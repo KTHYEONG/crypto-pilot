@@ -53,7 +53,11 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
     if not has_comp_level:
         # Prefer gate-status keys to avoid duplicate alias rows such as alpha_long vs alpha_long_00.
         filt_meta_probe = getattr(alpha_panel, "attrs", {}).get("alpha_component_filter", {})
-        gate_probe = filt_meta_probe.get("gate_status_by_col", {}) if isinstance(filt_meta_probe, dict) else {}
+        gate_probe = (
+            filt_meta_probe.get("gate_status_by_col", {})
+            if isinstance(filt_meta_probe, dict)
+            else {}
+        )
         if isinstance(gate_probe, dict) and gate_probe:
             components = sorted(str(k) for k in gate_probe.keys())
     if has_comp_level:
@@ -62,13 +66,14 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
         # Discover both Long and Short components
         components = sorted(
             [
-                c for c in alpha_panel.columns
+                c
+                for c in alpha_panel.columns
                 if c.startswith("alpha_long_")
                 or c.startswith("alpha_short_")
                 or c in {"alpha_long_signal", "alpha_short_signal"}
             ]
         )
-    
+
     if not components:
         _logger.info("  No elite components found.")
         _logger.info(SEP_85 + "\n")
@@ -79,7 +84,7 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
     gate_status_by_col = filt_meta.get("gate_status_by_col", {})
     ic_by_slot = filt_meta.get("ic_by_slot", {})
     gate_fail_reasons_by_col = filt_meta.get("gate_fail_reasons_by_col", {})
-    
+
     def _resolve_comp_series_col(comp: str) -> str | None:
         if comp in alpha_panel.columns:
             return comp
@@ -119,9 +124,13 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
     def _get_sort_key(c: str) -> tuple[int, int, float]:
         side_priority = 0 if "long" in c else 1
         stat = gate_status_by_col.get(c, {})
-        is_ok = 0 if bool(stat.get("final_selection_ok", False)) else 1 # 0 is higher priority in ascending sort
-        oos_val = safe_float(filt_meta.get("ic_oos_by_slot", {}).get(c, oos_ic_fallback.get(c, 0.0)))
-        return (side_priority, is_ok, -oos_val) # -oos_val for descending IC
+        is_ok = (
+            0 if bool(stat.get("final_selection_ok", False)) else 1
+        )  # 0 is higher priority in ascending sort
+        oos_val = safe_float(
+            filt_meta.get("ic_oos_by_slot", {}).get(c, oos_ic_fallback.get(c, 0.0))
+        )
+        return (side_priority, is_ok, -oos_val)  # -oos_val for descending IC
 
     sorted_components = sorted(components, key=_get_sort_key)
 
@@ -129,56 +138,99 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
     failing_limit_per_side = 10
     long_failing_count = 0
     short_failing_count = 0
-    
+
     for comp in sorted_components:
         if has_comp_level:
             sub_full = alpha_panel.xs(comp, level="component")
-            primary_col = "alpha_long_signal" if "alpha_long_signal" in sub_full.columns else ("alpha_long_00" if "alpha_long_00" in sub_full.columns else ("alpha_long" if "alpha_long" in sub_full.columns else None))
+            primary_col = (
+                "alpha_long_signal"
+                if "alpha_long_signal" in sub_full.columns
+                else (
+                    "alpha_long_00"
+                    if "alpha_long_00" in sub_full.columns
+                    else ("alpha_long" if "alpha_long" in sub_full.columns else None)
+                )
+            )
         else:
             sub_full = alpha_panel
             primary_col = _resolve_comp_series_col(comp)
 
         if primary_col is None or "target" not in sub_full.columns:
             continue
-            
+
         # Get metrics
         is_ic = safe_float(ic_by_slot.get(comp, is_ic_fallback.get(comp, 0.0)))
-        oos_ic = safe_float(filt_meta.get("ic_oos_by_slot", {}).get(comp, oos_ic_fallback.get(comp, 0.0)))
-        
+        oos_ic = safe_float(
+            filt_meta.get("ic_oos_by_slot", {}).get(comp, oos_ic_fallback.get(comp, 0.0))
+        )
+
         slot_stat = gate_status_by_col.get(comp, {})
         ic_oos_slot_map = filt_meta.get("ic_oos_by_slot", {})  # Fix 3B: OOS CS-IC per slot
         short_ic = safe_float(ic_oos_slot_map.get(comp, oos_ic), default=oos_ic)
         half_life = safe_float(slot_stat.get("half_life_bars", np.nan), default=np.nan)
         if not np.isfinite(half_life):
             half_life = safe_float(filt_meta.get("primary_half_life", np.nan), default=np.nan)
-        
+
         is_passed = bool(slot_stat.get("final_selection_ok", False))
-        
+
         # Filtering for display
         is_long = "long" in comp
         if not is_passed:
             if is_long:
                 long_failing_count += 1
-                if long_failing_count > failing_limit_per_side: continue
+                if long_failing_count > failing_limit_per_side:
+                    continue
             else:
                 short_failing_count += 1
-                if short_failing_count > failing_limit_per_side: continue
+                if short_failing_count > failing_limit_per_side:
+                    continue
 
         status = f"{C_GRN}[PASS]{C_RST}" if is_passed else f"{C_YEL}[FAIL]{C_RST}"
         reasons = gate_fail_reasons_by_col.get(comp, [])
         reason_str = f" ({','.join(reasons)})" if not is_passed and reasons else ""
-        
-        disp_comp = "long_signal" if comp == "alpha_long_signal" else ("short_signal" if comp == "alpha_short_signal" else comp)
-        _logger.info(f"  {disp_comp:<14} │ {is_ic:>6.3f} │ {oos_ic:>6.3f} │  {short_ic:>6.3f}  │   {half_life:>4.1f}b    │ {status}{reason_str}")
+
+        disp_comp = (
+            "long_signal"
+            if comp == "alpha_long_signal"
+            else ("short_signal" if comp == "alpha_short_signal" else comp)
+        )
+        _logger.info(
+            "  %s │ %6.3f │ %6.3f │  %6.3f  │   %4.1fb    │ %s%s",
+            f"{disp_comp:<14}",
+            is_ic,
+            oos_ic,
+            short_ic,
+            half_life,
+            status,
+            reason_str,
+        )
 
     # Summary of hidden failing components
-    total_long_fail = len([c for c in sorted_components if "long" in c and not gate_status_by_col.get(c, {}).get("final_selection_ok")])
-    total_short_fail = len([c for c in sorted_components if "short" in c and not gate_status_by_col.get(c, {}).get("final_selection_ok")])
-    
+    total_long_fail = len(
+        [
+            c
+            for c in sorted_components
+            if "long" in c and not gate_status_by_col.get(c, {}).get("final_selection_ok")
+        ]
+    )
+    total_short_fail = len(
+        [
+            c
+            for c in sorted_components
+            if "short" in c and not gate_status_by_col.get(c, {}).get("final_selection_ok")
+        ]
+    )
+
     if total_long_fail > failing_limit_per_side:
-        _logger.info(f"  ... ({total_long_fail - failing_limit_per_side} more failing LONG components hidden)")
+        _logger.info(
+            "  ... (%d more failing LONG components hidden)",
+            total_long_fail - failing_limit_per_side,
+        )
     if total_short_fail > failing_limit_per_side:
-        _logger.info(f"  ... ({total_short_fail - failing_limit_per_side} more failing SHORT components hidden)")
+        _logger.info(
+            "  ... (%d more failing SHORT components hidden)",
+            total_short_fail - failing_limit_per_side,
+        )
 
     _logger.info(" ────────────────┴────────┴────────┴──────────┴───────────┴───────────────────")
     root_diag = filt_meta.get("root_cause_diag", {}) if isinstance(filt_meta, dict) else {}
@@ -187,7 +239,11 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
         raw_oos = safe_float(root_diag.get("raw_alpha_oos_csic_mean", 0.0))
         adj_is = safe_float(root_diag.get("adjusted_alpha_is_csic_mean", 0.0))
         adj_oos = safe_float(root_diag.get("adjusted_alpha_oos_csic_mean", 0.0))
-        sleeve_oos = root_diag.get("sleeve_oos_csic_mean", {}) if isinstance(root_diag.get("sleeve_oos_csic_mean", {}), dict) else {}
+        sleeve_oos = (
+            root_diag.get("sleeve_oos_csic_mean", {})
+            if isinstance(root_diag.get("sleeve_oos_csic_mean", {}), dict)
+            else {}
+        )
         trend_oos = safe_float(sleeve_oos.get("trend", 0.0))
         reversal_oos = safe_float(sleeve_oos.get("reversal", 0.0))
         carry_oos = safe_float(sleeve_oos.get("carry", 0.0))
@@ -195,15 +251,29 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
         idio_oos = safe_float(sleeve_oos.get("idio", 0.0))
         sign_ok = bool(root_diag.get("signal_sign_ok", False))
         _logger.info("  [ALPHA ROOT-CAUSE]")
-        _logger.info(f"  raw_is={raw_is:+.4f}, raw_oos={raw_oos:+.4f}, adj_is={adj_is:+.4f}, adj_oos={adj_oos:+.4f}")
         _logger.info(
-            f"  sleeve_oos: trend={trend_oos:+.4f}, reversal={reversal_oos:+.4f}, carry={carry_oos:+.4f}, flow={flow_oos:+.4f}, idio={idio_oos:+.4f}"
+            "  raw_is=%+.4f, raw_oos=%+.4f, adj_is=%+.4f, adj_oos=%+.4f",
+            raw_is,
+            raw_oos,
+            adj_is,
+            adj_oos,
+        )
+        _logger.info(
+            "  sleeve_oos: trend=%+.4f, reversal=%+.4f, carry=%+.4f, "
+            "flow=%+.4f, idio=%+.4f",
+            trend_oos,
+            reversal_oos,
+            carry_oos,
+            flow_oos,
+            idio_oos,
         )
         _logger.info(f"  sign_ok={sign_ok}")
 
-    alpha_goal_eval_meta = _build_alpha_goal_eval_meta(alpha_panel=alpha_panel, is_end_date=is_end_date)
+    alpha_goal_eval_meta = _build_alpha_goal_eval_meta(
+        alpha_panel=alpha_panel, is_end_date=is_end_date
+    )
     alpha_panel.attrs["alpha_goal_eval_meta"] = alpha_goal_eval_meta
-    
+
     # Fix 3A: IC Retention — IS CS-IC (ic_by_slot) vs OOS CS-IC (ic_oos_by_slot)
     surviving_ic_pairs = []
     ic_oos_by_slot = filt_meta.get("ic_oos_by_slot", {})
@@ -218,14 +288,36 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
     # Fix 3C: Verdict with OOS CS-IC quality gate
     surviving_cs = [k for k, v in gate_status_by_col.items() if v.get("final_selection_ok")]
     mean_survivor_oos_cs = (
-        float(np.mean([safe_float(ic_oos_by_slot.get(c, oos_ic_fallback.get(c, 0.0))) for c in surviving_cs]))
-        if surviving_cs else 0.0
+        float(
+            np.mean(
+                [
+                    safe_float(ic_oos_by_slot.get(c, oos_ic_fallback.get(c, 0.0)))
+                    for c in surviving_cs
+                ]
+            )
+        )
+        if surviving_cs
+        else 0.0
     )
-    is_ready = n_surv > 0 and mean_survivor_oos_cs >= 0.02 and (retention >= 50.0 or len(surviving_ic_pairs) == 0)
-    verdict_str = f"{C_GRN}[READY]{C_RST}" if is_ready else (f"{C_YEL}[MARGINAL]{C_RST}" if n_surv > 0 else f"{C_RED}[FAIL]{C_RST}")
-    _logger.info(f"  🚀 G-ALPHA Verdict: {verdict_str} - {n_surv} elite slots surviving. (IC Retention: {retention:.1f}% | OOS-CS-IC: {mean_survivor_oos_cs:.4f})")
+    is_ready = (
+        n_surv > 0
+        and mean_survivor_oos_cs >= 0.02
+        and (retention >= 50.0 or len(surviving_ic_pairs) == 0)
+    )
+    verdict_str = (
+        f"{C_GRN}[READY]{C_RST}"
+        if is_ready
+        else (f"{C_YEL}[MARGINAL]{C_RST}" if n_surv > 0 else f"{C_RED}[FAIL]{C_RST}")
+    )
+    _logger.info(
+        "  🚀 G-ALPHA Verdict: %s - %d elite slots surviving. "
+        "(IC Retention: %.1f%% | OOS-CS-IC: %.4f)",
+        verdict_str,
+        n_surv,
+        retention,
+        mean_survivor_oos_cs,
+    )
     _logger.info(SEP_85 + "\n")
-
 
 
 def _build_alpha_goal_eval_meta(
@@ -263,7 +355,9 @@ def _build_alpha_goal_eval_meta(
     if not required["fdr"] or not required["dsr"]:
         reasons.append("missing_gate_status")
 
-    verdict = "pass" if not reasons else ("warn" if "no_elite_components" not in reasons else "fail")
+    verdict = (
+        "pass" if not reasons else ("warn" if "no_elite_components" not in reasons else "fail")
+    )
     return {
         "framework": "g-alpha.v8",
         "verdict": verdict,
@@ -300,19 +394,23 @@ def print_mechanical_dashboard(
     win_rate = safe_float(oos_port.get("win_rate_pct", 0.0))
     pf = safe_float(oos_port.get("profit_factor", 1.0))
     avg_pnl = safe_float(oos_port.get("avg_trade_pnl_pct", 0.0))
-    
+
     _logger.info(
         "\n [OOS_SUMMARY] trades=%d win_rate=%.1f%% profit_factor=%.2f avg_pnl=%.4f%%",
-        trades, win_rate, pf, avg_pnl
+        trades,
+        win_rate,
+        pf,
+        avg_pnl,
     )
-    
+
     _logger.info("\n ────────────────────────────────────────────────────────────────────────────")
     _logger.info(" [STRATEGY PERFORMANCE AUDIT]")
     _logger.info(" ────────────────────────────────────────────────────────────────────────────")
     _logger.info("  Metric                  Value      Target     Status    Meaning")
     _logger.info("  ──────────────────────────────────────────────────────────────────────────")
 
-    def get_v(k: str) -> float: return safe_float(oos_port.get(k, 0.0))
+    def get_v(k: str) -> float:
+        return safe_float(oos_port.get(k, 0.0))
 
     metrics = [
         ("EV/Cost Ratio", "ev_cost_ratio", 3.0, ">", "Friction 가드 통과 (Top Priority)"),
@@ -327,15 +425,24 @@ def print_mechanical_dashboard(
         val = get_v(key) if key != "pbo" else pbo_obs * 100.0
         passed = (val >= target) if op == ">" else (val <= target)
         status = f"{C_GRN}[PASS]{C_RST}" if passed else f"{C_RED}[FAIL]{C_RST}"
-        
-        val_fmt = f"{val:>8.2f}%" if key in ["cagr_pct", "mdd_pct", "pbo", "funding_drag_ratio"] else f"{val:>8.2f} "
+
+        val_fmt = (
+            f"{val:>8.2f}%"
+            if key in ["cagr_pct", "mdd_pct", "pbo", "funding_drag_ratio"]
+            else f"{val:>8.2f} "
+        )
         tgt_fmt = f"{'≥' if op == '>' else '≤'} {target:>4.1f}" + ("%" if "%" in val_fmt else "")
-        
+
         _logger.info(f"  {label:<21} : {val_fmt} | {tgt_fmt:<8} | {status:<8} | {meaning}")
 
     _logger.info("  ──────────────────────────────────────────────────────────────────────────")
     v_color = C_GRN if "PROMOTE" in gate_status or "PASS" in gate_status else C_RED
-    _logger.info(f"  🏆 STRATEGY VERDICT: {v_color}[{gate_status}]{C_RST} - Ready for 24/7 Mechanical Trading.")
+    _logger.info(
+        "  🏆 STRATEGY VERDICT: %s[%s]%s - Ready for 24/7 Mechanical Trading.",
+        v_color,
+        gate_status,
+        C_RST,
+    )
     _logger.info(" ────────────────────────────────────────────────────────────────────────────\n")
 
 
@@ -383,17 +490,43 @@ def log_oos_regime_attribution(regime_attr: dict[str, Any]) -> None:
     flip = safe_float(regime_attr.get("chop_flip_proxy", 0.0))
     _logger.info(
         " [OOS_SIGNAL] coverage=%.1f%% flip_proxy=%.3f chop_loss_share=%.3f chop_trade_share=%.3f",
-        coverage, flip,
-        regime_attr.get('chop_loss_share', 0.0),
-        regime_attr.get('chop_trade_share', 0.0)
+        coverage,
+        flip,
+        regime_attr.get("chop_loss_share", 0.0),
+        regime_attr.get("chop_trade_share", 0.0),
     )
 
 
-def print_dual_audit_dashboard(new_m: dict[str, Any], champ_m: dict[str, Any], verdict: str) -> None:
+def log_oos_alpha_attribution(report: dict[str, Any]) -> None:
+    """Log OOS alpha attribution diagnostics report."""
+    if not report:
+        return
+    pnl = report.get("pnl_pct", {})
+    share = report.get("share_pct", {})
+    obs = int(safe_float(report.get("n_obs", 0.0), 0.0))
+    _logger.info(
+        " [OOS_ALPHA_ATTR] n_obs=%d total=%.4f market=%.4f factor_proxy=%.4f residual=%.4f",
+        obs,
+        safe_float(pnl.get("total", 0.0)),
+        safe_float(pnl.get("market", 0.0)),
+        safe_float(pnl.get("factor_proxy", 0.0)),
+        safe_float(pnl.get("residual", 0.0)),
+    )
+    _logger.info(
+        " [OOS_ALPHA_ATTR_SHARE] market=%.1f%% factor_proxy=%.1f%% residual=%.1f%%",
+        safe_float(share.get("market", 0.0)),
+        safe_float(share.get("factor_proxy", 0.0)),
+        safe_float(share.get("residual", 0.0)),
+    )
+
+
+def print_dual_audit_dashboard(
+    new_m: dict[str, Any], champ_m: dict[str, Any], verdict: str
+) -> None:
     """Compare candidate and champion core metrics in one panel (Visual Audit)."""
     new_m = new_m or {}
     champ_m = champ_m or {}
-    
+
     _logger.info("\n 🏆 [CANDIDATE VS CHAMPION AUDIT]")
     _logger.info(" ────────────────────────────────────────────────────────────────────────────")
     _logger.info("  METRIC           CANDIDATE     CHAMPION      DELTA       STATUS")
@@ -415,7 +548,7 @@ def print_dual_audit_dashboard(new_m: dict[str, Any], champ_m: dict[str, Any], v
         cand = safe_float(new_m.get(key, 0.0))
         champ = safe_float(champ_m.get(key, 0.0))
         delta = cand - champ
-        
+
         # Determine status emoji
         if abs(delta) < 1e-6:
             status = "⚪ Equal"

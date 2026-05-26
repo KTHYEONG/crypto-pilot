@@ -1,11 +1,28 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
-from src.domain.futures.strategy.contracts import FoldSpec, LongMatrixDataset
+from src.domain.futures.strategy.contracts import (
+    ALPHA_FORECAST_CONTRACT_V3,
+    ALPHA_FORECAST_V3_ATTR_KEY,
+    FoldSpec,
+    LongMatrixDataset,
+)
+
+_FORECAST_V3_NUMERIC_KEYS: tuple[str, ...] = (
+    "q10_long",
+    "q50_long",
+    "q90_long",
+    "q10_short",
+    "q50_short",
+    "q90_short",
+    "confidence_long",
+    "confidence_short",
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -39,6 +56,7 @@ def assemble_alpha_panel(
     ev_grid: np.ndarray,
     clip_abs: float,
     eligible_mask: np.ndarray | None = None,
+    forecast_metadata_v3: Mapping[str, object] | None = None,
 ) -> pd.DataFrame:
     """Assemble alpha panel from signed EV grid."""
     if eligible_mask is not None and eligible_mask.shape != ev_grid.shape:
@@ -62,4 +80,27 @@ def assemble_alpha_panel(
     vals = panel[["alpha_long", "alpha_short"]].to_numpy(dtype=np.float64)
     if not np.all(np.isfinite(vals)):
         raise RuntimeError("alpha_panel contains non-finite values")
+    if forecast_metadata_v3 is not None:
+        panel.attrs["forecast_contract_version"] = ALPHA_FORECAST_CONTRACT_V3
+        panel.attrs[ALPHA_FORECAST_V3_ATTR_KEY] = dict(forecast_metadata_v3)
+        validate_alpha_forecast_metadata(panel)
     return panel
+
+
+def validate_alpha_forecast_metadata(panel: pd.DataFrame) -> None:
+    """Validate optional v3 forecast metadata when present."""
+    attrs = panel.attrs
+    payload = attrs.get(ALPHA_FORECAST_V3_ATTR_KEY)
+    if payload is None:
+        return
+    if not isinstance(payload, dict):
+        raise RuntimeError("alpha_panel v3 metadata must be a dict")
+    row_count = len(panel.index)
+    for key in _FORECAST_V3_NUMERIC_KEYS:
+        if key not in payload:
+            continue
+        values = np.asarray(payload[key], dtype=np.float64).reshape(-1)
+        if values.shape[0] != row_count:
+            raise RuntimeError(f"alpha_panel v3 metadata length mismatch: {key}")
+        if not np.all(np.isfinite(values)):
+            raise RuntimeError(f"alpha_panel v3 metadata contains non-finite values: {key}")

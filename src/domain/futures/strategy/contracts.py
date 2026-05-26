@@ -5,6 +5,9 @@ from typing import Any
 
 import numpy as np
 
+ALPHA_FORECAST_CONTRACT_V3 = "v3"
+ALPHA_FORECAST_V3_ATTR_KEY = "alpha_forecast_v3"
+
 
 @dataclass(slots=True, frozen=True)
 class FeaturePanel:

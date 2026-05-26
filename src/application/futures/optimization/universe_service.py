@@ -148,7 +148,7 @@ def discover_universe_timeline(
     windows: list[UniverseMembershipWindow] = []
     previous_symbols: frozenset[str] = frozenset()
     for idx, (quarter_start, snapshot, _report) in enumerate(snapshots_by_quarter):
-        symbols = timeline_by_quarter[quarter_start]
+        quarter_symbols = timeline_by_quarter[quarter_start]
         next_start = (
             pd.Timestamp(snapshots_by_quarter[idx + 1][0])
             if idx + 1 < len(snapshots_by_quarter)
@@ -159,12 +159,12 @@ def discover_universe_timeline(
                 effective_from=pd.Timestamp(quarter_start),
                 effective_to=next_start,
                 snapshot_as_of=snapshot.as_of,
-                active_symbols=tuple(sorted(symbols)),
-                entry_symbols=tuple(sorted(symbols - previous_symbols)),
-                exit_symbols=tuple(sorted(previous_symbols - symbols)),
+                active_symbols=tuple(sorted(quarter_symbols)),
+                entry_symbols=tuple(sorted(quarter_symbols - previous_symbols)),
+                exit_symbols=tuple(sorted(previous_symbols - quarter_symbols)),
             )
         )
-        previous_symbols = symbols
+        previous_symbols = quarter_symbols
 
     _write_universe_audit_parquet(
         snapshots_by_quarter=snapshots_by_quarter,

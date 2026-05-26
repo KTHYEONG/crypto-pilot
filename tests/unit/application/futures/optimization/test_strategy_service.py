@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -79,6 +80,41 @@ def test_assert_strategy_alpha_ready_accepts_merged_nonzero_long_short() -> None
         valid_symbols=["BTCUSDT", "ETHUSDT"],
         tf="4h",
     )
+
+
+def test_assert_strategy_alpha_ready_rejects_non_finite_v3_metadata() -> None:
+    alpha_panel = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2026-01-01"]),
+            "symbol": ["BTCUSDT"],
+            "alpha_long": [0.001],
+            "alpha_short": [0.0],
+        }
+    ).set_index(["datetime", "symbol"])
+    alpha_panel.attrs["alpha_forecast_v3"] = {
+        "q10_long": np.array([0.0], dtype=np.float32),
+        "q50_long": np.array([np.inf], dtype=np.float32),
+    }
+    ml_out = MLPipelineOutput(alpha_panel=alpha_panel)
+    oos = {
+        "BTCUSDT": {
+            "4h": pd.DataFrame(
+                {
+                    "datetime": pd.to_datetime(["2026-01-01"]),
+                    "alpha_long": [0.001],
+                    "alpha_short": [0.0],
+                }
+            )
+        }
+    }
+
+    with pytest.raises(RuntimeError, match="v3 metadata contains non-finite values"):
+        assert_strategy_alpha_ready(
+            ml_out=ml_out,
+            oos_data_maps=oos,
+            valid_symbols=["BTCUSDT"],
+            tf="4h",
+        )
 
 
 def test_run_active_strategy_output_bridge_allows_quick_backtest_neutral() -> None:
