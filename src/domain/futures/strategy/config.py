@@ -188,7 +188,7 @@ class StrategyMLConfig:
     # Calibrator target: which return series to use as y_ev for magnitude learning.
     # "beta_residualized" = current default: exec_net_ret after beta-resid, pre-CS-demean
     # "gross"             = raw log return minus funding only (no beta removal, no fee)
-    calibrator_target: Literal["beta_residualized", "gross"] = "beta_residualized"
+    calibrator_target: Literal["beta_residualized", "gross"] = "gross"
     model_family: Literal["lgbm_regression", "lgbm_huber", "lgbm_lambdarank"] = "lgbm_regression"
     ranking_mode: Literal["pointwise", "group_ndcg"] = "group_ndcg"
     ev_mode: Literal["quantile", "prob_x_magnitude"] = "quantile"

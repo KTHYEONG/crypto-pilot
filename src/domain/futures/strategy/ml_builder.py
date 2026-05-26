@@ -763,7 +763,12 @@ def build_ml_strategy_alpha(
     _friction_bps = round_trip_cost_bps()
     _hurdle_default_bps = float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0))
     alpha_diag = alpha_gate_diagnostics(
-        alpha_p95_bps=float(quality_report.get("alpha_p95_bps", 0.0)),
+        alpha_p95_bps=float(
+            quality_report.get(
+                "in_fold_valid_alpha_p95_bps",
+                quality_report.get("alpha_p95_bps", 0.0),
+            )
+        ),
         friction_bps=float(_friction_bps),
         hurdle_bps=float(_hurdle_default_bps),
         long_nz=float(quality_report.get("alpha_long_non_zero_ratio", 0.0)),
