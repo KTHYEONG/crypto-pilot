@@ -149,14 +149,14 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> dict[str, np.ndarray]:
     Optimized to minimize allocations and redundant filling.
     """
     out: dict[str, np.ndarray] = {}
-    
+
     # 1. Base OHLCV (Direct to numpy, no filling needed for these usually)
     for col in ["open", "high", "low", "close", "volume"]:
         if col in sig_df.columns:
             out[col] = sig_df[col].to_numpy(dtype=np.float64, copy=False)
         else:
             out[col] = np.ones(len(sig_df), dtype=np.float64)
-    
+
     # 2. ATR (Fast ffill then fallback)
     atr = sig_df["atr"].to_numpy(dtype=np.float64, copy=True)
     mask = np.isnan(atr)
@@ -190,7 +190,7 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> dict[str, np.ndarray]:
         "composer_sigma_bar": 0.01,
         "btc_trend_vol_adj_24h": 0.0,
     }
-    
+
     for col, fill_val in fill_map.items():
         if col in sig_df.columns:
             arr = sig_df[col].to_numpy(dtype=np.float64, copy=True)
@@ -199,7 +199,7 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> dict[str, np.ndarray]:
         else:
             # Create zeros if missing
             out[col] = np.full(out["close"].shape, fill_val, dtype=np.float64)
-            
+
     return out
 
 
@@ -214,13 +214,13 @@ def _build_aligned_2d_from_prebuilt(
         return None
     aligned_data: dict[str, np.ndarray] = {}
     aligned_data["symbol_names"] = np.asarray(symbols, dtype=object)
-    
+
     # Slice the precomputed 3D covariance if provided
     if sigma_3d_full is not None:
         if slice_end > sigma_3d_full.shape[0]:
             return None
         aligned_data["sigma_3d"] = sigma_3d_full[slice_start:slice_end]
-        
+
     for col in _FUTURES_2D_REQUIRED_COLS:
         col_views: list[np.ndarray] = []
         for sym in symbols:
@@ -358,20 +358,16 @@ def _build_optional_exec_1m_payload(
                 continue
 
             if is_price_col:
-                # 1. Forward Fill: Propagate previous valid pricing
+                # Forward Fill only: 직전 유효 가격으로 갭 보간 (flat price 가정).
+                # Backward Fill 제거: 심볼 상장 전 leading NaN을 첫 유효 가격으로 채우면
+                # 미래 참조(look-ahead)가 되므로 NaN 유지 → 엔진이 해당 1m bar를 skip.
+                # 0.0 fallback 제거: 전 구간 데이터 없는 심볼은 NaN → 엔진 skip.
                 non_nan_indices = np.flatnonzero(~nan_mask)
                 if non_nan_indices.size > 0:
                     idx = np.where(~nan_mask, np.arange(col_arr.size), 0)
                     np.maximum.accumulate(idx, out=idx)
                     col_arr[nan_mask] = col_arr[idx[nan_mask]]
-
-                    # 2. Backward Fill: Propagate earliest price to leading NaNs
-                    nan_mask_post = np.isnan(col_arr)
-                    if np.any(nan_mask_post):
-                        col_arr[nan_mask_post] = col_arr[non_nan_indices[0]]
-                else:
-                    # Fallback to 0.0 only if the entire series is empty
-                    col_arr[nan_mask] = 0.0
+                    # leading NaN (심볼 상장 전 구간)은 ffill 후에도 NaN으로 남음 — 의도된 동작
             else:
                 # Flat fill volume and funding event rates to 0.0
                 col_arr[nan_mask] = 0.0
