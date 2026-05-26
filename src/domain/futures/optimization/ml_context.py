@@ -17,7 +17,10 @@ from src.domain.futures.optimization.data_aligner import (
     _dataframe_to_symbol_arrays,
     merge_effective_membership_constraints,
 )
-from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.optimization.opt_config import (
+    OPT_FUTURES_CONFIG,
+    default_ev_hurdle_bps,
+)
 from src.domain.futures.optimization.validation import build_anchored_wf_legs
 from src.domain.futures.portfolio.portfolio_constructor import (
     RiskSnapshot,
@@ -105,7 +108,67 @@ def _build_beta_2d_full(
             continue
         out[:, s_idx] = np.nan_to_num(beta_arr, nan=0.0, posinf=0.0, neginf=0.0)
         has_any_beta = True
-    return out if has_any_beta else None
+    if has_any_beta:
+        return out
+    return _build_trailing_btc_beta_fallback(
+        close_2d=out,
+        data_maps=data_maps,
+        symbols=symbols,
+        tf=tf,
+        alignment_info=alignment_info,
+        eff_len=eff_len,
+    )
+
+
+def _build_trailing_btc_beta_fallback(
+    *,
+    close_2d: np.ndarray,
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
+    tf: str,
+    alignment_info: dict[str, Any],
+    eff_len: int,
+) -> np.ndarray | None:
+    """Build causal trailing BTC-beta fallback when source beta column is absent."""
+    n_syms = len(symbols)
+    if eff_len <= 1 or n_syms == 0:
+        return None
+    filled = np.asarray(close_2d, dtype=np.float64).copy()
+    for s_idx, sym in enumerate(symbols):
+        if sym not in data_maps or tf not in data_maps[sym]:
+            continue
+        start_idx = int(alignment_info["alignment_offsets"][sym])
+        raw = data_maps[sym][tf].iloc[start_idx : start_idx + eff_len]
+        if "close" not in raw.columns:
+            continue
+        c = np.asarray(raw["close"].to_numpy(dtype=np.float64), dtype=np.float64)
+        if c.shape[0] == eff_len:
+            filled[:, s_idx] = np.nan_to_num(c, nan=0.0, posinf=0.0, neginf=0.0)
+    btc_idx = next((idx for idx, sym in enumerate(symbols) if "BTC" in sym.upper()), None)
+    if btc_idx is None:
+        return None
+    ret = np.zeros((eff_len, n_syms), dtype=np.float64)
+    prev = np.maximum(np.abs(filled[:-1, :]), 1e-12)
+    ret[1:, :] = (filled[1:, :] - filled[:-1, :]) / prev
+    ret = np.nan_to_num(ret, nan=0.0, posinf=0.0, neginf=0.0)
+    btc_ret = ret[:, btc_idx]
+    lookback = max(20, int(OPT_FUTURES_CONFIG.get("FUTURES_PORTFOLIO_COV_LOOKBACK", 180)))
+    beta = np.zeros((eff_len, n_syms), dtype=np.float64)
+    for t in range(1, eff_len):
+        st = max(1, t - lookback + 1)
+        x = btc_ret[st : t + 1]
+        var_x = float(np.var(x, ddof=1)) if x.size > 1 else 0.0
+        if not np.isfinite(var_x) or var_x <= 1e-12:
+            continue
+        x_m = float(np.mean(x))
+        for j in range(n_syms):
+            y = ret[st : t + 1, j]
+            if y.size != x.size or y.size <= 1:
+                continue
+            cov_xy = float(np.mean((x - x_m) * (y - float(np.mean(y)))))
+            b = cov_xy / var_x
+            beta[t, j] = float(np.nan_to_num(b, nan=0.0, posinf=0.0, neginf=0.0))
+    return beta
 
 
 def _attach_risk_snapshot_slice(
@@ -635,9 +698,7 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "USE_COMPOUNDING": True,
         "LEVERAGE": int(lev),
         "BETA_ALPHA": float(ml.get("BETA_ALPHA", cfg.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))),
-        "EV_HURDLE_BPS": float(
-            ml.get("EV_HURDLE_BPS", cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 5.0))
-        ),
+        "EV_HURDLE_BPS": float(ml.get("EV_HURDLE_BPS", default_ev_hurdle_bps(cfg))),
         "SLIPPAGE_BPS_BUFFER_MULT": float(
             ml.get("SLIPPAGE_BPS_BUFFER_MULT", cfg.get("SLIPPAGE_BPS_BUFFER_MULT", 1.0))
         ),

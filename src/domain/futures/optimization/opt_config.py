@@ -410,6 +410,12 @@ FUTURES_SCREENER_CONFIG: dict[str, Any] = {
 # FUTURES OPT CONFIGURATION & SEARCH SPACE
 # ==============================================================================
 
+
+def default_ev_hurdle_bps(cfg: dict[str, Any] | None = None) -> float:
+    """Return canonical EV hurdle in bps from a config mapping."""
+    source = OPT_FUTURES_CONFIG if cfg is None else cfg
+    return float(source.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0))
+
 def get_search_space_futures(tf: str, stage: int = 0) -> dict[str, dict[str, Any]]:
     _ = tf
     return build_full_discovery_space_futures()

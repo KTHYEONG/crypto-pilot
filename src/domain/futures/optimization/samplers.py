@@ -5,7 +5,10 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import optuna
 
-from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.optimization.opt_config import (
+    OPT_FUTURES_CONFIG,
+    default_ev_hurdle_bps,
+)
 from src.domain.futures.optimization.workflow import (
     FIXED_DEFAULTS,
     suggest_joint_params,
@@ -194,7 +197,7 @@ def _baseline_ml_out_dict_for_coordinate(policy: Any) -> dict[str, Any]:
             OPT_FUTURES_CONFIG.get("FUTURES_CRISIS_LONG_MAG_SUPPRESS", 1.0)
         ),
         "BETA_ALPHA": float(fc.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0)),
-        "EV_HURDLE_BPS": float(fc.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 5.0)),
+        "EV_HURDLE_BPS": float(default_ev_hurdle_bps(fc)),
         "SLIPPAGE_BPS_BUFFER_MULT": float(fc.get("SLIPPAGE_BPS_BUFFER_MULT", 1.0)),
         "TIME_BARRIER_H": float(fc.get("FUTURES_DEFAULT_TIME_BARRIER_H", 0.0)),
     }
@@ -218,7 +221,9 @@ def _suggest_ml_joint_nsga2(trial: optuna.Trial, ctx: MLPhaseDContext) -> dict[s
         "K_LONG": int(baseline.get("K_LONG", 2)),
         "K_SHORT": int(baseline.get("K_SHORT", 2)),
         "REBALANCE_BARS": int(baseline.get("REBALANCE_BARS", 6)),
-        "EV_HURDLE_BPS": float(baseline.get("EV_HURDLE_BPS", 5.0)),
+        "EV_HURDLE_BPS": float(
+            baseline.get("EV_HURDLE_BPS", default_ev_hurdle_bps(OPT_FUTURES_CONFIG))
+        ),
         "PORTFOLIO_KAPPA": float(baseline.get("PORTFOLIO_KAPPA", 0.35)),
         "TARGET_ANN_VOL": float(baseline.get("TARGET_ANN_VOL", 0.25)),
         "MAX_EXPOSURE": float(baseline.get("MAX_EXPOSURE", 1.2)),

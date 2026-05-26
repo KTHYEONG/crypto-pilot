@@ -198,9 +198,8 @@ def solve_constrained_weights(
 
     w_c = _project_l1_linf(w_pre, gross_cap=gross_cap, per_symbol_cap=per_symbol_cap)
 
-    dd = float(max(0.0, current_dd))
-    dd_scale = float(np.clip(1.0 - max(0.0, dd - 0.05) / 0.10, 0.3, 1.0))
-    return w_c * dd_scale
+    _ = current_dd
+    return w_c
 
 
 def precompute_rolling_covariances(
@@ -285,15 +284,7 @@ def _solve_constrained_weights_numba(
 
     w_c = _project_l1_linf_numba(w_pre, dyn_gross_cap, per_symbol_cap)
 
-    dd_scale = 1.0 - max(0.0, current_dd - 0.05) / 0.10
-    if dd_scale < 0.3:
-        dd_scale = 0.3
-    elif dd_scale > 1.0:
-        dd_scale = 1.0
-
-    for i in range(n):
-        w_c[i] *= dd_scale
-
+    _ = current_dd
     return np.asarray(w_c, dtype=np.float64)
 
 

@@ -90,6 +90,24 @@ last_verified: 2026-05-26
 - **Imputer:** Train 구간의 Median값을 사용하여 실시간 추론 시의 데이터 결측(Missing) 대응.
 - **Feature Groups:** Carry, Volatility, Momentum, CS-Sharpe 등 도메인 지식 기반 50+ Pillars 구성.
 
+### 5.5 Split-Consistent Alpha Artifact Contract (2026-05-26)
+- **Single Build-Merge Path:** Final evaluation의 IS/HO 평가는 OOS와 동일하게 `build_strategy_alpha -> merge_ml_output_into_data_maps` 경로를 사용해야 한다.
+- **Metadata Consistency Gate:** Split 간 `strategy_name`, `config_hash`, `selected_horizon`, `model_family`, `cost_source`가 불일치하면 즉시 fail-fast 한다.
+- **Cost Source Inference:** `execution_cost_bps` 컬럼 존재 여부를 기반으로 split cost source를 `per_symbol`/`fallback_global`로 표준화해 비교한다.
+
+### 5.6 Calibrator Weight Propagation Contract (2026-05-26)
+- **Weight Forwarding:** `LongMatrixDataset.sample_weight`는 quantile calibrator 학습 시 `model.fit(sample_weight=...)`에 반드시 전달한다.
+- **Validation Weighting:** early-stopping validation set에도 `eval_sample_weight`를 전달해 train/valid weighting policy를 일치시킨다.
+
+### 5.7 Canonical EV Hurdle Default (2026-05-26)
+- **Single Default Resolver:** `default_ev_hurdle_bps()`를 통해 `FUTURES_DEFAULT_EV_HURDLE_BPS`의 기본값 해석을 단일화한다.
+- **No Local Fallback Drift:** 모듈별 `5/10/40` 하드코딩 fallback을 금지하고 동일 helper를 재사용한다.
+
+### 5.8 Beta Fallback Contract (2026-05-26)
+- **Causal BTC-Beta:** 소스 `beta` 컬럼이 없으면 trailing return window 기반 `cov(symbol, btc)/var(btc)`로 `beta_2d`를 계산한다.
+- **No Look-Ahead:** 시점 `t`의 beta는 `[t-lookback+1, t]` 과거 구간만 사용한다.
+- **BTC Dependency:** BTC 기준 심볼이 없으면 fallback beta 계산을 수행하지 않는다.
+
 ---
 
 ## 6. Examples
