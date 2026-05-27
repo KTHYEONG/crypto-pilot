@@ -64,7 +64,10 @@ def _build_strategy_compose_diag(
     xs_short: np.ndarray,
     params: dict[str, Any],
     cost_snapshot: CostSnapshot,
+    holding_bars: int | None = None,
 ) -> dict[str, float]:
+    from src.domain.futures.strategy.diagnostics import preservation_ratio
+
     n_bars = alpha_long.shape[0]
     beta_a = float(
         params.get("BETA_ALPHA", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))
@@ -74,7 +77,11 @@ def _build_strategy_compose_diag(
     )
     friction_2d = np.asarray(cost_snapshot.execution_cost_fraction_2d, dtype=np.float64)
     friction_bps_2d = np.asarray(cost_snapshot.execution_cost_bps_2d, dtype=np.float64)
-    threshold_bps = friction_bps_2d + ev_h
+    effective_friction_2d = friction_2d
+    if params.get("COST_GATE_AMORTIZE", False) and holding_bars and int(holding_bars) > 1:
+        effective_friction_2d = friction_2d / float(int(holding_bars))
+    effective_friction_bps_2d = effective_friction_2d * 10000.0
+    threshold_bps = effective_friction_bps_2d + ev_h
     alpha_p95_bps = max(
         _safe_pct(alpha_long, 95) * 10000.0,
         _safe_pct(alpha_short, 95) * 10000.0,
@@ -83,14 +90,14 @@ def _build_strategy_compose_diag(
         "[ML-COST-WALL] alpha_p95=%.2fbps friction=%.1fbps "
         "hurdle_bps=%.1fbps floor=%.1fbps signal_clears_floor=%s",
         alpha_p95_bps,
-        float(np.nanmean(friction_bps_2d)),
+        float(np.nanmean(effective_friction_bps_2d)),
         ev_h,
         float(np.nanmean(threshold_bps)),
         str(alpha_p95_bps >= float(np.nanmean(threshold_bps))),
     )
 
-    mu_l_pre = beta_a * alpha_long - friction_2d
-    mu_s_pre = beta_a * alpha_short - friction_2d
+    mu_l_pre = beta_a * alpha_long - effective_friction_2d
+    mu_s_pre = beta_a * alpha_short - effective_friction_2d
 
     cost_source = str(cost_snapshot.execution_cost_bps_source)
     return {
@@ -104,8 +111,18 @@ def _build_strategy_compose_diag(
         "alpha_short_p95": _safe_pct(alpha_short, 95),
         "alpha_short_p99": _safe_pct(alpha_short, 99),
         "friction_bps": float(np.nanmean(friction_bps_2d)),
+        "raw_friction_bps": float(np.nanmean(friction_bps_2d)),
+        "effective_friction_bps": float(np.nanmean(effective_friction_bps_2d)),
         "ev_hurdle_bps": float(ev_h),
         "effective_threshold_bps": float(np.nanmean(threshold_bps)),
+        "cost_gate_amortized": float(
+            1.0
+            if params.get("COST_GATE_AMORTIZE", False)
+            and holding_bars
+            and int(holding_bars) > 1
+            else 0.0
+        ),
+        "holding_bars": float(int(holding_bars) if holding_bars is not None else 1),
         "execution_cost_source_universe_static": (
             1.0 if cost_source == "universe_static" else 0.0
         ),
@@ -119,14 +136,8 @@ def _build_strategy_compose_diag(
         "mu_pre_hurdle_p95_short": _safe_pct(mu_s_pre, 95),
         "xs_long_nz_ratio": _nonzero_ratio(xs_long),
         "xs_short_nz_ratio": _nonzero_ratio(xs_short),
-        "xs_long_preservation_ratio": _safe_preservation_ratio(
-            _nonzero_ratio(xs_long),
-            _nonzero_ratio(alpha_long),
-        ),
-        "xs_short_preservation_ratio": _safe_preservation_ratio(
-            _nonzero_ratio(xs_short),
-            _nonzero_ratio(alpha_short),
-        ),
+        "xs_long_preservation_ratio": preservation_ratio(alpha_long, xs_long),
+        "xs_short_preservation_ratio": preservation_ratio(alpha_short, xs_short),
         "mu_long_mean": float(np.mean(mu_l_pre)) if mu_l_pre.size > 0 else 0.0,
         "mu_short_mean": float(np.mean(mu_s_pre)) if mu_s_pre.size > 0 else 0.0,
         "threshold_bps": float(np.nanmean(threshold_bps)),
@@ -143,11 +154,6 @@ def _nonzero_ratio(arr: np.ndarray, eps: float = 1e-12) -> float:
         return 0.0
     return float(np.count_nonzero(np.abs(arr) > eps) / arr.size)
 
-
-def _safe_preservation_ratio(numerator: float, denominator: float) -> float:
-    if denominator <= 0.0:
-        return 0.0
-    return float(numerator / denominator)
 
 def _pf_and_ev_cost_from_trades(all_trades: np.ndarray) -> tuple[float, float]:
     """PF = gross_win / |gross_loss|; EV/cost = |sum(pnl)| / sum(entry_fee + funding_fee)."""
@@ -404,6 +410,7 @@ def _compose_strategy_scores_inplace(
         xs_short=xs_s,
         params=params,
         cost_snapshot=cost_snapshot,
+        holding_bars=holding_bars,
     )
     aligned["_strategy_cost_snapshot_meta"] = {
         "execution_cost_bps_source": selected_cost_source,
