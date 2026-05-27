@@ -74,12 +74,152 @@ def test_assert_strategy_alpha_ready_accepts_merged_nonzero_long_short() -> None
         },
     }
 
-    assert_strategy_alpha_ready(
+    report = assert_strategy_alpha_ready(
         ml_out=ml_out,
         oos_data_maps=oos,
         valid_symbols=["BTCUSDT", "ETHUSDT"],
         tf="4h",
     )
+    assert report.merged_symbols == 2
+
+
+def test_assert_strategy_alpha_ready_preflight_warns_when_target_oos_absent() -> None:
+    alpha_panel = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2026-01-01 00:00:00", "2026-01-01 04:00:00"]),
+            "symbol": ["BTCUSDT", "BTCUSDT"],
+            "alpha_long": [0.001, 0.001],
+            "alpha_short": [0.001, 0.001],
+        }
+    ).set_index(["datetime", "symbol"])
+    ml_out = MLPipelineOutput(alpha_panel=alpha_panel)
+    oos = {
+        "BTCUSDT": {
+            "4h": pd.DataFrame(
+                {
+                    "datetime": pd.to_datetime(
+                        [
+                            "2026-01-01 00:00:00",
+                            "2026-01-01 04:00:00",
+                            "2026-01-01 08:00:00",
+                            "2026-01-01 12:00:00",
+                        ]
+                    ),
+                    "alpha_long": [0.001, 0.001, 0.0, 0.0],
+                    "alpha_short": [0.001, 0.001, 0.0, 0.0],
+                }
+            ),
+            "oos_start_idx_4h": 3,
+        }
+    }
+    report = assert_strategy_alpha_ready(
+        ml_out=ml_out,
+        oos_data_maps=oos,
+        valid_symbols=["BTCUSDT"],
+        tf="4h",
+    )
+    assert "target_oos_alpha_absent_preflight" in report.warnings
+
+
+def test_assert_strategy_alpha_ready_requires_target_oos_alpha_when_requested() -> None:
+    alpha_panel = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2026-01-01 00:00:00", "2026-01-01 04:00:00"]),
+            "symbol": ["BTCUSDT", "BTCUSDT"],
+            "alpha_long": [0.001, 0.001],
+            "alpha_short": [0.001, 0.001],
+        }
+    ).set_index(["datetime", "symbol"])
+    ml_out = MLPipelineOutput(alpha_panel=alpha_panel)
+    oos = {
+        "BTCUSDT": {
+            "4h": pd.DataFrame(
+                {
+                    "datetime": pd.to_datetime(
+                        [
+                            "2026-01-01 00:00:00",
+                            "2026-01-01 04:00:00",
+                            "2026-01-01 08:00:00",
+                            "2026-01-01 12:00:00",
+                        ]
+                    ),
+                    "alpha_long": [0.001, 0.001, 0.0, 0.0],
+                    "alpha_short": [0.001, 0.001, 0.0, 0.0],
+                }
+            ),
+            "oos_start_idx_4h": 3,
+        }
+    }
+    with pytest.raises(RuntimeError, match="strategy target OOS alpha is zero-only"):
+        assert_strategy_alpha_ready(
+            ml_out=ml_out,
+            oos_data_maps=oos,
+            valid_symbols=["BTCUSDT"],
+            tf="4h",
+            require_target_oos_alpha=True,
+        )
+
+
+def test_assert_strategy_alpha_ready_rejects_zero_only_panel() -> None:
+    alpha_panel = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2026-01-01 00:00:00", "2026-01-01 04:00:00"]),
+            "symbol": ["BTCUSDT", "BTCUSDT"],
+            "alpha_long": [0.0, 0.0],
+            "alpha_short": [0.0, 0.0],
+        }
+    ).set_index(["datetime", "symbol"])
+    ml_out = MLPipelineOutput(alpha_panel=alpha_panel)
+    oos = {
+        "BTCUSDT": {
+            "4h": pd.DataFrame(
+                {
+                    "datetime": pd.to_datetime(["2026-01-01 00:00:00", "2026-01-01 04:00:00"]),
+                    "alpha_long": [1.0, 1.0],
+                    "alpha_short": [1.0, 1.0],
+                }
+            )
+        }
+    }
+    with pytest.raises(RuntimeError, match="strategy alpha_panel is zero-only"):
+        assert_strategy_alpha_ready(
+            ml_out=ml_out,
+            oos_data_maps=oos,
+            valid_symbols=["BTCUSDT"],
+            tf="4h",
+        )
+
+
+def test_assert_strategy_alpha_ready_rejects_zero_only_merged_panel_window() -> None:
+    alpha_panel = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2026-01-01 00:00:00", "2026-01-01 04:00:00"]),
+            "symbol": ["BTCUSDT", "BTCUSDT"],
+            "alpha_long": [0.001, 0.002],
+            "alpha_short": [0.001, 0.002],
+        }
+    ).set_index(["datetime", "symbol"])
+    ml_out = MLPipelineOutput(alpha_panel=alpha_panel)
+    oos = {
+        "BTCUSDT": {
+            "4h": pd.DataFrame(
+                {
+                    "datetime": pd.to_datetime(["2026-01-01 00:00:00", "2026-01-01 04:00:00"]),
+                    "alpha_long": [0.0, 0.0],
+                    "alpha_short": [0.0, 0.0],
+                }
+            )
+        }
+    }
+    with pytest.raises(
+        RuntimeError, match="strategy merge produced zero-only alpha columns in panel window"
+    ):
+        assert_strategy_alpha_ready(
+            ml_out=ml_out,
+            oos_data_maps=oos,
+            valid_symbols=["BTCUSDT"],
+            tf="4h",
+        )
 
 
 def test_assert_strategy_alpha_ready_rejects_non_finite_v3_metadata() -> None:
