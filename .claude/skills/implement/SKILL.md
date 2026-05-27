@@ -1,33 +1,26 @@
 ---
 name: implement
-description: Implement changes by strictly following the blueprint with surgical precision and token efficiency.
+description: Apply blueprint changes with precision, focusing on 100% fidelity and efficiency.
 ---
 
-# implement
-
-Focus on execution. Use surgical tools to minimize token waste.
+# Skill: Implement
 
 ## Purpose
-Apply the implementation blueprint with 100% fidelity. You are the builder who translates the architect's specs into working code.
+Translate the Blueprint into working code with surgical precision. Follow instructions exactly as defined by the architect.
 
-## Rules
-1.  **Blueprint Source-of-Truth:** You MUST read the blueprint in `.agents/specs/` using `read_file` before starting. Follow the `Symbolic Interface Definitions` and `Step-by-Step Logic` exactly.
-2.  **Surgical Precision:** ALWAYS prefer the `replace` tool over overwriting entire files to preserve context and minimize token usage.
-3.  **No Unrelated Changes:** Do not refactor or clean up code outside the `Surgical Edit Plan` defined in the blueprint.
-4.  **Minimalist Chat Output:** Avoid verbose explanations. Focus on the "Blueprint Alignment" checklist.
+## Execution Rules
+1. **Blueprint Truth:** Read the blueprint in `docs/specs/` using `read_file` before acting. Follow `Contract` and `Logic` strictly.
+2. **Surgical Tools:** ALWAYS use `replace` instead of overwriting files whenever possible to minimize token waste and preserve context.
+3. **No Drift:** Do NOT perform unrelated refactoring or "clean-up" outside the `Surgical Plan`.
+4. **Fallback:** If the Blueprint conflicts with the actual code or if the `replace` tool fails due to context mismatch, **STOP immediately**. Report the conflict and wait for clarification. Do not force the implementation.
+5. **Iteration Limit:** Max 3 attempts to fix `verify` failures (lint/test). If unresolved, hand off to `review` or `spec` for re-evaluation.
 
-## Implementation Workflow
-1.  **Read:** Get the blueprint from `.agents/specs/`.
-2.  **Act:** Apply changes using `replace` or `write_file` as per the `Surgical Edit Plan`.
-3.  **Sync:** Update relevant `docs/` files to match the new implementation.
-
-## Output (Token Optimized)
+## Output Format
 ```md
 ### 🏗️ Implement: [Blueprint Name]
 - **Target Files:** `[Paths]`
 - **Blueprint Alignment:**
-  - [ ] Step 1: [Short name from Blueprint]
-  - [ ] Step 2: [Short name from Blueprint]
-- **Docs Sync:** `[Updated Path]`
-- **Handoff:** Ready for `verify` (Snippet: `[Snippet Command]`)
+  - [ ] Step 1: [Short name]
+  - [ ] Step 2: [Short name]
+- **Status:** Ready for `verify` | **Issues:** [Conflict/Drift noted]
 ```
