@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 from _pytest.logging import LogCaptureFixture
 from _pytest.monkeypatch import MonkeyPatch
 from numpy.typing import NDArray
@@ -158,6 +159,9 @@ def test_build_ml_strategy_alpha_emits_orchestration_tags(
     assert float(panel["alpha_short"].sum()) > 0.0
     assert float(panel.loc[(datetimes[2], "BTCUSDT"), "alpha_long"]) >= 0.0
     assert float(panel.loc[(datetimes[2], "XRPUSDT"), "alpha_short"]) >= 0.0
+    q = panel.attrs["quality_report"]
+    assert 0.0 <= float(q.get("xs_long_preservation_ratio", 0.0)) <= 1.0
+    assert 0.0 <= float(q.get("xs_short_preservation_ratio", 0.0)) <= 1.0
 
 
 def test_build_ml_strategy_alpha_filters_nonfinite_and_clips_test_outlier(
@@ -816,8 +820,24 @@ def test_build_ml_strategy_alpha_selects_best_horizon_and_records_metadata(
             "ic_t_stat": 2.5,
             "ic_hit_ratio": 0.5,
             "ic_n_obs": 1,
-            "alpha_p95_bps": 10.0,
-            "in_fold_valid_alpha_p95_bps": 40.0 if state["horizon"] == 12 else 28.0,
+            "alpha_p95_bps": 10.0 if state["horizon"] == 12 else 14.0,
+            "alpha_active_p95_bps": 35.0 if state["horizon"] == 12 else 18.0,
+            "alpha_long_tradable_nz": 0.20 if state["horizon"] == 12 else 0.05,
+            "alpha_short_tradable_nz": 0.15 if state["horizon"] == 12 else 0.05,
+            "in_fold_valid_alpha_p95_bps": 20.0 if state["horizon"] == 12 else 40.0,
+        },
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.side_alpha_tail_metrics",
+        lambda alpha_long, alpha_short, *, cost_floor: {
+            "alpha_full_matrix_p95_bps": 10.0 if state["horizon"] == 12 else 14.0,
+            "alpha_active_p95_bps": 35.0 if state["horizon"] == 12 else 18.0,
+            "alpha_long_active_p95_bps": 30.0 if state["horizon"] == 12 else 16.0,
+            "alpha_short_active_p95_bps": 35.0 if state["horizon"] == 12 else 18.0,
+            "alpha_long_tradable_nz": 0.20 if state["horizon"] == 12 else 0.05,
+            "alpha_short_tradable_nz": 0.15 if state["horizon"] == 12 else 0.05,
+            "alpha_long_active_count": 10.0,
+            "alpha_short_active_count": 10.0,
         },
     )
     monkeypatch.setattr(
@@ -860,4 +880,355 @@ def test_build_ml_strategy_alpha_selects_best_horizon_and_records_metadata(
     panel = build_ml_strategy_alpha(data_maps={}, symbols=list(symbols), tf="4h", cfg=cfg)
     assert panel.attrs["selected_horizon"] == 12
     assert len(panel.attrs["horizon_experiment"]) == 2
+    assert "active_p95_bps" in panel.attrs["horizon_experiment"][0]
+    assert "full_matrix_p95_bps" in panel.attrs["horizon_experiment"][0]
+    assert "tradable_density" in panel.attrs["horizon_experiment"][0]
     assert panel.attrs["baseline_harness"]["mode"] == "horizon_experiment"
+
+
+def test_build_ml_strategy_alpha_gate_uses_oos_alpha_p95_not_in_fold(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    datetimes = np.array(
+        [
+            np.datetime64("2024-01-01T00:00:00"),
+            np.datetime64("2024-01-01T04:00:00"),
+            np.datetime64("2024-01-01T08:00:00"),
+        ],
+        dtype="datetime64[ns]",
+    )
+    symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT")
+    feature_names = ("f0", "f1")
+    fp = FeaturePanel(
+        datetimes=datetimes,
+        symbols=symbols,
+        values=np.ones((3, 5, 2), dtype=np.float32),
+        feature_names=feature_names,
+        valid_mask=np.ones((3, 5), dtype=bool),
+    )
+    lp = LabelPanel(
+        long_net_ret=np.zeros((3, 5), dtype=np.float32),
+        short_net_ret=np.zeros((3, 5), dtype=np.float32),
+        signed_net_ret=np.zeros((3, 5), dtype=np.float32),
+        exec_net_ret=np.zeros((3, 5), dtype=np.float32),
+        relevance=np.full((3, 5), 2, dtype=np.int32),
+        sample_weight=np.ones((3, 5), dtype=np.float32),
+        eligible_mask=np.ones((3, 5), dtype=bool),
+    )
+    ds = _dataset(
+        x=np.ones((10, 2), dtype=np.float32),
+        group=np.array([5, 5], dtype=np.int32),
+        index_map=np.array([[2, i % 5] for i in range(10)], dtype=np.int64),
+        feature_names=feature_names,
+    )
+    fold = FoldSpec(
+        fold_id=0,
+        train_start=0,
+        train_end=1,
+        valid_start=1,
+        valid_end=2,
+        test_start=2,
+        test_end=3,
+        purge_bars=1,
+        embargo_bars=1,
+    )
+    called: dict[str, float] = {}
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.align_data_maps",
+        lambda data_maps, symbols, tf: SimpleNamespace(symbols=list(symbols)),
+    )
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.build_feature_panel", lambda *_: fp)
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.build_label_panel", lambda *_: lp)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.make_walk_forward_folds",
+        lambda *_: [fold],
+    )
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.build_long_matrix", lambda **_: ds)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.fit_ranker",
+        lambda **_: SimpleNamespace(model=object()),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.predict_rank_score",
+        lambda _model, ds: np.zeros(ds.X.shape[0], dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.fit_quantile_calibrators",
+        lambda **_: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.predict_conservative_ev",
+        lambda *_: np.array([0.02] * 10, dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.build_quality_report",
+        lambda **_: {
+            "feature_finite_ratio": 1.0,
+            "label_valid_ratio": 1.0,
+            "ranker_valid_ndcg_at_5": 1.0,
+            "spearman_rank_ic": 0.1,
+            "ic_icir": 0.1,
+            "ic_t_stat": 2.5,
+            "ic_hit_ratio": 0.5,
+            "ic_n_obs": 1,
+            "alpha_p95_bps": 7.0,
+            "in_fold_valid_alpha_p95_bps": 77.0,
+        },
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.passes_quality_gate",
+        lambda *_: True,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.passes_ic_gate",
+        lambda *_, **__: True,
+    )
+
+    def _capture_alpha_gate(**kwargs: float) -> dict[str, object]:
+        called["alpha_p95_bps"] = float(kwargs["alpha_p95_bps"])
+        called["active_alpha_p95_bps"] = float(kwargs["active_alpha_p95_bps"])
+        called["min_tradable_long_nz"] = float(kwargs["min_tradable_long_nz"])
+        called["min_tradable_short_nz"] = float(kwargs["min_tradable_short_nz"])
+        return {
+            "alpha_gate_pass": True,
+            "alpha_gate_fail_reasons": [],
+            "alpha_gate_floor_bps": 0.0,
+        }
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.alpha_gate_diagnostics",
+        _capture_alpha_gate,
+    )
+
+    cfg = StrategyConfig(
+        name="ml_lambdamart_v1",
+        ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
+    )
+    build_ml_strategy_alpha(data_maps={}, symbols=list(symbols), tf="4h", cfg=cfg)
+    assert called["alpha_p95_bps"] == pytest.approx(7.0)
+    assert called["active_alpha_p95_bps"] > 0.0
+    assert called["min_tradable_long_nz"] == pytest.approx(cfg.ml.alpha_gate_min_tradable_long_nz)
+    assert called["min_tradable_short_nz"] == pytest.approx(
+        cfg.ml.alpha_gate_min_tradable_short_nz
+    )
+
+
+def test_build_ml_strategy_alpha_anchored_gate_uses_oos_alpha_p95_not_in_fold(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    datetimes = np.array(
+        [np.datetime64("2024-01-01T00:00:00") + np.timedelta64(4 * i, "h") for i in range(40)],
+        dtype="datetime64[ns]",
+    )
+    symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT")
+    feature_names = ("f0", "f1")
+    fp = FeaturePanel(
+        datetimes=datetimes,
+        symbols=symbols,
+        values=np.ones((40, 5, 2), dtype=np.float32),
+        feature_names=feature_names,
+        valid_mask=np.ones((40, 5), dtype=bool),
+    )
+    lp = LabelPanel(
+        long_net_ret=np.zeros((40, 5), dtype=np.float32),
+        short_net_ret=np.zeros((40, 5), dtype=np.float32),
+        signed_net_ret=np.zeros((40, 5), dtype=np.float32),
+        exec_net_ret=np.zeros((40, 5), dtype=np.float32),
+        relevance=np.full((40, 5), 2, dtype=np.int32),
+        sample_weight=np.ones((40, 5), dtype=np.float32),
+        eligible_mask=np.ones((40, 5), dtype=bool),
+    )
+    called: dict[str, float] = {}
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.align_data_maps",
+        lambda data_maps, symbols, tf: SimpleNamespace(symbols=list(symbols)),
+    )
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.build_feature_panel", lambda *_: fp)
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.build_label_panel", lambda *_: lp)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.fit_ranker",
+        lambda **_: SimpleNamespace(model=object()),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.predict_rank_score",
+        lambda _model, ds: np.linspace(-0.5, 0.5, ds.X.shape[0], dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.fit_quantile_calibrators",
+        lambda **_: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.predict_conservative_ev",
+        lambda *_: np.ones(5, dtype=np.float32) * np.float32(0.02),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.build_quality_report",
+        lambda **_: {
+            "feature_finite_ratio": 1.0,
+            "label_valid_ratio": 1.0,
+            "ranker_valid_ndcg_at_5": 1.0,
+            "spearman_rank_ic": 0.1,
+            "ic_icir": 0.1,
+            "ic_t_stat": 2.5,
+            "ic_hit_ratio": 0.5,
+            "ic_n_obs": 1,
+            "alpha_p95_bps": 6.0,
+            "in_fold_valid_alpha_p95_bps": 66.0,
+        },
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.passes_quality_gate",
+        lambda *_: True,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.passes_ic_gate",
+        lambda *_, **__: True,
+    )
+
+    def _capture_alpha_gate(**kwargs: float) -> dict[str, object]:
+        called["alpha_p95_bps"] = float(kwargs["alpha_p95_bps"])
+        called["active_alpha_p95_bps"] = float(kwargs["active_alpha_p95_bps"])
+        return {
+            "alpha_gate_pass": True,
+            "alpha_gate_fail_reasons": [],
+            "alpha_gate_floor_bps": 0.0,
+        }
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.alpha_gate_diagnostics",
+        _capture_alpha_gate,
+    )
+
+    cfg = StrategyConfig(
+        name="ml_lambdamart_v1",
+        ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
+    )
+    build_ml_strategy_alpha_anchored(
+        data_maps={},
+        symbols=list(symbols),
+        tf="4h",
+        cfg=cfg,
+        anchor_end_idx=35,
+        target_start=35,
+        target_end=36,
+    )
+    assert called["alpha_p95_bps"] == pytest.approx(6.0)
+    assert called["active_alpha_p95_bps"] > 0.0
+
+
+def test_build_ml_strategy_alpha_logs_cost_wall_gate_metric_source(
+    monkeypatch: MonkeyPatch,
+    caplog: LogCaptureFixture,
+) -> None:
+    datetimes = np.array(
+        [
+            np.datetime64("2024-01-01T00:00:00"),
+            np.datetime64("2024-01-01T04:00:00"),
+            np.datetime64("2024-01-01T08:00:00"),
+        ],
+        dtype="datetime64[ns]",
+    )
+    symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT")
+    feature_names = ("f0", "f1")
+    fp = FeaturePanel(
+        datetimes=datetimes,
+        symbols=symbols,
+        values=np.ones((3, 5, 2), dtype=np.float32),
+        feature_names=feature_names,
+        valid_mask=np.ones((3, 5), dtype=bool),
+    )
+    lp = LabelPanel(
+        long_net_ret=np.zeros((3, 5), dtype=np.float32),
+        short_net_ret=np.zeros((3, 5), dtype=np.float32),
+        signed_net_ret=np.zeros((3, 5), dtype=np.float32),
+        exec_net_ret=np.zeros((3, 5), dtype=np.float32),
+        relevance=np.full((3, 5), 2, dtype=np.int32),
+        sample_weight=np.ones((3, 5), dtype=np.float32),
+        eligible_mask=np.ones((3, 5), dtype=bool),
+    )
+    ds = _dataset(
+        x=np.ones((10, 2), dtype=np.float32),
+        group=np.array([5, 5], dtype=np.int32),
+        index_map=np.array([[2, i % 5] for i in range(10)], dtype=np.int64),
+        feature_names=feature_names,
+    )
+    fold = FoldSpec(
+        fold_id=0,
+        train_start=0,
+        train_end=1,
+        valid_start=1,
+        valid_end=2,
+        test_start=2,
+        test_end=3,
+        purge_bars=1,
+        embargo_bars=1,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.align_data_maps",
+        lambda data_maps, symbols, tf: SimpleNamespace(symbols=list(symbols)),
+    )
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.build_feature_panel", lambda *_: fp)
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.build_label_panel", lambda *_: lp)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.make_walk_forward_folds",
+        lambda *_: [fold],
+    )
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.build_long_matrix", lambda **_: ds)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.fit_ranker",
+        lambda **_: SimpleNamespace(model=object()),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.predict_rank_score",
+        lambda _model, ds: np.zeros(ds.X.shape[0], dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.fit_quantile_calibrators",
+        lambda **_: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.predict_conservative_ev",
+        lambda *_: np.array([0.02] * 10, dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.build_quality_report",
+        lambda **_: {
+            "feature_finite_ratio": 1.0,
+            "label_valid_ratio": 1.0,
+            "ranker_valid_ndcg_at_5": 1.0,
+            "spearman_rank_ic": 0.1,
+            "ic_icir": 0.1,
+            "ic_t_stat": 2.5,
+            "ic_hit_ratio": 0.5,
+            "ic_n_obs": 1,
+            "alpha_p95_bps": 8.0,
+        },
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.passes_quality_gate",
+        lambda *_: True,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.passes_ic_gate",
+        lambda *_, **__: True,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.alpha_gate_diagnostics",
+        lambda **_: {
+            "alpha_gate_pass": True,
+            "alpha_gate_fail_reasons": [],
+            "alpha_gate_floor_bps": 0.0,
+            "alpha_gate_metric_bps": 30.0,
+            "alpha_gate_metric_source": "active_alpha_p95_bps",
+        },
+    )
+
+    cfg = StrategyConfig(
+        name="ml_lambdamart_v1",
+        ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
+    )
+    caplog.set_level("INFO")
+    build_ml_strategy_alpha(data_maps={}, symbols=list(symbols), tf="4h", cfg=cfg)
+    assert "gate_metric=30.00bps" in caplog.text
+    assert "source=active_alpha_p95_bps" in caplog.text
