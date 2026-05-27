@@ -362,8 +362,8 @@ def test_build_ml_strategy_alpha_anchored_test_alpha_independent_of_future_label
 ) -> None:
     """Test 구간 alpha가 미래 실현수익 label과 무관함을 검증 (leakage 회귀 테스트).
 
-    cost_clearance_target_long/short 값을 0과 1로 뒤집어도 test 구간 alpha가
-    동일해야 한다 — realized label이 더 이상 게이팅에 쓰이지 않으므로.
+    cost_clearance_target 계열은 LabelDiagnostics로 격리(LabelPanel에서 삭제)됨.
+    레이블이 변경되어도 test 구간 alpha가 동일해야 한다.
     """
     datetimes = np.array(
         [np.datetime64("2024-01-01T00:00:00") + np.timedelta64(4 * i, "h") for i in range(40)],
@@ -379,21 +379,19 @@ def test_build_ml_strategy_alpha_anchored_test_alpha_independent_of_future_label
         valid_mask=np.ones((40, 5), dtype=bool),
     )
 
-    def _make_label_panel(cost_clear_val: float) -> LabelPanel:
-        clear = np.full((40, 5), cost_clear_val, dtype=np.float32)
+    def _make_label_panel(signed_val: float) -> LabelPanel:
+        # cost_clearance_target 계열은 LabelDiagnostics로 격리됨 — LabelPanel에 없음
+        signed = np.full((40, 5), signed_val, dtype=np.float32)
         return LabelPanel(
             long_net_ret=np.zeros((40, 5), dtype=np.float32),
             short_net_ret=np.zeros((40, 5), dtype=np.float32),
-            signed_net_ret=np.zeros((40, 5), dtype=np.float32),
+            signed_net_ret=signed,
             exec_net_ret=np.zeros((40, 5), dtype=np.float32),
             relevance=np.full((40, 5), 2, dtype=np.int32),
             relevance_long=np.full((40, 5), 2, dtype=np.int32),
             relevance_short=np.full((40, 5), 2, dtype=np.int32),
             magnitude_target_long=np.ones((40, 5), dtype=np.float32) * 0.01,
             magnitude_target_short=np.ones((40, 5), dtype=np.float32) * 0.02,
-            cost_clearance_target=clear,
-            cost_clearance_target_long=clear,
-            cost_clearance_target_short=clear,
             sample_weight=np.ones((40, 5), dtype=np.float32),
             eligible_mask=np.ones((40, 5), dtype=bool),
         )
@@ -458,7 +456,7 @@ def test_build_ml_strategy_alpha_anchored_test_alpha_independent_of_future_label
         ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
     )
 
-    # Arrange: run with cost_clearance_target = all-ones (cost cleared)
+    # Arrange: run with signed_net_ret = all-ones (label variant A)
     label_state["value"] = _make_label_panel(1.0)
     panel_cleared = build_ml_strategy_alpha_anchored(
         data_maps={},
@@ -470,7 +468,7 @@ def test_build_ml_strategy_alpha_anchored_test_alpha_independent_of_future_label
         target_end=36,
     )
 
-    # Act: run with cost_clearance_target = all-zeros (cost NOT cleared)
+    # Act: run with signed_net_ret = all-zeros (label variant B)
     label_state["value"] = _make_label_panel(0.0)
     panel_blocked = build_ml_strategy_alpha_anchored(
         data_maps={},
@@ -489,14 +487,14 @@ def test_build_ml_strategy_alpha_anchored_test_alpha_independent_of_future_label
     np.testing.assert_array_equal(
         long_cleared,
         long_blocked,
-        err_msg="alpha_long must not depend on cost_clearance_target (look-ahead leakage removed)",
+        err_msg="alpha_long must be deterministic (test window is isolated from train labels)",
     )
     short_cleared = panel_cleared.loc[(target_ts, slice(None)), "alpha_short"].to_numpy()
     short_blocked = panel_blocked.loc[(target_ts, slice(None)), "alpha_short"].to_numpy()
     np.testing.assert_array_equal(
         short_cleared,
         short_blocked,
-        err_msg="alpha_short must not depend on cost_clearance_target (look-ahead leakage removed)",
+        err_msg="alpha_short must be deterministic (test window is isolated from train labels)",
     )
 
 
