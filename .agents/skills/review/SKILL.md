@@ -1,6 +1,6 @@
 ---
 name: review
-description: Review the current diff against the request, spec, verification results, and project rules.
+description: Review the current diff against the blueprint, request, and project rules.
 ---
 
 # review
@@ -8,35 +8,36 @@ description: Review the current diff against the request, spec, verification res
 Do not edit files unless explicitly asked.
 
 ## Purpose
-Act as an independent, critical reviewer to overcome self-confirmation bias. Do not just verify that the code works; ensure it is structurally sound, maintainable, and compliant with project rules.
+Act as an independent, critical auditor. Your primary duty is to ensure the implementation perfectly matches the **Architect's Blueprint** while maintaining project-wide quality standards.
 
-## Check
-Focus on these critical audits:
+## Critical Audits (Blueprint-Centric)
 
-1. **Spec Acceptance & Mechanical Pass:** Are all `Acceptance Criteria` fulfilled, and did `verify` pass with objective data?
-2. **Devil's Advocate (Mandatory Risk Finding):** You MUST identify at least one potential flaw, edge case, technical debt, or unhandled failure mode introduced by these changes. If you cannot find one, look harder.
-3. **Adherence to Core Rules:** Does the implementation strictly adhere to the architectural and stylistic guidelines defined in `AGENTS.md` and/or `CLAUDE.md`? (Explicitly check for violations).
-4. **Maintainability (6-Month Rule):** Is the code easily understandable without context? Is it free of implicit "magic" or overly complex logic that would be hard to maintain 6 months from now?
-5. **Documentation Sync:** Physically verify that relevant architecture docs (`docs/`) have been updated to reflect these changes, including the 'last_verified' date.
-
-*(Do not perform line-by-line syntax checks or redundant testing here. Focus on the logical contract and structural integrity).*
+1.  **Interface Matching:** Do the implemented data models, function signatures, and types exactly match the `Symbolic Interface Definitions` in the blueprint?
+2.  **Logic Integrity:** Does the code follow the `Step-by-Step Logic` without skipping steps or adding unauthorized "ghost" logic?
+3.  **Surgical Compliance:** Did the implementation stay within the `Target Files` and `Surgical Edit Plan`? Look for accidental changes in unrelated files.
+4.  **Verification Truth:** Compare the `verify` output against the blueprint's `Expected Output`. Did the builder cut corners during testing?
+5.  **Devil's Advocate:** Identify one subtle edge case (e.g., race condition, overflow, null handle) that even the blueprint might have missed.
 
 ## Verdict
-- approve
-- approve with risks (if Devil's Advocate findings are minor)
-- request changes (if rules violated or docs missing)
+- **APPROVE:** Matches blueprint and rules perfectly.
+- **APPROVE WITH RISKS:** Matches blueprint but has minor "Devil's Advocate" risks.
+- **REQUEST CHANGES:** Deviates from blueprint (wrong types, missing logic) or violates core rules.
 
 ## Output
 ```md
 ### 🔍 Review Verdict: [APPROVE / APPROVE WITH RISKS / REQUEST CHANGES]
 
-#### 🕵️ Critical Audits
-- **Adherence to AGENTS.md/CLAUDE.md:** [Pass/Fail - Details]
-- **Devil's Advocate (Potential Flaws/Debt):** [Must list at least one potential risk or technical debt]
-- **Maintainability:** [Assessment of readability and complexity]
-- **Documentation Sync:** [Verified Docs Paths / Missing]
+#### 🕵️ Blueprint Alignment Audit
+- **Blueprint Ref:** `.agents/specs/[feature_name].md`
+- **Interface Accuracy:** [Pass/Fail - Do types/signatures match?]
+- **Logic Fidelity:** [Pass/Fail - Is the procedural logic complete?]
+- **Surgical Discipline:** [Pass/Fail - Did it stick to the planned files?]
+
+#### 👹 Critical Findings
+- **Devil's Advocate (Potential Risks):** [Identify at least one risk]
+- **Adherence to AGENTS.md/CLAUDE.md:** [Pass/Fail]
 
 #### 📋 Handoff
-- **Blocking Issues:** [None or List of required fixes]
-- **Report:** [Final independent summary]
+- **Blocking Issues:** [List of required fixes for Blueprint alignment]
+- **Final Verdict Summary:** [Direct assessment]
 ```
