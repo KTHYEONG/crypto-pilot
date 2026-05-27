@@ -1,38 +1,41 @@
 ---
 name: verify
-description: Verify implemented changes using the blueprint's verification snippet and acceptance criteria.
+description: Confirm implementation completeness based on Spec acceptance criteria and verification scripts.
 ---
 
-# verify
+# Skill: Verify
 
 ## Purpose
-Run and report checks to ensure technical integrity. You must prove that the implementation meets the specific standards defined in the architect's blueprint.
+Empirically verify mechanical integrity (tests, linting, type-checking) and confirm that changes meet the technical criteria defined in the Spec.
 
-## Rules
-1.  **Blueprint Priority:** You MUST read the relevant blueprint file in `.agents/specs/` before verifying.
-2.  **Execute Snippets:** Prioritize running the `Verification Snippet` exactly as defined in the blueprint.
-3.  **Actual Summaries:** Always include the raw summary line from the tool (e.g., `5 passed, 2 failed in 0.5s`). Do not paraphrase.
-4.  **Side-Effect Awareness:** If shared logic was changed, you MUST run tests for at least one dependent module.
+## Execution Rules
+1. **Mechanical Focus:** Prioritize proving the code *works* and is *valid*. Use tests and static analysis.
+2. **Spec Alignment:** Read `Verification Snippet` and `Acceptance Criteria` in the relevant `docs/specs/` file before verifying.
+3. **Standard Commands:** Use project standard commands (e.g., pytest, ruff, mypy) for verification.
+4. **Raw Output:** Include raw tool output summaries (e.g., `5 passed, 2 failed`) without paraphrasing.
+5. **Handoff:** If mechanical checks pass but logical complexity is high, clearly state that deep logic auditing is deferred to the `review` skill.
 
 ## Verification Checklist
-- [ ] **Acceptance Criteria:** Check each item from the blueprint's `Acceptance Criteria`.
-- [ ] **Snippet Success:** Did the `Verification Snippet` produce the `Expected Output`?
-- [ ] **Static Analysis:** Run `ruff` and `mypy` as standard sanity checks.
+- [ ] **Acceptance:** Does it satisfy all Acceptance Criteria in the Spec?
+- [ ] **Functional:** Does the Verification Snippet output match the Expected Output?
+- [ ] **Quality:** No regressions in static analysis (Lint/Type) or existing tests?
 
-## Output
+## Output Format
 ```md
-<verify>
-
 ### ✅ Verification: [PASS / FAIL / PARTIAL]
-- **Blueprint Reference:** `.agents/specs/[feature_name].md`
-- **Summary:** `[Actual tool output summary]`
-- **Commands Run:** `[Exact commands from snippet or manual]`
-- **Acceptance Criteria Check:**
-  - [ ] [Criterion 1 from Blueprint]
-  - [ ] [Criterion 2 from Blueprint]
-- **Passed:** [Specific tests/checks]
-- **Failed/Skipped:** [Specific failures with brief error]
-- **Next:** `[Next Step]`
 
-</verify>
+**1. Execution Overview**
+- **Target Spec:** `docs/specs/filename.md`
+- **Commands:** `[Commands executed]`
+- **Result:** `[Raw output summary]`
+
+**2. Detailed Results**
+- [ ] **Criteria 1:** [Pass/Fail] - [Brief note]
+- [ ] **Criteria 2:** [Pass/Fail]
+
+**3. Findings/Gaps**
+- [Details of failed tests or lint errors]
+
+**4. Next Steps**
+- [Fix direction or Next Step (e.g., Request review)]
 ```

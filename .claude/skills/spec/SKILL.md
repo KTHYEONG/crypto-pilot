@@ -1,74 +1,44 @@
 ---
 name: spec
-description: Create a deep architectural design and a detailed implementation blueprint.
+description: Architecture design & machine-readable blueprint for implementation.
 ---
 
-# spec
-
-Do not implement production code. Your goal is to provide high-level architectural alignment and a low-level implementation blueprint.
+# Skill: Spec
 
 ## Purpose
-Think deeply and architect the solution. You are the lead architect responsible for the technical integrity and long-term maintainability of the codebase. You produce two outputs:
-1.  **Chat Summary:** A concise overview of the design for the user.
-2.  **Blueprint File:** A detailed, machine-readable specification for the builder AI, saved in `.agents/specs/`.
+Produce high-precision technical specifications. High-reasoning models must focus on "Why" and "How", delegating "Action" to the Blueprint.
 
-## Deep Reasoning Guidelines
-1.  **Analyze & Reason:** Use the "Surgical Map" from `triage-scan` to jump straight into the logic. Analyze why the current code behaves as it does and how the proposed change affects the broader system.
-2.  **Completeness:** If you suspect side effects or missing dependencies, you MUST perform your own targeted searches (`grep`, `read_file`) to ensure a high-quality, comprehensive design.
-3.  **Architecture Alignment:** Verify alignment with `docs/` and `AGENTS.md`. Focus on the "Why".
+## Output 1: Blueprint File (Save to `docs/specs/*.md`)
+*Purpose: Strict instruction set for the builder AI. Zero ambiguity.*
+- **Target Files:** List of files to be modified.
+- **Contract:** Exact function signatures, types, and data models.
+- **Step-by-Step Logic:** Procedural logic in pseudo-code or bullet points.
+- **Surgical Plan:** 
+  - `[FILE_PATH]`
+  - `[ACTION: ADD/REPLACE/DELETE]`
+  - `[CODE_OR_INSTRUCTION]` (Provide exact code snippets for complex logic).
+- **Verification:** Precise `uv run` command and expected outcome.
 
-## Two-Phase Output Workflow
-
-### Phase 1: Create Blueprint File (Use `write_file`)
-Save a detailed specification to `.agents/specs/[feature_name].md`. This file must be structured for high-precision coding AI consumption:
-
-```markdown
-# Blueprint: [Feature Name]
-- **Target Files:** `[Paths]`
-- **Context:** [Brief reasoning]
-
-## 1. Symbolic Interface Definitions
-- **Data Models:** [Pydantic/Dataclass definitions]
-- **Signatures:** [Exact function/method signatures with types]
-
-## 2. Step-by-Step Logic (Procedural)
-1. **Step 1:** [Specific action/condition]
-2. **Step 2:** [Specific action/condition]
-...
-
-## 3. Surgical Edit Plan
-- **File:** `[Path]`
-  - [ADD/REPLACE/DELETE] [Specific code block or instruction]
-- **File:** `[Path]`
-  - [ADD/REPLACE/DELETE] [Specific code block or instruction]
-
-## 4. Verification Snippet
-- **Command:** `[uv run ...]`
-- **Expected Output:** [Expected result]
-```
-
-### Phase 2: Chat Summary (Brief)
-After saving the file, provide a concise summary in the chat:
-
+## Output 2: Chat Summary (Brief)
+*Purpose: Rapid user alignment. Minimal tokens.*
 ```md
-### 📝 Spec: [Type]
-- **Goal:** [Goal]
-- **Blueprint Saved:** `.agents/specs/[feature_name].md`
+### 📝 Spec: [Type] | [Brief Goal]
+- **Blueprint:** `docs/specs/[filename].md`
+- **Impact:** `[Files changed]`
 
-#### 🏗️ Technical Design Summary
-- **Logic Flow:** [High-level summary of the algorithm/logic]
-- **Architecture Alignment:** [Why this approach was chosen]
+**1. Design Strategy**
+- **Approach:** [1-2 sentences on core logic]
+- **Trade-offs:** [Why this way? - only if critical]
 
-#### 📋 Quick Overview
-- **Affected Area:** `[Files]`
-- **Acceptance Criteria:**
-  - [ ] [Criterion 1]
-- **Ready:** [Yes/No] | **Blocking:** [Questions]
+**2. Acceptance Criteria**
+- [ ] [Measurable outcome 1]
+- [ ] [Measurable outcome 2]
+
+**3. Status:** [Ready to Implement? / Questions for User]
 ```
 
-## Choose One for [Type]
-- `spec-lite`: small or medium feature
-- `bug brief`: bug fix
-- `PRD`: complex feature or multi-module change
-- `refactor plan`: behavior-preserving structure change
-- `ADR`: architecture decision
+## Reasoning Constraints
+1. **Verification First:** Before designing, use `read_file` to confirm the FULL signatures and context of functions/classes identified in `triage-scan`. Never assume based on partial imports or 10-line "sniffs".
+2. **No Hallucination:** If a path is unverified, run `grep/ls` first.
+3. **Context Density:** Do not repeat the prompt. Focus on the Delta (what changes).
+4. **Spec Types:** `spec-lite` (minor), `prd` (major), `bug-fix`, `refactor`.
