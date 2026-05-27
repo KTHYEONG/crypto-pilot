@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from src.domain.futures.forecast.diagnostics import LabelDiagnostics
 from src.domain.futures.portfolio.friction_model import resolve_cost_snapshot
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import StrategyMLConfig
@@ -268,11 +269,6 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
             float(np.nanmean(dynamic_cost_2d)),
         )
 
-    cost_clearance_target = np.where(
-        valid_mask,
-        (np.abs(exec_net_ret) * 1e4) - dynamic_cost_2d,
-        np.float32(0.0),
-    ).astype(np.float32)
     magnitude_target_long = np.where(
         valid_mask,
         np.maximum(exec_net_ret, 0.0),
@@ -283,16 +279,26 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         np.maximum(-exec_net_ret, 0.0),
         0.0,
     ).astype(np.float32)
-    cost_clearance_target_long = np.where(
-        valid_mask,
-        (magnitude_target_long * 1e4) - dynamic_cost_2d,
-        np.float32(0.0),
-    ).astype(np.float32)
-    cost_clearance_target_short = np.where(
-        valid_mask,
-        (magnitude_target_short * 1e4) - dynamic_cost_2d,
-        np.float32(0.0),
-    ).astype(np.float32)
+
+    # cost_clearance 3필드 → LabelDiagnostics로 격리 (LabelPanel 훈련 계약에서 제외)
+    _label_diag = LabelDiagnostics(
+        cost_clearance_target=np.where(
+            valid_mask,
+            (np.abs(exec_net_ret) * 1e4) - dynamic_cost_2d,
+            np.float32(0.0),
+        ).astype(np.float32),
+        cost_clearance_target_long=np.where(
+            valid_mask,
+            (magnitude_target_long * 1e4) - dynamic_cost_2d,
+            np.float32(0.0),
+        ).astype(np.float32),
+        cost_clearance_target_short=np.where(
+            valid_mask,
+            (magnitude_target_short * 1e4) - dynamic_cost_2d,
+            np.float32(0.0),
+        ).astype(np.float32),
+    )
+
     metadata = {
         "rank_target_key": "signed_net_ret",
         "rank_target_long_key": "long_net_ret",
@@ -300,13 +306,15 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         "magnitude_target_key": "exec_net_ret",
         "magnitude_target_long_key": "max(exec_net_ret,0)",
         "magnitude_target_short_key": "max(-exec_net_ret,0)",
-        "cost_clearance_target_key": "cost_clearance_target",
-        "cost_clearance_target_long_key": "cost_clearance_target_long",
-        "cost_clearance_target_short_key": "cost_clearance_target_short",
         "calibrator_target_mode": cfg.calibrator_target,
         "round_trip_cost_bps": cost_snapshot.round_trip_cost_bps_fallback,
         "execution_cost_bps_source": cost_snapshot.execution_cost_bps_source,
         "label_horizon_bars": int(cfg.label_horizon_bars),
+        "_label_diagnostics_summary": {
+            "cost_clearance_mean": float(
+                np.nanmean(_label_diag.cost_clearance_target)
+            ),
+        },
     }
     return LabelPanel(
         long_net_ret=long_net,
@@ -318,13 +326,10 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         eligible_mask=eligible & finite_long,
         rank_target=signed,
         magnitude_target=exec_net_ret,
-        cost_clearance_target=cost_clearance_target,
         rank_target_long=long_net,
         rank_target_short=short_net,
         magnitude_target_long=magnitude_target_long,
         magnitude_target_short=magnitude_target_short,
-        cost_clearance_target_long=cost_clearance_target_long,
-        cost_clearance_target_short=cost_clearance_target_short,
         relevance_long=rel_long,
         relevance_short=rel_short,
         dynamic_cost_bps_2d=dynamic_cost_2d,
