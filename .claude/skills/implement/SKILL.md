@@ -1,53 +1,33 @@
 ---
 name: implement
-description: Implement a scoped change using the selected strategy. TDD is optional.
+description: Implement changes by strictly following the blueprint with surgical precision and token efficiency.
 ---
 
 # implement
 
-Edit only task-relevant files.
+Focus on execution. Use surgical tools to minimize token waste.
 
 ## Purpose
-Apply the smallest correct change.
-
-## Strategies
-- `direct patch`: low-risk local changes
-- `regression-first`: bug fixes
-- `TDD`: high-risk logic, auth, permissions, billing, data integrity, quant logic
-- `characterization-first`: refactoring
-- `spike`: unclear feasibility
+Apply the implementation blueprint with 100% fidelity. You are the builder who translates the architect's specs into working code.
 
 ## Rules
-- Do not broaden scope.
-- Do not perform unrelated refactors.
-- Do not change public APIs unless required.
-- Always update relevant architecture and domain documents in docs/ alongside code changes.
-- **Promotion Lifecycle:** You MUST promote approved specs (ADR, PRD, etc.) into the '5. Detailed Specifications' section of the target architecture/domain document and update the 'last_verified' Frontmatter date.
-- Preserve behavior unless change is requested.
-- Hand off to `verify` after implementation.
+1.  **Blueprint Source-of-Truth:** You MUST read the blueprint in `.agents/specs/` using `read_file` before starting. Follow the `Symbolic Interface Definitions` and `Step-by-Step Logic` exactly.
+2.  **Surgical Precision:** ALWAYS prefer the `replace` tool over overwriting entire files to preserve context and minimize token usage.
+3.  **No Unrelated Changes:** Do not refactor or clean up code outside the `Surgical Edit Plan` defined in the blueprint.
+4.  **Minimalist Chat Output:** Avoid verbose explanations. Focus on the "Blueprint Alignment" checklist.
 
-## Output
+## Implementation Workflow
+1.  **Read:** Get the blueprint from `.agents/specs/`.
+2.  **Act:** Apply changes using `replace` or `write_file` as per the `Surgical Edit Plan`.
+3.  **Sync:** Update relevant `docs/` files to match the new implementation.
+
+## Output (Token Optimized)
 ```md
-<perf>
-(Only if Scale is 'high')
-- **Bottleneck:** CPU / IO / Memory | **Complexity:** T(O), S(O)
-- **Strategy:** [Tool/Method]
-- **Trade-offs:** [Sacrifices]
-</perf>
-
-### 🏗️ Implementation: [Strategy]
-- **Changes:** `[Files]`
-- **Docs:** `[Updated/Verified]` | **Handoff:** `verify`
-- **Notes:** [Details]
-```* [Sacrifices]
-</perf>
-
-<risk>
-- ...
-</risk>
-
-### 🏗️ Implementation: [Strategy]
-- **Changes:** `[Files]`
-- **Docs:** `[Updated/Verified]` | **Handoff:** `verify`
-- **Notes:** [Details]
+### 🏗️ Implement: [Blueprint Name]
+- **Target Files:** `[Paths]`
+- **Blueprint Alignment:**
+  - [ ] Step 1: [Short name from Blueprint]
+  - [ ] Step 2: [Short name from Blueprint]
+- **Docs Sync:** `[Updated Path]`
+- **Handoff:** Ready for `verify` (Snippet: `[Snippet Command]`)
 ```
