@@ -1,43 +1,38 @@
 ---
 name: review
-description: Review the current diff against the blueprint, request, and project rules.
+description: Critically audit compliance with Specs and Project Standards to determine approval.
 ---
 
-# review
-
-Do not edit files unless explicitly asked.
+# Skill: Review
 
 ## Purpose
-Act as an independent, critical auditor. Your primary duty is to ensure the implementation perfectly matches the **Architect's Blueprint** while maintaining project-wide quality standards.
+Act as the final logical gatekeeper. Critically review code changes to ensure they perfectly align with the design (Spec) and fulfill all Acceptance Criteria.
 
-## Critical Audits (Blueprint-Centric)
+## Audit Checklist
+1. **Logic Integrity:** Do the changes fulfill the "Why" and "How" of the Spec? Check for subtle logical drift or missing edge cases.
+2. **Spec Alignment:** Do interfaces, types, and logic match `docs/specs/*.md` 100%?
+3. **Surgical Precision:** No unnecessary file modifications or "just-in-case" logic outside `Target Files`?
+4. **Standards Compliance:** Adherence to project rules (e.g., Python 3.11+, Strict Typing, Logging, Docstrings)?
+5. **Final Acceptance:** Verify that the implementation achieves the measurable outcomes defined in the Spec's Acceptance Criteria.
 
-1.  **Interface Matching:** Do the implemented data models, function signatures, and types exactly match the `Symbolic Interface Definitions` in the blueprint?
-2.  **Logic Integrity:** Does the code follow the `Step-by-Step Logic` without skipping steps or adding unauthorized "ghost" logic?
-3.  **Surgical Compliance:** Did the implementation stay within the `Target Files` and `Surgical Edit Plan`? Look for accidental changes in unrelated files.
-4.  **Verification Truth:** Compare the `verify` output against the blueprint's `Expected Output`. Did the builder cut corners during testing?
-5.  **Devil's Advocate:** Identify one subtle edge case (e.g., race condition, overflow, null handle) that even the blueprint might have missed.
+## Verdicts
+- **PASS**: Perfect alignment with Spec and Rules.
+- **PASS WITH RISKS**: Alignment achieved, but potential edge cases or minor improvements identified.
+- **FAIL**: Spec mismatch, rule violation, or logic errors found.
 
-## Verdict
-- **APPROVE:** Matches blueprint and rules perfectly.
-- **APPROVE WITH RISKS:** Matches blueprint but has minor "Devil's Advocate" risks.
-- **REQUEST CHANGES:** Deviates from blueprint (wrong types, missing logic) or violates core rules.
-
-## Output
+## Output Format
 ```md
-### 🔍 Review Verdict: [APPROVE / APPROVE WITH RISKS / REQUEST CHANGES]
+### 🏁 Review Verdict: [PASS / PASS WITH RISKS / FAIL]
 
-#### 🕵️ Blueprint Alignment Audit
-- **Blueprint Ref:** `.agents/specs/[feature_name].md`
-- **Interface Accuracy:** [Pass/Fail - Do types/signatures match?]
-- **Logic Fidelity:** [Pass/Fail - Is the procedural logic complete?]
-- **Surgical Discipline:** [Pass/Fail - Did it stick to the planned files?]
+**1. Core Audit Results**
+- **Spec Alignment:** [Pass/Fail] (Ref: `docs/specs/filename.md`)
+- **Surgical Precision:** [Pass/Fail] (Unintended changes check)
+- **Standards Compliance:** [Pass/Fail] (Project rules check)
 
-#### 👹 Critical Findings
-- **Devil's Advocate (Potential Risks):** [Identify at least one risk]
-- **Adherence to AGENTS.md/CLAUDE.md:** [Pass/Fail]
+**2. Findings & Risks**
+- [Issue 1: Detail and location]
+- [Issue 2: Recommendations]
 
-#### 📋 Handoff
-- **Blocking Issues:** [List of required fixes for Blueprint alignment]
-- **Final Verdict Summary:** [Direct assessment]
+**3. Handoff**
+- [Specific fixes required or Next Step]
 ```
