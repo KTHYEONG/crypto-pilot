@@ -92,6 +92,7 @@ def _build_strategy_compose_diag(
     mu_l_pre = beta_a * alpha_long - friction_2d
     mu_s_pre = beta_a * alpha_short - friction_2d
 
+    cost_source = str(cost_snapshot.execution_cost_bps_source)
     return {
         "bars": float(n_bars),
         "alpha_long_nz_ratio": _nonzero_ratio(alpha_long),
@@ -105,8 +106,14 @@ def _build_strategy_compose_diag(
         "friction_bps": float(np.nanmean(friction_bps_2d)),
         "ev_hurdle_bps": float(ev_h),
         "effective_threshold_bps": float(np.nanmean(threshold_bps)),
-        "execution_cost_bps_source": (
-            1.0 if cost_snapshot.execution_cost_bps_source == "per_symbol" else 0.0
+        "execution_cost_source_universe_static": (
+            1.0 if cost_source == "universe_static" else 0.0
+        ),
+        "execution_cost_source_parametric_dynamic": (
+            1.0 if cost_source == "parametric_dynamic" else 0.0
+        ),
+        "execution_cost_source_fallback_global": (
+            1.0 if cost_source == "fallback_global" else 0.0
         ),
         "mu_pre_hurdle_p95_long": _safe_pct(mu_l_pre, 95),
         "mu_pre_hurdle_p95_short": _safe_pct(mu_s_pre, 95),
@@ -222,6 +229,15 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "EV_HURDLE_BPS": float(
             ml.get("EV_HURDLE_BPS", default_ev_hurdle_bps(cfg))
         ),
+        "COST_GATE_AMORTIZE": bool(
+            ml.get("COST_GATE_AMORTIZE", cfg.get("COST_GATE_AMORTIZE", False))
+        ),
+        "KELLY_USE_RESIDUAL_VAR": bool(
+            ml.get("KELLY_USE_RESIDUAL_VAR", cfg.get("KELLY_USE_RESIDUAL_VAR", False))
+        ),
+        "COST_FORECAST_DYNAMIC": bool(
+            ml.get("COST_FORECAST_DYNAMIC", cfg.get("COST_FORECAST_DYNAMIC", False))
+        ),
         "SLIPPAGE_BPS_BUFFER_MULT": float(
             ml.get("SLIPPAGE_BPS_BUFFER_MULT", cfg.get("SLIPPAGE_BPS_BUFFER_MULT", 1.0))
         ),
@@ -284,34 +300,98 @@ def _compose_strategy_scores_inplace(
         raise RuntimeError("strategy mode requires 2D alpha_long/alpha_short with matching shape")
 
     n_bars, n_syms = alpha_l_2d.shape
-    xs_l = np.zeros((n_bars, n_syms), dtype=np.float64)
-    xs_s = np.zeros((n_bars, n_syms), dtype=np.float64)
 
-    beta_a = float(
-        params.get("BETA_ALPHA", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))
-    )
-    ev_h_base = float(
+    dynamic_on = bool(
         params.get(
-            "EV_HURDLE_BPS",
-            default_ev_hurdle_bps(OPT_FUTURES_CONFIG),
+            "COST_FORECAST_DYNAMIC",
+            OPT_FUTURES_CONFIG.get("COST_FORECAST_DYNAMIC", False),
         )
     )
-    ev_h = np.full((n_bars, n_syms), ev_h_base, dtype=np.float64)
+    selected_cost_bps = aligned.get("execution_cost_bps_2d")
+    selected_cost_frac = aligned.get("execution_cost_fraction_2d")
+    selected_cost_source = "fallback_global"
+    if dynamic_on and aligned.get("execution_cost_bps_2d_dynamic") is not None:
+        selected_cost_bps = aligned.get("execution_cost_bps_2d_dynamic")
+        selected_cost_frac = aligned.get("execution_cost_fraction_2d_dynamic")
+        selected_cost_source = str(
+            aligned.get("_cost_forecast_source_dynamic", "parametric_dynamic")
+        )
+        if aligned.get("capacity_notional_2d_dynamic") is not None:
+            aligned["capacity_notional_2d"] = aligned.get("capacity_notional_2d_dynamic")
+        aligned["_cost_forecast_dynamic"] = 1.0
+    else:
+        if selected_cost_bps is not None:
+            selected_cost_source = str(aligned.get("_cost_forecast_source", "universe_static"))
+        elif aligned.get("execution_cost_bps_2d_static") is not None:
+            selected_cost_bps = aligned.get("execution_cost_bps_2d_static")
+            selected_cost_frac = aligned.get("execution_cost_fraction_2d_static")
+            selected_cost_source = str(
+                aligned.get("_cost_forecast_source_static", "universe_static")
+            )
+        else:
+            selected_cost_source = "fallback_global"
+        aligned["_cost_forecast_dynamic"] = 0.0
+
+    if selected_cost_bps is not None:
+        aligned["execution_cost_bps_2d"] = selected_cost_bps
+    if selected_cost_frac is not None:
+        aligned["execution_cost_fraction_2d"] = selected_cost_frac
 
     cost_snapshot = resolve_cost_snapshot(
         execution_cost_bps_2d=cast(
             NDArray[np.float64] | None,
-            aligned.get("execution_cost_bps_2d"),
+            selected_cost_bps,
         ),
         shape=(n_bars, n_syms),
     )
-    friction_2d = np.asarray(cost_snapshot.execution_cost_fraction_2d, dtype=np.float64)
-    mu_l = beta_a * alpha_l_2d - friction_2d
-    mu_s = beta_a * alpha_s_2d - friction_2d
+    if selected_cost_frac is not None:
+        friction_2d = np.asarray(selected_cost_frac, dtype=np.float64)
+    else:
+        friction_2d = np.asarray(cost_snapshot.execution_cost_fraction_2d, dtype=np.float64)
 
-    hurdle_frac = ev_h / 10000.0
-    xs_l = np.where(mu_l >= hurdle_frac, mu_l, 0.0)
-    xs_s = np.where(mu_s >= hurdle_frac, mu_s, 0.0)
+    # compose_mu 위임 (Phase 1: 동일 수치 — behavior-preserving)
+    from src.domain.futures.forecast.compose import compose_mu as _compose_mu
+    from src.domain.futures.forecast.contracts import (
+        AlphaArtifactHash,
+        AlphaForecast,
+        CostForecast,
+    )
+
+    _dummy_hash = AlphaArtifactHash(
+        alpha_config_hash="",
+        feature_config_hash="",
+        label_config_hash="",
+        train_window_hash="",
+        fold_spec_hash="",
+        model_family="",
+        selected_horizon=-1,
+    )
+    _af = AlphaForecast(
+        datetimes=np.array([]),
+        symbols=(),
+        alpha_long_2d=alpha_l_2d,
+        alpha_short_2d=alpha_s_2d,
+        q10_long_2d=None,
+        q50_long_2d=None,
+        q90_long_2d=None,
+        q10_short_2d=None,
+        q50_short_2d=None,
+        q90_short_2d=None,
+        confidence_long_2d=None,
+        confidence_short_2d=None,
+        eligible_mask=np.ones(alpha_l_2d.shape, dtype=bool),
+        source="objectives_inplace",
+        artifact_hash=_dummy_hash,
+    )
+    _cf = CostForecast(
+        execution_cost_bps_2d=np.asarray(cost_snapshot.execution_cost_bps_2d, dtype=np.float64),
+        execution_cost_fraction_2d=friction_2d,
+        uncertainty_bps_2d=np.zeros_like(friction_2d),
+        capacity_notional_2d=None,
+        source=cost_snapshot.execution_cost_bps_source,
+    )
+    holding_bars = max(1, int(params.get("REBALANCE_BARS", 1)))
+    xs_l, xs_s, mu_l, mu_s = _compose_mu(_af, _cf, params, holding_bars=holding_bars)
 
     aligned["xs_score_long"] = np.ascontiguousarray(xs_l)
     aligned["xs_score_short"] = np.ascontiguousarray(xs_s)
@@ -326,7 +406,7 @@ def _compose_strategy_scores_inplace(
         cost_snapshot=cost_snapshot,
     )
     aligned["_strategy_cost_snapshot_meta"] = {
-        "execution_cost_bps_source": cost_snapshot.execution_cost_bps_source,
+        "execution_cost_bps_source": selected_cost_source,
         "round_trip_cost_bps": float(cost_snapshot.round_trip_cost_bps_fallback),
     }
     aligned["_strategy_signal_path_diag"] = {
@@ -481,6 +561,12 @@ def _run_portfolio_numba_block(
             risk_snapshot=risk_snapshot,
             btc_beta_2d=np.asarray(beta_2d, dtype=np.float64) if beta_2d is not None else None,
             policy_inputs=policy_inputs,
+            use_residual_var_for_kelly=bool(
+                params.get(
+                    "KELLY_USE_RESIDUAL_VAR",
+                    OPT_FUTURES_CONFIG.get("KELLY_USE_RESIDUAL_VAR", False),
+                )
+            ),
         ),
         dtype=np.float64,
     )
@@ -1120,6 +1206,36 @@ def _evaluate_awf_phase_d_aggregate(
         trial.set_user_attr("cvar", float(cvar_pct))
         trial.set_user_attr("minority_side_ratio", float(minority))
         trial.set_user_attr("n_trades", float(avg_trades_agg))
+        trial.set_user_attr(
+            "phase2_cost_forecast_dynamic",
+            float(
+                1.0
+                if bool(
+                    params.get(
+                        "COST_FORECAST_DYNAMIC",
+                        cfg.get("COST_FORECAST_DYNAMIC", False),
+                    )
+                )
+                else 0.0
+            ),
+        )
+        trial.set_user_attr(
+            "phase2_cost_gate_amortize",
+            float(1.0 if bool(params.get("COST_GATE_AMORTIZE", False)) else 0.0),
+        )
+        trial.set_user_attr(
+            "phase2_kelly_use_residual_var",
+            float(
+                1.0
+                if bool(
+                    params.get(
+                        "KELLY_USE_RESIDUAL_VAR",
+                        cfg.get("KELLY_USE_RESIDUAL_VAR", False),
+                    )
+                )
+                else 0.0
+            ),
+        )
         trial.set_user_attr("prof_compose", float(t_compose_tot))
         trial.set_user_attr("prof_prep", float(t_prep_tot))
         trial.set_user_attr("prof_prep_align", float(t_prep_align_tot))

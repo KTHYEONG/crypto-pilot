@@ -251,9 +251,12 @@ def test_build_label_panel_exposes_explicit_target_contract_metadata() -> None:
     )
     assert panel.rank_target is not None
     assert panel.magnitude_target is not None
-    assert panel.cost_clearance_target is not None
+    # cost_clearance_target 3필드는 LabelDiagnostics로 격리됨 — LabelPanel에 없음
+    assert not hasattr(panel, "cost_clearance_target")
     assert panel.metadata["rank_target_key"] == "signed_net_ret"
     assert panel.metadata["magnitude_target_key"] == "exec_net_ret"
+    # LabelDiagnostics 요약은 metadata에 보존됨
+    assert "_label_diagnostics_summary" in panel.metadata
 
 
 # ---------------------------------------------------------------------------
@@ -390,8 +393,9 @@ def test_build_label_panel_exposes_dual_side_targets() -> None:
     assert panel.rank_target_short is not None
     assert panel.magnitude_target_long is not None
     assert panel.magnitude_target_short is not None
-    assert panel.cost_clearance_target_long is not None
-    assert panel.cost_clearance_target_short is not None
+    # cost_clearance_target_long/short는 LabelDiagnostics로 격리됨 — LabelPanel에 없음
+    assert not hasattr(panel, "cost_clearance_target_long")
+    assert not hasattr(panel, "cost_clearance_target_short")
     assert panel.relevance_long is not None
     assert panel.relevance_short is not None
 
