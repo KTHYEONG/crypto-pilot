@@ -45,6 +45,8 @@ from src.domain.futures.strategy.diagnostics import (
     ml_alpha_metrics,
     passes_ic_gate,
     passes_quality_gate,
+    preservation_ratio,
+    side_alpha_tail_metrics,
 )
 from src.domain.futures.strategy.features import build_feature_panel
 from src.domain.futures.strategy.inference import (
@@ -300,22 +302,36 @@ def build_ml_strategy_alpha(
                 cfg=candidate_cfg,
             )
             report = panel.attrs.get("quality_report", {})
-            alpha_p95_bps = float(report.get("in_fold_valid_alpha_p95_bps", 0.0))
-            score_bps = alpha_p95_bps - floor_bps
+            active_p95_bps = float(
+                report.get("alpha_active_p95_bps", report.get("alpha_p95_bps", 0.0))
+            )
+            full_matrix_p95_bps = float(report.get("alpha_p95_bps", 0.0))
+            tradable_density = min(
+                float(report.get("alpha_long_tradable_nz", 0.0)),
+                float(report.get("alpha_short_tradable_nz", 0.0)),
+            )
+            score_bps = (active_p95_bps - floor_bps) + 10.0 * tradable_density
             record = {
                 "horizon": int(horizon),
-                "alpha_p95_bps": alpha_p95_bps,
+                "active_p95_bps": active_p95_bps,
+                "full_matrix_p95_bps": full_matrix_p95_bps,
+                "tradable_density": tradable_density,
                 "score_bps": score_bps,
-                "clears_cost_wall": bool(alpha_p95_bps >= floor_bps),
+                "clears_cost_wall": bool(active_p95_bps >= floor_bps),
             }
             records.append(record)
             _logger.info(
-                "[ML-HORIZON] horizon=%d alpha_p95=%.2fbps floor=%.2fbps score=%.2fbps pass=%s",
+                (
+                    "[ML-HORIZON] horizon=%d active_p95=%.2fbps full_p95=%.2fbps "
+                    "floor=%.2fbps tradable=%.4f score=%.2fbps pass=%s"
+                ),
                 int(horizon),
-                alpha_p95_bps,
+                active_p95_bps,
+                full_matrix_p95_bps,
                 floor_bps,
+                tradable_density,
                 score_bps,
-                str(alpha_p95_bps >= floor_bps),
+                str(active_p95_bps >= floor_bps),
             )
             if score_bps > best_score:
                 best_score = score_bps
@@ -747,7 +763,20 @@ def build_ml_strategy_alpha(
                 float(np.count_nonzero(v_ev_test_short) / max(1, v_ev_test_short.size)),
             )
 
-    ev_grid = ev_long_grid - ev_short_grid
+    clip_lim = float(ml_cfg.alpha_clip_bps / 10000.0)
+    eligible_2d = labels.eligible_mask
+    alpha_long_final = np.where(
+        eligible_2d,
+        np.clip(np.maximum(ev_long_grid, 0.0), 0.0, clip_lim),
+        0.0,
+    ).astype(np.float32, copy=False)
+    alpha_short_final = np.where(
+        eligible_2d,
+        np.clip(np.maximum(ev_short_grid, 0.0), 0.0, clip_lim),
+        0.0,
+    ).astype(np.float32, copy=False)
+    alpha_ic_score = (alpha_long_final - alpha_short_final).astype(np.float64, copy=False)
+    ev_grid = alpha_ic_score
     forecast_metadata_v3 = {
         "q10_long": q10_long_grid.reshape(-1),
         "q50_long": q50_long_grid.reshape(-1),
@@ -766,8 +795,8 @@ def build_ml_strategy_alpha(
         eligible_mask=labels.eligible_mask,
         forecast_metadata_v3=forecast_metadata_v3,
     )
-    panel.loc[:, "alpha_long"] = ev_long_grid.reshape(-1)
-    panel.loc[:, "alpha_short"] = ev_short_grid.reshape(-1)
+    panel.loc[:, "alpha_long"] = alpha_long_final.reshape(-1)
+    panel.loc[:, "alpha_short"] = alpha_short_final.reshape(-1)
     panel.attrs["strategy_name"] = cfg.name
     panel.attrs["feature_names"] = list(features.feature_names)
     panel.attrs["fold_count"] = len(folds)
@@ -840,8 +869,9 @@ def build_ml_strategy_alpha(
         score_2d=score_grid,
         signed_ret_2d=labels.signed_net_ret.astype(np.float64),
         relevance_2d=labels.relevance.astype(np.float64),
-        alpha_long_2d=ev_long_grid,
-        alpha_short_2d=ev_short_grid,
+        alpha_long_2d=alpha_long_final,
+        alpha_short_2d=alpha_short_final,
+        ic_score_2d=alpha_ic_score,
     )
     valid_stack_long = (
         np.concatenate(valid_ev_long_all)
@@ -862,29 +892,27 @@ def build_ml_strategy_alpha(
         quality_report["in_fold_valid_alpha_p95_bps"] = (
             float(np.percentile(np.abs(valid_alpha) * 1e4, 95)) if valid_alpha.size > 0 else 0.0
         )
-    clip_lim = float(ml_cfg.alpha_clip_bps / 10000.0)
-    _ev_grid_ungated = ev_long_grid - ev_short_grid
-    raw_long = np.maximum(np.clip(_ev_grid_ungated, -clip_lim, clip_lim), 0.0)
-    raw_short = np.maximum(-np.clip(_ev_grid_ungated, -clip_lim, clip_lim), 0.0)
-    panel_long = panel["alpha_long"].to_numpy(dtype=np.float64).reshape(raw_long.shape)
-    panel_short = panel["alpha_short"].to_numpy(dtype=np.float64).reshape(raw_short.shape)
-    raw_long_nz = float(np.mean(np.abs(raw_long) > 1e-12)) if raw_long.size > 0 else 0.0
-    raw_short_nz = float(np.mean(np.abs(raw_short) > 1e-12)) if raw_short.size > 0 else 0.0
-    panel_long_nz = float(np.mean(np.abs(panel_long) > 1e-12)) if panel_long.size > 0 else 0.0
-    panel_short_nz = float(np.mean(np.abs(panel_short) > 1e-12)) if panel_short.size > 0 else 0.0
-    xs_long_preservation = panel_long_nz / max(raw_long_nz, 1e-12) if raw_long_nz > 0.0 else 0.0
-    xs_short_preservation = panel_short_nz / max(raw_short_nz, 1e-12) if raw_short_nz > 0.0 else 0.0
+    cost_floor = (
+        round_trip_cost_bps() + float(default_ev_hurdle_bps(OPT_FUTURES_CONFIG))
+    ) / 10000.0
+    xs_long_proxy = np.where(alpha_long_final >= cost_floor, alpha_long_final, 0.0)
+    xs_short_proxy = np.where(alpha_short_final >= cost_floor, alpha_short_final, 0.0)
+    xs_long_preservation = preservation_ratio(alpha_long_final, xs_long_proxy)
+    xs_short_preservation = preservation_ratio(alpha_short_final, xs_short_proxy)
+    quality_report.update(
+        side_alpha_tail_metrics(
+            alpha_long_final,
+            alpha_short_final,
+            cost_floor=cost_floor,
+        )
+    )
+    quality_report["alpha_full_matrix_p95_bps"] = float(quality_report.get("alpha_p95_bps", 0.0))
     quality_report["xs_long_preservation_ratio"] = xs_long_preservation
     quality_report["xs_short_preservation_ratio"] = xs_short_preservation
     _friction_bps = round_trip_cost_bps()
     _hurdle_default_bps = float(default_ev_hurdle_bps(OPT_FUTURES_CONFIG))
     alpha_diag = alpha_gate_diagnostics(
-        alpha_p95_bps=float(
-            quality_report.get(
-                "in_fold_valid_alpha_p95_bps",
-                quality_report.get("alpha_p95_bps", 0.0),
-            )
-        ),
+        alpha_p95_bps=float(quality_report.get("alpha_p95_bps", 0.0)),
         friction_bps=float(_friction_bps),
         hurdle_bps=float(_hurdle_default_bps),
         long_nz=float(quality_report.get("alpha_long_non_zero_ratio", 0.0)),
@@ -895,6 +923,11 @@ def build_ml_strategy_alpha(
         min_short_nz=ml_cfg.alpha_gate_min_short_nz,
         min_xs_preservation=ml_cfg.alpha_gate_min_xs_preservation,
         cost_wall_tolerance_bps=ml_cfg.alpha_gate_cost_wall_tolerance_bps,
+        active_alpha_p95_bps=float(quality_report.get("alpha_active_p95_bps", 0.0)),
+        tradable_long_nz=float(quality_report.get("alpha_long_tradable_nz", 0.0)),
+        tradable_short_nz=float(quality_report.get("alpha_short_tradable_nz", 0.0)),
+        min_tradable_long_nz=ml_cfg.alpha_gate_min_tradable_long_nz,
+        min_tradable_short_nz=ml_cfg.alpha_gate_min_tradable_short_nz,
     )
     quality_report.update(alpha_diag)
     panel.attrs["quality_report"] = quality_report
@@ -902,7 +935,8 @@ def build_ml_strategy_alpha(
         raise RuntimeError(
             "strategy ml alpha gate failed: "
             f"reasons={quality_report.get('alpha_gate_fail_reasons', [])} "
-            f"alpha_p95_bps={quality_report.get('alpha_p95_bps', 0.0):.2f} "
+            f"alpha_gate_metric_bps={quality_report.get('alpha_gate_metric_bps', 0.0):.2f} "
+            f"alpha_full_matrix_p95_bps={quality_report.get('alpha_full_matrix_p95_bps', 0.0):.2f} "
             f"floor_bps={quality_report.get('alpha_gate_floor_bps', 0.0):.2f} "
             f"long_nz={quality_report.get('alpha_long_non_zero_ratio', 0.0):.4f} "
             f"short_nz={quality_report.get('alpha_short_non_zero_ratio', 0.0):.4f} "
@@ -948,20 +982,40 @@ def build_ml_strategy_alpha(
         quality_report.get("ic_hit_ratio", 0.0),
         int(quality_report.get("ic_n_obs", 0)),
     )
-    # Cost wall diagnosis: gross alpha vs effective cost floor
+    # Cost wall diagnosis: gate metric vs effective cost floor
     _floor_bps = _friction_bps + _hurdle_default_bps
-    _alpha_p95 = max(
-        quality_report.get("alpha_p95_bps", 0.0),
+    _gate_metric_bps = float(
+        quality_report.get(
+            "alpha_gate_metric_bps",
+            quality_report.get("alpha_active_p95_bps", quality_report.get("alpha_p95_bps", 0.0)),
+        )
+    )
+    _gate_metric_source = str(
+        quality_report.get(
+            "alpha_gate_metric_source",
+            "alpha_active_p95_bps" if "alpha_active_p95_bps" in quality_report else "alpha_p95_bps",
+        )
+    )
+    _full_matrix_p95 = float(
+        quality_report.get("alpha_full_matrix_p95_bps", quality_report.get("alpha_p95_bps", 0.0))
+    )
+    _active_p95 = float(quality_report.get("alpha_active_p95_bps", _full_matrix_p95))
+    _gate_metric_bps = max(
+        _gate_metric_bps,
         0.0,
     )
     _logger.info(
-        "[ML-COST-WALL] alpha_p95=%.2fbps friction=%.1fbps hurdle_default=%.1fbps "
-        "floor=%.1fbps signal_clears_floor=%s",
-        _alpha_p95,
+        "[ML-COST-WALL] gate_metric=%.2fbps source=%s full_matrix_p95=%.2fbps "
+        "active_p95=%.2fbps friction=%.1fbps hurdle_default=%.1fbps floor=%.1fbps "
+        "gate_clears_floor=%s",
+        _gate_metric_bps,
+        _gate_metric_source,
+        _full_matrix_p95,
+        _active_p95,
         _friction_bps,
         _hurdle_default_bps,
         _floor_bps,
-        str(_alpha_p95 >= _floor_bps),
+        str(_gate_metric_bps >= _floor_bps),
     )
     # B4: IC gate — config-driven 임계값으로 통계적 유의성 검사
     _ic_pass = passes_ic_gate(
@@ -1237,7 +1291,22 @@ def build_ml_strategy_alpha_anchored(
         if np.isnan(score_grid[int(t_idx), int(s_idx)]):
             score_grid[int(t_idx), int(s_idx)] = score_test_short[row]
 
-    ev_grid = ev_long_grid - ev_short_grid
+    clip_lim_awf = float(ml_cfg.alpha_clip_bps / 10000.0)
+    eligible_2d_awf = labels.eligible_mask
+    alpha_long_final_awf = np.where(
+        eligible_2d_awf,
+        np.clip(np.maximum(ev_long_grid, 0.0), 0.0, clip_lim_awf),
+        0.0,
+    ).astype(np.float32, copy=False)
+    alpha_short_final_awf = np.where(
+        eligible_2d_awf,
+        np.clip(np.maximum(ev_short_grid, 0.0), 0.0, clip_lim_awf),
+        0.0,
+    ).astype(np.float32, copy=False)
+    alpha_ic_score_awf = (alpha_long_final_awf - alpha_short_final_awf).astype(
+        np.float64, copy=False
+    )
+    ev_grid = alpha_ic_score_awf
 
     panel = assemble_alpha_panel(
         datetimes=features.datetimes,
@@ -1256,8 +1325,8 @@ def build_ml_strategy_alpha_anchored(
             "confidence_short": confidence_short_grid.reshape(-1),
         },
     )
-    panel.loc[:, "alpha_long"] = ev_long_grid.reshape(-1)
-    panel.loc[:, "alpha_short"] = ev_short_grid.reshape(-1)
+    panel.loc[:, "alpha_long"] = alpha_long_final_awf.reshape(-1)
+    panel.loc[:, "alpha_short"] = alpha_short_final_awf.reshape(-1)
 
     # AWF quality/IC gates — warn-only モード (Optuna 최적화 중단 방지)
     # WF 경로와 동일하게 build_quality_report()로 실제 IC/NDCG/alpha_p95 계산
@@ -1268,8 +1337,9 @@ def build_ml_strategy_alpha_anchored(
         score_2d=score_grid,
         signed_ret_2d=labels.signed_net_ret.astype(np.float64),
         relevance_2d=labels.relevance.astype(np.float64),
-        alpha_long_2d=ev_long_grid,
-        alpha_short_2d=ev_short_grid,
+        alpha_long_2d=alpha_long_final_awf,
+        alpha_short_2d=alpha_short_final_awf,
+        ic_score_2d=alpha_ic_score_awf,
     )
     _awf_valid_stack = (
         np.concatenate([_awf_result.ev_valid_long, _awf_result.ev_valid_short])
@@ -1282,39 +1352,37 @@ def build_ml_strategy_alpha_anchored(
             if _awf_valid_stack.size > 0
             else 0.0
         )
-    clip_lim_awf = float(ml_cfg.alpha_clip_bps / 10000.0)
-    _ev_ungated_awf = ev_long_grid - ev_short_grid
-    raw_long_awf = np.maximum(np.clip(_ev_ungated_awf, -clip_lim_awf, clip_lim_awf), 0.0)
-    raw_short_awf = np.maximum(-np.clip(_ev_ungated_awf, -clip_lim_awf, clip_lim_awf), 0.0)
-    panel_long_awf = panel["alpha_long"].to_numpy(dtype=np.float64).reshape(raw_long_awf.shape)
-    panel_short_awf = panel["alpha_short"].to_numpy(dtype=np.float64).reshape(raw_short_awf.shape)
-    raw_long_nz_awf = float(np.mean(np.abs(raw_long_awf) > 1e-12)) if raw_long_awf.size > 0 else 0.0
-    raw_short_nz_awf = (
-        float(np.mean(np.abs(raw_short_awf) > 1e-12)) if raw_short_awf.size > 0 else 0.0
+    cost_floor_awf = (
+        round_trip_cost_bps() + float(default_ev_hurdle_bps(OPT_FUTURES_CONFIG))
+    ) / 10000.0
+    xs_long_proxy_awf = np.where(
+        alpha_long_final_awf >= cost_floor_awf,
+        alpha_long_final_awf,
+        0.0,
     )
-    panel_long_nz_awf = (
-        float(np.mean(np.abs(panel_long_awf) > 1e-12)) if panel_long_awf.size > 0 else 0.0
+    xs_short_proxy_awf = np.where(
+        alpha_short_final_awf >= cost_floor_awf,
+        alpha_short_final_awf,
+        0.0,
     )
-    panel_short_nz_awf = (
-        float(np.mean(np.abs(panel_short_awf) > 1e-12)) if panel_short_awf.size > 0 else 0.0
+    xs_long_pres_awf = preservation_ratio(alpha_long_final_awf, xs_long_proxy_awf)
+    xs_short_pres_awf = preservation_ratio(alpha_short_final_awf, xs_short_proxy_awf)
+    awf_quality_report.update(
+        side_alpha_tail_metrics(
+            alpha_long_final_awf,
+            alpha_short_final_awf,
+            cost_floor=cost_floor_awf,
+        )
     )
-    xs_long_pres_awf = (
-        panel_long_nz_awf / max(raw_long_nz_awf, 1e-12) if raw_long_nz_awf > 0.0 else 0.0
-    )
-    xs_short_pres_awf = (
-        panel_short_nz_awf / max(raw_short_nz_awf, 1e-12) if raw_short_nz_awf > 0.0 else 0.0
+    awf_quality_report["alpha_full_matrix_p95_bps"] = float(
+        awf_quality_report.get("alpha_p95_bps", 0.0)
     )
     awf_quality_report["xs_long_preservation_ratio"] = xs_long_pres_awf
     awf_quality_report["xs_short_preservation_ratio"] = xs_short_pres_awf
     _awf_friction_bps = round_trip_cost_bps()
     _awf_hurdle_bps = float(default_ev_hurdle_bps(OPT_FUTURES_CONFIG))
     alpha_diag_awf = alpha_gate_diagnostics(
-        alpha_p95_bps=float(
-            awf_quality_report.get(
-                "in_fold_valid_alpha_p95_bps",
-                awf_quality_report.get("alpha_p95_bps", 0.0),
-            )
-        ),
+        alpha_p95_bps=float(awf_quality_report.get("alpha_p95_bps", 0.0)),
         friction_bps=float(_awf_friction_bps),
         hurdle_bps=float(_awf_hurdle_bps),
         long_nz=float(awf_quality_report.get("alpha_long_non_zero_ratio", 0.0)),
@@ -1329,6 +1397,11 @@ def build_ml_strategy_alpha_anchored(
         min_short_nz=ml_cfg.alpha_gate_min_short_nz,
         min_xs_preservation=ml_cfg.alpha_gate_min_xs_preservation,
         cost_wall_tolerance_bps=ml_cfg.alpha_gate_cost_wall_tolerance_bps,
+        active_alpha_p95_bps=float(awf_quality_report.get("alpha_active_p95_bps", 0.0)),
+        tradable_long_nz=float(awf_quality_report.get("alpha_long_tradable_nz", 0.0)),
+        tradable_short_nz=float(awf_quality_report.get("alpha_short_tradable_nz", 0.0)),
+        min_tradable_long_nz=ml_cfg.alpha_gate_min_tradable_long_nz,
+        min_tradable_short_nz=ml_cfg.alpha_gate_min_tradable_short_nz,
     )
     awf_quality_report.update(alpha_diag_awf)
     if not bool(awf_quality_report.get("alpha_gate_pass", False)):
@@ -1337,8 +1410,8 @@ def build_ml_strategy_alpha_anchored(
             "long_nz=%.4f short_nz=%.4f "
             "xs_long_pres=%.4f xs_short_pres=%.4f",
             awf_quality_report.get("alpha_gate_fail_reasons", []),
-            panel_long_nz_awf,
-            panel_short_nz_awf,
+            float(awf_quality_report.get("alpha_long_non_zero_ratio", 0.0)),
+            float(awf_quality_report.get("alpha_short_non_zero_ratio", 0.0)),
             xs_long_pres_awf,
             xs_short_pres_awf,
         )

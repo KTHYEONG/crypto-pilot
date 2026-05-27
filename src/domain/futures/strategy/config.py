@@ -195,8 +195,11 @@ class StrategyMLConfig:
     alpha_gate_min_long_nz: float = 0.0
     alpha_gate_min_short_nz: float = 0.0
     alpha_gate_min_xs_preservation: float = 0.0
+    alpha_gate_min_tradable_long_nz: float = 0.01
+    alpha_gate_min_tradable_short_nz: float = 0.005
     # Numerical tolerance around cost wall comparison to avoid failing on tiny rounding noise.
     alpha_gate_cost_wall_tolerance_bps: float = 0.0
+    ev_tail_blend_weight: float = 0.25
     feature_groups_enabled: tuple[
         Literal[
             "trend",
@@ -298,8 +301,14 @@ class StrategyMLConfig:
             raise ValueError("alpha_gate_min_short_nz must satisfy 0 <= value <= 1")
         if not (0.0 <= self.alpha_gate_min_xs_preservation <= 1.0):
             raise ValueError("alpha_gate_min_xs_preservation must satisfy 0 <= value <= 1")
+        if not (0.0 <= self.alpha_gate_min_tradable_long_nz <= 1.0):
+            raise ValueError("alpha_gate_min_tradable_long_nz must satisfy 0 <= value <= 1")
+        if not (0.0 <= self.alpha_gate_min_tradable_short_nz <= 1.0):
+            raise ValueError("alpha_gate_min_tradable_short_nz must satisfy 0 <= value <= 1")
         if self.alpha_gate_cost_wall_tolerance_bps < 0.0:
             raise ValueError("alpha_gate_cost_wall_tolerance_bps must be >= 0")
+        if not (0.0 <= self.ev_tail_blend_weight <= 1.0):
+            raise ValueError("ev_tail_blend_weight must satisfy 0 <= value <= 1")
         if self.horizon_experiment_enabled:
             if len(self.horizon_candidates) == 0:
                 raise ValueError(
