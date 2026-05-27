@@ -1,48 +1,37 @@
 ---
 name: verify
-description: Verify implemented changes with the smallest sufficient checks.
+description: Verify implemented changes using the blueprint's verification snippet and acceptance criteria.
 ---
 
 # verify
 
 ## Purpose
-Run and report checks to ensure technical integrity and prevent regressions. Do not settle for "it should work"—prove it with objective data.
+Run and report checks to ensure technical integrity. You must prove that the implementation meets the specific standards defined in the architect's blueprint.
 
 ## Rules
-- **Actual Summaries:** Always include the raw summary line from the tool (e.g., `5 passed, 2 failed in 0.5s`). Do not paraphrase the results.
-- **Side-Effect Awareness:** If shared logic, base classes, or public APIs were changed, you MUST run tests for at least one dependent module or related test suite to check for side effects.
-- **Proof of Execution:** Only report results for commands you actually executed in the current session.
+1.  **Blueprint Priority:** You MUST read the relevant blueprint file in `.agents/specs/` before verifying.
+2.  **Execute Snippets:** Prioritize running the `Verification Snippet` exactly as defined in the blueprint.
+3.  **Actual Summaries:** Always include the raw summary line from the tool (e.g., `5 passed, 2 failed in 0.5s`). Do not paraphrase.
+4.  **Side-Effect Awareness:** If shared logic was changed, you MUST run tests for at least one dependent module.
 
-## Choose Checks
-Based on:
-- **Dependency Analysis:** Which modules rely on the changed files?
-- **Risk Level:** Higher risk requires broader test coverage.
-- **Quant Context:** Financial/math logic requires precision validation.
-- **Available Suites:** Use existing `pytest` marks or directory structures.
-
-## Check Types
-- **Static:** Lint (`ruff`) & Typecheck (`mypy`)
-- **Dynamic:** Unit & Integration tests (`pytest`)
-- **Regression:** Testing unaffected but related areas.
-- **Manual:** Smoke tests via CLI or script execution.
+## Verification Checklist
+- [ ] **Acceptance Criteria:** Check each item from the blueprint's `Acceptance Criteria`.
+- [ ] **Snippet Success:** Did the `Verification Snippet` produce the `Expected Output`?
+- [ ] **Static Analysis:** Run `ruff` and `mypy` as standard sanity checks.
 
 ## Output
 ```md
 <verify>
 
 ### ✅ Verification: [PASS / FAIL / PARTIAL]
-- **Summary:** `[Actual tool output summary, e.g., '15 passed in 1.2s']`
-- **Commands:** `[Exact commands run, e.g., 'uv run pytest ...']`
-- **Side-Effects Checked:** `[Modules/Tests checked for regressions or 'None']`
-- **Passed:** `[Specific test names or categories]`
-- **Failed/Skipped:** `[Specific failures with brief error message]`
-- **Next:** `[Next Step]`
-
-</verify>
-```]`
-- **Passed:** `[Items]`
-- **Failed/Skipped:** `[Items]`
-- **Risks:** [Remaining Risks]
+- **Blueprint Reference:** `.agents/specs/[feature_name].md`
+- **Summary:** `[Actual tool output summary]`
+- **Commands Run:** `[Exact commands from snippet or manual]`
+- **Acceptance Criteria Check:**
+  - [ ] [Criterion 1 from Blueprint]
+  - [ ] [Criterion 2 from Blueprint]
+- **Passed:** [Specific tests/checks]
+- **Failed/Skipped:** [Specific failures with brief error]
 - **Next:** `[Next Step]`
 
 </verify>
