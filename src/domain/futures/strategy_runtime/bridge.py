@@ -211,6 +211,8 @@ def merge_ml_output_into_data_maps(
     )
     _long_nz_ratios: list[float] = []
     _short_nz_ratios: list[float] = []
+    _target_oos_long_nz_ratios: list[float] = []
+    _target_oos_short_nz_ratios: list[float] = []
     for sym in symbols:
         if sym not in data_maps or tf not in data_maps[sym]:
             continue
@@ -219,13 +221,47 @@ def merge_ml_output_into_data_maps(
             _long_nz_ratios.append(float((_df["alpha_long"] != 0).mean()))
         if "alpha_short" in _df.columns:
             _short_nz_ratios.append(float((_df["alpha_short"] != 0).mean()))
+        _oos_key = f"oos_start_idx_{tf}"
+        if _oos_key in data_maps[sym]:
+            _start = int(data_maps[sym][_oos_key])
+            _mask = np.arange(len(_df), dtype=np.int64) >= _start
+            if "alpha_long" in _df.columns:
+                _target_oos_long_nz_ratios.append(
+                    float(np.mean(_df["alpha_long"].to_numpy(dtype=np.float64)[_mask] != 0.0))
+                )
+            if "alpha_short" in _df.columns:
+                _target_oos_short_nz_ratios.append(
+                    float(np.mean(_df["alpha_short"].to_numpy(dtype=np.float64)[_mask] != 0.0))
+                )
     _alpha_long_nz = float(np.mean(_long_nz_ratios)) if _long_nz_ratios else 0.0
     _alpha_short_nz = float(np.mean(_short_nz_ratios)) if _short_nz_ratios else 0.0
+    _panel_start = "na"
+    _panel_end = "na"
+    try:
+        _panel_dt = pd.to_datetime(panel.index.get_level_values("datetime"), utc=True).tz_localize(
+            None
+        )
+        _panel_start = str(_panel_dt.min())
+        _panel_end = str(_panel_dt.max())
+    except Exception as exc:
+        _logger.debug("[ALPHA-MERGE] panel datetime extraction failed: %s", exc)
+    _target_oos_long_nz = (
+        float(np.mean(_target_oos_long_nz_ratios)) if _target_oos_long_nz_ratios else 0.0
+    )
+    _target_oos_short_nz = (
+        float(np.mean(_target_oos_short_nz_ratios)) if _target_oos_short_nz_ratios else 0.0
+    )
     _logger.info(
-        "[ALPHA-MERGE] merged_syms=%d alpha_long_nz=%.3f alpha_short_nz=%.3f",
+        "[ALPHA-MERGE] merged_syms=%d panel_start=%s panel_end=%s "
+        "alpha_long_nz=%.3f alpha_short_nz=%.3f "
+        "target_oos_long_nz=%.3f target_oos_short_nz=%.3f",
         merged_symbols,
+        _panel_start,
+        _panel_end,
         _alpha_long_nz,
         _alpha_short_nz,
+        _target_oos_long_nz,
+        _target_oos_short_nz,
     )
 
 
