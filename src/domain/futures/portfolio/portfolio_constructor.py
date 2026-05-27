@@ -364,6 +364,7 @@ def precompute_rebalance_weights(
     risk_snapshot: RiskSnapshot | None = None,
     btc_beta_2d: np.ndarray | None = None,
     policy_inputs: PortfolioPolicyInputs | None = None,
+    use_residual_var_for_kelly: bool = False,
 ) -> np.ndarray:
     """Sparse target weights: precomputed or rolling LW covariance."""
     c = np.asarray(close_2d, dtype=np.float64)
@@ -394,13 +395,29 @@ def precompute_rebalance_weights(
         if btc_beta_2d is None and risk_snapshot.beta_2d is not None:
             btc_beta_2d = np.asarray(risk_snapshot.beta_2d, dtype=np.float64)
 
+    residual_var_2d: np.ndarray | None = None
+    if policy_inputs is not None and policy_inputs.risk_residual_var_2d is not None:
+        residual_var_2d = np.asarray(policy_inputs.risk_residual_var_2d, dtype=np.float64)
+    if (
+        residual_var_2d is None
+        and risk_snapshot is not None
+        and risk_snapshot.residual_var_2d is not None
+    ):
+        residual_var_2d = np.asarray(risk_snapshot.residual_var_2d, dtype=np.float64)
+
+    ks_diag_2d: np.ndarray | None = None
+    if (
+        use_residual_var_for_kelly
+        and residual_var_2d is not None
+        and residual_var_2d.shape == mu_2d.shape
+    ):
+        ks_diag_2d = np.sqrt(np.maximum(residual_var_2d, 1e-12))
+    elif composer_sigma_2d is not None:
+        ks_diag_2d = np.asarray(composer_sigma_2d, dtype=np.float64)
+        ks_diag_2d = np.maximum(ks_diag_2d, 1e-12)
+
     # If sigma_input is provided, we can use the high-speed Numba loop
     if sigma_input is not None:
-        ks_diag_2d = None
-        if composer_sigma_2d is not None:
-            ks_diag_2d = np.asarray(composer_sigma_2d, dtype=np.float64)
-            ks_diag_2d = np.maximum(ks_diag_2d, 1e-12)
-
         out = np.asarray(
             _precompute_loop_numba(
                 n_bars,
@@ -435,8 +452,8 @@ def precompute_rebalance_weights(
             sigma = rolling_ledoit_wolf_cov(rr, min_obs=min_obs)
 
             ks_diag = None
-            if composer_sigma_2d is not None:
-                ks_diag = np.asarray(composer_sigma_2d[i - 1, :], dtype=np.float64).ravel()
+            if ks_diag_2d is not None and ks_diag_2d.shape == mu_2d.shape:
+                ks_diag = np.asarray(ks_diag_2d[i - 1, :], dtype=np.float64).ravel()
                 ks_diag = np.maximum(ks_diag, 1e-12)
 
             out[i, :] = np.asarray(
