@@ -196,6 +196,15 @@ def compute_conservative_ev(
         penalty_ratio = np.where(is_long, downside / uncertainty, upside / uncertainty)
         penalty_term = np.clip(lam_dynamic * penalty_ratio, np.float32(0.0), np.float32(0.99))
         ev = median * (np.float32(1.0) - penalty_term)
+        if cfg.ev_tail_blend_weight > 0.0:
+            non_negative_ev = np.maximum(np.asarray(ev, dtype=np.float32), np.float32(0.0))
+            tail_room = np.maximum(upper - non_negative_ev, np.float32(0.0))
+            confidence = np.clip(
+                np.abs(median) / uncertainty,
+                np.float32(0.0),
+                np.float32(1.0),
+            )
+            ev = ev + np.float32(cfg.ev_tail_blend_weight) * confidence * tail_room
     ev = np.asarray(ev, dtype=np.float32)
     clip = np.float32(cfg.alpha_clip_bps / 10000.0)
     clipped = np.clip(ev, -clip, clip)

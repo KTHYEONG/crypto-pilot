@@ -54,3 +54,15 @@ def test_ml_config_rejects_negative_alpha_gate_tolerance() -> None:
 def test_ml_config_cost_wall_tolerance_default_is_zero() -> None:
     cfg = StrategyMLConfig()
     assert cfg.alpha_gate_cost_wall_tolerance_bps == 0.0
+
+
+def test_ml_config_rejects_invalid_tradable_thresholds() -> None:
+    with pytest.raises(ValueError, match="alpha_gate_min_tradable_long_nz"):
+        StrategyMLConfig(alpha_gate_min_tradable_long_nz=1.1)
+    with pytest.raises(ValueError, match="alpha_gate_min_tradable_short_nz"):
+        StrategyMLConfig(alpha_gate_min_tradable_short_nz=-0.1)
+
+
+def test_ml_config_rejects_invalid_ev_tail_blend_weight() -> None:
+    with pytest.raises(ValueError, match="ev_tail_blend_weight"):
+        StrategyMLConfig(ev_tail_blend_weight=1.1)

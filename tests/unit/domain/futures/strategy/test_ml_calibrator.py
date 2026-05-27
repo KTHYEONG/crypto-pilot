@@ -218,3 +218,37 @@ def test_compute_conservative_ev_prob_x_magnitude_mode() -> None:
     assert ev.shape == (3,)
     assert ev.dtype == np.float32
     assert np.all(np.isfinite(ev))
+
+
+def test_compute_conservative_ev_quantile_tail_blend_zero_matches_baseline() -> None:
+    cfg = StrategyMLConfig(ev_mode="quantile", ev_tail_blend_weight=0.0, alpha_clip_bps=1_000.0)
+    q10 = np.array([-0.03, -0.02, 0.00], dtype=np.float32)
+    q50 = np.array([-0.01, 0.005, 0.01], dtype=np.float32)
+    q90 = np.array([0.01, 0.03, 0.04], dtype=np.float32)
+    ev = compute_conservative_ev(q10=q10, q50=q50, q90=q90, cfg=cfg)
+    uncertainty = np.maximum(q90 - q10, np.float32(1e-8))
+    downside = np.maximum(q50 - q10, np.float32(0.0))
+    upside = np.maximum(q90 - q50, np.float32(0.0))
+    med_unc = np.median(uncertainty)
+    lam = np.float32(cfg.lambda_tail)
+    lam_dynamic = np.clip(
+        lam * (uncertainty / np.maximum(med_unc, np.float32(1e-8))),
+        np.float32(0.0),
+        lam * np.float32(2.0),
+    )
+    is_long = q50 >= np.float32(0.0)
+    penalty_ratio = np.where(is_long, downside / uncertainty, upside / uncertainty)
+    penalty_term = np.clip(lam_dynamic * penalty_ratio, np.float32(0.0), np.float32(0.99))
+    expected = (q50 * (np.float32(1.0) - penalty_term)).astype(np.float32)
+    np.testing.assert_allclose(ev, expected, rtol=0.0, atol=0.0)
+
+
+def test_compute_conservative_ev_quantile_tail_blend_is_bounded() -> None:
+    cfg = StrategyMLConfig(ev_mode="quantile", ev_tail_blend_weight=0.5, alpha_clip_bps=200.0)
+    q10 = np.array([0.00, 0.001, 0.002], dtype=np.float32)
+    q50 = np.array([0.001, 0.002, 0.003], dtype=np.float32)
+    q90 = np.array([0.01, 0.012, 0.014], dtype=np.float32)
+    ev = compute_conservative_ev(q10=q10, q50=q50, q90=q90, cfg=cfg)
+    assert np.all(ev <= q90 + np.float32(1e-8))
+    assert np.all(ev >= np.float32(0.0))
+    assert np.max(ev) <= np.float32(cfg.alpha_clip_bps / 10000.0) + np.float32(1e-8)
