@@ -9,9 +9,12 @@ from src.domain.futures.strategy.diagnostics import (
     build_quality_report,
     gross_return_diagnostics,
     ndcg_proxy_at_k,
+    nonzero_ratio,
     passes_ic_gate,
     passes_quality_gate,
     passes_signal_preservation_gate,
+    preservation_ratio,
+    side_alpha_tail_metrics,
 )
 
 
@@ -273,8 +276,99 @@ def test_alpha_gate_diagnostics_exposes_fail_reasons() -> None:
         min_long_nz=0.5,
         min_short_nz=0.5,
         min_xs_preservation=0.8,
+        tradable_long_nz=0.0,
+        tradable_short_nz=0.0,
+        min_tradable_long_nz=0.1,
+        min_tradable_short_nz=0.1,
     )
     assert result["alpha_gate_pass"] is False
     reasons = result["alpha_gate_fail_reasons"]
     assert isinstance(reasons, list)
     assert len(reasons) >= 1
+    assert "tradable_long_nz_below_threshold" in reasons
+    assert "tradable_short_nz_below_threshold" in reasons
+
+
+def test_alpha_gate_diagnostics_prefers_active_metric_when_provided() -> None:
+    result = alpha_gate_diagnostics(
+        alpha_p95_bps=5.0,
+        friction_bps=12.0,
+        hurdle_bps=10.0,
+        long_nz=1.0,
+        short_nz=1.0,
+        xs_long_preservation_ratio=1.0,
+        xs_short_preservation_ratio=1.0,
+        min_long_nz=0.0,
+        min_short_nz=0.0,
+        min_xs_preservation=0.0,
+        active_alpha_p95_bps=30.0,
+    )
+    assert result["alpha_gate_pass"] is True
+    assert result["alpha_gate_metric_bps"] == pytest.approx(30.0)
+    assert result["alpha_gate_metric_source"] == "active_alpha_p95_bps"
+
+
+def test_build_quality_report_uses_ic_score_2d_for_spearman_rank_ic() -> None:
+    t, n, f = 12, 6, 3
+    rng = np.random.default_rng(0)
+    feature_values = rng.normal(size=(t, n, f)).astype(np.float32)
+    feature_valid_mask = np.ones((t, n), dtype=bool)
+    label_eligible_mask = np.ones((t, n), dtype=bool)
+    signed_ret = rng.normal(scale=1e-3, size=(t, n)).astype(np.float64)
+    score = rng.normal(size=(t, n)).astype(np.float64)
+    relevance = np.tile(np.array([4, 3, 2, 1, 0, 2], dtype=np.float64), (t, 1))
+
+    report_default = build_quality_report(
+        feature_values=feature_values,
+        feature_valid_mask=feature_valid_mask,
+        label_eligible_mask=label_eligible_mask,
+        score_2d=score,
+        signed_ret_2d=signed_ret,
+        relevance_2d=relevance,
+    )
+    report_ic = build_quality_report(
+        feature_values=feature_values,
+        feature_valid_mask=feature_valid_mask,
+        label_eligible_mask=label_eligible_mask,
+        score_2d=score,
+        signed_ret_2d=signed_ret,
+        relevance_2d=relevance,
+        ic_score_2d=signed_ret.copy(),
+    )
+    assert report_ic["spearman_rank_ic"] > report_default["spearman_rank_ic"]
+    assert report_ic["ranker_valid_ndcg_at_5"] == pytest.approx(
+        report_default["ranker_valid_ndcg_at_5"]
+    )
+
+
+def test_build_quality_report_raises_on_ic_score_shape_mismatch() -> None:
+    with pytest.raises(ValueError, match="ic_score_2d and signed_ret_2d"):
+        build_quality_report(
+            feature_values=np.ones((2, 2, 1), dtype=np.float32),
+            feature_valid_mask=np.ones((2, 2), dtype=bool),
+            label_eligible_mask=np.ones((2, 2), dtype=bool),
+            score_2d=np.ones((2, 2), dtype=np.float64),
+            signed_ret_2d=np.ones((2, 2), dtype=np.float64),
+            relevance_2d=np.ones((2, 2), dtype=np.float64),
+            ic_score_2d=np.ones((1, 2), dtype=np.float64),
+        )
+
+
+def test_preservation_ratio_bounds_and_empty_handling() -> None:
+    before = np.array([[0.1, 0.0], [0.2, 0.3]], dtype=np.float64)
+    after = np.array([[0.1, 0.0], [0.0, 0.3]], dtype=np.float64)
+    ratio = preservation_ratio(before, after)
+    assert 0.0 <= ratio <= 1.0
+    assert ratio == pytest.approx(2.0 / 3.0)
+    assert nonzero_ratio(np.array([], dtype=np.float64)) == 0.0
+
+
+def test_side_alpha_tail_metrics_reports_active_and_tradable_fields() -> None:
+    alpha_long = np.array([[0.0, 0.0], [0.0030, 0.0020]], dtype=np.float64)
+    alpha_short = np.array([[0.0, 0.0010], [0.0040, 0.0]], dtype=np.float64)
+    report = side_alpha_tail_metrics(alpha_long, alpha_short, cost_floor=0.0025)
+    assert report["alpha_active_p95_bps"] >= report["alpha_full_matrix_p95_bps"]
+    assert report["alpha_long_tradable_nz"] == pytest.approx(0.25)
+    assert report["alpha_short_tradable_nz"] == pytest.approx(0.25)
+    assert report["alpha_long_active_count"] == pytest.approx(2.0)
+    assert report["alpha_short_active_count"] == pytest.approx(2.0)
