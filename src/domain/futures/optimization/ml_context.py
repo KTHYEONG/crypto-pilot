@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from src.core.indicators.numpy_ops_futures import compute_atr_numpy
-from src.core.settings import LOG_DIR
+from src.core.settings import LOG_DIR, TAKER_FEE_BPS
 from src.domain.futures.optimization.data_aligner import (
     _build_aligned_2d_from_prebuilt,
     _dataframe_to_symbol_arrays,
@@ -177,20 +177,66 @@ def _attach_risk_snapshot_slice(
     beta_2d_full: np.ndarray | None,
     slice_start: int,
     slice_end: int,
+    *,
+    close_2d_full: np.ndarray | None = None,
+    symbols: list[str] | None = None,
+    lookback: int = 60,
+    vol_lookback: int = 20,
 ) -> None:
-    """Attach factor-lite risk snapshot payload to aligned slice."""
+    """Attach factor-lite risk snapshot payload to aligned slice.
+
+    Args:
+        aligned: Target aligned dict to mutate.
+        sigma_3d_full: Precomputed full-length covariance [T, N, N].
+        beta_2d_full: Precomputed full-length BTC beta [T, N] or None.
+        slice_start: Start index of the slice.
+        slice_end: End index of the slice.
+        close_2d_full: Full close price array [T, N] for residual variance computation.
+        symbols: Symbol name list for BTC detection.
+        lookback: Rolling window for residual variance.
+        vol_lookback: Rolling window for residual variance std.
+
+    """
     if aligned is None:
         return
     sigma_slice = np.asarray(sigma_3d_full[slice_start:slice_end], dtype=np.float64)
-    beta_slice = None
+    beta_slice: np.ndarray | None = None
+    beta_source = "unavailable"
+
     if beta_2d_full is not None:
         beta_slice = np.asarray(beta_2d_full[slice_start:slice_end], dtype=np.float64)
         aligned["btc_beta_2d"] = beta_slice
+        beta_source = "trailing_btc"
+
+    residual_var_slice: np.ndarray | None = None
+    if close_2d_full is not None and symbols is not None:
+        try:
+            from src.domain.futures.forecast.risk import build_risk_forecast
+
+            rf = build_risk_forecast(
+                close_2d=close_2d_full[slice_start:slice_end],
+                symbols=symbols,
+                tf="",
+                cfg={},
+                lookback=lookback,
+                vol_lookback=vol_lookback,
+            )
+            residual_var_slice = rf.residual_var_2d
+            beta_source = rf.beta_source
+            if rf.beta_2d is not None and beta_slice is None:
+                beta_slice = rf.beta_2d
+                aligned["btc_beta_2d"] = beta_slice
+        except Exception as exc:
+            _logger.debug("_attach_risk_snapshot_slice: residual var computation failed: %s", exc)
+
     aligned["risk_snapshot"] = RiskSnapshot(
         covariance_3d=sigma_slice,
         beta_2d=beta_slice,
-        residual_var_2d=None,
+        residual_var_2d=residual_var_slice,
     )
+    if residual_var_slice is not None:
+        aligned["residual_var_2d"] = residual_var_slice
+    aligned["_beta_source"] = beta_source
 
 
 def build_universe_membership_arrays(
@@ -578,7 +624,11 @@ def _attach_execution_cost_bps_2d(
     slice_start: int,
     slice_end: int,
 ) -> None:
-    """Attach optional execution cost tensor to aligned slice."""
+    """Attach optional execution cost tensor to aligned slice.
+
+    Always attach a static per-symbol cost tensor as baseline and precompute
+    a dynamic forecast candidate tensor for trial-level Phase2 A/B toggling.
+    """
     if aligned is None:
         return
     cost_cols: list[np.ndarray] = []
@@ -592,7 +642,81 @@ def _attach_execution_cost_bps_2d(
         cost_cols.append(np.asarray(cost_arr[slice_start:slice_end], dtype=np.float64))
     if not cost_cols:
         return
-    aligned["execution_cost_bps_2d"] = np.ascontiguousarray(np.column_stack(cost_cols))
+    static_cost_bps_2d = np.ascontiguousarray(np.column_stack(cost_cols))
+    static_cost_frac_2d = static_cost_bps_2d / 10000.0
+    aligned["execution_cost_bps_2d_static"] = static_cost_bps_2d
+    aligned["execution_cost_fraction_2d_static"] = static_cost_frac_2d
+    aligned["execution_cost_bps_2d"] = static_cost_bps_2d
+    aligned["execution_cost_fraction_2d"] = static_cost_frac_2d
+    aligned["_cost_forecast_source_static"] = "universe_static"
+    aligned["_cost_forecast_dynamic"] = 0.0
+
+    try:
+        from src.domain.futures.forecast.cost import CostModelConfig, build_cost_forecast
+
+        close_2d = np.asarray(aligned.get("close"), dtype=np.float64)
+        if close_2d.shape != static_cost_bps_2d.shape:
+            return
+        high_2d = aligned.get("high")
+        low_2d = aligned.get("low")
+        volume_2d = np.asarray(aligned.get("volume"), dtype=np.float64)
+        funding_2d_raw = aligned.get("funding_rate_sum")
+        funding_2d = (
+            np.asarray(funding_2d_raw, dtype=np.float64)
+            if funding_2d_raw is not None and np.asarray(funding_2d_raw).shape == close_2d.shape
+            else None
+        )
+        cfg = CostModelConfig(
+            taker_fee_bps=float(
+                OPT_FUTURES_CONFIG.get("FUTURES_COST_TAKER_FEE_BPS", TAKER_FEE_BPS)
+            ),
+            latency_buffer_bps=float(
+                OPT_FUTURES_CONFIG.get("FUTURES_COST_LATENCY_BUFFER_BPS", 0.5)
+            ),
+            impact_coef=float(OPT_FUTURES_CONFIG.get("FUTURES_COST_IMPACT_COEF", 0.5)),
+            vol_buffer_coef=float(OPT_FUTURES_CONFIG.get("FUTURES_COST_VOL_BUFFER_COEF", 0.0)),
+            funding_event_buffer_bps=float(
+                OPT_FUTURES_CONFIG.get("FUTURES_COST_FUNDING_EVENT_BUFFER_BPS", 0.0)
+            ),
+            adv_lookback=int(OPT_FUTURES_CONFIG.get("FUTURES_COST_ADV_LOOKBACK", 30)),
+            vol_lookback=int(OPT_FUTURES_CONFIG.get("FUTURES_COST_VOL_LOOKBACK", 20)),
+            estimated_order_notional=float(
+                OPT_FUTURES_CONFIG.get("FUTURES_COST_ORDER_NOTIONAL_USDT", 0.0)
+            ),
+            uncertainty_ratio=float(OPT_FUTURES_CONFIG.get("FUTURES_COST_UNCERTAINTY_RATIO", 0.1)),
+            enable_dynamic_components=True,
+        )
+        cf = build_cost_forecast(
+            close_2d=close_2d,
+            high_2d=np.asarray(high_2d, dtype=np.float64)
+            if high_2d is not None and np.asarray(high_2d).shape == close_2d.shape
+            else None,
+            low_2d=np.asarray(low_2d, dtype=np.float64)
+            if low_2d is not None and np.asarray(low_2d).shape == close_2d.shape
+            else None,
+            volume_2d=volume_2d,
+            funding_2d=funding_2d,
+            adv_usdt_2d=None,
+            universe_cost_bps_2d=static_cost_bps_2d,
+            cfg=cfg,
+            shape=close_2d.shape,
+        )
+        dynamic_bps_2d = np.ascontiguousarray(cf.execution_cost_bps_2d)
+        dynamic_frac_2d = np.ascontiguousarray(cf.execution_cost_fraction_2d)
+        aligned["execution_cost_bps_2d_dynamic"] = dynamic_bps_2d
+        aligned["execution_cost_fraction_2d_dynamic"] = dynamic_frac_2d
+        if cf.capacity_notional_2d is not None:
+            aligned["capacity_notional_2d_dynamic"] = np.ascontiguousarray(cf.capacity_notional_2d)
+        aligned["_cost_forecast_source_dynamic"] = str(cf.source)
+
+        if bool(OPT_FUTURES_CONFIG.get("COST_FORECAST_DYNAMIC", False)):
+            aligned["execution_cost_bps_2d"] = dynamic_bps_2d
+            aligned["execution_cost_fraction_2d"] = dynamic_frac_2d
+            if cf.capacity_notional_2d is not None:
+                aligned["capacity_notional_2d"] = np.ascontiguousarray(cf.capacity_notional_2d)
+            aligned["_cost_forecast_dynamic"] = 1.0
+    except Exception as exc:
+        _logger.debug("_attach_execution_cost_bps_2d: dynamic forecast fallback to static: %s", exc)
 
 
 def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFrame) -> None:
@@ -989,6 +1113,8 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                             beta_2d_full,
                             test_s,
                             test_e,
+                            close_2d_full=close_2d_full,
+                            symbols=list(ctx.symbols),
                         )
                         _attach_execution_cost_bps_2d(
                             aligned=aligned_leg,
@@ -1049,6 +1175,8 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 beta_2d_full,
                 0,
                 eff_len,
+                close_2d_full=close_2d_full,
+                symbols=list(ctx.symbols),
             )
             _attach_execution_cost_bps_2d(
                 aligned=ctx.is_slice,
@@ -1115,6 +1243,8 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 beta_2d_full,
                 0,
                 eff_len,
+                close_2d_full=close_2d_full,
+                symbols=list(ctx.symbols),
             )
             _attach_execution_cost_bps_2d(
                 aligned=ctx.is_slice,
@@ -1183,6 +1313,8 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     beta_2d_full,
                     test_s,
                     test_e,
+                    close_2d_full=close_2d_full,
+                    symbols=list(ctx.symbols),
                 )
                 _attach_execution_cost_bps_2d(
                     aligned=aligned,
