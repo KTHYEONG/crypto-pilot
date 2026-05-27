@@ -146,3 +146,15 @@ def test_strategy_compose_cost_gate_amortize_uses_rebalance_bars() -> None:
     mu_amort = np.asarray(aligned_amort["mu_long_2d"], dtype=np.float64)
     assert np.all(mu_amort > mu_no)
     np.testing.assert_allclose(mu_amort - mu_no, (20.0 / 10000.0) * (1.0 - 1.0 / 5.0), rtol=1e-9)
+    diag_no = aligned_no.get("_strategy_compose_diag")
+    diag_amort = aligned_amort.get("_strategy_compose_diag")
+    assert isinstance(diag_no, dict)
+    assert isinstance(diag_amort, dict)
+    assert float(diag_no.get("cost_gate_amortized", -1.0)) == 0.0
+    assert float(diag_amort.get("cost_gate_amortized", -1.0)) == 1.0
+    assert float(diag_amort.get("holding_bars", 0.0)) == 5.0
+    assert float(diag_amort.get("effective_friction_bps", 0.0)) < float(
+        diag_no.get("effective_friction_bps", 0.0)
+    )
+    assert 0.0 <= float(diag_amort.get("xs_long_preservation_ratio", 0.0)) <= 1.0
+    assert 0.0 <= float(diag_amort.get("xs_short_preservation_ratio", 0.0)) <= 1.0
