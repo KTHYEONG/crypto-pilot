@@ -119,6 +119,40 @@ def ml_alpha_metrics(alpha_long: np.ndarray, alpha_short: np.ndarray) -> dict[st
     }
 
 
+def nonzero_ratio(arr: np.ndarray, *, eps: float = 1e-12) -> float:
+    """Return finite non-zero ratio for a numeric array."""
+    finite = np.asarray(arr, dtype=np.float64)
+    if finite.size == 0:
+        return 0.0
+    mask = np.isfinite(finite)
+    if not np.any(mask):
+        return 0.0
+    vals = finite[mask]
+    return float(np.count_nonzero(np.abs(vals) > eps) / vals.size)
+
+
+def preservation_ratio(
+    before: np.ndarray,
+    after: np.ndarray,
+    *,
+    eps: float = 1e-12,
+) -> float:
+    """Return non-zero survival ratio after gating.
+
+    Raises:
+        ValueError: If shapes differ.
+
+    """
+    if before.shape != after.shape:
+        raise ValueError("before and after must have the same shape")
+    denom = nonzero_ratio(before, eps=eps)
+    if denom <= 0.0:
+        return 0.0
+    ratio = float(nonzero_ratio(after, eps=eps) / denom)
+    # Bounded contract: preservation ratio must stay within [0, 1].
+    return float(np.clip(ratio, 0.0, 1.0))
+
+
 def ndcg_proxy_at_k(score_2d: np.ndarray, rel_2d: np.ndarray, *, k: int = 5) -> float:
     """Compute simple NDCG proxy at K across timestamps."""
     if score_2d.shape != rel_2d.shape:
@@ -156,9 +190,13 @@ def build_quality_report(
     alpha_long_2d: np.ndarray | None = None,
     alpha_short_2d: np.ndarray | None = None,
     cost_2d: np.ndarray | None = None,
+    ic_score_2d: np.ndarray | None = None,
 ) -> dict[str, float]:
     """Build structured diagnostics report used for quality gates."""
-    ic_series = rolling_ic(score_2d, signed_ret_2d, method="spearman")
+    ic_input = ic_score_2d if ic_score_2d is not None else score_2d
+    if ic_score_2d is not None and ic_score_2d.shape != signed_ret_2d.shape:
+        raise ValueError("ic_score_2d and signed_ret_2d must have the same shape")
+    ic_series = rolling_ic(ic_input, signed_ret_2d, method="spearman")
     ic_stats = ic_summary(ic_series)
     report: dict[str, float] = {
         "feature_finite_ratio": (
@@ -238,11 +276,22 @@ def alpha_gate_diagnostics(
     min_short_nz: float,
     min_xs_preservation: float,
     cost_wall_tolerance_bps: float = 0.0,
+    active_alpha_p95_bps: float | None = None,
+    tradable_long_nz: float = 0.0,
+    tradable_short_nz: float = 0.0,
+    min_tradable_long_nz: float = 0.0,
+    min_tradable_short_nz: float = 0.0,
 ) -> dict[str, object]:
     """Evaluate alpha viability gate and expose fail reasons."""
     floor_bps = float(friction_bps + hurdle_bps)
+    metric_bps = (
+        float(active_alpha_p95_bps)
+        if active_alpha_p95_bps is not None
+        else float(alpha_p95_bps)
+    )
+    metric_source = "active_alpha_p95_bps" if active_alpha_p95_bps is not None else "alpha_p95_bps"
     fail_reasons: list[str] = []
-    if alpha_p95_bps < (floor_bps - max(0.0, float(cost_wall_tolerance_bps))):
+    if metric_bps < (floor_bps - max(0.0, float(cost_wall_tolerance_bps))):
         fail_reasons.append("alpha_p95_below_cost_wall")
     if long_nz < min_long_nz:
         fail_reasons.append("long_nz_below_threshold")
@@ -252,10 +301,56 @@ def alpha_gate_diagnostics(
         fail_reasons.append("xs_long_preservation_below_threshold")
     if xs_short_preservation_ratio < min_xs_preservation:
         fail_reasons.append("xs_short_preservation_below_threshold")
+    if tradable_long_nz < min_tradable_long_nz:
+        fail_reasons.append("tradable_long_nz_below_threshold")
+    if tradable_short_nz < min_tradable_short_nz:
+        fail_reasons.append("tradable_short_nz_below_threshold")
     return {
         "alpha_gate_pass": len(fail_reasons) == 0,
         "alpha_gate_fail_reasons": fail_reasons,
         "alpha_gate_floor_bps": floor_bps,
+        "alpha_gate_metric_bps": metric_bps,
+        "alpha_gate_metric_source": metric_source,
+    }
+
+
+def side_alpha_tail_metrics(
+    alpha_long: np.ndarray,
+    alpha_short: np.ndarray,
+    *,
+    cost_floor: float,
+    eps: float = 1e-12,
+) -> dict[str, float]:
+    """Measure active-side magnitude and tradable density separately from full matrix sparsity."""
+    if alpha_long.shape != alpha_short.shape:
+        raise ValueError("alpha_long and alpha_short must have the same shape")
+    long_vals = np.asarray(alpha_long, dtype=np.float64)
+    short_vals = np.asarray(alpha_short, dtype=np.float64)
+    long_finite = long_vals[np.isfinite(long_vals)]
+    short_finite = short_vals[np.isfinite(short_vals)]
+    long_active = long_finite[np.abs(long_finite) > eps]
+    short_active = short_finite[np.abs(short_finite) > eps]
+    long_p95 = float(np.nanpercentile(long_active, 95) * 10000.0) if long_active.size > 0 else 0.0
+    short_p95 = (
+        float(np.nanpercentile(short_active, 95) * 10000.0) if short_active.size > 0 else 0.0
+    )
+    long_full_p95 = (
+        float(np.nanpercentile(long_finite, 95) * 10000.0) if long_finite.size > 0 else 0.0
+    )
+    short_full_p95 = (
+        float(np.nanpercentile(short_finite, 95) * 10000.0) if short_finite.size > 0 else 0.0
+    )
+    long_tradable = float(np.mean(long_finite >= cost_floor)) if long_finite.size > 0 else 0.0
+    short_tradable = float(np.mean(short_finite >= cost_floor)) if short_finite.size > 0 else 0.0
+    return {
+        "alpha_full_matrix_p95_bps": max(long_full_p95, short_full_p95),
+        "alpha_active_p95_bps": max(long_p95, short_p95),
+        "alpha_long_active_p95_bps": long_p95,
+        "alpha_short_active_p95_bps": short_p95,
+        "alpha_long_tradable_nz": long_tradable,
+        "alpha_short_tradable_nz": short_tradable,
+        "alpha_long_active_count": float(long_active.size),
+        "alpha_short_active_count": float(short_active.size),
     }
 
 
