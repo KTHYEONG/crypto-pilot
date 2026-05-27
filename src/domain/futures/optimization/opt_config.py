@@ -186,6 +186,20 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_SHORT_BORROW_DAILY": 0.0006,
     "SLIPPAGE_BPS_BUFFER_MULT": 1.0,
     "FUTURES_DEFAULT_BETA_ALPHA": 1.0,
+    # Phase2 forecast-layer flags (default off for behavior safety).
+    "COST_FORECAST_DYNAMIC": False,
+    "COST_GATE_AMORTIZE": False,
+    "KELLY_USE_RESIDUAL_VAR": False,
+    # Dynamic cost forecast hyper-parameters.
+    "FUTURES_COST_TAKER_FEE_BPS": 4.0,
+    "FUTURES_COST_LATENCY_BUFFER_BPS": 0.5,
+    "FUTURES_COST_IMPACT_COEF": 0.5,
+    "FUTURES_COST_VOL_BUFFER_COEF": 0.0,
+    "FUTURES_COST_FUNDING_EVENT_BUFFER_BPS": 0.0,
+    "FUTURES_COST_ADV_LOOKBACK": 30,
+    "FUTURES_COST_VOL_LOOKBACK": 20,
+    "FUTURES_COST_ORDER_NOTIONAL_USDT": 0.0,
+    "FUTURES_COST_UNCERTAINTY_RATIO": 0.1,
     # Stability fail → try runner-up phase-C trial once.
     "FUTURES_STABILITY_RUNNER_UP_RETRY": True,
     "FUTURES_DEFAULT_EV_HURDLE_BPS": 10.0,
