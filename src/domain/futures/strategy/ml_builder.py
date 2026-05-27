@@ -772,6 +772,52 @@ def build_ml_strategy_alpha(
     panel.attrs["feature_names"] = list(features.feature_names)
     panel.attrs["fold_count"] = len(folds)
     panel.attrs["config_hash"] = build_manifest_hash(asdict(cfg.ml))
+    panel.attrs["feature_config_hash"] = build_manifest_hash(
+        {"feature_names": sorted(list(features.feature_names))}
+    )
+    panel.attrs["label_config_hash"] = build_manifest_hash(
+        {
+            "label_horizon_bars": ml_cfg.label_horizon_bars,
+            "calibrator_target": getattr(ml_cfg, "calibrator_target", "exec_net_ret"),
+        }
+    )
+    panel.attrs["fold_spec_hash"] = build_manifest_hash(
+        {
+            "fold_count": len(folds),
+            "folds": [
+                {
+                    "fold_id": getattr(f, "fold_id", i),
+                    "train_start": getattr(f, "train_start", 0),
+                    "train_end": getattr(f, "train_end", 0),
+                }
+                for i, f in enumerate(folds)
+            ],
+        }
+    )
+    panel.attrs["train_window_hash"] = build_manifest_hash(
+        {
+            "windows": [
+                {
+                    "train_start": getattr(f, "train_start", 0),
+                    "train_end": getattr(f, "train_end", 0),
+                }
+                for f in folds
+            ]
+        }
+    )
+    from src.domain.futures.forecast.contracts import AlphaArtifactHash
+
+    _aah = AlphaArtifactHash(
+        alpha_config_hash=str(panel.attrs["config_hash"]),
+        feature_config_hash=str(panel.attrs["feature_config_hash"]),
+        label_config_hash=str(panel.attrs["label_config_hash"]),
+        train_window_hash=str(panel.attrs["train_window_hash"]),
+        fold_spec_hash=str(panel.attrs["fold_spec_hash"]),
+        model_family="lightgbm_dual_side_quantile",
+        selected_horizon=int(ml_cfg.label_horizon_bars),
+    )
+    panel.attrs["alpha_artifact_combined_hash"] = _aah.combined()
+    panel.attrs["alpha_artifact_structural_hash"] = _aah.structural_hash()
     panel.attrs["selected_horizon"] = int(ml_cfg.label_horizon_bars)
     panel.attrs["baseline_harness"] = {
         "version": "v1",

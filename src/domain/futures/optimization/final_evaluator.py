@@ -702,6 +702,9 @@ def run_final_oos_evaluation(
             "selected_horizon": int(alpha_panel.attrs.get("selected_horizon", -1)),
             "model_family": str(alpha_panel.attrs.get("model_family", "")),
             "cost_source": _infer_split_cost_source(split_maps_clone, valid_symbols, args.tf),
+            "alpha_artifact_structural_hash": str(
+                alpha_panel.attrs.get("alpha_artifact_structural_hash", "")
+            ),
         }
         port = run_oos_margin_shared_portfolio(
             valid_symbols,
@@ -734,6 +737,9 @@ def run_final_oos_evaluation(
         "selected_horizon": int(oos_alpha_panel.attrs.get("selected_horizon", -1)),
         "model_family": str(oos_alpha_panel.attrs.get("model_family", "")),
         "cost_source": _infer_split_cost_source(oos_data_maps, valid_symbols, args.tf),
+        "alpha_artifact_structural_hash": str(
+            oos_alpha_panel.attrs.get("alpha_artifact_structural_hash", "")
+        ),
     }
     split_meta_ref = is_meta
     split_meta_mismatch: list[str] = []
@@ -747,6 +753,7 @@ def run_final_oos_evaluation(
                     "selected_horizon",
                     "model_family",
                     "cost_source",
+                    "alpha_artifact_structural_hash",
                 )
                 if split_meta.get(key) != split_meta_ref.get(key)
             ]
