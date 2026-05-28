@@ -205,7 +205,7 @@ def run_active_strategy_output_bridge(
     """Run active strategy bridge for quick-backtest/strategy modes."""
     if run_config.mode == "quick-backtest":
         return MLPipelineOutput()
-    if run_config.mode not in {"strategy", "strategy-smoke"}:
+    if run_config.mode not in {"strategy", "strategy-smoke", "alpha"}:
         raise ValueError(f"unsupported mode for active strategy bridge: {run_config.mode}")
     if run_config.strategy is None:
         raise ValueError("strategy mode requires strategy")

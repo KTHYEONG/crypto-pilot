@@ -66,3 +66,64 @@ def test_ml_config_rejects_invalid_tradable_thresholds() -> None:
 def test_ml_config_rejects_invalid_ev_tail_blend_weight() -> None:
     with pytest.raises(ValueError, match="ev_tail_blend_weight"):
         StrategyMLConfig(ev_tail_blend_weight=1.1)
+
+
+# ---------------------------------------------------------------------------
+# ranker_enabled (T-B)
+# ---------------------------------------------------------------------------
+
+
+def test_strategy_ml_config_ranker_enabled_default() -> None:
+    """Default StrategyMLConfig must have ranker_enabled=False (empirically better OOS IC)."""
+    # Arrange / Act
+    cfg = StrategyMLConfig()
+
+    # Assert
+    assert cfg.ranker_enabled is False
+
+
+def test_strategy_ml_config_ranker_enabled_false() -> None:
+    """Setting ranker_enabled=False must not raise any error."""
+    # Arrange / Act
+    cfg = StrategyMLConfig(ranker_enabled=False)
+
+    # Assert
+    assert cfg.ranker_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Regime gate defaults & validation
+# ---------------------------------------------------------------------------
+
+
+def test_strategy_ml_config_regime_gate_defaults() -> None:
+    """Default regime gate fields must be enabled with specified exposure scalars."""
+    # Arrange / Act
+    cfg = StrategyMLConfig()
+
+    # Assert
+    assert cfg.regime_gate_enabled is True
+    assert cfg.regime_exposure_bull == pytest.approx(1.0)
+    assert cfg.regime_exposure_bear == pytest.approx(0.0)
+    assert cfg.regime_exposure_chop == pytest.approx(1.0)
+
+
+def test_strategy_ml_config_regime_gate_exposure_validation_bull() -> None:
+    """regime_exposure_bull > 1.0 must raise ValueError."""
+    # Arrange / Act / Assert
+    with pytest.raises(ValueError, match="regime_exposure_bull"):
+        StrategyMLConfig(regime_exposure_bull=1.5)
+
+
+def test_strategy_ml_config_regime_gate_exposure_validation_chop() -> None:
+    """regime_exposure_chop < 0.0 must raise ValueError."""
+    # Arrange / Act / Assert
+    with pytest.raises(ValueError, match="regime_exposure_chop"):
+        StrategyMLConfig(regime_exposure_chop=-0.1)
+
+
+def test_strategy_ml_config_regime_gate_exposure_validation_bear() -> None:
+    """regime_exposure_bear > 1.0 must raise ValueError."""
+    # Arrange / Act / Assert
+    with pytest.raises(ValueError, match="regime_exposure_bear"):
+        StrategyMLConfig(regime_exposure_bear=2.0)
