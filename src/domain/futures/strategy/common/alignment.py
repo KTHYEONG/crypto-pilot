@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
 from src.domain.futures.optimization.optimizer import compute_multi_alignment_info
@@ -29,6 +30,12 @@ class AlignedMarketData:
     oi_2d: NDArray[np.float64] | None = None
     adv_usdt_2d: NDArray[np.float64] | None = None
     execution_cost_bps_2d: NDArray[np.float64] | None = None
+    # Phase D: C1 inference panel 전용 마스크 (Stage5 timeline 기반). None이면 미사용.
+    inference_active_mask: NDArray[np.bool_] | None = None
+    inference_entry_warm_mask: NDArray[np.bool_] | None = None
+    # Phase D/E: per-symbol 정적 메타데이터 (sample weighting용). {col: [N] array}
+    symbol_meta: dict[str, NDArray[np.float32]] | None = None
+
 
 
 def align_data_maps(
@@ -63,6 +70,12 @@ def align_data_maps(
     warm_mask: NDArray[np.bool_] = np.ones((eff_len, n), dtype=bool)
     entry_block_mask: NDArray[np.bool_] = np.zeros((eff_len, n), dtype=bool)
     kill_mask: NDArray[np.bool_] = np.zeros((eff_len, n), dtype=bool)
+    # Phase D: inference 마스크 초기화 — 데이터에 컬럼 있을 때만 채움
+    _inf_active: NDArray[np.bool_] | None = None
+    _inf_warm: NDArray[np.bool_] | None = None
+    # Phase D/E: per-symbol 메타 컬럼 수집 (coverage_60d, cluster_id 등)
+    _meta_cols_to_read: tuple[str, ...] = ("coverage_60d", "last_60d_coverage", "cluster_id")
+    _sym_meta_lists: dict[str, list[float]] = {col: [] for col in _meta_cols_to_read}
     datetimes: NDArray[np.datetime64] | None = None
 
     for col, sym in enumerate(valid_symbols):
@@ -111,6 +124,34 @@ def align_data_maps(
             )
         if "kill_signal" in frame.columns:
             kill_mask[:, col] = frame["kill_signal"].iloc[start:end].to_numpy(dtype=bool)
+        # Phase D/E: per-symbol 정적 메타 (최신 row의 값 = 정적 추정치)
+        for _mc in _meta_cols_to_read:
+            if _mc in frame.columns:
+                _last_val = float(
+                    pd.to_numeric(frame[_mc].iloc[start:end], errors="coerce")
+                    .dropna()
+                    .iloc[-1]
+                    if not pd.to_numeric(frame[_mc].iloc[start:end], errors="coerce")
+                    .dropna()
+                    .empty
+                    else float("nan")
+                )
+                _sym_meta_lists[_mc].append(_last_val)
+            else:
+                _sym_meta_lists[_mc].append(float("nan"))
+        # Phase D: inference panel 마스크 (Stage5 timeline 기반)
+        if "inference_active_mask" in frame.columns:
+            if _inf_active is None:
+                _inf_active = np.ones((eff_len, n), dtype=bool)
+            _inf_active[:, col] = frame["inference_active_mask"].iloc[start:end].to_numpy(
+                dtype=bool
+            )
+        if "inference_entry_warm_mask" in frame.columns:
+            if _inf_warm is None:
+                _inf_warm = np.ones((eff_len, n), dtype=bool)
+            _inf_warm[:, col] = frame["inference_entry_warm_mask"].iloc[start:end].to_numpy(
+                dtype=bool
+            )
         if datetimes is None:
             datetimes = np.asarray(
                 frame["datetime"].iloc[start:end].to_numpy(),
@@ -136,4 +177,11 @@ def align_data_maps(
         warm_mask=warm_mask,
         entry_block_mask=entry_block_mask,
         kill_mask=kill_mask,
+        inference_active_mask=_inf_active,
+        inference_entry_warm_mask=_inf_warm,
+        symbol_meta={
+            col: np.array(vals, dtype=np.float32)
+            for col, vals in _sym_meta_lists.items()
+            if any(np.isfinite(v) for v in vals)
+        } or None,
     )
