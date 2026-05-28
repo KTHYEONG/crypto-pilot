@@ -73,7 +73,11 @@ def build_long_matrix(
     relevance_override: np.ndarray | None = None,
     ev_target_override: np.ndarray | None = None,
 ) -> LongMatrixDataset:
-    """Flatten [T, N, F] tensors to LightGBM-ready matrix."""
+    """Flatten [T, N, F] tensors to LightGBM-ready matrix.
+
+    Time complexity: O(M) where M is the number of valid samples.
+    Space complexity: O(M * F) for the flattened feature matrix X.
+    """
     if fold is not None or split is not None:
         if fold is None or split is None:
             raise ValueError("fold and split must be provided together")
@@ -89,64 +93,10 @@ def build_long_matrix(
     if start is None or end is None:
         raise ValueError("start/end or fold/split must be provided")
 
-    rows_x: list[np.ndarray] = []
-    rows_rank: list[np.int32] = []
-    rows_ev: list[np.float32] = []
-    rows_w: list[np.float32] = []
-    rows_idx: list[tuple[int, int]] = []
-    groups: list[int] = []
-    for t in range(start, end):
-        mask_t = features.valid_mask[t] & labels.eligible_mask[t]
-        idx = np.flatnonzero(mask_t)
-        if idx.size < min_group_size:
-            continue
-        x_t: list[np.ndarray] = []
-        rank_t: list[np.int32] = []
-        ev_t: list[np.float32] = []
-        w_t: list[np.float32] = []
-        i_t: list[tuple[int, int]] = []
-        group_count = 0
-        for col in idx:
-            feat = features.values[t, col]
-            if not np.all(np.isfinite(feat)):
-                continue
-            # sample_weight from labels (liquidity * (1+2|y_ev|), computed in labels.py).
-            # magnitude_target preferred for explicit label contract tracing (Step4);
-            # fallback to exec_net_ret for backward compatibility.
-            # signed_net_ret (CS-demeaned) is consumed only by ranker via _cs_demean in ranker.py.
-            ev_source = (
-                ev_target_override
-                if ev_target_override is not None
-                else (
-                labels.magnitude_target
-                if labels.magnitude_target is not None
-                else labels.exec_net_ret
-                )
-            )
-            ev_val = np.float32(ev_source[t, col])
-            w = np.float32(labels.sample_weight[t, col])
-            rank_source = relevance_override if relevance_override is not None else labels.relevance
-            if rank_target_override is not None:
-                rank_val = np.float32(rank_target_override[t, col])
-                rank_t.append(np.int32(4 if rank_val > 0.0 else 0))
-            else:
-                rank_t.append(np.int32(rank_source[t, col]))
-
-            x_t.append(feat.astype(np.float32, copy=False))
-            ev_t.append(ev_val)
-            w_t.append(w)
-            i_t.append((t, int(col)))
-            group_count += 1
-        if group_count >= min_group_size:
-            rows_x.extend(x_t)
-            rows_rank.extend(rank_t)
-            rows_ev.extend(ev_t)
-            rows_w.extend(w_t)
-            rows_idx.extend(i_t)
-            groups.append(group_count)
-    if not rows_x:
+    t_slice = end - start
+    if t_slice <= 0:
         empty_x = np.zeros((0, features.values.shape[2]), dtype=np.float32)
-        empty_i: np.ndarray = np.zeros((0, 2), dtype=np.int64)
+        empty_i = np.zeros((0, 2), dtype=np.int64)
         return LongMatrixDataset(
             X=empty_x,
             y_rank=np.zeros((0,), dtype=np.int32),
@@ -156,13 +106,86 @@ def build_long_matrix(
             index_map=empty_i,
             feature_names=features.feature_names,
         )
+
+    # 1. 2D 마스크 결합 (Timeframe slice 추출)
+    valid_mask = features.valid_mask[start:end]
+    eligible_mask = labels.eligible_mask[start:end]
+    full_mask_2d = valid_mask & eligible_mask  # [t_slice, N]
+
+    # 2. Finite Feature Mask 생성
+    feature_slice = features.values[start:end]  # [t_slice, N, F]
+    finite_feat_mask = np.all(np.isfinite(feature_slice), axis=2)  # [t_slice, N]
+
+    # 3. 최종 유효 2D 마스크 결합
+    final_mask = full_mask_2d & finite_feat_mask  # [t_slice, N]
+
+    # 4. 행별 그룹 크기 필터링 (min_group_size 조건 충족 행 필터링)
+    group_counts = final_mask.sum(axis=1)  # [t_slice]
+    valid_rows_mask = group_counts >= min_group_size  # [t_slice]
+
+    # 유효하지 않은 행의 마스크는 False로 오프셋 차단
+    final_mask = final_mask.copy()
+    final_mask[~valid_rows_mask, :] = False
+
+    # 5. C-level에서 2D 마스크 좌표 추출
+    t_indices, col_indices = np.where(final_mask)
+
+    if t_indices.size == 0:
+        empty_x = np.zeros((0, features.values.shape[2]), dtype=np.float32)
+        empty_i = np.zeros((0, 2), dtype=np.int64)
+        return LongMatrixDataset(
+            X=empty_x,
+            y_rank=np.zeros((0,), dtype=np.int32),
+            y_ev=np.zeros((0,), dtype=np.float32),
+            group=np.zeros((0,), dtype=np.int32),
+            sample_weight=np.zeros((0,), dtype=np.float32),
+            index_map=empty_i,
+            feature_names=features.feature_names,
+        )
+
+    # 6. Fancy Indexing을 통한 고속 2D 매핑 (Zero-Loop)
+    x = feature_slice[t_indices, col_indices].astype(np.float32, copy=False)
+
+    # y_rank 조립
+    if rank_target_override is not None:
+        rank_override_slice = rank_target_override[start:end]
+        rank_vals = rank_override_slice[t_indices, col_indices]
+        y_rank = np.where(rank_vals > 0.0, np.int32(4), np.int32(0))
+    else:
+        rank_src_slice = (
+            relevance_override[start:end]
+            if relevance_override is not None
+            else labels.relevance[start:end]
+        )
+        y_rank = rank_src_slice[t_indices, col_indices].astype(np.int32)
+
+    # y_ev 조립
+    ev_source = (
+        ev_target_override[start:end]
+        if ev_target_override is not None
+        else (
+            labels.magnitude_target[start:end]
+            if labels.magnitude_target is not None
+            else labels.exec_net_ret[start:end]
+        )
+    )
+    y_ev = ev_source[t_indices, col_indices].astype(np.float32)
+
+    # sample_weight 및 index_map 조립
+    sample_weight = labels.sample_weight[start:end][t_indices, col_indices].astype(np.float32)
+    global_t_indices = t_indices + start
+    index_map = np.column_stack((global_t_indices, col_indices)).astype(np.int64)
+
+    # Group Size 리스트 조립
+    group = group_counts[valid_rows_mask].astype(np.int32)
+
     return LongMatrixDataset(
-        X=np.vstack(rows_x).astype(np.float32, copy=False),
-        y_rank=np.asarray(rows_rank, dtype=np.int32),
-        y_ev=np.asarray(rows_ev, dtype=np.float32),
-        group=np.asarray(groups, dtype=np.int32),
-        sample_weight=np.asarray(rows_w, dtype=np.float32),
-        index_map=np.asarray(rows_idx, dtype=np.int64),
+        X=x,
+        y_rank=y_rank,
+        y_ev=y_ev,
+        group=group,
+        sample_weight=sample_weight,
+        index_map=index_map,
         feature_names=features.feature_names,
     )
 
