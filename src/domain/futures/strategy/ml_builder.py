@@ -419,11 +419,21 @@ def build_ml_strategy_alpha(
         )
         return best_panel
 
+    # Timing Accumulators (Time Complexity: O(1) space overhead)
+    t_align_feature_label = 0.0
+    t_fold_split_preprocess = 0.0
+    t_dataset_build = 0.0
+    t_fit_predict_fold = 0.0
+    t_grid_assembly = 0.0
+
+    t_start_total = time.perf_counter()
+
     ml_cfg = replace(
         cfg.ml,
         min_data_in_leaf=30,
         num_leaves=31,
     )
+    t_align_start = time.perf_counter()
     aligned = align_data_maps(data_maps=data_maps, symbols=symbols, tf=tf)
     if len(aligned.symbols) < ml_cfg.min_group_size:
         raise ValueError(
@@ -433,6 +443,7 @@ def build_ml_strategy_alpha(
     labels = build_label_panel(aligned, ml_cfg)
     validate_feature_panel(features)
     validate_label_panel(labels, t=features.values.shape[0], n=features.values.shape[1])
+    t_align_feature_label += time.perf_counter() - t_align_start
 
     # [Dynamic Train Window] In-Sample 또는 Leg Refit 등 데이터 기간이 부족할 경우
     # train_months를 유연하게 동적 조정합니다.
@@ -497,6 +508,7 @@ def build_ml_strategy_alpha(
             fold.test_start,
             fold.test_end,
         )
+        t_pre_start = time.perf_counter()
         train_values = features.values[fold.train_start : fold.train_end].astype(
             np.float64, copy=False
         )
@@ -519,6 +531,9 @@ def build_ml_strategy_alpha(
                 "missing_imputer": "train_median",
             },
         )
+        t_fold_split_preprocess += time.perf_counter() - t_pre_start
+
+        t_db_start = time.perf_counter()
         long_rel, short_rel, long_mag, short_mag = _resolve_side_targets(labels)
         train_long = _build_side_matrix(
             features=normalized_features,
@@ -592,6 +607,9 @@ def build_ml_strategy_alpha(
         validate_long_matrix(train_short)
         validate_long_matrix(valid_short)
         validate_long_matrix(test_short)
+        t_dataset_build += time.perf_counter() - t_db_start
+
+        t_fp_start = time.perf_counter()
         _fold_result = _fit_predict_fold_dual_side(
             train_long=train_long,
             valid_long=valid_long,
@@ -601,6 +619,9 @@ def build_ml_strategy_alpha(
             test_short=test_short,
             ml_cfg=ml_cfg,
         )
+        t_fit_predict_fold += time.perf_counter() - t_fp_start
+
+        t_grid_start = time.perf_counter()
         ev_test_long = _fold_result.ev_test_long
         ev_test_short = _fold_result.ev_test_short
         quant_test_long = _fold_result.quant_test_long
@@ -648,6 +669,7 @@ def build_ml_strategy_alpha(
             int(test_long.X.shape[0]),
             float(np.count_nonzero(ev_test_long) / max(1, ev_test_long.size)),
         )
+        t_grid_assembly += time.perf_counter() - t_grid_start
 
     # [ML-OOS-FILL] Check if there is an uncovered live/OOS window at the end of the timeline
     last_test_end = folds[-1].test_end
@@ -667,6 +689,7 @@ def build_ml_strategy_alpha(
 
         from src.domain.futures.strategy.contracts import FoldSpec
 
+        t_pre_start = time.perf_counter()
         _v_purge = getattr(ml_cfg, "purge_bars", 0)
         _v_embargo = getattr(ml_cfg, "embargo_bars", 0)
         _v_purged_valid_start = min(v_train_end + _v_purge, max(v_train_end, v_valid_end - 1))
@@ -707,7 +730,10 @@ def build_ml_strategy_alpha(
                 "missing_imputer": "train_median",
             },
         )
+        t_fold_split_preprocess += time.perf_counter() - t_pre_start
+
         # Dual-side label derivation — same pattern as regular fold loop
+        t_db_start = time.perf_counter()
         v_long_rel, v_short_rel, v_long_mag, v_short_mag = _resolve_side_targets(labels)
         v_train_long = _build_side_matrix(
             features=v_normalized_features,
@@ -775,7 +801,10 @@ def build_ml_strategy_alpha(
             relevance_override=v_short_rel,
             ev_target_override=v_short_mag,
         )
+        t_dataset_build += time.perf_counter() - t_db_start
+
         if v_test_long.X.shape[0] > 0:
+            t_fp_start = time.perf_counter()
             validate_long_matrix(v_train_long)
             validate_long_matrix(v_valid_long)
             validate_long_matrix(v_test_long)
@@ -799,7 +828,10 @@ def build_ml_strategy_alpha(
             v_conf_test_short = _v_result.conf_test_short
             v_score_test_long = _v_result.score_test_long
             v_score_test_short = _v_result.score_test_short
+            t_fit_predict_fold += time.perf_counter() - t_fp_start
+
             # Write directly into side-specific grids — ex-ante gate only (no look-ahead)
+            t_grid_start = time.perf_counter()
             for row, (t_idx, s_idx) in enumerate(v_test_long.index_map):
                 q10_long_grid[int(t_idx), int(s_idx)] = v_quant_test_long.q10[row]
                 q50_long_grid[int(t_idx), int(s_idx)] = v_quant_test_long.q50[row]
@@ -821,7 +853,9 @@ def build_ml_strategy_alpha(
                 float(np.count_nonzero(v_ev_test_long) / max(1, v_ev_test_long.size)),
                 float(np.count_nonzero(v_ev_test_short) / max(1, v_ev_test_short.size)),
             )
+            t_grid_assembly += time.perf_counter() - t_grid_start
 
+    t_grid_start = time.perf_counter()
     clip_lim = float(ml_cfg.alpha_clip_bps / 10000.0)
     eligible_2d = labels.eligible_mask
     alpha_long_final = np.where(
@@ -1034,6 +1068,41 @@ def build_ml_strategy_alpha(
         quality_report.get("ic_hit_ratio", 0.0),
         int(quality_report.get("ic_n_obs", 0)),
     )
+    t_grid_assembly += time.perf_counter() - t_grid_start
+
+    # Print Granular Performance Profile (Detailed Profiler Output)
+    t_total_elapsed = time.perf_counter() - t_start_total
+    if not cfg.ml.horizon_experiment_enabled:
+        _logger.debug("=" * 60)
+        _logger.debug(" [ML-DETAILED-PROFILE] Granular Execution Performance Profiling")
+        _logger.debug(
+            "  1. Align & Feat/Label Gen: %7.2f ms (%5.1f%%)",
+            t_align_feature_label * 1000.0,
+            (t_align_feature_label / t_total_elapsed) * 100.0,
+        )
+        _logger.debug(
+            "  2. Fold Split & Preprocess: %7.2f ms (%5.1f%%)",
+            t_fold_split_preprocess * 1000.0,
+            (t_fold_split_preprocess / t_total_elapsed) * 100.0,
+        )
+        _logger.debug(
+            "  3. Matrix Dataset Build   : %7.2f ms (%5.1f%%)",
+            t_dataset_build * 1000.0,
+            (t_dataset_build / t_total_elapsed) * 100.0,
+        )
+        _logger.debug(
+            "  4. LightGBM Fold Train/Prd: %7.2f ms (%5.1f%%)",
+            t_fit_predict_fold * 1000.0,
+            (t_fit_predict_fold / t_total_elapsed) * 100.0,
+        )
+        _logger.debug(
+            "  5. OOS Grid & Assembly    : %7.2f ms (%5.1f%%)",
+            t_grid_assembly * 1000.0,
+            (t_grid_assembly / t_total_elapsed) * 100.0,
+        )
+        _logger.debug("  * Total Pipeline Execution: %7.2f ms", t_total_elapsed * 1000.0)
+        _logger.debug("=" * 60)
+
     # Cost wall diagnosis: compact summary
     _floor_bps = _friction_bps + _hurdle_default_bps
     _gate_metric_bps = float(
