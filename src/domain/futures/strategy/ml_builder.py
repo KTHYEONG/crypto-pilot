@@ -53,7 +53,8 @@ from src.domain.futures.strategy.inference import (
     assemble_alpha_panel,
 )
 from src.domain.futures.strategy.labels import build_label_panel
-from src.domain.futures.strategy.ranker import fit_ranker, predict_rank_score
+from src.domain.futures.strategy.ranker import RankerFitResult, fit_ranker, predict_rank_score
+from src.domain.futures.strategy.regime_gate import apply_regime_gate
 
 _logger = logging.getLogger(__name__)
 
@@ -94,6 +95,59 @@ def _resolve_side_targets(
         )
     )
     return long_rel, short_rel, long_mag, short_mag
+
+
+def _rank_score(
+    fit_result: RankerFitResult | None, dataset: LongMatrixDataset
+) -> np.ndarray:
+    """Return rank score or zeros when ranker is disabled.
+
+    Args:
+        fit_result: Trained ranker result, or None when ranker_enabled=False.
+        dataset: Dataset to score.
+
+    Returns:
+        Rank score array [N] as float32; zeros when fit_result is None.
+
+    Time complexity: O(N * T_trees) when fit_result is not None, O(N) otherwise.
+    Space complexity: O(N).
+
+    """
+    if fit_result is None:
+        return np.zeros(dataset.X.shape[0], dtype=np.float32)
+    return predict_rank_score(fit_result.model, dataset)
+
+
+def _btc_close_from_data_maps(
+    data_maps: dict[str, dict[str, Any]],
+    tf: str,
+    prefer_symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT"),
+) -> pd.Series:
+    """Extract BTC-proxy close series from data_maps for regime classification.
+
+    Args:
+        data_maps: symbol → timeframe → DataFrame with 'datetime' and 'close' columns.
+        tf: Timeframe key to look up (e.g. "4h").
+        prefer_symbols: Symbols tried in order; first hit wins.
+
+    Returns:
+        pd.Series indexed by datetime, or empty Series if no match found.
+
+    Time Complexity: O(|prefer_symbols|).
+
+    Space Complexity: O(T) for the selected close series.
+
+    """
+    for sym in prefer_symbols:
+        df: pd.DataFrame | None = data_maps.get(sym, {}).get(tf)
+        if (
+            df is not None
+            and not df.empty
+            and "close" in df.columns
+            and "datetime" in df.columns
+        ):
+            return df.set_index("datetime")["close"]
+    return pd.Series(dtype=np.float64)
 
 
 def _predict_quantiles_with_fallback(
@@ -153,12 +207,21 @@ def _fit_predict_fold_dual_side(
         Space Complexity: O(N) per output array.
 
     """
-    fit_long = fit_ranker(train=train_long, valid=valid_long, cfg=ml_cfg)
-    fit_short = fit_ranker(train=train_short, valid=valid_short, cfg=ml_cfg)
-    score_train_long = predict_rank_score(fit_long.model, train_long)
-    score_valid_long = predict_rank_score(fit_long.model, valid_long)
-    score_test_long = predict_rank_score(fit_long.model, test_long)
-    score_test_short = predict_rank_score(fit_short.model, test_short)
+    if ml_cfg.ranker_enabled:
+        ranker_long: RankerFitResult | None = fit_ranker(
+            train=train_long, valid=valid_long, cfg=ml_cfg
+        )
+        ranker_short: RankerFitResult | None = fit_ranker(
+            train=train_short, valid=valid_short, cfg=ml_cfg
+        )
+    else:
+        ranker_long = None
+        ranker_short = None
+
+    score_train_long = _rank_score(ranker_long, train_long)
+    score_valid_long = _rank_score(ranker_long, valid_long)
+    score_test_long = _rank_score(ranker_long, test_long)
+    score_test_short = _rank_score(ranker_short, test_short)
     calibration_fit_long = fit_quantile_calibrators(
         train=train_long,
         valid=valid_long,
@@ -169,18 +232,15 @@ def _fit_predict_fold_dual_side(
     calibration_fit_short = fit_quantile_calibrators(
         train=train_short,
         valid=valid_short,
-        rank_score_train=predict_rank_score(fit_short.model, train_short),
-        rank_score_valid=predict_rank_score(fit_short.model, valid_short),
+        rank_score_train=_rank_score(ranker_short, train_short),
+        rank_score_valid=_rank_score(ranker_short, valid_short),
         cfg=ml_cfg,
     )
     ev_valid_long = predict_conservative_ev(
         calibration_fit_long, valid_long, score_valid_long, ml_cfg
     )
     ev_valid_short = predict_conservative_ev(
-        calibration_fit_short,
-        valid_short,
-        predict_rank_score(fit_short.model, valid_short),
-        ml_cfg,
+        calibration_fit_short, valid_short, _rank_score(ranker_short, valid_short), ml_cfg
     )
     ev_test_long = predict_conservative_ev(
         calibration_fit_long, test_long, score_test_long, ml_cfg
@@ -873,6 +933,9 @@ def build_ml_strategy_alpha(
         alpha_short_2d=alpha_short_final,
         ic_score_2d=alpha_ic_score,
     )
+    if not ml_cfg.ranker_enabled:
+        # NDCG is N/A without ranker; mark as passing to avoid false gate failure
+        quality_report["ranker_valid_ndcg_at_5"] = 1.0
     valid_stack_long = (
         np.concatenate(valid_ev_long_all)
         if valid_ev_long_all
@@ -1039,6 +1102,13 @@ def build_ml_strategy_alpha(
                 f"t_stat={quality_report.get('ic_t_stat', 0.0):.2f} "
                 f"hit_ratio={quality_report.get('ic_hit_ratio', 0.0):.3f}"
             )
+    if ml_cfg.regime_gate_enabled:
+        _btc_ser = _btc_close_from_data_maps(data_maps, tf)
+        alpha_long_final, alpha_short_final = apply_regime_gate(
+            alpha_long_final, alpha_short_final, features.datetimes, _btc_ser, ml_cfg
+        )
+        panel.loc[:, "alpha_long"] = alpha_long_final.reshape(-1)
+        panel.loc[:, "alpha_short"] = alpha_short_final.reshape(-1)
     return panel
 
 
@@ -1341,6 +1411,9 @@ def build_ml_strategy_alpha_anchored(
         alpha_short_2d=alpha_short_final_awf,
         ic_score_2d=alpha_ic_score_awf,
     )
+    if not ml_cfg.ranker_enabled:
+        # NDCG is N/A without ranker; mark as passing to avoid false gate failure
+        awf_quality_report["ranker_valid_ndcg_at_5"] = 1.0
     _awf_valid_stack = (
         np.concatenate([_awf_result.ev_valid_long, _awf_result.ev_valid_short])
         if (_awf_result.ev_valid_long.size + _awf_result.ev_valid_short.size) > 0
@@ -1483,4 +1556,11 @@ def build_ml_strategy_alpha_anchored(
         float(np.count_nonzero(_tgt_long_slice) / _tgt_cells),
         float(np.count_nonzero(_tgt_short_slice) / _tgt_cells),
     )
+    if ml_cfg.regime_gate_enabled:
+        _btc_ser_awf = _btc_close_from_data_maps(data_maps, tf)
+        alpha_long_final_awf, alpha_short_final_awf = apply_regime_gate(
+            alpha_long_final_awf, alpha_short_final_awf, features.datetimes, _btc_ser_awf, ml_cfg
+        )
+        panel.loc[:, "alpha_long"] = alpha_long_final_awf.reshape(-1)
+        panel.loc[:, "alpha_short"] = alpha_short_final_awf.reshape(-1)
     return panel

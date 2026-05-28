@@ -49,11 +49,12 @@ def fit_ranker(
     valid: LongMatrixDataset,
     cfg: StrategyMLConfig,
 ) -> RankerFitResult:
-    """Train CS-demeaned GBT regressor (replaces LambdaMART).
+    """Train L1 ranker model (LambdaRank by default when ranking_mode='group_ndcg').
 
-    Cross-sectional demeaning removes market-beta from the target so the model
-    learns relative expected-return signals rather than directional market bets.
-    Works correctly with any group size N >= min_group_size (no NDCG constraint).
+    With the default config (ranking_mode='group_ndcg', sufficient n_groups), trains
+    LGBMRanker with lambdarank objective on y_rank relevance labels (0-4).
+    Falls back to pointwise CS-demeaned regression when n_groups < _MIN_GROUPS_FOR_NDCG.
+    Set StrategyMLConfig.ranker_enabled=False to skip this stage entirely (ablation A/B).
     """
     if train.X.shape[0] == 0:
         raise RuntimeError("ranker train dataset is empty")

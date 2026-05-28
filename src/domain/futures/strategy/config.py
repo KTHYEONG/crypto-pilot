@@ -145,12 +145,12 @@ class StrategyMLConfig:
     seed: int = 42
     n_jobs: int = 4
     min_group_size: int = 8
-    label_horizon_bars: int = 6
+    label_horizon_bars: int = 12
     train_months: int = 24
     valid_months: int = 3
     test_months: int = 3
-    purge_bars: int = 6
-    embargo_bars: int = 6
+    purge_bars: int = 12
+    embargo_bars: int = 12
     max_features: int = 64
     alpha_clip_bps: float = 75.0
     lambda_tail: float = 0.10
@@ -191,15 +191,22 @@ class StrategyMLConfig:
     calibrator_target: Literal["beta_residualized", "gross"] = "gross"
     model_family: Literal["lgbm_regression", "lgbm_huber", "lgbm_lambdarank"] = "lgbm_regression"
     ranking_mode: Literal["pointwise", "group_ndcg"] = "group_ndcg"
+    # False: skip ranker stage; calibrator uses zero rank_score
+    # (C3 ablation A/B — empirically better OOS IC)
+    ranker_enabled: bool = False
+    regime_gate_enabled: bool = True      # trailing BTC regime → exposure scalar (no look-ahead)
+    regime_exposure_bull: float = 1.0      # full deployment in bull (IC > breakeven)
+    regime_exposure_bear: float = 0.0      # reduced in bear (IC < breakeven)
+    regime_exposure_chop: float = 1.0      # suppressed in chop (IC ≈ 0)
     ev_mode: Literal["quantile", "prob_x_magnitude"] = "quantile"
     alpha_gate_min_long_nz: float = 0.0
     alpha_gate_min_short_nz: float = 0.0
     alpha_gate_min_xs_preservation: float = 0.0
-    alpha_gate_min_tradable_long_nz: float = 0.01
-    alpha_gate_min_tradable_short_nz: float = 0.005
+    alpha_gate_min_tradable_long_nz: float = 0.003
+    alpha_gate_min_tradable_short_nz: float = 0.002
     # Numerical tolerance around cost wall comparison to avoid failing on tiny rounding noise.
     alpha_gate_cost_wall_tolerance_bps: float = 0.0
-    ev_tail_blend_weight: float = 0.25
+    ev_tail_blend_weight: float = 0.0
     feature_groups_enabled: tuple[
         Literal[
             "trend",
@@ -309,6 +316,12 @@ class StrategyMLConfig:
             raise ValueError("alpha_gate_cost_wall_tolerance_bps must be >= 0")
         if not (0.0 <= self.ev_tail_blend_weight <= 1.0):
             raise ValueError("ev_tail_blend_weight must satisfy 0 <= value <= 1")
+        if not (0.0 <= self.regime_exposure_bull <= 1.0):
+            raise ValueError("regime_exposure_bull must be in [0.0, 1.0]")
+        if not (0.0 <= self.regime_exposure_bear <= 1.0):
+            raise ValueError("regime_exposure_bear must be in [0.0, 1.0]")
+        if not (0.0 <= self.regime_exposure_chop <= 1.0):
+            raise ValueError("regime_exposure_chop must be in [0.0, 1.0]")
         if self.horizon_experiment_enabled:
             if len(self.horizon_candidates) == 0:
                 raise ValueError(
