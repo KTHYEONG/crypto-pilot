@@ -330,6 +330,7 @@ def build_ml_strategy_alpha(
     symbols: list[str],
     tf: str,
     cfg: StrategyConfig,
+    trading_symbols: tuple[str, ...] | None = None,
 ) -> pd.DataFrame:
     """Build ML strategy alpha panel."""
     if cfg.ml.horizon_experiment_enabled:
@@ -445,10 +446,7 @@ def build_ml_strategy_alpha(
             adjusted_train = max(12, total_months - required_minimum - 1)
             if adjusted_train != ml_cfg.train_months:
                 _logger.info(
-                    "[ML-ADJUST] Dynamic train window adjustment: history covers %d months, "
-                    "adjusting train_months from %d to %d (with 1-month safety margin) "
-                    "to satisfy walk-forward layout.",
-                    total_months,
+                    "🧠 ML_INIT: adj_train=%dm -> %dm (safety_margin applied)",
                     ml_cfg.train_months,
                     adjusted_train,
                 )
@@ -458,13 +456,15 @@ def build_ml_strategy_alpha(
     if not folds:
         raise RuntimeError("no walk-forward folds can be built")
     _logger.info(
-        "[ML-FEATURE] rows=%d symbols=%d features=%d",
-        features.values.shape[0],
-        features.values.shape[1],
+        "🧠 ML_INIT: feats=%d symbols=%d rows=%d train_w=%dm | 🧩 folds=%d",
         features.values.shape[2],
+        features.values.shape[1],
+        features.values.shape[0],
+        ml_cfg.train_months,
+        len(folds),
     )
-    _logger.info(
-        "[ML-LABEL] eligible=%.4f sample_weight_mean=%.4f",
+    _logger.debug(
+        ".. ML_LABEL: eligible=%.4f sample_weight_mean=%.4f",
         float(np.mean(labels.eligible_mask)),
         (
             float(np.mean(labels.sample_weight[labels.eligible_mask]))
@@ -487,8 +487,8 @@ def build_ml_strategy_alpha(
     valid_ev_long_all: list[np.ndarray] = []
     valid_ev_short_all: list[np.ndarray] = []
     for fold in folds:
-        _logger.info(
-            "[ML-FOLD] id=%d train=[%d,%d) valid=[%d,%d) test=[%d,%d)",
+        _logger.debug(
+            ".. ML_FOLD: id=%d train=[%d,%d) valid=[%d,%d) test=[%d,%d)",
             fold.fold_id,
             fold.train_start,
             fold.train_end,
@@ -611,8 +611,8 @@ def build_ml_strategy_alpha(
         score_test_short = _fold_result.score_test_short
         ev_valid_long = _fold_result.ev_valid_long
         ev_valid_short = _fold_result.ev_valid_short
-        _logger.info(
-            "[ML-RANKER] fold=%d train_n=%d valid_n=%d test_n=%d",
+        _logger.debug(
+            ".. ML_RANKER: fold=%d train_n=%d valid_n=%d test_n=%d",
             fold.fold_id,
             int(train_long.X.shape[0]),
             int(valid_long.X.shape[0]),
@@ -635,15 +635,15 @@ def build_ml_strategy_alpha(
             ev_short_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_short[row], 0.0))
             if np.isnan(score_grid[int(t_idx), int(s_idx)]):
                 score_grid[int(t_idx), int(s_idx)] = score_test_short[row]
-        _logger.info(
-            "[ML-CALIB] fold=%d ev_mean=%.6e ev_p10=%.6e ev_p90=%.6e",
+        _logger.debug(
+            ".. ML_CALIB: fold=%d ev_mean=%.6e ev_p10=%.6e ev_p90=%.6e",
             fold.fold_id,
             float(np.mean(ev_test_long, dtype=np.float32)) if ev_test_long.size > 0 else 0.0,
             float(np.percentile(ev_test_long, 10)) if ev_test_long.size > 0 else 0.0,
             float(np.percentile(ev_test_long, 90)) if ev_test_long.size > 0 else 0.0,
         )
-        _logger.info(
-            "[ML-OOS] fold=%d test_rows=%d alpha_nonzero=%.4f",
+        _logger.debug(
+            ".. ML_OOS: fold=%d test_rows=%d alpha_nz=%.4f",
             fold.fold_id,
             int(test_long.X.shape[0]),
             float(np.count_nonzero(ev_test_long) / max(1, ev_test_long.size)),
@@ -653,7 +653,7 @@ def build_ml_strategy_alpha(
     last_test_end = folds[-1].test_end
     total_bars = features.values.shape[0]
     if last_test_end < total_bars:
-        _logger.info(
+        _logger.debug(
             "[ML-OOS-FILL] Uncovered OOS/live window detected: [%d, %d)", last_test_end, total_bars
         )
         # Construct virtual fold for the remaining live window — same contract as regular folds
@@ -816,8 +816,7 @@ def build_ml_strategy_alpha(
                 if np.isnan(score_grid[int(t_idx), int(s_idx)]):
                     score_grid[int(t_idx), int(s_idx)] = v_score_test_short[row]
             _logger.info(
-                "[ML-OOS-FILL] Completed dual-side virtual refit fold. "
-                "test_rows=%d long_nonzero=%.4f short_nonzero=%.4f",
+                "🧩 ML_OOS_FILL: virtual_refit complete (rows=%d L_nz=%.3f S=%.3f)",
                 int(v_test_long.X.shape[0]),
                 float(np.count_nonzero(v_ev_test_long) / max(1, v_ev_test_long.size)),
                 float(np.count_nonzero(v_ev_test_short) / max(1, v_ev_test_short.size)),
@@ -1027,25 +1026,15 @@ def build_ml_strategy_alpha(
         panel["alpha_short"].to_numpy(dtype=np.float64).reshape(-1, 1),
     )
     _logger.info(
-        "[ML-ALPHA] rows=%d symbols=%d long_nz=%.4f short_nz=%.4f "
-        "long_p95=%.2fbps short_p95=%.2fbps",
-        len(panel),
-        len(features.symbols),
+        "📊 ML_EVAL: nz(L=%.3f S=%.3f) ic=%.4f t=%.2f hit=%.3f obs=%d",
         metrics["long_nz"],
         metrics["short_nz"],
-        metrics["long_p95_bps"],
-        metrics["short_p95_bps"],
-    )
-    # IC quality summary
-    _logger.info(
-        "[ML-ALPHA-IC] mean_ic=%.4f icir=%.3f t_stat=%.2f hit_ratio=%.3f n_obs=%d",
         quality_report.get("spearman_rank_ic", 0.0),
-        quality_report.get("ic_icir", 0.0),
         quality_report.get("ic_t_stat", 0.0),
         quality_report.get("ic_hit_ratio", 0.0),
         int(quality_report.get("ic_n_obs", 0)),
     )
-    # Cost wall diagnosis: gate metric vs effective cost floor
+    # Cost wall diagnosis: compact summary
     _floor_bps = _friction_bps + _hurdle_default_bps
     _gate_metric_bps = float(
         quality_report.get(
@@ -1053,32 +1042,11 @@ def build_ml_strategy_alpha(
             quality_report.get("alpha_active_p95_bps", quality_report.get("alpha_p95_bps", 0.0)),
         )
     )
-    _gate_metric_source = str(
-        quality_report.get(
-            "alpha_gate_metric_source",
-            "alpha_active_p95_bps" if "alpha_active_p95_bps" in quality_report else "alpha_p95_bps",
-        )
-    )
-    _full_matrix_p95 = float(
-        quality_report.get("alpha_full_matrix_p95_bps", quality_report.get("alpha_p95_bps", 0.0))
-    )
-    _active_p95 = float(quality_report.get("alpha_active_p95_bps", _full_matrix_p95))
-    _gate_metric_bps = max(
-        _gate_metric_bps,
-        0.0,
-    )
     _logger.info(
-        "[ML-COST-WALL] gate_metric=%.2fbps source=%s full_matrix_p95=%.2fbps "
-        "active_p95=%.2fbps friction=%.1fbps hurdle_default=%.1fbps floor=%.1fbps "
-        "gate_clears_floor=%s",
+        "💰 ML_COST: gate=%.1fbps floor=%.1fbps pass=%s",
         _gate_metric_bps,
-        _gate_metric_source,
-        _full_matrix_p95,
-        _active_p95,
-        _friction_bps,
-        _hurdle_default_bps,
         _floor_bps,
-        str(_gate_metric_bps >= _floor_bps),
+        str(_gate_metric_bps >= _floor_bps).lower(),
     )
     # B4: IC gate — config-driven 임계값으로 통계적 유의성 검사
     _ic_pass = passes_ic_gate(
@@ -1109,6 +1077,16 @@ def build_ml_strategy_alpha(
         )
         panel.loc[:, "alpha_long"] = alpha_long_final.reshape(-1)
         panel.loc[:, "alpha_short"] = alpha_short_final.reshape(-1)
+    # P1: trading_symbols 마스킹 — 학습 패널(training_panel) 중 Stage6 미포함 심볼 거래 차단
+    _effective_trading = trading_symbols if trading_symbols else ml_cfg.trading_symbols
+    if _effective_trading:
+        _trading_set = set(_effective_trading)
+        for _i, _sym in enumerate(features.symbols):
+            if _sym not in _trading_set:
+                alpha_long_final[:, _i] = 0.0
+                alpha_short_final[:, _i] = 0.0
+        panel.loc[:, "alpha_long"] = alpha_long_final.reshape(-1)
+        panel.loc[:, "alpha_short"] = alpha_short_final.reshape(-1)
     return panel
 
 
@@ -1121,6 +1099,7 @@ def build_ml_strategy_alpha_anchored(
     target_start: int,
     target_end: int,
     precomputed_panels: AnchoredMLPrecomputedPanels | None = None,
+    trading_symbols: tuple[str, ...] | None = None,
 ) -> pd.DataFrame:
     """Single anchored-pass ML alpha.
 
@@ -1561,6 +1540,16 @@ def build_ml_strategy_alpha_anchored(
         alpha_long_final_awf, alpha_short_final_awf = apply_regime_gate(
             alpha_long_final_awf, alpha_short_final_awf, features.datetimes, _btc_ser_awf, ml_cfg
         )
+        panel.loc[:, "alpha_long"] = alpha_long_final_awf.reshape(-1)
+        panel.loc[:, "alpha_short"] = alpha_short_final_awf.reshape(-1)
+    # P1: trading_symbols 마스킹 — 학습 패널(training_panel) 중 Stage6 미포함 심볼 거래 차단
+    _effective_trading_awf = trading_symbols if trading_symbols else ml_cfg.trading_symbols
+    if _effective_trading_awf:
+        _trading_set_awf = set(_effective_trading_awf)
+        for _i_awf, _sym_awf in enumerate(features.symbols):
+            if _sym_awf not in _trading_set_awf:
+                alpha_long_final_awf[:, _i_awf] = 0.0
+                alpha_short_final_awf[:, _i_awf] = 0.0
         panel.loc[:, "alpha_long"] = alpha_long_final_awf.reshape(-1)
         panel.loc[:, "alpha_short"] = alpha_short_final_awf.reshape(-1)
     return panel
