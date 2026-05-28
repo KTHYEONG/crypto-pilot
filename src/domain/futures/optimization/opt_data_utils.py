@@ -11,7 +11,11 @@ import pandas as pd
 
 from src.core.optimization.opt_utils import compute_segment_merge_index
 from src.core.settings import FUTURES_DATA_DIR, LOG_DIR
-from src.domain.futures.backtest.data_loader import DataCollector, summarize_dataframe_integrity
+from src.domain.futures.backtest.data_loader import (
+    DataCollector,
+    summarize_dataframe_integrity,
+    summarize_ohlcv_collection_integrity,
+)
 from src.domain.futures.optimization.common import inject_cs_momentum_ranks
 from src.domain.futures.optimization.observability.dashboard import REGIME_NAMES
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
@@ -50,7 +54,8 @@ def _resolve_warmup_bars(tf: str) -> int:
     atr = int(OPT_FUTURES_CONFIG.get("FUTURES_ATR_PERIOD", 14))
     embargo = int(OPT_FUTURES_CONFIG.get("FUTURES_EMBARGO_BARS", 0))
     platt = int(OPT_FUTURES_CONFIG.get("FUTURES_PLATT_MIN_TRAIN_BARS", 120))
-    min_membership_warm = int(OPT_FUTURES_CONFIG.get("FUTURES_MEMBERSHIP_WARM_DAYS", 42)) * bars_per_day
+    min_membership_warm_days = int(OPT_FUTURES_CONFIG.get("FUTURES_MEMBERSHIP_WARM_DAYS", 42))
+    min_membership_warm = min_membership_warm_days * bars_per_day
     return max(lookback, cov, sigma, atr, embargo, platt, min_membership_warm)
 
 
@@ -65,6 +70,7 @@ def evaluate_symbol_data_sufficiency(
     oos_end: str,
     require_exec_1m: bool,
     warmup_bars_required: int,
+    scope_name: str = "unknown",
 ) -> dict[str, Any]:
     frame = symbol_map.get(tf)
     if not isinstance(frame, pd.DataFrame) or frame.empty or "datetime" not in frame.columns:
@@ -95,7 +101,11 @@ def evaluate_symbol_data_sufficiency(
     exec_1m_cov = 1.0
     if require_exec_1m:
         exec_1m = symbol_map.get("exec_1m")
-        if not isinstance(exec_1m, pd.DataFrame) or exec_1m.empty or "datetime" not in exec_1m.columns:
+        if (
+            not isinstance(exec_1m, pd.DataFrame)
+            or exec_1m.empty
+            or "datetime" not in exec_1m.columns
+        ):
             exec_1m_ok = False
             exec_1m_cov = 0.0
         else:
@@ -107,15 +117,31 @@ def evaluate_symbol_data_sufficiency(
             exec_1m_cov = float(actual_1m / required_1m)
             exec_1m_ok = exec_1m_cov >= 0.95
 
-    pass_flag = bool(fetch_ok and warmup_ok and actual_is_bars >= min_is_bars and actual_oos_bars >= min_oos_bars and exec_1m_ok)
+    is_historical_stage5 = str(scope_name).strip().lower() == "historical_stage5_union"
+    if is_historical_stage5:
+        # C1 학습 패널은 delisted 포함 historical union이므로
+        # 전체 fetch/OOS 종단 커버리지를 강제하지 않는다.
+        pass_flag = bool(
+            warmup_ok
+            and actual_is_bars >= min_is_bars
+            and exec_1m_ok
+        )
+    else:
+        pass_flag = bool(
+            fetch_ok
+            and warmup_ok
+            and actual_is_bars >= min_is_bars
+            and actual_oos_bars >= min_oos_bars
+            and exec_1m_ok
+        )
     reason = "ok"
-    if not fetch_ok:
+    if not fetch_ok and not is_historical_stage5:
         reason = "fetch_window_short"
     elif not warmup_ok:
         reason = "warmup_insufficient"
     elif actual_is_bars < min_is_bars:
         reason = "is_coverage_short"
-    elif actual_oos_bars < min_oos_bars:
+    elif actual_oos_bars < min_oos_bars and not is_historical_stage5:
         reason = "oos_coverage_short"
     elif not exec_1m_ok:
         reason = "missing_exec_1m"
@@ -149,6 +175,7 @@ def filter_symbols_by_data_sufficiency(
     oos_start: str,
     oos_end: str,
     require_exec_1m: bool,
+    scope_name: str = "unknown",
 ) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, dict[str, Any]], pd.DataFrame, int]:
     warmup_bars = _resolve_warmup_bars(tf)
     rows: list[dict[str, Any]] = []
@@ -164,21 +191,15 @@ def filter_symbols_by_data_sufficiency(
             oos_end=oos_end,
             require_exec_1m=require_exec_1m,
             warmup_bars_required=warmup_bars,
+            scope_name=scope_name,
         )
         rows.append(rec)
-        _logger.info(
-            "[DATA-SUFFICIENCY] symbol=%s tf=%s fetch_ok=%s warmup_bars=%d required_is_bars=%d actual_is_bars=%d required_oos_bars=%d actual_oos_bars=%d pass=%s reason=%s exec_1m_coverage=%.3f",
+        _logger.debug(
+            ".. DATA_S: sym=%s tf=%s pass=%s reason=%s",
             symbol,
             tf,
-            str(bool(rec.get("fetch_ok", False))).lower(),
-            int(rec.get("warmup_bars", 0)),
-            int(rec.get("required_is_bars", 0)),
-            int(rec.get("actual_is_bars", 0)),
-            int(rec.get("required_oos_bars", 0)),
-            int(rec.get("actual_oos_bars", 0)),
             str(bool(rec.get("pass", False))).lower(),
             str(rec.get("reason", "unknown")),
-            float(rec.get("exec_1m_coverage", 0.0)),
         )
         if bool(rec.get("pass", False)):
             kept.append(symbol)
@@ -217,6 +238,27 @@ def _safe_read_funding_parquet(symbol: str) -> pd.DataFrame | None:
         return None
     try:
         df = pd.read_parquet(f_path)
+        df = df.loc[:, ~df.columns.duplicated(keep="first")]
+        if "calc_time" in df.columns:
+            df = df.rename(columns={"calc_time": "timestamp"})
+        if "fundingRate" in df.columns:
+            df = df.rename(columns={"fundingRate": "funding_rate"})
+        if "timestamp" not in df.columns and len(df.columns) > 0:
+            df = df.rename(columns={df.columns[0]: "timestamp"})
+        if "funding_rate" not in df.columns and len(df.columns) > 2:
+            df = df.rename(columns={df.columns[2]: "funding_rate"})
+        if "timestamp" not in df.columns or "funding_rate" not in df.columns:
+            return None
+        df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
+        df["funding_rate"] = pd.to_numeric(df["funding_rate"], errors="coerce")
+        df = df.dropna(subset=["timestamp", "funding_rate"])
+        if df.empty:
+            return None
+        df["timestamp"] = df["timestamp"].astype("int64")
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True, errors="coerce")
+        df = df.dropna(subset=["datetime"])
+        df = df[["timestamp", "funding_rate", "datetime"]].drop_duplicates(subset=["timestamp"])
+        df = df.sort_values("timestamp").reset_index(drop=True)
         return df if not df.empty else None
     except Exception:
         _logger.warning("Failed to load funding parquet for %s", symbol)
@@ -305,7 +347,10 @@ def _append_stage_integrity(
     fillna_cols: list[str] | None = None,
 ) -> None:
     rec: dict[str, Any] = {"symbol": symbol, "timeframe": timeframe, "stage": stage}
-    rec.update(summarize_dataframe_integrity(df, timeframe=timeframe))
+    if stage in {"raw", "merged"}:
+        rec.update(summarize_ohlcv_collection_integrity(df, timeframe=timeframe))
+    else:
+        rec.update(summarize_dataframe_integrity(df, timeframe=timeframe))
     if fillna_cols:
         pre_na = df[fillna_cols].isna().sum().sum() if fillna_cols else 0
         denom = max(int(len(df) * len(fillna_cols)), 1)
@@ -712,6 +757,8 @@ def load_futures_data_maps_for_symbols(
     skip_metrics: bool = False,
     target_tfs: list[str] | None = None,
     load_exec_1m: bool | None = None,
+    requested_symbols_count: int | None = None,
+    scope_name: str = "unknown",
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], list[str]]:
     """Load data for multiple symbols in parallel and inject momentum ranks."""
     data_maps: dict[str, dict[str, Any]] = {}
@@ -752,55 +799,42 @@ def load_futures_data_maps_for_symbols(
         recs = data_maps.get(sym, {}).get("integrity_audit", [])
         if isinstance(recs, list):
             audit_rows.extend([r for r in recs if isinstance(r, dict)])
+    requested_count = int(requested_symbols_count or len(symbols))
+    loaded_count = len(valid_symbols)
     if audit_rows:
         audit_df = pd.DataFrame(audit_rows)
         grp = (
             audit_df.groupby(["stage", "timeframe"], dropna=False)[
-                ["nan_pct", "inf_count", "zero_ratio", "duplicate_dt", "gap_count", "nonpositive_price_count"]
+                ["nan_pct", "inf_count", "gap_count", "duplicate_dt", "nonpositive_price_count"]
             ]
             .mean(numeric_only=True)
             .reset_index()
         )
-        _logger.info(" 📊 [DATA INTEGRITY AUDIT] symbols=%d rows=%d", len(valid_symbols), len(audit_rows))
-        _logger.info(" ──────────────────────────────────────────────────────────────")
-        _logger.info("  STAGE    TF      NAN-PCT    ZERO-RAT    GAPS/DUP   VERDICT")
-        _logger.info(" ──────────────────────────────────────────────────────────────")
-
-        # Smart consolidation: If all metrics are same across timeframes for a stage, collapse them.
+        # Condensed single-line audit summary
+        failed_tfs = []
         for stage_name in sorted(grp["stage"].unique()):
             stage_df = grp[grp["stage"] == stage_name]
-            
-            # Check if metrics are identical across all TFs in this stage
-            # We check nan_pct, zero_ratio, gap_count, duplicate_dt
-            unique_metrics = stage_df[["nan_pct", "zero_ratio", "gap_count", "duplicate_dt"]].round(6).drop_duplicates()
-            
-            rows_to_print = []
-            if len(unique_metrics) == 1 and len(stage_df) > 1:
-                # All TFs are identical, collapse to 'All'
-                row = stage_df.iloc[0].to_dict()
-                row["timeframe"] = "All"
-                rows_to_print.append(row)
-            else:
-                # Different metrics or only one TF, print all
-                rows_to_print = stage_df.to_dict(orient="records")
-
-            for row in rows_to_print:
-                stg = str(row.get("stage", "??")).upper()[:7]
-                tf = str(row.get("timeframe", "??"))
+            for _, row in stage_df.iterrows():
                 nan = float(row.get("nan_pct", 0.0)) * 100
-                zero = float(row.get("zero_ratio", 0.0)) * 100
                 gaps = float(row.get("gap_count", 0.0))
                 dups = float(row.get("duplicate_dt", 0.0))
-                
-                verdict = "[PASS]"
-                if nan > 25.0: verdict = "[FAIL: NaN]"
-                elif nan > 10.0: verdict = "[WARN: NaN]"
-                elif gaps > 0 or dups > 0: verdict = "[FAIL: Gaps]"
-                
-                # Robust whitespace alignment (No vertical bars)
-                _logger.info(f"  {stg:<8} {tf:<5} {nan:>8.2f}% {zero:>10.2f}% {gaps:>5.0f}/{dups:<3.0f}   {verdict}")
+                nonpos = float(row.get("nonpositive_price_count", 0.0))
+                if nan > 10.0 or gaps > 0 or dups > 0 or nonpos > 0:
+                    failed_tfs.append(f"{row['timeframe']}({row['stage']}: nan={nan:.1f}%)")
+        
+        audit_msg = ".. AUDIT: req=%d load=%d coverage=%.2f" % (
+            requested_count, loaded_count, float(loaded_count / max(requested_count, 1))
+        )
+        if failed_tfs:
+            audit_msg += " | !! FAIL: %s" % (", ".join(failed_tfs[:3]))
+        else:
+            audit_msg += " | ok"
+        _logger.info(audit_msg)
+    else:
+        _logger.info(".. AUDIT: req=%d load=%d coverage=%.2f | ok (0 rows)", 
+                     requested_count, loaded_count, float(loaded_count / max(requested_count, 1)))
 
-        _logger.info(" ──────────────────────────────────────────────────────────────")
+    return data_maps, oos_data_maps, valid_symbols
 
     return data_maps, oos_data_maps, valid_symbols
 
@@ -862,14 +896,6 @@ def compute_regime_drift(
             "ratio": float((oos_dist[ridx] + eps) / (is_dist[ridx] + eps)),
         }
     is_oos_crisis_ratio = float(regime_shift.get("CRISIS", {}).get("ratio", 1.0))
-
-    status_map = {
-        "SEVERE": "🔴 SEVERE",
-        "MODERATE": "🟡 MODERATE",
-        "MILD": "🔵 MILD",
-        "OK": "🟢 OK"
-    }
-    status_text = status_map.get(drift_label, "🟢 OK")
 
     _logger.info(
         " [DRIFT_AUDIT] status=%s score=%.3f crisis_ratio=%.2f",

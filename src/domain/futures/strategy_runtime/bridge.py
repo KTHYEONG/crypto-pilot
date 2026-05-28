@@ -193,7 +193,7 @@ def merge_ml_output_into_data_maps(
         if log_tag == "oos":
             l_sample = [str(x)[:19] for x in left["_merge_datetime"].iloc[:2]]
             r_sample = [str(x)[:19] for x in right["_merge_datetime"].iloc[:2]]
-            _logger.info(
+            _logger.debug(
                 f" [DIAG-SHORT] sym={sym} raw_L_nz={raw_long_nz} merged_L_nz={merged_long_nz} "
                 f"L_rows={len(left)} R_rows={len(right)} L_dt={l_sample} R_dt={r_sample}"
             )
@@ -252,16 +252,12 @@ def merge_ml_output_into_data_maps(
         float(np.mean(_target_oos_short_nz_ratios)) if _target_oos_short_nz_ratios else 0.0
     )
     _logger.info(
-        "[ALPHA-MERGE] merged_syms=%d panel_start=%s panel_end=%s "
-        "alpha_long_nz=%.3f alpha_short_nz=%.3f "
-        "target_oos_long_nz=%.3f target_oos_short_nz=%.3f",
+        ".. ALPHA_MERGE: syms=%d span=%s ~ %s L_nz=%.3f S=%.3f",
         merged_symbols,
-        _panel_start,
-        _panel_end,
+        str(_panel_start)[:10],
+        str(_panel_end)[:10],
         _alpha_long_nz,
         _alpha_short_nz,
-        _target_oos_long_nz,
-        _target_oos_short_nz,
     )
 
 

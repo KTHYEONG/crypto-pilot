@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import warnings
 
 import numpy as np
@@ -113,12 +114,30 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
     # Pre-allocated capture of raw gross log returns (before beta-residualization).
     # Shape: [T, N]. Used for RAW-SIGNAL-DIAG and "gross" calibrator_target branch.
     gross_long_2d: NDArray[np.float32] = np.full((t_len, n_len), np.nan, dtype=np.float32)
-    eligible = (
-        aligned.active_mask
-        & aligned.warm_mask
-        & ~aligned.entry_block_mask
-        & ~aligned.kill_mask
+    # Phase D: use_inference_active_mask 분기 — C1 학습 시 Stage5 timeline 마스크 우선 사용.
+    # inference_active_mask가 None이면(데이터에 컬럼 없음) 기존 universe 마스크로 fallback.
+    _use_inf_mask: bool = (
+        getattr(cfg, "use_inference_active_mask", True)
+        and aligned.inference_active_mask is not None
+        and aligned.inference_entry_warm_mask is not None
     )
+    if _use_inf_mask:
+        # inference 학습: entry_block_mask는 Stage6 trading 전용이므로 미적용.
+        # inference_entry_warm_mask가 warm-up 기간 완료 여부를 나타냄.
+        assert aligned.inference_active_mask is not None  # _use_inf_mask 조건으로 보장
+        assert aligned.inference_entry_warm_mask is not None  # _use_inf_mask 조건으로 보장
+        eligible = (
+            aligned.inference_active_mask
+            & aligned.inference_entry_warm_mask
+            & ~aligned.kill_mask
+        )
+    else:
+        eligible = (
+            aligned.active_mask
+            & aligned.warm_mask
+            & ~aligned.entry_block_mask
+            & ~aligned.kill_mask
+        )
     # Gross alpha: cost deducted once at objectives layer (B1 canonical fix).
     cost = np.float64(0.0)
 
@@ -250,6 +269,50 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
     original_weight = np.where(valid_mask, liq_weight, 0.0).astype(np.float32)
     y_ev_abs = np.where(valid_mask, np.abs(signed), 0.0).astype(np.float32)
     sample_weight = (original_weight * (1.0 + 2.0 * y_ev_abs)).astype(np.float32)
+
+    # Phase D: Quality factor — coverage_60d 기반 per-symbol 가중치 [N] → broadcast [T, N]
+    # Time complexity: O(N). Space complexity: O(N).
+    _sym_meta = aligned.symbol_meta or {}
+    _cov_key = "coverage_60d" if "coverage_60d" in _sym_meta else "last_60d_coverage"
+    if _cov_key in _sym_meta:
+        quality_arr = _sym_meta[_cov_key]  # shape [N]
+        quality_min_f = float(getattr(cfg, "sample_weight_quality_clip_min", 0.50))
+        quality_clipped = np.clip(quality_arr, quality_min_f, 1.0).astype(np.float32)  # [N]
+        # sample_weight shape: [T, N] → broadcast quality [N] across rows
+        sample_weight = sample_weight * quality_clipped[np.newaxis, :]  # [T, N]
+
+    # Phase D: Cluster balance factor — cluster_id 기반 1/sqrt(cluster_size) 역수 가중치
+    # Time complexity: O(N). Space complexity: O(N).
+    if (
+        getattr(cfg, "sample_weight_cluster_balance_enabled", True)
+        and "cluster_id" in _sym_meta
+    ):
+        cluster_ids_arr = _sym_meta["cluster_id"].astype(np.int32)  # [N]
+        unique_cids, cid_counts = np.unique(
+            cluster_ids_arr[cluster_ids_arr >= 0], return_counts=True
+        )
+        _size_map: dict[int, int] = dict(
+            zip(unique_cids.tolist(), cid_counts.tolist(), strict=False)
+        )
+        cluster_w = np.array(
+            [
+                1.0 / math.sqrt(_size_map.get(int(c), 1)) if c >= 0 else 1.0
+                for c in cluster_ids_arr
+            ],
+            dtype=np.float32,
+        )  # [N]
+        sample_weight = sample_weight * cluster_w[np.newaxis, :]  # [T, N]
+
+    if cfg.sample_weight_time_decay_halflife_bars is not None:
+        # P2: Exponential time-decay weighting — 최신 데이터에 더 높은 가중치 부여.
+        # shape: sample_weight [T, N], time_decay [T] (최신 t=T-1 → 1.0, 과거로 갈수록 감소)
+        hl = float(cfg.sample_weight_time_decay_halflife_bars)
+        lam = math.log(2.0) / max(hl, 1.0)
+        t_len_sw = sample_weight.shape[0]
+        time_decay = np.exp(
+            -lam * np.arange(t_len_sw - 1, -1, -1, dtype=np.float64)
+        ).astype(np.float32)  # [T]
+        sample_weight = (sample_weight.T * time_decay).T  # broadcast [T, N]
     # Dynamic cost: execution_cost_bps_2d (per-symbol) preferred; fallback to global round-trip.
     # cost_clearance_target gates on actual label return vs dynamic_cost only (no hurdle here).
     # hurdle is applied at EV inference time in ml_builder.py: ev_bps - (dynamic_cost + hurdle) > 0.

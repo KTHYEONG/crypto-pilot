@@ -218,14 +218,80 @@ def apply_selection_stage(
     cost_inv_norm = _normalize_unit(1.0 / positive_cost)
     quality_norm = _normalize_unit(out.get("last_60d_coverage", pd.Series(0.0, index=out.index)))
     stability_norm = _normalize_unit(out.get("listing_age_days", pd.Series(0.0, index=out.index)))
+    # Phase E: 1) Friction score (기존 tradeable_score를 friction_score로 분리)
+    friction_score = (
+        DEFAULT_W_LIQ * liq_norm
+        + DEFAULT_W_COST_INV * cost_inv_norm
+        + DEFAULT_W_QUALITY * quality_norm
+        + DEFAULT_W_STABILITY * stability_norm
+    )
+    out["friction_score"] = friction_score
+
+    # Phase E: 2) Alpha capacity score — volatility / dispersion / regime independence
+    # Time complexity: O(N). Space complexity: O(N).
+    vol_series = pd.to_numeric(
+        out.get("vol_30d", pd.Series(np.nan, index=out.index)), errors="coerce"
+    )
+    _vol_median = float(vol_series.median()) if not vol_series.dropna().empty else 0.0
+    vol_z = _zscore(vol_series.fillna(_vol_median))
+    vol_norm = _normalize_unit(vol_z)
+
+    beta = pd.to_numeric(
+        out.get("beta_vs_market", pd.Series(1.0, index=out.index)), errors="coerce"
+    ).fillna(1.0)
+    dispersion_norm = _normalize_unit((beta - 1.0).abs())
+
+    anchor_key_set_for_regime = {_symbol_key(a) for a in anchors}
+    anchor_clusters_for_regime = set(
+        out.loc[out["_symbol_key"].isin(anchor_key_set_for_regime), "cluster_id"].tolist()
+    )
+    regime_indep = (~out["cluster_id"].isin(anchor_clusters_for_regime)).astype(float)
+
+    alpha_capacity = (
+        float(cfg.capacity_w_volatility) * vol_norm
+        + float(cfg.capacity_w_dispersion) * dispersion_norm
+        + float(cfg.capacity_w_regime_independence) * regime_indep
+    )
+    out["alpha_capacity_score"] = alpha_capacity
+
+    # Phase E: 3) Diversification score — cluster size 역수 기반
+    _cluster_counts_map = out["cluster_id"].value_counts().to_dict()
+    _cluster_size = out["cluster_id"].map(_cluster_counts_map).fillna(1.0).astype(float)
+    _diversification_raw = 1.0 / np.sqrt(_cluster_size.clip(lower=1.0))
+    out["diversification_score"] = _normalize_unit(_diversification_raw)
+
+    # Phase E: 4) Combined multi-objective score (이름 유지: tradeable_score)
     out["tradeable_score"] = (
-        (DEFAULT_W_LIQ * liq_norm)
-        + (DEFAULT_W_COST_INV * cost_inv_norm)
-        + (DEFAULT_W_QUALITY * quality_norm)
-        + (DEFAULT_W_STABILITY * stability_norm)
+        float(cfg.weight_friction) * friction_score
+        + float(cfg.weight_alpha_capacity) * alpha_capacity
+        + float(cfg.weight_diversification) * out["diversification_score"]
     )
 
     out = out.sort_values("tradeable_score", ascending=False).reset_index(drop=True)
+
+    # Phase E: 5) Cluster cap — 동일 cluster에서 max_per_cluster 초과 선택 금지
+    # 앵커 심볼은 항상 cap 제외(anchor forcing 단계에서 별도 처리).
+    # 히스테리시스 전 후보 풀 구성 단계에서 적용.
+    # Time complexity: O(N). Space complexity: O(N).
+    _max_per_cluster = int(cfg.max_per_cluster)
+    _cluster_cap_counts: dict[int, int] = {}
+    _cap_selected_indices: list[int] = []
+    _anchor_key_set_cap = {_symbol_key(a) for a in anchors}
+    for _row_idx in out.index:
+        _cid = int(out.at[_row_idx, "cluster_id"])
+        _sym_key_cap = str(out.at[_row_idx, "_symbol_key"])
+        # 앵커 심볼 및 비클러스터(-1)는 cap 미적용
+        if _sym_key_cap in _anchor_key_set_cap or _cid < 0:
+            _cap_selected_indices.append(_row_idx)
+        elif _cluster_cap_counts.get(_cid, 0) < _max_per_cluster:
+            _cap_selected_indices.append(_row_idx)
+            _cluster_cap_counts[_cid] = _cluster_cap_counts.get(_cid, 0) + 1
+        if len(_cap_selected_indices) >= max_symbols * 2:
+            break
+    # cluster cap 적용 후보 풀: 앵커 강제 포함을 위해 2배 여유 확보
+    out = out.loc[_cap_selected_indices].copy()
+
+    out = out.reset_index(drop=True)
     out["rank"] = out.index + 1
     out["hysteresis_state"] = "candidate"
     selected = out.head(max_symbols).copy()

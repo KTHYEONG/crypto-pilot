@@ -44,6 +44,7 @@ def evaluate_data_readiness(
     oos_start: date,
     end: date,
     require_exec_1m: bool,
+    scope_name: str = "unknown",
 ) -> DataReadinessResult:
     kept, filtered_is, filtered_oos, report_df, warmup_bars = filter_symbols_by_data_sufficiency(
         tf=tf,
@@ -55,6 +56,7 @@ def evaluate_data_readiness(
         oos_start=oos_start.isoformat(),
         oos_end=end.isoformat(),
         require_exec_1m=require_exec_1m,
+        scope_name=scope_name,
     )
     contract = DataWindowContract(
         fetch_start=fetch_start,

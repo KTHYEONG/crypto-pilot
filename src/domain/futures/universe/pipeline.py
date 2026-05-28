@@ -324,6 +324,15 @@ def _stage_counts_from_report(
     )
 
 
+def _stage5_symbols_from_report(report: pd.DataFrame) -> tuple[str, ...]:
+    """Extract Stage5-passed symbols from a filter report DataFrame."""
+    if report.empty or "stage" not in report.columns or "passed" not in report.columns:
+        return ()
+    mask = report["stage"].str.startswith("stage5") & report["passed"].astype(bool)
+    syms = report.loc[mask, "symbol"].dropna().astype(str).unique().tolist()
+    return tuple(sorted(syms))
+
+
 def _save_snapshot(
     snapshot: UniverseSnapshot,
     selected: pd.DataFrame,
@@ -473,6 +482,9 @@ def build_universe(
     )
     report = pd.concat([r1, r2, r3, r4, r5, r6], ignore_index=True)
 
+    stage5_passed_symbols: tuple[str, ...] = tuple(
+        sorted(s5["symbol"].dropna().astype(str).tolist())
+    )
     snapshot = UniverseSnapshot(
         as_of=as_of_date.isoformat(),
         tf=tf,
@@ -482,6 +494,8 @@ def build_universe(
         basket_ref=config.stage6.basket_ref,
         basket_weights=config.stage6.basket_weights,
         selected=_to_symbol_meta(s6),
+        training_panel=tuple(s5["symbol"].dropna().astype(str).tolist()),
+        live_inference_panel=stage5_passed_symbols,
         rejected=_to_rejected(report),
         n_stage0=int(latest["symbol"].nunique()),
         n_stage1_pass=int(s1["symbol"].nunique()),
@@ -652,6 +666,7 @@ def load_or_build_universe_snapshot(
             n_stage5_pass=n_stage5_pass,
             n_stage6_selected=n_stage6_selected,
             generated_at_utc=datetime.now(tz=UTC).isoformat(),
+            live_inference_panel=_stage5_symbols_from_report(report),
         )
         return snapshot, loaded, report
     return build_universe(
