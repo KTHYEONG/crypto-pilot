@@ -726,7 +726,7 @@ def _run_alpha_evaluation_report(
     h_sweep_strs = []
     for h in sorted(sweep.keys()):
         h_res = sweep[h]
-        pass_s = "✅" if h_res["passes"] else "❌"
+        pass_s = "✅" if h_res["ic_exceeds_breakeven"] else "❌"
         h_sweep_strs.append(f"[{h}h: ic={h_res['net_ic']:5.3f} {pass_s}]")
     
     _logger.info(f"📈 SWEEP: {' '.join(h_sweep_strs)}")
