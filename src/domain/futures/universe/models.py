@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -188,6 +188,19 @@ class UniverseSnapshot:
     n_stage4_pass: int
     n_stage5_pass: int
     n_stage6_selected: int
+    # Stage5-passed 심볼 전체 (학습 전용)
+    training_panel: tuple[str, ...] = field(default_factory=tuple)
+    # C1: Historical Stage5 union (분기별 Stage5 통과의 시계열 union)
+    inference_panel: tuple[str, ...] = field(default_factory=tuple)
+    # C2: 현재 분기 Stage5 통과 심볼
+    live_inference_panel: tuple[str, ...] = field(default_factory=tuple)
+    # 보조: Historical Stage6 union (universe-fix.md 호환)
+    historical_trading_panel: tuple[str, ...] = field(default_factory=tuple)
+    # SSOT: 분기별 Stage5 통과 집합 (inference_active_mask 계산용)
+    # dict key = quarter_start date (isoformat str로 직렬화), value = tuple of symbols (sorted)
+    inference_panel_quarter_membership: dict[date, tuple[str, ...]] = field(
+        default_factory=dict
+    )
 
 
 def _to_date(value: str | date) -> date:

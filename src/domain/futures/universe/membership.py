@@ -27,6 +27,9 @@ class MembershipMaskBundle:
     membership_kill_signal: np.ndarray
     entry_block_mask: np.ndarray
     kill_signal: np.ndarray
+    # C1 inference용 — Stage5 timeline 기반 (inference_timeline 미지정 시 trading mask 복사)
+    inference_active_mask: np.ndarray
+    inference_entry_warm_mask: np.ndarray
 
 
 def build_membership_mask_bundle(
@@ -36,6 +39,7 @@ def build_membership_mask_bundle(
     timeline: Mapping[date, frozenset[str] | set[str]],
     warmup_bars_required: int,
     raw_kill_signal: np.ndarray | None = None,
+    inference_timeline: Mapping[date, frozenset[str] | set[str]] | None = None,
 ) -> MembershipMaskBundle:
     dt_ser = pd.to_datetime(datetimes, utc=True, errors="coerce")
     n = len(dt_ser)
@@ -52,8 +56,9 @@ def build_membership_mask_bundle(
     dti = pd.DatetimeIndex(dt_ser)
     if dti.tz is not None:
         dti = dti.tz_localize(None)
-    if dti.isna().any():
-        na_mask = dti.isna()
+    na_mask = dti.isna()
+    has_na = bool(na_mask.any())
+    if has_na:
         dti_filled = dti.fillna(pd.Timestamp("1970-01-01", tz="UTC"))
         bar_q_starts = dti_filled.to_period("Q").start_time.date
         active = np.isin(bar_q_starts, q_list).astype(np.float64)
@@ -86,12 +91,48 @@ def build_membership_mask_bundle(
         else np.asarray(raw_kill_signal, dtype=np.float64)
     )
     effective_kill = np.maximum(raw_kill, membership_kill)
+
+    # inference mask 계산 — inference_timeline 미지정 시 trading mask 복사
+    if inference_timeline is None:
+        inf_active = active.copy()
+        inf_warm_ready = warm_ready.copy()
+    else:
+        norm_inf_timeline: dict[date, frozenset[str]] = {}
+        for k, syms in inference_timeline.items():
+            q_start = _quarter_start(k)
+            norm_inf_timeline[q_start] = frozenset(canonical_symbol(s) for s in syms)
+
+        inf_active_quarters = {q for q, syms in norm_inf_timeline.items() if sym_norm in syms}
+        inf_q_list = np.asarray(list(inf_active_quarters), dtype=object)
+
+        inf_active = np.isin(bar_q_starts, inf_q_list).astype(np.float64)
+        if has_na:
+            inf_active[na_mask] = 0.0
+
+        inf_active_on = np.concatenate(([0.0], inf_active[:-1]))
+        inf_active_on_bool = (inf_active_on <= 0.0) & (inf_active > 0.0)
+
+        inf_warm_ready = np.zeros(n, dtype=np.float64)
+        if warmup_bars_required <= 1:
+            inf_warm_ready = inf_active.copy()
+        else:
+            run_len = 0
+            for idx in range(n):
+                if inf_active[idx] > 0.0:
+                    run_len = run_len + 1 if not inf_active_on_bool[idx] else 1
+                    if run_len >= warmup_bars_required:
+                        inf_warm_ready[idx] = 1.0
+                else:
+                    run_len = 0
+
     return MembershipMaskBundle(
         universe_active_mask=active,
         universe_entry_warm_mask=warm_ready,
         membership_kill_signal=membership_kill,
         entry_block_mask=entry_block_mask,
         kill_signal=effective_kill,
+        inference_active_mask=inf_active,
+        inference_entry_warm_mask=inf_warm_ready,
     )
 
 
@@ -103,6 +144,7 @@ def inject_membership_masks_into_maps(
     tf: str,
     timeline: Mapping[date, frozenset[str] | set[str]],
     warmup_bars_required: int,
+    inference_timeline: Mapping[date, frozenset[str] | set[str]] | None = None,
 ) -> None:
     if not timeline:
         return
@@ -128,9 +170,12 @@ def inject_membership_masks_into_maps(
                 timeline=timeline,
                 warmup_bars_required=warmup_bars_required,
                 raw_kill_signal=raw_kill,
+                inference_timeline=inference_timeline,
             )
             frame.loc[:, "universe_active_mask"] = bundle.universe_active_mask
             frame.loc[:, "universe_entry_warm_mask"] = bundle.universe_entry_warm_mask
             frame.loc[:, "membership_kill_signal"] = bundle.membership_kill_signal
             frame.loc[:, "entry_block_mask"] = bundle.entry_block_mask
             frame.loc[:, "kill_signal"] = bundle.kill_signal
+            frame.loc[:, "inference_active_mask"] = bundle.inference_active_mask
+            frame.loc[:, "inference_entry_warm_mask"] = bundle.inference_entry_warm_mask

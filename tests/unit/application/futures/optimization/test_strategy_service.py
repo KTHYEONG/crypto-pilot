@@ -283,6 +283,68 @@ def test_run_active_strategy_output_bridge_allows_quick_backtest_neutral() -> No
     assert out.alpha_panel.empty
 
 
+def test_run_active_strategy_output_bridge_historical_stage5_union_uses_inference_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ml_scope=historical_stage5_union 시 inference_panel을 학습 심볼로 사용해야 한다."""
+    # Arrange
+    cfg = FuturesRunConfig(
+        tf="4h",
+        reference_date=None,
+        symbols=("BTCUSDT",),
+        trials=1,
+        mode="strategy-smoke",
+        strategy="ml_lambdamart_v1",
+        sync_mode="full_history_master",
+        skip_universe=False,
+        skip_data_sync=False,
+        force_universe_rebuild=False,
+    )
+    inference_panel = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+    captured: dict[str, object] = {}
+
+    def fake_run(**kwargs: object) -> MLPipelineOutput:
+        captured["symbols"] = kwargs["symbols"]
+        return MLPipelineOutput()
+
+    monkeypatch.setattr(
+        "src.application.futures.optimization.strategy_service.run_ml_pipeline_for_universe",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.StrategyMLConfig.training_universe_scope",
+        "historical_stage5_union",
+        raising=False,
+    )
+
+    # Act — strategy_cfg 내 scope를 패치하기 위해 StrategyConfig 자체를 mock
+    mock_ml = pytest.importorskip("unittest.mock").MagicMock()
+    mock_ml.training_universe_scope = "historical_stage5_union"
+    mock_ml.trading_symbols = None
+    mock_strategy_cfg = pytest.importorskip("unittest.mock").MagicMock()
+    mock_strategy_cfg.ml = mock_ml
+
+    monkeypatch.setattr(
+        "src.application.futures.optimization.strategy_service.StrategyConfig",
+        lambda **kwargs: mock_strategy_cfg,
+    )
+
+    out = run_active_strategy_output_bridge(
+        run_config=cfg,
+        symbols=["BTCUSDT"],
+        tf="4h",
+        fetch_start=None,
+        end_date=None,
+        opt_config={},
+        preloaded_data_maps={},
+        inference_panel=inference_panel,
+    )
+
+    # Assert
+    assert captured["symbols"] == list(inference_panel)
+    assert isinstance(out, MLPipelineOutput)
+
+
 def test_run_active_strategy_output_bridge_accepts_strategy_smoke(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
