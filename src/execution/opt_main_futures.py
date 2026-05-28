@@ -173,7 +173,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["quick-backtest", "strategy", "strategy-smoke", "full"],
+        choices=["quick-backtest", "strategy", "strategy-smoke", "alpha", "full"],
         default="strategy",
     )
     parser.add_argument(
@@ -373,7 +373,7 @@ def _run_strategy_stage(
         end_date=window.end_date,
         opt_config=OPT_FUTURES_CONFIG,
         preloaded_data_maps=(
-            strategy_maps if run_config.mode in {"strategy", "strategy-smoke"} else None
+            strategy_maps if run_config.mode in {"strategy", "strategy-smoke", "alpha"} else None
         ),
     )
     merge_ml_output_into_is_and_oos(
@@ -390,6 +390,144 @@ def _run_strategy_stage(
             valid_symbols=data_stage.valid_symbols,
             tf=run_config.tf,
         )
+    elif run_config.mode == "alpha":
+        _run_alpha_evaluation_report(ml_out, data_stage, run_config.tf)
+
+
+def _run_alpha_evaluation_report(
+    ml_out: Any,
+    data_stage: DataStageResult,
+    tf: str,
+) -> None:
+    """Run and print alpha quality metrics and horizon sweep like phase0_alpha_eval.py."""
+    import math
+
+    from src.domain.futures.strategy.alpha_evaluation import evaluate_alpha, sweep_horizon_breakeven
+
+    alpha_panel = getattr(ml_out, "alpha_panel", None)
+    if alpha_panel is None or alpha_panel.empty:
+        _logger.error("[FAIL] alpha_panel이 비어 있음 — OOS fold 없음")
+        return
+
+    quality_report = alpha_panel.attrs.get("quality_report", {})
+    print("\n=== Quality Gate Report (내장) ===")
+    for k, v in quality_report.items():
+        print(f"  {k}: {v}")
+
+    # realized returns matching
+    # NOTE: Use data_maps (full IS+OOS), not oos_data_maps (OOS-only).
+    # alpha_panel spans the full period; reindexing against OOS-only maps
+    # fills the IS portion with NaN, collapsing IC to ~0.
+    panel_reset = alpha_panel.reset_index()
+    panel_reset["datetime"] = pd.to_datetime(panel_reset["datetime"], utc=True)
+    pivot_long = panel_reset.pivot(index="datetime", columns="symbol", values="alpha_long")
+    pivot_short = panel_reset.pivot(index="datetime", columns="symbol", values="alpha_short")
+    common_syms = [s for s in pivot_long.columns if s in data_stage.data_maps]
+    pivot_long = pivot_long[common_syms].fillna(0.0)
+    pivot_short = pivot_short[common_syms].fillna(0.0)
+
+    # get horizon from config
+    horizon = int(OPT_FUTURES_CONFIG.get("label_horizon_bars", 12))
+
+    realized_rows: dict[str, pd.Series] = {}
+    for sym in common_syms:
+        df = data_stage.data_maps[sym][tf].set_index("datetime")
+        close = df["close"].reindex(pivot_long.index)
+        fwd_ret = np.log(close.shift(-horizon) / close)
+        realized_rows[sym] = fwd_ret
+    realized_df = pd.DataFrame(realized_rows, index=pivot_long.index)
+
+    common_idx = pivot_long.index.intersection(realized_df.index)
+    al = pivot_long.loc[common_idx].to_numpy(dtype=np.float64)
+    as_ = pivot_short.loc[common_idx].to_numpy(dtype=np.float64)
+    real = realized_df.loc[common_idx].to_numpy(dtype=np.float64)
+
+    al = al[:-horizon]
+    as_ = as_[:-horizon]
+    real = real[:-horizon]
+
+    eth_close = data_stage.data_maps.get("ETHUSDT", {}).get(tf, pd.DataFrame())
+    if eth_close is not None and not eth_close.empty:
+        eth_close_ser = eth_close.set_index("datetime")["close"].reindex(common_idx).ffill()
+        btc_close_1d = eth_close_ser.iloc[:-horizon].to_numpy(dtype=np.float64)
+    else:
+        btc_close_1d = None
+
+    print(f"\n[INFO] 평가 배열 shape: alpha_long={al.shape}, realized={real.shape}")
+    print("[INFO] evaluate_alpha 실행...")
+    report = evaluate_alpha(
+        alpha_long_2d=al,
+        alpha_short_2d=as_,
+        realized_fwd_ret_2d=real,
+        btc_close_1d=btc_close_1d,
+        n_trials=1,
+        horizon_bars=horizon,
+    )
+
+    print("\n" + "=" * 60)
+    print("=== Phase 0 Alpha Evaluation Report ===")
+    print("=" * 60)
+    print(f"  net_ic              : {report.net_ic:.4f}   (PASS >= 0.03)")
+    print(f"  net_icir            : {report.net_icir:.4f}")
+    print(f"  ic_t_stat_nw        : {report.ic_t_stat_nw:.4f}  (PASS >= 2.0)")
+    print(f"  breakeven_ic        : {report.breakeven_ic:.4f}   (24bps cost wall)")
+    print(f"  effective_breadth   : {report.effective_breadth:.2f}   (PASS >= 3.0)")
+    print(f"  deflated_sharpe     : {report.deflated_sharpe:.4f}  (PASS >= 0.95)")
+    print(f"\n  passes              : {report.passes}")
+    if report.fail_reasons:
+        print(f"  fail_reasons        : {report.fail_reasons}")
+
+    print("\n  per_regime_ic       :")
+    for regime, ic in report.per_regime_ic.items():
+        print(f"    {regime:6s}: {ic:.4f}")
+
+    print("\n  per_regime_breakeven:")
+    for regime in ("bull", "bear", "chop"):
+        ic_val = report.per_regime_ic.get(regime, float("nan"))
+        be_val = report.per_regime_breakeven.get(regime, float("nan"))
+        if math.isnan(ic_val) or math.isnan(be_val):
+            print(f"    {regime:6s}: IC=NaN  breakeven=NaN")
+        else:
+            margin = ic_val - be_val
+            status = "✓ L-B 배포 가능" if margin > 0 else "✗ L-B 불가"
+            print(
+                f"    {regime:6s}: IC={ic_val:.4f}  "
+                f"breakeven={be_val:.4f}  margin={margin:+.4f}  {status}"
+            )
+
+    # sweep horizons
+    print("\n[INFO] horizon sweep 실행 (6, 12, 18 bars)...")
+    realized_map: dict[int, np.ndarray] = {}
+    alpha_long_map: dict[int, np.ndarray] = {}
+    alpha_short_map: dict[int, np.ndarray] = {}
+    for h in [6, 12, 18]:
+        r_rows: dict[str, pd.Series] = {}
+        for sym in common_syms:
+            df = data_stage.data_maps[sym][tf].set_index("datetime")
+            close = df["close"].reindex(common_idx)
+            fwd = np.log(close.shift(-h) / close)
+            r_rows[sym] = fwd
+        r_df = pd.DataFrame(r_rows, index=common_idx)
+        r_arr = r_df.iloc[:-h].to_numpy(dtype=np.float64)
+        clip = min(len(al), len(r_arr))
+        realized_map[h] = r_arr[:clip]
+        alpha_long_map[h] = al[:clip]
+        alpha_short_map[h] = as_[:clip]
+
+    sweep = sweep_horizon_breakeven(realized_map, alpha_long_map, alpha_short_map)
+    print("\n  horizon | sigma_r_bps | net_ic  | breakeven_ic | ic>breakeven")
+    print("  " + "-" * 60)
+    for h in sorted(sweep.keys()):
+        m = sweep[h]
+        print(
+            f"  {h:6d} | {m['sigma_r_bps']:10.2f} | {m['net_ic']:7.4f} | "
+            f"{m['breakeven_ic']:12.4f} | {m['ic_exceeds_breakeven']}"
+        )
+    print("\n=== 진단 완료 ===")
+    ans_ic = "YES ✓" if report.net_ic >= report.breakeven_ic else "NO ✗ (cost wall 초과)"
+    print("핵심 질문: net_ic >= breakeven_ic?", ans_ic)
+    ans_breadth = "YES ✓" if report.effective_breadth >= 3.0 else "NO ✗ (breadth 붕괴)"
+    print("핵심 질문: breadth >= 3?", ans_breadth)
 
 
 def _run_optimization_stage(
@@ -724,6 +862,8 @@ def run_pipeline(
     _logger.info("[STAGE_TIME] step=strategy elapsed_s=%.2f", time.perf_counter() - t_strategy)
     if run_config.mode == "strategy-smoke":
         return RunnerResult(exit_code=0, reason="strategy_smoke_done")
+    if run_config.mode == "alpha":
+        return RunnerResult(exit_code=0, reason="alpha_evaluation_done")
     # Step 5) optimization + final OOS evaluation
     _logger.info(
         "[STAGE_INIT] step=optimize symbols=%d trials=%d",

@@ -4,11 +4,11 @@ from argparse import Namespace
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-ActiveMode = Literal["quick-backtest", "strategy", "strategy-smoke"]
+ActiveMode = Literal["quick-backtest", "strategy", "strategy-smoke", "alpha"]
 ActiveStrategyName = Literal["momentum_v0", "eh_st_v1", "ml_lambdamart_v1", "xs_reversal"]
 SyncMode = Literal["full_history_master", "elite_fast"]
 
-_ACTIVE_MODES: frozenset[str] = frozenset({"quick-backtest", "strategy", "strategy-smoke"})
+_ACTIVE_MODES: frozenset[str] = frozenset({"quick-backtest", "strategy", "strategy-smoke", "alpha"})
 _LEGACY_MODES: frozenset[str] = frozenset({"full"})
 _LEGACY_FLAGS: tuple[str, ...] = ("alpha_only",)
 
@@ -59,7 +59,7 @@ def _normalize_symbols(symbols: tuple[str, ...] | list[str] | None) -> tuple[str
 
 def validate_run_config(config: FuturesRunConfig) -> FuturesRunConfig:
     """Validate cross-field contracts for active runner config."""
-    if config.mode in {"strategy", "strategy-smoke"} and config.strategy is None:
+    if config.mode in {"strategy", "strategy-smoke", "alpha"} and config.strategy is None:
         raise ValueError(f"{config.mode} mode requires strategy")
     if config.mode == "quick-backtest" and config.strategy is not None:
         raise ValueError("quick-backtest mode cannot set strategy")
@@ -81,7 +81,7 @@ def build_run_config_from_args(args: Namespace | dict[str, Any]) -> FuturesRunCo
             raise ValueError(f"legacy flag is not allowed in active runner: {legacy_flag}")
 
     mode = parse_active_mode(str(raw.get("mode", "strategy")))
-    default_strategy: str | None = "ml_lambdamart_v1" if mode == "strategy" else None
+    default_strategy: str | None = "ml_lambdamart_v1" if mode in {"strategy", "alpha"} else None
     strategy = _parse_strategy_name(raw.get("strategy", default_strategy))
     sync_mode_raw = str(raw.get("sync_mode", "full_history_master"))
     if sync_mode_raw not in {"full_history_master", "elite_fast"}:

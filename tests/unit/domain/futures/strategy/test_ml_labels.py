@@ -407,3 +407,58 @@ def test_build_label_panel_keeps_b1_no_fee_slippage_deduction() -> None:
     assert panel.metadata["round_trip_cost_bps"] > 0.0
     valid = panel.eligible_mask & np.isfinite(panel.exec_net_ret)
     assert np.any(valid)
+
+
+def test_build_label_panel_magnitude_target_long_is_signed_exec_net_ret() -> None:
+    """magnitude_target_long must equal exec_net_ret (signed, not censored).
+
+    The long calibrator receives the full signed distribution to learn direction
+    + magnitude jointly. Censored max(x,0) targets collapse fold OOS IC to
+    consistently negative values, causing quality gate failure.
+    """
+    # Arrange
+    aligned = _aligned_for_labels()
+    cfg = StrategyMLConfig(label_horizon_bars=1, fee_bps=0.0, slippage_bps=0.0, min_group_size=2)
+
+    # Act
+    panel = build_label_panel(aligned, cfg)
+
+    # Assert — signed: magnitude_target_long[valid] == exec_net_ret[valid]
+    valid_mask = panel.eligible_mask & np.isfinite(panel.exec_net_ret)
+    long_valid = panel.magnitude_target_long[valid_mask]
+    assert long_valid.size > 0, "no valid cells to assert on"
+    np.testing.assert_array_almost_equal(
+        long_valid,
+        panel.exec_net_ret[valid_mask].astype(np.float32),
+        decimal=6,
+        err_msg="magnitude_target_long must equal exec_net_ret (signed), not max(exec_net_ret,0)",
+    )
+    # Metadata key must reflect signed contract
+    assert panel.metadata["magnitude_target_long_key"] == "exec_net_ret"
+
+
+def test_build_label_panel_magnitude_target_short_is_signed_neg_exec_net_ret() -> None:
+    """magnitude_target_short must equal -exec_net_ret (signed, not censored).
+
+    The short calibrator receives the full signed distribution to learn direction
+    + magnitude jointly. Censored max(-x,0) targets collapse fold OOS IC.
+    """
+    # Arrange
+    aligned = _aligned_for_labels()
+    cfg = StrategyMLConfig(label_horizon_bars=1, fee_bps=0.0, slippage_bps=0.0, min_group_size=2)
+
+    # Act
+    panel = build_label_panel(aligned, cfg)
+
+    # Assert — signed: magnitude_target_short[valid] == -exec_net_ret[valid]
+    valid_mask = panel.eligible_mask & np.isfinite(panel.exec_net_ret)
+    short_valid = panel.magnitude_target_short[valid_mask]
+    assert short_valid.size > 0, "no valid cells to assert on"
+    np.testing.assert_array_almost_equal(
+        short_valid,
+        (-panel.exec_net_ret[valid_mask]).astype(np.float32),
+        decimal=6,
+        err_msg="magnitude_target_short must equal -exec_net_ret (signed), not max(-exec_net_ret,0)",
+    )
+    # Metadata key must reflect signed contract
+    assert panel.metadata["magnitude_target_short_key"] == "-exec_net_ret"
