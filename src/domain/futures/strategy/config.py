@@ -232,6 +232,20 @@ class StrategyMLConfig:
     add_missingness_indicators: bool = True
     horizon_experiment_enabled: bool = False
     horizon_candidates: tuple[int, ...] = ()
+    training_universe_scope: Literal[
+        "stage5_passed",
+        "stage6_selected",
+        "historical_stage6",          # universe-fix.md 호환 (deprecated 예정)
+        "historical_stage5_union",    # 신규 기본값 (C1)
+    ] = "historical_stage5_union"
+    trading_symbols: tuple[str, ...] = ()  # Stage6 selected 심볼 — 거래 마스킹용
+    # C1 active_mask 사용 여부 — True면 inference_active_mask, False면 universe_active_mask
+    use_inference_active_mask: bool = True
+    # Sample weighting 보정 설정
+    sample_weight_quality_clip_min: float = 0.50
+    sample_weight_cluster_balance_enabled: bool = True
+    # None=비활성(현행). 권장 초기값: 4380 (4h bar x 6/day x 365day x 0.5year = 6mo half-life)
+    sample_weight_time_decay_halflife_bars: int | None = None
 
     def __post_init__(self) -> None:
         """Validate ML strategy parameters."""
@@ -322,6 +336,23 @@ class StrategyMLConfig:
             raise ValueError("regime_exposure_bear must be in [0.0, 1.0]")
         if not (0.0 <= self.regime_exposure_chop <= 1.0):
             raise ValueError("regime_exposure_chop must be in [0.0, 1.0]")
+        if self.training_universe_scope not in {
+            "stage5_passed",
+            "stage6_selected",
+            "historical_stage6",
+            "historical_stage5_union",
+        }:
+            raise ValueError(
+                "training_universe_scope must be one of: "
+                "'stage5_passed', 'stage6_selected', 'historical_stage6', 'historical_stage5_union'"
+            )
+        if (
+            self.sample_weight_time_decay_halflife_bars is not None
+            and self.sample_weight_time_decay_halflife_bars <= 0
+        ):
+            raise ValueError("sample_weight_time_decay_halflife_bars must be > 0 when set")
+        if not (0.0 < self.sample_weight_quality_clip_min <= 1.0):
+            raise ValueError("sample_weight_quality_clip_min must satisfy 0 < x <= 1")
         if self.horizon_experiment_enabled:
             if len(self.horizon_candidates) == 0:
                 raise ValueError(

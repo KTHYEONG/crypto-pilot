@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import scipy.stats
@@ -51,6 +51,10 @@ class AlphaEvaluationReport:
     cost_drag: dict[str, float]
     passes: bool
     fail_reasons: list[str]
+    # Phase F: panel별 메트릭 분리 — {"inference": {...}, "trading": {...}}
+    # inference panel: 학습에 사용된 전체 패널 (C1/C2)
+    # trading panel: trading_mask=True 심볼만 (C3)
+    metrics_by_panel: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 def compute_net_ic(
@@ -472,6 +476,8 @@ def evaluate_alpha(
     cost_floor_bps: float = 24.0,
     n_trials: int = 1,
     horizon_bars: int = 6,
+    # Phase F: trading_mask — True인 심볼(C3)만 trading panel 계산에 사용
+    trading_mask: NDArray[np.bool_] | None = None,
 ) -> AlphaEvaluationReport:
     """Compute all alpha quality metrics in one call.
 
@@ -488,6 +494,8 @@ def evaluate_alpha(
         cost_floor_bps: Total cost threshold (round-trip + hurdle), bps.
         n_trials: Number of hyperparameter trials (for DSR).
         horizon_bars: Label horizon in bars (for NW t-stat lag).
+        trading_mask: Boolean mask [N] — True인 심볼(C3)만 trading panel 메트릭 계산에 사용.
+            None이면 trading panel 계산 생략.
 
     Returns:
         AlphaEvaluationReport with all metrics and PASS/FAIL verdict.
@@ -618,6 +626,32 @@ def evaluate_alpha(
         fail_reasons,
     )
 
+    # Phase F: dual panel 메트릭 계산 — inference(전체) vs trading(C3 마스크만)
+    # Time complexity: O(T * N * log N). Space complexity: O(T * N).
+    _metrics_by_panel: dict[str, dict[str, float]] = {
+        "inference": {
+            "net_ic": net_ic_dict["mean_ic"],
+            "icir": net_ic_dict["icir"],
+            "ic_t_stat_nw": net_ic_dict["t_stat_nw"],
+            "effective_breadth": breadth,
+        }
+    }
+    if trading_mask is not None and trading_mask.any():
+        _pred_trading = pred_2d[:, trading_mask]
+        _realized_trading = realized_fwd_ret_2d[:, trading_mask]
+        _trading_ic_dict = compute_net_ic(
+            _pred_trading, _realized_trading, horizon_bars=horizon_bars
+        )
+        _trading_breadth = compute_effective_breadth(
+            alpha_long_2d[:, trading_mask], alpha_short_2d[:, trading_mask]
+        )
+        _metrics_by_panel["trading"] = {
+            "net_ic": _trading_ic_dict["mean_ic"],
+            "icir": _trading_ic_dict["icir"],
+            "ic_t_stat_nw": _trading_ic_dict["t_stat_nw"],
+            "effective_breadth": _trading_breadth,
+        }
+
     return AlphaEvaluationReport(
         net_ic=net_ic_dict["mean_ic"],
         net_icir=net_ic_dict["icir"],
@@ -633,6 +667,7 @@ def evaluate_alpha(
         cost_drag=cost_drag,
         passes=passes,
         fail_reasons=fail_reasons,
+        metrics_by_panel=_metrics_by_panel,
     )
 
 
