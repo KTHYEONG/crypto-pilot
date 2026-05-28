@@ -9,6 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -25,6 +26,18 @@ except IndexError:
     pass
 
 from src.core.settings import API_READ_TIMEOUT
+
+
+@dataclass(slots=True, frozen=True)
+class BinanceKlinePermanentError(RuntimeError):
+    """Permanent Binance kline request error."""
+
+    symbol: str
+    timeframe: str
+    http_code: int
+    start_time_ms: int
+    end_time_ms: int
+    url: str
 
 
 class OrderRateLimiter:
@@ -425,6 +438,29 @@ class BinanceClient:
                     data = json.loads(raw)
                     retry_count = 0 # Success
                 except urllib.error.HTTPError as e:
+                    if e.code == 429 or 500 <= int(e.code) <= 599:
+                        retry_count += 1
+                        if e.code == 429:
+                            wait_sec = 120
+                            self.logger.warning(f"⚠️ HTTP 429 for {symbol}. Wait {wait_sec}s...")
+                            time.sleep(wait_sec)
+                        else:
+                            wait_sec = 2 * retry_count
+                            self.logger.error(f"Error ({retry_count}/5) for {symbol}: {e}")
+                            time.sleep(wait_sec)
+                        if retry_count >= 5:
+                            self.logger.error(f"Failed chunks for {symbol}. Skipping.")
+                            break
+                        continue
+                    if 400 <= int(e.code) < 500:
+                        raise BinanceKlinePermanentError(
+                            symbol=symbol,
+                            timeframe=timeframe,
+                            http_code=int(e.code),
+                            start_time_ms=int(since),
+                            end_time_ms=int(end_timestamp),
+                            url=url,
+                        ) from e
                     retry_count += 1
                     if e.code == 429:
                         wait_sec = 120
@@ -596,7 +632,7 @@ class BinanceClient:
         all_rows: list[tuple[int, float]] = []
         since = start_ts
 
-        self.logger.info(
+        self.logger.debug(
             "Fetching funding rate for %s from %s to %s...",
             symbol,
             datetime.fromtimestamp(since / 1000).strftime("%Y-%m-%d"),

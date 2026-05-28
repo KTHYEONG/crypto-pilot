@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 
 import numpy as np
@@ -41,6 +41,19 @@ class UniverseMembershipTimeline:
     tf: str
     windows: tuple[UniverseMembershipWindow, ...]
 
+    def as_mapping(self) -> dict[date, frozenset[str]]:
+        """Return quarter_start → active_symbols mapping for membership mask injection.
+
+        Returns:
+            Dict mapping each window's effective_from date to its active symbol frozenset.
+
+        """
+        result: dict[date, frozenset[str]] = {}
+        for window in self.windows:
+            q_date: date = window.effective_from.date()
+            result[q_date] = frozenset(window.active_symbols)
+        return result
+
 
 @dataclass(slots=True, frozen=True)
 class UniverseTimelineResult:
@@ -51,6 +64,10 @@ class UniverseTimelineResult:
     snapshots: tuple[UniverseSnapshot, ...]
     snapshot: UniverseSnapshot
     report: pd.DataFrame
+    # 신규 필드 (기존 report 필드 뒤에 추가)
+    inference_symbols: tuple[str, ...] = field(default_factory=tuple)
+    inference_timeline: object | None = None  # UniverseMembershipTimeline | None (순환 임포트 회피)
+    inference_panel_quarter_membership: dict[date, frozenset[str]] = field(default_factory=dict)
 
 
 def _quarter_start(dt: date) -> date:
@@ -105,6 +122,8 @@ def discover_universe_timeline(
     end_date: date,
     force_rebuild: bool = False,
 ) -> UniverseTimelineResult:
+    from dataclasses import replace as _dataclass_replace
+
     current_dt = _quarter_start(is_start)
     all_symbols: set[str] = set()
     oos_snapshot: UniverseSnapshot | None = None
@@ -112,6 +131,8 @@ def discover_universe_timeline(
     previous_selection: tuple[str, ...] | None = None
     timeline_by_quarter: dict[date, frozenset[str]] = {}
     snapshots_by_quarter: list[tuple[date, UniverseSnapshot, pd.DataFrame]] = []
+    inference_panel_quarter_membership: dict[date, frozenset[str]] = {}
+    inference_symbols_set: set[str] = set()
 
     while current_dt <= end_date:
         ref_dt = current_dt + relativedelta(months=3)
@@ -124,17 +145,22 @@ def discover_universe_timeline(
         current_set = frozenset(symbols)
         timeline_by_quarter[current_dt] = current_set
         all_symbols.update(current_set)
+        # Stage5 inference panel 수집
+        quarter_stage5 = frozenset(snapshot.live_inference_panel)
+        inference_panel_quarter_membership[current_dt] = quarter_stage5
+        inference_symbols_set.update(quarter_stage5)
         prev_set = set(previous_selection or ())
         new_symbols = sorted(current_set - prev_set)
         dropped_symbols = sorted(prev_set - set(current_set))
         retained_symbols = sorted(prev_set & set(current_set))
-        _logger.info(
-            "[UNIVERSE-TIMELINE] quarter=%s selected=%d new=%d dropped=%d retained=%d",
+        _logger.debug(
+            ".. UNIVERSE_T: quarter=%s sel=%d new=%d drop=%d ret=%d stg5=%d",
             current_dt.isoformat(),
             len(current_set),
             len(new_symbols),
             len(dropped_symbols),
             len(retained_symbols),
+            len(quarter_stage5),
         )
         previous_selection = tuple(sorted(current_set))
         if current_dt == oos_start:
@@ -166,6 +192,42 @@ def discover_universe_timeline(
         )
         previous_symbols = quarter_symbols
 
+    # Stage5 inference timeline 빌드 (Stage6 timeline과 동일 구조)
+    inference_windows: list[UniverseMembershipWindow] = []
+    prev_stage5: frozenset[str] = frozenset()
+    for idx, (q_start, snap_q, _) in enumerate(snapshots_by_quarter):
+        members = inference_panel_quarter_membership.get(q_start, frozenset())
+        next_q = (
+            pd.Timestamp(snapshots_by_quarter[idx + 1][0])
+            if idx + 1 < len(snapshots_by_quarter)
+            else None
+        )
+        inference_windows.append(
+            UniverseMembershipWindow(
+                effective_from=pd.Timestamp(q_start),
+                effective_to=next_q,
+                snapshot_as_of=snap_q.as_of,
+                active_symbols=tuple(sorted(members)),
+                entry_symbols=tuple(sorted(members - prev_stage5)),
+                exit_symbols=tuple(sorted(prev_stage5 - members)),
+            )
+        )
+        prev_stage5 = members
+
+    inference_timeline_obj = UniverseMembershipTimeline(
+        tf=tf, windows=tuple(inference_windows)
+    )
+
+    # OOS snapshot에 C1 union 주입 (frozen → replace)
+    oos_snapshot = _dataclass_replace(
+        oos_snapshot,
+        inference_panel=tuple(sorted(inference_symbols_set)),
+        historical_trading_panel=tuple(sorted(all_symbols)),
+        inference_panel_quarter_membership={
+            k: tuple(sorted(v)) for k, v in inference_panel_quarter_membership.items()
+        },
+    )
+
     _write_universe_audit_parquet(
         snapshots_by_quarter=snapshots_by_quarter,
         windows=tuple(windows),
@@ -173,9 +235,14 @@ def discover_universe_timeline(
     return UniverseTimelineResult(
         symbols=tuple(sorted(all_symbols)),
         timeline=UniverseMembershipTimeline(tf=tf, windows=tuple(windows)),
-        snapshots=tuple(snapshot for _, snapshot, _ in snapshots_by_quarter),
+        snapshots=tuple(snap for _, snap, _ in snapshots_by_quarter),
         snapshot=oos_snapshot,
         report=oos_report,
+        inference_symbols=tuple(sorted(inference_symbols_set)),
+        inference_timeline=inference_timeline_obj,
+        inference_panel_quarter_membership={
+            k: frozenset(v) for k, v in inference_panel_quarter_membership.items()
+        },
     )
 
 
@@ -306,9 +373,9 @@ def validate_universe_quality(
 
     quality_pass = median_cost <= 50.0 and median_adv >= 25_000_000.0 and dropout_pass
     _logger.info(
-        "[UNIVERSE-QUALITY] median_cost_bps=%.3f median_adv=%.3f dropout_rate=%.4f pass=%s",
+        ".. UNIVERSE_Q: med_cost=%.1fbps med_adv=%.1fm drop_rate=%.2f pass=%s",
         median_cost,
-        median_adv,
+        median_adv / 1_000_000,
         dropout_rate,
         str(bool(quality_pass)).lower(),
     )

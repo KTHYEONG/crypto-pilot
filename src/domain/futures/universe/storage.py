@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import multiprocessing
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -30,6 +30,16 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True, frozen=True)
+class SymbolSyncProfile:
+    """Lifecycle metadata for per-symbol sync window clipping."""
+
+    symbol: str
+    onboard_date: date | None
+    delivery_date: date | None
+    status: str
 
 
 # --- Persistence Helpers ---
@@ -152,6 +162,14 @@ def snapshot_to_payload(snapshot: UniverseSnapshot) -> dict[str, Any]:
         "n_stage4_pass": snapshot.n_stage4_pass,
         "n_stage5_pass": snapshot.n_stage5_pass,
         "n_stage6_selected": snapshot.n_stage6_selected,
+        "training_panel": list(snapshot.training_panel),
+        "inference_panel": list(snapshot.inference_panel),
+        "live_inference_panel": list(snapshot.live_inference_panel),
+        "historical_trading_panel": list(snapshot.historical_trading_panel),
+        "inference_panel_quarter_membership": {
+            qd.isoformat() if hasattr(qd, "isoformat") else str(qd): list(syms)
+            for qd, syms in snapshot.inference_panel_quarter_membership.items()
+        },
     }
 
 
@@ -180,6 +198,16 @@ def snapshot_from_payload(payload: dict[str, Any]) -> UniverseSnapshot:
         n_stage4_pass=int(payload["n_stage4_pass"]),
         n_stage5_pass=int(payload["n_stage5_pass"]),
         n_stage6_selected=int(payload["n_stage6_selected"]),
+        training_panel=tuple(str(s) for s in payload.get("training_panel", [])),
+        inference_panel=tuple(str(s) for s in payload.get("inference_panel", [])),
+        live_inference_panel=tuple(str(s) for s in payload.get("live_inference_panel", [])),
+        historical_trading_panel=tuple(
+            str(s) for s in payload.get("historical_trading_panel", [])
+        ),
+        inference_panel_quarter_membership={
+            date.fromisoformat(k): tuple(str(s) for s in v)
+            for k, v in payload.get("inference_panel_quarter_membership", {}).items()
+        },
     )
 
 
@@ -344,6 +372,59 @@ def _list_usdt_futures_symbols() -> list[str]:
         return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
 
 
+def _load_symbol_sync_profiles() -> dict[str, SymbolSyncProfile]:
+    """Load symbol lifecycle profiles from exchangeInfo."""
+    profiles: dict[str, SymbolSyncProfile] = {}
+    client = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET)
+    info = client.exchange.fapiPublicGetExchangeInfo()
+    for sym_info in info.get("symbols", []):
+        symbol = str(sym_info.get("symbol", "")).strip()
+        if not symbol:
+            continue
+        onboard_date: date | None = None
+        delivery_date: date | None = None
+        onboard_raw = sym_info.get("onboardDate")
+        delivery_raw = sym_info.get("deliveryDate")
+        if onboard_raw:
+            try:
+                onboard_date = date.fromtimestamp(int(onboard_raw) / 1000)
+            except Exception:
+                logger.debug("Invalid onboardDate for symbol=%s", symbol)
+        if delivery_raw:
+            try:
+                parsed_delivery = date.fromtimestamp(int(delivery_raw) / 1000)
+                if parsed_delivery.year < 2100:
+                    delivery_date = parsed_delivery
+            except Exception:
+                logger.debug("Invalid deliveryDate for symbol=%s", symbol)
+        profiles[symbol] = SymbolSyncProfile(
+            symbol=symbol,
+            onboard_date=onboard_date,
+            delivery_date=delivery_date,
+            status=str(sym_info.get("status", "")),
+        )
+    return profiles
+
+
+def _resolve_effective_sync_window(
+    *,
+    profile: SymbolSyncProfile | None,
+    requested_start: date,
+    requested_end: date,
+) -> tuple[date, date] | None:
+    """Clip sync window to known symbol lifecycle bounds."""
+    eff_start = requested_start
+    eff_end = requested_end
+    if profile is not None:
+        if profile.onboard_date is not None:
+            eff_start = max(eff_start, profile.onboard_date)
+        if profile.delivery_date is not None:
+            eff_end = min(eff_end, profile.delivery_date)
+    if eff_start > eff_end:
+        return None
+    return eff_start, eff_end
+
+
 def smart_filter_symbols(limit: int | None = None) -> list[str]:
     """Fast-mode filter: top-volume elite symbols (optional acceleration mode)."""
     logger.info("Starting Smart Early-Exit Filtering (elite_fast)...")
@@ -375,30 +456,41 @@ def sync_single_symbol_data(
     sync_1d: bool = True,
     sync_4h: bool = True,
     sync_1m: bool = False,
+    sync_profile: SymbolSyncProfile | None = None,
 ) -> tuple[list[LedgerRow], int]:
     """개별 심볼을 동기화하고 ledger row를 생성한다."""
     if collector is None:
         from src.domain.futures.backtest.data_loader import DataCollector
         collector = DataCollector()
     
+    window = _resolve_effective_sync_window(
+        profile=sync_profile,
+        requested_start=start_date,
+        requested_end=end_date,
+    )
+    if window is None:
+        logger.info("Skip symbol=%s due to non-overlapping lifecycle window", symbol)
+        return [], 0
+    effective_start, effective_end = window
+
     # 1h 데이터 확보 (로컬 캐시 우선 사용)
-    collector.ensure_ohlcv_data(symbol, "1h", str(start_date), str(end_date))
+    collector.ensure_ohlcv_data(symbol, "1h", str(effective_start), str(effective_end))
     
     # [Component 4] 백테스팅 필수 데이터 일괄 선 수집 (Pre-fetch)
     if sync_1d:
-        collector.ensure_ohlcv_data(symbol, "1d", str(start_date), str(end_date))
+        collector.ensure_ohlcv_data(symbol, "1d", str(effective_start), str(effective_end))
     if sync_4h:
-        collector.ensure_ohlcv_data(symbol, "4h", str(start_date), str(end_date))
+        collector.ensure_ohlcv_data(symbol, "4h", str(effective_start), str(effective_end))
     if sync_1m:
-        collector.ensure_1m_data(symbol, str(start_date), str(end_date))
+        collector.ensure_1m_data(symbol, str(effective_start), str(effective_end))
 
     klines_1h = collector._load_cache(symbol, "1h")
     if klines_1h.empty:
         return [], 0
     
     # 요청 범위로 필터링
-    req_start = pd.to_datetime(start_date, utc=True)
-    req_end = pd.to_datetime(end_date, utc=True)
+    req_start = pd.to_datetime(effective_start, utc=True)
+    req_end = pd.to_datetime(effective_end, utc=True)
     klines_1h = klines_1h[
         (klines_1h["datetime"] >= req_start) & (klines_1h["datetime"] <= req_end)
     ].copy()
@@ -438,11 +530,19 @@ def sync_single_symbol_data(
     safe_symbol = symbol.replace("/", "_")
     funding_path = Path(FUTURES_DATA_DIR) / f"{safe_symbol}_funding.parquet"
     if funding_path.exists():
-        funding = pd.read_parquet(funding_path)
-        funding['datetime'] = pd.to_datetime(funding['timestamp'], unit='ms', utc=True)
-        funding = funding[
-            (funding["datetime"] >= req_start) & (funding["datetime"] <= req_end)
-        ].copy()
+        try:
+            funding = pd.read_parquet(funding_path)
+            funding['datetime'] = pd.to_datetime(funding['timestamp'], unit='ms', utc=True)
+            funding = funding[
+                (funding["datetime"] >= req_start) & (funding["datetime"] <= req_end)
+            ].copy()
+        except Exception as e:
+            logger.warning(
+                "funding parquet read failed symbol=%s error=%s; continue without funding",
+                symbol,
+                type(e).__name__,
+            )
+            funding = pd.DataFrame()
 
     # LedgerRow 생성 (이하 기존 로직 동일)
     # vol_30d: 30일(4h*6*30=180바) 롤링 수익률 표준편차 연율화 (annualized)
@@ -570,9 +670,9 @@ def _init_worker() -> None:
 
 
 def _worker(
-    args: tuple[str, date, date, date | None, bool, bool, bool],
+    args: tuple[str, date, date, date | None, bool, bool, bool, SymbolSyncProfile | None],
 ) -> tuple[list[LedgerRow], int]:
-    symbol, start, end, onboard_date, sync_1d, sync_4h, sync_1m = args
+    symbol, start, end, onboard_date, sync_1d, sync_4h, sync_1m, sync_profile = args
     global _worker_collector, _worker_downloader
     from src.core.exchange.binance_vision import BinanceVisionDownloader
     from src.domain.futures.backtest.data_loader import DataCollector
@@ -591,7 +691,48 @@ def _worker(
         sync_1d=sync_1d,
         sync_4h=sync_4h,
         sync_1m=sync_1m,
+        sync_profile=sync_profile,
     )
+
+
+def _sync_cache_path(symbol: str, timeframe: str) -> Path:
+    return FUTURES_DATA_DIR / f"{symbol.replace('/', '_')}_{timeframe}.parquet"
+
+
+def _requested_sync_caches_missing(
+    symbol: str,
+    *,
+    sync_1d: bool,
+    sync_4h: bool,
+    sync_1m: bool,
+    requested_start: date,
+    requested_end: date,
+) -> bool:
+    required_timeframes = ["1h"]
+    if sync_1d:
+        required_timeframes.append("1d")
+    if sync_4h:
+        required_timeframes.append("4h")
+    if sync_1m:
+        required_timeframes.append("1m")
+    req_start_ts = pd.Timestamp(requested_start, tz="UTC")
+    req_end_ts = pd.Timestamp(requested_end, tz="UTC")
+    for tf in required_timeframes:
+        path = _sync_cache_path(symbol, tf)
+        if not path.exists():
+            return True
+        try:
+            cache_df = pd.read_parquet(path, columns=["datetime"])
+        except Exception:
+            return True
+        if cache_df.empty:
+            return True
+        dt = pd.to_datetime(cache_df["datetime"], utc=True, errors="coerce").dropna()
+        if dt.empty:
+            return True
+        if dt.min() > req_start_ts or dt.max() < req_end_ts:
+            return True
+    return False
 
 
 def run_historical_sync(
@@ -630,21 +771,12 @@ def run_historical_sync(
     sync_tasks = []
 
     # Fix 2 Step C: FAPI exchangeInfo에서 onboardDate 일괄 조회
-    onboard_dates: dict[str, date] = {}
+    sync_profiles: dict[str, SymbolSyncProfile] = {}
     try:
-        client = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET)
-        info = client.exchange.fapiPublicGetExchangeInfo()
-        for sym_info in info.get("symbols", []):
-            s = sym_info.get("symbol", "")
-            ob_ms = sym_info.get("onboardDate")
-            if ob_ms:
-                try:
-                    onboard_dates[s] = date.fromtimestamp(int(ob_ms) / 1000)
-                except Exception as e:
-                    logger.debug("Invalid onboardDate for symbol=%s: %s", s, e)
-        logger.info(f"onboardDate 조회 완료: {len(onboard_dates)}개 심볼")
+        sync_profiles = _load_symbol_sync_profiles()
+        logger.info("symbol lifecycle profile loaded: %d symbols", len(sync_profiles))
     except Exception as e:
-        logger.warning(f"onboardDate 조회 실패(fallback to first kline): {e}")
+        logger.warning("symbol lifecycle profile load failed: %s", e)
 
     # Ledger에 있는 데이터 중 가장 최신 날짜를 기준으로 상장 폐지 여부 판단 (180일 이상 지연시 중단)
     global_max = max(symbol_start_dates.values()) if symbol_start_dates else end_date
@@ -653,37 +785,73 @@ def run_historical_sync(
         sym_start = start_date
         if symbol in symbol_start_dates:
             last = symbol_start_dates[symbol]
-            if last >= end_date:
+            caches_missing = _requested_sync_caches_missing(
+                symbol,
+                sync_1d=sync_1d,
+                sync_4h=sync_4h,
+                sync_1m=sync_1m,
+                requested_start=start_date,
+                requested_end=end_date,
+            )
+            if last >= end_date and not caches_missing:
                 continue
+            if last >= end_date and caches_missing:
+                sym_start = start_date
+            elif caches_missing:
+                sym_start = last.replace(day=1)
             # 180일 이상 데이터가 끊긴 경우 상장 폐지로 간주하고 스킵 (단, force인 경우는 제외)
             if not force and last < (global_max - timedelta(days=180)):
                 continue
-            sym_start = last.replace(day=1) # 월 단위 아카이브이므로 해당 월 초부터 다시 수집
+            if not caches_missing:
+                # 월 단위 아카이브이므로 해당 월 초부터 다시 수집
+                sym_start = last.replace(day=1)
+        profile = sync_profiles.get(symbol)
         sync_tasks.append(
-            (symbol, sym_start, end_date, onboard_dates.get(symbol), sync_1d, sync_4h, sync_1m)
+            (
+                symbol,
+                sym_start,
+                end_date,
+                profile.onboard_date if profile is not None else None,
+                sync_1d,
+                sync_4h,
+                sync_1m,
+                profile,
+            )
         )
 
     if not sync_tasks:
         logger.info("All symbols are already up-to-date.")
         return
 
-    logger.info(f"Syncing {len(sync_tasks)} symbols (Parallel)...")
+    logger.info(f"🔄 SYNC: processing {len(sync_tasks)} symbols (Parallel)...")
+    t0_sync = time.perf_counter()
     with multiprocessing.Pool(
         processes=min(multiprocessing.cpu_count(), 8),
         initializer=_init_worker,
     ) as pool:
         results = pool.map(_worker, sync_tasks)
+    elapsed_sync = time.perf_counter() - t0_sync
 
     all_new = []
     per_symbol_synced_days: dict[str, int] = {}
-    for (rows, _count), (symbol, _, _, _, _, _, _) in zip(results, sync_tasks, strict=False):
+    synced_count = 0
+    empty_count = 0
+    for (rows, _count), (symbol, _, _, _, _, _, _, _) in zip(results, sync_tasks, strict=False):
         per_symbol_synced_days[str(symbol)] = len(rows)
         if rows:
             df = pd.DataFrame([asdict(row) for row in rows])
             all_new.append(df)
-            logger.info(f"  > {symbol} synced ({len(df)} days)")
+            synced_count += 1
         else:
-            logger.info(f"  > {symbol} synced (0 days)")
+            empty_count += 1
+
+    logger.info(
+        "✅ SYNC: symbols=%d/%d (empty=%d) | ⏱️ %.2fs",
+        synced_count,
+        len(sync_tasks),
+        empty_count,
+        elapsed_sync,
+    )
 
     report_rows = _build_sync_coverage_report_rows(
         mode=mode,

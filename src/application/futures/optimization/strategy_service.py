@@ -201,8 +201,29 @@ def run_active_strategy_output_bridge(
     end_date: str | None,
     opt_config: dict[str, Any],
     preloaded_data_maps: dict[str, dict[str, Any]] | None = None,
+    training_panel: tuple[str, ...] | None = None,
+    trading_symbols: tuple[str, ...] | None = None,
+    inference_panel: tuple[str, ...] | None = None,
+    live_inference_panel: tuple[str, ...] | None = None,
+    historical_trading_panel: tuple[str, ...] | None = None,
 ) -> MLPipelineOutput:
-    """Run active strategy bridge for quick-backtest/strategy modes."""
+    """Run active strategy bridge for quick-backtest/strategy modes.
+
+    Args:
+        run_config: Futures run configuration.
+        symbols: Symbol list for data loading (Stage6 selected when P1 active).
+        tf: Timeframe string.
+        fetch_start: Optional fetch start date string.
+        end_date: Optional end date string.
+        opt_config: Optimisation config dict.
+        preloaded_data_maps: Pre-loaded OHLCV data keyed by symbol.
+        training_panel: Stage5-passed 전체 심볼 (legacy, stage5_passed 분기용).
+        trading_symbols: Stage6 selected 심볼 (alpha 마스킹용, C3 집행).
+        inference_panel: C1 학습용 — historical_stage5_union 심볼 전체.
+        live_inference_panel: C2 학습용 — stage5_passed 현재 통과 심볼.
+        historical_trading_panel: historical_stage6 호환 심볼 패널.
+
+    """
     if run_config.mode == "quick-backtest":
         return MLPipelineOutput()
     if run_config.mode not in {"strategy", "strategy-smoke", "alpha"}:
@@ -213,8 +234,26 @@ def run_active_strategy_output_bridge(
         raise ValueError("strategy mode requires preloaded_data_maps")
 
     strategy_cfg = StrategyConfig(name=run_config.strategy)
+    # Three-Cohort 4-way 분기: training_universe_scope에 따라 학습 패널 결정
+    ml_scope = strategy_cfg.ml.training_universe_scope
+    if ml_scope == "historical_stage5_union" and inference_panel:
+        effective_symbols = list(inference_panel)
+    elif ml_scope == "historical_stage6" and historical_trading_panel:
+        effective_symbols = list(historical_trading_panel)
+    elif ml_scope == "stage5_passed" and (live_inference_panel or training_panel):
+        effective_symbols = list(live_inference_panel or training_panel)  # type: ignore[arg-type]
+    else:
+        effective_symbols = symbols  # stage6_selected 또는 fallback
+
+    # trading_symbols 마스킹: C3 집행 심볼로 alpha 필터링
+    if trading_symbols:
+        from dataclasses import replace as _dc_replace
+
+        updated_ml = _dc_replace(strategy_cfg.ml, trading_symbols=tuple(trading_symbols))
+        strategy_cfg = _dc_replace(strategy_cfg, ml=updated_ml)
+
     return run_ml_pipeline_for_universe(
-        symbols=symbols,
+        symbols=effective_symbols,
         tf=tf,
         fetch_start=fetch_start,
         end_date=end_date,
