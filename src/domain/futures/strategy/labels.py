@@ -269,14 +269,19 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
             float(np.nanmean(dynamic_cost_2d)),
         )
 
+    # Signed magnitude targets: the calibrator receives the full distribution
+    # including negative losses. This allows it to learn that a long trade with
+    # negative exec_net_ret is a BAD long, improving directional discrimination.
+    # Censored max(x,0) targets remove direction signal and consistently collapse
+    # fold OOS IC to negative values, causing quality gate failure.
     magnitude_target_long = np.where(
         valid_mask,
-        np.maximum(exec_net_ret, 0.0),
+        exec_net_ret,
         0.0,
     ).astype(np.float32)
     magnitude_target_short = np.where(
         valid_mask,
-        np.maximum(-exec_net_ret, 0.0),
+        -exec_net_ret,
         0.0,
     ).astype(np.float32)
 
@@ -304,8 +309,8 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         "rank_target_long_key": "long_net_ret",
         "rank_target_short_key": "short_net_ret",
         "magnitude_target_key": "exec_net_ret",
-        "magnitude_target_long_key": "max(exec_net_ret,0)",
-        "magnitude_target_short_key": "max(-exec_net_ret,0)",
+        "magnitude_target_long_key": "exec_net_ret",
+        "magnitude_target_short_key": "-exec_net_ret",
         "calibrator_target_mode": cfg.calibrator_target,
         "round_trip_cost_bps": cost_snapshot.round_trip_cost_bps_fallback,
         "execution_cost_bps_source": cost_snapshot.execution_cost_bps_source,

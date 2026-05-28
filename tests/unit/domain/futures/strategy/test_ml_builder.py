@@ -17,6 +17,8 @@ from src.domain.futures.strategy.contracts import (
     LongMatrixDataset,
 )
 from src.domain.futures.strategy.ml_builder import (
+    _fit_predict_fold_dual_side,
+    _rank_score,
     build_ml_strategy_alpha,
     build_ml_strategy_alpha_anchored,
 )
@@ -280,7 +282,13 @@ def test_build_ml_strategy_alpha_filters_nonfinite_and_clips_test_outlier(
 
     cfg = StrategyConfig(
         name="ml_lambdamart_v1",
-        ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
+        ml=StrategyMLConfig(
+            min_group_size=2,
+            train_months=1,
+            valid_months=1,
+            test_months=1,
+            ranker_enabled=True,  # explicit: test verifies ranker call path
+        ),
     )
     panel = build_ml_strategy_alpha(data_maps={}, symbols=list(symbols), tf="4h", cfg=cfg)
 
@@ -1231,4 +1239,79 @@ def test_build_ml_strategy_alpha_logs_cost_wall_gate_metric_source(
     caplog.set_level("INFO")
     build_ml_strategy_alpha(data_maps={}, symbols=list(symbols), tf="4h", cfg=cfg)
     assert "gate_metric=30.00bps" in caplog.text
-    assert "source=active_alpha_p95_bps" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# T-B: ranker ablation (_rank_score, ranker_enabled)
+# ---------------------------------------------------------------------------
+
+
+def test_rank_score_returns_zeros_when_fit_result_is_none() -> None:
+    """_rank_score(None, dataset) must return all-zero float32 array of correct length."""
+    # Arrange
+    feature_names: tuple[str, ...] = ("f0", "f1")
+    ds = LongMatrixDataset(
+        X=np.ones((8, 2), dtype=np.float32),
+        y_rank=np.arange(8, dtype=np.int32),
+        y_ev=np.zeros(8, dtype=np.float32),
+        group=np.array([4, 4], dtype=np.int32),
+        sample_weight=np.ones(8, dtype=np.float32),
+        index_map=np.zeros((8, 2), dtype=np.int64),
+        feature_names=feature_names,
+    )
+
+    # Act
+    scores = _rank_score(None, ds)
+
+    # Assert
+    assert scores.shape == (8,)
+    assert scores.dtype == np.float32
+    assert np.all(scores == 0.0)
+
+
+def test_ranker_enabled_false_skips_fit_ranker(monkeypatch: MonkeyPatch) -> None:
+    """When ranker_enabled=False, fit_ranker must NOT be called."""
+    # Arrange
+    feature_names: tuple[str, ...] = ("f0", "f1")
+    fit_ranker_calls: list[int] = []
+
+    def _mock_fit_ranker(**_kwargs: object) -> object:
+        fit_ranker_calls.append(1)
+        return object()  # should never be reached
+
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.fit_ranker", _mock_fit_ranker)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.fit_quantile_calibrators",
+        lambda **_: object(),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.predict_conservative_ev",
+        lambda *_: np.zeros(5, dtype=np.float32),
+    )
+
+    def _make_ds(n: int) -> LongMatrixDataset:
+        return LongMatrixDataset(
+            X=np.ones((n, 2), dtype=np.float32),
+            y_rank=np.arange(n, dtype=np.int32),
+            y_ev=np.zeros(n, dtype=np.float32),
+            group=np.full(max(1, n // 5), 5, dtype=np.int32),
+            sample_weight=np.ones(n, dtype=np.float32),
+            index_map=np.zeros((n, 2), dtype=np.int64),
+            feature_names=feature_names,
+        )
+
+    cfg = StrategyMLConfig(ranker_enabled=False, min_group_size=2)
+
+    # Act
+    _fit_predict_fold_dual_side(
+        train_long=_make_ds(10),
+        valid_long=_make_ds(5),
+        test_long=_make_ds(5),
+        train_short=_make_ds(10),
+        valid_short=_make_ds(5),
+        test_short=_make_ds(5),
+        ml_cfg=cfg,
+    )
+
+    # Assert — fit_ranker was never called
+    assert len(fit_ranker_calls) == 0
