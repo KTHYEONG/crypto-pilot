@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
 from src.application.futures.optimization.config import build_run_config_from_args
+from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.execution import opt_main_futures
 
 
@@ -46,22 +48,35 @@ def test_strategy_mode_pipeline_orchestration_order(
     def fake_universe(
         rc: object,
         win: object,
-    ) -> tuple[list[str], dict[object, frozenset[str]]]:
+    ) -> tuple[
+        list[str],
+        dict[object, frozenset[str]],
+        tuple[str, ...],
+        tuple[str, ...],
+        tuple[str, ...],
+        dict[object, frozenset[str]],
+    ]:
         _ = rc
         _ = win
         called.append("universe")
-        return ["BTCUSDT"], {}
+        return ["BTCUSDT"], {}, (), (), ("BTCUSDT",), {}
 
     def fake_data(
         rc: object,
         win: object,
         discovered: list[str],
         timeline: dict[object, frozenset[str]],
+        inference_panel: tuple[str, ...] = (),
+        live_inference_panel: tuple[str, ...] = (),
+        inference_timeline: dict[object, frozenset[str]] | None = None,
     ) -> opt_main_futures.DataStageResult:
         _ = rc
         _ = win
         _ = discovered
         _ = timeline
+        _ = inference_panel
+        _ = live_inference_panel
+        _ = inference_timeline
         called.append("data")
         return data_stage
 
@@ -69,10 +84,16 @@ def test_strategy_mode_pipeline_orchestration_order(
         rc: object,
         win: object,
         ds: object,
+        inference_panel: tuple[str, ...] = (),
+        live_inference_panel: tuple[str, ...] = (),
+        trading_symbols: tuple[str, ...] = (),
     ) -> None:
         _ = rc
         _ = win
         _ = ds
+        _ = inference_panel
+        _ = live_inference_panel
+        _ = trading_symbols
         called.append("strategy")
 
     def fake_optimization(
@@ -92,6 +113,12 @@ def test_strategy_mode_pipeline_orchestration_order(
         return opt_main_futures.RunnerResult(exit_code=0, reason="ok")
 
     monkeypatch.setattr(opt_main_futures, "_resolve_quarterly_window", fake_window)
+    monkeypatch.setattr(opt_main_futures, "_ensure_universe_ledger_sync", lambda *_: None)
+    monkeypatch.setattr(
+        opt_main_futures,
+        "_ensure_cached_symbol_data_for_targets",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(opt_main_futures, "_run_universe_stage", fake_universe)
     monkeypatch.setattr(opt_main_futures, "_run_data_stage", fake_data)
     monkeypatch.setattr(opt_main_futures, "_run_strategy_stage", fake_strategy)
@@ -132,7 +159,17 @@ def test_strategy_smoke_skips_optimization_stage(
     )
 
     monkeypatch.setattr(opt_main_futures, "_resolve_quarterly_window", lambda _: window)
-    monkeypatch.setattr(opt_main_futures, "_run_universe_stage", lambda *_: (["BTCUSDT"], {}))
+    monkeypatch.setattr(opt_main_futures, "_ensure_universe_ledger_sync", lambda *_: None)
+    monkeypatch.setattr(
+        opt_main_futures,
+        "_ensure_cached_symbol_data_for_targets",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        opt_main_futures,
+        "_run_universe_stage",
+        lambda *_: (["BTCUSDT"], {}, (), (), ("BTCUSDT",), {}),
+    )
     monkeypatch.setattr(opt_main_futures, "_run_data_stage", lambda *_: data_stage)
     monkeypatch.setattr(opt_main_futures, "_run_strategy_stage", lambda *_: None)
 
@@ -179,3 +216,136 @@ def test_run_from_cli_when_pipeline_raises_runtime_error_returns_one(
 
     # Assert
     assert exit_code == 1
+
+
+def test_requires_exec_1m_returns_false_for_alpha_mode() -> None:
+    run_config = build_run_config_from_args(
+        {
+            "mode": "alpha",
+            "strategy": "ml_lambdamart_v1",
+            "symbols": ("BTCUSDT",),
+            "tf": "4h",
+            "trials": 1,
+            "sync_mode": "full_history_master",
+        }
+    )
+    assert opt_main_futures._requires_exec_1m(run_config) is False
+
+
+def test_requires_exec_1m_respects_intrabar_config_for_quick_backtest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_config = build_run_config_from_args(
+        {
+            "mode": "quick-backtest",
+            "symbols": ("BTCUSDT",),
+            "tf": "4h",
+            "trials": 1,
+            "sync_mode": "full_history_master",
+        }
+    )
+    monkeypatch.setitem(OPT_FUTURES_CONFIG, "FUTURES_EXECUTION_MODE", "intrabar_1m")
+    assert opt_main_futures._requires_exec_1m(run_config) is True
+
+
+def test_resolve_data_collection_symbols_uses_inference_panel() -> None:
+    run_config = build_run_config_from_args(
+        {
+            "mode": "strategy-smoke",
+            "strategy": "ml_lambdamart_v1",
+            "symbols": ("BTCUSDT",),
+            "tf": "4h",
+            "trials": 1,
+            "sync_mode": "full_history_master",
+            "skip_universe": False,
+        }
+    )
+    out = opt_main_futures._resolve_data_collection_symbols(
+        run_config=run_config,
+        discovered_symbols=["AAAUSDT"],
+        inference_panel=("BTCUSDT", "ETHUSDT", "SOLUSDT"),
+        live_inference_panel=("BTCUSDT",),
+    )
+    for sym in ("BTCUSDT", "ETHUSDT", "SOLUSDT"):
+        assert sym in out
+
+
+def test_ensure_universe_ledger_sync_ignores_cli_symbols(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_config = build_run_config_from_args(
+        {
+            "mode": "strategy-smoke",
+            "strategy": "ml_lambdamart_v1",
+            "symbols": ("BTCUSDT",),
+            "tf": "4h",
+            "trials": 1,
+            "sync_mode": "full_history_master",
+            "skip_universe": False,
+        }
+    )
+    window = opt_main_futures.QuarterlyWindow(
+        fetch_start="2025-01-01",
+        is_start="2025-04-01",
+        oos_start="2026-01-01",
+        end_date="2026-04-01",
+        fetch_start_date=datetime.strptime("2025-01-01", "%Y-%m-%d").date(),
+        is_start_date=datetime.strptime("2025-04-01", "%Y-%m-%d").date(),
+        oos_start_date=datetime.strptime("2026-01-01", "%Y-%m-%d").date(),
+        end_date_value=datetime.strptime("2026-04-01", "%Y-%m-%d").date(),
+    )
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        opt_main_futures,
+        "run_historical_sync",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(opt_main_futures, "FUTURES_DATA_DIR", tmp_path)
+    opt_main_futures._ensure_universe_ledger_sync(run_config, window)
+    assert calls
+    assert calls[0].get("symbols") is None
+
+
+def test_ensure_cached_symbol_data_uses_fetch_start_for_backfill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_config = build_run_config_from_args(
+        {
+            "mode": "strategy-smoke",
+            "strategy": "ml_lambdamart_v1",
+            "symbols": ("BTCUSDT",),
+            "tf": "4h",
+            "trials": 1,
+            "sync_mode": "full_history_master",
+            "skip_universe": False,
+        }
+    )
+    window = opt_main_futures.QuarterlyWindow(
+        fetch_start="2022-10-01",
+        is_start="2023-10-01",
+        oos_start="2025-10-01",
+        end_date="2026-03-31",
+        fetch_start_date=datetime.strptime("2022-10-01", "%Y-%m-%d").date(),
+        is_start_date=datetime.strptime("2023-10-01", "%Y-%m-%d").date(),
+        oos_start_date=datetime.strptime("2025-10-01", "%Y-%m-%d").date(),
+        end_date_value=datetime.strptime("2026-03-31", "%Y-%m-%d").date(),
+    )
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        opt_main_futures,
+        "run_historical_sync",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    opt_main_futures._ensure_cached_symbol_data_for_targets(
+        run_config,
+        window,
+        ("BTCUSDT", "ETHUSDT"),
+        require_exec_1m=True,
+    )
+
+    assert len(calls) == 2
+    assert calls[0].get("start_date") == window.fetch_start_date
+    assert calls[1].get("start_date") == window.fetch_start_date

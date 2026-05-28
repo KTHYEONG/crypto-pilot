@@ -126,6 +126,17 @@ class Stage6Config:
     basket_ref: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
     basket_weights: tuple[float, ...] = (0.45, 0.25, 0.08)
     corr_cluster_threshold: float = 0.70  # 상관계수 >= threshold → 동일 클러스터로 연결
+    # 다목표 점수 가중치 (합계 = 1.0)
+    weight_friction: float = 0.50
+    weight_alpha_capacity: float = 0.30
+    weight_diversification: float = 0.20
+    max_per_cluster: int = 3
+    # alpha_capacity 하위 가중치
+    capacity_w_volatility: float = 0.40
+    capacity_w_dispersion: float = 0.30
+    capacity_w_regime_independence: float = 0.30
+    # ex-ante volatility 측정 윈도우 (4h bars)
+    vol_lookback_bars: int = 540  # 90일 = 90 * 6bars/day
 
 
 @dataclass(frozen=True, slots=True)
