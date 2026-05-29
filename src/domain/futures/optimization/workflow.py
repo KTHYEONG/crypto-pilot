@@ -13,10 +13,10 @@ import numpy as np
 import optuna
 from optuna.trial import FrozenTrial, Trial, TrialState
 
-from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.optimization.ml_context import MLPhaseDContext
 from src.domain.futures.optimization.objectives import objective_ml_phase_d
 from src.domain.futures.optimization.observability.trial_observability import set_trial_event_attrs
+from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 
 # Optuna Experimental Warning suppression at code level
 warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)

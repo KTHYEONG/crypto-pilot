@@ -61,6 +61,46 @@ def _numba_rolling_mad_zscore(funding_2d: np.ndarray) -> np.ndarray:
     return out
 
 
+@njit(parallel=True, fastmath=True)  # type: ignore[untyped-decorator]
+def _numba_rolling_corr_2d(x: np.ndarray, y: np.ndarray, window: int) -> np.ndarray:
+    """Numba accelerated 2D rolling correlation with min_periods=1.
+    
+    Time Complexity: O(T * N), Space Complexity: O(T * N)
+    """
+    t_len, n_len = x.shape
+    out = np.zeros((t_len, n_len), dtype=np.float64)
+    
+    for j in prange(n_len):
+        for t in range(3, t_len):
+            start = max(3, t - window + 1)
+            n = t - start + 1
+            if n < 2:
+                continue
+            
+            sum_x = 0.0
+            sum_y = 0.0
+            for k in range(start, t + 1):
+                sum_x += x[k, j]
+                sum_y += y[k, j]
+            mx = sum_x / n
+            my = sum_y / n
+            
+            sum_xx = 0.0
+            sum_yy = 0.0
+            sum_xy = 0.0
+            for k in range(start, t + 1):
+                dx = x[k, j] - mx
+                dy = y[k, j] - my
+                sum_xx += dx * dx
+                sum_yy += dy * dy
+                sum_xy += dx * dy
+            
+            denom = np.sqrt(sum_xx * sum_yy)
+            if denom > 1e-12:
+                out[t, j] = sum_xy / denom
+    return out
+
+
 def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> FeaturePanel:
     """Build P0 feature tensor with returns/vol/carry/liquidity/cs features."""
     close_2d = aligned.close_2d
@@ -195,6 +235,29 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
     xs_reversal_prior_6 = -cs_rank_ret_6
     carry_prior_6 = cs_rank_funding_6
 
+    # 4종 신규 알파 피처 계산
+    # 1. 단기 리턴 자기상관성 (ret_3과 이의 3-bar shift 리턴의 6-period rolling correlation)
+    ret_3_shift = np.full_like(ret_3, np.nan)
+    ret_3_shift[3:] = ret_3[:-3]
+    momentum_autocorr = _numba_rolling_corr_2d(ret_3, ret_3_shift, 6)
+
+    # 2. 횡단면 잔차 모멘텀 (CS demeaned return의 6-period rolling average)
+    cs_mean_ret = np.nanmean(ret_3, axis=1, keepdims=True)
+    cs_resid_ret = ret_3 - cs_mean_ret
+    cs_residual_momentum = _rolling_mean_2d(cs_resid_ret, 6)
+
+    # 3. vwap_deviation (VWAP 대비 종가 이격도)
+    pv = close_2d * volume_2d
+    rolling_pv = _rolling_mean_2d(pv, 12)
+    rolling_v = _rolling_mean_2d(volume_2d, 12)
+    vwap = rolling_pv / np.maximum(rolling_v, 1e-12)
+    vwap_deviation = (close_2d - vwap) / np.maximum(vwap, 1e-12)
+
+    # 4. funding_rate_momentum (자금조달율의 3-bar 차이의 6-period rolling average)
+    funding_diff = funding_2d_filled - np.roll(funding_2d_filled, 3, axis=0)
+    funding_diff[:3] = 0.0
+    funding_rate_momentum = _rolling_mean_2d(funding_diff, 6)
+
     basis_1 = basis_2d.copy()
     basis_mean_6 = _rolling_mean_2d(basis_2d, 6)
     oi_ret_1 = _ret(np.maximum(oi_2d, 1e-12), 1)
@@ -227,6 +290,9 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
         ("cs_rank_ret_36", cs_rank_ret_36),
         ("cs_sharpe_6", cs_sharpe_6),
         ("cs_sharpe_18", cs_sharpe_18),
+        ("momentum_autocorr", momentum_autocorr),
+        ("cs_residual_momentum", cs_residual_momentum),
+        ("vwap_deviation", vwap_deviation),
         ],
         "reversal": [
         ("rev_3", rev_3),
@@ -254,6 +320,7 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
         ("carry_prior_6", carry_prior_6),
         ("basis_1", basis_1),
         ("basis_mean_6", basis_mean_6),
+        ("funding_rate_momentum", funding_rate_momentum),
         ],
         "liquidity": [
         ("volume_z_18", volume_z_18),

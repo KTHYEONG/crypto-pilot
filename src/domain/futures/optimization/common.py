@@ -5,9 +5,9 @@ from typing import Any
 
 import numpy as np
 import optuna
+import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
-import pandas as pd
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 
 _logger = logging.getLogger(__name__)
