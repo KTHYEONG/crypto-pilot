@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import typing
 import numpy as np
 from _pytest.monkeypatch import MonkeyPatch
 
@@ -77,7 +78,7 @@ def test_predict_rank_score_empty_dataset_returns_empty() -> None:
 def test_fit_ranker_uses_config_hyperparams(monkeypatch: MonkeyPatch) -> None:
     train = _dataset(rows=40, groups=5)
     valid = _dataset(rows=16, groups=2)
-    captured: dict[str, float] = {}
+    captured: dict[str, typing.Any] = {}
 
     class _FakeRegressor:
         def __init__(self, **kwargs: float) -> None:
@@ -87,7 +88,7 @@ def test_fit_ranker_uses_config_hyperparams(monkeypatch: MonkeyPatch) -> None:
             del args, kwargs
             return self
 
-        def predict(self, x: object) -> np.ndarray:
+        def predict(self, x: typing.Sized) -> np.ndarray:
             return np.zeros((len(x),), dtype=np.float64)
 
     monkeypatch.setattr("src.domain.futures.strategy.ranker.lgb.LGBMRegressor", _FakeRegressor)
@@ -113,7 +114,7 @@ def test_fit_ranker_uses_config_hyperparams(monkeypatch: MonkeyPatch) -> None:
 def test_fit_ranker_uses_huber_family(monkeypatch: MonkeyPatch) -> None:
     train = _dataset(rows=40, groups=5)
     valid = _dataset(rows=16, groups=2)
-    captured: dict[str, object] = {}
+    captured: dict[str, typing.Any] = {}
 
     class _FakeRegressor:
         def __init__(self, **kwargs: object) -> None:
@@ -123,7 +124,7 @@ def test_fit_ranker_uses_huber_family(monkeypatch: MonkeyPatch) -> None:
             del args, kwargs
             return self
 
-        def predict(self, x: object) -> np.ndarray:
+        def predict(self, x: typing.Sized) -> np.ndarray:
             return np.zeros((len(x),), dtype=np.float64)
 
     monkeypatch.setattr("src.domain.futures.strategy.ranker.lgb.LGBMRegressor", _FakeRegressor)
@@ -136,8 +137,8 @@ def test_fit_ranker_uses_huber_family(monkeypatch: MonkeyPatch) -> None:
 def test_fit_ranker_uses_lambdarank_group_and_relevance(monkeypatch: MonkeyPatch) -> None:
     train = _dataset(rows=40, groups=5)
     valid = _dataset(rows=16, groups=2)
-    captured_ctor: dict[str, object] = {}
-    captured_fit: dict[str, object] = {}
+    captured_ctor: dict[str, typing.Any] = {}
+    captured_fit: dict[str, typing.Any] = {}
 
     class _FakeRanker:
         def __init__(self, **kwargs: object) -> None:
@@ -148,7 +149,7 @@ def test_fit_ranker_uses_lambdarank_group_and_relevance(monkeypatch: MonkeyPatch
             captured_fit["kwargs"] = kwargs
             return self
 
-        def predict(self, x: object) -> np.ndarray:
+        def predict(self, x: typing.Sized) -> np.ndarray:
             return np.linspace(0.0, 1.0, len(x), dtype=np.float64)
 
     monkeypatch.setattr("src.domain.futures.strategy.ranker.lgb.LGBMRanker", _FakeRanker)
@@ -167,3 +168,24 @@ def test_fit_ranker_uses_lambdarank_group_and_relevance(monkeypatch: MonkeyPatch
     assert score.shape == (valid.X.shape[0],)
     assert score.dtype == np.float32
     assert np.all(np.isfinite(score))
+
+
+def test_ranker_reproducibility() -> None:
+    train = _dataset(rows=160, groups=20)
+    valid = _dataset(rows=40, groups=5)
+    cfg = StrategyMLConfig(
+        ranker_n_estimators=30,
+        early_stopping_rounds=10,
+        n_jobs=2,  # test with multiple threads
+        ranking_mode="group_ndcg",
+        model_family="lgbm_lambdarank",
+    )
+
+    fit1 = fit_ranker(train=train, valid=valid, cfg=cfg)
+    score1 = predict_rank_score(fit1.model, valid)
+
+    fit2 = fit_ranker(train=train, valid=valid, cfg=cfg)
+    score2 = predict_rank_score(fit2.model, valid)
+
+    assert np.array_equal(score1, score2)
+
