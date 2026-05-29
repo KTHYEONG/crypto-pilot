@@ -244,8 +244,8 @@ class StrategyMLConfig:
     # Sample weighting 보정 설정
     sample_weight_quality_clip_min: float = 0.50
     sample_weight_cluster_balance_enabled: bool = True
-    # None=비활성(현행). 권장 초기값: 4380 (4h bar x 6/day x 365day x 0.5year = 6mo half-life)
-    sample_weight_time_decay_halflife_bars: int | None = None
+    # Phase 1C: 6mo halflife = 180d x 6bar/day = 1080 bars. None=disabled.
+    sample_weight_time_decay_halflife_bars: int | None = 1080
 
     def __post_init__(self) -> None:
         """Validate ML strategy parameters."""

@@ -118,6 +118,16 @@ def evaluate_symbol_data_sufficiency(
             exec_1m_ok = exec_1m_cov >= 0.95
 
     is_historical_stage5 = str(scope_name).strip().lower() == "historical_stage5_union"
+
+    # C1 inference panel: 신규 상장 심볼이 공유 time axis를 끌어내려
+    # adj_train + folds=1 붕괴를 유발하지 않도록 최소 패널 이력 체크.
+    # 기준: first_dt ≤ oos_start - FUTURES_INFERENCE_MIN_HISTORY_MONTHS
+    panel_history_ok = True
+    if is_historical_stage5:
+        _min_hist_months = int(OPT_FUTURES_CONFIG.get("FUTURES_INFERENCE_MIN_HISTORY_MONTHS", 33))
+        _panel_cutoff = pd.Timestamp(oos_start, tz="UTC") - pd.DateOffset(months=_min_hist_months)
+        panel_history_ok = first_dt <= _panel_cutoff
+
     if is_historical_stage5:
         # C1 학습 패널은 delisted 포함 historical union이므로
         # 전체 fetch/OOS 종단 커버리지를 강제하지 않는다.
@@ -125,6 +135,7 @@ def evaluate_symbol_data_sufficiency(
             warmup_ok
             and actual_is_bars >= min_is_bars
             and exec_1m_ok
+            and panel_history_ok
         )
     else:
         pass_flag = bool(
@@ -141,6 +152,8 @@ def evaluate_symbol_data_sufficiency(
         reason = "warmup_insufficient"
     elif actual_is_bars < min_is_bars:
         reason = "is_coverage_short"
+    elif not panel_history_ok and is_historical_stage5:
+        reason = "panel_history_insufficient"
     elif actual_oos_bars < min_oos_bars and not is_historical_stage5:
         reason = "oos_coverage_short"
     elif not exec_1m_ok:
