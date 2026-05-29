@@ -233,7 +233,10 @@ def test_build_label_panel_applies_ev_scaled_sample_weight() -> None:
     aligned = _aligned_for_labels()
     panel = build_label_panel(
         aligned,
-        StrategyMLConfig(label_horizon_bars=1, fee_bps=0.0, slippage_bps=0.0, min_group_size=2),
+        StrategyMLConfig(
+            label_horizon_bars=1, fee_bps=0.0, slippage_bps=0.0, min_group_size=2,
+            sample_weight_time_decay_halflife_bars=None,  # isolate EV-scaling, no time-decay
+        ),
     )
     liq_weight = np.clip(np.log1p(np.maximum(aligned.volume_2d, 0.0)), 0.25, 2.0).astype(np.float32)
     expected = np.where(
@@ -462,3 +465,105 @@ def test_build_label_panel_magnitude_target_short_is_signed_neg_exec_net_ret() -
     )
     # Metadata key must reflect signed contract
     assert panel.metadata["magnitude_target_short_key"] == "-exec_net_ret"
+
+
+# ---------------------------------------------------------------------------
+# Phase 1C — time-decay sample weighting (spec §A)
+# ---------------------------------------------------------------------------
+
+
+def _aligned_for_timedecay_flat(n_bars: int = 20) -> AlignedMarketData:
+    """Flat-price panel: all log returns = 0 → y_ev_abs = 0 → EV-scaling is neutralized.
+
+    With constant prices, sample_weight = liq_weight * time_decay only,
+    allowing pure isolation of the time-decay multiplier.
+    """
+    dt = np.array(
+        [np.datetime64("2026-01-01") + np.timedelta64(4 * i, "h") for i in range(n_bars)],
+        dtype="datetime64[ns]",
+    )
+    close_2d = np.full((n_bars, 2), 100.0, dtype=np.float64)  # flat → log-return = 0
+    open_2d = close_2d.copy()
+    return AlignedMarketData(
+        datetimes=dt,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        open_2d=open_2d,
+        high_2d=close_2d + 1.0,
+        low_2d=close_2d - 1.0,
+        close_2d=close_2d,
+        volume_2d=np.full((n_bars, 2), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((n_bars, 2), dtype=np.float64),
+        active_mask=np.ones((n_bars, 2), dtype=bool),
+        warm_mask=np.ones((n_bars, 2), dtype=bool),
+        entry_block_mask=np.zeros((n_bars, 2), dtype=bool),
+        kill_mask=np.zeros((n_bars, 2), dtype=bool),
+    )
+
+
+def test_time_decay_halflife_recent_weight_higher() -> None:
+    """halflife=1080 적용 시 모든 valid row의 가중치가 단조증가(최신 bar가 더 높음)해야 한다.
+
+    격리 전략: flat price(log-ret=0) → y_ev_abs=0 → EV-scaling 제거.
+    결과로 sample_weight = liq_weight(상수) * time_decay(단조감소 in t) → 순수 decay 검증.
+    """
+    # Arrange — flat prices neutralize EV-scaling variance
+    n_bars = 20
+    aligned = _aligned_for_timedecay_flat(n_bars)
+    cfg = StrategyMLConfig(
+        label_horizon_bars=1,
+        purge_bars=1,
+        embargo_bars=1,
+        sample_weight_time_decay_halflife_bars=1080,
+    )
+
+    # Act
+    panel = build_label_panel(aligned, cfg)
+
+    # eligible rows with non-zero weight
+    valid_rows = np.any(panel.sample_weight > 0, axis=1)
+    assert valid_rows.any(), "No valid rows with positive sample_weight"
+    valid_indices = np.where(valid_rows)[0]
+
+    # Assert — with flat prices, weights per row are all identical across symbols.
+    # time_decay[t] = exp(-lam * (T-1 - t)) so valid_indices[-1] > valid_indices[0] → strictly higher.
+    assert len(valid_indices) >= 2, "Need ≥ 2 valid rows to compare"
+    first_idx = int(valid_indices[0])
+    last_idx = int(valid_indices[-1])
+    w_first = float(panel.sample_weight[first_idx, 0])
+    w_last = float(panel.sample_weight[last_idx, 0])
+    assert w_last > w_first, (
+        f"time-decay: expected w[last]({w_last:.8f}) > w[first]({w_first:.8f})"
+    )
+    # Verify monotonicity across all consecutive valid rows
+    weights_col0 = panel.sample_weight[valid_indices, 0]
+    assert np.all(np.diff(weights_col0) > 0), (
+        "sample_weight must be strictly increasing along time axis when prices are flat"
+    )
+
+
+def test_time_decay_disabled_when_halflife_none() -> None:
+    """halflife=None 이면 time-decay 없이 uniform 가중치를 유지한다."""
+    # Arrange — flat prices: EV-scaling은 0으로 중립화. decay/no-decay 비교만 격리.
+    n_bars = 20
+    aligned = _aligned_for_timedecay_flat(n_bars)
+    cfg_decay = StrategyMLConfig(
+        label_horizon_bars=1, purge_bars=1, embargo_bars=1,
+        sample_weight_time_decay_halflife_bars=1080,
+    )
+    cfg_nodecay = StrategyMLConfig(
+        label_horizon_bars=1, purge_bars=1, embargo_bars=1,
+        sample_weight_time_decay_halflife_bars=None,
+    )
+
+    # Act
+    panel_decay = build_label_panel(aligned, cfg_decay)
+    panel_nodecay = build_label_panel(aligned, cfg_nodecay)
+
+    # Assert — decay variant must have strictly different (non-uniform) weights
+    # across time relative to no-decay variant
+    w_decay = panel_decay.sample_weight
+    w_nodecay = panel_nodecay.sample_weight
+    # At least one row should differ (time-decay shrinks early rows)
+    assert not np.allclose(w_decay, w_nodecay, atol=1e-6), (
+        "time-decay weights must differ from no-decay weights"
+    )

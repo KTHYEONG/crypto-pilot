@@ -166,6 +166,10 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_CALIB_PLATT_MIN_OOS_BARS": 80,
     # If True and the primary OOS window has too few samples, widen to AWF OOS-pool start (still no IS-pool).
     "FUTURES_CALIB_PLATT_OOS_WIDEN_TO_POOL": True,
+    # C1 inference panel minimum history: first_dt must be ≤ oos_start - N months.
+    # Ensures common time axis spans ≥ N months → folds=2 with train_months=24.
+    # (train_months + valid_months + test_months * 2 = 24+3+3*2 = 33 months required)
+    "FUTURES_INFERENCE_MIN_HISTORY_MONTHS": 33,
     # Covariance lookback for portfolio_constructor (~30 calendar days in bars per TF).
     "FUTURES_PORTFOLIO_COV_LOOKBACK": 180,
     "FUTURES_PORTFOLIO_COV_LOOKBACK_BY_TF": {"1h": 720, "4h": 180, "1d": 30},
