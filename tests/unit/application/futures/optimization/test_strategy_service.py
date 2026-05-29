@@ -222,7 +222,7 @@ def test_assert_strategy_alpha_ready_rejects_zero_only_merged_panel_window() -> 
         )
 
 
-def test_assert_strategy_alpha_ready_rejects_non_finite_v3_metadata() -> None:
+def test_assert_strategy_alpha_ready_rejects_non_finite_metadata() -> None:
     alpha_panel = pd.DataFrame(
         {
             "datetime": pd.to_datetime(["2026-01-01"]),
@@ -231,7 +231,7 @@ def test_assert_strategy_alpha_ready_rejects_non_finite_v3_metadata() -> None:
             "alpha_short": [0.0],
         }
     ).set_index(["datetime", "symbol"])
-    alpha_panel.attrs["alpha_forecast_v3"] = {
+    alpha_panel.attrs["alpha_forecast_metadata"] = {
         "q10_long": np.array([0.0], dtype=np.float32),
         "q50_long": np.array([np.inf], dtype=np.float32),
     }
@@ -248,7 +248,7 @@ def test_assert_strategy_alpha_ready_rejects_non_finite_v3_metadata() -> None:
         }
     }
 
-    with pytest.raises(RuntimeError, match="v3 metadata contains non-finite values"):
+    with pytest.raises(RuntimeError, match="metadata contains non-finite values"):
         assert_strategy_alpha_ready(
             ml_out=ml_out,
             oos_data_maps=oos,
@@ -259,15 +259,11 @@ def test_assert_strategy_alpha_ready_rejects_non_finite_v3_metadata() -> None:
 
 def test_run_active_strategy_output_bridge_allows_quick_backtest_neutral() -> None:
     cfg = FuturesRunConfig(
-        tf="4h",
+        timeframe="4h",
         reference_date=None,
-        symbols=("BTCUSDT",),
         trials=1,
         mode="quick-backtest",
-        strategy=None,
         sync_mode="full_history_master",
-        skip_universe=False,
-        skip_data_sync=False,
         force_universe_rebuild=False,
     )
     out = run_active_strategy_output_bridge(
@@ -289,15 +285,11 @@ def test_run_active_strategy_output_bridge_historical_stage5_union_uses_inferenc
     """ml_scope=historical_stage5_union 시 inference_panel을 학습 심볼로 사용해야 한다."""
     # Arrange
     cfg = FuturesRunConfig(
-        tf="4h",
+        timeframe="4h",
         reference_date=None,
-        symbols=("BTCUSDT",),
         trials=1,
-        mode="strategy-smoke",
-        strategy="ml_lambdamart_v1",
+        mode="strategy",
         sync_mode="full_history_master",
-        skip_universe=False,
-        skip_data_sync=False,
         force_universe_rebuild=False,
     )
     inference_panel = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
@@ -345,19 +337,15 @@ def test_run_active_strategy_output_bridge_historical_stage5_union_uses_inferenc
     assert isinstance(out, MLPipelineOutput)
 
 
-def test_run_active_strategy_output_bridge_accepts_strategy_smoke(
+def test_run_active_strategy_output_bridge_accepts_strategy_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cfg = FuturesRunConfig(
-        tf="4h",
+        timeframe="4h",
         reference_date=None,
-        symbols=("BTCUSDT",),
         trials=1,
-        mode="strategy-smoke",
-        strategy="ml_lambdamart_v1",
+        mode="strategy",
         sync_mode="full_history_master",
-        skip_universe=False,
-        skip_data_sync=False,
         force_universe_rebuild=False,
     )
     expected = MLPipelineOutput(
@@ -376,7 +364,7 @@ def test_run_active_strategy_output_bridge_accepts_strategy_smoke(
     def fake_run_ml_pipeline_for_universe(**kwargs: object) -> MLPipelineOutput:
         strategy_cfg = kwargs["strategy_cfg"]
         assert isinstance(strategy_cfg, StrategyConfig)
-        assert strategy_cfg.name == "ml_lambdamart_v1"
+        assert strategy_cfg.name == "lambdamart"
         assert kwargs["preloaded_data_maps"] == {}
         return expected
 

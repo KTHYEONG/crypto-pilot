@@ -6,8 +6,8 @@ from src.domain.futures.strategy.config import StrategyConfig, StrategyMLConfig
 
 
 def test_ml_strategy_name_is_supported() -> None:
-    cfg = StrategyConfig(name="ml_lambdamart_v1")
-    assert cfg.name == "ml_lambdamart_v1"
+    cfg = StrategyConfig(name="lambdamart")
+    assert cfg.name == "lambdamart"
 
 
 def test_ml_config_validates_leaf_bound() -> None:
@@ -95,7 +95,7 @@ def test_strategy_ml_config_new_modes_defaults() -> None:
     cfg = StrategyMLConfig()
     assert cfg.rank_target_mode == "forward_gross_rank"
     assert cfg.calibrator_target_mode == "rank_confidence"
-    assert cfg.post_cost_admission_mode == "rank_then_ev_gate"
+    assert cfg.post_cost_admission_mode == "rank_cs_neutral"
     assert cfg.oos_ic_target_source == "forward_gross_ret"
 
 
@@ -108,6 +108,32 @@ def test_strategy_ml_config_rejects_invalid_new_modes() -> None:
         StrategyMLConfig(post_cost_admission_mode="bad")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="oos_ic_target_source"):
         StrategyMLConfig(oos_ic_target_source="bad")  # type: ignore[arg-type]
+
+
+def test_strategy_ml_config_rank_cs_neutral_defaults() -> None:
+    """Phase 1 rank-native 파라미터 기본값 및 범위 검증."""
+    # Arrange / Act
+    cfg = StrategyMLConfig()
+
+    # Assert — 기본값 확인
+    assert cfg.rank_select_quantile == pytest.approx(0.33)
+    assert cfg.target_breadth == 8
+    assert cfg.ic_prior_for_gate == pytest.approx(0.03)
+    assert cfg.ev_secondary_tilt_weight == pytest.approx(0.0)
+
+
+def test_strategy_ml_config_rank_cs_neutral_boundary_validation() -> None:
+    """Phase 1 파라미터 경계 검증 — 유효하지 않은 값은 ValueError 발생."""
+    with pytest.raises(ValueError, match="rank_select_quantile"):
+        StrategyMLConfig(rank_select_quantile=0.0)
+    with pytest.raises(ValueError, match="rank_select_quantile"):
+        StrategyMLConfig(rank_select_quantile=0.5)
+    with pytest.raises(ValueError, match="target_breadth"):
+        StrategyMLConfig(target_breadth=1)
+    with pytest.raises(ValueError, match="ic_prior_for_gate"):
+        StrategyMLConfig(ic_prior_for_gate=0.21)
+    with pytest.raises(ValueError, match="ev_secondary_tilt_weight"):
+        StrategyMLConfig(ev_secondary_tilt_weight=1.1)
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +149,7 @@ def test_strategy_ml_config_regime_gate_defaults() -> None:
     # Assert
     assert cfg.regime_gate_enabled is True
     assert cfg.regime_exposure_bull == pytest.approx(1.0)
-    assert cfg.regime_exposure_bear == pytest.approx(0.0)
+    assert cfg.regime_exposure_bear == pytest.approx(0.5)  # partial exposure: L/S is market-hedged
     assert cfg.regime_exposure_chop == pytest.approx(1.0)
 
 

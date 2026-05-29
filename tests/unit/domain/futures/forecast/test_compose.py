@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from src.domain.futures.forecast.compose import compose_mu
 from src.domain.futures.forecast.contracts import (
@@ -44,7 +43,7 @@ def _make_cost(bps: float = 14.0) -> CostForecast:
     )
 
 
-_BASE_PARAMS: dict = {"BETA_ALPHA": 1.0, "EV_HURDLE_BPS": 10.0}
+_BASE_PARAMS: dict = {"BETA_ALPHA": 1.0, "EV_HURDLE_BPS": 10.0, "MAKER_RATIO": 0.0}
 
 
 class TestComposeMuHurdle:
@@ -171,3 +170,119 @@ class TestComposeMuOutputShapes:
         xs_l, _, mu_l, _ = compose_mu(af, cf, _BASE_PARAMS)
         pos_mask = mu_l > 0.0
         np.testing.assert_allclose(xs_l[pos_mask], mu_l[pos_mask], rtol=1e-9)
+
+
+class TestComposeMuRankCsNeutral:
+    """rank_cs_neutral admission mode 단위 테스트."""
+
+    _PARAMS_RANK: dict = {
+        "BETA_ALPHA": 1.0,
+        "EV_HURDLE_BPS": 10.0,
+        "POST_COST_ADMISSION_MODE": "rank_cs_neutral",
+        "RANK_SELECT_QUANTILE": 0.33,
+        "IC_PRIOR_FOR_GATE": 0.03,
+        "COMPOSER_SIGMA_BPS": 500.0,
+        "COST_GATE_BPS": 24.0,
+        "REBALANCE_BARS": 1,
+        "EV_SECONDARY_TILT_WEIGHT": 0.0,
+    }
+
+    def _make_alpha_with_rank(
+        self, rank_long_val: float = 1.0, rank_short_val: float = -1.0
+    ) -> AlphaForecast:
+        al = np.full(_SHAPE, 0.003, dtype=np.float32)
+        as_ = np.full(_SHAPE, 0.003, dtype=np.float32)
+        rank_l = np.full(_SHAPE, rank_long_val, dtype=np.float32)
+        rank_s = np.full(_SHAPE, rank_short_val, dtype=np.float32)
+        return AlphaForecast(
+            datetimes=np.array([]),
+            symbols=(),
+            alpha_long_2d=al,
+            alpha_short_2d=as_,
+            q10_long_2d=None, q50_long_2d=None, q90_long_2d=None,
+            q10_short_2d=None, q50_short_2d=None, q90_short_2d=None,
+            confidence_long_2d=None, confidence_short_2d=None,
+            eligible_mask=np.ones(_SHAPE, dtype=bool),
+            source="test",
+            artifact_hash=_DUMMY_HASH,
+            rank_score_long_2d=rank_l,
+            rank_score_short_2d=rank_s,
+        )
+
+    def test_rank_cs_neutral_rank_none_falls_back_to_ev_gate(self) -> None:
+        """rank_score가 None이면 rank_cs_neutral은 xs를 z-score 없이 반환한다."""
+        # Arrange
+        af_no_rank = _make_alpha(long_val=0.003, short_val=0.003)
+        cf = _make_cost(bps=0.0)
+
+        # Act
+        xs_l, xs_s, _, _ = compose_mu(af_no_rank, cf, self._PARAMS_RANK)
+
+        # Assert — rank_score None이면 mu_long == 0.003 (> 0 이므로 isfinite passes)
+        assert xs_l.shape == _SHAPE
+        assert xs_s.shape == _SHAPE
+
+    def test_rank_cs_neutral_xs_nonnegative(self) -> None:
+        """rank_cs_neutral 모드: xs는 선택된 포지션에만 양수값, 나머지 0."""
+        # Arrange
+        af = self._make_alpha_with_rank()
+        cf = _make_cost(bps=0.0)
+
+        # Act
+        xs_l, xs_s, _, _ = compose_mu(af, cf, self._PARAMS_RANK)
+
+        # Assert — xs는 0 이상이어야 함 (z-score 선택 구간)
+        assert np.all(xs_l >= 0.0)
+        assert np.all(xs_s >= 0.0)
+
+    def test_rank_cs_neutral_output_shape(self) -> None:
+        """rank_cs_neutral 모드: 출력 shape이 입력과 동일."""
+        # Arrange
+        af = self._make_alpha_with_rank()
+        cf = _make_cost(bps=0.0)
+
+        # Act
+        xs_l, xs_s, mu_l, mu_s = compose_mu(af, cf, self._PARAMS_RANK)
+
+        # Assert
+        for arr in (xs_l, xs_s, mu_l, mu_s):
+            assert arr.shape == _SHAPE
+
+    def test_rank_cs_neutral_varied_scores_select_top_quantile(self) -> None:
+        """분산된 rank score에서 상위 분위만 선택된다."""
+        # Arrange — 10개 종목, 5개 bar, 상위 2개(top 20%)가 높은 rank
+        shape = (5, 10)
+        rank_l = np.tile(np.arange(10, dtype=np.float32), (5, 1))  # 0~9
+        rank_s = np.tile(-np.arange(10, dtype=np.float32), (5, 1))  # 0~-9
+        al = np.full(shape, 0.003, dtype=np.float32)
+        as_ = np.full(shape, 0.003, dtype=np.float32)
+        af = AlphaForecast(
+            datetimes=np.array([]),
+            symbols=(),
+            alpha_long_2d=al,
+            alpha_short_2d=as_,
+            q10_long_2d=None, q50_long_2d=None, q90_long_2d=None,
+            q10_short_2d=None, q50_short_2d=None, q90_short_2d=None,
+            confidence_long_2d=None, confidence_short_2d=None,
+            eligible_mask=np.ones(shape, dtype=bool),
+            source="test",
+            artifact_hash=_DUMMY_HASH,
+            rank_score_long_2d=rank_l,
+            rank_score_short_2d=rank_s,
+        )
+        cf = CostForecast(
+            execution_cost_bps_2d=np.zeros(shape),
+            execution_cost_fraction_2d=np.zeros(shape),
+            uncertainty_bps_2d=np.zeros(shape),
+            capacity_notional_2d=None,
+            source="test",
+        )
+        params = {**self._PARAMS_RANK, "RANK_SELECT_QUANTILE": 0.30}
+
+        # Act
+        xs_l, xs_s, _, _ = compose_mu(af, cf, params)
+
+        # Assert — top 30% of 10 = 3 종목이 선택됨 → xs_l의 nonzero ≤ 3 per bar
+        for t in range(5):
+            nz_long = int(np.count_nonzero(xs_l[t] > 0.0))
+            assert nz_long <= 3, f"bar {t}: {nz_long} selected, expected <= 3"

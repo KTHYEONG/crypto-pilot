@@ -146,7 +146,7 @@ def test_build_ml_strategy_alpha_emits_orchestration_tags(
     )
 
     cfg = StrategyConfig(
-        name="ml_lambdamart_v1",
+        name="lambdamart",
         ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
     )
     caplog.set_level("INFO")
@@ -280,7 +280,7 @@ def test_build_ml_strategy_alpha_filters_nonfinite_and_clips_test_outlier(
     )
 
     cfg = StrategyConfig(
-        name="ml_lambdamart_v1",
+        name="lambdamart",
         ml=StrategyMLConfig(
             min_group_size=2,
             train_months=1,
@@ -351,7 +351,7 @@ def test_build_ml_strategy_alpha_anchored_preserves_short_side_opportunity(
     )
 
     cfg = StrategyConfig(
-        name="ml_lambdamart_v1",
+        name="lambdamart",
         ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
     )
     panel = build_ml_strategy_alpha_anchored(
@@ -472,7 +472,7 @@ def test_build_ml_strategy_alpha_anchored_test_alpha_independent_of_future_label
     )
 
     cfg = StrategyConfig(
-        name="ml_lambdamart_v1",
+        name="lambdamart",
         ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
     )
 
@@ -725,7 +725,7 @@ def test_build_ml_strategy_alpha_virtual_refit_uses_own_train_normalization(
     )
 
     cfg = StrategyConfig(
-        name="ml_lambdamart_v1",
+        name="lambdamart",
         ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
     )
     build_ml_strategy_alpha(data_maps={}, symbols=list(symbols), tf="4h", cfg=cfg)
@@ -886,7 +886,7 @@ def test_build_ml_strategy_alpha_selects_best_horizon_and_records_metadata(
     )
 
     cfg = StrategyConfig(
-        name="ml_lambdamart_v1",
+        name="lambdamart",
         ml=StrategyMLConfig(
             min_group_size=2,
             train_months=1,
@@ -1020,7 +1020,7 @@ def test_build_ml_strategy_alpha_gate_uses_oos_alpha_p95_not_in_fold(
     )
 
     cfg = StrategyConfig(
-        name="ml_lambdamart_v1",
+        name="lambdamart",
         ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
     )
     build_ml_strategy_alpha(data_maps={}, symbols=list(symbols), tf="4h", cfg=cfg)
@@ -1120,7 +1120,7 @@ def test_build_ml_strategy_alpha_anchored_gate_uses_oos_alpha_p95_not_in_fold(
     )
 
     cfg = StrategyConfig(
-        name="ml_lambdamart_v1",
+        name="lambdamart",
         ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
     )
     build_ml_strategy_alpha_anchored(
@@ -1244,7 +1244,7 @@ def test_build_ml_strategy_alpha_logs_cost_wall_gate_metric_source(
     )
 
     cfg = StrategyConfig(
-        name="ml_lambdamart_v1",
+        name="lambdamart",
         ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
     )
     caplog.set_level("INFO")

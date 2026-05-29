@@ -47,7 +47,7 @@ def build_strategy_alpha(
 
     """
     _assert_no_legacy_imports()
-    if cfg.name == "ml_lambdamart_v1":
+    if cfg.name == "lambdamart":
         from src.domain.futures.strategy.ml_builder import build_ml_strategy_alpha
 
         return build_ml_strategy_alpha(data_maps=data_maps, symbols=symbols, tf=tf, cfg=cfg)
