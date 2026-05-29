@@ -504,6 +504,14 @@ def _build_prebuilt_full_arrays(
             if "slot_rank_score" in raw_full.columns
             else np.zeros(len(raw_full))
         )
+        if "rank_score_long" in raw_full.columns:
+            trimmed_sig["rank_score_long_2d"] = raw_full["rank_score_long"].to_numpy(
+                dtype=np.float64, copy=False
+            )
+        if "rank_score_short" in raw_full.columns:
+            trimmed_sig["rank_score_short_2d"] = raw_full["rank_score_short"].to_numpy(
+                dtype=np.float64, copy=False
+            )
 
         if "funding_rate_sum" in raw_full.columns:
             trimmed_sig["funding_rate_sum"] = raw_full["funding_rate_sum"].to_numpy(

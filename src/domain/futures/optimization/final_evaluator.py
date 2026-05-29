@@ -144,7 +144,7 @@ def _rebuild_member_strategy_config(
 
     if base_cfg is not None:
         return replace(base_cfg, ml=member_ml_cfg)
-    return StrategyConfig(name="ml_lambdamart_v1", ml=member_ml_cfg)
+    return StrategyConfig(name="lambdamart", ml=member_ml_cfg)
 
 
 def _compute_expectancy_retention_pct(oos_expectancy: float, is_expectancy: float) -> float:
@@ -1115,7 +1115,7 @@ def run_final_oos_evaluation(
             Path(project_root),
             cand_metrics,
             pbo_champ_eff,
-            bool(args.bypass_champion_guard),
+            False,  # bypass_champion_guard removed from CLI
         )
         if not allow:
             gate_ok = False
