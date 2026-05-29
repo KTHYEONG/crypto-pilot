@@ -17,10 +17,10 @@ Translate the Blueprint into working code with surgical precision. Follow instru
 
 ## Output Format
 ```md
-### 🏗️ Implement: [Blueprint Name]
-- **Target Files:** `[Paths]`
-- **Blueprint Alignment:**
+### 🏗️ 코드 구현: [Blueprint Name]
+- **작업 파일 목록:** `[Paths]`
+- **작업 진행률:**
   - [ ] Step 1: [Short name]
   - [ ] Step 2: [Short name]
-- **Status:** Ready for `verify` | **Issues:** [Conflict/Drift noted]
+- **현재 상태 및 이슈:** [Status / Conflicts noted]
 ```
