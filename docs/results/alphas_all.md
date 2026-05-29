@@ -123,3 +123,26 @@
 * **향후 권장 방향성 (spec §2.4 분기):**
   * **A. Feature Engineering Track (3주):** 모멘텀(단기 리턴 자기상관), 섹터 중립화(상관구조), 유동성 팩터, Microstructure 신호 보강.
   * **B. IS Window Redesign Track (1주):** 학습 윈도우를 bear-heavy(2022-2023)에서 bull-recovery(2024-2025)로 변경하여 OOS 일반화 유도.
+
+---
+
+## 6. alpha_ml_generalization_rebuild.md: Alpha ML 일반화 재구축 후속 실측
+* **측정일시:** 2026-05-29 | **레퍼런스:** `docs/specs/alpha_ml_generalization_rebuild.md` | **상태:** 완료 (forward gross rank target + OOS rank IC SSOT 반영)
+* **실행 환경:** `--skip-universe --skip-data-sync`, `strategy-smoke` / `strategy`, `ml_lambdamart_v1`, `tf=4h`, `reference-date=2026-05-01`
+* **핵심 반영 사항:** `ranker_enabled=True` 기본값 전환, `forward_gross_ret` 기반 OOS 측정, `rank_target_mode=forward_gross_rank`, `rank_then_ev_gate` admission 경로, `oos_forward_rank_ic` / `generalization_report` attrs 추가.
+* **strategy-smoke 실측:** 9 symbols / `trials=1`
+  * `OOS-RANKIC`: `ic=0.0185`, `t=2.16`, `n_bars=1590`, `cofinite_p50=12.0`, `bars_ge5_ratio=1.000`, `snr_oos_finite=1.000`
+  * `ML_EVAL`: `ic=0.0115`, `t=5.60`, `hit=0.139`, `obs=6012`
+  * `ML_COST`: `gate=75.0bps`, `floor=24.0bps`, `pass=true`
+  * `IC gate`: WARN 유지, `target_oos_alpha_absent_preflight` 경고 관측
+* **strategy 본 실행 실측 1:** 9 symbols / `trials=1`
+  * `OOS-RANKIC`: `ic=-0.0036`, `t=-0.37`, `n_bars=1590`, `cofinite_p50=12.0`, `bars_ge5_ratio=1.000`, `snr_oos_finite=1.000`
+  * `ML_EVAL`: `ic=0.0129`, `t=6.00`, `hit=0.143`, `obs=6012`
+  * `ML_COST`: `gate=75.0bps`, `floor=24.0bps`, `pass=true`
+  * `IC gate`: WARN 유지
+* **strategy 본 실행 실측 2:** 9 symbols / `trials=5`
+  * `OOS-RANKIC`: `ic=0.0216`, `t=2.44`, `n_bars=1590`, `cofinite_p50=12.0`, `bars_ge5_ratio=1.000`, `snr_oos_finite=1.000`
+  * `ML_EVAL`: `ic=0.0096`, `t=4.75`, `hit=0.141`, `obs=6012`
+  * `ML_COST`: `gate=75.0bps`, `floor=24.0bps`, `pass=true`
+  * `IC gate`: WARN 유지
+* **해석:** smoke와 `strategy` 5-trial에서 OOS ordering edge가 양수로 재측정됐고, 1-trial에서는 음수로 흔들렸다. 즉, 개선 후에도 OOS edge는 존재하지만 trial 수와 fold 샘플링에 따라 변동성이 남아 있다. 비용 게이트는 세 실행 모두 통과했다.
