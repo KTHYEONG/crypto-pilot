@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 
 from src.core.settings import round_trip_cost_bps
 from src.domain.futures.optimization.opt_config import (
@@ -34,7 +36,12 @@ from src.domain.futures.strategy.common.validation import (
     validate_long_matrix,
 )
 from src.domain.futures.strategy.config import StrategyConfig, StrategyMLConfig
-from src.domain.futures.strategy.contracts import FeaturePanel, LabelPanel, LongMatrixDataset
+from src.domain.futures.strategy.contracts import (
+    FeaturePanel,
+    FoldSpec,
+    LabelPanel,
+    LongMatrixDataset,
+)
 from src.domain.futures.strategy.dataset import (
     build_long_matrix,
     make_walk_forward_folds,
@@ -179,6 +186,145 @@ class _FoldPredictResult:
     score_test_short: np.ndarray
     ev_valid_long: np.ndarray
     ev_valid_short: np.ndarray
+def _train_predict_single_fold(
+    fold: FoldSpec,
+    features: FeaturePanel,
+    labels: LabelPanel,
+    ml_cfg: StrategyMLConfig,
+    long_rel: np.ndarray,
+    short_rel: np.ndarray,
+    long_mag: np.ndarray,
+    short_mag: np.ndarray,
+) -> dict[str, Any]:
+    """Train and predict a single walk-forward or virtual fold in parallel-safe manner."""
+    # 1. Feature normalization and imputation on fold slices
+    train_values = features.values[fold.train_start : fold.train_end].astype(
+        np.float64, copy=False
+    )
+    bounds = fit_robust_bounds(train_values, clip_quantile=0.995)
+    clipped_values = apply_robust_bounds(features.values.astype(np.float64, copy=False), bounds)
+    imputer = fit_missing_value_imputer(train_values)
+    normalized = apply_missing_value_imputer(clipped_values, imputer).astype(
+        np.float32, copy=False
+    )
+    normalized_features = FeaturePanel(
+        datetimes=features.datetimes,
+        symbols=features.symbols,
+        values=normalized,
+        feature_names=features.feature_names,
+        valid_mask=features.valid_mask,
+        availability_masks=features.availability_masks,
+        metadata={
+            **features.metadata,
+            "train_imputer_applied": True,
+            "missing_imputer": "train_median",
+        },
+    )
+
+    # 2. Build Side Matrices
+    train_long = _build_side_matrix(
+        features=normalized_features,
+        labels=labels,
+        start=fold.train_start,
+        end=fold.train_end,
+        fold=fold,
+        split="train",
+        min_group_size=ml_cfg.min_group_size,
+        relevance_override=long_rel,
+        ev_target_override=long_mag,
+    )
+    valid_long = _build_side_matrix(
+        features=normalized_features,
+        labels=labels,
+        start=fold.valid_start,
+        end=fold.valid_end,
+        fold=fold,
+        split="valid",
+        min_group_size=ml_cfg.min_group_size,
+        relevance_override=long_rel,
+        ev_target_override=long_mag,
+    )
+    test_long = _build_side_matrix(
+        features=normalized_features,
+        labels=labels,
+        start=fold.test_start,
+        end=fold.test_end,
+        fold=fold,
+        split="test",
+        min_group_size=ml_cfg.min_group_size,
+        relevance_override=long_rel,
+        ev_target_override=long_mag,
+    )
+    train_short = _build_side_matrix(
+        features=normalized_features,
+        labels=labels,
+        start=fold.train_start,
+        end=fold.train_end,
+        fold=fold,
+        split="train",
+        min_group_size=ml_cfg.min_group_size,
+        relevance_override=short_rel,
+        ev_target_override=short_mag,
+    )
+    valid_short = _build_side_matrix(
+        features=normalized_features,
+        labels=labels,
+        start=fold.valid_start,
+        end=fold.valid_end,
+        fold=fold,
+        split="valid",
+        min_group_size=ml_cfg.min_group_size,
+        relevance_override=short_rel,
+        ev_target_override=short_mag,
+    )
+    test_short = _build_side_matrix(
+        features=normalized_features,
+        labels=labels,
+        start=fold.test_start,
+        end=fold.test_end,
+        fold=fold,
+        split="test",
+        min_group_size=ml_cfg.min_group_size,
+        relevance_override=short_rel,
+        ev_target_override=short_mag,
+    )
+
+    validate_long_matrix(train_long)
+    validate_long_matrix(valid_long)
+    validate_long_matrix(test_long)
+    validate_long_matrix(train_short)
+    validate_long_matrix(valid_short)
+    validate_long_matrix(test_short)
+
+    # 3. Model training & prediction
+    _fold_result = _fit_predict_fold_dual_side(
+        train_long=train_long,
+        valid_long=valid_long,
+        test_long=test_long,
+        train_short=train_short,
+        valid_short=valid_short,
+        test_short=test_short,
+        ml_cfg=ml_cfg,
+    )
+
+    return {
+        "fold_id": fold.fold_id,
+        "test_long_index_map": test_long.index_map,
+        "test_short_index_map": test_short.index_map,
+        "ev_test_long": _fold_result.ev_test_long,
+        "ev_test_short": _fold_result.ev_test_short,
+        "quant_test_long": _fold_result.quant_test_long,
+        "quant_test_short": _fold_result.quant_test_short,
+        "conf_test_long": _fold_result.conf_test_long,
+        "conf_test_short": _fold_result.conf_test_short,
+        "score_test_long": _fold_result.score_test_long,
+        "score_test_short": _fold_result.score_test_short,
+        "ev_valid_long": _fold_result.ev_valid_long,
+        "ev_valid_short": _fold_result.ev_valid_short,
+        "test_long_shape_0": test_long.X.shape[0],
+        "train_long_shape_0": train_long.X.shape[0],
+        "valid_long_shape_0": valid_long.X.shape[0],
+    }
 
 
 def _fit_predict_fold_dual_side(
@@ -499,173 +645,169 @@ def build_ml_strategy_alpha(
     score_grid = np.full_like(ev_long_grid, np.nan, dtype=np.float32)
     valid_ev_long_all: list[np.ndarray] = []
     valid_ev_short_all: list[np.ndarray] = []
-    for fold in folds:
+
+    # 1. Check if there is an uncovered live/OOS window at the end of the timeline
+    last_test_end = folds[-1].test_end
+    total_bars = features.values.shape[0]
+    all_folds = list(folds)
+    v_fold = None
+    if last_test_end < total_bars:
         _logger.debug(
-            ".. ML_FOLD: id=%d train=[%d,%d) valid=[%d,%d) test=[%d,%d)",
-            fold.fold_id,
-            fold.train_start,
-            fold.train_end,
-            fold.valid_start,
-            fold.valid_end,
-            fold.test_start,
-            fold.test_end,
+            "[ML-OOS-FILL] Uncovered OOS/live window detected: [%d, %d)", last_test_end, total_bars
         )
-        t_pre_start = time.perf_counter()
-        train_values = features.values[fold.train_start : fold.train_end].astype(
-            np.float64, copy=False
+        # Construct virtual fold Spec
+        v_size = folds[-1].valid_end - folds[-1].valid_start
+        v_train_end = last_test_end - v_size
+        _v_purge = getattr(ml_cfg, "purge_bars", 0)
+        _v_embargo = getattr(ml_cfg, "embargo_bars", 0)
+        v_fold = FoldSpec(
+            fold_id=len(folds),
+            train_start=0,
+            train_end=v_train_end,
+            valid_start=min(v_train_end + _v_purge, max(v_train_end, last_test_end - 1)),
+            valid_end=last_test_end,
+            test_start=min(last_test_end + _v_embargo, max(last_test_end, total_bars - 1)),
+            test_end=total_bars,
+            purge_bars=_v_purge,
+            embargo_bars=_v_embargo,
         )
-        bounds = fit_robust_bounds(train_values, clip_quantile=0.995)
-        clipped_values = apply_robust_bounds(features.values.astype(np.float64, copy=False), bounds)
-        imputer = fit_missing_value_imputer(train_values)
-        normalized = apply_missing_value_imputer(clipped_values, imputer).astype(
-            np.float32, copy=False
-        )
-        normalized_features = FeaturePanel(
-            datetimes=features.datetimes,
-            symbols=features.symbols,
-            values=normalized,
-            feature_names=features.feature_names,
-            valid_mask=features.valid_mask,
-            availability_masks=features.availability_masks,
-            metadata={
-                **features.metadata,
-                "train_imputer_applied": True,
-                "missing_imputer": "train_median",
-            },
-        )
-        t_fold_split_preprocess += time.perf_counter() - t_pre_start
+        all_folds.append(v_fold)
 
-        t_db_start = time.perf_counter()
-        long_rel, short_rel, long_mag, short_mag = _resolve_side_targets(labels)
-        train_long = _build_side_matrix(
-            features=normalized_features,
-            labels=labels,
-            start=fold.train_start,
-            end=fold.train_end,
-            fold=fold,
-            split="train",
-            min_group_size=ml_cfg.min_group_size,
-            relevance_override=long_rel,
-            ev_target_override=long_mag,
+    # 2. Dynamic CPU & Thread Allocation to maximize CPU and prevent WSL OOM
+    import sys
+    cpu_count = os.cpu_count() or 4
+    is_pytest = "pytest" in sys.modules
+    if ml_cfg.parallel_folds and len(all_folds) > 1 and not is_pytest:
+        if ml_cfg.parallel_fold_workers <= 0:
+            # Optimal fallback for WSL with 8 processes and 16GB RAM:
+            # Set to 6 folds in parallel. Under loky, memory reuse prevents OOM.
+            folds_jobs = min(6, max(1, cpu_count - 2))
+        else:
+            folds_jobs = ml_cfg.parallel_fold_workers
+        
+        # Enforce n_jobs = 1 to prevent CPU oversubscription thrashing.
+        lgb_n_jobs = 1
+        _logger.info(
+            "🧠 ML-PARALLEL: Training %d folds in parallel. LightGBM n_jobs forced to %d.",
+            folds_jobs,
+            lgb_n_jobs,
         )
-        valid_long = _build_side_matrix(
-            features=normalized_features,
-            labels=labels,
-            start=fold.valid_start,
-            end=fold.valid_end,
-            fold=fold,
-            split="valid",
-            min_group_size=ml_cfg.min_group_size,
-            relevance_override=long_rel,
-            ev_target_override=long_mag,
+    else:
+        folds_jobs = 1
+        lgb_n_jobs = max(1, cpu_count - 2) if ml_cfg.n_jobs <= 0 else ml_cfg.n_jobs
+        _logger.info(
+            "🧠 ML-SEQUENTIAL: Training folds sequentially. LightGBM n_jobs=%d.",
+            lgb_n_jobs,
         )
-        test_long = _build_side_matrix(
-            features=normalized_features,
-            labels=labels,
-            start=fold.test_start,
-            end=fold.test_end,
-            fold=fold,
-            split="test",
-            min_group_size=ml_cfg.min_group_size,
-            relevance_override=long_rel,
-            ev_target_override=long_mag,
-        )
-        train_short = _build_side_matrix(
-            features=normalized_features,
-            labels=labels,
-            start=fold.train_start,
-            end=fold.train_end,
-            fold=fold,
-            split="train",
-            min_group_size=ml_cfg.min_group_size,
-            relevance_override=short_rel,
-            ev_target_override=short_mag,
-        )
-        valid_short = _build_side_matrix(
-            features=normalized_features,
-            labels=labels,
-            start=fold.valid_start,
-            end=fold.valid_end,
-            fold=fold,
-            split="valid",
-            min_group_size=ml_cfg.min_group_size,
-            relevance_override=short_rel,
-            ev_target_override=short_mag,
-        )
-        test_short = _build_side_matrix(
-            features=normalized_features,
-            labels=labels,
-            start=fold.test_start,
-            end=fold.test_end,
-            fold=fold,
-            split="test",
-            min_group_size=ml_cfg.min_group_size,
-            relevance_override=short_rel,
-            ev_target_override=short_mag,
-        )
-        validate_long_matrix(train_long)
-        validate_long_matrix(valid_long)
-        validate_long_matrix(test_long)
-        validate_long_matrix(train_short)
-        validate_long_matrix(valid_short)
-        validate_long_matrix(test_short)
-        t_dataset_build += time.perf_counter() - t_db_start
 
-        t_fp_start = time.perf_counter()
-        _fold_result = _fit_predict_fold_dual_side(
-            train_long=train_long,
-            valid_long=valid_long,
-            test_long=test_long,
-            train_short=train_short,
-            valid_short=valid_short,
-            test_short=test_short,
-            ml_cfg=ml_cfg,
-        )
-        t_fit_predict_fold += time.perf_counter() - t_fp_start
+    # Apply resolved dynamic n_jobs
+    ml_cfg = replace(ml_cfg, n_jobs=lgb_n_jobs)
 
-        t_grid_start = time.perf_counter()
-        ev_test_long = _fold_result.ev_test_long
-        ev_test_short = _fold_result.ev_test_short
-        quant_test_long = _fold_result.quant_test_long
-        quant_test_short = _fold_result.quant_test_short
-        conf_test_long = _fold_result.conf_test_long
-        conf_test_short = _fold_result.conf_test_short
-        score_test = _fold_result.score_test_long
-        score_test_short = _fold_result.score_test_short
-        ev_valid_long = _fold_result.ev_valid_long
-        ev_valid_short = _fold_result.ev_valid_short
-        _logger.debug(
-            ".. ML_RANKER: fold=%d train_n=%d valid_n=%d test_n=%d",
-            fold.fold_id,
-            int(train_long.X.shape[0]),
-            int(valid_long.X.shape[0]),
-            int(test_long.X.shape[0]),
-        )
-        valid_ev_long_all.append(ev_valid_long)
-        valid_ev_short_all.append(ev_valid_short)
-        # Pre-clip EV distribution (fold-level, before max(·,0))
-        if ev_test_long.size > 0:
-            _ev_neg_ratio = float(np.mean(ev_test_long < 0.0))
-            _ev_p50 = float(np.percentile(ev_test_long, 50)) * 1e4
-            _ev_p90 = float(np.percentile(ev_test_long, 90)) * 1e4
-            _ev_p95 = float(np.percentile(ev_test_long, 95)) * 1e4
-            _logger.info(
-                "🔬 [EV-PRECLIP] fold=%d neg=%.1f%% p50=%.1fbps p90=%.1fbps p95=%.1fbps n=%d",
-                fold.fold_id,
-                100.0 * _ev_neg_ratio,
-                _ev_p50,
-                _ev_p90,
-                _ev_p95,
-                int(ev_test_long.size),
+    # 3. Resolve target arrays once to optimize memory allocation
+    long_rel, short_rel, long_mag, short_mag = _resolve_side_targets(labels)
+
+    # 4. joblib Parallel execution with sequential fallback (pytest-friendly)
+    t_parallel_start = time.perf_counter()
+    if folds_jobs > 1:
+        results = Parallel(n_jobs=folds_jobs, backend="loky")(
+            delayed(_train_predict_single_fold)(
+                fold=fold,
+                features=features,
+                labels=labels,
+                ml_cfg=ml_cfg,
+                long_rel=long_rel,
+                short_rel=short_rel,
+                long_mag=long_mag,
+                short_mag=short_mag,
             )
-        for row, (t_idx, s_idx) in enumerate(test_long.index_map):
+            for fold in all_folds
+        )
+    else:
+        results = [
+            _train_predict_single_fold(
+                fold=fold,
+                features=features,
+                labels=labels,
+                ml_cfg=ml_cfg,
+                long_rel=long_rel,
+                short_rel=short_rel,
+                long_mag=long_mag,
+                short_mag=short_mag,
+            )
+            for fold in all_folds
+        ]
+    t_parallel_elapsed = time.perf_counter() - t_parallel_start
+    _logger.info(
+        "🧠 ML-PARALLEL: Completed all %d folds in %.2f ms",
+        len(all_folds),
+        t_parallel_elapsed * 1000.0,
+    )
+
+    # 5. Grid Assembly and Post-processing
+    t_grid_start = time.perf_counter()
+    for res in results:
+        fold_id = res["fold_id"]
+        is_virtual = (v_fold is not None and fold_id == v_fold.fold_id)
+
+        ev_test_long = res["ev_test_long"]
+        ev_test_short = res["ev_test_short"]
+        quant_test_long = res["quant_test_long"]
+        quant_test_short = res["quant_test_short"]
+        conf_test_long = res["conf_test_long"]
+        conf_test_short = res["conf_test_short"]
+        score_test = res["score_test_long"]
+        score_test_short = res["score_test_short"]
+
+        if not is_virtual:
+            valid_ev_long_all.append(res["ev_valid_long"])
+            valid_ev_short_all.append(res["ev_valid_short"])
+            
+            _logger.debug(
+                ".. ML_RANKER: fold=%d train_n=%d valid_n=%d test_n=%d",
+                fold_id,
+                int(res["train_long_shape_0"]),
+                int(res["valid_long_shape_0"]),
+                int(res["test_long_shape_0"]),
+            )
+            if ev_test_long.size > 0:
+                _ev_neg_ratio = float(np.mean(ev_test_long < 0.0))
+                _ev_p50 = float(np.percentile(ev_test_long, 50)) * 1e4
+                _ev_p90 = float(np.percentile(ev_test_long, 90)) * 1e4
+                _ev_p95 = float(np.percentile(ev_test_long, 95)) * 1e4
+                _logger.info(
+                    "🔬 [EV-PRECLIP] fold=%d neg=%.1f%% p50=%.1fbps p90=%.1fbps p95=%.1fbps n=%d",
+                    fold_id,
+                    100.0 * _ev_neg_ratio,
+                    _ev_p50,
+                    _ev_p90,
+                    _ev_p95,
+                    int(ev_test_long.size),
+                )
+        else:
+            if ev_test_long.size > 0:
+                _vev_neg_ratio = float(np.mean(ev_test_long < 0.0))
+                _vev_p50 = float(np.percentile(ev_test_long, 50)) * 1e4
+                _vev_p90 = float(np.percentile(ev_test_long, 90)) * 1e4
+                _vev_p95 = float(np.percentile(ev_test_long, 95)) * 1e4
+                _logger.info(
+                    "🔬 [EV-PRECLIP] vrefit neg=%.1f%% p50=%.1fbps p90=%.1fbps p95=%.1fbps n=%d",
+                    100.0 * _vev_neg_ratio,
+                    _vev_p50,
+                    _vev_p90,
+                    _vev_p95,
+                    int(ev_test_long.size),
+                )
+
+        # Write directly into grids via fancy indexing
+        for row, (t_idx, s_idx) in enumerate(res["test_long_index_map"]):
             q10_long_grid[int(t_idx), int(s_idx)] = quant_test_long.q10[row]
             q50_long_grid[int(t_idx), int(s_idx)] = quant_test_long.q50[row]
             q90_long_grid[int(t_idx), int(s_idx)] = quant_test_long.q90[row]
             confidence_long_grid[int(t_idx), int(s_idx)] = conf_test_long[row]
             ev_long_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_long[row], 0.0))
             score_grid[int(t_idx), int(s_idx)] = score_test[row]
-        for row, (t_idx, s_idx) in enumerate(test_short.index_map):
+
+        for row, (t_idx, s_idx) in enumerate(res["test_short_index_map"]):
             q10_short_grid[int(t_idx), int(s_idx)] = quant_test_short.q10[row]
             q50_short_grid[int(t_idx), int(s_idx)] = quant_test_short.q50[row]
             q90_short_grid[int(t_idx), int(s_idx)] = quant_test_short.q90[row]
@@ -673,218 +815,40 @@ def build_ml_strategy_alpha(
             ev_short_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_short[row], 0.0))
             if np.isnan(score_grid[int(t_idx), int(s_idx)]):
                 score_grid[int(t_idx), int(s_idx)] = score_test_short[row]
-        _logger.debug(
-            ".. ML_CALIB: fold=%d ev_mean=%.6e ev_p10=%.6e ev_p90=%.6e",
-            fold.fold_id,
-            float(np.mean(ev_test_long, dtype=np.float32)) if ev_test_long.size > 0 else 0.0,
-            float(np.percentile(ev_test_long, 10)) if ev_test_long.size > 0 else 0.0,
-            float(np.percentile(ev_test_long, 90)) if ev_test_long.size > 0 else 0.0,
-        )
-        _logger.debug(
-            ".. ML_OOS: fold=%d test_rows=%d alpha_nz=%.4f",
-            fold.fold_id,
-            int(test_long.X.shape[0]),
-            float(np.count_nonzero(ev_test_long) / max(1, ev_test_long.size)),
-        )
-        t_grid_assembly += time.perf_counter() - t_grid_start
 
-    # [ML-OOS-FILL] Check if there is an uncovered live/OOS window at the end of the timeline
-    last_test_end = folds[-1].test_end
-    total_bars = features.values.shape[0]
-    if last_test_end < total_bars:
-        _logger.debug(
-            "[ML-OOS-FILL] Uncovered OOS/live window detected: [%d, %d)", last_test_end, total_bars
-        )
-        # Construct virtual fold for the remaining live window — same contract as regular folds
-        v_size = folds[-1].valid_end - folds[-1].valid_start
-        v_train_start = 0
-        v_train_end = last_test_end - v_size
-        v_valid_start = v_train_end
-        v_valid_end = last_test_end
-        v_test_start = last_test_end
-        v_test_end = total_bars
-
-        from src.domain.futures.strategy.contracts import FoldSpec
-
-        t_pre_start = time.perf_counter()
-        _v_purge = getattr(ml_cfg, "purge_bars", 0)
-        _v_embargo = getattr(ml_cfg, "embargo_bars", 0)
-        _v_purged_valid_start = min(v_train_end + _v_purge, max(v_train_end, v_valid_end - 1))
-        _v_embargoed_test_start = min(
-            last_test_end + _v_embargo, max(last_test_end, v_test_end - 1)
-        )
-        v_fold = FoldSpec(
-            fold_id=len(folds),
-            train_start=v_train_start,
-            train_end=v_train_end,
-            valid_start=_v_purged_valid_start,
-            valid_end=v_valid_end,
-            test_start=_v_embargoed_test_start,
-            test_end=v_test_end,
-            purge_bars=_v_purge,
-            embargo_bars=_v_embargo,
-        )
-        v_train_values = features.values[v_train_start:v_train_end].astype(np.float64, copy=False)
-        v_bounds = fit_robust_bounds(v_train_values, clip_quantile=0.995)
-        v_clipped_values = apply_robust_bounds(
-            features.values.astype(np.float64, copy=False),
-            v_bounds,
-        )
-        v_imputer = fit_missing_value_imputer(v_train_values)
-        v_normalized = apply_missing_value_imputer(v_clipped_values, v_imputer).astype(
-            np.float32, copy=False
-        )
-        v_normalized_features = FeaturePanel(
-            datetimes=features.datetimes,
-            symbols=features.symbols,
-            values=v_normalized,
-            feature_names=features.feature_names,
-            valid_mask=features.valid_mask,
-            availability_masks=features.availability_masks,
-            metadata={
-                **features.metadata,
-                "train_imputer_applied": True,
-                "missing_imputer": "train_median",
-            },
-        )
-        t_fold_split_preprocess += time.perf_counter() - t_pre_start
-
-        # Dual-side label derivation — same pattern as regular fold loop
-        t_db_start = time.perf_counter()
-        v_long_rel, v_short_rel, v_long_mag, v_short_mag = _resolve_side_targets(labels)
-        v_train_long = _build_side_matrix(
-            features=v_normalized_features,
-            labels=labels,
-            start=v_train_start,
-            end=v_train_end,
-            fold=v_fold,
-            split="train",
-            min_group_size=ml_cfg.min_group_size,
-            relevance_override=v_long_rel,
-            ev_target_override=v_long_mag,
-        )
-        v_valid_long = _build_side_matrix(
-            features=v_normalized_features,
-            labels=labels,
-            start=v_valid_start,
-            end=v_valid_end,
-            fold=v_fold,
-            split="valid",
-            min_group_size=ml_cfg.min_group_size,
-            relevance_override=v_long_rel,
-            ev_target_override=v_long_mag,
-        )
-        v_test_long = _build_side_matrix(
-            features=v_normalized_features,
-            labels=labels,
-            start=v_test_start,
-            end=v_test_end,
-            fold=v_fold,
-            split="test",
-            min_group_size=ml_cfg.min_group_size,
-            relevance_override=v_long_rel,
-            ev_target_override=v_long_mag,
-        )
-        v_train_short = _build_side_matrix(
-            features=v_normalized_features,
-            labels=labels,
-            start=v_train_start,
-            end=v_train_end,
-            fold=v_fold,
-            split="train",
-            min_group_size=ml_cfg.min_group_size,
-            relevance_override=v_short_rel,
-            ev_target_override=v_short_mag,
-        )
-        v_valid_short = _build_side_matrix(
-            features=v_normalized_features,
-            labels=labels,
-            start=v_valid_start,
-            end=v_valid_end,
-            fold=v_fold,
-            split="valid",
-            min_group_size=ml_cfg.min_group_size,
-            relevance_override=v_short_rel,
-            ev_target_override=v_short_mag,
-        )
-        v_test_short = _build_side_matrix(
-            features=v_normalized_features,
-            labels=labels,
-            start=v_test_start,
-            end=v_test_end,
-            fold=v_fold,
-            split="test",
-            min_group_size=ml_cfg.min_group_size,
-            relevance_override=v_short_rel,
-            ev_target_override=v_short_mag,
-        )
-        t_dataset_build += time.perf_counter() - t_db_start
-
-        if v_test_long.X.shape[0] > 0:
-            t_fp_start = time.perf_counter()
-            validate_long_matrix(v_train_long)
-            validate_long_matrix(v_valid_long)
-            validate_long_matrix(v_test_long)
-            validate_long_matrix(v_train_short)
-            validate_long_matrix(v_valid_short)
-            validate_long_matrix(v_test_short)
-            _v_result = _fit_predict_fold_dual_side(
-                train_long=v_train_long,
-                valid_long=v_valid_long,
-                test_long=v_test_long,
-                train_short=v_train_short,
-                valid_short=v_valid_short,
-                test_short=v_test_short,
-                ml_cfg=ml_cfg,
+        if not is_virtual:
+            _logger.debug(
+                ".. ML_CALIB: fold=%d ev_mean=%.6e ev_p10=%.6e ev_p90=%.6e",
+                fold_id,
+                float(np.mean(ev_test_long, dtype=np.float32)) if ev_test_long.size > 0 else 0.0,
+                float(np.percentile(ev_test_long, 10)) if ev_test_long.size > 0 else 0.0,
+                float(np.percentile(ev_test_long, 90)) if ev_test_long.size > 0 else 0.0,
             )
-            v_ev_test_long = _v_result.ev_test_long
-            v_ev_test_short = _v_result.ev_test_short
-            v_quant_test_long = _v_result.quant_test_long
-            v_quant_test_short = _v_result.quant_test_short
-            v_conf_test_long = _v_result.conf_test_long
-            v_conf_test_short = _v_result.conf_test_short
-            v_score_test_long = _v_result.score_test_long
-            v_score_test_short = _v_result.score_test_short
-            t_fit_predict_fold += time.perf_counter() - t_fp_start
-
-            # Write directly into side-specific grids — ex-ante gate only (no look-ahead)
-            t_grid_start = time.perf_counter()
-            # Pre-clip EV distribution (virtual refit fold-level, before max(·,0))
-            if v_ev_test_long.size > 0:
-                _vev_neg_ratio = float(np.mean(v_ev_test_long < 0.0))
-                _vev_p50 = float(np.percentile(v_ev_test_long, 50)) * 1e4
-                _vev_p90 = float(np.percentile(v_ev_test_long, 90)) * 1e4
-                _vev_p95 = float(np.percentile(v_ev_test_long, 95)) * 1e4
-                _logger.info(
-                    "🔬 [EV-PRECLIP] vrefit neg=%.1f%% p50=%.1fbps p90=%.1fbps p95=%.1fbps n=%d",
-                    100.0 * _vev_neg_ratio,
-                    _vev_p50,
-                    _vev_p90,
-                    _vev_p95,
-                    int(v_ev_test_long.size),
-                )
-            for row, (t_idx, s_idx) in enumerate(v_test_long.index_map):
-                q10_long_grid[int(t_idx), int(s_idx)] = v_quant_test_long.q10[row]
-                q50_long_grid[int(t_idx), int(s_idx)] = v_quant_test_long.q50[row]
-                q90_long_grid[int(t_idx), int(s_idx)] = v_quant_test_long.q90[row]
-                confidence_long_grid[int(t_idx), int(s_idx)] = v_conf_test_long[row]
-                ev_long_grid[int(t_idx), int(s_idx)] = np.float32(max(v_ev_test_long[row], 0.0))
-                score_grid[int(t_idx), int(s_idx)] = v_score_test_long[row]
-            for row, (t_idx, s_idx) in enumerate(v_test_short.index_map):
-                q10_short_grid[int(t_idx), int(s_idx)] = v_quant_test_short.q10[row]
-                q50_short_grid[int(t_idx), int(s_idx)] = v_quant_test_short.q50[row]
-                q90_short_grid[int(t_idx), int(s_idx)] = v_quant_test_short.q90[row]
-                confidence_short_grid[int(t_idx), int(s_idx)] = v_conf_test_short[row]
-                ev_short_grid[int(t_idx), int(s_idx)] = np.float32(max(v_ev_test_short[row], 0.0))
-                if np.isnan(score_grid[int(t_idx), int(s_idx)]):
-                    score_grid[int(t_idx), int(s_idx)] = v_score_test_short[row]
+            _logger.debug(
+                ".. ML_OOS: fold=%d test_rows=%d alpha_nz=%.4f",
+                fold_id,
+                int(res["test_long_shape_0"]),
+                float(np.count_nonzero(ev_test_long) / max(1, ev_test_long.size)),
+            )
+        else:
+            nz_l = (
+                float(np.count_nonzero(ev_test_long) / max(1, ev_test_long.size))
+                if ev_test_long.size > 0
+                else 0.0
+            )
+            nz_s = (
+                float(np.count_nonzero(ev_test_short) / max(1, ev_test_short.size))
+                if ev_test_short.size > 0
+                else 0.0
+            )
             _logger.info(
                 "🧩 ML_OOS_FILL: virtual_refit complete (rows=%d L_nz=%.3f S=%.3f)",
-                int(v_test_long.X.shape[0]),
-                float(np.count_nonzero(v_ev_test_long) / max(1, v_ev_test_long.size)),
-                float(np.count_nonzero(v_ev_test_short) / max(1, v_ev_test_short.size)),
+                int(res["test_long_shape_0"]),
+                nz_l,
+                nz_s,
             )
-            t_grid_assembly += time.perf_counter() - t_grid_start
+
+    t_grid_assembly += time.perf_counter() - t_grid_start
 
     t_grid_start = time.perf_counter()
     clip_lim = float(ml_cfg.alpha_clip_bps / 10000.0)
