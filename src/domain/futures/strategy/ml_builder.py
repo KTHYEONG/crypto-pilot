@@ -6,6 +6,7 @@ import time
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
@@ -136,7 +137,16 @@ def _rank_score(
     """
     if fit_result is None:
         return np.full(dataset.X.shape[0], np.nan, dtype=np.float32)
-    return predict_rank_score(fit_result.model, dataset)
+    models_to_predict: (
+        lgb.LGBMRegressor
+        | lgb.LGBMRanker
+        | list[lgb.LGBMRegressor | lgb.LGBMRanker]
+    ) = fit_result.model
+    if getattr(fit_result, "models", None) is not None:
+        models_list = fit_result.models
+        if models_list is not None:
+            models_to_predict = models_list
+    return predict_rank_score(models_to_predict, dataset)
 
 
 def _btc_close_from_data_maps(
@@ -471,15 +481,7 @@ def precompute_anchored_ml_panels(
     cfg: StrategyConfig,
 ) -> AnchoredMLPrecomputedPanels:
     """Build feature/label panels once and reuse across anchored legs."""
-    from dataclasses import replace
-
-    ml_cfg = replace(
-        cfg.ml,
-        ranker_lambda_l2=1.0,
-        calibrator_lambda_l2=1.0,
-        min_data_in_leaf=30,
-        num_leaves=31,
-    )
+    ml_cfg = cfg.ml
     aligned = align_data_maps(data_maps=data_maps, symbols=symbols, tf=tf)
     if len(aligned.symbols) < ml_cfg.min_group_size:
         raise ValueError(
@@ -1311,13 +1313,7 @@ def build_ml_strategy_alpha_anchored(
     from src.domain.futures.strategy.contracts import FoldSpec
 
     t0_total = time.perf_counter()
-    ml_cfg = replace(
-        cfg.ml,
-        ranker_lambda_l2=1.0,
-        calibrator_lambda_l2=1.0,
-        min_data_in_leaf=30,
-        num_leaves=31,
-    )
+    ml_cfg = cfg.ml
     t_feature_label = time.perf_counter()
     if precomputed_panels is None:
         precomputed_panels = precompute_anchored_ml_panels(data_maps, symbols, tf, cfg)

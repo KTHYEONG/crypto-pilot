@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from src.core.settings import SLIPPAGE_BPS, TAKER_FEE_BPS
+from src.core.settings import MAKER_FEE_BPS, SLIPPAGE_BPS, TAKER_FEE_BPS
 
 
 @dataclass(slots=True, frozen=True)
@@ -182,6 +182,12 @@ class StrategyMLConfig:
     # per-side 비용: 레이블 생성 시 round-trip(x2)으로 환산됨 (labels.py 참조)
     fee_bps: float = TAKER_FEE_BPS       # Taker 수수료 per side (canonical: core/settings.py)
     slippage_bps: float = SLIPPAGE_BPS   # 슬리피지 per side (canonical: core/settings.py)
+
+    # 앙상블 및 실질 메이커 비용 반영 설정
+    ensemble_seeds: list[int] = field(default_factory=lambda: [42, 1004, 2026])
+    maker_ratio: float = 0.20            # 보수적 설정을 위해 Taker 비중을 80%로 높게 설정
+    maker_fee_bps: float = MAKER_FEE_BPS
+    taker_fee_bps: float = TAKER_FEE_BPS
     # IC gate 파라미터: 완화된 초기 임계값 — B2 uplift 확인 후 강화 예정
     ic_gate_min_mean_ic: float = 0.01
     ic_gate_min_t_stat: float = 1.5
@@ -257,6 +263,10 @@ class StrategyMLConfig:
 
     def __post_init__(self) -> None:
         """Validate ML strategy parameters."""
+        if not self.ensemble_seeds:
+            raise ValueError("ensemble_seeds list must contain at least one integer seed.")
+        if not (0.0 <= self.maker_ratio <= 1.0):
+            raise ValueError("maker_ratio must be between 0.0 and 1.0.")
         if self.purge_bars < self.label_horizon_bars:
             raise ValueError("purge_bars must be >= label_horizon_bars")
         if self.embargo_bars < self.label_horizon_bars:

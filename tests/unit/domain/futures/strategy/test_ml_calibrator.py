@@ -116,7 +116,12 @@ def test_predict_ev_quantiles_and_compute_conservative_ev() -> None:
 def test_fit_quantile_calibrators_uses_raw_y_ev(monkeypatch: MonkeyPatch) -> None:
     train = _dataset(rows=20, groups=4)
     valid = _dataset(rows=8, groups=2)
-    cfg = StrategyMLConfig(calibrator_n_estimators=10, early_stopping_rounds=5, n_jobs=1)
+    cfg = StrategyMLConfig(
+        calibrator_n_estimators=10,
+        early_stopping_rounds=5,
+        n_jobs=1,
+        ensemble_seeds=[42],
+    )
     seen: list[np.ndarray] = []
 
     def _fake_fit_one(
@@ -128,8 +133,9 @@ def test_fit_quantile_calibrators_uses_raw_y_ev(monkeypatch: MonkeyPatch) -> Non
         valid_weight: np.ndarray,
         cfg: StrategyMLConfig,
         alpha: float,
+        seed: int | None = None,
     ) -> object:
-        del train_x, train_weight, valid_x, valid_y, valid_weight, cfg, alpha
+        del train_x, train_weight, valid_x, valid_y, valid_weight, cfg, alpha, seed
         seen.append(np.asarray(train_y, dtype=np.float32).copy())
         return object()
 
@@ -139,6 +145,40 @@ def test_fit_quantile_calibrators_uses_raw_y_ev(monkeypatch: MonkeyPatch) -> Non
     assert len(seen) == 3
     for y in seen:
         np.testing.assert_allclose(y, train.y_ev, rtol=0.0, atol=0.0)
+
+
+def test_fit_quantile_calibrators_ensemble_seeds(monkeypatch: MonkeyPatch) -> None:
+    train = _dataset(rows=20, groups=4)
+    valid = _dataset(rows=8, groups=2)
+    cfg = StrategyMLConfig(
+        calibrator_n_estimators=10,
+        early_stopping_rounds=5,
+        n_jobs=1,
+        ensemble_seeds=[101, 102],
+    )
+    seen_seeds: list[int | None] = []
+
+    def _fake_fit_one(
+        train_x: np.ndarray,
+        train_y: np.ndarray,
+        train_weight: np.ndarray,
+        valid_x: np.ndarray,
+        valid_y: np.ndarray,
+        valid_weight: np.ndarray,
+        cfg: StrategyMLConfig,
+        alpha: float,
+        seed: int | None = None,
+    ) -> object:
+        del train_x, train_y, train_weight, valid_x, valid_y, valid_weight, cfg, alpha
+        seen_seeds.append(seed)
+        return object()
+
+    monkeypatch.setattr("src.domain.futures.strategy.calibrator._fit_one", _fake_fit_one)
+
+    fit_quantile_calibrators(train=train, valid=valid, cfg=cfg)
+    # 2 seeds * 3 quantiles = 6 fits
+    assert len(seen_seeds) == 6
+    assert seen_seeds == [101, 101, 101, 102, 102, 102]
 
 
 def test_calibrator_fit_uses_config_hyperparams(monkeypatch: MonkeyPatch) -> None:
@@ -167,6 +207,7 @@ def test_calibrator_fit_uses_config_hyperparams(monkeypatch: MonkeyPatch) -> Non
         calibrator_reg_alpha=0.8,
         max_depth=6,
         calibrator_max_depth_cap=4,
+        ensemble_seeds=[42],
     )
     fit_quantile_calibrators(train=train, valid=valid, cfg=cfg)
     assert captured["learning_rate"] == 0.019
@@ -201,7 +242,12 @@ def test_calibrator_fit_propagates_sample_weights(monkeypatch: MonkeyPatch) -> N
             return np.zeros((len(x),), dtype=np.float64)
 
     monkeypatch.setattr("src.domain.futures.strategy.calibrator.lgb.LGBMRegressor", _FakeRegressor)
-    cfg = StrategyMLConfig(calibrator_n_estimators=10, early_stopping_rounds=5, n_jobs=1)
+    cfg = StrategyMLConfig(
+        calibrator_n_estimators=10,
+        early_stopping_rounds=5,
+        n_jobs=1,
+        ensemble_seeds=[42],
+    )
     fit_quantile_calibrators(train=train, valid=valid, cfg=cfg)
     np.testing.assert_allclose(seen["train"], train.sample_weight, rtol=0.0, atol=0.0)
     np.testing.assert_allclose(seen["valid"], valid.sample_weight, rtol=0.0, atol=0.0)
