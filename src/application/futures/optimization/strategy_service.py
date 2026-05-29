@@ -228,12 +228,10 @@ def run_active_strategy_output_bridge(
         return MLPipelineOutput()
     if run_config.mode not in {"strategy", "strategy-smoke", "alpha"}:
         raise ValueError(f"unsupported mode for active strategy bridge: {run_config.mode}")
-    if run_config.strategy is None:
-        raise ValueError("strategy mode requires strategy")
     if preloaded_data_maps is None:
         raise ValueError("strategy mode requires preloaded_data_maps")
 
-    strategy_cfg = StrategyConfig(name=run_config.strategy)
+    strategy_cfg = StrategyConfig(name="lambdamart")
     # Three-Cohort 4-way 분기: training_universe_scope에 따라 학습 패널 결정
     ml_scope = strategy_cfg.ml.training_universe_scope
     if ml_scope == "historical_stage5_union" and inference_panel:
