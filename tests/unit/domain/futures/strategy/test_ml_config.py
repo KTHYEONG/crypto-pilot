@@ -74,12 +74,12 @@ def test_ml_config_rejects_invalid_ev_tail_blend_weight() -> None:
 
 
 def test_strategy_ml_config_ranker_enabled_default() -> None:
-    """Default StrategyMLConfig must have ranker_enabled=False (empirically better OOS IC)."""
+    """Default StrategyMLConfig must have ranker_enabled=True."""
     # Arrange / Act
     cfg = StrategyMLConfig()
 
     # Assert
-    assert cfg.ranker_enabled is False
+    assert cfg.ranker_enabled is True
 
 
 def test_strategy_ml_config_ranker_enabled_false() -> None:
@@ -89,6 +89,25 @@ def test_strategy_ml_config_ranker_enabled_false() -> None:
 
     # Assert
     assert cfg.ranker_enabled is False
+
+
+def test_strategy_ml_config_new_modes_defaults() -> None:
+    cfg = StrategyMLConfig()
+    assert cfg.rank_target_mode == "forward_gross_rank"
+    assert cfg.calibrator_target_mode == "rank_confidence"
+    assert cfg.post_cost_admission_mode == "rank_then_ev_gate"
+    assert cfg.oos_ic_target_source == "forward_gross_ret"
+
+
+def test_strategy_ml_config_rejects_invalid_new_modes() -> None:
+    with pytest.raises(ValueError, match="rank_target_mode"):
+        StrategyMLConfig(rank_target_mode="bad")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="calibrator_target_mode"):
+        StrategyMLConfig(calibrator_target_mode="bad")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="post_cost_admission_mode"):
+        StrategyMLConfig(post_cost_admission_mode="bad")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="oos_ic_target_source"):
+        StrategyMLConfig(oos_ic_target_source="bad")  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

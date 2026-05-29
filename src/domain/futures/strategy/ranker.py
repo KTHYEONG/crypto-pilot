@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 
 import lightgbm as lgb
 import numpy as np
@@ -17,9 +17,10 @@ _logger = logging.getLogger(__name__)
 
 @dataclass(slots=True, frozen=True)
 class RankerFitResult:
-    """Regressor fit output (CS-demeaned GBT regression)."""
+    """Ranker fit output."""
 
     model: lgb.LGBMRegressor | lgb.LGBMRanker
+    fit_mode: Literal["lambdarank", "pointwise"]
 
 
 def _as_feature_frame(x: np.ndarray, feature_names: tuple[str, ...]) -> pd.DataFrame:
@@ -117,7 +118,10 @@ def fit_ranker(
         else:
             regressor_model = cast(lgb.LGBMRegressor, model)
             regressor_model.fit(x_train, train_target, sample_weight=train.sample_weight)
-    return RankerFitResult(model=model)
+    return RankerFitResult(
+        model=model,
+        fit_mode="lambdarank" if is_lambdarank else "pointwise",
+    )
 
 
 def _build_ranker_model(

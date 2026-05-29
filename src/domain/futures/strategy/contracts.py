@@ -41,6 +41,9 @@ class LabelPanel:
     magnitude_target_short: np.ndarray | None = None
     relevance_long: np.ndarray | None = None
     relevance_short: np.ndarray | None = None
+    forward_gross_ret: np.ndarray | None = None
+    forward_gross_rank_target: np.ndarray | None = None
+    forward_gross_relevance: np.ndarray | None = None
     dynamic_cost_bps_2d: np.ndarray | None = None  # per-symbol dynamic cost for EV gate
     metadata: dict[str, Any] = field(default_factory=dict)
 

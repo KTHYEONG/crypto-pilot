@@ -153,10 +153,9 @@ def test_build_ml_strategy_alpha_emits_orchestration_tags(
 
     panel = build_ml_strategy_alpha(data_maps={}, symbols=list(symbols), tf="4h", cfg=cfg)
 
-    assert "[ML-FOLD]" in caplog.text
-    assert "[ML-RANKER]" in caplog.text
-    assert "[ML-CALIB]" in caplog.text
-    assert "[ML-OOS]" in caplog.text
+    assert "ML-PARALLEL: Completed all" in caplog.text
+    assert "ML_EVAL" in caplog.text
+    assert "ML_COST" in caplog.text
     assert float(panel["alpha_long"].sum()) > 0.0
     assert float(panel["alpha_short"].sum()) > 0.0
     assert float(panel.loc[(datetimes[2], "BTCUSDT"), "alpha_long"]) >= 0.0
@@ -429,10 +428,19 @@ def test_build_ml_strategy_alpha_anchored_test_alpha_independent_of_future_label
         fold: FoldSpec,
         split: str,
         min_group_size: int,
+        rank_target_override: np.ndarray | None = None,
         relevance_override: np.ndarray | None = None,
         ev_target_override: np.ndarray | None = None,
     ) -> LongMatrixDataset:
-        del features, labels, fold, min_group_size, relevance_override, ev_target_override
+        del (
+            features,
+            labels,
+            fold,
+            min_group_size,
+            rank_target_override,
+            relevance_override,
+            ev_target_override,
+        )
         rows = (end - start) * len(symbols)
         idx = [[t, s] for t in range(start, end) for s in range(len(symbols))]
         return _dataset(
@@ -596,8 +604,11 @@ def test_build_ml_strategy_alpha_virtual_refit_uses_own_train_normalization(
         fold: FoldSpec,
         split: str,
         min_group_size: int,
+        rank_target_override: np.ndarray | None = None,
+        relevance_override: np.ndarray | None = None,
+        ev_target_override: np.ndarray | None = None,
     ) -> LongMatrixDataset:
-        del labels, min_group_size
+        del labels, min_group_size, rank_target_override, relevance_override, ev_target_override
         captured_split_marker[(fold.fold_id, split)] = float(features.values[start, 0, 0])
         rows = max(1, (end - start) * len(symbols))
         index_map: list[list[int]] = []
@@ -1238,7 +1249,7 @@ def test_build_ml_strategy_alpha_logs_cost_wall_gate_metric_source(
     )
     caplog.set_level("INFO")
     build_ml_strategy_alpha(data_maps={}, symbols=list(symbols), tf="4h", cfg=cfg)
-    assert "gate_metric=30.00bps" in caplog.text
+    assert "ML_COST: gate=30.0bps floor=24.0bps pass=true" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -1246,8 +1257,8 @@ def test_build_ml_strategy_alpha_logs_cost_wall_gate_metric_source(
 # ---------------------------------------------------------------------------
 
 
-def test_rank_score_returns_zeros_when_fit_result_is_none() -> None:
-    """_rank_score(None, dataset) must return all-zero float32 array of correct length."""
+def test_rank_score_returns_nans_when_fit_result_is_none() -> None:
+    """_rank_score(None, dataset) must return all-NaN float32 array of correct length."""
     # Arrange
     feature_names: tuple[str, ...] = ("f0", "f1")
     ds = LongMatrixDataset(
@@ -1266,7 +1277,7 @@ def test_rank_score_returns_zeros_when_fit_result_is_none() -> None:
     # Assert
     assert scores.shape == (8,)
     assert scores.dtype == np.float32
-    assert np.all(scores == 0.0)
+    assert np.all(np.isnan(scores))
 
 
 def test_ranker_enabled_false_skips_fit_ranker(monkeypatch: MonkeyPatch) -> None:
