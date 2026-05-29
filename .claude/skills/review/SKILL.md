@@ -22,17 +22,17 @@ Act as the final logical gatekeeper. Critically review code changes to ensure th
 
 ## Output Format
 ```md
-### 🏁 Review Verdict: [PASS / PASS WITH RISKS / FAIL]
+### 🏁 최종 리뷰: [PASS / PASS WITH RISKS / FAIL]
 
-**1. Core Audit Results**
-- **Spec Alignment:** [Pass/Fail] (Ref: `docs/specs/filename.md`)
-- **Surgical Precision:** [Pass/Fail] (Unintended changes check)
-- **Standards Compliance:** [Pass/Fail] (Project rules check)
+**1. 주요 검토 결과**
+- **설계 부합도:** [Pass/Fail] (Ref: `docs/specs/filename.md`)
+- **작업 범위 준수:** [Pass/Fail] (Unintended changes check)
+- **표준 규격 준수:** [Pass/Fail] (Project rules check)
 
-**2. Findings & Risks**
+**2. 발견 사항 및 리스크**
 - [Issue 1: Detail and location]
 - [Issue 2: Recommendations]
 
-**3. Handoff**
+**3. 후속 조치**
 - [Specific fixes required or Next Step]
 ```
