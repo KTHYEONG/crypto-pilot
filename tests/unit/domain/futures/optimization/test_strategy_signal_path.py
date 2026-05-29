@@ -58,6 +58,8 @@ def test_strategy_path_diag_xs_nz_counts_short_side_union() -> None:
     assert isinstance(path_diag, dict)
     assert float(path_diag.get("alpha_nz", 0.0)) > 0.0
     assert float(path_diag.get("xs_nz", 0.0)) > 0.0
+    assert "rank_candidate_nz" in path_diag
+    assert "post_cost_admission_mode" in path_diag
 
 
 def test_strategy_mode_fail_fast_when_alpha_prerequisite_missing() -> None:

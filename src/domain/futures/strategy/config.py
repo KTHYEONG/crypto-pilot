@@ -156,14 +156,14 @@ class StrategyMLConfig:
     max_features: int = 64
     alpha_clip_bps: float = 75.0
     lambda_tail: float = 0.10
-    ranker_n_estimators: int = 800
-    calibrator_n_estimators: int = 600
+    ranker_n_estimators: int = 300
+    calibrator_n_estimators: int = 200
     learning_rate: float = 0.03
     ranker_learning_rate: float = 0.02
     calibrator_learning_rate: float = 0.02
-    num_leaves: int = 31
-    max_depth: int = 6
-    min_data_in_leaf: int = 50
+    num_leaves: int = 15
+    max_depth: int = 4
+    min_data_in_leaf: int = 100
     feature_fraction: float = 0.80
     bagging_fraction: float = 0.80
     ranker_feature_fraction: float = 0.70
@@ -173,9 +173,9 @@ class StrategyMLConfig:
     ranker_bagging_freq: int = 1
     calibrator_bagging_freq: int = 1
     lambda_l2: float = 5.0
-    ranker_lambda_l2: float = 5.0
+    ranker_lambda_l2: float = 20.0
     calibrator_lambda_l2: float = 1.0
-    ranker_reg_alpha: float = 1.5
+    ranker_reg_alpha: float = 5.0
     calibrator_reg_alpha: float = 1.5
     calibrator_max_depth_cap: int = 5
     early_stopping_rounds: int = 75
@@ -195,7 +195,13 @@ class StrategyMLConfig:
     ranking_mode: Literal["pointwise", "group_ndcg"] = "group_ndcg"
     # False: skip ranker stage; calibrator uses zero rank_score
     # (C3 ablation A/B — empirically better OOS IC)
-    ranker_enabled: bool = False
+    ranker_enabled: bool = True
+    rank_target_mode: Literal["cs_residual", "forward_gross_rank"] = "forward_gross_rank"
+    calibrator_target_mode: Literal["signed_ev", "rank_confidence"] = "rank_confidence"
+    post_cost_admission_mode: Literal["ev_gate", "rank_then_ev_gate"] = "rank_then_ev_gate"
+    rank_portfolio_top_k: int = 4
+    rank_portfolio_min_score_spread_bps: float = 0.0
+    oos_ic_target_source: Literal["signed_net_ret", "forward_gross_ret"] = "forward_gross_ret"
     regime_gate_enabled: bool = True      # trailing BTC regime → exposure scalar (no look-ahead)
     regime_exposure_bull: float = 1.0      # full deployment in bull (IC > breakeven)
     regime_exposure_bear: float = 0.0      # reduced in bear (IC < breakeven)
@@ -318,6 +324,24 @@ class StrategyMLConfig:
             raise ValueError("ev_mode must be 'quantile' or 'prob_x_magnitude'")
         if self.ranking_mode not in {"pointwise", "group_ndcg"}:
             raise ValueError("ranking_mode must be 'pointwise' or 'group_ndcg'")
+        if self.rank_target_mode not in {"cs_residual", "forward_gross_rank"}:
+            raise ValueError("rank_target_mode must be 'cs_residual' or 'forward_gross_rank'")
+        if self.calibrator_target_mode not in {"signed_ev", "rank_confidence"}:
+            raise ValueError(
+                "calibrator_target_mode must be 'signed_ev' or 'rank_confidence'"
+            )
+        if self.post_cost_admission_mode not in {"ev_gate", "rank_then_ev_gate"}:
+            raise ValueError(
+                "post_cost_admission_mode must be 'ev_gate' or 'rank_then_ev_gate'"
+            )
+        if self.rank_portfolio_top_k < 1:
+            raise ValueError("rank_portfolio_top_k must be >= 1")
+        if self.rank_portfolio_min_score_spread_bps < 0.0:
+            raise ValueError("rank_portfolio_min_score_spread_bps must be >= 0")
+        if self.oos_ic_target_source not in {"signed_net_ret", "forward_gross_ret"}:
+            raise ValueError(
+                "oos_ic_target_source must be 'signed_net_ret' or 'forward_gross_ret'"
+            )
         if not (0.0 <= self.alpha_gate_min_long_nz <= 1.0):
             raise ValueError("alpha_gate_min_long_nz must satisfy 0 <= value <= 1")
         if not (0.0 <= self.alpha_gate_min_short_nz <= 1.0):
