@@ -643,6 +643,21 @@ def build_ml_strategy_alpha(
         )
         valid_ev_long_all.append(ev_valid_long)
         valid_ev_short_all.append(ev_valid_short)
+        # Pre-clip EV distribution (fold-level, before max(·,0))
+        if ev_test_long.size > 0:
+            _ev_neg_ratio = float(np.mean(ev_test_long < 0.0))
+            _ev_p50 = float(np.percentile(ev_test_long, 50)) * 1e4
+            _ev_p90 = float(np.percentile(ev_test_long, 90)) * 1e4
+            _ev_p95 = float(np.percentile(ev_test_long, 95)) * 1e4
+            _logger.info(
+                "🔬 [EV-PRECLIP] fold=%d neg=%.1f%% p50=%.1fbps p90=%.1fbps p95=%.1fbps n=%d",
+                fold.fold_id,
+                100.0 * _ev_neg_ratio,
+                _ev_p50,
+                _ev_p90,
+                _ev_p95,
+                int(ev_test_long.size),
+            )
         for row, (t_idx, s_idx) in enumerate(test_long.index_map):
             q10_long_grid[int(t_idx), int(s_idx)] = quant_test_long.q10[row]
             q50_long_grid[int(t_idx), int(s_idx)] = quant_test_long.q50[row]
@@ -834,6 +849,20 @@ def build_ml_strategy_alpha(
 
             # Write directly into side-specific grids — ex-ante gate only (no look-ahead)
             t_grid_start = time.perf_counter()
+            # Pre-clip EV distribution (virtual refit fold-level, before max(·,0))
+            if v_ev_test_long.size > 0:
+                _vev_neg_ratio = float(np.mean(v_ev_test_long < 0.0))
+                _vev_p50 = float(np.percentile(v_ev_test_long, 50)) * 1e4
+                _vev_p90 = float(np.percentile(v_ev_test_long, 90)) * 1e4
+                _vev_p95 = float(np.percentile(v_ev_test_long, 95)) * 1e4
+                _logger.info(
+                    "🔬 [EV-PRECLIP] vrefit neg=%.1f%% p50=%.1fbps p90=%.1fbps p95=%.1fbps n=%d",
+                    100.0 * _vev_neg_ratio,
+                    _vev_p50,
+                    _vev_p90,
+                    _vev_p95,
+                    int(v_ev_test_long.size),
+                )
             for row, (t_idx, s_idx) in enumerate(v_test_long.index_map):
                 q10_long_grid[int(t_idx), int(s_idx)] = v_quant_test_long.q10[row]
                 q50_long_grid[int(t_idx), int(s_idx)] = v_quant_test_long.q50[row]
@@ -968,24 +997,80 @@ def build_ml_strategy_alpha(
         alpha_short_2d=alpha_short_final,
         ic_score_2d=alpha_ic_score,
     )
-    # Phase 2: dense ranker score IC 진단 — clip/hurdle 무관, 관측 전용
-    # score_grid: raw ranker output [T, N], NaN=미예측, 실수=score (ml_builder.py:650)
-    # signed_net_ret: beta-resid+CS-demean label [T, N] — 학습 타깃과 동일 → 정합
-    _score_ic_series = rolling_ic(
-        score_grid.astype(np.float64),
-        labels.signed_net_ret.astype(np.float64),
-        method="spearman",
-    )
-    _score_ic_stats = ic_summary(_score_ic_series)
-    # NaN-aware breadth: bar당 score 부여(non-NaN) 심볼 수 평균
-    _score_breadth = float(np.mean(np.sum(np.isfinite(score_grid), axis=1)))
+    # OOS rank-IC 진단 (Phase A / D1)
+    # score_grid: [T, N] raw ranker output — NaN=미예측, 실수=OOS test 구간만 채워짐
+    # signed_net_ret: [T, N] beta-resid+CS-demean label — 학습 타깃 정합
+    # OOS 구간 = score_grid에 finite 값이 있는 t-행 (fold test + virtual refit)
+    _score_grid_f = score_grid.astype(np.float64)
+    _snr_f = labels.signed_net_ret.astype(np.float64)
+
+    # OOS 시간 범위 감지: score_grid에 ≥1 finite가 있는 bar
+    _score_finite_per_bar = np.sum(np.isfinite(_score_grid_f), axis=1)  # [T]
+    _oos_time_mask: np.ndarray = _score_finite_per_bar >= 1  # OOS로 추정되는 bar들
+
+    # Co-finite: score AND signed_net_ret 모두 finite인 (t,s) 쌍 수 / bar
+    _cofinite_per_bar = np.sum(
+        np.isfinite(_score_grid_f) & np.isfinite(_snr_f), axis=1
+    )  # [T]
+    _cofinite_oos = _cofinite_per_bar[_oos_time_mask]  # OOS 구간만
+
+    # SNR OOS finite 비율 진단 — signed_net_ret가 OOS에서 얼마나 채워져 있는가
+    _snr_oos_finite = float(
+        np.mean(np.isfinite(_snr_f[_oos_time_mask]))
+    ) if _oos_time_mask.any() else 0.0
+
+    _cofinite_p50 = float(np.median(_cofinite_oos)) if _cofinite_oos.size > 0 else 0.0
+    _bars_ge5 = int(np.sum(_cofinite_oos >= 5))
+    _bars_ge5_ratio = float(_bars_ge5 / max(int(_cofinite_oos.size), 1))
+
+    # SCORE-IC 0/0/0 원인 진단
+    if not _oos_time_mask.any():
+        _oos_diag = "no_oos_predictions"
+    elif _cofinite_p50 < 5 and _snr_oos_finite < 0.5:
+        _oos_diag = "both_cofinite_starvation_AND_snr_nan"
+    elif _cofinite_p50 < 5:
+        _oos_diag = "cofinite_starvation(score∩snr<5/bar)"
+    elif _snr_oos_finite < 0.5:
+        _oos_diag = "snr_nan_in_oos"
+    else:
+        _oos_diag = "sufficient_cofinite_check_ic"
+
+    # OOS rank-IC 계산 (co-finite ≥ 5인 bar 한정)
+    _oos_ge5_mask = (_oos_time_mask) & (_cofinite_per_bar >= 5)
+    if _oos_ge5_mask.any():
+        _oos_ic_series = rolling_ic(
+            _score_grid_f[_oos_ge5_mask],
+            _snr_f[_oos_ge5_mask],
+            method="spearman",
+        )
+        _oos_ic_stats = ic_summary(_oos_ic_series)
+    else:
+        _oos_ic_stats = {"mean_ic": 0.0, "t_stat": 0.0, "hit_ratio": 0.0, "n_obs": 0.0}
+
+    _score_breadth = float(np.mean(_score_finite_per_bar))
     _logger.info(
         "🔬 [SCORE-IC] dense_ranker ic=%.4f t=%.2f hit=%.3f breadth=%.1f"
         " (cf. emit_breadth≈1, target_breadth≥8)",
-        _score_ic_stats["mean_ic"],
-        _score_ic_stats["t_stat"],
-        _score_ic_stats["hit_ratio"],
+        float(_oos_ic_stats["mean_ic"]),
+        float(_oos_ic_stats["t_stat"]),
+        float(_oos_ic_stats["hit_ratio"]),
         _score_breadth,
+    )
+    _logger.info(
+        "🔬 [OOS-RANKIC] ic=%.4f t=%.2f n_bars=%d cofinite_p50=%.1f"
+        " bars_ge5_ratio=%.3f snr_oos_finite=%.3f",
+        float(_oos_ic_stats["mean_ic"]),
+        float(_oos_ic_stats["t_stat"]),
+        int(_oos_ic_stats.get("n_obs", 0.0)),
+        _cofinite_p50,
+        _bars_ge5_ratio,
+        _snr_oos_finite,
+    )
+    _logger.info(
+        "🔬 [OOS-DIAG] cause=%s oos_bars=%d ge5_bars=%d",
+        _oos_diag,
+        int(_oos_time_mask.sum()),
+        _bars_ge5,
     )
     if not ml_cfg.ranker_enabled:
         # NDCG is N/A without ranker; mark as passing to avoid false gate failure
