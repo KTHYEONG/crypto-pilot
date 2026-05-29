@@ -44,6 +44,34 @@ def _build_relevance(
     return np.asarray(rel, dtype=np.int32)
 
 
+def _build_centered_rank_target(
+    signed_ret: np.ndarray,
+    eligible: np.ndarray,
+    *,
+    min_group_size: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return centered rank target [-1, 1] and relevance 0..4 per row."""
+    t_len, n_len = signed_ret.shape
+    rank_target = np.full((t_len, n_len), np.nan, dtype=np.float32)
+    relevance = np.zeros((t_len, n_len), dtype=np.int32)
+    for t in range(t_len):
+        idx = np.flatnonzero(eligible[t] & np.isfinite(signed_ret[t]))
+        if idx.size < min_group_size:
+            continue
+        vals = signed_ret[t, idx].astype(np.float64, copy=False)
+        order = np.argsort(vals, kind="mergesort")
+        ranks = np.empty(idx.size, dtype=np.float64)
+        ranks[order] = np.arange(idx.size, dtype=np.float64)
+        if idx.size == 1:
+            centered = np.zeros((1,), dtype=np.float64)
+        else:
+            centered = 2.0 * (ranks / float(idx.size - 1)) - 1.0
+        rank_target[t, idx] = centered.astype(np.float32)
+        bins = np.floor((ranks / float(idx.size)) * 5.0).astype(np.int32)
+        relevance[t, idx] = np.clip(bins, 0, 4)
+    return rank_target, relevance
+
+
 def _compute_trailing_beta(
     close_2d: NDArray[np.float64],
 ) -> NDArray[np.float64]:
@@ -270,6 +298,11 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         eligible=eligible & finite_long,
         min_group_size=cfg.min_group_size,
     )
+    forward_gross_rank_target, forward_gross_relevance = _build_centered_rank_target(
+        signed_ret=gross_long_2d,
+        eligible=eligible & np.isfinite(gross_long_2d),
+        min_group_size=cfg.min_group_size,
+    )
 
     liq_weight = np.clip(np.log1p(np.maximum(aligned.volume_2d, 0.0)), 0.25, 2.0)
     valid_mask = eligible & finite_long
@@ -407,6 +440,9 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         magnitude_target_short=magnitude_target_short,
         relevance_long=rel_long,
         relevance_short=rel_short,
+        forward_gross_ret=gross_long_2d,
+        forward_gross_rank_target=forward_gross_rank_target,
+        forward_gross_relevance=forward_gross_relevance,
         dynamic_cost_bps_2d=dynamic_cost_2d,
         metadata=metadata,
     )

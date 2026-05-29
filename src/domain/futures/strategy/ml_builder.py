@@ -80,7 +80,8 @@ def _build_side_matrix(**kwargs: Any) -> Any:
 
 def _resolve_side_targets(
     labels: LabelPanel,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ml_cfg: StrategyMLConfig,
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Resolve side-specific relevance and magnitude targets."""
     long_rel = labels.relevance_long if labels.relevance_long is not None else labels.relevance
     short_rel = labels.relevance_short if labels.relevance_short is not None else labels.relevance
@@ -103,27 +104,38 @@ def _resolve_side_targets(
             0.0,
         )
     )
-    return long_rel, short_rel, long_mag, short_mag
+    long_rank_target: np.ndarray | None = None
+    short_rank_target: np.ndarray | None = None
+    if (
+        ml_cfg.rank_target_mode == "forward_gross_rank"
+        and labels.forward_gross_rank_target is not None
+        and labels.forward_gross_relevance is not None
+    ):
+        long_rank_target = labels.forward_gross_rank_target
+        short_rank_target = -labels.forward_gross_rank_target
+        long_rel = labels.forward_gross_relevance
+        short_rel = 4 - labels.forward_gross_relevance
+    return long_rank_target, short_rank_target, long_rel, short_rel, long_mag, short_mag
 
 
 def _rank_score(
     fit_result: RankerFitResult | None, dataset: LongMatrixDataset
 ) -> np.ndarray:
-    """Return rank score or zeros when ranker is disabled.
+    """Return rank score or NaNs when ranker is disabled.
 
     Args:
         fit_result: Trained ranker result, or None when ranker_enabled=False.
         dataset: Dataset to score.
 
     Returns:
-        Rank score array [N] as float32; zeros when fit_result is None.
+        Rank score array [N] as float32; NaNs when fit_result is None.
 
     Time complexity: O(N * T_trees) when fit_result is not None, O(N) otherwise.
     Space complexity: O(N).
 
     """
     if fit_result is None:
-        return np.zeros(dataset.X.shape[0], dtype=np.float32)
+        return np.full(dataset.X.shape[0], np.nan, dtype=np.float32)
     return predict_rank_score(fit_result.model, dataset)
 
 
@@ -191,6 +203,8 @@ def _train_predict_single_fold(
     features: FeaturePanel,
     labels: LabelPanel,
     ml_cfg: StrategyMLConfig,
+    long_rank_target: np.ndarray | None,
+    short_rank_target: np.ndarray | None,
     long_rel: np.ndarray,
     short_rel: np.ndarray,
     long_mag: np.ndarray,
@@ -230,6 +244,7 @@ def _train_predict_single_fold(
         fold=fold,
         split="train",
         min_group_size=ml_cfg.min_group_size,
+        rank_target_override=long_rank_target,
         relevance_override=long_rel,
         ev_target_override=long_mag,
     )
@@ -241,6 +256,7 @@ def _train_predict_single_fold(
         fold=fold,
         split="valid",
         min_group_size=ml_cfg.min_group_size,
+        rank_target_override=long_rank_target,
         relevance_override=long_rel,
         ev_target_override=long_mag,
     )
@@ -252,6 +268,7 @@ def _train_predict_single_fold(
         fold=fold,
         split="test",
         min_group_size=ml_cfg.min_group_size,
+        rank_target_override=long_rank_target,
         relevance_override=long_rel,
         ev_target_override=long_mag,
     )
@@ -263,6 +280,7 @@ def _train_predict_single_fold(
         fold=fold,
         split="train",
         min_group_size=ml_cfg.min_group_size,
+        rank_target_override=short_rank_target,
         relevance_override=short_rel,
         ev_target_override=short_mag,
     )
@@ -274,6 +292,7 @@ def _train_predict_single_fold(
         fold=fold,
         split="valid",
         min_group_size=ml_cfg.min_group_size,
+        rank_target_override=short_rank_target,
         relevance_override=short_rel,
         ev_target_override=short_mag,
     )
@@ -285,6 +304,7 @@ def _train_predict_single_fold(
         fold=fold,
         split="test",
         min_group_size=ml_cfg.min_group_size,
+        rank_target_override=short_rank_target,
         relevance_override=short_rel,
         ev_target_override=short_mag,
     )
@@ -576,11 +596,7 @@ def build_ml_strategy_alpha(
 
     t_start_total = time.perf_counter()
 
-    ml_cfg = replace(
-        cfg.ml,
-        min_data_in_leaf=30,
-        num_leaves=31,
-    )
+    ml_cfg = cfg.ml
     t_align_start = time.perf_counter()
     aligned = align_data_maps(data_maps=data_maps, symbols=symbols, tf=tf)
     if len(aligned.symbols) < ml_cfg.min_group_size:
@@ -704,7 +720,14 @@ def build_ml_strategy_alpha(
     ml_cfg = replace(ml_cfg, n_jobs=lgb_n_jobs)
 
     # 3. Resolve target arrays once to optimize memory allocation
-    long_rel, short_rel, long_mag, short_mag = _resolve_side_targets(labels)
+    (
+        long_rank_target,
+        short_rank_target,
+        long_rel,
+        short_rel,
+        long_mag,
+        short_mag,
+    ) = _resolve_side_targets(labels, ml_cfg)
 
     # 4. joblib Parallel execution with sequential fallback (pytest-friendly)
     t_parallel_start = time.perf_counter()
@@ -715,6 +738,8 @@ def build_ml_strategy_alpha(
                 features=features,
                 labels=labels,
                 ml_cfg=ml_cfg,
+                long_rank_target=long_rank_target,
+                short_rank_target=short_rank_target,
                 long_rel=long_rel,
                 short_rel=short_rel,
                 long_mag=long_mag,
@@ -729,6 +754,8 @@ def build_ml_strategy_alpha(
                 features=features,
                 labels=labels,
                 ml_cfg=ml_cfg,
+                long_rank_target=long_rank_target,
+                short_rank_target=short_rank_target,
                 long_rel=long_rel,
                 short_rel=short_rel,
                 long_mag=long_mag,
@@ -961,26 +988,26 @@ def build_ml_strategy_alpha(
         alpha_short_2d=alpha_short_final,
         ic_score_2d=alpha_ic_score,
     )
-    # OOS rank-IC 진단 (Phase A / D1)
-    # score_grid: [T, N] raw ranker output — NaN=미예측, 실수=OOS test 구간만 채워짐
-    # signed_net_ret: [T, N] beta-resid+CS-demean label — 학습 타깃 정합
-    # OOS 구간 = score_grid에 finite 값이 있는 t-행 (fold test + virtual refit)
+    # OOS rank-IC 진단
     _score_grid_f = score_grid.astype(np.float64)
-    _snr_f = labels.signed_net_ret.astype(np.float64)
+    if ml_cfg.oos_ic_target_source == "forward_gross_ret" and labels.forward_gross_ret is not None:
+        _ic_target = labels.forward_gross_ret.astype(np.float64)
+        _target_source = "forward_gross_ret"
+    else:
+        _ic_target = labels.signed_net_ret.astype(np.float64)
+        _target_source = "signed_net_ret"
 
     # OOS 시간 범위 감지: score_grid에 ≥1 finite가 있는 bar
     _score_finite_per_bar = np.sum(np.isfinite(_score_grid_f), axis=1)  # [T]
     _oos_time_mask: np.ndarray = _score_finite_per_bar >= 1  # OOS로 추정되는 bar들
 
     # Co-finite: score AND signed_net_ret 모두 finite인 (t,s) 쌍 수 / bar
-    _cofinite_per_bar = np.sum(
-        np.isfinite(_score_grid_f) & np.isfinite(_snr_f), axis=1
-    )  # [T]
+    _cofinite_per_bar = np.sum(np.isfinite(_score_grid_f) & np.isfinite(_ic_target), axis=1)  # [T]
     _cofinite_oos = _cofinite_per_bar[_oos_time_mask]  # OOS 구간만
 
     # SNR OOS finite 비율 진단 — signed_net_ret가 OOS에서 얼마나 채워져 있는가
-    _snr_oos_finite = float(
-        np.mean(np.isfinite(_snr_f[_oos_time_mask]))
+    _target_oos_finite = float(
+        np.mean(np.isfinite(_ic_target[_oos_time_mask]))
     ) if _oos_time_mask.any() else 0.0
 
     _cofinite_p50 = float(np.median(_cofinite_oos)) if _cofinite_oos.size > 0 else 0.0
@@ -990,11 +1017,11 @@ def build_ml_strategy_alpha(
     # SCORE-IC 0/0/0 원인 진단
     if not _oos_time_mask.any():
         _oos_diag = "no_oos_predictions"
-    elif _cofinite_p50 < 5 and _snr_oos_finite < 0.5:
+    elif _cofinite_p50 < 5 and _target_oos_finite < 0.5:
         _oos_diag = "both_cofinite_starvation_AND_snr_nan"
     elif _cofinite_p50 < 5:
         _oos_diag = "cofinite_starvation(score∩snr<5/bar)"
-    elif _snr_oos_finite < 0.5:
+    elif _target_oos_finite < 0.5:
         _oos_diag = "snr_nan_in_oos"
     else:
         _oos_diag = "sufficient_cofinite_check_ic"
@@ -1004,7 +1031,7 @@ def build_ml_strategy_alpha(
     if _oos_ge5_mask.any():
         _oos_ic_series = rolling_ic(
             _score_grid_f[_oos_ge5_mask],
-            _snr_f[_oos_ge5_mask],
+            _ic_target[_oos_ge5_mask],
             method="spearman",
         )
         _oos_ic_stats = ic_summary(_oos_ic_series)
@@ -1028,7 +1055,7 @@ def build_ml_strategy_alpha(
         int(_oos_ic_stats.get("n_obs", 0.0)),
         _cofinite_p50,
         _bars_ge5_ratio,
-        _snr_oos_finite,
+        _target_oos_finite,
     )
     _logger.info(
         "🔬 [OOS-DIAG] cause=%s oos_bars=%d ge5_bars=%d",
@@ -1036,6 +1063,41 @@ def build_ml_strategy_alpha(
         int(_oos_time_mask.sum()),
         _bars_ge5,
     )
+    panel.attrs["oos_forward_rank_ic"] = {
+        "mean_ic": float(_oos_ic_stats.get("mean_ic", 0.0)),
+        "t_stat": float(_oos_ic_stats.get("t_stat", 0.0)),
+        "hit_ratio": float(_oos_ic_stats.get("hit_ratio", 0.0)),
+        "n_obs": int(_oos_ic_stats.get("n_obs", 0.0)),
+        "cofinite_p50": float(_cofinite_p50),
+        "bars_ge5_ratio": float(_bars_ge5_ratio),
+        "target_source": _target_source,
+    }
+    _is_rank_ic = float(quality_report.get("spearman_rank_ic", 0.0))
+    _valid_rank_ic = float(quality_report.get("ranker_valid_ndcg_at_5", 0.0))
+    _test_rank_ic = float(_oos_ic_stats.get("mean_ic", 0.0))
+    _retention_ratio = float(
+        _test_rank_ic / max(abs(_is_rank_ic), 1e-12) if abs(_is_rank_ic) > 0.0 else 0.0
+    )
+    if not ml_cfg.ranker_enabled:
+        _decision = "not_measured"
+    elif (
+        _test_rank_ic >= 0.015
+        and float(_oos_ic_stats.get("t_stat", 0.0)) >= 2.0
+        and _retention_ratio >= 0.50
+    ):
+        _decision = "continue"
+    elif _test_rank_ic < 0.005 or float(_oos_ic_stats.get("t_stat", 0.0)) < 1.0:
+        _decision = "no_edge"
+    else:
+        _decision = "continue"
+    panel.attrs["generalization_report"] = {
+        "is_rank_ic": _is_rank_ic,
+        "valid_rank_ic": _valid_rank_ic,
+        "test_rank_ic": _test_rank_ic,
+        "oos_rank_ic": _test_rank_ic,
+        "retention_ratio": _retention_ratio,
+        "decision": _decision,
+    }
     if not ml_cfg.ranker_enabled:
         # NDCG is N/A without ranker; mark as passing to avoid false gate failure
         quality_report["ranker_valid_ndcg_at_5"] = 1.0
@@ -1328,7 +1390,14 @@ def build_ml_strategy_alpha_anchored(
     )
 
     t_matrix = time.perf_counter()
-    long_rel, short_rel, long_mag, short_mag = _resolve_side_targets(labels)
+    (
+        long_rank_target,
+        short_rank_target,
+        long_rel,
+        short_rel,
+        long_mag,
+        short_mag,
+    ) = _resolve_side_targets(labels, ml_cfg)
 
     train_long = _build_side_matrix(
         features=normalized_features,
@@ -1338,6 +1407,7 @@ def build_ml_strategy_alpha_anchored(
         fold=fold,
         split="train",
         min_group_size=ml_cfg.min_group_size,
+        rank_target_override=long_rank_target,
         relevance_override=long_rel,
         ev_target_override=long_mag,
     )
@@ -1365,6 +1435,7 @@ def build_ml_strategy_alpha_anchored(
         fold=fold,
         split="valid",
         min_group_size=ml_cfg.min_group_size,
+        rank_target_override=long_rank_target,
         relevance_override=long_rel,
         ev_target_override=long_mag,
     )
@@ -1376,6 +1447,7 @@ def build_ml_strategy_alpha_anchored(
         fold=fold,
         split="test",
         min_group_size=ml_cfg.min_group_size,
+        rank_target_override=long_rank_target,
         relevance_override=long_rel,
         ev_target_override=long_mag,
     )
@@ -1387,6 +1459,7 @@ def build_ml_strategy_alpha_anchored(
         fold=fold,
         split="train",
         min_group_size=ml_cfg.min_group_size,
+        rank_target_override=short_rank_target,
         relevance_override=short_rel,
         ev_target_override=short_mag,
     )
@@ -1398,6 +1471,7 @@ def build_ml_strategy_alpha_anchored(
         fold=fold,
         split="valid",
         min_group_size=ml_cfg.min_group_size,
+        rank_target_override=short_rank_target,
         relevance_override=short_rel,
         ev_target_override=short_mag,
     )
@@ -1409,6 +1483,7 @@ def build_ml_strategy_alpha_anchored(
         fold=fold,
         split="test",
         min_group_size=ml_cfg.min_group_size,
+        rank_target_override=short_rank_target,
         relevance_override=short_rel,
         ev_target_override=short_mag,
     )
