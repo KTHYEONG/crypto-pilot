@@ -16,6 +16,7 @@ from src.domain.futures.strategy.alpha_evaluation import (
     compute_per_regime_ic,
     compute_q50_sign_hit,
     compute_quantile_coverage,
+    diagnose_alpha_ic_decomposition,
     evaluate_alpha,
     sweep_horizon_breakeven,
 )
@@ -528,3 +529,136 @@ def test_evaluate_alpha_includes_per_regime_breakeven() -> None:
     assert set(report.per_regime_breakeven.keys()) == {"bull", "bear", "chop"}
     # Without btc_close all values are nan
     assert all(math.isnan(v) for v in report.per_regime_breakeven.values())
+
+
+# ---------------------------------------------------------------------------
+# diagnose_alpha_ic_decomposition — Phase 0/§A spec tests
+# ---------------------------------------------------------------------------
+
+
+def test_diagnose_ic_decomposition_returns_expected_keys() -> None:
+    """반환 dict에 7개 핵심 키가 모두 존재해야 한다."""
+    # Arrange
+    rng = np.random.default_rng(seed=42)
+    T, N = 50, 10
+    pred = rng.standard_normal((T, N)).astype(np.float64)
+    real = rng.standard_normal((T, N)).astype(np.float64)
+
+    # Act
+    result = diagnose_alpha_ic_decomposition(
+        pred_dense_2d=pred,
+        realized_raw_2d=real,
+    )
+
+    # Assert — 7개 키 존재
+    expected_keys = {
+        "dense_c1_raw_ic",
+        "dense_c1_raw_hit",
+        "dense_c1_raw_breadth",
+        "dense_c1_resid_ic",
+        "dense_c1_resid_hit",
+        "dense_c3_raw_ic",
+        "dense_c3_resid_ic",
+    }
+    assert set(result.keys()) == expected_keys
+
+
+def test_diagnose_ic_decomposition_dense_breadth_greater_than_gated() -> None:
+    """Dense signal breadth > gated (sparse) signal breadth."""
+    # Arrange — dense signal: all non-zero; gated: only 1/10 non-zero
+    rng = np.random.default_rng(seed=7)
+    T, N = 100, 20
+    pred_dense = rng.standard_normal((T, N)).astype(np.float64)
+    pred_gated = np.zeros((T, N), dtype=np.float64)
+    pred_gated[:, :2] = pred_dense[:, :2]  # only 2/20 symbols active
+
+    real = rng.standard_normal((T, N)).astype(np.float64)
+
+    # Act
+    result_dense = diagnose_alpha_ic_decomposition(
+        pred_dense_2d=pred_dense, realized_raw_2d=real
+    )
+    result_gated = diagnose_alpha_ic_decomposition(
+        pred_dense_2d=pred_gated, realized_raw_2d=real
+    )
+
+    # Assert — dense breadth significantly larger
+    assert result_dense["dense_c1_raw_breadth"] > result_gated["dense_c1_raw_breadth"]
+    assert result_dense["dense_c1_raw_breadth"] == pytest.approx(20.0, rel=0.01)
+    assert result_gated["dense_c1_raw_breadth"] == pytest.approx(2.0, rel=0.01)
+
+
+def test_diagnose_ic_decomposition_residualized_differs_from_raw() -> None:
+    """beta-residualization이 적용될 때 resid IC가 raw IC와 달라야 한다.
+
+    핵심: beta가 심볼별로 다를 때만 per-row 차감값이 달라 spearman rank가 변함.
+    상수 beta는 per-row shift이므로 spearman에 불변 → 심볼별 heterogeneous beta 필요.
+    """
+    # Arrange — signal correlated with idiosyncratic, but raw return contaminated by market
+    rng = np.random.default_rng(seed=99)
+    T, N = 200, 15
+    # market factor
+    market = rng.standard_normal(T).astype(np.float64) * 0.05
+    # heterogeneous beta: varies per symbol (0.5 ~ 3.0) AND per time
+    beta = np.abs(rng.standard_normal((T, N)).astype(np.float64)) * 1.0 + 0.5
+    # idiosyncratic return (true signal target)
+    idio = rng.standard_normal((T, N)).astype(np.float64) * 0.01
+    # raw return = beta_i,t * market_t + idio_i,t (cross-sectional rank dominated by beta*market)
+    raw = beta * market[:, np.newaxis] + idio
+    # signal predicts idiosyncratic component (perfectly correlated, slight noise)
+    pred = idio + rng.standard_normal((T, N)).astype(np.float64) * 0.001
+
+    # Act
+    result = diagnose_alpha_ic_decomposition(
+        pred_dense_2d=pred,
+        realized_raw_2d=raw,
+        beta_2d=beta,
+        market_fwd_1d=market,
+    )
+
+    # Assert — residualized IC ≠ raw IC (beta*market contamination changes cross-sectional rank)
+    assert not math.isnan(result["dense_c1_resid_ic"])
+    assert not math.isnan(result["dense_c1_raw_ic"])
+    # They must differ — residualization removes the cross-sectional beta*market rank contamination
+    assert abs(result["dense_c1_resid_ic"] - result["dense_c1_raw_ic"]) > 0.01
+
+
+def test_diagnose_ic_decomposition_c3_subset_smaller_breadth() -> None:
+    """C3 mask (subset) 적용 시 breadth가 C1보다 작아야 한다."""
+    # Arrange
+    rng = np.random.default_rng(seed=3)
+    T, N = 80, 30
+    pred = rng.standard_normal((T, N)).astype(np.float64)
+    real = rng.standard_normal((T, N)).astype(np.float64)
+    # C3: only 8/30 symbols
+    c3_mask = np.zeros(N, dtype=np.bool_)
+    c3_mask[:8] = True
+
+    # Act
+    result = diagnose_alpha_ic_decomposition(
+        pred_dense_2d=pred,
+        realized_raw_2d=real,
+        trading_mask_1d=c3_mask,
+    )
+
+    # Assert — C3 IC computed (not nan); C1 breadth = 30
+    assert not math.isnan(result["dense_c3_raw_ic"])
+    assert result["dense_c1_raw_breadth"] == pytest.approx(30.0, rel=0.01)
+
+
+def test_diagnose_ic_decomposition_resid_nan_when_beta_none() -> None:
+    """beta_2d=None이면 resid IC는 nan이어야 한다."""
+    # Arrange
+    rng = np.random.default_rng(seed=1)
+    T, N = 40, 8
+    pred = rng.standard_normal((T, N)).astype(np.float64)
+    real = rng.standard_normal((T, N)).astype(np.float64)
+
+    # Act
+    result = diagnose_alpha_ic_decomposition(
+        pred_dense_2d=pred, realized_raw_2d=real, beta_2d=None
+    )
+
+    # Assert
+    assert math.isnan(result["dense_c1_resid_ic"])
+    assert math.isnan(result["dense_c1_resid_hit"])

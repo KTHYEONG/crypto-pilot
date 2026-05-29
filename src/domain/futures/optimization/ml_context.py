@@ -737,12 +737,12 @@ def compute_multi_alignment_info(
 
     for sym in symbols:
         sym_df = data_maps[sym].get(tf)
-        if sym_df is None or sym_df.empty:
+        if sym_df is None or sym_df.empty or "datetime" not in sym_df.columns:
             continue
-
-        is_off = int(data_maps[sym].get(f"is_start_idx_{tf}", 0))
-        if len(sym_df) > is_off and "datetime" in sym_df.columns:
-            is_start_dts_per_sym[sym] = sym_df["datetime"].iloc[is_off]
+        # 첫 bar(= fetch_start 포함 warmup 시작점)을 anchor로 사용.
+        # is_start_idx 기반 anchor는 warmup 기간을 panel에서 제외하여
+        # total_months < needed → adj_train + folds=1 붕괴를 유발함.
+        is_start_dts_per_sym[sym] = sym_df["datetime"].iloc[0]
 
     if not is_start_dts_per_sym:
         return None

@@ -736,3 +736,71 @@ def sweep_horizon_breakeven(
         )
 
     return results
+
+
+def diagnose_alpha_ic_decomposition(
+    *,
+    pred_dense_2d: NDArray[np.float64],
+    realized_raw_2d: NDArray[np.float64],
+    beta_2d: NDArray[np.float64] | None = None,
+    market_fwd_1d: NDArray[np.float64] | None = None,
+    trading_mask_1d: NDArray[np.bool_] | None = None,
+    horizon_bars: int = 12,
+) -> dict[str, float]:
+    """Dense vs gated, raw vs residualized IC 분해 — acceptance 디버깅 전용.
+
+    모든 IC는 관측만 하고 게이팅하지 않는다.
+
+    Args:
+        pred_dense_2d: Dense alpha signal [T, N] — EV hurdle/gate 미적용.
+        realized_raw_2d: Raw forward log returns [T, N].
+        beta_2d: Trailing OLS beta [T, N]; None이면 잔차화 생략.
+        market_fwd_1d: Market forward return [T]; None이면 잔차화 생략.
+        trading_mask_1d: C3 심볼 boolean mask [N]; None이면 C3 서브셋 생략.
+        horizon_bars: NW t-stat lag.
+
+    Returns:
+        Dict with keys:
+          dense_c1_raw_ic, dense_c1_raw_hit, dense_c1_raw_breadth,
+          dense_c1_resid_ic, dense_c1_resid_hit,
+          dense_c3_raw_ic, dense_c3_resid_ic.
+
+    """
+    result: dict[str, float] = {}
+
+    # --- C1 dense, raw target ---
+    ic_c1_raw = compute_net_ic(pred_dense_2d, realized_raw_2d, horizon_bars=horizon_bars)
+    result["dense_c1_raw_ic"] = ic_c1_raw["mean_ic"]
+    result["dense_c1_raw_hit"] = ic_c1_raw["hit_ratio"]
+    result["dense_c1_raw_breadth"] = compute_effective_breadth(
+        pred_dense_2d, np.zeros_like(pred_dense_2d)
+    )
+
+    # --- C1 dense, beta-residualized target ---
+    realized_resid: NDArray[np.float64] | None = None
+    if beta_2d is not None and market_fwd_1d is not None:
+        realized_resid = realized_raw_2d - beta_2d * market_fwd_1d[:, np.newaxis]
+        ic_c1_resid = compute_net_ic(pred_dense_2d, realized_resid, horizon_bars=horizon_bars)
+        result["dense_c1_resid_ic"] = ic_c1_resid["mean_ic"]
+        result["dense_c1_resid_hit"] = ic_c1_resid["hit_ratio"]
+    else:
+        result["dense_c1_resid_ic"] = float("nan")
+        result["dense_c1_resid_hit"] = float("nan")
+
+    # --- C3 subset dense, raw target ---
+    if trading_mask_1d is not None and np.any(trading_mask_1d):
+        pred_c3 = pred_dense_2d[:, trading_mask_1d]
+        real_c3 = realized_raw_2d[:, trading_mask_1d]
+        ic_c3_raw = compute_net_ic(pred_c3, real_c3, horizon_bars=horizon_bars)
+        result["dense_c3_raw_ic"] = ic_c3_raw["mean_ic"]
+        if realized_resid is not None:
+            resid_c3 = realized_resid[:, trading_mask_1d]
+            ic_c3_resid = compute_net_ic(pred_c3, resid_c3, horizon_bars=horizon_bars)
+            result["dense_c3_resid_ic"] = ic_c3_resid["mean_ic"]
+        else:
+            result["dense_c3_resid_ic"] = float("nan")
+    else:
+        result["dense_c3_raw_ic"] = float("nan")
+        result["dense_c3_resid_ic"] = float("nan")
+
+    return result
