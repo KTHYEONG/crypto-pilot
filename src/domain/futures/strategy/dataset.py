@@ -151,28 +151,27 @@ def build_long_matrix(
     x = feature_slice[t_indices, col_indices].astype(np.float32, copy=False)
 
     # y_rank 조립
-    if rank_target_override is not None:
+    if relevance_override is not None:
+        rank_src_slice = relevance_override[start:end]
+        y_rank = rank_src_slice[t_indices, col_indices].astype(np.int32)
+    elif rank_target_override is not None:
         rank_override_slice = rank_target_override[start:end]
         rank_vals = rank_override_slice[t_indices, col_indices]
         y_rank = np.where(rank_vals > 0.0, np.int32(4), np.int32(0))
     else:
-        rank_src_slice = (
-            relevance_override[start:end]
-            if relevance_override is not None
-            else labels.relevance[start:end]
-        )
-        y_rank = rank_src_slice[t_indices, col_indices].astype(np.int32)
+        y_rank = labels.relevance[start:end][t_indices, col_indices].astype(np.int32)
 
     # y_ev 조립
-    ev_source = (
-        ev_target_override[start:end]
-        if ev_target_override is not None
-        else (
+    if ev_target_override is not None:
+        ev_source = ev_target_override[start:end]
+    elif rank_target_override is not None:
+        ev_source = rank_target_override[start:end]
+    else:
+        ev_source = (
             labels.magnitude_target[start:end]
             if labels.magnitude_target is not None
             else labels.exec_net_ret[start:end]
         )
-    )
     y_ev = ev_source[t_indices, col_indices].astype(np.float32)
 
     # sample_weight 및 index_map 조립

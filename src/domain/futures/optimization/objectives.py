@@ -259,6 +259,18 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
             or OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE", "coarse")
         ),
         "STRATEGY_MODE": bool(ml.get("STRATEGY_MODE", False)),
+        "POST_COST_ADMISSION_MODE": str(
+            ml.get("POST_COST_ADMISSION_MODE", ml.get("post_cost_admission_mode", "ev_gate"))
+        ),
+        "RANK_PORTFOLIO_TOP_K": int(
+            ml.get("RANK_PORTFOLIO_TOP_K", ml.get("rank_portfolio_top_k", 4))
+        ),
+        "RANK_PORTFOLIO_MIN_SCORE_SPREAD_BPS": float(
+            ml.get(
+                "RANK_PORTFOLIO_MIN_SCORE_SPREAD_BPS",
+                ml.get("rank_portfolio_min_score_spread_bps", 0.0),
+            )
+        ),
     }
 
 
@@ -431,6 +443,15 @@ def _compose_strategy_scores_inplace(
         "xs_short_preservation_ratio": float(
             aligned["_strategy_compose_diag"].get("xs_short_preservation_ratio", 0.0)
         ),
+        "rank_candidate_nz": float(
+            np.count_nonzero((np.abs(xs_l) > 1e-12) | (np.abs(xs_s) > 1e-12)) / max(xs_l.size, 1)
+        ),
+        "rank_candidate_to_xs_preservation": float(
+            aligned["_strategy_compose_diag"].get("xs_long_preservation_ratio", 0.0)
+            + aligned["_strategy_compose_diag"].get("xs_short_preservation_ratio", 0.0)
+        )
+        / 2.0,
+        "post_cost_admission_mode": str(params.get("POST_COST_ADMISSION_MODE", "ev_gate")),
     }
     if trial_number is not None and trial_number < 3:
         _diag: dict[str, float] = aligned["_strategy_compose_diag"]
@@ -462,7 +483,6 @@ def _run_portfolio_numba_block(
     *,
     trial_number: int | None = None,
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
-    import time
     _ = estimated_b
     orig_aligned = aligned
 
@@ -753,7 +773,6 @@ def _evaluate_awf_phase_d_aggregate(
     trial: optuna.Trial | None,
 ) -> tuple[float | tuple[float, float], dict[str, Any]]:
     """Core AWF leg loop + robust objective."""
-    import time
     t_compose_tot = 0.0
     t_prep_tot = 0.0
     t_prep_align_tot = 0.0
