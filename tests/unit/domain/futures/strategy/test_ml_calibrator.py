@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import typing
 import numpy as np
 from _pytest.monkeypatch import MonkeyPatch
 from numpy.typing import NDArray
@@ -184,7 +185,7 @@ def test_fit_quantile_calibrators_ensemble_seeds(monkeypatch: MonkeyPatch) -> No
 def test_calibrator_fit_uses_config_hyperparams(monkeypatch: MonkeyPatch) -> None:
     train = _dataset(rows=20, groups=4)
     valid = _dataset(rows=8, groups=2)
-    captured: dict[str, float] = {}
+    captured: dict[str, typing.Any] = {}
 
     class _FakeRegressor:
         def __init__(self, **kwargs: float) -> None:
@@ -194,7 +195,7 @@ def test_calibrator_fit_uses_config_hyperparams(monkeypatch: MonkeyPatch) -> Non
             del args, kwargs
             return self
 
-        def predict(self, x: object) -> np.ndarray:
+        def predict(self, x: typing.Sized) -> np.ndarray:
             return np.zeros((len(x),), dtype=np.float64)
 
     monkeypatch.setattr("src.domain.futures.strategy.calibrator.lgb.LGBMRegressor", _FakeRegressor)
@@ -224,7 +225,7 @@ def test_calibrator_fit_propagates_sample_weights(monkeypatch: MonkeyPatch) -> N
     valid = _dataset(rows=8, groups=2)
     train.sample_weight[:] = np.linspace(1.0, 2.0, train.sample_weight.shape[0], dtype=np.float32)
     valid.sample_weight[:] = np.linspace(2.0, 3.0, valid.sample_weight.shape[0], dtype=np.float32)
-    seen: dict[str, np.ndarray] = {}
+    seen: dict[str, typing.Any] = {}
 
     class _FakeRegressor:
         def __init__(self, **kwargs: float) -> None:
@@ -238,7 +239,7 @@ def test_calibrator_fit_propagates_sample_weights(monkeypatch: MonkeyPatch) -> N
             seen["valid"] = np.asarray(ev_sw[0], dtype=np.float32).copy()
             return self
 
-        def predict(self, x: object) -> np.ndarray:
+        def predict(self, x: typing.Sized) -> np.ndarray:
             return np.zeros((len(x),), dtype=np.float64)
 
     monkeypatch.setattr("src.domain.futures.strategy.calibrator.lgb.LGBMRegressor", _FakeRegressor)
@@ -298,3 +299,37 @@ def test_compute_conservative_ev_quantile_tail_blend_is_bounded() -> None:
     assert np.all(ev <= q90 + np.float32(1e-8))
     assert np.all(ev >= np.float32(0.0))
     assert np.max(ev) <= np.float32(cfg.alpha_clip_bps / 10000.0) + np.float32(1e-8)
+
+
+def test_calibrator_reproducibility() -> None:
+    train = _dataset(rows=180, groups=20)
+    valid = _dataset(rows=45, groups=5)
+    cfg = StrategyMLConfig(
+        calibrator_n_estimators=30,
+        early_stopping_rounds=10,
+        n_jobs=2,  # test with multiple threads
+    )
+
+    score_train = np.linspace(-1.0, 1.0, train.X.shape[0], dtype=np.float32)
+    score_valid = np.linspace(-0.8, 0.8, valid.X.shape[0], dtype=np.float32)
+
+    fit1 = fit_quantile_calibrators(
+        train=train,
+        valid=valid,
+        rank_score_train=score_train,
+        rank_score_valid=score_valid,
+        cfg=cfg,
+    )
+    ev1 = predict_conservative_ev(models=fit1, dataset=valid, rank_score=score_valid, cfg=cfg)
+
+    fit2 = fit_quantile_calibrators(
+        train=train,
+        valid=valid,
+        rank_score_train=score_train,
+        rank_score_valid=score_valid,
+        cfg=cfg,
+    )
+    ev2 = predict_conservative_ev(models=fit2, dataset=valid, rank_score=score_valid, cfg=cfg)
+
+    assert np.array_equal(ev1, ev2)
+
