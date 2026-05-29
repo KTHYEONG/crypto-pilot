@@ -113,11 +113,15 @@ def build_long_matrix(
     full_mask_2d = valid_mask & eligible_mask  # [t_slice, N]
 
     # 2. Finite Feature Mask 생성
+    # LightGBM handles NaN natively — only require that the symbol row is not ALL-NaN
+    # to avoid passing completely empty feature rows.
     feature_slice = features.values[start:end]  # [t_slice, N, F]
-    finite_feat_mask = np.all(np.isfinite(feature_slice), axis=2)  # [t_slice, N]
+    # Drop only rows where ALL features are NaN (completely missing symbol at this bar).
+    # Partial NaN features are acceptable — LightGBM uses them natively.
+    any_finite_feat_mask = np.any(np.isfinite(feature_slice), axis=2)  # [t_slice, N]
 
     # 3. 최종 유효 2D 마스크 결합
-    final_mask = full_mask_2d & finite_feat_mask  # [t_slice, N]
+    final_mask = full_mask_2d & any_finite_feat_mask  # [t_slice, N]
 
     # 4. 행별 그룹 크기 필터링 (min_group_size 조건 충족 행 필터링)
     group_counts = final_mask.sum(axis=1)  # [t_slice]

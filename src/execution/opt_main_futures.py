@@ -757,10 +757,15 @@ def _run_alpha_evaluation_report(
         float(np.nanstd(real_resid)),
     )
 
+    # Pass dense pre-clip signed signal (C1) when shapes align with C3 panel
+    _dense_pred_for_eval: np.ndarray | None = (
+        dense_pred if dense_pred.shape == al.shape else None
+    )
     report = evaluate_alpha(
         alpha_long_2d=al,
         alpha_short_2d=as_,
         realized_fwd_ret_2d=real_resid,
+        inference_signed_2d=_dense_pred_for_eval,
         btc_close_1d=btc_close_1d,
         n_trials=1,
         horizon_bars=horizon,
@@ -790,6 +795,24 @@ def _run_alpha_evaluation_report(
         pass_emoji(report.effective_breadth >= 3.0),
         pass_emoji(report.deflated_sharpe >= 0.95),
         (report.net_ic - report.breakeven_ic) * 10000.0
+    )
+    _infer_stat = report.metrics_by_panel.get("inference_stat", {})
+    if _infer_stat:
+        _logger.info(
+            "📊 [C1-STAT]  NET_IC=%7.4f  T-STAT=%7.2f  BRDTH=%7.2f  DSR=%7.4f",
+            _infer_stat.get("net_ic", float("nan")),
+            _infer_stat.get("ic_t_stat_nw", float("nan")),
+            _infer_stat.get("effective_breadth", float("nan")),
+            report.deflated_sharpe,
+        )
+    _logger.info(
+        "📊 [C3-EXEC]  NET_IC=%7.4f  T-STAT=%7.2f  BRDTH=%7.2f  BE_IC(%dh)=%7.4f  gap=%+5.1fbps",
+        report.net_ic,
+        report.ic_t_stat_nw,
+        report.effective_breadth,
+        horizon,
+        report.breakeven_ic,
+        (report.net_ic - report.breakeven_ic) * 10000.0,
     )
     
     reg_ics = [f"{r.capitalize()}: {ic:5.3f}" for r, ic in report.per_regime_ic.items()]
