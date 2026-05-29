@@ -468,6 +468,7 @@ def evaluate_alpha(
     alpha_long_2d: NDArray[np.float64],
     alpha_short_2d: NDArray[np.float64],
     realized_fwd_ret_2d: NDArray[np.float64],
+    inference_signed_2d: NDArray[np.float64] | None = None,
     q10_2d: NDArray[np.float64] | None = None,
     q90_2d: NDArray[np.float64] | None = None,
     q50_2d: NDArray[np.float64] | None = None,
@@ -485,6 +486,11 @@ def evaluate_alpha(
         alpha_long_2d: Predicted long EV [T, N] (signed, in return units).
         alpha_short_2d: Predicted short EV [T, N].
         realized_fwd_ret_2d: Realized forward gross log returns [T, N].
+        inference_signed_2d: Pre-clip continuous signed signal [T, N], optional.
+            When provided, an ``inference_stat`` panel is added to
+            ``metrics_by_panel`` reflecting ranking skill independent of the
+            cost-threshold clipping.  The top-level report fields remain based
+            on the clipped alpha to avoid breaking downstream consumers.
         q10_2d: 10th percentile predictions [T, N], optional.
         q90_2d: 90th percentile predictions [T, N], optional.
         q50_2d: Median predictions [T, N], optional.
@@ -650,6 +656,27 @@ def evaluate_alpha(
             "icir": _trading_ic_dict["icir"],
             "ic_t_stat_nw": _trading_ic_dict["t_stat_nw"],
             "effective_breadth": _trading_breadth,
+        }
+
+    # inference_stat panel: pre-clip signed signal — reveals ranking skill
+    # independent of the max(ev, 0) cost-threshold gate.
+    if inference_signed_2d is not None:
+        _infer_ic_dict = compute_net_ic(
+            inference_signed_2d, realized_fwd_ret_2d, horizon_bars=horizon_bars
+        )
+        _infer_breadth = float(
+            np.mean(
+                np.sum(
+                    np.isfinite(inference_signed_2d) & (inference_signed_2d != 0.0),
+                    axis=1,
+                )
+            )
+        )
+        _metrics_by_panel["inference_stat"] = {
+            "net_ic": _infer_ic_dict["mean_ic"],
+            "icir": _infer_ic_dict["icir"],
+            "ic_t_stat_nw": _infer_ic_dict["t_stat_nw"],
+            "effective_breadth": _infer_breadth,
         }
 
     return AlphaEvaluationReport(

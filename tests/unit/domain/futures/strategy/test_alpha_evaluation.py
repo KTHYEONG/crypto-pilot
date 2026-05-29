@@ -662,3 +662,83 @@ def test_diagnose_ic_decomposition_resid_nan_when_beta_none() -> None:
     # Assert
     assert math.isnan(result["dense_c1_resid_ic"])
     assert math.isnan(result["dense_c1_resid_hit"])
+
+
+# ---------------------------------------------------------------------------
+# evaluate_alpha — inference_signed_2d (inference_stat panel)
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_alpha_inference_stat_panel_present_when_signed_provided() -> None:
+    """inference_signed_2d가 주어지면 metrics_by_panel에 inference_stat 패널이 추가된다."""
+    # Arrange
+    rng = np.random.default_rng(0)
+    T, N = 50, 20
+    # Signed signal: continuous (not clipped to ≥0)
+    signed_2d = rng.standard_normal((T, N)).astype(np.float64) * 0.01
+    # Clipped signal: only positive values (simulating max(ev,0) clipping)
+    clipped_long = np.where(signed_2d > 0, signed_2d, 0.0)
+    clipped_short = np.zeros((T, N))
+    realized = rng.standard_normal((T, N)).astype(np.float64) * 0.02
+
+    # Act
+    report = evaluate_alpha(
+        alpha_long_2d=clipped_long,
+        alpha_short_2d=clipped_short,
+        realized_fwd_ret_2d=realized,
+        inference_signed_2d=signed_2d,
+    )
+
+    # Assert
+    assert "inference_stat" in report.metrics_by_panel
+    panel = report.metrics_by_panel["inference_stat"]
+    assert "net_ic" in panel
+    assert "ic_t_stat_nw" in panel
+    assert "effective_breadth" in panel
+
+
+def test_evaluate_alpha_inference_stat_breadth_exceeds_clipped() -> None:
+    """Signed pre-clip 신호의 inference breadth는 클리핑된 신호의 breadth보다 크다."""
+    # Arrange
+    rng = np.random.default_rng(42)
+    T, N = 60, 20
+    # signed: continuous → all N symbols have nonzero values
+    signed_2d = rng.standard_normal((T, N)).astype(np.float64) * 0.01
+    # clipped: only ~50% survive max(·,0) → breadth≈10
+    clipped_long = np.where(signed_2d > 0, signed_2d, 0.0)
+    clipped_short = np.zeros((T, N))
+    realized = rng.standard_normal((T, N)).astype(np.float64) * 0.02
+
+    # Act
+    report = evaluate_alpha(
+        alpha_long_2d=clipped_long,
+        alpha_short_2d=clipped_short,
+        realized_fwd_ret_2d=realized,
+        inference_signed_2d=signed_2d,
+    )
+
+    # Assert
+    clipped_breadth = report.effective_breadth
+    infer_breadth = report.metrics_by_panel["inference_stat"]["effective_breadth"]
+    assert infer_breadth > clipped_breadth, (
+        f"inference breadth {infer_breadth:.1f} should exceed clipped breadth {clipped_breadth:.1f}"
+    )
+
+
+def test_evaluate_alpha_inference_stat_absent_when_not_provided() -> None:
+    """inference_signed_2d 미제공 시 inference_stat 패널이 없다."""
+    # Arrange
+    rng = np.random.default_rng(1)
+    T, N = 30, 10
+    alpha = np.abs(rng.standard_normal((T, N)).astype(np.float64)) * 0.005
+    realized = rng.standard_normal((T, N)).astype(np.float64) * 0.02
+
+    # Act
+    report = evaluate_alpha(
+        alpha_long_2d=alpha,
+        alpha_short_2d=np.zeros((T, N)),
+        realized_fwd_ret_2d=realized,
+    )
+
+    # Assert
+    assert "inference_stat" not in report.metrics_by_panel
