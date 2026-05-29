@@ -117,7 +117,7 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
     # Phase D: use_inference_active_mask 분기 — C1 학습 시 Stage5 timeline 마스크 우선 사용.
     # inference_active_mask가 None이면(데이터에 컬럼 없음) 기존 universe 마스크로 fallback.
     _use_inf_mask: bool = (
-        getattr(cfg, "use_inference_active_mask", True)
+        cfg.use_inference_active_mask
         and aligned.inference_active_mask is not None
         and aligned.inference_entry_warm_mask is not None
     )
@@ -126,11 +126,18 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         # inference_entry_warm_mask가 warm-up 기간 완료 여부를 나타냄.
         assert aligned.inference_active_mask is not None  # _use_inf_mask 조건으로 보장
         assert aligned.inference_entry_warm_mask is not None  # _use_inf_mask 조건으로 보장
-        eligible = (
-            aligned.inference_active_mask
-            & aligned.inference_entry_warm_mask
-            & ~aligned.kill_mask
-        )
+        # historical_stage5_union: inference_entry_warm_mask는 inference_timeline 기반이므로
+        # warmup 기간(is_start 이전)에서 모두 False → eligible 붕괴.
+        # 이 스코프에서는 warm_mask(데이터 가용성 기반)를 직접 사용.
+        if cfg.training_universe_scope == "historical_stage5_union":
+            # (inference_active | warm) & warm ≡ warm (흡수법칙) — warm_mask로 직접 확장.
+            eligible = aligned.warm_mask & ~aligned.kill_mask
+        else:
+            eligible = (
+                aligned.inference_active_mask
+                & aligned.inference_entry_warm_mask
+                & ~aligned.kill_mask
+            )
     else:
         eligible = (
             aligned.active_mask
@@ -276,7 +283,7 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
     _cov_key = "coverage_60d" if "coverage_60d" in _sym_meta else "last_60d_coverage"
     if _cov_key in _sym_meta:
         quality_arr = _sym_meta[_cov_key]  # shape [N]
-        quality_min_f = float(getattr(cfg, "sample_weight_quality_clip_min", 0.50))
+        quality_min_f = float(cfg.sample_weight_quality_clip_min)
         quality_clipped = np.clip(quality_arr, quality_min_f, 1.0).astype(np.float32)  # [N]
         # sample_weight shape: [T, N] → broadcast quality [N] across rows
         sample_weight = sample_weight * quality_clipped[np.newaxis, :]  # [T, N]
@@ -284,7 +291,7 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
     # Phase D: Cluster balance factor — cluster_id 기반 1/sqrt(cluster_size) 역수 가중치
     # Time complexity: O(N). Space complexity: O(N).
     if (
-        getattr(cfg, "sample_weight_cluster_balance_enabled", True)
+        cfg.sample_weight_cluster_balance_enabled
         and "cluster_id" in _sym_meta
     ):
         cluster_ids_arr = _sym_meta["cluster_id"].astype(np.int32)  # [N]
