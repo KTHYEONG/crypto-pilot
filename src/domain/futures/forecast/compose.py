@@ -8,6 +8,32 @@ import numpy as np
 from src.domain.futures.forecast.contracts import AlphaForecast, CostForecast
 
 
+def _cs_zscore(score_2d: np.ndarray) -> np.ndarray:
+    """Bar-wise cross-sectional z-score (NaN-safe).
+
+    Args:
+        score_2d: Input array of shape [T, N].
+
+    Returns:
+        Z-scored array of same shape [T, N]. Non-finite positions are set to 0.
+
+    Time: O(T * N), Space: O(T * N)
+
+    """
+    out = np.full_like(score_2d, 0.0, dtype=np.float64)
+    for t in range(score_2d.shape[0]):
+        row = score_2d[t]
+        finite = np.isfinite(row)
+        if finite.sum() < 3:
+            continue
+        mu = np.mean(row[finite])
+        sd = np.std(row[finite], ddof=1)
+        if sd < 1e-12:
+            continue
+        out[t] = np.where(finite, (row - mu) / sd, 0.0)
+    return out
+
+
 def compose_mu(
     alpha: AlphaForecast,
     cost: CostForecast,
@@ -89,6 +115,89 @@ def compose_mu(
                         short_mask[t, pick] = True
             mu_long = np.where(long_mask, mu_long, -np.inf)
             mu_short = np.where(short_mask, mu_short, -np.inf)
-    xs_long = np.where(mu_long >= hurdle, mu_long, 0.0)
-    xs_short = np.where(mu_short >= hurdle, mu_short, 0.0)
+    elif admission_mode == "rank_cs_neutral":
+        rank_l = getattr(alpha, "rank_score_long_2d", None)
+        rank_s = getattr(alpha, "rank_score_short_2d", None)
+        if rank_l is not None and rank_s is not None:
+            rank_select_q = float(params.get("RANK_SELECT_QUANTILE", 0.33))
+            ic_prior = float(params.get("IC_PRIOR_FOR_GATE", 0.03))
+            ev_tilt_w = float(params.get("EV_SECONDARY_TILT_WEIGHT", 0.0))
+
+            rank_l2d = np.asarray(rank_l, dtype=np.float64)
+            rank_s2d = np.asarray(rank_s, dtype=np.float64)
+
+            # Cross-sectional z-score of rank scores
+            z_long = _cs_zscore(rank_l2d)
+            z_short = _cs_zscore(-rank_s2d)   # short: lower rank = better, so negate
+
+            # Optional EV rank tilt
+            if ev_tilt_w > 1e-9:
+                ev_z_long = _cs_zscore(
+                    np.asarray(alpha.alpha_long_2d, dtype=np.float64)
+                )
+                ev_z_short = _cs_zscore(
+                    np.asarray(alpha.alpha_short_2d, dtype=np.float64)
+                )
+                z_long = (1.0 - ev_tilt_w) * z_long + ev_tilt_w * ev_z_long
+                z_short = (1.0 - ev_tilt_w) * z_short + ev_tilt_w * ev_z_short
+
+            long_mask = np.zeros_like(mu_long, dtype=bool)
+            short_mask = np.zeros_like(mu_short, dtype=bool)
+
+            alpha_long_arr = np.asarray(alpha.alpha_long_2d, dtype=np.float64)
+            alpha_short_arr = np.asarray(alpha.alpha_short_2d, dtype=np.float64)
+
+            for t in range(mu_long.shape[0]):
+                lrow = z_long[t]
+                srow = z_short[t]
+                l_finite = np.isfinite(lrow) & np.isfinite(alpha_long_arr[t])
+                s_finite = np.isfinite(srow) & np.isfinite(alpha_short_arr[t])
+                n_l = int(l_finite.sum())
+                n_s = int(s_finite.sum())
+                if n_l > 0:
+                    k_l = max(1, int(np.ceil(n_l * rank_select_q)))
+                    idx_l = np.flatnonzero(l_finite)
+                    top_l = idx_l[np.argsort(lrow[idx_l])[::-1][:k_l]]
+                    long_mask[t, top_l] = True
+                if n_s > 0:
+                    k_s = max(1, int(np.ceil(n_s * rank_select_q)))
+                    idx_s = np.flatnonzero(s_finite)
+                    top_s = idx_s[np.argsort(srow[idx_s])[::-1][:k_s]]
+                    short_mask[t, top_s] = True
+
+            # Portfolio net-edge gate (bar-level, leak-free IC prior)
+            sigma_r = float(params.get("COMPOSER_SIGMA_BPS", 500.0))
+            holding_bars_gate = max(1, int(params.get("REBALANCE_BARS", 1)))
+            cost_bps = float(params.get("COST_GATE_BPS", 24.0))
+            amortized_cost = cost_bps / holding_bars_gate
+
+            z_long_masked = np.where(long_mask, z_long, 0.0)
+            z_short_masked = np.where(short_mask, z_short, 0.0)
+
+            for t in range(mu_long.shape[0]):
+                l_sel = long_mask[t].sum()
+                s_sel = short_mask[t].sum()
+                if l_sel < 1 or s_sel < 1:
+                    long_mask[t] = False
+                    short_mask[t] = False
+                    continue
+                zmean_l = float(np.mean(z_long_masked[t, long_mask[t]]))
+                zmean_s = float(np.mean(z_short_masked[t, short_mask[t]]))
+                gross_spread_bps = ic_prior * sigma_r * (zmean_l + zmean_s)
+                net_edge = gross_spread_bps - amortized_cost
+                if net_edge <= 0.0:
+                    long_mask[t] = False
+                    short_mask[t] = False
+
+            # Output: z-score as signal (no absolute EV gate)
+            mu_long = np.where(long_mask, z_long, -np.inf)
+            mu_short = np.where(short_mask, z_short, -np.inf)
+
+    if admission_mode == "rank_cs_neutral":
+        # hurdle은 rank z-score 맥락에서 의미없음; 선택된 포지션은 모두 통과
+        xs_long = np.where(np.isfinite(mu_long), mu_long, 0.0)
+        xs_short = np.where(np.isfinite(mu_short), mu_short, 0.0)
+    else:
+        xs_long = np.where(mu_long >= hurdle, mu_long, 0.0)
+        xs_short = np.where(mu_short >= hurdle, mu_short, 0.0)
     return xs_long, xs_short, mu_long, mu_short

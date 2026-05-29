@@ -16,7 +16,6 @@ def test_strategy_mode_pipeline_orchestration_order(
     run_config = build_run_config_from_args(
         {
             "mode": "strategy",
-            "strategy": "momentum_v0",
             "symbols": ("BTCUSDT",),
             "tf": "4h",
             "trials": 1,
@@ -129,14 +128,13 @@ def test_strategy_mode_pipeline_orchestration_order(
     assert called == ["window", "universe", "data", "strategy", "optimization"]
 
 
-def test_strategy_smoke_skips_optimization_stage(
+def test_alpha_mode_skips_optimization_stage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Alpha 모드는 strategy bridge 후 optimization 없이 종료해야 한다."""
     run_config = build_run_config_from_args(
         {
-            "mode": "strategy-smoke",
-            "strategy": "eh_st_v1",
-            "symbols": ("BTCUSDT",),
+            "mode": "alpha",
             "tf": "4h",
             "trials": 1,
             "sync_mode": "full_history_master",
@@ -174,19 +172,19 @@ def test_strategy_smoke_skips_optimization_stage(
     monkeypatch.setattr(opt_main_futures, "_run_strategy_stage", lambda *_: None)
 
     def fail_if_called(*args: object, **kwargs: object) -> opt_main_futures.RunnerResult:
-        raise AssertionError("optimization stage should not be called in strategy-smoke")
+        raise AssertionError("optimization stage should not be called in alpha mode")
 
     monkeypatch.setattr(opt_main_futures, "_run_optimization_stage", fail_if_called)
     result = opt_main_futures.run_pipeline(run_config)
     assert result.exit_code == 0
-    assert result.reason == "strategy_smoke_done"
+    assert result.reason == "alpha_evaluation_done"
 
 
 def test_run_from_cli_when_pipeline_returns_nonzero_propagates_exit_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Arrange
-    argv = ["--mode", "strategy-smoke", "--strategy", "momentum_v0", "--symbols", "BTCUSDT"]
+    argv = ["--mode", "strategy"]
     monkeypatch.setattr(
         opt_main_futures,
         "run_pipeline",
@@ -204,7 +202,7 @@ def test_run_from_cli_when_pipeline_raises_runtime_error_returns_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Arrange
-    argv = ["--mode", "strategy-smoke", "--strategy", "momentum_v0", "--symbols", "BTCUSDT"]
+    argv = ["--mode", "strategy"]
 
     def _raise_runtime_error(*_args: object, **_kwargs: object) -> opt_main_futures.RunnerResult:
         raise RuntimeError("boom")
@@ -222,7 +220,6 @@ def test_requires_exec_1m_returns_false_for_alpha_mode() -> None:
     run_config = build_run_config_from_args(
         {
             "mode": "alpha",
-            "strategy": "ml_lambdamart_v1",
             "symbols": ("BTCUSDT",),
             "tf": "4h",
             "trials": 1,
@@ -251,13 +248,10 @@ def test_requires_exec_1m_respects_intrabar_config_for_quick_backtest(
 def test_resolve_data_collection_symbols_uses_inference_panel() -> None:
     run_config = build_run_config_from_args(
         {
-            "mode": "strategy-smoke",
-            "strategy": "ml_lambdamart_v1",
-            "symbols": ("BTCUSDT",),
+            "mode": "strategy",
             "tf": "4h",
             "trials": 1,
             "sync_mode": "full_history_master",
-            "skip_universe": False,
         }
     )
     out = opt_main_futures._resolve_data_collection_symbols(
@@ -270,19 +264,16 @@ def test_resolve_data_collection_symbols_uses_inference_panel() -> None:
         assert sym in out
 
 
-def test_ensure_universe_ledger_sync_ignores_cli_symbols(
+def test_ensure_universe_ledger_sync_always_passes_none_symbols(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     run_config = build_run_config_from_args(
         {
-            "mode": "strategy-smoke",
-            "strategy": "ml_lambdamart_v1",
-            "symbols": ("BTCUSDT",),
+            "mode": "strategy",
             "tf": "4h",
             "trials": 1,
             "sync_mode": "full_history_master",
-            "skip_universe": False,
         }
     )
     window = opt_main_futures.QuarterlyWindow(
@@ -313,13 +304,10 @@ def test_ensure_cached_symbol_data_uses_fetch_start_for_backfill(
 ) -> None:
     run_config = build_run_config_from_args(
         {
-            "mode": "strategy-smoke",
-            "strategy": "ml_lambdamart_v1",
-            "symbols": ("BTCUSDT",),
+            "mode": "strategy",
             "tf": "4h",
             "trials": 1,
             "sync_mode": "full_history_master",
-            "skip_universe": False,
         }
     )
     window = opt_main_futures.QuarterlyWindow(

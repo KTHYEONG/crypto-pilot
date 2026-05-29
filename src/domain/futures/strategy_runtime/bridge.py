@@ -166,6 +166,7 @@ def merge_ml_output_into_data_maps(
         _logger.warning("[%s] alpha_panel missing required columns; skip merge", log_tag)
         return
 
+    _rank_cols = [c for c in ("rank_score_long", "rank_score_short") if c in panel.columns]
     by_sym = panel.reset_index().groupby("symbol", sort=False)
     for sym in symbols:
         if sym not in data_maps or tf not in data_maps[sym]:
@@ -178,11 +179,13 @@ def merge_ml_output_into_data_maps(
         if "alpha_long" in df.columns or "alpha_short" in df.columns:
             _logger.warning("[%s] overwrite alpha columns for symbol=%s", log_tag, sym)
         left = df[["datetime"]].copy()
-        right = sym_rows[["datetime", "alpha_long", "alpha_short"]].copy()
+        merge_cols = ["datetime", "alpha_long", "alpha_short", *_rank_cols]
+        right = sym_rows[merge_cols].copy()
         left["_merge_datetime"] = pd.to_datetime(left["datetime"], utc=True).dt.tz_localize(None)
         right["_merge_datetime"] = pd.to_datetime(right["datetime"], utc=True).dt.tz_localize(None)
+        merge_value_cols = ["_merge_datetime", "alpha_long", "alpha_short", *_rank_cols]
         merged = left.merge(
-            right[["_merge_datetime", "alpha_long", "alpha_short"]],
+            right[merge_value_cols],
             on="_merge_datetime",
             how="left",
         )
@@ -200,6 +203,8 @@ def merge_ml_output_into_data_maps(
 
         df["alpha_long"] = merged["alpha_long"].fillna(0.0).to_numpy(dtype=np.float64)
         df["alpha_short"] = merged["alpha_short"].fillna(0.0).to_numpy(dtype=np.float64)
+        for _rc in _rank_cols:
+            df[_rc] = merged[_rc].fillna(0.0).to_numpy(dtype=np.float64)
 
     # [ALPHA-MERGE] summary log
     merged_symbols = sum(

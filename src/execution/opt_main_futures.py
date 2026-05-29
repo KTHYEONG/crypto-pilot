@@ -28,7 +28,6 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=UserWarning, module="numpy")
 warnings.filterwarnings("ignore", message="no explicit representation of timezones")
 
-import src.domain.futures.optimization.opt_config
 from src.application.futures.optimization.config import (
     FuturesRunConfig,
     build_run_config_from_args,
@@ -86,7 +85,7 @@ _logger = logging.getLogger("opt_main_futures")
 
 def _requires_exec_1m(run_config: FuturesRunConfig) -> bool:
     """Return whether this run mode requires execution-grade 1m data."""
-    if run_config.mode in {"alpha", "strategy", "strategy-smoke"}:
+    if run_config.mode in {"alpha", "strategy"}:
         return False
     exec_mode_cfg = str(OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE", "coarse"))
     return exec_mode_cfg == "intrabar_1m"
@@ -94,10 +93,6 @@ def _requires_exec_1m(run_config: FuturesRunConfig) -> bool:
 
 def _ensure_universe_ledger_sync(run_config: FuturesRunConfig, window: QuarterlyWindow) -> None:
     """Ensure universe ledger coverage for the required window."""
-    if run_config.skip_data_sync:
-        _logger.info(".. SYNC: skip (reason=config_flag)")
-        return
-
     ledger_path = FUTURES_DATA_DIR / "universe_ledger.parquet"
     needs_sync = False
     last_ledger_date = date(2023, 1, 1)
@@ -129,19 +124,11 @@ def _ensure_universe_ledger_sync(run_config: FuturesRunConfig, window: Quarterly
             needs_sync = True
 
     if needs_sync:
-        target_symbols: list[str] | None = None
-        if run_config.skip_universe and run_config.symbols:
-            target_symbols = list(
-                set(list(run_config.symbols) + FUTURES_ANCHOR_SYMBOLS + FUTURES_MACRO_INDEX_SYMBOLS)
-            )
-        elif run_config.symbols:
-            _logger.info(".. SYNC: ignoring cli_symbols for universe")
-
         run_historical_sync(
             start_date=last_ledger_date,
             end_date=window.end_date_value,
             sync_mode=run_config.sync_mode,
-            symbols=target_symbols,
+            symbols=None,
             sync_1d=True,
             sync_4h=True,
             sync_1m=False,
@@ -155,24 +142,13 @@ def _resolve_data_collection_symbols(
     inference_panel: tuple[str, ...],
     live_inference_panel: tuple[str, ...],
 ) -> tuple[str, ...]:
-    if run_config.skip_universe:
-        base_symbols = list(
-            run_config.symbols
-            or tuple(discovered_symbols)
-            or tuple(src.domain.futures.optimization.opt_config.FUTURES_SYMBOLS)
-        )
+    scope = StrategyConfig(name="lambdamart").ml.training_universe_scope
+    if scope == "historical_stage5_union" and inference_panel:
+        base_symbols = list(inference_panel)
+    elif scope == "stage5_passed" and live_inference_panel:
+        base_symbols = list(live_inference_panel)
     else:
-        scope = "stage6_selected"
-        if run_config.strategy is not None:
-            scope = StrategyConfig(name=run_config.strategy).ml.training_universe_scope
-        if run_config.symbols:
-            _logger.info(".. DATA: ignoring cli_symbols for universe")
-        if scope == "historical_stage5_union" and inference_panel:
-            base_symbols = list(inference_panel)
-        elif scope == "stage5_passed" and live_inference_panel:
-            base_symbols = list(live_inference_panel)
-        else:
-            base_symbols = list(discovered_symbols)
+        base_symbols = list(discovered_symbols)
 
     merged_symbols = (
         base_symbols
@@ -191,8 +167,6 @@ def _ensure_cached_symbol_data_for_targets(
     require_exec_1m: bool,
 ) -> None:
     """Ensure cached parquet data exists for the resolved data-load target symbols."""
-    if run_config.skip_data_sync:
-        return
     if not symbols:
         return
     ledger_path = FUTURES_DATA_DIR / "universe_ledger.parquet"
@@ -268,8 +242,7 @@ class DataStageResult:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbols", type=str, default=None)
-    parser.add_argument("--trials", type=int, default=OPT_FUTURES_CONFIG["total_trials"])
+    parser.add_argument("--trials", type=int, default=100)
     parser.add_argument("--tf", type=str, choices=["1h", "4h"], default="4h")
     parser.add_argument("--reference-date", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -277,22 +250,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["quick-backtest", "strategy", "strategy-smoke", "alpha", "full"],
+        choices=["quick-backtest", "strategy", "alpha", "full"],
         default="strategy",
     )
-    parser.add_argument(
-        "--quick-backtest",
-        action="store_true",
-        help="Alias for --mode quick-backtest.",
-    )
-    parser.add_argument(
-        "--strategy",
-        type=str,
-        default="ml_lambdamart_v1",
-        choices=["momentum_v0", "eh_st_v1", "ml_lambdamart_v1", "xs_reversal"],
-    )
-    parser.add_argument("--skip-universe", action="store_true")
-    parser.add_argument("--skip-data-sync", action="store_true")
     parser.add_argument(
         "--sync-mode",
         type=str,
@@ -300,19 +260,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["full_history_master", "elite_fast"],
     )
     parser.add_argument("--force-universe-rebuild", action="store_true")
-    parser.add_argument("--bypass-champion-guard", action="store_true")
-    parser.add_argument("--alpha-only", action="store_true")
     return parser
 
 
 def _build_run_config(args: argparse.Namespace) -> FuturesRunConfig:
     payload = vars(args).copy()
-    if args.quick_backtest:
-        payload["mode"] = "quick-backtest"
-    if payload.get("mode") == "quick-backtest":
-        payload["strategy"] = None
-    if payload.get("symbols"):
-        payload["symbols"] = tuple(str(payload["symbols"]).split(","))
     return build_run_config_from_args(payload)
 
 
@@ -347,18 +299,9 @@ def _run_universe_stage(
     inference_panel: tuple[str, ...] = ()
     live_inference_panel: tuple[str, ...] = ()
     selected_symbols: tuple[str, ...] = ()
-    if run_config.skip_universe:
-        return (
-            discovered_symbols,
-            timeline,
-            inference_panel,
-            live_inference_panel,
-            selected_symbols,
-            inference_timeline,
-        )
 
     universe_result = discover_universe_timeline(
-        tf=run_config.tf,
+        tf=run_config.timeframe,
         is_start=window.is_start_date,
         oos_start=window.oos_start_date,
         end_date=window.end_date_value,
@@ -368,7 +311,7 @@ def _run_universe_stage(
         snapshot=universe_result.snapshot,
         report=universe_result.report,
         reference_date=run_config.reference_date,
-        tf=run_config.tf,
+        tf=run_config.timeframe,
     ):
         raise RuntimeError("universe_quality_rejected")
     discovered_symbols = list(universe_result.symbols)
@@ -422,19 +365,18 @@ def _run_data_stage(
         inference_panel=inference_panel,
         live_inference_panel=live_inference_panel,
     )
-    exec_mode_cfg = str(OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE", "coarse"))
     require_exec_1m = _requires_exec_1m(run_config)
 
-    if not run_config.skip_universe and inference_panel:
+    if inference_panel:
         scope_name = "historical_stage5_union"
-    elif not run_config.skip_universe and live_inference_panel:
+    elif live_inference_panel:
         scope_name = "stage5_passed"
     else:
         scope_name = "stage6_selected"
 
     data_maps, oos_data_maps, valid_symbols = load_futures_data_maps_for_symbols(
         list(load_symbols),
-        run_config.tf,
+        run_config.timeframe,
         window.fetch_start,
         window.is_start,
         window.oos_start,
@@ -447,7 +389,7 @@ def _run_data_stage(
         missing_1m = [s for s in valid_symbols if "exec_1m" not in (data_maps.get(s) or {})]
         if missing_1m:
             raise RuntimeError(
-                f"exec_mode=intrabar_1m but {len(missing_1m)} symbol(s) missing 1m data: "
+                f"exec_mode=intrarar_1m but {len(missing_1m)} symbol(s) missing 1m data: "
                 f"{missing_1m[:5]}{'...' if len(missing_1m) > 5 else ''}"
             )
     if timeline and valid_symbols:
@@ -456,14 +398,14 @@ def _run_data_stage(
             data_maps=data_maps,
             oos_data_maps=oos_data_maps,
             symbols=valid_symbols,
-            tf=run_config.tf,
+            tf=run_config.timeframe,
             timeline=timeline,
             warmup_bars_required=warmup_bars_required,
             inference_timeline=inference_timeline or None,
         )
 
     readiness: DataReadinessResult = evaluate_data_readiness(
-        tf=run_config.tf,
+        tf=run_config.timeframe,
         data_maps=data_maps,
         oos_data_maps=oos_data_maps,
         valid_symbols=valid_symbols,
@@ -511,7 +453,7 @@ def _run_strategy_stage(
         oos_data_maps=data_stage.oos_data_maps,
         is_data_maps=data_stage.data_maps,
         valid_symbols=data_stage.valid_symbols,
-        tf=run_config.tf,
+        tf=run_config.timeframe,
     )
     # C1/C2 inference panel이 있으면 해당 심볼 데이터도 strategy_maps에 포함
     all_inference_syms = list(
@@ -519,14 +461,14 @@ def _run_strategy_stage(
             list(inference_panel or live_inference_panel) + list(data_stage.valid_symbols)
         )
     )
-    if run_config.mode in {"strategy", "strategy-smoke", "alpha"} and (
+    if run_config.mode in {"strategy", "alpha"} and (
         inference_panel or live_inference_panel
     ):
         full_strategy_maps = pick_strategy_data_maps(
             oos_data_maps=data_stage.oos_data_maps,
             is_data_maps=data_stage.data_maps,
             valid_symbols=all_inference_syms,
-            tf=run_config.tf,
+            tf=run_config.timeframe,
         )
     else:
         full_strategy_maps = strategy_maps
@@ -549,13 +491,13 @@ def _run_strategy_stage(
         ml_out = run_active_strategy_output_bridge(
             run_config=run_config,
             symbols=bridge_trading_symbols,
-            tf=run_config.tf,
+            tf=run_config.timeframe,
             fetch_start=window.fetch_start,
             end_date=window.end_date,
             opt_config=OPT_FUTURES_CONFIG,
             preloaded_data_maps=(
                 full_strategy_maps
-                if run_config.mode in {"strategy", "strategy-smoke", "alpha"}
+                if run_config.mode in {"strategy", "alpha"}
                 else None
             ),
             inference_panel=effective_inference,
@@ -569,7 +511,7 @@ def _run_strategy_stage(
             # gate 실패 시 ml_pipeline에서 이미 panel.attrs에 quality_report가 저장됨
             # bridge에서 예외 전 ml_out을 얻을 수 없으므로 gate 없이 재실행
 
-            _s_cfg = StrategyConfig(name=str(run_config.strategy))
+            _s_cfg = StrategyConfig(name="lambdamart")
             if effective_inference:
                 _eff_syms = list(effective_inference)
             elif effective_live:
@@ -590,7 +532,7 @@ def _run_strategy_stage(
             try:
                 ml_out = run_ml_pipeline_for_universe(
                     symbols=_eff_syms,
-                    tf=run_config.tf,
+                    tf=run_config.timeframe,
                     fetch_start=window.fetch_start,
                     end_date=window.end_date,
                     opt_config=OPT_FUTURES_CONFIG,
@@ -612,18 +554,18 @@ def _run_strategy_stage(
         data_stage.data_maps,
         data_stage.oos_data_maps,
         data_stage.valid_symbols,
-        run_config.tf,
+        run_config.timeframe,
     )
-    if run_config.mode in {"strategy", "strategy-smoke"}:
+    if run_config.mode == "strategy":
         assert_strategy_alpha_ready(
             ml_out=ml_out,
             oos_data_maps=data_stage.oos_data_maps,
             valid_symbols=data_stage.valid_symbols,
-            tf=run_config.tf,
+            tf=run_config.timeframe,
         )
     elif run_config.mode == "alpha":
         _run_alpha_evaluation_report(
-            ml_out, data_stage, run_config.tf,
+            ml_out, data_stage, run_config.timeframe,
             trading_symbols or tuple(data_stage.valid_symbols),
         )
 
@@ -635,8 +577,6 @@ def _run_alpha_evaluation_report(
     trading_symbols: tuple[str, ...] = (),
 ) -> None:
     """Run and print alpha quality metrics and horizon sweep like phase0_alpha_eval.py."""
-    import math
-
     from src.domain.futures.strategy.alpha_evaluation import evaluate_alpha, sweep_horizon_breakeven
 
     alpha_panel = getattr(ml_out, "alpha_panel", None)
@@ -657,6 +597,57 @@ def _run_alpha_evaluation_report(
     ]
     pivot_long = pivot_long[common_syms].fillna(0.0)
     pivot_short = pivot_short[common_syms].fillna(0.0)
+
+    # rank_cs_neutral: apply rank-based selection to SCOREBOARD evaluation
+    # if rank_score columns are present in panel, apply quantile selection
+    if "rank_score_long" in panel_reset.columns and "rank_score_short" in panel_reset.columns:
+        from src.domain.futures.forecast.compose import _cs_zscore
+        from src.domain.futures.strategy.config import StrategyMLConfig
+        _ml_cfg = StrategyMLConfig()
+        if _ml_cfg.post_cost_admission_mode == "rank_cs_neutral":
+            _q = float(_ml_cfg.rank_select_quantile)
+            _pivot_rs_long = panel_reset.pivot(
+                index="datetime", columns="symbol", values="rank_score_long"
+            ).reindex(columns=common_syms).fillna(0.0)
+            _pivot_rs_short = panel_reset.pivot(
+                index="datetime", columns="symbol", values="rank_score_short"
+            ).reindex(columns=common_syms).fillna(0.0)
+            _rs_l = _pivot_rs_long.to_numpy(dtype=np.float64)
+            _rs_s = _pivot_rs_short.to_numpy(dtype=np.float64)
+            _z_l = _cs_zscore(_rs_l)
+            _z_s = _cs_zscore(-_rs_s)  # short: negate so higher z = better short (matches compose.py)  # noqa: E501
+            _long_mask = np.zeros_like(_z_l, dtype=bool)
+            _short_mask = np.zeros_like(_z_s, dtype=bool)
+            for _t in range(_z_l.shape[0]):
+                _n = _z_l.shape[1]
+                _k = max(1, int(np.ceil(_n * _q)))
+                _lrow = _z_l[_t]
+                _srow = _z_s[_t]
+                _lf = np.isfinite(_lrow)
+                _sf = np.isfinite(_srow)
+                if _lf.sum() > 0:
+                    _idx_l = np.flatnonzero(_lf)
+                    _top_l = _idx_l[np.argsort(_lrow[_idx_l])[::-1][:_k]]
+                    _long_mask[_t, _top_l] = True
+                if _sf.sum() > 0:
+                    _idx_s = np.flatnonzero(_sf)
+                    _top_s = _idx_s[np.argsort(_srow[_idx_s])[::-1][:_k]]
+                    _short_mask[_t, _top_s] = True
+            # Use z-score as signal (not raw EV) — EV is near-zero OOS and kills breadth
+            pivot_long = pd.DataFrame(
+                np.where(_long_mask, _z_l, 0.0),
+                index=pivot_long.index, columns=common_syms,
+            )
+            pivot_short = pd.DataFrame(
+                np.where(_short_mask, _z_s, 0.0),
+                index=pivot_short.index, columns=common_syms,
+            )
+            _logger.info(
+                "[RANK-SCOREBOARD] rank_cs_neutral applied: q=%.2f long_nz=%.3f short_nz=%.3f",
+                _q,
+                float(np.count_nonzero(_long_mask) / max(_long_mask.size, 1)),
+                float(np.count_nonzero(_short_mask) / max(_short_mask.size, 1)),
+            )
 
     # get horizon from config
     horizon = int(OPT_FUTURES_CONFIG.get("label_horizon_bars", 12))
@@ -859,7 +850,7 @@ def _run_optimization_stage(
     project_root = str(BASE_DIR)
     ml_n_jobs = resolve_futures_parallel_policy(len(data_stage.valid_symbols))
     run_id = build_run_id(
-        run_config.tf,
+        run_config.timeframe,
         window.fetch_start,
         window.end_date,
         data_stage.valid_symbols,
@@ -868,7 +859,7 @@ def _run_optimization_stage(
     )
     storage_url, storage = setup_optuna_storage(project_root)
     study_name = build_joint_study_name(
-        run_config.tf,
+        run_config.timeframe,
         window.fetch_start,
         window.end_date,
         data_stage.valid_symbols,
@@ -881,7 +872,7 @@ def _run_optimization_stage(
     opt_req = OptimizationRequest(
         data_maps=data_stage.data_maps,
         symbols=data_stage.valid_symbols,
-        tf=run_config.tf,
+        tf=run_config.timeframe,
         fetch_start=window.fetch_start,
         is_start=window.is_start,
         end_date=window.end_date,
@@ -893,10 +884,8 @@ def _run_optimization_stage(
         ml_n_jobs=ml_n_jobs,
         seed=seed,
         resume=resume,
-        strategy_mode=(run_config.strategy is not None),
-        strategy_cfg=(
-            StrategyConfig(name=run_config.strategy) if run_config.strategy is not None else None
-        ),
+        strategy_mode=True,
+        strategy_cfg=StrategyConfig(name="lambdamart"),
         n_trials_a1=max(1, int(run_config.trials * 0.5)),
         n_trials_a2=max(1, int(run_config.trials * 0.2)),
         n_trials_b=max(1, int(run_config.trials * 0.3)),
@@ -1090,7 +1079,7 @@ def _run_optimization_stage(
         ensemble_results = [{"trial": t, "params": t.params} for t in completed_trials]
 
     final_req = FinalEvaluationRequest(
-        tf=run_config.tf,
+        tf=run_config.timeframe,
         project_root=project_root,
         study_ml=study_ml,
         run_id=run_id,
@@ -1161,10 +1150,9 @@ def run_pipeline(
         inference_timeline,
     ) = _run_universe_stage(run_config, window)
     _logger.info(
-        ">> UNIVERSE: n=%d windows=%d (skip=%s)",
+        ">> UNIVERSE: n=%d windows=%d",
         len(discovered_symbols),
         len(timeline),
-        run_config.skip_universe,
     )
     _logger.info("<< UNIVERSE: %.2fs", time.perf_counter() - t_universe)
     resolved_load_symbols = _resolve_data_collection_symbols(
@@ -1190,13 +1178,13 @@ def run_pipeline(
         live_inference_panel,
         inference_timeline,
     )
-    _logger.info("<< DATA: %.2fs (ok=%d)", time.perf_counter() - t_data, len(data_stage.valid_symbols))
+    _logger.info("<< DATA: %.2fs (ok=%d)", time.perf_counter() - t_data, len(data_stage.valid_symbols))  # noqa: E501
     # Step 4) strategy bridge + alpha contract
     t_strategy = time.perf_counter()
     _logger.info(
         ">> STRATEGY: %s | %s",
         run_config.mode,
-        run_config.strategy,
+        "lambdamart",
     )
     _run_strategy_stage(
         run_config,
@@ -1207,8 +1195,6 @@ def run_pipeline(
         selected_symbols,
     )
     _logger.info("<< STRATEGY: %.2fs", time.perf_counter() - t_strategy)
-    if run_config.mode == "strategy-smoke":
-        return RunnerResult(exit_code=0, reason="strategy_smoke_done")
     if run_config.mode == "alpha":
         return RunnerResult(exit_code=0, reason="alpha_evaluation_done")
     # Step 5) optimization + final OOS evaluation
