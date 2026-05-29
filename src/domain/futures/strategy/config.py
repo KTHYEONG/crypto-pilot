@@ -123,7 +123,7 @@ class RegimeConfig:
 class StrategyConfig:
     """Top-level strategy switch."""
 
-    name: str = "momentum_v0"
+    name: str = "momentum"
     momentum: MomentumConfig = field(default_factory=MomentumConfig)
     sleeves: SleeveConfig = field(default_factory=SleeveConfig)
     blend: BlendConfig = field(default_factory=BlendConfig)
@@ -132,7 +132,7 @@ class StrategyConfig:
 
     def __post_init__(self) -> None:
         """Validate top-level strategy name."""
-        if self.name not in {"momentum_v0", "eh_st_v1", "ml_lambdamart_v1", "xs_reversal"}:
+        if self.name not in {"momentum", "eh_st", "lambdamart", "xs_reversal"}:
             raise ValueError(f"unsupported strategy name: {self.name}")
 
 
@@ -140,7 +140,7 @@ class StrategyConfig:
 class StrategyMLConfig:
     """ML strategy configuration for compatibility name + quantile calibrator."""
 
-    name: Literal["ml_lambdamart_v1"] = "ml_lambdamart_v1"
+    name: Literal["lambdamart"] = "lambdamart"
     timeframe: str = "4h"
     seed: int = 42
     n_jobs: int = -1  # -1 resolves dynamically to optimal CPU count
@@ -204,13 +204,15 @@ class StrategyMLConfig:
     ranker_enabled: bool = True
     rank_target_mode: Literal["cs_residual", "forward_gross_rank"] = "forward_gross_rank"
     calibrator_target_mode: Literal["signed_ev", "rank_confidence"] = "rank_confidence"
-    post_cost_admission_mode: Literal["ev_gate", "rank_then_ev_gate"] = "rank_then_ev_gate"
+    post_cost_admission_mode: Literal[
+        "ev_gate", "rank_then_ev_gate", "rank_cs_neutral"
+    ] = "rank_cs_neutral"
     rank_portfolio_top_k: int = 4
     rank_portfolio_min_score_spread_bps: float = 0.0
     oos_ic_target_source: Literal["signed_net_ret", "forward_gross_ret"] = "forward_gross_ret"
     regime_gate_enabled: bool = True      # trailing BTC regime → exposure scalar (no look-ahead)
     regime_exposure_bull: float = 1.0      # full deployment in bull (IC > breakeven)
-    regime_exposure_bear: float = 0.0      # reduced in bear (IC < breakeven)
+    regime_exposure_bear: float = 0.5      # partial exposure in bear — L/S is already market-hedged
     regime_exposure_chop: float = 1.0      # suppressed in chop (IC ≈ 0)
     ev_mode: Literal["quantile", "prob_x_magnitude"] = "quantile"
     alpha_gate_min_long_nz: float = 0.0
@@ -260,6 +262,12 @@ class StrategyMLConfig:
     sample_weight_cluster_balance_enabled: bool = True
     # Phase 1C: 6mo halflife = 180d x 6bar/day = 1080 bars. None=disabled.
     sample_weight_time_decay_halflife_bars: int | None = 1080
+
+    # Phase 1: rank-native composition
+    rank_select_quantile: float = 0.33          # top/bottom quantile for L/S selection
+    target_breadth: int = 8                      # minimum effective breadth target
+    ic_prior_for_gate: float = 0.03             # leak-free IC prior for portfolio net-edge gate
+    ev_secondary_tilt_weight: float = 0.0       # blend weight for EV rank tilt (0=rank-only)
 
     def __post_init__(self) -> None:
         """Validate ML strategy parameters."""
@@ -340,10 +348,21 @@ class StrategyMLConfig:
             raise ValueError(
                 "calibrator_target_mode must be 'signed_ev' or 'rank_confidence'"
             )
-        if self.post_cost_admission_mode not in {"ev_gate", "rank_then_ev_gate"}:
+        if self.post_cost_admission_mode not in {
+            "ev_gate", "rank_then_ev_gate", "rank_cs_neutral"
+        }:
             raise ValueError(
-                "post_cost_admission_mode must be 'ev_gate' or 'rank_then_ev_gate'"
+                "post_cost_admission_mode must be "
+                "'ev_gate', 'rank_then_ev_gate', or 'rank_cs_neutral'"
             )
+        if not (0.0 < self.rank_select_quantile < 0.5):
+            raise ValueError("rank_select_quantile must satisfy 0 < value < 0.5")
+        if self.target_breadth < 2:
+            raise ValueError("target_breadth must be >= 2")
+        if not (0.0 <= self.ic_prior_for_gate <= 0.2):
+            raise ValueError("ic_prior_for_gate must satisfy 0 <= value <= 0.2")
+        if not (0.0 <= self.ev_secondary_tilt_weight <= 1.0):
+            raise ValueError("ev_secondary_tilt_weight must satisfy 0 <= value <= 1")
         if self.rank_portfolio_top_k < 1:
             raise ValueError("rank_portfolio_top_k must be >= 1")
         if self.rank_portfolio_min_score_spread_bps < 0.0:

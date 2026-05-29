@@ -429,6 +429,8 @@ def _compose_strategy_scores_inplace(
         eligible_mask=np.ones(alpha_l_2d.shape, dtype=bool),
         source="objectives_inplace",
         artifact_hash=_dummy_hash,
+        rank_score_long_2d=aligned.get("rank_score_long_2d"),   # may be None
+        rank_score_short_2d=aligned.get("rank_score_short_2d"), # may be None
     )
     _cf = CostForecast(
         execution_cost_bps_2d=np.asarray(cost_snapshot.execution_cost_bps_2d, dtype=np.float64),

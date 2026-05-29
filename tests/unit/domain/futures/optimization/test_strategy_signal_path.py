@@ -137,11 +137,23 @@ def test_strategy_compose_cost_gate_amortize_uses_rebalance_bars() -> None:
 
     _compose_strategy_scores_inplace(
         aligned_no,
-        {"BETA_ALPHA": 1.0, "EV_HURDLE_BPS": 0.0, "REBALANCE_BARS": 5, "COST_GATE_AMORTIZE": False},
+        {
+            "BETA_ALPHA": 1.0,
+            "EV_HURDLE_BPS": 0.0,
+            "REBALANCE_BARS": 5,
+            "COST_GATE_AMORTIZE": False,
+            "MAKER_RATIO": 0.0,
+        },
     )
     _compose_strategy_scores_inplace(
         aligned_amort,
-        {"BETA_ALPHA": 1.0, "EV_HURDLE_BPS": 0.0, "REBALANCE_BARS": 5, "COST_GATE_AMORTIZE": True},
+        {
+            "BETA_ALPHA": 1.0,
+            "EV_HURDLE_BPS": 0.0,
+            "REBALANCE_BARS": 5,
+            "COST_GATE_AMORTIZE": True,
+            "MAKER_RATIO": 0.0,
+        },
     )
 
     mu_no = np.asarray(aligned_no["mu_long_2d"], dtype=np.float64)
