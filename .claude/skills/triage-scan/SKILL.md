@@ -21,18 +21,18 @@ Quickly identify task type, strategy, and locate relevant code/tests with minima
 
 ## Output Format
 ```md
-### 🛡️ Triage-Scan: [Type]
+### 🔍 작업 탐색: [Type]
 
-**1. Triage**
-- **Strategy:** `[Strategy]` (Risk: `[Risk]`)
-- **Domain/Layer:** `[Layer Name]`
+**1. 작업 개요**
+- **해결 방향:** `[Strategy]` (예상 위험도: `[Risk]`)
+- **관련 모듈/계층:** `[Layer Name]`
 
-**2. Verified Map**
-- **Logic:** `[Path]:[Line]` (via [Keyword])
-- **Tests:** `[Path]`
-- **Deps:** `[Key Imports/Classes]`
-- **Related:** `[Relevant Filenames]`
+**2. 영향 범위 및 참조**
+- **수정할 주요 코드:** `[Path]:[Line]` (via [Keyword])
+- **테스트 파일:** `[Path]`
+- **의존성:** `[Key Imports/Classes]`
+- **관련 파일:** `[Relevant Filenames]`
 
-**3. Next Step**
+**3. 다음 단계**
 - [Hand off verified paths to `spec` or `implement`]
 ```
