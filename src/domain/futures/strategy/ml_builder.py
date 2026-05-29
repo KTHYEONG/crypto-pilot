@@ -42,10 +42,12 @@ from src.domain.futures.strategy.dataset import (
 from src.domain.futures.strategy.diagnostics import (
     alpha_gate_diagnostics,
     build_quality_report,
+    ic_summary,
     ml_alpha_metrics,
     passes_ic_gate,
     passes_quality_gate,
     preservation_ratio,
+    rolling_ic,
     side_alpha_tail_metrics,
 )
 from src.domain.futures.strategy.features import build_feature_panel
@@ -965,6 +967,25 @@ def build_ml_strategy_alpha(
         alpha_long_2d=alpha_long_final,
         alpha_short_2d=alpha_short_final,
         ic_score_2d=alpha_ic_score,
+    )
+    # Phase 2: dense ranker score IC 진단 — clip/hurdle 무관, 관측 전용
+    # score_grid: raw ranker output [T, N], NaN=미예측, 실수=score (ml_builder.py:650)
+    # signed_net_ret: beta-resid+CS-demean label [T, N] — 학습 타깃과 동일 → 정합
+    _score_ic_series = rolling_ic(
+        score_grid.astype(np.float64),
+        labels.signed_net_ret.astype(np.float64),
+        method="spearman",
+    )
+    _score_ic_stats = ic_summary(_score_ic_series)
+    # NaN-aware breadth: bar당 score 부여(non-NaN) 심볼 수 평균
+    _score_breadth = float(np.mean(np.sum(np.isfinite(score_grid), axis=1)))
+    _logger.info(
+        "🔬 [SCORE-IC] dense_ranker ic=%.4f t=%.2f hit=%.3f breadth=%.1f"
+        " (cf. emit_breadth≈1, target_breadth≥8)",
+        _score_ic_stats["mean_ic"],
+        _score_ic_stats["t_stat"],
+        _score_ic_stats["hit_ratio"],
+        _score_breadth,
     )
     if not ml_cfg.ranker_enabled:
         # NDCG is N/A without ranker; mark as passing to avoid false gate failure

@@ -74,6 +74,7 @@ from src.domain.futures.optimization.validation import (
 )
 from src.domain.futures.strategy.config import StrategyConfig
 from src.domain.futures.strategy_runtime.bridge import (
+    MLPipelineOutput,
     merge_ml_output_into_is_and_oos,
     run_ml_pipeline_for_universe,
 )
@@ -562,7 +563,7 @@ def _run_strategy_stage(
             trading_symbols=trading_symbols or tuple(data_stage.valid_symbols),
         )
     except RuntimeError as _e:
-        if run_config.mode == "alpha" and "alpha gate" in str(_e):
+        if run_config.mode == "alpha" and ("alpha gate" in str(_e) or "quality gate" in str(_e)):
             _alpha_gate_error = _e
             _logger.warning("⚠️ ALPHA: gate failed (evaluation continues) -> %s", _e)
             # gate 실패 시 ml_pipeline에서 이미 panel.attrs에 quality_report가 저장됨
@@ -586,15 +587,24 @@ def _run_strategy_stage(
                 alpha_gate_cost_wall_tolerance_bps=9999.0,
             )
             _s_cfg = _dc_replace(_s_cfg, ml=_updated_ml)
-            ml_out = run_ml_pipeline_for_universe(
-                symbols=_eff_syms,
-                tf=run_config.tf,
-                fetch_start=window.fetch_start,
-                end_date=window.end_date,
-                opt_config=OPT_FUTURES_CONFIG,
-                strategy_cfg=_s_cfg,
-                preloaded_data_maps=full_strategy_maps,
-            )
+            try:
+                ml_out = run_ml_pipeline_for_universe(
+                    symbols=_eff_syms,
+                    tf=run_config.tf,
+                    fetch_start=window.fetch_start,
+                    end_date=window.end_date,
+                    opt_config=OPT_FUTURES_CONFIG,
+                    strategy_cfg=_s_cfg,
+                    preloaded_data_maps=full_strategy_maps,
+                )
+            except RuntimeError as _e2:
+                # alpha 모드에서 gate-bypass 재실행도 quality gate 실패 시
+                # 평가 리포트 출력을 위해 MLPipelineOutput 빈 객체 사용
+                _logger.warning(
+                    "⚠️ ALPHA: gate-bypass rerun also failed (%s) -> evaluation with empty ml_out",
+                    _e2,
+                )
+                ml_out = MLPipelineOutput()
         else:
             raise
     merge_ml_output_into_is_and_oos(
@@ -612,13 +622,17 @@ def _run_strategy_stage(
             tf=run_config.tf,
         )
     elif run_config.mode == "alpha":
-        _run_alpha_evaluation_report(ml_out, data_stage, run_config.tf)
+        _run_alpha_evaluation_report(
+            ml_out, data_stage, run_config.tf,
+            trading_symbols or tuple(data_stage.valid_symbols),
+        )
 
 
 def _run_alpha_evaluation_report(
     ml_out: Any,
     data_stage: DataStageResult,
     tf: str,
+    trading_symbols: tuple[str, ...] = (),
 ) -> None:
     """Run and print alpha quality metrics and horizon sweep like phase0_alpha_eval.py."""
     import math
@@ -635,7 +649,12 @@ def _run_alpha_evaluation_report(
     panel_reset["datetime"] = pd.to_datetime(panel_reset["datetime"], utc=True)
     pivot_long = panel_reset.pivot(index="datetime", columns="symbol", values="alpha_long")
     pivot_short = panel_reset.pivot(index="datetime", columns="symbol", values="alpha_short")
-    common_syms = [s for s in pivot_long.columns if s in data_stage.data_maps]
+    # C3 trading_symbols만 평가 — non-trading 심볼의 alpha=0이 IC를 왜곡하는 것을 방지
+    trading_set = set(trading_symbols) if trading_symbols else set()
+    common_syms = [
+        s for s in pivot_long.columns
+        if s in data_stage.data_maps and (not trading_set or s in trading_set)
+    ]
     pivot_long = pivot_long[common_syms].fillna(0.0)
     pivot_short = pivot_short[common_syms].fillna(0.0)
 
@@ -666,10 +685,82 @@ def _run_alpha_evaluation_report(
     else:
         btc_close_1d = None
 
+    # Phase 0: IC Decomposition Diagnostic (dense C1 전체 심볼, C3 마스크 포함)
+    from src.domain.futures.strategy.alpha_evaluation import diagnose_alpha_ic_decomposition
+
+    # C1 전체 심볼 dense alpha — C3 필터·regime gate 미적용
+    all_syms = [s for s in panel_reset["symbol"].unique() if s in data_stage.data_maps]
+    dense_long_df = panel_reset.pivot(
+        index="datetime", columns="symbol", values="alpha_long"
+    ).reindex(columns=all_syms).fillna(0.0)
+    dense_short_df = panel_reset.pivot(
+        index="datetime", columns="symbol", values="alpha_short"
+    ).reindex(columns=all_syms).fillna(0.0)
+
+    dense_long_df.index = pd.to_datetime(dense_long_df.index, utc=True)
+    dense_short_df.index = pd.to_datetime(dense_short_df.index, utc=True)
+
+    c1_real_rows: dict[str, pd.Series] = {}
+    for sym in all_syms:
+        df_sym = data_stage.data_maps[sym][tf].set_index("datetime")
+        close_sym = df_sym["close"].reindex(dense_long_df.index)
+        c1_real_rows[sym] = np.log(close_sym.shift(-horizon) / close_sym)
+    c1_real_df = pd.DataFrame(c1_real_rows, index=dense_long_df.index)
+
+    diag_common_idx = dense_long_df.index.intersection(c1_real_df.index)
+    dense_long_arr = dense_long_df.loc[diag_common_idx].iloc[:-horizon].to_numpy(dtype=np.float64)
+    dense_short_arr = dense_short_df.loc[diag_common_idx].iloc[:-horizon].to_numpy(dtype=np.float64)
+    dense_pred = dense_long_arr - dense_short_arr
+    c1_real_arr = c1_real_df.loc[diag_common_idx].iloc[:-horizon].to_numpy(dtype=np.float64)
+
+    # C3 mask: trading_set 기반
+    c3_mask = np.array([s in trading_set for s in all_syms], dtype=np.bool_)
+
+    _ic_decomp = diagnose_alpha_ic_decomposition(
+        pred_dense_2d=dense_pred,
+        realized_raw_2d=c1_real_arr,
+        beta_2d=None,
+        market_fwd_1d=None,
+        trading_mask_1d=c3_mask if np.any(c3_mask) else None,
+        horizon_bars=horizon,
+    )
+    _logger.info(
+        "🔬 [IC-DECOMP] dense_c1_raw=%.4f(hit=%.3f br=%.1f)"
+        " dense_c1_resid=%.4f dense_c3_raw=%.4f dense_c3_resid=%.4f",
+        _ic_decomp.get("dense_c1_raw_ic", float("nan")),
+        _ic_decomp.get("dense_c1_raw_hit", float("nan")),
+        _ic_decomp.get("dense_c1_raw_breadth", float("nan")),
+        _ic_decomp.get("dense_c1_resid_ic", float("nan")),
+        _ic_decomp.get("dense_c3_raw_ic", float("nan")),
+        _ic_decomp.get("dense_c3_resid_ic", float("nan")),
+    )
+
+    # Phase 1B: SCOREBOARD realized return beta-residualize (타깃 정합)
+    # 모델 학습 타깃(beta-residualized)과 측정 타깃 정합 → raw return의 시장 성분 제거
+    from src.domain.futures.strategy.labels import _compute_trailing_beta
+    _close_rows: dict[str, pd.Series] = {}
+    for sym in common_syms:
+        _df_sym = data_stage.data_maps[sym][tf].set_index("datetime")
+        _close_rows[sym] = _df_sym["close"].reindex(common_idx)
+    _close_2d = pd.DataFrame(_close_rows, index=common_idx).to_numpy(dtype=np.float64)
+    _beta_2d_full = _compute_trailing_beta(_close_2d)           # [T_full, N_c3]
+    _beta_2d = _beta_2d_full[:-horizon]                         # [T-h, N_c3]
+    with np.errstate(all="ignore"):
+        _market_fwd = np.nanmean(real, axis=1)                  # [T-h]
+    _market_fwd = np.where(np.isfinite(_market_fwd), _market_fwd, 0.0)
+    real_resid = real - _beta_2d * _market_fwd[:, np.newaxis]  # [T-h, N_c3]
+    _logger.info(
+        "🔧 [1B-RESID] market_fwd_std=%.4f beta_mean=%.3f real_std=%.4f resid_std=%.4f",
+        float(np.nanstd(_market_fwd)),
+        float(np.nanmean(_beta_2d)),
+        float(np.nanstd(real)),
+        float(np.nanstd(real_resid)),
+    )
+
     report = evaluate_alpha(
         alpha_long_2d=al,
         alpha_short_2d=as_,
-        realized_fwd_ret_2d=real,
+        realized_fwd_ret_2d=real_resid,
         btc_close_1d=btc_close_1d,
         n_trials=1,
         horizon_bars=horizon,
