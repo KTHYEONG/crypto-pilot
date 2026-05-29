@@ -22,20 +22,20 @@ Empirically verify mechanical integrity (tests, linting, type-checking) and conf
 
 ## Output Format
 ```md
-### ✅ Verification: [PASS / FAIL / PARTIAL]
+### ✅ 검증 및 테스트: [PASS / FAIL / PARTIAL]
 
-**1. Execution Overview**
-- **Target Spec:** `docs/specs/filename.md`
-- **Commands:** `[Commands executed]`
-- **Result:** `[Raw output summary]`
+**1. 검증 요약**
+- **기준 설계 문서:** `docs/specs/filename.md`
+- **실행 명령어:** `[Commands executed]`
+- **결과 요약:** `[Raw output summary]`
 
-**2. Detailed Results**
-- [ ] **Criteria 1:** [Pass/Fail] - [Brief note]
-- [ ] **Criteria 2:** [Pass/Fail]
+**2. 세부 검증 내역**
+- [ ] **완료 기준 1:** [Pass/Fail] - [Brief note]
+- [ ] **완료 기준 2:** [Pass/Fail]
 
-**3. Findings/Gaps**
+**3. 문제점 및 발견 사항**
 - [Details of failed tests or lint errors]
 
-**4. Next Steps**
-- [Fix direction or Next Step (e.g., Request review)]
+**4. 다음 단계**
+- [Fix direction or Next Step]
 ```
