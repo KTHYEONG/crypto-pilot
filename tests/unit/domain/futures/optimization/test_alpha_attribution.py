@@ -43,7 +43,7 @@ def test_alpha_attribution_allows_negative_residual_without_failure() -> None:
 
 def test_rebuild_member_strategy_config_does_not_mutate_frozen_base() -> None:
     base_ml = StrategyMLConfig(label_horizon_bars=6, embargo_bars=6, learning_rate=0.03)
-    base_cfg = StrategyConfig(name="ml_lambdamart_v1", ml=base_ml)
+    base_cfg = StrategyConfig(name="lambdamart", ml=base_ml)
 
     member_cfg = _rebuild_member_strategy_config(base_cfg, {"learning_rate": 0.07})
 
@@ -54,7 +54,7 @@ def test_rebuild_member_strategy_config_does_not_mutate_frozen_base() -> None:
 
 
 def test_rebuild_member_strategy_config_ignores_non_ml_params_with_mixed_inputs() -> None:
-    base_cfg = StrategyConfig(name="ml_lambdamart_v1", ml=StrategyMLConfig())
+    base_cfg = StrategyConfig(name="lambdamart", ml=StrategyMLConfig())
     member_cfg = _rebuild_member_strategy_config(
         base_cfg,
         {
@@ -71,7 +71,7 @@ def test_rebuild_member_strategy_config_ignores_non_ml_params_with_mixed_inputs(
 
 
 def test_rebuild_member_strategy_config_invalid_scalar_type_fails_fast() -> None:
-    base_cfg = StrategyConfig(name="ml_lambdamart_v1", ml=StrategyMLConfig())
+    base_cfg = StrategyConfig(name="lambdamart", ml=StrategyMLConfig())
 
     with pytest.raises(ValueError, match="learning_rate"):
         _rebuild_member_strategy_config(base_cfg, {"learning_rate": "bad"})
@@ -79,7 +79,7 @@ def test_rebuild_member_strategy_config_invalid_scalar_type_fails_fast() -> None
 
 @pytest.mark.parametrize("ranking_mode", [123, "invalid_mode"])
 def test_rebuild_member_strategy_config_invalid_literal_fails_fast(ranking_mode: object) -> None:
-    base_cfg = StrategyConfig(name="ml_lambdamart_v1", ml=StrategyMLConfig())
+    base_cfg = StrategyConfig(name="lambdamart", ml=StrategyMLConfig())
 
     with pytest.raises(ValueError, match="ranking_mode"):
         _rebuild_member_strategy_config(base_cfg, {"ranking_mode": ranking_mode})
@@ -88,7 +88,7 @@ def test_rebuild_member_strategy_config_invalid_literal_fails_fast(ranking_mode:
 def test_rebuild_member_strategy_config_ignores_unknown_key_and_applies_valid_key(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    base_cfg = StrategyConfig(name="ml_lambdamart_v1", ml=StrategyMLConfig(learning_rate=0.03))
+    base_cfg = StrategyConfig(name="lambdamart", ml=StrategyMLConfig(learning_rate=0.03))
 
     with caplog.at_level("WARNING", logger="final_evaluator"):
         member_cfg = _rebuild_member_strategy_config(
@@ -101,7 +101,7 @@ def test_rebuild_member_strategy_config_ignores_unknown_key_and_applies_valid_ke
 
 
 def test_rebuild_member_strategy_config_mixed_valid_invalid_known_fails_no_partial_apply() -> None:
-    base_cfg = StrategyConfig(name="ml_lambdamart_v1", ml=StrategyMLConfig(learning_rate=0.03))
+    base_cfg = StrategyConfig(name="lambdamart", ml=StrategyMLConfig(learning_rate=0.03))
 
     with pytest.raises(ValueError, match="ranking_mode"):
         _rebuild_member_strategy_config(

@@ -9,10 +9,11 @@ from src.execution import opt_main_futures
 
 
 def test_rejects_legacy_alpha_only_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--alpha-only는 제거되어 unrecognized argument 오류(exit 2)를 반환해야 한다."""
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--mode", "quick-backtest", "--symbols", "BTCUSDT", "--alpha-only"],
+        ["opt_main_futures.py", "--mode", "quick-backtest", "--alpha-only"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -22,7 +23,7 @@ def test_rejects_legacy_hmm_only_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--mode", "quick-backtest", "--symbols", "BTCUSDT", "--hmm-only"],
+        ["opt_main_futures.py", "--mode", "quick-backtest", "--hmm-only"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -39,58 +40,31 @@ def test_strategy_mode_uses_default_strategy(monkeypatch: pytest.MonkeyPatch) ->
     ) -> opt_main_futures.RunnerResult:
         _ = seed
         _ = resume
-        captured["strategy"] = run_config.strategy
+        captured["mode"] = run_config.mode
         return opt_main_futures.RunnerResult(exit_code=0, reason="ok")
 
     monkeypatch.setattr(opt_main_futures, "run_pipeline", fake_run_pipeline)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--mode", "strategy", "--symbols", "BTCUSDT"],
+        ["opt_main_futures.py", "--mode", "strategy"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 0
-    assert captured["strategy"] == "ml_lambdamart_v1"
-
-
-def test_strategy_smoke_mode_uses_default_strategy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, str] = {}
-
-    def fake_run_pipeline(
-        run_config: Any,
-        *,
-        seed: int = 42,
-        resume: bool = False,
-    ) -> opt_main_futures.RunnerResult:
-        _ = seed
-        _ = resume
-        captured["strategy"] = run_config.strategy
-        return opt_main_futures.RunnerResult(exit_code=0, reason="ok")
-
-    monkeypatch.setattr(opt_main_futures, "run_pipeline", fake_run_pipeline)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["opt_main_futures.py", "--mode", "strategy-smoke", "--symbols", "BTCUSDT"],
-    )
-    exit_code = opt_main_futures.main()
-    assert exit_code == 0
-    assert captured["strategy"] == "ml_lambdamart_v1"
+    assert captured["mode"] == "strategy"
 
 
 def test_rejects_legacy_full_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--mode", "full", "--symbols", "BTCUSDT"],
+        ["opt_main_futures.py", "--mode", "full"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
 
 
-def test_strategy_smoke_mode_enters_pipeline(
+def test_strategy_mode_enters_pipeline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_mode = {"value": None}
@@ -104,7 +78,7 @@ def test_strategy_smoke_mode_enters_pipeline(
         _ = seed
         _ = resume
         captured_mode["value"] = run_config.mode
-        return opt_main_futures.RunnerResult(exit_code=0, reason="strategy_smoke_done")
+        return opt_main_futures.RunnerResult(exit_code=0, reason="strategy_done")
 
     monkeypatch.setattr(opt_main_futures, "run_pipeline", fake_run_pipeline)
     monkeypatch.setattr(
@@ -113,15 +87,11 @@ def test_strategy_smoke_mode_enters_pipeline(
         [
             "opt_main_futures.py",
             "--mode",
-            "strategy-smoke",
-            "--strategy",
-            "momentum_v0",
-            "--symbols",
-            "BTCUSDT",
+            "strategy",
             "--trials",
             "1",
         ],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 0
-    assert captured_mode["value"] == "strategy-smoke"
+    assert captured_mode["value"] == "strategy"

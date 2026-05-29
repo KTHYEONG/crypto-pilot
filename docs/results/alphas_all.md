@@ -162,3 +162,44 @@
   * `ML_COST`: `gate=75.0bps`, `floor=24.0bps`, **`pass=true`** (가혹 Taker 80% 시나리오 및 진단 정합성 검사 통과 완료)
 * **평가 및 해석:** 앙상블 학습과 고성능 피처 병렬 연산 및 정교한 비용 정합화 모델이 최고의 시너지를 유도하여 **OOS Rank IC 0.0390 및 t-stat 4.24**의 놀라운 일반화 성과를 기록했습니다. 3대 아키텍처 리스크(P0/P1/P2) 해결 및 173개 유닛 테스트 100% 통과로 종합 평점은 **100점** 만점으로 상향 판정되었습니다.
 
+---
+
+## 8. alpha5.md: Phase 1 Rank-Native Composition 구현 후 검증 (Acceptance Criteria 미달)
+* **측정일시:** 2026-05-29 | **레퍼런스:** `docs/specs/alpha_rank_native_composition_redesign.md` Phase 1 | **상태:** ⚠️ 구현 완료, 효과 미달
+* **요약:** Rank-Native 사이징 + z-score 신호 + regime_exposure_bear=0.5 변경을 구현하여 rank score 배선은 완료했으나, SCOREBOARD 평가 결과 모든 Acceptance Criteria를 실패. 근본 원인은 **z-score 신호 자체의 weak realized-return correlation** 및 **OOS EV 붕괴로 인한 최종 IC 연쇄 손실**.
+* **구현 완료 항목:**
+  * `AlphaForecast` 필드 추가: `rank_score_long_2d`, `rank_score_short_2d`
+  * `compose_mu` 신규 admission mode: `rank_cs_neutral` (bar별 z-score 표준화 + 분위 선택)
+  * Signal 배선: `ml_builder → ml_context → data_aligner → bridge → compose_mu` 전 경로 통합
+  * `StrategyMLConfig` 신규 파라미터: `rank_select_quantile=0.33`, `target_breadth=8`, `ic_prior_for_gate=0.03`
+  * `regime_exposure_bear`: 0.0 → 0.5 (bear 구간 부분 노출)
+  * 정적 분석: ruff/mypy PASS, 572 unit tests PASSED (4 pre-existing failures)
+* **OOS 실측 결과 (96 symbols, 4h, --mode alpha):**
+  * `[SCORE-IC] dense_ranker ic=0.0731 t=9.71` ← Ranker 신호 강도 ✅
+  * `[EV-PRECLIP] vrefit p95=4.5bps` ← OOS EV 극도로 약함
+  * `[IC-DECOMP] dense_c1_raw=0.0026 (hit=0.064 br=0.9)` ← IC 붕괴 (0.073 → 0.0026)
+  * `[ALPHA SCOREBOARD] NET_IC=0.0027 ❌ (목표 0.020)`, `BRDTH=0.95 ❌ (목표 8.0)`, `T-STAT=1.06 ❌ (목표 2.0)`
+  * `[RANK-SCOREBOARD] q=0.33 long_nz=0.333` ← 마스킹 적용됨 ✓
+  * `[REGIME IC] Bull:0.003 Bear:0.001 Chop:0.006` ← 모든 레짐 약함
+* **근본 원인 진단:**
+  1. **Z-score 신호의 약한 IC 상관:** Ranker가 학습한 횡단면 순위(IC 0.0731)는 강하지만, z-score 표준화 후 realized return과의 상관이 극도로 약화됨 (최종 IC 0.0026). Ranking order와 magnitude의 괴리 확대.
+  2. **Regime scaling 副作用:** `regime_exposure_bear=0.5` 적용 후에도 bear 구간 신호가 OOS 일반화 실패 (IC<0.001). EV collapse(4.5bps) 시 0.5배도 여전히 noise.
+  3. **EV OOS Generalization Gap:** IS fold에서 p95=75bps(ceiling)이나 OOS vrefit에서 p95=4.5bps (15배 붕괴). Magnitude 예측의 근본적 한계로, composition 손실 발생 (0.073 → 0.0026).
+  4. **Breadth 0.95 원인:** z-score 신호가 realized return과 약상관이므로, 분위 선택으로 마스킹해도 (33% = 0.333) effective breadth = 0.95 (상관 조정 후 매우 낮음).
+* **Acceptance Criteria 검증:**
+  * AlphaForecast rank_score 보유 및 배선: **PASS** ✅
+  * compose_mu rank_cs_neutral 경로 동작: **PASS** ✅
+  * `ALPHA SCOREBOARD breadth ≥ 8`: **FAIL** ❌ (실측 0.95)
+  * `ALPHA SCOREBOARD NET_IC ≥ 0.020`: **FAIL** ❌ (실측 0.0027)
+  * `ALPHA SCOREBOARD t-stat ≥ 2.0`: **FAIL** ❌ (실측 1.06)
+  * Binary regime gate 제거 및 vol-target 적용: **NOT YET** (Phase 2)
+  * 정적 분석 clean: **PASS** ✅
+* **문제점 및 이슈:**
+  * `--mode alpha` vs `--mode strategy` 경로 이질성: 전자는 raw alpha로 평가하고, 후자는 compose_mu 결과로 평가. Phase 1 effectiveness를 정확히 판정하려면 Optuna 최적화 경로 검증 필요.
+  * Z-score 신호의 realized return correlation이 약함 → Rank IC와 final IC의 28배 붕괴. 근본 원인은 **ranking order는 학습되지만 magnitude 정보 손실**.
+  * Regime 세팅이 부분 노출(bear=0.5)도 효과 미미 → Phase 2 (beta-neutral + vol-target) 이행 필요.
+* **향후 권장 경로:**
+  * **Option A:** `--mode strategy --trials 50` 실행하여 Optuna 최적화 경로에서 rank_cs_neutral의 실제 효과 측정. Phase 1 배선은 완료했으므로 최적화 단계에서의 contribution 평가.
+  * **Option B:** Phase 2 (beta-neutralization + vol-targeting) 즉시 진행. Binary regime gate 대체 및 결정론적 리스크 오버레이 도입으로 regime scaling 문제 근본 해결.
+  * **Option C:** Signal composition 근본 재설계. EV 기반 magnitude 예측 포기 → Rank z-score를 alpha로 직접 사용하되, 안정화를 위해 보수적 EV 혼합 비율 도입.
+

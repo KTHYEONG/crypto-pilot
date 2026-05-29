@@ -237,6 +237,28 @@ def _build_aligned_2d_from_prebuilt(
             return None
         aligned_data[col] = np.ascontiguousarray(merged)
 
+    # Optional rank score columns: pass through if all symbols have them
+    for opt_col in ("rank_score_long_2d", "rank_score_short_2d"):
+        opt_views: list[np.ndarray] = []
+        all_present = True
+        for sym in symbols:
+            sym_arrs = prebuilt_arrays.get(sym)
+            if sym_arrs is None:
+                all_present = False
+                break
+            arr = sym_arrs.get(opt_col)
+            if arr is None or slice_end > int(arr.shape[0]):
+                all_present = False
+                break
+            opt_views.append(arr[slice_start:slice_end])
+        if all_present and opt_views:
+            try:
+                aligned_data[opt_col] = np.ascontiguousarray(
+                    np.column_stack(opt_views).astype(np.float64, copy=False)
+                )
+            except ValueError:
+                pass
+
     decision_dt = _extract_decision_dt_index(
         prebuilt_arrays=prebuilt_arrays,
         symbols=symbols,

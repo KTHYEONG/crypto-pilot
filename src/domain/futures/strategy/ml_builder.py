@@ -661,6 +661,8 @@ def build_ml_strategy_alpha(
     confidence_long_grid = np.zeros_like(ev_long_grid)
     confidence_short_grid = np.zeros_like(ev_long_grid)
     score_grid = np.full_like(ev_long_grid, np.nan, dtype=np.float32)
+    rank_score_long_grid = np.full_like(ev_long_grid, np.nan, dtype=np.float32)
+    rank_score_short_grid = np.full_like(ev_long_grid, np.nan, dtype=np.float32)
     valid_ev_long_all: list[np.ndarray] = []
     valid_ev_short_all: list[np.ndarray] = []
 
@@ -835,6 +837,7 @@ def build_ml_strategy_alpha(
             confidence_long_grid[int(t_idx), int(s_idx)] = conf_test_long[row]
             ev_long_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_long[row], 0.0))
             score_grid[int(t_idx), int(s_idx)] = score_test[row]
+            rank_score_long_grid[int(t_idx), int(s_idx)] = score_test[row]
 
         for row, (t_idx, s_idx) in enumerate(res["test_short_index_map"]):
             q10_short_grid[int(t_idx), int(s_idx)] = quant_test_short.q10[row]
@@ -842,6 +845,7 @@ def build_ml_strategy_alpha(
             q90_short_grid[int(t_idx), int(s_idx)] = quant_test_short.q90[row]
             confidence_short_grid[int(t_idx), int(s_idx)] = conf_test_short[row]
             ev_short_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_short[row], 0.0))
+            rank_score_short_grid[int(t_idx), int(s_idx)] = score_test_short[row]
             if np.isnan(score_grid[int(t_idx), int(s_idx)]):
                 score_grid[int(t_idx), int(s_idx)] = score_test_short[row]
 
@@ -894,7 +898,7 @@ def build_ml_strategy_alpha(
     ).astype(np.float32, copy=False)
     alpha_ic_score = (alpha_long_final - alpha_short_final).astype(np.float64, copy=False)
     ev_grid = alpha_ic_score
-    forecast_metadata_v3 = {
+    forecast_metadata = {
         "q10_long": q10_long_grid.reshape(-1),
         "q50_long": q50_long_grid.reshape(-1),
         "q90_long": q90_long_grid.reshape(-1),
@@ -903,6 +907,8 @@ def build_ml_strategy_alpha(
         "q90_short": q90_short_grid.reshape(-1),
         "confidence_long": confidence_long_grid.reshape(-1),
         "confidence_short": confidence_short_grid.reshape(-1),
+        "rank_score_long": rank_score_long_grid.reshape(-1),
+        "rank_score_short": rank_score_short_grid.reshape(-1),
     }
     panel = assemble_alpha_panel(
         datetimes=features.datetimes,
@@ -910,10 +916,12 @@ def build_ml_strategy_alpha(
         ev_grid=ev_grid,
         clip_abs=float(ml_cfg.alpha_clip_bps / 10000.0),
         eligible_mask=labels.eligible_mask,
-        forecast_metadata_v3=forecast_metadata_v3,
+        forecast_metadata=forecast_metadata,
     )
     panel.loc[:, "alpha_long"] = alpha_long_final.reshape(-1)
     panel.loc[:, "alpha_short"] = alpha_short_final.reshape(-1)
+    panel.loc[:, "rank_score_long"] = rank_score_long_grid.reshape(-1)
+    panel.loc[:, "rank_score_short"] = rank_score_short_grid.reshape(-1)
     panel.attrs["strategy_name"] = cfg.name
     panel.attrs["feature_names"] = list(features.feature_names)
     panel.attrs["fold_count"] = len(folds)
@@ -1534,6 +1542,8 @@ def build_ml_strategy_alpha_anchored(
     confidence_long_grid = np.zeros_like(ev_long_grid)
     confidence_short_grid = np.zeros_like(ev_long_grid)
     score_grid = np.full((t_size, features.values.shape[1]), np.nan, dtype=np.float32)
+    rank_score_long_grid_awf = np.full_like(score_grid, np.nan, dtype=np.float32)
+    rank_score_short_grid_awf = np.full_like(score_grid, np.nan, dtype=np.float32)
     for row, (t_idx, s_idx) in enumerate(test_long.index_map):
         q10_long_grid[int(t_idx), int(s_idx)] = quant_test_long.q10[row]
         q50_long_grid[int(t_idx), int(s_idx)] = quant_test_long.q50[row]
@@ -1541,12 +1551,14 @@ def build_ml_strategy_alpha_anchored(
         confidence_long_grid[int(t_idx), int(s_idx)] = conf_test_long[row]
         ev_long_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_long[row], 0.0))
         score_grid[int(t_idx), int(s_idx)] = score_test_long[row]
+        rank_score_long_grid_awf[int(t_idx), int(s_idx)] = score_test_long[row]
     for row, (t_idx, s_idx) in enumerate(test_short.index_map):
         q10_short_grid[int(t_idx), int(s_idx)] = quant_test_short.q10[row]
         q50_short_grid[int(t_idx), int(s_idx)] = quant_test_short.q50[row]
         q90_short_grid[int(t_idx), int(s_idx)] = quant_test_short.q90[row]
         confidence_short_grid[int(t_idx), int(s_idx)] = conf_test_short[row]
         ev_short_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_short[row], 0.0))
+        rank_score_short_grid_awf[int(t_idx), int(s_idx)] = score_test_short[row]
         if np.isnan(score_grid[int(t_idx), int(s_idx)]):
             score_grid[int(t_idx), int(s_idx)] = score_test_short[row]
 
@@ -1573,7 +1585,7 @@ def build_ml_strategy_alpha_anchored(
         ev_grid=ev_grid,
         clip_abs=float(ml_cfg.alpha_clip_bps / 10000.0),
         eligible_mask=labels.eligible_mask,
-        forecast_metadata_v3={
+        forecast_metadata={
             "q10_long": q10_long_grid.reshape(-1),
             "q50_long": q50_long_grid.reshape(-1),
             "q90_long": q90_long_grid.reshape(-1),
@@ -1582,10 +1594,14 @@ def build_ml_strategy_alpha_anchored(
             "q90_short": q90_short_grid.reshape(-1),
             "confidence_long": confidence_long_grid.reshape(-1),
             "confidence_short": confidence_short_grid.reshape(-1),
+            "rank_score_long": rank_score_long_grid_awf.reshape(-1),
+            "rank_score_short": rank_score_short_grid_awf.reshape(-1),
         },
     )
     panel.loc[:, "alpha_long"] = alpha_long_final_awf.reshape(-1)
     panel.loc[:, "alpha_short"] = alpha_short_final_awf.reshape(-1)
+    panel.loc[:, "rank_score_long"] = rank_score_long_grid_awf.reshape(-1)
+    panel.loc[:, "rank_score_short"] = rank_score_short_grid_awf.reshape(-1)
 
     # AWF quality/IC gates — warn-only モード (Optuna 최적화 중단 방지)
     # WF 경로와 동일하게 build_quality_report()로 실제 IC/NDCG/alpha_p95 계산

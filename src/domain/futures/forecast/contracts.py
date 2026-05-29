@@ -80,6 +80,8 @@ class AlphaForecast:
     eligible_mask: np.ndarray
     source: str
     artifact_hash: AlphaArtifactHash
+    rank_score_long_2d: np.ndarray | None = None   # [T, N] ranker score (long side)
+    rank_score_short_2d: np.ndarray | None = None  # [T, N] ranker score (short side)
 
 
 @dataclass(slots=True, frozen=True)

@@ -106,13 +106,19 @@ def to_alpha_forecast(
         alpha_short_2d[t, s] = max(as_, 0.0)
         eligible_mask[t, s] = np.isfinite(al) and np.isfinite(as_)
 
-    v3: dict[str, Any] = attrs.get(
-        "alpha_forecast_v3",
-        attrs.get("forecast_metadata_v3", {}),
+    meta: dict[str, Any] = attrs.get(
+        "alpha_forecast_metadata",
+        attrs.get(
+            "forecast_metadata",
+            attrs.get(
+                "alpha_forecast_v3",
+                attrs.get("forecast_metadata_v3", {}),
+            ),
+        ),
     )
 
     def _reshape(key: str) -> np.ndarray | None:
-        arr = v3.get(key)
+        arr = meta.get(key)
         if arr is None:
             return None
         flat = np.asarray(arr, dtype=np.float32)
@@ -136,4 +142,6 @@ def to_alpha_forecast(
         eligible_mask=eligible_mask,
         source=str(attrs.get("strategy_name", "ml_builder")),
         artifact_hash=artifact_hash,
+        rank_score_long_2d=_reshape("rank_score_long"),
+        rank_score_short_2d=_reshape("rank_score_short"),
     )
