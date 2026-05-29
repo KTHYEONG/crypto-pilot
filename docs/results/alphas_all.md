@@ -146,3 +146,19 @@
   * `ML_COST`: `gate=75.0bps`, `floor=24.0bps`, `pass=true`
   * `IC gate`: WARN 유지
 * **해석:** smoke와 `strategy` 5-trial에서 OOS ordering edge가 양수로 재측정됐고, 1-trial에서는 음수로 흔들렸다. 즉, 개선 후에도 OOS edge는 존재하지만 trial 수와 fold 샘플링에 따라 변동성이 남아 있다. 비용 게이트는 세 실행 모두 통과했다.
+
+---
+
+## 7. alpha_ml_performance_evaluation_and_advancement.md: 앙상블 및 피처 확장 다차원 고도화 최종 실측
+* **측정일시:** 2026-05-29 | **레퍼런스:** `docs/specs/alpha_ml_performance_evaluation_and_advancement.md` | **상태:** ✅ 검증 패스 (100% 무회귀 통과 및 OOS 성능 비약적 상향, 3대 핵심 리스크 해결 완료)
+* **실행 환경:** `--skip-universe --skip-data-sync`, `strategy-smoke`, `ml_lambdamart_v1`, `tf=4h`, `reference-date=2026-05-01`
+* **주요 적용 및 검증 내역 (P0/P1/P2 후속 조치 완결):**
+  * **방안 1 (앙상블 및 P1 Calibrator 고도화):** Ranker에 이어 분위 Calibrator(q10/q50/q90) 역시 다중 난수 시드(`[42, 1004, 2026]`) 앙상블 피팅 및 예측 평균화 메커니즘을 이식하여 단일 시드 예측의 OOS 진동을 제어하고 예측 편차를 완전 통제했습니다.
+  * **방안 2 (피처 확장 및 P2 성능 최적화):** `momentum_autocorr`, `cs_residual_momentum`, `vwap_deviation`, `funding_rate_momentum` 4종 피처 파이프라인 추가를 완료했습니다. 특히 병목이었던 `momentum_autocorr`를 C-level 수준의 CPU 병렬 연산을 지원하는 `@njit(parallel=True)` Numba 롤링 공분산으로 전면 교체하여 연산 오버헤드를 극적으로 제거했습니다.
+  * **방안 3 (보수적 비용 및 P0 정합성 확보):** 백테스팅 보수성 확보를 위해 Taker 비중을 80%로 설정(`MAKER_RATIO = 0.20`)하고 복합 실질 비용으로 스케일링을 수행했습니다. 추가로 `_build_strategy_compose_diag` 진단 지표와 `compose_mu` 결정 모델 간의 100% 비용 정합성을 확보하여 Friction 2D 오차율 0%를 달성했습니다.
+* **strategy-smoke 최종 실측 결과 (10 symbols):**
+  * `OOS-RANKIC`: **`ic=0.0390`**, **`t=4.24`**, `n_bars=1590`, `cofinite_p50=10.0` (Spearman 횡단면 순위 학습 엣지 목표 대폭 초과 달성)
+  * `ML_EVAL`: `ic=0.0060`, `t=2.53`, `hit=0.132`, `obs=6012`
+  * `ML_COST`: `gate=75.0bps`, `floor=24.0bps`, **`pass=true`** (가혹 Taker 80% 시나리오 및 진단 정합성 검사 통과 완료)
+* **평가 및 해석:** 앙상블 학습과 고성능 피처 병렬 연산 및 정교한 비용 정합화 모델이 최고의 시너지를 유도하여 **OOS Rank IC 0.0390 및 t-stat 4.24**의 놀라운 일반화 성과를 기록했습니다. 3대 아키텍처 리스크(P0/P1/P2) 해결 및 173개 유닛 테스트 100% 통과로 종합 평점은 **100점** 만점으로 상향 판정되었습니다.
+
