@@ -16,9 +16,9 @@ from src.domain.futures.strategy.contracts import LongMatrixDataset
 class CalibratorFitResult:
     """Quantile calibrator models."""
 
-    q10: lgb.LGBMRegressor
-    q50: lgb.LGBMRegressor
-    q90: lgb.LGBMRegressor
+    q10: lgb.LGBMRegressor | list[lgb.LGBMRegressor]
+    q50: lgb.LGBMRegressor | list[lgb.LGBMRegressor]
+    q90: lgb.LGBMRegressor | list[lgb.LGBMRegressor]
 
 
 @dataclass(slots=True, frozen=True)
@@ -46,7 +46,9 @@ def _fit_one(
     valid_weight: np.ndarray,
     cfg: StrategyMLConfig,
     alpha: float,
+    seed: int | None = None,
 ) -> lgb.LGBMRegressor:
+    run_seed = seed if seed is not None else cfg.seed
     model = lgb.LGBMRegressor(
         objective="quantile",
         alpha=alpha,
@@ -60,7 +62,7 @@ def _fit_one(
         bagging_freq=cfg.calibrator_bagging_freq,
         lambda_l2=cfg.calibrator_lambda_l2,
         reg_alpha=cfg.calibrator_reg_alpha,
-        random_state=cfg.seed,
+        random_state=run_seed,
         n_jobs=cfg.n_jobs,
         verbose=-1,
     )
@@ -119,10 +121,30 @@ def fit_quantile_calibrators(
             x_train_names,
         )
     )
-    q10 = _fit_one(x_train, y_train, w_train, x_valid, y_valid, w_valid, cfg, 0.10)
-    q50 = _fit_one(x_train, y_train, w_train, x_valid, y_valid, w_valid, cfg, 0.50)
-    q90 = _fit_one(x_train, y_train, w_train, x_valid, y_valid, w_valid, cfg, 0.90)
-    return CalibratorFitResult(q10=q10, q50=q50, q90=q90)
+    seeds = (
+        cfg.ensemble_seeds
+        if (cfg.ensemble_seeds and len(cfg.ensemble_seeds) > 0)
+        else [cfg.seed]
+    )
+    q10_list = []
+    q50_list = []
+    q90_list = []
+    for s in seeds:
+        q10_list.append(
+            _fit_one(x_train, y_train, w_train, x_valid, y_valid, w_valid, cfg, 0.10, seed=s)
+        )
+        q50_list.append(
+            _fit_one(x_train, y_train, w_train, x_valid, y_valid, w_valid, cfg, 0.50, seed=s)
+        )
+        q90_list.append(
+            _fit_one(x_train, y_train, w_train, x_valid, y_valid, w_valid, cfg, 0.90, seed=s)
+        )
+        
+    return CalibratorFitResult(
+        q10=q10_list if len(seeds) > 1 else q10_list[0],
+        q50=q50_list if len(seeds) > 1 else q50_list[0],
+        q90=q90_list if len(seeds) > 1 else q90_list[0],
+    )
 
 
 def predict_ev_quantiles(
@@ -140,9 +162,23 @@ def predict_ev_quantiles(
         np.column_stack([dataset.X, rank_score]),
         (*dataset.feature_names, "rank_score"),
     )
-    q10 = np.asarray(cast(NDArray[np.float64], models.q10.predict(x)), dtype=np.float32)
-    q50 = np.asarray(cast(NDArray[np.float64], models.q50.predict(x)), dtype=np.float32)
-    q90 = np.asarray(cast(NDArray[np.float64], models.q90.predict(x)), dtype=np.float32)
+    def _predict_ensemble(
+        m_field: lgb.LGBMRegressor | list[lgb.LGBMRegressor], x_df: pd.DataFrame
+    ) -> NDArray[np.float32]:
+        if isinstance(m_field, list):
+            preds = [
+                np.asarray(cast(NDArray[np.float64], m.predict(x_df)), dtype=np.float32)
+                for m in m_field
+            ]
+            return cast(NDArray[np.float32], np.mean(preds, axis=0))
+        else:
+            return np.asarray(
+                cast(NDArray[np.float64], m_field.predict(x_df)), dtype=np.float32
+            )
+
+    q10 = _predict_ensemble(models.q10, x)
+    q50 = _predict_ensemble(models.q50, x)
+    q90 = _predict_ensemble(models.q90, x)
     # Per-row monotonic sort: enforce q10 <= q50 <= q90 (quantile crossing fix)
     # Shape: [N, 3] -> sorted along axis=1 -> [N, 3]
     q_stack = np.stack([q10.reshape(-1), q50.reshape(-1), q90.reshape(-1)], axis=1)
