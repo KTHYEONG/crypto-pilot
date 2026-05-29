@@ -157,6 +157,8 @@ def _build_ranker_model(
             random_state=run_seed,
             n_jobs=cfg.n_jobs,
             verbose=-1,
+            deterministic=True,
+            force_col_wise=True,
         )
     # force_pointwise=True with lgbm_lambdarank family → fall back to regression
     if cfg.model_family in {"lgbm_regression", "lgbm_lambdarank"}:
@@ -177,6 +179,8 @@ def _build_ranker_model(
             random_state=run_seed,
             n_jobs=cfg.n_jobs,
             verbose=-1,
+            deterministic=True,
+            force_col_wise=True,
         )
     if cfg.model_family == "lgbm_huber":
         return lgb.LGBMRegressor(
@@ -196,6 +200,8 @@ def _build_ranker_model(
             random_state=run_seed,
             n_jobs=cfg.n_jobs,
             verbose=-1,
+            deterministic=True,
+            force_col_wise=True,
         )
     raise ValueError(f"unsupported model_family: {cfg.model_family}")
 

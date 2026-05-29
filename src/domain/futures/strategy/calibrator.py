@@ -65,6 +65,8 @@ def _fit_one(
         random_state=run_seed,
         n_jobs=cfg.n_jobs,
         verbose=-1,
+        deterministic=True,
+        force_col_wise=True,
     )
     if valid_x.shape[0] > 0:
         model.fit(
