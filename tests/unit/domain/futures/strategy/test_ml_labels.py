@@ -262,6 +262,19 @@ def test_build_label_panel_exposes_explicit_target_contract_metadata() -> None:
     assert "_label_diagnostics_summary" in panel.metadata
 
 
+def test_build_label_panel_exposes_forward_gross_rank_contracts() -> None:
+    panel = build_label_panel(
+        _aligned_for_labels(),
+        StrategyMLConfig(label_horizon_bars=1, fee_bps=0.0, slippage_bps=0.0, min_group_size=2),
+    )
+    assert panel.forward_gross_ret is not None
+    assert panel.forward_gross_rank_target is not None
+    assert panel.forward_gross_relevance is not None
+    assert panel.forward_gross_ret.shape == panel.signed_net_ret.shape
+    assert panel.forward_gross_rank_target.shape == panel.signed_net_ret.shape
+    assert panel.forward_gross_relevance.shape == panel.relevance.shape
+
+
 # ---------------------------------------------------------------------------
 # calibrator_target toggle tests
 # ---------------------------------------------------------------------------
@@ -461,7 +474,10 @@ def test_build_label_panel_magnitude_target_short_is_signed_neg_exec_net_ret() -
         short_valid,
         (-panel.exec_net_ret[valid_mask]).astype(np.float32),
         decimal=6,
-        err_msg="magnitude_target_short must equal -exec_net_ret (signed), not max(-exec_net_ret,0)",
+        err_msg=(
+            "magnitude_target_short must equal -exec_net_ret (signed), "
+            "not max(-exec_net_ret,0)"
+        ),
     )
     # Metadata key must reflect signed contract
     assert panel.metadata["magnitude_target_short_key"] == "-exec_net_ret"
@@ -525,7 +541,7 @@ def test_time_decay_halflife_recent_weight_higher() -> None:
     valid_indices = np.where(valid_rows)[0]
 
     # Assert — with flat prices, weights per row are all identical across symbols.
-    # time_decay[t] = exp(-lam * (T-1 - t)) so valid_indices[-1] > valid_indices[0] → strictly higher.
+    # time_decay[t] = exp(-lam * (T-1 - t)), so valid_indices[-1] > valid_indices[0].
     assert len(valid_indices) >= 2, "Need ≥ 2 valid rows to compare"
     first_idx = int(valid_indices[0])
     last_idx = int(valid_indices[-1])

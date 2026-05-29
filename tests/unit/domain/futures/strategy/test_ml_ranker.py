@@ -43,6 +43,7 @@ def test_fit_ranker_and_predict_rank_score() -> None:
     fit_result = fit_ranker(train=train, valid=valid, cfg=cfg)
     score = predict_rank_score(fit_result.model, valid)
 
+    assert fit_result.fit_mode == "pointwise"
     assert score.shape == (valid.X.shape[0],)
     assert score.dtype == np.float32
     assert np.all(np.isfinite(score))
@@ -155,6 +156,7 @@ def test_fit_ranker_uses_lambdarank_group_and_relevance(monkeypatch: MonkeyPatch
     fit_result = fit_ranker(train=train, valid=valid, cfg=cfg)
     score = predict_rank_score(fit_result.model, valid)
 
+    assert fit_result.fit_mode == "lambdarank"
     assert captured_ctor["objective"] == "lambdarank"
     assert captured_ctor["metric"] == "ndcg"
     assert np.array_equal(captured_fit["args"][1], train.y_rank)
