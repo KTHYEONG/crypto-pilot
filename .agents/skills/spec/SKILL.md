@@ -22,19 +22,19 @@ Produce high-precision technical specifications. High-reasoning models must focu
 ## Output 2: Chat Summary (Brief)
 *Purpose: Rapid user alignment. Minimal tokens.*
 ```md
-### 📝 Spec: [Type] | [Brief Goal]
-- **Blueprint:** `docs/specs/[filename].md`
-- **Impact:** `[Files changed]`
+### 📝 작업 설계: [Type] | [Brief Goal]
+- **설계 문서:** `docs/specs/[filename].md`
+- **수정 대상:** `[Files changed]`
 
-**1. Design Strategy**
-- **Approach:** [1-2 sentences on core logic]
-- **Trade-offs:** [Why this way? - only if critical]
+**1. 설계 방향**
+- **핵심 구현 아이디어:** [1-2 sentences on core logic]
+- **고려사항/제약조건:** [Why this way? - only if critical]
 
-**2. Acceptance Criteria**
+**2. 완료 기준 (Checklist)**
 - [ ] [Measurable outcome 1]
 - [ ] [Measurable outcome 2]
 
-**3. Status:** [Ready to Implement? / Questions for User]
+**3. 상태:** [Ready to Implement? / Questions for User]
 ```
 
 ## Reasoning Constraints
