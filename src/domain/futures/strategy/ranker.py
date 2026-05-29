@@ -21,6 +21,7 @@ class RankerFitResult:
 
     model: lgb.LGBMRegressor | lgb.LGBMRanker
     fit_mode: Literal["lambdarank", "pointwise"]
+    models: list[lgb.LGBMRegressor | lgb.LGBMRanker] | None = None
 
 
 def _as_feature_frame(x: np.ndarray, feature_names: tuple[str, ...]) -> pd.DataFrame:
@@ -50,8 +51,9 @@ def fit_ranker(
     valid: LongMatrixDataset,
     cfg: StrategyMLConfig,
 ) -> RankerFitResult:
-    """Train L1 ranker model (LambdaRank by default when ranking_mode='group_ndcg').
+    """Train L1 ranker model with ensemble seeds.
 
+    LambdaRank by default when ranking_mode='group_ndcg'.
     With the default config (ranking_mode='group_ndcg', sufficient n_groups), trains
     LGBMRanker with lambdarank objective on y_rank relevance labels (0-4).
     Falls back to pointwise CS-demeaned regression when n_groups < _MIN_GROUPS_FOR_NDCG.
@@ -72,7 +74,6 @@ def fit_ranker(
         )
         is_lambdarank = False
 
-    model = _build_ranker_model(cfg, force_pointwise=not is_lambdarank)
     x_train = _as_feature_frame(train.X, train.feature_names)
     train_target: NDArray[np.float32] | NDArray[np.int32]
     valid_target: NDArray[np.float32] | NDArray[np.int32]
@@ -83,51 +84,59 @@ def fit_ranker(
         train_target = _cs_demean(train.y_ev, train.group)
         valid_target = _cs_demean(valid.y_ev, valid.group) if valid.X.shape[0] > 0 else valid.y_ev
 
-    if valid.X.shape[0] > 0:
-        x_valid = _as_feature_frame(valid.X, valid.feature_names)
-        if is_lambdarank:
-            ranker_model = cast(lgb.LGBMRanker, model)
-            ranker_model.fit(
-                x_train,
-                train_target,
-                group=train.group,
-                sample_weight=train.sample_weight,
-                eval_set=[(x_valid, valid_target)],
-                eval_group=[valid.group],
-                eval_at=(3, 5),
-                callbacks=[lgb.early_stopping(cfg.early_stopping_rounds, verbose=False)],
-            )
+    models: list[lgb.LGBMRegressor | lgb.LGBMRanker] = []
+
+    for seed in cfg.ensemble_seeds:
+        model = _build_ranker_model(cfg, force_pointwise=not is_lambdarank, seed=seed)
+        if valid.X.shape[0] > 0:
+            x_valid = _as_feature_frame(valid.X, valid.feature_names)
+            if is_lambdarank:
+                ranker_model = cast(lgb.LGBMRanker, model)
+                ranker_model.fit(
+                    x_train,
+                    train_target,
+                    group=train.group,
+                    sample_weight=train.sample_weight,
+                    eval_set=[(x_valid, valid_target)],
+                    eval_group=[valid.group],
+                    eval_at=(3, 5),
+                    callbacks=[lgb.early_stopping(cfg.early_stopping_rounds, verbose=False)],
+                )
+            else:
+                regressor_model = cast(lgb.LGBMRegressor, model)
+                regressor_model.fit(
+                    x_train,
+                    train_target,
+                    sample_weight=train.sample_weight,
+                    eval_set=[(x_valid, valid_target)],
+                    callbacks=[lgb.early_stopping(cfg.early_stopping_rounds, verbose=False)],
+                )
         else:
-            regressor_model = cast(lgb.LGBMRegressor, model)
-            regressor_model.fit(
-                x_train,
-                train_target,
-                sample_weight=train.sample_weight,
-                eval_set=[(x_valid, valid_target)],
-                callbacks=[lgb.early_stopping(cfg.early_stopping_rounds, verbose=False)],
-            )
-    else:
-        if is_lambdarank:
-            ranker_model = cast(lgb.LGBMRanker, model)
-            ranker_model.fit(
-                x_train,
-                train_target,
-                group=train.group,
-                sample_weight=train.sample_weight,
-            )
-        else:
-            regressor_model = cast(lgb.LGBMRegressor, model)
-            regressor_model.fit(x_train, train_target, sample_weight=train.sample_weight)
+            if is_lambdarank:
+                ranker_model = cast(lgb.LGBMRanker, model)
+                ranker_model.fit(
+                    x_train,
+                    train_target,
+                    group=train.group,
+                    sample_weight=train.sample_weight,
+                )
+            else:
+                regressor_model = cast(lgb.LGBMRegressor, model)
+                regressor_model.fit(x_train, train_target, sample_weight=train.sample_weight)
+        models.append(model)
+
     return RankerFitResult(
-        model=model,
+        model=models[0],
         fit_mode="lambdarank" if is_lambdarank else "pointwise",
+        models=models,
     )
 
 
 def _build_ranker_model(
-    cfg: StrategyMLConfig, force_pointwise: bool = False
+    cfg: StrategyMLConfig, force_pointwise: bool = False, seed: int | None = None
 ) -> lgb.LGBMRegressor | lgb.LGBMRanker:
     """Build ranker model by configured model family."""
+    run_seed = seed if seed is not None else cfg.seed
     if not force_pointwise and (
         cfg.ranking_mode == "group_ndcg" or cfg.model_family == "lgbm_lambdarank"
     ):
@@ -145,7 +154,7 @@ def _build_ranker_model(
             bagging_freq=cfg.ranker_bagging_freq,
             lambda_l2=cfg.ranker_lambda_l2,
             reg_alpha=cfg.ranker_reg_alpha,
-            random_state=cfg.seed,
+            random_state=run_seed,
             n_jobs=cfg.n_jobs,
             verbose=-1,
         )
@@ -165,7 +174,7 @@ def _build_ranker_model(
             bagging_freq=cfg.ranker_bagging_freq,
             lambda_l2=cfg.ranker_lambda_l2,
             reg_alpha=cfg.ranker_reg_alpha,
-            random_state=cfg.seed,
+            random_state=run_seed,
             n_jobs=cfg.n_jobs,
             verbose=-1,
         )
@@ -184,7 +193,7 @@ def _build_ranker_model(
             bagging_freq=cfg.ranker_bagging_freq,
             lambda_l2=cfg.ranker_lambda_l2,
             reg_alpha=cfg.ranker_reg_alpha,
-            random_state=cfg.seed,
+            random_state=run_seed,
             n_jobs=cfg.n_jobs,
             verbose=-1,
         )
@@ -192,12 +201,19 @@ def _build_ranker_model(
 
 
 def predict_rank_score(
-    model: lgb.LGBMRegressor | lgb.LGBMRanker, dataset: LongMatrixDataset
+    model: lgb.LGBMRegressor | lgb.LGBMRanker | list[lgb.LGBMRegressor | lgb.LGBMRanker],
+    dataset: LongMatrixDataset,
 ) -> NDArray[np.float32]:
-    """Predict CS-demeaned expected return score."""
+    """Predict CS-demeaned expected return score (with support for ensemble list)."""
     if dataset.X.shape[0] == 0:
         return np.zeros((0,), dtype=np.float32)
     x = _as_feature_frame(dataset.X, dataset.feature_names)
-    estimate = cast(NDArray[np.float64], model.predict(x))
+    if isinstance(model, list):
+        if not model:
+            raise ValueError("empty model list for ranker ensemble prediction")
+        estimates = [cast(NDArray[np.float64], m.predict(x)) for m in model]
+        estimate = np.mean(estimates, axis=0)
+    else:
+        estimate = cast(NDArray[np.float64], model.predict(x))
     score: NDArray[np.float32] = np.asarray(estimate, dtype=np.float32).reshape(-1).copy()
     return score
