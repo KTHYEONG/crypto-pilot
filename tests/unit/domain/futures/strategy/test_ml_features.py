@@ -81,6 +81,24 @@ def test_build_feature_panel_supports_group_ablation_toggle() -> None:
     assert "funding_missing_ind" in panel.feature_names
 
 
+def test_build_feature_panel_excludes_alias_features() -> None:
+    # Arrange: minimal aligned data with enough symbols for CS rank
+    close = np.tile(np.linspace(100.0, 110.0, 50)[:, None], (1, 5))
+    cfg = StrategyMLConfig(min_group_size=2)
+
+    # Act
+    panel = build_feature_panel(_aligned(close), cfg)
+
+    # Assert: alias duplicates must not appear in feature_names
+    assert "carry_prior_6" not in panel.feature_names
+    assert "xs_reversal_prior_6" not in panel.feature_names
+    assert "cs_rank_dollar_volume" not in panel.feature_names
+    # Originals must still exist
+    assert "cs_rank_funding_6" in panel.feature_names
+    assert "cs_rank_ret_6" in panel.feature_names
+    assert "dollar_volume_rank" in panel.feature_names
+
+
 def test_build_feature_panel_relaxes_all_finite_valid_mask() -> None:
     close = np.array([[100.0, 100.0], [101.0, 101.0], [102.0, 102.0], [103.0, 103.0]])
     aligned = _aligned(close)
