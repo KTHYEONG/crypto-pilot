@@ -41,7 +41,10 @@ def build_membership_mask_bundle(
     raw_kill_signal: np.ndarray | None = None,
     inference_timeline: Mapping[date, frozenset[str] | set[str]] | None = None,
 ) -> MembershipMaskBundle:
-    dt_ser = pd.to_datetime(datetimes, utc=True, errors="coerce")
+    if pd.api.types.is_datetime64_any_dtype(datetimes):
+        dt_ser = datetimes
+    else:
+        dt_ser = pd.to_datetime(datetimes, utc=True, errors="coerce")
     n = len(dt_ser)
     sym_norm = canonical_symbol(symbol)
     
@@ -59,7 +62,7 @@ def build_membership_mask_bundle(
     na_mask = dti.isna()
     has_na = bool(na_mask.any())
     if has_na:
-        dti_filled = dti.fillna(pd.Timestamp("1970-01-01", tz="UTC"))
+        dti_filled = dti.fillna(pd.Timestamp("1970-01-01"))
         bar_q_starts = dti_filled.to_period("Q").start_time.date
         active = np.isin(bar_q_starts, q_list).astype(np.float64)
         active[na_mask] = 0.0
@@ -68,21 +71,15 @@ def build_membership_mask_bundle(
         active = np.isin(bar_q_starts, q_list).astype(np.float64)
 
     active_prev = np.concatenate(([0.0], active[:-1]))
-    active_on = (active_prev <= 0.0) & (active > 0.0)
     membership_kill = np.where((active_prev > 0.0) & (active <= 0.0), 1.0, 0.0)
 
-    warm_ready = np.zeros(n, dtype=np.float64)
     if warmup_bars_required <= 1:
         warm_ready = active.copy()
     else:
-        run_len = 0
-        for idx in range(n):
-            if active[idx] > 0.0:
-                run_len = run_len + 1 if not active_on[idx] else 1
-                if run_len >= warmup_bars_required:
-                    warm_ready[idx] = 1.0
-            else:
-                run_len = 0
+        s = pd.Series(active)
+        groups = (s == 0.0).cumsum()
+        run_lens = s.groupby(groups, sort=False).cumsum()
+        warm_ready = (run_lens >= warmup_bars_required).astype(np.float64).to_numpy()
 
     entry_block_mask = np.where((active > 0.0) & (warm_ready > 0.0), 0.0, 1.0)
     raw_kill = (
@@ -109,21 +106,13 @@ def build_membership_mask_bundle(
         if has_na:
             inf_active[na_mask] = 0.0
 
-        inf_active_on = np.concatenate(([0.0], inf_active[:-1]))
-        inf_active_on_bool = (inf_active_on <= 0.0) & (inf_active > 0.0)
-
-        inf_warm_ready = np.zeros(n, dtype=np.float64)
         if warmup_bars_required <= 1:
             inf_warm_ready = inf_active.copy()
         else:
-            run_len = 0
-            for idx in range(n):
-                if inf_active[idx] > 0.0:
-                    run_len = run_len + 1 if not inf_active_on_bool[idx] else 1
-                    if run_len >= warmup_bars_required:
-                        inf_warm_ready[idx] = 1.0
-                else:
-                    run_len = 0
+            s_inf = pd.Series(inf_active)
+            inf_groups = (s_inf == 0.0).cumsum()
+            inf_run_lens = s_inf.groupby(inf_groups, sort=False).cumsum()
+            inf_warm_ready = (inf_run_lens >= warmup_bars_required).astype(np.float64).to_numpy()
 
     return MembershipMaskBundle(
         universe_active_mask=active,

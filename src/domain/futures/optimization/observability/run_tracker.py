@@ -794,6 +794,7 @@ def run_optimization_loop(
     import optuna
     from tqdm import tqdm
 
+    t_loop_start = time.perf_counter()
     global _GLOBAL_BASE_CTX, _GLOBAL_OBJECTIVE_FN
 
     # 1. Prevent CPU Thrashing: Disable nested multi-threading in sub-processes
@@ -907,14 +908,26 @@ def run_optimization_loop(
     mp_ctx = multiprocessing.get_context("fork")
     try:
         with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp_ctx) as executor:
+            t_submit = time.perf_counter()
             futures = [
                 executor.submit(optimize_worker, study_name, storage_url, c_size)
                 for c_size in chunks
             ]
+            _logger.debug(
+                "[PROF] opt_loop futures_submit elapsed_s=%.4f",
+                time.perf_counter() - t_submit,
+            )
             # Wait chunk-by-chunk with timeout to avoid indefinite tail stalls.
             for i, future in enumerate(futures, start=1):
+                t_chunk = time.perf_counter()
                 try:
                     future.result(timeout=None if chunk_timeout_sec <= 0 else chunk_timeout_sec)
+                    _logger.debug(
+                        "[PROF] opt_loop chunk %d/%d completed_s=%.4f",
+                        i,
+                        len(futures),
+                        time.perf_counter() - t_chunk,
+                    )
                 except TimeoutError:
                     _logger.error(
                         "Worker batch timeout (chunk %d/%d, timeout=%ss).",
@@ -943,5 +956,9 @@ def run_optimization_loop(
             poller_thread.join(timeout=5)
         _GLOBAL_BASE_CTX = None  # Clear global reference
         _GLOBAL_OBJECTIVE_FN = objective_ml_phase_d
+        _logger.debug(
+            "[PROF] run_optimization_loop total_elapsed_s=%.4f",
+            time.perf_counter() - t_loop_start,
+        )
 
     return study_ml

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 ActiveMode = Literal["quick-backtest", "strategy", "alpha"]
-SyncMode = Literal["full_history_master", "elite_fast"]
+SyncMode = Literal["full_history_master", "elite_fast", "skip"]
 
 _ACTIVE_MODES: frozenset[str] = frozenset({"quick-backtest", "strategy", "alpha"})
 _LEGACY_MODES: frozenset[str] = frozenset({"full", "strategy-smoke"})
@@ -59,7 +59,7 @@ def build_run_config_from_args(args: Namespace | dict[str, Any]) -> FuturesRunCo
 
     mode = parse_active_mode(str(raw.get("mode", "strategy")))
     sync_mode_raw = str(raw.get("sync_mode", "full_history_master"))
-    if sync_mode_raw not in {"full_history_master", "elite_fast"}:
+    if sync_mode_raw not in {"full_history_master", "elite_fast", "skip"}:
         raise ValueError(f"invalid sync_mode: {sync_mode_raw}")
     config = FuturesRunConfig(
         timeframe=str(raw.get("timeframe", raw.get("tf", "4h"))),

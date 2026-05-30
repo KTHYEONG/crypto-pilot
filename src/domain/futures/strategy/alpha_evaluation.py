@@ -237,32 +237,33 @@ def _compute_regime_labels(
 ) -> list[str | None]:
     """Classify each bar as bull/bear/chop using trailing BTC trend + vol. No look-ahead.
 
-    Regime classification per bar t using only [t-trend_window..t] data:
-      bear: trailing_ret < 0
-      chop: trailing_ret >= 0 AND trailing_vol > vol_high_pct percentile of hist_vols
-      bull: trailing_ret >= 0 AND trailing_vol <= vol_high_pct percentile of hist_vols
-
-    Args:
-        btc_close_1d: BTC close prices [T].
-        trend_window: Lookback bars for trailing return computation.
-        vol_window: Lookback bars for rolling volatility computation.
-        vol_high_pct: Percentile threshold (0-1) separating chop from bull.
-
-    Returns:
-        List of length T with str labels or None for t < trend_window.
-
-    Time complexity: O(T^2) for hist_vols accumulation.
-    Space complexity: O(T) for label list.
-
+    Optimized using vectorized pre-computation of rolling standard deviations.
     """
     t_len: int = btc_close_1d.shape[0]
+    labels: list[str | None] = [None] * t_len
+    if t_len <= trend_window:
+        return labels
 
     # Log returns for volatility computation; shape [T-1]
     log_ret_1d: NDArray[np.float64] = np.log(
         np.maximum(btc_close_1d[1:], 1e-12) / np.maximum(btc_close_1d[:-1], 1e-12)
     )
 
-    labels: list[str | None] = [None] * t_len
+    rolling_vols = np.zeros(t_len, dtype=np.float64)
+    
+    # Pre-compute rolling standard deviations efficiently using pandas
+    import pandas as pd
+    series_ret = pd.Series(log_ret_1d)
+    rolling_vols_slice = (
+        series_ret.rolling(window=vol_window, min_periods=2)
+        .std(ddof=0)
+        .fillna(0.0)
+        .to_numpy()
+    )
+    
+    # Align indices: rolling_vols[s] represents standard deviation of log_ret_1d[s - vol_window : s]
+    for s in range(vol_window, t_len):
+        rolling_vols[s] = rolling_vols_slice[s - 1]
 
     for t in range(trend_window, t_len):
         trailing_ret: float = float(
@@ -270,20 +271,13 @@ def _compute_regime_labels(
                 max(btc_close_1d[t], 1e-12) / max(btc_close_1d[t - trend_window], 1e-12)
             )
         )
-        # Rolling vol uses log returns up to bar t (log_ret_1d index t-1 corresponds to close[t])
-        vol_start: int = max(0, t - vol_window)
-        vol_slice: NDArray[np.float64] = log_ret_1d[vol_start:t]
-        trailing_vol: float = float(np.std(vol_slice, ddof=0)) if vol_slice.size > 1 else 0.0
+        trailing_vol = rolling_vols[t]
 
         if trailing_ret < 0.0:
             labels[t] = "bear"
         else:
-            # Determine vol threshold from full available history up to t
-            hist_vols: list[float] = []
-            for s in range(trend_window, t + 1):
-                v_start = max(0, s - vol_window)
-                v_sl = log_ret_1d[v_start:s]
-                hist_vols.append(float(np.std(v_sl, ddof=0)) if v_sl.size > 1 else 0.0)
+            # Vectorized percentile computation utilizing the pre-calculated slice
+            hist_vols = rolling_vols[trend_window : t + 1]
             vol_threshold: float = float(np.percentile(hist_vols, vol_high_pct * 100.0))
             labels[t] = "chop" if trailing_vol > vol_threshold else "bull"
 
@@ -513,10 +507,14 @@ def evaluate_alpha(
     # Signed net alpha: long minus short
     pred_2d: NDArray[np.float64] = alpha_long_2d - alpha_short_2d
 
+    import time
+    t_start = time.perf_counter()
     net_ic_dict: dict[str, float] = compute_net_ic(
         pred_2d, realized_fwd_ret_2d, horizon_bars=horizon_bars
     )
+    _logger.debug("[micro-latency] compute_net_ic: %.4fs", time.perf_counter() - t_start)
 
+    t_step = time.perf_counter()
     breadth: float = compute_effective_breadth(alpha_long_2d, alpha_short_2d)
 
     # Cross-sectional return volatility for breakeven IC
@@ -540,26 +538,60 @@ def evaluate_alpha(
         if q50_2d is not None
         else float("nan")
     )
-
-    regime_ic: dict[str, float] = (
-        compute_per_regime_ic(pred_2d, realized_fwd_ret_2d, btc_close_1d, trend_window=30)
-        if btc_close_1d is not None
-        else {"bull": float("nan"), "bear": float("nan"), "chop": float("nan")}
+    _logger.debug(
+        "[micro-latency] basic metrics (breadth, cov, sign): %.4fs",
+        time.perf_counter() - t_step,
     )
 
-    regime_breakeven: dict[str, float] = (
-        compute_per_regime_breakeven(
-            alpha_long_2d,
-            alpha_short_2d,
-            realized_fwd_ret_2d,
-            btc_close_1d,
-            cost_floor_bps=cost_floor_bps,
-            trend_window=30,
-        )
-        if btc_close_1d is not None
-        else {"bull": float("nan"), "bear": float("nan"), "chop": float("nan")}
-    )
+    t_step = time.perf_counter()
+    regime_labels = None
+    if btc_close_1d is not None:
+        regime_labels = _compute_regime_labels(btc_close_1d, trend_window=30)
 
+    regime_ic: dict[str, float] = {
+        "bull": float("nan"),
+        "bear": float("nan"),
+        "chop": float("nan"),
+    }
+    if regime_labels is not None:
+        ic_series = rolling_ic(pred_2d, realized_fwd_ret_2d, method="spearman")
+        for regime in ("bull", "bear", "chop"):
+            indices = [t for t, lbl in enumerate(regime_labels) if lbl == regime]
+            if len(indices) < 5:
+                regime_ic[regime] = float("nan")
+            else:
+                regime_ic_vals = ic_series[np.array(indices, dtype=np.intp)]
+                valid_regime_ic = regime_ic_vals[np.isfinite(regime_ic_vals)]
+                regime_ic[regime] = (
+                    float(np.mean(valid_regime_ic))
+                    if valid_regime_ic.size > 0
+                    else float("nan")
+                )
+
+    regime_breakeven: dict[str, float] = {
+        "bull": float("nan"),
+        "bear": float("nan"),
+        "chop": float("nan"),
+    }
+    if regime_labels is not None:
+        for regime in ("bull", "bear", "chop"):
+            rows = [t for t, lbl in enumerate(regime_labels) if lbl == regime]
+            if len(rows) < 5:
+                regime_breakeven[regime] = float("nan")
+                continue
+            row_idx = np.array(rows, dtype=np.intp)
+            realized_slice = realized_fwd_ret_2d[row_idx]
+            valid_vals = realized_slice[np.isfinite(realized_slice)]
+            sigma_r_bps_reg = float(np.nanstd(valid_vals)) * 1e4 if valid_vals.size > 0 else 400.0
+            breadth_r = compute_effective_breadth(alpha_long_2d[row_idx], alpha_short_2d[row_idx])
+            regime_breakeven[regime] = compute_breakeven_ic(
+                cost_floor_bps=cost_floor_bps,
+                sigma_r_bps=sigma_r_bps_reg,
+                breadth_eff=breadth_r,
+            )
+    _logger.debug("[micro-latency] regime metrics: %.4fs", time.perf_counter() - t_step)
+
+    t_step = time.perf_counter()
     _logger.debug(
         "per_regime: ic=%s breakeven=%s",
         {r: f"{v:.4f}" for r, v in regime_ic.items()},
@@ -588,6 +620,7 @@ def evaluate_alpha(
         skew=skew_v,
         kurt=kurt_v,
     )
+    _logger.debug("[micro-latency] deflated_sharpe: %.4fs", time.perf_counter() - t_step)
 
     # net_sharpe from post-cost daily returns (optional)
     net_sharpe: float

@@ -50,14 +50,15 @@ graph TD
   * 알고리즘: LightGBM (`LGBMRanker` 또는 `LGBMRegressor`)
   * 타깃: `forward_gross_rank` (미래 수익률의 횡단면 분위수 순위)
   * 목적: 롱/숏 포트폴리오 구성 시 최우수 종목의 상대적 순위 보장
-* **기대가치 분위 Calibrator (Calibrator Model):**
-  * 알고리즘: LightGBM Quantile Regressor (`LGBMRegressor(objective="quantile")`)
-  * 타깃: `y_ev` (실질 실행 가능 수익률 타깃)
-  * 목적: 개별 자산의 절대적 하방 위험 대비 기대 수익의 비대칭성 판별
+* **시그널 캘리브레이터 (Signal Calibrator):**
+  * 알고리즘: Platt Scaling (`LogisticRegression`)
+  * 타깃: 수익 발생 여부 (Forward Return > 0) 및 평균 손익비 (`mean_b`)
+  * 목적: Ranker가 출력한 원시 스코어를 실질 승률(Probability) 및 기대가치(EV) 단위로 정규화
 
 ### 3.2. 난수 시드 앙상블 시스템 (Seed Ensemble System)
 * **메커니즘:** 단일 시드의 무작위 추출 편향(Sampling Noise) 및 OOS 성능 진동을 완전 통제하기 위해 다중 난수 시드(`[42, 1004, 2026]`) 앙상블 기법 이식.
-* **Ranker & Calibrator 통합 적용:** Ranker 학습 모델 리스트와 Calibrator의 분위 모델(`q10`/`q50`/`q90`)을 지정 시드 개수만큼 개별 피팅 후, 예측 단계에서 분위수별 예측값의 산술 평균을 산출하여 최종 점수로 채택.
+* **Ranker 통합 적용:** Ranker 학습 모델 리스트를 지정 시드 개수만큼 개별 피팅 후, 예측 단계에서 예측값의 산술 평균을 산출하여 최종 점수로 채택.
+* **Calibrator 최적화:** 각 AWF(Anchored Walk-Forward) 레그별로 OOS 데이터를 활용하여 로지스틱 회귀 기반 캘리브레이션을 수행함으로써 실질 실행 환경과의 정합성 극대화.
 
 ### 3.3. 비트 단위 재현성 보장 (Bitwise Reproducibility Guarantee)
 * **결정론적 연산 파라미터 적용:** LightGBM의 멀티 스레딩 병렬 히스토그램 연산 시 발생하는 부동소수점 누적 순서 변동(floating-point round-off errors)을 방지하기 위해 `deterministic=True` 및 `force_col_wise=True`를 강제 설정함.
@@ -97,15 +98,3 @@ graph TD
 * **ML_COST:** 가혹 테이커 복합 비용 게이트 통과 여부 검사 (`pass=true`).
 
 ---
-
-## 6. 풀 유니버스 vs 통제 유니버스 성능 정합성 진단 (Full vs Controlled Universe Performance Diagnosis)
-
-* **성능 괴리 현상:**
-  - 통제된 10개 대표 자산 유니버스(`strategy-smoke` 모드) 구동 시에는 OOS Rank IC **`0.0390`**, t-stat **`4.24`**로 배포 기준을 대폭 초과 달성함.
-  - 그러나 96개 전체 선물 유니버스를 대상으로 구동할 시, 랭커 스코어 자체의 OOS Rank IC는 **`0.0731`**, t-stat **`9.71`**로 압도적인 능력을 입증하나, 최종 C3 포트폴리오의 `ALPHA SCOREBOARD` 상 `NET_IC`는 **`0.0027`**로 급격히 희석 탈락하는 정합성 괴리가 목격됨.
-* **근본 원인 분석:**
-  1. **레짐 차단에 의한 신호 희석:** 전체 평가 기간의 60% 이상이 Bear 레짐(2,905 bars) 및 Chop 레짐(1,096 bars)으로 분류됨. Bear 레짐에서 포지션 노출도를 `0.0`으로 완전 셧다운하는 설계에 의해, 대다수의 타임스탬프에서 노출이 0이 되면서 평균 Net IC가 0에 가깝게 강하게 희석됨.
-  2. **엄격한 EV 장벽과 Breadth 붕괴:** 대형 96개 자산 패널에서 상위 K개(4개) 자산 제한 및 보수적인 `EV_HURDLE_BPS(10.0bps)` 장벽이 병합되어 실제 진입하는 포지션 수가 고갈됨. 이로 인해 유효 베팅 개수(`effective_breadth`)가 **`0.95`**로 붕괴하여 브레이크이븐 IC 허들(`BE_IC = 0.0508`)을 감당할 수 없게 만듦.
-* **실행 최적화 권장 아규먼트:**
-  - 123개 심볼의 거래소 API 동기화 및 유니버스 타임라인 재구축에 따른 초기 약 80~90초의 오버헤드를 억제하기 위해, 실측 검증 시에는 반드시 `--skip-data-sync` 및 `--skip-universe` 옵션을 결합하여 실행할 것을 강력 권장함.
-
