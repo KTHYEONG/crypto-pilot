@@ -1084,10 +1084,16 @@ def calculate_score(
 
 def compute_segment_merge_index(hourly_df: pd.DataFrame, daily_df: pd.DataFrame) -> np.ndarray:
     """Build merge index for a sliced segment to enable fast index mapping."""
-    hourly_days = (
-        pd.to_datetime(hourly_df["datetime"]).dt.normalize().values.astype("datetime64[ns]")
-    )
-    daily_days = pd.to_datetime(daily_df["datetime"]).dt.normalize().values.astype("datetime64[ns]")
+    h_dt = hourly_df["datetime"]
+    d_dt = daily_df["datetime"]
+
+    if not pd.api.types.is_datetime64_any_dtype(h_dt):
+        h_dt = pd.to_datetime(h_dt, utc=True)
+    if not pd.api.types.is_datetime64_any_dtype(d_dt):
+        d_dt = pd.to_datetime(d_dt, utc=True)
+
+    hourly_days = h_dt.dt.normalize().values.astype("datetime64[ns]")
+    daily_days = d_dt.dt.normalize().values.astype("datetime64[ns]")
     if len(daily_days) == 0:
         return np.zeros(len(hourly_days), dtype=np.int32)
 
