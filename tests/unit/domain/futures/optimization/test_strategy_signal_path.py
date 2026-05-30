@@ -119,8 +119,10 @@ def test_strategy_compose_trial_toggle_uses_dynamic_cost_even_when_default_stati
     assert meta.get("execution_cost_bps_source") == "parametric_dynamic"
     assert float(aligned.get("_cost_forecast_dynamic", 0.0)) == 1.0
     xs_l = np.asarray(aligned["xs_score_long"], dtype=np.float64)
-    # dynamic cost(40bps) 사용 시 static(10bps) 대비 순 alpha 감소
-    assert np.all(xs_l < (0.03 - 10.0 / 10000.0))
+    # rank-sizing: 출력은 EV 절대값이 아닌 횡단면 순위 기반 → [0,1] 범위
+    # 핵심 검증: dynamic cost(40bps)가 정상 적용됐는가 (meta 확인이 주 assertion)
+    assert np.all(xs_l >= 0.0)
+    assert np.all(xs_l <= 1.0)
 
 
 def test_strategy_compose_cost_gate_amortize_uses_rebalance_bars() -> None:

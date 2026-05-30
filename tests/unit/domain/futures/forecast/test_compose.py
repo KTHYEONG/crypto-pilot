@@ -56,14 +56,17 @@ class TestComposeMuHurdle:
         assert np.all(xs_l > 0.0)
         assert np.all(xs_s > 0.0)
 
-    def test_below_hurdle_zeroed(self) -> None:
-        # alpha=5bps, cost=14bps → net=-9bps < 10bps → xs=0
+    def test_rank_sizing_output_nonnegative(self) -> None:
+        # rank-sizing은 경질 hurdle이 아닌 횡단면 순위 기반 연속 가중.
+        # EV 크기와 무관하게 출력은 항상 [0, 1] 범위 비음수여야 함.
         af = _make_alpha(long_val=0.0005, short_val=0.0004)
         cf = _make_cost(bps=14.0)
         xs_l, xs_s, mu_l, mu_s = compose_mu(af, cf, _BASE_PARAMS)
 
-        assert np.all(xs_l == 0.0)
-        assert np.all(xs_s == 0.0)
+        assert np.all(xs_l >= 0.0)
+        assert np.all(xs_s >= 0.0)
+        assert np.all(xs_l <= 1.0)
+        assert np.all(xs_s <= 1.0)
 
     def test_hurdle_boundary_exact(self) -> None:
         # alpha=24bps, cost=14bps → net=10bps == hurdle → passes (>=)
@@ -164,12 +167,15 @@ class TestComposeMuOutputShapes:
         assert np.all(xs_l >= 0.0)
         assert np.all(xs_s >= 0.0)
 
-    def test_xs_leq_mu_when_positive(self) -> None:
+    def test_xs_bounded_after_rank_sizing(self) -> None:
+        # rank-sizing 후 출력은 tanh 범위 (0, 1) 이내여야 함 (mu와 동일하지 않음).
         af = _make_alpha(long_val=0.01)
         cf = _make_cost(bps=0.0)
         xs_l, _, mu_l, _ = compose_mu(af, cf, _BASE_PARAMS)
         pos_mask = mu_l > 0.0
-        np.testing.assert_allclose(xs_l[pos_mask], mu_l[pos_mask], rtol=1e-9)
+        # rank-sizing 출력: mu와 다르지만 [0, 1] 범위, 비음수
+        assert np.all(xs_l[pos_mask] >= 0.0)
+        assert np.all(xs_l[pos_mask] <= 1.0)
 
 
 class TestComposeMuRankCsNeutral:

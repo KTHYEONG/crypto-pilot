@@ -93,9 +93,17 @@ class AlphaPhase1Verdict(TypedDict):
     bear_ic: float
     bear_pass: bool
     dsr: float
+    # G2: 경제거래성 (진단→하드 게이트 승격)
     port_ic: float
     be_raw: float
     gap_raw: float
+    clip_preservation_ratio: float
+    basket_net_bps: float
+    basket_ir_t: float
+    sweep_pass_count: int
+    # G3: 강건성
+    bear_basket_net_bps: float
+    gate_results: dict[str, bool]
 
 
 class ExecDiagVerdict(TypedDict):
@@ -107,16 +115,66 @@ class ExecDiagVerdict(TypedDict):
     basket_net_bps: float
 
 
-def _summarize_alpha_phase1_verdict(report: Any) -> AlphaPhase1Verdict:
-    """Summarize robust alpha extraction verdict separately from execution diagnostics."""
+def _summarize_alpha_phase1_verdict(
+    report: Any,
+    *,
+    basket_net_bps: float,
+    basket_ir_t: float,
+    sweep_pass_count: int,
+    bear_basket_net_bps: float = float("nan"),
+) -> AlphaPhase1Verdict:
+    """Unified alpha acceptance verdict: G0+G1 + G2 (economic) + G3 (robustness)."""
     bear_ic = float(report.per_regime_ic.get("bear", float("nan")))
     be_eff = float(report.breakeven_ic_eff)
     resid_ic = float(report.resid_ic)
     resid_t = float(getattr(report, "resid_t_stat_nw", float("nan")))
     gap_eff = resid_ic - be_eff if np.isfinite(resid_ic) and np.isfinite(be_eff) else float("nan")
+    port_ic = float(report.net_ic)
+    be_raw = float(report.breakeven_ic)
+    gap_raw = port_ic - be_raw if np.isfinite(port_ic) and np.isfinite(be_raw) else float("nan")
+    clip_pres = float(getattr(report, "clip_preservation_ratio", float("nan")))
+
+    # G1 (already in report.passes / report.fail_reasons from evaluate_alpha)
+    g1_pass = bool(report.passes)
+
+    # G2: 경제거래성
+    g2a = bool(np.isfinite(gap_raw) and gap_raw > 0.0)
+    g2b = bool(
+        np.isfinite(basket_net_bps) and basket_net_bps > 0.0
+        and np.isfinite(basket_ir_t) and basket_ir_t >= 2.0
+    )
+    g2c = bool(np.isfinite(clip_pres) and clip_pres >= 0.5)
+    g2d = bool(sweep_pass_count >= 1)
+
+    # G3: 강건성
+    g3a = bool(not np.isfinite(bear_basket_net_bps) or bear_basket_net_bps >= 0.0)
+
+    gate_results: dict[str, bool] = {
+        "g1": g1_pass,
+        "g2a_gap_raw": g2a,
+        "g2b_basket": g2b,
+        "g2c_clip_preservation": g2c,
+        "g2d_sweep": g2d,
+        "g3a_bear_basket": g3a,
+    }
+
+    fail_reasons: list[str] = list(report.fail_reasons)
+    if not g2a:
+        fail_reasons.append("g2a_gap_raw_non_positive")
+    if not g2b:
+        fail_reasons.append("g2b_basket_non_positive_or_ir_low")
+    if not g2c:
+        fail_reasons.append("g2c_clip_preservation_below_0.5")
+    if not g2d:
+        fail_reasons.append("g2d_sweep_no_pass")
+    if not g3a:
+        fail_reasons.append("g3a_bear_basket_negative")
+
+    alpha_pass = g1_pass and g2a and g2b and g2c and g2d and g3a
+
     return {
-        "alpha_pass": bool(report.passes),
-        "fail_reasons": list(report.fail_reasons),
+        "alpha_pass": alpha_pass,
+        "fail_reasons": fail_reasons,
         "resid_ic": resid_ic,
         "resid_t_stat_nw": resid_t,
         "be_eff": be_eff,
@@ -124,10 +182,15 @@ def _summarize_alpha_phase1_verdict(report: Any) -> AlphaPhase1Verdict:
         "bear_ic": bear_ic,
         "bear_pass": not (np.isfinite(bear_ic) and bear_ic < 0.0),
         "dsr": float(report.deflated_sharpe),
-        # Execution-path metrics stay diagnostic only; do not override robust alpha verdict.
-        "port_ic": float(report.net_ic),
-        "be_raw": float(report.breakeven_ic),
-        "gap_raw": float(report.net_ic - report.breakeven_ic),
+        "port_ic": port_ic,
+        "be_raw": be_raw,
+        "gap_raw": gap_raw if np.isfinite(gap_raw) else float("nan"),
+        "clip_preservation_ratio": clip_pres,
+        "basket_net_bps": basket_net_bps,
+        "basket_ir_t": basket_ir_t,
+        "sweep_pass_count": sweep_pass_count,
+        "bear_basket_net_bps": bear_basket_net_bps,
+        "gate_results": gate_results,
     }
 
 
@@ -992,13 +1055,16 @@ def _run_alpha_evaluation_report(
     # L2 C3 rank score IC — evaluate_alpha inference_signed_2d로 전달
     # rank_pred_c3는 C3 기준 dense signal이므로 al과 shape 일치
     _dense_pred_for_eval: np.ndarray | None = _rank_pred_c3
+    # DSR 정직화: folds x sweep horizons 탐색공간 반영
+    _n_folds = int(getattr(ml_out, "n_folds", 2))
+    _n_trials_dsr = max(1, _n_folds * 3)
     report = evaluate_alpha(
         alpha_long_2d=al,
         alpha_short_2d=as_,
         realized_fwd_ret_2d=real_resid,
         inference_signed_2d=_dense_pred_for_eval,
         btc_close_1d=btc_close_1d,
-        n_trials=1,
+        n_trials=_n_trials_dsr,
         horizon_bars=horizon,
     )
 
@@ -1164,26 +1230,39 @@ def _run_alpha_evaluation_report(
         h_sweep_strs.append(f"[{h}h: ic={h_res['net_ic']:5.3f} {pass_s}]")
     
     _logger.info(f"📈 SWEEP: {' '.join(h_sweep_strs)}")
-    _alpha_verdict = _summarize_alpha_phase1_verdict(report)
+    _sweep_pass_n = int(sum(1 for v in sweep.values() if v.get("ic_exceeds_breakeven", 0.0) > 0.0))
+    _alpha_verdict = _summarize_alpha_phase1_verdict(
+        report,
+        basket_net_bps=float(_basket.get("net_bps", float("nan"))),
+        basket_ir_t=float(_basket.get("ir_t", float("nan"))),
+        sweep_pass_count=_sweep_pass_n,
+        bear_basket_net_bps=float("nan"),  # bear-only basket 미구현 시 nan
+    )
     _exec_verdict = _summarize_exec_diag_verdict(
         report=report,
         basket_net_bps=float(_basket.get("net_bps", float("nan"))),
     )
+    _gate_str = " ".join(
+        f"{k}={'OK' if v else 'FAIL'}" for k, v in _alpha_verdict["gate_results"].items()
+    )
     _logger.info(
-        ">> ALPHA_PASS: %s"
-        " [phase1 resid_ic=%.4f be_eff=%.4f gap=%+.4f(%s) t=%.2f(>=2.0:%s)"
-        " bear_ic=%.4f(>=0:%s) dsr=%.3f(>=0.95:%s) fail=%s]",
+        ">> ALPHA_PASS: %s [%s]"
+        " [G1: resid_ic=%.4f be_eff=%.4f gap=%+.4f t=%.2f bear_ic=%.4f dsr=%.3f]"
+        " [G2: gap_raw=%+.4f net_bps=%.1f ir_t=%.2f presv=%.2f sweep=%d/3]"
+        " [fail=%s]",
         str(bool(_alpha_verdict["alpha_pass"])).upper(),
+        _gate_str,
         float(_alpha_verdict["resid_ic"]),
         float(_alpha_verdict["be_eff"]),
         float(_alpha_verdict["gap_eff"]),
-        "OK" if float(_alpha_verdict["gap_eff"]) > 0.0 else "FAIL",
         float(_alpha_verdict["resid_t_stat_nw"]),
-        "OK" if float(_alpha_verdict["resid_t_stat_nw"]) >= 2.0 else "FAIL",
         float(_alpha_verdict["bear_ic"]),
-        "OK" if bool(_alpha_verdict["bear_pass"]) else "FAIL",
         float(_alpha_verdict["dsr"]),
-        "OK" if float(_alpha_verdict["dsr"]) >= 0.95 else "FAIL",
+        float(_alpha_verdict["gap_raw"]),
+        float(_alpha_verdict["basket_net_bps"]),
+        float(_alpha_verdict["basket_ir_t"]),
+        float(_alpha_verdict["clip_preservation_ratio"]),
+        int(_alpha_verdict["sweep_pass_count"]),
         _alpha_verdict["fail_reasons"],
     )
     _logger.info(
