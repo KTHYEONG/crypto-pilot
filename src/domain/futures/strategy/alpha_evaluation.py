@@ -8,7 +8,7 @@ import numpy as np
 import scipy.stats
 from numpy.typing import NDArray
 
-from src.domain.futures.strategy.diagnostics import ic_summary, rolling_ic
+from src.domain.futures.strategy.diagnostics import _fast_rank1d, ic_summary, rolling_ic
 
 _logger = logging.getLogger(__name__)
 
@@ -232,8 +232,8 @@ def effective_breadth_corr(
             if int(both.sum()) < min_cofinite:
                 continue
             # Spearman == Pearson on ranks computed within the overlapping subset.
-            rank_i: NDArray[np.float64] = scipy.stats.rankdata(col_i[both])
-            rank_j: NDArray[np.float64] = scipy.stats.rankdata(col_j[both])
+            rank_i: NDArray[np.float64] = _fast_rank1d(col_i[both].astype(np.float64))
+            rank_j: NDArray[np.float64] = _fast_rank1d(col_j[both].astype(np.float64))
             if np.std(rank_i) < 1e-12 or np.std(rank_j) < 1e-12:
                 continue
             c: float = float(np.corrcoef(rank_i, rank_j)[0, 1])
