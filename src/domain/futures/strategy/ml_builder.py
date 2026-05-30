@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from dataclasses import asdict, dataclass, replace
@@ -15,6 +16,10 @@ from src.core.settings import round_trip_cost_bps
 from src.domain.futures.optimization.opt_config import (
     OPT_FUTURES_CONFIG,
     default_ev_hurdle_bps,
+)
+from src.domain.futures.strategy.alpha_evaluation import (
+    diagnose_alpha_ic_decomposition,
+    effective_breadth_corr,
 )
 from src.domain.futures.strategy.cache import build_manifest_hash
 from src.domain.futures.strategy.calibrator import (
@@ -50,6 +55,7 @@ from src.domain.futures.strategy.dataset import (
 from src.domain.futures.strategy.diagnostics import (
     alpha_gate_diagnostics,
     build_quality_report,
+    feature_cs_ic_audit,
     ic_summary,
     ml_alpha_metrics,
     passes_ic_gate,
@@ -61,6 +67,11 @@ from src.domain.futures.strategy.diagnostics import (
 from src.domain.futures.strategy.features import build_feature_panel
 from src.domain.futures.strategy.inference import (
     assemble_alpha_panel,
+)
+from src.domain.futures.strategy.integrity import (
+    select_features,
+    verify_data_integrity,
+    verify_feature_integrity,
 )
 from src.domain.futures.strategy.labels import build_label_panel
 from src.domain.futures.strategy.ranker import RankerFitResult, fit_ranker, predict_rank_score
@@ -116,6 +127,11 @@ def _resolve_side_targets(
         short_rank_target = -labels.forward_gross_rank_target
         long_rel = labels.forward_gross_relevance
         short_rel = 4 - labels.forward_gross_relevance
+    elif ml_cfg.rank_target_mode == "cs_residual" and labels.rank_target is not None:
+        long_rank_target = labels.rank_target
+        short_rank_target = -labels.rank_target
+        long_rel = labels.relevance
+        short_rel = 4 - labels.relevance
     return long_rank_target, short_rank_target, long_rel, short_rel, long_mag, short_mag
 
 
@@ -221,7 +237,11 @@ def _train_predict_single_fold(
     short_mag: np.ndarray,
 ) -> dict[str, Any]:
     """Train and predict a single walk-forward or virtual fold in parallel-safe manner."""
+    t_start = time.perf_counter()
+    fold_id = fold.fold_id
+
     # 1. Feature normalization and imputation on fold slices
+    t_slice = time.perf_counter()
     train_values = features.values[fold.train_start : fold.train_end].astype(
         np.float64, copy=False
     )
@@ -244,8 +264,14 @@ def _train_predict_single_fold(
             "missing_imputer": "train_median",
         },
     )
+    _logger.debug(
+        "[perf-ml-fold] [Fold %d] data slicing and robust scaling took %.4fs",
+        fold_id,
+        time.perf_counter() - t_slice,
+    )
 
     # 2. Build Side Matrices
+    t_matrices = time.perf_counter()
     train_long = _build_side_matrix(
         features=normalized_features,
         labels=labels,
@@ -325,8 +351,14 @@ def _train_predict_single_fold(
     validate_long_matrix(train_short)
     validate_long_matrix(valid_short)
     validate_long_matrix(test_short)
+    _logger.debug(
+        "[perf-ml-fold] [Fold %d] side matrix build took %.4fs",
+        fold_id,
+        time.perf_counter() - t_matrices,
+    )
 
     # 3. Model training & prediction
+    t_fit_predict = time.perf_counter()
     _fold_result = _fit_predict_fold_dual_side(
         train_long=train_long,
         valid_long=valid_long,
@@ -335,6 +367,16 @@ def _train_predict_single_fold(
         valid_short=valid_short,
         test_short=test_short,
         ml_cfg=ml_cfg,
+    )
+    _logger.debug(
+        "[perf-ml-fold] [Fold %d] _fit_predict_fold_dual_side took %.4fs",
+        fold_id,
+        time.perf_counter() - t_fit_predict,
+    )
+    _logger.debug(
+        "[perf-ml-fold] [Fold %d] total run took %.4fs",
+        fold_id,
+        time.perf_counter() - t_start,
     )
 
     return {
@@ -385,6 +427,7 @@ def _fit_predict_fold_dual_side(
         Space Complexity: O(N) per output array.
 
     """
+    t_fit_ranker = time.perf_counter()
     if ml_cfg.ranker_enabled:
         ranker_long: RankerFitResult | None = fit_ranker(
             train=train_long, valid=valid_long, cfg=ml_cfg
@@ -395,11 +438,17 @@ def _fit_predict_fold_dual_side(
     else:
         ranker_long = None
         ranker_short = None
+    _logger.debug(
+        "[perf-ml-fold] fit_ranker (long+short) took %.4fs",
+        time.perf_counter() - t_fit_ranker,
+    )
 
     score_train_long = _rank_score(ranker_long, train_long)
     score_valid_long = _rank_score(ranker_long, valid_long)
     score_test_long = _rank_score(ranker_long, test_long)
     score_test_short = _rank_score(ranker_short, test_short)
+
+    t_fit_calib = time.perf_counter()
     calibration_fit_long = fit_quantile_calibrators(
         train=train_long,
         valid=valid_long,
@@ -414,6 +463,12 @@ def _fit_predict_fold_dual_side(
         rank_score_valid=_rank_score(ranker_short, valid_short),
         cfg=ml_cfg,
     )
+    _logger.debug(
+        "[perf-ml-fold] fit_quantile_calibrators (long+short) took %.4fs",
+        time.perf_counter() - t_fit_calib,
+    )
+
+    t_predict = time.perf_counter()
     ev_valid_long = predict_conservative_ev(
         calibration_fit_long, valid_long, score_valid_long, ml_cfg
     )
@@ -437,6 +492,10 @@ def _fit_predict_fold_dual_side(
     )
     conf_test_short = compute_forecast_confidence(
         quant_test_short.q10, quant_test_short.q50, quant_test_short.q90
+    )
+    _logger.debug(
+        "[perf-ml-fold] prediction + quantile forecasting took %.4fs",
+        time.perf_counter() - t_predict,
     )
     return _FoldPredictResult(
         ev_test_long=ev_test_long,
@@ -466,6 +525,46 @@ def _resolve_horizon_candidates(ml_cfg: StrategyMLConfig) -> tuple[int, ...]:
     return tuple(out) if out else (int(ml_cfg.label_horizon_bars),)
 
 
+def _subset_feature_panel(panel: FeaturePanel, selected_names: tuple[str, ...]) -> FeaturePanel:
+    """Return feature panel reduced to selected feature names."""
+    if not selected_names:
+        return panel
+    idx_map = {name: i for i, name in enumerate(panel.feature_names)}
+    indices = [idx_map[name] for name in selected_names if name in idx_map]
+    if len(indices) == len(panel.feature_names):
+        return panel
+    values = panel.values[:, :, indices]
+    availability_masks = {
+        name: mask for name, mask in panel.availability_masks.items() if name in selected_names
+    }
+    metadata = dict(panel.metadata)
+    metadata["selected_feature_names"] = list(selected_names)
+    metadata["selected_feature_count"] = len(selected_names)
+    return FeaturePanel(
+        datetimes=panel.datetimes,
+        symbols=panel.symbols,
+        values=values,
+        feature_names=selected_names,
+        valid_mask=panel.valid_mask,
+        availability_masks=availability_masks,
+        metadata=metadata,
+    )
+
+
+def _integrity_ready(aligned: Any) -> bool:
+    required = (
+        "open_2d",
+        "high_2d",
+        "low_2d",
+        "close_2d",
+        "active_mask",
+        "warm_mask",
+        "kill_mask",
+        "datetimes",
+    )
+    return all(hasattr(aligned, key) for key in required)
+
+
 @dataclass(slots=True, frozen=True)
 class AnchoredMLPrecomputedPanels:
     """Reusable causal ML panels for anchored refit legs."""
@@ -492,6 +591,46 @@ def precompute_anchored_ml_panels(
     labels = build_label_panel(aligned, ml_cfg)
     validate_feature_panel(features)
     validate_label_panel(labels, t=features.values.shape[0], n=features.values.shape[1])
+    if _integrity_ready(aligned):
+        oos_start_idx = max(int(features.values.shape[0] * 0.8), 1)
+        _ic_target = (
+            labels.forward_gross_ret.astype(np.float64)
+            if labels.forward_gross_ret is not None
+            else labels.signed_net_ret.astype(np.float64)
+        )
+        _raw_elig = (
+            labels.raw_eligible_mask
+            if labels.raw_eligible_mask is not None
+            else labels.eligible_mask
+        )
+        data_integrity = verify_data_integrity(
+            aligned,
+            oos_start_idx=oos_start_idx,
+            forward_gross_ret=_ic_target,
+            eligible_mask=_raw_elig,
+        )
+        _avg_breadth = float(np.mean(np.sum(labels.eligible_mask, axis=1)))
+        breakeven_ic = 24.0 / (500.0 * max(_avg_breadth, 1.0) ** 0.5)
+        feature_integrity = verify_feature_integrity(
+            features,
+            train_slice=slice(0, oos_start_idx),
+            oos_slice=slice(oos_start_idx, features.values.shape[0]),
+            target_2d=_ic_target,
+            breakeven_ic=float(breakeven_ic),
+        )
+        if ml_cfg.feature_selection_enabled:
+            selected_names = select_features(
+                feature_integrity,
+                features.feature_names,
+                ml_cfg.feature_integrity,
+            )
+            features = _subset_feature_panel(features, selected_names)
+        features.metadata["integrity"] = {
+            "data": asdict(data_integrity),
+            "feature": asdict(feature_integrity),
+        }
+        if data_integrity.hard_fail and ml_cfg.integrity_gate_enabled:
+            raise RuntimeError(f"data integrity hard-fail: {data_integrity.fail_reasons}")
     return AnchoredMLPrecomputedPanels(features=features, labels=labels)
 
 
@@ -605,11 +744,118 @@ def build_ml_strategy_alpha(
         raise ValueError(
             f"strategy needs >= {ml_cfg.min_group_size} symbols, got {len(aligned.symbols)}"
         )
+    
+    t_feat_build = time.perf_counter()
     features = build_feature_panel(aligned, ml_cfg)
+    _logger.debug(
+        "[perf-ml-prep] build_feature_panel took %.4fs",
+        time.perf_counter() - t_feat_build,
+    )
+
+    t_lbl_build = time.perf_counter()
     labels = build_label_panel(aligned, ml_cfg)
+    _logger.debug("[perf-ml-prep] build_label_panel took %.4fs", time.perf_counter() - t_lbl_build)
+
+    t_val = time.perf_counter()
     validate_feature_panel(features)
     validate_label_panel(labels, t=features.values.shape[0], n=features.values.shape[1])
+    _logger.debug("[perf-ml-prep] validate panels took %.4fs", time.perf_counter() - t_val)
+
+    data_integrity: Any | None = None
+    feature_integrity: Any | None = None
+    if _integrity_ready(aligned):
+        oos_start_idx = max(int(features.values.shape[0] * 0.8), 1)
+        _ic_target_int = (
+            labels.forward_gross_ret.astype(np.float64)
+            if labels.forward_gross_ret is not None
+            else labels.signed_net_ret.astype(np.float64)
+        )
+        _raw_elig_int = (
+            labels.raw_eligible_mask
+            if labels.raw_eligible_mask is not None
+            else labels.eligible_mask
+        )
+        t_data_int = time.perf_counter()
+        data_integrity = verify_data_integrity(
+            aligned,
+            oos_start_idx=oos_start_idx,
+            forward_gross_ret=_ic_target_int,
+            eligible_mask=_raw_elig_int,
+        )
+        _logger.debug(
+            "[perf-ml-prep] verify_data_integrity took %.4fs",
+            time.perf_counter() - t_data_int,
+        )
+
+        _cofinite = np.sum(
+            np.isfinite(_ic_target_int[oos_start_idx:]) & labels.eligible_mask[oos_start_idx:],
+            axis=1,
+        )
+        _cofinite_p50 = float(np.median(_cofinite)) if _cofinite.size else 1.0
+        breakeven_ic = 24.0 / (500.0 * max(_cofinite_p50, 1.0) ** 0.5)
+        
+        t_feat_int = time.perf_counter()
+        feature_integrity = verify_feature_integrity(
+            features,
+            train_slice=slice(0, oos_start_idx),
+            oos_slice=slice(oos_start_idx, features.values.shape[0]),
+            target_2d=_ic_target_int,
+            breakeven_ic=float(breakeven_ic),
+        )
+        _logger.debug(
+            "[perf-ml-prep] verify_feature_integrity took %.4fs",
+            time.perf_counter() - t_feat_int,
+        )
+
+        if ml_cfg.feature_selection_enabled:
+            _total_feat_before = len(features.feature_names)
+            t_feat_select = time.perf_counter()
+            selected_names = select_features(
+                feature_integrity, features.feature_names, ml_cfg.feature_integrity
+            )
+            features = _subset_feature_panel(features, selected_names)
+            _logger.debug(
+                "[perf-ml-prep] select_features took %.4fs",
+                time.perf_counter() - t_feat_select,
+            )
+        _logger.info(
+            "🛡️ [DATA-INT] zero_price=%.6f ohlc_violation=%.6f bar_gap=%d nan_decomp=%s",
+            data_integrity.zero_price_ratio,
+            data_integrity.ohlc_violation_ratio,
+            data_integrity.bar_gap_count,
+            data_integrity.nan_decomposition,
+        )
+        _logger.info(
+            "🧬 [FEAT-INT] constant=%d drifted=%d redundant=%d leakage=%d",
+            len(feature_integrity.constant_features),
+            len(feature_integrity.drifted_features),
+            len(feature_integrity.redundant_pairs),
+            len(feature_integrity.leakage_suspects),
+        )
+        if feature_integrity.constant_features:
+            _logger.info("🧬 [FEAT-INT] constant=%s", feature_integrity.constant_features)
+        if feature_integrity.redundant_pairs:
+            _logger.info(
+                "🧬 [FEAT-INT] redundant=%s",
+                [(a, b, round(c, 3)) for a, b, c in feature_integrity.redundant_pairs],
+            )
+        if ml_cfg.feature_selection_enabled:
+            _logger.info(
+                "🧬 [FEAT-SELECT] kept=%d/%d names=%s",
+                len(selected_names),
+                _total_feat_before,
+                list(selected_names),
+            )
+        if data_integrity.hard_fail:
+            msg = f"data integrity hard-fail: {data_integrity.fail_reasons}"
+            if ml_cfg.integrity_gate_enabled:
+                raise RuntimeError(msg)
+            _logger.warning("🛡️ [DATA-INT] %s", msg)
     t_align_feature_label += time.perf_counter() - t_align_start
+    _logger.debug(
+        "[perf-ml-prep] total features + alignment phase took %.4fs",
+        t_align_feature_label,
+    )
 
     # [Dynamic Train Window] In-Sample 또는 Leg Refit 등 데이터 기간이 부족할 경우
     # train_months를 유연하게 동적 조정합니다.
@@ -629,7 +875,12 @@ def build_ml_strategy_alpha(
                 )
                 ml_cfg = replace(ml_cfg, train_months=adjusted_train)
 
+    t_folds = time.perf_counter()
     folds = make_walk_forward_folds(features.datetimes, ml_cfg)
+    _logger.debug(
+        "[perf-ml-prep] make_walk_forward_folds took %.4fs",
+        time.perf_counter() - t_folds,
+    )
     if not folds:
         raise RuntimeError("no walk-forward folds can be built")
     _logger.info(
@@ -987,6 +1238,11 @@ def build_ml_strategy_alpha(
     panel.attrs["ranking_mode"] = "cross_sectional_regression"
     panel.attrs["calibrator_target"] = "exec_net_ret"
     panel.attrs["feature_groups_enabled"] = list(features.availability_masks.keys())
+    if data_integrity is not None and feature_integrity is not None:
+        panel.attrs["integrity"] = {
+            "data": asdict(data_integrity),
+            "feature": asdict(feature_integrity),
+        }
     quality_report: dict[str, Any] = build_quality_report(
         feature_values=features.values,
         feature_valid_mask=features.valid_mask,
@@ -1015,7 +1271,7 @@ def build_ml_strategy_alpha(
     _cofinite_per_bar = np.sum(np.isfinite(_score_grid_f) & np.isfinite(_ic_target), axis=1)  # [T]
     _cofinite_oos = _cofinite_per_bar[_oos_time_mask]  # OOS 구간만
 
-    # SNR OOS finite 비율 진단 — signed_net_ret가 OOS에서 얼마나 채워져 있는가
+    # dense 비율 — 로깅 호환용으로만 유지 (분모에 비활성 심볼 포함하므로 진단 기준 아님)
     _target_oos_finite = float(
         np.mean(np.isfinite(_ic_target[_oos_time_mask]))
     ) if _oos_time_mask.any() else 0.0
@@ -1024,15 +1280,32 @@ def build_ml_strategy_alpha(
     _bars_ge5 = int(np.sum(_cofinite_oos >= 5))
     _bars_ge5_ratio = float(_bars_ge5 / max(int(_cofinite_oos.size), 1))
 
-    # SCORE-IC 0/0/0 원인 진단
+    # eligibility-조건부 커버리지: raw eligible 셀(finite_long 적용 전) 중 target이 finite인 비율.
+    # raw_eligible을 써야 tautology를 방지한다 — eligible_mask=eligible&finite_long을 쓰면
+    # 분모가 이미 finite를 보장하므로 cov_elig ≡ 1.0이 되어 결손 탐지력이 없다.
+    _raw_elig_labels = (
+        labels.raw_eligible_mask
+        if labels.raw_eligible_mask is not None
+        else labels.eligible_mask
+    )
+    _elig = np.asarray(_raw_elig_labels, dtype=bool)
+    _elig_oos = _elig[_oos_time_mask]
+    _tgt_oos = _ic_target[_oos_time_mask]
+    _elig_cnt = int(np.count_nonzero(_elig_oos))
+    _cov_within_elig = (
+        float(np.count_nonzero(np.isfinite(_tgt_oos) & _elig_oos) / _elig_cnt)
+        if _elig_cnt > 0 else 0.0
+    )
+
+    # SCORE-IC 원인 진단 — dense 비율 대신 eligibility-조건부 커버리지 기준 사용
     if not _oos_time_mask.any():
         _oos_diag = "no_oos_predictions"
-    elif _cofinite_p50 < 5 and _target_oos_finite < 0.5:
-        _oos_diag = "both_cofinite_starvation_AND_snr_nan"
+    elif _cofinite_p50 < 5 and _cov_within_elig < 0.9:
+        _oos_diag = "both_cofinite_starvation_AND_target_dropout"
     elif _cofinite_p50 < 5:
         _oos_diag = "cofinite_starvation(score∩snr<5/bar)"
-    elif _target_oos_finite < 0.5:
-        _oos_diag = "snr_nan_in_oos"
+    elif _cov_within_elig < 0.9:
+        _oos_diag = "target_dropout_within_eligible"
     else:
         _oos_diag = "sufficient_cofinite_check_ic"
 
@@ -1059,13 +1332,14 @@ def build_ml_strategy_alpha(
     )
     _logger.info(
         "🔬 [OOS-RANKIC] ic=%.4f t=%.2f n_bars=%d cofinite_p50=%.1f"
-        " bars_ge5_ratio=%.3f snr_oos_finite=%.3f",
+        " bars_ge5_ratio=%.3f snr_oos_finite=%.3f cov_elig=%.3f",
         float(_oos_ic_stats["mean_ic"]),
         float(_oos_ic_stats["t_stat"]),
         int(_oos_ic_stats.get("n_obs", 0.0)),
         _cofinite_p50,
         _bars_ge5_ratio,
         _target_oos_finite,
+        _cov_within_elig,
     )
     _logger.info(
         "🔬 [OOS-DIAG] cause=%s oos_bars=%d ge5_bars=%d",
@@ -1081,6 +1355,7 @@ def build_ml_strategy_alpha(
         "cofinite_p50": float(_cofinite_p50),
         "bars_ge5_ratio": float(_bars_ge5_ratio),
         "target_source": _target_source,
+        "coverage_within_eligible": float(_cov_within_elig),
     }
     _is_rank_ic = float(quality_report.get("spearman_rank_ic", 0.0))
     _valid_rank_ic = float(quality_report.get("ranker_valid_ndcg_at_5", 0.0))
@@ -1088,6 +1363,92 @@ def build_ml_strategy_alpha(
     _retention_ratio = float(
         _test_rank_ic / max(abs(_is_rank_ic), 1e-12) if abs(_is_rank_ic) > 0.0 else 0.0
     )
+    # breakeven IC: cost24bps / (sigma500bps * sqrt(breadth)); breadth ≈ cofinite_p50
+    _be_ic = 24.0 / (500.0 * max(_cofinite_p50, 1.0) ** 0.5)
+    _ic_gap_oos = _test_rank_ic - _be_ic
+
+    # --- Phase 0 anti-bias diagnostic: beta-residualized IC + effective-breadth breakeven ---
+    # Observation-only (gate unchanged). Resolves whether raw dense_ranker_ic is tradable
+    # market-neutral alpha or a beta/size factor tilt hedged away by the L/S book.
+    # See docs/specs/ml_system_integrity_and_evaluation.md §2 (C1 + C2).
+    _resid_decomp: dict[str, float] = {}
+    _be_eff = float("nan")
+    _n_eff = float("nan")
+    _gap_resid_eff = float("nan")
+    if _oos_ge5_mask.any():
+        _beta_oos = (
+            labels.beta_2d[_oos_ge5_mask].astype(np.float64)
+            if labels.beta_2d is not None
+            else None
+        )
+        _mkt_fwd_oos = (
+            labels.market_fwd_ret[_oos_ge5_mask].astype(np.float64)
+            if labels.market_fwd_ret is not None
+            else None
+        )
+        _resid_decomp = diagnose_alpha_ic_decomposition(
+            pred_dense_2d=_score_grid_f[_oos_ge5_mask],
+            realized_raw_2d=_ic_target[_oos_ge5_mask],
+            beta_2d=_beta_oos,
+            market_fwd_1d=_mkt_fwd_oos,
+            horizon_bars=int(ml_cfg.label_horizon_bars),
+        )
+        # Effective (correlation-adjusted) breadth from realized cross-section comovement.
+        _n_eff = effective_breadth_corr(_ic_target[_oos_ge5_mask])
+        _tgt_oos_flat = _ic_target[_oos_ge5_mask]
+        _tgt_oos_finite_vals = _tgt_oos_flat[np.isfinite(_tgt_oos_flat)]
+        _sigma_r_bps_oos = (
+            float(np.nanstd(_tgt_oos_finite_vals)) * 1e4
+            if _tgt_oos_finite_vals.size > 0
+            else 400.0
+        )
+        _cost_bps_oos = round_trip_cost_bps()
+        _be_eff = _cost_bps_oos / (
+            max(_sigma_r_bps_oos, 1e-6) * max(_n_eff, 1.0) ** 0.5
+        )
+        _resid_ic = float(_resid_decomp.get("dense_c1_resid_ic", float("nan")))
+        _gap_resid_eff = _resid_ic - _be_eff
+        _logger.info(
+            "🔬 [RESID-IC] raw=%.4f resid=%.4f resid_hit=%.3f",
+            float(_resid_decomp.get("dense_c1_raw_ic", float("nan"))),
+            _resid_ic,
+            float(_resid_decomp.get("dense_c1_resid_hit", float("nan"))),
+        )
+        _logger.info(
+            "🔬 [BE-EFF] N_raw=%.1f N_eff=%.1f sigma_r=%.1fbps be_raw=%.4f be_eff=%.4f"
+            " gap_resid_eff=%+.4f",
+            float(_cofinite_p50),
+            float(_n_eff),
+            float(_sigma_r_bps_oos),
+            float(_be_ic),
+            float(_be_eff),
+            float(_gap_resid_eff),
+        )
+    panel.attrs["oos_resid_ic_decomp"] = {
+        **_resid_decomp,
+        "n_eff": float(_n_eff),
+        "be_eff": float(_be_eff),
+        "gap_resid_eff": float(_gap_resid_eff),
+    }
+    _feature_ic_audit: list[dict[str, float | str]] = []
+    if _oos_ge5_mask.any():
+        _feature_ic_audit = feature_cs_ic_audit(
+            features.values[_oos_ge5_mask].astype(np.float64),
+            tuple(features.feature_names),
+            _ic_target[_oos_ge5_mask],
+            breakeven_ic=float(_be_eff) if math.isfinite(_be_eff) else float(_be_ic),
+            horizon_bars=int(ml_cfg.label_horizon_bars),
+            top_k=15,
+        )
+    panel.attrs["feature_ic_audit"] = _feature_ic_audit
+    if _feature_ic_audit:
+        _feature_ic_msg = " | ".join(
+            f"{row['name']}:ic={float(row['mean_ic']):.4f},gap={float(row['gap']):.4f}"
+            for row in _feature_ic_audit
+        )
+        _logger.info("🔬 [FEATURE-IC] %s", _feature_ic_msg)
+    else:
+        _logger.info("🔬 [FEATURE-IC] no_oos_bars_with_cofinite_ge5")
     if not ml_cfg.ranker_enabled:
         _decision = "not_measured"
     elif (
@@ -1100,6 +1461,7 @@ def build_ml_strategy_alpha(
         _decision = "no_edge"
     else:
         _decision = "continue"
+    _be_ic_for_report = float(_be_eff) if math.isfinite(_be_eff) else float(_be_ic)
     panel.attrs["generalization_report"] = {
         "is_rank_ic": _is_rank_ic,
         "valid_rank_ic": _valid_rank_ic,
@@ -1107,6 +1469,8 @@ def build_ml_strategy_alpha(
         "oos_rank_ic": _test_rank_ic,
         "retention_ratio": _retention_ratio,
         "decision": _decision,
+        "be_ic": _be_ic_for_report,
+        "ic_gap": _test_rank_ic - _be_ic_for_report,
     }
     if not ml_cfg.ranker_enabled:
         # NDCG is N/A without ranker; mark as passing to avoid false gate failure

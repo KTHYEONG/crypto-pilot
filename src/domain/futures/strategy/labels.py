@@ -432,6 +432,7 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         relevance=rel,
         sample_weight=sample_weight,
         eligible_mask=eligible & finite_long,
+        raw_eligible_mask=eligible,
         rank_target=signed,
         magnitude_target=exec_net_ret,
         rank_target_long=long_net,
@@ -444,5 +445,7 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         forward_gross_rank_target=forward_gross_rank_target,
         forward_gross_relevance=forward_gross_relevance,
         dynamic_cost_bps_2d=dynamic_cost_2d,
+        beta_2d=beta_2d,
+        market_fwd_ret=market_fwd_ret,
         metadata=metadata,
     )

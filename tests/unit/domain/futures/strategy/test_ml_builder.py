@@ -19,6 +19,7 @@ from src.domain.futures.strategy.contracts import (
 from src.domain.futures.strategy.ml_builder import (
     _fit_predict_fold_dual_side,
     _rank_score,
+    _resolve_side_targets,
     build_ml_strategy_alpha,
     build_ml_strategy_alpha_anchored,
 )
@@ -516,6 +517,31 @@ def test_build_ml_strategy_alpha_anchored_test_alpha_independent_of_future_label
         short_blocked,
         err_msg="alpha_short must be deterministic (test window is isolated from train labels)",
     )
+
+
+def test_resolve_side_targets_cs_residual_uses_residual_rank_and_relevance() -> None:
+    labels = LabelPanel(
+        long_net_ret=np.zeros((2, 3), dtype=np.float32),
+        short_net_ret=np.zeros((2, 3), dtype=np.float32),
+        signed_net_ret=np.zeros((2, 3), dtype=np.float32),
+        exec_net_ret=np.zeros((2, 3), dtype=np.float32),
+        relevance=np.array([[0, 2, 4], [1, 3, 4]], dtype=np.int32),
+        sample_weight=np.ones((2, 3), dtype=np.float32),
+        eligible_mask=np.ones((2, 3), dtype=bool),
+        rank_target=np.array([[0.1, -0.2, 0.3], [0.0, 0.4, -0.5]], dtype=np.float32),
+    )
+    ml_cfg = StrategyMLConfig(rank_target_mode="cs_residual")
+
+    long_rank, short_rank, long_rel, short_rel, _long_mag, _short_mag = _resolve_side_targets(
+        labels, ml_cfg
+    )
+
+    assert long_rank is not None
+    assert short_rank is not None
+    assert np.allclose(long_rank, labels.rank_target)
+    assert np.allclose(short_rank, -labels.rank_target)
+    assert np.array_equal(long_rel, labels.relevance)
+    assert np.array_equal(short_rel, 4 - labels.relevance)
 
 
 def test_build_ml_strategy_alpha_virtual_refit_uses_own_train_normalization(
