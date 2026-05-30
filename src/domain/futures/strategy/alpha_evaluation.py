@@ -77,6 +77,10 @@ class AlphaEvaluationReport:
     n_eff: float = float("nan")
     # Phase 1: breakeven IC using N_eff and measured sigma_r.
     breakeven_ic_eff: float = float("nan")
+    # Phase G1a: floor 전 corr-조정 N_eff (관측 보존용).
+    n_eff_corr_raw: float = float("nan")
+    # Phase G2c: post-clip IC / pre-clip IC 비율. 클립 파괴 감지.
+    clip_preservation_ratio: float = float("nan")
 
 
 def compute_net_ic(
@@ -743,9 +747,12 @@ def evaluate_alpha(
         _resid_ic_dict["t_stat_nw"] if _resid_ic_dict is not None else net_ic_dict["t_stat_nw"]
     )
 
-    # Phase 1: correlation-adjusted effective breadth N_eff from realized cross-section.
-    # Used for the economically-meaningful breakeven gate instead of the raw symbol count.
-    _n_eff: float = effective_breadth_corr(realized_fwd_ret_2d)
+    # Phase G1a: corr-조정 N_eff를 emit-breadth로 floor.
+    # effective_breadth_corr(real_resid)는 잔차화가 BTC 공통팩터를 이미 제거했기 때문에
+    # N_eff≈N_raw를 반환한다. 실거래 북은 베타를 헤지하지 않으므로 이 크레딧은 unearned.
+    # 클립북 실제 발산(emit breadth)을 상한으로 적용하여 미실현 분산 크레딧을 제거.
+    _n_eff_corr_raw: float = effective_breadth_corr(realized_fwd_ret_2d)
+    _n_eff: float = float(min(_n_eff_corr_raw, max(breadth, 1.0)))
     _breakeven_eff: float = compute_breakeven_ic(
         cost_floor_bps=cost_floor_bps,
         sigma_r_bps=sigma_r_bps,
@@ -759,8 +766,8 @@ def evaluate_alpha(
     # Removes arbitrary net_ic≥0.03 and raw-breadth<3 thresholds.
     if _gating_ic < _breakeven_eff:
         fail_reasons.append("resid_ic_below_breakeven_eff")
-    if _gating_t_nw < 2.0:
-        fail_reasons.append("ic_t_stat_nw_below_2.0")
+    if _gating_t_nw < 3.0:
+        fail_reasons.append("ic_t_stat_nw_below_3.0")
     # Regime gate: bear IC must be non-negative (strategy cannot lose in down markets).
     _bear_ic: float = regime_ic.get("bear", float("nan"))
     if math.isfinite(_bear_ic) and _bear_ic < 0.0:
@@ -837,6 +844,14 @@ def evaluate_alpha(
         resid_t_stat_nw=_gating_t_nw,
         n_eff=_n_eff,
         breakeven_ic_eff=_breakeven_eff,
+        n_eff_corr_raw=_n_eff_corr_raw,
+        clip_preservation_ratio=(
+            # post_clip_IC / pre_clip_IC: 클립 후 스킬이 얼마나 보존됐는가 (Spec G2c).
+            # net_ic_dict["mean_ic"] = post-clip (al-as), _gating_ic = pre-clip dense.
+            float(net_ic_dict["mean_ic"] / _gating_ic)
+            if abs(_gating_ic) > 1e-9
+            else float("nan")
+        ),
     )
 
 
