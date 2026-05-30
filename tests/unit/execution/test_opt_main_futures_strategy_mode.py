@@ -252,9 +252,16 @@ def test_summarize_alpha_phase1_verdict_uses_report_passes_not_port_ic() -> None
         breakeven_ic_eff=0.0131,
     )
 
-    verdict = opt_main_futures._summarize_alpha_phase1_verdict(report)
+    verdict = opt_main_futures._summarize_alpha_phase1_verdict(
+        report,
+        basket_net_bps=-36.94,   # 실행 로그 기준 음수 → G2b FAIL
+        basket_ir_t=-2.61,
+        sweep_pass_count=0,      # sweep 0/3 → G2d FAIL
+    )
 
-    assert verdict["alpha_pass"] is True
+    # G1은 passes=True이지만 G2(basket/sweep/gap_raw) FAIL → alpha_pass=False
+    assert verdict["alpha_pass"] is False
+    assert "g2a_gap_raw_non_positive" in verdict["fail_reasons"]
     assert verdict["gap_eff"] == pytest.approx(0.0010, abs=1e-6)
     assert verdict["port_ic"] == pytest.approx(-0.0030, abs=1e-6)
     assert verdict["bear_pass"] is True
