@@ -199,7 +199,6 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
     cs_rank_rv_18 = cross_sectional_rank(rv_18, mask, cfg.min_group_size)
     cs_rank_funding_6 = cross_sectional_rank(funding_mean_6, mask, cfg.min_group_size)
     cs_rank_volume_18 = cross_sectional_rank(volume_z_18, mask, cfg.min_group_size)
-    cs_rank_dollar_vol = cross_sectional_rank(dollar_volume, mask, cfg.min_group_size)
 
     # [ML-UPGRADE] 장기 추세 변별성 강화를 위한 횡단면 랭크 확장 및
     # Volatility-adjusted CS-Sharpe 피처 도입
@@ -231,9 +230,6 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
     market_median_ret_6 = np.repeat(market_median_base, close_2d.shape[1], axis=1)
     market_dispersion_6 = np.repeat(market_dispersion_base, close_2d.shape[1], axis=1)
     positive_breadth_6 = np.repeat(positive_breadth_base, close_2d.shape[1], axis=1)
-
-    xs_reversal_prior_6 = -cs_rank_ret_6
-    carry_prior_6 = cs_rank_funding_6
 
     # 4종 신규 알파 피처 계산
     # 1. 단기 리턴 자기상관성 (ret_3과 이의 3-bar shift 리턴의 6-period rolling correlation)
@@ -298,7 +294,6 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
         ("rev_3", rev_3),
         ("rev_6", rev_6),
         ("rev_12", rev_12),
-        ("xs_reversal_prior_6", xs_reversal_prior_6),
         ],
         "volatility": [
         ("rv_6", rv_6),
@@ -317,7 +312,6 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
         ("funding_z_30d", funding_z_30d),
         ("funding_sign_persistence_6", funding_sign_persistence_6),
         ("cs_rank_funding_6", cs_rank_funding_6),
-        ("carry_prior_6", carry_prior_6),
         ("basis_1", basis_1),
         ("basis_mean_6", basis_mean_6),
         ("funding_rate_momentum", funding_rate_momentum),
@@ -328,7 +322,6 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
         ("adv_rank", adv_rank),
         ("execution_cost_rank", execution_cost_rank),
         ("cs_rank_volume_18", cs_rank_volume_18),
-        ("cs_rank_dollar_volume", cs_rank_dollar_vol),
         ("oi_ret_1", oi_ret_1),
         ("oi_z_18", oi_z_18),
         ],
