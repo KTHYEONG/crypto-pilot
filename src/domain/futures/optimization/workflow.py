@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import logging
 import math
 import warnings
 from collections.abc import Callable, Iterable
@@ -17,6 +18,8 @@ from src.domain.futures.optimization.ml_context import MLPhaseDContext
 from src.domain.futures.optimization.objectives import objective_ml_phase_d
 from src.domain.futures.optimization.observability.trial_observability import set_trial_event_attrs
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+
+_logger = logging.getLogger(__name__)
 
 # Optuna Experimental Warning suppression at code level
 warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)
@@ -1355,6 +1358,8 @@ def run_phased_optimization_skeleton(
         phase_a2_trials = max(30, int(n_trials * 0.20))
         phase_b_trials = max(40, int(n_trials * 0.30))
 
+    import time
+    t_phase_a1 = time.perf_counter()
     study_a1 = run_phase_a1(
         base_ctx=base_ctx,
         base_study_name=base_study_name,
@@ -1365,6 +1370,7 @@ def run_phased_optimization_skeleton(
         resume=resume,
         n_workers=phase_a1_workers,
     )
+    _logger.debug("[PROF] PhasedOpt phase_a1 elapsed_s=%.4f", time.perf_counter() - t_phase_a1)
     best_a1_trial_for_a2 = _best_complete_trial(study_a1)
     frozen_signal_for_a2 = _core_subset(
         (best_a1_trial_for_a2.params if best_a1_trial_for_a2 is not None else {}),
@@ -1376,6 +1382,7 @@ def run_phased_optimization_skeleton(
             "EV_HURDLE_BPS",
         ),
     )
+    t_phase_a2 = time.perf_counter()
     study_a2 = run_phase_a2(
         base_ctx=base_ctx,
         base_study_name=base_study_name,
@@ -1387,6 +1394,7 @@ def run_phased_optimization_skeleton(
         n_workers=phase_a2_workers,
         frozen_signal_params=frozen_signal_for_a2,
     )
+    _logger.debug("[PROF] PhasedOpt phase_a2 elapsed_s=%.4f", time.perf_counter() - t_phase_a2)
     try:
         phase_b_plan = build_phase_b_plan(study_a1, study_a2)
     except Exception:
@@ -1420,6 +1428,7 @@ def run_phased_optimization_skeleton(
     phase_b_frozen.update(best_risk)
     if phase_b_plan is not None:
         phase_b_frozen.update(dict(phase_b_plan.fixed_params))
+    t_phase_b = time.perf_counter()
     study_b = run_phase_b(
         base_ctx=base_ctx,
         base_study_name=base_study_name,
@@ -1433,6 +1442,7 @@ def run_phased_optimization_skeleton(
         frozen_params=phase_b_frozen,
         phase_ranges=(phase_b_plan.shrunk_ranges if phase_b_plan is not None else None),
     )
+    _logger.debug("[PROF] PhasedOpt phase_b elapsed_s=%.4f", time.perf_counter() - t_phase_b)
     if phase_b_plan is not None:
         try:
             study_b.set_user_attr("phase_b_plan", phase_b_plan.importance_report)

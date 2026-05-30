@@ -124,15 +124,18 @@ def _ensure_universe_ledger_sync(run_config: FuturesRunConfig, window: Quarterly
             needs_sync = True
 
     if needs_sync:
-        run_historical_sync(
-            start_date=last_ledger_date,
-            end_date=window.end_date_value,
-            sync_mode=run_config.sync_mode,
-            symbols=None,
-            sync_1d=True,
-            sync_4h=True,
-            sync_1m=False,
-        )
+        if run_config.sync_mode == "skip":
+            _logger.info("🔄 SYNC: skip -> skip synchronization as requested")
+        else:
+            run_historical_sync(
+                start_date=last_ledger_date,
+                end_date=window.end_date_value,
+                sync_mode=run_config.sync_mode,
+                symbols=None,
+                sync_1d=True,
+                sync_4h=True,
+                sync_1m=False,
+            )
 
 
 def _resolve_data_collection_symbols(
@@ -168,6 +171,9 @@ def _ensure_cached_symbol_data_for_targets(
 ) -> None:
     """Ensure cached parquet data exists for the resolved data-load target symbols."""
     if not symbols:
+        return
+    if run_config.sync_mode == "skip":
+        _logger.info(".. CACHE: skip backfill as requested")
         return
     ledger_path = FUTURES_DATA_DIR / "universe_ledger.parquet"
     last_ledger_date = date(2023, 1, 1)
@@ -257,7 +263,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--sync-mode",
         type=str,
         default="full_history_master",
-        choices=["full_history_master", "elite_fast"],
+        choices=["full_history_master", "elite_fast", "skip"],
     )
     parser.add_argument("--force-universe-rebuild", action="store_true")
     return parser
@@ -487,7 +493,11 @@ def _run_strategy_stage(
 
     # alpha 모드에서는 gate 실패 시에도 평가 리포트를 출력하기 위해 예외를 캡처
     _alpha_gate_error: Exception | None = None
+    t_bridge_start = time.perf_counter()
     try:
+        _logger.debug(
+            "[latency] Starting run_active_strategy_output_bridge for alpha/strategy mode"
+        )
         ml_out = run_active_strategy_output_bridge(
             run_config=run_config,
             symbols=bridge_trading_symbols,
@@ -504,7 +514,16 @@ def _run_strategy_stage(
             live_inference_panel=effective_live,
             trading_symbols=trading_symbols or tuple(data_stage.valid_symbols),
         )
+        _logger.debug(
+            "[latency] Completed run_active_strategy_output_bridge: %.4fs",
+            time.perf_counter() - t_bridge_start,
+        )
     except RuntimeError as _e:
+        _logger.debug(
+            "[latency] Exception in active_strategy_output_bridge after %.4fs: %s",
+            time.perf_counter() - t_bridge_start,
+            str(_e),
+        )
         if run_config.mode == "alpha" and ("alpha gate" in str(_e) or "quality gate" in str(_e)):
             _alpha_gate_error = _e
             _logger.warning("⚠️ ALPHA: gate failed (evaluation continues) -> %s", _e)
@@ -529,7 +548,11 @@ def _run_strategy_stage(
                 alpha_gate_cost_wall_tolerance_bps=9999.0,
             )
             _s_cfg = _dc_replace(_s_cfg, ml=_updated_ml)
+            t_bypass_start = time.perf_counter()
             try:
+                _logger.debug(
+                    "[latency] Starting fallback run_ml_pipeline_for_universe (gate bypass)"
+                )
                 ml_out = run_ml_pipeline_for_universe(
                     symbols=_eff_syms,
                     tf=run_config.timeframe,
@@ -538,6 +561,10 @@ def _run_strategy_stage(
                     opt_config=OPT_FUTURES_CONFIG,
                     strategy_cfg=_s_cfg,
                     preloaded_data_maps=full_strategy_maps,
+                )
+                _logger.debug(
+                    "[latency] Completed fallback run_ml_pipeline_for_universe: %.4fs",
+                    time.perf_counter() - t_bypass_start,
                 )
             except RuntimeError as _e2:
                 # alpha 모드에서 gate-bypass 재실행도 quality gate 실패 시
@@ -549,6 +576,8 @@ def _run_strategy_stage(
                 ml_out = MLPipelineOutput()
         else:
             raise
+    
+    t_merge_start = time.perf_counter()
     merge_ml_output_into_is_and_oos(
         ml_out,
         data_stage.data_maps,
@@ -556,6 +585,11 @@ def _run_strategy_stage(
         data_stage.valid_symbols,
         run_config.timeframe,
     )
+    _logger.debug(
+        "[latency] merge_ml_output_into_is_and_oos: %.4fs",
+        time.perf_counter() - t_merge_start,
+    )
+
     if run_config.mode == "strategy":
         assert_strategy_alpha_ready(
             ml_out=ml_out,
@@ -564,9 +598,15 @@ def _run_strategy_stage(
             tf=run_config.timeframe,
         )
     elif run_config.mode == "alpha":
+        t_report_start = time.perf_counter()
+        _logger.debug("[latency] Starting _run_alpha_evaluation_report")
         _run_alpha_evaluation_report(
             ml_out, data_stage, run_config.timeframe,
             trading_symbols or tuple(data_stage.valid_symbols),
+        )
+        _logger.debug(
+            "[latency] Completed _run_alpha_evaluation_report: %.4fs",
+            time.perf_counter() - t_report_start,
         )
 
 
@@ -1248,7 +1288,9 @@ def run_from_cli(argv: list[str] | None = None) -> int:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
+    log_level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_str, logging.INFO)
+    logging.basicConfig(level=log_level, format="%(message)s", force=True)
     return run_from_cli()
 
 
