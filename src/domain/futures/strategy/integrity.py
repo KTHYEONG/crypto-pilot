@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -9,6 +10,14 @@ from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import FeatureIntegrityConfig
 from src.domain.futures.strategy.contracts import FeaturePanel
 from src.domain.futures.strategy.diagnostics import rolling_ic
+
+_logger = logging.getLogger(__name__)
+
+_STATIC_ALIAS_EXCLUSIONS: frozenset[str] = frozenset({
+    "carry_prior_6",
+    "xs_reversal_prior_6",
+    "cs_rank_dollar_volume",
+})
 
 
 @dataclass(slots=True, frozen=True)
@@ -177,6 +186,10 @@ def verify_feature_integrity(
     leakage_suspects: list[str] = []
     vals = np.asarray(features.values, dtype=np.float64)
     names = tuple(features.feature_names)
+
+    alias_found = [n for n in names if n in _STATIC_ALIAS_EXCLUSIONS]
+    if alias_found:
+        _logger.warning("🧬 [FEAT-INT] alias_detected=%s", alias_found)
 
     train_feat = vals[train_slice]
     train_target = np.asarray(target_2d[train_slice], dtype=np.float64)
