@@ -7,6 +7,7 @@ import pytest
 
 from src.application.futures.optimization.config import build_run_config_from_args
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.strategy.alpha_evaluation import AlphaEvaluationReport
 from src.execution import opt_main_futures
 
 
@@ -227,6 +228,100 @@ def test_requires_exec_1m_returns_false_for_alpha_mode() -> None:
         }
     )
     assert opt_main_futures._requires_exec_1m(run_config) is False
+
+
+def test_summarize_alpha_phase1_verdict_uses_report_passes_not_port_ic() -> None:
+    report = AlphaEvaluationReport(
+        net_ic=-0.0030,
+        net_icir=0.0,
+        ic_t_stat_nw=-0.95,
+        breakeven_ic=0.0386,
+        effective_breadth=1.74,
+        net_sharpe=float("nan"),
+        quantile_coverage=float("nan"),
+        q50_sign_hit=float("nan"),
+        per_regime_ic={"bull": 0.011, "bear": 0.024, "chop": -0.006},
+        per_regime_breakeven={"bull": 0.01, "bear": 0.01, "chop": 0.01},
+        deflated_sharpe=1.0,
+        cost_drag={},
+        passes=True,
+        fail_reasons=[],
+        resid_ic=0.0141,
+        resid_t_stat_nw=3.62,
+        n_eff=15.0,
+        breakeven_ic_eff=0.0131,
+    )
+
+    verdict = opt_main_futures._summarize_alpha_phase1_verdict(report)
+
+    assert verdict["alpha_pass"] is True
+    assert verdict["gap_eff"] == pytest.approx(0.0010, abs=1e-6)
+    assert verdict["port_ic"] == pytest.approx(-0.0030, abs=1e-6)
+    assert verdict["bear_pass"] is True
+
+
+def test_summarize_exec_diag_verdict_fails_on_negative_portfolio_edge() -> None:
+    report = AlphaEvaluationReport(
+        net_ic=-0.0030,
+        net_icir=0.0,
+        ic_t_stat_nw=-0.95,
+        breakeven_ic=0.0386,
+        effective_breadth=1.74,
+        net_sharpe=float("nan"),
+        quantile_coverage=float("nan"),
+        q50_sign_hit=float("nan"),
+        per_regime_ic={"bull": 0.011, "bear": 0.024, "chop": -0.006},
+        per_regime_breakeven={"bull": 0.01, "bear": 0.01, "chop": 0.01},
+        deflated_sharpe=1.0,
+        cost_drag={},
+        passes=True,
+        fail_reasons=[],
+        resid_ic=0.0141,
+        resid_t_stat_nw=3.62,
+        n_eff=15.0,
+        breakeven_ic_eff=0.0131,
+    )
+
+    verdict = opt_main_futures._summarize_exec_diag_verdict(
+        report=report,
+        basket_net_bps=-36.94,
+    )
+
+    assert verdict["status"] == "FAIL"
+    assert "port_ic_non_positive" in verdict["fail_reasons"]
+    assert "port_ic_below_raw_breakeven" in verdict["fail_reasons"]
+    assert "basket_net_bps_non_positive" in verdict["fail_reasons"]
+
+
+def test_summarize_exec_diag_verdict_passes_on_positive_execution_edge() -> None:
+    report = AlphaEvaluationReport(
+        net_ic=0.0100,
+        net_icir=0.0,
+        ic_t_stat_nw=2.5,
+        breakeven_ic=0.0060,
+        effective_breadth=2.0,
+        net_sharpe=float("nan"),
+        quantile_coverage=float("nan"),
+        q50_sign_hit=float("nan"),
+        per_regime_ic={"bull": 0.01, "bear": 0.01, "chop": 0.00},
+        per_regime_breakeven={"bull": 0.01, "bear": 0.01, "chop": 0.01},
+        deflated_sharpe=0.99,
+        cost_drag={},
+        passes=True,
+        fail_reasons=[],
+        resid_ic=0.02,
+        resid_t_stat_nw=2.6,
+        n_eff=10.0,
+        breakeven_ic_eff=0.01,
+    )
+
+    verdict = opt_main_futures._summarize_exec_diag_verdict(
+        report=report,
+        basket_net_bps=5.5,
+    )
+
+    assert verdict["status"] == "PASS"
+    assert verdict["fail_reasons"] == []
 
 
 def test_requires_exec_1m_respects_intrabar_config_for_quick_backtest(

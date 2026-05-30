@@ -17,6 +17,7 @@ from src.domain.futures.strategy.alpha_evaluation import (
     compute_q50_sign_hit,
     compute_quantile_coverage,
     diagnose_alpha_ic_decomposition,
+    effective_breadth_corr,
     evaluate_alpha,
     sweep_horizon_breakeven,
 )
@@ -96,6 +97,39 @@ def test_compute_effective_breadth_partial_active() -> None:
 
     # Assert
     assert result == pytest.approx(3.0, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# effective_breadth_corr
+# ---------------------------------------------------------------------------
+
+
+def test_effective_breadth_corr_independent_columns_returns_near_n() -> None:
+    """Uncorrelated assets (rho_bar≈0) → N_eff ≈ N (no diversification haircut)."""
+    # Arrange
+    rng = np.random.default_rng(42)
+    n_cols = 8
+    panel = rng.standard_normal((400, n_cols)).astype(np.float64)
+
+    # Act
+    result = effective_breadth_corr(panel)
+
+    # Assert: independent columns retain near-full breadth (tolerant to sampling noise)
+    assert result == pytest.approx(float(n_cols), rel=0.20)
+
+
+def test_effective_breadth_corr_perfectly_correlated_returns_one() -> None:
+    """Identical columns (rho_bar==1) → N_eff = N/(1+(N-1)) == 1.0."""
+    # Arrange
+    rng = np.random.default_rng(7)
+    base = rng.standard_normal((300, 1)).astype(np.float64)
+    panel = np.repeat(base, 6, axis=1)  # 6 perfectly correlated assets
+
+    # Act
+    result = effective_breadth_corr(panel)
+
+    # Assert
+    assert result == pytest.approx(1.0, abs=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +347,43 @@ def test_evaluate_alpha_passes_false_when_no_signal() -> None:
     # Assert
     assert report.passes is False
     assert len(report.fail_reasons) > 0
+
+
+def test_evaluate_alpha_regime_gate_uses_preclip_signal_when_provided() -> None:
+    """Bear gate must use pre-clip inference IC, not clipped trading alpha IC."""
+    rng = np.random.default_rng(seed=123)
+    T, N = 180, 8
+    # Ensure all regimes exist with a clear bear segment.
+    btc_close = np.concatenate([
+        np.linspace(10000.0, 20000.0, 60),
+        np.linspace(20000.0, 9000.0, 70),
+        np.linspace(9000.0, 14000.0, 50),
+    ]).astype(np.float64)
+    labels = _compute_regime_labels(btc_close, trend_window=30)
+
+    realized = rng.standard_normal((T, N)).astype(np.float64) * 0.02
+    inference = (
+        realized + rng.standard_normal((T, N)).astype(np.float64) * 0.001
+    ).astype(np.float64)
+
+    pred_clip = inference.copy()
+    bear_rows = np.array([i for i, lbl in enumerate(labels) if lbl == "bear"], dtype=np.intp)
+    if bear_rows.size > 0:
+        pred_clip[bear_rows] = -pred_clip[bear_rows]
+
+    alpha_long = np.maximum(pred_clip, 0.0)
+    alpha_short = np.maximum(-pred_clip, 0.0)
+
+    report = evaluate_alpha(
+        alpha_long_2d=alpha_long,
+        alpha_short_2d=alpha_short,
+        realized_fwd_ret_2d=realized,
+        inference_signed_2d=inference,
+        btc_close_1d=btc_close,
+        n_trials=1,
+    )
+
+    assert "bear_regime_ic_negative" not in report.fail_reasons
 
 
 # ---------------------------------------------------------------------------

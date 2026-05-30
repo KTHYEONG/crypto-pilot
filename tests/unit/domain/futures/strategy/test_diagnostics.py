@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.domain.futures.strategy.diagnostics import ic_summary, passes_ic_gate, rolling_ic
+from src.domain.futures.strategy.diagnostics import (
+    feature_cs_ic_audit,
+    ic_summary,
+    passes_ic_gate,
+    rolling_ic,
+)
 
 
 def test_rolling_ic_basic() -> None:
@@ -83,3 +88,27 @@ def test_passes_ic_gate_logic() -> None:
         passes_ic_gate(summary_fail_hit, min_mean_ic=0.02, min_t_stat=2.0, min_hit_ratio=0.5)
         is False
     )
+
+
+def test_feature_cs_ic_audit_detects_injected_signal() -> None:
+    rng = np.random.default_rng(7)
+    t_len, n_len, f_len = 40, 20, 3
+    target = rng.normal(0.0, 1.0, size=(t_len, n_len))
+    features = rng.normal(0.0, 1.0, size=(t_len, n_len, f_len))
+    features[:, :, 0] = target + rng.normal(0.0, 0.05, size=(t_len, n_len))
+    names = ("sig_feature", "noise_a", "noise_b")
+
+    rows = feature_cs_ic_audit(
+        features,
+        names,
+        target,
+        breakeven_ic=0.02,
+        horizon_bars=12,
+        top_k=3,
+    )
+
+    assert len(rows) == 3
+    assert rows[0]["name"] == "sig_feature"
+    assert float(rows[0]["mean_ic"]) > 0.8
+    assert "t_stat_nw" in rows[0]
+    assert "gap" in rows[0]
