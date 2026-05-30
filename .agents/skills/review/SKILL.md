@@ -12,7 +12,7 @@ Act as the final logical gatekeeper. Critically review code changes to ensure th
 1. **Logic Integrity:** Do the changes fulfill the "Why" and "How" of the Spec? Check for subtle logical drift or missing edge cases.
 2. **Spec Alignment:** Do interfaces, types, and logic match `docs/specs/*.md` 100%?
 3. **Surgical Precision:** No unnecessary file modifications or "just-in-case" logic outside `Target Files`?
-4. **Standards Compliance:** Adherence to project rules (e.g., Python 3.11+, Strict Typing, Logging, Docstrings)?
+4. **Standards Review:** Manual check for adherence to project rules (e.g., Python 3.11+, Strict Typing, Logging, Docstrings). Do NOT re-run automated tools unless manual verification is required for a specific edge case.
 5. **Final Acceptance:** Verify that the implementation achieves the measurable outcomes defined in the Spec's Acceptance Criteria.
 
 ## Verdicts
