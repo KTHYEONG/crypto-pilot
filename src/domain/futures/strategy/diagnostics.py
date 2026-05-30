@@ -1,11 +1,169 @@
 from __future__ import annotations
 
 import logging
+import math
 
+import numba
 import numpy as np
-import scipy.stats
 
 _logger = logging.getLogger(__name__)
+
+
+def _nw_t_stat(series: np.ndarray, *, horizon_bars: int) -> float:
+    """Compute Newey-West HAC t-stat for a 1D IC series."""
+    valid = series[np.isfinite(series)]
+    n_obs = int(valid.size)
+    if n_obs < 2:
+        return 0.0
+    mean_ic = float(np.mean(valid))
+    lag = min(max(int(horizon_bars), 1), n_obs // 4)
+    demeaned = valid - mean_ic
+    s0 = float(np.mean(demeaned**2))
+    for j in range(1, lag + 1):
+        cov_j = float(np.mean(demeaned[j:] * demeaned[:-j]))
+        s0 += 2.0 * (1.0 - j / (lag + 1)) * cov_j
+    se_nw = math.sqrt(max(s0, 1e-12) / n_obs)
+    return float(mean_ic / max(se_nw, 1e-12))
+
+
+@numba.njit(cache=True)  # type: ignore
+def _fast_rank1d(x: np.ndarray) -> np.ndarray:
+    """Numba-compatible 1D rank calculator (average rank handling for ties)."""
+    n = len(x)
+    temp = np.argsort(x)
+    ranks = np.empty(n, dtype=np.float64)
+    
+    i = 0
+    while i < n:
+        j = i
+        while j < n - 1 and x[temp[j]] == x[temp[j + 1]]:
+            j += 1
+        
+        rank_val = (i + j + 2.0) / 2.0
+        for k in range(i, j + 1):
+            ranks[temp[k]] = rank_val
+        i = j + 1
+    return ranks
+
+
+@numba.njit(cache=True)  # type: ignore
+def _fast_pearson_core(x: np.ndarray, y: np.ndarray) -> float:
+    """Numba-accelerated Pearson correlation coefficient."""
+    n = len(x)
+    if n < 2:
+        return 0.0
+    x_mean = np.mean(x)
+    y_mean = np.mean(y)
+    
+    num = 0.0
+    den_x = 0.0
+    den_y = 0.0
+    for i in range(n):
+        dx = x[i] - x_mean
+        dy = y[i] - y_mean
+        num += dx * dy
+        den_x += dx * dx
+        den_y += dy * dy
+        
+    den = np.sqrt(den_x * den_y)
+    if den > 1e-12:
+        return float(num / den)
+    return 0.0
+
+
+@numba.njit(cache=True)  # type: ignore
+def _numba_rolling_ic_spearman(sig_2d: np.ndarray, fwd_ret_2d: np.ndarray) -> np.ndarray:
+    """JIT compiled core Spearman rolling IC loop."""
+    t_len, n_syms = sig_2d.shape
+    ic_values = np.empty(t_len, dtype=np.float64)
+    
+    for t in range(t_len):
+        row_sig = sig_2d[t]
+        row_ret = fwd_ret_2d[t]
+        
+        # Collect non-NaN indices
+        valid_count = 0
+        for i in range(n_syms):
+            if np.isfinite(row_sig[i]) and np.isfinite(row_ret[i]):
+                valid_count += 1
+                
+        if valid_count < 5:
+            ic_values[t] = np.nan
+            continue
+            
+        s_vals = np.empty(valid_count, dtype=np.float64)
+        r_vals = np.empty(valid_count, dtype=np.float64)
+        curr = 0
+        for i in range(n_syms):
+            if np.isfinite(row_sig[i]) and np.isfinite(row_ret[i]):
+                s_vals[curr] = row_sig[i]
+                r_vals[curr] = row_ret[i]
+                curr += 1
+                
+        is_const_s = True
+        is_const_r = True
+        s0 = s_vals[0]
+        r0 = r_vals[0]
+        for i in range(1, valid_count):
+            if s_vals[i] != s0:
+                is_const_s = False
+            if r_vals[i] != r0:
+                is_const_r = False
+                
+        if is_const_s or is_const_r:
+            ic_values[t] = 0.0
+            continue
+            
+        rx = _fast_rank1d(s_vals)
+        ry = _fast_rank1d(r_vals)
+        ic_values[t] = _fast_pearson_core(rx, ry)
+    return ic_values
+
+
+@numba.njit(cache=True)  # type: ignore
+def _numba_rolling_ic_pearson(sig_2d: np.ndarray, fwd_ret_2d: np.ndarray) -> np.ndarray:
+    """JIT compiled core Pearson rolling IC loop."""
+    t_len, n_syms = sig_2d.shape
+    ic_values = np.empty(t_len, dtype=np.float64)
+    
+    for t in range(t_len):
+        row_sig = sig_2d[t]
+        row_ret = fwd_ret_2d[t]
+        
+        valid_count = 0
+        for i in range(n_syms):
+            if np.isfinite(row_sig[i]) and np.isfinite(row_ret[i]):
+                valid_count += 1
+                
+        if valid_count < 5:
+            ic_values[t] = np.nan
+            continue
+            
+        s_vals = np.empty(valid_count, dtype=np.float64)
+        r_vals = np.empty(valid_count, dtype=np.float64)
+        curr = 0
+        for i in range(n_syms):
+            if np.isfinite(row_sig[i]) and np.isfinite(row_ret[i]):
+                s_vals[curr] = row_sig[i]
+                r_vals[curr] = row_ret[i]
+                curr += 1
+                
+        is_const_s = True
+        is_const_r = True
+        s0 = s_vals[0]
+        r0 = r_vals[0]
+        for i in range(1, valid_count):
+            if s_vals[i] != s0:
+                is_const_s = False
+            if r_vals[i] != r0:
+                is_const_r = False
+                
+        if is_const_s or is_const_r:
+            ic_values[t] = 0.0
+            continue
+            
+        ic_values[t] = _fast_pearson_core(s_vals, r_vals)
+    return ic_values
 
 
 def rolling_ic(
@@ -14,30 +172,61 @@ def rolling_ic(
     *,
     method: str = "spearman",
 ) -> np.ndarray:
-    """Compute cross-sectional IC over time."""
+    """Compute cross-sectional IC over time utilizing Numba JIT acceleration."""
     if sig_2d.shape != fwd_ret_2d.shape:
         raise ValueError("sig_2d and fwd_ret_2d must have the same shape")
-    t_len, _n_syms = sig_2d.shape
-    ic_values: list[float] = [float("nan")] * t_len
-    for t in range(t_len):
-        row_sig = sig_2d[t]
-        row_ret = fwd_ret_2d[t]
-        m = np.isfinite(row_sig) & np.isfinite(row_ret)
-        if int(m.sum()) < 5:
-            continue
-        s_vals = row_sig[m]
-        r_vals = row_ret[m]
-        if np.all(s_vals == s_vals[0]) or np.all(r_vals == r_vals[0]):
-            ic_values[t] = 0.0
-            continue
-        if method == "spearman":
-            stat = float(scipy.stats.spearmanr(s_vals, r_vals).statistic)
-        elif method == "pearson":
-            stat = float(scipy.stats.pearsonr(s_vals, r_vals).statistic)
-        else:
-            raise ValueError(f"Unknown method: {method}")
-        ic_values[t] = stat if np.isfinite(stat) else 0.0
-    return np.array(ic_values, dtype=np.float64)
+    
+    s_2d = sig_2d.astype(np.float64)
+    r_2d = fwd_ret_2d.astype(np.float64)
+    
+    if method == "spearman":
+        return _numba_rolling_ic_spearman(s_2d, r_2d)  # type: ignore[no-any-return]
+    elif method == "pearson":
+        return _numba_rolling_ic_pearson(s_2d, r_2d)  # type: ignore[no-any-return]
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+
+def feature_cs_ic_audit(
+    feature_values_3d: np.ndarray,
+    feature_names: tuple[str, ...],
+    target_2d: np.ndarray,
+    *,
+    breakeven_ic: float,
+    horizon_bars: int = 12,
+    top_k: int = 15,
+) -> list[dict[str, float | str]]:
+    """Per-feature cross-sectional IC audit on OOS panel.
+
+    Returns top-k rows sorted by |mean_ic| desc.
+    """
+    if feature_values_3d.ndim != 3:
+        raise ValueError("feature_values_3d must be 3D [T, N, F]")
+    t_len, n_len, f_len = feature_values_3d.shape
+    if target_2d.shape != (t_len, n_len):
+        raise ValueError("target_2d must have shape [T, N] matching feature_values_3d")
+    if f_len != len(feature_names):
+        raise ValueError("feature_names length must match feature dimension")
+    if top_k <= 0:
+        return []
+
+    rows: list[dict[str, float | str]] = []
+    for f_idx, name in enumerate(feature_names):
+        ic_series = rolling_ic(feature_values_3d[:, :, f_idx], target_2d, method="spearman")
+        stats = ic_summary(ic_series)
+        mean_ic = float(stats["mean_ic"])
+        gap = float(mean_ic - breakeven_ic)
+        rows.append(
+            {
+                "name": name,
+                "mean_ic": mean_ic,
+                "t_stat_nw": _nw_t_stat(ic_series, horizon_bars=horizon_bars),
+                "gap": gap,
+                "hit": float(stats["hit_ratio"]),
+            }
+        )
+    rows.sort(key=lambda item: abs(float(item["mean_ic"])), reverse=True)
+    return rows[: min(top_k, len(rows))]
 
 
 def ic_summary(ic_series: np.ndarray) -> dict[str, float]:

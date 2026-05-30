@@ -17,7 +17,7 @@ import warnings
 from dataclasses import dataclass
 from dataclasses import replace as _dc_replace
 from datetime import date, datetime
-from typing import Any
+from typing import Any, TypedDict
 
 import numpy as np
 import optuna
@@ -81,6 +81,85 @@ from src.domain.futures.universe.membership import inject_membership_masks_into_
 from src.domain.futures.universe.storage import run_historical_sync
 
 _logger = logging.getLogger("opt_main_futures")
+
+
+class AlphaPhase1Verdict(TypedDict):
+    alpha_pass: bool
+    fail_reasons: list[str]
+    resid_ic: float
+    resid_t_stat_nw: float
+    be_eff: float
+    gap_eff: float
+    bear_ic: float
+    bear_pass: bool
+    dsr: float
+    port_ic: float
+    be_raw: float
+    gap_raw: float
+
+
+class ExecDiagVerdict(TypedDict):
+    status: str
+    fail_reasons: list[str]
+    port_ic: float
+    be_raw: float
+    gap_raw: float
+    basket_net_bps: float
+
+
+def _summarize_alpha_phase1_verdict(report: Any) -> AlphaPhase1Verdict:
+    """Summarize robust alpha extraction verdict separately from execution diagnostics."""
+    bear_ic = float(report.per_regime_ic.get("bear", float("nan")))
+    be_eff = float(report.breakeven_ic_eff)
+    resid_ic = float(report.resid_ic)
+    resid_t = float(getattr(report, "resid_t_stat_nw", float("nan")))
+    gap_eff = resid_ic - be_eff if np.isfinite(resid_ic) and np.isfinite(be_eff) else float("nan")
+    return {
+        "alpha_pass": bool(report.passes),
+        "fail_reasons": list(report.fail_reasons),
+        "resid_ic": resid_ic,
+        "resid_t_stat_nw": resid_t,
+        "be_eff": be_eff,
+        "gap_eff": gap_eff,
+        "bear_ic": bear_ic,
+        "bear_pass": not (np.isfinite(bear_ic) and bear_ic < 0.0),
+        "dsr": float(report.deflated_sharpe),
+        # Execution-path metrics stay diagnostic only; do not override robust alpha verdict.
+        "port_ic": float(report.net_ic),
+        "be_raw": float(report.breakeven_ic),
+        "gap_raw": float(report.net_ic - report.breakeven_ic),
+    }
+
+
+def _summarize_exec_diag_verdict(
+    *,
+    report: Any,
+    basket_net_bps: float,
+) -> ExecDiagVerdict:
+    """Execution realism diagnostic separated from robust alpha extraction verdict."""
+    port_ic = float(report.net_ic)
+    be_raw = float(report.breakeven_ic)
+    gap_raw = port_ic - be_raw if np.isfinite(port_ic) and np.isfinite(be_raw) else float("nan")
+    fail_reasons: list[str] = []
+    if not np.isfinite(port_ic):
+        fail_reasons.append("port_ic_nan")
+    elif port_ic <= 0.0:
+        fail_reasons.append("port_ic_non_positive")
+    if np.isfinite(gap_raw) and gap_raw <= 0.0:
+        fail_reasons.append("port_ic_below_raw_breakeven")
+    if np.isfinite(basket_net_bps) and basket_net_bps <= 0.0:
+        fail_reasons.append("basket_net_bps_non_positive")
+    status = "PASS" if not fail_reasons else "FAIL"
+    if not np.isfinite(port_ic) and not np.isfinite(basket_net_bps):
+        status = "UNKNOWN"
+    return {
+        "status": status,
+        "fail_reasons": fail_reasons,
+        "port_ic": port_ic,
+        "be_raw": be_raw,
+        "gap_raw": gap_raw,
+        "basket_net_bps": basket_net_bps,
+    }
 
 
 def _requires_exec_1m(run_config: FuturesRunConfig) -> bool:
@@ -194,6 +273,7 @@ def _ensure_cached_symbol_data_for_targets(
         len(symbols),
         last_ledger_date,
     )
+    t_sync_main = time.perf_counter()
     run_historical_sync(
         start_date=sync_start_date,
         end_date=window.end_date_value,
@@ -203,7 +283,9 @@ def _ensure_cached_symbol_data_for_targets(
         sync_4h=True,
         sync_1m=False,
     )
+    _logger.debug("[perf-data] backfill base data took %.4fs", time.perf_counter() - t_sync_main)
     if require_exec_1m:
+        t_sync_1m = time.perf_counter()
         run_historical_sync(
             start_date=sync_start_date,
             end_date=window.end_date_value,
@@ -213,6 +295,7 @@ def _ensure_cached_symbol_data_for_targets(
             sync_4h=False,
             sync_1m=True,
         )
+        _logger.debug("[perf-data] backfill 1m data took %.4fs", time.perf_counter() - t_sync_1m)
 
 
 @dataclass(slots=True, frozen=True)
@@ -306,6 +389,7 @@ def _run_universe_stage(
     live_inference_panel: tuple[str, ...] = ()
     selected_symbols: tuple[str, ...] = ()
 
+    t_discover = time.perf_counter()
     universe_result = discover_universe_timeline(
         tf=run_config.timeframe,
         is_start=window.is_start_date,
@@ -313,6 +397,12 @@ def _run_universe_stage(
         end_date=window.end_date_value,
         force_rebuild=run_config.force_universe_rebuild,
     )
+    _logger.debug(
+        "[perf-universe] discover_universe_timeline took %.4fs",
+        time.perf_counter() - t_discover,
+    )
+
+    t_quality = time.perf_counter()
     if not validate_universe_quality(
         snapshot=universe_result.snapshot,
         report=universe_result.report,
@@ -320,6 +410,10 @@ def _run_universe_stage(
         tf=run_config.timeframe,
     ):
         raise RuntimeError("universe_quality_rejected")
+    _logger.debug(
+        "[perf-universe] validate_universe_quality took %.4fs",
+        time.perf_counter() - t_quality,
+    )
     discovered_symbols = list(universe_result.symbols)
     timeline_obj: UniverseMembershipTimeline = universe_result.timeline
     timeline = {
@@ -380,6 +474,7 @@ def _run_data_stage(
     else:
         scope_name = "stage6_selected"
 
+    t_load = time.perf_counter()
     data_maps, oos_data_maps, valid_symbols = load_futures_data_maps_for_symbols(
         list(load_symbols),
         run_config.timeframe,
@@ -391,6 +486,10 @@ def _run_data_stage(
         requested_symbols_count=len(load_symbols),
         scope_name=scope_name,
     )
+    _logger.debug(
+        "[perf-data] load_futures_data_maps_for_symbols took %.4fs",
+        time.perf_counter() - t_load,
+    )
     if require_exec_1m:
         missing_1m = [s for s in valid_symbols if "exec_1m" not in (data_maps.get(s) or {})]
         if missing_1m:
@@ -399,6 +498,7 @@ def _run_data_stage(
                 f"{missing_1m[:5]}{'...' if len(missing_1m) > 5 else ''}"
             )
     if timeline and valid_symbols:
+        t_inject = time.perf_counter()
         warmup_bars_required = int(OPT_FUTURES_CONFIG.get("FUTURES_UNIVERSE_WARMUP_BARS", 60))
         inject_membership_masks_into_maps(
             data_maps=data_maps,
@@ -409,7 +509,12 @@ def _run_data_stage(
             warmup_bars_required=warmup_bars_required,
             inference_timeline=inference_timeline or None,
         )
+        _logger.debug(
+            "[perf-data] inject_membership_masks_into_maps took %.4fs",
+            time.perf_counter() - t_inject,
+        )
 
+    t_ready = time.perf_counter()
     readiness: DataReadinessResult = evaluate_data_readiness(
         tf=run_config.timeframe,
         data_maps=data_maps,
@@ -422,6 +527,7 @@ def _run_data_stage(
         require_exec_1m=require_exec_1m,
         scope_name=scope_name,
     )
+    _logger.debug("[perf-data] evaluate_data_readiness took %.4fs", time.perf_counter() - t_ready)
     report_df = readiness.report
     fail_reasons: dict[str, int] = {}
     if isinstance(report_df, pd.DataFrame) and not report_df.empty and "pass" in report_df.columns:
@@ -638,6 +744,37 @@ def _run_alpha_evaluation_report(
     pivot_long = pivot_long[common_syms].fillna(0.0)
     pivot_short = pivot_short[common_syms].fillna(0.0)
 
+    # L1: C1 전체 심볼 dense rank score (unclipped, raw — 랭커 순수 예측력 측정)
+    _pivot_rank_l_c1: pd.DataFrame | None = None
+    _pivot_rank_s_c1: pd.DataFrame | None = None
+    _all_syms_with_data = [s for s in panel_reset["symbol"].unique() if s in data_stage.data_maps]
+    if "rank_score_long" in panel_reset.columns and "rank_score_short" in panel_reset.columns:
+        _pivot_rank_l_c1 = (
+            panel_reset.pivot(index="datetime", columns="symbol", values="rank_score_long")
+            .reindex(columns=_all_syms_with_data)
+            .fillna(0.0)
+        )
+        _pivot_rank_s_c1 = (
+            panel_reset.pivot(index="datetime", columns="symbol", values="rank_score_short")
+            .reindex(columns=_all_syms_with_data)
+            .fillna(0.0)
+        )
+
+    # L2: C3 필터링된 rank score (cost-adjusted evaluation용)
+    _pivot_rank_l_c3: pd.DataFrame | None = None
+    _pivot_rank_s_c3: pd.DataFrame | None = None
+    if "rank_score_long" in panel_reset.columns and "rank_score_short" in panel_reset.columns:
+        _pivot_rank_l_c3 = (
+            panel_reset.pivot(index="datetime", columns="symbol", values="rank_score_long")
+            .reindex(columns=common_syms)
+            .fillna(0.0)
+        )
+        _pivot_rank_s_c3 = (
+            panel_reset.pivot(index="datetime", columns="symbol", values="rank_score_short")
+            .reindex(columns=common_syms)
+            .fillna(0.0)
+        )
+
     # rank_cs_neutral: apply rank-based selection to SCOREBOARD evaluation
     # if rank_score columns are present in panel, apply quantile selection
     if "rank_score_long" in panel_reset.columns and "rank_score_short" in panel_reset.columns:
@@ -709,6 +846,29 @@ def _run_alpha_evaluation_report(
     as_ = as_[:-horizon]
     real = real[:-horizon]
 
+    # L2 C3 rank signal [T-h, N_c3] — dense, unclipped
+    _rank_pred_c3: np.ndarray | None = None
+    if _pivot_rank_l_c3 is not None and _pivot_rank_s_c3 is not None:
+        _rl_c3 = _pivot_rank_l_c3.reindex(common_idx).iloc[:-horizon].to_numpy(dtype=np.float64)
+        _rs_c3 = _pivot_rank_s_c3.reindex(common_idx).iloc[:-horizon].to_numpy(dtype=np.float64)
+        _rank_pred_c3 = _rl_c3 - _rs_c3  # signed: long - short rank score differential
+
+    # L1 C1 rank signal [T-h, N_c1] — for separate RANK-QUALITY log
+    _rank_pred_c1: np.ndarray | None = None
+    _real_c1: np.ndarray | None = None
+    if _pivot_rank_l_c1 is not None and _pivot_rank_s_c1 is not None:
+        _c1_real_rows_rs: dict[str, pd.Series] = {}
+        for _sym_c1 in _all_syms_with_data:
+            _df_c1 = data_stage.data_maps[_sym_c1][tf].set_index("datetime")
+            _c1_close = _df_c1["close"].reindex(common_idx)
+            _c1_real_rows_rs[_sym_c1] = np.log(_c1_close.shift(-horizon) / _c1_close)
+        _c1_real_df = pd.DataFrame(_c1_real_rows_rs, index=common_idx)
+        _rank_pred_c1 = (
+            _pivot_rank_l_c1.reindex(common_idx).iloc[:-horizon].to_numpy(dtype=np.float64)
+            - _pivot_rank_s_c1.reindex(common_idx).iloc[:-horizon].to_numpy(dtype=np.float64)
+        )
+        _real_c1 = _c1_real_df.iloc[:-horizon].to_numpy(dtype=np.float64)
+
     eth_close = data_stage.data_maps.get("ETHUSDT", {}).get(tf, pd.DataFrame())
     if eth_close is not None and not eth_close.empty:
         eth_close_ser = eth_close.set_index("datetime")["close"].reindex(common_idx).ffill()
@@ -718,6 +878,7 @@ def _run_alpha_evaluation_report(
 
     # Phase 0: IC Decomposition Diagnostic (dense C1 전체 심볼, C3 마스크 포함)
     from src.domain.futures.strategy.alpha_evaluation import diagnose_alpha_ic_decomposition
+    from src.domain.futures.strategy.labels import _compute_trailing_beta
 
     # C1 전체 심볼 dense alpha — C3 필터·regime gate 미적용
     all_syms = [s for s in panel_reset["symbol"].unique() if s in data_stage.data_maps]
@@ -744,14 +905,27 @@ def _run_alpha_evaluation_report(
     dense_pred = dense_long_arr - dense_short_arr
     c1_real_arr = c1_real_df.loc[diag_common_idx].iloc[:-horizon].to_numpy(dtype=np.float64)
 
+    # C1 전체 심볼 beta + market_fwd 계산 (resid IC 분해용)
+    # C3(common_syms) beta와 별도로 계산해야 shape가 [T_diag, N_c1] 정합
+    _c1_close_rows: dict[str, pd.Series] = {}
+    for _sym in all_syms:
+        _df_c1 = data_stage.data_maps[_sym][tf].set_index("datetime")
+        _c1_close_rows[_sym] = _df_c1["close"].reindex(diag_common_idx)
+    _c1_close_2d = pd.DataFrame(_c1_close_rows, index=diag_common_idx).to_numpy(dtype=np.float64)
+    _c1_beta_full = _compute_trailing_beta(_c1_close_2d)           # [T_diag, N_c1]
+    _c1_beta_2d = _c1_beta_full[:-horizon]                         # [T_diag-h, N_c1]
+    with np.errstate(all="ignore"):
+        _c1_mkt_fwd_raw = np.nanmean(c1_real_arr, axis=1)          # [T_diag-h]
+    _c1_market_fwd = np.where(np.isfinite(_c1_mkt_fwd_raw), _c1_mkt_fwd_raw, 0.0)
+
     # C3 mask: trading_set 기반
     c3_mask = np.array([s in trading_set for s in all_syms], dtype=np.bool_)
 
     _ic_decomp = diagnose_alpha_ic_decomposition(
         pred_dense_2d=dense_pred,
         realized_raw_2d=c1_real_arr,
-        beta_2d=None,
-        market_fwd_1d=None,
+        beta_2d=_c1_beta_2d,
+        market_fwd_1d=_c1_market_fwd,
         trading_mask_1d=c3_mask if np.any(c3_mask) else None,
         horizon_bars=horizon,
     )
@@ -768,7 +942,6 @@ def _run_alpha_evaluation_report(
 
     # Phase 1B: SCOREBOARD realized return beta-residualize (타깃 정합)
     # 모델 학습 타깃(beta-residualized)과 측정 타깃 정합 → raw return의 시장 성분 제거
-    from src.domain.futures.strategy.labels import _compute_trailing_beta
     _close_rows: dict[str, pd.Series] = {}
     for sym in common_syms:
         _df_sym = data_stage.data_maps[sym][tf].set_index("datetime")
@@ -788,10 +961,37 @@ def _run_alpha_evaluation_report(
         float(np.nanstd(real_resid)),
     )
 
-    # Pass dense pre-clip signed signal (C1) when shapes align with C3 panel
-    _dense_pred_for_eval: np.ndarray | None = (
-        dense_pred if dense_pred.shape == al.shape else None
-    )
+    # L1: Dense rank IC (C1 전체, unclipped raw rank score)
+    if _rank_pred_c1 is not None and _real_c1 is not None:
+        from src.domain.futures.strategy.alpha_evaluation import (
+            compute_effective_breadth,
+            compute_net_ic,
+        )
+        _r_c1_ic = compute_net_ic(_rank_pred_c1, _real_c1, horizon_bars=horizon)
+        _r_c1_br = compute_effective_breadth(_rank_pred_c1, np.zeros_like(_rank_pred_c1))
+        _logger.info(
+            "🏅 [RANK-QUALITY L1] ic=%.4f t=%.2f hit=%.3f breadth=%.1f"
+            " | rank_score_long-short vs forward_gross_ret (C1 dense, unclipped)",
+            _r_c1_ic["mean_ic"],
+            _r_c1_ic["t_stat_nw"],
+            _r_c1_ic["hit_ratio"],
+            _r_c1_br,
+        )
+        _gen_report = getattr(ml_out, "alpha_panel", pd.DataFrame()).attrs.get(
+            "generalization_report", {}
+        )
+        if _gen_report:
+            _logger.info(
+                "🏅 [RANK-GENERALIZE] oos_rank_ic=%.4f is_rank_ic=%.4f retention=%.2f decision=%s",
+                float(_gen_report.get("oos_rank_ic", float("nan"))),
+                float(_gen_report.get("is_rank_ic", float("nan"))),
+                float(_gen_report.get("retention_ratio", float("nan"))),
+                str(_gen_report.get("decision", "unknown")),
+            )
+
+    # L2 C3 rank score IC — evaluate_alpha inference_signed_2d로 전달
+    # rank_pred_c3는 C3 기준 dense signal이므로 al과 shape 일치
+    _dense_pred_for_eval: np.ndarray | None = _rank_pred_c3
     report = evaluate_alpha(
         alpha_long_2d=al,
         alpha_short_2d=as_,
@@ -802,40 +1002,129 @@ def _run_alpha_evaluation_report(
         horizon_bars=horizon,
     )
 
-    # Compact Alpha Scoreboard
+    # Compact Alpha Scoreboard (Phase 1: resid_ic / N_eff-based breakeven)
     def pass_emoji(condition: bool) -> str:
         return "✅" if condition else "❌"
 
     _logger.info("\n📊 [ALPHA SCOREBOARD]")
     _logger.info(
-        "Metric |  NET_IC  |  T-STAT  |  BRDTH   |   DSR    |  BE_IC(%dh)",
+        "Metric | RESID_IC |  T-STAT  |  N_EFF   |   DSR    | BE_EFF(%dh) | BEAR_IC",
         horizon
     )
     _logger.info(
-        "Value  | %7.4f  | %7.2f  | %7.2f  | %7.4f  |  %7.4f",
-        report.net_ic,
-        report.ic_t_stat_nw,
-        report.effective_breadth,
+        "Value  | %7.4f  | %7.2f  | %7.1f  | %7.4f  |  %7.4f  | %7.4f",
+        report.resid_ic,
+        report.resid_t_stat_nw,
+        report.n_eff,
         report.deflated_sharpe,
-        report.breakeven_ic
+        report.breakeven_ic_eff,
+        report.per_regime_ic.get("bear", float("nan")),
     )
     _logger.info(
-        "Result |    %s    |    %s    |    %s    |    %s    |  (gap=%+5.1f)",
-        pass_emoji(report.net_ic >= 0.03),
-        pass_emoji(report.ic_t_stat_nw >= 2.0),
-        pass_emoji(report.effective_breadth >= 3.0),
+        "Result |    %s    |    %s    |  N_eff   |    %s    |  (gap=%+5.1fbps)  |    %s",
+        pass_emoji(report.resid_ic >= report.breakeven_ic_eff),
+        pass_emoji(report.resid_t_stat_nw >= 2.0),
         pass_emoji(report.deflated_sharpe >= 0.95),
-        (report.net_ic - report.breakeven_ic) * 10000.0
+        (report.resid_ic - report.breakeven_ic_eff) * 10000.0,
+        pass_emoji(
+            not (
+                bool(np.isfinite(report.per_regime_ic.get("bear", float("nan"))))
+                and report.per_regime_ic.get("bear", 0.0) < 0.0
+            )
+        ),
+    )
+    _logger.info(
+        "📊 [PASS=%s] fail=%s | net_ic=%.4f be_raw=%.4f gap_raw=%+.1fbps",
+        "✅" if report.passes else "❌",
+        report.fail_reasons,
+        report.net_ic,
+        report.breakeven_ic,
+        (report.net_ic - report.breakeven_ic) * 10000.0,
     )
     _infer_stat = report.metrics_by_panel.get("inference_stat", {})
+    _rank_ic_c3 = float(_infer_stat.get("net_ic", float("nan")))
+    _rank_t_c3 = float(_infer_stat.get("ic_t_stat_nw", float("nan")))
+    _rank_br_c3 = float(_infer_stat.get("effective_breadth", float("nan")))
     if _infer_stat:
         _logger.info(
-            "📊 [C1-STAT]  NET_IC=%7.4f  T-STAT=%7.2f  BRDTH=%7.2f  DSR=%7.4f",
-            _infer_stat.get("net_ic", float("nan")),
-            _infer_stat.get("ic_t_stat_nw", float("nan")),
-            _infer_stat.get("effective_breadth", float("nan")),
-            report.deflated_sharpe,
+            "📊 [RANK-IC C3] ic=%7.4f  t=%7.2f  breadth=%7.2f"
+            " | rank_score_long-short vs beta-resid (dense, unclipped, C3)",
+            _rank_ic_c3, _rank_t_c3, _rank_br_c3,
         )
+
+    def _basket_spread_diag(
+        sig_long_2d: np.ndarray,
+        sig_short_2d: np.ndarray,
+        realized_2d: np.ndarray,
+        *,
+        cost_per_bar_bps: float = 24.0,
+    ) -> dict[str, float]:
+        t_n = sig_long_2d.shape[0]
+        spreads_ew = np.full(t_n, np.nan, dtype=np.float64)
+        spreads_zw = np.full(t_n, np.nan, dtype=np.float64)
+        for _t in range(t_n):
+            sl = sig_long_2d[_t]
+            ss = sig_short_2d[_t]
+            rl = realized_2d[_t]
+            fin = np.isfinite(rl)
+            # equal-weighted (primary — no confound from z-score magnitude)
+            lmask = (sl > 0.0) & fin
+            smask = (ss > 0.0) & fin
+            if lmask.sum() > 0 and smask.sum() > 0:
+                spreads_ew[_t] = float(np.mean(rl[lmask])) - float(np.mean(rl[smask]))
+            # z-weighted (secondary — confound diagnostic only)
+            wl = np.where(sl > 0.0, sl, 0.0)
+            ws = np.where(ss > 0.0, ss, 0.0)
+            wl_sum = float(wl[fin].sum())
+            ws_sum = float(ws[fin].sum())
+            if wl_sum > 0.0 and ws_sum > 0.0:
+                spreads_zw[_t] = (
+                    float(np.dot(wl[fin], rl[fin]) / wl_sum)
+                    - float(np.dot(ws[fin], rl[fin]) / ws_sum)
+                )
+        valid_ew = spreads_ew[np.isfinite(spreads_ew)]
+        valid_zw = spreads_zw[np.isfinite(spreads_zw)]
+        if valid_ew.size < 2:
+            return {
+                "mean_bps": float("nan"), "net_bps": float("nan"),
+                "ir_t": float("nan"), "hit": float("nan"), "n": 0.0,
+                "mean_bps_zw": float("nan"), "ir_t_zw": float("nan"),
+            }
+        mean_ew = float(np.mean(valid_ew))
+        std_ew = float(np.std(valid_ew, ddof=1))
+        n_ew = float(valid_ew.size)
+        ir_t_ew = mean_ew / max(std_ew, 1e-12) * (n_ew ** 0.5)
+        mean_bps_ew = mean_ew * 1e4
+        mean_bps_zw: float = float("nan")
+        ir_t_zw: float = float("nan")
+        if valid_zw.size >= 2:
+            mean_zw = float(np.mean(valid_zw))
+            std_zw = float(np.std(valid_zw, ddof=1))
+            mean_bps_zw = mean_zw * 1e4
+            ir_t_zw = mean_zw / max(std_zw, 1e-12) * (valid_zw.size ** 0.5)
+        return {
+            "mean_bps": mean_bps_ew,
+            "net_bps": mean_bps_ew - cost_per_bar_bps,
+            "ir_t": ir_t_ew,
+            "hit": float(np.mean(valid_ew > 0.0)),
+            "n": n_ew,
+            "mean_bps_zw": mean_bps_zw,
+            "ir_t_zw": ir_t_zw,
+        }
+
+    _basket = _basket_spread_diag(al, as_, real_resid)
+    _logger.info(
+        "🧺 [L3-BASKET] ew_bps=%.2f net_bps=%.2f ir_t=%.2f hit=%.3f n=%d"
+        " | zw_bps=%.2f(confound) | RANK-IC C3=%.4f",
+        _basket.get("mean_bps", float("nan")),
+        _basket.get("net_bps", float("nan")),
+        _basket.get("ir_t", float("nan")),
+        _basket.get("hit", float("nan")),
+        int(_basket.get("n", 0.0)),
+        _basket.get("mean_bps_zw", float("nan")),
+        _rank_ic_c3,
+    )
+
     _logger.info(
         "📊 [C3-EXEC]  NET_IC=%7.4f  T-STAT=%7.2f  BRDTH=%7.2f  BE_IC(%dh)=%7.4f  gap=%+5.1fbps",
         report.net_ic,
@@ -875,7 +1164,37 @@ def _run_alpha_evaluation_report(
         h_sweep_strs.append(f"[{h}h: ic={h_res['net_ic']:5.3f} {pass_s}]")
     
     _logger.info(f"📈 SWEEP: {' '.join(h_sweep_strs)}")
-    _logger.info(f">> ALPHA_PASS: {str(report.passes).upper()}\n")
+    _alpha_verdict = _summarize_alpha_phase1_verdict(report)
+    _exec_verdict = _summarize_exec_diag_verdict(
+        report=report,
+        basket_net_bps=float(_basket.get("net_bps", float("nan"))),
+    )
+    _logger.info(
+        ">> ALPHA_PASS: %s"
+        " [phase1 resid_ic=%.4f be_eff=%.4f gap=%+.4f(%s) t=%.2f(>=2.0:%s)"
+        " bear_ic=%.4f(>=0:%s) dsr=%.3f(>=0.95:%s) fail=%s]",
+        str(bool(_alpha_verdict["alpha_pass"])).upper(),
+        float(_alpha_verdict["resid_ic"]),
+        float(_alpha_verdict["be_eff"]),
+        float(_alpha_verdict["gap_eff"]),
+        "OK" if float(_alpha_verdict["gap_eff"]) > 0.0 else "FAIL",
+        float(_alpha_verdict["resid_t_stat_nw"]),
+        "OK" if float(_alpha_verdict["resid_t_stat_nw"]) >= 2.0 else "FAIL",
+        float(_alpha_verdict["bear_ic"]),
+        "OK" if bool(_alpha_verdict["bear_pass"]) else "FAIL",
+        float(_alpha_verdict["dsr"]),
+        "OK" if float(_alpha_verdict["dsr"]) >= 0.95 else "FAIL",
+        _alpha_verdict["fail_reasons"],
+    )
+    _logger.info(
+        ">> EXEC_DIAG: %s [port_ic=%.4f be_raw=%.4f gap_raw=%+.4f basket_net_bps=%.2f fail=%s]",
+        _exec_verdict["status"],
+        _exec_verdict["port_ic"],
+        _exec_verdict["be_raw"],
+        _exec_verdict["gap_raw"],
+        _exec_verdict["basket_net_bps"],
+        _exec_verdict["fail_reasons"],
+    )
 
 
 def _run_optimization_stage(
