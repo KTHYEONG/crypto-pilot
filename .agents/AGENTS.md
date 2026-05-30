@@ -29,7 +29,9 @@
 - **Codebase Discovery:** Use `rg` to prevent duplicate code, but limit output (e.g., `head -n 30`) to avoid token overflow.
 - **Verification Loop:** 
     - **Trigger:** Execute when a `.py` file is created or modified.
-    - **Action:** Run `uv run ruff check` and `uv run mypy`. (Limit the modify-verify loop to a maximum of 3 iterations).
+    - **Action:** 
+        - **Implementation Phase (L1):** Run `uv run ruff check --fix [file]` and `uv run mypy [file]` on the modified file immediately.
+        - **Verification Phase (L2):** Use `uv run pytest` to run tests and measure coverage, strictly following the directives in [.agents/rules/testing.md](file:///.agents/rules/testing.md). Avoid redundant L1 checks.
     - **Test Scope:** Use `uv run pytest` to run tests and measure coverage, strictly following the directives in [.agents/rules/testing.md](file:///.agents/rules/testing.md). Use `uv run pytest -k "keyword"` with the `--tb=short` option for fast feedback during iterations.
 
 ## 5. Tech Stack & Standards (Python 3.11)
