@@ -886,6 +886,10 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         t_align = time.perf_counter()
         info = compute_multi_alignment_info(ctx.data_maps, ctx.symbols, ctx.tf, emb)
         t_align_total += time.perf_counter() - t_align
+        _logger.debug(
+            "[PROF] compute_multi_alignment_info elapsed_s=%.4f",
+            time.perf_counter() - t_align,
+        )
         if info is None:
             raise RuntimeError("multi alignment info unavailable")
         alignment_info: dict[str, Any] = info
@@ -910,6 +914,10 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         t_cov = time.perf_counter()
         sigma_3d_full = precompute_rolling_covariances(close_2d_full, lookback)
         t_cov_total += time.perf_counter() - t_cov
+        _logger.debug(
+            "[PROF] precompute_rolling_covariances elapsed_s=%.4f",
+            time.perf_counter() - t_cov,
+        )
         beta_2d_full = _build_beta_2d_full(
             ctx.data_maps,
             ctx.symbols,
@@ -936,7 +944,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
 
             _logger.debug(
                 "[ML_OPT] AWF full ML leg refit - %dx universe pipeline "
-                "(cross-sectional alpha + systemic HMM + fusion). Expect long precompute.",
+                "(cross-sectional alpha + BTC trend-vol regime scaling). Expect long precompute.",
                 len(awf_legs),
             )
             ref_sym = next(
@@ -962,6 +970,10 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                         list(ctx.symbols),
                         ctx.tf,
                         strategy_cfg,
+                    )
+                    _logger.debug(
+                        "[PROF] precompute_anchored_ml_panels elapsed_s=%.4f",
+                        time.perf_counter() - t_panel_cache,
                     )
                     _logger.info(
                         (
@@ -1000,6 +1012,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                             int(test_e),
                         )
 
+                        t_ml_pipeline = time.perf_counter()
                         ml_out = run_ml_pipeline_for_universe(
                             list(ctx.symbols),
                             ctx.tf,
@@ -1018,6 +1031,11 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                             target_start_idx=int(test_s),
                             target_end_idx=int(test_e),
                             precomputed_panels=precomputed_panels,
+                        )
+                        _logger.debug(
+                            "[PROF] Leg %d run_ml_pipeline_for_universe elapsed_s=%.4f",
+                            leg_i,
+                            time.perf_counter() - t_ml_pipeline,
                         )
                         # alpha_panel 기준으로 empty check (meta_feature_frame은 bridge에서 미사용)
                         _alpha_panel = getattr(ml_out, "alpha_panel", None)

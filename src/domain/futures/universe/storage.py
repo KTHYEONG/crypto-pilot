@@ -14,7 +14,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy.stats import median_abs_deviation as _mad
 
 from src.core.exchange.binance_client import BinanceClient
 from src.core.exchange.binance_vision import BinanceVisionDownloader
@@ -578,23 +577,29 @@ def sync_single_symbol_data(
     klines_4h['_ret_abs'] = ret_series.abs()
 
     # Fix 5: Rolling MAD-based robust z-score (breakdown point 50%)
-    # NOTE: funding_daily는 일별 집계 최대 ~2000행 소규모 배열 → Python loop 허용
-    #       (CLAUDE.md Zero-Loop Policy는 OHLCV 시계열 대용량 배열에 해당)
     def _mad_zscore_series(series: pd.Series, window: int, min_periods: int = 3) -> pd.Series:
-        """Compute rolling MAD-based robust z-score."""
-        result = np.zeros(len(series), dtype=float)
-        arr = series.to_numpy(dtype=float)
-        for i in range(len(arr)):
-            start = max(0, i - window + 1)
-            window_data = arr[start : i + 1]
-            if len(window_data) < min_periods:
-                result[i] = 0.0
-                continue
-            med = np.median(window_data)
-            mad_val = float(_mad(window_data, scale="normal"))  # 0.6745 x MAD
-            z = (arr[i] - med) / mad_val if mad_val > 1e-10 else 0.0
-            result[i] = float(np.clip(z, -50.0, 50.0))  # prevent extreme z values
-        return pd.Series(result, index=series.index)
+        """Compute rolling MAD-based robust z-score in fully vectorized form."""
+        if len(series) < min_periods:
+            return pd.Series(0.0, index=series.index)
+        
+        # 1. Rolling Median
+        rolling_median = series.rolling(window=window, min_periods=min_periods).median()
+        
+        # 2. Rolling MAD (Median Absolute Deviation)
+        abs_deviation = (series - rolling_median).abs()
+        # Scale factor 1.4826 matches normal distribution scale
+        # (equivalent to _mad(..., scale='normal'))
+        rolling_mad = (
+            abs_deviation.rolling(window=window, min_periods=min_periods)
+            .median()
+            .mul(1.4826)
+        )
+        
+        # 3. Robust Z-score
+        safe_mad = rolling_mad.replace(0.0, np.nan)
+        z = (series - rolling_median) / safe_mad
+        
+        return z.fillna(0.0).clip(-50.0, 50.0)
 
     # 펀딩비 일별 마지막 값 집계 + 30일 롤링 MAD z-score
     funding_daily: pd.DataFrame = pd.DataFrame()
@@ -612,42 +617,61 @@ def sync_single_symbol_data(
         )
         funding_daily = funding_daily.set_index('date')
 
-    daily_groups = klines_4h.groupby('date')
+    # 1. Vectorized Aggregation for daily metrics
+    daily_df = klines_4h.groupby('date').agg(
+        adv=('quote_vol', 'sum'),
+        ret_abs_mean=('_ret_abs', 'mean'),
+        last_price=('close', 'last'),
+        vol_30d_val=('_vol_30d', 'last')
+    )
+
+    # 2. Vectorized Amihud and finite check conversions
+    daily_df['amihud'] = np.where(
+        daily_df['adv'] > 0, daily_df['ret_abs_mean'] / daily_df['adv'], 0.0
+    )
+    daily_df['vol_30d_val'] = np.where(
+        np.isfinite(daily_df['vol_30d_val']), daily_df['vol_30d_val'], 0.0
+    )
+
+    # 3. Merge funding rate daily stats
+    if not funding_daily.empty:
+        daily_df = daily_df.join(funding_daily[['fr', 'fz']], how='left')
+    else:
+        daily_df['fr'] = 0.0
+        daily_df['fz'] = 0.0
+    daily_df['fr'] = daily_df['fr'].fillna(0.0)
+    daily_df['fz'] = daily_df['fz'].fillna(0.0)
+
+    # 4. Merge cumulative bars PIT metrics
+    daily_df = daily_df.join(_cumulative_bars.rename('pit_bars'), how='left')
+    daily_df['pit_bars'] = daily_df['pit_bars'].fillna(0).astype(int)
+
+    # 5. Filter date range and loop over low-overhead dictionary records
+    daily_df = daily_df[(daily_df.index >= start_date) & (daily_df.index <= end_date)]
+    records = daily_df.reset_index().to_dict('records')
+    
     daily_rows = []
-
-    for day, group in daily_groups:
-        if day < start_date or day > end_date:
-            continue
-
-        adv = float(group['_adv'].sum())
-        ret_abs_mean = float(group['_ret_abs'].mean()) if group['_ret_abs'].notna().any() else 0.0
-        amihud = float(ret_abs_mean / adv) if adv > 0 else 0.0
-        last_price = float(group['close'].iloc[-1])
-
-        # vol_30d: 해당 일의 마지막 바 롤링값 사용
-        vol_30d_val = float(group['_vol_30d'].iloc[-1])
-        if not np.isfinite(vol_30d_val):
-            vol_30d_val = 0.0
-
-        fr = 0.0
-        fz = 0.0
-        if not funding_daily.empty and day in funding_daily.index:
-            fr = float(funding_daily.loc[day, 'fr'])
-            fz = float(funding_daily.loc[day, 'fz'])
+    for r in records:
+        day = r['date']
+        adv = float(r['adv'])
+        amihud = float(r['amihud'])
+        last_price = float(r['last_price'])
+        vol_30d_val = float(r['vol_30d_val'])
+        fr = float(r['fr'])
+        fz = float(r['fz'])
+        pit_bars = int(r['pit_bars'])
 
         knowledge_date = (day + timedelta(days=1)).isoformat()
         listing_age = max(0, (day - true_first_date).days)
-        # Fix 1: PIT 누적 봉 수 (look-ahead 방지)
-        pit_bars = int(_cumulative_bars.get(day, 0))
+        
         daily_rows.append(LedgerRow(
             symbol=symbol, date=day.isoformat(), knowledge_date=knowledge_date,
             is_listed=True, is_trading=True, status="TRADING",
-            # Fix 2: true_first_date (onboardDate 우선) 사용
             first_kline_date=true_first_date.isoformat(),
             adv_usdt_median=adv, adv_usdt_mean=adv,
             has_kline=True, has_funding=not funding.empty, n_bar_gaps=0, max_gap_bars=0,
             frozen_bars=0, last_60d_coverage=1.0, n_zero_volume_bars_60d=0,
-            funding_rate_8h=float(fr), listing_age_days=listing_age,
+            funding_rate_8h=fr, listing_age_days=listing_age,
             vol_30d=vol_30d_val, risk_event_override=None,
             updated_at_utc=datetime.now().isoformat(),
             is_coverage=True,
@@ -708,6 +732,8 @@ def _requested_sync_caches_missing(
     sync_1m: bool,
     requested_start: date,
     requested_end: date,
+    metadata_cache: dict[str, Any] | None = None,
+    profile: SymbolSyncProfile | None = None,
 ) -> bool:
     required_timeframes = ["1h"]
     if sync_1d:
@@ -716,12 +742,76 @@ def _requested_sync_caches_missing(
         required_timeframes.append("4h")
     if sync_1m:
         required_timeframes.append("1m")
+    
     req_start_ts = pd.Timestamp(requested_start, tz="UTC")
     req_end_ts = pd.Timestamp(requested_end, tz="UTC")
+    
+    # Load metadata cache if not provided
+    if metadata_cache is None:
+        try:
+            import json
+            meta_path = FUTURES_DATA_DIR / "parquet_cache_meta.json"
+            if meta_path.exists():
+                with open(meta_path, encoding="utf-8") as f:
+                    metadata_cache = json.load(f)
+            else:
+                metadata_cache = {}
+        except Exception:
+            metadata_cache = {}
+
+    # Fast O(1) Skip: If representative '1h' metadata cache exists and is fully
+    # up-to-date, we can safely treat this symbol as complete.
+    safe_sym = symbol.replace("/", "_")
+    meta_key_1h = f"{safe_sym}::1h"
+    meta_1h = metadata_cache.get(meta_key_1h, {})
+    la_1h = meta_1h.get("latest_available")
+    if la_1h:
+        try:
+            la_dt_1h = pd.to_datetime(la_1h, utc=True)
+            if la_dt_1h >= req_end_ts - pd.Timedelta(hours=8):
+                return False
+        except Exception as exc:
+            logger.debug("Failed to parse la_1h in fast skip: %s", exc)
+
     for tf in required_timeframes:
         path = _sync_cache_path(symbol, tf)
         if not path.exists():
             return True
+            
+        # Fast path: check metadata cache first
+        safe_sym = symbol.replace("/", "_")
+        meta_key = f"{safe_sym}::{tf}"
+        meta = metadata_cache.get(meta_key, {})
+        ea = meta.get("earliest_available")
+        la = meta.get("latest_available")
+        
+        # Clip expected start to onboard date or actual cache earliest date if missing
+        effective_start_ts = req_start_ts
+        if profile is not None and profile.onboard_date is not None:
+            onboard_ts = pd.Timestamp(profile.onboard_date, tz="UTC")
+            effective_start_ts = max(effective_start_ts, onboard_ts)
+        elif ea:
+            try:
+                ea_dt = pd.to_datetime(ea, utc=True)
+                effective_start_ts = max(effective_start_ts, ea_dt)
+            except Exception as exc:
+                logger.debug("Failed to parse earliest_available fallback: %s", exc)
+
+        if ea and la:
+            try:
+                ea_dt = pd.to_datetime(ea, utc=True)
+                la_dt = pd.to_datetime(la, utc=True)
+                # If cached range covers requested range (clipped to onboard date),
+                # this timeframe is not missing.
+                if (
+                    ea_dt <= effective_start_ts
+                    and la_dt >= req_end_ts - pd.Timedelta(hours=8)
+                ):
+                    continue
+            except Exception as exc:
+                logger.debug("Failed to check metadata cache for %s %s: %s", symbol, tf, exc)
+                
+        # Slow path fallback (only if metadata is missing or stale)
         try:
             cache_df = pd.read_parquet(path, columns=["datetime"])
         except Exception:
@@ -731,8 +821,16 @@ def _requested_sync_caches_missing(
         dt = pd.to_datetime(cache_df["datetime"], utc=True, errors="coerce").dropna()
         if dt.empty:
             return True
-        if dt.min() > req_start_ts or dt.max() < req_end_ts:
+            
+        # Fallback clipping logic for slow path
+        slow_start_ts = req_start_ts
+        if profile is not None and profile.onboard_date is not None:
+            onboard_ts = pd.Timestamp(profile.onboard_date, tz="UTC")
+            slow_start_ts = max(slow_start_ts, onboard_ts)
+
+        if dt.min() > slow_start_ts or dt.max() < req_end_ts:
             return True
+            
     return False
 
 
@@ -779,10 +877,23 @@ def run_historical_sync(
     except Exception as e:
         logger.warning("symbol lifecycle profile load failed: %s", e)
 
+    # Pre-load parquet cache metadata to optimize range checks
+    metadata_cache = {}
+    try:
+        import json
+        meta_path = FUTURES_DATA_DIR / "parquet_cache_meta.json"
+        if meta_path.exists():
+            with open(meta_path, encoding="utf-8") as f:
+                metadata_cache = json.load(f)
+            logger.info("Loaded parquet cache metadata: %d keys", len(metadata_cache))
+    except Exception as e:
+        logger.warning("Failed to load parquet cache metadata: %s", e)
+
     # Ledger에 있는 데이터 중 가장 최신 날짜를 기준으로 상장 폐지 여부 판단 (180일 이상 지연시 중단)
     global_max = max(symbol_start_dates.values()) if symbol_start_dates else end_date
 
     for symbol in symbols:
+        profile = sync_profiles.get(symbol)
         sym_start = start_date
         if symbol in symbol_start_dates:
             last = symbol_start_dates[symbol]
@@ -793,6 +904,8 @@ def run_historical_sync(
                 sync_1m=sync_1m,
                 requested_start=start_date,
                 requested_end=end_date,
+                metadata_cache=metadata_cache,
+                profile=profile,
             )
             if last >= end_date and not caches_missing:
                 continue
@@ -806,7 +919,6 @@ def run_historical_sync(
             if not caches_missing:
                 # 월 단위 아카이브이므로 해당 월 초부터 다시 수집
                 sym_start = last.replace(day=1)
-        profile = sync_profiles.get(symbol)
         sync_tasks.append(
             (
                 symbol,
@@ -824,7 +936,13 @@ def run_historical_sync(
         logger.info("All symbols are already up-to-date.")
         return
 
-    logger.info(f"🔄 SYNC: processing {len(sync_tasks)} symbols (Parallel)...")
+    skipped_count = len(symbols) - len(sync_tasks)
+    logger.info(
+        "🔄 SYNC: processing %d symbols (Parallel) | "
+        "%d symbols are already up-to-date (skipped)...",
+        len(sync_tasks),
+        skipped_count,
+    )
     t0_sync = time.perf_counter()
     with multiprocessing.Pool(
         processes=min(multiprocessing.cpu_count(), 8),
