@@ -13,6 +13,19 @@ from src.domain.futures.strategy.diagnostics import ic_summary, rolling_ic
 _logger = logging.getLogger(__name__)
 
 
+def _measured_sigma_r_bps(
+    values_2d: NDArray[np.float64],
+    *,
+    fallback_bps: float = 1.0,
+) -> float:
+    """Measure cross-sectional sigma_r in bps from finite panel values."""
+    finite_vals: NDArray[np.float64] = values_2d[np.isfinite(values_2d)]
+    if finite_vals.size == 0:
+        return fallback_bps
+    measured = float(np.nanstd(finite_vals)) * 1e4
+    return measured if measured > 0.0 else fallback_bps
+
+
 @dataclass(slots=True, frozen=True)
 class AlphaEvaluationReport:
     """Comprehensive alpha quality report for Phase 0 evaluation gate.
@@ -55,6 +68,15 @@ class AlphaEvaluationReport:
     # inference panel: 학습에 사용된 전체 패널 (C1/C2)
     # trading panel: trading_mask=True 심볼만 (C3)
     metrics_by_panel: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Phase 1: gating IC = pre-clip signal IC (resid target).
+    # NaN when inference_signed not provided.
+    resid_ic: float = float("nan")
+    # Phase 1: gating t-stat corresponding to resid_ic.
+    resid_t_stat_nw: float = float("nan")
+    # Phase 1: correlation-adjusted effective breadth N_eff = N/(1+(N-1)·rho_bar).
+    n_eff: float = float("nan")
+    # Phase 1: breakeven IC using N_eff and measured sigma_r.
+    breakeven_ic_eff: float = float("nan")
 
 
 def compute_net_ic(
@@ -168,6 +190,64 @@ def compute_effective_breadth(
     finite_rows: NDArray[np.float64] = per_bar[valid_row_mask]
 
     return float(np.mean(finite_rows)) if finite_rows.size > 0 else 0.0
+
+
+def effective_breadth_corr(
+    panel_2d: NDArray[np.float64],
+    *,
+    min_cofinite: int = 5,
+) -> float:
+    """Correlation-adjusted effective breadth ``N_eff = N / (1 + (N-1)·rho_bar)``.
+
+    ``rho_bar`` is the mean off-diagonal pairwise Spearman correlation of the
+    cross-sectional columns (assets), estimated over bars where both columns are
+    finite (re-ranked within the overlap). It quantifies the diversification
+    haircut from asset comovement — e.g. the common BTC factor in crypto — that a
+    raw co-finite count ignores. Independent assets give ``N_eff ≈ N``; perfectly
+    correlated assets give ``N_eff ≈ 1``.
+
+    Args:
+        panel_2d: Realized return or signal panel [T, N].
+        min_cofinite: Minimum overlapping finite observations to count a pair.
+
+    Returns:
+        Effective breadth in [1.0, N]. Returns N (no haircut) when correlation
+        cannot be estimated; callers must mask uninformative bars so this fallback
+        does not silently lower the breakeven.
+
+    Time complexity: O(N^2 * T * log T). Space complexity: O(T).
+
+    """
+    arr: NDArray[np.float64] = np.asarray(panel_2d, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] < 2:
+        return float(max(arr.shape[1], 1)) if arr.ndim == 2 else 1.0
+
+    n_cols: int = arr.shape[1]
+    corrs: list[float] = []
+    for i in range(n_cols):
+        col_i: NDArray[np.float64] = arr[:, i]
+        for j in range(i + 1, n_cols):
+            col_j: NDArray[np.float64] = arr[:, j]
+            both: NDArray[np.bool_] = np.isfinite(col_i) & np.isfinite(col_j)
+            if int(both.sum()) < min_cofinite:
+                continue
+            # Spearman == Pearson on ranks computed within the overlapping subset.
+            rank_i: NDArray[np.float64] = scipy.stats.rankdata(col_i[both])
+            rank_j: NDArray[np.float64] = scipy.stats.rankdata(col_j[both])
+            if np.std(rank_i) < 1e-12 or np.std(rank_j) < 1e-12:
+                continue
+            c: float = float(np.corrcoef(rank_i, rank_j)[0, 1])
+            if np.isfinite(c):
+                corrs.append(c)
+
+    if not corrs:
+        return float(n_cols)
+
+    # Negative mean correlation implies extra diversification; clamp to 0 so the
+    # haircut never inflates breadth beyond the independent-bet count N.
+    rho_bar: float = max(float(np.mean(corrs)), 0.0)
+    n_eff: float = n_cols / (1.0 + (n_cols - 1) * rho_bar)
+    return float(min(max(n_eff, 1.0), float(n_cols)))
 
 
 def compute_quantile_coverage(
@@ -391,10 +471,7 @@ def compute_per_regime_breakeven(
 
         row_idx: NDArray[np.intp] = np.array(rows, dtype=np.intp)
         realized_slice: NDArray[np.float64] = realized_fwd_2d[row_idx]
-        valid_vals: NDArray[np.float64] = realized_slice[np.isfinite(realized_slice)]
-        sigma_r_bps: float = (
-            float(np.nanstd(valid_vals)) * 1e4 if valid_vals.size > 0 else 400.0
-        )
+        sigma_r_bps: float = _measured_sigma_r_bps(realized_slice)
         breadth_r: float = compute_effective_breadth(
             alpha_long_2d[row_idx], alpha_short_2d[row_idx]
         )
@@ -518,8 +595,7 @@ def evaluate_alpha(
     breadth: float = compute_effective_breadth(alpha_long_2d, alpha_short_2d)
 
     # Cross-sectional return volatility for breakeven IC
-    realized_flat: NDArray[np.float64] = realized_fwd_ret_2d[np.isfinite(realized_fwd_ret_2d)]
-    sigma_r_bps: float = float(np.nanstd(realized_flat)) * 1e4 if realized_flat.size > 0 else 400.0
+    sigma_r_bps: float = _measured_sigma_r_bps(realized_fwd_ret_2d)
 
     breakeven: float = compute_breakeven_ic(
         cost_floor_bps=cost_floor_bps,
@@ -553,8 +629,11 @@ def evaluate_alpha(
         "bear": float("nan"),
         "chop": float("nan"),
     }
+    _gating_pred_2d: NDArray[np.float64] = (
+        inference_signed_2d if inference_signed_2d is not None else pred_2d
+    )
     if regime_labels is not None:
-        ic_series = rolling_ic(pred_2d, realized_fwd_ret_2d, method="spearman")
+        ic_series = rolling_ic(_gating_pred_2d, realized_fwd_ret_2d, method="spearman")
         for regime in ("bull", "bear", "chop"):
             indices = [t for t, lbl in enumerate(regime_labels) if lbl == regime]
             if len(indices) < 5:
@@ -581,8 +660,7 @@ def evaluate_alpha(
                 continue
             row_idx = np.array(rows, dtype=np.intp)
             realized_slice = realized_fwd_ret_2d[row_idx]
-            valid_vals = realized_slice[np.isfinite(realized_slice)]
-            sigma_r_bps_reg = float(np.nanstd(valid_vals)) * 1e4 if valid_vals.size > 0 else 400.0
+            sigma_r_bps_reg = _measured_sigma_r_bps(realized_slice, fallback_bps=sigma_r_bps)
             breadth_r = compute_effective_breadth(alpha_long_2d[row_idx], alpha_short_2d[row_idx])
             regime_breakeven[regime] = compute_breakeven_ic(
                 cost_floor_bps=cost_floor_bps,
@@ -599,7 +677,7 @@ def evaluate_alpha(
     )
 
     # DSR computation
-    ic_arr: NDArray[np.float64] = rolling_ic(pred_2d, realized_fwd_ret_2d)
+    ic_arr: NDArray[np.float64] = rolling_ic(_gating_pred_2d, realized_fwd_ret_2d)
     valid_ic: NDArray[np.float64] = ic_arr[np.isfinite(ic_arr)]
 
     if valid_ic.size > 1:
@@ -635,20 +713,58 @@ def evaluate_alpha(
     else:
         net_sharpe = float("nan")
 
-    # cost_drag deferred to Phase 1 (requires backtest PnL decomposition)
+    # cost_drag deferred (requires backtest PnL decomposition)
     cost_drag: dict[str, float] = {}
 
-    # PASS / FAIL verdict
+    # Phase 1: pre-clip signal IC (C3 fix) — inference_signed_2d is the unclipped dense signal.
+    # Residualization (C1) is handled at the call site (realized_fwd_ret_2d should be resid).
+    _resid_ic_dict: dict[str, float] | None = None
+    _infer_ic_dict: dict[str, float] | None = None
+    _infer_breadth: float = float("nan")
+    if inference_signed_2d is not None:
+        _infer_ic_dict = compute_net_ic(
+            inference_signed_2d, realized_fwd_ret_2d, horizon_bars=horizon_bars
+        )
+        _resid_ic_dict = _infer_ic_dict
+        _infer_breadth = float(
+            np.mean(
+                np.sum(
+                    np.isfinite(inference_signed_2d) & (inference_signed_2d != 0.0),
+                    axis=1,
+                )
+            )
+        )
+
+    # Gating IC: pre-clip when available (C3), else clipped net IC (backward compat).
+    _gating_ic: float = (
+        _resid_ic_dict["mean_ic"] if _resid_ic_dict is not None else net_ic_dict["mean_ic"]
+    )
+    _gating_t_nw: float = (
+        _resid_ic_dict["t_stat_nw"] if _resid_ic_dict is not None else net_ic_dict["t_stat_nw"]
+    )
+
+    # Phase 1: correlation-adjusted effective breadth N_eff from realized cross-section.
+    # Used for the economically-meaningful breakeven gate instead of the raw symbol count.
+    _n_eff: float = effective_breadth_corr(realized_fwd_ret_2d)
+    _breakeven_eff: float = compute_breakeven_ic(
+        cost_floor_bps=cost_floor_bps,
+        sigma_r_bps=sigma_r_bps,
+        breadth_eff=_n_eff,
+    )
+
+    # PASS / FAIL verdict (Phase 1 criteria)
     fail_reasons: list[str] = []
 
-    if net_ic_dict["mean_ic"] < 0.03:
-        fail_reasons.append("net_ic_below_0.03")
-    if net_ic_dict["t_stat_nw"] < 2.0:
+    # Single economic gate: gating IC must exceed N_eff-based breakeven.
+    # Removes arbitrary net_ic≥0.03 and raw-breadth<3 thresholds.
+    if _gating_ic < _breakeven_eff:
+        fail_reasons.append("resid_ic_below_breakeven_eff")
+    if _gating_t_nw < 2.0:
         fail_reasons.append("ic_t_stat_nw_below_2.0")
-    if breadth < 3.0:
-        fail_reasons.append("effective_breadth_below_3")
-    if net_ic_dict["mean_ic"] < breakeven:
-        fail_reasons.append("net_ic_below_breakeven")
+    # Regime gate: bear IC must be non-negative (strategy cannot lose in down markets).
+    _bear_ic: float = regime_ic.get("bear", float("nan"))
+    if math.isfinite(_bear_ic) and _bear_ic < 0.0:
+        fail_reasons.append("bear_regime_ic_negative")
     if not math.isnan(quantile_cov) and not (0.72 <= quantile_cov <= 0.88):
         fail_reasons.append("quantile_coverage_out_of_range")
     if dsr < 0.95:
@@ -657,15 +773,16 @@ def evaluate_alpha(
     passes: bool = len(fail_reasons) == 0
 
     _logger.debug(
-        "evaluate_alpha: net_ic=%.4f breadth=%.1f dsr=%.3f passes=%s fail=%s",
-        net_ic_dict["mean_ic"],
-        breadth,
+        "evaluate_alpha: gating_ic=%.4f n_eff=%.1f be_eff=%.4f dsr=%.3f passes=%s fail=%s",
+        _gating_ic,
+        _n_eff,
+        _breakeven_eff,
         dsr,
         passes,
         fail_reasons,
     )
 
-    # Phase F: dual panel 메트릭 계산 — inference(전체) vs trading(C3 마스크만)
+    # Phase F: dual panel 메트릭 분리 — inference(전체) vs trading(C3 마스크만)
     # Time complexity: O(T * N * log N). Space complexity: O(T * N).
     _metrics_by_panel: dict[str, dict[str, float]] = {
         "inference": {
@@ -691,20 +808,8 @@ def evaluate_alpha(
             "effective_breadth": _trading_breadth,
         }
 
-    # inference_stat panel: pre-clip signed signal — reveals ranking skill
-    # independent of the max(ev, 0) cost-threshold gate.
-    if inference_signed_2d is not None:
-        _infer_ic_dict = compute_net_ic(
-            inference_signed_2d, realized_fwd_ret_2d, horizon_bars=horizon_bars
-        )
-        _infer_breadth = float(
-            np.mean(
-                np.sum(
-                    np.isfinite(inference_signed_2d) & (inference_signed_2d != 0.0),
-                    axis=1,
-                )
-            )
-        )
+    # inference_stat panel: pre-clip signed signal (already computed above when provided).
+    if _infer_ic_dict is not None:
         _metrics_by_panel["inference_stat"] = {
             "net_ic": _infer_ic_dict["mean_ic"],
             "icir": _infer_ic_dict["icir"],
@@ -728,6 +833,10 @@ def evaluate_alpha(
         passes=passes,
         fail_reasons=fail_reasons,
         metrics_by_panel=_metrics_by_panel,
+        resid_ic=_gating_ic,
+        resid_t_stat_nw=_gating_t_nw,
+        n_eff=_n_eff,
+        breakeven_ic_eff=_breakeven_eff,
     )
 
 
@@ -764,8 +873,7 @@ def sweep_horizon_breakeven(
             _logger.warning("[SWEEP] horizon=%d missing alpha maps — skipped", horizon)
             continue
 
-        realized_flat = realized_2d[np.isfinite(realized_2d)]
-        sigma_r_bps = float(np.nanstd(realized_flat)) * 1e4 if realized_flat.size > 0 else 400.0
+        sigma_r_bps = _measured_sigma_r_bps(realized_2d)
 
         breadth = compute_effective_breadth(alpha_long_2d, alpha_short_2d)
         breakeven = compute_breakeven_ic(
