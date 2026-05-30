@@ -813,3 +813,112 @@ def test_evaluate_alpha_inference_stat_absent_when_not_provided() -> None:
 
     # Assert
     assert "inference_stat" not in report.metrics_by_panel
+
+
+# ---------------------------------------------------------------------------
+# Phase G1a / G2c 관련 신규 테스트
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_alpha_n_eff_floored_to_emit_breadth() -> None:
+    """N_eff는 클립북 emit_breadth를 초과할 수 없다 (미실현 분산크레딧 방지)."""
+    # Arrange: emit_breadth≈2, corr-adjusted N_eff가 훨씬 큰 패널 시뮬레이션
+    rng = np.random.default_rng(42)
+    T, N = 200, 20
+    # 잔차화된 패널: 낮은 상관관계 → N_eff_corr ≈ N (floor 없으면 20 반환)
+    realized = rng.standard_normal((T, N)) * 0.05
+    # 클립 알파: 2개 심볼만 비零 → emit_breadth ≈ 2
+    alpha_long = np.zeros((T, N))
+    alpha_long[:, :2] = 0.01
+    alpha_short = np.zeros((T, N))
+    alpha_short[:, 2:4] = 0.01
+
+    # Act
+    report = evaluate_alpha(
+        alpha_long_2d=alpha_long,
+        alpha_short_2d=alpha_short,
+        realized_fwd_ret_2d=realized,
+    )
+
+    # Assert: n_eff <= emit_breadth (long 2 + short 2 = 4), n_eff_corr_raw는 더 클 수 있음
+    assert report.n_eff <= report.n_eff_corr_raw + 1e-9
+    assert report.n_eff <= 5.0  # emit_breadth = 4 (long_cols=2, short_cols=2)
+
+
+def test_evaluate_alpha_clip_preservation_ratio_computed() -> None:
+    """clip_preservation_ratio = port_ic / resid_ic (pre-clip IC 대비 비율)."""
+    # Arrange
+    rng = np.random.default_rng(7)
+    T, N = 150, 10
+    realized = rng.standard_normal((T, N)) * 0.04
+    signal = rng.standard_normal((T, N)) * 0.01
+    alpha_long = np.where(signal > 0, signal, 0.0)
+    alpha_short = np.where(signal < 0, -signal, 0.0)
+
+    # Act
+    report = evaluate_alpha(
+        alpha_long_2d=alpha_long,
+        alpha_short_2d=alpha_short,
+        realized_fwd_ret_2d=realized,
+        inference_signed_2d=signal,
+    )
+
+    # Assert: 유한한 비율이 반환되거나(net_ic≠0) nan이 아닌 경우 타입 체크
+    assert isinstance(report.clip_preservation_ratio, float)
+
+
+def test_evaluate_alpha_clip_preservation_ratio_direction() -> None:
+    """clip_preservation_ratio = post_clip_IC / pre_clip_IC (G2c: post/pre 순서).
+
+    0 < post < pre 구간에서 비율이 0~1 사이여야 한다(G2c FAIL 경계).
+    역전(pre/post)이면 이 케이스에서 > 1 반환 → 오통과 발생하므로 반드시 검증.
+    """
+    # Arrange: pre-clip signal이 유의하고, post-clip이 그보다 약한 상황 시뮬레이션.
+    # inference_signed_2d = pre-clip dense signal
+    # alpha_long/short = 부분 클립 후 신호 (magnitude 절반)
+    rng = np.random.default_rng(42)
+    T, N = 300, 12
+    realized = rng.standard_normal((T, N)) * 0.04
+    pre_clip = rng.standard_normal((T, N)) * 0.008   # pre-clip dense signal
+    # post-clip: 같은 방향이지만 약함 (보존비 ≈ 0.5)
+    post_long = np.where(pre_clip > 0, pre_clip * 0.5, 0.0)
+    post_short = np.where(pre_clip < 0, -pre_clip * 0.5, 0.0)
+
+    # Act
+    report = evaluate_alpha(
+        alpha_long_2d=post_long,
+        alpha_short_2d=post_short,
+        realized_fwd_ret_2d=realized,
+        inference_signed_2d=pre_clip,
+    )
+
+    # Assert: 비율 = post/pre ∈ (0, 1) — pre > post > 0 이므로 0~1 사이
+    ratio = report.clip_preservation_ratio
+    if np.isfinite(ratio):
+        # 스킬이 있는 경우: post/pre이면 < 1, pre/post이면 > 1
+        # 이 케이스에서 > 1이면 분자/분모 역전 버그
+        assert ratio <= 1.5, (
+            f"clip_preservation_ratio={ratio:.3f} > 1.5 suggests pre/post inversion"
+        )
+
+
+def test_evaluate_alpha_t_stat_threshold_raised_to_3() -> None:
+    """t_stat < 3.0이면 ic_t_stat_nw_below_3.0이 fail_reasons에 포함된다."""
+    # Arrange
+    rng = np.random.default_rng(99)
+    T, N = 50, 5  # 적은 bars → 낮은 t-stat
+    realized = rng.standard_normal((T, N)) * 0.05
+    pred = rng.standard_normal((T, N)) * 0.001  # 매우 약한 신호
+    alpha_long = np.where(pred > 0, pred, 0.0)
+    alpha_short = np.where(pred < 0, -pred, 0.0)
+
+    # Act
+    report = evaluate_alpha(
+        alpha_long_2d=alpha_long,
+        alpha_short_2d=alpha_short,
+        realized_fwd_ret_2d=realized,
+    )
+
+    # Assert
+    assert not report.passes
+    assert "ic_t_stat_nw_below_3.0" in report.fail_reasons

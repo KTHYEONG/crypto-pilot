@@ -4,8 +4,56 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import scipy.stats
 
 from src.domain.futures.forecast.contracts import AlphaForecast, CostForecast
+
+
+def _rank_weight_1d(ev_row: np.ndarray, *, k: float = 3.0) -> np.ndarray:
+    """Cross-sectional rank to continuous weight in (-1, +1) via tanh.
+
+    Args:
+        ev_row: 1-D EV signal array for a single bar [N].
+        k: Scaling factor controlling weight steepness (default 3.0).
+
+    Returns:
+        Weight array of same shape [N] with values in (-1, +1).
+
+    Time: O(N log N), Space: O(N)
+
+    """
+    finite = np.isfinite(ev_row)
+    out = np.zeros_like(ev_row)
+    n = int(finite.sum())
+    if n < 2:
+        return out
+    # rank in [0, 1]
+    ranks = scipy.stats.rankdata(ev_row[finite], method="average") / n
+    # centered: [-0.5, +0.5], scaled: [-k/2, k/2]
+    out[finite] = np.tanh(k * (ranks - 0.5))  # -> (-1, +1)
+    return out
+
+
+def _soft_hurdle(ev: np.ndarray, cost_bps: float, *, steepness: float = 5.0) -> np.ndarray:
+    """Sigmoid gate: near-zero EV gets smoothly attenuated near cost threshold.
+
+    Args:
+        ev: EV signal array (any shape).
+        cost_bps: Cost threshold in basis points.
+        steepness: Sigmoid steepness (default 5.0).
+
+    Returns:
+        Attenuated EV array of same shape.
+
+    Time: O(N), Space: O(N)
+
+    """
+    cost_frac = cost_bps / 1e4
+    exponent = np.clip(
+        -steepness * (ev - cost_frac) / max(cost_frac, 1e-8), -500.0, 500.0
+    )
+    gate = 1.0 / (1.0 + np.exp(exponent))
+    return ev * gate
 
 
 def _cs_zscore(score_2d: np.ndarray) -> np.ndarray:
@@ -63,7 +111,6 @@ def compose_mu(
         params.get("BETA_ALPHA", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))
     )
     ev_h = float(params.get("EV_HURDLE_BPS", default_ev_hurdle_bps(OPT_FUTURES_CONFIG)))
-    hurdle = ev_h / 10000.0
 
     cost_frac = np.asarray(cost.execution_cost_fraction_2d, dtype=np.float64)
 
@@ -174,6 +221,7 @@ def compose_mu(
             z_long_masked = np.where(long_mask, z_long, 0.0)
             z_short_masked = np.where(short_mask, z_short, 0.0)
 
+            soft_steepness = float(params.get("SOFT_HURDLE_STEEPNESS", 5.0))
             for t in range(mu_long.shape[0]):
                 l_sel = long_mask[t].sum()
                 s_sel = short_mask[t].sum()
@@ -184,8 +232,12 @@ def compose_mu(
                 zmean_l = float(np.mean(z_long_masked[t, long_mask[t]]))
                 zmean_s = float(np.mean(z_short_masked[t, short_mask[t]]))
                 gross_spread_bps = ic_prior * sigma_r * (zmean_l + zmean_s)
-                net_edge = gross_spread_bps - amortized_cost
-                if net_edge <= 0.0:
+                # soft-hurdle: 경질 절단 대신 sigmoid 감쇠
+                net_edge_arr = np.array([gross_spread_bps - amortized_cost])
+                net_edge_soft = float(
+                    _soft_hurdle(net_edge_arr, amortized_cost, steepness=soft_steepness)[0]
+                )
+                if net_edge_soft <= 0.0:
                     long_mask[t] = False
                     short_mask[t] = False
 
@@ -198,6 +250,24 @@ def compose_mu(
         xs_long = np.where(np.isfinite(mu_long), mu_long, 0.0)
         xs_short = np.where(np.isfinite(mu_short), mu_short, 0.0)
     else:
-        xs_long = np.where(mu_long >= hurdle, mu_long, 0.0)
-        xs_short = np.where(mu_short >= hurdle, mu_short, 0.0)
+        # rank-sizing: 경질 max(ev,0) 절단 대신 횡단면 rank 기반 연속 가중.
+        # C-Clip 수정: 클립이 ranking skill을 파괴하는 것을 방지.
+        # 순서: (1) EV 단위 soft-hurdle → (2) rank-sizing.
+        # soft-hurdle은 EV(return-fraction)에 적용해야 단위가 일치함.
+        # rank-sizing(-1,+1)에 bps 기준 hurdle을 적용하면 단위 불일치로 무력화됨.
+        rank_k = float(params.get("RANK_WEIGHT_K", 3.0))
+        soft_steepness = float(params.get("SOFT_HURDLE_STEEPNESS", 5.0))
+        cost_bps = float(params.get("COST_GATE_BPS", ev_h))
+        # Step 1: EV 단위 soft-hurdle (overflow 방지를 위해 exp 인수 클립)
+        gated_long = _soft_hurdle(mu_long, cost_bps, steepness=soft_steepness)
+        gated_short = _soft_hurdle(mu_short, cost_bps, steepness=soft_steepness)
+        # Step 2: 횡단면 rank-sizing — soft-hurdle 후 양수 EV만 대상
+        n_bars = mu_long.shape[0]
+        rw_long = np.zeros_like(mu_long)
+        rw_short = np.zeros_like(mu_short)
+        for t in range(n_bars):
+            rw_long[t] = _rank_weight_1d(gated_long[t], k=rank_k)
+            rw_short[t] = _rank_weight_1d(gated_short[t], k=rank_k)
+        xs_long = np.where(rw_long > 0.0, rw_long, 0.0)
+        xs_short = np.where(rw_short > 0.0, rw_short, 0.0)
     return xs_long, xs_short, mu_long, mu_short
