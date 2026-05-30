@@ -137,6 +137,32 @@ class StrategyConfig:
 
 
 @dataclass(slots=True, frozen=True)
+class FeatureIntegrityConfig:
+    """Feature integrity selection thresholds."""
+
+    tau_nan: float = 0.50
+    epsilon: float = 1e-9
+    tau_psi: float = 0.25
+    ic_floor: float | None = None
+    tau_corr: float = 0.95
+    min_keep: int = 8
+
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.tau_nan <= 1.0):
+            raise ValueError("tau_nan must be in [0, 1]")
+        if self.epsilon <= 0.0:
+            raise ValueError("epsilon must be > 0")
+        if self.tau_psi < 0.0:
+            raise ValueError("tau_psi must be >= 0")
+        if self.ic_floor is not None and self.ic_floor < 0.0:
+            raise ValueError("ic_floor must be >= 0 when set")
+        if not (0.0 <= self.tau_corr <= 1.0):
+            raise ValueError("tau_corr must be in [0, 1]")
+        if self.min_keep < 1:
+            raise ValueError("min_keep must be >= 1")
+
+
+@dataclass(slots=True, frozen=True)
 class StrategyMLConfig:
     """ML strategy configuration for compatibility name + quantile calibrator."""
 
@@ -268,6 +294,9 @@ class StrategyMLConfig:
     target_breadth: int = 8                      # minimum effective breadth target
     ic_prior_for_gate: float = 0.03             # leak-free IC prior for portfolio net-edge gate
     ev_secondary_tilt_weight: float = 0.0       # blend weight for EV rank tilt (0=rank-only)
+    integrity_gate_enabled: bool = True
+    feature_selection_enabled: bool = True
+    feature_integrity: FeatureIntegrityConfig = field(default_factory=FeatureIntegrityConfig)
 
     def __post_init__(self) -> None:
         """Validate ML strategy parameters."""
