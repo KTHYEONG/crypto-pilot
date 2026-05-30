@@ -310,6 +310,7 @@ class DataCollector:
     def __init__(self, api_key: str | None = None, secret: str | None = None) -> None:
         self.client = BinanceClient(api_key, secret)
         self.logger = setup_logger("DataCollector")
+        self._metadata_cache: dict[str, Any] | None = None
 
     @staticmethod
     def _safe_symbol(symbol: str) -> str:
@@ -385,14 +386,19 @@ class DataCollector:
         )
 
     def _load_meta(self) -> dict[str, Any]:
+        if self._metadata_cache is not None:
+            return self._metadata_cache
         path = self._meta_path()
         if not path.exists():
+            self._metadata_cache = {}
             return {}
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            return data if isinstance(data, dict) else {}
+            self._metadata_cache = data if isinstance(data, dict) else {}
+            return self._metadata_cache
         except Exception:
+            self._metadata_cache = {}
             return {}
 
     def _save_meta(self, meta_updates: dict[str, Any]) -> None:
@@ -402,18 +408,27 @@ class DataCollector:
             try:
                 with open(lock_path, "w") as lock_file:
                     fcntl.flock(lock_file, fcntl.LOCK_EX)
-                    current_meta = self._load_meta()
+                    disk_meta = {}
+                    if path.exists():
+                        try:
+                            with open(path, encoding="utf-8") as f:
+                                data = json.load(f)
+                            if isinstance(data, dict):
+                                disk_meta = data
+                        except Exception as exc:
+                            self.logger.debug("Failed to read disk meta: %s", exc)
                     for mk, updates in meta_updates.items():
-                        if mk not in current_meta:
-                            current_meta[mk] = {}
-                        if isinstance(updates, dict) and isinstance(current_meta[mk], dict):
-                            current_meta[mk].update(updates)
+                        if mk not in disk_meta:
+                            disk_meta[mk] = {}
+                        if isinstance(updates, dict) and isinstance(disk_meta[mk], dict):
+                            disk_meta[mk].update(updates)
                         else:
-                            current_meta[mk] = updates
+                            disk_meta[mk] = updates
                     tmp = path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}.json")
                     with open(tmp, "w", encoding="utf-8") as f:
-                        json.dump(current_meta, f, ensure_ascii=False, indent=2)
+                        json.dump(disk_meta, f, ensure_ascii=False, indent=2)
                     os.replace(tmp, path)
+                    self._metadata_cache = disk_meta
             except Exception as e:
                 self.logger.error(f"Failed to save metadata: {e}")
 
@@ -445,6 +460,8 @@ class DataCollector:
 
     def _normalize_df(self, df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
+            return df
+        if "datetime" in df.columns and pd.api.types.is_datetime64_any_dtype(df["datetime"]):
             return df
         if "timestamp" in df.columns:
             # Ensure timestamp is numeric to prevent pandas from parsing it as a date string
@@ -959,6 +976,24 @@ class DataCollector:
         req_start = pd.to_datetime(start_date, utc=True)
         req_end = pd.to_datetime(end_date, utc=True)
 
+        # 1. 메타데이터 사전 검사 (디스크 I/O 최적화)
+        meta = self._load_meta().get(self._meta_key(symbol, "funding"), {})
+        ea = meta.get("earliest_available")
+        la = meta.get("latest_available")
+        if ea and la:
+            try:
+                ea_dt = pd.to_datetime(ea, utc=True)
+                la_dt = pd.to_datetime(la, utc=True)
+                if (
+                    ea_dt <= req_start + pd.Timedelta(days=1)
+                    and la_dt >= req_end - pd.Timedelta(hours=12)
+                ):
+                    return
+            except Exception as exc:
+                self.logger.debug(
+                    "Failed to parse metadata for %s funding: %s", symbol, exc
+                )
+
         cache_df = pd.DataFrame()
         if path.exists():
             try:
@@ -976,7 +1011,18 @@ class DataCollector:
             and (cache_df["datetime"].min() <= req_start + pd.Timedelta(days=1))
             and cache_df["datetime"].max() >= req_end - pd.Timedelta(hours=12)
         ):
+            # 메타데이터에 등록되어 있지 않은 경우 채워넣어 다음 호출 시 Parquet read 방지
+            if not ea or not la:
+                self._save_meta(
+                    {
+                        self._meta_key(symbol, "funding"): {
+                            "earliest_available": str(cache_df["datetime"].min()),
+                            "latest_available": str(cache_df["datetime"].max()),
+                        }
+                    }
+                )
             return
+
         api_cutoff = pd.Timestamp.now(tz="UTC").replace(
             day=1, hour=0, minute=0, second=0, microsecond=0
         ) - pd.Timedelta(days=32)
@@ -1049,6 +1095,14 @@ class DataCollector:
                 .sort_values("timestamp")
             )
             _normalize_funding_frame(combined).to_parquet(path, index=False)
+            self._save_meta(
+                {
+                    self._meta_key(symbol, "funding"): {
+                        "earliest_available": str(combined["datetime"].min()),
+                        "latest_available": str(combined["datetime"].max()),
+                    }
+                }
+            )
 
 
 # --- Merging Utilities (from funding_utils.py and metrics_utils.py) ---
