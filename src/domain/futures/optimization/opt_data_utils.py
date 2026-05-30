@@ -75,7 +75,12 @@ def evaluate_symbol_data_sufficiency(
     frame = symbol_map.get(tf)
     if not isinstance(frame, pd.DataFrame) or frame.empty or "datetime" not in frame.columns:
         return {"symbol": symbol, "tf": tf, "pass": False, "reason": "missing_tf_frame"}
-    dt = pd.to_datetime(frame["datetime"], utc=True, errors="coerce").dropna().sort_values()
+    dt_col = frame["datetime"]
+    if not pd.api.types.is_datetime64_any_dtype(dt_col):
+        dt = pd.to_datetime(dt_col, utc=True, errors="coerce").dropna().sort_values()
+    else:
+        dt = dt_col.dropna()
+
     if dt.empty:
         return {"symbol": symbol, "tf": tf, "pass": False, "reason": "invalid_datetime"}
 
@@ -109,7 +114,11 @@ def evaluate_symbol_data_sufficiency(
             exec_1m_ok = False
             exec_1m_cov = 0.0
         else:
-            exec_dt = pd.to_datetime(exec_1m["datetime"], utc=True, errors="coerce").dropna()
+            exec_dt_col = exec_1m["datetime"]
+            if not pd.api.types.is_datetime64_any_dtype(exec_dt_col):
+                exec_dt = pd.to_datetime(exec_dt_col, utc=True, errors="coerce").dropna()
+            else:
+                exec_dt = exec_dt_col.dropna()
             actual_1m = int(
                 ((exec_dt >= pd.Timestamp(fetch_start, tz="UTC")) & (exec_dt <= oos_end_ts)).sum()
             )
@@ -233,7 +242,12 @@ def _to_unix_ms(dt: pd.Series | pd.DatetimeIndex) -> pd.Series:
     Pandas 2.x preserves storage resolution (ms/us/ns), so astype('int64') returns
     values in the native unit. Upcasting to ns first normalizes all variants.
     """
-    return pd.to_datetime(dt, utc=True).astype("datetime64[ns, UTC]").astype("int64") // 10**6
+    if isinstance(dt, pd.Series):
+        if pd.api.types.is_datetime64_any_dtype(dt):
+            return dt.astype("datetime64[ns]").astype("int64") // 10**6
+    elif isinstance(dt, pd.DatetimeIndex):
+        return dt.astype("datetime64[ns]").astype("int64") // 10**6
+    return pd.to_datetime(dt, utc=True).astype("datetime64[ns]").astype("int64") // 10**6
 
 
 def _should_load_exec_1m(load_exec_1m: bool | None) -> bool:
@@ -580,16 +594,31 @@ def load_single_symbol_data(
         tfs_to_load = set(target_tfs) if target_tfs else {tf, "1d", "1h", "4h"}
         use_exec_1m = _should_load_exec_1m(load_exec_1m)
 
-        # [Optimization] Pre-load funding and metrics data once to avoid redundant I/O per TF
-        funding_df = None
-        metrics_df = None
+        # [Optimization] Pre-load and prepare funding and metrics data once
+        # to avoid redundant I/O and processing per TF.
+        funding_df_prepared = None
+        metrics_df_prepared = None
         if not skip_metrics:
             funding_df = _safe_read_funding_parquet(sym)
+            if funding_df is not None and not funding_df.empty:
+                exclude_fr = ["datetime", "symbol"]
+                cols_fr = [c for c in funding_df.columns if c not in exclude_fr]
+                funding_df_prepared = (
+                    funding_df[cols_fr].sort_values("timestamp").reset_index(drop=True)
+                )
 
             m_path = Path(FUTURES_DATA_DIR) / f"{sym.replace('/', '_')}_metrics.parquet"
             if m_path.exists():
                 try:
-                    metrics_df = pd.read_parquet(m_path)
+                    m_df = pd.read_parquet(m_path)
+                    if m_df is not None and not m_df.empty:
+                        m_df = m_df.loc[:, ~m_df.columns.duplicated(keep="first")]
+                        m_df["timestamp"] = _to_unix_ms(m_df["datetime"])
+                        exclude_m = ["datetime", "create_time", "symbol"]
+                        cols_m = [c for c in m_df.columns if c not in exclude_m]
+                        metrics_df_prepared = (
+                            m_df[cols_m].sort_values("timestamp").reset_index(drop=True)
+                        )
                 except Exception:
                     _logger.warning("Failed to load metrics data for %s", sym)
 
@@ -614,33 +643,24 @@ def load_single_symbol_data(
                     raw_df = raw_df.rename(columns={str(raw_df.columns[0]): "datetime"})
 
             try:
-                # [Optimization] Use localized merge logic to benefit from pre-loaded data
+                # [Optimization] Use pre-prepared data outside the loop for high-speed merge
                 df = raw_df.copy()
-                if funding_df is not None and not funding_df.empty:
-                    df["timestamp"] = _to_unix_ms(df["datetime"])
-                    f_tmp = funding_df.copy()
-                    f_tmp["timestamp"] = _to_unix_ms(
-                        pd.to_datetime(f_tmp["timestamp"], unit="ms", utc=True)
-                    )
-                    exclude_fr = ["datetime", "symbol"]
-                    cols_fr = [c for c in f_tmp.columns if c not in exclude_fr]
+                if funding_df_prepared is not None and not funding_df_prepared.empty:
+                    if "timestamp" not in df.columns:
+                        df["timestamp"] = _to_unix_ms(df["datetime"])
                     df = pd.merge_asof(
                         df.sort_values("timestamp"),
-                        f_tmp[cols_fr].sort_values("timestamp"),
+                        funding_df_prepared,
                         on="timestamp",
                         direction="backward",
                     )
 
-                if metrics_df is not None and not metrics_df.empty:
+                if metrics_df_prepared is not None and not metrics_df_prepared.empty:
                     if "timestamp" not in df.columns:
                         df["timestamp"] = _to_unix_ms(df["datetime"])
-                    m_tmp = metrics_df.copy()
-                    m_tmp["timestamp"] = _to_unix_ms(m_tmp["datetime"])
-                    exclude_m = ["timestamp", "datetime", "create_time", "symbol"]
-                    cols_m = [c for c in m_tmp.columns if c not in exclude_m]
                     df = pd.merge_asof(
                         df.sort_values("timestamp"),
-                        m_tmp[["timestamp", *cols_m]].sort_values("timestamp"),
+                        metrics_df_prepared,
                         on="timestamp",
                         direction="backward",
                     )
@@ -835,11 +855,13 @@ def load_futures_data_maps_for_symbols(
                 if nan > 10.0 or gaps > 0 or dups > 0 or nonpos > 0:
                     failed_tfs.append(f"{row['timeframe']}({row['stage']}: nan={nan:.1f}%)")
         
-        audit_msg = ".. AUDIT: req=%d load=%d coverage=%.2f" % (
-            requested_count, loaded_count, float(loaded_count / max(requested_count, 1))
+        coverage_val = float(loaded_count / max(requested_count, 1))
+        audit_msg = (
+            f".. AUDIT: req={requested_count} load={loaded_count} "
+            f"coverage={coverage_val:.2f}"
         )
         if failed_tfs:
-            audit_msg += " | !! FAIL: %s" % (", ".join(failed_tfs[:3]))
+            audit_msg += f" | !! FAIL: {', '.join(failed_tfs[:3])}"
         else:
             audit_msg += " | ok"
         _logger.info(audit_msg)

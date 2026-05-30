@@ -208,26 +208,36 @@ def precompute_rolling_covariances(
     """Precompute rolling Ledoit-Wolf covariance matrices for all bars.
 
     Called once during optimization precompute phase to eliminate 1M+ redundant
-    calls during trials.
+    calls during trials. Optimized via threading parallel dispatch.
     """
     c = np.asarray(close_2d, dtype=np.float64)
     n_bars, n_syms = c.shape
     out = np.zeros((n_bars, n_syms, n_syms), dtype=np.float64)
     lb = max(5, int(lookback))
 
-    # LW fit is relatively heavy, but we only do this once per bar for the entire optimization.
-    for i in range(1, n_bars):
+    from joblib import Parallel, delayed
+
+    def _compute_single_cov(i: int) -> tuple[int, np.ndarray]:
         start_i = max(0, i - lb)
         hist = c[start_i:i, :]
         if hist.shape[0] < 3:
-            # Identity matrix fallback for insufficient history
+            cov = np.zeros((n_syms, n_syms), dtype=np.float64)
             for j in range(n_syms):
-                out[i, j, j] = 1e-6
-            continue
+                cov[j, j] = 1e-6
+            return i, cov
 
         rr = np.diff(hist, axis=0) / np.maximum(hist[:-1, :], 1e-12)
         rr = np.nan_to_num(rr, nan=0.0, posinf=0.0, neginf=0.0)
-        out[i] = rolling_ledoit_wolf_cov(rr, min_obs=min_obs)
+        return i, rolling_ledoit_wolf_cov(rr, min_obs=min_obs)
+
+    # Scikit-learn algorithms run GIL-free inside C routines;
+    # we leverage threading backend to bypass serialization costs
+    results = Parallel(n_jobs=-1, backend="threading")(
+        delayed(_compute_single_cov)(i) for i in range(1, n_bars)
+    )
+
+    for i, cov in results:
+        out[i] = cov
 
     return out
 
