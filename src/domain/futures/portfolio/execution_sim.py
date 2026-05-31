@@ -202,11 +202,7 @@ def backtest_target_weights_numba(
                 desired_amt = abs(tgt_notional) / op if ts != 0 else 0.0
 
                 need_exit = False
-                if ts == 0:
-                    need_exit = True
-                elif ts != pos_side[s]:
-                    need_exit = True
-                elif abs(amount[s] - desired_amt) * op > max(0.01, eq_snap * min_notional_floor_pct):
+                if ts == 0 or ts != pos_side[s] or abs(amount[s] - desired_amt) * op > max(0.01, eq_snap * min_notional_floor_pct):
                     need_exit = True
 
                 if need_exit:
@@ -643,11 +639,7 @@ def backtest_target_weights_intrabar_numba(
                 desired_amt = abs(tgt_notional) / op if ts != 0 else 0.0
 
                 need_exit = False
-                if ts == 0:
-                    need_exit = True
-                elif ts != pos_side[s]:
-                    need_exit = True
-                elif abs(amount[s] - desired_amt) * op > max(0.01, eq_snap * min_notional_floor_pct):
+                if ts == 0 or ts != pos_side[s] or abs(amount[s] - desired_amt) * op > max(0.01, eq_snap * min_notional_floor_pct):
                     need_exit = True
 
                 if need_exit:
