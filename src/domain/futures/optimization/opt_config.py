@@ -192,7 +192,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_DEFAULT_BETA_ALPHA": 1.0,
     # Phase2 forecast-layer flags (default off for behavior safety).
     "COST_FORECAST_DYNAMIC": False,
-    "COST_GATE_AMORTIZE": False,
+    "COST_GATE_AMORTIZE": True,
     "KELLY_USE_RESIDUAL_VAR": False,
     # Dynamic cost forecast hyper-parameters.
     "FUTURES_COST_TAKER_FEE_BPS": 4.0,
@@ -363,6 +363,9 @@ ENGINE_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
     **PORTFOLIO_PARAM_SPACE_FUTURES,
     "K_RANK": {"type": "int", "low": 1, "high": 4, "step": 1},
     "REBALANCE_BARS": {"type": "categorical", "choices": (1, 3, 6)},
+    "label_horizon_bars": {"type": "categorical", "choices": (6, 12, 18)},
+    "alpha_emit_select_q": {"type": "float", "low": 0.25, "high": 0.50, "step": 0.05},
+    "alpha_emit_weight_k": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.5},
     "MIN_SCORE_PERCENTILE": {"type": "float", "low": 0.40, "high": 0.90, "step": 0.10},
     "CS_Z_SCORE_THRESHOLD": {"type": "float", "low": 0.2, "high": 2.0, "step": 0.1},
     "CRISIS_GAMMA": {"type": "float", "low": 1.0, "high": 5.0, "step": 1.0},

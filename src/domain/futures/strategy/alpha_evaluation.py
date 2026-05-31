@@ -79,6 +79,8 @@ class AlphaEvaluationReport:
     breakeven_ic_eff: float = float("nan")
     # Phase G1a: floor 전 corr-조정 N_eff (관측 보존용).
     n_eff_corr_raw: float = float("nan")
+    # 진단용: emit breadth (게이트 판정에는 사용 안 함 — 대신 n_eff_universe 사용)
+    n_eff_emit: float = float("nan")
     # Phase G2c: post-clip IC / pre-clip IC 비율. 클립 파괴 감지.
     clip_preservation_ratio: float = float("nan")
 
@@ -747,42 +749,44 @@ def evaluate_alpha(
         _resid_ic_dict["t_stat_nw"] if _resid_ic_dict is not None else net_ic_dict["t_stat_nw"]
     )
 
-    # Phase G1a: corr-조정 N_eff를 emit-breadth로 floor.
-    # effective_breadth_corr(real_resid)는 잔차화가 BTC 공통팩터를 이미 제거했기 때문에
-    # N_eff≈N_raw를 반환한다. 실거래 북은 베타를 헤지하지 않으므로 이 크레딧은 unearned.
-    # 클립북 실제 발산(emit breadth)을 상한으로 적용하여 미실현 분산 크레딧을 제거.
+    # IC skill gate: universe-level N_eff (emit breadth cap 제거).
+    # G1은 신호 스킬을 측정 → sizing policy(emit breadth)에 독립적이어야 한다.
+    # G2b(basket simulation)이 실제 emit P&L을 별도로 검증한다.
     _n_eff_corr_raw: float = effective_breadth_corr(realized_fwd_ret_2d)
-    _n_eff: float = float(min(_n_eff_corr_raw, max(breadth, 1.0)))
+    _n_eff_universe: float = float(max(_n_eff_corr_raw, 1.0))
     _breakeven_eff: float = compute_breakeven_ic(
         cost_floor_bps=cost_floor_bps,
         sigma_r_bps=sigma_r_bps,
-        breadth_eff=_n_eff,
+        breadth_eff=_n_eff_universe,
     )
+    _n_eff_emit: float = float(max(breadth, 1.0))  # 진단용 (게이트 판정 불사용)
 
     # PASS / FAIL verdict (Phase 1 criteria)
     fail_reasons: list[str] = []
 
-    # Single economic gate: gating IC must exceed N_eff-based breakeven.
-    # Removes arbitrary net_ic≥0.03 and raw-breadth<3 thresholds.
+    # G1a: IC skill — universe breakeven 기준 (신호 품질 측정, emit sizing과 분리)
     if _gating_ic < _breakeven_eff:
-        fail_reasons.append("resid_ic_below_breakeven_eff")
+        fail_reasons.append("signal_below_effective_breakeven")
+    # G1b: statistical significance
     if _gating_t_nw < 3.0:
-        fail_reasons.append("ic_t_stat_nw_below_3.0")
-    # Regime gate: bear IC must be non-negative (strategy cannot lose in down markets).
+        fail_reasons.append("signal_t_stat_too_low")
+    # G1c: bear-regime IC non-negative (하락장에서 손실 불가 조건)
     _bear_ic: float = regime_ic.get("bear", float("nan"))
     if math.isfinite(_bear_ic) and _bear_ic < 0.0:
         fail_reasons.append("bear_regime_ic_negative")
     if not math.isnan(quantile_cov) and not (0.72 <= quantile_cov <= 0.88):
         fail_reasons.append("quantile_coverage_out_of_range")
     if dsr < 0.95:
-        fail_reasons.append("deflated_sharpe_below_0.95")
+        fail_reasons.append("deflated_sharpe_too_low")
 
     passes: bool = len(fail_reasons) == 0
 
     _logger.debug(
-        "evaluate_alpha: gating_ic=%.4f n_eff=%.1f be_eff=%.4f dsr=%.3f passes=%s fail=%s",
+        "evaluate_alpha: gating_ic=%.4f n_eff=%.1f n_eff_emit=%.1f"
+        " be_eff=%.4f dsr=%.3f passes=%s fail=%s",
         _gating_ic,
-        _n_eff,
+        _n_eff_universe,
+        _n_eff_emit,
         _breakeven_eff,
         dsr,
         passes,
@@ -842,9 +846,10 @@ def evaluate_alpha(
         metrics_by_panel=_metrics_by_panel,
         resid_ic=_gating_ic,
         resid_t_stat_nw=_gating_t_nw,
-        n_eff=_n_eff,
+        n_eff=_n_eff_universe,
         breakeven_ic_eff=_breakeven_eff,
         n_eff_corr_raw=_n_eff_corr_raw,
+        n_eff_emit=_n_eff_emit,
         clip_preservation_ratio=(
             # post_clip_IC / pre_clip_IC: 클립 후 스킬이 얼마나 보존됐는가 (Spec G2c).
             # net_ic_dict["mean_ic"] = post-clip (al-as), _gating_ic = pre-clip dense.
@@ -861,6 +866,7 @@ def sweep_horizon_breakeven(
     alpha_short_map: dict[int, NDArray[np.float64]],
     *,
     cost_floor_bps: float = 24.0,
+    cost_map: dict[int, float] | None = None,
 ) -> dict[int, dict[str, float]]:
     """Scan horizon candidates to find optimal cost/signal ratio.
 
@@ -871,7 +877,10 @@ def sweep_horizon_breakeven(
         realized_fwd_ret_map: {horizon_bars: realized_2d [T, N]} — gross fwd returns.
         alpha_long_map: {horizon_bars: alpha_long_2d [T, N]}.
         alpha_short_map: {horizon_bars: alpha_short_2d [T, N]}.
-        cost_floor_bps: Round-trip cost + hurdle in bps (Taker fixed = 24.0).
+        cost_floor_bps: Default round-trip cost in bps (fallback when cost_map absent).
+        cost_map: Optional per-horizon cost override {horizon: cost_bps}.
+            Enables hold-period amortization (e.g., 24bps / (h // rebalance_bars)).
+            When provided, overrides cost_floor_bps for the matching horizon.
 
     Returns:
         {horizon_bars: {"sigma_r_bps", "net_ic", "breakeven_ic", "breadth_eff",
@@ -890,9 +899,14 @@ def sweep_horizon_breakeven(
 
         sigma_r_bps = _measured_sigma_r_bps(realized_2d)
 
+        # per-horizon amortized cost: cost_map overrides cost_floor_bps for this horizon
+        effective_cost = (
+            float(cost_map[horizon]) if cost_map is not None and horizon in cost_map
+            else cost_floor_bps
+        )
         breadth = compute_effective_breadth(alpha_long_2d, alpha_short_2d)
         breakeven = compute_breakeven_ic(
-            cost_floor_bps=cost_floor_bps,
+            cost_floor_bps=effective_cost,
             sigma_r_bps=sigma_r_bps,
             breadth_eff=breadth,
         )
@@ -986,4 +1000,105 @@ def diagnose_alpha_ic_decomposition(
         result["dense_c3_raw_ic"] = float("nan")
         result["dense_c3_resid_ic"] = float("nan")
 
+    return result
+
+
+def diagnose_selection_monotonicity(
+    inference_signed_2d: NDArray[np.float64],
+    realized_resid_2d: NDArray[np.float64],
+    beta_2d: NDArray[np.float64] | None,
+    *,
+    n_deciles: int = 5,
+    horizon_bars: int = 12,
+) -> dict[str, float]:
+    """Cross-sectional decile 단조성 + selection beta-tilt 분해.
+
+    Args:
+        inference_signed_2d: [T, N] dense NET rank signal (rank_score_long - short).
+        realized_resid_2d: [T, N] beta-residualized forward returns.
+        beta_2d: [T, N] trailing beta per (t, symbol). None이면 beta 지표 nan.
+        n_deciles: 분위 수 (default 5 = quintile).
+        horizon_bars: 확장용 보존 파라미터 (현재 미사용).
+
+    Returns dict with:
+        top_minus_bottom_bps: 최상-최하 decile 스프레드(bps). 양수=단조 방향 수익.
+        monotonicity_spearman: decile_idx vs decile_mean_ret Spearman rho. 1=완전단조.
+        decile_mean_ret_bps_{d}: 각 decile 평균 수익(bps), d=0최하 ~ d=k-1최상.
+        long_decile_beta_mean: 최상 decile 평균 beta.
+        short_decile_beta_mean: 최하 decile 평균 beta.
+        beta_tilt: long_beta - short_beta. ≠0 → beta-loaded selection.
+        n_obs: 유효 (t, s) 쌍 수.
+
+    """
+    t_size, _n_size = inference_signed_2d.shape
+
+    decile_ret_sums = np.zeros(n_deciles, dtype=np.float64)
+    decile_beta_sums = np.zeros(n_deciles, dtype=np.float64)
+    decile_counts = np.zeros(n_deciles, dtype=np.int64)
+    n_obs: int = 0
+
+    for t in range(t_size):
+        sig = inference_signed_2d[t]
+        ret = realized_resid_2d[t]
+        finite_mask = np.isfinite(sig) & np.isfinite(ret)
+        if int(finite_mask.sum()) < n_deciles:
+            continue
+
+        sig_f = sig[finite_mask]
+        ret_f = ret[finite_mask]
+        beta_f: NDArray[np.float64] | None = None
+        if beta_2d is not None:
+            b_row = beta_2d[t][finite_mask]
+            if np.isfinite(b_row).all():
+                beta_f = b_row
+
+        # fractional rank [0,1] → decile 인덱스 (0=최하, n_deciles-1=최상)
+        # _fast_rank1d returns 1-based ranks (1..n); normalize to [0, 1]
+        ranks = _fast_rank1d(sig_f)
+        n_f = float(len(sig_f))
+        ranks_norm = (ranks - 1.0) / max(n_f - 1.0, 1.0)
+        decile_idx = np.clip(
+            (ranks_norm * n_deciles).astype(np.int64), 0, n_deciles - 1
+        )
+
+        for d in range(n_deciles):
+            mask_d = decile_idx == d
+            if not mask_d.any():
+                continue
+            decile_ret_sums[d] += float(np.mean(ret_f[mask_d]))
+            if beta_f is not None:
+                decile_beta_sums[d] += float(np.mean(beta_f[mask_d]))
+            decile_counts[d] += 1
+
+        n_obs += int(finite_mask.sum())
+
+    valid_counts = np.maximum(decile_counts, 1)
+    decile_mean_ret = decile_ret_sums / valid_counts
+    decile_mean_beta = decile_beta_sums / valid_counts
+
+    decile_indices = np.arange(n_deciles, dtype=np.float64)
+    if np.std(decile_mean_ret) > 1e-12:
+        mono_rho = float(scipy.stats.spearmanr(decile_indices, decile_mean_ret).statistic)
+    else:
+        mono_rho = float("nan")
+
+    top_idx = n_deciles - 1
+    top_bps = float(decile_mean_ret[top_idx]) * 1e4
+    bot_bps = float(decile_mean_ret[0]) * 1e4
+    top_minus_bottom_bps = top_bps - bot_bps
+
+    long_beta = float(decile_mean_beta[top_idx]) if beta_2d is not None else float("nan")
+    short_beta = float(decile_mean_beta[0]) if beta_2d is not None else float("nan")
+    beta_tilt = long_beta - short_beta if beta_2d is not None else float("nan")
+
+    result: dict[str, float] = {
+        "top_minus_bottom_bps": top_minus_bottom_bps,
+        "monotonicity_spearman": mono_rho,
+        "long_decile_beta_mean": long_beta,
+        "short_decile_beta_mean": short_beta,
+        "beta_tilt": beta_tilt,
+        "n_obs": float(n_obs),
+    }
+    for d in range(n_deciles):
+        result[f"decile_mean_ret_bps_{d}"] = float(decile_mean_ret[d]) * 1e4
     return result
