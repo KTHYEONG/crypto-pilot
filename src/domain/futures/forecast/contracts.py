@@ -82,6 +82,7 @@ class AlphaForecast:
     artifact_hash: AlphaArtifactHash
     rank_score_long_2d: np.ndarray | None = None   # [T, N] ranker score (long side)
     rank_score_short_2d: np.ndarray | None = None  # [T, N] ranker score (short side)
+    rank_selection_policy: dict[str, Any] | None = None
 
 
 @dataclass(slots=True, frozen=True)

@@ -174,21 +174,22 @@ def _summarize_alpha_phase1_verdict(
     # Categorize blockers for ALPHA_PASS=false diagnostics.
     reason_category_map: dict[str, str] = {
         "signal_below_effective_breakeven": "rank_skill",
-        "signal_t_stat_too_low": "rank_skill",
-        "portfolio_ic_below_raw_breakeven": "rank_skill",
-        "signal_lost_after_selection": "breadth",
-        "no_profitable_horizon_found": "breadth",
+        "signal_t_stat_too_low": "statistical_robustness",
+        "portfolio_ic_below_raw_breakeven": "post_selection",
+        "signal_lost_after_selection": "post_selection",
+        "no_profitable_horizon_found": "post_selection",
         "basket_net_lcb_non_positive": "cost_turnover",
         "basket_net_not_profitable": "cost_turnover",
         "bear_regime_ic_negative": "regime_stability",
         "bear_market_basket_negative": "regime_stability",
-        "deflated_sharpe_too_low": "regime_stability",
+        "deflated_sharpe_too_low": "statistical_robustness",
         "quantile_coverage_out_of_range": "regime_stability",
     }
     blocker_categories: dict[str, list[str]] = {
         "rank_skill": [],
-        "breadth": [],
+        "post_selection": [],
         "cost_turnover": [],
+        "statistical_robustness": [],
         "regime_stability": [],
     }
     for reason in fail_reasons:
@@ -895,6 +896,7 @@ def _run_alpha_evaluation_report(
     if "rank_score_long" in panel_reset.columns and "rank_score_short" in panel_reset.columns:
         from src.domain.futures.forecast.compose import _cs_zscore
         from src.domain.futures.strategy.config import StrategyMLConfig
+        from src.domain.futures.strategy.rank_selection import apply_rank_selection_policy, policy_from_dict
         _ml_cfg = StrategyMLConfig()
         if _ml_cfg.post_cost_admission_mode == "rank_cs_neutral":
             _q = float(_ml_cfg.rank_select_quantile)
@@ -910,27 +912,40 @@ def _run_alpha_evaluation_report(
             # Phase 0-diag: 별도 L/S 선택이 NET +35.5bps 엣지를 파괴(ew=-12.94bps).
             # NET = rank_score_long - rank_score_short 기준으로 long/short 동시 선택.
             _net_signal = derive_signed_rank_signal(_rs_l, _rs_s)
-            _z_net = _cs_zscore(_net_signal)  # cross-sectional z-score
-            _long_mask = np.zeros_like(_z_net, dtype=bool)
-            _short_mask = np.zeros_like(_z_net, dtype=bool)
-            for _t in range(_z_net.shape[0]):
-                _n = _z_net.shape[1]
-                _k = max(1, int(np.ceil(_n * _q)))
-                _row = _z_net[_t]
-                _fin = np.isfinite(_row)
-                if _fin.sum() > 0:
-                    _fin_idx = np.flatnonzero(_fin)
-                    _sorted = _fin_idx[np.argsort(_row[_fin_idx])]
-                    _long_mask[_t, _sorted[-_k:]] = True   # NET 상위 q% = long
-                    _short_mask[_t, _sorted[:_k]] = True   # NET 하위 q% = short
-            pivot_long = pd.DataFrame(
-                np.where(_long_mask, _z_net, 0.0),
-                index=pivot_long.index, columns=common_syms,
-            )
-            pivot_short = pd.DataFrame(
-                np.where(_short_mask, -_z_net, 0.0),  # short: 음의 NET을 양으로 반전
-                index=pivot_short.index, columns=common_syms,
-            )
+            _policy_payload = getattr(alpha_panel, "attrs", {}).get("rank_selection_policy")
+            if isinstance(_policy_payload, dict):
+                _policy = policy_from_dict(_policy_payload)
+                _alpha_l, _alpha_s = apply_rank_selection_policy(
+                    signed_score_2d=_net_signal,
+                    eligible_2d=np.isfinite(_rs_l) | np.isfinite(_rs_s),
+                    policy=_policy,
+                )
+                _long_mask = _alpha_l > 0.0
+                _short_mask = _alpha_s > 0.0
+                pivot_long = pd.DataFrame(_alpha_l, index=pivot_long.index, columns=common_syms)
+                pivot_short = pd.DataFrame(_alpha_s, index=pivot_short.index, columns=common_syms)
+            else:
+                _z_net = _cs_zscore(_net_signal)  # cross-sectional z-score
+                _long_mask = np.zeros_like(_z_net, dtype=bool)
+                _short_mask = np.zeros_like(_z_net, dtype=bool)
+                for _t in range(_z_net.shape[0]):
+                    _n = _z_net.shape[1]
+                    _k = max(1, int(np.ceil(_n * _q)))
+                    _row = _z_net[_t]
+                    _fin = np.isfinite(_row)
+                    if _fin.sum() > 0:
+                        _fin_idx = np.flatnonzero(_fin)
+                        _sorted = _fin_idx[np.argsort(_row[_fin_idx])]
+                        _long_mask[_t, _sorted[-_k:]] = True
+                        _short_mask[_t, _sorted[:_k]] = True
+                pivot_long = pd.DataFrame(
+                    np.where(_long_mask, _z_net, 0.0),
+                    index=pivot_long.index, columns=common_syms,
+                )
+                pivot_short = pd.DataFrame(
+                    np.where(_short_mask, -_z_net, 0.0),
+                    index=pivot_short.index, columns=common_syms,
+                )
             _logger.info(
                 "[RANK-SCOREBOARD] net_signal applied: q=%.2f long_nz=%.3f short_nz=%.3f",
                 _q,
@@ -1120,7 +1135,7 @@ def _run_alpha_evaluation_report(
         _r_c1_br = compute_effective_breadth(_rank_pred_c1, np.zeros_like(_rank_pred_c1))
         _logger.info(
             "🏅 [RANK-QUALITY L1] ic=%.4f t=%.2f hit=%.3f breadth=%.1f"
-            " | rank_score_long-short vs forward_gross_ret (C1 dense, unclipped)",
+            " | signed rank score vs forward_gross_ret (C1 dense, unclipped)",
             _r_c1_ic["mean_ic"],
             _r_c1_ic["t_stat_nw"],
             _r_c1_ic["hit_ratio"],
@@ -1176,7 +1191,7 @@ def _run_alpha_evaluation_report(
     _logger.info(
         "Result |    %s    |    %s    |  N_eff   |    %s    |  (gap=%+5.1fbps)  |    %s",
         pass_emoji(report.resid_ic >= report.breakeven_ic_eff),
-        pass_emoji(report.resid_t_stat_nw >= 2.0),
+        pass_emoji(report.resid_t_stat_nw >= 3.0),
         pass_emoji(report.deflated_sharpe >= 0.95),
         (report.resid_ic - report.breakeven_ic_eff) * 10000.0,
         pass_emoji(
@@ -1200,9 +1215,9 @@ def _run_alpha_evaluation_report(
     _rank_br_c3 = float(_infer_stat.get("effective_breadth", float("nan")))
     if _infer_stat:
         _logger.info(
-            "📊 [RANK-IC C3] ic=%7.4f  t=%7.2f  breadth=%7.2f"
-            " | rank_score_long-short vs beta-resid (dense, unclipped, C3)",
-            _rank_ic_c3, _rank_t_c3, _rank_br_c3,
+            "📊 [RANK-IC C3] ic=%7.4f  t=%7.2f  lcb=%7.4f  breadth=%7.2f"
+            " | signed rank score vs beta-resid (dense, unclipped, C3)",
+            _rank_ic_c3, _rank_t_c3, float(report.rank_ic_lcb), _rank_br_c3,
         )
 
     # Phase 0-diag: Tail-Basket Monotonicity + Beta-Tilt 진단
