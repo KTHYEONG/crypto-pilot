@@ -1352,3 +1352,65 @@ def test_ranker_enabled_false_skips_fit_ranker(monkeypatch: MonkeyPatch) -> None
 
     # Assert — fit_ranker was never called
     assert len(fit_ranker_calls) == 0
+
+
+def test_emit_rank_sized_alpha_preserves_breadth_and_positive_presv() -> None:
+    """rank_sized emission이 EV-clip보다 더 넓은 breadth와 양수 presv를 보장하는지 검증."""
+    from src.domain.futures.strategy.ml_builder import _emit_rank_sized_alpha
+
+    rng = np.random.default_rng(42)
+    T, N = 20, 12
+    rank_score_long = rng.standard_normal((T, N)).astype(np.float32)
+    rank_score_short = rng.standard_normal((T, N)).astype(np.float32)
+    eligible = np.ones((T, N), dtype=bool)
+
+    # Act
+    al, as_ = _emit_rank_sized_alpha(
+        rank_score_long,
+        rank_score_short,
+        eligible,
+        select_q=0.40,
+        weight_k=3.0,
+        clip_lim=1.0,
+    )
+
+    # Assert shape
+    assert al.shape == (T, N)
+    assert as_.shape == (T, N)
+    assert al.dtype == np.float32
+    assert as_.dtype == np.float32
+
+    # breadth: 각 timestep에서 비영(non-zero) 심볼 수 ≥ ceil(N*select_q)
+    min_keep = int(np.ceil(N * 0.40))
+    long_nz = (al > 0).sum(axis=1)
+    short_nz = (as_ > 0).sum(axis=1)
+    assert (long_nz >= min_keep).all(), f"long breadth 부족: min={long_nz.min()}"
+    assert (short_nz >= min_keep).all(), f"short breadth 부족: min={short_nz.min()}"
+
+    # 모든 값이 [0, clip_lim] 범위 내
+    assert al.min() >= 0.0
+    assert al.max() <= 1.0 + 1e-6
+    assert as_.min() >= 0.0
+    assert as_.max() <= 1.0 + 1e-6
+
+
+def test_emit_rank_sized_alpha_skips_sparse_timestep() -> None:
+    """n_elig < 2인 timestep에서 출력이 0임을 검증."""
+    from src.domain.futures.strategy.ml_builder import _emit_rank_sized_alpha
+
+    T, N = 3, 5
+    rank_score = np.ones((T, N), dtype=np.float32)
+    eligible = np.zeros((T, N), dtype=bool)
+    eligible[0, :1] = True  # t=0: n_elig=1 (<2 → skip)
+    eligible[1, :3] = True  # t=1: n_elig=3 (emit)
+    eligible[2, :] = True   # t=2: n_elig=5 (emit)
+
+    al, as_ = _emit_rank_sized_alpha(
+        rank_score, rank_score, eligible,
+        select_q=0.40, weight_k=3.0, clip_lim=1.0,
+    )
+
+    assert (al[0] == 0.0).all(), "n_elig<2 timestep은 0이어야 함"
+    assert (as_[0] == 0.0).all()
+    assert (al[1] > 0).any(), "t=1 emit 미발생"
+    assert (al[2] > 0).any(), "t=2 emit 미발생"

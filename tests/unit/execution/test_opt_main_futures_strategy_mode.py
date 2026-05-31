@@ -261,7 +261,7 @@ def test_summarize_alpha_phase1_verdict_uses_report_passes_not_port_ic() -> None
 
     # G1은 passes=True이지만 G2(basket/sweep/gap_raw) FAIL → alpha_pass=False
     assert verdict["alpha_pass"] is False
-    assert "g2a_gap_raw_non_positive" in verdict["fail_reasons"]
+    assert "portfolio_ic_below_raw_breakeven" in verdict["fail_reasons"]
     assert verdict["gap_eff"] == pytest.approx(0.0010, abs=1e-6)
     assert verdict["port_ic"] == pytest.approx(-0.0030, abs=1e-6)
     assert verdict["bear_pass"] is True
@@ -295,9 +295,9 @@ def test_summarize_exec_diag_verdict_fails_on_negative_portfolio_edge() -> None:
     )
 
     assert verdict["status"] == "FAIL"
-    assert "port_ic_non_positive" in verdict["fail_reasons"]
-    assert "port_ic_below_raw_breakeven" in verdict["fail_reasons"]
-    assert "basket_net_bps_non_positive" in verdict["fail_reasons"]
+    assert "portfolio_ic_not_positive" in verdict["fail_reasons"]
+    assert "portfolio_ic_below_raw_breakeven" in verdict["fail_reasons"]
+    assert "basket_net_returns_negative" in verdict["fail_reasons"]
 
 
 def test_summarize_exec_diag_verdict_passes_on_positive_execution_edge() -> None:
