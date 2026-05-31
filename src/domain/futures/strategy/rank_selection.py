@@ -26,6 +26,11 @@ class RankSelectionPolicy:
     n_obs: int
 
 
+def policy_is_no_trade(policy: RankSelectionPolicy) -> bool:
+    """Return True when validation failed and policy intentionally emits no trade."""
+    return bool(policy.validation_net_lcb_bps <= 0.0 or policy.n_obs <= 0)
+
+
 def _cs_zscore_2d(score_2d: NDArray[np.float64]) -> NDArray[np.float64]:
     """Compute bar-wise cross-sectional z-score."""
     out = np.full_like(score_2d, np.nan, dtype=np.float64)
@@ -201,7 +206,7 @@ def apply_rank_selection_policy(
     alpha_long = np.zeros_like(score, dtype=np.float32)
     alpha_short = np.zeros_like(score, dtype=np.float32)
     # Conservative fallback: if validation failed, keep no-trade and let gates fail honestly.
-    if policy.validation_net_lcb_bps <= 0.0 or policy.n_obs <= 0:
+    if policy_is_no_trade(policy):
         return alpha_long, alpha_short
 
     for t in range(score.shape[0]):

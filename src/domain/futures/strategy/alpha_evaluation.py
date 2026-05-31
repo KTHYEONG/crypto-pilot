@@ -138,6 +138,12 @@ class AlphaEvaluationReport:
     basket_net_bps_lcb_24bps: float = float("nan")
     top_bottom_spread_bps: float = float("nan")
     turnover_proxy: float = float("nan")
+    policy_validation_net_lcb_bps: float = float("nan")
+    policy_validation_gross_bps: float = float("nan")
+    policy_validation_ir_t: float = float("nan")
+    policy_validation_monotonicity: float = float("nan")
+    policy_no_trade: bool = False
+    evaluation_layer_failures: dict[str, list[str]] = field(default_factory=dict)
 
 
 def compute_net_ic(
@@ -612,6 +618,11 @@ def evaluate_alpha(
     basket_quantile: float = 0.35,
     # Phase F: trading_mask — True인 심볼(C3)만 trading panel 계산에 사용
     trading_mask: NDArray[np.bool_] | None = None,
+    policy_validation_net_lcb_bps: float = float("nan"),
+    policy_validation_gross_bps: float = float("nan"),
+    policy_validation_ir_t: float = float("nan"),
+    policy_validation_monotonicity: float = float("nan"),
+    policy_no_trade: bool = False,
 ) -> AlphaEvaluationReport:
     """Compute all alpha quality metrics in one call.
 
@@ -846,7 +857,7 @@ def evaluate_alpha(
     if _gating_t_nw < 3.0:
         fail_reasons.append("signal_t_stat_too_low")
     # G2: post-cost basket robustness
-    if float(_spread_diag.get("net_spread_lcb_bps", -1e9)) <= 0.0:
+    if not policy_no_trade and float(_spread_diag.get("net_spread_lcb_bps", -1e9)) <= 0.0:
         fail_reasons.append("basket_net_lcb_non_positive")
     # G1c: bear-regime IC non-negative (하락장에서 손실 불가 조건)
     _bear_ic: float = regime_ic.get("bear", float("nan"))
@@ -856,6 +867,8 @@ def evaluate_alpha(
         fail_reasons.append("quantile_coverage_out_of_range")
     if dsr < 0.95:
         fail_reasons.append("deflated_sharpe_too_low")
+    if policy_no_trade:
+        fail_reasons.append("policy_economics.validation_net_lcb_non_positive")
 
     passes: bool = len(fail_reasons) == 0
 
@@ -908,6 +921,25 @@ def evaluate_alpha(
             "effective_breadth": _infer_breadth,
         }
 
+    evaluation_layer_failures: dict[str, list[str]] = {
+        "mechanical_integrity": [],
+        "rank_skill": [],
+        "policy_economics": [],
+        "execution_realism": [],
+        "statistical_robustness": [],
+    }
+    for reason in fail_reasons:
+        if reason.startswith("policy_economics."):
+            evaluation_layer_failures["policy_economics"].append(reason)
+        elif reason in {"signal_below_effective_breakeven", "bear_regime_ic_negative"}:
+            evaluation_layer_failures["rank_skill"].append(reason)
+        elif reason in {"signal_t_stat_too_low", "deflated_sharpe_too_low"}:
+            evaluation_layer_failures["statistical_robustness"].append(reason)
+        elif reason == "basket_net_lcb_non_positive":
+            evaluation_layer_failures["execution_realism"].append(reason)
+        else:
+            evaluation_layer_failures["mechanical_integrity"].append(reason)
+
     return AlphaEvaluationReport(
         net_ic=net_ic_dict["mean_ic"],
         net_icir=net_ic_dict["icir"],
@@ -934,6 +966,12 @@ def evaluate_alpha(
         basket_net_bps_lcb_24bps=float(_spread_diag.get("net_spread_lcb_bps", float("nan"))),
         top_bottom_spread_bps=float(_spread_diag.get("gross_spread_bps", float("nan"))),
         turnover_proxy=float(_spread_diag.get("turnover_proxy", float("nan"))),
+        policy_validation_net_lcb_bps=float(policy_validation_net_lcb_bps),
+        policy_validation_gross_bps=float(policy_validation_gross_bps),
+        policy_validation_ir_t=float(policy_validation_ir_t),
+        policy_validation_monotonicity=float(policy_validation_monotonicity),
+        policy_no_trade=bool(policy_no_trade),
+        evaluation_layer_failures=evaluation_layer_failures,
         clip_preservation_ratio=(
             # post_clip_IC / pre_clip_IC: 클립 후 스킬이 얼마나 보존됐는가 (Spec G2c).
             # net_ic_dict["mean_ic"] = post-clip (al-as), _gating_ic = pre-clip dense.

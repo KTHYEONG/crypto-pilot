@@ -2,11 +2,30 @@ from __future__ import annotations
 
 import logging
 import math
+from typing import Literal, TypedDict
 
 import numba
 import numpy as np
 
 _logger = logging.getLogger(__name__)
+
+AlphaOutputUnit = Literal["return_fraction", "rank_weight"]
+AlphaGateLayer = Literal[
+    "mechanical_integrity",
+    "rank_skill",
+    "policy_economics",
+    "execution_realism",
+    "statistical_robustness",
+]
+
+
+class AlphaGateReason(TypedDict):
+    reason: str
+    layer: AlphaGateLayer
+    metric: str
+    observed: float
+    threshold: float
+    unit: str
 
 
 def _nw_t_stat(series: np.ndarray, *, horizon_bars: int) -> float:
@@ -548,8 +567,10 @@ def alpha_gate_diagnostics(
     tradable_short_nz: float = 0.0,
     min_tradable_long_nz: float = 0.0,
     min_tradable_short_nz: float = 0.0,
+    alpha_output_unit: AlphaOutputUnit = "return_fraction",
+    require_alpha_cost_wall: bool = True,
 ) -> dict[str, object]:
-    """Evaluate alpha viability gate and expose fail reasons."""
+    """Evaluate alpha admission diagnostics without mixing rank weights and return bps."""
     floor_bps = float(friction_bps + hurdle_bps)
     metric_bps = (
         float(active_alpha_p95_bps)
@@ -558,26 +579,101 @@ def alpha_gate_diagnostics(
     )
     metric_source = "active_alpha_p95_bps" if active_alpha_p95_bps is not None else "alpha_p95_bps"
     fail_reasons: list[str] = []
-    if metric_bps < (floor_bps - max(0.0, float(cost_wall_tolerance_bps))):
+    reason_details: list[AlphaGateReason] = []
+    cost_wall_required = bool(require_alpha_cost_wall and alpha_output_unit == "return_fraction")
+    if cost_wall_required and metric_bps < (floor_bps - max(0.0, float(cost_wall_tolerance_bps))):
         fail_reasons.append("alpha_p95_below_cost_wall")
+        reason_details.append(
+            {
+                "reason": "alpha_p95_below_cost_wall",
+                "layer": "policy_economics",
+                "metric": metric_source,
+                "observed": metric_bps,
+                "threshold": floor_bps,
+                "unit": "bps",
+            }
+        )
     if long_nz < min_long_nz:
         fail_reasons.append("long_nz_below_threshold")
+        reason_details.append(
+            {
+                "reason": "long_nz_below_threshold",
+                "layer": "mechanical_integrity",
+                "metric": "long_nz",
+                "observed": float(long_nz),
+                "threshold": float(min_long_nz),
+                "unit": "ratio",
+            }
+        )
     if short_nz < min_short_nz:
         fail_reasons.append("short_nz_below_threshold")
+        reason_details.append(
+            {
+                "reason": "short_nz_below_threshold",
+                "layer": "mechanical_integrity",
+                "metric": "short_nz",
+                "observed": float(short_nz),
+                "threshold": float(min_short_nz),
+                "unit": "ratio",
+            }
+        )
     if xs_long_preservation_ratio < min_xs_preservation:
         fail_reasons.append("xs_long_preservation_below_threshold")
+        reason_details.append(
+            {
+                "reason": "xs_long_preservation_below_threshold",
+                "layer": "rank_skill",
+                "metric": "xs_long_preservation_ratio",
+                "observed": float(xs_long_preservation_ratio),
+                "threshold": float(min_xs_preservation),
+                "unit": "ratio",
+            }
+        )
     if xs_short_preservation_ratio < min_xs_preservation:
         fail_reasons.append("xs_short_preservation_below_threshold")
-    if tradable_long_nz < min_tradable_long_nz:
+        reason_details.append(
+            {
+                "reason": "xs_short_preservation_below_threshold",
+                "layer": "rank_skill",
+                "metric": "xs_short_preservation_ratio",
+                "observed": float(xs_short_preservation_ratio),
+                "threshold": float(min_xs_preservation),
+                "unit": "ratio",
+            }
+        )
+    if alpha_output_unit != "rank_weight" and tradable_long_nz < min_tradable_long_nz:
         fail_reasons.append("tradable_long_nz_below_threshold")
-    if tradable_short_nz < min_tradable_short_nz:
+        reason_details.append(
+            {
+                "reason": "tradable_long_nz_below_threshold",
+                "layer": "execution_realism",
+                "metric": "tradable_long_nz",
+                "observed": float(tradable_long_nz),
+                "threshold": float(min_tradable_long_nz),
+                "unit": "ratio",
+            }
+        )
+    if alpha_output_unit != "rank_weight" and tradable_short_nz < min_tradable_short_nz:
         fail_reasons.append("tradable_short_nz_below_threshold")
+        reason_details.append(
+            {
+                "reason": "tradable_short_nz_below_threshold",
+                "layer": "execution_realism",
+                "metric": "tradable_short_nz",
+                "observed": float(tradable_short_nz),
+                "threshold": float(min_tradable_short_nz),
+                "unit": "ratio",
+            }
+        )
     return {
         "alpha_gate_pass": len(fail_reasons) == 0,
         "alpha_gate_fail_reasons": fail_reasons,
         "alpha_gate_floor_bps": floor_bps,
         "alpha_gate_metric_bps": metric_bps,
         "alpha_gate_metric_source": metric_source,
+        "alpha_output_unit": alpha_output_unit,
+        "alpha_cost_wall_required": cost_wall_required,
+        "alpha_gate_reason_details": reason_details,
     }
 
 

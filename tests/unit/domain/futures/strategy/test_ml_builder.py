@@ -13,6 +13,7 @@ from src.domain.futures.strategy.ml_builder import (
     _rank_score,
     _resolve_side_targets,
 )
+from src.domain.futures.strategy.rank_selection import RankSelectionPolicy, policy_is_no_trade
 
 
 def _dataset(rows: int, groups: int, features: int = 3) -> LongMatrixDataset:
@@ -115,3 +116,20 @@ def test_resolve_side_targets_cs_residual_uses_residual_rank_and_relevance() -> 
     assert np.allclose(short_rank, -labels.rank_target)
     assert np.array_equal(long_rel, labels.relevance)
     assert np.array_equal(short_rel, 4 - labels.relevance)
+
+
+def test_policy_is_no_trade_true_when_validation_lcb_non_positive() -> None:
+    policy = RankSelectionPolicy(
+        polarity=1,
+        quantile=0.25,
+        min_abs_z=0.0,
+        weighting="tanh",
+        weight_k=3.0,
+        holding_bars=12,
+        validation_net_lcb_bps=0.0,
+        validation_gross_bps=0.0,
+        validation_ir_t=0.0,
+        validation_monotonicity=0.0,
+        n_obs=100,
+    )
+    assert policy_is_no_trade(policy) is True

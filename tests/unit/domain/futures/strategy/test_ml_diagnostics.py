@@ -308,6 +308,51 @@ def test_alpha_gate_diagnostics_prefers_active_metric_when_provided() -> None:
     assert result["alpha_gate_metric_source"] == "active_alpha_p95_bps"
 
 
+def test_alpha_gate_diagnostics_skips_cost_wall_for_rank_weight() -> None:
+    result = alpha_gate_diagnostics(
+        alpha_p95_bps=1.0,
+        friction_bps=24.0,
+        hurdle_bps=0.0,
+        long_nz=1.0,
+        short_nz=1.0,
+        xs_long_preservation_ratio=1.0,
+        xs_short_preservation_ratio=1.0,
+        min_long_nz=0.0,
+        min_short_nz=0.0,
+        min_xs_preservation=0.0,
+        tradable_long_nz=0.0,
+        tradable_short_nz=0.0,
+        min_tradable_long_nz=0.5,
+        min_tradable_short_nz=0.5,
+        alpha_output_unit="rank_weight",
+        require_alpha_cost_wall=True,
+    )
+    assert result["alpha_gate_pass"] is True
+    assert result["alpha_cost_wall_required"] is False
+    assert "alpha_p95_below_cost_wall" not in result["alpha_gate_fail_reasons"]
+    assert "tradable_long_nz_below_threshold" not in result["alpha_gate_fail_reasons"]
+
+
+def test_alpha_gate_diagnostics_keeps_cost_wall_for_return_fraction() -> None:
+    result = alpha_gate_diagnostics(
+        alpha_p95_bps=1.0,
+        friction_bps=24.0,
+        hurdle_bps=0.0,
+        long_nz=1.0,
+        short_nz=1.0,
+        xs_long_preservation_ratio=1.0,
+        xs_short_preservation_ratio=1.0,
+        min_long_nz=0.0,
+        min_short_nz=0.0,
+        min_xs_preservation=0.0,
+        alpha_output_unit="return_fraction",
+        require_alpha_cost_wall=True,
+    )
+    assert result["alpha_gate_pass"] is False
+    assert result["alpha_cost_wall_required"] is True
+    assert "alpha_p95_below_cost_wall" in result["alpha_gate_fail_reasons"]
+
+
 def test_build_quality_report_uses_ic_score_2d_for_spearman_rank_ic() -> None:
     t, n, f = 12, 6, 3
     rng = np.random.default_rng(0)
