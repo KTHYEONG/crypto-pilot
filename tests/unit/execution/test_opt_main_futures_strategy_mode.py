@@ -263,14 +263,14 @@ def test_summarize_alpha_phase1_verdict_uses_report_passes_not_port_ic() -> None
     assert verdict["alpha_pass"] is False
     assert "portfolio_ic_below_raw_breakeven" in verdict["fail_reasons"]
     assert verdict["blocker_categories"]["rank_skill"] == []
-    assert verdict["blocker_categories"]["post_selection"] == [
+    assert verdict["blocker_categories"]["policy_economics"] == [
         "portfolio_ic_below_raw_breakeven",
         "signal_lost_after_selection",
         "no_profitable_horizon_found",
     ]
-    assert verdict["blocker_categories"]["cost_turnover"] == ["basket_net_not_profitable"]
+    assert verdict["blocker_categories"]["execution_realism"] == ["basket_net_not_profitable"]
     assert verdict["blocker_categories"]["statistical_robustness"] == []
-    assert verdict["blocker_categories"]["regime_stability"] == []
+    assert verdict["blocker_categories"]["mechanical_integrity"] == []
     assert verdict["gap_eff"] == pytest.approx(0.0010, abs=1e-6)
     assert verdict["port_ic"] == pytest.approx(-0.0030, abs=1e-6)
     assert verdict["bear_pass"] is True
@@ -368,6 +368,48 @@ def test_summarize_alpha_phase1_verdict_maps_dsr_to_statistical_robustness() -> 
         sweep_pass_count=1,
     )
     assert "deflated_sharpe_too_low" in verdict["blocker_categories"]["statistical_robustness"]
+    assert verdict["blocker_categories"]["policy_economics"] == [
+        "portfolio_ic_below_raw_breakeven",
+        "signal_lost_after_selection",
+    ]
+    assert verdict["blocker_categories"]["execution_realism"] == []
+
+
+def test_summarize_alpha_phase1_verdict_maps_policy_no_trade_reason() -> None:
+    report = AlphaEvaluationReport(
+        net_ic=0.01,
+        net_icir=0.0,
+        ic_t_stat_nw=3.2,
+        breakeven_ic=0.005,
+        effective_breadth=2.0,
+        net_sharpe=float("nan"),
+        quantile_coverage=float("nan"),
+        q50_sign_hit=float("nan"),
+        per_regime_ic={"bull": 0.01, "bear": 0.01, "chop": 0.0},
+        per_regime_breakeven={"bull": 0.01, "bear": 0.01, "chop": 0.01},
+        deflated_sharpe=0.99,
+        cost_drag={},
+        passes=False,
+        fail_reasons=["policy_economics.validation_net_lcb_non_positive"],
+        resid_ic=0.02,
+        resid_t_stat_nw=3.2,
+        n_eff=10.0,
+        breakeven_ic_eff=0.01,
+        policy_no_trade=True,
+    )
+    verdict = opt_main_futures._summarize_alpha_phase1_verdict(
+        report,
+        basket_net_bps=10.0,
+        basket_ir_t=2.5,
+        sweep_pass_count=1,
+    )
+    assert "policy_economics.validation_net_lcb_non_positive" in verdict["fail_reasons"]
+    assert (
+        "policy_economics.validation_net_lcb_non_positive"
+        in verdict["blocker_categories"]["policy_economics"]
+    )
+    assert verdict["policy_no_trade"] is True
+    assert verdict["gate_results"]["basket_net_positive"] is True
 
 
 def test_requires_exec_1m_respects_intrabar_config_for_quick_backtest(
