@@ -16,6 +16,7 @@ from src.domain.futures.strategy.alpha_evaluation import (
     compute_per_regime_ic,
     compute_q50_sign_hit,
     compute_quantile_coverage,
+    derive_signed_rank_signal,
     diagnose_alpha_ic_decomposition,
     diagnose_selection_monotonicity,
     effective_breadth_corr,
@@ -98,6 +99,37 @@ def test_compute_effective_breadth_partial_active() -> None:
 
     # Assert
     assert result == pytest.approx(3.0, rel=1e-6)
+
+
+def test_derive_signed_rank_signal_same_score_returns_single_ranker_contract() -> None:
+    """Same-score panel should return long if finite, else short."""
+    long_arr = np.array([[1.0, np.nan], [3.0, 4.0]], dtype=np.float64)
+    short_arr = np.array([[1.0 + 1e-12, 2.0], [3.0 - 1e-12, 4.0]], dtype=np.float64)
+
+    result = derive_signed_rank_signal(long_arr, short_arr)
+
+    expected = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
+    np.testing.assert_allclose(result, expected, rtol=0.0, atol=0.0)
+
+
+def test_derive_signed_rank_signal_dual_side_returns_half_spread() -> None:
+    """Distinct long/short score panels should return half spread."""
+    long_arr = np.array([[3.0, 1.0], [2.0, -2.0]], dtype=np.float64)
+    short_arr = np.array([[1.0, -1.0], [0.0, -4.0]], dtype=np.float64)
+
+    result = derive_signed_rank_signal(long_arr, short_arr)
+
+    expected = 0.5 * (long_arr - short_arr)
+    np.testing.assert_allclose(result, expected, rtol=0.0, atol=0.0)
+
+
+def test_derive_signed_rank_signal_shape_mismatch_raises_value_error() -> None:
+    """Shape mismatch must raise ValueError."""
+    long_arr = np.zeros((2, 2), dtype=np.float64)
+    short_arr = np.zeros((2, 3), dtype=np.float64)
+
+    with pytest.raises(ValueError, match="identical shapes"):
+        derive_signed_rank_signal(long_arr, short_arr)
 
 
 # ---------------------------------------------------------------------------
