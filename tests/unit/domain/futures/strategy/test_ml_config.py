@@ -93,7 +93,7 @@ def test_strategy_ml_config_ranker_enabled_false() -> None:
 
 def test_strategy_ml_config_new_modes_defaults() -> None:
     cfg = StrategyMLConfig()
-    assert cfg.rank_target_mode == "forward_gross_rank"
+    assert cfg.rank_target_mode == "cs_residual"
     assert cfg.calibrator_target_mode == "rank_confidence"
     assert cfg.post_cost_admission_mode == "rank_cs_neutral"
     assert cfg.oos_ic_target_source == "forward_gross_ret"
@@ -116,7 +116,7 @@ def test_strategy_ml_config_rank_cs_neutral_defaults() -> None:
     cfg = StrategyMLConfig()
 
     # Assert — 기본값 확인
-    assert cfg.rank_select_quantile == pytest.approx(0.33)
+    assert cfg.rank_select_quantile == pytest.approx(0.45)
     assert cfg.target_breadth == 8
     assert cfg.ic_prior_for_gate == pytest.approx(0.03)
     assert cfg.ev_secondary_tilt_weight == pytest.approx(0.0)
