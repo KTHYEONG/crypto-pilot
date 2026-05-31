@@ -13,11 +13,11 @@ from src.domain.futures.strategy.alpha_evaluation import (
     compute_effective_breadth,
     compute_net_ic,
     compute_per_regime_breakeven,
-    diagnose_selection_monotonicity,
     compute_per_regime_ic,
     compute_q50_sign_hit,
     compute_quantile_coverage,
     diagnose_alpha_ic_decomposition,
+    diagnose_selection_monotonicity,
     effective_breadth_corr,
     evaluate_alpha,
     sweep_horizon_breakeven,
@@ -993,3 +993,74 @@ def test_diagnose_selection_monotonicity_beta_tilt_detected() -> None:
     # 고베타가 상위 decile → long_beta > short_beta
     assert result["long_decile_beta_mean"] > result["short_decile_beta_mean"]
     assert result["beta_tilt"] > 0.3  # 명확한 tilt
+
+
+def test_evaluate_alpha_dsr_uses_post_clip_signal() -> None:
+    """DSR은 post-clip(체결) 신호 기준으로 계산 → dense pre-clip 과포화 방지.
+
+    pre-clip dense signal(IC 높음)과 post-clip(순수 노이즈, IC≈0)을 분리 공급했을 때,
+    DSR이 post-clip 기준으로 낮게 계산되어야 한다.
+    구현이 잘못되어 pre-clip을 사용하면 DSR ≈ 1.0 saturate.
+    """
+    # Arrange
+    rng = np.random.default_rng(11)
+    T, N = 120, 8
+    realized = rng.standard_normal((T, N)) * 0.04
+
+    # pre-clip dense: 실현수익과 강한 상관 (IC ≈ 0.8)
+    dense_signal = realized * 0.8 + rng.standard_normal((T, N)) * 0.002
+
+    # post-clip: 순수 랜덤 노이즈 (realized와 독립, IC ≈ 0)
+    noise_l = np.abs(rng.standard_normal((T, N)) * 0.001)
+    noise_s = np.abs(rng.standard_normal((T, N)) * 0.001)
+
+    # Act
+    report = evaluate_alpha(
+        alpha_long_2d=noise_l,
+        alpha_short_2d=noise_s,
+        realized_fwd_ret_2d=realized,
+        inference_signed_2d=dense_signal,
+        n_trials=6,
+    )
+
+    # Assert: post-clip(노이즈) 기준 DSR은 낮아야 함 (< 0.7)
+    # pre-clip 기준을 사용하면 dense IC ≈ 0.8 → DSR ≈ 1.0
+    assert 0.0 <= report.deflated_sharpe <= 1.0
+    assert report.deflated_sharpe < 0.7, (
+        f"DSR={report.deflated_sharpe:.4f} — post-clip(노이즈) 신호 기준이 아닌 경우 1.0에 가까워짐"
+    )
+
+
+def test_evaluate_alpha_clip_preservation_gate_at_0_7() -> None:
+    """clip_preservation_ratio < 0.7 시나리오 검증.
+
+    변경 2: threshold 0.5 → 0.7 상향.
+    clip_preservation_ratio = post_clip_IC / pre_clip_IC.
+    Spearman은 scale-invariant이므로 magnitude 축소가 아닌
+    신호 구조 파괴(post = 독립 노이즈)로 낮은 비율을 생성해야 한다.
+    """
+    # Arrange: pre-clip은 IC 높고, post-clip은 독립 노이즈(다른 방향 구조)
+    rng = np.random.default_rng(55)
+    T, N = 200, 10
+    realized = rng.standard_normal((T, N)) * 0.04
+
+    # pre-clip: 실현수익과 강한 상관 (IC ≈ 0.7)
+    dense = realized * 0.7 + rng.standard_normal((T, N)) * 0.004
+
+    # post-clip: 독립 노이즈 — pred_2d IC ≈ 0 → ratio ≈ 0 / 0.7 ≈ 0
+    random_long = np.abs(rng.standard_normal((T, N)) * 0.001)
+    random_short = np.abs(rng.standard_normal((T, N)) * 0.001)
+
+    # Act
+    report = evaluate_alpha(
+        alpha_long_2d=random_long,
+        alpha_short_2d=random_short,
+        realized_fwd_ret_2d=realized,
+        inference_signed_2d=dense,
+    )
+
+    # Assert: clip_preservation_ratio << 0.7
+    assert np.isfinite(report.clip_preservation_ratio)
+    assert report.clip_preservation_ratio < 0.7, (
+        f"clip_pres={report.clip_preservation_ratio:.3f} — post-clip이 독립 노이즈일 때 < 0.7이어야 함"
+    )
