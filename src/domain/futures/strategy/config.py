@@ -164,7 +164,7 @@ class FeatureIntegrityConfig:
 
 @dataclass(slots=True, frozen=True)
 class StrategyMLConfig:
-    """ML strategy configuration for compatibility name + quantile calibrator."""
+    """ML strategy configuration for simple rank-native architecture."""
 
     name: Literal["lambdamart"] = "lambdamart"
     timeframe: str = "4h"
@@ -179,27 +179,27 @@ class StrategyMLConfig:
     test_months: int = 3
     purge_bars: int = 12
     embargo_bars: int = 12
-    max_features: int = 64
+    max_features: int = 32
     alpha_clip_bps: float = 75.0
     lambda_tail: float = 0.10
     ranker_n_estimators: int = 300
     calibrator_n_estimators: int = 200
     learning_rate: float = 0.03
-    ranker_learning_rate: float = 0.02
+    ranker_learning_rate: float = 0.03
     calibrator_learning_rate: float = 0.02
-    num_leaves: int = 15
-    max_depth: int = 4
+    num_leaves: int = 7
+    max_depth: int = 3
     min_data_in_leaf: int = 100
     feature_fraction: float = 0.80
     bagging_fraction: float = 0.80
-    ranker_feature_fraction: float = 0.70
+    ranker_feature_fraction: float = 0.80
     calibrator_feature_fraction: float = 0.70
-    ranker_bagging_fraction: float = 0.75
+    ranker_bagging_fraction: float = 0.80
     calibrator_bagging_fraction: float = 0.75
     ranker_bagging_freq: int = 1
     calibrator_bagging_freq: int = 1
     lambda_l2: float = 5.0
-    ranker_lambda_l2: float = 20.0
+    ranker_lambda_l2: float = 30.0
     calibrator_lambda_l2: float = 1.0
     ranker_reg_alpha: float = 5.0
     calibrator_reg_alpha: float = 1.5
@@ -223,13 +223,13 @@ class StrategyMLConfig:
     # "beta_residualized" = current default: exec_net_ret after beta-resid, pre-CS-demean
     # "gross"             = raw log return minus funding only (no beta removal, no fee)
     calibrator_target: Literal["beta_residualized", "gross"] = "beta_residualized"
-    model_family: Literal["lgbm_regression", "lgbm_huber", "lgbm_lambdarank"] = "lgbm_regression"
+    model_family: Literal["lgbm_regression", "lgbm_huber", "lgbm_lambdarank"] = "lgbm_lambdarank"
     ranking_mode: Literal["pointwise", "group_ndcg"] = "group_ndcg"
     # False: skip ranker stage; calibrator uses zero rank_score
     # (C3 ablation A/B — empirically better OOS IC)
     ranker_enabled: bool = True
     rank_target_mode: Literal["cs_residual", "forward_gross_rank"] = "cs_residual"
-    calibrator_target_mode: Literal["signed_ev", "rank_confidence"] = "rank_confidence"
+    calibrator_target_mode: Literal["signed_ev", "rank_confidence"] = "signed_ev"
     post_cost_admission_mode: Literal[
         "ev_gate", "rank_then_ev_gate", "rank_cs_neutral"
     ] = "rank_cs_neutral"
@@ -240,7 +240,7 @@ class StrategyMLConfig:
     regime_exposure_bull: float = 1.0      # full deployment in bull (IC > breakeven)
     regime_exposure_bear: float = 0.5      # partial exposure in bear — L/S is already market-hedged
     regime_exposure_chop: float = 1.0      # suppressed in chop (IC ≈ 0)
-    ev_mode: Literal["quantile", "prob_x_magnitude"] = "quantile"
+    ev_mode: Literal["quantile", "prob_x_magnitude"] = "prob_x_magnitude"
     alpha_gate_min_long_nz: float = 0.0
     alpha_gate_min_short_nz: float = 0.0
     alpha_gate_min_xs_preservation: float = 0.0
@@ -249,8 +249,8 @@ class StrategyMLConfig:
     # Numerical tolerance around cost wall comparison to avoid failing on tiny rounding noise.
     alpha_gate_cost_wall_tolerance_bps: float = 0.0
     ev_tail_blend_weight: float = 0.0
-    alpha_emit_mode: str = "rank_sized"   # "rank_sized" | "ev_clip"
-    alpha_emit_select_q: float = 0.40     # per-side 광폭 분위
+    alpha_emit_mode: str = "rank_sized"   # keep for compatibility
+    alpha_emit_select_q: float = 0.35
     alpha_emit_weight_k: float = 3.0      # tanh rank-weight steepness
     feature_groups_enabled: tuple[
         Literal[
@@ -272,9 +272,8 @@ class StrategyMLConfig:
         "liquidity",
         "market_context",
         "microstructure",
-        "missingness",
     )
-    add_missingness_indicators: bool = True
+    add_missingness_indicators: bool = False
     horizon_experiment_enabled: bool = False
     horizon_candidates: tuple[int, ...] = ()
     training_universe_scope: Literal[
@@ -293,8 +292,10 @@ class StrategyMLConfig:
     sample_weight_time_decay_halflife_bars: int | None = 1080
 
     # Phase 1: rank-native composition
-    rank_select_quantile: float = 0.45          # top/bottom quantile for L/S selection (N_eff)
+    rank_select_quantile: float = 0.35
+    rank_select_quantiles: tuple[float, ...] = (0.25, 0.35, 0.45)
     target_breadth: int = 8                      # minimum effective breadth target
+    ic_lcb_z: float = 1.0
     ic_prior_for_gate: float = 0.03             # leak-free IC prior for portfolio net-edge gate
     ev_secondary_tilt_weight: float = 0.0       # blend weight for EV rank tilt (0=rank-only)
     integrity_gate_enabled: bool = True
@@ -317,8 +318,8 @@ class StrategyMLConfig:
             )
         if self.embargo_bars < 1:
             raise ValueError("embargo_bars must be >= 1")
-        if self.max_features > 64:
-            raise ValueError("max_features must be <= 64")
+        if self.max_features > 32:
+            raise ValueError("max_features must be <= 32")
         if self.alpha_clip_bps <= 0.0:
             raise ValueError("alpha_clip_bps must be > 0")
         if self.min_group_size < 2:
@@ -389,8 +390,14 @@ class StrategyMLConfig:
             )
         if not (0.0 < self.rank_select_quantile < 0.5):
             raise ValueError("rank_select_quantile must satisfy 0 < value < 0.5")
+        if len(self.rank_select_quantiles) == 0:
+            raise ValueError("rank_select_quantiles must be non-empty")
+        if any((q <= 0.0 or q >= 0.5) for q in self.rank_select_quantiles):
+            raise ValueError("rank_select_quantiles must satisfy 0 < q < 0.5")
         if self.target_breadth < 2:
             raise ValueError("target_breadth must be >= 2")
+        if self.ic_lcb_z < 0.0:
+            raise ValueError("ic_lcb_z must be >= 0")
         if not (0.0 <= self.ic_prior_for_gate <= 0.2):
             raise ValueError("ic_prior_for_gate must satisfy 0 <= value <= 0.2")
         if not (0.0 <= self.ev_secondary_tilt_weight <= 1.0):

@@ -74,6 +74,7 @@ def test_build_feature_panel_supports_group_ablation_toggle() -> None:
     cfg = StrategyMLConfig(
         min_group_size=2,
         feature_groups_enabled=("trend", "missingness"),
+        add_missingness_indicators=True,
     )
     panel = build_feature_panel(_aligned(close), cfg)
     assert "ret_1" in panel.feature_names
