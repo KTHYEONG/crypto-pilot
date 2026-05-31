@@ -829,7 +829,7 @@ def _run_alpha_evaluation_report(
 
     # realized returns matching
     panel_reset = alpha_panel.reset_index()
-    panel_reset["datetime"] = pd.to_datetime(panel_reset["datetime"], utc=True).dt.tz_localize(None)
+    panel_reset["datetime"] = pd.to_datetime(panel_reset["datetime"], utc=True).dt.tz_convert(None)
     pivot_long = panel_reset.pivot(index="datetime", columns="symbol", values="alpha_long")
     pivot_short = panel_reset.pivot(index="datetime", columns="symbol", values="alpha_short")
     # C3 trading_symbols만 평가 — non-trading 심볼의 alpha=0이 IC를 왜곡하는 것을 방지
@@ -933,14 +933,25 @@ def _run_alpha_evaluation_report(
     realized_df = pd.DataFrame(realized_rows, index=pivot_long.index)
 
     # rank_score_long이 finite인 날짜(OOS fold 예측 구간)만 추출
-    _raw_rs_long = (
+    # C3 심볼 교집합 전에 전체 심볼 기준으로 OOS 날짜를 확정한다.
+    _raw_rs_all = (
         panel_reset.pivot(index="datetime", columns="symbol", values="rank_score_long")
-        .reindex(columns=common_syms)
+        .reindex(columns=_all_syms_with_data)
     )
-    _oos_dt_mask = np.any(np.isfinite(_raw_rs_long.to_numpy()), axis=1)
-    _oos_idx = _raw_rs_long.index[_oos_dt_mask]
+    _oos_dt_mask = np.any(np.isfinite(_raw_rs_all.to_numpy()), axis=1)
+    _oos_idx = _raw_rs_all.index[_oos_dt_mask]
 
     common_idx = _oos_idx.intersection(realized_df.index)
+    _logger.info(
+        "[OOS-DIAG] rank_cols=%d finite_rows=%d oos_idx=%d common_idx=%d | "
+        "common_syms[:3]=%s rank_cols[:3]=%s",
+        len(_raw_rs_all.columns),
+        int(_oos_dt_mask.sum()),
+        len(_oos_idx),
+        len(common_idx),
+        list(common_syms)[:3],
+        list(_raw_rs_all.columns)[:3],
+    )
     al = pivot_long.loc[common_idx].to_numpy(dtype=np.float64)
     as_ = pivot_short.loc[common_idx].to_numpy(dtype=np.float64)
     real = realized_df.loc[common_idx].to_numpy(dtype=np.float64)
@@ -1297,10 +1308,7 @@ def _run_alpha_evaluation_report(
         alpha_short_map[h] = as_[:clip]
 
     # Phase 2: 엄격한 24bps 비용 검증 (상각 없음, 물리적 진실 보존)
-    _cost_map = {
-        h: 24.0
-        for h in [6, 12, 18]
-    }
+    _cost_map = dict.fromkeys([6, 12, 18], 24.0)
     sweep = sweep_horizon_breakeven(
         realized_map, alpha_long_map, alpha_short_map, cost_map=_cost_map
     )
@@ -1713,7 +1721,7 @@ def run_pipeline(
         live_inference_panel,
         inference_timeline,
     )
-    _logger.info("<< DATA: %.2fs (ok=%d)", time.perf_counter() - t_data, len(data_stage.valid_symbols))  # noqa: E501
+    _logger.info("<< DATA: %.2fs (ok=%d)", time.perf_counter() - t_data, len(data_stage.valid_symbols))
     # Step 4) strategy bridge + alpha contract
     t_strategy = time.perf_counter()
     _logger.info(

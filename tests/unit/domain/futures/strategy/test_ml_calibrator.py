@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import typing
+
 import numpy as np
 from _pytest.monkeypatch import MonkeyPatch
 from numpy.typing import NDArray

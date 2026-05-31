@@ -144,7 +144,7 @@ def build_strategy_alpha(
     for t in range(eff_len):
         # If t < w_bars, fallback to equal-weight blend due to short history.
         if t < w_bars:
-            equal_weights = {name: 1.0 for name in sleeve_names}
+            equal_weights = dict.fromkeys(sleeve_names, 1.0)
             t_z = {name: z_by_sleeve[name][t : t + 1] for name in sleeve_names}
             blended_scores[t] = blend_sleeves(
                 t_z, equal_weights, clip_z=cfg.blend.clip_z, min_symbols=min_syms
