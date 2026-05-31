@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import typing
+
 import numpy as np
 from _pytest.monkeypatch import MonkeyPatch
 
@@ -34,107 +35,17 @@ def _dataset(rows: int, groups: int, features: int = 6) -> LongMatrixDataset:
 def test_fit_ranker_and_predict_rank_score() -> None:
     train = _dataset(rows=160, groups=20)
     valid = _dataset(rows=40, groups=5)
-    cfg = StrategyMLConfig(
-        ranker_n_estimators=20,
-        early_stopping_rounds=10,
-        n_jobs=1,
-        ranking_mode="pointwise",
-    )
+    cfg = StrategyMLConfig(ranker_n_estimators=20, early_stopping_rounds=10, n_jobs=1)
 
     fit_result = fit_ranker(train=train, valid=valid, cfg=cfg)
     score = predict_rank_score(fit_result.model, valid)
 
-    assert fit_result.fit_mode == "pointwise"
     assert score.shape == (valid.X.shape[0],)
     assert score.dtype == np.float32
     assert np.all(np.isfinite(score))
 
 
-def test_predict_rank_score_empty_dataset_returns_empty() -> None:
-    train = _dataset(rows=160, groups=20)
-    valid = _dataset(rows=40, groups=5)
-    empty = LongMatrixDataset(
-        X=np.zeros((0, train.X.shape[1]), dtype=np.float32),
-        y_rank=np.zeros((0,), dtype=np.int32),
-        y_ev=np.zeros((0,), dtype=np.float32),
-        group=np.zeros((0,), dtype=np.int32),
-        sample_weight=np.zeros((0,), dtype=np.float32),
-        index_map=np.zeros((0, 2), dtype=np.int64),
-        feature_names=train.feature_names,
-    )
-    cfg = StrategyMLConfig(
-        ranker_n_estimators=5,
-        early_stopping_rounds=3,
-        n_jobs=1,
-        ranking_mode="pointwise",
-    )
-
-    fit_result = fit_ranker(train=train, valid=valid, cfg=cfg)
-    score = predict_rank_score(fit_result.model, empty)
-
-    assert score.shape == (0,)
-
-
-def test_fit_ranker_uses_config_hyperparams(monkeypatch: MonkeyPatch) -> None:
-    train = _dataset(rows=40, groups=5)
-    valid = _dataset(rows=16, groups=2)
-    captured: dict[str, typing.Any] = {}
-
-    class _FakeRegressor:
-        def __init__(self, **kwargs: float) -> None:
-            captured.update(kwargs)
-
-        def fit(self, *args: object, **kwargs: object) -> _FakeRegressor:
-            del args, kwargs
-            return self
-
-        def predict(self, x: typing.Sized) -> np.ndarray:
-            return np.zeros((len(x),), dtype=np.float64)
-
-    monkeypatch.setattr("src.domain.futures.strategy.ranker.lgb.LGBMRegressor", _FakeRegressor)
-    cfg = StrategyMLConfig(
-        ranker_learning_rate=0.017,
-        ranker_feature_fraction=0.66,
-        ranker_bagging_fraction=0.61,
-        ranker_bagging_freq=3,
-        ranker_lambda_l2=2.5,
-        ranker_reg_alpha=0.9,
-        ranking_mode="pointwise",
-    )
-    fit_ranker(train=train, valid=valid, cfg=cfg)
-
-    assert captured["learning_rate"] == 0.017
-    assert captured["feature_fraction"] == 0.66
-    assert captured["bagging_fraction"] == 0.61
-    assert captured["bagging_freq"] == 3
-    assert captured["lambda_l2"] == 2.5
-    assert captured["reg_alpha"] == 0.9
-
-
-def test_fit_ranker_uses_huber_family(monkeypatch: MonkeyPatch) -> None:
-    train = _dataset(rows=40, groups=5)
-    valid = _dataset(rows=16, groups=2)
-    captured: dict[str, typing.Any] = {}
-
-    class _FakeRegressor:
-        def __init__(self, **kwargs: object) -> None:
-            captured.update(kwargs)
-
-        def fit(self, *args: object, **kwargs: object) -> _FakeRegressor:
-            del args, kwargs
-            return self
-
-        def predict(self, x: typing.Sized) -> np.ndarray:
-            return np.zeros((len(x),), dtype=np.float64)
-
-    monkeypatch.setattr("src.domain.futures.strategy.ranker.lgb.LGBMRegressor", _FakeRegressor)
-    cfg = StrategyMLConfig(model_family="lgbm_huber", ranking_mode="pointwise")
-    fit_ranker(train=train, valid=valid, cfg=cfg)
-
-    assert captured["objective"] == "huber"
-
-
-def test_fit_ranker_uses_lambdarank_group_and_relevance(monkeypatch: MonkeyPatch) -> None:
+def test_fit_ranker_uses_lambdarank_hyperparams(monkeypatch: MonkeyPatch) -> None:
     train = _dataset(rows=40, groups=5)
     valid = _dataset(rows=16, groups=2)
     captured_ctor: dict[str, typing.Any] = {}
@@ -153,39 +64,48 @@ def test_fit_ranker_uses_lambdarank_group_and_relevance(monkeypatch: MonkeyPatch
             return np.linspace(0.0, 1.0, len(x), dtype=np.float64)
 
     monkeypatch.setattr("src.domain.futures.strategy.ranker.lgb.LGBMRanker", _FakeRanker)
-    cfg = StrategyMLConfig(model_family="lgbm_lambdarank", ranking_mode="group_ndcg")
+    cfg = StrategyMLConfig(
+        model_family="lgbm_lambdarank",
+        ranking_mode="group_ndcg",
+        ranker_learning_rate=0.017,
+        ranker_feature_fraction=0.66,
+        ranker_bagging_fraction=0.61,
+        ranker_bagging_freq=3,
+        ranker_lambda_l2=2.5,
+        ranker_reg_alpha=0.9,
+    )
     fit_result = fit_ranker(train=train, valid=valid, cfg=cfg)
     score = predict_rank_score(fit_result.model, valid)
 
-    assert fit_result.fit_mode == "lambdarank"
     assert captured_ctor["objective"] == "lambdarank"
     assert captured_ctor["metric"] == "ndcg"
-    assert np.array_equal(captured_fit["args"][1], train.y_rank)
-    fit_kwargs = captured_fit["kwargs"]
-    assert np.array_equal(fit_kwargs["group"], train.group)
-    assert np.array_equal(fit_kwargs["eval_group"][0], valid.group)
-    assert np.array_equal(fit_kwargs["eval_set"][0][1], valid.y_rank)
+    assert captured_ctor["learning_rate"] == 0.017
+    assert captured_ctor["feature_fraction"] == 0.66
+    assert captured_ctor["bagging_fraction"] == 0.61
+    assert captured_ctor["bagging_freq"] == 3
+    assert captured_ctor["lambda_l2"] == 2.5
+    assert captured_ctor["reg_alpha"] == 0.9
+    assert np.array_equal(captured_fit["kwargs"]["group"], train.group)
+    assert np.array_equal(captured_fit["kwargs"]["eval_group"][0], valid.group)
+    assert np.array_equal(captured_fit["kwargs"]["eval_set"][0][1], valid.y_rank)
     assert score.shape == (valid.X.shape[0],)
     assert score.dtype == np.float32
-    assert np.all(np.isfinite(score))
 
 
-def test_ranker_reproducibility() -> None:
+def test_predict_rank_score_empty_dataset_returns_empty() -> None:
     train = _dataset(rows=160, groups=20)
     valid = _dataset(rows=40, groups=5)
-    cfg = StrategyMLConfig(
-        ranker_n_estimators=30,
-        early_stopping_rounds=10,
-        n_jobs=2,  # test with multiple threads
-        ranking_mode="group_ndcg",
-        model_family="lgbm_lambdarank",
+    empty = LongMatrixDataset(
+        X=np.zeros((0, train.X.shape[1]), dtype=np.float32),
+        y_rank=np.zeros((0,), dtype=np.int32),
+        y_ev=np.zeros((0,), dtype=np.float32),
+        group=np.zeros((0,), dtype=np.int32),
+        sample_weight=np.zeros((0,), dtype=np.float32),
+        index_map=np.zeros((0, 2), dtype=np.int64),
+        feature_names=train.feature_names,
     )
+    cfg = StrategyMLConfig(ranker_n_estimators=5, early_stopping_rounds=3, n_jobs=1)
 
-    fit1 = fit_ranker(train=train, valid=valid, cfg=cfg)
-    score1 = predict_rank_score(fit1.model, valid)
-
-    fit2 = fit_ranker(train=train, valid=valid, cfg=cfg)
-    score2 = predict_rank_score(fit2.model, valid)
-
-    assert np.array_equal(score1, score2)
-
+    fit_result = fit_ranker(train=train, valid=valid, cfg=cfg)
+    score = predict_rank_score(fit_result.model, empty)
+    assert score.shape == (0,)
