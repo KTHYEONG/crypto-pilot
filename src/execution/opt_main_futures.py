@@ -259,6 +259,20 @@ def _summarize_exec_diag_verdict(
     }
 
 
+def _forward_log_return_on_index(
+    close: pd.Series,
+    target_index: pd.Index,
+    horizon_bars: int,
+) -> pd.Series:
+    """Compute forward log return on full series, then align to target index."""
+    close_ser = close.copy()
+    close_ser.index = pd.to_datetime(close_ser.index, utc=True).tz_localize(None)
+    close_ser = close_ser.sort_index()
+    target_idx = pd.to_datetime(target_index, utc=True).tz_localize(None)
+    fwd = np.log(close_ser.shift(-horizon_bars) / close_ser)
+    return fwd.reindex(target_idx)
+
+
 def _requires_exec_1m(run_config: FuturesRunConfig) -> bool:
     """Return whether this run mode requires execution-grade 1m data."""
     if run_config.mode in {"alpha", "strategy"}:
@@ -820,7 +834,11 @@ def _run_alpha_evaluation_report(
     trading_symbols: tuple[str, ...] = (),
 ) -> None:
     """Run and print alpha quality metrics and horizon sweep like phase0_alpha_eval.py."""
-    from src.domain.futures.strategy.alpha_evaluation import evaluate_alpha, sweep_horizon_breakeven
+    from src.domain.futures.strategy.alpha_evaluation import (
+        derive_signed_rank_signal,
+        evaluate_alpha,
+        sweep_horizon_breakeven,
+    )
 
     alpha_panel = getattr(ml_out, "alpha_panel", None)
     if alpha_panel is None or alpha_panel.empty:
@@ -891,7 +909,7 @@ def _run_alpha_evaluation_report(
             # Phase 1b: NET 신호 기반 단일 선택
             # Phase 0-diag: 별도 L/S 선택이 NET +35.5bps 엣지를 파괴(ew=-12.94bps).
             # NET = rank_score_long - rank_score_short 기준으로 long/short 동시 선택.
-            _net_signal = _rs_l - _rs_s  # [T, N] signed NET rank score
+            _net_signal = derive_signed_rank_signal(_rs_l, _rs_s)
             _z_net = _cs_zscore(_net_signal)  # cross-sectional z-score
             _long_mask = np.zeros_like(_z_net, dtype=bool)
             _short_mask = np.zeros_like(_z_net, dtype=bool)
@@ -926,9 +944,11 @@ def _run_alpha_evaluation_report(
     realized_rows: dict[str, pd.Series] = {}
     for sym in common_syms:
         df = data_stage.data_maps[sym][tf].set_index("datetime")
-        df.index = pd.to_datetime(df.index, utc=True).tz_localize(None)
-        # 전체 시계열에서 shift 후 OOS 인덱스로 reindex 수행
-        fwd_ret = np.log(df["close"].shift(-horizon) / df["close"]).reindex(pivot_long.index)
+        fwd_ret = _forward_log_return_on_index(
+            df["close"],
+            pivot_long.index,
+            horizon,
+        )
         realized_rows[sym] = fwd_ret
     realized_df = pd.DataFrame(realized_rows, index=pivot_long.index)
 
@@ -965,7 +985,16 @@ def _run_alpha_evaluation_report(
     if _pivot_rank_l_c3 is not None and _pivot_rank_s_c3 is not None:
         _rl_c3 = _pivot_rank_l_c3.reindex(common_idx).iloc[:-horizon].to_numpy(dtype=np.float64)
         _rs_c3 = _pivot_rank_s_c3.reindex(common_idx).iloc[:-horizon].to_numpy(dtype=np.float64)
-        _rank_pred_c3 = _rl_c3 - _rs_c3  # signed: long - short rank score differential
+        _rank_pred_c3 = derive_signed_rank_signal(_rl_c3, _rs_c3)
+        _logger.info(
+            "[RANK-CONTRACT] c3_signed_nz=%.3f c3_signed_std=%.6f c3_long_short_absdiff_p50=%.6f",
+            float(
+                np.count_nonzero(np.isfinite(_rank_pred_c3) & (_rank_pred_c3 != 0.0))
+                / max(_rank_pred_c3.size, 1)
+            ),
+            float(np.nanstd(_rank_pred_c3)),
+            float(np.nanmedian(np.abs(_rl_c3 - _rs_c3))),
+        )
 
     # L1 C1 rank signal [T-h, N_c1] — for separate RANK-QUALITY log
     _rank_pred_c1: np.ndarray | None = None
@@ -974,12 +1003,15 @@ def _run_alpha_evaluation_report(
         _c1_real_rows_rs: dict[str, pd.Series] = {}
         for _sym_c1 in _all_syms_with_data:
             _df_c1 = data_stage.data_maps[_sym_c1][tf].set_index("datetime")
-            _c1_close = _df_c1["close"].reindex(common_idx)
-            _c1_real_rows_rs[_sym_c1] = np.log(_c1_close.shift(-horizon) / _c1_close)
+            _c1_real_rows_rs[_sym_c1] = _forward_log_return_on_index(
+                _df_c1["close"],
+                common_idx,
+                horizon,
+            )
         _c1_real_df = pd.DataFrame(_c1_real_rows_rs, index=common_idx)
-        _rank_pred_c1 = (
-            _pivot_rank_l_c1.reindex(common_idx).iloc[:-horizon].to_numpy(dtype=np.float64)
-            - _pivot_rank_s_c1.reindex(common_idx).iloc[:-horizon].to_numpy(dtype=np.float64)
+        _rank_pred_c1 = derive_signed_rank_signal(
+            _pivot_rank_l_c1.reindex(common_idx).iloc[:-horizon].to_numpy(dtype=np.float64),
+            _pivot_rank_s_c1.reindex(common_idx).iloc[:-horizon].to_numpy(dtype=np.float64),
         )
         _real_c1 = _c1_real_df.iloc[:-horizon].to_numpy(dtype=np.float64)
 
@@ -1009,9 +1041,11 @@ def _run_alpha_evaluation_report(
     c1_real_rows: dict[str, pd.Series] = {}
     for sym in all_syms:
         df_sym = data_stage.data_maps[sym][tf].set_index("datetime")
-        df_sym.index = pd.to_datetime(df_sym.index, utc=True).tz_localize(None)
-        close_sym = df_sym["close"].reindex(dense_long_df.index)
-        c1_real_rows[sym] = np.log(close_sym.shift(-horizon) / close_sym)
+        c1_real_rows[sym] = _forward_log_return_on_index(
+            df_sym["close"],
+            dense_long_df.index,
+            horizon,
+        )
     c1_real_df = pd.DataFrame(c1_real_rows, index=dense_long_df.index)
 
     diag_common_idx = dense_long_df.index.intersection(c1_real_df.index)
@@ -1296,9 +1330,7 @@ def _run_alpha_evaluation_report(
         r_rows: dict[str, pd.Series] = {}
         for sym in common_syms:
             df = data_stage.data_maps[sym][tf].set_index("datetime")
-            df.index = pd.to_datetime(df.index, utc=True).tz_localize(None)
-            # 전체 시계열에서 shift 후 OOS 인덱스로 reindex 수행
-            fwd = np.log(df["close"].shift(-h) / df["close"]).reindex(common_idx)
+            fwd = _forward_log_return_on_index(df["close"], common_idx, h)
             r_rows[sym] = fwd
         r_df = pd.DataFrame(r_rows, index=common_idx)
         r_arr = r_df.iloc[:-h].to_numpy(dtype=np.float64)
