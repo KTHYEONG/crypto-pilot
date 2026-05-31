@@ -95,9 +95,7 @@ def classify_no_valid_candidates(
     for trial in completed_trials:
         ua = trial.user_attrs or {}
         value = getattr(trial, "value", None)
-        if value is None:
-            nan_like += 1
-        elif _safe_float(value) is None:
+        if value is None or _safe_float(value) is None:
             nan_like += 1
         obs_reason = str(ua.get("obs_reason", ""))
         if obs_reason.startswith("constraint_"):

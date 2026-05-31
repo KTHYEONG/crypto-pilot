@@ -51,9 +51,7 @@ def _normalize_unit(series: pd.Series) -> pd.Series:
 
 
 def _to_return_vector(value: object) -> np.ndarray | None:
-    if isinstance(value, np.ndarray):
-        vector = np.asarray(value, dtype=float)
-    elif isinstance(value, (list, tuple)):
+    if isinstance(value, np.ndarray) or isinstance(value, (list, tuple)):
         vector = np.asarray(value, dtype=float)
     else:
         return None
@@ -334,7 +332,7 @@ def apply_selection_stage(
             continue
         anchor_rows = out[out["_symbol_key"] == anchor_key].copy()
         if anchor_rows.empty:
-            synth_payload: dict[str, object] = {col: np.nan for col in out.columns}
+            synth_payload: dict[str, object] = dict.fromkeys(out.columns, np.nan)
             synth_payload["symbol"] = anchor_symbol
             synth_payload["_symbol_key"] = anchor_key
             synth_payload["tradeable_score"] = float("-inf")
