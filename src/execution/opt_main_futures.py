@@ -86,6 +86,7 @@ _logger = logging.getLogger("opt_main_futures")
 class AlphaPhase1Verdict(TypedDict):
     alpha_pass: bool
     fail_reasons: list[str]
+    blocker_categories: dict[str, list[str]]
     resid_ic: float
     resid_t_stat_nw: float
     be_eff: float
@@ -170,6 +171,31 @@ def _summarize_alpha_phase1_verdict(
     if not bear_market_basket_safe:
         fail_reasons.append("bear_market_basket_negative")
 
+    # Categorize blockers for ALPHA_PASS=false diagnostics.
+    reason_category_map: dict[str, str] = {
+        "signal_below_effective_breakeven": "rank_skill",
+        "signal_t_stat_too_low": "rank_skill",
+        "portfolio_ic_below_raw_breakeven": "rank_skill",
+        "signal_lost_after_selection": "breadth",
+        "no_profitable_horizon_found": "breadth",
+        "basket_net_lcb_non_positive": "cost_turnover",
+        "basket_net_not_profitable": "cost_turnover",
+        "bear_regime_ic_negative": "regime_stability",
+        "bear_market_basket_negative": "regime_stability",
+        "deflated_sharpe_too_low": "regime_stability",
+        "quantile_coverage_out_of_range": "regime_stability",
+    }
+    blocker_categories: dict[str, list[str]] = {
+        "rank_skill": [],
+        "breadth": [],
+        "cost_turnover": [],
+        "regime_stability": [],
+    }
+    for reason in fail_reasons:
+        category = reason_category_map.get(reason)
+        if category is not None and reason not in blocker_categories[category]:
+            blocker_categories[category].append(reason)
+
     alpha_pass = (
         g1_pass
         and portfolio_ic_above_breakeven
@@ -182,6 +208,7 @@ def _summarize_alpha_phase1_verdict(
     return {
         "alpha_pass": alpha_pass,
         "fail_reasons": fail_reasons,
+        "blocker_categories": blocker_categories,
         "resid_ic": resid_ic,
         "resid_t_stat_nw": resid_t,
         "be_eff": be_eff,
@@ -1307,7 +1334,7 @@ def _run_alpha_evaluation_report(
         ">> ALPHA_PASS: %s [%s]"
         " [IC_SKILL: resid_ic=%.4f be_eff=%.4f gap=%+.4f t=%.2f bear_ic=%.4f dsr=%.3f]"
         " [BASKET: gap_raw=%+.4f net_bps=%.1f ir_t=%.2f presv=%.2f sweep=%d/3]"
-        " [fail=%s]",
+        " [fail=%s blockers=%s]",
         str(bool(_alpha_verdict["alpha_pass"])).upper(),
         _gate_str,
         float(_alpha_verdict["resid_ic"]),
@@ -1322,6 +1349,7 @@ def _run_alpha_evaluation_report(
         float(_alpha_verdict["clip_preservation_ratio"]),
         int(_alpha_verdict["sweep_pass_count"]),
         _alpha_verdict["fail_reasons"],
+        _alpha_verdict["blocker_categories"],
     )
     _logger.info(
         ">> EXEC_DIAG: %s [port_ic=%.4f be_raw=%.4f gap_raw=%+.4f basket_net_bps=%.2f fail=%s]",
