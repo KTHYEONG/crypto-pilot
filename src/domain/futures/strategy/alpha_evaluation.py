@@ -696,7 +696,7 @@ def evaluate_alpha(
     )
 
     # DSR computation
-    ic_arr: NDArray[np.float64] = rolling_ic(_gating_pred_2d, realized_fwd_ret_2d)
+    ic_arr: NDArray[np.float64] = rolling_ic(pred_2d, realized_fwd_ret_2d)  # post-clip tradeable
     valid_ic: NDArray[np.float64] = ic_arr[np.isfinite(ic_arr)]
 
     if valid_ic.size > 1:
