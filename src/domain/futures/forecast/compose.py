@@ -7,6 +7,12 @@ import numpy as np
 import scipy.stats
 
 from src.domain.futures.forecast.contracts import AlphaForecast, CostForecast
+from src.domain.futures.strategy.alpha_evaluation import derive_signed_rank_signal
+from src.domain.futures.strategy.rank_selection import (
+    RankSelectionPolicy,
+    apply_rank_selection_policy,
+    policy_from_dict,
+)
 
 
 def _rank_weight_1d(ev_row: np.ndarray, *, k: float = 3.0) -> np.ndarray:
@@ -166,84 +172,106 @@ def compose_mu(
         rank_l = getattr(alpha, "rank_score_long_2d", None)
         rank_s = getattr(alpha, "rank_score_short_2d", None)
         if rank_l is not None and rank_s is not None:
-            rank_select_q = float(params.get("RANK_SELECT_QUANTILE", 0.33))
-            ic_prior = float(params.get("IC_PRIOR_FOR_GATE", 0.03))
-            ev_tilt_w = float(params.get("EV_SECONDARY_TILT_WEIGHT", 0.0))
-
-            rank_l2d = np.asarray(rank_l, dtype=np.float64)
-            rank_s2d = np.asarray(rank_s, dtype=np.float64)
-
-            # Cross-sectional z-score of rank scores
-            z_long = _cs_zscore(rank_l2d)
-            z_short = _cs_zscore(-rank_s2d)   # short: lower rank = better, so negate
-
-            # Optional EV rank tilt
-            if ev_tilt_w > 1e-9:
-                ev_z_long = _cs_zscore(
-                    np.asarray(alpha.alpha_long_2d, dtype=np.float64)
+            policy_payload = params.get("RANK_SELECTION_POLICY")
+            if not isinstance(policy_payload, dict):
+                policy_payload = getattr(alpha, "rank_selection_policy", None)
+            policy: RankSelectionPolicy | None = None
+            if isinstance(policy_payload, dict):
+                policy = policy_from_dict(policy_payload)
+            elif all(
+                key in params
+                for key in ("RANK_POLICY_POLARITY", "RANK_POLICY_QUANTILE", "RANK_POLICY_MIN_ABS_Z")
+            ):
+                policy = RankSelectionPolicy(
+                    polarity=1 if int(params["RANK_POLICY_POLARITY"]) >= 0 else -1,
+                    quantile=float(params["RANK_POLICY_QUANTILE"]),
+                    min_abs_z=float(params["RANK_POLICY_MIN_ABS_Z"]),
+                    weighting=str(params.get("RANK_POLICY_WEIGHTING", "tanh")),  # type: ignore[arg-type]
+                    weight_k=float(params.get("RANK_POLICY_WEIGHT_K", 3.0)),
+                    holding_bars=int(params.get("RANK_POLICY_HOLDING_BARS", 12)),
+                    validation_net_lcb_bps=float(params.get("RANK_POLICY_VAL_LCB_BPS", -1.0)),
+                    validation_gross_bps=float(params.get("RANK_POLICY_VAL_GROSS_BPS", 0.0)),
+                    validation_ir_t=float(params.get("RANK_POLICY_VAL_IR_T", 0.0)),
+                    validation_monotonicity=float(params.get("RANK_POLICY_VAL_MONO", 0.0)),
+                    n_obs=int(params.get("RANK_POLICY_VAL_N_OBS", 0)),
                 )
-                ev_z_short = _cs_zscore(
-                    np.asarray(alpha.alpha_short_2d, dtype=np.float64)
+            if policy is not None:
+                signed = derive_signed_rank_signal(
+                    np.asarray(rank_l, dtype=np.float64),
+                    np.asarray(rank_s, dtype=np.float64),
                 )
-                z_long = (1.0 - ev_tilt_w) * z_long + ev_tilt_w * ev_z_long
-                z_short = (1.0 - ev_tilt_w) * z_short + ev_tilt_w * ev_z_short
-
-            long_mask = np.zeros_like(mu_long, dtype=bool)
-            short_mask = np.zeros_like(mu_short, dtype=bool)
-
-            alpha_long_arr = np.asarray(alpha.alpha_long_2d, dtype=np.float64)
-            alpha_short_arr = np.asarray(alpha.alpha_short_2d, dtype=np.float64)
-
-            for t in range(mu_long.shape[0]):
-                lrow = z_long[t]
-                srow = z_short[t]
-                l_finite = np.isfinite(lrow) & np.isfinite(alpha_long_arr[t])
-                s_finite = np.isfinite(srow) & np.isfinite(alpha_short_arr[t])
-                n_l = int(l_finite.sum())
-                n_s = int(s_finite.sum())
-                if n_l > 0:
-                    k_l = max(1, int(np.ceil(n_l * rank_select_q)))
-                    idx_l = np.flatnonzero(l_finite)
-                    top_l = idx_l[np.argsort(lrow[idx_l])[::-1][:k_l]]
-                    long_mask[t, top_l] = True
-                if n_s > 0:
-                    k_s = max(1, int(np.ceil(n_s * rank_select_q)))
-                    idx_s = np.flatnonzero(s_finite)
-                    top_s = idx_s[np.argsort(srow[idx_s])[::-1][:k_s]]
-                    short_mask[t, top_s] = True
-
-            # Portfolio net-edge gate (bar-level, leak-free IC prior)
-            sigma_r = float(params.get("COMPOSER_SIGMA_BPS", 500.0))
-            holding_bars_gate = max(1, int(params.get("REBALANCE_BARS", 1)))
-            cost_bps = float(params.get("COST_GATE_BPS", 24.0))
-            amortized_cost = cost_bps / holding_bars_gate
-
-            z_long_masked = np.where(long_mask, z_long, 0.0)
-            z_short_masked = np.where(short_mask, z_short, 0.0)
-
-            soft_steepness = float(params.get("SOFT_HURDLE_STEEPNESS", 5.0))
-            for t in range(mu_long.shape[0]):
-                l_sel = long_mask[t].sum()
-                s_sel = short_mask[t].sum()
-                if l_sel < 1 or s_sel < 1:
-                    long_mask[t] = False
-                    short_mask[t] = False
-                    continue
-                zmean_l = float(np.mean(z_long_masked[t, long_mask[t]]))
-                zmean_s = float(np.mean(z_short_masked[t, short_mask[t]]))
-                gross_spread_bps = ic_prior * sigma_r * (zmean_l + zmean_s)
-                # soft-hurdle: 경질 절단 대신 sigmoid 감쇠
-                net_edge_arr = np.array([gross_spread_bps - amortized_cost])
-                net_edge_soft = float(
-                    _soft_hurdle(net_edge_arr, amortized_cost, steepness=soft_steepness)[0]
+                policy_long, policy_short = apply_rank_selection_policy(
+                    signed_score_2d=signed,
+                    eligible_2d=np.isfinite(np.asarray(rank_l)) | np.isfinite(np.asarray(rank_s)),
+                    policy=policy,
                 )
-                if net_edge_soft <= 0.0:
-                    long_mask[t] = False
-                    short_mask[t] = False
+                mu_long = np.where(policy_long > 0.0, policy_long, -np.inf)
+                mu_short = np.where(policy_short > 0.0, policy_short, -np.inf)
+            else:
+                rank_select_q = float(params.get("RANK_SELECT_QUANTILE", 0.33))
+                ic_prior = float(params.get("IC_PRIOR_FOR_GATE", 0.03))
+                ev_tilt_w = float(params.get("EV_SECONDARY_TILT_WEIGHT", 0.0))
+                rank_l2d = np.asarray(rank_l, dtype=np.float64)
+                rank_s2d = np.asarray(rank_s, dtype=np.float64)
+                z_long = _cs_zscore(rank_l2d)
+                z_short = _cs_zscore(-rank_s2d)   # short: lower rank = better, so negate
+                if ev_tilt_w > 1e-9:
+                    ev_z_long = _cs_zscore(
+                        np.asarray(alpha.alpha_long_2d, dtype=np.float64)
+                    )
+                    ev_z_short = _cs_zscore(
+                        np.asarray(alpha.alpha_short_2d, dtype=np.float64)
+                    )
+                    z_long = (1.0 - ev_tilt_w) * z_long + ev_tilt_w * ev_z_long
+                    z_short = (1.0 - ev_tilt_w) * z_short + ev_tilt_w * ev_z_short
 
-            # Output: z-score as signal (no absolute EV gate)
-            mu_long = np.where(long_mask, z_long, -np.inf)
-            mu_short = np.where(short_mask, z_short, -np.inf)
+                long_mask = np.zeros_like(mu_long, dtype=bool)
+                short_mask = np.zeros_like(mu_short, dtype=bool)
+                alpha_long_arr = np.asarray(alpha.alpha_long_2d, dtype=np.float64)
+                alpha_short_arr = np.asarray(alpha.alpha_short_2d, dtype=np.float64)
+                for t in range(mu_long.shape[0]):
+                    lrow = z_long[t]
+                    srow = z_short[t]
+                    l_finite = np.isfinite(lrow) & np.isfinite(alpha_long_arr[t])
+                    s_finite = np.isfinite(srow) & np.isfinite(alpha_short_arr[t])
+                    n_l = int(l_finite.sum())
+                    n_s = int(s_finite.sum())
+                    if n_l > 0:
+                        k_l = max(1, int(np.ceil(n_l * rank_select_q)))
+                        idx_l = np.flatnonzero(l_finite)
+                        top_l = idx_l[np.argsort(lrow[idx_l])[::-1][:k_l]]
+                        long_mask[t, top_l] = True
+                    if n_s > 0:
+                        k_s = max(1, int(np.ceil(n_s * rank_select_q)))
+                        idx_s = np.flatnonzero(s_finite)
+                        top_s = idx_s[np.argsort(srow[idx_s])[::-1][:k_s]]
+                        short_mask[t, top_s] = True
+                sigma_r = float(params.get("COMPOSER_SIGMA_BPS", 500.0))
+                holding_bars_gate = max(1, int(params.get("REBALANCE_BARS", 1)))
+                cost_bps = float(params.get("COST_GATE_BPS", 24.0))
+                amortized_cost = cost_bps / holding_bars_gate
+                z_long_masked = np.where(long_mask, z_long, 0.0)
+                z_short_masked = np.where(short_mask, z_short, 0.0)
+                soft_steepness = float(params.get("SOFT_HURDLE_STEEPNESS", 5.0))
+                for t in range(mu_long.shape[0]):
+                    l_sel = long_mask[t].sum()
+                    s_sel = short_mask[t].sum()
+                    if l_sel < 1 or s_sel < 1:
+                        long_mask[t] = False
+                        short_mask[t] = False
+                        continue
+                    zmean_l = float(np.mean(z_long_masked[t, long_mask[t]]))
+                    zmean_s = float(np.mean(z_short_masked[t, short_mask[t]]))
+                    gross_spread_bps = ic_prior * sigma_r * (zmean_l + zmean_s)
+                    net_edge_arr = np.array([gross_spread_bps - amortized_cost])
+                    net_edge_soft = float(
+                        _soft_hurdle(net_edge_arr, amortized_cost, steepness=soft_steepness)[0]
+                    )
+                    if net_edge_soft <= 0.0:
+                        long_mask[t] = False
+                        short_mask[t] = False
+                mu_long = np.where(long_mask, z_long, -np.inf)
+                mu_short = np.where(short_mask, z_short, -np.inf)
 
     if admission_mode == "rank_cs_neutral":
         # hurdle은 rank z-score 맥락에서 의미없음; 선택된 포지션은 모두 통과
