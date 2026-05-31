@@ -270,6 +270,27 @@ def test_compute_quantile_coverage_zero() -> None:
     assert result == pytest.approx(0.0, rel=1e-6)
 
 
+def test_evaluate_alpha_marks_policy_no_trade_as_policy_economics_failure() -> None:
+    alpha_long = np.ones((40, 6), dtype=np.float64) * 0.001
+    alpha_short = np.zeros((40, 6), dtype=np.float64)
+    realized = np.ones((40, 6), dtype=np.float64) * 0.001
+    report = evaluate_alpha(
+        alpha_long_2d=alpha_long,
+        alpha_short_2d=alpha_short,
+        realized_fwd_ret_2d=realized,
+        policy_no_trade=True,
+        policy_validation_net_lcb_bps=-0.1,
+    )
+    assert report.policy_no_trade is True
+    assert "policy_economics.validation_net_lcb_non_positive" in report.fail_reasons
+    assert "basket_net_lcb_non_positive" not in report.fail_reasons
+    assert (
+        "policy_economics.validation_net_lcb_non_positive"
+        in report.evaluation_layer_failures["policy_economics"]
+    )
+    assert report.evaluation_layer_failures["execution_realism"] == []
+
+
 # ---------------------------------------------------------------------------
 # compute_q50_sign_hit
 # ---------------------------------------------------------------------------
