@@ -87,6 +87,7 @@ class AlphaPhase1Verdict(TypedDict):
     alpha_pass: bool
     fail_reasons: list[str]
     blocker_categories: dict[str, list[str]]
+    policy_no_trade: bool
     resid_ic: float
     resid_t_stat_nw: float
     be_eff: float
@@ -138,9 +139,16 @@ def _summarize_alpha_phase1_verdict(
 
     # G2: 경제 거래성
     portfolio_ic_above_breakeven = bool(np.isfinite(gap_raw) and gap_raw > 0.0)
+    basket_evaluated = not bool(getattr(report, "policy_no_trade", False))
     basket_net_positive = bool(
-        np.isfinite(basket_net_bps) and basket_net_bps > 0.0
-        and np.isfinite(basket_ir_t) and basket_ir_t >= 2.0
+        True
+        if not basket_evaluated
+        else (
+            np.isfinite(basket_net_bps)
+            and basket_net_bps > 0.0
+            and np.isfinite(basket_ir_t)
+            and basket_ir_t >= 2.0
+        )
     )
     signal_preserved_after_selection = bool(np.isfinite(clip_pres) and clip_pres >= 0.7)
     multi_horizon_sweep_passes = bool(sweep_pass_count >= 1)
@@ -162,7 +170,7 @@ def _summarize_alpha_phase1_verdict(
     fail_reasons: list[str] = list(report.fail_reasons)
     if not portfolio_ic_above_breakeven:
         fail_reasons.append("portfolio_ic_below_raw_breakeven")
-    if not basket_net_positive:
+    if basket_evaluated and not basket_net_positive:
         fail_reasons.append("basket_net_not_profitable")
     if not signal_preserved_after_selection:
         fail_reasons.append("signal_lost_after_selection")
@@ -175,22 +183,30 @@ def _summarize_alpha_phase1_verdict(
     reason_category_map: dict[str, str] = {
         "signal_below_effective_breakeven": "rank_skill",
         "signal_t_stat_too_low": "statistical_robustness",
-        "portfolio_ic_below_raw_breakeven": "post_selection",
-        "signal_lost_after_selection": "post_selection",
-        "no_profitable_horizon_found": "post_selection",
-        "basket_net_lcb_non_positive": "cost_turnover",
-        "basket_net_not_profitable": "cost_turnover",
-        "bear_regime_ic_negative": "regime_stability",
-        "bear_market_basket_negative": "regime_stability",
+        "policy_economics.validation_net_lcb_non_positive": "policy_economics",
+        "portfolio_ic_below_raw_breakeven": "policy_economics",
+        "signal_lost_after_selection": "policy_economics",
+        "no_profitable_horizon_found": "policy_economics",
+        "basket_net_lcb_non_positive": "execution_realism",
+        "basket_net_not_profitable": "execution_realism",
+        "bear_regime_ic_negative": "execution_realism",
+        "bear_market_basket_negative": "execution_realism",
         "deflated_sharpe_too_low": "statistical_robustness",
-        "quantile_coverage_out_of_range": "regime_stability",
+        "quantile_coverage_out_of_range": "statistical_robustness",
+        "long_nz_below_threshold": "mechanical_integrity",
+        "short_nz_below_threshold": "mechanical_integrity",
+        "xs_long_preservation_below_threshold": "rank_skill",
+        "xs_short_preservation_below_threshold": "rank_skill",
+        "tradable_long_nz_below_threshold": "execution_realism",
+        "tradable_short_nz_below_threshold": "execution_realism",
+        "alpha_p95_below_cost_wall": "policy_economics",
     }
     blocker_categories: dict[str, list[str]] = {
+        "mechanical_integrity": [],
         "rank_skill": [],
-        "post_selection": [],
-        "cost_turnover": [],
+        "policy_economics": [],
+        "execution_realism": [],
         "statistical_robustness": [],
-        "regime_stability": [],
     }
     for reason in fail_reasons:
         category = reason_category_map.get(reason)
@@ -210,6 +226,7 @@ def _summarize_alpha_phase1_verdict(
         "alpha_pass": alpha_pass,
         "fail_reasons": fail_reasons,
         "blocker_categories": blocker_categories,
+        "policy_no_trade": bool(getattr(report, "policy_no_trade", False)),
         "resid_ic": resid_ic,
         "resid_t_stat_nw": resid_t,
         "be_eff": be_eff,
@@ -1168,6 +1185,50 @@ def _run_alpha_evaluation_report(
         n_trials=_n_trials_dsr,
         horizon_bars=horizon,
         cost_floor_bps=24.0,  # 24bps 고정 물리 비용 장벽 보존
+        policy_validation_net_lcb_bps=float(
+            getattr(alpha_panel, "attrs", {}).get("rank_selection_policy", {}).get(
+                "validation_net_lcb_bps", float("nan")
+            )
+        ),
+        policy_validation_gross_bps=float(
+            getattr(alpha_panel, "attrs", {}).get("rank_selection_policy", {}).get(
+                "validation_gross_bps", float("nan")
+            )
+        ),
+        policy_validation_ir_t=float(
+            getattr(alpha_panel, "attrs", {}).get("rank_selection_policy", {}).get(
+                "validation_ir_t", float("nan")
+            )
+        ),
+        policy_validation_monotonicity=float(
+            getattr(alpha_panel, "attrs", {}).get("rank_selection_policy", {}).get(
+                "validation_monotonicity", float("nan")
+            )
+        ),
+        policy_no_trade=bool(getattr(alpha_panel, "attrs", {}).get("rank_policy_no_trade", False)),
+    )
+
+    _policy_payload = getattr(alpha_panel, "attrs", {}).get("rank_selection_policy", {})
+    _policy_no_trade = bool(getattr(alpha_panel, "attrs", {}).get("rank_policy_no_trade", False))
+    _policy_reason = str(
+        getattr(alpha_panel, "attrs", {}).get(
+            "rank_policy_failure_reason",
+            "validation_net_lcb_non_positive" if _policy_no_trade else "none",
+        )
+    )
+    _logger.info(
+        "[ALPHA-GATE] alpha_output_unit=%s alpha_cost_wall_required=%s policy_no_trade=%s",
+        getattr(_ml_cfg, "alpha_output_unit", "rank_weight"),
+        bool(getattr(_ml_cfg, "require_alpha_cost_wall", False)),
+        _policy_no_trade,
+    )
+    _logger.info(
+        "[ALPHA-POLICY] policy_no_trade=%s reason=%s val_lcb=%.2f val_ir=%.2f mono=%.2f",
+        _policy_no_trade,
+        _policy_reason,
+        float(_policy_payload.get("validation_net_lcb_bps", float("nan"))),
+        float(_policy_payload.get("validation_ir_t", float("nan"))),
+        float(_policy_payload.get("validation_monotonicity", float("nan"))),
     )
 
     # Compact Alpha Scoreboard (Phase 1: resid_ic / N_eff-based breakeven)
@@ -1399,7 +1460,7 @@ def _run_alpha_evaluation_report(
     _logger.info(
         ">> ALPHA_PASS: %s [%s]"
         " [IC_SKILL: resid_ic=%.4f be_eff=%.4f gap=%+.4f t=%.2f bear_ic=%.4f dsr=%.3f]"
-        " [BASKET: gap_raw=%+.4f net_bps=%.1f ir_t=%.2f presv=%.2f sweep=%d/3]"
+        " [BASKET: gap_raw=%+.4f net_bps=%.1f ir_t=%.2f presv=%.2f sweep=%d/3%s]"
         " [fail=%s blockers=%s]",
         str(bool(_alpha_verdict["alpha_pass"])).upper(),
         _gate_str,
@@ -1414,6 +1475,7 @@ def _run_alpha_evaluation_report(
         float(_alpha_verdict["basket_ir_t"]),
         float(_alpha_verdict["clip_preservation_ratio"]),
         int(_alpha_verdict["sweep_pass_count"]),
+        "" if not _alpha_verdict["policy_no_trade"] else " skipped=no-trade",
         _alpha_verdict["fail_reasons"],
         _alpha_verdict["blocker_categories"],
     )

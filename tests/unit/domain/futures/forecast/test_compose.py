@@ -388,3 +388,53 @@ class TestComposeMuRankCsNeutral:
         )
         assert int(np.count_nonzero(xs_l[0] > 0.0)) <= 2
         assert int(np.count_nonzero(xs_s[0] > 0.0)) <= 2
+
+    def test_rank_cs_neutral_does_not_subtract_cost_from_rank_weights(self) -> None:
+        shape = (4, 6)
+        rank_l = np.tile(np.array([0, 1, 2, 3, 4, 5], dtype=np.float32), (4, 1))
+        rank_s = np.tile(np.array([0, -1, -2, -3, -4, -5], dtype=np.float32), (4, 1))
+        af = AlphaForecast(
+            datetimes=np.array([]),
+            symbols=(),
+            alpha_long_2d=np.full(shape, 0.003, dtype=np.float32),
+            alpha_short_2d=np.full(shape, 0.003, dtype=np.float32),
+            q10_long_2d=None, q50_long_2d=None, q90_long_2d=None,
+            q10_short_2d=None, q50_short_2d=None, q90_short_2d=None,
+            confidence_long_2d=None, confidence_short_2d=None,
+            eligible_mask=np.ones(shape, dtype=bool),
+            source="test",
+            artifact_hash=_DUMMY_HASH,
+            rank_score_long_2d=rank_l,
+            rank_score_short_2d=rank_s,
+            rank_selection_policy={
+                "polarity": 1,
+                "quantile": 0.33,
+                "min_abs_z": 0.0,
+                "weighting": "equal",
+                "weight_k": 3.0,
+                "holding_bars": 12,
+                "validation_net_lcb_bps": 1.0,
+                "validation_gross_bps": 1.0,
+                "validation_ir_t": 1.0,
+                "validation_monotonicity": 1.0,
+                "n_obs": 100,
+            },
+        )
+        cf_zero = CostForecast(
+            execution_cost_bps_2d=np.zeros(shape),
+            execution_cost_fraction_2d=np.zeros(shape),
+            uncertainty_bps_2d=np.zeros(shape),
+            capacity_notional_2d=None,
+            source="test",
+        )
+        cf_high = CostForecast(
+            execution_cost_bps_2d=np.full(shape, 50.0),
+            execution_cost_fraction_2d=np.full(shape, 50.0 / 10000.0),
+            uncertainty_bps_2d=np.zeros(shape),
+            capacity_notional_2d=None,
+            source="test",
+        )
+        xs_l_zero, xs_s_zero, _mu_l_zero, _mu_s_zero = compose_mu(af, cf_zero, self._PARAMS_RANK)
+        xs_l_high, xs_s_high, _mu_l_high, _mu_s_high = compose_mu(af, cf_high, self._PARAMS_RANK)
+        np.testing.assert_allclose(xs_l_zero, xs_l_high)
+        np.testing.assert_allclose(xs_s_zero, xs_s_high)

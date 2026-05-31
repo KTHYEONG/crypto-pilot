@@ -69,6 +69,7 @@ from src.domain.futures.strategy.rank_selection import (
     RankSelectionPolicy,
     apply_rank_selection_policy,
     calibrate_rank_selection_policy,
+    policy_is_no_trade,
     policy_to_dict,
 )
 from src.domain.futures.strategy.ranker import RankerFitResult, fit_ranker, predict_rank_score
@@ -1211,6 +1212,11 @@ def build_ml_strategy_alpha(
         if bool(getattr(ml_cfg, "rank_policy_enabled", True)) and rank_policies_by_fold:
             alpha_long_final = np.zeros_like(rank_score_long_grid, dtype=np.float32)
             alpha_short_final = np.zeros_like(rank_score_short_grid, dtype=np.float32)
+            rank_policy_no_trade = bool(
+                getattr(ml_cfg, "require_rank_policy_positive_lcb_for_emit", True)
+                and len(fold_policy_masks) > 0
+                and all(policy_is_no_trade(policy) for _, _, policy, _ in fold_policy_masks)
+            )
             signed_all = derive_signed_rank_signal(
                 rank_score_long_grid.astype(np.float64),
                 rank_score_short_grid.astype(np.float64),
@@ -1268,6 +1274,7 @@ def build_ml_strategy_alpha(
                     key=lambda p: float(p["validation_net_lcb_bps"]),
                 )
         else:
+            rank_policy_no_trade = False
             alpha_long_final, alpha_short_final = _emit_rank_sized_alpha(
                 rank_score_long_grid,
                 rank_score_short_grid,
@@ -1278,6 +1285,7 @@ def build_ml_strategy_alpha(
             )
             panel_policy_summary = None
     else:
+        rank_policy_no_trade = False
         alpha_long_final = np.where(
             eligible_2d,
             np.clip(np.maximum(ev_long_grid, 0.0), 0.0, clip_lim),
@@ -1328,6 +1336,9 @@ def build_ml_strategy_alpha(
         assert panel_policy_summary is not None
         panel.attrs["rank_selection_policy"] = dict(panel_policy_summary)
         panel.attrs["rank_selection_policy_by_fold"] = list(rank_policies_by_fold)
+        panel.attrs["rank_policy_no_trade"] = bool(rank_policy_no_trade)
+        if rank_policy_no_trade:
+            panel.attrs["rank_policy_failure_reason"] = "validation_net_lcb_non_positive"
     panel.attrs["strategy_name"] = cfg.name
     panel.attrs["feature_names"] = list(features.feature_names)
     panel.attrs["fold_count"] = len(folds)
@@ -1689,10 +1700,12 @@ def build_ml_strategy_alpha(
         tradable_short_nz=float(quality_report.get("alpha_short_tradable_nz", 0.0)),
         min_tradable_long_nz=ml_cfg.alpha_gate_min_tradable_long_nz,
         min_tradable_short_nz=ml_cfg.alpha_gate_min_tradable_short_nz,
+        alpha_output_unit=ml_cfg.alpha_output_unit,
+        require_alpha_cost_wall=ml_cfg.require_alpha_cost_wall,
     )
     quality_report.update(alpha_diag)
     panel.attrs["quality_report"] = quality_report
-    if not bool(quality_report.get("alpha_gate_pass", False)):
+    if not bool(quality_report.get("alpha_gate_pass", False)) and not bool(rank_policy_no_trade):
         raise RuntimeError(
             "strategy ml alpha gate failed: "
             f"reasons={quality_report.get('alpha_gate_fail_reasons', [])} "
@@ -1716,9 +1729,15 @@ def build_ml_strategy_alpha(
         raise RuntimeError(
             f"strategy ml quality gate failed: reasons={failed_keys} full={quality_report}"
         )
-    if float(np.count_nonzero(panel["alpha_long"].to_numpy(dtype=np.float64))) <= 0.0:
+    if (
+        float(np.count_nonzero(panel["alpha_long"].to_numpy(dtype=np.float64))) <= 0.0
+        and not bool(rank_policy_no_trade)
+    ):
         raise RuntimeError("generated alpha_long is all zero")
-    if float(np.count_nonzero(panel["alpha_short"].to_numpy(dtype=np.float64))) <= 0.0:
+    if (
+        float(np.count_nonzero(panel["alpha_short"].to_numpy(dtype=np.float64))) <= 0.0
+        and not bool(rank_policy_no_trade)
+    ):
         raise RuntimeError("generated alpha_short is all zero")
     metrics = ml_alpha_metrics(
         panel["alpha_long"].to_numpy(dtype=np.float64).reshape(-1, 1),
@@ -2269,6 +2288,8 @@ def build_ml_strategy_alpha_anchored(
         tradable_short_nz=float(awf_quality_report.get("alpha_short_tradable_nz", 0.0)),
         min_tradable_long_nz=ml_cfg.alpha_gate_min_tradable_long_nz,
         min_tradable_short_nz=ml_cfg.alpha_gate_min_tradable_short_nz,
+        alpha_output_unit=ml_cfg.alpha_output_unit,
+        require_alpha_cost_wall=ml_cfg.require_alpha_cost_wall,
     )
     awf_quality_report.update(alpha_diag_awf)
     if not bool(awf_quality_report.get("alpha_gate_pass", False)):
