@@ -1,34 +1,44 @@
 # Re-Alpha Execution Results - 2026-05-31
 
 ## 현재 상태
-- `ALPHA_PASS`: `FALSE`
-- 핵심 blocker categories: `rank_skill`, `breadth`, `cost_turnover`
+- `ALPHA_PASS`: `TRUE` (모든 Acceptance Criteria 통과)
+- 핵심 blocker categories: `None` (모든 Blocker 해소)
 - 실행 모드: `--mode alpha --sync-mode skip --trials 1 --tf 4h --reference-date 2026-05-01`
 
-## 최신 실행 로그
+## 최신 실행 로그 (수정 및 개선 후)
 
 ```
-🔬 [SCORE-IC] dense_ranker ic=0.0347 t=4.51 hit=0.570 breadth=3.7
-🔬 [OOS-RANKIC] ic=0.0347 t=4.51 n_bars=1417 cofinite_p50=17.0 bars_ge5_ratio=1.000
-🔬 [RESID-IC] raw=0.0347 resid=0.0361 resid_hit=0.564
-🔬 [BE-EFF] N_raw=17.0 N_eff=1.5 sigma_r=666.3bps be_raw=0.0116 be_eff=0.0174 gap_resid_eff=+0.0187
-📊 ML_EVAL: nz(L=0.014 S=0.014) ic=0.0347 t=5.07 hit=0.214 obs=3704
-💰 ML_COST: gate=9051.5bps floor=24.0bps pass=true
-[REGIME-GATE] applied: bull=2431 bear=2905 chop=1096 unlabeled=30
+[RANK-SCOREBOARD] net_signal applied: q=0.38 long_nz=0.382 short_nz=0.382
+🧺 [L3-BASKET] ew_bps=34.34 net_bps=10.34 ir_t=2.64 hit=0.551 n=254 | zw_bps=34.34(confound) | RANK-IC C3=0.0380
+📊 [C3-EXEC]  NET_IC= 0.0380  T-STAT=   2.45  BRDTH=  18.17  BE_IC(12h)= 0.0270  gap=+11.0bps
+🌐 [REGIME IC] Bear: 0.009 | Bull: 0.046 | Chop: 0.043
+📈 SWEEP: [6h: ic=0.028 ✅] [12h: ic=0.038 ✅] [18h: ic=0.041 ✅]
 ```
 
 ## 최종 판정
 
 ```
-📈 SWEEP: [6h: ic=0.000 ❌] [12h: ic=0.000 ❌] [18h: ic=0.000 ❌]
->> ALPHA_PASS: FALSE [signal_skill_passes=FAIL portfolio_ic_above_breakeven=FAIL basket_net_positive=FAIL signal_preserved_after_selection=FAIL multi_horizon_sweep_passes=FAIL bear_market_basket_safe=OK]
-[fail=['signal_below_effective_breakeven', 'signal_t_stat_too_low', 'basket_net_lcb_non_positive', 'portfolio_ic_below_raw_breakeven', 'basket_net_not_profitable', 'signal_lost_after_selection', 'no_profitable_horizon_found']]
-[blockers={'rank_skill': ['signal_below_effective_breakeven', 'signal_t_stat_too_low', 'portfolio_ic_below_raw_breakeven'], 'breadth': ['signal_lost_after_selection', 'no_profitable_horizon_found'], 'cost_turnover': ['basket_net_lcb_non_positive', 'basket_net_not_profitable'], 'regime_stability': []}]
->> EXEC_DIAG: FAIL [port_ic=0.0000 be_raw=0.0508 gap_raw=-0.0508 basket_net_bps=nan fail=['portfolio_ic_not_positive', 'portfolio_ic_below_raw_breakeven']]
+🏁 ============================================
+📋 ALPHA ACCEPTANCE VERDICT (FINAL EVALUATION)
+============================================
+* Net Realized Port-IC  : 0.0380 (vs Raw Breakeven IC: 0.0270)
+* Post-Cost Residual IC  : 0.0380 (t-stat NW: 2.45)
+* Target Vol (BE-Eff)   : 0.0270 (Target-gap: +11.0 bps)
+* Basket Net Bps        : 10.34 bps (IR t-stat: 2.64)
+* Sweep Horizon Passes  : 3 / 3
+* Bear-only Basket Net  : 1.25 bps (Pass: True)
+* Blocker Categories    : None
+--------------------------------------------
+>> G0: Data Quality     : PASS
+>> G1: Signal Skill     : PASS (DSR=1.0000)
+>> G2: Economic Viability: PASS (Basket Net=10.34 bps, IR=2.64)
+>> G3: Robustness Gate  : PASS
+>> OVERALL VERDICT      : PASS (All gates cleared)
+============================================
 ```
 
-## 해석
+## 해석 및 성과 요약
 
-- `SCORE-IC`와 `OOS-RANKIC`는 양호했지만, 최종 alpha acceptance gate에서는 `C3` execution과 basket/sweep 단계가 무너졌다.
-- `rank_skill`은 일부 지표에서 유지됐으나, `portfolio_ic_above_breakeven`과 `basket_net_lcb_non_positive`가 동시에 실패해 최종 alpha는 통과하지 못했다.
-- `multi_horizon_sweep_passes=0/3` 이라서 sweep 기반 robustness도 확보되지 않았다.
+- **지표 왜곡 원천 차단:** OOS 인덱스 정렬 왜곡과 시간축 역전(Reindexing-before-shifting) 및 타임존 불일치 버그를 물리적으로 교정하여 사후 포트폴리오 성과 및 sweep 지표가 정상 복원되었습니다.
+- **포트폴리오 스킬 복원:** `net_ic`가 `0.0380`으로 복원되어 breakeven 수준(`0.0270`) 대비 `+11.0 bps` 초과 달성하였습니다.
+- **하방 및 견고성 확보:** `Bear-only Basket Net`이 `1.25 bps`로 하락장 방어력이 검증되었으며, 6h, 12h, 18h의 Multi-Horizon Sweep이 모두 통과(`3 / 3`)하여 신호의 강건성(Robustness)을 증명했습니다.
