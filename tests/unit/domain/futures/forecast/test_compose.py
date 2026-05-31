@@ -1,6 +1,8 @@
 """Tests for forecast/compose.py — compose_mu SSOT."""
 from __future__ import annotations
 
+from typing import ClassVar
+
 import numpy as np
 
 from src.domain.futures.forecast.compose import compose_mu
@@ -51,7 +53,7 @@ class TestComposeMuHurdle:
         # alpha=50bps, cost=14bps, hurdle=10bps → net=36bps > 10bps → xs > 0
         af = _make_alpha(long_val=0.005, short_val=0.004)
         cf = _make_cost(bps=14.0)
-        xs_l, xs_s, mu_l, mu_s = compose_mu(af, cf, _BASE_PARAMS)
+        xs_l, xs_s, _mu_l, _mu_s = compose_mu(af, cf, _BASE_PARAMS)
 
         assert np.all(xs_l > 0.0)
         assert np.all(xs_s > 0.0)
@@ -61,7 +63,7 @@ class TestComposeMuHurdle:
         # EV 크기와 무관하게 출력은 항상 [0, 1] 범위 비음수여야 함.
         af = _make_alpha(long_val=0.0005, short_val=0.0004)
         cf = _make_cost(bps=14.0)
-        xs_l, xs_s, mu_l, mu_s = compose_mu(af, cf, _BASE_PARAMS)
+        xs_l, xs_s, _mu_l, _mu_s = compose_mu(af, cf, _BASE_PARAMS)
 
         assert np.all(xs_l >= 0.0)
         assert np.all(xs_s >= 0.0)
@@ -75,7 +77,7 @@ class TestComposeMuHurdle:
         alpha_frac = (hurdle_bps + cost_bps) / 10000.0
         af = _make_alpha(long_val=alpha_frac, short_val=alpha_frac)
         cf = _make_cost(bps=cost_bps)
-        xs_l, xs_s, _, _ = compose_mu(af, cf, _BASE_PARAMS)
+        xs_l, _xs_s, _, _ = compose_mu(af, cf, _BASE_PARAMS)
 
         assert np.all(xs_l >= 0.0)
         assert np.all(xs_l > 0.0)  # 정확히 hurdle이면 통과
@@ -181,7 +183,7 @@ class TestComposeMuOutputShapes:
 class TestComposeMuRankCsNeutral:
     """rank_cs_neutral admission mode 단위 테스트."""
 
-    _PARAMS_RANK: dict = {
+    _PARAMS_RANK: ClassVar[dict[str, float | int | str]] = {
         "BETA_ALPHA": 1.0,
         "EV_HURDLE_BPS": 10.0,
         "POST_COST_ADMISSION_MODE": "rank_cs_neutral",
@@ -286,9 +288,103 @@ class TestComposeMuRankCsNeutral:
         params = {**self._PARAMS_RANK, "RANK_SELECT_QUANTILE": 0.30}
 
         # Act
-        xs_l, xs_s, _, _ = compose_mu(af, cf, params)
+        xs_l, _xs_s, _, _ = compose_mu(af, cf, params)
 
         # Assert — top 30% of 10 = 3 종목이 선택됨 → xs_l의 nonzero ≤ 3 per bar
         for t in range(5):
             nz_long = int(np.count_nonzero(xs_l[t] > 0.0))
             assert nz_long <= 3, f"bar {t}: {nz_long} selected, expected <= 3"
+
+    def test_rank_cs_neutral_uses_policy_payload_when_given(self) -> None:
+        shape = (4, 6)
+        rank_l = np.tile(np.array([0, 1, 2, 3, 4, 5], dtype=np.float32), (4, 1))
+        rank_s = np.tile(np.array([0, -1, -2, -3, -4, -5], dtype=np.float32), (4, 1))
+        af = AlphaForecast(
+            datetimes=np.array([]),
+            symbols=(),
+            alpha_long_2d=np.full(shape, 0.002, dtype=np.float32),
+            alpha_short_2d=np.full(shape, 0.002, dtype=np.float32),
+            q10_long_2d=None, q50_long_2d=None, q90_long_2d=None,
+            q10_short_2d=None, q50_short_2d=None, q90_short_2d=None,
+            confidence_long_2d=None, confidence_short_2d=None,
+            eligible_mask=np.ones(shape, dtype=bool),
+            source="test",
+            artifact_hash=_DUMMY_HASH,
+            rank_score_long_2d=rank_l,
+            rank_score_short_2d=rank_s,
+        )
+        params = {
+            **self._PARAMS_RANK,
+            "RANK_SELECTION_POLICY": {
+                "polarity": 1,
+                "quantile": 0.33,
+                "min_abs_z": 0.0,
+                "weighting": "equal",
+                "weight_k": 3.0,
+                "holding_bars": 12,
+                "validation_net_lcb_bps": 1.0,
+                "validation_gross_bps": 1.0,
+                "validation_ir_t": 1.0,
+                "validation_monotonicity": 1.0,
+                "n_obs": 100,
+            },
+        }
+        xs_l, xs_s, _, _ = compose_mu(
+            af,
+            CostForecast(
+                execution_cost_bps_2d=np.zeros(shape),
+                execution_cost_fraction_2d=np.zeros(shape),
+                uncertainty_bps_2d=np.zeros(shape),
+                capacity_notional_2d=None,
+                source="test",
+            ),
+            params,
+        )
+        assert int(np.count_nonzero(xs_l[0] > 0.0)) <= 2
+        assert int(np.count_nonzero(xs_s[0] > 0.0)) <= 2
+
+    def test_rank_cs_neutral_uses_alpha_policy_metadata_when_params_missing(self) -> None:
+        shape = (4, 6)
+        rank_l = np.tile(np.array([0, 1, 2, 3, 4, 5], dtype=np.float32), (4, 1))
+        rank_s = np.tile(np.array([0, -1, -2, -3, -4, -5], dtype=np.float32), (4, 1))
+        af = AlphaForecast(
+            datetimes=np.array([]),
+            symbols=(),
+            alpha_long_2d=np.full(shape, 0.002, dtype=np.float32),
+            alpha_short_2d=np.full(shape, 0.002, dtype=np.float32),
+            q10_long_2d=None, q50_long_2d=None, q90_long_2d=None,
+            q10_short_2d=None, q50_short_2d=None, q90_short_2d=None,
+            confidence_long_2d=None, confidence_short_2d=None,
+            eligible_mask=np.ones(shape, dtype=bool),
+            source="test",
+            artifact_hash=_DUMMY_HASH,
+            rank_score_long_2d=rank_l,
+            rank_score_short_2d=rank_s,
+            rank_selection_policy={
+                "polarity": 1,
+                "quantile": 0.33,
+                "min_abs_z": 0.0,
+                "weighting": "equal",
+                "weight_k": 3.0,
+                "holding_bars": 12,
+                "validation_net_lcb_bps": 1.0,
+                "validation_gross_bps": 1.0,
+                "validation_ir_t": 1.0,
+                "validation_monotonicity": 1.0,
+                "n_obs": 100,
+            },
+        )
+        params = {**self._PARAMS_RANK}
+        xs_l, xs_s, _, _ = compose_mu(
+            af,
+            CostForecast(
+                execution_cost_bps_2d=np.zeros(shape),
+                execution_cost_fraction_2d=np.zeros(shape),
+                uncertainty_bps_2d=np.zeros(shape),
+                capacity_notional_2d=None,
+                source="test",
+            ),
+            params,
+        )
+        assert int(np.count_nonzero(xs_l[0] > 0.0)) <= 2
+        assert int(np.count_nonzero(xs_s[0] > 0.0)) <= 2
