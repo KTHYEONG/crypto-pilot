@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from src.domain.futures.forecast.alpha import _hash_payload, to_alpha_forecast
 from src.domain.futures.forecast.contracts import AlphaArtifactHash

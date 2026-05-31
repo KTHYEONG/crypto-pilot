@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from src.domain.futures.strategy.config import StrategyMLConfig
 from src.domain.futures.strategy.regime_gate import apply_regime_gate

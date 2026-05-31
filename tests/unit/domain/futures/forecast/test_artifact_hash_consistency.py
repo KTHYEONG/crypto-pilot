@@ -1,8 +1,6 @@
 """Regression tests for AlphaArtifactHash.structural_hash cross-split IS/HO/OOS consistency."""
 from __future__ import annotations
 
-import pytest
-
 from src.domain.futures.forecast.contracts import AlphaArtifactHash
 
 
