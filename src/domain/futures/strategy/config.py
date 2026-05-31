@@ -248,6 +248,9 @@ class StrategyMLConfig:
     alpha_gate_min_tradable_short_nz: float = 0.002
     # Numerical tolerance around cost wall comparison to avoid failing on tiny rounding noise.
     alpha_gate_cost_wall_tolerance_bps: float = 0.0
+    alpha_output_unit: Literal["return_fraction", "rank_weight"] = "rank_weight"
+    require_alpha_cost_wall: bool = False
+    require_rank_policy_positive_lcb_for_emit: bool = True
     ev_tail_blend_weight: float = 0.0
     alpha_emit_mode: str = "rank_sized"   # keep for compatibility
     alpha_emit_select_q: float = 0.35
@@ -440,6 +443,12 @@ class StrategyMLConfig:
             raise ValueError("alpha_gate_min_tradable_short_nz must satisfy 0 <= value <= 1")
         if self.alpha_gate_cost_wall_tolerance_bps < 0.0:
             raise ValueError("alpha_gate_cost_wall_tolerance_bps must be >= 0")
+        if self.alpha_output_unit not in {"return_fraction", "rank_weight"}:
+            raise ValueError("alpha_output_unit must be 'return_fraction' or 'rank_weight'")
+        if self.require_alpha_cost_wall and self.alpha_output_unit != "return_fraction":
+            raise ValueError(
+                "require_alpha_cost_wall=True is allowed only when alpha_output_unit='return_fraction'"
+            )
         if not (0.0 <= self.ev_tail_blend_weight <= 1.0):
             raise ValueError("ev_tail_blend_weight must satisfy 0 <= value <= 1")
         if not (0.0 <= self.regime_exposure_bull <= 1.0):
