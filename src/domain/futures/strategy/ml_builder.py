@@ -58,9 +58,6 @@ from src.domain.futures.strategy.diagnostics import (
     side_alpha_tail_metrics,
 )
 from src.domain.futures.strategy.features import build_feature_panel
-from src.domain.futures.strategy.inference import (
-    assemble_alpha_panel,
-)
 from src.domain.futures.strategy.integrity import (
     select_features,
     verify_data_integrity,
@@ -1162,7 +1159,6 @@ def build_ml_strategy_alpha(
             0.0,
         ).astype(np.float32, copy=False)
     alpha_ic_score = (alpha_long_final - alpha_short_final).astype(np.float64, copy=False)
-    ev_grid = alpha_ic_score
     forecast_metadata = {
         "q10_long": q10_long_grid.reshape(-1),
         "q50_long": q50_long_grid.reshape(-1),
@@ -1175,18 +1171,22 @@ def build_ml_strategy_alpha(
         "rank_score_long": rank_score_long_grid.reshape(-1),
         "rank_score_short": rank_score_short_grid.reshape(-1),
     }
-    panel = assemble_alpha_panel(
-        datetimes=features.datetimes,
-        symbols=features.symbols,
-        ev_grid=ev_grid,
-        clip_abs=float(ml_cfg.alpha_clip_bps / 10000.0),
-        eligible_mask=labels.eligible_mask,
-        forecast_metadata=forecast_metadata,
+    _idx = pd.MultiIndex.from_product(
+        [features.datetimes, features.symbols], names=["datetime", "symbol"]
     )
-    panel.loc[:, "alpha_long"] = alpha_long_final.reshape(-1)
-    panel.loc[:, "alpha_short"] = alpha_short_final.reshape(-1)
-    panel.loc[:, "rank_score_long"] = rank_score_long_grid.reshape(-1)
-    panel.loc[:, "rank_score_short"] = rank_score_short_grid.reshape(-1)
+    panel = pd.DataFrame(
+        {
+            "alpha_long": alpha_long_final.reshape(-1),
+            "alpha_short": alpha_short_final.reshape(-1),
+            "rank_score_long": rank_score_long_grid.reshape(-1),
+            "rank_score_short": rank_score_short_grid.reshape(-1),
+        },
+        index=_idx,
+    ).sort_index()
+    if forecast_metadata is not None:
+        from src.domain.futures.strategy.contracts import ALPHA_FORECAST_CONTRACT
+        panel.attrs["forecast_contract_version"] = ALPHA_FORECAST_CONTRACT
+        panel.attrs["alpha_forecast_metadata"] = dict(forecast_metadata)
     panel.attrs["strategy_name"] = cfg.name
     panel.attrs["feature_names"] = list(features.feature_names)
     panel.attrs["fold_count"] = len(folds)
@@ -1663,13 +1663,16 @@ def build_ml_strategy_alpha(
                 f"t_stat={quality_report.get('ic_t_stat', 0.0):.2f} "
                 f"hit_ratio={quality_report.get('ic_hit_ratio', 0.0):.3f}"
             )
+    _idx = pd.MultiIndex.from_product(
+        [features.datetimes, features.symbols], names=["datetime", "symbol"]
+    )
     if ml_cfg.regime_gate_enabled:
         _btc_ser = _btc_close_from_data_maps(data_maps, tf)
         alpha_long_final, alpha_short_final = apply_regime_gate(
             alpha_long_final, alpha_short_final, features.datetimes, _btc_ser, ml_cfg
         )
-        panel.loc[:, "alpha_long"] = alpha_long_final.reshape(-1)
-        panel.loc[:, "alpha_short"] = alpha_short_final.reshape(-1)
+        panel.loc[:, "alpha_long"] = pd.Series(alpha_long_final.reshape(-1), index=_idx)
+        panel.loc[:, "alpha_short"] = pd.Series(alpha_short_final.reshape(-1), index=_idx)
     # P1: trading_symbols 마스킹 — 학습 패널(training_panel) 중 Stage6 미포함 심볼 거래 차단
     _effective_trading = trading_symbols if trading_symbols else ml_cfg.trading_symbols
     if _effective_trading:
@@ -1678,8 +1681,8 @@ def build_ml_strategy_alpha(
             if _sym not in _trading_set:
                 alpha_long_final[:, _i] = 0.0
                 alpha_short_final[:, _i] = 0.0
-        panel.loc[:, "alpha_long"] = alpha_long_final.reshape(-1)
-        panel.loc[:, "alpha_short"] = alpha_short_final.reshape(-1)
+        panel.loc[:, "alpha_long"] = pd.Series(alpha_long_final.reshape(-1), index=_idx)
+        panel.loc[:, "alpha_short"] = pd.Series(alpha_short_final.reshape(-1), index=_idx)
     return panel
 
 
@@ -1970,31 +1973,33 @@ def build_ml_strategy_alpha_anchored(
     alpha_ic_score_awf = (alpha_long_final_awf - alpha_short_final_awf).astype(
         np.float64, copy=False
     )
-    ev_grid = alpha_ic_score_awf
 
-    panel = assemble_alpha_panel(
-        datetimes=features.datetimes,
-        symbols=features.symbols,
-        ev_grid=ev_grid,
-        clip_abs=float(ml_cfg.alpha_clip_bps / 10000.0),
-        eligible_mask=labels.eligible_mask,
-        forecast_metadata={
-            "q10_long": q10_long_grid.reshape(-1),
-            "q50_long": q50_long_grid.reshape(-1),
-            "q90_long": q90_long_grid.reshape(-1),
-            "q10_short": q10_short_grid.reshape(-1),
-            "q50_short": q50_short_grid.reshape(-1),
-            "q90_short": q90_short_grid.reshape(-1),
-            "confidence_long": confidence_long_grid.reshape(-1),
-            "confidence_short": confidence_short_grid.reshape(-1),
+    _idx = pd.MultiIndex.from_product(
+        [features.datetimes, features.symbols], names=["datetime", "symbol"]
+    )
+    panel = pd.DataFrame(
+        {
+            "alpha_long": alpha_long_final_awf.reshape(-1),
+            "alpha_short": alpha_short_final_awf.reshape(-1),
             "rank_score_long": rank_score_long_grid_awf.reshape(-1),
             "rank_score_short": rank_score_short_grid_awf.reshape(-1),
         },
-    )
-    panel.loc[:, "alpha_long"] = alpha_long_final_awf.reshape(-1)
-    panel.loc[:, "alpha_short"] = alpha_short_final_awf.reshape(-1)
-    panel.loc[:, "rank_score_long"] = rank_score_long_grid_awf.reshape(-1)
-    panel.loc[:, "rank_score_short"] = rank_score_short_grid_awf.reshape(-1)
+        index=_idx,
+    ).sort_index()
+    from src.domain.futures.strategy.contracts import ALPHA_FORECAST_CONTRACT
+    panel.attrs["forecast_contract_version"] = ALPHA_FORECAST_CONTRACT
+    panel.attrs["alpha_forecast_metadata"] = {
+        "q10_long": q10_long_grid.reshape(-1),
+        "q50_long": q50_long_grid.reshape(-1),
+        "q90_long": q90_long_grid.reshape(-1),
+        "q10_short": q10_short_grid.reshape(-1),
+        "q50_short": q50_short_grid.reshape(-1),
+        "q90_short": q90_short_grid.reshape(-1),
+        "confidence_long": confidence_long_grid.reshape(-1),
+        "confidence_short": confidence_short_grid.reshape(-1),
+        "rank_score_long": rank_score_long_grid_awf.reshape(-1),
+        "rank_score_short": rank_score_short_grid_awf.reshape(-1),
+    }
 
     # AWF quality/IC gates — warn-only モード (Optuna 최적화 중단 방지)
     # WF 경로와 동일하게 build_quality_report()로 실제 IC/NDCG/alpha_p95 계산
