@@ -129,7 +129,7 @@ def _summarize_alpha_phase1_verdict(
     resid_t = float(getattr(report, "resid_t_stat_nw", float("nan")))
     gap_eff = resid_ic - be_eff if np.isfinite(resid_ic) and np.isfinite(be_eff) else float("nan")
     port_ic = float(report.net_ic)
-    be_raw = float(report.breakeven_ic)
+    be_raw = float(report.breakeven_ic_eff)  # N_eff 기준으로 통일 (G1과 동일 기준)
     gap_raw = port_ic - be_raw if np.isfinite(port_ic) and np.isfinite(be_raw) else float("nan")
     clip_pres = float(getattr(report, "clip_preservation_ratio", float("nan")))
 
@@ -142,7 +142,7 @@ def _summarize_alpha_phase1_verdict(
         np.isfinite(basket_net_bps) and basket_net_bps > 0.0
         and np.isfinite(basket_ir_t) and basket_ir_t >= 2.0
     )
-    signal_preserved_after_selection = bool(np.isfinite(clip_pres) and clip_pres >= 0.5)
+    signal_preserved_after_selection = bool(np.isfinite(clip_pres) and clip_pres >= 0.7)
     multi_horizon_sweep_passes = bool(sweep_pass_count >= 1)
 
     # G3: 강건성
