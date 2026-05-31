@@ -1070,6 +1070,7 @@ def _run_alpha_evaluation_report(
         btc_close_1d=btc_close_1d,
         n_trials=_n_trials_dsr,
         horizon_bars=horizon,
+        cost_floor_bps=24.0,  # 24bps 고정 물리 비용 장벽 보존
     )
 
     # Compact Alpha Scoreboard (Phase 1: resid_ic / N_eff-based breakeven)
@@ -1157,7 +1158,7 @@ def _run_alpha_evaluation_report(
         realized_2d: np.ndarray,
         *,
         cost_per_bar_bps: float = 24.0,
-    ) -> dict[str, float]:
+    ) -> dict[str, Any]:
         t_n = sig_long_2d.shape[0]
         spreads_ew = np.full(t_n, np.nan, dtype=np.float64)
         spreads_zw = np.full(t_n, np.nan, dtype=np.float64)
@@ -1188,6 +1189,7 @@ def _run_alpha_evaluation_report(
                 "mean_bps": float("nan"), "net_bps": float("nan"),
                 "ir_t": float("nan"), "hit": float("nan"), "n": 0.0,
                 "mean_bps_zw": float("nan"), "ir_t_zw": float("nan"),
+                "spreads_ew": spreads_ew,
             }
         mean_ew = float(np.mean(valid_ew))
         std_ew = float(np.std(valid_ew, ddof=1))
@@ -1209,9 +1211,10 @@ def _run_alpha_evaluation_report(
             "n": n_ew,
             "mean_bps_zw": mean_bps_zw,
             "ir_t_zw": ir_t_zw,
+            "spreads_ew": spreads_ew,
         }
 
-    _basket = _basket_spread_diag(al, as_, real_resid)
+    _basket = _basket_spread_diag(al, as_, real_resid, cost_per_bar_bps=24.0)
     _logger.info(
         "🧺 [L3-BASKET] ew_bps=%.2f net_bps=%.2f ir_t=%.2f hit=%.3f n=%d"
         " | zw_bps=%.2f(confound) | RANK-IC C3=%.4f",
@@ -1255,11 +1258,9 @@ def _run_alpha_evaluation_report(
         alpha_long_map[h] = al[:clip]
         alpha_short_map[h] = as_[:clip]
 
-    # Phase 2: 호라이즌별 비용 상각 — 보유기간 연장 시 단위 비용 인하 (quant.md Leakage-safe)
-    # cost_amortize_bars: 기본 리밸런스 주기(4h*6=24h). h/6 배로 비용을 나눔.
-    _cost_amortize_bars = 6  # conservative default matching REBALANCE_BARS median
+    # Phase 2: 엄격한 24bps 비용 검증 (상각 없음, 물리적 진실 보존)
     _cost_map = {
-        h: 24.0 / max(1, h // _cost_amortize_bars)
+        h: 24.0
         for h in [6, 12, 18]
     }
     sweep = sweep_horizon_breakeven(
@@ -1273,12 +1274,27 @@ def _run_alpha_evaluation_report(
     
     _logger.info(f"📈 SWEEP: {' '.join(h_sweep_strs)}")
     _sweep_pass_n = int(sum(1 for v in sweep.values() if v.get("ic_exceeds_breakeven", 0.0) > 0.0))
+
+    # Bear-only basket 실측 계산
+    bear_basket_net_bps = float("nan")
+    if btc_close_1d is not None and "spreads_ew" in _basket:
+        from src.domain.futures.strategy.alpha_evaluation import _compute_regime_labels
+        _labels = _compute_regime_labels(btc_close_1d)
+        _clip_len = min(len(_labels), len(_basket["spreads_ew"]))
+        _bear_indices = [
+            t for t in range(_clip_len)
+            if _labels[t] == "bear" and np.isfinite(_basket["spreads_ew"][t])
+        ]
+        if len(_bear_indices) >= 5:
+            _bear_spreads = _basket["spreads_ew"][_bear_indices]
+            bear_basket_net_bps = float(np.mean(_bear_spreads)) * 1e4 - 24.0
+
     _alpha_verdict = _summarize_alpha_phase1_verdict(
         report,
         basket_net_bps=float(_basket.get("net_bps", float("nan"))),
         basket_ir_t=float(_basket.get("ir_t", float("nan"))),
         sweep_pass_count=_sweep_pass_n,
-        bear_basket_net_bps=float("nan"),  # bear-only basket 미구현 시 nan
+        bear_basket_net_bps=bear_basket_net_bps,
     )
     _exec_verdict = _summarize_exec_diag_verdict(
         report=report,
