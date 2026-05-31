@@ -32,7 +32,7 @@ def test_ml_config_rejects_invalid_ev_mode() -> None:
 
 def test_ml_config_accepts_model_family_default() -> None:
     cfg = StrategyMLConfig()
-    assert cfg.model_family == "lgbm_regression"
+    assert cfg.model_family == "lgbm_lambdarank"
     assert cfg.ranking_mode == "group_ndcg"
 
 
@@ -94,7 +94,7 @@ def test_strategy_ml_config_ranker_enabled_false() -> None:
 def test_strategy_ml_config_new_modes_defaults() -> None:
     cfg = StrategyMLConfig()
     assert cfg.rank_target_mode == "cs_residual"
-    assert cfg.calibrator_target_mode == "rank_confidence"
+    assert cfg.calibrator_target_mode == "signed_ev"
     assert cfg.post_cost_admission_mode == "rank_cs_neutral"
     assert cfg.oos_ic_target_source == "forward_gross_ret"
 
@@ -116,7 +116,9 @@ def test_strategy_ml_config_rank_cs_neutral_defaults() -> None:
     cfg = StrategyMLConfig()
 
     # Assert — 기본값 확인
-    assert cfg.rank_select_quantile == pytest.approx(0.45)
+    assert cfg.rank_select_quantile == pytest.approx(0.35)
+    assert cfg.rank_select_quantiles == (0.25, 0.35, 0.45)
+    assert cfg.ic_lcb_z == pytest.approx(1.0)
     assert cfg.target_breadth == 8
     assert cfg.ic_prior_for_gate == pytest.approx(0.03)
     assert cfg.ev_secondary_tilt_weight == pytest.approx(0.0)

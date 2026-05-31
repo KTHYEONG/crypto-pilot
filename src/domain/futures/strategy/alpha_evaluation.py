@@ -8,7 +8,13 @@ import numpy as np
 import scipy.stats
 from numpy.typing import NDArray
 
-from src.domain.futures.strategy.diagnostics import _fast_rank1d, ic_summary, rolling_ic
+from src.domain.futures.strategy.diagnostics import (
+    _fast_rank1d,
+    ic_lcb_hac,
+    ic_summary,
+    rolling_ic,
+    top_bottom_spread_bps,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -83,6 +89,11 @@ class AlphaEvaluationReport:
     n_eff_emit: float = float("nan")
     # Phase G2c: post-clip IC / pre-clip IC 비율. 클립 파괴 감지.
     clip_preservation_ratio: float = float("nan")
+    # Robust rank skill and basket economics (24bps baseline).
+    rank_ic_lcb: float = float("nan")
+    basket_net_bps_lcb_24bps: float = float("nan")
+    top_bottom_spread_bps: float = float("nan")
+    turnover_proxy: float = float("nan")
 
 
 def compute_net_ic(
@@ -554,6 +565,7 @@ def evaluate_alpha(
     cost_floor_bps: float = 24.0,
     n_trials: int = 1,
     horizon_bars: int = 6,
+    basket_quantile: float = 0.35,
     # Phase F: trading_mask — True인 심볼(C3)만 trading panel 계산에 사용
     trading_mask: NDArray[np.bool_] | None = None,
 ) -> AlphaEvaluationReport:
@@ -577,6 +589,7 @@ def evaluate_alpha(
         cost_floor_bps: Total cost threshold (round-trip + hurdle), bps.
         n_trials: Number of hyperparameter trials (for DSR).
         horizon_bars: Label horizon in bars (for NW t-stat lag).
+        basket_quantile: Top/bottom quantile used for basket spread diagnostics.
         trading_mask: Boolean mask [N] — True인 심볼(C3)만 trading panel 메트릭 계산에 사용.
             None이면 trading panel 계산 생략.
 
@@ -761,15 +774,36 @@ def evaluate_alpha(
     )
     _n_eff_emit: float = float(max(breadth, 1.0))  # 진단용 (게이트 판정 불사용)
 
+    # Basket economics at fixed 24bps-style cost baseline.
+    _spread_diag = top_bottom_spread_bps(
+        score_2d=_gating_pred_2d,
+        realized_2d=realized_fwd_ret_2d,
+        eligible_2d=(
+            np.isfinite(_gating_pred_2d)
+            & np.isfinite(realized_fwd_ret_2d)
+            & (np.isfinite(alpha_long_2d) | np.isfinite(alpha_short_2d))
+        ),
+        quantile=basket_quantile,
+        cost_bps=cost_floor_bps,
+    )
+    _rank_ic_lcb = ic_lcb_hac(
+        rolling_ic(_gating_pred_2d, realized_fwd_ret_2d, method="spearman"),
+        horizon_bars=horizon_bars,
+        z=1.0,
+    )
+
     # PASS / FAIL verdict (Phase 1 criteria)
     fail_reasons: list[str] = []
 
-    # G1a: IC skill — universe breakeven 기준 (신호 품질 측정, emit sizing과 분리)
-    if _gating_ic < _breakeven_eff:
+    # G1a: IC LCB skill — universe breakeven 기준.
+    if _rank_ic_lcb < _breakeven_eff:
         fail_reasons.append("signal_below_effective_breakeven")
     # G1b: statistical significance
     if _gating_t_nw < 3.0:
         fail_reasons.append("signal_t_stat_too_low")
+    # G2: post-cost basket robustness
+    if float(_spread_diag.get("net_spread_lcb_bps", -1e9)) <= 0.0:
+        fail_reasons.append("basket_net_lcb_non_positive")
     # G1c: bear-regime IC non-negative (하락장에서 손실 불가 조건)
     _bear_ic: float = regime_ic.get("bear", float("nan"))
     if math.isfinite(_bear_ic) and _bear_ic < 0.0:
@@ -783,11 +817,13 @@ def evaluate_alpha(
 
     _logger.debug(
         "evaluate_alpha: gating_ic=%.4f n_eff=%.1f n_eff_emit=%.1f"
-        " be_eff=%.4f dsr=%.3f passes=%s fail=%s",
+        " be_eff=%.4f lcb=%.4f basket_lcb=%.2fbps dsr=%.3f passes=%s fail=%s",
         _gating_ic,
         _n_eff_universe,
         _n_eff_emit,
         _breakeven_eff,
+        _rank_ic_lcb,
+        float(_spread_diag.get("net_spread_lcb_bps", float("nan"))),
         dsr,
         passes,
         fail_reasons,
@@ -850,6 +886,10 @@ def evaluate_alpha(
         breakeven_ic_eff=_breakeven_eff,
         n_eff_corr_raw=_n_eff_corr_raw,
         n_eff_emit=_n_eff_emit,
+        rank_ic_lcb=float(_rank_ic_lcb),
+        basket_net_bps_lcb_24bps=float(_spread_diag.get("net_spread_lcb_bps", float("nan"))),
+        top_bottom_spread_bps=float(_spread_diag.get("gross_spread_bps", float("nan"))),
+        turnover_proxy=float(_spread_diag.get("turnover_proxy", float("nan"))),
         clip_preservation_ratio=(
             # post_clip_IC / pre_clip_IC: 클립 후 스킬이 얼마나 보존됐는가 (Spec G2c).
             # net_ic_dict["mean_ic"] = post-clip (al-as), _gating_ic = pre-clip dense.
