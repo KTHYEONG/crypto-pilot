@@ -222,13 +222,13 @@ class StrategyMLConfig:
     # Calibrator target: which return series to use as y_ev for magnitude learning.
     # "beta_residualized" = current default: exec_net_ret after beta-resid, pre-CS-demean
     # "gross"             = raw log return minus funding only (no beta removal, no fee)
-    calibrator_target: Literal["beta_residualized", "gross"] = "gross"
+    calibrator_target: Literal["beta_residualized", "gross"] = "beta_residualized"
     model_family: Literal["lgbm_regression", "lgbm_huber", "lgbm_lambdarank"] = "lgbm_regression"
     ranking_mode: Literal["pointwise", "group_ndcg"] = "group_ndcg"
     # False: skip ranker stage; calibrator uses zero rank_score
     # (C3 ablation A/B — empirically better OOS IC)
     ranker_enabled: bool = True
-    rank_target_mode: Literal["cs_residual", "forward_gross_rank"] = "forward_gross_rank"
+    rank_target_mode: Literal["cs_residual", "forward_gross_rank"] = "cs_residual"
     calibrator_target_mode: Literal["signed_ev", "rank_confidence"] = "rank_confidence"
     post_cost_admission_mode: Literal[
         "ev_gate", "rank_then_ev_gate", "rank_cs_neutral"
