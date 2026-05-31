@@ -364,9 +364,9 @@ def test_build_label_panel_gross_target_differs_from_beta_residualized() -> None
     )
 
 
-def test_build_label_panel_gross_target_default_unchanged() -> None:
-    """Default calibrator_target='gross' produces same exec_net_ret as explicit gross config."""
-    # Arrange — default config (no explicit calibrator_target); default is now "gross"
+def test_build_label_panel_residual_target_default_unchanged() -> None:
+    """Default calibrator_target='beta_residualized' equals explicit config."""
+    # Arrange — default config (no explicit calibrator_target); default is beta_residualized
     aligned = _aligned_multi_symbol(n_symbols=6, t_len=15)
     cfg_default = StrategyMLConfig(
         label_horizon_bars=1,
@@ -379,14 +379,14 @@ def test_build_label_panel_gross_target_default_unchanged() -> None:
         fee_bps=0.0,
         slippage_bps=0.0,
         min_group_size=2,
-        calibrator_target="gross",
+        calibrator_target="beta_residualized",
     )
 
     # Act
     panel_default = build_label_panel(aligned, cfg_default)
     panel_explicit = build_label_panel(aligned, cfg_explicit)
 
-    # Assert — both produce identical exec_net_ret (regression test for new default)
+    # Assert — both produce identical exec_net_ret
     np.testing.assert_array_equal(
         panel_default.exec_net_ret,
         panel_explicit.exec_net_ret,
@@ -440,6 +440,7 @@ def test_build_label_panel_magnitude_target_long_is_signed_exec_net_ret() -> Non
     panel = build_label_panel(aligned, cfg)
 
     # Assert — signed: magnitude_target_long[valid] == exec_net_ret[valid]
+    assert panel.magnitude_target_long is not None
     valid_mask = panel.eligible_mask & np.isfinite(panel.exec_net_ret)
     long_valid = panel.magnitude_target_long[valid_mask]
     assert long_valid.size > 0, "no valid cells to assert on"
@@ -467,6 +468,7 @@ def test_build_label_panel_magnitude_target_short_is_signed_neg_exec_net_ret() -
     panel = build_label_panel(aligned, cfg)
 
     # Assert — signed: magnitude_target_short[valid] == -exec_net_ret[valid]
+    assert panel.magnitude_target_short is not None
     valid_mask = panel.eligible_mask & np.isfinite(panel.exec_net_ret)
     short_valid = panel.magnitude_target_short[valid_mask]
     assert short_valid.size > 0, "no valid cells to assert on"
