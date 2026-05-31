@@ -224,6 +224,42 @@ class _FoldPredictResult:
     score_test_short: np.ndarray
     ev_valid_long: np.ndarray
     ev_valid_short: np.ndarray
+def _emit_rank_sized_alpha(
+    rank_score_long_2d: np.ndarray,
+    rank_score_short_2d: np.ndarray,
+    eligible_2d: np.ndarray,
+    *,
+    select_q: float,
+    weight_k: float,
+    clip_lim: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Dense rank score to cross-sectional continuous long/short weights.
+
+    Replaces EV-magnitude hard clip. Broad quantile selection + tanh rank-weight:
+    (1) emit breadth increases → N_eff increases → be_eff decreases,
+    (2) dense ranking skill preserved (presv improves).
+    Time: O(T·N log N). Space: O(T·N).
+    """
+    from src.domain.futures.forecast.compose import _rank_weight_1d
+
+    t_n = rank_score_long_2d.shape[0]
+    al = np.zeros_like(rank_score_long_2d, dtype=np.float64)
+    as_ = np.zeros_like(rank_score_short_2d, dtype=np.float64)
+    for t in range(t_n):
+        elig = eligible_2d[t]
+        n_elig = int(np.count_nonzero(elig))
+        if n_elig < 2:
+            continue
+        wl = _rank_weight_1d(np.where(elig, rank_score_long_2d[t], np.nan), k=weight_k)
+        ws = _rank_weight_1d(np.where(elig, -rank_score_short_2d[t], np.nan), k=weight_k)
+        keep = max(1, int(np.ceil(n_elig * select_q)))
+        lo_idx = np.argsort(wl)[::-1][:keep]
+        so_idx = np.argsort(ws)[::-1][:keep]
+        al[t, lo_idx] = np.clip(np.maximum(wl[lo_idx], 0.0), 0.0, clip_lim)
+        as_[t, so_idx] = np.clip(np.maximum(ws[so_idx], 0.0), 0.0, clip_lim)
+    return al.astype(np.float32, copy=False), as_.astype(np.float32, copy=False)
+
+
 def _train_predict_single_fold(
     fold: FoldSpec,
     features: FeaturePanel,
@@ -1137,16 +1173,29 @@ def build_ml_strategy_alpha(
     t_grid_start = time.perf_counter()
     clip_lim = float(ml_cfg.alpha_clip_bps / 10000.0)
     eligible_2d = labels.eligible_mask
-    alpha_long_final = np.where(
-        eligible_2d,
-        np.clip(np.maximum(ev_long_grid, 0.0), 0.0, clip_lim),
-        0.0,
-    ).astype(np.float32, copy=False)
-    alpha_short_final = np.where(
-        eligible_2d,
-        np.clip(np.maximum(ev_short_grid, 0.0), 0.0, clip_lim),
-        0.0,
-    ).astype(np.float32, copy=False)
+    _emit_mode = str(getattr(ml_cfg, "alpha_emit_mode", "rank_sized"))
+    if _emit_mode == "rank_sized":
+        # clip_lim=1.0: tanh weights가 (-1,+1) 범위이므로 alpha_clip_bps(0.0075) 대신
+        # 1.0을 사용해 continuous weight 보존. portfolio sizing은 backtest에서 별도 결정.
+        alpha_long_final, alpha_short_final = _emit_rank_sized_alpha(
+            rank_score_long_grid,
+            rank_score_short_grid,
+            eligible_2d,
+            select_q=float(getattr(ml_cfg, "alpha_emit_select_q", 0.40)),
+            weight_k=float(getattr(ml_cfg, "alpha_emit_weight_k", 3.0)),
+            clip_lim=1.0,
+        )
+    else:
+        alpha_long_final = np.where(
+            eligible_2d,
+            np.clip(np.maximum(ev_long_grid, 0.0), 0.0, clip_lim),
+            0.0,
+        ).astype(np.float32, copy=False)
+        alpha_short_final = np.where(
+            eligible_2d,
+            np.clip(np.maximum(ev_short_grid, 0.0), 0.0, clip_lim),
+            0.0,
+        ).astype(np.float32, copy=False)
     alpha_ic_score = (alpha_long_final - alpha_short_final).astype(np.float64, copy=False)
     ev_grid = alpha_ic_score
     forecast_metadata = {
@@ -1363,6 +1412,11 @@ def build_ml_strategy_alpha(
     _retention_ratio = float(
         _test_rank_ic / max(abs(_is_rank_ic), 1e-12) if abs(_is_rank_ic) > 0.0 else 0.0
     )
+    # 게이트를 OOS-only IC 기준으로 교체: 전체 패널 IC(IS+OOS)는 vrefit 구간 노이즈에 취약.
+    # is_rank_ic(alpha_long-short 전체 패널)는 diagnostic 용도로만 유지.
+    quality_report["full_panel_alpha_ic"] = _is_rank_ic
+    quality_report["spearman_rank_ic"] = _test_rank_ic
+    quality_report["fold_oos_ic"] = _test_rank_ic
     # breakeven IC: cost24bps / (sigma500bps * sqrt(breadth)); breadth ≈ cofinite_p50
     _be_ic = 24.0 / (500.0 * max(_cofinite_p50, 1.0) ** 0.5)
     _ic_gap_oos = _test_rank_ic - _be_ic
@@ -1928,16 +1982,27 @@ def build_ml_strategy_alpha_anchored(
 
     clip_lim_awf = float(ml_cfg.alpha_clip_bps / 10000.0)
     eligible_2d_awf = labels.eligible_mask
-    alpha_long_final_awf = np.where(
-        eligible_2d_awf,
-        np.clip(np.maximum(ev_long_grid, 0.0), 0.0, clip_lim_awf),
-        0.0,
-    ).astype(np.float32, copy=False)
-    alpha_short_final_awf = np.where(
-        eligible_2d_awf,
-        np.clip(np.maximum(ev_short_grid, 0.0), 0.0, clip_lim_awf),
-        0.0,
-    ).astype(np.float32, copy=False)
+    _emit_mode_awf = str(getattr(ml_cfg, "alpha_emit_mode", "rank_sized"))
+    if _emit_mode_awf == "rank_sized":
+        alpha_long_final_awf, alpha_short_final_awf = _emit_rank_sized_alpha(
+            rank_score_long_grid_awf,
+            rank_score_short_grid_awf,
+            eligible_2d_awf,
+            select_q=float(getattr(ml_cfg, "alpha_emit_select_q", 0.40)),
+            weight_k=float(getattr(ml_cfg, "alpha_emit_weight_k", 3.0)),
+            clip_lim=1.0,  # tanh weights가 (-1,+1) 범위이므로 continuous 보존
+        )
+    else:
+        alpha_long_final_awf = np.where(
+            eligible_2d_awf,
+            np.clip(np.maximum(ev_long_grid, 0.0), 0.0, clip_lim_awf),
+            0.0,
+        ).astype(np.float32, copy=False)
+        alpha_short_final_awf = np.where(
+            eligible_2d_awf,
+            np.clip(np.maximum(ev_short_grid, 0.0), 0.0, clip_lim_awf),
+            0.0,
+        ).astype(np.float32, copy=False)
     alpha_ic_score_awf = (alpha_long_final_awf - alpha_short_final_awf).astype(
         np.float64, copy=False
     )

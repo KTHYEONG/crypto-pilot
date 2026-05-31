@@ -249,6 +249,9 @@ class StrategyMLConfig:
     # Numerical tolerance around cost wall comparison to avoid failing on tiny rounding noise.
     alpha_gate_cost_wall_tolerance_bps: float = 0.0
     ev_tail_blend_weight: float = 0.0
+    alpha_emit_mode: str = "rank_sized"   # "rank_sized" | "ev_clip"
+    alpha_emit_select_q: float = 0.40     # per-side 광폭 분위
+    alpha_emit_weight_k: float = 3.0      # tanh rank-weight steepness
     feature_groups_enabled: tuple[
         Literal[
             "trend",
