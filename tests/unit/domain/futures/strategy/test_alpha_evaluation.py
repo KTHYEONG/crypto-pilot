@@ -23,6 +23,10 @@ from src.domain.futures.strategy.alpha_evaluation import (
     evaluate_alpha,
     sweep_horizon_breakeven,
 )
+from src.domain.futures.strategy.rank_selection import (
+    apply_rank_selection_policy,
+    calibrate_rank_selection_policy,
+)
 
 # ---------------------------------------------------------------------------
 # compute_breakeven_ic
@@ -130,6 +134,72 @@ def test_derive_signed_rank_signal_shape_mismatch_raises_value_error() -> None:
 
     with pytest.raises(ValueError, match="identical shapes"):
         derive_signed_rank_signal(long_arr, short_arr)
+
+
+def test_rank_policy_calibration_selects_negative_polarity_for_inverted_tails() -> None:
+    rng = np.random.default_rng(42)
+    t, n = 220, 10
+    score = rng.standard_normal((t, n)).astype(np.float64)
+    realized = (-score + 0.01 * rng.standard_normal((t, n))).astype(np.float64) / 100.0
+    policy = calibrate_rank_selection_policy(
+        signed_score_2d=score,
+        realized_fwd_ret_2d=realized,
+        eligible_2d=np.ones((t, n), dtype=bool),
+        quantiles=(0.2, 0.3),
+        min_abs_z_grid=(0.0, 0.25),
+        holding_bars=12,
+        cost_bps=1.0,
+        min_obs=30,
+    )
+    assert policy.polarity == -1
+
+
+def test_rank_policy_apply_outputs_non_overlapping_positive_masks() -> None:
+    rng = np.random.default_rng(1)
+    score = rng.standard_normal((30, 8)).astype(np.float64)
+    realized = score / 100.0
+    policy = calibrate_rank_selection_policy(
+        signed_score_2d=score,
+        realized_fwd_ret_2d=realized,
+        eligible_2d=np.ones((30, 8), dtype=bool),
+        quantiles=(0.25,),
+        min_abs_z_grid=(0.0,),
+        holding_bars=12,
+        cost_bps=0.0,
+        min_obs=20,
+    )
+    al, as_ = apply_rank_selection_policy(
+        signed_score_2d=score,
+        eligible_2d=np.ones((30, 8), dtype=bool),
+        policy=policy,
+    )
+    assert al.shape == score.shape
+    assert as_.shape == score.shape
+    assert not np.any((al > 0.0) & (as_ > 0.0))
+
+
+def test_rank_policy_fallback_keeps_no_trade_when_validation_fails() -> None:
+    score = np.zeros((40, 6), dtype=np.float64)
+    realized = np.zeros((40, 6), dtype=np.float64)
+    policy = calibrate_rank_selection_policy(
+        signed_score_2d=score,
+        realized_fwd_ret_2d=realized,
+        eligible_2d=np.ones((40, 6), dtype=bool),
+        quantiles=(0.2, 0.3),
+        min_abs_z_grid=(0.0, 0.25),
+        holding_bars=12,
+        cost_bps=8.0,
+        min_obs=20,
+    )
+    assert policy.validation_net_lcb_bps <= 0.0
+    assert policy.n_obs == 0
+    al, as_ = apply_rank_selection_policy(
+        signed_score_2d=score,
+        eligible_2d=np.ones((40, 6), dtype=bool),
+        policy=policy,
+    )
+    assert np.count_nonzero(al) == 0
+    assert np.count_nonzero(as_) == 0
 
 
 # ---------------------------------------------------------------------------
