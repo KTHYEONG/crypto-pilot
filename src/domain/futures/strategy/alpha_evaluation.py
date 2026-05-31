@@ -32,6 +32,50 @@ def _measured_sigma_r_bps(
     return measured if measured > 0.0 else fallback_bps
 
 
+def derive_signed_rank_signal(
+    rank_score_long_2d: NDArray[np.float64],
+    rank_score_short_2d: NDArray[np.float64],
+    *,
+    same_score_rtol: float = 1e-6,
+    same_score_atol: float = 1e-8,
+) -> NDArray[np.float64]:
+    """Derive signed dense rank signal from long/short rank score panels.
+
+    Args:
+        rank_score_long_2d: Long-side rank score panel.
+        rank_score_short_2d: Short-side rank score panel.
+        same_score_rtol: Relative tolerance for same-score contract detection.
+        same_score_atol: Absolute tolerance for same-score contract detection.
+
+    Returns:
+        Signed rank signal panel with the same shape as inputs.
+
+    Raises:
+        ValueError: If input shapes are not identical.
+
+    Time complexity: O(T * N).
+    Space complexity: O(T * N).
+    """
+    long_arr = np.asarray(rank_score_long_2d, dtype=np.float64)
+    short_arr = np.asarray(rank_score_short_2d, dtype=np.float64)
+    if long_arr.shape != short_arr.shape:
+        raise ValueError(
+            "rank_score_long_2d and rank_score_short_2d must have identical shapes."
+        )
+
+    finite = np.isfinite(long_arr) & np.isfinite(short_arr)
+    signed_single = np.where(np.isfinite(long_arr), long_arr, short_arr)
+    if not np.any(finite):
+        return signed_single
+
+    scale = max(float(np.nanmedian(np.abs(long_arr[finite]))), 1.0)
+    abs_diff_p50 = float(np.nanmedian(np.abs(long_arr[finite] - short_arr[finite])))
+    same_score = abs_diff_p50 <= (same_score_atol + same_score_rtol * scale)
+    if same_score:
+        return signed_single
+    return 0.5 * (long_arr - short_arr)
+
+
 @dataclass(slots=True, frozen=True)
 class AlphaEvaluationReport:
     """Comprehensive alpha quality report for Phase 0 evaluation gate.

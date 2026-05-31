@@ -1187,12 +1187,19 @@ def build_ml_strategy_alpha(
         from src.domain.futures.strategy.contracts import ALPHA_FORECAST_CONTRACT
         panel.attrs["forecast_contract_version"] = ALPHA_FORECAST_CONTRACT
         panel.attrs["alpha_forecast_metadata"] = dict(forecast_metadata)
+    panel.attrs["rank_score_contract"] = {
+        "version": 1,
+        "mode": "signed_single_ranker",
+        "long_higher_is_better": True,
+        "short_lower_is_better": True,
+        "signed_signal_formula": "derive_signed_rank_signal(rank_score_long, rank_score_short)",
+    }
     panel.attrs["strategy_name"] = cfg.name
     panel.attrs["feature_names"] = list(features.feature_names)
     panel.attrs["fold_count"] = len(folds)
     panel.attrs["config_hash"] = build_manifest_hash(asdict(cfg.ml))
     panel.attrs["feature_config_hash"] = build_manifest_hash(
-        {"feature_names": sorted(list(features.feature_names))}
+        {"feature_names": sorted(features.feature_names)}
     )
     panel.attrs["label_config_hash"] = build_manifest_hash(
         {
@@ -1999,6 +2006,13 @@ def build_ml_strategy_alpha_anchored(
         "confidence_short": confidence_short_grid.reshape(-1),
         "rank_score_long": rank_score_long_grid_awf.reshape(-1),
         "rank_score_short": rank_score_short_grid_awf.reshape(-1),
+    }
+    panel.attrs["rank_score_contract"] = {
+        "version": 1,
+        "mode": "signed_single_ranker",
+        "long_higher_is_better": True,
+        "short_lower_is_better": True,
+        "signed_signal_formula": "derive_signed_rank_signal(rank_score_long, rank_score_short)",
     }
 
     # AWF quality/IC gates — warn-only モード (Optuna 최적화 중단 방지)
