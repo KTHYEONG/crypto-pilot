@@ -13,6 +13,7 @@ from src.domain.futures.strategy.alpha_evaluation import (
     compute_effective_breadth,
     compute_net_ic,
     compute_per_regime_breakeven,
+    diagnose_selection_monotonicity,
     compute_per_regime_ic,
     compute_q50_sign_hit,
     compute_quantile_coverage,
@@ -383,7 +384,7 @@ def test_evaluate_alpha_regime_gate_uses_preclip_signal_when_provided() -> None:
         n_trials=1,
     )
 
-    assert "bear_regime_ic_negative" not in report.fail_reasons
+    assert "bear_ic_negative" not in report.fail_reasons
 
 
 # ---------------------------------------------------------------------------
@@ -820,14 +821,18 @@ def test_evaluate_alpha_inference_stat_absent_when_not_provided() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_evaluate_alpha_n_eff_floored_to_emit_breadth() -> None:
-    """N_eff는 클립북 emit_breadth를 초과할 수 없다 (미실현 분산크레딧 방지)."""
+def test_evaluate_alpha_n_eff_universe_independent_of_emit_breadth() -> None:
+    """n_eff는 universe-level N_eff (emit breadth cap 제거).
+
+    G1 IC 스킬 게이트는 sizing policy와 독립적이어야 한다.
+    n_eff_emit은 진단용으로만 보존된다.
+    """
     # Arrange: emit_breadth≈2, corr-adjusted N_eff가 훨씬 큰 패널 시뮬레이션
     rng = np.random.default_rng(42)
     T, N = 200, 20
-    # 잔차화된 패널: 낮은 상관관계 → N_eff_corr ≈ N (floor 없으면 20 반환)
+    # 잔차화된 패널: 낮은 상관관계 → N_eff_corr ≈ N
     realized = rng.standard_normal((T, N)) * 0.05
-    # 클립 알파: 2개 심볼만 비零 → emit_breadth ≈ 2
+    # 클립 알파: 2개 심볼만 비零 → emit_breadth ≈ 4
     alpha_long = np.zeros((T, N))
     alpha_long[:, :2] = 0.01
     alpha_short = np.zeros((T, N))
@@ -840,9 +845,12 @@ def test_evaluate_alpha_n_eff_floored_to_emit_breadth() -> None:
         realized_fwd_ret_2d=realized,
     )
 
-    # Assert: n_eff <= emit_breadth (long 2 + short 2 = 4), n_eff_corr_raw는 더 클 수 있음
-    assert report.n_eff <= report.n_eff_corr_raw + 1e-9
-    assert report.n_eff <= 5.0  # emit_breadth = 4 (long_cols=2, short_cols=2)
+    # Assert: n_eff는 universe-level (emit breadth 상한 없음), n_eff_corr_raw와 동일해야 함
+    assert report.n_eff == report.n_eff_corr_raw
+    # n_eff_emit은 실제 emit breadth를 저장 (≈4, long 2 + short 2)
+    assert report.n_eff_emit <= 5.0
+    # universe n_eff는 emit breadth보다 커야 함 (cap이 제거됐으므로)
+    assert report.n_eff >= report.n_eff_emit - 1e-9
 
 
 def test_evaluate_alpha_clip_preservation_ratio_computed() -> None:
@@ -921,4 +929,67 @@ def test_evaluate_alpha_t_stat_threshold_raised_to_3() -> None:
 
     # Assert
     assert not report.passes
-    assert "ic_t_stat_nw_below_3.0" in report.fail_reasons
+    assert "signal_t_stat_too_low" in report.fail_reasons
+
+
+def test_diagnose_selection_monotonicity_monotone_signal() -> None:
+    """단조 신호(rank score = 실현수익)에서 mono_rho=1, top-bot > 0 보장."""
+    rng = np.random.default_rng(0)
+    T, N = 40, 20
+    # 신호가 수익과 완전 단조: pred = realized (noise 추가)
+    base = rng.standard_normal((T, N))
+    realized = base + rng.standard_normal((T, N)) * 0.01  # 거의 동일
+    inference = base.copy()
+    beta = rng.uniform(0.5, 1.5, size=(T, N))
+
+    # Act
+    result = diagnose_selection_monotonicity(
+        inference, realized, beta, n_deciles=5, horizon_bars=6
+    )
+
+    # Assert: 단조 신호 → mono_rho 양수, top-bot 양수
+    assert result["monotonicity_spearman"] > 0.5
+    assert result["top_minus_bottom_bps"] > 0.0
+    assert result["n_obs"] > 0
+    for d in range(5):
+        assert f"decile_mean_ret_bps_{d}" in result
+
+
+def test_diagnose_selection_monotonicity_anti_monotone_signal() -> None:
+    """역방향 신호에서 mono_rho 음수, top-bot < 0 확인."""
+    rng = np.random.default_rng(1)
+    T, N = 40, 20
+    base = rng.standard_normal((T, N))
+    realized = base + rng.standard_normal((T, N)) * 0.01
+    inference = -base  # 역방향
+
+    result = diagnose_selection_monotonicity(
+        inference, realized, None, n_deciles=5, horizon_bars=6
+    )
+
+    assert result["monotonicity_spearman"] < -0.5
+    assert result["top_minus_bottom_bps"] < 0.0
+    # beta_2d=None → beta 지표 nan
+    assert np.isnan(result["beta_tilt"])
+    assert np.isnan(result["long_decile_beta_mean"])
+    assert np.isnan(result["short_decile_beta_mean"])
+
+
+def test_diagnose_selection_monotonicity_beta_tilt_detected() -> None:
+    """상위 decile에 고베타 심볼이 몰릴 때 beta_tilt > 0 감지."""
+    rng = np.random.default_rng(42)
+    T, N = 30, 16
+    # 신호 = beta rank (고베타를 선택)
+    beta = np.tile(np.linspace(0.5, 2.0, N), (T, 1))
+    noise = rng.standard_normal((T, N)) * 0.001
+    inference = beta + noise  # 신호가 beta와 거의 동일
+
+    realized = rng.standard_normal((T, N)) * 0.01  # 수익은 무관
+
+    result = diagnose_selection_monotonicity(
+        inference, realized, beta, n_deciles=5, horizon_bars=6
+    )
+
+    # 고베타가 상위 decile → long_beta > short_beta
+    assert result["long_decile_beta_mean"] > result["short_decile_beta_mean"]
+    assert result["beta_tilt"] > 0.3  # 명확한 tilt

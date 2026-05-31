@@ -93,7 +93,6 @@ class AlphaPhase1Verdict(TypedDict):
     bear_ic: float
     bear_pass: bool
     dsr: float
-    # G2: 경제거래성 (진단→하드 게이트 승격)
     port_ic: float
     be_raw: float
     gap_raw: float
@@ -101,7 +100,6 @@ class AlphaPhase1Verdict(TypedDict):
     basket_net_bps: float
     basket_ir_t: float
     sweep_pass_count: int
-    # G3: 강건성
     bear_basket_net_bps: float
     gate_results: dict[str, bool]
 
@@ -134,43 +132,52 @@ def _summarize_alpha_phase1_verdict(
     gap_raw = port_ic - be_raw if np.isfinite(port_ic) and np.isfinite(be_raw) else float("nan")
     clip_pres = float(getattr(report, "clip_preservation_ratio", float("nan")))
 
-    # G1 (already in report.passes / report.fail_reasons from evaluate_alpha)
+    # G1: 신호 스킬 (evaluate_alpha 내부에서 판정)
     g1_pass = bool(report.passes)
 
-    # G2: 경제거래성
-    g2a = bool(np.isfinite(gap_raw) and gap_raw > 0.0)
-    g2b = bool(
+    # G2: 경제 거래성
+    portfolio_ic_above_breakeven = bool(np.isfinite(gap_raw) and gap_raw > 0.0)
+    basket_net_positive = bool(
         np.isfinite(basket_net_bps) and basket_net_bps > 0.0
         and np.isfinite(basket_ir_t) and basket_ir_t >= 2.0
     )
-    g2c = bool(np.isfinite(clip_pres) and clip_pres >= 0.5)
-    g2d = bool(sweep_pass_count >= 1)
+    signal_preserved_after_selection = bool(np.isfinite(clip_pres) and clip_pres >= 0.5)
+    multi_horizon_sweep_passes = bool(sweep_pass_count >= 1)
 
     # G3: 강건성
-    g3a = bool(not np.isfinite(bear_basket_net_bps) or bear_basket_net_bps >= 0.0)
+    bear_market_basket_safe = bool(
+        not np.isfinite(bear_basket_net_bps) or bear_basket_net_bps >= 0.0
+    )
 
     gate_results: dict[str, bool] = {
-        "g1": g1_pass,
-        "g2a_gap_raw": g2a,
-        "g2b_basket": g2b,
-        "g2c_clip_preservation": g2c,
-        "g2d_sweep": g2d,
-        "g3a_bear_basket": g3a,
+        "signal_skill_passes":              g1_pass,
+        "portfolio_ic_above_breakeven":     portfolio_ic_above_breakeven,
+        "basket_net_positive":              basket_net_positive,
+        "signal_preserved_after_selection": signal_preserved_after_selection,
+        "multi_horizon_sweep_passes":       multi_horizon_sweep_passes,
+        "bear_market_basket_safe":          bear_market_basket_safe,
     }
 
     fail_reasons: list[str] = list(report.fail_reasons)
-    if not g2a:
-        fail_reasons.append("g2a_gap_raw_non_positive")
-    if not g2b:
-        fail_reasons.append("g2b_basket_non_positive_or_ir_low")
-    if not g2c:
-        fail_reasons.append("g2c_clip_preservation_below_0.5")
-    if not g2d:
-        fail_reasons.append("g2d_sweep_no_pass")
-    if not g3a:
-        fail_reasons.append("g3a_bear_basket_negative")
+    if not portfolio_ic_above_breakeven:
+        fail_reasons.append("portfolio_ic_below_raw_breakeven")
+    if not basket_net_positive:
+        fail_reasons.append("basket_net_not_profitable")
+    if not signal_preserved_after_selection:
+        fail_reasons.append("signal_lost_after_selection")
+    if not multi_horizon_sweep_passes:
+        fail_reasons.append("no_profitable_horizon_found")
+    if not bear_market_basket_safe:
+        fail_reasons.append("bear_market_basket_negative")
 
-    alpha_pass = g1_pass and g2a and g2b and g2c and g2d and g3a
+    alpha_pass = (
+        g1_pass
+        and portfolio_ic_above_breakeven
+        and basket_net_positive
+        and signal_preserved_after_selection
+        and multi_horizon_sweep_passes
+        and bear_market_basket_safe
+    )
 
     return {
         "alpha_pass": alpha_pass,
@@ -205,13 +212,13 @@ def _summarize_exec_diag_verdict(
     gap_raw = port_ic - be_raw if np.isfinite(port_ic) and np.isfinite(be_raw) else float("nan")
     fail_reasons: list[str] = []
     if not np.isfinite(port_ic):
-        fail_reasons.append("port_ic_nan")
+        fail_reasons.append("portfolio_ic_missing")
     elif port_ic <= 0.0:
-        fail_reasons.append("port_ic_non_positive")
+        fail_reasons.append("portfolio_ic_not_positive")
     if np.isfinite(gap_raw) and gap_raw <= 0.0:
-        fail_reasons.append("port_ic_below_raw_breakeven")
+        fail_reasons.append("portfolio_ic_below_raw_breakeven")
     if np.isfinite(basket_net_bps) and basket_net_bps <= 0.0:
-        fail_reasons.append("basket_net_bps_non_positive")
+        fail_reasons.append("basket_net_returns_negative")
     status = "PASS" if not fail_reasons else "FAIL"
     if not np.isfinite(port_ic) and not np.isfinite(basket_net_bps):
         status = "UNKNOWN"
@@ -854,36 +861,33 @@ def _run_alpha_evaluation_report(
             ).reindex(columns=common_syms).fillna(0.0)
             _rs_l = _pivot_rs_long.to_numpy(dtype=np.float64)
             _rs_s = _pivot_rs_short.to_numpy(dtype=np.float64)
-            _z_l = _cs_zscore(_rs_l)
-            _z_s = _cs_zscore(-_rs_s)  # short: negate so higher z = better short (matches compose.py)  # noqa: E501
-            _long_mask = np.zeros_like(_z_l, dtype=bool)
-            _short_mask = np.zeros_like(_z_s, dtype=bool)
-            for _t in range(_z_l.shape[0]):
-                _n = _z_l.shape[1]
+            # Phase 1b: NET 신호 기반 단일 선택
+            # Phase 0-diag: 별도 L/S 선택이 NET +35.5bps 엣지를 파괴(ew=-12.94bps).
+            # NET = rank_score_long - rank_score_short 기준으로 long/short 동시 선택.
+            _net_signal = _rs_l - _rs_s  # [T, N] signed NET rank score
+            _z_net = _cs_zscore(_net_signal)  # cross-sectional z-score
+            _long_mask = np.zeros_like(_z_net, dtype=bool)
+            _short_mask = np.zeros_like(_z_net, dtype=bool)
+            for _t in range(_z_net.shape[0]):
+                _n = _z_net.shape[1]
                 _k = max(1, int(np.ceil(_n * _q)))
-                _lrow = _z_l[_t]
-                _srow = _z_s[_t]
-                _lf = np.isfinite(_lrow)
-                _sf = np.isfinite(_srow)
-                if _lf.sum() > 0:
-                    _idx_l = np.flatnonzero(_lf)
-                    _top_l = _idx_l[np.argsort(_lrow[_idx_l])[::-1][:_k]]
-                    _long_mask[_t, _top_l] = True
-                if _sf.sum() > 0:
-                    _idx_s = np.flatnonzero(_sf)
-                    _top_s = _idx_s[np.argsort(_srow[_idx_s])[::-1][:_k]]
-                    _short_mask[_t, _top_s] = True
-            # Use z-score as signal (not raw EV) — EV is near-zero OOS and kills breadth
+                _row = _z_net[_t]
+                _fin = np.isfinite(_row)
+                if _fin.sum() > 0:
+                    _fin_idx = np.flatnonzero(_fin)
+                    _sorted = _fin_idx[np.argsort(_row[_fin_idx])]
+                    _long_mask[_t, _sorted[-_k:]] = True   # NET 상위 q% = long
+                    _short_mask[_t, _sorted[:_k]] = True   # NET 하위 q% = short
             pivot_long = pd.DataFrame(
-                np.where(_long_mask, _z_l, 0.0),
+                np.where(_long_mask, _z_net, 0.0),
                 index=pivot_long.index, columns=common_syms,
             )
             pivot_short = pd.DataFrame(
-                np.where(_short_mask, _z_s, 0.0),
+                np.where(_short_mask, -_z_net, 0.0),  # short: 음의 NET을 양으로 반전
                 index=pivot_short.index, columns=common_syms,
             )
             _logger.info(
-                "[RANK-SCOREBOARD] rank_cs_neutral applied: q=%.2f long_nz=%.3f short_nz=%.3f",
+                "[RANK-SCOREBOARD] net_signal applied: q=%.2f long_nz=%.3f short_nz=%.3f",
                 _q,
                 float(np.count_nonzero(_long_mask) / max(_long_mask.size, 1)),
                 float(np.count_nonzero(_short_mask) / max(_short_mask.size, 1)),
@@ -1118,6 +1122,35 @@ def _run_alpha_evaluation_report(
             _rank_ic_c3, _rank_t_c3, _rank_br_c3,
         )
 
+    # Phase 0-diag: Tail-Basket Monotonicity + Beta-Tilt 진단
+    # 목적: full-CS IC(+) vs tail-basket(-) 괴리의 selection 원인 정량 확정
+    if _dense_pred_for_eval is not None:
+        from src.domain.futures.strategy.alpha_evaluation import (
+            diagnose_selection_monotonicity,
+        )
+        _mono = diagnose_selection_monotonicity(
+            _dense_pred_for_eval,
+            real_resid,
+            _beta_2d,
+            n_deciles=5,
+            horizon_bars=horizon,
+        )
+        _decile_strs = " | ".join(
+            f"Q{d}={_mono.get(f'decile_mean_ret_bps_{d}', float('nan')):+.1f}"
+            for d in range(5)
+        )
+        _logger.info(
+            "🔬 [MONOTONICITY] top-bot=%+.1fbps mono_rho=%.2f"
+            " beta_tilt=%+.3f (L=%.2f S=%.2f) n=%d",
+            _mono["top_minus_bottom_bps"],
+            _mono["monotonicity_spearman"],
+            _mono["beta_tilt"],
+            _mono["long_decile_beta_mean"],
+            _mono["short_decile_beta_mean"],
+            int(_mono["n_obs"]),
+        )
+        _logger.info("🔬 [DECILE-RET] %s", _decile_strs)
+
     def _basket_spread_diag(
         sig_long_2d: np.ndarray,
         sig_short_2d: np.ndarray,
@@ -1222,7 +1255,16 @@ def _run_alpha_evaluation_report(
         alpha_long_map[h] = al[:clip]
         alpha_short_map[h] = as_[:clip]
 
-    sweep = sweep_horizon_breakeven(realized_map, alpha_long_map, alpha_short_map)
+    # Phase 2: 호라이즌별 비용 상각 — 보유기간 연장 시 단위 비용 인하 (quant.md Leakage-safe)
+    # cost_amortize_bars: 기본 리밸런스 주기(4h*6=24h). h/6 배로 비용을 나눔.
+    _cost_amortize_bars = 6  # conservative default matching REBALANCE_BARS median
+    _cost_map = {
+        h: 24.0 / max(1, h // _cost_amortize_bars)
+        for h in [6, 12, 18]
+    }
+    sweep = sweep_horizon_breakeven(
+        realized_map, alpha_long_map, alpha_short_map, cost_map=_cost_map
+    )
     h_sweep_strs = []
     for h in sorted(sweep.keys()):
         h_res = sweep[h]
@@ -1247,8 +1289,8 @@ def _run_alpha_evaluation_report(
     )
     _logger.info(
         ">> ALPHA_PASS: %s [%s]"
-        " [G1: resid_ic=%.4f be_eff=%.4f gap=%+.4f t=%.2f bear_ic=%.4f dsr=%.3f]"
-        " [G2: gap_raw=%+.4f net_bps=%.1f ir_t=%.2f presv=%.2f sweep=%d/3]"
+        " [IC_SKILL: resid_ic=%.4f be_eff=%.4f gap=%+.4f t=%.2f bear_ic=%.4f dsr=%.3f]"
+        " [BASKET: gap_raw=%+.4f net_bps=%.1f ir_t=%.2f presv=%.2f sweep=%d/3]"
         " [fail=%s]",
         str(bool(_alpha_verdict["alpha_pass"])).upper(),
         _gate_str,
