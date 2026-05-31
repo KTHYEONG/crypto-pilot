@@ -829,7 +829,7 @@ def _run_alpha_evaluation_report(
 
     # realized returns matching
     panel_reset = alpha_panel.reset_index()
-    panel_reset["datetime"] = pd.to_datetime(panel_reset["datetime"], utc=True)
+    panel_reset["datetime"] = pd.to_datetime(panel_reset["datetime"], utc=True).dt.tz_localize(None)
     pivot_long = panel_reset.pivot(index="datetime", columns="symbol", values="alpha_long")
     pivot_short = panel_reset.pivot(index="datetime", columns="symbol", values="alpha_short")
     # C3 trading_symbols만 평가 — non-trading 심볼의 alpha=0이 IC를 왜곡하는 것을 방지
@@ -926,12 +926,21 @@ def _run_alpha_evaluation_report(
     realized_rows: dict[str, pd.Series] = {}
     for sym in common_syms:
         df = data_stage.data_maps[sym][tf].set_index("datetime")
-        close = df["close"].reindex(pivot_long.index)
-        fwd_ret = np.log(close.shift(-horizon) / close)
+        df.index = pd.to_datetime(df.index, utc=True).tz_localize(None)
+        # 전체 시계열에서 shift 후 OOS 인덱스로 reindex 수행
+        fwd_ret = np.log(df["close"].shift(-horizon) / df["close"]).reindex(pivot_long.index)
         realized_rows[sym] = fwd_ret
     realized_df = pd.DataFrame(realized_rows, index=pivot_long.index)
 
-    common_idx = pivot_long.index.intersection(realized_df.index)
+    # rank_score_long이 finite인 날짜(OOS fold 예측 구간)만 추출
+    _raw_rs_long = (
+        panel_reset.pivot(index="datetime", columns="symbol", values="rank_score_long")
+        .reindex(columns=common_syms)
+    )
+    _oos_dt_mask = np.any(np.isfinite(_raw_rs_long.to_numpy()), axis=1)
+    _oos_idx = _raw_rs_long.index[_oos_dt_mask]
+
+    common_idx = _oos_idx.intersection(realized_df.index)
     al = pivot_long.loc[common_idx].to_numpy(dtype=np.float64)
     as_ = pivot_short.loc[common_idx].to_numpy(dtype=np.float64)
     real = realized_df.loc[common_idx].to_numpy(dtype=np.float64)
@@ -983,12 +992,13 @@ def _run_alpha_evaluation_report(
         index="datetime", columns="symbol", values="alpha_short"
     ).reindex(columns=all_syms).fillna(0.0)
 
-    dense_long_df.index = pd.to_datetime(dense_long_df.index, utc=True)
-    dense_short_df.index = pd.to_datetime(dense_short_df.index, utc=True)
+    dense_long_df.index = pd.to_datetime(dense_long_df.index, utc=True).tz_localize(None)
+    dense_short_df.index = pd.to_datetime(dense_short_df.index, utc=True).tz_localize(None)
 
     c1_real_rows: dict[str, pd.Series] = {}
     for sym in all_syms:
         df_sym = data_stage.data_maps[sym][tf].set_index("datetime")
+        df_sym.index = pd.to_datetime(df_sym.index, utc=True).tz_localize(None)
         close_sym = df_sym["close"].reindex(dense_long_df.index)
         c1_real_rows[sym] = np.log(close_sym.shift(-horizon) / close_sym)
     c1_real_df = pd.DataFrame(c1_real_rows, index=dense_long_df.index)
@@ -1275,8 +1285,9 @@ def _run_alpha_evaluation_report(
         r_rows: dict[str, pd.Series] = {}
         for sym in common_syms:
             df = data_stage.data_maps[sym][tf].set_index("datetime")
-            close = df["close"].reindex(common_idx)
-            fwd = np.log(close.shift(-h) / close)
+            df.index = pd.to_datetime(df.index, utc=True).tz_localize(None)
+            # 전체 시계열에서 shift 후 OOS 인덱스로 reindex 수행
+            fwd = np.log(df["close"].shift(-h) / df["close"]).reindex(common_idx)
             r_rows[sym] = fwd
         r_df = pd.DataFrame(r_rows, index=common_idx)
         r_arr = r_df.iloc[:-h].to_numpy(dtype=np.float64)
