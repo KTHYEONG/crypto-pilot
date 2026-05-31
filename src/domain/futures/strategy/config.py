@@ -293,7 +293,7 @@ class StrategyMLConfig:
     sample_weight_time_decay_halflife_bars: int | None = 1080
 
     # Phase 1: rank-native composition
-    rank_select_quantile: float = 0.33          # top/bottom quantile for L/S selection
+    rank_select_quantile: float = 0.45          # top/bottom quantile for L/S selection (N_eff)
     target_breadth: int = 8                      # minimum effective breadth target
     ic_prior_for_gate: float = 0.03             # leak-free IC prior for portfolio net-edge gate
     ev_secondary_tilt_weight: float = 0.0       # blend weight for EV rank tilt (0=rank-only)
