@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 
 from src.domain.futures.universe.membership import (
-    MembershipMaskBundle,
     build_membership_mask_bundle,
     canonical_symbol,
     inject_membership_masks_into_maps,

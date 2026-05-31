@@ -25,7 +25,7 @@ from src.execution import opt_main_futures
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture()
+@pytest.fixture
 def minimal_run_config() -> FuturesRunConfig:
     """Minimal strategy run config without bypass fields.
 
@@ -41,7 +41,7 @@ def minimal_run_config() -> FuturesRunConfig:
     )
 
 
-@pytest.fixture()
+@pytest.fixture
 def mocked_pipeline_stages(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
     """Mock all IO-heavy pipeline stages for fast unit-level testing.
 

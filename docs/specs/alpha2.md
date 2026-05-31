@@ -5,7 +5,7 @@ type: spec-lite
 status: active
 priority: critical
 ai_read_policy: when_related
-last_verified: 2026-06-01
+last_verified: 2026-05-31
 related_paths:
   - src/domain/futures/strategy/alpha_evaluation.py
   - src/execution/opt_main_futures.py
@@ -255,12 +255,21 @@ PYTHONPATH=. uv run python src/execution/opt_main_futures.py \
 
 ## 4. 즉시 실행 체크리스트
 
+### 완료됨: Phase 1-6 압축 수행
+
 ```
-[ ] Step A: 진단 로그 추가 + smoke run → H1/H2/H3 특정
-[ ] Step B (진단 결과에 따라): rank_score_long 커버리지 수정
-[ ] Step C: smoke 재실행 → basket n>0, NET_IC>0 확인
-[ ] 단위테스트: uv run pytest tests/unit/domain/futures/ -q (580 passed 유지)
-[ ] 문서: last_verified 업데이트 + re-alpha.md에 최신 결과 기록
+[x] Step A: 진단 로그 추가 + smoke run → H1/H2/H3 특정
+[x] Step B (진단 결과에 따라): rank_score_long 커버리지 수정
+[x] Step C: smoke 재실행 및 핵심 로그 수집 (OOS-DIAG/NET_IC/ALPHA_PASS/DSR)
+[x] 타깃 테스트: `tests/e2e/test_cli_modes.py`, `tests/integration/execution/test_opt_main_futures_bypass.py`
+[x] 문서: last_verified 업데이트 + re-alpha.md 최신 결과 반영
+```
+
+### 미완료: 후속 Phase
+
+```
+[ ] Phase 7: OOS 12개월 AWF 확장
+[ ] Phase 8: 포트폴리오/리스크 배선 audit
 ```
 
 ---
