@@ -214,7 +214,10 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
     if "BTCUSDT" in aligned.symbols:
         btc_idx = aligned.symbols.index("BTCUSDT")
     btc_ret_6 = np.repeat(ret_6[:, [btc_idx]], close_2d.shape[1], axis=1)
+    btc_ret_12 = np.repeat(ret_12[:, [btc_idx]], close_2d.shape[1], axis=1)
     btc_rv_18 = np.repeat(rv_18[:, [btc_idx]], close_2d.shape[1], axis=1)
+    ret_6_minus_btc_ret_6 = ret_6 - btc_ret_6
+    ret_12_minus_btc_ret_12 = ret_12 - btc_ret_12
     
     # 100% Vectorized Market-wide median and dispersion
     # (O(T) time, Python loop completely eliminated)
@@ -253,9 +256,16 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
     funding_diff = funding_2d_filled - np.roll(funding_2d_filled, 3, axis=0)
     funding_diff[:3] = 0.0
     funding_rate_momentum = _rolling_mean_2d(funding_diff, 6)
-
     basis_1 = basis_2d.copy()
     basis_mean_6 = _rolling_mean_2d(basis_2d, 6)
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        _funding_cs_med = np.nanmedian(funding_mean_6, axis=1, keepdims=True)
+        _basis_cs_med = np.nanmedian(basis_mean_6, axis=1, keepdims=True)
+    _funding_cs_med = np.nan_to_num(_funding_cs_med, nan=0.0)
+    _basis_cs_med = np.nan_to_num(_basis_cs_med, nan=0.0)
+    funding_6_minus_cs_median = funding_mean_6 - _funding_cs_med
+    basis_6_minus_cs_median = basis_mean_6 - _basis_cs_med
     oi_ret_1 = _ret(np.maximum(oi_2d, 1e-12), 1)
     
     # Vectorized Open Interest Z-score
@@ -269,6 +279,25 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
         aligned.high_2d - aligned.low_2d,
         1e-12,
     )
+
+    cluster_rel_ret_6 = np.zeros_like(ret_6, dtype=np.float64)
+    cluster_rel_enabled = False
+    if (
+        aligned.symbol_meta is not None
+        and "cluster_id" in aligned.symbol_meta
+        and aligned.symbol_meta["cluster_id"].shape[0] == close_2d.shape[1]
+    ):
+        cluster_rel_enabled = True
+        cluster_ids = aligned.symbol_meta["cluster_id"].astype(np.int32, copy=False)
+        for cid in np.unique(cluster_ids):
+            members = cluster_ids == cid
+            if not np.any(members):
+                continue
+            with np.errstate(all="ignore"), warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                cluster_med = np.nanmedian(ret_6[:, members], axis=1, keepdims=True)
+            cluster_med = np.nan_to_num(cluster_med, nan=0.0)
+            cluster_rel_ret_6[:, members] = ret_6[:, members] - cluster_med
 
     base_groups: dict[str, list[tuple[str, NDArray[np.float64]]]] = {
         "trend": [
@@ -289,6 +318,9 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
         ("momentum_autocorr", momentum_autocorr),
         ("cs_residual_momentum", cs_residual_momentum),
         ("vwap_deviation", vwap_deviation),
+        ("ret_6_minus_btc_ret_6", ret_6_minus_btc_ret_6),
+        ("ret_12_minus_btc_ret_12", ret_12_minus_btc_ret_12),
+        ("cluster_rel_ret_6", cluster_rel_ret_6),
         ],
         "reversal": [
         ("rev_3", rev_3),
@@ -315,6 +347,8 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
         ("basis_1", basis_1),
         ("basis_mean_6", basis_mean_6),
         ("funding_rate_momentum", funding_rate_momentum),
+        ("funding_6_minus_cs_median", funding_6_minus_cs_median),
+        ("basis_6_minus_cs_median", basis_6_minus_cs_median),
         ],
         "liquidity": [
         ("volume_z_18", volume_z_18),
@@ -370,6 +404,7 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
         "execution_cost_missing_ratio": (
             1.0 if execution_cost_missing else float(np.mean(~np.isfinite(execution_cost_bps_2d)))
         ),
+        "cluster_rel_ret_6_enabled": cluster_rel_enabled,
     }
     return FeaturePanel(
         datetimes=aligned.datetimes,

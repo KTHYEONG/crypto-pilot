@@ -261,6 +261,84 @@ def ic_summary(ic_series: np.ndarray) -> dict[str, float]:
     }
 
 
+def ic_lcb_hac(
+    ic_series: np.ndarray,
+    *,
+    horizon_bars: int,
+    z: float = 1.0,
+) -> float:
+    """Compute lower confidence bound of mean IC using HAC standard error."""
+    valid = np.asarray(ic_series, dtype=np.float64)
+    valid = valid[np.isfinite(valid)]
+    n_obs = int(valid.size)
+    if n_obs < 2:
+        return 0.0
+    mean_ic = float(np.mean(valid))
+    t_nw = _nw_t_stat(valid, horizon_bars=horizon_bars)
+    if not np.isfinite(t_nw) or abs(t_nw) < 1e-12:
+        return mean_ic
+    se_nw = abs(mean_ic / t_nw)
+    return float(mean_ic - float(max(z, 0.0)) * se_nw)
+
+
+def top_bottom_spread_bps(
+    score_2d: np.ndarray,
+    realized_2d: np.ndarray,
+    eligible_2d: np.ndarray,
+    *,
+    quantile: float,
+    cost_bps: float,
+) -> dict[str, float]:
+    """Top-bottom spread and cost-adjusted spread diagnostics in bps."""
+    if score_2d.shape != realized_2d.shape or score_2d.shape != eligible_2d.shape:
+        raise ValueError("score/realized/eligible shapes must match")
+    q = float(np.clip(quantile, 0.01, 0.49))
+    t_len, _n_len = score_2d.shape
+    gross_spreads: list[float] = []
+    turnover_proxy_rows: list[float] = []
+    for t in range(t_len):
+        row_mask = (
+            np.asarray(eligible_2d[t], dtype=bool)
+            & np.isfinite(score_2d[t])
+            & np.isfinite(realized_2d[t])
+        )
+        idx = np.flatnonzero(row_mask)
+        if idx.size < 6:
+            continue
+        keep = max(1, int(np.floor(idx.size * q)))
+        row_score = score_2d[t, idx]
+        order = np.argsort(row_score, kind="mergesort")
+        short_idx = idx[order[:keep]]
+        long_idx = idx[order[-keep:]]
+        long_ret = float(np.nanmean(realized_2d[t, long_idx]))
+        short_ret = float(np.nanmean(realized_2d[t, short_idx]))
+        gross_spreads.append(long_ret - short_ret)
+        turnover_proxy_rows.append((2.0 * keep) / float(idx.size))
+
+    if not gross_spreads:
+        return {
+            "n_obs": 0.0,
+            "gross_spread_bps": 0.0,
+            "net_spread_bps": -float(cost_bps),
+            "net_spread_lcb_bps": -float(cost_bps),
+            "turnover_proxy": 0.0,
+        }
+
+    gross_arr = np.asarray(gross_spreads, dtype=np.float64)
+    gross_mean_bps = float(np.mean(gross_arr) * 1e4)
+    gross_std_bps = float(np.std(gross_arr, ddof=1) * 1e4) if gross_arr.size > 1 else 0.0
+    se_bps = gross_std_bps / max(np.sqrt(gross_arr.size), 1.0)
+    net_mean_bps = gross_mean_bps - float(cost_bps)
+    net_lcb_bps = (gross_mean_bps - se_bps) - float(cost_bps)
+    return {
+        "n_obs": float(gross_arr.size),
+        "gross_spread_bps": gross_mean_bps,
+        "net_spread_bps": net_mean_bps,
+        "net_spread_lcb_bps": net_lcb_bps,
+        "turnover_proxy": float(np.mean(np.asarray(turnover_proxy_rows, dtype=np.float64))),
+    }
+
+
 def passes_ic_gate(
     summary: dict[str, float],
     *,

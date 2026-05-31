@@ -22,13 +22,6 @@ from src.domain.futures.strategy.alpha_evaluation import (
     effective_breadth_corr,
 )
 from src.domain.futures.strategy.cache import build_manifest_hash
-from src.domain.futures.strategy.calibrator import (
-    EVQuantiles,
-    compute_forecast_confidence,
-    fit_quantile_calibrators,
-    predict_conservative_ev,
-    predict_ev_quantiles,
-)
 from src.domain.futures.strategy.common.alignment import align_data_maps
 from src.domain.futures.strategy.common.normalization import (
     apply_missing_value_imputer,
@@ -78,6 +71,15 @@ from src.domain.futures.strategy.ranker import RankerFitResult, fit_ranker, pred
 from src.domain.futures.strategy.regime_gate import apply_regime_gate
 
 _logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class EVQuantiles:
+    """Compatibility quantile container for downstream metadata contracts."""
+
+    q10: np.ndarray
+    q50: np.ndarray
+    q90: np.ndarray
 
 
 def _build_side_matrix(**kwargs: Any) -> Any:
@@ -203,9 +205,8 @@ def _predict_quantiles_with_fallback(
     rank_score: np.ndarray,
     ev_pred: np.ndarray,
 ) -> EVQuantiles:
-    """Return quantiles when available; fallback to degenerate quantiles for test doubles."""
-    if all(hasattr(models, attr) for attr in ("q10", "q50", "q90")):
-        return predict_ev_quantiles(models, dataset, rank_score)
+    """Build degenerate quantiles from signed score-only prediction."""
+    _ = (models, dataset, rank_score)
     fallback = np.asarray(ev_pred, dtype=np.float32).reshape(-1).copy()
     return EVQuantiles(q10=fallback, q50=fallback, q90=fallback)
 
@@ -464,73 +465,37 @@ def _fit_predict_fold_dual_side(
 
     """
     t_fit_ranker = time.perf_counter()
-    if ml_cfg.ranker_enabled:
-        ranker_long: RankerFitResult | None = fit_ranker(
-            train=train_long, valid=valid_long, cfg=ml_cfg
-        )
-        ranker_short: RankerFitResult | None = fit_ranker(
-            train=train_short, valid=valid_short, cfg=ml_cfg
-        )
-    else:
-        ranker_long = None
-        ranker_short = None
+    ranker_long: RankerFitResult | None = (
+        fit_ranker(train=train_long, valid=valid_long, cfg=ml_cfg)
+        if ml_cfg.ranker_enabled
+        else None
+    )
     _logger.debug(
-        "[perf-ml-fold] fit_ranker (long+short) took %.4fs",
+        "[perf-ml-fold] fit_ranker (signed) took %.4fs",
         time.perf_counter() - t_fit_ranker,
     )
 
-    score_train_long = _rank_score(ranker_long, train_long)
+    _ = _rank_score(ranker_long, train_long)
     score_valid_long = _rank_score(ranker_long, valid_long)
     score_test_long = _rank_score(ranker_long, test_long)
-    score_test_short = _rank_score(ranker_short, test_short)
-
-    t_fit_calib = time.perf_counter()
-    calibration_fit_long = fit_quantile_calibrators(
-        train=train_long,
-        valid=valid_long,
-        rank_score_train=score_train_long,
-        rank_score_valid=score_valid_long,
-        cfg=ml_cfg,
-    )
-    calibration_fit_short = fit_quantile_calibrators(
-        train=train_short,
-        valid=valid_short,
-        rank_score_train=_rank_score(ranker_short, train_short),
-        rank_score_valid=_rank_score(ranker_short, valid_short),
-        cfg=ml_cfg,
-    )
-    _logger.debug(
-        "[perf-ml-fold] fit_quantile_calibrators (long+short) took %.4fs",
-        time.perf_counter() - t_fit_calib,
-    )
+    score_valid_short = _rank_score(ranker_long, valid_short)
+    score_test_short = _rank_score(ranker_long, test_short)
 
     t_predict = time.perf_counter()
-    ev_valid_long = predict_conservative_ev(
-        calibration_fit_long, valid_long, score_valid_long, ml_cfg
-    )
-    ev_valid_short = predict_conservative_ev(
-        calibration_fit_short, valid_short, _rank_score(ranker_short, valid_short), ml_cfg
-    )
-    ev_test_long = predict_conservative_ev(
-        calibration_fit_long, test_long, score_test_long, ml_cfg
-    )
-    ev_test_short = predict_conservative_ev(
-        calibration_fit_short, test_short, score_test_short, ml_cfg
-    )
+    ev_valid_long = np.maximum(score_valid_long, 0.0).astype(np.float32, copy=False)
+    ev_valid_short = np.maximum(-score_valid_short, 0.0).astype(np.float32, copy=False)
+    ev_test_long = np.maximum(score_test_long, 0.0).astype(np.float32, copy=False)
+    ev_test_short = np.maximum(-score_test_short, 0.0).astype(np.float32, copy=False)
     quant_test_long = _predict_quantiles_with_fallback(
-        calibration_fit_long, test_long, score_test_long, ev_test_long
+        None, test_long, score_test_long, ev_test_long
     )
     quant_test_short = _predict_quantiles_with_fallback(
-        calibration_fit_short, test_short, score_test_short, ev_test_short
+        None, test_short, score_test_short, ev_test_short
     )
-    conf_test_long = compute_forecast_confidence(
-        quant_test_long.q10, quant_test_long.q50, quant_test_long.q90
-    )
-    conf_test_short = compute_forecast_confidence(
-        quant_test_short.q10, quant_test_short.q50, quant_test_short.q90
-    )
+    conf_test_long = np.ones_like(ev_test_long, dtype=np.float32)
+    conf_test_short = np.ones_like(ev_test_short, dtype=np.float32)
     _logger.debug(
-        "[perf-ml-fold] prediction + quantile forecasting took %.4fs",
+        "[perf-ml-fold] signed score split prediction took %.4fs",
         time.perf_counter() - t_predict,
     )
     return _FoldPredictResult(
@@ -1138,7 +1103,7 @@ def build_ml_strategy_alpha(
 
         if not is_virtual:
             _logger.debug(
-                ".. ML_CALIB: fold=%d ev_mean=%.6e ev_p10=%.6e ev_p90=%.6e",
+                ".. ML_SCORE_SPLIT: fold=%d ev_mean=%.6e ev_p10=%.6e ev_p90=%.6e",
                 fold_id,
                 float(np.mean(ev_test_long, dtype=np.float32)) if ev_test_long.size > 0 else 0.0,
                 float(np.percentile(ev_test_long, 10)) if ev_test_long.size > 0 else 0.0,
@@ -1232,7 +1197,6 @@ def build_ml_strategy_alpha(
     panel.attrs["label_config_hash"] = build_manifest_hash(
         {
             "label_horizon_bars": ml_cfg.label_horizon_bars,
-            "calibrator_target": getattr(ml_cfg, "calibrator_target", "exec_net_ret"),
         }
     )
     panel.attrs["fold_spec_hash"] = build_manifest_hash(
@@ -1267,7 +1231,7 @@ def build_ml_strategy_alpha(
         label_config_hash=str(panel.attrs["label_config_hash"]),
         train_window_hash=str(panel.attrs["train_window_hash"]),
         fold_spec_hash=str(panel.attrs["fold_spec_hash"]),
-        model_family="lightgbm_dual_side_quantile",
+        model_family="lightgbm_signed_lambdarank",
         selected_horizon=int(ml_cfg.label_horizon_bars),
     )
     panel.attrs["alpha_artifact_combined_hash"] = _aah.combined()
@@ -1283,9 +1247,9 @@ def build_ml_strategy_alpha(
         ),
         "candidate_count": 1,
     }
-    panel.attrs["model_family"] = "lightgbm_dual_side_quantile"
-    panel.attrs["ranking_mode"] = "cross_sectional_regression"
-    panel.attrs["calibrator_target"] = "exec_net_ret"
+    panel.attrs["model_family"] = "lightgbm_signed_lambdarank"
+    panel.attrs["ranking_mode"] = "group_ndcg_signed"
+    panel.attrs["alpha_contract"] = "return_unit_grinold_rank"
     panel.attrs["feature_groups_enabled"] = list(features.availability_masks.keys())
     if data_integrity is not None and feature_integrity is not None:
         panel.attrs["integrity"] = {
@@ -1944,7 +1908,7 @@ def build_ml_strategy_alpha_anchored(
         int(test_long.X.shape[0]),
     )
     _logger.info(
-        "[ML-ANCHORED-CALIB] ev_mean=%.6e ev_p10=%.6e ev_p90=%.6e",
+        "[ML-ANCHORED-SCORE-SPLIT] ev_mean=%.6e ev_p10=%.6e ev_p90=%.6e",
         float(np.mean(ev_test_long, dtype=np.float32)) if ev_test_long.size > 0 else 0.0,
         float(np.percentile(ev_test_long, 10)) if ev_test_long.size > 0 else 0.0,
         float(np.percentile(ev_test_long, 90)) if ev_test_long.size > 0 else 0.0,
@@ -2178,9 +2142,9 @@ def build_ml_strategy_alpha_anchored(
     panel.attrs["anchored"] = True
     panel.attrs["anchor_end_idx"] = anchor_end
     panel.attrs["target_range"] = (tgt_start, tgt_end)
-    panel.attrs["model_family"] = "lightgbm_dual_side_quantile"
-    panel.attrs["ranking_mode"] = "cross_sectional_regression"
-    panel.attrs["calibrator_target"] = "exec_net_ret"
+    panel.attrs["model_family"] = "lightgbm_signed_lambdarank"
+    panel.attrs["ranking_mode"] = "group_ndcg_signed"
+    panel.attrs["alpha_contract"] = "return_unit_grinold_rank"
     panel.attrs["feature_groups_enabled"] = list(features.availability_masks.keys())
     _tgt_cells = max(1, (tgt_end - tgt_start) * features.values.shape[1])
     _tgt_long_slice = ev_long_grid[tgt_start:tgt_end]
