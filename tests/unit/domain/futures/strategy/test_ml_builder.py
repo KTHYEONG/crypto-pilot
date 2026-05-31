@@ -88,6 +88,8 @@ def test_fit_predict_fold_dual_side_signed_split(monkeypatch: MonkeyPatch) -> No
     assert np.all(out.ev_test_short >= 0.0)
     assert np.all(out.conf_test_long == 1.0)
     assert np.all(out.conf_test_short == 1.0)
+    assert out.score_valid_long.shape == (valid_long.X.shape[0],)
+    assert out.score_valid_short.shape == (valid_short.X.shape[0],)
 
 
 def test_resolve_side_targets_cs_residual_uses_residual_rank_and_relevance() -> None:

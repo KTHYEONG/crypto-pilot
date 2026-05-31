@@ -294,6 +294,12 @@ class StrategyMLConfig:
     # Phase 1: rank-native composition
     rank_select_quantile: float = 0.35
     rank_select_quantiles: tuple[float, ...] = (0.25, 0.35, 0.45)
+    rank_policy_enabled: bool = True
+    rank_policy_quantiles: tuple[float, ...] = (0.20, 0.25, 0.35)
+    rank_policy_min_abs_z_grid: tuple[float, ...] = (0.0, 0.25, 0.50)
+    rank_policy_weighting: Literal["equal", "zscore", "tanh"] = "tanh"
+    rank_policy_holding_candidates: tuple[int, ...] = (12, 18)
+    rank_policy_min_validation_obs: int = 120
     target_breadth: int = 8                      # minimum effective breadth target
     ic_lcb_z: float = 1.0
     ic_prior_for_gate: float = 0.03             # leak-free IC prior for portfolio net-edge gate
@@ -394,6 +400,18 @@ class StrategyMLConfig:
             raise ValueError("rank_select_quantiles must be non-empty")
         if any((q <= 0.0 or q >= 0.5) for q in self.rank_select_quantiles):
             raise ValueError("rank_select_quantiles must satisfy 0 < q < 0.5")
+        if len(self.rank_policy_quantiles) == 0:
+            raise ValueError("rank_policy_quantiles must be non-empty")
+        if any((q <= 0.0 or q >= 0.5) for q in self.rank_policy_quantiles):
+            raise ValueError("rank_policy_quantiles must satisfy 0 < q < 0.5")
+        if any(z < 0.0 for z in self.rank_policy_min_abs_z_grid):
+            raise ValueError("rank_policy_min_abs_z_grid must satisfy z >= 0")
+        if len(self.rank_policy_holding_candidates) == 0:
+            raise ValueError("rank_policy_holding_candidates must be non-empty")
+        if any(h <= 0 for h in self.rank_policy_holding_candidates):
+            raise ValueError("rank_policy_holding_candidates must contain positive integers")
+        if self.rank_policy_min_validation_obs < 30:
+            raise ValueError("rank_policy_min_validation_obs must be >= 30")
         if self.target_breadth < 2:
             raise ValueError("target_breadth must be >= 2")
         if self.ic_lcb_z < 0.0:

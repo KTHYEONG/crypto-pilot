@@ -144,4 +144,9 @@ def to_alpha_forecast(
         artifact_hash=artifact_hash,
         rank_score_long_2d=_reshape("rank_score_long"),
         rank_score_short_2d=_reshape("rank_score_short"),
+        rank_selection_policy=(
+            dict(attrs["rank_selection_policy"])
+            if isinstance(attrs.get("rank_selection_policy"), dict)
+            else None
+        ),
     )

@@ -18,6 +18,7 @@ from src.domain.futures.optimization.opt_config import (
     default_ev_hurdle_bps,
 )
 from src.domain.futures.strategy.alpha_evaluation import (
+    derive_signed_rank_signal,
     diagnose_alpha_ic_decomposition,
     effective_breadth_corr,
 )
@@ -64,6 +65,12 @@ from src.domain.futures.strategy.integrity import (
     verify_feature_integrity,
 )
 from src.domain.futures.strategy.labels import build_label_panel
+from src.domain.futures.strategy.rank_selection import (
+    RankSelectionPolicy,
+    apply_rank_selection_policy,
+    calibrate_rank_selection_policy,
+    policy_to_dict,
+)
 from src.domain.futures.strategy.ranker import RankerFitResult, fit_ranker, predict_rank_score
 from src.domain.futures.strategy.regime_gate import apply_regime_gate
 
@@ -222,6 +229,8 @@ class _FoldPredictResult:
     score_test_short: np.ndarray
     ev_valid_long: np.ndarray
     ev_valid_short: np.ndarray
+    score_valid_long: np.ndarray
+    score_valid_short: np.ndarray
 def _emit_rank_sized_alpha(
     rank_score_long_2d: np.ndarray,
     rank_score_short_2d: np.ndarray,
@@ -417,6 +426,8 @@ def _train_predict_single_fold(
         "fold_id": fold.fold_id,
         "test_long_index_map": test_long.index_map,
         "test_short_index_map": test_short.index_map,
+        "valid_long_index_map": valid_long.index_map,
+        "valid_short_index_map": valid_short.index_map,
         "ev_test_long": _fold_result.ev_test_long,
         "ev_test_short": _fold_result.ev_test_short,
         "quant_test_long": _fold_result.quant_test_long,
@@ -427,6 +438,8 @@ def _train_predict_single_fold(
         "score_test_short": _fold_result.score_test_short,
         "ev_valid_long": _fold_result.ev_valid_long,
         "ev_valid_short": _fold_result.ev_valid_short,
+        "score_valid_long": _fold_result.score_valid_long,
+        "score_valid_short": _fold_result.score_valid_short,
         "test_long_shape_0": test_long.X.shape[0],
         "train_long_shape_0": train_long.X.shape[0],
         "valid_long_shape_0": valid_long.X.shape[0],
@@ -506,6 +519,8 @@ def _fit_predict_fold_dual_side(
         score_test_short=score_test_short,
         ev_valid_long=ev_valid_long,
         ev_valid_short=ev_valid_short,
+        score_valid_long=score_valid_long,
+        score_valid_short=score_valid_short,
     )
 
 
@@ -914,6 +929,8 @@ def build_ml_strategy_alpha(
     rank_score_short_grid = np.full_like(ev_long_grid, np.nan, dtype=np.float32)
     valid_ev_long_all: list[np.ndarray] = []
     valid_ev_short_all: list[np.ndarray] = []
+    rank_policies_by_fold: list[dict[str, float | int | str]] = []
+    fold_policy_masks: list[tuple[np.ndarray, np.ndarray, RankSelectionPolicy, int]] = []
 
     # 1. Check if there is an uncovered live/OOS window at the end of the timeline
     last_test_end = folds[-1].test_end
@@ -1041,6 +1058,10 @@ def build_ml_strategy_alpha(
         if not is_virtual:
             valid_ev_long_all.append(res["ev_valid_long"])
             valid_ev_short_all.append(res["ev_valid_short"])
+            valid_long_index_map = np.asarray(res["valid_long_index_map"])
+            valid_short_index_map = np.asarray(res["valid_short_index_map"])
+            score_valid_long = np.asarray(res["score_valid_long"], dtype=np.float64)
+            score_valid_short = np.asarray(res["score_valid_short"], dtype=np.float64)
             
             _logger.debug(
                 ".. ML_RANKER: fold=%d train_n=%d valid_n=%d test_n=%d",
@@ -1098,6 +1119,54 @@ def build_ml_strategy_alpha(
             if np.isnan(score_grid[int(t_idx), int(s_idx)]):
                 score_grid[int(t_idx), int(s_idx)] = score_test_short[row]
 
+        if not is_virtual and bool(getattr(ml_cfg, "rank_policy_enabled", True)):
+            valid_score_long_grid = np.full_like(rank_score_long_grid, np.nan, dtype=np.float64)
+            valid_score_short_grid = np.full_like(rank_score_short_grid, np.nan, dtype=np.float64)
+            for row, (t_idx, s_idx) in enumerate(valid_long_index_map):
+                valid_score_long_grid[int(t_idx), int(s_idx)] = score_valid_long[row]
+            for row, (t_idx, s_idx) in enumerate(valid_short_index_map):
+                valid_score_short_grid[int(t_idx), int(s_idx)] = score_valid_short[row]
+
+            valid_signed = derive_signed_rank_signal(valid_score_long_grid, valid_score_short_grid)
+            h_candidates = tuple(int(h) for h in ml_cfg.rank_policy_holding_candidates)
+            hold = int(ml_cfg.label_horizon_bars)
+            if hold not in h_candidates and len(h_candidates) > 0:
+                hold = int(h_candidates[0])
+            policy = calibrate_rank_selection_policy(
+                signed_score_2d=valid_signed,
+                realized_fwd_ret_2d=labels.exec_net_ret.astype(np.float64),
+                eligible_2d=labels.eligible_mask.astype(bool),
+                quantiles=tuple(float(q) for q in ml_cfg.rank_policy_quantiles),
+                min_abs_z_grid=tuple(float(z) for z in ml_cfg.rank_policy_min_abs_z_grid),
+                holding_bars=hold,
+                cost_bps=24.0,
+                min_obs=int(ml_cfg.rank_policy_min_validation_obs),
+                weight_k=float(ml_cfg.alpha_emit_weight_k),
+                weighting=ml_cfg.rank_policy_weighting,
+            )
+            fold_policy_masks.append(
+                (
+                    np.asarray(res["test_long_index_map"]),
+                    np.asarray(res["test_short_index_map"]),
+                    policy,
+                    int(fold_id),
+                )
+            )
+            pol_dict = policy_to_dict(policy)
+            pol_dict["fold_id"] = int(fold_id)
+            rank_policies_by_fold.append(pol_dict)
+            _logger.info(
+                "[RANK-POLICY] fold=%d polarity=%d q=%.2f floor=%.2f hold=%d val_lcb=%.2f val_ir=%.2f mono=%.2f",
+                int(fold_id),
+                int(policy.polarity),
+                float(policy.quantile),
+                float(policy.min_abs_z),
+                int(policy.holding_bars),
+                float(policy.validation_net_lcb_bps),
+                float(policy.validation_ir_t),
+                float(policy.validation_monotonicity),
+            )
+
         if not is_virtual:
             _logger.debug(
                 ".. ML_SCORE_SPLIT: fold=%d ev_mean=%.6e ev_p10=%.6e ev_p90=%.6e",
@@ -1139,14 +1208,75 @@ def build_ml_strategy_alpha(
     if _emit_mode == "rank_sized":
         # clip_lim=1.0: tanh weights가 (-1,+1) 범위이므로 alpha_clip_bps(0.0075) 대신
         # 1.0을 사용해 continuous weight 보존. portfolio sizing은 backtest에서 별도 결정.
-        alpha_long_final, alpha_short_final = _emit_rank_sized_alpha(
-            rank_score_long_grid,
-            rank_score_short_grid,
-            eligible_2d,
-            select_q=float(getattr(ml_cfg, "alpha_emit_select_q", 0.40)),
-            weight_k=float(getattr(ml_cfg, "alpha_emit_weight_k", 3.0)),
-            clip_lim=1.0,
-        )
+        if bool(getattr(ml_cfg, "rank_policy_enabled", True)) and rank_policies_by_fold:
+            alpha_long_final = np.zeros_like(rank_score_long_grid, dtype=np.float32)
+            alpha_short_final = np.zeros_like(rank_score_short_grid, dtype=np.float32)
+            signed_all = derive_signed_rank_signal(
+                rank_score_long_grid.astype(np.float64),
+                rank_score_short_grid.astype(np.float64),
+            )
+            for test_l_idx, test_s_idx, policy, _fold_id in fold_policy_masks:
+                lmask_2d = np.zeros_like(eligible_2d, dtype=bool)
+                smask_2d = np.zeros_like(eligible_2d, dtype=bool)
+                for t_idx, s_idx in test_l_idx:
+                    lmask_2d[int(t_idx), int(s_idx)] = True
+                for t_idx, s_idx in test_s_idx:
+                    smask_2d[int(t_idx), int(s_idx)] = True
+                apply_mask = lmask_2d | smask_2d
+                pol_long, pol_short = apply_rank_selection_policy(
+                    signed_score_2d=signed_all,
+                    eligible_2d=eligible_2d & apply_mask,
+                    policy=policy,
+                )
+                alpha_long_final = np.maximum(alpha_long_final, pol_long)
+                alpha_short_final = np.maximum(alpha_short_final, pol_short)
+            if v_fold is not None:
+                aggregate_policy = sorted(
+                    rank_policies_by_fold,
+                    key=lambda p: float(p["validation_net_lcb_bps"]),
+                    reverse=True,
+                )[0]
+                live_policy = RankSelectionPolicy(
+                    polarity=int(aggregate_policy["polarity"]),  # type: ignore[arg-type]
+                    quantile=float(aggregate_policy["quantile"]),
+                    min_abs_z=float(aggregate_policy["min_abs_z"]),
+                    weighting=str(aggregate_policy["weighting"]),  # type: ignore[arg-type]
+                    weight_k=float(aggregate_policy["weight_k"]),
+                    holding_bars=int(aggregate_policy["holding_bars"]),
+                    validation_net_lcb_bps=float(aggregate_policy["validation_net_lcb_bps"]),
+                    validation_gross_bps=float(aggregate_policy["validation_gross_bps"]),
+                    validation_ir_t=float(aggregate_policy["validation_ir_t"]),
+                    validation_monotonicity=float(aggregate_policy["validation_monotonicity"]),
+                    n_obs=int(aggregate_policy["n_obs"]),
+                )
+                vmask = np.zeros_like(eligible_2d, dtype=bool)
+                for t_idx, s_idx in np.asarray(results[-1]["test_long_index_map"]):
+                    vmask[int(t_idx), int(s_idx)] = True
+                for t_idx, s_idx in np.asarray(results[-1]["test_short_index_map"]):
+                    vmask[int(t_idx), int(s_idx)] = True
+                pol_long_v, pol_short_v = apply_rank_selection_policy(
+                    signed_score_2d=signed_all,
+                    eligible_2d=eligible_2d & vmask,
+                    policy=live_policy,
+                )
+                alpha_long_final = np.maximum(alpha_long_final, pol_long_v)
+                alpha_short_final = np.maximum(alpha_short_final, pol_short_v)
+                panel_policy_summary = dict(aggregate_policy)
+            else:
+                panel_policy_summary = max(
+                    rank_policies_by_fold,
+                    key=lambda p: float(p["validation_net_lcb_bps"]),
+                )
+        else:
+            alpha_long_final, alpha_short_final = _emit_rank_sized_alpha(
+                rank_score_long_grid,
+                rank_score_short_grid,
+                eligible_2d,
+                select_q=float(getattr(ml_cfg, "alpha_emit_select_q", 0.40)),
+                weight_k=float(getattr(ml_cfg, "alpha_emit_weight_k", 3.0)),
+                clip_lim=1.0,
+            )
+            panel_policy_summary = None
     else:
         alpha_long_final = np.where(
             eligible_2d,
@@ -1194,6 +1324,10 @@ def build_ml_strategy_alpha(
         "short_lower_is_better": True,
         "signed_signal_formula": "derive_signed_rank_signal(rank_score_long, rank_score_short)",
     }
+    if _emit_mode == "rank_sized" and rank_policies_by_fold:
+        assert panel_policy_summary is not None
+        panel.attrs["rank_selection_policy"] = dict(panel_policy_summary)
+        panel.attrs["rank_selection_policy_by_fold"] = list(rank_policies_by_fold)
     panel.attrs["strategy_name"] = cfg.name
     panel.attrs["feature_names"] = list(features.feature_names)
     panel.attrs["fold_count"] = len(folds)
@@ -1958,14 +2092,50 @@ def build_ml_strategy_alpha_anchored(
     eligible_2d_awf = labels.eligible_mask
     _emit_mode_awf = str(getattr(ml_cfg, "alpha_emit_mode", "rank_sized"))
     if _emit_mode_awf == "rank_sized":
-        alpha_long_final_awf, alpha_short_final_awf = _emit_rank_sized_alpha(
-            rank_score_long_grid_awf,
-            rank_score_short_grid_awf,
-            eligible_2d_awf,
-            select_q=float(getattr(ml_cfg, "alpha_emit_select_q", 0.40)),
-            weight_k=float(getattr(ml_cfg, "alpha_emit_weight_k", 3.0)),
-            clip_lim=1.0,  # tanh weights가 (-1,+1) 범위이므로 continuous 보존
-        )
+        if bool(getattr(ml_cfg, "rank_policy_enabled", True)):
+            valid_score_long_grid_awf = np.full_like(rank_score_long_grid_awf, np.nan, dtype=np.float64)
+            valid_score_short_grid_awf = np.full_like(rank_score_short_grid_awf, np.nan, dtype=np.float64)
+            for row, (t_idx, s_idx) in enumerate(valid_long.index_map):
+                valid_score_long_grid_awf[int(t_idx), int(s_idx)] = _awf_result.score_valid_long[row]
+            for row, (t_idx, s_idx) in enumerate(valid_short.index_map):
+                valid_score_short_grid_awf[int(t_idx), int(s_idx)] = _awf_result.score_valid_short[row]
+            valid_signed_awf = derive_signed_rank_signal(
+                valid_score_long_grid_awf,
+                valid_score_short_grid_awf,
+            )
+            hold_awf = int(ml_cfg.label_horizon_bars)
+            if hold_awf not in tuple(int(h) for h in ml_cfg.rank_policy_holding_candidates):
+                hold_awf = int(ml_cfg.rank_policy_holding_candidates[0])
+            awf_policy = calibrate_rank_selection_policy(
+                signed_score_2d=valid_signed_awf,
+                realized_fwd_ret_2d=labels.exec_net_ret.astype(np.float64),
+                eligible_2d=labels.eligible_mask.astype(bool),
+                quantiles=tuple(float(q) for q in ml_cfg.rank_policy_quantiles),
+                min_abs_z_grid=tuple(float(z) for z in ml_cfg.rank_policy_min_abs_z_grid),
+                holding_bars=hold_awf,
+                cost_bps=24.0,
+                min_obs=int(ml_cfg.rank_policy_min_validation_obs),
+                weight_k=float(ml_cfg.alpha_emit_weight_k),
+                weighting=ml_cfg.rank_policy_weighting,
+            )
+            awf_signed = derive_signed_rank_signal(
+                rank_score_long_grid_awf.astype(np.float64),
+                rank_score_short_grid_awf.astype(np.float64),
+            )
+            alpha_long_final_awf, alpha_short_final_awf = apply_rank_selection_policy(
+                signed_score_2d=awf_signed,
+                eligible_2d=eligible_2d_awf,
+                policy=awf_policy,
+            )
+        else:
+            alpha_long_final_awf, alpha_short_final_awf = _emit_rank_sized_alpha(
+                rank_score_long_grid_awf,
+                rank_score_short_grid_awf,
+                eligible_2d_awf,
+                select_q=float(getattr(ml_cfg, "alpha_emit_select_q", 0.40)),
+                weight_k=float(getattr(ml_cfg, "alpha_emit_weight_k", 3.0)),
+                clip_lim=1.0,  # tanh weights가 (-1,+1) 범위이므로 continuous 보존
+            )
     else:
         alpha_long_final_awf = np.where(
             eligible_2d_awf,
@@ -2014,6 +2184,13 @@ def build_ml_strategy_alpha_anchored(
         "short_lower_is_better": True,
         "signed_signal_formula": "derive_signed_rank_signal(rank_score_long, rank_score_short)",
     }
+    if (
+        _emit_mode_awf == "rank_sized"
+        and bool(getattr(ml_cfg, "rank_policy_enabled", True))
+        and "awf_policy" in locals()
+    ):
+        panel.attrs["rank_selection_policy"] = policy_to_dict(awf_policy)
+        panel.attrs["rank_selection_policy_by_fold"] = [policy_to_dict(awf_policy)]
 
     # AWF quality/IC gates — warn-only モード (Optuna 최적화 중단 방지)
     # WF 경로와 동일하게 build_quality_report()로 실제 IC/NDCG/alpha_p95 계산
