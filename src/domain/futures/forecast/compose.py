@@ -169,6 +169,9 @@ def compose_mu(
             mu_long = np.where(long_mask, mu_long, -np.inf)
             mu_short = np.where(short_mask, mu_short, -np.inf)
     elif admission_mode == "rank_cs_neutral":
+        # rank_cs_neutral returns selection/weight surfaces (rank unit), not EV-return surfaces.
+        # Portfolio economics must be validated with realized basket spread diagnostics downstream.
+        # Do not subtract cost/hurdle from rank weights in this branch.
         rank_l = getattr(alpha, "rank_score_long_2d", None)
         rank_s = getattr(alpha, "rank_score_short_2d", None)
         if rank_l is not None and rank_s is not None:
