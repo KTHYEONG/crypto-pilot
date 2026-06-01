@@ -75,7 +75,7 @@ def _filter_report_path(*, tf: str, as_of: date, root: Path) -> Path:
 def _to_symbol_meta(frame: pd.DataFrame) -> tuple[SymbolMeta, ...]:
     metas: list[SymbolMeta] = []
     if frame.empty:
-        return tuple()
+        return ()
     ranked = frame.copy()
     if "rank" not in ranked.columns:
         ranked["rank"] = pd.Series(range(1, len(ranked) + 1), dtype="int64")
@@ -126,7 +126,7 @@ def _empty_filter_report(symbol: str) -> FilterReport:
         stage6_metrics={},
         final_rank=None,
         final_cluster_id=None,
-        audit_trail=tuple(),
+        audit_trail=(),
     )
 
 
@@ -243,16 +243,16 @@ def _to_rejected(frame: pd.DataFrame) -> dict[str, FilterReport]:
 
 def _compute_manifest_hash(*, as_of: date, tf: str, manifest_path: Path) -> str:
     if not manifest_path.exists():
-        return str(hash_manifest_rows(tuple()))
+        return str(hash_manifest_rows(()))
     manifest = pd.read_parquet(manifest_path)
     if manifest.empty:
-        return str(hash_manifest_rows(tuple()))
+        return str(hash_manifest_rows(()))
 
     scoped = manifest.copy()
     if "tf" in scoped.columns:
         scoped = scoped.loc[scoped["tf"].astype("string") == tf]
     if scoped.empty:
-        return str(hash_manifest_rows(tuple()))
+        return str(hash_manifest_rows(()))
 
     if "knowledge_date" in scoped.columns:
         cutoff_raw = pd.to_datetime(scoped["knowledge_date"], errors="coerce")
@@ -260,7 +260,7 @@ def _compute_manifest_hash(*, as_of: date, tf: str, manifest_path: Path) -> str:
         cutoff_raw = pd.to_datetime(scoped.get("period"), errors="coerce")
     scoped = scoped.loc[cutoff_raw.dt.date <= as_of]
     if scoped.empty:
-        return str(hash_manifest_rows(tuple()))
+        return str(hash_manifest_rows(()))
 
     rows: list[ManifestRow] = []
     for _, row in scoped.iterrows():
@@ -443,7 +443,7 @@ def build_universe(
             data_manifest_hash=manifest_hash,
             basket_ref=config.stage6.basket_ref,
             basket_weights=config.stage6.basket_weights,
-            selected=tuple(),
+            selected=(),
             rejected={},
             generated_at_utc=datetime.now(tz=UTC).isoformat(),
             ledger_confidence=config.ledger_confidence,
@@ -507,9 +507,12 @@ def build_universe(
         generated_at_utc=datetime.now(tz=UTC).isoformat(),
         ledger_confidence=config.ledger_confidence,
     )
+    score_column = "tradeable_score" if config.stage6_is_alpha_rank else "execution_pool_score"
     selected_columns = [
         "symbol",
+        score_column,
         "tradeable_score",
+        "execution_pool_score",
         "rank",
         "role",
         "hysteresis_state",
@@ -525,6 +528,7 @@ def build_universe(
     selected_columns.extend(
         [dwell_col for dwell_col in ("membership_days", "dwell_days") if dwell_col in s6.columns]
     )
+    selected_columns = list(dict.fromkeys(selected_columns))
     selected = s6[[column for column in selected_columns if column in s6.columns]].copy()
 
     # [P1-3] 유니버스 충원율(fill-rate) 경보 게이트
