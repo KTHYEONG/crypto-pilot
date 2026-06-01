@@ -13,7 +13,7 @@ def test_rejects_legacy_alpha_only_flag(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--mode", "quick-backtest", "--alpha-only"],
+        ["opt_main_futures.py", "--phase", "strategy", "--alpha-only"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -23,7 +23,17 @@ def test_rejects_legacy_hmm_only_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--mode", "quick-backtest", "--hmm-only"],
+        ["opt_main_futures.py", "--phase", "strategy", "--hmm-only"],
+    )
+    exit_code = opt_main_futures.main()
+    assert exit_code == 2
+
+
+def test_rejects_legacy_mode_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["opt_main_futures.py", "--mode", "strategy"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -40,25 +50,25 @@ def test_strategy_mode_uses_default_strategy(monkeypatch: pytest.MonkeyPatch) ->
     ) -> opt_main_futures.RunnerResult:
         _ = seed
         _ = resume
-        captured["mode"] = run_config.mode
+        captured["phase"] = run_config.phase
         return opt_main_futures.RunnerResult(exit_code=0, reason="ok")
 
     monkeypatch.setattr(opt_main_futures, "run_pipeline", fake_run_pipeline)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--mode", "strategy"],
+        ["opt_main_futures.py", "--phase", "strategy"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 0
-    assert captured["mode"] == "strategy"
+    assert captured["phase"] == "strategy"
 
 
-def test_rejects_legacy_full_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rejects_legacy_full_phase(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--mode", "full"],
+        ["opt_main_futures.py", "--phase", "full"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -77,7 +87,7 @@ def test_strategy_mode_enters_pipeline(
     ) -> opt_main_futures.RunnerResult:
         _ = seed
         _ = resume
-        captured_mode["value"] = run_config.mode
+        captured_mode["value"] = run_config.phase
         return opt_main_futures.RunnerResult(exit_code=0, reason="strategy_done")
 
     monkeypatch.setattr(opt_main_futures, "run_pipeline", fake_run_pipeline)
@@ -86,7 +96,7 @@ def test_strategy_mode_enters_pipeline(
         "argv",
         [
             "opt_main_futures.py",
-            "--mode",
+            "--phase",
             "strategy",
             "--trials",
             "1",

@@ -6,13 +6,11 @@ from typing import Any
 
 from src.domain.futures.strategy.config import (
     CandidateStrategyConfig,
-    MomentumConfig,
     StrategyConfig,
 )
 
 __all__ = [
     "CandidateStrategyConfig",
-    "MomentumConfig",
     "StrategyConfig",
     "build_strategy_alpha",
 ]

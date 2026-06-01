@@ -4,11 +4,11 @@ from argparse import Namespace
 from dataclasses import dataclass
 from typing import Any, Literal
 
-ActiveMode = Literal["quick-backtest", "strategy", "alpha"]
+ActivePhase = Literal["strategy", "alpha"]
 SyncMode = Literal["full", "fast", "skip"]
 
-_ACTIVE_MODES: frozenset[str] = frozenset({"quick-backtest", "strategy", "alpha"})
-_LEGACY_MODES: frozenset[str] = frozenset({"full", "strategy-smoke"})
+_ACTIVE_PHASES: frozenset[str] = frozenset({"strategy", "alpha"})
+_LEGACY_PHASES: frozenset[str] = frozenset({"full", "strategy-smoke", "quick-backtest"})
 _LEGACY_FLAGS: tuple[str, ...] = (
     "alpha_only",
     "skip_universe",
@@ -17,6 +17,14 @@ _LEGACY_FLAGS: tuple[str, ...] = (
     "seed",
     "resume",
 )
+_LEGACY_ARG_KEYS: tuple[str, ...] = (
+    "mode",
+    "tf",
+    "reference_date",
+    "rebuild_universe",
+    "force_universe_rebuild",
+    "sync_mode",
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -24,20 +32,20 @@ class FuturesRunConfig:
     """Active futures optimization runner configuration."""
 
     timeframe: str
-    reference_date: str | None
+    date: str | None
     trials: int
-    mode: ActiveMode
+    phase: ActivePhase
     sync: SyncMode
-    rebuild_universe: bool
+    refresh_universe: bool
 
 
-def parse_active_mode(mode: str) -> ActiveMode:
-    """Parse and validate active mode name."""
-    if mode in _LEGACY_MODES:
-        raise ValueError(f"legacy mode is not allowed in active runner: {mode}")
-    if mode not in _ACTIVE_MODES:
-        raise ValueError(f"invalid active mode: {mode}")
-    return mode  # type: ignore[return-value]
+def parse_active_phase(phase: str) -> ActivePhase:
+    """Parse and validate active phase name."""
+    if phase in _LEGACY_PHASES:
+        raise ValueError(f"legacy phase is not allowed in active runner: {phase}")
+    if phase not in _ACTIVE_PHASES:
+        raise ValueError(f"invalid active phase: {phase}")
+    return phase  # type: ignore[return-value]
 
 
 def validate_run_config(config: FuturesRunConfig) -> FuturesRunConfig:
@@ -54,27 +62,21 @@ def build_run_config_from_args(args: Namespace | dict[str, Any]) -> FuturesRunCo
     for legacy_flag in _LEGACY_FLAGS:
         if bool(raw.get(legacy_flag, False)):
             raise ValueError(f"legacy flag is not allowed in active runner: {legacy_flag}")
+    for legacy_key in _LEGACY_ARG_KEYS:
+        if legacy_key in raw:
+            raise ValueError(f"legacy argument key is not allowed in active runner: {legacy_key}")
 
-    mode = parse_active_mode(str(raw.get("mode", "strategy")))
-    
-    # Map simplified sync values or handle legacy if passed through dict
-    sync_raw = str(raw.get("sync", raw.get("sync_mode", "full")))
-    sync_map = {
-        "full_history_master": "full",
-        "elite_fast": "fast",
-        "full": "full",
-        "fast": "fast",
-        "skip": "skip",
-    }
-    sync = sync_map.get(sync_raw, "full")
+    phase = parse_active_phase(str(raw.get("phase", "strategy")))
+    sync = str(raw.get("sync", "full"))
+    if sync not in {"full", "fast", "skip"}:
+        raise ValueError(f"invalid sync mode: {sync}")
 
     config = FuturesRunConfig(
-        timeframe=str(raw.get("timeframe", raw.get("tf", "4h"))),
-        reference_date=raw.get("reference_date"),
+        timeframe=str(raw.get("timeframe", "4h")),
+        date=raw.get("date"),
         trials=int(raw.get("trials", 100)),
-        mode=mode,
+        phase=phase,
         sync=sync,  # type: ignore[arg-type]
-        rebuild_universe=bool(raw.get("rebuild_universe", raw.get("force_universe_rebuild", False))),
+        refresh_universe=bool(raw.get("refresh_universe", False)),
     )
     return validate_run_config(config)
-

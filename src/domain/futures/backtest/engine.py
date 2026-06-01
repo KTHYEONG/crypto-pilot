@@ -24,10 +24,6 @@ from src.domain.futures.portfolio.execution_sim import (
     check_long_exit,
     check_short_exit,
 )
-from src.domain.futures.portfolio.portfolio_constructor import (
-    portfolio_weight_params_from_optuna,
-    precompute_rebalance_weights,
-)
 
 _logger = logging.getLogger("backtest_engine")
 
@@ -106,11 +102,6 @@ class PortfolioBacktestEngine:
 
     def run(self) -> tuple[pd.DataFrame, np.ndarray, float, np.ndarray]:
         """Execute multi-symbol futures backtest."""
-        if bool(self.params.get("STRATEGY_MODE", False)):
-            from src.domain.futures.optimization.optimizer import (
-                _compose_strategy_scores_inplace,
-            )
-            _compose_strategy_scores_inplace(self.data, self.params)
         prepared = prepare_backtest_inputs(self.data, self.params)
         d = prepared.aligned_data
         membership_stats = merge_effective_membership_constraints(d, clamp_target_weights=False)
@@ -130,32 +121,11 @@ class PortfolioBacktestEngine:
         hpb_for_borrow = hours_per_bar_from_timeframe(str(self.params.get("TIMEFRAME", "4h")))
 
         tw_raw = d.get("target_weights")
-        tw_arr: np.ndarray
-        if tw_raw is not None:
-            tw_arr = np.asarray(tw_raw, dtype=np.float64)
-        else:
-            pw = portfolio_weight_params_from_optuna(self.params, OPT_FUTURES_CONFIG)
-            hpb = hours_per_bar_from_timeframe(str(self.params.get("TIMEFRAME", "4h")))
-            bars_py = (365.0 * 24.0) / max(hpb, 1e-9)
-            tw_arr = precompute_rebalance_weights(
-                c2d,
-                np.asarray(d.get("xs_score_long", np.zeros_like(c2d)), dtype=np.float64),
-                np.asarray(d.get("xs_score_short", np.zeros_like(c2d)), dtype=np.float64),
-                rebalance_bars=max(1, int(self.params.get("REBALANCE_BARS", 6))),
-                lookback=int(pw["lookback"]),
-                bars_per_year=bars_py,
-                kappa=float(pw["kappa"]),
-                f_kelly_max=float(pw["f_kelly_max"]),
-                sigma_target_ann=float(pw["sigma_target_ann"]),
-                gross_cap=float(pw["gross_cap"]),
-                per_symbol_cap=float(pw["per_symbol_cap"]),
-                current_dd=0.0,
-                composer_sigma_2d=(
-                    np.asarray(d["composer_sigma_bar"], dtype=np.float64)
-                    if d.get("composer_sigma_bar") is not None
-                    else None
-                ),
+        if tw_raw is None:
+            raise RuntimeError(
+                "target_weights required: pre-merge candidate output before running engine"
             )
+        tw_arr = np.asarray(tw_raw, dtype=np.float64)
         entry_block = d.get("entry_block_mask")
         if entry_block is not None:
             entry_block_2d = np.asarray(entry_block, dtype=np.float64)
