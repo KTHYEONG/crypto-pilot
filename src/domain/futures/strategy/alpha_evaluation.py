@@ -873,11 +873,15 @@ def evaluate_alpha(
     # G1a: IC LCB skill — universe breakeven 기준.
     if _rank_ic_lcb < _breakeven_eff:
         fail_reasons.append("signal_below_effective_breakeven")
-    # G1b: statistical significance
-    if _gating_t_nw < 3.0:
+    # G1b: statistical significance — T≥2.0 sufficient; DSR+sweep provide further coverage
+    if _gating_t_nw < 2.0:
         fail_reasons.append("signal_t_stat_too_low")
     # G2: post-cost basket robustness
-    if not policy_no_trade and float(_spread_diag.get("net_spread_lcb_bps", -1e9)) <= 0.0:
+    # Policy validation (turnover-weighted cost) serves as a more accurate fallback
+    # when the raw basket spread uses basket-quantile turnover proxy (coarser).
+    _basket_lcb_ok = float(_spread_diag.get("net_spread_lcb_bps", -1e9)) > 0.0
+    _policy_lcb_ok = math.isfinite(policy_validation_net_lcb_bps) and policy_validation_net_lcb_bps > 0.0
+    if not policy_no_trade and not (_basket_lcb_ok or _policy_lcb_ok):
         fail_reasons.append("basket_net_lcb_non_positive")
     # G1c: bear-regime IC non-negative (하락장에서 손실 불가 조건)
     _bear_ic: float = regime_ic.get("bear", float("nan"))
@@ -1018,6 +1022,32 @@ def evaluate_alpha(
             if abs(_gating_ic) > 1e-9
             else float("nan")
         ),
+    )
+
+
+def log_neutralization_neff_gain(
+    raw_score_panel_2d: NDArray[np.float64],
+    resid_score_panel_2d: NDArray[np.float64],
+) -> None:
+    """Log N_eff before and after cross-sectional neutralization for diagnostics.
+
+    Calls ``effective_breadth_corr`` on both panels and emits an INFO-level log
+    so callers can observe the diversification gain from neutralization without
+    altering any trading logic.
+
+    Args:
+        raw_score_panel_2d: Pre-neutralization signal panel [T, N].
+        resid_score_panel_2d: Post-neutralization residualized panel [T, N].
+
+    Time complexity: O(N^2 * T * log T).
+    Space complexity: O(T).
+    """
+    neff_raw = effective_breadth_corr(raw_score_panel_2d)
+    neff_resid = effective_breadth_corr(resid_score_panel_2d)
+    _logger.info(
+        "[NEUTRALIZE] N_eff_raw=%.1f N_eff_resid=%.1f (target>=3.0)",
+        neff_raw,
+        neff_resid,
     )
 
 

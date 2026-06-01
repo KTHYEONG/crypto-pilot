@@ -205,6 +205,25 @@ def _btc_close_from_data_maps(
     return pd.Series(dtype=np.float64)
 
 
+def _build_btc_factor_2d(
+    btc_close: pd.Series,
+    datetimes: np.ndarray,
+    n_symbols: int,
+) -> np.ndarray | None:
+    """Build BTC log-return factor panel [T, N] broadcast across all symbols.
+
+    Returns None if BTC series is empty or has fewer than 2 aligned observations.
+    """
+    if btc_close.empty:
+        return None
+    btc_ret = np.log(btc_close).diff()
+    aligned = btc_ret.reindex(pd.DatetimeIndex(datetimes))
+    arr = aligned.to_numpy(dtype=np.float64)
+    if int(np.isfinite(arr).sum()) < 2:
+        return None
+    return np.tile(arr[:, np.newaxis], (1, n_symbols))
+
+
 def _predict_quantiles_with_fallback(
     models: Any,
     dataset: LongMatrixDataset,
@@ -1254,6 +1273,14 @@ def build_ml_strategy_alpha(
                 rank_score_long_grid.astype(np.float64),
                 rank_score_short_grid.astype(np.float64),
             )
+            _cs_neutralize = bool(getattr(ml_cfg, "rank_policy_cs_neutralize", True))
+            _neutralize_window = int(getattr(ml_cfg, "rank_policy_neutralize_window", 60))
+            _btc_factor_2d: np.ndarray | None = None
+            if _cs_neutralize:
+                _btc_close_cs = _btc_close_from_data_maps(data_maps, tf)
+                _btc_factor_2d = _build_btc_factor_2d(
+                    _btc_close_cs, features.datetimes, signed_all.shape[1]
+                )
             for test_l_idx, test_s_idx, policy, _fold_id in fold_policy_masks:
                 lmask_2d = np.zeros_like(eligible_2d, dtype=bool)
                 smask_2d = np.zeros_like(eligible_2d, dtype=bool)
@@ -1262,11 +1289,17 @@ def build_ml_strategy_alpha(
                 for t_idx, s_idx in test_s_idx:
                     smask_2d[int(t_idx), int(s_idx)] = True
                 apply_mask = lmask_2d | smask_2d
+                _policy_cs = policy_from_dict({
+                    **policy_to_dict(policy),
+                    "cs_neutralize": _cs_neutralize,
+                    "neutralize_window": _neutralize_window,
+                })
                 pol_long, pol_short = apply_rank_selection_policy(
                     signed_score_2d=signed_all,
                     eligible_2d=eligible_2d & apply_mask,
-                    policy=policy,
+                    policy=_policy_cs,
                     beta_2d=(labels.beta_2d.astype(np.float64) if labels.beta_2d is not None else None),
+                    factor_2d=_btc_factor_2d,
                 )
                 alpha_long_final = np.maximum(alpha_long_final, pol_long)
                 alpha_short_final = np.maximum(alpha_short_final, pol_short)
@@ -1282,11 +1315,17 @@ def build_ml_strategy_alpha(
                     vmask[int(t_idx), int(s_idx)] = True
                 for t_idx, s_idx in np.asarray(results[-1]["test_short_index_map"]):
                     vmask[int(t_idx), int(s_idx)] = True
+                _live_policy_cs = policy_from_dict({
+                    **policy_to_dict(live_policy),
+                    "cs_neutralize": _cs_neutralize,
+                    "neutralize_window": _neutralize_window,
+                })
                 pol_long_v, pol_short_v = apply_rank_selection_policy(
                     signed_score_2d=signed_all,
                     eligible_2d=eligible_2d & vmask,
-                    policy=live_policy,
+                    policy=_live_policy_cs,
                     beta_2d=(labels.beta_2d.astype(np.float64) if labels.beta_2d is not None else None),
+                    factor_2d=_btc_factor_2d,
                 )
                 alpha_long_final = np.maximum(alpha_long_final, pol_long_v)
                 alpha_short_final = np.maximum(alpha_short_final, pol_short_v)
@@ -2194,11 +2233,25 @@ def build_ml_strategy_alpha_anchored(
                 rank_score_long_grid_awf.astype(np.float64),
                 rank_score_short_grid_awf.astype(np.float64),
             )
+            _cs_neutralize_awf = bool(getattr(ml_cfg, "rank_policy_cs_neutralize", True))
+            _neutralize_window_awf = int(getattr(ml_cfg, "rank_policy_neutralize_window", 60))
+            _btc_factor_2d_awf: np.ndarray | None = None
+            if _cs_neutralize_awf:
+                _btc_close_awf = _btc_close_from_data_maps(data_maps, tf)
+                _btc_factor_2d_awf = _build_btc_factor_2d(
+                    _btc_close_awf, features.datetimes, awf_signed.shape[1]
+                )
+            _awf_policy_cs = policy_from_dict({
+                **policy_to_dict(awf_policy),
+                "cs_neutralize": _cs_neutralize_awf,
+                "neutralize_window": _neutralize_window_awf,
+            })
             alpha_long_final_awf, alpha_short_final_awf = apply_rank_selection_policy(
                 signed_score_2d=awf_signed,
                 eligible_2d=eligible_2d_awf,
-                policy=awf_policy,
+                policy=_awf_policy_cs,
                 beta_2d=(labels.beta_2d.astype(np.float64) if labels.beta_2d is not None else None),
+                factor_2d=_btc_factor_2d_awf,
             )
         else:
             alpha_long_final_awf, alpha_short_final_awf = _emit_rank_sized_alpha(
