@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from src.domain.futures.strategy.candidate_edge import fit_candidate_edge_models, predict_candidate_edges
-from src.domain.futures.strategy.config import CandidateStrategyConfig, StrategyMLConfig
+from src.domain.futures.strategy.config import CandidateStrategyConfig
 
 
 @dataclass(slots=True, frozen=True)

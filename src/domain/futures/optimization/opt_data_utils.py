@@ -19,7 +19,6 @@ from src.domain.futures.backtest.data_loader import (
 from src.domain.futures.optimization.common import inject_cs_momentum_ranks
 from src.domain.futures.optimization.observability.dashboard import REGIME_NAMES
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
-from src.domain.futures.strategy_runtime.bridge import _enrich_with_gp_features
 
 _logger: logging.Logger = logging.getLogger("opt_data_utils")
 _SUFFICIENCY_LOG_DIR = LOG_DIR / "futures/data"
@@ -672,16 +671,6 @@ def load_single_symbol_data(
                     df=df,
                 )
 
-                # Enrich with GP features
-                if not skip_metrics:
-                    df = _enrich_with_gp_features(df, tf=tf_l)
-                    _append_stage_integrity(
-                        integrity_audit,
-                        symbol=sym,
-                        timeframe=tf_l,
-                        stage="engineered",
-                        df=df,
-                    )
             except Exception as e:
                 _logger.error("[%s] Merge/Enrich failed: %s", sym, e)
                 insufficient = True
