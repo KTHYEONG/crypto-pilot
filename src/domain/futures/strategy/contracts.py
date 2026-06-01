@@ -51,6 +51,7 @@ class LabelPanel:
     # Exposed for beta-residualized OOS IC decomposition (anti-bias diagnostic).
     beta_2d: np.ndarray | None = None
     market_fwd_ret: np.ndarray | None = None
+    forward_return_by_horizon: dict[int, np.ndarray] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

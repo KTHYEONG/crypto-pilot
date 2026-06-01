@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import warnings
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -19,6 +20,47 @@ _logger = logging.getLogger(__name__)
 
 _BETA_WINDOW: int = 120
 _BETA_MIN_PERIODS: int = 20
+
+
+def build_forward_return_for_horizon(
+    *,
+    aligned: AlignedMarketData,
+    eligible_2d: NDArray[np.bool_],
+    beta_2d: NDArray[np.float64],
+    horizon_bars: int,
+    target_mode: Literal["beta_residualized", "gross"],
+) -> NDArray[np.float32]:
+    """Build leak-free forward return labels for one horizon."""
+    t_len, n_len = aligned.close_2d.shape
+    out = np.full((t_len, n_len), np.nan, dtype=np.float32)
+    market_fwd_ret: NDArray[np.float64] = np.full(t_len, np.nan, dtype=np.float64)
+    if t_len > horizon_bars:
+        entry_mkt = aligned.open_2d[1 : t_len - horizon_bars + 1]
+        exit_mkt = aligned.close_2d[horizon_bars:t_len]
+        valid_mkt = (
+            (entry_mkt > 0.0)
+            & (exit_mkt > 0.0)
+            & np.isfinite(entry_mkt)
+            & np.isfinite(exit_mkt)
+        )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mkt_log = np.where(valid_mkt, np.log(exit_mkt / entry_mkt), np.nan)
+        market_fwd_ret[: t_len - horizon_bars] = np.nanmean(mkt_log, axis=1)
+    for t in range(max(t_len - horizon_bars, 0)):
+        entry = aligned.open_2d[t + 1]
+        exit_ = aligned.close_2d[t + horizon_bars]
+        valid_px = (entry > 0.0) & (exit_ > 0.0) & np.isfinite(entry) & np.isfinite(exit_)
+        row_ok = eligible_2d[t] & valid_px
+        if not np.any(row_ok):
+            continue
+        with np.errstate(divide="ignore", invalid="ignore"):
+            gross_long = np.log(exit_ / entry)
+        base = gross_long - aligned.funding_2d[t]
+        if target_mode == "beta_residualized":
+            mkt_ret_t = float(market_fwd_ret[t]) if np.isfinite(market_fwd_ret[t]) else 0.0
+            base = base - beta_2d[t] * mkt_ret_t
+        out[t, row_ok] = base[row_ok].astype(np.float32)
+    return out
 
 
 def _build_relevance(
@@ -62,10 +104,11 @@ def _build_centered_rank_target(
         order = np.argsort(vals, kind="mergesort")
         ranks = np.empty(idx.size, dtype=np.float64)
         ranks[order] = np.arange(idx.size, dtype=np.float64)
-        if idx.size == 1:
-            centered = np.zeros((1,), dtype=np.float64)
-        else:
-            centered = 2.0 * (ranks / float(idx.size - 1)) - 1.0
+        centered = (
+            np.zeros((1,), dtype=np.float64)
+            if idx.size == 1
+            else 2.0 * (ranks / float(idx.size - 1)) - 1.0
+        )
         rank_target[t, idx] = centered.astype(np.float32)
         bins = np.floor((ranks / float(idx.size)) * 5.0).astype(np.int32)
         relevance[t, idx] = np.clip(bins, 0, 4)
@@ -424,6 +467,17 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
             ),
         },
     }
+    horizon_candidates = {int(h) for h in cfg.rank_policy_holding_candidates}
+    horizon_candidates.add(int(cfg.label_horizon_bars))
+    forward_return_by_horizon: dict[int, np.ndarray] = {}
+    for horizon_bars in sorted(horizon_candidates):
+        forward_return_by_horizon[horizon_bars] = build_forward_return_for_horizon(
+            aligned=aligned,
+            eligible_2d=eligible,
+            beta_2d=beta_2d,
+            horizon_bars=int(horizon_bars),
+            target_mode=cfg.calibrator_target,
+        )
     return LabelPanel(
         long_net_ret=long_net,
         short_net_ret=short_net,
@@ -447,5 +501,6 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         dynamic_cost_bps_2d=dynamic_cost_2d,
         beta_2d=beta_2d,
         market_fwd_ret=market_fwd_ret,
+        forward_return_by_horizon=forward_return_by_horizon,
         metadata=metadata,
     )

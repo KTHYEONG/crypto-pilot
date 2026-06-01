@@ -303,6 +303,13 @@ class StrategyMLConfig:
     rank_policy_weighting: Literal["equal", "zscore", "tanh"] = "tanh"
     rank_policy_holding_candidates: tuple[int, ...] = (12, 18)
     rank_policy_min_validation_obs: int = 120
+    rank_policy_selection_modes: tuple[Literal["tail", "soft_cs"], ...] = ("soft_cs", "tail")
+    rank_policy_target_breadth_min: int = 8
+    rank_policy_max_turnover: float = 1.25
+    rank_policy_max_abs_net_exposure: float = 0.05
+    rank_policy_max_abs_beta_exposure: float = 0.20
+    rank_policy_cost_source: Literal["dynamic", "static"] = "dynamic"
+    alpha_promotion_min_oos_folds: int = 2
     target_breadth: int = 8                      # minimum effective breadth target
     ic_lcb_z: float = 1.0
     ic_prior_for_gate: float = 0.03             # leak-free IC prior for portfolio net-edge gate
@@ -415,6 +422,22 @@ class StrategyMLConfig:
             raise ValueError("rank_policy_holding_candidates must contain positive integers")
         if self.rank_policy_min_validation_obs < 30:
             raise ValueError("rank_policy_min_validation_obs must be >= 30")
+        if len(self.rank_policy_selection_modes) == 0:
+            raise ValueError("rank_policy_selection_modes must be non-empty")
+        if any(m not in {"tail", "soft_cs"} for m in self.rank_policy_selection_modes):
+            raise ValueError("rank_policy_selection_modes must contain only tail|soft_cs")
+        if self.rank_policy_target_breadth_min < 2:
+            raise ValueError("rank_policy_target_breadth_min must be >= 2")
+        if self.rank_policy_max_turnover <= 0.0:
+            raise ValueError("rank_policy_max_turnover must be > 0")
+        if self.rank_policy_max_abs_net_exposure < 0.0:
+            raise ValueError("rank_policy_max_abs_net_exposure must be >= 0")
+        if self.rank_policy_max_abs_beta_exposure < 0.0:
+            raise ValueError("rank_policy_max_abs_beta_exposure must be >= 0")
+        if self.rank_policy_cost_source not in {"dynamic", "static"}:
+            raise ValueError("rank_policy_cost_source must be 'dynamic' or 'static'")
+        if self.alpha_promotion_min_oos_folds < 1:
+            raise ValueError("alpha_promotion_min_oos_folds must be >= 1")
         if self.target_breadth < 2:
             raise ValueError("target_breadth must be >= 2")
         if self.ic_lcb_z < 0.0:

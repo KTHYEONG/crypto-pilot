@@ -1205,7 +1205,34 @@ def _run_alpha_evaluation_report(
                 "validation_monotonicity", float("nan")
             )
         ),
+        policy_validation_turnover=float(
+            getattr(alpha_panel, "attrs", {}).get("rank_selection_policy", {}).get(
+                "validation_turnover", float("nan")
+            )
+        ),
+        policy_validation_cost_bps=float(
+            getattr(alpha_panel, "attrs", {}).get("rank_selection_policy", {}).get(
+                "validation_cost_bps", float("nan")
+            )
+        ),
+        policy_validation_breadth=float(
+            getattr(alpha_panel, "attrs", {}).get("rank_selection_policy", {}).get(
+                "validation_breadth", float("nan")
+            )
+        ),
+        policy_selection_mode=str(
+            getattr(alpha_panel, "attrs", {}).get(
+                "rank_policy_selection_mode",
+                getattr(alpha_panel, "attrs", {}).get("rank_selection_policy", {}).get(
+                    "selection_mode", ""
+                ),
+            )
+        ),
         policy_no_trade=bool(getattr(alpha_panel, "attrs", {}).get("rank_policy_no_trade", False)),
+        policy_min_breadth=float(getattr(_ml_cfg, "rank_policy_target_breadth_min", 8)),
+        policy_max_turnover=float(getattr(_ml_cfg, "rank_policy_max_turnover", 1.25)),
+        promotion_min_oos_folds=int(getattr(_ml_cfg, "alpha_promotion_min_oos_folds", 2)),
+        observed_oos_folds=int(_n_folds),
     )
 
     _policy_payload = getattr(alpha_panel, "attrs", {}).get("rank_selection_policy", {})
@@ -1229,6 +1256,17 @@ def _run_alpha_evaluation_report(
         float(_policy_payload.get("validation_net_lcb_bps", float("nan"))),
         float(_policy_payload.get("validation_ir_t", float("nan"))),
         float(_policy_payload.get("validation_monotonicity", float("nan"))),
+    )
+    _logger.info(
+        "[ALPHA-POLICY-PORT] mode=%s hold=%s breadth=%.2f turnover=%.2f cost=%.2f net_lcb=%.2f beta=%.4f net=%.4f",
+        str(_policy_payload.get("selection_mode", "")),
+        str(_policy_payload.get("holding_bars", "")),
+        float(_policy_payload.get("validation_breadth", float("nan"))),
+        float(_policy_payload.get("validation_turnover", float("nan"))),
+        float(_policy_payload.get("validation_cost_bps", float("nan"))),
+        float(_policy_payload.get("validation_net_lcb_bps", float("nan"))),
+        float(_policy_payload.get("validation_abs_beta_exposure", float("nan"))),
+        float(_policy_payload.get("validation_abs_net_exposure", float("nan"))),
     )
 
     # Compact Alpha Scoreboard (Phase 1: resid_ic / N_eff-based breakeven)
@@ -1461,6 +1499,7 @@ def _run_alpha_evaluation_report(
         ">> ALPHA_PASS: %s [%s]"
         " [IC_SKILL: resid_ic=%.4f be_eff=%.4f gap=%+.4f t=%.2f bear_ic=%.4f dsr=%.3f]"
         " [BASKET: gap_raw=%+.4f net_bps=%.1f ir_t=%.2f presv=%.2f sweep=%d/3%s]"
+        " [PROMOTION: stage=%s mode=%s breadth=%.2f turnover=%.2f cost=%.2f]"
         " [fail=%s blockers=%s]",
         str(bool(_alpha_verdict["alpha_pass"])).upper(),
         _gate_str,
@@ -1476,6 +1515,11 @@ def _run_alpha_evaluation_report(
         float(_alpha_verdict["clip_preservation_ratio"]),
         int(_alpha_verdict["sweep_pass_count"]),
         "" if not _alpha_verdict["policy_no_trade"] else " skipped=no-trade",
+        str(report.promotion_stage),
+        str(report.policy_selection_mode),
+        float(report.policy_validation_breadth),
+        float(report.policy_validation_turnover),
+        float(report.policy_validation_cost_bps),
         _alpha_verdict["fail_reasons"],
         _alpha_verdict["blocker_categories"],
     )
