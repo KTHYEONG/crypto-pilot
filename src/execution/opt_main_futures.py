@@ -1312,6 +1312,14 @@ def _run_alpha_evaluation_report(
         float(_policy_payload.get("validation_abs_beta_exposure", float("nan"))),
         float(_policy_payload.get("validation_abs_net_exposure", float("nan"))),
     )
+    _logger.info(
+        "[ALPHA-POLICY-BASKET] gross=%.2f net=%.2f ir=%.2f hit=%.3f strict_cost=%.2f",
+        float(_policy_payload.get("validation_basket_gross_bps", float("nan"))),
+        float(_policy_payload.get("validation_basket_net_bps", float("nan"))),
+        float(_policy_payload.get("validation_basket_ir_t", float("nan"))),
+        float(_policy_payload.get("validation_basket_hit", float("nan"))),
+        float(getattr(_ml_cfg, "rank_policy_strict_cost_floor_bps", 24.0)),
+    )
 
     # Compact Alpha Scoreboard (Phase 1: resid_ic / N_eff-based breakeven)
     def pass_emoji(condition: bool) -> str:
@@ -1392,73 +1400,27 @@ def _run_alpha_evaluation_report(
         )
         _logger.info("🔬 [DECILE-RET] %s", _decile_strs)
 
-    def _basket_spread_diag(
-        sig_long_2d: np.ndarray,
-        sig_short_2d: np.ndarray,
-        realized_2d: np.ndarray,
-        *,
-        cost_per_bar_bps: float = 24.0,
-    ) -> dict[str, Any]:
-        t_n = sig_long_2d.shape[0]
-        spreads_ew = np.full(t_n, np.nan, dtype=np.float64)
-        spreads_zw = np.full(t_n, np.nan, dtype=np.float64)
-        for _t in range(t_n):
-            sl = sig_long_2d[_t]
-            ss = sig_short_2d[_t]
-            rl = realized_2d[_t]
-            fin = np.isfinite(rl)
-            # equal-weighted (primary — no confound from z-score magnitude)
-            lmask = (sl > 0.0) & fin
-            smask = (ss > 0.0) & fin
-            if lmask.sum() > 0 and smask.sum() > 0:
-                spreads_ew[_t] = float(np.mean(rl[lmask])) - float(np.mean(rl[smask]))
-            # z-weighted (secondary — confound diagnostic only)
-            wl = np.where(sl > 0.0, sl, 0.0)
-            ws = np.where(ss > 0.0, ss, 0.0)
-            wl_sum = float(wl[fin].sum())
-            ws_sum = float(ws[fin].sum())
-            if wl_sum > 0.0 and ws_sum > 0.0:
-                spreads_zw[_t] = (
-                    float(np.dot(wl[fin], rl[fin]) / wl_sum)
-                    - float(np.dot(ws[fin], rl[fin]) / ws_sum)
-                )
-        valid_ew = spreads_ew[np.isfinite(spreads_ew)]
-        valid_zw = spreads_zw[np.isfinite(spreads_zw)]
-        if valid_ew.size < 2:
-            return {
-                "mean_bps": float("nan"), "net_bps": float("nan"),
-                "ir_t": float("nan"), "hit": float("nan"), "n": 0.0,
-                "mean_bps_zw": float("nan"), "ir_t_zw": float("nan"),
-                "spreads_ew": spreads_ew,
-            }
-        mean_ew = float(np.mean(valid_ew))
-        std_ew = float(np.std(valid_ew, ddof=1))
-        n_ew = float(valid_ew.size)
-        ir_t_ew = mean_ew / max(std_ew, 1e-12) * (n_ew ** 0.5)
-        mean_bps_ew = mean_ew * 1e4
-        mean_bps_zw: float = float("nan")
-        ir_t_zw: float = float("nan")
-        if valid_zw.size >= 2:
-            mean_zw = float(np.mean(valid_zw))
-            std_zw = float(np.std(valid_zw, ddof=1))
-            mean_bps_zw = mean_zw * 1e4
-            ir_t_zw = mean_zw / max(std_zw, 1e-12) * (valid_zw.size ** 0.5)
-        return {
-            "mean_bps": mean_bps_ew,
-            "net_bps": mean_bps_ew - cost_per_bar_bps,
-            "ir_t": ir_t_ew,
-            "hit": float(np.mean(valid_ew > 0.0)),
-            "n": n_ew,
-            "mean_bps_zw": mean_bps_zw,
-            "ir_t_zw": ir_t_zw,
-            "spreads_ew": spreads_ew,
-        }
-
     _policy_turnover = float(_policy_payload.get("validation_turnover", float("nan")))
     _basket_cost_per_bar = (
         _policy_turnover * 24.0 if np.isfinite(_policy_turnover) and _policy_turnover > 0.0 else 24.0
     )
-    _basket = _basket_spread_diag(al, as_, real_resid, cost_per_bar_bps=_basket_cost_per_bar)
+    from src.domain.futures.strategy.rank_selection import _equal_weight_basket_metrics
+    _weights_l3 = al.astype(np.float64) - as_.astype(np.float64)
+    _elig_l3 = np.isfinite(_weights_l3) & np.isfinite(real_resid)
+    _basket_eq = _equal_weight_basket_metrics(
+        weights=_weights_l3,
+        realized=real_resid,
+        eligible=_elig_l3,
+        cost_per_bar_bps=_basket_cost_per_bar,
+    )
+    _basket = {
+        "mean_bps": float(_basket_eq.get("validation_basket_gross_bps", float("nan"))),
+        "net_bps": float(_basket_eq.get("validation_basket_net_bps", float("nan"))),
+        "ir_t": float(_basket_eq.get("validation_basket_ir_t", float("nan"))),
+        "hit": float(_basket_eq.get("validation_basket_hit", float("nan"))),
+        "n": float(np.count_nonzero(np.isfinite(_weights_l3).any(axis=1))),
+        "mean_bps_zw": float("nan"),
+    }
     _logger.info(
         "🧺 [L3-BASKET] ew_bps=%.2f net_bps=%.2f ir_t=%.2f hit=%.3f n=%d"
         " | zw_bps=%.2f(confound) | RANK-IC C3=%.4f",
@@ -1517,16 +1479,26 @@ def _run_alpha_evaluation_report(
 
     # Bear-only basket 실측 계산
     bear_basket_net_bps = float("nan")
-    if btc_close_1d is not None and "spreads_ew" in _basket:
+    if btc_close_1d is not None:
         from src.domain.futures.strategy.alpha_evaluation import _compute_regime_labels
         _labels = _compute_regime_labels(btc_close_1d)
-        _clip_len = min(len(_labels), len(_basket["spreads_ew"]))
+        _spread_arr = np.full(len(_labels), np.nan, dtype=np.float64)
+        for _t in range(min(len(_labels), _weights_l3.shape[0])):
+            _w_row = _weights_l3[_t]
+            _r_row = real_resid[_t]
+            _mask = np.isfinite(_w_row) & np.isfinite(_r_row)
+            _lmask = _mask & (_w_row > 0.0)
+            _smask = _mask & (_w_row < 0.0)
+            if int(np.count_nonzero(_lmask)) < 1 or int(np.count_nonzero(_smask)) < 1:
+                continue
+            _spread_arr[_t] = float(np.mean(_r_row[_lmask]) - np.mean(_r_row[_smask]))
+        _clip_len = min(len(_labels), len(_spread_arr))
         _bear_indices = [
             t for t in range(_clip_len)
-            if _labels[t] == "bear" and np.isfinite(_basket["spreads_ew"][t])
+            if _labels[t] == "bear" and np.isfinite(_spread_arr[t])
         ]
         if len(_bear_indices) >= 5:
-            _bear_spreads = _basket["spreads_ew"][_bear_indices]
+            _bear_spreads = _spread_arr[_bear_indices]
             bear_basket_net_bps = float(np.mean(_bear_spreads)) * 1e4 - 24.0
 
     _alpha_verdict = _summarize_alpha_phase1_verdict(
