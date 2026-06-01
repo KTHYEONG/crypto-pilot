@@ -340,6 +340,37 @@ def test_summarize_exec_diag_verdict_passes_on_positive_execution_edge() -> None
     assert verdict["fail_reasons"] == []
 
 
+def test_summarize_exec_diag_verdict_keeps_negative_basket_fail_even_if_report_passes() -> None:
+    report = AlphaEvaluationReport(
+        net_ic=0.0300,
+        net_icir=0.0,
+        ic_t_stat_nw=3.1,
+        breakeven_ic=0.0100,
+        effective_breadth=5.0,
+        net_sharpe=float("nan"),
+        quantile_coverage=float("nan"),
+        q50_sign_hit=float("nan"),
+        per_regime_ic={"bull": 0.02, "bear": 0.01, "chop": 0.0},
+        per_regime_breakeven={"bull": 0.01, "bear": 0.01, "chop": 0.01},
+        deflated_sharpe=0.99,
+        cost_drag={},
+        passes=True,
+        fail_reasons=[],
+        resid_ic=0.03,
+        resid_t_stat_nw=3.1,
+        n_eff=12.0,
+        breakeven_ic_eff=0.01,
+        policy_validation_net_lcb_bps=3.0,
+        policy_validation_ir_t=2.2,
+    )
+    verdict = opt_main_futures._summarize_exec_diag_verdict(
+        report=report,
+        basket_net_bps=-0.5,
+    )
+    assert verdict["status"] == "FAIL"
+    assert "basket_net_returns_negative" in verdict["fail_reasons"]
+
+
 def test_summarize_alpha_phase1_verdict_maps_dsr_to_statistical_robustness() -> None:
     report = AlphaEvaluationReport(
         net_ic=0.01,
