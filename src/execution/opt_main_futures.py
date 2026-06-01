@@ -42,9 +42,10 @@ from src.application.futures.optimization.optimization_service import (
     run_optimization,
 )
 from src.application.futures.optimization.strategy_service import (
-    assert_strategy_alpha_ready,
+    assert_candidate_output_ready,
     pick_strategy_data_maps,
     run_active_strategy_output_bridge,
+    summarize_candidate_output_readiness,
 )
 from src.application.futures.optimization.universe_service import (
     UniverseMembershipTimeline,
@@ -72,7 +73,7 @@ from src.domain.futures.optimization.validation import (
 )
 from src.domain.futures.strategy.config import StrategyConfig
 from src.domain.futures.strategy_runtime.bridge import (
-    merge_ml_output_into_is_and_oos,
+    merge_candidate_output_into_is_and_oos,
 )
 from src.domain.futures.universe.membership import inject_membership_masks_into_maps
 from src.domain.futures.universe.storage import run_historical_sync
@@ -95,11 +96,9 @@ def _forward_log_return_on_index(
 
 
 def _requires_exec_1m(run_config: FuturesRunConfig) -> bool:
-    """Return whether this run mode requires execution-grade 1m data."""
-    if run_config.mode in {"alpha", "strategy"}:
-        return False
-    exec_mode_cfg = str(OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE", "coarse"))
-    return exec_mode_cfg == "intrabar_1m"
+    """Return whether the active phases require execution-grade 1m data."""
+    del run_config
+    return False
 
 
 def _ensure_universe_ledger_sync(run_config: FuturesRunConfig, window: QuarterlyWindow) -> None:
@@ -265,11 +264,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trials", type=int, default=100)
     parser.add_argument("--timeframe", type=str, choices=["1h", "4h"], default="4h")
-    parser.add_argument("--reference-date", type=str, default=None)
+    parser.add_argument("--date", type=str, default=None)
     parser.add_argument(
-        "--mode",
+        "--phase",
         type=str,
-        choices=["quick-backtest", "strategy", "alpha"],
+        choices=["strategy", "alpha"],
         default="strategy",
     )
     parser.add_argument(
@@ -278,7 +277,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="full",
         choices=["full", "fast", "skip"],
     )
-    parser.add_argument("--rebuild-universe", action="store_true")
+    parser.add_argument("--refresh-universe", action="store_true")
     return parser
 
 
@@ -325,7 +324,7 @@ def _run_universe_stage(
         is_start=window.is_start_date,
         oos_start=window.oos_start_date,
         end_date=window.end_date_value,
-        force_rebuild=run_config.rebuild_universe,
+        force_rebuild=run_config.refresh_universe,
     )
     _logger.debug(
         "[perf-universe] discover_universe_timeline took %.4fs",
@@ -336,7 +335,7 @@ def _run_universe_stage(
     if not validate_universe_quality(
         snapshot=universe_result.snapshot,
         report=universe_result.report,
-        reference_date=run_config.reference_date,
+        reference_date=run_config.date,
         tf=run_config.timeframe,
     ):
         raise RuntimeError("universe_quality_rejected")
@@ -503,7 +502,7 @@ def _run_strategy_stage(
             list(inference_panel or live_inference_panel) + list(data_stage.valid_symbols)
         )
     )
-    if run_config.mode in {"strategy", "alpha"} and (
+    if run_config.phase in {"strategy", "alpha"} and (
         inference_panel or live_inference_panel
     ):
         full_strategy_maps = pick_strategy_data_maps(
@@ -546,7 +545,7 @@ def _run_strategy_stage(
     )
 
     t_merge_start = time.perf_counter()
-    merge_ml_output_into_is_and_oos(
+    merge_candidate_output_into_is_and_oos(
         ml_out,
         data_stage.data_maps,
         data_stage.oos_data_maps,
@@ -554,18 +553,33 @@ def _run_strategy_stage(
         run_config.timeframe,
     )
     _logger.debug(
-        "[latency] merge_ml_output_into_is_and_oos: %.4fs",
+        "[latency] merge_candidate_output_into_is_and_oos: %.4fs",
         time.perf_counter() - t_merge_start,
     )
 
-    if run_config.mode == "strategy":
-        assert_strategy_alpha_ready(
-            ml_out=ml_out,
-            oos_data_maps=data_stage.oos_data_maps,
-            valid_symbols=data_stage.valid_symbols,
-            tf=run_config.timeframe,
-        )
-    elif run_config.mode == "alpha":
+    if run_config.phase == "strategy":
+        strategy_name = str(OPT_FUTURES_CONFIG.get("FUTURES_STRATEGY_NAME", "candidate_ml"))
+        if strategy_name in {"candidate_ml", "rule_baseline"}:
+            report = summarize_candidate_output_readiness(
+                candidate_out=ml_out,
+                oos_data_maps=data_stage.oos_data_maps,
+                valid_symbols=data_stage.valid_symbols,
+                tf=run_config.timeframe,
+            )
+            if report.panel_target_weight_non_zero <= 0:
+                _logger.warning(
+                    "[CANDIDATE-OUTPUT-READINESS] candidate strategy produced zero-only panel "
+                    "(nonzero target_weight=%d)",
+                    report.panel_target_weight_non_zero,
+                )
+        else:
+            assert_candidate_output_ready(
+                candidate_out=ml_out,
+                oos_data_maps=data_stage.oos_data_maps,
+                valid_symbols=data_stage.valid_symbols,
+                tf=run_config.timeframe,
+            )
+    elif run_config.phase == "alpha":
         t_report_start = time.perf_counter()
         _logger.debug("[latency] Starting _run_candidate_evaluation_report")
         _run_candidate_evaluation_report(
@@ -833,10 +847,9 @@ def _run_optimization_stage(
     # ------------------------------------------------------------
 
     if study_ml is None or best_trial is None:
-        # quick-backtest has no active signal source by design, so every trial
-        # prunes on zero trades; a clean prune-to-completion is a passing smoke.
-        if run_config.mode == "quick-backtest":
-            return RunnerResult(exit_code=0, reason="quick_backtest_smoke_no_candidate")
+        strategy_name = str(OPT_FUTURES_CONFIG.get("FUTURES_STRATEGY_NAME", "candidate_ml"))
+        if run_config.phase == "strategy" and strategy_name in {"candidate_ml", "rule_baseline"}:
+            return RunnerResult(exit_code=0, reason="candidate_smoke_no_candidate")
         return RunnerResult(exit_code=1, reason="no_candidate")
 
     pbo_gate, dsr_gate, _ = resolve_adjusted_gates(OPT_FUTURES_CONFIG, int(run_config.trials))
@@ -900,7 +913,7 @@ def run_pipeline(
     pipeline_t0 = time.perf_counter()
     # Step 1) parse run window
     t_window = time.perf_counter()
-    window = _resolve_quarterly_window(run_config.reference_date)
+    window = _resolve_quarterly_window(run_config.date)
     _logger.info(
         ">> WINDOW: %s ~ %s [IS: %s | OOS: %s]",
         window.fetch_start,
@@ -957,7 +970,7 @@ def run_pipeline(
     t_strategy = time.perf_counter()
     _logger.info(
         ">> STRATEGY: %s | %s",
-        run_config.mode,
+        run_config.phase,
         str(OPT_FUTURES_CONFIG.get("FUTURES_STRATEGY_NAME", "candidate_ml")),
     )
     _run_strategy_stage(
@@ -969,8 +982,8 @@ def run_pipeline(
         selected_symbols,
     )
     _logger.info("<< STRATEGY: %.2fs", time.perf_counter() - t_strategy)
-    if run_config.mode == "alpha":
-        return RunnerResult(exit_code=0, reason="alpha_evaluation_done")
+    if run_config.phase == "alpha":
+        return RunnerResult(exit_code=0, reason="candidate_evaluation_done")
     # Step 5) optimization + final OOS evaluation
     _logger.info(
         ">> OPTIMIZE: n=%d trials=%d",

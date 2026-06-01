@@ -1,11 +1,11 @@
-"""Diagnostic containers and reporting for alpha, cost, and risk forecasts."""
+"""Diagnostic containers and reporting for cost and risk forecasts."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import numpy as np
 
-from src.domain.futures.forecast.contracts import AlphaForecast, CostForecast, RiskForecast
+from src.domain.futures.forecast.contracts import CostForecast, RiskForecast
 
 
 @dataclass(frozen=True)
@@ -22,39 +22,6 @@ class LabelDiagnostics:
     cost_clearance_target: np.ndarray
     cost_clearance_target_long: np.ndarray
     cost_clearance_target_short: np.ndarray
-
-
-def alpha_diagnostics(af: AlphaForecast) -> dict[str, float]:
-    """Compute summary diagnostics for an AlphaForecast.
-
-    Args:
-        af: Typed alpha forecast.
-
-    Returns:
-        Dict of scalar diagnostic metrics.
-
-    """
-    al = np.asarray(af.alpha_long_2d, dtype=np.float64).ravel()
-    as_ = np.asarray(af.alpha_short_2d, dtype=np.float64).ravel()
-    total = max(al.size, 1)
-    al_fin = al[np.isfinite(al)]
-    as_fin = as_[np.isfinite(as_)]
-
-    diag: dict[str, float] = {
-        "alpha_long_nz_ratio": float(np.count_nonzero(np.abs(al) > 1e-12) / total),
-        "alpha_short_nz_ratio": float(np.count_nonzero(np.abs(as_) > 1e-12) / total),
-        "alpha_long_p50_bps": float(np.nanpercentile(al_fin, 50) * 1e4) if al_fin.size else 0.0,
-        "alpha_long_p95_bps": float(np.nanpercentile(al_fin, 95) * 1e4) if al_fin.size else 0.0,
-        "alpha_long_p99_bps": float(np.nanpercentile(al_fin, 99) * 1e4) if al_fin.size else 0.0,
-        "alpha_short_p50_bps": float(np.nanpercentile(as_fin, 50) * 1e4) if as_fin.size else 0.0,
-        "alpha_short_p95_bps": float(np.nanpercentile(as_fin, 95) * 1e4) if as_fin.size else 0.0,
-        "alpha_short_p99_bps": float(np.nanpercentile(as_fin, 99) * 1e4) if as_fin.size else 0.0,
-    }
-    if af.confidence_long_2d is not None:
-        diag["confidence_long_mean"] = float(np.nanmean(af.confidence_long_2d))
-    if af.confidence_short_2d is not None:
-        diag["confidence_short_mean"] = float(np.nanmean(af.confidence_short_2d))
-    return diag
 
 
 def cost_diagnostics(cf: CostForecast) -> dict[str, float]:

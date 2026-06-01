@@ -105,16 +105,16 @@ def test_build_candidate_target_weights_applies_kelly_and_caps() -> None:
     )
 
     assert target_weights.shape == (20, 2)
-    # decision timestamp is entry_idx - 1 = 9
-    assert target_weights[9, 0] < 0.0  # BTC short
-    assert target_weights[9, 1] > 0.0  # ETH long
+    # execution timestamp is entry_idx = 10
+    assert target_weights[10, 0] < 0.0  # BTC short
+    assert target_weights[10, 1] > 0.0  # ETH long
     
     # Check that caps are respected
     # gross cap = 1.2, net cap = 0.3, symbol cap = 0.15
-    assert abs(target_weights[9, 0]) <= 0.15
-    assert abs(target_weights[9, 1]) <= 0.15
-    assert np.sum(np.abs(target_weights[9])) <= 1.2
-    assert abs(np.sum(target_weights[9])) <= 0.3
+    assert abs(target_weights[10, 0]) <= 0.15
+    assert abs(target_weights[10, 1]) <= 0.15
+    assert np.sum(np.abs(target_weights[10])) <= 1.2
+    assert abs(np.sum(target_weights[10])) <= 0.3
 
 
 def test_build_candidate_alpha_panel_formats_correctly() -> None:
@@ -128,8 +128,8 @@ def test_build_candidate_alpha_panel_formats_correctly() -> None:
 
     target_weights_2d = np.array([
         [0.0, 0.0],
-        [-0.10, 0.12],  # t = 1 (entry_idx = 2? Here mock events has entry_idx = 10, so let's adjust entry_idx to 2)
         [0.0, 0.0],
+        [-0.10, 0.12],  # execution bar t = entry_idx = 2
     ])
     selected.loc[0, "entry_idx"] = 2
     selected.loc[1, "entry_idx"] = 2
@@ -153,9 +153,9 @@ def test_build_candidate_alpha_panel_formats_correctly() -> None:
     assert "alpha_long" in panel.columns
     assert "alpha_short" in panel.columns
 
-    # Check mapping at t = 1
-    btc_idx = (datetimes[1], "BTCUSDT")
-    eth_idx = (datetimes[1], "ETHUSDT")
+    # Check mapping at execution bar t = 2
+    btc_idx = (datetimes[2], "BTCUSDT")
+    eth_idx = (datetimes[2], "ETHUSDT")
 
     assert panel.loc[btc_idx, "alpha_short"] == 0.10
     assert panel.loc[btc_idx, "alpha_long"] == 0.0

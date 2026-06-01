@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from src.application.futures.optimization.config import build_run_config_from_args
-from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.execution import opt_main_futures
 
 
@@ -15,11 +14,10 @@ def test_strategy_mode_pipeline_orchestration_order(
 ) -> None:
     run_config = build_run_config_from_args(
         {
-            "mode": "strategy",
-            "symbols": ("BTCUSDT",),
-            "tf": "4h",
+            "phase": "strategy",
+            "timeframe": "4h",
             "trials": 1,
-            "sync_mode": "full_history_master",
+            "sync": "full",
         }
     )
     called: list[str] = []
@@ -134,10 +132,10 @@ def test_alpha_mode_skips_optimization_stage(
     """Alpha 모드는 strategy bridge 후 optimization 없이 종료해야 한다."""
     run_config = build_run_config_from_args(
         {
-            "mode": "alpha",
-            "tf": "4h",
+            "phase": "alpha",
+            "timeframe": "4h",
             "trials": 1,
-            "sync_mode": "full_history_master",
+            "sync": "full",
         }
     )
     window = opt_main_futures.QuarterlyWindow(
@@ -177,14 +175,14 @@ def test_alpha_mode_skips_optimization_stage(
     monkeypatch.setattr(opt_main_futures, "_run_optimization_stage", fail_if_called)
     result = opt_main_futures.run_pipeline(run_config)
     assert result.exit_code == 0
-    assert result.reason == "alpha_evaluation_done"
+    assert result.reason == "candidate_evaluation_done"
 
 
 def test_run_from_cli_when_pipeline_returns_nonzero_propagates_exit_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Arrange
-    argv = ["--mode", "strategy"]
+    argv = ["--phase", "strategy"]
     monkeypatch.setattr(
         opt_main_futures,
         "run_pipeline",
@@ -202,7 +200,7 @@ def test_run_from_cli_when_pipeline_raises_runtime_error_returns_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Arrange
-    argv = ["--mode", "strategy"]
+    argv = ["--phase", "strategy"]
 
     def _raise_runtime_error(*_args: object, **_kwargs: object) -> opt_main_futures.RunnerResult:
         raise RuntimeError("boom")
@@ -219,37 +217,34 @@ def test_run_from_cli_when_pipeline_raises_runtime_error_returns_one(
 def test_requires_exec_1m_returns_false_for_alpha_mode() -> None:
     run_config = build_run_config_from_args(
         {
-            "mode": "alpha",
-            "symbols": ("BTCUSDT",),
-            "tf": "4h",
+            "phase": "alpha",
+            "timeframe": "4h",
             "trials": 1,
-            "sync_mode": "full_history_master",
+            "sync": "full",
         }
     )
     assert opt_main_futures._requires_exec_1m(run_config) is False
-def test_requires_exec_1m_respects_intrabar_config_for_quick_backtest(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+
+
+def test_requires_exec_1m_returns_false_for_strategy_phase() -> None:
     run_config = build_run_config_from_args(
         {
-            "mode": "quick-backtest",
-            "symbols": ("BTCUSDT",),
-            "tf": "4h",
+            "phase": "strategy",
+            "timeframe": "4h",
             "trials": 1,
-            "sync_mode": "full_history_master",
+            "sync": "full",
         }
     )
-    monkeypatch.setitem(OPT_FUTURES_CONFIG, "FUTURES_EXECUTION_MODE", "intrabar_1m")
-    assert opt_main_futures._requires_exec_1m(run_config) is True
+    assert opt_main_futures._requires_exec_1m(run_config) is False
 
 
 def test_resolve_data_collection_symbols_uses_inference_panel() -> None:
     run_config = build_run_config_from_args(
         {
-            "mode": "strategy",
-            "tf": "4h",
+            "phase": "strategy",
+            "timeframe": "4h",
             "trials": 1,
-            "sync_mode": "full_history_master",
+            "sync": "full",
         }
     )
     out = opt_main_futures._resolve_data_collection_symbols(
@@ -268,10 +263,10 @@ def test_ensure_universe_ledger_sync_always_passes_none_symbols(
 ) -> None:
     run_config = build_run_config_from_args(
         {
-            "mode": "strategy",
-            "tf": "4h",
+            "phase": "strategy",
+            "timeframe": "4h",
             "trials": 1,
-            "sync_mode": "full_history_master",
+            "sync": "full",
         }
     )
     window = opt_main_futures.QuarterlyWindow(
@@ -302,10 +297,10 @@ def test_ensure_cached_symbol_data_uses_fetch_start_for_backfill(
 ) -> None:
     run_config = build_run_config_from_args(
         {
-            "mode": "strategy",
-            "tf": "4h",
+            "phase": "strategy",
+            "timeframe": "4h",
             "trials": 1,
-            "sync_mode": "full_history_master",
+            "sync": "full",
         }
     )
     window = opt_main_futures.QuarterlyWindow(
