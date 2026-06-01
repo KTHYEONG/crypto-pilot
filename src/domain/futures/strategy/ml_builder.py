@@ -68,7 +68,8 @@ from src.domain.futures.strategy.labels import build_label_panel
 from src.domain.futures.strategy.rank_selection import (
     RankSelectionPolicy,
     apply_rank_selection_policy,
-    calibrate_rank_selection_policy,
+    calibrate_rank_portfolio_policy,
+    policy_from_dict,
     policy_is_no_trade,
     policy_to_dict,
 )
@@ -1133,17 +1134,42 @@ def build_ml_strategy_alpha(
             hold = int(ml_cfg.label_horizon_bars)
             if hold not in h_candidates and len(h_candidates) > 0:
                 hold = int(h_candidates[0])
-            policy = calibrate_rank_selection_policy(
+            realized_by_horizon = {
+                int(h): labels.forward_return_by_horizon[int(h)].astype(np.float64)
+                for h in h_candidates
+                if labels.forward_return_by_horizon is not None
+                and int(h) in labels.forward_return_by_horizon
+            }
+            if hold not in realized_by_horizon:
+                realized_by_horizon[hold] = labels.exec_net_ret.astype(np.float64)
+            dynamic_cost = (
+                labels.dynamic_cost_bps_2d.astype(np.float64)
+                if (
+                    ml_cfg.rank_policy_cost_source == "dynamic"
+                    and labels.dynamic_cost_bps_2d is not None
+                )
+                else None
+            )
+            policy = calibrate_rank_portfolio_policy(
                 signed_score_2d=valid_signed,
-                realized_fwd_ret_2d=labels.exec_net_ret.astype(np.float64),
+                realized_fwd_ret_by_horizon=realized_by_horizon,
                 eligible_2d=labels.eligible_mask.astype(bool),
+                execution_cost_bps_2d=dynamic_cost,
+                beta_2d=(
+                    labels.beta_2d.astype(np.float64) if labels.beta_2d is not None else None
+                ),
                 quantiles=tuple(float(q) for q in ml_cfg.rank_policy_quantiles),
                 min_abs_z_grid=tuple(float(z) for z in ml_cfg.rank_policy_min_abs_z_grid),
-                holding_bars=hold,
-                cost_bps=24.0,
+                holding_bars_candidates=h_candidates,
+                selection_modes=tuple(ml_cfg.rank_policy_selection_modes),
+                cost_bps_fallback=24.0,
                 min_obs=int(ml_cfg.rank_policy_min_validation_obs),
                 weight_k=float(ml_cfg.alpha_emit_weight_k),
                 weighting=ml_cfg.rank_policy_weighting,
+                target_breadth_min=int(ml_cfg.rank_policy_target_breadth_min),
+                max_turnover=float(ml_cfg.rank_policy_max_turnover),
+                max_abs_net_exposure=float(ml_cfg.rank_policy_max_abs_net_exposure),
+                max_abs_beta_exposure=float(ml_cfg.rank_policy_max_abs_beta_exposure),
             )
             fold_policy_masks.append(
                 (
@@ -1157,8 +1183,12 @@ def build_ml_strategy_alpha(
             pol_dict["fold_id"] = int(fold_id)
             rank_policies_by_fold.append(pol_dict)
             _logger.info(
-                "[RANK-POLICY] fold=%d polarity=%d q=%.2f floor=%.2f hold=%d val_lcb=%.2f val_ir=%.2f mono=%.2f",
+                (
+                    "[RANK-POLICY] fold=%d mode=%s polarity=%d q=%.2f floor=%.2f hold=%d "
+                    "val_lcb=%.2f val_ir=%.2f mono=%.2f breadth=%.2f turnover=%.2f cost=%.2f"
+                ),
                 int(fold_id),
+                str(policy.selection_mode),
                 int(policy.polarity),
                 float(policy.quantile),
                 float(policy.min_abs_z),
@@ -1166,6 +1196,9 @@ def build_ml_strategy_alpha(
                 float(policy.validation_net_lcb_bps),
                 float(policy.validation_ir_t),
                 float(policy.validation_monotonicity),
+                float(policy.validation_breadth),
+                float(policy.validation_turnover),
+                float(policy.validation_cost_bps),
             )
 
         if not is_virtual:
@@ -1233,6 +1266,7 @@ def build_ml_strategy_alpha(
                     signed_score_2d=signed_all,
                     eligible_2d=eligible_2d & apply_mask,
                     policy=policy,
+                    beta_2d=(labels.beta_2d.astype(np.float64) if labels.beta_2d is not None else None),
                 )
                 alpha_long_final = np.maximum(alpha_long_final, pol_long)
                 alpha_short_final = np.maximum(alpha_short_final, pol_short)
@@ -1242,19 +1276,7 @@ def build_ml_strategy_alpha(
                     key=lambda p: float(p["validation_net_lcb_bps"]),
                     reverse=True,
                 )[0]
-                live_policy = RankSelectionPolicy(
-                    polarity=int(aggregate_policy["polarity"]),  # type: ignore[arg-type]
-                    quantile=float(aggregate_policy["quantile"]),
-                    min_abs_z=float(aggregate_policy["min_abs_z"]),
-                    weighting=str(aggregate_policy["weighting"]),  # type: ignore[arg-type]
-                    weight_k=float(aggregate_policy["weight_k"]),
-                    holding_bars=int(aggregate_policy["holding_bars"]),
-                    validation_net_lcb_bps=float(aggregate_policy["validation_net_lcb_bps"]),
-                    validation_gross_bps=float(aggregate_policy["validation_gross_bps"]),
-                    validation_ir_t=float(aggregate_policy["validation_ir_t"]),
-                    validation_monotonicity=float(aggregate_policy["validation_monotonicity"]),
-                    n_obs=int(aggregate_policy["n_obs"]),
-                )
+                live_policy = policy_from_dict(aggregate_policy)
                 vmask = np.zeros_like(eligible_2d, dtype=bool)
                 for t_idx, s_idx in np.asarray(results[-1]["test_long_index_map"]):
                     vmask[int(t_idx), int(s_idx)] = True
@@ -1264,6 +1286,7 @@ def build_ml_strategy_alpha(
                     signed_score_2d=signed_all,
                     eligible_2d=eligible_2d & vmask,
                     policy=live_policy,
+                    beta_2d=(labels.beta_2d.astype(np.float64) if labels.beta_2d is not None else None),
                 )
                 alpha_long_final = np.maximum(alpha_long_final, pol_long_v)
                 alpha_short_final = np.maximum(alpha_short_final, pol_short_v)
@@ -1337,6 +1360,12 @@ def build_ml_strategy_alpha(
         panel.attrs["rank_selection_policy"] = dict(panel_policy_summary)
         panel.attrs["rank_selection_policy_by_fold"] = list(rank_policies_by_fold)
         panel.attrs["rank_policy_no_trade"] = bool(rank_policy_no_trade)
+        panel.attrs["rank_policy_selection_mode"] = str(
+            panel_policy_summary.get("selection_mode", "tail")
+        )
+        panel.attrs["rank_policy_target_breadth_min"] = int(
+            ml_cfg.rank_policy_target_breadth_min
+        )
         if rank_policy_no_trade:
             panel.attrs["rank_policy_failure_reason"] = "validation_net_lcb_non_positive"
     panel.attrs["strategy_name"] = cfg.name
@@ -2125,17 +2154,41 @@ def build_ml_strategy_alpha_anchored(
             hold_awf = int(ml_cfg.label_horizon_bars)
             if hold_awf not in tuple(int(h) for h in ml_cfg.rank_policy_holding_candidates):
                 hold_awf = int(ml_cfg.rank_policy_holding_candidates[0])
-            awf_policy = calibrate_rank_selection_policy(
+            _awf_h_candidates = tuple(int(h) for h in ml_cfg.rank_policy_holding_candidates)
+            _awf_realized_by_horizon = {
+                int(h): labels.forward_return_by_horizon[int(h)].astype(np.float64)
+                for h in _awf_h_candidates
+                if labels.forward_return_by_horizon is not None
+                and int(h) in labels.forward_return_by_horizon
+            }
+            if hold_awf not in _awf_realized_by_horizon:
+                _awf_realized_by_horizon[hold_awf] = labels.exec_net_ret.astype(np.float64)
+            _awf_dynamic_cost = (
+                labels.dynamic_cost_bps_2d.astype(np.float64)
+                if (
+                    ml_cfg.rank_policy_cost_source == "dynamic"
+                    and labels.dynamic_cost_bps_2d is not None
+                )
+                else None
+            )
+            awf_policy = calibrate_rank_portfolio_policy(
                 signed_score_2d=valid_signed_awf,
-                realized_fwd_ret_2d=labels.exec_net_ret.astype(np.float64),
+                realized_fwd_ret_by_horizon=_awf_realized_by_horizon,
                 eligible_2d=labels.eligible_mask.astype(bool),
+                execution_cost_bps_2d=_awf_dynamic_cost,
+                beta_2d=(labels.beta_2d.astype(np.float64) if labels.beta_2d is not None else None),
                 quantiles=tuple(float(q) for q in ml_cfg.rank_policy_quantiles),
                 min_abs_z_grid=tuple(float(z) for z in ml_cfg.rank_policy_min_abs_z_grid),
-                holding_bars=hold_awf,
-                cost_bps=24.0,
+                holding_bars_candidates=_awf_h_candidates,
+                selection_modes=tuple(ml_cfg.rank_policy_selection_modes),
+                cost_bps_fallback=24.0,
                 min_obs=int(ml_cfg.rank_policy_min_validation_obs),
                 weight_k=float(ml_cfg.alpha_emit_weight_k),
                 weighting=ml_cfg.rank_policy_weighting,
+                target_breadth_min=int(ml_cfg.rank_policy_target_breadth_min),
+                max_turnover=float(ml_cfg.rank_policy_max_turnover),
+                max_abs_net_exposure=float(ml_cfg.rank_policy_max_abs_net_exposure),
+                max_abs_beta_exposure=float(ml_cfg.rank_policy_max_abs_beta_exposure),
             )
             awf_signed = derive_signed_rank_signal(
                 rank_score_long_grid_awf.astype(np.float64),
@@ -2145,6 +2198,7 @@ def build_ml_strategy_alpha_anchored(
                 signed_score_2d=awf_signed,
                 eligible_2d=eligible_2d_awf,
                 policy=awf_policy,
+                beta_2d=(labels.beta_2d.astype(np.float64) if labels.beta_2d is not None else None),
             )
         else:
             alpha_long_final_awf, alpha_short_final_awf = _emit_rank_sized_alpha(
