@@ -133,3 +133,49 @@ def test_policy_is_no_trade_true_when_validation_lcb_non_positive() -> None:
         n_obs=100,
     )
     assert policy_is_no_trade(policy) is True
+
+
+def test_alpha6_features() -> None:
+    from typing import Any, cast
+
+    from src.domain.futures.strategy.rank_selection import (
+        _compute_rolling_vol,
+        _dema_2d,
+        _ema_dema_adaptive_2d,
+        _soft_beta_neutralize,
+    )
+    from src.domain.futures.strategy.ranker import RankerFitResult, predict_rank_score
+
+    # 1. DEMA smoothing
+    arr = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=np.float64)
+    dema_res = _dema_2d(arr, span=12)
+    assert dema_res.shape == arr.shape
+
+    # 2. Adaptive Volatility & Smoothing
+    vol = _compute_rolling_vol(arr, window=3)
+    assert vol.shape == (3,)
+    adaptive_res = _ema_dema_adaptive_2d(arr, base_span=12, vol=vol, method="dema")
+    assert adaptive_res.shape == arr.shape
+
+    # 3. Soft Beta Neutralize
+    w = np.array([0.5, -0.5], dtype=np.float64)
+    beta = np.array([1.2, 0.8], dtype=np.float64)
+    w_neut = _soft_beta_neutralize(w, beta, target_weight=0.5)
+    assert w_neut.shape == (2,)
+
+    # 4. Hybrid prediction
+    class DummyModel:
+        def predict(self, x: Any) -> np.ndarray:
+            return np.ones(x.shape[0], dtype=np.float64)
+
+    dummy_fit = RankerFitResult(
+        model=cast(Any, DummyModel()),
+        models=cast(Any, [DummyModel()]),
+        regressor_model=cast(Any, DummyModel()),
+        regressor_models=cast(Any, [DummyModel()]),
+        hybrid_blending_enabled=True,
+        hybrid_rank_weight=0.5,
+    )
+    dataset = _dataset(rows=4, groups=2, features=3)
+    score = predict_rank_score(dummy_fit, dataset)
+    assert score.shape == (4,)
