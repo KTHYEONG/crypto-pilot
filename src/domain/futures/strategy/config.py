@@ -253,6 +253,16 @@ class StrategyMLConfig:
     require_rank_policy_positive_lcb_for_emit: bool = True
     ev_tail_blend_weight: float = 0.0
     alpha_emit_mode: str = "rank_sized"   # keep for compatibility
+    
+    # alpha6 개선 파라미터
+    multi_horizon_ensembling: bool = False
+    ensemble_horizons: tuple[int, ...] = (6, 12, 18)
+    hybrid_blending_enabled: bool = False
+    hybrid_rank_weight: float = 0.75
+    smoothing_method: Literal["ema", "dema"] = "dema"
+    adaptive_smoothing: bool = False
+    soft_beta_neutralize: bool = True
+    soft_beta_neutralize_weight: float = 0.40
     alpha_emit_select_q: float = 0.35
     alpha_emit_weight_k: float = 3.0      # tanh rank-weight steepness
     feature_groups_enabled: tuple[
