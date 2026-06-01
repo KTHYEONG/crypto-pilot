@@ -288,9 +288,9 @@ def _emit_rank_sized_alpha(
     return al.astype(np.float32, copy=False), as_.astype(np.float32, copy=False)
 
 
-def _train_predict_single_fold(
+def _train_predict_single_fold_for_horizon(
     fold: FoldSpec,
-    features: FeaturePanel,
+    normalized_features: FeaturePanel,
     labels: LabelPanel,
     ml_cfg: StrategyMLConfig,
     long_rank_target: np.ndarray | None,
@@ -300,42 +300,7 @@ def _train_predict_single_fold(
     long_mag: np.ndarray,
     short_mag: np.ndarray,
 ) -> dict[str, Any]:
-    """Train and predict a single walk-forward or virtual fold in parallel-safe manner."""
-    t_start = time.perf_counter()
-    fold_id = fold.fold_id
-
-    # 1. Feature normalization and imputation on fold slices
-    t_slice = time.perf_counter()
-    train_values = features.values[fold.train_start : fold.train_end].astype(
-        np.float64, copy=False
-    )
-    bounds = fit_robust_bounds(train_values, clip_quantile=0.995)
-    clipped_values = apply_robust_bounds(features.values.astype(np.float64, copy=False), bounds)
-    imputer = fit_missing_value_imputer(train_values)
-    normalized = apply_missing_value_imputer(clipped_values, imputer).astype(
-        np.float32, copy=False
-    )
-    normalized_features = FeaturePanel(
-        datetimes=features.datetimes,
-        symbols=features.symbols,
-        values=normalized,
-        feature_names=features.feature_names,
-        valid_mask=features.valid_mask,
-        availability_masks=features.availability_masks,
-        metadata={
-            **features.metadata,
-            "train_imputer_applied": True,
-            "missing_imputer": "train_median",
-        },
-    )
-    _logger.debug(
-        "[perf-ml-fold] [Fold %d] data slicing and robust scaling took %.4fs",
-        fold_id,
-        time.perf_counter() - t_slice,
-    )
-
-    # 2. Build Side Matrices
-    t_matrices = time.perf_counter()
+    """Helper to train and predict a fold for a specific horizon."""
     train_long = _build_side_matrix(
         features=normalized_features,
         labels=labels,
@@ -415,14 +380,7 @@ def _train_predict_single_fold(
     validate_long_matrix(train_short)
     validate_long_matrix(valid_short)
     validate_long_matrix(test_short)
-    _logger.debug(
-        "[perf-ml-fold] [Fold %d] side matrix build took %.4fs",
-        fold_id,
-        time.perf_counter() - t_matrices,
-    )
 
-    # 3. Model training & prediction
-    t_fit_predict = time.perf_counter()
     _fold_result = _fit_predict_fold_dual_side(
         train_long=train_long,
         valid_long=valid_long,
@@ -432,19 +390,8 @@ def _train_predict_single_fold(
         test_short=test_short,
         ml_cfg=ml_cfg,
     )
-    _logger.debug(
-        "[perf-ml-fold] [Fold %d] _fit_predict_fold_dual_side took %.4fs",
-        fold_id,
-        time.perf_counter() - t_fit_predict,
-    )
-    _logger.debug(
-        "[perf-ml-fold] [Fold %d] total run took %.4fs",
-        fold_id,
-        time.perf_counter() - t_start,
-    )
 
     return {
-        "fold_id": fold.fold_id,
         "test_long_index_map": test_long.index_map,
         "test_short_index_map": test_short.index_map,
         "valid_long_index_map": valid_long.index_map,
@@ -465,6 +412,165 @@ def _train_predict_single_fold(
         "train_long_shape_0": train_long.X.shape[0],
         "valid_long_shape_0": valid_long.X.shape[0],
     }
+
+
+def _train_predict_single_fold(
+    fold: FoldSpec,
+    features: FeaturePanel,
+    labels: LabelPanel,
+    ml_cfg: StrategyMLConfig,
+    long_rank_target: np.ndarray | None,
+    short_rank_target: np.ndarray | None,
+    long_rel: np.ndarray,
+    short_rel: np.ndarray,
+    long_mag: np.ndarray,
+    short_mag: np.ndarray,
+    aligned: Any | None = None,
+) -> dict[str, Any]:
+    """Train and predict a single walk-forward or virtual fold in parallel-safe manner."""
+    t_start = time.perf_counter()
+    fold_id = fold.fold_id
+
+    # 1. Feature normalization and imputation on fold slices
+    t_slice = time.perf_counter()
+    train_values = features.values[fold.train_start : fold.train_end].astype(
+        np.float64, copy=False
+    )
+    bounds = fit_robust_bounds(train_values, clip_quantile=0.995)
+    clipped_values = apply_robust_bounds(features.values.astype(np.float64, copy=False), bounds)
+    imputer = fit_missing_value_imputer(train_values)
+    normalized = apply_missing_value_imputer(clipped_values, imputer).astype(
+        np.float32, copy=False
+    )
+    normalized_features = FeaturePanel(
+        datetimes=features.datetimes,
+        symbols=features.symbols,
+        values=normalized,
+        feature_names=features.feature_names,
+        valid_mask=features.valid_mask,
+        availability_masks=features.availability_masks,
+        metadata={
+            **features.metadata,
+            "train_imputer_applied": True,
+            "missing_imputer": "train_median",
+        },
+    )
+    _logger.debug(
+        "[perf-ml-fold] [Fold %d] data slicing and robust scaling took %.4fs",
+        fold_id,
+        time.perf_counter() - t_slice,
+    )
+
+    if getattr(ml_cfg, "multi_horizon_ensembling", False) and aligned is not None:
+        from src.domain.futures.strategy.labels import build_label_panel
+        horizons = ml_cfg.ensemble_horizons
+        ev_test_long_list = []
+        ev_test_short_list = []
+        quant_test_long_list = []
+        quant_test_short_list = []
+        score_test_long_list = []
+        score_test_short_list = []
+        ev_valid_long_list = []
+        ev_valid_short_list = []
+        score_valid_long_list = []
+        score_valid_short_list = []
+
+        last_res: dict[str, Any] = {}
+        for h in horizons:
+            h_cfg = replace(
+                ml_cfg,
+                label_horizon_bars=h,
+                purge_bars=max(int(ml_cfg.purge_bars), h),
+                embargo_bars=max(int(ml_cfg.embargo_bars), h),
+            )
+            h_labels = build_label_panel(aligned, h_cfg)
+            (
+                h_long_rank_target,
+                h_short_rank_target,
+                h_long_rel,
+                h_short_rel,
+                h_long_mag,
+                h_short_mag,
+            ) = _resolve_side_targets(h_labels, h_cfg)
+
+            h_res = _train_predict_single_fold_for_horizon(
+                fold=fold,
+                normalized_features=normalized_features,
+                labels=h_labels,
+                ml_cfg=h_cfg,
+                long_rank_target=h_long_rank_target,
+                short_rank_target=h_short_rank_target,
+                long_rel=h_long_rel,
+                short_rel=h_short_rel,
+                long_mag=h_long_mag,
+                short_mag=h_short_mag,
+            )
+            last_res = h_res
+            ev_test_long_list.append(h_res["ev_test_long"])
+            ev_test_short_list.append(h_res["ev_test_short"])
+            quant_test_long_list.append(h_res["quant_test_long"])
+            quant_test_short_list.append(h_res["quant_test_short"])
+            score_test_long_list.append(h_res["score_test_long"])
+            score_test_short_list.append(h_res["score_test_short"])
+            ev_valid_long_list.append(h_res["ev_valid_long"])
+            ev_valid_short_list.append(h_res["ev_valid_short"])
+            score_valid_long_list.append(h_res["score_valid_long"])
+            score_valid_short_list.append(h_res["score_valid_short"])
+
+        min_test_len = min(arr.shape[0] for arr in ev_test_long_list)
+        min_valid_len = min(arr.shape[0] for arr in ev_valid_long_list)
+
+        res = {
+            "fold_id": fold.fold_id,
+            "test_long_index_map": last_res["test_long_index_map"][:min_test_len],
+            "test_short_index_map": last_res["test_short_index_map"][:min_test_len],
+            "valid_long_index_map": last_res["valid_long_index_map"][:min_valid_len],
+            "valid_short_index_map": last_res["valid_short_index_map"][:min_valid_len],
+            "ev_test_long": np.mean([arr[:min_test_len] for arr in ev_test_long_list], axis=0),
+            "ev_test_short": np.mean([arr[:min_test_len] for arr in ev_test_short_list], axis=0),
+            "quant_test_long": EVQuantiles(
+                q10=np.mean([q.q10[:min_test_len] for q in quant_test_long_list], axis=0),
+                q50=np.mean([q.q50[:min_test_len] for q in quant_test_long_list], axis=0),
+                q90=np.mean([q.q90[:min_test_len] for q in quant_test_long_list], axis=0),
+            ),
+            "quant_test_short": EVQuantiles(
+                q10=np.mean([q.q10[:min_test_len] for q in quant_test_short_list], axis=0),
+                q50=np.mean([q.q50[:min_test_len] for q in quant_test_short_list], axis=0),
+                q90=np.mean([q.q90[:min_test_len] for q in quant_test_short_list], axis=0),
+            ),
+            "conf_test_long": last_res["conf_test_long"][:min_test_len],
+            "conf_test_short": last_res["conf_test_short"][:min_test_len],
+            "score_test_long": np.mean([arr[:min_test_len] for arr in score_test_long_list], axis=0),
+            "score_test_short": np.mean([arr[:min_test_len] for arr in score_test_short_list], axis=0),
+            "ev_valid_long": np.mean([arr[:min_valid_len] for arr in ev_valid_long_list], axis=0),
+            "ev_valid_short": np.mean([arr[:min_valid_len] for arr in ev_valid_short_list], axis=0),
+            "score_valid_long": np.mean([arr[:min_valid_len] for arr in score_valid_long_list], axis=0),
+            "score_valid_short": np.mean([arr[:min_valid_len] for arr in score_valid_short_list], axis=0),
+            "test_long_shape_0": min_test_len,
+            "train_long_shape_0": last_res["train_long_shape_0"],
+            "valid_long_shape_0": min_valid_len,
+        }
+    else:
+        res = _train_predict_single_fold_for_horizon(
+            fold=fold,
+            normalized_features=normalized_features,
+            labels=labels,
+            ml_cfg=ml_cfg,
+            long_rank_target=long_rank_target,
+            short_rank_target=short_rank_target,
+            long_rel=long_rel,
+            short_rel=short_rel,
+            long_mag=long_mag,
+            short_mag=short_mag,
+        )
+        res["fold_id"] = fold.fold_id
+
+    _logger.debug(
+        "[perf-ml-fold] [Fold %d] total run took %.4fs",
+        fold_id,
+        time.perf_counter() - t_start,
+    )
+    return res
 
 
 def _fit_predict_fold_dual_side(
@@ -1035,6 +1141,7 @@ def build_ml_strategy_alpha(
                 short_rel=short_rel,
                 long_mag=long_mag,
                 short_mag=short_mag,
+                aligned=aligned,
             )
             for fold in all_folds
         )
@@ -1051,6 +1158,7 @@ def build_ml_strategy_alpha(
                 short_rel=short_rel,
                 long_mag=long_mag,
                 short_mag=short_mag,
+                aligned=aligned,
             )
             for fold in all_folds
         ]
