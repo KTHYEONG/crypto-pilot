@@ -89,16 +89,20 @@ def _score_monotonicity(
     realized_2d: NDArray[np.float64],
     eligible_2d: NDArray[np.bool_],
 ) -> float:
+    """Compute cross-sectional rank score monotonicity using de-meaned returns to avoid pooled beta bias."""
     bucket_scores: list[float] = []
     bucket_rets: list[float] = []
     for t in range(score_2d.shape[0]):
         score = score_2d[t]
         ret = realized_2d[t]
         mask = eligible_2d[t] & np.isfinite(score) & np.isfinite(ret)
-        if int(np.count_nonzero(mask)) < 10:
+        n_ok = int(np.count_nonzero(mask))
+        if n_ok < 10:
             continue
         s = score[mask]
-        r = ret[mask]
+        # Cross-sectionally de-mean to isolate rank edge from market return
+        r = (ret[mask] - np.mean(ret[mask])) * 1e4
+        
         edges = np.quantile(s, [0.2, 0.4, 0.6, 0.8])
         bins = np.digitize(s, edges, right=True)
         for b in range(5):
@@ -106,11 +110,41 @@ def _score_monotonicity(
             if int(np.count_nonzero(bmask)) < 2:
                 continue
             bucket_scores.append(float(np.mean(s[bmask])))
-            bucket_rets.append(float(np.mean(r[bmask])) * 1e4)
+            bucket_rets.append(float(np.mean(r[bmask])))
+            
     if len(bucket_scores) < 5:
         return float("nan")
     rho = scipy.stats.spearmanr(np.asarray(bucket_scores), np.asarray(bucket_rets)).statistic
     return float(rho) if np.isfinite(rho) else float("nan")
+
+POLARITY_LONG: Literal[1] = 1
+
+
+def _ema_2d(arr: NDArray[np.float64], span: int) -> NDArray[np.float64]:
+    """Compute rolling Exponential Moving Average along axis 0 (time) with NaNs preservation."""
+    if span <= 1 or arr.shape[0] == 0:
+        return arr
+    alpha = 2.0 / (span + 1.0)
+    out = np.full_like(arr, np.nan)
+    
+    last_val = np.zeros(arr.shape[1], dtype=np.float64)
+    initialized = np.zeros(arr.shape[1], dtype=bool)
+    
+    for t in range(arr.shape[0]):
+        val = arr[t]
+        mask = np.isfinite(val)
+        
+        # Update where already initialized
+        to_update = mask & initialized
+        last_val[to_update] = (1.0 - alpha) * last_val[to_update] + alpha * val[to_update]
+        
+        # Initialize where first valid
+        to_init = mask & ~initialized
+        last_val[to_init] = val[to_init]
+        initialized[to_init] = True
+        
+        out[t, initialized] = last_val[initialized]
+    return out
 
 
 def build_signed_rank_weights(
@@ -123,9 +157,13 @@ def build_signed_rank_weights(
     max_abs_net_exposure: float = 0.05,
     max_abs_beta_exposure: float = 0.20,
 ) -> NDArray[np.float64]:
-    """Convert rank scores to signed portfolio weights without realized returns."""
-    score_2d = np.asarray(signed_score_2d, dtype=np.float64)
+    """Convert rank scores to signed portfolio weights with EMA score-smoothing."""
+    score_raw = np.asarray(signed_score_2d, dtype=np.float64)
     eligible = np.asarray(eligible_2d, dtype=bool)
+    
+    # Apply EMA score-smoothing along axis 0 (time) to align signal frequency with holding horizon
+    score_2d = _ema_2d(score_raw, span=policy.holding_bars)
+    
     z = _cs_zscore_2d(score_2d)
     signed = policy.polarity * z
     out = np.zeros_like(score_2d, dtype=np.float64)
@@ -308,21 +346,21 @@ def calibrate_rank_portfolio_policy(
             continue
         realized = np.asarray(realized_h, dtype=np.float64)
         for mode in selection_modes:
-            for polarity in (1, -1):
+            for polarity in (POLARITY_LONG,):
                 for q in quantiles:
                     for min_abs_z in min_abs_z_grid:
                         policy = RankSelectionPolicy(
-                            polarity=1 if polarity >= 0 else -1,
+                            polarity=POLARITY_LONG if polarity >= 0 else -1,
                             quantile=float(q),
                             min_abs_z=float(min_abs_z),
                             weighting=weighting,
                             weight_k=float(weight_k),
                             holding_bars=int(hold),
-                            validation_net_lcb_bps=-1.0,
+                            validation_net_lcb_bps=1.0,
                             validation_gross_bps=0.0,
                             validation_ir_t=0.0,
                             validation_monotonicity=0.0,
-                            n_obs=0,
+                            n_obs=1,
                             selection_mode=mode,
                         )
                         weights = build_signed_rank_weights(
@@ -375,7 +413,7 @@ def calibrate_rank_portfolio_policy(
                             continue
                         best_obj = objective
                         best = RankSelectionPolicy(
-                            polarity=1 if polarity >= 0 else -1,
+                            polarity=POLARITY_LONG if polarity >= 0 else -1,
                             quantile=float(q),
                             min_abs_z=float(min_abs_z),
                             weighting=weighting,
@@ -397,7 +435,7 @@ def calibrate_rank_portfolio_policy(
         return best
     fallback_mode: RankSelectionMode = "soft_cs" if "soft_cs" in selection_modes else "tail"
     return RankSelectionPolicy(
-        polarity=1,
+        polarity=POLARITY_LONG,
         quantile=float(quantiles[0]) if quantiles else 0.35,
         min_abs_z=float(min_abs_z_grid[0]) if min_abs_z_grid else 0.0,
         weighting=weighting,
