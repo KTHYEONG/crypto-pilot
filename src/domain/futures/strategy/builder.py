@@ -47,10 +47,15 @@ def build_strategy_alpha(
 
     """
     _assert_no_legacy_imports()
-    if cfg.name == "lambdamart":
-        from src.domain.futures.strategy.ml_builder import build_ml_strategy_alpha
-
-        return build_ml_strategy_alpha(data_maps=data_maps, symbols=symbols, tf=tf, cfg=cfg)
+    if cfg.name in {"candidate_ml", "rule_baseline"}:
+        from src.domain.futures.strategy_runtime.bridge import run_candidate_strategy_for_universe
+        res = run_candidate_strategy_for_universe(
+            symbols=symbols,
+            tf=tf,
+            strategy_cfg=cfg,
+            preloaded_data_maps=data_maps,
+        )
+        return res.alpha_panel
 
     # 1. Align price panels (using compute_multi_alignment_info base)
     info = compute_multi_alignment_info(data_maps, symbols, tf, embargo=0)

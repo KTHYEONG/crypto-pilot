@@ -81,3 +81,22 @@ class FoldSpec:
     test_end: int
     purge_bars: int
     embargo_bars: int
+
+
+@dataclass(slots=True, frozen=True)
+class CandidateSignalPanel:
+    """Candidate signal matrix contract."""
+
+    datetimes: np.ndarray
+    symbols: tuple[str, ...]
+    values: np.ndarray
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True, frozen=True)
+class CandidatePortfolioPanelMeta:
+    """Candidate portfolio panel metadata contract."""
+
+    datetimes: np.ndarray
+    symbols: tuple[str, ...]
+    metadata: dict[str, Any] = field(default_factory=dict)
