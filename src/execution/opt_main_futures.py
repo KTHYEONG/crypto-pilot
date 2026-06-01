@@ -838,6 +838,7 @@ def _run_strategy_stage(
         _run_alpha_evaluation_report(
             ml_out, data_stage, run_config.timeframe,
             trading_symbols or tuple(data_stage.valid_symbols),
+            trials=int(run_config.trials),
         )
         _logger.debug(
             "[latency] Completed _run_alpha_evaluation_report: %.4fs",
@@ -850,6 +851,7 @@ def _run_alpha_evaluation_report(
     data_stage: DataStageResult,
     tf: str,
     trading_symbols: tuple[str, ...] = (),
+    trials: int = 1,
 ) -> None:
     """Run and print alpha quality metrics and horizon sweep like phase0_alpha_eval.py."""
     from src.domain.futures.strategy.alpha_evaluation import (
@@ -917,24 +919,27 @@ def _run_alpha_evaluation_report(
         _ml_cfg = StrategyMLConfig()
         if _ml_cfg.post_cost_admission_mode == "rank_cs_neutral":
             _q = float(_ml_cfg.rank_select_quantile)
-            _pivot_rs_long = panel_reset.pivot(
+            _pivot_rs_long_raw = panel_reset.pivot(
                 index="datetime", columns="symbol", values="rank_score_long"
-            ).reindex(columns=common_syms).fillna(0.0)
-            _pivot_rs_short = panel_reset.pivot(
+            ).reindex(columns=common_syms)
+            _pivot_rs_short_raw = panel_reset.pivot(
                 index="datetime", columns="symbol", values="rank_score_short"
-            ).reindex(columns=common_syms).fillna(0.0)
-            _rs_l = _pivot_rs_long.to_numpy(dtype=np.float64)
-            _rs_s = _pivot_rs_short.to_numpy(dtype=np.float64)
+            ).reindex(columns=common_syms)
+            _finite_mask = np.isfinite(_pivot_rs_long_raw.to_numpy()) & np.isfinite(_pivot_rs_short_raw.to_numpy())
+
+            _rs_l = _pivot_rs_long_raw.fillna(0.0).to_numpy(dtype=np.float64)
+            _rs_s = _pivot_rs_short_raw.fillna(0.0).to_numpy(dtype=np.float64)
             # Phase 1b: NET 신호 기반 단일 선택
             # Phase 0-diag: 별도 L/S 선택이 NET +35.5bps 엣지를 파괴(ew=-12.94bps).
             # NET = rank_score_long - rank_score_short 기준으로 long/short 동시 선택.
             _net_signal = derive_signed_rank_signal(_rs_l, _rs_s)
+            _net_signal = np.where(_finite_mask, _net_signal, np.nan)
             _policy_payload = getattr(alpha_panel, "attrs", {}).get("rank_selection_policy")
             if isinstance(_policy_payload, dict):
                 _policy = policy_from_dict(_policy_payload)
                 _alpha_l, _alpha_s = apply_rank_selection_policy(
                     signed_score_2d=_net_signal,
-                    eligible_2d=np.isfinite(_rs_l) | np.isfinite(_rs_s),
+                    eligible_2d=_finite_mask,
                     policy=_policy,
                 )
                 _long_mask = _alpha_l > 0.0
@@ -1148,8 +1153,10 @@ def _run_alpha_evaluation_report(
             compute_effective_breadth,
             compute_net_ic,
         )
-        _r_c1_ic = compute_net_ic(_rank_pred_c1, _real_c1, horizon_bars=horizon)
-        _r_c1_br = compute_effective_breadth(_rank_pred_c1, np.zeros_like(_rank_pred_c1))
+        from src.domain.futures.strategy.rank_selection import _ema_2d
+        _smoothed_c1 = _ema_2d(_rank_pred_c1, span=horizon)
+        _r_c1_ic = compute_net_ic(_smoothed_c1, _real_c1, horizon_bars=horizon)
+        _r_c1_br = compute_effective_breadth(_smoothed_c1, np.zeros_like(_smoothed_c1))
         _logger.info(
             "🏅 [RANK-QUALITY L1] ic=%.4f t=%.2f hit=%.3f breadth=%.1f"
             " | signed rank score vs forward_gross_ret (C1 dense, unclipped)",
@@ -1173,9 +1180,15 @@ def _run_alpha_evaluation_report(
     # L2 C3 rank score IC — evaluate_alpha inference_signed_2d로 전달
     # rank_pred_c3는 C3 기준 dense signal이므로 al과 shape 일치
     _dense_pred_for_eval: np.ndarray | None = _rank_pred_c3
-    # DSR 정직화: folds x sweep horizons 탐색공간 반영
+    # DSR 정직화: 실제 탐색한 하이퍼파라미터 trials 반영
     _n_folds = int(getattr(ml_out, "n_folds", 2))
-    _n_trials_dsr = max(1, _n_folds * 3)
+    _n_trials_dsr = max(1, trials)
+
+    _opt_q = 0.35
+    _policy_payload = getattr(alpha_panel, "attrs", {}).get("rank_selection_policy")
+    if isinstance(_policy_payload, dict):
+        _opt_q = float(_policy_payload.get("quantile", 0.35))
+
     report = evaluate_alpha(
         alpha_long_2d=al,
         alpha_short_2d=as_,
@@ -1185,6 +1198,7 @@ def _run_alpha_evaluation_report(
         n_trials=_n_trials_dsr,
         horizon_bars=horizon,
         cost_floor_bps=24.0,  # 24bps 고정 물리 비용 장벽 보존
+        basket_quantile=_opt_q,
         policy_validation_net_lcb_bps=float(
             getattr(alpha_panel, "attrs", {}).get("rank_selection_policy", {}).get(
                 "validation_net_lcb_bps", float("nan")
