@@ -8,14 +8,12 @@ from src.domain.futures.strategy.config import (
     CandidateStrategyConfig,
     MomentumConfig,
     StrategyConfig,
-    StrategyMLConfig,
 )
 
 __all__ = [
     "CandidateStrategyConfig",
     "MomentumConfig",
     "StrategyConfig",
-    "StrategyMLConfig",
     "build_strategy_alpha",
 ]
 

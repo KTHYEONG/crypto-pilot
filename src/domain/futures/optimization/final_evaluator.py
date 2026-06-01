@@ -4,9 +4,8 @@ import json
 import logging
 import math
 import time
-from dataclasses import fields, replace
 from pathlib import Path
-from typing import Any, Literal, get_args, get_origin, get_type_hints
+from typing import Any
 
 import numpy as np
 import optuna
@@ -67,84 +66,16 @@ from src.domain.futures.validation.walk_forward import (
 _logger: logging.Logger = logging.getLogger("final_evaluator")
 
 
-def _validate_strategy_ml_member_param(field_name: str, value: Any, expected_type: Any) -> None:
-    """Validate strict type/literal for StrategyMLConfig member override values."""
-    origin = get_origin(expected_type)
-    if origin is Literal:
-        literal_values = get_args(expected_type)
-        if value not in literal_values:
-            raise ValueError(
-                f"invalid StrategyMLConfig override for '{field_name}': "
-                f"expected one of {literal_values}, got {value!r}"
-            )
-        return
-
-    if expected_type is bool:
-        if not isinstance(value, bool):
-            raise ValueError(
-                f"invalid StrategyMLConfig override for '{field_name}': "
-                f"expected bool, got {type(value).__name__}"
-            )
-        return
-
-    if expected_type is int:
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError(
-                f"invalid StrategyMLConfig override for '{field_name}': "
-                f"expected int, got {type(value).__name__}"
-            )
-        return
-
-    if expected_type is float:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(
-                f"invalid StrategyMLConfig override for '{field_name}': "
-                f"expected float, got {type(value).__name__}"
-            )
-        return
-
-    if expected_type is str:
-        if not isinstance(value, str):
-            raise ValueError(
-                f"invalid StrategyMLConfig override for '{field_name}': "
-                f"expected str, got {type(value).__name__}"
-            )
-        return
-
-
 def _rebuild_member_strategy_config(
     strategy_cfg: Any,
     member_params: dict[str, Any],
 ) -> Any:
-    """Rebuild per-member strategy config without mutating frozen dataclasses."""
-    from src.domain.futures.strategy import StrategyConfig, StrategyMLConfig
+    """Rebuild per-member strategy config (currently passthrough for candidate_ml)."""
+    from src.domain.futures.strategy import StrategyConfig
 
-    base_cfg = strategy_cfg if isinstance(strategy_cfg, StrategyConfig) else None
-    base_ml_cfg = base_cfg.ml if base_cfg is not None else StrategyMLConfig()
-    ml_type_hints = get_type_hints(StrategyMLConfig)
-    ml_fields = {field.name: field for field in fields(StrategyMLConfig)}
-    ml_updates: dict[str, Any] = {}
-    unknown_keys: list[str] = []
-    for key, value in member_params.items():
-        field = ml_fields.get(key)
-        if field is None:
-            unknown_keys.append(key)
-            continue
-        expected_type = ml_type_hints.get(key, field.type)
-        _validate_strategy_ml_member_param(key, value, expected_type)
-        ml_updates[key] = value
-
-    if unknown_keys:
-        _logger.warning(
-            "Ignoring unknown StrategyMLConfig override key(s): %s",
-            sorted(unknown_keys),
-        )
-
-    member_ml_cfg = replace(base_ml_cfg, **ml_updates) if ml_updates else base_ml_cfg
-
-    if base_cfg is not None:
-        return replace(base_cfg, ml=member_ml_cfg)
-    return StrategyConfig(name="lambdamart", ml=member_ml_cfg)
+    if isinstance(strategy_cfg, StrategyConfig):
+        return strategy_cfg
+    return StrategyConfig(name="candidate_ml")
 
 
 def _compute_expectancy_retention_pct(oos_expectancy: float, is_expectancy: float) -> float:
