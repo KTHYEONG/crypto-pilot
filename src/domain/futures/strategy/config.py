@@ -314,6 +314,8 @@ class StrategyMLConfig:
     ic_lcb_z: float = 1.0
     ic_prior_for_gate: float = 0.03             # leak-free IC prior for portfolio net-edge gate
     ev_secondary_tilt_weight: float = 0.0       # blend weight for EV rank tilt (0=rank-only)
+    rank_policy_cs_neutralize: bool = False     # W1: BTC-factor neutralization (off: destroys signal)
+    rank_policy_neutralize_window: int = 60     # trailing OLS window in bars for neutralization
     integrity_gate_enabled: bool = True
     feature_selection_enabled: bool = True
     feature_integrity: FeatureIntegrityConfig = field(default_factory=FeatureIntegrityConfig)

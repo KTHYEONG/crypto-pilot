@@ -34,6 +34,8 @@ class RankSelectionPolicy:
     validation_breadth: float = float("nan")
     validation_abs_net_exposure: float = float("nan")
     validation_abs_beta_exposure: float = float("nan")
+    cs_neutralize: bool = False
+    neutralize_window: int = 60
 
 
 def policy_is_no_trade(policy: RankSelectionPolicy) -> bool:
@@ -147,12 +149,87 @@ def _ema_2d(arr: NDArray[np.float64], span: int) -> NDArray[np.float64]:
     return out
 
 
+def _cross_sectional_neutralize_2d(
+    score_2d: NDArray[np.float64],
+    factor_2d: NDArray[np.float64],
+    *,
+    window: int,
+    embargo: int = 1,
+) -> NDArray[np.float64]:
+    """Residualize score panel against a common factor via trailing-only OLS betas.
+
+    For each bar t and asset n:
+      beta_n = OLS coefficient fit on [t-embargo-window, t-embargo) rows of (factor[:,n], score[:,n])
+      out[t,n] = score[t,n] - beta_n * factor[t,n]
+
+    NaN propagates from score or factor. Warm-up bars with insufficient trailing obs
+    fall back to cross-sectionally de-meaned raw score (safe fallback, no leakage risk).
+
+    Args:
+        score_2d: Signal panel [T, N].
+        factor_2d: Common-factor panel [T, N] (e.g. BTC return broadcast to all columns).
+        window: Trailing regression window in bars (>= 2).
+        embargo: Bars excluded immediately before t (default 1) to prevent leakage.
+
+    Returns:
+        Residualized panel [T, N]. Same dtype as input (float64).
+        Time O(T·N·window), Space O(T·N).
+    """
+    n_t, n_assets = score_2d.shape
+    out = np.full((n_t, n_assets), np.nan, dtype=np.float64)
+
+    for t in range(n_t):
+        s_row = score_2d[t]
+        f_row = factor_2d[t]
+
+        start = t - embargo - window
+        end = t - embargo  # exclusive
+
+        if start < 0 or end <= start:
+            # Warm-up: cross-sectional de-mean fallback (no leakage).
+            finite = np.isfinite(s_row)
+            if int(np.count_nonzero(finite)) >= 2:
+                out[t, finite] = s_row[finite] - float(np.mean(s_row[finite]))
+            continue
+
+        s_win = score_2d[start:end]   # [window, n_assets]
+        f_win = factor_2d[start:end]  # [window, n_assets]
+
+        for n in range(n_assets):
+            s_n = s_win[:, n]
+            f_n = f_win[:, n]
+            both_finite = np.isfinite(s_n) & np.isfinite(f_n)
+            n_ok = int(np.count_nonzero(both_finite))
+
+            if not (np.isfinite(s_row[n]) and np.isfinite(f_row[n])):
+                # NaN propagates.
+                continue
+
+            if n_ok < 2:
+                out[t, n] = s_row[n]
+                continue
+
+            f_col = f_n[both_finite]
+            s_col = s_n[both_finite]
+            f2 = float(np.dot(f_col, f_col))
+
+            if f2 < 1e-12:
+                # Near-zero factor variance: skip neutralization.
+                out[t, n] = s_row[n]
+            else:
+                beta_n = float(np.dot(f_col, s_col)) / f2
+                out[t, n] = s_row[n] - beta_n * f_row[n]
+
+    return out
+
+
 def build_signed_rank_weights(
     *,
     signed_score_2d: NDArray[np.float64],
     eligible_2d: NDArray[np.bool_],
     policy: RankSelectionPolicy,
     beta_2d: NDArray[np.float64] | None = None,
+    factor_2d: NDArray[np.float64] | None = None,
     gross_target: float = 1.0,
     max_abs_net_exposure: float = 0.05,
     max_abs_beta_exposure: float = 0.20,
@@ -160,7 +237,12 @@ def build_signed_rank_weights(
     """Convert rank scores to signed portfolio weights with EMA score-smoothing."""
     score_raw = np.asarray(signed_score_2d, dtype=np.float64)
     eligible = np.asarray(eligible_2d, dtype=bool)
-    
+
+    if policy.cs_neutralize and factor_2d is not None:
+        score_raw = _cross_sectional_neutralize_2d(
+            score_raw, factor_2d, window=policy.neutralize_window, embargo=1
+        )
+
     # Apply EMA score-smoothing along axis 0 (time) to align signal frequency with holding horizon
     score_2d = _ema_2d(score_raw, span=policy.holding_bars)
     
@@ -491,6 +573,7 @@ def apply_rank_selection_policy(
     eligible_2d: NDArray[np.bool_],
     policy: RankSelectionPolicy,
     beta_2d: NDArray[np.float64] | None = None,
+    factor_2d: NDArray[np.float64] | None = None,
 ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
     """Emit alpha_long/alpha_short rank-weight surfaces from signed weights."""
     weights = build_signed_rank_weights(
@@ -498,6 +581,7 @@ def apply_rank_selection_policy(
         eligible_2d=eligible_2d,
         policy=policy,
         beta_2d=beta_2d,
+        factor_2d=factor_2d,
     )
     alpha_long = np.clip(weights, 0.0, np.inf).astype(np.float32, copy=False)
     alpha_short = np.clip(-weights, 0.0, np.inf).astype(np.float32, copy=False)
@@ -524,6 +608,8 @@ def policy_to_dict(policy: RankSelectionPolicy) -> dict[str, float | int | str]:
         "validation_breadth": float(policy.validation_breadth),
         "validation_abs_net_exposure": float(policy.validation_abs_net_exposure),
         "validation_abs_beta_exposure": float(policy.validation_abs_beta_exposure),
+        "cs_neutralize": bool(policy.cs_neutralize),
+        "neutralize_window": int(policy.neutralize_window),
     }
 
 
@@ -554,4 +640,6 @@ def policy_from_dict(payload: Mapping[str, Any]) -> RankSelectionPolicy:
         validation_breadth=float(payload.get("validation_breadth", float("nan"))),
         validation_abs_net_exposure=float(payload.get("validation_abs_net_exposure", float("nan"))),
         validation_abs_beta_exposure=float(payload.get("validation_abs_beta_exposure", float("nan"))),
+        cs_neutralize=bool(payload.get("cs_neutralize", False)),
+        neutralize_window=int(payload.get("neutralize_window", 60)),
     )
