@@ -304,7 +304,7 @@ def test_run_active_strategy_output_bridge_historical_stage5_union_uses_inferenc
         fake_run,
     )
     monkeypatch.setattr(
-        "src.domain.futures.strategy.ml_builder.StrategyMLConfig.training_universe_scope",
+        "src.domain.futures.strategy.legacy.ml_builder.StrategyMLConfig.training_universe_scope",
         "historical_stage5_union",
         raising=False,
     )
@@ -379,7 +379,7 @@ def test_run_active_strategy_output_bridge_accepts_strategy_mode(
         tf="4h",
         fetch_start=None,
         end_date=None,
-        opt_config={},
+        opt_config={"FUTURES_STRATEGY_NAME": "lambdamart"},
         preloaded_data_maps={},
     )
 

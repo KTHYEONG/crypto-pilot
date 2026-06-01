@@ -7,7 +7,7 @@ import pytest
 
 from src.application.futures.optimization.config import build_run_config_from_args
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
-from src.domain.futures.strategy.alpha_evaluation import AlphaEvaluationReport
+from src.domain.futures.strategy.legacy.alpha_evaluation import AlphaEvaluationReport
 from src.execution import opt_main_futures
 
 

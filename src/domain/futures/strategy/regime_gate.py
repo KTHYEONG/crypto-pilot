@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from src.domain.futures.strategy.alpha_evaluation import _compute_regime_labels
+from src.domain.futures.strategy.legacy.alpha_evaluation import _compute_regime_labels
 from src.domain.futures.strategy.config import StrategyMLConfig
 
 _logger = logging.getLogger(__name__)
