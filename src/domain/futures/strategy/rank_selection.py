@@ -35,6 +35,10 @@ class RankSelectionPolicy:
     validation_breadth: float = float("nan")
     validation_abs_net_exposure: float = float("nan")
     validation_abs_beta_exposure: float = float("nan")
+    validation_pre_ic: float = float("nan")
+    validation_post_ic: float = float("nan")
+    validation_clip_preservation: float = float("nan")
+    validation_objective: float = float("nan")
     cs_neutralize: bool = False
     neutralize_window: int = 60
     smoothing_method: Literal["ema", "dema"] = "dema"
@@ -123,6 +127,27 @@ def _score_monotonicity(
         return float("nan")
     rho = scipy.stats.spearmanr(np.asarray(bucket_scores), np.asarray(bucket_rets)).statistic
     return float(rho) if np.isfinite(rho) else float("nan")
+
+
+def _mean_spearman_ic_2d(
+    signal_2d: NDArray[np.float64],
+    realized_2d: NDArray[np.float64],
+    eligible_2d: NDArray[np.bool_],
+) -> float:
+    """Compute mean bar-wise Spearman IC with minimum bar support."""
+    values: list[float] = []
+    for t in range(signal_2d.shape[0]):
+        s_row = signal_2d[t]
+        r_row = realized_2d[t]
+        mask = eligible_2d[t] & np.isfinite(s_row) & np.isfinite(r_row)
+        if int(np.count_nonzero(mask)) < 5:
+            continue
+        rho = scipy.stats.spearmanr(s_row[mask], r_row[mask], nan_policy="omit").statistic
+        if np.isfinite(rho):
+            values.append(float(rho))
+    if not values:
+        return float("nan")
+    return float(np.mean(np.asarray(values, dtype=np.float64)))
 
 POLARITY_LONG: Literal[1] = 1
 
@@ -474,6 +499,8 @@ def _estimate_policy_metrics(
             "validation_abs_net_exposure": float("nan"),
             "validation_abs_beta_exposure": float("nan"),
             "validation_monotonicity": float("nan"),
+            "validation_pre_ic": float("nan"),
+            "validation_post_ic": float("nan"),
         }
     net_arr = np.asarray(net_bps, dtype=np.float64)
     se = float(np.std(net_arr, ddof=1)) / max(np.sqrt(float(n_obs)), 1e-12)
@@ -488,6 +515,8 @@ def _estimate_policy_metrics(
         "validation_abs_net_exposure": float(np.mean(net_exp)),
         "validation_abs_beta_exposure": float(np.mean(beta_exp)) if beta_exp else 0.0,
         "validation_monotonicity": float(_score_monotonicity(score, realized, eligible)),
+        "validation_pre_ic": float(_mean_spearman_ic_2d(score, realized, eligible)),
+        "validation_post_ic": float(_mean_spearman_ic_2d(weights, realized, eligible)),
     }
 
 
@@ -510,6 +539,14 @@ def calibrate_rank_portfolio_policy(
     max_turnover: float = 1.25,
     max_abs_net_exposure: float = 0.10,
     max_abs_beta_exposure: float = 0.20,
+    min_clip_preservation: float = 0.70,
+    preservation_weight: float = 12.0,
+    post_ic_weight: float = 100.0,
+    allow_preservation_fallback: bool = True,
+    smoothing_method: Literal["ema", "dema"] = "dema",
+    adaptive_smoothing: bool = False,
+    soft_beta_neutralize: bool = False,
+    soft_beta_weights: tuple[float, ...] = (0.0,),
 ) -> RankSelectionPolicy:
     """Select validation-only rank-to-portfolio policy after costs and risk constraints."""
     score = np.asarray(signed_score_2d, dtype=np.float64)
@@ -521,6 +558,8 @@ def calibrate_rank_portfolio_policy(
     )
     best_obj = float("-inf")
     best: RankSelectionPolicy | None = None
+    best_fallback_pres = float("-inf")
+    best_fallback: RankSelectionPolicy | None = None
 
     for hold in holding_bars_candidates:
         realized_h = realized_fwd_ret_by_horizon.get(int(hold))
@@ -531,90 +570,134 @@ def calibrate_rank_portfolio_policy(
             for polarity in (POLARITY_LONG,):
                 for q in quantiles:
                     for min_abs_z in min_abs_z_grid:
-                        policy = RankSelectionPolicy(
-                            polarity=POLARITY_LONG if polarity >= 0 else -1,
-                            quantile=float(q),
-                            min_abs_z=float(min_abs_z),
-                            weighting=weighting,
-                            weight_k=float(weight_k),
-                            holding_bars=int(hold),
-                            validation_net_lcb_bps=1.0,
-                            validation_gross_bps=0.0,
-                            validation_ir_t=0.0,
-                            validation_monotonicity=0.0,
-                            n_obs=1,
-                            selection_mode=mode,
-                        )
-                        weights = build_signed_rank_weights(
-                            signed_score_2d=score,
-                            eligible_2d=eligible,
-                            policy=policy,
-                            beta_2d=beta_2d,
-                            gross_target=1.0,
-                            max_abs_net_exposure=max_abs_net_exposure,
-                            max_abs_beta_exposure=max_abs_beta_exposure,
-                        )
-                        metrics = _estimate_policy_metrics(
-                            weights=weights,
-                            realized=realized,
-                            eligible=eligible,
-                            execution_cost_bps_2d=execution_cost_bps_2d,
-                            cost_bps_fallback=cost_bps_fallback,
-                            beta_2d=beta_2d,
-                            score=policy.polarity * _cs_zscore_2d(score),
-                            compat_static_cost=compat_relaxed,
-                        )
-                        n_obs = int(metrics["n_obs"])
-                        if n_obs < min_obs:
-                            continue
-                        if metrics["validation_net_lcb_bps"] <= 0.0:
-                            continue
-                        if (
-                            not compat_relaxed
-                            and (
-                                not np.isfinite(metrics["validation_monotonicity"])
-                                or metrics["validation_monotonicity"] <= 0.0
+                        for soft_beta_weight in soft_beta_weights:
+                            policy = RankSelectionPolicy(
+                                polarity=POLARITY_LONG if polarity >= 0 else -1,
+                                quantile=float(q),
+                                min_abs_z=float(min_abs_z),
+                                weighting=weighting,
+                                weight_k=float(weight_k),
+                                holding_bars=int(hold),
+                                validation_net_lcb_bps=1.0,
+                                validation_gross_bps=0.0,
+                                validation_ir_t=0.0,
+                                validation_monotonicity=0.0,
+                                n_obs=1,
+                                selection_mode=mode,
+                                smoothing_method=smoothing_method,
+                                adaptive_smoothing=adaptive_smoothing,
+                                soft_beta_neutralize=(
+                                    bool(soft_beta_neutralize) and float(soft_beta_weight) > 0.0
+                                ),
+                                soft_beta_neutralize_weight=float(soft_beta_weight),
                             )
-                        ):
-                            continue
-                        if metrics["validation_breadth"] < float(target_breadth_min):
-                            continue
-                        if metrics["validation_turnover"] > float(max_turnover):
-                            continue
-                        if metrics["validation_abs_net_exposure"] > float(max_abs_net_exposure):
-                            continue
-                        if metrics["validation_abs_beta_exposure"] > float(max_abs_beta_exposure):
-                            continue
-                        objective = (
-                            metrics["validation_net_lcb_bps"]
-                            + 0.10 * metrics["validation_gross_bps"]
-                            + 0.05 * min(metrics["validation_breadth"], float(target_breadth_min))
-                            - 0.25 * metrics["validation_cost_bps"]
-                        )
-                        if objective <= best_obj:
-                            continue
-                        best_obj = objective
-                        best = RankSelectionPolicy(
-                            polarity=POLARITY_LONG if polarity >= 0 else -1,
-                            quantile=float(q),
-                            min_abs_z=float(min_abs_z),
-                            weighting=weighting,
-                            weight_k=float(weight_k),
-                            holding_bars=int(hold),
-                            validation_net_lcb_bps=float(metrics["validation_net_lcb_bps"]),
-                            validation_gross_bps=float(metrics["validation_gross_bps"]),
-                            validation_ir_t=float(metrics["validation_ir_t"]),
-                            validation_monotonicity=float(metrics["validation_monotonicity"]),
-                            n_obs=n_obs,
-                            selection_mode=mode,
-                            validation_turnover=float(metrics["validation_turnover"]),
-                            validation_cost_bps=float(metrics["validation_cost_bps"]),
-                            validation_breadth=float(metrics["validation_breadth"]),
-                            validation_abs_net_exposure=float(metrics["validation_abs_net_exposure"]),
-                            validation_abs_beta_exposure=float(metrics["validation_abs_beta_exposure"]),
-                        )
+                            weights = build_signed_rank_weights(
+                                signed_score_2d=score,
+                                eligible_2d=eligible,
+                                policy=policy,
+                                beta_2d=beta_2d,
+                                gross_target=1.0,
+                                max_abs_net_exposure=max_abs_net_exposure,
+                                max_abs_beta_exposure=max_abs_beta_exposure,
+                            )
+                            metrics = _estimate_policy_metrics(
+                                weights=weights,
+                                realized=realized,
+                                eligible=eligible,
+                                execution_cost_bps_2d=execution_cost_bps_2d,
+                                cost_bps_fallback=cost_bps_fallback,
+                                beta_2d=beta_2d,
+                                score=policy.polarity * _cs_zscore_2d(score),
+                                compat_static_cost=compat_relaxed,
+                            )
+                            n_obs = int(metrics["n_obs"])
+                            if n_obs < min_obs:
+                                continue
+                            if metrics["validation_net_lcb_bps"] <= 0.0:
+                                continue
+                            if (
+                                not compat_relaxed
+                                and (
+                                    not np.isfinite(metrics["validation_monotonicity"])
+                                    or metrics["validation_monotonicity"] <= 0.0
+                                )
+                            ):
+                                continue
+                            if metrics["validation_breadth"] < float(target_breadth_min):
+                                continue
+                            if metrics["validation_turnover"] > float(max_turnover):
+                                continue
+                            if metrics["validation_abs_net_exposure"] > float(max_abs_net_exposure):
+                                continue
+                            if metrics["validation_abs_beta_exposure"] > float(max_abs_beta_exposure):
+                                continue
+
+                            pre_ic = float(metrics["validation_pre_ic"])
+                            post_ic = float(metrics["validation_post_ic"])
+                            clip_pres = (
+                                float(post_ic / pre_ic)
+                                if np.isfinite(pre_ic) and abs(pre_ic) > 1e-9 and np.isfinite(post_ic)
+                                else float("nan")
+                            )
+                            objective = (
+                                metrics["validation_net_lcb_bps"]
+                                + 0.10 * metrics["validation_gross_bps"]
+                                + 0.05 * min(metrics["validation_breadth"], float(target_breadth_min))
+                                - 0.25 * metrics["validation_cost_bps"]
+                                + float(post_ic_weight) * (post_ic if np.isfinite(post_ic) else 0.0)
+                                + float(preservation_weight)
+                                * (min(clip_pres, 1.25) if np.isfinite(clip_pres) else 0.0)
+                            )
+                            candidate = RankSelectionPolicy(
+                                polarity=POLARITY_LONG if polarity >= 0 else -1,
+                                quantile=float(q),
+                                min_abs_z=float(min_abs_z),
+                                weighting=weighting,
+                                weight_k=float(weight_k),
+                                holding_bars=int(hold),
+                                validation_net_lcb_bps=float(metrics["validation_net_lcb_bps"]),
+                                validation_gross_bps=float(metrics["validation_gross_bps"]),
+                                validation_ir_t=float(metrics["validation_ir_t"]),
+                                validation_monotonicity=float(metrics["validation_monotonicity"]),
+                                n_obs=n_obs,
+                                selection_mode=mode,
+                                validation_turnover=float(metrics["validation_turnover"]),
+                                validation_cost_bps=float(metrics["validation_cost_bps"]),
+                                validation_breadth=float(metrics["validation_breadth"]),
+                                validation_abs_net_exposure=float(metrics["validation_abs_net_exposure"]),
+                                validation_abs_beta_exposure=float(metrics["validation_abs_beta_exposure"]),
+                                validation_pre_ic=pre_ic,
+                                validation_post_ic=post_ic,
+                                validation_clip_preservation=clip_pres,
+                                validation_objective=float(objective),
+                                smoothing_method=smoothing_method,
+                                adaptive_smoothing=adaptive_smoothing,
+                                soft_beta_neutralize=(
+                                    bool(soft_beta_neutralize) and float(soft_beta_weight) > 0.0
+                                ),
+                                soft_beta_neutralize_weight=float(soft_beta_weight),
+                            )
+                            if (
+                                allow_preservation_fallback
+                                and np.isfinite(clip_pres)
+                                and np.isfinite(post_ic)
+                                and post_ic > 0.0
+                                and metrics["validation_net_lcb_bps"] > 0.0
+                                and metrics["validation_breadth"] >= float(target_breadth_min)
+                                and clip_pres > best_fallback_pres
+                            ):
+                                best_fallback_pres = clip_pres
+                                best_fallback = candidate
+                            if not (np.isfinite(clip_pres) and clip_pres >= float(min_clip_preservation)):
+                                continue
+                            if objective <= best_obj:
+                                continue
+                            best_obj = objective
+                            best = candidate
     if best is not None:
         return best
+    if allow_preservation_fallback and best_fallback is not None:
+        return best_fallback
     fallback_mode: RankSelectionMode = "soft_cs" if "soft_cs" in selection_modes else "tail"
     return RankSelectionPolicy(
         polarity=POLARITY_LONG,
@@ -629,6 +712,10 @@ def calibrate_rank_portfolio_policy(
         validation_monotonicity=0.0,
         n_obs=0,
         selection_mode=fallback_mode,
+        smoothing_method=smoothing_method,
+        adaptive_smoothing=adaptive_smoothing,
+        soft_beta_neutralize=bool(soft_beta_neutralize),
+        soft_beta_neutralize_weight=float(soft_beta_weights[0]) if soft_beta_weights else 0.0,
     )
 
 
@@ -708,6 +795,10 @@ def policy_to_dict(policy: RankSelectionPolicy) -> dict[str, float | int | str]:
         "validation_breadth": float(policy.validation_breadth),
         "validation_abs_net_exposure": float(policy.validation_abs_net_exposure),
         "validation_abs_beta_exposure": float(policy.validation_abs_beta_exposure),
+        "validation_pre_ic": float(policy.validation_pre_ic),
+        "validation_post_ic": float(policy.validation_post_ic),
+        "validation_clip_preservation": float(policy.validation_clip_preservation),
+        "validation_objective": float(policy.validation_objective),
         "cs_neutralize": bool(policy.cs_neutralize),
         "neutralize_window": int(policy.neutralize_window),
         "smoothing_method": str(policy.smoothing_method),
@@ -746,6 +837,10 @@ def policy_from_dict(payload: Mapping[str, Any]) -> RankSelectionPolicy:
         validation_breadth=float(payload.get("validation_breadth", float("nan"))),
         validation_abs_net_exposure=float(payload.get("validation_abs_net_exposure", float("nan"))),
         validation_abs_beta_exposure=float(payload.get("validation_abs_beta_exposure", float("nan"))),
+        validation_pre_ic=float(payload.get("validation_pre_ic", float("nan"))),
+        validation_post_ic=float(payload.get("validation_post_ic", float("nan"))),
+        validation_clip_preservation=float(payload.get("validation_clip_preservation", float("nan"))),
+        validation_objective=float(payload.get("validation_objective", float("nan"))),
         cs_neutralize=bool(payload.get("cs_neutralize", False)),
         neutralize_window=int(payload.get("neutralize_window", 60)),
         smoothing_method=smoothing_method,
