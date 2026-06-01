@@ -179,3 +179,11 @@ def test_alpha6_features() -> None:
     dataset = _dataset(rows=4, groups=2, features=3)
     score = predict_rank_score(dummy_fit, dataset)
     assert score.shape == (4,)
+
+
+def test_strategy_ml_config_exposes_alpha1_rank_policy_fields() -> None:
+    cfg = StrategyMLConfig()
+    assert cfg.rank_policy_strict_cost_floor_bps == 24.0
+    assert cfg.rank_policy_use_strict_cost_floor is True
+    assert cfg.rank_policy_min_basket_net_bps == 0.0
+    assert cfg.rank_policy_min_basket_ir_t == 1.50

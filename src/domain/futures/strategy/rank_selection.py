@@ -39,6 +39,10 @@ class RankSelectionPolicy:
     validation_post_ic: float = float("nan")
     validation_clip_preservation: float = float("nan")
     validation_objective: float = float("nan")
+    validation_basket_gross_bps: float = float("nan")
+    validation_basket_net_bps: float = float("nan")
+    validation_basket_ir_t: float = float("nan")
+    validation_basket_hit: float = float("nan")
     cs_neutralize: bool = False
     neutralize_window: int = 60
     smoothing_method: Literal["ema", "dema"] = "dema"
@@ -148,6 +152,47 @@ def _mean_spearman_ic_2d(
     if not values:
         return float("nan")
     return float(np.mean(np.asarray(values, dtype=np.float64)))
+
+
+def _equal_weight_basket_metrics(
+    *,
+    weights: NDArray[np.float64],
+    realized: NDArray[np.float64],
+    eligible: NDArray[np.bool_],
+    cost_per_bar_bps: float,
+) -> dict[str, float]:
+    """Compute equal-weight long-short basket metrics under fixed per-bar cost."""
+    spreads: list[float] = []
+    for t in range(weights.shape[0]):
+        w = weights[t]
+        r = realized[t]
+        mask = eligible[t] & np.isfinite(w) & np.isfinite(r)
+        if int(np.count_nonzero(mask)) < 2:
+            continue
+        long_mask = mask & (w > 0.0)
+        short_mask = mask & (w < 0.0)
+        if int(np.count_nonzero(long_mask)) < 1 or int(np.count_nonzero(short_mask)) < 1:
+            continue
+        spread = float(np.mean(r[long_mask]) - np.mean(r[short_mask]))
+        spreads.append(spread)
+    if len(spreads) < 2:
+        return {
+            "validation_basket_gross_bps": float("nan"),
+            "validation_basket_net_bps": float("nan"),
+            "validation_basket_ir_t": float("nan"),
+            "validation_basket_hit": float("nan"),
+        }
+    spread_arr = np.asarray(spreads, dtype=np.float64)
+    spread_mean = float(np.mean(spread_arr))
+    spread_std = float(np.std(spread_arr, ddof=1))
+    gross_bps = spread_mean * 1e4
+    ir_t = spread_mean / max(spread_std, 1e-12) * np.sqrt(float(spread_arr.size))
+    return {
+        "validation_basket_gross_bps": gross_bps,
+        "validation_basket_net_bps": gross_bps - float(cost_per_bar_bps),
+        "validation_basket_ir_t": float(ir_t),
+        "validation_basket_hit": float(np.mean(spread_arr > 0.0)),
+    }
 
 POLARITY_LONG: Literal[1] = 1
 
@@ -446,6 +491,8 @@ def _estimate_policy_metrics(
     beta_2d: NDArray[np.float64] | None,
     score: NDArray[np.float64],
     compat_static_cost: bool = False,
+    strict_cost_floor_bps: float = 24.0,
+    use_strict_cost_floor: bool = True,
 ) -> dict[str, float]:
     gross_bps: list[float] = []
     net_bps: list[float] = []
@@ -471,12 +518,15 @@ def _estimate_policy_metrics(
             delta = np.abs(w_row - prev)
         trn = float(np.sum(delta))
         if compat_static_cost:
-            cost = float(cost_bps_fallback)
+            cost = float(max(cost_bps_fallback, strict_cost_floor_bps))
         elif execution_cost_bps_2d is not None:
             cost_row = np.where(np.isfinite(execution_cost_bps_2d[t]), execution_cost_bps_2d[t], cost_bps_fallback)
+            if use_strict_cost_floor:
+                cost_row = np.maximum(cost_row, float(strict_cost_floor_bps))
             cost = float(np.sum(delta * cost_row))
         else:
-            cost = float(np.sum(delta) * cost_bps_fallback)
+            effective_cost = max(float(cost_bps_fallback), float(strict_cost_floor_bps))
+            cost = float(np.sum(delta) * effective_cost)
         gross_bps.append(gross)
         cost_bps.append(cost)
         net_bps.append(gross - cost)
@@ -501,9 +551,21 @@ def _estimate_policy_metrics(
             "validation_monotonicity": float("nan"),
             "validation_pre_ic": float("nan"),
             "validation_post_ic": float("nan"),
+            "validation_basket_gross_bps": float("nan"),
+            "validation_basket_net_bps": float("nan"),
+            "validation_basket_ir_t": float("nan"),
+            "validation_basket_hit": float("nan"),
         }
     net_arr = np.asarray(net_bps, dtype=np.float64)
     se = float(np.std(net_arr, ddof=1)) / max(np.sqrt(float(n_obs)), 1e-12)
+    mean_turnover = float(np.mean(turnover))
+    basket_cost_per_bar = mean_turnover * float(max(strict_cost_floor_bps, 0.0))
+    basket_metrics = _equal_weight_basket_metrics(
+        weights=weights,
+        realized=realized,
+        eligible=eligible,
+        cost_per_bar_bps=basket_cost_per_bar,
+    )
     return {
         "n_obs": float(n_obs),
         "validation_gross_bps": float(np.mean(gross_bps)),
@@ -517,6 +579,10 @@ def _estimate_policy_metrics(
         "validation_monotonicity": float(_score_monotonicity(score, realized, eligible)),
         "validation_pre_ic": float(_mean_spearman_ic_2d(score, realized, eligible)),
         "validation_post_ic": float(_mean_spearman_ic_2d(weights, realized, eligible)),
+        "validation_basket_gross_bps": float(basket_metrics["validation_basket_gross_bps"]),
+        "validation_basket_net_bps": float(basket_metrics["validation_basket_net_bps"]),
+        "validation_basket_ir_t": float(basket_metrics["validation_basket_ir_t"]),
+        "validation_basket_hit": float(basket_metrics["validation_basket_hit"]),
     }
 
 
@@ -547,6 +613,12 @@ def calibrate_rank_portfolio_policy(
     adaptive_smoothing: bool = False,
     soft_beta_neutralize: bool = False,
     soft_beta_weights: tuple[float, ...] = (0.0,),
+    strict_cost_floor_bps: float = 24.0,
+    use_strict_cost_floor: bool = True,
+    min_basket_net_bps: float = 0.0,
+    min_basket_ir_t: float = 1.50,
+    basket_net_weight: float = 1.0,
+    basket_ir_weight: float = 0.50,
 ) -> RankSelectionPolicy:
     """Select validation-only rank-to-portfolio policy after costs and risk constraints."""
     score = np.asarray(signed_score_2d, dtype=np.float64)
@@ -609,6 +681,8 @@ def calibrate_rank_portfolio_policy(
                                 beta_2d=beta_2d,
                                 score=policy.polarity * _cs_zscore_2d(score),
                                 compat_static_cost=compat_relaxed,
+                                strict_cost_floor_bps=float(strict_cost_floor_bps),
+                                use_strict_cost_floor=bool(use_strict_cost_floor),
                             )
                             n_obs = int(metrics["n_obs"])
                             if n_obs < min_obs:
@@ -631,6 +705,12 @@ def calibrate_rank_portfolio_policy(
                                 continue
                             if metrics["validation_abs_beta_exposure"] > float(max_abs_beta_exposure):
                                 continue
+                            basket_net = float(metrics["validation_basket_net_bps"])
+                            basket_ir = float(metrics["validation_basket_ir_t"])
+                            if not np.isfinite(basket_net) or basket_net <= float(min_basket_net_bps):
+                                continue
+                            if not np.isfinite(basket_ir) or basket_ir < float(min_basket_ir_t):
+                                continue
 
                             pre_ic = float(metrics["validation_pre_ic"])
                             post_ic = float(metrics["validation_post_ic"])
@@ -647,6 +727,8 @@ def calibrate_rank_portfolio_policy(
                                 + float(post_ic_weight) * (post_ic if np.isfinite(post_ic) else 0.0)
                                 + float(preservation_weight)
                                 * (min(clip_pres, 1.25) if np.isfinite(clip_pres) else 0.0)
+                                + float(basket_net_weight) * basket_net
+                                + float(basket_ir_weight) * basket_ir
                             )
                             candidate = RankSelectionPolicy(
                                 polarity=POLARITY_LONG if polarity >= 0 else -1,
@@ -670,6 +752,10 @@ def calibrate_rank_portfolio_policy(
                                 validation_post_ic=post_ic,
                                 validation_clip_preservation=clip_pres,
                                 validation_objective=float(objective),
+                                validation_basket_gross_bps=float(metrics["validation_basket_gross_bps"]),
+                                validation_basket_net_bps=basket_net,
+                                validation_basket_ir_t=basket_ir,
+                                validation_basket_hit=float(metrics["validation_basket_hit"]),
                                 smoothing_method=smoothing_method,
                                 adaptive_smoothing=adaptive_smoothing,
                                 soft_beta_neutralize=(
@@ -799,6 +885,10 @@ def policy_to_dict(policy: RankSelectionPolicy) -> dict[str, float | int | str]:
         "validation_post_ic": float(policy.validation_post_ic),
         "validation_clip_preservation": float(policy.validation_clip_preservation),
         "validation_objective": float(policy.validation_objective),
+        "validation_basket_gross_bps": float(policy.validation_basket_gross_bps),
+        "validation_basket_net_bps": float(policy.validation_basket_net_bps),
+        "validation_basket_ir_t": float(policy.validation_basket_ir_t),
+        "validation_basket_hit": float(policy.validation_basket_hit),
         "cs_neutralize": bool(policy.cs_neutralize),
         "neutralize_window": int(policy.neutralize_window),
         "smoothing_method": str(policy.smoothing_method),
@@ -841,6 +931,10 @@ def policy_from_dict(payload: Mapping[str, Any]) -> RankSelectionPolicy:
         validation_post_ic=float(payload.get("validation_post_ic", float("nan"))),
         validation_clip_preservation=float(payload.get("validation_clip_preservation", float("nan"))),
         validation_objective=float(payload.get("validation_objective", float("nan"))),
+        validation_basket_gross_bps=float(payload.get("validation_basket_gross_bps", float("nan"))),
+        validation_basket_net_bps=float(payload.get("validation_basket_net_bps", float("nan"))),
+        validation_basket_ir_t=float(payload.get("validation_basket_ir_t", float("nan"))),
+        validation_basket_hit=float(payload.get("validation_basket_hit", float("nan"))),
         cs_neutralize=bool(payload.get("cs_neutralize", False)),
         neutralize_window=int(payload.get("neutralize_window", 60)),
         smoothing_method=smoothing_method,
