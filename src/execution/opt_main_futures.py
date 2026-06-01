@@ -365,7 +365,7 @@ def _resolve_data_collection_symbols(
     inference_panel: tuple[str, ...],
     live_inference_panel: tuple[str, ...],
 ) -> tuple[str, ...]:
-    scope = StrategyConfig(name="lambdamart").ml.training_universe_scope
+    scope = "stage5_passed"
     if scope == "historical_stage5_union" and inference_panel:
         base_symbols = list(inference_panel)
     elif scope == "stage5_passed" and live_inference_panel:
@@ -777,24 +777,29 @@ def _run_strategy_stage(
             # gate 실패 시 ml_pipeline에서 이미 panel.attrs에 quality_report가 저장됨
             # bridge에서 예외 전 ml_out을 얻을 수 없으므로 gate 없이 재실행
 
-            _s_cfg = StrategyConfig(name="lambdamart")
+            _s_cfg = StrategyConfig(name="candidate_ml")
             if effective_inference:
                 _eff_syms = list(effective_inference)
             elif effective_live:
                 _eff_syms = list(effective_live)
             else:
                 _eff_syms = bridge_trading_symbols
-            _updated_ml = _dc_replace(
-                _s_cfg.ml,
-                trading_symbols=tuple(bridge_trading_symbols),
-                alpha_gate_min_long_nz=0.0,
-                alpha_gate_min_short_nz=0.0,
-                alpha_gate_min_xs_preservation=0.0,
-                alpha_gate_min_tradable_long_nz=0.0,
-                alpha_gate_min_tradable_short_nz=0.0,
-                alpha_gate_cost_wall_tolerance_bps=9999.0,
-            )
-            _s_cfg = _dc_replace(_s_cfg, ml=_updated_ml)
+
+            strategy_name = str(OPT_FUTURES_CONFIG.get("FUTURES_STRATEGY_NAME", "candidate_ml"))
+            if strategy_name in {"candidate_ml", "rule_baseline"}:
+                _s_cfg = _dc_replace(_s_cfg, candidate=_s_cfg.candidate)
+            else:
+                _updated_ml = _dc_replace(
+                    _s_cfg.ml,
+                    trading_symbols=tuple(bridge_trading_symbols),
+                    alpha_gate_min_long_nz=0.0,
+                    alpha_gate_min_short_nz=0.0,
+                    alpha_gate_min_xs_preservation=0.0,
+                    alpha_gate_min_tradable_long_nz=0.0,
+                    alpha_gate_min_tradable_short_nz=0.0,
+                    alpha_gate_cost_wall_tolerance_bps=9999.0,
+                )
+                _s_cfg = _dc_replace(_s_cfg, ml=_updated_ml)
             t_bypass_start = time.perf_counter()
             try:
                 _logger.debug(
@@ -847,15 +852,57 @@ def _run_strategy_stage(
     elif run_config.mode == "alpha":
         t_report_start = time.perf_counter()
         _logger.debug("[latency] Starting _run_alpha_evaluation_report")
-        _run_alpha_evaluation_report(
-            ml_out, data_stage, run_config.timeframe,
-            trading_symbols or tuple(data_stage.valid_symbols),
-            trials=int(run_config.trials),
-        )
+        
+        strategy_name = str(OPT_FUTURES_CONFIG.get("FUTURES_STRATEGY_NAME", "candidate_ml"))
+        if strategy_name in {"candidate_ml", "rule_baseline"}:
+            _run_candidate_evaluation_report(
+                ml_out, data_stage, run_config.timeframe,
+                trading_symbols or tuple(data_stage.valid_symbols),
+            )
+        else:
+            _run_alpha_evaluation_report(
+                ml_out, data_stage, run_config.timeframe,
+                trading_symbols or tuple(data_stage.valid_symbols),
+                trials=int(run_config.trials),
+            )
         _logger.debug(
             "[latency] Completed _run_alpha_evaluation_report: %.4fs",
             time.perf_counter() - t_report_start,
         )
+
+
+def _run_candidate_evaluation_report(
+    candidate_out: Any,
+    data_stage: DataStageResult,
+    tf: str,
+    trading_symbols: tuple[str, ...],
+) -> None:
+    """Print candidate-ml performance reporting and ablation study."""
+    _logger.info("================================================================================")
+    _logger.info(">> CANDIDATE-ML STRATEGY COMPONENT EVALUATION REPORT")
+    _logger.info("================================================================================")
+
+    from src.domain.futures.strategy.ablation import run_candidate_ablation
+    from src.domain.futures.strategy.config import CandidateStrategyConfig
+    
+    cfg = CandidateStrategyConfig(timeframe=tf)
+    
+    active_syms = [s for s in trading_symbols if s in data_stage.data_maps]
+    if not active_syms:
+        active_syms = list(data_stage.data_maps.keys())
+        
+    _logger.info(">> Running Candidate Ablation Study...")
+    df_ablation = run_candidate_ablation(
+        data_maps=data_stage.data_maps,
+        symbols=tuple(active_syms),
+        tf=tf,
+        cfg=cfg,
+    )
+    
+    # Log ablation study table
+    _logger.info("\n=== ABLATION STUDY COMPARATIVE FRONTIER ===")
+    _logger.info("\n" + df_ablation.to_string(index=False))
+    _logger.info("===========================================")
 
 
 def _run_alpha_evaluation_report(
@@ -1601,7 +1648,7 @@ def _run_optimization_stage(
         seed=seed,
         resume=resume,
         strategy_mode=True,
-        strategy_cfg=StrategyConfig(name="lambdamart"),
+        strategy_cfg=StrategyConfig(name="candidate_ml"),
         n_trials_a1=max(1, int(run_config.trials * 0.5)),
         n_trials_a2=max(1, int(run_config.trials * 0.2)),
         n_trials_b=max(1, int(run_config.trials * 0.3)),
@@ -1900,7 +1947,7 @@ def run_pipeline(
     _logger.info(
         ">> STRATEGY: %s | %s",
         run_config.mode,
-        "lambdamart",
+        str(OPT_FUTURES_CONFIG.get("FUTURES_STRATEGY_NAME", "candidate_ml")),
     )
     _run_strategy_stage(
         run_config,

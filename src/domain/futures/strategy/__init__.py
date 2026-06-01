@@ -5,12 +5,14 @@ from __future__ import annotations
 from typing import Any
 
 from src.domain.futures.strategy.config import (
+    CandidateStrategyConfig,
     MomentumConfig,
     StrategyConfig,
     StrategyMLConfig,
 )
 
 __all__ = [
+    "CandidateStrategyConfig",
     "MomentumConfig",
     "StrategyConfig",
     "StrategyMLConfig",

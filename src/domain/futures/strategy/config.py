@@ -128,11 +128,18 @@ class StrategyConfig:
     sleeves: SleeveConfig = field(default_factory=SleeveConfig)
     blend: BlendConfig = field(default_factory=BlendConfig)
     regime: RegimeConfig = field(default_factory=RegimeConfig)
-    ml: StrategyMLConfig = field(default_factory=lambda: StrategyMLConfig())
+    candidate: CandidateStrategyConfig = field(default_factory=lambda: CandidateStrategyConfig())
+    ml: StrategyMLConfig = field(default_factory=lambda: StrategyMLConfig())  # legacy
 
     def __post_init__(self) -> None:
         """Validate top-level strategy name."""
-        if self.name not in {"momentum", "eh_st", "lambdamart", "xs_reversal"}:
+        if self.name not in {
+            "candidate_ml",
+            "rule_baseline",
+            "momentum",
+            "xs_reversal",
+            "lambdamart",
+        }:
             raise ValueError(f"unsupported strategy name: {self.name}")
 
 
@@ -558,3 +565,71 @@ class StrategyMLConfig:
         invalid_groups = [g for g in self.feature_groups_enabled if g not in allowed_groups]
         if invalid_groups:
             raise ValueError(f"unsupported feature group(s): {invalid_groups}")
+
+
+@dataclass(slots=True, frozen=True)
+class CandidateStrategyConfig:
+    """Candidate strategy routing config."""
+
+    name: Literal["candidate_ml", "rule_baseline"] = "candidate_ml"
+    timeframe: str = "4h"
+    seed: int = 42
+    train_months: int = 24
+    valid_months: int = 3
+    test_months: int = 6
+    purge_bars: int = 18
+    embargo_bars: int = 18
+    cost_floor_bps: float = 24.0
+    min_listing_age_days: int = 90
+    min_candidate_obs: int = 200
+    min_symbol_oos_blocks: int = 3
+    min_rule_net_bps: float = 0.0
+    min_rule_ir_t: float = 1.0
+    min_rule_hit_rate: float = 0.50
+    max_rule_turnover_per_bar: float = 0.50
+    max_symbol_weight: float = 0.10
+    gross_cap: float = 1.20
+    net_cap: float = 0.30
+    beta_cap: float = 0.50
+    target_ann_vol: float = 0.35
+    kelly_fraction: float = 0.25
+    min_gate_probability: float = 0.15
+    min_expected_net_bps: float = -35.0
+    max_expected_shortfall_bps: float = 990.0
+    candidate_families: tuple[str, ...] = (
+        "trend_ma",
+        "trend_donchian",
+        "vol_breakout",
+        "bollinger_reversion",
+        "rsi_reversion",
+        "funding_carry",
+        "oi_volume_impulse",
+        "btc_regime_pullback",
+    )
+
+    def __post_init__(self) -> None:
+        """Validate candidate strategy parameters."""
+        if self.name not in {"candidate_ml", "rule_baseline"}:
+            raise ValueError("candidate strategy name must be 'candidate_ml' or 'rule_baseline'")
+        if self.train_months <= 0 or self.valid_months <= 0 or self.test_months <= 0:
+            raise ValueError("all month windows must be positive")
+        if self.purge_bars < 0 or self.embargo_bars < 0:
+            raise ValueError("purge and embargo bars must be non-negative")
+        if not (0.0 < self.kelly_fraction <= 0.25):
+            raise ValueError("kelly_fraction must be in range (0.0, 0.25]")
+        if self.cost_floor_bps < 0.0:
+            raise ValueError("cost_floor_bps must be non-negative")
+        if (
+            self.max_symbol_weight < 0.0
+            or self.gross_cap < 0.0
+            or self.net_cap < 0.0
+            or self.beta_cap < 0.0
+            or self.target_ann_vol < 0.0
+            or self.max_expected_shortfall_bps < 0.0
+        ):
+            raise ValueError("cap and penalty parameters must be non-negative")
+        if self.gross_cap < self.max_symbol_weight:
+            raise ValueError("gross cap must be at least max symbol weight")
+        if self.min_candidate_obs <= 0 or self.min_symbol_oos_blocks <= 0:
+            raise ValueError("minimum observations and blocks must be positive")
+
