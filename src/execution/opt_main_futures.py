@@ -948,11 +948,21 @@ def _run_alpha_evaluation_report(
             _net_signal = np.where(_finite_mask, _net_signal, np.nan)
             _policy_payload = getattr(alpha_panel, "attrs", {}).get("rank_selection_policy")
             if isinstance(_policy_payload, dict):
+                from src.domain.futures.strategy.rank_selection import (
+                    build_simulation_beta_context,
+                    merge_metadata_with_runtime_config,
+                )
+                _policy_payload = merge_metadata_with_runtime_config(_policy_payload, _ml_cfg)
                 _policy = policy_from_dict(_policy_payload)
+                _beta_2d = build_simulation_beta_context(
+                    common_syms, data_stage.data_maps, tf, pivot_long.index
+                )
+
                 _alpha_l, _alpha_s = apply_rank_selection_policy(
                     signed_score_2d=_net_signal,
                     eligible_2d=_finite_mask,
                     policy=_policy,
+                    beta_2d=_beta_2d,
                 )
                 _long_mask = _alpha_l > 0.0
                 _short_mask = _alpha_s > 0.0

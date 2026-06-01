@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 import numpy as np
+import pandas as pd
 import scipy.stats
 from numpy.typing import NDArray
 
@@ -36,6 +37,10 @@ class RankSelectionPolicy:
     validation_abs_beta_exposure: float = float("nan")
     cs_neutralize: bool = False
     neutralize_window: int = 60
+    smoothing_method: Literal["ema", "dema"] = "dema"
+    adaptive_smoothing: bool = False
+    soft_beta_neutralize: bool = False
+    soft_beta_neutralize_weight: float = 0.7
 
 
 def policy_is_no_trade(policy: RankSelectionPolicy) -> bool:
@@ -149,6 +154,80 @@ def _ema_2d(arr: NDArray[np.float64], span: int) -> NDArray[np.float64]:
     return out
 
 
+def _dema_2d(arr: NDArray[np.float64], span: int) -> NDArray[np.float64]:
+    """Compute Double Exponential Moving Average along axis 0 (time) to reduce lag."""
+    if span <= 1 or arr.shape[0] == 0:
+        return arr
+    ema1 = _ema_2d(arr, span=span)
+    ema2 = _ema_2d(ema1, span=span)
+    return 2.0 * ema1 - ema2
+
+
+def _compute_rolling_vol(arr: NDArray[np.float64], window: int = 30) -> NDArray[np.float64]:
+    """Compute rolling volatility along axis 0 (time) as a proxy for regime."""
+    m = np.nanmean(arr, axis=1)
+    m = np.where(np.isfinite(m), m, 0.0)
+
+    vol = np.zeros_like(m)
+    for t in range(len(m)):
+        start = max(0, t - window + 1)
+        slice_vals = m[start : t + 1]
+        vol[t] = float(np.std(slice_vals)) if len(slice_vals) > 1 else 0.0
+    return vol
+
+
+def _ema_dema_adaptive_2d(
+    arr: NDArray[np.float64],
+    base_span: int,
+    vol: NDArray[np.float64],
+    method: str = "dema"
+) -> NDArray[np.float64]:
+    """Compute adaptive EMA/DEMA smoothing where span dynamically scales with volatility."""
+    if base_span <= 1 or arr.shape[0] == 0:
+        return arr
+
+    vol_mean = float(np.mean(vol)) if len(vol) > 0 else 1.0
+    if vol_mean < 1e-9:
+        vol_mean = 1.0
+
+    out = np.zeros_like(arr)
+    span_fast = max(3, int(base_span * 0.6))
+    span_std = base_span
+    span_slow = int(base_span * 1.5)
+
+    if method == "dema":
+        smooth_fast = _dema_2d(arr, span=span_fast)
+        smooth_std = _dema_2d(arr, span=span_std)
+        smooth_slow = _dema_2d(arr, span=span_slow)
+    else:
+        smooth_fast = _ema_2d(arr, span=span_fast)
+        smooth_std = _ema_2d(arr, span=span_std)
+        smooth_slow = _ema_2d(arr, span=span_slow)
+
+    for t in range(arr.shape[0]):
+        v_t = vol[t]
+        if v_t > 1.2 * vol_mean:
+            out[t] = smooth_fast[t]
+        elif v_t < 0.8 * vol_mean:
+            out[t] = smooth_slow[t]
+        else:
+            out[t] = smooth_std[t]
+    return out
+
+
+def _soft_beta_neutralize(
+    w: NDArray[np.float64],
+    btc_beta: NDArray[np.float64],
+    target_weight: float = 0.7
+) -> NDArray[np.float64]:
+    """Reduce systematic beta exposure prior to rigorous optimization."""
+    denom = float(np.dot(btc_beta, btc_beta))
+    if denom > 1e-9:
+        portfolio_beta = float(np.dot(w, btc_beta) / denom)
+        return w - target_weight * portfolio_beta * btc_beta
+    return w
+
+
 def _cross_sectional_neutralize_2d(
     score_2d: NDArray[np.float64],
     factor_2d: NDArray[np.float64],
@@ -231,7 +310,7 @@ def build_signed_rank_weights(
     beta_2d: NDArray[np.float64] | None = None,
     factor_2d: NDArray[np.float64] | None = None,
     gross_target: float = 1.0,
-    max_abs_net_exposure: float = 0.05,
+    max_abs_net_exposure: float = 0.10,
     max_abs_beta_exposure: float = 0.20,
 ) -> NDArray[np.float64]:
     """Convert rank scores to signed portfolio weights with EMA score-smoothing."""
@@ -243,8 +322,18 @@ def build_signed_rank_weights(
             score_raw, factor_2d, window=policy.neutralize_window, embargo=1
         )
 
-    # Apply EMA score-smoothing along axis 0 (time) to align signal frequency with holding horizon
-    score_2d = _ema_2d(score_raw, span=policy.holding_bars)
+    # Apply EMA/DEMA score-smoothing along axis 0 (time) to align signal frequency with holding horizon
+    smoothing = getattr(policy, "smoothing_method", "ema")
+    is_adaptive = getattr(policy, "adaptive_smoothing", False)
+
+    if is_adaptive:
+        vol = _compute_rolling_vol(score_raw, window=30)
+        score_2d = _ema_dema_adaptive_2d(score_raw, base_span=policy.holding_bars, vol=vol, method=smoothing)
+    else:
+        if smoothing == "dema":
+            score_2d = _dema_2d(score_raw, span=policy.holding_bars)
+        else:
+            score_2d = _ema_2d(score_raw, span=policy.holding_bars)
     
     z = _cs_zscore_2d(score_2d)
     signed = policy.polarity * z
@@ -291,6 +380,17 @@ def build_signed_rank_weights(
 
         row = out[t]
         row = np.where(row_elig, row, 0.0)
+
+        # Soft Beta Neutralize if enabled
+        if getattr(policy, "soft_beta_neutralize", False) and beta_2d is not None:
+            btc_beta = np.where(np.isfinite(beta_arr[t]), beta_arr[t], 0.0)
+            row = _soft_beta_neutralize(
+                row,
+                btc_beta,
+                target_weight=getattr(policy, "soft_beta_neutralize_weight", 0.7)
+            )
+            row = np.where(row_elig, row, 0.0)
+
         gross = float(np.sum(np.abs(row)))
         if gross > 1e-12:
             row = row * (float(gross_target) / gross)
@@ -408,7 +508,7 @@ def calibrate_rank_portfolio_policy(
     weighting: Literal["equal", "zscore", "tanh"] = "tanh",
     target_breadth_min: int = 8,
     max_turnover: float = 1.25,
-    max_abs_net_exposure: float = 0.05,
+    max_abs_net_exposure: float = 0.10,
     max_abs_beta_exposure: float = 0.20,
 ) -> RankSelectionPolicy:
     """Select validation-only rank-to-portfolio policy after costs and risk constraints."""
@@ -610,6 +710,10 @@ def policy_to_dict(policy: RankSelectionPolicy) -> dict[str, float | int | str]:
         "validation_abs_beta_exposure": float(policy.validation_abs_beta_exposure),
         "cs_neutralize": bool(policy.cs_neutralize),
         "neutralize_window": int(policy.neutralize_window),
+        "smoothing_method": str(policy.smoothing_method),
+        "adaptive_smoothing": bool(policy.adaptive_smoothing),
+        "soft_beta_neutralize": bool(policy.soft_beta_neutralize),
+        "soft_beta_neutralize_weight": float(policy.soft_beta_neutralize_weight),
     }
 
 
@@ -622,6 +726,8 @@ def policy_from_dict(payload: Mapping[str, Any]) -> RankSelectionPolicy:
         RankSelectionMode,
         selection_mode_str if selection_mode_str in {"tail", "soft_cs"} else "tail",
     )
+    smoothing_method_str = str(payload.get("smoothing_method", "dema"))
+    smoothing_method = cast(Literal["ema", "dema"], smoothing_method_str)
     return RankSelectionPolicy(
         polarity=1 if int(payload.get("polarity", 1)) >= 0 else -1,
         quantile=float(payload.get("quantile", 0.35)),
@@ -642,4 +748,37 @@ def policy_from_dict(payload: Mapping[str, Any]) -> RankSelectionPolicy:
         validation_abs_beta_exposure=float(payload.get("validation_abs_beta_exposure", float("nan"))),
         cs_neutralize=bool(payload.get("cs_neutralize", False)),
         neutralize_window=int(payload.get("neutralize_window", 60)),
+        smoothing_method=smoothing_method,
+        adaptive_smoothing=bool(payload.get("adaptive_smoothing", False)),
+        soft_beta_neutralize=bool(payload.get("soft_beta_neutralize", False)),
+        soft_beta_neutralize_weight=float(payload.get("soft_beta_neutralize_weight", 0.7)),
     )
+
+
+def build_simulation_beta_context(
+    common_syms: list[str],
+    data_maps: dict[str, dict[str, Any]],
+    timeframe: str,
+    target_index: pd.Index,
+) -> NDArray[np.float64]:
+    """Build dynamic rolling OLS beta matrix for evaluation without code duplication."""
+    from src.domain.futures.strategy.labels import _compute_trailing_beta
+    close_list = []
+    for s in common_syms:
+        df = data_maps[s][timeframe]
+        close_list.append(df["close"].reindex(target_index).ffill().bfill())
+    close_2d = np.column_stack([col.to_numpy(dtype=np.float64) for col in close_list])
+    return _compute_trailing_beta(close_2d)
+
+
+def merge_metadata_with_runtime_config(
+    metadata_policy: dict[str, Any],
+    runtime_cfg: Any,
+) -> dict[str, Any]:
+    """Merge serialized model metadata policy with current runtime config dynamically."""
+    merged = dict(metadata_policy)
+    merged["soft_beta_neutralize"] = bool(runtime_cfg.soft_beta_neutralize)
+    merged["soft_beta_neutralize_weight"] = float(runtime_cfg.soft_beta_neutralize_weight)
+    merged["max_abs_net_exposure"] = 0.10
+    merged["max_abs_beta_exposure"] = 0.20
+    return merged
