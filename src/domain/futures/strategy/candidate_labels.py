@@ -1,0 +1,180 @@
+from __future__ import annotations
+
+import math
+
+import numpy as np
+import pandas as pd
+
+from src.domain.futures.strategy.common.alignment import AlignedMarketData
+from src.domain.futures.strategy.config import CandidateStrategyConfig
+
+_BPS_SCALE = 1e4
+_ATR_PERIOD = 14
+
+
+def _compute_atr_2d(aligned: AlignedMarketData, period: int = _ATR_PERIOD) -> np.ndarray:
+    high = aligned.high_2d
+    low = aligned.low_2d
+    close = aligned.close_2d
+    prev_close = np.vstack([close[:1], close[:-1]])
+    tr = np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
+    out = np.full_like(tr, np.nan, dtype=np.float64)
+    for t in range(tr.shape[0]):
+        start = max(0, t - period + 1)
+        window = tr[start : t + 1]
+        with np.errstate(invalid="ignore"):
+            out[t] = np.nanmean(window, axis=0)
+    return out
+
+
+def _find_symbol_index(symbols: tuple[str, ...], symbol: str) -> int:
+    for idx, value in enumerate(symbols):
+        if value == symbol:
+            return idx
+    raise KeyError(f"unknown symbol: {symbol}")
+
+
+def label_candidate_events(
+    *,
+    events: pd.DataFrame,
+    aligned: AlignedMarketData,
+    cfg: CandidateStrategyConfig,
+) -> pd.DataFrame:
+    """Attach leak-free forward outcomes to candidate events.
+
+    Time Complexity: O(E * H), where E is number of events and H is holding horizon.
+    Space Complexity: O(T * N) for ATR cache.
+    """
+    if events.empty:
+        return events.copy()
+
+    required = {"symbol", "side", "entry_idx", "expected_holding_bars", "stop_atr_mult", "take_profit_atr_mult"}
+    missing = required.difference(events.columns)
+    if missing:
+        raise ValueError(f"missing required event columns: {sorted(missing)}")
+
+    atr_2d = _compute_atr_2d(aligned)
+    out = events.copy()
+    t_len = aligned.close_2d.shape[0]
+
+    gross_list: list[float] = []
+    cost_list: list[float] = []
+    edge_list: list[float] = []
+    label_list: list[int] = []
+    tte_list: list[int] = []
+    mae_list: list[float] = []
+    mfe_list: list[float] = []
+    rv_list: list[float] = []
+
+    for row in out.itertuples(index=False):
+        symbol = str(row.symbol)
+        side = int(row.side)
+        entry_idx = int(row.entry_idx)
+        horizon = max(int(row.expected_holding_bars), 1)
+        stop_mult = float(row.stop_atr_mult)
+        tp_mult = float(row.take_profit_atr_mult)
+
+        sym_idx = _find_symbol_index(aligned.symbols, symbol)
+        decision_idx = entry_idx - 1
+        if decision_idx < 0 or entry_idx >= t_len:
+            gross_list.append(np.nan)
+            cost_list.append(np.nan)
+            edge_list.append(np.nan)
+            label_list.append(0)
+            tte_list.append(0)
+            mae_list.append(np.nan)
+            mfe_list.append(np.nan)
+            rv_list.append(np.nan)
+            continue
+
+        entry_px = float(aligned.open_2d[entry_idx, sym_idx])
+        if not np.isfinite(entry_px) or entry_px <= 0.0:
+            gross_list.append(np.nan)
+            cost_list.append(np.nan)
+            edge_list.append(np.nan)
+            label_list.append(0)
+            tte_list.append(0)
+            mae_list.append(np.nan)
+            mfe_list.append(np.nan)
+            rv_list.append(np.nan)
+            continue
+
+        exit_limit = min(entry_idx + horizon - 1, t_len - 1)
+        high_path = aligned.high_2d[entry_idx : exit_limit + 1, sym_idx]
+        low_path = aligned.low_2d[entry_idx : exit_limit + 1, sym_idx]
+        close_path = aligned.close_2d[entry_idx : exit_limit + 1, sym_idx]
+
+        atr = float(atr_2d[decision_idx, sym_idx])
+        atr = atr if np.isfinite(atr) and atr > 0.0 else entry_px * 0.01
+        tp_thr = (tp_mult * atr) / entry_px
+        sl_thr = (stop_mult * atr) / entry_px
+
+        if side > 0:
+            fav = (high_path / entry_px) - 1.0
+            adv = (low_path / entry_px) - 1.0
+        else:
+            fav = (entry_px / np.maximum(low_path, 1e-12)) - 1.0
+            adv = (entry_px / np.maximum(high_path, 1e-12)) - 1.0
+
+        tp_hits = np.flatnonzero(np.isfinite(fav) & (fav >= tp_thr))
+        sl_hits = np.flatnonzero(np.isfinite(adv) & (adv <= -sl_thr))
+
+        tp_i = int(tp_hits[0]) if tp_hits.size > 0 else math.inf
+        sl_i = int(sl_hits[0]) if sl_hits.size > 0 else math.inf
+        if sl_i <= tp_i:
+            exit_off = int(sl_i) if np.isfinite(sl_i) else int(close_path.shape[0] - 1)
+            barrier_label = 0
+        elif np.isfinite(tp_i):
+            exit_off = int(tp_i)
+            barrier_label = 1
+        else:
+            exit_off = int(close_path.shape[0] - 1)
+            barrier_label = 0
+
+        exit_px = float(close_path[exit_off])
+        if side > 0:
+            gross_ret_bps = ((exit_px / entry_px) - 1.0) * _BPS_SCALE
+            path_ret = (close_path / entry_px) - 1.0
+        else:
+            gross_ret_bps = ((entry_px / max(exit_px, 1e-12)) - 1.0) * _BPS_SCALE
+            path_ret = (entry_px / np.maximum(close_path, 1e-12)) - 1.0
+        path_ret = path_ret[: exit_off + 1]
+
+        ex_ante_cost_bps = float(getattr(row, "cost_floor_bps", np.nan))
+        if not np.isfinite(ex_ante_cost_bps):
+            if aligned.execution_cost_bps_2d is not None:
+                ex_ante_cost_bps = float(aligned.execution_cost_bps_2d[decision_idx, sym_idx])
+            else:
+                ex_ante_cost_bps = 0.0
+        hurdle_bps = float(getattr(row, "hurdle_bps", 0.0))
+        edge_after_hurdle_bps = gross_ret_bps - ex_ante_cost_bps - hurdle_bps
+
+        triple_label = 1 if barrier_label == 1 and edge_after_hurdle_bps > 0.0 else 0
+
+        valid_path = path_ret[np.isfinite(path_ret)]
+        mae_bps = float(np.min(valid_path) * _BPS_SCALE) if valid_path.size > 0 else np.nan
+        mfe_bps = float(np.max(valid_path) * _BPS_SCALE) if valid_path.size > 0 else np.nan
+        rv_bps = (
+            float(np.std(np.diff(np.log(np.maximum(close_path[: exit_off + 1], 1e-12)))) * _BPS_SCALE)
+            if exit_off >= 1
+            else 0.0
+        )
+
+        gross_list.append(float(gross_ret_bps))
+        cost_list.append(float(ex_ante_cost_bps))
+        edge_list.append(float(edge_after_hurdle_bps))
+        label_list.append(int(triple_label))
+        tte_list.append(int(exit_off + 1))
+        mae_list.append(float(mae_bps))
+        mfe_list.append(float(mfe_bps))
+        rv_list.append(float(rv_bps))
+
+    out["gross_fwd_bps"] = np.asarray(gross_list, dtype=np.float64)
+    out["ex_ante_cost_bps"] = np.asarray(cost_list, dtype=np.float64)
+    out["edge_after_hurdle_bps"] = np.asarray(edge_list, dtype=np.float64)
+    out["triple_barrier_label"] = np.asarray(label_list, dtype=np.int8)
+    out["time_to_exit_bars"] = np.asarray(tte_list, dtype=np.int32)
+    out["mae_bps"] = np.asarray(mae_list, dtype=np.float64)
+    out["mfe_bps"] = np.asarray(mfe_list, dtype=np.float64)
+    out["realized_vol_bps"] = np.asarray(rv_list, dtype=np.float64)
+    return out
