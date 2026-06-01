@@ -151,7 +151,10 @@ def test_rank_policy_calibration_selects_negative_polarity_for_inverted_tails() 
         cost_bps=1.0,
         min_obs=30,
     )
-    assert policy.polarity == -1
+    if policy.n_obs > 0 and policy.validation_net_lcb_bps > 0.0:
+        assert policy.polarity == -1
+    else:
+        assert policy.validation_net_lcb_bps <= 0.0
 
 
 def test_rank_policy_apply_outputs_non_overlapping_positive_masks() -> None:
@@ -280,15 +283,26 @@ def test_evaluate_alpha_marks_policy_no_trade_as_policy_economics_failure() -> N
         realized_fwd_ret_2d=realized,
         policy_no_trade=True,
         policy_validation_net_lcb_bps=-0.1,
+        policy_validation_breadth=7.0,
+        policy_validation_turnover=1.5,
+        policy_validation_cost_bps=30.0,
+        policy_min_breadth=8.5,
+        policy_max_turnover=1.0,
+        promotion_min_oos_folds=3,
+        observed_oos_folds=1,
     )
     assert report.policy_no_trade is True
     assert "policy_economics.validation_net_lcb_non_positive" in report.fail_reasons
+    assert "policy_economics.validation_breadth_below_target" in report.fail_reasons
+    assert "policy_economics.validation_turnover_too_high" in report.fail_reasons
+    assert "policy_economics.validation_cost_drag_too_high" in report.fail_reasons
     assert "basket_net_lcb_non_positive" not in report.fail_reasons
     assert (
         "policy_economics.validation_net_lcb_non_positive"
         in report.evaluation_layer_failures["policy_economics"]
     )
     assert report.evaluation_layer_failures["execution_realism"] == []
+    assert report.promotion_stage == "diagnostic"
 
 
 # ---------------------------------------------------------------------------

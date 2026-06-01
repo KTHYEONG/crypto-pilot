@@ -142,6 +142,11 @@ class AlphaEvaluationReport:
     policy_validation_gross_bps: float = float("nan")
     policy_validation_ir_t: float = float("nan")
     policy_validation_monotonicity: float = float("nan")
+    policy_validation_turnover: float = float("nan")
+    policy_validation_cost_bps: float = float("nan")
+    policy_validation_breadth: float = float("nan")
+    policy_selection_mode: str = ""
+    promotion_stage: str = "diagnostic"
     policy_no_trade: bool = False
     evaluation_layer_failures: dict[str, list[str]] = field(default_factory=dict)
 
@@ -622,7 +627,16 @@ def evaluate_alpha(
     policy_validation_gross_bps: float = float("nan"),
     policy_validation_ir_t: float = float("nan"),
     policy_validation_monotonicity: float = float("nan"),
+    policy_validation_turnover: float = float("nan"),
+    policy_validation_cost_bps: float = float("nan"),
+    policy_validation_breadth: float = float("nan"),
+    policy_selection_mode: str = "",
     policy_no_trade: bool = False,
+    policy_min_breadth: float = 8.0,
+    policy_max_turnover: float = 1.25,
+    policy_max_cost_bps: float | None = None,
+    promotion_min_oos_folds: int = 2,
+    observed_oos_folds: int = 0,
 ) -> AlphaEvaluationReport:
     """Compute all alpha quality metrics in one call.
 
@@ -869,8 +883,22 @@ def evaluate_alpha(
         fail_reasons.append("deflated_sharpe_too_low")
     if policy_no_trade:
         fail_reasons.append("policy_economics.validation_net_lcb_non_positive")
+    if np.isfinite(policy_validation_breadth) and policy_validation_breadth < policy_min_breadth:
+        fail_reasons.append("policy_economics.validation_breadth_below_target")
+    if np.isfinite(policy_validation_turnover) and policy_validation_turnover > policy_max_turnover:
+        fail_reasons.append("policy_economics.validation_turnover_too_high")
+    _policy_cost_bps_threshold = (
+        float(cost_floor_bps) if policy_max_cost_bps is None else float(policy_max_cost_bps)
+    )
+    if np.isfinite(policy_validation_cost_bps) and policy_validation_cost_bps > _policy_cost_bps_threshold:
+        fail_reasons.append("policy_economics.validation_cost_drag_too_high")
 
     passes: bool = len(fail_reasons) == 0
+    promotion_stage = (
+        "paper"
+        if (passes and not policy_no_trade and int(observed_oos_folds) >= int(promotion_min_oos_folds))
+        else "diagnostic"
+    )
 
     _logger.debug(
         "evaluate_alpha: gating_ic=%.4f n_eff=%.1f n_eff_emit=%.1f"
@@ -970,6 +998,11 @@ def evaluate_alpha(
         policy_validation_gross_bps=float(policy_validation_gross_bps),
         policy_validation_ir_t=float(policy_validation_ir_t),
         policy_validation_monotonicity=float(policy_validation_monotonicity),
+        policy_validation_turnover=float(policy_validation_turnover),
+        policy_validation_cost_bps=float(policy_validation_cost_bps),
+        policy_validation_breadth=float(policy_validation_breadth),
+        policy_selection_mode=str(policy_selection_mode),
+        promotion_stage=promotion_stage,
         policy_no_trade=bool(policy_no_trade),
         evaluation_layer_failures=evaluation_layer_failures,
         clip_preservation_ratio=(
