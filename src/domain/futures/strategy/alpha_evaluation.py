@@ -717,9 +717,12 @@ def evaluate_alpha(
         "bear": float("nan"),
         "chop": float("nan"),
     }
+    from src.domain.futures.strategy.rank_selection import _ema_2d
     _gating_pred_2d: NDArray[np.float64] = (
         inference_signed_2d if inference_signed_2d is not None else pred_2d
     )
+    if inference_signed_2d is not None:
+        _gating_pred_2d = _ema_2d(_gating_pred_2d, span=horizon_bars)
     if regime_labels is not None:
         ic_series = rolling_ic(_gating_pred_2d, realized_fwd_ret_2d, method="spearman")
         for regime in ("bull", "bear", "chop"):
@@ -810,14 +813,17 @@ def evaluate_alpha(
     _infer_ic_dict: dict[str, float] | None = None
     _infer_breadth: float = float("nan")
     if inference_signed_2d is not None:
+        from src.domain.futures.strategy.rank_selection import _ema_2d
+        # Smooth the dense unclipped signal using the target horizon to match trading signal speed
+        smoothed_infer = _ema_2d(inference_signed_2d, span=horizon_bars)
         _infer_ic_dict = compute_net_ic(
-            inference_signed_2d, realized_fwd_ret_2d, horizon_bars=horizon_bars
+            smoothed_infer, realized_fwd_ret_2d, horizon_bars=horizon_bars
         )
         _resid_ic_dict = _infer_ic_dict
         _infer_breadth = float(
             np.mean(
                 np.sum(
-                    np.isfinite(inference_signed_2d) & (inference_signed_2d != 0.0),
+                    np.isfinite(smoothed_infer) & (smoothed_infer != 0.0),
                     axis=1,
                 )
             )
@@ -850,7 +856,7 @@ def evaluate_alpha(
         eligible_2d=(
             np.isfinite(_gating_pred_2d)
             & np.isfinite(realized_fwd_ret_2d)
-            & (np.isfinite(alpha_long_2d) | np.isfinite(alpha_short_2d))
+            & (_gating_pred_2d != 0.0)
         ),
         quantile=basket_quantile,
         cost_bps=cost_floor_bps,
