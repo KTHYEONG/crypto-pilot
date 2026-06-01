@@ -47,8 +47,8 @@ class OptimizationRequest:
     ml_n_jobs: int
     seed: int = 42
     resume: bool = False
-    strategy_mode: bool = False
-    # strategy_cfg: strategy-smoke/strategy 모드에서 AWF leg refit에 사용
+    strategy_mode: bool = True
+    # strategy_cfg: strategy/alpha 실행에서 AWF leg refit에 사용
     strategy_cfg: StrategyConfig | None = None
     n_workers_b: int = 1
     enqueue_seeds: list[dict[str, Any]] | None = None
