@@ -19,9 +19,6 @@ class MLPipelineOutput:
     """Neutral bridge output for runtime compatibility."""
 
     alpha_panel: pd.DataFrame = field(default_factory=pd.DataFrame)
-    market_probs: pd.DataFrame = field(default_factory=pd.DataFrame)
-    integrity_report: dict[str, Any] = field(default_factory=dict)
-    meta_feature_frame_by_symbol: dict[str, pd.DataFrame] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -31,11 +28,6 @@ class CandidatePipelineOutput:
     alpha_panel: pd.DataFrame = field(default_factory=pd.DataFrame)
     target_weights: pd.DataFrame | None = None
     rule_report: dict[str, Any] | None = None
-
-
-def _enrich_with_gp_features(df: pd.DataFrame, tf: str = "1h") -> pd.DataFrame:
-    del tf
-    return df
 
 
 def run_candidate_strategy_for_universe(
@@ -163,11 +155,6 @@ def run_ml_pipeline_for_universe(
     **kwargs: Any,
 ) -> MLPipelineOutput:
     t0 = time.perf_counter()
-    # Extract anchoring params BEFORE discarding kwargs
-    _anchor_end_idx: int | None = kwargs.get("anchor_end_idx")
-    _target_start: int | None = kwargs.get("target_start_idx")
-    _target_end: int | None = kwargs.get("target_end_idx")
-    _precomputed_panels = kwargs.get("precomputed_panels")
     del fetch_start, end_date, opt_config, kwargs
     if strategy_cfg is None or preloaded_data_maps is None:
         return MLPipelineOutput()
@@ -183,73 +170,17 @@ def run_ml_pipeline_for_universe(
 
     from src.domain.futures.strategy.builder import build_strategy_alpha
 
-    if _anchor_end_idx is not None and _target_start is not None and _target_end is not None:
-        from src.domain.futures.strategy.legacy.ml_builder import build_ml_strategy_alpha_anchored
-
-        alpha_panel = build_ml_strategy_alpha_anchored(
-            data_maps=preloaded_data_maps,
-            symbols=symbols,
-            tf=tf,
-            cfg=strategy_cfg,
-            anchor_end_idx=int(_anchor_end_idx),
-            target_start=int(_target_start),
-            target_end=int(_target_end),
-            precomputed_panels=_precomputed_panels,
-        )
-    else:
-        alpha_panel = build_strategy_alpha(
-            data_maps=preloaded_data_maps,
-            symbols=symbols,
-            tf=tf,
-            cfg=strategy_cfg,
-        )
-
-    market_probs = pd.DataFrame()
-    if strategy_cfg.regime.enabled:
-        from src.domain.futures.strategy.regime.provider import compute_regime_posterior
-
-        from src.domain.futures.optimization.optimizer import compute_multi_alignment_info
-
-        info = compute_multi_alignment_info(preloaded_data_maps, symbols, tf, embargo=0)
-        if info is not None:
-            eff_len = int(info["eff_ref_len"])
-            offsets = info["alignment_offsets"]
-            valid_symbols = [
-                sym
-                for sym in symbols
-                if (
-                    sym in offsets and sym in preloaded_data_maps and tf in preloaded_data_maps[sym]
-                )
-            ]
-            if len(valid_symbols) >= strategy_cfg.blend.min_symbols:
-                close_2d: np.ndarray = np.zeros(
-                    (eff_len, len(valid_symbols)),
-                    dtype=np.float64,
-                )
-                datetimes = None
-                for col_idx, sym in enumerate(valid_symbols):
-                    df = preloaded_data_maps[sym][tf]
-                    start_idx = offsets[sym]
-                    end_idx = start_idx + eff_len
-                    close_2d[:, col_idx] = (
-                        df["close"].iloc[start_idx:end_idx].to_numpy(dtype=np.float64)
-                    )
-                    if datetimes is None:
-                        datetimes = df["datetime"].iloc[start_idx:end_idx].to_numpy()
-
-                if datetimes is not None:
-                    probs_dict = compute_regime_posterior(close_2d, strategy_cfg.regime)
-                    probs_dict["datetime"] = datetimes
-                    market_probs = pd.DataFrame(probs_dict).set_index("datetime")
-
-    out = MLPipelineOutput(alpha_panel=alpha_panel, market_probs=market_probs)
-    anchored = bool(
-        _anchor_end_idx is not None and _target_start is not None and _target_end is not None
+    alpha_panel = build_strategy_alpha(
+        data_maps=preloaded_data_maps,
+        symbols=symbols,
+        tf=tf,
+        cfg=strategy_cfg,
     )
+
+    out = MLPipelineOutput(alpha_panel=alpha_panel)
     alpha_rows = len(alpha_panel)
     _logger.info(
-        "[ML-PIPE-PROF] anchored=%s symbols=%d tf=%s elapsed=%.2fs alpha_rows=%d",
-        anchored,
+        "[ML-PIPE-PROF] symbols=%d tf=%s elapsed=%.2fs alpha_rows=%d",
         len(symbols),
         tf,
         time.perf_counter() - t0,
@@ -348,7 +279,6 @@ def merge_ml_output_into_data_maps(
         _logger.warning("[%s] alpha_panel missing required columns; skip merge", log_tag)
         return
 
-    _rank_cols = [c for c in ("rank_score_long", "rank_score_short") if c in panel.columns]
     by_sym = panel.reset_index().groupby("symbol", sort=False)
     for sym in symbols:
         if sym not in data_maps or tf not in data_maps[sym]:
@@ -361,32 +291,19 @@ def merge_ml_output_into_data_maps(
         if "alpha_long" in df.columns or "alpha_short" in df.columns:
             _logger.warning("[%s] overwrite alpha columns for symbol=%s", log_tag, sym)
         left = df[["datetime"]].copy()
-        merge_cols = ["datetime", "alpha_long", "alpha_short", *_rank_cols]
+        merge_cols = ["datetime", "alpha_long", "alpha_short"]
         right = sym_rows[merge_cols].copy()
         left["_merge_datetime"] = pd.to_datetime(left["datetime"], utc=True).dt.tz_localize(None)
         right["_merge_datetime"] = pd.to_datetime(right["datetime"], utc=True).dt.tz_localize(None)
-        merge_value_cols = ["_merge_datetime", "alpha_long", "alpha_short", *_rank_cols]
+        merge_value_cols = ["_merge_datetime", "alpha_long", "alpha_short"]
         merged = left.merge(
             right[merge_value_cols],
             on="_merge_datetime",
             how="left",
         )
 
-        # === [DIAG-MERGE] ===
-        raw_long_nz = int(np.count_nonzero(right["alpha_long"].fillna(0.0).to_numpy()))
-        merged_long_nz = int(np.count_nonzero(merged["alpha_long"].fillna(0.0).to_numpy()))
-        if log_tag == "oos":
-            l_sample = [str(x)[:19] for x in left["_merge_datetime"].iloc[:2]]
-            r_sample = [str(x)[:19] for x in right["_merge_datetime"].iloc[:2]]
-            _logger.debug(
-                f" [DIAG-SHORT] sym={sym} raw_L_nz={raw_long_nz} merged_L_nz={merged_long_nz} "
-                f"L_rows={len(left)} R_rows={len(right)} L_dt={l_sample} R_dt={r_sample}"
-            )
-
         df["alpha_long"] = merged["alpha_long"].fillna(0.0).to_numpy(dtype=np.float64)
         df["alpha_short"] = merged["alpha_short"].fillna(0.0).to_numpy(dtype=np.float64)
-        for _rc in _rank_cols:
-            df[_rc] = merged[_rc].fillna(0.0).to_numpy(dtype=np.float64)
 
     # [ALPHA-MERGE] summary log
     merged_symbols = sum(
@@ -398,8 +315,6 @@ def merge_ml_output_into_data_maps(
     )
     _long_nz_ratios: list[float] = []
     _short_nz_ratios: list[float] = []
-    _target_oos_long_nz_ratios: list[float] = []
-    _target_oos_short_nz_ratios: list[float] = []
     for sym in symbols:
         if sym not in data_maps or tf not in data_maps[sym]:
             continue
@@ -408,18 +323,7 @@ def merge_ml_output_into_data_maps(
             _long_nz_ratios.append(float((_df["alpha_long"] != 0).mean()))
         if "alpha_short" in _df.columns:
             _short_nz_ratios.append(float((_df["alpha_short"] != 0).mean()))
-        _oos_key = f"oos_start_idx_{tf}"
-        if _oos_key in data_maps[sym]:
-            _start = int(data_maps[sym][_oos_key])
-            _mask = np.arange(len(_df), dtype=np.int64) >= _start
-            if "alpha_long" in _df.columns:
-                _target_oos_long_nz_ratios.append(
-                    float(np.mean(_df["alpha_long"].to_numpy(dtype=np.float64)[_mask] != 0.0))
-                )
-            if "alpha_short" in _df.columns:
-                _target_oos_short_nz_ratios.append(
-                    float(np.mean(_df["alpha_short"].to_numpy(dtype=np.float64)[_mask] != 0.0))
-                )
+    
     _alpha_long_nz = float(np.mean(_long_nz_ratios)) if _long_nz_ratios else 0.0
     _alpha_short_nz = float(np.mean(_short_nz_ratios)) if _short_nz_ratios else 0.0
     _panel_start = "na"
@@ -432,12 +336,7 @@ def merge_ml_output_into_data_maps(
         _panel_end = str(_panel_dt.max())
     except Exception as exc:
         _logger.debug("[ALPHA-MERGE] panel datetime extraction failed: %s", exc)
-    _target_oos_long_nz = (
-        float(np.mean(_target_oos_long_nz_ratios)) if _target_oos_long_nz_ratios else 0.0
-    )
-    _target_oos_short_nz = (
-        float(np.mean(_target_oos_short_nz_ratios)) if _target_oos_short_nz_ratios else 0.0
-    )
+    
     _logger.info(
         ".. ALPHA_MERGE: syms=%d span=%s ~ %s L_nz=%.3f S=%.3f",
         merged_symbols,
