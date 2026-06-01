@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 import pandas as pd
 
-from src.domain.futures.optimization.optimizer import compute_multi_alignment_info
 from src.domain.futures.strategy.config import StrategyConfig
-
-_logger = logging.getLogger(__name__)
 
 
 def build_strategy_alpha(
@@ -39,20 +35,6 @@ def build_strategy_alpha(
         )
         return res.alpha_panel
 
-    # 1. Align price panels (using compute_multi_alignment_info base)
-    info = compute_multi_alignment_info(data_maps, symbols, tf, embargo=0)
-    if info is None:
-        return pd.DataFrame(columns=["alpha_long", "alpha_short"])
-
-    offsets: dict[str, int] = info["alignment_offsets"]
-    valid_symbols = [
-        sym for sym in symbols if sym in offsets and sym in data_maps and tf in data_maps[sym]
-    ]
-
-    min_syms = cfg.blend.min_symbols
-    if len(valid_symbols) < min_syms:
-        raise ValueError(f"strategy needs >= {min_syms} symbols, got {len(valid_symbols)}")
-
-    # Legacy sleeve logic removed. Only candidate_ml path is fully supported.
-    _logger.warning(f"Strategy {cfg.name} not fully implemented in non-legacy mode.")
-    return pd.DataFrame(columns=["alpha_long", "alpha_short"])
+    raise ValueError(
+        f"unsupported active strategy name: {cfg.name}; allowed: candidate_ml, rule_baseline"
+    )

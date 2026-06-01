@@ -437,11 +437,7 @@ def run_oos_margin_shared_portfolio(
 ) -> dict[str, Any]:
     import gc
 
-    from src.domain.futures.strategy_runtime.bridge import FuturesMLStrategy
-
     from .data_aligner import _segment_with_context, align_data_for_2d_engine
-
-    strategy = FuturesMLStrategy(name="OOS_Portfolio", params=params)
     full_signal_dfs: dict[str, pd.DataFrame] = {}
     seg_dfs: dict[str, pd.DataFrame] = {}
 
@@ -449,8 +445,8 @@ def run_oos_margin_shared_portfolio(
         "open", "high", "low", "close", "volume", "atr",
         "entry_upper", "entry_lower", "trend_direction", "strength_filter",
         "garch_kelly_f", "funding_rate_sum", "kill_signal", "membership_kill_signal",
-        "entry_block_mask", "slot_rank_score", "ml_calib_prob", "dyn_leverage",
-        "xs_score_long", "xs_score_short", "alpha_long", "alpha_short",
+        "entry_block_mask", "dyn_leverage",
+        "alpha_long", "alpha_short",
         "datetime"
     }
 
@@ -467,7 +463,7 @@ def run_oos_margin_shared_portfolio(
         slice_start = max(0, oos_start - warmup_margin)
         sliced_df = full_df.iloc[slice_start:end_cap].copy(deep=False)
         
-        full_sig = strategy.generate_signals(sliced_df)
+        full_sig = sliced_df.copy()
         
         # Drop heavy non-essential columns to free RAM immediately
         cols_to_drop = [c for c in full_sig.columns if c not in required_backtest_cols]
@@ -522,14 +518,6 @@ def run_oos_margin_shared_portfolio(
     trades_df, equity_curve, final_balance, _bt_diag = engine.run()
     
     # === [DIAG-OOS-ENGINE-END] ===
-    if "xs_score_long" in aligned_data:
-        xsl = np.asarray(aligned_data["xs_score_long"])
-        xss = np.asarray(aligned_data["xs_score_short"])
-        _logger.info(
-            " [DIAG-OOS-ENGINE-XS] xs_score_long nz: %.4f%%, max: %.6f | xs_score_short nz: %.4f%%, max: %.6f",
-            np.mean(xsl != 0.0) * 100.0, np.max(xsl) if xsl.size > 0 else 0.0,
-            np.mean(xss != 0.0) * 100.0, np.max(xss) if xss.size > 0 else 0.0
-        )
     if "target_weights" in aligned_data:
         tw = np.asarray(aligned_data["target_weights"])
         _logger.info(
@@ -776,7 +764,7 @@ def calc_n_trials_eff_entropy(
     sig = np.asarray(signatures, dtype=np.float64)
     w = np.asarray(weights, dtype=np.float64)
 
-    n_trials, n_features = sig.shape
+    n_trials, _n_features = sig.shape
     if n_trials < 2:
         return 1.0
 

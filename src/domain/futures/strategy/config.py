@@ -5,51 +5,6 @@ from typing import Literal
 
 
 @dataclass(slots=True, frozen=True)
-class MomentumConfig:
-    """XS momentum sleeve parameters."""
-
-    lookback_bars: int = 6
-    top_ratio: float = 0.30
-    bottom_ratio: float = 0.30
-    min_symbols_for_xs: int = 5
-    edge_scale_per_bar: float = 1e-3
-
-    def __post_init__(self) -> None:
-        """Validate momentum parameter bounds."""
-        if self.lookback_bars < 1:
-            raise ValueError("lookback_bars must be >= 1")
-        if not (0.0 < self.top_ratio <= 0.5):
-            raise ValueError("top_ratio must satisfy 0 < top_ratio <= 0.5")
-        if not (0.0 < self.bottom_ratio <= 0.5):
-            raise ValueError("bottom_ratio must satisfy 0 < bottom_ratio <= 0.5")
-
-
-@dataclass(slots=True, frozen=True)
-class SleeveConfig:
-    """Enhanced strategy multi-sleeve switch and parameter settings."""
-
-    # TS momentum disabled: negative IC at all tested horizons (4h t=-6.8, 1d t=-2.3)
-    ts_momentum_enabled: bool = False
-    ts_momentum_lookback: int = 36
-    ts_momentum_skip: int = 1
-    reversal_enabled: bool = True
-    reversal_lookback: int = 6
-    carry_enabled: bool = True
-    carry_smooth: int = 6
-
-    def __post_init__(self) -> None:
-        """Validate sleeve parameters."""
-        if self.ts_momentum_lookback < 1:
-            raise ValueError("ts_momentum_lookback must be >= 1")
-        if self.ts_momentum_skip < 0:
-            raise ValueError("ts_momentum_skip must be >= 0")
-        if self.reversal_lookback < 1:
-            raise ValueError("reversal_lookback must be >= 1")
-        if self.carry_smooth < 1:
-            raise ValueError("carry_smooth must be >= 1")
-
-
-@dataclass(slots=True, frozen=True)
 class BlendConfig:
     """Enhanced strategy blending parameters."""
 
@@ -121,9 +76,7 @@ class RegimeConfig:
 class StrategyConfig:
     """Top-level strategy switch."""
 
-    name: str = "momentum"
-    momentum: MomentumConfig = field(default_factory=MomentumConfig)
-    sleeves: SleeveConfig = field(default_factory=SleeveConfig)
+    name: str = "candidate_ml"
     blend: BlendConfig = field(default_factory=BlendConfig)
     regime: RegimeConfig = field(default_factory=RegimeConfig)
     candidate: CandidateStrategyConfig = field(default_factory=lambda: CandidateStrategyConfig())
@@ -133,8 +86,6 @@ class StrategyConfig:
         if self.name not in {
             "candidate_ml",
             "rule_baseline",
-            "momentum",
-            "xs_reversal",
         }:
             raise ValueError(f"unsupported strategy name: {self.name}")
 
@@ -165,9 +116,9 @@ class CandidateStrategyConfig:
     beta_cap: float = 0.50
     target_ann_vol: float = 0.35
     kelly_fraction: float = 0.25
-    min_gate_probability: float = 0.15
-    min_expected_net_bps: float = -35.0
-    max_expected_shortfall_bps: float = 990.0
+    min_gate_probability: float = 0.55
+    min_expected_net_bps: float = 1.0
+    max_expected_shortfall_bps: float = 80.0
     candidate_families: tuple[str, ...] = (
         "trend_ma",
         "trend_donchian",
@@ -204,4 +155,3 @@ class CandidateStrategyConfig:
             raise ValueError("gross cap must be at least max symbol weight")
         if self.min_candidate_obs <= 0 or self.min_symbol_oos_blocks <= 0:
             raise ValueError("minimum observations and blocks must be positive")
-

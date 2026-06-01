@@ -43,13 +43,7 @@ from src.domain.futures.optimization.opt_config import (
     OPT_FUTURES_CONFIG,
     default_ev_hurdle_bps,
 )
-from src.domain.futures.portfolio.friction_model import CostSnapshot, resolve_cost_snapshot
-from src.domain.futures.portfolio.portfolio_constructor import (
-    RiskSnapshot,
-    portfolio_weight_params_from_optuna,
-    precompute_rebalance_weights,
-)
-from src.domain.futures.portfolio.portfolio_optimizer import PortfolioPolicyInputs
+from src.domain.futures.portfolio.friction_model import CostSnapshot
 
 if TYPE_CHECKING:
     from src.domain.futures.optimization.ml_context import MLPhaseDContext
@@ -67,7 +61,7 @@ def _build_strategy_compose_diag(
     cost_snapshot: CostSnapshot,
     holding_bars: int | None = None,
 ) -> dict[str, float]:
-    from src.domain.futures.strategy.diagnostics import preservation_ratio
+    from src.domain.futures.optimization.diag_utils import preservation_ratio
 
     n_bars = alpha_long.shape[0]
     beta_a = float(
@@ -330,182 +324,6 @@ def _cached_kill_fund_lev(
     return zkill, zfund, lev_blk
 
 
-def _compose_strategy_scores_inplace(
-    aligned: dict[str, Any],
-    params: dict[str, Any],
-    *,
-    trial_number: int | None = None,
-) -> None:
-    """Build xs_score from alpha_long/alpha_short for strategy-mode trials."""
-    alpha_l = aligned.get("alpha_long")
-    alpha_s = aligned.get("alpha_short")
-    if alpha_l is None or alpha_s is None:
-        raise RuntimeError("strategy mode requires aligned alpha_long/alpha_short")
-    alpha_l_2d = np.asarray(alpha_l, dtype=np.float64)
-    alpha_s_2d = np.asarray(alpha_s, dtype=np.float64)
-    if alpha_l_2d.ndim != 2 or alpha_s_2d.ndim != 2 or alpha_l_2d.shape != alpha_s_2d.shape:
-        raise RuntimeError("strategy mode requires 2D alpha_long/alpha_short with matching shape")
-
-    n_bars, n_syms = alpha_l_2d.shape
-
-    dynamic_on = bool(
-        params.get(
-            "COST_FORECAST_DYNAMIC",
-            OPT_FUTURES_CONFIG.get("COST_FORECAST_DYNAMIC", False),
-        )
-    )
-    selected_cost_bps = aligned.get("execution_cost_bps_2d")
-    selected_cost_frac = aligned.get("execution_cost_fraction_2d")
-    selected_cost_source = "fallback_global"
-    if dynamic_on and aligned.get("execution_cost_bps_2d_dynamic") is not None:
-        selected_cost_bps = aligned.get("execution_cost_bps_2d_dynamic")
-        selected_cost_frac = aligned.get("execution_cost_fraction_2d_dynamic")
-        selected_cost_source = str(
-            aligned.get("_cost_forecast_source_dynamic", "parametric_dynamic")
-        )
-        if aligned.get("capacity_notional_2d_dynamic") is not None:
-            aligned["capacity_notional_2d"] = aligned.get("capacity_notional_2d_dynamic")
-        aligned["_cost_forecast_dynamic"] = 1.0
-    else:
-        if selected_cost_bps is not None:
-            selected_cost_source = str(aligned.get("_cost_forecast_source", "universe_static"))
-        elif aligned.get("execution_cost_bps_2d_static") is not None:
-            selected_cost_bps = aligned.get("execution_cost_bps_2d_static")
-            selected_cost_frac = aligned.get("execution_cost_fraction_2d_static")
-            selected_cost_source = str(
-                aligned.get("_cost_forecast_source_static", "universe_static")
-            )
-        else:
-            selected_cost_source = "fallback_global"
-        aligned["_cost_forecast_dynamic"] = 0.0
-
-    if selected_cost_bps is not None:
-        aligned["execution_cost_bps_2d"] = selected_cost_bps
-    if selected_cost_frac is not None:
-        aligned["execution_cost_fraction_2d"] = selected_cost_frac
-
-    cost_snapshot = resolve_cost_snapshot(
-        execution_cost_bps_2d=cast(
-            NDArray[np.float64] | None,
-            selected_cost_bps,
-        ),
-        shape=(n_bars, n_syms),
-    )
-    if selected_cost_frac is not None:
-        friction_2d = np.asarray(selected_cost_frac, dtype=np.float64)
-    else:
-        friction_2d = np.asarray(cost_snapshot.execution_cost_fraction_2d, dtype=np.float64)
-
-    # compose_mu 위임 (Phase 1: 동일 수치 — behavior-preserving)
-    from src.domain.futures.forecast.compose import compose_mu as _compose_mu
-    from src.domain.futures.forecast.contracts import (
-        AlphaArtifactHash,
-        AlphaForecast,
-        CostForecast,
-    )
-
-    _dummy_hash = AlphaArtifactHash(
-        alpha_config_hash="",
-        feature_config_hash="",
-        label_config_hash="",
-        train_window_hash="",
-        fold_spec_hash="",
-        model_family="",
-        selected_horizon=-1,
-    )
-    _af = AlphaForecast(
-        datetimes=np.array([]),
-        symbols=(),
-        alpha_long_2d=alpha_l_2d,
-        alpha_short_2d=alpha_s_2d,
-        q10_long_2d=None,
-        q50_long_2d=None,
-        q90_long_2d=None,
-        q10_short_2d=None,
-        q50_short_2d=None,
-        q90_short_2d=None,
-        confidence_long_2d=None,
-        confidence_short_2d=None,
-        eligible_mask=np.ones(alpha_l_2d.shape, dtype=bool),
-        source="objectives_inplace",
-        artifact_hash=_dummy_hash,
-        rank_score_long_2d=aligned.get("rank_score_long_2d"),   # may be None
-        rank_score_short_2d=aligned.get("rank_score_short_2d"), # may be None
-    )
-    _cf = CostForecast(
-        execution_cost_bps_2d=np.asarray(cost_snapshot.execution_cost_bps_2d, dtype=np.float64),
-        execution_cost_fraction_2d=friction_2d,
-        uncertainty_bps_2d=np.zeros_like(friction_2d),
-        capacity_notional_2d=None,
-        source=cost_snapshot.execution_cost_bps_source,
-    )
-    holding_bars = max(1, int(params.get("REBALANCE_BARS", 1)))
-    xs_l, xs_s, mu_l, mu_s = _compose_mu(_af, _cf, params, holding_bars=holding_bars)
-
-    aligned["xs_score_long"] = np.ascontiguousarray(xs_l)
-    aligned["xs_score_short"] = np.ascontiguousarray(xs_s)
-    aligned["mu_long_2d"] = np.ascontiguousarray(mu_l)
-    aligned["mu_short_2d"] = np.ascontiguousarray(mu_s)
-    aligned["_strategy_compose_diag"] = _build_strategy_compose_diag(
-        alpha_long=alpha_l_2d,
-        alpha_short=alpha_s_2d,
-        xs_long=xs_l,
-        xs_short=xs_s,
-        params=params,
-        cost_snapshot=cost_snapshot,
-        holding_bars=holding_bars,
-    )
-    aligned["_strategy_cost_snapshot_meta"] = {
-        "execution_cost_bps_source": selected_cost_source,
-        "round_trip_cost_bps": float(cost_snapshot.round_trip_cost_bps_fallback),
-    }
-    aligned["_strategy_signal_path_diag"] = {
-        "alpha_nz": float(
-            np.count_nonzero((np.abs(alpha_l_2d) > 1e-12) | (np.abs(alpha_s_2d) > 1e-12))
-            / max(alpha_l_2d.size, 1)
-        ),
-        "xs_nz": float(
-            np.count_nonzero((np.abs(xs_l) > 1e-12) | (np.abs(xs_s) > 1e-12)) / max(xs_l.size, 1)
-        ),
-        "xs_long_preservation_ratio": float(
-            aligned["_strategy_compose_diag"].get("xs_long_preservation_ratio", 0.0)
-        ),
-        "xs_short_preservation_ratio": float(
-            aligned["_strategy_compose_diag"].get("xs_short_preservation_ratio", 0.0)
-        ),
-        "rank_candidate_nz": float(
-            np.count_nonzero((np.abs(xs_l) > 1e-12) | (np.abs(xs_s) > 1e-12)) / max(xs_l.size, 1)
-        ),
-        "rank_candidate_to_xs_preservation": float(
-            aligned["_strategy_compose_diag"].get("xs_long_preservation_ratio", 0.0)
-            + aligned["_strategy_compose_diag"].get("xs_short_preservation_ratio", 0.0)
-        )
-        / 2.0,
-        "post_cost_admission_mode": str(params.get("POST_COST_ADMISSION_MODE", "ev_gate")),
-    }
-    if trial_number is not None and trial_number < 3:
-        _diag: dict[str, float] = aligned["_strategy_compose_diag"]
-        _beta_a = float(
-            params.get("BETA_ALPHA", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))
-        )
-        _logger.info(
-            "[COMPOSE-DIAG] trial=%d beta_alpha=%.2f friction=%.1fbps hurdle=%.1fbps"
-            " thr=%.1fbps alpha_l_p95=%.1fbps alpha_s_p95=%.1fbps"
-            " xs_long_nz=%.4f xs_short_nz=%.4f preserve_l=%.4f preserve_s=%.4f",
-            trial_number,
-            _beta_a,
-            _diag.get("friction_bps", 0.0),
-            _diag.get("ev_hurdle_bps", 0.0),
-            _diag.get("effective_threshold_bps", 0.0),
-            _diag.get("alpha_long_p95", 0.0) * 10000.0,
-            _diag.get("alpha_short_p95", 0.0) * 10000.0,
-            _diag.get("xs_long_nz_ratio", 0.0),
-            _diag.get("xs_short_nz_ratio", 0.0),
-            _diag.get("xs_long_preservation_ratio", 0.0),
-            _diag.get("xs_short_preservation_ratio", 0.0),
-        )
-
-
 def _run_portfolio_numba_block(
     params: dict[str, Any],
     aligned: dict[str, Any],
@@ -528,15 +346,12 @@ def _run_portfolio_numba_block(
         orig_aligned["_prepared_cache"] = prepared
     t_prep_align = time.perf_counter() - t0_align
 
-    # 2. STRATEGY_MODE compose: trial별 xs_score 격리 (얕은 복사로 공유 aligned 보호)
-    # 캐시 교체 이후 compose해야 xs_score가 최종 aligned에 유지됨.
-    # race condition 방지: 공유 prepared.aligned_data를 직접 쓰지 않고 사본에 쓴다.
     t0_compose = time.perf_counter()
-    if bool(params.get("STRATEGY_MODE", False)):
-        aligned = {**aligned}  # xs_score 쓰기 격리 (얕은 복사)
-        _compose_strategy_scores_inplace(aligned, params, trial_number=trial_number)
-        if "xs_score_long" not in aligned or "xs_score_short" not in aligned:
-            raise RuntimeError("strategy mode failed to generate xs_score_long/xs_score_short")
+    tw_from_strategy = aligned.get("target_weights")
+    if tw_from_strategy is None or np.asarray(tw_from_strategy).shape != np.asarray(aligned["close"]).shape:
+        raise RuntimeError(
+            "target_weights required: pre-merge candidate output before calling objectives"
+        )
     t_compose = time.perf_counter() - t0_compose
 
     t0_const = time.perf_counter()
@@ -551,83 +366,9 @@ def _run_portfolio_numba_block(
     aligned["_prof_prep_constraint"] = t_prep_constraint
     cfg_block = OPT_FUTURES_CONFIG
     reb_b = max(1, int(params["REBALANCE_BARS"]))
-    pwp = portfolio_weight_params_from_optuna(params, cfg_block)
-
-    pwp["f_kelly_max"] = min(float(pwp["f_kelly_max"]), float(params.get("KELLY_IC_UPPER", 0.5)))
 
     hpb = hours_per_bar_from_timeframe(str(params.get("TIMEFRAME", "4h")))
-    bars_py = (365.0 * 24.0) / max(hpb, 1e-9)
-    close_np = np.asarray(aligned["close"], dtype=np.float64)
-    xl = np.asarray(
-        aligned.get("xs_score_long", np.zeros_like(close_np)), dtype=np.float64
-    )
-    xs = np.asarray(
-        aligned.get("xs_score_short", np.zeros_like(close_np)), dtype=np.float64
-    )
-    sigma_3d = aligned.get("sigma_3d")
-    beta_2d = aligned.get("btc_beta_2d")
-    residual_var_2d = aligned.get("residual_var_2d")
-    capacity_notional_2d = aligned.get("capacity_notional_2d")
-    policy_inputs = PortfolioPolicyInputs(
-        mu_long_2d=cast(np.ndarray | None, aligned.get("mu_long_2d")),
-        mu_short_2d=cast(np.ndarray | None, aligned.get("mu_short_2d")),
-        risk_sigma_3d=cast(np.ndarray | None, sigma_3d),
-        risk_beta_2d=cast(np.ndarray | None, beta_2d),
-        risk_residual_var_2d=cast(np.ndarray | None, residual_var_2d),
-        cost_fraction_2d=cast(
-            np.ndarray | None,
-            aligned.get("execution_cost_fraction_2d"),
-        ),
-        cost_bps_2d=cast(np.ndarray | None, aligned.get("execution_cost_bps_2d")),
-        cost_source=cast(
-            str | None,
-            (aligned.get("_strategy_cost_snapshot_meta") or {}).get("execution_cost_bps_source"),
-        ),
-        capacity_notional_2d=cast(np.ndarray | None, capacity_notional_2d),
-    )
-    risk_snapshot = None
-    if sigma_3d is not None:
-        risk_snapshot = RiskSnapshot(
-            covariance_3d=np.asarray(sigma_3d, dtype=np.float64),
-            beta_2d=np.asarray(beta_2d, dtype=np.float64) if beta_2d is not None else None,
-            residual_var_2d=(
-                np.asarray(residual_var_2d, dtype=np.float64)
-                if residual_var_2d is not None
-                else None
-            ),
-        )
-    tw_blk = np.asarray(
-        precompute_rebalance_weights(
-            close_np,
-            xl,
-            xs,
-            rebalance_bars=reb_b,
-            lookback=int(pwp["lookback"]),
-            bars_per_year=bars_py,
-            kappa=float(pwp["kappa"]),
-            f_kelly_max=float(pwp["f_kelly_max"]),
-            sigma_target_ann=float(pwp["sigma_target_ann"]),
-            gross_cap=float(pwp["gross_cap"]),
-            per_symbol_cap=float(pwp["per_symbol_cap"]),
-            current_dd=0.0,
-            composer_sigma_2d=(
-                np.asarray(aligned["composer_sigma_bar"], dtype=np.float64)
-                if aligned.get("composer_sigma_bar") is not None
-                else None
-            ),
-            sigma_3d=sigma_3d,
-            risk_snapshot=risk_snapshot,
-            btc_beta_2d=np.asarray(beta_2d, dtype=np.float64) if beta_2d is not None else None,
-            policy_inputs=policy_inputs,
-            use_residual_var_for_kelly=bool(
-                params.get(
-                    "KELLY_USE_RESIDUAL_VAR",
-                    OPT_FUTURES_CONFIG.get("KELLY_USE_RESIDUAL_VAR", False),
-                )
-            ),
-        ),
-        dtype=np.float64,
-    )
+    tw_blk = np.asarray(tw_from_strategy, dtype=np.float64)
     entry_block = aligned.get("entry_block_mask")
     if entry_block is not None:
         entry_block_2d = np.asarray(entry_block, dtype=np.float64)
@@ -821,14 +562,13 @@ def _evaluate_awf_phase_d_aggregate(
         ns = bool(cfg.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False))
         return ((fail, fail) if ns else fail), diag
 
-    if ml_bundle.get("TIMEFRAME"):
-        params = dict(ml_bundle)
-    else:
-        params = _base_engine_params(ml_bundle, ctx.tf)
-    if ctx.strategy_mode:
-        params["STRATEGY_MODE"] = True
+    params = (
+        dict(ml_bundle)
+        if ml_bundle.get("TIMEFRAME")
+        else _base_engine_params(ml_bundle, ctx.tf)
+    )
+    params["STRATEGY_MODE"] = True
     params["ESTIMATED_B"] = ctx.estimated_b
-    params["KELLY_IC_UPPER"] = ctx.kelly_ic_upper
 
     n_trials_eff = int(cfg.get("total_trials", 400))
     if ctx.effective_total_trials is not None:
@@ -889,21 +629,6 @@ def _evaluate_awf_phase_d_aggregate(
         _trial_num_leg = trial.number if trial is not None else None
         if _trial_num_leg is not None and _trial_num_leg < 5:
             _b_bars_leg = max(1, leg_range[1] - leg_range[0])
-            _xs_l_leg = aligned.get("xs_score_long")
-            _xs_s_leg = aligned.get("xs_score_short")
-            _tw_nz = 0.0
-            if _xs_l_leg is not None and _xs_s_leg is not None:
-                _xs_l_arr = np.asarray(_xs_l_leg, dtype=np.float64)
-                _xs_s_arr = np.asarray(_xs_s_leg, dtype=np.float64)
-                _tw_nz = float(
-                    np.count_nonzero(
-                        (np.abs(_xs_l_arr) > 1e-12) | (np.abs(_xs_s_arr) > 1e-12)
-                    )
-                    / max(_xs_l_arr.size, 1)
-                )
-            elif _xs_l_leg is not None:
-                _xs_arr = np.asarray(_xs_l_leg, dtype=np.float64)
-                _tw_nz = float(np.count_nonzero(np.abs(_xs_arr) > 1e-12) / max(_xs_arr.size, 1))
             _n_long_leg = int(np.sum(b_trades_raw[:, 3] == 1.0)) if n_tr > 0 else 0
             _n_short_leg = int(np.sum(b_trades_raw[:, 3] == -1.0)) if n_tr > 0 else 0
             _path_diag_leg = aligned.get("_strategy_signal_path_diag")
@@ -917,20 +642,9 @@ def _evaluate_awf_phase_d_aggregate(
                 if isinstance(_path_diag_leg, dict)
                 else 0.0
             )
-            _preserve_l = (
-                float(_path_diag_leg.get("xs_long_preservation_ratio", 0.0))
-                if isinstance(_path_diag_leg, dict)
-                else 0.0
-            )
-            _preserve_s = (
-                float(_path_diag_leg.get("xs_short_preservation_ratio", 0.0))
-                if isinstance(_path_diag_leg, dict)
-                else 0.0
-            )
             _logger.info(
                 "[STRAT-PATH] trial=%d leg=%d range=(%d,%d) bars=%d"
-                " alpha_nz=%.4f merge_nz=%.4f xs_nz=%.4f preserve_l=%.4f preserve_s=%.4f"
-                " trades=%d long=%d short=%d",
+                " alpha_nz=%.4f merge_nz=%.4f trades=%d long=%d short=%d",
                 _trial_num_leg,
                 leg_idx,
                 leg_range[0],
@@ -938,9 +652,6 @@ def _evaluate_awf_phase_d_aggregate(
                 _b_bars_leg,
                 _alpha_nz,
                 _merge_nz,
-                _tw_nz,
-                _preserve_l,
-                _preserve_s,
                 n_tr,
                 _n_long_leg,
                 _n_short_leg,
@@ -994,17 +705,16 @@ def _evaluate_awf_phase_d_aggregate(
                 _prune_suffix,
             )
 
-        if leg_idx == 0 and trial is not None:
-            if log_ret < -0.1:
-                set_trial_event_attrs(
-                    trial,
-                    status="pruned",
-                    reason="first_leg_log_ret_too_low",
-                    stage="awf_leg_eval",
-                    step=int(leg_idx),
-                    metrics={"log_ret": log_ret},
-                )
-                raise optuna.TrialPruned()
+        if leg_idx == 0 and trial is not None and log_ret < -0.1:
+            set_trial_event_attrs(
+                trial,
+                status="pruned",
+                reason="first_leg_log_ret_too_low",
+                stage="awf_leg_eval",
+                step=int(leg_idx),
+                metrics={"log_ret": log_ret},
+            )
+            raise optuna.TrialPruned()
 
         if mdd >= liq_mdd_thr:
             log_ret -= (mdd - liq_mdd_thr) * 3.0

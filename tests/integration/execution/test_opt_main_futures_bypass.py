@@ -1,7 +1,7 @@
-"""Tests for fast-path verification (replaces CLI bypass flags).
+"""Tests for active CLI contract and mocked fast-path verification.
 
 These tests replace the removed --skip-universe, --skip-data-sync,
---bypass-champion-guard, --symbols, and strategy-smoke CLI flags.
+--bypass-champion-guard, --symbols, and legacy phase flags.
 Fast execution paths are achieved through mock/patch fixtures.
 
 Time complexity: O(1) per test — all IO is mocked.
@@ -33,10 +33,10 @@ def minimal_run_config() -> FuturesRunConfig:
     """
     return build_run_config_from_args(
         {
-            "mode": "strategy",
-            "tf": "4h",
+            "phase": "strategy",
+            "timeframe": "4h",
             "trials": 1,
-            "sync_mode": "full_history_master",
+            "sync": "full",
         }
     )
 
@@ -111,7 +111,7 @@ def test_run_config_rejects_skip_universe() -> None:
     with pytest.raises(ValueError, match="legacy flag"):
         build_run_config_from_args(
             {
-                "mode": "strategy",
+                "phase": "strategy",
                 "trials": 1,
                 "skip_universe": True,
             }
@@ -123,7 +123,7 @@ def test_run_config_rejects_skip_data_sync() -> None:
     with pytest.raises(ValueError, match="legacy flag"):
         build_run_config_from_args(
             {
-                "mode": "strategy",
+                "phase": "strategy",
                 "trials": 1,
                 "skip_data_sync": True,
             }
@@ -135,7 +135,7 @@ def test_run_config_rejects_bypass_champion_guard() -> None:
     with pytest.raises(ValueError, match="legacy flag"):
         build_run_config_from_args(
             {
-                "mode": "strategy",
+                "phase": "strategy",
                 "trials": 1,
                 "bypass_champion_guard": True,
             }
@@ -143,11 +143,11 @@ def test_run_config_rejects_bypass_champion_guard() -> None:
 
 
 def test_run_config_rejects_strategy_smoke() -> None:
-    """strategy-smoke 모드는 legacy mode로 분류되어 ValueError를 발생시켜야 한다."""
-    with pytest.raises(ValueError, match="legacy mode"):
+    """strategy-smoke phase는 legacy phase로 분류되어 ValueError를 발생시켜야 한다."""
+    with pytest.raises(ValueError, match="legacy phase"):
         build_run_config_from_args(
             {
-                "mode": "strategy-smoke",
+                "phase": "strategy-smoke",
                 "trials": 1,
             }
         )
@@ -176,7 +176,7 @@ def test_run_config_has_no_symbols_field(minimal_run_config: FuturesRunConfig) -
 def test_cli_rejects_symbols_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--symbols CLI 인자는 argparse 오류(exit 2)를 반환해야 한다."""
     monkeypatch.setattr(
-        sys, "argv", ["opt_main_futures.py", "--mode", "strategy", "--symbols", "BTCUSDT"]
+        sys, "argv", ["opt_main_futures.py", "--phase", "strategy", "--symbols", "BTCUSDT"]
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -185,7 +185,7 @@ def test_cli_rejects_symbols_flag(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_cli_rejects_skip_universe_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--skip-universe CLI 인자는 argparse 오류(exit 2)를 반환해야 한다."""
     monkeypatch.setattr(
-        sys, "argv", ["opt_main_futures.py", "--mode", "strategy", "--skip-universe"]
+        sys, "argv", ["opt_main_futures.py", "--phase", "strategy", "--skip-universe"]
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -194,7 +194,7 @@ def test_cli_rejects_skip_universe_flag(monkeypatch: pytest.MonkeyPatch) -> None
 def test_cli_rejects_skip_data_sync_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--skip-data-sync CLI 인자는 argparse 오류(exit 2)를 반환해야 한다."""
     monkeypatch.setattr(
-        sys, "argv", ["opt_main_futures.py", "--mode", "strategy", "--skip-data-sync"]
+        sys, "argv", ["opt_main_futures.py", "--phase", "strategy", "--skip-data-sync"]
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -205,7 +205,7 @@ def test_cli_rejects_bypass_champion_guard_flag(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--mode", "strategy", "--bypass-champion-guard"],
+        ["opt_main_futures.py", "--phase", "strategy", "--bypass-champion-guard"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -214,7 +214,7 @@ def test_cli_rejects_bypass_champion_guard_flag(monkeypatch: pytest.MonkeyPatch)
 def test_cli_rejects_alpha_only_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--alpha-only CLI 인자는 argparse 오류(exit 2)를 반환해야 한다."""
     monkeypatch.setattr(
-        sys, "argv", ["opt_main_futures.py", "--mode", "quick-backtest", "--alpha-only"]
+        sys, "argv", ["opt_main_futures.py", "--phase", "strategy", "--alpha-only"]
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -229,12 +229,12 @@ def test_cli_rejects_quick_backtest_alias_flag(monkeypatch: pytest.MonkeyPatch) 
     assert exit_code == 2
 
 
-def test_cli_rejects_strategy_smoke_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """strategy-smoke 모드는 argparse choices 검증으로 거부되어야 한다(exit 2)."""
+def test_cli_rejects_strategy_smoke_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    """strategy-smoke phase는 argparse choices 검증으로 거부되어야 한다(exit 2)."""
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--mode", "strategy-smoke"],
+        ["opt_main_futures.py", "--phase", "strategy-smoke"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
