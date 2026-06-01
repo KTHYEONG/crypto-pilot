@@ -9,7 +9,7 @@ import pandas as pd
 
 from src.application.futures.optimization.config import FuturesRunConfig
 from src.domain.futures.strategy import StrategyConfig
-from src.domain.futures.strategy.inference import validate_alpha_forecast_metadata
+from src.domain.futures.strategy.legacy.inference import validate_alpha_forecast_metadata
 from src.domain.futures.strategy_runtime.bridge import (
     MLPipelineOutput,
     run_ml_pipeline_for_universe,
@@ -231,7 +231,8 @@ def run_active_strategy_output_bridge(
     if preloaded_data_maps is None:
         raise ValueError("strategy mode requires preloaded_data_maps")
 
-    strategy_cfg = StrategyConfig(name="lambdamart")
+    strategy_name = str(opt_config.get("FUTURES_STRATEGY_NAME", "candidate_ml"))
+    strategy_cfg = StrategyConfig(name=strategy_name)
     # Three-Cohort 4-way 분기: training_universe_scope에 따라 학습 패널 결정
     ml_scope = strategy_cfg.ml.training_universe_scope
     if ml_scope == "historical_stage5_union" and inference_panel:

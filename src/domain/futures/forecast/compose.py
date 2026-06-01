@@ -1,14 +1,14 @@
 """Single SSOT for alpha - cost - hurdle composition (compose_mu)."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal, cast
 
 import numpy as np
 import scipy.stats
 
 from src.domain.futures.forecast.contracts import AlphaForecast, CostForecast
-from src.domain.futures.strategy.alpha_evaluation import derive_signed_rank_signal
-from src.domain.futures.strategy.rank_selection import (
+from src.domain.futures.strategy.legacy.alpha_evaluation import derive_signed_rank_signal
+from src.domain.futures.strategy.legacy.rank_selection import (
     RankSelectionPolicy,
     apply_rank_selection_policy,
     policy_from_dict,
@@ -189,7 +189,7 @@ def compose_mu(
                     polarity=1 if int(params["RANK_POLICY_POLARITY"]) >= 0 else -1,
                     quantile=float(params["RANK_POLICY_QUANTILE"]),
                     min_abs_z=float(params["RANK_POLICY_MIN_ABS_Z"]),
-                    weighting=str(params.get("RANK_POLICY_WEIGHTING", "tanh")),  # type: ignore[arg-type]
+                    weighting=cast(Literal["equal", "zscore", "tanh"], params.get("RANK_POLICY_WEIGHTING", "tanh")),
                     weight_k=float(params.get("RANK_POLICY_WEIGHT_K", 3.0)),
                     holding_bars=int(params.get("RANK_POLICY_HOLDING_BARS", 12)),
                     validation_net_lcb_bps=float(params.get("RANK_POLICY_VAL_LCB_BPS", -1.0)),
