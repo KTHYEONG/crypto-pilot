@@ -1,18 +1,18 @@
-# Re-Alpha Execution Results - 2026-06-01 (Phase alpha7 격리 실험 6단계 및 바이패스 버그 패치 완결)
+# Re-Alpha Execution Results - 2026-06-01 (alpha0 실전 개선안 반영 후 최신 smoke)
 
 ## 현재 상태
-- `ALPHA_PASS`: `FALSE` (단일 블로커: `signal_lost_after_selection`)
+- `ALPHA_PASS`: `FALSE` (단일 블로커: `basket_net_returns_negative`)
 - 실행 모드: `--mode alpha --sync-mode skip --trials 1 --tf 4h --reference-date 2026-05-01`
 - 최신 성능 등급:
   - `PASS=✅` (evaluate_alpha 내부 판정 통과)
-  - `EXEC_DIAG: PASS`
-  - `PROMOTION: stage=paper` ( paper 단계 실전 승격 완벽 재유지 ✅)
+  - `EXEC_DIAG: FAIL`
+  - `PROMOTION: stage=paper`
   - `gating_ic` (dense ranker): **0.0347** ✅
   - `RESID_IC (C3)`: **0.0425** (임계값 0.01 대비 **4.2배 초과 달성** ✅)
   - `T-STAT`: **2.22** (임계값 2.0 돌파 ✅)
-  - `DSR (Deflated Sharpe Ratio)`: **0.9804** (임계값 0.95 돌파 ✅)
+  - `DSR (Deflated Sharpe Ratio)`: **0.9999** (임계값 0.95 돌파 ✅)
   - `OOS 일반화 비율`: **2.81** (과적합 없이 완벽한 OOS 일반화 ✅)
-  - 남은 단일 물리 한계선 블로커: `signal_lost_after_selection` (`presv=0.46 < 0.70`)
+  - 남은 단일 블로커: `basket_net_returns_negative` (`basket_net_bps=-0.96`)
 
 ---
 
@@ -28,51 +28,52 @@
 - 직렬화 아티팩트(`_policy_payload`) 내에 `soft_beta_neutralize=False` 및 `max_abs_net_exposure=0.05`가 정적으로 락인(Lock-in)되어 실시간 설정을 덮어쓰고 바이패스하는 버그 해결.
 - `max_abs_net_exposure = 0.10`으로 오버라이딩 패치 완료.
 
-### 3. 최종 아키텍처적 한계 규명 (격리 6단계)
-- 3중 락인을 완벽히 파괴하고 사전 Beta 중립화 및 Net Exposure를 10%로 유연하게 풀어주었음에도 최종 OOS 평가 지표는 `presv = 0.46` 및 `net_ic = 0.0197`로 소수점 4자리까지 완전히 동일함.
-- **원인:** `post_cost_admission_mode == "rank_cs_neutral"` 설정 하에서는 시뮬레이터의 최종 가중치 클리핑부(`evaluate_alpha` 내부)에서 포트폴리오의 독자적 리스크 캡(`PortfolioCaps`로 고정된 Net 5% 및 Beta 20%)이 투영되어 가중치를 압축하기 때문임.
-- **결론:** `presv=0.46` 한계는 버그가 아닌 포트폴리오 안전 캡의 강제적 기하 구조 때문이며, 본래 스킬 지표 자체는 완벽하게 우수함.
+### 3. 최신 개선안 반영 후의 결과
+- `alpha0` 개선안 반영으로 `signal_preserved_after_selection=True`가 재확인되었고, `clip_preservation_ratio=0.76`로 0.70 기준을 통과함.
+- 반면 최종 basket 단계에서 `basket_net_bps=-0.96`이 발생해 `basket_net_positive=False`가 남은 마지막 블로커가 됨.
+- **결론:** 이번 결과는 선택 후 신호 보존 문제는 해소했지만, 실제 basket 수익성 검증이 아직 부족하다는 뜻이다.
 
 ---
 
-## 최신 복원 및 패치 완료 실행 로그 (alpha7 OOS)
+## 최신 smoke 실행 로그 (alpha0 개선안 반영)
 
 ```text
-🧠 ML-PARALLEL: Completed all 3 folds in 4253.12 ms
+🧠 ML-PARALLEL: Completed all 3 folds in 4769.02 ms
 🧩 ML_OOS_FILL: virtual_refit complete (rows=6624 L_nz=0.626 S=0.374)
 🔬 [SCORE-IC] dense_ranker ic=0.0347 t=4.51 hit=0.570 breadth=3.7
 🔬 [OOS-RANKIC] ic=0.0347 t=4.51 n_bars=1417 cofinite_p50=17.0 bars_ge5_ratio=1.000 snr_oos_finite=0.174 cov_elig=1.000
 🔬 [RESID-IC] raw=0.0347 resid=0.0361 resid_hit=0.564
 🔬 [BE-EFF] N_raw=17.0 N_eff=1.5 sigma_r=666.3bps be_raw=0.0116 be_eff=0.0174 gap_resid_eff=+0.0187
 [ALPHA-GATE] alpha_output_unit=rank_weight alpha_cost_wall_required=False policy_no_trade=False
-[ALPHA-POLICY] policy_no_trade=False reason=none val_lcb=4.65 val_ir=1.92 mono=0.02
-[ALPHA-POLICY-PORT] mode=soft_cs hold=12 breadth=16.21 turnover=0.25 cost=3.51 net_lcb=4.65 beta=0.1137 net=0.0000
+[ALPHA-POLICY] policy_no_trade=False reason=none val_lcb=1.41 val_ir=1.20 mono=0.02 pre_ic=0.0175 post_ic=0.0162 pres=0.9240 soft_beta=True soft_beta_w=0.25
+[ALPHA-POLICY-PORT] mode=tail hold=12 breadth=15.85 turnover=0.35 cost=4.84 net_lcb=1.41 beta=0.1333 net=0.0133
 
 📊 [ALPHA SCOREBOARD]
 Metric | RESID_IC |  T-STAT  |  N_EFF   |   DSR    | BE_EFF(12h) | BEAR_IC
-Value  |  0.0425  |    2.22  |    15.0  |  0.9804  |   0.0136  |     nan
+Value  |  0.0425  |    2.22  |    15.0  |  0.9999  |   0.0136  |     nan
 Result |    ✅    |    ❌    |  N_eff   |    ✅    |  (gap=+289.5bps)  |    ✅
-📊 [PASS=✅] fail=[] | net_ic=0.0197 be_raw=0.0177 gap_raw=+20.2bps
+📊 [PASS=✅] fail=[] | net_ic=0.0322 be_raw=0.0177 gap_raw=+144.4bps
 📊 [RANK-IC C3] ic= 0.0425  t=   2.22  lcb= 0.0234  breadth=  10.64
-🧺 [L3-BASKET] ew_bps=7.45 net_bps=1.44 ir_t=1.16 hit=0.529 n=1405 | zw_bps=7.52(confound) | RANK-IC C3=0.0425
-📊 [C3-EXEC]  NET_IC= 0.0197  T-STAT=   1.03  BRDTH=   8.79  BE_IC(12h)= 0.0177 gap=+20.2bps
+🧺 [L3-BASKET] ew_bps=7.33 net_bps=-0.96 ir_t=1.07 hit=0.535 n=1405 | zw_bps=13.68(confound) | RANK-IC C3=0.0425
+📊 [C3-EXEC]  NET_IC= 0.0322  T-STAT=   1.82  BRDTH=   8.79  BE_IC(12h)= 0.0177 gap=+144.4bps
 
-[SWEEP] horizon=6 sigma_r=510.7bps net_ic=0.0210 breakeven=0.0158 breadth=8.8 pass=True
-[SWEEP] horizon=12 sigma_r=689.5bps net_ic=0.0197 breakeven=0.0117 breadth=8.8 pass=True
-[SWEEP] horizon=18 sigma_r=830.0bps net_ic=0.0193 breakeven=0.0098 breadth=8.8 pass=True
-📈 SWEEP: [6h: ic=0.021 ✅] [12h: ic=0.020 ✅] [18h: ic=0.019 ✅]
+[SWEEP] horizon=6 sigma_r=510.7bps net_ic=0.0274 breakeven=0.0158 breadth=8.8 pass=True
+[SWEEP] horizon=12 sigma_r=689.5bps net_ic=0.0322 breakeven=0.0117 breadth=8.8 pass=True
+[SWEEP] horizon=18 sigma_r=830.0bps net_ic=0.0328 breakeven=0.0098 breadth=8.8 pass=True
+📈 SWEEP: [6h: ic=0.027 ✅] [12h: ic=0.032 ✅] [18h: ic=0.033 ✅]
 
->> ALPHA_PASS: FALSE [signal_skill_passes=OK portfolio_ic_above_breakeven=OK basket_net_positive=FAIL signal_preserved_after_selection=FAIL multi_horizon_sweep_passes=OK bear_market_basket_safe=OK] 
->> EXEC_DIAG: PASS [port_ic=0.0197 be_raw=0.0177 gap_raw=+0.0020 basket_net_bps=1.44 fail=[]]
+>> ALPHA_PASS: FALSE [signal_skill_passes=OK portfolio_ic_above_breakeven=OK basket_net_positive=FAIL signal_preserved_after_selection=OK multi_horizon_sweep_passes=OK bear_market_basket_safe=OK]
+>> EXEC_DIAG: FAIL [port_ic=0.0322 be_raw=0.0177 gap_raw=+0.0144 basket_net_bps=-0.96 fail=['basket_net_returns_negative']]
 ```
 
 ## 판정 및 결론
-- **MHE & Hybrid Blending 전면 배제**: 과적합 오염으로 인해 베이스라인에서 전면 영구 배제 확정.
-- **Paper 승격 완벽 성공**: lambda 랭커 및 DEMA 베이스라인의 OOS 지표 복원을 통해 `stage=paper` 상태를 흔들림 없이 수성 완료.
+- **신호 보존 문제는 해소**: `clip_preservation_ratio`는 0.70 기준을 넘겼다.
+- **최종 블로커는 basket 수익성**: `basket_net_bps=-0.96` 때문에 `basket_net_positive=False`가 남았다.
+- **다음 초점**: policy calibration 이후의 basket 구성 또는 비용 반영이 실제 수익을 깎는 경로를 별도로 진단해야 한다.
 
 ## 테스트 결과
 
 ```text
-322 passed, 8 warnings in 5.78s
-latest smoke: PASS=✅ / EXEC_DIAG=PASS / PROMOTION=paper / ALPHA_PASS=FALSE (signal_lost_after_selection)
+600 passed, 8 warnings in 7.84s
+latest smoke: PASS=✅ / EXEC_DIAG=FAIL / PROMOTION=paper / ALPHA_PASS=FALSE (basket_net_returns_negative)
 ```

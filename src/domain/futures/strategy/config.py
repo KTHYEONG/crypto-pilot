@@ -318,6 +318,11 @@ class StrategyMLConfig:
     rank_policy_max_turnover: float = 1.25
     rank_policy_max_abs_net_exposure: float = 0.05
     rank_policy_max_abs_beta_exposure: float = 0.20
+    rank_policy_min_clip_preservation: float = 0.70
+    rank_policy_preservation_weight: float = 12.0
+    rank_policy_post_ic_weight: float = 100.0
+    rank_policy_allow_preservation_fallback: bool = True
+    rank_policy_soft_beta_weights: tuple[float, ...] = (0.0, 0.25, 0.40, 0.60)
     rank_policy_cost_source: Literal["dynamic", "static"] = "dynamic"
     alpha_promotion_min_oos_folds: int = 2
     target_breadth: int = 8                      # minimum effective breadth target
@@ -446,6 +451,16 @@ class StrategyMLConfig:
             raise ValueError("rank_policy_max_abs_net_exposure must be >= 0")
         if self.rank_policy_max_abs_beta_exposure < 0.0:
             raise ValueError("rank_policy_max_abs_beta_exposure must be >= 0")
+        if not (0.0 <= self.rank_policy_min_clip_preservation <= 2.0):
+            raise ValueError("rank_policy_min_clip_preservation must satisfy 0 <= value <= 2")
+        if self.rank_policy_preservation_weight < 0.0:
+            raise ValueError("rank_policy_preservation_weight must be >= 0")
+        if self.rank_policy_post_ic_weight < 0.0:
+            raise ValueError("rank_policy_post_ic_weight must be >= 0")
+        if len(self.rank_policy_soft_beta_weights) == 0:
+            raise ValueError("rank_policy_soft_beta_weights must be non-empty")
+        if any(w < 0.0 or w > 1.0 for w in self.rank_policy_soft_beta_weights):
+            raise ValueError("rank_policy_soft_beta_weights must contain values in [0, 1]")
         if self.rank_policy_cost_source not in {"dynamic", "static"}:
             raise ValueError("rank_policy_cost_source must be 'dynamic' or 'static'")
         if self.alpha_promotion_min_oos_folds < 1:
