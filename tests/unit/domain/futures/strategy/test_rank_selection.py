@@ -201,6 +201,33 @@ def test_policy_to_dict_round_trip_includes_preservation_fields() -> None:
     assert restored.validation_objective == pytest.approx(9.9, abs=1e-12)
 
 
+def test_policy_to_dict_round_trip_includes_basket_fields() -> None:
+    policy = RankSelectionPolicy(
+        polarity=1,
+        quantile=0.25,
+        min_abs_z=0.0,
+        weighting="tanh",
+        weight_k=3.0,
+        holding_bars=12,
+        validation_net_lcb_bps=1.0,
+        validation_gross_bps=2.0,
+        validation_ir_t=3.0,
+        validation_monotonicity=0.4,
+        n_obs=111,
+        selection_mode="soft_cs",
+        validation_basket_gross_bps=9.5,
+        validation_basket_net_bps=1.1,
+        validation_basket_ir_t=2.4,
+        validation_basket_hit=0.57,
+    )
+    payload = policy_to_dict(policy)
+    restored = policy_from_dict(payload)
+    assert restored.validation_basket_gross_bps == pytest.approx(9.5, abs=1e-12)
+    assert restored.validation_basket_net_bps == pytest.approx(1.1, abs=1e-12)
+    assert restored.validation_basket_ir_t == pytest.approx(2.4, abs=1e-12)
+    assert restored.validation_basket_hit == pytest.approx(0.57, abs=1e-12)
+
+
 def test_calibrate_rank_portfolio_policy_prefers_higher_post_ic_objective(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -246,6 +273,10 @@ def test_calibrate_rank_portfolio_policy_prefers_higher_post_ic_objective(
             "validation_monotonicity": 0.2,
             "validation_pre_ic": pre_ic,
             "validation_post_ic": post_ic,
+            "validation_basket_gross_bps": 12.0,
+            "validation_basket_net_bps": 2.0 if w >= 0.5 else 0.5,
+            "validation_basket_ir_t": 2.2 if w >= 0.5 else 1.6,
+            "validation_basket_hit": 0.55,
         }
 
     monkeypatch.setattr(
@@ -280,6 +311,53 @@ def test_calibrate_rank_portfolio_policy_prefers_higher_post_ic_objective(
     assert policy.soft_beta_neutralize_weight == pytest.approx(0.6, abs=1e-12)
     assert policy.validation_post_ic == pytest.approx(0.05, abs=1e-12)
     assert policy.validation_net_lcb_bps == pytest.approx(8.0, abs=1e-12)
+
+
+def test_calibrate_rank_portfolio_policy_applies_strict_cost_floor() -> None:
+    score = np.array(
+        [
+            [1.0, 0.2, -0.2, -1.0],
+            [0.8, 0.1, -0.1, -0.8],
+            [1.2, 0.3, -0.3, -1.2],
+            [0.9, 0.2, -0.2, -0.9],
+        ],
+        dtype=np.float64,
+    )
+    weights = np.array(
+        [
+            [0.5, 0.0, 0.0, -0.5],
+            [0.5, 0.0, 0.0, -0.5],
+            [0.5, 0.0, 0.0, -0.5],
+            [0.5, 0.0, 0.0, -0.5],
+        ],
+        dtype=np.float64,
+    )
+    realized = score / 100.0
+    eligible = np.ones_like(score, dtype=bool)
+    dynamic_cost = np.ones_like(score, dtype=np.float64) * 2.0
+    metrics_no_floor = _estimate_policy_metrics(
+        weights=weights,
+        realized=realized,
+        eligible=eligible,
+        execution_cost_bps_2d=dynamic_cost,
+        cost_bps_fallback=2.0,
+        beta_2d=None,
+        score=score,
+        strict_cost_floor_bps=24.0,
+        use_strict_cost_floor=False,
+    )
+    metrics_floor = _estimate_policy_metrics(
+        weights=weights,
+        realized=realized,
+        eligible=eligible,
+        execution_cost_bps_2d=dynamic_cost,
+        cost_bps_fallback=2.0,
+        beta_2d=None,
+        score=score,
+        strict_cost_floor_bps=24.0,
+        use_strict_cost_floor=True,
+    )
+    assert metrics_floor["validation_cost_bps"] > metrics_no_floor["validation_cost_bps"]
 
 
 def test_ema_2d_functional() -> None:

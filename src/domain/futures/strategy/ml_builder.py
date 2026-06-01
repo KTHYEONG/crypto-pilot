@@ -1305,6 +1305,12 @@ def build_ml_strategy_alpha(
                 adaptive_smoothing=bool(ml_cfg.adaptive_smoothing),
                 soft_beta_neutralize=bool(ml_cfg.soft_beta_neutralize),
                 soft_beta_weights=tuple(float(w) for w in ml_cfg.rank_policy_soft_beta_weights),
+                strict_cost_floor_bps=float(ml_cfg.rank_policy_strict_cost_floor_bps),
+                use_strict_cost_floor=bool(ml_cfg.rank_policy_use_strict_cost_floor),
+                min_basket_net_bps=float(ml_cfg.rank_policy_min_basket_net_bps),
+                min_basket_ir_t=float(ml_cfg.rank_policy_min_basket_ir_t),
+                basket_net_weight=float(ml_cfg.rank_policy_basket_net_weight),
+                basket_ir_weight=float(ml_cfg.rank_policy_basket_ir_weight),
             )
             fold_policy_masks.append(
                 (
@@ -1320,7 +1326,8 @@ def build_ml_strategy_alpha(
             _logger.info(
                 (
                     "[RANK-POLICY] fold=%d mode=%s polarity=%d q=%.2f floor=%.2f hold=%d "
-                    "val_lcb=%.2f val_ir=%.2f mono=%.2f breadth=%.2f turnover=%.2f cost=%.2f"
+                    "val_lcb=%.2f val_ir=%.2f mono=%.2f breadth=%.2f turnover=%.2f cost=%.2f "
+                    "basket_net=%.2f basket_ir=%.2f strict_floor=%.2f"
                 ),
                 int(fold_id),
                 str(policy.selection_mode),
@@ -1334,6 +1341,9 @@ def build_ml_strategy_alpha(
                 float(policy.validation_breadth),
                 float(policy.validation_turnover),
                 float(policy.validation_cost_bps),
+                float(policy.validation_basket_net_bps),
+                float(policy.validation_basket_ir_t),
+                float(ml_cfg.rank_policy_strict_cost_floor_bps),
             )
 
         if not is_virtual:
@@ -2352,6 +2362,12 @@ def build_ml_strategy_alpha_anchored(
                 adaptive_smoothing=bool(ml_cfg.adaptive_smoothing),
                 soft_beta_neutralize=bool(ml_cfg.soft_beta_neutralize),
                 soft_beta_weights=tuple(float(w) for w in ml_cfg.rank_policy_soft_beta_weights),
+                strict_cost_floor_bps=float(ml_cfg.rank_policy_strict_cost_floor_bps),
+                use_strict_cost_floor=bool(ml_cfg.rank_policy_use_strict_cost_floor),
+                min_basket_net_bps=float(ml_cfg.rank_policy_min_basket_net_bps),
+                min_basket_ir_t=float(ml_cfg.rank_policy_min_basket_ir_t),
+                basket_net_weight=float(ml_cfg.rank_policy_basket_net_weight),
+                basket_ir_weight=float(ml_cfg.rank_policy_basket_ir_weight),
             )
             awf_signed = derive_signed_rank_signal(
                 rank_score_long_grid_awf.astype(np.float64),

@@ -323,6 +323,12 @@ class StrategyMLConfig:
     rank_policy_post_ic_weight: float = 100.0
     rank_policy_allow_preservation_fallback: bool = True
     rank_policy_soft_beta_weights: tuple[float, ...] = (0.0, 0.25, 0.40, 0.60)
+    rank_policy_strict_cost_floor_bps: float = 24.0
+    rank_policy_use_strict_cost_floor: bool = True
+    rank_policy_min_basket_net_bps: float = 0.0
+    rank_policy_min_basket_ir_t: float = 1.50
+    rank_policy_basket_net_weight: float = 1.0
+    rank_policy_basket_ir_weight: float = 0.50
     rank_policy_cost_source: Literal["dynamic", "static"] = "dynamic"
     alpha_promotion_min_oos_folds: int = 2
     target_breadth: int = 8                      # minimum effective breadth target
@@ -461,6 +467,14 @@ class StrategyMLConfig:
             raise ValueError("rank_policy_soft_beta_weights must be non-empty")
         if any(w < 0.0 or w > 1.0 for w in self.rank_policy_soft_beta_weights):
             raise ValueError("rank_policy_soft_beta_weights must contain values in [0, 1]")
+        if self.rank_policy_strict_cost_floor_bps < 0.0:
+            raise ValueError("rank_policy_strict_cost_floor_bps must be >= 0")
+        if self.rank_policy_min_basket_ir_t < 0.0:
+            raise ValueError("rank_policy_min_basket_ir_t must be >= 0")
+        if self.rank_policy_basket_net_weight < 0.0:
+            raise ValueError("rank_policy_basket_net_weight must be >= 0")
+        if self.rank_policy_basket_ir_weight < 0.0:
+            raise ValueError("rank_policy_basket_ir_weight must be >= 0")
         if self.rank_policy_cost_source not in {"dynamic", "static"}:
             raise ValueError("rank_policy_cost_source must be 'dynamic' or 'static'")
         if self.alpha_promotion_min_oos_folds < 1:
