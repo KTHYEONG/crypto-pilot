@@ -939,7 +939,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         last_est_b = 1.05
 
         if use_full_leg_ml:
-            from src.domain.futures.strategy.ml_builder import precompute_anchored_ml_panels
+            from src.domain.futures.strategy.legacy.ml_builder import precompute_anchored_ml_panels
             from src.domain.futures.strategy_runtime.bridge import run_ml_pipeline_for_universe
 
             _logger.debug(
