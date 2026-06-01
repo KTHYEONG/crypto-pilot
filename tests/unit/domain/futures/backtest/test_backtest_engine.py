@@ -35,8 +35,6 @@ def test_backtest_engine_multi_symbol_mock() -> None:
         "funding_rate_sum": np.zeros((n_bars, n_syms)),
         "kill_signal": np.zeros((n_bars, n_syms)),
         "target_weights": np.ones((n_bars, n_syms)) * 0.3,
-        "xs_score_long": np.ones((n_bars, n_syms)) * 0.5,
-        "xs_score_short": np.zeros((n_bars, n_syms)),
         "hmm_prob_crisis": np.zeros((n_bars, n_syms)),
         "hmm_modulator_long": np.ones((n_bars, n_syms)),
         "hmm_modulator_short": np.ones((n_bars, n_syms)),
@@ -45,8 +43,6 @@ def test_backtest_engine_multi_symbol_mock() -> None:
         "entry_lower": np.ones((n_bars, n_syms)) * 999999.0,
         "trend_direction": np.ones((n_bars, n_syms)),
         "strength_filter": np.ones((n_bars, n_syms)),
-        "slot_rank_score": np.ones((n_bars, n_syms)),
-        "ml_calib_prob": np.zeros((n_bars, n_syms)),
     }
 
     strategy_params = {
@@ -116,8 +112,6 @@ def test_backtest_engine_uses_1h_base_for_4h_and_accepts_volume() -> None:
         "kill_signal": np.zeros((n_bars, 1), dtype=np.float64),
         "volume": np.full((n_bars, 1), 5000.0, dtype=np.float64),
         "target_weights": np.full((n_bars, 1), 0.3, dtype=np.float64),
-        "xs_score_long": np.full((n_bars, 1), 0.5, dtype=np.float64),
-        "xs_score_short": np.zeros((n_bars, 1), dtype=np.float64),
     }
     params = {
         "TIMEFRAME": "4h",
@@ -379,8 +373,6 @@ def test_backtest_engine_real_data_structure() -> None:
         "funding_rate_sum": np.zeros((n_bars, 1)),
         "kill_signal": np.zeros((n_bars, 1)),
         "target_weights": np.ones((n_bars, 1)) * 0.3,
-        "xs_score_long": np.ones((n_bars, 1)) * 0.5,
-        "xs_score_short": np.zeros((n_bars, 1)),
         "hmm_prob_crisis": np.zeros((n_bars, 1)),
         "hmm_modulator_long": np.ones((n_bars, 1)),
         "hmm_modulator_short": np.ones((n_bars, 1)),
@@ -388,8 +380,6 @@ def test_backtest_engine_real_data_structure() -> None:
         "entry_lower": np.ones((n_bars, 1)) * 999999.0,
         "trend_direction": np.ones((n_bars, 1)),
         "strength_filter": np.ones((n_bars, 1)),
-        "slot_rank_score": np.ones((n_bars, 1)),
-        "ml_calib_prob": np.zeros((n_bars, 1)),
     }
 
     engine = PortfolioBacktestEngine(

@@ -78,8 +78,6 @@ def _aggregate_aligned_data_1h_to_4h(
         "kill_signal": "max",
         "atr": "finite_last",
         "dyn_leverage": "last",
-        "xs_score_long": "last",
-        "xs_score_short": "last",
         "target_weights": "last",
     }
     mode_map["composer_sigma_bar"] = "last"
@@ -162,12 +160,11 @@ def prepare_backtest_inputs(
     mark_price_1m = None
     if mark_price_1m_raw is not None:
         exec_open_1m = out.get("exec_open_1m")
-        if exec_open_1m is not None:
-            if mark_price_1m_raw.shape != exec_open_1m.shape:
-                raise ValueError(
-                    f"mark_price_1m_raw shape {mark_price_1m_raw.shape} "
-                    f"does not match exec_open_1m shape {exec_open_1m.shape}"
-                )
+        if exec_open_1m is not None and mark_price_1m_raw.shape != exec_open_1m.shape:
+            raise ValueError(
+                f"mark_price_1m_raw shape {mark_price_1m_raw.shape} "
+                f"does not match exec_open_1m shape {exec_open_1m.shape}"
+            )
         mark_price_1m = mark_price_1m_raw
 
     return PreparedBacktestInputs(

@@ -78,14 +78,13 @@ def build_candidate_target_weights(
     # Map symbols to index
     sym_to_idx = {sym: idx for idx, sym in enumerate(symbols)}
 
-    # Group selected events by entry_idx (t + 1) or datetime decision timestamp (t)
-    # selected_events entry_idx is 1-indexed (decision t + 1)
+    # Group selected events by entry_idx so metadata lands on the execution bar.
     for row in selected_events.itertuples(index=False):
         sym = str(row.symbol)
         if sym not in sym_to_idx:
             continue
         s_idx = sym_to_idx[sym]
-        t = int(row.entry_idx) - 1  # Map entry_idx back to decision timestamp t
+        t = int(row.entry_idx)
         if t < 0 or t >= n_times:
             continue
 
@@ -168,16 +167,12 @@ def build_candidate_alpha_panel(
     # Map symbols to index
     sym_to_idx = {sym: idx for idx, sym in enumerate(symbols)}
 
-    # Convert datetimes for standard lookup
+    # Group by execution index so metadata aligns with the target weight row.
     df_selected = selected_events.copy()
-    df_selected["_dt_lookup"] = pd.to_datetime(df_selected["datetime"], utc=True).dt.tz_localize(None)
-
-    # Group by lookup datetime
-    grouped = df_selected.groupby("_dt_lookup")
+    df_selected["_entry_idx"] = df_selected["entry_idx"].astype(int)
+    grouped = df_selected.groupby("_entry_idx")
 
     for t in range(n_times):
-        dt_val = pd.to_datetime(datetimes[t], utc=True).tz_localize(None)
-        
         # Default empty attributes
         alpha_long = np.zeros(n_symbols, dtype=np.float64)
         alpha_short = np.zeros(n_symbols, dtype=np.float64)
@@ -194,8 +189,8 @@ def build_candidate_alpha_panel(
         q10_bps = np.zeros(n_symbols, dtype=np.float64)
         utility = np.zeros(n_symbols, dtype=np.float64)
 
-        if dt_val in grouped.groups:
-            dt_group = grouped.get_group(dt_val)
+        if t in grouped.groups:
+            dt_group = grouped.get_group(t)
             for row in dt_group.itertuples(index=False):
                 sym = str(row.symbol)
                 if sym in sym_to_idx:
@@ -239,7 +234,5 @@ def build_candidate_alpha_panel(
         .sort_index()
     )
     return panel
-
-
 
 

@@ -45,10 +45,4 @@ def run_from_cli(argv: list[str] | None = None) -> int:
 
 def build_config_from_namespace(args: argparse.Namespace) -> FuturesRunConfig:
     """Build validated run config from argparse namespace."""
-    payload = vars(args).copy()
-    if bool(payload.get("quick_backtest", False)):
-        payload["mode"] = "quick-backtest"
-    symbols_raw = payload.get("symbols")
-    if symbols_raw:
-        payload["symbols"] = tuple(str(symbols_raw).split(","))
-    return build_run_config_from_args(payload)
+    return build_run_config_from_args(args)
