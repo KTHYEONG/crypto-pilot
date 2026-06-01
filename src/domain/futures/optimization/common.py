@@ -6,7 +6,6 @@ from typing import Any
 import numpy as np
 import optuna
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
 
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 
@@ -169,67 +168,4 @@ def resolve_embargo_bars_for_tf(
 EMBARGO_BARS: dict[str, int] = {
     tf: resolve_embargo_bars_for_tf(OPT_FUTURES_CONFIG, tf) for tf in ("1h", "4h", "1d")
 }
-
-
-class SignalCalibrator:
-    """Platt scaling on alpha vs forward returns.
-
-    Default AWF precompute fits only on **out-of-sample** bars (see
-    ``_fit_oos_platt_calibrators_from_maps``). Legacy tail-window or in-sample fits are not used
-    there.
-    """
-
-    def __init__(self) -> None:
-        """Initialize the signal calibrator with a logistic regression model."""
-        self.model = LogisticRegression(penalty=None, solver="lbfgs")
-        self.is_fitted = False
-        self.mean_b = 1.05  # Estimated win/loss ratio (Profit Factor)
-
-    def fit(self, alphas: np.ndarray, returns: np.ndarray) -> None:
-        """Fit calibration model and estimate average win/loss ratio."""
-        # y=1 if forward return is positive
-        y = (returns > 0.0001).astype(int)
-        x_input = alphas.reshape(-1, 1)
-
-        if len(np.unique(y)) > 1:
-            try:
-                self.model.fit(x_input, y)
-                self.is_fitted = True
-            except Exception as e:
-                _logger.warning("[SignalCalibrator] Logistic fit failed: %s", e)
-
-        # Estimate average win/loss ratio (b) for Kelly
-        pos_rets = returns[returns > 0]
-        neg_rets = np.abs(returns[returns < 0])
-        if pos_rets.size > 0 and neg_rets.size > 0:
-            raw_b = float(np.mean(pos_rets) / np.mean(neg_rets))
-            self.mean_b = float(np.clip(raw_b, 0.7, 2.0))
-            if self.is_fitted:
-                _logger.debug(
-                    "📐 Platt coef=%.4f b=%.4f n=%d/%d",
-                    self.model.coef_[0][0],
-                    self.mean_b,
-                    int(pos_rets.size),
-                    int(neg_rets.size),
-                )
-            else:
-                _logger.debug(
-                    "📐 Platt skip (no fit) b=%.4f n=%d/%d",
-                    self.mean_b,
-                    int(pos_rets.size),
-                    int(neg_rets.size),
-                )
-        else:
-            self.mean_b = 1.05
-            _logger.debug("📐 Platt skip (insufficient samples) b=%.4f default", self.mean_b)
-
-    def predict_prob(self, alphas: np.ndarray) -> np.ndarray:
-        """Predict win probability p."""
-        if not self.is_fitted:
-            # Fallback: sigmoid-like mapping centered at 0.5
-            z = (alphas - 0.5) * 8.0
-            return 1.0 / (1.0 + np.exp(-z))
-        x_input = alphas.reshape(-1, 1)
-        proba = np.asarray(self.model.predict_proba(x_input), dtype=np.float64)
-        return np.asarray(proba[:, 1], dtype=np.float64)
 

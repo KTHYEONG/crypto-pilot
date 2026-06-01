@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from src.domain.futures.strategy.candidate_gate import fit_candidate_gate, predict_candidate_gate
-from src.domain.futures.strategy.config import CandidateStrategyConfig, StrategyMLConfig
+from src.domain.futures.strategy.config import CandidateStrategyConfig
 
 
 @dataclass(slots=True, frozen=True)
