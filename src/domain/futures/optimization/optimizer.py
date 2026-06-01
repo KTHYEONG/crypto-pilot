@@ -17,7 +17,6 @@ from src.domain.futures.optimization.ml_context import (
 )
 from src.domain.futures.optimization.objectives import (
     _build_strategy_compose_diag,
-    _compose_strategy_scores_inplace,
     _evaluate_awf_phase_d_aggregate,
     _run_portfolio_numba_block,
     objective_ml_phase_d,
@@ -33,7 +32,6 @@ __all__ = [
     "MLPhaseDContext",
     "_base_engine_params",
     "_build_strategy_compose_diag",
-    "_compose_strategy_scores_inplace",
     "_evaluate_awf_phase_d_aggregate",
     "_run_portfolio_numba_block",
     "_suggest_ml_joint_nsga2",
@@ -46,4 +44,3 @@ __all__ = [
     "select_best_trial_by_holdout_log_ret",
     "topsis_select_best",
 ]
-

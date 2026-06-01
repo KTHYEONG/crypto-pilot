@@ -12,6 +12,7 @@ import pandas as pd
 
 from src.core.indicators.numpy_ops_futures import compute_atr_numpy
 from src.core.settings import LOG_DIR, TAKER_FEE_BPS
+from src.domain.futures.optimization.common import SignalCalibrator
 from src.domain.futures.optimization.data_aligner import (
     _build_aligned_2d_from_prebuilt,
     _dataframe_to_symbol_arrays,
@@ -31,11 +32,9 @@ from src.domain.futures.portfolio.signal_composer import (
     composer_sigma_lookback_bars,
     rolling_per_bar_return_std,
 )
-from src.domain.futures.strategy_runtime.bridge import FuturesMLStrategy
 from src.domain.futures.universe.membership import build_membership_mask_bundle
 
 if TYPE_CHECKING:
-    from src.domain.futures.optimization.common import SignalCalibrator
     from src.domain.futures.strategy.config import StrategyConfig
     from src.domain.futures.validation.gates import PurgeBarsRegistry
 
@@ -62,7 +61,6 @@ class MLPhaseDContext:
     calibrator: SignalCalibrator | None = None
     calibrator_short: SignalCalibrator | None = None
     estimated_b: float = 1.05
-    kelly_ic_upper: float = 0.5  # T3-B: IC EWMA-based Kelly upper bound
     # Effective Bonferroni count = n_seeds x trials_per_seed (multi-seed studies).
 
     effective_total_trials: int | None = None
@@ -78,7 +76,7 @@ class MLPhaseDContext:
     # Per-execution identifier for run-level trial filtering in shared Optuna DB.
     run_id: str | None = None
     strategy_mode: bool = False
-    # AWF leg refit 시 ML pipeline에 전달할 전략 설정 (strategy/strategy-smoke 모드 전용)
+    # AWF leg refit 시 ML pipeline에 전달할 전략 설정 (strategy/alpha 전용)
     strategy_cfg: StrategyConfig | None = None
     universe_timeline: dict[date, frozenset[str] | set[str]] | None = None
     warmup_bars_required: int = 0
@@ -450,8 +448,8 @@ def _build_prebuilt_full_arrays(
     tf: str,
     info: dict[str, Any],
     *,
-    calibrator: SignalCalibrator | None,
-    calibrator_short: SignalCalibrator | None,
+    calibrator: SignalCalibrator | None = None,
+    calibrator_short: SignalCalibrator | None = None,
     alpha_overrides: AlphaOverrides | None = None,
 ) -> dict[str, dict[str, np.ndarray]]:
     """Build vector bundles for ``_build_aligned_2d_from_prebuilt``.
@@ -499,19 +497,6 @@ def _build_prebuilt_full_arrays(
             if "garch_kelly_f" in raw_full.columns
             else np.ones(len(raw_full))
         )
-        trimmed_sig["slot_rank_score"] = (
-            raw_full["slot_rank_score"].to_numpy(dtype=np.float64, copy=False)
-            if "slot_rank_score" in raw_full.columns
-            else np.zeros(len(raw_full))
-        )
-        if "rank_score_long" in raw_full.columns:
-            trimmed_sig["rank_score_long_2d"] = raw_full["rank_score_long"].to_numpy(
-                dtype=np.float64, copy=False
-            )
-        if "rank_score_short" in raw_full.columns:
-            trimmed_sig["rank_score_short_2d"] = raw_full["rank_score_short"].to_numpy(
-                dtype=np.float64, copy=False
-            )
 
         if "funding_rate_sum" in raw_full.columns:
             trimmed_sig["funding_rate_sum"] = raw_full["funding_rate_sum"].to_numpy(
@@ -555,44 +540,16 @@ def _build_prebuilt_full_arrays(
                     raw_full["alpha_short"].to_numpy(dtype=np.float64, copy=False),
                     dtype=np.float64,
                 )
-        # Prefer current strategy alpha path. Keep legacy fallback for non-strategy runs.
-        gp_base: np.ndarray
-        gp_base = (
-            alpha_long_full
-            if alpha_long_full is not None
-            else (
-                np.asarray(
-                    raw_full["alpha_long_00"].to_numpy(dtype=np.float64, copy=False),
-                    dtype=np.float64,
-                )
-                if "alpha_long_00" in raw_full.columns
-                else np.zeros(len(raw_full), dtype=np.float64)
-            )
+        gp_base: np.ndarray = (
+            alpha_long_full if alpha_long_full is not None else np.zeros(len(raw_full), dtype=np.float64)
         )
         if alpha_long_full is not None:
             trimmed_sig["alpha_long"] = alpha_long_full
         if alpha_short_full is not None:
             trimmed_sig["alpha_short"] = alpha_short_full
-        if calibrator:
-            p_base = calibrator.predict_prob(gp_base)
-            trimmed_sig["ml_calib_prob"] = p_base
-
-            if alpha_long_full is not None:
-                p_l = calibrator.predict_prob(alpha_long_full)
-                trimmed_sig["ml_calib_prob_long"] = p_l
-            else:
-                trimmed_sig["ml_calib_prob_long"] = trimmed_sig["ml_calib_prob"]
-
-            if alpha_short_full is not None:
-                calib_s = calibrator_short or calibrator
-                p_s = calib_s.predict_prob(alpha_short_full)
-                trimmed_sig["ml_calib_prob_short"] = p_s
-            else:
-                trimmed_sig["ml_calib_prob_short"] = trimmed_sig["ml_calib_prob"]
-        else:
-            trimmed_sig["ml_calib_prob"] = raw_full.get("ml_calib_prob", 0.5)
-            trimmed_sig["ml_calib_prob_long"] = raw_full.get("ml_calib_prob_long", 0.5)
-            trimmed_sig["ml_calib_prob_short"] = raw_full.get("ml_calib_prob_short", 0.5)
+        # Legacy calibration payload is removed from active candidate path.
+        _ = calibrator
+        _ = calibrator_short
 
         gp_centered = gp_base - 0.5
         trimmed_sig["trend_direction"] = np.where(
@@ -601,8 +558,6 @@ def _build_prebuilt_full_arrays(
         trimmed_sig["entry_upper"] = 0.0
         trimmed_sig["entry_lower"] = 999999.0
         _xs_cols = (
-            "xs_score_long",
-            "xs_score_short",
             "expected_variance",
             "target_variance",
             "btc_trend_vol_adj_24h",
@@ -863,25 +818,6 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             pass
 
         # 1. Alignment & Baseline Signals
-        fc_pre = OPT_FUTURES_CONFIG
-        atm0 = float(fc_pre.get("FUTURES_ATR_STOP_MULT", 2.5))
-        pre_ml: dict[str, Any] = {
-            "TRAILING_ACTIVATION_ATR": 1.0,
-            "BAYESIAN_C": 10.0,
-            "KELLY_SHRINKAGE": 0.3,
-            "K_LONG": 2,
-            "K_SHORT": 2,
-            "REBALANCE_BARS": 6,
-            "MIN_SCORE_PERCENTILE": 0.55,
-            "CRISIS_GAMMA": 1.0,
-            "ATR_PERIOD": 30,
-            "ATR_MULT": atm0,
-            "TRAIL_MULT": atm0,
-            "PORTFOLIO_KAPPA": float(fc_pre.get("FUTURES_PORTFOLIO_KAPPA", 0.35)),
-        }
-        params = _base_engine_params(pre_ml, ctx.tf)
-        FuturesMLStrategy(name="Precompute", params=params)
-
         emb = int(EMBARGO_BARS.get(ctx.tf, 12))
         t_align = time.perf_counter()
         info = compute_multi_alignment_info(ctx.data_maps, ctx.symbols, ctx.tf, emb)
@@ -1076,48 +1012,8 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
 
         ctx.holdout_slice = None
 
-        if ctx.is_slice is not None:
-            xl_is = ctx.is_slice.get("xs_score_long")
-            cl_is = ctx.is_slice.get("close")
-            if xl_is is not None and cl_is is not None:
-                xl_arr = np.asarray(xl_is, dtype=np.float64)
-                cl_arr = np.asarray(cl_is, dtype=np.float64)
-                if xl_arr.ndim == 2:
-                    xl_arr = np.nanmean(xl_arr, axis=1)
-                if cl_arr.ndim == 2:
-                    cl_arr = np.nanmean(cl_arr, axis=1)
-                fwd = np.log(np.clip(cl_arr[1:], 1e-12, None) / np.clip(cl_arr[:-1], 1e-12, None))
-                sig = xl_arr[:-1]
-                mask = np.isfinite(sig) & np.isfinite(fwd)
-                if int(np.sum(mask)) > 30:
-                    from scipy.stats import spearmanr as _spearmanr
-
-                    _ic_raw, _ = _spearmanr(sig[mask], fwd[mask])
-                    ctx.kelly_ic_upper = float(np.clip(abs(_ic_raw) * 10.0, 0.05, 0.5))
-                    _logger.debug(
-                        "[T3-B] IC\u2192Kelly upper: %.4f (Spearman IC=%.4f)",
-                        ctx.kelly_ic_upper,
-                        _ic_raw,
-                    )
-
         alignment_info["awf_legs"] = awf_legs
 
-        if ctx.awf_leg_slices:
-            aligned0 = ctx.awf_leg_slices[0].get("data") or {}
-            xl0 = aligned0.get("xs_score_long")
-            if xl0 is not None and getattr(xl0, "size", 0) > 0:
-                xs_std = float(np.nanstd(np.asarray(xl0, dtype=np.float64)))
-                alignment_info["xs_score_aligned_std"] = xs_std
-                if xs_std < 0.05:
-                    _logger.debug(
-                        "[ML_OPT] xs_score dispersion low (std=%.6f); check GP/CS merge path.",
-                        xs_std,
-                    )
-
-            _log_precompute_xs_dispersion(
-                aligned0,
-                k_long=int(pre_ml["K_LONG"]),
-            )
         precompute_total = time.perf_counter() - t_precompute_total
         precompute_profile = {
             "total": float(precompute_total),
@@ -1143,29 +1039,6 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             precompute_profile["prebuilt_total"],
             precompute_profile["awf_legs"],
         )
-
-
-def _log_precompute_xs_dispersion(aligned0: dict[str, Any], *, k_long: int) -> None:
-    """Lightweight precompute diagnostic (linear xs scores; no CS rank engine)."""
-    _ = k_long
-    xl = aligned0.get("xs_score_long")
-    if xl is None or getattr(xl, "size", 0) == 0:
-        pass
-    arr_l = np.ascontiguousarray(xl, dtype=np.float64)
-    n_b = arr_l.shape[0]
-    prev_i = min(n_b - 1, max(0, n_b // 2))
-    flat_l = arr_l[prev_i, :].ravel()
-    q1, q50, q99 = (
-        float(np.nanpercentile(flat_l, 1)),
-        float(np.nanpercentile(flat_l, 50)),
-        float(np.nanpercentile(flat_l, 99)),
-    )
-    _logger.debug(
-        "[ML_OPT][precompute] xs_score_long row quantiles p01/p50/p99=%.6f/%.6f/%.6f",
-        q1,
-        q50,
-        q99,
-    )
 
 
 def rerun_precompute_for_ctx(ctx: MLPhaseDContext) -> None:

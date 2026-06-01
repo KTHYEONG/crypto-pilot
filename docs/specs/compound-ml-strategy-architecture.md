@@ -1,5 +1,7 @@
 # Compound ML Strategy Architecture Spec
 
+> last_verified: 2026-06-01
+
 ## Spec Type
 - `prd` + `refactor`
 - Goal: replace the current ML alpha ranking stack with a candidate-driven strategy architecture that optimizes post-cost geometric capital growth in Binance futures backtests.
@@ -208,8 +210,9 @@ Do not delete these foundations:
 - `src/domain/futures/universe/pipeline.py`
 
 ### Forecast Compatibility
-- `src/domain/futures/forecast/contracts.py`
-- `src/domain/futures/forecast/compose.py`
+- `src/domain/futures/forecast/contracts.py` — CostForecast, RiskForecast (유효)
+- `src/domain/futures/forecast/cost.py` — build_cost_forecast (유효)
+- `src/domain/futures/forecast/risk.py` — build_risk_forecast (유효)
 
 ### Tests
 - `tests/unit/domain/futures/strategy/test_rule_signals.py`
@@ -1493,7 +1496,7 @@ Expected:
 
 ### Smoke
 ```bash
-PYTHONPATH=. uv run python src/execution/opt_main_futures.py --mode strategy-smoke --skip-universe --skip-data-sync --symbols BTCUSDT,ETHUSDT,SOLUSDT --trials 1 --tf 4h --reference-date 2026-05-01 --strategy candidate_ml
+PYTHONPATH=. uv run python src/execution/opt_main_futures.py --phase strategy --trials 1 --timeframe 4h --date 2026-05-01 --sync skip
 ```
 
 Expected:

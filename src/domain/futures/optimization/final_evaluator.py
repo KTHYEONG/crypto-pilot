@@ -66,11 +66,8 @@ from src.domain.futures.validation.walk_forward import (
 _logger: logging.Logger = logging.getLogger("final_evaluator")
 
 
-def _rebuild_member_strategy_config(
-    strategy_cfg: Any,
-    member_params: dict[str, Any],
-) -> Any:
-    """Rebuild per-member strategy config (currently passthrough for candidate_ml)."""
+def _resolve_candidate_strategy_config(strategy_cfg: Any) -> Any:
+    """Resolve active strategy config for candidate pipeline."""
     from src.domain.futures.strategy import StrategyConfig
 
     if isinstance(strategy_cfg, StrategyConfig):
@@ -334,9 +331,9 @@ def run_final_oos_evaluation(
     from src.domain.futures.optimization.samplers import build_ml_phase_d_params
     from src.domain.futures.strategy.builder import build_strategy_alpha
     from src.domain.futures.strategy_runtime.bridge import (
-        MLPipelineOutput,
+        CandidatePipelineOutput,
         copy_data_maps_tf_clone,
-        merge_ml_output_into_data_maps,
+        merge_candidate_output_into_data_maps,
     )
 
     ensemble_curves = []
@@ -420,7 +417,7 @@ def run_final_oos_evaluation(
 
         # 2) Dynamically reconstruct completed alpha panel containing Virtual Refit Fold
         strategy_cfg = ml_ctx.strategy_cfg if ml_ctx is not None else None
-        m_strat_cfg = _rebuild_member_strategy_config(strategy_cfg, dict(res.get("params", {})))
+        m_strat_cfg = _resolve_candidate_strategy_config(strategy_cfg)
 
         # Build the completed alpha panel (including OOS Virtual Refit filling!)
         t_build_alpha = time.perf_counter()
@@ -437,8 +434,8 @@ def run_final_oos_evaluation(
 
         # 3) Merge the newly completed alpha panel into the cloned OOS maps
         t_merge = time.perf_counter()
-        m_ml_out = MLPipelineOutput(alpha_panel=m_alpha_panel)
-        merge_ml_output_into_data_maps(
+        m_ml_out = CandidatePipelineOutput(alpha_panel=m_alpha_panel)
+        merge_candidate_output_into_data_maps(
             m_ml_out,
             m_oos_maps,
             valid_symbols,
@@ -602,17 +599,14 @@ def run_final_oos_evaluation(
         ho_data_maps[sym] = ho_dm
 
     base_strategy_cfg = ml_ctx.strategy_cfg if ml_ctx is not None else None
-    split_strategy_cfg = _rebuild_member_strategy_config(
-        base_strategy_cfg,
-        dict(best_trial.params),
-    )
+    split_strategy_cfg = _resolve_candidate_strategy_config(base_strategy_cfg)
 
     def _build_merge_eval_split(
         *,
         split_name: str,
         split_maps: dict[str, dict[str, Any]],
         split_params: dict[str, Any],
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    ) -> tuple[dict[str, Any], str]:
         split_maps_clone = copy_data_maps_tf_clone(split_maps, valid_symbols, args.tf)
         alpha_panel = build_strategy_alpha(
             data_maps=split_maps,
@@ -620,23 +614,14 @@ def run_final_oos_evaluation(
             tf=args.tf,
             cfg=split_strategy_cfg,
         )
-        merge_ml_output_into_data_maps(
-            MLPipelineOutput(alpha_panel=alpha_panel),
+        merge_candidate_output_into_data_maps(
+            CandidatePipelineOutput(alpha_panel=alpha_panel),
             split_maps_clone,
             valid_symbols,
             args.tf,
             log_tag=split_name,
         )
-        artifact_meta = {
-            "strategy_name": str(alpha_panel.attrs.get("strategy_name", "")),
-            "config_hash": str(alpha_panel.attrs.get("config_hash", "")),
-            "selected_horizon": int(alpha_panel.attrs.get("selected_horizon", -1)),
-            "model_family": str(alpha_panel.attrs.get("model_family", "")),
-            "cost_source": _infer_split_cost_source(split_maps_clone, valid_symbols, args.tf),
-            "alpha_artifact_structural_hash": str(
-                alpha_panel.attrs.get("alpha_artifact_structural_hash", "")
-            ),
-        }
+        cost_source = _infer_split_cost_source(split_maps_clone, valid_symbols, args.tf)
         port = run_oos_margin_shared_portfolio(
             valid_symbols,
             args.tf,
@@ -644,7 +629,7 @@ def run_final_oos_evaluation(
             split_maps_clone,
             cache_root=FUTURES_CACHE_DIR,
         )
-        return port, artifact_meta
+        return port, cost_source
 
     is_port, is_meta = _build_merge_eval_split(
         split_name="is",
@@ -656,43 +641,15 @@ def run_final_oos_evaluation(
         split_maps=ho_data_maps,
         split_params=params,
     )
-    oos_alpha_panel = build_strategy_alpha(
-        data_maps=oos_data_maps,
-        symbols=valid_symbols,
-        tf=args.tf,
-        cfg=split_strategy_cfg,
-    )
-    oos_meta = {
-        "strategy_name": str(oos_alpha_panel.attrs.get("strategy_name", "")),
-        "config_hash": str(oos_alpha_panel.attrs.get("config_hash", "")),
-        "selected_horizon": int(oos_alpha_panel.attrs.get("selected_horizon", -1)),
-        "model_family": str(oos_alpha_panel.attrs.get("model_family", "")),
-        "cost_source": _infer_split_cost_source(oos_data_maps, valid_symbols, args.tf),
-        "alpha_artifact_structural_hash": str(
-            oos_alpha_panel.attrs.get("alpha_artifact_structural_hash", "")
-        ),
-    }
-    split_meta_ref = is_meta
-    split_meta_mismatch: list[str] = []
-    for split_name, split_meta in (("ho", ho_meta), ("oos", oos_meta)):
-        split_meta_mismatch.extend(
-            [
-                f"{split_name}:{key}"
-                for key in (
-                    "strategy_name",
-                    "config_hash",
-                    "selected_horizon",
-                    "model_family",
-                    "cost_source",
-                    "alpha_artifact_structural_hash",
-                )
-                if split_meta.get(key) != split_meta_ref.get(key)
-            ]
-        )
-    if split_meta_mismatch:
+    oos_cost_source = _infer_split_cost_source(oos_data_maps, valid_symbols, args.tf)
+    split_cost_source_mismatch: list[str] = []
+    for split_name, split_cost_source in (("ho", ho_meta), ("oos", oos_cost_source)):
+        if split_cost_source != is_meta:
+            split_cost_source_mismatch.append(f"{split_name}:cost_source")
+    if split_cost_source_mismatch:
         raise RuntimeError(
-            "split artifact metadata mismatch: "
-            + ", ".join(split_meta_mismatch)
+            "split cost source mismatch: "
+            + ", ".join(split_cost_source_mismatch)
         )
 
     def _augment_port_metrics(p: dict[str, Any], hrs_tf: int) -> None:

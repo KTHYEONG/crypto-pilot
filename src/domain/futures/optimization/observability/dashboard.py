@@ -51,7 +51,7 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
     components: list[str] = []
     has_comp_level = "component" in alpha_panel.index.names
     if not has_comp_level:
-        # Prefer gate-status keys to avoid duplicate alias rows such as alpha_long vs alpha_long_00.
+        # Prefer gate-status keys to avoid duplicate alias rows.
         filt_meta_probe = getattr(alpha_panel, "attrs", {}).get("alpha_component_filter", {})
         gate_probe = (
             filt_meta_probe.get("gate_status_by_col", {})
@@ -59,7 +59,7 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
             else {}
         )
         if isinstance(gate_probe, dict) and gate_probe:
-            components = sorted(str(k) for k in gate_probe.keys())
+            components = sorted(str(k) for k in gate_probe)
     if has_comp_level:
         components = sorted(alpha_panel.index.get_level_values("component").unique())
     elif not components:
@@ -89,11 +89,11 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
         if comp in alpha_panel.columns:
             return comp
         if comp == "alpha_long_signal":
-            for c in ("alpha_long_signal", "alpha_long_00", "alpha_long"):
+            for c in ("alpha_long_signal", "alpha_long"):
                 if c in alpha_panel.columns:
                     return c
         if comp == "alpha_short_signal":
-            for c in ("alpha_short_signal", "alpha_short_00", "alpha_short"):
+            for c in ("alpha_short_signal", "alpha_short"):
                 if c in alpha_panel.columns:
                     return c
         return None
@@ -146,9 +146,7 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
                 "alpha_long_signal"
                 if "alpha_long_signal" in sub_full.columns
                 else (
-                    "alpha_long_00"
-                    if "alpha_long_00" in sub_full.columns
-                    else ("alpha_long" if "alpha_long" in sub_full.columns else None)
+                    "alpha_long" if "alpha_long" in sub_full.columns else None
                 )
             )
         else:
@@ -239,16 +237,11 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
         raw_oos = safe_float(root_diag.get("raw_alpha_oos_csic_mean", 0.0))
         adj_is = safe_float(root_diag.get("adjusted_alpha_is_csic_mean", 0.0))
         adj_oos = safe_float(root_diag.get("adjusted_alpha_oos_csic_mean", 0.0))
-        sleeve_oos = (
-            root_diag.get("sleeve_oos_csic_mean", {})
-            if isinstance(root_diag.get("sleeve_oos_csic_mean", {}), dict)
+        component_oos = (
+            root_diag.get("component_oos_csic_mean", {})
+            if isinstance(root_diag.get("component_oos_csic_mean", {}), dict)
             else {}
         )
-        trend_oos = safe_float(sleeve_oos.get("trend", 0.0))
-        reversal_oos = safe_float(sleeve_oos.get("reversal", 0.0))
-        carry_oos = safe_float(sleeve_oos.get("carry", 0.0))
-        flow_oos = safe_float(sleeve_oos.get("flow", 0.0))
-        idio_oos = safe_float(sleeve_oos.get("idio", 0.0))
         sign_ok = bool(root_diag.get("signal_sign_ok", False))
         _logger.info("  [ALPHA ROOT-CAUSE]")
         _logger.info(
@@ -258,15 +251,12 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
             adj_is,
             adj_oos,
         )
-        _logger.info(
-            "  sleeve_oos: trend=%+.4f, reversal=%+.4f, carry=%+.4f, "
-            "flow=%+.4f, idio=%+.4f",
-            trend_oos,
-            reversal_oos,
-            carry_oos,
-            flow_oos,
-            idio_oos,
-        )
+        if component_oos:
+            formatted = ", ".join(
+                f"{key!s}={safe_float(value, default=0.0):+.4f}"
+                for key, value in sorted(component_oos.items())
+            )
+            _logger.info("  component_oos: %s", formatted)
         _logger.info(f"  sign_ok={sign_ok}")
 
     alpha_goal_eval_meta = _build_alpha_goal_eval_meta(
@@ -463,9 +453,7 @@ def log_ml_merge_feature_stats(oos_data_maps: Any, valid_symbols: Any, tf: Any) 
         total_rows += len(df)
         total_cols += len(df.columns)
         has_alpha_cols = (
-            "alpha_long_00" in df.columns
-            or "alpha_long" in df.columns
-            or "alpha_short" in df.columns
+            "alpha_long" in df.columns or "alpha_short" in df.columns
         )
         if has_alpha_cols:
             alpha_present += 1

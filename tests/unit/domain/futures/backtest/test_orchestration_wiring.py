@@ -26,7 +26,6 @@ def _make_minimal_ctx(n_bars: int = 60) -> Any:
 
     rng = np.random.default_rng(0)
     close = 100.0 + rng.standard_normal(n_bars).cumsum()
-    xs = rng.standard_normal(n_bars)
 
     df_mock: Any = MagicMock()
     df_mock.__len__ = lambda self: n_bars
@@ -35,8 +34,6 @@ def _make_minimal_ctx(n_bars: int = 60) -> Any:
     # aligned dict — backtest_engine이 기대하는 키 구성
     aligned: dict[str, Any] = {
         "close": close.reshape(-1, 1),
-        "xs_score_long": np.clip(xs, 0, None).reshape(-1, 1),
-        "xs_score_short": np.clip(-xs, 0, None).reshape(-1, 1),
         "hmm_prob_crisis": np.zeros((n_bars, 1)),
         "hmm_prob_chop": np.zeros((n_bars, 1)),
         "target_weights": np.zeros((n_bars, 1)),
@@ -225,62 +222,29 @@ def test_evaluate_sequential_promotion_gate_returns_result() -> None:
     assert result.promoted_to_champion is True
 
 
-def test_strategy_compose_wiring_produces_target_weights_with_policy_contract() -> None:
-    from src.domain.futures.optimization.objectives import _compose_strategy_scores_inplace
-    from src.domain.futures.portfolio.portfolio_constructor import precompute_rebalance_weights
-    from src.domain.futures.portfolio.portfolio_optimizer import PortfolioPolicyInputs
+def test_strategy_mode_requires_premerged_target_weights() -> None:
+    from src.domain.futures.optimization.objectives import _run_portfolio_numba_block
 
-    n_bars, n_syms = 8, 2
-    close = np.column_stack(
-        [
-            np.linspace(100.0, 105.0, num=n_bars),
-            np.linspace(101.0, 106.0, num=n_bars),
-        ]
-    ).astype(np.float64)
-    alpha_long = np.full((n_bars, n_syms), 0.004, dtype=np.float64)
-    alpha_short = np.zeros((n_bars, n_syms), dtype=np.float64)
-    execution_cost_bps = np.full((n_bars, n_syms), 1.0, dtype=np.float64)
-    sigma_3d = np.repeat(np.eye(n_syms, dtype=np.float64)[None, :, :] * 2e-4, n_bars, axis=0)
-    beta_2d = np.ones((n_bars, n_syms), dtype=np.float64)
-
+    close = np.full((8, 2), 100.0, dtype=np.float64)
     aligned: dict[str, Any] = {
-        "alpha_long": alpha_long,
-        "alpha_short": alpha_short,
-        "execution_cost_bps_2d": execution_cost_bps,
+        "close": close,
+        "high": close + 1.0,
+        "low": close - 1.0,
+        "open": close,
+        "atr": np.full_like(close, 2.0),
+        "kill_signal": np.zeros_like(close),
+        "funding_rate_sum": np.zeros_like(close),
     }
     params: dict[str, Any] = {
-        "BETA_ALPHA": 1.0,
-        "EV_HURDLE_BPS": 5.0,
+        "STRATEGY_MODE": True,
+        "REBALANCE_BARS": 1,
+        "LEVERAGE": 3.0,
+        "ATR_MULT": 2.0,
+        "TRAIL_MULT": 2.0,
+        "MAX_EXPOSURE_PER_COIN": 1.0,
+        "MAX_EXPOSURE": 1.0,
+        "DD_SCALING_THRESHOLD": 0.0,
+        "TIMEFRAME": "4h",
     }
-    _compose_strategy_scores_inplace(aligned, params)
-
-    policy_inputs = PortfolioPolicyInputs(
-        mu_long_2d=np.asarray(aligned["mu_long_2d"], dtype=np.float64),
-        mu_short_2d=np.asarray(aligned["mu_short_2d"], dtype=np.float64),
-        risk_sigma_3d=sigma_3d,
-        risk_beta_2d=beta_2d,
-        cost_fraction_2d=np.asarray(aligned["mu_long_2d"], dtype=np.float64) * 0.0,
-        cost_bps_2d=execution_cost_bps,
-        cost_source=str(aligned["_strategy_cost_snapshot_meta"]["execution_cost_bps_source"]),
-    )
-
-    w = precompute_rebalance_weights(
-        close,
-        np.asarray(aligned["xs_score_long"], dtype=np.float64),
-        np.asarray(aligned["xs_score_short"], dtype=np.float64),
-        rebalance_bars=1,
-        lookback=5,
-        bars_per_year=365.0 * 24.0,
-        kappa=0.3,
-        f_kelly_max=1.0,
-        sigma_target_ann=0.2,
-        gross_cap=0.8,
-        per_symbol_cap=0.3,
-        sigma_3d=sigma_3d,
-        btc_beta_2d=beta_2d,
-        policy_inputs=policy_inputs,
-    )
-
-    assert w.shape == (n_bars, n_syms)
-    assert float(np.sum(np.abs(w[-1]))) > 0.0
-    assert "_strategy_cost_snapshot_meta" in aligned
+    with pytest.raises(RuntimeError, match="target_weights"):
+        _run_portfolio_numba_block(params, aligned)

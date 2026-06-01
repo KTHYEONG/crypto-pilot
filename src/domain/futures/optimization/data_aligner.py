@@ -29,13 +29,10 @@ _FUTURES_2D_REQUIRED_COLS: tuple[str, ...] = (
     "kill_signal",
     "membership_kill_signal",
     "entry_block_mask",
-    "slot_rank_score",
-    "ml_calib_prob",
     "alpha_long",
     "alpha_short",
     "dyn_leverage",
-    "xs_score_long",
-    "xs_score_short",
+    "target_weight",
     "composer_sigma_bar",
     "btc_trend_vol_adj_24h",
 )
@@ -180,13 +177,10 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> dict[str, np.ndarray]:
         "kill_signal": 0.0,
         "membership_kill_signal": 0.0,
         "entry_block_mask": 0.0,
-        "slot_rank_score": 0.0,
-        "ml_calib_prob": 1.0,
         "alpha_long": 0.0,
         "alpha_short": 0.0,
         "dyn_leverage": 5.0,
-        "xs_score_long": 0.0,
-        "xs_score_short": 0.0,
+        "target_weight": 0.0,
         "composer_sigma_bar": 0.01,
         "btc_trend_vol_adj_24h": 0.0,
     }
@@ -236,28 +230,10 @@ def _build_aligned_2d_from_prebuilt(
         except ValueError:
             return None
         aligned_data[col] = np.ascontiguousarray(merged)
-
-    # Optional rank score columns: pass through if all symbols have them
-    for opt_col in ("rank_score_long_2d", "rank_score_short_2d"):
-        opt_views: list[np.ndarray] = []
-        all_present = True
-        for sym in symbols:
-            sym_arrs = prebuilt_arrays.get(sym)
-            if sym_arrs is None:
-                all_present = False
-                break
-            arr = sym_arrs.get(opt_col)
-            if arr is None or slice_end > int(arr.shape[0]):
-                all_present = False
-                break
-            opt_views.append(arr[slice_start:slice_end])
-        if all_present and opt_views:
-            try:
-                aligned_data[opt_col] = np.ascontiguousarray(
-                    np.column_stack(opt_views).astype(np.float64, copy=False)
-                )
-            except ValueError:
-                pass
+    if "target_weight" in aligned_data:
+        aligned_data["target_weights"] = np.asarray(
+            aligned_data["target_weight"], dtype=np.float64
+        )
 
     decision_dt = _extract_decision_dt_index(
         prebuilt_arrays=prebuilt_arrays,
@@ -445,11 +421,7 @@ def align_data_for_2d_engine(
         "kill_signal",
         "membership_kill_signal",
         "entry_block_mask",
-        "slot_rank_score",
-        "ml_calib_prob",
         "dyn_leverage",
-        "xs_score_long",
-        "xs_score_short",
         "alpha_long",
         "alpha_short",
     ]
@@ -479,10 +451,6 @@ def align_data_for_2d_engine(
             "kill_signal",
             "membership_kill_signal",
             "entry_block_mask",
-            "slot_rank_score",
-            "ml_calib_prob",
-            "xs_score_long",
-            "xs_score_short",
             "alpha_long",
             "alpha_short",
         ]:

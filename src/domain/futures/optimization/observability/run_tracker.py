@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -176,7 +177,7 @@ def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages
         (parsed.path or "/0").lstrip("/"),
     )
     _preflight_redis_endpoint(storage_url)
-    storage = optuna.storages.JournalStorage(
+    storage: optuna.storages.BaseStorage = optuna.storages.JournalStorage(
         optuna.storages.JournalRedisStorage(storage_url)
     )
     return storage_url, storage
@@ -311,15 +312,15 @@ def ml_trial_passes_hard_gates(
 
     if is_mdd is not None and is_dsr is not None:
         # Optimization phase checks
+        is_mdd_val = float(is_mdd)
+        is_dsr_val = float(is_dsr)
         mdd_limit = float(cfg.get("FUTURES_MAX_MDD", 25.0))
         dsr_floor = float(
             dsr_min if dsr_min is not None else cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.30)
         )
-        if is_mdd >= mdd_limit:
+        if is_mdd_val >= mdd_limit:
             return False
-        if is_dsr < dsr_floor:
-            return False
-        return True
+        return is_dsr_val >= dsr_floor
 
     # Historical AWF-based checks
     pbo_lim = float(pbo_max if pbo_max is not None else cfg.get("FUTURES_PBO_MAX", 0.40))
@@ -355,9 +356,7 @@ def ml_trial_passes_hard_gates(
     min_trades_dynamic = (
         max(12.0, float(span_bars) / bars_per_trade_est) if span_bars > 0 else 12.0
     )
-    if float(trial.user_attrs.get("avg_trades", 0.0)) < min_trades_dynamic:
-        return False
-    return True
+    return float(trial.user_attrs.get("avg_trades", 0.0)) >= min_trades_dynamic
 
 
 # Global context for worker processes to leverage Linux Copy-on-Write (CoW)
@@ -835,10 +834,8 @@ def run_optimization_loop(
     _GLOBAL_BASE_CTX = base_ctx
     _GLOBAL_OBJECTIVE_FN = objective_fn if objective_fn is not None else objective_ml_phase_d
     gc.collect()
-    try:
+    with contextlib.suppress(AttributeError, RuntimeError):
         gc.freeze()
-    except (AttributeError, RuntimeError):
-        pass
 
     # 3. Micro-Batching: Calculate chunk size to balance throughput and latency
     # Typically 2-4 trials per chunk is a good balance for SQLite WAL.

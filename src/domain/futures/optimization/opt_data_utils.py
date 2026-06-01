@@ -502,10 +502,7 @@ def compute_oos_regime_attribution(
             r_pnl = pnl[r_mask]
             gains = float(r_pnl[r_pnl > 0.0].sum())
             losses = abs(float(r_pnl[r_pnl < 0.0].sum()))
-            if losses == 0.0:
-                pf = 5.0 if gains > 0.0 else 1.0
-            else:
-                pf = gains / losses
+            pf = (5.0 if gains > 0.0 else 1.0) if losses == 0.0 else gains / losses
             win_rate = float(np.mean(r_pnl > 0.0) * 100.0)
             avg_pnl = float(np.mean(r_pnl))
         else:
@@ -552,23 +549,6 @@ def compute_oos_regime_attribution(
             100.0 * np.mean(trade_codes >= 0) if n_trades > 0 else 0.0
         ),
     }
-
-
-def assert_oos_gp_signal_alive(
-    oos_data_maps: dict[str, dict[str, Any]], valid_symbols: list[str], tf: str
-) -> None:
-    """Verify that ML signals are not dead in the OOS period."""
-    for sym in valid_symbols[: min(5, len(valid_symbols))]:
-        df = oos_data_maps[sym][tf]
-        if "alpha_long_00" not in df.columns:
-            raise RuntimeError(f"Pre-OOS: {sym} missing alpha_long_00.")
-        gp = df["alpha_long_00"]
-        if not pd.api.types.is_numeric_dtype(gp):
-            raise RuntimeError(f"Pre-OOS: {sym} alpha_long_00 non-numeric dtype={gp.dtype}")
-        o0 = int(oos_data_maps[sym][f"oos_start_idx_{tf}"])
-        oos_std = float(pd.to_numeric(gp.iloc[o0:], errors="coerce").std(ddof=0) or 0.0)
-        if oos_std < 1e-6:
-            raise RuntimeError(f"Pre-OOS: {sym} OOS alpha_long_00 std={oos_std:.2e} (dead signal).")
 
 
 def load_single_symbol_data(

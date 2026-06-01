@@ -15,6 +15,50 @@ _logger = logging.getLogger(__name__)
 _CS_MOM_LOOKBACKS: list[int] = [12, 24, 36, 48, 60, 72]
 
 
+class SignalCalibrator:
+    """Deterministic Platt-style calibrator for alpha scores."""
+
+    def __init__(self) -> None:
+        self.mean_b: float = 1.05
+        self._coef: float = 1.0
+        self._intercept: float = 0.0
+
+    def fit(self, alpha: np.ndarray, returns: np.ndarray) -> SignalCalibrator:
+        """Fit a simple logistic mapping from alpha to positive-return probability."""
+        x = np.asarray(alpha, dtype=np.float64).reshape(-1)
+        y_raw = np.asarray(returns, dtype=np.float64).reshape(-1)
+        mask = np.isfinite(x) & np.isfinite(y_raw)
+        if not np.any(mask):
+            self.mean_b = 1.05
+            self._coef = 1.0
+            self._intercept = 0.0
+            return self
+
+        x = x[mask]
+        y = (y_raw[mask] > 0.0).astype(np.float64)
+        x_centered = x - float(np.mean(x))
+        design = np.column_stack([x_centered, np.ones_like(x_centered)])
+        ridge = np.eye(2, dtype=np.float64) * 1e-6
+        ridge[1, 1] = 0.0
+        beta, *_ = np.linalg.lstsq(design.T @ design + ridge, design.T @ y, rcond=None)
+        coef = float(beta[0])
+        intercept = float(beta[1])
+        if not np.isfinite(coef):
+            coef = 1.0
+        if not np.isfinite(intercept):
+            intercept = 0.0
+        self._coef = float(np.clip(coef, -50.0, 50.0))
+        self._intercept = float(np.clip(intercept, -50.0, 50.0))
+        self.mean_b = float(max(0.1, abs(self._coef)))
+        return self
+
+    def predict_prob(self, alpha: np.ndarray) -> np.ndarray:
+        """Return calibrated probability scores."""
+        x = np.asarray(alpha, dtype=np.float64)
+        logits = np.clip(self._coef * x + self._intercept, -50.0, 50.0)
+        return 1.0 / (1.0 + np.exp(-logits))
+
+
 def inject_cs_momentum_ranks(
     data_maps: dict[str, dict[str, Any]],
     symbols: list[str],
@@ -168,4 +212,3 @@ def resolve_embargo_bars_for_tf(
 EMBARGO_BARS: dict[str, int] = {
     tf: resolve_embargo_bars_for_tf(OPT_FUTURES_CONFIG, tf) for tf in ("1h", "4h", "1d")
 }
-
