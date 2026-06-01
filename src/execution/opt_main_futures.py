@@ -1286,12 +1286,20 @@ def _run_alpha_evaluation_report(
         _policy_no_trade,
     )
     _logger.info(
-        "[ALPHA-POLICY] policy_no_trade=%s reason=%s val_lcb=%.2f val_ir=%.2f mono=%.2f",
+        (
+            "[ALPHA-POLICY] policy_no_trade=%s reason=%s val_lcb=%.2f val_ir=%.2f mono=%.2f "
+            "pre_ic=%.4f post_ic=%.4f pres=%.4f soft_beta=%s soft_beta_w=%.2f"
+        ),
         _policy_no_trade,
         _policy_reason,
         float(_policy_payload.get("validation_net_lcb_bps", float("nan"))),
         float(_policy_payload.get("validation_ir_t", float("nan"))),
         float(_policy_payload.get("validation_monotonicity", float("nan"))),
+        float(_policy_payload.get("validation_pre_ic", float("nan"))),
+        float(_policy_payload.get("validation_post_ic", float("nan"))),
+        float(_policy_payload.get("validation_clip_preservation", float("nan"))),
+        bool(_policy_payload.get("soft_beta_neutralize", False)),
+        float(_policy_payload.get("soft_beta_neutralize_weight", float("nan"))),
     )
     _logger.info(
         "[ALPHA-POLICY-PORT] mode=%s hold=%s breadth=%.2f turnover=%.2f cost=%.2f net_lcb=%.2f beta=%.4f net=%.4f",
