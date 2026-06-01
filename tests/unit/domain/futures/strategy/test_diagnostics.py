@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from src.domain.futures.strategy.diagnostics import (
     feature_cs_ic_audit,
     ic_summary,
     passes_ic_gate,
     rolling_ic,
+    top_bottom_spread_bps,
 )
 
 
@@ -112,3 +114,33 @@ def test_feature_cs_ic_audit_detects_injected_signal() -> None:
     assert float(rows[0]["mean_ic"]) > 0.8
     assert "t_stat_nw" in rows[0]
     assert "gap" in rows[0]
+
+
+def test_top_bottom_spread_bps_flat_cost_semantics() -> None:
+    # Arrange: perfect long-short signal, known gross spread
+    T, N = 50, 10
+    score = np.tile(np.arange(N, dtype=np.float64), (T, 1))  # [0..9] each bar
+    realized = np.zeros((T, N), dtype=np.float64)
+    realized[:, -1] = 0.01   # top symbol: +1% per bar
+    realized[:, 0] = -0.01   # bottom symbol: -1% per bar
+    eligible = np.ones((T, N), dtype=bool)
+
+    # Act
+    result = top_bottom_spread_bps(score, realized, eligible, quantile=0.10, cost_bps=24.0)
+
+    # Assert: gross ≈ 200bps (1%-(-1%)=2%), net = gross - 24 (FLAT, not turnover-weighted)
+    assert result["gross_spread_bps"] == pytest.approx(200.0, abs=1.0)
+    assert result["net_spread_bps"] == pytest.approx(200.0 - 24.0, abs=1.0)
+    # turnover_proxy is selection-fraction, not portfolio-weight turnover
+    assert 0.0 < result["turnover_proxy"] <= 1.0
+
+
+def test_top_bottom_spread_bps_insufficient_rows_returns_zeros() -> None:
+    score = np.ones((2, 4), dtype=np.float64)
+    realized = np.ones((2, 4), dtype=np.float64) * 0.001
+    eligible = np.ones((2, 4), dtype=bool)
+
+    result = top_bottom_spread_bps(score, realized, eligible, quantile=0.35, cost_bps=24.0)
+
+    assert result["n_obs"] == 0.0
+    assert result["net_spread_lcb_bps"] == pytest.approx(-24.0)
