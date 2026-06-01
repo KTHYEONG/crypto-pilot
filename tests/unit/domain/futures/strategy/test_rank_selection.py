@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from _pytest.monkeypatch import MonkeyPatch
 
+from src.domain.futures.strategy.alpha_evaluation import effective_breadth_corr
 from src.domain.futures.strategy.rank_selection import (
     RankSelectionPolicy,
     _cross_sectional_neutralize_2d,
@@ -13,7 +15,6 @@ from src.domain.futures.strategy.rank_selection import (
     policy_from_dict,
     policy_to_dict,
 )
-from src.domain.futures.strategy.alpha_evaluation import effective_breadth_corr
 
 
 def test_soft_cs_emits_broader_weights_than_tail_on_same_scores() -> None:
@@ -173,6 +174,114 @@ def test_policy_to_dict_round_trip_includes_new_keys() -> None:
     assert "validation_turnover" in out
 
 
+def test_policy_to_dict_round_trip_includes_preservation_fields() -> None:
+    policy = RankSelectionPolicy(
+        polarity=1,
+        quantile=0.25,
+        min_abs_z=0.0,
+        weighting="tanh",
+        weight_k=3.0,
+        holding_bars=12,
+        validation_net_lcb_bps=1.0,
+        validation_gross_bps=2.0,
+        validation_ir_t=3.0,
+        validation_monotonicity=0.4,
+        n_obs=111,
+        selection_mode="soft_cs",
+        validation_pre_ic=0.03,
+        validation_post_ic=0.02,
+        validation_clip_preservation=0.66,
+        validation_objective=9.9,
+    )
+    payload = policy_to_dict(policy)
+    restored = policy_from_dict(payload)
+    assert restored.validation_pre_ic == pytest.approx(0.03, abs=1e-12)
+    assert restored.validation_post_ic == pytest.approx(0.02, abs=1e-12)
+    assert restored.validation_clip_preservation == pytest.approx(0.66, abs=1e-12)
+    assert restored.validation_objective == pytest.approx(9.9, abs=1e-12)
+
+
+def test_calibrate_rank_portfolio_policy_prefers_higher_post_ic_objective(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    score = np.ones((24, 8), dtype=np.float64)
+    realized = {12: np.ones((24, 8), dtype=np.float64) * 0.001}
+    eligible = np.ones((24, 8), dtype=bool)
+
+    def _fake_build_signed_rank_weights(
+        *,
+        signed_score_2d: np.ndarray,
+        eligible_2d: np.ndarray,
+        policy: RankSelectionPolicy,
+        beta_2d: np.ndarray | None = None,
+        factor_2d: np.ndarray | None = None,
+        gross_target: float = 1.0,
+        max_abs_net_exposure: float = 0.10,
+        max_abs_beta_exposure: float = 0.20,
+    ) -> np.ndarray:
+        out = np.zeros_like(signed_score_2d, dtype=np.float64)
+        out[0, 0] = float(policy.soft_beta_neutralize_weight)
+        return out
+
+    def _fake_estimate_policy_metrics(**kwargs: object) -> dict[str, float]:
+        w = float(np.asarray(kwargs["weights"])[0, 0])
+        if w >= 0.5:
+            pre_ic = 0.05
+            post_ic = 0.05
+            lcb = 8.0
+        else:
+            pre_ic = 0.05
+            post_ic = 0.01
+            lcb = 10.0
+        return {
+            "n_obs": 200.0,
+            "validation_gross_bps": 10.0,
+            "validation_cost_bps": 1.0,
+            "validation_net_lcb_bps": lcb,
+            "validation_ir_t": 3.0,
+            "validation_breadth": 12.0,
+            "validation_turnover": 0.4,
+            "validation_abs_net_exposure": 0.02,
+            "validation_abs_beta_exposure": 0.05,
+            "validation_monotonicity": 0.2,
+            "validation_pre_ic": pre_ic,
+            "validation_post_ic": post_ic,
+        }
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rank_selection.build_signed_rank_weights",
+        _fake_build_signed_rank_weights,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rank_selection._estimate_policy_metrics",
+        _fake_estimate_policy_metrics,
+    )
+
+    policy = calibrate_rank_portfolio_policy(
+        signed_score_2d=score,
+        realized_fwd_ret_by_horizon=realized,
+        eligible_2d=eligible,
+        execution_cost_bps_2d=None,
+        beta_2d=None,
+        quantiles=(0.25,),
+        min_abs_z_grid=(0.0,),
+        holding_bars_candidates=(12,),
+        selection_modes=("tail",),
+        cost_bps_fallback=0.0,
+        min_obs=30,
+        post_ic_weight=100.0,
+        preservation_weight=12.0,
+        min_clip_preservation=0.0,
+        soft_beta_neutralize=True,
+        soft_beta_weights=(0.0, 0.6),
+    )
+
+    assert policy.soft_beta_neutralize is True
+    assert policy.soft_beta_neutralize_weight == pytest.approx(0.6, abs=1e-12)
+    assert policy.validation_post_ic == pytest.approx(0.05, abs=1e-12)
+    assert policy.validation_net_lcb_bps == pytest.approx(8.0, abs=1e-12)
+
+
 def test_ema_2d_functional() -> None:
     from src.domain.futures.strategy.rank_selection import _ema_2d
     arr = np.array([
@@ -309,4 +418,3 @@ def test_cross_sectional_neutralize_2d_reduces_inter_asset_correlation() -> None
     assert neff_resid > neff_raw, (
         f"Expected N_eff_resid ({neff_resid:.2f}) > N_eff_raw ({neff_raw:.2f})"
     )
-

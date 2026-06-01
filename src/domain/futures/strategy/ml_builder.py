@@ -1297,6 +1297,14 @@ def build_ml_strategy_alpha(
                 max_turnover=float(ml_cfg.rank_policy_max_turnover),
                 max_abs_net_exposure=float(ml_cfg.rank_policy_max_abs_net_exposure),
                 max_abs_beta_exposure=float(ml_cfg.rank_policy_max_abs_beta_exposure),
+                min_clip_preservation=float(ml_cfg.rank_policy_min_clip_preservation),
+                preservation_weight=float(ml_cfg.rank_policy_preservation_weight),
+                post_ic_weight=float(ml_cfg.rank_policy_post_ic_weight),
+                allow_preservation_fallback=bool(ml_cfg.rank_policy_allow_preservation_fallback),
+                smoothing_method=ml_cfg.smoothing_method,
+                adaptive_smoothing=bool(ml_cfg.adaptive_smoothing),
+                soft_beta_neutralize=bool(ml_cfg.soft_beta_neutralize),
+                soft_beta_weights=tuple(float(w) for w in ml_cfg.rank_policy_soft_beta_weights),
             )
             fold_policy_masks.append(
                 (
@@ -2336,6 +2344,14 @@ def build_ml_strategy_alpha_anchored(
                 max_turnover=float(ml_cfg.rank_policy_max_turnover),
                 max_abs_net_exposure=float(ml_cfg.rank_policy_max_abs_net_exposure),
                 max_abs_beta_exposure=float(ml_cfg.rank_policy_max_abs_beta_exposure),
+                min_clip_preservation=float(ml_cfg.rank_policy_min_clip_preservation),
+                preservation_weight=float(ml_cfg.rank_policy_preservation_weight),
+                post_ic_weight=float(ml_cfg.rank_policy_post_ic_weight),
+                allow_preservation_fallback=bool(ml_cfg.rank_policy_allow_preservation_fallback),
+                smoothing_method=ml_cfg.smoothing_method,
+                adaptive_smoothing=bool(ml_cfg.adaptive_smoothing),
+                soft_beta_neutralize=bool(ml_cfg.soft_beta_neutralize),
+                soft_beta_weights=tuple(float(w) for w in ml_cfg.rank_policy_soft_beta_weights),
             )
             awf_signed = derive_signed_rank_signal(
                 rank_score_long_grid_awf.astype(np.float64),
