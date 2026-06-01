@@ -51,7 +51,7 @@ def _normalize_unit(series: pd.Series) -> pd.Series:
 
 
 def _to_return_vector(value: object) -> np.ndarray | None:
-    if isinstance(value, np.ndarray) or isinstance(value, (list, tuple)):
+    if isinstance(value, np.ndarray | list | tuple):
         vector = np.asarray(value, dtype=float)
     else:
         return None
@@ -264,6 +264,8 @@ def apply_selection_stage(
         + float(cfg.weight_alpha_capacity) * alpha_capacity
         + float(cfg.weight_diversification) * out["diversification_score"]
     )
+    # Stage6 score is for execution pool construction, not alpha ranking.
+    out["execution_pool_score"] = out["tradeable_score"]
 
     out = out.sort_values("tradeable_score", ascending=False).reset_index(drop=True)
 
