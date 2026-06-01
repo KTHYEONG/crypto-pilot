@@ -169,3 +169,24 @@ def test_policy_to_dict_round_trip_includes_new_keys() -> None:
     out = policy_to_dict(policy)
     assert out["selection_mode"] == "soft_cs"
     assert "validation_turnover" in out
+
+
+def test_ema_2d_functional() -> None:
+    from src.domain.futures.strategy.rank_selection import _ema_2d
+    arr = np.array([
+        [1.0, np.nan],
+        [2.0, 3.0],
+        [3.0, np.nan],
+    ], dtype=np.float64)
+    # span = 3 -> alpha = 0.5
+    smoothed = _ema_2d(arr, span=3)
+    
+    assert np.isnan(smoothed[0, 1])
+    assert smoothed[0, 0] == 1.0
+    # t=1: 0.5 * 2.0 + 0.5 * 1.0 = 1.5
+    assert smoothed[1, 0] == 1.5
+    assert smoothed[1, 1] == 3.0
+    # t=2: 0.5 * 3.0 + 0.5 * 1.5 = 2.25
+    assert smoothed[2, 0] == 2.25
+    assert smoothed[2, 1] == 3.0
+
