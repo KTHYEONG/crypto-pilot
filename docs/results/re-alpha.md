@@ -85,3 +85,46 @@ uv run pytest tests/unit/domain/futures/strategy/test_ml_diagnostics.py tests/un
 UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. timeout 360 uv run python src/execution/opt_main_futures.py --mode alpha --sync-mode skip --trials 1 --tf 4h --reference-date 2026-05-01
 latest smoke: `ALPHA_PASS: FALSE` / `policy_economics.validation_net_lcb_non_positive`
 ```
+
+---
+
+# Re-Alpha Execution Results - 2026-06-01 (Phase alpha3 latest)
+
+## 현재 상태
+- `ALPHA_PASS`: `FALSE`
+- 실행 모드: `--mode alpha --sync-mode skip --trials 1 --tf 4h --reference-date 2026-05-01`
+- 목적: alpha3 (cost-aware soft portfolio policy + horizon-aware validation) 구현 확인
+- 최신 상태: `rank_policy.selection_mode=soft_cs`가 동작하고 `promotion_stage=diagnostic`로 리포트됨
+
+## 최신 실행 로그 (alpha3 최신 스모크)
+
+```text
+[RANK-POLICY] fold=0 mode=soft_cs polarity=1 q=0.20 floor=0.00 hold=12 val_lcb=-1.00 val_ir=0.00 mono=0.00 breadth=nan turnover=nan cost=nan
+[RANK-POLICY] fold=1 mode=soft_cs polarity=1 q=0.20 floor=0.00 hold=12 val_lcb=-1.00 val_ir=0.00 mono=0.00 breadth=nan turnover=nan cost=nan
+[ALPHA-GATE] alpha_output_unit=rank_weight alpha_cost_wall_required=False policy_no_trade=True
+[ALPHA-POLICY] policy_no_trade=True reason=validation_net_lcb_non_positive val_lcb=-1.00 val_ir=0.00 mono=0.00
+[ALPHA-POLICY-PORT] mode=soft_cs hold=12 breadth=nan turnover=nan cost=nan net_lcb=-1.00 beta=nan net=nan
+📊 [PASS=❌] fail=['signal_below_effective_breakeven', 'signal_t_stat_too_low', 'policy_economics.validation_net_lcb_non_positive'] | net_ic=0.0000 be_raw=0.0526 gap_raw=-525.9bps
+>> ALPHA_PASS: FALSE ... [PROMOTION: stage=diagnostic mode=soft_cs breadth=nan turnover=nan cost=nan]
+```
+
+## 판정
+
+```text
+핵심 결과:
+- alpha3 계약(soft_cs 모드, policy portfolio 로그, promotion_stage 노출)은 구현되어 smoke에서 확인됨
+- `alpha_panel empty` 종료는 발생하지 않음
+- 24bps는 rank-weight magnitude가 아닌 policy economics / execution realism 계층에 남아 있음
+- 다만 fold 정책이 모두 no-trade(`validation_net_lcb_non_positive`)로 귀결되어 아직 ALPHA_PASS는 FALSE
+- 즉, alpha3는 "평가/변환 계층의 실전성 강화" 구현 단계는 완료했지만 경제성 pass는 미달 상태
+```
+
+## 테스트
+
+```text
+uv run pytest tests/unit/domain/futures/strategy/test_labels.py tests/unit/domain/futures/strategy/test_rank_selection.py tests/unit/domain/futures/strategy/test_alpha_evaluation.py tests/unit/domain/futures/strategy/test_ml_builder.py tests/unit/execution/test_opt_main_futures_strategy_mode.py --tb=short
+74 passed in 1.75s
+
+UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. timeout 360 uv run python src/execution/opt_main_futures.py --mode alpha --sync-mode skip --trials 1 --tf 4h --reference-date 2026-05-01
+latest smoke: `ALPHA_PASS: FALSE` / `promotion_stage=diagnostic` / `policy_economics.validation_net_lcb_non_positive`
+```
