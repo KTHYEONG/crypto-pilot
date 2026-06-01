@@ -9,7 +9,6 @@ import pandas as pd
 
 from src.application.futures.optimization.config import FuturesRunConfig
 from src.domain.futures.strategy import StrategyConfig
-from src.domain.futures.strategy.legacy.inference import validate_alpha_forecast_metadata
 from src.domain.futures.strategy_runtime.bridge import (
     MLPipelineOutput,
     run_ml_pipeline_for_universe,
@@ -74,7 +73,6 @@ def summarize_strategy_alpha_readiness(
     for required_col in ("alpha_long", "alpha_short"):
         if required_col not in alpha_panel.columns:
             raise RuntimeError(f"strategy alpha_panel missing required column: {required_col}")
-    validate_alpha_forecast_metadata(alpha_panel)
 
     panel_reset = alpha_panel.reset_index()
     if "datetime" not in panel_reset.columns or "symbol" not in panel_reset.columns:

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 ActiveMode = Literal["quick-backtest", "strategy", "alpha"]
-SyncMode = Literal["full_history_master", "elite_fast", "skip"]
+SyncMode = Literal["full", "fast", "skip"]
 
 _ACTIVE_MODES: frozenset[str] = frozenset({"quick-backtest", "strategy", "alpha"})
 _LEGACY_MODES: frozenset[str] = frozenset({"full", "strategy-smoke"})
@@ -14,6 +14,8 @@ _LEGACY_FLAGS: tuple[str, ...] = (
     "skip_universe",
     "skip_data_sync",
     "bypass_champion_guard",
+    "seed",
+    "resume",
 )
 
 
@@ -25,8 +27,8 @@ class FuturesRunConfig:
     reference_date: str | None
     trials: int
     mode: ActiveMode
-    sync_mode: SyncMode
-    force_universe_rebuild: bool
+    sync: SyncMode
+    rebuild_universe: bool
 
 
 def parse_active_mode(mode: str) -> ActiveMode:
@@ -47,27 +49,32 @@ def validate_run_config(config: FuturesRunConfig) -> FuturesRunConfig:
 
 def build_run_config_from_args(args: Namespace | dict[str, Any]) -> FuturesRunConfig:
     """Build validated active run config from argparse namespace or mapping."""
-    raw: dict[str, Any]
-    if isinstance(args, Namespace):
-        raw = vars(args)
-    else:
-        raw = dict(args)
+    raw = vars(args) if isinstance(args, Namespace) else dict(args)
 
     for legacy_flag in _LEGACY_FLAGS:
         if bool(raw.get(legacy_flag, False)):
             raise ValueError(f"legacy flag is not allowed in active runner: {legacy_flag}")
 
     mode = parse_active_mode(str(raw.get("mode", "strategy")))
-    sync_mode_raw = str(raw.get("sync_mode", "full_history_master"))
-    if sync_mode_raw not in {"full_history_master", "elite_fast", "skip"}:
-        raise ValueError(f"invalid sync_mode: {sync_mode_raw}")
+    
+    # Map simplified sync values or handle legacy if passed through dict
+    sync_raw = str(raw.get("sync", raw.get("sync_mode", "full")))
+    sync_map = {
+        "full_history_master": "full",
+        "elite_fast": "fast",
+        "full": "full",
+        "fast": "fast",
+        "skip": "skip",
+    }
+    sync = sync_map.get(sync_raw, "full")
+
     config = FuturesRunConfig(
         timeframe=str(raw.get("timeframe", raw.get("tf", "4h"))),
         reference_date=raw.get("reference_date"),
         trials=int(raw.get("trials", 100)),
         mode=mode,
-        sync_mode=sync_mode_raw,  # type: ignore[arg-type]
-        force_universe_rebuild=bool(raw.get("force_universe_rebuild", False)),
+        sync=sync,  # type: ignore[arg-type]
+        rebuild_universe=bool(raw.get("rebuild_universe", raw.get("force_universe_rebuild", False))),
     )
     return validate_run_config(config)
 
