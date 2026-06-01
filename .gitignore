@@ -12,6 +12,8 @@ data/
 
 # legacy
 legacy/
+!src/domain/futures/strategy/legacy/
+!src/domain/futures/strategy/legacy/**
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
