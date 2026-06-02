@@ -30,6 +30,31 @@ def _make_aligned() -> AlignedMarketData:
     )
 
 
+def _make_collision_aligned() -> AlignedMarketData:
+    t = 20
+    n = 1
+    open_ = np.full((t, n), 100.0, dtype=np.float64)
+    high = np.full((t, n), 120.0, dtype=np.float64)
+    low = np.full((t, n), 80.0, dtype=np.float64)
+    close = np.full((t, n), 100.0, dtype=np.float64)
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    return AlignedMarketData(
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        open_2d=open_,
+        high_2d=high,
+        low_2d=low,
+        close_2d=close,
+        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, n), dtype=np.float64),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.full((t, n), 5.0, dtype=np.float64),
+    )
+
+
 def test_label_candidate_events_t_plus_one_entry_and_columns() -> None:
     aligned = _make_aligned()
     events = pd.DataFrame(
@@ -61,6 +86,10 @@ def test_label_candidate_events_t_plus_one_entry_and_columns() -> None:
         "mae_bps",
         "mfe_bps",
         "realized_vol_bps",
+        "exit_reason",
+        "exit_idx",
+        "exit_policy_version",
+        "same_bar_collision",
     ):
         assert col in out.columns
     assert np.isfinite(float(out.loc[0, "gross_fwd_bps"]))
@@ -83,6 +112,10 @@ def test_label_candidate_events_uses_future_window_only_for_targets() -> None:
     )
     out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
     assert int(out.loc[0, "time_to_exit_bars"]) == 4
+    assert str(out.loc[0, "exit_reason"]) == "time_exit"
+    assert int(out.loc[0, "exit_idx"]) == 12
+    assert int(out.loc[0, "same_bar_collision"]) == 0
+    assert str(out.loc[0, "exit_policy_version"]) == "candidate_label_atr_v1"
 
 
 def test_label_candidate_events_separates_barrier_and_profitable_labels() -> None:
@@ -129,3 +162,50 @@ def test_label_candidate_events_profitable_label_respects_hurdle() -> None:
 
     assert float(out.loc[0, "edge_after_hurdle_bps"]) < 0.0
     assert int(out.loc[0, "profitable_after_hurdle_label"]) == 0
+
+
+def test_label_candidate_events_same_bar_collision_defaults_to_stop_loss() -> None:
+    aligned = _make_collision_aligned()
+    events = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[2]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [3],
+            "expected_holding_bars": [5],
+            "min_holding_bars": [1],
+            "stop_atr_mult": [0.25],
+            "take_profit_atr_mult": [0.25],
+            "cost_floor_bps": [0.0],
+        }
+    )
+
+    out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
+
+    assert str(out.loc[0, "exit_reason"]) == "stop_loss"
+    assert int(out.loc[0, "same_bar_collision"]) == 1
+    assert int(out.loc[0, "exit_idx"]) == 3
+    assert int(out.loc[0, "triple_barrier_label"]) == 0
+
+
+def test_label_candidate_events_invalid_entry_marks_metadata() -> None:
+    aligned = _make_aligned()
+    events = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[0]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [999],
+            "expected_holding_bars": [5],
+            "min_holding_bars": [1],
+            "stop_atr_mult": [1.0],
+            "take_profit_atr_mult": [1.0],
+            "cost_floor_bps": [0.0],
+        }
+    )
+
+    out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
+
+    assert str(out.loc[0, "exit_reason"]) == "invalid"
+    assert int(out.loc[0, "exit_idx"]) == -1
+    assert int(out.loc[0, "same_bar_collision"]) == 0

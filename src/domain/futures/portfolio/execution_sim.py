@@ -92,6 +92,8 @@ def backtest_target_weights_numba(
     max_exp_per_coin: float,
     dd_scaling_threshold: float,
     volume_2d: np.ndarray | None = None,
+    candidate_stop_atr_mult: np.ndarray | None = None,
+    candidate_take_profit_atr_mult: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
     """Execute toward signed equity fractions `target_weights` (rebalance at open); no CS ranking path.
 
@@ -114,6 +116,7 @@ def backtest_target_weights_numba(
     entry_fee_stored = np.zeros(n_syms, dtype=np.float64)
     fund_fee_stored = np.zeros(n_syms, dtype=np.float64)
     stop_p = np.zeros(n_syms, dtype=np.float64)
+    take_p = np.zeros(n_syms, dtype=np.float64)
     highest = np.zeros(n_syms, dtype=np.float64)
     lowest = np.zeros(n_syms, dtype=np.float64)
     entry_lev = np.ones(n_syms, dtype=np.float64)
@@ -123,7 +126,7 @@ def backtest_target_weights_numba(
     min_notional_floor_pct = 0.0001
 
     liq_p = np.zeros(n_syms, dtype=np.float64)
-    MAINT_MARGIN_RATE = 0.005  # Binance USDT-M 기본 유지증거금율 0.5%
+    maint_margin_rate = 0.005  # Binance USDT-M 기본 유지증거금율 0.5%
 
     max_trades = max(50_000, n_bars * n_syms * 3)
     trades: np.ndarray = np.zeros((max_trades, 10), dtype=np.float64)
@@ -202,7 +205,9 @@ def backtest_target_weights_numba(
                 desired_amt = abs(tgt_notional) / op if ts != 0 else 0.0
 
                 need_exit = False
-                if ts == 0 or ts != pos_side[s] or abs(amount[s] - desired_amt) * op > max(0.01, eq_snap * min_notional_floor_pct):
+                if ts == 0 or ts != pos_side[s] or abs(amount[s] - desired_amt) * op > max(
+                    0.01, eq_snap * min_notional_floor_pct
+                ):
                     need_exit = True
 
                 if need_exit:
@@ -324,12 +329,23 @@ def backtest_target_weights_numba(
                 fund_fee_stored[s] = 0.0
                 highest[s] = fill_p
                 lowest[s] = fill_p
+                stop_mult = atr_mult
+                tp_mult = 0.0
+                if candidate_stop_atr_mult is not None:
+                    raw_stop_mult = float(candidate_stop_atr_mult[i, s])
+                    if np.isfinite(raw_stop_mult) and raw_stop_mult > 0.0:
+                        stop_mult = raw_stop_mult
+                if candidate_take_profit_atr_mult is not None:
+                    raw_tp_mult = float(candidate_take_profit_atr_mult[i, s])
+                    if np.isfinite(raw_tp_mult) and raw_tp_mult > 0.0:
+                        tp_mult = raw_tp_mult
+                stop_dist = atr_prev * stop_mult
+                tp_dist = atr_prev * tp_mult
                 stop_p[s] = fill_p - (stop_dist * float(ts))
+                take_p[s] = fill_p + (tp_dist * float(ts)) if tp_mult > 0.0 else 0.0
                 # Isolated margin liquidation price
                 # Long: entry*(1 - 1/lev + MMR), Short: entry*(1 + 1/lev - MMR)
-                liq_p[s] = fill_p * (
-                    1.0 - (1.0 / le_ent) * float(ts) + MAINT_MARGIN_RATE * float(ts)
-                )
+                liq_p[s] = fill_p * (1.0 - (1.0 / le_ent) * float(ts) + maint_margin_rate * float(ts))
 
         unrealized_total = 0.0
         used_margin_total = 0.0
@@ -424,6 +440,21 @@ def backtest_target_weights_numba(
                         elif c_high >= stop_p[s]:
                             exit_triggered = True
                             exit_price = stop_p[s] * (1.0 + slippage_rate)
+                    if not exit_triggered and take_p[s] > 0.0:
+                        if pos_side[s] == 1:
+                            if c_open >= take_p[s]:
+                                exit_triggered = True
+                                exit_price = c_open * (1.0 - slippage_rate)
+                            elif c_high >= take_p[s]:
+                                exit_triggered = True
+                                exit_price = take_p[s] * (1.0 - slippage_rate)
+                        else:
+                            if c_open <= take_p[s]:
+                                exit_triggered = True
+                                exit_price = c_open * (1.0 + slippage_rate)
+                            elif c_low <= take_p[s]:
+                                exit_triggered = True
+                                exit_price = take_p[s] * (1.0 + slippage_rate)
                 else:
                     if pos_side[s] == 1:
                         if c_high > highest[s]:
@@ -437,6 +468,21 @@ def backtest_target_weights_numba(
                         exit_triggered, exit_price, stop_p[s] = check_short_exit(
                             c_open, c_high, lowest[s], pos_atr, stop_p[s], trail_mult, slippage_rate
                         )
+                    if not exit_triggered and take_p[s] > 0.0:
+                        if pos_side[s] == 1:
+                            if c_open >= take_p[s]:
+                                exit_triggered = True
+                                exit_price = c_open * (1.0 - slippage_rate)
+                            elif c_high >= take_p[s]:
+                                exit_triggered = True
+                                exit_price = take_p[s] * (1.0 - slippage_rate)
+                        else:
+                            if c_open <= take_p[s]:
+                                exit_triggered = True
+                                exit_price = c_open * (1.0 + slippage_rate)
+                            elif c_low <= take_p[s]:
+                                exit_triggered = True
+                                exit_price = take_p[s] * (1.0 + slippage_rate)
 
             if exit_triggered:
                 pnl_x = (exit_price - entry_p[s]) * amount[s] * pos_side[s]
@@ -460,6 +506,7 @@ def backtest_target_weights_numba(
                     t_count += 1
                 in_pos[s] = False
                 liq_p[s] = 0.0
+                take_p[s] = 0.0
 
     if n_bars > 0:
         last_idx = n_bars - 1
@@ -522,6 +569,8 @@ def backtest_target_weights_intrabar_numba(
     funding_event_mask_1m: np.ndarray | None = None,
     funding_rate_1m: np.ndarray | None = None,
     volume_1m_2d: np.ndarray | None = None,
+    candidate_stop_atr_mult: np.ndarray | None = None,
+    candidate_take_profit_atr_mult: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
     """Intrabar execution with 1m path scan and decision-level rebalancing."""
     _ = maker_fee
@@ -544,11 +593,12 @@ def backtest_target_weights_intrabar_numba(
     entry_fee_stored = np.zeros(n_syms, dtype=np.float64)
     fund_fee_stored = np.zeros(n_syms, dtype=np.float64)
     stop_p = np.zeros(n_syms, dtype=np.float64)
+    take_p = np.zeros(n_syms, dtype=np.float64)
     highest = np.zeros(n_syms, dtype=np.float64)
     lowest = np.zeros(n_syms, dtype=np.float64)
     entry_lev = np.ones(n_syms, dtype=np.float64)
     liq_p = np.zeros(n_syms, dtype=np.float64)
-    MAINT_MARGIN_RATE = 0.005  # Binance USDT-M 기본 유지증거금율 0.5%
+    maint_margin_rate = 0.005  # Binance USDT-M 기본 유지증거금율 0.5%
 
     dust_skip_cnt, margin_fail_cnt = 0, 0
     spare_a, spare_b = 0, 0
@@ -639,7 +689,9 @@ def backtest_target_weights_intrabar_numba(
                 desired_amt = abs(tgt_notional) / op if ts != 0 else 0.0
 
                 need_exit = False
-                if ts == 0 or ts != pos_side[s] or abs(amount[s] - desired_amt) * op > max(0.01, eq_snap * min_notional_floor_pct):
+                if ts == 0 or ts != pos_side[s] or abs(amount[s] - desired_amt) * op > max(
+                    0.01, eq_snap * min_notional_floor_pct
+                ):
                     need_exit = True
 
                 if need_exit:
@@ -713,7 +765,18 @@ def backtest_target_weights_intrabar_numba(
                 atr_prev = atr_2d[prev_i, s]
                 if np.isnan(atr_prev) or atr_prev <= 0.0:
                     continue
-                stop_dist = atr_prev * atr_mult
+                stop_mult = atr_mult
+                tp_mult = 0.0
+                if candidate_stop_atr_mult is not None:
+                    raw_stop_mult = float(candidate_stop_atr_mult[i, s])
+                    if np.isfinite(raw_stop_mult) and raw_stop_mult > 0.0:
+                        stop_mult = raw_stop_mult
+                if candidate_take_profit_atr_mult is not None:
+                    raw_tp_mult = float(candidate_take_profit_atr_mult[i, s])
+                    if np.isfinite(raw_tp_mult) and raw_tp_mult > 0.0:
+                        tp_mult = raw_tp_mult
+                stop_dist = atr_prev * stop_mult
+                tp_dist = atr_prev * tp_mult
                 abs_tgt = abs(tgt_notional)
                 desired_amt = abs_tgt / fill_p
                 max_qty_exp = (eq_snap2 * max_exp_per_coin) / fill_p
@@ -753,10 +816,9 @@ def backtest_target_weights_intrabar_numba(
                 highest[s] = fill_p
                 lowest[s] = fill_p
                 stop_p[s] = fill_p - (stop_dist * float(ts))
+                take_p[s] = fill_p + (tp_dist * float(ts)) if tp_mult > 0.0 else 0.0
                 # Isolated margin liquidation price
-                liq_p[s] = fill_p * (
-                    1.0 - (1.0 / le_ent) * float(ts) + MAINT_MARGIN_RATE * float(ts)
-                )
+                liq_p[s] = fill_p * (1.0 - (1.0 / le_ent) * float(ts) + maint_margin_rate * float(ts))
 
         window_liq = False
         liq_m = start_m
@@ -773,13 +835,16 @@ def backtest_target_weights_intrabar_numba(
                 used_margin_total += (amount[s] * cur_p) / entry_lev[s]
                 unrealized_total += (cur_p - entry_p[s]) * amount[s] * pos_side[s]
 
-                if funding_event_mask_1m is not None and funding_rate_1m is not None:
-                    if funding_event_mask_1m[m, s] > 0.5:
-                        fr = funding_rate_1m[m, s]
-                        if not np.isnan(fr):
-                            fund_fee = amount[s] * cur_p * fr * pos_side[s]
-                            if np.isfinite(fund_fee):
-                                fund_fee_stored[s] += fund_fee
+                if (
+                    funding_event_mask_1m is not None
+                    and funding_rate_1m is not None
+                    and funding_event_mask_1m[m, s] > 0.5
+                ):
+                    fr = funding_rate_1m[m, s]
+                    if not np.isnan(fr):
+                        fund_fee = amount[s] * cur_p * fr * pos_side[s]
+                        if np.isfinite(fund_fee):
+                            fund_fee_stored[s] += fund_fee
 
                 if short_borrow_daily > 0.0 and pos_side[s] == -1:
                     balance -= amount[s] * cur_p * (short_borrow_daily / 1440.0)
@@ -838,6 +903,21 @@ def backtest_target_weights_intrabar_numba(
                             elif c_high >= stop_p[s]:
                                 exit_triggered = True
                                 exit_price = stop_p[s] * (1.0 + slippage_rate)
+                        if not exit_triggered and take_p[s] > 0.0:
+                            if pos_side[s] == 1:
+                                if c_open >= take_p[s]:
+                                    exit_triggered = True
+                                    exit_price = c_open * (1.0 - slippage_rate)
+                                elif c_high >= take_p[s]:
+                                    exit_triggered = True
+                                    exit_price = take_p[s] * (1.0 - slippage_rate)
+                            else:
+                                if c_open <= take_p[s]:
+                                    exit_triggered = True
+                                    exit_price = c_open * (1.0 + slippage_rate)
+                                elif c_low <= take_p[s]:
+                                    exit_triggered = True
+                                    exit_price = take_p[s] * (1.0 + slippage_rate)
                     else:
                         if pos_side[s] == 1:
                             if c_high > highest[s]:
@@ -851,6 +931,21 @@ def backtest_target_weights_intrabar_numba(
                             exit_triggered, exit_price, stop_p[s] = check_short_exit(
                                 c_open, c_high, lowest[s], pos_atr, stop_p[s], trail_mult, slippage_rate
                             )
+                        if not exit_triggered and take_p[s] > 0.0:
+                            if pos_side[s] == 1:
+                                if c_open >= take_p[s]:
+                                    exit_triggered = True
+                                    exit_price = c_open * (1.0 - slippage_rate)
+                                elif c_high >= take_p[s]:
+                                    exit_triggered = True
+                                    exit_price = take_p[s] * (1.0 - slippage_rate)
+                            else:
+                                if c_open <= take_p[s]:
+                                    exit_triggered = True
+                                    exit_price = c_open * (1.0 + slippage_rate)
+                                elif c_low <= take_p[s]:
+                                    exit_triggered = True
+                                    exit_price = take_p[s] * (1.0 + slippage_rate)
 
                 if exit_triggered:
                     pnl_x = (exit_price - entry_p[s]) * amount[s] * pos_side[s]
@@ -872,6 +967,7 @@ def backtest_target_weights_intrabar_numba(
                         t_count += 1
                     in_pos[s] = False
                     liq_p[s] = 0.0
+                    take_p[s] = 0.0
 
         if window_liq:
             for s in range(n_syms):

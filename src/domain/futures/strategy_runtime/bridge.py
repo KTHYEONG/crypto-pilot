@@ -35,6 +35,7 @@ def run_candidate_strategy_for_universe(
 
     from dataclasses import replace
 
+    from src.domain.futures.strategy.ablation import apply_variant_promotions
     from src.domain.futures.strategy.candidate_dataset import build_candidate_dataset
     from src.domain.futures.strategy.candidate_edge import fit_candidate_edge_models, predict_candidate_edges
     from src.domain.futures.strategy.candidate_gate import fit_candidate_gate, predict_candidate_gate
@@ -81,6 +82,40 @@ def run_candidate_strategy_for_universe(
 
     labeled = label_candidate_events(events=raw_events, aligned=aligned, cfg=strategy_cfg.candidate)
 
+    diag = compute_rule_diagnostics(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=strategy_cfg.candidate,
+        min_obs=max(strategy_cfg.candidate.min_candidate_obs, 100),
+    )
+
+    if strategy_cfg.candidate.promotion_filter_enabled:
+        labeled = apply_variant_promotions(
+            labeled=labeled,
+            keep_variants=diag.recommended_keep_variants,
+            flip_variants=diag.recommended_flip_variants,
+        )
+        if labeled.empty:
+            _logger.warning(
+                "[BRIDGE] all candidate variants blocked by promotion filter; producing zero weights"
+            )
+            alpha_panel = build_candidate_alpha_panel(
+                selected_events=pd.DataFrame(),
+                target_weights_2d=np.zeros_like(aligned.close_2d),
+                datetimes=aligned.datetimes,
+                symbols=tuple(symbols),
+            )
+            return CandidatePipelineOutput(
+                alpha_panel=alpha_panel,
+                target_weights=np.zeros_like(aligned.close_2d),
+                rule_report={
+                    "events_total": len(raw_events),
+                    "selected_total": 0,
+                    "recommended_keep_variants": diag.recommended_keep_variants,
+                    "recommended_flip_variants": diag.recommended_flip_variants,
+                },
+            )
+
     split_val = int(n_bars * 0.8)
     train_set = build_candidate_dataset(
         labeled_events=labeled, aligned=aligned, cfg=strategy_cfg.candidate, split_start=0, split_end=split_val
@@ -89,12 +124,6 @@ def run_candidate_strategy_for_universe(
         labeled_events=labeled, aligned=aligned, cfg=strategy_cfg.candidate, split_start=split_val, split_end=n_bars
     )
 
-    diag = compute_rule_diagnostics(
-        labeled_events=labeled,
-        aligned=aligned,
-        cfg=strategy_cfg.candidate,
-        min_obs=max(strategy_cfg.candidate.min_candidate_obs, 100),
-    )
     gate_model = fit_candidate_gate(train=train_set, valid=valid_set, cfg=strategy_cfg.candidate)
     edge_models = fit_candidate_edge_models(train=train_set, valid=valid_set, cfg=strategy_cfg.candidate)
 
@@ -118,6 +147,13 @@ def run_candidate_strategy_for_universe(
         datetimes=aligned.datetimes,
         symbols=tuple(symbols),
     )
+
+    if strategy_cfg.candidate.exit_policy_mode == "label_only":
+        # label_only: suppress per-event TP/SL; engine uses global ATR_MULT only
+        _logger.info("[BRIDGE] exit_policy_mode=label_only; zeroing per-event TP/SL columns")
+        alpha_panel = alpha_panel.copy()
+        alpha_panel["candidate_stop_atr_mult"] = 0.0
+        alpha_panel["candidate_take_profit_atr_mult"] = 0.0
 
     return CandidatePipelineOutput(
         alpha_panel=alpha_panel,
@@ -144,7 +180,8 @@ def merge_candidate_output_into_data_maps(
         return
     required = {
         "alpha_long", "alpha_short", "target_weight", "candidate_family",
-        "candidate_variant", "p_pass", "mu_net_decision_bps", "q10_net_bps", "utility_score"
+        "candidate_variant", "p_pass", "mu_net_decision_bps", "q10_net_bps", "utility_score",
+        "candidate_stop_atr_mult", "candidate_take_profit_atr_mult",
     }
     if not required.issubset(panel.columns):
         _logger.warning("[%s] candidate panel missing required columns; skip merge", log_tag)
@@ -162,6 +199,8 @@ def merge_candidate_output_into_data_maps(
             ("mu_net_decision_bps", 0.0),
             ("q10_net_bps", 0.0),
             ("utility_score", 0.0),
+            ("candidate_stop_atr_mult", 0.0),
+            ("candidate_take_profit_atr_mult", 0.0),
         ):
             if col not in df.columns:
                 df[col] = np.full(len(df), default, dtype=np.float64)
@@ -189,6 +228,10 @@ def merge_candidate_output_into_data_maps(
         df["mu_net_decision_bps"] = merged["mu_net_decision_bps"].fillna(0.0).to_numpy(dtype=np.float64)
         df["q10_net_bps"] = merged["q10_net_bps"].fillna(0.0).to_numpy(dtype=np.float64)
         df["utility_score"] = merged["utility_score"].fillna(0.0).to_numpy(dtype=np.float64)
+        df["candidate_stop_atr_mult"] = merged["candidate_stop_atr_mult"].fillna(0.0).to_numpy(dtype=np.float64)
+        df["candidate_take_profit_atr_mult"] = (
+            merged["candidate_take_profit_atr_mult"].fillna(0.0).to_numpy(dtype=np.float64)
+        )
 
 
 def merge_candidate_output_into_is_and_oos(

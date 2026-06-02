@@ -42,6 +42,7 @@ def test_predict_candidate_edges_exposes_all_required_outputs() -> None:
     assert out.q10_net_bps.shape == (60,)
     assert out.q90_net_bps.shape == (60,)
     assert out.utility_score.shape == (60,)
+    assert "utility_min" in out.selection_thresholds
 
 
 def test_predict_candidate_edges_applies_cost_and_utility_formula() -> None:
