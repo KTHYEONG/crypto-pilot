@@ -178,4 +178,5 @@ def test_compute_rule_diagnostics_keeps_positive_expectancy_low_hit_rate_variant
     assert float(variant_row["oos_pct_edge_pos"]) < 0.50
     assert float(variant_row["oos_payoff_ratio"]) >= 3.0
     assert variant_row["candidate_action"] == "KEEP_CANDIDATE"
-    assert result.recommended_keep_variants == ("variant=trend_donchian:donchian_72",)
+    assert float(variant_row["oos_rank_ic"]) >= cfg.min_oos_rank_ic
+    assert result.recommended_keep_variants == ("trend_donchian:donchian_72",)

@@ -17,7 +17,7 @@ from src.domain.futures.strategy.candidate_portfolio import (
     build_candidate_target_weights,
     select_candidate_events_for_portfolio,
 )
-from src.domain.futures.strategy.common.alignment import align_data_maps
+from src.domain.futures.strategy.common.alignment import AlignedMarketData, align_data_maps
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 from src.domain.futures.strategy.rule_diagnostics import compute_rule_diagnostics
 from src.domain.futures.strategy.rule_signals import build_rule_signal_panels, candidate_panels_to_events
@@ -37,6 +37,45 @@ class AblationRow:
     turnover: float
     final_equity: float
     pass_compound_gate: bool
+
+
+def _variant_key(frame: pd.DataFrame) -> pd.Series:
+    return frame["family"].astype(str).str.cat(frame["variant"].astype(str), sep=":")
+
+
+def apply_variant_promotions(
+    *,
+    labeled: pd.DataFrame,
+    keep_variants: tuple[str, ...],
+    flip_variants: tuple[str, ...],
+) -> pd.DataFrame:
+    """Filter labeled events to only recommended variants.
+
+    Returns empty DataFrame (fail-closed) when no variants are recommended,
+    so callers must guard for empty result.
+    """
+    if labeled.empty:
+        return labeled
+
+    allowed = set(keep_variants) | set(flip_variants)
+    if not allowed:
+        _logger.warning("[PROMO_FILTER] no variants recommended by diagnostics; blocking all candidates (fail-closed)")
+        return labeled.iloc[0:0].copy()
+
+    out = labeled.loc[_variant_key(labeled).isin(allowed)].copy()
+    if out.empty:
+        _logger.warning("[PROMO_FILTER] all candidates removed after variant filter; returning empty")
+        return labeled.iloc[0:0].copy()
+
+    flip_mask = _variant_key(out).isin(set(flip_variants))
+    if bool(flip_mask.any()):
+        out.loc[flip_mask, "side"] = -pd.to_numeric(out.loc[flip_mask, "side"], errors="coerce")
+        if "raw_score" in out.columns:
+            out.loc[flip_mask, "raw_score"] = -pd.to_numeric(out.loc[flip_mask, "raw_score"], errors="coerce")
+        if "score_z" in out.columns:
+            out.loc[flip_mask, "score_z"] = -pd.to_numeric(out.loc[flip_mask, "score_z"], errors="coerce")
+        out.loc[flip_mask, "side_flipped"] = True
+    return out.reset_index(drop=True)
 
 
 def _build_rule_equal_size_weights(
@@ -129,6 +168,18 @@ def run_candidate_ablation(
         ",".join(diag.recommended_keep_variants) if diag.recommended_keep_variants else "",
         ",".join(diag.recommended_flip_variants) if diag.recommended_flip_variants else "",
     )
+    labeled_unfiltered = labeled  # save before promotion filter for ablation row 7
+
+    if cfg.promotion_filter_enabled:
+        labeled = apply_variant_promotions(
+            labeled=labeled,
+            keep_variants=diag.recommended_keep_variants,
+            flip_variants=diag.recommended_flip_variants,
+        )
+        if labeled.empty:
+            _logger.warning(
+                "[ABLATION][PROMO_FILTER] all candidates blocked; ML rows will produce zero weights"
+            )
     n_bars = aligned.close_2d.shape[0]
     
     # Create fold splits (80% train, 20% validation)
@@ -252,6 +303,51 @@ def run_candidate_ablation(
         full_ml_w, data_maps, symbols, tf, "candidate_ml_full", cfg
     ))
 
+    # ── New OOS-only ablation rows (7-10): each isolates one added layer ──────
+    # Row 7: without promotion filter (shows promotion filter contribution)
+    rows.append(_run_oos_only_ablation_variant(
+        labeled=labeled_unfiltered,
+        aligned=aligned,
+        data_maps=data_maps,
+        symbols=symbols,
+        tf=tf,
+        cfg=cfg,
+        variant_name="candidate_ml_promotion_filter",
+    ))
+
+    # Row 8: with hard selection instead of validation_quantile (shows validation_quantile value)
+    rows.append(_run_oos_only_ablation_variant(
+        labeled=labeled,
+        aligned=aligned,
+        data_maps=data_maps,
+        symbols=symbols,
+        tf=tf,
+        cfg=replace(cfg, selection_policy="hard"),
+        variant_name="candidate_ml_validation_quantile_selection",
+    ))
+
+    # Row 9: without candidate identity features (shows identity feature contribution)
+    rows.append(_run_oos_only_ablation_variant(
+        labeled=labeled,
+        aligned=aligned,
+        data_maps=data_maps,
+        symbols=symbols,
+        tf=tf,
+        cfg=replace(cfg, candidate_identity_features_enabled=False),
+        variant_name="candidate_ml_identity_features",
+    ))
+
+    # Row 10: without market-state features (shows market-state feature contribution)
+    rows.append(_run_oos_only_ablation_variant(
+        labeled=labeled,
+        aligned=aligned,
+        data_maps=data_maps,
+        symbols=symbols,
+        tf=tf,
+        cfg=replace(cfg, market_state_features_enabled=False),
+        variant_name="candidate_ml_market_state_features",
+    ))
+
     # Convert results to DataFrame
     df_results = pd.DataFrame([
         {
@@ -268,6 +364,51 @@ def run_candidate_ablation(
     ])
 
     return df_results
+
+
+def _run_oos_only_ablation_variant(
+    *,
+    labeled: pd.DataFrame,
+    aligned: AlignedMarketData,
+    data_maps: dict[str, dict[str, Any]],
+    symbols: tuple[str, ...],
+    tf: str,
+    cfg: CandidateStrategyConfig,
+    variant_name: str,
+) -> AblationRow:
+    """Retrain models with modified cfg/labeled and evaluate on OOS split only."""
+    n_bars = aligned.close_2d.shape[0]
+    split_val = int(n_bars * 0.8)
+    zero_w = np.zeros_like(aligned.close_2d)
+
+    if labeled.empty:
+        _logger.warning("[ABLATION][%s] empty labeled events; returning zero weights", variant_name)
+        return _run_backtest_and_evaluate(zero_w, data_maps, symbols, tf, variant_name, cfg)
+
+    train_set = build_candidate_dataset(
+        labeled_events=labeled, aligned=aligned, cfg=cfg, split_start=0, split_end=split_val
+    )
+    valid_set = build_candidate_dataset(
+        labeled_events=labeled, aligned=aligned, cfg=cfg, split_start=split_val, split_end=n_bars
+    )
+
+    gate_model = fit_candidate_gate(train=train_set, valid=valid_set, cfg=cfg)
+    edge_models = fit_candidate_edge_models(train=train_set, valid=valid_set, cfg=cfg)
+
+    p_pass = predict_candidate_gate(model=gate_model, dataset=valid_set)
+    ml_out = predict_candidate_edges(models=edge_models, dataset=valid_set, p_pass=p_pass, cfg=cfg)
+    ml_out = replace(ml_out, events=valid_set.event_index)
+
+    selected = select_candidate_events_for_portfolio(model_output=ml_out, cfg=cfg)
+    w = build_candidate_target_weights(
+        selected_events=selected,
+        close_2d=aligned.close_2d,
+        symbols=symbols,
+        beta_2d=None,
+        sigma_3d=None,
+        cfg=cfg,
+    )
+    return _run_backtest_and_evaluate(w, data_maps, symbols, tf, variant_name, cfg)
 
 
 def _run_backtest_and_evaluate(

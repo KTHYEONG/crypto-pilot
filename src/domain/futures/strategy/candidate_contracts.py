@@ -54,6 +54,7 @@ class CandidateModelOutput:
     q10_net_bps: NDArray[np.float64]
     q90_net_bps: NDArray[np.float64]
     utility_score: NDArray[np.float64]
+    selection_thresholds: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(slots=True, frozen=True)

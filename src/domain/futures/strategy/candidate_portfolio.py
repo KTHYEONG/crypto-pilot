@@ -26,6 +26,27 @@ def _q10_mask_for_mode(df: pd.DataFrame, cfg: CandidateStrategyConfig) -> pd.Ser
     return df["q10_net_bps"] >= -cfg.max_expected_shortfall_bps
 
 
+def _catastrophic_q10_mask(df: pd.DataFrame, cfg: CandidateStrategyConfig) -> pd.Series:
+    return df["q10_net_bps"] >= -cfg.catastrophic_shortfall_bps
+
+
+def _utility_threshold(
+    *,
+    df: pd.DataFrame,
+    cfg: CandidateStrategyConfig,
+    model_output: CandidateModelOutput,
+) -> float:
+    threshold = model_output.selection_thresholds.get("utility_min")
+    if threshold is not None and np.isfinite(threshold):
+        return float(threshold)
+    finite = pd.to_numeric(df["utility_score"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return float("-inf")
+    quantile = max(0.0, min(1.0, 1.0 - float(cfg.selection_top_quantile)))
+    return float(np.quantile(finite, quantile))
+
+
 def compute_selection_sensitivity(
     *,
     events: pd.DataFrame,
@@ -216,16 +237,35 @@ def select_candidate_events_for_portfolio(
         )
         _log_selection_sensitivity(sensitivity, cfg=cfg)
 
-    # Apply gate and edge threshold filters
     gate_mask = df["p_pass"] >= cfg.min_gate_probability
     edge_mask = df["mu_net_decision_bps"] >= cfg.min_expected_net_bps
     q10_mask = _q10_mask_for_mode(df, cfg)
-    mask = gate_mask & edge_mask & q10_mask
+    catastrophic_mask = _catastrophic_q10_mask(df, cfg)
+    utility_threshold = _utility_threshold(df=df, cfg=cfg, model_output=model_output)
+    utility_mask = df["utility_score"] >= utility_threshold
+
+    if cfg.selection_policy == "hard":
+        mask = gate_mask & edge_mask & q10_mask
+    elif cfg.selection_policy == "validation_quantile":
+        mask = catastrophic_mask & (df["mu_net_decision_bps"] >= 0.0) & utility_mask
+    else:
+        # utility_topk: safety filter then rank by utility, keep top fraction
+        eligible = catastrophic_mask & (df["mu_net_decision_bps"] >= 0.0)
+        n_eligible = int(eligible.sum())
+        if n_eligible == 0:
+            mask = eligible
+        else:
+            n_keep = max(1, math.ceil(n_eligible * cfg.selection_top_quantile))
+            utility_vals = pd.to_numeric(df.loc[eligible, "utility_score"], errors="coerce")
+            top_idx = utility_vals.nlargest(n_keep).index
+            mask = pd.Series(False, index=df.index, dtype=bool)
+            mask.loc[top_idx] = True
+
     _log_selection_by_variant(
         df=df,
         gate_mask=gate_mask,
         edge_mask=edge_mask,
-        q10_mask=q10_mask,
+        q10_mask=catastrophic_mask if cfg.selection_policy != "hard" else q10_mask,
         pass_mask=mask,
         cfg=cfg,
     )
@@ -233,16 +273,18 @@ def select_candidate_events_for_portfolio(
     _sel_logger = logging.getLogger(__name__)
     _sel_logger.info(
         "[DIAG][SELECT] total=%d gate_fail=%d edge_fail=%d q10_fail=%d "
-        "all_fail=%d passed=%d | thresholds(gate>=%.2f edge_net>=%.1f q10>=-%.1f)",
+        "all_fail=%d passed=%d | policy=%s thresholds(gate>=%.2f edge_net>=%.1f q10>=-%.1f utility>=%.3f)",
         len(df),
         int((~gate_mask).sum()),
         int((~edge_mask).sum()),
-        int((~q10_mask).sum()),
+        int((~(catastrophic_mask if cfg.selection_policy != "hard" else q10_mask)).sum()),
         int((~mask).sum()),
         int(mask.sum()),
+        cfg.selection_policy,
         cfg.min_gate_probability,
         cfg.min_expected_net_bps,
-        cfg.max_expected_shortfall_bps,
+        cfg.catastrophic_shortfall_bps if cfg.selection_policy != "hard" else cfg.max_expected_shortfall_bps,
+        utility_threshold,
     )
     filtered = df.loc[mask].copy()
     if filtered.empty:
@@ -408,6 +450,8 @@ def build_candidate_alpha_panel(
         mu_bps = np.zeros(n_symbols, dtype=np.float64)
         q10_bps = np.zeros(n_symbols, dtype=np.float64)
         utility = np.zeros(n_symbols, dtype=np.float64)
+        stop_atr_mult = np.zeros(n_symbols, dtype=np.float64)
+        take_profit_atr_mult = np.zeros(n_symbols, dtype=np.float64)
 
         if t in grouped.groups:
             dt_group = grouped.get_group(t)
@@ -421,6 +465,8 @@ def build_candidate_alpha_panel(
                     mu_bps[s_idx] = float(row.mu_net_decision_bps)
                     q10_bps[s_idx] = float(row.q10_net_bps)
                     utility[s_idx] = float(row.utility_score)
+                    stop_atr_mult[s_idx] = float(getattr(row, "stop_atr_mult", 0.0))
+                    take_profit_atr_mult[s_idx] = float(getattr(row, "take_profit_atr_mult", 0.0))
 
         df_t = pd.DataFrame({
             "datetime": datetimes[t],
@@ -434,13 +480,16 @@ def build_candidate_alpha_panel(
             "mu_net_decision_bps": mu_bps,
             "q10_net_bps": q10_bps,
             "utility_score": utility,
+            "candidate_stop_atr_mult": stop_atr_mult,
+            "candidate_take_profit_atr_mult": take_profit_atr_mult,
         })
         rows.append(df_t)
 
     if not rows:
         empty_df = pd.DataFrame(columns=[
             "alpha_long", "alpha_short", "target_weight", "candidate_family",
-            "candidate_variant", "p_pass", "mu_net_decision_bps", "q10_net_bps", "utility_score"
+            "candidate_variant", "p_pass", "mu_net_decision_bps", "q10_net_bps", "utility_score",
+            "candidate_stop_atr_mult", "candidate_take_profit_atr_mult",
         ])
         empty_df.index = pd.MultiIndex.from_arrays(
             [pd.Index([], dtype="datetime64[ns]"), pd.Index([], dtype="object")],
