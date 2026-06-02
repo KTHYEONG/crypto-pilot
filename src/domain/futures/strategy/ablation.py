@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -20,6 +21,8 @@ from src.domain.futures.strategy.common.alignment import align_data_maps
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 from src.domain.futures.strategy.rule_diagnostics import compute_rule_diagnostics
 from src.domain.futures.strategy.rule_signals import build_rule_signal_panels, candidate_panels_to_events
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -101,7 +104,11 @@ def run_candidate_ablation(
     
     # 2. Build hypothesis rule candidates
     panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
-    raw_events = candidate_panels_to_events(panels, min_abs_score=cfg.min_rule_net_bps * 1e-4)
+    raw_events = candidate_panels_to_events(
+        panels,
+        min_abs_score=cfg.min_rule_net_bps * 1e-4,
+        side_flip_variants=cfg.side_flip_candidate_variants,
+    )
 
     if raw_events.empty:
         return pd.DataFrame(columns=[
@@ -111,11 +118,16 @@ def run_candidate_ablation(
 
     # 3. Label events and split dataset
     labeled = label_candidate_events(events=raw_events, aligned=aligned, cfg=cfg)
-    compute_rule_diagnostics(
+    diag = compute_rule_diagnostics(
         labeled_events=labeled,
         aligned=aligned,
         cfg=cfg,
         min_obs=max(cfg.min_candidate_obs, 100),
+    )
+    _logger.info(
+        "[DIAG][RULE_RECOMMEND_ABLATION] keep=%s flip=%s",
+        ",".join(diag.recommended_keep_variants) if diag.recommended_keep_variants else "",
+        ",".join(diag.recommended_flip_variants) if diag.recommended_flip_variants else "",
     )
     n_bars = aligned.close_2d.shape[0]
     

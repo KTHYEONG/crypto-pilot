@@ -64,8 +64,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_ALPHA_HORIZONS": (12, 24, 48, 72, 96),
     # Cache-control refit: when True, bypass Alpha raw cache and force alpha retraining.
     "FUTURES_ML_FORCE_RETRAIN_ALPHA": True,
-    # Thematic breadth: LambdaRank buckets (Trend / Vol+MR / Interaction) × slots each. Total = 3 × value.
-    # Raising adds interaction-style capacity without injecting systemic HMM into Trend slots (helps long IC vs AWF pos_frac).
+    # Thematic breadth: LambdaRank buckets with multiple slots per theme. Total = 3 x value.
+    # Raising adds interaction-style capacity without injecting systemic HMM into Trend slots.
     "FUTURES_ML_ALPHA_SLOTS_PER_THEME": 3,
     "FUTURES_ML_ALPHA_PARSIMONY": 0.02,
     "FUTURES_ML_ALPHA_USE_TBM_WEIGHT": True,
@@ -158,7 +158,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "CRISIS_RECOVERY_FLOOR": 0.30,
     # CAWF-R: K anchored legs in the OOS-pool slice (train [0, anchor_i), embargo, test window).
     "FUTURES_AWF_K_LEGS": 5,
-    # IS-pool fraction (leading bars); trailing (1 − frac) builds tiled OOS test legs only.
+    # IS-pool fraction (leading bars); trailing (1 - frac) builds tiled OOS test legs only.
     "FUTURES_AWF_IS_POOL_FRAC": 0.65,
     # Platt: prefer OOS-only windows in optimizer ``_fit_oos_platt_calibrators_from_maps``;
     # legacy tail fraction kept for deprecated tail-window path only.
@@ -180,7 +180,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_SIMPLE_ATR_STOP": True,
     # ATR period fixed (not an Optuna dimension).
     "FUTURES_ATR_PERIOD_FIXED": 30,
-    # Rolling σ lookback ≈ 8 calendar days (bars per TF optional override).
+    # Rolling σ lookback ≈ 8 calendar days (bars per TF optional override).  # noqa: RUF003
     "FUTURES_COMPOSER_SIGMA_CALENDAR_DAYS": 8.0,
     "FUTURES_COMPOSER_SIGMA_LOOKBACK_BY_TF": {"1h": 192, "4h": 48, "1d": 8},
     # 1.0 = disabled (no crisis long-only magnitude scaling in execution stack).
@@ -214,7 +214,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_TMP_LAYER1_MAX_DD_PCT": 12.0,
     "FUTURES_TMP_LAYER2_PSR_MIN": 0.95,
     "FUTURES_TMP_LAYER2_MIN_TRADES_PER_LEG": 20,
-    # Layer 2 optional: median(leg_log_tw − stress·round_trip) > 0 (see tmp_md_champion).
+    # Layer 2 optional: median(leg_log_tw - stress·round_trip) > 0 (see tmp_md_champion).
     "FUTURES_TMP_LAYER2_FRICTION_STRESS_ENABLED": True,
     "FUTURES_TMP_LAYER2_FRICTION_STRESS_MULT": 1.2,
     # Layer 3: every stability-seed AWF replay must pass Layer-1 checks when hard gate on.
@@ -335,6 +335,17 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
         "elite_top_n": 30,
         "basin_iqr_mult": 1.0,
     },
+    "FUTURES_CANDIDATE_FAMILIES": ("trend_donchian",),
+    "FUTURES_CANDIDATE_ENABLED_VARIANTS": (
+        "trend_donchian:donchian_18",
+        "trend_donchian:donchian_36",
+        "trend_donchian:donchian_72",
+    ),
+    "FUTURES_CANDIDATE_SIDE_FLIP_VARIANTS": (),
+    "FUTURES_CANDIDATE_DIAGNOSTIC_TOP_K": 10,
+    "FUTURES_CANDIDATE_MIN_VARIANT_OOS_OBS": 100,
+    "FUTURES_CANDIDATE_MIN_VARIANT_OOS_EDGE_BPS": 1.0,
+    "FUTURES_CANDIDATE_MIN_VARIANT_OOS_HIT_RATE": 0.50,
     # Per-symbol beta scaling + idiosyncratic overlay (per_symbol_overlay.py)
     "FUTURES_BETA_WINDOW": 240,
     "FUTURES_BETA_MIN": 0.3,
