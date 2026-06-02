@@ -67,6 +67,8 @@ def test_build_candidate_dataset_shapes_and_types() -> None:
     assert ds.y_mfe_bps.dtype == np.float32
     assert ds.groups.dtype == np.int32
     assert ds.y_gate.tolist() == [0, 1]
+    assert ds.y_q10_bps.tolist() == [-10.0, -12.0]
+    assert ds.y_mfe_bps.tolist() == [14.0, 1.0]
 
 
 def test_build_candidate_dataset_split_filter() -> None:
@@ -126,3 +128,36 @@ def test_build_candidate_dataset_falls_back_to_triple_barrier_label() -> None:
     )
 
     assert ds.y_gate.tolist() == [1, 0]
+
+
+def test_build_candidate_dataset_builds_net_q10_and_mfe_targets_with_hurdle() -> None:
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [26],
+            "raw_score": [0.5],
+            "score_z": [1.2],
+            "turnover_proxy": [0.1],
+            "triple_barrier_label": [1],
+            "profitable_after_hurdle_label": [1],
+            "edge_after_hurdle_bps": [12.0],
+            "mae_bps": [-6.0],
+            "mfe_bps": [18.0],
+            "ex_ante_cost_bps": [4.0],
+            "hurdle_bps": [2.0],
+        }
+    )
+
+    ds = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(),
+        split_start=20,
+        split_end=40,
+    )
+
+    assert ds.y_q10_bps.tolist() == [-12.0]
+    assert ds.y_mfe_bps.tolist() == [12.0]
