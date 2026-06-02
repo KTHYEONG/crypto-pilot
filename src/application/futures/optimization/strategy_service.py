@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -15,6 +15,54 @@ from src.domain.futures.strategy_runtime.bridge import (
 )
 
 _logger = logging.getLogger(__name__)
+
+
+def _parse_str_tuple(value: Any, *, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    if value is None:
+        return default
+    if isinstance(value, tuple):
+        return tuple(str(item) for item in value if str(item))
+    if isinstance(value, list):
+        return tuple(str(item) for item in value if str(item))
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",")]
+        return tuple(item for item in items if item)
+    return (str(value),)
+
+
+def build_candidate_strategy_config(
+    *,
+    strategy_cfg: StrategyConfig,
+    opt_config: dict[str, Any],
+    timeframe: str,
+) -> StrategyConfig:
+    """Build a runtime candidate strategy config from opt_config overrides."""
+    candidate = strategy_cfg.candidate
+    candidate = replace(
+        candidate,
+        timeframe=timeframe,
+        candidate_families=_parse_str_tuple(
+            opt_config.get("FUTURES_CANDIDATE_FAMILIES"),
+            default=candidate.candidate_families,
+        ),
+        enabled_candidate_variants=_parse_str_tuple(
+            opt_config.get("FUTURES_CANDIDATE_ENABLED_VARIANTS"),
+            default=candidate.enabled_candidate_variants,
+        ),
+        side_flip_candidate_variants=_parse_str_tuple(
+            opt_config.get("FUTURES_CANDIDATE_SIDE_FLIP_VARIANTS"),
+            default=candidate.side_flip_candidate_variants,
+        ),
+        diagnostic_top_k=int(opt_config.get("FUTURES_CANDIDATE_DIAGNOSTIC_TOP_K", candidate.diagnostic_top_k)),
+        min_variant_oos_obs=int(opt_config.get("FUTURES_CANDIDATE_MIN_VARIANT_OOS_OBS", candidate.min_variant_oos_obs)),
+        min_variant_oos_edge_bps=float(
+            opt_config.get("FUTURES_CANDIDATE_MIN_VARIANT_OOS_EDGE_BPS", candidate.min_variant_oos_edge_bps)
+        ),
+        min_variant_oos_hit_rate=float(
+            opt_config.get("FUTURES_CANDIDATE_MIN_VARIANT_OOS_HIT_RATE", candidate.min_variant_oos_hit_rate)
+        ),
+    )
+    return replace(strategy_cfg, candidate=candidate)
 
 
 def pick_strategy_data_maps(
@@ -207,7 +255,11 @@ def run_active_strategy_output_bridge(
         raise ValueError("active strategy bridge requires preloaded_data_maps")
 
     strategy_name = str(opt_config.get("FUTURES_STRATEGY_NAME", "candidate_ml"))
-    strategy_cfg = StrategyConfig(name=strategy_name)
+    strategy_cfg = build_candidate_strategy_config(
+        strategy_cfg=StrategyConfig(name=strategy_name),
+        opt_config=opt_config,
+        timeframe=run_config.timeframe,
+    )
     effective_symbols = [sym for sym in symbols if sym in preloaded_data_maps]
 
     return run_candidate_strategy_for_universe(

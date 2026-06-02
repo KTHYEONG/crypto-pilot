@@ -125,3 +125,57 @@ def test_compute_rule_diagnostics_marks_insufficient_obs() -> None:
 
     assert result.by_family.iloc[0]["candidate_action"] == "INSUFFICIENT_OBS"
     assert result.side_flip.iloc[0]["candidate_action"] == "INSUFFICIENT_OBS"
+
+
+def test_compute_rule_diagnostics_keeps_positive_expectancy_low_hit_rate_variant() -> None:
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [
+                aligned.datetimes[33],
+                aligned.datetimes[35],
+                aligned.datetimes[37],
+            ],
+            "symbol": ["BTCUSDT", "BTCUSDT", "BTCUSDT"],
+            "family": ["trend_donchian", "trend_donchian", "trend_donchian"],
+            "variant": ["donchian_72", "donchian_72", "donchian_72"],
+            "side": [1, 1, 1],
+            "raw_score": [0.9, 0.5, 0.4],
+            "score_z": [1.2, 0.8, 0.6],
+            "entry_idx": [34, 36, 38],
+            "expected_holding_bars": [2, 2, 2],
+            "min_holding_bars": [1, 1, 1],
+            "stop_atr_mult": [50.0, 50.0, 50.0],
+            "take_profit_atr_mult": [50.0, 50.0, 50.0],
+            "turnover_proxy": [0.1, 0.1, 0.1],
+            "cost_floor_bps": [0.0, 0.0, 0.0],
+            "hurdle_bps": [0.0, 0.0, 0.0],
+            "profitable_after_hurdle_label": [1, 0, 0],
+            "edge_after_hurdle_bps": [300.0, -10.0, -10.0],
+            "mae_bps": [-20.0, -20.0, -20.0],
+            "mfe_bps": [400.0, 15.0, 15.0],
+        }
+    )
+    labeled["triple_barrier_label"] = labeled["profitable_after_hurdle_label"]
+
+    cfg = CandidateStrategyConfig(
+        min_rule_hit_rate=0.50,
+        min_variant_oos_obs=1,
+        min_variant_oos_hit_rate=0.50,
+        min_variant_oos_payoff_ratio=3.0,
+        max_variant_oos_q10_fail_rate=0.50,
+        max_expected_shortfall_bps=80.0,
+    )
+
+    result = compute_rule_diagnostics(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        min_obs=1,
+    )
+
+    variant_row = result.by_variant.loc[result.by_variant["group"] == "variant=trend_donchian:donchian_72"].iloc[0]
+    assert float(variant_row["oos_pct_edge_pos"]) < 0.50
+    assert float(variant_row["oos_payoff_ratio"]) >= 3.0
+    assert variant_row["candidate_action"] == "KEEP_CANDIDATE"
+    assert result.recommended_keep_variants == ("variant=trend_donchian:donchian_72",)

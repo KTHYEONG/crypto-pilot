@@ -22,6 +22,8 @@ class RuleDiagnosticsResult:
     by_family_side: pd.DataFrame
     side_flip: pd.DataFrame
     decision: dict[str, float | int | str]
+    recommended_keep_variants: tuple[str, ...]
+    recommended_flip_variants: tuple[str, ...]
 
 
 def _safe_spearman(signal_scores: pd.Series, target_returns: pd.Series) -> float:
@@ -68,6 +70,11 @@ def _candidate_action(
     min_obs: int,
     mean_edge_bps: float,
     pct_edge_pos: float,
+    payoff_ratio: float,
+    q10_shortfall_fail_rate: float,
+    min_hit_rate: float,
+    min_payoff_ratio: float,
+    max_q10_fail_rate: float,
     flip_delta_bps: float | None = None,
     flip_mean_edge_bps: float | None = None,
 ) -> str:
@@ -75,7 +82,11 @@ def _candidate_action(
     if n < min_obs:
         return "INSUFFICIENT_OBS"
     if np.isfinite(mean_edge_bps) and np.isfinite(pct_edge_pos):
-        if mean_edge_bps > 0.0 and pct_edge_pos >= 0.50:
+        if (
+            mean_edge_bps > 0.0
+            and q10_shortfall_fail_rate <= max_q10_fail_rate
+            and (pct_edge_pos >= min_hit_rate or payoff_ratio >= min_payoff_ratio)
+        ):
             return "KEEP_CANDIDATE"
         if (
             flip_delta_bps is not None
@@ -88,11 +99,49 @@ def _candidate_action(
     return "DROP_OR_REWORK"
 
 
+def _split_index(n_bars: int) -> int:
+    """Return the fixed train/OOS split index used by candidate datasets."""
+    return max(1, int(n_bars * 0.8))
+
+
+def _edge_summary_from_frame(frame: pd.DataFrame, *, cfg: CandidateStrategyConfig) -> dict[str, float]:
+    """Compute edge summary metrics for a grouped frame."""
+    edge = pd.to_numeric(frame["edge_after_hurdle_bps"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+    mae = pd.to_numeric(frame["mae_bps"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+    mfe = pd.to_numeric(frame["mfe_bps"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+    raw_score = pd.to_numeric(frame["raw_score"], errors="coerce")
+    score_abs = raw_score.abs()
+
+    finite_edge = edge[np.isfinite(edge)]
+    finite_mae = mae[np.isfinite(mae)]
+    finite_mfe = mfe[np.isfinite(mfe)]
+    finite_shortfall = finite_mae < -float(cfg.max_expected_shortfall_bps)
+
+    return {
+        "mean_edge_bps": float(np.mean(finite_edge)) if finite_edge.size > 0 else float("nan"),
+        "median_edge_bps": float(np.median(finite_edge)) if finite_edge.size > 0 else float("nan"),
+        "pct_edge_pos": float((finite_edge > 0.0).mean()) if finite_edge.size > 0 else 0.0,
+        "p10_edge_bps": float(np.percentile(finite_edge, 10)) if finite_edge.size > 0 else float("nan"),
+        "p90_edge_bps": float(np.percentile(finite_edge, 90)) if finite_edge.size > 0 else float("nan"),
+        "mean_mae_bps": float(np.mean(finite_mae)) if finite_mae.size > 0 else float("nan"),
+        "mean_mfe_bps": float(np.mean(finite_mfe)) if finite_mfe.size > 0 else float("nan"),
+        "payoff_ratio": _safe_payoff_ratio(
+            float(np.mean(finite_mfe)) if finite_mfe.size > 0 else float("nan"),
+            float(np.mean(finite_mae)) if finite_mae.size > 0 else float("nan"),
+        ),
+        "spearman_score_edge": _safe_spearman(raw_score, frame["edge_after_hurdle_bps"]),
+        "spearman_abs_score_edge": _safe_spearman(score_abs, frame["edge_after_hurdle_bps"]),
+        "q10_shortfall_fail_rate": float(finite_shortfall.mean()) if finite_shortfall.size > 0 else 0.0,
+    }
+
+
 def _summarize_view(
     *,
     events: pd.DataFrame,
     view: str,
     min_obs: int,
+    cfg: CandidateStrategyConfig,
+    split_idx: int,
 ) -> pd.DataFrame:
     """Summarize a view of rule events."""
     group_cols: list[str]
@@ -110,24 +159,23 @@ def _summarize_view(
     for _, group in grouped:
         row = group.iloc[0]
         key = _group_key(view, row)
-        edge = pd.to_numeric(group["edge_after_hurdle_bps"], errors="coerce").to_numpy(
-            dtype=np.float64,
-            copy=False,
-        )
-        mae = pd.to_numeric(group["mae_bps"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
-        mfe = pd.to_numeric(group["mfe_bps"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
-        raw_score = pd.to_numeric(group["raw_score"], errors="coerce")
-        score_abs = raw_score.abs()
         side = pd.to_numeric(group["side"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
-
-        finite_edge = edge[np.isfinite(edge)]
-        mean_edge = float(np.mean(finite_edge)) if finite_edge.size > 0 else float("nan")
-        median_edge = float(np.median(finite_edge)) if finite_edge.size > 0 else float("nan")
-        pct_edge_pos = float((finite_edge > 0.0).mean()) if finite_edge.size > 0 else 0.0
-        p10_edge = float(np.percentile(finite_edge, 10)) if finite_edge.size > 0 else float("nan")
-        p90_edge = float(np.percentile(finite_edge, 90)) if finite_edge.size > 0 else float("nan")
-        mean_mae = float(np.mean(mae[np.isfinite(mae)])) if np.isfinite(mae).any() else float("nan")
-        mean_mfe = float(np.mean(mfe[np.isfinite(mfe)])) if np.isfinite(mfe).any() else float("nan")
+        entry_idx = pd.to_numeric(group["entry_idx"], errors="coerce").to_numpy(dtype=np.int64, copy=False)
+        train_group = group.loc[entry_idx < split_idx]
+        oos_group = group.loc[entry_idx >= split_idx]
+        full_metrics = _edge_summary_from_frame(group, cfg=cfg)
+        train_metrics = _edge_summary_from_frame(train_group, cfg=cfg) if not train_group.empty else {
+            "mean_edge_bps": float("nan"),
+            "pct_edge_pos": 0.0,
+            "payoff_ratio": 0.0,
+            "q10_shortfall_fail_rate": 0.0,
+        }
+        oos_metrics = _edge_summary_from_frame(oos_group, cfg=cfg) if not oos_group.empty else {
+            "mean_edge_bps": float("nan"),
+            "pct_edge_pos": 0.0,
+            "payoff_ratio": 0.0,
+            "q10_shortfall_fail_rate": 0.0,
+        }
 
         records.append(
             {
@@ -135,21 +183,40 @@ def _summarize_view(
                 "n": len(group),
                 "long_n": int(np.sum(side > 0.0)),
                 "short_n": int(np.sum(side < 0.0)),
-                "mean_edge_bps": mean_edge,
-                "median_edge_bps": median_edge,
-                "pct_edge_pos": pct_edge_pos,
-                "p10_edge_bps": p10_edge,
-                "p90_edge_bps": p90_edge,
-                "mean_mae_bps": mean_mae,
-                "mean_mfe_bps": mean_mfe,
-                "payoff_ratio": _safe_payoff_ratio(mean_mfe, mean_mae),
-                "spearman_score_edge": _safe_spearman(raw_score, group["edge_after_hurdle_bps"]),
-                "spearman_abs_score_edge": _safe_spearman(score_abs, group["edge_after_hurdle_bps"]),
+                "train_n": len(train_group),
+                "oos_n": len(oos_group),
+                "train_mean_edge_bps": float(train_metrics["mean_edge_bps"]),
+                "oos_mean_edge_bps": float(oos_metrics["mean_edge_bps"]),
+                "train_pct_edge_pos": float(train_metrics["pct_edge_pos"]),
+                "oos_pct_edge_pos": float(oos_metrics["pct_edge_pos"]),
+                "train_payoff_ratio": float(train_metrics["payoff_ratio"]),
+                "oos_payoff_ratio": float(oos_metrics["payoff_ratio"]),
+                "train_q10_shortfall_fail_rate": float(train_metrics["q10_shortfall_fail_rate"]),
+                "oos_q10_shortfall_fail_rate": float(oos_metrics["q10_shortfall_fail_rate"]),
+                "edge_stability_bps": float(oos_metrics["mean_edge_bps"] - train_metrics["mean_edge_bps"])
+                if np.isfinite(train_metrics["mean_edge_bps"]) and np.isfinite(oos_metrics["mean_edge_bps"])
+                else float("nan"),
+                "mean_edge_bps": float(full_metrics["mean_edge_bps"]),
+                "median_edge_bps": float(full_metrics["median_edge_bps"]),
+                "pct_edge_pos": float(full_metrics["pct_edge_pos"]),
+                "p10_edge_bps": float(full_metrics["p10_edge_bps"]),
+                "p90_edge_bps": float(full_metrics["p90_edge_bps"]),
+                "mean_mae_bps": float(full_metrics["mean_mae_bps"]),
+                "mean_mfe_bps": float(full_metrics["mean_mfe_bps"]),
+                "payoff_ratio": float(full_metrics["payoff_ratio"]),
+                "spearman_score_edge": float(full_metrics["spearman_score_edge"]),
+                "spearman_abs_score_edge": float(full_metrics["spearman_abs_score_edge"]),
+                "q10_shortfall_fail_rate": float(full_metrics["q10_shortfall_fail_rate"]),
                 "candidate_action": _candidate_action(
                     n=len(group),
                     min_obs=min_obs,
-                    mean_edge_bps=mean_edge,
-                    pct_edge_pos=pct_edge_pos,
+                    mean_edge_bps=float(full_metrics["mean_edge_bps"]),
+                    pct_edge_pos=float(full_metrics["pct_edge_pos"]),
+                    payoff_ratio=float(full_metrics["payoff_ratio"]),
+                    q10_shortfall_fail_rate=float(full_metrics["q10_shortfall_fail_rate"]),
+                    min_hit_rate=cfg.min_rule_hit_rate,
+                    min_payoff_ratio=cfg.min_variant_oos_payoff_ratio,
+                    max_q10_fail_rate=cfg.max_variant_oos_q10_fail_rate,
                 ),
             }
         )
@@ -159,6 +226,17 @@ def _summarize_view(
         "n",
         "long_n",
         "short_n",
+        "train_n",
+        "oos_n",
+        "train_mean_edge_bps",
+        "oos_mean_edge_bps",
+        "train_pct_edge_pos",
+        "oos_pct_edge_pos",
+        "train_payoff_ratio",
+        "oos_payoff_ratio",
+        "train_q10_shortfall_fail_rate",
+        "oos_q10_shortfall_fail_rate",
+        "edge_stability_bps",
         "mean_edge_bps",
         "median_edge_bps",
         "pct_edge_pos",
@@ -169,6 +247,7 @@ def _summarize_view(
         "payoff_ratio",
         "spearman_score_edge",
         "spearman_abs_score_edge",
+        "q10_shortfall_fail_rate",
         "candidate_action",
     ]
     if not records:
@@ -184,10 +263,12 @@ def _summarize_side_flip(
     flipped: pd.DataFrame,
     view: str,
     min_obs: int,
+    cfg: CandidateStrategyConfig,
+    split_idx: int,
 ) -> pd.DataFrame:
     """Compare original and side-flipped diagnostics for a view."""
-    orig_summary = _summarize_view(events=original, view=view, min_obs=min_obs)
-    flip_summary = _summarize_view(events=flipped, view=view, min_obs=min_obs)
+    orig_summary = _summarize_view(events=original, view=view, min_obs=min_obs, cfg=cfg, split_idx=split_idx)
+    flip_summary = _summarize_view(events=flipped, view=view, min_obs=min_obs, cfg=cfg, split_idx=split_idx)
 
     flip_map = flip_summary.set_index("group") if not flip_summary.empty else pd.DataFrame()
     records: list[dict[str, float | int | str]] = []
@@ -211,6 +292,11 @@ def _summarize_side_flip(
             min_obs=min_obs,
             mean_edge_bps=float(row.mean_edge_bps),
             pct_edge_pos=float(row.pct_edge_pos),
+            payoff_ratio=float(row.payoff_ratio),
+            q10_shortfall_fail_rate=float(row.q10_shortfall_fail_rate),
+            min_hit_rate=cfg.min_rule_hit_rate,
+            min_payoff_ratio=cfg.min_variant_oos_payoff_ratio,
+            max_q10_fail_rate=cfg.max_variant_oos_q10_fail_rate,
             flip_delta_bps=delta,
             flip_mean_edge_bps=flip_mean,
         )
@@ -292,6 +378,78 @@ def _log_summary_block(
             raise ValueError(f"unsupported view: {view}")
 
 
+def _log_variant_top_block(summary: pd.DataFrame, *, top_k: int) -> None:
+    """Emit top variant diagnostics using OOS metrics when available."""
+    if summary.empty:
+        return
+    columns = summary.columns
+    sort_col = "oos_mean_edge_bps" if "oos_mean_edge_bps" in columns else "mean_edge_bps"
+    top = summary.sort_values([sort_col, "group"], ascending=[False, True]).head(top_k)
+    for idx, row in enumerate(top.itertuples(index=False), start=1):
+        _logger.info(
+            (
+                "[DIAG][RULE_VARIANT_TOP] rank=%d key=%s n=%d oos_n=%d "
+                "mean_edge=%.1f oos_edge=%.1f oos_hit=%.3f oos_payoff=%.2f ic=%.4f "
+                "q10_fail=%.3f oos_q10_fail=%.3f action=%s"
+            ),
+            idx,
+            str(row.group),
+            int(row.n),
+            int(getattr(row, "oos_n", 0)),
+            float(row.mean_edge_bps),
+            float(getattr(row, "oos_mean_edge_bps", float("nan"))),
+            float(getattr(row, "oos_pct_edge_pos", 0.0)),
+            float(getattr(row, "oos_payoff_ratio", 0.0)),
+            float(row.spearman_score_edge),
+            float(getattr(row, "q10_shortfall_fail_rate", 0.0)),
+            float(getattr(row, "oos_q10_shortfall_fail_rate", 0.0)),
+            str(row.candidate_action),
+        )
+
+
+def _meets_recommendation_thresholds(row: pd.Series, cfg: CandidateStrategyConfig) -> bool:
+    return bool(
+        int(row.get("oos_n", 0)) >= cfg.min_variant_oos_obs
+        and float(row.get("oos_mean_edge_bps", float("nan"))) >= cfg.min_variant_oos_edge_bps
+        and float(row.get("oos_q10_shortfall_fail_rate", 1.0)) <= cfg.max_variant_oos_q10_fail_rate
+        and (
+            float(row.get("oos_pct_edge_pos", 0.0)) >= cfg.min_variant_oos_hit_rate
+            or float(row.get("oos_payoff_ratio", 0.0)) >= cfg.min_variant_oos_payoff_ratio
+        )
+    )
+
+
+def _build_recommendations(
+    *,
+    by_variant: pd.DataFrame,
+    flipped_by_variant: pd.DataFrame,
+    cfg: CandidateStrategyConfig,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return keep and flip recommendations from OOS metrics."""
+    keep_groups: list[str] = []
+    for _, row in by_variant.iterrows():
+        if str(row.get("candidate_action", "")) != "KEEP_CANDIDATE":
+            continue
+        if _meets_recommendation_thresholds(row, cfg):
+            keep_groups.append(str(row.get("group", "")))
+    recommended_keep = tuple(keep_groups)
+
+    flipped_lookup = flipped_by_variant.set_index("group") if not flipped_by_variant.empty else pd.DataFrame()
+    flip_groups: list[str] = []
+    for row in by_variant.itertuples(index=False):
+        if str(row.candidate_action) != "SIDE_FLIP_CANDIDATE":
+            continue
+        if str(row.group) not in getattr(flipped_lookup, "index", []):
+            continue
+        flip_row = flipped_lookup.loc[str(row.group)]
+        if isinstance(flip_row, pd.DataFrame):
+            continue
+        if _meets_recommendation_thresholds(pd.Series(flip_row), cfg):
+            flip_groups.append(str(row.group))
+
+    return recommended_keep, tuple(flip_groups)
+
+
 def _log_side_flip_block(side_flip: pd.DataFrame) -> None:
     """Emit a compact diagnostic log for side-flip comparisons."""
     for row in side_flip.itertuples(index=False):
@@ -334,6 +492,17 @@ def compute_rule_diagnostics(
                 "n",
                 "long_n",
                 "short_n",
+                "train_n",
+                "oos_n",
+                "train_mean_edge_bps",
+                "oos_mean_edge_bps",
+                "train_pct_edge_pos",
+                "oos_pct_edge_pos",
+                "train_payoff_ratio",
+                "oos_payoff_ratio",
+                "train_q10_shortfall_fail_rate",
+                "oos_q10_shortfall_fail_rate",
+                "edge_stability_bps",
                 "mean_edge_bps",
                 "median_edge_bps",
                 "pct_edge_pos",
@@ -344,6 +513,7 @@ def compute_rule_diagnostics(
                 "payoff_ratio",
                 "spearman_score_edge",
                 "spearman_abs_score_edge",
+                "q10_shortfall_fail_rate",
                 "candidate_action",
             ]
         )
@@ -367,7 +537,7 @@ def compute_rule_diagnostics(
             "best_group": "",
             "best_mean_edge": float("nan"),
         }
-        return RuleDiagnosticsResult(empty, empty, empty, empty_side, empty_decision)
+        return RuleDiagnosticsResult(empty, empty, empty, empty_side, empty_decision, (), ())
 
     required = {
         "family",
@@ -388,22 +558,65 @@ def compute_rule_diagnostics(
     if missing:
         raise ValueError(f"missing required diagnostic columns: {sorted(missing)}")
 
-    by_family = _summarize_view(events=labeled_events, view="family", min_obs=min_obs)
-    by_variant = _summarize_view(events=labeled_events, view="variant", min_obs=min_obs)
-    by_family_side = _summarize_view(events=labeled_events, view="family_side", min_obs=min_obs)
+    split_idx = _split_index(int(aligned.close_2d.shape[0]))
+
+    by_family = _summarize_view(
+        events=labeled_events,
+        view="family",
+        min_obs=min_obs,
+        cfg=cfg,
+        split_idx=split_idx,
+    )
+    by_variant = _summarize_view(
+        events=labeled_events,
+        view="variant",
+        min_obs=min_obs,
+        cfg=cfg,
+        split_idx=split_idx,
+    )
+    by_family_side = _summarize_view(
+        events=labeled_events,
+        view="family_side",
+        min_obs=min_obs,
+        cfg=cfg,
+        split_idx=split_idx,
+    )
 
     flipped = labeled_events.copy()
     flipped["side"] = -flipped["side"]
     flipped_labeled = label_candidate_events(events=flipped, aligned=aligned, cfg=cfg)
+    flipped_by_variant = _summarize_view(
+        events=flipped_labeled,
+        view="variant",
+        min_obs=min_obs,
+        cfg=cfg,
+        split_idx=split_idx,
+    )
 
     side_flip_frames = [
-        _summarize_side_flip(original=labeled_events, flipped=flipped_labeled, view="family", min_obs=min_obs),
-        _summarize_side_flip(original=labeled_events, flipped=flipped_labeled, view="variant", min_obs=min_obs),
+        _summarize_side_flip(
+            original=labeled_events,
+            flipped=flipped_labeled,
+            view="family",
+            min_obs=min_obs,
+            cfg=cfg,
+            split_idx=split_idx,
+        ),
+        _summarize_side_flip(
+            original=labeled_events,
+            flipped=flipped_labeled,
+            view="variant",
+            min_obs=min_obs,
+            cfg=cfg,
+            split_idx=split_idx,
+        ),
         _summarize_side_flip(
             original=labeled_events,
             flipped=flipped_labeled,
             view="family_side",
             min_obs=min_obs,
+            cfg=cfg,
+            split_idx=split_idx,
         ),
     ]
     side_flip = pd.concat(side_flip_frames, axis=0, ignore_index=True) if side_flip_frames else pd.DataFrame()
@@ -423,6 +636,11 @@ def compute_rule_diagnostics(
                 min_obs=min_obs,
                 mean_edge_bps=float(row.mean_edge_bps),
                 pct_edge_pos=float(row.pct_edge_pos),
+                payoff_ratio=float(row.payoff_ratio),
+                q10_shortfall_fail_rate=float(row.q10_shortfall_fail_rate),
+                min_hit_rate=cfg.min_rule_hit_rate,
+                min_payoff_ratio=cfg.min_variant_oos_payoff_ratio,
+                max_q10_fail_rate=cfg.max_variant_oos_q10_fail_rate,
                 flip_delta_bps=float(flip_row.delta_mean_edge_bps) if flip_row is not None else None,
                 flip_mean_edge_bps=float(flip_row.flip_mean_edge_bps) if flip_row is not None else None,
             )
@@ -434,6 +652,11 @@ def compute_rule_diagnostics(
     by_family = _apply_action(by_family)
     by_variant = _apply_action(by_variant)
     by_family_side = _apply_action(by_family_side)
+    recommended_keep_variants, recommended_flip_variants = _build_recommendations(
+        by_variant=by_variant,
+        flipped_by_variant=flipped_by_variant,
+        cfg=cfg,
+    )
 
     decision_counts = by_variant["candidate_action"].value_counts() if not by_variant.empty else pd.Series(dtype=int)
     best_row = by_variant.iloc[0] if not by_variant.empty else None
@@ -448,8 +671,14 @@ def compute_rule_diagnostics(
 
     _log_summary_block(summary=by_family, view="family")
     _log_summary_block(summary=by_variant, view="variant")
+    _log_variant_top_block(by_variant, top_k=cfg.diagnostic_top_k)
     _log_side_flip_block(side_flip=side_flip)
     _log_decision_block(decision)
+    _logger.info(
+        "[DIAG][RULE_RECOMMEND] keep=%s flip=%s",
+        ",".join(recommended_keep_variants) if recommended_keep_variants else "",
+        ",".join(recommended_flip_variants) if recommended_flip_variants else "",
+    )
 
     return RuleDiagnosticsResult(
         by_family=by_family,
@@ -457,4 +686,6 @@ def compute_rule_diagnostics(
         by_family_side=by_family_side,
         side_flip=side_flip,
         decision=decision,
+        recommended_keep_variants=recommended_keep_variants,
+        recommended_flip_variants=recommended_flip_variants,
     )
