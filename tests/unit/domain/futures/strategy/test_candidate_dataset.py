@@ -161,3 +161,51 @@ def test_build_candidate_dataset_builds_net_q10_and_mfe_targets_with_hurdle() ->
 
     assert ds.y_q10_bps.tolist() == [-12.0]
     assert ds.y_mfe_bps.tolist() == [12.0]
+
+
+def test_build_candidate_dataset_keeps_feature_schema_stable_across_splits() -> None:
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25], aligned.datetimes[45]],
+            "symbol": ["BTCUSDT", "ETHUSDT"],
+            "family": ["trend_ma", "trend_donchian"],
+            "variant": ["ema_12_72", "donchian_36"],
+            "side": [1, -1],
+            "entry_idx": [26, 46],
+            "raw_score": [0.5, -0.4],
+            "score_z": [1.2, -0.8],
+            "turnover_proxy": [0.1, 0.2],
+            "expected_holding_bars": [12, 24],
+            "min_holding_bars": [4, 8],
+            "stop_atr_mult": [2.0, 2.0],
+            "take_profit_atr_mult": [4.0, 4.0],
+            "triple_barrier_label": [1, 0],
+            "profitable_after_hurdle_label": [1, 0],
+            "edge_after_hurdle_bps": [12.0, -5.0],
+            "mae_bps": [-6.0, -8.0],
+            "mfe_bps": [18.0, 5.0],
+            "ex_ante_cost_bps": [4.0, 4.0],
+        }
+    )
+
+    train = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(),
+        split_start=20,
+        split_end=40,
+    )
+    valid = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(),
+        split_start=40,
+        split_end=60,
+    )
+
+    assert train.feature_names == valid.feature_names
+    assert train.feature_schema_version == "candidate_v2"
+    assert valid.feature_schema_version == "candidate_v2"
+    assert "family=trend_ma" in train.feature_names
+    assert "variant=trend_donchian:donchian_36" in train.feature_names

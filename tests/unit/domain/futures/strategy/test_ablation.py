@@ -87,7 +87,7 @@ def test_run_candidate_ablation_returns_correct_ablation_dataframe(monkeypatch: 
 
     assert isinstance(df_ablation, pd.DataFrame)
     if not df_ablation.empty:
-        assert df_ablation.shape[0] == 6  # 6 variants
+        assert df_ablation.shape[0] == 10  # 6 base variants + 4 OOS-only ablation rows
         required_cols = {
             "variant",
             "mean_log_growth",

@@ -11,6 +11,7 @@ from src.domain.futures.strategy.config import CandidateStrategyConfig
 
 _BPS_SCALE = 1e4
 _ATR_PERIOD = 14
+_EXIT_POLICY_VERSION = "candidate_label_atr_v1"
 _logger = logging.getLogger(__name__)
 
 
@@ -68,6 +69,10 @@ def label_candidate_events(
     mae_list: list[float] = []
     mfe_list: list[float] = []
     rv_list: list[float] = []
+    exit_reason_list: list[str] = []
+    exit_idx_list: list[int] = []
+    exit_policy_version_list: list[str] = []
+    same_bar_collision_list: list[int] = []
 
     for row in out.itertuples(index=False):
         symbol = str(row.symbol)
@@ -89,6 +94,10 @@ def label_candidate_events(
             mae_list.append(np.nan)
             mfe_list.append(np.nan)
             rv_list.append(np.nan)
+            exit_reason_list.append("invalid")
+            exit_idx_list.append(-1)
+            exit_policy_version_list.append(_EXIT_POLICY_VERSION)
+            same_bar_collision_list.append(0)
             continue
 
         entry_px = float(aligned.open_2d[entry_idx, sym_idx])
@@ -102,6 +111,10 @@ def label_candidate_events(
             mae_list.append(np.nan)
             mfe_list.append(np.nan)
             rv_list.append(np.nan)
+            exit_reason_list.append("invalid")
+            exit_idx_list.append(-1)
+            exit_policy_version_list.append(_EXIT_POLICY_VERSION)
+            same_bar_collision_list.append(0)
             continue
 
         exit_limit = min(entry_idx + horizon - 1, t_len - 1)
@@ -126,15 +139,19 @@ def label_candidate_events(
 
         tp_i = int(tp_hits[0]) if tp_hits.size > 0 else math.inf
         sl_i = int(sl_hits[0]) if sl_hits.size > 0 else math.inf
-        if sl_i <= tp_i:
-            exit_off = int(sl_i) if np.isfinite(sl_i) else int(close_path.shape[0] - 1)
+        same_bar_collision = int(np.isfinite(tp_i) and np.isfinite(sl_i) and tp_i == sl_i)
+        if np.isfinite(sl_i) and (not np.isfinite(tp_i) or sl_i <= tp_i):
+            exit_off = int(sl_i)
             barrier_label = 0
+            exit_reason = "stop_loss"
         elif np.isfinite(tp_i):
             exit_off = int(tp_i)
             barrier_label = 1
+            exit_reason = "take_profit"
         else:
             exit_off = int(close_path.shape[0] - 1)
             barrier_label = 0
+            exit_reason = "time_exit"
 
         exit_px = float(close_path[exit_off])
         if side > 0:
@@ -175,6 +192,10 @@ def label_candidate_events(
         mae_list.append(float(mae_bps))
         mfe_list.append(float(mfe_bps))
         rv_list.append(float(rv_bps))
+        exit_reason_list.append(exit_reason)
+        exit_idx_list.append(int(entry_idx + exit_off))
+        exit_policy_version_list.append(_EXIT_POLICY_VERSION)
+        same_bar_collision_list.append(int(same_bar_collision))
 
     out["barrier_first_label"] = np.asarray(barrier_label_list, dtype=np.int8)
     out["profitable_after_hurdle_label"] = np.asarray(profitable_label_list, dtype=np.int8)
@@ -186,6 +207,10 @@ def label_candidate_events(
     out["mae_bps"] = np.asarray(mae_list, dtype=np.float64)
     out["mfe_bps"] = np.asarray(mfe_list, dtype=np.float64)
     out["realized_vol_bps"] = np.asarray(rv_list, dtype=np.float64)
+    out["exit_reason"] = np.asarray(exit_reason_list, dtype=object)
+    out["exit_idx"] = np.asarray(exit_idx_list, dtype=np.int32)
+    out["exit_policy_version"] = np.asarray(exit_policy_version_list, dtype=object)
+    out["same_bar_collision"] = np.asarray(same_bar_collision_list, dtype=np.int8)
 
     _barrier_labels = np.asarray(barrier_label_list, dtype=np.int8)
     _profitable_labels = np.asarray(profitable_label_list, dtype=np.int8)

@@ -169,12 +169,14 @@ def _summarize_view(
             "pct_edge_pos": 0.0,
             "payoff_ratio": 0.0,
             "q10_shortfall_fail_rate": 0.0,
+            "spearman_score_edge": 0.0,
         }
         oos_metrics = _edge_summary_from_frame(oos_group, cfg=cfg) if not oos_group.empty else {
             "mean_edge_bps": float("nan"),
             "pct_edge_pos": 0.0,
             "payoff_ratio": 0.0,
             "q10_shortfall_fail_rate": 0.0,
+            "spearman_score_edge": 0.0,
         }
 
         records.append(
@@ -193,6 +195,8 @@ def _summarize_view(
                 "oos_payoff_ratio": float(oos_metrics["payoff_ratio"]),
                 "train_q10_shortfall_fail_rate": float(train_metrics["q10_shortfall_fail_rate"]),
                 "oos_q10_shortfall_fail_rate": float(oos_metrics["q10_shortfall_fail_rate"]),
+                "train_rank_ic": float(train_metrics["spearman_score_edge"]),
+                "oos_rank_ic": float(oos_metrics["spearman_score_edge"]),
                 "edge_stability_bps": float(oos_metrics["mean_edge_bps"] - train_metrics["mean_edge_bps"])
                 if np.isfinite(train_metrics["mean_edge_bps"]) and np.isfinite(oos_metrics["mean_edge_bps"])
                 else float("nan"),
@@ -236,6 +240,8 @@ def _summarize_view(
         "oos_payoff_ratio",
         "train_q10_shortfall_fail_rate",
         "oos_q10_shortfall_fail_rate",
+        "train_rank_ic",
+        "oos_rank_ic",
         "edge_stability_bps",
         "mean_edge_bps",
         "median_edge_bps",
@@ -408,15 +414,25 @@ def _log_variant_top_block(summary: pd.DataFrame, *, top_k: int) -> None:
 
 
 def _meets_recommendation_thresholds(row: pd.Series, cfg: CandidateStrategyConfig) -> bool:
+    edge_stability_bps = float(row.get("edge_stability_bps", float("nan")))
+    edge_decay_ok = (not np.isfinite(edge_stability_bps)) or edge_stability_bps >= -cfg.max_oos_edge_decay_bps
     return bool(
         int(row.get("oos_n", 0)) >= cfg.min_variant_oos_obs
         and float(row.get("oos_mean_edge_bps", float("nan"))) >= cfg.min_variant_oos_edge_bps
         and float(row.get("oos_q10_shortfall_fail_rate", 1.0)) <= cfg.max_variant_oos_q10_fail_rate
+        and float(row.get("oos_rank_ic", 0.0)) >= cfg.min_oos_rank_ic
+        and edge_decay_ok
         and (
             float(row.get("oos_pct_edge_pos", 0.0)) >= cfg.min_variant_oos_hit_rate
             or float(row.get("oos_payoff_ratio", 0.0)) >= cfg.min_variant_oos_payoff_ratio
         )
     )
+
+
+def _variant_group_to_key(group: str) -> str:
+    payload = str(group).removeprefix("variant=")
+    family, variant = payload.split(":", 1)
+    return f"{family}:{variant}"
 
 
 def _build_recommendations(
@@ -431,7 +447,7 @@ def _build_recommendations(
         if str(row.get("candidate_action", "")) != "KEEP_CANDIDATE":
             continue
         if _meets_recommendation_thresholds(row, cfg):
-            keep_groups.append(str(row.get("group", "")))
+            keep_groups.append(_variant_group_to_key(str(row.get("group", ""))))
     recommended_keep = tuple(keep_groups)
 
     flipped_lookup = flipped_by_variant.set_index("group") if not flipped_by_variant.empty else pd.DataFrame()
@@ -445,7 +461,7 @@ def _build_recommendations(
         if isinstance(flip_row, pd.DataFrame):
             continue
         if _meets_recommendation_thresholds(pd.Series(flip_row), cfg):
-            flip_groups.append(str(row.group))
+            flip_groups.append(_variant_group_to_key(str(row.group)))
 
     return recommended_keep, tuple(flip_groups)
 
