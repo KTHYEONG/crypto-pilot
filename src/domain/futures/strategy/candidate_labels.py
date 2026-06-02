@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 
 import numpy as np
@@ -10,6 +11,7 @@ from src.domain.futures.strategy.config import CandidateStrategyConfig
 
 _BPS_SCALE = 1e4
 _ATR_PERIOD = 14
+_logger = logging.getLogger(__name__)
 
 
 def _compute_atr_2d(aligned: AlignedMarketData, period: int = _ATR_PERIOD) -> np.ndarray:
@@ -60,7 +62,8 @@ def label_candidate_events(
     gross_list: list[float] = []
     cost_list: list[float] = []
     edge_list: list[float] = []
-    label_list: list[int] = []
+    barrier_label_list: list[int] = []
+    profitable_label_list: list[int] = []
     tte_list: list[int] = []
     mae_list: list[float] = []
     mfe_list: list[float] = []
@@ -80,7 +83,8 @@ def label_candidate_events(
             gross_list.append(np.nan)
             cost_list.append(np.nan)
             edge_list.append(np.nan)
-            label_list.append(0)
+            barrier_label_list.append(0)
+            profitable_label_list.append(0)
             tte_list.append(0)
             mae_list.append(np.nan)
             mfe_list.append(np.nan)
@@ -92,7 +96,8 @@ def label_candidate_events(
             gross_list.append(np.nan)
             cost_list.append(np.nan)
             edge_list.append(np.nan)
-            label_list.append(0)
+            barrier_label_list.append(0)
+            profitable_label_list.append(0)
             tte_list.append(0)
             mae_list.append(np.nan)
             mfe_list.append(np.nan)
@@ -149,7 +154,8 @@ def label_candidate_events(
         hurdle_bps = float(getattr(row, "hurdle_bps", 0.0))
         edge_after_hurdle_bps = gross_ret_bps - ex_ante_cost_bps - hurdle_bps
 
-        triple_label = 1 if barrier_label == 1 and edge_after_hurdle_bps > 0.0 else 0
+        barrier_first_label = 1 if barrier_label == 1 and edge_after_hurdle_bps > 0.0 else 0
+        profitable_after_hurdle_label = 1 if edge_after_hurdle_bps > 0.0 else 0
 
         valid_path = path_ret[np.isfinite(path_ret)]
         mae_bps = float(np.min(valid_path) * _BPS_SCALE) if valid_path.size > 0 else np.nan
@@ -163,18 +169,41 @@ def label_candidate_events(
         gross_list.append(float(gross_ret_bps))
         cost_list.append(float(ex_ante_cost_bps))
         edge_list.append(float(edge_after_hurdle_bps))
-        label_list.append(int(triple_label))
+        barrier_label_list.append(int(barrier_first_label))
+        profitable_label_list.append(int(profitable_after_hurdle_label))
         tte_list.append(int(exit_off + 1))
         mae_list.append(float(mae_bps))
         mfe_list.append(float(mfe_bps))
         rv_list.append(float(rv_bps))
 
+    out["barrier_first_label"] = np.asarray(barrier_label_list, dtype=np.int8)
+    out["profitable_after_hurdle_label"] = np.asarray(profitable_label_list, dtype=np.int8)
     out["gross_fwd_bps"] = np.asarray(gross_list, dtype=np.float64)
     out["ex_ante_cost_bps"] = np.asarray(cost_list, dtype=np.float64)
     out["edge_after_hurdle_bps"] = np.asarray(edge_list, dtype=np.float64)
-    out["triple_barrier_label"] = np.asarray(label_list, dtype=np.int8)
+    out["triple_barrier_label"] = np.asarray(barrier_label_list, dtype=np.int8)
     out["time_to_exit_bars"] = np.asarray(tte_list, dtype=np.int32)
     out["mae_bps"] = np.asarray(mae_list, dtype=np.float64)
     out["mfe_bps"] = np.asarray(mfe_list, dtype=np.float64)
     out["realized_vol_bps"] = np.asarray(rv_list, dtype=np.float64)
+
+    _barrier_labels = np.asarray(barrier_label_list, dtype=np.int8)
+    _profitable_labels = np.asarray(profitable_label_list, dtype=np.int8)
+    _edge = np.asarray(edge_list, dtype=np.float64)
+    _finite_edge = _edge[np.isfinite(_edge)]
+    _barrier_label1_rate = float(_barrier_labels.mean()) if len(_barrier_labels) > 0 else 0.0
+    _gate_label1_rate = float(_profitable_labels.mean()) if len(_profitable_labels) > 0 else 0.0
+    _logger.info(
+        "[DIAG][LABEL] events=%d barrier_label1_rate=%.3f gate_label1_rate=%.3f "
+        "mean_edge=%.1f median_edge=%.1f "
+        "pct_edge_pos=%.3f p10_edge=%.1f p90_edge=%.1f",
+        len(_barrier_labels),
+        _barrier_label1_rate,
+        _gate_label1_rate,
+        float(np.mean(_finite_edge)) if len(_finite_edge) > 0 else float("nan"),
+        float(np.median(_finite_edge)) if len(_finite_edge) > 0 else float("nan"),
+        float((_finite_edge > 0).mean()) if len(_finite_edge) > 0 else 0.0,
+        float(np.percentile(_finite_edge, 10)) if len(_finite_edge) > 0 else float("nan"),
+        float(np.percentile(_finite_edge, 90)) if len(_finite_edge) > 0 else float("nan"),
+    )
     return out

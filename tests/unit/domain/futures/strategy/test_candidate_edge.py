@@ -14,6 +14,7 @@ class _Dataset:
     X: np.ndarray
     y_edge_bps: np.ndarray
     y_q10_bps: np.ndarray
+    y_mfe_bps: np.ndarray
     sample_weight: np.ndarray
     feature_names: tuple[str, ...]
 
@@ -23,11 +24,13 @@ def _make_dataset(seed: int, n: int) -> _Dataset:
     x = rng.normal(size=(n, 4)).astype(np.float32)
     edge = (15.0 * x[:, 0] - 5.0 * x[:, 1]).astype(np.float32)
     q10 = (edge - 8.0).astype(np.float32)
+    mfe = (edge + 8.0).astype(np.float32)
     w = np.ones(n, dtype=np.float32)
     return _Dataset(
         X=x,
         y_edge_bps=edge,
         y_q10_bps=q10,
+        y_mfe_bps=mfe,
         sample_weight=w,
         feature_names=("f0", "f1", "f2", "f3"),
     )
@@ -52,8 +55,13 @@ def test_predict_candidate_edges_exposes_all_required_outputs() -> None:
 def test_predict_candidate_edges_applies_cost_and_utility_formula() -> None:
     train = _make_dataset(seed=200, n=180)
     valid = _make_dataset(seed=201, n=30)
+    # Flat namespace so getattr(cfg, key) resolves directly without nested lookup
     cfg = SimpleNamespace(
-        ml=SimpleNamespace(seed=4, expected_cost_bps=2.0, downside_penalty=0.5, turnover_penalty=1.0)
+        seed=4,
+        expected_cost_bps=2.0,
+        downside_penalty=0.5,
+        turnover_penalty=1.0,
+        concentration_penalty=0.0,
     )
 
     models = fit_candidate_edge_models(train=train, valid=valid, cfg=cfg)

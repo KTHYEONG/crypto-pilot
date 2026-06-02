@@ -75,16 +75,14 @@ def run_candidate_strategy_for_universe(
     valid_set = build_candidate_dataset(
         labeled_events=labeled, aligned=aligned, cfg=strategy_cfg.candidate, split_start=split_val, split_end=n_bars
     )
-    full_set = build_candidate_dataset(
-        labeled_events=labeled, aligned=aligned, cfg=strategy_cfg.candidate, split_start=0, split_end=n_bars
-    )
 
     gate_model = fit_candidate_gate(train=train_set, valid=valid_set, cfg=strategy_cfg.candidate)
     edge_models = fit_candidate_edge_models(train=train_set, valid=valid_set, cfg=strategy_cfg.candidate)
 
-    p_pass = predict_candidate_gate(model=gate_model, dataset=full_set)
-    ml_out = predict_candidate_edges(models=edge_models, dataset=full_set, p_pass=p_pass, cfg=strategy_cfg.candidate)
-    ml_out = replace(ml_out, events=full_set.event_index)
+    # OOS-only predict: IS 구간(0~80%)은 target_weight=0으로 유지하여 look-ahead 누수 방지
+    p_pass = predict_candidate_gate(model=gate_model, dataset=valid_set)
+    ml_out = predict_candidate_edges(models=edge_models, dataset=valid_set, p_pass=p_pass, cfg=strategy_cfg.candidate)
+    ml_out = replace(ml_out, events=valid_set.event_index)
 
     selected = select_candidate_events_for_portfolio(model_output=ml_out, cfg=strategy_cfg.candidate)
     target_weights = build_candidate_target_weights(
