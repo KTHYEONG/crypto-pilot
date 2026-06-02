@@ -18,6 +18,7 @@ class CandidateDataset:
     y_gate: NDArray[np.int8]
     y_edge_bps: NDArray[np.float32]
     y_q10_bps: NDArray[np.float32]
+    y_mfe_bps: NDArray[np.float32]
     sample_weight: NDArray[np.float32]
     groups: NDArray[np.int32]
     event_index: pd.DataFrame
@@ -54,6 +55,7 @@ def build_candidate_dataset(
             y_gate=np.zeros((0,), dtype=np.int8),
             y_edge_bps=np.zeros((0,), dtype=np.float32),
             y_q10_bps=np.zeros((0,), dtype=np.float32),
+            y_mfe_bps=np.zeros((0,), dtype=np.float32),
             sample_weight=np.zeros((0,), dtype=np.float32),
             groups=np.zeros((0,), dtype=np.int32),
             event_index=labeled_events.copy(),
@@ -68,6 +70,7 @@ def build_candidate_dataset(
             y_gate=np.zeros((0,), dtype=np.int8),
             y_edge_bps=np.zeros((0,), dtype=np.float32),
             y_q10_bps=np.zeros((0,), dtype=np.float32),
+            y_mfe_bps=np.zeros((0,), dtype=np.float32),
             sample_weight=np.zeros((0,), dtype=np.float32),
             groups=np.zeros((0,), dtype=np.int32),
             event_index=events,
@@ -76,12 +79,13 @@ def build_candidate_dataset(
 
     feature_rows: list[list[float]] = []
     groups: list[int] = []
+    kept_positions: list[int] = []
 
     close = aligned.close_2d
     volume = aligned.volume_2d
     funding = aligned.funding_2d
 
-    for row in events.itertuples(index=False):
+    for pos, row in enumerate(events.itertuples(index=False)):
         symbol = str(row.symbol)
         sym_idx = _find_symbol_index(aligned.symbols, symbol)
         t = int(row.entry_idx) - 1
@@ -142,6 +146,7 @@ def build_candidate_dataset(
             continue
         feature_rows.append(row_features)
         groups.append(int(t))
+        kept_positions.append(pos)
 
     feature_names = (
         "side",
@@ -165,21 +170,27 @@ def build_candidate_dataset(
             y_gate=np.zeros((0,), dtype=np.int8),
             y_edge_bps=np.zeros((0,), dtype=np.float32),
             y_q10_bps=np.zeros((0,), dtype=np.float32),
+            y_mfe_bps=np.zeros((0,), dtype=np.float32),
             sample_weight=np.zeros((0,), dtype=np.float32),
             groups=np.zeros((0,), dtype=np.int32),
             event_index=events.iloc[0:0].copy(),
             feature_names=feature_names,
         )
 
-    valid_len = len(feature_rows)
-    kept_events = events.iloc[:valid_len].copy()
+    kept_events = events.iloc[kept_positions].copy()
 
-    y_gate = kept_events["triple_barrier_label"].to_numpy(dtype=np.int8, copy=False)
+    gate_label_col = (
+        "profitable_after_hurdle_label"
+        if "profitable_after_hurdle_label" in kept_events.columns
+        else "triple_barrier_label"
+    )
+    y_gate = kept_events[gate_label_col].to_numpy(dtype=np.int8, copy=False)
     y_edge = kept_events["edge_after_hurdle_bps"].to_numpy(dtype=np.float32, copy=False)
     y_q10 = np.minimum(
         kept_events["mae_bps"].to_numpy(dtype=np.float32, copy=False),
         y_edge,
     )
+    y_mfe = kept_events["mfe_bps"].to_numpy(dtype=np.float32, copy=False)
     sw = np.clip(np.abs(y_edge) / 10.0, 0.5, 5.0).astype(np.float32, copy=False)
 
     return CandidateDataset(
@@ -187,6 +198,7 @@ def build_candidate_dataset(
         y_gate=y_gate,
         y_edge_bps=y_edge,
         y_q10_bps=y_q10.astype(np.float32, copy=False),
+        y_mfe_bps=y_mfe,
         sample_weight=sw,
         groups=np.asarray(groups, dtype=np.int32),
         event_index=kept_events.reset_index(drop=True),

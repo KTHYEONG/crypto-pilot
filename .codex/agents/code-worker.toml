@@ -1,7 +1,7 @@
 name = "code_worker"
 description = "Strict Python 3.11+ implementation agent. Focuses purely on logic generation. Linting and verification are deferred to the parent agent."
 
-model = "gpt-5.3-codex"
+model = "gpt-5.4-mini"
 model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"
 

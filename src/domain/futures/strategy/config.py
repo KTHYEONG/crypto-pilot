@@ -129,6 +129,12 @@ class CandidateStrategyConfig:
         "oi_volume_impulse",
         "btc_regime_pullback",
     )
+    # Edge model utility parameters
+    downside_penalty: float = 1.0
+    turnover_penalty: float = 0.5
+    concentration_penalty: float = 0.0
+    expected_cost_bps: float = 24.0
+    max_drawdown_cap: float = 0.25
 
     def __post_init__(self) -> None:
         """Validate candidate strategy parameters."""
@@ -155,3 +161,7 @@ class CandidateStrategyConfig:
             raise ValueError("gross cap must be at least max symbol weight")
         if self.min_candidate_obs <= 0 or self.min_symbol_oos_blocks <= 0:
             raise ValueError("minimum observations and blocks must be positive")
+        if self.downside_penalty < 0.0 or self.turnover_penalty < 0.0 or self.concentration_penalty < 0.0:
+            raise ValueError("penalty parameters must be non-negative")
+        if not (0.0 < self.max_drawdown_cap <= 1.0):
+            raise ValueError("max_drawdown_cap must be in (0.0, 1.0]")

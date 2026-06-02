@@ -1,12 +1,65 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+from scipy.stats import norm
 
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+
+
+def _calc_dsr(block_returns: list[float], n_trials: int = 1) -> float:
+    """Simplified DSR: Sharpe ratio deflated for multiple comparisons.
+
+    Args:
+        block_returns: List of OOS block returns.
+        n_trials: Number of strategy trials evaluated (for deflation).
+            Defaults to 1 (no deflation). Pass the actual Optuna trial count
+            to enable Bailey-Lopez de Prado multi-test correction.
+
+    Returns:
+        DSR value in [0.0, 1.0].
+    """
+    if len(block_returns) < 2:
+        return 0.0
+    returns_arr = np.array(block_returns, dtype=np.float64)
+    std_val = float(np.std(returns_arr, ddof=1))
+    sr = float(np.mean(returns_arr) / (std_val + 1e-12))
+
+    # Bailey-Lopez de Prado deflation factor
+    n = len(block_returns)
+    # E[max(SR)] for n_trials i.i.d. SR ~ N(0,1)
+    e_max_sr = (1.0 - 0.5772156649) / math.log(max(n_trials, 2)) if n_trials > 1 else 0.0
+
+    mean_val = float(np.mean(returns_arr))
+    demeaned = returns_arr - mean_val
+    std_safe = std_val + 1e-12
+    gamma_1 = float(np.mean(demeaned**3) / std_safe**3)
+    gamma_2 = float(np.mean(demeaned**4) / std_safe**4) - 3.0
+
+    deflation_denom = n - 1 + sr**2 * (gamma_1 * sr / 6.0 - gamma_2 * sr**2 / 24.0)
+    sr_adj = sr * math.sqrt(n) / math.sqrt(max(deflation_denom, 1e-12))
+
+    dsr_val = float(norm.cdf((sr_adj - e_max_sr) * math.sqrt(n)))
+    return float(np.clip(dsr_val, 0.0, 1.0))
+
+
+def _calc_pbo(block_returns: list[float]) -> float:
+    """Simplified PBO: fraction of OOS blocks with negative return.
+
+    Args:
+        block_returns: List of OOS block returns.
+
+    Returns:
+        PBO value in [0.0, 1.0].
+    """
+    if not block_returns:
+        return 1.0
+    n_neg = sum(1 for r in block_returns if r < 0.0)
+    return float(n_neg / len(block_returns))
 
 
 @dataclass(slots=True, frozen=True)
@@ -126,8 +179,9 @@ def evaluate_compound_backtest(
         fail_reasons.append("negative log growth")
     if cagr <= 0.0:
         fail_reasons.append("negative CAGR")
-    if max_dd > cfg.gross_cap:
-        fail_reasons.append(f"max drawdown {max_dd:.3f} exceeds gross cap limit {cfg.gross_cap:.3f}")
+    drawdown_cap = float(getattr(cfg, "max_drawdown_cap", 0.25))
+    if max_dd > drawdown_cap:
+        fail_reasons.append(f"max drawdown {max_dd:.3f} exceeds max_drawdown_cap {drawdown_cap:.3f}")
     if mar < 0.75:
         fail_reasons.append(f"MAR ratio {mar:.3f} is below 0.75 target")
     if worst_block_return <= -0.3:
@@ -153,8 +207,8 @@ def evaluate_compound_backtest(
         turnover=turnover,
         block_pass_ratio=block_pass_ratio,
         worst_block_return=worst_block_return,
-        dsr=0.0,  # Hook for future DSR
-        pbo=0.0,  # Hook for future PBO
+        dsr=_calc_dsr(block_returns),
+        pbo=_calc_pbo(block_returns),
         liquidation_count=liquidation_count,
         pass_compound_gate=pass_gate,
         fail_reasons=tuple(fail_reasons),

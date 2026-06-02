@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from typing import cast, Any
+from typing import Any, cast
 
 import numpy as np
 from lightgbm import LGBMRegressor
@@ -24,8 +25,6 @@ def _seed_from_cfg(cfg: Any) -> int:
     return int(getattr(cfg, "seed", getattr(getattr(cfg, "ml", cfg), "seed", 42)))
 
 
-def _read_float(cfg: Any, key: str, default: float) -> float:
-    return float(getattr(cfg, key, getattr(getattr(cfg, "ml", cfg), key, default)))
 
 
 def fit_candidate_edge_models(
@@ -76,7 +75,7 @@ def fit_candidate_edge_models(
     # Use valid split if provided for early stopping
     eval_set_center: Any = [(valid.X, valid.y_edge_bps)] if valid.X.shape[0] > 0 else None
     eval_set_q10: Any = [(valid.X, valid.y_q10_bps)] if valid.X.shape[0] > 0 else None
-    eval_set_q90: Any = [(valid.X, valid.y_edge_bps)] if valid.X.shape[0] > 0 else None
+    eval_set_q90: Any = [(valid.X, valid.y_mfe_bps)] if valid.X.shape[0] > 0 else None
 
     if eval_set_center is not None and len(np.unique(valid.y_edge_bps)) > 1:
         center.fit(
@@ -100,17 +99,17 @@ def fit_candidate_edge_models(
     else:
         q10.fit(train.X, train.y_q10_bps, sample_weight=train.sample_weight)
 
-    # Fit Q90 on y_edge_bps (representing the target upside distribution)
-    if eval_set_q90 is not None and len(np.unique(valid.y_edge_bps)) > 1:
+    # Fit Q90 on y_mfe_bps (upside realisation — maximum favourable excursion)
+    if eval_set_q90 is not None and len(np.unique(valid.y_mfe_bps)) > 1:
         q90.fit(
             train.X,
-            train.y_edge_bps,
+            train.y_mfe_bps,
             sample_weight=train.sample_weight,
             eval_set=eval_set_q90,
             callbacks=[],
         )
     else:
-        q90.fit(train.X, train.y_edge_bps, sample_weight=train.sample_weight)
+        q90.fit(train.X, train.y_mfe_bps, sample_weight=train.sample_weight)
 
     return CandidateEdgeModels(
         center_model=center,
@@ -138,10 +137,10 @@ def predict_candidate_edges(
         np.float64, copy=False
     )
 
-    expected_cost_bps = _read_float(cfg, "expected_cost_bps", 0.0)
-    downside_penalty = _read_float(cfg, "downside_penalty", 0.0)
-    turnover_penalty = _read_float(cfg, "turnover_penalty", 0.0)
-    concentration_penalty = _read_float(cfg, "concentration_penalty", 0.0)
+    expected_cost_bps = float(getattr(cfg, "expected_cost_bps", 24.0))
+    downside_penalty = float(getattr(cfg, "downside_penalty", 1.0))
+    turnover_penalty = float(getattr(cfg, "turnover_penalty", 0.5))
+    concentration_penalty = float(getattr(cfg, "concentration_penalty", 0.0))
 
     # Extract turnover_proxy from features or fallback to a constant 1.0 (so turnover_term = turnover_penalty)
     turnover_proxy = np.ones_like(mu_gross_bps)
@@ -157,6 +156,25 @@ def predict_candidate_edges(
     turnover_term = turnover_penalty * turnover_proxy
     utility_score = p_pass * mu_net_decision_bps - downside_term - turnover_term - concentration_penalty
 
+    _logger = logging.getLogger(__name__)
+    _logger.info(
+        "[DIAG][EDGE] n=%d cost_bps=%.1f "
+        "mu_gross mean=%.1f max=%.1f pct_ge25=%.3f | "
+        "mu_net mean=%.1f max=%.1f pct_ge1=%.3f | "
+        "q10_net mean=%.1f min=%.1f | utility mean=%.3f max=%.3f",
+        len(mu_gross_bps),
+        expected_cost_bps,
+        float(mu_gross_bps.mean()),
+        float(mu_gross_bps.max()),
+        float((mu_gross_bps >= 25.0).mean()),
+        float(mu_net_decision_bps.mean()),
+        float(mu_net_decision_bps.max()),
+        float((mu_net_decision_bps >= 1.0).mean()),
+        float(q10_net_bps.mean()),
+        float(q10_net_bps.min()),
+        float(utility_score.mean()),
+        float(utility_score.max()),
+    )
     return CandidateModelOutput(
         events=None,
         p_pass=p_pass.astype(np.float64, copy=False),

@@ -5,7 +5,12 @@ import pandas as pd
 
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
-from src.domain.futures.strategy.rule_signals import build_rule_signal_panels, candidate_panels_to_events
+from src.domain.futures.strategy.rule_signals import (
+    _rolling_max_2d,
+    _rolling_min_2d,
+    build_rule_signal_panels,
+    candidate_panels_to_events,
+)
 
 
 def _make_aligned(t: int = 150, n: int = 2) -> AlignedMarketData:
@@ -34,7 +39,8 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
     panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
 
     assert isinstance(panels, tuple)
-    assert len(panels) == 8  # 8 rule families
+    # 8 base families + 2 trend_ma variants + 2 trend_donchian variants + 1 rsi_reversion variant = 13
+    assert len(panels) == 13
 
     expected_families = {
         "trend_ma",
@@ -54,6 +60,25 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
         assert p.valid_mask_2d.shape == (150, 2)
         assert isinstance(p.symbols, tuple)
         assert len(p.symbols) == 2
+
+
+def test_rolling_max_min_trailing_exclusive() -> None:
+    # Monotonically increasing high: close[t] must be able to exceed prior high (trailing-exclusive).
+    # If shift(1) is absent, roll_max[t] == high[t] and close[t] > roll_max[t] is always False.
+    t, n = 50, 1
+    high = np.linspace(100.0, 150.0, t).reshape(t, n)
+    close = high * 1.001  # close slightly above same-bar high
+
+    max_2d = _rolling_max_2d(high, window=10)
+    min_2d = _rolling_min_2d(high, window=10)
+
+    # After shift(1): roll_max[t] = max(high[t-10:t]) — excludes current bar.
+    # close[t] = 1.001 * high[t] > prior_high is possible for t > 1.
+    long_break = (close > max_2d)[2:].any()
+    short_break = (close < min_2d)[2:].any()
+
+    assert long_break, "Donchian long breakout must be possible with trailing-exclusive rolling max"
+    assert not short_break, "Donchian short breakout must not fire when price is monotonically rising"
 
 
 def test_candidate_panels_to_events_creates_dataframe() -> None:
