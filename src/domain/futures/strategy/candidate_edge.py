@@ -154,6 +154,25 @@ def _log_edge_prediction_variants(
         )
 
 
+def _selection_thresholds(
+    *,
+    utility_score: NDArray[np.float64],
+    p_pass: NDArray[np.float64],
+    cfg: CandidateStrategyConfig,
+) -> dict[str, float]:
+    finite_utility = utility_score[np.isfinite(utility_score)]
+    utility_min = float("-inf")
+    if finite_utility.size > 0:
+        quantile = max(0.0, min(1.0, 1.0 - float(cfg.selection_top_quantile)))
+        utility_min = float(np.quantile(finite_utility, quantile))
+    return {
+        "utility_min": utility_min,
+        "p_pass_min": float(np.nanmin(p_pass)) if p_pass.size > 0 else 0.0,
+        "edge_min": max(0.0, float(cfg.min_expected_net_bps)),
+        "q10_catastrophic_min": -float(cfg.catastrophic_shortfall_bps),
+    }
+
+
 def fit_candidate_edge_models(
     *,
     train: CandidateDataset,
@@ -322,4 +341,9 @@ def predict_candidate_edges(
         q10_net_bps=q10_net_bps,
         q90_net_bps=q90_net_bps,
         utility_score=utility_score,
+        selection_thresholds=_selection_thresholds(
+            utility_score=utility_score,
+            p_pass=p_pass.astype(np.float64, copy=False),
+            cfg=cfg,
+        ),
     )

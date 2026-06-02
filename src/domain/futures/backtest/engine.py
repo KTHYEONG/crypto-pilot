@@ -208,6 +208,8 @@ class PortfolioBacktestEngine:
                 funding_event_mask_1m=d.get("funding_event_mask_1m"),
                 funding_rate_1m=d.get("funding_rate_event_1m"),
                 volume_1m_2d=d.get("exec_volume_1m"),
+                candidate_stop_atr_mult=d.get("candidate_stop_atr_mult"),
+                candidate_take_profit_atr_mult=d.get("candidate_take_profit_atr_mult"),
             )
         else:
             trades_arr, final_bal, equity, diag = backtest_target_weights_numba(
@@ -236,6 +238,8 @@ class PortfolioBacktestEngine:
                 float(self.params.get("MAX_EXPOSURE_PER_COIN", 1.5)),
                 float(self.params.get("DD_SCALING_THRESHOLD", 0.0)),
                 d.get("volume"),
+                d.get("candidate_stop_atr_mult"),
+                d.get("candidate_take_profit_atr_mult"),
             )
         if isinstance(diag, np.ndarray) and diag.size >= 3:
             rows = membership_stats.get("rows", [])
