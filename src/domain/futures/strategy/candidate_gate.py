@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from typing import cast, Any
+from typing import Any, cast
 
 import numpy as np
 from lightgbm import LGBMClassifier
@@ -9,8 +10,8 @@ from numpy.typing import NDArray
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.frozen import FrozenEstimator
 
-from src.domain.futures.strategy.config import CandidateStrategyConfig
 from src.domain.futures.strategy.candidate_dataset import CandidateDataset
+from src.domain.futures.strategy.config import CandidateStrategyConfig
 
 
 @dataclass(slots=True, frozen=True)
@@ -79,6 +80,9 @@ def fit_candidate_gate(
     )
 
 
+_logger = logging.getLogger(__name__)
+
+
 def predict_candidate_gate(
     *,
     model: CandidateGateModel,
@@ -87,5 +91,19 @@ def predict_candidate_gate(
     """Return calibrated pass probability for candidate events."""
     predictor = model.calibrator if model.calibrator is not None else model.model
     probs = cast(NDArray[np.float64], predictor.predict_proba(dataset.X)[:, 1])
-    return np.clip(probs.astype(np.float64, copy=False), 0.0, 1.0)
+    clipped = np.clip(probs.astype(np.float64, copy=False), 0.0, 1.0)
+
+    _logger.info(
+        "[DIAG][GATE] n=%d mean_p=%.4f median_p=%.4f max_p=%.4f "
+        "pct_ge55=%.3f pct_ge50=%.3f pct_ge45=%.3f calibrated=%s",
+        len(clipped),
+        float(clipped.mean()) if len(clipped) > 0 else float("nan"),
+        float(np.median(clipped)) if len(clipped) > 0 else float("nan"),
+        float(clipped.max()) if len(clipped) > 0 else float("nan"),
+        float((clipped >= 0.55).mean()) if len(clipped) > 0 else 0.0,
+        float((clipped >= 0.50).mean()) if len(clipped) > 0 else 0.0,
+        float((clipped >= 0.45).mean()) if len(clipped) > 0 else 0.0,
+        model.calibrator is not None,
+    )
+    return clipped
 

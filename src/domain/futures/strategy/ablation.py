@@ -18,6 +18,7 @@ from src.domain.futures.strategy.candidate_portfolio import (
 )
 from src.domain.futures.strategy.common.alignment import align_data_maps
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.rule_diagnostics import compute_rule_diagnostics
 from src.domain.futures.strategy.rule_signals import build_rule_signal_panels, candidate_panels_to_events
 
 
@@ -33,6 +34,58 @@ class AblationRow:
     turnover: float
     final_equity: float
     pass_compound_gate: bool
+
+
+def _build_rule_equal_size_weights(
+    *,
+    raw_events: pd.DataFrame,
+    close_2d: np.ndarray,
+    symbols: tuple[str, ...],
+    max_symbol_weight: float,
+) -> np.ndarray:
+    raw_w = np.zeros_like(close_2d)
+    n_bars = close_2d.shape[0]
+    for row in raw_events.itertuples(index=False):
+        t = int(row.entry_idx)
+        for s_idx, sym in enumerate(symbols):
+            if sym == row.symbol and 0 <= t < n_bars:
+                raw_w[t, s_idx] = float(row.side) * max_symbol_weight
+    return raw_w
+
+
+def _build_uncapped_kelly_edge_weights(
+    *,
+    selected_events: pd.DataFrame,
+    close_2d: np.ndarray,
+    symbols: tuple[str, ...],
+    kelly_fraction: float,
+) -> np.ndarray:
+    n_times, n_symbols = close_2d.shape
+    raw_kelly_edge_w = np.zeros((n_times, n_symbols), dtype=np.float64)
+    sym_to_idx = {sym: idx for idx, sym in enumerate(symbols)}
+    for row in selected_events.itertuples(index=False):
+        sym = str(row.symbol)
+        if sym not in sym_to_idx:
+            continue
+        s_idx = sym_to_idx[sym]
+        t = int(row.entry_idx)
+        if not (0 <= t < n_times):
+            continue
+
+        side = float(row.side)
+        holding_bars = max(int(getattr(row, "expected_holding_bars", 1)), 1)
+        mu_i_per_bar = float(row.mu_net_decision_bps) * 1e-4 / holding_bars
+
+        st = max(0, t - 20)
+        variance_i = 1e-4
+        if t > st:
+            ret = np.diff(close_2d[st : t + 1, s_idx]) / np.maximum(close_2d[st:t, s_idx], 1e-12)
+            v = float(np.var(ret))
+            if np.isfinite(v) and v > 1e-12:
+                variance_i = v
+        raw_w_val = kelly_fraction * mu_i_per_bar / max(variance_i, 1e-12)
+        raw_kelly_edge_w[t, s_idx] = raw_w_val * np.sign(side)
+    return raw_kelly_edge_w
 
 
 def run_candidate_ablation(
@@ -58,6 +111,12 @@ def run_candidate_ablation(
 
     # 3. Label events and split dataset
     labeled = label_candidate_events(events=raw_events, aligned=aligned, cfg=cfg)
+    compute_rule_diagnostics(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        min_obs=max(cfg.min_candidate_obs, 100),
+    )
     n_bars = aligned.close_2d.shape[0]
     
     # Create fold splits (80% train, 20% validation)
@@ -85,13 +144,13 @@ def run_candidate_ablation(
 
     # Variant 1: rule_only_equal_size (Simple benchmark)
     # equal weight assigned to any rule trigger
-    raw_w = np.zeros_like(aligned.close_2d)
-    for row in raw_events.itertuples(index=False):
-        t = int(row.entry_idx) - 1
-        for s_idx, sym in enumerate(symbols):
-            if sym == row.symbol and 0 <= t < n_bars:
-                raw_w[t, s_idx] = float(row.side) * cfg.max_symbol_weight
-    
+    raw_w = _build_rule_equal_size_weights(
+        raw_events=raw_events,
+        close_2d=aligned.close_2d,
+        symbols=symbols,
+        max_symbol_weight=cfg.max_symbol_weight,
+    )
+
     rows.append(_run_backtest_and_evaluate(raw_w, data_maps, symbols, tf, "rule_only_equal_size", cfg))
 
     # Variant 2: rule_only_fractional_kelly (Kelly Sizing but no ML)
@@ -132,27 +191,12 @@ def run_candidate_ablation(
     # Variant 4: rule_plus_ml_gate_plus_edge (Gate + Edge, but uncapped/uncapped Kelly)
     # Sized dynamically using predicted expected edge mu, but bypasses the cap projection loop (raw fractional Kelly)
     # Calculate raw Kelly weights manually to bypass project_all_caps
-    n_times, n_symbols = aligned.close_2d.shape
-    raw_kelly_edge_w = np.zeros((n_times, n_symbols), dtype=np.float64)
-    sym_to_idx = {sym: idx for idx, sym in enumerate(symbols)}
-    for row in gate_events_only.itertuples(index=False):
-        sym = str(row.symbol)
-        if sym in sym_to_idx:
-            s_idx = sym_to_idx[sym]
-            t = int(row.entry_idx) - 1
-            if 0 <= t < n_times:
-                side = float(row.side)
-                mu_i = float(row.mu_net_decision_bps) * 1e-4
-                # Trailing variance fallback estimation
-                st = max(0, t - 20)
-                variance_i = 1e-4
-                if t > st:
-                    ret = np.diff(aligned.close_2d[st : t + 1, s_idx]) / np.maximum(aligned.close_2d[st:t, s_idx], 1e-12)
-                    v = float(np.var(ret))
-                    if np.isfinite(v) and v > 1e-12:
-                        variance_i = v
-                raw_w_val = cfg.kelly_fraction * mu_i / max(variance_i, 1e-12)
-                raw_kelly_edge_w[t, s_idx] = raw_w_val * np.sign(side)
+    raw_kelly_edge_w = _build_uncapped_kelly_edge_weights(
+        selected_events=gate_events_only,
+        close_2d=aligned.close_2d,
+        symbols=symbols,
+        kelly_fraction=cfg.kelly_fraction,
+    )
 
     rows.append(_run_backtest_and_evaluate(
         raw_kelly_edge_w, data_maps, symbols, tf, "rule_plus_ml_gate_plus_edge", cfg
@@ -172,9 +216,28 @@ def run_candidate_ablation(
         gate_plus_edge_plus_caps_w, data_maps, symbols, tf, "rule_plus_ml_gate_plus_edge_plus_portfolio_caps", cfg
     ))
 
-    # Variant 6: candidate_ml_full (Complete production flow)
+    # Variant 6: candidate_ml_full (OOS-only signal — bridges production forward-fill path)
+    # Filter gate-passed events to validation split (IS 구간 제외 → look-ahead-free OOS signal)
+    n_bars_total = aligned.close_2d.shape[0]
+    split_val_oos = int(n_bars_total * 0.8)
+    gate_events_oos: pd.DataFrame
+    if gate_events_only.empty:
+        gate_events_oos = gate_events_only
+    else:
+        gate_events_oos = gate_events_only[
+            gate_events_only["entry_idx"] >= split_val_oos
+        ].copy()
+
+    full_ml_w = build_candidate_target_weights(
+        selected_events=gate_events_oos,
+        close_2d=aligned.close_2d,
+        symbols=symbols,
+        beta_2d=None,
+        sigma_3d=None,
+        cfg=cfg,
+    )
     rows.append(_run_backtest_and_evaluate(
-        gate_plus_edge_plus_caps_w, data_maps, symbols, tf, "candidate_ml_full", cfg
+        full_ml_w, data_maps, symbols, tf, "candidate_ml_full", cfg
     ))
 
     # Convert results to DataFrame

@@ -38,10 +38,25 @@ def select_candidate_events_for_portfolio(
     df["utility_score"] = np.asarray(model_output.utility_score, dtype=np.float64)
 
     # Apply gate and edge threshold filters
-    mask = (
-        (df["p_pass"] >= cfg.min_gate_probability) &
-        (df["mu_net_decision_bps"] >= cfg.min_expected_net_bps) &
-        (df["q10_net_bps"] >= -cfg.max_expected_shortfall_bps)
+    gate_mask = df["p_pass"] >= cfg.min_gate_probability
+    edge_mask = df["mu_net_decision_bps"] >= cfg.min_expected_net_bps
+    q10_mask = df["q10_net_bps"] >= -cfg.max_expected_shortfall_bps
+    mask = gate_mask & edge_mask & q10_mask
+
+    import logging as _logging
+    _sel_logger = _logging.getLogger(__name__)
+    _sel_logger.info(
+        "[DIAG][SELECT] total=%d gate_fail=%d edge_fail=%d q10_fail=%d "
+        "all_fail=%d passed=%d | thresholds(gate>=%.2f edge_net>=%.1f q10>=-%.1f)",
+        len(df),
+        int((~gate_mask).sum()),
+        int((~edge_mask).sum()),
+        int((~q10_mask).sum()),
+        int((~mask).sum()),
+        int(mask.sum()),
+        cfg.min_gate_probability,
+        cfg.min_expected_net_bps,
+        cfg.max_expected_shortfall_bps,
     )
     filtered = df.loc[mask].copy()
     if filtered.empty:
@@ -78,7 +93,12 @@ def build_candidate_target_weights(
     # Map symbols to index
     sym_to_idx = {sym: idx for idx, sym in enumerate(symbols)}
 
-    # Group selected events by entry_idx so metadata lands on the execution bar.
+    # ---------- Pass 1: entry_idx bar에 raw_weight 기록 ----------
+    # 각 이벤트의 (entry_idx, symbol) → raw_weight 를 먼저 매핑한다.
+    # 타임스텝 정렬된 리스트도 함께 수집해 Pass 2에서 재사용한다.
+    # event_records: list of (entry_idx, s_idx, raw_signed_weight, holding_bars)
+    event_records: list[tuple[int, int, float, int]] = []
+
     for row in selected_events.itertuples(index=False):
         sym = str(row.symbol)
         if sym not in sym_to_idx:
@@ -89,8 +109,11 @@ def build_candidate_target_weights(
             continue
 
         side = float(row.side)
-        # Expected edge return converted to return fraction per bar scale
-        mu_i = float(row.mu_net_decision_bps) * 1e-4
+        # Normalise expected edge to per-bar scale before Kelly calculation.
+        # mu_net_decision_bps is a per-HORIZON figure; dividing by holding_bars
+        # converts it to per-bar, matching the per-bar variance denominator.
+        holding_bars = max(int(getattr(row, "expected_holding_bars", 1)), 1)
+        mu_i_per_bar = float(row.mu_net_decision_bps) * 1e-4 / holding_bars
 
         # Trailing variance retrieval
         variance_i = 1e-4  # Default fallback
@@ -107,9 +130,20 @@ def build_candidate_target_weights(
                     variance_i = v
 
         variance_i = max(variance_i, 1e-12)
-        # Fractional Kelly: raw_weight = kelly_fraction * mu_i / variance_i
-        raw_w = cfg.kelly_fraction * mu_i / variance_i
-        raw_weights[t, s_idx] = raw_w * np.sign(side)
+        # Fractional Kelly: raw_weight = kelly_fraction * mu_i_per_bar / variance_i
+        raw_w = cfg.kelly_fraction * mu_i_per_bar / variance_i
+        signed_w = raw_w * np.sign(side)
+        raw_weights[t, s_idx] = signed_w
+        event_records.append((t, s_idx, signed_w, holding_bars))
+
+    # ---------- Pass 2: entry_idx → entry_idx + holding_bars - 1 구간 forward-fill ----------
+    # 타임스텝 오름차순 정렬 후 순회: 이미 비영값(다른 이벤트로 채워진 구간)은 덮어쓰지 않는다.
+    event_records.sort(key=lambda r: r[0])
+    for entry_t, s_idx, signed_w, holding_bars in event_records:
+        fill_end = min(entry_t + holding_bars, n_times)
+        for fill_t in range(entry_t + 1, fill_end):
+            if raw_weights[fill_t, s_idx] == 0.0:
+                raw_weights[fill_t, s_idx] = signed_w
 
     # Apply 5-cap multi-cap projection per timestamp
     caps = PortfolioCaps(
