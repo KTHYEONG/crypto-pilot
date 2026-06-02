@@ -53,6 +53,7 @@ def test_select_candidate_events_for_portfolio_filters_by_thresholds() -> None:
         min_gate_probability=0.75,
         min_expected_net_bps=10.0,
         max_expected_shortfall_bps=50.0,
+        selection_policy="hard",
     )
 
     selected = select_candidate_events_for_portfolio(model_output=model_output, cfg=cfg)
@@ -84,6 +85,7 @@ def test_select_candidate_events_for_portfolio_penalty_only_mode_ignores_q10_fil
         min_expected_net_bps=10.0,
         max_expected_shortfall_bps=50.0,
         selection_shortfall_mode="penalty_only",
+        selection_policy="hard",
     )
 
     selected = select_candidate_events_for_portfolio(model_output=model_output, cfg=cfg)
@@ -113,6 +115,27 @@ def test_compute_selection_sensitivity_returns_grid_counts() -> None:
     ].iloc[0]
     assert int(target["all_pass"]) == 1
     assert str(target["top_variant"]) == "trend_donchian:donchian_36"
+
+
+def test_select_candidate_events_for_portfolio_uses_validation_quantile_policy() -> None:
+    events = _make_sample_events()
+    model_output = CandidateModelOutput(
+        events=events,
+        p_pass=np.array([0.2, 0.3, 0.4], dtype=np.float64),
+        mu_gross_bps=np.array([10.0, 20.0, 30.0], dtype=np.float64),
+        mu_net_decision_bps=np.array([1.0, 2.0, 3.0], dtype=np.float64),
+        q10_net_bps=np.array([-10.0, -15.0, -20.0], dtype=np.float64),
+        q90_net_bps=np.array([20.0, 25.0, 35.0], dtype=np.float64),
+        utility_score=np.array([1.0, 5.0, 9.0], dtype=np.float64),
+        selection_thresholds={"utility_min": 5.0},
+    )
+    cfg = CandidateStrategyConfig(selection_policy="validation_quantile", selection_top_quantile=0.5)
+
+    selected = select_candidate_events_for_portfolio(model_output=model_output, cfg=cfg)
+
+    assert set(selected["symbol"]) == {"BTCUSDT", "ETHUSDT"}
+    btc_row = selected[selected["symbol"] == "BTCUSDT"].iloc[0]
+    assert btc_row["family"] == "rsi_reversion"
 
 
 def test_build_candidate_target_weights_applies_kelly_and_caps() -> None:

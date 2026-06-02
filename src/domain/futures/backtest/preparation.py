@@ -79,6 +79,8 @@ def _aggregate_aligned_data_1h_to_4h(
         "atr": "finite_last",
         "dyn_leverage": "last",
         "target_weights": "last",
+        "candidate_stop_atr_mult": "last",
+        "candidate_take_profit_atr_mult": "last",
     }
     mode_map["composer_sigma_bar"] = "last"
 
@@ -174,4 +176,3 @@ def prepare_backtest_inputs(
         exec_bar_end_1m_idx=end_idx,
         mark_price_1m=mark_price_1m,
     )
-
