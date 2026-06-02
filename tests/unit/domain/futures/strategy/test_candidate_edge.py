@@ -1,37 +1,29 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from types import SimpleNamespace
-
 import numpy as np
+import pandas as pd
 
+from src.domain.futures.strategy.candidate_dataset import CandidateDataset
 from src.domain.futures.strategy.candidate_edge import fit_candidate_edge_models, predict_candidate_edges
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 
 
-@dataclass(slots=True, frozen=True)
-class _Dataset:
-    X: np.ndarray
-    y_edge_bps: np.ndarray
-    y_q10_bps: np.ndarray
-    y_mfe_bps: np.ndarray
-    sample_weight: np.ndarray
-    feature_names: tuple[str, ...]
-
-
-def _make_dataset(seed: int, n: int) -> _Dataset:
+def _make_dataset(seed: int, n: int) -> CandidateDataset:
     rng = np.random.default_rng(seed)
     x = rng.normal(size=(n, 4)).astype(np.float32)
     edge = (15.0 * x[:, 0] - 5.0 * x[:, 1]).astype(np.float32)
     q10 = (edge - 8.0).astype(np.float32)
     mfe = (edge + 8.0).astype(np.float32)
     w = np.ones(n, dtype=np.float32)
-    return _Dataset(
+    return CandidateDataset(
         X=x,
+        y_gate=np.ones(n, dtype=np.int8),
         y_edge_bps=edge,
         y_q10_bps=q10,
         y_mfe_bps=mfe,
         sample_weight=w,
+        groups=np.arange(n, dtype=np.int32),
+        event_index=pd.DataFrame(),
         feature_names=("f0", "f1", "f2", "f3"),
     )
 
@@ -55,8 +47,7 @@ def test_predict_candidate_edges_exposes_all_required_outputs() -> None:
 def test_predict_candidate_edges_applies_cost_and_utility_formula() -> None:
     train = _make_dataset(seed=200, n=180)
     valid = _make_dataset(seed=201, n=30)
-    # Flat namespace so getattr(cfg, key) resolves directly without nested lookup
-    cfg = SimpleNamespace(
+    cfg = CandidateStrategyConfig(
         seed=4,
         expected_cost_bps=2.0,
         downside_penalty=0.5,
@@ -68,8 +59,7 @@ def test_predict_candidate_edges_applies_cost_and_utility_formula() -> None:
     p_pass = np.full(valid.X.shape[0], 0.5, dtype=np.float64)
     out = predict_candidate_edges(models=models, dataset=valid, p_pass=p_pass, cfg=cfg)
 
-    expected_mu_net = out.mu_gross_bps - 2.0
-    expected_utility = 0.5 * expected_mu_net - 0.5 * np.abs(np.minimum(out.q10_net_bps, 0.0)) - 1.0
+    expected_utility = 0.5 * out.mu_net_decision_bps - 0.5 * np.abs(np.minimum(out.q10_net_bps, 0.0)) - 1.0
 
-    assert np.allclose(out.mu_net_decision_bps, expected_mu_net)
+    assert np.allclose(out.mu_net_decision_bps, out.mu_gross_bps)
     assert np.allclose(out.utility_score, expected_utility)

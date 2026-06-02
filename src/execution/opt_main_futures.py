@@ -43,6 +43,7 @@ from src.application.futures.optimization.optimization_service import (
 )
 from src.application.futures.optimization.strategy_service import (
     assert_candidate_output_ready,
+    build_candidate_strategy_config,
     pick_strategy_data_maps,
     run_active_strategy_output_bridge,
     summarize_candidate_output_readiness,
@@ -604,9 +605,12 @@ def _run_candidate_evaluation_report(
     _logger.info("================================================================================")
 
     from src.domain.futures.strategy.ablation import run_candidate_ablation
-    from src.domain.futures.strategy.config import CandidateStrategyConfig
     
-    cfg = CandidateStrategyConfig(timeframe=tf)
+    cfg = build_candidate_strategy_config(
+        strategy_cfg=StrategyConfig(name="candidate_ml"),
+        opt_config=OPT_FUTURES_CONFIG,
+        timeframe=tf,
+    ).candidate
     
     active_syms = [s for s in trading_symbols if s in data_stage.data_maps]
     if not active_syms:
@@ -673,7 +677,11 @@ def _run_optimization_stage(
         seed=seed,
         resume=resume,
         strategy_mode=True,
-        strategy_cfg=StrategyConfig(name="candidate_ml"),
+        strategy_cfg=build_candidate_strategy_config(
+            strategy_cfg=StrategyConfig(name="candidate_ml"),
+            opt_config=OPT_FUTURES_CONFIG,
+            timeframe=run_config.timeframe,
+        ),
         n_trials_a1=max(1, int(run_config.trials * 0.5)),
         n_trials_a2=max(1, int(run_config.trials * 0.2)),
         n_trials_b=max(1, int(run_config.trials * 0.3)),

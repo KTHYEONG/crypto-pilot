@@ -32,6 +32,21 @@ def _find_symbol_index(symbols: tuple[str, ...], symbol: str) -> int:
     raise KeyError(f"unknown symbol: {symbol}")
 
 
+def _target_cost_hurdle_bps(events: pd.DataFrame) -> NDArray[np.float32]:
+    """Return per-event cost+hurdle already embedded in edge_after_hurdle_bps."""
+    size = len(events)
+    cost_hurdle = np.zeros(size, dtype=np.float32)
+    if "ex_ante_cost_bps" in events.columns:
+        cost = pd.to_numeric(events["ex_ante_cost_bps"], errors="coerce").to_numpy(dtype=np.float32, copy=False)
+        np.nan_to_num(cost, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        cost_hurdle = cost_hurdle + cost
+    if "hurdle_bps" in events.columns:
+        hurdle = pd.to_numeric(events["hurdle_bps"], errors="coerce").to_numpy(dtype=np.float32, copy=False)
+        np.nan_to_num(hurdle, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        cost_hurdle = cost_hurdle + hurdle
+    return cost_hurdle
+
+
 def build_candidate_dataset(
     *,
     labeled_events: pd.DataFrame,
@@ -186,11 +201,12 @@ def build_candidate_dataset(
     )
     y_gate = kept_events[gate_label_col].to_numpy(dtype=np.int8, copy=False)
     y_edge = kept_events["edge_after_hurdle_bps"].to_numpy(dtype=np.float32, copy=False)
+    cost_hurdle = _target_cost_hurdle_bps(kept_events)
     y_q10 = np.minimum(
-        kept_events["mae_bps"].to_numpy(dtype=np.float32, copy=False),
+        kept_events["mae_bps"].to_numpy(dtype=np.float32, copy=False) - cost_hurdle,
         y_edge,
     )
-    y_mfe = kept_events["mfe_bps"].to_numpy(dtype=np.float32, copy=False)
+    y_mfe = kept_events["mfe_bps"].to_numpy(dtype=np.float32, copy=False) - cost_hurdle
     sw = np.clip(np.abs(y_edge) / 10.0, 0.5, 5.0).astype(np.float32, copy=False)
 
     return CandidateDataset(

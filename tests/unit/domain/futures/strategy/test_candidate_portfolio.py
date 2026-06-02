@@ -7,6 +7,7 @@ from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
 from src.domain.futures.strategy.candidate_portfolio import (
     build_candidate_alpha_panel,
     build_candidate_target_weights,
+    compute_selection_sensitivity,
     select_candidate_events_for_portfolio,
 )
 from src.domain.futures.strategy.config import CandidateStrategyConfig
@@ -65,6 +66,53 @@ def test_select_candidate_events_for_portfolio_filters_by_thresholds() -> None:
     eth_row = selected[selected["symbol"] == "ETHUSDT"].iloc[0]
     assert int(eth_row["side"]) == 1
     assert eth_row["family"] == "trend_donchian"
+
+
+def test_select_candidate_events_for_portfolio_penalty_only_mode_ignores_q10_filter() -> None:
+    events = _make_sample_events()
+    model_output = CandidateModelOutput(
+        events=events,
+        p_pass=np.array([0.8, 0.9, 0.85], dtype=np.float64),
+        mu_gross_bps=np.array([50.0, 60.0, 40.0], dtype=np.float64),
+        mu_net_decision_bps=np.array([26.0, 36.0, 16.0], dtype=np.float64),
+        q10_net_bps=np.array([-120.0, -140.0, -10.0], dtype=np.float64),
+        q90_net_bps=np.array([40.0, 45.0, 30.0], dtype=np.float64),
+        utility_score=np.array([10.0, 12.0, 8.0], dtype=np.float64),
+    )
+    cfg = CandidateStrategyConfig(
+        min_gate_probability=0.75,
+        min_expected_net_bps=10.0,
+        max_expected_shortfall_bps=50.0,
+        selection_shortfall_mode="penalty_only",
+    )
+
+    selected = select_candidate_events_for_portfolio(model_output=model_output, cfg=cfg)
+
+    assert selected.shape[0] == 2
+    assert set(selected["symbol"]) == {"BTCUSDT", "ETHUSDT"}
+
+
+def test_compute_selection_sensitivity_returns_grid_counts() -> None:
+    events = _make_sample_events()
+    events["p_pass"] = [0.40, 0.60, 0.80]
+    events["mu_net_decision_bps"] = [0.0, 2.0, 8.0]
+    events["q10_net_bps"] = [-300.0, -120.0, -20.0]
+
+    sensitivity = compute_selection_sensitivity(
+        events=events,
+        gate_grid=(0.40, 0.55),
+        edge_grid_bps=(0.0, 5.0),
+        q10_grid_bps=(80.0, 250.0),
+    )
+
+    assert sensitivity.shape[0] == 8
+    target = sensitivity.loc[
+        (sensitivity["gate_threshold"] == 0.55)
+        & (sensitivity["edge_threshold_bps"] == 5.0)
+        & (sensitivity["q10_shortfall_bps"] == 250.0)
+    ].iloc[0]
+    assert int(target["all_pass"]) == 1
+    assert str(target["top_variant"]) == "trend_donchian:donchian_36"
 
 
 def test_build_candidate_target_weights_applies_kelly_and_caps() -> None:
