@@ -30,47 +30,36 @@ def _ema_2d(arr: NDArray[np.float64], span: int) -> NDArray[np.float64]:
 
 
 def _rolling_mean_2d(arr: NDArray[np.float64], window: int) -> NDArray[np.float64]:
+    # Time: O(T*N) via pandas C-layer; Space: O(T*N)
     if window <= 1:
         return arr.copy()
-    out = np.full_like(arr, np.nan, dtype=np.float64)
-    for s in range(arr.shape[1]):
-        col = arr[:, s]
-        finite = np.isfinite(col)
-        vals = np.where(finite, col, 0.0)
-        cnt = np.cumsum(finite.astype(np.int64))
-        csum = np.cumsum(vals)
-        for t in range(arr.shape[0]):
-            st = max(0, t - window + 1)
-            total = csum[t] - (csum[st - 1] if st > 0 else 0.0)
-            n = cnt[t] - (cnt[st - 1] if st > 0 else 0)
-            if n > 0:
-                out[t, s] = total / float(n)
-    return out
+    df = pd.DataFrame(arr)
+    result: NDArray[np.float64] = df.rolling(window=window, min_periods=1).mean().to_numpy(dtype=np.float64)
+    return result
 
 
 def _rolling_std_2d(arr: NDArray[np.float64], window: int) -> NDArray[np.float64]:
+    # Time: O(T*N) via pandas C-layer; Space: O(T*N)
     if window <= 1:
         return np.zeros_like(arr, dtype=np.float64)
-    mean = _rolling_mean_2d(arr, window)
-    sq_diff = np.square(arr - mean)
-    var = _rolling_mean_2d(sq_diff, window)
-    return np.sqrt(np.maximum(var, 1e-12))
+    df = pd.DataFrame(arr)
+    raw: NDArray[np.float64] = df.rolling(window=window, min_periods=2).std().to_numpy(dtype=np.float64)
+    result: NDArray[np.float64] = np.where(np.isfinite(raw), raw, 1e-12)
+    return result
 
 
 def _rolling_max_2d(arr: NDArray[np.float64], window: int) -> NDArray[np.float64]:
-    out = np.full_like(arr, np.nan, dtype=np.float64)
-    for t in range(arr.shape[0]):
-        st = max(0, t - window)
-        out[t] = np.nanmax(arr[st:t], axis=0) if t > 0 else arr[0]
-    return out
+    # shift(1): exclude current bar to produce trailing-exclusive channel (Donchian semantics).
+    # close[t] > prior_high[t] triggers breakout; without shift, roll_max[t]==high[t] → signal impossible.
+    df = pd.DataFrame(arr)
+    result: NDArray[np.float64] = df.rolling(window=window, min_periods=1).max().shift(1).to_numpy(dtype=np.float64)
+    return result
 
 
 def _rolling_min_2d(arr: NDArray[np.float64], window: int) -> NDArray[np.float64]:
-    out = np.full_like(arr, np.nan, dtype=np.float64)
-    for t in range(arr.shape[0]):
-        st = max(0, t - window)
-        out[t] = np.nanmin(arr[st:t], axis=0) if t > 0 else arr[0]
-    return out
+    df = pd.DataFrame(arr)
+    result: NDArray[np.float64] = df.rolling(window=window, min_periods=1).min().shift(1).to_numpy(dtype=np.float64)
+    return result
 
 
 def _atr_2d(
@@ -142,6 +131,58 @@ def build_rule_signal_panels(
         )
     )
 
+    # 1b. Trend MA Cross — ema_6_36
+    ema_fast_6 = _ema_2d(close, span=6)
+    ema_slow_36 = _ema_2d(close, span=36)
+    ma_diff_6_36 = (ema_fast_6 - ema_slow_36) / atr
+    signed_score_ma_6_36 = np.tanh(ma_diff_6_36)
+    side_hint_ma_6_36 = np.zeros_like(signed_score_ma_6_36, dtype=np.int8)
+    side_hint_ma_6_36[ma_diff_6_36 > 0.5] = 1
+    side_hint_ma_6_36[ma_diff_6_36 < -0.5] = -1
+    panels.append(
+        CandidateSignalPanel(
+            family="trend_ma",
+            variant="ema_6_36",
+            params={"ema_fast": 6, "ema_slow": 36, "atr_period": 14},
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=signed_score_ma_6_36,
+            side_hint_2d=side_hint_ma_6_36,
+            expected_holding_bars=12,
+            min_holding_bars=4,
+            stop_atr_mult=1.5,
+            take_profit_atr_mult=3.0,
+            turnover_proxy_2d=np.abs(np.diff(signed_score_ma_6_36, axis=0, prepend=0.0)),
+            valid_mask_2d=valid_mask,
+        )
+    )
+
+    # 1c. Trend MA Cross — ema_18_108
+    ema_fast_18 = _ema_2d(close, span=18)
+    ema_slow_108 = _ema_2d(close, span=108)
+    ma_diff_18_108 = (ema_fast_18 - ema_slow_108) / atr
+    signed_score_ma_18_108 = np.tanh(ma_diff_18_108)
+    side_hint_ma_18_108 = np.zeros_like(signed_score_ma_18_108, dtype=np.int8)
+    side_hint_ma_18_108[ma_diff_18_108 > 0.5] = 1
+    side_hint_ma_18_108[ma_diff_18_108 < -0.5] = -1
+    panels.append(
+        CandidateSignalPanel(
+            family="trend_ma",
+            variant="ema_18_108",
+            params={"ema_fast": 18, "ema_slow": 108, "atr_period": 14},
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=signed_score_ma_18_108,
+            side_hint_2d=side_hint_ma_18_108,
+            expected_holding_bars=24,
+            min_holding_bars=8,
+            stop_atr_mult=2.5,
+            take_profit_atr_mult=5.0,
+            turnover_proxy_2d=np.abs(np.diff(signed_score_ma_18_108, axis=0, prepend=0.0)),
+            valid_mask_2d=valid_mask,
+        )
+    )
+
     # 2. Trend Donchian
     donchian_high = _rolling_max_2d(high, window=36)
     donchian_low = _rolling_min_2d(low, window=36)
@@ -167,6 +208,64 @@ def build_rule_signal_panels(
             stop_atr_mult=2.0,
             take_profit_atr_mult=4.0,
             turnover_proxy_2d=np.abs(np.diff(donchian_score, axis=0, prepend=0.0)),
+            valid_mask_2d=valid_mask,
+        )
+    )
+
+    # 2b. Trend Donchian — donchian_18
+    d18_high = _rolling_max_2d(high, window=18)
+    d18_low = _rolling_min_2d(low, window=18)
+    d18_side = np.zeros_like(close, dtype=np.int8)
+    d18_side[close > d18_high] = 1
+    d18_side[close < d18_low] = -1
+    d18_score = np.zeros_like(close)
+    above_18 = close > d18_high
+    below_18 = close < d18_low
+    d18_score[above_18] = (close[above_18] - d18_high[above_18]) / atr[above_18]
+    d18_score[below_18] = (close[below_18] - d18_low[below_18]) / atr[below_18]
+    panels.append(
+        CandidateSignalPanel(
+            family="trend_donchian",
+            variant="donchian_18",
+            params={"lookback": 18},
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=np.clip(d18_score, -1.0, 1.0),
+            side_hint_2d=d18_side,
+            expected_holding_bars=12,
+            min_holding_bars=4,
+            stop_atr_mult=1.5,
+            take_profit_atr_mult=3.0,
+            turnover_proxy_2d=np.abs(np.diff(d18_score, axis=0, prepend=0.0)),
+            valid_mask_2d=valid_mask,
+        )
+    )
+
+    # 2c. Trend Donchian — donchian_72
+    d72_high = _rolling_max_2d(high, window=72)
+    d72_low = _rolling_min_2d(low, window=72)
+    d72_side = np.zeros_like(close, dtype=np.int8)
+    d72_side[close > d72_high] = 1
+    d72_side[close < d72_low] = -1
+    d72_score = np.zeros_like(close)
+    above_72 = close > d72_high
+    below_72 = close < d72_low
+    d72_score[above_72] = (close[above_72] - d72_high[above_72]) / atr[above_72]
+    d72_score[below_72] = (close[below_72] - d72_low[below_72]) / atr[below_72]
+    panels.append(
+        CandidateSignalPanel(
+            family="trend_donchian",
+            variant="donchian_72",
+            params={"lookback": 72},
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=np.clip(d72_score, -1.0, 1.0),
+            side_hint_2d=d72_side,
+            expected_holding_bars=36,
+            min_holding_bars=12,
+            stop_atr_mult=2.5,
+            take_profit_atr_mult=5.0,
+            turnover_proxy_2d=np.abs(np.diff(d72_score, axis=0, prepend=0.0)),
             valid_mask_2d=valid_mask,
         )
     )
@@ -248,6 +347,31 @@ def build_rule_signal_panels(
             stop_atr_mult=2.0,
             take_profit_atr_mult=3.0,
             turnover_proxy_2d=np.abs(np.diff(rsi_score, axis=0, prepend=0.0)),
+            valid_mask_2d=valid_mask,
+        )
+    )
+
+    # 5b. RSI Reversion — rsi_6
+    rsi6 = _rsi_2d(close, period=6)
+    rsi6_prev = np.vstack([rsi6[:1], rsi6[:-1]])
+    rsi6_side = np.zeros_like(close, dtype=np.int8)
+    rsi6_side[(rsi6_prev < 20) & (rsi6 > rsi6_prev)] = 1
+    rsi6_side[(rsi6_prev > 80) & (rsi6 < rsi6_prev)] = -1
+    rsi6_score = (50.0 - rsi6) / 20.0
+    panels.append(
+        CandidateSignalPanel(
+            family="rsi_reversion",
+            variant="rsi_6",
+            params={"rsi_period": 6, "oversold": 20.0, "overbought": 80.0},
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=np.clip(rsi6_score, -1.0, 1.0),
+            side_hint_2d=rsi6_side,
+            expected_holding_bars=8,
+            min_holding_bars=2,
+            stop_atr_mult=1.5,
+            take_profit_atr_mult=2.5,
+            turnover_proxy_2d=np.abs(np.diff(rsi6_score, axis=0, prepend=0.0)),
             valid_mask_2d=valid_mask,
         )
     )

@@ -1,223 +1,208 @@
-# Compound ML Strategy Architecture Spec
+# Candidate ML Architecture
 
-> last_verified: 2026-06-01
+> last_verified: 2026-06-02
 
-## Spec Type
-- `prd` + `refactor`
-- Goal: replace the current ML alpha ranking stack with a candidate-driven strategy architecture that optimizes post-cost geometric capital growth in Binance futures backtests.
+## Scope
+This document describes the current candidate-driven futures strategy architecture in the codebase.
+It replaces the legacy rank-selection ML stack with a target-weight pipeline that feeds the existing intrabar futures backtest engine.
 
-## Strategic Decision
-The existing ML alpha path must be retired:
-- no direct multi-symbol LambdaRank alpha extraction
-- no rank-selection policy as the production decision layer
-- no alpha pass based primarily on IC
-- no ML module controlling leverage or orders
+## Goal
+Maximize post-cost geometric capital growth while keeping the execution path deterministic, target-weight driven, and compatible with the existing portfolio/backtest layers.
 
-The new architecture uses this flow:
+## Current Pipeline
 ```text
-PIT universe filter
-  -> per-symbol rule candidate generation
-  -> per-symbol candidate backtest/evaluation
-  -> ML trade gate
-  -> ML edge/downside estimator
-  -> fractional Kelly portfolio constructor
-  -> existing intrabar futures backtest engine
-  -> OOS block promotion and ablation
+PIT universe filters
+  -> rule signal panel generation
+  -> sparse candidate event extraction
+  -> leak-free forward labeling
+  -> tabular candidate dataset build
+  -> trade gate model
+  -> edge / downside model
+  -> utility-based event selection
+  -> fractional Kelly target weights
+  -> existing futures backtest engine
+  -> compound evaluation and ablation
 ```
 
-Primary objective:
-```text
-maximize mean(log(equity_t / equity_{t-1}))
-subject to liquidation-free survival, drawdown, turnover, capacity, beta, gross, net, and per-symbol caps
-```
+## Module Responsibilities
 
-Secondary diagnostics:
-- CAGR
-- MAR / Calmar
-- max drawdown
-- post-cost net bps
-- turnover
-- block pass ratio
-- DSR / PBO / bootstrap robustness
-- IC only as a secondary signal-quality diagnostic
+### `src/domain/futures/strategy/rule_signals.py`
+Builds `CandidateSignalPanel` objects from aligned OHLCV/funding/OI data.
 
-## Current Contracts Verified
-
-### Backtest Engine
-Path: `src/domain/futures/backtest/engine.py`
-
-Current production entry:
+Current contract:
 ```python
-class FuturesBacktestEngine:
-    @staticmethod
-    def run_multi(
-        aligned_data: dict[str, np.ndarray],
-        symbol_names: list[str],
-        strategy_params: dict[str, Any],
-        **kwargs: Any,
-    ) -> tuple[pd.DataFrame, np.ndarray, float, np.ndarray]:
-```
-
-Relevant behavior:
-- `PortfolioBacktestEngine.run()` consumes `aligned_data["target_weights"]` when present.
-- If `target_weights` is absent, it falls back to legacy `xs_score_long/xs_score_short`.
-- Therefore new architecture must inject `target_weights` directly and avoid the legacy cross-sectional score fallback.
-
-### Execution Semantics
-Paths:
-- `docs/architecture/backtest-logic.md`
-- `docs/architecture/backtest-engine.md`
-- `src/domain/futures/portfolio/execution_sim.py`
-
-Hard constraints:
-- T signal can only execute from T+1.
-- execution is target-weight driven.
-- intrabar 1m path applies conservative fill semantics.
-- costs are single-source through settings/friction/execution layers.
-- drawdown scaling is path-aware only inside execution simulation.
-- ML must remain an alpha supplier, not an order/leverage controller.
-
-### Portfolio Constructor
-Path: `src/domain/futures/portfolio/portfolio_constructor.py`
-
-Current reusable contracts:
-```python
-def precompute_rebalance_weights(
-    close_2d: np.ndarray,
-    xs_long: np.ndarray,
-    xs_short: np.ndarray,
+def build_rule_signal_panels(
     *,
-    rebalance_bars: int,
-    lookback: int,
-    bars_per_year: float,
-    kappa: float,
-    f_kelly_max: float,
-    sigma_target_ann: float,
-    gross_cap: float,
-    per_symbol_cap: float,
-    current_dd: float = 0.0,
-    min_obs: int = 20,
-    composer_sigma_2d: np.ndarray | None = None,
-    sigma_3d: np.ndarray | None = None,
-    risk_snapshot: RiskSnapshot | None = None,
-    btc_beta_2d: np.ndarray | None = None,
-    policy_inputs: PortfolioPolicyInputs | None = None,
-    use_residual_var_for_kelly: bool = False,
-) -> np.ndarray:
+    aligned: AlignedMarketData,
+    cfg: CandidateStrategyConfig,
+) -> tuple[CandidateSignalPanel, ...]:
 ```
 
+Outputs dense `[T, N]` score and side-hint arrays for the available rule families:
+`trend_ma`, `trend_donchian`, `vol_breakout`, `bollinger_reversion`, `rsi_reversion`, `funding_carry`, `oi_volume_impulse`, and `btc_regime_pullback`.
+
+`candidate_panels_to_events()` converts those panels into sparse event rows with:
+`family`, `variant`, `side`, `raw_score`, `score_z`, `expected_holding_bars`, `min_holding_bars`, `stop_atr_mult`, `take_profit_atr_mult`, `turnover_proxy`, `cost_floor_bps`, and `entry_idx`.
+
+### `src/domain/futures/strategy/candidate_labels.py`
+Converts sparse candidate events into leak-free forward outcomes.
+
+Current contract:
 ```python
-@dataclass(frozen=True)
-class PortfolioCaps:
-    gross: float = 3.0
-    per_symbol: float = 0.10
-    net: float = 0.30
-    beta: float = 0.50
-    target_ann_vol: float = 0.20
-```
-
-```python
-def project_all_caps(
-    w: np.ndarray,
-    btc_beta: np.ndarray,
-    sigma_port: float,
-    bars_per_year: float,
-    caps: PortfolioCaps | None = None,
-) -> np.ndarray:
-```
-
-Decision:
-- reuse `project_all_caps()`, `quantize_weights()`, covariance utilities, and the execution engine.
-- add a candidate-specific portfolio layer that produces `target_weights`.
-- do not let the ML router emit final weights.
-
-### Universe Filter
-Paths:
-- `src/domain/futures/universe/config.py`
-- `src/domain/futures/universe/selection.py`
-- `src/domain/futures/universe/pipeline.py`
-- `src/domain/futures/universe/models.py`
-
-Current Stage6 behavior:
-```python
-def apply_selection_stage(
-    frame: pd.DataFrame,
+def label_candidate_events(
     *,
-    config: Stage6Config | None = None,
-    max_symbols: int = DEFAULT_MAX_SYMBOLS,
-    previous_selection: tuple[str, ...] | None = None,
-    k_in: int = DEFAULT_K_IN,
-    k_out: int = DEFAULT_K_OUT,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    events: pd.DataFrame,
+    aligned: AlignedMarketData,
+    cfg: CandidateStrategyConfig,
+) -> pd.DataFrame:
 ```
 
-Current Stage6 ranks by `tradeable_score` and selects `k_in`.
+Current outputs:
+`gross_fwd_bps`, `ex_ante_cost_bps`, `edge_after_hurdle_bps`, `barrier_first_label`, `profitable_after_hurdle_label`, `triple_barrier_label`, `time_to_exit_bars`, `mae_bps`, `mfe_bps`, `realized_vol_bps`.
 
-Decision:
-- keep Stage0 to Stage5 as PIT tradability and risk filters.
-- change the role of Stage6 from "alpha trading rank" to "execution pool and capacity metadata".
-- per-symbol strategy evaluation must run on Stage5-passed or Stage6-eligible symbols independently.
-- final portfolio selection is done by candidate expected utility, not universe rank.
+`triple_barrier_label` is retained for compatibility, but gate training now prefers `profitable_after_hurdle_label`.
 
-### Existing ML Alpha Legacy Scope
-Move to `legacy/` folder (to completely separate rather than delete) after new architecture is green:
-- `src/domain/futures/strategy/ml_builder.py` -> `legacy/strategy/ml_builder.py`
-- `src/domain/futures/strategy/ranker.py` -> `legacy/strategy/ranker.py`
-- `src/domain/futures/strategy/calibrator.py` -> `legacy/strategy/calibrator.py`
-- `src/domain/futures/strategy/rank_selection.py` -> `legacy/strategy/rank_selection.py`
-- `src/domain/futures/strategy/alpha_evaluation.py` -> `legacy/strategy/alpha_evaluation.py`
-- `src/domain/futures/strategy/features.py` -> `legacy/strategy/features.py`
-- `src/domain/futures/strategy/labels.py` -> `legacy/strategy/labels.py`
-- `src/domain/futures/strategy/dataset.py` -> `legacy/strategy/dataset.py`
-- `src/domain/futures/strategy/inference.py` -> `legacy/strategy/inference.py`
-- `src/domain/futures/strategy/cache.py` -> `legacy/strategy/cache.py`
-- old `StrategyMLConfig`
-- old tests named `test_ml_*`, `test_rank_selection.py`, `test_alpha_evaluation.py`
+### `src/domain/futures/strategy/candidate_dataset.py`
+Builds the tabular ML dataset for gate and edge models.
 
-Do not delete these foundations:
-- `src/domain/futures/strategy/common/alignment.py`
-- `src/domain/futures/strategy/common/normalization.py`
-- `src/domain/futures/strategy/diagnostics.py`, if generic IC/return diagnostics are still useful
-- `src/domain/futures/portfolio/*`
-- `src/domain/futures/backtest/*`
-- `src/domain/futures/universe/*`
+Current contract:
+```python
+def build_candidate_dataset(
+    *,
+    labeled_events: pd.DataFrame,
+    aligned: AlignedMarketData,
+    cfg: CandidateStrategyConfig,
+    split_start: int,
+    split_end: int,
+) -> CandidateDataset:
+```
 
-## New Target Files
+Current features:
+`side`, `raw_score`, `score_z`, `turnover_proxy`, `sym_ret_1`, `sym_ret_5`, `sym_vol_20`, `sym_volume_z20`, `mkt_ret_1`, `mkt_vol_20`, `mkt_dispersion_20`, `ex_ante_cost_bps`, `funding_z20`.
 
-### Strategy Layer
-- `src/domain/futures/strategy/config.py`
-- `src/domain/futures/strategy/builder.py`
-- `src/domain/futures/strategy/contracts.py`
-- `src/domain/futures/strategy/candidate_contracts.py`
-- `src/domain/futures/strategy/rule_signals.py`
-- `src/domain/futures/strategy/candidate_labels.py`
-- `src/domain/futures/strategy/candidate_dataset.py`
-- `src/domain/futures/strategy/candidate_gate.py`
-- `src/domain/futures/strategy/candidate_edge.py`
-- `src/domain/futures/strategy/candidate_portfolio.py`
-- `src/domain/futures/strategy/candidate_backtest.py`
-- `src/domain/futures/strategy/candidate_evaluation.py`
-- `src/domain/futures/strategy/ablation.py`
+Current labels:
+- `y_gate` uses `profitable_after_hurdle_label` if present, otherwise `triple_barrier_label`
+- `y_edge_bps` uses `edge_after_hurdle_bps`
+- `y_q10_bps` uses `min(mae_bps, y_edge_bps)`
+- `y_mfe_bps` uses `mfe_bps`
 
-### Runtime Layer
+### `src/domain/futures/strategy/candidate_gate.py`
+Fits a binary classifier plus optional calibration layer.
+
+Current contract:
+```python
+def fit_candidate_gate(
+    *,
+    train: CandidateDataset,
+    valid: CandidateDataset,
+    cfg: CandidateStrategyConfig,
+) -> CandidateGateModel:
+```
+
+The gate predicts pass probability `p_pass` and is calibrated against the validation split.
+
+### `src/domain/futures/strategy/candidate_edge.py`
+Fits edge, downside, and upside estimators.
+
+Current contract:
+```python
+def fit_candidate_edge_models(
+    *,
+    train: CandidateDataset,
+    valid: CandidateDataset,
+    cfg: CandidateStrategyConfig,
+) -> CandidateEdgeModels:
+```
+
+Current edge output:
+- center model: `mu_gross_bps`
+- q10 model: `q10_net_bps`
+- q90 model: `q90_net_bps`
+- utility score: `p_pass * mu_net_decision_bps - downside_term - turnover_term - concentration_penalty`
+
+### `src/domain/futures/strategy/candidate_portfolio.py`
+Filters selected events and constructs target weights.
+
+Current contracts:
+```python
+def select_candidate_events_for_portfolio(
+    *,
+    model_output: CandidateModelOutput,
+    cfg: CandidateStrategyConfig,
+) -> pd.DataFrame:
+```
+
+```python
+def build_candidate_target_weights(
+    *,
+    selected_events: pd.DataFrame,
+    close_2d: NDArray[np.float64],
+    symbols: tuple[str, ...],
+    beta_2d: NDArray[np.float64] | None,
+    sigma_3d: NDArray[np.float64] | None,
+    cfg: CandidateStrategyConfig,
+) -> NDArray[np.float64]:
+```
+
+Selection gates:
+- `p_pass >= min_gate_probability`
+- `mu_net_decision_bps >= min_expected_net_bps`
+- `q10_net_bps >= -max_expected_shortfall_bps`
+
+Weights are written at `entry_idx` and then forward-filled for the holding horizon before caps are projected.
+
+### `src/domain/futures/strategy/ablation.py`
+Runs benchmark variants and compound evaluation.
+
+Current role:
+- benchmark rule-only and ML-assisted variants
+- call rule diagnostics before training
+- produce OOS-only candidate flow for the full ML path
+
+Current state:
+- `entry_idx` uses execution-bar semantics
+- Kelly sizing uses per-bar expected return normalization
+- variant 6 is the OOS-only candidate path
+
+### `src/domain/futures/strategy/rule_diagnostics.py`
+Advisory diagnostics layer for rule quality.
+
+Current role:
+- summarize `family`, `variant`, and `family+side`
+- compare side-flipped labels
+- classify groups into `KEEP_CANDIDATE`, `SIDE_FLIP_CANDIDATE`, `DROP_OR_REWORK`, `INSUFFICIENT_OBS`
+
+This layer is used to decide whether rule families should be kept, flipped, pruned, or pushed into ML feature expansion.
+
+## Execution Semantics
+
+- Signal time is `T`.
+- Execution begins at `entry_idx` and is therefore T+1 relative to the decision bar.
+- The backtest engine consumes `target_weights` directly.
+- ML must remain an alpha supplier, not the final order/leverage controller.
+- The existing futures backtest engine stays in place; the strategy stack only feeds it weights and diagnostics.
+
+## Current Gaps
+
+The current code still has known limits:
+
+- no nested walk-forward promotion in the production strategy runtime
+- no family/variant identity feature in the dataset yet
+- edge model still receives a negative-centered target distribution
+- rule family pruning is advisory, not yet wired into production selection
+
+These gaps are intentional until diagnostics show a positive subset that is worth promoting.
+
+## Key Verification Paths
+
+- `src/domain/futures/backtest/engine.py`
+- `src/domain/futures/portfolio/portfolio_constructor.py`
 - `src/domain/futures/strategy_runtime/bridge.py`
 - `src/execution/opt_main_futures.py`
-
-### Universe Layer
-- `src/domain/futures/universe/config.py`
-- `src/domain/futures/universe/selection.py`
-- `src/domain/futures/universe/models.py`
 - `src/domain/futures/universe/pipeline.py`
 
-### Forecast Compatibility
-- `src/domain/futures/forecast/contracts.py` — CostForecast, RiskForecast (유효)
-- `src/domain/futures/forecast/cost.py` — build_cost_forecast (유효)
-- `src/domain/futures/forecast/risk.py` — build_risk_forecast (유효)
-
-### Tests
-- `tests/unit/domain/futures/strategy/test_rule_signals.py`
-- `tests/unit/domain/futures/strategy/test_candidate_labels.py`
-- `tests/unit/domain/futures/strategy/test_candidate_dataset.py`
+## Design Rule
+Do not add more ML complexity before the rule diagnostics prove that at least one family or variant can produce positive net edge after cost and hurdle.
 - `tests/unit/domain/futures/strategy/test_candidate_gate.py`
 - `tests/unit/domain/futures/strategy/test_candidate_edge.py`
 - `tests/unit/domain/futures/strategy/test_candidate_portfolio.py`

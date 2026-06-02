@@ -51,6 +51,8 @@ def test_label_candidate_events_t_plus_one_entry_and_columns() -> None:
     assert out.shape[0] == 1
     assert int(out.loc[0, "entry_idx"]) == 11
     for col in (
+        "barrier_first_label",
+        "profitable_after_hurdle_label",
         "gross_fwd_bps",
         "ex_ante_cost_bps",
         "edge_after_hurdle_bps",
@@ -81,3 +83,49 @@ def test_label_candidate_events_uses_future_window_only_for_targets() -> None:
     )
     out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
     assert int(out.loc[0, "time_to_exit_bars"]) == 4
+
+
+def test_label_candidate_events_separates_barrier_and_profitable_labels() -> None:
+    aligned = _make_aligned()
+    events = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[8]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [9],
+            "expected_holding_bars": [4],
+            "min_holding_bars": [1],
+            "stop_atr_mult": [50.0],
+            "take_profit_atr_mult": [50.0],
+            "cost_floor_bps": [0.0],
+        }
+    )
+
+    out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
+
+    assert int(out.loc[0, "triple_barrier_label"]) == 0
+    assert int(out.loc[0, "barrier_first_label"]) == 0
+    assert int(out.loc[0, "profitable_after_hurdle_label"]) == 1
+
+
+def test_label_candidate_events_profitable_label_respects_hurdle() -> None:
+    aligned = _make_aligned()
+    events = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[8]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [9],
+            "expected_holding_bars": [4],
+            "min_holding_bars": [1],
+            "stop_atr_mult": [50.0],
+            "take_profit_atr_mult": [50.0],
+            "cost_floor_bps": [0.0],
+            "hurdle_bps": [1000.0],
+        }
+    )
+
+    out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
+
+    assert float(out.loc[0, "edge_after_hurdle_bps"]) < 0.0
+    assert int(out.loc[0, "profitable_after_hurdle_label"]) == 0
