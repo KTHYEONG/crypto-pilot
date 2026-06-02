@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -7,6 +9,46 @@ from numpy.typing import NDArray
 from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+
+_logger = logging.getLogger(__name__)
+
+
+def candidate_variant_key(family: str, variant: str) -> str:
+    """Return a stable candidate variant key."""
+    return f"{family}:{variant}"
+
+
+def _candidate_variant_set(values: tuple[str, ...]) -> set[str]:
+    return {value for value in values if value}
+
+
+def filter_rule_signal_panels(
+    panels: tuple[CandidateSignalPanel, ...],
+    *,
+    cfg: CandidateStrategyConfig,
+) -> tuple[CandidateSignalPanel, ...]:
+    """Filter panels by configured family and variant allowlists."""
+    before = len(panels)
+    family_allowlist = _candidate_variant_set(cfg.candidate_families)
+    enabled_variants = _candidate_variant_set(cfg.enabled_candidate_variants)
+
+    filtered: list[CandidateSignalPanel] = []
+    for panel in panels:
+        if family_allowlist and panel.family not in family_allowlist:
+            continue
+        key = candidate_variant_key(panel.family, panel.variant)
+        if enabled_variants and key not in enabled_variants:
+            continue
+        filtered.append(panel)
+
+    _logger.info(
+        "[DIAG][RULE_PANEL_FILTER] before=%d after=%d families=%s variants=%s",
+        before,
+        len(filtered),
+        ",".join(cfg.candidate_families) if cfg.candidate_families else "",
+        ",".join(cfg.enabled_candidate_variants) if cfg.enabled_candidate_variants else "",
+    )
+    return tuple(filtered)
 
 # --- Vectorized Technical Indicator Helpers ---
 
@@ -467,16 +509,18 @@ def build_rule_signal_panels(
         )
     )
 
-    return tuple(panels)
+    return filter_rule_signal_panels(tuple(panels), cfg=cfg)
 
 
 def candidate_panels_to_events(
     panels: tuple[CandidateSignalPanel, ...],
     *,
     min_abs_score: float,
+    side_flip_variants: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """Convert dense [T,N] panels into sparse candidate event rows."""
     all_events: list[pd.DataFrame] = []
+    side_flip_allowlist = _candidate_variant_set(side_flip_variants)
     for panel in panels:
         scores = panel.signed_score_2d
         sides = panel.side_hint_2d
@@ -490,15 +534,24 @@ def candidate_panels_to_events(
 
         event_datetimes = panel.datetimes[t_idx]
         event_symbols = np.array([panel.symbols[s] for s in s_idx], dtype=object)
+        variant_key = candidate_variant_key(panel.family, panel.variant)
+        side_flipped = variant_key in side_flip_allowlist
+        raw_scores = scores[t_idx, s_idx]
+        score_z = raw_scores.copy()
+        event_sides = sides[t_idx, s_idx].copy()
+        if side_flipped:
+            raw_scores = -raw_scores
+            score_z = -score_z
+            event_sides = -event_sides
 
         df = pd.DataFrame({
             "datetime": event_datetimes,
             "symbol": event_symbols,
             "family": panel.family,
             "variant": panel.variant,
-            "side": sides[t_idx, s_idx],
-            "raw_score": scores[t_idx, s_idx],
-            "score_z": scores[t_idx, s_idx],  # proxy
+            "side": event_sides,
+            "raw_score": raw_scores,
+            "score_z": score_z,  # proxy
             "expected_holding_bars": panel.expected_holding_bars,
             "min_holding_bars": panel.min_holding_bars,
             "stop_atr_mult": panel.stop_atr_mult,
@@ -506,6 +559,7 @@ def candidate_panels_to_events(
             "turnover_proxy": panel.turnover_proxy_2d[t_idx, s_idx],
             "cost_floor_bps": 24.0,  # default floor
             "entry_idx": t_idx + 1,
+            "side_flipped": side_flipped,
         })
         all_events.append(df)
 
@@ -513,7 +567,8 @@ def candidate_panels_to_events(
         return pd.DataFrame(columns=[
             "datetime", "symbol", "family", "variant", "side",
             "raw_score", "score_z", "expected_holding_bars", "min_holding_bars",
-            "stop_atr_mult", "take_profit_atr_mult", "turnover_proxy", "cost_floor_bps", "entry_idx"
+            "stop_atr_mult", "take_profit_atr_mult", "turnover_proxy", "cost_floor_bps", "entry_idx",
+            "side_flipped",
         ])
 
     return pd.concat(all_events, axis=0, ignore_index=True).sort_values("datetime").reset_index(drop=True)

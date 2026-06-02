@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 
 import numpy as np
@@ -13,6 +14,158 @@ from src.domain.futures.strategy.candidate_contracts import (
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 
 
+def _candidate_variant_key(frame: pd.DataFrame) -> str:
+    return f"{frame['family'].iloc[0]!s}:{frame['variant'].iloc[0]!s}"
+
+
+def _q10_mask_for_mode(df: pd.DataFrame, cfg: CandidateStrategyConfig) -> pd.Series:
+    if cfg.selection_shortfall_mode == "penalty_only":
+        return pd.Series(True, index=df.index, dtype=bool)
+    if cfg.selection_shortfall_mode == "catastrophic":
+        return df["q10_net_bps"] >= -cfg.catastrophic_shortfall_bps
+    return df["q10_net_bps"] >= -cfg.max_expected_shortfall_bps
+
+
+def compute_selection_sensitivity(
+    *,
+    events: pd.DataFrame,
+    gate_grid: tuple[float, ...],
+    edge_grid_bps: tuple[float, ...],
+    q10_grid_bps: tuple[float, ...],
+) -> pd.DataFrame:
+    """Return pass counts across gate, edge, and q10 threshold grids."""
+    if events.empty:
+        return pd.DataFrame(
+            columns=[
+                "gate_threshold",
+                "edge_threshold_bps",
+                "q10_shortfall_bps",
+                "total",
+                "gate_pass",
+                "edge_pass",
+                "q10_pass",
+                "all_pass",
+                "all_pass_rate",
+                "top_variant",
+                "top_variant_pass",
+            ]
+        )
+
+    records: list[dict[str, float | int | str]] = []
+    total = int(events.shape[0])
+    variant_keys = (
+        events["family"].astype(str).str.cat(events["variant"].astype(str), sep=":")
+        if {"family", "variant"}.issubset(events.columns)
+        else pd.Series([""] * total, index=events.index, dtype="object")
+    )
+    for gate_threshold in gate_grid:
+        gate_mask = events["p_pass"] >= gate_threshold
+        for edge_threshold in edge_grid_bps:
+            edge_mask = events["mu_net_decision_bps"] >= edge_threshold
+            for q10_threshold in q10_grid_bps:
+                q10_mask = events["q10_net_bps"] >= -q10_threshold
+                all_mask = gate_mask & edge_mask & q10_mask
+                passed = variant_keys.loc[all_mask]
+                if passed.empty:
+                    top_variant = ""
+                    top_variant_pass = 0
+                else:
+                    counts = passed.value_counts(sort=True)
+                    top_variant = str(counts.index[0])
+                    top_variant_pass = int(counts.iloc[0])
+                records.append(
+                    {
+                        "gate_threshold": float(gate_threshold),
+                        "edge_threshold_bps": float(edge_threshold),
+                        "q10_shortfall_bps": float(q10_threshold),
+                        "total": total,
+                        "gate_pass": int(gate_mask.sum()),
+                        "edge_pass": int(edge_mask.sum()),
+                        "q10_pass": int(q10_mask.sum()),
+                        "all_pass": int(all_mask.sum()),
+                        "all_pass_rate": float(all_mask.mean()),
+                        "top_variant": top_variant,
+                        "top_variant_pass": top_variant_pass,
+                    }
+                )
+    return pd.DataFrame.from_records(records)
+
+
+def _log_selection_sensitivity(df: pd.DataFrame, *, cfg: CandidateStrategyConfig) -> None:
+    if df.empty:
+        return
+    logger = logging.getLogger(__name__)
+    top = df.sort_values(
+        ["all_pass", "all_pass_rate", "gate_threshold", "edge_threshold_bps", "q10_shortfall_bps"],
+        ascending=[False, False, True, True, True],
+    ).head(max(1, int(cfg.diagnostic_top_k)))
+    for row in top.itertuples(index=False):
+        logger.info(
+            "[DIAG][SELECT_SENS] gate>=%.2f edge>=%.1f q10>=-%.1f passed=%d pass_rate=%.4f top_variant=%s top_pass=%d",
+            float(row.gate_threshold),
+            float(row.edge_threshold_bps),
+            float(row.q10_shortfall_bps),
+            int(row.all_pass),
+            float(row.all_pass_rate),
+            str(row.top_variant),
+            int(row.top_variant_pass),
+        )
+
+
+def _log_selection_by_variant(
+    *,
+    df: pd.DataFrame,
+    gate_mask: pd.Series,
+    edge_mask: pd.Series,
+    q10_mask: pd.Series,
+    pass_mask: pd.Series,
+    cfg: CandidateStrategyConfig,
+) -> None:
+    """Log grouped candidate selection failure reasons."""
+    if df.empty:
+        return
+
+    logger = logging.getLogger(__name__)
+    grouped = df.groupby(["family", "variant"], sort=False, dropna=False)
+    rows: list[tuple[str, int, int, int, int, int, float, float, float]] = []
+    for (family, variant), group in grouped:
+        idx = group.index
+        rows.append(
+            (
+                f"{family}:{variant}",
+                int(group.shape[0]),
+                int((~gate_mask.loc[idx]).sum()),
+                int((~edge_mask.loc[idx]).sum()),
+                int((~q10_mask.loc[idx]).sum()),
+                int(pass_mask.loc[idx].sum()),
+                float(pd.to_numeric(group["p_pass"], errors="coerce").mean()),
+                float(pd.to_numeric(group["mu_net_decision_bps"], errors="coerce").max()),
+                float(pd.to_numeric(group["q10_net_bps"], errors="coerce").max()),
+            )
+        )
+
+    for key, total, gate_fail, edge_fail, q10_fail, passed, mean_p, max_mu, max_q10 in sorted(
+        rows,
+        key=lambda item: item[1],
+        reverse=True,
+    )[: max(1, int(getattr(cfg, "diagnostic_top_k", 10)))]:
+        logger.info(
+            (
+                "[DIAG][SELECT_VARIANT] key=%s total=%d gate_fail=%d edge_fail=%d "
+                "q10_fail=%d passed=%d mean_p=%.3f max_mu=%.1f max_q10=%.1f"
+            ),
+            key,
+            total,
+            gate_fail,
+            edge_fail,
+            q10_fail,
+            passed,
+            mean_p,
+            max_mu,
+            max_q10,
+        )
+
+
 def select_candidate_events_for_portfolio(
     *,
     model_output: CandidateModelOutput,
@@ -24,12 +177,29 @@ def select_candidate_events_for_portfolio(
     """
     events = model_output.events
     if events is None or events.empty:
-        return pd.DataFrame(columns=[
-            "datetime", "symbol", "family", "variant", "side", "raw_score", "score_z",
-            "expected_holding_bars", "min_holding_bars", "stop_atr_mult", "take_profit_atr_mult",
-            "turnover_proxy", "cost_floor_bps", "entry_idx", "p_pass", "mu_net_decision_bps",
-            "q10_net_bps", "utility_score"
-        ])
+        return pd.DataFrame(
+            columns=[
+                "datetime",
+                "symbol",
+                "family",
+                "variant",
+                "side",
+                "raw_score",
+                "score_z",
+                "expected_holding_bars",
+                "min_holding_bars",
+                "stop_atr_mult",
+                "take_profit_atr_mult",
+                "turnover_proxy",
+                "cost_floor_bps",
+                "entry_idx",
+                "side_flipped",
+                "p_pass",
+                "mu_net_decision_bps",
+                "q10_net_bps",
+                "utility_score",
+            ]
+        )
 
     df = events.copy()
     df["p_pass"] = np.asarray(model_output.p_pass, dtype=np.float64)
@@ -37,14 +207,30 @@ def select_candidate_events_for_portfolio(
     df["q10_net_bps"] = np.asarray(model_output.q10_net_bps, dtype=np.float64)
     df["utility_score"] = np.asarray(model_output.utility_score, dtype=np.float64)
 
+    if cfg.selection_sensitivity_enabled:
+        sensitivity = compute_selection_sensitivity(
+            events=df,
+            gate_grid=cfg.selection_gate_grid,
+            edge_grid_bps=cfg.selection_edge_grid_bps,
+            q10_grid_bps=cfg.selection_q10_grid_bps,
+        )
+        _log_selection_sensitivity(sensitivity, cfg=cfg)
+
     # Apply gate and edge threshold filters
     gate_mask = df["p_pass"] >= cfg.min_gate_probability
     edge_mask = df["mu_net_decision_bps"] >= cfg.min_expected_net_bps
-    q10_mask = df["q10_net_bps"] >= -cfg.max_expected_shortfall_bps
+    q10_mask = _q10_mask_for_mode(df, cfg)
     mask = gate_mask & edge_mask & q10_mask
+    _log_selection_by_variant(
+        df=df,
+        gate_mask=gate_mask,
+        edge_mask=edge_mask,
+        q10_mask=q10_mask,
+        pass_mask=mask,
+        cfg=cfg,
+    )
 
-    import logging as _logging
-    _sel_logger = _logging.getLogger(__name__)
+    _sel_logger = logging.getLogger(__name__)
     _sel_logger.info(
         "[DIAG][SELECT] total=%d gate_fail=%d edge_fail=%d q10_fail=%d "
         "all_fail=%d passed=%d | thresholds(gate>=%.2f edge_net>=%.1f q10>=-%.1f)",
@@ -268,5 +454,3 @@ def build_candidate_alpha_panel(
         .sort_index()
     )
     return panel
-
-
