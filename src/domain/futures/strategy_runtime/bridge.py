@@ -45,13 +45,21 @@ def run_candidate_strategy_for_universe(
         select_candidate_events_for_portfolio,
     )
     from src.domain.futures.strategy.common.alignment import align_data_maps
-    from src.domain.futures.strategy.rule_signals import build_rule_signal_panels, candidate_panels_to_events
+    from src.domain.futures.strategy.rule_diagnostics import compute_rule_diagnostics
+    from src.domain.futures.strategy.rule_signals import (
+        build_rule_signal_panels,
+        candidate_panels_to_events,
+    )
 
     aligned = align_data_maps(preloaded_data_maps, symbols, tf)
     n_bars = aligned.close_2d.shape[0]
 
     panels = build_rule_signal_panels(aligned=aligned, cfg=strategy_cfg.candidate)
-    raw_events = candidate_panels_to_events(panels, min_abs_score=strategy_cfg.candidate.min_rule_net_bps * 1e-4)
+    raw_events = candidate_panels_to_events(
+        panels,
+        min_abs_score=strategy_cfg.candidate.min_rule_net_bps * 1e-4,
+        side_flip_variants=strategy_cfg.candidate.side_flip_candidate_variants,
+    )
 
     if raw_events.empty:
         alpha_panel = build_candidate_alpha_panel(
@@ -63,7 +71,12 @@ def run_candidate_strategy_for_universe(
         return CandidatePipelineOutput(
             alpha_panel=alpha_panel,
             target_weights=np.zeros_like(aligned.close_2d),
-            rule_report={"events_total": 0},
+            rule_report={
+                "events_total": 0,
+                "selected_total": 0,
+                "recommended_keep_variants": (),
+                "recommended_flip_variants": (),
+            },
         )
 
     labeled = label_candidate_events(events=raw_events, aligned=aligned, cfg=strategy_cfg.candidate)
@@ -76,6 +89,12 @@ def run_candidate_strategy_for_universe(
         labeled_events=labeled, aligned=aligned, cfg=strategy_cfg.candidate, split_start=split_val, split_end=n_bars
     )
 
+    diag = compute_rule_diagnostics(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=strategy_cfg.candidate,
+        min_obs=max(strategy_cfg.candidate.min_candidate_obs, 100),
+    )
     gate_model = fit_candidate_gate(train=train_set, valid=valid_set, cfg=strategy_cfg.candidate)
     edge_models = fit_candidate_edge_models(train=train_set, valid=valid_set, cfg=strategy_cfg.candidate)
 
@@ -103,7 +122,12 @@ def run_candidate_strategy_for_universe(
     return CandidatePipelineOutput(
         alpha_panel=alpha_panel,
         target_weights=target_weights,
-        rule_report={"events_total": len(raw_events), "selected_total": len(selected)},
+        rule_report={
+            "events_total": len(raw_events),
+            "selected_total": len(selected),
+            "recommended_keep_variants": diag.recommended_keep_variants,
+            "recommended_flip_variants": diag.recommended_flip_variants,
+        },
     )
 
 

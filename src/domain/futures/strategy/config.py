@@ -119,6 +119,20 @@ class CandidateStrategyConfig:
     min_gate_probability: float = 0.55
     min_expected_net_bps: float = 1.0
     max_expected_shortfall_bps: float = 80.0
+    selection_shortfall_mode: Literal["hard", "penalty_only", "catastrophic"] = "hard"
+    catastrophic_shortfall_bps: float = 300.0
+    selection_sensitivity_enabled: bool = True
+    selection_gate_grid: tuple[float, ...] = (0.40, 0.45, 0.50, 0.55)
+    selection_edge_grid_bps: tuple[float, ...] = (0.0, 1.0, 5.0)
+    selection_q10_grid_bps: tuple[float, ...] = (80.0, 150.0, 250.0, 400.0)
+    enabled_candidate_variants: tuple[str, ...] = ()
+    side_flip_candidate_variants: tuple[str, ...] = ()
+    diagnostic_top_k: int = 10
+    min_variant_oos_obs: int = 100
+    min_variant_oos_edge_bps: float = 1.0
+    min_variant_oos_hit_rate: float = 0.50
+    min_variant_oos_payoff_ratio: float = 1.20
+    max_variant_oos_q10_fail_rate: float = 0.90
     candidate_families: tuple[str, ...] = (
         "trend_ma",
         "trend_donchian",
@@ -155,13 +169,42 @@ class CandidateStrategyConfig:
             or self.beta_cap < 0.0
             or self.target_ann_vol < 0.0
             or self.max_expected_shortfall_bps < 0.0
+            or self.catastrophic_shortfall_bps < 0.0
         ):
             raise ValueError("cap and penalty parameters must be non-negative")
         if self.gross_cap < self.max_symbol_weight:
             raise ValueError("gross cap must be at least max symbol weight")
         if self.min_candidate_obs <= 0 or self.min_symbol_oos_blocks <= 0:
             raise ValueError("minimum observations and blocks must be positive")
+        if self.diagnostic_top_k < 1:
+            raise ValueError("diagnostic_top_k must be >= 1")
+        if self.min_variant_oos_obs < 1:
+            raise ValueError("min_variant_oos_obs must be >= 1")
+        if self.min_variant_oos_edge_bps < 0.0:
+            raise ValueError("min_variant_oos_edge_bps must be non-negative")
+        if not (0.0 <= self.min_variant_oos_hit_rate <= 1.0):
+            raise ValueError("min_variant_oos_hit_rate must satisfy 0 <= value <= 1")
+        if self.min_variant_oos_payoff_ratio < 0.0:
+            raise ValueError("min_variant_oos_payoff_ratio must be non-negative")
+        if not (0.0 <= self.max_variant_oos_q10_fail_rate <= 1.0):
+            raise ValueError("max_variant_oos_q10_fail_rate must satisfy 0 <= value <= 1")
+        if self.selection_shortfall_mode not in {"hard", "penalty_only", "catastrophic"}:
+            raise ValueError("selection_shortfall_mode must be hard, penalty_only, or catastrophic")
+        if self.catastrophic_shortfall_bps < self.max_expected_shortfall_bps:
+            raise ValueError("catastrophic_shortfall_bps must be >= max_expected_shortfall_bps")
+        if any((value < 0.0) or (value > 1.0) for value in self.selection_gate_grid):
+            raise ValueError("selection_gate_grid values must be within [0.0, 1.0]")
+        if any(value < 0.0 for value in self.selection_edge_grid_bps):
+            raise ValueError("selection_edge_grid_bps values must be non-negative")
+        if any(value < 0.0 for value in self.selection_q10_grid_bps):
+            raise ValueError("selection_q10_grid_bps values must be non-negative")
         if self.downside_penalty < 0.0 or self.turnover_penalty < 0.0 or self.concentration_penalty < 0.0:
             raise ValueError("penalty parameters must be non-negative")
         if not (0.0 < self.max_drawdown_cap <= 1.0):
             raise ValueError("max_drawdown_cap must be in (0.0, 1.0]")
+        for variant in self.enabled_candidate_variants:
+            if variant.count(":") != 1:
+                raise ValueError("enabled_candidate_variants entries must be formatted as family:variant")
+        for variant in self.side_flip_candidate_variants:
+            if variant.count(":") != 1:
+                raise ValueError("side_flip_candidate_variants entries must be formatted as family:variant")
