@@ -133,6 +133,15 @@ class CandidateStrategyConfig:
     min_variant_oos_hit_rate: float = 0.50
     min_variant_oos_payoff_ratio: float = 1.20
     max_variant_oos_q10_fail_rate: float = 0.90
+    candidate_identity_features_enabled: bool = True
+    market_state_features_enabled: bool = True
+    promotion_filter_enabled: bool = True
+    selection_policy: Literal["hard", "validation_quantile", "utility_topk"] = "validation_quantile"
+    selection_top_quantile: float = 0.10
+    min_oos_rank_ic: float = 0.01
+    min_oos_log_growth_uplift: float = 0.0
+    max_oos_edge_decay_bps: float = 50.0
+    exit_policy_mode: Literal["label_only", "engine_aligned"] = "engine_aligned"
     candidate_families: tuple[str, ...] = (
         "trend_ma",
         "trend_donchian",
@@ -188,8 +197,18 @@ class CandidateStrategyConfig:
             raise ValueError("min_variant_oos_payoff_ratio must be non-negative")
         if not (0.0 <= self.max_variant_oos_q10_fail_rate <= 1.0):
             raise ValueError("max_variant_oos_q10_fail_rate must satisfy 0 <= value <= 1")
+        if not (0.0 < self.selection_top_quantile <= 1.0):
+            raise ValueError("selection_top_quantile must satisfy 0 < value <= 1")
+        if not (-1.0 <= self.min_oos_rank_ic <= 1.0):
+            raise ValueError("min_oos_rank_ic must satisfy -1 <= value <= 1")
+        if self.max_oos_edge_decay_bps < 0.0:
+            raise ValueError("max_oos_edge_decay_bps must be non-negative")
         if self.selection_shortfall_mode not in {"hard", "penalty_only", "catastrophic"}:
             raise ValueError("selection_shortfall_mode must be hard, penalty_only, or catastrophic")
+        if self.selection_policy not in {"hard", "validation_quantile", "utility_topk"}:
+            raise ValueError("selection_policy must be hard, validation_quantile, or utility_topk")
+        if self.exit_policy_mode not in {"label_only", "engine_aligned"}:
+            raise ValueError("exit_policy_mode must be label_only or engine_aligned")
         if self.catastrophic_shortfall_bps < self.max_expected_shortfall_bps:
             raise ValueError("catastrophic_shortfall_bps must be >= max_expected_shortfall_bps")
         if any((value < 0.0) or (value > 1.0) for value in self.selection_gate_grid):
