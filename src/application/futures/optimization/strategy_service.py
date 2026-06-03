@@ -239,12 +239,11 @@ def run_active_strategy_output_bridge(
     inference_panel: tuple[str, ...] | None = None,
     live_inference_panel: tuple[str, ...] | None = None,
     historical_trading_panel: tuple[str, ...] | None = None,
+    silent: bool = False,
 ) -> CandidatePipelineOutput:
     del (
         fetch_start,
         end_date,
-        training_panel,
-        trading_symbols,
         inference_panel,
         live_inference_panel,
         historical_trading_panel,
@@ -260,11 +259,18 @@ def run_active_strategy_output_bridge(
         opt_config=opt_config,
         timeframe=run_config.timeframe,
     )
-    effective_symbols = [sym for sym in symbols if sym in preloaded_data_maps]
+    candidate_scope = list(trading_symbols or tuple(symbols))
+    if training_panel:
+        allowed = set(training_panel)
+        candidate_scope = [sym for sym in candidate_scope if sym in allowed]
+    effective_symbols = [sym for sym in dict.fromkeys(candidate_scope) if sym in preloaded_data_maps]
+    if not effective_symbols:
+        raise ValueError("candidate ML scope is empty")
 
     return run_candidate_strategy_for_universe(
         symbols=effective_symbols,
         tf=tf,
         strategy_cfg=strategy_cfg,
         preloaded_data_maps=preloaded_data_maps,
+        silent=silent,
     )

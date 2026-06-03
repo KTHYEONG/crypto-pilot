@@ -218,7 +218,7 @@ def label_candidate_events(
     _finite_edge = _edge[np.isfinite(_edge)]
     _barrier_label1_rate = float(_barrier_labels.mean()) if len(_barrier_labels) > 0 else 0.0
     _gate_label1_rate = float(_profitable_labels.mean()) if len(_profitable_labels) > 0 else 0.0
-    _logger.info(
+    _logger.debug(
         "[DIAG][LABEL] events=%d barrier_label1_rate=%.3f gate_label1_rate=%.3f "
         "mean_edge=%.1f median_edge=%.1f "
         "pct_edge_pos=%.3f p10_edge=%.1f p90_edge=%.1f",
