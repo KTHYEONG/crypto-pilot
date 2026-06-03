@@ -358,7 +358,9 @@ def run_candidate_strategy_for_universe(
             "oos_start": oos_start,
             "oos_end": oos_end,
             "y_gate_fit_pos_rate": float(fit_set.y_gate.mean()) if fit_set.X.shape[0] > 0 else 0.0,
-            "y_gate_calibration_pos_rate": float(calibration_set.y_gate.mean()) if calibration_set.X.shape[0] > 0 else 0.0,
+            "y_gate_calibration_pos_rate": (
+                float(calibration_set.y_gate.mean()) if calibration_set.X.shape[0] > 0 else 0.0
+            ),
             "y_gate_oos_pos_rate": float(oos_set.y_gate.mean()) if oos_set.X.shape[0] > 0 else 0.0,
             "gate_calibration_used": bool(gate_model.calibration_used) if gate_model is not None else False,
             "gate_calibration_reason": gate_model.calibration_reason if gate_model is not None else "not_fit",
@@ -388,7 +390,9 @@ def run_candidate_strategy_for_universe(
             "n_keep": int(selection_diag.get("n_keep", 0)),
             "policy": str(selection_diag.get("policy", strategy_cfg.candidate.selection_policy)),
             "zero_reason": str(selection_diag.get("zero_reason", "unknown")),
-            "breakeven_floor_bps": float(selection_diag.get("breakeven_floor_bps", strategy_cfg.candidate.cost_floor_bps)),
+            "breakeven_floor_bps": float(
+                selection_diag.get("breakeven_floor_bps", strategy_cfg.candidate.cost_floor_bps)
+            ),
             "recommended_keep_variants": diag.recommended_keep_variants,
             "recommended_flip_variants": diag.recommended_flip_variants,
         },
