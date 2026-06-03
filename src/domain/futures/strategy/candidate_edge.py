@@ -325,24 +325,43 @@ def predict_candidate_edges(
     turnover_term = turnover_penalty * turnover_proxy
     utility_score = p_pass * mu_net_decision_bps - downside_term - turnover_term - concentration_penalty
 
+    breakeven_floor_bps = float(getattr(cfg, "min_net_floor_cost_fraction", 0.5)) * float(
+        getattr(cfg, "cost_floor_bps", expected_cost_bps)
+    )
+    catastrophic_shortfall_bps = float(getattr(cfg, "catastrophic_shortfall_bps", 300.0))
+    max_shortfall_bps = float(getattr(cfg, "max_expected_shortfall_bps", 80.0))
+    finite_mu = mu_net_decision_bps[np.isfinite(mu_net_decision_bps)]
+    finite_q10 = q10_net_bps[np.isfinite(q10_net_bps)]
+    finite_utility = utility_score[np.isfinite(utility_score)]
+
     _logger = logging.getLogger(__name__)
-    _logger.debug(
-        "[DIAG][EDGE] n=%d target_scale=net cost_bps=%.1f "
-        "mu_model mean=%.1f max=%.1f pct_ge25=%.3f | "
-        "mu_decision mean=%.1f max=%.1f pct_ge1=%.3f | "
-        "q10_net mean=%.1f min=%.1f | utility mean=%.3f max=%.3f",
+    _logger.info(
+        (
+            "[DIAG][EDGE] n=%d target_scale=net cost_bps=%.1f floor_bps=%.1f "
+            "mu_mean=%.1f mu_p50=%.1f mu_p90=%.1f mu_max=%.1f "
+            "q10_mean=%.1f q10_p10=%.1f q10_p50=%.1f q10_min=%.1f "
+            "utility_mean=%.3f utility_p50=%.3f utility_p90=%.3f utility_max=%.3f "
+            "pct_mu_ge1=%.3f pct_mu_ge_floor=%.3f pct_q10_ge_cat=%.3f pct_q10_ge_max=%.3f"
+        ),
         len(mu_model_bps),
         expected_cost_bps,
-        float(mu_model_bps.mean()),
-        float(mu_model_bps.max()),
-        float((mu_model_bps >= 25.0).mean()),
-        float(mu_net_decision_bps.mean()),
-        float(mu_net_decision_bps.max()),
-        float((mu_net_decision_bps >= 1.0).mean()),
-        float(q10_net_bps.mean()),
-        float(q10_net_bps.min()),
-        float(utility_score.mean()),
-        float(utility_score.max()),
+        breakeven_floor_bps,
+        float(np.mean(finite_mu)) if finite_mu.size > 0 else float("nan"),
+        float(np.median(finite_mu)) if finite_mu.size > 0 else float("nan"),
+        float(np.percentile(finite_mu, 90)) if finite_mu.size > 0 else float("nan"),
+        float(np.max(finite_mu)) if finite_mu.size > 0 else float("nan"),
+        float(np.mean(finite_q10)) if finite_q10.size > 0 else float("nan"),
+        float(np.percentile(finite_q10, 10)) if finite_q10.size > 0 else float("nan"),
+        float(np.median(finite_q10)) if finite_q10.size > 0 else float("nan"),
+        float(np.min(finite_q10)) if finite_q10.size > 0 else float("nan"),
+        float(np.mean(finite_utility)) if finite_utility.size > 0 else float("nan"),
+        float(np.median(finite_utility)) if finite_utility.size > 0 else float("nan"),
+        float(np.percentile(finite_utility, 90)) if finite_utility.size > 0 else float("nan"),
+        float(np.max(finite_utility)) if finite_utility.size > 0 else float("nan"),
+        float((finite_mu >= 1.0).mean()) if finite_mu.size > 0 else 0.0,
+        float((finite_mu >= breakeven_floor_bps).mean()) if finite_mu.size > 0 else 0.0,
+        float((finite_q10 >= -catastrophic_shortfall_bps).mean()) if finite_q10.size > 0 else 0.0,
+        float((finite_q10 >= -max_shortfall_bps).mean()) if finite_q10.size > 0 else 0.0,
     )
     _log_edge_prediction_variants(
         dataset=dataset,
