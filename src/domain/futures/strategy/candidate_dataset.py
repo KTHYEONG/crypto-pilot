@@ -356,9 +356,13 @@ def build_candidate_dataset(
         )
 
     gate_label_col = (
-        "profitable_after_hurdle_label"
-        if "profitable_after_hurdle_label" in kept_events.columns
-        else "triple_barrier_label"
+        "gross_direction_label"
+        if "gross_direction_label" in kept_events.columns
+        else (
+            "profitable_after_hurdle_label"
+            if "profitable_after_hurdle_label" in kept_events.columns
+            else "triple_barrier_label"
+        )
     )
     y_gate = kept_events[gate_label_col].to_numpy(dtype=np.int8, copy=False)
     y_edge = kept_events["edge_after_hurdle_bps"].to_numpy(dtype=np.float32, copy=False)

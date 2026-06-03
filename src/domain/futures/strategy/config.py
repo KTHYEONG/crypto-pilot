@@ -103,7 +103,7 @@ class CandidateStrategyConfig:
     purge_bars: int = 18
     embargo_bars: int = 18
     cost_floor_bps: float = 24.0
-    min_listing_age_days: int = 90
+    min_listing_age_days: int = 180
     min_candidate_obs: int = 200
     min_symbol_oos_blocks: int = 3
     min_rule_net_bps: float = 0.0
@@ -136,8 +136,9 @@ class CandidateStrategyConfig:
     candidate_identity_features_enabled: bool = True
     market_state_features_enabled: bool = True
     promotion_filter_enabled: bool = True
-    selection_policy: Literal["hard", "validation_quantile", "utility_topk"] = "validation_quantile"
+    selection_policy: Literal["hard", "validation_quantile", "utility_topk"] = "utility_topk"
     selection_top_quantile: float = 0.10
+    min_net_floor_cost_fraction: float = 0.50
     min_oos_rank_ic: float = 0.01
     min_oos_log_growth_uplift: float = 0.0
     max_oos_edge_decay_bps: float = 50.0
@@ -151,6 +152,10 @@ class CandidateStrategyConfig:
         "funding_carry",
         "oi_volume_impulse",
         "btc_regime_pullback",
+        "cross_sectional_momentum",
+        "funding_zscore_carry",
+        "vol_regime_reversion",
+        "btc_corr_regime",
     )
     # Edge model utility parameters
     downside_penalty: float = 1.0
@@ -197,6 +202,8 @@ class CandidateStrategyConfig:
             raise ValueError("max_variant_oos_q10_fail_rate must satisfy 0 <= value <= 1")
         if not (0.0 < self.selection_top_quantile <= 1.0):
             raise ValueError("selection_top_quantile must satisfy 0 < value <= 1")
+        if not (0.0 <= self.min_net_floor_cost_fraction <= 2.0):
+            raise ValueError("min_net_floor_cost_fraction must be in [0.0, 2.0]")
         if not (-1.0 <= self.min_oos_rank_ic <= 1.0):
             raise ValueError("min_oos_rank_ic must satisfy -1 <= value <= 1")
         if self.max_oos_edge_decay_bps < 0.0:

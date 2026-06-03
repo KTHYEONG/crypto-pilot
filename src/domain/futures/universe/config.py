@@ -102,7 +102,7 @@ class Stage5Config:
 
     """
 
-    min_listing_age_days: int = 90
+    min_listing_age_days: int = 180
     min_vol_30d: float = 0.05   # 5% annualized — 거래 없는 죽은 코인 제거
     max_vol_30d: float = 4.0    # 400% annualized — 극단적 meme/junk 제거
     max_abs_funding_z: float = 2.5
