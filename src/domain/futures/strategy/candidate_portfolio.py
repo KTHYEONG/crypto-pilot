@@ -121,7 +121,7 @@ def _log_selection_sensitivity(df: pd.DataFrame, *, cfg: CandidateStrategyConfig
         ascending=[False, False, True, True, True],
     ).head(max(1, int(cfg.diagnostic_top_k)))
     for row in top.itertuples(index=False):
-        logger.info(
+        logger.debug(
             "[DIAG][SELECT_SENS] gate>=%.2f edge>=%.1f q10>=-%.1f passed=%d pass_rate=%.4f top_variant=%s top_pass=%d",
             float(row.gate_threshold),
             float(row.edge_threshold_bps),
@@ -170,7 +170,7 @@ def _log_selection_by_variant(
         key=lambda item: item[1],
         reverse=True,
     )[: max(1, int(getattr(cfg, "diagnostic_top_k", 10)))]:
-        logger.info(
+        logger.debug(
             (
                 "[DIAG][SELECT_VARIANT] key=%s total=%d gate_fail=%d edge_fail=%d "
                 "q10_fail=%d passed=%d mean_p=%.3f max_mu=%.1f max_q10=%.1f"
@@ -271,7 +271,7 @@ def select_candidate_events_for_portfolio(
     )
 
     _sel_logger = logging.getLogger(__name__)
-    _sel_logger.info(
+    _sel_logger.debug(
         "[DIAG][SELECT] total=%d gate_fail=%d edge_fail=%d q10_fail=%d "
         "all_fail=%d passed=%d | policy=%s thresholds(gate>=%.2f edge_net>=%.1f q10>=-%.1f utility>=%.3f)",
         len(df),
@@ -424,6 +424,28 @@ def build_candidate_alpha_panel(
 ) -> pd.DataFrame:
     """Build long-format panel for merge into data maps."""
     n_times, n_symbols = target_weights_2d.shape
+    if n_times == 0 or n_symbols == 0:
+        empty = pd.DataFrame(
+            columns=[
+                "alpha_long",
+                "alpha_short",
+                "target_weight",
+                "candidate_family",
+                "candidate_variant",
+                "p_pass",
+                "mu_net_decision_bps",
+                "q10_net_bps",
+                "utility_score",
+                "candidate_stop_atr_mult",
+                "candidate_take_profit_atr_mult",
+            ]
+        )
+        empty.index = pd.MultiIndex.from_arrays(
+            [pd.Index([], dtype="datetime64[ns]"), pd.Index([], dtype="object")],
+            names=["datetime", "symbol"],
+        )
+        return empty
+
     rows: list[pd.DataFrame] = []
 
     # Map symbols to index
@@ -431,8 +453,11 @@ def build_candidate_alpha_panel(
 
     # Group by execution index so metadata aligns with the target weight row.
     df_selected = selected_events.copy()
-    df_selected["_entry_idx"] = df_selected["entry_idx"].astype(int)
-    grouped = df_selected.groupby("_entry_idx")
+    if df_selected.empty or "entry_idx" not in df_selected.columns:
+        grouped: dict[int, pd.DataFrame] = {}
+    else:
+        df_selected["_entry_idx"] = df_selected["entry_idx"].astype(int)
+        grouped = {int(key): group for key, group in df_selected.groupby("_entry_idx")}
 
     for t in range(n_times):
         # Default empty attributes
@@ -453,8 +478,8 @@ def build_candidate_alpha_panel(
         stop_atr_mult = np.zeros(n_symbols, dtype=np.float64)
         take_profit_atr_mult = np.zeros(n_symbols, dtype=np.float64)
 
-        if t in grouped.groups:
-            dt_group = grouped.get_group(t)
+        if t in grouped:
+            dt_group = grouped[t]
             for row in dt_group.itertuples(index=False):
                 sym = str(row.symbol)
                 if sym in sym_to_idx:

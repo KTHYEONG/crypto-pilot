@@ -235,3 +235,19 @@ def test_build_candidate_alpha_panel_formats_correctly() -> None:
     assert panel.loc[eth_idx, "alpha_long"] == 0.12
     assert panel.loc[eth_idx, "alpha_short"] == 0.0
     assert panel.loc[eth_idx, "candidate_family"] == "trend_donchian"
+
+
+def test_build_candidate_alpha_panel_when_selected_events_empty_returns_zero_panel() -> None:
+    datetimes = np.array(["2025-01-01T00", "2025-01-01T01"], dtype="datetime64[ns]")
+    target_weights_2d = np.zeros((2, 2), dtype=np.float64)
+
+    panel = build_candidate_alpha_panel(
+        selected_events=pd.DataFrame(),
+        target_weights_2d=target_weights_2d,
+        datetimes=datetimes,
+        symbols=("BTCUSDT", "ETHUSDT"),
+    )
+
+    assert panel.shape[0] == 4
+    assert panel.index.names == ["datetime", "symbol"]
+    assert float(panel["target_weight"].abs().sum()) == 0.0

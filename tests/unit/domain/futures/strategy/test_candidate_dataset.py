@@ -28,6 +28,10 @@ def _make_aligned() -> AlignedMarketData:
         entry_block_mask=np.zeros((t, n), dtype=bool),
         kill_mask=np.zeros((t, n), dtype=bool),
         execution_cost_bps_2d=np.full((t, n), 4.0, dtype=np.float64),
+        cluster_id_1d=np.array([3.0, 7.0], dtype=np.float32),
+        beta_vs_market_1d=np.array([1.1, 0.4], dtype=np.float32),
+        cluster_size_1d=np.array([2.0, 5.0], dtype=np.float32),
+        anchor_cluster_1d=np.array([1.0, 0.0], dtype=np.float32),
     )
 
 
@@ -69,6 +73,10 @@ def test_build_candidate_dataset_shapes_and_types() -> None:
     assert ds.y_gate.tolist() == [0, 1]
     assert ds.y_q10_bps.tolist() == [-10.0, -12.0]
     assert ds.y_mfe_bps.tolist() == [14.0, 1.0]
+    assert "universe_cluster_id" in ds.feature_names
+    assert "universe_beta_vs_market" in ds.feature_names
+    assert "universe_cluster_size" in ds.feature_names
+    assert "universe_anchor_cluster_member" in ds.feature_names
 
 
 def test_build_candidate_dataset_split_filter() -> None:
@@ -98,6 +106,7 @@ def test_build_candidate_dataset_split_filter() -> None:
         split_end=40,
     )
     assert ds.X.shape[0] == 0
+    assert ds.X.shape[1] == len(ds.feature_names)
 
 
 def test_build_candidate_dataset_falls_back_to_triple_barrier_label() -> None:
@@ -209,3 +218,39 @@ def test_build_candidate_dataset_keeps_feature_schema_stable_across_splits() -> 
     assert valid.feature_schema_version == "candidate_v2"
     assert "family=trend_ma" in train.feature_names
     assert "variant=trend_donchian:donchian_36" in train.feature_names
+
+
+def test_build_candidate_dataset_includes_universe_metadata_features() -> None:
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [26],
+            "raw_score": [0.5],
+            "score_z": [1.2],
+            "turnover_proxy": [0.1],
+            "triple_barrier_label": [1],
+            "profitable_after_hurdle_label": [1],
+            "edge_after_hurdle_bps": [12.0],
+            "mae_bps": [-6.0],
+            "mfe_bps": [18.0],
+            "ex_ante_cost_bps": [4.0],
+        }
+    )
+
+    ds = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(),
+        split_start=20,
+        split_end=40,
+    )
+
+    by_name = {name: idx for idx, name in enumerate(ds.feature_names)}
+    row = ds.X[0]
+    assert row[by_name["universe_cluster_id"]] == 3.0
+    assert row[by_name["universe_beta_vs_market"]] == 1.1
+    assert row[by_name["universe_cluster_size"]] == 2.0
+    assert row[by_name["universe_anchor_cluster_member"]] == 1.0

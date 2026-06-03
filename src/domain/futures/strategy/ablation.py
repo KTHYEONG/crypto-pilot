@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -214,7 +215,7 @@ def run_candidate_ablation(
         max_symbol_weight=cfg.max_symbol_weight,
     )
 
-    rows.append(_run_backtest_and_evaluate(raw_w, data_maps, symbols, tf, "rule_only_equal_size", cfg))
+    rows.append(_run_backtest_and_evaluate(raw_w, aligned, "rule_only_equal_size", cfg))
 
     # Variant 2: rule_only_fractional_kelly (Kelly Sizing but no ML)
     # create artificial mock edge output using constant score
@@ -231,7 +232,7 @@ def run_candidate_ablation(
         sigma_3d=None,
         cfg=cfg,
     )
-    rows.append(_run_backtest_and_evaluate(raw_kelly_w, data_maps, symbols, tf, "rule_only_fractional_kelly", cfg))
+    rows.append(_run_backtest_and_evaluate(raw_kelly_w, aligned, "rule_only_fractional_kelly", cfg))
 
     # Variant 3: rule_plus_ml_gate (Gate filtering only)
     # ML gate filters events, but sizes them using constant ex-ante edge dummy values
@@ -248,7 +249,7 @@ def run_candidate_ablation(
         cfg=cfg,
     )
     rows.append(_run_backtest_and_evaluate(
-        gate_only_w, data_maps, symbols, tf, "rule_plus_ml_gate", cfg
+        gate_only_w, aligned, "rule_plus_ml_gate", cfg
     ))
 
     # Variant 4: rule_plus_ml_gate_plus_edge (Gate + Edge, but uncapped/uncapped Kelly)
@@ -262,7 +263,7 @@ def run_candidate_ablation(
     )
 
     rows.append(_run_backtest_and_evaluate(
-        raw_kelly_edge_w, data_maps, symbols, tf, "rule_plus_ml_gate_plus_edge", cfg
+        raw_kelly_edge_w, aligned, "rule_plus_ml_gate_plus_edge", cfg
     ))
 
     # Variant 5: rule_plus_ml_gate_plus_edge_plus_portfolio_caps (Full sizing caps applied)
@@ -276,7 +277,7 @@ def run_candidate_ablation(
         cfg=cfg,
     )
     rows.append(_run_backtest_and_evaluate(
-        gate_plus_edge_plus_caps_w, data_maps, symbols, tf, "rule_plus_ml_gate_plus_edge_plus_portfolio_caps", cfg
+        gate_plus_edge_plus_caps_w, aligned, "rule_plus_ml_gate_plus_edge_plus_portfolio_caps", cfg
     ))
 
     # Variant 6: candidate_ml_full (OOS-only signal — bridges production forward-fill path)
@@ -300,53 +301,55 @@ def run_candidate_ablation(
         cfg=cfg,
     )
     rows.append(_run_backtest_and_evaluate(
-        full_ml_w, data_maps, symbols, tf, "candidate_ml_full", cfg
+        full_ml_w, aligned, "candidate_ml_full", cfg
     ))
 
-    # ── New OOS-only ablation rows (7-10): each isolates one added layer ──────
-    # Row 7: without promotion filter (shows promotion filter contribution)
-    rows.append(_run_oos_only_ablation_variant(
-        labeled=labeled_unfiltered,
-        aligned=aligned,
-        data_maps=data_maps,
-        symbols=symbols,
-        tf=tf,
-        cfg=cfg,
-        variant_name="candidate_ml_promotion_filter",
-    ))
+        # ── New OOS-only ablation rows (7-10): each isolates one added layer ──────
+    future_to_idx = {}
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        # Row 7: without promotion filter
+        future_to_idx[executor.submit(
+            _run_oos_only_ablation_variant,
+            labeled=labeled_unfiltered,
+            aligned=aligned,
+            cfg=cfg,
+            variant_name="candidate_ml_promotion_filter",
+        )] = 0
 
-    # Row 8: with hard selection instead of validation_quantile (shows validation_quantile value)
-    rows.append(_run_oos_only_ablation_variant(
-        labeled=labeled,
-        aligned=aligned,
-        data_maps=data_maps,
-        symbols=symbols,
-        tf=tf,
-        cfg=replace(cfg, selection_policy="hard"),
-        variant_name="candidate_ml_validation_quantile_selection",
-    ))
+        # Row 8: with hard selection
+        future_to_idx[executor.submit(
+            _run_oos_only_ablation_variant,
+            labeled=labeled,
+            aligned=aligned,
+            cfg=replace(cfg, selection_policy="hard"),
+            variant_name="candidate_ml_validation_quantile_selection",
+        )] = 1
 
-    # Row 9: without candidate identity features (shows identity feature contribution)
-    rows.append(_run_oos_only_ablation_variant(
-        labeled=labeled,
-        aligned=aligned,
-        data_maps=data_maps,
-        symbols=symbols,
-        tf=tf,
-        cfg=replace(cfg, candidate_identity_features_enabled=False),
-        variant_name="candidate_ml_identity_features",
-    ))
+        # Row 9: without identity features
+        future_to_idx[executor.submit(
+            _run_oos_only_ablation_variant,
+            labeled=labeled,
+            aligned=aligned,
+            cfg=replace(cfg, candidate_identity_features_enabled=False),
+            variant_name="candidate_ml_identity_features",
+        )] = 2
 
-    # Row 10: without market-state features (shows market-state feature contribution)
-    rows.append(_run_oos_only_ablation_variant(
-        labeled=labeled,
-        aligned=aligned,
-        data_maps=data_maps,
-        symbols=symbols,
-        tf=tf,
-        cfg=replace(cfg, market_state_features_enabled=False),
-        variant_name="candidate_ml_market_state_features",
-    ))
+        # Row 10: without market-state features
+        future_to_idx[executor.submit(
+            _run_oos_only_ablation_variant,
+            labeled=labeled,
+            aligned=aligned,
+            cfg=replace(cfg, market_state_features_enabled=False),
+            variant_name="candidate_ml_market_state_features",
+        )] = 3
+
+        ablation_results = [
+            (future_to_idx[future], future.result()) for future in as_completed(future_to_idx)
+        ]
+
+        ablation_results.sort(key=lambda x: x[0])
+        for _, result in ablation_results:
+            rows.append(result)
 
     # Convert results to DataFrame
     df_results = pd.DataFrame([
@@ -370,9 +373,6 @@ def _run_oos_only_ablation_variant(
     *,
     labeled: pd.DataFrame,
     aligned: AlignedMarketData,
-    data_maps: dict[str, dict[str, Any]],
-    symbols: tuple[str, ...],
-    tf: str,
     cfg: CandidateStrategyConfig,
     variant_name: str,
 ) -> AblationRow:
@@ -383,7 +383,7 @@ def _run_oos_only_ablation_variant(
 
     if labeled.empty:
         _logger.warning("[ABLATION][%s] empty labeled events; returning zero weights", variant_name)
-        return _run_backtest_and_evaluate(zero_w, data_maps, symbols, tf, variant_name, cfg)
+        return _run_backtest_and_evaluate(zero_w, aligned, variant_name, cfg)
 
     train_set = build_candidate_dataset(
         labeled_events=labeled, aligned=aligned, cfg=cfg, split_start=0, split_end=split_val
@@ -403,43 +403,31 @@ def _run_oos_only_ablation_variant(
     w = build_candidate_target_weights(
         selected_events=selected,
         close_2d=aligned.close_2d,
-        symbols=symbols,
+        symbols=aligned.symbols,
         beta_2d=None,
         sigma_3d=None,
         cfg=cfg,
     )
-    return _run_backtest_and_evaluate(w, data_maps, symbols, tf, variant_name, cfg)
+    return _run_backtest_and_evaluate(w, aligned, variant_name, cfg)
+
 
 
 def _run_backtest_and_evaluate(
     target_weights: np.ndarray,
-    data_maps: dict[str, dict[str, Any]],
-    symbols: tuple[str, ...],
-    tf: str,
+    aligned: AlignedMarketData,
     variant_name: str,
     cfg: CandidateStrategyConfig,
 ) -> AblationRow:
     """Helper to inject target_weights into data_maps and run backtest simulation."""
-    # Shallow copy data map structure for safe isolated execution
-    run_maps = {sym: dict(data_maps[sym]) for sym in symbols if sym in data_maps}
-    for col_idx, sym in enumerate(symbols):
-        if sym in run_maps and tf in run_maps[sym]:
-            df = run_maps[sym][tf].copy()
-            df["target_weight"] = target_weights[:, col_idx]
-            run_maps[sym][tf] = df
-
-    # Prepare AlignedMarketData from run_maps containing target_weight
-    run_aligned = align_data_maps(run_maps, list(symbols), tf)
-
     from src.domain.futures.strategy.rule_signals import _atr_2d
-    atr_2d = _atr_2d(run_aligned.high_2d, run_aligned.low_2d, run_aligned.close_2d, period=14)
+    atr_2d = _atr_2d(aligned.high_2d, aligned.low_2d, aligned.close_2d, period=14)
 
     aligned_data = {
-        "close": run_aligned.close_2d,
-        "high": run_aligned.high_2d,
-        "low": run_aligned.low_2d,
-        "open": run_aligned.open_2d,
-        "volume": run_aligned.volume_2d,
+        "close": aligned.close_2d,
+        "high": aligned.high_2d,
+        "low": aligned.low_2d,
+        "open": aligned.open_2d,
+        "volume": aligned.volume_2d,
         "atr": atr_2d,
         "target_weights": target_weights,
     }
@@ -447,7 +435,7 @@ def _run_backtest_and_evaluate(
     # Execute backtest engine
     trades, equity_curve, _, _ = FuturesBacktestEngine.run_multi(
         aligned_data=aligned_data,
-        symbol_names=list(symbols),
+        symbol_names=list(aligned.symbols),
         strategy_params={},
     )
 

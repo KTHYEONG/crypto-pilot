@@ -33,6 +33,10 @@ class AlignedMarketData:
     # Phase D: C1 inference panel 전용 마스크 (Stage5 timeline 기반). None이면 미사용.
     inference_active_mask: NDArray[np.bool_] | None = None
     inference_entry_warm_mask: NDArray[np.bool_] | None = None
+    cluster_id_1d: NDArray[np.float32] | None = None
+    beta_vs_market_1d: NDArray[np.float32] | None = None
+    cluster_size_1d: NDArray[np.float32] | None = None
+    anchor_cluster_1d: NDArray[np.float32] | None = None
     # Phase D/E: per-symbol 정적 메타데이터 (sample weighting용). {col: [N] array}
     symbol_meta: dict[str, NDArray[np.float32]] | None = None
 
@@ -73,8 +77,15 @@ def align_data_maps(
     # Phase D: inference 마스크 초기화 — 데이터에 컬럼 있을 때만 채움
     _inf_active: NDArray[np.bool_] | None = None
     _inf_warm: NDArray[np.bool_] | None = None
-    # Phase D/E: per-symbol 메타 컬럼 수집 (coverage_60d, cluster_id 등)
-    _meta_cols_to_read: tuple[str, ...] = ("coverage_60d", "last_60d_coverage", "cluster_id")
+    # Phase D/E: per-symbol 메타 컬럼 수집 (coverage, cluster, beta 등)
+    _meta_cols_to_read: tuple[str, ...] = (
+        "coverage_60d",
+        "last_60d_coverage",
+        "cluster_id",
+        "beta_vs_market",
+        "cluster_size",
+        "anchor_cluster_member",
+    )
     _sym_meta_lists: dict[str, list[float]] = {col: [] for col in _meta_cols_to_read}
     datetimes: NDArray[np.datetime64] | None = None
 
@@ -124,19 +135,12 @@ def align_data_maps(
             )
         if "kill_signal" in frame.columns:
             kill_mask[:, col] = frame["kill_signal"].iloc[start:end].to_numpy(dtype=bool)
-        # Phase D/E: per-symbol 정적 메타 (최신 row의 값 = 정적 추정치)
+        # Phase D/E: per-symbol 정적 메타 (PIT-safe: aligned window의 첫 유효값 사용)
         for _mc in _meta_cols_to_read:
             if _mc in frame.columns:
-                _last_val = float(
-                    pd.to_numeric(frame[_mc].iloc[start:end], errors="coerce")
-                    .dropna()
-                    .iloc[-1]
-                    if not pd.to_numeric(frame[_mc].iloc[start:end], errors="coerce")
-                    .dropna()
-                    .empty
-                    else float("nan")
-                )
-                _sym_meta_lists[_mc].append(_last_val)
+                _meta_series = pd.to_numeric(frame[_mc].iloc[start:end], errors="coerce").dropna()
+                _meta_value = float(_meta_series.iloc[0]) if not _meta_series.empty else float("nan")
+                _sym_meta_lists[_mc].append(_meta_value)
             else:
                 _sym_meta_lists[_mc].append(float("nan"))
         # Phase D: inference panel 마스크 (Stage5 timeline 기반)
@@ -160,6 +164,11 @@ def align_data_maps(
 
     if datetimes is None:
         raise ValueError("datetime alignment failed")
+    symbol_meta = {
+        col: np.array(vals, dtype=np.float32)
+        for col, vals in _sym_meta_lists.items()
+        if any(np.isfinite(v) for v in vals)
+    } or None
     return AlignedMarketData(
         datetimes=datetimes,
         symbols=valid_symbols,
@@ -179,9 +188,9 @@ def align_data_maps(
         kill_mask=kill_mask,
         inference_active_mask=_inf_active,
         inference_entry_warm_mask=_inf_warm,
-        symbol_meta={
-            col: np.array(vals, dtype=np.float32)
-            for col, vals in _sym_meta_lists.items()
-            if any(np.isfinite(v) for v in vals)
-        } or None,
+        cluster_id_1d=None if symbol_meta is None else symbol_meta.get("cluster_id"),
+        beta_vs_market_1d=None if symbol_meta is None else symbol_meta.get("beta_vs_market"),
+        cluster_size_1d=None if symbol_meta is None else symbol_meta.get("cluster_size"),
+        anchor_cluster_1d=None if symbol_meta is None else symbol_meta.get("anchor_cluster_member"),
+        symbol_meta=symbol_meta,
     )

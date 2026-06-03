@@ -6,9 +6,10 @@ import logging
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from src.core.settings import FUTURES_DATA_DIR, LOG_DIR
 
@@ -25,6 +26,7 @@ from .models import (
     ManifestRow,
     RejectCode,
     SymbolMeta,
+    UniverseRunManifest,
     UniverseSnapshot,
     apply_structure_stage,
     load_ledger_slice,
@@ -32,8 +34,17 @@ from .models import (
 from .selection import apply_selection_stage
 from .storage import (
     hash_manifest_rows,
+    load_snapshot_json,
     save_snapshot_json,
     save_snapshot_parquet,
+)
+from .store import (
+    DEFAULT_UNIVERSE_STORE_ROOT,
+    build_decision_frame,
+    compute_universe_run_id,
+    load_universe_store_run,
+    materialize_snapshot_from_store,
+    write_universe_store_run,
 )
 
 DEFAULT_SNAPSHOT_ROOT = LOG_DIR / "futures/universe/snapshots"
@@ -72,6 +83,13 @@ def _filter_report_path(*, tf: str, as_of: date, root: Path) -> Path:
     return root / f"filter_report_{tf}_{as_of.isoformat()}.parquet"
 
 
+def _existing_ledger_columns(*, ledger_path: Path) -> tuple[str, ...]:
+    if not ledger_path.exists():
+        return ()
+    parquet_file = cast(Any, pq.ParquetFile)(ledger_path)
+    return tuple(str(name) for name in parquet_file.schema.names)
+
+
 def _to_symbol_meta(frame: pd.DataFrame) -> tuple[SymbolMeta, ...]:
     metas: list[SymbolMeta] = []
     if frame.empty:
@@ -103,6 +121,8 @@ def _to_symbol_meta(frame: pd.DataFrame) -> tuple[SymbolMeta, ...]:
                 capacity_clip_usdt_list=tuple(
                     float(x) for x in row.get("capacity_clip_usdt_list", ())
                 ),
+                cluster_size=float(row.get("cluster_size", 1.0)),
+                anchor_cluster_member=float(row.get("anchor_cluster_member", 0.0)),
             )
         )
     return tuple(metas)
@@ -334,13 +354,21 @@ def _stage5_symbols_from_report(report: pd.DataFrame) -> tuple[str, ...]:
 
 
 def _save_snapshot(
+    manifest: UniverseRunManifest,
     snapshot: UniverseSnapshot,
     selected: pd.DataFrame,
+    decisions: pd.DataFrame,
     report: pd.DataFrame,
     *,
     root: Path,
 ) -> None:
     as_of_date = date.fromisoformat(snapshot.as_of)
+    write_universe_store_run(
+        manifest=manifest,
+        decisions=decisions,
+        report=report,
+        root=DEFAULT_UNIVERSE_STORE_ROOT,
+    )
     out_dir = _snapshot_dir(tf=snapshot.tf, as_of=as_of_date, root=root)
     flat_parquet, flat_json = _snapshot_paths(tf=snapshot.tf, as_of=as_of_date, root=root)
     flat_report = _filter_report_path(tf=snapshot.tf, as_of=as_of_date, root=root)
@@ -431,22 +459,38 @@ def build_universe(
         "funding_zscore",
         "risk_event_override",
     )
-    stage0 = load_ledger_slice(as_of=as_of_date, tf=tf, columns=columns, ledger_path=ledger_path)
+    ledger_columns = _existing_ledger_columns(ledger_path=ledger_path)
+    optional_oi_cols = tuple(
+        col
+        for col in ("oi_usdt_median", "sum_open_interest_value", "open_interest_usdt")
+        if col in ledger_columns
+    )
+    stage0 = load_ledger_slice(
+        as_of=as_of_date,
+        tf=tf,
+        columns=columns + optional_oi_cols,
+        ledger_path=ledger_path,
+    )
     if stage0.empty:
         empty = pd.DataFrame(columns=["symbol"])
         report = pd.DataFrame(columns=["symbol", "stage", "passed", "reason"])
-        snapshot = UniverseSnapshot(
+        generated_at_utc = datetime.now(tz=UTC).isoformat()
+        manifest = UniverseRunManifest(
             as_of=as_of_date.isoformat(),
             tf=tf,
             schema_version=SCHEMA_VERSION,
+            run_id=compute_universe_run_id(
+                as_of=as_of_date,
+                tf=tf,
+                config_hash=hash_config(config),
+                data_manifest_hash=manifest_hash,
+            ),
             config_hash=hash_config(config),
             data_manifest_hash=manifest_hash,
+            generated_at_utc=generated_at_utc,
+            ledger_confidence=config.ledger_confidence,
             basket_ref=config.stage6.basket_ref,
             basket_weights=config.stage6.basket_weights,
-            selected=(),
-            rejected={},
-            generated_at_utc=datetime.now(tz=UTC).isoformat(),
-            ledger_confidence=config.ledger_confidence,
             n_stage0=0,
             n_stage1_pass=0,
             n_stage2_pass=0,
@@ -455,8 +499,19 @@ def build_universe(
             n_stage5_pass=0,
             n_stage6_selected=0,
         )
-        _save_snapshot(snapshot, empty, report, root=snapshot_root)
-        return snapshot, empty, report
+        decisions = build_decision_frame(
+            manifest=manifest,
+            stage5_frame=empty,
+            stage6_frame=empty,
+            report=report,
+        )
+        snapshot, selected, report = materialize_snapshot_from_store(
+            manifest=manifest,
+            decisions=decisions,
+            report=report,
+        )
+        _save_snapshot(manifest, snapshot, selected, decisions, report, root=snapshot_root)
+        return snapshot, selected, report
 
     latest = (
         stage0.sort_values(["symbol", "date", "knowledge_date"])
@@ -482,21 +537,23 @@ def build_universe(
     )
     report = pd.concat([r1, r2, r3, r4, r5, r6], ignore_index=True)
 
-    stage5_passed_symbols: tuple[str, ...] = tuple(
-        sorted(s5["symbol"].dropna().astype(str).tolist())
-    )
-    snapshot = UniverseSnapshot(
+    generated_at_utc = datetime.now(tz=UTC).isoformat()
+    manifest = UniverseRunManifest(
         as_of=as_of_date.isoformat(),
         tf=tf,
         schema_version=SCHEMA_VERSION,
+        run_id=compute_universe_run_id(
+            as_of=as_of_date,
+            tf=tf,
+            config_hash=hash_config(config),
+            data_manifest_hash=manifest_hash,
+        ),
         config_hash=hash_config(config),
         data_manifest_hash=manifest_hash,
+        generated_at_utc=generated_at_utc,
+        ledger_confidence=config.ledger_confidence,
         basket_ref=config.stage6.basket_ref,
         basket_weights=config.stage6.basket_weights,
-        selected=_to_symbol_meta(s6),
-        training_panel=tuple(s5["symbol"].dropna().astype(str).tolist()),
-        live_inference_panel=stage5_passed_symbols,
-        rejected=_to_rejected(report),
         n_stage0=int(latest["symbol"].nunique()),
         n_stage1_pass=int(s1["symbol"].nunique()),
         n_stage2_pass=int(s2["symbol"].nunique()),
@@ -504,32 +561,18 @@ def build_universe(
         n_stage4_pass=int(s4["symbol"].nunique()),
         n_stage5_pass=int(s5["symbol"].nunique()),
         n_stage6_selected=int(s6["symbol"].nunique()),
-        generated_at_utc=datetime.now(tz=UTC).isoformat(),
-        ledger_confidence=config.ledger_confidence,
     )
-    score_column = "tradeable_score" if config.stage6_is_alpha_rank else "execution_pool_score"
-    selected_columns = [
-        "symbol",
-        score_column,
-        "tradeable_score",
-        "execution_pool_score",
-        "rank",
-        "role",
-        "hysteresis_state",
-        "adv_usdt_median",
-        "execution_cost_bps",
-        "funding_rate_8h",
-        "beta_vs_market",
-        "cluster_id",
-        "basis_annualized_mean",
-        "basis_vol",
-        "capacity_clip_usdt_list",
-    ]
-    selected_columns.extend(
-        [dwell_col for dwell_col in ("membership_days", "dwell_days") if dwell_col in s6.columns]
+    decisions = build_decision_frame(
+        manifest=manifest,
+        stage5_frame=s5,
+        stage6_frame=s6,
+        report=report,
     )
-    selected_columns = list(dict.fromkeys(selected_columns))
-    selected = s6[[column for column in selected_columns if column in s6.columns]].copy()
+    snapshot, selected, report = materialize_snapshot_from_store(
+        manifest=manifest,
+        decisions=decisions,
+        report=report,
+    )
 
     # [P1-3] 유니버스 충원율(fill-rate) 경보 게이트
     _n_selected = snapshot.n_stage6_selected
@@ -546,7 +589,7 @@ def build_universe(
             _n_selected, _k_in, _fill_rate * 100,
         )
 
-    _save_snapshot(snapshot, selected, report, root=snapshot_root)
+    _save_snapshot(manifest, snapshot, selected, decisions, report, root=snapshot_root)
     return snapshot, selected, report
 
 
@@ -560,119 +603,215 @@ def load_or_build_universe_snapshot(
     previous_selection: tuple[str, ...] | None = None,
 ) -> tuple[UniverseSnapshot, pd.DataFrame, pd.DataFrame]:
     """Load cached snapshot, otherwise build and persist it."""
-    loaded = load_universe_snapshot(as_of=as_of, tf=tf, snapshot_root=snapshot_root)
-    if loaded is not None:
-        as_of_date = _to_date(as_of)
-        if not loaded.empty and "adv_usdt_median" not in loaded.columns:
-            # Join from ledger to restore metrics for backwards compatibility
-            # Only query physical columns in load_ledger_slice
-            physical_cols = (
-                "adv_usdt_median",
-                "funding_rate_8h",
-                "taker_fee_bps",
-                "half_spread_bps",
-                "impact_bps",
-                "tick_cost_bps",
-            )
-            try:
-                ledger_slice = load_ledger_slice(
-                    as_of=as_of_date,
-                    tf=tf,
-                    columns=physical_cols,
-                    symbols=tuple(loaded["symbol"].tolist()),
-                    ledger_path=ledger_path,
-                )
-                if not ledger_slice.empty:
-                    latest_ledger = (
-                        ledger_slice.sort_values(["symbol", "date", "knowledge_date"])
-                        .groupby("symbol", as_index=False)
-                        .tail(1)
-                    ).copy()
-                    
-                    # Compute execution_cost_bps from physical ledger metrics
-                    latest_ledger["execution_cost_bps"] = (
-                        2.0 * latest_ledger["taker_fee_bps"].fillna(0.0)
-                        + 2.0 * latest_ledger["half_spread_bps"].fillna(0.0)
-                        + latest_ledger["impact_bps"].fillna(0.0)
-                        + latest_ledger["tick_cost_bps"].fillna(0.0)
+    as_of_date = _to_date(as_of)
+    config = _normalize_cfg(cfg)
+    expected_config_hash = hash_config(config)
+    expected_manifest_hash = _compute_manifest_hash(
+        as_of=as_of_date,
+        tf=tf,
+        manifest_path=DEFAULT_MANIFEST_PATH,
+    )
+    store_run = load_universe_store_run(
+        as_of=as_of_date,
+        tf=tf,
+        config_hash=expected_config_hash,
+        data_manifest_hash=expected_manifest_hash,
+        root=DEFAULT_UNIVERSE_STORE_ROOT,
+    )
+    if store_run is not None:
+        manifest, decisions, report = store_run
+        return materialize_snapshot_from_store(
+            manifest=manifest,
+            decisions=decisions,
+            report=report,
+        )
+
+    loaded_snapshot: UniverseSnapshot | None = None
+    _flat_parquet, flat_json = _snapshot_paths(tf=tf, as_of=as_of_date, root=snapshot_root)
+    legacy_json = _snapshot_dir(tf=tf, as_of=as_of_date, root=snapshot_root) / "snapshot.json"
+    snapshot_meta_path = flat_json if flat_json.exists() else legacy_json
+    if snapshot_meta_path.exists():
+        try:
+            loaded_snapshot = load_snapshot_json(snapshot_meta_path)
+        except Exception as exc:
+            _log.warning("Cached universe snapshot metadata load failed: %s", exc)
+
+    if loaded_snapshot is not None:
+        cache_mismatches: list[str] = []
+        if loaded_snapshot.as_of != as_of_date.isoformat():
+            cache_mismatches.append("as_of")
+        if loaded_snapshot.tf != tf:
+            cache_mismatches.append("tf")
+        if loaded_snapshot.schema_version != SCHEMA_VERSION:
+            cache_mismatches.append("schema")
+        if loaded_snapshot.config_hash != expected_config_hash:
+            cache_mismatches.append("config_hash")
+        if loaded_snapshot.data_manifest_hash != expected_manifest_hash:
+            cache_mismatches.append("manifest_hash")
+        if cache_mismatches:
+            _log.info("Cached universe snapshot stale (%s); rebuilding", ",".join(cache_mismatches))
+        else:
+            loaded = load_universe_snapshot(as_of=as_of, tf=tf, snapshot_root=snapshot_root)
+            if loaded is not None:
+                if not loaded.empty and "adv_usdt_median" not in loaded.columns:
+                    # Join from ledger to restore metrics for backwards compatibility
+                    # Only query physical columns in load_ledger_slice
+                    physical_cols = (
+                        "adv_usdt_median",
+                        "funding_rate_8h",
+                        "taker_fee_bps",
+                        "half_spread_bps",
+                        "impact_bps",
+                        "tick_cost_bps",
                     )
-                    
-                    missing_cols = [
-                        c
-                        for c in (*physical_cols, "execution_cost_bps")
-                        if c in latest_ledger.columns and c not in loaded.columns
-                    ]
-                    if missing_cols:
-                        loaded = loaded.merge(
-                            latest_ledger[["symbol", *missing_cols]],
-                            on="symbol",
-                            how="left",
+                    try:
+                        ledger_slice = load_ledger_slice(
+                            as_of=as_of_date,
+                            tf=tf,
+                            columns=physical_cols,
+                            symbols=tuple(loaded["symbol"].tolist()),
+                            ledger_path=ledger_path,
                         )
-            except Exception as e:
-                _log.warning("Backwards compatible ledger join failed: %s", e)
-            
-            # Safely backfill all virtual/derived columns to avoid KeyError or 0.0 anomalies
-            fallback_defaults = {
-                "adv_usdt_median": 0.0,
-                "execution_cost_bps": 0.0,
-                "funding_rate_8h": 0.0,
-                "beta_vs_market": 0.0,
-                "cluster_id": -1,
-                "basis_annualized_mean": None,
-                "basis_vol": None,
-            }
-            for col, default_val in fallback_defaults.items():
-                if col not in loaded.columns:
-                    if default_val is None:
-                        loaded[col] = None
-                    else:
-                        loaded[col] = default_val
-            
-            if "capacity_clip_usdt_list" not in loaded.columns:
-                loaded["capacity_clip_usdt_list"] = [() for _ in range(len(loaded))]
-        config = _normalize_cfg(cfg)
-        manifest_hash = _compute_manifest_hash(
-            as_of=as_of_date,
-            tf=tf,
-            manifest_path=DEFAULT_MANIFEST_PATH,
-        )
-        report_path = _filter_report_path(tf=tf, as_of=as_of_date, root=snapshot_root)
-        if not report_path.exists():
-            report_path = (
-                _snapshot_dir(tf=tf, as_of=as_of_date, root=snapshot_root) / "filter_report.parquet"
-            )
-        report = pd.read_parquet(report_path) if report_path.exists() else pd.DataFrame()
-        (
-            n_stage0,
-            n_stage1_pass,
-            n_stage2_pass,
-            n_stage3_pass,
-            n_stage4_pass,
-            n_stage5_pass,
-            n_stage6_selected,
-        ) = _stage_counts_from_report(report, selected=loaded)
-        snapshot = UniverseSnapshot(
-            as_of=as_of_date.isoformat(),
-            tf=tf,
-            schema_version=SCHEMA_VERSION,
-            config_hash=hash_config(config),
-            data_manifest_hash=manifest_hash,
-            basket_ref=config.stage6.basket_ref,
-            basket_weights=config.stage6.basket_weights,
-            selected=_to_symbol_meta(loaded),
-            rejected=_to_rejected(report),
-            ledger_confidence=config.ledger_confidence,
-            n_stage0=n_stage0,
-            n_stage1_pass=n_stage1_pass,
-            n_stage2_pass=n_stage2_pass,
-            n_stage3_pass=n_stage3_pass,
-            n_stage4_pass=n_stage4_pass,
-            n_stage5_pass=n_stage5_pass,
-            n_stage6_selected=n_stage6_selected,
-            generated_at_utc=datetime.now(tz=UTC).isoformat(),
-            live_inference_panel=_stage5_symbols_from_report(report),
-        )
-        return snapshot, loaded, report
+                        if not ledger_slice.empty:
+                            latest_ledger = (
+                                ledger_slice.sort_values(["symbol", "date", "knowledge_date"])
+                                .groupby("symbol", as_index=False)
+                                .tail(1)
+                            ).copy()
+
+                            # Compute execution_cost_bps from physical ledger metrics
+                            latest_ledger["execution_cost_bps"] = (
+                                2.0 * latest_ledger["taker_fee_bps"].fillna(0.0)
+                                + 2.0 * latest_ledger["half_spread_bps"].fillna(0.0)
+                                + latest_ledger["impact_bps"].fillna(0.0)
+                                + latest_ledger["tick_cost_bps"].fillna(0.0)
+                            )
+
+                            missing_cols = [
+                                c
+                                for c in (*physical_cols, "execution_cost_bps")
+                                if c in latest_ledger.columns and c not in loaded.columns
+                            ]
+                            if missing_cols:
+                                loaded = loaded.merge(
+                                    latest_ledger[["symbol", *missing_cols]],
+                                    on="symbol",
+                                    how="left",
+                                )
+                    except Exception as exc:
+                        _log.warning("Backwards compatible ledger join failed: %s", exc)
+
+                    # Safely backfill all virtual/derived columns to avoid KeyError or 0.0 anomalies
+                    fallback_defaults = {
+                        "adv_usdt_median": 0.0,
+                        "execution_cost_bps": 0.0,
+                        "funding_rate_8h": 0.0,
+                        "beta_vs_market": 0.0,
+                        "cluster_id": -1,
+                        "cluster_size": 1.0,
+                        "anchor_cluster_member": 0.0,
+                        "basis_annualized_mean": None,
+                        "basis_vol": None,
+                    }
+                    for col, default_val in fallback_defaults.items():
+                        if col not in loaded.columns:
+                            if default_val is None:
+                                loaded[col] = None
+                            else:
+                                loaded[col] = default_val
+
+                    if "capacity_clip_usdt_list" not in loaded.columns:
+                        loaded["capacity_clip_usdt_list"] = [() for _ in range(len(loaded))]
+
+                report_path = _filter_report_path(tf=tf, as_of=as_of_date, root=snapshot_root)
+                if not report_path.exists():
+                    report_path = (
+                        _snapshot_dir(tf=tf, as_of=as_of_date, root=snapshot_root)
+                        / "filter_report.parquet"
+                    )
+                report = pd.read_parquet(report_path) if report_path.exists() else pd.DataFrame()
+                selected_symbols = tuple(
+                    str(symbol).strip()
+                    for symbol in loaded["symbol"].astype(str).tolist()
+                    if str(symbol).strip()
+                )
+                selected_set = set(selected_symbols)
+                inference_panel = tuple(loaded_snapshot.inference_panel)
+                stage5_research_panel = (
+                    tuple(loaded_snapshot.stage5_research_panel)
+                    or _stage5_symbols_from_report(report)
+                )
+                training_panel = tuple(loaded_snapshot.training_panel)
+                live_inference_panel = tuple(loaded_snapshot.live_inference_panel)
+                has_required_metadata = {"cluster_size", "anchor_cluster_member"}.issubset(
+                    set(loaded.columns)
+                )
+                if not training_panel or set(training_panel) != selected_set:
+                    training_panel = selected_symbols
+                if not live_inference_panel or set(live_inference_panel) != selected_set:
+                    live_inference_panel = selected_symbols
+                if (
+                    has_required_metadata
+                    and loaded_snapshot.schema_version == SCHEMA_VERSION
+                    and loaded_snapshot.config_hash == expected_config_hash
+                    and loaded_snapshot.data_manifest_hash == expected_manifest_hash
+                    and (not inference_panel or set(inference_panel) == selected_set)
+                ):
+                    manifest = UniverseRunManifest(
+                        as_of=loaded_snapshot.as_of,
+                        tf=loaded_snapshot.tf,
+                        schema_version=loaded_snapshot.schema_version,
+                        run_id=compute_universe_run_id(
+                            as_of=loaded_snapshot.as_of,
+                            tf=loaded_snapshot.tf,
+                            config_hash=loaded_snapshot.config_hash,
+                            data_manifest_hash=loaded_snapshot.data_manifest_hash,
+                        ),
+                        config_hash=loaded_snapshot.config_hash,
+                        data_manifest_hash=loaded_snapshot.data_manifest_hash,
+                        generated_at_utc=loaded_snapshot.generated_at_utc,
+                        ledger_confidence=loaded_snapshot.ledger_confidence,
+                        basket_ref=loaded_snapshot.basket_ref,
+                        basket_weights=loaded_snapshot.basket_weights,
+                        n_stage0=loaded_snapshot.n_stage0,
+                        n_stage1_pass=loaded_snapshot.n_stage1_pass,
+                        n_stage2_pass=loaded_snapshot.n_stage2_pass,
+                        n_stage3_pass=loaded_snapshot.n_stage3_pass,
+                        n_stage4_pass=loaded_snapshot.n_stage4_pass,
+                        n_stage5_pass=loaded_snapshot.n_stage5_pass,
+                        n_stage6_selected=loaded_snapshot.n_stage6_selected,
+                    )
+                    stage5_frame = loaded.loc[
+                        loaded["symbol"].astype(str).isin(stage5_research_panel)
+                    ].copy()
+                    decisions = build_decision_frame(
+                        manifest=manifest,
+                        stage5_frame=stage5_frame,
+                        stage6_frame=loaded,
+                        report=report,
+                    )
+                    snapshot, selected, normalized_report = materialize_snapshot_from_store(
+                        manifest=manifest,
+                        decisions=decisions,
+                        report=report,
+                    )
+                    snapshot = replace(
+                        snapshot,
+                        inference_panel=inference_panel,
+                        historical_trading_panel=tuple(loaded_snapshot.historical_trading_panel),
+                        inference_panel_quarter_membership=dict(
+                            loaded_snapshot.inference_panel_quarter_membership
+                        ),
+                    )
+                    _save_snapshot(
+                        manifest,
+                        snapshot,
+                        selected,
+                        decisions,
+                        normalized_report,
+                        root=snapshot_root,
+                    )
+                    return snapshot, selected, normalized_report
     return build_universe(
         as_of=as_of,
         tf=tf,

@@ -141,6 +141,31 @@ class SymbolMeta:
     basis_annualized_mean: float | None
     basis_vol: float | None
     capacity_clip_usdt_list: tuple[float, ...]
+    cluster_size: float = 1.0
+    anchor_cluster_member: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class UniverseRunManifest:
+    """Persistent manifest for one deterministic universe build."""
+
+    as_of: str
+    tf: str
+    schema_version: int
+    run_id: str
+    config_hash: str
+    data_manifest_hash: str
+    generated_at_utc: str
+    ledger_confidence: str
+    basket_ref: tuple[str, ...]
+    basket_weights: tuple[float, ...]
+    n_stage0: int
+    n_stage1_pass: int
+    n_stage2_pass: int
+    n_stage3_pass: int
+    n_stage4_pass: int
+    n_stage5_pass: int
+    n_stage6_selected: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,19 +213,21 @@ class UniverseSnapshot:
     n_stage4_pass: int
     n_stage5_pass: int
     n_stage6_selected: int
-    # Stage5-passed 심볼 전체 (학습 전용)
+    # Current-quarter Stage6 selected symbols for candidate ML training.
     training_panel: tuple[str, ...] = field(default_factory=tuple)
-    # C1: Historical Stage5 union (분기별 Stage5 통과의 시계열 union)
+    # Historical quarterly Stage6 union for candidate ML loading.
     inference_panel: tuple[str, ...] = field(default_factory=tuple)
-    # C2: 현재 분기 Stage5 통과 심볼
+    # Current-quarter Stage6 selected symbols for candidate ML inference.
     live_inference_panel: tuple[str, ...] = field(default_factory=tuple)
-    # 보조: Historical Stage6 union (universe-fix.md 호환)
+    # Historical quarterly Stage6 union for trading membership.
     historical_trading_panel: tuple[str, ...] = field(default_factory=tuple)
-    # SSOT: 분기별 Stage5 통과 집합 (inference_active_mask 계산용)
+    # SSOT: quarterly Stage6 members for candidate ML membership masks.
     # dict key = quarter_start date (isoformat str로 직렬화), value = tuple of symbols (sorted)
     inference_panel_quarter_membership: dict[date, tuple[str, ...]] = field(
         default_factory=dict
     )
+    # Current-quarter Stage5 survivors retained for audit and research only.
+    stage5_research_panel: tuple[str, ...] = field(default_factory=tuple)
 
 
 def _to_date(value: str | date) -> date:
