@@ -55,10 +55,11 @@ class Stage2Config:
 class Stage3Config:
     """Liquidity and execution feasibility gates."""
 
-    min_adv_usdt_median: float = 25_000_000.0
-    # 실측 분포 기반: p99 ~= 1.084e-9, 임계값 = p99 x 1.5 ~= 1.627e-9
-    max_amihud_30d: float = 1.63e-9
-    max_clip_to_adv: float = 0.005
+    min_adv_usdt_median: float = 50_000_000.0
+    max_amihud_30d: float = 1.00e-9
+    max_clip_to_adv: float = 0.0025
+    enable_oi_adv_crowding_gate: bool = True
+    max_oi_to_adv: float = 12.0
     screening_tier: str = "mid"
     screening_clip_usdt_by_tier: dict[str, float] = field(
         default_factory=lambda: {
@@ -76,7 +77,7 @@ class Stage3Config:
 class Stage4Config:
     """Execution-cost model gates."""
 
-    max_execution_cost_bps: float = 50.0
+    max_execution_cost_bps: float = 35.0
     default_taker_fee_bps: float = 5.0
     default_half_spread_bps: float = 1.0
     spread_source_switch_date: str = "2020-01-01"
@@ -146,7 +147,7 @@ class UniverseConfig:
     schema_version: int = 1
     timeframe: str = "4h"
     ledger_confidence: str = "reconstructed"
-    strategy_pool_mode: str = "stage5_all"
+    strategy_pool_mode: str = "stage6_selected"
     stage6_is_alpha_rank: bool = False
     stage2: Stage2Config = field(default_factory=Stage2Config)
     stage3: Stage3Config = field(default_factory=Stage3Config)

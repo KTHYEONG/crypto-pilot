@@ -78,19 +78,28 @@ def inject_cs_momentum_ranks(
     rets_series: dict[str, pd.Series] = {}
     for sym in symbols:
         df = data_maps.get(sym, {}).get(tf)
-        if df is not None and not df.empty:
-            rets_series[sym] = df["close"]
+        if df is not None and not df.empty and "datetime" in df.columns:
+            # [Fix] Use datetime as index to ensure correct cross-sectional alignment
+            ser = df.set_index("datetime")["close"]
+            rets_series[sym] = ser
 
     if len(rets_series) < 2:
         return
 
     for lb in lookbacks:
+        # pd.DataFrame(rets_series) will now correctly align by datetime index
         all_rets = {s: r.pct_change(periods=lb) for s, r in rets_series.items()}
         ranks_df = pd.DataFrame(all_rets).rank(axis=1, pct=True)
         for sym in rets_series:
             if sym in ranks_df.columns:
                 col_name = f"cs_mom_rank_{lb}"
-                data_maps[sym][tf][col_name] = ranks_df[sym].astype(np.float64)
+                # Map back to original dataframe using datetime alignment
+                target_df = data_maps[sym][tf]
+                ranks_ser = ranks_df[sym]
+                # Reindex to match target_df datetime and convert to numpy for fast assignment
+                data_maps[sym][tf][col_name] = (
+                    ranks_ser.reindex(target_df["datetime"]).to_numpy(dtype=np.float64)
+                )
 
 
 def _array_stats(name: str, arr: Any) -> str:

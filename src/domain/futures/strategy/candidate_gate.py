@@ -85,15 +85,18 @@ _logger = logging.getLogger(__name__)
 
 def predict_candidate_gate(
     *,
-    model: CandidateGateModel,
+    model: CandidateGateModel | None,
     dataset: CandidateDataset,
 ) -> NDArray[np.float64]:
     """Return calibrated pass probability for candidate events."""
+    if model is None or dataset.X.shape[0] == 0:
+        return np.zeros(dataset.X.shape[0], dtype=np.float64)
+
     predictor = model.calibrator if model.calibrator is not None else model.model
     probs = cast(NDArray[np.float64], predictor.predict_proba(dataset.X)[:, 1])
     clipped = np.clip(probs.astype(np.float64, copy=False), 0.0, 1.0)
 
-    _logger.info(
+    _logger.debug(
         "[DIAG][GATE] n=%d mean_p=%.4f median_p=%.4f max_p=%.4f "
         "pct_ge55=%.3f pct_ge50=%.3f pct_ge45=%.3f calibrated=%s",
         len(clipped),

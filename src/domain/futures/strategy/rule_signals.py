@@ -41,7 +41,7 @@ def filter_rule_signal_panels(
             continue
         filtered.append(panel)
 
-    _logger.info(
+    _logger.debug(
         "[DIAG][RULE_PANEL_FILTER] before=%d after=%d families=%s variants=%s",
         before,
         len(filtered),

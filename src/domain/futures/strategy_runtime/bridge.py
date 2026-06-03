@@ -28,6 +28,7 @@ def run_candidate_strategy_for_universe(
     *,
     strategy_cfg: StrategyConfig | None = None,
     preloaded_data_maps: dict[str, dict[str, Any]] | None = None,
+    silent: bool = False,
 ) -> CandidatePipelineOutput:
     """Run candidate strategy pipeline and return candidate output."""
     if strategy_cfg is None or preloaded_data_maps is None:
@@ -87,6 +88,7 @@ def run_candidate_strategy_for_universe(
         aligned=aligned,
         cfg=strategy_cfg.candidate,
         min_obs=max(strategy_cfg.candidate.min_candidate_obs, 100),
+        silent=silent,
     )
 
     if strategy_cfg.candidate.promotion_filter_enabled:
@@ -96,7 +98,7 @@ def run_candidate_strategy_for_universe(
             flip_variants=diag.recommended_flip_variants,
         )
         if labeled.empty:
-            _logger.warning(
+            _logger.debug(
                 "[BRIDGE] all candidate variants blocked by promotion filter; producing zero weights"
             )
             alpha_panel = build_candidate_alpha_panel(
@@ -124,8 +126,13 @@ def run_candidate_strategy_for_universe(
         labeled_events=labeled, aligned=aligned, cfg=strategy_cfg.candidate, split_start=split_val, split_end=n_bars
     )
 
-    gate_model = fit_candidate_gate(train=train_set, valid=valid_set, cfg=strategy_cfg.candidate)
-    edge_models = fit_candidate_edge_models(train=train_set, valid=valid_set, cfg=strategy_cfg.candidate)
+    gate_model = None
+    if train_set.X.shape[0] >= 2:
+        gate_model = fit_candidate_gate(train=train_set, valid=valid_set, cfg=strategy_cfg.candidate)
+    
+    edge_models = None
+    if train_set.X.shape[0] >= 2:
+        edge_models = fit_candidate_edge_models(train=train_set, valid=valid_set, cfg=strategy_cfg.candidate)
 
     # OOS-only predict: IS 구간(0~80%)은 target_weight=0으로 유지하여 look-ahead 누수 방지
     p_pass = predict_candidate_gate(model=gate_model, dataset=valid_set)
@@ -150,7 +157,7 @@ def run_candidate_strategy_for_universe(
 
     if strategy_cfg.candidate.exit_policy_mode == "label_only":
         # label_only: suppress per-event TP/SL; engine uses global ATR_MULT only
-        _logger.info("[BRIDGE] exit_policy_mode=label_only; zeroing per-event TP/SL columns")
+        _logger.debug("[BRIDGE] exit_policy_mode=label_only; zeroing per-event TP/SL columns")
         alpha_panel = alpha_panel.copy()
         alpha_panel["candidate_stop_atr_mult"] = 0.0
         alpha_panel["candidate_take_profit_atr_mult"] = 0.0

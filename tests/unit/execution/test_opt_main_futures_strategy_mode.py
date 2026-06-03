@@ -3,9 +3,12 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from src.application.futures.optimization.config import build_run_config_from_args
+from src.domain.futures.strategy_runtime.bridge import CandidatePipelineOutput
+from src.domain.futures.universe import SymbolMeta, UniverseSnapshot
 from src.execution import opt_main_futures
 
 
@@ -36,6 +39,44 @@ def test_strategy_mode_pipeline_orchestration_order(
         oos_data_maps={"BTCUSDT": {}},
         valid_symbols=["BTCUSDT"],
     )
+    snapshot = UniverseSnapshot(
+        as_of="2026-01-01",
+        tf="4h",
+        schema_version=1,
+        config_hash="cfg-hash",
+        data_manifest_hash="manifest-hash",
+        basket_ref=(),
+        basket_weights=(),
+        selected=(
+            SymbolMeta(
+                symbol="BTCUSDT",
+                role="anchor",
+                adv_usdt=1.0,
+                execution_cost_bps=1.0,
+                funding_carry_8h=0.0,
+                beta_vs_market=1.2,
+                cluster_id=7,
+                tradeable_rank=1,
+                basis_annualized_mean=None,
+                basis_vol=None,
+                capacity_clip_usdt_list=(),
+                cluster_size=5.0,
+                anchor_cluster_member=1.0,
+            ),
+        ),
+        rejected={},
+        generated_at_utc="2026-01-01T00:00:00+00:00",
+        ledger_confidence="high",
+        n_stage0=1,
+        n_stage1_pass=1,
+        n_stage2_pass=1,
+        n_stage3_pass=1,
+        n_stage4_pass=1,
+        n_stage5_pass=1,
+        n_stage6_selected=1,
+        training_panel=("BTCUSDT",),
+        live_inference_panel=("BTCUSDT",),
+    )
 
     def fake_window(reference_date: str | None) -> opt_main_futures.QuarterlyWindow:
         _ = reference_date
@@ -50,13 +91,13 @@ def test_strategy_mode_pipeline_orchestration_order(
         dict[object, frozenset[str]],
         tuple[str, ...],
         tuple[str, ...],
-        tuple[str, ...],
+        UniverseSnapshot,
         dict[object, frozenset[str]],
     ]:
         _ = rc
         _ = win
         called.append("universe")
-        return ["BTCUSDT"], {}, (), (), ("BTCUSDT",), {}
+        return ["BTCUSDT"], {}, (), (), snapshot, {}
 
     def fake_data(
         rc: object,
@@ -84,6 +125,7 @@ def test_strategy_mode_pipeline_orchestration_order(
         inference_panel: tuple[str, ...] = (),
         live_inference_panel: tuple[str, ...] = (),
         trading_symbols: tuple[str, ...] = (),
+        universe_snapshot: object | None = None,
     ) -> None:
         _ = rc
         _ = win
@@ -91,6 +133,7 @@ def test_strategy_mode_pipeline_orchestration_order(
         _ = inference_panel
         _ = live_inference_panel
         _ = trading_symbols
+        _ = universe_snapshot
         called.append("strategy")
 
     def fake_optimization(
@@ -164,10 +207,36 @@ def test_alpha_mode_skips_optimization_stage(
     monkeypatch.setattr(
         opt_main_futures,
         "_run_universe_stage",
-        lambda *_: (["BTCUSDT"], {}, (), (), ("BTCUSDT",), {}),
+        lambda *_: (
+            ["BTCUSDT"],
+            {},
+            (),
+            (),
+            UniverseSnapshot(
+                as_of="2026-01-01",
+                tf="4h",
+                schema_version=1,
+                config_hash="cfg-hash",
+                data_manifest_hash="manifest-hash",
+                basket_ref=(),
+                basket_weights=(),
+                selected=(),
+                rejected={},
+                generated_at_utc="2026-01-01T00:00:00+00:00",
+                ledger_confidence="high",
+                n_stage0=0,
+                n_stage1_pass=0,
+                n_stage2_pass=0,
+                n_stage3_pass=0,
+                n_stage4_pass=0,
+                n_stage5_pass=0,
+                n_stage6_selected=0,
+            ),
+            {},
+        ),
     )
     monkeypatch.setattr(opt_main_futures, "_run_data_stage", lambda *_: data_stage)
-    monkeypatch.setattr(opt_main_futures, "_run_strategy_stage", lambda *_: None)
+    monkeypatch.setattr(opt_main_futures, "_run_strategy_stage", lambda *_args, **_kwargs: None)
 
     def fail_if_called(*args: object, **kwargs: object) -> opt_main_futures.RunnerResult:
         raise AssertionError("optimization stage should not be called in alpha mode")
@@ -176,6 +245,114 @@ def test_alpha_mode_skips_optimization_stage(
     result = opt_main_futures.run_pipeline(run_config)
     assert result.exit_code == 0
     assert result.reason == "candidate_evaluation_done"
+
+
+def test_strategy_stage_injects_universe_metadata_before_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_config = build_run_config_from_args(
+        {
+            "phase": "alpha",
+            "timeframe": "4h",
+            "trials": 1,
+            "sync": "full",
+        }
+    )
+    window = opt_main_futures.QuarterlyWindow(
+        fetch_start="2025-01-01",
+        is_start="2025-04-01",
+        oos_start="2026-01-01",
+        end_date="2026-04-01",
+        fetch_start_date=datetime.strptime("2025-01-01", "%Y-%m-%d").date(),
+        is_start_date=datetime.strptime("2025-04-01", "%Y-%m-%d").date(),
+        oos_start_date=datetime.strptime("2026-01-01", "%Y-%m-%d").date(),
+        end_date_value=datetime.strptime("2026-04-01", "%Y-%m-%d").date(),
+    )
+    frame = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-01-01", periods=4, freq="4h"),
+            "open": [100.0, 101.0, 102.0, 103.0],
+            "high": [101.0, 102.0, 103.0, 104.0],
+            "low": [99.0, 100.0, 101.0, 102.0],
+            "close": [100.5, 101.5, 102.5, 103.5],
+            "volume": [1000.0, 1000.0, 1000.0, 1000.0],
+        }
+    )
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps={"BTCUSDT": {"4h": frame.copy()}},
+        oos_data_maps={"BTCUSDT": {"4h": frame.copy()}},
+        valid_symbols=["BTCUSDT"],
+    )
+    snapshot = UniverseSnapshot(
+        as_of="2026-01-01",
+        tf="4h",
+        schema_version=1,
+        config_hash="cfg-hash",
+        data_manifest_hash="manifest-hash",
+        basket_ref=(),
+        basket_weights=(),
+        selected=(
+            SymbolMeta(
+                symbol="BTCUSDT",
+                role="anchor",
+                adv_usdt=1.0,
+                execution_cost_bps=1.0,
+                funding_carry_8h=0.0,
+                beta_vs_market=1.25,
+                cluster_id=7,
+                tradeable_rank=1,
+                basis_annualized_mean=None,
+                basis_vol=None,
+                capacity_clip_usdt_list=(),
+                cluster_size=6.0,
+                anchor_cluster_member=1.0,
+            ),
+        ),
+        rejected={},
+        generated_at_utc="2026-01-01T00:00:00+00:00",
+        ledger_confidence="high",
+        n_stage0=1,
+        n_stage1_pass=1,
+        n_stage2_pass=1,
+        n_stage3_pass=1,
+        n_stage4_pass=1,
+        n_stage5_pass=1,
+        n_stage6_selected=1,
+        training_panel=("BTCUSDT",),
+        live_inference_panel=("BTCUSDT",),
+    )
+    injected: dict[str, float] = {}
+
+    def fake_bridge(*, preloaded_data_maps: dict[str, dict[str, object]], **kwargs: object) -> CandidatePipelineOutput:
+        _ = kwargs
+        frame_out = preloaded_data_maps["BTCUSDT"]["4h"]
+        assert isinstance(frame_out, pd.DataFrame)
+        injected["cluster_id"] = float(frame_out["cluster_id"].iloc[0])
+        injected["beta_vs_market"] = float(frame_out["beta_vs_market"].iloc[0])
+        injected["cluster_size"] = float(frame_out["cluster_size"].iloc[0])
+        injected["anchor_cluster_member"] = float(frame_out["anchor_cluster_member"].iloc[0])
+        return CandidatePipelineOutput()
+
+    monkeypatch.setattr(opt_main_futures, "run_active_strategy_output_bridge", fake_bridge)
+    monkeypatch.setattr(opt_main_futures, "merge_candidate_output_into_is_and_oos", lambda *_: None)
+    monkeypatch.setattr(opt_main_futures, "_run_candidate_evaluation_report", lambda *_: None)
+
+    opt_main_futures._run_strategy_stage(
+        run_config,
+        window,
+        data_stage,
+        inference_panel=("BTCUSDT",),
+        live_inference_panel=("BTCUSDT",),
+        trading_symbols=("BTCUSDT",),
+        universe_snapshot=snapshot,
+    )
+
+    assert injected == {
+        "cluster_id": 7.0,
+        "beta_vs_market": 1.25,
+        "cluster_size": 6.0,
+        "anchor_cluster_member": 1.0,
+    }
 
 
 def test_run_from_cli_when_pipeline_returns_nonzero_propagates_exit_code(
@@ -255,6 +432,27 @@ def test_resolve_data_collection_symbols_uses_inference_panel() -> None:
     )
     for sym in ("BTCUSDT", "ETHUSDT", "SOLUSDT"):
         assert sym in out
+
+
+def test_resolve_data_collection_symbols_uses_live_panel_when_inference_panel_is_empty() -> None:
+    run_config = build_run_config_from_args(
+        {
+            "phase": "strategy",
+            "timeframe": "4h",
+            "trials": 1,
+            "sync": "full",
+        }
+    )
+    out = opt_main_futures._resolve_data_collection_symbols(
+        run_config=run_config,
+        discovered_symbols=["AAAUSDT"],
+        inference_panel=(),
+        live_inference_panel=("BTCUSDT", "ETHUSDT"),
+    )
+
+    assert "BTCUSDT" in out
+    assert "ETHUSDT" in out
+    assert "AAAUSDT" not in out
 
 
 def test_ensure_universe_ledger_sync_always_passes_none_symbols(

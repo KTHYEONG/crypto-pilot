@@ -145,22 +145,21 @@ def discover_universe_timeline(
         current_set = frozenset(symbols)
         timeline_by_quarter[current_dt] = current_set
         all_symbols.update(current_set)
-        # Stage5 inference panel 수집
-        quarter_stage5 = frozenset(snapshot.live_inference_panel)
-        inference_panel_quarter_membership[current_dt] = quarter_stage5
-        inference_symbols_set.update(quarter_stage5)
+        ml_panel = current_set
+        inference_panel_quarter_membership[current_dt] = ml_panel
+        inference_symbols_set.update(ml_panel)
         prev_set = set(previous_selection or ())
         new_symbols = sorted(current_set - prev_set)
         dropped_symbols = sorted(prev_set - set(current_set))
         retained_symbols = sorted(prev_set & set(current_set))
         _logger.debug(
-            ".. UNIVERSE_T: quarter=%s sel=%d new=%d drop=%d ret=%d stg5=%d",
+            ".. UNIVERSE_T: quarter=%s sel=%d new=%d drop=%d ret=%d ml=%d",
             current_dt.isoformat(),
             len(current_set),
             len(new_symbols),
             len(dropped_symbols),
             len(retained_symbols),
-            len(quarter_stage5),
+            len(ml_panel),
         )
         previous_selection = tuple(sorted(current_set))
         if current_dt == oos_start:
@@ -192,9 +191,9 @@ def discover_universe_timeline(
         )
         previous_symbols = quarter_symbols
 
-    # Stage5 inference timeline 빌드 (Stage6 timeline과 동일 구조)
+    # Candidate ML inference timeline uses Stage6 membership.
     inference_windows: list[UniverseMembershipWindow] = []
-    prev_stage5: frozenset[str] = frozenset()
+    prev_ml_panel: frozenset[str] = frozenset()
     for idx, (q_start, snap_q, _) in enumerate(snapshots_by_quarter):
         members = inference_panel_quarter_membership.get(q_start, frozenset())
         next_q = (
@@ -208,11 +207,11 @@ def discover_universe_timeline(
                 effective_to=next_q,
                 snapshot_as_of=snap_q.as_of,
                 active_symbols=tuple(sorted(members)),
-                entry_symbols=tuple(sorted(members - prev_stage5)),
-                exit_symbols=tuple(sorted(prev_stage5 - members)),
+                entry_symbols=tuple(sorted(members - prev_ml_panel)),
+                exit_symbols=tuple(sorted(prev_ml_panel - members)),
             )
         )
-        prev_stage5 = members
+        prev_ml_panel = members
 
     inference_timeline_obj = UniverseMembershipTimeline(
         tf=tf, windows=tuple(inference_windows)
@@ -372,7 +371,7 @@ def validate_universe_quality(
             dropout_pass = dropout_rate <= 0.10
 
     quality_pass = median_cost <= 50.0 and median_adv >= 25_000_000.0 and dropout_pass
-    _logger.info(
+    _logger.debug(
         ".. UNIVERSE_Q: med_cost=%.1fbps med_adv=%.1fm drop_rate=%.2f pass=%s",
         median_cost,
         median_adv / 1_000_000,

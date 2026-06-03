@@ -189,8 +189,6 @@ class CandidateStrategyConfig:
             raise ValueError("diagnostic_top_k must be >= 1")
         if self.min_variant_oos_obs < 1:
             raise ValueError("min_variant_oos_obs must be >= 1")
-        if self.min_variant_oos_edge_bps < 0.0:
-            raise ValueError("min_variant_oos_edge_bps must be non-negative")
         if not (0.0 <= self.min_variant_oos_hit_rate <= 1.0):
             raise ValueError("min_variant_oos_hit_rate must satisfy 0 <= value <= 1")
         if self.min_variant_oos_payoff_ratio < 0.0:

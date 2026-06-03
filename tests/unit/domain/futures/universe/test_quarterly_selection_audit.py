@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import pandas as pd
+import pytest
 
 from src.domain.futures.optimization.opt_config import get_quarterly_window
 from src.domain.futures.universe import (
     Stage6Config,
     UniverseConfig,
     build_universe,
+    hash_config,
     load_universe_snapshot,
 )
 from src.domain.futures.universe.models import RejectCode
@@ -147,9 +150,18 @@ def _write_ledger(path: Path) -> None:
     pd.DataFrame(rows).to_parquet(path, index=False)
 
 
-def test_quarterly_universe_selection_audit(tmp_path: Path) -> None:
+def test_quarterly_universe_selection_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.domain.futures.universe import pipeline as universe_pipeline
+    from src.domain.futures.universe import store as universe_store
+
     ledger_path = tmp_path / "universe_ledger.parquet"
     snapshot_root = tmp_path / "results" / "universe"
+    store_root = tmp_path / "results" / "store"
+    monkeypatch.setattr(universe_pipeline, "DEFAULT_UNIVERSE_STORE_ROOT", store_root)
+    monkeypatch.setattr(universe_store, "DEFAULT_UNIVERSE_STORE_ROOT", store_root)
     _write_ledger(ledger_path)
 
     cfg = UniverseConfig(
@@ -200,8 +212,9 @@ def test_quarterly_universe_selection_audit(tmp_path: Path) -> None:
 
         ranked_out = expectation["ranked_out"]
         rejected = snapshot.rejected[ranked_out]
-        assert rejected.stage6_reason == RejectCode.RANKED_OUT
-        assert rejected.audit_trail[-1].startswith("stage6_selection:FAIL:not_selected")
+        assert rejected.stage3_reason == RejectCode.LOW_LIQUIDITY
+        assert rejected.stage6_reason is None
+        assert rejected.audit_trail[-1].startswith("stage3_liquidity:FAIL:adv_too_low")
         rejected_symbols = set(report.loc[~report["passed"].astype(bool), "symbol"].astype(str))
         assert ranked_out in rejected_symbols
         assert (
@@ -213,3 +226,82 @@ def test_quarterly_universe_selection_audit(tmp_path: Path) -> None:
         "2025-04-01": ("BTC/USDT", "XRP/USDT"),
         "2025-07-01": ("BTC/USDT", "ETH/USDT"),
     }  # is_end keys: oos_start from OOS=6M window
+
+
+def test_load_or_build_universe_snapshot_rebuilds_on_config_hash_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.domain.futures.universe import pipeline as universe_pipeline
+    from src.domain.futures.universe import store as universe_store
+
+    ledger_path = tmp_path / "universe_ledger.parquet"
+    snapshot_root = tmp_path / "results" / "universe"
+    store_root = tmp_path / "results" / "store"
+    monkeypatch.setattr(universe_pipeline, "DEFAULT_UNIVERSE_STORE_ROOT", store_root)
+    monkeypatch.setattr(universe_store, "DEFAULT_UNIVERSE_STORE_ROOT", store_root)
+    _write_ledger(ledger_path)
+
+    base_cfg = UniverseConfig(
+        stage6=Stage6Config(
+            k_in=2,
+            k_out=2,
+            anchor_symbols=("BTC/USDT",),
+            basket_ref=("BTC/USDT", "ETH/USDT", "XRP/USDT"),
+            basket_weights=(0.5, 0.3, 0.2),
+        )
+    )
+    build_universe(
+        as_of="2025-01-01",
+        tf="4h",
+        cfg=base_cfg,
+        ledger_path=ledger_path,
+        snapshot_root=snapshot_root,
+    )
+
+    rebuild_cfg = UniverseConfig(
+        stage6=Stage6Config(
+            k_in=3,
+            k_out=2,
+            anchor_symbols=("BTC/USDT",),
+            basket_ref=("BTC/USDT", "ETH/USDT", "XRP/USDT"),
+            basket_weights=(0.5, 0.3, 0.2),
+        )
+    )
+
+    called: list[bool] = []
+    original_build_universe = universe_pipeline.build_universe
+
+    def wrapped_build_universe(
+        *,
+        as_of: str | date,
+        tf: str,
+        cfg: dict[str, Any] | UniverseConfig | None = None,
+        ledger_path: Path = ledger_path,
+        snapshot_root: Path = snapshot_root,
+        previous_selection: tuple[str, ...] | None = None,
+    ) -> tuple[object, object, object]:
+        called.append(True)
+        return original_build_universe(
+            as_of=as_of,
+            tf=tf,
+            cfg=cfg,
+            ledger_path=ledger_path,
+            snapshot_root=snapshot_root,
+            previous_selection=previous_selection,
+        )
+
+    monkeypatch.setattr(universe_pipeline, "build_universe", wrapped_build_universe)
+
+    snapshot, selected_frame, report = universe_pipeline.load_or_build_universe_snapshot(
+        as_of="2025-01-01",
+        tf="4h",
+        cfg=rebuild_cfg,
+        ledger_path=ledger_path,
+        snapshot_root=snapshot_root,
+    )
+
+    assert called == [True]
+    assert snapshot.config_hash == hash_config(rebuild_cfg)
+    assert not selected_frame.empty
+    assert not report.empty
