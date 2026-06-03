@@ -6,11 +6,14 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from src.domain.futures.universe.models import SymbolMeta, UniverseSnapshot
 from src.domain.futures.universe.storage import (
     SymbolSyncProfile,
     _requested_sync_caches_missing,
     _resolve_effective_sync_window,
     run_historical_sync,
+    snapshot_from_payload,
+    snapshot_to_payload,
     sync_single_symbol_data,
 )
 
@@ -127,17 +130,17 @@ def test_run_historical_sync_when_caches_missing_uses_requested_start_date(
         lambda *_args, **_kwargs: df_ledger,
     )
 
-    captured: list[tuple] = []
+    captured: list[tuple[object, ...]] = []
 
-    def _fake_pool(*_args: object, **_kwargs: object):
+    def _fake_pool(*_args: object, **_kwargs: object) -> object:
         class _Pool:
-            def __enter__(self):
+            def __enter__(self) -> _Pool:
                 return self
 
             def __exit__(self, *_exc: object) -> None:
                 return None
 
-            def map(self, _worker_fn, tasks):
+            def map(self, _worker_fn: object, tasks: list[tuple[object, ...]]) -> list[tuple[list[object], int]]:
                 captured.extend(tasks)
                 return [([], 0) for _ in tasks]
 
@@ -154,3 +157,54 @@ def test_run_historical_sync_when_caches_missing_uses_requested_start_date(
     )
     assert captured
     assert captured[0][1] == date(2022, 10, 1)
+
+
+def test_snapshot_payload_roundtrip_preserves_stage5_research_panel() -> None:
+    snapshot = UniverseSnapshot(
+        as_of="2025-01-01",
+        tf="4h",
+        schema_version=1,
+        config_hash="cfg",
+        data_manifest_hash="manifest",
+        basket_ref=(),
+        basket_weights=(),
+        selected=(
+            SymbolMeta(
+                symbol="BTCUSDT",
+                role="anchor",
+                adv_usdt=1.0,
+                execution_cost_bps=2.0,
+                funding_carry_8h=0.0,
+                beta_vs_market=1.1,
+                cluster_id=3,
+                tradeable_rank=1,
+                basis_annualized_mean=None,
+                basis_vol=None,
+                capacity_clip_usdt_list=(10.0,),
+                cluster_size=4.0,
+                anchor_cluster_member=1.0,
+            ),
+        ),
+        rejected={},
+        generated_at_utc="2025-01-01T00:00:00Z",
+        ledger_confidence="high",
+        n_stage0=0,
+        n_stage1_pass=0,
+        n_stage2_pass=0,
+        n_stage3_pass=0,
+        n_stage4_pass=0,
+        n_stage5_pass=2,
+        n_stage6_selected=1,
+        training_panel=("BTCUSDT",),
+        live_inference_panel=("BTCUSDT",),
+        stage5_research_panel=("BTCUSDT", "ETHUSDT"),
+    )
+
+    payload = snapshot_to_payload(snapshot)
+    roundtrip = snapshot_from_payload(payload)
+
+    assert roundtrip.training_panel == ("BTCUSDT",)
+    assert roundtrip.live_inference_panel == ("BTCUSDT",)
+    assert roundtrip.stage5_research_panel == ("BTCUSDT", "ETHUSDT")
+    assert roundtrip.selected[0].cluster_size == 4.0
+    assert roundtrip.selected[0].anchor_cluster_member == 1.0

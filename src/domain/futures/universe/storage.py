@@ -79,6 +79,8 @@ def _symbol_meta_from_dict(payload: dict[str, Any]) -> SymbolMeta:
         ),
         basis_vol=float(payload["basis_vol"]) if payload["basis_vol"] is not None else None,
         capacity_clip_usdt_list=tuple(float(item) for item in payload["capacity_clip_usdt_list"]),
+        cluster_size=float(payload.get("cluster_size", 1.0)),
+        anchor_cluster_member=float(payload.get("anchor_cluster_member", 0.0)),
     )
 
 
@@ -170,6 +172,7 @@ def snapshot_to_payload(snapshot: UniverseSnapshot) -> dict[str, Any]:
             qd.isoformat() if hasattr(qd, "isoformat") else str(qd): list(syms)
             for qd, syms in snapshot.inference_panel_quarter_membership.items()
         },
+        "stage5_research_panel": list(snapshot.stage5_research_panel),
     }
 
 
@@ -208,6 +211,7 @@ def snapshot_from_payload(payload: dict[str, Any]) -> UniverseSnapshot:
             date.fromisoformat(k): tuple(str(s) for s in v)
             for k, v in payload.get("inference_panel_quarter_membership", {}).items()
         },
+        stage5_research_panel=tuple(str(s) for s in payload.get("stage5_research_panel", [])),
     )
 
 
@@ -873,7 +877,7 @@ def run_historical_sync(
     sync_profiles: dict[str, SymbolSyncProfile] = {}
     try:
         sync_profiles = _load_symbol_sync_profiles()
-        logger.info("symbol lifecycle profile loaded: %d symbols", len(sync_profiles))
+        logger.debug("symbol lifecycle profile loaded: %d symbols", len(sync_profiles))
     except Exception as e:
         logger.warning("symbol lifecycle profile load failed: %s", e)
 
@@ -885,7 +889,7 @@ def run_historical_sync(
         if meta_path.exists():
             with open(meta_path, encoding="utf-8") as f:
                 metadata_cache = json.load(f)
-            logger.info("Loaded parquet cache metadata: %d keys", len(metadata_cache))
+            logger.debug("Loaded parquet cache metadata: %d keys", len(metadata_cache))
     except Exception as e:
         logger.warning("Failed to load parquet cache metadata: %s", e)
 
@@ -937,7 +941,7 @@ def run_historical_sync(
         return
 
     skipped_count = len(symbols) - len(sync_tasks)
-    logger.info(
+    logger.debug(
         "🔄 SYNC: processing %d symbols (Parallel) | "
         "%d symbols are already up-to-date (skipped)...",
         len(sync_tasks),
@@ -964,7 +968,7 @@ def run_historical_sync(
         else:
             empty_count += 1
 
-    logger.info(
+    logger.debug(
         "✅ SYNC: symbols=%d/%d (empty=%d) | ⏱️ %.2fs",
         synced_count,
         len(sync_tasks),

@@ -52,3 +52,30 @@ def test_align_data_maps_missing_ohlcv_column_raises(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(ValueError, match="missing required column: volume"):
         alignment.align_data_maps(data_maps, ["BTCUSDT"], "4h")
+
+
+def test_align_data_maps_uses_first_finite_metadata_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = _frame().assign(
+        cluster_id=[3.0, np.nan, 9.0, 9.0, 9.0, 9.0],
+        beta_vs_market=[1.2, np.nan, 2.8, 2.8, 2.8, 2.8],
+        cluster_size=[2.0, np.nan, 6.0, 6.0, 6.0, 6.0],
+        anchor_cluster_member=[1.0, np.nan, 0.0, 0.0, 0.0, 0.0],
+    )
+    data_maps = {"BTCUSDT": {"4h": frame}}
+    monkeypatch.setattr(
+        alignment,
+        "compute_multi_alignment_info",
+        lambda *_args, **_kwargs: {"eff_ref_len": len(frame), "alignment_offsets": {"BTCUSDT": 0}},
+    )
+
+    out = alignment.align_data_maps(data_maps, ["BTCUSDT"], "4h")
+    assert out.cluster_id_1d is not None
+    assert out.beta_vs_market_1d is not None
+    assert out.cluster_size_1d is not None
+    assert out.anchor_cluster_1d is not None
+    assert out.cluster_id_1d.tolist() == [3.0]
+    assert np.allclose(out.beta_vs_market_1d, np.array([1.2], dtype=np.float32))
+    assert out.cluster_size_1d.tolist() == [2.0]
+    assert out.anchor_cluster_1d.tolist() == [1.0]
