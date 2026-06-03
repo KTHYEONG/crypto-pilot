@@ -742,11 +742,15 @@ def _run_candidate_evaluation_report(
     # Alias mapping for variant names to keep the table compact
     alias_map = {
         "rule_only_equal_size": "Equal Size",
+        "rule_promo_no_leak": "Rule Promo NL",
+        "rule_promo_oos_oracle": "Rule Promo Oracle",
         "rule_only_fractional_kelly": "Kelly (No ML)",
         "rule_plus_ml_gate": "ML Gate",
         "rule_plus_ml_gate_plus_edge": "ML Gate+Edge",
         "rule_plus_ml_gate_plus_edge_plus_portfolio_caps": "ML Full (Capped)",
         "candidate_ml_full": "Cand. ML",
+        "candidate_ml_direct_edge": "Direct Edge",
+        "candidate_ml_variant_prior": "Variant Prior",
         "candidate_ml_promotion_filter": "Promo Filter",
         "candidate_ml_validation_quantile_selection": "Val. Selection",
         "candidate_ml_identity_features": "Identity Feat",

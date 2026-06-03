@@ -8,7 +8,7 @@ from src.domain.futures.strategy.candidate_edge import fit_candidate_edge_models
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 
 
-def _make_dataset(seed: int, n: int) -> CandidateDataset:
+def _make_dataset(seed: int, n: int, *, family: str = "trend_ma", variant: str = "ema_12_72") -> CandidateDataset:
     rng = np.random.default_rng(seed)
     x = rng.normal(size=(n, 4)).astype(np.float32)
     edge = (15.0 * x[:, 0] - 5.0 * x[:, 1]).astype(np.float32)
@@ -23,7 +23,12 @@ def _make_dataset(seed: int, n: int) -> CandidateDataset:
         y_mfe_bps=mfe,
         sample_weight=w,
         groups=np.arange(n, dtype=np.int32),
-        event_index=pd.DataFrame(),
+        event_index=pd.DataFrame(
+            {
+                "family": [family] * n,
+                "variant": [variant] * n,
+            }
+        ),
         feature_names=("f0", "f1", "f2", "f3"),
     )
 
@@ -64,3 +69,53 @@ def test_predict_candidate_edges_applies_cost_and_utility_formula() -> None:
 
     assert np.allclose(out.mu_net_decision_bps, out.mu_gross_bps)
     assert np.allclose(out.utility_score, expected_utility)
+
+
+def test_edge_prior_residual_preserves_positive_variant_prior() -> None:
+    train = _make_dataset(seed=300, n=120, family="funding_carry", variant="funding_24")
+    train = CandidateDataset(
+        X=train.X,
+        y_gate=train.y_gate,
+        y_edge_bps=np.full(train.X.shape[0], 25.0, dtype=np.float32),
+        y_q10_bps=np.full(train.X.shape[0], -5.0, dtype=np.float32),
+        y_mfe_bps=np.full(train.X.shape[0], 40.0, dtype=np.float32),
+        sample_weight=train.sample_weight,
+        groups=train.groups,
+        event_index=train.event_index,
+        feature_names=train.feature_names,
+    )
+    valid = _make_dataset(seed=301, n=30, family="funding_carry", variant="funding_24")
+    cfg = CandidateStrategyConfig(seed=11, edge_prior_min_obs=10, edge_prior_shrinkage_obs=50)
+
+    models = fit_candidate_edge_models(train=train, valid=valid, cfg=cfg)
+    out = predict_candidate_edges(
+        models=models,
+        dataset=valid,
+        p_pass=np.full(valid.X.shape[0], 0.6, dtype=np.float64),
+        cfg=cfg,
+    )
+
+    assert models.target_mode == "prior_residual"
+    assert models.variant_prior_bps["funding_carry:funding_24"] > 0.0
+    assert float(np.max(out.mu_net_decision_bps)) > 0.0
+
+
+def test_predict_candidate_edges_flags_prediction_collapse() -> None:
+    train = _make_dataset(seed=400, n=120)
+    valid = _make_dataset(seed=401, n=40)
+    cfg = CandidateStrategyConfig(
+        seed=12,
+        edge_prediction_min_std_bps=100.0,
+        edge_prediction_min_positive_rate=0.99,
+    )
+
+    models = fit_candidate_edge_models(train=train, valid=valid, cfg=cfg)
+    out = predict_candidate_edges(
+        models=models,
+        dataset=valid,
+        p_pass=np.full(valid.X.shape[0], 0.4, dtype=np.float64),
+        cfg=cfg,
+    )
+
+    assert out.selection_thresholds["prediction_collapse"] is True
+    assert float(out.selection_thresholds["mu_std_bps"]) < 100.0
