@@ -154,7 +154,20 @@ def build_rule_signal_panels(
     vol = aligned.volume_2d
     funding = aligned.funding_2d
     oi = aligned.oi_2d if aligned.oi_2d is not None else np.zeros_like(close)
-    valid_mask = aligned.active_mask & np.isfinite(close) & np.isfinite(high) & np.isfinite(low)
+    entry_warm_mask = (
+        aligned.inference_entry_warm_mask
+        if aligned.inference_entry_warm_mask is not None
+        else aligned.warm_mask
+    )
+    valid_mask = (
+        aligned.active_mask
+        & entry_warm_mask
+        & ~aligned.entry_block_mask
+        & ~aligned.kill_mask
+        & np.isfinite(close)
+        & np.isfinite(high)
+        & np.isfinite(low)
+    )
 
     atr = _atr_2d(high, low, close, period=14)
     atr = np.maximum(atr, 1e-12)
@@ -656,6 +669,8 @@ def candidate_panels_to_events(
     *,
     min_abs_score: float,
     side_flip_variants: tuple[str, ...] = (),
+    cost_floor_bps: float = 24.0,
+    execution_cost_bps_2d: NDArray[np.float64] | None = None,
 ) -> pd.DataFrame:
     """Convert dense [T,N] panels into sparse candidate event rows."""
     all_events: list[pd.DataFrame] = []
@@ -682,6 +697,11 @@ def candidate_panels_to_events(
             raw_scores = -raw_scores
             score_z = -score_z
             event_sides = -event_sides
+        event_cost = np.full(t_idx.shape[0], float(cost_floor_bps), dtype=np.float64)
+        if execution_cost_bps_2d is not None:
+            physical_cost = execution_cost_bps_2d[t_idx, s_idx].astype(np.float64, copy=False)
+            physical_cost = np.nan_to_num(physical_cost, nan=0.0, posinf=0.0, neginf=0.0)
+            event_cost = np.maximum(event_cost, physical_cost)
 
         df = pd.DataFrame({
             "datetime": event_datetimes,
@@ -696,7 +716,7 @@ def candidate_panels_to_events(
             "stop_atr_mult": panel.stop_atr_mult,
             "take_profit_atr_mult": panel.take_profit_atr_mult,
             "turnover_proxy": panel.turnover_proxy_2d[t_idx, s_idx],
-            "cost_floor_bps": 24.0,  # default floor
+            "cost_floor_bps": event_cost,
             "entry_idx": t_idx + 1,
             "side_flipped": side_flipped,
         })

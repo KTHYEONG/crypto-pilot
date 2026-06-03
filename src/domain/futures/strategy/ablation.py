@@ -22,6 +22,7 @@ from src.domain.futures.strategy.common.alignment import AlignedMarketData, alig
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 from src.domain.futures.strategy.rule_diagnostics import compute_rule_diagnostics
 from src.domain.futures.strategy.rule_signals import build_rule_signal_panels, candidate_panels_to_events
+from src.domain.futures.strategy_runtime.bridge import _candidate_ml_split_indices
 
 _logger = logging.getLogger(__name__)
 
@@ -148,6 +149,8 @@ def run_candidate_ablation(
         panels,
         min_abs_score=cfg.min_rule_net_bps * 1e-4,
         side_flip_variants=cfg.side_flip_candidate_variants,
+        cost_floor_bps=cfg.cost_floor_bps,
+        execution_cost_bps_2d=aligned.execution_cost_bps_2d,
     )
 
     if raw_events.empty:
@@ -188,26 +191,35 @@ def run_candidate_ablation(
     # variants still produce informative (non-crash) results for comparison.
     _labeled_for_ml = labeled if not labeled.empty else labeled_unfiltered
 
-    # Create fold splits (80% train, 20% validation)
-    split_val = int(n_bars * 0.8)
-    train_set = build_candidate_dataset(
-        labeled_events=_labeled_for_ml, aligned=aligned, cfg=cfg, split_start=0, split_end=split_val
+    fit_start, fit_end, calibration_start, calibration_end, oos_start, oos_end = _candidate_ml_split_indices(
+        n_bars=n_bars,
+        fit_fraction=cfg.ml_fit_fraction,
+        calibration_fraction=cfg.ml_calibration_fraction,
+        purge_bars=cfg.purge_bars,
+        embargo_bars=cfg.embargo_bars,
     )
-    valid_set = build_candidate_dataset(
-        labeled_events=_labeled_for_ml, aligned=aligned, cfg=cfg, split_start=split_val, split_end=n_bars
+    fit_set = build_candidate_dataset(
+        labeled_events=_labeled_for_ml, aligned=aligned, cfg=cfg, split_start=fit_start, split_end=fit_end
     )
-    full_set = build_candidate_dataset(
-        labeled_events=_labeled_for_ml, aligned=aligned, cfg=cfg, split_start=0, split_end=n_bars
+    calibration_set = build_candidate_dataset(
+        labeled_events=_labeled_for_ml,
+        aligned=aligned,
+        cfg=cfg,
+        split_start=calibration_start,
+        split_end=calibration_end,
+    )
+    oos_set = build_candidate_dataset(
+        labeled_events=_labeled_for_ml, aligned=aligned, cfg=cfg, split_start=oos_start, split_end=oos_end
     )
 
     # 4. Train ML Models
-    gate_model = fit_candidate_gate(train=train_set, valid=valid_set, cfg=cfg)
-    edge_models = fit_candidate_edge_models(train=train_set, valid=valid_set, cfg=cfg)
+    gate_model = fit_candidate_gate(train=fit_set, valid=calibration_set, cfg=cfg)
+    edge_models = fit_candidate_edge_models(train=fit_set, valid=calibration_set, cfg=cfg)
 
-    # 5. Predict outcomes for full sample
-    p_pass = predict_candidate_gate(model=gate_model, dataset=full_set)
-    ml_out = predict_candidate_edges(models=edge_models, dataset=full_set, p_pass=p_pass, cfg=cfg)
-    ml_out = replace(ml_out, events=full_set.event_index)
+    # 5. Predict outcomes for OOS sample only
+    p_pass = predict_candidate_gate(model=gate_model, dataset=oos_set)
+    ml_out = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=cfg)
+    ml_out = replace(ml_out, events=oos_set.event_index)
 
     rows: list[AblationRow] = []
 
@@ -285,18 +297,8 @@ def run_candidate_ablation(
         gate_plus_edge_plus_caps_w, aligned, "rule_plus_ml_gate_plus_edge_plus_portfolio_caps", cfg
     ))
 
-    # Variant 6: candidate_ml_full (OOS-only signal — bridges production forward-fill path)
-    # Filter gate-passed events to validation split (IS 구간 제외 → look-ahead-free OOS signal)
-    n_bars_total = aligned.close_2d.shape[0]
-    split_val_oos = int(n_bars_total * 0.8)
-    gate_events_oos: pd.DataFrame
-    if gate_events_only.empty:
-        gate_events_oos = gate_events_only
-    else:
-        gate_events_oos = gate_events_only[
-            gate_events_only["entry_idx"] >= split_val_oos
-        ].copy()
-
+    # Variant 6: candidate_ml_full (OOS-only signal — production-equivalent split)
+    gate_events_oos = gate_events_only
     full_ml_w = build_candidate_target_weights(
         selected_events=gate_events_oos,
         close_2d=aligned.close_2d,
@@ -383,26 +385,35 @@ def _run_oos_only_ablation_variant(
 ) -> AblationRow:
     """Retrain models with modified cfg/labeled and evaluate on OOS split only."""
     n_bars = aligned.close_2d.shape[0]
-    split_val = int(n_bars * 0.8)
     zero_w = np.zeros_like(aligned.close_2d)
 
     if labeled.empty:
         _logger.warning("[ABLATION][%s] empty labeled events; returning zero weights", variant_name)
         return _run_backtest_and_evaluate(zero_w, aligned, variant_name, cfg)
 
-    train_set = build_candidate_dataset(
-        labeled_events=labeled, aligned=aligned, cfg=cfg, split_start=0, split_end=split_val
+    fit_start, fit_end, calibration_start, calibration_end, oos_start, oos_end = _candidate_ml_split_indices(
+        n_bars=n_bars,
+        fit_fraction=cfg.ml_fit_fraction,
+        calibration_fraction=cfg.ml_calibration_fraction,
+        purge_bars=cfg.purge_bars,
+        embargo_bars=cfg.embargo_bars,
     )
-    valid_set = build_candidate_dataset(
-        labeled_events=labeled, aligned=aligned, cfg=cfg, split_start=split_val, split_end=n_bars
+    fit_set = build_candidate_dataset(
+        labeled_events=labeled, aligned=aligned, cfg=cfg, split_start=fit_start, split_end=fit_end
+    )
+    calibration_set = build_candidate_dataset(
+        labeled_events=labeled, aligned=aligned, cfg=cfg, split_start=calibration_start, split_end=calibration_end
+    )
+    oos_set = build_candidate_dataset(
+        labeled_events=labeled, aligned=aligned, cfg=cfg, split_start=oos_start, split_end=oos_end
     )
 
-    gate_model = fit_candidate_gate(train=train_set, valid=valid_set, cfg=cfg)
-    edge_models = fit_candidate_edge_models(train=train_set, valid=valid_set, cfg=cfg)
+    gate_model = fit_candidate_gate(train=fit_set, valid=calibration_set, cfg=cfg)
+    edge_models = fit_candidate_edge_models(train=fit_set, valid=calibration_set, cfg=cfg)
 
-    p_pass = predict_candidate_gate(model=gate_model, dataset=valid_set)
-    ml_out = predict_candidate_edges(models=edge_models, dataset=valid_set, p_pass=p_pass, cfg=cfg)
-    ml_out = replace(ml_out, events=valid_set.event_index)
+    p_pass = predict_candidate_gate(model=gate_model, dataset=oos_set)
+    ml_out = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=cfg)
+    ml_out = replace(ml_out, events=oos_set.event_index)
 
     selected = select_candidate_events_for_portfolio(model_output=ml_out, cfg=cfg)
     w = build_candidate_target_weights(
