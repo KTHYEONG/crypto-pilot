@@ -620,6 +620,9 @@ def _run_strategy_stage(
         ptw = ml_out.panel_target_weight
         if isinstance(ptw, pd.DataFrame) and not ptw.empty:
             non_zero_weights = (ptw.abs().sum(axis=1) > 1e-9).sum()
+    candidate_report = getattr(ml_out, "rule_report", {})
+    if not isinstance(candidate_report, dict):
+        candidate_report = {}
 
     header = f"| {'Metric':<18} | {'Value':<27} |"
     width = len(header)
@@ -631,6 +634,26 @@ def _run_strategy_stage(
     _logger.info(f"| {'Status':<18} | {'PROMOTED' if non_zero_weights > 0 else 'BLOCKED':<27} |")
     _logger.info(f"| {'Execution Time':<18} | {f'{bridge_elapsed:.2f}s':<27} |")
     _logger.info("-" * width)
+    _logger.info(
+        (
+            "[BRIDGE SUMMARY][DIAG] selected_total=%s eligible_total=%s selected_pre_group=%s "
+            "policy=%s zero_reason=%s gate_p50=%.4f gate_p90=%.4f mu_p50=%.1f mu_p90=%.1f "
+            "q10_p10=%.1f utility_p50=%.3f utility_p90=%.3f breakeven_floor=%.1f"
+        ),
+        candidate_report.get("selected_total", 0),
+        candidate_report.get("eligible", 0),
+        candidate_report.get("selected_pre_group", 0),
+        candidate_report.get("policy", "unknown"),
+        candidate_report.get("zero_reason", "unknown"),
+        float(candidate_report.get("gate_p_median", float("nan"))),
+        float(candidate_report.get("gate_p_p90", float("nan"))),
+        float(candidate_report.get("mu_median_bps", float("nan"))),
+        float(candidate_report.get("mu_p90_bps", float("nan"))),
+        float(candidate_report.get("q10_p10_bps", float("nan"))),
+        float(candidate_report.get("utility_median", float("nan"))),
+        float(candidate_report.get("utility_p90", float("nan"))),
+        float(candidate_report.get("breakeven_floor_bps", float("nan"))),
+    )
 
     t_merge_start = time.perf_counter()
     merge_candidate_output_into_is_and_oos(
@@ -867,9 +890,22 @@ def _run_optimization_stage(
             )
             valid_trials = [t for t in all_trials if t.state in valid_states]
             if valid_trials:
-                # ... existing profiling code ...
-                # (keeping the existing detailed profiling as it is, but fixing formatting if needed)
-                # ...
+                compose_vals = [float(t.user_attrs.get("prof_compose", 0.0)) for t in valid_trials]
+                prep_vals = [float(t.user_attrs.get("prof_prep", 0.0)) for t in valid_trials]
+                prep_align_vals = [float(t.user_attrs.get("prof_prep_align", 0.0)) for t in valid_trials]
+                prep_constraint_vals = [float(t.user_attrs.get("prof_prep_constraint", 0.0)) for t in valid_trials]
+                exec_vals = [float(t.user_attrs.get("prof_exec", 0.0)) for t in valid_trials]
+                metrics_vals = [float(t.user_attrs.get("prof_metrics", 0.0)) for t in valid_trials]
+                metrics_pure_vals = [float(t.user_attrs.get("prof_metrics_pure", 0.0)) for t in valid_trials]
+                metrics_db_io_vals = [float(t.user_attrs.get("prof_metrics_db_io", 0.0)) for t in valid_trials]
+                mean_c = float(np.mean(compose_vals)) if compose_vals else 0.0
+                mean_p = float(np.mean(prep_vals)) if prep_vals else 0.0
+                mean_pa = float(np.mean(prep_align_vals)) if prep_align_vals else 0.0
+                mean_pc = float(np.mean(prep_constraint_vals)) if prep_constraint_vals else 0.0
+                mean_e = float(np.mean(exec_vals)) if exec_vals else 0.0
+                mean_m = float(np.mean(metrics_vals)) if metrics_vals else 0.0
+                mean_mp = float(np.mean(metrics_pure_vals)) if metrics_pure_vals else 0.0
+                mean_md = float(np.mean(metrics_db_io_vals)) if metrics_db_io_vals else 0.0
                 total_mean = mean_c + mean_p + mean_e + mean_m
                 trial_elapsed_sum = 0.0
                 for trial in valid_trials:
@@ -1061,7 +1097,7 @@ def run_pipeline(
         require_exec_1m=_requires_exec_1m(run_config),
     )
     # Step 3) data loading + readiness
-    t_data = time.perf_counter()
+    _t_data = time.perf_counter()
     data_stage = _run_data_stage(
         run_config,
         window,
@@ -1073,7 +1109,7 @@ def run_pipeline(
     )
     # Step 4) strategy bridge + alpha contract
     t_strategy = time.perf_counter()
-    strategy_name = str(OPT_FUTURES_CONFIG.get("FUTURES_STRATEGY_NAME", "candidate_ml"))
+    _strategy_name = str(OPT_FUTURES_CONFIG.get("FUTURES_STRATEGY_NAME", "candidate_ml"))
     _run_strategy_stage(
         run_config,
         window,
