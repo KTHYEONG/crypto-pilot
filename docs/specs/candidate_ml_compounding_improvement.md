@@ -464,10 +464,10 @@ Run focused tests:
 uv run pytest tests/unit/domain/futures/strategy/test_candidate_dataset.py tests/unit/domain/futures/strategy/test_candidate_gate.py tests/unit/domain/futures/strategy/test_rule_signals.py tests/unit/domain/futures/strategy/test_candidate_portfolio.py tests/unit/domain/futures/strategy/test_ablation.py --tb=short
 ```
 
-Run integration smoke:
+Run integration alpha verification:
 
 ```bash
-PYTHONPATH=. uv run python src/execution/opt_main_futures.py --mode strategy-smoke --skip-universe --skip-data-sync --symbols BTCUSDT --trials 1 --tf 4h --reference-date 2026-05-01 --strategy candidate_ml
+UV_CACHE_DIR=/tmp/uv-cache FUTURES_STRATEGY_NAME=candidate_ml PYTHONPATH=. uv run python src/execution/opt_main_futures.py --phase alpha --sync skip --timeframe 4h --trials 1 --date 2026-05-01
 ```
 
 Expected outcomes:
