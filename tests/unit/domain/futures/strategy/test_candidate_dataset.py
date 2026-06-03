@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.domain.futures.strategy.candidate_dataset import CandidateDataset, build_candidate_dataset
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
@@ -109,7 +110,7 @@ def test_build_candidate_dataset_split_filter() -> None:
     assert ds.X.shape[1] == len(ds.feature_names)
 
 
-def test_build_candidate_dataset_falls_back_to_triple_barrier_label() -> None:
+def test_build_candidate_dataset_uses_configured_gate_label_column() -> None:
     aligned = _make_aligned()
     labeled = pd.DataFrame(
         {
@@ -120,6 +121,7 @@ def test_build_candidate_dataset_falls_back_to_triple_barrier_label() -> None:
             "raw_score": [0.5, -0.4],
             "score_z": [1.2, -0.8],
             "turnover_proxy": [0.1, 0.2],
+            "barrier_first_label": [1, 0],
             "triple_barrier_label": [1, 0],
             "edge_after_hurdle_bps": [12.0, -5.0],
             "mae_bps": [-6.0, -8.0],
@@ -131,12 +133,41 @@ def test_build_candidate_dataset_falls_back_to_triple_barrier_label() -> None:
     ds = build_candidate_dataset(
         labeled_events=labeled,
         aligned=aligned,
-        cfg=CandidateStrategyConfig(),
+        cfg=CandidateStrategyConfig(gate_label_column="barrier_first_label"),
         split_start=20,
         split_end=40,
     )
 
     assert ds.y_gate.tolist() == [1, 0]
+
+
+def test_build_candidate_dataset_raises_when_configured_gate_label_is_missing() -> None:
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [26],
+            "raw_score": [0.5],
+            "score_z": [1.2],
+            "turnover_proxy": [0.1],
+            "triple_barrier_label": [1],
+            "edge_after_hurdle_bps": [12.0],
+            "mae_bps": [-6.0],
+            "mfe_bps": [18.0],
+            "ex_ante_cost_bps": [4.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="missing configured gate label column"):
+        build_candidate_dataset(
+            labeled_events=labeled,
+            aligned=aligned,
+            cfg=CandidateStrategyConfig(gate_label_column="profitable_after_hurdle_label"),
+            split_start=20,
+            split_end=40,
+        )
 
 
 def test_build_candidate_dataset_builds_net_q10_and_mfe_targets_with_hurdle() -> None:

@@ -103,6 +103,17 @@ class CandidateStrategyConfig:
     purge_bars: int = 18
     embargo_bars: int = 18
     cost_floor_bps: float = 24.0
+    gate_label_column: Literal[
+        "profitable_after_hurdle_label",
+        "barrier_first_label",
+        "gross_direction_label",
+    ] = "profitable_after_hurdle_label"
+    gate_calibration_method: Literal["sigmoid", "isotonic", "none"] = "sigmoid"
+    min_gate_calibration_obs: int = 100
+    min_gate_calibration_pos: int = 10
+    min_gate_probability_std: float = 0.03
+    ml_fit_fraction: float = 0.60
+    ml_calibration_fraction: float = 0.20
     min_listing_age_days: int = 180
     min_candidate_obs: int = 200
     min_symbol_oos_blocks: int = 3
@@ -172,6 +183,26 @@ class CandidateStrategyConfig:
             raise ValueError("all month windows must be positive")
         if self.purge_bars < 0 or self.embargo_bars < 0:
             raise ValueError("purge and embargo bars must be non-negative")
+        if self.gate_label_column not in {
+            "profitable_after_hurdle_label",
+            "barrier_first_label",
+            "gross_direction_label",
+        }:
+            raise ValueError("unsupported gate_label_column")
+        if self.gate_calibration_method not in {"sigmoid", "isotonic", "none"}:
+            raise ValueError("gate_calibration_method must be sigmoid, isotonic, or none")
+        if self.min_gate_calibration_obs < 1:
+            raise ValueError("min_gate_calibration_obs must be >= 1")
+        if self.min_gate_calibration_pos < 1:
+            raise ValueError("min_gate_calibration_pos must be >= 1")
+        if self.min_gate_probability_std < 0.0:
+            raise ValueError("min_gate_probability_std must be non-negative")
+        if not (0.1 <= self.ml_fit_fraction < 1.0):
+            raise ValueError("ml_fit_fraction must be in [0.1, 1.0)")
+        if not (0.0 <= self.ml_calibration_fraction < 1.0):
+            raise ValueError("ml_calibration_fraction must be in [0.0, 1.0)")
+        if self.ml_fit_fraction + self.ml_calibration_fraction >= 1.0:
+            raise ValueError("ml_fit_fraction + ml_calibration_fraction must be < 1.0")
         if not (0.0 < self.kelly_fraction <= 0.25):
             raise ValueError("kelly_fraction must be in range (0.0, 0.25]")
         if self.cost_floor_bps < 0.0:

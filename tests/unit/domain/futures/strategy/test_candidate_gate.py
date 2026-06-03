@@ -27,7 +27,7 @@ def _make_dataset(seed: int, n: int) -> _Dataset:
 def test_fit_predict_candidate_gate_returns_calibrated_probability() -> None:
     train = _make_dataset(seed=11, n=160)
     valid = _make_dataset(seed=13, n=80)
-    cfg = CandidateStrategyConfig(seed=17)
+    cfg = CandidateStrategyConfig(seed=17, min_gate_calibration_obs=10)
 
     model = fit_candidate_gate(train=train, valid=valid, cfg=cfg)
     probs = predict_candidate_gate(model=model, dataset=valid)
@@ -35,7 +35,15 @@ def test_fit_predict_candidate_gate_returns_calibrated_probability() -> None:
     assert probs.shape == (80,)
     assert np.all(probs >= 0.0)
     assert np.all(probs <= 1.0)
-    assert model.calibrator is not None
+    if model.calibration_used:
+        assert model.calibrator is not None
+        assert model.calibration_reason == "calibration_accepted"
+    else:
+        assert model.calibrator is None
+        assert model.calibration_reason in {
+            "calibration_probability_collapse",
+            "calibration_brier_regression",
+        }
 
 
 def test_fit_candidate_gate_is_deterministic_given_seed() -> None:
@@ -50,3 +58,16 @@ def test_fit_candidate_gate_is_deterministic_given_seed() -> None:
     probs_b = predict_candidate_gate(model=model_b, dataset=valid)
 
     assert np.allclose(probs_a, probs_b)
+
+
+def test_fit_candidate_gate_skips_calibration_when_probability_dispersion_collapses() -> None:
+    train = _make_dataset(seed=31, n=160)
+    valid = _make_dataset(seed=32, n=80)
+    cfg = CandidateStrategyConfig(seed=9, min_gate_calibration_obs=10, min_gate_probability_std=10.0)
+
+    model = fit_candidate_gate(train=train, valid=valid, cfg=cfg)
+    probs = predict_candidate_gate(model=model, dataset=valid)
+
+    assert probs.shape == (80,)
+    assert not model.calibration_used
+    assert model.calibration_reason == "calibration_probability_collapse"
