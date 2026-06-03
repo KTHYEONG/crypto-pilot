@@ -170,6 +170,9 @@ class CandidateStrategyConfig:
         "funding_zscore_carry",
         "vol_regime_reversion",
         "btc_corr_regime",
+        "funding_acceleration_carry",
+        "btc_residual_momentum",
+        "oi_volume_confirmed_breakout",
     )
     # Edge model utility parameters
     downside_penalty: float = 1.0
@@ -183,6 +186,11 @@ class CandidateStrategyConfig:
     edge_prior_shrinkage_obs: int = 500
     edge_residual_model_enabled: bool = True
     max_drawdown_cap: float = 0.25
+    # Deployment integrity: prevent near-zero-trading variants from "passing"
+    min_deployment_trade_count: int = 20
+    min_deployment_capital_fraction: float = 0.05
+    # Edge attribution diagnostics
+    edge_attribution_enabled: bool = True
 
     def __post_init__(self) -> None:
         """Validate candidate strategy parameters."""
@@ -286,3 +294,7 @@ class CandidateStrategyConfig:
         for variant in self.side_flip_candidate_variants:
             if variant.count(":") != 1:
                 raise ValueError("side_flip_candidate_variants entries must be formatted as family:variant")
+        if self.min_deployment_trade_count < 0:
+            raise ValueError("min_deployment_trade_count must be >= 0")
+        if not (0.0 <= self.min_deployment_capital_fraction <= 1.0):
+            raise ValueError("min_deployment_capital_fraction must be in [0.0, 1.0]")
