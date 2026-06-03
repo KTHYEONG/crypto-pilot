@@ -21,9 +21,9 @@ def _empty_snapshot() -> UniverseSnapshot:
         schema_version=1,
         config_hash="cfg",
         data_manifest_hash="manifest",
-        basket_ref=tuple(),
-        basket_weights=tuple(),
-        selected=tuple(),
+        basket_ref=(),
+        basket_weights=(),
+        selected=(),
         rejected={},
         generated_at_utc="2025-01-01T00:00:00Z",
         ledger_confidence="high",
@@ -44,8 +44,8 @@ def _snapshot_with_selected() -> UniverseSnapshot:
         schema_version=1,
         config_hash="cfg",
         data_manifest_hash="manifest",
-        basket_ref=tuple(),
-        basket_weights=tuple(),
+        basket_ref=(),
+        basket_weights=(),
         selected=(
             SymbolMeta(
                 symbol="BTCUSDT",
@@ -71,6 +71,9 @@ def _snapshot_with_selected() -> UniverseSnapshot:
         n_stage4_pass=1,
         n_stage5_pass=1,
         n_stage6_selected=1,
+        training_panel=("BTCUSDT",),
+        live_inference_panel=("BTCUSDT",),
+        stage5_research_panel=("BTCUSDT", "ETHUSDT"),
     )
 
 
@@ -151,3 +154,25 @@ def test_discover_universe_timeline_writes_membership_state_columns(
         "was_prev_member",
     }
     assert expected_cols.issubset(set(membership.columns))
+
+
+def test_discover_universe_timeline_uses_stage6_for_inference_membership(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def _fake_discover(**_kwargs: object) -> tuple[tuple[str, ...], UniverseSnapshot, pd.DataFrame]:
+        return ("BTCUSDT",), _snapshot_with_selected(), pd.DataFrame()
+
+    monkeypatch.setattr(universe_service, "_discover_symbols_via_universe", _fake_discover)
+    monkeypatch.setattr(universe_service, "_UNIVERSE_AUDIT_DIR", tmp_path)
+    result = universe_service.discover_universe_timeline(
+        tf="4h",
+        is_start=date(2025, 1, 1),
+        oos_start=date(2025, 1, 1),
+        end_date=date(2025, 1, 1),
+        force_rebuild=False,
+    )
+
+    assert result.symbols == ("BTCUSDT",)
+    assert result.inference_symbols == ("BTCUSDT",)
+    assert result.inference_panel_quarter_membership[date(2025, 1, 1)] == frozenset({"BTCUSDT"})

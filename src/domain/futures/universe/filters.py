@@ -11,6 +11,12 @@ import pandas as pd
 from .config import Stage3Config, Stage4Config, Stage5Config
 
 HalfSpreadFallback = Callable[[pd.DataFrame, Stage4Config, date], pd.Series]
+_OI_SOURCE_COLUMNS: tuple[str, ...] = (
+    "oi_usdt_median",
+    "sum_open_interest_value",
+    "open_interest_usdt",
+    "open_interest",
+)
 
 
 def _to_date(value: str | date) -> date:
@@ -30,6 +36,13 @@ def _resolve_as_of_date(frame: pd.DataFrame, as_of: str | date | None) -> date:
 
 def _numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
     return pd.to_numeric(frame.get(column, pd.Series(np.nan, index=frame.index)), errors="coerce")
+
+
+def _first_available_column(frame: pd.DataFrame, candidates: tuple[str, ...]) -> str | None:
+    for candidate in candidates:
+        if candidate in frame.columns:
+            return candidate
+    return None
 
 
 def _safe_div(numer: pd.Series, denom: pd.Series) -> pd.Series:
@@ -58,11 +71,22 @@ def apply_liquidity_stage(
         default_clip
     )
     clip_to_adv = _safe_div(clip_usdt, adv).fillna(np.inf)
+    oi_col = _first_available_column(frame, _OI_SOURCE_COLUMNS)
+    oi_series = (
+        _numeric_series(frame, oi_col) if oi_col is not None else pd.Series(np.nan, index=frame.index)
+    )
+    oi_to_adv = _safe_div(oi_series, adv)
+    oi_gate_enabled = bool(cfg.enable_oi_adv_crowding_gate) and oi_col is not None
+    if oi_gate_enabled:
+        oi_pass = oi_to_adv.le(cfg.max_oi_to_adv) | oi_to_adv.isna()
+    else:
+        oi_pass = pd.Series(True, index=frame.index)
 
     pass_mask = (
         (adv >= cfg.min_adv_usdt_median)
         & (amihud <= cfg.max_amihud_30d)
         & (clip_to_adv <= cfg.max_clip_to_adv)
+        & oi_pass
     )
     reasons = np.where(adv < cfg.min_adv_usdt_median, "adv_too_low", "")
     reasons = np.where((reasons == "") & (amihud > cfg.max_amihud_30d), "amihud_too_high", reasons)
@@ -71,10 +95,16 @@ def apply_liquidity_stage(
         "clip_too_large_vs_adv",
         reasons,
     )
+    reasons = np.where(
+        (reasons == "") & oi_gate_enabled & oi_to_adv.gt(cfg.max_oi_to_adv),
+        "oi_adv_crowded",
+        reasons,
+    )
     reasons = pd.Series(np.where(reasons == "", "pass", reasons), index=frame.index, dtype="string")
 
     out = frame.copy()
     out["clip_to_adv"] = clip_to_adv.astype(float)
+    out["oi_to_adv"] = oi_to_adv.astype(float)
     report = pd.DataFrame(
         {
             "symbol": frame["symbol"].astype("string"),
@@ -83,6 +113,7 @@ def apply_liquidity_stage(
             "reason": reasons,
             "screening_clip_usdt": clip_usdt.astype(float),
             "clip_to_adv": clip_to_adv.astype(float),
+            "oi_to_adv": oi_to_adv.astype(float),
         }
     )
     return out.loc[pass_mask].copy(), report
