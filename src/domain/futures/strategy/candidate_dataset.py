@@ -355,15 +355,9 @@ def build_candidate_dataset(
             feature_names=feature_names,
         )
 
-    gate_label_col = (
-        "gross_direction_label"
-        if "gross_direction_label" in kept_events.columns
-        else (
-            "profitable_after_hurdle_label"
-            if "profitable_after_hurdle_label" in kept_events.columns
-            else "triple_barrier_label"
-        )
-    )
+    gate_label_col = cfg.gate_label_column
+    if gate_label_col not in kept_events.columns:
+        raise ValueError(f"missing configured gate label column: {gate_label_col}")
     y_gate = kept_events[gate_label_col].to_numpy(dtype=np.int8, copy=False)
     y_edge = kept_events["edge_after_hurdle_bps"].to_numpy(dtype=np.float32, copy=False)
     cost_hurdle = _target_cost_hurdle_bps(kept_events)

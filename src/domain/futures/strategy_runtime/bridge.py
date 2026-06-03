@@ -13,6 +13,61 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
+def _candidate_ml_split_indices(
+    *,
+    n_bars: int,
+    fit_fraction: float,
+    calibration_fraction: float,
+    purge_bars: int,
+    embargo_bars: int,
+) -> tuple[int, int, int, int, int, int]:
+    """Return fit, calibration, and OOS index ranges."""
+    fit_start = 0
+    fit_end = int(n_bars * fit_fraction)
+    calibration_start = fit_end + purge_bars
+    calibration_end = int(n_bars * (fit_fraction + calibration_fraction))
+    oos_start = calibration_end + embargo_bars
+    oos_end = n_bars
+    if not (fit_start < fit_end <= n_bars):
+        raise ValueError("fit split is empty or invalid")
+    if not (calibration_start < calibration_end <= n_bars):
+        raise ValueError("calibration split is empty or invalid")
+    if not (oos_start < oos_end <= n_bars):
+        raise ValueError("oos split is empty or invalid")
+    return fit_start, fit_end, calibration_start, calibration_end, oos_start, oos_end
+
+
+def _finite_summary(values: np.ndarray) -> dict[str, float]:
+    """Return finite mean/median/p90/min/max statistics for a numeric array."""
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return {
+            "mean": float("nan"),
+            "median": float("nan"),
+            "p90": float("nan"),
+            "min": float("nan"),
+            "max": float("nan"),
+        }
+    return {
+        "mean": float(np.mean(finite)),
+        "median": float(np.median(finite)),
+        "p10": float(np.percentile(finite, 10)),
+        "p90": float(np.percentile(finite, 90)),
+        "min": float(np.min(finite)),
+        "max": float(np.max(finite)),
+    }
+
+
+def _threshold_rate(values: np.ndarray, threshold: float) -> float:
+    """Return fraction of finite values above a threshold."""
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return 0.0
+    return float((finite >= threshold).mean())
+
+
 @dataclass(slots=True)
 class CandidatePipelineOutput:
     """Candidate strategy bridge output."""
@@ -61,6 +116,8 @@ def run_candidate_strategy_for_universe(
         panels,
         min_abs_score=strategy_cfg.candidate.min_rule_net_bps * 1e-4,
         side_flip_variants=strategy_cfg.candidate.side_flip_candidate_variants,
+        cost_floor_bps=strategy_cfg.candidate.cost_floor_bps,
+        execution_cost_bps_2d=aligned.execution_cost_bps_2d,
     )
 
     if raw_events.empty:
@@ -75,7 +132,19 @@ def run_candidate_strategy_for_universe(
             target_weights=np.zeros_like(aligned.close_2d),
             rule_report={
                 "events_total": 0,
+                "labeled_total": 0,
+                "promoted_total": 0,
+                "fit_total": 0,
+                "calibration_total": 0,
+                "oos_total": 0,
+                "selected_pre_group": 0,
                 "selected_total": 0,
+                "eligible": 0,
+                "n_keep": 0,
+                "policy": strategy_cfg.candidate.selection_policy,
+                "zero_reason": "no_events",
+                "gate_calibration_used": False,
+                "gate_calibration_reason": "no_events",
                 "recommended_keep_variants": (),
                 "recommended_flip_variants": (),
             },
@@ -112,34 +181,144 @@ def run_candidate_strategy_for_universe(
                 target_weights=np.zeros_like(aligned.close_2d),
                 rule_report={
                     "events_total": len(raw_events),
+                    "labeled_total": len(labeled),
+                    "promoted_total": 0,
+                    "fit_total": 0,
+                    "calibration_total": 0,
+                    "oos_total": 0,
+                    "selected_pre_group": 0,
                     "selected_total": 0,
+                    "eligible": 0,
+                    "n_keep": 0,
+                    "policy": strategy_cfg.candidate.selection_policy,
+                    "zero_reason": "promotion_filter_empty",
+                    "gate_calibration_used": False,
+                    "gate_calibration_reason": "promotion_filter_empty",
                     "recommended_keep_variants": diag.recommended_keep_variants,
                     "recommended_flip_variants": diag.recommended_flip_variants,
                 },
             )
+    promoted_total = len(labeled)
 
-    split_val = int(n_bars * 0.8)
-    train_set = build_candidate_dataset(
-        labeled_events=labeled, aligned=aligned, cfg=strategy_cfg.candidate, split_start=0, split_end=split_val
+    fit_start, fit_end, calibration_start, calibration_end, oos_start, oos_end = _candidate_ml_split_indices(
+        n_bars=n_bars,
+        fit_fraction=strategy_cfg.candidate.ml_fit_fraction,
+        calibration_fraction=strategy_cfg.candidate.ml_calibration_fraction,
+        purge_bars=strategy_cfg.candidate.purge_bars,
+        embargo_bars=strategy_cfg.candidate.embargo_bars,
     )
-    valid_set = build_candidate_dataset(
-        labeled_events=labeled, aligned=aligned, cfg=strategy_cfg.candidate, split_start=split_val, split_end=n_bars
+    fit_set = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=strategy_cfg.candidate,
+        split_start=fit_start,
+        split_end=fit_end,
+    )
+    calibration_set = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=strategy_cfg.candidate,
+        split_start=calibration_start,
+        split_end=calibration_end,
+    )
+    oos_set = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=strategy_cfg.candidate,
+        split_start=oos_start,
+        split_end=oos_end,
+    )
+
+    _logger.info(
+        (
+            "[DIAG][PIPELINE] raw=%d labeled=%d promoted=%d fit=%d cal=%d oos=%d "
+            "splits fit=[%d,%d) cal=[%d,%d) oos=[%d,%d) "
+            "y_gate_pos_rate fit=%.3f cal=%.3f oos=%.3f"
+        ),
+        len(raw_events),
+        len(labeled),
+        promoted_total,
+        int(fit_set.X.shape[0]),
+        int(calibration_set.X.shape[0]),
+        int(oos_set.X.shape[0]),
+        fit_start,
+        fit_end,
+        calibration_start,
+        calibration_end,
+        oos_start,
+        oos_end,
+        float(fit_set.y_gate.mean()) if fit_set.X.shape[0] > 0 else 0.0,
+        float(calibration_set.y_gate.mean()) if calibration_set.X.shape[0] > 0 else 0.0,
+        float(oos_set.y_gate.mean()) if oos_set.X.shape[0] > 0 else 0.0,
     )
 
     gate_model = None
-    if train_set.X.shape[0] >= 2:
-        gate_model = fit_candidate_gate(train=train_set, valid=valid_set, cfg=strategy_cfg.candidate)
-    
-    edge_models = None
-    if train_set.X.shape[0] >= 2:
-        edge_models = fit_candidate_edge_models(train=train_set, valid=valid_set, cfg=strategy_cfg.candidate)
+    if fit_set.X.shape[0] >= 2:
+        gate_model = fit_candidate_gate(train=fit_set, valid=calibration_set, cfg=strategy_cfg.candidate)
 
-    # OOS-only predict: IS 구간(0~80%)은 target_weight=0으로 유지하여 look-ahead 누수 방지
-    p_pass = predict_candidate_gate(model=gate_model, dataset=valid_set)
-    ml_out = predict_candidate_edges(models=edge_models, dataset=valid_set, p_pass=p_pass, cfg=strategy_cfg.candidate)
-    ml_out = replace(ml_out, events=valid_set.event_index)
+    edge_models = None
+    if fit_set.X.shape[0] >= 2:
+        edge_models = fit_candidate_edge_models(train=fit_set, valid=calibration_set, cfg=strategy_cfg.candidate)
+
+    # OOS-only predict: fit/calibration rows are excluded from inference.
+    p_pass = predict_candidate_gate(model=gate_model, dataset=oos_set)
+    ml_out = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=strategy_cfg.candidate)
+    ml_out = replace(ml_out, events=oos_set.event_index)
+    gate_summary = _finite_summary(p_pass)
+    edge_summary = _finite_summary(ml_out.mu_net_decision_bps)
+    q10_summary = _finite_summary(ml_out.q10_net_bps)
+    utility_summary = _finite_summary(ml_out.utility_score)
+    _logger.info(
+        (
+            "[DIAG][PIPELINE_GATE] calibrated=%s reason=%s mean=%.4f median=%.4f p90=%.4f max=%.4f "
+            "pct_ge40=%.3f pct_ge45=%.3f pct_ge50=%.3f pct_ge55=%.3f"
+        ),
+        bool(gate_model.calibration_used) if gate_model is not None else False,
+        gate_model.calibration_reason if gate_model is not None else "not_fit",
+        gate_summary["mean"],
+        gate_summary["median"],
+        gate_summary["p90"],
+        gate_summary["max"],
+        _threshold_rate(p_pass, 0.40),
+        _threshold_rate(p_pass, 0.45),
+        _threshold_rate(p_pass, 0.50),
+        _threshold_rate(p_pass, 0.55),
+    )
+    _logger.info(
+        (
+            "[DIAG][PIPELINE_EDGE] mu_mean=%.1f mu_median=%.1f mu_p90=%.1f mu_max=%.1f "
+            "q10_mean=%.1f q10_p10=%.1f q10_median=%.1f q10_min=%.1f "
+            "utility_mean=%.3f utility_median=%.3f utility_p90=%.3f utility_max=%.3f"
+        ),
+        edge_summary["mean"],
+        edge_summary["median"],
+        edge_summary["p90"],
+        edge_summary["max"],
+        q10_summary["mean"],
+        q10_summary["p10"],
+        q10_summary["median"],
+        q10_summary["min"],
+        utility_summary["mean"],
+        utility_summary["median"],
+        utility_summary["p90"],
+        utility_summary["max"],
+    )
 
     selected = select_candidate_events_for_portfolio(model_output=ml_out, cfg=strategy_cfg.candidate)
+    selection_diag = dict(getattr(selected, "attrs", {}).get("candidate_selection_diagnostics", {}))
+    _logger.info(
+        (
+            "[DIAG][PIPELINE_SELECT] policy=%s zero_reason=%s eligible=%s selected_pre_group=%s "
+            "selected=%s n_keep=%s breakeven_floor=%.1f"
+        ),
+        selection_diag.get("policy", strategy_cfg.candidate.selection_policy),
+        selection_diag.get("zero_reason", "unknown"),
+        selection_diag.get("eligible", 0),
+        selection_diag.get("selected_pre_group", 0),
+        selection_diag.get("selected_total", len(selected)),
+        selection_diag.get("n_keep", 0),
+        float(selection_diag.get("breakeven_floor_bps", strategy_cfg.candidate.cost_floor_bps)),
+    )
     target_weights = build_candidate_target_weights(
         selected_events=selected,
         close_2d=aligned.close_2d,
@@ -167,7 +346,49 @@ def run_candidate_strategy_for_universe(
         target_weights=target_weights,
         rule_report={
             "events_total": len(raw_events),
-            "selected_total": len(selected),
+            "labeled_total": len(labeled),
+            "promoted_total": promoted_total,
+            "fit_total": int(fit_set.X.shape[0]),
+            "calibration_total": int(calibration_set.X.shape[0]),
+            "oos_total": int(oos_set.X.shape[0]),
+            "fit_start": fit_start,
+            "fit_end": fit_end,
+            "calibration_start": calibration_start,
+            "calibration_end": calibration_end,
+            "oos_start": oos_start,
+            "oos_end": oos_end,
+            "y_gate_fit_pos_rate": float(fit_set.y_gate.mean()) if fit_set.X.shape[0] > 0 else 0.0,
+            "y_gate_calibration_pos_rate": float(calibration_set.y_gate.mean()) if calibration_set.X.shape[0] > 0 else 0.0,
+            "y_gate_oos_pos_rate": float(oos_set.y_gate.mean()) if oos_set.X.shape[0] > 0 else 0.0,
+            "gate_calibration_used": bool(gate_model.calibration_used) if gate_model is not None else False,
+            "gate_calibration_reason": gate_model.calibration_reason if gate_model is not None else "not_fit",
+            "gate_p_mean": gate_summary["mean"],
+            "gate_p_median": gate_summary["median"],
+            "gate_p_p90": gate_summary["p90"],
+            "gate_p_max": gate_summary["max"],
+            "gate_pct_ge40": _threshold_rate(p_pass, 0.40),
+            "gate_pct_ge45": _threshold_rate(p_pass, 0.45),
+            "gate_pct_ge50": _threshold_rate(p_pass, 0.50),
+            "gate_pct_ge55": _threshold_rate(p_pass, 0.55),
+            "mu_mean_bps": edge_summary["mean"],
+            "mu_median_bps": edge_summary["median"],
+            "mu_p90_bps": edge_summary["p90"],
+            "mu_max_bps": edge_summary["max"],
+            "q10_mean_bps": q10_summary["mean"],
+            "q10_p10_bps": q10_summary["p10"],
+            "q10_median_bps": q10_summary["median"],
+            "q10_min_bps": q10_summary["min"],
+            "utility_mean": utility_summary["mean"],
+            "utility_median": utility_summary["median"],
+            "utility_p90": utility_summary["p90"],
+            "utility_max": utility_summary["max"],
+            "selected_pre_group": int(selection_diag.get("selected_pre_group", len(selected))),
+            "selected_total": int(selection_diag.get("selected_total", len(selected))),
+            "eligible": int(selection_diag.get("eligible", 0)),
+            "n_keep": int(selection_diag.get("n_keep", 0)),
+            "policy": str(selection_diag.get("policy", strategy_cfg.candidate.selection_policy)),
+            "zero_reason": str(selection_diag.get("zero_reason", "unknown")),
+            "breakeven_floor_bps": float(selection_diag.get("breakeven_floor_bps", strategy_cfg.candidate.cost_floor_bps)),
             "recommended_keep_variants": diag.recommended_keep_variants,
             "recommended_flip_variants": diag.recommended_flip_variants,
         },
