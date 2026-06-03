@@ -104,6 +104,20 @@ def _rolling_min_2d(arr: NDArray[np.float64], window: int) -> NDArray[np.float64
     return result
 
 
+def _rolling_corr_with_col(arr: NDArray[np.float64], ref_col: int, window: int) -> NDArray[np.float64]:
+    """Rolling Pearson corr of each column with arr[:, ref_col].
+
+    Loops over N symbols (not T time steps) — acceptable for N~20.
+    """
+    t_len, n_sym = arr.shape
+    out = np.full((t_len, n_sym), np.nan, dtype=np.float64)
+    ref = pd.Series(arr[:, ref_col])
+    for col in range(n_sym):
+        corr = pd.Series(arr[:, col]).rolling(window, min_periods=window).corr(ref)
+        out[:, col] = corr.to_numpy(dtype=np.float64)
+    return out
+
+
 def _atr_2d(
     high: NDArray[np.float64],
     low: NDArray[np.float64],
@@ -508,6 +522,131 @@ def build_rule_signal_panels(
             valid_mask_2d=valid_mask,
         )
     )
+
+    # 9. Cross-Sectional Momentum (F1)
+    # Look-ahead guard: close_shifted[t] = close[t-lb] for t>=lb, else close[0]
+    for _lb, _q in [(5, 0.2), (10, 0.2), (20, 0.3)]:
+        _close_shifted = np.vstack([
+            np.tile(close[0:1], (_lb, 1)),
+            close[:-_lb],
+        ])
+        _ret_lb = close / np.maximum(_close_shifted, 1e-12) - 1.0
+        _rank_pct: NDArray[np.float64] = (
+            pd.DataFrame(_ret_lb).rank(axis=1, pct=True).to_numpy(dtype=np.float64)
+        )
+        _cs_score = np.tanh((_rank_pct - 0.5) * 4.0)
+        _cs_side = np.zeros_like(_cs_score, dtype=np.int8)
+        _cs_side[_rank_pct >= 1.0 - _q] = 1
+        _cs_side[_rank_pct <= _q] = -1
+        # Zero out warmup bars (no valid lookback)
+        _cs_score[:_lb] = 0.0
+        _cs_side[:_lb] = 0
+        panels.append(
+            CandidateSignalPanel(
+                family="cross_sectional_momentum",
+                variant=f"cs_mom_{_lb}",
+                params={"lookback": _lb, "quantile": _q},
+                datetimes=aligned.datetimes,
+                symbols=aligned.symbols,
+                signed_score_2d=np.clip(_cs_score, -1.0, 1.0),
+                side_hint_2d=_cs_side,
+                expected_holding_bars=_lb * 2,
+                min_holding_bars=max(2, _lb // 2),
+                stop_atr_mult=2.0,
+                take_profit_atr_mult=3.0,
+                turnover_proxy_2d=np.abs(np.diff(np.clip(_cs_score, -1.0, 1.0), axis=0, prepend=0.0)),
+                valid_mask_2d=valid_mask,
+            )
+        )
+
+    # 10. Funding Z-Score Carry (F2)
+    for _fz_win, _fz_thr in [(48, 2.0), (96, 2.0), (168, 1.5)]:
+        _f_mean = _rolling_mean_2d(funding, window=_fz_win)
+        _f_std = _rolling_std_2d(funding, window=_fz_win)
+        _f_z = (funding - _f_mean) / np.maximum(_f_std, 1e-6)
+        _fz_side = np.zeros_like(close, dtype=np.int8)
+        _fz_side[_f_z >= _fz_thr] = -1   # extreme positive funding → mean reversion short
+        _fz_side[_f_z <= -_fz_thr] = 1   # extreme negative funding → long
+        _fz_score = np.clip(-_f_z / _fz_thr, -1.0, 1.0)
+        panels.append(
+            CandidateSignalPanel(
+                family="funding_zscore_carry",
+                variant=f"fzs_{_fz_win}",
+                params={"z_window": _fz_win, "z_threshold": _fz_thr},
+                datetimes=aligned.datetimes,
+                symbols=aligned.symbols,
+                signed_score_2d=_fz_score,
+                side_hint_2d=_fz_side,
+                expected_holding_bars=_fz_win // 2,
+                min_holding_bars=8,
+                stop_atr_mult=2.0,
+                take_profit_atr_mult=3.0,
+                turnover_proxy_2d=np.abs(np.diff(_fz_score, axis=0, prepend=0.0)),
+                valid_mask_2d=valid_mask,
+            )
+        )
+
+    # 11. Vol Regime Reversion (F3)
+    _price_dir = np.sign(np.diff(close, axis=0, prepend=close[:1]))
+    for _vr_win, _vr_thr in [(20, 2.0), (40, 1.5)]:
+        _atr_mean = _rolling_mean_2d(atr, window=_vr_win)
+        _atr_std = _rolling_std_2d(atr, window=_vr_win)
+        _vol_z = (atr - _atr_mean) / np.maximum(_atr_std, 1e-12)
+        _high_vol = _vol_z >= _vr_thr
+        _vr_side = np.zeros_like(close, dtype=np.int8)
+        _vr_side[_high_vol & (_price_dir > 0)] = -1  # high vol + up move → fade (short)
+        _vr_side[_high_vol & (_price_dir < 0)] = 1   # high vol + down move → fade (long)
+        _vr_score = np.clip(-_vol_z / _vr_thr * _price_dir, -1.0, 1.0)
+        panels.append(
+            CandidateSignalPanel(
+                family="vol_regime_reversion",
+                variant=f"vrr_{_vr_win}",
+                params={"vol_window": _vr_win, "vol_z_threshold": _vr_thr},
+                datetimes=aligned.datetimes,
+                symbols=aligned.symbols,
+                signed_score_2d=_vr_score,
+                side_hint_2d=_vr_side,
+                expected_holding_bars=_vr_win,
+                min_holding_bars=4,
+                stop_atr_mult=2.0,
+                take_profit_atr_mult=3.0,
+                turnover_proxy_2d=np.abs(np.diff(_vr_score, axis=0, prepend=0.0)),
+                valid_mask_2d=valid_mask,
+            )
+        )
+
+    # 12. BTC Correlation Regime (F4)
+    _close_ret = np.diff(np.log(np.maximum(close, 1e-12)), axis=0, prepend=0.0)
+    for _cr_win, _cr_thr in [(24, 0.6), (48, 0.5), (96, 0.5)]:
+        _corr_2d = _rolling_corr_with_col(_close_ret, btc_idx, _cr_win)
+        _btc_dir = np.sign(_close_ret[:, btc_idx : btc_idx + 1])  # BTC return direction [T,1]
+        # High-corr regime: follow BTC direction; score = corr * btc_direction
+        _cr_score = np.where(
+            np.isfinite(_corr_2d) & (_corr_2d >= _cr_thr),
+            _corr_2d * _btc_dir,
+            0.0,
+        )
+        _cr_side = np.zeros_like(close, dtype=np.int8)
+        _cr_valid = np.isfinite(_corr_2d) & (_corr_2d >= _cr_thr)
+        _cr_side[_cr_valid & (_btc_dir[:, 0:1].repeat(close.shape[1], axis=1) > 0)] = 1
+        _cr_side[_cr_valid & (_btc_dir[:, 0:1].repeat(close.shape[1], axis=1) < 0)] = -1
+        panels.append(
+            CandidateSignalPanel(
+                family="btc_corr_regime",
+                variant=f"bcr_{_cr_win}",
+                params={"corr_window": _cr_win, "corr_threshold": _cr_thr},
+                datetimes=aligned.datetimes,
+                symbols=aligned.symbols,
+                signed_score_2d=np.clip(_cr_score, -1.0, 1.0),
+                side_hint_2d=_cr_side,
+                expected_holding_bars=_cr_win // 4,
+                min_holding_bars=2,
+                stop_atr_mult=1.5,
+                take_profit_atr_mult=2.5,
+                turnover_proxy_2d=np.abs(np.diff(np.clip(_cr_score, -1.0, 1.0), axis=0, prepend=0.0)),
+                valid_mask_2d=valid_mask,
+            )
+        )
 
     return filter_rule_signal_panels(tuple(panels), cfg=cfg)
 
