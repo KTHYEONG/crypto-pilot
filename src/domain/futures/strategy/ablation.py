@@ -179,20 +179,25 @@ def run_candidate_ablation(
         )
         if labeled.empty:
             _logger.warning(
-                "[ABLATION][PROMO_FILTER] all candidates blocked; ML rows will produce zero weights"
+                "[ABLATION][PROMO_FILTER] all candidates blocked; "
+                "falling back to unfiltered events for ML training"
             )
     n_bars = aligned.close_2d.shape[0]
-    
+
+    # When promo filter blocks all variants, fall back to unfiltered data so ML
+    # variants still produce informative (non-crash) results for comparison.
+    _labeled_for_ml = labeled if not labeled.empty else labeled_unfiltered
+
     # Create fold splits (80% train, 20% validation)
     split_val = int(n_bars * 0.8)
     train_set = build_candidate_dataset(
-        labeled_events=labeled, aligned=aligned, cfg=cfg, split_start=0, split_end=split_val
+        labeled_events=_labeled_for_ml, aligned=aligned, cfg=cfg, split_start=0, split_end=split_val
     )
     valid_set = build_candidate_dataset(
-        labeled_events=labeled, aligned=aligned, cfg=cfg, split_start=split_val, split_end=n_bars
+        labeled_events=_labeled_for_ml, aligned=aligned, cfg=cfg, split_start=split_val, split_end=n_bars
     )
     full_set = build_candidate_dataset(
-        labeled_events=labeled, aligned=aligned, cfg=cfg, split_start=0, split_end=n_bars
+        labeled_events=_labeled_for_ml, aligned=aligned, cfg=cfg, split_start=0, split_end=n_bars
     )
 
     # 4. Train ML Models

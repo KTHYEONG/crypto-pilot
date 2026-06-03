@@ -39,8 +39,8 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
     panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
 
     assert isinstance(panels, tuple)
-    # 8 base families + 2 trend_ma variants + 2 trend_donchian variants + 1 rsi_reversion variant = 13
-    assert len(panels) == 13
+    # 8 base families (13 variants) + 4 new families (11 variants: F1x3+F2x3+F3x2+F4x3) = 24
+    assert len(panels) == 24
 
     expected_families = {
         "trend_ma",
@@ -51,6 +51,10 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
         "funding_carry",
         "oi_volume_impulse",
         "btc_regime_pullback",
+        "cross_sectional_momentum",
+        "funding_zscore_carry",
+        "vol_regime_reversion",
+        "btc_corr_regime",
     }
 
     for p in panels:
@@ -109,3 +113,55 @@ def test_candidate_panels_to_events_creates_dataframe() -> None:
         }
         assert required_cols.issubset(events.columns)
         assert (events["entry_idx"] > 0).all()
+
+
+def test_new_signal_families_shapes_and_side_hints() -> None:
+    # Arrange
+    aligned = _make_aligned(t=200)
+    cfg = CandidateStrategyConfig()
+
+    # Act
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+
+    # Assert: 각 신규 family 패널의 shape 및 side_hint 범위 검증
+    new_families = {
+        "cross_sectional_momentum",
+        "funding_zscore_carry",
+        "vol_regime_reversion",
+        "btc_corr_regime",
+    }
+    new_panels = [p for p in panels if p.family in new_families]
+    assert len(new_panels) == 11  # 3+3+2+3
+
+    for p in new_panels:
+        assert p.signed_score_2d.shape == (200, 2), f"{p.family}:{p.variant} score shape mismatch"
+        assert p.side_hint_2d.shape == (200, 2), f"{p.family}:{p.variant} side shape mismatch"
+        assert p.valid_mask_2d.shape == (200, 2)
+        # side_hint must be in {-1, 0, 1}
+        unique_sides = {int(v) for v in np.unique(p.side_hint_2d)}
+        assert unique_sides.issubset({-1, 0, 1}), (
+            f"{p.family}:{p.variant} invalid side_hint values: {unique_sides}"
+        )
+        # signed_score must be in [-1, 1]
+        finite_scores = p.signed_score_2d[np.isfinite(p.signed_score_2d)]
+        if finite_scores.size > 0:
+            assert float(np.max(np.abs(finite_scores))) <= 1.0 + 1e-6, (
+                f"{p.family}:{p.variant} score out of [-1,1]"
+            )
+
+
+def test_cross_sectional_momentum_no_lookahead() -> None:
+    # The first `lookback` rows should have side_hint == 0 (warmup guard).
+    aligned = _make_aligned(t=100)
+    cfg = CandidateStrategyConfig()
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+
+    cs_panels = [p for p in panels if p.family == "cross_sectional_momentum"]
+    assert len(cs_panels) == 3
+
+    for p in cs_panels:
+        lb = int(p.params["lookback"])
+        warmup_sides = p.side_hint_2d[:lb]
+        assert (warmup_sides == 0).all(), (
+            f"cross_sectional_momentum:{p.variant} has non-zero side_hint in warmup bars [0:{lb}]"
+        )
