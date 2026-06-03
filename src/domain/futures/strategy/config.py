@@ -114,6 +114,9 @@ class CandidateStrategyConfig:
     min_gate_probability_std: float = 0.03
     ml_fit_fraction: float = 0.60
     ml_calibration_fraction: float = 0.20
+    promotion_decision_split: Literal["fit", "calibration", "fit_calibration"] = "fit_calibration"
+    min_promotion_calibration_edge_bps: float = 1.0
+    min_promotion_calibration_obs: int = 100
     min_listing_age_days: int = 180
     min_candidate_obs: int = 200
     min_symbol_oos_blocks: int = 3
@@ -173,6 +176,12 @@ class CandidateStrategyConfig:
     turnover_penalty: float = 0.5
     concentration_penalty: float = 0.0
     expected_cost_bps: float = 24.0
+    edge_prediction_min_std_bps: float = 3.0
+    edge_prediction_min_positive_rate: float = 0.01
+    edge_prior_enabled: bool = True
+    edge_prior_min_obs: int = 100
+    edge_prior_shrinkage_obs: int = 500
+    edge_residual_model_enabled: bool = True
     max_drawdown_cap: float = 0.25
 
     def __post_init__(self) -> None:
@@ -203,6 +212,12 @@ class CandidateStrategyConfig:
             raise ValueError("ml_calibration_fraction must be in [0.0, 1.0)")
         if self.ml_fit_fraction + self.ml_calibration_fraction >= 1.0:
             raise ValueError("ml_fit_fraction + ml_calibration_fraction must be < 1.0")
+        if self.promotion_decision_split not in {"fit", "calibration", "fit_calibration"}:
+            raise ValueError("unsupported promotion_decision_split")
+        if self.min_promotion_calibration_edge_bps < 0.0:
+            raise ValueError("min_promotion_calibration_edge_bps must be non-negative")
+        if self.min_promotion_calibration_obs < 1:
+            raise ValueError("min_promotion_calibration_obs must be >= 1")
         if not (0.0 < self.kelly_fraction <= 0.25):
             raise ValueError("kelly_fraction must be in range (0.0, 0.25]")
         if self.cost_floor_bps < 0.0:
@@ -255,6 +270,14 @@ class CandidateStrategyConfig:
             raise ValueError("selection_q10_grid_bps values must be non-negative")
         if self.downside_penalty < 0.0 or self.turnover_penalty < 0.0 or self.concentration_penalty < 0.0:
             raise ValueError("penalty parameters must be non-negative")
+        if self.edge_prediction_min_std_bps < 0.0:
+            raise ValueError("edge_prediction_min_std_bps must be non-negative")
+        if not (0.0 <= self.edge_prediction_min_positive_rate <= 1.0):
+            raise ValueError("edge_prediction_min_positive_rate must be within [0.0, 1.0]")
+        if self.edge_prior_min_obs < 1:
+            raise ValueError("edge_prior_min_obs must be >= 1")
+        if self.edge_prior_shrinkage_obs < 1:
+            raise ValueError("edge_prior_shrinkage_obs must be >= 1")
         if not (0.0 < self.max_drawdown_cap <= 1.0):
             raise ValueError("max_drawdown_cap must be in (0.0, 1.0]")
         for variant in self.enabled_candidate_variants:

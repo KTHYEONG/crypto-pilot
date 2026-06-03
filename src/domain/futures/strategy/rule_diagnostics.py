@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
@@ -24,6 +25,9 @@ class RuleDiagnosticsResult:
     decision: dict[str, float | int | str]
     recommended_keep_variants: tuple[str, ...]
     recommended_flip_variants: tuple[str, ...]
+    recommendation_basis: str
+    recommendation_split: tuple[int, int]
+    report_split: tuple[int, int]
 
 
 def _safe_spearman(signal: np.ndarray, target: np.ndarray) -> float:
@@ -114,6 +118,24 @@ def _split_index(n_bars: int) -> int:
     return max(1, int(n_bars * 0.8))
 
 
+def _window_mask(entry_idx: np.ndarray, start: int, end: int) -> np.ndarray:
+    """Return a half-open interval mask."""
+    return (entry_idx >= start) & (entry_idx < end)
+
+
+def _resolve_report_window(
+    *,
+    n_bars: int,
+    report_start: int | None,
+    report_end: int | None,
+) -> tuple[int, int]:
+    """Return the report window, defaulting to the legacy 80/20 OOS split."""
+    if report_start is None or report_end is None:
+        split_idx = _split_index(n_bars)
+        return split_idx, n_bars
+    return report_start, report_end
+
+
 def _edge_summary_from_frame(frame: pd.DataFrame, *, cfg: CandidateStrategyConfig) -> dict[str, float]:
     """Compute edge summary metrics for a grouped frame."""
     edge = frame["edge_after_hurdle_bps"].to_numpy(copy=False)
@@ -151,7 +173,8 @@ def _summarize_view(
     view: str,
     min_obs: int,
     cfg: CandidateStrategyConfig,
-    split_idx: int,
+    report_start: int,
+    report_end: int,
 ) -> pd.DataFrame:
     """Summarize a view of rule events."""
     group_cols: list[str]
@@ -171,8 +194,8 @@ def _summarize_view(
         key = _group_key(view, row)
         side = group["side"].to_numpy(copy=False)
         entry_idx = group["entry_idx"].to_numpy(copy=False)
-        train_group = group.loc[entry_idx < split_idx]
-        oos_group = group.loc[entry_idx >= split_idx]
+        train_group = group.loc[entry_idx < report_start]
+        oos_group = group.loc[_window_mask(entry_idx, report_start, report_end)]
         full_metrics = _edge_summary_from_frame(group, cfg=cfg)
         train_metrics = _edge_summary_from_frame(train_group, cfg=cfg) if not train_group.empty else {
             "mean_edge_bps": float("nan"),
@@ -273,6 +296,73 @@ def _summarize_view(
     return out.sort_values(["mean_edge_bps", "group"], ascending=[False, True]).reset_index(drop=True)
 
 
+def _summarize_recommendation_variants(
+    *,
+    events: pd.DataFrame,
+    min_obs: int,
+    cfg: CandidateStrategyConfig,
+    recommendation_start: int,
+    recommendation_end: int,
+    side_flip_lookup: Mapping[str, tuple[float | None, float | None]] | None = None,
+) -> pd.DataFrame:
+    """Summarize variant metrics for the recommendation window only."""
+    records: list[dict[str, float | int | str]] = []
+    grouped = events.groupby(["family", "variant"], sort=False, dropna=False)
+    for (family, variant), group in grouped:
+        entry_idx = group["entry_idx"].to_numpy(copy=False)
+        rec_group = group.loc[_window_mask(entry_idx, recommendation_start, recommendation_end)]
+        if rec_group.empty:
+            continue
+        rec_metrics = _edge_summary_from_frame(rec_group, cfg=cfg)
+        rec_n = int(rec_group.shape[0])
+        key = f"{family}:{variant}"
+        flip_delta, flip_mean = (None, None)
+        if side_flip_lookup is not None:
+            flip_delta, flip_mean = side_flip_lookup.get(f"variant={key}", (None, None))
+        records.append(
+            {
+                "group": f"variant={key}",
+                "n": int(group.shape[0]),
+                "oos_n": rec_n,
+                "oos_mean_edge_bps": float(rec_metrics["mean_edge_bps"]),
+                "oos_pct_edge_pos": float(rec_metrics["pct_edge_pos"]),
+                "oos_payoff_ratio": float(rec_metrics["payoff_ratio"]),
+                "oos_q10_shortfall_fail_rate": float(rec_metrics["q10_shortfall_fail_rate"]),
+                "edge_stability_bps": float("nan"),
+                "candidate_action": _candidate_action(
+                    n=rec_n,
+                    min_obs=min_obs,
+                    mean_edge_bps=float(rec_metrics["mean_edge_bps"]),
+                    pct_edge_pos=float(rec_metrics["pct_edge_pos"]),
+                    payoff_ratio=float(rec_metrics["payoff_ratio"]),
+                    q10_shortfall_fail_rate=float(rec_metrics["q10_shortfall_fail_rate"]),
+                    min_hit_rate=cfg.min_rule_hit_rate,
+                    min_payoff_ratio=cfg.min_variant_oos_payoff_ratio,
+                    max_q10_fail_rate=cfg.max_variant_oos_q10_fail_rate,
+                    flip_delta_bps=flip_delta,
+                    flip_mean_edge_bps=flip_mean,
+                ),
+            }
+        )
+    if not records:
+        return pd.DataFrame(
+            columns=[
+                "group",
+                "n",
+                "oos_n",
+                "oos_mean_edge_bps",
+                "oos_pct_edge_pos",
+                "oos_payoff_ratio",
+                "oos_q10_shortfall_fail_rate",
+                "edge_stability_bps",
+                "candidate_action",
+            ]
+        )
+    return pd.DataFrame.from_records(records).sort_values(
+        ["oos_mean_edge_bps", "group"], ascending=[False, True]
+    ).reset_index(drop=True)
+
+
 def _summarize_side_flip(
     *,
     original: pd.DataFrame,
@@ -280,11 +370,26 @@ def _summarize_side_flip(
     view: str,
     min_obs: int,
     cfg: CandidateStrategyConfig,
-    split_idx: int,
+    report_start: int,
+    report_end: int,
 ) -> pd.DataFrame:
     """Compare original and side-flipped diagnostics for a view."""
-    orig_summary = _summarize_view(events=original, view=view, min_obs=min_obs, cfg=cfg, split_idx=split_idx)
-    flip_summary = _summarize_view(events=flipped, view=view, min_obs=min_obs, cfg=cfg, split_idx=split_idx)
+    orig_summary = _summarize_view(
+        events=original,
+        view=view,
+        min_obs=min_obs,
+        cfg=cfg,
+        report_start=report_start,
+        report_end=report_end,
+    )
+    flip_summary = _summarize_view(
+        events=flipped,
+        view=view,
+        min_obs=min_obs,
+        cfg=cfg,
+        report_start=report_start,
+        report_end=report_end,
+    )
 
     flip_map = flip_summary.set_index("group") if not flip_summary.empty else pd.DataFrame()
     records: list[dict[str, float | int | str]] = []
@@ -398,39 +503,48 @@ def _log_variant_top_block(summary: pd.DataFrame, *, top_k: int) -> None:
     """Emit top variant diagnostics as a formatted table at INFO level."""
     if summary.empty:
         return
-    
+
     columns = summary.columns
     sort_col = "oos_mean_edge_bps" if "oos_mean_edge_bps" in columns else "mean_edge_bps"
     top = summary.sort_values([sort_col, "group"], ascending=[False, True]).head(top_k)
 
     # Use more intuitive header names
-    header = f"| {'Rank':<4} | {'Strategy Name':<35} | {'Sample (OOS)':<12} | {'Profit(bps)':>11} | {'Win Rate':>8} | {'P/L':>6} | {'Score':>6} | {'Action':<6} |"
+    header = (
+        f"| {'Rank':<4} | {'Strategy Name':<35} | {'Sample (OOS)':<12} | "
+        f"{'Profit(bps)':>11} | {'Win Rate':>8} | {'P/L':>6} | {'Score':>6} | {'Action':<6} |"
+    )
     width = len(header)
-    
+
     title = "[CANDIDATE TOP STRATEGIES] "
     _logger.info("\n" + title + "-" * (width - len(title)))
     _logger.info(header)
-    _logger.info(f"| {'-'*4:<4} | {'-'*35:<35} | {'-'*12:<12} | {'-'*11:>11} | {'-'*8:>8} | {'-'*6:>6} | {'-'*6:>6} | {'-'*6:<6} |")
+    _logger.info(
+        f"| {'-'*4:<4} | {'-'*35:<35} | {'-'*12:<12} | {'-'*11:>11} | "
+        f"{'-'*8:>8} | {'-'*6:>6} | {'-'*6:>6} | {'-'*6:<6} |"
+    )
 
     for idx, row in enumerate(top.itertuples(index=False), start=1):
         key = str(row.group).removeprefix("variant=")
         if len(key) > 35:
             key = key[:32] + "..."
-            
+
         n_total = int(row.n)
         n_oos = int(getattr(row, "oos_n", 0))
         n_str = f"{n_total} ({n_oos})"
-        
+
         profit = f"{float(getattr(row, 'oos_mean_edge_bps', row.mean_edge_bps)):>11.1f}"
         win_rate = f"{float(getattr(row, 'oos_pct_edge_pos', 0.0)) * 100:>7.1f}%"
         pl_ratio = f"{float(getattr(row, 'oos_payoff_ratio', 0.0)):>6.2f}"
         score = f"{float(getattr(row, 'oos_rank_ic', row.spearman_score_edge)):>6.3f}"
-        
+
         status_raw = str(row.candidate_action)
         action = "KEEP" if "KEEP" in status_raw else ("FLIP" if "FLIP" in status_raw else "DROP")
-        
-        _logger.info(f"| {idx:<4} | {key:<35} | {n_str:<12} | {profit} | {win_rate} | {pl_ratio} | {score} | {action:<6} |")
-    
+
+        _logger.info(
+            f"| {idx:<4} | {key:<35} | {n_str:<12} | {profit} | "
+            f"{win_rate} | {pl_ratio} | {score} | {action:<6} |"
+        )
+
     _logger.info("-" * width)
 
 
@@ -520,6 +634,10 @@ def compute_rule_diagnostics(
     cfg: CandidateStrategyConfig,
     min_obs: int = 100,
     silent: bool = False,
+    recommendation_start: int | None = None,
+    recommendation_end: int | None = None,
+    report_start: int | None = None,
+    report_end: int | None = None,
 ) -> RuleDiagnosticsResult:
     """Compute family/variant/side diagnostics for rule alpha events."""
     if not labeled_events.empty:
@@ -583,7 +701,18 @@ def compute_rule_diagnostics(
             "best_group": "",
             "best_mean_edge": float("nan"),
         }
-        return RuleDiagnosticsResult(empty, empty, empty, empty_side, empty_decision, (), ())
+        return RuleDiagnosticsResult(
+            empty,
+            empty,
+            empty,
+            empty_side,
+            empty_decision,
+            (),
+            (),
+            "legacy_oos",
+            (0, 0),
+            (0, 0),
+        )
 
     required = {
         "family",
@@ -604,28 +733,44 @@ def compute_rule_diagnostics(
     if missing:
         raise ValueError(f"missing required diagnostic columns: {sorted(missing)}")
 
-    split_idx = _split_index(int(aligned.close_2d.shape[0]))
+    n_bars = int(aligned.close_2d.shape[0])
+    resolved_report_start, resolved_report_end = _resolve_report_window(
+        n_bars=n_bars,
+        report_start=report_start,
+        report_end=report_end,
+    )
+    resolved_recommendation_start = recommendation_start
+    resolved_recommendation_end = recommendation_end
+    recommendation_basis = "legacy_oos"
+    if resolved_recommendation_start is None or resolved_recommendation_end is None:
+        resolved_recommendation_start = resolved_report_start
+        resolved_recommendation_end = resolved_report_end
+    else:
+        recommendation_basis = str(cfg.promotion_decision_split)
 
     by_family = _summarize_view(
         events=labeled_events,
         view="family",
         min_obs=min_obs,
         cfg=cfg,
-        split_idx=split_idx,
+        report_start=resolved_report_start,
+        report_end=resolved_report_end,
     )
     by_variant = _summarize_view(
         events=labeled_events,
         view="variant",
         min_obs=min_obs,
         cfg=cfg,
-        split_idx=split_idx,
+        report_start=resolved_report_start,
+        report_end=resolved_report_end,
     )
     by_family_side = _summarize_view(
         events=labeled_events,
         view="family_side",
         min_obs=min_obs,
         cfg=cfg,
-        split_idx=split_idx,
+        report_start=resolved_report_start,
+        report_end=resolved_report_end,
     )
 
     flipped = labeled_events.copy()
@@ -641,14 +786,6 @@ def compute_rule_diagnostics(
         if "entry_idx" in flipped_labeled.columns:
             flipped_labeled["entry_idx"] = pd.to_numeric(flipped_labeled["entry_idx"], errors="coerce").astype(np.int64)
 
-    flipped_by_variant = _summarize_view(
-        events=flipped_labeled,
-        view="variant",
-        min_obs=min_obs,
-        cfg=cfg,
-        split_idx=split_idx,
-    )
-
     side_flip_frames = [
         _summarize_side_flip(
             original=labeled_events,
@@ -656,7 +793,8 @@ def compute_rule_diagnostics(
             view="family",
             min_obs=min_obs,
             cfg=cfg,
-            split_idx=split_idx,
+            report_start=resolved_report_start,
+            report_end=resolved_report_end,
         ),
         _summarize_side_flip(
             original=labeled_events,
@@ -664,7 +802,8 @@ def compute_rule_diagnostics(
             view="variant",
             min_obs=min_obs,
             cfg=cfg,
-            split_idx=split_idx,
+            report_start=resolved_report_start,
+            report_end=resolved_report_end,
         ),
         _summarize_side_flip(
             original=labeled_events,
@@ -672,7 +811,8 @@ def compute_rule_diagnostics(
             view="family_side",
             min_obs=min_obs,
             cfg=cfg,
-            split_idx=split_idx,
+            report_start=resolved_report_start,
+            report_end=resolved_report_end,
         ),
     ]
     side_flip = pd.concat(side_flip_frames, axis=0, ignore_index=True) if side_flip_frames else pd.DataFrame()
@@ -711,7 +851,11 @@ def compute_rule_diagnostics(
                 max_q10_fail_rate=cfg.max_variant_oos_q10_fail_rate,
                 flip_delta_bps=float(flip_row.delta_mean_edge_bps) if flip_row is not None else None,
                 flip_mean_edge_bps=float(flip_row.flip_mean_edge_bps) if flip_row is not None else None,
-                train_mean_edge_bps=float(getattr(row, "train_mean_edge_bps", float("nan"))),
+                train_mean_edge_bps=float(
+                    getattr(row, "train_mean_edge_bps", float("nan"))
+                    if recommendation_start is None or recommendation_end is None
+                    else float("nan")
+                ),
             )
             actions.append(action)
         updated = table.copy()
@@ -721,9 +865,28 @@ def compute_rule_diagnostics(
     by_family = _apply_action(by_family)
     by_variant = _apply_action(by_variant)
     by_family_side = _apply_action(by_family_side)
+    side_flip_rec_lookup = {
+        str(row.group): (float(row.delta_mean_edge_bps), float(row.flip_mean_edge_bps))
+        for row in side_flip.itertuples(index=False)
+    } if not side_flip.empty else {}
+    recommendation_variant_summary = _summarize_recommendation_variants(
+        events=labeled_events,
+        min_obs=min_obs,
+        cfg=cfg,
+        recommendation_start=resolved_recommendation_start,
+        recommendation_end=resolved_recommendation_end,
+        side_flip_lookup=side_flip_rec_lookup,
+    )
+    recommendation_flipped_summary = _summarize_recommendation_variants(
+        events=flipped_labeled,
+        min_obs=min_obs,
+        cfg=cfg,
+        recommendation_start=resolved_recommendation_start,
+        recommendation_end=resolved_recommendation_end,
+    )
     recommended_keep_variants, recommended_flip_variants = _build_recommendations(
-        by_variant=by_variant,
-        flipped_by_variant=flipped_by_variant,
+        by_variant=recommendation_variant_summary,
+        flipped_by_variant=recommendation_flipped_summary,
         cfg=cfg,
     )
 
@@ -745,6 +908,14 @@ def compute_rule_diagnostics(
         _log_side_flip_block(side_flip=side_flip)
         _log_decision_block(decision)
         _logger.debug(
+            "[DIAG][RULE_RECOMMEND_BASIS] basis=%s recommend=[%d,%d) report=[%d,%d)",
+            recommendation_basis,
+            resolved_recommendation_start,
+            resolved_recommendation_end,
+            resolved_report_start,
+            resolved_report_end,
+        )
+        _logger.debug(
             "[DIAG][RULE_RECOMMEND] keep=%s flip=%s",
             ",".join(recommended_keep_variants) if recommended_keep_variants else "",
             ",".join(recommended_flip_variants) if recommended_flip_variants else "",
@@ -758,4 +929,7 @@ def compute_rule_diagnostics(
         decision=decision,
         recommended_keep_variants=recommended_keep_variants,
         recommended_flip_variants=recommended_flip_variants,
+        recommendation_basis=recommendation_basis,
+        recommendation_split=(resolved_recommendation_start, resolved_recommendation_end),
+        report_split=(resolved_report_start, resolved_report_end),
     )
