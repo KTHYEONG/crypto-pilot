@@ -76,6 +76,7 @@ def _candidate_action(
     max_q10_fail_rate: float,
     flip_delta_bps: float | None = None,
     flip_mean_edge_bps: float | None = None,
+    train_mean_edge_bps: float | None = None,
 ) -> str:
     """Classify a diagnostic group."""
     if n < min_obs:
@@ -86,6 +87,16 @@ def _candidate_action(
             and q10_shortfall_fail_rate <= max_q10_fail_rate
             and (pct_edge_pos >= min_hit_rate or payoff_ratio >= min_payoff_ratio)
         ):
+            # IS→OOS consistency guard: reject only when IS was positive but OOS turned
+            # negative (genuine overfitting signal). IS-negative → OOS-positive is allowed
+            # — the strategy improved out-of-sample, which is a desirable regime shift.
+            if (
+                train_mean_edge_bps is not None
+                and np.isfinite(train_mean_edge_bps)
+                and train_mean_edge_bps > 0.0
+                and mean_edge_bps < 0.0
+            ):
+                return "DROP_OR_REWORK"
             return "KEEP_CANDIDATE"
         if (
             flip_delta_bps is not None
@@ -413,7 +424,7 @@ def _log_variant_top_block(summary: pd.DataFrame, *, top_k: int) -> None:
         profit = f"{float(getattr(row, 'oos_mean_edge_bps', row.mean_edge_bps)):>11.1f}"
         win_rate = f"{float(getattr(row, 'oos_pct_edge_pos', 0.0)) * 100:>7.1f}%"
         pl_ratio = f"{float(getattr(row, 'oos_payoff_ratio', 0.0)):>6.2f}"
-        score = f"{float(row.spearman_score_edge):>6.3f}"
+        score = f"{float(getattr(row, 'oos_rank_ic', row.spearman_score_edge)):>6.3f}"
         
         status_raw = str(row.candidate_action)
         action = "KEEP" if "KEEP" in status_raw else ("FLIP" if "FLIP" in status_raw else "DROP")
@@ -430,7 +441,6 @@ def _meets_recommendation_thresholds(row: pd.Series, cfg: CandidateStrategyConfi
         int(row.get("oos_n", 0)) >= cfg.min_variant_oos_obs
         and float(row.get("oos_mean_edge_bps", float("nan"))) >= cfg.min_variant_oos_edge_bps
         and float(row.get("oos_q10_shortfall_fail_rate", 1.0)) <= cfg.max_variant_oos_q10_fail_rate
-        and float(row.get("oos_rank_ic", 0.0)) >= cfg.min_oos_rank_ic
         and edge_decay_ok
         and (
             float(row.get("oos_pct_edge_pos", 0.0)) >= cfg.min_variant_oos_hit_rate
@@ -677,18 +687,31 @@ def compute_rule_diagnostics(
         actions: list[str] = []
         for row in table.itertuples(index=False):
             flip_row = side_flip_lookup.get(str(row.group))
+            _oos_n = int(getattr(row, "oos_n", 0))
+            _full_edge = float(row.mean_edge_bps)
+            _full_pct = float(row.pct_edge_pos)
+            _full_payoff = float(row.payoff_ratio)
+            _full_q10 = float(row.q10_shortfall_fail_rate)
+
+            def _pick(oos_val: float, full_val: float, has_oos: bool) -> float:
+                return (oos_val if np.isfinite(oos_val) else full_val) if has_oos else full_val
+
+            _has_oos = _oos_n > 0
             action = _candidate_action(
                 n=int(row.n),
                 min_obs=min_obs,
-                mean_edge_bps=float(row.mean_edge_bps),
-                pct_edge_pos=float(row.pct_edge_pos),
-                payoff_ratio=float(row.payoff_ratio),
-                q10_shortfall_fail_rate=float(row.q10_shortfall_fail_rate),
+                mean_edge_bps=_pick(float(getattr(row, "oos_mean_edge_bps", float("nan"))), _full_edge, _has_oos),
+                pct_edge_pos=_pick(float(getattr(row, "oos_pct_edge_pos", float("nan"))), _full_pct, _has_oos),
+                payoff_ratio=_pick(float(getattr(row, "oos_payoff_ratio", float("nan"))), _full_payoff, _has_oos),
+                q10_shortfall_fail_rate=_pick(
+                    float(getattr(row, "oos_q10_shortfall_fail_rate", float("nan"))), _full_q10, _has_oos
+                ),
                 min_hit_rate=cfg.min_rule_hit_rate,
                 min_payoff_ratio=cfg.min_variant_oos_payoff_ratio,
                 max_q10_fail_rate=cfg.max_variant_oos_q10_fail_rate,
                 flip_delta_bps=float(flip_row.delta_mean_edge_bps) if flip_row is not None else None,
                 flip_mean_edge_bps=float(flip_row.flip_mean_edge_bps) if flip_row is not None else None,
+                train_mean_edge_bps=float(getattr(row, "train_mean_edge_bps", float("nan"))),
             )
             actions.append(action)
         updated = table.copy()

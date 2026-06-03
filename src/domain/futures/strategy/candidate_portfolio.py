@@ -249,11 +249,13 @@ def select_candidate_events_for_portfolio(
     elif cfg.selection_policy == "validation_quantile":
         mask = catastrophic_mask & (df["mu_net_decision_bps"] >= 0.0) & utility_mask
     else:
-        # utility_topk: safety filter then rank by utility, keep top fraction
-        eligible = catastrophic_mask & (df["mu_net_decision_bps"] >= 0.0)
+        # utility_topk: absolute cost-fraction floor + relative rank among survivors
+        # floor prevents selecting garbage candidates when all signals are weak
+        breakeven_floor = cfg.min_net_floor_cost_fraction * cfg.cost_floor_bps
+        eligible = catastrophic_mask & (df["mu_net_decision_bps"] >= breakeven_floor)
         n_eligible = int(eligible.sum())
         if n_eligible == 0:
-            mask = eligible
+            mask = eligible  # honest zero exposure — do not force trade
         else:
             n_keep = max(1, math.ceil(n_eligible * cfg.selection_top_quantile))
             utility_vals = pd.to_numeric(df.loc[eligible, "utility_score"], errors="coerce")
