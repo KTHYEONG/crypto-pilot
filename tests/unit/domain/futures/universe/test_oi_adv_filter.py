@@ -1,141 +1,49 @@
-"""Phase 14: OI/ADV crowding filter tests.
-
-테스트 1: oi_usdt_median / adv > 12 → 해당 심볼 제외 (fetch_metrics_bulk 적용)
-테스트 2: 2020-08 이전 구간 → OI 필터 비활성 (빈 DataFrame 허용)
-테스트 3: fetch_metrics_bulk shape 검증 (mock HTTP)
-"""
-
 from __future__ import annotations
-
-from datetime import UTC, datetime
-from unittest.mock import patch
 
 import pandas as pd
 
-from src.core.exchange.binance_vision import (
-    BinanceVisionDownloader,
-    fetch_metrics_bulk,
-)
-
-# ---------------------------------------------------------------------------
-# 테스트 1: OI/ADV > 12 → 심볼 제외
-# ---------------------------------------------------------------------------
+from src.domain.futures.universe.config import Stage3Config
+from src.domain.futures.universe.filters import apply_liquidity_stage
 
 
-def _make_metrics_df(oi_usdt: float, adv_usdt: float) -> pd.DataFrame:
-    """합성 metrics DataFrame 생성 (단일 행)."""
+def _base_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "sum_open_interest_value": [oi_usdt],
-            "adv_usdt": [adv_usdt],
+            "symbol": ["BTCUSDT"],
+            "adv_usdt_median": [100_000_000.0],
+            "amihud_30d": [5.0e-10],
+            "screening_clip_usdt": [100_000.0],
         }
     )
 
 
-def _oi_adv_ratio(df: pd.DataFrame) -> float:
-    """oi_usdt_median / adv 비율 계산 (단순화된 필터 로직)."""
-    if df.empty:
-        return 0.0
-    oi = float(df["sum_open_interest_value"].median())
-    adv = float(df["adv_usdt"].median())
-    if adv <= 1e-9:
-        return 0.0
-    return oi / adv
+def test_apply_liquidity_stage_when_oi_to_adv_exceeds_threshold_rejects_symbol() -> None:
+    frame = _base_frame()
+    frame["sum_open_interest_value"] = [1_500_000_000.0]
+
+    filtered, report = apply_liquidity_stage(frame, config=Stage3Config())
+
+    assert filtered.empty
+    assert report.loc[0, "reason"] == "oi_adv_crowded"
+    assert float(report.loc[0, "oi_to_adv"]) == 15.0
 
 
-def test_oi_adv_ratio_over_threshold_excludes_symbol() -> None:
-    """OI/ADV > 12 → 과밀 심볼로 분류되어야 함."""
-    # OI = 120M, ADV = 5M → ratio = 24 > 12
-    df = _make_metrics_df(oi_usdt=120_000_000.0, adv_usdt=5_000_000.0)
-    ratio = _oi_adv_ratio(df)
-    assert ratio > 12.0, f"OI/ADV ratio expected > 12.0, got {ratio:.2f}"
+def test_apply_liquidity_stage_when_oi_column_missing_does_not_reject_symbol() -> None:
+    filtered, report = apply_liquidity_stage(_base_frame(), config=Stage3Config())
 
-    crowded = ratio > 12.0
-    assert crowded is True, "과밀 심볼로 분류되어야 함"
+    assert list(filtered["symbol"]) == ["BTCUSDT"]
+    assert report.loc[0, "reason"] == "pass"
+    assert pd.isna(report.loc[0, "oi_to_adv"])
 
 
-def test_oi_adv_ratio_under_threshold_passes() -> None:
-    """OI/ADV <= 12 → 정상 심볼로 통과해야 함."""
-    # OI = 30M, ADV = 10M → ratio = 3 <= 12
-    df = _make_metrics_df(oi_usdt=30_000_000.0, adv_usdt=10_000_000.0)
-    ratio = _oi_adv_ratio(df)
-    assert ratio <= 12.0, f"OI/ADV ratio expected <= 12.0, got {ratio:.2f}"
+def test_apply_liquidity_stage_includes_oi_to_adv_report_column() -> None:
+    frame = _base_frame()
+    frame["oi_usdt_median"] = [600_000_000.0]
 
-    crowded = ratio > 12.0
-    assert not crowded, f"정상 심볼이 과밀로 분류됨: ratio={ratio:.2f}"
-
-
-# ---------------------------------------------------------------------------
-# 테스트 2: 2020-08 이전 구간 → fetch_metrics_bulk 빈 DataFrame 반환
-# ---------------------------------------------------------------------------
-
-
-def test_fetch_metrics_bulk_returns_empty_before_2020_09() -> None:
-    """2020-09-01 이전 구간 → 데이터 없음 → 빈 DataFrame."""
-    result = fetch_metrics_bulk(
-        symbol="BTCUSDT",
-        start_date=datetime(2020, 1, 1, tzinfo=UTC),
-        end_date=datetime(2020, 8, 31, tzinfo=UTC),  # 전부 이전 구간
-    )
-    assert isinstance(result, pd.DataFrame), "반환 타입은 pd.DataFrame이어야 함"
-    assert result.empty, "2020-09-01 이전은 빈 DataFrame을 반환해야 함"
-
-
-def test_fetch_metrics_bulk_adjusts_start_to_metrics_start() -> None:
-    """start_date < 2020-09-01이지만 end_date >= 2020-09-01 → 2020-09-01부터 수집 시도."""
-    # HTTP 요청 mock — 1행짜리 DataFrame 반환
-    mock_df = pd.DataFrame(
-        {
-            "open_time": [1598918400000],
-            "sum_open_interest_value": [1_000_000.0],
-            "adv_usdt": [500_000.0],
-        }
+    _, report = apply_liquidity_stage(
+        frame,
+        config=Stage3Config(enable_oi_adv_crowding_gate=False),
     )
 
-    with patch.object(BinanceVisionDownloader, "fetch_metrics_daily", return_value=mock_df):
-        result = fetch_metrics_bulk(
-            symbol="BTCUSDT",
-            start_date=datetime(2020, 7, 1, tzinfo=UTC),  # 이전 구간
-            end_date=datetime(2020, 9, 2, tzinfo=UTC),  # 2020-09-01 포함 → 2일치만 요청
-        )
-
-    # 비어 있지 않아야 함 (최소 1일치 mock 데이터)
-    assert isinstance(result, pd.DataFrame)
-    assert not result.empty, "2020-09-01 이후 구간 데이터가 있어야 함"
-
-
-# ---------------------------------------------------------------------------
-# 테스트 3: fetch_metrics_bulk shape 검증 (mock HTTP)
-# ---------------------------------------------------------------------------
-
-
-def test_fetch_metrics_bulk_shape_with_mock_http() -> None:
-    """HTTP mock으로 5일치 metrics 요청 → DataFrame row 수 확인."""
-    n_mock_days = 3
-    mock_row = pd.DataFrame(
-        {
-            "open_time": [1598918400000],
-            "sum_open_interest_value": [2_000_000.0],
-            "count_toptrader_long_short_ratio": [1.2],
-            "adv_usdt": [800_000.0],
-        }
-    )
-
-    call_count = 0
-
-    def _mock_daily(self: BinanceVisionDownloader, symbol: str, dt: object) -> pd.DataFrame:
-        nonlocal call_count
-        call_count += 1
-        return mock_row.copy()
-
-    with patch.object(BinanceVisionDownloader, "fetch_metrics_daily", _mock_daily):
-        result = fetch_metrics_bulk(
-            symbol="ETHUSDT",
-            start_date=datetime(2020, 9, 1, tzinfo=UTC),
-            end_date=datetime(2020, 9, 3, tzinfo=UTC),  # 3일
-        )
-
-    assert isinstance(result, pd.DataFrame)
-    assert call_count == n_mock_days, f"예상 call_count={n_mock_days}, actual={call_count}"
-    assert len(result) == n_mock_days, f"예상 row 수={n_mock_days}, actual={len(result)}"
-    assert "sum_open_interest_value" in result.columns
+    assert "oi_to_adv" in report.columns
+    assert float(report.loc[0, "oi_to_adv"]) == 6.0

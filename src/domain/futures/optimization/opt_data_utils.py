@@ -373,8 +373,13 @@ def _append_stage_integrity(
     fillna_cols: list[str] | None = None,
 ) -> None:
     rec: dict[str, Any] = {"symbol": symbol, "timeframe": timeframe, "stage": stage}
-    if stage in {"raw", "merged"}:
+    # [Optimization] Skip expensive integrity check for "raw" stage to reduce CPU/GIL bottleneck.
+    # We only care about the "merged" (final) state for the audit report.
+    if stage == "merged":
         rec.update(summarize_ohlcv_collection_integrity(df, timeframe=timeframe))
+    elif stage == "raw":
+        # Minimal metrics for raw stage
+        rec.update({"rows": float(len(df)), "cols": float(len(df.columns))})
     else:
         rec.update(summarize_dataframe_integrity(df, timeframe=timeframe))
     if fillna_cols:
@@ -661,7 +666,9 @@ def load_single_symbol_data(
                 break
 
             df.reset_index(drop=True, inplace=True)
-            df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+            # [Optimization] Avoid redundant to_datetime if already normalized by collector
+            if not pd.api.types.is_datetime64_any_dtype(df["datetime"]):
+                df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
 
             is_start_dt = pd.Timestamp(start, tz="UTC")
             is_end_dt = pd.Timestamp(is_end, tz="UTC")
@@ -770,7 +777,9 @@ def load_futures_data_maps_for_symbols(
     # [Fix] Filter out non-ASCII symbols before processing
     symbols = [s for s in symbols if all(ord(c) < 128 for c in s)]
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    # [Optimization] Use ProcessPoolExecutor to bypass GIL for CPU-bound pandas operations (merge, integrity check).
+    # Since we are loading 90+ symbols, the CPU overhead of thread serialization is significant.
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max(1, (os.cpu_count() or 4) // 2)) as executor:
         futures = [
             executor.submit(
                 load_single_symbol_data,
@@ -833,9 +842,9 @@ def load_futures_data_maps_for_symbols(
             audit_msg += f" | !! FAIL: {', '.join(failed_tfs[:3])}"
         else:
             audit_msg += " | ok"
-        _logger.info(audit_msg)
+        _logger.debug(audit_msg)
     else:
-        _logger.info(".. AUDIT: req=%d load=%d coverage=%.2f | ok (0 rows)", 
+        _logger.debug(".. AUDIT: req=%d load=%d coverage=%.2f | ok (0 rows)", 
                      requested_count, loaded_count, float(loaded_count / max(requested_count, 1)))
 
     return data_maps, oos_data_maps, valid_symbols

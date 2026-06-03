@@ -55,7 +55,7 @@ def _log_edge_target_distribution(*, split: str, dataset: CandidateDataset, cfg:
     finite_edge = y_edge[np.isfinite(y_edge)]
     finite_q10 = y_q10[np.isfinite(y_q10)]
     _logger = logging.getLogger(__name__)
-    _logger.info(
+    _logger.debug(
         (
             "[DIAG][EDGE_TARGET] split=%s n=%d mean=%.1f median=%.1f "
             "p10=%.1f p90=%.1f pct_pos=%.3f q10_mean=%.1f q10_pass=%.3f"
@@ -98,7 +98,7 @@ def _log_edge_target_variants(*, split: str, dataset: CandidateDataset, cfg: Can
 
     top = sorted(rows, key=lambda item: item[1], reverse=True)[: _diagnostic_top_k(cfg)]
     for key, mean_edge, pct_pos, q10_pass in top:
-        logging.getLogger(__name__).info(
+        logging.getLogger(__name__).debug(
             "[DIAG][EDGE_TARGET_VARIANT] split=%s key=%s mean=%.1f pct_pos=%.3f q10_pass=%.3f",
             split,
             key,
@@ -143,7 +143,7 @@ def _log_edge_prediction_variants(
 
     top = sorted(rows, key=lambda item: item[1], reverse=True)[: _diagnostic_top_k(cfg)]
     for key, mean_mu, max_mu, pct_mu_pass, pct_q10_pass, n in top:
-        logging.getLogger(__name__).info(
+        logging.getLogger(__name__).debug(
             "[DIAG][EDGE_VARIANT_TOP] key=%s n=%d mean_mu=%.1f max_mu=%.1f pct_mu_pass=%.3f pct_q10_pass=%.3f",
             key,
             n,
@@ -271,12 +271,30 @@ def fit_candidate_edge_models(
 
 def predict_candidate_edges(
     *,
-    models: CandidateEdgeModels,
+    models: CandidateEdgeModels | None,
     dataset: CandidateDataset,
     p_pass: NDArray[np.float64],
     cfg: CandidateStrategyConfig,
 ) -> CandidateModelOutput:
     """Return expected edge, downside quantiles, and utility scores."""
+    if models is None or dataset.X.shape[0] == 0:
+        zeros = np.zeros(dataset.X.shape[0], dtype=np.float64)
+        return CandidateModelOutput(
+            events=None,
+            p_pass=p_pass.astype(np.float64, copy=False),
+            mu_gross_bps=zeros,
+            mu_net_decision_bps=zeros,
+            q10_net_bps=zeros,
+            q90_net_bps=zeros,
+            utility_score=zeros,
+            selection_thresholds={
+                "utility_min": 0.0,
+                "p_pass_min": 0.0,
+                "edge_min": 0.0,
+                "q10_catastrophic_min": 0.0,
+            },
+        )
+
     mu_model_bps = cast(NDArray[np.float64], models.center_model.predict(dataset.X)).astype(
         np.float64, copy=False
     )
@@ -308,7 +326,7 @@ def predict_candidate_edges(
     utility_score = p_pass * mu_net_decision_bps - downside_term - turnover_term - concentration_penalty
 
     _logger = logging.getLogger(__name__)
-    _logger.info(
+    _logger.debug(
         "[DIAG][EDGE] n=%d target_scale=net cost_bps=%.1f "
         "mu_model mean=%.1f max=%.1f pct_ge25=%.3f | "
         "mu_decision mean=%.1f max=%.1f pct_ge1=%.3f | "
