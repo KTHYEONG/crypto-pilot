@@ -243,25 +243,31 @@ def select_candidate_events_for_portfolio(
     catastrophic_mask = _catastrophic_q10_mask(df, cfg)
     utility_threshold = _utility_threshold(df=df, cfg=cfg, model_output=model_output)
     utility_mask = df["utility_score"] >= utility_threshold
+    breakeven_floor = cfg.min_net_floor_cost_fraction * cfg.cost_floor_bps
+    eligible = catastrophic_mask & (df["mu_net_decision_bps"] >= breakeven_floor)
+    n_eligible = int(eligible.sum())
+    n_keep = 0
+    zero_reason = "selected_nonzero"
 
     if cfg.selection_policy == "hard":
         mask = gate_mask & edge_mask & q10_mask
+        zero_reason = "policy_hard"
     elif cfg.selection_policy == "validation_quantile":
         mask = catastrophic_mask & (df["mu_net_decision_bps"] >= 0.0) & utility_mask
+        zero_reason = "policy_validation_quantile"
     else:
         # utility_topk: absolute cost-fraction floor + relative rank among survivors
         # floor prevents selecting garbage candidates when all signals are weak
-        breakeven_floor = cfg.min_net_floor_cost_fraction * cfg.cost_floor_bps
-        eligible = catastrophic_mask & (df["mu_net_decision_bps"] >= breakeven_floor)
-        n_eligible = int(eligible.sum())
         if n_eligible == 0:
             mask = eligible  # honest zero exposure — do not force trade
+            zero_reason = "no_eligible_after_breakeven_floor"
         else:
             n_keep = max(1, math.ceil(n_eligible * cfg.selection_top_quantile))
             utility_vals = pd.to_numeric(df.loc[eligible, "utility_score"], errors="coerce")
             top_idx = utility_vals.nlargest(n_keep).index
             mask = pd.Series(False, index=df.index, dtype=bool)
             mask.loc[top_idx] = True
+            zero_reason = "selected_nonzero" if int(mask.sum()) > 0 else "topk_selected_zero"
 
     _log_selection_by_variant(
         df=df,
@@ -273,23 +279,38 @@ def select_candidate_events_for_portfolio(
     )
 
     _sel_logger = logging.getLogger(__name__)
-    _sel_logger.debug(
-        "[DIAG][SELECT] total=%d gate_fail=%d edge_fail=%d q10_fail=%d "
-        "all_fail=%d passed=%d | policy=%s thresholds(gate>=%.2f edge_net>=%.1f q10>=-%.1f utility>=%.3f)",
-        len(df),
-        int((~gate_mask).sum()),
-        int((~edge_mask).sum()),
-        int((~(catastrophic_mask if cfg.selection_policy != "hard" else q10_mask)).sum()),
-        int((~mask).sum()),
-        int(mask.sum()),
-        cfg.selection_policy,
-        cfg.min_gate_probability,
-        cfg.min_expected_net_bps,
-        cfg.catastrophic_shortfall_bps if cfg.selection_policy != "hard" else cfg.max_expected_shortfall_bps,
-        utility_threshold,
-    )
     filtered = df.loc[mask].copy()
     if filtered.empty:
+        diagnostics = {
+            "total": len(df),
+            "gate_pass": int(gate_mask.sum()),
+            "edge_pass": int(edge_mask.sum()),
+            "q10_pass": int((catastrophic_mask if cfg.selection_policy != "hard" else q10_mask).sum()),
+            "utility_pass": int(utility_mask.sum()),
+            "eligible": n_eligible,
+            "selected_pre_group": 0,
+            "selected_total": 0,
+            "n_keep": n_keep,
+            "policy": cfg.selection_policy,
+            "zero_reason": zero_reason,
+            "breakeven_floor_bps": breakeven_floor,
+            "utility_threshold": utility_threshold,
+        }
+        filtered.attrs["candidate_selection_diagnostics"] = diagnostics
+        _sel_logger.warning(
+            (
+                "[DIAG][SELECT_ZERO] total=%d policy=%s zero_reason=%s "
+                "gate_fail=%d edge_fail=%d q10_fail=%d utility_fail=%d eligible=%d"
+            ),
+            len(df),
+            cfg.selection_policy,
+            zero_reason,
+            int((~gate_mask).sum()),
+            int((~edge_mask).sum()),
+            int((~(catastrophic_mask if cfg.selection_policy != "hard" else q10_mask)).sum()),
+            int((~utility_mask).sum()),
+            n_eligible,
+        )
         return filtered
 
     # Ensure datetime format is uniform for grouping
@@ -297,11 +318,52 @@ def select_candidate_events_for_portfolio(
 
     # Sort to resolve conflicts: pick highest utility score first
     filtered = filtered.sort_values(["_merge_dt", "symbol", "utility_score"], ascending=[True, True, False])
-    
+
     # Per (datetime, symbol), pick the variant with the highest utility
     selected = filtered.groupby(["_merge_dt", "symbol"], as_index=False).first()
-    
-    return selected.drop(columns=["_merge_dt"]).reset_index(drop=True)
+    selected_total = int(selected.shape[0])
+    diagnostics = {
+        "total": len(df),
+        "gate_pass": int(gate_mask.sum()),
+        "edge_pass": int(edge_mask.sum()),
+        "q10_pass": int((catastrophic_mask if cfg.selection_policy != "hard" else q10_mask).sum()),
+        "utility_pass": int(utility_mask.sum()),
+        "eligible": n_eligible,
+        "selected_pre_group": int(mask.sum()),
+        "selected_total": selected_total,
+        "n_keep": n_keep,
+        "policy": cfg.selection_policy,
+        "zero_reason": zero_reason,
+        "breakeven_floor_bps": breakeven_floor,
+        "utility_threshold": utility_threshold,
+    }
+    selected.attrs["candidate_selection_diagnostics"] = diagnostics
+    _sel_logger.info(
+        (
+            "[DIAG][SELECT] total=%d gate_pass=%d edge_pass=%d q10_pass=%d utility_pass=%d "
+            "eligible=%d selected_pre_group=%d selected=%d n_keep=%d | policy=%s zero_reason=%s "
+            "thresholds(gate>=%.2f edge_net>=%.1f q10>=-%.1f utility>=%.3f breakeven_floor=%.1f)"
+        ),
+        diagnostics["total"],
+        diagnostics["gate_pass"],
+        diagnostics["edge_pass"],
+        diagnostics["q10_pass"],
+        diagnostics["utility_pass"],
+        diagnostics["eligible"],
+        diagnostics["selected_pre_group"],
+        diagnostics["selected_total"],
+        diagnostics["n_keep"],
+        cfg.selection_policy,
+        zero_reason,
+        cfg.min_gate_probability,
+        cfg.min_expected_net_bps,
+        cfg.catastrophic_shortfall_bps if cfg.selection_policy != "hard" else cfg.max_expected_shortfall_bps,
+        utility_threshold,
+        breakeven_floor,
+    )
+    result = selected.drop(columns=["_merge_dt"]).reset_index(drop=True)
+    result.attrs["candidate_selection_diagnostics"] = diagnostics
+    return result
 
 
 def build_candidate_target_weights(
