@@ -255,8 +255,10 @@ def apply_selection_stage(
     # Phase E: 3) Diversification score — cluster size 역수 기반
     _cluster_counts_map = out["cluster_id"].value_counts().to_dict()
     _cluster_size = out["cluster_id"].map(_cluster_counts_map).fillna(1.0).astype(float)
+    out["cluster_size"] = _cluster_size
     _diversification_raw = 1.0 / np.sqrt(_cluster_size.clip(lower=1.0))
     out["diversification_score"] = _normalize_unit(_diversification_raw)
+    out["anchor_cluster_member"] = out["cluster_id"].isin(anchor_clusters_for_regime).astype(float)
 
     # Phase E: 4) Combined multi-objective score (이름 유지: tradeable_score)
     out["tradeable_score"] = (
