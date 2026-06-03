@@ -200,6 +200,7 @@ def label_candidate_events(
     out["barrier_first_label"] = np.asarray(barrier_label_list, dtype=np.int8)
     out["profitable_after_hurdle_label"] = np.asarray(profitable_label_list, dtype=np.int8)
     out["gross_fwd_bps"] = np.asarray(gross_list, dtype=np.float64)
+    out["gross_direction_label"] = (np.asarray(gross_list, dtype=np.float64) > 0.0).astype(np.int8)
     out["ex_ante_cost_bps"] = np.asarray(cost_list, dtype=np.float64)
     out["edge_after_hurdle_bps"] = np.asarray(edge_list, dtype=np.float64)
     out["triple_barrier_label"] = np.asarray(barrier_label_list, dtype=np.int8)
@@ -216,15 +217,19 @@ def label_candidate_events(
     _profitable_labels = np.asarray(profitable_label_list, dtype=np.int8)
     _edge = np.asarray(edge_list, dtype=np.float64)
     _finite_edge = _edge[np.isfinite(_edge)]
+    _gross_arr = np.asarray(gross_list, dtype=np.float64)
+    _gross_direction_labels = (_gross_arr > 0.0).astype(np.int8)
     _barrier_label1_rate = float(_barrier_labels.mean()) if len(_barrier_labels) > 0 else 0.0
     _gate_label1_rate = float(_profitable_labels.mean()) if len(_profitable_labels) > 0 else 0.0
+    _gross_dir_rate = float(_gross_direction_labels.mean()) if len(_gross_direction_labels) > 0 else 0.0
     _logger.debug(
         "[DIAG][LABEL] events=%d barrier_label1_rate=%.3f gate_label1_rate=%.3f "
-        "mean_edge=%.1f median_edge=%.1f "
+        "gross_dir_label1_rate=%.3f mean_edge=%.1f median_edge=%.1f "
         "pct_edge_pos=%.3f p10_edge=%.1f p90_edge=%.1f",
         len(_barrier_labels),
         _barrier_label1_rate,
         _gate_label1_rate,
+        _gross_dir_rate,
         float(np.mean(_finite_edge)) if len(_finite_edge) > 0 else float("nan"),
         float(np.median(_finite_edge)) if len(_finite_edge) > 0 else float("nan"),
         float((_finite_edge > 0).mean()) if len(_finite_edge) > 0 else 0.0,
