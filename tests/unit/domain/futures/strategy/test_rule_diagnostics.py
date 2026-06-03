@@ -180,3 +180,64 @@ def test_compute_rule_diagnostics_keeps_positive_expectancy_low_hit_rate_variant
     assert variant_row["candidate_action"] == "KEEP_CANDIDATE"
     assert float(variant_row["oos_rank_ic"]) >= cfg.min_oos_rank_ic
     assert result.recommended_keep_variants == ("trend_donchian:donchian_72",)
+
+
+def test_rule_recommendations_use_explicit_recommendation_window_not_report_window() -> None:
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [
+                aligned.datetimes[9],
+                aligned.datetimes[11],
+                aligned.datetimes[21],
+                aligned.datetimes[23],
+                aligned.datetimes[33],
+                aligned.datetimes[35],
+            ],
+            "symbol": ["BTCUSDT"] * 6,
+            "family": ["trend_ma"] * 6,
+            "variant": ["ema_12_72"] * 6,
+            "side": [1] * 6,
+            "raw_score": [0.5, 0.4, 0.9, 0.8, 0.1, 0.2],
+            "score_z": [0.5, 0.4, 0.9, 0.8, 0.1, 0.2],
+            "entry_idx": [10, 12, 22, 24, 34, 36],
+            "expected_holding_bars": [2] * 6,
+            "min_holding_bars": [1] * 6,
+            "stop_atr_mult": [50.0] * 6,
+            "take_profit_atr_mult": [50.0] * 6,
+            "turnover_proxy": [0.1] * 6,
+            "cost_floor_bps": [0.0] * 6,
+            "hurdle_bps": [0.0] * 6,
+            "profitable_after_hurdle_label": [0, 0, 1, 1, 0, 0],
+            "edge_after_hurdle_bps": [-20.0, -10.0, 40.0, 30.0, -30.0, -25.0],
+            "mae_bps": [-10.0] * 6,
+            "mfe_bps": [15.0, 12.0, 55.0, 45.0, 10.0, 9.0],
+        }
+    )
+    labeled["triple_barrier_label"] = labeled["profitable_after_hurdle_label"]
+
+    cfg = CandidateStrategyConfig(
+        min_variant_oos_obs=2,
+        min_variant_oos_edge_bps=1.0,
+        min_variant_oos_hit_rate=0.5,
+        min_variant_oos_payoff_ratio=1.0,
+        max_variant_oos_q10_fail_rate=1.0,
+    )
+
+    result = compute_rule_diagnostics(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        min_obs=1,
+        recommendation_start=20,
+        recommendation_end=30,
+        report_start=32,
+        report_end=40,
+    )
+
+    variant_row = result.by_variant.loc[result.by_variant["group"] == "variant=trend_ma:ema_12_72"].iloc[0]
+    assert float(variant_row["oos_mean_edge_bps"]) < 0.0
+    assert result.recommended_keep_variants == ("trend_ma:ema_12_72",)
+    assert result.recommendation_basis == "fit_calibration"
+    assert result.recommendation_split == (20, 30)
+    assert result.report_split == (32, 40)

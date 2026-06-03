@@ -138,6 +138,32 @@ def test_select_candidate_events_for_portfolio_uses_validation_quantile_policy()
     assert btc_row["family"] == "rsi_reversion"
 
 
+def test_selection_stays_zero_when_all_mu_below_breakeven_floor() -> None:
+    events = _make_sample_events()
+    model_output = CandidateModelOutput(
+        events=events,
+        p_pass=np.array([0.9, 0.9, 0.9], dtype=np.float64),
+        mu_gross_bps=np.array([5.0, 6.0, 7.0], dtype=np.float64),
+        mu_net_decision_bps=np.array([5.0, 6.0, 7.0], dtype=np.float64),
+        q10_net_bps=np.array([-20.0, -20.0, -20.0], dtype=np.float64),
+        q90_net_bps=np.array([15.0, 16.0, 17.0], dtype=np.float64),
+        utility_score=np.array([1.0, 2.0, 3.0], dtype=np.float64),
+    )
+    cfg = CandidateStrategyConfig(
+        selection_policy="utility_topk",
+        cost_floor_bps=24.0,
+        min_net_floor_cost_fraction=0.5,
+        catastrophic_shortfall_bps=300.0,
+    )
+
+    selected = select_candidate_events_for_portfolio(model_output=model_output, cfg=cfg)
+
+    assert selected.empty
+    diagnostics = selected.attrs["candidate_selection_diagnostics"]
+    assert diagnostics["zero_reason"] == "no_eligible_after_breakeven_floor"
+    assert diagnostics["eligible"] == 0
+
+
 def test_build_candidate_target_weights_applies_kelly_and_caps() -> None:
     events = _make_sample_events()
     # Add passing features directly
