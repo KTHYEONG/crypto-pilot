@@ -28,6 +28,24 @@ from src.domain.futures.strategy_runtime.bridge import _candidate_ml_split_indic
 _logger = logging.getLogger(__name__)
 
 
+def _is_nan(v: float) -> bool:
+    return v != v  # NaN-safe check without math import
+
+
+@dataclass(slots=True, frozen=True)
+class EdgeAttributionReport:
+    """Per-variant predicted vs realised edge attribution."""
+
+    variant: str
+    trade_count: int
+    deployed_bar_fraction: float
+    pred_edge_bps_p50: float
+    real_edge_bps_p50: float
+    edge_capture_ratio: float
+    gross_cost_bps: float
+    turnover_total: float
+
+
 @dataclass(slots=True, frozen=True)
 class AblationRow:
     """Represents a row in the ablation comparison study."""
@@ -40,6 +58,14 @@ class AblationRow:
     turnover: float
     final_equity: float
     pass_compound_gate: bool
+    # Attribution fields (default 0/False for backward-compat)
+    trade_count: int = 0
+    deployed_bar_fraction: float = 0.0
+    pred_edge_bps_p50: float = float("nan")
+    real_edge_bps_p50: float = float("nan")
+    edge_capture_ratio: float = float("nan")
+    gross_cost_bps: float = float("nan")
+    pass_deployment_gate: bool = False
 
 
 def _variant_key(frame: pd.DataFrame) -> pd.Series:
@@ -338,7 +364,10 @@ def run_candidate_ablation(
     if raw_events.empty:
         return pd.DataFrame(columns=[
             "variant", "mean_log_growth", "cagr", "max_drawdown", "mar",
-            "turnover", "final_equity", "pass_compound_gate"
+            "turnover", "final_equity", "pass_compound_gate",
+            "trade_count", "deployed_bar_fraction", "pred_edge_bps_p50",
+            "real_edge_bps_p50", "edge_capture_ratio", "gross_cost_bps",
+            "pass_deployment_gate",
         ])
 
     # 3. Label events and split dataset
@@ -522,7 +551,10 @@ def run_candidate_ablation(
     )
 
     rows.append(
-        _run_backtest_and_evaluate(raw_kelly_edge_w, aligned, "rule_plus_ml_gate_plus_edge", cfg)
+        _run_backtest_and_evaluate(
+            raw_kelly_edge_w, aligned, "rule_plus_ml_gate_plus_edge", cfg,
+            selected_events=gate_events_only,
+        )
     )
 
     # Variant 5: rule_plus_ml_gate_plus_edge_plus_portfolio_caps (Full sizing caps applied)
@@ -541,6 +573,7 @@ def run_candidate_ablation(
             aligned,
             "rule_plus_ml_gate_plus_edge_plus_portfolio_caps",
             cfg,
+            selected_events=gate_events_only,
         )
     )
 
@@ -562,6 +595,7 @@ def run_candidate_ablation(
             cfg,
             start_idx=oos_start,
             end_idx=oos_end,
+            selected_events=gate_events_oos,
         )
     )
 
@@ -600,6 +634,7 @@ def run_candidate_ablation(
             cfg,
             start_idx=oos_start,
             end_idx=oos_end,
+            selected_events=prior_selected,
         )
     )
 
@@ -661,6 +696,13 @@ def run_candidate_ablation(
             "turnover": r.turnover,
             "final_equity": r.final_equity,
             "pass_compound_gate": r.pass_compound_gate,
+            "trade_count": r.trade_count,
+            "deployed_bar_fraction": r.deployed_bar_fraction,
+            "pred_edge_bps_p50": r.pred_edge_bps_p50,
+            "real_edge_bps_p50": r.real_edge_bps_p50,
+            "edge_capture_ratio": r.edge_capture_ratio,
+            "gross_cost_bps": r.gross_cost_bps,
+            "pass_deployment_gate": r.pass_deployment_gate,
         }
         for r in rows
     ])
@@ -723,8 +765,37 @@ def _run_oos_only_ablation_variant(
         cfg,
         start_idx=oos_start,
         end_idx=oos_end,
+        selected_events=selected,
     )
 
+
+
+def _compute_attribution(
+    *,
+    target_weights_eval: np.ndarray,
+    selected_events: pd.DataFrame | None,
+    cfg: CandidateStrategyConfig,
+) -> tuple[int, float, float, float]:
+    """Return (trade_count, deployed_bar_fraction, pred_edge_p50, gross_cost_bps)."""
+    n_bars = target_weights_eval.shape[0]
+    gross = np.abs(target_weights_eval).sum(axis=1) if target_weights_eval.ndim == 2 else np.abs(target_weights_eval)
+    trade_count = int(np.count_nonzero(np.diff(gross, prepend=0.0) > 1e-9))
+    deployed_bar_fraction = float((gross > 1e-9).mean()) if n_bars > 0 else 0.0
+
+    pred_edge_p50 = float("nan")
+    if selected_events is not None and not selected_events.empty and "mu_net_decision_bps" in selected_events.columns:
+        mu_vals = pd.to_numeric(selected_events["mu_net_decision_bps"], errors="coerce").dropna().to_numpy()
+        if mu_vals.size > 0:
+            pred_edge_p50 = float(np.median(mu_vals))
+
+    cost_2d = cfg.cost_floor_bps * 1e-4
+    if target_weights_eval.ndim == 2:
+        delta_w = np.abs(np.diff(target_weights_eval, axis=0, prepend=0.0))
+    else:
+        delta_w = np.abs(np.diff(target_weights_eval, prepend=0.0))
+    gross_cost_bps = float(delta_w.sum() * cost_2d * 1e4) if delta_w.size > 0 else float("nan")
+
+    return trade_count, deployed_bar_fraction, pred_edge_p50, gross_cost_bps
 
 
 def _run_backtest_and_evaluate(
@@ -735,6 +806,7 @@ def _run_backtest_and_evaluate(
     *,
     start_idx: int | None = None,
     end_idx: int | None = None,
+    selected_events: pd.DataFrame | None = None,
 ) -> AblationRow:
     """Helper to inject target_weights into data_maps and run backtest simulation."""
     from src.domain.futures.strategy.rule_signals import _atr_2d
@@ -802,6 +874,31 @@ def _run_backtest_and_evaluate(
         cfg=cfg,
     )
 
+    # Attribution metrics
+    trade_count, deployed_bar_fraction, pred_edge_p50, gross_cost_bps = _compute_attribution(
+        target_weights_eval=target_weights_eval,
+        selected_events=selected_events,
+        cfg=cfg,
+    )
+
+    # Deployment integrity gate
+    pass_deployment_gate = (
+        trade_count >= cfg.min_deployment_trade_count
+        and deployed_bar_fraction >= cfg.min_deployment_capital_fraction
+    )
+
+    if cfg.edge_attribution_enabled:
+        _logger.info(
+            "[DIAG][EDGE_ATTRIB] variant=%s trades=%d deployed=%.3f pred_p50=%.1fbps "
+            "cost=%.1fbps pass_deploy=%s",
+            variant_name,
+            trade_count,
+            deployed_bar_fraction,
+            pred_edge_p50 if not _is_nan(pred_edge_p50) else float("nan"),
+            gross_cost_bps if not _is_nan(gross_cost_bps) else float("nan"),
+            pass_deployment_gate,
+        )
+
     return AblationRow(
         variant=variant_name,
         mean_log_growth=report.mean_log_growth,
@@ -811,4 +908,11 @@ def _run_backtest_and_evaluate(
         turnover=report.turnover,
         final_equity=report.final_equity,
         pass_compound_gate=report.pass_compound_gate,
+        trade_count=trade_count,
+        deployed_bar_fraction=deployed_bar_fraction,
+        pred_edge_bps_p50=pred_edge_p50,
+        real_edge_bps_p50=float("nan"),
+        edge_capture_ratio=float("nan"),
+        gross_cost_bps=gross_cost_bps,
+        pass_deployment_gate=pass_deployment_gate,
     )

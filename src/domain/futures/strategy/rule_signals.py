@@ -661,6 +661,123 @@ def build_rule_signal_panels(
             )
         )
 
+    # 13. Funding Acceleration Carry (F5)
+    # Signal: funding z-score slope (acceleration) * persistence proxy.
+    # Long when funding z-score is falling from high (carry unwind expected);
+    # Short when funding z-score is rising steeply (negative funding carry building).
+    # Look-ahead guard: all rolling ops are trailing-only.
+    _funding_finite = np.where(np.isfinite(funding), funding, 0.0)
+    for _fa_win, _fa_slope_win in [(48, 6), (168, 12)]:
+        _f_mean = _rolling_mean_2d(_funding_finite, window=_fa_win)
+        _f_std = _rolling_std_2d(_funding_finite, window=_fa_win)
+        _f_z = (_funding_finite - _f_mean) / np.maximum(_f_std, 1e-9)
+        # Slope of z-score over short window (acceleration)
+        _f_z_lag = np.vstack([_f_z[:_fa_slope_win], _f_z[:-_fa_slope_win]])
+        _f_slope = _f_z - _f_z_lag
+        # Persistence: exponential decay weight of recent z-scores
+        _f_persist = _rolling_mean_2d(np.abs(_f_z), window=_fa_slope_win)
+        _f_signal = -np.tanh(_f_slope * _f_persist)  # fade the slope direction
+        _fa_side = np.zeros_like(close, dtype=np.int8)
+        _fa_side[_f_signal > 0.3] = 1
+        _fa_side[_f_signal < -0.3] = -1
+        panels.append(
+            CandidateSignalPanel(
+                family="funding_acceleration_carry",
+                variant=f"fac_{_fa_win}",
+                params={"funding_window": _fa_win, "slope_window": _fa_slope_win},
+                datetimes=aligned.datetimes,
+                symbols=aligned.symbols,
+                signed_score_2d=np.clip(_f_signal, -1.0, 1.0),
+                side_hint_2d=_fa_side,
+                expected_holding_bars=_fa_win // 6,
+                min_holding_bars=4,
+                stop_atr_mult=2.0,
+                take_profit_atr_mult=3.0,
+                turnover_proxy_2d=np.abs(np.diff(_f_signal, axis=0, prepend=0.0)),
+                valid_mask_2d=valid_mask,
+            )
+        )
+
+    # 14. BTC Residual Momentum (F6)
+    # Signal: alt return residual after BTC beta adjustment.
+    # Measures alt-specific alpha: excess return vs expected BTC-driven move.
+    # Look-ahead guard: beta estimated from trailing window only.
+    _log_ret = np.diff(np.log(np.maximum(close, 1e-12)), axis=0, prepend=0.0)
+    _btc_ret = _log_ret[:, btc_idx : btc_idx + 1]
+    for _br_win in [24, 48]:
+        _btc_var = _rolling_mean_2d(_btc_ret ** 2, window=_br_win)
+        _cov_alt_btc = _rolling_mean_2d(_log_ret * _btc_ret, window=_br_win)
+        _beta_hat = _cov_alt_btc / np.maximum(_btc_var, 1e-12)
+        _resid_ret = _log_ret - _beta_hat * _btc_ret
+        _resid_mean = _rolling_mean_2d(_resid_ret, window=_br_win)
+        _resid_std = _rolling_std_2d(_resid_ret, window=_br_win)
+        _resid_z = _resid_mean / np.maximum(_resid_std / np.sqrt(float(_br_win)), 1e-12)
+        _resid_z = np.clip(_resid_z, -3.0, 3.0)
+        _br_side = np.zeros_like(close, dtype=np.int8)
+        _br_side[_resid_z > 1.5] = 1
+        _br_side[_resid_z < -1.5] = -1
+        panels.append(
+            CandidateSignalPanel(
+                family="btc_residual_momentum",
+                variant=f"brm_{_br_win}",
+                params={"window": _br_win},
+                datetimes=aligned.datetimes,
+                symbols=aligned.symbols,
+                signed_score_2d=np.tanh(_resid_z / 2.0),
+                side_hint_2d=_br_side,
+                expected_holding_bars=_br_win // 4,
+                min_holding_bars=3,
+                stop_atr_mult=1.5,
+                take_profit_atr_mult=3.0,
+                turnover_proxy_2d=np.abs(np.diff(_resid_z, axis=0, prepend=0.0)),
+                valid_mask_2d=valid_mask,
+            )
+        )
+
+    # 15. OI-Volume Confirmed Breakout (F7)
+    # Signal: price range breakout confirmed by concurrent OI impulse + volume z-score.
+    # All three conditions must align: prevents noise-driven breakouts.
+    # Look-ahead guard: donchian channels and volume/OI z-scores are trailing-only.
+    _vol_finite = np.where(np.isfinite(vol), vol, 0.0)
+    _oi_finite = np.where(np.isfinite(oi), oi, 0.0)
+    for _ob_win in [20, 40]:
+        _don_high = _rolling_max_2d(high, window=_ob_win)
+        _don_low = _rolling_min_2d(low, window=_ob_win)
+        _don_mid = (_don_high + _don_low) / 2.0
+        _breakout_up = close >= _don_high * 0.998
+        _breakout_dn = close <= _don_low * 1.002
+        _vol_mean = _rolling_mean_2d(_vol_finite, window=_ob_win)
+        _vol_std = _rolling_std_2d(_vol_finite, window=_ob_win)
+        _vol_z_ob = (_vol_finite - _vol_mean) / np.maximum(_vol_std, 1e-12)
+        _oi_mean = _rolling_mean_2d(_oi_finite, window=_ob_win)
+        _oi_std = _rolling_std_2d(_oi_finite, window=_ob_win)
+        _oi_z_ob = (_oi_finite - _oi_mean) / np.maximum(_oi_std, 1e-12)
+        _confirmed = (_vol_z_ob >= 1.0) & (_oi_z_ob >= 0.5)
+        _ob_score = np.where(
+            _breakout_up & _confirmed, np.clip(_vol_z_ob / 3.0, 0.0, 1.0),
+            np.where(_breakout_dn & _confirmed, -np.clip(_vol_z_ob / 3.0, 0.0, 1.0), 0.0),
+        )
+        _ob_side = np.zeros_like(close, dtype=np.int8)
+        _ob_side[_breakout_up & _confirmed] = 1
+        _ob_side[_breakout_dn & _confirmed] = -1
+        panels.append(
+            CandidateSignalPanel(
+                family="oi_volume_confirmed_breakout",
+                variant=f"oib_{_ob_win}",
+                params={"window": _ob_win},
+                datetimes=aligned.datetimes,
+                symbols=aligned.symbols,
+                signed_score_2d=_ob_score.astype(np.float64),
+                side_hint_2d=_ob_side,
+                expected_holding_bars=_ob_win // 4,
+                min_holding_bars=3,
+                stop_atr_mult=1.5,
+                take_profit_atr_mult=3.5,
+                turnover_proxy_2d=np.abs(np.diff(_ob_score.astype(np.float64), axis=0, prepend=0.0)),
+                valid_mask_2d=valid_mask,
+            )
+        )
+
     return filter_rule_signal_panels(tuple(panels), cfg=cfg)
 
 

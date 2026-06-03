@@ -614,15 +614,16 @@ def _run_strategy_stage(
     )
     bridge_elapsed = time.perf_counter() - t_bridge_start
     
-    # Summary of bridge output
+    # Summary of bridge output — read from alpha_panel["target_weight"] (CandidatePipelineOutput)
     non_zero_weights = 0
-    if hasattr(ml_out, "panel_target_weight"):
-        ptw = ml_out.panel_target_weight
-        if isinstance(ptw, pd.DataFrame) and not ptw.empty:
-            non_zero_weights = (ptw.abs().sum(axis=1) > 1e-9).sum()
+    panel = getattr(ml_out, "alpha_panel", None)
+    if isinstance(panel, pd.DataFrame) and not panel.empty and "target_weight" in panel.columns:
+        tw_arr = panel["target_weight"].to_numpy(dtype=np.float64)
+        non_zero_weights = int(np.count_nonzero(np.abs(tw_arr) > 1e-9))
     candidate_report = getattr(ml_out, "rule_report", {})
     if not isinstance(candidate_report, dict):
         candidate_report = {}
+    selected_total_bridge = int(candidate_report.get("selected_total", 0))
 
     header = f"| {'Metric':<18} | {'Value':<27} |"
     width = len(header)
@@ -630,7 +631,7 @@ def _run_strategy_stage(
     _logger.info("\n" + title + "-" * (width - len(title)))
     _logger.info(header)
     _logger.info(f"| {'-'*18:<18} | {'-'*27:<27} |")
-    _logger.info(f"| {'Active Signals':<18} | {non_zero_weights:<27} |")
+    _logger.info(f"| {'Active Signals':<18} | {f'{non_zero_weights} (sel={selected_total_bridge})':<27} |")
     _logger.info(f"| {'Status':<18} | {'PROMOTED' if non_zero_weights > 0 else 'BLOCKED':<27} |")
     _logger.info(f"| {'Execution Time':<18} | {f'{bridge_elapsed:.2f}s':<27} |")
     _logger.info("-" * width)
@@ -757,14 +758,20 @@ def _run_candidate_evaluation_report(
         "candidate_ml_market_state_features": "Market Feat",
     }
 
-    # Log ablation study table in a structured, compact format
-    header = f"| {'Model Alias':<18} | {'CAGR':>7} | {'MaxDD':>7} | {'MAR':>6} | {'Equity':>10} | {'Pass':<5} |"
+    # Log ablation study table — final PASS = compound gate AND deployment gate
+    header = (
+        f"| {'Model Alias':<18} | {'CAGR':>7} | {'MaxDD':>7} | {'MAR':>6}"
+        f" | {'Equity':>10} | {'Trades':>6} | {'Deploy':>6} | {'Pass':<5} |"
+    )
     width = len(header)
     title = "[ABLATION STUDY FRONTIER] "
     _logger.info("\n" + title + "-" * (width - len(title)))
     _logger.info(header)
-    _logger.info(f"| {'-'*18:<18} | {'-'*7:>7} | {'-'*7:>7} | {'-'*6:>6} | {'-'*10:>10} | {'-'*5:<5} |")
-    
+    _logger.info(
+        f"| {'-'*18:<18} | {'-'*7:>7} | {'-'*7:>7} | {'-'*6:>6}"
+        f" | {'-'*10:>10} | {'-'*6:>6} | {'-'*6:>6} | {'-'*5:<5} |"
+    )
+
     for _, row in df_ablation.iterrows():
         name = str(row["variant"])
         alias = alias_map.get(name, name[:18])
@@ -772,9 +779,18 @@ def _run_candidate_evaluation_report(
         dd = f"{float(row['max_drawdown']) * 100:>.1f}%"
         mar = f"{float(row['mar']):>.2f}"
         equity = f"{float(row['final_equity']):,.0f}"
-        passed = "Y" if str(row["pass_compound_gate"]) == "True" else "N"
-        
-        _logger.info(f"| {alias:<18} | {cagr:>7} | {dd:>7} | {mar:>6} | {equity:>10} | {passed:^5} |")
+        trades = str(int(row.get("trade_count", 0)))
+        deploy = f"{float(row.get('deployed_bar_fraction', 0.0)):.2f}"
+        final_pass = (
+            str(row["pass_compound_gate"]) == "True"
+            and str(row.get("pass_deployment_gate", "False")) == "True"
+        )
+        passed = "Y" if final_pass else "N"
+
+        _logger.info(
+            f"| {alias:<18} | {cagr:>7} | {dd:>7} | {mar:>6}"
+            f" | {equity:>10} | {trades:>6} | {deploy:>6} | {passed:^5} |"
+        )
     
     _logger.info("-" * width)
 
