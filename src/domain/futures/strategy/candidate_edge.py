@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -20,6 +20,11 @@ class CandidateEdgeModels:
     q10_model: LGBMRegressor
     q90_model: LGBMRegressor
     feature_names: tuple[str, ...]
+    variant_prior_bps: dict[str, float]
+    variant_prior_obs: dict[str, int]
+    global_prior_bps: float
+    target_mode: Literal["direct", "prior_residual"]
+    prediction_diagnostics: dict[str, float | int | str]
 
 
 def _seed_from_cfg(cfg: Any) -> int:
@@ -43,6 +48,66 @@ def _edge_shortfall_pass_rate(
 
 def _shortfall_threshold(cfg: Any) -> float:
     return -float(getattr(cfg, "max_expected_shortfall_bps", 80.0))
+
+
+def _variant_keys(dataset: CandidateDataset) -> list[str]:
+    """Return stable per-row variant keys or global fallbacks."""
+    event_index = getattr(dataset, "event_index", pd.DataFrame())
+    if (
+        not event_index.empty
+        and {"family", "variant"}.issubset(event_index.columns)
+        and len(event_index) == dataset.X.shape[0]
+    ):
+        keys = event_index["family"].astype(str).str.cat(event_index["variant"].astype(str), sep=":")
+        return list(keys.to_numpy(dtype=object))
+    return ["__global__"] * dataset.X.shape[0]
+
+
+def _weighted_mean(values: NDArray[np.float64], weights: NDArray[np.float64]) -> float:
+    """Return a finite weighted mean with uniform fallback."""
+    finite_mask = np.isfinite(values) & np.isfinite(weights) & (weights > 0.0)
+    if not bool(finite_mask.any()):
+        finite_values = values[np.isfinite(values)]
+        return float(np.mean(finite_values)) if finite_values.size > 0 else 0.0
+    return float(np.average(values[finite_mask], weights=weights[finite_mask]))
+
+
+def _build_variant_priors(
+    *,
+    dataset: CandidateDataset,
+    cfg: CandidateStrategyConfig,
+) -> tuple[dict[str, float], dict[str, int], float, NDArray[np.float64]]:
+    """Return shrunk per-variant priors and per-row prior values."""
+    y_edge = np.asarray(dataset.y_edge_bps, dtype=np.float64)
+    weights = np.asarray(dataset.sample_weight, dtype=np.float64)
+    keys = _variant_keys(dataset)
+    global_prior = _weighted_mean(y_edge, weights)
+    variant_prior_bps: dict[str, float] = {}
+    variant_prior_obs: dict[str, int] = {}
+    row_priors = np.full(dataset.X.shape[0], global_prior, dtype=np.float64)
+    shrinkage_obs = float(cfg.edge_prior_shrinkage_obs)
+    min_obs = int(cfg.edge_prior_min_obs)
+
+    key_to_indices: dict[str, list[int]] = {}
+    for idx, key in enumerate(keys):
+        key_to_indices.setdefault(key, []).append(idx)
+
+    for key, indices in key_to_indices.items():
+        indexer = np.asarray(indices, dtype=np.int32)
+        variant_values = y_edge[indexer]
+        variant_weights = weights[indexer]
+        obs = int(indexer.shape[0])
+        variant_prior_obs[key] = obs
+        if obs < min_obs:
+            row_priors[indexer] = global_prior
+            continue
+        variant_mean = _weighted_mean(variant_values, variant_weights)
+        shrink = obs / (obs + shrinkage_obs)
+        prior = float(shrink * variant_mean + (1.0 - shrink) * global_prior)
+        variant_prior_bps[key] = prior
+        row_priors[indexer] = prior
+
+    return variant_prior_bps, variant_prior_obs, global_prior, row_priors
 
 
 def _log_edge_target_distribution(*, split: str, dataset: CandidateDataset, cfg: CandidateStrategyConfig) -> None:
@@ -158,18 +223,33 @@ def _selection_thresholds(
     *,
     utility_score: NDArray[np.float64],
     p_pass: NDArray[np.float64],
+    mu_net_decision_bps: NDArray[np.float64],
     cfg: CandidateStrategyConfig,
-) -> dict[str, float]:
+) -> dict[str, float | bool]:
     finite_utility = utility_score[np.isfinite(utility_score)]
     utility_min = float("-inf")
     if finite_utility.size > 0:
         quantile = max(0.0, min(1.0, 1.0 - float(cfg.selection_top_quantile)))
         utility_min = float(np.quantile(finite_utility, quantile))
+    finite_mu = mu_net_decision_bps[np.isfinite(mu_net_decision_bps)]
+    breakeven_floor_bps = float(cfg.min_net_floor_cost_fraction) * float(cfg.cost_floor_bps)
+    mu_std_bps = float(np.std(finite_mu)) if finite_mu.size > 0 else 0.0
+    mu_positive_rate = float((finite_mu > 0.0).mean()) if finite_mu.size > 0 else 0.0
+    mu_floor_pass_rate = float((finite_mu >= breakeven_floor_bps).mean()) if finite_mu.size > 0 else 0.0
+    prediction_collapse = bool(
+        finite_mu.size > 0
+        and mu_std_bps < float(cfg.edge_prediction_min_std_bps)
+        and mu_positive_rate < float(cfg.edge_prediction_min_positive_rate)
+    )
     return {
         "utility_min": utility_min,
         "p_pass_min": float(np.nanmin(p_pass)) if p_pass.size > 0 else 0.0,
         "edge_min": max(0.0, float(cfg.min_expected_net_bps)),
         "q10_catastrophic_min": -float(cfg.catastrophic_shortfall_bps),
+        "mu_std_bps": mu_std_bps,
+        "mu_positive_rate": mu_positive_rate,
+        "mu_floor_pass_rate": mu_floor_pass_rate,
+        "prediction_collapse": prediction_collapse,
     }
 
 
@@ -185,6 +265,25 @@ def fit_candidate_edge_models(
     _log_edge_target_distribution(split="valid", dataset=valid, cfg=cfg)
     _log_edge_target_variants(split="train", dataset=train, cfg=cfg)
     _log_edge_target_variants(split="valid", dataset=valid, cfg=cfg)
+    variant_prior_bps, variant_prior_obs, global_prior_bps, train_row_priors = _build_variant_priors(
+        dataset=train,
+        cfg=cfg,
+    )
+    use_prior_residual = bool(cfg.edge_prior_enabled and cfg.edge_residual_model_enabled)
+    target_mode: Literal["direct", "prior_residual"] = "prior_residual" if use_prior_residual else "direct"
+    center_train_target = (
+        train.y_edge_bps.astype(np.float64, copy=False) - train_row_priors
+        if use_prior_residual
+        else train.y_edge_bps.astype(np.float64, copy=False)
+    )
+    center_valid_target = valid.y_edge_bps.astype(np.float64, copy=False)
+    if use_prior_residual and valid.X.shape[0] > 0:
+        valid_keys = _variant_keys(valid)
+        valid_priors = np.asarray(
+            [variant_prior_bps.get(key, global_prior_bps) for key in valid_keys],
+            dtype=np.float64,
+        )
+        center_valid_target = center_valid_target - valid_priors
 
     center = LGBMRegressor(
         objective="huber",
@@ -223,20 +322,20 @@ def fit_candidate_edge_models(
     )
 
     # Use valid split if provided for early stopping
-    eval_set_center: Any = [(valid.X, valid.y_edge_bps)] if valid.X.shape[0] > 0 else None
+    eval_set_center: Any = [(valid.X, center_valid_target)] if valid.X.shape[0] > 0 else None
     eval_set_q10: Any = [(valid.X, valid.y_q10_bps)] if valid.X.shape[0] > 0 else None
     eval_set_q90: Any = [(valid.X, valid.y_mfe_bps)] if valid.X.shape[0] > 0 else None
 
     if eval_set_center is not None and len(np.unique(valid.y_edge_bps)) > 1:
         center.fit(
             train.X,
-            train.y_edge_bps,
+            center_train_target,
             sample_weight=train.sample_weight,
             eval_set=eval_set_center,
             callbacks=[],
         )
     else:
-        center.fit(train.X, train.y_edge_bps, sample_weight=train.sample_weight)
+        center.fit(train.X, center_train_target, sample_weight=train.sample_weight)
 
     if eval_set_q10 is not None and len(np.unique(valid.y_q10_bps)) > 1:
         q10.fit(
@@ -266,6 +365,15 @@ def fit_candidate_edge_models(
         q10_model=q10,
         q90_model=q90,
         feature_names=tuple(train.feature_names),
+        variant_prior_bps=variant_prior_bps,
+        variant_prior_obs=variant_prior_obs,
+        global_prior_bps=global_prior_bps,
+        target_mode=target_mode,
+        prediction_diagnostics={
+            "target_mode": target_mode,
+            "global_prior_bps": global_prior_bps,
+            "variant_prior_count": len(variant_prior_bps),
+        },
     )
 
 
@@ -292,10 +400,14 @@ def predict_candidate_edges(
                 "p_pass_min": 0.0,
                 "edge_min": 0.0,
                 "q10_catastrophic_min": 0.0,
+                "mu_std_bps": 0.0,
+                "mu_positive_rate": 0.0,
+                "mu_floor_pass_rate": 0.0,
+                "prediction_collapse": False,
             },
         )
 
-    mu_model_bps = cast(NDArray[np.float64], models.center_model.predict(dataset.X)).astype(
+    center_pred_bps = cast(NDArray[np.float64], models.center_model.predict(dataset.X)).astype(
         np.float64, copy=False
     )
     q10_model_bps = cast(NDArray[np.float64], models.q10_model.predict(dataset.X)).astype(
@@ -311,13 +423,19 @@ def predict_candidate_edges(
     concentration_penalty = float(getattr(cfg, "concentration_penalty", 0.0))
 
     # Extract turnover_proxy from features or fallback to a constant 1.0 (so turnover_term = turnover_penalty)
-    turnover_proxy = np.ones_like(mu_model_bps)
+    turnover_proxy = np.ones_like(center_pred_bps)
     if "turnover_proxy" in dataset.feature_names:
         t_idx = dataset.feature_names.index("turnover_proxy")
         turnover_proxy = dataset.X[:, t_idx].astype(np.float64, copy=False)
 
-    # The fitted targets already use net-of-cost/hurdle labels.
-    mu_net_decision_bps = mu_model_bps
+    prior_bps = np.zeros(dataset.X.shape[0], dtype=np.float64)
+    if models.target_mode == "prior_residual":
+        keys = _variant_keys(dataset)
+        prior_bps = np.asarray(
+            [models.variant_prior_bps.get(key, models.global_prior_bps) for key in keys],
+            dtype=np.float64,
+        )
+    mu_net_decision_bps = center_pred_bps + prior_bps
     q10_net_bps = q10_model_bps
     q90_net_bps = q90_model_bps
 
@@ -335,15 +453,21 @@ def predict_candidate_edges(
     finite_utility = utility_score[np.isfinite(utility_score)]
 
     _logger = logging.getLogger(__name__)
+    prediction_collapse = bool(
+        finite_mu.size > 0
+        and float(np.std(finite_mu)) < float(cfg.edge_prediction_min_std_bps)
+        and float((finite_mu > 0.0).mean()) < float(cfg.edge_prediction_min_positive_rate)
+    )
     _logger.info(
         (
-            "[DIAG][EDGE] n=%d target_scale=net cost_bps=%.1f floor_bps=%.1f "
+            "[DIAG][EDGE] n=%d target_scale=net mode=%s cost_bps=%.1f floor_bps=%.1f "
             "mu_mean=%.1f mu_p50=%.1f mu_p90=%.1f mu_max=%.1f "
             "q10_mean=%.1f q10_p10=%.1f q10_p50=%.1f q10_min=%.1f "
             "utility_mean=%.3f utility_p50=%.3f utility_p90=%.3f utility_max=%.3f "
             "pct_mu_ge1=%.3f pct_mu_ge_floor=%.3f pct_q10_ge_cat=%.3f pct_q10_ge_max=%.3f"
         ),
-        len(mu_model_bps),
+        len(center_pred_bps),
+        models.target_mode,
         expected_cost_bps,
         breakeven_floor_bps,
         float(np.mean(finite_mu)) if finite_mu.size > 0 else float("nan"),
@@ -363,6 +487,14 @@ def predict_candidate_edges(
         float((finite_q10 >= -catastrophic_shortfall_bps).mean()) if finite_q10.size > 0 else 0.0,
         float((finite_q10 >= -max_shortfall_bps).mean()) if finite_q10.size > 0 else 0.0,
     )
+    if prediction_collapse:
+        _logger.warning(
+            "[DIAG][EDGE_COLLAPSE] std=%.3f positive_rate=%.3f threshold_std=%.3f threshold_pos=%.3f",
+            float(np.std(finite_mu)) if finite_mu.size > 0 else 0.0,
+            float((finite_mu > 0.0).mean()) if finite_mu.size > 0 else 0.0,
+            float(cfg.edge_prediction_min_std_bps),
+            float(cfg.edge_prediction_min_positive_rate),
+        )
     _log_edge_prediction_variants(
         dataset=dataset,
         mu_net_decision_bps=mu_net_decision_bps,
@@ -373,7 +505,7 @@ def predict_candidate_edges(
         events=None,
         p_pass=p_pass.astype(np.float64, copy=False),
         # Legacy field name: values are now on the fitted target scale (net of cost/hurdle).
-        mu_gross_bps=mu_model_bps,
+        mu_gross_bps=mu_net_decision_bps,
         mu_net_decision_bps=mu_net_decision_bps,
         q10_net_bps=q10_net_bps,
         q90_net_bps=q90_net_bps,
@@ -381,6 +513,7 @@ def predict_candidate_edges(
         selection_thresholds=_selection_thresholds(
             utility_score=utility_score,
             p_pass=p_pass.astype(np.float64, copy=False),
+            mu_net_decision_bps=mu_net_decision_bps,
             cfg=cfg,
         ),
     )
