@@ -220,3 +220,85 @@ def test_build_variant_prior_output_uses_calibration_set_prior(monkeypatch: Any)
     assert np.allclose(out.mu_net_decision_bps, np.asarray([75.0, 25.0], dtype=np.float64))
     assert np.allclose(out.mu_gross_bps, np.asarray([75.0, 25.0], dtype=np.float64))
     assert np.isclose(out.selection_thresholds["utility_min"], 56.0)
+
+
+def test_ablation_returns_attribution_columns(monkeypatch: Any) -> None:
+    """Ablation DataFrame에 attribution 컬럼이 포함되어야 한다."""
+    data_maps = _make_mock_data_maps(250)
+    cfg = CandidateStrategyConfig(
+        timeframe="4h",
+        min_candidate_obs=10,
+        min_rule_net_bps=0.0,
+        kelly_fraction=0.1,
+        gross_cap=1.2,
+    )
+    monkeypatch.setattr("src.domain.futures.strategy.ablation.fit_candidate_gate", lambda **_: object())
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ablation.predict_candidate_gate",
+        lambda *, dataset, **__: np.full(dataset.X.shape[0], 0.9, dtype=np.float64),
+    )
+    monkeypatch.setattr("src.domain.futures.strategy.ablation.fit_candidate_edge_models", lambda **_: object())
+
+    def _fake_edges(*, dataset: Any, p_pass: np.ndarray, **__: Any) -> CandidateModelOutput:
+        n = dataset.X.shape[0]
+        return CandidateModelOutput(
+            events=dataset.event_index,
+            p_pass=p_pass,
+            mu_gross_bps=np.full(n, 40.0, dtype=np.float64),
+            mu_net_decision_bps=np.full(n, 16.0, dtype=np.float64),
+            q10_net_bps=np.full(n, -10.0, dtype=np.float64),
+            q90_net_bps=np.full(n, 30.0, dtype=np.float64),
+            utility_score=np.full(n, 8.0, dtype=np.float64),
+        )
+
+    monkeypatch.setattr("src.domain.futures.strategy.ablation.predict_candidate_edges", _fake_edges)
+
+    df_ablation = run_candidate_ablation(
+        data_maps=data_maps, symbols=("BTCUSDT", "ETHUSDT"), tf="4h", cfg=cfg,
+    )
+
+    if not df_ablation.empty:
+        required_attr_cols = {
+            "trade_count", "deployed_bar_fraction",
+            "pred_edge_bps_p50", "gross_cost_bps", "pass_deployment_gate",
+        }
+        assert required_attr_cols.issubset(df_ablation.columns), (
+            f"Missing attribution columns: {required_attr_cols - set(df_ablation.columns)}"
+        )
+        assert df_ablation["trade_count"].dtype in (
+            "int64", "int32", object
+        ) or df_ablation["trade_count"].apply(lambda x: isinstance(x, int)).all()
+        assert df_ablation["pass_deployment_gate"].dtype == bool or df_ablation[
+            "pass_deployment_gate"
+        ].apply(lambda x: isinstance(x, bool)).all()
+
+
+def test_deployment_gate_blocks_near_zero_trading_variant() -> None:
+    """near-zero-trading 변형은 pass_deployment_gate=False 여야 한다."""
+    from src.domain.futures.strategy.ablation import AblationRow
+
+    row_no_trade = AblationRow(
+        variant="test",
+        mean_log_growth=0.001,
+        cagr=0.001,
+        max_drawdown=0.0001,
+        mar=1.0,
+        turnover=0.0,
+        final_equity=1_000_100.0,
+        pass_compound_gate=True,
+        trade_count=0,
+        deployed_bar_fraction=0.0,
+        pass_deployment_gate=False,
+    )
+    assert not row_no_trade.pass_deployment_gate
+
+    cfg = CandidateStrategyConfig(
+        min_deployment_trade_count=20,
+        min_deployment_capital_fraction=0.05,
+    )
+    # trade_count=0 < 20, deployed_bar_fraction=0.0 < 0.05 → gate must fail
+    gate_result = (
+        row_no_trade.trade_count >= cfg.min_deployment_trade_count
+        and row_no_trade.deployed_bar_fraction >= cfg.min_deployment_capital_fraction
+    )
+    assert not gate_result

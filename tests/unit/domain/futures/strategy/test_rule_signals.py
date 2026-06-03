@@ -40,7 +40,8 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
 
     assert isinstance(panels, tuple)
     # 8 base families (13 variants) + 4 new families (11 variants: F1x3+F2x3+F3x2+F4x3) = 24
-    assert len(panels) == 24
+    # + 3 new families (6 variants: fac x2 + brm x2 + oib x2) = 30
+    assert len(panels) == 30
 
     expected_families = {
         "trend_ma",
@@ -55,6 +56,9 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
         "funding_zscore_carry",
         "vol_regime_reversion",
         "btc_corr_regime",
+        "funding_acceleration_carry",
+        "btc_residual_momentum",
+        "oi_volume_confirmed_breakout",
     }
 
     for p in panels:
