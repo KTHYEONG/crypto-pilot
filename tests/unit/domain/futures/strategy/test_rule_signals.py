@@ -115,6 +115,52 @@ def test_candidate_panels_to_events_creates_dataframe() -> None:
         assert (events["entry_idx"] > 0).all()
 
 
+def test_candidate_panels_to_events_uses_max_of_policy_floor_and_physical_cost() -> None:
+    aligned = _make_aligned()
+    cfg = CandidateStrategyConfig()
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+
+    execution_cost_bps_2d = np.full((150, 2), 40.0, dtype=np.float64)
+    events = candidate_panels_to_events(
+        panels,
+        min_abs_score=0.0,
+        cost_floor_bps=24.0,
+        execution_cost_bps_2d=execution_cost_bps_2d,
+    )
+
+    assert not events.empty
+    assert float(events["cost_floor_bps"].min()) >= 40.0
+
+
+def test_build_rule_signal_panels_respects_entry_warm_and_block_masks() -> None:
+    aligned = _make_aligned()
+    t, n = aligned.close_2d.shape
+    blocked = np.zeros((t, n), dtype=bool)
+    blocked[:20] = True
+    warm = np.ones((t, n), dtype=bool)
+    warm[:20] = False
+    aligned = AlignedMarketData(
+        datetimes=aligned.datetimes,
+        symbols=aligned.symbols,
+        open_2d=aligned.open_2d,
+        high_2d=aligned.high_2d,
+        low_2d=aligned.low_2d,
+        close_2d=aligned.close_2d,
+        volume_2d=aligned.volume_2d,
+        funding_2d=aligned.funding_2d,
+        active_mask=aligned.active_mask,
+        warm_mask=warm,
+        entry_block_mask=blocked,
+        kill_mask=aligned.kill_mask,
+        execution_cost_bps_2d=aligned.execution_cost_bps_2d,
+    )
+
+    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+
+    for panel in panels:
+        assert not panel.valid_mask_2d[:20].any()
+
+
 def test_new_signal_families_shapes_and_side_hints() -> None:
     # Arrange
     aligned = _make_aligned(t=200)
