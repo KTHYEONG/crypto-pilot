@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -8,6 +9,7 @@ import pandas as pd
 from src.domain.futures.strategy.ablation import (
     _build_rule_equal_size_weights,
     _build_uncapped_kelly_edge_weights,
+    _build_variant_prior_output,
     run_candidate_ablation,
 )
 from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
@@ -87,7 +89,7 @@ def test_run_candidate_ablation_returns_correct_ablation_dataframe(monkeypatch: 
 
     assert isinstance(df_ablation, pd.DataFrame)
     if not df_ablation.empty:
-        assert df_ablation.shape[0] == 10  # 6 base variants + 4 OOS-only ablation rows
+        assert df_ablation.shape[0] == 14
         required_cols = {
             "variant",
             "mean_log_growth",
@@ -99,6 +101,12 @@ def test_run_candidate_ablation_returns_correct_ablation_dataframe(monkeypatch: 
             "pass_compound_gate",
         }
         assert required_cols.issubset(df_ablation.columns)
+        assert {
+            "rule_promo_no_leak",
+            "rule_promo_oos_oracle",
+            "candidate_ml_direct_edge",
+            "candidate_ml_variant_prior",
+        }.issubset(set(df_ablation["variant"]))
 
 
 def test_build_rule_equal_size_weights_uses_entry_idx_bar() -> None:
@@ -147,3 +155,68 @@ def test_build_uncapped_kelly_edge_weights_scales_by_holding_bars() -> None:
     assert short_hold > 0.0
     assert long_hold > 0.0
     assert np.isclose(short_hold / long_hold, 10.0, rtol=1e-6)
+
+
+def test_build_variant_prior_output_uses_calibration_set_prior(monkeypatch: Any) -> None:
+    calibration_set = SimpleNamespace(
+        X=np.zeros((2, 1), dtype=np.float32),
+        y_edge_bps=np.asarray([100.0, 0.0], dtype=np.float32),
+        sample_weight=np.ones(2, dtype=np.float32),
+        event_index=pd.DataFrame(
+            {
+                "family": ["trend_ma", "rsi_reversion"],
+                "variant": ["ema_12_72", "rsi_6"],
+            }
+        ),
+        feature_names=("turnover_proxy",),
+    )
+    oos_set = SimpleNamespace(
+        X=np.zeros((2, 1), dtype=np.float32),
+        event_index=pd.DataFrame(
+            {
+                "family": ["trend_ma", "rsi_reversion"],
+                "variant": ["ema_12_72", "rsi_6"],
+            }
+        ),
+        feature_names=("turnover_proxy",),
+    )
+    edge_models = SimpleNamespace(
+        variant_prior_bps={
+            "trend_ma:ema_12_72": -999.0,
+            "rsi_reversion:rsi_6": -999.0,
+        },
+        global_prior_bps=-999.0,
+    )
+
+    def _fake_predict_candidate_edges(*_: Any, **__: Any) -> CandidateModelOutput:
+        return CandidateModelOutput(
+            events=oos_set.event_index,
+            p_pass=np.asarray([0.8, 0.8], dtype=np.float64),
+            mu_gross_bps=np.asarray([1.0, 1.0], dtype=np.float64),
+            mu_net_decision_bps=np.asarray([1.0, 1.0], dtype=np.float64),
+            q10_net_bps=np.asarray([-10.0, -10.0], dtype=np.float64),
+            q90_net_bps=np.asarray([30.0, 30.0], dtype=np.float64),
+            utility_score=np.asarray([1.0, 1.0], dtype=np.float64),
+            selection_thresholds={"utility_min": 0.0},
+        )
+
+    monkeypatch.setattr("src.domain.futures.strategy.ablation.predict_candidate_edges", _fake_predict_candidate_edges)
+
+    cfg = CandidateStrategyConfig(
+        edge_prior_min_obs=1,
+        edge_prior_shrinkage_obs=1,
+        downside_penalty=0.0,
+        turnover_penalty=0.0,
+        concentration_penalty=0.0,
+    )
+    out = _build_variant_prior_output(
+        edge_models=edge_models,
+        calibration_set=calibration_set,
+        oos_set=oos_set,
+        p_pass=np.asarray([0.8, 0.8], dtype=np.float64),
+        cfg=cfg,
+    )
+
+    assert np.allclose(out.mu_net_decision_bps, np.asarray([75.0, 25.0], dtype=np.float64))
+    assert np.allclose(out.mu_gross_bps, np.asarray([75.0, 25.0], dtype=np.float64))
+    assert np.isclose(out.selection_thresholds["utility_min"], 56.0)

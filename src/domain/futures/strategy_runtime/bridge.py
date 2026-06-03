@@ -68,6 +68,25 @@ def _threshold_rate(values: np.ndarray, threshold: float) -> float:
     return float((finite >= threshold).mean())
 
 
+def _recommendation_window_indices(
+    *,
+    fit_start: int,
+    fit_end: int,
+    calibration_start: int,
+    calibration_end: int,
+    cfg: Any,
+) -> tuple[int, int]:
+    """Return the contiguous recommendation window to evaluate for promotion."""
+    basis = str(getattr(cfg, "promotion_decision_split", "fit_calibration"))
+    if basis == "fit":
+        return fit_start, fit_end
+    if basis == "calibration":
+        return calibration_start, calibration_end
+    if basis == "fit_calibration":
+        return fit_start, calibration_end
+    raise ValueError(f"unsupported promotion_decision_split: {basis}")
+
+
 @dataclass(slots=True)
 class CandidatePipelineOutput:
     """Candidate strategy bridge output."""
@@ -151,13 +170,36 @@ def run_candidate_strategy_for_universe(
         )
 
     labeled = label_candidate_events(events=raw_events, aligned=aligned, cfg=strategy_cfg.candidate)
+    fit_start, fit_end, calibration_start, calibration_end, oos_start, oos_end = _candidate_ml_split_indices(
+        n_bars=n_bars,
+        fit_fraction=strategy_cfg.candidate.ml_fit_fraction,
+        calibration_fraction=strategy_cfg.candidate.ml_calibration_fraction,
+        purge_bars=strategy_cfg.candidate.purge_bars,
+        embargo_bars=strategy_cfg.candidate.embargo_bars,
+    )
+    recommendation_start, recommendation_end = _recommendation_window_indices(
+        fit_start=fit_start,
+        fit_end=fit_end,
+        calibration_start=calibration_start,
+        calibration_end=calibration_end,
+        cfg=strategy_cfg.candidate,
+    )
+    if strategy_cfg.candidate.promotion_decision_split == "fit_calibration":
+        entry_idx = pd.to_numeric(labeled["entry_idx"], errors="coerce")
+        labeled_for_diag = labeled.loc[(entry_idx < fit_end) | (entry_idx >= calibration_start)].copy()
+    else:
+        labeled_for_diag = labeled
 
     diag = compute_rule_diagnostics(
-        labeled_events=labeled,
+        labeled_events=labeled_for_diag,
         aligned=aligned,
         cfg=strategy_cfg.candidate,
         min_obs=max(strategy_cfg.candidate.min_candidate_obs, 100),
         silent=silent,
+        recommendation_start=recommendation_start,
+        recommendation_end=recommendation_end,
+        report_start=oos_start,
+        report_end=oos_end,
     )
 
     if strategy_cfg.candidate.promotion_filter_enabled:
@@ -200,13 +242,6 @@ def run_candidate_strategy_for_universe(
             )
     promoted_total = len(labeled)
 
-    fit_start, fit_end, calibration_start, calibration_end, oos_start, oos_end = _candidate_ml_split_indices(
-        n_bars=n_bars,
-        fit_fraction=strategy_cfg.candidate.ml_fit_fraction,
-        calibration_fraction=strategy_cfg.candidate.ml_calibration_fraction,
-        purge_bars=strategy_cfg.candidate.purge_bars,
-        embargo_bars=strategy_cfg.candidate.embargo_bars,
-    )
     fit_set = build_candidate_dataset(
         labeled_events=labeled,
         aligned=aligned,
@@ -395,6 +430,11 @@ def run_candidate_strategy_for_universe(
             ),
             "recommended_keep_variants": diag.recommended_keep_variants,
             "recommended_flip_variants": diag.recommended_flip_variants,
+            "recommendation_basis": diag.recommendation_basis,
+            "recommendation_start": int(diag.recommendation_split[0]),
+            "recommendation_end": int(diag.recommendation_split[1]),
+            "report_start": int(diag.report_split[0]),
+            "report_end": int(diag.report_split[1]),
         },
     )
 
