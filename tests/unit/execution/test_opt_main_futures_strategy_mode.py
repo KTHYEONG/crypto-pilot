@@ -528,3 +528,40 @@ def test_ensure_cached_symbol_data_uses_fetch_start_for_backfill(
     assert len(calls) == 2
     assert calls[0].get("start_date") == window.fetch_start_date
     assert calls[1].get("start_date") == window.fetch_start_date
+
+
+def test_active_signals_count_reads_alpha_panel_not_missing_attr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Active Signals는 alpha_panel["target_weight"]에서 집계해야 한다.
+    panel_target_weight 속성(존재하지 않는)을 읽으면 항상 0이 되는 버그를 방지한다.
+    """
+    import numpy as np
+
+    from src.domain.futures.strategy_runtime.bridge import CandidatePipelineOutput
+
+    # Arrange: alpha_panel에 nonzero target_weight가 있는 CandidatePipelineOutput 구성
+    datetimes = pd.date_range("2026-01-01", periods=5, freq="4h")
+    panel = pd.DataFrame(
+        {
+            "datetime": datetimes,
+            "symbol": ["BTCUSDT"] * 5,
+            "target_weight": np.array([0.0, 0.1, 0.05, 0.0, 0.08], dtype=np.float64),
+            "alpha_long": np.zeros(5, dtype=np.float64),
+            "alpha_short": np.zeros(5, dtype=np.float64),
+        }
+    ).set_index(["datetime", "symbol"])
+    ml_out = CandidatePipelineOutput(alpha_panel=panel, target_weights=None, rule_report={})
+
+    # Assert: panel_target_weight 속성은 없어야 한다 (버그 재현 조건)
+    assert not hasattr(ml_out, "panel_target_weight"), (
+        "CandidatePipelineOutput must not have panel_target_weight attribute"
+    )
+
+    # Assert: alpha_panel["target_weight"]에서 nonzero를 올바르게 집계하는지 검증
+    alpha_panel_check = getattr(ml_out, "alpha_panel", None)
+    assert isinstance(alpha_panel_check, pd.DataFrame)
+    assert "target_weight" in alpha_panel_check.columns
+    tw_arr = alpha_panel_check["target_weight"].to_numpy(dtype=np.float64)
+    non_zero_weights = int(np.count_nonzero(np.abs(tw_arr) > 1e-9))
+    assert non_zero_weights == 3, f"Expected 3 nonzero weights, got {non_zero_weights}"
