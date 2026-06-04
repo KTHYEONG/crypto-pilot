@@ -1,38 +1,34 @@
 ---
 name: triage-scan
-description: Classify tasks and map repository context efficiently before design.
+description: Scout and map relevant file paths (code, tests, docs) BEFORE any design work.
 ---
 
-# Skill: Triage-Scan
+# Skill: Triage-Scan (File Discovery & Mapping)
 
 ## Purpose
-Quickly identify task type, strategy, and locate relevant code/tests with minimal token usage. Do not design or read full files.
+Act as a lightweight scout. Your ONLY goal is to locate the exact files, tests, and documentation related to the user's request. **DO NOT design solutions, analyze logic, or formulate strategies.** 
 
-## Scan Guidelines (Efficiency)
-1. **Live Truth:** Use `ls`, `glob`, and `grep` only. Use live code as the source of truth.
-2. **Pinpoint Grep:** Use `total_max_matches: 1` and minimal context to confirm existence, not deep logic.
-3. **Index Mapping:** Map architecture via folder/file names. Read only the first 5-10 lines if the purpose is unclear.
-4. **No Full Reads:** Never read >20 lines of any file. Defer deep analysis to the `spec` phase.
-
-## Triage Classifications
-- **Type:** bug | feature | refactor | quant | docs | config
-- **Risk:** low | medium | high
-- **Strategy:** direct patch | TDD | spike | regression-first
+## Scout Guidelines (Strict Token Efficiency)
+1. **Search Only:** Rely heavily on `grep_search`, `glob`, and `list_directory`. 
+2. **Zero Logic Analysis:** Do not read entire files. If you find the target class/function via grep, record its path and line number, then immediately stop reading.
+3. **Trace Ecosystem:** Always find the Holy Trinity for the target:
+   - **Core Code:** Where is the logic defined?
+   - **Tests:** Where is the `test_*.py` file for it?
+   - **Docs:** Which `docs/domains/*.md` or `docs/architecture/*.md` governs this?
+4. **No Guesses:** If you cannot find a related test or doc, explicitly state `None found`. Do not hallucinate paths.
 
 ## Output Format
 ```md
-### 🔍 작업 탐색: [Type]
+### 🔍 사전 파일 탐색 완료
 
-**1. 작업 개요**
-- **해결 방향:** `[Strategy]` (예상 위험도: `[Risk]`)
-- **관련 모듈/계층:** `[Layer Name]`
+**1. 핵심 타겟 파일**
+- `[File Path]` (Line: X) - *[짧은 설명: e.g., ML Gate 로직 정의부]*
 
-**2. 영향 범위 및 참조**
-- **수정할 주요 코드:** `[Path]:[Line]` (via [Keyword])
-- **테스트 파일:** `[Path]`
-- **의존성:** `[Key Imports/Classes]`
-- **관련 파일:** `[Relevant Filenames]`
+**2. 연관 생태계 (Ecosystem)**
+- **의존성/참조:** `[관련된 다른 모듈 Path]`
+- **테스트 파일:** `[test_*.py Path]` (없을 경우 'None found')
+- **관련 문서:** `[docs/*.md Path]` (없을 경우 'None found')
 
 **3. 다음 단계**
-- [Hand off verified paths to `spec` or `implement`]
+- ➡️ 탐색된 경로를 바탕으로 `spec` 스킬로 넘어가 세부 설계를 진행합니다.
 ```

@@ -1,44 +1,49 @@
 ---
 name: spec
-description: Architecture design & machine-readable blueprint for implementation.
+description: Actionable code implementation blueprint. STRICTLY FOR CODE CONVERSION.
 ---
 
-# Skill: Spec
+# Skill: Spec (Implementation Blueprint)
 
 ## Purpose
-Produce high-precision technical specifications. High-reasoning models must focus on "Why" and "How", delegating "Action" to the Blueprint.
+Produce high-precision technical specifications for the `implement` agent. 
+**CRITICAL:** This is an EPHEMERAL WORK ORDER. It must clearly communicate the **Reasoning (Why/Direction)** to the User for approval, and the **Action (How)** to the Implementer for execution.
 
 ## Output 1: Blueprint File (Save to `docs/specs/*.md`)
-*Purpose: Strict instruction set for the builder AI. Zero ambiguity.*
-- **Target Files:** List of files to be modified.
-- **Contract:** Exact function signatures, types, and data models.
-- **Step-by-Step Logic:** Procedural logic in pseudo-code or bullet points.
-- **Surgical Plan:** 
+*Purpose: Zero ambiguity instruction set for the builder AI.*
+
+- **# 🎯 Objective**: 1-sentence goal (e.g., "Improve ML Gate logic to reduce false positives").
+- **# 💡 Strategy**: A brief summary of *what* was found during analysis and *how* it will be improved (The "Logic" behind the change).
+- **Target Files**: List of exact files to be modified.
+- **Contract Changes**: Exact function signatures, types, and data models to add/change.
+- **Surgical Plan**: 
   - `[FILE_PATH]`
-  - `[ACTION: ADD/REPLACE/DELETE]`
-  - `[CODE_OR_INSTRUCTION]` (Provide exact code snippets for complex logic).
-- **Verification:** Precise `uv run` command and expected outcome.
+  - `[ACTION: CREATE / UPDATE / DELETE]`
+  - `[TARGET_FUNCTION_OR_CLASS]`
+  - `[EXACT_CODE_OR_INSTRUCTION]` (Provide exact code for complex logic).
+- **Verification**: Precise `uv run` commands to prove success.
 
 ## Output 2: Chat Summary (Brief)
-*Purpose: Rapid user alignment. Minimal tokens.*
+*Purpose: Rapid user alignment & approval. Minimal tokens.*
 ```md
-### 📝 작업 설계: [Type] | [Brief Goal]
-- **설계 문서:** `docs/specs/[filename].md`
-- **수정 대상:** `[Files changed]`
+### 📝 설계 승인 요청: [Title]
+> **검토 결과:** [기존 코드의 문제점이나 개선이 필요한 이유를 1줄로 요약]
 
-**1. 설계 방향**
-- **핵심 구현 아이디어:** [1-2 sentences on core logic]
-- **고려사항/제약조건:** [Why this way? - only if critical]
+**1. 개선 방향 (Strategy)**
+- [어떤 로직을 어떻게 바꿀 것인지 사용자가 이해하기 쉽게 2-3개 불릿으로 설명]
+- [예: "ml_gate의 임계값 계산 방식을 가중치 평균에서 지수 이동 평균으로 변경"]
 
-**2. 완료 기준 (Checklist)**
-- [ ] [Measurable outcome 1]
-- [ ] [Measurable outcome 2]
+**2. 작업 범위**
+- **문서 위치:** `docs/specs/[filename].md`
+- **수정 파일:** `[File names...]`
 
-**3. 상태:** [Ready to Implement? / Questions for User]
+**3. 완료 기준**
+- [ ] [구현 후 기대되는 구체적인 결과물이나 상태]
+
+**상태:** 이 설계대로 진행할까요? (Yes/No 또는 의견)
 ```
 
 ## Reasoning Constraints
-1. **Verification First:** Before designing, use `read_file` to confirm the FULL signatures and context of functions/classes identified in `triage-scan`. Never assume based on partial imports or 10-line "sniffs".
-2. **No Hallucination:** If a path is unverified, run `grep/ls` first.
-3. **Context Density:** Do not repeat the prompt. Focus on the Delta (what changes).
-4. **Spec Types:** `spec-lite` (minor), `prd` (major), `bug-fix`, `refactor`.
+1. **Analysis First**: Before writing the spec, you MUST explain to yourself "What is wrong with the current code?". This logic must be reflected in the **Strategy**.
+2. **User-Centric**: The Chat Summary must be readable by a human. Avoid overly cryptic jargon where simple terms suffice.
+3. **No Documentation Overlap**: Keep this file as a throw-away task list. Only record permanent rules in `documentation.md`.
