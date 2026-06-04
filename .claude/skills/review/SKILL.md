@@ -6,19 +6,25 @@ description: Critically audit compliance with Specs and Project Standards to det
 # Skill: Review
 
 ## Purpose
-Act as the final logical gatekeeper. Critically review code changes to ensure they perfectly align with the design (Spec) and fulfill all Acceptance Criteria.
+Act as the final logical gatekeeper and project maintainer. Critically audit code changes and ensure the system's permanent knowledge base is updated while cleaning up temporary task files.
 
 ## Audit Checklist
 1. **Logic Integrity:** Do the changes fulfill the "Why" and "How" of the Spec? Check for subtle logical drift or missing edge cases.
 2. **Spec Alignment:** Do interfaces, types, and logic match `docs/specs/*.md` 100%?
 3. **Surgical Precision:** No unnecessary file modifications or "just-in-case" logic outside `Target Files`?
-4. **Standards Review:** Manual check for adherence to project rules (e.g., Python 3.11+, Strict Typing, Logging, Docstrings). Do NOT re-run automated tools unless manual verification is required for a specific edge case.
-5. **Final Acceptance:** Verify that the implementation achieves the measurable outcomes defined in the Spec's Acceptance Criteria.
+4. **Standards Review:** Manual check for adherence to project rules (e.g., Python 3.11+, Strict Typing, Logging, Docstrings).
 
-## Verdicts
-- **PASS**: Perfect alignment with Spec and Rules.
-- **PASS WITH RISKS**: Alignment achieved, but potential edge cases or minor improvements identified.
-- **FAIL**: Spec mismatch, rule violation, or logic errors found.
+## Finalization & Cleanup (Mandatory for PASS)
+If the verdict is **PASS**, you MUST perform the following maintenance before finishing:
+1. **Knowledge Promotion:** If the Spec introduced new business rules, invariants, or architectural changes, ensure they are merged into the relevant official documents in `docs/architecture/` or `docs/domains/` according to `documentation.md`.
+2. **Garbage Collection:** Delete the temporary blueprint file in `docs/specs/` to prevent AI context pollution.
+3. **Doc Sync:** Ensure the `last_verified` date in official documents is updated.
+
+## Verdicts & Routing
+- **PASS**: Perfect alignment. (Trigger Cleanup & Promotion).
+- **PASS WITH RISKS**: Alignment achieved, but identify risks. (Trigger Cleanup & Promotion).
+- **FAIL (Implementation Error)**: Spec is fine, but code has bugs/typos. -> **Handoff to `implement`**.
+- **FAIL (Design Error)**: The Spec itself was flawed or didn't account for real-world code. -> **Handoff to `spec`**.
 
 ## Output Format
 ```md
@@ -26,13 +32,16 @@ Act as the final logical gatekeeper. Critically review code changes to ensure th
 
 **1. 주요 검토 결과**
 - **설계 부합도:** [Pass/Fail] (Ref: `docs/specs/filename.md`)
-- **작업 범위 준수:** [Pass/Fail] (Unintended changes check)
-- **표준 규격 준수:** [Pass/Fail] (Project rules check)
+- **작업 범위 준수:** [Pass/Fail]
+- **표준 규격 준수:** [Pass/Fail]
 
-**2. 발견 사항 및 리스크**
-- [Issue 1: Detail and location]
-- [Issue 2: Recommendations]
+**2. 지식 승격 및 정리 (PASS 시)**
+- [ ] 공식 문서 업데이트 완료: `[Path]`
+- [ ] 임시 Spec 파일 삭제 완료: `docs/specs/[filename].md`
 
-**3. 후속 조치**
-- [Specific fixes required or Next Step]
+**3. 발견 사항 및 리스크**
+- [Issues/Recommendations]
+
+**4. 후속 조치 (Routing)**
+- [Next Step: implement / spec / close]
 ```
