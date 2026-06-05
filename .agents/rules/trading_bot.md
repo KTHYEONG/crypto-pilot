@@ -70,4 +70,4 @@ These rules prioritize system integrity and asset protection. They are applied w
 1. **<bot_plan>**: (Max 5 lines) Design time sync method, concurrency control (Lock) points, and initial state sync logic.
 2. **<bot_safety>**: (Max 3 lines) Define precision handling (Decimal), Kill Switch triggers, and maximum order limits.
 3. **Write Code**: Write robust asynchronous code with comprehensive exception handling.
-4. **<verify_bot>**: (Max 4 lines) Verify race condition possibilities and state recovery scenarios upon network disconnection or restart.
+4. **<check_bot>**: (Max 4 lines) Verify race condition possibilities and state recovery scenarios upon network disconnection or restart.

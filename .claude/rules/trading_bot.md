@@ -55,7 +55,7 @@ These rules prioritize system integrity and asset protection. They are applied w
         3. Exchange maintenance or API permission errors (401, 403).
 - **Sanity Checks:**
     - Set hard limits such as `MaxOrderValue` and `MaxOrderQty` to fundamentally block 'Fat Finger' errors.
-    - For Binance Futures, explicitly set or verify Leverage and Margin Mode (Cross/Isolated) before ordering.
+    - For Binance Futures, explicitly set or check Leverage and Margin Mode (Cross/Isolated) before ordering.
 - **Secrets Management:** Load API Key/Secret from environment variables (`.env`) and filter them to ensure they are not leaked in logs.
 
 ## 5. Logging & Traceability
@@ -66,4 +66,4 @@ These rules prioritize system integrity and asset protection. They are applied w
 1. **<bot_plan>**: (Max 5 lines) Design time sync method, concurrency control (Lock) points, and initial state sync logic.
 2. **<bot_safety>**: (Max 3 lines) Define precision handling (Decimal), Kill Switch triggers, and maximum order limits.
 3. **Write Code**: Write robust asynchronous code with comprehensive exception handling.
-4. **<verify_bot>**: (Max 4 lines) Verify race condition possibilities and state recovery scenarios upon network disconnection or restart.
+4. **<check_bot>**: (Max 4 lines) Verify race condition possibilities and state recovery scenarios upon network disconnection or restart.
