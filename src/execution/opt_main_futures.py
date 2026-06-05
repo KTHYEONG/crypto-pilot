@@ -313,7 +313,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--phase",
         type=str,
-        choices=["full", "ml", "signal", "strategy"],
+        choices=["full", "ml", "signal"],
         default="full",
     )
     parser.add_argument(
@@ -560,23 +560,7 @@ def _run_strategy_stage(
         valid_symbols=data_stage.valid_symbols,
         tf=run_config.timeframe,
     )
-    # Candidate ML support maps can include the Stage6 union plus current ready symbols.
-    all_inference_syms = list(
-        dict.fromkeys(
-            list(inference_panel or live_inference_panel) + list(data_stage.valid_symbols)
-        )
-    )
-    if run_config.phase in {"strategy", "alpha"} and (
-        inference_panel or live_inference_panel
-    ):
-        full_strategy_maps = pick_strategy_data_maps(
-            oos_data_maps=data_stage.oos_data_maps,
-            is_data_maps=data_stage.data_maps,
-            valid_symbols=all_inference_syms,
-            tf=run_config.timeframe,
-        )
-    else:
-        full_strategy_maps = strategy_maps
+    full_strategy_maps = strategy_maps
 
     if universe_snapshot is not None:
         _inject_universe_metadata_into_maps(
