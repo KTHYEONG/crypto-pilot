@@ -217,9 +217,15 @@ Schemes: `anchored` (default, fit_start=0 fixed), `rolling` (fixed-length fit wi
 
 `--phase signal` CLI argument → `FuturesRunConfig.phase="signal"` → `strategy_cfg.candidate.signal_only=True`. Bridge short-circuits before ML training, emits `SignalValidationReport` (rule_only and rule_promo_no_leak variants), and returns zero weights.
 
-**Validation criteria (2026-06-05 현재, pending redesign):**
-- `net_stress_p50 > 0` AND `ir_t ≥ min_rule_ir_t` — 현재 median 기반이어서 right-skew payoff 전략에 불리.
-- `docs/specs/signal_gate_expectancy_redesign.md` 에서 **mean-net 기반**으로 교체 예정.
+**Validation criteria (2026-06-05, mean-net redesign Phase 1 적용):**
+- **Blend survival gate (signal→ML handoff):** `mean_net_stress > blend_survival_min_net_stress_bps(=0)` AND `ir_t ≥ min_rule_ir_t`.
+  - `mean_net_stress` = `mean(edge_after_hurdle + ex_ante_cost − stress_rt)` — **정직한 stress(1회 차감)**.
+  - `edge_after_hurdle`는 이미 base RT 비용을 차감한 net이므로, base 비용을 복원한 뒤 stress RT를 1회만 적용하여 **이중 차감을 방지**한다.
+  - mean 기반이라 right-skew payoff(ATR-stop: median<0, mean>0) 전략을 정상 평가한다.
+- **판정 대상:** `blend_survival_require_promoted=True`이면 ML이 실제 소비하는 `rule_promo_no_leak` 블렌드만 pass 판정 (rule_only는 진단용 baseline).
+- **median/p10은 진단 보고 전용** (`net_edge_bps_p50`, tail guard는 q10_fail_rate가 담당).
+- legacy median path(`net_stress_p50 > 0`)는 `blend_survival_use_mean=False`로 회귀 검증 가능하게 보존.
+- 미적용 (future): 다중검정 보정(deflated Sharpe / BH-FDR), WF fold positive-ratio 게이트, capacity-aware 실현 EV 게이트.
 
 `Status: BLOCKED`는 signal mode에서 항상 표시(target_weights=zeros가 설계상 정상). 실질 판단 지표는 `zero_reason` 필드:
 - `promotion_filter_empty` → 승격 실패(이전 상태).
@@ -230,16 +236,16 @@ Schemes: `anchored` (default, fit_start=0 fixed), `rolling` (fixed-length fit wi
 `promotion_level="variant"` — signal_cell 분할 없이 family:variant 단위 평가. (Phase 1 변경)
 
 A variant is KEEP when it clears **all** of:
-- `mean_edge ≥ min_variant_oos_edge_bps` (1.0bps gross; 향후 net 기준 전환 예정)
-- `median_edge ≥ −100bps` (Phase 1 완화값; `signal_gate_expectancy_redesign`에서 −50 + net mean 교체 예정)
-- `p10_edge ≥ −600bps` (Phase 1 완화값; 교체 예정 −400)
+- `mean_edge ≥ min_variant_oos_edge_bps` (1.0bps **net** — `edge_after_hurdle`는 이미 cost+hurdle 차감)
+- `median_edge ≥ −100bps` (soft outlier filter; skew-exempt archetype 면제)
+- `p10_edge ≥ −600bps` (hard outlier filter; primary tail guard는 q10_fail_rate)
 - `q10_fail_rate ≤ max_variant_oos_q10_fail_rate`
 - `event_density ≤ max_variant_event_fraction_per_bar`
 - `hit_or_payoff` — hit_rate ≥ 0.50 OR payoff_ratio ≥ 1.20
 - `edge_decay ≥ −max_oos_edge_decay_bps`
 - `regime_edge` — diagnostic-only (variant mode에서 gate 제외)
 
-**알려진 문제 (pending fix):** 현재 −100/−600 완화로 인해 keep-set이 pass-through에 가까워 블렌드 경제성 미검증. `signal_gate_expectancy_redesign.md` 구현 완료 전까지 **ML 단계 진행 금지**.
+**블렌드 경제성 검증 (Phase 1 적용 완료):** keep-set 블렌드(`rule_promo_no_leak`)는 위 mean-net-stress 게이트를 통과해야 ML 단계로 진행한다. 2026-06-05 검증: `mean=17.8bps`, `stress_mean=14.1bps`, `overall_pass=True` → ML 진행 가능.
 
 Regime partition (6-state, `compute_market_regime_context`):
 - `bull_quiet`, `bull_volatile`, `bear_quiet`, `bear_volatile`, `transition`, `crash`
@@ -266,7 +272,8 @@ The rule candidate pool now includes these additional families, each with explic
 - ML allocation remains valid only after rule candidates pass standalone post-cost edge gates.
 - Candidate families should encode archetype, regime, and entry trigger explicitly rather than acting as a flat rule list.
 - Adding more candidate variants without stricter diagnostics is not treated as signal improvement.
-- **[2026-06-05 신규] signal promotion 게이트가 경제적 판별력을 상실** — Phase 1 완화(median −100 / p10 −600)로 keep-set이 사실상 pass-through. `signal_gate_expectancy_redesign.md`에서 mean-net 게이트로 교체 예정. ML 진행 전 이 작업 완료 필수.
+- **[2026-06-05 해결] signal→ML 핸드오프 게이트를 mean-net 기반으로 교정** — median 기반 + 비용 이중차감 버그 제거 (`blend_survival_use_mean`). `overall_pass=True` 달성으로 ML 진행 가능.
+- **[2026-06-05 신규 블로커] ML Gate calibration_probability_collapse** — 4 WF fold 전체에서 sigmoid 캘리브레이션 std 붕괴(0.12→0.003). `gate_p50=0.449 < 0.55` → 선택 과소. ML Gate+Edge OOS CAGR −3.2%. isotonic 교체 또는 uncalibrated 경로 검토 필요(다음 spec).
 
 ## Key Verification Paths
 
