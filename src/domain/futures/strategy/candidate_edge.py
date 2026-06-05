@@ -346,13 +346,18 @@ def fit_candidate_edge_models(
     eval_set_q10: Any = [(valid.X, valid.y_q10_bps)] if valid.X.shape[0] > 0 else None
     eval_set_q90: Any = [(valid.X, valid.y_mfe_bps)] if valid.X.shape[0] > 0 else None
 
+    from lightgbm import early_stopping as lgbm_early_stopping
+    from lightgbm import log_evaluation as lgbm_log_evaluation
+
+    _es_cb: list[Any] = [lgbm_early_stopping(stopping_rounds=30, verbose=False), lgbm_log_evaluation(period=-1)]
+
     if eval_set_center is not None and len(np.unique(valid.y_edge_bps)) > 1:
         center.fit(
             train.X,
             center_train_target,
             sample_weight=train.sample_weight,
             eval_set=eval_set_center,
-            callbacks=[],
+            callbacks=_es_cb,
         )
     else:
         center.fit(train.X, center_train_target, sample_weight=train.sample_weight)
@@ -363,7 +368,7 @@ def fit_candidate_edge_models(
             train.y_q10_bps,
             sample_weight=train.sample_weight,
             eval_set=eval_set_q10,
-            callbacks=[],
+            callbacks=_es_cb,
         )
     else:
         q10.fit(train.X, train.y_q10_bps, sample_weight=train.sample_weight)
@@ -375,7 +380,7 @@ def fit_candidate_edge_models(
             train.y_mfe_bps,
             sample_weight=train.sample_weight,
             eval_set=eval_set_q90,
-            callbacks=[],
+            callbacks=_es_cb,
         )
     else:
         q90.fit(train.X, train.y_mfe_bps, sample_weight=train.sample_weight)
@@ -468,7 +473,10 @@ def predict_candidate_edges(
         - turnover_term
         - concentration_penalty
     )
-    if bool(getattr(cfg, "selection_use_expected_utility", True)):
+    if getattr(cfg, "selection_utility_mode", "additive_drag") == "expected_edge_direct":
+        # Direct mode: mu_net is the unconditional E[return]; p_pass/q10 are sizing-only.
+        utility_score = mu_net_decision_bps
+    elif bool(getattr(cfg, "selection_use_expected_utility", True)):
         utility_score = expected_utility_bps
     else:
         utility_score = prob_adjusted_mu_bps - downside_term - turnover_term - concentration_penalty

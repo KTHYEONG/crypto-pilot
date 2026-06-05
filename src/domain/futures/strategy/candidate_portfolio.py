@@ -634,10 +634,17 @@ def select_candidate_events_for_portfolio(
             zero_reason = "no_eligible_after_breakeven_floor"
         else:
             n_keep = max(1, math.ceil(n_eligible * cfg.selection_top_quantile))
+            # In expected_edge_direct mode, rank by expected_utility_bps (= mu_net)
+            # to match the eligibility criterion and shadow evaluation logic.
+            primary_sort_col = (
+                "expected_utility_bps"
+                if cfg.selection_utility_mode == "expected_edge_direct"
+                else "utility_score"
+            )
             top_idx = (
                 df.loc[eligible]
                 .sort_values(
-                    ["utility_score", "p_pass", "mu_net_decision_bps", "q10_net_bps"],
+                    [primary_sort_col, "p_pass", "mu_net_decision_bps", "q10_net_bps"],
                     ascending=[False, False, False, False],
                 )
                 .head(n_keep)

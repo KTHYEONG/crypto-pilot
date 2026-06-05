@@ -6,6 +6,8 @@ from typing import Any, cast
 
 import numpy as np
 from lightgbm import LGBMClassifier
+from lightgbm import early_stopping as lgbm_early_stopping
+from lightgbm import log_evaluation as lgbm_log_evaluation
 from numpy.typing import NDArray
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.frozen import FrozenEstimator
@@ -57,10 +59,16 @@ def fit_candidate_gate(
         n_jobs=1,
         verbose=-1,
     )
+    _es_cb = [lgbm_early_stopping(stopping_rounds=30, verbose=False), lgbm_log_evaluation(period=-1)]
+    _gate_eval: list[tuple[Any, Any]] = (
+        [(valid.X, valid.y_gate.astype(np.int32, copy=False))] if valid.X.shape[0] > 0 else []
+    )
     model.fit(
         train.X,
         train.y_gate.astype(np.int32, copy=False),
         sample_weight=train.sample_weight,
+        eval_set=_gate_eval if _gate_eval else None,
+        callbacks=_es_cb if _gate_eval else None,  # type: ignore[arg-type]
     )
 
     calibration_method = str(cfg.gate_calibration_method)
