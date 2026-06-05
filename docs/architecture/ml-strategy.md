@@ -32,6 +32,8 @@
 - **Gate Model**: LightGBM Classifier를 이용한 calibrated confidence 추정입니다. `p_pass`는 단순 win-rate 문턱이 아니라, payoff/downside와 결합되어 utility와 sizing에 쓰입니다.
 - **Edge Model**: LightGBM Regressor (Huber/Quantile)를 이용한 기대 수익 및 하방 리스크(q10) 추정입니다.
 - **Selection Diagnostics**: 예측 `mu`, `p_pass`, `expected_utility` decile별 realized edge/hit-rate 및 rank IC를 기록하여, pointwise 예측이 실제 top-k 선택 품질로 이어지는지 점검합니다.
+- **Selection Waterfall Diagnostics**: `prob_adjusted_mu`, `downside_drag`, `turnover_drag`, `soft_gate_penalty`, `expected_utility_raw/adj`를 fold별로 기록하여 `eligible=0`의 직접 원인을 분해합니다.
+- **Shadow Profiles**: production selection은 유지한 채, fold-local OOS에서 완화된 gate/utility/breakeven 조합을 shadow로만 평가하여 threshold bottleneck과 model bottleneck을 구분합니다.
 
 ### 3.4 Portfolio & Weights (`candidate_portfolio.py`)
 - **Selection**: `utility_topk`는 `expected_utility_bps`를 기준으로 후보를 고르고, gate는 `selection_gate_mode`에 따라 `off`, `soft_floor`, `hard_floor`로 동작합니다.
@@ -40,6 +42,7 @@
   - `soft_floor`: 즉시 제외하지 않고, 낮은 `p_pass`에 soft penalty를 부여
   - `off`: gate는 진단용으로만 사용
 - **Expected Utility**: 기본 selection은 `p_pass * mu_net + (1 - p_pass) * min(q10, 0) - turnover_penalty` 형태의 보수적 utility를 사용합니다.
+- **Selection Waterfall**: `expected_utility_raw`와 `expected_utility_adj`를 분리해, payoff 부족인지 downside 과대인지, 혹은 soft gate penalty 때문인지를 보고합니다.
 - **Shortfall Thresholding**: 기본값은 절대 bps 기준(`shortfall_threshold_basis="absolute_bps"`)이며, 필요 시 `stop_relative` 모드로 자산별 `sl_thr_bps` 기반 한계를 사용할 수 있습니다. 현재 기본값은 보수적으로 유지됩니다.
 - **Sizing**: Kelly 입력 `mu`는 기본적으로 `p_pass`로 discount되며, q10 downside로부터 variance floor를 부여하여 과도한 sizing을 방지합니다.
 - **Metadata Forward Fill**: `target_weights`가 holding 구간에 forward-fill될 때 candidate stop/take-profit metadata도 함께 유지되어, 엔진 진입 시점이 늦어져도 exit geometry가 보존됩니다.
@@ -62,6 +65,7 @@
 ### 4.3 검증 및 승격 (Validation & Promotion)
 - **Nested Walk-Forward**: 훈련/검증/OOS(Out-of-Sample)를 분리한 순방향 검증.
 - **Realized Fold Survival Gate**: 기본 fold survival은 예측 `mu` t-stat이 아니라, fold-local selected events의 realized edge / log-growth를 기준으로 판정합니다.
+- **WF Diagnostics**: fold별 `WF_DIAG`는 `eligible`, `selected`, `expected_utility p90`, `downside_drag p90`, best shadow profile을 남겨서, fail-closed 원인이 threshold인지 model quality인지 추적합니다.
 - **Compound Gate**: 단순 IC/AUC가 아닌, CAGR, Max Drawdown, Log Growth 등 실제 자본 성장 지표를 기준으로 전략 승격합니다.
 
 ## 4.4 Optuna Boundary
