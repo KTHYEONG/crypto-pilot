@@ -13,6 +13,7 @@ Analyze `<diff>`, `git status`, and untracked files to organize changes into an 
 - **Action-Oriented:** Provide a concrete **Commit Plan** for diverse or large changes instead of just recommendations.
 - **Security First:** If secrets are detected, ABORT immediately and output: `🚨 SECURITY ALERT: Secrets detected in diff.`
 - **Language:** Subject and Body MUST be in Korean.
+- **No AI Attribution:** DO NOT include `Co-Authored-By`, AI model names, or any AI-related attribution metadata in the commit message.
 
 ## 🧠 Internal Logic (Grouping & Structuring)
 1. **Logical Grouping:**
