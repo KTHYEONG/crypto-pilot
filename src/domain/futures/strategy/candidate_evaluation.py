@@ -91,8 +91,19 @@ def evaluate_compound_backtest(
     diag: NDArray[np.float64] | None = None,
     cfg: CandidateStrategyConfig,
     fold_oos_boundaries: tuple[tuple[int, int], ...] | None = None,
+    deployed_bar_fraction: float | None = None,
+    trade_count: int | None = None,
 ) -> CompoundEvaluationReport:
-    """Evaluate geometric capital growth and execution realism of a backtest."""
+    """Evaluate geometric capital growth and execution realism of a backtest.
+
+    Args:
+        deployed_bar_fraction: Fraction of bars with non-zero exposure.  Pass
+            ``None`` (default) to skip the deployment enforcement check; always
+            provide an explicit value when ``enforce_deployment_in_compound_gate``
+            matters.
+        trade_count: Number of round-trip trades.  Same sentinel semantics as
+            ``deployed_bar_fraction``.
+    """
     del diag
     n_bars = equity_curve.shape[0]
     if n_bars < 2:
@@ -136,7 +147,10 @@ def evaluate_compound_backtest(
     peaks = np.maximum.accumulate(equity_curve)
     drawdowns = (equity_curve - peaks) / np.maximum(peaks, 1e-12)
     max_dd = float(np.abs(np.min(drawdowns)))
-    mar = float(cagr / max_dd) if max_dd > 1e-9 else 0.0
+    # RC2 guard: max_dd below the floor means cagr/max_dd is a ratio of two noise-level
+    # numbers that can explode (e.g. 0.0001% / 0.00005% = MAR 2). Treat as MAR = 0.
+    mar_min_dd = float(getattr(cfg, "mar_min_drawdown_floor", 0.01))
+    mar = float(cagr / max_dd) if max_dd > mar_min_dd else 0.0
 
     # 4. Trades Metrics
     net_pnl = 0.0
@@ -186,6 +200,10 @@ def evaluate_compound_backtest(
         fail_reasons.append("negative log growth")
     if cagr <= 0.0:
         fail_reasons.append("negative CAGR")
+    # RC2: absolute CAGR floor prevents noise-level gains from passing
+    min_cagr = float(getattr(cfg, "min_cagr_for_promotion", 0.02))
+    if cagr < min_cagr:
+        fail_reasons.append(f"CAGR {cagr:.4f} below min_cagr_for_promotion {min_cagr:.4f}")
     drawdown_cap = float(getattr(cfg, "max_drawdown_cap", 0.25))
     if max_dd > drawdown_cap:
         fail_reasons.append(f"max drawdown {max_dd:.3f} exceeds max_drawdown_cap {drawdown_cap:.3f}")
@@ -199,6 +217,21 @@ def evaluate_compound_backtest(
         fail_reasons.append(f"block pass ratio {block_pass_ratio:.3f} is below 0.70 threshold")
     if net_pnl <= 0.0:
         fail_reasons.append("negative net pnl after costs")
+    # RC2: deployment enforcement — near-zero-trading variants must not pass.
+    # Only applied when explicit deployment metrics are provided (not None sentinel).
+    if (
+        bool(getattr(cfg, "enforce_deployment_in_compound_gate", True))
+        and deployed_bar_fraction is not None
+        and trade_count is not None
+    ):
+        min_deploy_frac = float(getattr(cfg, "min_deployment_capital_fraction", 0.05))
+        min_deploy_trades = int(getattr(cfg, "min_deployment_trade_count", 20))
+        if deployed_bar_fraction < min_deploy_frac:
+            fail_reasons.append(
+                f"deployed_bar_fraction {deployed_bar_fraction:.3f} below {min_deploy_frac:.3f}"
+            )
+        if trade_count < min_deploy_trades:
+            fail_reasons.append(f"trade_count {trade_count} below min_deployment_trade_count {min_deploy_trades}")
 
     pass_gate = len(fail_reasons) == 0
 

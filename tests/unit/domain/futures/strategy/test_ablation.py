@@ -5,11 +5,14 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.domain.futures.strategy.ablation import (
+    _build_barrier_arrays,
     _build_rule_equal_size_weights,
     _build_uncapped_kelly_edge_weights,
     _build_variant_prior_output,
+    _compute_realized_edge,
     run_candidate_ablation,
 )
 from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
@@ -302,3 +305,115 @@ def test_deployment_gate_blocks_near_zero_trading_variant() -> None:
         and row_no_trade.deployed_bar_fraction >= cfg.min_deployment_capital_fraction
     )
     assert not gate_result
+
+
+# ── Phase 0 tests ──────────────────────────────────────────────────────────────
+
+def test_compute_realized_edge_returns_nan_for_empty_trades() -> None:
+    """Phase 0: empty trade DataFrame yields NaN realized edge."""
+    result = _compute_realized_edge(pd.DataFrame())
+    assert np.isnan(result)
+
+
+def test_compute_realized_edge_returns_median_gross_bps() -> None:
+    """Phase 0: realized edge uses LONG/SHORT string side, price-based formula."""
+    trades = pd.DataFrame({
+        "entry_price": [100.0, 100.0],
+        "exit_price": [101.0, 99.0],    # +1% long win, -1% short win
+        "side": ["LONG", "SHORT"],
+    })
+    # trade 0 (LONG): (101/100 - 1) * 1 * 1e4 = 100 bps
+    # trade 1 (SHORT): (99/100 - 1) * -1 * 1e4 = +100 bps
+    result = _compute_realized_edge(trades)
+    assert np.isclose(result, 100.0, rtol=1e-6)
+
+
+def test_ablation_result_contains_real_edge_columns() -> None:
+    """Phase 0: ablation DataFrame must expose real_edge_bps_p50 and edge_capture_ratio."""
+    import dataclasses
+    required = {"real_edge_bps_p50", "edge_capture_ratio"}
+    from src.domain.futures.strategy.ablation import AblationRow
+    row = AblationRow(
+        variant="test",
+        mean_log_growth=0.001,
+        cagr=0.01,
+        max_drawdown=0.05,
+        mar=0.2,
+        turnover=0.01,
+        final_equity=1_010_000.0,
+        pass_compound_gate=False,
+        trade_count=5,
+        deployed_bar_fraction=0.1,
+        pred_edge_bps_p50=40.0,
+        real_edge_bps_p50=8.0,
+        edge_capture_ratio=0.2,
+        gross_cost_bps=15.0,
+        pass_deployment_gate=True,
+    )
+    df = pd.DataFrame([dataclasses.asdict(row)])
+    assert required.issubset(df.columns)
+    assert float(df["real_edge_bps_p50"].iloc[0]) == pytest.approx(8.0)
+    assert float(df["edge_capture_ratio"].iloc[0]) == pytest.approx(0.2)
+
+
+# ── Phase 1 tests ──────────────────────────────────────────────────────────────
+
+def test_build_barrier_arrays_writes_stop_and_tp_at_entry() -> None:
+    """Phase 1: barrier arrays are non-zero only at and after each event's entry_idx."""
+    events = pd.DataFrame({
+        "symbol": ["BTCUSDT"],
+        "entry_idx": [5],
+        "stop_atr_mult": [2.0],
+        "take_profit_atr_mult": [3.0],
+        "expected_holding_bars": [3],
+    })
+    stop_2d, tp_2d = _build_barrier_arrays(
+        selected_events=events,
+        n_times=10,
+        n_symbols=2,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        start_idx=0,
+    )
+    # bars 5, 6, 7 should be filled (entry + 2 forward fills)
+    assert stop_2d[4, 0] == 0.0, "bar before entry must be zero"
+    assert stop_2d[5, 0] == pytest.approx(2.0)
+    assert stop_2d[6, 0] == pytest.approx(2.0)
+    assert stop_2d[7, 0] == pytest.approx(2.0)
+    assert stop_2d[8, 0] == 0.0, "bar after holding window must be zero"
+    assert tp_2d[5, 0] == pytest.approx(3.0)
+    assert stop_2d[:, 1].sum() == 0.0, "ETHUSDT column must remain zero"
+
+
+def test_build_barrier_arrays_respects_start_idx_offset() -> None:
+    """Phase 1: global entry_idx is remapped correctly via start_idx."""
+    events = pd.DataFrame({
+        "symbol": ["BTCUSDT"],
+        "entry_idx": [100],  # global index
+        "stop_atr_mult": [1.5],
+        "take_profit_atr_mult": [2.5],
+        "expected_holding_bars": [2],
+    })
+    stop_2d, _ = _build_barrier_arrays(
+        selected_events=events,
+        n_times=10,
+        n_symbols=1,
+        symbols=("BTCUSDT",),
+        start_idx=99,  # local_t = 100 - 99 = 1
+    )
+    assert stop_2d[0, 0] == 0.0
+    assert stop_2d[1, 0] == pytest.approx(1.5)
+    assert stop_2d[2, 0] == pytest.approx(1.5)
+    assert stop_2d[3, 0] == 0.0
+
+
+def test_build_barrier_arrays_empty_events_returns_zeros() -> None:
+    """Phase 1: empty selected_events yields all-zero arrays."""
+    stop_2d, tp_2d = _build_barrier_arrays(
+        selected_events=pd.DataFrame(),
+        n_times=5,
+        n_symbols=2,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        start_idx=0,
+    )
+    assert stop_2d.sum() == 0.0
+    assert tp_2d.sum() == 0.0
