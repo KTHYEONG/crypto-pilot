@@ -202,6 +202,7 @@ def run_candidate_strategy_for_universe(
             target_weights_2d=np.zeros_like(aligned.close_2d),
             datetimes=aligned.datetimes,
             symbols=tuple(symbols),
+            cfg=strategy_cfg.candidate,
         )
         return CandidatePipelineOutput(
             alpha_panel=alpha_panel,
@@ -278,6 +279,7 @@ def run_candidate_strategy_for_universe(
                 target_weights_2d=np.zeros_like(aligned.close_2d),
                 datetimes=aligned.datetimes,
                 symbols=tuple(symbols),
+                cfg=strategy_cfg.candidate,
             )
             return CandidatePipelineOutput(
                 alpha_panel=alpha_panel,
@@ -353,6 +355,7 @@ def run_candidate_strategy_for_universe(
             target_weights_2d=np.zeros_like(aligned.close_2d),
             datetimes=aligned.datetimes,
             symbols=tuple(symbols),
+            cfg=strategy_cfg.candidate,
         )
         return CandidatePipelineOutput(
             alpha_panel=alpha_panel_sv,
@@ -408,8 +411,7 @@ def run_candidate_strategy_for_universe(
     fold_calibration_used = False
     fold_calibration_reason = "not_fit"
     total_fit = total_cal = total_oos = 0
-    fold_cost_survival: list[bool] = []  # per-fold cost survival for min_wf_fold_pass_ratio gate
-    fold_p_values: list[float] = []
+    fold_cost_survival: list[bool] = []
 
     for fold in wf_folds:
         fit_set = build_candidate_dataset(
@@ -465,20 +467,85 @@ def run_candidate_strategy_for_universe(
             models=fold_edge_models, dataset=oos_set, p_pass=fold_p, cfg=strategy_cfg.candidate
         )
         
-        # calculate p-value for cost survival (t-statistic of net edge relative to zero)
-        _fold_mu_finite = fold_ml.mu_net_decision_bps[np.isfinite(fold_ml.mu_net_decision_bps)]
-        if _fold_mu_finite.size >= 10:
-            mean_edge = float(np.mean(_fold_mu_finite))
-            std_edge = float(np.std(_fold_mu_finite)) + 1e-12
-            n_obs = _fold_mu_finite.size
-            t_stat = mean_edge / (std_edge / np.sqrt(n_obs))
-            
-            from scipy.stats import norm
-            p_val = float(1.0 - norm.cdf(t_stat))
-            fold_p_values.append(p_val)
+        from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
+
+        fold_model_output = CandidateModelOutput(
+            events=oos_set.event_index,
+            p_pass=fold_p,
+            mu_gross_bps=fold_ml.mu_gross_bps,
+            mu_net_decision_bps=fold_ml.mu_net_decision_bps,
+            q10_net_bps=fold_ml.q10_net_bps,
+            q90_net_bps=fold_ml.q90_net_bps,
+            utility_score=fold_ml.utility_score,
+            selection_thresholds=fold_ml.selection_thresholds,
+        )
+        selected_fold = select_candidate_events_for_portfolio(
+            model_output=fold_model_output,
+            cfg=strategy_cfg.candidate,
+        )
+        if "edge_after_hurdle_bps" in selected_fold.columns:
+            realized_edge = pd.to_numeric(selected_fold["edge_after_hurdle_bps"], errors="coerce")
         else:
-            fold_p_values.append(1.0)
-            
+            realized_edge = pd.Series(dtype="float64")
+        selected_count = int(selected_fold.shape[0])
+        realized_mean = float(realized_edge.mean()) if realized_edge.notna().any() else float("nan")
+        realized_hit_rate = float((realized_edge > 0.0).mean()) if realized_edge.notna().any() else 0.0
+        if realized_edge.notna().any():
+            log_growth_proxy = float(
+                np.mean(
+                    np.log1p(
+                        np.clip(realized_edge.to_numpy(dtype=np.float64, copy=False) * 1e-4, -0.99, None)
+                    )
+                )
+            )
+        else:
+            log_growth_proxy = float("-inf")
+
+        survival_metric = strategy_cfg.candidate.fold_survival_metric
+        if survival_metric == "predicted_mu_tstat":
+            fold_mu_finite = fold_ml.mu_net_decision_bps[np.isfinite(fold_ml.mu_net_decision_bps)]
+            if fold_mu_finite.size >= 10:
+                mean_edge = float(np.mean(fold_mu_finite))
+                std_edge = float(np.std(fold_mu_finite)) + 1e-12
+                n_obs = fold_mu_finite.size
+                t_stat = mean_edge / (std_edge / np.sqrt(n_obs))
+                pass_survival = bool(mean_edge > 0.0 and t_stat > 1.645)
+                survival_reason = "predicted_mu_tstat_pass" if pass_survival else "predicted_mu_tstat_fail"
+            else:
+                pass_survival = False
+                survival_reason = "predicted_mu_tstat_insufficient_obs"
+        elif survival_metric == "realized_log_growth":
+            pass_survival = (
+                selected_count >= strategy_cfg.candidate.min_fold_selected_events
+                and np.isfinite(log_growth_proxy)
+                and log_growth_proxy >= strategy_cfg.candidate.min_fold_log_growth
+            )
+            survival_reason = "realized_log_growth_pass" if pass_survival else "realized_log_growth_fail"
+        else:
+            pass_survival = (
+                selected_count >= strategy_cfg.candidate.min_fold_selected_events
+                and np.isfinite(realized_mean)
+                and realized_mean >= strategy_cfg.candidate.min_fold_realized_edge_bps
+                and log_growth_proxy >= strategy_cfg.candidate.min_fold_log_growth
+            )
+            survival_reason = "realized_selected_edge_pass" if pass_survival else "realized_selected_edge_fail"
+        fold_cost_survival.append(bool(pass_survival))
+        _logger.info(
+            (
+                "[BRIDGE][WF_REALIZED] metric=%s oos=[%d,%d) selected=%d realized_mean=%.3f "
+                "hit_rate=%.3f log_growth=%.6f pass=%s reason=%s"
+            ),
+            survival_metric,
+            fold.oos_start,
+            fold.oos_end,
+            selected_count,
+            realized_mean,
+            realized_hit_rate,
+            log_growth_proxy,
+            pass_survival,
+            survival_reason,
+        )
+
         fold_p_pass_parts.append(fold_p)
         fold_mu_parts.append(fold_ml.mu_net_decision_bps)
         fold_q10_parts.append(fold_ml.q10_net_bps)
@@ -515,26 +582,6 @@ def run_candidate_strategy_for_universe(
         _combined_q90 = _fallback_ml.q90_net_bps
         _combined_utility = _fallback_ml.utility_score
         total_oos = int(oos_set_fallback.X.shape[0])
-
-    # Apply BH-FDR correction to verify fold survival rates
-    fdr_target = 0.20
-    m = len(fold_p_values)
-    if m > 0:
-        sorted_p_indices = sorted(range(m), key=lambda k: fold_p_values[k])
-        sorted_p_vals = [fold_p_values[idx] for idx in sorted_p_indices]
-        max_k = -1
-        for k in range(m):
-            if sorted_p_vals[k] <= ((k + 1) / m) * fdr_target:
-                max_k = k
-        fold_cost_survival = [False] * m
-        for k in range(max_k + 1):
-            fold_cost_survival[sorted_p_indices[k]] = True
-        # single test alpha fallback
-        for idx in range(m):
-            if fold_p_values[idx] < 0.05:
-                fold_cost_survival[idx] = True
-    else:
-        fold_cost_survival = []
 
     # Use last fold's models for selection_thresholds (best fit available)
     _last_oos_set = build_candidate_dataset(
@@ -583,6 +630,7 @@ def run_candidate_strategy_for_universe(
             target_weights_2d=np.zeros_like(aligned.close_2d),
             datetimes=aligned.datetimes,
             symbols=tuple(symbols),
+            cfg=strategy_cfg.candidate,
         )
         return CandidatePipelineOutput(
             alpha_panel=_wf_fail_panel,
@@ -705,6 +753,7 @@ def run_candidate_strategy_for_universe(
         target_weights_2d=target_weights,
         datetimes=aligned.datetimes,
         symbols=tuple(symbols),
+        cfg=strategy_cfg.candidate,
     )
 
     if strategy_cfg.candidate.exit_policy_mode == "label_only":
