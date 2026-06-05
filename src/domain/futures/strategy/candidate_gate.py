@@ -40,17 +40,19 @@ def fit_candidate_gate(
 
     Follows spec hyperparameters for strict regime/overfit reduction.
     """
+    max_depth = int(getattr(cfg, "gate_lgbm_max_depth", 4))
+    reg_lambda = float(getattr(cfg, "gate_lgbm_reg_lambda", 20.0))
     model = LGBMClassifier(
         objective="binary",
         n_estimators=300,
         learning_rate=0.03,
-        num_leaves=15,
-        max_depth=4,
+        num_leaves=2**max_depth - 1 if max_depth > 0 else 15,
+        max_depth=max_depth,
         min_child_samples=100,
         subsample=0.80,
         colsample_bytree=0.80,
         reg_alpha=2.0,
-        reg_lambda=20.0,
+        reg_lambda=reg_lambda,
         random_state=_seed_from_cfg(cfg),
         n_jobs=1,
         verbose=-1,
@@ -154,6 +156,7 @@ def predict_candidate_gate(
     *,
     model: CandidateGateModel | None,
     dataset: CandidateDataset,
+    cfg: CandidateStrategyConfig | None = None,
 ) -> NDArray[np.float64]:
     """Return calibrated pass probability for candidate events."""
     if model is None or dataset.X.shape[0] == 0:
@@ -161,6 +164,32 @@ def predict_candidate_gate(
 
     predictor = model.calibrator if model.calibration_used and model.calibrator is not None else model.model
     probs = cast(NDArray[np.float64], predictor.predict_proba(dataset.X)[:, 1])
+    
+    # Apply percentile-based soft gate if calibration is not used and percentile gate is enabled
+    if not model.calibration_used and cfg is not None and getattr(cfg, "percentile_gate_enabled", False):
+        pct_threshold = float(getattr(cfg, "percentile_gate_threshold", 0.70))
+        min_gate_prob = float(getattr(cfg, "min_gate_probability", 0.55))
+        if len(probs) > 0:
+            pct_val = float(np.quantile(probs, pct_threshold))
+            max_val = float(probs.max())
+            adjusted = np.zeros_like(probs)
+            above_mask = probs >= pct_val
+            below_mask = ~above_mask
+            
+            if max_val > pct_val:
+                diff_val = max_val - pct_val
+                adjusted[above_mask] = (
+                    min_gate_prob + (1.0 - min_gate_prob) * (probs[above_mask] - pct_val) / diff_val
+                )
+            else:
+                adjusted[above_mask] = min_gate_prob
+                
+            if pct_val > 0.0:
+                adjusted[below_mask] = min_gate_prob * probs[below_mask] / pct_val
+            else:
+                adjusted[below_mask] = 0.0
+            probs = adjusted
+
     clipped = np.clip(probs.astype(np.float64, copy=False), 0.0, 1.0)
 
     _logger.debug(

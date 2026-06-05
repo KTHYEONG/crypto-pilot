@@ -353,6 +353,7 @@ def run_candidate_strategy_for_universe(
     fold_calibration_reason = "not_fit"
     total_fit = total_cal = total_oos = 0
     fold_cost_survival: list[bool] = []  # per-fold cost survival for min_wf_fold_pass_ratio gate
+    fold_p_values: list[float] = []
 
     for fold in wf_folds:
         fit_set = build_candidate_dataset(
@@ -403,16 +404,25 @@ def run_candidate_strategy_for_universe(
         fold_calibration_used = bool(fold_gate_model.calibration_used) if fold_gate_model is not None else False
         fold_calibration_reason = fold_gate_model.calibration_reason if fold_gate_model is not None else "not_fit"
 
-        fold_p = predict_candidate_gate(model=fold_gate_model, dataset=oos_set)
+        fold_p = predict_candidate_gate(model=fold_gate_model, dataset=oos_set, cfg=strategy_cfg.candidate)
         fold_ml = predict_candidate_edges(
             models=fold_edge_models, dataset=oos_set, p_pass=fold_p, cfg=strategy_cfg.candidate
         )
-        # cost survival: fold mean net edge > 0 (mu_net_decision_bps is already cost/hurdle-deducted)
+        
+        # calculate p-value for cost survival (t-statistic of net edge relative to zero)
         _fold_mu_finite = fold_ml.mu_net_decision_bps[np.isfinite(fold_ml.mu_net_decision_bps)]
-        fold_cost_survival.append(
-            float(np.mean(_fold_mu_finite)) > 0.0
-            if _fold_mu_finite.size > 0 else False
-        )
+        if _fold_mu_finite.size >= 10:
+            mean_edge = float(np.mean(_fold_mu_finite))
+            std_edge = float(np.std(_fold_mu_finite)) + 1e-12
+            n_obs = _fold_mu_finite.size
+            t_stat = mean_edge / (std_edge / np.sqrt(n_obs))
+            
+            from scipy.stats import norm
+            p_val = float(1.0 - norm.cdf(t_stat))
+            fold_p_values.append(p_val)
+        else:
+            fold_p_values.append(1.0)
+            
         fold_p_pass_parts.append(fold_p)
         fold_mu_parts.append(fold_ml.mu_net_decision_bps)
         fold_q10_parts.append(fold_ml.q10_net_bps)
@@ -440,7 +450,7 @@ def run_candidate_strategy_for_universe(
             split_end=_oos_end_ref,
         )
         combined_events = oos_set_fallback.event_index
-        p_pass = predict_candidate_gate(model=fold_gate_model, dataset=oos_set_fallback)
+        p_pass = predict_candidate_gate(model=fold_gate_model, dataset=oos_set_fallback, cfg=strategy_cfg.candidate)
         _fallback_ml = predict_candidate_edges(
             models=fold_edge_models, dataset=oos_set_fallback, p_pass=p_pass, cfg=strategy_cfg.candidate
         )
@@ -449,6 +459,26 @@ def run_candidate_strategy_for_universe(
         _combined_q90 = _fallback_ml.q90_net_bps
         _combined_utility = _fallback_ml.utility_score
         total_oos = int(oos_set_fallback.X.shape[0])
+
+    # Apply BH-FDR correction to verify fold survival rates
+    fdr_target = 0.20
+    m = len(fold_p_values)
+    if m > 0:
+        sorted_p_indices = sorted(range(m), key=lambda k: fold_p_values[k])
+        sorted_p_vals = [fold_p_values[idx] for idx in sorted_p_indices]
+        max_k = -1
+        for k in range(m):
+            if sorted_p_vals[k] <= ((k + 1) / m) * fdr_target:
+                max_k = k
+        fold_cost_survival = [False] * m
+        for k in range(max_k + 1):
+            fold_cost_survival[sorted_p_indices[k]] = True
+        # single test alpha fallback
+        for idx in range(m):
+            if fold_p_values[idx] < 0.05:
+                fold_cost_survival[idx] = True
+    else:
+        fold_cost_survival = []
 
     # Use last fold's models for selection_thresholds (best fit available)
     _last_oos_set = build_candidate_dataset(
@@ -460,7 +490,7 @@ def run_candidate_strategy_for_universe(
     )
     _ref_ml = predict_candidate_edges(
         models=fold_edge_models, dataset=_last_oos_set,
-        p_pass=predict_candidate_gate(model=fold_gate_model, dataset=_last_oos_set),
+        p_pass=predict_candidate_gate(model=fold_gate_model, dataset=_last_oos_set, cfg=strategy_cfg.candidate),
         cfg=strategy_cfg.candidate,
     )
     from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput

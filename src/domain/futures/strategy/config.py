@@ -114,10 +114,17 @@ class CandidateStrategyConfig:
         "barrier_first_label",
         "gross_direction_label",
     ] = "profitable_after_hurdle_label"
-    gate_calibration_method: Literal["sigmoid", "isotonic", "none"] = "sigmoid"
+    gate_calibration_method: Literal["sigmoid", "isotonic", "none"] = "isotonic"
+    gate_calibration_fallback_raw: bool = True
     min_gate_calibration_obs: int = 100
     min_gate_calibration_pos: int = 10
     min_gate_probability_std: float = 0.03
+    percentile_gate_enabled: bool = False
+    percentile_gate_threshold: float = 0.70  # top 30% signals pass
+    gate_lgbm_max_depth: int = 2
+    gate_lgbm_reg_lambda: float = 100.0
+    edge_lgbm_max_depth: int = 2
+    edge_lgbm_reg_lambda: float = 100.0
     ml_fit_fraction: float = 0.60
     ml_calibration_fraction: float = 0.20
     promotion_decision_split: Literal["fit", "calibration", "fit_calibration"] = "fit_calibration"
@@ -138,8 +145,8 @@ class CandidateStrategyConfig:
     kelly_fraction: float = 0.25
     min_gate_probability: float = 0.55
     min_expected_net_bps: float = 1.0
-    max_expected_shortfall_bps: float = 80.0
-    selection_shortfall_mode: Literal["hard", "penalty_only", "catastrophic"] = "hard"
+    max_expected_shortfall_bps: float = 300.0
+    selection_shortfall_mode: Literal["hard", "penalty_only", "catastrophic"] = "penalty_only"
     catastrophic_shortfall_bps: float = 300.0
     selection_sensitivity_enabled: bool = True
     selection_gate_grid: tuple[float, ...] = (0.40, 0.45, 0.50, 0.55)
@@ -193,6 +200,7 @@ class CandidateStrategyConfig:
     max_signal_cell_event_fraction_per_bar: float = 0.12
     candidate_identity_features_enabled: bool = True
     market_state_features_enabled: bool = True
+    exclude_immediate_return_features: bool = True
     promotion_filter_enabled: bool = True
     selection_policy: Literal["hard", "validation_quantile", "utility_topk"] = "utility_topk"
     selection_top_quantile: float = 0.10
@@ -240,7 +248,7 @@ class CandidateStrategyConfig:
     min_fit_obs: int = 200
     min_wf_fold_pass_ratio: float = 0.60
     # Edge model utility parameters
-    downside_penalty: float = 1.0
+    downside_penalty: float = 0.3
     turnover_penalty: float = 0.5
     concentration_penalty: float = 0.0
     # Deprecated: use ExecutionCostModel fields instead; kept for explicit override only

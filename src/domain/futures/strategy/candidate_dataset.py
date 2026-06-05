@@ -131,7 +131,9 @@ def build_candidate_dataset(
     id_feat_names = _ordered_identity_feature_names(labeled_events, cfg=cfg)
     mkt_feat_names = _market_state_feature_names(cfg)
     uni_feat_names = _universe_feature_names()
-    base_feat_names = (
+
+    exclude_leaky = bool(getattr(cfg, "exclude_immediate_return_features", False))
+    base_feat_names_list = [
         "side",
         "raw_score",
         "score_z",
@@ -140,16 +142,23 @@ def build_candidate_dataset(
         "min_holding_bars",
         "stop_atr_mult",
         "take_profit_atr_mult",
-        "sym_ret_1",
+    ]
+    if not exclude_leaky:
+        base_feat_names_list.append("sym_ret_1")
+    base_feat_names_list.extend([
         "sym_ret_5",
         "sym_vol_20",
         "sym_volume_z20",
-        "mkt_ret_1",
+    ])
+    if not exclude_leaky:
+        base_feat_names_list.append("mkt_ret_1")
+    base_feat_names_list.extend([
         "mkt_vol_20",
         "mkt_dispersion_20",
         "ex_ante_cost_bps",
         "funding_z20",
-    )
+    ])
+    base_feat_names = tuple(base_feat_names_list)
     feature_names = base_feat_names + uni_feat_names + mkt_feat_names + id_feat_names
 
     mask = (labeled_events["entry_idx"] >= split_start) & (labeled_events["entry_idx"] < split_end)
@@ -283,6 +292,13 @@ def build_candidate_dataset(
     valid_mask = event_t >= 20
 
     x_mat = np.zeros((len(events), len(feature_names)), dtype=np.float32)
+
+    # Helper function to set feature values dynamically based on name index
+    def _set_feat(name: str, values: NDArray[np.float32] | NDArray[np.float64]) -> None:
+        if name in feature_names:
+            idx = feature_names.index(name)
+            x_mat[:, idx] = values
+
     cols_from_events = [
         "side",
         "raw_score",
@@ -293,29 +309,50 @@ def build_candidate_dataset(
         "stop_atr_mult",
         "take_profit_atr_mult",
     ]
-    for i, col in enumerate(cols_from_events):
+    for col in cols_from_events:
         if col in events.columns:
-            x_mat[:, i] = events[col].fillna(0).values
+            _set_feat(col, events[col].fillna(0).values.astype(np.float32))
         elif col == "raw_score" and "score" in events.columns:
-            x_mat[:, i] = events["score"].fillna(0).values
+            _set_feat("raw_score", events["score"].fillna(0).values.astype(np.float32))
 
-    x_mat[valid_mask, 8] = sym_ret_1[event_t[valid_mask] - 1, event_sym_idxs[valid_mask]]
-    x_mat[valid_mask, 9] = sym_ret_5[event_t[valid_mask] - 5, event_sym_idxs[valid_mask]]
-    x_mat[valid_mask, 10] = sym_vol_20[event_t[valid_mask], event_sym_idxs[valid_mask]]
-    x_mat[valid_mask, 11] = sym_volume_z20[event_t[valid_mask], event_sym_idxs[valid_mask]]
+    if not exclude_leaky:
+        idx_ret1 = feature_names.index("sym_ret_1")
+        x_mat[valid_mask, idx_ret1] = sym_ret_1[
+            event_t[valid_mask] - 1, event_sym_idxs[valid_mask]
+        ]
 
-    x_mat[valid_mask, 12] = mkt_ret_1_padded[event_t[valid_mask]]
-    x_mat[valid_mask, 13] = mkt_vol_20[event_t[valid_mask]]
-    x_mat[valid_mask, 14] = mkt_dispersion_20[event_t[valid_mask]]
+    x_mat[valid_mask, feature_names.index("sym_ret_5")] = sym_ret_5[
+        event_t[valid_mask] - 5, event_sym_idxs[valid_mask]
+    ]
+    x_mat[valid_mask, feature_names.index("sym_vol_20")] = sym_vol_20[
+        event_t[valid_mask], event_sym_idxs[valid_mask]
+    ]
+    x_mat[valid_mask, feature_names.index("sym_volume_z20")] = sym_volume_z20[
+        event_t[valid_mask], event_sym_idxs[valid_mask]
+    ]
+
+    if not exclude_leaky:
+        idx_mkt_ret1 = feature_names.index("mkt_ret_1")
+        x_mat[valid_mask, idx_mkt_ret1] = mkt_ret_1_padded[event_t[valid_mask]]
+
+    x_mat[valid_mask, feature_names.index("mkt_vol_20")] = mkt_vol_20[event_t[valid_mask]]
+    x_mat[valid_mask, feature_names.index("mkt_dispersion_20")] = mkt_dispersion_20[
+        event_t[valid_mask]
+    ]
 
     if "ex_ante_cost_bps" in events.columns:
-        x_mat[:, 15] = events["ex_ante_cost_bps"].fillna(0).values
+        _set_feat("ex_ante_cost_bps", events["ex_ante_cost_bps"].fillna(0).values.astype(np.float32))
     elif aligned.execution_cost_bps_2d is not None:
-        x_mat[valid_mask, 15] = aligned.execution_cost_bps_2d[event_t[valid_mask], event_sym_idxs[valid_mask]]
+        idx_cost = feature_names.index("ex_ante_cost_bps")
+        x_mat[valid_mask, idx_cost] = aligned.execution_cost_bps_2d[
+            event_t[valid_mask], event_sym_idxs[valid_mask]
+        ]
 
-    x_mat[valid_mask, 16] = funding_z20[event_t[valid_mask], event_sym_idxs[valid_mask]]
+    x_mat[valid_mask, feature_names.index("funding_z20")] = funding_z20[
+        event_t[valid_mask], event_sym_idxs[valid_mask]
+    ]
 
-    curr = 17
+    curr = len(base_feat_names)
     x_mat[:, curr : curr + len(uni_feat_names)] = uni_matrix
     curr += len(uni_feat_names)
 
@@ -329,8 +366,8 @@ def build_candidate_dataset(
         x_mat[valid_mask, curr + 6] = symbol_ret_rank_20_2d[event_t[valid_mask], event_sym_idxs[valid_mask]]
         x_mat[valid_mask, curr + 7] = symbol_vol_z120_2d[event_t[valid_mask], event_sym_idxs[valid_mask]]
         x_mat[valid_mask, curr + 8] = funding_cs_z_2d[event_t[valid_mask], event_sym_idxs[valid_mask]]
-        vol_20_vals = x_mat[:, 10]
-        cost_bps_vals = x_mat[:, 15]
+        vol_20_vals = x_mat[:, feature_names.index("sym_vol_20")]
+        cost_bps_vals = x_mat[:, feature_names.index("ex_ante_cost_bps")]
         x_mat[:, curr + 9] = cost_bps_vals / np.maximum(vol_20_vals * 1e4, 1.0)
         curr += 10
 
