@@ -23,7 +23,7 @@ class CandidateDataset:
     groups: NDArray[np.int32]
     event_index: pd.DataFrame
     feature_names: tuple[str, ...]
-    feature_schema_version: str = "candidate_v2"
+    feature_schema_version: str = "candidate_v3"
 
 
 def _find_symbol_index(symbols: tuple[str, ...], symbol: str) -> int:
@@ -106,6 +106,11 @@ def _market_state_feature_names(cfg: CandidateStrategyConfig) -> tuple[str, ...]
 
 def _universe_feature_names() -> tuple[str, ...]:
     return (
+        "universe_vol_30d",
+        "universe_friction_score",
+        "universe_alpha_capacity_score",
+        "universe_diversification_score",
+        "universe_tradeable_score",
         "universe_cluster_id",
         "universe_beta_vs_market",
         "universe_cluster_size",
@@ -141,6 +146,7 @@ def build_candidate_dataset(
         "expected_holding_bars",
         "min_holding_bars",
         "stop_atr_mult",
+        "sl_thr_bps",
         "take_profit_atr_mult",
     ]
     if not exclude_leaky:
@@ -278,14 +284,24 @@ def build_candidate_dataset(
     uni_matrix = np.zeros((len(events), len(uni_feat_names)), dtype=np.float32)
     sym_to_idx = {s: i for i, s in enumerate(aligned.symbols)}
     event_sym_idxs = events["symbol"].map(sym_to_idx).values
+    if aligned.vol_30d_1d is not None:
+        uni_matrix[:, 0] = aligned.vol_30d_1d[event_sym_idxs]
+    if aligned.friction_score_1d is not None:
+        uni_matrix[:, 1] = aligned.friction_score_1d[event_sym_idxs]
+    if aligned.alpha_capacity_score_1d is not None:
+        uni_matrix[:, 2] = aligned.alpha_capacity_score_1d[event_sym_idxs]
+    if aligned.diversification_score_1d is not None:
+        uni_matrix[:, 3] = aligned.diversification_score_1d[event_sym_idxs]
+    if aligned.tradeable_score_1d is not None:
+        uni_matrix[:, 4] = aligned.tradeable_score_1d[event_sym_idxs]
     if aligned.cluster_id_1d is not None:
-        uni_matrix[:, 0] = aligned.cluster_id_1d[event_sym_idxs]
+        uni_matrix[:, 5] = aligned.cluster_id_1d[event_sym_idxs]
     if aligned.beta_vs_market_1d is not None:
-        uni_matrix[:, 1] = aligned.beta_vs_market_1d[event_sym_idxs]
+        uni_matrix[:, 6] = aligned.beta_vs_market_1d[event_sym_idxs]
     if aligned.cluster_size_1d is not None:
-        uni_matrix[:, 2] = aligned.cluster_size_1d[event_sym_idxs]
+        uni_matrix[:, 7] = aligned.cluster_size_1d[event_sym_idxs]
     if aligned.anchor_cluster_1d is not None:
-        uni_matrix[:, 3] = aligned.anchor_cluster_1d[event_sym_idxs]
+        uni_matrix[:, 8] = aligned.anchor_cluster_1d[event_sym_idxs]
 
     # 6. Assembly
     event_t = events["entry_idx"].values - 1
@@ -307,6 +323,7 @@ def build_candidate_dataset(
         "expected_holding_bars",
         "min_holding_bars",
         "stop_atr_mult",
+        "sl_thr_bps",
         "take_profit_atr_mult",
     ]
     for col in cols_from_events:

@@ -68,6 +68,62 @@ def _threshold_rate(values: np.ndarray, threshold: float) -> float:
     return float((finite >= threshold).mean())
 
 
+def _log_universe_volatility_deciles(
+    *,
+    events: pd.DataFrame,
+    selected: pd.DataFrame,
+    mu_net_decision_bps: np.ndarray,
+    q10_net_bps: np.ndarray,
+) -> None:
+    if events.empty or "vol_30d" not in events.columns:
+        return
+    vol = pd.to_numeric(events["vol_30d"], errors="coerce")
+    valid = vol.notna()
+    if int(valid.sum()) < 10:
+        return
+    diag = events.loc[valid].copy()
+    diag["_mu_net_decision_bps"] = np.asarray(mu_net_decision_bps, dtype=np.float64)[valid.to_numpy()]
+    diag["_q10_net_bps"] = np.asarray(q10_net_bps, dtype=np.float64)[valid.to_numpy()]
+    diag["_selected"] = False
+    if not selected.empty:
+        selected_keys = {
+            (
+                pd.Timestamp(dt).tz_localize(None) if pd.Timestamp(dt).tzinfo is not None else pd.Timestamp(dt),
+                str(sym),
+                int(entry_idx),
+                str(family),
+                str(variant),
+            )
+            for dt, sym, entry_idx, family, variant in selected.loc[
+                :, ["datetime", "symbol", "entry_idx", "family", "variant"]
+            ].itertuples(index=False, name=None)
+        }
+        diag["_selected"] = [
+            (
+                pd.Timestamp(dt).tz_localize(None) if pd.Timestamp(dt).tzinfo is not None else pd.Timestamp(dt),
+                str(sym),
+                int(entry_idx),
+                str(family),
+                str(variant),
+            )
+            in selected_keys
+            for dt, sym, entry_idx, family, variant in diag.loc[
+                :, ["datetime", "symbol", "entry_idx", "family", "variant"]
+            ].itertuples(index=False, name=None)
+        ]
+    diag["_vol_decile"] = pd.qcut(vol.loc[valid], q=10, labels=False, duplicates="drop")
+    grouped = diag.groupby("_vol_decile", sort=True, dropna=True)
+    for decile, group in grouped:
+        _logger.info(
+            "[DIAG][VOL_DECILE] decile=%s events=%d mu_mean=%.1f q10_median=%.1f selected_pass_rate=%.3f",
+            int(decile) + 1,
+            int(group.shape[0]),
+            float(pd.to_numeric(group["_mu_net_decision_bps"], errors="coerce").mean()),
+            float(pd.to_numeric(group["_q10_net_bps"], errors="coerce").median()),
+            float(pd.to_numeric(group["_selected"], errors="coerce").mean()),
+        )
+
+
 def _recommendation_window_indices(
     *,
     fit_start: int,
@@ -629,6 +685,12 @@ def run_candidate_strategy_for_universe(
         selection_diag.get("selected_total", len(selected)),
         selection_diag.get("n_keep", 0),
         float(selection_diag.get("breakeven_floor_bps", strategy_cfg.candidate.cost_floor_bps)),
+    )
+    _log_universe_volatility_deciles(
+        events=combined_events,
+        selected=selected,
+        mu_net_decision_bps=ml_out.mu_net_decision_bps,
+        q10_net_bps=ml_out.q10_net_bps,
     )
     target_weights = build_candidate_target_weights(
         selected_events=selected,

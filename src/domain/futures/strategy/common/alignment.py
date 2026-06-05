@@ -33,6 +33,11 @@ class AlignedMarketData:
     # Phase D: C1 inference panel 전용 마스크 (Stage5 timeline 기반). None이면 미사용.
     inference_active_mask: NDArray[np.bool_] | None = None
     inference_entry_warm_mask: NDArray[np.bool_] | None = None
+    vol_30d_1d: NDArray[np.float32] | None = None
+    friction_score_1d: NDArray[np.float32] | None = None
+    alpha_capacity_score_1d: NDArray[np.float32] | None = None
+    diversification_score_1d: NDArray[np.float32] | None = None
+    tradeable_score_1d: NDArray[np.float32] | None = None
     cluster_id_1d: NDArray[np.float32] | None = None
     beta_vs_market_1d: NDArray[np.float32] | None = None
     cluster_size_1d: NDArray[np.float32] | None = None
@@ -81,6 +86,11 @@ def align_data_maps(
     _meta_cols_to_read: tuple[str, ...] = (
         "coverage_60d",
         "last_60d_coverage",
+        "vol_30d",
+        "friction_score",
+        "alpha_capacity_score",
+        "diversification_score",
+        "tradeable_score",
         "cluster_id",
         "beta_vs_market",
         "cluster_size",
@@ -188,6 +198,15 @@ def align_data_maps(
         kill_mask=kill_mask,
         inference_active_mask=_inf_active,
         inference_entry_warm_mask=_inf_warm,
+        vol_30d_1d=None if symbol_meta is None else symbol_meta.get("vol_30d"),
+        friction_score_1d=None if symbol_meta is None else symbol_meta.get("friction_score"),
+        alpha_capacity_score_1d=(
+            None if symbol_meta is None else symbol_meta.get("alpha_capacity_score")
+        ),
+        diversification_score_1d=(
+            None if symbol_meta is None else symbol_meta.get("diversification_score")
+        ),
+        tradeable_score_1d=None if symbol_meta is None else symbol_meta.get("tradeable_score"),
         cluster_id_1d=None if symbol_meta is None else symbol_meta.get("cluster_id"),
         beta_vs_market_1d=None if symbol_meta is None else symbol_meta.get("beta_vs_market"),
         cluster_size_1d=None if symbol_meta is None else symbol_meta.get("cluster_size"),

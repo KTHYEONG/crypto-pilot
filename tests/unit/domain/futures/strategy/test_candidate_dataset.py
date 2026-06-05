@@ -29,6 +29,11 @@ def _make_aligned() -> AlignedMarketData:
         entry_block_mask=np.zeros((t, n), dtype=bool),
         kill_mask=np.zeros((t, n), dtype=bool),
         execution_cost_bps_2d=np.full((t, n), 4.0, dtype=np.float64),
+        vol_30d_1d=np.array([0.35, 0.55], dtype=np.float32),
+        friction_score_1d=np.array([0.8, 0.6], dtype=np.float32),
+        alpha_capacity_score_1d=np.array([0.7, 0.9], dtype=np.float32),
+        diversification_score_1d=np.array([0.4, 0.5], dtype=np.float32),
+        tradeable_score_1d=np.array([0.75, 0.72], dtype=np.float32),
         cluster_id_1d=np.array([3.0, 7.0], dtype=np.float32),
         beta_vs_market_1d=np.array([1.1, 0.4], dtype=np.float32),
         cluster_size_1d=np.array([2.0, 5.0], dtype=np.float32),
@@ -50,6 +55,7 @@ def test_build_candidate_dataset_shapes_and_types() -> None:
             "triple_barrier_label": [1, 0],
             "profitable_after_hurdle_label": [0, 1],
             "edge_after_hurdle_bps": [12.0, -5.0],
+            "sl_thr_bps": [25.0, 30.0],
             "mae_bps": [-6.0, -8.0],
             "mfe_bps": [18.0, 5.0],
             "ex_ante_cost_bps": [4.0, 4.0],
@@ -74,10 +80,18 @@ def test_build_candidate_dataset_shapes_and_types() -> None:
     assert ds.y_gate.tolist() == [0, 1]
     assert ds.y_q10_bps.tolist() == [-10.0, -12.0]
     assert ds.y_mfe_bps.tolist() == [14.0, 1.0]
+    assert ds.feature_schema_version == "candidate_v3"
+    assert "sl_thr_bps" in ds.feature_names
+    assert "universe_vol_30d" in ds.feature_names
+    assert "universe_friction_score" in ds.feature_names
+    assert "universe_alpha_capacity_score" in ds.feature_names
+    assert "universe_diversification_score" in ds.feature_names
+    assert "universe_tradeable_score" in ds.feature_names
     assert "universe_cluster_id" in ds.feature_names
     assert "universe_beta_vs_market" in ds.feature_names
     assert "universe_cluster_size" in ds.feature_names
     assert "universe_anchor_cluster_member" in ds.feature_names
+    assert ds.X[0, ds.feature_names.index("sl_thr_bps")] == pytest.approx(25.0)
 
 
 def test_build_candidate_dataset_split_filter() -> None:
@@ -245,8 +259,8 @@ def test_build_candidate_dataset_keeps_feature_schema_stable_across_splits() -> 
     )
 
     assert train.feature_names == valid.feature_names
-    assert train.feature_schema_version == "candidate_v2"
-    assert valid.feature_schema_version == "candidate_v2"
+    assert train.feature_schema_version == "candidate_v3"
+    assert valid.feature_schema_version == "candidate_v3"
     assert "family=trend_ma" in train.feature_names
     assert "variant=trend_donchian:donchian_36" in train.feature_names
 
@@ -281,6 +295,11 @@ def test_build_candidate_dataset_includes_universe_metadata_features() -> None:
 
     by_name = {name: idx for idx, name in enumerate(ds.feature_names)}
     row = ds.X[0]
+    assert row[by_name["universe_vol_30d"]] == pytest.approx(0.35)
+    assert row[by_name["universe_friction_score"]] == pytest.approx(0.8)
+    assert row[by_name["universe_alpha_capacity_score"]] == pytest.approx(0.7)
+    assert row[by_name["universe_diversification_score"]] == pytest.approx(0.4)
+    assert row[by_name["universe_tradeable_score"]] == pytest.approx(0.75)
     assert row[by_name["universe_cluster_id"]] == 3.0
     assert row[by_name["universe_beta_vs_market"]] == 1.1
     assert row[by_name["universe_cluster_size"]] == 2.0
