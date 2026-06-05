@@ -168,6 +168,10 @@ class CandidateStrategyConfig:
     selection_shadow_breakeven_floor_fractions: tuple[float, ...] = (0.0, 0.25, 0.50)
     selection_shadow_top_quantile: float = 0.10
     selection_shadow_max_profiles: int = 20
+    selection_utility_mode: Literal["additive_drag", "expected_edge_direct"] = "additive_drag"
+    selection_shadow_utility_modes: tuple[str, ...] = ("additive_drag", "expected_edge_direct")
+    breakeven_floor_mode: Literal["static", "fold_adaptive"] = "static"
+    breakeven_floor_cost_quantile: float = 0.50
     enabled_candidate_variants: tuple[str, ...] = ()
     side_flip_candidate_variants: tuple[str, ...] = ()
     diagnostic_top_k: int = 10
@@ -385,6 +389,12 @@ class CandidateStrategyConfig:
             raise ValueError("min_oos_rank_ic must satisfy -1 <= value <= 1")
         if self.max_oos_edge_decay_bps < 0.0:
             raise ValueError("max_oos_edge_decay_bps must be non-negative")
+        if self.selection_utility_mode not in {"additive_drag", "expected_edge_direct"}:
+            raise ValueError("unsupported selection_utility_mode")
+        if self.breakeven_floor_mode not in {"static", "fold_adaptive"}:
+            raise ValueError("unsupported breakeven_floor_mode")
+        if not (0.0 <= self.breakeven_floor_cost_quantile <= 1.0):
+            raise ValueError("breakeven_floor_cost_quantile must be in [0.0, 1.0]")
         if self.selection_shortfall_mode not in {"hard", "penalty_only", "catastrophic"}:
             raise ValueError("selection_shortfall_mode must be hard, penalty_only, or catastrophic")
         if self.selection_policy not in {"hard", "validation_quantile", "utility_topk"}:
