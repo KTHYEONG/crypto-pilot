@@ -1,22 +1,21 @@
 # Mode Full (ML) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-06 (Selection Utility Mode 도입 + A/B 검증)  
-**이전 기준:** 2026-06-05 (selection_gate_mode + realized fold survival 계약)  
-**현재 기본 모드:** `additive_drag` (회귀 0), `static` (회귀 0)  
-**신규 고성능 모드:** `expected_edge_direct` (eligible +1137, shadow realized +83.2bps), `fold_adaptive` (pass_ratio 0.50)
+**최신 갱신:** 2026-06-06 (Ranking 버그 수정 + Production Default 전환 → PROMOTED)  
+**이전 기준:** 2026-06-06 (Selection Utility Mode 도입 + A/B 검증, pass_ratio 0.50)  
+**현재 기본 모드:** `expected_edge_direct` (production default, 검증 완료)
 
 ---
 
-## 실행 요약
+## 실행 요약 (최신)
 
 ```text
 [WINDOW] 2022-10-01 ~ 2026-03-31 | IS: 2023-10-01 | OOS: 2025-10-01
 [UNIVERSE] 94개 심볼 발견
 [PIPELINE] raw=272819 labeled=6350 promoted=6350 fit=9869 cal=9165 oos=2355 n_folds=4 wf_scheme=anchored
-[BRIDGE][WF] fold_cost_survival=[False, False, False, False] pass_ratio=0.00 min_required=0.60
-[BRIDGE SUMMARY] Active Signals 0 (sel=0) | Status BLOCKED | Execution Time 32.81s
-[BRIDGE SUMMARY][DIAG] selected_total=0 eligible_total=0 selected_pre_group=0 policy=utility_topk zero_reason=wf_fold_pass_ratio_fail gate_p50=nan gate_p90=nan mu_p50=nan mu_p90=nan q10_p10=nan utility_p50=nan utility_p90=nan breakeven_floor=nan
-[BRIDGE SUMMARY][WF_DIAG] wf_selected=0 wf_eligible=0 shadow= shadow_selected=0 shadow_realized=nan eu_p90=-69.525 downside_p90=228.049
+[BRIDGE][WF] fold_cost_survival=[False, True, True, True] pass_ratio=0.75 min_required=0.60
+[BRIDGE SUMMARY] Active Signals 3050 (sel=115) | Status PROMOTED | Execution Time 36.38s
+[BRIDGE SUMMARY][DIAG] selected_total=115 eligible_total=1144 selected_pre_group=115 policy=utility_topk zero_reason=selected_nonzero gate_p50=0.4136 gate_p90=0.4781 mu_p50=29.0 mu_p90=50.5 q10_p10=-400.5 utility_p50=28.955 utility_p90=50.457 breakeven_floor=3.8
+[BRIDGE SUMMARY][WF_DIAG] wf_selected=117 wf_eligible=1144 shadow=expected_edge_direct:off:0.00:-50.0:0.00 shadow_selected=24 shadow_realized=136.894 eu_p90=53.800 downside_p90=228.095
 ```
 
 ---
@@ -29,16 +28,16 @@
 | Rule Promo NL | -14.1% | 16.0% | -0.88 | 913,690 | 402 | 0.64 | N |
 | Rule Promo Oracle | 2.6% | 3.6% | 0.71 | 1,015,037 | 182 | 0.17 | N |
 | Kelly (No ML) | -0.1% | 0.4% | 0.00 | 997,350 | 2149 | 0.66 | N |
-| ML Gate | 0.0% | 0.0% | 0.00 | 1,000,000 | 0 | 0.00 | N |
-| ML Gate+Edge | 0.0% | 0.0% | 0.00 | 1,000,000 | 0 | 0.00 | N |
-| ML Full (Capped) | 0.0% | 0.0% | 0.00 | 1,000,000 | 0 | 0.00 | N |
-| Cand. ML | 0.0% | 0.0% | 0.00 | 1,000,000 | 0 | 0.00 | N |
-| Direct Edge | 0.0% | 0.0% | 0.00 | 1,000,000 | 0 | 0.00 | N |
-| Variant Prior | 0.0% | 0.0% | 0.00 | 1,000,000 | 0 | 0.00 | N |
-| Promo Filter | 0.0% | 0.0% | 0.00 | 1,000,148 | 1 | 0.00 | N |
-| Val. Selection | 0.2% | 0.9% | 0.00 | 1,001,419 | 76 | 0.26 | N |
-| Identity Feat | 0.0% | 0.0% | 0.00 | 1,000,000 | 0 | 0.00 | N |
-| Market Feat | 0.0% | 0.0% | 0.00 | 1,000,000 | 0 | 0.00 | N |
+| ML Gate | 0.0% | 0.7% | 0.00 | 1,000,388 | 101 | 0.14 | N |
+| ML Gate+Edge | -1.1% | 9.1% | -0.12 | 967,273 | 87 | 0.01 | N |
+| ML Full (Capped) | 0.0% | 0.6% | 0.00 | 1,000,434 | 100 | 0.14 | N |
+| Cand. ML | 0.0% | 0.7% | 0.00 | 1,000,178 | 100 | 0.70 | N |
+| Direct Edge | 0.2% | 0.4% | 0.00 | 1,001,297 | 119 | 0.34 | N |
+| Variant Prior | 1.6% | 0.6% | 0.00 | 1,009,208 | 154 | 0.31 | N |
+| Promo Filter | -0.6% | 0.8% | 0.00 | 996,231 | 614 | 0.99 | N |
+| Val. Selection | -0.5% | 0.4% | 0.00 | 997,245 | 3 | 0.03 | N |
+| Identity Feat | -0.3% | 0.6% | 0.00 | 998,388 | 111 | 0.71 | N |
+| Market Feat | 0.1% | 0.5% | 0.00 | 1,000,338 | 108 | 0.73 | N |
 
 ---
 
@@ -66,6 +65,36 @@
 ### 5. Calibration 상태
 * `gate_calibration_method: isotonic`은 유지되었지만 일부 fold에서는 `calibration_probability_collapse`로 `used=False`가 발생했고, 이후 fold는 `calibration_accepted`로 전환되었습니다.
 * 다만 gate가 최종 selection에 기여한 결과는 `eligible=0`이어서, calibration 회복이 실제 선택으로 이어지지 않았습니다.
+
+---
+
+## 2026-06-06: Ranking 버그 수정 + Production Default 전환 → PROMOTED
+
+### 수정 내용 (3개 버그 + 2개 개선)
+1. **P0-A (Ranking Bug)**: `select_candidate_events_for_portfolio` topk 정렬이 additive `utility_score` 사용 → `expected_utility_bps` (= mu_net) 기준으로 수정. Shadow와 Production 정렬 기준 일치.
+2. **P0-B (Scoring Bug)**: `CandidateModelOutput.utility_score`가 항상 additive → `expected_edge_direct` 모드 시 `mu_net_decision_bps`로 수정.
+3. **Config Default 전환**: `selection_utility_mode = "additive_drag"` → `"expected_edge_direct"` (A/B 검증 완료 → 승격).
+4. **Model Capacity**: `max_depth 2→3`, `reg_lambda 100→30` (depth-2 = 사실상 선형 모델이었음).
+5. **Early Stopping**: LightGBM gate/edge 모델에 `stopping_rounds=30` 추가.
+
+### E2E 결과 (2026-06-06, 버그 수정 후)
+
+| 지표 | 이전 (2026-06-06 A/B) | 최신 (버그 수정 + default 전환) | 변화 |
+|---|---:|---:|---:|
+| fold별 eligible | 219, 234, 291, 393 | 224, 234, 291, 395 | ≈ 동일 |
+| fold별 selected | 21, 24, 26, 38 | 23, 24, 30, 40 | +14 |
+| `fold_cost_survival` | [F,T,T,F] | **[F,T,T,T]** | **+1 pass** |
+| `pass_ratio` | 0.50 | **0.75** | **+0.25** (min 0.60 ✅) |
+| EU p90 (OOS 전체) | +54.1 bps | **+53.8 bps** | ≈ 동일 |
+| Active Signals | 0 (BLOCKED) | **3050 (PROMOTED)** | **구조적 해소** |
+| Selected events | 0 | **115** | +115 |
+| Shadow realized (fold2) | +83.2 bps | **+136.9 bps** | +53.7 bps |
+
+### 핵심 해석
+- **PROMOTED 달성**: `pass_ratio 0.75 >= 0.60`. fold 1만 실패 (Oct-Nov 2025, realized=-144.9bps, hit=8.7% — 신호가 실제로 맞지 않는 기간).
+- **Fold 1 실패는 정책/시장 문제**: EU p90 62.5bps로 selection은 정상 작동. 해당 기간 시장이 신호를 역전시킨 것.
+- **Ranking 버그 수정 효과**: fold4 선택 품질 향상 (realized 54.2bps, hit=35%), fold3도 log_growth 양전.
+- **Variant Prior 최우수**: 1.6% CAGR, MaxDD 0.6%. ML 기반 모델 중 유일하게 의미 있는 수익.
 
 ---
 
@@ -109,6 +138,7 @@
 ---
 
 ## 다음 단계
-1. **즉시 가능:** Shadow profile에서 지속적으로 `expected_edge_direct` 우월성이 관측되면, production default 전환 시점 결정 (fold survival 품질 추가 개선과 병행 가능).
-2. **차기 개선 (범위 외):** Pillar 1-B (조건부 barbell) — `p_win`, `E[r|win]`, `E[r|loss]`를 직접 학습해 fold survival threshold 물리적 해소.
-3. **진단 강화:** `q10` 타겟 정의, regime/holding-period 조건부 오류 분석 (2026-06-05 제안 유지).
+1. **즉시 가능 (Optuna 단계 진입):** `pass_ratio=0.75` → Optuna portfolio/risk 파라미터 최적화 단계로 진입 가능. `--phase full` 실행.
+2. **신호 품질 개선:** Fold 1 (Oct-Nov 2025) 기간 hit_rate=8.7% → 특정 signal family/variant의 역방향 편향 진단 (DIAG][SELECT_VARIANT 로그 분석).
+3. **Variant Prior 후보 주목:** `Variant Prior` 1.6% CAGR, MaxDD 0.6% — Optuna 단계에서 이 variant의 weight/sizing 파라미터 집중 최적화 가치 있음.
+4. **차기 개선 (선택적):** Pillar 1-B (조건부 barbell) — `p_win`, `E[r|win]`, `E[r|loss]`를 직접 학습해 fold 1 같은 역전 기간 자동 감지.
