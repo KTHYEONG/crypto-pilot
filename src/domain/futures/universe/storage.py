@@ -81,6 +81,11 @@ def _symbol_meta_from_dict(payload: dict[str, Any]) -> SymbolMeta:
         capacity_clip_usdt_list=tuple(float(item) for item in payload["capacity_clip_usdt_list"]),
         cluster_size=float(payload.get("cluster_size", 1.0)),
         anchor_cluster_member=float(payload.get("anchor_cluster_member", 0.0)),
+        vol_30d=float(payload.get("vol_30d", 0.0)),
+        friction_score=float(payload.get("friction_score", 0.0)),
+        alpha_capacity_score=float(payload.get("alpha_capacity_score", 0.0)),
+        diversification_score=float(payload.get("diversification_score", 0.0)),
+        tradeable_score=float(payload.get("tradeable_score", 0.0)),
     )
 
 
