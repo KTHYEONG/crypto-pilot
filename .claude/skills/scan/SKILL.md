@@ -1,9 +1,9 @@
 ---
-name: triage-scan
+name: scan
 description: Scout and map relevant file paths (code, tests, docs) BEFORE any design work.
 ---
 
-# Skill: Triage-Scan (File Discovery & Mapping)
+# Skill: Scan (File Discovery & Mapping)
 
 ## Purpose
 Act as a lightweight scout. Your ONLY goal is to locate the exact files, tests, and documentation related to the user's request. **DO NOT design solutions, analyze logic, or formulate strategies.** 
@@ -19,7 +19,7 @@ Act as a lightweight scout. Your ONLY goal is to locate the exact files, tests, 
 
 ## Output Format
 ```md
-### 🔍 사전 파일 탐색 완료
+### 🔍 파일 탐색 완료
 
 **1. 핵심 타겟 파일**
 - `[File Path]` (Line: X) - *[짧은 설명: e.g., ML Gate 로직 정의부]*
