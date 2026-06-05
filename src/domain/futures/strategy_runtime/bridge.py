@@ -412,6 +412,7 @@ def run_candidate_strategy_for_universe(
     fold_calibration_reason = "not_fit"
     total_fit = total_cal = total_oos = 0
     fold_cost_survival: list[bool] = []
+    fold_selection_reports: list[dict[str, Any]] = []
 
     for fold in wf_folds:
         fit_set = build_candidate_dataset(
@@ -483,6 +484,7 @@ def run_candidate_strategy_for_universe(
             model_output=fold_model_output,
             cfg=strategy_cfg.candidate,
         )
+        selection_diag_fold = dict(getattr(selected_fold, "attrs", {}).get("candidate_selection_diagnostics", {}))
         if "edge_after_hurdle_bps" in selected_fold.columns:
             realized_edge = pd.to_numeric(selected_fold["edge_after_hurdle_bps"], errors="coerce")
         else:
@@ -530,6 +532,30 @@ def run_candidate_strategy_for_universe(
             )
             survival_reason = "realized_selected_edge_pass" if pass_survival else "realized_selected_edge_fail"
         fold_cost_survival.append(bool(pass_survival))
+        fold_selection_reports.append(
+            {
+                "eligible": int(selection_diag_fold.get("eligible", 0)),
+                "selected_total": selected_count,
+                "realized_mean_bps": realized_mean,
+                "log_growth_proxy": log_growth_proxy,
+                "waterfall_expected_utility_adj_p90_bps": selection_diag_fold.get(
+                    "waterfall_expected_utility_adj_p90_bps",
+                    float("nan"),
+                ),
+                "waterfall_downside_drag_p90_bps": selection_diag_fold.get(
+                    "waterfall_downside_drag_p90_bps",
+                    float("nan"),
+                ),
+                "waterfall_breakeven_floor_bps": selection_diag_fold.get(
+                    "waterfall_breakeven_floor_bps",
+                    float("nan"),
+                ),
+                "shadow_profile_id": selection_diag_fold.get("shadow_profile_id", ""),
+                "shadow_selected_total": selection_diag_fold.get("shadow_selected_total", 0),
+                "shadow_realized_mean_bps": selection_diag_fold.get("shadow_realized_mean_bps", float("nan")),
+                "shadow_log_growth_proxy": selection_diag_fold.get("shadow_log_growth_proxy", float("nan")),
+            }
+        )
         _logger.info(
             (
                 "[BRIDGE][WF_REALIZED] metric=%s oos=[%d,%d) selected=%d realized_mean=%.3f "
@@ -545,6 +571,32 @@ def run_candidate_strategy_for_universe(
             pass_survival,
             survival_reason,
         )
+        _logger.info(
+            (
+                "[BRIDGE][WF_DIAG] fold=%d eligible=%s selected=%d eu_p90=%.3f downside_p90=%.3f "
+                "breakeven=%.1f best_shadow=%s shadow_selected=%s shadow_realized=%.3f shadow_log_growth=%.6f"
+            ),
+            len(fold_selection_reports),
+            selection_diag_fold.get("eligible", 0),
+            selected_count,
+            float(selection_diag_fold.get("waterfall_expected_utility_adj_p90_bps", float("nan"))),
+            float(selection_diag_fold.get("waterfall_downside_drag_p90_bps", float("nan"))),
+            float(selection_diag_fold.get("waterfall_breakeven_floor_bps", float("nan"))),
+            str(selection_diag_fold.get("shadow_profile_id", "")),
+            selection_diag_fold.get("shadow_selected_total", 0),
+            float(selection_diag_fold.get("shadow_realized_mean_bps", float("nan"))),
+            float(selection_diag_fold.get("shadow_log_growth_proxy", float("nan"))),
+        )
+        if (
+            selected_count == 0
+            and int(selection_diag_fold.get("shadow_selected_total", 0))
+            >= strategy_cfg.candidate.min_fold_selected_events
+            and float(selection_diag_fold.get("shadow_log_growth_proxy", float("-inf"))) > 0.0
+        ):
+            _logger.info(
+                "[BRIDGE][WF_DIAG] fold=%d shadow profile indicates tunable selection bottleneck",
+                len(fold_selection_reports),
+            )
 
         fold_p_pass_parts.append(fold_p)
         fold_mu_parts.append(fold_ml.mu_net_decision_bps)
@@ -619,6 +671,61 @@ def run_candidate_strategy_for_universe(
         _fold_pass_ratio,
         strategy_cfg.candidate.min_wf_fold_pass_ratio,
     )
+    wf_selected_total = int(sum(int(r.get("selected_total", 0)) for r in fold_selection_reports))
+    wf_eligible_total = int(sum(int(r.get("eligible", 0)) for r in fold_selection_reports))
+    realized_mean_values = [
+        float(r["realized_mean_bps"])
+        for r in fold_selection_reports
+        if np.isfinite(float(r.get("realized_mean_bps", float("nan"))))
+    ]
+    log_growth_values = [
+        float(r["log_growth_proxy"])
+        for r in fold_selection_reports
+        if np.isfinite(float(r.get("log_growth_proxy", float("nan"))))
+    ]
+    wf_fold_realized_mean_bps = (
+        float(np.mean(realized_mean_values)) if realized_mean_values else float("nan")
+    )
+    wf_fold_log_growth_mean = (
+        float(np.mean(log_growth_values)) if log_growth_values else float("nan")
+    )
+    wf_waterfall_expected_utility_p90_bps = float(
+        np.mean(
+            [
+                float(r["waterfall_expected_utility_adj_p90_bps"])
+                for r in fold_selection_reports
+                if np.isfinite(float(r.get("waterfall_expected_utility_adj_p90_bps", float("nan"))))
+            ]
+        )
+    ) if any(
+        np.isfinite(float(r.get("waterfall_expected_utility_adj_p90_bps", float("nan"))))
+        for r in fold_selection_reports
+    ) else float("nan")
+    wf_waterfall_downside_drag_p90_bps = float(
+        np.mean(
+            [
+                float(r["waterfall_downside_drag_p90_bps"])
+                for r in fold_selection_reports
+                if np.isfinite(float(r.get("waterfall_downside_drag_p90_bps", float("nan"))))
+            ]
+        )
+    ) if any(
+        np.isfinite(float(r.get("waterfall_downside_drag_p90_bps", float("nan"))))
+        for r in fold_selection_reports
+    ) else float("nan")
+    shadow_candidates = [
+        r for r in fold_selection_reports if int(r.get("shadow_selected_total", 0)) > 0
+    ]
+    shadow_candidates.sort(
+        key=lambda r: (
+            int(r.get("shadow_selected_total", 0)) >= strategy_cfg.candidate.min_fold_selected_events,
+            float(r.get("shadow_log_growth_proxy", float("-inf"))),
+            float(r.get("shadow_realized_mean_bps", float("-inf"))),
+            int(r.get("shadow_selected_total", 0)),
+        ),
+        reverse=True,
+    )
+    best_shadow = shadow_candidates[0] if shadow_candidates else {}
     if _fold_pass_ratio < strategy_cfg.candidate.min_wf_fold_pass_ratio:
         _logger.warning(
             "[BRIDGE][WF] fold_pass_ratio=%.2f < min_wf_fold_pass_ratio=%.2f → fail-closed",
@@ -653,6 +760,18 @@ def run_candidate_strategy_for_universe(
                 "wf_fold_pass_ratio": _fold_pass_ratio,
                 "wf_n_folds": _n_folds_total,
                 "wf_scheme": strategy_cfg.candidate.wf_scheme,
+                "wf_selected_total": wf_selected_total,
+                "wf_eligible_total": wf_eligible_total,
+                "wf_fold_realized_mean_bps": wf_fold_realized_mean_bps,
+                "wf_fold_log_growth_mean": wf_fold_log_growth_mean,
+                "wf_best_shadow_profile": str(best_shadow.get("shadow_profile_id", "")),
+                "wf_best_shadow_selected_total": int(best_shadow.get("shadow_selected_total", 0)),
+                "wf_best_shadow_realized_mean_bps": float(
+                    best_shadow.get("shadow_realized_mean_bps", float("nan"))
+                ),
+                "wf_best_shadow_log_growth": float(best_shadow.get("shadow_log_growth_proxy", float("nan"))),
+                "wf_waterfall_expected_utility_p90_bps": wf_waterfall_expected_utility_p90_bps,
+                "wf_waterfall_downside_drag_p90_bps": wf_waterfall_downside_drag_p90_bps,
                 "recommended_keep_variants": diag.recommended_keep_variants,
                 "recommended_flip_variants": diag.recommended_flip_variants,
                 "recommended_keep_signal_cells": diag.recommended_keep_signal_cells,
@@ -804,6 +923,16 @@ def run_candidate_strategy_for_universe(
             "utility_median": utility_summary["median"],
             "utility_p90": utility_summary["p90"],
             "utility_max": utility_summary["max"],
+            "wf_selected_total": wf_selected_total,
+            "wf_eligible_total": wf_eligible_total,
+            "wf_fold_realized_mean_bps": wf_fold_realized_mean_bps,
+            "wf_fold_log_growth_mean": wf_fold_log_growth_mean,
+            "wf_best_shadow_profile": str(best_shadow.get("shadow_profile_id", "")),
+            "wf_best_shadow_selected_total": int(best_shadow.get("shadow_selected_total", 0)),
+            "wf_best_shadow_realized_mean_bps": float(best_shadow.get("shadow_realized_mean_bps", float("nan"))),
+            "wf_best_shadow_log_growth": float(best_shadow.get("shadow_log_growth_proxy", float("nan"))),
+            "wf_waterfall_expected_utility_p90_bps": wf_waterfall_expected_utility_p90_bps,
+            "wf_waterfall_downside_drag_p90_bps": wf_waterfall_downside_drag_p90_bps,
             "selected_pre_group": int(selection_diag.get("selected_pre_group", len(selected))),
             "selected_total": int(selection_diag.get("selected_total", len(selected))),
             "eligible": int(selection_diag.get("eligible", 0)),
