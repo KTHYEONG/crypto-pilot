@@ -1,6 +1,6 @@
 # Candidate ML Architecture
 
-> last_verified: 2026-06-02
+> last_verified: 2026-06-05
 
 ## Scope
 This document describes the current candidate-driven futures strategy architecture in the codebase.
@@ -60,7 +60,11 @@ def label_candidate_events(
 Current outputs:
 `gross_fwd_bps`, `ex_ante_cost_bps`, `edge_after_hurdle_bps`, `barrier_first_label`, `profitable_after_hurdle_label`, `triple_barrier_label`, `time_to_exit_bars`, `mae_bps`, `mfe_bps`, `realized_vol_bps`.
 
-`triple_barrier_label` is retained for compatibility, but gate training now prefers `profitable_after_hurdle_label`.
+**Labeling invariants (2026-06-05):**
+- `triple_barrier_label` = **raw** triple-barrier result (1=TP reached first, 0=SL or time-exit). Semantic is now corrected; previously it was a cost-conditioned value.
+- `barrier_first_label` = cost-conditioned label (TP AND net-edge-after-hurdle > 0). Gate training prefers `profitable_after_hurdle_label`.
+- Exit price at barrier: TP → `entry_px * (1 + side * tp_thr)`, SL → `entry_px * (1 - side * sl_thr)`, time-exit → close. Prevents SL optimism bias from using close-price realized returns.
+- `min_holding_bars` offset: when `exit_policy_mode="engine_aligned"`, barrier scan starts after `min_holding_bars` to match engine semantics.
 
 ### `src/domain/futures/strategy/candidate_dataset.py`
 Builds the tabular ML dataset for gate and edge models.
@@ -182,16 +186,33 @@ This layer is used to decide whether rule families should be kept, flipped, prun
 - ML must remain an alpha supplier, not the final order/leverage controller.
 - The existing futures backtest engine stays in place; the strategy stack only feeds it weights and diagnostics.
 
+## Execution Cost Model
+
+Single source of truth: `src/domain/futures/strategy/execution_cost.py::ExecutionCostModel`.
+
+Default parameters (2026-06-05): `maker_ratio=0.75`, `maker_fee=2bps`, `taker_fee=5bps`, `slippage=1bps` → **RT=7.5bps**, stress (1.5×) = **11.25bps**.
+
+Replaces the former flat 24bps constant in `cost_floor_bps` / `expected_cost_bps`. The `objectives.py` maker/taker blend delegates to this model. Stress RT is the final promotion gate threshold.
+
+## Walk-Forward Validation
+
+`src/domain/futures/strategy/walk_forward.py::build_walk_forward_folds` generates purged + embargoed folds.
+
+Schemes: `anchored` (default, fit_start=0 fixed), `rolling` (fixed-length fit window), `single` (backward-compat single split).
+
+**Cross-fold consistency gate** (`min_wf_fold_pass_ratio=0.60`): if fewer than 60% of folds show mean-net-edge > cost_floor, bridge returns zero weights (fail-closed). Prior-only fallback applies when fold fit_obs < `min_fit_obs=200`.
+
+## Signal-Only Mode
+
+`--mode signal` CLI argument → `FuturesRunConfig.run_mode="signal"` → `strategy_cfg.candidate.signal_only=True`. Bridge short-circuits before ML training, emits `SignalValidationReport` (rule_only and rule_promo_no_leak variants), and returns zero weights. Validation criteria: stress-RT-adjusted p50 > 0 AND t-stat ≥ min_rule_ir_t.
+
 ## Current Gaps
 
 The current code still has known limits:
 
-- no nested walk-forward promotion in the production strategy runtime
-- no family/variant identity feature in the dataset yet
-- edge model still receives a negative-centered target distribution
+- edge model still receives a negative-centered target distribution in some market regimes
 - rule family pruning is advisory, not yet wired into production selection
-
-These gaps are intentional until diagnostics show a positive subset that is worth promoting.
+- gate calibration collapses in early WF folds (small fit set); further min_fit_obs tuning may help
 
 ## Key Verification Paths
 
