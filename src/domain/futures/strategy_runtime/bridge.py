@@ -167,6 +167,8 @@ def run_candidate_strategy_for_universe(
                 "gate_calibration_reason": "no_events",
                 "recommended_keep_variants": (),
                 "recommended_flip_variants": (),
+                "recommended_keep_signal_cells": (),
+                "recommended_flip_signal_cells": (),
             },
         )
 
@@ -208,6 +210,8 @@ def run_candidate_strategy_for_universe(
             labeled=labeled,
             keep_variants=diag.recommended_keep_variants,
             flip_variants=diag.recommended_flip_variants,
+            keep_signal_cells=diag.recommended_keep_signal_cells,
+            flip_signal_cells=diag.recommended_flip_signal_cells,
         )
         if labeled.empty:
             _logger.debug(
@@ -239,6 +243,8 @@ def run_candidate_strategy_for_universe(
                     "gate_calibration_reason": "promotion_filter_empty",
                     "recommended_keep_variants": diag.recommended_keep_variants,
                     "recommended_flip_variants": diag.recommended_flip_variants,
+                    "recommended_keep_signal_cells": diag.recommended_keep_signal_cells,
+                    "recommended_flip_signal_cells": diag.recommended_flip_signal_cells,
                 },
             )
     promoted_total = len(labeled)
@@ -508,6 +514,8 @@ def run_candidate_strategy_for_universe(
                 "wf_scheme": strategy_cfg.candidate.wf_scheme,
                 "recommended_keep_variants": diag.recommended_keep_variants,
                 "recommended_flip_variants": diag.recommended_flip_variants,
+                "recommended_keep_signal_cells": diag.recommended_keep_signal_cells,
+                "recommended_flip_signal_cells": diag.recommended_flip_signal_cells,
             },
         )
 
@@ -659,6 +667,8 @@ def run_candidate_strategy_for_universe(
             ),
             "recommended_keep_variants": diag.recommended_keep_variants,
             "recommended_flip_variants": diag.recommended_flip_variants,
+            "recommended_keep_signal_cells": diag.recommended_keep_signal_cells,
+            "recommended_flip_signal_cells": diag.recommended_flip_signal_cells,
             "recommendation_basis": diag.recommendation_basis,
             "recommendation_start": int(diag.recommendation_split[0]),
             "recommendation_end": int(diag.recommendation_split[1]),
