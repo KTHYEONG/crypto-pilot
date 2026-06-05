@@ -74,6 +74,16 @@ def _utility_threshold(
     return float(np.quantile(finite, quantile))
 
 
+def _rank_ic(pred: pd.Series, target: pd.Series) -> float | None:
+    valid = pd.DataFrame({"pred": pred, "target": target}).replace([np.inf, -np.inf], np.nan).dropna()
+    if valid.empty:
+        return None
+    corr = valid["pred"].corr(valid["target"], method="spearman")
+    if corr is None or not np.isfinite(corr):
+        return None
+    return float(corr)
+
+
 def compute_selection_sensitivity(
     *,
     events: pd.DataFrame,
@@ -269,6 +279,21 @@ def select_candidate_events_for_portfolio(
         )
         _log_selection_sensitivity(sensitivity, cfg=cfg)
 
+    gate_floor = float(cfg.selection_min_gate_probability_floor)
+    turnover_proxy = _series_or_default(df, "turnover_proxy", 1.0)
+    gate_shortfall = np.maximum(0.0, gate_floor - df["p_pass"].to_numpy(dtype=np.float64, copy=False))
+    soft_gate_penalty_bps = gate_shortfall * np.maximum(
+        pd.to_numeric(df["mu_net_decision_bps"], errors="coerce").to_numpy(dtype=np.float64, copy=False),
+        0.0,
+    )
+    expected_utility_bps = (
+        df["p_pass"] * df["mu_net_decision_bps"]
+        + (1.0 - df["p_pass"]) * df["q10_net_bps"].clip(upper=0.0)
+        - cfg.turnover_penalty * turnover_proxy
+    )
+    if cfg.selection_gate_mode == "soft_floor":
+        expected_utility_bps = expected_utility_bps - soft_gate_penalty_bps
+    df["expected_utility_bps"] = expected_utility_bps.to_numpy(dtype=np.float64, copy=False)
     gate_mask = df["p_pass"] >= cfg.min_gate_probability
     edge_mask = df["mu_net_decision_bps"] >= cfg.min_expected_net_bps
     q10_mask = _q10_mask_for_mode(df, cfg)
@@ -277,7 +302,12 @@ def select_candidate_events_for_portfolio(
     utility_threshold = _utility_threshold(df=df, cfg=cfg, model_output=model_output)
     utility_mask = df["utility_score"] >= utility_threshold
     breakeven_floor = cfg.min_net_floor_cost_fraction * cfg.cost_floor_bps
-    eligible = catastrophic_mask & (df["mu_net_decision_bps"] >= breakeven_floor)
+    gate_eligible_mask = pd.Series(True, index=df.index, dtype=bool)
+    if cfg.selection_gate_mode == "hard_floor":
+        gate_eligible_mask = df["p_pass"] >= gate_floor
+    utility_floor = max(float(cfg.selection_min_expected_utility_bps), breakeven_floor)
+    utility_eligible_mask = df["expected_utility_bps"] >= utility_floor
+    eligible = catastrophic_mask & gate_eligible_mask & utility_eligible_mask
     n_eligible = int(eligible.sum())
     n_keep = 0
     zero_reason = "selected_nonzero"
@@ -296,8 +326,15 @@ def select_candidate_events_for_portfolio(
             zero_reason = "no_eligible_after_breakeven_floor"
         else:
             n_keep = max(1, math.ceil(n_eligible * cfg.selection_top_quantile))
-            utility_vals = pd.to_numeric(df.loc[eligible, "utility_score"], errors="coerce")
-            top_idx = utility_vals.nlargest(n_keep).index
+            top_idx = (
+                df.loc[eligible]
+                .sort_values(
+                    ["utility_score", "p_pass", "mu_net_decision_bps", "q10_net_bps"],
+                    ascending=[False, False, False, False],
+                )
+                .head(n_keep)
+                .index
+            )
             mask = pd.Series(False, index=df.index, dtype=bool)
             mask.loc[top_idx] = True
             zero_reason = "selected_nonzero" if int(mask.sum()) > 0 else "topk_selected_zero"
@@ -320,6 +357,11 @@ def select_candidate_events_for_portfolio(
             "edge_pass": int(edge_mask.sum()),
             "q10_pass": int((catastrophic_mask if cfg.selection_policy != "hard" else q10_mask).sum()),
             "utility_pass": int(utility_mask.sum()),
+            "gate_mode": cfg.selection_gate_mode,
+            "gate_floor_used": gate_floor,
+            "expected_utility_floor_bps": utility_floor,
+            "gate_eligible": int(gate_eligible_mask.sum()),
+            "soft_gate_penalty_mean_bps": float(np.mean(soft_gate_penalty_bps)) if len(df) > 0 else 0.0,
             "eligible": n_eligible,
             "selected_pre_group": 0,
             "selected_total": 0,
@@ -331,6 +373,9 @@ def select_candidate_events_for_portfolio(
             "shortfall_basis": cfg.shortfall_threshold_basis,
             "shortfall_limit_mean_bps": float(catastrophic_limits.mean()),
             "shortfall_limit_p90_bps": float(catastrophic_limits.quantile(0.9)),
+            "realized_selected_edge_mean_bps": None,
+            "realized_selected_hit_rate": None,
+            "selected_rank_ic": None,
         }
         filtered.attrs["candidate_selection_diagnostics"] = diagnostics
         _sel_logger.warning(
@@ -364,6 +409,11 @@ def select_candidate_events_for_portfolio(
         "edge_pass": int(edge_mask.sum()),
         "q10_pass": int((catastrophic_mask if cfg.selection_policy != "hard" else q10_mask).sum()),
         "utility_pass": int(utility_mask.sum()),
+        "gate_mode": cfg.selection_gate_mode,
+        "gate_floor_used": gate_floor,
+        "expected_utility_floor_bps": utility_floor,
+        "gate_eligible": int(gate_eligible_mask.sum()),
+        "soft_gate_penalty_mean_bps": float(np.mean(soft_gate_penalty_bps)) if len(df) > 0 else 0.0,
         "eligible": n_eligible,
         "selected_pre_group": int(mask.sum()),
         "selected_total": selected_total,
@@ -375,7 +425,22 @@ def select_candidate_events_for_portfolio(
         "shortfall_basis": cfg.shortfall_threshold_basis,
         "shortfall_limit_mean_bps": float(catastrophic_limits.mean()),
         "shortfall_limit_p90_bps": float(catastrophic_limits.quantile(0.9)),
+        "realized_selected_edge_mean_bps": None,
+        "realized_selected_hit_rate": None,
+        "selected_rank_ic": None,
     }
+    if "edge_after_hurdle_bps" in selected.columns:
+        realized_edge = pd.to_numeric(selected["edge_after_hurdle_bps"], errors="coerce")
+        diagnostics["realized_selected_edge_mean_bps"] = (
+            float(realized_edge.mean()) if realized_edge.notna().any() else None
+        )
+        diagnostics["realized_selected_hit_rate"] = (
+            float((realized_edge > 0.0).mean()) if realized_edge.notna().any() else None
+        )
+        diagnostics["selected_rank_ic"] = _rank_ic(
+            pd.to_numeric(selected["expected_utility_bps"], errors="coerce"),
+            realized_edge,
+        )
     selected.attrs["candidate_selection_diagnostics"] = diagnostics
     _sel_logger.info(
         (
@@ -394,7 +459,7 @@ def select_candidate_events_for_portfolio(
         diagnostics["n_keep"],
         cfg.selection_policy,
         zero_reason,
-        cfg.min_gate_probability,
+        gate_floor,
         cfg.min_expected_net_bps,
         cfg.catastrophic_shortfall_bps if cfg.selection_policy != "hard" else cfg.max_expected_shortfall_bps,
         utility_threshold,
@@ -444,7 +509,10 @@ def build_candidate_target_weights(
         # mu_net_decision_bps is a per-HORIZON figure; dividing by holding_bars
         # converts it to per-bar, matching the per-bar variance denominator.
         holding_bars = max(int(getattr(row, "expected_holding_bars", 1)), 1)
-        mu_i_per_bar = float(row.mu_net_decision_bps) * 1e-4 / holding_bars
+        mu_event_bps = float(row.mu_net_decision_bps)
+        if bool(getattr(cfg, "kelly_use_probability_adjusted_mu", True)):
+            mu_event_bps = float(getattr(row, "p_pass", 1.0)) * mu_event_bps
+        mu_i_per_bar = mu_event_bps * 1e-4 / holding_bars
 
         # Trailing variance retrieval
         variance_i = 1e-4  # Default fallback
@@ -460,6 +528,10 @@ def build_candidate_target_weights(
                 if np.isfinite(v) and v > 1e-12:
                     variance_i = v
 
+        if bool(getattr(cfg, "kelly_downside_variance_floor_enabled", True)):
+            q10_per_bar = abs(min(float(getattr(row, "q10_net_bps", 0.0)), 0.0)) * 1e-4 / holding_bars
+            downside_var_floor = q10_per_bar * q10_per_bar
+            variance_i = max(variance_i, downside_var_floor)
         variance_i = max(variance_i, 1e-12)
         # Fractional Kelly: raw_weight = kelly_fraction * mu_i_per_bar / variance_i
         raw_w = cfg.kelly_fraction * mu_i_per_bar / variance_i
@@ -534,6 +606,7 @@ def build_candidate_alpha_panel(
     target_weights_2d: NDArray[np.float64],
     datetimes: NDArray[np.datetime64],
     symbols: tuple[str, ...],
+    cfg: CandidateStrategyConfig | None = None,
 ) -> pd.DataFrame:
     """Build long-format panel for merge into data maps."""
     n_times, n_symbols = target_weights_2d.shape
@@ -566,11 +639,27 @@ def build_candidate_alpha_panel(
 
     # Group by execution index so metadata aligns with the target weight row.
     df_selected = selected_events.copy()
-    if df_selected.empty or "entry_idx" not in df_selected.columns:
-        grouped: dict[int, pd.DataFrame] = {}
-    else:
-        df_selected["_entry_idx"] = df_selected["entry_idx"].astype(int)
-        grouped = {int(key): group for key, group in df_selected.groupby("_entry_idx")}
+    grouped: dict[int, pd.DataFrame] = {}
+    if not df_selected.empty and "entry_idx" in df_selected.columns:
+        if bool(getattr(cfg, "candidate_metadata_forward_fill", True)):
+            expanded_rows: list[dict[str, object]] = []
+            for row in df_selected.to_dict(orient="records"):
+                entry_idx = int(row["entry_idx"])
+                holding_bars = max(int(row.get("expected_holding_bars", 1)), 1)
+                fill_end = min(entry_idx + holding_bars, n_times)
+                for fill_idx in range(entry_idx, fill_end):
+                    copied = dict(row)
+                    copied["_entry_idx"] = fill_idx
+                    expanded_rows.append(copied)
+            expanded = (
+                pd.DataFrame(expanded_rows)
+                if expanded_rows
+                else pd.DataFrame(columns=[*df_selected.columns, "_entry_idx"])
+            )
+            grouped = {int(key): group for key, group in expanded.groupby("_entry_idx")}
+        else:
+            df_selected["_entry_idx"] = df_selected["entry_idx"].astype(int)
+            grouped = {int(key): group for key, group in df_selected.groupby("_entry_idx")}
 
     for t in range(n_times):
         # Default empty attributes
