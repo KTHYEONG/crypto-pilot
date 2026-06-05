@@ -14,9 +14,11 @@ from src.domain.futures.strategy.ablation import (
     _build_variant_prior_output,
     _compute_realized_edge,
     run_candidate_ablation,
+    validate_candidate_signals,
 )
 from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 
 
 def _make_mock_data_maps(t: int = 150) -> dict[str, dict[str, Any]]:
@@ -417,3 +419,117 @@ def test_build_barrier_arrays_empty_events_returns_zeros() -> None:
     )
     assert stop_2d.sum() == 0.0
     assert tp_2d.sum() == 0.0
+
+
+def _make_signal_labeled(edge_bps: list[float], *, cost_bps: float = 7.5) -> pd.DataFrame:
+    """Build a minimal labeled frame for validate_candidate_signals tests.
+
+    All events fall inside OOS window [0, 100) under a single variant.
+    """
+    n = len(edge_bps)
+    return pd.DataFrame(
+        {
+            "entry_idx": np.arange(n, dtype=np.int64),
+            "edge_after_hurdle_bps": np.asarray(edge_bps, dtype=np.float64),
+            "ex_ante_cost_bps": np.full(n, cost_bps, dtype=np.float64),
+            "family": ["trend_ma"] * n,
+            "variant": ["tma_1"] * n,
+            "signal_cell": [""] * n,
+            "side": np.ones(n, dtype=np.float64),
+        }
+    )
+
+
+def _signal_diag() -> SimpleNamespace:
+    return SimpleNamespace(
+        recommended_keep_variants=("trend_ma:tma_1",),
+        recommended_flip_variants=(),
+        recommended_keep_signal_cells=(),
+        recommended_flip_signal_cells=(),
+    )
+
+
+def _stress_rt() -> float:
+    return ExecutionCostModel().stress_round_trip_bps()  # 11.25
+
+
+def test_validate_candidate_signals_stress_mean_avoids_cost_double_counting() -> None:
+    # Arrange: edge_after_hurdle already nets base cost; stress must add only the increment.
+    cfg = CandidateStrategyConfig(blend_survival_use_mean=True)
+    labeled = _make_signal_labeled([10.0, 20.0, 30.0, 40.0], cost_bps=7.5)
+
+    # Act
+    reports = validate_candidate_signals(
+        labeled=labeled, diag=_signal_diag(), cfg=cfg, oos_start=0, oos_end=100
+    )
+
+    # Assert: honest stress = mean(edge) + base_cost - stress_rt = 25 + 7.5 - 11.25 = 21.25
+    #         buggy double-count would be mean(edge) - stress_rt = 13.75.
+    rule_only = next(r for r in reports if r.variant == "rule_only_equal_size")
+    assert rule_only.net_edge_bps_mean == pytest.approx(25.0)
+    assert rule_only.net_edge_bps_stress_mean == pytest.approx(25.0 + 7.5 - _stress_rt())
+    assert rule_only.net_edge_bps_stress_mean != pytest.approx(25.0 - _stress_rt())
+
+
+def test_validate_candidate_signals_mean_path_survives_skewed_payoff() -> None:
+    # Arrange: right-skewed payoff — median negative, mean positive (ATR-stop structure).
+    cfg = CandidateStrategyConfig(blend_survival_use_mean=True)
+    labeled = _make_signal_labeled([-10.0] * 8 + [200.0] * 2, cost_bps=7.5)
+
+    # Act
+    reports = validate_candidate_signals(
+        labeled=labeled, diag=_signal_diag(), cfg=cfg, oos_start=0, oos_end=100
+    )
+
+    # Assert: mean rescues skew where median would reject (p50<0<mean).
+    rule_only = next(r for r in reports if r.variant == "rule_only_equal_size")
+    assert rule_only.net_edge_bps_p50 < 0.0 < rule_only.net_edge_bps_mean
+    assert rule_only.survives_cost is True
+
+
+def test_validate_candidate_signals_legacy_median_path_blocks_skewed_payoff() -> None:
+    # Arrange: identical skewed data, but legacy median gate active.
+    cfg = CandidateStrategyConfig(blend_survival_use_mean=False)
+    labeled = _make_signal_labeled([-10.0] * 8 + [200.0] * 2, cost_bps=7.5)
+
+    # Act
+    reports = validate_candidate_signals(
+        labeled=labeled, diag=_signal_diag(), cfg=cfg, oos_start=0, oos_end=100
+    )
+
+    # Assert: median-stress (-10 - 11.25 < 0) blocks the skewed-but-profitable variant.
+    rule_only = next(r for r in reports if r.variant == "rule_only_equal_size")
+    assert rule_only.survives_cost is False
+
+
+def test_validate_candidate_signals_blocks_when_mean_net_stress_negative() -> None:
+    # Arrange: genuinely unprofitable signals (negative mean even before stress).
+    cfg = CandidateStrategyConfig(blend_survival_use_mean=True)
+    labeled = _make_signal_labeled([-10.0, -15.0, -20.0, -25.0], cost_bps=7.5)
+
+    # Act
+    reports = validate_candidate_signals(
+        labeled=labeled, diag=_signal_diag(), cfg=cfg, oos_start=0, oos_end=100
+    )
+
+    # Assert
+    rule_only = next(r for r in reports if r.variant == "rule_only_equal_size")
+    assert rule_only.net_edge_bps_stress_mean < 0.0
+    assert rule_only.survives_cost is False
+
+
+def test_validate_candidate_signals_empty_oos_reports_not_survived() -> None:
+    # Arrange: all events fall outside the OOS window.
+    cfg = CandidateStrategyConfig(blend_survival_use_mean=True)
+    labeled = _make_signal_labeled([20.0, 20.0, 20.0], cost_bps=7.5)
+
+    # Act: OOS window starts past all entry_idx values.
+    reports = validate_candidate_signals(
+        labeled=labeled, diag=_signal_diag(), cfg=cfg, oos_start=500, oos_end=600
+    )
+
+    # Assert
+    rule_only = next(r for r in reports if r.variant == "rule_only_equal_size")
+    assert rule_only.n_events == 0
+    assert rule_only.survives_cost is False
+    assert np.isnan(rule_only.net_edge_bps_stress_mean)
