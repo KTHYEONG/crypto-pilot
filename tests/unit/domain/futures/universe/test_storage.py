@@ -183,6 +183,11 @@ def test_snapshot_payload_roundtrip_preserves_stage5_research_panel() -> None:
                 capacity_clip_usdt_list=(10.0,),
                 cluster_size=4.0,
                 anchor_cluster_member=1.0,
+                vol_30d=0.35,
+                friction_score=0.81,
+                alpha_capacity_score=0.73,
+                diversification_score=0.44,
+                tradeable_score=0.69,
             ),
         ),
         rejected={},
@@ -208,3 +213,5 @@ def test_snapshot_payload_roundtrip_preserves_stage5_research_panel() -> None:
     assert roundtrip.stage5_research_panel == ("BTCUSDT", "ETHUSDT")
     assert roundtrip.selected[0].cluster_size == 4.0
     assert roundtrip.selected[0].anchor_cluster_member == 1.0
+    assert roundtrip.selected[0].vol_30d == 0.35
+    assert roundtrip.selected[0].tradeable_score == 0.69

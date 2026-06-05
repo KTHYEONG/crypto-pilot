@@ -10,7 +10,7 @@ related_paths:
   - src/application/futures/optimization/universe_service.py
 change_triggers:
   - src/domain/futures/universe/**
-last_verified: 2026-05-24
+last_verified: 2026-06-05
 ---
 
 # Futures Universe Management
@@ -39,6 +39,8 @@ last_verified: 2026-05-24
   -> [Execution Cost (Stage 4)] -> [Risk Events (Stage 5)] 
   -> [Selection/Ranking (Stage 6)] -> [Universe Snapshot]
 ```
+
+Stage6 결과는 snapshot에만 머무르지 않고, downstream candidate ML 파이프라인으로 정적 메타데이터를 전달합니다. 현재 전달 항목은 `vol_30d`, `friction_score`, `alpha_capacity_score`, `diversification_score`, `tradeable_score`, `cluster_id`, `beta_vs_market`, `cluster_size`, `anchor_cluster_member` 입니다.
 
 ---
 
@@ -71,6 +73,11 @@ $$\text{cost\_bps} = 2 \cdot \text{taker} + 2 \cdot \text{half\_spread} + \text{
 ### 5.3 Snapshot Quality Score
 $$Score_{universe} = fill\_rate \times \log_{10}\!\left(\frac{\text{median\_adv\_usdt}}{10^6}\right) \times \frac{1}{\text{mAEC\_bps}}$$
 - **Excellent:** Median Cost < 18.0 bps, Median ADV > 100M USDT.
+
+### 5.4 Downstream Coupling Rules
+- **PIT-safe Metadata**: Stage6 메타데이터는 snapshot 시점에 고정된 정적 값으로만 downstream에 주입되어야 합니다.
+- **No Forced Policy Flip**: 유니버스가 고변동성 자산을 더 많이 포함하더라도, downstream shortfall selection 규칙은 기본적으로 절대 bps 기준을 유지합니다.
+- **Optional Risk Normalization**: `stop_relative` shortfall threshold는 지원되지만 기본값은 꺼져 있으며, 진단 로그로 충분히 검증된 뒤에만 정책 기본값 변경을 검토합니다.
 
 ---
 
