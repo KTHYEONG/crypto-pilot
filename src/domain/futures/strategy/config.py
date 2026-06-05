@@ -271,7 +271,7 @@ class CandidateStrategyConfig:
         "predicted_mu_tstat", "realized_selected_edge", "realized_log_growth"
     ] = "realized_selected_edge"
     min_fold_selected_events: int = 20
-    min_fold_realized_edge_bps: float = 0.0
+    min_fold_realized_edge_bps: float = 15.0  # >= 2x RT cost (7.5bps); 0.0은 +0.001bps도 통과
     min_fold_log_growth: float = 0.0
     # Edge model utility parameters
     downside_penalty: float = 0.3
@@ -295,7 +295,7 @@ class CandidateStrategyConfig:
     eval_apply_candidate_barriers: bool = True
     # Promotion gate — RC2 fix: prevent degenerate near-zero-deployment passes
     mar_min_drawdown_floor: float = 0.01      # MAR = 0 when max_dd < this (ratio of two noise values)
-    min_cagr_for_promotion: float = 0.02      # absolute CAGR floor kills noise-pass (e.g. 0.035% equity gain)
+    min_cagr_for_promotion: float = 0.15      # crypto 위험 대비 최소 15% (0.02는 예금 이하)
     enforce_deployment_in_compound_gate: bool = True
     # Downside target — RC3 fix: clip paper-MAE to realizable stop loss
     q10_bound_to_stop: bool = True

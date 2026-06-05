@@ -1,8 +1,9 @@
 # Mode Full (ML) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-06 (Ranking 버그 수정 + Production Default 전환 → PROMOTED)  
-**이전 기준:** 2026-06-06 (Selection Utility Mode 도입 + A/B 검증, pass_ratio 0.50)  
-**현재 기본 모드:** `expected_edge_direct` (production default, 검증 완료)
+**최신 갱신:** 2026-06-06 (평가 기준 강화 → BLOCKED. fold 3 +6.8bps 정직하게 실패 처리)  
+**이전 기준:** 2026-06-06 (Ranking 버그 수정 + Production Default 전환, pass_ratio 0.75)  
+**현재 기본 모드:** `expected_edge_direct` (production default, 검증 완료)  
+**평가 기준:** `min_fold_realized_edge_bps=15.0` (이전 0.0), `min_cagr_for_promotion=0.15` (이전 0.02)
 
 ---
 
@@ -12,9 +13,9 @@
 [WINDOW] 2022-10-01 ~ 2026-03-31 | IS: 2023-10-01 | OOS: 2025-10-01
 [UNIVERSE] 94개 심볼 발견
 [PIPELINE] raw=272819 labeled=6350 promoted=6350 fit=9869 cal=9165 oos=2355 n_folds=4 wf_scheme=anchored
-[BRIDGE][WF] fold_cost_survival=[False, True, True, True] pass_ratio=0.75 min_required=0.60
-[BRIDGE SUMMARY] Active Signals 3050 (sel=115) | Status PROMOTED | Execution Time 36.38s
-[BRIDGE SUMMARY][DIAG] selected_total=115 eligible_total=1144 selected_pre_group=115 policy=utility_topk zero_reason=selected_nonzero gate_p50=0.4136 gate_p90=0.4781 mu_p50=29.0 mu_p90=50.5 q10_p10=-400.5 utility_p50=28.955 utility_p90=50.457 breakeven_floor=3.8
+[BRIDGE][WF] fold_cost_survival=[False, True, False, True] pass_ratio=0.50 min_required=0.60
+[BRIDGE SUMMARY] Active Signals 0 (sel=0) | Status BLOCKED | Execution Time 34.10s
+[BRIDGE SUMMARY][DIAG] selected_total=0 eligible_total=0 zero_reason=wf_fold_pass_ratio_fail gate_p50=nan mu_p50=nan utility_p50=nan breakeven_floor=nan
 [BRIDGE SUMMARY][WF_DIAG] wf_selected=117 wf_eligible=1144 shadow=expected_edge_direct:off:0.00:-50.0:0.00 shadow_selected=24 shadow_realized=136.894 eu_p90=53.800 downside_p90=228.095
 ```
 
@@ -38,6 +39,37 @@
 | Val. Selection | -0.5% | 0.4% | 0.00 | 997,245 | 3 | 0.03 | N |
 | Identity Feat | -0.3% | 0.6% | 0.00 | 998,388 | 111 | 0.71 | N |
 | Market Feat | 0.1% | 0.5% | 0.00 | 1,000,338 | 108 | 0.73 | N |
+
+---
+
+## 2026-06-06: 평가 기준 강화 (경제적 최소선 적용)
+
+### 기준 변경
+| 항목 | 이전 | 변경 후 | 이유 |
+|---|---|---|---|
+| `min_fold_realized_edge_bps` | 0.0 bps | **15.0 bps** | RT cost(7.5bps) × 2배 최소선 |
+| `min_cagr_for_promotion` | 2% | **15%** | crypto 위험 프리미엄 최소선 |
+
+### fold별 결과 (新기준 적용)
+
+| Fold | OOS 기간 | 선택 수 | realized edge | hit rate | 결과 |
+|---|---|---:|---:|---:|---|
+| 1 | Oct-Nov 2025 | 23 | **-144.9 bps** | 8.7% | ❌ (수익 음수) |
+| 2 | Nov-Dec 2025 | 24 | **+136.9 bps** | 50.0% | ✅ |
+| 3 | Jan-Feb 2026 | 30 | **+6.8 bps** | 33.3% | ❌ (**新기준**으로 탈락: 6.8 < 15bps) |
+| 4 | Feb-Mar 2026 | 40 | **+54.2 bps** | 35.0% | ✅ |
+
+**pass_ratio = 2/4 = 0.50 < 0.60 → BLOCKED**
+
+### 핵심 해석
+- Fold 3의 +6.8bps는 거래비용(7.5bps)도 회수하지 못하는 수준 — 기존 0.0 기준이 잘못 통과시킨 것
+- 현재 `gate p_pass max=0.4958` — 모델이 0.5 이상 확신을 한 번도 못 내는 상태
+- **BLOCKED = 정직한 현재 상태.** 개선 없이 Optuna 진입은 의미 없음
+
+### 다음 목표
+3개 이상의 fold에서 realized edge ≥ 15bps 달성이 선행 조건:
+1. Gate 모델이 p_pass > 0.55 신호를 실제로 골라낼 수 있어야 함
+2. Fold 3 구간(Jan-Feb 2026) 신호 품질 개선 — 33% hit rate에서 +6.8bps는 손실 트레이드의 규모가 너무 큰 것
 
 ---
 
@@ -137,8 +169,11 @@
 
 ---
 
-## 다음 단계
-1. **즉시 가능 (Optuna 단계 진입):** `pass_ratio=0.75` → Optuna portfolio/risk 파라미터 최적화 단계로 진입 가능. `--phase full` 실행.
-2. **신호 품질 개선:** Fold 1 (Oct-Nov 2025) 기간 hit_rate=8.7% → 특정 signal family/variant의 역방향 편향 진단 (DIAG][SELECT_VARIANT 로그 분석).
-3. **Variant Prior 후보 주목:** `Variant Prior` 1.6% CAGR, MaxDD 0.6% — Optuna 단계에서 이 variant의 weight/sizing 파라미터 집중 최적화 가치 있음.
-4. **차기 개선 (선택적):** Pillar 1-B (조건부 barbell) — `p_win`, `E[r|win]`, `E[r|loss]`를 직접 학습해 fold 1 같은 역전 기간 자동 감지.
+## 다음 단계 (현재 BLOCKED)
+
+PROMOTED 재달성 조건 (3/4 fold에서 realized edge ≥ 15bps):
+
+1. **Gate 모델 개선 (최우선):** p_pass가 0.5를 한 번도 넘지 못하는 근본 원인 진단. label 전략 재검토 또는 피처 품질 개선.
+2. **Fold 1 역전 구간 진단:** Oct-Nov 2025 hit_rate 8.7% → 어떤 signal family가 역방향 편향인지 `[DIAG][SELECT_VARIANT]` 로그 분석 후 비활성화.
+3. **Fold 3 edge 개선:** Jan-Feb 2026 realized +6.8bps → hit_rate 33%에서 손실 트레이드 규모 축소 필요. payoff ratio 개선이 핵심.
+4. **Optuna는 선행 조건 충족 후:** Gate가 실제로 좋은 신호를 구별할 때 Optuna가 의미를 가짐. 현재는 시기 상조.
