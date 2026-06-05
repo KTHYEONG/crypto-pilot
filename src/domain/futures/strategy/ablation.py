@@ -468,7 +468,8 @@ def run_candidate_ablation(
         max_symbol_weight=cfg.max_symbol_weight,
     )
 
-    rows.append(_run_backtest_and_evaluate(raw_w, aligned, "rule_only_equal_size", cfg))
+    rows.append(_run_backtest_and_evaluate(raw_w, aligned, "rule_only_equal_size", cfg,
+                                           barrier_events=raw_events))
 
     # Variant 1b: no-leak rule promotion only
     promoted_rule_events = apply_variant_promotions(
@@ -495,6 +496,7 @@ def run_candidate_ablation(
             cfg,
             start_idx=oos_start,
             end_idx=oos_end,
+            barrier_events=promoted_rule_events,
             fold_oos_boundaries=_fold_oos_boundaries,
         )
     )
@@ -524,6 +526,7 @@ def run_candidate_ablation(
             cfg,
             start_idx=oos_start,
             end_idx=oos_end,
+            barrier_events=oracle_rule_events,
             fold_oos_boundaries=_fold_oos_boundaries,
         )
     )
@@ -543,7 +546,8 @@ def run_candidate_ablation(
         sigma_3d=None,
         cfg=cfg,
     )
-    rows.append(_run_backtest_and_evaluate(raw_kelly_w, aligned, "rule_only_fractional_kelly", cfg))
+    rows.append(_run_backtest_and_evaluate(raw_kelly_w, aligned, "rule_only_fractional_kelly", cfg,
+                                           barrier_events=mock_events))
 
     # Variant 3: rule_plus_ml_gate (Gate filtering only)
     # ML gate filters events, but sizes them using constant ex-ante edge dummy values
@@ -560,7 +564,8 @@ def run_candidate_ablation(
         cfg=cfg,
     )
     rows.append(
-        _run_backtest_and_evaluate(gate_only_w, aligned, "rule_plus_ml_gate", cfg)
+        _run_backtest_and_evaluate(gate_only_w, aligned, "rule_plus_ml_gate", cfg,
+                                   barrier_events=gate_events_only_mock)
     )
 
     # Variant 4: rule_plus_ml_gate_plus_edge (Gate + Edge, but uncapped/uncapped Kelly)
@@ -801,6 +806,76 @@ def _run_oos_only_ablation_variant(
 
 
 
+def _build_barrier_arrays(
+    *,
+    selected_events: pd.DataFrame,
+    n_times: int,
+    n_symbols: int,
+    symbols: tuple[str, ...],
+    start_idx: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build [T, N] stop/TP barrier multiplier arrays for engine consumption.
+
+    Fills the entry bar and forward-fills over the holding window (same pattern
+    as target_weights) so the engine can apply the same barrier semantics that
+    were used during triple-barrier labeling.
+    """
+    stop_2d = np.zeros((n_times, n_symbols), dtype=np.float64)
+    tp_2d = np.zeros((n_times, n_symbols), dtype=np.float64)
+    if selected_events.empty:
+        return stop_2d, tp_2d
+    # Defensive sort: oldest entry first so the first event fills each slot.
+    # selected_events is normally already sorted but this guards against
+    # out-of-order inputs (e.g., unsorted rule event frames).
+    if "entry_idx" in selected_events.columns:
+        selected_events = selected_events.sort_values("entry_idx", kind="stable").reset_index(drop=True)
+    sym_to_idx = {sym: idx for idx, sym in enumerate(symbols)}
+    for row in selected_events.itertuples(index=False):
+        sym = str(row.symbol)
+        if sym not in sym_to_idx:
+            continue
+        s_idx = sym_to_idx[sym]
+        local_t = int(row.entry_idx) - start_idx
+        if local_t < 0 or local_t >= n_times:
+            continue
+        stop_val = float(getattr(row, "stop_atr_mult", 0.0))
+        tp_val = float(getattr(row, "take_profit_atr_mult", 0.0))
+        holding = max(int(getattr(row, "expected_holding_bars", 1)), 1)
+        fill_end = min(local_t + holding, n_times)
+        for fill_t in range(local_t, fill_end):
+            if stop_2d[fill_t, s_idx] == 0.0:
+                stop_2d[fill_t, s_idx] = stop_val
+            if tp_2d[fill_t, s_idx] == 0.0:
+                tp_2d[fill_t, s_idx] = tp_val
+    return stop_2d, tp_2d
+
+
+def _compute_realized_edge(trades: pd.DataFrame) -> float:
+    """Return median realized gross return in bps from engine trade records.
+
+    Uses price-based formula (exit/entry - 1) * side to match the gross_fwd_bps
+    label semantics.  Dividing pnl by amount is avoided because the engine stores
+    notional in contract units, making the ratio scale-dependent and unstable for
+    small fractional-Kelly positions.
+    """
+    if trades.empty:
+        return float("nan")
+    if not {"entry_price", "exit_price", "side"}.issubset(trades.columns):
+        return float("nan")
+    entry_px = trades["entry_price"].to_numpy(dtype=np.float64)
+    exit_px = trades["exit_price"].to_numpy(dtype=np.float64)
+    # engine stores side as "LONG"/"SHORT" strings; convert to +1/-1
+    raw_side = trades["side"]
+    side_num = np.where(
+        raw_side == "LONG", 1.0, np.where(raw_side == "SHORT", -1.0, float("nan"))
+    ).astype(np.float64)
+    valid = np.isfinite(entry_px) & np.isfinite(exit_px) & np.isfinite(side_num) & (entry_px > 1e-12)
+    if not bool(valid.any()):
+        return float("nan")
+    gross_bps = (exit_px[valid] / entry_px[valid] - 1.0) * side_num[valid] * 1e4
+    return float(np.median(gross_bps))
+
+
 def _compute_attribution(
     *,
     target_weights_eval: np.ndarray,
@@ -838,9 +913,20 @@ def _run_backtest_and_evaluate(
     start_idx: int | None = None,
     end_idx: int | None = None,
     selected_events: pd.DataFrame | None = None,
+    barrier_events: pd.DataFrame | None = None,
     fold_oos_boundaries: tuple[tuple[int, int], ...] | None = None,
 ) -> AblationRow:
-    """Helper to inject target_weights into data_maps and run backtest simulation."""
+    """Helper to inject target_weights into data_maps and run backtest simulation.
+
+    Args:
+        selected_events: Used for edge attribution metrics.  Also the barrier
+            source when ``barrier_events`` is not provided.
+        barrier_events: Explicit barrier source for variants where
+            ``selected_events`` is None (e.g., rule-only variants that carry
+            ``stop_atr_mult``/``take_profit_atr_mult`` columns but whose events
+            are not used for attribution).  When both are provided,
+            ``barrier_events`` wins for barrier construction.
+    """
     from src.domain.futures.strategy.rule_signals import _atr_2d
     if start_idx is None and end_idx is None:
         aligned_eval = aligned
@@ -882,6 +968,9 @@ def _run_backtest_and_evaluate(
         target_weights_eval = target_weights[st:ed]
     atr_2d = _atr_2d(aligned_eval.high_2d, aligned_eval.low_2d, aligned_eval.close_2d, period=14)
 
+    # Phase 1 (RC1): track eval window start for global→local index remapping
+    _eval_start = 0 if start_idx is None else max(0, int(start_idx))
+
     aligned_data = {
         "close": aligned_eval.close_2d,
         "high": aligned_eval.high_2d,
@@ -891,12 +980,41 @@ def _run_backtest_and_evaluate(
         "atr": atr_2d,
         "target_weights": target_weights_eval,
     }
+    # Phase 1 (RC1): wire TP/SL barriers so evaluation matches label semantics.
+    # Without this, the engine holds every position for the full horizon with no
+    # profit-take or stop, which diverges from the triple-barrier labeling used
+    # to train the gate/edge models.
+    # Fix 2 (audit): barrier_events is the explicit source for rule-only variants
+    # that carry stop/tp columns but use None for selected_events (attribution).
+    _barrier_source = barrier_events if barrier_events is not None else selected_events
+    if cfg.eval_apply_candidate_barriers and _barrier_source is not None and not _barrier_source.empty:
+        _n_times_eval, _n_syms_eval = target_weights_eval.shape
+        _stop_2d, _tp_2d = _build_barrier_arrays(
+            selected_events=_barrier_source,
+            n_times=_n_times_eval,
+            n_symbols=_n_syms_eval,
+            symbols=aligned_eval.symbols,
+            start_idx=_eval_start,
+        )
+        aligned_data["candidate_stop_atr_mult"] = _stop_2d
+        aligned_data["candidate_take_profit_atr_mult"] = _tp_2d
 
     # Execute backtest engine
     trades, equity_curve, _, _ = FuturesBacktestEngine.run_multi(
         aligned_data=aligned_data,
         symbol_names=list(aligned_eval.symbols),
         strategy_params={},
+    )
+
+    # Phase 0 (diagnostic): compute realized net edge from engine trade records.
+    # edge_capture_ratio = real / pred; values << 1 confirm RC1 is the primary cause.
+    _real_edge_p50 = _compute_realized_edge(trades)
+
+    # Phase 2 (RC2): compute attribution BEFORE evaluation so deployment can gate passing.
+    trade_count, deployed_bar_fraction, pred_edge_p50, gross_cost_bps = _compute_attribution(
+        target_weights_eval=target_weights_eval,
+        selected_events=selected_events,
+        cfg=cfg,
     )
 
     # Evaluate compounding growth
@@ -916,13 +1034,8 @@ def _run_backtest_and_evaluate(
         equity_curve=equity_curve,
         cfg=cfg,
         fold_oos_boundaries=_local_boundaries,
-    )
-
-    # Attribution metrics
-    trade_count, deployed_bar_fraction, pred_edge_p50, gross_cost_bps = _compute_attribution(
-        target_weights_eval=target_weights_eval,
-        selected_events=selected_events,
-        cfg=cfg,
+        deployed_bar_fraction=deployed_bar_fraction,
+        trade_count=trade_count,
     )
 
     # Deployment integrity gate
@@ -931,14 +1044,23 @@ def _run_backtest_and_evaluate(
         and deployed_bar_fraction >= cfg.min_deployment_capital_fraction
     )
 
+    _capture_ratio = (
+        float(_real_edge_p50 / pred_edge_p50)
+        if (not _is_nan(_real_edge_p50) and not _is_nan(pred_edge_p50) and abs(pred_edge_p50) > 1e-9)
+        else float("nan")
+    )
+
     if cfg.edge_attribution_enabled:
         _logger.info(
-            "[DIAG][EDGE_ATTRIB] variant=%s trades=%d deployed=%.3f pred_p50=%.1fbps "
+            "[DIAG][EDGE_ATTRIB] variant=%s trades=%d deployed=%.3f "
+            "pred_p50=%.1fbps real_p50=%.1fbps capture=%.3f "
             "cost=%.1fbps pass_deploy=%s",
             variant_name,
             trade_count,
             deployed_bar_fraction,
             pred_edge_p50 if not _is_nan(pred_edge_p50) else float("nan"),
+            _real_edge_p50 if not _is_nan(_real_edge_p50) else float("nan"),
+            _capture_ratio if not _is_nan(_capture_ratio) else float("nan"),
             gross_cost_bps if not _is_nan(gross_cost_bps) else float("nan"),
             pass_deployment_gate,
         )
@@ -955,8 +1077,8 @@ def _run_backtest_and_evaluate(
         trade_count=trade_count,
         deployed_bar_fraction=deployed_bar_fraction,
         pred_edge_bps_p50=pred_edge_p50,
-        real_edge_bps_p50=float("nan"),
-        edge_capture_ratio=float("nan"),
+        real_edge_bps_p50=_real_edge_p50,
+        edge_capture_ratio=_capture_ratio,
         gross_cost_bps=gross_cost_bps,
         pass_deployment_gate=pass_deployment_gate,
     )
