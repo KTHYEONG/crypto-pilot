@@ -4,11 +4,11 @@ from argparse import Namespace
 from dataclasses import dataclass
 from typing import Any, Literal
 
-ActivePhase = Literal["strategy", "alpha"]
+ActivePhase = Literal["full", "ml", "signal"]
 SyncMode = Literal["full", "fast", "skip"]
 
-_ACTIVE_PHASES: frozenset[str] = frozenset({"strategy", "alpha"})
-_LEGACY_PHASES: frozenset[str] = frozenset({"full", "strategy-smoke", "quick-backtest"})
+_ACTIVE_PHASES: frozenset[str] = frozenset({"full", "ml", "signal"})
+_LEGACY_PHASES: frozenset[str] = frozenset({"strategy-smoke", "quick-backtest"})
 _LEGACY_FLAGS: tuple[str, ...] = (
     "alpha_only",
     "skip_universe",
@@ -18,7 +18,6 @@ _LEGACY_FLAGS: tuple[str, ...] = (
     "resume",
 )
 _LEGACY_ARG_KEYS: tuple[str, ...] = (
-    "mode",
     "tf",
     "reference_date",
     "rebuild_universe",
@@ -66,10 +65,19 @@ def build_run_config_from_args(args: Namespace | dict[str, Any]) -> FuturesRunCo
         if legacy_key in raw:
             raise ValueError(f"legacy argument key is not allowed in active runner: {legacy_key}")
 
-    phase = parse_active_phase(str(raw.get("phase", "strategy")))
+    phase_raw = str(raw.get("phase", "full"))
+    if phase_raw == "alpha":
+        phase_raw = "ml"
+    if phase_raw == "strategy":
+        phase_raw = "full"
+    phase = parse_active_phase(phase_raw)
     sync = str(raw.get("sync", "full"))
     if sync not in {"full", "fast", "skip"}:
         raise ValueError(f"invalid sync mode: {sync}")
+
+    # Fallback to merge mode into phase if mode="signal" was passed for backward compatibility
+    if "mode" in raw and raw["mode"] == "signal":
+        phase = "signal"
 
     config = FuturesRunConfig(
         timeframe=str(raw.get("timeframe", "4h")),

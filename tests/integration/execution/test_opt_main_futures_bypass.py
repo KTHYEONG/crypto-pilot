@@ -72,6 +72,13 @@ def mocked_pipeline_stages(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[An
         valid_symbols=["BTCUSDT"],
     )
 
+    from unittest.mock import Mock
+
+    mock_snapshot = Mock()
+    mock_meta = Mock()
+    mock_meta.symbol = "BTCUSDT"
+    mock_snapshot.selected = [mock_meta]
+
     monkeypatch.setattr(opt_main_futures, "_resolve_quarterly_window", lambda _: window)
     monkeypatch.setattr(
         opt_main_futures,
@@ -86,7 +93,7 @@ def mocked_pipeline_stages(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[An
     monkeypatch.setattr(
         opt_main_futures,
         "_run_universe_stage",
-        lambda *a: calls["universe"].append(a) or (["BTCUSDT"], {}, (), (), ("BTCUSDT",), {}),
+        lambda *a: calls["universe"].append(a) or (["BTCUSDT"], {}, (), (), mock_snapshot, {}),
     )
     monkeypatch.setattr(
         opt_main_futures,
