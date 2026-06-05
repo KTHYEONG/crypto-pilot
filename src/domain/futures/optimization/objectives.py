@@ -73,15 +73,17 @@ def _build_strategy_compose_diag(
     friction_2d = np.asarray(cost_snapshot.execution_cost_fraction_2d, dtype=np.float64)
     friction_bps_2d = np.asarray(cost_snapshot.execution_cost_bps_2d, dtype=np.float64)
 
-    # Maker-friendly 복합 실질 비용 모델 반영 (Taker 위주 80% 기본값 적용)
-    maker_ratio = float(params.get("MAKER_RATIO", 0.20))
-    maker_fee = float(params.get("MAKER_FEE_BPS", 2.0))
+    # Delegate cost blend to ExecutionCostModel (SSOT)
+    from src.domain.futures.strategy.execution_cost import ExecutionCostModel
+    _cost_model = ExecutionCostModel(
+        maker_fee_bps=float(params.get("MAKER_FEE_BPS", 2.0)),
+        taker_fee_bps=float(params.get("TAKER_FEE_BPS", 5.0)),
+        maker_ratio=float(params.get("MAKER_RATIO", 0.20)),
+        slippage_bps=float(params.get("SLIPPAGE_BPS", 2.0)),
+    )
+    effective_rt = _cost_model.round_trip_bps() / 10000.0
     taker_fee = float(params.get("TAKER_FEE_BPS", 5.0))
     slippage = float(params.get("SLIPPAGE_BPS", 2.0))
-
-    effective_rt = (
-        (maker_ratio * maker_fee) + ((1.0 - maker_ratio) * taker_fee) + slippage
-    ) * 2.0 / 10000.0
     baseline_rt = (taker_fee + slippage) * 2.0 / 10000.0
     if baseline_rt > 1e-12:
         scale = effective_rt / baseline_rt
