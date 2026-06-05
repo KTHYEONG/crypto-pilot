@@ -4,7 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.domain.futures.strategy.candidate_portfolio import (
+    _resolve_breakeven_floor,
+    _selection_component_frame,
+)
 from src.domain.futures.strategy.common import alignment
+from src.domain.futures.strategy.config import CandidateStrategyConfig
 
 
 def _frame(n: int = 6) -> pd.DataFrame:
@@ -79,3 +84,113 @@ def test_align_data_maps_uses_first_finite_metadata_value(
     assert np.allclose(out.beta_vs_market_1d, np.array([1.2], dtype=np.float32))
     assert out.cluster_size_1d.tolist() == [2.0]
     assert out.anchor_cluster_1d.tolist() == [1.0]
+
+
+# ---------------------------------------------------------------------------
+# Selection utility mode contract tests
+# ---------------------------------------------------------------------------
+
+
+def _candidate_frame(n: int = 10) -> pd.DataFrame:
+    """Synthetic candidate events with large downside_drag to stress EU modes."""
+    rng = np.random.default_rng(42)
+    dt = pd.date_range("2026-01-01", periods=n, freq="4h", tz="UTC")
+    return pd.DataFrame(
+        {
+            "datetime": dt,
+            "symbol": [f"SYM{i % 3}" for i in range(n)],
+            "p_pass": rng.uniform(0.45, 0.70, n),
+            "mu_net_decision_bps": rng.uniform(5.0, 25.0, n),
+            # q10 is MAE-based (path-risk proxy, magnitude ~200bps) — much larger than mu
+            "q10_net_bps": rng.uniform(-300.0, -150.0, n),
+            "turnover_proxy": np.ones(n),
+            "cost_floor_bps": np.full(n, 7.5),
+            "edge_after_hurdle_bps": rng.uniform(-10.0, 20.0, n),
+            "sl_thr_bps": np.full(n, 250.0),
+        }
+    )
+
+
+def test_selection_utility_mode_direct_excludes_downside_drag() -> None:
+    # Arrange
+    cfg = CandidateStrategyConfig(selection_utility_mode="expected_edge_direct")
+    events = _candidate_frame()
+
+    # Act
+    frame = _selection_component_frame(
+        events=events, cfg=cfg, gate_mode="off", gate_floor=0.0
+    )
+
+    # Assert — expected_utility_bps must equal mu_net_decision_bps exactly
+    expected = pd.to_numeric(events["mu_net_decision_bps"], errors="coerce")
+    actual = pd.to_numeric(frame["expected_utility_bps"], errors="coerce")
+    pd.testing.assert_series_equal(actual.reset_index(drop=True), expected.reset_index(drop=True), check_names=False)
+
+
+def test_selection_utility_mode_additive_preserves_legacy() -> None:
+    # Arrange
+    cfg = CandidateStrategyConfig(selection_utility_mode="additive_drag")
+    events = _candidate_frame()
+
+    # Act
+    frame = _selection_component_frame(
+        events=events, cfg=cfg, gate_mode="off", gate_floor=0.0
+    )
+
+    # Assert — additive_drag formula: p_pass*mu - (1-p_pass)*|q10| - turnover_penalty
+    p = events["p_pass"].to_numpy(dtype=np.float64)
+    mu = events["mu_net_decision_bps"].to_numpy(dtype=np.float64)
+    q10 = np.clip(events["q10_net_bps"].to_numpy(dtype=np.float64), None, 0.0)
+    expected_eu = p * mu - (1.0 - p) * np.abs(q10) - float(cfg.turnover_penalty)
+    actual = frame["expected_utility_bps"].to_numpy(dtype=np.float64)
+    np.testing.assert_allclose(actual, expected_eu, rtol=1e-9)
+
+
+def test_fold_adaptive_breakeven_floor_uses_cost_quantile() -> None:
+    # Arrange
+    cfg = CandidateStrategyConfig(
+        breakeven_floor_mode="fold_adaptive",
+        breakeven_floor_cost_quantile=0.50,
+        min_net_floor_cost_fraction=0.50,
+    )
+    events = _candidate_frame()
+    # Override cost_floor_bps with a known distribution
+    events["cost_floor_bps"] = np.array([5.0, 10.0, 15.0, 7.0, 8.0, 12.0, 6.0, 9.0, 11.0, 14.0], dtype=np.float64)
+
+    # Act
+    floor = _resolve_breakeven_floor(events, cfg)
+
+    # Assert — median(cost_floor_bps) * min_net_floor_cost_fraction
+    expected = float(np.median(events["cost_floor_bps"].to_numpy())) * 0.50
+    assert floor == pytest.approx(expected, rel=1e-9)
+
+
+def test_expected_edge_direct_selects_when_additive_blocks() -> None:
+    # Arrange — large q10 makes additive EU deeply negative; direct uses mu only
+    cfg_additive = CandidateStrategyConfig(
+        selection_utility_mode="additive_drag",
+        selection_min_expected_utility_bps=0.0,
+        min_net_floor_cost_fraction=0.0,
+    )
+    cfg_direct = CandidateStrategyConfig(
+        selection_utility_mode="expected_edge_direct",
+        selection_min_expected_utility_bps=0.0,
+        min_net_floor_cost_fraction=0.0,
+    )
+    events = _candidate_frame()
+    # Force a scenario where additive drag is extreme (q10 = -500bps)
+    events["q10_net_bps"] = -500.0
+
+    # Act
+    frame_add = _selection_component_frame(
+        events=events, cfg=cfg_additive, gate_mode="off", gate_floor=0.0
+    )
+    frame_dir = _selection_component_frame(
+        events=events, cfg=cfg_direct, gate_mode="off", gate_floor=0.0
+    )
+    eligible_additive = int((frame_add["expected_utility_bps"] >= 0.0).sum())
+    eligible_direct = int((frame_dir["expected_utility_bps"] >= 0.0).sum())
+
+    # Assert — additive mode blocks all (EU << 0), direct mode passes all (mu > 0)
+    assert eligible_additive == 0, f"expected 0 eligible in additive mode, got {eligible_additive}"
+    assert eligible_direct == len(events), f"expected all eligible in direct mode, got {eligible_direct}"
