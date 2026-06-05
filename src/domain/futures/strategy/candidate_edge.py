@@ -285,14 +285,21 @@ def fit_candidate_edge_models(
         )
         center_valid_target = center_valid_target - valid_priors
 
+    max_depth = int(getattr(cfg, "edge_lgbm_max_depth", 4))
+    reg_lambda = float(getattr(cfg, "edge_lgbm_reg_lambda", 20.0))
+    num_leaves = 2**max_depth - 1 if max_depth > 0 else 31
+
     center = LGBMRegressor(
         objective="huber",
         random_state=seed,
         n_estimators=200,
         learning_rate=0.05,
-        num_leaves=31,
+        num_leaves=num_leaves,
+        max_depth=max_depth,
         subsample=1.0,
         colsample_bytree=1.0,
+        reg_alpha=2.0,
+        reg_lambda=reg_lambda,
         n_jobs=1,
         verbose=-1,
     )
@@ -302,9 +309,12 @@ def fit_candidate_edge_models(
         random_state=seed,
         n_estimators=200,
         learning_rate=0.05,
-        num_leaves=31,
+        num_leaves=num_leaves,
+        max_depth=max_depth,
         subsample=1.0,
         colsample_bytree=1.0,
+        reg_alpha=2.0,
+        reg_lambda=reg_lambda,
         n_jobs=1,
         verbose=-1,
     )
@@ -314,9 +324,12 @@ def fit_candidate_edge_models(
         random_state=seed,
         n_estimators=200,
         learning_rate=0.05,
-        num_leaves=31,
+        num_leaves=num_leaves,
+        max_depth=max_depth,
         subsample=1.0,
         colsample_bytree=1.0,
+        reg_alpha=2.0,
+        reg_lambda=reg_lambda,
         n_jobs=1,
         verbose=-1,
     )
