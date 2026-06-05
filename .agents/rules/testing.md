@@ -50,12 +50,14 @@ Test functions must be named descriptively using the **`test_[target]_[condition
 - **Leverage Standard Fixtures:** Avoid manually creating temp directories/files; instead, leverage Pytest's built-in `tmp_path` fixture.
 - **Limit `autouse=True`:** Restrict `autouse=True` strictly to global initialization (e.g., global mocking hooks). All other dependencies must be explicitly injected.
 - **Immutability of Higher-Scoped Fixtures:** `session` or `module` scoped fixtures must be treated as read-only. Modifying their internal state inside a test function is strictly prohibited.
-- **Asynchronous Testing Standards:** Every asynchronous fixture must be decorated with `@pytest_asyncio.fixture`. Additionally, every asynchronous test function (`async def`) must be explicitly marked with `@pytest.mark.asyncio` to ensure proper event loop management and prevent execution failures.
+- **Asynchronous Testing Standards:** Every asynchronous fixture must be decorated with `@pytest_asyncio.fixture`. Every asynchronous test function (`async def`) must be explicitly marked with `@pytest.mark.asyncio`. 
+- **Async Fixture Scope Trap:** Be highly cautious of Event Loop scope mismatches. Do not mix `scope="session"` standard fixtures with `scope="function"` async tests without explicit loop management.
 
 ### 2.4 Co-modification Mapping
 Source files and test files must maintain a strict 1:1 mapping in folder structure and file naming to simplify discovery and maintainability.
 - **Convention:** A source module located at `src/[path]/[module_name].py` must map directly to `tests/[category]/[path]/test_[module_name].py` (where `category` is `unit`, `integration`, or `e2e`).
 - **Co-modification Rule:** When creating or modifying a source file under `src/`, the AI assistant MUST immediately locate, review, and update/create the corresponding test file to ensure they are synchronized.
+- **Exception for Trivial Changes:** This rule is waived for changes that do not alter logical behavior, such as typos in comments, adding type hints, or documentation-only updates. It is also waived if the user explicitly instructs to skip tests for a specific task.
 
 ---
 
@@ -81,12 +83,18 @@ with pytest.raises(InsufficientBalanceError, match="Cannot withdraw more than ba
 ```
 - *Note:* The `match` argument treats the string as a regular expression pattern. If the error message contains special characters (like brackets `[]` or parentheses `()`), escape them properly or match only the key unique phrases to prevent regex matching failures.
 
+### 3.4 Test Data Generation Strategy (Proactive Testing)
+The AI MUST design test cases based on rigorous testing theory BEFORE looking at coverage reports:
+- **Equivalence Partitioning (EP) & Boundary Value Analysis (BVA):** For trading logic (e.g., price, quantities, indicators), explicitly test valid ranges, extreme boundaries (e.g., zero, maximum precision limits), and invalid ranges.
+- **Data Flow Testing (Def-Use):** When testing pipelines (e.g., `Signal` -> `Portfolio` -> `Order`), ensure that the specific state mutated in the definition (Def) is explicitly verified at its usage point (Use).
+
 ---
 
 ## 4. Isolation & Mocking Guidelines
 
 ### 4.1 Mocking Boundaries (Avoid Over-Mocking)
 - **Mock Only Boundaries:** Restrict mocking strictly to system boundaries: external Web APIs (e.g., Upbit, Binance), database queries, sockets, filesystems, and clock times.
+- **No Hallucinated API Schemas:** When mocking external exchange APIs (Binance, Upbit), the AI MUST NOT guess or hallucinate JSON response structures. The AI MUST use pre-recorded JSON responses located in the `tests/fixtures/` directory, or ask the user to provide the exact API response payload if missing.
 - **Do Not Mock Pure Logic:** Never mock internal domain models, utility functions, or pure mathematical modules. Doing so results in fragile tests that pass even when the actual implementation is broken.
 - **Enforce `autospec=True`:** When mocking classes or modules using `unittest.mock` or `pytest-mock`, always specify `autospec=True` (or `spec=True`). This prevents the AI from calling non-existent mock methods—a common hallucination.
   ```python
@@ -100,6 +108,7 @@ with pytest.raises(InsufficientBalanceError, match="Cannot withdraw more than ba
 - **Time Mocking Constraints:** Since Python's built-in `datetime` module is implemented in C, it cannot be patched directly using standard `mocker.patch`. When time isolation is required, use the `freezegun` library or patch the project's internal time abstraction layer (e.g., `src.utils.time.get_now`) instead.
 - **Boundary Isolation by Test Category:**
   - **Unit Tests (`unit/`):** All system boundaries, including database access, external APIs, and network I/O, MUST be strictly mocked.
+  - **Exception for DB Layer:** For Repository or Database access layers, using an in-memory database (e.g., `sqlite:///:memory:`) is PREFERRED over mocking ORM sessions/queries to prevent "False Positives" and ensure query correctness.
   - **Integration Tests (`integration/`):** Real database instances or test containers must be utilized. Ensure state isolation and resource cleanup are strictly managed via DB fixtures using the `yield` keyword (e.g., transaction rollbacks).
 ---
 
@@ -112,7 +121,7 @@ graph TD
     B --> C{3. Inspect term-missing}
     C -- "Missing Lines Found" --> D[4. Add Edge Cases/Exception Path Tests]
     D --> B
-    C -- "Coverage >= 90% Achieved" --> E[5. Verification Complete]
+    C -- "Target Met" --> E[5. Verification Complete]
 ```
 
 1. **Standard Coverage Execution Command:**
@@ -121,7 +130,12 @@ graph TD
    ```
 2. **Missing Line Tracking:**
    If the coverage output identifies missing/unexecuted lines (indicated under the `Missing` column), the AI must immediately write targeted edge cases (e.g., negative parameters, exceptions, fallback branches) to cover those lines.
-3. **No Empty Assertions:**
+3. **Risk-Adjusted Coverage Targets:**
+   - **Core Logic (Domain, Signal, Sizing, Portfolio):** Aim for **>= 90%**.
+   - **Boilerplate/Adapters/DTOs:** Aim for **>= 70%** or cover only the primary happy paths to avoid token waste.
+4. **[CRITICAL LIMIT] AI Loop Termination:**
+   The AI MUST NOT execute the coverage self-correction loop more than **3 times**. If targets are not achieved within 3 iterations, the AI MUST stop, commit the current progress, and report the specific bottleneck to the user.
+5. **No Empty Assertions:**
    Tests written solely to execute lines without performing meaningful assertions are strictly prohibited. The AI must always validate the final return value or verify expected state side effects.
-4. **No Abuse of `# pragma: no cover`:**
+6. **No Abuse of `# pragma: no cover`:**
    Abusing `# pragma: no cover` to artificially inflate coverage percentages is strictly prohibited. It should only be used for genuinely untestable code paths (e.g., `if __name__ == "__main__":`).

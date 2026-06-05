@@ -26,21 +26,21 @@ Produce high-precision technical specifications for the `implement` agent.
 ## Output 2: Chat Summary (Brief)
 *Purpose: Rapid user alignment & approval. Minimal tokens.*
 ```md
-### 📝 설계 승인 요청: [Title]
-> **검토 결과:** [기존 코드의 문제점이나 개선이 필요한 이유를 1줄로 요약]
+### 📝 Design Approval Request: [Title]
+> **Summary:** [1-sentence summary of the problem or need for improvement]
 
-**1. 개선 방향 (Strategy)**
-- [어떤 로직을 어떻게 바꿀 것인지 사용자가 이해하기 쉽게 2-3개 불릿으로 설명]
-- [예: "ml_gate의 임계값 계산 방식을 가중치 평균에서 지수 이동 평균으로 변경"]
+**1. Strategy**
+- [Explain how the logic will change in 2-3 readable bullets]
+- [e.g., "Change ML Gate thresholding from weighted average to EMA"]
 
-**2. 작업 범위**
-- **문서 위치:** `docs/specs/[filename].md`
-- **수정 파일:** `[File names...]`
+**2. Scope of Work**
+- **Spec Path:** `docs/specs/[filename].md`
+- **Modified Files:** `[File names...]`
 
-**3. 완료 기준**
-- [ ] [구현 후 기대되는 구체적인 결과물이나 상태]
+**3. Success Criteria**
+- [ ] [Specific outcome or state expected after implementation]
 
-**상태:** 이 설계대로 진행할까요? (Yes/No 또는 의견)
+**Status:** Should I proceed with this design? (Yes/No or feedback)
 ```
 
 ## Reasoning Constraints

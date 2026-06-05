@@ -35,7 +35,7 @@ When writing or updating documents, follow this strict, token-efficient structur
 - **`6. Testing Expectations`**: Which conditions must be covered in tests.
 
 ## 4. AI Document Lifecycle & Integration
-- **[triage-scan] Selective Loading:** Index only documents matching `change_triggers`. Read only necessary headings (e.g., `Business Rules`).
+- **[scan] Selective Loading:** Index only documents matching `change_triggers`. Read only necessary headings (e.g., `Business Rules`).
 - **Knowledge Update (Post-Spec):** If a temporary blueprint (`docs/specs/`) introduces new business rules or architectural changes, you MUST update the relevant official document here FIRST, and then the temporary spec file must be deleted.
 - **Anti-Sprawl & SSOT:** Do not duplicate business logic across multiple documentation files. Define common rules in architecture docs and reference them in domain docs.
 - **Archiving:** Mark obsolete logic as `status: deprecated` and specify `replaced_by` immediately.
