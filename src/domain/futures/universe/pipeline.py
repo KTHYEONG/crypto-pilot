@@ -123,6 +123,11 @@ def _to_symbol_meta(frame: pd.DataFrame) -> tuple[SymbolMeta, ...]:
                 ),
                 cluster_size=float(row.get("cluster_size", 1.0)),
                 anchor_cluster_member=float(row.get("anchor_cluster_member", 0.0)),
+                vol_30d=float(row.get("vol_30d", 0.0)),
+                friction_score=float(row.get("friction_score", 0.0)),
+                alpha_capacity_score=float(row.get("alpha_capacity_score", 0.0)),
+                diversification_score=float(row.get("diversification_score", 0.0)),
+                tradeable_score=float(row.get("tradeable_score", 0.0)),
             )
         )
     return tuple(metas)

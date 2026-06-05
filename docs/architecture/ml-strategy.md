@@ -26,14 +26,20 @@
 - **Anti-Leakage**: 결정 시점(T) 이후의 정보 오염 방지 및 T+1 진입 원칙 준수.
 
 ### 3.3 Dataset & Models (`candidate_dataset.py`, `*_gate.py`, `*_edge.py`)
-- **Feature Groups**: 시그널 강도, 심볼 상태(Vol, Funding), 시장 상태(BTC Trend, Breadth), 실행 비용 등.
+- **Feature Groups**: 시그널 강도, 심볼 상태(Vol, Funding), 시장 상태(BTC Trend, Breadth), 실행 비용, 그리고 Stage6 유니버스 메타데이터(`vol_30d`, `friction_score`, `alpha_capacity_score`, `diversification_score`, `tradeable_score`)를 포함합니다.
+- **Risk Scale Feature**: `sl_thr_bps`를 ex-ante feature로 포함하여 q10 downside model이 자산별 stop distance scale을 직접 관측합니다.
 - **Gate Model**: LightGBM Classifier를 이용한 거래 승인 여부 판정 (Calibrated Probability).
 - **Edge Model**: LightGBM Regressor (Huber/Quantile)를 이용한 기대 수익 및 하방 리스크(q10) 추정.
 
 ### 3.4 Portfolio & Weights (`candidate_portfolio.py`)
 - **Selection**: `p_pass`, `mu_net`, `q10_shortfall` 임계치를 통과한 이벤트 중 유틸리티가 가장 높은 후보 선택.
+- **Shortfall Thresholding**: 기본값은 절대 bps 기준(`shortfall_threshold_basis="absolute_bps"`)이며, 필요 시 `stop_relative` 모드로 자산별 `sl_thr_bps` 기반 한계를 사용할 수 있습니다. 현재 기본값은 보수적으로 유지됩니다.
 - **Sizing**: Fractional Kelly 기반 사이징 및 심볼/Net/Gross/Beta/Vol 캡 적용.
 - **Bridge**: 최종 생성된 `target_weights`를 백테스트 엔진에 주입.
+
+### 3.5 Universe-to-ML Coupling
+- **Metadata Propagation**: Stage6 selection 결과의 정적 메타데이터는 `UniverseSnapshot -> data_maps -> AlignedMarketData -> CandidateDataset` 순서로 전달됩니다.
+- **Diagnostics**: bridge 단계에서 `vol_30d` decile별 `mu_mean`, `q10_median`, `selected_pass_rate`를 로그로 남겨, 고변동성 유니버스가 downstream selection에서 어떻게 생존/탈락하는지 추적합니다.
 
 ## 4. 설계 원칙 (Design Principles)
 

@@ -178,8 +178,10 @@ def _selected_symbols_from_snapshot(snapshot: UniverseSnapshot) -> tuple[str, ..
     )
 
 
-def _universe_metadata_by_symbol(snapshot: UniverseSnapshot) -> dict[str, tuple[float, float, float, float]]:
-    metadata: dict[str, tuple[float, float, float, float]] = {}
+def _universe_metadata_by_symbol(
+    snapshot: UniverseSnapshot,
+) -> dict[str, tuple[float, float, float, float, float, float, float, float, float]]:
+    metadata: dict[str, tuple[float, float, float, float, float, float, float, float, float]] = {}
     for meta in snapshot.selected:
         symbol = str(meta.symbol).strip()
         if not symbol:
@@ -189,6 +191,11 @@ def _universe_metadata_by_symbol(snapshot: UniverseSnapshot) -> dict[str, tuple[
             float(meta.beta_vs_market),
             float(meta.cluster_size),
             float(meta.anchor_cluster_member),
+            float(meta.vol_30d),
+            float(meta.friction_score),
+            float(meta.alpha_capacity_score),
+            float(meta.diversification_score),
+            float(meta.tradeable_score),
         )
     return metadata
 
@@ -208,13 +215,30 @@ def _inject_universe_metadata_into_maps(
         frame = data_maps.get(symbol, {}).get(tf)
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             continue
-        cluster_id, beta_vs_market, cluster_size, anchor_cluster_member = metadata
+        (
+            cluster_id,
+            beta_vs_market,
+            cluster_size,
+            anchor_cluster_member,
+            vol_30d,
+            friction_score,
+            alpha_capacity_score,
+            diversification_score,
+            tradeable_score,
+        ) = metadata
         frame["cluster_id"] = np.full(len(frame), cluster_id, dtype=np.float64)
         frame["beta_vs_market"] = np.full(len(frame), beta_vs_market, dtype=np.float64)
         frame["cluster_size"] = np.full(len(frame), cluster_size, dtype=np.float64)
         frame["anchor_cluster_member"] = np.full(
             len(frame), anchor_cluster_member, dtype=np.float64
         )
+        frame["vol_30d"] = np.full(len(frame), vol_30d, dtype=np.float64)
+        frame["friction_score"] = np.full(len(frame), friction_score, dtype=np.float64)
+        frame["alpha_capacity_score"] = np.full(len(frame), alpha_capacity_score, dtype=np.float64)
+        frame["diversification_score"] = np.full(
+            len(frame), diversification_score, dtype=np.float64
+        )
+        frame["tradeable_score"] = np.full(len(frame), tradeable_score, dtype=np.float64)
 
 
 def _ensure_cached_symbol_data_for_targets(

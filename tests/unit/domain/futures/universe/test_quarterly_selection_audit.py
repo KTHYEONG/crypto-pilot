@@ -4,6 +4,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, TypedDict
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -209,6 +210,11 @@ def test_quarterly_universe_selection_audit(
         observed[is_end] = selected_symbols
         assert selected_symbols == expectation["selected"]
         assert tuple(meta.symbol for meta in snapshot.selected) == expectation["selected"]
+        assert all(meta.vol_30d >= 0.0 for meta in snapshot.selected)
+        assert all(
+            np.isfinite(meta.tradeable_score) or meta.tradeable_score == float("-inf")
+            for meta in snapshot.selected
+        )
 
         ranked_out = expectation["ranked_out"]
         rejected = snapshot.rejected[ranked_out]
