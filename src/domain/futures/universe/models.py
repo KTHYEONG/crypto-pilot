@@ -143,6 +143,11 @@ class SymbolMeta:
     capacity_clip_usdt_list: tuple[float, ...]
     cluster_size: float = 1.0
     anchor_cluster_member: float = 0.0
+    vol_30d: float = 0.0
+    friction_score: float = 0.0
+    alpha_capacity_score: float = 0.0
+    diversification_score: float = 0.0
+    tradeable_score: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
