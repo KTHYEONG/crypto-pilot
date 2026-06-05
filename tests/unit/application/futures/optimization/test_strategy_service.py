@@ -86,7 +86,7 @@ def test_run_active_strategy_output_bridge_uses_stage6_trading_scope(
     )
 
     run_config = build_run_config_from_args(
-        {"phase": "strategy", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full"}
     )
     out = run_active_strategy_output_bridge(
         run_config=run_config,
@@ -106,7 +106,7 @@ def test_run_active_strategy_output_bridge_uses_stage6_trading_scope(
 
 def test_run_active_strategy_output_bridge_when_scope_is_empty_raises_value_error() -> None:
     run_config = build_run_config_from_args(
-        {"phase": "strategy", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full"}
     )
 
     with pytest.raises(ValueError, match="candidate ML scope is empty"):

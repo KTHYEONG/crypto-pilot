@@ -33,7 +33,7 @@ def minimal_run_config() -> FuturesRunConfig:
     """
     return build_run_config_from_args(
         {
-            "phase": "strategy",
+            "phase": "full",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -118,7 +118,7 @@ def test_run_config_rejects_skip_universe() -> None:
     with pytest.raises(ValueError, match="legacy flag"):
         build_run_config_from_args(
             {
-                "phase": "strategy",
+                "phase": "full",
                 "trials": 1,
                 "skip_universe": True,
             }
@@ -130,7 +130,7 @@ def test_run_config_rejects_skip_data_sync() -> None:
     with pytest.raises(ValueError, match="legacy flag"):
         build_run_config_from_args(
             {
-                "phase": "strategy",
+                "phase": "full",
                 "trials": 1,
                 "skip_data_sync": True,
             }
@@ -142,7 +142,7 @@ def test_run_config_rejects_bypass_champion_guard() -> None:
     with pytest.raises(ValueError, match="legacy flag"):
         build_run_config_from_args(
             {
-                "phase": "strategy",
+                "phase": "full",
                 "trials": 1,
                 "bypass_champion_guard": True,
             }
@@ -183,7 +183,7 @@ def test_run_config_has_no_symbols_field(minimal_run_config: FuturesRunConfig) -
 def test_cli_rejects_symbols_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--symbols CLI 인자는 argparse 오류(exit 2)를 반환해야 한다."""
     monkeypatch.setattr(
-        sys, "argv", ["opt_main_futures.py", "--phase", "strategy", "--symbols", "BTCUSDT"]
+        sys, "argv", ["opt_main_futures.py", "--phase", "full", "--symbols", "BTCUSDT"]
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -192,7 +192,7 @@ def test_cli_rejects_symbols_flag(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_cli_rejects_skip_universe_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--skip-universe CLI 인자는 argparse 오류(exit 2)를 반환해야 한다."""
     monkeypatch.setattr(
-        sys, "argv", ["opt_main_futures.py", "--phase", "strategy", "--skip-universe"]
+        sys, "argv", ["opt_main_futures.py", "--phase", "full", "--skip-universe"]
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -201,7 +201,7 @@ def test_cli_rejects_skip_universe_flag(monkeypatch: pytest.MonkeyPatch) -> None
 def test_cli_rejects_skip_data_sync_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--skip-data-sync CLI 인자는 argparse 오류(exit 2)를 반환해야 한다."""
     monkeypatch.setattr(
-        sys, "argv", ["opt_main_futures.py", "--phase", "strategy", "--skip-data-sync"]
+        sys, "argv", ["opt_main_futures.py", "--phase", "full", "--skip-data-sync"]
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -212,7 +212,7 @@ def test_cli_rejects_bypass_champion_guard_flag(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--phase", "strategy", "--bypass-champion-guard"],
+        ["opt_main_futures.py", "--phase", "full", "--bypass-champion-guard"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -221,7 +221,7 @@ def test_cli_rejects_bypass_champion_guard_flag(monkeypatch: pytest.MonkeyPatch)
 def test_cli_rejects_alpha_only_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     """--alpha-only CLI 인자는 argparse 오류(exit 2)를 반환해야 한다."""
     monkeypatch.setattr(
-        sys, "argv", ["opt_main_futures.py", "--phase", "strategy", "--alpha-only"]
+        sys, "argv", ["opt_main_futures.py", "--phase", "full", "--alpha-only"]
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2

@@ -17,7 +17,7 @@ def test_strategy_mode_pipeline_orchestration_order(
 ) -> None:
     run_config = build_run_config_from_args(
         {
-            "phase": "strategy",
+            "phase": "full",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -406,7 +406,7 @@ def test_requires_exec_1m_returns_false_for_ml_mode() -> None:
 def test_requires_exec_1m_returns_false_for_strategy_phase() -> None:
     run_config = build_run_config_from_args(
         {
-            "phase": "strategy",
+            "phase": "full",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -418,7 +418,7 @@ def test_requires_exec_1m_returns_false_for_strategy_phase() -> None:
 def test_resolve_data_collection_symbols_uses_inference_panel() -> None:
     run_config = build_run_config_from_args(
         {
-            "phase": "strategy",
+            "phase": "full",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -437,7 +437,7 @@ def test_resolve_data_collection_symbols_uses_inference_panel() -> None:
 def test_resolve_data_collection_symbols_uses_live_panel_when_inference_panel_is_empty() -> None:
     run_config = build_run_config_from_args(
         {
-            "phase": "strategy",
+            "phase": "full",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -461,7 +461,7 @@ def test_ensure_universe_ledger_sync_always_passes_none_symbols(
 ) -> None:
     run_config = build_run_config_from_args(
         {
-            "phase": "strategy",
+            "phase": "full",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -495,7 +495,7 @@ def test_ensure_cached_symbol_data_uses_fetch_start_for_backfill(
 ) -> None:
     run_config = build_run_config_from_args(
         {
-            "phase": "strategy",
+            "phase": "full",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -572,7 +572,7 @@ def test_active_signals_count_reads_alpha_panel_not_missing_attr(
 def test_build_run_config_accepts_mode_signal() -> None:
     # "--mode signal" is mapped to phase="signal" for backward compatibility
     cfg = build_run_config_from_args(
-        {"phase": "strategy", "timeframe": "4h", "trials": 1, "sync": "full", "mode": "signal"}
+        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full", "mode": "signal"}
     )
     assert cfg.phase == "signal"
 
