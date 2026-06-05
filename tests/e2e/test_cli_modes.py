@@ -13,7 +13,7 @@ def test_rejects_legacy_alpha_only_flag(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--phase", "strategy", "--alpha-only"],
+        ["opt_main_futures.py", "--phase", "full", "--alpha-only"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -23,7 +23,7 @@ def test_rejects_legacy_hmm_only_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--phase", "strategy", "--hmm-only"],
+        ["opt_main_futures.py", "--phase", "full", "--hmm-only"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2

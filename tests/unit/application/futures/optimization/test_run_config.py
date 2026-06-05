@@ -21,9 +21,10 @@ def test_build_run_config_accepts_ml_phase() -> None:
     assert cfg.phase == "ml"
 
 
-def test_build_run_config_backward_compatibility_strategy() -> None:
-    cfg = build_run_config_from_args({"phase": "strategy", "timeframe": "4h", "trials": 1})
-    assert cfg.phase == "full"
+def test_build_run_config_rejects_strategy_phase() -> None:
+    """strategy alias는 제거됨; full을 사용해야 한다."""
+    with pytest.raises(ValueError, match="invalid active phase"):
+        build_run_config_from_args({"phase": "strategy", "timeframe": "4h", "trials": 1})
 
 
 def test_build_run_config_backward_compatibility_alpha() -> None:
@@ -46,7 +47,7 @@ def test_build_run_config_rejects_legacy_flags() -> None:
     with pytest.raises(ValueError, match="legacy flag"):
         build_run_config_from_args(
             {
-                "phase": "strategy",
+                "phase": "full",
                 "alpha_only": True,
             }
         )
@@ -74,7 +75,7 @@ def test_build_run_config_rejects_skip_universe_flag() -> None:
     with pytest.raises(ValueError, match="legacy flag"):
         build_run_config_from_args(
             {
-                "phase": "strategy",
+                "phase": "full",
                 "timeframe": "4h",
                 "trials": 1,
                 "skip_universe": True,
@@ -87,7 +88,7 @@ def test_build_run_config_rejects_skip_data_sync_flag() -> None:
     with pytest.raises(ValueError, match="legacy flag"):
         build_run_config_from_args(
             {
-                "phase": "strategy",
+                "phase": "full",
                 "timeframe": "4h",
                 "trials": 1,
                 "skip_data_sync": True,

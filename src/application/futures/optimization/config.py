@@ -68,8 +68,6 @@ def build_run_config_from_args(args: Namespace | dict[str, Any]) -> FuturesRunCo
     phase_raw = str(raw.get("phase", "full"))
     if phase_raw == "alpha":
         phase_raw = "ml"
-    if phase_raw == "strategy":
-        phase_raw = "full"
     phase = parse_active_phase(phase_raw)
     sync = str(raw.get("sync", "full"))
     if sync not in {"full", "fast", "skip"}:
