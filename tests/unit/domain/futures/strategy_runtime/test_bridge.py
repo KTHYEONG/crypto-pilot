@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -71,6 +71,8 @@ def test_bridge_passes_no_leak_recommendation_window(monkeypatch: Any) -> None:
         return SimpleNamespace(
             recommended_keep_variants=(),
             recommended_flip_variants=(),
+            recommended_keep_signal_cells=(),
+            recommended_flip_signal_cells=(),
             recommendation_basis="fit_calibration",
             recommendation_split=(0, 0),
             report_split=(0, 0),
@@ -128,10 +130,12 @@ def test_bridge_passes_no_leak_recommendation_window(monkeypatch: Any) -> None:
 
 def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) -> None:
     """min_wf_fold_pass_ratio gate: 모든 폴드 cost survival 실패 시 zero weights 반환."""
-    import numpy as np
-    import pandas as pd
     from dataclasses import replace as dc_replace
     from types import SimpleNamespace
+
+    import numpy as np
+    import pandas as pd
+
     from src.domain.futures.strategy.config import StrategyConfig
     from src.domain.futures.strategy_runtime.bridge import run_candidate_strategy_for_universe
 
@@ -175,12 +179,19 @@ def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) 
 
     monkeypatch.setattr("src.domain.futures.strategy.common.alignment.align_data_maps", lambda *_, **__: aligned)
     monkeypatch.setattr("src.domain.futures.strategy.rule_signals.build_rule_signal_panels", lambda *_, **__: {})
-    monkeypatch.setattr("src.domain.futures.strategy.rule_signals.candidate_panels_to_events", lambda *_, **__: raw_events.copy())
-    monkeypatch.setattr("src.domain.futures.strategy.candidate_labels.label_candidate_events", lambda *_, **__: raw_events.copy())
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rule_signals.candidate_panels_to_events",
+        lambda *_, **__: raw_events.copy(),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_labels.label_candidate_events",
+        lambda *_, **__: raw_events.copy(),
+    )
     monkeypatch.setattr(
         "src.domain.futures.strategy.rule_diagnostics.compute_rule_diagnostics",
         lambda *_, **__: SimpleNamespace(
             recommended_keep_variants=(), recommended_flip_variants=(),
+            recommended_keep_signal_cells=(), recommended_flip_signal_cells=(),
             recommendation_basis="fit_calibration",
             recommendation_split=(0, 0), report_split=(0, 0),
         ),
@@ -194,7 +205,7 @@ def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) 
         y_gate = np.zeros(5, dtype=np.float64)
         y_edge = np.zeros(5, dtype=np.float64)
         event_index = pd.DataFrame({"family": ["f"] * 5, "variant": ["v"] * 5})
-        feature_names: list[str] = []
+        feature_names: ClassVar[list[str]] = []
 
     monkeypatch.setattr(
         "src.domain.futures.strategy.candidate_dataset.build_candidate_dataset",
