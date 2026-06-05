@@ -40,6 +40,8 @@ class SignalValidationReport:
     n_events: int
     net_edge_bps_p50: float
     net_edge_bps_stress_p50: float
+    net_edge_bps_mean: float
+    net_edge_bps_stress_mean: float
     hit_rate: float
     ir_t_stat: float
     survives_cost: bool
@@ -1148,6 +1150,8 @@ def validate_candidate_signals(
                 n_events=0,
                 net_edge_bps_p50=float("nan"),
                 net_edge_bps_stress_p50=float("nan"),
+                net_edge_bps_mean=float("nan"),
+                net_edge_bps_stress_mean=float("nan"),
                 hit_rate=0.0,
                 ir_t_stat=0.0,
                 survives_cost=False,
@@ -1156,33 +1160,52 @@ def validate_candidate_signals(
             continue
 
         edge_col = "edge_after_hurdle_bps"
-        if edge_col in oos_events.columns:
-            edge_arr = oos_events[edge_col].to_numpy(dtype=np.float64)
+        edge_arr = (
+            oos_events[edge_col].to_numpy(dtype=np.float64)
+            if edge_col in oos_events.columns
+            else np.zeros(n_events, dtype=np.float64)
+        )
+        # base 비용 복원 (이중차감 방지): edge_after_hurdle은 이미 base RT 차감됨
+        if "ex_ante_cost_bps" in oos_events.columns:
+            base_cost_arr = oos_events["ex_ante_cost_bps"].to_numpy(dtype=np.float64)
         else:
-            edge_arr = np.zeros(n_events, dtype=np.float64)
+            base_cost_arr = np.full(n_events, cost_model.round_trip_bps(), dtype=np.float64)
 
-        finite_edge = edge_arr[np.isfinite(edge_arr)]
+        finite_mask = np.isfinite(edge_arr)
+        finite_edge = edge_arr[finite_mask]
+        # 정직한 stress: gross_minus_hurdle - stress_rt (stress 비용 1회만 적용)
+        stress_mask = finite_mask & np.isfinite(base_cost_arr)
+        net_stress_arr = (edge_arr + base_cost_arr - stress_rt)[stress_mask]
+
+        mean_net = float(np.mean(finite_edge)) if finite_edge.size > 0 else float("nan")
+        mean_net_stress = float(np.mean(net_stress_arr)) if net_stress_arr.size > 0 else float("nan")
         net_p50 = float(np.median(finite_edge)) if finite_edge.size > 0 else float("nan")
         net_stress_p50 = net_p50 - stress_rt if np.isfinite(net_p50) else float("nan")
-        hit_rate = float((finite_edge > 0).mean()) if finite_edge.size > 0 else 0.0
 
+        hit_rate = float((finite_edge > 0).mean()) if finite_edge.size > 0 else 0.0
         if finite_edge.size >= 2:
             std_val = float(np.std(finite_edge, ddof=1))
             ir_t = float(np.mean(finite_edge) / (std_val / (finite_edge.size ** 0.5) + 1e-12))
         else:
             ir_t = 0.0
 
-        survives = (
-            np.isfinite(net_stress_p50)
-            and net_stress_p50 > 0.0
-            and ir_t >= cfg.min_rule_ir_t
-        )
+        if cfg.blend_survival_use_mean:
+            survives = (
+                np.isfinite(mean_net_stress)
+                and mean_net_stress > cfg.blend_survival_min_net_stress_bps
+                and ir_t >= cfg.min_rule_ir_t
+            )
+        else:
+            # legacy median path (회귀 대비 보존)
+            survives = np.isfinite(net_stress_p50) and net_stress_p50 > 0.0 and ir_t >= cfg.min_rule_ir_t
 
         reports.append(SignalValidationReport(
             variant=variant_name,
             n_events=n_events,
             net_edge_bps_p50=net_p50,
             net_edge_bps_stress_p50=net_stress_p50,
+            net_edge_bps_mean=mean_net,
+            net_edge_bps_stress_mean=mean_net_stress,
             hit_rate=hit_rate,
             ir_t_stat=ir_t,
             survives_cost=survives,
