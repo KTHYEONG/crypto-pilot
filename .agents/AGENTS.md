@@ -68,12 +68,12 @@ This protocol applies only inside code-writing phases such as `implement`.
 - **Unverified Refactoring:** Prohibit large-scale structural changes without test code or guaranteed behavior.
 - **Ignoring Return Values:** Prohibit neglecting return values or error handling.
 
-## 9. Rule Isolation & Priority: Commit Rule
+## 9. Rule Isolation & Priority: Commit Skill
 
-- **Manual Trigger Only**: The commit-specific rule file (`.agents/rules/commit.md`) is applied only when the user explicitly invokes a commit task or directly requests the commit rule.
-- **No Auto Activation**: Do not infer or auto-activate the commit rule from file changes, labels, branch names, or nearby context unless the user explicitly asks for a commit operation.
-- **Precedence**: When the commit rule is manually activated, it temporarily suspends the general check loop and multi-step development workflow defined in this document.
-- **Scope**: The commit rule is limited to version-control tasks such as commit message creation, staging guidance, commit splitting, or commit audit.
+- **Manual Activation Only**: The `commit` skill is applied only when the user explicitly invokes it via `activate_skill` or directly requests a commit task.
+- **No Auto Activation**: Do not infer or auto-activate the commit skill from file changes, labels, branch names, or nearby context unless the user explicitly asks for a commit operation.
+- **Precedence**: When the commit skill is manually activated, it temporarily suspends the general check loop and multi-step development workflow defined in this document.
+- **Scope**: The commit skill is limited to version-control tasks such as commit message creation, staging guidance, commit splitting, or commit audit.
 
 ## 10. Quant & Financial Engineering (Automatic Augmentation)
 
@@ -86,7 +86,7 @@ This protocol applies only inside code-writing phases such as `implement`.
 
 Skills define phase-specific workflows only.
 
-Global directives in this document always apply unless a manually activated commit rule or automatically activated quant rule overrides them.
+Global directives in this document always apply unless a manually activated commit skill or automatically activated quant rule overrides them.
 
 Default non-trivial development workflow:
 
@@ -98,7 +98,7 @@ Default non-trivial development workflow:
 
 Commit tasks:
 - Do not route through the default skill workflow.
-- Use `.agents/rules/commit.md` only when explicitly requested by the user.
+- Use the `commit` skill only when explicitly requested by the user.
 
 Quant tasks:
 - Route through the default skill workflow unless `quant.md` requires otherwise.
