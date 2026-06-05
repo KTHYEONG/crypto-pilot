@@ -10,7 +10,8 @@
 [Universe Filters] -> [Rule Signal Panels] -> [Candidate Event Extraction]
       -> [Leak-free Labeling] -> [Tabular Dataset Build]
       -> [Gate Model (Classifier)] -> [Edge/Downside Model (Regressor)]
-      -> [Utility-based Selection] -> [Fractional Kelly Weights]
+      -> [Expected-Utility Selection] -> [Probability-Discounted Kelly Weights]
+      -> [Realized Fold Survival Gate]
       -> [Backtest Engine] -> [Compound Evaluation]
 ```
 
@@ -28,13 +29,20 @@
 ### 3.3 Dataset & Models (`candidate_dataset.py`, `*_gate.py`, `*_edge.py`)
 - **Feature Groups**: 시그널 강도, 심볼 상태(Vol, Funding), 시장 상태(BTC Trend, Breadth), 실행 비용, 그리고 Stage6 유니버스 메타데이터(`vol_30d`, `friction_score`, `alpha_capacity_score`, `diversification_score`, `tradeable_score`)를 포함합니다.
 - **Risk Scale Feature**: `sl_thr_bps`를 ex-ante feature로 포함하여 q10 downside model이 자산별 stop distance scale을 직접 관측합니다.
-- **Gate Model**: LightGBM Classifier를 이용한 거래 승인 여부 판정 (Calibrated Probability).
-- **Edge Model**: LightGBM Regressor (Huber/Quantile)를 이용한 기대 수익 및 하방 리스크(q10) 추정.
+- **Gate Model**: LightGBM Classifier를 이용한 calibrated confidence 추정입니다. `p_pass`는 단순 win-rate 문턱이 아니라, payoff/downside와 결합되어 utility와 sizing에 쓰입니다.
+- **Edge Model**: LightGBM Regressor (Huber/Quantile)를 이용한 기대 수익 및 하방 리스크(q10) 추정입니다.
+- **Selection Diagnostics**: 예측 `mu`, `p_pass`, `expected_utility` decile별 realized edge/hit-rate 및 rank IC를 기록하여, pointwise 예측이 실제 top-k 선택 품질로 이어지는지 점검합니다.
 
 ### 3.4 Portfolio & Weights (`candidate_portfolio.py`)
-- **Selection**: `p_pass`, `mu_net`, `q10_shortfall` 임계치를 통과한 이벤트 중 유틸리티가 가장 높은 후보 선택.
+- **Selection**: `utility_topk`는 `expected_utility_bps`를 기준으로 후보를 고르고, gate는 `selection_gate_mode`에 따라 `off`, `soft_floor`, `hard_floor`로 동작합니다.
+- **Gate Contract**:
+  - `hard_floor`: `p_pass < selection_min_gate_probability_floor`이면 즉시 제외
+  - `soft_floor`: 즉시 제외하지 않고, 낮은 `p_pass`에 soft penalty를 부여
+  - `off`: gate는 진단용으로만 사용
+- **Expected Utility**: 기본 selection은 `p_pass * mu_net + (1 - p_pass) * min(q10, 0) - turnover_penalty` 형태의 보수적 utility를 사용합니다.
 - **Shortfall Thresholding**: 기본값은 절대 bps 기준(`shortfall_threshold_basis="absolute_bps"`)이며, 필요 시 `stop_relative` 모드로 자산별 `sl_thr_bps` 기반 한계를 사용할 수 있습니다. 현재 기본값은 보수적으로 유지됩니다.
-- **Sizing**: Fractional Kelly 기반 사이징 및 심볼/Net/Gross/Beta/Vol 캡 적용.
+- **Sizing**: Kelly 입력 `mu`는 기본적으로 `p_pass`로 discount되며, q10 downside로부터 variance floor를 부여하여 과도한 sizing을 방지합니다.
+- **Metadata Forward Fill**: `target_weights`가 holding 구간에 forward-fill될 때 candidate stop/take-profit metadata도 함께 유지되어, 엔진 진입 시점이 늦어져도 exit geometry가 보존됩니다.
 - **Bridge**: 최종 생성된 `target_weights`를 백테스트 엔진에 주입.
 
 ### 3.5 Universe-to-ML Coupling
@@ -53,7 +61,12 @@
 
 ### 4.3 검증 및 승격 (Validation & Promotion)
 - **Nested Walk-Forward**: 훈련/검증/OOS(Out-of-Sample)를 분리한 순방향 검증.
-- **Compound Gate**: 단순 IC/AUC가 아닌, CAGR, Max Drawdown, Log Growth 등 실제 자본 성장 지표를 기준으로 전략 승격.
+- **Realized Fold Survival Gate**: 기본 fold survival은 예측 `mu` t-stat이 아니라, fold-local selected events의 realized edge / log-growth를 기준으로 판정합니다.
+- **Compound Gate**: 단순 IC/AUC가 아닌, CAGR, Max Drawdown, Log Growth 등 실제 자본 성장 지표를 기준으로 전략 승격합니다.
+
+## 4.4 Optuna Boundary
+- **Role Separation**: ML은 경제적으로 타당한 candidate `target_weights`를 생성해야 하며, Optuna는 그 이후 portfolio/execution/risk 파라미터를 조정합니다.
+- **No Final-OOS Fitting**: ML selection 계약을 최종 OOS 창에 반복 적합시키는 것은 금지합니다. fold survival과 recommendation window에서만 selection 품질을 판단합니다.
 
 ## 5. 핵심 기술 스택
 - **Base**: `numpy`, `pandas`, `numba` (벡터화 및 고속 연산)
