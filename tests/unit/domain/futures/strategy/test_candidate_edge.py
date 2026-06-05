@@ -65,7 +65,11 @@ def test_predict_candidate_edges_applies_cost_and_utility_formula() -> None:
     p_pass = np.full(valid.X.shape[0], 0.5, dtype=np.float64)
     out = predict_candidate_edges(models=models, dataset=valid, p_pass=p_pass, cfg=cfg)
 
-    expected_utility = 0.5 * out.mu_net_decision_bps - 0.5 * np.abs(np.minimum(out.q10_net_bps, 0.0)) - 1.0
+    expected_utility = (
+        0.5 * out.mu_net_decision_bps
+        + 0.5 * np.minimum(out.q10_net_bps, 0.0)
+        - 1.0
+    )
 
     assert np.allclose(out.mu_net_decision_bps, out.mu_gross_bps)
     assert np.allclose(out.utility_score, expected_utility)
