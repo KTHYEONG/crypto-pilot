@@ -7,13 +7,28 @@ from src.application.futures.optimization.config import build_run_config_from_ar
 
 def test_build_run_config_defaults_to_trials_100() -> None:
     cfg = build_run_config_from_args({"timeframe": "4h"})
-    assert cfg.phase == "strategy"
+    assert cfg.phase == "full"
     assert cfg.trials == 100
 
 
-def test_build_run_config_accepts_strategy_phase() -> None:
+def test_build_run_config_accepts_full_phase() -> None:
+    cfg = build_run_config_from_args({"phase": "full", "timeframe": "4h", "trials": 1})
+    assert cfg.phase == "full"
+
+
+def test_build_run_config_accepts_ml_phase() -> None:
+    cfg = build_run_config_from_args({"phase": "ml", "timeframe": "4h", "trials": 1})
+    assert cfg.phase == "ml"
+
+
+def test_build_run_config_backward_compatibility_strategy() -> None:
     cfg = build_run_config_from_args({"phase": "strategy", "timeframe": "4h", "trials": 1})
-    assert cfg.phase == "strategy"
+    assert cfg.phase == "full"
+
+
+def test_build_run_config_backward_compatibility_alpha() -> None:
+    cfg = build_run_config_from_args({"phase": "alpha", "timeframe": "4h", "trials": 1})
+    assert cfg.phase == "ml"
 
 
 def test_build_run_config_rejects_legacy_quick_backtest_phase() -> None:
@@ -35,11 +50,6 @@ def test_build_run_config_rejects_legacy_flags() -> None:
                 "alpha_only": True,
             }
         )
-
-
-def test_build_run_config_rejects_legacy_mode_key() -> None:
-    with pytest.raises(ValueError, match="legacy argument key"):
-        build_run_config_from_args({"mode": "strategy", "trials": 1})
 
 
 def test_build_run_config_rejects_legacy_tf_key() -> None:
