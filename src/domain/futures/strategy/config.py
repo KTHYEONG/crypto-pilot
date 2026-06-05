@@ -3,6 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from src.domain.futures.strategy.execution_cost import ExecutionCostModel
+
+_DEFAULT_COST_MODEL = ExecutionCostModel()
+_DEFAULT_RT_BPS: float = _DEFAULT_COST_MODEL.round_trip_bps()  # ≈ 7.5
+
 
 @dataclass(slots=True, frozen=True)
 class BlendConfig:
@@ -102,7 +107,8 @@ class CandidateStrategyConfig:
     test_months: int = 6
     purge_bars: int = 18
     embargo_bars: int = 18
-    cost_floor_bps: float = 24.0
+    # Deprecated: use ExecutionCostModel fields instead; kept for explicit override only
+    cost_floor_bps: float = _DEFAULT_RT_BPS
     gate_label_column: Literal[
         "profitable_after_hurdle_label",
         "barrier_first_label",
@@ -174,11 +180,28 @@ class CandidateStrategyConfig:
         "btc_residual_momentum",
         "oi_volume_confirmed_breakout",
     )
+    # Execution cost model (SSOT; replaces flat 24bps)
+    maker_fee_bps: float = 2.0
+    taker_fee_bps: float = 5.0
+    maker_ratio: float = 0.75
+    slippage_bps: float = 1.0
+    impact_coeff_bps: float = 0.0
+    cost_stress_multiplier: float = 1.5
+    cost_amortize_by_holding: bool = True
+    # Signal-only validation mode (--mode signal; skips ML training)
+    signal_only: bool = False
+    # Walk-forward
+    wf_enabled: bool = True
+    wf_scheme: Literal["anchored", "rolling", "single"] = "anchored"
+    wf_n_folds: int = 4
+    min_fit_obs: int = 200
+    min_wf_fold_pass_ratio: float = 0.60
     # Edge model utility parameters
     downside_penalty: float = 1.0
     turnover_penalty: float = 0.5
     concentration_penalty: float = 0.0
-    expected_cost_bps: float = 24.0
+    # Deprecated: use ExecutionCostModel fields instead; kept for explicit override only
+    expected_cost_bps: float = _DEFAULT_RT_BPS
     edge_prediction_min_std_bps: float = 3.0
     edge_prediction_min_positive_rate: float = 0.01
     edge_prior_enabled: bool = True
@@ -276,6 +299,20 @@ class CandidateStrategyConfig:
             raise ValueError("selection_edge_grid_bps values must be non-negative")
         if any(value < 0.0 for value in self.selection_q10_grid_bps):
             raise ValueError("selection_q10_grid_bps values must be non-negative")
+        if not (0.0 <= self.maker_ratio <= 1.0):
+            raise ValueError("maker_ratio must be in [0.0, 1.0]")
+        if any(v < 0.0 for v in (self.maker_fee_bps, self.taker_fee_bps, self.slippage_bps, self.impact_coeff_bps)):
+            raise ValueError("fee, slippage, and impact parameters must be non-negative")
+        if self.cost_stress_multiplier < 1.0:
+            raise ValueError("cost_stress_multiplier must be >= 1.0")
+        if self.wf_scheme not in {"anchored", "rolling", "single"}:
+            raise ValueError("wf_scheme must be anchored, rolling, or single")
+        if self.wf_n_folds < 1:
+            raise ValueError("wf_n_folds must be >= 1")
+        if self.min_fit_obs < 1:
+            raise ValueError("min_fit_obs must be >= 1")
+        if not (0.0 <= self.min_wf_fold_pass_ratio <= 1.0):
+            raise ValueError("min_wf_fold_pass_ratio must be in [0.0, 1.0]")
         if self.downside_penalty < 0.0 or self.turnover_penalty < 0.0 or self.concentration_penalty < 0.0:
             raise ValueError("penalty parameters must be non-negative")
         if self.edge_prediction_min_std_bps < 0.0:

@@ -90,6 +90,7 @@ def evaluate_compound_backtest(
     equity_curve: NDArray[np.float64],
     diag: NDArray[np.float64] | None = None,
     cfg: CandidateStrategyConfig,
+    fold_oos_boundaries: tuple[tuple[int, int], ...] | None = None,
 ) -> CompoundEvaluationReport:
     """Evaluate geometric capital growth and execution realism of a backtest."""
     del diag
@@ -156,18 +157,24 @@ def evaluate_compound_backtest(
         if "size" in trades.columns and n_bars > 0:
             turnover = float(trades["size"].sum() / initial_eq / n_bars)
 
-    # 5. Non-overlapping 6-month block evaluation
-    # 6 months = 180 days = 1080 bars in 4h timeframe
-    block_size = int(bars_per_year / 2.0)
-    n_blocks = max(1, n_bars // block_size)
+    # 5. Block evaluation: fold OOS boundaries if provided, else 6-month fallback
     block_returns: list[float] = []
-
-    for i in range(n_blocks):
-        st = i * block_size
-        ed = min((i + 1) * block_size, n_bars - 1)
-        if ed > st:
-            b_ret = float((equity_curve[ed] / max(equity_curve[st], 1e-12)) - 1.0)
-            block_returns.append(b_ret)
+    if fold_oos_boundaries:
+        for oos_s, oos_e in fold_oos_boundaries:
+            st = max(0, min(oos_s, n_bars - 1))
+            ed = max(0, min(oos_e, n_bars - 1))
+            if ed > st:
+                b_ret = float((equity_curve[ed] / max(equity_curve[st], 1e-12)) - 1.0)
+                block_returns.append(b_ret)
+    else:
+        block_size = int(bars_per_year / 2.0)
+        n_blocks = max(1, n_bars // block_size)
+        for i in range(n_blocks):
+            st = i * block_size
+            ed = min((i + 1) * block_size, n_bars - 1)
+            if ed > st:
+                b_ret = float((equity_curve[ed] / max(equity_curve[st], 1e-12)) - 1.0)
+                block_returns.append(b_ret)
 
     passed_blocks = sum(1 for r in block_returns if r > 0.0)
     block_pass_ratio = float(passed_blocks / len(block_returns)) if block_returns else 0.0
