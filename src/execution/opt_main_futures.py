@@ -313,14 +313,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--phase",
         type=str,
-        choices=["strategy", "alpha"],
-        default="strategy",
+        choices=["full", "ml", "signal", "strategy"],
+        default="full",
     )
     parser.add_argument(
         "--sync",
         type=str,
         default="full",
         choices=["full", "fast", "skip"],
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["full", "signal"],
+        default="full",
+        help=argparse.SUPPRESS,
+        dest="mode",
     )
     parser.add_argument("--refresh-universe", action="store_true")
     return parser
@@ -610,7 +618,7 @@ def _run_strategy_stage(
         inference_panel=effective_inference,
         live_inference_panel=effective_live,
         trading_symbols=trading_symbols or tuple(data_stage.valid_symbols),
-        silent=(run_config.phase == "alpha"),
+        silent=False,
     )
     bridge_elapsed = time.perf_counter() - t_bridge_start
     
@@ -669,7 +677,42 @@ def _run_strategy_stage(
         time.perf_counter() - t_merge_start,
     )
 
-    if run_config.phase == "strategy":
+    # signal_only: print validation table and skip ML-downstream steps
+    candidate_report_ref = getattr(ml_out, "rule_report", {}) or {}
+    if isinstance(candidate_report_ref, dict) and candidate_report_ref.get("zero_reason") == "signal_only_mode":
+        sv_list = candidate_report_ref.get("signal_validation", [])
+        header_sv = (
+            f"| {'Variant':<28} | {'n':<5} | {'net_p50':>8} | {'stress_p50':>10} | {'t':>5} | {'pass':>4} |"
+        )
+        _logger.info("\n[SIGNAL-VALIDATION] " + "-" * (len(header_sv) - 20))
+        _logger.info(header_sv)
+        for sv in sv_list:
+            _logger.info(
+                "| %-30s | %5d | %8.1f | %10.1f | %5.3f | %5.2f | %5s |",
+                sv.get("variant", "?")[:30],
+                sv.get("n_events", 0),
+                sv.get("net_edge_bps_p50", float("nan")),
+                sv.get("net_edge_bps_stress_p50", float("nan")),
+                sv.get("hit_rate", 0.0),
+                sv.get("ir_t_stat", 0.0),
+                "PASS" if sv.get("survives_cost") else "FAIL",
+            )
+        _logger.info("[SIGNAL-VALIDATION] overall_pass=%s", candidate_report_ref.get("signal_validation_pass"))
+        return
+
+    if run_config.phase in {"full", "ml"}:
+        t_report_start = time.perf_counter()
+        _logger.debug("[latency] Starting _run_candidate_evaluation_report")
+        _run_candidate_evaluation_report(
+            ml_out, data_stage, run_config.timeframe,
+            trading_symbols or tuple(data_stage.valid_symbols),
+        )
+        _logger.debug(
+            "[latency] Completed _run_candidate_evaluation_report: %.4fs",
+            time.perf_counter() - t_report_start,
+        )
+
+    if run_config.phase == "full":
         strategy_name = str(OPT_FUTURES_CONFIG.get("FUTURES_STRATEGY_NAME", "candidate_ml"))
         if strategy_name in {"candidate_ml", "rule_baseline"}:
             report = summarize_candidate_output_readiness(
@@ -691,17 +734,6 @@ def _run_strategy_stage(
                 valid_symbols=data_stage.valid_symbols,
                 tf=run_config.timeframe,
             )
-    elif run_config.phase == "alpha":
-        t_report_start = time.perf_counter()
-        _logger.debug("[latency] Starting _run_candidate_evaluation_report")
-        _run_candidate_evaluation_report(
-            ml_out, data_stage, run_config.timeframe,
-            trading_symbols or tuple(data_stage.valid_symbols),
-        )
-        _logger.debug(
-            "[latency] Completed _run_candidate_evaluation_report: %.4fs",
-            time.perf_counter() - t_report_start,
-        )
 
 
 def _run_candidate_evaluation_report(
@@ -1000,7 +1032,7 @@ def _run_optimization_stage(
 
     if study_ml is None or best_trial is None:
         strategy_name = str(OPT_FUTURES_CONFIG.get("FUTURES_STRATEGY_NAME", "candidate_ml"))
-        if run_config.phase == "strategy" and strategy_name in {"candidate_ml", "rule_baseline"}:
+        if run_config.phase == "full" and strategy_name in {"candidate_ml", "rule_baseline"}:
             return RunnerResult(exit_code=0, reason="candidate_smoke_no_candidate")
         return RunnerResult(exit_code=1, reason="no_candidate")
 
@@ -1140,7 +1172,9 @@ def run_pipeline(
         universe_snapshot=universe_snapshot,
     )
     _logger.info("<< STRATEGY: %.2fs", time.perf_counter() - t_strategy)
-    if run_config.phase == "alpha":
+    if run_config.phase == "signal":
+        return RunnerResult(exit_code=0, reason="signal_mode_done")
+    if run_config.phase == "ml":
         return RunnerResult(exit_code=0, reason="candidate_evaluation_done")
     # Step 5) optimization + final OOS evaluation
     _logger.info(
