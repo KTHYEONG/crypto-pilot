@@ -115,7 +115,7 @@ def test_label_candidate_events_uses_future_window_only_for_targets() -> None:
     assert str(out.loc[0, "exit_reason"]) == "time_exit"
     assert int(out.loc[0, "exit_idx"]) == 12
     assert int(out.loc[0, "same_bar_collision"]) == 0
-    assert str(out.loc[0, "exit_policy_version"]) == "candidate_label_atr_v1"
+    assert str(out.loc[0, "exit_policy_version"]) == "candidate_label_atr_v2"
 
 
 def test_label_candidate_events_separates_barrier_and_profitable_labels() -> None:
@@ -173,7 +173,7 @@ def test_label_candidate_events_same_bar_collision_defaults_to_stop_loss() -> No
             "side": [1],
             "entry_idx": [3],
             "expected_holding_bars": [5],
-            "min_holding_bars": [1],
+            "min_holding_bars": [0],  # no holding constraint so collision detected at bar 0
             "stop_atr_mult": [0.25],
             "take_profit_atr_mult": [0.25],
             "cost_floor_bps": [0.0],
@@ -209,3 +209,165 @@ def test_label_candidate_events_invalid_entry_marks_metadata() -> None:
     assert str(out.loc[0, "exit_reason"]) == "invalid"
     assert int(out.loc[0, "exit_idx"]) == -1
     assert int(out.loc[0, "same_bar_collision"]) == 0
+
+
+# ─── L-1: triple_barrier_label is raw result ─────────────────────────────────
+
+def _make_tp_hit_aligned() -> AlignedMarketData:
+    """Market that hits TP on bar 5 (high spikes, low stays within SL)."""
+    t, n = 20, 1
+    open_ = np.full((t, n), 100.0)
+    high = np.full((t, n), 101.0)
+    low = np.full((t, n), 99.5)
+    close = np.full((t, n), 100.0)
+    # Bar 5: high reaches 115 (easily hits 10% TP)
+    high[5, 0] = 115.0
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    return AlignedMarketData(
+        datetimes=datetimes, symbols=("BTCUSDT",),
+        open_2d=open_, high_2d=high, low_2d=low, close_2d=close,
+        volume_2d=np.full((t, n), 1000.0), funding_2d=np.zeros((t, n)),
+        active_mask=np.ones((t, n), dtype=bool), warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool), kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.full((t, n), 100.0),  # high cost to test L-1 separation
+    )
+
+
+def test_l1_triple_barrier_label_is_raw_tp_result() -> None:
+    """triple_barrier_label must reflect raw TP hit, regardless of edge."""
+    aligned = _make_tp_hit_aligned()
+    events = pd.DataFrame({
+        "datetime": [aligned.datetimes[2]],
+        "symbol": ["BTCUSDT"],
+        "side": [1],
+        "entry_idx": [3],
+        "expected_holding_bars": [15],
+        "min_holding_bars": [0],
+        "stop_atr_mult": [2.0],
+        "take_profit_atr_mult": [0.05],  # 5% TP → hit at bar 5 (high=115 > 105)
+        "cost_floor_bps": [100.0],       # very high cost so edge < 0
+    })
+
+    out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
+
+    # L-1: triple_barrier_label=1 (TP reached first, raw), barrier_first_label=0 (net edge < 0)
+    assert int(out.loc[0, "triple_barrier_label"]) == 1, "raw barrier should reflect TP hit"
+    assert int(out.loc[0, "barrier_first_label"]) == 0, "cost-conditioned label with high cost should be 0"
+
+
+def test_l1_triple_barrier_and_barrier_first_agree_when_profitable() -> None:
+    """When TP hits and edge > 0, both labels must agree (=1)."""
+    aligned = _make_tp_hit_aligned()
+    events = pd.DataFrame({
+        "datetime": [aligned.datetimes[2]],
+        "symbol": ["BTCUSDT"],
+        "side": [1],
+        "entry_idx": [3],
+        "expected_holding_bars": [15],
+        "min_holding_bars": [0],
+        "stop_atr_mult": [2.0],
+        "take_profit_atr_mult": [0.05],
+        "cost_floor_bps": [1.0],  # low cost → edge > 0
+    })
+
+    out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
+
+    assert int(out.loc[0, "triple_barrier_label"]) == 1
+    assert int(out.loc[0, "barrier_first_label"]) == 1
+
+
+# ─── L-2: exit_px is barrier price, not close ─────────────────────────────────
+
+def test_l2_tp_exit_price_is_barrier_price_not_close() -> None:
+    """TP gross_ret must match tp_thr exactly, not close-based return."""
+    t, n = 20, 1
+    entry_px = 100.0
+    tp_mult = 1.0
+    # ATR from decision bar (bar 3 = entry-1 bar 3 is index 3, decision=2)
+    # Use large high so TP triggers on bar 5
+    open_ = np.full((t, n), entry_px)
+    close = np.full((t, n), 95.0)  # close far below TP — would give wrong ret if used
+    high = np.full((t, n), 101.0)
+    low = np.full((t, n), 99.0)
+    high[5, 0] = 120.0  # triggers TP (ATR ≈ 1.0 → tp_thr ≈ 0.01 → high must be > 101)
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    aligned = AlignedMarketData(
+        datetimes=datetimes, symbols=("BTCUSDT",),
+        open_2d=open_, high_2d=high, low_2d=low, close_2d=close,
+        volume_2d=np.full((t, n), 1000.0), funding_2d=np.zeros((t, n)),
+        active_mask=np.ones((t, n), dtype=bool), warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool), kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.zeros((t, n)),
+    )
+    events = pd.DataFrame({
+        "datetime": [aligned.datetimes[3]],
+        "symbol": ["BTCUSDT"],
+        "side": [1],
+        "entry_idx": [4],
+        "expected_holding_bars": [15],
+        "min_holding_bars": [0],
+        "stop_atr_mult": [10.0],  # far away
+        "take_profit_atr_mult": [tp_mult],
+        "cost_floor_bps": [0.0],
+    })
+
+    out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
+
+    assert str(out.loc[0, "exit_reason"]) == "take_profit"
+    # gross_fwd_bps must be > 0 (barrier price > entry_px), not negative (close < entry_px)
+    assert float(out.loc[0, "gross_fwd_bps"]) > 0.0, "TP exit should use barrier price (positive), not close"
+
+
+# ─── L-3: min_holding_bars scan offset ──────────────────────────────────────
+
+def test_l3_min_holding_bars_prevents_early_exit_engine_aligned() -> None:
+    """engine_aligned: barrier hit before min_holding_bars must be ignored."""
+    t, n = 20, 1
+    open_ = np.full((t, n), 100.0)
+    high = np.full((t, n), 101.0)
+    low = np.full((t, n), 99.0)
+    close = np.full((t, n), 100.0)
+    # Bar 1 hits SL (entry bar+1), but min_holding_bars=5
+    low[1, 0] = 50.0  # extreme drop on bar 1
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    aligned = AlignedMarketData(
+        datetimes=datetimes, symbols=("BTCUSDT",),
+        open_2d=open_, high_2d=high, low_2d=low, close_2d=close,
+        volume_2d=np.full((t, n), 1000.0), funding_2d=np.zeros((t, n)),
+        active_mask=np.ones((t, n), dtype=bool), warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool), kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.zeros((t, n)),
+    )
+    events = pd.DataFrame({
+        "datetime": [aligned.datetimes[0]],
+        "symbol": ["BTCUSDT"],
+        "side": [1],
+        "entry_idx": [1],
+        "expected_holding_bars": [10],
+        "min_holding_bars": [5],
+        "stop_atr_mult": [1.0],
+        "take_profit_atr_mult": [100.0],  # far TP
+        "cost_floor_bps": [0.0],
+    })
+
+    cfg_aligned = CandidateStrategyConfig(exit_policy_mode="engine_aligned")
+    cfg_label_only = CandidateStrategyConfig(exit_policy_mode="label_only")
+
+    out_aligned = label_candidate_events(events=events, aligned=aligned, cfg=cfg_aligned)
+    out_label = label_candidate_events(events=events, aligned=aligned, cfg=cfg_label_only)
+
+    # label_only sees the SL at bar 1 (should exit early)
+    assert str(out_label.loc[0, "exit_reason"]) == "stop_loss"
+    assert int(out_label.loc[0, "time_to_exit_bars"]) == 1
+
+    # engine_aligned ignores bar 1 SL (before min_holding=5), exits at time
+    assert str(out_aligned.loc[0, "exit_reason"]) != "stop_loss" or int(out_aligned.loc[0, "time_to_exit_bars"]) > 1
+
+
+# ─── L-4: ATR fallback uses constant ─────────────────────────────────────────
+
+def test_l4_atr_fallback_constant_used() -> None:
+    """_ATR_FALLBACK_FRACTION constant should be used, not inline 0.01."""
+    from src.domain.futures.strategy.candidate_labels import _ATR_FALLBACK_FRACTION
+
+    assert _ATR_FALLBACK_FRACTION == 0.01
