@@ -25,6 +25,8 @@ class RuleDiagnosticsResult:
     decision: dict[str, float | int | str]
     recommended_keep_variants: tuple[str, ...]
     recommended_flip_variants: tuple[str, ...]
+    recommended_keep_signal_cells: tuple[str, ...]
+    recommended_flip_signal_cells: tuple[str, ...]
     recommendation_basis: str
     recommendation_split: tuple[int, int]
     report_split: tuple[int, int]
@@ -299,6 +301,7 @@ def _summarize_view(
 def _summarize_recommendation_variants(
     *,
     events: pd.DataFrame,
+    aligned: AlignedMarketData,
     min_obs: int,
     cfg: CandidateStrategyConfig,
     recommendation_start: int,
@@ -306,32 +309,100 @@ def _summarize_recommendation_variants(
     side_flip_lookup: Mapping[str, tuple[float | None, float | None]] | None = None,
 ) -> pd.DataFrame:
     """Summarize variant metrics for the recommendation window only."""
+    use_signal_cells = bool(cfg.diagnose_signal_cells and "signal_cell" in events.columns)
+    regime_names = ("bear_quiet", "bear_volatile", "bull_quiet", "bull_volatile")
+    close = aligned.close_2d
+    log_ret = np.zeros_like(close, dtype=np.float64)
+    log_ret[1:] = np.diff(np.log(np.maximum(close, 1e-12)), axis=0)
+    btc_idx = 0
+    for idx, symbol in enumerate(aligned.symbols):
+        if "BTC" in symbol.upper():
+            btc_idx = idx
+            break
+    btc_close = close[:, btc_idx]
+    btc_ma20 = pd.Series(btc_close).rolling(20, min_periods=1).mean().to_numpy(dtype=np.float64, copy=False)
+    btc_ma100 = pd.Series(btc_close).rolling(100, min_periods=1).mean().to_numpy(dtype=np.float64, copy=False)
+    trend_up = btc_ma20 >= btc_ma100
+    mkt_vol_20 = pd.Series(np.nanmean(log_ret, axis=1)).rolling(20, min_periods=1).std(ddof=0).fillna(0.0)
+    mkt_vol_roll = mkt_vol_20.rolling(120, min_periods=1)
+    mkt_vol_z120 = ((mkt_vol_20 - mkt_vol_roll.mean()) / mkt_vol_roll.std(ddof=0)).fillna(0.0).to_numpy(
+        dtype=np.float64,
+        copy=False,
+    )
+    vol_high = mkt_vol_z120 > 0.0
+    regime_code = (trend_up.astype(np.int8) * 2) + vol_high.astype(np.int8)
     records: list[dict[str, float | int | str]] = []
-    grouped = events.groupby(["family", "variant"], sort=False, dropna=False)
-    for (family, variant), group in grouped:
+    group_cols = ["signal_cell"] if use_signal_cells else ["family", "variant"]
+    grouped = events.groupby(group_cols, sort=False, dropna=False)
+    for _key_tuple, group in grouped:
         entry_idx = group["entry_idx"].to_numpy(copy=False)
         rec_group = group.loc[_window_mask(entry_idx, recommendation_start, recommendation_end)]
         if rec_group.empty:
             continue
         rec_metrics = _edge_summary_from_frame(rec_group, cfg=cfg)
         rec_n = int(rec_group.shape[0])
-        key = f"{family}:{variant}"
+        row0 = group.iloc[0]
+        family = str(row0["family"])
+        variant = str(row0["variant"])
+        key = str(row0["signal_cell"]) if use_signal_cells else f"{family}:{variant}"
+        prefix = "cell=" if use_signal_cells else "variant="
         flip_delta, flip_mean = (None, None)
         if side_flip_lookup is not None:
-            flip_delta, flip_mean = side_flip_lookup.get(f"variant={key}", (None, None))
+            flip_delta, flip_mean = side_flip_lookup.get(f"{prefix}{key}", (None, None))
+        regime_best_name = ""
+        regime_best_obs = 0
+        regime_best_edge_bps = float("nan")
+        regime_eligible_count = 0
+        regime_pass = True
+        if cfg.regime_diagnostic_enabled:
+            rec_entry_idx = rec_group["entry_idx"].to_numpy(dtype=np.int64, copy=False)
+            rec_edge = rec_group["edge_after_hurdle_bps"].to_numpy(dtype=np.float64, copy=False)
+            best_edge = -np.inf
+            valid_idx = (rec_entry_idx >= 0) & (rec_entry_idx < regime_code.shape[0])
+            if np.any(valid_idx):
+                rec_entry_idx = rec_entry_idx[valid_idx]
+                rec_edge = rec_edge[valid_idx]
+                rec_regime_code = regime_code[rec_entry_idx]
+                for code, name in enumerate(regime_names):
+                    code_mask = rec_regime_code == code
+                    obs = int(np.sum(code_mask))
+                    if obs < cfg.min_regime_variant_oos_obs:
+                        continue
+                    regime_eligible_count += 1
+                    mean_edge = float(np.mean(rec_edge[code_mask]))
+                    if mean_edge > best_edge:
+                        best_edge = mean_edge
+                        regime_best_name = name
+                        regime_best_obs = obs
+                        regime_best_edge_bps = mean_edge
+            regime_pass = regime_eligible_count > 0 and regime_best_edge_bps >= cfg.min_regime_variant_oos_edge_bps
         records.append(
             {
-                "group": f"variant={key}",
+                "group": f"{prefix}{key}",
+                "family": family,
+                "variant": variant,
+                "signal_cell": str(row0.get("signal_cell", "")),
+                "entry_regime": str(row0.get("entry_regime", "")),
+                "exit_policy_id": str(row0.get("exit_policy_id", "")),
+                "archetype": str(row0.get("archetype", "")),
                 "n": int(group.shape[0]),
                 "oos_n": rec_n,
                 "oos_mean_edge_bps": float(rec_metrics["mean_edge_bps"]),
+                "oos_median_edge_bps": float(rec_metrics["median_edge_bps"]),
+                "oos_p10_edge_bps": float(rec_metrics["p10_edge_bps"]),
                 "oos_pct_edge_pos": float(rec_metrics["pct_edge_pos"]),
                 "oos_payoff_ratio": float(rec_metrics["payoff_ratio"]),
                 "oos_q10_shortfall_fail_rate": float(rec_metrics["q10_shortfall_fail_rate"]),
+                "event_fraction_per_bar": float(rec_n / float(max(1, recommendation_end - recommendation_start))),
+                "regime_eligible_count": regime_eligible_count,
+                "regime_best_oos_obs": regime_best_obs,
+                "regime_best_oos_edge_bps": regime_best_edge_bps,
+                "regime_best_name": regime_best_name,
+                "regime_pass": regime_pass,
                 "edge_stability_bps": float("nan"),
                 "candidate_action": _candidate_action(
                     n=rec_n,
-                    min_obs=min_obs,
+                    min_obs=cfg.min_signal_cell_oos_obs if use_signal_cells else min_obs,
                     mean_edge_bps=float(rec_metrics["mean_edge_bps"]),
                     pct_edge_pos=float(rec_metrics["pct_edge_pos"]),
                     payoff_ratio=float(rec_metrics["payoff_ratio"]),
@@ -348,12 +419,26 @@ def _summarize_recommendation_variants(
         return pd.DataFrame(
             columns=[
                 "group",
+                "family",
+                "variant",
+                "signal_cell",
+                "entry_regime",
+                "exit_policy_id",
+                "archetype",
                 "n",
                 "oos_n",
                 "oos_mean_edge_bps",
+                "oos_median_edge_bps",
+                "oos_p10_edge_bps",
                 "oos_pct_edge_pos",
                 "oos_payoff_ratio",
                 "oos_q10_shortfall_fail_rate",
+                "event_fraction_per_bar",
+                "regime_eligible_count",
+                "regime_best_oos_obs",
+                "regime_best_oos_edge_bps",
+                "regime_best_name",
+                "regime_pass",
                 "edge_stability_bps",
                 "candidate_action",
             ]
@@ -548,25 +633,100 @@ def _log_variant_top_block(summary: pd.DataFrame, *, top_k: int) -> None:
     _logger.info("-" * width)
 
 
-def _meets_recommendation_thresholds(row: pd.Series, cfg: CandidateStrategyConfig) -> bool:
+def _recommendation_threshold_checks(row: pd.Series, cfg: CandidateStrategyConfig) -> dict[str, bool]:
+    is_signal_cell = str(row.get("group", "")).startswith("cell=")
+    min_obs = cfg.min_signal_cell_oos_obs if is_signal_cell else cfg.min_variant_oos_obs
+    max_event_fraction = (
+        min(cfg.max_signal_cell_event_fraction_per_bar, cfg.max_variant_event_fraction_per_bar)
+        if is_signal_cell
+        else cfg.max_variant_event_fraction_per_bar
+    )
     edge_stability_bps = float(row.get("edge_stability_bps", float("nan")))
     edge_decay_ok = (not np.isfinite(edge_stability_bps)) or edge_stability_bps >= -cfg.max_oos_edge_decay_bps
-    return bool(
-        int(row.get("oos_n", 0)) >= cfg.min_variant_oos_obs
-        and float(row.get("oos_mean_edge_bps", float("nan"))) >= cfg.min_variant_oos_edge_bps
-        and float(row.get("oos_q10_shortfall_fail_rate", 1.0)) <= cfg.max_variant_oos_q10_fail_rate
-        and edge_decay_ok
-        and (
-            float(row.get("oos_pct_edge_pos", 0.0)) >= cfg.min_variant_oos_hit_rate
-            or float(row.get("oos_payoff_ratio", 0.0)) >= cfg.min_variant_oos_payoff_ratio
-        )
+    hit_or_payoff_ok = (
+        float(row.get("oos_pct_edge_pos", 0.0)) >= cfg.min_variant_oos_hit_rate
+        or float(row.get("oos_payoff_ratio", 0.0)) >= cfg.min_variant_oos_payoff_ratio
     )
+    return {
+        "min_obs": int(row.get("oos_n", 0)) >= min_obs,
+        "mean_edge": float(row.get("oos_mean_edge_bps", float("nan"))) >= cfg.min_variant_oos_edge_bps,
+        "median_edge": float(row.get("oos_median_edge_bps", float("nan"))) >= cfg.min_variant_oos_median_edge_bps,
+        "p10_edge": float(row.get("oos_p10_edge_bps", float("nan"))) >= cfg.min_variant_oos_p10_edge_bps,
+        "q10_fail": float(row.get("oos_q10_shortfall_fail_rate", 1.0)) <= cfg.max_variant_oos_q10_fail_rate,
+        "event_density": float(row.get("event_fraction_per_bar", 1.0)) <= max_event_fraction,
+        "regime_edge": bool(row.get("regime_pass", False)) if cfg.regime_diagnostic_enabled else True,
+        "edge_decay": edge_decay_ok,
+        "hit_or_payoff": hit_or_payoff_ok,
+        "exit_policy": bool(str(row.get("exit_policy_id", ""))) if is_signal_cell else True,
+    }
+
+
+def _meets_recommendation_thresholds(row: pd.Series, cfg: CandidateStrategyConfig) -> bool:
+    return all(_recommendation_threshold_checks(row, cfg).values())
+
+
+def _failed_recommendation_checks(row: pd.Series, cfg: CandidateStrategyConfig) -> tuple[str, ...]:
+    checks = _recommendation_threshold_checks(row, cfg)
+    return tuple(name for name, passed in checks.items() if not passed)
+
+
+def _log_recommendation_failure_block(summary: pd.DataFrame, *, cfg: CandidateStrategyConfig, top_k: int) -> None:
+    """Emit why high-ranked variants were blocked by recommendation thresholds."""
+    if summary.empty:
+        return
+
+    blocked = summary.copy()
+    blocked["failed_checks"] = [
+        ",".join(_failed_recommendation_checks(row, cfg)) for _, row in blocked.iterrows()
+    ]
+    blocked = blocked.loc[blocked["failed_checks"] != ""].copy()
+    if blocked.empty:
+        _logger.info("[DIAG][RULE_RECOMMEND_FAIL] no blocked variants under recommendation thresholds")
+        return
+
+    failure_counts: dict[str, int] = {}
+    for failed in blocked["failed_checks"]:
+        for name in str(failed).split(","):
+            if not name:
+                continue
+            failure_counts[name] = failure_counts.get(name, 0) + 1
+
+    ordered_counts = ",".join(f"{name}:{count}" for name, count in sorted(failure_counts.items()))
+    _logger.info("[DIAG][RULE_RECOMMEND_FAIL_COUNTS] %s", ordered_counts)
+
+    top = blocked.sort_values(["oos_mean_edge_bps", "group"], ascending=[False, True]).head(top_k)
+    for row in top.itertuples(index=False):
+        _logger.info(
+            (
+                "[DIAG][RULE_RECOMMEND_FAIL] variant=%s cell=%s failed=%s "
+                "oos_n=%d mean=%.1f median=%.1f p10=%.1f q10_fail=%.3f density=%.3f "
+                "regime=%s regime_obs=%d regime_edge=%.1f hit=%.3f payoff=%.2f decay=%.1f"
+            ),
+            str(getattr(row, "variant", str(row.group).removeprefix("variant="))),
+            str(getattr(row, "signal_cell", "")),
+            str(row.failed_checks),
+            int(row.oos_n),
+            float(row.oos_mean_edge_bps),
+            float(row.oos_median_edge_bps),
+            float(row.oos_p10_edge_bps),
+            float(row.oos_q10_shortfall_fail_rate),
+            float(row.event_fraction_per_bar),
+            str(row.regime_best_name),
+            int(row.regime_best_oos_obs),
+            float(row.regime_best_oos_edge_bps),
+            float(row.oos_pct_edge_pos),
+            float(row.oos_payoff_ratio),
+            float(row.edge_stability_bps),
+        )
 
 
 def _variant_group_to_key(group: str) -> str:
-    payload = str(group).removeprefix("variant=")
+    payload = str(group)
+    if payload.startswith("cell="):
+        return payload
+    payload = payload.removeprefix("variant=")
     family, variant = payload.split(":", 1)
-    return f"{family}:{variant}"
+    return f"variant={family}:{variant}"
 
 
 def _build_recommendations(
@@ -598,6 +758,12 @@ def _build_recommendations(
             flip_groups.append(_variant_group_to_key(str(row.group)))
 
     return recommended_keep, tuple(flip_groups)
+
+
+def _split_recommendation_groups(groups: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    signal_cells = tuple(str(group).removeprefix("cell=") for group in groups if str(group).startswith("cell="))
+    variants = tuple(str(group).removeprefix("variant=") for group in groups if str(group).startswith("variant="))
+    return signal_cells, variants
 
 
 def _log_side_flip_block(side_flip: pd.DataFrame) -> None:
@@ -707,6 +873,8 @@ def compute_rule_diagnostics(
             empty,
             empty_side,
             empty_decision,
+            (),
+            (),
             (),
             (),
             "legacy_oos",
@@ -871,6 +1039,7 @@ def compute_rule_diagnostics(
     } if not side_flip.empty else {}
     recommendation_variant_summary = _summarize_recommendation_variants(
         events=labeled_events,
+        aligned=aligned,
         min_obs=min_obs,
         cfg=cfg,
         recommendation_start=resolved_recommendation_start,
@@ -879,6 +1048,7 @@ def compute_rule_diagnostics(
     )
     recommendation_flipped_summary = _summarize_recommendation_variants(
         events=flipped_labeled,
+        aligned=aligned,
         min_obs=min_obs,
         cfg=cfg,
         recommendation_start=resolved_recommendation_start,
@@ -888,6 +1058,12 @@ def compute_rule_diagnostics(
         by_variant=recommendation_variant_summary,
         flipped_by_variant=recommendation_flipped_summary,
         cfg=cfg,
+    )
+    recommended_keep_signal_cells, recommended_keep_variants = _split_recommendation_groups(
+        recommended_keep_variants
+    )
+    recommended_flip_signal_cells, recommended_flip_variants = _split_recommendation_groups(
+        recommended_flip_variants
     )
 
     decision_counts = by_variant["candidate_action"].value_counts() if not by_variant.empty else pd.Series(dtype=int)
@@ -905,6 +1081,11 @@ def compute_rule_diagnostics(
         _log_summary_block(summary=by_family, view="family")
         _log_summary_block(summary=by_variant, view="variant")
         _log_variant_top_block(by_variant, top_k=cfg.diagnostic_top_k)
+        _log_recommendation_failure_block(
+            recommendation_variant_summary,
+            cfg=cfg,
+            top_k=cfg.diagnostic_top_k,
+        )
         _log_side_flip_block(side_flip=side_flip)
         _log_decision_block(decision)
         _logger.debug(
@@ -916,9 +1097,11 @@ def compute_rule_diagnostics(
             resolved_report_end,
         )
         _logger.debug(
-            "[DIAG][RULE_RECOMMEND] keep=%s flip=%s",
+            "[DIAG][RULE_RECOMMEND] keep=%s flip=%s keep_cells=%s flip_cells=%s",
             ",".join(recommended_keep_variants) if recommended_keep_variants else "",
             ",".join(recommended_flip_variants) if recommended_flip_variants else "",
+            ",".join(recommended_keep_signal_cells) if recommended_keep_signal_cells else "",
+            ",".join(recommended_flip_signal_cells) if recommended_flip_signal_cells else "",
         )
 
     return RuleDiagnosticsResult(
@@ -929,6 +1112,8 @@ def compute_rule_diagnostics(
         decision=decision,
         recommended_keep_variants=recommended_keep_variants,
         recommended_flip_variants=recommended_flip_variants,
+        recommended_keep_signal_cells=recommended_keep_signal_cells,
+        recommended_flip_signal_cells=recommended_flip_signal_cells,
         recommendation_basis=recommendation_basis,
         recommendation_split=(resolved_recommendation_start, resolved_recommendation_end),
         report_split=(resolved_report_start, resolved_report_end),

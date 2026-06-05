@@ -223,6 +223,8 @@ def apply_variant_promotions(
     labeled: pd.DataFrame,
     keep_variants: tuple[str, ...],
     flip_variants: tuple[str, ...],
+    keep_signal_cells: tuple[str, ...] = (),
+    flip_signal_cells: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """Filter labeled events to only recommended variants.
 
@@ -232,17 +234,26 @@ def apply_variant_promotions(
     if labeled.empty:
         return labeled
 
-    allowed = set(keep_variants) | set(flip_variants)
+    allowed_signal_cells = set(keep_signal_cells) | set(flip_signal_cells)
+    allowed_variants = set(keep_variants) | set(flip_variants)
+    allowed = allowed_signal_cells | allowed_variants
     if not allowed:
         _logger.warning("[PROMO_FILTER] no variants recommended by diagnostics; blocking all candidates (fail-closed)")
         return labeled.iloc[0:0].copy()
 
-    out = labeled.loc[_variant_key(labeled).isin(allowed)].copy()
+    if allowed_signal_cells and "signal_cell" in labeled.columns:
+        out = labeled.loc[labeled["signal_cell"].astype(str).isin(allowed_signal_cells)].copy()
+    else:
+        out = labeled.loc[_variant_key(labeled).isin(allowed_variants)].copy()
     if out.empty:
         _logger.warning("[PROMO_FILTER] all candidates removed after variant filter; returning empty")
         return labeled.iloc[0:0].copy()
 
-    flip_mask = _variant_key(out).isin(set(flip_variants))
+    flip_mask = pd.Series(False, index=out.index)
+    if flip_signal_cells and "signal_cell" in out.columns:
+        flip_mask = out["signal_cell"].astype(str).isin(set(flip_signal_cells))
+    elif flip_variants:
+        flip_mask = _variant_key(out).isin(set(flip_variants))
     if bool(flip_mask.any()):
         out.loc[flip_mask, "side"] = -pd.to_numeric(out.loc[flip_mask, "side"], errors="coerce")
         if "raw_score" in out.columns:
@@ -250,6 +261,8 @@ def apply_variant_promotions(
         if "score_z" in out.columns:
             out.loc[flip_mask, "score_z"] = -pd.to_numeric(out.loc[flip_mask, "score_z"], errors="coerce")
         out.loc[flip_mask, "side_flipped"] = True
+        if "signal_cell" in out.columns:
+            out.loc[flip_mask, "signal_cell"] = out.loc[flip_mask, "signal_cell"].astype(str)
     return out.reset_index(drop=True)
 
 
@@ -424,6 +437,8 @@ def run_candidate_ablation(
             labeled=labeled,
             keep_variants=diag.recommended_keep_variants,
             flip_variants=diag.recommended_flip_variants,
+            keep_signal_cells=diag.recommended_keep_signal_cells,
+            flip_signal_cells=diag.recommended_flip_signal_cells,
         )
         if labeled.empty:
             _logger.warning(
@@ -476,6 +491,8 @@ def run_candidate_ablation(
         labeled=labeled_unfiltered,
         keep_variants=diag.recommended_keep_variants,
         flip_variants=diag.recommended_flip_variants,
+        keep_signal_cells=diag.recommended_keep_signal_cells,
+        flip_signal_cells=diag.recommended_flip_signal_cells,
     )
     promoted_rule_events = _oos_only_events(
         labeled=promoted_rule_events,
@@ -506,6 +523,8 @@ def run_candidate_ablation(
         labeled=labeled_unfiltered,
         keep_variants=diag_oracle.recommended_keep_variants,
         flip_variants=diag_oracle.recommended_flip_variants,
+        keep_signal_cells=diag_oracle.recommended_keep_signal_cells,
+        flip_signal_cells=diag_oracle.recommended_flip_signal_cells,
     )
     oracle_rule_events = _oos_only_events(
         labeled=oracle_rule_events,
@@ -1117,6 +1136,8 @@ def validate_candidate_signals(
             labeled=labeled,
             keep_variants=diag.recommended_keep_variants,
             flip_variants=diag.recommended_flip_variants,
+            keep_signal_cells=diag.recommended_keep_signal_cells,
+            flip_signal_cells=diag.recommended_flip_signal_cells,
         )),
     ]:
         oos_events = _oos_only_events(labeled=events_df, oos_start=oos_start, oos_end=oos_end)

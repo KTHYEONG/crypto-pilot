@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel, SignalExitPolicy
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 from src.domain.futures.strategy.rule_signals import (
@@ -39,9 +40,8 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
     panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
 
     assert isinstance(panels, tuple)
-    # 8 base families (13 variants) + 4 new families (11 variants: F1x3+F2x3+F3x2+F4x3) = 24
-    # + 3 new families (6 variants: fac x2 + brm x2 + oib x2) = 30
-    assert len(panels) == 30
+    # 30 existing variants + 10 new variants = 40
+    assert len(panels) == 40
 
     expected_families = {
         "trend_ma",
@@ -59,6 +59,11 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
         "funding_acceleration_carry",
         "btc_residual_momentum",
         "oi_volume_confirmed_breakout",
+        "trend_pullback_continuation",
+        "dual_momentum",
+        "liquidation_wick_reversal",
+        "squeeze_unwind",
+        "residual_reversion",
     }
 
     for p in panels:
@@ -114,9 +119,15 @@ def test_candidate_panels_to_events_creates_dataframe() -> None:
             "turnover_proxy",
             "cost_floor_bps",
             "entry_idx",
+            "exit_policy_id",
+            "signal_cell",
+            "archetype",
+            "entry_regime",
+            "entry_regime_code",
         }
         assert required_cols.issubset(events.columns)
         assert (events["entry_idx"] > 0).all()
+        assert events["signal_cell"].astype(str).str.contains(":").all()
 
 
 def test_candidate_panels_to_events_uses_max_of_policy_floor_and_physical_cost() -> None:
@@ -215,3 +226,74 @@ def test_cross_sectional_momentum_no_lookahead() -> None:
         assert (warmup_sides == 0).all(), (
             f"cross_sectional_momentum:{p.variant} has non-zero side_hint in warmup bars [0:{lb}]"
         )
+
+
+def test_dual_momentum_no_lookahead() -> None:
+    aligned = _make_aligned(t=140)
+    cfg = CandidateStrategyConfig()
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+
+    dm_panels = [p for p in panels if p.family == "dual_momentum"]
+    assert len(dm_panels) == 2
+
+    for panel in dm_panels:
+        long_lb = int(panel.params["long_lookback"])
+        assert (panel.side_hint_2d[:long_lb] == 0).all(), (
+            f"dual_momentum:{panel.variant} has non-zero side_hint in warmup bars [0:{long_lb}]"
+        )
+
+
+def test_new_signal_families_include_metadata_contract() -> None:
+    aligned = _make_aligned(t=220)
+    cfg = CandidateStrategyConfig()
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+
+    expected_new_families = {
+        "trend_pullback_continuation",
+        "dual_momentum",
+        "liquidation_wick_reversal",
+        "squeeze_unwind",
+        "residual_reversion",
+    }
+    matched = [panel for panel in panels if panel.family in expected_new_families]
+    assert len(matched) == 10
+    for panel in matched:
+        assert panel.metadata["archetype"]
+        assert panel.metadata["regime"]
+        assert panel.metadata["edge_hypothesis"]
+        assert panel.exit_policies
+        assert panel.allowed_regimes
+        assert panel.regime_code_1d is not None
+
+
+def test_candidate_panels_to_events_uses_entry_regime_for_exit_policy() -> None:
+    aligned = _make_aligned(t=6, n=1)
+    panel = CandidateSignalPanel(
+        family="trend_pullback_continuation",
+        variant="tpc_20_100",
+        params={},
+        datetimes=aligned.datetimes,
+        symbols=aligned.symbols,
+        signed_score_2d=np.ones((6, 1), dtype=np.float64),
+        side_hint_2d=np.array([[0], [1], [1], [1], [0], [0]], dtype=np.int8),
+        expected_holding_bars=8,
+        min_holding_bars=2,
+        stop_atr_mult=1.5,
+        take_profit_atr_mult=3.0,
+        turnover_proxy_2d=np.zeros((6, 1), dtype=np.float64),
+        valid_mask_2d=np.ones((6, 1), dtype=bool),
+        archetype="trend_continuation",
+        allowed_regimes=("bull_quiet", "bull_volatile", "crash"),
+        exit_policies=(
+            SignalExitPolicy("trend_grind", "trend_continuation", 1.25, 3.5, 8, 2),
+            SignalExitPolicy("trend_fast_fail", "trend_continuation", 0.9, 2.25, 8, 2),
+        ),
+        regime_code_1d=np.array([0, 1, 5, 0, 0, 0], dtype=np.int8),
+        regime_name_by_code=("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash"),
+    )
+    events = candidate_panels_to_events((panel,), min_abs_score=0.0)
+
+    assert not events.empty
+    volatile_events = events.loc[events["entry_regime"].isin(["bull_volatile", "bear_volatile", "crash"])]
+    if not volatile_events.empty:
+        assert "trend_fast_fail" in set(volatile_events["exit_policy_id"].astype(str))
