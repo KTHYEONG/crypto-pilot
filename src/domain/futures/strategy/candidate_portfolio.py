@@ -18,16 +18,43 @@ def _candidate_variant_key(frame: pd.DataFrame) -> str:
     return f"{frame['family'].iloc[0]!s}:{frame['variant'].iloc[0]!s}"
 
 
+def _series_or_default(df: pd.DataFrame, column: str, default: float = 0.0) -> pd.Series:
+    if column in df.columns:
+        return pd.to_numeric(df[column], errors="coerce").fillna(default)
+    return pd.Series(default, index=df.index, dtype="float64")
+
+
+def _shortfall_limit_bps(
+    df: pd.DataFrame,
+    cfg: CandidateStrategyConfig,
+    *,
+    catastrophic: bool,
+) -> pd.Series:
+    if cfg.shortfall_threshold_basis == "absolute_bps" or "sl_thr_bps" not in df.columns:
+        value = cfg.catastrophic_shortfall_bps if catastrophic else cfg.max_expected_shortfall_bps
+        return pd.Series(float(value), index=df.index, dtype="float64")
+    sl = _series_or_default(df, "sl_thr_bps").clip(lower=0.0)
+    cost = _series_or_default(df, "ex_ante_cost_bps").clip(lower=0.0)
+    mult = cfg.catastrophic_shortfall_stop_mult if catastrophic else cfg.max_expected_shortfall_stop_mult
+    absolute_floor = cfg.catastrophic_shortfall_bps if catastrophic else cfg.max_expected_shortfall_bps
+    dynamic_limit = sl.mul(float(mult)).add(cost)
+    return pd.Series(
+        np.maximum(float(absolute_floor), dynamic_limit.to_numpy(dtype=np.float64, copy=False)),
+        index=df.index,
+        dtype="float64",
+    )
+
+
 def _q10_mask_for_mode(df: pd.DataFrame, cfg: CandidateStrategyConfig) -> pd.Series:
     if cfg.selection_shortfall_mode == "penalty_only":
         return pd.Series(True, index=df.index, dtype=bool)
     if cfg.selection_shortfall_mode == "catastrophic":
-        return df["q10_net_bps"] >= -cfg.catastrophic_shortfall_bps
-    return df["q10_net_bps"] >= -cfg.max_expected_shortfall_bps
+        return df["q10_net_bps"] >= -_shortfall_limit_bps(df, cfg, catastrophic=True)
+    return df["q10_net_bps"] >= -_shortfall_limit_bps(df, cfg, catastrophic=False)
 
 
 def _catastrophic_q10_mask(df: pd.DataFrame, cfg: CandidateStrategyConfig) -> pd.Series:
-    return df["q10_net_bps"] >= -cfg.catastrophic_shortfall_bps
+    return df["q10_net_bps"] >= -_shortfall_limit_bps(df, cfg, catastrophic=True)
 
 
 def _utility_threshold(
@@ -53,6 +80,7 @@ def compute_selection_sensitivity(
     gate_grid: tuple[float, ...],
     edge_grid_bps: tuple[float, ...],
     q10_grid_bps: tuple[float, ...],
+    cfg: CandidateStrategyConfig | None = None,
 ) -> pd.DataFrame:
     """Return pass counts across gate, edge, and q10 threshold grids."""
     if events.empty:
@@ -96,6 +124,9 @@ def compute_selection_sensitivity(
                     top_variant_pass = int(counts.iloc[0])
                 records.append(
                     {
+                        "shortfall_basis": (
+                            "absolute_bps" if cfg is None else str(cfg.shortfall_threshold_basis)
+                        ),
                         "gate_threshold": float(gate_threshold),
                         "edge_threshold_bps": float(edge_threshold),
                         "q10_shortfall_bps": float(q10_threshold),
@@ -234,6 +265,7 @@ def select_candidate_events_for_portfolio(
             gate_grid=cfg.selection_gate_grid,
             edge_grid_bps=cfg.selection_edge_grid_bps,
             q10_grid_bps=cfg.selection_q10_grid_bps,
+            cfg=cfg,
         )
         _log_selection_sensitivity(sensitivity, cfg=cfg)
 
@@ -241,6 +273,7 @@ def select_candidate_events_for_portfolio(
     edge_mask = df["mu_net_decision_bps"] >= cfg.min_expected_net_bps
     q10_mask = _q10_mask_for_mode(df, cfg)
     catastrophic_mask = _catastrophic_q10_mask(df, cfg)
+    catastrophic_limits = _shortfall_limit_bps(df, cfg, catastrophic=True)
     utility_threshold = _utility_threshold(df=df, cfg=cfg, model_output=model_output)
     utility_mask = df["utility_score"] >= utility_threshold
     breakeven_floor = cfg.min_net_floor_cost_fraction * cfg.cost_floor_bps
@@ -295,6 +328,9 @@ def select_candidate_events_for_portfolio(
             "zero_reason": zero_reason,
             "breakeven_floor_bps": breakeven_floor,
             "utility_threshold": utility_threshold,
+            "shortfall_basis": cfg.shortfall_threshold_basis,
+            "shortfall_limit_mean_bps": float(catastrophic_limits.mean()),
+            "shortfall_limit_p90_bps": float(catastrophic_limits.quantile(0.9)),
         }
         filtered.attrs["candidate_selection_diagnostics"] = diagnostics
         _sel_logger.warning(
@@ -336,6 +372,9 @@ def select_candidate_events_for_portfolio(
         "zero_reason": zero_reason,
         "breakeven_floor_bps": breakeven_floor,
         "utility_threshold": utility_threshold,
+        "shortfall_basis": cfg.shortfall_threshold_basis,
+        "shortfall_limit_mean_bps": float(catastrophic_limits.mean()),
+        "shortfall_limit_p90_bps": float(catastrophic_limits.quantile(0.9)),
     }
     selected.attrs["candidate_selection_diagnostics"] = diagnostics
     _sel_logger.info(

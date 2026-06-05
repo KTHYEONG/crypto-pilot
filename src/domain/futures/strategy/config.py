@@ -146,8 +146,11 @@ class CandidateStrategyConfig:
     min_gate_probability: float = 0.55
     min_expected_net_bps: float = 1.0
     max_expected_shortfall_bps: float = 300.0
+    shortfall_threshold_basis: Literal["absolute_bps", "stop_relative"] = "absolute_bps"
+    max_expected_shortfall_stop_mult: float = 1.25
     selection_shortfall_mode: Literal["hard", "penalty_only", "catastrophic"] = "penalty_only"
     catastrophic_shortfall_bps: float = 300.0
+    catastrophic_shortfall_stop_mult: float = 1.50
     selection_sensitivity_enabled: bool = True
     selection_gate_grid: tuple[float, ...] = (0.40, 0.45, 0.50, 0.55)
     selection_edge_grid_bps: tuple[float, ...] = (0.0, 1.0, 5.0)
@@ -316,6 +319,12 @@ class CandidateStrategyConfig:
             raise ValueError("kelly_fraction must be in range (0.0, 0.25]")
         if self.cost_floor_bps < 0.0:
             raise ValueError("cost_floor_bps must be non-negative")
+        if self.shortfall_threshold_basis not in {"absolute_bps", "stop_relative"}:
+            raise ValueError("unsupported shortfall_threshold_basis")
+        if self.max_expected_shortfall_stop_mult < 0.0:
+            raise ValueError("max_expected_shortfall_stop_mult must be non-negative")
+        if self.catastrophic_shortfall_stop_mult < 0.0:
+            raise ValueError("catastrophic_shortfall_stop_mult must be non-negative")
         if (
             self.max_symbol_weight < 0.0
             or self.gross_cap < 0.0

@@ -94,6 +94,37 @@ def test_select_candidate_events_for_portfolio_penalty_only_mode_ignores_q10_fil
     assert set(selected["symbol"]) == {"BTCUSDT", "ETHUSDT"}
 
 
+def test_select_candidate_events_for_portfolio_supports_stop_relative_shortfall_thresholds() -> None:
+    events = _make_sample_events()
+    events["sl_thr_bps"] = [40.0, 300.0, 40.0]
+    events["ex_ante_cost_bps"] = [10.0, 10.0, 10.0]
+    model_output = CandidateModelOutput(
+        events=events,
+        p_pass=np.array([0.8, 0.9, 0.85], dtype=np.float64),
+        mu_gross_bps=np.array([50.0, 60.0, 40.0], dtype=np.float64),
+        mu_net_decision_bps=np.array([26.0, 36.0, 16.0], dtype=np.float64),
+        q10_net_bps=np.array([-80.0, -200.0, -10.0], dtype=np.float64),
+        q90_net_bps=np.array([40.0, 45.0, 30.0], dtype=np.float64),
+        utility_score=np.array([10.0, 12.0, 8.0], dtype=np.float64),
+    )
+    cfg = CandidateStrategyConfig(
+        min_gate_probability=0.75,
+        min_expected_net_bps=10.0,
+        max_expected_shortfall_bps=50.0,
+        catastrophic_shortfall_bps=120.0,
+        shortfall_threshold_basis="stop_relative",
+        catastrophic_shortfall_stop_mult=1.0,
+        selection_policy="hard",
+    )
+
+    selected = select_candidate_events_for_portfolio(model_output=model_output, cfg=cfg)
+
+    assert selected.shape[0] == 2
+    assert set(selected["symbol"]) == {"BTCUSDT", "ETHUSDT"}
+    diagnostics = selected.attrs["candidate_selection_diagnostics"]
+    assert diagnostics["shortfall_basis"] == "stop_relative"
+
+
 def test_compute_selection_sensitivity_returns_grid_counts() -> None:
     events = _make_sample_events()
     events["p_pass"] = [0.40, 0.60, 0.80]
