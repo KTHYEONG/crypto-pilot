@@ -38,11 +38,20 @@ def build_rule_signal_panels(
 ) -> tuple[CandidateSignalPanel, ...]:
 ```
 
-Outputs dense `[T, N]` score and side-hint arrays for the available rule families:
-`trend_ma`, `trend_donchian`, `vol_breakout`, `bollinger_reversion`, `rsi_reversion`, `funding_carry`, `oi_volume_impulse`, and `btc_regime_pullback`.
+Outputs dense `[T, N]` score and side-hint arrays for rule families, then attaches:
+- `MarketRegimeContext` (`bull_quiet`, `bull_volatile`, `bear_quiet`, `bear_volatile`, `transition`, `crash`)
+- `SignalExitPolicy` templates keyed by signal archetype
+- regime-gated `side_hint_2d` when `regime_signal_gating_enabled=True`
 
 `candidate_panels_to_events()` converts those panels into sparse event rows with:
-`family`, `variant`, `side`, `raw_score`, `score_z`, `expected_holding_bars`, `min_holding_bars`, `stop_atr_mult`, `take_profit_atr_mult`, `turnover_proxy`, `cost_floor_bps`, and `entry_idx`.
+`family`, `variant`, `side`, `raw_score`, `score_z`, `expected_holding_bars`, `min_holding_bars`, `stop_atr_mult`, `take_profit_atr_mult`, `turnover_proxy`, `cost_floor_bps`, `entry_idx`, `exit_policy_id`, `signal_cell`, `archetype`, `entry_regime`, and `entry_regime_code`.
+
+`signal_cell` contract:
+```text
+family:variant:exit_policy_id:entry_regime[:flip]
+```
+
+Exit policy resolution is event-local: the emitted `stop_atr_mult` / `take_profit_atr_mult` pair is chosen from the candidate archetype and the event's actual `entry_regime`, not from a global panel default.
 
 ### `src/domain/futures/strategy/candidate_labels.py`
 Converts sparse candidate events into leak-free forward outcomes.
@@ -206,7 +215,40 @@ Schemes: `anchored` (default, fit_start=0 fixed), `rolling` (fixed-length fit wi
 
 ## Signal-Only Mode
 
-`--mode signal` CLI argument → `FuturesRunConfig.run_mode="signal"` → `strategy_cfg.candidate.signal_only=True`. Bridge short-circuits before ML training, emits `SignalValidationReport` (rule_only and rule_promo_no_leak variants), and returns zero weights. Validation criteria: stress-RT-adjusted p50 > 0 AND t-stat ≥ min_rule_ir_t.
+`--phase signal` CLI argument → `FuturesRunConfig.phase="signal"` → `strategy_cfg.candidate.signal_only=True`. Bridge short-circuits before ML training, emits `SignalValidationReport` (rule_only and rule_promo_no_leak variants), and returns zero weights. Validation criteria: stress-RT-adjusted p50 > 0 AND t-stat ≥ min_rule_ir_t.
+
+## Signal Promotion Contract
+
+Signal promotion is now intentionally fail-closed. A `signal_cell` is recommended only when it clears all of the following on the recommendation window:
+
+- variant-level mean edge, median edge, and p10 tail floor
+- q10 shortfall fail-rate and event-density ceiling
+- hit-rate or payoff-ratio minimum
+- edge-decay guard
+- regime-local survival gate
+
+The regime gate uses a 6-state market partition derived from trailing-only market-state features:
+
+- `bear_quiet`
+- `bear_volatile`
+- `bull_quiet`
+- `bull_volatile`
+- `transition`
+- `crash`
+
+Implementation rule:
+
+- `regime_diagnostic_enabled=True` means a candidate must show at least one sufficiently observed regime (`min_regime_variant_oos_obs`) whose OOS mean edge is at least `min_regime_variant_oos_edge_bps`.
+- recommendation failures are logged through `[DIAG][RULE_RECOMMEND_FAIL_COUNTS]` and per-candidate `[DIAG][RULE_RECOMMEND_FAIL]` lines, including `variant=<family:variant>` and `cell=<signal_cell>`.
+- promotion filtering now prefers `recommended_keep_signal_cells` / `recommended_flip_signal_cells`; legacy `family:variant` keys remain as fallback.
+
+The rule candidate pool now includes these additional families, each with explicit `metadata.archetype`, `metadata.regime`, and `metadata.edge_hypothesis`:
+
+- `trend_pullback_continuation`
+- `dual_momentum`
+- `liquidation_wick_reversal`
+- `squeeze_unwind`
+- `residual_reversion`
 
 ## Current Gaps
 
@@ -217,6 +259,9 @@ The current code still has known limits:
 - gate calibration collapses in early WF folds (small fit set); further min_fit_obs tuning may help
 - **signal edge is genuinely thin post-cost:** after RC1 barrier alignment, `candidate_ml_full` still shows `edge_capture_ratio ≈ -0.12` and the OOS-oracle rule variant remains ≈ -46bps realized. The measurement bugs are fixed; the alpha itself is the open problem.
 - **q10 still rejects ~88%:** RC3 stop-clip raised `pct_q10_ge_cat` 2.9%→12.1%, but `q10_median ≈ -498bps` still exceeds the catastrophic floor (-300) for most events — stop-distance parameters in labeling may need review.
+- ML allocation remains valid only after rule candidates pass standalone post-cost edge gates.
+- Candidate families should encode archetype, regime, and entry trigger explicitly rather than acting as a flat rule list.
+- Adding more candidate variants without stricter diagnostics is not treated as signal improvement.
 
 ## Key Verification Paths
 

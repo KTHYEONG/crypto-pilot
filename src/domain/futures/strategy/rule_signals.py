@@ -6,9 +6,11 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
+from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel, SignalExitPolicy
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.exit_policies import build_exit_policies_for_panel
+from src.domain.futures.strategy.market_regime import MarketRegimeContext, compute_market_regime_context
 
 _logger = logging.getLogger(__name__)
 
@@ -90,6 +92,19 @@ def _rolling_std_2d(arr: NDArray[np.float64], window: int) -> NDArray[np.float64
     return result
 
 
+def _log_return_2d(close: NDArray[np.float64], lag: int) -> NDArray[np.float64]:
+    shifted = np.vstack([np.tile(close[:1], (lag, 1)), close[:-lag]])
+    out = np.log(np.maximum(close, 1e-12) / np.maximum(shifted, 1e-12))
+    out[:lag] = 0.0
+    return out.astype(np.float64, copy=False)
+
+
+def _zscore_2d(arr: NDArray[np.float64], window: int, eps: float = 1e-12) -> NDArray[np.float64]:
+    mean = _rolling_mean_2d(arr, window=window)
+    std = _rolling_std_2d(arr, window=window)
+    return (arr - mean) / np.maximum(std, eps)
+
+
 def _rolling_max_2d(arr: NDArray[np.float64], window: int) -> NDArray[np.float64]:
     # shift(1): exclude current bar to produce trailing-exclusive channel (Donchian semantics).
     # close[t] > prior_high[t] triggers breakout; without shift, roll_max[t]==high[t] → signal impossible.
@@ -140,6 +155,114 @@ def _rsi_2d(close: NDArray[np.float64], period: int) -> NDArray[np.float64]:
     return np.clip(rsi, 0.0, 100.0)
 
 
+def _resolve_panel_archetype(panel: CandidateSignalPanel) -> str:
+    archetype = str(panel.metadata.get("archetype", panel.archetype or "")).strip()
+    family = panel.family
+    if archetype:
+        return archetype
+    if family in {"trend_ma", "trend_donchian", "vol_breakout", "trend_pullback_continuation"}:
+        return "trend_continuation"
+    if family in {"dual_momentum", "cross_sectional_momentum", "btc_corr_regime", "btc_residual_momentum"}:
+        return "time_series_momentum"
+    if family in {"funding_carry", "funding_zscore_carry", "funding_acceleration_carry"}:
+        return "carry_reversion"
+    if family in {"residual_reversion"}:
+        return "beta_neutral_reversion"
+    if family in {"liquidation_wick_reversal"}:
+        return "forced_flow_reversal"
+    if family in {"squeeze_unwind"}:
+        return "position_unwind"
+    return "mean_reversion"
+
+
+def _allowed_regimes_for_archetype(archetype: str) -> tuple[str, ...]:
+    if archetype in {"trend_continuation", "time_series_momentum"}:
+        return ("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile")
+    if archetype in {"forced_flow_reversal", "position_unwind"}:
+        return ("bull_volatile", "bear_volatile", "crash")
+    if archetype == "carry_reversion":
+        return ("bull_quiet", "bear_quiet", "transition")
+    return ("bull_quiet", "bear_quiet", "transition")
+
+
+def _legacy_exit_policy(panel: CandidateSignalPanel) -> SignalExitPolicy:
+    return SignalExitPolicy(
+        policy_id="legacy",
+        archetype="mean_reversion",
+        stop_atr_mult=float(panel.stop_atr_mult),
+        take_profit_atr_mult=float(panel.take_profit_atr_mult),
+        expected_holding_bars=int(panel.expected_holding_bars),
+        min_holding_bars=int(panel.min_holding_bars),
+        description="Backward-compatible panel policy.",
+    )
+
+
+def _entry_regime_fields(
+    panel: CandidateSignalPanel,
+    t_idx: NDArray[np.int64] | NDArray[np.int32],
+) -> tuple[NDArray[np.int8], NDArray[np.object_]]:
+    regime_code_1d = panel.regime_code_1d
+    regime_names = panel.regime_name_by_code
+    if regime_code_1d is None or not regime_names:
+        return (
+            np.full(t_idx.shape[0], 4, dtype=np.int8),
+            np.full(t_idx.shape[0], "transition", dtype=object),
+        )
+    entry_regime_codes = regime_code_1d[t_idx].astype(np.int8, copy=False)
+    entry_regimes = np.asarray([regime_names[int(code)] for code in entry_regime_codes], dtype=object)
+    return entry_regime_codes, entry_regimes
+
+
+def _attach_signal_context(
+    panels: tuple[CandidateSignalPanel, ...],
+    *,
+    cfg: CandidateStrategyConfig,
+    regime_ctx: MarketRegimeContext,
+) -> tuple[CandidateSignalPanel, ...]:
+    out: list[CandidateSignalPanel] = []
+    regime_names = np.asarray(regime_ctx.name_by_code, dtype=object)
+    for panel in panels:
+        archetype = _resolve_panel_archetype(panel)
+        allowed_regimes = _allowed_regimes_for_archetype(archetype)
+        side_hint_2d = np.asarray(panel.side_hint_2d, dtype=np.int8).copy()
+        if cfg.regime_signal_gating_enabled:
+            allowed_mask = np.isin(regime_names[regime_ctx.code_1d], np.asarray(allowed_regimes, dtype=object))
+            side_hint_2d[~allowed_mask, :] = 0
+        exit_policies = build_exit_policies_for_panel(
+            archetype=archetype,
+            regime_name=allowed_regimes[0] if allowed_regimes else "transition",
+            base_expected_holding_bars=int(panel.expected_holding_bars),
+            base_min_holding_bars=int(panel.min_holding_bars),
+            max_policies=cfg.max_exit_policy_variants_per_signal,
+            fallback_stop_atr_mult=float(panel.stop_atr_mult),
+            fallback_take_profit_atr_mult=float(panel.take_profit_atr_mult),
+        )
+        out.append(
+            CandidateSignalPanel(
+                family=panel.family,
+                variant=panel.variant,
+                params=panel.params,
+                datetimes=panel.datetimes,
+                symbols=panel.symbols,
+                signed_score_2d=panel.signed_score_2d,
+                side_hint_2d=side_hint_2d,
+                expected_holding_bars=panel.expected_holding_bars,
+                min_holding_bars=panel.min_holding_bars,
+                stop_atr_mult=panel.stop_atr_mult,
+                take_profit_atr_mult=panel.take_profit_atr_mult,
+                turnover_proxy_2d=panel.turnover_proxy_2d,
+                valid_mask_2d=panel.valid_mask_2d,
+                metadata=panel.metadata,
+                archetype=archetype,
+                allowed_regimes=allowed_regimes,
+                exit_policies=exit_policies,
+                regime_code_1d=regime_ctx.code_1d,
+                regime_name_by_code=regime_ctx.name_by_code,
+            )
+        )
+    return tuple(out)
+
+
 # --- 8 Vectorized Rule Families ---
 
 def build_rule_signal_panels(
@@ -148,6 +271,7 @@ def build_rule_signal_panels(
     cfg: CandidateStrategyConfig,
 ) -> tuple[CandidateSignalPanel, ...]:
     """Build trailing-only rule candidates for all symbols."""
+    regime_ctx = compute_market_regime_context(aligned=aligned)
     close = aligned.close_2d
     high = aligned.high_2d
     low = aligned.low_2d
@@ -778,7 +902,239 @@ def build_rule_signal_panels(
             )
         )
 
-    return filter_rule_signal_panels(tuple(panels), cfg=cfg)
+    # 16. Trend Pullback Continuation
+    for _fast, _slow, _rsi_lo, _rsi_hi in [(20, 100, 40.0, 65.0), (50, 200, 40.0, 65.0)]:
+        _ema_fast = _ema_2d(close, span=_fast)
+        _ema_slow = _ema_2d(close, span=_slow)
+        _close_prev = np.vstack([close[:1], close[:-1]])
+        _ema_fast_prev = np.vstack([_ema_fast[:1], _ema_fast[:-1]])
+        _rsi_trend = _rsi_2d(close, period=14)
+        _trend_up = _ema_fast > _ema_slow
+        _trend_dn = _ema_fast < _ema_slow
+        _long = _trend_up & (_close_prev <= _ema_fast_prev) & (close > _ema_fast) & (_rsi_trend >= _rsi_lo) & (
+            _rsi_trend <= _rsi_hi
+        )
+        _short = (
+            _trend_dn
+            & (_close_prev >= _ema_fast_prev)
+            & (close < _ema_fast)
+            & (_rsi_trend >= (100.0 - _rsi_hi))
+            & (_rsi_trend <= (100.0 - _rsi_lo))
+        )
+        _pullback_dist = (close - _ema_fast) / atr
+        _tpc_score = np.where(
+            _long,
+            np.clip(_pullback_dist, 0.0, 2.0),
+            np.where(_short, np.clip(_pullback_dist, -2.0, 0.0), 0.0),
+        )
+        _tpc_side = np.zeros_like(close, dtype=np.int8)
+        _tpc_side[_long] = 1
+        _tpc_side[_short] = -1
+        panels.append(
+            CandidateSignalPanel(
+                family="trend_pullback_continuation",
+                variant=f"tpc_{_fast}_{_slow}",
+                params={"ema_fast": _fast, "ema_slow": _slow, "rsi_lo": int(_rsi_lo), "rsi_hi": int(_rsi_hi)},
+                datetimes=aligned.datetimes,
+                symbols=aligned.symbols,
+                signed_score_2d=np.clip(_tpc_score / 2.0, -1.0, 1.0),
+                side_hint_2d=_tpc_side,
+                expected_holding_bars=max(8, _fast // 2),
+                min_holding_bars=max(3, _fast // 8),
+                stop_atr_mult=1.5,
+                take_profit_atr_mult=3.0,
+                turnover_proxy_2d=np.abs(np.diff(np.clip(_tpc_score / 2.0, -1.0, 1.0), axis=0, prepend=0.0)),
+                valid_mask_2d=valid_mask,
+                metadata={
+                    "archetype": "trend_continuation",
+                    "regime": "established_trend_pullback",
+                    "edge_hypothesis": (
+                        "pullback recovery inside an established trend improves continuation "
+                        "entry quality"
+                    ),
+                },
+            )
+        )
+
+    # 17. Dual Momentum
+    for _short_lb, _long_lb in [(12, 48), (24, 96)]:
+        _ret_short = _log_return_2d(close, lag=_short_lb)
+        _ret_long = _log_return_2d(close, lag=_long_lb)
+        _ret_short_z = _zscore_2d(_ret_short, window=_long_lb)
+        _ret_long_z = _zscore_2d(_ret_long, window=_long_lb)
+        _dm_score = np.tanh((_ret_short_z + _ret_long_z) / 2.0)
+        _dm_side = np.zeros_like(close, dtype=np.int8)
+        _dm_side[(_ret_short_z > 0.5) & (_ret_long_z > 0.5)] = 1
+        _dm_side[(_ret_short_z < -0.5) & (_ret_long_z < -0.5)] = -1
+        _dm_score[:_long_lb] = 0.0
+        _dm_side[:_long_lb] = 0
+        panels.append(
+            CandidateSignalPanel(
+                family="dual_momentum",
+                variant=f"dm_{_short_lb}_{_long_lb}",
+                params={"short_lookback": _short_lb, "long_lookback": _long_lb},
+                datetimes=aligned.datetimes,
+                symbols=aligned.symbols,
+                signed_score_2d=np.clip(_dm_score, -1.0, 1.0),
+                side_hint_2d=_dm_side,
+                expected_holding_bars=max(8, _short_lb),
+                min_holding_bars=max(3, _short_lb // 3),
+                stop_atr_mult=1.5,
+                take_profit_atr_mult=3.0,
+                turnover_proxy_2d=np.abs(np.diff(np.clip(_dm_score, -1.0, 1.0), axis=0, prepend=0.0)),
+                valid_mask_2d=valid_mask,
+                metadata={
+                    "archetype": "time_series_momentum",
+                    "regime": "multi_horizon_trend_agreement",
+                    "edge_hypothesis": (
+                        "aligned short and long horizon momentum produces more durable "
+                        "continuation than single-horizon trend rules"
+                    ),
+                },
+            )
+        )
+
+    # 18. Liquidation Wick Reversal
+    _close_open_dir = np.sign(close - aligned.open_2d)
+    _body = np.abs(close - aligned.open_2d)
+    _lower_wick = np.minimum(aligned.open_2d, close) - low
+    _upper_wick = high - np.maximum(aligned.open_2d, close)
+    _candle_range = np.maximum(high - low, 1e-12)
+    _vol_z_lwr = _zscore_2d(np.where(np.isfinite(vol), vol, 0.0), window=20)
+    _oi_diff = np.diff(oi, axis=0, prepend=oi[:1])
+    for _lwr_win in [20, 40]:
+        _vol_z_local = _zscore_2d(np.where(np.isfinite(vol), vol, 0.0), window=_lwr_win)
+        _lower_cond = (
+            (_lower_wick / atr >= 1.0)
+            & (_vol_z_local >= 1.5)
+            & (_oi_diff <= 0.0)
+            & ((close - low) / _candle_range >= 0.5)
+        )
+        _upper_cond = (
+            (_upper_wick / atr >= 1.0)
+            & (_vol_z_local >= 1.5)
+            & (_oi_diff <= 0.0)
+            & ((high - close) / _candle_range >= 0.5)
+        )
+        _lwr_score = np.where(
+            _lower_cond,
+            np.clip((_lower_wick / atr) * np.maximum(_vol_z_local, 0.0) / 3.0, 0.0, 1.0),
+            np.where(_upper_cond, -np.clip((_upper_wick / atr) * np.maximum(_vol_z_local, 0.0) / 3.0, 0.0, 1.0), 0.0),
+        )
+        _lwr_side = np.zeros_like(close, dtype=np.int8)
+        _lwr_side[_lower_cond] = 1
+        _lwr_side[_upper_cond] = -1
+        panels.append(
+            CandidateSignalPanel(
+                family="liquidation_wick_reversal",
+                variant=f"lwr_{_lwr_win}",
+                params={"window": _lwr_win},
+                datetimes=aligned.datetimes,
+                symbols=aligned.symbols,
+                signed_score_2d=_lwr_score.astype(np.float64, copy=False),
+                side_hint_2d=_lwr_side,
+                expected_holding_bars=max(4, _lwr_win // 6),
+                min_holding_bars=2,
+                stop_atr_mult=1.25,
+                take_profit_atr_mult=2.0,
+                turnover_proxy_2d=np.abs(np.diff(_lwr_score.astype(np.float64, copy=False), axis=0, prepend=0.0)),
+                valid_mask_2d=valid_mask,
+                metadata={
+                    "archetype": "forced_flow_reversal",
+                    "regime": "liquidation_exhaustion",
+                    "edge_hypothesis": (
+                        "extreme wick plus volume spike and non-confirming OI captures "
+                        "liquidation exhaustion mean reversion"
+                    ),
+                },
+            )
+        )
+
+    # 19. Squeeze Unwind
+    _funding_z_unwind = _zscore_2d(np.where(np.isfinite(funding), funding, 0.0), window=48, eps=1e-6)
+    _price_ret_1 = _log_return_2d(close, lag=1)
+    for _sqz_win in [24, 48]:
+        _vol_z_sqz = _zscore_2d(np.where(np.isfinite(vol), vol, 0.0), window=_sqz_win)
+        _oi_z_sqz = _zscore_2d(np.where(np.isfinite(oi), oi, 0.0), window=_sqz_win)
+        _unwind_long = (_price_ret_1 > 0.0) & (_vol_z_sqz >= 1.5) & (_oi_diff < 0.0) & (_funding_z_unwind < 1.0)
+        _unwind_short = (_price_ret_1 < 0.0) & (_vol_z_sqz >= 1.5) & (_oi_diff < 0.0) & (_funding_z_unwind > -1.0)
+        _sqz_score = np.where(
+            _unwind_long,
+            np.clip((_vol_z_sqz + np.maximum(-_oi_z_sqz, 0.0)) / 4.0, 0.0, 1.0),
+            np.where(_unwind_short, -np.clip((_vol_z_sqz + np.maximum(-_oi_z_sqz, 0.0)) / 4.0, 0.0, 1.0), 0.0),
+        )
+        _sqz_side = np.zeros_like(close, dtype=np.int8)
+        _sqz_side[_unwind_long] = 1
+        _sqz_side[_unwind_short] = -1
+        panels.append(
+            CandidateSignalPanel(
+                family="squeeze_unwind",
+                variant=f"sqz_{_sqz_win}",
+                params={"window": _sqz_win},
+                datetimes=aligned.datetimes,
+                symbols=aligned.symbols,
+                signed_score_2d=_sqz_score.astype(np.float64, copy=False),
+                side_hint_2d=_sqz_side,
+                expected_holding_bars=max(4, _sqz_win // 6),
+                min_holding_bars=2,
+                stop_atr_mult=1.5,
+                take_profit_atr_mult=2.5,
+                turnover_proxy_2d=np.abs(np.diff(_sqz_score.astype(np.float64, copy=False), axis=0, prepend=0.0)),
+                valid_mask_2d=valid_mask,
+                metadata={
+                    "archetype": "position_unwind",
+                    "regime": "squeeze_release",
+                    "edge_hypothesis": (
+                        "price impulse with shrinking open interest isolates position unwind "
+                        "from fresh trend initiation"
+                    ),
+                },
+            )
+        )
+
+    # 20. Residual Reversion
+    _log_ret_rr = np.diff(np.log(np.maximum(close, 1e-12)), axis=0, prepend=0.0)
+    _btc_ret_rr = _log_ret_rr[:, btc_idx : btc_idx + 1]
+    for _rr_win in [24, 48]:
+        _btc_var_rr = _rolling_mean_2d(_btc_ret_rr ** 2, window=_rr_win)
+        _cov_alt_btc_rr = _rolling_mean_2d(_log_ret_rr * _btc_ret_rr, window=_rr_win)
+        _beta_hat_rr = _cov_alt_btc_rr / np.maximum(_btc_var_rr, 1e-12)
+        _resid_ret_rr = _log_ret_rr - _beta_hat_rr * _btc_ret_rr
+        _resid_mean_rr = _rolling_mean_2d(_resid_ret_rr, window=_rr_win)
+        _resid_std_rr = _rolling_std_2d(_resid_ret_rr, window=_rr_win)
+        _resid_z_rr = (_resid_ret_rr - _resid_mean_rr) / np.maximum(_resid_std_rr, 1e-12)
+        _rr_side = np.zeros_like(close, dtype=np.int8)
+        _rr_side[_resid_z_rr <= -2.0] = 1
+        _rr_side[_resid_z_rr >= 2.0] = -1
+        _rr_score = np.where(_rr_side != 0, -np.clip(_resid_z_rr / 3.0, -1.0, 1.0), 0.0)
+        panels.append(
+            CandidateSignalPanel(
+                family="residual_reversion",
+                variant=f"rr_{_rr_win}",
+                params={"window": _rr_win},
+                datetimes=aligned.datetimes,
+                symbols=aligned.symbols,
+                signed_score_2d=_rr_score.astype(np.float64, copy=False),
+                side_hint_2d=_rr_side,
+                expected_holding_bars=max(4, _rr_win // 6),
+                min_holding_bars=2,
+                stop_atr_mult=1.25,
+                take_profit_atr_mult=2.0,
+                turnover_proxy_2d=np.abs(np.diff(_rr_score.astype(np.float64, copy=False), axis=0, prepend=0.0)),
+                valid_mask_2d=valid_mask,
+                metadata={
+                    "archetype": "beta_neutral_reversion",
+                    "regime": "btc_adjusted_overextension",
+                    "edge_hypothesis": (
+                        "large BTC-adjusted residual moves mean revert when they reflect "
+                        "idiosyncratic overextension rather than broad market beta"
+                    ),
+                },
+            )
+        )
+
+    panels_with_context = _attach_signal_context(tuple(panels), cfg=cfg, regime_ctx=regime_ctx)
+    return filter_rule_signal_panels(panels_with_context, cfg=cfg)
 
 
 def candidate_panels_to_events(
@@ -819,32 +1175,62 @@ def candidate_panels_to_events(
             physical_cost = execution_cost_bps_2d[t_idx, s_idx].astype(np.float64, copy=False)
             physical_cost = np.nan_to_num(physical_cost, nan=0.0, posinf=0.0, neginf=0.0)
             event_cost = np.maximum(event_cost, physical_cost)
-
-        df = pd.DataFrame({
-            "datetime": event_datetimes,
-            "symbol": event_symbols,
-            "family": panel.family,
-            "variant": panel.variant,
-            "side": event_sides,
-            "raw_score": raw_scores,
-            "score_z": score_z,  # proxy
-            "expected_holding_bars": panel.expected_holding_bars,
-            "min_holding_bars": panel.min_holding_bars,
-            "stop_atr_mult": panel.stop_atr_mult,
-            "take_profit_atr_mult": panel.take_profit_atr_mult,
-            "turnover_proxy": panel.turnover_proxy_2d[t_idx, s_idx],
-            "cost_floor_bps": event_cost,
-            "entry_idx": t_idx + 1,
-            "side_flipped": side_flipped,
-        })
-        all_events.append(df)
+        turnover_proxy = panel.turnover_proxy_2d[t_idx, s_idx]
+        entry_regime_codes, entry_regimes = _entry_regime_fields(panel, t_idx)
+        unique_entry_regimes = tuple(dict.fromkeys(str(regime) for regime in entry_regimes))
+        for regime_name in unique_entry_regimes:
+            regime_mask = entry_regimes == regime_name
+            if not bool(np.any(regime_mask)):
+                continue
+            regime_policies = build_exit_policies_for_panel(
+                archetype=str(panel.archetype),
+                regime_name=regime_name,
+                base_expected_holding_bars=int(panel.expected_holding_bars),
+                base_min_holding_bars=int(panel.min_holding_bars),
+                max_policies=max(1, len(panel.exit_policies)) if panel.exit_policies else 1,
+                fallback_stop_atr_mult=float(panel.stop_atr_mult),
+                fallback_take_profit_atr_mult=float(panel.take_profit_atr_mult),
+            )
+            for policy in regime_policies:
+                signal_cells = np.asarray(
+                    [
+                        f"{panel.family}:{panel.variant}:{policy.policy_id}:{entry_regime}"
+                        for entry_regime in entry_regimes[regime_mask]
+                    ],
+                    dtype=object,
+                )
+                if side_flipped:
+                    signal_cells = np.asarray([f"{cell}:flip" for cell in signal_cells], dtype=object)
+                df = pd.DataFrame({
+                    "datetime": event_datetimes[regime_mask],
+                    "symbol": event_symbols[regime_mask],
+                    "family": panel.family,
+                    "variant": panel.variant,
+                    "side": event_sides[regime_mask],
+                    "raw_score": raw_scores[regime_mask],
+                    "score_z": score_z[regime_mask],
+                    "expected_holding_bars": int(policy.expected_holding_bars),
+                    "min_holding_bars": int(policy.min_holding_bars),
+                    "stop_atr_mult": float(policy.stop_atr_mult),
+                    "take_profit_atr_mult": float(policy.take_profit_atr_mult),
+                    "turnover_proxy": turnover_proxy[regime_mask],
+                    "cost_floor_bps": event_cost[regime_mask],
+                    "entry_idx": t_idx[regime_mask] + 1,
+                    "side_flipped": side_flipped,
+                    "exit_policy_id": policy.policy_id,
+                    "signal_cell": signal_cells,
+                    "archetype": panel.archetype,
+                    "entry_regime": entry_regimes[regime_mask],
+                    "entry_regime_code": entry_regime_codes[regime_mask],
+                })
+                all_events.append(df)
 
     if not all_events:
         return pd.DataFrame(columns=[
             "datetime", "symbol", "family", "variant", "side",
             "raw_score", "score_z", "expected_holding_bars", "min_holding_bars",
             "stop_atr_mult", "take_profit_atr_mult", "turnover_proxy", "cost_floor_bps", "entry_idx",
-            "side_flipped",
+            "side_flipped", "exit_policy_id", "signal_cell", "archetype", "entry_regime", "entry_regime_code",
         ])
 
     return pd.concat(all_events, axis=0, ignore_index=True).sort_values("datetime").reset_index(drop=True)

@@ -1,11 +1,43 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+
+SignalArchetype = Literal[
+    "trend_continuation",
+    "time_series_momentum",
+    "mean_reversion",
+    "forced_flow_reversal",
+    "position_unwind",
+    "carry_reversion",
+    "beta_neutral_reversion",
+]
+
+RegimeName = Literal[
+    "bull_quiet",
+    "bull_volatile",
+    "bear_quiet",
+    "bear_volatile",
+    "transition",
+    "crash",
+]
+
+
+@dataclass(slots=True, frozen=True)
+class SignalExitPolicy:
+    """Deterministic exit geometry attached to a candidate signal."""
+
+    policy_id: str
+    archetype: SignalArchetype
+    stop_atr_mult: float
+    take_profit_atr_mult: float
+    expected_holding_bars: int
+    min_holding_bars: int
+    description: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -26,6 +58,11 @@ class CandidateSignalPanel:
     turnover_proxy_2d: NDArray[np.float64]
     valid_mask_2d: NDArray[np.bool_]
     metadata: dict[str, Any] = field(default_factory=dict)
+    archetype: SignalArchetype | str = "mean_reversion"
+    allowed_regimes: tuple[RegimeName | str, ...] = ()
+    exit_policies: tuple[SignalExitPolicy, ...] = ()
+    regime_code_1d: NDArray[np.int8] | None = None
+    regime_name_by_code: tuple[str, ...] = ()
 
     @property
     def scores(self) -> NDArray[np.float64]:

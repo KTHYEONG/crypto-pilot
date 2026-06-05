@@ -150,9 +150,20 @@ class CandidateStrategyConfig:
     diagnostic_top_k: int = 10
     min_variant_oos_obs: int = 100
     min_variant_oos_edge_bps: float = 1.0
+    min_variant_oos_median_edge_bps: float = 0.0
+    min_variant_oos_p10_edge_bps: float = -150.0
     min_variant_oos_hit_rate: float = 0.50
     min_variant_oos_payoff_ratio: float = 1.20
     max_variant_oos_q10_fail_rate: float = 0.90
+    max_variant_event_fraction_per_bar: float = 0.25
+    regime_diagnostic_enabled: bool = True
+    min_regime_variant_oos_obs: int = 40
+    min_regime_variant_oos_edge_bps: float = 2.0
+    regime_signal_gating_enabled: bool = True
+    max_exit_policy_variants_per_signal: int = 2
+    diagnose_signal_cells: bool = True
+    min_signal_cell_oos_obs: int = 80
+    max_signal_cell_event_fraction_per_bar: float = 0.12
     candidate_identity_features_enabled: bool = True
     market_state_features_enabled: bool = True
     promotion_filter_enabled: bool = True
@@ -179,6 +190,11 @@ class CandidateStrategyConfig:
         "funding_acceleration_carry",
         "btc_residual_momentum",
         "oi_volume_confirmed_breakout",
+        "trend_pullback_continuation",
+        "dual_momentum",
+        "liquidation_wick_reversal",
+        "squeeze_unwind",
+        "residual_reversion",
     )
     # Execution cost model (SSOT; replaces flat 24bps)
     maker_fee_bps: float = 2.0
@@ -331,6 +347,18 @@ class CandidateStrategyConfig:
             raise ValueError("edge_prior_min_obs must be >= 1")
         if self.edge_prior_shrinkage_obs < 1:
             raise ValueError("edge_prior_shrinkage_obs must be >= 1")
+        if self.min_variant_oos_obs < 1:
+            raise ValueError("min_variant_oos_obs must be >= 1")
+        if not (0.0 < self.max_variant_event_fraction_per_bar <= 1.0):
+            raise ValueError("max_variant_event_fraction_per_bar must be in (0.0, 1.0]")
+        if self.min_regime_variant_oos_obs < 1:
+            raise ValueError("min_regime_variant_oos_obs must be >= 1")
+        if self.max_exit_policy_variants_per_signal < 1:
+            raise ValueError("max_exit_policy_variants_per_signal must be >= 1")
+        if self.min_signal_cell_oos_obs < 1:
+            raise ValueError("min_signal_cell_oos_obs must be >= 1")
+        if self.max_signal_cell_event_fraction_per_bar <= 0.0:
+            raise ValueError("max_signal_cell_event_fraction_per_bar must be positive")
         if not (0.0 < self.max_drawdown_cap <= 1.0):
             raise ValueError("max_drawdown_cap must be in (0.0, 1.0]")
         for variant in self.enabled_candidate_variants:
