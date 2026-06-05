@@ -8,7 +8,7 @@ from src.domain.futures.universe.selection import apply_selection_stage
 
 def test_universe_config_strategy_pool_defaults() -> None:
     cfg = UniverseConfig()
-    assert cfg.strategy_pool_mode == "stage5_all"
+    assert cfg.strategy_pool_mode == "stage6_selected"
     assert cfg.stage6_is_alpha_rank is False
 
 

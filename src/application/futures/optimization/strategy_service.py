@@ -35,6 +35,7 @@ def build_candidate_strategy_config(
     strategy_cfg: StrategyConfig,
     opt_config: dict[str, Any],
     timeframe: str,
+    signal_only: bool = False,
 ) -> StrategyConfig:
     """Build a runtime candidate strategy config from opt_config overrides."""
     candidate = strategy_cfg.candidate
@@ -61,6 +62,7 @@ def build_candidate_strategy_config(
         min_variant_oos_hit_rate=float(
             opt_config.get("FUTURES_CANDIDATE_MIN_VARIANT_OOS_HIT_RATE", candidate.min_variant_oos_hit_rate)
         ),
+        signal_only=signal_only,
     )
     return replace(strategy_cfg, candidate=candidate)
 
@@ -248,7 +250,7 @@ def run_active_strategy_output_bridge(
         live_inference_panel,
         historical_trading_panel,
     )
-    if run_config.phase not in {"strategy", "alpha"}:
+    if run_config.phase not in {"full", "ml", "signal"}:
         raise ValueError(f"unsupported phase for active strategy bridge: {run_config.phase}")
     if preloaded_data_maps is None:
         raise ValueError("active strategy bridge requires preloaded_data_maps")
@@ -258,6 +260,7 @@ def run_active_strategy_output_bridge(
         strategy_cfg=StrategyConfig(name=strategy_name),
         opt_config=opt_config,
         timeframe=run_config.timeframe,
+        signal_only=(run_config.phase == "signal"),
     )
     candidate_scope = list(trading_symbols or tuple(symbols))
     if training_panel:
