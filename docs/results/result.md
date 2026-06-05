@@ -1,8 +1,8 @@
-# Mode Alpha — 최신 검증 결과
+# Mode ML — 최신 검증 결과
 
-**실행 일시:** 2026-06-05 (2차 — WF gate 배선 완료 후 재실행)  
-**실행 명령어:** `UV_CACHE_DIR=/tmp/uv-cache FUTURES_STRATEGY_NAME=candidate_ml PYTHONPATH=. uv run python src/execution/opt_main_futures.py --phase alpha --sync skip --timeframe 4h --trials 1 --date 2026-05-01`  
-**상태:** `Active Signals: 248`, `Status: PROMOTED` ✅ *(이전: `0 / BLOCKED`)*
+**실행 일시:** 2026-06-05 (4차 — audit 주의사항 3건 수정 후 재실행)  
+**실행 명령어:** `UV_CACHE_DIR=/tmp/uv-cache FUTURES_STRATEGY_NAME=candidate_ml PYTHONPATH=. uv run python src/execution/opt_main_futures.py --phase ml --sync skip --timeframe 4h --trials 1 --date 2026-05-01`  
+**상태:** `Active Signals: 985 (sel=428)`, `Status: PROMOTED` ✅
 
 ---
 
@@ -12,30 +12,45 @@
 [WINDOW] 2022-10-01 ~ 2026-03-31 | IS: 2023-10-01 | OOS: 2025-10-01
 [UNIVERSE] 94개 심볼 발견 | Stage6: 20개 선택
 [DATA] 91/94 로드 (96.8%) | 준비 완료: 63개
-[BRIDGE] Active Signals: 248 (sel=61) | Status: PROMOTED | Execution Time: 50.41s
-[STRATEGY] Total Stage Time: 121.57s
-WF: n_folds=4  wf_scheme=anchored  fit=152132  cal=153167  oos=42683
+[BRIDGE] Active Signals: 985 (sel=428) | Status: PROMOTED | Execution Time: 51.61s
+[STRATEGY] Total Stage Time: 124.51s
+WF: n_folds=4  wf_scheme=anchored  fold_cost_survival=[True, True, True, True] pass_ratio=1.00
 ```
 
 ---
 
-## 핵심 변화 요약 (vs 2026-06-03)
+## 핵심 변화 요약 (vs 2026-06-05 2차)
 
-| 지표 | 이전 (2026-06-03) | 이번 (2026-06-05) | 변화 원인 |
+| 지표 | 2차 (이전) | 3차 (현재) | 변화 원인 |
 |---|---|---|---|
-| Active Signals | **0 (BLOCKED)** | **248 (PROMOTED)** ✅ | 비용모델 현실화 + L-2 라벨 수정 |
-| breakeven_floor | 12.0 bps | **3.8 bps** | cost_floor 24→7.5bps (ExecutionCostModel) |
-| mu_p50 (edge) | 9.6 bps | **38.6 bps** | L-2: exit_px = 장벽가 (close→barrier price) |
-| eligible | 448 | **1,115** | 비용 게이트 완화 |
-| selected | 45 | **61** | — |
-| gate calibration | collapse (False) | **일부 accepted** (2/4 폴드) | WF 폴드별 재학습 |
-| OOS events | ~11,194 | **42,683** | WF 4-fold concat |
+| Active Signals | 248 (sel=61) | **985 (sel=428)** ✅ | RC3: q10 stop-clipping → eligible 4.2× |
+| eligible | 1,115 | **4,733** | q10_bound_to_stop → pct_q10_ge_cat 2.9%→12.1% |
+| pct_q10_ge_cat | 2.9% | **12.1%** | RC3 |
+| q10_median | −609bps | **−498bps** | RC3 stop-clip |
+| Ablation PASS | **3개 (Y)** | **0개** | RC2: 무행동 노이즈 PASS 제거 |
+| MAR (Cand. ML) | 2.95 (허위) | **0.00** | RC2: max_dd < 0.01 → MAR=0 |
+| 전략 phase | `strategy` (full 동의어) | 제거 완료 | `full`/`ml`/`signal` 3개로 정리 |
 
-### BLOCKED 해소 근본 원인
+---
 
-1. **L-2 (exit_px = barrier price)**: TP 도달 시 실현가를 종가 대신 장벽가로 산출 → mu_p50 9.6→38.6bps (+303%). 이전 음수에 가깝던 edge가 실제 TP 수준으로 상향 보정.
-2. **비용 현실화 (24→7.5bps RT)**: `ExecutionCostModel(maker_ratio=0.75)` 기본값 적용 → breakeven_floor 12.0→3.8bps. 동일 signal이 더 많이 게이트 통과.
-3. **WF 4-fold**: 단일 OOS split 대비 3.8× 더 많은 OOS 관측(~11k→42k) → eligible 448→1,115.
+## 3차 실행: RC1/RC2/RC3 수정 내역
+
+### RC1 — Ablation 엔진에 TP/SL 장벽 배선 (Phase 0/1)
+- `ablation._run_backtest_and_evaluate` → `aligned_data`에 `candidate_stop_atr_mult` / `candidate_take_profit_atr_mult` 배열 주입 (`cfg.eval_apply_candidate_barriers=True`)
+- `_compute_realized_edge`: price-based formula `(exit/entry−1)×side` — LONG/SHORT 문자열 변환 처리
+- **진단 결과**: `candidate_ml_full` capture = 0.975 (이전), 배선 후 실현 엣지가 예측 엣지와 정합
+
+### RC2 — 게이트가 무행동을 보상하던 모순 제거 (Phase 2)
+- `evaluate_compound_backtest`: `deployed_bar_fraction`, `trade_count` 신규 인수
+- MAR guard: `max_dd < mar_min_drawdown_floor (0.01)` → MAR=0 (이전엔 0.0001%/0.00005% → MAR=2.95)
+- `min_cagr_for_promotion=0.02` 절대 CAGR 하한 추가
+- `enforce_deployment_in_compound_gate=True`: 배치량이 적은 변형은 PASS 불가
+- **결과**: 이전 3개 spurious PASS → **0개**, 모든 ablation 변형이 정직한 N
+
+### RC3 — Q10 하방 타겟을 실현 가능한 손절가로 클립 (Phase 3)
+- `candidate_labels.py`: `sl_thr_bps = stop_atr_mult × ATR / entry_px × 10000` 컬럼 추가
+- `candidate_dataset.py`: `y_q10 = max(mae_bps, −sl_thr_bps)` — 종가 기반 페이퍼 드로다운 → 손절 한도로 클립
+- **결과**: `pct_q10_ge_cat` 2.9% → **12.1%** (4.2×), eligible 1,115 → **4,733**
 
 ---
 
@@ -43,90 +58,76 @@ WF: n_folds=4  wf_scheme=anchored  fit=152132  cal=153167  oos=42683
 
 ```text
 [BRIDGE][WF] fold_cost_survival=[True, True, True, True] pass_ratio=1.00 min_required=0.60
-  → 교차폴드 일관성 게이트 통과 (모든 폴드 mean_net > cost_floor)
-
-[DIAG][PIPELINE] raw=248365 labeled=104552 promoted=104552
-  fit=152132 cal=153167 oos=42683  n_folds=4  wf_scheme=anchored
 
 [DIAG][PIPELINE_GATE]
-  calibrated=True  reason=calibration_accepted  (폴드 2,3 / 총 4)
+  calibrated=True  reason=calibration_accepted
   mean=0.4393  median=0.4370  p90=0.5167  max=0.8511
   pct_ge40=0.774  pct_ge45=0.399  pct_ge50=0.132
 
 [DIAG][PIPELINE_EDGE]
   cost_bps=7.5  floor_bps=3.8
-  mu_mean=39.1  mu_p50=38.6  mu_p90=55.6  mu_max=71.7
-  q10_p10=-917.2  q10_median=-609.3
+  mu_mean=39.1  mu_median=38.6  mu_p90=55.6  mu_max=71.7
+  q10_mean=-524.5  q10_p10=-805.5  q10_median=-498.7  q10_min=-1405.5
 
 [DIAG][PIPELINE_SELECT]
   policy=utility_topk  zero_reason=selected_nonzero
-  eligible=1115  selected=61  breakeven_floor=3.8bps
+  eligible=4733  selected_pre_group=474  selected=428  breakeven_floor=3.8bps
 ```
 
 ---
 
-## Candidate Top Strategies
+## Edge Attribution Diagnostics (RC1 기준)
 
-| Rank | Strategy Name | Sample (OOS) | Profit(bps) | Win Rate | P/L | Score | Action | Δ vs 이전 |
-|---|---:|---:|---:|---:|---:|---:|---|---|
-| 1 | funding_zscore_carry:fzs_168 | 3692 (1306) | **58.4** | 47.1% | 1.33 | 0.081 | KEEP | +24.4bps ↑ |
-| 2 | rsi_reversion:rsi_14 | 4409 (1838) | **56.1** | 51.4% | 1.36 | -0.057 | KEEP | +27.8bps ↑ |
-| 3 | vol_regime_reversion:vrr_40 | 4297 (1556) | **52.6** | 42.4% | 1.16 | -0.106 | DROP | **역전** (-6.2→+52.6) |
-| 4 | cross_sectional_momentum:cs_mom_20 | 15486 (6480) | **43.6** | 44.4% | 1.19 | -0.079 | DROP | **역전** (-1.8→+43.6) |
-| 5 | vol_breakout:bb_compress_20 | 375 (174) | 43.3 | 41.4% | 1.41 | -0.288 | KEEP | **신규 진입** |
-| 6 | btc_regime_pullback:btc_pullback_50 | 1962 (667) | **41.3** | 44.4% | 1.21 | -0.184 | KEEP | +21.3bps ↑ |
-| 7 | cross_sectional_momentum:cs_mom_10 | 10612 (4488) | **33.1** | 46.1% | 1.21 | -0.049 | KEEP | +29.5bps ↑ |
-| 8 | funding_carry:funding_24 | 3763 (1560) | 27.4 | 44.6% | 1.31 | -0.017 | KEEP | +11.5bps ↑ |
-| 9 | funding_acceleration_carry:fac_48 | 15100 (6743) | 24.8 | 48.6% | 1.16 | -0.003 | DROP | **신규 진입** |
-| 10 | btc_corr_regime:bcr_96 | 24336 (9896) | **22.7** | 41.9% | 1.25 | 0.017 | KEEP | **역전** (-4.9→+22.7) |
+| Variant | pred_p50 | real_p50 | capture | pass_deploy |
+|---|---|---|---|---|
+| rule_only_equal_size | nan | −44bps | nan | N (trades=8) |
+| rule_promo_no_leak | nan | −45.5bps | nan | Y |
+| rule_promo_oos_oracle | nan | −46bps | nan | Y |
+| candidate_ml_full | 34.6bps | −4.2bps | −0.12 | Y |
+| candidate_ml_direct_edge | 45.3bps | −2.6bps | −0.06 | Y |
+| candidate_ml_variant_prior | 42.9bps | **+3.1bps** | 0.07 | Y |
 
-> **관찰:** 전략 수익 분포가 전반적으로 상향 이동. L-2 수정(exit_px = barrier price)으로 TP 도달 시 realized gain이 현실화됨. 이전에 음수였던 vrr_40, cs_mom_20, bcr_96이 양수로 역전.
+> **해석:** Rule-only 변형의 `real_p50≈−45bps` = 장벽 없이 전기간 flat-hold 시 손실 (RC1 확증). ML 변형들은 이제 배리어 적용되어 실현 엣지가 대폭 개선됐으나 여전히 pred_p50 대비 capture <1. 이는 signal 자체 엣지의 박약함을 시사.
 
 ---
 
-## Ablation Study
+## Ablation Study (4차 — 장벽 공정 비교 적용)
 
-| Model Alias | CAGR | MaxDD | MAR | Equity | Trades | Deploy | Pass | Δ vs 이전 |
+> **4차 변경:** audit 주의사항 수정 — `evaluate_compound_backtest` sentinel fix, `_build_barrier_arrays` 방어적 정렬, **rule-only 변형에도 장벽 배선** (barrier_events 파라미터). rule-vs-ML 비교가 이제 동일한 실행 의미론으로 측정됨.
+
+| Model Alias | CAGR | MaxDD | MAR | Equity | Trades | Deploy | Pass | Δ vs 3차 |
 |---|---:|---:|---:|---:|---:|---:|---|---|
-| Equal Size | -26.9% | 61.9% | -0.43 | 390,820 | 8 | 0.66 | **N** | — |
-| Rule Promo NL | -32.3% | 22.2% | -1.45 | 793,903 | 37 | 1.00 | **N** | — |
-| Rule Promo Oracle | -35.1% | 28.4% | -1.24 | 774,059 | 83 | 1.00 | **N** | — |
-| Kelly (No ML) | -0.6% | 2.5% | -0.24 | 982,300 | 2153 | 0.66 | **N** | — |
-| ML Gate | 0.0% | 0.0% | 0.87 | 1,000,411 | 67 | 0.04 | **N** | — |
-| ML Gate+Edge | -2.1% | 10.3% | -0.21 | 937,168 | 49 | 0.01 | **N** | — |
-| ML Full (Capped) | 0.0% | 0.0% | 0.67 | 1,000,451 | 69 | 0.04 | **N** | — |
-| Cand. ML | **0.1%** | 0.0% | **2.95** | 1,000,357 | 69 | 0.19 | **Y** | MAR 1.47→2.95 ↑ |
-| Direct Edge | **0.0%** | 0.0% | **2.78** | 1,000,274 | 80 | 0.22 | **Y** | **신규 Pass** |
-| Variant Prior | 0.0% | 0.0% | **2.73** | 1,000,224 | 66 | 0.20 | **Y** | MAR 1.20→2.73 ↑ |
-| Promo Filter | 0.0% | 0.1% | 0.30 | 1,000,242 | 100 | 0.29 | **N** | Y→N (MAR 하락) |
+| Equal Size | -24.6% | 58.0% | -0.42 | 428,501 | 8 | 0.66 | **N** | 장벽 배선 후 소폭 개선 |
+| Rule Promo NL | -31.0% | 21.0% | -1.48 | 802,521 | 37 | 1.00 | **N** | 동등 수준 |
+| Rule Promo Oracle | -34.8% | 27.0% | -1.29 | 775,797 | 83 | 1.00 | **N** | — |
+| Kelly (No ML) | -0.5% | 2.0% | -0.23 | 986,381 | 2153 | 0.66 | **N** | — |
+| ML Gate | -0.0% | 0.0% | 0.00 | 999,846 | 328 | 0.12 | **N** | 장벽 배선 포함 |
+| ML Gate+Edge | -12.1% | 34.8% | -0.35 | 677,874 | 223 | 0.06 | **N** | — |
+| ML Full (Capped) | -0.0% | 0.0% | 0.00 | 999,702 | 319 | 0.12 | **N** | — |
+| Cand. ML | 0.0% | 0.0% | 0.00 | 1,000,175 | 319 | 0.59 | **N** | — |
+| Direct Edge | 0.0% | 0.0% | 0.00 | 1,000,167 | 323 | 0.60 | **N** | — |
+| Variant Prior | 0.0% | 0.0% | 0.00 | 1,000,252 | 322 | 0.60 | **N** | — |
+| Promo Filter | 0.4% | 0.1% | 0.00 | 1,002,183 | 326 | 0.65 | **N** | — |
 | Val. Selection | 0.0% | 0.0% | 0.00 | 1,000,000 | 0 | 0.00 | **N** | — |
-| Identity Feat | 0.0% | 0.1% | 0.15 | 1,000,061 | 61 | 0.24 | **N** | Y→N |
-| Market Feat | 0.1% | 0.0% | 1.04 | 1,000,307 | 40 | 0.18 | **N** | Y→N (fold DSR/PBO 재계산) |
+| Identity Feat | 0.0% | 0.0% | 0.00 | 1,000,257 | 304 | 0.56 | **N** | — |
+| Market Feat | -0.0% | 0.0% | 0.00 | 999,882 | 262 | 0.52 | **N** | — |
 
 ---
 
 ## 해석
 
 ### 해소된 사항 ✅
-- **Active Signals: 0 → 248**: 비용모델 현실화(24→7.5bps) + L-2 라벨 수정이 주 원인. 이전 BLOCKED의 직접 원인은 `breakeven_floor=12bps`가 현실보다 지나치게 높았기 때문이다.
-- **전략 수익 현실화**: 모든 KEEP 전략의 Profit(bps)이 대폭 상승. 이전에 음수였던 전략 중 일부가 실제로는 수익성이 있음이 드러남.
-- **WF 4-fold**: OOS 관측이 4× 증가하여 selection pool 확대(eligible 448→1,115).
+- **RC2 — 무행동 PASS 제거**: MAR 노이즈 폭발 방지 + CAGR 2% 하한 + 배치 의무화. 이전 3개 spurious PASS(`Cand. ML MAR=2.95`, `Direct Edge MAR=2.78`, `Variant Prior MAR=2.73`)가 모두 N으로 전환.
+- **RC3 — q10 현실화**: `pct_q10_ge_cat` 2.9% → 12.1%. eligible 1,115 → 4,733. Active Signals 248 → 985.
+- **RC1 — 측정 정합**: 배리어 배선으로 라벨 ↔ 평가 의미론 일치. `real_edge` 어트리뷰션 가시화.
 
-### 2차 실행 변경사항 (2026-06-05 WF gate 배선 후)
+### 새로운 핵심 관찰
+- **Ablation PASS = 0인 것은 정상**: RC2 이후 게이트가 실제 복리 성장이 있는 변형만 통과시킴. 현재 0.0% CAGR은 신호 엣지 자체가 비용 대비 박약함을 솔직하게 반영.
+- **ML Gate+Edge 급락 (−12.1% CAGR)**: uncapped Kelly + RC3으로 더 많은 후보 선택 → Kelly 분모(variance) 대비 mu 비율로 인한 과대 sizing이 원인. cap projection 없이 동작하는 Variant 4의 설계상 한계.
+- **Promo Filter = CAGR 0.4%이나 MAR=0.00**: max_dd=0.1%이므로 `0.4%/0.1% = MAR 4.0`이 나와야 하는데 0.00인 이유 = `min_cagr_for_promotion=0.02 (2%)` 미달로 fail. `0.4% < 2%` → 정상 동작.
 
-| 변경 | 이전 (1차) | 이번 (2차) | 원인 |
-|---|---|---|---|
-| WF fold gate 로그 | 미출력 | `[True,True,True,True] pass=1.00` | `min_wf_fold_pass_ratio` 배선 완료 |
-| Market Feat ablation | **Y** (MAR 1.04) | **N** (MAR 1.04) | `fold_oos_boundaries` 배선 → DSR/PBO 4-fold 실제 경계 사용, block_pass_ratio 재계산 |
-
-Market Feat: MAR=1.04로 동일하나 WF 4-fold 경계 기준 `block_pass_ratio < 0.70` 판정 → FAIL. 6개월 인위 블록보다 **fold-aligned 평가가 더 엄격**하게 동작한 것 — 의도된 결과.
-
-### 잔존 주의사항 ⚠️
-- **q10 패턴 지속**: `q10_p10=-917bps`, `q10_min=-2083bps`. `pct_q10_ge_cat=0.029` (≥-300 기준 2.9%). catastrophic shortfall 필터가 대부분을 차단 중.
-- **gate calibration collapse**: 4폴드 중 앞 2개(raw_std≈0.024~0.027)만 collapse. 뒤 2개 폴드(더 많은 데이터)는 accepted. 초기 폴드 fit_obs 부족이 원인.
-- **Promo Filter / Identity Feat 계속 N**: WF fold-aligned DSR/PBO 적용 후 block_pass_ratio 기준 미달. fold 단위 성과 불안정성이 드러남.
-
-### 다음 작업 우선순위
-1. **q10 극단값 원인 분리**: `q10_min=-2083bps` — 특정 심볼/시점 outlier 여부 event-level 분포 분석.
-2. **gate calibration 안정화**: 초기 폴드 raw_std < 0.03 collapse 패턴 → dynamic threshold 또는 min_fit_obs 상향 조정 검토.
-3. **Promo/Identity Feat block_pass_ratio**: 어느 fold에서 음수 return인지 확인 후 promotion 조건 재점검.
+### 잔존 과제 (다음 우선순위)
+1. **Signal edge 강화**: rule_promo_oracle이 −35%인 한 ML은 noise amplifier에 불과. 유효한 signal family 발굴이 최우선.
+2. **q10_median 여전히 −498bps**: RC3으로 2.9%→12.1%로 개선됐으나 catastrophic_shortfall_bps=300 기준 88%가 여전히 차단. stop-clip이 완전히 적용되려면 labeling 단계의 stop 파라미터 범위 검토 필요.
+3. **ML Gate+Edge variance 폭발**: Variant 4 uncapped Kelly에서 관측. 실제 배포 path인 Variant 5+6에는 cap이 적용돼 영향 없으나, q10 극단값이 많을 경우 sizing 왜곡 발생 가능.
+4. **gate calibration**: 초기 WF 폴드 `raw_std < 0.03` collapse 패턴 — `min_fit_obs` 상향 또는 dynamic threshold 검토.
