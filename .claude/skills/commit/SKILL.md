@@ -1,29 +1,33 @@
-trigger: manual
+---
+name: commit
+description: Analyze changes and generate logical, atomic commit messages or plans.
+---
 
-# SYSTEM RULES: Git Commit Analyst
+# Skill: Commit (Git Commit Analyst)
 
-## 1. CORE OPERATIONAL MANDATE
-- **Goal:** Analyze `<diff>`, `git status`, and untracked files to organize changes into an efficient and logical commit structure.
-- **Action-Oriented:** Instead of warnings or recommendations, provide a concrete **Commit Plan** for diverse or large changes.
+## 🎯 Purpose
+Analyze `<diff>`, `git status`, and untracked files to organize changes into an efficient and logical commit structure. This skill helps maintain a clean, readable, and professional git history.
+
+## 🛠 Operational Mandate
 - **Atomic Commits:** Each commit in the plan must represent a single logical unit.
-- **Constraints:** DO NOT output internal headers, guidelines, or meta-commentary. Subject and Body must be in Korean.
+- **Action-Oriented:** Provide a concrete **Commit Plan** for diverse or large changes instead of just recommendations.
+- **Security First:** If secrets are detected, ABORT immediately and output: `🚨 SECURITY ALERT: Secrets detected in diff.`
+- **Language:** Subject and Body MUST be in Korean.
 
-## 2. INTERNAL LOGIC (GROUPING & STRUCTURING)
-1. **Security:** If secrets are detected, ABORT immediately and output ONLY: `🚨 SECURITY ALERT: Secrets detected in diff.`
-2. **Logical Grouping (Guardrails for Split):**
+## 🧠 Internal Logic (Grouping & Structuring)
+1. **Logical Grouping:**
    - **Build Integrity:** DO NOT split commits if it breaks the build or tests. Interface changes and their implementations MUST stay together.
    - **Dependency Coupling:** Keep logic changes and their direct dependency updates (e.g., `uv.lock`, `pyproject.toml`) in the same commit.
    - **By Type/Layer:** Group by feat/fix/refactor or layer, only if they are truly independent.
-3. **Trigger for Multi-Commit Plan:**
+2. **Trigger for Multi-Commit Plan:**
    - Multiple independent change types or layers exist.
    - More than 10 files or 300 lines of change.
-4. **Drafting:**
+3. **Drafting Standards:**
    - **Subject:** Max 50 chars, imperative, no trailing period. (Korean)
    - **Body:** Focus on 'WHY' and 'HOW'. (Korean)
    - **Hunk Splitting:** If a single file contains multiple distinct changes, explicitly add `(Use git add -p)` next to the file name in the plan.
 
-## 3. OUTPUT SCHEMA
-Choose the most efficient structure based on the diff analysis.
+## 📋 Output Schema
 
 ### CASE A: Single Focused Change
 🤖 **Suggested Commit Message**
