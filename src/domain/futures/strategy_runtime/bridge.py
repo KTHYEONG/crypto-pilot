@@ -110,7 +110,7 @@ def run_candidate_strategy_for_universe(
 
     from dataclasses import replace
 
-    from src.domain.futures.strategy.ablation import apply_variant_promotions
+    from src.domain.futures.strategy.ablation import apply_variant_promotions, validate_candidate_signals
     from src.domain.futures.strategy.candidate_dataset import build_candidate_dataset
     from src.domain.futures.strategy.candidate_edge import fit_candidate_edge_models, predict_candidate_edges
     from src.domain.futures.strategy.candidate_gate import fit_candidate_gate, predict_candidate_gate
@@ -126,6 +126,7 @@ def run_candidate_strategy_for_universe(
         build_rule_signal_panels,
         candidate_panels_to_events,
     )
+    from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
 
     aligned = align_data_maps(preloaded_data_maps, symbols, tf)
     n_bars = aligned.close_2d.shape[0]
@@ -242,63 +243,293 @@ def run_candidate_strategy_for_universe(
             )
     promoted_total = len(labeled)
 
-    fit_set = build_candidate_dataset(
+    # Compute split indices needed for signal_only + WF (done once for OOS window bounds)
+    if strategy_cfg.candidate.wf_enabled and strategy_cfg.candidate.wf_scheme != "single":
+        _folds = build_walk_forward_folds(n_bars=n_bars, cfg=strategy_cfg.candidate)
+        _oos_start_ref = _folds[0].oos_start if _folds else 0
+        _oos_end_ref = _folds[-1].oos_end if _folds else n_bars
+    else:
+        _s = _candidate_ml_split_indices(
+            n_bars=n_bars,
+            fit_fraction=strategy_cfg.candidate.ml_fit_fraction,
+            calibration_fraction=strategy_cfg.candidate.ml_calibration_fraction,
+            purge_bars=strategy_cfg.candidate.purge_bars,
+            embargo_bars=strategy_cfg.candidate.embargo_bars,
+        )
+        _oos_start_ref, _oos_end_ref = _s[4], _s[5]
+        _folds = None  # single-fold path handled below
+
+    # signal_only: validate rule signals, skip ML training
+    if strategy_cfg.candidate.signal_only:
+        signal_reports = validate_candidate_signals(
+            labeled=labeled,
+            diag=diag,
+            cfg=strategy_cfg.candidate,
+            oos_start=_oos_start_ref,
+            oos_end=_oos_end_ref,
+        )
+        any_passes = any(r.survives_cost for r in signal_reports)
+        _logger.info(
+            "[SIGNAL-VALIDATION] variants=%d any_passes=%s",
+            len(signal_reports),
+            any_passes,
+        )
+        for rpt in signal_reports:
+            _logger.info(
+                "[SIGNAL-VALIDATION] variant=%s n=%d net_p50=%.1f stress_p50=%.1f "
+                "hit=%.3f t=%.2f survives=%s",
+                rpt.variant, rpt.n_events, rpt.net_edge_bps_p50,
+                rpt.net_edge_bps_stress_p50, rpt.hit_rate, rpt.ir_t_stat, rpt.survives_cost,
+            )
+        alpha_panel_sv = build_candidate_alpha_panel(
+            selected_events=pd.DataFrame(),
+            target_weights_2d=np.zeros_like(aligned.close_2d),
+            datetimes=aligned.datetimes,
+            symbols=tuple(symbols),
+        )
+        return CandidatePipelineOutput(
+            alpha_panel=alpha_panel_sv,
+            target_weights=np.zeros_like(aligned.close_2d),
+            rule_report={
+                "events_total": len(raw_events),
+                "labeled_total": len(labeled),
+                "promoted_total": promoted_total,
+                "fit_total": 0,
+                "calibration_total": 0,
+                "oos_total": 0,
+                "selected_pre_group": 0,
+                "selected_total": 0,
+                "eligible": 0,
+                "n_keep": 0,
+                "policy": strategy_cfg.candidate.selection_policy,
+                "zero_reason": "signal_only_mode",
+                "gate_calibration_used": False,
+                "gate_calibration_reason": "signal_only_mode",
+                "recommended_keep_variants": diag.recommended_keep_variants,
+                "recommended_flip_variants": diag.recommended_flip_variants,
+                "signal_validation": [
+                    {
+                        "variant": r.variant,
+                        "n_events": r.n_events,
+                        "net_edge_bps_p50": r.net_edge_bps_p50,
+                        "net_edge_bps_stress_p50": r.net_edge_bps_stress_p50,
+                        "hit_rate": r.hit_rate,
+                        "ir_t_stat": r.ir_t_stat,
+                        "survives_cost": r.survives_cost,
+                        "deployment_count": r.deployment_count,
+                    }
+                    for r in signal_reports
+                ],
+                "signal_validation_pass": any_passes,
+            },
+        )
+
+    # Build WF folds (multi-fold or single)
+    wf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=strategy_cfg.candidate) if _folds is None else _folds
+
+    # --- WF fold loop: train per fold, concat OOS predictions ---
+    fold_p_pass_parts: list[np.ndarray] = []
+    fold_mu_parts: list[np.ndarray] = []
+    fold_q10_parts: list[np.ndarray] = []
+    fold_q90_parts: list[np.ndarray] = []
+    fold_utility_parts: list[np.ndarray] = []
+    fold_event_parts: list[Any] = []
+    fold_gate_model = None
+    fold_edge_models = None
+    fold_calibration_used = False
+    fold_calibration_reason = "not_fit"
+    total_fit = total_cal = total_oos = 0
+    fold_cost_survival: list[bool] = []  # per-fold cost survival for min_wf_fold_pass_ratio gate
+
+    for fold in wf_folds:
+        fit_set = build_candidate_dataset(
+            labeled_events=labeled,
+            aligned=aligned,
+            cfg=strategy_cfg.candidate,
+            split_start=fold.fit_start,
+            split_end=fold.fit_end,
+        )
+        calibration_set = build_candidate_dataset(
+            labeled_events=labeled,
+            aligned=aligned,
+            cfg=strategy_cfg.candidate,
+            split_start=fold.cal_start,
+            split_end=fold.cal_end,
+        )
+        oos_set = build_candidate_dataset(
+            labeled_events=labeled,
+            aligned=aligned,
+            cfg=strategy_cfg.candidate,
+            split_start=fold.oos_start,
+            split_end=fold.oos_end,
+        )
+        total_fit += int(fit_set.X.shape[0])
+        total_cal += int(calibration_set.X.shape[0])
+        total_oos += int(oos_set.X.shape[0])
+
+        # Prior-only fallback when fit set is too small
+        if fit_set.X.shape[0] < strategy_cfg.candidate.min_fit_obs:
+            _logger.warning(
+                "[BRIDGE][WF] fold oos=[%d,%d) fit_obs=%d < min_fit_obs=%d; prior-only",
+                fold.oos_start, fold.oos_end,
+                int(fit_set.X.shape[0]), strategy_cfg.candidate.min_fit_obs,
+            )
+            fold_cost_survival.append(False)  # prior-only = no cost survival
+            if oos_set.X.shape[0] > 0:
+                n_oos = oos_set.X.shape[0]
+                fold_p_pass_parts.append(np.full(n_oos, 0.5, dtype=np.float64))
+                fold_mu_parts.append(np.zeros(n_oos, dtype=np.float64))
+                fold_q10_parts.append(np.zeros(n_oos, dtype=np.float64))
+                fold_q90_parts.append(np.zeros(n_oos, dtype=np.float64))
+                fold_utility_parts.append(np.zeros(n_oos, dtype=np.float64))
+                fold_event_parts.append(oos_set.event_index)
+            continue
+
+        fold_gate_model = fit_candidate_gate(train=fit_set, valid=calibration_set, cfg=strategy_cfg.candidate)
+        fold_edge_models = fit_candidate_edge_models(train=fit_set, valid=calibration_set, cfg=strategy_cfg.candidate)
+        fold_calibration_used = bool(fold_gate_model.calibration_used) if fold_gate_model is not None else False
+        fold_calibration_reason = fold_gate_model.calibration_reason if fold_gate_model is not None else "not_fit"
+
+        fold_p = predict_candidate_gate(model=fold_gate_model, dataset=oos_set)
+        fold_ml = predict_candidate_edges(
+            models=fold_edge_models, dataset=oos_set, p_pass=fold_p, cfg=strategy_cfg.candidate
+        )
+        # cost survival: fold mean net edge > 0 (mu_net_decision_bps is already cost/hurdle-deducted)
+        _fold_mu_finite = fold_ml.mu_net_decision_bps[np.isfinite(fold_ml.mu_net_decision_bps)]
+        fold_cost_survival.append(
+            float(np.mean(_fold_mu_finite)) > 0.0
+            if _fold_mu_finite.size > 0 else False
+        )
+        fold_p_pass_parts.append(fold_p)
+        fold_mu_parts.append(fold_ml.mu_net_decision_bps)
+        fold_q10_parts.append(fold_ml.q10_net_bps)
+        fold_q90_parts.append(fold_ml.q90_net_bps)
+        fold_utility_parts.append(fold_ml.utility_score)
+        fold_event_parts.append(oos_set.event_index)
+
+    # Combine fold OOS outputs (time-ordered concat)
+    if fold_event_parts:
+        combined_events = (
+            pd.concat(fold_event_parts, ignore_index=True) if len(fold_event_parts) > 1 else fold_event_parts[0]
+        )
+        p_pass = np.concatenate(fold_p_pass_parts) if fold_p_pass_parts else np.array([], dtype=np.float64)
+        _combined_mu = np.concatenate(fold_mu_parts) if fold_mu_parts else np.array([], dtype=np.float64)
+        _combined_q10 = np.concatenate(fold_q10_parts) if fold_q10_parts else np.array([], dtype=np.float64)
+        _combined_q90 = np.concatenate(fold_q90_parts) if fold_q90_parts else np.array([], dtype=np.float64)
+        _combined_utility = np.concatenate(fold_utility_parts) if fold_utility_parts else np.array([], dtype=np.float64)
+    else:
+        # Fallback: use last fold's full OOS as single-fold behavior
+        oos_set_fallback = build_candidate_dataset(
+            labeled_events=labeled,
+            aligned=aligned,
+            cfg=strategy_cfg.candidate,
+            split_start=_oos_start_ref,
+            split_end=_oos_end_ref,
+        )
+        combined_events = oos_set_fallback.event_index
+        p_pass = predict_candidate_gate(model=fold_gate_model, dataset=oos_set_fallback)
+        _fallback_ml = predict_candidate_edges(
+            models=fold_edge_models, dataset=oos_set_fallback, p_pass=p_pass, cfg=strategy_cfg.candidate
+        )
+        _combined_mu = _fallback_ml.mu_net_decision_bps
+        _combined_q10 = _fallback_ml.q10_net_bps
+        _combined_q90 = _fallback_ml.q90_net_bps
+        _combined_utility = _fallback_ml.utility_score
+        total_oos = int(oos_set_fallback.X.shape[0])
+
+    # Use last fold's models for selection_thresholds (best fit available)
+    _last_oos_set = build_candidate_dataset(
         labeled_events=labeled,
         aligned=aligned,
         cfg=strategy_cfg.candidate,
-        split_start=fit_start,
-        split_end=fit_end,
+        split_start=wf_folds[-1].oos_start,
+        split_end=wf_folds[-1].oos_end,
     )
-    calibration_set = build_candidate_dataset(
-        labeled_events=labeled,
-        aligned=aligned,
+    _ref_ml = predict_candidate_edges(
+        models=fold_edge_models, dataset=_last_oos_set,
+        p_pass=predict_candidate_gate(model=fold_gate_model, dataset=_last_oos_set),
         cfg=strategy_cfg.candidate,
-        split_start=calibration_start,
-        split_end=calibration_end,
     )
-    oos_set = build_candidate_dataset(
-        labeled_events=labeled,
-        aligned=aligned,
-        cfg=strategy_cfg.candidate,
-        split_start=oos_start,
-        split_end=oos_end,
+    from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
+    ml_out = CandidateModelOutput(
+        events=combined_events,
+        p_pass=p_pass.astype(np.float64, copy=False) if p_pass.size > 0 else p_pass,
+        mu_gross_bps=_combined_mu,
+        mu_net_decision_bps=_combined_mu,
+        q10_net_bps=_combined_q10,
+        q90_net_bps=_combined_q90,
+        utility_score=_combined_utility,
+        selection_thresholds=_ref_ml.selection_thresholds,
     )
+    ml_out = replace(ml_out, events=combined_events)
+
+    # --- Cross-fold consistency gate (min_wf_fold_pass_ratio) ---
+    _n_folds_total = len(fold_cost_survival)
+    _n_folds_pass = sum(fold_cost_survival)
+    _fold_pass_ratio = _n_folds_pass / max(_n_folds_total, 1)
+    _logger.info(
+        "[BRIDGE][WF] fold_cost_survival=%s pass_ratio=%.2f min_required=%.2f",
+        fold_cost_survival,
+        _fold_pass_ratio,
+        strategy_cfg.candidate.min_wf_fold_pass_ratio,
+    )
+    if _fold_pass_ratio < strategy_cfg.candidate.min_wf_fold_pass_ratio:
+        _logger.warning(
+            "[BRIDGE][WF] fold_pass_ratio=%.2f < min_wf_fold_pass_ratio=%.2f → fail-closed",
+            _fold_pass_ratio,
+            strategy_cfg.candidate.min_wf_fold_pass_ratio,
+        )
+        _wf_fail_panel = build_candidate_alpha_panel(
+            selected_events=pd.DataFrame(),
+            target_weights_2d=np.zeros_like(aligned.close_2d),
+            datetimes=aligned.datetimes,
+            symbols=tuple(symbols),
+        )
+        return CandidatePipelineOutput(
+            alpha_panel=_wf_fail_panel,
+            target_weights=np.zeros_like(aligned.close_2d),
+            rule_report={
+                "events_total": len(raw_events),
+                "labeled_total": len(labeled),
+                "promoted_total": promoted_total,
+                "fit_total": total_fit,
+                "calibration_total": total_cal,
+                "oos_total": total_oos,
+                "selected_pre_group": 0,
+                "selected_total": 0,
+                "eligible": 0,
+                "n_keep": 0,
+                "policy": strategy_cfg.candidate.selection_policy,
+                "zero_reason": "wf_fold_pass_ratio_fail",
+                "gate_calibration_used": fold_calibration_used,
+                "gate_calibration_reason": fold_calibration_reason,
+                "wf_fold_pass_ratio": _fold_pass_ratio,
+                "wf_n_folds": _n_folds_total,
+                "wf_scheme": strategy_cfg.candidate.wf_scheme,
+                "recommended_keep_variants": diag.recommended_keep_variants,
+                "recommended_flip_variants": diag.recommended_flip_variants,
+            },
+        )
+
+    # For downstream logging, expose last-fold model state
+    gate_model = fold_gate_model
+    # Reconstruct oos_set for report counts (use combined)
+    oos_set = _last_oos_set
 
     _logger.info(
         (
             "[DIAG][PIPELINE] raw=%d labeled=%d promoted=%d fit=%d cal=%d oos=%d "
-            "splits fit=[%d,%d) cal=[%d,%d) oos=[%d,%d) "
-            "y_gate_pos_rate fit=%.3f cal=%.3f oos=%.3f"
+            "n_folds=%d wf_scheme=%s"
         ),
         len(raw_events),
         len(labeled),
         promoted_total,
-        int(fit_set.X.shape[0]),
-        int(calibration_set.X.shape[0]),
-        int(oos_set.X.shape[0]),
-        fit_start,
-        fit_end,
-        calibration_start,
-        calibration_end,
-        oos_start,
-        oos_end,
-        float(fit_set.y_gate.mean()) if fit_set.X.shape[0] > 0 else 0.0,
-        float(calibration_set.y_gate.mean()) if calibration_set.X.shape[0] > 0 else 0.0,
-        float(oos_set.y_gate.mean()) if oos_set.X.shape[0] > 0 else 0.0,
+        total_fit,
+        total_cal,
+        total_oos,
+        len(wf_folds),
+        strategy_cfg.candidate.wf_scheme,
     )
-
-    gate_model = None
-    if fit_set.X.shape[0] >= 2:
-        gate_model = fit_candidate_gate(train=fit_set, valid=calibration_set, cfg=strategy_cfg.candidate)
-
-    edge_models = None
-    if fit_set.X.shape[0] >= 2:
-        edge_models = fit_candidate_edge_models(train=fit_set, valid=calibration_set, cfg=strategy_cfg.candidate)
-
-    # OOS-only predict: fit/calibration rows are excluded from inference.
-    p_pass = predict_candidate_gate(model=gate_model, dataset=oos_set)
-    ml_out = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=strategy_cfg.candidate)
-    ml_out = replace(ml_out, events=oos_set.event_index)
     gate_summary = _finite_summary(p_pass)
     edge_summary = _finite_summary(ml_out.mu_net_decision_bps)
     q10_summary = _finite_summary(ml_out.q10_net_bps)
@@ -383,22 +614,20 @@ def run_candidate_strategy_for_universe(
             "events_total": len(raw_events),
             "labeled_total": len(labeled),
             "promoted_total": promoted_total,
-            "fit_total": int(fit_set.X.shape[0]),
-            "calibration_total": int(calibration_set.X.shape[0]),
-            "oos_total": int(oos_set.X.shape[0]),
-            "fit_start": fit_start,
-            "fit_end": fit_end,
-            "calibration_start": calibration_start,
-            "calibration_end": calibration_end,
-            "oos_start": oos_start,
-            "oos_end": oos_end,
-            "y_gate_fit_pos_rate": float(fit_set.y_gate.mean()) if fit_set.X.shape[0] > 0 else 0.0,
-            "y_gate_calibration_pos_rate": (
-                float(calibration_set.y_gate.mean()) if calibration_set.X.shape[0] > 0 else 0.0
-            ),
-            "y_gate_oos_pos_rate": float(oos_set.y_gate.mean()) if oos_set.X.shape[0] > 0 else 0.0,
-            "gate_calibration_used": bool(gate_model.calibration_used) if gate_model is not None else False,
-            "gate_calibration_reason": gate_model.calibration_reason if gate_model is not None else "not_fit",
+            "fit_total": total_fit,
+            "calibration_total": total_cal,
+            "oos_total": total_oos,
+            "fit_start": wf_folds[0].fit_start,
+            "fit_end": wf_folds[-1].fit_end,
+            "calibration_start": wf_folds[0].cal_start,
+            "calibration_end": wf_folds[-1].cal_end,
+            "oos_start": wf_folds[0].oos_start,
+            "oos_end": wf_folds[-1].oos_end,
+            "wf_n_folds": len(wf_folds),
+            "wf_scheme": strategy_cfg.candidate.wf_scheme,
+            "y_gate_oos_pos_rate": float(np.mean(p_pass > 0.5)) if p_pass.size > 0 else 0.0,
+            "gate_calibration_used": fold_calibration_used,
+            "gate_calibration_reason": fold_calibration_reason,
             "gate_p_mean": gate_summary["mean"],
             "gate_p_median": gate_summary["median"],
             "gate_p_p90": gate_summary["p90"],
