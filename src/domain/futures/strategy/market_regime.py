@@ -16,6 +16,26 @@ _REGIME_NAMES = (
     "crash",
 )
 
+# 4-state regime names: coarser, more robust for sizing multipliers.
+_REGIME_NAMES_4STATE = (
+    "trend_up",
+    "trend_up",   # bull_volatile -> trend_up
+    "trend_down",
+    "trend_down",  # bear_volatile -> trend_down
+    "chop",        # transition -> chop
+    "crisis",      # crash -> crisis
+)
+
+# Mapping from 6-state code to 4-state name (index matches _REGIME_NAMES).
+_6STATE_TO_4STATE: dict[str, str] = {
+    "bull_quiet": "trend_up",
+    "bull_volatile": "trend_up",
+    "bear_quiet": "trend_down",
+    "bear_volatile": "trend_down",
+    "transition": "chop",
+    "crash": "crisis",
+}
+
 
 def _ema_1d(values: NDArray[np.float64], span: int) -> NDArray[np.float64]:
     alpha = 2.0 / (float(span) + 1.0)
@@ -111,4 +131,34 @@ def compute_market_regime_context(*, aligned: AlignedMarketData) -> MarketRegime
         trend_score_1d=trend_score,
         vol_z_1d=vol_z,
         dispersion_z_1d=dispersion_z,
+    )
+
+
+def compute_market_regime_context_4state(*, aligned: AlignedMarketData) -> MarketRegimeContext:
+    """Return a 4-state coarsened regime context.
+
+    Maps the 6-state output of :func:`compute_market_regime_context` to 4 states:
+    - ``trend_up``  : bull_quiet | bull_volatile
+    - ``trend_down``: bear_quiet | bear_volatile
+    - ``chop``      : transition
+    - ``crisis``    : crash
+
+    The coarser representation improves robustness and is intended for use as a
+    sizing multiplier layer rather than a signal gate.
+
+    Args:
+        aligned: Aligned market data with at least a BTC symbol.
+
+    Returns:
+        :class:`MarketRegimeContext` with 4-state codes.  ``name_by_code`` is
+        a length-6 tuple that maps the same 0-5 integer codes to 4-state names,
+        so downstream consumers can keep the same indexing logic.
+    """
+    ctx_6 = compute_market_regime_context(aligned=aligned)
+    return MarketRegimeContext(
+        code_1d=ctx_6.code_1d,
+        name_by_code=_REGIME_NAMES_4STATE,
+        trend_score_1d=ctx_6.trend_score_1d,
+        vol_z_1d=ctx_6.vol_z_1d,
+        dispersion_z_1d=ctx_6.dispersion_z_1d,
     )

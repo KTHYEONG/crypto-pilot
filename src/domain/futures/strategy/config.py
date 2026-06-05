@@ -150,8 +150,18 @@ class CandidateStrategyConfig:
     diagnostic_top_k: int = 10
     min_variant_oos_obs: int = 100
     min_variant_oos_edge_bps: float = 1.0
-    min_variant_oos_median_edge_bps: float = 0.0
-    min_variant_oos_p10_edge_bps: float = -150.0
+    # Any ATR-stop strategy has median<0 + mean>0 as a structural property.
+    # Use mean_edge + hit_or_payoff as economic gates; median is a soft diagnostic.
+    min_variant_oos_median_edge_bps: float = -100.0
+    median_gate_skew_exempt_archetypes: tuple[str, ...] = (
+        "trend_continuation",
+        "time_series_momentum",
+    )
+    # p10 for crypto futures with 1.5-2.5x ATR stops is structurally -300~-500bps.
+    # Primary tail guard is q10_fail_rate; p10 is a hard outlier filter only.
+    min_variant_oos_p10_edge_bps: float = -600.0
+    p10_edge_relative_to_stop: bool = False
+    p10_min_fraction_of_stop: float = 1.5
     min_variant_oos_hit_rate: float = 0.50
     min_variant_oos_payoff_ratio: float = 1.20
     max_variant_oos_q10_fail_rate: float = 0.90
@@ -159,9 +169,26 @@ class CandidateStrategyConfig:
     regime_diagnostic_enabled: bool = True
     min_regime_variant_oos_obs: int = 40
     min_regime_variant_oos_edge_bps: float = 2.0
-    regime_signal_gating_enabled: bool = True
+    # Set to False to remove hard regime-based signal masking; regime moves to
+    # sizing multiplier layer (see regime_as_size_multiplier).
+    regime_signal_gating_enabled: bool = False
+    # When True, apply per-regime continuous weight multipliers at sizing stage.
+    regime_as_size_multiplier: bool = False
+    regime_size_multipliers: tuple[tuple[str, float], ...] = (
+        ("crash", 0.3),
+        ("bear_volatile", 0.5),
+        ("transition", 0.7),
+        ("bull_volatile", 0.85),
+        ("bull_quiet", 1.0),
+        ("bear_quiet", 0.8),
+    )
     max_exit_policy_variants_per_signal: int = 2
     diagnose_signal_cells: bool = True
+    # "variant": promote at family:variant granularity (regime pooled).
+    # "signal_cell": legacy per-cell AND-conjunction (fail-closed).
+    promotion_level: Literal["signal_cell", "variant"] = "variant"
+    # Vol-normalised percentile edge (atr_bps column required; skeleton if absent)
+    edge_percentile_vol_normalized: bool = False
     min_signal_cell_oos_obs: int = 80
     max_signal_cell_event_fraction_per_bar: float = 0.12
     candidate_identity_features_enabled: bool = True

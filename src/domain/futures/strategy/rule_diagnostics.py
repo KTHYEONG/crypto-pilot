@@ -151,6 +151,14 @@ def _edge_summary_from_frame(frame: pd.DataFrame, *, cfg: CandidateStrategyConfi
     finite_mfe = mfe[np.isfinite(mfe)]
     finite_shortfall = finite_mae < -float(cfg.max_expected_shortfall_bps)
 
+    # Phase 2 skeleton — vol-normalised percentile edge.
+    # Requires `atr_bps` column in the events frame (not yet emitted by
+    # rule_signals.py). When available, normalise: edge_norm = edge / atr_bps
+    # using t-1 ATR to prevent look-ahead bias, then derive median/p10 from the
+    # normalised distribution.  Until atr_bps is added, cfg.edge_percentile_vol_normalized
+    # is a no-op; the flag is reserved for the next spec iteration.
+    # TODO(Phase2): implement when atr_bps column is available in labeled events.
+
     return {
         "mean_edge_bps": float(np.mean(finite_edge)) if finite_edge.size > 0 else float("nan"),
         "median_edge_bps": float(np.median(finite_edge)) if finite_edge.size > 0 else float("nan"),
@@ -309,7 +317,13 @@ def _summarize_recommendation_variants(
     side_flip_lookup: Mapping[str, tuple[float | None, float | None]] | None = None,
 ) -> pd.DataFrame:
     """Summarize variant metrics for the recommendation window only."""
-    use_signal_cells = bool(cfg.diagnose_signal_cells and "signal_cell" in events.columns)
+    # When promotion_level == "variant", group at family:variant granularity
+    # regardless of diagnose_signal_cells to avoid obs fragmentation.
+    use_signal_cells = bool(
+        cfg.diagnose_signal_cells
+        and "signal_cell" in events.columns
+        and cfg.promotion_level == "signal_cell"
+    )
     regime_names = ("bear_quiet", "bear_volatile", "bull_quiet", "bull_volatile")
     close = aligned.close_2d
     log_ret = np.zeros_like(close, dtype=np.float64)
@@ -647,14 +661,48 @@ def _recommendation_threshold_checks(row: pd.Series, cfg: CandidateStrategyConfi
         float(row.get("oos_pct_edge_pos", 0.0)) >= cfg.min_variant_oos_hit_rate
         or float(row.get("oos_payoff_ratio", 0.0)) >= cfg.min_variant_oos_payoff_ratio
     )
+    # Archetype-aware median gate: right-skewed payoff archetypes (trend/momentum)
+    # structurally exhibit median<0 + mean>0; exempt from the absolute median floor.
+    archetype = str(row.get("archetype", ""))
+    median_exempt = archetype in cfg.median_gate_skew_exempt_archetypes
+    median_ok = median_exempt or (
+        float(row.get("oos_median_edge_bps", float("nan"))) >= cfg.min_variant_oos_median_edge_bps
+    )
+
+    # p10 floor: relative to stop size when p10_edge_relative_to_stop is True.
+    # avg_stop_loss_bps is derived from stop_atr_mult if present; falls back to
+    # the absolute threshold otherwise.
+    if cfg.p10_edge_relative_to_stop:
+        stop_atr_mult_val = float(row.get("stop_atr_mult", 0.0))
+        if stop_atr_mult_val > 0.0:
+            # Use stop_atr_mult as a proxy for stop distance in bps units.
+            # The multiplier itself is dimensionless; treat it as bps proxy
+            # (e.g. stop_atr_mult=1.5 -> floor = -(1.5 * 1.5 * 100) = -225bps).
+            # If avg_stop_loss_bps is available use it directly.
+            avg_stop_bps = float(row.get("avg_stop_loss_bps", stop_atr_mult_val * 100.0))
+            p10_floor = -(cfg.p10_min_fraction_of_stop * abs(avg_stop_bps))
+        else:
+            p10_floor = cfg.min_variant_oos_p10_edge_bps
+    else:
+        p10_floor = cfg.min_variant_oos_p10_edge_bps
+    p10_ok = float(row.get("oos_p10_edge_bps", float("nan"))) >= p10_floor
+
+    # regime_edge is diagnostic-only when promotion_level == "variant" to avoid
+    # triple-penalty (masking + fragmentation + gating).
+    regime_ok = (
+        bool(row.get("regime_pass", False))
+        if (cfg.regime_diagnostic_enabled and cfg.promotion_level == "signal_cell")
+        else True
+    )
+
     return {
         "min_obs": int(row.get("oos_n", 0)) >= min_obs,
         "mean_edge": float(row.get("oos_mean_edge_bps", float("nan"))) >= cfg.min_variant_oos_edge_bps,
-        "median_edge": float(row.get("oos_median_edge_bps", float("nan"))) >= cfg.min_variant_oos_median_edge_bps,
-        "p10_edge": float(row.get("oos_p10_edge_bps", float("nan"))) >= cfg.min_variant_oos_p10_edge_bps,
+        "median_edge": median_ok,
+        "p10_edge": p10_ok,
         "q10_fail": float(row.get("oos_q10_shortfall_fail_rate", 1.0)) <= cfg.max_variant_oos_q10_fail_rate,
         "event_density": float(row.get("event_fraction_per_bar", 1.0)) <= max_event_fraction,
-        "regime_edge": bool(row.get("regime_pass", False)) if cfg.regime_diagnostic_enabled else True,
+        "regime_edge": regime_ok,
         "edge_decay": edge_decay_ok,
         "hit_or_payoff": hit_or_payoff_ok,
         "exit_policy": bool(str(row.get("exit_policy_id", ""))) if is_signal_cell else True,
