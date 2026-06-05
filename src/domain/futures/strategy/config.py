@@ -122,10 +122,10 @@ class CandidateStrategyConfig:
     min_gate_probability_std: float = 0.03
     percentile_gate_enabled: bool = False
     percentile_gate_threshold: float = 0.70  # top 30% signals pass
-    gate_lgbm_max_depth: int = 2
-    gate_lgbm_reg_lambda: float = 100.0
-    edge_lgbm_max_depth: int = 2
-    edge_lgbm_reg_lambda: float = 100.0
+    gate_lgbm_max_depth: int = 3
+    gate_lgbm_reg_lambda: float = 30.0
+    edge_lgbm_max_depth: int = 3
+    edge_lgbm_reg_lambda: float = 30.0
     ml_fit_fraction: float = 0.60
     ml_calibration_fraction: float = 0.20
     promotion_decision_split: Literal["fit", "calibration", "fit_calibration"] = "fit_calibration"
@@ -168,7 +168,7 @@ class CandidateStrategyConfig:
     selection_shadow_breakeven_floor_fractions: tuple[float, ...] = (0.0, 0.25, 0.50)
     selection_shadow_top_quantile: float = 0.10
     selection_shadow_max_profiles: int = 20
-    selection_utility_mode: Literal["additive_drag", "expected_edge_direct"] = "additive_drag"
+    selection_utility_mode: Literal["additive_drag", "expected_edge_direct"] = "expected_edge_direct"
     selection_shadow_utility_modes: tuple[str, ...] = ("additive_drag", "expected_edge_direct")
     breakeven_floor_mode: Literal["static", "fold_adaptive"] = "static"
     breakeven_floor_cost_quantile: float = 0.50
