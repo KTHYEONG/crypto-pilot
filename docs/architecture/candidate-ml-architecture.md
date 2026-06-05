@@ -1,6 +1,6 @@
 # Candidate ML Architecture
 
-> last_verified: 2026-06-05
+> last_verified: 2026-06-05 (Phase 1~3 적용 후 감사 완료)
 
 ## Scope
 This document describes the current candidate-driven futures strategy architecture in the codebase.
@@ -215,32 +215,38 @@ Schemes: `anchored` (default, fit_start=0 fixed), `rolling` (fixed-length fit wi
 
 ## Signal-Only Mode
 
-`--phase signal` CLI argument → `FuturesRunConfig.phase="signal"` → `strategy_cfg.candidate.signal_only=True`. Bridge short-circuits before ML training, emits `SignalValidationReport` (rule_only and rule_promo_no_leak variants), and returns zero weights. Validation criteria: stress-RT-adjusted p50 > 0 AND t-stat ≥ min_rule_ir_t.
+`--phase signal` CLI argument → `FuturesRunConfig.phase="signal"` → `strategy_cfg.candidate.signal_only=True`. Bridge short-circuits before ML training, emits `SignalValidationReport` (rule_only and rule_promo_no_leak variants), and returns zero weights.
 
-## Signal Promotion Contract
+**Validation criteria (2026-06-05 현재, pending redesign):**
+- `net_stress_p50 > 0` AND `ir_t ≥ min_rule_ir_t` — 현재 median 기반이어서 right-skew payoff 전략에 불리.
+- `docs/specs/signal_gate_expectancy_redesign.md` 에서 **mean-net 기반**으로 교체 예정.
 
-Signal promotion is now intentionally fail-closed. A `signal_cell` is recommended only when it clears all of the following on the recommendation window:
+`Status: BLOCKED`는 signal mode에서 항상 표시(target_weights=zeros가 설계상 정상). 실질 판단 지표는 `zero_reason` 필드:
+- `promotion_filter_empty` → 승격 실패(이전 상태).
+- `signal_only_mode` → 승격 성공, 배포만 미진행(현재 상태).
 
-- variant-level mean edge, median edge, and p10 tail floor
-- q10 shortfall fail-rate and event-density ceiling
-- hit-rate or payoff-ratio minimum
-- edge-decay guard
-- regime-local survival gate
+## Signal Promotion Contract (2026-06-05 현재 상태)
 
-The regime gate uses a 6-state market partition derived from trailing-only market-state features:
+`promotion_level="variant"` — signal_cell 분할 없이 family:variant 단위 평가. (Phase 1 변경)
 
-- `bear_quiet`
-- `bear_volatile`
-- `bull_quiet`
-- `bull_volatile`
-- `transition`
-- `crash`
+A variant is KEEP when it clears **all** of:
+- `mean_edge ≥ min_variant_oos_edge_bps` (1.0bps gross; 향후 net 기준 전환 예정)
+- `median_edge ≥ −100bps` (Phase 1 완화값; `signal_gate_expectancy_redesign`에서 −50 + net mean 교체 예정)
+- `p10_edge ≥ −600bps` (Phase 1 완화값; 교체 예정 −400)
+- `q10_fail_rate ≤ max_variant_oos_q10_fail_rate`
+- `event_density ≤ max_variant_event_fraction_per_bar`
+- `hit_or_payoff` — hit_rate ≥ 0.50 OR payoff_ratio ≥ 1.20
+- `edge_decay ≥ −max_oos_edge_decay_bps`
+- `regime_edge` — diagnostic-only (variant mode에서 gate 제외)
 
-Implementation rule:
+**알려진 문제 (pending fix):** 현재 −100/−600 완화로 인해 keep-set이 pass-through에 가까워 블렌드 경제성 미검증. `signal_gate_expectancy_redesign.md` 구현 완료 전까지 **ML 단계 진행 금지**.
 
-- `regime_diagnostic_enabled=True` means a candidate must show at least one sufficiently observed regime (`min_regime_variant_oos_obs`) whose OOS mean edge is at least `min_regime_variant_oos_edge_bps`.
-- recommendation failures are logged through `[DIAG][RULE_RECOMMEND_FAIL_COUNTS]` and per-candidate `[DIAG][RULE_RECOMMEND_FAIL]` lines, including `variant=<family:variant>` and `cell=<signal_cell>`.
-- promotion filtering now prefers `recommended_keep_signal_cells` / `recommended_flip_signal_cells`; legacy `family:variant` keys remain as fallback.
+Regime partition (6-state, `compute_market_regime_context`):
+- `bull_quiet`, `bull_volatile`, `bear_quiet`, `bear_volatile`, `transition`, `crash`
+- BTC EMA20/100 추세 + 횡단면 vol-z 기반. `regime_signal_gating_enabled=False`(Phase 3) → 신호 생성 마스킹 제거됨.
+- 4-state 버전(`compute_market_regime_context_4state`) 추가됨(사이징 승수용 예비).
+
+Failure diagnostics: `[DIAG][RULE_RECOMMEND_FAIL_COUNTS]` → per-candidate `[DIAG][RULE_RECOMMEND_FAIL]` lines.
 
 The rule candidate pool now includes these additional families, each with explicit `metadata.archetype`, `metadata.regime`, and `metadata.edge_hypothesis`:
 
@@ -252,8 +258,6 @@ The rule candidate pool now includes these additional families, each with explic
 
 ## Current Gaps
 
-The current code still has known limits:
-
 - edge model still receives a negative-centered target distribution in some market regimes
 - rule family pruning is advisory, not yet wired into production selection
 - gate calibration collapses in early WF folds (small fit set); further min_fit_obs tuning may help
@@ -262,6 +266,7 @@ The current code still has known limits:
 - ML allocation remains valid only after rule candidates pass standalone post-cost edge gates.
 - Candidate families should encode archetype, regime, and entry trigger explicitly rather than acting as a flat rule list.
 - Adding more candidate variants without stricter diagnostics is not treated as signal improvement.
+- **[2026-06-05 신규] signal promotion 게이트가 경제적 판별력을 상실** — Phase 1 완화(median −100 / p10 −600)로 keep-set이 사실상 pass-through. `signal_gate_expectancy_redesign.md`에서 mean-net 게이트로 교체 예정. ML 진행 전 이 작업 완료 필수.
 
 ## Key Verification Paths
 
@@ -273,6 +278,7 @@ The current code still has known limits:
 
 ## Design Rule
 Do not add more ML complexity before the rule diagnostics prove that at least one family or variant can produce positive net edge after cost and hurdle.
+Do not proceed to `--phase ml` until `--phase signal` produces `overall_pass=True` with mean-net > 0 validated across OOS blocks.
 - `tests/unit/domain/futures/strategy/test_candidate_gate.py`
 - `tests/unit/domain/futures/strategy/test_candidate_edge.py`
 - `tests/unit/domain/futures/strategy/test_candidate_portfolio.py`
