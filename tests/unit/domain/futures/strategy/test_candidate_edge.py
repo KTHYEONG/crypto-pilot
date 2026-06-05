@@ -59,6 +59,7 @@ def test_predict_candidate_edges_applies_cost_and_utility_formula() -> None:
         downside_penalty=0.5,
         turnover_penalty=1.0,
         concentration_penalty=0.0,
+        selection_utility_mode="additive_drag",  # test additive formula path explicitly
     )
 
     models = fit_candidate_edge_models(train=train, valid=valid, cfg=cfg)
