@@ -424,7 +424,17 @@ def build_candidate_target_weights(
         variance_i = max(variance_i, 1e-12)
         # Fractional Kelly: raw_weight = kelly_fraction * mu_i_per_bar / variance_i
         raw_w = cfg.kelly_fraction * mu_i_per_bar / variance_i
-        signed_w = raw_w * np.sign(side)
+
+        # Phase 3: regime-as-size-multiplier.  Applies a continuous regime
+        # multiplier at the Kelly weight level before cap projection, so the
+        # signal itself is not masked — only position size is attenuated.
+        regime_mult = 1.0
+        if cfg.regime_as_size_multiplier:
+            regime_name = str(getattr(row, "entry_regime", ""))
+            regime_mult_map: dict[str, float] = dict(cfg.regime_size_multipliers)
+            regime_mult = regime_mult_map.get(regime_name, 1.0)
+
+        signed_w = raw_w * np.sign(side) * regime_mult
         raw_weights[t, s_idx] = signed_w
         event_records.append((t, s_idx, signed_w, holding_bars))
 
