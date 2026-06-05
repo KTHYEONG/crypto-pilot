@@ -148,6 +148,10 @@ class CandidateStrategyConfig:
     max_expected_shortfall_bps: float = 300.0
     shortfall_threshold_basis: Literal["absolute_bps", "stop_relative"] = "absolute_bps"
     max_expected_shortfall_stop_mult: float = 1.25
+    selection_gate_mode: Literal["off", "soft_floor", "hard_floor"] = "soft_floor"
+    selection_min_gate_probability_floor: float = 0.35
+    selection_use_expected_utility: bool = True
+    selection_min_expected_utility_bps: float = 0.0
     selection_shortfall_mode: Literal["hard", "penalty_only", "catastrophic"] = "penalty_only"
     catastrophic_shortfall_bps: float = 300.0
     catastrophic_shortfall_stop_mult: float = 1.50
@@ -250,6 +254,12 @@ class CandidateStrategyConfig:
     wf_n_folds: int = 4
     min_fit_obs: int = 200
     min_wf_fold_pass_ratio: float = 0.60
+    fold_survival_metric: Literal[
+        "predicted_mu_tstat", "realized_selected_edge", "realized_log_growth"
+    ] = "realized_selected_edge"
+    min_fold_selected_events: int = 20
+    min_fold_realized_edge_bps: float = 0.0
+    min_fold_log_growth: float = 0.0
     # Edge model utility parameters
     downside_penalty: float = 0.3
     turnover_penalty: float = 0.5
@@ -280,6 +290,9 @@ class CandidateStrategyConfig:
     blend_survival_use_mean: bool = True
     blend_survival_min_net_stress_bps: float = 0.0
     blend_survival_require_promoted: bool = True
+    kelly_use_probability_adjusted_mu: bool = True
+    kelly_downside_variance_floor_enabled: bool = True
+    candidate_metadata_forward_fill: bool = True
 
     def __post_init__(self) -> None:
         """Validate candidate strategy parameters."""
@@ -319,6 +332,10 @@ class CandidateStrategyConfig:
             raise ValueError("kelly_fraction must be in range (0.0, 0.25]")
         if self.cost_floor_bps < 0.0:
             raise ValueError("cost_floor_bps must be non-negative")
+        if self.selection_gate_mode not in {"off", "soft_floor", "hard_floor"}:
+            raise ValueError("unsupported selection_gate_mode")
+        if not (0.0 <= self.selection_min_gate_probability_floor <= 1.0):
+            raise ValueError("selection_min_gate_probability_floor must be in [0.0, 1.0]")
         if self.shortfall_threshold_basis not in {"absolute_bps", "stop_relative"}:
             raise ValueError("unsupported shortfall_threshold_basis")
         if self.max_expected_shortfall_stop_mult < 0.0:
@@ -339,6 +356,8 @@ class CandidateStrategyConfig:
             raise ValueError("gross cap must be at least max symbol weight")
         if self.min_candidate_obs <= 0 or self.min_symbol_oos_blocks <= 0:
             raise ValueError("minimum observations and blocks must be positive")
+        if self.min_fold_selected_events < 1:
+            raise ValueError("min_fold_selected_events must be >= 1")
         if self.diagnostic_top_k < 1:
             raise ValueError("diagnostic_top_k must be >= 1")
         if self.min_variant_oos_obs < 1:
@@ -379,6 +398,12 @@ class CandidateStrategyConfig:
             raise ValueError("cost_stress_multiplier must be >= 1.0")
         if self.wf_scheme not in {"anchored", "rolling", "single"}:
             raise ValueError("wf_scheme must be anchored, rolling, or single")
+        if self.fold_survival_metric not in {
+            "predicted_mu_tstat",
+            "realized_selected_edge",
+            "realized_log_growth",
+        }:
+            raise ValueError("unsupported fold_survival_metric")
         if self.wf_n_folds < 1:
             raise ValueError("wf_n_folds must be >= 1")
         if self.min_fit_obs < 1:
