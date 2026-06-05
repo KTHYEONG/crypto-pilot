@@ -11,7 +11,8 @@ from src.domain.futures.strategy.config import CandidateStrategyConfig
 
 _BPS_SCALE = 1e4
 _ATR_PERIOD = 14
-_EXIT_POLICY_VERSION = "candidate_label_atr_v1"
+_ATR_FALLBACK_FRACTION = 0.01  # L-4: fallback when ATR unavailable; was inline magic number
+_EXIT_POLICY_VERSION = "candidate_label_atr_v2"
 _logger = logging.getLogger(__name__)
 
 
@@ -63,7 +64,8 @@ def label_candidate_events(
     gross_list: list[float] = []
     cost_list: list[float] = []
     edge_list: list[float] = []
-    barrier_label_list: list[int] = []
+    raw_barrier_label_list: list[int] = []  # L-1: raw triple-barrier result (TP=1, SL/time=0)
+    barrier_label_list: list[int] = []      # L-1: cost-conditioned label (TP AND edge>0)
     profitable_label_list: list[int] = []
     tte_list: list[int] = []
     mae_list: list[float] = []
@@ -88,6 +90,7 @@ def label_candidate_events(
             gross_list.append(np.nan)
             cost_list.append(np.nan)
             edge_list.append(np.nan)
+            raw_barrier_label_list.append(0)
             barrier_label_list.append(0)
             profitable_label_list.append(0)
             tte_list.append(0)
@@ -105,6 +108,7 @@ def label_candidate_events(
             gross_list.append(np.nan)
             cost_list.append(np.nan)
             edge_list.append(np.nan)
+            raw_barrier_label_list.append(0)
             barrier_label_list.append(0)
             profitable_label_list.append(0)
             tte_list.append(0)
@@ -123,7 +127,7 @@ def label_candidate_events(
         close_path = aligned.close_2d[entry_idx : exit_limit + 1, sym_idx]
 
         atr = float(atr_2d[decision_idx, sym_idx])
-        atr = atr if np.isfinite(atr) and atr > 0.0 else entry_px * 0.01
+        atr = atr if np.isfinite(atr) and atr > 0.0 else entry_px * _ATR_FALLBACK_FRACTION  # L-4
         tp_thr = (tp_mult * atr) / entry_px
         sl_thr = (stop_mult * atr) / entry_px
 
@@ -134,8 +138,16 @@ def label_candidate_events(
             fav = (entry_px / np.maximum(low_path, 1e-12)) - 1.0
             adv = (entry_px / np.maximum(high_path, 1e-12)) - 1.0
 
-        tp_hits = np.flatnonzero(np.isfinite(fav) & (fav >= tp_thr))
-        sl_hits = np.flatnonzero(np.isfinite(adv) & (adv <= -sl_thr))
+        # L-3: engine_aligned → skip first min_holding_bars when scanning barriers
+        min_hold = max(0, int(getattr(row, "min_holding_bars", 0))) if cfg.exit_policy_mode == "engine_aligned" else 0
+        scan_from = min_hold
+
+        fav_scan = fav[scan_from:]
+        adv_scan = adv[scan_from:]
+        tp_hits_rel = np.flatnonzero(np.isfinite(fav_scan) & (fav_scan >= tp_thr))
+        sl_hits_rel = np.flatnonzero(np.isfinite(adv_scan) & (adv_scan <= -sl_thr))
+        tp_hits = tp_hits_rel + scan_from if tp_hits_rel.size > 0 else tp_hits_rel
+        sl_hits = sl_hits_rel + scan_from if sl_hits_rel.size > 0 else sl_hits_rel
 
         tp_i = int(tp_hits[0]) if tp_hits.size > 0 else math.inf
         sl_i = int(sl_hits[0]) if sl_hits.size > 0 else math.inf
@@ -153,7 +165,14 @@ def label_candidate_events(
             barrier_label = 0
             exit_reason = "time_exit"
 
-        exit_px = float(close_path[exit_off])
+        # L-2: use barrier price as exit_px (not close of exit bar)
+        # Prevents SL optimism (low triggers but close rebounds) and TP pessimism.
+        if exit_reason == "take_profit":
+            exit_px = entry_px * (1.0 + side * tp_thr)
+        elif exit_reason == "stop_loss":
+            exit_px = entry_px * (1.0 - side * sl_thr)
+        else:  # time_exit: close of last bar
+            exit_px = float(close_path[exit_off])
         if side > 0:
             gross_ret_bps = ((exit_px / entry_px) - 1.0) * _BPS_SCALE
             path_ret = (close_path / entry_px) - 1.0
@@ -171,6 +190,8 @@ def label_candidate_events(
         hurdle_bps = float(getattr(row, "hurdle_bps", 0.0))
         edge_after_hurdle_bps = gross_ret_bps - ex_ante_cost_bps - hurdle_bps
 
+        # L-1: separate raw barrier result from cost-conditioned label
+        raw_barrier = int(barrier_label)  # 1=TP reached first, 0=SL or time
         barrier_first_label = 1 if barrier_label == 1 and edge_after_hurdle_bps > 0.0 else 0
         profitable_after_hurdle_label = 1 if edge_after_hurdle_bps > 0.0 else 0
 
@@ -186,6 +207,7 @@ def label_candidate_events(
         gross_list.append(float(gross_ret_bps))
         cost_list.append(float(ex_ante_cost_bps))
         edge_list.append(float(edge_after_hurdle_bps))
+        raw_barrier_label_list.append(raw_barrier)
         barrier_label_list.append(int(barrier_first_label))
         profitable_label_list.append(int(profitable_after_hurdle_label))
         tte_list.append(int(exit_off + 1))
@@ -203,7 +225,9 @@ def label_candidate_events(
     out["gross_direction_label"] = (np.asarray(gross_list, dtype=np.float64) > 0.0).astype(np.int8)
     out["ex_ante_cost_bps"] = np.asarray(cost_list, dtype=np.float64)
     out["edge_after_hurdle_bps"] = np.asarray(edge_list, dtype=np.float64)
-    out["triple_barrier_label"] = np.asarray(barrier_label_list, dtype=np.int8)
+    # L-1: triple_barrier_label = raw result (TP reached first=1, else=0)
+    #      barrier_first_label  = cost-conditioned (TP AND net_edge>0)
+    out["triple_barrier_label"] = np.asarray(raw_barrier_label_list, dtype=np.int8)
     out["time_to_exit_bars"] = np.asarray(tte_list, dtype=np.int32)
     out["mae_bps"] = np.asarray(mae_list, dtype=np.float64)
     out["mfe_bps"] = np.asarray(mfe_list, dtype=np.float64)
@@ -213,7 +237,7 @@ def label_candidate_events(
     out["exit_policy_version"] = np.asarray(exit_policy_version_list, dtype=object)
     out["same_bar_collision"] = np.asarray(same_bar_collision_list, dtype=np.int8)
 
-    _barrier_labels = np.asarray(barrier_label_list, dtype=np.int8)
+    _barrier_labels = np.asarray(raw_barrier_label_list, dtype=np.int8)
     _profitable_labels = np.asarray(profitable_label_list, dtype=np.int8)
     _edge = np.asarray(edge_list, dtype=np.float64)
     _finite_edge = _edge[np.isfinite(_edge)]
