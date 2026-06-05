@@ -252,6 +252,8 @@ def test_compute_rule_diagnostics_promotes_signal_cells_when_present() -> None:
         max_variant_event_fraction_per_bar=0.50,
         max_signal_cell_event_fraction_per_bar=0.50,
         regime_diagnostic_enabled=False,
+        # Use signal_cell promotion to test per-cell granularity explicitly.
+        promotion_level="signal_cell",
     )
 
     result = compute_rule_diagnostics(
@@ -326,13 +328,14 @@ def test_rule_recommendations_use_explicit_recommendation_window_not_report_wind
     assert result.report_split == (32, 40)
 
 
-def test_meets_recommendation_thresholds_rejects_negative_median_edge() -> None:
-    cfg = CandidateStrategyConfig(min_variant_oos_obs=10)
+def test_meets_recommendation_thresholds_rejects_median_below_floor() -> None:
+    # min_variant_oos_median_edge_bps=-100; median=-101 should still fail.
+    cfg = CandidateStrategyConfig(min_variant_oos_obs=10, min_variant_oos_median_edge_bps=-100.0)
     row = pd.Series(
         {
             "oos_n": 10,
             "oos_mean_edge_bps": 5.0,
-            "oos_median_edge_bps": -1.0,
+            "oos_median_edge_bps": -101.0,
             "oos_p10_edge_bps": -50.0,
             "oos_q10_shortfall_fail_rate": 0.2,
             "event_fraction_per_bar": 0.05,
@@ -439,6 +442,8 @@ def test_compute_rule_diagnostics_rejects_variant_without_positive_regime_edge()
         max_variant_event_fraction_per_bar=1.0,
         min_regime_variant_oos_obs=1,
         min_regime_variant_oos_edge_bps=2.0,
+        # signal_cell promotion: regime_edge check is active (as in legacy behaviour)
+        promotion_level="signal_cell",
     )
 
     result = compute_rule_diagnostics(
