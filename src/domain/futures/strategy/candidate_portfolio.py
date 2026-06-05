@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import asdict, dataclass
+from itertools import product
 
 import numpy as np
 import pandas as pd
@@ -12,6 +14,31 @@ from src.domain.futures.strategy.candidate_contracts import (
     CandidateModelOutput,
 )
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+
+
+@dataclass(frozen=True)
+class SelectionWaterfall:
+    total: int
+    gate_floor: float
+    breakeven_floor_bps: float
+    utility_floor_bps: float
+    gate_eligible: int
+    catastrophic_eligible: int
+    utility_eligible: int
+    all_eligible: int
+    mu_ge_floor: int
+    expected_utility_ge_zero: int
+    expected_utility_ge_floor: int
+    prob_adjusted_mu_p50_bps: float | None
+    prob_adjusted_mu_p90_bps: float | None
+    downside_drag_p50_bps: float | None
+    downside_drag_p90_bps: float | None
+    turnover_drag_p50_bps: float | None
+    soft_gate_penalty_p50_bps: float | None
+    expected_utility_raw_p50_bps: float | None
+    expected_utility_raw_p90_bps: float | None
+    expected_utility_adj_p50_bps: float | None
+    expected_utility_adj_p90_bps: float | None
 
 
 def _candidate_variant_key(frame: pd.DataFrame) -> str:
@@ -82,6 +109,239 @@ def _rank_ic(pred: pd.Series, target: pd.Series) -> float | None:
     if corr is None or not np.isfinite(corr):
         return None
     return float(corr)
+
+
+def _finite_quantile_or_none(values: pd.Series | np.ndarray, q: float) -> float | None:
+    arr = pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(dtype=np.float64, copy=False)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+    return float(np.quantile(arr, q))
+
+
+def _selection_component_frame(
+    *,
+    events: pd.DataFrame,
+    cfg: CandidateStrategyConfig,
+    gate_mode: str,
+    gate_floor: float,
+) -> pd.DataFrame:
+    frame = events.copy()
+    turnover_proxy = _series_or_default(frame, "turnover_proxy", 1.0)
+    prob_adjusted_mu_bps = frame["p_pass"] * frame["mu_net_decision_bps"]
+    downside_drag_bps = (1.0 - frame["p_pass"]) * frame["q10_net_bps"].clip(upper=0.0).abs()
+    turnover_drag_bps = cfg.turnover_penalty * turnover_proxy
+    gate_shortfall = np.maximum(0.0, gate_floor - frame["p_pass"].to_numpy(dtype=np.float64, copy=False))
+    soft_gate_penalty_bps = gate_shortfall * np.maximum(
+        pd.to_numeric(frame["mu_net_decision_bps"], errors="coerce").to_numpy(dtype=np.float64, copy=False),
+        0.0,
+    )
+    expected_utility_raw_bps = prob_adjusted_mu_bps - downside_drag_bps - turnover_drag_bps
+    expected_utility_bps = expected_utility_raw_bps.copy()
+    if gate_mode == "soft_floor":
+        expected_utility_bps = expected_utility_bps - soft_gate_penalty_bps
+    frame["prob_adjusted_mu_bps"] = pd.to_numeric(prob_adjusted_mu_bps, errors="coerce")
+    frame["downside_drag_bps"] = pd.to_numeric(downside_drag_bps, errors="coerce")
+    frame["turnover_drag_bps"] = pd.to_numeric(turnover_drag_bps, errors="coerce")
+    frame["soft_gate_penalty_bps"] = pd.to_numeric(soft_gate_penalty_bps, errors="coerce")
+    frame["expected_utility_raw_bps"] = pd.to_numeric(expected_utility_raw_bps, errors="coerce")
+    frame["expected_utility_bps"] = pd.to_numeric(expected_utility_bps, errors="coerce")
+    return frame
+
+
+def compute_selection_waterfall(
+    *,
+    events: pd.DataFrame,
+    cfg: CandidateStrategyConfig,
+) -> dict[str, int | float | None]:
+    """Return component-level diagnostics for candidate selection eligibility."""
+    gate_floor = float(cfg.selection_min_gate_probability_floor)
+    breakeven_floor = float(cfg.min_net_floor_cost_fraction) * float(cfg.cost_floor_bps)
+    utility_floor = max(float(cfg.selection_min_expected_utility_bps), breakeven_floor)
+    if events.empty:
+        return asdict(
+            SelectionWaterfall(
+                total=0,
+                gate_floor=gate_floor,
+                breakeven_floor_bps=breakeven_floor,
+                utility_floor_bps=utility_floor,
+                gate_eligible=0,
+                catastrophic_eligible=0,
+                utility_eligible=0,
+                all_eligible=0,
+                mu_ge_floor=0,
+                expected_utility_ge_zero=0,
+                expected_utility_ge_floor=0,
+                prob_adjusted_mu_p50_bps=None,
+                prob_adjusted_mu_p90_bps=None,
+                downside_drag_p50_bps=None,
+                downside_drag_p90_bps=None,
+                turnover_drag_p50_bps=None,
+                soft_gate_penalty_p50_bps=None,
+                expected_utility_raw_p50_bps=None,
+                expected_utility_raw_p90_bps=None,
+                expected_utility_adj_p50_bps=None,
+                expected_utility_adj_p90_bps=None,
+            )
+        )
+
+    frame = _selection_component_frame(
+        events=events,
+        cfg=cfg,
+        gate_mode=cfg.selection_gate_mode,
+        gate_floor=gate_floor,
+    )
+    catastrophic_mask = _catastrophic_q10_mask(frame, cfg)
+    gate_eligible_mask = pd.Series(True, index=frame.index, dtype=bool)
+    if cfg.selection_gate_mode == "hard_floor":
+        gate_eligible_mask = frame["p_pass"] >= gate_floor
+    utility_eligible_mask = frame["expected_utility_bps"] >= utility_floor
+    waterfall = SelectionWaterfall(
+        total=int(frame.shape[0]),
+        gate_floor=gate_floor,
+        breakeven_floor_bps=breakeven_floor,
+        utility_floor_bps=utility_floor,
+        gate_eligible=int(gate_eligible_mask.sum()),
+        catastrophic_eligible=int(catastrophic_mask.sum()),
+        utility_eligible=int(utility_eligible_mask.sum()),
+        all_eligible=int((catastrophic_mask & gate_eligible_mask & utility_eligible_mask).sum()),
+        mu_ge_floor=int((frame["mu_net_decision_bps"] >= breakeven_floor).sum()),
+        expected_utility_ge_zero=int((frame["expected_utility_bps"] >= 0.0).sum()),
+        expected_utility_ge_floor=int(utility_eligible_mask.sum()),
+        prob_adjusted_mu_p50_bps=_finite_quantile_or_none(frame["prob_adjusted_mu_bps"], 0.50),
+        prob_adjusted_mu_p90_bps=_finite_quantile_or_none(frame["prob_adjusted_mu_bps"], 0.90),
+        downside_drag_p50_bps=_finite_quantile_or_none(frame["downside_drag_bps"], 0.50),
+        downside_drag_p90_bps=_finite_quantile_or_none(frame["downside_drag_bps"], 0.90),
+        turnover_drag_p50_bps=_finite_quantile_or_none(frame["turnover_drag_bps"], 0.50),
+        soft_gate_penalty_p50_bps=_finite_quantile_or_none(frame["soft_gate_penalty_bps"], 0.50),
+        expected_utility_raw_p50_bps=_finite_quantile_or_none(frame["expected_utility_raw_bps"], 0.50),
+        expected_utility_raw_p90_bps=_finite_quantile_or_none(frame["expected_utility_raw_bps"], 0.90),
+        expected_utility_adj_p50_bps=_finite_quantile_or_none(frame["expected_utility_bps"], 0.50),
+        expected_utility_adj_p90_bps=_finite_quantile_or_none(frame["expected_utility_bps"], 0.90),
+    )
+    return asdict(waterfall)
+
+
+def compute_shadow_selection_profiles(
+    *,
+    events: pd.DataFrame,
+    cfg: CandidateStrategyConfig,
+) -> pd.DataFrame:
+    """Evaluate relaxed/tightened selection profiles on the same fold predictions."""
+    columns = [
+        "profile_id",
+        "gate_mode",
+        "gate_floor",
+        "utility_floor_bps",
+        "breakeven_floor_fraction",
+        "eligible",
+        "selected_pre_group",
+        "selected_total",
+        "realized_mean_bps",
+        "realized_hit_rate",
+        "rank_ic",
+        "log_growth_proxy",
+    ]
+    if not cfg.selection_shadow_profiles_enabled or events.empty:
+        return pd.DataFrame(columns=columns)
+
+    records: list[dict[str, object]] = []
+    catastrophic_mask = _catastrophic_q10_mask(events, cfg)
+    profile_index = 0
+    for gate_mode, gate_floor, utility_floor_base, breakeven_fraction in product(
+        cfg.selection_shadow_gate_modes,
+        cfg.selection_shadow_gate_floors,
+        cfg.selection_shadow_utility_floors_bps,
+        cfg.selection_shadow_breakeven_floor_fractions,
+    ):
+        if gate_mode == "off" and gate_floor > 0.0:
+            continue
+        profile_index += 1
+        frame = _selection_component_frame(
+            events=events,
+            cfg=cfg,
+            gate_mode=str(gate_mode),
+            gate_floor=float(gate_floor),
+        )
+        gate_eligible_mask = pd.Series(True, index=frame.index, dtype=bool)
+        if gate_mode == "hard_floor":
+            gate_eligible_mask = frame["p_pass"] >= float(gate_floor)
+        utility_floor = max(float(utility_floor_base), float(breakeven_fraction) * float(cfg.cost_floor_bps))
+        eligible = catastrophic_mask & gate_eligible_mask & (frame["expected_utility_bps"] >= utility_floor)
+        selected_pre_group = 0
+        selected_total = 0
+        realized_mean = float("nan")
+        realized_hit_rate = float("nan")
+        rank_ic = float("nan")
+        log_growth_proxy = float("-inf")
+        if int(eligible.sum()) > 0:
+            n_keep = max(1, math.ceil(int(eligible.sum()) * float(cfg.selection_shadow_top_quantile)))
+            top_idx = (
+                frame.loc[eligible]
+                .sort_values(
+                    ["expected_utility_bps", "p_pass", "mu_net_decision_bps", "q10_net_bps"],
+                    ascending=[False, False, False, False],
+                )
+                .head(n_keep)
+                .index
+            )
+            selected_pre_group = len(top_idx)
+            selected_frame = frame.loc[top_idx].copy()
+            selected_frame["_merge_dt"] = pd.to_datetime(selected_frame["datetime"], utc=True).dt.tz_localize(None)
+            selected_frame = (
+                selected_frame.sort_values(
+                    ["_merge_dt", "symbol", "expected_utility_bps"],
+                    ascending=[True, True, False],
+                )
+                .groupby(["_merge_dt", "symbol"], as_index=False)
+                .first()
+            )
+            selected_total = int(selected_frame.shape[0])
+            if "edge_after_hurdle_bps" in selected_frame.columns:
+                realized_edge = pd.to_numeric(selected_frame["edge_after_hurdle_bps"], errors="coerce")
+                if realized_edge.notna().any():
+                    realized_mean = float(realized_edge.mean())
+                    realized_hit_rate = float((realized_edge > 0.0).mean())
+                    rank_val = _rank_ic(
+                        pd.to_numeric(selected_frame["expected_utility_bps"], errors="coerce"),
+                        realized_edge,
+                    )
+                    rank_ic = float(rank_val) if rank_val is not None else float("nan")
+                    log_growth_proxy = float(
+                        np.mean(
+                            np.log1p(
+                                np.clip(realized_edge.to_numpy(dtype=np.float64, copy=False) * 1e-4, -0.99, None)
+                            )
+                        )
+                    )
+        records.append(
+            {
+                "profile_id": (
+                    f"{gate_mode}:{float(gate_floor):.2f}:"
+                    f"{float(utility_floor_base):.1f}:{float(breakeven_fraction):.2f}"
+                ),
+                "gate_mode": str(gate_mode),
+                "gate_floor": float(gate_floor),
+                "utility_floor_bps": utility_floor,
+                "breakeven_floor_fraction": float(breakeven_fraction),
+                "eligible": int(eligible.sum()),
+                "selected_pre_group": int(selected_pre_group),
+                "selected_total": int(selected_total),
+                "realized_mean_bps": realized_mean,
+                "realized_hit_rate": realized_hit_rate,
+                "rank_ic": rank_ic,
+                "log_growth_proxy": log_growth_proxy,
+            }
+        )
+    profiles = pd.DataFrame.from_records(records, columns=columns)
+    if profiles.empty:
+        return profiles
+    profiles = profiles.sort_values(
+        ["selected_total", "log_growth_proxy", "realized_mean_bps", "selected_total"],
+        ascending=[False, False, False, False],
+        key=lambda s: (s >= cfg.min_fold_selected_events) if s.name == "selected_total" else s,
+    )
+    return profiles.head(max(1, int(cfg.selection_shadow_max_profiles))).reset_index(drop=True)
 
 
 def compute_selection_sensitivity(
@@ -280,20 +540,12 @@ def select_candidate_events_for_portfolio(
         _log_selection_sensitivity(sensitivity, cfg=cfg)
 
     gate_floor = float(cfg.selection_min_gate_probability_floor)
-    turnover_proxy = _series_or_default(df, "turnover_proxy", 1.0)
-    gate_shortfall = np.maximum(0.0, gate_floor - df["p_pass"].to_numpy(dtype=np.float64, copy=False))
-    soft_gate_penalty_bps = gate_shortfall * np.maximum(
-        pd.to_numeric(df["mu_net_decision_bps"], errors="coerce").to_numpy(dtype=np.float64, copy=False),
-        0.0,
+    df = _selection_component_frame(
+        events=df,
+        cfg=cfg,
+        gate_mode=cfg.selection_gate_mode,
+        gate_floor=gate_floor,
     )
-    expected_utility_bps = (
-        df["p_pass"] * df["mu_net_decision_bps"]
-        + (1.0 - df["p_pass"]) * df["q10_net_bps"].clip(upper=0.0)
-        - cfg.turnover_penalty * turnover_proxy
-    )
-    if cfg.selection_gate_mode == "soft_floor":
-        expected_utility_bps = expected_utility_bps - soft_gate_penalty_bps
-    df["expected_utility_bps"] = expected_utility_bps.to_numpy(dtype=np.float64, copy=False)
     gate_mask = df["p_pass"] >= cfg.min_gate_probability
     edge_mask = df["mu_net_decision_bps"] >= cfg.min_expected_net_bps
     q10_mask = _q10_mask_for_mode(df, cfg)
@@ -308,6 +560,9 @@ def select_candidate_events_for_portfolio(
     utility_floor = max(float(cfg.selection_min_expected_utility_bps), breakeven_floor)
     utility_eligible_mask = df["expected_utility_bps"] >= utility_floor
     eligible = catastrophic_mask & gate_eligible_mask & utility_eligible_mask
+    waterfall = compute_selection_waterfall(events=df, cfg=cfg)
+    shadow_profiles = compute_shadow_selection_profiles(events=df, cfg=cfg)
+    shadow_best = shadow_profiles.iloc[0].to_dict() if not shadow_profiles.empty else {}
     n_eligible = int(eligible.sum())
     n_keep = 0
     zero_reason = "selected_nonzero"
@@ -361,7 +616,9 @@ def select_candidate_events_for_portfolio(
             "gate_floor_used": gate_floor,
             "expected_utility_floor_bps": utility_floor,
             "gate_eligible": int(gate_eligible_mask.sum()),
-            "soft_gate_penalty_mean_bps": float(np.mean(soft_gate_penalty_bps)) if len(df) > 0 else 0.0,
+            "soft_gate_penalty_mean_bps": (
+                float(pd.to_numeric(df["soft_gate_penalty_bps"], errors="coerce").mean()) if len(df) > 0 else 0.0
+            ),
             "eligible": n_eligible,
             "selected_pre_group": 0,
             "selected_total": 0,
@@ -377,6 +634,9 @@ def select_candidate_events_for_portfolio(
             "realized_selected_hit_rate": None,
             "selected_rank_ic": None,
         }
+        diagnostics.update({f"waterfall_{key}": value for key, value in waterfall.items()})
+        if shadow_best:
+            diagnostics.update({f"shadow_{key}": value for key, value in shadow_best.items()})
         filtered.attrs["candidate_selection_diagnostics"] = diagnostics
         _sel_logger.warning(
             (
@@ -413,7 +673,9 @@ def select_candidate_events_for_portfolio(
         "gate_floor_used": gate_floor,
         "expected_utility_floor_bps": utility_floor,
         "gate_eligible": int(gate_eligible_mask.sum()),
-        "soft_gate_penalty_mean_bps": float(np.mean(soft_gate_penalty_bps)) if len(df) > 0 else 0.0,
+        "soft_gate_penalty_mean_bps": (
+            float(pd.to_numeric(df["soft_gate_penalty_bps"], errors="coerce").mean()) if len(df) > 0 else 0.0
+        ),
         "eligible": n_eligible,
         "selected_pre_group": int(mask.sum()),
         "selected_total": selected_total,
@@ -441,6 +703,9 @@ def select_candidate_events_for_portfolio(
             pd.to_numeric(selected["expected_utility_bps"], errors="coerce"),
             realized_edge,
         )
+    diagnostics.update({f"waterfall_{key}": value for key, value in waterfall.items()})
+    if shadow_best:
+        diagnostics.update({f"shadow_{key}": value for key, value in shadow_best.items()})
     selected.attrs["candidate_selection_diagnostics"] = diagnostics
     _sel_logger.info(
         (

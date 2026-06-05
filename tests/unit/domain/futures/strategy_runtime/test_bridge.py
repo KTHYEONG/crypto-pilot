@@ -410,3 +410,151 @@ def test_bridge_realized_fold_survival_fails_when_selected_realized_edge_is_nega
 
     assert result.rule_report is not None
     assert result.rule_report["zero_reason"] == "wf_fold_pass_ratio_fail"
+
+
+def test_bridge_reports_shadow_profile_when_production_selection_stays_blocked(monkeypatch: Any) -> None:
+    t = 120
+    datetimes = np.asarray(
+        [np.datetime64("2026-01-01T00:00:00") + np.timedelta64(i, "h") for i in range(t)],
+        dtype="datetime64[ns]",
+    )
+    aligned = SimpleNamespace(
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        close_2d=np.linspace(100.0, 110.0, t, dtype=np.float64).reshape(t, 1),
+        open_2d=np.linspace(100.0, 110.0, t, dtype=np.float64).reshape(t, 1),
+        high_2d=np.linspace(101.0, 111.0, t, dtype=np.float64).reshape(t, 1),
+        low_2d=np.linspace(99.0, 109.0, t, dtype=np.float64).reshape(t, 1),
+        volume_2d=np.full((t, 1), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, 1), dtype=np.float64),
+        active_mask=np.ones((t, 1), dtype=bool),
+        warm_mask=np.ones((t, 1), dtype=bool),
+        entry_block_mask=np.zeros((t, 1), dtype=bool),
+        kill_mask=np.zeros((t, 1), dtype=bool),
+        execution_cost_bps_2d=np.zeros((t, 1), dtype=np.float64),
+    )
+    raw_events = pd.DataFrame(
+        {
+            "datetime": [datetimes[20], datetimes[24]],
+            "symbol": ["BTCUSDT", "BTCUSDT"],
+            "family": ["trend_ma", "trend_ma"],
+            "variant": ["ema_12_72", "ema_12_72"],
+            "side": [1, 1],
+            "raw_score": [0.9, 0.8],
+            "score_z": [0.9, 0.8],
+            "entry_idx": [20, 24],
+            "expected_holding_bars": [4, 4],
+            "min_holding_bars": [1, 1],
+            "stop_atr_mult": [2.0, 2.0],
+            "take_profit_atr_mult": [4.0, 4.0],
+            "turnover_proxy": [0.1, 0.1],
+            "cost_floor_bps": [0.0, 0.0],
+            "hurdle_bps": [0.0, 0.0],
+            "edge_after_hurdle_bps": [15.0, 18.0],
+        }
+    )
+
+    monkeypatch.setattr("src.domain.futures.strategy.common.alignment.align_data_maps", lambda *_, **__: aligned)
+    monkeypatch.setattr("src.domain.futures.strategy.rule_signals.build_rule_signal_panels", lambda *_, **__: {})
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rule_signals.candidate_panels_to_events",
+        lambda *_, **__: raw_events.copy(),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_labels.label_candidate_events",
+        lambda *_, **__: raw_events.copy(),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rule_diagnostics.compute_rule_diagnostics",
+        lambda *_, **__: SimpleNamespace(
+            recommended_keep_variants=(),
+            recommended_flip_variants=(),
+            recommended_keep_signal_cells=(),
+            recommended_flip_signal_cells=(),
+            recommendation_basis="fit_calibration",
+            recommendation_split=(0, 0),
+            report_split=(0, 0),
+        ),
+    )
+
+    class _FakeDataset:
+        X = np.zeros((2, 2), dtype=np.float64)
+        y_gate = np.ones(2, dtype=np.int8)
+        y_edge_bps = np.array([15.0, 18.0], dtype=np.float32)
+        y_q10_bps = np.array([-20.0, -20.0], dtype=np.float32)
+        y_mfe_bps = np.array([20.0, 22.0], dtype=np.float32)
+        sample_weight = np.ones(2, dtype=np.float32)
+        groups = np.zeros(2, dtype=np.int32)
+        event_index = raw_events.copy()
+        feature_names: ClassVar[list[str]] = []
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_dataset.build_candidate_dataset",
+        lambda *_, **__: _FakeDataset(),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_gate.fit_candidate_gate",
+        lambda *_, **__: SimpleNamespace(calibration_used=False, calibration_reason="test"),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_gate.predict_candidate_gate",
+        lambda *_, **__: np.array([0.30, 0.34], dtype=np.float64),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_edge.fit_candidate_edge_models",
+        lambda *_, **__: None,
+    )
+
+    from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
+
+    def fake_predict_edges(*, models: object, dataset: object, p_pass: np.ndarray, cfg: object) -> CandidateModelOutput:
+        return CandidateModelOutput(
+            events=getattr(dataset, "event_index", pd.DataFrame()),
+            p_pass=p_pass,
+            mu_gross_bps=np.array([40.0, 45.0], dtype=np.float64),
+            mu_net_decision_bps=np.array([40.0, 45.0], dtype=np.float64),
+            q10_net_bps=np.array([-20.0, -20.0], dtype=np.float64),
+            q90_net_bps=np.array([60.0, 65.0], dtype=np.float64),
+            utility_score=np.array([12.0, 13.0], dtype=np.float64),
+            selection_thresholds={},
+        )
+
+    monkeypatch.setattr("src.domain.futures.strategy.candidate_edge.predict_candidate_edges", fake_predict_edges)
+
+    strategy_cfg = StrategyConfig()
+    object.__setattr__(
+        strategy_cfg,
+        "candidate",
+        replace(
+            strategy_cfg.candidate,
+            ml_fit_fraction=0.5,
+            ml_calibration_fraction=0.2,
+            purge_bars=0,
+            embargo_bars=0,
+            wf_scheme="single",
+            min_fit_obs=1,
+            min_wf_fold_pass_ratio=1.0,
+            fold_survival_metric="realized_selected_edge",
+            min_fold_selected_events=1,
+            selection_policy="utility_topk",
+            selection_gate_mode="hard_floor",
+            selection_min_gate_probability_floor=0.35,
+            selection_shadow_gate_modes=("off", "hard_floor"),
+            selection_shadow_gate_floors=(0.0, 0.35),
+            selection_shadow_utility_floors_bps=(-20.0, 0.0),
+            selection_shadow_breakeven_floor_fractions=(0.0, 0.5),
+            promotion_filter_enabled=False,
+        ),
+    )
+
+    result = run_candidate_strategy_for_universe(
+        ["BTCUSDT"],
+        "4h",
+        strategy_cfg=strategy_cfg,
+        preloaded_data_maps={"BTCUSDT": {"4h": pd.DataFrame()}},
+    )
+
+    assert result.rule_report is not None
+    assert result.rule_report["selected_total"] == 0
+    assert result.rule_report["wf_best_shadow_selected_total"] > 0
+    assert result.rule_report["zero_reason"] == "wf_fold_pass_ratio_fail"

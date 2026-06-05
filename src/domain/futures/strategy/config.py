@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -159,6 +160,14 @@ class CandidateStrategyConfig:
     selection_gate_grid: tuple[float, ...] = (0.40, 0.45, 0.50, 0.55)
     selection_edge_grid_bps: tuple[float, ...] = (0.0, 1.0, 5.0)
     selection_q10_grid_bps: tuple[float, ...] = (80.0, 150.0, 250.0, 400.0)
+    selection_waterfall_diagnostics_enabled: bool = True
+    selection_shadow_profiles_enabled: bool = True
+    selection_shadow_gate_modes: tuple[str, ...] = ("off", "soft_floor", "hard_floor")
+    selection_shadow_gate_floors: tuple[float, ...] = (0.0, 0.30, 0.35, 0.40)
+    selection_shadow_utility_floors_bps: tuple[float, ...] = (-50.0, -25.0, 0.0)
+    selection_shadow_breakeven_floor_fractions: tuple[float, ...] = (0.0, 0.25, 0.50)
+    selection_shadow_top_quantile: float = 0.10
+    selection_shadow_max_profiles: int = 20
     enabled_candidate_variants: tuple[str, ...] = ()
     side_flip_candidate_variants: tuple[str, ...] = ()
     diagnostic_top_k: int = 10
@@ -390,6 +399,22 @@ class CandidateStrategyConfig:
             raise ValueError("selection_edge_grid_bps values must be non-negative")
         if any(value < 0.0 for value in self.selection_q10_grid_bps):
             raise ValueError("selection_q10_grid_bps values must be non-negative")
+        valid_gate_modes = {"off", "soft_floor", "hard_floor"}
+        if any(mode not in valid_gate_modes for mode in self.selection_shadow_gate_modes):
+            raise ValueError("selection_shadow_gate_modes contains unsupported mode")
+        if any((floor < 0.0 or floor > 1.0) for floor in self.selection_shadow_gate_floors):
+            raise ValueError("selection_shadow_gate_floors must be in [0.0, 1.0]")
+        if any(not math.isfinite(floor) for floor in self.selection_shadow_utility_floors_bps):
+            raise ValueError("selection_shadow_utility_floors_bps must be finite")
+        if any(
+            (not math.isfinite(frac) or frac < 0.0)
+            for frac in self.selection_shadow_breakeven_floor_fractions
+        ):
+            raise ValueError("selection_shadow_breakeven_floor_fractions must be finite and non-negative")
+        if not (0.0 < self.selection_shadow_top_quantile <= 1.0):
+            raise ValueError("selection_shadow_top_quantile must be in (0.0, 1.0]")
+        if self.selection_shadow_max_profiles < 1:
+            raise ValueError("selection_shadow_max_profiles must be >= 1")
         if not (0.0 <= self.maker_ratio <= 1.0):
             raise ValueError("maker_ratio must be in [0.0, 1.0]")
         if any(v < 0.0 for v in (self.maker_fee_bps, self.taker_fee_bps, self.slippage_bps, self.impact_coeff_bps)):

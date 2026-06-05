@@ -9,6 +9,8 @@ from src.domain.futures.strategy.candidate_portfolio import (
     build_candidate_alpha_panel,
     build_candidate_target_weights,
     compute_selection_sensitivity,
+    compute_selection_waterfall,
+    compute_shadow_selection_profiles,
     select_candidate_events_for_portfolio,
 )
 from src.domain.futures.strategy.config import CandidateStrategyConfig
@@ -244,6 +246,69 @@ def test_utility_topk_soft_floor_keeps_positive_expected_utility_candidate() -> 
 
     assert not selected.empty
     assert "BTCUSDT" in set(selected["symbol"])
+
+
+def test_compute_selection_waterfall_exposes_expected_utility_terms() -> None:
+    events = _make_sample_events()
+    events["p_pass"] = [0.30, 0.75, 0.55]
+    events["mu_net_decision_bps"] = [50.0, 18.0, 14.0]
+    events["q10_net_bps"] = [-10.0, -120.0, -40.0]
+    cfg = CandidateStrategyConfig(
+        selection_gate_mode="soft_floor",
+        selection_min_gate_probability_floor=0.35,
+        selection_min_expected_utility_bps=0.0,
+        cost_floor_bps=10.0,
+        min_net_floor_cost_fraction=0.5,
+    )
+
+    diagnostics = compute_selection_waterfall(events=events, cfg=cfg)
+
+    assert diagnostics["expected_utility_raw_p90_bps"] is not None
+    assert diagnostics["downside_drag_p90_bps"] is not None
+    assert diagnostics["expected_utility_ge_floor"] is not None
+    assert diagnostics["all_eligible"] is not None
+    assert int(diagnostics["expected_utility_ge_floor"]) >= 1
+    assert int(diagnostics["all_eligible"]) >= 1
+
+
+def test_shadow_selection_profiles_do_not_change_production_selection() -> None:
+    events = _make_sample_events()
+    events["edge_after_hurdle_bps"] = [25.0, 22.0, 18.0]
+    model_output = CandidateModelOutput(
+        events=events,
+        p_pass=np.array([0.30, 0.34, 0.20], dtype=np.float64),
+        mu_gross_bps=np.array([40.0, 50.0, 60.0], dtype=np.float64),
+        mu_net_decision_bps=np.array([40.0, 50.0, 60.0], dtype=np.float64),
+        q10_net_bps=np.array([-20.0, -20.0, -20.0], dtype=np.float64),
+        q90_net_bps=np.array([60.0, 70.0, 80.0], dtype=np.float64),
+        utility_score=np.array([10.0, 11.0, 12.0], dtype=np.float64),
+    )
+    cfg = CandidateStrategyConfig(
+        selection_policy="utility_topk",
+        selection_gate_mode="hard_floor",
+        selection_min_gate_probability_floor=0.35,
+        cost_floor_bps=24.0,
+        min_net_floor_cost_fraction=0.5,
+        selection_shadow_gate_modes=("off", "hard_floor"),
+        selection_shadow_gate_floors=(0.0, 0.35),
+        selection_shadow_utility_floors_bps=(-20.0, 0.0),
+        selection_shadow_breakeven_floor_fractions=(0.0, 0.5),
+    )
+
+    selected = select_candidate_events_for_portfolio(model_output=model_output, cfg=cfg)
+    profiles = compute_shadow_selection_profiles(
+        events=selected.attrs["candidate_selection_diagnostics"] and model_output.events.assign(
+            p_pass=model_output.p_pass,
+            mu_net_decision_bps=model_output.mu_net_decision_bps,
+            q10_net_bps=model_output.q10_net_bps,
+            utility_score=model_output.utility_score,
+        ),
+        cfg=cfg,
+    )
+
+    assert selected.empty
+    assert int(selected.attrs["candidate_selection_diagnostics"]["selected_total"]) == 0
+    assert int(profiles["selected_total"].max()) > 0
 
 
 def test_build_candidate_target_weights_applies_kelly_and_caps() -> None:
