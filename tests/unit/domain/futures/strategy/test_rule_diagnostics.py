@@ -6,13 +6,42 @@ import pandas as pd
 from src.domain.futures.strategy.candidate_labels import label_candidate_events
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
-from src.domain.futures.strategy.rule_diagnostics import compute_rule_diagnostics
+from src.domain.futures.strategy.rule_diagnostics import (
+    _failed_recommendation_checks,
+    _meets_recommendation_thresholds,
+    compute_rule_diagnostics,
+)
 
 
 def _make_aligned() -> AlignedMarketData:
     t = 40
     n = 1
     close = np.linspace(100.0, 130.0, t, dtype=np.float64).reshape(t, n)
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    return AlignedMarketData(
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        open_2d=close.copy(),
+        high_2d=close * 1.01,
+        low_2d=close * 0.99,
+        close_2d=close,
+        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, n), dtype=np.float64),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.zeros((t, n), dtype=np.float64),
+    )
+
+
+def _make_regime_aligned() -> AlignedMarketData:
+    t = 260
+    n = 1
+    low_vol = np.linspace(100.0, 140.0, 130, dtype=np.float64)
+    high_vol_base = np.linspace(140.5, 190.0, 130, dtype=np.float64)
+    high_vol_noise = np.array([(-1.0) ** i * 3.0 for i in range(130)], dtype=np.float64)
+    close = np.concatenate([low_vol, high_vol_base + high_vol_noise]).reshape(t, n)
     datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
     return AlignedMarketData(
         datetimes=datetimes,
@@ -127,7 +156,7 @@ def test_compute_rule_diagnostics_marks_insufficient_obs() -> None:
     assert result.side_flip.iloc[0]["candidate_action"] == "INSUFFICIENT_OBS"
 
 
-def test_compute_rule_diagnostics_keeps_positive_expectancy_low_hit_rate_variant() -> None:
+def test_compute_rule_diagnostics_keeps_positive_expectancy_variant_under_stricter_gates() -> None:
     aligned = _make_aligned()
     labeled = pd.DataFrame(
         {
@@ -151,9 +180,9 @@ def test_compute_rule_diagnostics_keeps_positive_expectancy_low_hit_rate_variant
             "cost_floor_bps": [0.0, 0.0, 0.0],
             "hurdle_bps": [0.0, 0.0, 0.0],
             "profitable_after_hurdle_label": [1, 0, 0],
-            "edge_after_hurdle_bps": [300.0, -10.0, -10.0],
+            "edge_after_hurdle_bps": [300.0, 20.0, -10.0],
             "mae_bps": [-20.0, -20.0, -20.0],
-            "mfe_bps": [400.0, 15.0, 15.0],
+            "mfe_bps": [400.0, 25.0, 15.0],
         }
     )
     labeled["triple_barrier_label"] = labeled["profitable_after_hurdle_label"]
@@ -164,7 +193,9 @@ def test_compute_rule_diagnostics_keeps_positive_expectancy_low_hit_rate_variant
         min_variant_oos_hit_rate=0.50,
         min_variant_oos_payoff_ratio=3.0,
         max_variant_oos_q10_fail_rate=0.50,
+        max_variant_event_fraction_per_bar=0.50,
         max_expected_shortfall_bps=80.0,
+        regime_diagnostic_enabled=False,
     )
 
     result = compute_rule_diagnostics(
@@ -175,11 +206,62 @@ def test_compute_rule_diagnostics_keeps_positive_expectancy_low_hit_rate_variant
     )
 
     variant_row = result.by_variant.loc[result.by_variant["group"] == "variant=trend_donchian:donchian_72"].iloc[0]
-    assert float(variant_row["oos_pct_edge_pos"]) < 0.50
+    assert float(variant_row["oos_pct_edge_pos"]) >= 0.50
     assert float(variant_row["oos_payoff_ratio"]) >= 3.0
     assert variant_row["candidate_action"] == "KEEP_CANDIDATE"
     assert float(variant_row["oos_rank_ic"]) >= cfg.min_oos_rank_ic
     assert result.recommended_keep_variants == ("trend_donchian:donchian_72",)
+
+
+def test_compute_rule_diagnostics_promotes_signal_cells_when_present() -> None:
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[33], aligned.datetimes[35]],
+            "symbol": ["BTCUSDT", "BTCUSDT"],
+            "family": ["trend_donchian", "trend_donchian"],
+            "variant": ["donchian_72", "donchian_72"],
+            "signal_cell": [
+                "trend_donchian:donchian_72:trend_grind:bull_quiet",
+                "trend_donchian:donchian_72:trend_grind:bull_quiet",
+            ],
+            "exit_policy_id": ["trend_grind", "trend_grind"],
+            "entry_regime": ["bull_quiet", "bull_quiet"],
+            "archetype": ["trend_continuation", "trend_continuation"],
+            "side": [1, 1],
+            "raw_score": [0.9, 0.8],
+            "score_z": [1.2, 1.0],
+            "entry_idx": [34, 36],
+            "expected_holding_bars": [2, 2],
+            "min_holding_bars": [1, 1],
+            "stop_atr_mult": [50.0, 50.0],
+            "take_profit_atr_mult": [50.0, 50.0],
+            "turnover_proxy": [0.1, 0.1],
+            "cost_floor_bps": [0.0, 0.0],
+            "hurdle_bps": [0.0, 0.0],
+            "profitable_after_hurdle_label": [1, 1],
+            "edge_after_hurdle_bps": [300.0, 120.0],
+            "mae_bps": [-20.0, -10.0],
+            "mfe_bps": [400.0, 160.0],
+            "triple_barrier_label": [1, 1],
+        }
+    )
+    cfg = CandidateStrategyConfig(
+        min_variant_oos_obs=1,
+        min_signal_cell_oos_obs=1,
+        max_variant_event_fraction_per_bar=0.50,
+        max_signal_cell_event_fraction_per_bar=0.50,
+        regime_diagnostic_enabled=False,
+    )
+
+    result = compute_rule_diagnostics(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        min_obs=1,
+    )
+
+    assert result.recommended_keep_signal_cells == ("trend_donchian:donchian_72:trend_grind:bull_quiet",)
 
 
 def test_rule_recommendations_use_explicit_recommendation_window_not_report_window() -> None:
@@ -222,6 +304,7 @@ def test_rule_recommendations_use_explicit_recommendation_window_not_report_wind
         min_variant_oos_hit_rate=0.5,
         min_variant_oos_payoff_ratio=1.0,
         max_variant_oos_q10_fail_rate=1.0,
+        regime_diagnostic_enabled=False,
     )
 
     result = compute_rule_diagnostics(
@@ -241,3 +324,202 @@ def test_rule_recommendations_use_explicit_recommendation_window_not_report_wind
     assert result.recommendation_basis == "fit_calibration"
     assert result.recommendation_split == (20, 30)
     assert result.report_split == (32, 40)
+
+
+def test_meets_recommendation_thresholds_rejects_negative_median_edge() -> None:
+    cfg = CandidateStrategyConfig(min_variant_oos_obs=10)
+    row = pd.Series(
+        {
+            "oos_n": 10,
+            "oos_mean_edge_bps": 5.0,
+            "oos_median_edge_bps": -1.0,
+            "oos_p10_edge_bps": -50.0,
+            "oos_q10_shortfall_fail_rate": 0.2,
+            "event_fraction_per_bar": 0.05,
+            "edge_stability_bps": 0.0,
+            "oos_pct_edge_pos": 0.6,
+            "oos_payoff_ratio": 1.3,
+        }
+    )
+    assert not _meets_recommendation_thresholds(row, cfg)
+    assert "median_edge" in _failed_recommendation_checks(row, cfg)
+
+
+def test_meets_recommendation_thresholds_rejects_bad_p10_tail() -> None:
+    cfg = CandidateStrategyConfig(min_variant_oos_obs=10, min_variant_oos_p10_edge_bps=-150.0)
+    row = pd.Series(
+        {
+            "oos_n": 10,
+            "oos_mean_edge_bps": 6.0,
+            "oos_median_edge_bps": 4.0,
+            "oos_p10_edge_bps": -220.0,
+            "oos_q10_shortfall_fail_rate": 0.2,
+            "event_fraction_per_bar": 0.05,
+            "edge_stability_bps": 0.0,
+            "oos_pct_edge_pos": 0.6,
+            "oos_payoff_ratio": 1.3,
+        }
+    )
+    assert not _meets_recommendation_thresholds(row, cfg)
+    assert "p10_edge" in _failed_recommendation_checks(row, cfg)
+
+
+def test_meets_recommendation_thresholds_rejects_over_dense_variant() -> None:
+    cfg = CandidateStrategyConfig(min_variant_oos_obs=10, max_variant_event_fraction_per_bar=0.10)
+    row = pd.Series(
+        {
+            "oos_n": 10,
+            "oos_mean_edge_bps": 6.0,
+            "oos_median_edge_bps": 4.0,
+            "oos_p10_edge_bps": -50.0,
+            "oos_q10_shortfall_fail_rate": 0.2,
+            "event_fraction_per_bar": 0.25,
+            "edge_stability_bps": 0.0,
+            "oos_pct_edge_pos": 0.6,
+            "oos_payoff_ratio": 1.3,
+        }
+    )
+    assert not _meets_recommendation_thresholds(row, cfg)
+    assert "event_density" in _failed_recommendation_checks(row, cfg)
+
+
+def test_meets_recommendation_thresholds_accepts_when_all_gates_pass() -> None:
+    cfg = CandidateStrategyConfig(min_variant_oos_obs=10)
+    row = pd.Series(
+        {
+            "oos_n": 12,
+            "oos_mean_edge_bps": 7.0,
+            "oos_median_edge_bps": 6.0,
+            "oos_p10_edge_bps": -40.0,
+            "oos_q10_shortfall_fail_rate": 0.2,
+            "event_fraction_per_bar": 0.05,
+            "regime_pass": True,
+            "edge_stability_bps": -10.0,
+            "oos_pct_edge_pos": 0.6,
+            "oos_payoff_ratio": 1.3,
+        }
+    )
+    assert _meets_recommendation_thresholds(row, cfg)
+
+
+def test_compute_rule_diagnostics_rejects_variant_without_positive_regime_edge() -> None:
+    aligned = _make_regime_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[idx] for idx in (110, 120, 130, 210, 220, 230)],
+            "symbol": ["BTCUSDT"] * 6,
+            "family": ["trend_ma"] * 6,
+            "variant": ["ema_12_72"] * 6,
+            "side": [1] * 6,
+            "raw_score": [0.6] * 6,
+            "score_z": [0.7] * 6,
+            "entry_idx": [110, 120, 130, 210, 220, 230],
+            "expected_holding_bars": [2] * 6,
+            "min_holding_bars": [1] * 6,
+            "stop_atr_mult": [50.0] * 6,
+            "take_profit_atr_mult": [50.0] * 6,
+            "turnover_proxy": [0.1] * 6,
+            "cost_floor_bps": [0.0] * 6,
+            "hurdle_bps": [0.0] * 6,
+            "profitable_after_hurdle_label": [1, 1, 1, 1, 1, 1],
+            "edge_after_hurdle_bps": [1.5, 1.6, 1.7, 1.6, 1.7, 1.8],
+            "mae_bps": [-10.0] * 6,
+            "mfe_bps": [20.0] * 6,
+        }
+    )
+    labeled["triple_barrier_label"] = labeled["profitable_after_hurdle_label"]
+    cfg = CandidateStrategyConfig(
+        min_variant_oos_obs=3,
+        min_variant_oos_edge_bps=1.0,
+        min_variant_oos_median_edge_bps=0.0,
+        min_variant_oos_p10_edge_bps=-50.0,
+        min_variant_oos_hit_rate=0.5,
+        min_variant_oos_payoff_ratio=1.0,
+        max_variant_oos_q10_fail_rate=1.0,
+        max_variant_event_fraction_per_bar=1.0,
+        min_regime_variant_oos_obs=1,
+        min_regime_variant_oos_edge_bps=2.0,
+    )
+
+    result = compute_rule_diagnostics(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        min_obs=1,
+        recommendation_start=100,
+        recommendation_end=240,
+        report_start=100,
+        report_end=240,
+    )
+
+    variant_row = result.by_variant.loc[result.by_variant["group"] == "variant=trend_ma:ema_12_72"].iloc[0]
+    rec_row = pd.Series(
+        {
+            "oos_n": 6,
+            "oos_mean_edge_bps": 1.65,
+            "oos_median_edge_bps": 1.65,
+            "oos_p10_edge_bps": 1.5,
+            "oos_q10_shortfall_fail_rate": 0.0,
+            "event_fraction_per_bar": 6.0 / 140.0,
+            "regime_pass": False,
+            "edge_stability_bps": 0.0,
+            "oos_pct_edge_pos": 1.0,
+            "oos_payoff_ratio": 2.0,
+        }
+    )
+    assert variant_row["candidate_action"] == "KEEP_CANDIDATE"
+    assert result.recommended_keep_variants == ()
+    assert "regime_edge" in _failed_recommendation_checks(rec_row, cfg)
+
+
+def test_compute_rule_diagnostics_accepts_variant_with_positive_regime_edge() -> None:
+    aligned = _make_regime_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[idx] for idx in (110, 120, 130, 210, 220, 230)],
+            "symbol": ["BTCUSDT"] * 6,
+            "family": ["trend_ma"] * 6,
+            "variant": ["ema_12_72"] * 6,
+            "side": [1] * 6,
+            "raw_score": [0.6] * 6,
+            "score_z": [0.7] * 6,
+            "entry_idx": [110, 120, 130, 210, 220, 230],
+            "expected_holding_bars": [2] * 6,
+            "min_holding_bars": [1] * 6,
+            "stop_atr_mult": [50.0] * 6,
+            "take_profit_atr_mult": [50.0] * 6,
+            "turnover_proxy": [0.1] * 6,
+            "cost_floor_bps": [0.0] * 6,
+            "hurdle_bps": [0.0] * 6,
+            "profitable_after_hurdle_label": [1, 1, 1, 1, 1, 1],
+            "edge_after_hurdle_bps": [3.1, 3.0, 3.2, 1.0, 1.1, 1.2],
+            "mae_bps": [-10.0] * 6,
+            "mfe_bps": [20.0] * 6,
+        }
+    )
+    labeled["triple_barrier_label"] = labeled["profitable_after_hurdle_label"]
+    cfg = CandidateStrategyConfig(
+        min_variant_oos_obs=3,
+        min_variant_oos_edge_bps=1.0,
+        min_variant_oos_median_edge_bps=0.0,
+        min_variant_oos_p10_edge_bps=-50.0,
+        min_variant_oos_hit_rate=0.5,
+        min_variant_oos_payoff_ratio=1.0,
+        max_variant_oos_q10_fail_rate=1.0,
+        max_variant_event_fraction_per_bar=1.0,
+        min_regime_variant_oos_obs=1,
+        min_regime_variant_oos_edge_bps=2.0,
+    )
+
+    result = compute_rule_diagnostics(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        min_obs=1,
+        recommendation_start=100,
+        recommendation_end=240,
+        report_start=100,
+        report_end=240,
+    )
+
+    assert result.recommended_keep_variants == ("trend_ma:ema_12_72",)
