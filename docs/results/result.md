@@ -1,8 +1,8 @@
 # Mode Full (ML) — 최신 검증 결과
 
-**실행 일시:** 2026-06-05 (Phase 2: ML Pipeline & Validation Upgrade 적용 후)  
+**실행 일시:** 2026-06-05 (Phase 2 + Universe-Signal-ML Coupling 적용 후)  
 **실행 명령어:** `PYTHONPATH=. uv run python src/execution/opt_main_futures.py --phase ml --sync skip --timeframe 4h --trials 1 --date 2026-05-01`  
-**상태:** `Active Signals: 433`, `Status: PROMOTED (ML Phase 2 패치 적용 버전)`
+**상태:** `Active Signals: 681 (sel=97)`, `Status: PROMOTED (ML Phase 2 + metadata coupling 적용 버전)`
 
 ---
 
@@ -11,9 +11,11 @@
 ```text
 [WINDOW] 2022-10-01 ~ 2026-03-31 | IS: 2023-10-01 | OOS: 2025-10-01
 [UNIVERSE] 94개 심볼 발견
-[PIPELINE] raw=272819 promoted=6350 n_folds=4
-[BRIDGE][WF] fold_cost_survival=[True, True, True, True] pass_ratio=1.00 (BH-FDR 통과)
-[SIGNAL-VALIDATION] overall_pass=True (mean=17.8bps)
+[PIPELINE] raw=272819 labeled=6350 promoted=6350 fit=9869 cal=9165 oos=2355 n_folds=4 wf_scheme=anchored
+[BRIDGE][WF] fold_cost_survival=[True, True, True, True] pass_ratio=1.00 min_required=0.60
+[PIPELINE_GATE] calibrated=True reason=calibration_accepted mean=0.4250 median=0.4006 p90=0.4936 max=1.0000
+[PIPELINE_EDGE] mu_mean=21.4 mu_median=29.2 mu_p90=50.4 mu_max=65.4 q10_mean=-284.8 q10_p10=-448.9 q10_median=-259.7 q10_min=-668.8
+[PIPELINE_SELECT] policy=utility_topk zero_reason=selected_nonzero eligible=1000 selected_pre_group=100 selected=97 n_keep=100
 ```
 
 ---
@@ -41,15 +43,17 @@
 
 ## ML Layer 개선 결과 (Phase 2 진단)
 
-### 1. q10 Catastrophic Pessimism 해결
-* `selection_shortfall_mode`를 `"penalty_only"`로 완화하고 `max_expected_shortfall_bps`를 `300.0`으로 현실화하여, 기존의 극단적인 비관주의로 인한 신호 전면 차단 현상을 성공적으로 우회하였습니다.
-* `pct_q10_ge_max`가 `0.000`에서 `0.607`로 정상화되었으며, 이를 통해 ML 모델이 실제로 거래를 집행하고 자본 배포를 활성화(Deploy `0.39` 수준)할 수 있게 되었습니다.
+### 1. q10 Catastrophic Pessimism 완화
+* `selection_shortfall_mode="penalty_only"`와 `max_expected_shortfall_bps=300.0` 조합은 유지되었고, `utility_topk` 선택이 `eligible=1000`, `selected=97`까지 살아났습니다.
+* 최신 실행에서 `q10_mean=-284.8bps`, `q10_p10=-448.9bps`, `selection` 단계의 `selected_nonzero`가 유지되어 hard zero-exposure로 되돌아가지 않았습니다.
 
 ### 2. Isotonic Calibration을 통한 확률 보정 붕괴 해결
-* `gate_calibration_method: isotonic`을 적용함으로써, 기존 sigmoid 방식에서 100% 발생하던 확률 분포 수축(std 0.006 수준)을 극복하고, calibration fold 중 일부에서 `calibration_accepted` 판정을 이끌어냈습니다 (cal_std 0.0316 달성).
+* `gate_calibration_method: isotonic`이 유지되었고, 최신 실행에서 `calibration_accepted`와 `cal_std 0.0387`을 확인했습니다.
+* `PIPELINE_GATE`의 `mean=0.4250`, `median=0.4006`, `p90=0.4936`으로 gate 확률이 극단적으로 붕괴하지 않았습니다.
 
 ### 3. 피처 누수(Feature Leakage) 억제
 * `sym_ret_1` 및 `mkt_ret_1`과 같은 즉각적 리턴 피처를 완전히 제거하여, IS/OOS 성능 괴리를 억제하는 기초를 마련하였습니다.
+* Stage6 메타데이터(`vol_30d`, `tradeable_score`)가 candidate dataset과 selection diagnostics까지 전달되도록 확장했습니다.
 
 ---
 
