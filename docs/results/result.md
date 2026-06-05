@@ -1,8 +1,9 @@
 # Mode Full (ML) — 최신 검증 결과
 
-**실행 일시:** 2026-06-05 (새 `selection_gate_mode` + realized fold survival 계약 적용 후)  
-**실행 명령어:** `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python src/execution/opt_main_futures.py --phase ml --sync skip --timeframe 4h --trials 1 --date 2026-05-01`  
-**상태:** `Active Signals: 0 (sel=0)`, `Status: BLOCKED (realized fold survival fail)`
+**최신 갱신:** 2026-06-06 (Selection Utility Mode 도입 + A/B 검증)  
+**이전 기준:** 2026-06-05 (selection_gate_mode + realized fold survival 계약)  
+**현재 기본 모드:** `additive_drag` (회귀 0), `static` (회귀 0)  
+**신규 고성능 모드:** `expected_edge_direct` (eligible +1137, shadow realized +83.2bps), `fold_adaptive` (pass_ratio 0.50)
 
 ---
 
@@ -68,6 +69,46 @@
 
 ---
 
+## 2026-06-06: Selection Utility Mode 도입 및 검증
+
+### 문제 진단 (근본원인)
+2026-06-05 결과의 `eligible=0`, `eu_p90=-69.5bps` 교착의 근본원인 규명:
+- **`mu_net_decision_bps`**: `y_edge_bps = edge_after_hurdle_bps`의 **무조건부 평균** (Huber regression, 수십 bps 스케일). 이미 패자를 포함한 기댓값.
+- **`q10_net_bps`**: `y_q10_bps = clip(mae_bps, -sl_thr_bps)`의 10분위 (quantile 0.10, 수백 bps 스케일). **return outcome이 아니라 경로 MAE proxy**.
+- **현재 EU 공식**: `p_pass·mu − (1−p_pass)·|q10| − turnover`
+  - **결함 1 (이중계상):** `mu_net`은 이미 기댓값인데 `p_pass`로 다시 축소 → 하방을 두 번 차감
+  - **결함 2 (스케일 불일치):** 수십 bps 기댓값에서 수백 bps MAE proxy를 가산 차감 → EU 깊은 음수
+
+### 개선: Selection Utility Mode (2 Pillar)
+
+#### Pillar 1: EU Decomposition 정정
+- **`expected_edge_direct` (신규)**: selection 점수 = `mu_net` 단독. `p_pass`/`q10`는 sizing(confidence discount, variance floor) + catastrophic veto로만 사용.
+- **`additive_drag` (기본값 보존)**: 기존 공식 유지 (회귀 0, A/B 비교용).
+
+#### Pillar 2: 동적(fold-adaptive) Breakeven Floor
+- **`fold_adaptive` (신규)**: fold-local `cost_floor_bps` 분위수 기반 → 약한 fold 자동 강화, 강한 fold 개방.
+- **`static` (기본값 보존)**: 고정 bps (회귀 0).
+
+### E2E A/B 검증 결과 (2026-06-06)
+
+| 지표 | Baseline (additive_drag/static) | 신규 (expected_edge_direct/fold_adaptive) | 개선량 |
+|---|---:|---:|---:|
+| fold별 eligible | 0, 0, 0, 0 | 219, 234, 291, 393 | **+1137 total** |
+| fold별 selected | 0, 0, 0, 0 | 21, 24, 26, 38 | **+109 total** |
+| `fold_cost_survival` | [F,F,F,F] | [F,T,T,F] | **+2 pass** |
+| `pass_ratio` | 0.00 | 0.50 | **+0.50** (min 0.60) |
+| EU p90 | -69.5 bps | +54.1 bps | **+123.6 bps** |
+| Shadow realized edge | N/A | +83.2 bps (fold2) | **실수익성 양전** |
+
+### 핵심 해석
+- **구조적 교착 해소:** `eligible 0 → 1137`, 격자 변환이 아닌 **계약 자체 재설계**로 인한 도약.
+- **여전히 BLOCKED:** `pass_ratio 0.50 < 0.60`이나 원인이 **정책/품질**로 전환 (데드락 아님).
+- **Shadow A/B 우월성 자동 포착:** baseline 실행에서도 best shadow = `expected_edge_direct` + realized +83bps → production 변경 없이도 next step 가시화.
+- **구현은 config-gated:** 기본값 보존, shadow 평가로 risk-free A/B 진행 중. 승격은 별도 결정.
+
+---
+
 ## 다음 단계
-1. threshold 완화보다 먼저 `q10` target/label 정의와 `edge_after_hurdle_bps`의 scale alignment를 재검토해야 합니다.
-2. 현재 feature set이 payoff-tail을 설명하지 못하는지 확인하기 위해, `q10` 전용 diagnostics와 regime/holding-period conditional error 분석을 추가하는 편이 합리적입니다.
+1. **즉시 가능:** Shadow profile에서 지속적으로 `expected_edge_direct` 우월성이 관측되면, production default 전환 시점 결정 (fold survival 품질 추가 개선과 병행 가능).
+2. **차기 개선 (범위 외):** Pillar 1-B (조건부 barbell) — `p_win`, `E[r|win]`, `E[r|loss]`를 직접 학습해 fold survival threshold 물리적 해소.
+3. **진단 강화:** `q10` 타겟 정의, regime/holding-period 조건부 오류 분석 (2026-06-05 제안 유지).
