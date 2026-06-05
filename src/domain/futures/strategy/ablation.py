@@ -33,6 +33,20 @@ def _is_nan(v: float) -> bool:
 
 
 @dataclass(slots=True, frozen=True)
+class SignalValidationReport:
+    """Signal-only validation result (produced before ML training)."""
+
+    variant: str
+    n_events: int
+    net_edge_bps_p50: float
+    net_edge_bps_stress_p50: float
+    hit_rate: float
+    ir_t_stat: float
+    survives_cost: bool
+    deployment_count: int
+
+
+@dataclass(slots=True, frozen=True)
 class EdgeAttributionReport:
     """Per-variant predicted vs realised edge attribution."""
 
@@ -188,6 +202,7 @@ def _compute_rule_diagnostics_for_ablation(
         recommendation_end=recommendation_end,
         report_start=oos_start,
         report_end=oos_end,
+        silent=True,
     )
     diag_oracle = compute_rule_diagnostics(
         labeled_events=labeled_for_diag,
@@ -380,6 +395,12 @@ def run_candidate_ablation(
         purge_bars=cfg.purge_bars,
         embargo_bars=cfg.embargo_bars,
     )
+    # Compute WF folds for fold_oos_boundaries (used by evaluate_compound_backtest DSR/PBO)
+    from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
+    _wf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=cfg)
+    _fold_oos_boundaries: tuple[tuple[int, int], ...] = tuple(
+        (f.oos_start, f.oos_end) for f in _wf_folds
+    )
     diag, diag_oracle = _compute_rule_diagnostics_for_ablation(
         labeled=labeled,
         aligned=aligned,
@@ -474,6 +495,7 @@ def run_candidate_ablation(
             cfg,
             start_idx=oos_start,
             end_idx=oos_end,
+            fold_oos_boundaries=_fold_oos_boundaries,
         )
     )
 
@@ -502,6 +524,7 @@ def run_candidate_ablation(
             cfg,
             start_idx=oos_start,
             end_idx=oos_end,
+            fold_oos_boundaries=_fold_oos_boundaries,
         )
     )
 
@@ -596,6 +619,7 @@ def run_candidate_ablation(
             start_idx=oos_start,
             end_idx=oos_end,
             selected_events=gate_events_oos,
+            fold_oos_boundaries=_fold_oos_boundaries,
         )
     )
 
@@ -635,6 +659,7 @@ def run_candidate_ablation(
             start_idx=oos_start,
             end_idx=oos_end,
             selected_events=prior_selected,
+            fold_oos_boundaries=_fold_oos_boundaries,
         )
     )
 
@@ -648,6 +673,7 @@ def run_candidate_ablation(
             aligned=aligned,
             cfg=cfg,
             variant_name="candidate_ml_promotion_filter",
+            fold_oos_boundaries=_fold_oos_boundaries,
         )] = 0
 
         # Row 8: with hard selection
@@ -657,6 +683,7 @@ def run_candidate_ablation(
             aligned=aligned,
             cfg=replace(cfg, selection_policy="hard"),
             variant_name="candidate_ml_validation_quantile_selection",
+            fold_oos_boundaries=_fold_oos_boundaries,
         )] = 1
 
         # Row 9: without identity features
@@ -666,6 +693,7 @@ def run_candidate_ablation(
             aligned=aligned,
             cfg=replace(cfg, candidate_identity_features_enabled=False),
             variant_name="candidate_ml_identity_features",
+            fold_oos_boundaries=_fold_oos_boundaries,
         )] = 2
 
         # Row 10: without market-state features
@@ -675,6 +703,7 @@ def run_candidate_ablation(
             aligned=aligned,
             cfg=replace(cfg, market_state_features_enabled=False),
             variant_name="candidate_ml_market_state_features",
+            fold_oos_boundaries=_fold_oos_boundaries,
         )] = 3
 
         ablation_results = [
@@ -716,6 +745,7 @@ def _run_oos_only_ablation_variant(
     aligned: AlignedMarketData,
     cfg: CandidateStrategyConfig,
     variant_name: str,
+    fold_oos_boundaries: tuple[tuple[int, int], ...] | None = None,
 ) -> AblationRow:
     """Retrain models with modified cfg/labeled and evaluate on OOS split only."""
     n_bars = aligned.close_2d.shape[0]
@@ -766,6 +796,7 @@ def _run_oos_only_ablation_variant(
         start_idx=oos_start,
         end_idx=oos_end,
         selected_events=selected,
+        fold_oos_boundaries=fold_oos_boundaries,
     )
 
 
@@ -807,6 +838,7 @@ def _run_backtest_and_evaluate(
     start_idx: int | None = None,
     end_idx: int | None = None,
     selected_events: pd.DataFrame | None = None,
+    fold_oos_boundaries: tuple[tuple[int, int], ...] | None = None,
 ) -> AblationRow:
     """Helper to inject target_weights into data_maps and run backtest simulation."""
     from src.domain.futures.strategy.rule_signals import _atr_2d
@@ -868,10 +900,22 @@ def _run_backtest_and_evaluate(
     )
 
     # Evaluate compounding growth
+    # Remap fold_oos_boundaries to local (sliced) index space when start_idx is applied
+    _local_boundaries: tuple[tuple[int, int], ...] | None = None
+    if fold_oos_boundaries and start_idx is not None:
+        _offset = int(start_idx)
+        _local_boundaries = tuple(
+            (max(0, s - _offset), max(0, e - _offset))
+            for s, e in fold_oos_boundaries
+            if e > _offset
+        ) or None
+    elif fold_oos_boundaries:
+        _local_boundaries = fold_oos_boundaries
     report = evaluate_compound_backtest(
         trades=trades,
         equity_curve=equity_curve,
         cfg=cfg,
+        fold_oos_boundaries=_local_boundaries,
     )
 
     # Attribution metrics
@@ -916,3 +960,90 @@ def _run_backtest_and_evaluate(
         gross_cost_bps=gross_cost_bps,
         pass_deployment_gate=pass_deployment_gate,
     )
+
+
+def validate_candidate_signals(
+    *,
+    labeled: pd.DataFrame,
+    diag: RuleDiagnosticsResult,
+    cfg: CandidateStrategyConfig,
+    oos_start: int,
+    oos_end: int,
+) -> list[SignalValidationReport]:
+    """Produce signal-only validation reports without ML training.
+
+    Runs variant 1 (rule_only_equal_size) and 1b (rule_promo_no_leak) only.
+    Used by bridge when cfg.signal_only=True to cut off before ML training.
+    """
+    from src.domain.futures.strategy.execution_cost import ExecutionCostModel
+
+    cost_model = ExecutionCostModel(
+        maker_fee_bps=cfg.maker_fee_bps,
+        taker_fee_bps=cfg.taker_fee_bps,
+        maker_ratio=cfg.maker_ratio,
+        slippage_bps=cfg.slippage_bps,
+        impact_coeff_bps=cfg.impact_coeff_bps,
+        stress_multiplier=cfg.cost_stress_multiplier,
+    )
+    stress_rt = cost_model.stress_round_trip_bps()
+
+    reports: list[SignalValidationReport] = []
+
+    for variant_name, events_df in [
+        ("rule_only_equal_size", labeled),
+        ("rule_promo_no_leak", apply_variant_promotions(
+            labeled=labeled,
+            keep_variants=diag.recommended_keep_variants,
+            flip_variants=diag.recommended_flip_variants,
+        )),
+    ]:
+        oos_events = _oos_only_events(labeled=events_df, oos_start=oos_start, oos_end=oos_end)
+        n_events = len(oos_events)
+        if n_events == 0:
+            reports.append(SignalValidationReport(
+                variant=variant_name,
+                n_events=0,
+                net_edge_bps_p50=float("nan"),
+                net_edge_bps_stress_p50=float("nan"),
+                hit_rate=0.0,
+                ir_t_stat=0.0,
+                survives_cost=False,
+                deployment_count=0,
+            ))
+            continue
+
+        edge_col = "edge_after_hurdle_bps"
+        if edge_col in oos_events.columns:
+            edge_arr = oos_events[edge_col].to_numpy(dtype=np.float64)
+        else:
+            edge_arr = np.zeros(n_events, dtype=np.float64)
+
+        finite_edge = edge_arr[np.isfinite(edge_arr)]
+        net_p50 = float(np.median(finite_edge)) if finite_edge.size > 0 else float("nan")
+        net_stress_p50 = net_p50 - stress_rt if np.isfinite(net_p50) else float("nan")
+        hit_rate = float((finite_edge > 0).mean()) if finite_edge.size > 0 else 0.0
+
+        if finite_edge.size >= 2:
+            std_val = float(np.std(finite_edge, ddof=1))
+            ir_t = float(np.mean(finite_edge) / (std_val / (finite_edge.size ** 0.5) + 1e-12))
+        else:
+            ir_t = 0.0
+
+        survives = (
+            np.isfinite(net_stress_p50)
+            and net_stress_p50 > 0.0
+            and ir_t >= cfg.min_rule_ir_t
+        )
+
+        reports.append(SignalValidationReport(
+            variant=variant_name,
+            n_events=n_events,
+            net_edge_bps_p50=net_p50,
+            net_edge_bps_stress_p50=net_stress_p50,
+            hit_rate=hit_rate,
+            ir_t_stat=ir_t,
+            survives_cost=survives,
+            deployment_count=int(n_events),
+        ))
+
+    return reports
