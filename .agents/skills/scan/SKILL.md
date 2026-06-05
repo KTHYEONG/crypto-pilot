@@ -1,9 +1,9 @@
 ---
-name: triage-scan
+name: scan
 description: Scout and map relevant file paths (code, tests, docs) BEFORE any design work.
 ---
 
-# Skill: Triage-Scan (File Discovery & Mapping)
+# Skill: Scan (File Discovery & Mapping)
 
 ## Purpose
 Act as a lightweight scout. Your ONLY goal is to locate the exact files, tests, and documentation related to the user's request. **DO NOT design solutions, analyze logic, or formulate strategies.** 
@@ -19,16 +19,16 @@ Act as a lightweight scout. Your ONLY goal is to locate the exact files, tests, 
 
 ## Output Format
 ```md
-### 🔍 사전 파일 탐색 완료
+### 🔍 File Exploration Completed
 
-**1. 핵심 타겟 파일**
-- `[File Path]` (Line: X) - *[짧은 설명: e.g., ML Gate 로직 정의부]*
+**1. Core Target Files**
+- `[File Path]` (Line: X) - *[Short Description: e.g., ML Gate logic definition]*
 
-**2. 연관 생태계 (Ecosystem)**
-- **의존성/참조:** `[관련된 다른 모듈 Path]`
-- **테스트 파일:** `[test_*.py Path]` (없을 경우 'None found')
-- **관련 문서:** `[docs/*.md Path]` (없을 경우 'None found')
+**2. Related Ecosystem**
+- **Dependencies/References:** `[Related module path]`
+- **Test Files:** `[test_*.py path]` (or 'None found')
+- **Related Documentation:** `[docs/*.md path]` (or 'None found')
 
-**3. 다음 단계**
-- ➡️ 탐색된 경로를 바탕으로 `spec` 스킬로 넘어가 세부 설계를 진행합니다.
+**3. Next Step**
+- ➡️ Proceed to `spec` skill for detailed design based on the discovered paths.
 ```
