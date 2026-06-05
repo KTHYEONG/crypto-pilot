@@ -71,6 +71,7 @@ def label_candidate_events(
     mae_list: list[float] = []
     mfe_list: list[float] = []
     rv_list: list[float] = []
+    sl_thr_bps_list: list[float] = []  # RC3: realizable stop loss in bps (for q10 clipping)
     exit_reason_list: list[str] = []
     exit_idx_list: list[int] = []
     exit_policy_version_list: list[str] = []
@@ -97,6 +98,7 @@ def label_candidate_events(
             mae_list.append(np.nan)
             mfe_list.append(np.nan)
             rv_list.append(np.nan)
+            sl_thr_bps_list.append(np.nan)
             exit_reason_list.append("invalid")
             exit_idx_list.append(-1)
             exit_policy_version_list.append(_EXIT_POLICY_VERSION)
@@ -115,6 +117,7 @@ def label_candidate_events(
             mae_list.append(np.nan)
             mfe_list.append(np.nan)
             rv_list.append(np.nan)
+            sl_thr_bps_list.append(np.nan)
             exit_reason_list.append("invalid")
             exit_idx_list.append(-1)
             exit_policy_version_list.append(_EXIT_POLICY_VERSION)
@@ -204,6 +207,9 @@ def label_candidate_events(
             else 0.0
         )
 
+        # RC3: realizable stop loss in bps — used to clip paper-MAE in q10 target
+        sl_thr_bps = sl_thr * _BPS_SCALE  # fractional stop → bps (always positive)
+
         gross_list.append(float(gross_ret_bps))
         cost_list.append(float(ex_ante_cost_bps))
         edge_list.append(float(edge_after_hurdle_bps))
@@ -212,6 +218,7 @@ def label_candidate_events(
         profitable_label_list.append(int(profitable_after_hurdle_label))
         tte_list.append(int(exit_off + 1))
         mae_list.append(float(mae_bps))
+        sl_thr_bps_list.append(float(sl_thr_bps))
         mfe_list.append(float(mfe_bps))
         rv_list.append(float(rv_bps))
         exit_reason_list.append(exit_reason)
@@ -231,6 +238,7 @@ def label_candidate_events(
     out["time_to_exit_bars"] = np.asarray(tte_list, dtype=np.int32)
     out["mae_bps"] = np.asarray(mae_list, dtype=np.float64)
     out["mfe_bps"] = np.asarray(mfe_list, dtype=np.float64)
+    out["sl_thr_bps"] = np.asarray(sl_thr_bps_list, dtype=np.float64)  # RC3: stop-loss threshold in bps
     out["realized_vol_bps"] = np.asarray(rv_list, dtype=np.float64)
     out["exit_reason"] = np.asarray(exit_reason_list, dtype=object)
     out["exit_idx"] = np.asarray(exit_idx_list, dtype=np.int32)
