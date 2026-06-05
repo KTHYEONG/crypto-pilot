@@ -87,7 +87,7 @@ Current features:
 Current labels:
 - `y_gate` uses `profitable_after_hurdle_label` if present, otherwise `triple_barrier_label`
 - `y_edge_bps` uses `edge_after_hurdle_bps`
-- `y_q10_bps` uses `min(mae_bps, y_edge_bps)`
+- `y_q10_bps` uses `min(clip(mae_bps, floor=-sl_thr_bps) - cost, y_edge_bps)` when `cfg.q10_bound_to_stop=True` (RC3). The paper-MAE drawdown is clipped to the realizable stop loss (`sl_thr_bps = stop_atr_mult*ATR/entry*1e4`, emitted by `candidate_labels.py`) so the q10 model learns the bounded worst case, not unbounded close-path drawdown.
 - `y_mfe_bps` uses `mfe_bps`
 
 ### `src/domain/futures/strategy/candidate_gate.py`
@@ -167,6 +167,8 @@ Current state:
 - `entry_idx` uses execution-bar semantics
 - Kelly sizing uses per-bar expected return normalization
 - variant 6 is the OOS-only candidate path
+- **Eval barrier alignment (RC1):** when `cfg.eval_apply_candidate_barriers=True`, ML variants feed `candidate_stop_atr_mult`/`candidate_take_profit_atr_mult` arrays (built from `selected_events`) into the engine so evaluation matches the triple-barrier labels. **Asymmetry:** rule-only variants (`equal_size`, `rule_promo_*`, `fractional_kelly`) pass `selected_events=None`, so they run barrier-less (flat hold to horizon). Rule-vs-ML rows are therefore not strictly barrier-comparable.
+- **Realized-edge attribution:** `_compute_realized_edge` reports median `(exit/entry-1)*side` bps per variant; `edge_capture_ratio = real/pred` exposes label↔execution gap.
 
 ### `src/domain/futures/strategy/rule_diagnostics.py`
 Advisory diagnostics layer for rule quality.
@@ -213,6 +215,8 @@ The current code still has known limits:
 - edge model still receives a negative-centered target distribution in some market regimes
 - rule family pruning is advisory, not yet wired into production selection
 - gate calibration collapses in early WF folds (small fit set); further min_fit_obs tuning may help
+- **signal edge is genuinely thin post-cost:** after RC1 barrier alignment, `candidate_ml_full` still shows `edge_capture_ratio ≈ -0.12` and the OOS-oracle rule variant remains ≈ -46bps realized. The measurement bugs are fixed; the alpha itself is the open problem.
+- **q10 still rejects ~88%:** RC3 stop-clip raised `pct_q10_ge_cat` 2.9%→12.1%, but `q10_median ≈ -498bps` still exceeds the catastrophic floor (-300) for most events — stop-distance parameters in labeling may need review.
 
 ## Key Verification Paths
 
@@ -1197,13 +1201,18 @@ Promotion gate:
 pass if:
   mean_log_growth > 0
   CAGR > 0
-  MAR >= 0.75
+  CAGR >= min_cagr_for_promotion (0.02)        # RC2: absolute growth floor kills noise-pass
+  MAR >= 0.75                                   # RC2: MAR=0 when max_dd < mar_min_drawdown_floor (0.01)
   max_drawdown <= configured cap
   liquidation_count == 0
   block_pass_ratio >= 0.70
   worst_block_return > -max_block_loss
   net_pnl after fees and funding > 0
+  deployed_bar_fraction >= min_deployment_capital_fraction (0.05)   # RC2: when enforce_deployment_in_compound_gate
+  trade_count >= min_deployment_trade_count (20)                    # RC2
 ```
+
+**RC2 rationale:** the old gate was maximized by trading almost nothing — `MAR = CAGR/max_dd` exploded when both approached zero, so a flat equity curve with a few-bps drift "passed". The MAR drawdown floor, absolute CAGR floor, and deployment enforcement collapse that degenerate optimum.
 
 ## Phase 7: Ablation
 
