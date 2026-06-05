@@ -1,6 +1,6 @@
 # Futures ML Strategy Architecture
 
-> last_verified: 2026-06-05
+> last_verified: 2026-06-06
 
 ## 1. Overview
 본 문서는 `my-coin-traider` 프로젝트의 선물(Futures) ML 전략 아키텍처를 기술합니다. 본 아키텍처는 단순 순위 기반(Rank-based) 모델에서 벗어나, 개별 **Candidate Event**를 추출하고 이를 ML로 필터링하여 최종 **Target Weight**를 생성하는 파이프라인을 핵심으로 합니다.
@@ -33,7 +33,7 @@
 - **Edge Model**: LightGBM Regressor (Huber/Quantile)를 이용한 기대 수익 및 하방 리스크(q10) 추정입니다.
 - **Selection Diagnostics**: 예측 `mu`, `p_pass`, `expected_utility` decile별 realized edge/hit-rate 및 rank IC를 기록하여, pointwise 예측이 실제 top-k 선택 품질로 이어지는지 점검합니다.
 - **Selection Waterfall Diagnostics**: `prob_adjusted_mu`, `downside_drag`, `turnover_drag`, `soft_gate_penalty`, `expected_utility_raw/adj`를 fold별로 기록하여 `eligible=0`의 직접 원인을 분해합니다.
-- **Shadow Profiles**: production selection은 유지한 채, fold-local OOS에서 완화된 gate/utility/breakeven 조합을 shadow로만 평가하여 threshold bottleneck과 model bottleneck을 구분합니다.
+- **Shadow Profiles**: production selection은 유지한 채, fold-local OOS에서 완화된 gate/utility/breakeven/**utility_mode**(`selection_shadow_utility_modes`) 조합을 shadow로만 평가하여 threshold bottleneck, model bottleneck, selection-contract bottleneck을 구분합니다. (예: production=`additive_drag`에서도 best shadow가 `expected_edge_direct`로 잡히면 계약 자체가 병목)
 
 ### 3.4 Portfolio & Weights (`candidate_portfolio.py`)
 - **Selection**: `utility_topk`는 `expected_utility_bps`를 기준으로 후보를 고르고, gate는 `selection_gate_mode`에 따라 `off`, `soft_floor`, `hard_floor`로 동작합니다.
@@ -41,7 +41,13 @@
   - `hard_floor`: `p_pass < selection_min_gate_probability_floor`이면 즉시 제외
   - `soft_floor`: 즉시 제외하지 않고, 낮은 `p_pass`에 soft penalty를 부여
   - `off`: gate는 진단용으로만 사용
-- **Expected Utility**: 기본 selection은 `p_pass * mu_net + (1 - p_pass) * min(q10, 0) - turnover_penalty` 형태의 보수적 utility를 사용합니다.
+- **Selection Utility Mode** (`selection_utility_mode`):
+  - `additive_drag` (default): `p_pass * mu_net − (1 − p_pass) * |min(q10,0)| − turnover_penalty`. 보수적이나 `mu_net`(무조건부 기댓값)과 `q10`(경로 MAE proxy)을 가산 결합해 **하방 이중계상·스케일 불일치** 위험이 있음.
+  - `expected_edge_direct`: selection 점수 = `mu_net` 단독(올바른 E[return]). `p_pass`/`q10`는 selection 점수에서 제외하고 sizing(p_pass discount, q10 variance floor)과 catastrophic veto로만 사용 → edge=selection / risk=sizing 분리.
+  - **Invariant**: `expected_edge_direct`에서 `q10`는 catastrophic veto(`catastrophic_shortfall_bps`)와 sizing variance floor로만 작동하며, 연속 가산 drag로 selection을 막지 않는다.
+- **Breakeven Floor Mode** (`breakeven_floor_mode`):
+  - `static` (default): `min_net_floor_cost_fraction * cost_floor_bps`.
+  - `fold_adaptive`: fold-local `cost_floor_bps`의 `breakeven_floor_cost_quantile` 분위수 × `min_net_floor_cost_fraction` → 약한 fold 자동 강화, 강한 fold 개방.
 - **Selection Waterfall**: `expected_utility_raw`와 `expected_utility_adj`를 분리해, payoff 부족인지 downside 과대인지, 혹은 soft gate penalty 때문인지를 보고합니다.
 - **Shortfall Thresholding**: 기본값은 절대 bps 기준(`shortfall_threshold_basis="absolute_bps"`)이며, 필요 시 `stop_relative` 모드로 자산별 `sl_thr_bps` 기반 한계를 사용할 수 있습니다. 현재 기본값은 보수적으로 유지됩니다.
 - **Sizing**: Kelly 입력 `mu`는 기본적으로 `p_pass`로 discount되며, q10 downside로부터 variance floor를 부여하여 과도한 sizing을 방지합니다.
