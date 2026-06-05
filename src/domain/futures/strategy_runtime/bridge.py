@@ -274,7 +274,11 @@ def run_candidate_strategy_for_universe(
             oos_start=_oos_start_ref,
             oos_end=_oos_end_ref,
         )
-        any_passes = any(r.survives_cost for r in signal_reports)
+        if strategy_cfg.candidate.blend_survival_require_promoted:
+            promoted_rpt = next((r for r in signal_reports if r.variant == "rule_promo_no_leak"), None)
+            any_passes = bool(promoted_rpt is not None and promoted_rpt.survives_cost)
+        else:
+            any_passes = any(r.survives_cost for r in signal_reports)
         _logger.info(
             "[SIGNAL-VALIDATION] variants=%d any_passes=%s",
             len(signal_reports),
@@ -283,9 +287,10 @@ def run_candidate_strategy_for_universe(
         for rpt in signal_reports:
             _logger.info(
                 "[SIGNAL-VALIDATION] variant=%s n=%d net_p50=%.1f stress_p50=%.1f "
-                "hit=%.3f t=%.2f survives=%s",
+                "mean=%.1f stress_mean=%.1f hit=%.3f t=%.2f survives=%s",
                 rpt.variant, rpt.n_events, rpt.net_edge_bps_p50,
-                rpt.net_edge_bps_stress_p50, rpt.hit_rate, rpt.ir_t_stat, rpt.survives_cost,
+                rpt.net_edge_bps_stress_p50, rpt.net_edge_bps_mean,
+                rpt.net_edge_bps_stress_mean, rpt.hit_rate, rpt.ir_t_stat, rpt.survives_cost,
             )
         alpha_panel_sv = build_candidate_alpha_panel(
             selected_events=pd.DataFrame(),
@@ -319,6 +324,8 @@ def run_candidate_strategy_for_universe(
                         "n_events": r.n_events,
                         "net_edge_bps_p50": r.net_edge_bps_p50,
                         "net_edge_bps_stress_p50": r.net_edge_bps_stress_p50,
+                        "net_edge_bps_mean": r.net_edge_bps_mean,
+                        "net_edge_bps_stress_mean": r.net_edge_bps_stress_mean,
                         "hit_rate": r.hit_rate,
                         "ir_t_stat": r.ir_t_stat,
                         "survives_cost": r.survives_cost,

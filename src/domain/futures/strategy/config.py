@@ -265,6 +265,10 @@ class CandidateStrategyConfig:
     enforce_deployment_in_compound_gate: bool = True
     # Downside target — RC3 fix: clip paper-MAE to realizable stop loss
     q10_bound_to_stop: bool = True
+    # Blend survival gate (signal→ML handoff) — mean-based, no double-count
+    blend_survival_use_mean: bool = True
+    blend_survival_min_net_stress_bps: float = 0.0
+    blend_survival_require_promoted: bool = True
 
     def __post_init__(self) -> None:
         """Validate candidate strategy parameters."""
@@ -398,3 +402,5 @@ class CandidateStrategyConfig:
             raise ValueError("min_deployment_trade_count must be >= 0")
         if not (0.0 <= self.min_deployment_capital_fraction <= 1.0):
             raise ValueError("min_deployment_capital_fraction must be in [0.0, 1.0]")
+        if self.blend_survival_min_net_stress_bps < -50.0:
+            raise ValueError("blend_survival_min_net_stress_bps too permissive (< -50)")
