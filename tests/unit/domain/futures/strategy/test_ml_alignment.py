@@ -7,7 +7,9 @@ import pytest
 from src.domain.futures.strategy.candidate_portfolio import (
     _resolve_breakeven_floor,
     _selection_component_frame,
+    select_candidate_events_for_portfolio,
 )
+from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
 from src.domain.futures.strategy.common import alignment
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 
@@ -194,3 +196,68 @@ def test_expected_edge_direct_selects_when_additive_blocks() -> None:
     # Assert — additive mode blocks all (EU << 0), direct mode passes all (mu > 0)
     assert eligible_additive == 0, f"expected 0 eligible in additive mode, got {eligible_additive}"
     assert eligible_direct == len(events), f"expected all eligible in direct mode, got {eligible_direct}"
+
+
+def test_production_topk_sorts_by_mu_in_direct_mode() -> None:
+    """Production topk must rank by mu_net (expected_utility_bps) when mode=expected_edge_direct."""
+    # Arrange — candidates with deliberately inverted mu vs additive utility ordering
+    # Candidate A: high mu (+30), extreme q10 (-500) → additive EU = 0.6*30 - 0.4*500 - 0.5 ≈ -182, mu=30
+    # Candidate B: low mu (+5),  moderate q10 (-20) → additive EU = 0.6*5 - 0.4*20 - 0.5 ≈ -5.5, mu=5
+    # Additive would pick B (less negative). Direct mode should pick A (higher mu).
+    rng = np.random.default_rng(0)
+    dt = pd.date_range("2026-01-01", periods=2, freq="4h", tz="UTC")
+    events = pd.DataFrame(
+        {
+            "datetime": dt,
+            "symbol": ["SYM0", "SYM1"],
+            "family": ["f", "f"],
+            "variant": ["v", "v"],
+            "side": [1, 1],
+            "p_pass": [0.60, 0.60],
+            "mu_net_decision_bps": [30.0, 5.0],   # A >> B
+            "q10_net_bps": [-500.0, -20.0],        # A much worse than B
+            "q90_net_bps": [60.0, 10.0],
+            "turnover_proxy": [1.0, 1.0],
+            "cost_floor_bps": [7.5, 7.5],
+            "edge_after_hurdle_bps": [30.0, 5.0],
+            "sl_thr_bps": [250.0, 250.0],
+            "raw_score": rng.uniform(0.5, 1.0, 2),
+            "score_z": rng.uniform(0, 1, 2),
+            "entry_idx": [100, 100],
+            "expected_holding_bars": [6, 6],
+            "min_holding_bars": [1, 1],
+            "stop_atr_mult": [1.5, 1.5],
+            "take_profit_atr_mult": [2.0, 2.0],
+            "side_flipped": [False, False],
+        }
+    )
+    # utility_score reflects additive formula (as produced by edge model)
+    additive_a = 0.60 * 30.0 - (1 - 0.60) * 500.0 - 0.5  # ≈ -182
+    additive_b = 0.60 * 5.0 - (1 - 0.60) * 20.0 - 0.5    # ≈ -5.5
+    model_output = CandidateModelOutput(
+        events=events,
+        p_pass=np.array([0.60, 0.60]),
+        mu_gross_bps=np.array([30.0, 5.0]),
+        mu_net_decision_bps=np.array([30.0, 5.0]),
+        q10_net_bps=np.array([-500.0, -20.0]),
+        q90_net_bps=np.array([60.0, 10.0]),
+        utility_score=np.array([additive_a, additive_b]),  # additive order: B > A
+        selection_thresholds={},
+    )
+    cfg_direct = CandidateStrategyConfig(
+        selection_utility_mode="expected_edge_direct",
+        selection_min_expected_utility_bps=-1000.0,  # open floor
+        min_net_floor_cost_fraction=0.0,
+        catastrophic_shortfall_bps=1000.0,           # don't veto on q10
+        selection_gate_mode="off",
+        selection_top_quantile=0.50,                 # keep 1 of 2
+    )
+
+    # Act
+    selected = select_candidate_events_for_portfolio(model_output=model_output, cfg=cfg_direct)
+
+    # Assert — candidate A (mu=30) must be selected, not B (mu=5)
+    assert len(selected) == 1, f"expected 1 selected, got {len(selected)}"
+    assert float(selected["mu_net_decision_bps"].iloc[0]) == pytest.approx(30.0), (
+        f"wrong candidate selected: mu={selected['mu_net_decision_bps'].iloc[0]}"
+    )
