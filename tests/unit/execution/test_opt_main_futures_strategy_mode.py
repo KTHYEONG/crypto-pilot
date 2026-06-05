@@ -359,7 +359,7 @@ def test_run_from_cli_when_pipeline_returns_nonzero_propagates_exit_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Arrange
-    argv = ["--phase", "strategy"]
+    argv = ["--phase", "full"]
     monkeypatch.setattr(
         opt_main_futures,
         "run_pipeline",
@@ -377,7 +377,7 @@ def test_run_from_cli_when_pipeline_raises_runtime_error_returns_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Arrange
-    argv = ["--phase", "strategy"]
+    argv = ["--phase", "full"]
 
     def _raise_runtime_error(*_args: object, **_kwargs: object) -> opt_main_futures.RunnerResult:
         raise RuntimeError("boom")
@@ -391,10 +391,10 @@ def test_run_from_cli_when_pipeline_raises_runtime_error_returns_one(
     assert exit_code == 1
 
 
-def test_requires_exec_1m_returns_false_for_alpha_mode() -> None:
+def test_requires_exec_1m_returns_false_for_ml_mode() -> None:
     run_config = build_run_config_from_args(
         {
-            "phase": "alpha",
+            "phase": "ml",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -565,3 +565,20 @@ def test_active_signals_count_reads_alpha_panel_not_missing_attr(
     tw_arr = alpha_panel_check["target_weight"].to_numpy(dtype=np.float64)
     non_zero_weights = int(np.count_nonzero(np.abs(tw_arr) > 1e-9))
     assert non_zero_weights == 3, f"Expected 3 nonzero weights, got {non_zero_weights}"
+
+
+# ─── --mode signal ────────────────────────────────────────────────────────────
+
+def test_build_run_config_accepts_mode_signal() -> None:
+    # "--mode signal" is mapped to phase="signal" for backward compatibility
+    cfg = build_run_config_from_args(
+        {"phase": "strategy", "timeframe": "4h", "trials": 1, "sync": "full", "mode": "signal"}
+    )
+    assert cfg.phase == "signal"
+
+
+def test_cli_mode_signal_is_accepted() -> None:
+    """--mode signal parsed from CLI args must be accepted."""
+    parser = opt_main_futures.build_arg_parser()
+    args = parser.parse_args(["--phase", "full", "--mode", "signal"])
+    assert args.mode == "signal"
