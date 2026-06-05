@@ -361,8 +361,16 @@ def build_candidate_dataset(
     y_gate = kept_events[gate_label_col].to_numpy(dtype=np.int8, copy=False)
     y_edge = kept_events["edge_after_hurdle_bps"].to_numpy(dtype=np.float32, copy=False)
     cost_hurdle = _target_cost_hurdle_bps(kept_events)
+    mae_raw = kept_events["mae_bps"].to_numpy(dtype=np.float32, copy=False)
+    # RC3: clip paper-MAE to the realizable stop-loss level so the q10 model learns
+    # the bounded worst-case, not the unbounded close-based paper drawdown.
+    # mae_bps is negative (min path return); -sl_thr_bps is also negative; max() is
+    # "less negative" = the stop-bounded floor.
+    if bool(getattr(cfg, "q10_bound_to_stop", True)) and "sl_thr_bps" in kept_events.columns:
+        sl_thr_raw = kept_events["sl_thr_bps"].to_numpy(dtype=np.float32, copy=False)
+        mae_raw = np.maximum(mae_raw, -sl_thr_raw)
     y_q10 = np.minimum(
-        kept_events["mae_bps"].to_numpy(dtype=np.float32, copy=False) - cost_hurdle,
+        mae_raw - cost_hurdle,
         y_edge,
     )
     y_mfe = kept_events["mfe_bps"].to_numpy(dtype=np.float32, copy=False) - cost_hurdle

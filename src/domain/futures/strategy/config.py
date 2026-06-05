@@ -214,6 +214,14 @@ class CandidateStrategyConfig:
     min_deployment_capital_fraction: float = 0.05
     # Edge attribution diagnostics
     edge_attribution_enabled: bool = True
+    # Ablation evaluation alignment (RC1 fix)
+    eval_apply_candidate_barriers: bool = True
+    # Promotion gate — RC2 fix: prevent degenerate near-zero-deployment passes
+    mar_min_drawdown_floor: float = 0.01      # MAR = 0 when max_dd < this (ratio of two noise values)
+    min_cagr_for_promotion: float = 0.02      # absolute CAGR floor kills noise-pass (e.g. 0.035% equity gain)
+    enforce_deployment_in_compound_gate: bool = True
+    # Downside target — RC3 fix: clip paper-MAE to realizable stop loss
+    q10_bound_to_stop: bool = True
 
     def __post_init__(self) -> None:
         """Validate candidate strategy parameters."""
