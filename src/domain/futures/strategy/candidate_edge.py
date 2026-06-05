@@ -253,6 +253,13 @@ def _selection_thresholds(
     }
 
 
+def _rank_ic(pred: NDArray[np.float64], target: NDArray[np.float64]) -> float:
+    pred_s = pd.Series(pred, dtype="float64")
+    target_s = pd.Series(target, dtype="float64")
+    corr = pred_s.corr(target_s, method="spearman")
+    return float(corr) if corr is not None and np.isfinite(corr) else float("nan")
+
+
 def fit_candidate_edge_models(
     *,
     train: CandidateDataset,
@@ -452,9 +459,19 @@ def predict_candidate_edges(
     q10_net_bps = q10_model_bps
     q90_net_bps = q90_model_bps
 
+    prob_adjusted_mu_bps = p_pass * mu_net_decision_bps
     downside_term = downside_penalty * np.abs(np.minimum(q10_net_bps, 0.0))
     turnover_term = turnover_penalty * turnover_proxy
-    utility_score = p_pass * mu_net_decision_bps - downside_term - turnover_term - concentration_penalty
+    expected_utility_bps = (
+        prob_adjusted_mu_bps
+        + (1.0 - p_pass) * np.minimum(q10_net_bps, 0.0)
+        - turnover_term
+        - concentration_penalty
+    )
+    if bool(getattr(cfg, "selection_use_expected_utility", True)):
+        utility_score = expected_utility_bps
+    else:
+        utility_score = prob_adjusted_mu_bps - downside_term - turnover_term - concentration_penalty
 
     breakeven_floor_bps = float(getattr(cfg, "min_net_floor_cost_fraction", 0.5)) * float(
         getattr(cfg, "cost_floor_bps", expected_cost_bps)
@@ -464,6 +481,7 @@ def predict_candidate_edges(
     finite_mu = mu_net_decision_bps[np.isfinite(mu_net_decision_bps)]
     finite_q10 = q10_net_bps[np.isfinite(q10_net_bps)]
     finite_utility = utility_score[np.isfinite(utility_score)]
+    finite_expected_utility = expected_utility_bps[np.isfinite(expected_utility_bps)]
 
     _logger = logging.getLogger(__name__)
     prediction_collapse = bool(
@@ -476,6 +494,7 @@ def predict_candidate_edges(
             "[DIAG][EDGE] n=%d target_scale=net mode=%s cost_bps=%.1f floor_bps=%.1f "
             "mu_mean=%.1f mu_p50=%.1f mu_p90=%.1f mu_max=%.1f "
             "q10_mean=%.1f q10_p10=%.1f q10_p50=%.1f q10_min=%.1f "
+            "exp_util_mean=%.3f exp_util_p50=%.3f exp_util_p90=%.3f "
             "utility_mean=%.3f utility_p50=%.3f utility_p90=%.3f utility_max=%.3f "
             "pct_mu_ge1=%.3f pct_mu_ge_floor=%.3f pct_q10_ge_cat=%.3f pct_q10_ge_max=%.3f"
         ),
@@ -491,6 +510,9 @@ def predict_candidate_edges(
         float(np.percentile(finite_q10, 10)) if finite_q10.size > 0 else float("nan"),
         float(np.median(finite_q10)) if finite_q10.size > 0 else float("nan"),
         float(np.min(finite_q10)) if finite_q10.size > 0 else float("nan"),
+        float(np.mean(finite_expected_utility)) if finite_expected_utility.size > 0 else float("nan"),
+        float(np.median(finite_expected_utility)) if finite_expected_utility.size > 0 else float("nan"),
+        float(np.percentile(finite_expected_utility, 90)) if finite_expected_utility.size > 0 else float("nan"),
         float(np.mean(finite_utility)) if finite_utility.size > 0 else float("nan"),
         float(np.median(finite_utility)) if finite_utility.size > 0 else float("nan"),
         float(np.percentile(finite_utility, 90)) if finite_utility.size > 0 else float("nan"),
@@ -514,6 +536,35 @@ def predict_candidate_edges(
         q10_net_bps=q10_net_bps,
         cfg=cfg,
     )
+    if dataset.X.shape[0] > 0 and dataset.y_edge_bps.shape[0] == dataset.X.shape[0]:
+        diag_frame = pd.DataFrame(
+            {
+                "mu": mu_net_decision_bps,
+                "p_pass": p_pass,
+                "expected_utility": expected_utility_bps,
+                "y_edge": np.asarray(dataset.y_edge_bps, dtype=np.float64),
+            }
+        )
+        for col in ("mu", "p_pass", "expected_utility"):
+            valid = diag_frame[[col, "y_edge"]].replace([np.inf, -np.inf], np.nan).dropna()
+            if valid.empty:
+                continue
+            valid["decile"] = pd.qcut(valid[col], q=10, labels=False, duplicates="drop")
+            grouped = valid.groupby("decile", sort=True)
+            for decile, group in grouped:
+                _logger.debug(
+                    "[DIAG][EDGE_DECILE] col=%s decile=%s n=%d realized_mean=%.3f hit_rate=%.3f",
+                    col,
+                    int(decile),
+                    int(group.shape[0]),
+                    float(group["y_edge"].mean()),
+                    float((group["y_edge"] > 0.0).mean()),
+                )
+        _logger.debug(
+            "[DIAG][EDGE_RANK] mu_ic=%.4f expected_utility_ic=%.4f",
+            _rank_ic(mu_net_decision_bps, np.asarray(dataset.y_edge_bps, dtype=np.float64)),
+            _rank_ic(expected_utility_bps, np.asarray(dataset.y_edge_bps, dtype=np.float64)),
+        )
     return CandidateModelOutput(
         events=None,
         p_pass=p_pass.astype(np.float64, copy=False),

@@ -92,6 +92,10 @@ def test_build_candidate_dataset_shapes_and_types() -> None:
     assert "universe_cluster_size" in ds.feature_names
     assert "universe_anchor_cluster_member" in ds.feature_names
     assert ds.X[0, ds.feature_names.index("sl_thr_bps")] == pytest.approx(25.0)
+    assert "edge_after_hurdle_bps" not in ds.feature_names
+    assert "profitable_after_hurdle_label" not in ds.feature_names
+    assert "edge_after_hurdle_bps" in ds.event_index.columns
+    assert "profitable_after_hurdle_label" in ds.event_index.columns
 
 
 def test_build_candidate_dataset_split_filter() -> None:
@@ -304,3 +308,37 @@ def test_build_candidate_dataset_includes_universe_metadata_features() -> None:
     assert row[by_name["universe_beta_vs_market"]] == 1.1
     assert row[by_name["universe_cluster_size"]] == 2.0
     assert row[by_name["universe_anchor_cluster_member"]] == 1.0
+
+
+def test_build_candidate_dataset_preserves_realized_diagnostics_only_in_event_index() -> None:
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [26],
+            "raw_score": [0.5],
+            "score_z": [1.2],
+            "turnover_proxy": [0.1],
+            "triple_barrier_label": [1],
+            "profitable_after_hurdle_label": [1],
+            "edge_after_hurdle_bps": [12.0],
+            "mae_bps": [-6.0],
+            "mfe_bps": [18.0],
+            "ex_ante_cost_bps": [4.0],
+            "exit_reason": ["take_profit"],
+        }
+    )
+
+    ds = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(),
+        split_start=20,
+        split_end=40,
+    )
+
+    assert "exit_reason" in ds.event_index.columns
+    assert ds.event_index.loc[0, "exit_reason"] == "take_profit"
+    assert "exit_reason" not in ds.feature_names
