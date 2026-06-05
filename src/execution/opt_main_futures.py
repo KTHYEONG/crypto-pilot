@@ -671,6 +671,19 @@ def _run_strategy_stage(
         float(candidate_report.get("utility_p90", float("nan"))),
         float(candidate_report.get("breakeven_floor_bps", float("nan"))),
     )
+    _logger.info(
+        (
+            "[BRIDGE SUMMARY][WF_DIAG] wf_selected=%s wf_eligible=%s shadow=%s shadow_selected=%s "
+            "shadow_realized=%.3f eu_p90=%.3f downside_p90=%.3f"
+        ),
+        candidate_report.get("wf_selected_total", 0),
+        candidate_report.get("wf_eligible_total", 0),
+        candidate_report.get("wf_best_shadow_profile", ""),
+        candidate_report.get("wf_best_shadow_selected_total", 0),
+        float(candidate_report.get("wf_best_shadow_realized_mean_bps", float("nan"))),
+        float(candidate_report.get("wf_waterfall_expected_utility_p90_bps", float("nan"))),
+        float(candidate_report.get("wf_waterfall_downside_drag_p90_bps", float("nan"))),
+    )
 
     t_merge_start = time.perf_counter()
     merge_candidate_output_into_is_and_oos(
