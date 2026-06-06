@@ -383,8 +383,8 @@ def compute_shadow_selection_profiles(
     if profiles.empty:
         return profiles
     profiles = profiles.sort_values(
-        ["selected_total", "log_growth_proxy", "realized_mean_bps", "selected_total"],
-        ascending=[False, False, False, False],
+        ["selected_total", "eligible", "gate_floor", "utility_floor_bps", "breakeven_floor_fraction", "profile_id"],
+        ascending=[False, False, True, True, True, True],
         key=lambda s: (s >= cfg.min_fold_selected_events) if s.name == "selected_total" else s,
     )
     return profiles.head(max(1, int(cfg.selection_shadow_max_profiles))).reset_index(drop=True)
@@ -608,7 +608,6 @@ def select_candidate_events_for_portfolio(
     eligible = catastrophic_mask & gate_eligible_mask & utility_eligible_mask
     waterfall = compute_selection_waterfall(events=df, cfg=cfg)
     shadow_profiles = compute_shadow_selection_profiles(events=df, cfg=cfg)
-    shadow_best = shadow_profiles.iloc[0].to_dict() if not shadow_profiles.empty else {}
     n_eligible = int(eligible.sum())
     n_keep = 0
     zero_reason = "selected_nonzero"
@@ -708,8 +707,17 @@ def select_candidate_events_for_portfolio(
             "selected_rank_ic": None,
         }
         diagnostics.update({f"waterfall_{key}": value for key, value in waterfall.items()})
-        if shadow_best:
-            diagnostics.update({f"shadow_{key}": value for key, value in shadow_best.items()})
+        diagnostics["shadow_profile_count"] = len(shadow_profiles)
+        diagnostics["shadow_max_selected_total"] = (
+            int(pd.to_numeric(shadow_profiles["selected_total"], errors="coerce").max())
+            if not shadow_profiles.empty
+            else 0
+        )
+        diagnostics["shadow_max_eligible"] = (
+            int(pd.to_numeric(shadow_profiles["eligible"], errors="coerce").max())
+            if not shadow_profiles.empty
+            else 0
+        )
         filtered.attrs["candidate_selection_diagnostics"] = diagnostics
         _sel_logger.warning(
             (
@@ -803,8 +811,17 @@ def select_candidate_events_for_portfolio(
             realized_edge,
         )
     diagnostics.update({f"waterfall_{key}": value for key, value in waterfall.items()})
-    if shadow_best:
-        diagnostics.update({f"shadow_{key}": value for key, value in shadow_best.items()})
+    diagnostics["shadow_profile_count"] = len(shadow_profiles)
+    diagnostics["shadow_max_selected_total"] = (
+        int(pd.to_numeric(shadow_profiles["selected_total"], errors="coerce").max())
+        if not shadow_profiles.empty
+        else 0
+    )
+    diagnostics["shadow_max_eligible"] = (
+        int(pd.to_numeric(shadow_profiles["eligible"], errors="coerce").max())
+        if not shadow_profiles.empty
+        else 0
+    )
     selected.attrs["candidate_selection_diagnostics"] = diagnostics
     _sel_logger.info(
         (

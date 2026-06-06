@@ -43,7 +43,7 @@
 - **Calibrated Gate (Classifier, Catastrophic Veto Only)**: LightGBM으로 성공 확률(`p_pass`)을 예측. 항상 활성(`enabled=True`)이며 유일한 역할은 `q10_net_bps < -catastrophic_shortfall_bps(300bps)` 이벤트 VETO. `p_pass`는 sizing confidence discount에만 사용하며 **selection score/`mu`에 곱하지 않는다** (이중계상 금지). base-rate ≈ 43% 구조상 `brier_skill`/`decile_lift`는 판정에서 제외(진단 전용).
 - **Risk-Unit Edge (Regressor)**:
   - **Prior Shrinkage**: calibration-set 가중 평균으로 variant prior `mu_prior_i = E[z_i]` 추정. global prior와 shrinkage 결합.
-  - **Residual Champion (Rank IC Gate)**: ML residual feature 모델은 `calibration_eval`에서 `Spearman(mu_pred, realized_edge) >= min_edge_rank_ic(0.02)`일 때만 활성(`target_mode="prior_residual"`). 미달 시 prior-only fallback(`target_mode="direct"`). `EdgeModelValidation`에 `rank_ic_cal_eval`/`accepted`/`reason` 기록.
+  - **Residual Champion (Rank IC Gate)**: ML residual feature 모델은 `calibration_eval`에서 `Spearman(mu_pred, realized_edge) >= min_edge_rank_ic(0.02)`일 때만 활성(`prediction_mode="prior_residual"`). 미달 시 prior-only fallback(`prediction_mode="prior_only"`, center contribution = 0). `EdgeModelValidation`에 `rank_ic_cal_eval`/`accepted`/`reason` 기록.
   - `mu_i = mu_prior_i + mu_residual_i` (residual champion pass 시). `expected_net_bps_i = mu_i * s_i`는 표시/검사 전용이며 raw model 출력이 아님.
   - **Multi-Objective**: risk-unit center(z), mae_r, mfe_r 별도 Quantile Regressor 학습.
 
@@ -65,6 +65,7 @@
     - **Calibrated Event Kelly (선택)**: `f_bin = clip(kelly_fraction * E[r|score_bin] / max(E[r²|score_bin], floor), 0, max_symbol_weight)`. `E[r]`, `E[r²]`, score-bin 경계는 calibration-fit에서만 추정하며 OOS에서 recalculate하지 않는다.
     - **`p_pass`는 sizing에 곱하지 않음**: gate와 sizing의 이중계상 금지.
     - **Variant Concentration Cap**: timestamp 내부에서만 적용.
+    - **Shadow Profiles Are Diagnostic Only**: shadow selection profile은 prediction-side counts(`eligible`, `selected_total`)만 요약하며, OOS realized 결과로 `best_shadow`를 승격하지 않는다.
 
 ### 3.6 Universe-to-ML Coupling
 - **Metadata Propagation**: 유니버스의 정적 메타데이터(`vol_30d`, `friction_score`)가 ML 학습 피처와 진단 지표로 전달됨.
