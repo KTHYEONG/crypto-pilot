@@ -15,6 +15,16 @@ from src.domain.futures.strategy.config import CandidateStrategyConfig
 
 
 @dataclass(slots=True, frozen=True)
+class EdgeModelValidation:
+    """Rank IC validation result for edge model acceptance gate."""
+
+    rank_ic_cal_eval: float
+    n_cal_eval: int
+    accepted: bool
+    reason: str
+
+
+@dataclass(slots=True, frozen=True)
 class CandidateEdgeModels:
     center_model: LGBMRegressor
     q10_model: LGBMRegressor
@@ -27,6 +37,7 @@ class CandidateEdgeModels:
     global_prior_bps: float
     target_mode: Literal["direct", "prior_residual"]
     prediction_diagnostics: dict[str, float | int | str]
+    validation: EdgeModelValidation | None = None
 
 
 def _seed_from_cfg(cfg: Any) -> int:
@@ -280,6 +291,7 @@ def fit_candidate_edge_models(
     *,
     train: CandidateDataset,
     valid: CandidateDataset,
+    calibration_eval: CandidateDataset,
     cfg: CandidateStrategyConfig,
 ) -> CandidateEdgeModels:
     """Fit robust expected edge and quantile downside models."""
@@ -293,7 +305,6 @@ def fit_candidate_edge_models(
         cfg=cfg,
     )
     use_prior_residual = bool(cfg.edge_prior_enabled and cfg.edge_residual_model_enabled)
-    target_mode: Literal["direct", "prior_residual"] = "prior_residual" if use_prior_residual else "direct"
     train_return_r = np.asarray(
         train.y_return_r if train.y_return_r is not None else train.y_edge_bps,
         dtype=np.float64,
@@ -411,6 +422,63 @@ def fit_candidate_edge_models(
         else getattr(cfg, "min_risk_unit_bps", 25.0)
     )
 
+    # --- Layer 2: Rank IC gate on calibration_eval set ---
+    _logger = logging.getLogger(__name__)
+    accepted = False
+    rank_ic_val = float("nan")
+    reason = "insufficient_obs"
+    n_cal_eval = int(calibration_eval.X.shape[0]) if calibration_eval.X is not None else 0
+    if n_cal_eval >= 20:
+        cal_keys = _variant_keys(calibration_eval)
+        if use_prior_residual:
+            cal_prior_r = np.asarray(
+                [variant_prior_bps.get(key, global_prior_bps) / max(median_risk_unit_bps, 1e-6)
+                 for key in cal_keys],
+                dtype=np.float64,
+            )
+        else:
+            cal_prior_r = np.zeros(n_cal_eval, dtype=np.float64)
+        pred_cal = cast(
+            NDArray[np.float64],
+            center.predict(calibration_eval.X),
+        ).astype(np.float64, copy=False) + cal_prior_r
+        realized_cal = np.asarray(
+            calibration_eval.y_return_r
+            if calibration_eval.y_return_r is not None
+            else calibration_eval.y_edge_bps,
+            dtype=np.float64,
+        )
+        rank_ic_val = _rank_ic(pred_cal, realized_cal)
+        min_ic = float(getattr(cfg, "min_edge_rank_ic", 0.02))
+        if np.isfinite(rank_ic_val) and rank_ic_val >= min_ic:
+            accepted = True
+            reason = "rank_ic_pass"
+        elif np.isfinite(rank_ic_val):
+            reason = "rank_ic_fail"
+    else:
+        reason = "insufficient_obs"
+
+    _logger.info(
+        "[EDGE_GATE] rank_ic=%.4f threshold=%.4f decision=%s n=%d reason=%s",
+        rank_ic_val,
+        float(getattr(cfg, "min_edge_rank_ic", 0.02)),
+        "accepted" if accepted else "rejected",
+        n_cal_eval,
+        reason,
+    )
+
+    # target_mode: cfg 플래그 AND rank_ic acceptance 둘 다 충족해야 residual 활성화
+    final_target_mode: Literal["direct", "prior_residual"] = (
+        "prior_residual" if (use_prior_residual and accepted) else "direct"
+    )
+
+    edge_validation = EdgeModelValidation(
+        rank_ic_cal_eval=rank_ic_val,
+        n_cal_eval=n_cal_eval,
+        accepted=accepted,
+        reason=reason,
+    )
+
     return CandidateEdgeModels(
         center_model=center,
         q10_model=q10,
@@ -421,13 +489,16 @@ def fit_candidate_edge_models(
         variant_prior_bps={key: value * median_risk_unit_bps for key, value in variant_prior_bps.items()},
         variant_prior_obs=variant_prior_obs,
         global_prior_bps=global_prior_bps * median_risk_unit_bps,
-        target_mode=target_mode,
+        target_mode=final_target_mode,
         prediction_diagnostics={
-            "target_mode": target_mode,
+            "target_mode": final_target_mode,
             "global_prior_bps": global_prior_bps * median_risk_unit_bps,
             "global_prior_r": global_prior_bps,
             "variant_prior_count": len(variant_prior_bps),
+            "rank_ic_cal_eval": rank_ic_val,
+            "edge_gate_accepted": accepted,
         },
+        validation=edge_validation,
     )
 
 
