@@ -103,7 +103,7 @@ def test_edge_prior_residual_preserves_positive_variant_prior() -> None:
     )
 
     models = fit_candidate_edge_models(train=train, valid=valid, calibration_eval=cal_eval, cfg=cfg)
-    out = predict_candidate_edges(
+    predict_candidate_edges(
         models=models,
         dataset=valid,
         p_pass=np.full(valid.X.shape[0], 0.6, dtype=np.float64),
@@ -111,7 +111,7 @@ def test_edge_prior_residual_preserves_positive_variant_prior() -> None:
     )
 
     assert models.variant_prior_bps["funding_carry:funding_24"] > 0.0
-    # Prior is positive; model output should reflect it regardless of target_mode
+    # Prior is positive; model output should reflect it regardless of prediction_mode
     assert float(models.global_prior_bps) > 0.0 or models.variant_prior_bps.get("funding_carry:funding_24", 0.0) > 0.0
 
 
@@ -140,7 +140,7 @@ def test_predict_candidate_edges_flags_prediction_collapse() -> None:
 
 
 def test_edge_gate_reverts_to_direct_when_rank_ic_below_threshold() -> None:
-    """rank_ic < min_edge_rank_ic → target_mode='direct', accepted=False."""
+    """rank_ic < min_edge_rank_ic → prediction_mode='prior_only', accepted=False."""
     # Arrange: cal_eval is constant → rank_ic=nan → insufficient_obs or rank_ic_fail
     train = _make_dataset(seed=500, n=120)
     valid = _make_dataset(seed=501, n=30)
@@ -159,12 +159,11 @@ def test_edge_gate_reverts_to_direct_when_rank_ic_below_threshold() -> None:
     assert models.validation.accepted is False
     assert models.validation.reason == "insufficient_obs"
     assert models.validation.n_cal_eval == 10
-    # target_mode must be "direct" when not accepted
-    assert models.target_mode == "direct"
+    assert models.prediction_mode == "prior_only"
 
 
 def test_edge_gate_accepts_when_rank_ic_above_threshold() -> None:
-    """rank_ic >= min_edge_rank_ic AND edge_prior_enabled → target_mode='prior_residual'."""
+    """rank_ic >= min_edge_rank_ic AND edge_prior_enabled → prediction_mode='prior_residual'."""
     # Arrange: strong signal so rank_ic is high
     rng = np.random.default_rng(600)
     n = 150
@@ -226,4 +225,68 @@ def test_edge_gate_accepts_when_rank_ic_above_threshold() -> None:
     assert np.isfinite(models.validation.rank_ic_cal_eval)
     assert models.validation.accepted is True
     assert models.validation.reason == "rank_ic_pass"
-    assert models.target_mode == "prior_residual"
+    assert models.prediction_mode == "prior_residual"
+
+
+def test_rejected_residual_model_uses_prior_only_mu() -> None:
+    train = _make_dataset(seed=700, n=120, family="carry", variant="v1")
+    train = CandidateDataset(
+        X=train.X,
+        y_gate=train.y_gate,
+        y_edge_bps=np.full(train.X.shape[0], 30.0, dtype=np.float32),
+        y_q10_bps=np.full(train.X.shape[0], -5.0, dtype=np.float32),
+        y_mfe_bps=np.full(train.X.shape[0], 40.0, dtype=np.float32),
+        gate_weight=train.gate_weight,
+        edge_weight=train.edge_weight,
+        groups=train.groups,
+        event_index=train.event_index,
+        feature_names=train.feature_names,
+        effective_sample_size=train.effective_sample_size,
+    )
+    valid = _make_dataset(seed=701, n=40, family="carry", variant="v1")
+    cal_eval = _make_dataset(seed=702, n=40, family="carry", variant="v1")
+    cfg = CandidateStrategyConfig(seed=15, min_edge_rank_ic=0.99, edge_prior_min_obs=10)
+
+    models = fit_candidate_edge_models(train=train, valid=valid, calibration_eval=cal_eval, cfg=cfg)
+    out = predict_candidate_edges(
+        models=models,
+        dataset=valid,
+        p_pass=np.full(valid.X.shape[0], 0.5, dtype=np.float64),
+        cfg=cfg,
+    )
+
+    expected_prior_bps = models.variant_prior_bps["carry:v1"]
+    assert models.prediction_mode == "prior_only"
+    assert np.allclose(out.mu_net_decision_bps, expected_prior_bps)
+
+
+def test_rejected_prior_only_without_eligible_rows_disables_mu() -> None:
+    train = _make_dataset(seed=800, n=120, family="carry", variant="v1")
+    zero_weights = np.zeros(train.X.shape[0], dtype=np.float32)
+    train = CandidateDataset(
+        X=train.X,
+        y_gate=train.y_gate,
+        y_edge_bps=train.y_edge_bps,
+        y_q10_bps=train.y_q10_bps,
+        y_mfe_bps=train.y_mfe_bps,
+        gate_weight=zero_weights,
+        edge_weight=zero_weights,
+        groups=train.groups,
+        event_index=train.event_index,
+        feature_names=train.feature_names,
+        effective_sample_size=0.0,
+    )
+    valid = _make_dataset(seed=801, n=20, family="carry", variant="v1")
+    cal_eval = _make_dataset(seed=802, n=20, family="carry", variant="v1")
+    cfg = CandidateStrategyConfig(seed=16, min_edge_rank_ic=0.99, edge_prior_min_obs=10)
+
+    models = fit_candidate_edge_models(train=train, valid=valid, calibration_eval=cal_eval, cfg=cfg)
+    out = predict_candidate_edges(
+        models=models,
+        dataset=valid,
+        p_pass=np.full(valid.X.shape[0], 0.5, dtype=np.float64),
+        cfg=cfg,
+    )
+
+    assert models.prediction_mode == "disabled"
+    assert np.allclose(out.mu_net_decision_bps, 0.0)
