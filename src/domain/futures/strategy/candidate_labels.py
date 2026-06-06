@@ -8,6 +8,7 @@ import pandas as pd
 
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 
 _BPS_SCALE = 1e4
 _ATR_PERIOD = 14
@@ -38,6 +39,30 @@ def _find_symbol_index(symbols: tuple[str, ...], symbol: str) -> int:
     raise KeyError(f"unknown symbol: {symbol}")
 
 
+def _invalid_label_payload() -> dict[str, float | int | str]:
+    return {
+        "gross_event_bps": float("nan"),
+        "execution_cost_bps": float("nan"),
+        "realized_funding_bps": float("nan"),
+        "net_event_bps": float("nan"),
+        "triple_barrier_label": 0,
+        "barrier_first_label": 0,
+        "profitable_after_hurdle_label": 0,
+        "time_to_exit_bars": 0,
+        "mae_bps": float("nan"),
+        "mfe_bps": float("nan"),
+        "realized_vol_bps": float("nan"),
+        "sl_thr_bps": float("nan"),
+        "exit_reason": "invalid",
+        "exit_idx": -1,
+        "same_bar_collision": 0,
+        "net_return_r": float("nan"),
+        "mae_r": float("nan"),
+        "mfe_r": float("nan"),
+        "risk_unit_bps": float("nan"),
+    }
+
+
 def label_candidate_events(
     *,
     events: pd.DataFrame,
@@ -60,9 +85,19 @@ def label_candidate_events(
     atr_2d = _compute_atr_2d(aligned)
     out = events.copy()
     t_len = aligned.close_2d.shape[0]
+    cost_model = ExecutionCostModel(
+        maker_fee_bps=float(getattr(cfg, "maker_fee_bps", 2.0)),
+        taker_fee_bps=float(getattr(cfg, "taker_fee_bps", 5.0)),
+        maker_ratio=float(getattr(cfg, "maker_ratio", 0.75)),
+        slippage_bps=float(getattr(cfg, "slippage_bps", 1.0)),
+        impact_coeff_bps=float(getattr(cfg, "impact_coeff_bps", 0.0)),
+        stress_multiplier=float(getattr(cfg, "cost_stress_multiplier", 1.5)),
+    )
+    taker_round_trip_bps = cost_model.taker_round_trip_bps()
 
     gross_list: list[float] = []
     cost_list: list[float] = []
+    funding_cost_list: list[float] = []
     edge_list: list[float] = []
     raw_barrier_label_list: list[int] = []  # L-1: raw triple-barrier result (TP=1, SL/time=0)
     barrier_label_list: list[int] = []      # L-1: cost-conditioned label (TP AND edge>0)
@@ -88,46 +123,51 @@ def label_candidate_events(
         sym_idx = _find_symbol_index(aligned.symbols, symbol)
         decision_idx = entry_idx - 1
         if decision_idx < 0 or entry_idx >= t_len:
-            gross_list.append(np.nan)
-            cost_list.append(np.nan)
-            edge_list.append(np.nan)
-            raw_barrier_label_list.append(0)
-            barrier_label_list.append(0)
-            profitable_label_list.append(0)
-            tte_list.append(0)
-            mae_list.append(np.nan)
-            mfe_list.append(np.nan)
-            rv_list.append(np.nan)
-            sl_thr_bps_list.append(np.nan)
-            exit_reason_list.append("invalid")
-            exit_idx_list.append(-1)
+            invalid = _invalid_label_payload()
+            gross_list.append(float(invalid["gross_event_bps"]))
+            cost_list.append(float(invalid["execution_cost_bps"]))
+            funding_cost_list.append(float(invalid["realized_funding_bps"]))
+            edge_list.append(float(invalid["net_event_bps"]))
+            raw_barrier_label_list.append(int(invalid["triple_barrier_label"]))
+            barrier_label_list.append(int(invalid["barrier_first_label"]))
+            profitable_label_list.append(int(invalid["profitable_after_hurdle_label"]))
+            tte_list.append(int(invalid["time_to_exit_bars"]))
+            mae_list.append(float(invalid["mae_bps"]))
+            mfe_list.append(float(invalid["mfe_bps"]))
+            rv_list.append(float(invalid["realized_vol_bps"]))
+            sl_thr_bps_list.append(float(invalid["sl_thr_bps"]))
+            exit_reason_list.append(str(invalid["exit_reason"]))
+            exit_idx_list.append(int(invalid["exit_idx"]))
             exit_policy_version_list.append(_EXIT_POLICY_VERSION)
-            same_bar_collision_list.append(0)
+            same_bar_collision_list.append(int(invalid["same_bar_collision"]))
             continue
 
         entry_px = float(aligned.open_2d[entry_idx, sym_idx])
         if not np.isfinite(entry_px) or entry_px <= 0.0:
-            gross_list.append(np.nan)
-            cost_list.append(np.nan)
-            edge_list.append(np.nan)
-            raw_barrier_label_list.append(0)
-            barrier_label_list.append(0)
-            profitable_label_list.append(0)
-            tte_list.append(0)
-            mae_list.append(np.nan)
-            mfe_list.append(np.nan)
-            rv_list.append(np.nan)
-            sl_thr_bps_list.append(np.nan)
-            exit_reason_list.append("invalid")
-            exit_idx_list.append(-1)
+            invalid = _invalid_label_payload()
+            gross_list.append(float(invalid["gross_event_bps"]))
+            cost_list.append(float(invalid["execution_cost_bps"]))
+            funding_cost_list.append(float(invalid["realized_funding_bps"]))
+            edge_list.append(float(invalid["net_event_bps"]))
+            raw_barrier_label_list.append(int(invalid["triple_barrier_label"]))
+            barrier_label_list.append(int(invalid["barrier_first_label"]))
+            profitable_label_list.append(int(invalid["profitable_after_hurdle_label"]))
+            tte_list.append(int(invalid["time_to_exit_bars"]))
+            mae_list.append(float(invalid["mae_bps"]))
+            mfe_list.append(float(invalid["mfe_bps"]))
+            rv_list.append(float(invalid["realized_vol_bps"]))
+            sl_thr_bps_list.append(float(invalid["sl_thr_bps"]))
+            exit_reason_list.append(str(invalid["exit_reason"]))
+            exit_idx_list.append(int(invalid["exit_idx"]))
             exit_policy_version_list.append(_EXIT_POLICY_VERSION)
-            same_bar_collision_list.append(0)
+            same_bar_collision_list.append(int(invalid["same_bar_collision"]))
             continue
 
         exit_limit = min(entry_idx + horizon - 1, t_len - 1)
         high_path = aligned.high_2d[entry_idx : exit_limit + 1, sym_idx]
         low_path = aligned.low_2d[entry_idx : exit_limit + 1, sym_idx]
         close_path = aligned.close_2d[entry_idx : exit_limit + 1, sym_idx]
+        next_open_idx = entry_idx + horizon
 
         atr = float(atr_2d[decision_idx, sym_idx])
         atr = atr if np.isfinite(atr) and atr > 0.0 else entry_px * _ATR_FALLBACK_FRACTION  # L-4
@@ -174,8 +214,27 @@ def label_candidate_events(
             exit_px = entry_px * (1.0 + side * tp_thr)
         elif exit_reason == "stop_loss":
             exit_px = entry_px * (1.0 - side * sl_thr)
-        else:  # time_exit: close of last bar
-            exit_px = float(close_path[exit_off])
+        else:  # time_exit: next decision open to match engine lifecycle
+            if next_open_idx >= t_len:
+                invalid = _invalid_label_payload()
+                gross_list.append(float(invalid["gross_event_bps"]))
+                cost_list.append(float(invalid["execution_cost_bps"]))
+                funding_cost_list.append(float(invalid["realized_funding_bps"]))
+                edge_list.append(float(invalid["net_event_bps"]))
+                raw_barrier_label_list.append(int(invalid["triple_barrier_label"]))
+                barrier_label_list.append(int(invalid["barrier_first_label"]))
+                profitable_label_list.append(int(invalid["profitable_after_hurdle_label"]))
+                tte_list.append(int(invalid["time_to_exit_bars"]))
+                mae_list.append(float(invalid["mae_bps"]))
+                mfe_list.append(float(invalid["mfe_bps"]))
+                rv_list.append(float(invalid["realized_vol_bps"]))
+                sl_thr_bps_list.append(float(invalid["sl_thr_bps"]))
+                exit_reason_list.append(str(invalid["exit_reason"]))
+                exit_idx_list.append(int(invalid["exit_idx"]))
+                exit_policy_version_list.append(_EXIT_POLICY_VERSION)
+                same_bar_collision_list.append(int(invalid["same_bar_collision"]))
+                continue
+            exit_px = float(aligned.open_2d[next_open_idx, sym_idx])
         if side > 0:
             gross_ret_bps = ((exit_px / entry_px) - 1.0) * _BPS_SCALE
             path_ret = (close_path / entry_px) - 1.0
@@ -189,9 +248,17 @@ def label_candidate_events(
             if aligned.execution_cost_bps_2d is not None:
                 ex_ante_cost_bps = float(aligned.execution_cost_bps_2d[decision_idx, sym_idx])
             else:
-                ex_ante_cost_bps = 0.0
+                ex_ante_cost_bps = taker_round_trip_bps
+        ex_ante_cost_bps = max(ex_ante_cost_bps, taker_round_trip_bps)
+        funding_stop = min((next_open_idx if exit_reason == "time_exit" else entry_idx + exit_off + 1), t_len)
+        realized_funding_bps = 0.0
+        if funding_stop > entry_idx:
+            funding_path = aligned.funding_2d[entry_idx:funding_stop, sym_idx]
+            finite_funding = funding_path[np.isfinite(funding_path)]
+            if finite_funding.size > 0:
+                realized_funding_bps = float(np.sum(finite_funding) * side * _BPS_SCALE)
         hurdle_bps = float(getattr(row, "hurdle_bps", 0.0))
-        edge_after_hurdle_bps = gross_ret_bps - ex_ante_cost_bps - hurdle_bps
+        edge_after_hurdle_bps = gross_ret_bps - ex_ante_cost_bps - realized_funding_bps - hurdle_bps
 
         # L-1: separate raw barrier result from cost-conditioned label
         raw_barrier = int(barrier_label)  # 1=TP reached first, 0=SL or time
@@ -212,24 +279,30 @@ def label_candidate_events(
 
         gross_list.append(float(gross_ret_bps))
         cost_list.append(float(ex_ante_cost_bps))
+        funding_cost_list.append(float(realized_funding_bps))
         edge_list.append(float(edge_after_hurdle_bps))
         raw_barrier_label_list.append(raw_barrier)
         barrier_label_list.append(int(barrier_first_label))
         profitable_label_list.append(int(profitable_after_hurdle_label))
-        tte_list.append(int(exit_off + 1))
+        tte_list.append(int(horizon if exit_reason == "time_exit" else exit_off + 1))
         mae_list.append(float(mae_bps))
         sl_thr_bps_list.append(float(sl_thr_bps))
         mfe_list.append(float(mfe_bps))
         rv_list.append(float(rv_bps))
         exit_reason_list.append(exit_reason)
-        exit_idx_list.append(int(entry_idx + exit_off))
+        exit_idx_list.append(int(next_open_idx if exit_reason == "time_exit" else entry_idx + exit_off))
         exit_policy_version_list.append(_EXIT_POLICY_VERSION)
         same_bar_collision_list.append(int(same_bar_collision))
 
     out["barrier_first_label"] = np.asarray(barrier_label_list, dtype=np.int8)
     out["profitable_after_hurdle_label"] = np.asarray(profitable_label_list, dtype=np.int8)
+    out["event_id"] = np.arange(len(out), dtype=np.int64)
+    out["gross_event_bps"] = np.asarray(gross_list, dtype=np.float64)
     out["gross_fwd_bps"] = np.asarray(gross_list, dtype=np.float64)
     out["gross_direction_label"] = (np.asarray(gross_list, dtype=np.float64) > 0.0).astype(np.int8)
+    out["execution_cost_bps"] = np.asarray(cost_list, dtype=np.float64)
+    out["realized_funding_bps"] = np.asarray(funding_cost_list, dtype=np.float64)
+    out["net_event_bps"] = np.asarray(edge_list, dtype=np.float64)
     out["ex_ante_cost_bps"] = np.asarray(cost_list, dtype=np.float64)
     out["edge_after_hurdle_bps"] = np.asarray(edge_list, dtype=np.float64)
     # L-1: triple_barrier_label = raw result (TP reached first=1, else=0)
@@ -244,6 +317,18 @@ def label_candidate_events(
     out["exit_idx"] = np.asarray(exit_idx_list, dtype=np.int32)
     out["exit_policy_version"] = np.asarray(exit_policy_version_list, dtype=object)
     out["same_bar_collision"] = np.asarray(same_bar_collision_list, dtype=np.int8)
+    min_risk_unit_bps = float(getattr(cfg, "min_risk_unit_bps", 25.0))
+    risk_unit_bps = np.maximum(
+        pd.to_numeric(out["sl_thr_bps"], errors="coerce").to_numpy(dtype=np.float64),
+        min_risk_unit_bps,
+    )
+    net_event_bps = pd.to_numeric(out["net_event_bps"], errors="coerce").to_numpy(dtype=np.float64)
+    mae_bps_arr = pd.to_numeric(out["mae_bps"], errors="coerce").to_numpy(dtype=np.float64)
+    mfe_bps_arr = pd.to_numeric(out["mfe_bps"], errors="coerce").to_numpy(dtype=np.float64)
+    out["risk_unit_bps"] = risk_unit_bps
+    out["net_return_r"] = net_event_bps / _BPS_SCALE
+    out["mae_r"] = mae_bps_arr / _BPS_SCALE
+    out["mfe_r"] = mfe_bps_arr / _BPS_SCALE
 
     _barrier_labels = np.asarray(raw_barrier_label_list, dtype=np.int8)
     _profitable_labels = np.asarray(profitable_label_list, dtype=np.int8)
