@@ -5,84 +5,74 @@
 ## 1. Overview
 본 문서는 `my-coin-traider` 프로젝트의 선물(Futures) ML 전략 아키텍처를 기술합니다. 본 아키텍처는 단순 순위 기반(Rank-based) 모델에서 벗어나, 개별 **Candidate Event**를 추출하고 이를 ML로 필터링하여 최종 **Target Weight**를 생성하는 파이프라인을 핵심으로 합니다.
 
-## 2. ML 파이프라인 (Pipeline)
+## 2. ML 파이프라인 (Lifecycle)
 ```text
-[Universe Filters] -> [Rule Signal Panels] -> [Candidate Event Extraction]
-      -> [Leak-free Labeling] -> [Tabular Dataset Build]
-      -> [Gate Model (Classifier)] -> [Edge/Downside Model (Regressor)]
-      -> [Expected-Utility Selection] -> [Probability-Discounted Kelly Weights]
-      -> [Realized Fold Survival Gate]
-      -> [Backtest Engine] -> [Compound Evaluation]
+[Universe Selection] -> [Vectorized Signals] -> [Sparse Event Extraction]
+      -> [Triple-Barrier Labeling] -> [Feature Engineering: Identity/Mkt/Symbol]
+      -> [Model Training: Calibrated Gate + Shrunk Edge/Downside]
+      -> [Inference & Regime Scaling] -> [Cross-Sectional Alpha Selection]
+      -> [Top-K Sparsification] -> [Portfolio Sizing]
 ```
 
-## 3. 핵심 모듈별 역할
+## 3. 핵심 모듈별 상세 역할
 
-### 3.1 Signal & Event (`rule_signals.py`)
-- **Signal Panel**: OHLCV 데이터를 기반으로 다양한 규칙(Trend, Breakout, Reversion 등)의 밀집(Dense) 시그널 생성.
-- **Event Extraction**: 밀집 시그널에서 진입 조건이 충족된 시점을 희소(Sparse) 이벤트 행으로 변환.
+### 3.1 Vectorized Signals & Event Extraction (`rule_signals.py`)
+- **Vectorized Indicators**: `numba`와 `numpy`를 활용한 고속 벡터화 연산으로 EMA, Rolling Mean/Std, Log Return 등을 심볼별/타임스탬프별로 동시 계산.
+- **Rule Signal Panels**: 정의된 전략 로직(Trend, Reversion 등)을 적용하여 밀집(Dense) 시그널 생성.
+- **Sparse Event Extraction**: 시그널 문턱값을 넘는 진입 시점만 `Candidate Event`로 추출. 이때 사전에 통계적 유의미성(`KEEP`)이 검증된 전략 변종(Variant)만 필터링하여 노이즈 최소화.
 
-### 3.2 Labeling (`candidate_labels.py`)
-- **Triple Barrier**: Take-Profit, Stop-Loss, Time-Exit를 조합한 레이블링.
-- **Cost-Aware**: `edge_after_hurdle_bps`와 같이 거래 비용(Base RT 7.5bps)을 차감한 실질 기대수익 레이블링.
-- **Anti-Leakage**: 결정 시점(T) 이후의 정보 오염 방지 및 T+1 진입 원칙 준수.
+### 3.2 Leak-free Triple-Barrier Labeling (`candidate_labels.py`)
+- **Dynamic Barriers**: 진입 시점의 ATR을 기준으로 익절(TP), 손절(SL), 시간 제한(Time-Exit) 장벽을 동적으로 설정.
+- **Cost-Aware Edge**: `edge_after_hurdle_bps` 레이블링 시 진입/청산 슬리피지 및 수수료(Hurdle)를 선제적으로 차감하여 실질 수익성 학습 유도.
+- **Barrier Logic**: 
+  - `raw_barrier_label`: TP 도달 여부 (단순 분류)
+  - `edge_bps`: 청산 시점까지의 실질 실현 수익 (회귀)
+  - `q10_bps`: 보유 기간 중 발생한 최악의 하방 변동성 (리스크 예측)
 
-### 3.3 Dataset & Models (`candidate_dataset.py`, `*_gate.py`, `*_edge.py`)
-- **Feature Groups**: 시그널 강도, 심볼 상태(Vol, Funding), 시장 상태(BTC Trend, Breadth), 실행 비용, 그리고 Stage6 유니버스 메타데이터(`vol_30d`, `friction_score`, `alpha_capacity_score`, `diversification_score`, `tradeable_score`)를 포함합니다.
-- **Risk Scale Feature**: `sl_thr_bps`를 ex-ante feature로 포함하여 q10 downside model이 자산별 stop distance scale을 직접 관측합니다.
-- **Gate Model**: LightGBM Classifier를 이용한 calibrated confidence 추정입니다. `p_pass`는 단순 win-rate 문턱이 아니라, payoff/downside와 결합되어 utility와 sizing에 쓰입니다.
-- **Edge Model**: LightGBM Regressor (Huber/Quantile)를 이용한 기대 수익 및 하방 리스크(q10) 추정입니다.
-- **Selection Diagnostics**: 예측 `mu`, `p_pass`, `expected_utility` decile별 realized edge/hit-rate 및 rank IC를 기록하여, pointwise 예측이 실제 top-k 선택 품질로 이어지는지 점검합니다.
-- **Selection Waterfall Diagnostics**: `prob_adjusted_mu`, `downside_drag`, `turnover_drag`, `soft_gate_penalty`, `expected_utility_raw/adj`를 fold별로 기록하여 `eligible=0`의 직접 원인을 분해합니다.
-- **Shadow Profiles**: production selection은 유지한 채, fold-local OOS에서 완화된 gate/utility/breakeven/**utility_mode**(`selection_shadow_utility_modes`) 조합을 shadow로만 평가하여 threshold bottleneck, model bottleneck, selection-contract bottleneck을 구분합니다. (예: production=`expected_edge_direct`에서도 best shadow가 더 완화된 gate/breakeven 조합으로 잡히면 threshold가 추가 병목)
+### 3.3 Multi-Group Feature Engineering (`candidate_dataset.py`)
+학습 데이터셋은 세 가지 핵심 피처 그룹으로 구성됩니다.
+- **Identity Features**: 전략 패밀리 및 변종 ID를 원-핫 인코딩하여 개별 로직의 고유 특성 반영.
+- **Market State**: BTC 수익률, 추세, 전체 시장 변동성 및 분산, 시장 폭(Breadth) 등 거시 국면 정보.
+- **Symbol State**: 개별 코인의 변동성 Z-score, 펀딩비 상태, 수익률 랭크 등 자산 고유 상태 정보.
 
-### 3.4 Portfolio & Weights (`candidate_portfolio.py`)
-- **Selection**: `utility_topk`는 `expected_utility_bps`를 기준으로 후보를 고르고, gate는 `selection_gate_mode`에 따라 `off`, `soft_floor`, `hard_floor`로 동작합니다.
-- **Gate Contract**:
-  - `hard_floor`: `p_pass < selection_min_gate_probability_floor`이면 즉시 제외
-  - `soft_floor`: 즉시 제외하지 않고, 낮은 `p_pass`에 soft penalty를 부여
-  - `off`: gate는 진단용으로만 사용
-- **Selection Utility Mode** (`selection_utility_mode`):
-  - `expected_edge_direct` (default): selection 점수 = `mu_net` 단독(올바른 E[return]). `p_pass`/`q10`는 selection 점수에서 제외하고 sizing(p_pass discount, q10 variance floor)과 catastrophic veto로만 사용 → edge=selection / risk=sizing 분리.
-  - `additive_drag` (legacy/A-B용): `p_pass * mu_net − (1 − p_pass) * |min(q10,0)| − turnover_penalty`. 보수적이나 `mu_net`(무조건부 기댓값)과 `q10`(경로 MAE proxy)을 가산 결합해 **하방 이중계상·스케일 불일치** 위험이 있음.
-  - **Invariant**: `expected_edge_direct`에서 `q10`는 catastrophic veto(`catastrophic_shortfall_bps`)와 sizing variance floor로만 작동하며, 연속 가산 drag로 selection을 막지 않는다.
-  - **Ranking 계약**: production topk 정렬 키는 모드와 일치해야 한다. `expected_edge_direct`에서는 `expected_utility_bps`(=mu_net)로, `additive_drag`에서는 `utility_score`(additive)로 정렬한다. (eligibility/shadow 평가와 동일 기준 — 불일치 시 잘못된 후보 선택)
-- **Breakeven Floor Mode** (`breakeven_floor_mode`):
-  - `static` (default): `min_net_floor_cost_fraction * cost_floor_bps`.
-  - `fold_adaptive`: fold-local `cost_floor_bps`의 `breakeven_floor_cost_quantile` 분위수 × `min_net_floor_cost_fraction` → 약한 fold 자동 강화, 강한 fold 개방.
-- **Selection Waterfall**: `expected_utility_raw`와 `expected_utility_adj`를 분리해, payoff 부족인지 downside 과대인지, 혹은 soft gate penalty 때문인지를 보고합니다.
-- **Shortfall Thresholding**: 기본값은 절대 bps 기준(`shortfall_threshold_basis="absolute_bps"`)이며, 필요 시 `stop_relative` 모드로 자산별 `sl_thr_bps` 기반 한계를 사용할 수 있습니다. 현재 기본값은 보수적으로 유지됩니다.
-- **Sizing**: Kelly 입력 `mu`는 기본적으로 `p_pass`로 discount되며, q10 downside로부터 variance floor를 부여하여 과도한 sizing을 방지합니다.
-- **Metadata Forward Fill**: `target_weights`가 holding 구간에 forward-fill될 때 candidate stop/take-profit metadata도 함께 유지되어, 엔진 진입 시점이 늦어져도 exit geometry가 보존됩니다.
-- **Bridge**: 최종 생성된 `target_weights`를 백테스트 엔진에 주입.
+### 3.4 Model Training & Calibration (`*_gate.py`, `*_edge.py`)
+- **Calibrated Gate (Classifier)**: LightGBM을 사용하여 성공 확률(`p_pass`)을 예측. `CalibratedClassifierCV`를 적용하여 예측 확률이 실제 승률과 일치하도록 보정(Brier Score 최적화).
+- **Shrunk Edge (Regressor)**: 
+  - **Prior Shrinkage**: 개별 변종의 기대 수익을 글로벌 평균과 가중 결합(Shrinkage)하여 샘플이 적은 전략의 예측 불안정성 해소.
+  - **Prior Deviation Clipping**: 변종 prior를 `global_prior ± edge_prior_max_deviation_bps`로 클리핑하여 IS over-confidence를 억제하고 ML residual(`center_pred`)의 상대적 영향력을 보존. (`mu_net = center_pred + prior`이므로 prior 폭주 시 ML 신호가 무력화되는 것을 방지)
+  - **Multi-Objective**: 기대 수익(`mu`)뿐만 아니라 하방 리스크(`q10`) 및 상방 잠재력(`mfe`)을 별도의 Quantile Regressor로 학습.
 
-### 3.5 Universe-to-ML Coupling
-- **Metadata Propagation**: Stage6 selection 결과의 정적 메타데이터는 `UniverseSnapshot -> data_maps -> AlignedMarketData -> CandidateDataset` 순서로 전달됩니다.
-- **Diagnostics**: bridge 단계에서 `vol_30d` decile별 `mu_mean`, `q10_median`, `selected_pass_rate`를 로그로 남겨, 고변동성 유니버스가 downstream selection에서 어떻게 생존/탈락하는지 추적합니다.
+### 3.5 ML Gate & Dynamic Selection (`candidate_portfolio.py`)
+시그널이 포트폴리오에 최종 편입되기까지의 **4단계 동적 필터링** 과정입니다.
+
+1.  **Stage 1: Pointwise filtering (Gate & Utility)**
+    - `utility_score = (p_pass * mu) - ((1 - p_pass) * |q10|)` 식 등을 통해 기대 효용 계산.
+    - `MIN_SCORE_PERCENTILE` 임계치를 적용하여 상위 우량 시그널만 선별.
+2.  **Stage 2: Regime-Aware Scaling (Market Context)**
+    - `CRISIS_GAMMA` 지표로 시장 위기 국면을 감지하여 롱/숏 진입 강도를 동적으로 조절.
+    - 하락장/위기 시 `DYNAMIC_RA_CRISIS_COEF`를 적용하여 방어적 포지셔닝 수행.
+3.  **Stage 3: Cross-Sectional Relative Filter (Alpha Selection)**
+    - `CS_Z_SCORE_THRESHOLD`를 사용하여 시장 전체 평균 대비 독보적인 엣지를 가진 자산 선별.
+    - 동일 국면 내에서 상대적으로 강한 시그널에 자본 집중.
+4.  **Stage 4: Top-K Sparsification & Sizing**
+    - `K_RANK` 제한을 통해 가장 점수가 높은 최정예 후보군만 최종 선택.
+    - **Variant Concentration Cap**: 단일 `family:variant`가 top-k의 `max_variant_selection_fraction` 이상을 점유하지 못하도록 제한하여 특정 변종 독점(concentration risk) 방지. 초과분은 차순위 다른 변종으로 대체.
+    - `p_pass` 할인 켈리(Kelly) 베팅과 `q10` 기반의 리스크 분산 제약으로 최종 `Target Weight` 산출.
+
+### 3.6 Universe-to-ML Coupling
+- **Metadata Propagation**: 유니버스의 정적 메타데이터(`vol_30d`, `friction_score`)가 ML 학습 피처와 진단 지표로 전달됨.
+- **Diagnostics**: Bridge 단계에서 변동성 데실(Decile)별 생존율 등을 로깅하여 모델의 편향성 및 유니버스 적합성 모니터링.
 
 ## 4. 설계 원칙 (Design Principles)
-
-### 4.1 데이터 무결성 (Integrity)
-- **Point-in-Time**: 모든 피처는 결정 시점(T) 이전에 이용 가능한 데이터로만 구성.
-- **Purge & Embargo**: Walk-forward 교차 검증 시 레이블 중첩 및 정보 유출 방지.
-
-### 4.2 비용 모델 (Execution Cost)
-- **Single Source of Truth**: `execution_cost.py`에서 정의된 비용 모델(Maker Ratio, Fee, Slippage)을 학습과 백테스트에 동일하게 적용.
-- **Stress Testing**: 프로모션 게이트 통과를 위해 기본 비용의 1.5배(Stress RT)를 적용하여 검증.
-
-### 4.3 검증 및 승격 (Validation & Promotion)
-- **Nested Walk-Forward**: 훈련/검증/OOS(Out-of-Sample)를 분리한 순방향 검증.
-- **Realized Fold Survival Gate**: 기본 fold survival은 예측 `mu` t-stat이 아니라, fold-local selected events의 realized edge / log-growth를 기준으로 판정합니다.
-- **WF Diagnostics**: fold별 `WF_DIAG`는 `eligible`, `selected`, `expected_utility p90`, `downside_drag p90`, best shadow profile을 남겨서, fail-closed 원인이 threshold인지 model quality인지 추적합니다.
-- **Compound Gate**: 단순 IC/AUC가 아닌, CAGR, Max Drawdown, Log Growth 등 실제 자본 성장 지표를 기준으로 전략 승격합니다.
-
-## 4.4 Optuna Boundary
-- **Role Separation**: ML은 경제적으로 타당한 candidate `target_weights`를 생성해야 하며, Optuna는 그 이후 portfolio/execution/risk 파라미터를 조정합니다.
-- **No Final-OOS Fitting**: ML selection 계약을 최종 OOS 창에 반복 적합시키는 것은 금지합니다. fold survival과 recommendation window에서만 selection 품질을 판단합니다.
+- **Point-in-Time Integrity**: 모든 결정은 T시점 이전의 데이터로만 수행 (No Look-ahead).
+- **Fail-Closed Selection**: 모델의 확신이 낮거나 시장 리스크가 크면 자본을 투입하지 않음.
+- **Risk-Reward Asymmetry**: 단순히 수익만 쫓지 않고, 예측된 하방 변동성(`q10`)을 sizing의 핵심 제약 조건으로 활용.
 
 ## 5. 핵심 기술 스택
-- **Base**: `numpy`, `pandas`, `numba` (벡터화 및 고속 연산)
-- **ML**: `lightgbm` (표 형식 데이터 최적화), `scikit-learn` (검증 및 메트릭)
+- **Engine**: `numpy`, `pandas`, `numba` (고속 벡터 연산)
+- **ML**: `lightgbm` (Tabular 데이터 최적화), `scikit-learn` (검증 및 보정)
+- **Optimization**: `optuna` (전략 파라미터 최적화)
 - **Validation**: Purged Walk-forward, Bootstrap, DSR/PBO
 
 ---
-*참고: 상세 구현 로직은 `src/domain/futures/strategy/` 경로의 각 모듈을 참조하십시오.*
+*참고: 상세 구현 로직은 `src/domain/futures/strategy/` 및 `src/domain/futures/optimization/` 경로의 각 모듈을 참조하십시오.*
