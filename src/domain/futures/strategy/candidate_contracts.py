@@ -82,8 +82,18 @@ class CandidateSignalPanel:
 
 
 class EdgeSource(StrEnum):
+    DISABLED = "disabled"
+    DIRECT_MODEL = "direct_model"
     PRIOR_ONLY = "prior_only"
     PRIOR_RESIDUAL = "prior_residual"
+
+
+EdgePredictionMode = Literal[
+    "disabled",
+    "direct",
+    "prior_only",
+    "prior_residual",
+]
 
 
 @dataclass(slots=True, frozen=True)

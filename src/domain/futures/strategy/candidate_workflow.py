@@ -118,7 +118,7 @@ def run_candidate_walk_forward(
                 decile_lift=0.0, incremental_log_growth_lcb=0.0, reason="insufficient_observations"
             )
             edge_rep = EdgeValidationReport(
-                source=EdgeSource.PRIOR_ONLY, prior_rank_ic=0.0, residual_rank_ic=0.0,
+                source=EdgeSource.DISABLED, prior_rank_ic=0.0, residual_rank_ic=0.0,
                 incremental_log_growth_mean=0.0, incremental_log_growth_lcb=0.0,
                 selected=False, reason="insufficient_observations"
             )
@@ -127,7 +127,7 @@ def run_candidate_walk_forward(
                 p_pass=np.full(n_oos, 0.5, dtype=np.float64),
                 gate_enabled=False,
                 gate_threshold=0.5,
-                edge_source=EdgeSource.PRIOR_ONLY,
+                edge_source=EdgeSource.DISABLED,
                 expected_return_r=np.zeros(n_oos, dtype=np.float64),
                 expected_net_bps=np.zeros(n_oos, dtype=np.float64),
                 q10_return_r=np.zeros(n_oos, dtype=np.float64),
@@ -184,11 +184,13 @@ def run_candidate_walk_forward(
             reason=getattr(validation, "reason", "none")
         )
 
-        edge_source = (
-            EdgeSource.PRIOR_RESIDUAL
-            if edge_models is not None and edge_models.target_mode == "prior_residual"
-            else EdgeSource.PRIOR_ONLY
-        )
+        prediction_mode = edge_models.prediction_mode if edge_models is not None else "disabled"
+        edge_source = {
+            "disabled": EdgeSource.DISABLED,
+            "direct": EdgeSource.DIRECT_MODEL,
+            "prior_only": EdgeSource.PRIOR_ONLY,
+            "prior_residual": EdgeSource.PRIOR_RESIDUAL,
+        }[prediction_mode]
         edge_val = getattr(edge_models, "validation", None)
         edge_rep = EdgeValidationReport(
             source=edge_source,
@@ -196,7 +198,7 @@ def run_candidate_walk_forward(
             residual_rank_ic=float(getattr(edge_val, "residual_rank_ic", 0.0)),
             incremental_log_growth_mean=float(getattr(edge_val, "incremental_log_growth_mean", 0.0)),
             incremental_log_growth_lcb=float(getattr(edge_val, "incremental_log_growth_lcb", 0.0)),
-            selected=bool(edge_source == EdgeSource.PRIOR_RESIDUAL),
+            selected=bool(edge_source in {EdgeSource.DIRECT_MODEL, EdgeSource.PRIOR_RESIDUAL}),
             reason=getattr(edge_val, "reason", "none")
         )
 
