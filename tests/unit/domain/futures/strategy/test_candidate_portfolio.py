@@ -249,10 +249,10 @@ def test_utility_topk_soft_floor_keeps_positive_expected_utility_candidate() -> 
 
 
 def test_utility_topk_caps_single_variant_concentration() -> None:
-    # Arrange: 4 events share one variant, 1 event uses another. All distinct
-    # (datetime, symbol) so the per-cell groupby.first() never collapses them.
+    # Arrange: same timestamp, distinct symbols. Variant cap must apply inside
+    # this timestamp only.
     events = pd.DataFrame({
-        "datetime": [f"2025-01-0{i}T00:00:00" for i in range(1, 6)],
+        "datetime": ["2025-01-01T00:00:00"] * 5,
         "symbol": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"],
         "family": ["trend_ma", "trend_ma", "trend_ma", "trend_ma", "rsi_reversion"],
         "variant": ["ema_12_72", "ema_12_72", "ema_12_72", "ema_12_72", "rsi_14"],
@@ -288,7 +288,7 @@ def test_utility_topk_caps_single_variant_concentration() -> None:
     selected = select_candidate_events_for_portfolio(model_output=model_output, cfg=cfg)
 
     # n_keep = ceil(5 * 1.0) = 5; max_per_variant = ceil(5 * 0.5) = 3.
-    # The dominant variant must be capped to 3 despite holding 4 eligible events.
+    # The dominant variant must be capped to 3 within the timestamp.
     dominant = selected[selected["variant"] == "ema_12_72"]
     assert dominant.shape[0] == 3
     assert "rsi_14" in set(selected["variant"])
