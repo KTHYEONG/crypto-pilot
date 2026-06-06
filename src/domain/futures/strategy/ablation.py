@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -9,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from src.domain.futures.backtest.engine import FuturesBacktestEngine
-from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
+from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput, EdgeSource
 from src.domain.futures.strategy.candidate_dataset import build_candidate_dataset
 from src.domain.futures.strategy.candidate_edge import fit_candidate_edge_models, predict_candidate_edges
 from src.domain.futures.strategy.candidate_evaluation import evaluate_compound_backtest
@@ -353,20 +352,35 @@ def _build_variant_prior_output(
         - float(cfg.turnover_penalty) * turnover_proxy
         - float(cfg.concentration_penalty)
     )
-    selection_thresholds = dict(base_out.selection_thresholds)
-    selection_thresholds["utility_min"] = _utility_min_threshold(
+    validation_diagnostics = dict(base_out.validation_diagnostics)
+    validation_diagnostics["utility_min"] = _utility_min_threshold(
         utility_score=utility_score,
         cfg=cfg,
     )
+
+    risk_unit_raw = getattr(oos_set, "risk_unit_bps", None)
+    risk_unit_bps = (
+        risk_unit_raw.astype(np.float64, copy=False)
+        if risk_unit_raw is not None
+        else np.full(oos_set.X.shape[0], float(getattr(cfg, "min_risk_unit_bps", 25.0)), dtype=np.float64)
+    )
+    expected_return_r = prior_mu / risk_unit_bps
+
     return CandidateModelOutput(
         events=oos_set.event_index,
         p_pass=p_pass.astype(np.float64, copy=False),
-        mu_gross_bps=prior_mu,
-        mu_net_decision_bps=prior_mu,
+        gate_enabled=base_out.gate_enabled,
+        gate_threshold=base_out.gate_threshold,
+        edge_source=EdgeSource.PRIOR_ONLY,
+        expected_return_r=expected_return_r,
+        expected_net_bps=prior_mu,
+        q10_return_r=base_out.q10_return_r,
         q10_net_bps=base_out.q10_net_bps,
+        q90_return_r=base_out.q90_return_r,
         q90_net_bps=base_out.q90_net_bps,
-        utility_score=utility_score,
-        selection_thresholds=selection_thresholds,
+        selection_score=utility_score,
+        kelly_fraction=base_out.kelly_fraction,
+        validation_diagnostics=validation_diagnostics,
     )
 
 
@@ -416,7 +430,7 @@ def run_candidate_ablation(
     _fold_oos_boundaries: tuple[tuple[int, int], ...] = tuple(
         (f.oos_start, f.oos_end) for f in _wf_folds
     )
-    diag, diag_oracle = _compute_rule_diagnostics_for_ablation(
+    diag, _ = _compute_rule_diagnostics_for_ablation(
         labeled=labeled,
         aligned=aligned,
         cfg=cfg,
@@ -476,211 +490,60 @@ def run_candidate_ablation(
 
     rows: list[AblationRow] = []
 
-    # Variant 1: rule_only_equal_size (Simple benchmark)
-    # equal weight assigned to any rule trigger
-    raw_w = _build_rule_equal_size_weights(
-        raw_events=raw_events,
+    # 1. rule_stop_risk (Raw trigger rules with stop-risk sizing and no ML components)
+    cfg_rule = replace(
+        cfg,
+        sizing_mode="stop_risk",
+        gross_cap=999.0,
+        net_cap=999.0,
+        beta_cap=999.0,
+        target_ann_vol=999.0,
+    )
+    rule_events = _oos_only_events(labeled=labeled_unfiltered, oos_start=oos_start, oos_end=oos_end)
+    rule_w = build_candidate_target_weights(
+        selected_events=rule_events,
         close_2d=aligned.close_2d,
         symbols=symbols,
-        max_symbol_weight=cfg.max_symbol_weight,
-    )
-
-    rows.append(_run_backtest_and_evaluate(raw_w, aligned, "rule_only_equal_size", cfg,
-                                           barrier_events=raw_events))
-
-    # Variant 1b: no-leak rule promotion only
-    promoted_rule_events = apply_variant_promotions(
-        labeled=labeled_unfiltered,
-        keep_variants=diag.recommended_keep_variants,
-        flip_variants=diag.recommended_flip_variants,
-        keep_signal_cells=diag.recommended_keep_signal_cells,
-        flip_signal_cells=diag.recommended_flip_signal_cells,
-    )
-    promoted_rule_events = _oos_only_events(
-        labeled=promoted_rule_events,
-        oos_start=oos_start,
-        oos_end=oos_end,
-    )
-    promoted_rule_w = _build_rule_equal_size_weights(
-        raw_events=promoted_rule_events,
-        close_2d=aligned.close_2d,
-        symbols=symbols,
-        max_symbol_weight=cfg.max_symbol_weight,
+        beta_2d=None,
+        sigma_3d=None,
+        cfg=cfg_rule,
     )
     rows.append(
         _run_backtest_and_evaluate(
-            promoted_rule_w,
+            rule_w,
             aligned,
-            "rule_promo_no_leak",
+            "rule_stop_risk",
             cfg,
             start_idx=oos_start,
             end_idx=oos_end,
-            barrier_events=promoted_rule_events,
+            barrier_events=rule_events,
             fold_oos_boundaries=_fold_oos_boundaries,
         )
     )
 
-    # Variant 1c: OOS oracle rule promotion for comparison only
-    oracle_rule_events = apply_variant_promotions(
-        labeled=labeled_unfiltered,
-        keep_variants=diag_oracle.recommended_keep_variants,
-        flip_variants=diag_oracle.recommended_flip_variants,
-        keep_signal_cells=diag_oracle.recommended_keep_signal_cells,
-        flip_signal_cells=diag_oracle.recommended_flip_signal_cells,
-    )
-    oracle_rule_events = _oos_only_events(
-        labeled=oracle_rule_events,
-        oos_start=oos_start,
-        oos_end=oos_end,
-    )
-    oracle_rule_w = _build_rule_equal_size_weights(
-        raw_events=oracle_rule_events,
-        close_2d=aligned.close_2d,
-        symbols=symbols,
-        max_symbol_weight=cfg.max_symbol_weight,
-    )
-    rows.append(
-        _run_backtest_and_evaluate(
-            oracle_rule_w,
-            aligned,
-            "rule_promo_oos_oracle",
-            cfg,
-            start_idx=oos_start,
-            end_idx=oos_end,
-            barrier_events=oracle_rule_events,
-            fold_oos_boundaries=_fold_oos_boundaries,
-        )
-    )
-
-    # Variant 2: rule_only_fractional_kelly (Kelly Sizing but no ML)
-    # create artificial mock edge output using constant score
-    mock_events = raw_events.copy()
-    mock_events["p_pass"] = 1.0
-    mock_events["mu_net_decision_bps"] = 50.0  # Constant expectation
-    mock_events["q10_net_bps"] = -10.0
-    mock_events["utility_score"] = 1.0
-    raw_kelly_w = build_candidate_target_weights(
-        selected_events=mock_events,
-        close_2d=aligned.close_2d,
-        symbols=symbols,
-        beta_2d=None,
-        sigma_3d=None,
-        cfg=cfg,
-    )
-    rows.append(_run_backtest_and_evaluate(raw_kelly_w, aligned, "rule_only_fractional_kelly", cfg,
-                                           barrier_events=mock_events))
-
-    # Variant 3: rule_plus_ml_gate (Gate filtering only)
-    # ML gate filters events, but sizes them using constant ex-ante edge dummy values
-    gate_events_only = select_candidate_events_for_portfolio(model_output=ml_out, cfg=cfg)
-    # Override mu to ex-ante constant proxy for Variant 3
-    gate_events_only_mock = gate_events_only.copy()
-    gate_events_only_mock["mu_net_decision_bps"] = 50.0
-    gate_only_w = build_candidate_target_weights(
-        selected_events=gate_events_only_mock,
-        close_2d=aligned.close_2d,
-        symbols=symbols,
-        beta_2d=None,
-        sigma_3d=None,
-        cfg=cfg,
-    )
-    rows.append(
-        _run_backtest_and_evaluate(gate_only_w, aligned, "rule_plus_ml_gate", cfg,
-                                   barrier_events=gate_events_only_mock)
-    )
-
-    # Variant 4: rule_plus_ml_gate_plus_edge (Gate + Edge, but uncapped/uncapped Kelly)
-    # Sized dynamically using predicted expected edge mu, but bypasses the cap projection loop (raw fractional Kelly)
-    # Calculate raw Kelly weights manually to bypass project_all_caps
-    raw_kelly_edge_w = _build_uncapped_kelly_edge_weights(
-        selected_events=gate_events_only,
-        close_2d=aligned.close_2d,
-        symbols=symbols,
-        kelly_fraction=cfg.kelly_fraction,
-    )
-
-    rows.append(
-        _run_backtest_and_evaluate(
-            raw_kelly_edge_w, aligned, "rule_plus_ml_gate_plus_edge", cfg,
-            selected_events=gate_events_only,
-        )
-    )
-
-    # Variant 5: rule_plus_ml_gate_plus_edge_plus_portfolio_caps (Full sizing caps applied)
-    # Full constraint projection on Kelly weights
-    gate_plus_edge_plus_caps_w = build_candidate_target_weights(
-        selected_events=gate_events_only,
-        close_2d=aligned.close_2d,
-        symbols=symbols,
-        beta_2d=None,
-        sigma_3d=None,
-        cfg=cfg,
-    )
-    rows.append(
-        _run_backtest_and_evaluate(
-            gate_plus_edge_plus_caps_w,
-            aligned,
-            "rule_plus_ml_gate_plus_edge_plus_portfolio_caps",
-            cfg,
-            selected_events=gate_events_only,
-        )
-    )
-
-    # Variant 6: candidate_ml_full (OOS-only signal — production-equivalent split)
-    gate_events_oos = gate_events_only
-    full_ml_w = build_candidate_target_weights(
-        selected_events=gate_events_oos,
-        close_2d=aligned.close_2d,
-        symbols=symbols,
-        beta_2d=None,
-        sigma_3d=None,
-        cfg=cfg,
-    )
-    rows.append(
-        _run_backtest_and_evaluate(
-            full_ml_w,
-            aligned,
-            "candidate_ml_full",
-            cfg,
-            start_idx=oos_start,
-            end_idx=oos_end,
-            selected_events=gate_events_oos,
-            fold_oos_boundaries=_fold_oos_boundaries,
-        )
-    )
-
-    # Variant 6b: direct edge model without prior-residual decomposition
-    rows.append(
-        _run_oos_only_ablation_variant(
-            labeled=_labeled_for_ml,
-            aligned=aligned,
-            cfg=replace(cfg, edge_prior_enabled=False, edge_residual_model_enabled=False),
-            variant_name="candidate_ml_direct_edge",
-        )
-    )
-
-    # Variant 6c: prior-only edge using shrunk variant means
-    prior_only_out = _build_variant_prior_output(
+    # 2. prior_rank_stop_risk (Rule candidates filtered by prior variant-level rank selection only)
+    p_pass_ones = np.ones(oos_set.X.shape[0], dtype=np.float64)
+    prior_out = _build_variant_prior_output(
         edge_models=edge_models,
         calibration_set=calibration_set,
         oos_set=oos_set,
-        p_pass=p_pass,
+        p_pass=p_pass_ones,
         cfg=cfg,
     )
-    prior_selected = select_candidate_events_for_portfolio(model_output=prior_only_out, cfg=cfg)
-    prior_only_w = build_candidate_target_weights(
+    prior_selected = select_candidate_events_for_portfolio(model_output=prior_out, cfg=cfg)
+    prior_w = build_candidate_target_weights(
         selected_events=prior_selected,
         close_2d=aligned.close_2d,
         symbols=symbols,
         beta_2d=None,
         sigma_3d=None,
-        cfg=cfg,
+        cfg=replace(cfg, sizing_mode="stop_risk", gross_cap=999.0, net_cap=999.0, beta_cap=999.0, target_ann_vol=999.0),
     )
     rows.append(
         _run_backtest_and_evaluate(
-            prior_only_w,
+            prior_w,
             aligned,
-            "candidate_ml_variant_prior",
+            "prior_rank_stop_risk",
             cfg,
             start_idx=oos_start,
             end_idx=oos_end,
@@ -689,56 +552,106 @@ def run_candidate_ablation(
         )
     )
 
-    # ── New OOS-only ablation rows (7-10): each isolates one added layer ──────
-    future_to_idx = {}
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        # Row 7: without promotion filter
-        future_to_idx[executor.submit(
-            _run_oos_only_ablation_variant,
-            labeled=labeled_unfiltered,
-            aligned=aligned,
-            cfg=cfg,
-            variant_name="candidate_ml_promotion_filter",
+    # 3. prior_residual_rank_stop_risk (Adds ML residual model to rank selection, but no gate veto)
+    edge_out_nogate = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass_ones, cfg=cfg)
+    edge_out_nogate = replace(edge_out_nogate, events=oos_set.event_index)
+    residual_selected = select_candidate_events_for_portfolio(model_output=edge_out_nogate, cfg=cfg)
+    residual_w = build_candidate_target_weights(
+        selected_events=residual_selected,
+        close_2d=aligned.close_2d,
+        symbols=symbols,
+        beta_2d=None,
+        sigma_3d=None,
+        cfg=replace(cfg, sizing_mode="stop_risk", gross_cap=999.0, net_cap=999.0, beta_cap=999.0, target_ann_vol=999.0),
+    )
+    rows.append(
+        _run_backtest_and_evaluate(
+            residual_w,
+            aligned,
+            "prior_residual_rank_stop_risk",
+            cfg,
+            start_idx=oos_start,
+            end_idx=oos_end,
+            selected_events=residual_selected,
             fold_oos_boundaries=_fold_oos_boundaries,
-        )] = 0
+        )
+    )
 
-        # Row 8: with hard selection
-        future_to_idx[executor.submit(
-            _run_oos_only_ablation_variant,
-            labeled=labeled,
-            aligned=aligned,
-            cfg=replace(cfg, selection_policy="hard"),
-            variant_name="candidate_ml_validation_quantile_selection",
+    # 4. edge_plus_validated_gate_stop_risk (Adds ML gate veto to selection, retains stop-risk sizing)
+    edge_out_gate = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=cfg)
+    edge_out_gate = replace(edge_out_gate, events=oos_set.event_index)
+    gate_selected = select_candidate_events_for_portfolio(model_output=edge_out_gate, cfg=cfg)
+    gate_w = build_candidate_target_weights(
+        selected_events=gate_selected,
+        close_2d=aligned.close_2d,
+        symbols=symbols,
+        beta_2d=None,
+        sigma_3d=None,
+        cfg=replace(cfg, sizing_mode="stop_risk", gross_cap=999.0, net_cap=999.0, beta_cap=999.0, target_ann_vol=999.0),
+    )
+    rows.append(
+        _run_backtest_and_evaluate(
+            gate_w,
+            aligned,
+            "edge_plus_validated_gate_stop_risk",
+            cfg,
+            start_idx=oos_start,
+            end_idx=oos_end,
+            selected_events=gate_selected,
             fold_oos_boundaries=_fold_oos_boundaries,
-        )] = 1
+        )
+    )
 
-        # Row 9: without identity features
-        future_to_idx[executor.submit(
-            _run_oos_only_ablation_variant,
-            labeled=labeled,
-            aligned=aligned,
-            cfg=replace(cfg, candidate_identity_features_enabled=False),
-            variant_name="candidate_ml_identity_features",
+    # 5. edge_plus_gate_event_kelly (Replaces stop-risk sizing with calibrated event Kelly, portfolio caps bypassed)
+    kelly_w = build_candidate_target_weights(
+        selected_events=gate_selected,
+        close_2d=aligned.close_2d,
+        symbols=symbols,
+        beta_2d=None,
+        sigma_3d=None,
+        cfg=replace(
+            cfg,
+            sizing_mode="calibrated_event_kelly",
+            gross_cap=999.0,
+            net_cap=999.0,
+            beta_cap=999.0,
+            target_ann_vol=999.0,
+        ),
+    )
+    rows.append(
+        _run_backtest_and_evaluate(
+            kelly_w,
+            aligned,
+            "edge_plus_gate_event_kelly",
+            cfg,
+            start_idx=oos_start,
+            end_idx=oos_end,
+            selected_events=gate_selected,
             fold_oos_boundaries=_fold_oos_boundaries,
-        )] = 2
+        )
+    )
 
-        # Row 10: without market-state features
-        future_to_idx[executor.submit(
-            _run_oos_only_ablation_variant,
-            labeled=labeled,
-            aligned=aligned,
-            cfg=replace(cfg, market_state_features_enabled=False),
-            variant_name="candidate_ml_market_state_features",
+    # 6. full_portfolio_caps (Applies final portfolio constraints/caps projection to Kelly weights)
+    full_caps_w = build_candidate_target_weights(
+        selected_events=gate_selected,
+        close_2d=aligned.close_2d,
+        symbols=symbols,
+        beta_2d=None,
+        sigma_3d=None,
+        cfg=replace(cfg, sizing_mode="calibrated_event_kelly"),
+    )
+    rows.append(
+        _run_backtest_and_evaluate(
+            full_caps_w,
+            aligned,
+            "full_portfolio_caps",
+            cfg,
+            start_idx=oos_start,
+            end_idx=oos_end,
+            selected_events=gate_selected,
             fold_oos_boundaries=_fold_oos_boundaries,
-        )] = 3
-
-        ablation_results = [
-            (future_to_idx[future], future.result()) for future in as_completed(future_to_idx)
-        ]
-
-        ablation_results.sort(key=lambda x: x[0])
-        for _, result in ablation_results:
-            rows.append(result)
+        )
+    )
 
     # Convert results to DataFrame
     df_results = pd.DataFrame([
@@ -763,67 +676,6 @@ def run_candidate_ablation(
     ])
 
     return df_results
-
-
-def _run_oos_only_ablation_variant(
-    *,
-    labeled: pd.DataFrame,
-    aligned: AlignedMarketData,
-    cfg: CandidateStrategyConfig,
-    variant_name: str,
-    fold_oos_boundaries: tuple[tuple[int, int], ...] | None = None,
-) -> AblationRow:
-    """Retrain models with modified cfg/labeled and evaluate on OOS split only."""
-    n_bars = aligned.close_2d.shape[0]
-    zero_w = np.zeros_like(aligned.close_2d)
-
-    if labeled.empty:
-        _logger.warning("[ABLATION][%s] empty labeled events; returning zero weights", variant_name)
-        return _run_backtest_and_evaluate(zero_w, aligned, variant_name, cfg)
-
-    fit_start, fit_end, calibration_start, calibration_end, oos_start, oos_end = _candidate_ml_split_indices(
-        n_bars=n_bars,
-        fit_fraction=cfg.ml_fit_fraction,
-        calibration_fraction=cfg.ml_calibration_fraction,
-        purge_bars=cfg.purge_bars,
-        embargo_bars=cfg.embargo_bars,
-    )
-    fit_set = build_candidate_dataset(
-        labeled_events=labeled, aligned=aligned, cfg=cfg, split_start=fit_start, split_end=fit_end
-    )
-    calibration_set = build_candidate_dataset(
-        labeled_events=labeled, aligned=aligned, cfg=cfg, split_start=calibration_start, split_end=calibration_end
-    )
-    oos_set = build_candidate_dataset(
-        labeled_events=labeled, aligned=aligned, cfg=cfg, split_start=oos_start, split_end=oos_end
-    )
-
-    gate_model = fit_candidate_gate(train=fit_set, early_stop=calibration_set, calibration=calibration_set, cfg=cfg)
-    edge_models = fit_candidate_edge_models(train=fit_set, valid=calibration_set, cfg=cfg)
-
-    p_pass = predict_candidate_gate(model=gate_model, dataset=oos_set)
-    ml_out = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=cfg)
-    ml_out = replace(ml_out, events=oos_set.event_index)
-
-    selected = select_candidate_events_for_portfolio(model_output=ml_out, cfg=cfg)
-    w = build_candidate_target_weights(
-        selected_events=selected,
-        close_2d=aligned.close_2d,
-        symbols=aligned.symbols,
-        beta_2d=None,
-        sigma_3d=None,
-        cfg=cfg,
-    )
-    return _run_backtest_and_evaluate(
-        w,
-        aligned,
-        variant_name,
-        cfg,
-        start_idx=oos_start,
-        end_idx=oos_end,
-        selected_events=selected,
-        fold_oos_boundaries=fold_oos_boundaries,
-    )
 
 
 
@@ -872,41 +724,46 @@ def _build_barrier_arrays(
 
 
 def _compute_realized_edge(trades: pd.DataFrame) -> float:
-    """Return median realized gross return in bps from engine trade records.
+    """Return median realized net return in bps from engine trade records.
 
-    Uses price-based formula (exit/entry - 1) * side to match the gross_fwd_bps
-    label semantics.  Dividing pnl by amount is avoided because the engine stores
-    notional in contract units, making the ratio scale-dependent and unstable for
-    small fractional-Kelly positions.
+    Uses net edge formula:
+    net_trade_bps = (trade.pnl - trade.entry_fee) / (trade.entry_price * trade.amount) * 10_000
     """
     if trades.empty:
         return float("nan")
-    if not {"entry_price", "exit_price", "side"}.issubset(trades.columns):
+    required = {"pnl", "entry_fee", "entry_price", "amount"}
+    if not required.issubset(trades.columns):
         return float("nan")
+    pnl = trades["pnl"].to_numpy(dtype=np.float64)
+    entry_fee = trades["entry_fee"].to_numpy(dtype=np.float64)
     entry_px = trades["entry_price"].to_numpy(dtype=np.float64)
-    exit_px = trades["exit_price"].to_numpy(dtype=np.float64)
-    # engine stores side as "LONG"/"SHORT" strings; convert to +1/-1
-    raw_side = trades["side"]
-    side_num = np.where(
-        raw_side == "LONG", 1.0, np.where(raw_side == "SHORT", -1.0, float("nan"))
-    ).astype(np.float64)
-    valid = np.isfinite(entry_px) & np.isfinite(exit_px) & np.isfinite(side_num) & (entry_px > 1e-12)
+    amount = trades["amount"].to_numpy(dtype=np.float64)
+
+    denominator = entry_px * amount
+    valid = (
+        np.isfinite(pnl)
+        & np.isfinite(entry_fee)
+        & np.isfinite(entry_px)
+        & np.isfinite(amount)
+        & (denominator > 1e-12)
+    )
     if not bool(valid.any()):
         return float("nan")
-    gross_bps = (exit_px[valid] / entry_px[valid] - 1.0) * side_num[valid] * 1e4
-    return float(np.median(gross_bps))
+    net_bps = (pnl[valid] - entry_fee[valid]) / denominator[valid] * 10_000
+    return float(np.median(net_bps))
 
 
 def _compute_attribution(
     *,
     target_weights_eval: np.ndarray,
     selected_events: pd.DataFrame | None,
+    trades: pd.DataFrame,
     cfg: CandidateStrategyConfig,
 ) -> tuple[int, float, float, float]:
     """Return (trade_count, deployed_bar_fraction, pred_edge_p50, gross_cost_bps)."""
     n_bars = target_weights_eval.shape[0]
     gross = np.abs(target_weights_eval).sum(axis=1) if target_weights_eval.ndim == 2 else np.abs(target_weights_eval)
-    trade_count = int(np.count_nonzero(np.diff(gross, prepend=0.0) > 1e-9))
+    trade_count = len(trades)
     deployed_bar_fraction = float((gross > 1e-9).mean()) if n_bars > 0 else 0.0
 
     pred_edge_p50 = float("nan")
@@ -1035,6 +892,7 @@ def _run_backtest_and_evaluate(
     trade_count, deployed_bar_fraction, pred_edge_p50, gross_cost_bps = _compute_attribution(
         target_weights_eval=target_weights_eval,
         selected_events=selected_events,
+        trades=trades,
         cfg=cfg,
     )
 

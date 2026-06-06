@@ -69,15 +69,26 @@ def test_run_candidate_ablation_returns_correct_ablation_dataframe(monkeypatch: 
     )
 
     def _fake_predict_candidate_edges(*, dataset: Any, p_pass: np.ndarray, **__: Any) -> CandidateModelOutput:
+        from src.domain.futures.strategy.candidate_contracts import EdgeSource
         n = dataset.X.shape[0]
+        zeros = np.zeros(n, dtype=np.float64)
         return CandidateModelOutput(
             events=dataset.event_index,
             p_pass=p_pass,
-            mu_gross_bps=np.full(n, 40.0, dtype=np.float64),
-            mu_net_decision_bps=np.full(n, 16.0, dtype=np.float64),
+            gate_enabled=False,
+            gate_threshold=0.5,
+            edge_source=EdgeSource.PRIOR_ONLY,
+            expected_return_r=zeros,
+            expected_net_bps=np.full(n, 16.0, dtype=np.float64),
+            q10_return_r=zeros,
             q10_net_bps=np.full(n, -10.0, dtype=np.float64),
+            q90_return_r=zeros,
             q90_net_bps=np.full(n, 30.0, dtype=np.float64),
-            utility_score=np.full(n, 8.0, dtype=np.float64),
+            selection_score=np.full(n, 8.0, dtype=np.float64),
+            kelly_fraction=zeros,
+            validation_diagnostics={
+                "utility_min": 0.0,
+            },
         )
 
     monkeypatch.setattr(
@@ -94,7 +105,7 @@ def test_run_candidate_ablation_returns_correct_ablation_dataframe(monkeypatch: 
 
     assert isinstance(df_ablation, pd.DataFrame)
     if not df_ablation.empty:
-        assert df_ablation.shape[0] == 14
+        assert df_ablation.shape[0] == 6
         required_cols = {
             "variant",
             "mean_log_growth",
@@ -107,10 +118,12 @@ def test_run_candidate_ablation_returns_correct_ablation_dataframe(monkeypatch: 
         }
         assert required_cols.issubset(df_ablation.columns)
         assert {
-            "rule_promo_no_leak",
-            "rule_promo_oos_oracle",
-            "candidate_ml_direct_edge",
-            "candidate_ml_variant_prior",
+            "rule_stop_risk",
+            "prior_rank_stop_risk",
+            "prior_residual_rank_stop_risk",
+            "edge_plus_validated_gate_stop_risk",
+            "edge_plus_gate_event_kelly",
+            "full_portfolio_caps",
         }.issubset(set(df_ablation["variant"]))
 
 
@@ -194,15 +207,25 @@ def test_build_variant_prior_output_uses_calibration_set_prior(monkeypatch: Any)
     )
 
     def _fake_predict_candidate_edges(*_: Any, **__: Any) -> CandidateModelOutput:
+        from src.domain.futures.strategy.candidate_contracts import EdgeSource
+        zeros = np.zeros(2, dtype=np.float64)
         return CandidateModelOutput(
             events=oos_set.event_index,
             p_pass=np.asarray([0.8, 0.8], dtype=np.float64),
-            mu_gross_bps=np.asarray([1.0, 1.0], dtype=np.float64),
-            mu_net_decision_bps=np.asarray([1.0, 1.0], dtype=np.float64),
+            gate_enabled=False,
+            gate_threshold=0.5,
+            edge_source=EdgeSource.PRIOR_ONLY,
+            expected_return_r=zeros,
+            expected_net_bps=np.asarray([1.0, 1.0], dtype=np.float64),
+            q10_return_r=zeros,
             q10_net_bps=np.asarray([-10.0, -10.0], dtype=np.float64),
+            q90_return_r=zeros,
             q90_net_bps=np.asarray([30.0, 30.0], dtype=np.float64),
-            utility_score=np.asarray([1.0, 1.0], dtype=np.float64),
-            selection_thresholds={"utility_min": 0.0},
+            selection_score=np.asarray([1.0, 1.0], dtype=np.float64),
+            kelly_fraction=zeros,
+            validation_diagnostics={
+                "utility_min": 0.0,
+            },
         )
 
     monkeypatch.setattr("src.domain.futures.strategy.ablation.predict_candidate_edges", _fake_predict_candidate_edges)
@@ -245,15 +268,26 @@ def test_ablation_returns_attribution_columns(monkeypatch: Any) -> None:
     monkeypatch.setattr("src.domain.futures.strategy.ablation.fit_candidate_edge_models", lambda **_: object())
 
     def _fake_edges(*, dataset: Any, p_pass: np.ndarray, **__: Any) -> CandidateModelOutput:
+        from src.domain.futures.strategy.candidate_contracts import EdgeSource
         n = dataset.X.shape[0]
+        zeros = np.zeros(n, dtype=np.float64)
         return CandidateModelOutput(
             events=dataset.event_index,
             p_pass=p_pass,
-            mu_gross_bps=np.full(n, 40.0, dtype=np.float64),
-            mu_net_decision_bps=np.full(n, 16.0, dtype=np.float64),
+            gate_enabled=False,
+            gate_threshold=0.5,
+            edge_source=EdgeSource.PRIOR_ONLY,
+            expected_return_r=zeros,
+            expected_net_bps=np.full(n, 16.0, dtype=np.float64),
+            q10_return_r=zeros,
             q10_net_bps=np.full(n, -10.0, dtype=np.float64),
+            q90_return_r=zeros,
             q90_net_bps=np.full(n, 30.0, dtype=np.float64),
-            utility_score=np.full(n, 8.0, dtype=np.float64),
+            selection_score=np.full(n, 8.0, dtype=np.float64),
+            kelly_fraction=zeros,
+            validation_diagnostics={
+                "utility_min": 0.0,
+            },
         )
 
     monkeypatch.setattr("src.domain.futures.strategy.ablation.predict_candidate_edges", _fake_edges)
@@ -317,17 +351,17 @@ def test_compute_realized_edge_returns_nan_for_empty_trades() -> None:
     assert np.isnan(result)
 
 
-def test_compute_realized_edge_returns_median_gross_bps() -> None:
-    """Phase 0: realized edge uses LONG/SHORT string side, price-based formula."""
+def test_compute_realized_edge_returns_median_net_bps() -> None:
+    """Phase 0: realized edge uses new net edge formula with pnl, entry_fee, entry_price, amount."""
     trades = pd.DataFrame({
         "entry_price": [100.0, 100.0],
-        "exit_price": [101.0, 99.0],    # +1% long win, -1% short win
-        "side": ["LONG", "SHORT"],
+        "amount": [10.0, 10.0],
+        "pnl": [100.0, 100.0],
+        "entry_fee": [1.0, 1.0],
     })
-    # trade 0 (LONG): (101/100 - 1) * 1 * 1e4 = 100 bps
-    # trade 1 (SHORT): (99/100 - 1) * -1 * 1e4 = +100 bps
+    # net_trade_bps = (100.0 - 1.0) / 1000.0 * 10_000 = 990 bps
     result = _compute_realized_edge(trades)
-    assert np.isclose(result, 100.0, rtol=1e-6)
+    assert np.isclose(result, 990.0, rtol=1e-6)
 
 
 def test_ablation_result_contains_real_edge_columns() -> None:

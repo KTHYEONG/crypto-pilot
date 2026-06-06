@@ -11,9 +11,25 @@ from lightgbm import log_evaluation as lgbm_log_evaluation
 from numpy.typing import NDArray
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.frozen import FrozenEstimator
+from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 
 from src.domain.futures.strategy.candidate_dataset import CandidateDataset
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+
+
+@dataclass(slots=True, frozen=True)
+class GateValidationReport:
+    enabled: bool
+    threshold: float
+    raw_brier: float
+    calibrated_brier: float
+    base_brier: float
+    brier_skill: float
+    roc_auc: float
+    average_precision: float
+    decile_lift: float
+    incremental_log_growth_lcb: float
+    reason: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -26,6 +42,7 @@ class CandidateGateModel:
     calibration_method: str
     calibration_used: bool
     calibration_reason: str
+    validation: GateValidationReport
 
 
 def _seed_from_cfg(cfg: Any) -> int:
@@ -37,6 +54,7 @@ def fit_candidate_gate(
     train: CandidateDataset,
     early_stop: CandidateDataset,
     calibration: CandidateDataset,
+    calibration_eval: CandidateDataset | None = None,
     cfg: CandidateStrategyConfig,
 ) -> CandidateGateModel:
     """Fit and calibrate candidate trade/no-trade classifier.
@@ -76,13 +94,27 @@ def fit_candidate_gate(
     calibrator: CalibratedClassifierCV | None = None
     calibration_used = False
     calibration_reason = "calibration_disabled"
-    valid_n = int(calibration.X.shape[0])
-    valid_pos = int(calibration.y_gate.sum()) if valid_n > 0 else 0
+    eval_set = calibration_eval if calibration_eval is not None else calibration
+    valid_n = int(eval_set.X.shape[0])
+    valid_pos = int(eval_set.y_gate.sum()) if valid_n > 0 else 0
     valid_neg = valid_n - valid_pos
     raw_brier = float("nan")
     raw_std = float("nan")
     cal_brier = float("nan")
     cal_std = float("nan")
+    validation_report = GateValidationReport(
+        enabled=False,
+        threshold=float(getattr(cfg, "selection_min_gate_probability_floor", 0.35)),
+        raw_brier=float("nan"),
+        calibrated_brier=float("nan"),
+        base_brier=float("nan"),
+        brier_skill=float("nan"),
+        roc_auc=float("nan"),
+        average_precision=float("nan"),
+        decile_lift=float("nan"),
+        incremental_log_growth_lcb=0.0,
+        reason="not_evaluated",
+    )
     if calibration_method == "none":
         calibration_reason = "calibration_method_none"
     elif valid_n < cfg.min_gate_calibration_obs:
@@ -92,12 +124,12 @@ def fit_candidate_gate(
     elif np.unique(calibration.y_gate).size < 2:
         calibration_reason = "single_class_calibration_target"
     else:
-        raw_prob = cast(NDArray[np.float64], model.predict_proba(calibration.X)[:, 1]).astype(
+        raw_prob = cast(NDArray[np.float64], model.predict_proba(eval_set.X)[:, 1]).astype(
             np.float64,
             copy=False,
         )
         raw_std = float(np.std(raw_prob))
-        raw_brier = float(np.mean(np.square(raw_prob - calibration.y_gate)))
+        raw_brier = float(brier_score_loss(eval_set.y_gate, raw_prob))
         calibrator = CalibratedClassifierCV(
             estimator=FrozenEstimator(model),
             method=calibration_method,
@@ -108,12 +140,12 @@ def fit_candidate_gate(
             calibration.y_gate.astype(np.int32, copy=False),
             sample_weight=calibration.gate_weight,
         )
-        cal_prob = cast(NDArray[np.float64], calibrator.predict_proba(calibration.X)[:, 1]).astype(
+        cal_prob = cast(NDArray[np.float64], calibrator.predict_proba(eval_set.X)[:, 1]).astype(
             np.float64,
             copy=False,
         )
         cal_std = float(np.std(cal_prob))
-        cal_brier = float(np.mean(np.square(cal_prob - calibration.y_gate)))
+        cal_brier = float(brier_score_loss(eval_set.y_gate, cal_prob))
         if not np.all(np.isfinite(cal_prob)):
             calibration_reason = "non_finite_calibration_probabilities"
             calibrator = None
@@ -126,6 +158,49 @@ def fit_candidate_gate(
         else:
             calibration_used = True
             calibration_reason = "calibration_accepted"
+        base_rate = float(np.mean(eval_set.y_gate)) if valid_n > 0 else 0.0
+        base_prob = np.full(valid_n, base_rate, dtype=np.float64)
+        base_brier = float(brier_score_loss(eval_set.y_gate, base_prob)) if valid_n > 0 else float("nan")
+        chosen_prob = cal_prob if calibration_used and calibrator is not None else raw_prob
+        chosen_brier = float(brier_score_loss(eval_set.y_gate, chosen_prob)) if valid_n > 0 else float("nan")
+        brier_skill = (
+            float((base_brier - chosen_brier) / max(base_brier, 1e-12))
+            if valid_n > 0 and np.isfinite(base_brier)
+            else float("nan")
+        )
+        roc_auc = (
+            float(roc_auc_score(eval_set.y_gate, chosen_prob))
+            if valid_n > 0 and np.unique(eval_set.y_gate).size > 1
+            else float("nan")
+        )
+        avg_precision = (
+            float(average_precision_score(eval_set.y_gate, chosen_prob))
+            if valid_n > 0 and np.unique(eval_set.y_gate).size > 1
+            else float("nan")
+        )
+        decile_cut = float(np.quantile(chosen_prob, 0.9)) if chosen_prob.size > 0 else 1.0
+        top_decile_mask = chosen_prob >= decile_cut
+        top_decile_rate = float(np.mean(eval_set.y_gate[top_decile_mask])) if bool(top_decile_mask.any()) else base_rate
+        decile_lift = float(top_decile_rate - base_rate)
+        enabled = bool(
+            calibration_used
+            and np.isfinite(brier_skill)
+            and brier_skill >= float(getattr(cfg, "min_gate_brier_skill", 0.0))
+            and decile_lift >= float(getattr(cfg, "min_gate_decile_lift", 0.02))
+        )
+        validation_report = GateValidationReport(
+            enabled=enabled,
+            threshold=float(getattr(cfg, "selection_min_gate_probability_floor", 0.35)),
+            raw_brier=raw_brier,
+            calibrated_brier=cal_brier if np.isfinite(cal_brier) else raw_brier,
+            base_brier=base_brier,
+            brier_skill=brier_skill,
+            roc_auc=roc_auc,
+            average_precision=avg_precision,
+            decile_lift=decile_lift,
+            incremental_log_growth_lcb=0.0,
+            reason="gate_enabled" if enabled else "gate_disabled_no_incremental_value",
+        )
 
     _logger.info(
         (
@@ -155,6 +230,7 @@ def fit_candidate_gate(
         calibration_method=calibration_method,
         calibration_used=calibration_used,
         calibration_reason=calibration_reason,
+        validation=validation_report,
     )
 
 
@@ -170,6 +246,8 @@ def predict_candidate_gate(
     """Return calibrated pass probability for candidate events."""
     if model is None or dataset.X.shape[0] == 0:
         return np.zeros(dataset.X.shape[0], dtype=np.float64)
+    if not model.validation.enabled:
+        return np.ones(dataset.X.shape[0], dtype=np.float64)
 
     predictor = model.calibrator if model.calibration_used and model.calibrator is not None else model.model
     probs = cast(NDArray[np.float64], predictor.predict_proba(dataset.X)[:, 1])

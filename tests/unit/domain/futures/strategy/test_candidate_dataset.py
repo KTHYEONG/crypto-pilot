@@ -4,7 +4,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.domain.futures.strategy.candidate_dataset import CandidateDataset, build_candidate_dataset
+from src.domain.futures.strategy.candidate_dataset import (
+    CandidateDataset,
+    build_candidate_dataset,
+    fit_candidate_feature_schema,
+)
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 
@@ -67,6 +71,12 @@ def test_build_candidate_dataset_shapes_and_types() -> None:
         labeled_events=labeled,
         aligned=aligned,
         cfg=CandidateStrategyConfig(),
+        schema=fit_candidate_feature_schema(
+            labeled_events=labeled,
+            cfg=CandidateStrategyConfig(),
+            split_start=20,
+            split_end=40,
+        ),
         split_start=20,
         split_end=40,
     )
@@ -76,25 +86,21 @@ def test_build_candidate_dataset_shapes_and_types() -> None:
     assert ds.X.shape[1] == len(ds.feature_names)
     assert ds.y_gate.dtype == np.int8
     assert ds.y_edge_bps.dtype == np.float32
-    assert ds.y_mfe_bps.dtype == np.float32
+    assert ds.y_return_r is not None
+    assert ds.y_return_bps is not None
+    assert ds.y_mae_r is not None
+    assert ds.risk_unit_bps is not None
     assert ds.groups.dtype == np.int32
     assert ds.y_gate.tolist() == [0, 1]
-    assert ds.y_q10_bps.tolist() == [-10.0, -12.0]
-    assert ds.y_mfe_bps.tolist() == [14.0, 1.0]
-    assert ds.feature_schema_version == "candidate_v4"
+    assert ds.y_return_bps.tolist() == [12.0, -5.0]
+    assert ds.y_q10_bps.tolist() == [12.0, -5.0]
+    assert ds.y_mfe_bps.tolist() == [12.0, -5.0]
+    assert ds.feature_schema_version == "candidate_v5"
     assert np.all(ds.gate_weight > 0.0)
     assert np.all(ds.edge_weight > 0.0)
     assert ds.effective_sample_size > 0.0
     assert "sl_thr_bps" in ds.feature_names
-    assert "universe_vol_30d" in ds.feature_names
-    assert "universe_friction_score" in ds.feature_names
-    assert "universe_alpha_capacity_score" in ds.feature_names
-    assert "universe_diversification_score" in ds.feature_names
-    assert "universe_tradeable_score" in ds.feature_names
-    assert "universe_cluster_id" in ds.feature_names
-    assert "universe_beta_vs_market" in ds.feature_names
-    assert "universe_cluster_size" in ds.feature_names
-    assert "universe_anchor_cluster_member" in ds.feature_names
+    assert "universe_vol_30d" not in ds.feature_names
     assert ds.X[0, ds.feature_names.index("sl_thr_bps")] == pytest.approx(25.0)
     assert "edge_after_hurdle_bps" not in ds.feature_names
     assert "profitable_after_hurdle_label" not in ds.feature_names
@@ -126,6 +132,12 @@ def test_build_candidate_dataset_split_filter() -> None:
         labeled_events=labeled,
         aligned=aligned,
         cfg=CandidateStrategyConfig(),
+        schema=fit_candidate_feature_schema(
+            labeled_events=labeled,
+            cfg=CandidateStrategyConfig(),
+            split_start=20,
+            split_end=40,
+        ),
         split_start=20,
         split_end=40,
     )
@@ -158,6 +170,12 @@ def test_build_candidate_dataset_uses_configured_gate_label_column() -> None:
         labeled_events=labeled,
         aligned=aligned,
         cfg=CandidateStrategyConfig(gate_label_column="barrier_first_label"),
+        schema=fit_candidate_feature_schema(
+            labeled_events=labeled,
+            cfg=CandidateStrategyConfig(gate_label_column="barrier_first_label"),
+            split_start=20,
+            split_end=40,
+        ),
         split_start=20,
         split_end=40,
     )
@@ -190,12 +208,18 @@ def test_build_candidate_dataset_raises_when_configured_gate_label_is_missing() 
             labeled_events=labeled,
             aligned=aligned,
             cfg=CandidateStrategyConfig(gate_label_column="profitable_after_hurdle_label"),
+            schema=fit_candidate_feature_schema(
+                labeled_events=labeled,
+                cfg=CandidateStrategyConfig(gate_label_column="profitable_after_hurdle_label"),
+                split_start=20,
+                split_end=40,
+            ),
             split_start=20,
             split_end=40,
         )
 
 
-def test_build_candidate_dataset_builds_net_q10_and_mfe_targets_with_hurdle() -> None:
+def test_build_candidate_dataset_builds_risk_unit_return_targets() -> None:
     aligned = _make_aligned()
     labeled = pd.DataFrame(
         {
@@ -214,6 +238,10 @@ def test_build_candidate_dataset_builds_net_q10_and_mfe_targets_with_hurdle() ->
             "mfe_bps": [18.0],
             "ex_ante_cost_bps": [4.0],
             "hurdle_bps": [2.0],
+            "net_event_bps": [12.0],
+            "risk_unit_bps": [25.0],
+            "net_return_r": [0.48],
+            "mae_r": [-0.24],
         }
     )
 
@@ -221,11 +249,25 @@ def test_build_candidate_dataset_builds_net_q10_and_mfe_targets_with_hurdle() ->
         labeled_events=labeled,
         aligned=aligned,
         cfg=CandidateStrategyConfig(),
+        schema=fit_candidate_feature_schema(
+            labeled_events=labeled,
+            cfg=CandidateStrategyConfig(),
+            split_start=20,
+            split_end=40,
+        ),
         split_start=20,
         split_end=40,
     )
 
-    assert ds.y_q10_bps.tolist() == [-12.0]
+    assert ds.y_return_r is not None
+    assert ds.y_return_bps is not None
+    assert ds.y_mae_r is not None
+    assert ds.risk_unit_bps is not None
+    assert ds.y_return_r[0] == pytest.approx(0.48)
+    assert ds.y_return_bps[0] == pytest.approx(12.0)
+    assert ds.y_mae_r[0] == pytest.approx(-0.24)
+    assert ds.risk_unit_bps[0] == pytest.approx(25.0)
+    assert ds.y_q10_bps.tolist() == [12.0]
     assert ds.y_mfe_bps.tolist() == [12.0]
 
 
@@ -256,26 +298,36 @@ def test_build_candidate_dataset_keeps_feature_schema_stable_across_splits() -> 
         }
     )
 
+    cfg = CandidateStrategyConfig()
+    schema = fit_candidate_feature_schema(
+        labeled_events=labeled,
+        cfg=cfg,
+        split_start=20,
+        split_end=40,
+    )
+
     train = build_candidate_dataset(
         labeled_events=labeled,
         aligned=aligned,
-        cfg=CandidateStrategyConfig(),
+        cfg=cfg,
+        schema=schema,
         split_start=20,
         split_end=40,
     )
     valid = build_candidate_dataset(
         labeled_events=labeled,
         aligned=aligned,
-        cfg=CandidateStrategyConfig(),
+        cfg=cfg,
+        schema=schema,
         split_start=40,
         split_end=60,
     )
 
     assert train.feature_names == valid.feature_names
-    assert train.feature_schema_version == "candidate_v4"
-    assert valid.feature_schema_version == "candidate_v4"
+    assert train.feature_schema_version == "candidate_v5"
+    assert valid.feature_schema_version == "candidate_v5"
     assert "family=trend_ma" in train.feature_names
-    assert "variant=trend_donchian:donchian_36" in train.feature_names
+    assert "variant=trend_donchian:donchian_36" not in train.feature_names
 
 
 def test_build_candidate_dataset_includes_universe_metadata_features() -> None:
@@ -299,10 +351,18 @@ def test_build_candidate_dataset_includes_universe_metadata_features() -> None:
         }
     )
 
+    cfg = CandidateStrategyConfig(static_universe_features_enabled=True)
+    schema = fit_candidate_feature_schema(
+        labeled_events=labeled,
+        cfg=cfg,
+        split_start=20,
+        split_end=40,
+    )
     ds = build_candidate_dataset(
         labeled_events=labeled,
         aligned=aligned,
-        cfg=CandidateStrategyConfig(),
+        cfg=cfg,
+        schema=schema,
         split_start=20,
         split_end=40,
     )
@@ -346,6 +406,12 @@ def test_build_candidate_dataset_preserves_realized_diagnostics_only_in_event_in
         labeled_events=labeled,
         aligned=aligned,
         cfg=CandidateStrategyConfig(),
+        schema=fit_candidate_feature_schema(
+            labeled_events=labeled,
+            cfg=CandidateStrategyConfig(),
+            split_start=20,
+            split_end=40,
+        ),
         split_start=20,
         split_end=40,
     )
