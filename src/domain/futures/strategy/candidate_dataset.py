@@ -220,6 +220,7 @@ def build_candidate_dataset(
     split_start: int,
     split_end: int,
     require_label_within_split: bool = True,
+    is_fit_split: bool = False,
 ) -> CandidateDataset:
     """Build model matrix for candidate gate and edge models.
 
@@ -535,6 +536,33 @@ def build_candidate_dataset(
         split_start=split_start,
         split_end=split_end,
     )
+
+    # Layer 0: Signal Pre-Qualification — fit split only
+    # Variants with IS mean_edge < 0 or insufficient obs have edge_weight zeroed out.
+    min_obs_prequalify = int(getattr(cfg, "signal_prequalify_min_obs", 0))
+    if is_fit_split and min_obs_prequalify > 0:
+        edge_col = "edge_after_hurdle_bps" if "edge_after_hurdle_bps" in kept_events.columns else None
+        if (
+            edge_col is not None
+            and "family" in kept_events.columns
+            and "variant" in kept_events.columns
+        ):
+            variant_key_series = (
+                kept_events["family"].astype(str) + ":" + kept_events["variant"].astype(str)
+            )
+            edge_series = pd.to_numeric(kept_events[edge_col], errors="coerce")
+            variant_mean = edge_series.groupby(variant_key_series).transform("mean")
+            variant_count = edge_series.groupby(variant_key_series).transform("count")
+            disqualified = (variant_mean < 0.0) | (variant_count < min_obs_prequalify)
+            disq_arr = disqualified.to_numpy(dtype=bool)
+            uniqueness_weight[disq_arr] = 0.0
+            n_disqualified = int(disq_arr.sum())
+            if n_disqualified > 0:
+                _logger.info(
+                    "[SIGNAL_PREQUALIFY] disqualified=%d/%d events",
+                    n_disqualified,
+                    len(kept_events),
+                )
 
     return CandidateDataset(
         X=x_final,
