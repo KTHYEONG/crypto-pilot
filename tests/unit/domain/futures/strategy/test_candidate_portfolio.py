@@ -248,6 +248,52 @@ def test_utility_topk_soft_floor_keeps_positive_expected_utility_candidate() -> 
     assert "BTCUSDT" in set(selected["symbol"])
 
 
+def test_utility_topk_caps_single_variant_concentration() -> None:
+    # Arrange: 4 events share one variant, 1 event uses another. All distinct
+    # (datetime, symbol) so the per-cell groupby.first() never collapses them.
+    events = pd.DataFrame({
+        "datetime": [f"2025-01-0{i}T00:00:00" for i in range(1, 6)],
+        "symbol": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"],
+        "family": ["trend_ma", "trend_ma", "trend_ma", "trend_ma", "rsi_reversion"],
+        "variant": ["ema_12_72", "ema_12_72", "ema_12_72", "ema_12_72", "rsi_14"],
+        "side": [1, 1, 1, 1, 1],
+        "raw_score": [0.6, 0.6, 0.6, 0.6, 0.5],
+        "score_z": [0.6, 0.6, 0.6, 0.6, 0.5],
+        "expected_holding_bars": [18, 18, 18, 18, 12],
+        "min_holding_bars": [6, 6, 6, 6, 4],
+        "stop_atr_mult": [2.0, 2.0, 2.0, 2.0, 2.0],
+        "take_profit_atr_mult": [4.0, 4.0, 4.0, 4.0, 3.0],
+        "turnover_proxy": [0.05, 0.05, 0.05, 0.05, 0.05],
+        "cost_floor_bps": [10.0, 10.0, 10.0, 10.0, 10.0],
+        "entry_idx": [10, 10, 10, 10, 10],
+    })
+    # Dominant variant holds the 4 highest utilities; the other variant is lowest.
+    model_output = CandidateModelOutput(
+        events=events,
+        p_pass=np.array([0.9, 0.9, 0.9, 0.9, 0.9], dtype=np.float64),
+        mu_gross_bps=np.array([60.0, 55.0, 50.0, 45.0, 40.0], dtype=np.float64),
+        mu_net_decision_bps=np.array([60.0, 55.0, 50.0, 45.0, 40.0], dtype=np.float64),
+        q10_net_bps=np.array([-5.0, -5.0, -5.0, -5.0, -5.0], dtype=np.float64),
+        q90_net_bps=np.array([90.0, 85.0, 80.0, 75.0, 70.0], dtype=np.float64),
+        utility_score=np.array([60.0, 55.0, 50.0, 45.0, 40.0], dtype=np.float64),
+    )
+    cfg = CandidateStrategyConfig(
+        selection_policy="utility_topk",
+        selection_top_quantile=1.0,
+        max_variant_selection_fraction=0.5,
+        cost_floor_bps=10.0,
+        min_net_floor_cost_fraction=0.5,
+    )
+
+    selected = select_candidate_events_for_portfolio(model_output=model_output, cfg=cfg)
+
+    # n_keep = ceil(5 * 1.0) = 5; max_per_variant = ceil(5 * 0.5) = 3.
+    # The dominant variant must be capped to 3 despite holding 4 eligible events.
+    dominant = selected[selected["variant"] == "ema_12_72"]
+    assert dominant.shape[0] == 3
+    assert "rsi_14" in set(selected["variant"])
+
+
 def test_compute_selection_waterfall_exposes_expected_utility_terms() -> None:
     events = _make_sample_events()
     events["p_pass"] = [0.30, 0.75, 0.55]
