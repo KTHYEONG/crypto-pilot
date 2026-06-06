@@ -39,5 +39,10 @@ class ExecutionCostModel:
     def round_trip_bps(self) -> float:
         return 2.0 * self.one_way_bps()
 
+    def taker_round_trip_bps(self) -> float:
+        """Return two taker fees plus two-way slippage and impact."""
+        taker_one_way = self.taker_fee_bps + self.slippage_bps + self.impact_coeff_bps
+        return 2.0 * taker_one_way
+
     def stress_round_trip_bps(self) -> float:
         return self.stress_multiplier * self.round_trip_bps()

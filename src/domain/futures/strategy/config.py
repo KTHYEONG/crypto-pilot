@@ -129,6 +129,7 @@ class CandidateStrategyConfig:
     ml_fit_fraction: float = 0.60
     ml_calibration_fraction: float = 0.20
     model_early_stop_fraction: float = 0.15
+    calibration_fit_fraction: float = 0.50
     promotion_decision_split: Literal["fit", "calibration", "fit_calibration"] = "fit_calibration"
     min_promotion_calibration_edge_bps: float = 1.0
     min_promotion_calibration_obs: int = 100
@@ -145,6 +146,9 @@ class CandidateStrategyConfig:
     beta_cap: float = 0.50
     target_ann_vol: float = 0.35
     kelly_fraction: float = 0.25
+    sizing_mode: Literal["stop_risk", "calibrated_event_kelly"] = "stop_risk"
+    event_risk_budget: float = 0.0025
+    kelly_min_bin_ess: int = 100
     min_gate_probability: float = 0.55
     min_expected_net_bps: float = 1.0
     max_expected_shortfall_bps: float = 300.0
@@ -222,6 +226,7 @@ class CandidateStrategyConfig:
     max_signal_cell_event_fraction_per_bar: float = 0.12
     candidate_identity_features_enabled: bool = True
     market_state_features_enabled: bool = True
+    static_universe_features_enabled: bool = False
     exclude_immediate_return_features: bool = True
     promotion_filter_enabled: bool = True
     selection_policy: Literal["hard", "validation_quantile", "utility_topk"] = "utility_topk"
@@ -232,6 +237,13 @@ class CandidateStrategyConfig:
     min_oos_rank_ic: float = 0.01
     min_oos_log_growth_uplift: float = 0.0
     max_oos_edge_decay_bps: float = 50.0
+    min_gate_brier_skill: float = 0.0
+    min_gate_decile_lift: float = 0.02
+    min_edge_rank_ic: float = 0.01
+    edge_uplift_bootstrap_samples: int = 500
+    edge_uplift_confidence: float = 0.90
+    min_risk_unit_bps: float = 25.0
+    candidate_rebalance_bars: Literal[1] = 1
     exit_policy_mode: Literal["label_only", "engine_aligned"] = "engine_aligned"
     candidate_families: tuple[str, ...] = (
         "trend_ma",
@@ -341,6 +353,8 @@ class CandidateStrategyConfig:
             raise ValueError("ml_calibration_fraction must be in [0.0, 1.0)")
         if not (0.0 <= self.model_early_stop_fraction < 1.0):
             raise ValueError("model_early_stop_fraction must be in [0.0, 1.0)")
+        if not (0.0 < self.calibration_fit_fraction < 1.0):
+            raise ValueError("calibration_fit_fraction must be in (0.0, 1.0)")
         if self.ml_fit_fraction + self.ml_calibration_fraction >= 1.0:
             raise ValueError("ml_fit_fraction + ml_calibration_fraction must be < 1.0")
         if self.promotion_decision_split not in {"fit", "calibration", "fit_calibration"}:
@@ -351,6 +365,12 @@ class CandidateStrategyConfig:
             raise ValueError("min_promotion_calibration_obs must be >= 1")
         if not (0.0 < self.kelly_fraction <= 0.25):
             raise ValueError("kelly_fraction must be in range (0.0, 0.25]")
+        if self.sizing_mode not in {"stop_risk", "calibrated_event_kelly"}:
+            raise ValueError("unsupported sizing_mode")
+        if self.event_risk_budget <= 0.0:
+            raise ValueError("event_risk_budget must be positive")
+        if self.kelly_min_bin_ess < 1:
+            raise ValueError("kelly_min_bin_ess must be >= 1")
         if self.cost_floor_bps < 0.0:
             raise ValueError("cost_floor_bps must be non-negative")
         if self.selection_gate_mode not in {"off", "soft_floor", "hard_floor"}:
@@ -457,6 +477,20 @@ class CandidateStrategyConfig:
             raise ValueError("min_fit_obs must be >= 1")
         if not (0.0 <= self.min_wf_fold_pass_ratio <= 1.0):
             raise ValueError("min_wf_fold_pass_ratio must be in [0.0, 1.0]")
+        if self.min_gate_brier_skill < -1.0:
+            raise ValueError("min_gate_brier_skill must be >= -1.0")
+        if self.min_gate_decile_lift < 0.0:
+            raise ValueError("min_gate_decile_lift must be non-negative")
+        if not (-1.0 <= self.min_edge_rank_ic <= 1.0):
+            raise ValueError("min_edge_rank_ic must satisfy -1 <= value <= 1")
+        if self.edge_uplift_bootstrap_samples < 1:
+            raise ValueError("edge_uplift_bootstrap_samples must be >= 1")
+        if not (0.0 < self.edge_uplift_confidence < 1.0):
+            raise ValueError("edge_uplift_confidence must be in (0.0, 1.0)")
+        if self.min_risk_unit_bps <= 0.0:
+            raise ValueError("min_risk_unit_bps must be positive")
+        if self.candidate_rebalance_bars != 1:
+            raise ValueError("candidate_rebalance_bars must be fixed to 1")
         if self.downside_penalty < 0.0 or self.turnover_penalty < 0.0 or self.concentration_penalty < 0.0:
             raise ValueError("penalty parameters must be non-negative")
         if self.edge_prediction_min_std_bps < 0.0:

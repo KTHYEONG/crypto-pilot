@@ -9,7 +9,7 @@ import pandas as pd
 from lightgbm import LGBMRegressor
 from numpy.typing import NDArray
 
-from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
+from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput, EdgeSource
 from src.domain.futures.strategy.candidate_dataset import CandidateDataset
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 
@@ -20,6 +20,8 @@ class CandidateEdgeModels:
     q10_model: LGBMRegressor
     q90_model: LGBMRegressor
     feature_names: tuple[str, ...]
+    variant_prior_r: dict[str, float]
+    global_prior_r: float
     variant_prior_bps: dict[str, float]
     variant_prior_obs: dict[str, int]
     global_prior_bps: float
@@ -78,7 +80,10 @@ def _build_variant_priors(
     cfg: CandidateStrategyConfig,
 ) -> tuple[dict[str, float], dict[str, int], float, NDArray[np.float64]]:
     """Return shrunk per-variant priors and per-row prior values."""
-    y_edge = np.asarray(dataset.y_edge_bps, dtype=np.float64)
+    y_edge = np.asarray(
+        dataset.y_return_r if dataset.y_return_r is not None else dataset.y_edge_bps,
+        dtype=np.float64,
+    )
     weights = np.asarray(dataset.edge_weight, dtype=np.float64)
     keys = _variant_keys(dataset)
     global_prior = _weighted_mean(y_edge, weights)
@@ -118,8 +123,14 @@ def _log_edge_target_distribution(*, split: str, dataset: CandidateDataset, cfg:
     if dataset.X.shape[0] == 0:
         return
 
-    y_edge = np.asarray(dataset.y_edge_bps, dtype=np.float64)
-    y_q10 = np.asarray(dataset.y_q10_bps, dtype=np.float64)
+    y_edge = np.asarray(
+        dataset.y_return_r if dataset.y_return_r is not None else dataset.y_edge_bps,
+        dtype=np.float64,
+    )
+    y_q10 = np.asarray(
+        dataset.y_return_r if dataset.y_return_r is not None else dataset.y_q10_bps,
+        dtype=np.float64,
+    )
     finite_edge = y_edge[np.isfinite(y_edge)]
     finite_q10 = y_q10[np.isfinite(y_q10)]
     _logger = logging.getLogger(__name__)
@@ -147,8 +158,14 @@ def _log_edge_target_variants(*, split: str, dataset: CandidateDataset, cfg: Can
         return
 
     frame = event_index.copy()
-    frame["_edge"] = np.asarray(dataset.y_edge_bps, dtype=np.float64)
-    frame["_q10"] = np.asarray(dataset.y_q10_bps, dtype=np.float64)
+    frame["_edge"] = np.asarray(
+        dataset.y_return_r if dataset.y_return_r is not None else dataset.y_edge_bps,
+        dtype=np.float64,
+    )
+    frame["_q10"] = np.asarray(
+        dataset.y_return_r if dataset.y_return_r is not None else dataset.y_q10_bps,
+        dtype=np.float64,
+    )
     grouped = frame.groupby(["family", "variant"], sort=False, dropna=False)
     rows: list[tuple[str, float, float, float]] = []
     for (family, variant), group in grouped:
@@ -277,12 +294,16 @@ def fit_candidate_edge_models(
     )
     use_prior_residual = bool(cfg.edge_prior_enabled and cfg.edge_residual_model_enabled)
     target_mode: Literal["direct", "prior_residual"] = "prior_residual" if use_prior_residual else "direct"
-    center_train_target = (
-        train.y_edge_bps.astype(np.float64, copy=False) - train_row_priors
-        if use_prior_residual
-        else train.y_edge_bps.astype(np.float64, copy=False)
+    train_return_r = np.asarray(
+        train.y_return_r if train.y_return_r is not None else train.y_edge_bps,
+        dtype=np.float64,
     )
-    center_valid_target = valid.y_edge_bps.astype(np.float64, copy=False)
+    valid_return_r = np.asarray(
+        valid.y_return_r if valid.y_return_r is not None else valid.y_edge_bps,
+        dtype=np.float64,
+    )
+    center_train_target = train_return_r - train_row_priors if use_prior_residual else train_return_r
+    center_valid_target = valid_return_r
     if use_prior_residual and valid.X.shape[0] > 0:
         valid_keys = _variant_keys(valid)
         valid_priors = np.asarray(
@@ -342,15 +363,15 @@ def fit_candidate_edge_models(
 
     # Use valid split if provided for early stopping
     eval_set_center: Any = [(valid.X, center_valid_target)] if valid.X.shape[0] > 0 else None
-    eval_set_q10: Any = [(valid.X, valid.y_q10_bps)] if valid.X.shape[0] > 0 else None
-    eval_set_q90: Any = [(valid.X, valid.y_mfe_bps)] if valid.X.shape[0] > 0 else None
+    eval_set_q10: Any = [(valid.X, valid_return_r)] if valid.X.shape[0] > 0 else None
+    eval_set_q90: Any = [(valid.X, valid_return_r)] if valid.X.shape[0] > 0 else None
 
     from lightgbm import early_stopping as lgbm_early_stopping
     from lightgbm import log_evaluation as lgbm_log_evaluation
 
     _es_cb: list[Any] = [lgbm_early_stopping(stopping_rounds=30, verbose=False), lgbm_log_evaluation(period=-1)]
 
-    if eval_set_center is not None and len(np.unique(valid.y_edge_bps)) > 1:
+    if eval_set_center is not None and len(np.unique(valid_return_r)) > 1:
         center.fit(
             train.X,
             center_train_target,
@@ -361,41 +382,50 @@ def fit_candidate_edge_models(
     else:
         center.fit(train.X, center_train_target, sample_weight=train.edge_weight)
 
-    if eval_set_q10 is not None and len(np.unique(valid.y_q10_bps)) > 1:
+    if eval_set_q10 is not None and len(np.unique(valid_return_r)) > 1:
         q10.fit(
             train.X,
-            train.y_q10_bps,
+            train_return_r,
             sample_weight=train.edge_weight,
             eval_set=eval_set_q10,
             callbacks=_es_cb,
         )
     else:
-        q10.fit(train.X, train.y_q10_bps, sample_weight=train.edge_weight)
+        q10.fit(train.X, train_return_r, sample_weight=train.edge_weight)
 
     # Fit Q90 on y_mfe_bps (upside realisation — maximum favourable excursion)
-    if eval_set_q90 is not None and len(np.unique(valid.y_mfe_bps)) > 1:
+    if eval_set_q90 is not None and len(np.unique(valid_return_r)) > 1:
         q90.fit(
             train.X,
-            train.y_mfe_bps,
+            train_return_r,
             sample_weight=train.edge_weight,
             eval_set=eval_set_q90,
             callbacks=_es_cb,
         )
     else:
-        q90.fit(train.X, train.y_mfe_bps, sample_weight=train.edge_weight)
+        q90.fit(train.X, train_return_r, sample_weight=train.edge_weight)
+
+    median_risk_unit_bps = float(
+        np.median(train.risk_unit_bps.astype(np.float64, copy=False))
+        if train.risk_unit_bps is not None and train.risk_unit_bps.shape[0] > 0
+        else getattr(cfg, "min_risk_unit_bps", 25.0)
+    )
 
     return CandidateEdgeModels(
         center_model=center,
         q10_model=q10,
         q90_model=q90,
         feature_names=tuple(train.feature_names),
-        variant_prior_bps=variant_prior_bps,
+        variant_prior_r=variant_prior_bps,
+        global_prior_r=global_prior_bps,
+        variant_prior_bps={key: value * median_risk_unit_bps for key, value in variant_prior_bps.items()},
         variant_prior_obs=variant_prior_obs,
-        global_prior_bps=global_prior_bps,
+        global_prior_bps=global_prior_bps * median_risk_unit_bps,
         target_mode=target_mode,
         prediction_diagnostics={
             "target_mode": target_mode,
-            "global_prior_bps": global_prior_bps,
+            "global_prior_bps": global_prior_bps * median_risk_unit_bps,
+            "global_prior_r": global_prior_bps,
             "variant_prior_count": len(variant_prior_bps),
         },
     )
@@ -407,19 +437,28 @@ def predict_candidate_edges(
     dataset: CandidateDataset,
     p_pass: NDArray[np.float64],
     cfg: CandidateStrategyConfig,
+    gate_enabled: bool = False,
+    gate_threshold: float = 0.5,
+    edge_source: EdgeSource = EdgeSource.PRIOR_ONLY,
 ) -> CandidateModelOutput:
     """Return expected edge, downside quantiles, and utility scores."""
     if models is None or dataset.X.shape[0] == 0:
         zeros = np.zeros(dataset.X.shape[0], dtype=np.float64)
         return CandidateModelOutput(
-            events=None,
+            events=dataset.event_index,
             p_pass=p_pass.astype(np.float64, copy=False),
-            mu_gross_bps=zeros,
-            mu_net_decision_bps=zeros,
+            gate_enabled=gate_enabled,
+            gate_threshold=gate_threshold,
+            edge_source=edge_source,
+            expected_return_r=zeros,
+            expected_net_bps=zeros,
+            q10_return_r=zeros,
             q10_net_bps=zeros,
+            q90_return_r=zeros,
             q90_net_bps=zeros,
-            utility_score=zeros,
-            selection_thresholds={
+            selection_score=zeros,
+            kelly_fraction=zeros,
+            validation_diagnostics={
                 "utility_min": 0.0,
                 "p_pass_min": 0.0,
                 "edge_min": 0.0,
@@ -431,13 +470,13 @@ def predict_candidate_edges(
             },
         )
 
-    center_pred_bps = cast(NDArray[np.float64], models.center_model.predict(dataset.X)).astype(
+    center_pred_r = cast(NDArray[np.float64], models.center_model.predict(dataset.X)).astype(
         np.float64, copy=False
     )
-    q10_model_bps = cast(NDArray[np.float64], models.q10_model.predict(dataset.X)).astype(
+    q10_model_r = cast(NDArray[np.float64], models.q10_model.predict(dataset.X)).astype(
         np.float64, copy=False
     )
-    q90_model_bps = cast(NDArray[np.float64], models.q90_model.predict(dataset.X)).astype(
+    q90_model_r = cast(NDArray[np.float64], models.q90_model.predict(dataset.X)).astype(
         np.float64, copy=False
     )
 
@@ -447,38 +486,40 @@ def predict_candidate_edges(
     concentration_penalty = float(getattr(cfg, "concentration_penalty", 0.0))
 
     # Extract turnover_proxy from features or fallback to a constant 1.0 (so turnover_term = turnover_penalty)
-    turnover_proxy = np.ones_like(center_pred_bps)
+    turnover_proxy = np.ones_like(center_pred_r)
     if "turnover_proxy" in dataset.feature_names:
         t_idx = dataset.feature_names.index("turnover_proxy")
         turnover_proxy = dataset.X[:, t_idx].astype(np.float64, copy=False)
 
-    prior_bps = np.zeros(dataset.X.shape[0], dtype=np.float64)
+    risk_unit_bps = (
+        dataset.risk_unit_bps.astype(np.float64, copy=False)
+        if dataset.risk_unit_bps is not None
+        else np.full(dataset.X.shape[0], float(getattr(cfg, "min_risk_unit_bps", 25.0)), dtype=np.float64)
+    )
+    prior_r = np.zeros(dataset.X.shape[0], dtype=np.float64)
     if models.target_mode == "prior_residual":
         keys = _variant_keys(dataset)
-        prior_bps = np.asarray(
-            [models.variant_prior_bps.get(key, models.global_prior_bps) for key in keys],
+        prior_r = np.asarray(
+            [models.variant_prior_r.get(key, models.global_prior_r) for key in keys],
             dtype=np.float64,
         )
-    mu_net_decision_bps = center_pred_bps + prior_bps
-    q10_net_bps = q10_model_bps
-    q90_net_bps = q90_model_bps
+    mu_return_r = center_pred_r + prior_r
+    q10_return_r = q10_model_r
+    q90_return_r = q90_model_r
+    mu_net_decision_bps = mu_return_r * risk_unit_bps
+    q10_net_bps = q10_return_r * risk_unit_bps
+    q90_net_bps = q90_return_r * risk_unit_bps
 
-    prob_adjusted_mu_bps = p_pass * mu_net_decision_bps
     downside_term = downside_penalty * np.abs(np.minimum(q10_net_bps, 0.0))
     turnover_term = turnover_penalty * turnover_proxy
-    expected_utility_bps = (
-        prob_adjusted_mu_bps
-        + (1.0 - p_pass) * np.minimum(q10_net_bps, 0.0)
-        - turnover_term
-        - concentration_penalty
-    )
+    expected_utility_bps = mu_net_decision_bps - downside_term - turnover_term - concentration_penalty
     if getattr(cfg, "selection_utility_mode", "additive_drag") == "expected_edge_direct":
         # Direct mode: mu_net is the unconditional E[return]; p_pass/q10 are sizing-only.
         utility_score = mu_net_decision_bps
     elif bool(getattr(cfg, "selection_use_expected_utility", True)):
         utility_score = expected_utility_bps
     else:
-        utility_score = prob_adjusted_mu_bps - downside_term - turnover_term - concentration_penalty
+        utility_score = expected_utility_bps
 
     breakeven_floor_bps = float(getattr(cfg, "min_net_floor_cost_fraction", 0.5)) * float(
         getattr(cfg, "cost_floor_bps", expected_cost_bps)
@@ -505,7 +546,7 @@ def predict_candidate_edges(
             "utility_mean=%.3f utility_p50=%.3f utility_p90=%.3f utility_max=%.3f "
             "pct_mu_ge1=%.3f pct_mu_ge_floor=%.3f pct_q10_ge_cat=%.3f pct_q10_ge_max=%.3f"
         ),
-        len(center_pred_bps),
+        len(center_pred_r),
         models.target_mode,
         expected_cost_bps,
         breakeven_floor_bps,
@@ -543,13 +584,17 @@ def predict_candidate_edges(
         q10_net_bps=q10_net_bps,
         cfg=cfg,
     )
-    if dataset.X.shape[0] > 0 and dataset.y_edge_bps.shape[0] == dataset.X.shape[0]:
+    target_for_diag = np.asarray(
+        dataset.y_return_bps if dataset.y_return_bps is not None else dataset.y_edge_bps,
+        dtype=np.float64,
+    )
+    if dataset.X.shape[0] > 0 and target_for_diag.shape[0] == dataset.X.shape[0]:
         diag_frame = pd.DataFrame(
             {
                 "mu": mu_net_decision_bps,
                 "p_pass": p_pass,
                 "expected_utility": expected_utility_bps,
-                "y_edge": np.asarray(dataset.y_edge_bps, dtype=np.float64),
+                "y_edge": target_for_diag,
             }
         )
         for col in ("mu", "p_pass", "expected_utility"):
@@ -569,22 +614,35 @@ def predict_candidate_edges(
                 )
         _logger.debug(
             "[DIAG][EDGE_RANK] mu_ic=%.4f expected_utility_ic=%.4f",
-            _rank_ic(mu_net_decision_bps, np.asarray(dataset.y_edge_bps, dtype=np.float64)),
-            _rank_ic(expected_utility_bps, np.asarray(dataset.y_edge_bps, dtype=np.float64)),
+            _rank_ic(mu_net_decision_bps, target_for_diag),
+            _rank_ic(expected_utility_bps, target_for_diag),
         )
+
+    second_moment = np.maximum(mu_return_r * mu_return_r + q10_return_r * q10_return_r, 1e-6)
+    kelly_fraction_arr = cfg.kelly_fraction * np.maximum(mu_return_r, 0.0) / second_moment
+    kelly_fraction_arr = np.clip(kelly_fraction_arr, 0.0, float(cfg.max_symbol_weight))
+
     return CandidateModelOutput(
-        events=None,
+        events=dataset.event_index,
         p_pass=p_pass.astype(np.float64, copy=False),
-        # Legacy field name: values are now on the fitted target scale (net of cost/hurdle).
-        mu_gross_bps=mu_net_decision_bps,
-        mu_net_decision_bps=mu_net_decision_bps,
+        gate_enabled=gate_enabled,
+        gate_threshold=gate_threshold,
+        edge_source=edge_source,
+        expected_return_r=mu_return_r,
+        expected_net_bps=mu_net_decision_bps,
+        q10_return_r=q10_return_r,
         q10_net_bps=q10_net_bps,
+        q90_return_r=q90_return_r,
         q90_net_bps=q90_net_bps,
-        utility_score=utility_score,
-        selection_thresholds=_selection_thresholds(
-            utility_score=utility_score,
-            p_pass=p_pass.astype(np.float64, copy=False),
-            mu_net_decision_bps=mu_net_decision_bps,
-            cfg=cfg,
+        selection_score=utility_score,
+        kelly_fraction=kelly_fraction_arr,
+        validation_diagnostics=cast(
+            dict[str, float | int | str | bool],
+            _selection_thresholds(
+                utility_score=utility_score,
+                p_pass=p_pass.astype(np.float64, copy=False),
+                mu_net_decision_bps=mu_net_decision_bps,
+                cfg=cfg,
+            ),
         ),
     )

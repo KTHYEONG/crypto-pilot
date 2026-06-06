@@ -6,6 +6,7 @@ import pandas as pd
 from src.domain.futures.strategy.candidate_labels import label_candidate_events
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 
 
 def _make_aligned() -> AlignedMarketData:
@@ -76,15 +77,24 @@ def test_label_candidate_events_t_plus_one_entry_and_columns() -> None:
     assert out.shape[0] == 1
     assert int(out.loc[0, "entry_idx"]) == 11
     for col in (
+        "event_id",
         "barrier_first_label",
         "profitable_after_hurdle_label",
+        "gross_event_bps",
         "gross_fwd_bps",
+        "execution_cost_bps",
+        "realized_funding_bps",
+        "net_event_bps",
         "ex_ante_cost_bps",
         "edge_after_hurdle_bps",
         "triple_barrier_label",
         "time_to_exit_bars",
         "mae_bps",
         "mfe_bps",
+        "net_return_r",
+        "mae_r",
+        "mfe_r",
+        "risk_unit_bps",
         "realized_vol_bps",
         "exit_reason",
         "exit_idx",
@@ -113,7 +123,7 @@ def test_label_candidate_events_uses_future_window_only_for_targets() -> None:
     out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
     assert int(out.loc[0, "time_to_exit_bars"]) == 4
     assert str(out.loc[0, "exit_reason"]) == "time_exit"
-    assert int(out.loc[0, "exit_idx"]) == 12
+    assert int(out.loc[0, "exit_idx"]) == 13
     assert int(out.loc[0, "same_bar_collision"]) == 0
     assert str(out.loc[0, "exit_policy_version"]) == "candidate_label_atr_v2"
 
@@ -211,6 +221,74 @@ def test_label_candidate_events_invalid_entry_marks_metadata() -> None:
     assert int(out.loc[0, "same_bar_collision"]) == 0
 
 
+def test_label_candidate_events_uses_taker_cost_floor_for_net_event() -> None:
+    aligned = _make_aligned()
+    events = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[8]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [9],
+            "expected_holding_bars": [4],
+            "min_holding_bars": [1],
+            "stop_atr_mult": [50.0],
+            "take_profit_atr_mult": [50.0],
+            "cost_floor_bps": [1.0],
+        }
+    )
+    cfg = CandidateStrategyConfig()
+
+    out = label_candidate_events(events=events, aligned=aligned, cfg=cfg)
+
+    expected_floor = ExecutionCostModel(
+        maker_fee_bps=cfg.maker_fee_bps,
+        taker_fee_bps=cfg.taker_fee_bps,
+        maker_ratio=cfg.maker_ratio,
+        slippage_bps=cfg.slippage_bps,
+        impact_coeff_bps=cfg.impact_coeff_bps,
+        stress_multiplier=cfg.cost_stress_multiplier,
+    ).taker_round_trip_bps()
+    assert float(out.loc[0, "execution_cost_bps"]) == expected_floor
+    assert float(out.loc[0, "net_event_bps"]) == float(out.loc[0, "gross_event_bps"]) - expected_floor
+
+
+def test_label_candidate_events_includes_realized_funding_cost() -> None:
+    aligned = _make_aligned()
+    aligned = AlignedMarketData(
+        datetimes=aligned.datetimes,
+        symbols=aligned.symbols,
+        open_2d=aligned.open_2d,
+        high_2d=aligned.high_2d,
+        low_2d=aligned.low_2d,
+        close_2d=aligned.close_2d,
+        volume_2d=aligned.volume_2d,
+        funding_2d=np.full_like(aligned.funding_2d, 0.0001),
+        active_mask=aligned.active_mask,
+        warm_mask=aligned.warm_mask,
+        entry_block_mask=aligned.entry_block_mask,
+        kill_mask=aligned.kill_mask,
+        execution_cost_bps_2d=aligned.execution_cost_bps_2d,
+    )
+    events = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[8]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [9],
+            "expected_holding_bars": [4],
+            "min_holding_bars": [1],
+            "stop_atr_mult": [50.0],
+            "take_profit_atr_mult": [50.0],
+            "cost_floor_bps": [100.0],
+        }
+    )
+
+    out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
+
+    assert float(out.loc[0, "realized_funding_bps"]) > 0.0
+    assert float(out.loc[0, "net_event_bps"]) < float(out.loc[0, "gross_event_bps"]) - 100.0
+
+
 # ─── L-1: triple_barrier_label is raw result ─────────────────────────────────
 
 def _make_tp_hit_aligned() -> AlignedMarketData:
@@ -266,7 +344,7 @@ def test_l1_triple_barrier_and_barrier_first_agree_when_profitable() -> None:
         "expected_holding_bars": [15],
         "min_holding_bars": [0],
         "stop_atr_mult": [2.0],
-        "take_profit_atr_mult": [0.05],
+        "take_profit_atr_mult": [1.0],
         "cost_floor_bps": [1.0],  # low cost → edge > 0
     })
 
