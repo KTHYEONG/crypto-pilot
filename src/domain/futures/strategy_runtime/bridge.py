@@ -452,6 +452,10 @@ def run_candidate_strategy_for_universe(
         else:
             log_growth_proxy = float("-inf")
 
+        # Default values for lift variables (only computed in realized_selected_edge branch)
+        ml_lift_bps: float = float("nan")
+        pass_lift: bool = False
+
         survival_metric = strategy_cfg.candidate.fold_survival_metric
         if survival_metric == "predicted_mu_tstat":
             fold_mu_finite = ml_out.mu_net_decision_bps[np.isfinite(ml_out.mu_net_decision_bps)]
@@ -473,11 +477,27 @@ def run_candidate_strategy_for_universe(
             )
             survival_reason = "realized_log_growth_pass" if pass_survival else "realized_log_growth_fail"
         else:
+            # Compute ML selection lift: mean(selected_edge) - mean(all_fold_oos_edge)
+            fold_oos_events = labeled[
+                (labeled["entry_idx"] >= fold.oos_start) & (labeled["entry_idx"] < fold.oos_end)
+            ] if "entry_idx" in labeled.columns else pd.DataFrame()
+            if not fold_oos_events.empty and "edge_after_hurdle_bps" in fold_oos_events.columns:
+                baseline_mean = float(
+                    pd.to_numeric(fold_oos_events["edge_after_hurdle_bps"], errors="coerce").mean()
+                )
+            else:
+                baseline_mean = float("nan")
+            ml_lift_bps = (
+                (realized_mean - baseline_mean)
+                if np.isfinite(realized_mean) and np.isfinite(baseline_mean)
+                else float("nan")
+            )
+            pass_lift = bool(np.isfinite(ml_lift_bps) and ml_lift_bps > 0.0)
             pass_survival = (
                 selected_count >= strategy_cfg.candidate.min_fold_selected_events
                 and np.isfinite(realized_mean)
                 and realized_mean >= strategy_cfg.candidate.min_fold_realized_edge_bps
-                and log_growth_proxy >= strategy_cfg.candidate.min_fold_log_growth
+                and pass_lift
             )
             survival_reason = "realized_selected_edge_pass" if pass_survival else "realized_selected_edge_fail"
         
@@ -509,7 +529,7 @@ def run_candidate_strategy_for_universe(
         _logger.info(
             (
                 "[BRIDGE][WF_REALIZED] metric=%s oos=[%d,%d) selected=%d realized_mean=%.3f "
-                "hit_rate=%.3f log_growth=%.6f pass=%s reason=%s"
+                "hit_rate=%.3f log_growth=%.6f lift=%.3f pass_lift=%s pass=%s reason=%s"
             ),
             survival_metric,
             fold.oos_start,
@@ -518,6 +538,8 @@ def run_candidate_strategy_for_universe(
             realized_mean,
             realized_hit_rate,
             log_growth_proxy,
+            ml_lift_bps if survival_metric not in ("predicted_mu_tstat", "realized_log_growth") else float("nan"),
+            pass_lift if survival_metric not in ("predicted_mu_tstat", "realized_log_growth") else False,
             pass_survival,
             survival_reason,
         )

@@ -61,6 +61,7 @@ def run_candidate_walk_forward(
             schema=schema,
             split_start=fold.fit_start,
             split_end=train_end,
+            is_fit_split=True,
         )
         early_stop_set = build_candidate_dataset(
             labeled_events=labeled_events,
@@ -160,7 +161,8 @@ def run_candidate_walk_forward(
         edge_models = fit_candidate_edge_models(
             train=fit_set,
             valid=early_stop_set,
-            cfg=cfg
+            calibration_eval=calibration_eval_set,
+            cfg=cfg,
         )
 
         # 4. Calibration Acceptance & Validation Reports
