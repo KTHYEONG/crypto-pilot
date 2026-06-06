@@ -36,7 +36,7 @@
 - **Symbol State**: 개별 코인의 변동성 Z-score, 펀딩비 상태, 수익률 랭크 등 자산 고유 상태 정보.
 
 ### 3.4 Model Training & Calibration (`*_gate.py`, `*_edge.py`)
-- **Calibrated Gate (Classifier)**: LightGBM을 사용하여 성공 확률(`p_pass`)을 예측. `CalibratedClassifierCV`를 적용하여 예측 확률이 실제 승률과 일치하도록 보정(Brier Score 최적화).
+- **Calibrated Gate (Classifier)**: LightGBM을 사용하여 성공 확률(`p_pass`)을 예측. 학습은 `train / early_stop / calibration` 3분할로 수행하고, `CalibratedClassifierCV`는 calibration 구간에만 적합한다.
 - **Shrunk Edge (Regressor)**: 
   - **Prior Shrinkage**: 개별 변종의 기대 수익을 글로벌 평균과 가중 결합(Shrinkage)하여 샘플이 적은 전략의 예측 불안정성 해소.
   - **Prior Deviation Clipping**: 변종 prior를 `global_prior ± edge_prior_max_deviation_bps`로 클리핑하여 IS over-confidence를 억제하고 ML residual(`center_pred`)의 상대적 영향력을 보존. (`mu_net = center_pred + prior`이므로 prior 폭주 시 ML 신호가 무력화되는 것을 방지)
@@ -46,8 +46,9 @@
 시그널이 포트폴리오에 최종 편입되기까지의 **4단계 동적 필터링** 과정입니다.
 
 1.  **Stage 1: Pointwise filtering (Gate & Utility)**
-    - `utility_score = (p_pass * mu) - ((1 - p_pass) * |q10|)` 식 등을 통해 기대 효용 계산.
-    - `MIN_SCORE_PERCENTILE` 임계치를 적용하여 상위 우량 시그널만 선별.
+    - 현재 구현은 `selection_scope=per_timestamp` 이며, 각 timestamp 내부에서만 후보를 정렬하고 선택한다.
+    - `utility_score`는 production 기준에서 `expected_edge_direct`를 사용하며, OOS fold 전체 분위수로 percentile gate를 만들지 않는다.
+    - `cost_floor_bps` 및 `selection_max_events_per_bar`는 절대 제약으로만 작동한다.
 2.  **Stage 2: Regime-Aware Scaling (Market Context)**
     - `CRISIS_GAMMA` 지표로 시장 위기 국면을 감지하여 롱/숏 진입 강도를 동적으로 조절.
     - 하락장/위기 시 `DYNAMIC_RA_CRISIS_COEF`를 적용하여 방어적 포지셔닝 수행.
@@ -56,7 +57,7 @@
     - 동일 국면 내에서 상대적으로 강한 시그널에 자본 집중.
 4.  **Stage 4: Top-K Sparsification & Sizing**
     - `K_RANK` 제한을 통해 가장 점수가 높은 최정예 후보군만 최종 선택.
-    - **Variant Concentration Cap**: 단일 `family:variant`가 top-k의 `max_variant_selection_fraction` 이상을 점유하지 못하도록 제한하여 특정 변종 독점(concentration risk) 방지. 초과분은 차순위 다른 변종으로 대체.
+    - **Variant Concentration Cap**: 단일 `family:variant`가 top-k의 `max_variant_selection_fraction` 이상을 점유하지 못하도록 제한하여 특정 변종 독점(concentration risk) 방지. cap은 fold 전체가 아니라 timestamp 내부에 적용한다.
     - `p_pass` 할인 켈리(Kelly) 베팅과 `q10` 기반의 리스크 분산 제약으로 최종 `Target Weight` 산출.
 
 ### 3.6 Universe-to-ML Coupling
@@ -67,6 +68,7 @@
 - **Point-in-Time Integrity**: 모든 결정은 T시점 이전의 데이터로만 수행 (No Look-ahead).
 - **Fail-Closed Selection**: 모델의 확신이 낮거나 시장 리스크가 크면 자본을 투입하지 않음.
 - **Risk-Reward Asymmetry**: 단순히 수익만 쫓지 않고, 예측된 하방 변동성(`q10`)을 sizing의 핵심 제약 조건으로 활용.
+- **Workflow Status Contract**: bridge는 성공 시에도 `wf_eligible`까지만 출력하고, `deployment_promoted`는 별도 배포 게이트에서만 사용한다.
 
 ## 5. 핵심 기술 스택
 - **Engine**: `numpy`, `pandas`, `numba` (고속 벡터 연산)
