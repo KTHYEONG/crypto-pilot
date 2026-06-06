@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMRegressor
 from numpy.typing import NDArray
 
-from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput, EdgeSource
+from src.domain.futures.strategy.candidate_contracts import (
+    CandidateModelOutput,
+    EdgePredictionMode,
+    EdgeSource,
+)
 from src.domain.futures.strategy.candidate_dataset import CandidateDataset
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 
@@ -35,7 +39,7 @@ class CandidateEdgeModels:
     variant_prior_bps: dict[str, float]
     variant_prior_obs: dict[str, int]
     global_prior_bps: float
-    target_mode: Literal["direct", "prior_residual"]
+    prediction_mode: EdgePredictionMode
     prediction_diagnostics: dict[str, float | int | str]
     validation: EdgeModelValidation | None = None
 
@@ -77,11 +81,10 @@ def _variant_keys(dataset: CandidateDataset) -> list[str]:
 
 
 def _weighted_mean(values: NDArray[np.float64], weights: NDArray[np.float64]) -> float:
-    """Return a finite weighted mean with uniform fallback."""
+    """Return a finite weighted mean using positive-weight rows only."""
     finite_mask = np.isfinite(values) & np.isfinite(weights) & (weights > 0.0)
     if not bool(finite_mask.any()):
-        finite_values = values[np.isfinite(values)]
-        return float(np.mean(finite_values)) if finite_values.size > 0 else 0.0
+        return 0.0
     return float(np.average(values[finite_mask], weights=weights[finite_mask]))
 
 
@@ -89,7 +92,7 @@ def _build_variant_priors(
     *,
     dataset: CandidateDataset,
     cfg: CandidateStrategyConfig,
-) -> tuple[dict[str, float], dict[str, int], float, NDArray[np.float64]]:
+) -> tuple[dict[str, float], dict[str, int], float, NDArray[np.float64], bool]:
     """Return shrunk per-variant priors and per-row prior values."""
     y_edge = np.asarray(
         dataset.y_return_r if dataset.y_return_r is not None else dataset.y_edge_bps,
@@ -97,6 +100,7 @@ def _build_variant_priors(
     )
     weights = np.asarray(dataset.edge_weight, dtype=np.float64)
     keys = _variant_keys(dataset)
+    eligible_global = np.isfinite(y_edge) & np.isfinite(weights) & (weights > 0.0)
     global_prior = _weighted_mean(y_edge, weights)
     variant_prior_bps: dict[str, float] = {}
     variant_prior_obs: dict[str, int] = {}
@@ -112,7 +116,8 @@ def _build_variant_priors(
         indexer = np.asarray(indices, dtype=np.int32)
         variant_values = y_edge[indexer]
         variant_weights = weights[indexer]
-        obs = int(indexer.shape[0])
+        eligible_variant = np.isfinite(variant_values) & np.isfinite(variant_weights) & (variant_weights > 0.0)
+        obs = int(eligible_variant.sum())
         variant_prior_obs[key] = obs
         if obs < min_obs:
             row_priors[indexer] = global_prior
@@ -120,13 +125,23 @@ def _build_variant_priors(
         variant_mean = _weighted_mean(variant_values, variant_weights)
         shrink = obs / (obs + shrinkage_obs)
         prior = float(shrink * variant_mean + (1.0 - shrink) * global_prior)
-        max_dev = float(getattr(cfg, "edge_prior_max_deviation_bps", float("inf")))
+        reference_risk_unit_bps = float(
+            np.median(dataset.risk_unit_bps.astype(np.float64, copy=False)[dataset.risk_unit_bps > 0.0])
+        ) if dataset.risk_unit_bps is not None and np.any(dataset.risk_unit_bps > 0.0) else float(
+            getattr(cfg, "min_risk_unit_bps", 25.0)
+        )
+        max_dev_bps = float(getattr(cfg, "edge_prior_max_deviation_bps", float("inf")))
+        max_dev = (
+            max_dev_bps / max(reference_risk_unit_bps, 1e-6)
+            if np.isfinite(max_dev_bps) and max_dev_bps > 0.0
+            else float("inf")
+        )
         if np.isfinite(max_dev) and max_dev > 0.0:
             prior = float(np.clip(prior, global_prior - max_dev, global_prior + max_dev))
         variant_prior_bps[key] = prior
         row_priors[indexer] = prior
 
-    return variant_prior_bps, variant_prior_obs, global_prior, row_priors
+    return variant_prior_bps, variant_prior_obs, global_prior, row_priors, bool(eligible_global.any())
 
 
 def _log_edge_target_distribution(*, split: str, dataset: CandidateDataset, cfg: CandidateStrategyConfig) -> None:
@@ -300,10 +315,13 @@ def fit_candidate_edge_models(
     _log_edge_target_distribution(split="valid", dataset=valid, cfg=cfg)
     _log_edge_target_variants(split="train", dataset=train, cfg=cfg)
     _log_edge_target_variants(split="valid", dataset=valid, cfg=cfg)
-    variant_prior_bps, variant_prior_obs, global_prior_bps, train_row_priors = _build_variant_priors(
-        dataset=train,
-        cfg=cfg,
-    )
+    (
+        variant_prior_bps,
+        variant_prior_obs,
+        global_prior_bps,
+        train_row_priors,
+        has_eligible_prior_rows,
+    ) = _build_variant_priors(dataset=train, cfg=cfg)
     use_prior_residual = bool(cfg.edge_prior_enabled and cfg.edge_residual_model_enabled)
     train_return_r = np.asarray(
         train.y_return_r if train.y_return_r is not None else train.y_edge_bps,
@@ -458,18 +476,23 @@ def fit_candidate_edge_models(
     else:
         reason = "insufficient_obs"
 
+    if use_prior_residual:
+        final_prediction_mode: EdgePredictionMode = "prior_residual" if accepted else "prior_only"
+    elif accepted:
+        final_prediction_mode = "direct"
+    else:
+        final_prediction_mode = "disabled"
+    if not has_eligible_prior_rows and final_prediction_mode == "prior_only":
+        final_prediction_mode = "disabled"
+
     _logger.info(
-        "[EDGE_GATE] rank_ic=%.4f threshold=%.4f decision=%s n=%d reason=%s",
+        "[EDGE_GATE] rank_ic=%.4f threshold=%.4f decision=%s n=%d reason=%s inference_mode=%s",
         rank_ic_val,
         float(getattr(cfg, "min_edge_rank_ic", 0.02)),
         "accepted" if accepted else "rejected",
         n_cal_eval,
         reason,
-    )
-
-    # target_mode: cfg 플래그 AND rank_ic acceptance 둘 다 충족해야 residual 활성화
-    final_target_mode: Literal["direct", "prior_residual"] = (
-        "prior_residual" if (use_prior_residual and accepted) else "direct"
+        final_prediction_mode,
     )
 
     edge_validation = EdgeModelValidation(
@@ -489,14 +512,15 @@ def fit_candidate_edge_models(
         variant_prior_bps={key: value * median_risk_unit_bps for key, value in variant_prior_bps.items()},
         variant_prior_obs=variant_prior_obs,
         global_prior_bps=global_prior_bps * median_risk_unit_bps,
-        target_mode=final_target_mode,
+        prediction_mode=final_prediction_mode,
         prediction_diagnostics={
-            "target_mode": final_target_mode,
+            "prediction_mode": final_prediction_mode,
             "global_prior_bps": global_prior_bps * median_risk_unit_bps,
             "global_prior_r": global_prior_bps,
             "variant_prior_count": len(variant_prior_bps),
             "rank_ic_cal_eval": rank_ic_val,
             "edge_gate_accepted": accepted,
+            "has_eligible_prior_rows": int(has_eligible_prior_rows),
         },
         validation=edge_validation,
     )
@@ -568,13 +592,19 @@ def predict_candidate_edges(
         else np.full(dataset.X.shape[0], float(getattr(cfg, "min_risk_unit_bps", 25.0)), dtype=np.float64)
     )
     prior_r = np.zeros(dataset.X.shape[0], dtype=np.float64)
-    if models.target_mode == "prior_residual":
+    if models.prediction_mode in {"prior_only", "prior_residual"}:
         keys = _variant_keys(dataset)
         prior_r = np.asarray(
             [models.variant_prior_r.get(key, models.global_prior_r) for key in keys],
             dtype=np.float64,
         )
-    mu_return_r = center_pred_r + prior_r
+    center_component_r = (
+        center_pred_r if models.prediction_mode in {"direct", "prior_residual"} else np.zeros_like(center_pred_r)
+    )
+    prior_component_r = (
+        prior_r if models.prediction_mode in {"prior_only", "prior_residual"} else np.zeros_like(prior_r)
+    )
+    mu_return_r = center_component_r + prior_component_r
     q10_return_r = q10_model_r
     q90_return_r = q90_model_r
     mu_net_decision_bps = mu_return_r * risk_unit_bps
@@ -618,7 +648,7 @@ def predict_candidate_edges(
             "pct_mu_ge1=%.3f pct_mu_ge_floor=%.3f pct_q10_ge_cat=%.3f pct_q10_ge_max=%.3f"
         ),
         len(center_pred_r),
-        models.target_mode,
+        models.prediction_mode,
         expected_cost_bps,
         breakeven_floor_bps,
         float(np.mean(finite_mu)) if finite_mu.size > 0 else float("nan"),
@@ -709,11 +739,20 @@ def predict_candidate_edges(
         kelly_fraction=kelly_fraction_arr,
         validation_diagnostics=cast(
             dict[str, float | int | str | bool],
-            _selection_thresholds(
+            {
+                **_selection_thresholds(
                 utility_score=utility_score,
                 p_pass=p_pass.astype(np.float64, copy=False),
                 mu_net_decision_bps=mu_net_decision_bps,
                 cfg=cfg,
-            ),
+                ),
+                "prediction_mode": models.prediction_mode,
+                "center_component_p90_bps": float(np.percentile(center_component_r * risk_unit_bps, 90))
+                if center_component_r.size > 0
+                else 0.0,
+                "prior_component_p90_bps": float(np.percentile(prior_component_r * risk_unit_bps, 90))
+                if prior_component_r.size > 0
+                else 0.0,
+            },
         ),
     )
