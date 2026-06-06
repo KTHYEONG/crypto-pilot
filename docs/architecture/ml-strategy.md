@@ -1,6 +1,6 @@
 # Futures ML Strategy Architecture
 
-> last_verified: 2026-06-06 (ablation v2 causal framework)
+> last_verified: 2026-06-06 (4-Layer eval criteria hardening: signal pre-qual + rank IC gate + ML lift survival)
 
 ## 1. Overview
 본 문서는 `my-coin-traider` 프로젝트의 선물(Futures) ML 전략 아키텍처를 기술합니다. 본 아키텍처는 단순 순위 기반(Rank-based) 모델에서 벗어나, 개별 **Candidate Event**를 추출하고 이를 ML로 필터링하여 최종 **Target Weight**를 생성하는 파이프라인을 핵심으로 합니다.
@@ -34,15 +34,16 @@
 
 ### 3.3 Multi-Group Feature Engineering (`candidate_dataset.py`)
 학습 데이터셋은 세 가지 핵심 피처 그룹으로 구성됩니다.
+- **Signal Pre-Qualification (Layer 0)**: fit split(`is_fit_split=True`)에서만 IS `mean_edge < 0` 또는 `n_events < signal_prequalify_min_obs(30)` variant의 `uniqueness_weight=0` 처리. 학습 기여를 제거하되 OOS inference에서는 global prior로 유지(hard exclusion 아님).
 - **Identity Features**: 전략 패밀리 및 변종 ID를 원-핫 인코딩하여 개별 로직의 고유 특성 반영.
 - **Market State**: BTC 수익률, 추세, 전체 시장 변동성 및 분산, 시장 폭(Breadth) 등 거시 국면 정보.
 - **Symbol State**: 개별 코인의 변동성 Z-score, 펀딩비 상태, 수익률 랭크 등 자산 고유 상태 정보.
 
 ### 3.4 Model Training & Calibration (`*_gate.py`, `*_edge.py`)
-- **Calibrated Gate (Classifier)**: LightGBM으로 성공 확률(`p_pass`)을 예측. calibration-fit/eval 분리 적용. gate는 calibration incremental uplift가 양수일 때만 low-quality event veto로 작동하며, **`p_pass`를 `mu`에 곱하지 않는다** (이중계상 금지).
+- **Calibrated Gate (Classifier, Catastrophic Veto Only)**: LightGBM으로 성공 확률(`p_pass`)을 예측. 항상 활성(`enabled=True`)이며 유일한 역할은 `q10_net_bps < -catastrophic_shortfall_bps(300bps)` 이벤트 VETO. `p_pass`는 sizing confidence discount에만 사용하며 **selection score/`mu`에 곱하지 않는다** (이중계상 금지). base-rate ≈ 43% 구조상 `brier_skill`/`decile_lift`는 판정에서 제외(진단 전용).
 - **Risk-Unit Edge (Regressor)**:
   - **Prior Shrinkage**: calibration-set 가중 평균으로 variant prior `mu_prior_i = E[z_i]` 추정. global prior와 shrinkage 결합.
-  - **Residual Champion**: ML residual feature 모델은 calibration eval에서 incremental LCB > 0일 때만 활성화. 비활성 시 prior-only로 fallback.
+  - **Residual Champion (Rank IC Gate)**: ML residual feature 모델은 `calibration_eval`에서 `Spearman(mu_pred, realized_edge) >= min_edge_rank_ic(0.02)`일 때만 활성(`target_mode="prior_residual"`). 미달 시 prior-only fallback(`target_mode="direct"`). `EdgeModelValidation`에 `rank_ic_cal_eval`/`accepted`/`reason` 기록.
   - `mu_i = mu_prior_i + mu_residual_i` (residual champion pass 시). `expected_net_bps_i = mu_i * s_i`는 표시/검사 전용이며 raw model 출력이 아님.
   - **Multi-Objective**: risk-unit center(z), mae_r, mfe_r 별도 Quantile Regressor 학습.
 
@@ -53,7 +54,7 @@
     - `selection_scope=per_timestamp`: timestamp 내부에서만 후보를 정렬하고 선택.
     - `utility_score`는 production 기준에서 `expected_edge_direct`를 사용.
     - `cost_floor_bps` 및 `selection_max_events_per_bar`는 절대 제약으로만 작동.
-    - Gate는 incremental uplift 검증 통과 시에만 low-quality veto로 작동.
+    - Gate는 항상 `q10` catastrophic veto로 작동(`p_pass`는 selection 점수 미관여).
 2.  **Stage 2: Regime-Aware Scaling (Market Context)**
     - `CRISIS_GAMMA` 지표로 시장 위기 국면 감지, 롱/숏 진입 강도 동적 조절.
     - 하락장/위기 시 방어적 포지셔닝 적용.
@@ -73,7 +74,8 @@
 - **Point-in-Time Integrity**: entry bar 종가 미사용, next-open exit, calibration-only score-bin moment 추정.
 - **Fail-Closed Selection**: 모델의 확신이 낮거나 시장 리스크가 크면 자본을 투입하지 않음. threshold 완화로 통과 금지.
 - **Single-Unit Contract**: label, ML target, sizing이 동일한 risk-unit(s_i) 기준으로 통일. bps/q10/mfe를 혼용하지 않음.
-- **Incremental Uplift Gate**: residual/gate/Kelly 각각이 calibration eval에서 block-bootstrap lower bound > 0을 증명할 때만 활성화.
+- **Empirical Acceptance Gate**: residual은 `calibration_eval` rank IC >= 0.02, gate는 catastrophic veto, Kelly는 calibration-fit moment 추정으로만 활성화. 각 컴포넌트는 hold-out에서 가치를 직접 증명해야 한다.
+- **Fold Survival (ML Lift)**: `realized_selected_edge`(default) 기준 — `selected_count >= min_fold_selected_events(20)` AND `realized_mean >= min_fold_realized_edge_bps(15)` AND `ml_lift_bps > 0` (선택 이벤트 평균 - fold OOS 전체 이벤트 평균). `min_wf_fold_pass_ratio(0.60)` 미달 시 fail-closed. (`realized_log_growth`는 backward-compat non-default 옵션으로만 잔존.)
 - **Workflow Status Contract**: bridge는 성공 시에도 `wf_eligible`까지만 출력하고, `deployment_promoted`는 별도 배포 게이트에서만 사용한다.
 
 ## 4.1 Causal Ablation Framework (v2)
