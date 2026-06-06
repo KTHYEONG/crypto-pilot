@@ -233,18 +233,28 @@ def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) 
     )
 
     # Force all fold mu = -999bps (fails cost survival) by patching predict_candidate_edges
-    def fake_predict_edges(*, models: object, dataset: object, p_pass: np.ndarray, cfg: object) -> CandidateModelOutput:
+    def fake_predict_edges(
+        *, models: object, dataset: object, p_pass: np.ndarray, cfg: object, **__: Any
+    ) -> CandidateModelOutput:
+        from src.domain.futures.strategy.candidate_contracts import EdgeSource
         n = p_pass.shape[0]
         neg_mu = np.full(n, -999.0, dtype=np.float64)
+        zeros = np.zeros(n, dtype=np.float64)
         return CandidateModelOutput(
             events=getattr(dataset, "event_index", pd.DataFrame()),
             p_pass=p_pass,
-            mu_gross_bps=neg_mu,
-            mu_net_decision_bps=neg_mu,  # all negative → cost survival fails
+            gate_enabled=False,
+            gate_threshold=0.5,
+            edge_source=EdgeSource.PRIOR_ONLY,
+            expected_return_r=zeros,
+            expected_net_bps=neg_mu,
+            q10_return_r=zeros,
             q10_net_bps=neg_mu,
+            q90_return_r=zeros,
             q90_net_bps=neg_mu,
-            utility_score=neg_mu,
-            selection_thresholds={},
+            selection_score=neg_mu,
+            kelly_fraction=zeros,
+            validation_diagnostics={},
         )
     monkeypatch.setattr("src.domain.futures.strategy.candidate_edge.predict_candidate_edges", fake_predict_edges)
 
@@ -377,16 +387,26 @@ def test_bridge_realized_fold_survival_fails_when_selected_realized_edge_is_nega
 
     from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
 
-    def fake_predict_edges(*, models: object, dataset: object, p_pass: np.ndarray, cfg: object) -> CandidateModelOutput:
+    def fake_predict_edges(
+        *, models: object, dataset: object, p_pass: np.ndarray, cfg: object, **__: Any
+    ) -> CandidateModelOutput:
+        from src.domain.futures.strategy.candidate_contracts import EdgeSource
+        zeros = np.zeros(1, dtype=np.float64)
         return CandidateModelOutput(
             events=getattr(dataset, "event_index", pd.DataFrame()),
             p_pass=p_pass,
-            mu_gross_bps=np.array([30.0], dtype=np.float64),
-            mu_net_decision_bps=np.array([30.0], dtype=np.float64),
+            gate_enabled=False,
+            gate_threshold=0.5,
+            edge_source=EdgeSource.PRIOR_ONLY,
+            expected_return_r=zeros,
+            expected_net_bps=np.array([30.0], dtype=np.float64),
+            q10_return_r=zeros,
             q10_net_bps=np.array([-10.0], dtype=np.float64),
+            q90_return_r=zeros,
             q90_net_bps=np.array([40.0], dtype=np.float64),
-            utility_score=np.array([8.0], dtype=np.float64),
-            selection_thresholds={},
+            selection_score=np.array([8.0], dtype=np.float64),
+            kelly_fraction=zeros,
+            validation_diagnostics={},
         )
 
     monkeypatch.setattr("src.domain.futures.strategy.candidate_edge.predict_candidate_edges", fake_predict_edges)
@@ -446,23 +466,26 @@ def test_bridge_reports_shadow_profile_when_production_selection_stays_blocked(m
     )
     raw_events = pd.DataFrame(
         {
-            "datetime": [datetimes[20], datetimes[24]],
-            "symbol": ["BTCUSDT", "BTCUSDT"],
-            "family": ["trend_ma", "trend_ma"],
-            "variant": ["ema_12_72", "ema_12_72"],
-            "side": [1, 1],
-            "raw_score": [0.9, 0.8],
-            "score_z": [0.9, 0.8],
-            "entry_idx": [20, 24],
-            "exit_idx": [24, 28],
-            "expected_holding_bars": [4, 4],
-            "min_holding_bars": [1, 1],
-            "stop_atr_mult": [2.0, 2.0],
-            "take_profit_atr_mult": [4.0, 4.0],
-            "turnover_proxy": [0.1, 0.1],
-            "cost_floor_bps": [0.0, 0.0],
-            "hurdle_bps": [0.0, 0.0],
-            "edge_after_hurdle_bps": [15.0, 18.0],
+            "datetime": [datetimes[20], datetimes[24], datetimes[30], datetimes[34]],
+            "symbol": ["BTCUSDT", "BTCUSDT", "BTCUSDT", "BTCUSDT"],
+            "family": ["trend_ma", "trend_ma", "trend_ma", "trend_ma"],
+            "variant": ["ema_12_72", "ema_12_72", "ema_12_72", "ema_12_72"],
+            "side": [1, 1, 1, 1],
+            "raw_score": [0.9, 0.8, 0.7, 0.6],
+            "score_z": [0.9, 0.8, 0.7, 0.6],
+            "entry_idx": [20, 24, 30, 34],
+            "exit_idx": [24, 28, 34, 38],
+            "expected_holding_bars": [4, 4, 4, 4],
+            "min_holding_bars": [1, 1, 1, 1],
+            "stop_atr_mult": [2.0, 2.0, 2.0, 2.0],
+            "take_profit_atr_mult": [4.0, 4.0, 4.0, 4.0],
+            "turnover_proxy": [0.1, 0.1, 0.1, 0.1],
+            "cost_floor_bps": [0.0, 0.0, 0.0, 0.0],
+            "hurdle_bps": [0.0, 0.0, 0.0, 0.0],
+            "edge_after_hurdle_bps": [15.0, 18.0, 12.0, 14.0],
+            "profitable_after_hurdle_label": [1, 1, 1, 1],
+            "mae_bps": [-6.0, -8.0, -5.0, -7.0],
+            "mfe_bps": [18.0, 22.0, 15.0, 20.0],
         }
     )
 
@@ -490,50 +513,73 @@ def test_bridge_reports_shadow_profile_when_production_selection_stays_blocked(m
     )
 
     class _FakeDataset:
-        X = np.zeros((2, 2), dtype=np.float64)
-        y_gate = np.ones(2, dtype=np.int8)
-        y_edge_bps = np.array([15.0, 18.0], dtype=np.float32)
-        y_q10_bps = np.array([-20.0, -20.0], dtype=np.float32)
-        y_mfe_bps = np.array([20.0, 22.0], dtype=np.float32)
-        gate_weight = np.ones(2, dtype=np.float32)
-        edge_weight = np.ones(2, dtype=np.float32)
-        groups = np.zeros(2, dtype=np.int32)
+        X = np.zeros((4, 2), dtype=np.float32)
+        y_gate = np.ones(4, dtype=np.int8)
+        y_edge_bps = np.array([15.0, 18.0, 12.0, 14.0], dtype=np.float32)
+        y_q10_bps = np.array([-20.0, -20.0, -20.0, -20.0], dtype=np.float32)
+        y_mfe_bps = np.array([20.0, 22.0, 15.0, 20.0], dtype=np.float32)
+        gate_weight = np.ones(4, dtype=np.float32)
+        edge_weight = np.ones(4, dtype=np.float32)
+        groups = np.zeros(4, dtype=np.int32)
         event_index = raw_events.copy()
         feature_names: ClassVar[list[str]] = []
-        effective_sample_size = 2.0
+        effective_sample_size = 4.0
+        feature_schema_version = "candidate_v5"
+        y_return_r = np.zeros(4, dtype=np.float32)
+        y_return_bps = np.zeros(4, dtype=np.float32)
+        y_mae_r = np.zeros(4, dtype=np.float32)
+        risk_unit_bps = np.full(4, 25.0, dtype=np.float32)
 
     monkeypatch.setattr(
-        "src.domain.futures.strategy.candidate_dataset.build_candidate_dataset",
+        "src.domain.futures.strategy.candidate_workflow.build_candidate_dataset",
         lambda *_, **__: _FakeDataset(),
     )
     monkeypatch.setattr(
-        "src.domain.futures.strategy.candidate_gate.fit_candidate_gate",
+        "src.domain.futures.strategy.candidate_workflow.fit_candidate_gate",
         lambda *_, **__: SimpleNamespace(calibration_used=False, calibration_reason="test"),
     )
     monkeypatch.setattr(
-        "src.domain.futures.strategy.candidate_gate.predict_candidate_gate",
-        lambda *_, **__: np.array([0.30, 0.34], dtype=np.float64),
+        "src.domain.futures.strategy.candidate_workflow.predict_candidate_gate",
+        lambda *_, **__: np.array([0.30, 0.34, 0.31, 0.35], dtype=np.float64),
     )
     monkeypatch.setattr(
-        "src.domain.futures.strategy.candidate_edge.fit_candidate_edge_models",
+        "src.domain.futures.strategy.candidate_workflow.fit_candidate_edge_models",
         lambda *_, **__: None,
     )
 
     from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
 
-    def fake_predict_edges(*, models: object, dataset: object, p_pass: np.ndarray, cfg: object) -> CandidateModelOutput:
+    def fake_predict_edges(
+        *, models: object, dataset: object, p_pass: np.ndarray, cfg: object, **__: Any
+    ) -> CandidateModelOutput:
+        from src.domain.futures.strategy.candidate_contracts import EdgeSource
+        n = len(getattr(dataset, "event_index", pd.DataFrame()))
+        zeros = np.zeros(n, dtype=np.float64)
+        net_bps = np.full(n, 42.0, dtype=np.float64)  # positive edge
+        q10_bps = np.full(n, -5.0, dtype=np.float64)
+        q90_bps = np.full(n, 62.0, dtype=np.float64)
+        score = np.full(n, 12.0, dtype=np.float64)
+        p = np.full(n, 0.46, dtype=np.float64)
         return CandidateModelOutput(
             events=getattr(dataset, "event_index", pd.DataFrame()),
-            p_pass=p_pass,
-            mu_gross_bps=np.array([40.0, 45.0], dtype=np.float64),
-            mu_net_decision_bps=np.array([40.0, 45.0], dtype=np.float64),
-            q10_net_bps=np.array([-20.0, -20.0], dtype=np.float64),
-            q90_net_bps=np.array([60.0, 65.0], dtype=np.float64),
-            utility_score=np.array([12.0, 13.0], dtype=np.float64),
-            selection_thresholds={},
+            p_pass=p,
+            gate_enabled=True,
+            gate_threshold=0.35,
+            edge_source=EdgeSource.PRIOR_ONLY,
+            expected_return_r=zeros,
+            expected_net_bps=net_bps,
+            mu_net_decision_bps=net_bps,
+            q10_return_r=zeros,
+            q10_net_bps=q10_bps,
+            q90_return_r=zeros,
+            q90_net_bps=q90_bps,
+            selection_score=score,
+            utility_score=score,
+            kelly_fraction=zeros,
+            validation_diagnostics={},
         )
 
-    monkeypatch.setattr("src.domain.futures.strategy.candidate_edge.predict_candidate_edges", fake_predict_edges)
+    monkeypatch.setattr("src.domain.futures.strategy.candidate_workflow.predict_candidate_edges", fake_predict_edges)
 
     strategy_cfg = StrategyConfig()
     object.__setattr__(
@@ -558,6 +604,13 @@ def test_bridge_reports_shadow_profile_when_production_selection_stays_blocked(m
             selection_shadow_utility_floors_bps=(-20.0, 0.0),
             selection_shadow_breakeven_floor_fractions=(0.0, 0.5),
             promotion_filter_enabled=False,
+            min_fold_realized_edge_bps=50.0,
+            min_gate_probability=0.30,
+            min_expected_net_bps=-50.0,
+            selection_shadow_profiles_enabled=True,
+            selection_min_expected_utility_bps=-100.0,
+            cost_floor_bps=0.0,
+            expected_cost_bps=0.0,
         ),
     )
 
