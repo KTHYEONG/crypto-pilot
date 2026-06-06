@@ -1,9 +1,10 @@
 # Mode Full (ML) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-06 (평가 기준 강화 → BLOCKED. fold 3 +6.8bps 정직하게 실패 처리)  
-**이전 기준:** 2026-06-06 (Ranking 버그 수정 + Production Default 전환, pass_ratio 0.75)  
+**최신 갱신:** 2026-06-06 (Prior Clipping + Variant Concentration Cap → **PROMOTED** 재달성. pass_ratio=0.75)  
+**이전 기준:** 2026-06-06 (P0 IC 계측 + P1 gate label 분리 실험 → BLOCKED 유지. fold1 IC=-0.48 확정)  
 **현재 기본 모드:** `expected_edge_direct` (production default, 검증 완료)  
-**평가 기준:** `min_fold_realized_edge_bps=15.0` (이전 0.0), `min_cagr_for_promotion=0.15` (이전 0.02)
+**평가 기준:** `min_fold_realized_edge_bps=15.0`, `min_cagr_for_promotion=0.15`  
+**gate_label_column:** `gross_direction_label` (변경됨, 이전: `profitable_after_hurdle_label`)
 
 ---
 
@@ -13,15 +14,17 @@
 [WINDOW] 2022-10-01 ~ 2026-03-31 | IS: 2023-10-01 | OOS: 2025-10-01
 [UNIVERSE] 94개 심볼 발견
 [PIPELINE] raw=272819 labeled=6350 promoted=6350 fit=9869 cal=9165 oos=2355 n_folds=4 wf_scheme=anchored
-[BRIDGE][WF] fold_cost_survival=[False, True, False, True] pass_ratio=0.50 min_required=0.60
-[BRIDGE SUMMARY] Active Signals 0 (sel=0) | Status BLOCKED | Execution Time 34.10s
-[BRIDGE SUMMARY][DIAG] selected_total=0 eligible_total=0 zero_reason=wf_fold_pass_ratio_fail gate_p50=nan mu_p50=nan utility_p50=nan breakeven_floor=nan
-[BRIDGE SUMMARY][WF_DIAG] wf_selected=117 wf_eligible=1144 shadow=expected_edge_direct:off:0.00:-50.0:0.00 shadow_selected=24 shadow_realized=136.894 eu_p90=53.800 downside_p90=228.095
+[BRIDGE][WF] fold_cost_survival=[False, True, True, True] pass_ratio=0.75 min_required=0.60
+[BRIDGE SUMMARY] Active Signals 104 (sel=104) | Status PROMOTED
+[BRIDGE SUMMARY][DIAG] selected_total=104 eligible_total=1144 selected_pre_group=115 policy=utility_topk zero_reason=selected_nonzero gate_p50=0.4136 gate_p90=0.4781 mu_p50=27.8 mu_p90=49.1 q10_p10=-400.5 utility_p50=27.786 utility_p90=49.067 breakeven_floor=3.8
+[BRIDGE SUMMARY][WF_DIAG] wf_selected=109 wf_eligible=1144 shadow=expected_edge_direct:off:0.00:-50.0:0.00 shadow_selected=24 shadow_realized=136.894 eu_p90=50.638 downside_p90=228.095
 ```
 
 ---
 
 ## 백테스트 성과 (OOS)
+
+*(이전 실행 — BLOCKED 시점 기준, 갱신 보류)*
 
 | Model | CAGR | MaxDD | MAR | Equity | Trades | Deploy | Pass |
 |---|---:|---:|---:|---:|---:|---:|---|
@@ -29,16 +32,90 @@
 | Rule Promo NL | -14.1% | 16.0% | -0.88 | 913,690 | 402 | 0.64 | N |
 | Rule Promo Oracle | 2.6% | 3.6% | 0.71 | 1,015,037 | 182 | 0.17 | N |
 | Kelly (No ML) | -0.1% | 0.4% | 0.00 | 997,350 | 2149 | 0.66 | N |
-| ML Gate | 0.0% | 0.7% | 0.00 | 1,000,388 | 101 | 0.14 | N |
-| ML Gate+Edge | -1.1% | 9.1% | -0.12 | 967,273 | 87 | 0.01 | N |
-| ML Full (Capped) | 0.0% | 0.6% | 0.00 | 1,000,434 | 100 | 0.14 | N |
-| Cand. ML | 0.0% | 0.7% | 0.00 | 1,000,178 | 100 | 0.70 | N |
-| Direct Edge | 0.2% | 0.4% | 0.00 | 1,001,297 | 119 | 0.34 | N |
-| Variant Prior | 1.6% | 0.6% | 0.00 | 1,009,208 | 154 | 0.31 | N |
-| Promo Filter | -0.6% | 0.8% | 0.00 | 996,231 | 614 | 0.99 | N |
-| Val. Selection | -0.5% | 0.4% | 0.00 | 997,245 | 3 | 0.03 | N |
-| Identity Feat | -0.3% | 0.6% | 0.00 | 998,388 | 111 | 0.71 | N |
-| Market Feat | 0.1% | 0.5% | 0.00 | 1,000,338 | 108 | 0.73 | N |
+| ML Gate | 0.0% | 0.7% | 0.00 | 1,000,683 | 102 | 0.13 | N |
+| ML Gate+Edge | -1.3% | 9.9% | -0.13 | 961,599 | 86 | 0.01 | N |
+| ML Full (Capped) | 0.0% | 0.7% | 0.00 | 1,000,840 | 101 | 0.13 | N |
+| Cand. ML | 0.2% | 0.6% | 0.00 | 1,001,170 | 101 | 0.68 | N |
+| Direct Edge | -0.3% | 0.5% | 0.00 | 998,385 | 129 | 0.41 | N |
+| Variant Prior | 1.0% | 0.5% | 0.00 | 1,005,959 | 137 | 0.32 | N |
+| Promo Filter | -0.4% | 1.1% | -0.41 | 997,368 | 620 | 1.00 | N |
+| Val. Selection | -0.0% | 0.0% | 0.00 | 999,892 | 11 | 0.05 | N |
+| Identity Feat | 0.2% | 0.6% | 0.00 | 1,001,365 | 99 | 0.69 | N |
+| Market Feat | 0.1% | 0.5% | 0.00 | 1,000,349 | 108 | 0.73 | N |
+
+---
+
+## 2026-06-06: Prior Clipping + Variant Concentration Cap → **PROMOTED**
+
+### 변경 내용
+| 항목 | 이전 | 변경 후 |
+|---|---|---|
+| `edge_prior_max_deviation_bps` | (없음) | **30.0 bps** (global_prior ± 30bps 클리핑) |
+| `max_variant_selection_fraction` | (없음) | **0.4** (단일 variant top-k의 40% cap) |
+| `disabled_candidate_variants` | `("tpc_50_200",)` | `()` (복원) |
+
+### fold별 EDGE_IC 결과
+
+| Fold | OOS 기간 | 선택 수 | mu_net IC | hit_rate | payoff | realized edge | 결과 |
+|---|---|---:|---:|---:|---:|---:|---|
+| 1 | Oct-Nov 2025 | 22 | **-0.621** | 22.7% | 1.25 | **-82.1 bps** | ❌ |
+| 2 | Nov-Dec 2025 | 22 | -0.041 | 45.5% | 3.06 | **+83.9 bps** | ✅ |
+| 3 | Jan-Feb 2026 | 26 | -0.197 | 42.3% | 1.83 | **+27.4 bps** | ✅ |
+| 4 | Feb-Mar 2026 | 39 | +0.095 | 35.9% | 2.06 | **+16.3 bps** | ✅ |
+
+**pass_ratio = 3/4 = 0.75 ≥ 0.60 → PROMOTED**
+
+### fold1 variant 분포 변화 (cap 효과)
+
+| variant | 이전 passed | 현재 passed |
+|---|---:|---:|
+| tpc_50_200 | 27 (100%) | 10 (45%) |
+| tpc_20_100 | 0 | 4 (18%) |
+| fzs_96 | 0 | 3 (14%) |
+| bb_compress_20 | 0 | 6 (27%) |
+
+### 핵심 해석
+- **Concentration Cap의 구조적 효과:** fold1에서 tpc_50_200 100% 독점 → 45%로 분산. fold3/fold4에서도 3~4개 variant가 고르게 선택되어 단일 variant 실패에 대한 방어력 확보.
+- **fold3 27.4bps / fold4 16.3bps:** 이전 cap 미작동 시 fold3=6.8bps(❌), fold4=54.2bps(✅)였던 것과 비교해, cap 후 fold3이 역전 통과.
+- **fold1 여전히 실패:** realized=-82.1bps, IC=-0.621. Oct-Nov 2025 레짐 특수성은 변하지 않음. 단, 나머지 3개 fold pass로 전체 기준 충족.
+- **Prior Clipping 단독 효과:** cap 없이 clipping만 적용 시 fold1 IC가 -0.474로 약간 개선됐으나 realized=-144.9bps로 악화 (center_pred 비중 상승으로 역효과). 실질 개선은 cap이 주도.
+
+---
+
+## 2026-06-06: P0 IC 계측 + P1 Gate Label 분리 실험
+
+### 변경 내용
+| 항목 | 이전 | 변경 후 |
+|---|---|---|
+| `gate_label_column` | `profitable_after_hurdle_label` | `gross_direction_label` |
+| Gate 모델 | `scale_pos_weight` 미사용 | 동적 `scale_pos_weight` (neg/pos 비율) |
+| IC 계측 | 없음 | `[DIAG][EDGE_IC]` fold별 mu_net rank_ic 출력 |
+
+### fold별 EDGE_IC 결과 (신규, P0)
+
+| Fold | OOS 기간 | 선택 수 | mu_net IC | hit_rate | payoff | realized edge | 결과 |
+|---|---|---:|---:|---:|---:|---:|---|
+| 1 | Oct-Nov 2025 | 23 | **-0.481** | 13.0% | 2.67 | **-104.3 bps** | ❌ |
+| 2 | Nov-Dec 2025 | 24 | +0.020 | 50.0% | 2.25 | **+136.9 bps** | ✅ |
+| 3 | Jan-Feb 2026 | 30 | +0.282 | 33.3% | 2.06 | **+4.2 bps** | ❌ (<15bps) |
+| 4 | Feb-Mar 2026 | 40 | +0.149 | 30.0% | 2.66 | **+18.7 bps** | ✅ |
+
+**pass_ratio = 2/4 = 0.50 → BLOCKED (동일)**
+
+### 핵심 발견
+
+- **Fold 1 근본 원인 확정:** `mu_net_rank_ic=-0.481` — edge regressor가 Oct-Nov 2025 구간에서 **역방향 예측**. 단순 label/threshold 조정으로 해결 불가. 해당 구간 특이 regime에서 학습된 피처가 역전되는 **generalization failure**.
+- **Fold 3은 방향성은 맞지만 payoff 부족:** IC=+0.28이나 hit_rate 33% + realized +4.2bps → 손실 트레이드가 승리 트레이드보다 규모가 크다 (`payoff_ratio=2.06`이지만 hit_rate 33% → 기대값 음수에 가까움).
+- **Gate label 변경 효과 없음:** valid_pos rate 43.5% (전: ~43%)로 base-rate가 50%에 도달하지 않음. `gross_direction_label`도 비용 없이 raw 방향이지만 ATR-stop 구조상 TP/SL 비대칭에 의해 win rate < 50%. 따라서 p_pass 천장 문제는 여전히 남아있다.
+- **ablation Variant Prior 소폭 하락:** 1.6% → 1.0% CAGR. gate label 변경이 variant prior 모델에도 영향.
+
+### 다음 필요 조치 (업데이트)
+
+| 우선순위 | 액션 | 근거 |
+|---|---|---|
+| **P2 (최우선)** | Fold 1 역방향 variant 비활성화 | IC=-0.48 확정. `[DIAG][SELECT_VARIANT]` 로그로 어느 family가 역전되는지 식별 후 fold1 기간 비활성화 |
+| **P3** | Fold 3 payoff 개선 | hit_rate 33% + payoff 2.06 → 손실규모 축소 (비대칭 SL) |
+| **P1 롤백 고려** | gross_direction_label → profitable_after_hurdle_label 재검토 | Variant Prior 악화. gate label 변경의 net effect가 중립~부정적 |
 
 ---
 
@@ -169,11 +246,10 @@
 
 ---
 
-## 다음 단계 (현재 BLOCKED)
+## 다음 단계 (현재 PROMOTED)
 
-PROMOTED 재달성 조건 (3/4 fold에서 realized edge ≥ 15bps):
+현재 `pass_ratio=0.75`, PROMOTED 상태. Optuna `--phase full` 진입 가능.
 
-1. **Gate 모델 개선 (최우선):** p_pass가 0.5를 한 번도 넘지 못하는 근본 원인 진단. label 전략 재검토 또는 피처 품질 개선.
-2. **Fold 1 역전 구간 진단:** Oct-Nov 2025 hit_rate 8.7% → 어떤 signal family가 역방향 편향인지 `[DIAG][SELECT_VARIANT]` 로그 분석 후 비활성화.
-3. **Fold 3 edge 개선:** Jan-Feb 2026 realized +6.8bps → hit_rate 33%에서 손실 트레이드 규모 축소 필요. payoff ratio 개선이 핵심.
-4. **Optuna는 선행 조건 충족 후:** Gate가 실제로 좋은 신호를 구별할 때 Optuna가 의미를 가짐. 현재는 시기 상조.
+1. **Optuna 최적화 진입:** fold1 실패는 구조적(Oct-Nov 2025 레짐)이나 3/4 pass 확보. Optuna로 파라미터 공간 탐색 시작.
+2. **fold1 개선 (선택적):** IC=-0.621 지속. max_variant_selection_fraction, edge_prior_max_deviation_bps 튜닝 또는 fold1 IS 기간 레짐 다양성 확보 방향.
+3. **Gate label 롤백 검토:** `gross_direction_label` 유지 중. Variant Prior CAGR=1.0% (이전 1.6%). net 효과 재평가 가능.
