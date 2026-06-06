@@ -4,12 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
 from src.domain.futures.strategy.candidate_portfolio import (
     _resolve_breakeven_floor,
     _selection_component_frame,
     select_candidate_events_for_portfolio,
 )
-from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
 from src.domain.futures.strategy.common import alignment
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 
@@ -139,11 +139,10 @@ def test_selection_utility_mode_additive_preserves_legacy() -> None:
         events=events, cfg=cfg, gate_mode="off", gate_floor=0.0
     )
 
-    # Assert — additive_drag formula: p_pass*mu - (1-p_pass)*|q10| - turnover_penalty
-    p = events["p_pass"].to_numpy(dtype=np.float64)
+    # Assert — additive_drag formula: mu - |q10| - turnover_penalty
     mu = events["mu_net_decision_bps"].to_numpy(dtype=np.float64)
     q10 = np.clip(events["q10_net_bps"].to_numpy(dtype=np.float64), None, 0.0)
-    expected_eu = p * mu - (1.0 - p) * np.abs(q10) - float(cfg.turnover_penalty)
+    expected_eu = mu - np.abs(q10) - float(cfg.turnover_penalty)
     actual = frame["expected_utility_bps"].to_numpy(dtype=np.float64)
     np.testing.assert_allclose(actual, expected_eu, rtol=1e-9)
 
@@ -205,7 +204,7 @@ def test_production_topk_sorts_by_mu_in_direct_mode() -> None:
     # Candidate B: low mu (+5),  moderate q10 (-20) → additive EU = 0.6*5 - 0.4*20 - 0.5 ≈ -5.5, mu=5
     # Additive would pick B (less negative). Direct mode should pick A (higher mu).
     rng = np.random.default_rng(0)
-    dt = pd.date_range("2026-01-01", periods=2, freq="4h", tz="UTC")
+    dt = pd.DatetimeIndex([pd.Timestamp("2026-01-01T00:00:00Z")] * 2)
     events = pd.DataFrame(
         {
             "datetime": dt,

@@ -140,8 +140,8 @@ def _selection_component_frame(
     frame = events.copy()
     resolved_utility_mode = utility_mode if utility_mode is not None else cfg.selection_utility_mode
     turnover_proxy = _series_or_default(frame, "turnover_proxy", 1.0)
-    prob_adjusted_mu_bps = frame["p_pass"] * frame["mu_net_decision_bps"]
-    downside_drag_bps = (1.0 - frame["p_pass"]) * frame["q10_net_bps"].clip(upper=0.0).abs()
+    prob_adjusted_mu_bps = pd.to_numeric(frame["mu_net_decision_bps"], errors="coerce")
+    downside_drag_bps = frame["q10_net_bps"].clip(upper=0.0).abs()
     turnover_drag_bps = cfg.turnover_penalty * turnover_proxy
     gate_shortfall = np.maximum(0.0, gate_floor - frame["p_pass"].to_numpy(dtype=np.float64, copy=False))
     soft_gate_penalty_bps = gate_shortfall * np.maximum(
@@ -158,8 +158,6 @@ def _selection_component_frame(
     frame["soft_gate_penalty_bps"] = pd.to_numeric(soft_gate_penalty_bps, errors="coerce")
     frame["expected_utility_raw_bps"] = pd.to_numeric(expected_utility_raw_bps, errors="coerce")
     if resolved_utility_mode == "expected_edge_direct":
-        # mu_net is the unconditional E[return] — already incorporates win/loss mix.
-        # p_pass and q10 are demoted to sizing-only roles to avoid double-counting.
         frame["expected_utility_bps"] = pd.to_numeric(frame["mu_net_decision_bps"], errors="coerce")
     else:
         frame["expected_utility_bps"] = pd.to_numeric(expected_utility_bps, errors="coerce")
@@ -871,36 +869,19 @@ def build_candidate_target_weights(
             continue
 
         side = float(row.side)
-        # Normalise expected edge to per-bar scale before Kelly calculation.
-        # mu_net_decision_bps is a per-HORIZON figure; dividing by holding_bars
-        # converts it to per-bar, matching the per-bar variance denominator.
         holding_bars = max(int(getattr(row, "expected_holding_bars", 1)), 1)
-        mu_event_bps = float(row.mu_net_decision_bps)
-        if bool(getattr(cfg, "kelly_use_probability_adjusted_mu", True)):
-            mu_event_bps = float(getattr(row, "p_pass", 1.0)) * mu_event_bps
-        mu_i_per_bar = mu_event_bps * 1e-4 / holding_bars
-
-        # Trailing variance retrieval
-        variance_i = 1e-4  # Default fallback
-        if sigma_3d is not None:
-            # sigma_3d shape is usually [T, N, N] covariance matrix
-            variance_i = float(sigma_3d[t, s_idx, s_idx])
+        risk_unit_bps = max(
+            float(getattr(row, "risk_unit_bps", getattr(cfg, "min_risk_unit_bps", 25.0))),
+            float(getattr(cfg, "min_risk_unit_bps", 25.0)),
+        )
+        if getattr(cfg, "sizing_mode", "stop_risk") == "calibrated_event_kelly":
+            mu_return_r = float(row.mu_net_decision_bps) / max(risk_unit_bps, 1e-12)
+            q10_return_r = float(getattr(row, "q10_net_bps", 0.0)) / max(risk_unit_bps, 1e-12)
+            second_moment = max(mu_return_r * mu_return_r + q10_return_r * q10_return_r, 1e-6)
+            raw_abs_w = cfg.kelly_fraction * max(mu_return_r, 0.0) / second_moment
         else:
-            # Fallback trailing close returns std
-            st = max(0, t - 20)
-            if t > st:
-                ret = np.diff(close_2d[st : t + 1, s_idx]) / np.maximum(close_2d[st:t, s_idx], 1e-12)
-                v = float(np.var(ret))
-                if np.isfinite(v) and v > 1e-12:
-                    variance_i = v
-
-        if bool(getattr(cfg, "kelly_downside_variance_floor_enabled", True)):
-            q10_per_bar = abs(min(float(getattr(row, "q10_net_bps", 0.0)), 0.0)) * 1e-4 / holding_bars
-            downside_var_floor = q10_per_bar * q10_per_bar
-            variance_i = max(variance_i, downside_var_floor)
-        variance_i = max(variance_i, 1e-12)
-        # Fractional Kelly: raw_weight = kelly_fraction * mu_i_per_bar / variance_i
-        raw_w = cfg.kelly_fraction * mu_i_per_bar / variance_i
+            raw_abs_w = float(getattr(cfg, "event_risk_budget", 0.0025)) / max(risk_unit_bps * 1e-4, 1e-12)
+        raw_w = min(float(cfg.max_symbol_weight), raw_abs_w)
 
         # Phase 3: regime-as-size-multiplier.  Applies a continuous regime
         # multiplier at the Kelly weight level before cap projection, so the
