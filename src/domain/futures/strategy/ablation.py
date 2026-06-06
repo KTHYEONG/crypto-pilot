@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
 from src.domain.futures.backtest.engine import FuturesBacktestEngine
 from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput, EdgeSource
@@ -42,9 +43,10 @@ class SignalValidationReport:
     net_edge_bps_mean: float
     net_edge_bps_stress_mean: float
     hit_rate: float
-    ir_t_stat: float
+    hac_t_stat: float
     survives_cost: bool
     deployment_count: int
+    decision_bar_count: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -107,6 +109,58 @@ def _oos_only_events(*, labeled: pd.DataFrame, oos_start: int, oos_end: int) -> 
         return labeled
     entry_idx = pd.to_numeric(labeled["entry_idx"], errors="coerce")
     return labeled.loc[(entry_idx >= oos_start) & (entry_idx < oos_end)].copy()
+
+
+def _stress_edge_bps(
+    *,
+    edge_bps: NDArray[np.float64],
+    base_cost_bps: NDArray[np.float64],
+    stress_multiplier: float,
+) -> NDArray[np.float64]:
+    stress_cost_bps = base_cost_bps * stress_multiplier
+    return edge_bps - (stress_cost_bps - base_cost_bps)
+
+
+def _decision_bar_edge_series(events: pd.DataFrame, edge_column: str) -> NDArray[np.float64]:
+    if events.empty or edge_column not in events.columns or "entry_idx" not in events.columns:
+        return np.zeros((0,), dtype=np.float64)
+    frame = events.copy()
+    frame["_edge"] = pd.to_numeric(frame[edge_column], errors="coerce")
+    frame["_entry_idx"] = pd.to_numeric(frame["entry_idx"], errors="coerce")
+    if "symbol" in frame.columns:
+        grouped = (
+            frame.dropna(subset=["_edge", "_entry_idx"])
+            .groupby(["_entry_idx", "symbol"], sort=True, as_index=False)["_edge"]
+            .mean()
+            .groupby("_entry_idx", sort=True)["_edge"]
+            .mean()
+        )
+    else:
+        grouped = (
+            frame.dropna(subset=["_edge", "_entry_idx"])
+            .groupby("_entry_idx", sort=True)["_edge"]
+            .mean()
+        )
+    return np.asarray(grouped.to_numpy(dtype=np.float64, copy=False), dtype=np.float64)
+
+
+def _newey_west_t_stat(series: NDArray[np.float64], max_lag: int) -> float:
+    finite = np.asarray(series, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    n_obs = finite.size
+    if n_obs < 2:
+        return 0.0
+    mean_val = float(np.mean(finite))
+    centered = finite - mean_val
+    lag = min(max_lag, n_obs - 1)
+    gamma0 = float(np.dot(centered, centered) / n_obs)
+    long_run_var = gamma0
+    for idx in range(1, lag + 1):
+        gamma = float(np.dot(centered[idx:], centered[:-idx]) / n_obs)
+        weight = 1.0 - (idx / (lag + 1))
+        long_run_var += 2.0 * weight * gamma
+    stderr = float(np.sqrt(max(long_run_var, 0.0) / n_obs))
+    return mean_val / (stderr + 1e-12)
 
 
 def _build_calibration_variant_priors(
@@ -967,8 +1021,8 @@ def _run_backtest_and_evaluate(
 
 def validate_candidate_signals(
     *,
-    labeled: pd.DataFrame,
-    diag: RuleDiagnosticsResult,
+    labeled_all: pd.DataFrame,
+    labeled_promoted: pd.DataFrame,
     cfg: CandidateStrategyConfig,
     oos_start: int,
     oos_end: int,
@@ -988,19 +1042,11 @@ def validate_candidate_signals(
         impact_coeff_bps=cfg.impact_coeff_bps,
         stress_multiplier=cfg.cost_stress_multiplier,
     )
-    stress_rt = cost_model.stress_round_trip_bps()
-
     reports: list[SignalValidationReport] = []
 
     for variant_name, events_df in [
-        ("rule_only_equal_size", labeled),
-        ("rule_promo_no_leak", apply_variant_promotions(
-            labeled=labeled,
-            keep_variants=diag.recommended_keep_variants,
-            flip_variants=diag.recommended_flip_variants,
-            keep_signal_cells=diag.recommended_keep_signal_cells,
-            flip_signal_cells=diag.recommended_flip_signal_cells,
-        )),
+        ("rule_only_equal_size", labeled_all),
+        ("rule_promo_no_leak", labeled_promoted),
     ]:
         oos_events = _oos_only_events(labeled=events_df, oos_start=oos_start, oos_end=oos_end)
         n_events = len(oos_events)
@@ -1013,9 +1059,10 @@ def validate_candidate_signals(
                 net_edge_bps_mean=float("nan"),
                 net_edge_bps_stress_mean=float("nan"),
                 hit_rate=0.0,
-                ir_t_stat=0.0,
+                hac_t_stat=0.0,
                 survives_cost=False,
                 deployment_count=0,
+                decision_bar_count=0,
             ))
             continue
 
@@ -1029,35 +1076,37 @@ def validate_candidate_signals(
         if "ex_ante_cost_bps" in oos_events.columns:
             base_cost_arr = oos_events["ex_ante_cost_bps"].to_numpy(dtype=np.float64)
         else:
-            base_cost_arr = np.full(n_events, cost_model.round_trip_bps(), dtype=np.float64)
+            base_cost_arr = np.full(n_events, cost_model.taker_round_trip_bps(), dtype=np.float64)
 
-        finite_mask = np.isfinite(edge_arr)
+        finite_mask = np.isfinite(edge_arr) & np.isfinite(base_cost_arr) & (base_cost_arr >= 0.0)
         finite_edge = edge_arr[finite_mask]
-        # 정직한 stress: gross_minus_hurdle - stress_rt (stress 비용 1회만 적용)
-        stress_mask = finite_mask & np.isfinite(base_cost_arr)
-        net_stress_arr = (edge_arr + base_cost_arr - stress_rt)[stress_mask]
+        net_stress_arr = _stress_edge_bps(
+            edge_bps=edge_arr[finite_mask],
+            base_cost_bps=base_cost_arr[finite_mask],
+            stress_multiplier=cfg.cost_stress_multiplier,
+        )
 
         mean_net = float(np.mean(finite_edge)) if finite_edge.size > 0 else float("nan")
         mean_net_stress = float(np.mean(net_stress_arr)) if net_stress_arr.size > 0 else float("nan")
         net_p50 = float(np.median(finite_edge)) if finite_edge.size > 0 else float("nan")
-        net_stress_p50 = net_p50 - stress_rt if np.isfinite(net_p50) else float("nan")
+        net_stress_p50 = float(np.median(net_stress_arr)) if net_stress_arr.size > 0 else float("nan")
 
         hit_rate = float((finite_edge > 0).mean()) if finite_edge.size > 0 else 0.0
-        if finite_edge.size >= 2:
-            std_val = float(np.std(finite_edge, ddof=1))
-            ir_t = float(np.mean(finite_edge) / (std_val / (finite_edge.size ** 0.5) + 1e-12))
-        else:
-            ir_t = 0.0
+        stress_events = oos_events.loc[finite_mask].copy()
+        stress_events["_stress_edge_bps"] = net_stress_arr
+        decision_bar_edge = _decision_bar_edge_series(stress_events, "_stress_edge_bps")
+        hac_t = _newey_west_t_stat(decision_bar_edge, max_lag=max(0, min(cfg.purge_bars, decision_bar_edge.size - 1)))
+        decision_bar_count = int(decision_bar_edge.size)
 
         if cfg.blend_survival_use_mean:
             survives = (
                 np.isfinite(mean_net_stress)
                 and mean_net_stress > cfg.blend_survival_min_net_stress_bps
-                and ir_t >= cfg.min_rule_ir_t
+                and hac_t >= cfg.min_rule_ir_t
             )
         else:
             # legacy median path (회귀 대비 보존)
-            survives = np.isfinite(net_stress_p50) and net_stress_p50 > 0.0 and ir_t >= cfg.min_rule_ir_t
+            survives = np.isfinite(net_stress_p50) and net_stress_p50 > 0.0 and hac_t >= cfg.min_rule_ir_t
 
         reports.append(SignalValidationReport(
             variant=variant_name,
@@ -1067,9 +1116,10 @@ def validate_candidate_signals(
             net_edge_bps_mean=mean_net,
             net_edge_bps_stress_mean=mean_net_stress,
             hit_rate=hit_rate,
-            ir_t_stat=ir_t,
+            hac_t_stat=hac_t,
             survives_cost=survives,
             deployment_count=int(n_events),
+            decision_bar_count=decision_bar_count,
         ))
 
     return reports
