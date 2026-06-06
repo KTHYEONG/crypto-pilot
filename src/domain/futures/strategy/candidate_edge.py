@@ -104,6 +104,9 @@ def _build_variant_priors(
         variant_mean = _weighted_mean(variant_values, variant_weights)
         shrink = obs / (obs + shrinkage_obs)
         prior = float(shrink * variant_mean + (1.0 - shrink) * global_prior)
+        max_dev = float(getattr(cfg, "edge_prior_max_deviation_bps", float("inf")))
+        if np.isfinite(max_dev) and max_dev > 0.0:
+            prior = float(np.clip(prior, global_prior - max_dev, global_prior + max_dev))
         variant_prior_bps[key] = prior
         row_priors[indexer] = prior
 
