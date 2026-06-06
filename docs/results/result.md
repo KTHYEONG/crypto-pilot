@@ -1,10 +1,9 @@
 # Mode Full (ML) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-06 (Prior Clipping + Variant Concentration Cap → **PROMOTED** 재달성. pass_ratio=0.75)  
-**이전 기준:** 2026-06-06 (P0 IC 계측 + P1 gate label 분리 실험 → BLOCKED 유지. fold1 IC=-0.48 확정)  
-**현재 기본 모드:** `expected_edge_direct` (production default, 검증 완료)  
+**최신 갱신:** 2026-06-06 (`phase ml` 최신 실행 → `blocked`, `pass_ratio=0.50`)
+**현재 기본 모드:** `expected_edge_direct`
 **평가 기준:** `min_fold_realized_edge_bps=15.0`, `min_cagr_for_promotion=0.15`  
-**gate_label_column:** `gross_direction_label` (변경됨, 이전: `profitable_after_hurdle_label`)
+**gate_label_column:** `profitable_after_hurdle_label`
 
 ---
 
@@ -14,17 +13,15 @@
 [WINDOW] 2022-10-01 ~ 2026-03-31 | IS: 2023-10-01 | OOS: 2025-10-01
 [UNIVERSE] 94개 심볼 발견
 [PIPELINE] raw=272819 labeled=6350 promoted=6350 fit=9869 cal=9165 oos=2355 n_folds=4 wf_scheme=anchored
-[BRIDGE][WF] fold_cost_survival=[False, True, True, True] pass_ratio=0.75 min_required=0.60
-[BRIDGE SUMMARY] Active Signals 104 (sel=104) | Status PROMOTED
-[BRIDGE SUMMARY][DIAG] selected_total=104 eligible_total=1144 selected_pre_group=115 policy=utility_topk zero_reason=selected_nonzero gate_p50=0.4136 gate_p90=0.4781 mu_p50=27.8 mu_p90=49.1 q10_p10=-400.5 utility_p50=27.786 utility_p90=49.067 breakeven_floor=3.8
-[BRIDGE SUMMARY][WF_DIAG] wf_selected=109 wf_eligible=1144 shadow=expected_edge_direct:off:0.00:-50.0:0.00 shadow_selected=24 shadow_realized=136.894 eu_p90=50.638 downside_p90=228.095
+[BRIDGE][WF] fold_cost_survival=[False, True, False, True] pass_ratio=0.50 min_required=0.60
+[BRIDGE SUMMARY] Active Signals 0 (sel=0) | Status blocked
+[BRIDGE SUMMARY][DIAG] selected_total=0 eligible_total=0 selected_pre_group=0 policy=utility_topk zero_reason=wf_fold_pass_ratio_fail gate_p50=nan gate_p90=nan mu_p50=nan mu_p90=nan q10_p10=nan utility_p50=nan utility_p90=nan breakeven_floor=nan
+[BRIDGE SUMMARY][WF_DIAG] wf_selected=671 wf_eligible=1676 shadow=expected_edge_direct:hard_floor:0.40:-50.0:0.00 shadow_selected=34 shadow_realized=92.198 eu_p90=81.787 downside_p90=222.561
 ```
 
 ---
 
 ## 백테스트 성과 (OOS)
-
-*(이전 실행 — BLOCKED 시점 기준, 갱신 보류)*
 
 | Model | CAGR | MaxDD | MAR | Equity | Trades | Deploy | Pass |
 |---|---:|---:|---:|---:|---:|---:|---|
@@ -32,18 +29,38 @@
 | Rule Promo NL | -14.1% | 16.0% | -0.88 | 913,690 | 402 | 0.64 | N |
 | Rule Promo Oracle | 2.6% | 3.6% | 0.71 | 1,015,037 | 182 | 0.17 | N |
 | Kelly (No ML) | -0.1% | 0.4% | 0.00 | 997,350 | 2149 | 0.66 | N |
-| ML Gate | 0.0% | 0.7% | 0.00 | 1,000,683 | 102 | 0.13 | N |
-| ML Gate+Edge | -1.3% | 9.9% | -0.13 | 961,599 | 86 | 0.01 | N |
-| ML Full (Capped) | 0.0% | 0.7% | 0.00 | 1,000,840 | 101 | 0.13 | N |
-| Cand. ML | 0.2% | 0.6% | 0.00 | 1,001,170 | 101 | 0.68 | N |
-| Direct Edge | -0.3% | 0.5% | 0.00 | 998,385 | 129 | 0.41 | N |
-| Variant Prior | 1.0% | 0.5% | 0.00 | 1,005,959 | 137 | 0.32 | N |
-| Promo Filter | -0.4% | 1.1% | -0.41 | 997,368 | 620 | 1.00 | N |
-| Val. Selection | -0.0% | 0.0% | 0.00 | 999,892 | 11 | 0.05 | N |
-| Identity Feat | 0.2% | 0.6% | 0.00 | 1,001,365 | 99 | 0.69 | N |
-| Market Feat | 0.1% | 0.5% | 0.00 | 1,000,349 | 108 | 0.73 | N |
+| ML Gate | -0.1% | 0.7% | 0.00 | 997,627 | 462 | 0.18 | N |
+| ML Gate+Edge | -15.7% | 41.9% | -0.37 | 599,815 | 414 | 0.10 | N |
+| ML Full (Capped) | -0.1% | 0.7% | 0.00 | 996,383 | 462 | 0.18 | N |
+| Cand. ML | -0.1% | 0.5% | 0.00 | 999,508 | 462 | 0.91 | N |
+| Direct Edge | 0.0% | 0.5% | 0.00 | 1,000,196 | 497 | 0.89 | N |
+| Variant Prior | -0.5% | 1.4% | -0.37 | 997,052 | 449 | 0.85 | N |
+| Promo Filter | -1.2% | 1.4% | -0.86 | 992,691 | 632 | 1.00 | N |
+| Val. Selection | 0.0% | 0.0% | 0.00 | 1,000,000 | 0 | 0.00 | N |
+| Identity Feat | -0.2% | 0.5% | 0.00 | 998,851 | 454 | 0.91 | N |
+| Market Feat | -0.2% | 0.5% | 0.00 | 998,834 | 467 | 0.91 | N |
 
 ---
+
+## 2026-06-06: mode ml 최신 실행
+
+### 실행 결과
+- `fold_cost_survival=[False, True, False, True]`
+- `pass_ratio=0.50 < 0.60`
+- `Status=blocked`
+- `Active Signals=0`
+- `zero_reason=wf_fold_pass_ratio_fail`
+
+### 해석
+- `wf_fold_pass_ratio` 기준에서 4개 fold 중 2개만 통과
+- OOS 전체에서 non-zero selection은 존재했지만, 최종 배포 상태로 승격되지 않음
+- `candidate_ml`, `Direct Edge`, `Variant Prior` 모두 ablation 기준에서 deploy pass를 만족하지 못함
+
+### 검증 요약
+- `uv run pytest tests/unit/domain/futures/strategy/test_candidate_dataset.py tests/unit/domain/futures/strategy/test_candidate_gate.py tests/unit/domain/futures/strategy/test_candidate_edge.py tests/unit/domain/futures/strategy/test_candidate_portfolio.py tests/unit/domain/futures/strategy/test_ablation.py tests/unit/domain/futures/strategy_runtime/test_bridge.py tests/unit/execution/test_opt_main_futures_strategy_mode.py --tb=short`
+  - `66 passed`
+- `uv run pytest tests/e2e/test_cli_modes.py --tb=short`
+  - `6 passed`
 
 ## 2026-06-06: Prior Clipping + Variant Concentration Cap → **PROMOTED**
 
