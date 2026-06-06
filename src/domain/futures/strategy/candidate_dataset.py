@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -8,6 +9,8 @@ from numpy.typing import NDArray
 
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -25,7 +28,20 @@ class CandidateDataset:
     event_index: pd.DataFrame
     feature_names: tuple[str, ...]
     effective_sample_size: float = 0.0
-    feature_schema_version: str = "candidate_v4"
+    feature_schema_version: str = "candidate_v5"
+    y_return_r: NDArray[np.float32] | None = None
+    y_return_bps: NDArray[np.float32] | None = None
+    y_mae_r: NDArray[np.float32] | None = None
+    risk_unit_bps: NDArray[np.float32] | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class CandidateFeatureSchema:
+    """Train-fit feature schema contract for candidate datasets."""
+
+    feature_names: tuple[str, ...]
+    identity_categories: tuple[str, ...]
+    version: str = "candidate_v5"
 
 
 def _find_symbol_index(symbols: tuple[str, ...], symbol: str) -> int:
@@ -106,15 +122,9 @@ def _ordered_identity_feature_names(
     if "family" in labeled_events.columns:
         families = sorted({str(value) for value in labeled_events["family"].dropna().astype(str) if value})
         names.extend(f"family={family}" for family in families)
-    if {"family", "variant"}.issubset(labeled_events.columns):
-        variants = sorted(
-            {
-                _stable_variant_key(str(row.family), str(row.variant))
-                for row in labeled_events.loc[:, ["family", "variant"]].itertuples(index=False)
-                if str(row.family) and str(row.variant)
-            }
-        )
-        names.extend(f"variant={variant}" for variant in variants)
+    if "archetype" in labeled_events.columns:
+        archetypes = sorted({str(value) for value in labeled_events["archetype"].dropna().astype(str) if value})
+        names.extend(f"archetype={archetype}" for archetype in archetypes)
     names.extend(("side_is_long", "side_is_short"))
     return tuple(names)
 
@@ -143,7 +153,9 @@ def _market_state_feature_names(cfg: CandidateStrategyConfig) -> tuple[str, ...]
     )
 
 
-def _universe_feature_names() -> tuple[str, ...]:
+def _universe_feature_names(cfg: CandidateStrategyConfig) -> tuple[str, ...]:
+    if not cfg.static_universe_features_enabled:
+        return ()
     return (
         "universe_vol_30d",
         "universe_friction_score",
@@ -157,28 +169,9 @@ def _universe_feature_names() -> tuple[str, ...]:
     )
 
 
-def build_candidate_dataset(
-    *,
-    labeled_events: pd.DataFrame,
-    aligned: AlignedMarketData,
-    cfg: CandidateStrategyConfig,
-    split_start: int,
-    split_end: int,
-    require_label_within_split: bool = True,
-) -> CandidateDataset:
-    """Build model matrix for candidate gate and edge models.
-
-    Fully vectorized implementation for high performance.
-    """
-    if split_end <= split_start:
-        raise ValueError("split_end must be greater than split_start")
-
-    id_feat_names = _ordered_identity_feature_names(labeled_events, cfg=cfg)
-    mkt_feat_names = _market_state_feature_names(cfg)
-    uni_feat_names = _universe_feature_names()
-
+def _base_feature_names(cfg: CandidateStrategyConfig) -> tuple[str, ...]:
     exclude_leaky = bool(getattr(cfg, "exclude_immediate_return_features", False))
-    base_feat_names_list = [
+    names = [
         "side",
         "raw_score",
         "score_z",
@@ -190,22 +183,62 @@ def build_candidate_dataset(
         "take_profit_atr_mult",
     ]
     if not exclude_leaky:
-        base_feat_names_list.append("sym_ret_1")
-    base_feat_names_list.extend([
-        "sym_ret_5",
-        "sym_vol_20",
-        "sym_volume_z20",
-    ])
+        names.append("sym_ret_1")
+    names.extend(["sym_ret_5", "sym_vol_20", "sym_volume_z20"])
     if not exclude_leaky:
-        base_feat_names_list.append("mkt_ret_1")
-    base_feat_names_list.extend([
-        "mkt_vol_20",
-        "mkt_dispersion_20",
-        "ex_ante_cost_bps",
-        "funding_z20",
-    ])
-    base_feat_names = tuple(base_feat_names_list)
-    feature_names = base_feat_names + uni_feat_names + mkt_feat_names + id_feat_names
+        names.append("mkt_ret_1")
+    names.extend(["mkt_vol_20", "mkt_dispersion_20", "ex_ante_cost_bps", "funding_z20"])
+    return tuple(names)
+
+
+def fit_candidate_feature_schema(
+    *,
+    labeled_events: pd.DataFrame,
+    cfg: CandidateStrategyConfig,
+    split_start: int,
+    split_end: int,
+) -> CandidateFeatureSchema:
+    """Fit a feature schema from the train split only."""
+    mask = (labeled_events["entry_idx"] >= split_start) & (labeled_events["entry_idx"] < split_end)
+    events = labeled_events.loc[mask].copy()
+    base_feat_names = _base_feature_names(cfg)
+    uni_feat_names = _universe_feature_names(cfg)
+    mkt_feat_names = _market_state_feature_names(cfg)
+    id_feat_names = _ordered_identity_feature_names(events, cfg=cfg)
+    return CandidateFeatureSchema(
+        feature_names=base_feat_names + uni_feat_names + mkt_feat_names + id_feat_names,
+        identity_categories=id_feat_names,
+    )
+
+
+def build_candidate_dataset(
+    *,
+    labeled_events: pd.DataFrame,
+    aligned: AlignedMarketData,
+    cfg: CandidateStrategyConfig,
+    schema: CandidateFeatureSchema | None = None,
+    split_start: int,
+    split_end: int,
+    require_label_within_split: bool = True,
+) -> CandidateDataset:
+    """Build model matrix for candidate gate and edge models.
+
+    Fully vectorized implementation for high performance.
+    """
+    if split_end <= split_start:
+        raise ValueError("split_end must be greater than split_start")
+
+    active_schema = schema or fit_candidate_feature_schema(
+        labeled_events=labeled_events,
+        cfg=cfg,
+        split_start=split_start,
+        split_end=split_end,
+    )
+    base_feat_names = _base_feature_names(cfg)
+    uni_feat_names = _universe_feature_names(cfg)
+    id_feat_names = active_schema.identity_categories
+    feature_names = active_schema.feature_names
+    exclude_leaky = bool(getattr(cfg, "exclude_immediate_return_features", False))
 
     mask = (labeled_events["entry_idx"] >= split_start) & (labeled_events["entry_idx"] < split_end)
     if require_label_within_split:
@@ -228,6 +261,11 @@ def build_candidate_dataset(
             event_index=events,
             feature_names=feature_names,
             effective_sample_size=0.0,
+            feature_schema_version=active_schema.version,
+            y_return_r=np.zeros((0,), dtype=np.float32),
+            y_return_bps=np.zeros((0,), dtype=np.float32),
+            y_mae_r=np.zeros((0,), dtype=np.float32),
+            risk_unit_bps=np.zeros((0,), dtype=np.float32),
         )
 
     # Pre-calculate features
@@ -310,45 +348,46 @@ def build_candidate_dataset(
 
     # 4. Identity Features
     id_matrix: NDArray[np.float32] | None = None
-    if cfg.candidate_identity_features_enabled:
+    if cfg.candidate_identity_features_enabled and len(id_feat_names) > 0:
         id_matrix = np.zeros((len(events), len(id_feat_names)), dtype=np.float32)
         if "family" in events.columns:
             for i, name in enumerate(id_feat_names):
                 if name.startswith("family="):
                     fam = name.split("=", 1)[1]
                     id_matrix[:, i] = (events["family"].astype(str) == fam).astype(float)
-        if "family" in events.columns and "variant" in events.columns:
-            v_keys = events.apply(lambda r: _stable_variant_key(str(r.family), str(r.variant)), axis=1)
+        if "archetype" in events.columns:
             for i, name in enumerate(id_feat_names):
-                if name.startswith("variant="):
-                    var = name.split("=", 1)[1]
-                    id_matrix[:, i] = (v_keys == var).astype(float)
-        long_idx = id_feat_names.index("side_is_long")
-        short_idx = id_feat_names.index("side_is_short")
-        id_matrix[:, long_idx] = (events["side"] > 0).astype(float)
-        id_matrix[:, short_idx] = (events["side"] < 0).astype(float)
+                if name.startswith("archetype="):
+                    archetype = name.split("=", 1)[1]
+                    id_matrix[:, i] = (events["archetype"].astype(str) == archetype).astype(float)
+        long_idx = id_feat_names.index("side_is_long") if "side_is_long" in id_feat_names else -1
+        short_idx = id_feat_names.index("side_is_short") if "side_is_short" in id_feat_names else -1
+        if long_idx >= 0:
+            id_matrix[:, long_idx] = (events["side"] > 0).astype(float)
+        if short_idx >= 0:
+            id_matrix[:, short_idx] = (events["side"] < 0).astype(float)
 
     # 5. Universe Features
     uni_matrix = np.zeros((len(events), len(uni_feat_names)), dtype=np.float32)
     sym_to_idx = {s: i for i, s in enumerate(aligned.symbols)}
     event_sym_idxs = events["symbol"].map(sym_to_idx).values
-    if aligned.vol_30d_1d is not None:
+    if len(uni_feat_names) > 0 and aligned.vol_30d_1d is not None:
         uni_matrix[:, 0] = aligned.vol_30d_1d[event_sym_idxs]
-    if aligned.friction_score_1d is not None:
+    if len(uni_feat_names) > 1 and aligned.friction_score_1d is not None:
         uni_matrix[:, 1] = aligned.friction_score_1d[event_sym_idxs]
-    if aligned.alpha_capacity_score_1d is not None:
+    if len(uni_feat_names) > 2 and aligned.alpha_capacity_score_1d is not None:
         uni_matrix[:, 2] = aligned.alpha_capacity_score_1d[event_sym_idxs]
-    if aligned.diversification_score_1d is not None:
+    if len(uni_feat_names) > 3 and aligned.diversification_score_1d is not None:
         uni_matrix[:, 3] = aligned.diversification_score_1d[event_sym_idxs]
-    if aligned.tradeable_score_1d is not None:
+    if len(uni_feat_names) > 4 and aligned.tradeable_score_1d is not None:
         uni_matrix[:, 4] = aligned.tradeable_score_1d[event_sym_idxs]
-    if aligned.cluster_id_1d is not None:
+    if len(uni_feat_names) > 5 and aligned.cluster_id_1d is not None:
         uni_matrix[:, 5] = aligned.cluster_id_1d[event_sym_idxs]
-    if aligned.beta_vs_market_1d is not None:
+    if len(uni_feat_names) > 6 and aligned.beta_vs_market_1d is not None:
         uni_matrix[:, 6] = aligned.beta_vs_market_1d[event_sym_idxs]
-    if aligned.cluster_size_1d is not None:
+    if len(uni_feat_names) > 7 and aligned.cluster_size_1d is not None:
         uni_matrix[:, 7] = aligned.cluster_size_1d[event_sym_idxs]
-    if aligned.anchor_cluster_1d is not None:
+    if len(uni_feat_names) > 8 and aligned.anchor_cluster_1d is not None:
         uni_matrix[:, 8] = aligned.anchor_cluster_1d[event_sym_idxs]
 
     # 6. Assembly
@@ -457,27 +496,39 @@ def build_candidate_dataset(
             event_index=kept_events,
             feature_names=feature_names,
             effective_sample_size=0.0,
+            feature_schema_version=active_schema.version,
+            y_return_r=np.zeros((0,), dtype=np.float32),
+            y_return_bps=np.zeros((0,), dtype=np.float32),
+            y_mae_r=np.zeros((0,), dtype=np.float32),
+            risk_unit_bps=np.zeros((0,), dtype=np.float32),
         )
 
     gate_label_col = cfg.gate_label_column
     if gate_label_col not in kept_events.columns:
         raise ValueError(f"missing configured gate label column: {gate_label_col}")
     y_gate = kept_events[gate_label_col].to_numpy(dtype=np.int8, copy=False)
-    y_edge = kept_events["edge_after_hurdle_bps"].to_numpy(dtype=np.float32, copy=False)
-    cost_hurdle = _target_cost_hurdle_bps(kept_events)
-    mae_raw = kept_events["mae_bps"].to_numpy(dtype=np.float32, copy=False)
-    # RC3: clip paper-MAE to the realizable stop-loss level so the q10 model learns
-    # the bounded worst-case, not the unbounded close-based paper drawdown.
-    # mae_bps is negative (min path return); -sl_thr_bps is also negative; max() is
-    # "less negative" = the stop-bounded floor.
-    if bool(getattr(cfg, "q10_bound_to_stop", True)) and "sl_thr_bps" in kept_events.columns:
-        sl_thr_raw = kept_events["sl_thr_bps"].to_numpy(dtype=np.float32, copy=False)
-        mae_raw = np.maximum(mae_raw, -sl_thr_raw)
-    y_q10 = np.minimum(
-        mae_raw - cost_hurdle,
-        y_edge,
+    y_return_bps = kept_events.get("net_event_bps", kept_events["edge_after_hurdle_bps"]).to_numpy(
+        dtype=np.float32,
+        copy=False,
     )
-    y_mfe = kept_events["mfe_bps"].to_numpy(dtype=np.float32, copy=False) - cost_hurdle
+    min_risk_unit = np.float32(getattr(cfg, "min_risk_unit_bps", 25.0))
+    if "risk_unit_bps" in kept_events.columns:
+        risk_unit = kept_events["risk_unit_bps"].to_numpy(dtype=np.float32, copy=False)
+    elif "sl_thr_bps" in kept_events.columns:
+        risk_unit = kept_events["sl_thr_bps"].to_numpy(dtype=np.float32, copy=False)
+    else:
+        risk_unit = np.full((kept_events.shape[0],), min_risk_unit, dtype=np.float32)
+    risk_unit = np.maximum(risk_unit, min_risk_unit)
+    if "net_return_r" in kept_events.columns:
+        y_return_r = kept_events["net_return_r"].to_numpy(dtype=np.float32, copy=False)
+    else:
+        y_return_r = (y_return_bps / np.maximum(risk_unit, 1e-6)).astype(np.float32, copy=False)
+    if "mae_r" in kept_events.columns:
+        y_mae_r = kept_events["mae_r"].to_numpy(dtype=np.float32, copy=False)
+    else:
+        mae_raw = kept_events["mae_bps"].to_numpy(dtype=np.float32, copy=False)
+        y_mae_r = (mae_raw / np.maximum(risk_unit, 1e-6)).astype(np.float32, copy=False)
+    legacy_return_bps = (y_return_r * risk_unit).astype(np.float32, copy=False)
     uniqueness_weight, effective_sample_size = _event_uniqueness_weights(
         entry_idx=kept_events["entry_idx"].to_numpy(dtype=np.int32, copy=False),
         exit_idx=kept_events["exit_idx"].to_numpy(dtype=np.int32, copy=False),
@@ -488,13 +539,18 @@ def build_candidate_dataset(
     return CandidateDataset(
         X=x_final,
         y_gate=y_gate,
-        y_edge_bps=y_edge,
-        y_q10_bps=y_q10.astype(np.float32, copy=False),
-        y_mfe_bps=y_mfe,
+        y_edge_bps=legacy_return_bps,
+        y_q10_bps=legacy_return_bps,
+        y_mfe_bps=legacy_return_bps,
         gate_weight=uniqueness_weight,
         edge_weight=uniqueness_weight.copy(),
         groups=groups_final,
         event_index=kept_events.reset_index(drop=True),
         feature_names=feature_names,
         effective_sample_size=effective_sample_size,
+        feature_schema_version=active_schema.version,
+        y_return_r=y_return_r.astype(np.float32, copy=False),
+        y_return_bps=y_return_bps.astype(np.float32, copy=False),
+        y_mae_r=y_mae_r.astype(np.float32, copy=False),
+        risk_unit_bps=risk_unit.astype(np.float32, copy=False),
     )

@@ -407,7 +407,7 @@ def test_build_candidate_target_weights_applies_kelly_and_caps() -> None:
     assert abs(np.sum(target_weights[10])) <= 0.3
 
 
-def test_build_candidate_target_weights_scales_down_when_probability_or_q10_worsens(
+def test_build_candidate_target_weights_uses_stop_risk_and_kelly_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -423,6 +423,7 @@ def test_build_candidate_target_weights_scales_down_when_probability_or_q10_wors
             "p_pass": [0.4, 0.8],
             "mu_net_decision_bps": [40.0, 40.0],
             "q10_net_bps": [-5.0, -5.0],
+            "risk_unit_bps": [400.0, 100.0],
             "utility_score": [10.0, 10.0],
         }
     )
@@ -435,6 +436,7 @@ def test_build_candidate_target_weights_scales_down_when_probability_or_q10_wors
             "p_pass": [0.8, 0.8],
             "mu_net_decision_bps": [40.0, 40.0],
             "q10_net_bps": [-5.0, -1000.0],
+            "risk_unit_bps": [100.0, 100.0],
             "utility_score": [10.0, 10.0],
         }
     )
@@ -444,6 +446,15 @@ def test_build_candidate_target_weights_scales_down_when_probability_or_q10_wors
     sigma_3d[:, 0, 0] = 1e-8
     sigma_3d[:, 1, 1] = 1e-8
     cfg = CandidateStrategyConfig(
+        kelly_fraction=0.1,
+        max_symbol_weight=10.0,
+        gross_cap=20.0,
+        net_cap=20.0,
+        beta_cap=20.0,
+        target_ann_vol=10.0,
+    )
+    cfg_kelly = CandidateStrategyConfig(
+        sizing_mode="calibrated_event_kelly",
         kelly_fraction=0.1,
         max_symbol_weight=10.0,
         gross_cap=20.0,
@@ -466,7 +477,7 @@ def test_build_candidate_target_weights_scales_down_when_probability_or_q10_wors
         symbols=symbols,
         beta_2d=None,
         sigma_3d=sigma_3d,
-        cfg=cfg,
+        cfg=cfg_kelly,
     )
 
     assert prob_weights[10, 1] > prob_weights[10, 0]
