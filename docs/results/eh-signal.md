@@ -57,7 +57,7 @@ Huber regression이 이 잡음 패턴을 학습 → OOS residual 예측을 왜�
 - **SL**: ATR 기반 동적 설정 (진입 시점 기준)
 - **TP**: ATR × TP/SL ratio
 - **Time Exit**: `entry_idx + expected_holding_bars`의 next-open 가격 (close 미사용 → look-ahead 방지)
-- **비용 모델**: RT=7.5bps (maker_fee=2bps×0.75 + taker_fee=5bps×0.25 + slippage=1bps), stress=11.25bps
+- **비용 모델**: baseline floor는 7.5bps지만 label 단계에서는 `max(dynamic_cost, taker_round_trip_bps)`를 사용한다. signal stress는 고정 11.25bps 대체가 아니라 `stress_multiplier × ex_ante_cost_bps`를 event별로 적용해야 한다.
 - **구조적 비대칭**: ATR SL < TP → base hit_rate < 50% (≈43%) → gate binary classification 상한 구조적으로 0.496
 
 ---
@@ -73,9 +73,11 @@ Huber regression이 이 잡음 패턴을 학습 → OOS residual 예측을 왜�
 
 ---
 
-## 현재 상태 (2026-06-06)
+## 현재 상태 (2026-06-06, integrity fix 후)
 
 - Signal Pre-Qual 구현 완료 및 동작 확인
-- Shadow signal 품질은 존재: `shadow_realized=114~237bps`
-- 병목: ML feature가 cross-sectional 순위 예측 불가 (rank_ic < 0.02 전 fold)
-- 다음: Feature Engineering으로 진입 시점 momentum, variant rolling IC 등 추가
+- raw baseline과 promoted signal을 분리해서 봐야 함:
+  - `rule_only_equal_size`: `n=111101`, `decision_bars=1296`, `mean=8.9bps`, `stress_mean=2.9bps`, `hac_t=0.12` → FAIL
+  - `rule_promo_no_leak`: `n=2355`, `decision_bars=831`, `mean=12.9bps`, `stress_mean=6.9bps`, `hac_t=1.42` → PASS
+- 따라서 "signal 전체가 강하다"가 아니라 "promotion된 subset만 marginally survivable"가 더 정확한 해석이다.
+- shadow profile의 realized 결과는 OOS profile search 산물이므로 진단 전용이다.

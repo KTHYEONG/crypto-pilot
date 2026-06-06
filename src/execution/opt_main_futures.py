@@ -674,14 +674,14 @@ def _run_strategy_stage(
     )
     _logger.info(
         (
-            "[BRIDGE SUMMARY][WF_DIAG] wf_selected=%s wf_eligible=%s shadow=%s shadow_selected=%s "
-            "shadow_realized=%.3f eu_p90=%.3f downside_p90=%.3f"
+            "[BRIDGE SUMMARY][WF_DIAG] wf_selected=%s wf_eligible=%s shadow_profiles=%s "
+            "shadow_max_selected=%s shadow_max_eligible=%s eu_p90=%.3f downside_p90=%.3f"
         ),
         candidate_report.get("wf_selected_total", 0),
         candidate_report.get("wf_eligible_total", 0),
-        candidate_report.get("wf_best_shadow_profile", ""),
-        candidate_report.get("wf_best_shadow_selected_total", 0),
-        float(candidate_report.get("wf_best_shadow_realized_mean_bps", float("nan"))),
+        candidate_report.get("wf_shadow_profile_count", 0),
+        candidate_report.get("wf_shadow_max_selected_total", 0),
+        candidate_report.get("wf_shadow_max_eligible", 0),
         float(candidate_report.get("wf_waterfall_expected_utility_p90_bps", float("nan"))),
         float(candidate_report.get("wf_waterfall_downside_drag_p90_bps", float("nan"))),
     )
@@ -704,19 +704,21 @@ def _run_strategy_stage(
     if isinstance(candidate_report_ref, dict) and candidate_report_ref.get("zero_reason") == "signal_only_mode":
         sv_list = candidate_report_ref.get("signal_validation", [])
         header_sv = (
-            f"| {'Variant':<28} | {'n':<5} | {'net_p50':>8} | {'stress_p50':>10} | {'t':>5} | {'pass':>4} |"
+            f"| {'Variant':<28} | {'events':<6} | {'bars':<5} | {'net_p50':>8} | "
+            f"{'stress_p50':>10} | {'hit':>5} | {'hac_t':>6} | {'pass':>4} |"
         )
         _logger.info("\n[SIGNAL-VALIDATION] " + "-" * (len(header_sv) - 20))
         _logger.info(header_sv)
         for sv in sv_list:
             _logger.info(
-                "| %-30s | %5d | %8.1f | %10.1f | %5.3f | %5.2f | %5s |",
+                "| %-30s | %6d | %5d | %8.1f | %10.1f | %5.3f | %6.2f | %5s |",
                 sv.get("variant", "?")[:30],
                 sv.get("n_events", 0),
+                sv.get("decision_bar_count", 0),
                 sv.get("net_edge_bps_p50", float("nan")),
                 sv.get("net_edge_bps_stress_p50", float("nan")),
                 sv.get("hit_rate", 0.0),
-                sv.get("ir_t_stat", 0.0),
+                sv.get("hac_t_stat", 0.0),
                 "PASS" if sv.get("survives_cost") else "FAIL",
             )
         _logger.info("[SIGNAL-VALIDATION] overall_pass=%s", candidate_report_ref.get("signal_validation_pass"))

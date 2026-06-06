@@ -623,5 +623,6 @@ def test_bridge_reports_shadow_profile_when_production_selection_stays_blocked(m
 
     assert result.rule_report is not None
     assert result.rule_report["selected_total"] == 0
-    assert result.rule_report["wf_best_shadow_selected_total"] > 0
+    assert result.rule_report["wf_shadow_profile_count"] > 0
+    assert result.rule_report["wf_shadow_max_selected_total"] > 0
     assert result.rule_report["zero_reason"] == "wf_fold_pass_ratio_fail"

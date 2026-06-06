@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -474,15 +474,6 @@ def _make_signal_labeled(edge_bps: list[float], *, cost_bps: float = 7.5) -> pd.
     )
 
 
-def _signal_diag() -> SimpleNamespace:
-    return SimpleNamespace(
-        recommended_keep_variants=("trend_ma:tma_1",),
-        recommended_flip_variants=(),
-        recommended_keep_signal_cells=(),
-        recommended_flip_signal_cells=(),
-    )
-
-
 def _stress_rt() -> float:
     return ExecutionCostModel().stress_round_trip_bps()  # 11.25
 
@@ -494,7 +485,7 @@ def test_validate_candidate_signals_stress_mean_avoids_cost_double_counting() ->
 
     # Act
     reports = validate_candidate_signals(
-        labeled=labeled, diag=cast(Any, _signal_diag()), cfg=cfg, oos_start=0, oos_end=100
+        labeled_all=labeled, labeled_promoted=labeled, cfg=cfg, oos_start=0, oos_end=100
     )
 
     # Assert: honest stress = mean(edge) + base_cost - stress_rt = 25 + 7.5 - 11.25 = 21.25
@@ -503,6 +494,7 @@ def test_validate_candidate_signals_stress_mean_avoids_cost_double_counting() ->
     assert rule_only.net_edge_bps_mean == pytest.approx(25.0)
     assert rule_only.net_edge_bps_stress_mean == pytest.approx(25.0 + 7.5 - _stress_rt())
     assert rule_only.net_edge_bps_stress_mean != pytest.approx(25.0 - _stress_rt())
+    assert rule_only.decision_bar_count == 4
 
 
 def test_validate_candidate_signals_mean_path_survives_skewed_payoff() -> None:
@@ -512,7 +504,7 @@ def test_validate_candidate_signals_mean_path_survives_skewed_payoff() -> None:
 
     # Act
     reports = validate_candidate_signals(
-        labeled=labeled, diag=cast(Any, _signal_diag()), cfg=cfg, oos_start=0, oos_end=100
+        labeled_all=labeled, labeled_promoted=labeled, cfg=cfg, oos_start=0, oos_end=100
     )
 
     # Assert: mean rescues skew where median would reject (p50<0<mean).
@@ -528,7 +520,7 @@ def test_validate_candidate_signals_legacy_median_path_blocks_skewed_payoff() ->
 
     # Act
     reports = validate_candidate_signals(
-        labeled=labeled, diag=cast(Any, _signal_diag()), cfg=cfg, oos_start=0, oos_end=100
+        labeled_all=labeled, labeled_promoted=labeled, cfg=cfg, oos_start=0, oos_end=100
     )
 
     # Assert: median-stress (-10 - 11.25 < 0) blocks the skewed-but-profitable variant.
@@ -543,7 +535,7 @@ def test_validate_candidate_signals_blocks_when_mean_net_stress_negative() -> No
 
     # Act
     reports = validate_candidate_signals(
-        labeled=labeled, diag=cast(Any, _signal_diag()), cfg=cfg, oos_start=0, oos_end=100
+        labeled_all=labeled, labeled_promoted=labeled, cfg=cfg, oos_start=0, oos_end=100
     )
 
     # Assert
@@ -559,7 +551,7 @@ def test_validate_candidate_signals_empty_oos_reports_not_survived() -> None:
 
     # Act: OOS window starts past all entry_idx values.
     reports = validate_candidate_signals(
-        labeled=labeled, diag=cast(Any, _signal_diag()), cfg=cfg, oos_start=500, oos_end=600
+        labeled_all=labeled, labeled_promoted=labeled, cfg=cfg, oos_start=500, oos_end=600
     )
 
     # Assert
@@ -567,3 +559,23 @@ def test_validate_candidate_signals_empty_oos_reports_not_survived() -> None:
     assert rule_only.n_events == 0
     assert rule_only.survives_cost is False
     assert np.isnan(rule_only.net_edge_bps_stress_mean)
+
+
+def test_validate_candidate_signals_raw_and_promoted_are_distinct() -> None:
+    cfg = CandidateStrategyConfig(blend_survival_use_mean=True)
+    labeled_all = _make_signal_labeled([20.0, 20.0, -50.0, -50.0], cost_bps=12.0)
+    labeled_promoted = labeled_all.iloc[:2].copy()
+
+    reports = validate_candidate_signals(
+        labeled_all=labeled_all,
+        labeled_promoted=labeled_promoted,
+        cfg=cfg,
+        oos_start=0,
+        oos_end=100,
+    )
+
+    rule_only = next(r for r in reports if r.variant == "rule_only_equal_size")
+    promoted = next(r for r in reports if r.variant == "rule_promo_no_leak")
+    assert rule_only.n_events == 4
+    assert promoted.n_events == 2
+    assert promoted.net_edge_bps_mean > rule_only.net_edge_bps_mean

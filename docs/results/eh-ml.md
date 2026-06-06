@@ -57,8 +57,8 @@ IS (fit+cal) ──────────────────────�
 
 **변경**:
 - `calibration_eval` 셋에서 `Spearman(mu_pred, realized_edge)` 실계산
-- `rank_ic >= 0.02` → residual model 활성 (`target_mode = "prior_residual"`)
-- `rank_ic < 0.02` → prior-only fallback (`target_mode = "direct"`, center_pred = 0)
+- `rank_ic >= 0.02` → residual model 활성 (`prediction_mode = "prior_residual"`)
+- `rank_ic < 0.02` → prior-only fallback (`prediction_mode = "prior_only"`, center contribution = 0)
 
 **수용 기준**:
 | 조건 | 임계값 |
@@ -122,16 +122,19 @@ pass_survival = (
 
 ---
 
-## 현재 상태 (2026-06-06)
+## 현재 상태 (2026-06-06, integrity fix 후)
 
 | 계층 | 구현 | 동작 | 결과 |
 |---|---|---|---|
 | Layer 0 Signal Pre-Qual | ✅ | 26~29% 제거 확인 | 정제 완료 |
 | Layer 1 Gate Veto | ✅ | catastrophic veto only | 정상 동작 |
 | Layer 2 Edge IC Gate | ✅ | fold1~4 모두 IC < 0.02 → rejected | prior-only 전환 |
-| Layer 3 ML Lift | ✅ | fold2 lift=-30.9bps → fail | 정직한 실패 판정 |
+| Layer 3 ML Lift | ✅ | fold1만 pass, fold2~4 fail | `pass_ratio=0.25` |
 
-**BLOCKED 원인**: Residual model이 IC ≥ 0.02 달성 불가 → prior-only → eu_p90=0.769bps → selection 붕괴
+**수정 후 해석**:
+- 기존 `eu_p90=0.769bps`/fold1 zero-selection은 rejected residual이 계속 사용되던 버그의 산물이었다.
+- 현재는 reject 시 `prior_only`가 실제 적용되며 fold1 `realized_mean=265.4bps`, fold2 `232.4bps`까지는 복구된다.
+- 그럼에도 fold3~4가 큰 음수이고 fold2는 `selected_count < 20`이라 전체 `pass_ratio=0.25`로 여전히 blocked다.
 
 **다음 돌파구**: Feature Engineering
 - 진입 시점 momentum strength (entry bar의 signal intensity)
