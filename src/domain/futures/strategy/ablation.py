@@ -481,7 +481,9 @@ def run_candidate_ablation(
 
     # 4. Train ML Models
     gate_model = fit_candidate_gate(train=fit_set, early_stop=calibration_set, calibration=calibration_set, cfg=cfg)
-    edge_models = fit_candidate_edge_models(train=fit_set, valid=calibration_set, cfg=cfg)
+    edge_models = fit_candidate_edge_models(
+        train=fit_set, valid=calibration_set, calibration_eval=calibration_set, cfg=cfg
+    )
 
     # 5. Predict outcomes for OOS sample only
     p_pass = predict_candidate_gate(model=gate_model, dataset=oos_set)
