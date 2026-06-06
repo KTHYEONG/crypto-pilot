@@ -35,7 +35,8 @@ def _seed_from_cfg(cfg: Any) -> int:
 def fit_candidate_gate(
     *,
     train: CandidateDataset,
-    valid: CandidateDataset,
+    early_stop: CandidateDataset,
+    calibration: CandidateDataset,
     cfg: CandidateStrategyConfig,
 ) -> CandidateGateModel:
     """Fit and calibrate candidate trade/no-trade classifier.
@@ -61,12 +62,12 @@ def fit_candidate_gate(
     )
     _es_cb = [lgbm_early_stopping(stopping_rounds=30, verbose=False), lgbm_log_evaluation(period=-1)]
     _gate_eval: list[tuple[Any, Any]] = (
-        [(valid.X, valid.y_gate.astype(np.int32, copy=False))] if valid.X.shape[0] > 0 else []
+        [(early_stop.X, early_stop.y_gate.astype(np.int32, copy=False))] if early_stop.X.shape[0] > 0 else []
     )
     model.fit(
         train.X,
         train.y_gate.astype(np.int32, copy=False),
-        sample_weight=train.sample_weight,
+        sample_weight=train.gate_weight,
         eval_set=_gate_eval if _gate_eval else None,
         callbacks=_es_cb if _gate_eval else None,  # type: ignore[arg-type]
     )
@@ -75,8 +76,8 @@ def fit_candidate_gate(
     calibrator: CalibratedClassifierCV | None = None
     calibration_used = False
     calibration_reason = "calibration_disabled"
-    valid_n = int(valid.X.shape[0])
-    valid_pos = int(valid.y_gate.sum()) if valid_n > 0 else 0
+    valid_n = int(calibration.X.shape[0])
+    valid_pos = int(calibration.y_gate.sum()) if valid_n > 0 else 0
     valid_neg = valid_n - valid_pos
     raw_brier = float("nan")
     raw_std = float("nan")
@@ -88,31 +89,31 @@ def fit_candidate_gate(
         calibration_reason = "insufficient_calibration_rows"
     elif valid_pos < cfg.min_gate_calibration_pos or valid_neg < cfg.min_gate_calibration_pos:
         calibration_reason = "insufficient_calibration_class_balance"
-    elif np.unique(valid.y_gate).size < 2:
+    elif np.unique(calibration.y_gate).size < 2:
         calibration_reason = "single_class_calibration_target"
     else:
-        raw_prob = cast(NDArray[np.float64], model.predict_proba(valid.X)[:, 1]).astype(
+        raw_prob = cast(NDArray[np.float64], model.predict_proba(calibration.X)[:, 1]).astype(
             np.float64,
             copy=False,
         )
         raw_std = float(np.std(raw_prob))
-        raw_brier = float(np.average((raw_prob - valid.y_gate) ** 2, weights=valid.sample_weight))
+        raw_brier = float(np.mean(np.square(raw_prob - calibration.y_gate)))
         calibrator = CalibratedClassifierCV(
             estimator=FrozenEstimator(model),
             method=calibration_method,
             cv=None,
         )
         calibrator.fit(
-            valid.X,
-            valid.y_gate.astype(np.int32, copy=False),
-            sample_weight=valid.sample_weight,
+            calibration.X,
+            calibration.y_gate.astype(np.int32, copy=False),
+            sample_weight=calibration.gate_weight,
         )
-        cal_prob = cast(NDArray[np.float64], calibrator.predict_proba(valid.X)[:, 1]).astype(
+        cal_prob = cast(NDArray[np.float64], calibrator.predict_proba(calibration.X)[:, 1]).astype(
             np.float64,
             copy=False,
         )
         cal_std = float(np.std(cal_prob))
-        cal_brier = float(np.average((cal_prob - valid.y_gate) ** 2, weights=valid.sample_weight))
+        cal_brier = float(np.mean(np.square(cal_prob - calibration.y_gate)))
         if not np.all(np.isfinite(cal_prob)):
             calibration_reason = "non_finite_calibration_probabilities"
             calibrator = None
@@ -150,7 +151,7 @@ def fit_candidate_gate(
         calibrator=calibrator,
         feature_names=tuple(train.feature_names),
         train_window=(0, int(train.X.shape[0])),
-        valid_window=(0, int(valid.X.shape[0])),
+        valid_window=(0, int(calibration.X.shape[0])),
         calibration_method=calibration_method,
         calibration_used=calibration_used,
         calibration_reason=calibration_reason,
@@ -173,31 +174,6 @@ def predict_candidate_gate(
     predictor = model.calibrator if model.calibration_used and model.calibrator is not None else model.model
     probs = cast(NDArray[np.float64], predictor.predict_proba(dataset.X)[:, 1])
     
-    # Apply percentile-based soft gate if calibration is not used and percentile gate is enabled
-    if not model.calibration_used and cfg is not None and getattr(cfg, "percentile_gate_enabled", False):
-        pct_threshold = float(getattr(cfg, "percentile_gate_threshold", 0.70))
-        min_gate_prob = float(getattr(cfg, "min_gate_probability", 0.55))
-        if len(probs) > 0:
-            pct_val = float(np.quantile(probs, pct_threshold))
-            max_val = float(probs.max())
-            adjusted = np.zeros_like(probs)
-            above_mask = probs >= pct_val
-            below_mask = ~above_mask
-            
-            if max_val > pct_val:
-                diff_val = max_val - pct_val
-                adjusted[above_mask] = (
-                    min_gate_prob + (1.0 - min_gate_prob) * (probs[above_mask] - pct_val) / diff_val
-                )
-            else:
-                adjusted[above_mask] = min_gate_prob
-                
-            if pct_val > 0.0:
-                adjusted[below_mask] = min_gate_prob * probs[below_mask] / pct_val
-            else:
-                adjusted[below_mask] = 0.0
-            probs = adjusted
-
     clipped = np.clip(probs.astype(np.float64, copy=False), 0.0, 1.0)
 
     _logger.debug(

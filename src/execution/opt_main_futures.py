@@ -647,8 +647,9 @@ def _run_strategy_stage(
     _logger.info("\n" + title + "-" * (width - len(title)))
     _logger.info(header)
     _logger.info(f"| {'-'*18:<18} | {'-'*27:<27} |")
+    workflow_status = str(candidate_report.get("workflow_status", "blocked"))
     _logger.info(f"| {'Active Signals':<18} | {f'{non_zero_weights} (sel={selected_total_bridge})':<27} |")
-    _logger.info(f"| {'Status':<18} | {'PROMOTED' if non_zero_weights > 0 else 'BLOCKED':<27} |")
+    _logger.info(f"| {'Status':<18} | {workflow_status:<27} |")
     _logger.info(f"| {'Execution Time':<18} | {f'{bridge_elapsed:.2f}s':<27} |")
     _logger.info("-" * width)
     _logger.info(

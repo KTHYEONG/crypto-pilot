@@ -128,6 +128,7 @@ class CandidateStrategyConfig:
     edge_lgbm_reg_lambda: float = 30.0
     ml_fit_fraction: float = 0.60
     ml_calibration_fraction: float = 0.20
+    model_early_stop_fraction: float = 0.15
     promotion_decision_split: Literal["fit", "calibration", "fit_calibration"] = "fit_calibration"
     min_promotion_calibration_edge_bps: float = 1.0
     min_promotion_calibration_obs: int = 100
@@ -224,6 +225,8 @@ class CandidateStrategyConfig:
     exclude_immediate_return_features: bool = True
     promotion_filter_enabled: bool = True
     selection_policy: Literal["hard", "validation_quantile", "utility_topk"] = "utility_topk"
+    selection_scope: Literal["per_timestamp"] = "per_timestamp"
+    selection_max_events_per_bar: int | None = None
     selection_top_quantile: float = 0.10
     min_net_floor_cost_fraction: float = 0.50
     min_oos_rank_ic: float = 0.01
@@ -336,6 +339,8 @@ class CandidateStrategyConfig:
             raise ValueError("ml_fit_fraction must be in [0.1, 1.0)")
         if not (0.0 <= self.ml_calibration_fraction < 1.0):
             raise ValueError("ml_calibration_fraction must be in [0.0, 1.0)")
+        if not (0.0 <= self.model_early_stop_fraction < 1.0):
+            raise ValueError("model_early_stop_fraction must be in [0.0, 1.0)")
         if self.ml_fit_fraction + self.ml_calibration_fraction >= 1.0:
             raise ValueError("ml_fit_fraction + ml_calibration_fraction must be < 1.0")
         if self.promotion_decision_split not in {"fit", "calibration", "fit_calibration"}:
@@ -402,6 +407,10 @@ class CandidateStrategyConfig:
             raise ValueError("selection_shortfall_mode must be hard, penalty_only, or catastrophic")
         if self.selection_policy not in {"hard", "validation_quantile", "utility_topk"}:
             raise ValueError("selection_policy must be hard, validation_quantile, or utility_topk")
+        if self.selection_scope != "per_timestamp":
+            raise ValueError("selection_scope must be per_timestamp")
+        if self.selection_max_events_per_bar is not None and self.selection_max_events_per_bar < 1:
+            raise ValueError("selection_max_events_per_bar must be >= 1 when provided")
         if self.exit_policy_mode not in {"label_only", "engine_aligned"}:
             raise ValueError("exit_policy_mode must be label_only or engine_aligned")
         if self.catastrophic_shortfall_bps < self.max_expected_shortfall_bps:

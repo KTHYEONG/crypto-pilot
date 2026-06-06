@@ -41,6 +41,7 @@ def test_bridge_passes_no_leak_recommendation_window(monkeypatch: Any) -> None:
             "raw_score": [0.9],
             "score_z": [0.9],
             "entry_idx": [0],
+            "exit_idx": [1],
             "expected_holding_bars": [1],
             "min_holding_bars": [1],
             "stop_atr_mult": [50.0],
@@ -168,6 +169,7 @@ def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) 
         "raw_score": [0.9],
         "score_z": [0.9],
         "entry_idx": [0],
+        "exit_idx": [1],
         "expected_holding_bars": [1],
         "min_holding_bars": [0],
         "stop_atr_mult": [50.0],
@@ -202,10 +204,16 @@ def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) 
 
     class _FakeDataset:
         X = np.zeros((5, 2), dtype=np.float64)
-        y_gate = np.zeros(5, dtype=np.float64)
-        y_edge = np.zeros(5, dtype=np.float64)
+        y_gate = np.zeros(5, dtype=np.int8)
+        y_edge_bps = np.zeros(5, dtype=np.float32)
+        y_q10_bps = np.zeros(5, dtype=np.float32)
+        y_mfe_bps = np.zeros(5, dtype=np.float32)
+        gate_weight = np.ones(5, dtype=np.float32)
+        edge_weight = np.ones(5, dtype=np.float32)
+        groups = np.arange(5, dtype=np.int32)
         event_index = pd.DataFrame({"family": ["f"] * 5, "variant": ["v"] * 5})
         feature_names: ClassVar[list[str]] = []
+        effective_sample_size = 5.0
 
     monkeypatch.setattr(
         "src.domain.futures.strategy.candidate_dataset.build_candidate_dataset",
@@ -302,6 +310,7 @@ def test_bridge_realized_fold_survival_fails_when_selected_realized_edge_is_nega
             "raw_score": [0.9],
             "score_z": [0.9],
             "entry_idx": [20],
+            "exit_idx": [24],
             "expected_holding_bars": [4],
             "min_holding_bars": [1],
             "stop_atr_mult": [2.0],
@@ -342,10 +351,12 @@ def test_bridge_realized_fold_survival_fails_when_selected_realized_edge_is_nega
         y_edge_bps = np.array([-15.0], dtype=np.float32)
         y_q10_bps = np.array([-20.0], dtype=np.float32)
         y_mfe_bps = np.array([5.0], dtype=np.float32)
-        sample_weight = np.ones(1, dtype=np.float32)
+        gate_weight = np.ones(1, dtype=np.float32)
+        edge_weight = np.ones(1, dtype=np.float32)
         groups = np.zeros(1, dtype=np.int32)
         event_index = raw_events.copy()
         feature_names: ClassVar[list[str]] = []
+        effective_sample_size = 1.0
 
     monkeypatch.setattr(
         "src.domain.futures.strategy.candidate_dataset.build_candidate_dataset",
@@ -443,6 +454,7 @@ def test_bridge_reports_shadow_profile_when_production_selection_stays_blocked(m
             "raw_score": [0.9, 0.8],
             "score_z": [0.9, 0.8],
             "entry_idx": [20, 24],
+            "exit_idx": [24, 28],
             "expected_holding_bars": [4, 4],
             "min_holding_bars": [1, 1],
             "stop_atr_mult": [2.0, 2.0],
@@ -483,10 +495,12 @@ def test_bridge_reports_shadow_profile_when_production_selection_stays_blocked(m
         y_edge_bps = np.array([15.0, 18.0], dtype=np.float32)
         y_q10_bps = np.array([-20.0, -20.0], dtype=np.float32)
         y_mfe_bps = np.array([20.0, 22.0], dtype=np.float32)
-        sample_weight = np.ones(2, dtype=np.float32)
+        gate_weight = np.ones(2, dtype=np.float32)
+        edge_weight = np.ones(2, dtype=np.float32)
         groups = np.zeros(2, dtype=np.int32)
         event_index = raw_events.copy()
         feature_names: ClassVar[list[str]] = []
+        effective_sample_size = 2.0
 
     monkeypatch.setattr(
         "src.domain.futures.strategy.candidate_dataset.build_candidate_dataset",
