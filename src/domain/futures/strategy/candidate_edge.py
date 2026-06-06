@@ -79,7 +79,7 @@ def _build_variant_priors(
 ) -> tuple[dict[str, float], dict[str, int], float, NDArray[np.float64]]:
     """Return shrunk per-variant priors and per-row prior values."""
     y_edge = np.asarray(dataset.y_edge_bps, dtype=np.float64)
-    weights = np.asarray(dataset.sample_weight, dtype=np.float64)
+    weights = np.asarray(dataset.edge_weight, dtype=np.float64)
     keys = _variant_keys(dataset)
     global_prior = _weighted_mean(y_edge, weights)
     variant_prior_bps: dict[str, float] = {}
@@ -229,11 +229,7 @@ def _selection_thresholds(
     mu_net_decision_bps: NDArray[np.float64],
     cfg: CandidateStrategyConfig,
 ) -> dict[str, float | bool]:
-    finite_utility = utility_score[np.isfinite(utility_score)]
-    utility_min = float("-inf")
-    if finite_utility.size > 0:
-        quantile = max(0.0, min(1.0, 1.0 - float(cfg.selection_top_quantile)))
-        utility_min = float(np.quantile(finite_utility, quantile))
+    utility_min = float(getattr(cfg, "selection_min_expected_utility_bps", 0.0))
     finite_mu = mu_net_decision_bps[np.isfinite(mu_net_decision_bps)]
     breakeven_floor_bps = float(cfg.min_net_floor_cost_fraction) * float(cfg.cost_floor_bps)
     mu_std_bps = float(np.std(finite_mu)) if finite_mu.size > 0 else 0.0
@@ -358,35 +354,35 @@ def fit_candidate_edge_models(
         center.fit(
             train.X,
             center_train_target,
-            sample_weight=train.sample_weight,
+            sample_weight=train.edge_weight,
             eval_set=eval_set_center,
             callbacks=_es_cb,
         )
     else:
-        center.fit(train.X, center_train_target, sample_weight=train.sample_weight)
+        center.fit(train.X, center_train_target, sample_weight=train.edge_weight)
 
     if eval_set_q10 is not None and len(np.unique(valid.y_q10_bps)) > 1:
         q10.fit(
             train.X,
             train.y_q10_bps,
-            sample_weight=train.sample_weight,
+            sample_weight=train.edge_weight,
             eval_set=eval_set_q10,
             callbacks=_es_cb,
         )
     else:
-        q10.fit(train.X, train.y_q10_bps, sample_weight=train.sample_weight)
+        q10.fit(train.X, train.y_q10_bps, sample_weight=train.edge_weight)
 
     # Fit Q90 on y_mfe_bps (upside realisation — maximum favourable excursion)
     if eval_set_q90 is not None and len(np.unique(valid.y_mfe_bps)) > 1:
         q90.fit(
             train.X,
             train.y_mfe_bps,
-            sample_weight=train.sample_weight,
+            sample_weight=train.edge_weight,
             eval_set=eval_set_q90,
             callbacks=_es_cb,
         )
     else:
-        q90.fit(train.X, train.y_mfe_bps, sample_weight=train.sample_weight)
+        q90.fit(train.X, train.y_mfe_bps, sample_weight=train.edge_weight)
 
     return CandidateEdgeModels(
         center_model=center,

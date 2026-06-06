@@ -21,7 +21,8 @@ def _make_dataset(seed: int, n: int, *, family: str = "trend_ma", variant: str =
         y_edge_bps=edge,
         y_q10_bps=q10,
         y_mfe_bps=mfe,
-        sample_weight=w,
+        gate_weight=w,
+        edge_weight=w,
         groups=np.arange(n, dtype=np.int32),
         event_index=pd.DataFrame(
             {
@@ -30,6 +31,7 @@ def _make_dataset(seed: int, n: int, *, family: str = "trend_ma", variant: str =
             }
         ),
         feature_names=("f0", "f1", "f2", "f3"),
+        effective_sample_size=float(n),
     )
 
 
@@ -84,10 +86,12 @@ def test_edge_prior_residual_preserves_positive_variant_prior() -> None:
         y_edge_bps=np.full(train.X.shape[0], 25.0, dtype=np.float32),
         y_q10_bps=np.full(train.X.shape[0], -5.0, dtype=np.float32),
         y_mfe_bps=np.full(train.X.shape[0], 40.0, dtype=np.float32),
-        sample_weight=train.sample_weight,
+        gate_weight=train.gate_weight,
+        edge_weight=train.edge_weight,
         groups=train.groups,
         event_index=train.event_index,
         feature_names=train.feature_names,
+        effective_sample_size=train.effective_sample_size,
     )
     valid = _make_dataset(seed=301, n=30, family="funding_carry", variant="funding_24")
     cfg = CandidateStrategyConfig(seed=11, edge_prior_min_obs=10, edge_prior_shrinkage_obs=50)

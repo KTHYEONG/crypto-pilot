@@ -415,11 +415,22 @@ def run_candidate_strategy_for_universe(
     fold_selection_reports: list[dict[str, Any]] = []
 
     for fold in wf_folds:
+        fit_span = max(0, fold.fit_end - fold.fit_start)
+        early_stop_len = max(1, int(fit_span * strategy_cfg.candidate.model_early_stop_fraction))
+        early_stop_start = max(fold.fit_start + 1, fold.fit_end - early_stop_len)
+        train_end = max(fold.fit_start + 1, early_stop_start - strategy_cfg.candidate.purge_bars)
         fit_set = build_candidate_dataset(
             labeled_events=labeled,
             aligned=aligned,
             cfg=strategy_cfg.candidate,
             split_start=fold.fit_start,
+            split_end=train_end,
+        )
+        early_stop_set = build_candidate_dataset(
+            labeled_events=labeled,
+            aligned=aligned,
+            cfg=strategy_cfg.candidate,
+            split_start=early_stop_start,
             split_end=fold.fit_end,
         )
         calibration_set = build_candidate_dataset(
@@ -441,11 +452,11 @@ def run_candidate_strategy_for_universe(
         total_oos += int(oos_set.X.shape[0])
 
         # Prior-only fallback when fit set is too small
-        if fit_set.X.shape[0] < strategy_cfg.candidate.min_fit_obs:
+        if fit_set.effective_sample_size < float(strategy_cfg.candidate.min_fit_obs):
             _logger.warning(
-                "[BRIDGE][WF] fold oos=[%d,%d) fit_obs=%d < min_fit_obs=%d; prior-only",
+                "[BRIDGE][WF] fold oos=[%d,%d) fit_ess=%.1f < min_fit_obs=%d; prior-only",
                 fold.oos_start, fold.oos_end,
-                int(fit_set.X.shape[0]), strategy_cfg.candidate.min_fit_obs,
+                float(fit_set.effective_sample_size), strategy_cfg.candidate.min_fit_obs,
             )
             fold_cost_survival.append(False)  # prior-only = no cost survival
             if oos_set.X.shape[0] > 0:
@@ -458,8 +469,13 @@ def run_candidate_strategy_for_universe(
                 fold_event_parts.append(oos_set.event_index)
             continue
 
-        fold_gate_model = fit_candidate_gate(train=fit_set, valid=calibration_set, cfg=strategy_cfg.candidate)
-        fold_edge_models = fit_candidate_edge_models(train=fit_set, valid=calibration_set, cfg=strategy_cfg.candidate)
+        fold_gate_model = fit_candidate_gate(
+            train=fit_set,
+            early_stop=early_stop_set,
+            calibration=calibration_set,
+            cfg=strategy_cfg.candidate,
+        )
+        fold_edge_models = fit_candidate_edge_models(train=fit_set, valid=early_stop_set, cfg=strategy_cfg.candidate)
         fold_calibration_used = bool(fold_gate_model.calibration_used) if fold_gate_model is not None else False
         fold_calibration_reason = fold_gate_model.calibration_reason if fold_gate_model is not None else "not_fit"
 
@@ -648,7 +664,7 @@ def run_candidate_strategy_for_universe(
         p_pass=predict_candidate_gate(model=fold_gate_model, dataset=_last_oos_set, cfg=strategy_cfg.candidate),
         cfg=strategy_cfg.candidate,
     )
-    from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
+    from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput, CandidateWorkflowStatus
     ml_out = CandidateModelOutput(
         events=combined_events,
         p_pass=p_pass.astype(np.float64, copy=False) if p_pass.size > 0 else p_pass,
@@ -755,6 +771,7 @@ def run_candidate_strategy_for_universe(
                 "n_keep": 0,
                 "policy": strategy_cfg.candidate.selection_policy,
                 "zero_reason": "wf_fold_pass_ratio_fail",
+                "workflow_status": CandidateWorkflowStatus.BLOCKED.value,
                 "gate_calibration_used": fold_calibration_used,
                 "gate_calibration_reason": fold_calibration_reason,
                 "wf_fold_pass_ratio": _fold_pass_ratio,
@@ -939,6 +956,11 @@ def run_candidate_strategy_for_universe(
             "n_keep": int(selection_diag.get("n_keep", 0)),
             "policy": str(selection_diag.get("policy", strategy_cfg.candidate.selection_policy)),
             "zero_reason": str(selection_diag.get("zero_reason", "unknown")),
+            "workflow_status": (
+                CandidateWorkflowStatus.WF_ELIGIBLE.value
+                if int(selection_diag.get("selected_total", len(selected))) > 0
+                else CandidateWorkflowStatus.BLOCKED.value
+            ),
             "breakeven_floor_bps": float(
                 selection_diag.get("breakeven_floor_bps", strategy_cfg.candidate.cost_floor_bps)
             ),

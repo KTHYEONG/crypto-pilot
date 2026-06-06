@@ -93,12 +93,7 @@ def _utility_threshold(
     threshold = model_output.selection_thresholds.get("utility_min")
     if threshold is not None and np.isfinite(threshold):
         return float(threshold)
-    finite = pd.to_numeric(df["utility_score"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
-    finite = finite[np.isfinite(finite)]
-    if finite.size == 0:
-        return float("-inf")
-    quantile = max(0.0, min(1.0, 1.0 - float(cfg.selection_top_quantile)))
-    return float(np.quantile(finite, quantile))
+    return float(getattr(cfg, "selection_min_expected_utility_bps", 0.0))
 
 
 def _rank_ic(pred: pd.Series, target: pd.Series) -> float | None:
@@ -627,36 +622,49 @@ def select_candidate_events_for_portfolio(
         mask = catastrophic_mask & (df["mu_net_decision_bps"] >= 0.0) & utility_mask
         zero_reason = "policy_validation_quantile"
     else:
-        # utility_topk: absolute cost-fraction floor + relative rank among survivors
-        # floor prevents selecting garbage candidates when all signals are weak
         if n_eligible == 0:
-            mask = eligible  # honest zero exposure — do not force trade
+            mask = eligible
             zero_reason = "no_eligible_after_breakeven_floor"
         else:
-            n_keep = max(1, math.ceil(n_eligible * cfg.selection_top_quantile))
-            # In expected_edge_direct mode, rank by expected_utility_bps (= mu_net)
-            # to match the eligibility criterion and shadow evaluation logic.
             primary_sort_col = (
                 "expected_utility_bps"
                 if cfg.selection_utility_mode == "expected_edge_direct"
                 else "utility_score"
             )
-            sorted_eligible = df.loc[eligible].sort_values(
-                [primary_sort_col, "p_pass", "mu_net_decision_bps", "q10_net_bps"],
-                ascending=[False, False, False, False],
-            )
+            eligible_df = df.loc[eligible].copy()
+            eligible_df["_merge_dt"] = pd.to_datetime(eligible_df["datetime"], utc=True).dt.tz_localize(None)
+            top_idx: list[int] = []
             max_variant_fraction = float(getattr(cfg, "max_variant_selection_fraction", 1.0))
-            variant_group_cols = [
-                col for col in ("family", "variant") if col in sorted_eligible.columns
-            ]
-            if max_variant_fraction < 1.0 and n_keep > 1 and variant_group_cols:
-                max_per_variant = max(1, math.ceil(n_keep * max_variant_fraction))
-                variant_ranks = sorted_eligible.groupby(
-                    variant_group_cols, sort=False
-                ).cumcount()
-                top_idx = sorted_eligible[variant_ranks < max_per_variant].head(n_keep).index
-            else:
-                top_idx = sorted_eligible.head(n_keep).index
+            max_events_per_bar = getattr(cfg, "selection_max_events_per_bar", None)
+            for _, group in eligible_df.groupby("_merge_dt", sort=True):
+                deduped = (
+                    group.reset_index().sort_values(
+                        [primary_sort_col, "p_pass", "mu_net_decision_bps", "q10_net_bps"],
+                        ascending=[False, False, False, False],
+                    )
+                    .groupby("symbol", sort=False, as_index=False)
+                    .first()
+                )
+                keep_for_bar = max(1, math.ceil(len(deduped) * cfg.selection_top_quantile))
+                if max_events_per_bar is not None:
+                    keep_for_bar = min(keep_for_bar, int(max_events_per_bar))
+                n_keep += keep_for_bar
+                if max_variant_fraction < 1.0 and keep_for_bar > 1 and {"family", "variant"}.issubset(deduped.columns):
+                    max_per_variant = max(1, math.ceil(keep_for_bar * max_variant_fraction))
+                    variant_counts: dict[tuple[str, str], int] = {}
+                    selected_for_bar = 0
+                    for row in deduped.itertuples(index=False):
+                        key = (str(row.family), str(row.variant))
+                        current = variant_counts.get(key, 0)
+                        if current >= max_per_variant:
+                            continue
+                        top_idx.append(int(row.index))
+                        variant_counts[key] = current + 1
+                        selected_for_bar += 1
+                        if selected_for_bar >= keep_for_bar:
+                            break
+                else:
+                    top_idx.extend(int(idx) for idx in deduped.head(keep_for_bar)["index"].tolist())
             mask = pd.Series(False, index=df.index, dtype=bool)
             mask.loc[top_idx] = True
             zero_reason = "selected_nonzero" if int(mask.sum()) > 0 else "topk_selected_zero"
