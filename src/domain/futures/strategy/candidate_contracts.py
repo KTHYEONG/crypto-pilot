@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, Literal
 
 import numpy as np
@@ -92,6 +93,12 @@ class CandidateModelOutput:
     q90_net_bps: NDArray[np.float64]
     utility_score: NDArray[np.float64]
     selection_thresholds: dict[str, float | bool] = field(default_factory=dict)
+
+
+class CandidateWorkflowStatus(StrEnum):
+    BLOCKED = "blocked"
+    WF_ELIGIBLE = "wf_eligible"
+    DEPLOYMENT_PROMOTED = "deployment_promoted"
 
 
 @dataclass(slots=True, frozen=True)
