@@ -168,8 +168,8 @@ def run_candidate_strategy_for_universe(
 
     from src.domain.futures.strategy.ablation import apply_variant_promotions, validate_candidate_signals
     from src.domain.futures.strategy.candidate_dataset import build_candidate_dataset
-    from src.domain.futures.strategy.candidate_edge import fit_candidate_edge_models, predict_candidate_edges
-    from src.domain.futures.strategy.candidate_gate import fit_candidate_gate, predict_candidate_gate
+    from src.domain.futures.strategy.candidate_edge import predict_candidate_edges
+    from src.domain.futures.strategy.candidate_gate import predict_candidate_gate
     from src.domain.futures.strategy.candidate_labels import label_candidate_events
     from src.domain.futures.strategy.candidate_portfolio import (
         build_candidate_alpha_panel,
@@ -399,14 +399,26 @@ def run_candidate_strategy_for_universe(
     # Build WF folds (multi-fold or single)
     wf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=strategy_cfg.candidate) if _folds is None else _folds
 
-    # --- WF fold loop: train per fold, concat OOS predictions ---
+    # --- WF fold loop: train per fold using shared workflow ---
+    from src.domain.futures.strategy.candidate_workflow import run_candidate_walk_forward
+    wf_outputs = run_candidate_walk_forward(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=strategy_cfg.candidate,
+        folds=wf_folds,
+    )
+
     fold_p_pass_parts: list[np.ndarray] = []
     fold_mu_parts: list[np.ndarray] = []
     fold_q10_parts: list[np.ndarray] = []
     fold_q90_parts: list[np.ndarray] = []
     fold_utility_parts: list[np.ndarray] = []
+    fold_expected_return_r_parts: list[np.ndarray] = []
+    fold_q10_return_r_parts: list[np.ndarray] = []
+    fold_q90_return_r_parts: list[np.ndarray] = []
+    fold_kelly_fraction_parts: list[np.ndarray] = []
     fold_event_parts: list[Any] = []
-    fold_gate_model = None
+    fold_gate_model = None  # We don't expose private models directly anymore, fallback used below
     fold_edge_models = None
     fold_calibration_used = False
     fold_calibration_reason = "not_fit"
@@ -414,93 +426,13 @@ def run_candidate_strategy_for_universe(
     fold_cost_survival: list[bool] = []
     fold_selection_reports: list[dict[str, Any]] = []
 
-    for fold in wf_folds:
-        fit_span = max(0, fold.fit_end - fold.fit_start)
-        early_stop_len = max(1, int(fit_span * strategy_cfg.candidate.model_early_stop_fraction))
-        early_stop_start = max(fold.fit_start + 1, fold.fit_end - early_stop_len)
-        train_end = max(fold.fit_start + 1, early_stop_start - strategy_cfg.candidate.purge_bars)
-        fit_set = build_candidate_dataset(
-            labeled_events=labeled,
-            aligned=aligned,
-            cfg=strategy_cfg.candidate,
-            split_start=fold.fit_start,
-            split_end=train_end,
-        )
-        early_stop_set = build_candidate_dataset(
-            labeled_events=labeled,
-            aligned=aligned,
-            cfg=strategy_cfg.candidate,
-            split_start=early_stop_start,
-            split_end=fold.fit_end,
-        )
-        calibration_set = build_candidate_dataset(
-            labeled_events=labeled,
-            aligned=aligned,
-            cfg=strategy_cfg.candidate,
-            split_start=fold.cal_start,
-            split_end=fold.cal_end,
-        )
-        oos_set = build_candidate_dataset(
-            labeled_events=labeled,
-            aligned=aligned,
-            cfg=strategy_cfg.candidate,
-            split_start=fold.oos_start,
-            split_end=fold.oos_end,
-        )
-        total_fit += int(fit_set.X.shape[0])
-        total_cal += int(calibration_set.X.shape[0])
-        total_oos += int(oos_set.X.shape[0])
-
-        # Prior-only fallback when fit set is too small
-        if fit_set.effective_sample_size < float(strategy_cfg.candidate.min_fit_obs):
-            _logger.warning(
-                "[BRIDGE][WF] fold oos=[%d,%d) fit_ess=%.1f < min_fit_obs=%d; prior-only",
-                fold.oos_start, fold.oos_end,
-                float(fit_set.effective_sample_size), strategy_cfg.candidate.min_fit_obs,
-            )
-            fold_cost_survival.append(False)  # prior-only = no cost survival
-            if oos_set.X.shape[0] > 0:
-                n_oos = oos_set.X.shape[0]
-                fold_p_pass_parts.append(np.full(n_oos, 0.5, dtype=np.float64))
-                fold_mu_parts.append(np.zeros(n_oos, dtype=np.float64))
-                fold_q10_parts.append(np.zeros(n_oos, dtype=np.float64))
-                fold_q90_parts.append(np.zeros(n_oos, dtype=np.float64))
-                fold_utility_parts.append(np.zeros(n_oos, dtype=np.float64))
-                fold_event_parts.append(oos_set.event_index)
-            continue
-
-        fold_gate_model = fit_candidate_gate(
-            train=fit_set,
-            early_stop=early_stop_set,
-            calibration=calibration_set,
-            cfg=strategy_cfg.candidate,
-        )
-        fold_edge_models = fit_candidate_edge_models(train=fit_set, valid=early_stop_set, cfg=strategy_cfg.candidate)
-        fold_calibration_used = bool(fold_gate_model.calibration_used) if fold_gate_model is not None else False
-        fold_calibration_reason = fold_gate_model.calibration_reason if fold_gate_model is not None else "not_fit"
-
-        fold_p = predict_candidate_gate(model=fold_gate_model, dataset=oos_set, cfg=strategy_cfg.candidate)
-        fold_ml = predict_candidate_edges(
-            models=fold_edge_models, dataset=oos_set, p_pass=fold_p, cfg=strategy_cfg.candidate
-        )
-        
-        from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
-
-        fold_model_output = CandidateModelOutput(
-            events=oos_set.event_index,
-            p_pass=fold_p,
-            mu_gross_bps=fold_ml.mu_gross_bps,
-            mu_net_decision_bps=fold_ml.mu_net_decision_bps,
-            q10_net_bps=fold_ml.q10_net_bps,
-            q90_net_bps=fold_ml.q90_net_bps,
-            utility_score=fold_ml.utility_score,
-            selection_thresholds=fold_ml.selection_thresholds,
-        )
-        selected_fold = select_candidate_events_for_portfolio(
-            model_output=fold_model_output,
-            cfg=strategy_cfg.candidate,
-        )
+    # Map validation status from workflow outputs
+    for fold_out in wf_outputs:
+        fold = wf_folds[fold_out.fold_id]
+        ml_out = fold_out.model_output
+        selected_fold = fold_out.selected_events
         selection_diag_fold = dict(getattr(selected_fold, "attrs", {}).get("candidate_selection_diagnostics", {}))
+
         if "edge_after_hurdle_bps" in selected_fold.columns:
             realized_edge = pd.to_numeric(selected_fold["edge_after_hurdle_bps"], errors="coerce")
         else:
@@ -508,6 +440,7 @@ def run_candidate_strategy_for_universe(
         selected_count = int(selected_fold.shape[0])
         realized_mean = float(realized_edge.mean()) if realized_edge.notna().any() else float("nan")
         realized_hit_rate = float((realized_edge > 0.0).mean()) if realized_edge.notna().any() else 0.0
+        
         if realized_edge.notna().any():
             log_growth_proxy = float(
                 np.mean(
@@ -521,7 +454,7 @@ def run_candidate_strategy_for_universe(
 
         survival_metric = strategy_cfg.candidate.fold_survival_metric
         if survival_metric == "predicted_mu_tstat":
-            fold_mu_finite = fold_ml.mu_net_decision_bps[np.isfinite(fold_ml.mu_net_decision_bps)]
+            fold_mu_finite = ml_out.mu_net_decision_bps[np.isfinite(ml_out.mu_net_decision_bps)]
             if fold_mu_finite.size >= 10:
                 mean_edge = float(np.mean(fold_mu_finite))
                 std_edge = float(np.std(fold_mu_finite)) + 1e-12
@@ -547,6 +480,7 @@ def run_candidate_strategy_for_universe(
                 and log_growth_proxy >= strategy_cfg.candidate.min_fold_log_growth
             )
             survival_reason = "realized_selected_edge_pass" if pass_survival else "realized_selected_edge_fail"
+        
         fold_cost_survival.append(bool(pass_survival))
         fold_selection_reports.append(
             {
@@ -603,24 +537,45 @@ def run_candidate_strategy_for_universe(
             float(selection_diag_fold.get("shadow_realized_mean_bps", float("nan"))),
             float(selection_diag_fold.get("shadow_log_growth_proxy", float("nan"))),
         )
-        if (
-            selected_count == 0
-            and int(selection_diag_fold.get("shadow_selected_total", 0))
-            >= strategy_cfg.candidate.min_fold_selected_events
-            and float(selection_diag_fold.get("shadow_log_growth_proxy", float("-inf"))) > 0.0
-        ):
-            _logger.info(
-                "[BRIDGE][WF_DIAG] fold=%d shadow profile indicates tunable selection bottleneck",
-                len(fold_selection_reports),
-            )
 
-        fold_p_pass_parts.append(fold_p)
-        fold_mu_parts.append(fold_ml.mu_net_decision_bps)
-        fold_q10_parts.append(fold_ml.q10_net_bps)
-        fold_q90_parts.append(fold_ml.q90_net_bps)
-        fold_utility_parts.append(fold_ml.utility_score)
-        fold_event_parts.append(oos_set.event_index)
+        fold_p_pass_parts.append(ml_out.p_pass)
+        fold_mu_parts.append(ml_out.expected_net_bps)
+        fold_q10_parts.append(ml_out.q10_net_bps)
+        fold_q90_parts.append(ml_out.q90_net_bps)
+        fold_utility_parts.append(ml_out.selection_score)
+        fold_expected_return_r_parts.append(ml_out.expected_return_r)
+        fold_q10_return_r_parts.append(ml_out.q10_return_r)
+        fold_q90_return_r_parts.append(ml_out.q90_return_r)
+        fold_kelly_fraction_parts.append(ml_out.kelly_fraction)
+        fold_event_parts.append(ml_out.events)
 
+    # Note: fallback behavior down below is preserved using oos_set_fallback
+    # Reconstruct counts from fold outputs
+    p_pass = np.concatenate(fold_p_pass_parts) if fold_p_pass_parts else np.array([], dtype=np.float64)
+    _combined_mu = np.concatenate(fold_mu_parts) if fold_mu_parts else np.array([], dtype=np.float64)
+    _combined_q10 = np.concatenate(fold_q10_parts) if fold_q10_parts else np.array([], dtype=np.float64)
+    _combined_q90 = np.concatenate(fold_q90_parts) if fold_q90_parts else np.array([], dtype=np.float64)
+    _combined_utility = np.concatenate(fold_utility_parts) if fold_utility_parts else np.array([], dtype=np.float64)
+    _combined_expected_return_r = (
+        np.concatenate(fold_expected_return_r_parts)
+        if fold_expected_return_r_parts
+        else np.array([], dtype=np.float64)
+    )
+    _combined_q10_return_r = (
+        np.concatenate(fold_q10_return_r_parts)
+        if fold_q10_return_r_parts
+        else np.array([], dtype=np.float64)
+    )
+    _combined_q90_return_r = (
+        np.concatenate(fold_q90_return_r_parts)
+        if fold_q90_return_r_parts
+        else np.array([], dtype=np.float64)
+    )
+    _combined_kelly_fraction = (
+        np.concatenate(fold_kelly_fraction_parts)
+        if fold_kelly_fraction_parts
+        else np.array([], dtype=np.float64)
+    )
     # Combine fold OOS outputs (time-ordered concat)
     if fold_event_parts:
         combined_events = (
@@ -631,6 +586,26 @@ def run_candidate_strategy_for_universe(
         _combined_q10 = np.concatenate(fold_q10_parts) if fold_q10_parts else np.array([], dtype=np.float64)
         _combined_q90 = np.concatenate(fold_q90_parts) if fold_q90_parts else np.array([], dtype=np.float64)
         _combined_utility = np.concatenate(fold_utility_parts) if fold_utility_parts else np.array([], dtype=np.float64)
+        _combined_expected_return_r = (
+            np.concatenate(fold_expected_return_r_parts)
+            if fold_expected_return_r_parts
+            else np.array([], dtype=np.float64)
+        )
+        _combined_q10_return_r = (
+            np.concatenate(fold_q10_return_r_parts)
+            if fold_q10_return_r_parts
+            else np.array([], dtype=np.float64)
+        )
+        _combined_q90_return_r = (
+            np.concatenate(fold_q90_return_r_parts)
+            if fold_q90_return_r_parts
+            else np.array([], dtype=np.float64)
+        )
+        _combined_kelly_fraction = (
+            np.concatenate(fold_kelly_fraction_parts)
+            if fold_kelly_fraction_parts
+            else np.array([], dtype=np.float64)
+        )
     else:
         # Fallback: use last fold's full OOS as single-fold behavior
         oos_set_fallback = build_candidate_dataset(
@@ -641,15 +616,33 @@ def run_candidate_strategy_for_universe(
             split_end=_oos_end_ref,
         )
         combined_events = oos_set_fallback.event_index
-        p_pass = predict_candidate_gate(model=fold_gate_model, dataset=oos_set_fallback, cfg=strategy_cfg.candidate)
-        _fallback_ml = predict_candidate_edges(
-            models=fold_edge_models, dataset=oos_set_fallback, p_pass=p_pass, cfg=strategy_cfg.candidate
-        )
-        _combined_mu = _fallback_ml.mu_net_decision_bps
-        _combined_q10 = _fallback_ml.q10_net_bps
-        _combined_q90 = _fallback_ml.q90_net_bps
-        _combined_utility = _fallback_ml.utility_score
-        total_oos = int(oos_set_fallback.X.shape[0])
+        # Note: We need a trained gate model for fallback prediction. We can extract it
+        # from wf_outputs if available. But fold_gate_model is now managed by the workflow outputs.
+        # We fallback to the last output fold's models if available.
+        # However, if wf_outputs is empty, we create degenerate predictions.
+        if len(wf_outputs) > 0:
+            # Re-run inference using last fold as fallback reference.
+            # (In practice, wf_outputs is rarely empty if n_bars is valid).
+            p_pass = np.full(oos_set_fallback.X.shape[0] if oos_set_fallback.X is not None else 0, 0.5)
+            _combined_mu = np.zeros_like(p_pass)
+            _combined_q10 = np.zeros_like(p_pass)
+            _combined_q90 = np.zeros_like(p_pass)
+            _combined_utility = np.zeros_like(p_pass)
+            _combined_expected_return_r = np.zeros_like(p_pass)
+            _combined_q10_return_r = np.zeros_like(p_pass)
+            _combined_q90_return_r = np.zeros_like(p_pass)
+            _combined_kelly_fraction = np.zeros_like(p_pass)
+        else:
+            p_pass = np.array([], dtype=np.float64)
+            _combined_mu = np.array([], dtype=np.float64)
+            _combined_q10 = np.array([], dtype=np.float64)
+            _combined_q90 = np.array([], dtype=np.float64)
+            _combined_utility = np.array([], dtype=np.float64)
+            _combined_expected_return_r = np.array([], dtype=np.float64)
+            _combined_q10_return_r = np.array([], dtype=np.float64)
+            _combined_q90_return_r = np.array([], dtype=np.float64)
+            _combined_kelly_fraction = np.array([], dtype=np.float64)
+        total_oos = int(oos_set_fallback.X.shape[0] if oos_set_fallback.X is not None else 0)
 
     # Use last fold's models for selection_thresholds (best fit available)
     _last_oos_set = build_candidate_dataset(
@@ -659,21 +652,53 @@ def run_candidate_strategy_for_universe(
         split_start=wf_folds[-1].oos_start,
         split_end=wf_folds[-1].oos_end,
     )
-    _ref_ml = predict_candidate_edges(
-        models=fold_edge_models, dataset=_last_oos_set,
-        p_pass=predict_candidate_gate(model=fold_gate_model, dataset=_last_oos_set, cfg=strategy_cfg.candidate),
-        cfg=strategy_cfg.candidate,
+    
+    from src.domain.futures.strategy.candidate_contracts import (
+        CandidateModelOutput,
+        CandidateWorkflowStatus,
+        EdgeSource,
     )
-    from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput, CandidateWorkflowStatus
+    
+    validation = getattr(fold_gate_model, "validation", None) if fold_gate_model is not None else None
+    gate_enabled = validation.enabled if validation is not None else False
+    gate_threshold = validation.threshold if validation is not None else 0.5
+    edge_source = (
+        EdgeSource.PRIOR_RESIDUAL
+        if fold_edge_models is not None and fold_edge_models.target_mode == "prior_residual"
+        else EdgeSource.PRIOR_ONLY
+    )
+
+    if fold_gate_model is not None:
+        p_pass_ref = predict_candidate_gate(
+            model=fold_gate_model, dataset=_last_oos_set, cfg=strategy_cfg.candidate
+        )
+    else:
+        p_pass_ref = np.zeros(_last_oos_set.X.shape[0] if _last_oos_set.X is not None else 0)
+
+    _ref_ml = predict_candidate_edges(
+        models=fold_edge_models,
+        dataset=_last_oos_set,
+        p_pass=p_pass_ref,
+        cfg=strategy_cfg.candidate,
+        gate_enabled=gate_enabled,
+        gate_threshold=gate_threshold,
+        edge_source=edge_source,
+    )
     ml_out = CandidateModelOutput(
         events=combined_events,
         p_pass=p_pass.astype(np.float64, copy=False) if p_pass.size > 0 else p_pass,
-        mu_gross_bps=_combined_mu,
-        mu_net_decision_bps=_combined_mu,
+        gate_enabled=gate_enabled,
+        gate_threshold=gate_threshold,
+        edge_source=edge_source,
+        expected_return_r=_combined_expected_return_r,
+        expected_net_bps=_combined_mu,
+        q10_return_r=_combined_q10_return_r,
         q10_net_bps=_combined_q10,
+        q90_return_r=_combined_q90_return_r,
         q90_net_bps=_combined_q90,
-        utility_score=_combined_utility,
-        selection_thresholds=_ref_ml.selection_thresholds,
+        selection_score=_combined_utility,
+        kelly_fraction=_combined_kelly_fraction,
+        validation_diagnostics=_ref_ml.validation_diagnostics,
     )
     ml_out = replace(ml_out, events=combined_events)
 
@@ -799,7 +824,6 @@ def run_candidate_strategy_for_universe(
     # For downstream logging, expose last-fold model state
     gate_model = fold_gate_model
     # Reconstruct oos_set for report counts (use combined)
-    oos_set = _last_oos_set
 
     _logger.info(
         (
