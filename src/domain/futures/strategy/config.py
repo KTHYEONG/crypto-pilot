@@ -173,6 +173,7 @@ class CandidateStrategyConfig:
     breakeven_floor_mode: Literal["static", "fold_adaptive"] = "static"
     breakeven_floor_cost_quantile: float = 0.50
     enabled_candidate_variants: tuple[str, ...] = ()
+    disabled_candidate_variants: tuple[str, ...] = ()
     side_flip_candidate_variants: tuple[str, ...] = ()
     diagnostic_top_k: int = 10
     min_variant_oos_obs: int = 100
@@ -284,6 +285,8 @@ class CandidateStrategyConfig:
     edge_prior_enabled: bool = True
     edge_prior_min_obs: int = 100
     edge_prior_shrinkage_obs: int = 500
+    edge_prior_max_deviation_bps: float = 30.0
+    max_variant_selection_fraction: float = 0.4
     edge_residual_model_enabled: bool = True
     max_drawdown_cap: float = 0.25
     # Deployment integrity: prevent near-zero-trading variants from "passing"
@@ -455,6 +458,10 @@ class CandidateStrategyConfig:
             raise ValueError("edge_prior_min_obs must be >= 1")
         if self.edge_prior_shrinkage_obs < 1:
             raise ValueError("edge_prior_shrinkage_obs must be >= 1")
+        if self.edge_prior_max_deviation_bps <= 0.0:
+            raise ValueError("edge_prior_max_deviation_bps must be > 0")
+        if not (0.0 < self.max_variant_selection_fraction <= 1.0):
+            raise ValueError("max_variant_selection_fraction must be in (0.0, 1.0]")
         if self.min_variant_oos_obs < 1:
             raise ValueError("min_variant_oos_obs must be >= 1")
         if not (0.0 < self.max_variant_event_fraction_per_bar <= 1.0):
@@ -472,6 +479,9 @@ class CandidateStrategyConfig:
         for variant in self.enabled_candidate_variants:
             if variant.count(":") != 1:
                 raise ValueError("enabled_candidate_variants entries must be formatted as family:variant")
+        for variant in self.disabled_candidate_variants:
+            if variant.count(":") != 1:
+                raise ValueError("disabled_candidate_variants entries must be formatted as family:variant")
         for variant in self.side_flip_candidate_variants:
             if variant.count(":") != 1:
                 raise ValueError("side_flip_candidate_variants entries must be formatted as family:variant")

@@ -524,7 +524,7 @@ def _log_selection_by_variant(
         key=lambda item: item[1],
         reverse=True,
     )[: max(1, int(getattr(cfg, "diagnostic_top_k", 10)))]:
-        logger.debug(
+        logger.info(
             (
                 "[DIAG][SELECT_VARIANT] key=%s total=%d gate_fail=%d edge_fail=%d "
                 "q10_fail=%d passed=%d mean_p=%.3f max_mu=%.1f max_q10=%.1f"
@@ -641,15 +641,22 @@ def select_candidate_events_for_portfolio(
                 if cfg.selection_utility_mode == "expected_edge_direct"
                 else "utility_score"
             )
-            top_idx = (
-                df.loc[eligible]
-                .sort_values(
-                    [primary_sort_col, "p_pass", "mu_net_decision_bps", "q10_net_bps"],
-                    ascending=[False, False, False, False],
-                )
-                .head(n_keep)
-                .index
+            sorted_eligible = df.loc[eligible].sort_values(
+                [primary_sort_col, "p_pass", "mu_net_decision_bps", "q10_net_bps"],
+                ascending=[False, False, False, False],
             )
+            max_variant_fraction = float(getattr(cfg, "max_variant_selection_fraction", 1.0))
+            variant_group_cols = [
+                col for col in ("family", "variant") if col in sorted_eligible.columns
+            ]
+            if max_variant_fraction < 1.0 and n_keep > 1 and variant_group_cols:
+                max_per_variant = max(1, math.ceil(n_keep * max_variant_fraction))
+                variant_ranks = sorted_eligible.groupby(
+                    variant_group_cols, sort=False
+                ).cumcount()
+                top_idx = sorted_eligible[variant_ranks < max_per_variant].head(n_keep).index
+            else:
+                top_idx = sorted_eligible.head(n_keep).index
             mask = pd.Series(False, index=df.index, dtype=bool)
             mask.loc[top_idx] = True
             zero_reason = "selected_nonzero" if int(mask.sum()) > 0 else "topk_selected_zero"
@@ -753,6 +760,32 @@ def select_candidate_events_for_portfolio(
     }
     if "edge_after_hurdle_bps" in selected.columns:
         realized_edge = pd.to_numeric(selected["edge_after_hurdle_bps"], errors="coerce")
+        if realized_edge.notna().any():
+            _re_arr = realized_edge.to_numpy(dtype=np.float64, copy=False)
+            _wins = _re_arr[_re_arr > 0.0]
+            _losses = _re_arr[_re_arr < 0.0]
+            _payoff = (
+                (float(np.mean(_wins)) / abs(float(np.mean(_losses))))
+                if _wins.size > 0 and _losses.size > 0
+                else float("nan")
+            )
+            _mu_ic = _rank_ic(
+                pd.to_numeric(selected["mu_net_decision_bps"], errors="coerce"),
+                realized_edge,
+            )
+            _sel_logger.info(
+                "[DIAG][EDGE_IC] n=%d mu_net_rank_ic=%.4f hit_rate=%.3f payoff_ratio=%.3f "
+                "realized_mean=%.1f win_mean=%.1f loss_mean=%.1f",
+                len(realized_edge),
+                float(_mu_ic) if _mu_ic is not None else float("nan"),
+                float((realized_edge > 0.0).mean()),
+                _payoff,
+                float(realized_edge.mean()),
+                float(np.mean(_wins)) if _wins.size > 0 else float("nan"),
+                float(np.mean(_losses)) if _losses.size > 0 else float("nan"),
+            )
+            diagnostics["mu_net_rank_ic"] = float(_mu_ic) if _mu_ic is not None else None
+            diagnostics["payoff_ratio"] = _payoff
         diagnostics["realized_selected_edge_mean_bps"] = (
             float(realized_edge.mean()) if realized_edge.notna().any() else None
         )
