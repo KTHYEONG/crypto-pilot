@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -166,7 +166,7 @@ def test_build_variant_prior_output_uses_calibration_set_prior(monkeypatch: Any)
     calibration_set = SimpleNamespace(
         X=np.zeros((2, 1), dtype=np.float32),
         y_edge_bps=np.asarray([100.0, 0.0], dtype=np.float32),
-        sample_weight=np.ones(2, dtype=np.float32),
+        edge_weight=np.ones(2, dtype=np.float32),
         event_index=pd.DataFrame(
             {
                 "family": ["trend_ma", "rsi_reversion"],
@@ -460,7 +460,7 @@ def test_validate_candidate_signals_stress_mean_avoids_cost_double_counting() ->
 
     # Act
     reports = validate_candidate_signals(
-        labeled=labeled, diag=_signal_diag(), cfg=cfg, oos_start=0, oos_end=100
+        labeled=labeled, diag=cast(Any, _signal_diag()), cfg=cfg, oos_start=0, oos_end=100
     )
 
     # Assert: honest stress = mean(edge) + base_cost - stress_rt = 25 + 7.5 - 11.25 = 21.25
@@ -478,7 +478,7 @@ def test_validate_candidate_signals_mean_path_survives_skewed_payoff() -> None:
 
     # Act
     reports = validate_candidate_signals(
-        labeled=labeled, diag=_signal_diag(), cfg=cfg, oos_start=0, oos_end=100
+        labeled=labeled, diag=cast(Any, _signal_diag()), cfg=cfg, oos_start=0, oos_end=100
     )
 
     # Assert: mean rescues skew where median would reject (p50<0<mean).
@@ -494,7 +494,7 @@ def test_validate_candidate_signals_legacy_median_path_blocks_skewed_payoff() ->
 
     # Act
     reports = validate_candidate_signals(
-        labeled=labeled, diag=_signal_diag(), cfg=cfg, oos_start=0, oos_end=100
+        labeled=labeled, diag=cast(Any, _signal_diag()), cfg=cfg, oos_start=0, oos_end=100
     )
 
     # Assert: median-stress (-10 - 11.25 < 0) blocks the skewed-but-profitable variant.
@@ -509,7 +509,7 @@ def test_validate_candidate_signals_blocks_when_mean_net_stress_negative() -> No
 
     # Act
     reports = validate_candidate_signals(
-        labeled=labeled, diag=_signal_diag(), cfg=cfg, oos_start=0, oos_end=100
+        labeled=labeled, diag=cast(Any, _signal_diag()), cfg=cfg, oos_start=0, oos_end=100
     )
 
     # Assert
@@ -525,7 +525,7 @@ def test_validate_candidate_signals_empty_oos_reports_not_survived() -> None:
 
     # Act: OOS window starts past all entry_idx values.
     reports = validate_candidate_signals(
-        labeled=labeled, diag=_signal_diag(), cfg=cfg, oos_start=500, oos_end=600
+        labeled=labeled, diag=cast(Any, _signal_diag()), cfg=cfg, oos_start=500, oos_end=600
     )
 
     # Assert
