@@ -75,3 +75,24 @@ def test_fit_candidate_gate_skips_calibration_when_probability_dispersion_collap
     assert probs.shape == (80,)
     assert not model.calibration_used
     assert model.calibration_reason == "calibration_probability_collapse"
+
+
+def test_gate_always_active_returns_calibrated_prob() -> None:
+    """Layer 1 simplification: gate.validation.enabled=True always, predict returns calibrated prob."""
+    train = _make_dataset(seed=41, n=160)
+    valid = _make_dataset(seed=42, n=80)
+    cfg = CandidateStrategyConfig(seed=19, min_gate_calibration_obs=10)
+
+    # Act
+    model = fit_candidate_gate(train=train, early_stop=valid, calibration=valid, cfg=cfg)
+    probs = predict_candidate_gate(model=model, dataset=valid)
+
+    # Assert: gate is always enabled regardless of brier_skill/decile_lift
+    assert model.validation.enabled is True
+    assert model.validation.reason == "gate_always_active_catastrophic_veto"
+    # predict returns model probabilities (not ones)
+    assert probs.shape == (80,)
+    assert np.all(probs >= 0.0)
+    assert np.all(probs <= 1.0)
+    # Probabilities should NOT all be 1.0 (old behavior when disabled)
+    assert not np.all(probs == 1.0)

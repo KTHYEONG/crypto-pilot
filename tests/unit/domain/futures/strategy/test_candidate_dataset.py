@@ -419,3 +419,98 @@ def test_build_candidate_dataset_preserves_realized_diagnostics_only_in_event_in
     assert "exit_reason" in ds.event_index.columns
     assert ds.event_index.loc[0, "exit_reason"] == "take_profit"
     assert "exit_reason" not in ds.feature_names
+
+
+def test_signal_prequalify_excludes_negative_edge_variants() -> None:
+    """Layer 0: is_fit_split=True zeros out edge_weight for variants with IS mean_edge < 0."""
+    aligned = _make_aligned()
+    # Two variants: "good" variant with positive edge, "bad" variant with negative edge
+    labeled = pd.DataFrame(
+        {
+            "datetime": [
+                aligned.datetimes[25], aligned.datetimes[26],
+                aligned.datetimes[27], aligned.datetimes[28],
+                aligned.datetimes[29], aligned.datetimes[30],
+            ],
+            "symbol": ["BTCUSDT"] * 6,
+            "family": ["trend_ma"] * 3 + ["trend_ma"] * 3,
+            "variant": ["good_v"] * 3 + ["bad_v"] * 3,
+            "side": [1] * 6,
+            "entry_idx": [26, 27, 28, 29, 30, 31],
+            "exit_idx": [27, 28, 29, 30, 31, 32],
+            "raw_score": [0.5] * 6,
+            "score_z": [1.0] * 6,
+            "turnover_proxy": [0.1] * 6,
+            "profitable_after_hurdle_label": [1, 1, 1, 0, 0, 0],
+            "edge_after_hurdle_bps": [20.0, 25.0, 30.0, -10.0, -15.0, -20.0],
+            "sl_thr_bps": [25.0] * 6,
+            "mae_bps": [-5.0] * 6,
+            "mfe_bps": [20.0] * 6,
+            "ex_ante_cost_bps": [4.0] * 6,
+        }
+    )
+    cfg = CandidateStrategyConfig(signal_prequalify_min_obs=2)
+    schema = fit_candidate_feature_schema(
+        labeled_events=labeled, cfg=cfg, split_start=20, split_end=40
+    )
+
+    # Arrange: is_fit_split=True should zero out bad_v
+    ds = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        schema=schema,
+        split_start=20,
+        split_end=40,
+        is_fit_split=True,
+    )
+
+    # Assert: bad_v events have edge_weight=0, good_v events have edge_weight>0
+    event_idx = ds.event_index
+    good_mask = event_idx["variant"] == "good_v"
+    bad_mask = event_idx["variant"] == "bad_v"
+    assert ds.edge_weight[good_mask.to_numpy(dtype=bool)].sum() > 0.0
+    assert ds.edge_weight[bad_mask.to_numpy(dtype=bool)].sum() == pytest.approx(0.0)
+
+
+def test_signal_prequalify_not_applied_when_is_fit_split_false() -> None:
+    """Non-fit splits must not apply signal pre-qualification."""
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25], aligned.datetimes[26]],
+            "symbol": ["BTCUSDT", "BTCUSDT"],
+            "family": ["trend_ma", "trend_ma"],
+            "variant": ["bad_v", "bad_v"],
+            "side": [1, 1],
+            "entry_idx": [26, 27],
+            "exit_idx": [27, 28],
+            "raw_score": [0.5, 0.5],
+            "score_z": [1.0, 1.0],
+            "turnover_proxy": [0.1, 0.1],
+            "profitable_after_hurdle_label": [0, 0],
+            "edge_after_hurdle_bps": [-10.0, -20.0],
+            "sl_thr_bps": [25.0, 25.0],
+            "mae_bps": [-5.0, -5.0],
+            "mfe_bps": [5.0, 5.0],
+            "ex_ante_cost_bps": [4.0, 4.0],
+        }
+    )
+    cfg = CandidateStrategyConfig(signal_prequalify_min_obs=2)
+    schema = fit_candidate_feature_schema(
+        labeled_events=labeled, cfg=cfg, split_start=20, split_end=40
+    )
+
+    # Act: is_fit_split=False (default) — bad_v should retain its weight
+    ds = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        schema=schema,
+        split_start=20,
+        split_end=40,
+        is_fit_split=False,
+    )
+
+    # Assert: edge_weight is not zeroed out even though mean_edge < 0
+    assert ds.edge_weight.sum() > 0.0

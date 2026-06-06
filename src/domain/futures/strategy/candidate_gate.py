@@ -182,12 +182,9 @@ def fit_candidate_gate(
         top_decile_mask = chosen_prob >= decile_cut
         top_decile_rate = float(np.mean(eval_set.y_gate[top_decile_mask])) if bool(top_decile_mask.any()) else base_rate
         decile_lift = float(top_decile_rate - base_rate)
-        enabled = bool(
-            calibration_used
-            and np.isfinite(brier_skill)
-            and brier_skill >= float(getattr(cfg, "min_gate_brier_skill", 0.0))
-            and decile_lift >= float(getattr(cfg, "min_gate_decile_lift", 0.02))
-        )
+        # Layer 1 simplification: gate is always active (catastrophic veto only).
+        # brier_skill/decile_lift retained as diagnostics only — not used for gate enable/disable.
+        enabled = True
         validation_report = GateValidationReport(
             enabled=enabled,
             threshold=float(getattr(cfg, "selection_min_gate_probability_floor", 0.35)),
@@ -199,7 +196,7 @@ def fit_candidate_gate(
             average_precision=avg_precision,
             decile_lift=decile_lift,
             incremental_log_growth_lcb=0.0,
-            reason="gate_enabled" if enabled else "gate_disabled_no_incremental_value",
+            reason="gate_always_active_catastrophic_veto",
         )
 
     _logger.info(
@@ -246,9 +243,8 @@ def predict_candidate_gate(
     """Return calibrated pass probability for candidate events."""
     if model is None or dataset.X.shape[0] == 0:
         return np.zeros(dataset.X.shape[0], dtype=np.float64)
-    if not model.validation.enabled:
-        return np.ones(dataset.X.shape[0], dtype=np.float64)
-
+    # Gate is always active (catastrophic veto only). Always return calibrated p_pass.
+    # calibrator is used when available; otherwise fall back to raw model probability.
     predictor = model.calibrator if model.calibration_used and model.calibrator is not None else model.model
     probs = cast(NDArray[np.float64], predictor.predict_proba(dataset.X)[:, 1])
     

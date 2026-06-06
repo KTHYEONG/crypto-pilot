@@ -239,7 +239,8 @@ class CandidateStrategyConfig:
     max_oos_edge_decay_bps: float = 50.0
     min_gate_brier_skill: float = 0.0
     min_gate_decile_lift: float = 0.02
-    min_edge_rank_ic: float = 0.01
+    min_edge_rank_ic: float = 0.02
+    signal_prequalify_min_obs: int = 30
     edge_uplift_bootstrap_samples: int = 500
     edge_uplift_confidence: float = 0.90
     min_risk_unit_bps: float = 25.0
