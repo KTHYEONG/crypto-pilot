@@ -19,11 +19,13 @@ class CandidateDataset:
     y_edge_bps: NDArray[np.float32]
     y_q10_bps: NDArray[np.float32]
     y_mfe_bps: NDArray[np.float32]
-    sample_weight: NDArray[np.float32]
+    gate_weight: NDArray[np.float32]
+    edge_weight: NDArray[np.float32]
     groups: NDArray[np.int32]
     event_index: pd.DataFrame
     feature_names: tuple[str, ...]
-    feature_schema_version: str = "candidate_v3"
+    effective_sample_size: float = 0.0
+    feature_schema_version: str = "candidate_v4"
 
 
 def _find_symbol_index(symbols: tuple[str, ...], symbol: str) -> int:
@@ -46,6 +48,43 @@ def _target_cost_hurdle_bps(events: pd.DataFrame) -> NDArray[np.float32]:
         np.nan_to_num(hurdle, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         cost_hurdle = cost_hurdle + hurdle
     return cost_hurdle
+
+
+def _event_uniqueness_weights(
+    *,
+    entry_idx: NDArray[np.int32],
+    exit_idx: NDArray[np.int32],
+    split_start: int,
+    split_end: int,
+) -> tuple[NDArray[np.float32], float]:
+    """Return overlap-aware uniqueness weights and effective sample size."""
+    n_events = int(entry_idx.shape[0])
+    if n_events == 0 or split_end <= split_start:
+        return np.zeros((n_events,), dtype=np.float32), 0.0
+
+    horizon = split_end - split_start
+    concurrency = np.zeros(horizon + 1, dtype=np.int32)
+    starts = np.clip(entry_idx.astype(np.int64) - split_start, 0, max(horizon - 1, 0))
+    ends = np.clip(exit_idx.astype(np.int64) - split_start, 0, max(horizon - 1, 0))
+    for start, end in zip(starts, ends, strict=True):
+        concurrency[int(start)] += 1
+        concurrency[int(end) + 1] -= 1
+    active = np.cumsum(concurrency[:-1], dtype=np.int32)
+    inv_active = np.zeros(active.shape[0], dtype=np.float64)
+    positive_mask = active > 0
+    inv_active[positive_mask] = 1.0 / active[positive_mask]
+
+    weights = np.zeros((n_events,), dtype=np.float64)
+    for idx, (start, end) in enumerate(zip(starts, ends, strict=True)):
+        segment = inv_active[int(start) : int(end) + 1]
+        weights[idx] = float(segment.mean()) if segment.size > 0 else 0.0
+
+    positive = weights > 0.0
+    if positive.any():
+        weights[positive] = weights[positive] / float(np.mean(weights[positive]))
+    ess_den = float(np.sum(np.square(weights)))
+    ess = float((np.sum(weights) ** 2) / ess_den) if ess_den > 0.0 else 0.0
+    return weights.astype(np.float32, copy=False), ess
 
 
 def _stable_variant_key(family: str, variant: str) -> str:
@@ -125,6 +164,7 @@ def build_candidate_dataset(
     cfg: CandidateStrategyConfig,
     split_start: int,
     split_end: int,
+    require_label_within_split: bool = True,
 ) -> CandidateDataset:
     """Build model matrix for candidate gate and edge models.
 
@@ -168,6 +208,12 @@ def build_candidate_dataset(
     feature_names = base_feat_names + uni_feat_names + mkt_feat_names + id_feat_names
 
     mask = (labeled_events["entry_idx"] >= split_start) & (labeled_events["entry_idx"] < split_end)
+    if require_label_within_split:
+        if "exit_idx" not in labeled_events.columns:
+            mask &= False
+        else:
+            exit_idx = pd.to_numeric(labeled_events["exit_idx"], errors="coerce")
+            mask &= exit_idx.ge(0) & exit_idx.lt(split_end)
     events = labeled_events.loc[mask].copy()
     if events.empty:
         return CandidateDataset(
@@ -176,10 +222,12 @@ def build_candidate_dataset(
             y_edge_bps=np.zeros((0,), dtype=np.float32),
             y_q10_bps=np.zeros((0,), dtype=np.float32),
             y_mfe_bps=np.zeros((0,), dtype=np.float32),
-            sample_weight=np.zeros((0,), dtype=np.float32),
+            gate_weight=np.zeros((0,), dtype=np.float32),
+            edge_weight=np.zeros((0,), dtype=np.float32),
             groups=np.zeros((0,), dtype=np.int32),
             event_index=events,
             feature_names=feature_names,
+            effective_sample_size=0.0,
         )
 
     # Pre-calculate features
@@ -403,10 +451,12 @@ def build_candidate_dataset(
             y_edge_bps=np.zeros((0,), dtype=np.float32),
             y_q10_bps=np.zeros((0,), dtype=np.float32),
             y_mfe_bps=np.zeros((0,), dtype=np.float32),
-            sample_weight=np.zeros((0,), dtype=np.float32),
+            gate_weight=np.zeros((0,), dtype=np.float32),
+            edge_weight=np.zeros((0,), dtype=np.float32),
             groups=np.zeros((0,), dtype=np.int32),
             event_index=kept_events,
             feature_names=feature_names,
+            effective_sample_size=0.0,
         )
 
     gate_label_col = cfg.gate_label_column
@@ -428,7 +478,12 @@ def build_candidate_dataset(
         y_edge,
     )
     y_mfe = kept_events["mfe_bps"].to_numpy(dtype=np.float32, copy=False) - cost_hurdle
-    sw = np.clip(np.abs(y_edge) / 10.0, 0.5, 5.0).astype(np.float32, copy=False)
+    uniqueness_weight, effective_sample_size = _event_uniqueness_weights(
+        entry_idx=kept_events["entry_idx"].to_numpy(dtype=np.int32, copy=False),
+        exit_idx=kept_events["exit_idx"].to_numpy(dtype=np.int32, copy=False),
+        split_start=split_start,
+        split_end=split_end,
+    )
 
     return CandidateDataset(
         X=x_final,
@@ -436,8 +491,10 @@ def build_candidate_dataset(
         y_edge_bps=y_edge,
         y_q10_bps=y_q10.astype(np.float32, copy=False),
         y_mfe_bps=y_mfe,
-        sample_weight=sw,
+        gate_weight=uniqueness_weight,
+        edge_weight=uniqueness_weight.copy(),
         groups=groups_final,
         event_index=kept_events.reset_index(drop=True),
         feature_names=feature_names,
+        effective_sample_size=effective_sample_size,
     )

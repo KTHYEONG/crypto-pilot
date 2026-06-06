@@ -127,7 +127,7 @@ def _build_calibration_variant_priors(
         else pd.Series(["__global__"] * calibration_set.X.shape[0], dtype=object)
     )
     y_edge = np.asarray(calibration_set.y_edge_bps, dtype=np.float64)
-    weights = np.asarray(calibration_set.sample_weight, dtype=np.float64)
+    weights = np.asarray(calibration_set.edge_weight, dtype=np.float64)
     global_mask = np.isfinite(y_edge) & np.isfinite(weights) & (weights > 0.0)
     if bool(global_mask.any()):
         global_prior = float(np.average(y_edge[global_mask], weights=weights[global_mask]))
@@ -466,7 +466,7 @@ def run_candidate_ablation(
     )
 
     # 4. Train ML Models
-    gate_model = fit_candidate_gate(train=fit_set, valid=calibration_set, cfg=cfg)
+    gate_model = fit_candidate_gate(train=fit_set, early_stop=calibration_set, calibration=calibration_set, cfg=cfg)
     edge_models = fit_candidate_edge_models(train=fit_set, valid=calibration_set, cfg=cfg)
 
     # 5. Predict outcomes for OOS sample only
@@ -798,7 +798,7 @@ def _run_oos_only_ablation_variant(
         labeled_events=labeled, aligned=aligned, cfg=cfg, split_start=oos_start, split_end=oos_end
     )
 
-    gate_model = fit_candidate_gate(train=fit_set, valid=calibration_set, cfg=cfg)
+    gate_model = fit_candidate_gate(train=fit_set, early_stop=calibration_set, calibration=calibration_set, cfg=cfg)
     edge_models = fit_candidate_edge_models(train=fit_set, valid=calibration_set, cfg=cfg)
 
     p_pass = predict_candidate_gate(model=gate_model, dataset=oos_set)

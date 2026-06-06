@@ -49,6 +49,7 @@ def test_build_candidate_dataset_shapes_and_types() -> None:
             "symbol": ["BTCUSDT", "ETHUSDT"],
             "side": [1, -1],
             "entry_idx": [26, 31],
+            "exit_idx": [27, 32],
             "raw_score": [0.5, -0.4],
             "score_z": [1.2, -0.8],
             "turnover_proxy": [0.1, 0.2],
@@ -80,7 +81,10 @@ def test_build_candidate_dataset_shapes_and_types() -> None:
     assert ds.y_gate.tolist() == [0, 1]
     assert ds.y_q10_bps.tolist() == [-10.0, -12.0]
     assert ds.y_mfe_bps.tolist() == [14.0, 1.0]
-    assert ds.feature_schema_version == "candidate_v3"
+    assert ds.feature_schema_version == "candidate_v4"
+    assert np.all(ds.gate_weight > 0.0)
+    assert np.all(ds.edge_weight > 0.0)
+    assert ds.effective_sample_size > 0.0
     assert "sl_thr_bps" in ds.feature_names
     assert "universe_vol_30d" in ds.feature_names
     assert "universe_friction_score" in ds.feature_names
@@ -106,6 +110,7 @@ def test_build_candidate_dataset_split_filter() -> None:
             "symbol": ["BTCUSDT", "ETHUSDT"],
             "side": [1, 1],
             "entry_idx": [11, 51],
+            "exit_idx": [12, 52],
             "raw_score": [0.5, 0.6],
             "score_z": [1.0, 1.1],
             "turnover_proxy": [0.1, 0.1],
@@ -136,6 +141,7 @@ def test_build_candidate_dataset_uses_configured_gate_label_column() -> None:
             "symbol": ["BTCUSDT", "ETHUSDT"],
             "side": [1, -1],
             "entry_idx": [26, 31],
+            "exit_idx": [27, 32],
             "raw_score": [0.5, -0.4],
             "score_z": [1.2, -0.8],
             "turnover_proxy": [0.1, 0.2],
@@ -167,6 +173,7 @@ def test_build_candidate_dataset_raises_when_configured_gate_label_is_missing() 
             "symbol": ["BTCUSDT"],
             "side": [1],
             "entry_idx": [26],
+            "exit_idx": [27],
             "raw_score": [0.5],
             "score_z": [1.2],
             "turnover_proxy": [0.1],
@@ -196,6 +203,7 @@ def test_build_candidate_dataset_builds_net_q10_and_mfe_targets_with_hurdle() ->
             "symbol": ["BTCUSDT"],
             "side": [1],
             "entry_idx": [26],
+            "exit_idx": [27],
             "raw_score": [0.5],
             "score_z": [1.2],
             "turnover_proxy": [0.1],
@@ -231,6 +239,7 @@ def test_build_candidate_dataset_keeps_feature_schema_stable_across_splits() -> 
             "variant": ["ema_12_72", "donchian_36"],
             "side": [1, -1],
             "entry_idx": [26, 46],
+            "exit_idx": [27, 47],
             "raw_score": [0.5, -0.4],
             "score_z": [1.2, -0.8],
             "turnover_proxy": [0.1, 0.2],
@@ -263,8 +272,8 @@ def test_build_candidate_dataset_keeps_feature_schema_stable_across_splits() -> 
     )
 
     assert train.feature_names == valid.feature_names
-    assert train.feature_schema_version == "candidate_v3"
-    assert valid.feature_schema_version == "candidate_v3"
+    assert train.feature_schema_version == "candidate_v4"
+    assert valid.feature_schema_version == "candidate_v4"
     assert "family=trend_ma" in train.feature_names
     assert "variant=trend_donchian:donchian_36" in train.feature_names
 
@@ -277,6 +286,7 @@ def test_build_candidate_dataset_includes_universe_metadata_features() -> None:
             "symbol": ["BTCUSDT"],
             "side": [1],
             "entry_idx": [26],
+            "exit_idx": [27],
             "raw_score": [0.5],
             "score_z": [1.2],
             "turnover_proxy": [0.1],
@@ -318,6 +328,7 @@ def test_build_candidate_dataset_preserves_realized_diagnostics_only_in_event_in
             "symbol": ["BTCUSDT"],
             "side": [1],
             "entry_idx": [26],
+            "exit_idx": [27],
             "raw_score": [0.5],
             "score_z": [1.2],
             "turnover_proxy": [0.1],
