@@ -884,7 +884,7 @@ def run_optimization_loop(
                             break
                     except Exception as e:
                         _logger.debug("Progress poller failed to fetch trials: %s", e)
-                    time.sleep(1)  # Faster polling for better responsiveness
+                    time.sleep(5)  # Reduce polling frequency to prevent SQLite DB lock contention
                 pbar.n = target
                 pbar.refresh()
         except Exception as e:

@@ -171,8 +171,9 @@ def _build_variant_priors(
     min_obs = int(cfg.edge_prior_min_obs)
 
     key_to_indices: dict[str, list[int]] = {}
-    for idx, key in enumerate(keys):
-        key_to_indices.setdefault(key, []).append(idx)
+    if len(keys) > 0:
+        keys_ser = pd.Series(keys)
+        key_to_indices = {str(k): list(v) for k, v in keys_ser.groupby(keys_ser, sort=False).groups.items()}
 
     variant_means: list[float] = []
     variant_se: list[float] = []
@@ -524,14 +525,14 @@ def fit_candidate_edge_models(
     # --- Layer 2: Rank IC gate on calibration_eval set ---
     _logger = logging.getLogger(__name__)
     _breakeven_floor = float(cfg.min_net_floor_cost_fraction) * float(cfg.cost_floor_bps)
-    _logger.info(
+    _logger.debug(
         "[DIAG][PRIOR] global_prior_bps=%.2f breakeven_floor=%.2f n_variants=%d",
         global_prior_bps,
         _breakeven_floor,
         len(variant_prior_bps),
     )
     for _k, _p in sorted(variant_prior_bps.items(), key=lambda x: -x[1])[:8]:
-        _logger.info(
+        _logger.debug(
             "[DIAG][VARIANT_PRIOR] variant=%-45s prior=%.2f bps  obs=%d",
             _k,
             _p,
@@ -615,7 +616,7 @@ def fit_candidate_edge_models(
         final_prediction_mode = "disabled"
 
     if gate_mode == "overlay_lift":
-        _logger.info(
+        _logger.debug(
             "[EDGE_GATE] mode=overlay_lift lift=%.1f t=%.2f n_eff=%.1f decision=%s reason=%s inference_mode=%s",
             overlay_lift_bps,
             overlay_lift_tstat,
@@ -625,7 +626,7 @@ def fit_candidate_edge_models(
             final_prediction_mode,
         )
     else:
-        _logger.info(
+        _logger.debug(
             (
                 "[EDGE_GATE] mode=rank_ic rank_ic=%.4f t=%.2f threshold_t=%.2f "
                 "decision=%s n=%d reason=%s inference_mode=%s"
@@ -790,7 +791,7 @@ def predict_candidate_edges(
         and float(np.std(finite_mu)) < float(cfg.edge_prediction_min_std_bps)
         and float((finite_mu > 0.0).mean()) < float(cfg.edge_prediction_min_positive_rate)
     )
-    _logger.info(
+    _logger.debug(
         (
             "[DIAG][EDGE] n=%d target_scale=net mode=%s cost_bps=%.1f floor_bps=%.1f "
             "mu_mean=%.1f mu_p50=%.1f mu_p90=%.1f mu_max=%.1f "

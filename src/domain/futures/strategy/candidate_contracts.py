@@ -251,3 +251,9 @@ class CandidateFoldOutput:
     selected_events: pd.DataFrame
     gate_report: GateValidationReport
     edge_report: EdgeValidationReport
+    gate_model: Any | None = None
+    edge_models: Any | None = None
+    fit_set: Any | None = None
+    calibration_set: Any | None = None
+    oos_set: Any | None = None
+    timing_profile: dict[str, float] | None = None

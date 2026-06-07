@@ -72,7 +72,7 @@ def fit_candidate_gate(
         incremental_log_growth_lcb=0.0,
         reason="gate_replaced_by_q10_mu_ratio",
     )
-    _logger.info(
+    _logger.debug(
         "[DIAG][GATE_FIT] train_n=%d valid_n=%d valid_pos=%d valid_neg=%d reason=%s",
         int(train.X.shape[0]),
         valid_n,
