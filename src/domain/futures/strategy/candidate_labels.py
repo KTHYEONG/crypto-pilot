@@ -17,19 +17,76 @@ _EXIT_POLICY_VERSION = "candidate_label_atr_v2"
 _logger = logging.getLogger(__name__)
 
 
-def _compute_atr_2d(aligned: AlignedMarketData, period: int = _ATR_PERIOD) -> np.ndarray:
-    high = aligned.high_2d
-    low = aligned.low_2d
-    close = aligned.close_2d
+def _rolling_mean_2d(values: np.ndarray, window: int) -> np.ndarray:
+    return np.asarray(
+        pd.DataFrame(values).rolling(window=window, min_periods=1).mean().to_numpy(),
+        dtype=np.float64,
+    )
+
+
+def _rolling_var_2d(values: np.ndarray, window: int) -> np.ndarray:
+    return np.asarray(
+        pd.DataFrame(values)
+        .rolling(window=window, min_periods=2)
+        .var(ddof=0)
+        .fillna(0.0)
+        .to_numpy(),
+        dtype=np.float64,
+    )
+
+
+def _compute_yang_zhang_vol_2d(aligned: AlignedMarketData, period: int = _ATR_PERIOD) -> np.ndarray:
+    open_ = np.maximum(aligned.open_2d, 1e-12)
+    high = np.maximum(aligned.high_2d, 1e-12)
+    low = np.maximum(aligned.low_2d, 1e-12)
+    close = np.maximum(aligned.close_2d, 1e-12)
     prev_close = np.vstack([close[:1], close[:-1]])
-    tr = np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
-    out = np.full_like(tr, np.nan, dtype=np.float64)
-    for t in range(tr.shape[0]):
-        start = max(0, t - period + 1)
-        window = tr[start : t + 1]
-        with np.errstate(invalid="ignore"):
-            out[t] = np.nanmean(window, axis=0)
-    return out
+
+    log_oo = np.log(open_ / prev_close)
+    log_cc = np.log(close / open_)
+    log_ho = np.log(high / open_)
+    log_lo = np.log(low / open_)
+    rs = log_ho * (log_ho - log_cc) + log_lo * (log_lo - log_cc)
+
+    k = 0.34 / (1.34 + (period + 1.0) / max(period - 1.0, 1.0))
+    sigma2_oo = _rolling_var_2d(log_oo, period)
+    sigma2_cc = _rolling_var_2d(log_cc, period)
+    sigma2_rs = _rolling_mean_2d(rs, period)
+    yz_var = np.maximum(sigma2_oo + k * sigma2_cc + (1.0 - k) * sigma2_rs, 0.0)
+    return close * np.sqrt(yz_var)
+
+
+def _scan_barriers_vectorized(
+    *,
+    high: np.ndarray,
+    low: np.ndarray,
+    entry_price: float,
+    side: int,
+    tp_thr: float,
+    sl_thr: float,
+    scan_from: int,
+) -> tuple[int, int, str, int]:
+    """Return exit offset, barrier label, exit reason, and same-bar collision flag."""
+    if side > 0:
+        fav = (high / entry_price) - 1.0
+        adv = (low / entry_price) - 1.0
+    else:
+        fav = (entry_price / np.maximum(low, 1e-12)) - 1.0
+        adv = (entry_price / np.maximum(high, 1e-12)) - 1.0
+
+    fav_scan = fav[scan_from:]
+    adv_scan = adv[scan_from:]
+    tp_hit_mask = np.isfinite(fav_scan) & (fav_scan >= tp_thr)
+    sl_hit_mask = np.isfinite(adv_scan) & (adv_scan <= -sl_thr)
+    tp_i = int(np.argmax(tp_hit_mask)) + scan_from if bool(tp_hit_mask.any()) else math.inf
+    sl_i = int(np.argmax(sl_hit_mask)) + scan_from if bool(sl_hit_mask.any()) else math.inf
+
+    same_bar_collision = int(np.isfinite(tp_i) and np.isfinite(sl_i) and tp_i == sl_i)
+    if np.isfinite(sl_i) and (not np.isfinite(tp_i) or sl_i <= tp_i):
+        return int(sl_i), 0, "stop_loss", same_bar_collision
+    if np.isfinite(tp_i):
+        return int(tp_i), 1, "take_profit", same_bar_collision
+    return int(high.shape[0] - 1), 0, "time_exit", same_bar_collision
 
 
 def _find_symbol_index(symbols: tuple[str, ...], symbol: str) -> int:
@@ -82,7 +139,7 @@ def label_candidate_events(
     if missing:
         raise ValueError(f"missing required event columns: {sorted(missing)}")
 
-    atr_2d = _compute_atr_2d(aligned)
+    atr_2d = _compute_yang_zhang_vol_2d(aligned)
     out = events.copy()
     t_len = aligned.close_2d.shape[0]
     cost_model = ExecutionCostModel(
@@ -174,39 +231,18 @@ def label_candidate_events(
         tp_thr = (tp_mult * atr) / entry_px
         sl_thr = (stop_mult * atr) / entry_px
 
-        if side > 0:
-            fav = (high_path / entry_px) - 1.0
-            adv = (low_path / entry_px) - 1.0
-        else:
-            fav = (entry_px / np.maximum(low_path, 1e-12)) - 1.0
-            adv = (entry_px / np.maximum(high_path, 1e-12)) - 1.0
-
         # L-3: engine_aligned → skip first min_holding_bars when scanning barriers
         min_hold = max(0, int(getattr(row, "min_holding_bars", 0))) if cfg.exit_policy_mode == "engine_aligned" else 0
         scan_from = min_hold
-
-        fav_scan = fav[scan_from:]
-        adv_scan = adv[scan_from:]
-        tp_hits_rel = np.flatnonzero(np.isfinite(fav_scan) & (fav_scan >= tp_thr))
-        sl_hits_rel = np.flatnonzero(np.isfinite(adv_scan) & (adv_scan <= -sl_thr))
-        tp_hits = tp_hits_rel + scan_from if tp_hits_rel.size > 0 else tp_hits_rel
-        sl_hits = sl_hits_rel + scan_from if sl_hits_rel.size > 0 else sl_hits_rel
-
-        tp_i = int(tp_hits[0]) if tp_hits.size > 0 else math.inf
-        sl_i = int(sl_hits[0]) if sl_hits.size > 0 else math.inf
-        same_bar_collision = int(np.isfinite(tp_i) and np.isfinite(sl_i) and tp_i == sl_i)
-        if np.isfinite(sl_i) and (not np.isfinite(tp_i) or sl_i <= tp_i):
-            exit_off = int(sl_i)
-            barrier_label = 0
-            exit_reason = "stop_loss"
-        elif np.isfinite(tp_i):
-            exit_off = int(tp_i)
-            barrier_label = 1
-            exit_reason = "take_profit"
-        else:
-            exit_off = int(close_path.shape[0] - 1)
-            barrier_label = 0
-            exit_reason = "time_exit"
+        exit_off, barrier_label, exit_reason, same_bar_collision = _scan_barriers_vectorized(
+            high=high_path,
+            low=low_path,
+            entry_price=entry_px,
+            side=side,
+            tp_thr=tp_thr,
+            sl_thr=sl_thr,
+            scan_from=scan_from,
+        )
 
         # L-2: use barrier price as exit_px (not close of exit bar)
         # Prevents SL optimism (low triggers but close rebounds) and TP pessimism.
