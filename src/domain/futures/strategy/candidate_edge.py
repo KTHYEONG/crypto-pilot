@@ -523,6 +523,20 @@ def fit_candidate_edge_models(
 
     # --- Layer 2: Rank IC gate on calibration_eval set ---
     _logger = logging.getLogger(__name__)
+    _breakeven_floor = float(cfg.min_net_floor_cost_fraction) * float(cfg.cost_floor_bps)
+    _logger.info(
+        "[DIAG][PRIOR] global_prior_bps=%.2f breakeven_floor=%.2f n_variants=%d",
+        global_prior_bps,
+        _breakeven_floor,
+        len(variant_prior_bps),
+    )
+    for _k, _p in sorted(variant_prior_bps.items(), key=lambda x: -x[1])[:8]:
+        _logger.info(
+            "[DIAG][VARIANT_PRIOR] variant=%-45s prior=%.2f bps  obs=%d",
+            _k,
+            _p,
+            variant_prior_obs.get(_k, 0),
+        )
     accepted = False
     rank_ic_val = float("nan")
     overlay_lift_bps = 0.0

@@ -19,6 +19,51 @@ _logger = logging.getLogger(__name__)
 _ROBUST_Z_EPS = 1e-9
 _ROBUST_Z_CLIP = 3.0
 
+_ARCHETYPE_REGIME_AFFINITY: dict[tuple[str, str], float] = {
+    ("trend_continuation", "bull_quiet"): 1.0,
+    ("trend_continuation", "bull_volatile"): 0.5,
+    ("trend_continuation", "bear_quiet"): -0.5,
+    ("trend_continuation", "bear_volatile"): -1.0,
+    ("trend_continuation", "transition"): 0.0,
+    ("trend_continuation", "crash"): -1.0,
+    ("time_series_momentum", "bull_quiet"): 1.0,
+    ("time_series_momentum", "bull_volatile"): 0.7,
+    ("time_series_momentum", "bear_quiet"): -0.3,
+    ("time_series_momentum", "bear_volatile"): -0.7,
+    ("time_series_momentum", "transition"): 0.0,
+    ("time_series_momentum", "crash"): -1.0,
+    ("mean_reversion", "bull_quiet"): 0.0,
+    ("mean_reversion", "bull_volatile"): 0.8,
+    ("mean_reversion", "bear_quiet"): 0.0,
+    ("mean_reversion", "bear_volatile"): 0.8,
+    ("mean_reversion", "transition"): 0.5,
+    ("mean_reversion", "crash"): -0.5,
+    ("carry_reversion", "bull_quiet"): 0.3,
+    ("carry_reversion", "bull_volatile"): 0.5,
+    ("carry_reversion", "bear_quiet"): 0.3,
+    ("carry_reversion", "bear_volatile"): 0.5,
+    ("carry_reversion", "transition"): 0.8,
+    ("carry_reversion", "crash"): 0.0,
+    ("forced_flow_reversal", "bull_quiet"): 0.2,
+    ("forced_flow_reversal", "bull_volatile"): 0.7,
+    ("forced_flow_reversal", "bear_quiet"): 0.2,
+    ("forced_flow_reversal", "bear_volatile"): 0.7,
+    ("forced_flow_reversal", "transition"): 0.5,
+    ("forced_flow_reversal", "crash"): 0.3,
+    ("position_unwind", "bull_quiet"): -0.3,
+    ("position_unwind", "bull_volatile"): 0.3,
+    ("position_unwind", "bear_quiet"): 0.0,
+    ("position_unwind", "bear_volatile"): 0.5,
+    ("position_unwind", "transition"): 0.3,
+    ("position_unwind", "crash"): 1.0,
+    ("beta_neutral_reversion", "bull_quiet"): -0.2,
+    ("beta_neutral_reversion", "bull_volatile"): 0.5,
+    ("beta_neutral_reversion", "bear_quiet"): 0.2,
+    ("beta_neutral_reversion", "bear_volatile"): 0.5,
+    ("beta_neutral_reversion", "transition"): 0.3,
+    ("beta_neutral_reversion", "crash"): -0.3,
+}
+
 
 @dataclass(slots=True, frozen=True)
 class CandidateDataset:
@@ -35,7 +80,7 @@ class CandidateDataset:
     event_index: pd.DataFrame
     feature_names: tuple[str, ...]
     effective_sample_size: float = 0.0
-    feature_schema_version: str = "candidate_v5"
+    feature_schema_version: str = "candidate_v6"
     y_return_r: NDArray[np.float32] | None = None
     y_return_bps: NDArray[np.float32] | None = None
     y_mae_r: NDArray[np.float32] | None = None
@@ -48,7 +93,7 @@ class CandidateFeatureSchema:
 
     feature_names: tuple[str, ...]
     identity_categories: tuple[str, ...]
-    version: str = "candidate_v5"
+    version: str = "candidate_v6"
 
 
 def _find_symbol_index(symbols: tuple[str, ...], symbol: str) -> int:
@@ -92,6 +137,44 @@ def _cross_sectional_robust_z_2d(values: NDArray[np.float64]) -> NDArray[np.floa
         if mad > _ROBUST_Z_EPS:
             out[row_idx, finite_mask] = np.clip((finite_row - median) / mad, -_ROBUST_Z_CLIP, _ROBUST_Z_CLIP)
     return out
+
+
+def _compute_score_pct_variant_hist(
+    events: pd.DataFrame,
+    window_bars: int = 2160,
+) -> NDArray[np.float32]:
+    """Causal percentile of raw_score within this variant's window_bars event history.
+
+    For each event, fraction of prior same-variant events (within window_bars)
+    with strictly lower raw_score. Defaults to 0.5 if history < 5 events.
+    """
+    result = np.full(len(events), 0.5, dtype=np.float32)
+    if "family" not in events.columns or "variant" not in events.columns:
+        return result
+    score_col = "raw_score" if "raw_score" in events.columns else "score"
+    if score_col not in events.columns:
+        return result
+
+    variant_key = (events["family"].astype(str) + ":" + events["variant"].astype(str)).values
+    entry_idx_arr = events["entry_idx"].values
+    score_arr = events[score_col].fillna(0.0).values.astype(np.float64)
+
+    for vk in np.unique(variant_key):
+        v_mask = variant_key == vk
+        v_pos = np.where(v_mask)[0]
+        sort_order = np.argsort(entry_idx_arr[v_pos], kind="stable")
+        v_pos_sorted = v_pos[sort_order]
+        v_entry_sorted = entry_idx_arr[v_pos_sorted]
+        v_score_sorted = score_arr[v_pos_sorted]
+
+        for i in range(len(v_pos_sorted)):
+            cutoff = v_entry_sorted[i] - window_bars
+            hist_mask = v_entry_sorted[:i] > cutoff
+            hist_scores = v_score_sorted[:i][hist_mask]
+            if hist_scores.size >= 5:
+                result[v_pos_sorted[i]] = float(np.mean(hist_scores < v_score_sorted[i]))
+
+    return result
 
 
 def _impute_feature_matrix(
@@ -331,6 +414,19 @@ def _market_state_feature_names(cfg: CandidateStrategyConfig) -> tuple[str, ...]
     )
 
 
+def _signal_context_feature_names(cfg: CandidateStrategyConfig) -> tuple[str, ...]:
+    if not bool(getattr(cfg, "signal_context_features_enabled", True)):
+        return ()
+    return (
+        "overlay_mult_entry",
+        "crisis_active_entry",
+        "funding_side_alignment",
+        "score_pct_variant_hist_90d",
+        "archetype_regime_match",
+        "n_same_dir_variants_log",
+    )
+
+
 def _universe_feature_names(cfg: CandidateStrategyConfig) -> tuple[str, ...]:
     if not cfg.static_universe_features_enabled:
         return ()
@@ -382,9 +478,10 @@ def fit_candidate_feature_schema(
     base_feat_names = _base_feature_names(cfg)
     uni_feat_names = _universe_feature_names(cfg)
     mkt_feat_names = _market_state_feature_names(cfg)
+    sig_feat_names = _signal_context_feature_names(cfg)
     id_feat_names = _ordered_identity_feature_names(events, cfg=cfg)
     return CandidateFeatureSchema(
-        feature_names=base_feat_names + uni_feat_names + mkt_feat_names + id_feat_names,
+        feature_names=base_feat_names + uni_feat_names + mkt_feat_names + sig_feat_names + id_feat_names,
         identity_categories=id_feat_names,
     )
 
@@ -415,6 +512,7 @@ def build_candidate_dataset(
     )
     base_feat_names = _base_feature_names(cfg)
     uni_feat_names = _universe_feature_names(cfg)
+    sig_feat_names = _signal_context_feature_names(cfg)
     id_feat_names = active_schema.identity_categories
     feature_names = active_schema.feature_names
     exclude_leaky = bool(getattr(cfg, "exclude_immediate_return_features", False))
@@ -642,6 +740,60 @@ def build_candidate_dataset(
         x_mat[:, curr + 9] = cost_bps_vals / np.maximum(vol_20_vals * 1e4, 1.0)
         curr += 10
 
+    if sig_feat_names:
+        win = int(getattr(cfg, "score_pct_variant_hist_window_bars", 2160))
+        score_pct = _compute_score_pct_variant_hist(events, window_bars=win)
+
+        side_arr = x_mat[:, feature_names.index("side")]
+        funding_z20_arr = x_mat[:, feature_names.index("funding_z20")]
+        fsa = np.tanh(funding_z20_arr * side_arr).astype(np.float32)
+
+        regime_names_arr = np.asarray(
+            [regime_ctx.name_by_code[int(c)] for c in regime_ctx.code_1d[event_t]],
+            dtype=object,
+        )
+        archetype_arr = (
+            events.get("archetype", pd.Series("", index=events.index))
+            .fillna("")
+            .astype(str)
+            .values
+        )
+        arm = np.asarray(
+            [
+                _ARCHETYPE_REGIME_AFFINITY.get((str(arch), str(reg)), 0.0)
+                for arch, reg in zip(archetype_arr, regime_names_arr, strict=True)
+            ],
+            dtype=np.float32,
+        )
+
+        if "entry_idx" in events.columns and "symbol" in events.columns and "side" in events.columns:
+            side_sign = np.sign(events["side"].fillna(0)).astype(int)
+            grp_keys = (
+                events["entry_idx"].astype(str)
+                + "_"
+                + events["symbol"].astype(str)
+                + "_"
+                + side_sign.astype(str)
+            )
+            counts = grp_keys.map(grp_keys.value_counts())
+            n_same = np.log1p(np.maximum(counts.values - 1, 0)).astype(np.float32)
+        else:
+            n_same = np.zeros(len(events), dtype=np.float32)
+
+        def _set_sig(name: str, values: NDArray[np.float32]) -> None:
+            if name in feature_names:
+                x_mat[:, feature_names.index(name)] = values
+
+        _set_sig("overlay_mult_entry", overlay_ctx.overlay_mult_1d[event_t].astype(np.float32))
+        x_mat[valid_mask, feature_names.index("crisis_active_entry")] = (
+            overlay_ctx.crisis_active_1d[event_t[valid_mask]].astype(np.float32)
+        )
+        _set_sig("funding_side_alignment", fsa)
+        _set_sig("score_pct_variant_hist_90d", score_pct)
+        _set_sig("archetype_regime_match", arm)
+        _set_sig("n_same_dir_variants_log", n_same)
+        curr += len(sig_feat_names)
+
     if id_matrix is not None:
         x_mat[:, curr : curr + id_matrix.shape[1]] = id_matrix
 
@@ -784,6 +936,16 @@ def build_candidate_dataset(
                     n_disqualified,
                     len(kept_events),
                 )
+                for _dv in sorted(set(variant_keys[disq_arr]))[:10]:
+                    _dv_mask = variant_keys == _dv
+                    _dv_obs = int(np.isfinite(edge_values[_dv_mask]).sum())
+                    _dv_mean = float(np.nanmean(edge_values[_dv_mask])) if _dv_obs > 0 else float("nan")
+                    _logger.info(
+                        "[SIGNAL_PREQUALIFY][DISQ] variant=%-45s obs=%d  is_mean_edge=%.2f bps",
+                        _dv,
+                        _dv_obs,
+                        _dv_mean,
+                    )
             effective_sample_size = _effective_sample_size_from_weights(uniqueness_weight)
 
     return CandidateDataset(
