@@ -840,15 +840,6 @@ def _run_candidate_evaluation_report(
         "ablation": 0.0,
         "render": 0.0,
     }
-    header = f"| {'Action':<18} | {'Status':<27} |"
-    width = len(header)
-    title = "[CANDIDATE EVALUATION] "
-    _logger.info("\n" + title + "-" * (width - len(title)))
-    _logger.info(header)
-    _logger.info(f"| {'-'*18:<18} | {'-'*27:<27} |")
-    _logger.info(f"| {'Target Strategy':<18} | {'candidate_ml':<27} |")
-    _logger.info(f"| {'Ablation Study':<18} | {'Running...':<27} |")
-    _logger.info("-" * width)
 
     from src.domain.futures.strategy.ablation import run_candidate_ablation
 
