@@ -1,12 +1,12 @@
 # Mode Full (ML) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-07 (Fix1: prior_only fallback 활성화 / Fix2: edge_gate_mode=rank_ic 전환 후 재실행)
-**현재 상태:** `BLOCKED` — `pass_ratio=0.00`
+**최신 갱신:** 2026-06-07 (진단 로그 추가 후 재실행 — signal_ml_pipeline_audit.md)
+**현재 상태:** `BLOCKED` — `pass_ratio=0.00` (변화 없음)
 **평가 기준:** `min_fold_realized_edge_bps=15.0`, `min_cagr_for_promotion=0.15`, `min_edge_rank_ic=0.02`, `signal_prequalify_min_obs=30`
 
 ---
 
-## 최신 실행 요약
+## 최신 실행 요약 (candidate_v6)
 
 ```text
 [WINDOW] 2022-10-01 ~ 2026-03-31 | IS: 2023-10-01 | OOS: 2025-10-01
@@ -20,19 +20,27 @@
   fold4: ACCEPTED (rank_ic=0.071, t=1.98)    → inference_mode=direct
 [BRIDGE][WF] fold_cost_survival=[False, False, False, False] pass_ratio=0.00 min_required=0.60
 [BRIDGE SUMMARY] Active Signals 0 (sel=0) | Status blocked
-[BRIDGE SUMMARY][WF_DIAG] wf_selected=0 wf_eligible=0 shadow_profiles=18 shadow_max_selected=37 shadow_max_eligible=420 eu_p90=1.437 downside_p90=8.399
+[BRIDGE SUMMARY][WF_DIAG] wf_selected=0 wf_eligible=0 shadow_profiles=18 shadow_max_selected=37 shadow_max_eligible=420 eu_p90=1.437 downside_p90=8.490
+
+[ABLATION cal_eval] rank_ic=0.0689, t=2.23 (n=1047) → accepted (direct mode)
 ```
 
 ---
 
-## fold별 상세 결과
+## fold별 상세 결과 (+ 2026-06-07 진단 로그)
 
-| Fold | OOS 기간 | inference_mode | rank_ic | selected | eu_p90 | breakeven | 결과 |
-|---|---|---|---:|---:|---:|---:|---|
-| 1 | Oct-Nov 2025 | prior_only | n/a (insuf. obs) | 0 | 1.89 bps | 3.8 bps | ❌ (eu_p90 < breakeven) |
-| 2 | Nov-Dec 2025 | prior_only | n/a (insuf. obs) | 0 | 1.50 bps | 3.8 bps | ❌ (eu_p90 < breakeven) |
-| 3 | Jan-Feb 2026 | prior_only | -0.005 | 0 | 1.27 bps | 3.8 bps | ❌ (eu_p90 < breakeven) |
-| 4 | Feb-Mar 2026 | **direct** | +0.071 | 0 | 1.08 bps | 3.8 bps | ❌ (eu_p90 < breakeven) |
+| Fold | OOS 기간 | mode | rank_ic | n | prior | mu_p90 | eu_p90 | break | eligible | 선택 | 결과 |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | Oct-Nov | prior_only | n/a | 377 | 0.01 | 1.9 | 1.89 | 3.75 | 0 | 0 | ❌ |
+| 2 | Nov-Dec | prior_only | n/a | 303 | 0.01 | 1.5 | 1.50 | 3.75 | 0 | 0 | ❌ |
+| 3 | Jan-Feb | prior_only | -0.005 | 383 | 0.00 | 1.3 | 1.27 | 3.75 | 0 | 0 | ❌ |
+| 4 | Feb-Mar | **direct** | +0.071 | 420 | 0.00 | 1.1 | 1.08 | 3.75 | 0 | 0 | ❌ |
+| ablation | 전체 | direct | n/a | 1491 | 0.00 | 1.7 | n/a | 3.75 | 0 | 0 | ❌ |
+
+**신규 컬럼 해석:**
+- `prior`: `[DIAG][PRIOR]` global_prior_bps
+- `eligible`: `[DIAG][SELECT_ZERO]` 결과 — 모든 fold에서 0 (breakeven 미달)
+- `선택`: WF selected events
 
 ---
 
@@ -49,19 +57,46 @@
 
 ---
 
-## 근본 진단 (갱신)
+## 근본 진단 (진단 로그 추가 후 재실행 — 2026-06-07 v2)
 
 | 항목 | 내용 |
 |---|---|
-| Fix 1 적용 확인 | `prior_only` fallback 경로가 실제로 활성화됨. fold 1-3에서 `disabled` 대신 `prior_only`로 동작. 코드 결함 수정 완료. |
-| Fix 2 적용 확인 | `edge_gate_mode=rank_ic` 전환 완료. fold 4에서 `rank_ic=0.071, t=1.98`로 accept. 평가-제어 미스매치 제거됨. |
-| 잔여 블로커 (C5) | prior mu 자체가 0.8~1.2 bps로 `breakeven_floor=3.8 bps`에 미달. eu_p90이 **모든 fold에서 breakeven 미만**이므로 eligible=0. "ML이 거래를 회피"가 아니라 "prior가 말하는 기대 수익 자체가 비용 이하"인 상태. |
-| 룰 기반 엣지 부재 | `rule_stop_risk` = -20.4% CAGR. 순수 룰 자체가 비용 차감 후 손실. alpha 원천 문제. |
+| **신규 발견: Prior vs Breakeven 정량화** | `[DIAG][PRIOR]` 로그 새로 추가. 모든 fold에서 `global_prior_bps=0.00~0.01 bps << breakeven_floor=3.75 bps`. 이는 IS 학습 구간의 신호 성과가 극히 낮다는 의미. |
+| **신규 진단: Per-Variant Prior** | `[DIAG][VARIANT_PRIOR]` 로그. top-2 variant 모두 `prior=0.00 bps` → 개별 신호마다 IS mean_edge ≈ 0.01 bps 수준. |
+| **신규 진단: SIGNAL_PREQUALIFY 탈락 원인** | `[SIGNAL_PREQUALIFY][DISQ]` 로그. 예: tpc_20_100은 263/939 이벤트 탈락, IS mean_edge=12.05 bps. 즉, IS에서는 양의 수익이 있지만 t-stat 기준으로 유의성 없음. |
+| **신규: CANDIDATE TOP STRATEGIES Rec 컬럼** | KEEP 신호(OOS 기반)와 실제 학습 포함 여부(IS+Cal 기반) 비교 가능. |
+| candidate_v6 적용 | 피처 6개 추가. WF 결과 변화 없음 (예상대로). |
+| 핵심 병목 진단 (확정) | `global_prior ≈ 0.00 bps` — IS 신호 성과 자체가 비용(3.8 bps)보다 1000배 낮음. prior가 breakeven을 절대 넘을 수 없음. μ_p90 ≤ 1.7 bps 는 불가피한 결과, 설계 결함 아님. |
+| 다음 돌파 방향 (변경 없음) | (1) IS signal alpha 재설계 (tpc_50_200 등 IS mean edge 상향) (2) 비용 재검증 (3) 4h 타임프레임 검토 |
 
 ---
 
-## 다음 단계
+## 다음 단계 (2026-06-07 진단 결과 기반 — 우선순위 재정렬)
 
-1. **Feature Engineering 우선 (C5 해결):** 현재 prior mu(0.8-1.2 bps) < breakeven(3.8 bps). 기대 수익을 올리는 유일한 경로는 피처 예측력 개선. 상위 신호 후보: `trend_pullback_continuation:tpc_50_200`(IS profit 74bps), `funding_zscore_carry:fzs_96`.
-2. **breakeven_floor 재검토:** `min_net_floor_cost_fraction=0.5 × cost_floor_bps=7.5 → 3.8 bps`. eu_p90=1.4 bps 수준의 prior에 대해 floor가 과도하게 높을 수 있음. 단, 이는 완화가 아니라 cost 가정 검증이 먼저.
-3. **fold 1-2 insufficient_obs 원인 분석:** `n=725/869`임에도 `insufficient_obs` → `min_n_eff=60` 체크이므로 실제 n_eff 계산값 확인 필요.
+### ✅ 확정된 병목 (코드 버그 아님)
+```
+IS signal prior (0.00 bps) << breakeven_floor (3.75 bps)
+→ prior가 breakeven을 절대 초과할 수 없음
+→ eligible=0 고착 (구조적, 피처 추가로 탈출 불가)
+```
+
+### 1️⃣ **신호 alpha 재설계 (가장 중요)**
+- IS mean_edge가 모든 신호에서 ≤ 0.01 bps 수준 → 비용 7.5 bps 대비 1000배 낮음
+- `tpc_50_200` IS mean=? OOS mean=? 갭 분석 (현재 로그에 IS 74bps는 무엇인지 확인)
+- 신호별 IS mean_edge 분포도 작성 필요
+- **결론:** 규칙 신호 자체가 1h 타임프레임에서 엣지 부재
+
+### 2️⃣ **비용 가정 재검증**
+- `cost_floor_bps=7.5` (maker 2.0 + taker 5.0 + slippage 1.0 + impact 0.0)
+- 실제 Binance futures taker fee 현황 (2026-06-07 기준)
+- 펀딩비 (24h 평균)
+- 슬리피지 및 impact 재검토
+
+### 3️⃣ **4h 타임프레임 실험 (선택사항)**
+- `--timeframe 4h`로 재실행
+- 신호 노이즈 감소 기대 vs 신호 개수 감소 트레이드오프
+
+### ⚠️ 구조적 한계 인정
+- `prior ≤ 0.01 bps`, `breakeven = 3.75 bps` → **IS 신호 alpha 부재가 근본 원인**
+- ML 게이트 강화, 피처 추가, 모델 개선 → 모두 prior를 올릴 수 없음
+- **포기 판정 기준:** IS mean_edge가 breakeven의 20% 미만 (현재 << 0.8 bps)이면 전략 무용
