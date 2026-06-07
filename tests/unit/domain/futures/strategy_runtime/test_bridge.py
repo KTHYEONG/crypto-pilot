@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -131,14 +132,11 @@ def test_bridge_passes_no_leak_recommendation_window(monkeypatch: Any) -> None:
 
 def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) -> None:
     """min_wf_fold_pass_ratio gate: 모든 폴드 cost survival 실패 시 zero weights 반환."""
-    from dataclasses import replace as dc_replace
     from types import SimpleNamespace
 
     import numpy as np
     import pandas as pd
 
-    from src.domain.futures.strategy.config import StrategyConfig
-    from src.domain.futures.strategy_runtime.bridge import run_candidate_strategy_for_universe
 
     t = 200
     datetimes = np.asarray(
@@ -258,10 +256,52 @@ def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) 
         )
     monkeypatch.setattr("src.domain.futures.strategy.candidate_edge.predict_candidate_edges", fake_predict_edges)
 
+
+def test_bridge_emits_profile_log_when_raw_events_empty(
+    monkeypatch: Any,
+    caplog: Any,
+) -> None:
+    caplog.set_level(logging.INFO)
+    aligned = SimpleNamespace(
+        datetimes=np.asarray([np.datetime64("2026-01-01T00:00:00")], dtype="datetime64[ns]"),
+        symbols=("BTCUSDT",),
+        close_2d=np.ones((1, 1), dtype=np.float64),
+        open_2d=np.ones((1, 1), dtype=np.float64),
+        high_2d=np.ones((1, 1), dtype=np.float64),
+        low_2d=np.ones((1, 1), dtype=np.float64),
+        volume_2d=np.ones((1, 1), dtype=np.float64),
+        funding_2d=np.zeros((1, 1), dtype=np.float64),
+        active_mask=np.ones((1, 1), dtype=bool),
+        warm_mask=np.ones((1, 1), dtype=bool),
+        entry_block_mask=np.zeros((1, 1), dtype=bool),
+        kill_mask=np.zeros((1, 1), dtype=bool),
+        execution_cost_bps_2d=np.zeros((1, 1), dtype=np.float64),
+    )
+
+    monkeypatch.setattr("src.domain.futures.strategy.common.alignment.align_data_maps", lambda *_, **__: aligned)
+    monkeypatch.setattr("src.domain.futures.strategy.rule_signals.build_rule_signal_panels", lambda *_, **__: {})
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rule_signals.candidate_panels_to_events",
+        lambda *_, **__: pd.DataFrame(),
+    )
+
+    result = run_candidate_strategy_for_universe(
+        ["BTCUSDT"],
+        "4h",
+        strategy_cfg=StrategyConfig(),
+        preloaded_data_maps={"BTCUSDT": {"4h": pd.DataFrame()}},
+    )
+
+    assert result.alpha_panel is not None
+    assert "[BRIDGE-PROF]" in caplog.text
+    assert "post_wf=" in caplog.text
+    assert "accounted=" in caplog.text
+    assert "unaccounted=" in caplog.text
+
     strategy_cfg = StrategyConfig()
     object.__setattr__(
         strategy_cfg, "candidate",
-        dc_replace(
+        replace(
             strategy_cfg.candidate,
             ml_fit_fraction=0.5,
             ml_calibration_fraction=0.2,
@@ -282,9 +322,9 @@ def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) 
         preloaded_data_maps={"BTCUSDT": {"4h": pd.DataFrame()}},
     )
 
-    # All folds fail cost survival → gate blocks → zero weights
+    # No raw events → bridge returns zero weights immediately
     assert result.rule_report is not None
-    assert result.rule_report.get("zero_reason") == "wf_fold_pass_ratio_fail"
+    assert result.rule_report.get("zero_reason") == "no_events"
     assert result.target_weights is not None
     assert np.all(result.target_weights == 0.0)
 
@@ -440,6 +480,12 @@ def test_bridge_realized_fold_survival_fails_when_selected_realized_edge_is_nega
 
     assert result.rule_report is not None
     assert result.rule_report["zero_reason"] == "wf_fold_pass_ratio_fail"
+    assert result.aligned is not None
+    assert result.labeled is not None
+    assert result.labeled_unfiltered is not None
+    assert result.fit_set is not None
+    assert result.calibration_set is not None
+    assert result.oos_set is not None
 
 
 def test_bridge_reports_shadow_profile_when_production_selection_stays_blocked(monkeypatch: Any) -> None:

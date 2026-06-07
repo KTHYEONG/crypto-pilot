@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.domain.futures.strategy.config import CandidateStrategyConfig
+    from src.domain.futures.strategy_runtime.bridge import CandidatePipelineOutput
 
 import numpy as np
 import pandas as pd
@@ -30,6 +35,20 @@ from src.domain.futures.strategy.rule_signals import build_rule_signal_panels, c
 from src.domain.futures.strategy_runtime.bridge import _candidate_ml_split_indices, _recommendation_window_indices
 
 _logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True, frozen=True)
+class _RuntimeBreakdown:
+    total: float
+    steps: Mapping[str, float]
+
+    @property
+    def accounted(self) -> float:
+        return float(sum(max(float(value), 0.0) for value in self.steps.values()))
+
+    @property
+    def unaccounted(self) -> float:
+        return max(float(self.total) - self.accounted, 0.0)
 
 
 def _is_nan(v: float) -> bool:
@@ -444,120 +463,171 @@ def _build_variant_prior_output(
 
 def run_candidate_ablation(
     *,
-    data_maps: dict[str, dict[str, Any]],
-    symbols: tuple[str, ...],
-    tf: str,
+    data_maps: dict[str, dict[str, Any]] | None = None,
+    symbols: tuple[str, ...] | None = None,
+    tf: str | None = None,
     cfg: CandidateStrategyConfig,
+    cached_output: CandidatePipelineOutput | None = None,
 ) -> pd.DataFrame:
     """Run ablation variants to prove each complexity layer adds compounding value."""
-    # 1. Align market data
-    aligned = align_data_maps(data_maps, list(symbols), tf)
-    
-    # 2. Build hypothesis rule candidates
-    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
-    raw_events = candidate_panels_to_events(
-        panels,
-        min_abs_score=cfg.min_rule_net_bps * 1e-4,
-        side_flip_variants=cfg.side_flip_candidate_variants,
-        cost_floor_bps=cfg.cost_floor_bps,
-        execution_cost_bps_2d=aligned.execution_cost_bps_2d,
-    )
-    max_holding_bars = (
-        int(pd.to_numeric(raw_events["expected_holding_bars"], errors="coerce").max())
-        if not raw_events.empty and "expected_holding_bars" in raw_events.columns
-        else None
-    )
-    cfg = with_max_holding_bars(cfg, max_holding_bars=max_holding_bars)
-    purge_bars, embargo_bars = resolve_purge_and_embargo_bars(cfg)
+    import time
 
-    if raw_events.empty:
-        return pd.DataFrame(columns=[
-            "variant", "mean_log_growth", "cagr", "max_drawdown", "mar",
-            "turnover", "final_equity", "pass_compound_gate",
-            "trade_count", "deployed_bar_fraction", "pred_edge_bps_p50",
-            "real_edge_bps_p50", "edge_capture_ratio", "gross_cost_bps",
-            "pass_deployment_gate",
-        ])
+    t_start_all = time.perf_counter()
+    ablation_prof: dict[str, float] = {
+        "cached_unpack": 0.0,
+        "predict": 0.0,
+        "weights": 0.0,
+        "backtests": 0.0,
+        "dataframe": 0.0,
+    }
+    if cached_output is not None and cached_output.aligned is not None:
+        t_step = time.perf_counter()
+        aligned = cached_output.aligned
+        labeled = cached_output.labeled
+        labeled_unfiltered = cached_output.labeled_unfiltered
+        fit_set = cached_output.fit_set
+        calibration_set = cached_output.calibration_set
+        oos_set = cached_output.oos_set
+        gate_model = cached_output.gate_model
+        edge_models = cached_output.edge_models
+        fit_start = cached_output.fit_start
+        fit_end = cached_output.fit_end
+        calibration_start = cached_output.calibration_start
+        calibration_end = cached_output.calibration_end
+        oos_start = cached_output.oos_start
+        oos_end = cached_output.oos_end
+        _fold_oos_boundaries = cached_output.fold_oos_boundaries
+        assert labeled is not None
+        assert labeled_unfiltered is not None
+        assert fit_set is not None
+        assert calibration_set is not None
+        assert oos_set is not None
+        assert gate_model is not None
+        assert edge_models is not None
+        assert fit_start is not None
+        assert fit_end is not None
+        assert calibration_start is not None
+        assert calibration_end is not None
+        assert oos_start is not None
+        assert oos_end is not None
+        assert _fold_oos_boundaries is not None
+        symbols = aligned.symbols
+        ablation_prof["cached_unpack"] = time.perf_counter() - t_step
+    else:
+        t_step = time.perf_counter()
+        if data_maps is None or symbols is None or tf is None:
+            raise ValueError("data_maps, symbols, and tf must be provided if cached_output is None")
+        # 1. Align market data
+        aligned = align_data_maps(data_maps, list(symbols), tf)
 
-    # 3. Label events and split dataset
-    labeled = label_candidate_events(events=raw_events, aligned=aligned, cfg=cfg)
-    n_bars = aligned.close_2d.shape[0]
-    fit_start, fit_end, calibration_start, calibration_end, oos_start, oos_end = _candidate_ml_split_indices(
-        n_bars=n_bars,
-        fit_fraction=cfg.ml_fit_fraction,
-        calibration_fraction=cfg.ml_calibration_fraction,
-        purge_bars=purge_bars,
-        embargo_bars=embargo_bars,
-    )
-    # Compute WF folds for fold_oos_boundaries (used by evaluate_compound_backtest DSR/PBO)
-    from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
-    _wf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=cfg, max_holding_bars=max_holding_bars)
-    _fold_oos_boundaries: tuple[tuple[int, int], ...] = tuple(
-        (f.oos_start, f.oos_end) for f in _wf_folds
-    )
-    diag, _ = _compute_rule_diagnostics_for_ablation(
-        labeled=labeled,
-        aligned=aligned,
-        cfg=cfg,
-        fit_start=fit_start,
-        fit_end=fit_end,
-        calibration_start=calibration_start,
-        calibration_end=calibration_end,
-        oos_start=oos_start,
-        oos_end=oos_end,
-    )
-    _logger.info(
-        "[DIAG][RULE_RECOMMEND_ABLATION] keep=%s flip=%s",
-        ",".join(diag.recommended_keep_variants) if diag.recommended_keep_variants else "",
-        ",".join(diag.recommended_flip_variants) if diag.recommended_flip_variants else "",
-    )
-    labeled_unfiltered = labeled  # save before promotion filter for ablation row 7
-
-    if cfg.promotion_filter_enabled:
-        labeled = apply_variant_promotions(
-            labeled=labeled,
-            keep_variants=diag.recommended_keep_variants,
-            flip_variants=diag.recommended_flip_variants,
-            keep_signal_cells=diag.recommended_keep_signal_cells,
-            flip_signal_cells=diag.recommended_flip_signal_cells,
+        # 2. Build hypothesis rule candidates
+        panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+        raw_events = candidate_panels_to_events(
+            panels,
+            min_abs_score=cfg.min_rule_net_bps * 1e-4,
+            side_flip_variants=cfg.side_flip_candidate_variants,
+            cost_floor_bps=cfg.cost_floor_bps,
+            execution_cost_bps_2d=aligned.execution_cost_bps_2d,
         )
-        if labeled.empty:
-            _logger.warning(
-                "[ABLATION][PROMO_FILTER] all candidates blocked; "
-                "falling back to unfiltered events for ML training"
+        max_holding_bars = (
+            int(pd.to_numeric(raw_events["expected_holding_bars"], errors="coerce").max())
+            if not raw_events.empty and "expected_holding_bars" in raw_events.columns
+            else None
+        )
+        cfg = with_max_holding_bars(cfg, max_holding_bars=max_holding_bars)
+        purge_bars, embargo_bars = resolve_purge_and_embargo_bars(cfg)
+
+        if raw_events.empty:
+            return pd.DataFrame(columns=[
+                "variant", "mean_log_growth", "cagr", "max_drawdown", "mar",
+                "turnover", "final_equity", "pass_compound_gate",
+                "trade_count", "deployed_bar_fraction", "pred_edge_bps_p50",
+                "real_edge_bps_p50", "edge_capture_ratio", "gross_cost_bps",
+                "pass_deployment_gate",
+            ])
+
+        # 3. Label events and split dataset
+        labeled = label_candidate_events(events=raw_events, aligned=aligned, cfg=cfg)
+        n_bars = aligned.close_2d.shape[0]
+        fit_start, fit_end, calibration_start, calibration_end, oos_start, oos_end = _candidate_ml_split_indices(
+            n_bars=n_bars,
+            fit_fraction=cfg.ml_fit_fraction,
+            calibration_fraction=cfg.ml_calibration_fraction,
+            purge_bars=purge_bars,
+            embargo_bars=embargo_bars,
+        )
+        # Compute WF folds for fold_oos_boundaries (used by evaluate_compound_backtest DSR/PBO)
+        from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
+        _wf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=cfg, max_holding_bars=max_holding_bars)
+        _fold_oos_boundaries = tuple(
+            (f.oos_start, f.oos_end) for f in _wf_folds
+        )
+        diag, _ = _compute_rule_diagnostics_for_ablation(
+            labeled=labeled,
+            aligned=aligned,
+            cfg=cfg,
+            fit_start=fit_start,
+            fit_end=fit_end,
+            calibration_start=calibration_start,
+            calibration_end=calibration_end,
+            oos_start=oos_start,
+            oos_end=oos_end,
+        )
+        _logger.debug(
+            "[DIAG][RULE_RECOMMEND_ABLATION] keep=%s flip=%s",
+            ",".join(diag.recommended_keep_variants) if diag.recommended_keep_variants else "",
+            ",".join(diag.recommended_flip_variants) if diag.recommended_flip_variants else "",
+        )
+        labeled_unfiltered = labeled  # save before promotion filter for ablation row 7
+
+        if cfg.promotion_filter_enabled:
+            labeled = apply_variant_promotions(
+                labeled=labeled,
+                keep_variants=diag.recommended_keep_variants,
+                flip_variants=diag.recommended_flip_variants,
+                keep_signal_cells=diag.recommended_keep_signal_cells,
+                flip_signal_cells=diag.recommended_flip_signal_cells,
             )
+            if labeled.empty:
+                _logger.warning(
+                    "[ABLATION][PROMO_FILTER] all candidates blocked; "
+                    "falling back to unfiltered events for ML training"
+                )
 
-    # When promo filter blocks all variants, fall back to unfiltered data so ML
-    # variants still produce informative (non-crash) results for comparison.
-    _labeled_for_ml = labeled if not labeled.empty else labeled_unfiltered
-    fit_set = build_candidate_dataset(
-        labeled_events=_labeled_for_ml, aligned=aligned, cfg=cfg, split_start=fit_start, split_end=fit_end
-    )
-    calibration_set = build_candidate_dataset(
-        labeled_events=_labeled_for_ml,
-        aligned=aligned,
-        cfg=cfg,
-        split_start=calibration_start,
-        split_end=calibration_end,
-    )
-    oos_set = build_candidate_dataset(
-        labeled_events=_labeled_for_ml, aligned=aligned, cfg=cfg, split_start=oos_start, split_end=oos_end
-    )
+        # When promo filter blocks all variants, fall back to unfiltered data so ML
+        # variants still produce informative (non-crash) results for comparison.
+        _labeled_for_ml = labeled if not labeled.empty else labeled_unfiltered
+        fit_set = build_candidate_dataset(
+            labeled_events=_labeled_for_ml, aligned=aligned, cfg=cfg, split_start=fit_start, split_end=fit_end
+        )
+        calibration_set = build_candidate_dataset(
+            labeled_events=_labeled_for_ml,
+            aligned=aligned,
+            cfg=cfg,
+            split_start=calibration_start,
+            split_end=calibration_end,
+        )
+        oos_set = build_candidate_dataset(
+            labeled_events=_labeled_for_ml, aligned=aligned, cfg=cfg, split_start=oos_start, split_end=oos_end
+        )
 
-    # 4. Train ML Models
-    gate_model = fit_candidate_gate(train=fit_set, early_stop=calibration_set, calibration=calibration_set, cfg=cfg)
-    edge_models = fit_candidate_edge_models(
-        train=fit_set, valid=calibration_set, calibration_eval=calibration_set, cfg=cfg
-    )
+        # 4. Train ML Models
+        gate_model = fit_candidate_gate(train=fit_set, early_stop=calibration_set, calibration=calibration_set, cfg=cfg)
+        edge_models = fit_candidate_edge_models(
+            train=fit_set, valid=calibration_set, calibration_eval=calibration_set, cfg=cfg
+        )
+        ablation_prof["cached_unpack"] = time.perf_counter() - t_step
 
     # 5. Predict outcomes for OOS sample only
+    t_step = time.perf_counter()
     p_pass = predict_candidate_gate(model=gate_model, dataset=oos_set)
     ml_out = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=cfg)
     ml_out = replace(ml_out, events=oos_set.event_index)
-
-    rows: list[AblationRow] = []
+    ablation_prof["predict"] = time.perf_counter() - t_step
 
     # 1. rule_stop_risk (Raw trigger rules with stop-risk sizing and no ML components)
+    t_weights = time.perf_counter()
+    t_step = time.perf_counter()
     cfg_rule = replace(
         cfg,
         sizing_mode="stop_risk",
@@ -575,20 +645,10 @@ def run_candidate_ablation(
         sigma_3d=None,
         cfg=cfg_rule,
     )
-    rows.append(
-        _run_backtest_and_evaluate(
-            rule_w,
-            aligned,
-            "rule_stop_risk",
-            cfg,
-            start_idx=oos_start,
-            end_idx=oos_end,
-            barrier_events=rule_events,
-            fold_oos_boundaries=_fold_oos_boundaries,
-        )
-    )
+    _logger.info("[PROFILE][ABLATION] 1. rule_w took %.4fs", time.perf_counter() - t_step)
 
     # 2. prior_rank_stop_risk (Rule candidates filtered by prior variant-level rank selection only)
+    t_step = time.perf_counter()
     p_pass_ones = np.ones(oos_set.X.shape[0], dtype=np.float64)
     prior_out = _build_variant_prior_output(
         edge_models=edge_models,
@@ -606,20 +666,10 @@ def run_candidate_ablation(
         sigma_3d=None,
         cfg=replace(cfg, sizing_mode="stop_risk", gross_cap=999.0, net_cap=999.0, beta_cap=999.0, target_ann_vol=999.0),
     )
-    rows.append(
-        _run_backtest_and_evaluate(
-            prior_w,
-            aligned,
-            "prior_rank_stop_risk",
-            cfg,
-            start_idx=oos_start,
-            end_idx=oos_end,
-            selected_events=prior_selected,
-            fold_oos_boundaries=_fold_oos_boundaries,
-        )
-    )
+    _logger.info("[PROFILE][ABLATION] 2. prior_w took %.4fs", time.perf_counter() - t_step)
 
     # 3. prior_residual_rank_stop_risk (Adds ML residual model to rank selection, but no gate veto)
+    t_step = time.perf_counter()
     edge_out_nogate = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass_ones, cfg=cfg)
     edge_out_nogate = replace(edge_out_nogate, events=oos_set.event_index)
     residual_selected = select_candidate_events_for_portfolio(model_output=edge_out_nogate, cfg=cfg)
@@ -631,20 +681,10 @@ def run_candidate_ablation(
         sigma_3d=None,
         cfg=replace(cfg, sizing_mode="stop_risk", gross_cap=999.0, net_cap=999.0, beta_cap=999.0, target_ann_vol=999.0),
     )
-    rows.append(
-        _run_backtest_and_evaluate(
-            residual_w,
-            aligned,
-            "prior_residual_rank_stop_risk",
-            cfg,
-            start_idx=oos_start,
-            end_idx=oos_end,
-            selected_events=residual_selected,
-            fold_oos_boundaries=_fold_oos_boundaries,
-        )
-    )
+    _logger.info("[PROFILE][ABLATION] 3. residual_w took %.4fs", time.perf_counter() - t_step)
 
     # 4. edge_plus_validated_gate_stop_risk (Adds ML gate veto to selection, retains stop-risk sizing)
+    t_step = time.perf_counter()
     edge_out_gate = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=cfg)
     edge_out_gate = replace(edge_out_gate, events=oos_set.event_index)
     gate_selected = select_candidate_events_for_portfolio(model_output=edge_out_gate, cfg=cfg)
@@ -656,20 +696,10 @@ def run_candidate_ablation(
         sigma_3d=None,
         cfg=replace(cfg, sizing_mode="stop_risk", gross_cap=999.0, net_cap=999.0, beta_cap=999.0, target_ann_vol=999.0),
     )
-    rows.append(
-        _run_backtest_and_evaluate(
-            gate_w,
-            aligned,
-            "edge_plus_validated_gate_stop_risk",
-            cfg,
-            start_idx=oos_start,
-            end_idx=oos_end,
-            selected_events=gate_selected,
-            fold_oos_boundaries=_fold_oos_boundaries,
-        )
-    )
+    _logger.info("[PROFILE][ABLATION] 4. gate_w took %.4fs", time.perf_counter() - t_step)
 
     # 5. edge_plus_gate_event_kelly (Replaces stop-risk sizing with calibrated event Kelly, portfolio caps bypassed)
+    t_step = time.perf_counter()
     kelly_w = build_candidate_target_weights(
         selected_events=gate_selected,
         close_2d=aligned.close_2d,
@@ -685,20 +715,10 @@ def run_candidate_ablation(
             target_ann_vol=999.0,
         ),
     )
-    rows.append(
-        _run_backtest_and_evaluate(
-            kelly_w,
-            aligned,
-            "edge_plus_gate_event_kelly",
-            cfg,
-            start_idx=oos_start,
-            end_idx=oos_end,
-            selected_events=gate_selected,
-            fold_oos_boundaries=_fold_oos_boundaries,
-        )
-    )
+    _logger.info("[PROFILE][ABLATION] 5. kelly_w took %.4fs", time.perf_counter() - t_step)
 
     # 6. full_portfolio_caps (Applies final portfolio constraints/caps projection to Kelly weights)
+    t_step = time.perf_counter()
     full_caps_w = build_candidate_target_weights(
         selected_events=gate_selected,
         close_2d=aligned.close_2d,
@@ -707,20 +727,52 @@ def run_candidate_ablation(
         sigma_3d=None,
         cfg=replace(cfg, sizing_mode="calibrated_event_kelly"),
     )
-    rows.append(
-        _run_backtest_and_evaluate(
-            full_caps_w,
+    _logger.info("[PROFILE][ABLATION] 6. full_caps_w took %.4fs", time.perf_counter() - t_step)
+    ablation_prof["weights"] = time.perf_counter() - t_weights
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _run_task(
+        w: np.ndarray,
+        variant_name: str,
+        selected_ev: pd.DataFrame | None,
+        barrier_ev: pd.DataFrame | None,
+    ) -> AblationRow:
+        t_task = time.perf_counter()
+        res = _run_backtest_and_evaluate(
+            w,
             aligned,
-            "full_portfolio_caps",
+            variant_name,
             cfg,
             start_idx=oos_start,
             end_idx=oos_end,
-            selected_events=gate_selected,
+            selected_events=selected_ev,
+            barrier_events=barrier_ev,
             fold_oos_boundaries=_fold_oos_boundaries,
         )
-    )
+        _logger.info("[PROFILE][ABLATION] Backtest task %s took %.4fs", variant_name, time.perf_counter() - t_task)
+        return res
+
+    tasks = [
+        (rule_w, "rule_stop_risk", None, rule_events),
+        (prior_w, "prior_rank_stop_risk", prior_selected, None),
+        (residual_w, "prior_residual_rank_stop_risk", residual_selected, None),
+        (gate_w, "edge_plus_validated_gate_stop_risk", gate_selected, None),
+        (kelly_w, "edge_plus_gate_event_kelly", gate_selected, None),
+        (full_caps_w, "full_portfolio_caps", gate_selected, None),
+    ]
+
+    t_step = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=min(len(tasks), 6)) as executor:
+        futures = [
+            executor.submit(_run_task, w, name, sel, bar)
+            for w, name, sel, bar in tasks
+        ]
+        rows = [f.result() for f in futures]
+    ablation_prof["backtests"] = time.perf_counter() - t_step
 
     # Convert results to DataFrame
+    t_step = time.perf_counter()
     df_results = pd.DataFrame([
         {
             "variant": r.variant,
@@ -741,6 +793,23 @@ def run_candidate_ablation(
         }
         for r in rows
     ])
+    ablation_prof["dataframe"] = time.perf_counter() - t_step
+    breakdown = _RuntimeBreakdown(total=time.perf_counter() - t_start_all, steps=ablation_prof)
+    _logger.info(
+        (
+            "[ABLATION-PROF] total=%.4fs cached_unpack=%.4fs predict=%.4fs weights=%.4fs "
+            "backtests=%.4fs dataframe=%.4fs accounted=%.4fs unaccounted=%.4fs"
+        ),
+        breakdown.total,
+        ablation_prof["cached_unpack"],
+        ablation_prof["predict"],
+        ablation_prof["weights"],
+        ablation_prof["backtests"],
+        ablation_prof["dataframe"],
+        breakdown.accounted,
+        breakdown.unaccounted,
+    )
+    _logger.info("[PROFILE][ABLATION] Total ablation study run took %.4fs", breakdown.total)
 
     return df_results
 
@@ -872,7 +941,19 @@ def _run_backtest_and_evaluate(
             are not used for attribution).  When both are provided,
             ``barrier_events`` wins for barrier construction.
     """
+    import time
+
+    t_task = time.perf_counter()
+    task_prof: dict[str, float] = {
+        "slice": 0.0,
+        "atr": 0.0,
+        "barriers": 0.0,
+        "engine": 0.0,
+        "attribution": 0.0,
+        "compound_eval": 0.0,
+    }
     from src.domain.futures.strategy.rule_signals import _atr_2d
+    t_step = time.perf_counter()
     if start_idx is None and end_idx is None:
         aligned_eval = aligned
         target_weights_eval = target_weights
@@ -911,7 +992,10 @@ def _run_backtest_and_evaluate(
             symbol_meta=aligned.symbol_meta,
         )
         target_weights_eval = target_weights[st:ed]
+    task_prof["slice"] = time.perf_counter() - t_step
+    t_step = time.perf_counter()
     atr_2d = _atr_2d(aligned_eval.high_2d, aligned_eval.low_2d, aligned_eval.close_2d, period=14)
+    task_prof["atr"] = time.perf_counter() - t_step
 
     # Phase 1 (RC1): track eval window start for global→local index remapping
     _eval_start = 0 if start_idx is None else max(0, int(start_idx))
@@ -931,6 +1015,7 @@ def _run_backtest_and_evaluate(
     # to train the gate/edge models.
     # Fix 2 (audit): barrier_events is the explicit source for rule-only variants
     # that carry stop/tp columns but use None for selected_events (attribution).
+    t_step = time.perf_counter()
     _barrier_source = barrier_events if barrier_events is not None else selected_events
     if cfg.eval_apply_candidate_barriers and _barrier_source is not None and not _barrier_source.empty:
         _n_times_eval, _n_syms_eval = target_weights_eval.shape
@@ -943,25 +1028,30 @@ def _run_backtest_and_evaluate(
         )
         aligned_data["candidate_stop_atr_mult"] = _stop_2d
         aligned_data["candidate_take_profit_atr_mult"] = _tp_2d
+    task_prof["barriers"] = time.perf_counter() - t_step
 
     # Execute backtest engine
+    t_step = time.perf_counter()
     trades, equity_curve, _, _ = FuturesBacktestEngine.run_multi(
         aligned_data=aligned_data,
         symbol_names=list(aligned_eval.symbols),
         strategy_params={},
     )
+    task_prof["engine"] = time.perf_counter() - t_step
 
     # Phase 0 (diagnostic): compute realized net edge from engine trade records.
     # edge_capture_ratio = real / pred; values << 1 confirm RC1 is the primary cause.
     _real_edge_p50 = _compute_realized_edge(trades)
 
     # Phase 2 (RC2): compute attribution BEFORE evaluation so deployment can gate passing.
+    t_step = time.perf_counter()
     trade_count, deployed_bar_fraction, pred_edge_p50, gross_cost_bps = _compute_attribution(
         target_weights_eval=target_weights_eval,
         selected_events=selected_events,
         trades=trades,
         cfg=cfg,
     )
+    task_prof["attribution"] = time.perf_counter() - t_step
 
     # Evaluate compounding growth
     # Remap fold_oos_boundaries to local (sliced) index space when start_idx is applied
@@ -975,6 +1065,7 @@ def _run_backtest_and_evaluate(
         ) or None
     elif fold_oos_boundaries:
         _local_boundaries = fold_oos_boundaries
+    t_step = time.perf_counter()
     report = evaluate_compound_backtest(
         trades=trades,
         equity_curve=equity_curve,
@@ -983,6 +1074,7 @@ def _run_backtest_and_evaluate(
         deployed_bar_fraction=deployed_bar_fraction,
         trade_count=trade_count,
     )
+    task_prof["compound_eval"] = time.perf_counter() - t_step
 
     # Deployment integrity gate
     pass_deployment_gate = (
@@ -997,7 +1089,7 @@ def _run_backtest_and_evaluate(
     )
 
     if cfg.edge_attribution_enabled:
-        _logger.info(
+        _logger.debug(
             "[DIAG][EDGE_ATTRIB] variant=%s trades=%d deployed=%.3f "
             "pred_p50=%.1fbps real_p50=%.1fbps capture=%.3f "
             "cost=%.1fbps pass_deploy=%s",
@@ -1010,6 +1102,24 @@ def _run_backtest_and_evaluate(
             gross_cost_bps if not _is_nan(gross_cost_bps) else float("nan"),
             pass_deployment_gate,
         )
+    task_breakdown = _RuntimeBreakdown(total=time.perf_counter() - t_task, steps=task_prof)
+    _logger.info(
+        (
+            "[ABLATION-TASK-PROF] variant=%s total=%.4fs slice=%.4fs atr=%.4fs "
+            "barriers=%.4fs engine=%.4fs attribution=%.4fs compound_eval=%.4fs "
+            "accounted=%.4fs unaccounted=%.4fs"
+        ),
+        variant_name,
+        task_breakdown.total,
+        task_prof["slice"],
+        task_prof["atr"],
+        task_prof["barriers"],
+        task_prof["engine"],
+        task_prof["attribution"],
+        task_prof["compound_eval"],
+        task_breakdown.accounted,
+        task_breakdown.unaccounted,
+    )
 
     return AblationRow(
         variant=variant_name,
