@@ -615,7 +615,12 @@ def _log_summary_block(
             raise ValueError(f"unsupported view: {view}")
 
 
-def _log_variant_top_block(summary: pd.DataFrame, *, top_k: int) -> None:
+def _log_variant_top_block(
+    summary: pd.DataFrame,
+    *,
+    top_k: int,
+    recommended_variants: frozenset[str] | None = None,
+) -> None:
     """Emit top variant diagnostics as a formatted table at INFO level."""
     if summary.empty:
         return
@@ -624,10 +629,9 @@ def _log_variant_top_block(summary: pd.DataFrame, *, top_k: int) -> None:
     sort_col = "oos_mean_edge_bps" if "oos_mean_edge_bps" in columns else "mean_edge_bps"
     top = summary.sort_values([sort_col, "group"], ascending=[False, True]).head(top_k)
 
-    # Use more intuitive header names
     header = (
         f"| {'Rank':<4} | {'Strategy Name':<35} | {'Sample (OOS)':<12} | "
-        f"{'Profit(bps)':>11} | {'Win Rate':>8} | {'P/L':>6} | {'Score':>6} | {'Action':<6} |"
+        f"{'Profit(bps)':>11} | {'Win Rate':>8} | {'P/L':>6} | {'Score':>6} | {'Action':<6} | {'Rec':<3} |"
     )
     width = len(header)
 
@@ -636,13 +640,16 @@ def _log_variant_top_block(summary: pd.DataFrame, *, top_k: int) -> None:
     _logger.info(header)
     _logger.info(
         f"| {'-'*4:<4} | {'-'*35:<35} | {'-'*12:<12} | {'-'*11:>11} | "
-        f"{'-'*8:>8} | {'-'*6:>6} | {'-'*6:>6} | {'-'*6:<6} |"
+        f"{'-'*8:>8} | {'-'*6:>6} | {'-'*6:>6} | {'-'*6:<6} | {'-'*3:<3} |"
     )
 
     for idx, row in enumerate(top.itertuples(index=False), start=1):
-        key = str(row.group).removeprefix("variant=")
-        if len(key) > 35:
-            key = key[:32] + "..."
+        full_key = str(row.group).removeprefix("variant=")
+        # Match recommendation BEFORE truncating the display string.
+        variant_key = f"variant={full_key}"
+        rec = "Y" if (recommended_variants is not None and variant_key in recommended_variants) else "N"
+
+        key = full_key if len(full_key) <= 35 else full_key[:32] + "..."
 
         n_total = int(row.n)
         n_oos = int(getattr(row, "oos_n", 0))
@@ -658,7 +665,7 @@ def _log_variant_top_block(summary: pd.DataFrame, *, top_k: int) -> None:
 
         _logger.info(
             f"| {idx:<4} | {key:<35} | {n_str:<12} | {profit} | "
-            f"{win_rate} | {pl_ratio} | {score} | {action:<6} |"
+            f"{win_rate} | {pl_ratio} | {score} | {action:<6} | {rec:<3} |"
         )
 
     _logger.info("-" * width)
@@ -736,7 +743,7 @@ def _failed_recommendation_checks(row: pd.Series, cfg: CandidateStrategyConfig) 
 
 
 def _log_recommendation_failure_block(summary: pd.DataFrame, *, cfg: CandidateStrategyConfig, top_k: int) -> None:
-    """Emit why high-ranked variants were blocked by recommendation thresholds."""
+    """Emit a single-line summary of why variants failed recommendation thresholds."""
     if summary.empty:
         return
 
@@ -746,7 +753,6 @@ def _log_recommendation_failure_block(summary: pd.DataFrame, *, cfg: CandidateSt
     ]
     blocked = blocked.loc[blocked["failed_checks"] != ""].copy()
     if blocked.empty:
-        _logger.info("[DIAG][RULE_RECOMMEND_FAIL] no blocked variants under recommendation thresholds")
         return
 
     failure_counts: dict[str, int] = {}
@@ -756,33 +762,21 @@ def _log_recommendation_failure_block(summary: pd.DataFrame, *, cfg: CandidateSt
                 continue
             failure_counts[name] = failure_counts.get(name, 0) + 1
 
-    ordered_counts = ",".join(f"{name}:{count}" for name, count in sorted(failure_counts.items()))
-    _logger.info("[DIAG][RULE_RECOMMEND_FAIL_COUNTS] %s", ordered_counts)
-
-    top = blocked.sort_values(["oos_mean_edge_bps", "group"], ascending=[False, True]).head(top_k)
-    for row in top.itertuples(index=False):
-        _logger.info(
-            (
-                "[DIAG][RULE_RECOMMEND_FAIL] variant=%s cell=%s failed=%s "
-                "oos_n=%d mean=%.1f median=%.1f p10=%.1f q10_fail=%.3f density=%.3f "
-                "regime=%s regime_obs=%d regime_edge=%.1f hit=%.3f payoff=%.2f decay=%.1f"
-            ),
-            str(getattr(row, "variant", str(row.group).removeprefix("variant="))),
-            str(getattr(row, "signal_cell", "")),
-            str(row.failed_checks),
-            int(row.oos_n),
-            float(row.oos_mean_edge_bps),
-            float(row.oos_median_edge_bps),
-            float(row.oos_p10_edge_bps),
-            float(row.oos_q10_shortfall_fail_rate),
-            float(row.event_fraction_per_bar),
-            str(row.regime_best_name),
-            int(row.regime_best_oos_obs),
-            float(row.regime_best_oos_edge_bps),
-            float(row.oos_pct_edge_pos),
-            float(row.oos_payoff_ratio),
-            float(row.edge_stability_bps),
-        )
+    ordered_counts = " | ".join(f"{name}x{count}" for name, count in sorted(failure_counts.items()))
+    top_blocked = (
+        blocked.sort_values(["oos_mean_edge_bps", "group"], ascending=[False, True])
+        .head(top_k)
+    )
+    top_names = ", ".join(
+        str(getattr(r, "variant", str(r.group).removeprefix("variant=")))
+        for r in top_blocked.itertuples(index=False)
+    )
+    _logger.info(
+        "[DIAG][RECOMMEND_BLOCKED] n=%d  fail_gates: %s  top: %s",
+        len(blocked),
+        ordered_counts,
+        top_names,
+    )
 
 
 def _variant_group_to_key(group: str) -> str:
@@ -847,13 +841,12 @@ def _log_side_flip_block(side_flip: pd.DataFrame) -> None:
 
 def _log_decision_block(decision: dict[str, float | int | str]) -> None:
     """Emit a compact decision summary."""
-    _logger.debug(
-        "[DIAG][RULE_DECISION] keep=%d flip=%d drop=%d insufficient=%d best_group=%s best_mean_edge=%.1f",
+    _logger.info(
+        "[DIAG][RULE_DECISION] keep=%d flip=%d drop=%d insufficient=%d best_mean_edge=%.1f",
         int(decision.get("keep", 0)),
         int(decision.get("flip", 0)),
         int(decision.get("drop", 0)),
         int(decision.get("insufficient", 0)),
-        str(decision.get("best_group", "")),
         float(decision.get("best_mean_edge", float("nan"))),
     )
 
@@ -1145,7 +1138,15 @@ def compute_rule_diagnostics(
     if not silent:
         _log_summary_block(summary=by_family, view="family")
         _log_summary_block(summary=by_variant, view="variant")
-        _log_variant_top_block(by_variant, top_k=cfg.diagnostic_top_k)
+        _recommended_set = frozenset(
+            list(recommended_keep_variants)
+            + [f"variant={v}" for v in recommended_keep_variants if not v.startswith("variant=")]
+        )
+        _log_variant_top_block(
+            by_variant,
+            top_k=cfg.diagnostic_top_k,
+            recommended_variants=_recommended_set,
+        )
         _log_recommendation_failure_block(
             recommendation_variant_summary,
             cfg=cfg,
@@ -1153,20 +1154,11 @@ def compute_rule_diagnostics(
         )
         _log_side_flip_block(side_flip=side_flip)
         _log_decision_block(decision)
-        _logger.debug(
-            "[DIAG][RULE_RECOMMEND_BASIS] basis=%s recommend=[%d,%d) report=[%d,%d)",
+        _logger.info(
+            "[DIAG][RULE_RECOMMEND] basis=%s keep=%s flip=%s",
             recommendation_basis,
-            resolved_recommendation_start,
-            resolved_recommendation_end,
-            resolved_report_start,
-            resolved_report_end,
-        )
-        _logger.debug(
-            "[DIAG][RULE_RECOMMEND] keep=%s flip=%s keep_cells=%s flip_cells=%s",
-            ",".join(recommended_keep_variants) if recommended_keep_variants else "",
-            ",".join(recommended_flip_variants) if recommended_flip_variants else "",
-            ",".join(recommended_keep_signal_cells) if recommended_keep_signal_cells else "",
-            ",".join(recommended_flip_signal_cells) if recommended_flip_signal_cells else "",
+            ",".join(recommended_keep_variants) if recommended_keep_variants else "none",
+            ",".join(recommended_flip_variants) if recommended_flip_variants else "none",
         )
 
     return RuleDiagnosticsResult(
