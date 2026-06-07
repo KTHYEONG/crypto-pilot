@@ -379,6 +379,8 @@ def _build_optional_exec_1m_payload(
             nan_pct_pre,
             nan_pct_post,
         )
+        # Contiguous array 보장 (Numba copy 오버헤드 방지)
+        payload[col] = np.ascontiguousarray(arr_2d)
 
     return payload
 
