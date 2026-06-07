@@ -474,7 +474,7 @@ def _log_selection_by_variant(
         key=lambda item: item[1],
         reverse=True,
     )[: max(1, int(getattr(cfg, "diagnostic_top_k", 10)))]:
-        logger.info(
+        logger.debug(
             (
                 "[DIAG][SELECT_VARIANT] key=%s total=%d gate_fail=%d edge_fail=%d "
                 "q10_fail=%d passed=%d mean_p=%.3f max_mu=%.1f max_q10=%.1f"
@@ -667,7 +667,7 @@ def select_candidate_events_for_portfolio(
             else 0
         )
         filtered.attrs["candidate_selection_diagnostics"] = diagnostics
-        _sel_logger.warning(
+        _sel_logger.debug(
             (
                 "[DIAG][SELECT_ZERO] total=%d policy=%s zero_reason=%s "
                 "gate_fail=%d edge_fail=%d q10_fail=%d utility_fail=%d eligible=%d"
@@ -732,7 +732,7 @@ def select_candidate_events_for_portfolio(
                 pd.to_numeric(selected["mu_net_decision_bps"], errors="coerce"),
                 realized_edge,
             )
-            _sel_logger.info(
+            _sel_logger.debug(
                 "[DIAG][EDGE_IC] n=%d mu_net_rank_ic=%.4f hit_rate=%.3f payoff_ratio=%.3f "
                 "realized_mean=%.1f win_mean=%.1f loss_mean=%.1f",
                 len(realized_edge),
@@ -768,7 +768,7 @@ def select_candidate_events_for_portfolio(
         else 0
     )
     selected.attrs["candidate_selection_diagnostics"] = diagnostics
-    _sel_logger.info(
+    _sel_logger.debug(
         (
             "[DIAG][SELECT] total=%d gate_pass=%d edge_pass=%d q10_pass=%d utility_pass=%d "
             "eligible=%d selected_pre_group=%d selected=%d n_keep=%d | policy=%s zero_reason=%s "
