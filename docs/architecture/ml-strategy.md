@@ -1,6 +1,6 @@
 # Futures ML Strategy Architecture
 
-> last_verified: 2026-06-07 (edge gate default → rank_ic, prior_only fallback decoupled from residual model)
+> last_verified: 2026-06-07 (candidate_v6: signal context feature group 추가; edge gate default → rank_ic, prior_only fallback decoupled from residual model)
 
 ## 1. Overview
 본 문서는 `my-coin-traider` 프로젝트의 선물(Futures) ML 전략 아키텍처를 기술합니다. 본 아키텍처는 단순 순위 기반(Rank-based) 모델에서 벗어나, 개별 **Candidate Event**를 추출하고 이를 ML로 필터링하여 최종 **Target Weight**를 생성하는 파이프라인을 핵심으로 합니다.
@@ -41,12 +41,20 @@
   - `edge_after_hurdle_bps`: `net_event_bps`의 backward-compat alias
 
 ### 3.3 Multi-Group Feature Engineering (`candidate_dataset.py`)
-학습 데이터셋은 세 가지 핵심 피처 그룹으로 구성됩니다.
+학습 데이터셋(`feature_schema_version="candidate_v6"`)은 다음 피처 그룹으로 구성됩니다.
 - **Signal Pre-Qualification (Layer 0)**: fit split(`is_fit_split=True`)에서만 variant proof를 적용한다. `signal_prequalify_method="mean"`은 legacy 경로로 `mean_edge > 0` 와 `signal_prequalify_min_obs`만 확인하고, `"block_bootstrap"`/`"concurrency_t"`는 overlap-aware uniqueness weight를 사용해 `t-stat >= signal_prequalify_min_tstat`를 추가로 요구한다. 불합격 variant는 `uniqueness_weight=0` 처리되며 OOS inference에서는 global prior fallback을 유지한다.
 - **Identity Features**: 전략 패밀리 및 변종 ID를 원-핫 인코딩하여 개별 로직의 고유 특성 반영.
 - **Market State**: BTC 수익률, 추세, 전체 시장 변동성 및 분산, 시장 폭(Breadth) 등 거시 국면 정보.
 - **Symbol State**: 개별 코인의 변동성 Z-score, 펀딩비 상태, 수익률 랭크 등 자산 고유 상태 정보.
+- **Signal Context (`signal_context_features_enabled`, candidate_v6)**: ML이 "이 신호가 지금 적시·적소에 발화했는가"를 판단하도록 진입 시점 신호 품질을 직접 제공한다. 모든 피처는 `entry_idx - 1` 이하 정보만 사용(causal).
+  - `overlay_mult_entry`, `crisis_active_entry`: 진입 직전 regime overlay 강도/위기 여부.
+  - `funding_side_alignment` = `tanh(funding_z20 * side)`: 펀딩 방향이 진입 방향을 지지하는지(carry 정렬).
+  - `score_pct_variant_hist_90d`: 동일 variant의 최근 `score_pct_variant_hist_window_bars`(기본 90일) 이벤트 히스토리 대비 현재 `raw_score`의 percentile. 직전+동시간대 이벤트만 사용(미래 미참조).
+  - `archetype_regime_match`: `_ARCHETYPE_REGIME_AFFINITY[(archetype, entry_regime)]` 룩업 ∈ [-1, 1]. 신호 archetype과 레짐의 설계 적합도.
+  - `n_same_dir_variants_log` = `log1p(동일 entry_idx·symbol·side 이벤트 수 - 1)`: 같은 바에서의 신호 수렴도(confluence).
 - **Overlay Context**: `entry_idx - 1` 시점의 `overlay_mult`, `crisis_active`, `entry_regime_code`, `entry_regime`를 event context에 주입해 이후 gate/sizing이 동일한 causal snapshot을 사용한다.
+
+> **Feature Order Invariant**: 스키마/행렬 컬럼 순서는 `base + universe + market_state + signal_context + identity`로 고정된다. 그룹 비활성 시 해당 그룹 이름이 schema에서 제외되고 `build_candidate_dataset`의 컬럼 누적도 함께 생략되어 정합을 유지한다.
 
 ### 3.4 Model Training & Calibration (`*_gate.py`, `*_edge.py`)
 - **No Gate Classifier**: 별도 LightGBM gate classifier는 제거되었다. catastrophic veto는 `q10_net_bps < -catastrophic_shortfall_bps` 직접 판정으로 처리한다.
