@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -45,7 +46,8 @@ def _make_mock_data_maps(t: int = 150) -> dict[str, dict[str, Any]]:
     return maps
 
 
-def test_run_candidate_ablation_returns_correct_ablation_dataframe(monkeypatch: Any) -> None:
+def test_run_candidate_ablation_returns_correct_ablation_dataframe(monkeypatch: Any, caplog: Any) -> None:
+    caplog.set_level(logging.INFO)
     data_maps = _make_mock_data_maps(250)
     cfg = CandidateStrategyConfig(
         timeframe="4h",
@@ -125,6 +127,8 @@ def test_run_candidate_ablation_returns_correct_ablation_dataframe(monkeypatch: 
             "edge_plus_gate_event_kelly",
             "full_portfolio_caps",
         }.issubset(set(df_ablation["variant"]))
+    assert "[ABLATION-PROF]" in caplog.text
+    assert "[ABLATION-TASK-PROF]" in caplog.text
 
 
 def test_build_rule_equal_size_weights_uses_entry_idx_bar() -> None:
