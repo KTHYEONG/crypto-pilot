@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -171,8 +172,10 @@ def test_strategy_mode_pipeline_orchestration_order(
 
 def test_alpha_mode_skips_optimization_stage(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Alpha 모드는 strategy bridge 후 optimization 없이 종료해야 한다."""
+    caplog.set_level(logging.INFO)
     run_config = build_run_config_from_args(
         {
             "phase": "alpha",
@@ -245,11 +248,14 @@ def test_alpha_mode_skips_optimization_stage(
     result = opt_main_futures.run_pipeline(run_config)
     assert result.exit_code == 0
     assert result.reason == "candidate_evaluation_done"
+    assert "optimization/training skipped" in caplog.text
 
 
 def test_strategy_stage_injects_universe_metadata_before_bridge(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO)
     run_config = build_run_config_from_args(
         {
             "phase": "alpha",
@@ -353,6 +359,7 @@ def test_strategy_stage_injects_universe_metadata_before_bridge(
         "cluster_size": 6.0,
         "anchor_cluster_member": 1.0,
     }
+    assert "[STRATEGY-PROF]" in caplog.text
 
 
 def test_run_from_cli_when_pipeline_returns_nonzero_propagates_exit_code(

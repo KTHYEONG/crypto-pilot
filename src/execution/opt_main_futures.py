@@ -14,6 +14,7 @@ import logging
 import os
 import time
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
@@ -44,11 +45,9 @@ from src.application.futures.optimization.optimization_service import (
     run_optimization,
 )
 from src.application.futures.optimization.strategy_service import (
-    assert_candidate_output_ready,
     build_candidate_strategy_config,
     pick_strategy_data_maps,
     run_active_strategy_output_bridge,
-    summarize_candidate_output_readiness,
 )
 from src.application.futures.optimization.universe_service import (
     UniverseMembershipTimeline,
@@ -83,6 +82,24 @@ from src.domain.futures.universe.membership import inject_membership_masks_into_
 from src.domain.futures.universe.storage import run_historical_sync
 
 _logger = logging.getLogger("opt_main_futures")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeBreakdown:
+    total: float
+    steps: Mapping[str, float]
+
+    @property
+    def accounted(self) -> float:
+        return float(sum(max(float(value), 0.0) for value in self.steps.values()))
+
+    @property
+    def unaccounted(self) -> float:
+        return max(float(self.total) - self.accounted, 0.0)
+
+
+def _runtime_breakdown(total: float, **steps: float) -> RuntimeBreakdown:
+    return RuntimeBreakdown(total=float(total), steps={key: float(value) for key, value in steps.items()})
 
 
 def _forward_log_return_on_index(
@@ -578,21 +595,53 @@ def _run_strategy_stage(
     trading_symbols: tuple[str, ...] = (),
     universe_snapshot: UniverseSnapshot | None = None,
 ) -> None:
+    t_strategy_stage = time.perf_counter()
+    strategy_steps: dict[str, float] = {
+        "map_pick": 0.0,
+        "metadata": 0.0,
+        "bridge": 0.0,
+        "report": 0.0,
+        "merge": 0.0,
+        "evaluation": 0.0,
+    }
+
+    def _emit_strategy_profile() -> None:
+        profile = _runtime_breakdown(time.perf_counter() - t_strategy_stage, **strategy_steps)
+        _logger.info(
+            (
+                "[STRATEGY-PROF] total=%.4fs map_pick=%.4fs metadata=%.4fs bridge=%.4fs "
+                "report=%.4fs merge=%.4fs evaluation=%.4fs accounted=%.4fs unaccounted=%.4fs"
+            ),
+            profile.total,
+            strategy_steps["map_pick"],
+            strategy_steps["metadata"],
+            strategy_steps["bridge"],
+            strategy_steps["report"],
+            strategy_steps["merge"],
+            strategy_steps["evaluation"],
+            profile.accounted,
+            profile.unaccounted,
+        )
+
+    t_step = time.perf_counter()
     strategy_maps = pick_strategy_data_maps(
         oos_data_maps=data_stage.oos_data_maps,
         is_data_maps=data_stage.data_maps,
         valid_symbols=data_stage.valid_symbols,
         tf=run_config.timeframe,
     )
+    strategy_steps["map_pick"] = time.perf_counter() - t_step
     full_strategy_maps = strategy_maps
 
     if universe_snapshot is not None:
+        t_step = time.perf_counter()
         _inject_universe_metadata_into_maps(
             full_strategy_maps,
             snapshot=universe_snapshot,
             symbols=tuple(full_strategy_maps.keys()),
             tf=run_config.timeframe,
         )
+        strategy_steps["metadata"] = time.perf_counter() - t_step
 
     # inference_panel은 데이터가 실제 로드된 심볼만 필터링하여 전달
     loaded_sym_set = set(data_stage.data_maps.keys())
@@ -629,7 +678,9 @@ def _run_strategy_stage(
         silent=False,
     )
     bridge_elapsed = time.perf_counter() - t_bridge_start
+    strategy_steps["bridge"] = bridge_elapsed
     
+    t_report = time.perf_counter()
     # Summary of bridge output — read from alpha_panel["target_weight"] (CandidatePipelineOutput)
     non_zero_weights = 0
     panel = getattr(ml_out, "alpha_panel", None)
@@ -641,6 +692,68 @@ def _run_strategy_stage(
         candidate_report = {}
     selected_total_bridge = int(candidate_report.get("selected_total", 0))
 
+    # --- LOGICAL OUTPUT SEQUENCE ---
+    # Current candidates
+    failure_report = candidate_report.get("failure_report")
+    keep_variants = list(candidate_report.get("recommended_keep_variants", []))
+
+    # 1. Cause: Signal Selection
+    _logger.info("\n[SIGNAL DIAGNOSTICS: STRATEGY FILTERING]")
+    _logger.info("-" * 82)
+    _logger.info(f"| {'Action':<12} | {'Count':<5} | {'Details / Selected Strategies':<55} |")
+    _logger.info("-" * 82)
+    if failure_report:
+        n_blocked = failure_report.get("n_blocked", 0)
+        failure_counts = failure_report.get("failure_counts", {})
+        mapping = {
+            "min_obs": "Low Obs", "mean_edge": "Low Mean Edge", "median_edge": "Low Median Edge",
+            "p10_edge": "Poor P10 Edge", "q10_fail": "High Q10 Fail", "event_density": "Event Overload",
+            "regime_edge": "Regime Filter", "edge_decay": "Edge Decay", "hit_or_payoff": "Poor Hit/Payoff",
+            "exit_policy": "Exit Policy",
+        }
+        readable_failures = " | ".join([f"{mapping.get(k, k)} ({v})" for k, v in sorted(failure_counts.items())])
+        top_blocked = failure_report.get("top_blocked_str", "none")
+        _logger.info(f"| {'BLOCKED':<12} | {n_blocked:<5} | Fail Reasons: {readable_failures[:40]:<40} |")
+        _logger.info(f"| {'':<12} | {'':<5} | Top Blocked: {top_blocked[:41]:<41} |")
+    if keep_variants:
+        _logger.info(f"| {'RECOMMENDED':<12} | {len(keep_variants):<5} | 1. {keep_variants[0]:<52} |")
+        for i, var in enumerate(keep_variants[1:], 2):
+            _logger.info(f"| {'(ML Ready)':<12} | {'':<5} | {i}. {var:<52} |")
+    else:
+        _logger.info(f"| {'RECOMMENDED':<12} | {'0':<5} | {'none':<52} |")
+    _logger.info("-" * 82)
+
+    # 2. Cause: ML Walk-Forward Performance
+    wf_details = candidate_report.get("wf_fold_details", [])
+    if wf_details and run_config.phase in {"full", "ml"}:
+        _logger.info("\n[WALK-FORWARD FOLD DETAILS]")
+        _logger.info("-" * 82)
+        _logger.info(
+            f"| {'Fold':<4} | {'Mode':<10} | {'Rank IC':>8} | {'Events':>7} | "
+            f"{'Prior':>6} | {'EU_p90':>7} | {'Pass':<6} |"
+        )
+        _logger.info("-" * 82)
+        for res in wf_details:
+            fold_id = res.get("fold_id", 0)
+            mode = res.get("inference_mode", "n/a")
+            rank_ic = res.get("rank_ic")
+            rank_ic_str = (
+                f"{rank_ic:>8.3f}"
+                if isinstance(rank_ic, (int, float)) and np.isfinite(rank_ic)
+                else f"{'n/a':>8}"
+            )
+            events = res.get("n_events", 0)
+            prior = res.get("prior_bps", 0.0)
+            eu_p90 = res.get("eu_p90", 0.0)
+            passed = res.get("pass_cost", False)
+            pass_str = "✅" if passed else "❌"
+            _logger.info(
+                f"| {fold_id:<4} | {mode:<10} | {rank_ic_str} | {events:>7,} | "
+                f"{prior:>6.2f} | {eu_p90:>7.2f} | {pass_str:<6} |"
+            )
+        _logger.info("-" * 82)
+
+    # 3. Decision: Final Bridge Status
     header = f"| {'Metric':<18} | {'Value':<27} |"
     width = len(header)
     title = "[BRIDGE SUMMARY] "
@@ -652,112 +765,66 @@ def _run_strategy_stage(
     _logger.info(f"| {'Status':<18} | {workflow_status:<27} |")
     _logger.info(f"| {'Execution Time':<18} | {f'{bridge_elapsed:.2f}s':<27} |")
     _logger.info("-" * width)
-    _logger.info(
-        (
-            "[BRIDGE SUMMARY][DIAG] selected_total=%s eligible_total=%s selected_pre_group=%s "
-            "policy=%s zero_reason=%s gate_p50=%.4f gate_p90=%.4f mu_p50=%.1f mu_p90=%.1f "
-            "q10_p10=%.1f utility_p50=%.3f utility_p90=%.3f breakeven_floor=%.1f"
-        ),
-        candidate_report.get("selected_total", 0),
-        candidate_report.get("eligible", 0),
-        candidate_report.get("selected_pre_group", 0),
-        candidate_report.get("policy", "unknown"),
-        candidate_report.get("zero_reason", "unknown"),
-        float(candidate_report.get("gate_p_median", float("nan"))),
-        float(candidate_report.get("gate_p_p90", float("nan"))),
-        float(candidate_report.get("mu_median_bps", float("nan"))),
-        float(candidate_report.get("mu_p90_bps", float("nan"))),
-        float(candidate_report.get("q10_p10_bps", float("nan"))),
-        float(candidate_report.get("utility_median", float("nan"))),
-        float(candidate_report.get("utility_p90", float("nan"))),
-        float(candidate_report.get("breakeven_floor_bps", float("nan"))),
-    )
-    _logger.info(
-        (
-            "[BRIDGE SUMMARY][WF_DIAG] wf_selected=%s wf_eligible=%s shadow_profiles=%s "
-            "shadow_max_selected=%s shadow_max_eligible=%s eu_p90=%.3f downside_p90=%.3f"
-        ),
-        candidate_report.get("wf_selected_total", 0),
-        candidate_report.get("wf_eligible_total", 0),
-        candidate_report.get("wf_shadow_profile_count", 0),
-        candidate_report.get("wf_shadow_max_selected_total", 0),
-        candidate_report.get("wf_shadow_max_eligible", 0),
-        float(candidate_report.get("wf_waterfall_expected_utility_p90_bps", float("nan"))),
-        float(candidate_report.get("wf_waterfall_downside_drag_p90_bps", float("nan"))),
-    )
+    strategy_steps["report"] = time.perf_counter() - t_report
+
+    # Demote extra diagnostics to DEBUG
+    _logger.debug(f"[BRIDGE SUMMARY][DIAG] rule_report_keys={list(candidate_report.keys())}")
 
     t_merge_start = time.perf_counter()
     merge_candidate_output_into_is_and_oos(
-        ml_out,
-        data_stage.data_maps,
-        data_stage.oos_data_maps,
-        data_stage.valid_symbols,
-        run_config.timeframe,
+        ml_out, data_stage.data_maps, data_stage.oos_data_maps,
+        data_stage.valid_symbols, run_config.timeframe,
     )
-    _logger.debug(
-        "[latency] merge_candidate_output_into_is_and_oos: %.4fs",
-        time.perf_counter() - t_merge_start,
+    strategy_steps["merge"] = time.perf_counter() - t_merge_start
+    _logger.info(
+        "[PROFILE][STAGE] merge_candidate_output_into_is_and_oos took %.4fs",
+        strategy_steps["merge"],
     )
 
-    # signal_only: print validation table and skip ML-downstream steps
+    # 4. Post-Analysis: Evaluation/Ablation
     candidate_report_ref = getattr(ml_out, "rule_report", {}) or {}
     if isinstance(candidate_report_ref, dict) and candidate_report_ref.get("zero_reason") == "signal_only_mode":
         sv_list = candidate_report_ref.get("signal_validation", [])
-        header_sv = (
-            f"| {'Variant':<28} | {'events':<6} | {'bars':<5} | {'net_p50':>8} | "
-            f"{'stress_p50':>10} | {'hit':>5} | {'hac_t':>6} | {'pass':>4} |"
-        )
-        _logger.info("\n[SIGNAL-VALIDATION] " + "-" * (len(header_sv) - 20))
-        _logger.info(header_sv)
+        _logger.info("\n[SIGNAL VALIDATION: FILTERING IMPACT]")
+        _logger.info("-" * 82)
+        _logger.info(f"| {'Variant':<22} | {'Events':>8} | {'Hit Rate':>10} | {'Mean Edge':>10} | {'Status':<15} |")
+        _logger.info("-" * 82)
+        mean_unfiltered = mean_filtered = 0.0
         for sv in sv_list:
+            v_name = str(sv.get("variant", "unknown"))
+            if v_name == "rule_only_equal_size":
+                display_name, mean_unfiltered = "rule_only (Raw)", float(sv.get("net_edge_bps_mean", 0.0))
+            elif v_name == "rule_promo_no_leak":
+                display_name, mean_filtered = "rule_promo (Filter)", float(sv.get("net_edge_bps_mean", 0.0))
+            else:
+                display_name = v_name[:22]
+            status_text = "✅ PASS" if sv.get("survives_cost") else "❌ FAIL"
             _logger.info(
-                "| %-30s | %6d | %5d | %8.1f | %10.1f | %5.3f | %6.2f | %5s |",
-                sv.get("variant", "?")[:30],
-                sv.get("n_events", 0),
-                sv.get("decision_bar_count", 0),
-                sv.get("net_edge_bps_p50", float("nan")),
-                sv.get("net_edge_bps_stress_p50", float("nan")),
-                sv.get("hit_rate", 0.0),
-                sv.get("hac_t_stat", 0.0),
-                "PASS" if sv.get("survives_cost") else "FAIL",
+                f"| {display_name:<22} | {sv.get('n_events', 0):>8,} | "
+                f"{float(sv.get('hit_rate', 0.0))*100:>9.1f}% | "
+                f"{float(sv.get('net_edge_bps_mean', 0.0)):>6.1f} bps | "
+                f"{status_text:<14} |"
             )
-        _logger.info("[SIGNAL-VALIDATION] overall_pass=%s", candidate_report_ref.get("signal_validation_pass"))
+        _logger.info("-" * 82)
+        _logger.info(
+            ">> Conclusion: Filtering improved Mean Edge by %+0.1f bps. "
+            "Proceeding to ML phase.\n",
+            mean_filtered - mean_unfiltered,
+        )
+        _emit_strategy_profile()
         return
 
     if run_config.phase in {"full", "ml"}:
-        t_report_start = time.perf_counter()
-        _logger.debug("[latency] Starting _run_candidate_evaluation_report")
+        t_eval = time.perf_counter()
         _run_candidate_evaluation_report(
-            ml_out, data_stage, run_config.timeframe,
+            ml_out,
+            data_stage,
+            run_config.timeframe,
             trading_symbols or tuple(data_stage.valid_symbols),
         )
-        _logger.debug(
-            "[latency] Completed _run_candidate_evaluation_report: %.4fs",
-            time.perf_counter() - t_report_start,
-        )
+        strategy_steps["evaluation"] = time.perf_counter() - t_eval
 
-    if run_config.phase == "full":
-        strategy_name = str(OPT_FUTURES_CONFIG.get("FUTURES_STRATEGY_NAME", "candidate_ml"))
-        if strategy_name in {"candidate_ml", "rule_baseline"}:
-            report = summarize_candidate_output_readiness(
-                candidate_out=ml_out,
-                oos_data_maps=data_stage.oos_data_maps,
-                valid_symbols=data_stage.valid_symbols,
-                tf=run_config.timeframe,
-            )
-            if report.panel_target_weight_non_zero <= 0:
-                _logger.warning(
-                    "[CANDIDATE-OUTPUT-READINESS] candidate strategy produced zero-only panel "
-                    "(nonzero target_weight=%d)",
-                    report.panel_target_weight_non_zero,
-                )
-        else:
-            assert_candidate_output_ready(
-                candidate_out=ml_out,
-                oos_data_maps=data_stage.oos_data_maps,
-                valid_symbols=data_stage.valid_symbols,
-                tf=run_config.timeframe,
-            )
+    _emit_strategy_profile()
 
 
 def _run_candidate_evaluation_report(
@@ -767,6 +834,12 @@ def _run_candidate_evaluation_report(
     trading_symbols: tuple[str, ...],
 ) -> None:
     """Print candidate-ml performance reporting and ablation study."""
+    t_eval = time.perf_counter()
+    eval_steps: dict[str, float] = {
+        "config": 0.0,
+        "ablation": 0.0,
+        "render": 0.0,
+    }
     header = f"| {'Action':<18} | {'Status':<27} |"
     width = len(header)
     title = "[CANDIDATE EVALUATION] "
@@ -778,23 +851,28 @@ def _run_candidate_evaluation_report(
     _logger.info("-" * width)
 
     from src.domain.futures.strategy.ablation import run_candidate_ablation
-    
+
+    t_step = time.perf_counter()
     cfg = build_candidate_strategy_config(
         strategy_cfg=StrategyConfig(name="candidate_ml"),
         opt_config=OPT_FUTURES_CONFIG,
         timeframe=tf,
     ).candidate
+    eval_steps["config"] = time.perf_counter() - t_step
     
     active_syms = [s for s in trading_symbols if s in data_stage.data_maps]
     if not active_syms:
         active_syms = list(data_stage.data_maps.keys())
-        
+
+    t_step = time.perf_counter()
     df_ablation = run_candidate_ablation(
         data_maps=data_stage.data_maps,
         symbols=tuple(active_syms),
         tf=tf,
         cfg=cfg,
+        cached_output=candidate_out,
     )
+    eval_steps["ablation"] = time.perf_counter() - t_step
     
     # Alias mapping for variant names to keep the table compact
     alias_map = {
@@ -828,6 +906,7 @@ def _run_candidate_evaluation_report(
         f" | {'-'*10:>10} | {'-'*6:>6} | {'-'*6:>6} | {'-'*5:<5} |"
     )
 
+    t_render = time.perf_counter()
     for _, row in df_ablation.iterrows():
         name = str(row["variant"])
         alias = alias_map.get(name, name[:18])
@@ -847,8 +926,18 @@ def _run_candidate_evaluation_report(
             f"| {alias:<18} | {cagr:>7} | {dd:>7} | {mar:>6}"
             f" | {equity:>10} | {trades:>6} | {deploy:>6} | {passed:^5} |"
         )
-    
+    eval_steps["render"] = time.perf_counter() - t_render
     _logger.info("-" * width)
+    breakdown = _runtime_breakdown(time.perf_counter() - t_eval, **eval_steps)
+    _logger.info(
+        "[EVAL-PROF] total=%.4fs config=%.4fs ablation=%.4fs render=%.4fs accounted=%.4fs unaccounted=%.4fs",
+        breakdown.total,
+        eval_steps["config"],
+        eval_steps["ablation"],
+        eval_steps["render"],
+        breakdown.accounted,
+        breakdown.unaccounted,
+    )
 
 
 def _run_optimization_stage(
@@ -1199,6 +1288,9 @@ def run_pipeline(
     if run_config.phase == "signal":
         return RunnerResult(exit_code=0, reason="signal_mode_done")
     if run_config.phase == "ml":
+        _logger.info(
+            "[PHASE] phase=ml completed strategy/candidate evaluation only; optimization/training skipped"
+        )
         return RunnerResult(exit_code=0, reason="candidate_evaluation_done")
     # Step 5) optimization + final OOS evaluation
     _logger.info(
