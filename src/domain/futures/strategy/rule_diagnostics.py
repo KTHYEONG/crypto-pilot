@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -18,7 +19,7 @@ _logger = logging.getLogger(__name__)
 def log_regime_quality_report(report: RegimeQualityReport) -> None:
     """Emit a compact regime scorecard line for diagnostics."""
     reasons = ",".join(report.reasons) if report.reasons else "none"
-    _logger.info(
+    _logger.debug(
         "[REGIME_QUALITY] dwell=%.2f leakage_ok=%s overlay_lift_bps=%.3f "
         "overlay_lift_t=%.3f crisis_ok=%s passed=%s reasons=%s",
         report.persistence_dwell,
@@ -47,6 +48,7 @@ class RuleDiagnosticsResult:
     recommendation_basis: str
     recommendation_split: tuple[int, int]
     report_split: tuple[int, int]
+    recommendation_failure_report: dict[str, Any] | None = None
 
 
 def _safe_spearman(signal: np.ndarray, target: np.ndarray) -> float:
@@ -771,7 +773,7 @@ def _log_recommendation_failure_block(summary: pd.DataFrame, *, cfg: CandidateSt
         str(getattr(r, "variant", str(r.group).removeprefix("variant=")))
         for r in top_blocked.itertuples(index=False)
     )
-    _logger.info(
+    _logger.debug(
         "[DIAG][RECOMMEND_BLOCKED] n=%d  fail_gates: %s  top: %s",
         len(blocked),
         ordered_counts,
@@ -841,7 +843,7 @@ def _log_side_flip_block(side_flip: pd.DataFrame) -> None:
 
 def _log_decision_block(decision: dict[str, float | int | str]) -> None:
     """Emit a compact decision summary."""
-    _logger.info(
+    _logger.debug(
         "[DIAG][RULE_DECISION] keep=%d flip=%d drop=%d insufficient=%d best_mean_edge=%.1f",
         int(decision.get("keep", 0)),
         int(decision.get("flip", 0)),
@@ -1135,6 +1137,7 @@ def compute_rule_diagnostics(
         "best_mean_edge": float(best_row.mean_edge_bps) if best_row is not None else float("nan"),
     }
 
+    recommendation_failure_report: dict[str, Any] | None = None
     if not silent:
         _log_summary_block(summary=by_family, view="family")
         _log_summary_block(summary=by_variant, view="variant")
@@ -1147,6 +1150,35 @@ def compute_rule_diagnostics(
             top_k=cfg.diagnostic_top_k,
             recommended_variants=_recommended_set,
         )
+        # Collect failure report stats
+        if not recommendation_variant_summary.empty:
+            blocked_df = recommendation_variant_summary.copy()
+            blocked_df["failed_checks"] = [
+                ",".join(_failed_recommendation_checks(row, cfg)) for _, row in blocked_df.iterrows()
+            ]
+            blocked_df = blocked_df.loc[blocked_df["failed_checks"] != ""].copy()
+            if not blocked_df.empty:
+                failure_counts: dict[str, int] = {}
+                for failed in blocked_df["failed_checks"]:
+                    for name in str(failed).split(","):
+                        if name:
+                            failure_counts[name] = failure_counts.get(name, 0) + 1
+                ordered_counts = " | ".join(f"{name}x{count}" for name, count in sorted(failure_counts.items()))
+                top_blocked = (
+                    blocked_df.sort_values(["oos_mean_edge_bps", "group"], ascending=[False, True])
+                    .head(cfg.diagnostic_top_k)
+                )
+                top_names = ", ".join(
+                    str(getattr(r, "variant", str(r.group).removeprefix("variant=")))
+                    for r in top_blocked.itertuples(index=False)
+                )
+                recommendation_failure_report = {
+                    "n_blocked": len(blocked_df),
+                    "fail_gates_str": ordered_counts,
+                    "top_blocked_str": top_names,
+                    "failure_counts": failure_counts,
+                }
+
         _log_recommendation_failure_block(
             recommendation_variant_summary,
             cfg=cfg,
@@ -1154,7 +1186,7 @@ def compute_rule_diagnostics(
         )
         _log_side_flip_block(side_flip=side_flip)
         _log_decision_block(decision)
-        _logger.info(
+        _logger.debug(
             "[DIAG][RULE_RECOMMEND] basis=%s keep=%s flip=%s",
             recommendation_basis,
             ",".join(recommended_keep_variants) if recommended_keep_variants else "none",
@@ -1174,4 +1206,5 @@ def compute_rule_diagnostics(
         recommendation_basis=recommendation_basis,
         recommendation_split=(resolved_recommendation_start, resolved_recommendation_end),
         report_split=(resolved_report_start, resolved_report_end),
+        recommendation_failure_report=recommendation_failure_report,
     )

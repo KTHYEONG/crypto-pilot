@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -89,3 +91,90 @@ def test_run_candidate_walk_forward_prior_only_fallback(monkeypatch: pytest.Monk
     assert outputs[0].model_output.edge_source == EdgeSource.DISABLED
     assert not outputs[0].gate_report.enabled
     assert not outputs[0].edge_report.selected
+    assert outputs[0].timing_profile is not None
+    assert set(outputs[0].timing_profile) >= {
+        "schema",
+        "dataset_fit",
+        "dataset_early_stop",
+        "dataset_calibration_fit",
+        "dataset_calibration_eval",
+        "dataset_oos",
+        "gate_fit",
+        "edge_fit",
+        "inference",
+        "selection",
+        "total",
+    }
+
+
+def test_run_candidate_walk_forward_parallel_path_preserves_fold_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    size = 12
+    dummy_aligned = AlignedMarketData(
+        symbols=("BTC",),
+        datetimes=np.array(pd.date_range("2026-01-01", periods=size, freq="4h")),
+        open_2d=np.ones((size, 1)),
+        high_2d=np.ones((size, 1)),
+        low_2d=np.ones((size, 1)),
+        close_2d=np.ones((size, 1)),
+        volume_2d=np.ones((size, 1)),
+        funding_2d=np.zeros((size, 1)),
+        active_mask=np.ones((size, 1), dtype=bool),
+        warm_mask=np.ones((size, 1), dtype=bool),
+        entry_block_mask=np.zeros((size, 1), dtype=bool),
+        kill_mask=np.zeros((size, 1), dtype=bool),
+    )
+    cfg = CandidateStrategyConfig(min_fit_obs=100)
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_workflow.build_candidate_dataset",
+        lambda *args, **kwargs: DummyDataset(6),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_workflow.fit_candidate_feature_schema",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr("src.domain.futures.strategy.candidate_workflow.os.cpu_count", lambda: 8)
+
+    class _ImmediateFuture:
+        def __init__(self, fn: Callable[..., CandidateFoldOutput], *args: object) -> None:
+            self._result = fn(*args)
+
+        def result(self) -> CandidateFoldOutput:
+            return self._result
+
+    class _FakeExecutor:
+        def __init__(self, *, max_workers: int, mp_context: object) -> None:
+            self.max_workers = max_workers
+            self.mp_context = mp_context
+
+        def __enter__(self) -> _FakeExecutor:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def submit(
+            self,
+            fn: Callable[..., CandidateFoldOutput],
+            *args: object,
+        ) -> _ImmediateFuture:
+            return _ImmediateFuture(fn, *args)
+
+    monkeypatch.setattr("concurrent.futures.ProcessPoolExecutor", _FakeExecutor)
+
+    folds = (
+        WFFold(fit_start=0, fit_end=4, cal_start=4, cal_end=6, oos_start=6, oos_end=8),
+        WFFold(fit_start=1, fit_end=5, cal_start=5, cal_end=7, oos_start=7, oos_end=10),
+    )
+
+    outputs = run_candidate_walk_forward(
+        labeled_events=pd.DataFrame(),
+        aligned=dummy_aligned,
+        cfg=cfg,
+        folds=folds,
+    )
+
+    assert [out.fold_id for out in outputs] == [0, 1]
+    assert all(out.timing_profile is not None for out in outputs)
