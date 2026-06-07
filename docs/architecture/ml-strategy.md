@@ -1,6 +1,6 @@
 # Futures ML Strategy Architecture
 
-> last_verified: 2026-06-07 (continuous market regime overlay provider: vol-target + CUSUM, HMM removed)
+> last_verified: 2026-06-07 (edge gate default → rank_ic, prior_only fallback decoupled from residual model)
 
 ## 1. Overview
 본 문서는 `my-coin-traider` 프로젝트의 선물(Futures) ML 전략 아키텍처를 기술합니다. 본 아키텍처는 단순 순위 기반(Rank-based) 모델에서 벗어나, 개별 **Candidate Event**를 추출하고 이를 ML로 필터링하여 최종 **Target Weight**를 생성하는 파이프라인을 핵심으로 합니다.
@@ -53,8 +53,9 @@
 - **Downside/Upstream Ratio Diagnostic (`p_pass`)**: `p_pass`는 `clip(q10_return_r / mu_return_r, 0, 1)` 기반 downside/upside ratio로 유지된다. selection hard gate에는 사용하지 않고, sizing 단계에서 soft-discount로 곱해져서 target weight를 조절하거나 diagnostic confidence proxy로 사용한다.
 - **Risk-Unit Edge (Regressor)**:
   - **Prior Shrinkage**: calibration-set 가중 평균으로 variant prior `mu_prior_i = E[z_i]` 추정. global prior와 shrinkage 결합.
-  - **Honest Edge Gate**: 기본 게이트는 `edge_gate_mode="overlay_lift"`이며 `calibration_eval`에서만 overlay-applied realized lift를 평가한다. `lift_bps > 0`, `overlay_lift_tstat >= edge_gate_min_lift_tstat`, `n_eff >= edge_gate_min_n_eff`를 동시에 만족할 때만 수용한다. legacy `edge_gate_mode="rank_ic"`는 backward-compat 경로로만 유지한다.
-  - **Residual Champion Fallback**: `edge_residual_model_enabled=False`가 기본값이다. residual path를 다시 켜더라도 gate 미통과 시 prior-only 또는 disabled로 fail-closed 한다. `EdgeModelValidation`에 `rank_ic_cal_eval`, `overlay_lift_bps`, `overlay_lift_tstat`, `n_eff`, `accepted`, `reason`을 기록한다.
+  - **Edge Rank IC Gate (active default)**: 기본 게이트는 `edge_gate_mode="rank_ic"`이며 `calibration_eval`에서 `Spearman(mu_pred, realized_edge)`를 실계산하여 `rank_ic_tstat >= min_ic_tstat`일 때만 수용한다. 게이트 대상(center 모델)과 평가 지표(center 예측의 IC)가 정합한다.
+    - **overlay_lift mode (비활성/실험용)**: `edge_gate_mode="overlay_lift"`는 `realized_bps * (overlay_mult - 1.0)`로 regime overlay의 lift를 평가하나, accept/reject가 제어하는 것은 base center 모델이라 **평가-제어 미스매치**가 있다. 실측상 overlay lift t-stat이 0 근방이면 base alpha의 IC와 무관하게 전 fold `disabled`로 fail-closed되는 kill-switch로 동작하므로 기본값에서 제외한다.
+  - **Prior Fallback (residual과 분리)**: prior_only fallback은 `edge_residual_model_enabled`와 **독립**이다. 게이트 미통과 시 `edge_prior_enabled=True`이고 eligible prior row가 존재하면 `prior_only`로 graceful degradation(center contribution=0, variant prior로 사이징), 그렇지 않으면 `disabled`. residual path를 켜면(`edge_residual_model_enabled=True`) accept 시 `prior_residual`. `EdgeModelValidation`에 `rank_ic_cal_eval`, `overlay_lift_bps`, `overlay_lift_tstat`, `n_eff`, `accepted`, `reason`을 기록한다.
   - `mu_i = mu_prior_i + mu_residual_i` (residual champion pass 시). `expected_net_bps_i = mu_i * s_i`는 표시/검사 전용이며 raw model 출력이 아님.
   - **Multi-Objective**: risk-unit center(z), mae_r, mfe_r 별도 Quantile Regressor 학습.
 
