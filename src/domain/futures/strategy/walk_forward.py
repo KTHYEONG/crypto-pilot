@@ -23,6 +23,7 @@ def build_walk_forward_folds(
     *,
     n_bars: int,
     cfg: CandidateStrategyConfig,
+    max_holding_bars: int | None = None,
 ) -> tuple[WFFold, ...]:
     """Build purged + embargoed anchored/rolling WF folds.
 
@@ -33,10 +34,11 @@ def build_walk_forward_folds(
     Purge gap is inserted between fit_end and cal_start.
     Embargo gap is inserted between cal_end and oos_start.
     """
+    from src.domain.futures.strategy.config import resolve_purge_and_embargo_bars, with_max_holding_bars
     from src.domain.futures.strategy_runtime.bridge import _candidate_ml_split_indices
 
-    purge = cfg.purge_bars
-    embargo = cfg.embargo_bars
+    resolved_cfg = with_max_holding_bars(cfg, max_holding_bars=max_holding_bars)
+    purge, embargo = resolve_purge_and_embargo_bars(resolved_cfg)
     n_folds = cfg.wf_n_folds
     scheme = cfg.wf_scheme
 

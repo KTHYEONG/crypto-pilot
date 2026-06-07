@@ -6,6 +6,7 @@ import pandas as pd
 from src.domain.futures.strategy.candidate_dataset import CandidateDataset
 from src.domain.futures.strategy.candidate_edge import (
     EdgeModelValidation,
+    _compute_kelly_fraction,
     fit_candidate_edge_models,
     predict_candidate_edges,
 )
@@ -32,6 +33,8 @@ def _make_dataset(seed: int, n: int, *, family: str = "trend_ma", variant: str =
             {
                 "family": [family] * n,
                 "variant": [variant] * n,
+                "overlay_mult": [1.0] * n,
+                "crisis_active": [False] * n,
             }
         ),
         feature_names=("f0", "f1", "f2", "f3"),
@@ -43,7 +46,7 @@ def test_predict_candidate_edges_exposes_all_required_outputs() -> None:
     train = _make_dataset(seed=100, n=180)
     valid = _make_dataset(seed=101, n=60)
     cal_eval = _make_dataset(seed=102, n=40)
-    cfg = CandidateStrategyConfig(seed=3)
+    cfg = CandidateStrategyConfig(seed=3, edge_gate_mode="rank_ic")
 
     models = fit_candidate_edge_models(train=train, valid=valid, calibration_eval=cal_eval, cfg=cfg)
     p_pass = np.full(valid.X.shape[0], 0.6, dtype=np.float64)
@@ -57,12 +60,31 @@ def test_predict_candidate_edges_exposes_all_required_outputs() -> None:
     assert "utility_min" in out.selection_thresholds
 
 
+def test_compute_kelly_fraction_uses_quantile_sigma() -> None:
+    mu = np.array([0.10], dtype=np.float64)
+    q10 = np.array([-0.05], dtype=np.float64)
+    q90 = np.array([0.15], dtype=np.float64)
+
+    out = _compute_kelly_fraction(
+        mu,
+        q10,
+        q90,
+        kelly_fraction=0.25,
+        max_symbol_weight=0.10,
+    )
+
+    sigma = (0.15 - (-0.05)) / 2.563
+    expected = min(0.25 * 0.10 / ((sigma * sigma) + (0.10 * 0.10) + 1e-9), 0.10)
+    assert out[0] == expected
+
+
 def test_predict_candidate_edges_applies_cost_and_utility_formula() -> None:
     train = _make_dataset(seed=200, n=180)
     valid = _make_dataset(seed=201, n=30)
     cal_eval = _make_dataset(seed=202, n=30)
     cfg = CandidateStrategyConfig(
         seed=4,
+        edge_gate_mode="rank_ic",
         expected_cost_bps=2.0,
         downside_penalty=0.5,
         turnover_penalty=1.0,
@@ -99,7 +121,11 @@ def test_edge_prior_residual_preserves_positive_variant_prior() -> None:
     # cal_eval: varying edge so rank_ic is finite and test can confirm prior is positive
     cal_eval = _make_dataset(seed=302, n=30, family="funding_carry", variant="funding_24")
     cfg = CandidateStrategyConfig(
-        seed=11, edge_prior_min_obs=10, edge_prior_shrinkage_obs=50, min_edge_rank_ic=0.0
+        seed=11,
+        edge_gate_mode="rank_ic",
+        edge_prior_min_obs=10,
+        edge_prior_shrinkage_obs=50,
+        min_edge_rank_ic=0.0,
     )
 
     models = fit_candidate_edge_models(train=train, valid=valid, calibration_eval=cal_eval, cfg=cfg)
@@ -121,6 +147,7 @@ def test_predict_candidate_edges_flags_prediction_collapse() -> None:
     cal_eval = _make_dataset(seed=402, n=40)
     cfg = CandidateStrategyConfig(
         seed=12,
+        edge_gate_mode="rank_ic",
         edge_prediction_min_std_bps=1e9,
         edge_prediction_min_positive_rate=0.999,
     )
@@ -146,7 +173,12 @@ def test_edge_gate_reverts_to_direct_when_rank_ic_below_threshold() -> None:
     valid = _make_dataset(seed=501, n=30)
     # Small cal_eval (< 20 obs) → insufficient_obs → accepted=False
     cal_eval_small = _make_dataset(seed=502, n=10)
-    cfg = CandidateStrategyConfig(seed=13, min_edge_rank_ic=0.02)
+    cfg = CandidateStrategyConfig(
+        seed=13,
+        edge_gate_mode="rank_ic",
+        edge_residual_model_enabled=True,
+        min_edge_rank_ic=0.02,
+    )
 
     # Act
     models = fit_candidate_edge_models(
@@ -210,6 +242,7 @@ def test_edge_gate_accepts_when_rank_ic_above_threshold() -> None:
     # Set low threshold so acceptance is likely
     cfg = CandidateStrategyConfig(
         seed=14,
+        edge_gate_mode="rank_ic",
         edge_prior_enabled=True,
         edge_residual_model_enabled=True,
         min_edge_rank_ic=0.0,  # always accept finite rank_ic
@@ -245,7 +278,13 @@ def test_rejected_residual_model_uses_prior_only_mu() -> None:
     )
     valid = _make_dataset(seed=701, n=40, family="carry", variant="v1")
     cal_eval = _make_dataset(seed=702, n=40, family="carry", variant="v1")
-    cfg = CandidateStrategyConfig(seed=15, min_edge_rank_ic=0.99, edge_prior_min_obs=10)
+    cfg = CandidateStrategyConfig(
+        seed=15,
+        edge_gate_mode="rank_ic",
+        edge_residual_model_enabled=True,
+        min_edge_rank_ic=0.99,
+        edge_prior_min_obs=10,
+    )
 
     models = fit_candidate_edge_models(train=train, valid=valid, calibration_eval=cal_eval, cfg=cfg)
     out = predict_candidate_edges(
@@ -258,6 +297,96 @@ def test_rejected_residual_model_uses_prior_only_mu() -> None:
     expected_prior_bps = models.variant_prior_bps["carry:v1"]
     assert models.prediction_mode == "prior_only"
     assert np.allclose(out.mu_net_decision_bps, expected_prior_bps)
+
+
+def test_overlay_lift_gate_uses_cal_eval_only() -> None:
+    train = _make_dataset(seed=800, n=120)
+    valid = _make_dataset(seed=801, n=40)
+    cal_eval = _make_dataset(seed=802, n=80)
+    cal_eval = CandidateDataset(
+        X=cal_eval.X,
+        y_gate=cal_eval.y_gate,
+        y_edge_bps=np.full(80, 10.0, dtype=np.float32),
+        y_q10_bps=cal_eval.y_q10_bps,
+        y_mfe_bps=cal_eval.y_mfe_bps,
+        gate_weight=cal_eval.gate_weight,
+        edge_weight=cal_eval.edge_weight,
+        groups=cal_eval.groups,
+        event_index=pd.DataFrame(
+            {
+                "family": ["trend_ma"] * 80,
+                "variant": ["ema_12_72"] * 80,
+                "overlay_mult": [1.5] * 80,
+                "crisis_active": [False] * 80,
+            }
+        ),
+        feature_names=cal_eval.feature_names,
+        effective_sample_size=cal_eval.effective_sample_size,
+    )
+    valid = CandidateDataset(
+        X=valid.X,
+        y_gate=valid.y_gate,
+        y_edge_bps=np.full(40, -50.0, dtype=np.float32),
+        y_q10_bps=valid.y_q10_bps,
+        y_mfe_bps=valid.y_mfe_bps,
+        gate_weight=valid.gate_weight,
+        edge_weight=valid.edge_weight,
+        groups=valid.groups,
+        event_index=valid.event_index,
+        feature_names=valid.feature_names,
+        effective_sample_size=valid.effective_sample_size,
+    )
+    cfg = CandidateStrategyConfig(
+        seed=16,
+        edge_gate_mode="overlay_lift",
+        edge_gate_min_lift_tstat=0.0,
+        edge_gate_min_n_eff=10,
+    )
+
+    models = fit_candidate_edge_models(train=train, valid=valid, calibration_eval=cal_eval, cfg=cfg)
+
+    assert models.validation is not None
+    assert models.validation.accepted is True
+    assert models.validation.reason == "overlay_lift_pass"
+    assert models.validation.overlay_lift_bps > 0.0
+
+
+def test_gate_rejects_below_n_eff() -> None:
+    train = _make_dataset(seed=900, n=120)
+    valid = _make_dataset(seed=901, n=40)
+    cal_eval = _make_dataset(seed=902, n=20)
+    cal_eval = CandidateDataset(
+        X=cal_eval.X,
+        y_gate=cal_eval.y_gate,
+        y_edge_bps=np.full(20, 10.0, dtype=np.float32),
+        y_q10_bps=cal_eval.y_q10_bps,
+        y_mfe_bps=cal_eval.y_mfe_bps,
+        gate_weight=np.ones(20, dtype=np.float32),
+        edge_weight=np.full(20, 0.1, dtype=np.float32),
+        groups=cal_eval.groups,
+        event_index=pd.DataFrame(
+            {
+                "family": ["trend_ma"] * 20,
+                "variant": ["ema_12_72"] * 20,
+                "overlay_mult": [1.5] * 20,
+                "crisis_active": [False] * 20,
+            }
+        ),
+        feature_names=cal_eval.feature_names,
+        effective_sample_size=cal_eval.effective_sample_size,
+    )
+    cfg = CandidateStrategyConfig(
+        seed=17,
+        edge_gate_mode="overlay_lift",
+        edge_gate_min_lift_tstat=0.0,
+        edge_gate_min_n_eff=60,
+    )
+
+    models = fit_candidate_edge_models(train=train, valid=valid, calibration_eval=cal_eval, cfg=cfg)
+
+    assert models.validation is not None
+    assert models.validation.accepted is False
+    assert models.validation.reason == "insufficient_n_eff"
 
 
 def test_rejected_prior_only_without_eligible_rows_disables_mu() -> None:

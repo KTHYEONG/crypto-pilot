@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 
 _DEFAULT_COST_MODEL = ExecutionCostModel()
 _DEFAULT_RT_BPS: float = _DEFAULT_COST_MODEL.round_trip_bps()  # ≈ 7.5
+_DEFAULT_MAX_EXPECTED_HOLDING_BARS = 36
 
 
 @dataclass(slots=True, frozen=True)
@@ -41,41 +42,35 @@ class BlendConfig:
 
 @dataclass(slots=True, frozen=True)
 class RegimeConfig:
-    """Rule-based 5-state soft posterior regime settings."""
+    """Continuous risk overlay and regime quality settings."""
 
-    enabled: bool = False  # regime provider module removed; keep False until re-implemented
-    vol_window: int = 30
-    vol_crisis_pct: float = 0.95
-    vol_high_pct: float = 0.70
-    trend_ma_fast: int = 12
-    trend_ma_slow: int = 48
-    trend_thr: float = 0.0
-    dd_crisis_thr: float = -0.20
-    corr_crisis_thr: float = 0.80
-    smooth_ewma_bars: int = 6
-    gross_floor: float = 0.15
+    overlay_target_vol_ann: float = 0.40
+    overlay_vol_ewma_span: int = 30
+    overlay_vol_scale_clip: tuple[float, float] = (0.25, 1.5)
+    overlay_trend_snr_span: int = 60
+    crisis_target_arl_bars: int = 500
+    crisis_gross_floor: float = 0.15
+    regime_overlay_min_lift_tstat: float = 1.0
+    regime_min_n_eff: int = 60
+    regime_quality_gate_enabled: bool = True
 
     def __post_init__(self) -> None:
         """Validate regime parameters."""
-        if self.vol_window < 1:
-            raise ValueError("vol_window must be >= 1")
-        if not (0.0 < self.vol_high_pct < self.vol_crisis_pct < 1.0):
-            raise ValueError(
-                "volatility percentiles must satisfy "
-                "0 < vol_high_pct < vol_crisis_pct < 1.0"
-            )
-        if self.trend_ma_fast >= self.trend_ma_slow:
-            raise ValueError("trend_ma_fast must be less than trend_ma_slow")
-        if self.trend_ma_fast < 1:
-            raise ValueError("trend_ma_fast must be >= 1")
-        if self.dd_crisis_thr >= 0.0:
-            raise ValueError("dd_crisis_thr must be negative")
-        if not (0.0 <= self.corr_crisis_thr <= 1.0):
-            raise ValueError("corr_crisis_thr must satisfy 0 <= corr_crisis_thr <= 1.0")
-        if self.smooth_ewma_bars < 1:
-            raise ValueError("smooth_ewma_bars must be >= 1")
-        if not (0.0 <= self.gross_floor <= 1.0):
-            raise ValueError("gross_floor must satisfy 0 <= gross_floor <= 1.0")
+        if self.overlay_target_vol_ann <= 0.0:
+            raise ValueError("overlay_target_vol_ann must be positive")
+        if self.overlay_vol_ewma_span < 1:
+            raise ValueError("overlay_vol_ewma_span must be >= 1")
+        if self.overlay_trend_snr_span < 2:
+            raise ValueError("overlay_trend_snr_span must be >= 2")
+        lo, hi = self.overlay_vol_scale_clip
+        if not (0.0 < lo <= hi):
+            raise ValueError("overlay_vol_scale_clip must satisfy 0 < lo <= hi")
+        if self.crisis_target_arl_bars < 2:
+            raise ValueError("crisis_target_arl_bars must be >= 2")
+        if not (0.0 <= self.crisis_gross_floor <= 1.0):
+            raise ValueError("crisis_gross_floor must satisfy 0 <= gross_floor <= 1.0")
+        if self.regime_min_n_eff < 2:
+            raise ValueError("regime_min_n_eff must be >= 2")
 
 
 @dataclass(slots=True, frozen=True)
@@ -106,8 +101,12 @@ class CandidateStrategyConfig:
     train_months: int = 24
     valid_months: int = 3
     test_months: int = 6
-    purge_bars: int = 18
-    embargo_bars: int = 18
+    max_holding_bars: int = _DEFAULT_MAX_EXPECTED_HOLDING_BARS
+    purge_bars: int | None = None
+    embargo_bars: int | None = None
+    purge_safety_mult: float = 1.2
+    _purge_bars_input: int | None = field(init=False, repr=False, compare=False)
+    _embargo_bars_input: int | None = field(init=False, repr=False, compare=False)
     # Deprecated: use ExecutionCostModel fields instead; kept for explicit override only
     cost_floor_bps: float = _DEFAULT_RT_BPS
     gate_label_column: Literal[
@@ -149,13 +148,10 @@ class CandidateStrategyConfig:
     sizing_mode: Literal["stop_risk", "calibrated_event_kelly"] = "stop_risk"
     event_risk_budget: float = 0.0025
     kelly_min_bin_ess: int = 100
-    min_gate_probability: float = 0.55
     min_expected_net_bps: float = 1.0
     max_expected_shortfall_bps: float = 300.0
     shortfall_threshold_basis: Literal["absolute_bps", "stop_relative"] = "absolute_bps"
     max_expected_shortfall_stop_mult: float = 1.25
-    selection_gate_mode: Literal["off", "soft_floor", "hard_floor"] = "soft_floor"
-    selection_min_gate_probability_floor: float = 0.35
     selection_use_expected_utility: bool = True
     selection_min_expected_utility_bps: float = 0.0
     selection_shortfall_mode: Literal["hard", "penalty_only", "catastrophic"] = "penalty_only"
@@ -167,8 +163,6 @@ class CandidateStrategyConfig:
     selection_q10_grid_bps: tuple[float, ...] = (80.0, 150.0, 250.0, 400.0)
     selection_waterfall_diagnostics_enabled: bool = True
     selection_shadow_profiles_enabled: bool = True
-    selection_shadow_gate_modes: tuple[str, ...] = ("off", "soft_floor", "hard_floor")
-    selection_shadow_gate_floors: tuple[float, ...] = (0.0, 0.30, 0.35, 0.40)
     selection_shadow_utility_floors_bps: tuple[float, ...] = (-50.0, -25.0, 0.0)
     selection_shadow_breakeven_floor_fractions: tuple[float, ...] = (0.0, 0.25, 0.50)
     selection_shadow_top_quantile: float = 0.10
@@ -235,12 +229,20 @@ class CandidateStrategyConfig:
     selection_top_quantile: float = 0.10
     min_net_floor_cost_fraction: float = 0.50
     min_oos_rank_ic: float = 0.01
+    min_ic_tstat: float = 1.5
     min_oos_log_growth_uplift: float = 0.0
     max_oos_edge_decay_bps: float = 50.0
     min_gate_brier_skill: float = 0.0
     min_gate_decile_lift: float = 0.02
     min_edge_rank_ic: float = 0.02
     signal_prequalify_min_obs: int = 30
+    signal_prequalify_method: Literal["block_bootstrap", "concurrency_t", "mean"] = "block_bootstrap"
+    signal_prequalify_min_tstat: float = 1.5
+    signal_prequalify_bootstrap_n: int = 1000
+    overlay_sizing_enabled: bool = True
+    edge_gate_mode: Literal["overlay_lift", "rank_ic"] = "overlay_lift"
+    edge_gate_min_lift_tstat: float = 1.0
+    edge_gate_min_n_eff: int = 60
     edge_uplift_bootstrap_samples: int = 500
     edge_uplift_confidence: float = 0.90
     min_risk_unit_bps: float = 25.0
@@ -273,7 +275,8 @@ class CandidateStrategyConfig:
     taker_fee_bps: float = 5.0
     maker_ratio: float = 0.75
     slippage_bps: float = 1.0
-    impact_coeff_bps: float = 0.0
+    impact_coeff_bps: float = 0.5
+    impact_adv_proxy_field: str = "turnover_proxy"
     cost_stress_multiplier: float = 1.5
     cost_amortize_by_holding: bool = True
     # Signal-only validation mode (--mode signal; skips ML training)
@@ -299,11 +302,12 @@ class CandidateStrategyConfig:
     edge_prediction_min_std_bps: float = 3.0
     edge_prediction_min_positive_rate: float = 0.01
     edge_prior_enabled: bool = True
+    use_empirical_bayes_shrinkage: bool = True
     edge_prior_min_obs: int = 100
     edge_prior_shrinkage_obs: int = 500
     edge_prior_max_deviation_bps: float = 30.0
     max_variant_selection_fraction: float = 0.4
-    edge_residual_model_enabled: bool = True
+    edge_residual_model_enabled: bool = False
     max_drawdown_cap: float = 0.25
     # Deployment integrity: prevent near-zero-trading variants from "passing"
     min_deployment_trade_count: int = 20
@@ -332,8 +336,24 @@ class CandidateStrategyConfig:
             raise ValueError("candidate strategy name must be 'candidate_ml' or 'rule_baseline'")
         if self.train_months <= 0 or self.valid_months <= 0 or self.test_months <= 0:
             raise ValueError("all month windows must be positive")
-        if self.purge_bars < 0 or self.embargo_bars < 0:
+        if self.max_holding_bars < 1:
+            raise ValueError("max_holding_bars must be >= 1")
+        if self.purge_bars is not None and self.purge_bars < 0:
+            raise ValueError("purge bars must be non-negative")
+        if self.embargo_bars is not None and self.embargo_bars < 0:
             raise ValueError("purge and embargo bars must be non-negative")
+        if self.purge_safety_mult < 1.0:
+            raise ValueError("purge_safety_mult must be >= 1.0")
+        object.__setattr__(self, "_purge_bars_input", self.purge_bars)
+        object.__setattr__(self, "_embargo_bars_input", self.embargo_bars)
+        derived_purge_bars = (
+            int(self.purge_bars)
+            if self.purge_bars is not None
+            else max(0, math.ceil(int(self.max_holding_bars) * self.purge_safety_mult))
+        )
+        derived_embargo_bars = derived_purge_bars if self.embargo_bars is None else int(self.embargo_bars)
+        object.__setattr__(self, "purge_bars", derived_purge_bars)
+        object.__setattr__(self, "embargo_bars", derived_embargo_bars)
         if self.gate_label_column not in {
             "profitable_after_hurdle_label",
             "barrier_first_label",
@@ -374,10 +394,6 @@ class CandidateStrategyConfig:
             raise ValueError("kelly_min_bin_ess must be >= 1")
         if self.cost_floor_bps < 0.0:
             raise ValueError("cost_floor_bps must be non-negative")
-        if self.selection_gate_mode not in {"off", "soft_floor", "hard_floor"}:
-            raise ValueError("unsupported selection_gate_mode")
-        if not (0.0 <= self.selection_min_gate_probability_floor <= 1.0):
-            raise ValueError("selection_min_gate_probability_floor must be in [0.0, 1.0]")
         if self.shortfall_threshold_basis not in {"absolute_bps", "stop_relative"}:
             raise ValueError("unsupported shortfall_threshold_basis")
         if self.max_expected_shortfall_stop_mult < 0.0:
@@ -416,6 +432,8 @@ class CandidateStrategyConfig:
             raise ValueError("min_net_floor_cost_fraction must be in [0.0, 2.0]")
         if not (-1.0 <= self.min_oos_rank_ic <= 1.0):
             raise ValueError("min_oos_rank_ic must satisfy -1 <= value <= 1")
+        if self.min_ic_tstat < 0.0:
+            raise ValueError("min_ic_tstat must be non-negative")
         if self.max_oos_edge_decay_bps < 0.0:
             raise ValueError("max_oos_edge_decay_bps must be non-negative")
         if self.selection_utility_mode not in {"additive_drag", "expected_edge_direct"}:
@@ -442,11 +460,6 @@ class CandidateStrategyConfig:
             raise ValueError("selection_edge_grid_bps values must be non-negative")
         if any(value < 0.0 for value in self.selection_q10_grid_bps):
             raise ValueError("selection_q10_grid_bps values must be non-negative")
-        valid_gate_modes = {"off", "soft_floor", "hard_floor"}
-        if any(mode not in valid_gate_modes for mode in self.selection_shadow_gate_modes):
-            raise ValueError("selection_shadow_gate_modes contains unsupported mode")
-        if any((floor < 0.0 or floor > 1.0) for floor in self.selection_shadow_gate_floors):
-            raise ValueError("selection_shadow_gate_floors must be in [0.0, 1.0]")
         if any(not math.isfinite(floor) for floor in self.selection_shadow_utility_floors_bps):
             raise ValueError("selection_shadow_utility_floors_bps must be finite")
         if any(
@@ -484,6 +497,14 @@ class CandidateStrategyConfig:
             raise ValueError("min_gate_decile_lift must be non-negative")
         if not (-1.0 <= self.min_edge_rank_ic <= 1.0):
             raise ValueError("min_edge_rank_ic must satisfy -1 <= value <= 1")
+        if self.signal_prequalify_method not in {"block_bootstrap", "concurrency_t", "mean"}:
+            raise ValueError("unsupported signal_prequalify_method")
+        if self.signal_prequalify_bootstrap_n < 1:
+            raise ValueError("signal_prequalify_bootstrap_n must be >= 1")
+        if self.edge_gate_mode not in {"overlay_lift", "rank_ic"}:
+            raise ValueError("unsupported edge_gate_mode")
+        if self.edge_gate_min_n_eff < 1:
+            raise ValueError("edge_gate_min_n_eff must be >= 1")
         if self.edge_uplift_bootstrap_samples < 1:
             raise ValueError("edge_uplift_bootstrap_samples must be >= 1")
         if not (0.0 < self.edge_uplift_confidence < 1.0):
@@ -535,3 +556,54 @@ class CandidateStrategyConfig:
             raise ValueError("min_deployment_capital_fraction must be in [0.0, 1.0]")
         if self.blend_survival_min_net_stress_bps < -50.0:
             raise ValueError("blend_survival_min_net_stress_bps too permissive (< -50)")
+
+
+def with_max_holding_bars(
+    cfg: CandidateStrategyConfig,
+    *,
+    max_holding_bars: int | None = None,
+) -> CandidateStrategyConfig:
+    """Return a config instance with purge/embargo derived from the provided horizon."""
+    resolved_holding_bars = max(
+        1,
+        int(max_holding_bars) if max_holding_bars is not None else int(cfg.max_holding_bars),
+    )
+    if (
+        resolved_holding_bars == int(cfg.max_holding_bars)
+        and cfg.purge_bars == (
+            int(cfg._purge_bars_input)
+            if cfg._purge_bars_input is not None
+            else max(0, math.ceil(resolved_holding_bars * cfg.purge_safety_mult))
+        )
+        and cfg.embargo_bars
+        == (
+            int(cfg._embargo_bars_input)
+            if cfg._embargo_bars_input is not None
+            else (
+                int(cfg._purge_bars_input)
+                if cfg._purge_bars_input is not None
+                else max(0, math.ceil(resolved_holding_bars * cfg.purge_safety_mult))
+            )
+        )
+    ):
+        return cfg
+    return replace(
+        cfg,
+        max_holding_bars=resolved_holding_bars,
+        purge_bars=cfg._purge_bars_input,
+        embargo_bars=cfg._embargo_bars_input,
+    )
+
+
+def resolve_purge_and_embargo_bars(
+    cfg: CandidateStrategyConfig,
+    *,
+    max_holding_bars: int | None = None,
+) -> tuple[int, int]:
+    """Return purge and embargo bars, auto-derived from holding horizon when unset."""
+    resolved_cfg = with_max_holding_bars(cfg, max_holding_bars=max_holding_bars)
+    purge_bars = resolved_cfg.purge_bars
+    embargo_bars = resolved_cfg.embargo_bars
+    if purge_bars is None or embargo_bars is None:
+        raise ValueError("purge/embargo bars must be materialized before use")
+    return int(purge_bars), int(embargo_bars)

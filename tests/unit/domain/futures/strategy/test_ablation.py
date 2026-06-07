@@ -247,7 +247,7 @@ def test_build_variant_prior_output_uses_calibration_set_prior(monkeypatch: Any)
 
     assert np.allclose(out.mu_net_decision_bps, np.asarray([75.0, 25.0], dtype=np.float64))
     assert np.allclose(out.mu_gross_bps, np.asarray([75.0, 25.0], dtype=np.float64))
-    assert np.isclose(out.selection_thresholds["utility_min"], 56.0)
+    assert np.isclose(out.selection_thresholds["utility_min"], 70.0)
 
 
 def test_ablation_returns_attribution_columns(monkeypatch: Any) -> None:
