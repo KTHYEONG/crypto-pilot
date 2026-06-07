@@ -240,7 +240,7 @@ class CandidateStrategyConfig:
     signal_prequalify_min_tstat: float = 1.5
     signal_prequalify_bootstrap_n: int = 1000
     overlay_sizing_enabled: bool = True
-    edge_gate_mode: Literal["overlay_lift", "rank_ic"] = "overlay_lift"
+    edge_gate_mode: Literal["overlay_lift", "rank_ic"] = "rank_ic"
     edge_gate_min_lift_tstat: float = 1.0
     edge_gate_min_n_eff: int = 60
     edge_uplift_bootstrap_samples: int = 500

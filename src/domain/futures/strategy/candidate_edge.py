@@ -593,13 +593,11 @@ def fit_candidate_edge_models(
     else:
         reason = "insufficient_obs"
 
-    if use_prior_residual:
-        final_prediction_mode: EdgePredictionMode = "prior_residual" if accepted else "prior_only"
-    elif accepted:
-        final_prediction_mode = "direct"
+    if accepted:
+        final_prediction_mode: EdgePredictionMode = "prior_residual" if use_prior_residual else "direct"
+    elif cfg.edge_prior_enabled and has_eligible_prior_rows:
+        final_prediction_mode = "prior_only"
     else:
-        final_prediction_mode = "disabled"
-    if not has_eligible_prior_rows and final_prediction_mode == "prior_only":
         final_prediction_mode = "disabled"
 
     if gate_mode == "overlay_lift":
