@@ -19,10 +19,8 @@ from src.domain.futures.strategy.config import CandidateStrategyConfig
 @dataclass(frozen=True)
 class SelectionWaterfall:
     total: int
-    gate_floor: float
     breakeven_floor_bps: float
     utility_floor_bps: float
-    gate_eligible: int
     catastrophic_eligible: int
     utility_eligible: int
     all_eligible: int
@@ -34,7 +32,6 @@ class SelectionWaterfall:
     downside_drag_p50_bps: float | None
     downside_drag_p90_bps: float | None
     turnover_drag_p50_bps: float | None
-    soft_gate_penalty_p50_bps: float | None
     expected_utility_raw_p50_bps: float | None
     expected_utility_raw_p90_bps: float | None
     expected_utility_adj_p50_bps: float | None
@@ -133,8 +130,6 @@ def _selection_component_frame(
     *,
     events: pd.DataFrame,
     cfg: CandidateStrategyConfig,
-    gate_mode: str,
-    gate_floor: float,
     utility_mode: str | None = None,
 ) -> pd.DataFrame:
     frame = events.copy()
@@ -143,19 +138,11 @@ def _selection_component_frame(
     prob_adjusted_mu_bps = pd.to_numeric(frame["mu_net_decision_bps"], errors="coerce")
     downside_drag_bps = frame["q10_net_bps"].clip(upper=0.0).abs()
     turnover_drag_bps = cfg.turnover_penalty * turnover_proxy
-    gate_shortfall = np.maximum(0.0, gate_floor - frame["p_pass"].to_numpy(dtype=np.float64, copy=False))
-    soft_gate_penalty_bps = gate_shortfall * np.maximum(
-        pd.to_numeric(frame["mu_net_decision_bps"], errors="coerce").to_numpy(dtype=np.float64, copy=False),
-        0.0,
-    )
     expected_utility_raw_bps = prob_adjusted_mu_bps - downside_drag_bps - turnover_drag_bps
     expected_utility_bps = expected_utility_raw_bps.copy()
-    if gate_mode == "soft_floor":
-        expected_utility_bps = expected_utility_bps - soft_gate_penalty_bps
     frame["prob_adjusted_mu_bps"] = pd.to_numeric(prob_adjusted_mu_bps, errors="coerce")
     frame["downside_drag_bps"] = pd.to_numeric(downside_drag_bps, errors="coerce")
     frame["turnover_drag_bps"] = pd.to_numeric(turnover_drag_bps, errors="coerce")
-    frame["soft_gate_penalty_bps"] = pd.to_numeric(soft_gate_penalty_bps, errors="coerce")
     frame["expected_utility_raw_bps"] = pd.to_numeric(expected_utility_raw_bps, errors="coerce")
     if resolved_utility_mode == "expected_edge_direct":
         frame["expected_utility_bps"] = pd.to_numeric(frame["mu_net_decision_bps"], errors="coerce")
@@ -170,17 +157,14 @@ def compute_selection_waterfall(
     cfg: CandidateStrategyConfig,
 ) -> dict[str, int | float | None]:
     """Return component-level diagnostics for candidate selection eligibility."""
-    gate_floor = float(cfg.selection_min_gate_probability_floor)
     breakeven_floor = _resolve_breakeven_floor(events, cfg)
     utility_floor = max(float(cfg.selection_min_expected_utility_bps), breakeven_floor)
     if events.empty:
         return asdict(
             SelectionWaterfall(
                 total=0,
-                gate_floor=gate_floor,
                 breakeven_floor_bps=breakeven_floor,
                 utility_floor_bps=utility_floor,
-                gate_eligible=0,
                 catastrophic_eligible=0,
                 utility_eligible=0,
                 all_eligible=0,
@@ -192,7 +176,6 @@ def compute_selection_waterfall(
                 downside_drag_p50_bps=None,
                 downside_drag_p90_bps=None,
                 turnover_drag_p50_bps=None,
-                soft_gate_penalty_p50_bps=None,
                 expected_utility_raw_p50_bps=None,
                 expected_utility_raw_p90_bps=None,
                 expected_utility_adj_p50_bps=None,
@@ -203,23 +186,16 @@ def compute_selection_waterfall(
     frame = _selection_component_frame(
         events=events,
         cfg=cfg,
-        gate_mode=cfg.selection_gate_mode,
-        gate_floor=gate_floor,
     )
     catastrophic_mask = _catastrophic_q10_mask(frame, cfg)
-    gate_eligible_mask = pd.Series(True, index=frame.index, dtype=bool)
-    if cfg.selection_gate_mode == "hard_floor":
-        gate_eligible_mask = frame["p_pass"] >= gate_floor
     utility_eligible_mask = frame["expected_utility_bps"] >= utility_floor
     waterfall = SelectionWaterfall(
         total=int(frame.shape[0]),
-        gate_floor=gate_floor,
         breakeven_floor_bps=breakeven_floor,
         utility_floor_bps=utility_floor,
-        gate_eligible=int(gate_eligible_mask.sum()),
         catastrophic_eligible=int(catastrophic_mask.sum()),
         utility_eligible=int(utility_eligible_mask.sum()),
-        all_eligible=int((catastrophic_mask & gate_eligible_mask & utility_eligible_mask).sum()),
+        all_eligible=int((catastrophic_mask & utility_eligible_mask).sum()),
         mu_ge_floor=int((frame["mu_net_decision_bps"] >= breakeven_floor).sum()),
         expected_utility_ge_zero=int((frame["expected_utility_bps"] >= 0.0).sum()),
         expected_utility_ge_floor=int(utility_eligible_mask.sum()),
@@ -228,7 +204,6 @@ def compute_selection_waterfall(
         downside_drag_p50_bps=_finite_quantile_or_none(frame["downside_drag_bps"], 0.50),
         downside_drag_p90_bps=_finite_quantile_or_none(frame["downside_drag_bps"], 0.90),
         turnover_drag_p50_bps=_finite_quantile_or_none(frame["turnover_drag_bps"], 0.50),
-        soft_gate_penalty_p50_bps=_finite_quantile_or_none(frame["soft_gate_penalty_bps"], 0.50),
         expected_utility_raw_p50_bps=_finite_quantile_or_none(frame["expected_utility_raw_bps"], 0.50),
         expected_utility_raw_p90_bps=_finite_quantile_or_none(frame["expected_utility_raw_bps"], 0.90),
         expected_utility_adj_p50_bps=_finite_quantile_or_none(frame["expected_utility_bps"], 0.50),
@@ -242,8 +217,6 @@ def _evaluate_shadow_profile(
     events: pd.DataFrame,
     cfg: CandidateStrategyConfig,
     catastrophic_mask: pd.Series,
-    gate_mode: str,
-    gate_floor: float,
     utility_floor_base: float,
     breakeven_fraction: float,
     utility_mode: str,
@@ -252,15 +225,10 @@ def _evaluate_shadow_profile(
     frame = _selection_component_frame(
         events=events,
         cfg=cfg,
-        gate_mode=str(gate_mode),
-        gate_floor=float(gate_floor),
         utility_mode=utility_mode,
     )
-    gate_eligible_mask = pd.Series(True, index=frame.index, dtype=bool)
-    if gate_mode == "hard_floor":
-        gate_eligible_mask = frame["p_pass"] >= float(gate_floor)
     utility_floor = max(float(utility_floor_base), float(breakeven_fraction) * float(cfg.cost_floor_bps))
-    eligible = catastrophic_mask & gate_eligible_mask & (frame["expected_utility_bps"] >= utility_floor)
+    eligible = catastrophic_mask & (frame["expected_utility_bps"] >= utility_floor)
     selected_pre_group = 0
     selected_total = 0
     realized_mean = float("nan")
@@ -272,8 +240,8 @@ def _evaluate_shadow_profile(
         top_idx = (
             frame.loc[eligible]
             .sort_values(
-                ["expected_utility_bps", "p_pass", "mu_net_decision_bps", "q10_net_bps"],
-                ascending=[False, False, False, False],
+                ["expected_utility_bps", "mu_net_decision_bps", "q10_net_bps"],
+                ascending=[False, False, False],
             )
             .head(n_keep)
             .index
@@ -309,12 +277,9 @@ def _evaluate_shadow_profile(
                 )
     return {
         "profile_id": (
-            f"{utility_mode}:{gate_mode}:{float(gate_floor):.2f}:"
-            f"{float(utility_floor_base):.1f}:{float(breakeven_fraction):.2f}"
+            f"{utility_mode}:{float(utility_floor_base):.1f}:{float(breakeven_fraction):.2f}"
         ),
         "utility_mode": str(utility_mode),
-        "gate_mode": str(gate_mode),
-        "gate_floor": float(gate_floor),
         "utility_floor_bps": utility_floor,
         "breakeven_floor_fraction": float(breakeven_fraction),
         "eligible": int(eligible.sum()),
@@ -340,8 +305,6 @@ def compute_shadow_selection_profiles(
     columns = [
         "profile_id",
         "utility_mode",
-        "gate_mode",
-        "gate_floor",
         "utility_floor_bps",
         "breakeven_floor_fraction",
         "eligible",
@@ -358,22 +321,16 @@ def compute_shadow_selection_profiles(
     records: list[dict[str, object]] = []
     catastrophic_mask = _catastrophic_q10_mask(events, cfg)
     shadow_utility_modes = list(cfg.selection_shadow_utility_modes) or ["additive_drag"]
-    for utility_mode, gate_mode, gate_floor, utility_floor_base, breakeven_fraction in product(
+    for utility_mode, utility_floor_base, breakeven_fraction in product(
         shadow_utility_modes,
-        cfg.selection_shadow_gate_modes,
-        cfg.selection_shadow_gate_floors,
         cfg.selection_shadow_utility_floors_bps,
         cfg.selection_shadow_breakeven_floor_fractions,
     ):
-        if gate_mode == "off" and gate_floor > 0.0:
-            continue
         records.append(
             _evaluate_shadow_profile(
                 events=events,
                 cfg=cfg,
                 catastrophic_mask=catastrophic_mask,
-                gate_mode=str(gate_mode),
-                gate_floor=float(gate_floor),
                 utility_floor_base=float(utility_floor_base),
                 breakeven_fraction=float(breakeven_fraction),
                 utility_mode=str(utility_mode),
@@ -383,8 +340,8 @@ def compute_shadow_selection_profiles(
     if profiles.empty:
         return profiles
     profiles = profiles.sort_values(
-        ["selected_total", "eligible", "gate_floor", "utility_floor_bps", "breakeven_floor_fraction", "profile_id"],
-        ascending=[False, False, True, True, True, True],
+        ["selected_total", "eligible", "utility_floor_bps", "breakeven_floor_fraction", "profile_id"],
+        ascending=[False, False, True, True, True],
         key=lambda s: (s >= cfg.min_fold_selected_events) if s.name == "selected_total" else s,
     )
     return profiles.head(max(1, int(cfg.selection_shadow_max_profiles))).reset_index(drop=True)
@@ -424,7 +381,7 @@ def compute_selection_sensitivity(
         else pd.Series([""] * total, index=events.index, dtype="object")
     )
     for gate_threshold in gate_grid:
-        gate_mask = events["p_pass"] >= gate_threshold
+        gate_mask = pd.Series(True, index=events.index, dtype=bool)
         for edge_threshold in edge_grid_bps:
             edge_mask = events["mu_net_decision_bps"] >= edge_threshold
             for q10_threshold in q10_grid_bps:
@@ -585,14 +542,11 @@ def select_candidate_events_for_portfolio(
         )
         _log_selection_sensitivity(sensitivity, cfg=cfg)
 
-    gate_floor = float(cfg.selection_min_gate_probability_floor)
     df = _selection_component_frame(
         events=df,
         cfg=cfg,
-        gate_mode=cfg.selection_gate_mode,
-        gate_floor=gate_floor,
     )
-    gate_mask = df["p_pass"] >= cfg.min_gate_probability
+    gate_mask = pd.Series(True, index=df.index, dtype=bool)
     edge_mask = df["mu_net_decision_bps"] >= cfg.min_expected_net_bps
     q10_mask = _q10_mask_for_mode(df, cfg)
     catastrophic_mask = _catastrophic_q10_mask(df, cfg)
@@ -600,12 +554,9 @@ def select_candidate_events_for_portfolio(
     utility_threshold = _utility_threshold(df=df, cfg=cfg, model_output=model_output)
     utility_mask = df["utility_score"] >= utility_threshold
     breakeven_floor = _resolve_breakeven_floor(df, cfg)
-    gate_eligible_mask = pd.Series(True, index=df.index, dtype=bool)
-    if cfg.selection_gate_mode == "hard_floor":
-        gate_eligible_mask = df["p_pass"] >= gate_floor
     utility_floor = max(float(cfg.selection_min_expected_utility_bps), breakeven_floor)
     utility_eligible_mask = df["expected_utility_bps"] >= utility_floor
-    eligible = catastrophic_mask & gate_eligible_mask & utility_eligible_mask
+    eligible = catastrophic_mask & utility_eligible_mask
     waterfall = compute_selection_waterfall(events=df, cfg=cfg)
     shadow_profiles = compute_shadow_selection_profiles(events=df, cfg=cfg)
     n_eligible = int(eligible.sum())
@@ -613,7 +564,7 @@ def select_candidate_events_for_portfolio(
     zero_reason = "selected_nonzero"
 
     if cfg.selection_policy == "hard":
-        mask = gate_mask & edge_mask & q10_mask
+        mask = edge_mask & q10_mask
         zero_reason = "policy_hard"
     elif cfg.selection_policy == "validation_quantile":
         mask = catastrophic_mask & (df["mu_net_decision_bps"] >= 0.0) & utility_mask
@@ -636,8 +587,8 @@ def select_candidate_events_for_portfolio(
             for _, group in eligible_df.groupby("_merge_dt", sort=True):
                 deduped = (
                     group.reset_index().sort_values(
-                        [primary_sort_col, "p_pass", "mu_net_decision_bps", "q10_net_bps"],
-                        ascending=[False, False, False, False],
+                        [primary_sort_col, "mu_net_decision_bps", "q10_net_bps"],
+                        ascending=[False, False, False],
                     )
                     .groupby("symbol", sort=False, as_index=False)
                     .first()
@@ -684,13 +635,10 @@ def select_candidate_events_for_portfolio(
             "edge_pass": int(edge_mask.sum()),
             "q10_pass": int((catastrophic_mask if cfg.selection_policy != "hard" else q10_mask).sum()),
             "utility_pass": int(utility_mask.sum()),
-            "gate_mode": cfg.selection_gate_mode,
-            "gate_floor_used": gate_floor,
+            "gate_mode": "off",
+            "gate_floor_used": 0.0,
             "expected_utility_floor_bps": utility_floor,
-            "gate_eligible": int(gate_eligible_mask.sum()),
-            "soft_gate_penalty_mean_bps": (
-                float(pd.to_numeric(df["soft_gate_penalty_bps"], errors="coerce").mean()) if len(df) > 0 else 0.0
-            ),
+            "gate_eligible": len(df),
             "eligible": n_eligible,
             "selected_pre_group": 0,
             "selected_total": 0,
@@ -750,13 +698,10 @@ def select_candidate_events_for_portfolio(
         "edge_pass": int(edge_mask.sum()),
         "q10_pass": int((catastrophic_mask if cfg.selection_policy != "hard" else q10_mask).sum()),
         "utility_pass": int(utility_mask.sum()),
-        "gate_mode": cfg.selection_gate_mode,
-        "gate_floor_used": gate_floor,
+        "gate_mode": "off",
+        "gate_floor_used": 0.0,
         "expected_utility_floor_bps": utility_floor,
-        "gate_eligible": int(gate_eligible_mask.sum()),
-        "soft_gate_penalty_mean_bps": (
-            float(pd.to_numeric(df["soft_gate_penalty_bps"], errors="coerce").mean()) if len(df) > 0 else 0.0
-        ),
+        "gate_eligible": len(df),
         "eligible": n_eligible,
         "selected_pre_group": int(mask.sum()),
         "selected_total": selected_total,
@@ -840,7 +785,7 @@ def select_candidate_events_for_portfolio(
         diagnostics["n_keep"],
         cfg.selection_policy,
         zero_reason,
-        gate_floor,
+        0.0,
         cfg.min_expected_net_bps,
         cfg.catastrophic_shortfall_bps if cfg.selection_policy != "hard" else cfg.max_expected_shortfall_bps,
         utility_threshold,
@@ -891,6 +836,7 @@ def build_candidate_target_weights(
             float(getattr(row, "risk_unit_bps", getattr(cfg, "min_risk_unit_bps", 25.0))),
             float(getattr(cfg, "min_risk_unit_bps", 25.0)),
         )
+        p_pass_val = float(getattr(row, "p_pass", 1.0))
         if getattr(cfg, "sizing_mode", "stop_risk") == "calibrated_event_kelly":
             mu_return_r = float(row.mu_net_decision_bps) / max(risk_unit_bps, 1e-12)
             q10_return_r = float(getattr(row, "q10_net_bps", 0.0)) / max(risk_unit_bps, 1e-12)
@@ -898,18 +844,18 @@ def build_candidate_target_weights(
             raw_abs_w = cfg.kelly_fraction * max(mu_return_r, 0.0) / second_moment
         else:
             raw_abs_w = float(getattr(cfg, "event_risk_budget", 0.0025)) / max(risk_unit_bps * 1e-4, 1e-12)
+        raw_abs_w = raw_abs_w * p_pass_val
         raw_w = min(float(cfg.max_symbol_weight), raw_abs_w)
 
-        # Phase 3: regime-as-size-multiplier.  Applies a continuous regime
-        # multiplier at the Kelly weight level before cap projection, so the
-        # signal itself is not masked — only position size is attenuated.
-        regime_mult = 1.0
-        if cfg.regime_as_size_multiplier:
+        overlay_mult = 1.0
+        if bool(getattr(cfg, "overlay_sizing_enabled", True)):
+            overlay_mult = float(getattr(row, "overlay_mult", 1.0))
+        elif cfg.regime_as_size_multiplier:
             regime_name = str(getattr(row, "entry_regime", ""))
             regime_mult_map: dict[str, float] = dict(cfg.regime_size_multipliers)
-            regime_mult = regime_mult_map.get(regime_name, 1.0)
+            overlay_mult = regime_mult_map.get(regime_name, 1.0)
 
-        signed_w = raw_w * np.sign(side) * regime_mult
+        signed_w = raw_w * np.sign(side) * overlay_mult
         raw_weights[t, s_idx] = signed_w
         event_records.append((t, s_idx, signed_w, holding_bars))
 

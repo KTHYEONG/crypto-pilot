@@ -17,6 +17,7 @@ from src.domain.futures.strategy.candidate_dataset import build_candidate_datase
 from src.domain.futures.strategy.candidate_edge import fit_candidate_edge_models, predict_candidate_edges
 from src.domain.futures.strategy.candidate_gate import fit_candidate_gate, predict_candidate_gate
 from src.domain.futures.strategy.candidate_portfolio import select_candidate_events_for_portfolio
+from src.domain.futures.strategy.config import resolve_purge_and_embargo_bars, with_max_holding_bars
 
 if TYPE_CHECKING:
     from src.domain.futures.strategy.common.alignment import AlignedMarketData
@@ -38,12 +39,19 @@ def run_candidate_walk_forward(
     Prevents redundant model fitting between bridge and ablation.
     """
     outputs: list[CandidateFoldOutput] = []
+    max_holding_bars = (
+        int(pd.to_numeric(labeled_events["expected_holding_bars"], errors="coerce").max())
+        if not labeled_events.empty and "expected_holding_bars" in labeled_events.columns
+        else None
+    )
+    resolved_cfg = with_max_holding_bars(cfg, max_holding_bars=max_holding_bars)
+    purge_bars, _ = resolve_purge_and_embargo_bars(resolved_cfg)
 
     for fold_idx, fold in enumerate(folds):
         fit_span = max(0, fold.fit_end - fold.fit_start)
         early_stop_len = max(1, int(fit_span * cfg.model_early_stop_fraction))
         early_stop_start = max(fold.fit_start + 1, fold.fit_end - early_stop_len)
-        train_end = max(fold.fit_start + 1, early_stop_start - cfg.purge_bars)
+        train_end = max(fold.fit_start + 1, early_stop_start - purge_bars)
 
         # 1. Feature Schema
         schema = fit_candidate_feature_schema(

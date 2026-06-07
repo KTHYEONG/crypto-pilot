@@ -53,7 +53,6 @@ def test_select_candidate_events_for_portfolio_filters_by_thresholds() -> None:
     )
 
     cfg = CandidateStrategyConfig(
-        min_gate_probability=0.75,
         min_expected_net_bps=10.0,
         max_expected_shortfall_bps=50.0,
         selection_policy="hard",
@@ -84,7 +83,6 @@ def test_select_candidate_events_for_portfolio_penalty_only_mode_ignores_q10_fil
         utility_score=np.array([10.0, 12.0, 8.0], dtype=np.float64),
     )
     cfg = CandidateStrategyConfig(
-        min_gate_probability=0.75,
         min_expected_net_bps=10.0,
         max_expected_shortfall_bps=50.0,
         selection_shortfall_mode="penalty_only",
@@ -111,7 +109,6 @@ def test_select_candidate_events_for_portfolio_supports_stop_relative_shortfall_
         utility_score=np.array([10.0, 12.0, 8.0], dtype=np.float64),
     )
     cfg = CandidateStrategyConfig(
-        min_gate_probability=0.75,
         min_expected_net_bps=10.0,
         max_expected_shortfall_bps=50.0,
         catastrophic_shortfall_bps=120.0,
@@ -147,6 +144,7 @@ def test_compute_selection_sensitivity_returns_grid_counts() -> None:
         & (sensitivity["edge_threshold_bps"] == 5.0)
         & (sensitivity["q10_shortfall_bps"] == 250.0)
     ].iloc[0]
+    assert int(target["gate_pass"]) == 3
     assert int(target["all_pass"]) == 1
     assert str(target["top_variant"]) == "trend_donchian:donchian_36"
 
@@ -198,7 +196,7 @@ def test_selection_stays_zero_when_all_mu_below_breakeven_floor() -> None:
     assert diagnostics["eligible"] == 0
 
 
-def test_utility_topk_hard_floor_blocks_low_gate_probability() -> None:
+def test_utility_topk_hard_floor_no_longer_blocks_selection() -> None:
     events = _make_sample_events()
     model_output = CandidateModelOutput(
         events=events,
@@ -211,16 +209,15 @@ def test_utility_topk_hard_floor_blocks_low_gate_probability() -> None:
     )
     cfg = CandidateStrategyConfig(
         selection_policy="utility_topk",
-        selection_gate_mode="hard_floor",
-        selection_min_gate_probability_floor=0.35,
         cost_floor_bps=24.0,
         min_net_floor_cost_fraction=0.5,
     )
 
     selected = select_candidate_events_for_portfolio(model_output=model_output, cfg=cfg)
 
-    assert selected.empty
-    assert selected.attrs["candidate_selection_diagnostics"]["gate_mode"] == "hard_floor"
+    assert not selected.empty
+    assert set(selected["symbol"]) == {"ETHUSDT"}
+    assert selected.attrs["candidate_selection_diagnostics"]["gate_mode"] == "off"
 
 
 def test_utility_topk_soft_floor_keeps_positive_expected_utility_candidate() -> None:
@@ -236,8 +233,6 @@ def test_utility_topk_soft_floor_keeps_positive_expected_utility_candidate() -> 
     )
     cfg = CandidateStrategyConfig(
         selection_policy="utility_topk",
-        selection_gate_mode="soft_floor",
-        selection_min_gate_probability_floor=0.35,
         cost_floor_bps=10.0,
         min_net_floor_cost_fraction=0.5,
     )
@@ -300,8 +295,6 @@ def test_compute_selection_waterfall_exposes_expected_utility_terms() -> None:
     events["mu_net_decision_bps"] = [50.0, 18.0, 14.0]
     events["q10_net_bps"] = [-10.0, -120.0, -40.0]
     cfg = CandidateStrategyConfig(
-        selection_gate_mode="soft_floor",
-        selection_min_gate_probability_floor=0.35,
         selection_min_expected_utility_bps=0.0,
         cost_floor_bps=10.0,
         min_net_floor_cost_fraction=0.5,
@@ -331,12 +324,8 @@ def test_shadow_selection_profiles_do_not_change_production_selection() -> None:
     )
     cfg = CandidateStrategyConfig(
         selection_policy="utility_topk",
-        selection_gate_mode="hard_floor",
-        selection_min_gate_probability_floor=0.35,
         cost_floor_bps=24.0,
         min_net_floor_cost_fraction=0.5,
-        selection_shadow_gate_modes=("off", "hard_floor"),
-        selection_shadow_gate_floors=(0.0, 0.35),
         selection_shadow_utility_floors_bps=(-20.0, 0.0),
         selection_shadow_breakeven_floor_fractions=(0.0, 0.5),
     )
@@ -352,8 +341,8 @@ def test_shadow_selection_profiles_do_not_change_production_selection() -> None:
         cfg=cfg,
     )
 
-    assert selected.empty
-    assert int(selected.attrs["candidate_selection_diagnostics"]["selected_total"]) == 0
+    assert not selected.empty
+    assert int(selected.attrs["candidate_selection_diagnostics"]["selected_total"]) > 0
     assert int(profiles["selected_total"].max()) > 0
 
 
@@ -482,6 +471,87 @@ def test_build_candidate_target_weights_uses_stop_risk_and_kelly_contracts(
 
     assert prob_weights[10, 1] > prob_weights[10, 0]
     assert q10_weights[10, 0] > q10_weights[10, 1]
+
+
+def test_overlay_mult_scales_weight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_portfolio.project_all_caps",
+        lambda *, w, btc_beta, sigma_port, bars_per_year, caps: w,
+    )
+    selected = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [10],
+            "expected_holding_bars": [5],
+            "risk_unit_bps": [100.0],
+            "overlay_mult": [0.5],
+            "mu_net_decision_bps": [10.0],
+            "q10_net_bps": [-5.0],
+        }
+    )
+    cfg = CandidateStrategyConfig(
+        max_symbol_weight=10.0,
+        gross_cap=20.0,
+        net_cap=20.0,
+        beta_cap=20.0,
+        target_ann_vol=10.0,
+        event_risk_budget=0.01,
+    )
+
+    weights = build_candidate_target_weights(
+        selected_events=selected,
+        close_2d=np.full((20, 1), 100.0, dtype=np.float64),
+        symbols=("BTCUSDT",),
+        beta_2d=None,
+        sigma_3d=None,
+        cfg=cfg,
+    )
+
+    assert weights[10, 0] == pytest.approx(0.5)
+
+
+def test_crisis_floor_caps_gross(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_portfolio.project_all_caps",
+        lambda *, w, btc_beta, sigma_port, bars_per_year, caps: w,
+    )
+    selected = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT", "ETHUSDT"],
+            "side": [1, 1],
+            "entry_idx": [10, 10],
+            "expected_holding_bars": [5, 5],
+            "risk_unit_bps": [100.0, 100.0],
+            "overlay_mult": [0.15, 0.15],
+            "crisis_active": [True, True],
+            "mu_net_decision_bps": [10.0, 10.0],
+            "q10_net_bps": [-5.0, -5.0],
+        }
+    )
+    cfg = CandidateStrategyConfig(
+        max_symbol_weight=10.0,
+        gross_cap=20.0,
+        net_cap=20.0,
+        beta_cap=20.0,
+        target_ann_vol=10.0,
+        event_risk_budget=0.01,
+    )
+
+    weights = build_candidate_target_weights(
+        selected_events=selected,
+        close_2d=np.full((20, 2), 100.0, dtype=np.float64),
+        symbols=("BTCUSDT", "ETHUSDT"),
+        beta_2d=None,
+        sigma_3d=None,
+        cfg=cfg,
+    )
+
+    assert np.sum(np.abs(weights[10])) == pytest.approx(0.3)
 
 
 def test_build_candidate_alpha_panel_formats_correctly() -> None:

@@ -10,8 +10,25 @@ import pandas as pd
 from src.domain.futures.strategy.candidate_labels import label_candidate_events
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.market_regime import RegimeQualityReport
 
 _logger = logging.getLogger(__name__)
+
+
+def log_regime_quality_report(report: RegimeQualityReport) -> None:
+    """Emit a compact regime scorecard line for diagnostics."""
+    reasons = ",".join(report.reasons) if report.reasons else "none"
+    _logger.info(
+        "[REGIME_QUALITY] dwell=%.2f leakage_ok=%s overlay_lift_bps=%.3f "
+        "overlay_lift_t=%.3f crisis_ok=%s passed=%s reasons=%s",
+        report.persistence_dwell,
+        report.leakage_ok,
+        report.overlay_lift_bps,
+        report.overlay_lift_tstat,
+        report.crisis_precision_ok,
+        report.passed,
+        reasons,
+    )
 
 
 @dataclass(slots=True, frozen=True)

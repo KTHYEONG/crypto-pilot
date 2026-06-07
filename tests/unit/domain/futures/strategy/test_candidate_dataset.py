@@ -11,6 +11,7 @@ from src.domain.futures.strategy.candidate_dataset import (
 )
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.market_regime import compute_market_regime_context, compute_risk_overlay
 
 
 def _make_aligned() -> AlignedMarketData:
@@ -141,6 +142,7 @@ def test_build_candidate_dataset_split_filter() -> None:
         split_start=20,
         split_end=40,
     )
+
     assert ds.X.shape[0] == 0
     assert ds.X.shape[1] == len(ds.feature_names)
 
@@ -269,6 +271,45 @@ def test_build_candidate_dataset_builds_risk_unit_return_targets() -> None:
     assert ds.risk_unit_bps[0] == pytest.approx(25.0)
     assert ds.y_q10_bps.tolist() == [12.0]
     assert ds.y_mfe_bps.tolist() == [12.0]
+
+
+def test_build_candidate_dataset_imputes_missing_values_without_dropping_rows() -> None:
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25], aligned.datetimes[26]],
+            "symbol": ["BTCUSDT", "ETHUSDT"],
+            "side": [1, -1],
+            "entry_idx": [26, 27],
+            "exit_idx": [27, 28],
+            "raw_score": [0.5, np.nan],
+            "score_z": [1.0, np.nan],
+            "turnover_proxy": [0.1, np.nan],
+            "triple_barrier_label": [1, 0],
+            "profitable_after_hurdle_label": [1, 0],
+            "edge_after_hurdle_bps": [12.0, -5.0],
+            "mae_bps": [-6.0, -8.0],
+            "mfe_bps": [18.0, 5.0],
+            "ex_ante_cost_bps": [4.0, 4.0],
+        }
+    )
+
+    ds = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(),
+        schema=fit_candidate_feature_schema(
+            labeled_events=labeled,
+            cfg=CandidateStrategyConfig(),
+            split_start=20,
+            split_end=40,
+        ),
+        split_start=20,
+        split_end=40,
+    )
+
+    assert ds.X.shape[0] == 2
+    assert np.isfinite(ds.X).all()
 
 
 def test_build_candidate_dataset_keeps_feature_schema_stable_across_splits() -> None:
@@ -514,3 +555,153 @@ def test_signal_prequalify_not_applied_when_is_fit_split_false() -> None:
 
     # Assert: edge_weight is not zeroed out even though mean_edge < 0
     assert ds.edge_weight.sum() > 0.0
+
+
+def test_prequalify_bootstrap_disqualifies_insignificant_variant() -> None:
+    aligned = _make_aligned()
+    n_events = 33
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25 + idx] for idx in range(n_events)],
+            "symbol": ["BTCUSDT"] * n_events,
+            "family": ["trend_ma"] * n_events,
+            "variant": ["noisy_v"] * n_events,
+            "side": [1] * n_events,
+            "entry_idx": np.arange(26, 26 + n_events),
+            "exit_idx": np.arange(27, 27 + n_events),
+            "expected_holding_bars": [3] * n_events,
+            "raw_score": [0.5] * n_events,
+            "score_z": [1.0] * n_events,
+            "turnover_proxy": [0.1] * n_events,
+            "profitable_after_hurdle_label": [1] * n_events,
+            "edge_after_hurdle_bps": ([1.0, -1.0] * 16) + [0.0],
+            "sl_thr_bps": [25.0] * n_events,
+            "mae_bps": [-5.0] * n_events,
+            "mfe_bps": [5.0] * n_events,
+            "ex_ante_cost_bps": [4.0] * n_events,
+        }
+    )
+    cfg = CandidateStrategyConfig(
+        signal_prequalify_method="block_bootstrap",
+        signal_prequalify_min_obs=30,
+        signal_prequalify_min_tstat=3.0,
+        signal_prequalify_bootstrap_n=100,
+        seed=19,
+    )
+    schema = fit_candidate_feature_schema(
+        labeled_events=labeled,
+        cfg=cfg,
+        split_start=20,
+        split_end=60,
+    )
+
+    ds = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        schema=schema,
+        split_start=20,
+        split_end=60,
+        is_fit_split=True,
+    )
+
+    assert ds.X.shape[0] == n_events
+    assert ds.edge_weight.sum() == pytest.approx(0.0)
+
+
+def test_prequalify_mean_keeps_positive_mean_variant_without_tstat_gate() -> None:
+    aligned = _make_aligned()
+    n_events = 30
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25 + idx] for idx in range(n_events)],
+            "symbol": ["BTCUSDT"] * n_events,
+            "family": ["trend_ma"] * n_events,
+            "variant": ["legacy_mean_v"] * n_events,
+            "side": [1] * n_events,
+            "entry_idx": np.arange(26, 26 + n_events),
+            "exit_idx": np.arange(27, 27 + n_events),
+            "expected_holding_bars": [3] * n_events,
+            "raw_score": [0.5] * n_events,
+            "score_z": [1.0] * n_events,
+            "turnover_proxy": [0.1] * n_events,
+            "profitable_after_hurdle_label": [1] * n_events,
+            "edge_after_hurdle_bps": ([5.0, -4.0] * 15),
+            "sl_thr_bps": [25.0] * n_events,
+            "mae_bps": [-5.0] * n_events,
+            "mfe_bps": [5.0] * n_events,
+            "ex_ante_cost_bps": [4.0] * n_events,
+        }
+    )
+    cfg = CandidateStrategyConfig(
+        signal_prequalify_method="mean",
+        signal_prequalify_min_obs=30,
+        signal_prequalify_min_tstat=100.0,
+        seed=23,
+    )
+    schema = fit_candidate_feature_schema(
+        labeled_events=labeled,
+        cfg=cfg,
+        split_start=20,
+        split_end=60,
+    )
+
+    ds = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        schema=schema,
+        split_start=20,
+        split_end=60,
+        is_fit_split=True,
+    )
+
+    assert ds.X.shape[0] == n_events
+    assert ds.edge_weight.sum() > 0.0
+
+
+def test_regime_code_from_entry_minus_one() -> None:
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25]],
+            "symbol": ["BTCUSDT"],
+            "family": ["trend_ma"],
+            "variant": ["ema_12_72"],
+            "side": [1],
+            "entry_idx": [26],
+            "exit_idx": [27],
+            "expected_holding_bars": [3],
+            "raw_score": [0.5],
+            "score_z": [1.2],
+            "turnover_proxy": [0.1],
+            "profitable_after_hurdle_label": [1],
+            "edge_after_hurdle_bps": [12.0],
+            "sl_thr_bps": [25.0],
+            "mae_bps": [-6.0],
+            "mfe_bps": [18.0],
+            "ex_ante_cost_bps": [4.0],
+        }
+    )
+    cfg = CandidateStrategyConfig()
+    schema = fit_candidate_feature_schema(
+        labeled_events=labeled,
+        cfg=cfg,
+        split_start=20,
+        split_end=40,
+    )
+
+    ds = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        schema=schema,
+        split_start=20,
+        split_end=40,
+    )
+    regime = compute_market_regime_context(aligned=aligned)
+    overlay = compute_risk_overlay(aligned=aligned)
+
+    assert int(ds.event_index.loc[0, "entry_regime_code"]) == int(regime.code_1d[25])
+    assert ds.event_index.loc[0, "entry_regime"] == regime.name_by_code[int(regime.code_1d[25])]
+    assert float(ds.event_index.loc[0, "overlay_mult"]) == pytest.approx(overlay.overlay_mult_1d[25])

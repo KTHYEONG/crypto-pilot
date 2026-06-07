@@ -20,7 +20,11 @@ from src.domain.futures.strategy.candidate_portfolio import (
     select_candidate_events_for_portfolio,
 )
 from src.domain.futures.strategy.common.alignment import AlignedMarketData, align_data_maps
-from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.config import (
+    CandidateStrategyConfig,
+    resolve_purge_and_embargo_bars,
+    with_max_holding_bars,
+)
 from src.domain.futures.strategy.rule_diagnostics import RuleDiagnosticsResult, compute_rule_diagnostics
 from src.domain.futures.strategy.rule_signals import build_rule_signal_panels, candidate_panels_to_events
 from src.domain.futures.strategy_runtime.bridge import _candidate_ml_split_indices, _recommendation_window_indices
@@ -401,7 +405,7 @@ def _build_variant_prior_output(
         t_idx = oos_set.feature_names.index("turnover_proxy")
         turnover_proxy = oos_set.X[:, t_idx].astype(np.float64, copy=False)
     utility_score = (
-        p_pass * prior_mu
+        prior_mu
         - float(cfg.downside_penalty) * np.abs(np.minimum(base_out.q10_net_bps, 0.0))
         - float(cfg.turnover_penalty) * turnover_proxy
         - float(cfg.concentration_penalty)
@@ -458,6 +462,13 @@ def run_candidate_ablation(
         cost_floor_bps=cfg.cost_floor_bps,
         execution_cost_bps_2d=aligned.execution_cost_bps_2d,
     )
+    max_holding_bars = (
+        int(pd.to_numeric(raw_events["expected_holding_bars"], errors="coerce").max())
+        if not raw_events.empty and "expected_holding_bars" in raw_events.columns
+        else None
+    )
+    cfg = with_max_holding_bars(cfg, max_holding_bars=max_holding_bars)
+    purge_bars, embargo_bars = resolve_purge_and_embargo_bars(cfg)
 
     if raw_events.empty:
         return pd.DataFrame(columns=[
@@ -475,12 +486,12 @@ def run_candidate_ablation(
         n_bars=n_bars,
         fit_fraction=cfg.ml_fit_fraction,
         calibration_fraction=cfg.ml_calibration_fraction,
-        purge_bars=cfg.purge_bars,
-        embargo_bars=cfg.embargo_bars,
+        purge_bars=purge_bars,
+        embargo_bars=embargo_bars,
     )
     # Compute WF folds for fold_oos_boundaries (used by evaluate_compound_backtest DSR/PBO)
     from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
-    _wf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=cfg)
+    _wf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=cfg, max_holding_bars=max_holding_bars)
     _fold_oos_boundaries: tuple[tuple[int, int], ...] = tuple(
         (f.oos_start, f.oos_end) for f in _wf_folds
     )
@@ -1095,7 +1106,11 @@ def validate_candidate_signals(
         stress_events = oos_events.loc[finite_mask].copy()
         stress_events["_stress_edge_bps"] = net_stress_arr
         decision_bar_edge = _decision_bar_edge_series(stress_events, "_stress_edge_bps")
-        hac_t = _newey_west_t_stat(decision_bar_edge, max_lag=max(0, min(cfg.purge_bars, decision_bar_edge.size - 1)))
+        purge_bars_value = 0 if cfg.purge_bars is None else int(cfg.purge_bars)
+        hac_t = _newey_west_t_stat(
+            decision_bar_edge,
+            max_lag=max(0, min(purge_bars_value, decision_bar_edge.size - 1)),
+        )
         decision_bar_count = int(decision_bar_edge.size)
 
         if cfg.blend_survival_use_mean:
