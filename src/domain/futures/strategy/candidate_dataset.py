@@ -812,10 +812,10 @@ def build_candidate_dataset(
             dtype=object,
         )
     if n_imputed > 0:
-        _logger.info("[DATASET] imputed_missing_values=%d valid_events=%d", n_imputed, int(valid_mask.sum()))
+        _logger.debug("[DATASET] imputed_missing_values=%d valid_events=%d", n_imputed, int(valid_mask.sum()))
     dropped_events = int(valid_mask.sum()) - int(finite_mask.sum())
     if dropped_events > 0:
-        _logger.info("[DATASET] dropped_invalid_events=%d valid_events=%d", dropped_events, int(valid_mask.sum()))
+        _logger.debug("[DATASET] dropped_invalid_events=%d valid_events=%d", dropped_events, int(valid_mask.sum()))
 
     if x_final.shape[0] == 0:
         return CandidateDataset(
@@ -930,7 +930,7 @@ def build_candidate_dataset(
             uniqueness_weight[disq_arr] = 0.0
             n_disqualified = int(disq_arr.sum())
             if n_disqualified > 0:
-                _logger.info(
+                _logger.debug(
                     "[SIGNAL_PREQUALIFY] method=%s disqualified=%d/%d events",
                     method,
                     n_disqualified,
@@ -940,7 +940,7 @@ def build_candidate_dataset(
                     _dv_mask = variant_keys == _dv
                     _dv_obs = int(np.isfinite(edge_values[_dv_mask]).sum())
                     _dv_mean = float(np.nanmean(edge_values[_dv_mask])) if _dv_obs > 0 else float("nan")
-                    _logger.info(
+                    _logger.debug(
                         "[SIGNAL_PREQUALIFY][DISQ] variant=%-45s obs=%d  is_mean_edge=%.2f bps",
                         _dv,
                         _dv_obs,
