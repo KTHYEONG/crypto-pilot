@@ -221,6 +221,8 @@ class CandidateStrategyConfig:
     candidate_identity_features_enabled: bool = True
     market_state_features_enabled: bool = True
     static_universe_features_enabled: bool = False
+    signal_context_features_enabled: bool = True
+    score_pct_variant_hist_window_bars: int = 2160
     exclude_immediate_return_features: bool = True
     promotion_filter_enabled: bool = True
     selection_policy: Literal["hard", "validation_quantile", "utility_topk"] = "utility_topk"
