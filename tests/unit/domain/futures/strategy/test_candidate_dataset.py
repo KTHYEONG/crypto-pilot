@@ -11,7 +11,7 @@ from src.domain.futures.strategy.candidate_dataset import (
 )
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
-from src.domain.futures.strategy.market_regime import compute_market_regime_context, compute_risk_overlay
+from src.domain.futures.strategy.market_regime import compute_market_regime_context
 
 
 def _make_aligned() -> AlignedMarketData:
@@ -96,7 +96,7 @@ def test_build_candidate_dataset_shapes_and_types() -> None:
     assert ds.y_return_bps.tolist() == [12.0, -5.0]
     assert ds.y_q10_bps.tolist() == [12.0, -5.0]
     assert ds.y_mfe_bps.tolist() == [12.0, -5.0]
-    assert ds.feature_schema_version == "candidate_v5"
+    assert ds.feature_schema_version == "candidate_v6"
     assert np.all(ds.gate_weight > 0.0)
     assert np.all(ds.edge_weight > 0.0)
     assert ds.effective_sample_size > 0.0
@@ -365,8 +365,8 @@ def test_build_candidate_dataset_keeps_feature_schema_stable_across_splits() -> 
     )
 
     assert train.feature_names == valid.feature_names
-    assert train.feature_schema_version == "candidate_v5"
-    assert valid.feature_schema_version == "candidate_v5"
+    assert train.feature_schema_version == "candidate_v6"
+    assert valid.feature_schema_version == "candidate_v6"
     assert "family=trend_ma" in train.feature_names
     assert "variant=trend_donchian:donchian_36" not in train.feature_names
 
@@ -700,8 +700,210 @@ def test_regime_code_from_entry_minus_one() -> None:
         split_end=40,
     )
     regime = compute_market_regime_context(aligned=aligned)
-    overlay = compute_risk_overlay(aligned=aligned)
 
     assert int(ds.event_index.loc[0, "entry_regime_code"]) == int(regime.code_1d[25])
     assert ds.event_index.loc[0, "entry_regime"] == regime.name_by_code[int(regime.code_1d[25])]
-    assert float(ds.event_index.loc[0, "overlay_mult"]) == pytest.approx(overlay.overlay_mult_1d[25])
+
+
+# ─── Signal Context Feature Tests (candidate_v6) ─────────────────────────────
+
+
+def _make_labeled_with_variants(aligned: AlignedMarketData) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25], aligned.datetimes[30], aligned.datetimes[35]],
+            "symbol": ["BTCUSDT", "ETHUSDT", "BTCUSDT"],
+            "side": [1, -1, 1],
+            "entry_idx": [26, 31, 36],
+            "exit_idx": [27, 32, 37],
+            "raw_score": [0.5, -0.4, 0.8],
+            "score_z": [1.2, -0.8, 1.5],
+            "turnover_proxy": [0.1, 0.2, 0.1],
+            "triple_barrier_label": [1, 0, 1],
+            "profitable_after_hurdle_label": [1, 0, 1],
+            "edge_after_hurdle_bps": [12.0, -5.0, 20.0],
+            "sl_thr_bps": [25.0, 30.0, 25.0],
+            "mae_bps": [-6.0, -8.0, -4.0],
+            "mfe_bps": [18.0, 5.0, 25.0],
+            "ex_ante_cost_bps": [4.0, 4.0, 4.0],
+            "family": ["trend_ma", "mean_rev", "trend_ma"],
+            "variant": ["ema_12_72", "rsi_14", "ema_12_72"],
+            "archetype": ["trend_continuation", "mean_reversion", "trend_continuation"],
+        }
+    )
+
+
+def test_signal_context_features_present_in_schema() -> None:
+    aligned = _make_aligned()
+    labeled = _make_labeled_with_variants(aligned)
+    cfg = CandidateStrategyConfig(signal_context_features_enabled=True)
+    schema = fit_candidate_feature_schema(
+        labeled_events=labeled, cfg=cfg, split_start=20, split_end=40
+    )
+    ctx_features = {
+        "overlay_mult_entry",
+        "crisis_active_entry",
+        "funding_side_alignment",
+        "score_pct_variant_hist_90d",
+        "archetype_regime_match",
+        "n_same_dir_variants_log",
+    }
+    assert ctx_features.issubset(set(schema.feature_names))
+
+
+def test_signal_context_features_absent_when_disabled() -> None:
+    aligned = _make_aligned()
+    labeled = _make_labeled_with_variants(aligned)
+    cfg = CandidateStrategyConfig(signal_context_features_enabled=False)
+    schema = fit_candidate_feature_schema(
+        labeled_events=labeled, cfg=cfg, split_start=20, split_end=40
+    )
+    ctx_features = {
+        "overlay_mult_entry",
+        "crisis_active_entry",
+        "funding_side_alignment",
+        "score_pct_variant_hist_90d",
+        "archetype_regime_match",
+        "n_same_dir_variants_log",
+    }
+    assert ctx_features.isdisjoint(set(schema.feature_names))
+
+
+def test_score_pct_variant_hist_causal_monotone() -> None:
+    from src.domain.futures.strategy.candidate_dataset import _compute_score_pct_variant_hist
+
+    events = pd.DataFrame(
+        {
+            "entry_idx": [10, 20, 30, 40, 50, 60],
+            "family": ["trend_ma"] * 6,
+            "variant": ["ema_12"] * 6,
+            "raw_score": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+        }
+    )
+    result = _compute_score_pct_variant_hist(events, window_bars=1000)
+
+    # First 4 events should be 0.5 (insufficient history < 5)
+    assert result[0] == pytest.approx(0.5)
+    assert result[4] == pytest.approx(0.5)
+    # 6th event (index 5) has 5 prior events with lower scores → pct = 1.0
+    assert result[5] == pytest.approx(1.0)
+
+
+def test_funding_side_alignment_direction() -> None:
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25], aligned.datetimes[30]],
+            "symbol": ["BTCUSDT", "ETHUSDT"],
+            "side": [1, -1],
+            "entry_idx": [26, 31],
+            "exit_idx": [27, 32],
+            "raw_score": [0.5, -0.4],
+            "score_z": [1.2, -0.8],
+            "turnover_proxy": [0.1, 0.2],
+            "triple_barrier_label": [1, 0],
+            "profitable_after_hurdle_label": [1, 0],
+            "edge_after_hurdle_bps": [12.0, -5.0],
+            "sl_thr_bps": [25.0, 30.0],
+            "mae_bps": [-6.0, -8.0],
+            "mfe_bps": [18.0, 5.0],
+            "ex_ante_cost_bps": [4.0, 4.0],
+        }
+    )
+
+    from src.domain.futures.strategy.common.alignment import AlignedMarketData
+
+    t = 60
+    n = 2
+    # Increasing funding: rolling z-score at entry bars (25, 30) will be positive.
+    funding_pos = np.zeros((t, n), dtype=np.float64)
+    funding_pos[:, 0] = np.linspace(0.0, 0.1, t)
+    funding_pos[:, 1] = np.linspace(0.0, 0.1, t)
+    x = np.linspace(100.0, 160.0, t, dtype=np.float64)
+    close = np.stack([x, x * 1.02], axis=1)
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    aligned_pos_funding = AlignedMarketData(
+        datetimes=datetimes,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        open_2d=close.copy(),
+        high_2d=close * 1.01,
+        low_2d=close * 0.99,
+        close_2d=close,
+        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+        funding_2d=funding_pos,
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.full((t, n), 4.0, dtype=np.float64),
+    )
+    cfg = CandidateStrategyConfig(signal_context_features_enabled=True)
+    schema = fit_candidate_feature_schema(
+        labeled_events=labeled, cfg=cfg, split_start=20, split_end=40
+    )
+    ds = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned_pos_funding,
+        cfg=cfg,
+        schema=schema,
+        split_start=20,
+        split_end=40,
+    )
+    fsa_idx = ds.feature_names.index("funding_side_alignment")
+    # long (side=1) with positive funding → tanh(positive * 1) = positive alignment
+    # short (side=-1) with positive funding → tanh(positive * -1) = negative alignment
+    assert ds.X[0, fsa_idx] > 0.0
+    assert ds.X[1, fsa_idx] < 0.0
+
+
+def test_archetype_regime_match_lookup() -> None:
+    from src.domain.futures.strategy.candidate_dataset import _ARCHETYPE_REGIME_AFFINITY
+
+    assert _ARCHETYPE_REGIME_AFFINITY[("trend_continuation", "bull_quiet")] == pytest.approx(1.0)
+    assert _ARCHETYPE_REGIME_AFFINITY[("mean_reversion", "bull_volatile")] == pytest.approx(0.8)
+    assert _ARCHETYPE_REGIME_AFFINITY[("trend_continuation", "crash")] == pytest.approx(-1.0)
+    assert _ARCHETYPE_REGIME_AFFINITY[("position_unwind", "crash")] == pytest.approx(1.0)
+
+
+def test_n_same_dir_variants_log_confluence() -> None:
+    aligned = _make_aligned()
+    # 3 events at same entry_idx=26, same symbol, same side → confluence 3
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25]] * 3,
+            "symbol": ["BTCUSDT"] * 3,
+            "side": [1, 1, 1],
+            "entry_idx": [26, 26, 26],
+            "exit_idx": [27, 27, 27],
+            "raw_score": [0.5, 0.6, 0.7],
+            "score_z": [1.2, 1.3, 1.4],
+            "turnover_proxy": [0.1, 0.1, 0.1],
+            "triple_barrier_label": [1, 1, 1],
+            "profitable_after_hurdle_label": [1, 1, 1],
+            "edge_after_hurdle_bps": [12.0, 14.0, 16.0],
+            "sl_thr_bps": [25.0, 25.0, 25.0],
+            "mae_bps": [-6.0, -6.0, -6.0],
+            "mfe_bps": [18.0, 18.0, 18.0],
+            "ex_ante_cost_bps": [4.0, 4.0, 4.0],
+            "family": ["trend_ma", "dual_momentum", "trend_donchian"],
+            "variant": ["ema_12_72", "dm_12_48", "donchian_36"],
+            "archetype": ["trend_continuation", "time_series_momentum", "trend_continuation"],
+        }
+    )
+    cfg = CandidateStrategyConfig(signal_context_features_enabled=True)
+    schema = fit_candidate_feature_schema(
+        labeled_events=labeled, cfg=cfg, split_start=20, split_end=40
+    )
+    ds = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        schema=schema,
+        split_start=20,
+        split_end=40,
+    )
+    import math
+
+    n_idx = ds.feature_names.index("n_same_dir_variants_log")
+    # 3 events in the same group → log1p(3-1) = log1p(2) ≈ 1.099
+    assert ds.X[0, n_idx] == pytest.approx(math.log1p(2), rel=1e-4)
