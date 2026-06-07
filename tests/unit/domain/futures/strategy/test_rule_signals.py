@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel, SignalExitPolicy
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
@@ -128,6 +129,53 @@ def test_candidate_panels_to_events_creates_dataframe() -> None:
         assert required_cols.issubset(events.columns)
         assert (events["entry_idx"] > 0).all()
         assert events["signal_cell"].astype(str).str.contains(":").all()
+
+
+def test_candidate_panels_to_events_normalizes_score_z_per_bar() -> None:
+    datetimes = np.array(
+        [
+            np.datetime64("2025-01-01T00"),
+            np.datetime64("2025-01-01T04"),
+        ]
+    )
+    scores = np.array([[0.0, 0.0], [1.0, 2.0]], dtype=np.float64)
+    panel = CandidateSignalPanel(
+        family="trend_ma",
+        variant="unit",
+        params={},
+        datetimes=datetimes,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        signed_score_2d=scores,
+        side_hint_2d=np.array([[0, 0], [1, 1]], dtype=np.int8),
+        expected_holding_bars=8,
+        min_holding_bars=1,
+        stop_atr_mult=1.0,
+        take_profit_atr_mult=1.0,
+        turnover_proxy_2d=np.zeros_like(scores),
+        valid_mask_2d=np.array([[False, False], [True, True]], dtype=bool),
+        metadata={},
+        archetype="trend_continuation",
+        allowed_regimes=("bull_quiet",),
+        exit_policies=(
+            SignalExitPolicy(
+                policy_id="base",
+                archetype="trend_continuation",
+                stop_atr_mult=1.0,
+                take_profit_atr_mult=1.0,
+                expected_holding_bars=8,
+                min_holding_bars=1,
+                description="base",
+            ),
+        ),
+        regime_code_1d=np.array([4, 0], dtype=np.int8),
+        regime_name_by_code=("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash"),
+    )
+
+    events = candidate_panels_to_events((panel,), min_abs_score=0.0)
+
+    assert events["raw_score"].tolist() == [1.0, 2.0]
+    assert events["score_z"].iloc[0] == pytest.approx(-0.6744907594765952)
+    assert events["score_z"].iloc[1] == pytest.approx(0.6744907594765952)
 
 
 def test_candidate_panels_to_events_uses_max_of_policy_floor_and_physical_cost() -> None:
