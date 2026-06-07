@@ -39,15 +39,10 @@ def test_fit_predict_candidate_gate_returns_calibrated_probability() -> None:
     assert probs.shape == (80,)
     assert np.all(probs >= 0.0)
     assert np.all(probs <= 1.0)
-    if model.calibration_used:
-        assert model.calibrator is not None
-        assert model.calibration_reason == "calibration_accepted"
-    else:
-        assert model.calibrator is None
-        assert model.calibration_reason in {
-            "calibration_probability_collapse",
-            "calibration_brier_regression",
-        }
+    assert model.calibrator is None
+    assert model.calibration_used is False
+    assert model.calibration_reason == "gate_model_removed_ratio_discount"
+    assert np.all(probs == 1.0)
 
 
 def test_fit_candidate_gate_is_deterministic_given_seed() -> None:
@@ -74,7 +69,7 @@ def test_fit_candidate_gate_skips_calibration_when_probability_dispersion_collap
 
     assert probs.shape == (80,)
     assert not model.calibration_used
-    assert model.calibration_reason == "calibration_probability_collapse"
+    assert model.calibration_reason == "gate_model_removed_ratio_discount"
 
 
 def test_gate_always_active_returns_calibrated_prob() -> None:
@@ -89,10 +84,8 @@ def test_gate_always_active_returns_calibrated_prob() -> None:
 
     # Assert: gate is always enabled regardless of brier_skill/decile_lift
     assert model.validation.enabled is True
-    assert model.validation.reason == "gate_always_active_catastrophic_veto"
-    # predict returns model probabilities (not ones)
+    assert model.validation.reason == "gate_replaced_by_q10_mu_ratio"
     assert probs.shape == (80,)
     assert np.all(probs >= 0.0)
     assert np.all(probs <= 1.0)
-    # Probabilities should NOT all be 1.0 (old behavior when disabled)
-    assert not np.all(probs == 1.0)
+    assert np.all(probs == 1.0)

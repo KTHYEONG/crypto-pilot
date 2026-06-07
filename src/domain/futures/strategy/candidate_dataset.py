@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -9,8 +10,14 @@ from numpy.typing import NDArray
 
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.market_regime import (
+    compute_market_regime_context,
+    compute_risk_overlay,
+)
 
 _logger = logging.getLogger(__name__)
+_ROBUST_Z_EPS = 1e-9
+_ROBUST_Z_CLIP = 3.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -49,6 +56,65 @@ def _find_symbol_index(symbols: tuple[str, ...], symbol: str) -> int:
         if value == symbol:
             return idx
     raise KeyError(f"unknown symbol: {symbol}")
+
+
+def _rolling_robust_z_1d(values: NDArray[np.float64], window: int) -> NDArray[np.float64]:
+    series = pd.Series(values).replace([np.inf, -np.inf], np.nan)
+    median = series.rolling(window, min_periods=1).median()
+    mad = series.rolling(window, min_periods=1).apply(
+        lambda x: float(np.median(np.abs(x - np.median(x)))),
+        raw=True,
+    )
+    z = (series - median) / np.maximum(mad * 1.4826, _ROBUST_Z_EPS)
+    return np.asarray(
+        z.fillna(0.0).clip(-_ROBUST_Z_CLIP, _ROBUST_Z_CLIP).to_numpy(),
+        dtype=np.float64,
+    )
+
+
+def _rolling_robust_z_2d(values: NDArray[np.float64], window: int) -> NDArray[np.float64]:
+    out = np.zeros_like(values, dtype=np.float64)
+    for col_idx in range(values.shape[1]):
+        out[:, col_idx] = _rolling_robust_z_1d(values[:, col_idx], window)
+    return out
+
+
+def _cross_sectional_robust_z_2d(values: NDArray[np.float64]) -> NDArray[np.float64]:
+    out = np.zeros_like(values, dtype=np.float64)
+    for row_idx in range(values.shape[0]):
+        row = values[row_idx]
+        finite_mask = np.isfinite(row)
+        if not bool(finite_mask.any()):
+            continue
+        finite_row = row[finite_mask]
+        median = float(np.median(finite_row))
+        mad = float(np.median(np.abs(finite_row - median)) * 1.4826)
+        if mad > _ROBUST_Z_EPS:
+            out[row_idx, finite_mask] = np.clip((finite_row - median) / mad, -_ROBUST_Z_CLIP, _ROBUST_Z_CLIP)
+    return out
+
+
+def _impute_feature_matrix(
+    x_mat: NDArray[np.float32],
+    valid_mask: NDArray[np.bool_],
+) -> tuple[NDArray[np.float32], int]:
+    imputed = x_mat.copy()
+    if imputed.shape[0] == 0:
+        return imputed, 0
+    valid_rows = np.flatnonzero(valid_mask)
+    if valid_rows.size == 0:
+        return imputed, 0
+    replacements = 0
+    for col_idx in range(imputed.shape[1]):
+        column = imputed[:, col_idx].astype(np.float64, copy=False)
+        valid_values = column[valid_rows]
+        finite_valid = valid_values[np.isfinite(valid_values)]
+        fill_value = float(np.median(finite_valid)) if finite_valid.size > 0 else 0.0
+        missing_rows = valid_rows[~np.isfinite(valid_values)]
+        if missing_rows.size > 0:
+            imputed[missing_rows, col_idx] = np.float32(fill_value)
+            replacements += int(missing_rows.size)
+    return imputed, replacements
 
 
 def _target_cost_hurdle_bps(events: pd.DataFrame) -> NDArray[np.float32]:
@@ -101,6 +167,118 @@ def _event_uniqueness_weights(
     ess_den = float(np.sum(np.square(weights)))
     ess = float((np.sum(weights) ** 2) / ess_den) if ess_den > 0.0 else 0.0
     return weights.astype(np.float32, copy=False), ess
+
+
+def _effective_sample_size_from_weights(weights: NDArray[np.float32]) -> float:
+    weights64 = np.asarray(weights, dtype=np.float64)
+    positive = weights64[np.isfinite(weights64) & (weights64 > 0.0)]
+    if positive.size == 0:
+        return 0.0
+    denom = float(np.sum(np.square(positive)))
+    if denom <= 0.0:
+        return 0.0
+    total = float(np.sum(positive))
+    return (total * total) / denom
+
+
+def _weighted_tstat(
+    values: NDArray[np.float64],
+    weights: NDArray[np.float64],
+) -> tuple[float, float]:
+    mask = np.isfinite(values) & np.isfinite(weights) & (weights > 0.0)
+    if not bool(mask.any()):
+        return 0.0, 0.0
+    x = values[mask]
+    w = weights[mask]
+    w_sum = float(np.sum(w))
+    w_sq_sum = float(np.sum(np.square(w)))
+    if w_sum <= 0.0 or w_sq_sum <= 0.0:
+        return 0.0, 0.0
+    n_eff = (w_sum * w_sum) / w_sq_sum
+    if n_eff <= 1.0:
+        return 0.0, n_eff
+    mean = float(np.sum(w * x) / w_sum)
+    centered = x - mean
+    var_num = float(np.sum(w * centered * centered))
+    var = var_num / max(w_sum, 1e-12)
+    if not np.isfinite(var) or var <= 0.0:
+        return 0.0, n_eff
+    se = math.sqrt(var / n_eff)
+    if se <= 0.0 or not np.isfinite(se):
+        return 0.0, n_eff
+    return mean / se, n_eff
+
+
+def _block_bootstrap_tstat(
+    values: NDArray[np.float64],
+    weights: NDArray[np.float64],
+    entry_idx: NDArray[np.int32],
+    holding_bars: NDArray[np.int32],
+    *,
+    bootstrap_n: int,
+    seed: int,
+) -> float:
+    mask = np.isfinite(values) & np.isfinite(weights) & (weights > 0.0)
+    if int(mask.sum()) < 2:
+        return 0.0
+    x = values[mask]
+    w = weights[mask]
+    order = np.argsort(entry_idx[mask], kind="stable")
+    x = x[order]
+    w = w[order]
+    holding = holding_bars[mask][order]
+    n_obs = x.shape[0]
+    block = max(1, int(np.rint(np.median(holding))))
+    rng = np.random.default_rng(seed)
+    boot_means = np.zeros(bootstrap_n, dtype=np.float64)
+    for boot_idx in range(bootstrap_n):
+        sampled_x: list[NDArray[np.float64]] = []
+        sampled_w: list[NDArray[np.float64]] = []
+        taken = 0
+        while taken < n_obs:
+            start = int(rng.integers(0, n_obs))
+            end = min(start + block, n_obs)
+            sampled_x.append(x[start:end])
+            sampled_w.append(w[start:end])
+            taken += end - start
+        sx = np.concatenate(sampled_x, axis=0)[:n_obs]
+        sw = np.concatenate(sampled_w, axis=0)[:n_obs]
+        boot_means[boot_idx] = float(np.average(sx, weights=sw))
+    boot_std = float(np.std(boot_means, ddof=1)) if bootstrap_n > 1 else 0.0
+    if not np.isfinite(boot_std) or boot_std <= 0.0:
+        return 0.0
+    return float(np.average(x, weights=w)) / boot_std
+
+
+def _variant_proof_tstat(
+    *,
+    values: NDArray[np.float64],
+    weights: NDArray[np.float64],
+    entry_idx: NDArray[np.int32],
+    holding_bars: NDArray[np.int32],
+    method: str,
+    bootstrap_n: int,
+    seed: int,
+) -> tuple[float, float]:
+    if method == "concurrency_t":
+        return _weighted_tstat(values, weights)
+    if method == "block_bootstrap":
+        tstat = _block_bootstrap_tstat(
+            values,
+            weights,
+            entry_idx,
+            holding_bars,
+            bootstrap_n=bootstrap_n,
+            seed=seed,
+        )
+        _, n_eff = _weighted_tstat(values, weights)
+        return tstat, n_eff
+    mean = 0.0
+    mask = np.isfinite(values) & np.isfinite(weights) & (weights > 0.0)
+    if bool(mask.any()):
+        mean = float(np.average(values[mask], weights=weights[mask]))
+    _, n_eff = _weighted_tstat(values, weights)
+    return mean, n_eff
 
 
 def _stable_variant_key(family: str, variant: str) -> str:
@@ -283,19 +461,10 @@ def build_candidate_dataset(
     log_ret_2d[1:] = np.diff(np.log(np.maximum(close, 1e-12)), axis=0)
     sym_vol_20 = pd.DataFrame(log_ret_2d).rolling(20, min_periods=1).std(ddof=0).values
 
-    vol_df = pd.DataFrame(volume)
-    vol_mean_20 = vol_df.rolling(20, min_periods=1).mean().values
-    vol_std_20 = vol_df.rolling(20, min_periods=1).std(ddof=0).values
-    sym_volume_z20 = np.zeros_like(volume)
-    z_mask = vol_std_20 > 0
-    sym_volume_z20[z_mask] = (volume[z_mask] - vol_mean_20[z_mask]) / vol_std_20[z_mask]
+    sym_volume_z20 = _rolling_robust_z_2d(volume, window=20)
 
     f_df = pd.DataFrame(funding)
-    funding_mean_20 = f_df.rolling(20, min_periods=1).mean().values
-    funding_std_20 = f_df.rolling(20, min_periods=1).std(ddof=0).values
-    funding_z20 = np.zeros_like(funding)
-    fz_mask = funding_std_20 > 0
-    funding_z20[fz_mask] = (funding[fz_mask] - funding_mean_20[fz_mask]) / funding_std_20[fz_mask]
+    funding_z20 = _rolling_robust_z_2d(funding, window=20)
 
     # 2. Market-wide technicals (T)
     mkt_ret_1 = np.nanmean(sym_ret_1, axis=1)
@@ -330,22 +499,17 @@ def build_candidate_dataset(
         btc_trend_20_100_ser = (btc_ma20 >= btc_ma100).astype(float)
 
         mkt_vol_df = pd.Series(mkt_vol_20).fillna(0)
-        mkt_vol_rolling = mkt_vol_df.rolling(120, min_periods=1)
-        mkt_vol_z120_ser = ((mkt_vol_df - mkt_vol_rolling.mean()) / mkt_vol_rolling.std(ddof=0)).fillna(0).values
+        mkt_vol_z120_ser = _rolling_robust_z_1d(mkt_vol_df.to_numpy(dtype=np.float64), window=120)
 
         mkt_disp_df = pd.Series(mkt_dispersion_20).fillna(0)
-        mkt_disp_rolling = mkt_disp_df.rolling(120, min_periods=1)
-        mkt_disp_z120_ser = ((mkt_disp_df - mkt_disp_rolling.mean()) / mkt_disp_rolling.std(ddof=0)).fillna(0).values
+        mkt_disp_z120_ser = _rolling_robust_z_1d(mkt_disp_df.to_numpy(dtype=np.float64), window=120)
 
         symbol_ret_rank_20_2d[20:] = pd.DataFrame(ret20_2d[20:]).rank(axis=1, pct=True).values
 
         sv_df = pd.DataFrame(sym_vol_20).fillna(0)
-        sv_rolling = sv_df.rolling(120, min_periods=1)
-        symbol_vol_z120_2d = ((sv_df - sv_rolling.mean()) / sv_rolling.std(ddof=0)).fillna(0).values
+        symbol_vol_z120_2d = _rolling_robust_z_2d(sv_df.to_numpy(dtype=np.float64), window=120)
 
-        funding_cs_z_2d = (
-            (f_df.sub(f_df.mean(axis=1), axis=0)).div(f_df.std(axis=1, ddof=0), axis=0)
-        ).fillna(0).values
+        funding_cs_z_2d = _cross_sectional_robust_z_2d(f_df.fillna(0).to_numpy(dtype=np.float64))
 
     # 4. Identity Features
     id_matrix: NDArray[np.float32] | None = None
@@ -394,6 +558,8 @@ def build_candidate_dataset(
     # 6. Assembly
     event_t = events["entry_idx"].values - 1
     valid_mask = event_t >= 20
+    overlay_ctx = compute_risk_overlay(aligned=aligned)
+    regime_ctx = compute_market_regime_context(aligned=aligned)
 
     x_mat = np.zeros((len(events), len(feature_names)), dtype=np.float32)
 
@@ -479,10 +645,25 @@ def build_candidate_dataset(
     if id_matrix is not None:
         x_mat[:, curr : curr + id_matrix.shape[1]] = id_matrix
 
+    x_mat, n_imputed = _impute_feature_matrix(x_mat, valid_mask)
     finite_mask = np.all(np.isfinite(x_mat), axis=1) & valid_mask
     x_final = x_mat[finite_mask]
     kept_events = events[finite_mask].copy()
     groups_final = event_t[finite_mask].astype(np.int32)
+    event_t_kept = event_t[finite_mask].astype(np.int32, copy=False)
+    if kept_events.shape[0] > 0:
+        kept_events["overlay_mult"] = overlay_ctx.overlay_mult_1d[event_t_kept]
+        kept_events["crisis_active"] = overlay_ctx.crisis_active_1d[event_t_kept]
+        kept_events["entry_regime_code"] = regime_ctx.code_1d[event_t_kept]
+        kept_events["entry_regime"] = np.asarray(
+            [regime_ctx.name_by_code[int(code)] for code in regime_ctx.code_1d[event_t_kept]],
+            dtype=object,
+        )
+    if n_imputed > 0:
+        _logger.info("[DATASET] imputed_missing_values=%d valid_events=%d", n_imputed, int(valid_mask.sum()))
+    dropped_events = int(valid_mask.sum()) - int(finite_mask.sum())
+    if dropped_events > 0:
+        _logger.info("[DATASET] dropped_invalid_events=%d valid_events=%d", dropped_events, int(valid_mask.sum()))
 
     if x_final.shape[0] == 0:
         return CandidateDataset(
@@ -541,28 +722,69 @@ def build_candidate_dataset(
     # Variants with IS mean_edge < 0 or insufficient obs have edge_weight zeroed out.
     min_obs_prequalify = int(getattr(cfg, "signal_prequalify_min_obs", 0))
     if is_fit_split and min_obs_prequalify > 0:
+        method = str(getattr(cfg, "signal_prequalify_method", "mean"))
+        min_tstat = float(getattr(cfg, "signal_prequalify_min_tstat", 0.0))
+        bootstrap_n = int(getattr(cfg, "signal_prequalify_bootstrap_n", 1000))
+        seed = int(getattr(cfg, "seed", 42))
         edge_col = "edge_after_hurdle_bps" if "edge_after_hurdle_bps" in kept_events.columns else None
         if (
             edge_col is not None
             and "family" in kept_events.columns
             and "variant" in kept_events.columns
         ):
-            variant_key_series = (
+            variant_keys = (
                 kept_events["family"].astype(str) + ":" + kept_events["variant"].astype(str)
+            ).to_numpy(dtype=object)
+            edge_values = pd.to_numeric(kept_events[edge_col], errors="coerce").to_numpy(
+                dtype=np.float64,
+                copy=False,
             )
-            edge_series = pd.to_numeric(kept_events[edge_col], errors="coerce")
-            variant_mean = edge_series.groupby(variant_key_series).transform("mean")
-            variant_count = edge_series.groupby(variant_key_series).transform("count")
-            disqualified = (variant_mean < 0.0) | (variant_count < min_obs_prequalify)
-            disq_arr = disqualified.to_numpy(dtype=bool)
+            holding_bars = pd.to_numeric(
+                kept_events.get("expected_holding_bars", pd.Series(1, index=kept_events.index)),
+                errors="coerce",
+            ).fillna(1).clip(lower=1).to_numpy(dtype=np.int32, copy=False)
+            disq_arr = np.zeros(kept_events.shape[0], dtype=bool)
+            for key in pd.unique(variant_keys):
+                key_mask = variant_keys == key
+                obs = int(np.isfinite(edge_values[key_mask]).sum())
+                if obs < min_obs_prequalify:
+                    disq_arr[key_mask] = True
+                    continue
+                finite_variant = np.isfinite(edge_values[key_mask]) & (uniqueness_weight[key_mask] > 0.0)
+                if not bool(finite_variant.any()):
+                    disq_arr[key_mask] = True
+                    continue
+                mean_edge = float(
+                    np.average(
+                        edge_values[key_mask][finite_variant],
+                        weights=uniqueness_weight[key_mask][finite_variant],
+                    )
+                )
+                if method == "mean":
+                    disqualify = mean_edge <= 0.0
+                else:
+                    tstat, _ = _variant_proof_tstat(
+                        values=edge_values[key_mask],
+                        weights=uniqueness_weight[key_mask].astype(np.float64, copy=False),
+                        entry_idx=kept_events.loc[key_mask, "entry_idx"].to_numpy(dtype=np.int32, copy=False),
+                        holding_bars=holding_bars[key_mask],
+                        method=method,
+                        bootstrap_n=bootstrap_n,
+                        seed=seed + int(np.sum(key_mask)),
+                    )
+                    disqualify = mean_edge <= 0.0 or tstat < min_tstat
+                if disqualify:
+                    disq_arr[key_mask] = True
             uniqueness_weight[disq_arr] = 0.0
             n_disqualified = int(disq_arr.sum())
             if n_disqualified > 0:
                 _logger.info(
-                    "[SIGNAL_PREQUALIFY] disqualified=%d/%d events",
+                    "[SIGNAL_PREQUALIFY] method=%s disqualified=%d/%d events",
+                    method,
                     n_disqualified,
                     len(kept_events),
                 )
+            effective_sample_size = _effective_sample_size_from_weights(uniqueness_weight)
 
     return CandidateDataset(
         X=x_final,

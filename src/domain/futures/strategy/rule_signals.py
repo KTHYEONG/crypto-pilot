@@ -13,11 +13,47 @@ from src.domain.futures.strategy.exit_policies import build_exit_policies_for_pa
 from src.domain.futures.strategy.market_regime import MarketRegimeContext, compute_market_regime_context
 
 _logger = logging.getLogger(__name__)
+_ROBUST_Z_EPS = 1e-9
+_ROBUST_Z_CLIP = 3.0
 
 
 def candidate_variant_key(family: str, variant: str) -> str:
     """Return a stable candidate variant key."""
     return f"{family}:{variant}"
+
+
+def _cross_sectional_robust_zscore(raw_scores: NDArray[np.float64], groups: NDArray[np.int64]) -> NDArray[np.float64]:
+    """Return per-group robust z-scores using median/MAD normalization."""
+    score_z = np.zeros(raw_scores.shape[0], dtype=np.float64)
+    if raw_scores.size == 0:
+        return score_z
+    for group in np.unique(groups):
+        group_mask = groups == group
+        values = raw_scores[group_mask]
+        finite_mask = np.isfinite(values)
+        if not bool(finite_mask.any()):
+            continue
+        finite_values = values[finite_mask]
+        median = float(np.median(finite_values))
+        mad = float(np.median(np.abs(finite_values - median)) * 1.4826)
+        normalized = np.zeros(values.shape[0], dtype=np.float64)
+        if mad > _ROBUST_Z_EPS:
+            normalized[finite_mask] = (finite_values - median) / mad
+        score_z[group_mask] = np.clip(normalized, -_ROBUST_Z_CLIP, _ROBUST_Z_CLIP)
+    return score_z
+
+
+def _normalize_linear_score(
+    raw: NDArray[np.float64],
+    *,
+    scale: float,
+    positive_only: bool = False,
+) -> NDArray[np.float64]:
+    """Normalize raw amplitudes into bounded scores."""
+    normalized = raw / max(scale, 1e-12)
+    if positive_only:
+        return np.clip(normalized, 0.0, 1.0)
+    return np.clip(normalized, -1.0, 1.0)
 
 
 def _candidate_variant_set(values: tuple[str, ...]) -> set[str]:
@@ -877,9 +913,11 @@ def build_rule_signal_panels(
         _oi_std = _rolling_std_2d(_oi_finite, window=_ob_win)
         _oi_z_ob = (_oi_finite - _oi_mean) / np.maximum(_oi_std, 1e-12)
         _confirmed = (_vol_z_ob >= 1.0) & (_oi_z_ob >= 0.5)
+        _ob_mag = _normalize_linear_score(_vol_z_ob, scale=3.0, positive_only=True)
         _ob_score = np.where(
-            _breakout_up & _confirmed, np.clip(_vol_z_ob / 3.0, 0.0, 1.0),
-            np.where(_breakout_dn & _confirmed, -np.clip(_vol_z_ob / 3.0, 0.0, 1.0), 0.0),
+            _breakout_up & _confirmed,
+            _ob_mag,
+            np.where(_breakout_dn & _confirmed, -_ob_mag, 0.0),
         )
         _ob_side = np.zeros_like(close, dtype=np.int8)
         _ob_side[_breakout_up & _confirmed] = 1
@@ -937,13 +975,15 @@ def build_rule_signal_panels(
                 params={"ema_fast": _fast, "ema_slow": _slow, "rsi_lo": int(_rsi_lo), "rsi_hi": int(_rsi_hi)},
                 datetimes=aligned.datetimes,
                 symbols=aligned.symbols,
-                signed_score_2d=np.clip(_tpc_score / 2.0, -1.0, 1.0),
+                signed_score_2d=_normalize_linear_score(_tpc_score, scale=2.0),
                 side_hint_2d=_tpc_side,
                 expected_holding_bars=max(8, _fast // 2),
                 min_holding_bars=max(3, _fast // 8),
                 stop_atr_mult=1.5,
                 take_profit_atr_mult=3.0,
-                turnover_proxy_2d=np.abs(np.diff(np.clip(_tpc_score / 2.0, -1.0, 1.0), axis=0, prepend=0.0)),
+                turnover_proxy_2d=np.abs(
+                    np.diff(_normalize_linear_score(_tpc_score, scale=2.0), axis=0, prepend=0.0)
+                ),
                 valid_mask_2d=valid_mask,
                 metadata={
                     "archetype": "trend_continuation",
@@ -1016,11 +1056,17 @@ def build_rule_signal_panels(
             & (_oi_diff <= 0.0)
             & ((high - close) / _candle_range >= 0.5)
         )
-        _lwr_score = np.where(
-            _lower_cond,
-            np.clip((_lower_wick / atr) * np.maximum(_vol_z_local, 0.0) / 3.0, 0.0, 1.0),
-            np.where(_upper_cond, -np.clip((_upper_wick / atr) * np.maximum(_vol_z_local, 0.0) / 3.0, 0.0, 1.0), 0.0),
+        _lower_mag = _normalize_linear_score(
+            (_lower_wick / atr) * np.maximum(_vol_z_local, 0.0),
+            scale=3.0,
+            positive_only=True,
         )
+        _upper_mag = _normalize_linear_score(
+            (_upper_wick / atr) * np.maximum(_vol_z_local, 0.0),
+            scale=3.0,
+            positive_only=True,
+        )
+        _lwr_score = np.where(_lower_cond, _lower_mag, np.where(_upper_cond, -_upper_mag, 0.0))
         _lwr_side = np.zeros_like(close, dtype=np.int8)
         _lwr_side[_lower_cond] = 1
         _lwr_side[_upper_cond] = -1
@@ -1058,11 +1104,12 @@ def build_rule_signal_panels(
         _oi_z_sqz = _zscore_2d(np.where(np.isfinite(oi), oi, 0.0), window=_sqz_win)
         _unwind_long = (_price_ret_1 > 0.0) & (_vol_z_sqz >= 1.5) & (_oi_diff < 0.0) & (_funding_z_unwind < 1.0)
         _unwind_short = (_price_ret_1 < 0.0) & (_vol_z_sqz >= 1.5) & (_oi_diff < 0.0) & (_funding_z_unwind > -1.0)
-        _sqz_score = np.where(
-            _unwind_long,
-            np.clip((_vol_z_sqz + np.maximum(-_oi_z_sqz, 0.0)) / 4.0, 0.0, 1.0),
-            np.where(_unwind_short, -np.clip((_vol_z_sqz + np.maximum(-_oi_z_sqz, 0.0)) / 4.0, 0.0, 1.0), 0.0),
+        _sqz_mag = _normalize_linear_score(
+            _vol_z_sqz + np.maximum(-_oi_z_sqz, 0.0),
+            scale=4.0,
+            positive_only=True,
         )
+        _sqz_score = np.where(_unwind_long, _sqz_mag, np.where(_unwind_short, -_sqz_mag, 0.0))
         _sqz_side = np.zeros_like(close, dtype=np.int8)
         _sqz_side[_unwind_long] = 1
         _sqz_side[_unwind_short] = -1
@@ -1106,7 +1153,7 @@ def build_rule_signal_panels(
         _rr_side = np.zeros_like(close, dtype=np.int8)
         _rr_side[_resid_z_rr <= -2.0] = 1
         _rr_side[_resid_z_rr >= 2.0] = -1
-        _rr_score = np.where(_rr_side != 0, -np.clip(_resid_z_rr / 3.0, -1.0, 1.0), 0.0)
+        _rr_score = np.where(_rr_side != 0, -_normalize_linear_score(_resid_z_rr, scale=3.0), 0.0)
         panels.append(
             CandidateSignalPanel(
                 family="residual_reversion",
@@ -1164,7 +1211,7 @@ def candidate_panels_to_events(
         variant_key = candidate_variant_key(panel.family, panel.variant)
         side_flipped = variant_key in side_flip_allowlist
         raw_scores = scores[t_idx, s_idx]
-        score_z = raw_scores.copy()
+        score_z = _cross_sectional_robust_zscore(raw_scores, t_idx.astype(np.int64, copy=False))
         event_sides = sides[t_idx, s_idx].copy()
         if side_flipped:
             raw_scores = -raw_scores

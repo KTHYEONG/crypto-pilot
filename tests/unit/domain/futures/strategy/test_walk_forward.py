@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import pytest
-
-from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.config import CandidateStrategyConfig, resolve_purge_and_embargo_bars
 from src.domain.futures.strategy.walk_forward import WFFold, build_walk_forward_folds
 
 
@@ -21,12 +19,13 @@ def test_single_fold_matches_candidate_split() -> None:
 
     cfg = _cfg(wf_scheme="single", wf_n_folds=1, wf_enabled=True)
     folds = build_walk_forward_folds(n_bars=1000, cfg=cfg)
-    fs, fe, cs, ce, os_, oe = _candidate_ml_split_indices(
+    purge_bars, embargo_bars = resolve_purge_and_embargo_bars(cfg)
+    fs, fe, _cs, _ce, os_, oe = _candidate_ml_split_indices(
         n_bars=1000,
         fit_fraction=cfg.ml_fit_fraction,
         calibration_fraction=cfg.ml_calibration_fraction,
-        purge_bars=cfg.purge_bars,
-        embargo_bars=cfg.embargo_bars,
+        purge_bars=purge_bars,
+        embargo_bars=embargo_bars,
     )
     assert folds[0].fit_start == fs
     assert folds[0].fit_end == fe

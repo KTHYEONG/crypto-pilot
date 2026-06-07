@@ -177,6 +177,7 @@ def run_candidate_strategy_for_universe(
         select_candidate_events_for_portfolio,
     )
     from src.domain.futures.strategy.common.alignment import align_data_maps
+    from src.domain.futures.strategy.config import resolve_purge_and_embargo_bars, with_max_holding_bars
     from src.domain.futures.strategy.rule_diagnostics import compute_rule_diagnostics
     from src.domain.futures.strategy.rule_signals import (
         build_rule_signal_panels,
@@ -195,6 +196,16 @@ def run_candidate_strategy_for_universe(
         cost_floor_bps=strategy_cfg.candidate.cost_floor_bps,
         execution_cost_bps_2d=aligned.execution_cost_bps_2d,
     )
+    max_holding_bars = (
+        int(pd.to_numeric(raw_events["expected_holding_bars"], errors="coerce").max())
+        if not raw_events.empty and "expected_holding_bars" in raw_events.columns
+        else None
+    )
+    candidate_cfg = with_max_holding_bars(
+        strategy_cfg.candidate,
+        max_holding_bars=max_holding_bars,
+    )
+    purge_bars, embargo_bars = resolve_purge_and_embargo_bars(candidate_cfg)
 
     if raw_events.empty:
         alpha_panel = build_candidate_alpha_panel(
@@ -218,7 +229,7 @@ def run_candidate_strategy_for_universe(
                 "selected_total": 0,
                 "eligible": 0,
                 "n_keep": 0,
-                "policy": strategy_cfg.candidate.selection_policy,
+                "policy": candidate_cfg.selection_policy,
                 "zero_reason": "no_events",
                 "gate_calibration_used": False,
                 "gate_calibration_reason": "no_events",
@@ -229,14 +240,14 @@ def run_candidate_strategy_for_universe(
             },
         )
 
-    labeled = label_candidate_events(events=raw_events, aligned=aligned, cfg=strategy_cfg.candidate)
+    labeled = label_candidate_events(events=raw_events, aligned=aligned, cfg=candidate_cfg)
     labeled_all = labeled.copy()
     fit_start, fit_end, calibration_start, calibration_end, oos_start, oos_end = _candidate_ml_split_indices(
         n_bars=n_bars,
-        fit_fraction=strategy_cfg.candidate.ml_fit_fraction,
-        calibration_fraction=strategy_cfg.candidate.ml_calibration_fraction,
-        purge_bars=strategy_cfg.candidate.purge_bars,
-        embargo_bars=strategy_cfg.candidate.embargo_bars,
+        fit_fraction=candidate_cfg.ml_fit_fraction,
+        calibration_fraction=candidate_cfg.ml_calibration_fraction,
+        purge_bars=purge_bars,
+        embargo_bars=embargo_bars,
     )
     recommendation_start, recommendation_end = _recommendation_window_indices(
         fit_start=fit_start,
@@ -310,16 +321,16 @@ def run_candidate_strategy_for_universe(
 
     # Compute split indices needed for signal_only + WF (done once for OOS window bounds)
     if strategy_cfg.candidate.wf_enabled and strategy_cfg.candidate.wf_scheme != "single":
-        _folds = build_walk_forward_folds(n_bars=n_bars, cfg=strategy_cfg.candidate)
+        _folds = build_walk_forward_folds(n_bars=n_bars, cfg=candidate_cfg, max_holding_bars=max_holding_bars)
         _oos_start_ref = _folds[0].oos_start if _folds else 0
         _oos_end_ref = _folds[-1].oos_end if _folds else n_bars
     else:
         _s = _candidate_ml_split_indices(
             n_bars=n_bars,
-            fit_fraction=strategy_cfg.candidate.ml_fit_fraction,
-            calibration_fraction=strategy_cfg.candidate.ml_calibration_fraction,
-            purge_bars=strategy_cfg.candidate.purge_bars,
-            embargo_bars=strategy_cfg.candidate.embargo_bars,
+            fit_fraction=candidate_cfg.ml_fit_fraction,
+            calibration_fraction=candidate_cfg.ml_calibration_fraction,
+            purge_bars=purge_bars,
+            embargo_bars=embargo_bars,
         )
         _oos_start_ref, _oos_end_ref = _s[4], _s[5]
         _folds = None  # single-fold path handled below
@@ -329,7 +340,7 @@ def run_candidate_strategy_for_universe(
         signal_reports = validate_candidate_signals(
             labeled_all=labeled_all,
             labeled_promoted=labeled,
-            cfg=strategy_cfg.candidate,
+            cfg=candidate_cfg,
             oos_start=_oos_start_ref,
             oos_end=_oos_end_ref,
         )
@@ -399,14 +410,18 @@ def run_candidate_strategy_for_universe(
         )
 
     # Build WF folds (multi-fold or single)
-    wf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=strategy_cfg.candidate) if _folds is None else _folds
+    wf_folds = (
+        build_walk_forward_folds(n_bars=n_bars, cfg=candidate_cfg, max_holding_bars=max_holding_bars)
+        if _folds is None
+        else _folds
+    )
 
     # --- WF fold loop: train per fold using shared workflow ---
     from src.domain.futures.strategy.candidate_workflow import run_candidate_walk_forward
     wf_outputs = run_candidate_walk_forward(
         labeled_events=labeled,
         aligned=aligned,
-        cfg=strategy_cfg.candidate,
+        cfg=candidate_cfg,
         folds=wf_folds,
     )
 
