@@ -120,7 +120,7 @@ def test_selection_utility_mode_direct_excludes_downside_drag() -> None:
 
     # Act
     frame = _selection_component_frame(
-        events=events, cfg=cfg, gate_mode="off", gate_floor=0.0
+        events=events, cfg=cfg
     )
 
     # Assert — expected_utility_bps must equal mu_net_decision_bps exactly
@@ -136,7 +136,7 @@ def test_selection_utility_mode_additive_preserves_legacy() -> None:
 
     # Act
     frame = _selection_component_frame(
-        events=events, cfg=cfg, gate_mode="off", gate_floor=0.0
+        events=events, cfg=cfg
     )
 
     # Assert — additive_drag formula: mu - |q10| - turnover_penalty
@@ -184,10 +184,10 @@ def test_expected_edge_direct_selects_when_additive_blocks() -> None:
 
     # Act
     frame_add = _selection_component_frame(
-        events=events, cfg=cfg_additive, gate_mode="off", gate_floor=0.0
+        events=events, cfg=cfg_additive
     )
     frame_dir = _selection_component_frame(
-        events=events, cfg=cfg_direct, gate_mode="off", gate_floor=0.0
+        events=events, cfg=cfg_direct
     )
     eligible_additive = int((frame_add["expected_utility_bps"] >= 0.0).sum())
     eligible_direct = int((frame_dir["expected_utility_bps"] >= 0.0).sum())
@@ -248,7 +248,6 @@ def test_production_topk_sorts_by_mu_in_direct_mode() -> None:
         selection_min_expected_utility_bps=-1000.0,  # open floor
         min_net_floor_cost_fraction=0.0,
         catastrophic_shortfall_bps=1000.0,           # don't veto on q10
-        selection_gate_mode="off",
         selection_top_quantile=0.50,                 # keep 1 of 2
     )
 

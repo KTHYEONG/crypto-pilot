@@ -26,6 +26,9 @@ class EdgeModelValidation:
     n_cal_eval: int
     accepted: bool
     reason: str
+    overlay_lift_bps: float = 0.0
+    overlay_lift_tstat: float = 0.0
+    n_eff: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -88,6 +91,65 @@ def _weighted_mean(values: NDArray[np.float64], weights: NDArray[np.float64]) ->
     return float(np.average(values[finite_mask], weights=weights[finite_mask]))
 
 
+def _weighted_tstat(values: NDArray[np.float64], weights: NDArray[np.float64]) -> tuple[float, float]:
+    finite_mask = np.isfinite(values) & np.isfinite(weights) & (weights > 0.0)
+    if not bool(finite_mask.any()):
+        return 0.0, 0.0
+    x = values[finite_mask]
+    w = weights[finite_mask]
+    w_sum = float(np.sum(w))
+    w_sq_sum = float(np.sum(np.square(w)))
+    if w_sum <= 0.0 or w_sq_sum <= 0.0:
+        return 0.0, 0.0
+    n_eff = (w_sum * w_sum) / w_sq_sum
+    if n_eff <= 1.0:
+        return 0.0, n_eff
+    mean = float(np.sum(w * x) / w_sum)
+    centered = x - mean
+    var = float(np.sum(w * centered * centered) / w_sum)
+    if not np.isfinite(var) or var <= 0.0:
+        return 0.0, n_eff
+    se = np.sqrt(var / n_eff)
+    if not np.isfinite(se) or se <= 0.0:
+        return 0.0, n_eff
+    return mean / se, n_eff
+
+
+def _rank_ic_tstat(pred: NDArray[np.float64], target: NDArray[np.float64]) -> tuple[float, float]:
+    mask = np.isfinite(pred) & np.isfinite(target)
+    n_eff = float(np.sum(mask))
+    if n_eff <= 1.0:
+        return 0.0, n_eff
+    rank_ic = _rank_ic(pred[mask], target[mask])
+    if not np.isfinite(rank_ic):
+        return 0.0, n_eff
+    return float(rank_ic * np.sqrt(n_eff)), n_eff
+
+
+def _compute_kelly_fraction(
+    mu: NDArray[np.float64],
+    q10: NDArray[np.float64],
+    q90: NDArray[np.float64],
+    *,
+    kelly_fraction: float,
+    max_symbol_weight: float,
+) -> NDArray[np.float64]:
+    sigma = np.maximum((q90 - q10) / 2.563, 1e-6)
+    denom = np.square(sigma) + np.square(mu) + 1e-9
+    raw = kelly_fraction * np.maximum(mu, 0.0) / denom
+    return np.clip(raw, 0.0, max_symbol_weight)
+
+
+def _downside_upside_ratio_p_pass(
+    mu_return_r: NDArray[np.float64],
+    q10_return_r: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    positive_mu = np.maximum(mu_return_r, 1e-9)
+    ratio = q10_return_r / positive_mu
+    ratio = np.where(np.isfinite(ratio), ratio, 0.0)
+    return np.clip(ratio, 0.0, 1.0)
+
+
 def _build_variant_priors(
     *,
     dataset: CandidateDataset,
@@ -112,6 +174,9 @@ def _build_variant_priors(
     for idx, key in enumerate(keys):
         key_to_indices.setdefault(key, []).append(idx)
 
+    variant_means: list[float] = []
+    variant_se: list[float] = []
+    eligible_variants: list[tuple[str, NDArray[np.int32], float, int]] = []
     for key, indices in key_to_indices.items():
         indexer = np.asarray(indices, dtype=np.int32)
         variant_values = y_edge[indexer]
@@ -123,6 +188,11 @@ def _build_variant_priors(
             row_priors[indexer] = global_prior
             continue
         variant_mean = _weighted_mean(variant_values, variant_weights)
+        eligible_values = variant_values[eligible_variant]
+        finite_std = float(np.std(eligible_values, ddof=1)) if obs > 1 else 0.0
+        variant_means.append(variant_mean)
+        variant_se.append(finite_std / max(np.sqrt(obs), 1.0))
+        eligible_variants.append((key, indexer, variant_mean, obs))
         shrink = obs / (obs + shrinkage_obs)
         prior = float(shrink * variant_mean + (1.0 - shrink) * global_prior)
         reference_risk_unit_bps = float(
@@ -140,6 +210,17 @@ def _build_variant_priors(
             prior = float(np.clip(prior, global_prior - max_dev, global_prior + max_dev))
         variant_prior_bps[key] = prior
         row_priors[indexer] = prior
+
+    if bool(getattr(cfg, "use_empirical_bayes_shrinkage", True)) and len(eligible_variants) >= 2:
+        means = np.asarray(variant_means, dtype=np.float64)
+        se = np.asarray(variant_se, dtype=np.float64)
+        sigma2_within = float(np.mean(np.square(se))) if se.size > 0 else 0.0
+        sigma2_between = max(float(np.var(means, ddof=0)) - sigma2_within, 0.0)
+        shrinkage_lambda = sigma2_within / max(sigma2_within + sigma2_between, 1e-12)
+        for key, indexer, variant_mean, _obs in eligible_variants:
+            prior = float(shrinkage_lambda * global_prior + (1.0 - shrinkage_lambda) * variant_mean)
+            variant_prior_bps[key] = prior
+            row_priors[indexer] = prior
 
     return variant_prior_bps, variant_prior_obs, global_prior, row_priors, bool(eligible_global.any())
 
@@ -444,9 +525,43 @@ def fit_candidate_edge_models(
     _logger = logging.getLogger(__name__)
     accepted = False
     rank_ic_val = float("nan")
+    overlay_lift_bps = 0.0
+    overlay_lift_tstat = 0.0
+    n_eff = 0.0
     reason = "insufficient_obs"
     n_cal_eval = int(calibration_eval.X.shape[0]) if calibration_eval.X is not None else 0
-    if n_cal_eval >= 20:
+    gate_mode = str(getattr(cfg, "edge_gate_mode", "rank_ic"))
+    if gate_mode == "overlay_lift":
+        cal_events = getattr(calibration_eval, "event_index", pd.DataFrame())
+        if cal_events.empty or "overlay_mult" not in cal_events.columns:
+            reason = "missing_overlay_context"
+        else:
+            realized_bps = np.asarray(
+                calibration_eval.y_return_bps
+                if calibration_eval.y_return_bps is not None
+                else calibration_eval.y_edge_bps,
+                dtype=np.float64,
+            )
+            overlay_mult = pd.to_numeric(cal_events["overlay_mult"], errors="coerce").to_numpy(
+                dtype=np.float64,
+                copy=False,
+            )
+            cal_weights = np.asarray(calibration_eval.edge_weight, dtype=np.float64)
+            lift_diff_bps = realized_bps * (overlay_mult - 1.0)
+            overlay_lift_bps = _weighted_mean(lift_diff_bps, cal_weights)
+            overlay_lift_tstat, n_eff = _weighted_tstat(lift_diff_bps, cal_weights)
+            min_tstat = float(getattr(cfg, "edge_gate_min_lift_tstat", 1.0))
+            min_n_eff = float(getattr(cfg, "edge_gate_min_n_eff", 60))
+            if n_eff < min_n_eff:
+                reason = "insufficient_n_eff"
+            elif overlay_lift_bps <= 0.0:
+                reason = "overlay_lift_non_positive"
+            elif overlay_lift_tstat < min_tstat:
+                reason = "overlay_lift_below_threshold"
+            else:
+                accepted = True
+                reason = "overlay_lift_pass"
+    elif n_cal_eval >= 20:
         cal_keys = _variant_keys(calibration_eval)
         if use_prior_residual:
             cal_prior_r = np.asarray(
@@ -467,8 +582,10 @@ def fit_candidate_edge_models(
             dtype=np.float64,
         )
         rank_ic_val = _rank_ic(pred_cal, realized_cal)
-        min_ic = float(getattr(cfg, "min_edge_rank_ic", 0.02))
-        if np.isfinite(rank_ic_val) and rank_ic_val >= min_ic:
+        rank_ic_tstat, rank_ic_n_eff = _rank_ic_tstat(pred_cal, realized_cal)
+        min_ic_tstat = float(getattr(cfg, "min_ic_tstat", 1.5))
+        n_eff = rank_ic_n_eff
+        if np.isfinite(rank_ic_val) and rank_ic_tstat >= min_ic_tstat:
             accepted = True
             reason = "rank_ic_pass"
         elif np.isfinite(rank_ic_val):
@@ -485,21 +602,39 @@ def fit_candidate_edge_models(
     if not has_eligible_prior_rows and final_prediction_mode == "prior_only":
         final_prediction_mode = "disabled"
 
-    _logger.info(
-        "[EDGE_GATE] rank_ic=%.4f threshold=%.4f decision=%s n=%d reason=%s inference_mode=%s",
-        rank_ic_val,
-        float(getattr(cfg, "min_edge_rank_ic", 0.02)),
-        "accepted" if accepted else "rejected",
-        n_cal_eval,
-        reason,
-        final_prediction_mode,
-    )
+    if gate_mode == "overlay_lift":
+        _logger.info(
+            "[EDGE_GATE] mode=overlay_lift lift=%.1f t=%.2f n_eff=%.1f decision=%s reason=%s inference_mode=%s",
+            overlay_lift_bps,
+            overlay_lift_tstat,
+            n_eff,
+            "accepted" if accepted else "rejected",
+            reason,
+            final_prediction_mode,
+        )
+    else:
+        _logger.info(
+            (
+                "[EDGE_GATE] mode=rank_ic rank_ic=%.4f t=%.2f threshold_t=%.2f "
+                "decision=%s n=%d reason=%s inference_mode=%s"
+            ),
+            rank_ic_val,
+            rank_ic_tstat if "rank_ic_tstat" in locals() else 0.0,
+            float(getattr(cfg, "min_ic_tstat", 1.5)),
+            "accepted" if accepted else "rejected",
+            n_cal_eval,
+            reason,
+            final_prediction_mode,
+        )
 
     edge_validation = EdgeModelValidation(
         rank_ic_cal_eval=rank_ic_val,
         n_cal_eval=n_cal_eval,
         accepted=accepted,
         reason=reason,
+        overlay_lift_bps=overlay_lift_bps,
+        overlay_lift_tstat=overlay_lift_tstat,
+        n_eff=n_eff,
     )
 
     return CandidateEdgeModels(
@@ -519,6 +654,10 @@ def fit_candidate_edge_models(
             "global_prior_r": global_prior_bps,
             "variant_prior_count": len(variant_prior_bps),
             "rank_ic_cal_eval": rank_ic_val,
+            "rank_ic_tstat": rank_ic_tstat if "rank_ic_tstat" in locals() else 0.0,
+            "overlay_lift_bps": overlay_lift_bps,
+            "overlay_lift_tstat": overlay_lift_tstat,
+            "edge_gate_n_eff": n_eff,
             "edge_gate_accepted": accepted,
             "has_eligible_prior_rows": int(has_eligible_prior_rows),
         },
@@ -607,6 +746,7 @@ def predict_candidate_edges(
     mu_return_r = center_component_r + prior_component_r
     q10_return_r = q10_model_r
     q90_return_r = q90_model_r
+    effective_p_pass = _downside_upside_ratio_p_pass(mu_return_r, q10_return_r)
     mu_net_decision_bps = mu_return_r * risk_unit_bps
     q10_net_bps = q10_return_r * risk_unit_bps
     q90_net_bps = q90_return_r * risk_unit_bps
@@ -693,7 +833,7 @@ def predict_candidate_edges(
         diag_frame = pd.DataFrame(
             {
                 "mu": mu_net_decision_bps,
-                "p_pass": p_pass,
+                "p_pass": effective_p_pass,
                 "expected_utility": expected_utility_bps,
                 "y_edge": target_for_diag,
             }
@@ -719,13 +859,17 @@ def predict_candidate_edges(
             _rank_ic(expected_utility_bps, target_for_diag),
         )
 
-    second_moment = np.maximum(mu_return_r * mu_return_r + q10_return_r * q10_return_r, 1e-6)
-    kelly_fraction_arr = cfg.kelly_fraction * np.maximum(mu_return_r, 0.0) / second_moment
-    kelly_fraction_arr = np.clip(kelly_fraction_arr, 0.0, float(cfg.max_symbol_weight))
+    kelly_fraction_arr = _compute_kelly_fraction(
+        mu_return_r,
+        q10_return_r,
+        q90_return_r,
+        kelly_fraction=float(cfg.kelly_fraction),
+        max_symbol_weight=float(cfg.max_symbol_weight),
+    )
 
     return CandidateModelOutput(
         events=dataset.event_index,
-        p_pass=p_pass.astype(np.float64, copy=False),
+        p_pass=effective_p_pass.astype(np.float64, copy=False),
         gate_enabled=gate_enabled,
         gate_threshold=gate_threshold,
         edge_source=edge_source,
@@ -742,7 +886,7 @@ def predict_candidate_edges(
             {
                 **_selection_thresholds(
                 utility_score=utility_score,
-                p_pass=p_pass.astype(np.float64, copy=False),
+                p_pass=effective_p_pass.astype(np.float64, copy=False),
                 mu_net_decision_bps=mu_net_decision_bps,
                 cfg=cfg,
                 ),

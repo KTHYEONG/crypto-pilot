@@ -105,6 +105,28 @@ def test_label_candidate_events_t_plus_one_entry_and_columns() -> None:
     assert np.isfinite(float(out.loc[0, "gross_fwd_bps"]))
 
 
+def test_label_candidate_events_uses_yang_zhang_volatility_proxy() -> None:
+    aligned = _make_aligned()
+    events = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[10]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [11],
+            "expected_holding_bars": [5],
+            "min_holding_bars": [1],
+            "stop_atr_mult": [1.0],
+            "take_profit_atr_mult": [1.0],
+            "cost_floor_bps": [5.0],
+        }
+    )
+
+    out = label_candidate_events(events=events, aligned=aligned, cfg=CandidateStrategyConfig())
+
+    assert float(out.loc[0, "risk_unit_bps"]) > 0.0
+    assert np.isfinite(float(out.loc[0, "realized_vol_bps"]))
+
+
 def test_label_candidate_events_uses_future_window_only_for_targets() -> None:
     aligned = _make_aligned()
     events = pd.DataFrame(
