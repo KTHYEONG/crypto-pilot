@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -8,9 +9,24 @@ import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
+    from src.domain.futures.strategy.common.alignment import AlignedMarketData
     from src.domain.futures.strategy.config import StrategyConfig
 
 _logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeBreakdown:
+    total: float
+    steps: Mapping[str, float]
+
+    @property
+    def accounted(self) -> float:
+        return float(sum(max(float(value), 0.0) for value in self.steps.values()))
+
+    @property
+    def unaccounted(self) -> float:
+        return max(float(self.total) - self.accounted, 0.0)
 
 
 def _candidate_ml_split_indices(
@@ -114,7 +130,7 @@ def _log_universe_volatility_deciles(
     diag["_vol_decile"] = pd.qcut(vol.loc[valid], q=10, labels=False, duplicates="drop")
     grouped = diag.groupby("_vol_decile", sort=True, dropna=True)
     for decile, group in grouped:
-        _logger.info(
+        _logger.debug(
             "[DIAG][VOL_DECILE] decile=%s events=%d mu_mean=%.1f q10_median=%.1f selected_pass_rate=%.3f",
             int(decile) + 1,
             int(group.shape[0]),
@@ -150,6 +166,21 @@ class CandidatePipelineOutput:
     alpha_panel: pd.DataFrame = field(default_factory=pd.DataFrame)
     target_weights: np.ndarray | None = None
     rule_report: dict[str, Any] | None = None
+    aligned: AlignedMarketData | None = None
+    labeled: pd.DataFrame | None = None
+    labeled_unfiltered: pd.DataFrame | None = None
+    fit_set: Any | None = None
+    calibration_set: Any | None = None
+    oos_set: Any | None = None
+    gate_model: Any | None = None
+    edge_models: Any | None = None
+    fit_start: int | None = None
+    fit_end: int | None = None
+    calibration_start: int | None = None
+    calibration_end: int | None = None
+    oos_start: int | None = None
+    oos_end: int | None = None
+    fold_oos_boundaries: tuple[tuple[int, int], ...] | None = None
 
 
 def run_candidate_strategy_for_universe(
@@ -164,6 +195,7 @@ def run_candidate_strategy_for_universe(
     if strategy_cfg is None or preloaded_data_maps is None:
         return CandidatePipelineOutput()
 
+    import time
     from dataclasses import replace
 
     from src.domain.futures.strategy.ablation import apply_variant_promotions, validate_candidate_signals
@@ -185,10 +217,55 @@ def run_candidate_strategy_for_universe(
     )
     from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
 
+    bridge_t0 = time.perf_counter()
+    bridge_prof: dict[str, float] = {
+        "align": 0.0,
+        "rules": 0.0,
+        "events": 0.0,
+        "label": 0.0,
+        "diagnostics": 0.0,
+        "promotions": 0.0,
+        "walk_forward": 0.0,
+        "post_wf": 0.0,
+        "selection": 0.0,
+        "weights": 0.0,
+        "alpha_panel": 0.0,
+    }
+
+    def _emit_bridge_profile() -> None:
+        breakdown = _RuntimeBreakdown(total=time.perf_counter() - bridge_t0, steps=bridge_prof)
+        _logger.info(
+            (
+                "[BRIDGE-PROF] total=%.4fs align=%.4fs rules=%.4fs events=%.4fs "
+                "label=%.4fs diagnostics=%.4fs promotions=%.4fs walk_forward=%.4fs "
+                "post_wf=%.4fs selection=%.4fs weights=%.4fs alpha_panel=%.4fs "
+                "accounted=%.4fs unaccounted=%.4fs"
+            ),
+            breakdown.total,
+            bridge_prof["align"],
+            bridge_prof["rules"],
+            bridge_prof["events"],
+            bridge_prof["label"],
+            bridge_prof["diagnostics"],
+            bridge_prof["promotions"],
+            bridge_prof["walk_forward"],
+            bridge_prof["post_wf"],
+            bridge_prof["selection"],
+            bridge_prof["weights"],
+            bridge_prof["alpha_panel"],
+            breakdown.accounted,
+            breakdown.unaccounted,
+        )
+
+    t_step = time.perf_counter()
     aligned = align_data_maps(preloaded_data_maps, symbols, tf)
+    bridge_prof["align"] = time.perf_counter() - t_step
     n_bars = aligned.close_2d.shape[0]
 
+    t_step = time.perf_counter()
     panels = build_rule_signal_panels(aligned=aligned, cfg=strategy_cfg.candidate)
+    bridge_prof["rules"] = time.perf_counter() - t_step
+    t_step = time.perf_counter()
     raw_events = candidate_panels_to_events(
         panels,
         min_abs_score=strategy_cfg.candidate.min_rule_net_bps * 1e-4,
@@ -196,6 +273,7 @@ def run_candidate_strategy_for_universe(
         cost_floor_bps=strategy_cfg.candidate.cost_floor_bps,
         execution_cost_bps_2d=aligned.execution_cost_bps_2d,
     )
+    bridge_prof["events"] = time.perf_counter() - t_step
     max_holding_bars = (
         int(pd.to_numeric(raw_events["expected_holding_bars"], errors="coerce").max())
         if not raw_events.empty and "expected_holding_bars" in raw_events.columns
@@ -208,6 +286,7 @@ def run_candidate_strategy_for_universe(
     purge_bars, embargo_bars = resolve_purge_and_embargo_bars(candidate_cfg)
 
     if raw_events.empty:
+        t_step = time.perf_counter()
         alpha_panel = build_candidate_alpha_panel(
             selected_events=raw_events,
             target_weights_2d=np.zeros_like(aligned.close_2d),
@@ -215,6 +294,8 @@ def run_candidate_strategy_for_universe(
             symbols=tuple(symbols),
             cfg=strategy_cfg.candidate,
         )
+        bridge_prof["alpha_panel"] = time.perf_counter() - t_step
+        _emit_bridge_profile()
         return CandidatePipelineOutput(
             alpha_panel=alpha_panel,
             target_weights=np.zeros_like(aligned.close_2d),
@@ -240,7 +321,9 @@ def run_candidate_strategy_for_universe(
             },
         )
 
+    t_step = time.perf_counter()
     labeled = label_candidate_events(events=raw_events, aligned=aligned, cfg=candidate_cfg)
+    bridge_prof["label"] = time.perf_counter() - t_step
     labeled_all = labeled.copy()
     fit_start, fit_end, calibration_start, calibration_end, oos_start, oos_end = _candidate_ml_split_indices(
         n_bars=n_bars,
@@ -262,6 +345,7 @@ def run_candidate_strategy_for_universe(
     else:
         labeled_for_diag = labeled
 
+    t_step = time.perf_counter()
     diag = compute_rule_diagnostics(
         labeled_events=labeled_for_diag,
         aligned=aligned,
@@ -273,8 +357,10 @@ def run_candidate_strategy_for_universe(
         report_start=oos_start,
         report_end=oos_end,
     )
+    bridge_prof["diagnostics"] = time.perf_counter() - t_step
 
     if strategy_cfg.candidate.promotion_filter_enabled:
+        t_step = time.perf_counter()
         labeled = apply_variant_promotions(
             labeled=labeled,
             keep_variants=diag.recommended_keep_variants,
@@ -282,10 +368,12 @@ def run_candidate_strategy_for_universe(
             keep_signal_cells=diag.recommended_keep_signal_cells,
             flip_signal_cells=diag.recommended_flip_signal_cells,
         )
+        bridge_prof["promotions"] = time.perf_counter() - t_step
         if labeled.empty:
             _logger.debug(
                 "[BRIDGE] all candidate variants blocked by promotion filter; producing zero weights"
             )
+            t_step = time.perf_counter()
             alpha_panel = build_candidate_alpha_panel(
                 selected_events=pd.DataFrame(),
                 target_weights_2d=np.zeros_like(aligned.close_2d),
@@ -293,6 +381,8 @@ def run_candidate_strategy_for_universe(
                 symbols=tuple(symbols),
                 cfg=strategy_cfg.candidate,
             )
+            bridge_prof["alpha_panel"] = time.perf_counter() - t_step
+            _emit_bridge_profile()
             return CandidatePipelineOutput(
                 alpha_panel=alpha_panel,
                 target_weights=np.zeros_like(aligned.close_2d),
@@ -349,19 +439,20 @@ def run_candidate_strategy_for_universe(
             any_passes = bool(promoted_rpt is not None and promoted_rpt.survives_cost)
         else:
             any_passes = any(r.survives_cost for r in signal_reports)
-        _logger.info(
+        _logger.debug(
             "[SIGNAL-VALIDATION] variants=%d any_passes=%s",
             len(signal_reports),
             any_passes,
         )
         for rpt in signal_reports:
-            _logger.info(
+            _logger.debug(
                 "[SIGNAL-VALIDATION] variant=%s n=%d net_p50=%.1f stress_p50=%.1f "
                 "mean=%.1f stress_mean=%.1f hit=%.3f hac_t=%.2f decision_bars=%d survives=%s",
                 rpt.variant, rpt.n_events, rpt.net_edge_bps_p50,
                 rpt.net_edge_bps_stress_p50, rpt.net_edge_bps_mean,
                 rpt.net_edge_bps_stress_mean, rpt.hit_rate, rpt.hac_t_stat, rpt.decision_bar_count, rpt.survives_cost,
             )
+        t_step = time.perf_counter()
         alpha_panel_sv = build_candidate_alpha_panel(
             selected_events=pd.DataFrame(),
             target_weights_2d=np.zeros_like(aligned.close_2d),
@@ -369,6 +460,8 @@ def run_candidate_strategy_for_universe(
             symbols=tuple(symbols),
             cfg=strategy_cfg.candidate,
         )
+        bridge_prof["alpha_panel"] = time.perf_counter() - t_step
+        _emit_bridge_profile()
         return CandidatePipelineOutput(
             alpha_panel=alpha_panel_sv,
             target_weights=np.zeros_like(aligned.close_2d),
@@ -389,6 +482,7 @@ def run_candidate_strategy_for_universe(
                 "gate_calibration_reason": "signal_only_mode",
                 "recommended_keep_variants": diag.recommended_keep_variants,
                 "recommended_flip_variants": diag.recommended_flip_variants,
+                "failure_report": diag.recommendation_failure_report,
                 "signal_validation": [
                     {
                         "variant": r.variant,
@@ -418,12 +512,15 @@ def run_candidate_strategy_for_universe(
 
     # --- WF fold loop: train per fold using shared workflow ---
     from src.domain.futures.strategy.candidate_workflow import run_candidate_walk_forward
+    t_step = time.perf_counter()
     wf_outputs = run_candidate_walk_forward(
         labeled_events=labeled,
         aligned=aligned,
         cfg=candidate_cfg,
         folds=wf_folds,
     )
+    bridge_prof["walk_forward"] = time.perf_counter() - t_step
+    t_post_wf = time.perf_counter()
 
     fold_p_pass_parts: list[np.ndarray] = []
     fold_mu_parts: list[np.ndarray] = []
@@ -442,6 +539,8 @@ def run_candidate_strategy_for_universe(
     total_fit = total_cal = total_oos = 0
     fold_cost_survival: list[bool] = []
     fold_selection_reports: list[dict[str, Any]] = []
+
+    wf_fold_details: list[dict[str, Any]] = []
 
     # Map validation status from workflow outputs
     for fold_out in wf_outputs:
@@ -543,7 +642,19 @@ def run_candidate_strategy_for_universe(
                 "shadow_max_eligible": int(selection_diag_fold.get("shadow_max_eligible", 0)),
             }
         )
-        _logger.info(
+
+        # Collect for summary table
+        wf_fold_details.append({
+            "fold_id": len(fold_selection_reports),
+            "inference_mode": getattr(ml_out, "validation_diagnostics", {}).get("inference_mode", "n/a"),
+            "rank_ic": getattr(ml_out, "validation_diagnostics", {}).get("rank_ic", float("nan")),
+            "n_events": int(ml_out.events.shape[0]) if ml_out.events is not None else 0,
+            "prior_bps": float(getattr(ml_out, "validation_diagnostics", {}).get("prior_bps", 0.0)),
+            "eu_p90": float(selection_diag_fold.get("waterfall_expected_utility_adj_p90_bps", 0.0)),
+            "pass_cost": bool(pass_survival),
+        })
+
+        _logger.debug(
             (
                 "[BRIDGE][WF_REALIZED] metric=%s oos=[%d,%d) selected=%d realized_mean=%.3f "
                 "status=%s hit_rate=%.3f log_growth=%.6f lift=%.3f pass_lift=%s pass=%s reason=%s"
@@ -561,7 +672,7 @@ def run_candidate_strategy_for_universe(
             pass_survival,
             survival_reason,
         )
-        _logger.info(
+        _logger.debug(
             (
                 "[BRIDGE][WF_DIAG] fold=%d eligible=%s selected=%d eu_p90=%.3f downside_p90=%.3f "
                 "breakeven=%.1f shadow_profiles=%d shadow_max_selected=%d shadow_max_eligible=%d"
@@ -745,7 +856,7 @@ def run_candidate_strategy_for_universe(
     _n_folds_total = len(fold_cost_survival)
     _n_folds_pass = sum(fold_cost_survival)
     _fold_pass_ratio = _n_folds_pass / max(_n_folds_total, 1)
-    _logger.info(
+    _logger.debug(
         "[BRIDGE][WF] fold_cost_survival=%s pass_ratio=%.2f min_required=%.2f",
         fold_cost_survival,
         _fold_pass_ratio,
@@ -802,12 +913,16 @@ def run_candidate_strategy_for_universe(
         (int(r.get("shadow_max_eligible", 0)) for r in fold_selection_reports),
         default=0,
     )
+    _fold_oos_boundaries = tuple((f.oos_start, f.oos_end) for f in wf_folds)
+    last_fold_out = wf_outputs[-1] if wf_outputs else None
     if _fold_pass_ratio < strategy_cfg.candidate.min_wf_fold_pass_ratio:
-        _logger.warning(
+        _logger.debug(
             "[BRIDGE][WF] fold_pass_ratio=%.2f < min_wf_fold_pass_ratio=%.2f → fail-closed",
             _fold_pass_ratio,
             strategy_cfg.candidate.min_wf_fold_pass_ratio,
         )
+        bridge_prof["post_wf"] = time.perf_counter() - t_post_wf
+        t_step = time.perf_counter()
         _wf_fail_panel = build_candidate_alpha_panel(
             selected_events=pd.DataFrame(),
             target_weights_2d=np.zeros_like(aligned.close_2d),
@@ -815,7 +930,8 @@ def run_candidate_strategy_for_universe(
             symbols=tuple(symbols),
             cfg=strategy_cfg.candidate,
         )
-        return CandidatePipelineOutput(
+        bridge_prof["alpha_panel"] = time.perf_counter() - t_step
+        out = CandidatePipelineOutput(
             alpha_panel=_wf_fail_panel,
             target_weights=np.zeros_like(aligned.close_2d),
             rule_report={
@@ -846,18 +962,36 @@ def run_candidate_strategy_for_universe(
                 "wf_shadow_max_eligible": wf_shadow_max_eligible,
                 "wf_waterfall_expected_utility_p90_bps": wf_waterfall_expected_utility_p90_bps,
                 "wf_waterfall_downside_drag_p90_bps": wf_waterfall_downside_drag_p90_bps,
+                "wf_fold_details": wf_fold_details,
                 "recommended_keep_variants": diag.recommended_keep_variants,
                 "recommended_flip_variants": diag.recommended_flip_variants,
                 "recommended_keep_signal_cells": diag.recommended_keep_signal_cells,
                 "recommended_flip_signal_cells": diag.recommended_flip_signal_cells,
             },
+            aligned=aligned,
+            labeled=labeled,
+            labeled_unfiltered=labeled_all,
+            fit_set=last_fold_out.fit_set if last_fold_out else None,
+            calibration_set=last_fold_out.calibration_set if last_fold_out else None,
+            oos_set=last_fold_out.oos_set if last_fold_out else None,
+            gate_model=last_fold_out.gate_model if last_fold_out else None,
+            edge_models=last_fold_out.edge_models if last_fold_out else None,
+            fit_start=wf_folds[0].fit_start,
+            fit_end=wf_folds[-1].fit_end,
+            calibration_start=wf_folds[0].cal_start,
+            calibration_end=wf_folds[-1].cal_end,
+            oos_start=wf_folds[0].oos_start,
+            oos_end=wf_folds[-1].oos_end,
+            fold_oos_boundaries=_fold_oos_boundaries,
         )
+        _emit_bridge_profile()
+        return out
 
     # For downstream logging, expose last-fold model state
     gate_model = fold_gate_model
     # Reconstruct oos_set for report counts (use combined)
 
-    _logger.info(
+    _logger.debug(
         (
             "[DIAG][PIPELINE] raw=%d labeled=%d promoted=%d fit=%d cal=%d oos=%d "
             "n_folds=%d wf_scheme=%s"
@@ -875,7 +1009,7 @@ def run_candidate_strategy_for_universe(
     edge_summary = _finite_summary(ml_out.mu_net_decision_bps)
     q10_summary = _finite_summary(ml_out.q10_net_bps)
     utility_summary = _finite_summary(ml_out.utility_score)
-    _logger.info(
+    _logger.debug(
         (
             "[DIAG][PIPELINE_GATE] calibrated=%s reason=%s mean=%.4f median=%.4f p90=%.4f max=%.4f "
             "pct_ge40=%.3f pct_ge45=%.3f pct_ge50=%.3f pct_ge55=%.3f"
@@ -891,7 +1025,7 @@ def run_candidate_strategy_for_universe(
         _threshold_rate(p_pass, 0.50),
         _threshold_rate(p_pass, 0.55),
     )
-    _logger.info(
+    _logger.debug(
         (
             "[DIAG][PIPELINE_EDGE] mu_mean=%.1f mu_median=%.1f mu_p90=%.1f mu_max=%.1f "
             "q10_mean=%.1f q10_p10=%.1f q10_median=%.1f q10_min=%.1f "
@@ -911,9 +1045,12 @@ def run_candidate_strategy_for_universe(
         utility_summary["max"],
     )
 
+    bridge_prof["post_wf"] = time.perf_counter() - t_post_wf
+    t_step = time.perf_counter()
     selected = select_candidate_events_for_portfolio(model_output=ml_out, cfg=strategy_cfg.candidate)
+    bridge_prof["selection"] = time.perf_counter() - t_step
     selection_diag = dict(getattr(selected, "attrs", {}).get("candidate_selection_diagnostics", {}))
-    _logger.info(
+    _logger.debug(
         (
             "[DIAG][PIPELINE_SELECT] policy=%s zero_reason=%s eligible=%s selected_pre_group=%s "
             "selected=%s n_keep=%s breakeven_floor=%.1f"
@@ -932,6 +1069,7 @@ def run_candidate_strategy_for_universe(
         mu_net_decision_bps=ml_out.mu_net_decision_bps,
         q10_net_bps=ml_out.q10_net_bps,
     )
+    t_step = time.perf_counter()
     target_weights = build_candidate_target_weights(
         selected_events=selected,
         close_2d=aligned.close_2d,
@@ -940,6 +1078,8 @@ def run_candidate_strategy_for_universe(
         sigma_3d=None,
         cfg=strategy_cfg.candidate,
     )
+    bridge_prof["weights"] = time.perf_counter() - t_step
+    t_step = time.perf_counter()
     alpha_panel = build_candidate_alpha_panel(
         selected_events=selected,
         target_weights_2d=target_weights,
@@ -947,6 +1087,7 @@ def run_candidate_strategy_for_universe(
         symbols=tuple(symbols),
         cfg=strategy_cfg.candidate,
     )
+    bridge_prof["alpha_panel"] = time.perf_counter() - t_step
 
     if strategy_cfg.candidate.exit_policy_mode == "label_only":
         # label_only: suppress per-event TP/SL; engine uses global ATR_MULT only
@@ -954,6 +1095,8 @@ def run_candidate_strategy_for_universe(
         alpha_panel = alpha_panel.copy()
         alpha_panel["candidate_stop_atr_mult"] = 0.0
         alpha_panel["candidate_take_profit_atr_mult"] = 0.0
+
+    _emit_bridge_profile()
 
     return CandidatePipelineOutput(
         alpha_panel=alpha_panel,
@@ -1005,6 +1148,7 @@ def run_candidate_strategy_for_universe(
             "wf_shadow_max_eligible": wf_shadow_max_eligible,
             "wf_waterfall_expected_utility_p90_bps": wf_waterfall_expected_utility_p90_bps,
             "wf_waterfall_downside_drag_p90_bps": wf_waterfall_downside_drag_p90_bps,
+            "wf_fold_details": wf_fold_details,
             "selected_pre_group": int(selection_diag.get("selected_pre_group", len(selected))),
             "selected_total": int(selection_diag.get("selected_total", len(selected))),
             "eligible": int(selection_diag.get("eligible", 0)),
@@ -1023,12 +1167,28 @@ def run_candidate_strategy_for_universe(
             "recommended_flip_variants": diag.recommended_flip_variants,
             "recommended_keep_signal_cells": diag.recommended_keep_signal_cells,
             "recommended_flip_signal_cells": diag.recommended_flip_signal_cells,
+            "failure_report": diag.recommendation_failure_report,
             "recommendation_basis": diag.recommendation_basis,
             "recommendation_start": int(diag.recommendation_split[0]),
             "recommendation_end": int(diag.recommendation_split[1]),
             "report_start": int(diag.report_split[0]),
             "report_end": int(diag.report_split[1]),
         },
+        aligned=aligned,
+        labeled=labeled,
+        labeled_unfiltered=labeled_all,
+        fit_set=last_fold_out.fit_set if last_fold_out else None,
+        calibration_set=last_fold_out.calibration_set if last_fold_out else None,
+        oos_set=last_fold_out.oos_set if last_fold_out else None,
+        gate_model=last_fold_out.gate_model if last_fold_out else None,
+        edge_models=last_fold_out.edge_models if last_fold_out else None,
+        fit_start=wf_folds[0].fit_start,
+        fit_end=wf_folds[-1].fit_end,
+        calibration_start=wf_folds[0].cal_start,
+        calibration_end=wf_folds[-1].cal_end,
+        oos_start=wf_folds[0].oos_start,
+        oos_end=wf_folds[-1].oos_end,
+        fold_oos_boundaries=_fold_oos_boundaries,
     )
 
 
@@ -1040,6 +1200,8 @@ def merge_candidate_output_into_data_maps(
     log_tag: str = "",
 ) -> None:
     """Merge candidate output payload into data maps."""
+    import time
+    t_merge_start_all = time.perf_counter()
     panel = getattr(candidate_out, "alpha_panel", None)
     if panel is None or panel.empty:
         return
@@ -1051,8 +1213,14 @@ def merge_candidate_output_into_data_maps(
     if not required.issubset(panel.columns):
         _logger.warning("[%s] candidate panel missing required columns; skip merge", log_tag)
         return
-    by_sym = panel.reset_index().groupby("symbol", sort=False)
+
+    # Hoist pd.to_datetime out of the loop for right dataframe
+    panel_df = panel.reset_index() if "symbol" not in panel.columns else panel.copy()
+    panel_df["_merge_datetime"] = pd.to_datetime(panel_df["datetime"], utc=True).dt.tz_localize(None)
+    by_sym = panel_df.groupby("symbol", sort=False)
+
     for sym in symbols:
+        t_sym = time.perf_counter()
         if sym not in data_maps or tf not in data_maps[sym]:
             continue
         df = data_maps[sym][tf]
@@ -1078,11 +1246,17 @@ def merge_candidate_output_into_data_maps(
             sym_rows = by_sym.get_group(sym)
         except KeyError:
             continue
-        left = df[["datetime"]].copy()
-        right = sym_rows[["datetime", *list(required)]].copy()
-        left["_merge_datetime"] = pd.to_datetime(left["datetime"], utc=True).dt.tz_localize(None)
-        right["_merge_datetime"] = pd.to_datetime(right["datetime"], utc=True).dt.tz_localize(None)
-        merged = left.merge(right[["_merge_datetime", *list(required)]], on="_merge_datetime", how="left")
+
+        # Skip pd.to_datetime inside the loop if already datetime64 type
+        df_dt = df["datetime"]
+        if pd.api.types.is_datetime64_any_dtype(df_dt):
+            left_merge_dt = df_dt.dt.tz_convert(None) if isinstance(df_dt.dtype, pd.DatetimeTZDtype) else df_dt
+        else:
+            left_merge_dt = pd.to_datetime(df_dt, utc=True).dt.tz_localize(None)
+
+        left = pd.DataFrame({"_merge_datetime": left_merge_dt})
+        right = sym_rows[["_merge_datetime", *list(required)]]
+        merged = left.merge(right, on="_merge_datetime", how="left")
 
         df["alpha_long"] = merged["alpha_long"].fillna(0.0).to_numpy(dtype=np.float64)
         df["alpha_short"] = merged["alpha_short"].fillna(0.0).to_numpy(dtype=np.float64)
@@ -1097,6 +1271,9 @@ def merge_candidate_output_into_data_maps(
         df["candidate_take_profit_atr_mult"] = (
             merged["candidate_take_profit_atr_mult"].fillna(0.0).to_numpy(dtype=np.float64)
         )
+        # Log fast sym merge details under debug to prevent verbose log flood
+        _logger.debug("[PROFILE][MERGE] sym %s took %.4fs", sym, time.perf_counter() - t_sym)
+    _logger.info("[PROFILE][MERGE] Total merge %s took %.4fs", log_tag, time.perf_counter() - t_merge_start_all)
 
 
 def merge_candidate_output_into_is_and_oos(
