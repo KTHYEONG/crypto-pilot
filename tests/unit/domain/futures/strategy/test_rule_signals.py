@@ -8,6 +8,7 @@ from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 from src.domain.futures.strategy.rule_signals import (
+    _entry_rising_edge_2d,
     _rolling_max_2d,
     _rolling_min_2d,
     build_rule_signal_panels,
@@ -345,3 +346,307 @@ def test_candidate_panels_to_events_uses_entry_regime_for_exit_policy() -> None:
     volatile_events = events.loc[events["entry_regime"].isin(["bull_volatile", "bear_volatile", "crash"])]
     if not volatile_events.empty:
         assert "trend_fast_fail" in set(volatile_events["exit_policy_id"].astype(str))
+
+
+# ---------------------------------------------------------------------------
+# Group A: _entry_rising_edge_2d unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_entry_rising_edge_2d_only_false_to_true_transition() -> None:
+    # Arrange
+    # Rows: F, T, T, T, F, T — only rows 1 and 5 are transitions
+    cond = np.array(
+        [[False, False], [True, True], [True, True], [True, True], [False, False], [True, True]],
+        dtype=bool,
+    )
+
+    # Act
+    result = _entry_rising_edge_2d(cond)
+
+    # Assert: only row 1 and row 5 should be True
+    expected = np.array(
+        [[False, False], [True, True], [False, False], [False, False], [False, False], [True, True]],
+        dtype=bool,
+    )
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_entry_rising_edge_2d_first_row_always_false() -> None:
+    # Arrange — first row is True
+    cond = np.ones((5, 3), dtype=bool)
+
+    # Act
+    result = _entry_rising_edge_2d(cond)
+
+    # Assert: first row must always be False regardless of condition value
+    assert not result[0].any(), "first row must always be False (no prior state)"
+
+
+def test_entry_rising_edge_2d_shape_preserved() -> None:
+    # Arrange
+    t, n = 30, 4
+    cond = np.random.default_rng(42).integers(0, 2, size=(t, n)).astype(bool)
+
+    # Act
+    result = _entry_rising_edge_2d(cond)
+
+    # Assert
+    assert result.shape == (t, n)
+    assert result.dtype == bool
+
+
+def test_entry_rising_edge_2d_multiple_transitions() -> None:
+    # Arrange — alternating F/T pattern: each True is a new transition
+    cond = np.array(
+        [[False], [True], [False], [True], [False], [True]],
+        dtype=bool,
+    )
+
+    # Act
+    result = _entry_rising_edge_2d(cond)
+
+    # Assert: rows 1, 3, 5 are transitions
+    expected = np.array([[False], [True], [False], [True], [False], [True]], dtype=bool)
+    np.testing.assert_array_equal(result, expected)
+
+
+# ---------------------------------------------------------------------------
+# Group B: family-level sparse-entry (no-refire) tests
+# ---------------------------------------------------------------------------
+
+
+def test_bollinger_reversion_no_refire_during_persistent_state() -> None:
+    # Arrange — craft price series that stays below BB lower band for many bars
+    t, n = 100, 2
+    # Start at 100, then drop sharply and stay low so bb_z < -2.0 for many consecutive bars
+    close_flat = np.full((t, n), 100.0, dtype=np.float64)
+    close_flat[30:, :] = 60.0  # persistent extreme low
+
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    aligned = AlignedMarketData(
+        datetimes=datetimes,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        open_2d=close_flat.copy(),
+        high_2d=close_flat * 1.01,
+        low_2d=close_flat * 0.99,
+        close_2d=close_flat.copy(),
+        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, n), dtype=np.float64),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.full((t, n), 5.0, dtype=np.float64),
+    )
+
+    # Act
+    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+    bb_panels = [p for p in panels if p.family == "bollinger_reversion"]
+    assert bb_panels, "bollinger_reversion panel must exist"
+
+    for panel in bb_panels:
+        long_entries = panel.side_hint_2d == 1
+        # In a persistent extreme-low regime, the same symbol/column must not have
+        # more than 1 long entry per consecutive run (rising-edge semantics)
+        for col in range(n):
+            col_entries = long_entries[30:, col]
+            # Count consecutive runs of 1s — each run must have exactly 1 True
+            if col_entries.any():
+                # No two adjacent bars should both be 1
+                adjacent_fires = bool(np.any(col_entries[:-1] & col_entries[1:]))
+                assert not adjacent_fires, (
+                    f"bollinger_reversion col={col} re-fires on adjacent bars in persistent extreme state"
+                )
+
+
+def test_dual_momentum_no_refire_during_persistent_agreement() -> None:
+    # Arrange — price series with strong persistent uptrend so momentum agreement stays on
+    t, n = 150, 2
+    # Monotonically increasing: ret_short_z > 0.5 and ret_long_z > 0.5 for many bars
+    close = np.cumsum(np.ones((t, n), dtype=np.float64), axis=0) + 100.0
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    aligned = AlignedMarketData(
+        datetimes=datetimes,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        open_2d=close.copy(),
+        high_2d=close * 1.01,
+        low_2d=close * 0.99,
+        close_2d=close.copy(),
+        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, n), dtype=np.float64),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.full((t, n), 5.0, dtype=np.float64),
+    )
+
+    # Act
+    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+    dm_panels = [p for p in panels if p.family == "dual_momentum"]
+    assert dm_panels, "dual_momentum panel must exist"
+
+    for panel in dm_panels:
+        long_entries = panel.side_hint_2d == 1
+        for col in range(n):
+            col_entries = long_entries[:, col]
+            if col_entries.any():
+                adjacent_fires = bool(np.any(col_entries[:-1] & col_entries[1:]))
+                assert not adjacent_fires, (
+                    f"dual_momentum col={col} re-fires on adjacent bars in persistent agreement"
+                )
+
+
+def test_vol_regime_reversion_no_refire_during_persistent_high_vol() -> None:
+    # Arrange — constant extreme volatility with consistent price direction
+    # t >= 97 required: _log_return_2d max lag = 96
+    t, n = 120, 2
+    close = np.full((t, n), 100.0, dtype=np.float64)
+    # Add large consistent moves to ensure ATR z > threshold persistently
+    close[20:, :] = np.cumsum(np.full((t - 20, n), 5.0), axis=0) + 100.0
+    high = close * 1.05
+    low = close * 0.95
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    aligned = AlignedMarketData(
+        datetimes=datetimes,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        open_2d=close.copy(),
+        high_2d=high,
+        low_2d=low,
+        close_2d=close.copy(),
+        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, n), dtype=np.float64),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.full((t, n), 5.0, dtype=np.float64),
+    )
+
+    # Act
+    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+    vr_panels = [p for p in panels if p.family == "vol_regime_reversion"]
+    assert vr_panels, "vol_regime_reversion panel must exist"
+
+    for panel in vr_panels:
+        for side_val in (1, -1):
+            side_entries = panel.side_hint_2d == side_val
+            for col in range(n):
+                col_entries = side_entries[:, col]
+                if col_entries.any():
+                    adjacent_fires = bool(np.any(col_entries[:-1] & col_entries[1:]))
+                    assert not adjacent_fires, (
+                        f"vol_regime_reversion col={col} side={side_val} re-fires on adjacent bars"
+                    )
+
+
+def test_btc_corr_regime_no_refire_during_persistent_correlation() -> None:
+    # Arrange — two symbols highly correlated with BTC across many bars
+    t, n = 120, 2
+    # Identical price series → correlation = 1.0 > any threshold
+    close = np.cumsum(np.ones((t, n), dtype=np.float64), axis=0) + 100.0
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    aligned = AlignedMarketData(
+        datetimes=datetimes,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        open_2d=close.copy(),
+        high_2d=close * 1.01,
+        low_2d=close * 0.99,
+        close_2d=close.copy(),
+        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, n), dtype=np.float64),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.full((t, n), 5.0, dtype=np.float64),
+    )
+
+    # Act
+    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+    cr_panels = [p for p in panels if p.family == "btc_corr_regime"]
+    assert cr_panels, "btc_corr_regime panel must exist"
+
+    for panel in cr_panels:
+        for side_val in (1, -1):
+            side_entries = panel.side_hint_2d == side_val
+            for col in range(n):
+                col_entries = side_entries[:, col]
+                if col_entries.any():
+                    adjacent_fires = bool(np.any(col_entries[:-1] & col_entries[1:]))
+                    assert not adjacent_fires, (
+                        f"btc_corr_regime col={col} side={side_val}"
+                        " re-fires on adjacent bars during persistent correlation"
+                    )
+
+
+# ---------------------------------------------------------------------------
+# Group C: score-side decoupling
+# ---------------------------------------------------------------------------
+
+
+def test_bollinger_reversion_score_side_decoupled() -> None:
+    # Arrange — price stays below BB lower for multiple bars
+    # t >= 97 required: _log_return_2d max lag = 96
+    t, n = 120, 1
+    close = np.full((t, n), 100.0, dtype=np.float64)
+    close[25:, :] = 55.0  # stays at extreme low persistently
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    aligned = AlignedMarketData(
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        open_2d=close.copy(),
+        high_2d=close * 1.01,
+        low_2d=close * 0.99,
+        close_2d=close.copy(),
+        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, n), dtype=np.float64),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.full((t, n), 5.0, dtype=np.float64),
+    )
+
+    # Act
+    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+    bb_panels = [p for p in panels if p.family == "bollinger_reversion"]
+    assert bb_panels
+
+    panel = bb_panels[0]
+    # score must remain non-zero (level) while side_hint can be 0 after first entry bar
+    zero_side_mask = panel.side_hint_2d[:, 0] == 0
+    nonzero_score_mask = np.abs(panel.signed_score_2d[:, 0]) > 1e-6
+
+    # In the persistent extreme zone, there should be bars where side=0 but score≠0
+    decoupled_exists = bool(np.any(zero_side_mask & nonzero_score_mask))
+    assert decoupled_exists, (
+        "bollinger_reversion: expected bars where side_hint=0 but score≠0 (score-side decoupled)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Group D: metadata contract tests
+# ---------------------------------------------------------------------------
+
+
+def test_touched_panels_expose_required_metadata() -> None:
+    # Arrange
+    aligned = _make_aligned(t=200)
+    cfg = CandidateStrategyConfig()
+
+    # Act
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+
+    required_keys = {"edge_hypothesis", "causal_inputs", "expected_failure_mode"}
+    target_families = {"bollinger_reversion", "vol_regime_reversion", "btc_corr_regime"}
+
+    matched = [p for p in panels if p.family in target_families]
+    assert matched, "no panels found for target families"
+
+    for panel in matched:
+        missing = required_keys - set(panel.metadata.keys())
+        assert not missing, (
+            f"{panel.family}:{panel.variant} missing metadata keys: {missing}"
+        )
