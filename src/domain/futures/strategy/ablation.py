@@ -413,7 +413,7 @@ def _build_variant_prior_output(
     """Construct a prior-only edge output without residual center predictions."""
     if ensemble_model is not None:
         from src.domain.futures.strategy.candidate_ensemble import predict_regime_conditional_ensemble
-        base_out = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index)
+        base_out = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index, cfg=cfg)
     else:
         base_out = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=cfg)
     variant_prior_bps, global_prior_bps = _build_calibration_variant_priors(
@@ -637,7 +637,7 @@ def run_candidate_ablation(
             else fit_set.y_edge_bps
         )
         ensemble_model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
-        ml_out = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index)
+        ml_out = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index, cfg=cfg)
         p_pass = ml_out.p_pass
     else:
         p_pass = predict_candidate_gate(model=gate_model, dataset=oos_set)
@@ -692,7 +692,9 @@ def run_candidate_ablation(
     # 3. prior_residual_rank_stop_risk (Adds ML residual model to rank selection, but no gate veto)
     t_step = time.perf_counter()
     if ensemble_model is not None:
-        edge_out_nogate = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index)
+        edge_out_nogate = predict_regime_conditional_ensemble(
+            model=ensemble_model, oos_events=oos_set.event_index, cfg=cfg
+        )
     else:
         edge_out_nogate = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass_ones, cfg=cfg)
         edge_out_nogate = replace(edge_out_nogate, events=oos_set.event_index)
