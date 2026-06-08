@@ -354,7 +354,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--phase",
         type=str,
-        choices=["full", "ml", "signal"],
+        choices=["full", "ml", "signal", "regime"],
         default="full",
     )
     parser.add_argument(
@@ -586,6 +586,34 @@ def _run_data_stage(
     )
 
 
+def _run_regime_evaluation_stage(
+    run_config: FuturesRunConfig,
+    data_stage: DataStageResult,
+) -> None:
+    """Align data, compute regime context, and log scorecard table (C2+C5 from codes only)."""
+    import numpy as np
+
+    from src.domain.futures.strategy.common.alignment import align_data_maps
+    from src.domain.futures.strategy.market_regime import compute_market_regime_context
+    from src.domain.futures.strategy.regime_evaluation import evaluate_regime_classifier
+    from src.domain.futures.strategy.rule_diagnostics import log_regime_scorecard
+
+    aligned = align_data_maps(data_stage.data_maps, data_stage.valid_symbols, run_config.timeframe)
+    regime_ctx = compute_market_regime_context(aligned=aligned)
+
+    empty_i8 = np.array([], dtype=np.int8)
+    empty_f64 = np.array([], dtype=np.float64)
+    empty_bool = np.array([], dtype=bool)
+    scorecard = evaluate_regime_classifier(
+        all_codes_1d=regime_ctx.code_1d,
+        event_codes=empty_i8,
+        event_edges_bps=empty_f64,
+        is_event_mask=empty_bool,
+        oos_event_mask=empty_bool,
+    )
+    log_regime_scorecard(scorecard)
+
+
 def _run_strategy_stage(
     run_config: FuturesRunConfig,
     window: QuarterlyWindow,
@@ -730,7 +758,7 @@ def _run_strategy_stage(
         _logger.info("-" * 82)
         _logger.info(
             f"| {'Fold':<4} | {'Mode':<10} | {'Rank IC':>8} | {'Events':>7} | "
-            f"{'Prior':>6} | {'EU_p90':>7} | {'Pass':<6} |"
+            f"{'PriorP90':>8} | {'EU_p90':>7} | {'Pass':<6} |"
         )
         _logger.info("-" * 82)
         for res in wf_details:
@@ -749,7 +777,7 @@ def _run_strategy_stage(
             pass_str = "✅" if passed else "❌"
             _logger.info(
                 f"| {fold_id:<4} | {mode:<10} | {rank_ic_str} | {events:>7,} | "
-                f"{prior:>6.2f} | {eu_p90:>7.2f} | {pass_str:<6} |"
+                f"{prior:>8.2f} | {eu_p90:>7.2f} | {pass_str:<6} |"
             )
         _logger.info("-" * 82)
 
@@ -1263,6 +1291,12 @@ def run_pipeline(
         live_inference_panel,
         inference_timeline,
     )
+    # Step 3.5) regime evaluation (between universe and signal)
+    _run_regime_evaluation_stage(run_config, data_stage)
+    if run_config.phase == "regime":
+        _logger.info("[PHASE] phase=regime completed; signal and optimization skipped")
+        return RunnerResult(exit_code=0, reason="regime_evaluation_done")
+
     # Step 4) strategy bridge + alpha contract
     t_strategy = time.perf_counter()
     _strategy_name = str(OPT_FUTURES_CONFIG.get("FUTURES_STRATEGY_NAME", "candidate_ml"))
