@@ -10,6 +10,7 @@ from src.domain.futures.strategy.rule_diagnostics import (
     _failed_recommendation_checks,
     _meets_recommendation_thresholds,
     compute_rule_diagnostics,
+    summarize_recommendation_gate_failures,
 )
 
 
@@ -346,6 +347,76 @@ def test_meets_recommendation_thresholds_rejects_median_below_floor() -> None:
     )
     assert not _meets_recommendation_thresholds(row, cfg)
     assert "median_edge" in _failed_recommendation_checks(row, cfg)
+
+
+def test_summarize_recommendation_gate_failures_reports_pass_and_fail_reasons() -> None:
+    cfg = CandidateStrategyConfig(
+        min_variant_oos_obs=2,
+        min_variant_oos_edge_bps=5.0,
+        max_variant_event_fraction_per_bar=0.10,
+    )
+    summary = pd.DataFrame(
+        [
+            {
+                "group": "variant=trend_ma:ema_12_72",
+                "candidate_action": "KEEP_CANDIDATE",
+                "oos_n": 3,
+                "oos_mean_edge_bps": 8.0,
+                "oos_median_edge_bps": 1.0,
+                "oos_p10_edge_bps": -20.0,
+                "oos_q10_shortfall_fail_rate": 0.10,
+                "event_fraction_per_bar": 0.05,
+                "edge_stability_bps": 0.0,
+                "oos_pct_edge_pos": 0.60,
+                "oos_payoff_ratio": 1.30,
+                "archetype": "mean_reversion",
+                "exit_policy_id": "",
+            },
+            {
+                "group": "variant=trend_ma:ema_6_36",
+                "candidate_action": "DROP_OR_REWORK",
+                "oos_n": 3,
+                "oos_mean_edge_bps": 2.0,
+                "oos_median_edge_bps": 1.0,
+                "oos_p10_edge_bps": -20.0,
+                "oos_q10_shortfall_fail_rate": 0.10,
+                "event_fraction_per_bar": 0.05,
+                "edge_stability_bps": 0.0,
+                "oos_pct_edge_pos": 0.60,
+                "oos_payoff_ratio": 1.30,
+                "archetype": "mean_reversion",
+                "exit_policy_id": "",
+            },
+            {
+                "group": "variant=rsi_reversion:rsi_14",
+                "candidate_action": "DROP_OR_REWORK",
+                "oos_n": 3,
+                "oos_mean_edge_bps": 8.0,
+                "oos_median_edge_bps": 1.0,
+                "oos_p10_edge_bps": -20.0,
+                "oos_q10_shortfall_fail_rate": 0.10,
+                "event_fraction_per_bar": 0.25,
+                "edge_stability_bps": 0.0,
+                "oos_pct_edge_pos": 0.60,
+                "oos_payoff_ratio": 1.30,
+                "archetype": "mean_reversion",
+                "exit_policy_id": "",
+            },
+        ]
+    )
+
+    out = summarize_recommendation_gate_failures(summary, cfg)
+
+    keep_row = out.loc[out["group"] == "variant=trend_ma:ema_12_72"].iloc[0]
+    edge_row = out.loc[out["group"] == "variant=trend_ma:ema_6_36"].iloc[0]
+    density_row = out.loc[out["group"] == "variant=rsi_reversion:rsi_14"].iloc[0]
+
+    assert bool(keep_row["recommended"]) is True
+    assert keep_row["failed_checks"] == ()
+    assert bool(edge_row["recommended"]) is False
+    assert "mean_edge" in edge_row["failed_checks"]
+    assert bool(density_row["recommended"]) is False
+    assert "event_density" in density_row["failed_checks"]
 
 
 def test_meets_recommendation_thresholds_rejects_bad_p10_tail() -> None:
