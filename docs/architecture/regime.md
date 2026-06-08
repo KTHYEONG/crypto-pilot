@@ -14,10 +14,6 @@ change_triggers:
   - "src/domain/futures/strategy/market_regime.py"
   - "src/domain/futures/strategy/regime_evaluation.py"
   - "src/execution/opt_main_futures.py"
-dependencies:
-  documents:
-    - docs/specs/regime_architecture_audit_and_hardening.md
-    - docs/specs/ml_regime_allocation.md
 last_verified: 2026-06-08
 ---
 
@@ -163,8 +159,6 @@ code = {00:bull_quiet, 01:bull_volatile, 10:bear_quiet, 11:bear_volatile}
 
 # 7. Known Limitations
 
-> 상세 분석·개선 plan: [[regime_architecture_audit_and_hardening]] (`docs/specs/`). 상태는 Phase 1~7(2026-06-08) 기준.
-
 | ID | 한계 | 상태 | 영향 |
 |----|------|------|------|
 | D1 | `transition`(code 4) 구조적 dead state | ✅ 해소 (Phase 1+4: per-bar percentile band) | `transition=8.9%` |
@@ -180,13 +174,13 @@ code = {00:bull_quiet, 01:bull_volatile, 10:bear_quiet, 11:bear_volatile}
 
 ## 7.1 핵심 아키텍처 발견 (Proxy vs Gold 괴리)
 
-Phase 6 gold standard 연결 후 확정된 **본질적 한계** (코드 결함 아님):
+Phase 6 gold standard 연결 후 확정된 **본질적 한계** (코드 결함 아님). Signal Rising-Edge Refactor(2026-06-08) 이후 측정값 반영:
 
 | 측정 | flip | rho | 결론 |
 |------|------|-----|------|
 | Proxy (시장수익) | Y | 0.886 | 레짐이 **BTC 시장 방향**은 강하게 구분 |
-| Gold (전략 edge) | **N** | **0.029** | 레짐이 **전략 edge 방향**은 구분 못함 |
+| Gold (전략 edge, refactor 후) | **N** | **0.314** | 방향 구분 여전히 불가, OOS 순위 안정성은 0.029→0.314 개선 |
 
-- **함의:** 레짐은 시장 상태를 잘 분류하나, 모든 레짐에서 전략 edge가 동일 부호(long-bias)·OOS 순위 붕괴 → 현재 신호 풀로는 regime-conditional 배분의 통계적 근거 부족.
-- **다음:** 신호 풀 6+개 확장 후 C3/C4 재측정 (→ [[ml_regime_allocation]] Priority 0).
+- **함의:** 레짐은 시장 상태를 잘 분류하나, 모든 레짐에서 전략 edge가 동일 부호(long-bias) → flip=N 유지. rising-edge로 신호 풀이 정제(ML-Ready 3→5, gold events 4013→7370)되면서 C4 rho는 0.314로 부분 개선됐으나 ρ≥0.5 미달.
+- **근본 원인:** ML-Ready 5개가 전부 방향성(추세/모멘텀) 신호라 레짐 무관 동방향 수익. flip=Y를 달성하려면 **레짐별로 부호가 역전되는 신호**(예: 추세장 momentum vs 비추세장 mean-reversion)가 풀에 공존해야 함.
 - **측정 일관성 노트:** C2/C5는 regime-stage `code_1d`, C3/C4 gold standard는 strategy-stage `code_1d` 기반. 둘 다 BTC-anchored 동일 윈도우라 일치하나, 구조상 별개 계산 경로임.

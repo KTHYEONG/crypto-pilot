@@ -70,6 +70,7 @@ class SignalValidationReport:
     survives_cost: bool
     deployment_count: int
     decision_bar_count: int
+    fail_reasons: tuple[str, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -1164,6 +1165,8 @@ def validate_candidate_signals(
         stress_multiplier=cfg.cost_stress_multiplier,
     )
     reports: list[SignalValidationReport] = []
+    stress_floor = float(cfg.blend_survival_min_net_stress_bps)
+    hac_floor = float(cfg.min_rule_ir_t)
 
     for variant_name, events_df in [
         ("rule_only_equal_size", labeled_all),
@@ -1184,6 +1187,7 @@ def validate_candidate_signals(
                 survives_cost=False,
                 deployment_count=0,
                 decision_bar_count=0,
+                fail_reasons=("no_oos_events",),
             ))
             continue
 
@@ -1226,12 +1230,21 @@ def validate_candidate_signals(
         if cfg.blend_survival_use_mean:
             survives = (
                 np.isfinite(mean_net_stress)
-                and mean_net_stress > cfg.blend_survival_min_net_stress_bps
-                and hac_t >= cfg.min_rule_ir_t
+                and mean_net_stress > stress_floor
+                and hac_t >= hac_floor
             )
         else:
             # legacy median path (회귀 대비 보존)
-            survives = np.isfinite(net_stress_p50) and net_stress_p50 > 0.0 and hac_t >= cfg.min_rule_ir_t
+            survives = np.isfinite(net_stress_p50) and net_stress_p50 > 0.0 and hac_t >= hac_floor
+
+        fail_reasons: list[str] = []
+        if cfg.blend_survival_use_mean:
+            if not np.isfinite(mean_net_stress):
+                fail_reasons.append("non_finite_mean_net_stress")
+            elif mean_net_stress <= stress_floor:
+                fail_reasons.append("mean_net_stress_below_floor")
+        if hac_t < hac_floor:
+            fail_reasons.append("hac_t_below_floor")
 
         reports.append(SignalValidationReport(
             variant=variant_name,
@@ -1245,6 +1258,7 @@ def validate_candidate_signals(
             survives_cost=survives,
             deployment_count=int(n_events),
             decision_bar_count=decision_bar_count,
+            fail_reasons=tuple(fail_reasons),
         ))
 
     return reports

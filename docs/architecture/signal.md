@@ -26,6 +26,7 @@ last_verified: 2026-06-08
 | Component | 책임 | 파일 |
 |-----------|------|------|
 | Vectorized Indicators | `_ema_2d`, `_rolling_std_2d`, `_atr_2d` 등 Numpy 기반 고속 지표 연산 | `rule_signals.py` |
+| `_entry_rising_edge_2d` | 지속 상태(persistent boolean state)를 False→True 전이 시점(discrete event)으로 변환 | `rule_signals.py:172` |
 | `build_rule_signal_panels` | Rule-based Signal(8+개 전략군) 생성 진입점. (MA, Donchian, Bollinger 등) | `rule_signals.py` |
 | `_resolve_panel_archetype` | 신호의 성격(Archetype)을 분류 (`trend_continuation`, `mean_reversion` 등) | `rule_signals.py` |
 | `filter_rule_signal_panels` | 설정(Allowlist) 및 Variant 기준으로 활성 패널 동적 필터링 | `rule_signals.py` |
@@ -51,7 +52,10 @@ graph TD
 # 4. Business Rules & Invariants
 
 - **Strict Causality (Look-ahead 차단):** 모든 Vectorized 연산은 미래 데이터를 참조해서는 안 됩니다. 예를 들어 `_rolling_max_2d` (Donchian) 채널 계산 시, T 시점의 판단은 반드시 `shift(1)`을 통해 T-1 시점까지의 고가/저가 채널을 기준으로 이루어집니다.
-- **Sparsity Principle:** 패널은 `side_hint_2d` 배열을 통해 매 시점의 포지션 방향을 정하는 것이 아니라, 특정 임계값을 충족하는 시점(1 또는 -1)만을 진입(Event) 후보로 추출합니다. (나머지는 0)
+- **Sparsity Principle (Rising-Edge Entry):** 패널의 `side_hint_2d`는 임계 상태가 **유지되는 모든 bar**가 아니라, 상태가 **False→True로 전이되는 시점(rising edge)** 에만 진입(Event)을 발화합니다. `_entry_rising_edge_2d`가 이를 강제합니다.
+  - *근거: persistent threshold가 매 bar 재발화하면 이벤트가 자기상관(autocorrelation)되어 HAC t-stat이 붕괴하고 event_density gate에서 차단됨. 전이 시점만 추출하면 통계적 독립성과 진입 품질이 동시에 향상.*
+  - *적용 family: `bollinger_reversion`, `vol_regime_reversion`, `dual_momentum`, `btc_corr_regime`.*
+- **Score-Side Decoupling:** `side_hint_2d`(rising-edge, sparse)와 `signed_score_2d`(연속 level, dense)는 의도적으로 분리됩니다. side는 진입 여부를, score는 ML feature·position sizing 강도를 담당하므로 두 필드를 동기화하지 않습니다. (`side_hint_2d==0`이면서 `signed_score_2d≠0`인 bar는 정상)
 - **Archetype-Regime Alignment:** 신호의 Archetype에 따라 동작이 허용되는 Market Regime이 엄격히 분리됩니다 (`_allowed_regimes_for_archetype`). 
   - *예: Trend Continuation은 `quiet`나 `volatile` 국면에서 활성화, Reversion 계열은 특정 조건(transition) 등에 매핑.*
 - **Dynamic Risk (ATR-based Barrier):** `Exit Policy`는 고정 비율이 아닌 `ATR (Average True Range)` 배수로 SL(Stop Loss), TP(Take Profit) 장벽 거리를 지정하여, 자산과 국면의 변동성에 따른 동적 청산을 보장합니다.
@@ -86,4 +90,5 @@ graph TD
 # 7. Known Limitations
 
 - **Threshold Sensitivity:** 현재 Signal Panel이 생성하는 Candidate Event 수는 하드코딩되거나 설정된 임계값(Threshold)에 직접적인 영향을 받으며, Optuna를 통한 파라미터 최적화와 강하게 결합되어 있습니다.
-- **Collinearity (다중공선성):** 동일 패밀리(Family) 내의 여러 변종(Variant) 시그널들이 동시에 발화할 경우, 다운스트림(Downstream) ML Layer에서 이벤트 집중(Concentration) 제어가 필수적으로 요구됩니다.
+- **Collinearity (다중공선성):** 동일 패밀리(Family) 내의 여러 변종(Variant) 시그널들이 동시에 발화할 경우, 다운스트림(Downstream) ML Layer에서 이벤트 집중(Concentration) 제어가 필수적으로 요구됩니다. (rising-edge 전환으로 event_density는 완화되었으나 variant 간 동시발화는 잔존)
+- **Archetype-Regime Entry Gating 미적용:** `regime_signal_gating_enabled=False`(현재 기본값)이므로 mean-reversion 계열도 추세장(bull_volatile/bear_volatile/crash)에서 진입합니다. 추세장의 평균회귀 진입은 구조적으로 hit_rate/payoff가 낮아 ML-Ready gate에서 차단됩니다.

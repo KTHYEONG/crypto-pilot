@@ -169,6 +169,28 @@ def _rolling_corr_with_col(arr: NDArray[np.float64], ref_col: int, window: int) 
     return out
 
 
+def _entry_rising_edge_2d(condition: NDArray[np.bool_]) -> NDArray[np.bool_]:
+    """Return True only on False->True transitions for each [t, symbol].
+
+    Args:
+        condition: Boolean array of shape [T, N].
+
+    Returns:
+        Boolean array of shape [T, N] where True marks the first bar of each
+        consecutive True-run. The first row is always False (no prior state).
+
+    Time: O(T*N)  Space: O(T*N) — one vstack + elementwise AND/NOT
+    """
+    # prev[t] = condition[t-1]; prev[0] = False (no prior bar)
+    prev: NDArray[np.bool_] = np.vstack(
+        [np.zeros((1, condition.shape[1]), dtype=bool), condition[:-1]]
+    )
+    result: NDArray[np.bool_] = condition & ~prev
+    # Row 0 has no prior state — suppress any apparent transition
+    result[0, :] = False
+    return result
+
+
 def _atr_2d(
     high: NDArray[np.float64],
     low: NDArray[np.float64],
@@ -534,8 +556,8 @@ def build_rule_signal_panels(
     bb_std_rev = _rolling_std_2d(close, window=20)
     bb_z_rev = (close - bb_mean_rev) / np.maximum(bb_std_rev, 1e-12)
     rev_side = np.zeros_like(close, dtype=np.int8)
-    rev_side[bb_z_rev < -2.0] = 1
-    rev_side[bb_z_rev > 2.0] = -1
+    rev_side[_entry_rising_edge_2d(bb_z_rev < -2.0)] = 1
+    rev_side[_entry_rising_edge_2d(bb_z_rev > 2.0)] = -1
     rev_score = -bb_z_rev / 3.0
     panels.append(
         CandidateSignalPanel(
@@ -552,6 +574,16 @@ def build_rule_signal_panels(
             take_profit_atr_mult=3.0,
             turnover_proxy_2d=np.abs(np.diff(rev_score, axis=0, prepend=0.0)),
             valid_mask_2d=valid_mask,
+            metadata={
+                "edge_hypothesis": (
+                    "first breach of extreme z-score produces mean-reversion entry"
+                    " with higher expected edge than subsequent persistent-state bars"
+                ),
+                "causal_inputs": "trailing 20-bar rolling mean and std of close price",
+                "expected_failure_mode": (
+                    "trending markets where z-score remains extreme without reverting"
+                ),
+            },
         )
     )
 
@@ -767,8 +799,8 @@ def build_rule_signal_panels(
         _vol_z = (atr - _atr_mean) / np.maximum(_atr_std, 1e-12)
         _high_vol = _vol_z >= _vr_thr
         _vr_side = np.zeros_like(close, dtype=np.int8)
-        _vr_side[_high_vol & (_price_dir > 0)] = -1  # high vol + up move → fade (short)
-        _vr_side[_high_vol & (_price_dir < 0)] = 1   # high vol + down move → fade (long)
+        _vr_side[_entry_rising_edge_2d(_high_vol & (_price_dir > 0))] = -1  # high vol + up move → fade (short)
+        _vr_side[_entry_rising_edge_2d(_high_vol & (_price_dir < 0))] = 1   # high vol + down move → fade (long)
         _vr_score = np.clip(-_vol_z / _vr_thr * _price_dir, -1.0, 1.0)
         panels.append(
             CandidateSignalPanel(
@@ -785,6 +817,16 @@ def build_rule_signal_panels(
                 take_profit_atr_mult=3.0,
                 turnover_proxy_2d=np.abs(np.diff(_vr_score, axis=0, prepend=0.0)),
                 valid_mask_2d=valid_mask,
+                metadata={
+                    "edge_hypothesis": (
+                        "first appearance of high-vol spike with directional move produces"
+                        " mean-reversion entry; subsequent bars carry diminishing edge"
+                    ),
+                    "causal_inputs": "trailing ATR z-score and single-bar price direction",
+                    "expected_failure_mode": (
+                        "sustained volatility regimes where initial spike does not revert"
+                    ),
+                },
             )
         )
 
@@ -801,8 +843,10 @@ def build_rule_signal_panels(
         )
         _cr_side = np.zeros_like(close, dtype=np.int8)
         _cr_valid = np.isfinite(_corr_2d) & (_corr_2d >= _cr_thr)
-        _cr_side[_cr_valid & (_btc_dir[:, 0:1].repeat(close.shape[1], axis=1) > 0)] = 1
-        _cr_side[_cr_valid & (_btc_dir[:, 0:1].repeat(close.shape[1], axis=1) < 0)] = -1
+        _cr_regime_entry = _entry_rising_edge_2d(_cr_valid)
+        _btc_dir_broad = _btc_dir[:, 0:1].repeat(close.shape[1], axis=1)
+        _cr_side[_cr_regime_entry & (_btc_dir_broad > 0)] = 1
+        _cr_side[_cr_regime_entry & (_btc_dir_broad < 0)] = -1
         panels.append(
             CandidateSignalPanel(
                 family="btc_corr_regime",
@@ -818,6 +862,19 @@ def build_rule_signal_panels(
                 take_profit_atr_mult=2.5,
                 turnover_proxy_2d=np.abs(np.diff(np.clip(_cr_score, -1.0, 1.0), axis=0, prepend=0.0)),
                 valid_mask_2d=valid_mask,
+                metadata={
+                    "edge_hypothesis": (
+                        "regime entry when cross-asset correlation is newly established captures"
+                        " regime-shift momentum; re-firing on every BTC bar inflates event count"
+                        " without new information"
+                    ),
+                    "causal_inputs": (
+                        "rolling BTC return correlation and BTC bar direction at regime-entry bar"
+                    ),
+                    "expected_failure_mode": (
+                        "rapid regime switches where correlation threshold oscillates near boundary"
+                    ),
+                },
             )
         )
 
@@ -1004,8 +1061,8 @@ def build_rule_signal_panels(
         _ret_long_z = _zscore_2d(_ret_long, window=_long_lb)
         _dm_score = np.tanh((_ret_short_z + _ret_long_z) / 2.0)
         _dm_side = np.zeros_like(close, dtype=np.int8)
-        _dm_side[(_ret_short_z > 0.5) & (_ret_long_z > 0.5)] = 1
-        _dm_side[(_ret_short_z < -0.5) & (_ret_long_z < -0.5)] = -1
+        _dm_side[_entry_rising_edge_2d((_ret_short_z > 0.5) & (_ret_long_z > 0.5))] = 1
+        _dm_side[_entry_rising_edge_2d((_ret_short_z < -0.5) & (_ret_long_z < -0.5))] = -1
         _dm_score[:_long_lb] = 0.0
         _dm_side[:_long_lb] = 0
         panels.append(
