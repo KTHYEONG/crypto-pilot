@@ -73,6 +73,8 @@ graph TD
 - **Selection unchanged:** B0는 `mu_net_decision_bps`, `q10_net_bps`, `p_pass` 생산자만 교체합니다. sizing/objective/AWF logic은 바꾸지 않습니다. Portfolio Selection 시 `expected_utility` 산출은 설정된 `downside_penalty`를 꼬리 위험(`q10_net_bps`)에 차감 반영하여 작동합니다.
 - **Reporting parity:** ablation/reporting 경로는 challenger model이 비활성(예: `ensemble_b0` 모드)일 때도 active allocation backend인 B0 앙상블 모델의 예측값(`predict_regime_conditional_ensemble`)으로 우회하여 백테스트를 진행합니다.
 - **Walk-Forward Thresholds:** 캐리 및 평균회귀 전략의 빈번한 복리 엣지 기회를 정상 반영하기 위해 Walk-Forward Fold 생존을 위한 실질 실현 엣지 하한(`min_fold_realized_edge_bps`)은 8.0 bps(가중 평균 RT 비용 7.5 bps의 약 1.07배)로 운용됩니다.
+- **Failed-fold prediction censoring (불변식):** Walk-Forward fold 루프에서 `pass_survival=False`인 fold의 예측값(`mu`, `q10`, `q90`, `p_pass`, `selection_score`, `kelly_fraction` 등)은 combined selection pool에 합쳐지기 전에 **0으로 치환**됩니다(event DataFrame은 진단 완전성을 위해 유지). `expected_utility=0 < breakeven_floor(~3.75 bps)`이므로 실패 fold 이벤트는 selection에서 자동 배제됩니다. 이는 OOS에서 역방향 선택(음의 Rank IC)을 하는 fold가 최종 배분 풀을 오염시키는 것을 차단합니다. 구현: `bridge.py` fold 루프(`pass_survival` 분기).
+- **Signal OOS Rank IC gate (불변식):** signal 추천(`_recommendation_threshold_checks`)은 `oos_rank_ic >= min_oos_rank_ic`(기본 0.01)을 통과해야 합니다. IC가 비유한(NaN)이거나 임계 미만인 신호는 `Low OOS IC`로 차단됩니다. IC 소스는 recommendation window 기준 `spearman_score_edge`입니다. **한계:** binary/패턴형 raw_score 신호는 recommendation window Spearman이 0으로 수렴해 과차단될 수 있음 — IC 소스를 ensemble `prior_rank_ic`로 교체하는 개선이 후속 과제로 남아 있습니다.
 
 # 5. Data Schemas
 
