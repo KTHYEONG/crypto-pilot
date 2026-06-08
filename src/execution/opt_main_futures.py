@@ -791,12 +791,12 @@ def _run_strategy_stage(
     if keep_variants:
         _logger.info(f"| {'RECOMMENDED':<12} | {len(keep_variants):<5} | 1. {keep_variants[0]:<52} |")
         for i, var in enumerate(keep_variants[1:], 2):
-            _logger.info(f"| {'(ML Ready)':<12} | {'':<5} | {i}. {var:<52} |")
+            _logger.info(f"| {'(Eligible)':<12} | {'':<5} | {i}. {var:<52} |")
     else:
         _logger.info(f"| {'RECOMMENDED':<12} | {'0':<5} | {'none':<52} |")
     _logger.info("-" * 82)
 
-    # 2. Cause: ML Walk-Forward Performance
+    # 2. Cause: Walk-Forward Performance
     wf_details = candidate_report.get("wf_fold_details", [])
     if wf_details and run_config.phase in {"full", "alo"}:
         _logger.info("\n[WALK-FORWARD FOLD DETAILS]")
@@ -885,7 +885,7 @@ def _run_strategy_stage(
         _logger.info("-" * 122)
         _logger.info(
             ">> Conclusion: Filtering improved Mean Edge by %+0.1f bps. "
-            "Proceeding to ML phase.\n",
+            "Proceeding to Ensemble phase.\n",
             mean_filtered - mean_unfiltered,
         )
         _emit_strategy_profile()
@@ -1023,11 +1023,11 @@ def _run_candidate_evaluation_report(
         "rule_only_equal_size": "Equal Size",
         "rule_promo_no_leak": "Rule Promo NL",
         "rule_promo_oos_oracle": "Rule Promo Oracle",
-        "rule_only_fractional_kelly": "Kelly (No ML)",
-        "rule_plus_ml_gate": "ML Gate",
-        "rule_plus_ml_gate_plus_edge": "ML Gate+Edge",
-        "rule_plus_ml_gate_plus_edge_plus_portfolio_caps": "ML Full (Capped)",
-        "candidate_ml_full": "Cand. ML",
+        "rule_only_fractional_kelly": "Kelly (Rule Only)",
+        "rule_plus_ml_gate": "Ensemble Gate",
+        "rule_plus_ml_gate_plus_edge": "Ensemble Gate+Edge",
+        "rule_plus_ml_gate_plus_edge_plus_portfolio_caps": "Ensemble Full (Capped)",
+        "candidate_ml_full": "Cand. Ensemble",
         "candidate_ml_direct_edge": "Direct Edge",
         "candidate_ml_variant_prior": "Variant Prior",
         "candidate_ml_promotion_filter": "Promo Filter",
