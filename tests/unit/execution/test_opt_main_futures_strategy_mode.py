@@ -162,6 +162,7 @@ def test_strategy_mode_pipeline_orchestration_order(
     )
     monkeypatch.setattr(opt_main_futures, "_run_universe_stage", fake_universe)
     monkeypatch.setattr(opt_main_futures, "_run_data_stage", fake_data)
+    monkeypatch.setattr(opt_main_futures, "_run_regime_evaluation_stage", lambda *_: None)
     monkeypatch.setattr(opt_main_futures, "_run_strategy_stage", fake_strategy)
     monkeypatch.setattr(opt_main_futures, "_run_optimization_stage", fake_optimization)
 
@@ -239,6 +240,7 @@ def test_alpha_mode_skips_optimization_stage(
         ),
     )
     monkeypatch.setattr(opt_main_futures, "_run_data_stage", lambda *_: data_stage)
+    monkeypatch.setattr(opt_main_futures, "_run_regime_evaluation_stage", lambda *_: None)
     monkeypatch.setattr(opt_main_futures, "_run_strategy_stage", lambda *_args, **_kwargs: None)
 
     def fail_if_called(*args: object, **kwargs: object) -> opt_main_futures.RunnerResult:
