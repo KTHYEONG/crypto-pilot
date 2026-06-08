@@ -32,6 +32,58 @@ def log_regime_quality_report(report: RegimeQualityReport) -> None:
     )
 
 
+def log_regime_scorecard(scorecard: Any) -> None:
+    """Emit [REGIME_SCORECARD] in table format (gate-mode independent)."""
+    w = 60
+    sep = "-" * w
+    has_events = scorecard.c4_n_regimes_evaluated > 0
+
+    def _c3_str() -> str:
+        if not has_events:
+            return "needs signal phase"
+        flip = "Y" if scorecard.c3_has_sign_flip else "N"
+        return f"kw_p={scorecard.c3_kw_pvalue:.4f}  flip={flip}  mi={scorecard.c3_mutual_info:.4f}"
+
+    def _c4_str() -> str:
+        if not has_events:
+            return "needs signal phase"
+        return f"rho={scorecard.c4_spearman_rho:.3f}  n_regimes={scorecard.c4_n_regimes_evaluated}"
+
+    def _score(val: float, avail: bool) -> str:
+        return f"{val:.1f}/10" if avail else "  n/a  "
+
+    _logger.info(sep)
+    _logger.info("[REGIME_SCORECARD]")
+    _logger.info(f"| {'Axis':<20} | {'Score':^7} | {'Key Metrics':<26} |")
+    _logger.info(sep)
+    c2_metrics = (
+        f"dwell={scorecard.c2_dwell_median:.2f}  "
+        f"tr={scorecard.c2_transition_rate:.3f}  "
+        f"ent={scorecard.c2_entropy_rate:.3f}"
+    )
+    c5_metrics = (
+        f"min={scorecard.c5_min_occupancy:.3f}  "
+        f"max={scorecard.c5_max_occupancy:.3f}  "
+        f"n_eff={scorecard.c5_effective_regimes:.2f}"
+    )
+    _logger.info(f"| {'C2 Persistence':<20} | {_score(scorecard.c2_score, True):^7} | {c2_metrics:<26} |")
+    _logger.info(f"| {'C3 Distinctness':<20} | {_score(scorecard.c3_score, has_events):^7} | {_c3_str():<26} |")
+    _logger.info(f"| {'C4 OOS Stability':<20} | {_score(scorecard.c4_score, has_events):^7} | {_c4_str():<26} |")
+    _logger.info(f"| {'C5 Coverage':<20} | {_score(scorecard.c5_score, True):^7} | {c5_metrics:<26} |")
+    _logger.info(sep)
+    _logger.info(
+        f"| {'Weighted C2-C5':<20} | {scorecard.weighted_c2_to_c5:.3f}   | C1(hard_gate=pass)  C6-C8(manual)    |"
+    )
+    _logger.info(sep)
+    occ_pairs = list(zip(scorecard.regime_names, scorecard.occupancy_by_regime, strict=False))
+    occ_line1 = "  ".join(f"{n}={v:.3f}" for n, v in occ_pairs[:3])
+    occ_line2 = "  ".join(f"{n}={v:.3f}" for n, v in occ_pairs[3:])
+    _logger.info(f"| {'Occupancy':<20} | {occ_line1:<33} |")
+    if occ_line2:
+        _logger.info(f"| {'':<20} | {occ_line2:<33} |")
+    _logger.info(sep)
+
+
 @dataclass(slots=True, frozen=True)
 class RuleDiagnosticsResult:
     """Rule alpha diagnostics tables."""
