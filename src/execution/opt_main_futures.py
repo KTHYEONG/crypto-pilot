@@ -360,7 +360,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--phase",
         type=str,
-        choices=["full", "ml", "signal"],
+        choices=["full", "alo", "signal"],
         default="full",
     )
     parser.add_argument(
@@ -798,7 +798,7 @@ def _run_strategy_stage(
 
     # 2. Cause: ML Walk-Forward Performance
     wf_details = candidate_report.get("wf_fold_details", [])
-    if wf_details and run_config.phase in {"full", "ml"}:
+    if wf_details and run_config.phase in {"full", "alo"}:
         _logger.info("\n[WALK-FORWARD FOLD DETAILS]")
         _logger.info("-" * 82)
         _logger.info(
@@ -891,7 +891,7 @@ def _run_strategy_stage(
         _emit_strategy_profile()
         return ml_out
 
-    if run_config.phase in {"full", "ml"}:
+    if run_config.phase in {"full", "alo"}:
         t_eval = time.perf_counter()
         _run_candidate_evaluation_report(
             ml_out,
@@ -1438,9 +1438,9 @@ def run_pipeline(
         _refresh_regime_c34_gold_standard(*regime_stage_result, strategy_out)
     if run_config.phase == "signal":
         return RunnerResult(exit_code=0, reason="signal_mode_done")
-    if run_config.phase == "ml":
+    if run_config.phase == "alo":
         _logger.info(
-            "[PHASE] phase=ml completed strategy/candidate evaluation only; optimization/training skipped"
+            "[PHASE] phase=alo completed strategy/candidate evaluation only; optimization/training skipped"
         )
         return RunnerResult(exit_code=0, reason="candidate_evaluation_done")
     # Step 5) optimization + final OOS evaluation
