@@ -13,10 +13,6 @@ _logger: logging.Logger = logging.getLogger("opt_futures")
 C_GRN, C_RED, C_RST, C_BLD, C_YEL = "\033[92m", "\033[91m", "\033[0m", "\033[1m", "\033[93m"
 SEP_85 = " " + "─" * 84
 DBL_SEP_85 = "═" * 85
-# Shared regime contract used by optimization modules.
-REGIME_NAMES: list[str] = ["bull", "bear", "chop", "crisis"]
-
-
 def safe_float(v: Any, default: float = 0.0, limit: float = 1e9) -> float:
     """Safe conversion to float with optional clamping."""
     try:
@@ -466,22 +462,6 @@ def log_ml_merge_feature_stats(oos_data_maps: Any, valid_symbols: Any, tf: Any) 
         float(total_rows) / float(n),
         float(total_cols) / float(n),
         float(alpha_present) * 100.0 / float(n),
-    )
-
-
-def log_oos_regime_attribution(regime_attr: dict[str, Any]) -> None:
-    """Log high-level signal metrics (Visual Audit)."""
-    if not regime_attr:
-        return
-
-    coverage = safe_float(regime_attr.get("trade_regime_coverage_pct", 0.0))
-    flip = safe_float(regime_attr.get("chop_flip_proxy", 0.0))
-    _logger.info(
-        " [OOS_SIGNAL] coverage=%.1f%% flip_proxy=%.3f chop_loss_share=%.3f chop_trade_share=%.3f",
-        coverage,
-        flip,
-        regime_attr.get("chop_loss_share", 0.0),
-        regime_attr.get("chop_trade_share", 0.0),
     )
 
 
