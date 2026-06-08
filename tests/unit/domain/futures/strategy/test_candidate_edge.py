@@ -118,8 +118,21 @@ def test_edge_prior_residual_preserves_positive_variant_prior() -> None:
         effective_sample_size=train.effective_sample_size,
     )
     valid = _make_dataset(seed=301, n=30, family="funding_carry", variant="funding_24")
-    # cal_eval: varying edge so rank_ic is finite and test can confirm prior is positive
-    cal_eval = _make_dataset(seed=302, n=30, family="funding_carry", variant="funding_24")
+    # cal_eval: fixed positive edge to ensure calibration-window prior update yields positive variant prior
+    _cal_base = _make_dataset(seed=302, n=30, family="funding_carry", variant="funding_24")
+    cal_eval = CandidateDataset(
+        X=_cal_base.X,
+        y_gate=_cal_base.y_gate,
+        y_edge_bps=np.full(_cal_base.X.shape[0], 25.0, dtype=np.float32),
+        y_q10_bps=np.full(_cal_base.X.shape[0], -5.0, dtype=np.float32),
+        y_mfe_bps=np.full(_cal_base.X.shape[0], 40.0, dtype=np.float32),
+        gate_weight=_cal_base.gate_weight,
+        edge_weight=_cal_base.edge_weight,
+        groups=_cal_base.groups,
+        event_index=_cal_base.event_index,
+        feature_names=_cal_base.feature_names,
+        effective_sample_size=_cal_base.effective_sample_size,
+    )
     cfg = CandidateStrategyConfig(
         seed=11,
         edge_gate_mode="rank_ic",
