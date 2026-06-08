@@ -173,7 +173,7 @@ def _fit_and_predict_single_fold(
 
     if n_fit < cfg.min_fit_obs or n_fit < 2:
         _logger.warning(
-            "[WORKFLOW] Fold %d skipped ML (fit=%d < 2)",
+            "[WORKFLOW] Fold %d skipped Ensemble (fit=%d < 2)",
             fold_idx, n_fit
         )
         # Prior-only outputs fallback
@@ -238,7 +238,7 @@ def _fit_and_predict_single_fold(
         timing_profile["edge_fit"] = time.perf_counter() - t_step
 
         t_step = time.perf_counter()
-        ml_out = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index)
+        ml_out = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index, cfg=cfg)
         timing_profile["inference"] = time.perf_counter() - t_step
 
         # --- Calculate Rank IC for ensemble_b0 on OOS ---
@@ -259,6 +259,12 @@ def _fit_and_predict_single_fold(
         ml_out.validation_diagnostics["prior_component_p90_bps"] = (
             float(np.percentile(pred_oos, 90)) if pred_oos.size > 0 else 0.0
         )
+        _conditioning = getattr(ensemble_model, "conditioning", "ensemble_b0")
+        _val_ic = float(getattr(ensemble_model, "validation_rank_ic", 0.0))
+        _lam = float(ml_out.validation_diagnostics.get("mu_shrinkage_lambda", 1.0))
+        ml_out.validation_diagnostics["conditioning"] = _conditioning
+        ml_out.validation_diagnostics["val_rank_ic"] = _val_ic
+        ml_out.validation_diagnostics["mu_shrinkage_lambda"] = _lam
 
         gate_rep = GateValidationReport(
             enabled=False,
@@ -280,7 +286,7 @@ def _fit_and_predict_single_fold(
             incremental_log_growth_mean=0.0,
             incremental_log_growth_lcb=0.0,
             selected=True,
-            reason="ensemble_b0",
+            reason=f"ensemble_b0:{_conditioning}",
         )
     else:
         from src.domain.futures.strategy.candidate_edge import fit_candidate_edge_models, predict_candidate_edges
