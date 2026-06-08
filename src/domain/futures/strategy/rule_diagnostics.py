@@ -34,7 +34,7 @@ def log_regime_quality_report(report: RegimeQualityReport) -> None:
 
 def log_regime_scorecard(scorecard: Any) -> None:
     """Emit [REGIME_SCORECARD] in table format (gate-mode independent)."""
-    w = 60
+    w = 82
     sep = "-" * w
     has_events = scorecard.c4_n_regimes_evaluated > 0
 
@@ -52,48 +52,53 @@ def log_regime_scorecard(scorecard: Any) -> None:
     def _score(val: float, avail: bool) -> str:
         return f"{val:.1f}/10" if avail else "  n/a  "
 
+    _logger.info("\n" + sep)
+    _logger.info(f"| {'[REGIME_SCORECARD]':<{w-4}} |")
     _logger.info(sep)
-    _logger.info("[REGIME_SCORECARD]")
-    _logger.info(f"| {'Axis':<20} | {'Score':^7} | {'Key Metrics':<26} |")
+    _logger.info(f"| {'Axis':<20} | {'Score':^7} | {'Key Metrics':<45} |")
     _logger.info(sep)
     c2_macro_dwell = getattr(scorecard, "c2_macro_dwell_median", float("nan"))
     c2_macro_str = f"{c2_macro_dwell:.2f}" if not __import__("math").isnan(c2_macro_dwell) else "n/a"
     c2_metrics = (
-        f"dwell={scorecard.c2_dwell_median:.2f}(micro)  "
-        f"macro={c2_macro_str}  "
-        f"tr={scorecard.c2_transition_rate:.3f}  "
-        f"ent={scorecard.c2_entropy_rate:.3f}"
+        f"dwell={scorecard.c2_dwell_median:.2f}(micro) macro={c2_macro_str} "
+        f"tr={scorecard.c2_transition_rate:.3f} ent={scorecard.c2_entropy_rate:.3f}"
     )
     c5_metrics = (
-        f"min={scorecard.c5_min_occupancy:.3f}  "
-        f"max={scorecard.c5_max_occupancy:.3f}  "
+        f"min={scorecard.c5_min_occupancy:.3f} max={scorecard.c5_max_occupancy:.3f} "
         f"n_eff={scorecard.c5_effective_regimes:.2f}"
     )
-    _logger.info(f"| {'C2 Persistence':<20} | {_score(scorecard.c2_score, True):^7} | {c2_metrics:<26} |")
-    _logger.info(f"| {'C3 Distinctness':<20} | {_score(scorecard.c3_score, has_events):^7} | {_c3_str():<26} |")
-    _logger.info(f"| {'C4 OOS Stability':<20} | {_score(scorecard.c4_score, has_events):^7} | {_c4_str():<26} |")
-    _logger.info(f"| {'C5 Coverage':<20} | {_score(scorecard.c5_score, True):^7} | {c5_metrics:<26} |")
+    _logger.info(f"| {'C2 Persistence':<20} | {_score(scorecard.c2_score, True):^7} | {c2_metrics:<45} |")
+    _logger.info(f"| {'C3 Distinctness':<20} | {_score(scorecard.c3_score, has_events):^7} | {_c3_str():<45} |")
+    _logger.info(f"| {'C4 OOS Stability':<20} | {_score(scorecard.c4_score, has_events):^7} | {_c4_str():<45} |")
+    _logger.info(f"| {'C5 Coverage':<20} | {_score(scorecard.c5_score, True):^7} | {c5_metrics:<45} |")
     _logger.info(sep)
     _logger.info(
-        f"| {'Weighted C2-C5':<20} | {scorecard.weighted_c2_to_c5:.3f}   | C1(hard_gate=pass)  C6-C8(manual)    |"
+        f"| {'Weighted C2-C5':<20} | {scorecard.weighted_c2_to_c5:^7.3f} | {'C1(hard_gate=pass)  C6-C8(manual)':<45} |"
     )
     _logger.info(sep)
+    
+    # Occupancy
     occ_pairs = list(zip(scorecard.regime_names, scorecard.occupancy_by_regime, strict=False))
-    occ_line1 = "  ".join(f"{n}={v:.3f}" for n, v in occ_pairs[:3])
-    occ_line2 = "  ".join(f"{n}={v:.3f}" for n, v in occ_pairs[3:])
-    _logger.info(f"| {'Occupancy':<20} | {occ_line1:<33} |")
+    def _fmt_occ(n: str, v: float) -> str:
+        sn = n.replace("volatile", "vol").replace("quiet", "q").replace("transition", "trans")
+        return f"{sn}={v:.3f}"
+        
+    occ_line1 = "  ".join(_fmt_occ(n, v) for n, v in occ_pairs[:3])
+    occ_line2 = "  ".join(_fmt_occ(n, v) for n, v in occ_pairs[3:])
+    
+    _logger.info(f"| {'Occupancy':<20} | {'  n/a  ':^7} | {occ_line1:<45} |")
     if occ_line2:
-        _logger.info(f"| {'':<20} | {occ_line2:<33} |")
-    # proxy row (pre-signal C3/C4 from bar-level market returns)
+        _logger.info(f"| {'':<20} | {'':^7} | {occ_line2:<45} |")
+        
+    # Proxy row
     import math as _math
-
     c3p = getattr(scorecard, "c3_proxy_pvalue", float("nan"))
     c4p_rho = getattr(scorecard, "c4_proxy_spearman_rho", float("nan"))
     c3p_flip = getattr(scorecard, "c3_proxy_sign_flip", False)
     if not _math.isnan(c3p):
         c4p_str = f"{c4p_rho:.3f}" if not _math.isnan(c4p_rho) else "n/a"
-        proxy_metrics = f"kw_p={c3p:.3f}  flip={'Y' if c3p_flip else 'N'}  rho={c4p_str}"
-        _logger.info(f"| {'C3/C4_proxy (mkt)':<20} | {'  n/a  ':^7} | {proxy_metrics:<26} |")
+        proxy_metrics = f"kw_p={c3p:.3f} flip={'Y' if c3p_flip else 'N'} rho={c4p_str}"
+        _logger.info(f"| {'C3/C4_proxy (mkt)':<20} | {'  n/a  ':^7} | {proxy_metrics:<45} |")
     _logger.info(sep)
 
 
@@ -791,24 +796,48 @@ def _failed_recommendation_checks(row: pd.Series, cfg: CandidateStrategyConfig) 
     return tuple(name for name, passed in checks.items() if not passed)
 
 
+def summarize_recommendation_gate_failures(
+    recommendation_summary: pd.DataFrame,
+    cfg: CandidateStrategyConfig,
+) -> pd.DataFrame:
+    """Return one row per recommendation group with pass/fail checks."""
+    if recommendation_summary.empty:
+        return pd.DataFrame(
+            columns=["group", "candidate_action", "recommended", "failed_checks"]
+        )
+
+    rows: list[dict[str, Any]] = []
+    for row in recommendation_summary.itertuples(index=False):
+        row_series = pd.Series(row._asdict())
+        checks = _recommendation_threshold_checks(row_series, cfg)
+        failed_checks = tuple(name for name, passed in checks.items() if not passed)
+        rows.append(
+            {
+                "group": str(getattr(row, "group", "")),
+                "candidate_action": str(getattr(row, "candidate_action", "")),
+                "recommended": len(failed_checks) == 0,
+                "failed_checks": failed_checks,
+                "oos_mean_edge_bps": float(getattr(row, "oos_mean_edge_bps", float("nan"))),
+                "variant": str(getattr(row, "variant", "")),
+                **checks,
+            }
+        )
+    return pd.DataFrame.from_records(rows)
+
+
 def _log_recommendation_failure_block(summary: pd.DataFrame, *, cfg: CandidateStrategyConfig, top_k: int) -> None:
     """Emit a single-line summary of why variants failed recommendation thresholds."""
     if summary.empty:
         return
 
-    blocked = summary.copy()
-    blocked["failed_checks"] = [
-        ",".join(_failed_recommendation_checks(row, cfg)) for _, row in blocked.iterrows()
-    ]
-    blocked = blocked.loc[blocked["failed_checks"] != ""].copy()
+    blocked = summarize_recommendation_gate_failures(summary, cfg)
+    blocked = blocked.loc[~blocked["recommended"]].copy()
     if blocked.empty:
         return
 
     failure_counts: dict[str, int] = {}
     for failed in blocked["failed_checks"]:
-        for name in str(failed).split(","):
-            if not name:
-                continue
+        for name in failed:
             failure_counts[name] = failure_counts.get(name, 0) + 1
 
     ordered_counts = " | ".join(f"{name}x{count}" for name, count in sorted(failure_counts.items()))
@@ -1197,22 +1226,18 @@ def compute_rule_diagnostics(
             top_k=cfg.diagnostic_top_k,
             recommended_variants=_recommended_set,
         )
-        # Collect failure report stats
-        if not recommendation_variant_summary.empty:
-            blocked_df = recommendation_variant_summary.copy()
-            blocked_df["failed_checks"] = [
-                ",".join(_failed_recommendation_checks(row, cfg)) for _, row in blocked_df.iterrows()
-            ]
-            blocked_df = blocked_df.loc[blocked_df["failed_checks"] != ""].copy()
-            if not blocked_df.empty:
+        failure_summary = summarize_recommendation_gate_failures(recommendation_variant_summary, cfg)
+        blocked_df = failure_summary.loc[~failure_summary["recommended"]].copy()
+        if not blocked_df.empty:
+            # Collect failure report stats
                 failure_counts: dict[str, int] = {}
                 for failed in blocked_df["failed_checks"]:
-                    for name in str(failed).split(","):
-                        if name:
-                            failure_counts[name] = failure_counts.get(name, 0) + 1
+                    for name in failed:
+                        failure_counts[name] = failure_counts.get(name, 0) + 1
                 ordered_counts = " | ".join(f"{name}x{count}" for name, count in sorted(failure_counts.items()))
                 top_blocked = (
-                    blocked_df.sort_values(["oos_mean_edge_bps", "group"], ascending=[False, True])
+                    blocked_df
+                    .sort_values(["oos_mean_edge_bps", "group"], ascending=[False, True])
                     .head(cfg.diagnostic_top_k)
                 )
                 top_names = ", ".join(
@@ -1224,6 +1249,14 @@ def compute_rule_diagnostics(
                     "fail_gates_str": ordered_counts,
                     "top_blocked_str": top_names,
                     "failure_counts": failure_counts,
+                    "rows": [
+                        {
+                            "group": str(r.group),
+                            "candidate_action": str(r.candidate_action),
+                            "failed_checks": list(r.failed_checks),
+                        }
+                        for r in blocked_df.itertuples(index=False)
+                    ],
                 }
 
         _log_recommendation_failure_block(

@@ -234,7 +234,7 @@ def run_candidate_strategy_for_universe(
 
     def _emit_bridge_profile() -> None:
         breakdown = _RuntimeBreakdown(total=time.perf_counter() - bridge_t0, steps=bridge_prof)
-        _logger.info(
+        _logger.debug(
             (
                 "[BRIDGE-PROF] total=%.4fs align=%.4fs rules=%.4fs events=%.4fs "
                 "label=%.4fs diagnostics=%.4fs promotions=%.4fs walk_forward=%.4fs "
@@ -444,14 +444,34 @@ def run_candidate_strategy_for_universe(
             len(signal_reports),
             any_passes,
         )
+        _logger.debug(
+            "[SIGNAL-VALIDATION] -------------------------------------------------------------------------------"
+        )
+        _logger.debug(
+            "[SIGNAL-VALIDATION] | %-20s | %8s | %10s | %7s | %-5s | %s",
+            "Variant",
+            "Events",
+            "StressMean",
+            "HAC t",
+            "Pass",
+            "Fail Reasons",
+        )
+        _logger.debug(
+            "[SIGNAL-VALIDATION] -------------------------------------------------------------------------------"
+        )
         for rpt in signal_reports:
             _logger.debug(
-                "[SIGNAL-VALIDATION] variant=%s n=%d net_p50=%.1f stress_p50=%.1f "
-                "mean=%.1f stress_mean=%.1f hit=%.3f hac_t=%.2f decision_bars=%d survives=%s",
-                rpt.variant, rpt.n_events, rpt.net_edge_bps_p50,
-                rpt.net_edge_bps_stress_p50, rpt.net_edge_bps_mean,
-                rpt.net_edge_bps_stress_mean, rpt.hit_rate, rpt.hac_t_stat, rpt.decision_bar_count, rpt.survives_cost,
+                "[SIGNAL-VALIDATION] | %-20s | %8d | %10.1f | %7.2f | %-5s | %s",
+                rpt.variant,
+                rpt.n_events,
+                rpt.net_edge_bps_stress_mean,
+                rpt.hac_t_stat,
+                "PASS" if rpt.survives_cost else "FAIL",
+                ",".join(rpt.fail_reasons) if rpt.fail_reasons else "-",
             )
+        _logger.debug(
+            "[SIGNAL-VALIDATION] -------------------------------------------------------------------------------"
+        )
         t_step = time.perf_counter()
         alpha_panel_sv = build_candidate_alpha_panel(
             selected_events=pd.DataFrame(),
@@ -465,6 +485,9 @@ def run_candidate_strategy_for_universe(
         return CandidatePipelineOutput(
             alpha_panel=alpha_panel_sv,
             target_weights=np.zeros_like(aligned.close_2d),
+            labeled=labeled,
+            labeled_unfiltered=labeled_all,
+            oos_start=_oos_start_ref,
             rule_report={
                 "events_total": len(raw_events),
                 "labeled_total": len(labeled),
@@ -496,6 +519,7 @@ def run_candidate_strategy_for_universe(
                         "survives_cost": r.survives_cost,
                         "deployment_count": r.deployment_count,
                         "decision_bar_count": r.decision_bar_count,
+                        "fail_reasons": list(r.fail_reasons),
                     }
                     for r in signal_reports
                 ],
@@ -1281,7 +1305,7 @@ def merge_candidate_output_into_data_maps(
         )
         # Log fast sym merge details under debug to prevent verbose log flood
         _logger.debug("[PROFILE][MERGE] sym %s took %.4fs", sym, time.perf_counter() - t_sym)
-    _logger.info("[PROFILE][MERGE] Total merge %s took %.4fs", log_tag, time.perf_counter() - t_merge_start_all)
+    _logger.debug("[PROFILE][MERGE] Total merge %s took %.4fs", log_tag, time.perf_counter() - t_merge_start_all)
 
 
 def merge_candidate_output_into_is_and_oos(
