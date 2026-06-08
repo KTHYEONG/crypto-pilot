@@ -17,7 +17,13 @@ import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
+    from src.domain.futures.strategy.regime_evaluation import RegimeScoreCard
+    from src.domain.futures.strategy_runtime.bridge import CandidatePipelineOutput
 
 import numpy as np
 import optuna
@@ -589,8 +595,12 @@ def _run_data_stage(
 def _run_regime_evaluation_stage(
     run_config: FuturesRunConfig,
     data_stage: DataStageResult,
-) -> None:
-    """Align data, compute regime context, and log scorecard table (C2+C5 from codes only)."""
+) -> tuple[RegimeScoreCard, NDArray[np.int8]] | None:
+    """Align data, compute regime context, and log scorecard table (C2+C5 from codes only).
+
+    Returns:
+        ``(scorecard, code_1d)`` for post-hoc C3/C4 gold standard refresh, or ``None`` on failure.
+    """
     import numpy as np
 
     from src.domain.futures.strategy.common.alignment import align_data_maps
@@ -611,7 +621,44 @@ def _run_regime_evaluation_stage(
         is_event_mask=empty_bool,
         oos_event_mask=empty_bool,
     )
+
+    # compute proxy C3/C4 from BTC bar-level returns (pre-signal)
+    import dataclasses as _dc
+
+    from src.domain.futures.strategy.regime_evaluation import evaluate_regime_classifier_proxy
+
+    btc_log_ret = np.zeros(aligned.datetimes.shape[0], dtype=np.float64)
+    btc_close = aligned.close_2d
+    if btc_close.shape[1] > 0:
+        btc_idx = next(
+            (i for i, s in enumerate(aligned.symbols) if "BTC" in s.upper()), 0
+        )
+        raw = np.maximum(btc_close[:, btc_idx], 1e-12)
+        btc_log_ret[1:] = np.diff(np.log(raw))
+
+    n_bars = aligned.datetimes.shape[0]
+    split = n_bars // 2
+    is_bar_mask = np.zeros(n_bars, dtype=bool)
+    is_bar_mask[:split] = True
+    oos_bar_mask = np.zeros(n_bars, dtype=bool)
+    oos_bar_mask[split:] = True
+
+    c3p_pval, c3p_flip, c4p_rho, _c3p_score = evaluate_regime_classifier_proxy(
+        all_codes_1d=regime_ctx.code_1d,
+        market_returns_1d=btc_log_ret * 1e4,
+        is_bar_mask=is_bar_mask,
+        oos_bar_mask=oos_bar_mask,
+    )
+    # patch proxy values into scorecard (create new frozen instance)
+    scorecard = _dc.replace(
+        scorecard,
+        c3_proxy_pvalue=c3p_pval,
+        c3_proxy_sign_flip=c3p_flip,
+        c4_proxy_spearman_rho=c4p_rho,
+    )
+
     log_regime_scorecard(scorecard)
+    return scorecard, regime_ctx.code_1d
 
 
 def _run_strategy_stage(
@@ -622,7 +669,7 @@ def _run_strategy_stage(
     live_inference_panel: tuple[str, ...] = (),
     trading_symbols: tuple[str, ...] = (),
     universe_snapshot: UniverseSnapshot | None = None,
-) -> None:
+) -> CandidatePipelineOutput | None:
     t_strategy_stage = time.perf_counter()
     strategy_steps: dict[str, float] = {
         "map_pick": 0.0,
@@ -840,7 +887,7 @@ def _run_strategy_stage(
             mean_filtered - mean_unfiltered,
         )
         _emit_strategy_profile()
-        return
+        return ml_out
 
     if run_config.phase in {"full", "ml"}:
         t_eval = time.perf_counter()
@@ -853,6 +900,79 @@ def _run_strategy_stage(
         strategy_steps["evaluation"] = time.perf_counter() - t_eval
 
     _emit_strategy_profile()
+    return ml_out
+
+
+def _refresh_regime_c34_gold_standard(
+    scorecard: RegimeScoreCard,
+    code_1d: NDArray[np.int8],
+    ml_out: CandidatePipelineOutput,
+) -> None:
+    """C3/C4 gold standard를 전략 이벤트로 재계산 후 scorecard를 재로그.
+
+    regime evaluation stage는 strategy stage 이전에 실행되므로 C3/C4를 빈 배열로
+    계산한다. strategy stage 완료 후 이 함수를 호출하면 실제 이벤트 데이터로 C3/C4를
+    갱신하고 최종 scorecard를 재로그한다.
+    """
+    import dataclasses as _dc
+
+    from src.domain.futures.strategy.regime_evaluation import evaluate_regime_classifier
+    from src.domain.futures.strategy.rule_diagnostics import log_regime_scorecard
+
+    labeled = ml_out.labeled
+    if labeled is None or labeled.empty:
+        _logger.debug("[REGIME_C34_GOLD] labeled DataFrame 없음 — gold standard 계산 건너뜀")
+        return
+
+    required_cols = {"entry_regime_code", "edge_after_hurdle_bps", "entry_idx"}
+    if not required_cols.issubset(labeled.columns):
+        missing = required_cols - set(labeled.columns)
+        _logger.debug("[REGIME_C34_GOLD] 필수 컬럼 없음 %s — 건너뜀", missing)
+        return
+
+    oos_start = ml_out.oos_start
+    if oos_start is None:
+        _logger.debug("[REGIME_C34_GOLD] oos_start 없음 — IS/OOS 분리 불가, 건너뜀")
+        return
+
+    entry_codes = labeled["entry_regime_code"].to_numpy(dtype=np.int8, copy=False)
+    edge_bps = labeled["edge_after_hurdle_bps"].to_numpy(dtype=np.float64, copy=False)
+    entry_idx = labeled["entry_idx"].to_numpy(dtype=np.int32, copy=False)
+
+    is_mask = entry_idx < oos_start
+    oos_mask = entry_idx >= oos_start
+
+    n_is = int(is_mask.sum())
+    n_oos = int(oos_mask.sum())
+    if n_is + n_oos == 0:
+        _logger.debug("[REGIME_C34_GOLD] 이벤트 없음 — 건너뜀")
+        return
+
+    gold_scorecard = evaluate_regime_classifier(
+        all_codes_1d=code_1d,
+        event_codes=entry_codes,
+        event_edges_bps=edge_bps,
+        is_event_mask=is_mask,
+        oos_event_mask=oos_mask,
+    )
+
+    # proxy 값 + macro_dwell 보존 (pre-signal 단계에서 계산된 값)
+    final_scorecard = _dc.replace(
+        gold_scorecard,
+        c3_proxy_pvalue=scorecard.c3_proxy_pvalue,
+        c3_proxy_sign_flip=scorecard.c3_proxy_sign_flip,
+        c4_proxy_spearman_rho=scorecard.c4_proxy_spearman_rho,
+        c2_macro_dwell_median=scorecard.c2_macro_dwell_median,
+        c2_macro_transition_rate=scorecard.c2_macro_transition_rate,
+    )
+
+    _logger.info(
+        "[REGIME_C34_GOLD] C3/C4 gold standard 계산 완료: events=%d (IS=%d, OOS=%d)",
+        n_is + n_oos,
+        n_is,
+        n_oos,
+    )
+    log_regime_scorecard(final_scorecard)
 
 
 def _run_candidate_evaluation_report(
@@ -1292,7 +1412,7 @@ def run_pipeline(
         inference_timeline,
     )
     # Step 3.5) regime evaluation (between universe and signal)
-    _run_regime_evaluation_stage(run_config, data_stage)
+    regime_stage_result = _run_regime_evaluation_stage(run_config, data_stage)
     if run_config.phase == "regime":
         _logger.info("[PHASE] phase=regime completed; signal and optimization skipped")
         return RunnerResult(exit_code=0, reason="regime_evaluation_done")
@@ -1300,7 +1420,7 @@ def run_pipeline(
     # Step 4) strategy bridge + alpha contract
     t_strategy = time.perf_counter()
     _strategy_name = str(OPT_FUTURES_CONFIG.get("FUTURES_STRATEGY_NAME", "candidate_ml"))
-    _run_strategy_stage(
+    strategy_out = _run_strategy_stage(
         run_config,
         window,
         data_stage,
@@ -1310,6 +1430,10 @@ def run_pipeline(
         universe_snapshot=universe_snapshot,
     )
     _logger.info("<< STRATEGY: %.2fs", time.perf_counter() - t_strategy)
+
+    # Step 4.5) C3/C4 gold standard: 전략 이벤트로 scorecard 갱신
+    if regime_stage_result is not None and strategy_out is not None:
+        _refresh_regime_c34_gold_standard(*regime_stage_result, strategy_out)
     if run_config.phase == "signal":
         return RunnerResult(exit_code=0, reason="signal_mode_done")
     if run_config.phase == "ml":
