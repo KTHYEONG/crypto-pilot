@@ -175,6 +175,9 @@ def solve_constrained_weights(
     """Return signed portfolio weights (fractions of equity, before leverage)."""
     mu_v = np.asarray(mu, dtype=np.float64).ravel()
     n = int(mu_v.size)
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+
     if kelly_sigma_diag is not None:
         sig = np.asarray(kelly_sigma_diag, dtype=np.float64).ravel()
         if sig.size != n:
@@ -182,19 +185,31 @@ def solve_constrained_weights(
         sig = np.maximum(sig, 1e-12)
     else:
         sig = np.sqrt(np.clip(np.diag(np.asarray(sigma, dtype=np.float64)), 1e-12, None))
-    w_raw = kappa * _kelly_raw(mu_v, sig, f_kelly_max=f_kelly_max)
 
-    sigma = np.asarray(sigma, dtype=np.float64)
-    if sigma.shape != (n, n):
-        sigma = np.diag(np.diag(sigma))
+    sigma_mat = np.asarray(sigma, dtype=np.float64)
+    if sigma_mat.shape != (n, n):
+        sigma_mat = np.diag(np.diag(sigma_mat))
 
-    port_var_bar = float(w_raw @ sigma @ w_raw)
+    # Black-Litterman 사후 기대수익률 산출
+    tau = 1.0
+    omega_diag = np.maximum(sig ** 2, 1e-12)
+    try:
+        # Adaptive Diagonal Shrinkage (20% mean variance)
+        mean_var = float(np.mean(np.diag(sigma_mat))) * 0.20
+        inv_tau_sigma = np.linalg.pinv(tau * sigma_mat + np.eye(n) * (mean_var + 1e-6))
+        inv_omega = np.diag(1.0 / omega_diag)
+        mean_inv_omega = float(np.mean(1.0 / omega_diag)) * 0.10
+        bl_cov = np.linalg.pinv(inv_tau_sigma + inv_omega + np.eye(n) * (mean_inv_omega + 1e-6))
+        mu_bl = bl_cov @ (inv_omega @ mu_v)
+    except Exception:
+        mu_bl = mu_v
+
+    w_raw = kappa * _kelly_raw(mu_bl, sig, f_kelly_max=f_kelly_max)
+
+    port_var_bar = float(w_raw @ sigma_mat @ w_raw)
     sigma_pb = math.sqrt(max(port_var_bar, 1e-18))
     ann = _vol_ann_from_per_bar_sigma(sigma_pb, bars_per_year)
-    if ann > 1e-12:
-        w_pre = w_raw * (float(sigma_target_ann) / ann)
-    else:
-        w_pre = w_raw * 0.0
+    w_pre = w_raw * (float(sigma_target_ann) / ann) if ann > 1e-12 else w_raw * 0.0
 
     w_c = _project_l1_linf(w_pre, gross_cap=gross_cap, per_symbol_cap=per_symbol_cap)
 
@@ -256,6 +271,8 @@ def _solve_constrained_weights_numba(
     kelly_sigma_diag: np.ndarray | None = None,
 ) -> np.ndarray:
     n = mu.size
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
     mu_mod = mu.copy()
     dyn_gross_cap = gross_cap
 
@@ -266,12 +283,45 @@ def _solve_constrained_weights_numba(
         for i in range(n):
             sig[i] = math.sqrt(max(sigma[i, i], 1e-12))
 
-    # _kelly_raw logic  # [N] → scalar Kelly fraction per symbol
+    # Black-Litterman 사후 기대수익률 산출 (Numba)
+    tau = 1.0
+    mean_var = 0.0
+    for i in range(n):
+        mean_var += sigma[i, i]
+    mean_var = (mean_var / n) * 0.20
+
+    tau_sigma = np.zeros((n, n), dtype=np.float64)
+    for i in range(n):
+        for j in range(n):
+            tau_sigma[i, j] = tau * sigma[i, j]
+        tau_sigma[i, i] += mean_var + 1e-6
+
+    inv_tau_sigma = np.linalg.inv(tau_sigma)
+    inv_omega_diag = np.zeros(n, dtype=np.float64)
+    mean_inv_omega = 0.0
+    for i in range(n):
+        val = 1.0 / max(sig[i] ** 2, 1e-12)
+        inv_omega_diag[i] = val
+        mean_inv_omega += val
+    mean_inv_omega = (mean_inv_omega / n) * 0.10
+
+    a_mat = inv_tau_sigma.copy()
+    for i in range(n):
+        a_mat[i, i] += inv_omega_diag[i] + mean_inv_omega + 1e-6
+
+    bl_cov = np.linalg.inv(a_mat)
+    rhs = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        rhs[i] = inv_omega_diag[i] * mu_mod[i]
+
+    mu_bl = bl_cov @ rhs
+
+    # _kelly_raw logic
     w_raw = np.zeros(n, dtype=np.float64)
     f_max = abs(f_kelly_max)
     for i in range(n):
         var = max(sig[i] ** 2, 1e-12)
-        f = mu_mod[i] / var
+        f = mu_bl[i] / var
         if f > f_max:
             f = f_max
         elif f < -f_max:
@@ -287,10 +337,7 @@ def _solve_constrained_weights_numba(
     sigma_pb = math.sqrt(max(port_var_bar, 1e-18))
     ann = sigma_pb * math.sqrt(max(bars_per_year, 1e-9))
 
-    if ann > 1e-12:
-        w_pre = w_raw * (sigma_target_ann / ann)
-    else:
-        w_pre = w_raw * 0.0
+    w_pre = w_raw * (sigma_target_ann / ann) if ann > 1e-12 else w_raw * 0.0
 
     w_c = _project_l1_linf_numba(w_pre, dyn_gross_cap, per_symbol_cap)
 
