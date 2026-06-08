@@ -201,6 +201,18 @@ class CandidateStrategyConfig:
     min_regime_variant_oos_edge_bps: float = 2.0
     allocation_backend: Literal["ensemble_b0", "ml_edge"] = "ensemble_b0"
     ensemble_shrinkage_k: float = 50.0
+    # Conditioning axis: "archetype_regime" uses (archetype, regime_code) cells (default,
+    # restores original B0 behaviour with improved two-level fallback),
+    # "archetype_only" strips regime_code from alpha,
+    # "auto" picks via in-fold purged validation Rank IC gain.
+    ensemble_conditioning: Literal["archetype_regime", "archetype_only", "auto"] = "archetype_regime"
+    ensemble_internal_val_fraction: float = 0.25
+    ensemble_min_conditioning_ic_gain: float = 0.01
+    # mu-quality shrinkage: lam = clip(val_rank_ic / mu_quality_ic_full_scale, 0, 1)
+    # final_mu = lam * mu_pred + (1-lam) * cross_sectional_mean(mu_pred)
+    # Disabled by default: shrinkage can collapse predictions and worsen OOS rank IC.
+    mu_quality_shrinkage_enabled: bool = False
+    mu_quality_ic_full_scale: float = 0.05
     # Set to False to remove hard regime-based signal masking; regime moves to
     # sizing multiplier layer (see regime_as_size_multiplier).
     regime_signal_gating_enabled: bool = False
@@ -433,6 +445,12 @@ class CandidateStrategyConfig:
             raise ValueError("allocation_backend must be ensemble_b0 or ml_edge")
         if self.ensemble_shrinkage_k <= 0.0:
             raise ValueError("ensemble_shrinkage_k must be positive")
+        if self.ensemble_conditioning not in {"archetype_regime", "archetype_only", "auto"}:
+            raise ValueError("ensemble_conditioning must be archetype_regime, archetype_only, or auto")
+        if not (0.0 < self.ensemble_internal_val_fraction < 0.5):
+            raise ValueError("ensemble_internal_val_fraction must be in (0.0, 0.5)")
+        if self.mu_quality_ic_full_scale <= 0.0:
+            raise ValueError("mu_quality_ic_full_scale must be positive")
         if not (0.0 <= self.min_variant_oos_hit_rate <= 1.0):
             raise ValueError("min_variant_oos_hit_rate must satisfy 0 <= value <= 1")
         if self.min_variant_oos_payoff_ratio < 0.0:
