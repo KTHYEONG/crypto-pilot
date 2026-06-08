@@ -30,7 +30,6 @@ from src.domain.futures.optimization.evaluator import (
 from src.domain.futures.optimization.ml_context import MLPhaseDContext
 from src.domain.futures.optimization.observability.dashboard import (
     log_oos_alpha_attribution,
-    log_oos_regime_attribution,
     print_dual_audit_dashboard,
     print_mechanical_dashboard,
     safe_float,
@@ -38,10 +37,6 @@ from src.domain.futures.optimization.observability.dashboard import (
 from src.domain.futures.optimization.opt_config import (
     OPT_FUTURES_CONFIG,
     default_ev_hurdle_bps,
-)
-from src.domain.futures.optimization.opt_data_utils import (
-    compute_oos_regime_attribution,
-    compute_regime_drift,
 )
 from src.domain.futures.optimization.validation import resolve_adjusted_gates
 from src.domain.futures.portfolio.portfolio_optimizer import (
@@ -712,12 +707,6 @@ def run_final_oos_evaluation(
     is_port["symbol_names"] = valid_symbols
     ho_port["symbol_names"] = valid_symbols
     oos_port["symbol_names"] = valid_symbols
-    regime_attr = compute_oos_regime_attribution(
-        oos_port=oos_port, oos_data_maps=oos_data_maps, symbols=valid_symbols, tf=args.tf
-    )
-    oos_port["regime_attribution"] = regime_attr
-    run_summary_extras["oos_regime_attribution"] = regime_attr
-    log_oos_regime_attribution(regime_attr)
     alpha_attr = _build_oos_alpha_attribution_report(
         oos_port=oos_port,
         oos_data_maps=oos_data_maps,
@@ -728,14 +717,6 @@ def run_final_oos_evaluation(
     run_summary_extras["oos_alpha_attribution_diag"] = alpha_attr
     log_oos_alpha_attribution(alpha_attr)
 
-    # S3: Regime distribution drift detection (IS vs OOS KL divergence)
-    regime_drift_info = compute_regime_drift(
-        data_maps=data_maps,
-        oos_data_maps=oos_data_maps,
-        symbols=valid_symbols,
-        tf=args.tf,
-    )
-    run_summary_extras["regime_drift"] = regime_drift_info
     if phase_c_diagnostics is not None:
         run_summary_extras["phase_c_diagnostics"] = dict(phase_c_diagnostics)
 
