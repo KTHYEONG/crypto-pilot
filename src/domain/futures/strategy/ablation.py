@@ -408,9 +408,14 @@ def _build_variant_prior_output(
     oos_set: Any,
     p_pass: np.ndarray,
     cfg: CandidateStrategyConfig,
+    ensemble_model: Any = None,
 ) -> CandidateModelOutput:
     """Construct a prior-only edge output without residual center predictions."""
-    base_out = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=cfg)
+    if ensemble_model is not None:
+        from src.domain.futures.strategy.candidate_ensemble import predict_regime_conditional_ensemble
+        base_out = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index)
+    else:
+        base_out = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=cfg)
     variant_prior_bps, global_prior_bps = _build_calibration_variant_priors(
         calibration_set=calibration_set,
         cfg=cfg,
@@ -623,6 +628,7 @@ def run_candidate_ablation(
 
     # 5. Predict outcomes for OOS sample only
     t_step = time.perf_counter()
+    ensemble_model = None
     if gate_model is None or edge_models is None:
         train_events = fit_set.event_index.copy()
         train_events["net_return_bps"] = (
@@ -670,6 +676,7 @@ def run_candidate_ablation(
         oos_set=oos_set,
         p_pass=p_pass_ones,
         cfg=cfg,
+        ensemble_model=ensemble_model,
     )
     prior_selected = select_candidate_events_for_portfolio(model_output=prior_out, cfg=cfg)
     prior_w = build_candidate_target_weights(
@@ -684,8 +691,11 @@ def run_candidate_ablation(
 
     # 3. prior_residual_rank_stop_risk (Adds ML residual model to rank selection, but no gate veto)
     t_step = time.perf_counter()
-    edge_out_nogate = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass_ones, cfg=cfg)
-    edge_out_nogate = replace(edge_out_nogate, events=oos_set.event_index)
+    if ensemble_model is not None:
+        edge_out_nogate = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index)
+    else:
+        edge_out_nogate = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass_ones, cfg=cfg)
+        edge_out_nogate = replace(edge_out_nogate, events=oos_set.event_index)
     residual_selected = select_candidate_events_for_portfolio(model_output=edge_out_nogate, cfg=cfg)
     residual_w = build_candidate_target_weights(
         selected_events=residual_selected,
@@ -699,8 +709,11 @@ def run_candidate_ablation(
 
     # 4. edge_plus_validated_gate_stop_risk (Adds ML gate veto to selection, retains stop-risk sizing)
     t_step = time.perf_counter()
-    edge_out_gate = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=cfg)
-    edge_out_gate = replace(edge_out_gate, events=oos_set.event_index)
+    if ensemble_model is not None:
+        edge_out_gate = ml_out
+    else:
+        edge_out_gate = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=cfg)
+        edge_out_gate = replace(edge_out_gate, events=oos_set.event_index)
     gate_selected = select_candidate_events_for_portfolio(model_output=edge_out_gate, cfg=cfg)
     gate_w = build_candidate_target_weights(
         selected_events=gate_selected,
