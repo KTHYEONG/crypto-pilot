@@ -60,6 +60,29 @@ def _zscore_1d(values: NDArray[np.float64], window: int) -> NDArray[np.float64]:
     return (values - mean) / np.maximum(std, _EPS)
 
 
+def _expanding_quantile_causal(values: NDArray[np.float64], q: float) -> NDArray[np.float64]:
+    """Causal expanding q-th quantile — no lookahead. q in [0, 1].
+
+    Args:
+        values: 1-D float64 array of input values.
+        q: Quantile to compute, in [0, 1]. q=0.5 is equivalent to the median.
+
+    Returns:
+        Array of same shape where out[i] = q-th percentile of values[:i+1]
+        ignoring non-finite. Entries remain NaN if no finite value has been seen.
+
+    Time complexity: O(T²·logT) — expanding prefix sort per step.
+    Space complexity: O(T).
+    """
+    out = np.full(values.shape[0], np.nan, dtype=np.float64)
+    for idx in range(values.shape[0]):
+        sample = values[: idx + 1]
+        finite = sample[np.isfinite(sample)]
+        if finite.size > 0:
+            out[idx] = float(np.percentile(finite, q * 100.0))
+    return out
+
+
 def _infer_bars_per_year(datetimes: NDArray[np.datetime64]) -> float:
     if datetimes.shape[0] < 2:
         return _DEFAULT_BARS_PER_YEAR
@@ -127,15 +150,47 @@ def _continuous_regime_codes(
     trend_snr: NDArray[np.float64],
     vol_scale: NDArray[np.float64],
     crisis_active: NDArray[np.bool_],
+    trend_band_arr: NDArray[np.float64] | None = None,
+    vol_threshold: NDArray[np.float64] | None = None,
 ) -> NDArray[np.int8]:
-    code = np.full(trend_snr.shape[0], 4, dtype=np.int8)
+    """Assign 6-state discrete regime codes from continuous overlay signals.
+
+    Args:
+        trend_snr: Trend signal-to-noise ratio array [T].
+        vol_scale: Volatility scaling factor array [T].
+        crisis_active: Boolean crisis flag array [T].
+        trend_band_arr: Per-bar transition half-width array [T]. Bars where
+            ``|trend_snr[t]| < trend_band_arr[t]`` are assigned transition (code 4).
+            If None, falls back to fixed 0.5 for all bars (conservative default).
+        vol_threshold: Per-bar adaptive threshold for quiet/volatile split [T].
+            If None, falls back to fixed value 1.0 (original behaviour).
+
+    Returns:
+        int8 array of regime codes [T]:
+            0=bull_quiet, 1=bull_volatile, 2=bear_quiet, 3=bear_volatile,
+            4=transition, 5=crash.
+
+    Time complexity: O(T). Space complexity: O(T).
+    """
+    code = np.full(trend_snr.shape[0], 4, dtype=np.int8)  # transition = default
     finite = np.isfinite(trend_snr) & np.isfinite(vol_scale)
+    tb: NDArray[np.float64] = (
+        trend_band_arr
+        if trend_band_arr is not None
+        else np.full(trend_snr.shape[0], 0.5, dtype=np.float64)
+    )
+    decisive = finite & (np.abs(trend_snr) >= tb)  # band 밖만 방향 확정
     bull = trend_snr >= 0.0
-    quiet = vol_scale >= 1.0
-    code[finite & bull & quiet] = 0
-    code[finite & bull & ~quiet] = 1
-    code[finite & ~bull & quiet] = 2
-    code[finite & ~bull & ~quiet] = 3
+    # adaptive threshold: vol_threshold 제공 시 사용, 아니면 1.0 고정
+    vt: NDArray[np.float64] = (
+        vol_threshold if vol_threshold is not None else np.ones_like(vol_scale)
+    )
+    quiet = vol_scale >= vt
+    code[decisive & bull & quiet] = 0
+    code[decisive & bull & ~quiet] = 1
+    code[decisive & ~bull & quiet] = 2
+    code[decisive & ~bull & ~quiet] = 3
+    # |trend_snr| < trend_band_arr인 finite 구간은 code 4(transition) 유지
     code[crisis_active] = 5
     return code
 
@@ -326,10 +381,32 @@ def compute_market_regime_context(
     realized_vol = np.sqrt(np.maximum(vol_var, 0.0) * bars_per_year)
     vol_z = _zscore_1d(np.log(np.maximum(realized_vol, _EPS)), regime_cfg.overlay_trend_snr_span)
     dispersion_z = _compute_dispersion_z(aligned, regime_cfg.overlay_trend_snr_span)
+
+    # causal expanding median of vol_scale as adaptive threshold for quiet/volatile split
+    vol_median = _expanding_quantile_causal(overlay.vol_scale_1d, 0.5)
+    # fallback to 1.0 where insufficient data (< regime_min_n_eff bars)
+    min_n = regime_cfg.regime_min_n_eff
+    vol_threshold = np.where(
+        np.arange(vol_median.shape[0]) >= min_n,
+        vol_median,
+        np.ones_like(vol_median),
+    ).astype(np.float64)
+
+    # causal per-bar transition band (percentile of |trend_snr|)
+    abs_snr = np.abs(np.nan_to_num(trend_snr, nan=0.0))
+    raw_band = _expanding_quantile_causal(abs_snr, regime_cfg.regime_transition_occupancy)
+    trend_band_arr = np.where(
+        np.arange(raw_band.shape[0]) >= min_n,
+        raw_band,
+        np.full_like(raw_band, 0.5),
+    ).astype(np.float64)
+
     code = _continuous_regime_codes(
         trend_snr=np.nan_to_num(trend_snr, nan=0.0),
         vol_scale=overlay.vol_scale_1d,
         crisis_active=overlay.crisis_active_1d,
+        trend_band_arr=trend_band_arr,
+        vol_threshold=vol_threshold,
     )
 
     return MarketRegimeContext(
@@ -359,10 +436,23 @@ def evaluate_regime_quality(
         raise ValueError("cal_eval_mask and base_edge_1d must have identical length")
 
     base = np.asarray(base_edge_1d, dtype=np.float64)
-    overlay_diff = (base * overlay.overlay_mult_1d) - base
-    overlay_diff_cal = overlay_diff[cal_mask]
-    overlay_lift_bps = float(np.nanmean(overlay_diff_cal) * 1e4) if np.any(cal_mask) else 0.0
-    overlay_lift_tstat = _weighted_tstat(overlay_diff_cal, regime_cfg.regime_min_n_eff)
+    base_cal = base[cal_mask]
+    overlaid_cal = base_cal * overlay.overlay_mult_1d[cal_mask]
+
+    def _safe_sharpe(arr: NDArray[np.float64]) -> float:
+        """Compute mean/std Sharpe; returns 0.0 if insufficient finite data."""
+        finite = arr[np.isfinite(arr)]
+        if finite.size < 2:
+            return 0.0
+        return float(np.mean(finite) / max(float(np.std(finite, ddof=1)), _EPS))
+
+    sharpe_base = _safe_sharpe(base_cal)
+    sharpe_overlaid = _safe_sharpe(overlaid_cal)
+    # risk-adjusted lift: Sharpe(overlaid) - Sharpe(base), scaled to bps for reporting
+    overlay_lift_bps = (sharpe_overlaid - sharpe_base) * 1e4
+    # tstat: directional significance of (overlaid - base) difference series
+    overlay_diff = overlaid_cal - base_cal
+    overlay_lift_tstat = _weighted_tstat(overlay_diff, regime_cfg.regime_min_n_eff)
 
     crisis_mask = cal_mask & overlay.crisis_active_1d
     normal_mask = cal_mask & ~overlay.crisis_active_1d
