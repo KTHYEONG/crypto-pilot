@@ -3,10 +3,10 @@
 
 # Mode Full (ML) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-07 (Regime 평가 프레임워크 R1 구현 완료 + Phase R2 결정)
-**현재 상태:** `WF_ELIGIBLE (ML Phase)` — 3/4 fold PASS, Active Signals 614개 선정
+**최신 갱신:** 2026-06-08 (Phase 6+7 완료 — C3/C4 gold standard 연결, macro_dwell 함의 문서화)
+**현재 상태:** `WF_ELIGIBLE (ML Phase)` — 3/4 fold PASS, Active Signals 531개 선정
 **평가 기준:** `min_variant_oos_edge_bps=10.0`, `min_deployment_trade_count=20`, `cost_floor_bps=7.5`
-**진단 노트:** Fix-1/Fix-2로 복원한 베이스라인. Phase 1(cal prior update)·Phase 2(fit_frac=0.40) 실험 모두 악화 → 롤백. **근본 블로커**: center ML rank-IC=-0.10~+0.04(전 fold, 무예측력). 원인은 ML-Ready 신호 3개×~1500 훈련이벤트로 변별 불가. 해결책: 신호 풀을 6+개로 확장(Priority 1), 이진 분류 타겟(Priority 2), IC 게이트 재보정(Priority 3). SSOT: `docs/specs/ml_dynamic_allocation_roadmap.md`
+**진단 노트:** Fix-1/Fix-2로 복원한 베이스라인. Phase 1(cal prior update)·Phase 2(fit_frac=0.40) 실험 모두 악화 → 롤백. **근본 블로커**: center ML rank-IC≈0.000(전 fold, 무예측력). 원인은 ML-Ready 신호 3개×~1500 훈련이벤트로 변별 불가. 해결책: 신호 풀을 6+개로 확장(Priority 1). SSOT: `docs/specs/ml_dynamic_allocation_roadmap.md`
 
 ---
 
@@ -61,21 +61,30 @@
 | Fail Reasons       | fetch_window_short:28       |
 ----------------------------------------------------
 
-[REGIME_SCORECARD] (4h, 2026-06-07) ← 유니버스 이후 / 시그널 이전
+[REGIME_SCORECARD] (4h, 2026-06-08) ← Phase 6+7 완료 / gold standard 연결 후 최종
 ------------------------------------------------------------
-| Axis                 |  Score  | Key Metrics                     |
+| Axis                 |  Score  | Key Metrics                                        |
 ------------------------------------------------------------
-| C2 Persistence       | 8.0/10  | dwell=6.00  tr=0.116  ent=0.477 |
-| C3 Distinctness      | 6.0/10* | kw_p=0.000  flip=N  mi=0.039    |
-| C4 OOS Stability     | 4.0/10* | rho=0.100  n_regimes=5          |
-| C5 Coverage          |10.0/10  | min=0.111  max=0.325  n_eff=4.65|
+| C2 Persistence       | 3.0/10  | dwell=3.00(micro)  macro=3.00  tr=0.162  ent=0.619 |
+| C3 Distinctness      | 6.0/10  | kw_p=0.0078  flip=N  mi=0.0250                     |
+| C4 OOS Stability     | 4.0/10  | rho=0.029  n_regimes=6                             |
+| C5 Coverage          |10.0/10  | min=0.089  max=0.224  n_eff=5.77                   |
 ------------------------------------------------------------
-| Weighted C2-C5       |  0.450  | C1(hard_gate=pass)  C6-C8(manual) |
+| Weighted C2-C5       |  0.375  | C1(hard_gate=pass)  C6-C8(manual)                  |
 ------------------------------------------------------------
-| Occupancy            | bull_quiet=0.325  bull_volatile=0.153  bear_quiet=0.248 |
-|                      | bear_volatile=0.111  transition=0.000  crash=0.163      |
+| Occupancy            | bull_quiet=0.224  bull_volatile=0.212  bear_quiet=0.172     |
+|                      | bear_volatile=0.141  transition=0.089  crash=0.163          |
+| C3/C4_proxy (mkt)    |   n/a   | kw_p=0.000  flip=Y  rho=0.886                      |
 ------------------------------------------------------------
-* C3/C4: 레이블 이벤트 기반 사후 계산값 (pre-signal 단계에서는 n/a)
+* [Phase 6] C3/C4 gold standard 연결 완료 (events=4013: IS=2512, OOS=1501)
+  - C3 kw_p=0.0078 (유의) / flip=N (부호반전 없음) / mi=0.0250
+  - C4 rho=0.029 (OOS 불안정) → gold standard 확정치
+  - Weighted 0.185 → 0.375 (C3/C4 채워짐)
+* [핵심 진단] proxy vs gold 괴리: 레짐이 시장 수익은 강하게 구분(flip=Y, rho=0.886)하지만
+  전략 엣지는 약하게 구분(flip=N, rho=0.029). 레짐이 시장 방향은 잡지만 전략 성과 방향은 못 잡음.
+  → regime-conditional 배분 전에 신호 풀 확장(6+)으로 측정 신뢰도 확보 필요
+* C2: macro_dwell=3.00 = 4h crypto 방향 지속성 ≈ 12h (구조적 특성, 버그 아님)
+* C5: n_eff=5.77 (6-state 균등화 양호)
 
 [STRATEGY: candidate_ml] ---------------------------
 | Component          | Status/Value                |
@@ -123,7 +132,7 @@
 ----------------------------------------------------------------------------------
 | Fold | Mode       |  Rank IC |  Events | PriorP90 |  EU_p90 | Pass   |
 ----------------------------------------------------------------------------------
-| 1    | prior_only |    0.000 |     377 |   103.86 |  103.86 | ❌      |
+| 1    | direct     |    0.000 |     377 |     0.00 |   60.57 | ❌      |
 | 2    | prior_only |    0.000 |     303 |    80.97 |   80.97 | ✅      |
 | 3    | prior_only |    0.000 |     383 |    69.31 |   69.31 | ✅      |
 | 4    | prior_only |    0.000 |     420 |    61.76 |   61.76 | ✅      |
@@ -132,16 +141,16 @@
 [BRIDGE SUMMARY] -----------------------------------
 | Metric             | Value                       |
 | ------------------ | --------------------------- |
-| Active Signals     | 4924 (sel=614)              |
+| Active Signals     | 4461 (sel=531)              |
 | Status             | wf_eligible                 |
-| Execution Time     | 73.52s                      |
+| Execution Time     | 77.09s                      |
 ----------------------------------------------------
 
 [ABLATION STUDY FRONTIER] ----------------------------------------------------------------
 | Model Alias        |    CAGR |   MaxDD |    MAR |     Equity | Trades | Deploy | Pass  |
 | ------------------ | ------- | ------- | ------ | ---------- | ------ | ------ | ----- |
-| rule_stop_risk     |  -20.4% |   16.6% |  -1.23 |    875,924 |    620 |   1.00 |   N   |
-| prior_rank_stop_ri |    1.4% |    3.1% |   0.45 |  1,008,093 |    128 |   0.24 |   N   |
+| rule_stop_risk     |  -38.1% |   24.9% |  -1.53 |    756,823 |    630 |   1.00 |   N   |
+| prior_rank_stop_ri |   -0.1% |    3.3% |  -0.02 |    999,647 |    129 |   0.24 |   N   |
 | prior_residual_ran |    0.0% |    0.0% |   0.00 |  1,000,000 |      0 |   0.00 |   N   |
 | edge_plus_validate |    0.0% |    0.0% |   0.00 |  1,000,000 |      0 |   0.00 |   N   |
 | edge_plus_gate_eve |    0.0% |    0.0% |   0.00 |  1,000,000 |      0 |   0.00 |   N   |
@@ -161,38 +170,59 @@
 
 ---
 
-## Regime 평가 분석 (Phase R2 결정)
+## Regime 평가 분석 (Phase 6 gold standard 확정)
 
-**측정일:** 2026-06-07 | **기준:** `docs/specs/regime_evaluation_and_hardening.md` 8축 루브릭
+**측정일:** 2026-06-08 | **기준:** `docs/specs/regime_architecture_audit_and_hardening.md` 8축 루브릭
 
-### 축별 판정
+### 축별 판정 (gold standard 확정값)
 
 | 축 | 점수 | 임계 | 판정 | 근거 |
 |---|---:|---|---|---|
-| C1 Look-ahead | 9/10 | hard gate | ✅ PASS | CUSUM/EMA 전부 causal, entry-1 소비 |
-| C2 Persistence | 8/10 | dwell≥6, tr≤0.15 | ✅ PASS | dwell=6.0(경계), tr=0.116 |
-| C3 Distinctness | 6/10 | KW p<0.05 **AND** 부호반전 | ❌ FAIL | kw_p≈0(통계적 유의), **flip=False**(방향 역전 없음) |
-| C4 OOS Stability | 4/10 | ρ≥0.5 | ❌ FAIL | rho=0.100 << 0.5 |
-| C5 Coverage | 10/10 | 5%≤occ≤60% | ✅ PASS | n_eff=4.65, transition=0%(dead state) |
+| C1 Look-ahead | 9/10 | hard gate | ✅ PASS | CUSUM/EMA causal, entry-1 소비 |
+| C2 Persistence | 3/10 | dwell≥6, tr≤0.15 | ❌ FAIL | macro_dwell=3.00 (4h crypto 방향 ≈12h, 구조적 특성) |
+| C3 Distinctness | 6/10 | KW p<0.05 AND 부호반전 | ⚠️ PARTIAL | kw_p=0.0078(유의), **flip=N**(방향 역전 없음) |
+| C4 OOS Stability | 4/10 | ρ≥0.5 | ❌ FAIL | rho=0.029 (IS→OOS 붕괴) |
+| C5 Coverage | 10/10 | 5%≤occ≤60% | ✅ PASS | n_eff=5.77, transition=8.9% |
 
-**가중 종합 (C2-C5):** `0.450` — spec 예측치(0.355)보다 높으나 C3·C4 실패가 결정적
+**가중 종합 (C2-C5):** `0.375` (gold standard events=4013 기준)
 
-### Phase R2 결정: **분기 B** (이산 code 폐기 → 연속 overlay 직행)
+### 핵심 진단: Proxy vs Gold 괴리
 
-**근거:**
-- C3 `sign_flip=False` — 이산 code가 strategy 수익 **방향**을 전환하지 못함. 크기 차이(bull_quiet=max edge)는 있으나 regime 조건부 배분의 핵심 가치인 "A 레짐에서 매수, B 레짐에서 매도"가 부재
-- C4 `rho=0.10` — IS에서 확인된 regime-conditional Sharpe 순위가 OOS에서 붕괴. 분포 fitting 우려
-- `transition` 레짐 점유율=0% — 6-state 설계지만 실질 5-state
+| 측정 대상 | kw_p | flip | rho | 해석 |
+|---|---|---|---|---|
+| **Proxy** (BTC 시장수익) | 0.000 | ✅ Y | 0.886 | 레짐이 **시장 방향을 강하게 구분** |
+| **Gold** (전략 엣지) | 0.0078 | ❌ N | 0.029 | 레짐이 **전략 엣지 방향을 구분 못함** |
 
-**주의:** 신호 풀 3개(ML-Ready)로 측정한 C3/C4의 **측정 불확실성 높음**. 신호 풀 6개+ 확장 후 재측정 필요.
+→ 레짐은 시장 상태(BTC 방향)를 잘 분류하지만, 전략 수익의 방향 전환을 일으키지 못한다.  
+→ C3 flip=N: 모든 레짐에서 전략이 같은 방향(long bias)으로 수익. 레짐이 크기는 바꾸지만 방향은 못 바꿈.  
+→ C4 rho=0.029: IS 레짐별 Sharpe 순위가 OOS에서 완전 붕괴 — 레짐 조건부 전략 순위의 신호 없음.
 
-### Phase R3-B 다음 액션
+### 다음 단계
+
+신호 풀 3개(ML-Ready)로 측정한 C3/C4의 **측정 신뢰도 낮음** — 신호 풀 6+개 확장 후 재측정 필요.  
+SSOT: `docs/specs/ml_regime_allocation.md` Priority 0.
+
+### Phase 1~5 + C2 macro 재설계 결과 요약 (2026-06-08)
+
+| 결함/작업 | 조치 | 결과 |
+|---|---|---|
+| D1 transition dead state | percentile band 자기보정 (Phase 1+4) | ✅ transition 0%→8.9% |
+| D2 독립 4-state SSOT 위반 | rule_diagnostics CUSUM 단일화 | ✅ 제거 완료 |
+| D3 고정 vol 경계 | expanding median 적응 임계 | ✅ 적용 완료 |
+| D4 overlay_lift raw 처벌 | Sharpe 차분으로 교체 | ✅ 적용 완료 |
+| D5 평가 대상 불일치 | overlay IC + C3 magnitude_sep | ✅ 적용 완료 |
+| D8 C2 측정 대상 오류 | macro_dwell(방향 수준)로 교체 (임계 ≥6 유지) | ✅ micro=3/macro=3 — 방향 전환 자체 빈번 진단 |
+| D9 C3/C4 pre-signal 불가 | proxy (시장수익 기반) 추가 (Phase 5) | ✅ flip=Y, rho=0.886 |
+| C3/C4 gold standard 연결 | 이벤트 데이터 → scorecard 연결 경로 부재 | ❌ 구조적 공백 — 다음 P0 |
+
+### 다음 액션 (Phase 6+7 완료 후 갱신)
 
 | 우선순위 | 액션 | 근거 |
 |---|---|---|
-| **P0** | 신호 풀 확장 (6개+) | ML 신호 3개 → 변별력 불충분, C3/C4 재측정 선행 |
-| **P1** | 연속 overlay → allocation prior 연결 | trend_scale/vol_scale/overlay_mult 조건부 가중 회귀 |
-| **P2** | btc_trend_20_100 MA-cross 제거 | overlay.trend_scale로 일원화 (일관성 확보) |
-| **P3** | transition=0% dead state 처리 | 5-state로 축소 or hysteresis 재설계 |
+| ~~P0~~ | ~~C3/C4 gold standard 연결~~ | ✅ **완료** (Phase 6: events=4013, C3 kw_p=0.0078·C4 rho=0.029 확정) |
+| **P1** | 신호 풀 6개+ 확장 | ML Rank-IC=0.000 근본 해결 + C3/C4 측정 신뢰도 제고 (3개 신호로는 gold standard 불확실) |
+| **P2** | 신호 확장 후 C3/C4 재측정 | flip=Y·rho≥0.5 달성 시에만 regime-conditional prior 진입 |
+| **P3** | regime-conditional prior 설계 | 윈도우 제약 ≤ 3×macro_dwell(≈9 bars) 필수 — 12h 방향 회전 대응 ([[ml_regime_allocation]] P1) |
+| P4 (후순위) | `regime_c2_dwell_target` timeframe-relative 파라미터화 | D10 — C2 임계 4h 부적합 (현재 측정은 정확, 임계만 과함) |
 
-SSOT: `docs/specs/regime_evaluation_and_hardening.md` → Phase R3-B
+SSOT: `docs/specs/ml_regime_allocation.md` (배분), `docs/architecture/regime.md` (아키텍처)
