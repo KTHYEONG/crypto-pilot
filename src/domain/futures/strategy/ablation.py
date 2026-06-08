@@ -17,6 +17,10 @@ from src.domain.futures.backtest.engine import FuturesBacktestEngine
 from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput, EdgeSource
 from src.domain.futures.strategy.candidate_dataset import build_candidate_dataset
 from src.domain.futures.strategy.candidate_edge import fit_candidate_edge_models, predict_candidate_edges
+from src.domain.futures.strategy.candidate_ensemble import (
+    fit_regime_conditional_ensemble,
+    predict_regime_conditional_ensemble,
+)
 from src.domain.futures.strategy.candidate_evaluation import evaluate_compound_backtest
 from src.domain.futures.strategy.candidate_gate import fit_candidate_gate, predict_candidate_gate
 from src.domain.futures.strategy.candidate_labels import label_candidate_events
@@ -503,8 +507,6 @@ def run_candidate_ablation(
         assert fit_set is not None
         assert calibration_set is not None
         assert oos_set is not None
-        assert gate_model is not None
-        assert edge_models is not None
         assert fit_start is not None
         assert fit_end is not None
         assert calibration_start is not None
@@ -621,9 +623,20 @@ def run_candidate_ablation(
 
     # 5. Predict outcomes for OOS sample only
     t_step = time.perf_counter()
-    p_pass = predict_candidate_gate(model=gate_model, dataset=oos_set)
-    ml_out = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=cfg)
-    ml_out = replace(ml_out, events=oos_set.event_index)
+    if gate_model is None or edge_models is None:
+        train_events = fit_set.event_index.copy()
+        train_events["net_return_bps"] = (
+            fit_set.y_return_bps
+            if fit_set.y_return_bps is not None
+            else fit_set.y_edge_bps
+        )
+        ensemble_model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
+        ml_out = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index)
+        p_pass = ml_out.p_pass
+    else:
+        p_pass = predict_candidate_gate(model=gate_model, dataset=oos_set)
+        ml_out = predict_candidate_edges(models=edge_models, dataset=oos_set, p_pass=p_pass, cfg=cfg)
+        ml_out = replace(ml_out, events=oos_set.event_index)
     ablation_prof["predict"] = time.perf_counter() - t_step
 
     # 1. rule_stop_risk (Raw trigger rules with stop-risk sizing and no ML components)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.domain.futures.strategy.config import (
     CandidateStrategyConfig,
     resolve_purge_and_embargo_bars,
@@ -28,3 +30,11 @@ def test_with_max_holding_bars_rederives_from_raw_optional_inputs() -> None:
 
     assert resolved_cfg.purge_bars == 60
     assert resolved_cfg.embargo_bars == 60
+
+
+def test_candidate_strategy_config_validates_ensemble_backend_fields() -> None:
+    with pytest.raises(ValueError, match="allocation_backend"):
+        CandidateStrategyConfig(allocation_backend="invalid")  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="ensemble_shrinkage_k"):
+        CandidateStrategyConfig(ensemble_shrinkage_k=0.0)
