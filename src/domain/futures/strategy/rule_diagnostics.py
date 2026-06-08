@@ -11,7 +11,7 @@ import pandas as pd
 from src.domain.futures.strategy.candidate_labels import label_candidate_events
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
-from src.domain.futures.strategy.market_regime import RegimeQualityReport
+from src.domain.futures.strategy.market_regime import RegimeQualityReport, compute_market_regime_context
 
 _logger = logging.getLogger(__name__)
 
@@ -56,8 +56,11 @@ def log_regime_scorecard(scorecard: Any) -> None:
     _logger.info("[REGIME_SCORECARD]")
     _logger.info(f"| {'Axis':<20} | {'Score':^7} | {'Key Metrics':<26} |")
     _logger.info(sep)
+    c2_macro_dwell = getattr(scorecard, "c2_macro_dwell_median", float("nan"))
+    c2_macro_str = f"{c2_macro_dwell:.2f}" if not __import__("math").isnan(c2_macro_dwell) else "n/a"
     c2_metrics = (
-        f"dwell={scorecard.c2_dwell_median:.2f}  "
+        f"dwell={scorecard.c2_dwell_median:.2f}(micro)  "
+        f"macro={c2_macro_str}  "
         f"tr={scorecard.c2_transition_rate:.3f}  "
         f"ent={scorecard.c2_entropy_rate:.3f}"
     )
@@ -81,6 +84,16 @@ def log_regime_scorecard(scorecard: Any) -> None:
     _logger.info(f"| {'Occupancy':<20} | {occ_line1:<33} |")
     if occ_line2:
         _logger.info(f"| {'':<20} | {occ_line2:<33} |")
+    # proxy row (pre-signal C3/C4 from bar-level market returns)
+    import math as _math
+
+    c3p = getattr(scorecard, "c3_proxy_pvalue", float("nan"))
+    c4p_rho = getattr(scorecard, "c4_proxy_spearman_rho", float("nan"))
+    c3p_flip = getattr(scorecard, "c3_proxy_sign_flip", False)
+    if not _math.isnan(c3p):
+        c4p_str = f"{c4p_rho:.3f}" if not _math.isnan(c4p_rho) else "n/a"
+        proxy_metrics = f"kw_p={c3p:.3f}  flip={'Y' if c3p_flip else 'N'}  rho={c4p_str}"
+        _logger.info(f"| {'C3/C4_proxy (mkt)':<20} | {'  n/a  ':^7} | {proxy_metrics:<26} |")
     _logger.info(sep)
 
 
@@ -395,27 +408,9 @@ def _summarize_recommendation_variants(
         and "signal_cell" in events.columns
         and cfg.promotion_level == "signal_cell"
     )
-    regime_names = ("bear_quiet", "bear_volatile", "bull_quiet", "bull_volatile")
-    close = aligned.close_2d
-    log_ret = np.zeros_like(close, dtype=np.float64)
-    log_ret[1:] = np.diff(np.log(np.maximum(close, 1e-12)), axis=0)
-    btc_idx = 0
-    for idx, symbol in enumerate(aligned.symbols):
-        if "BTC" in symbol.upper():
-            btc_idx = idx
-            break
-    btc_close = close[:, btc_idx]
-    btc_ma20 = pd.Series(btc_close).rolling(20, min_periods=1).mean().to_numpy(dtype=np.float64, copy=False)
-    btc_ma100 = pd.Series(btc_close).rolling(100, min_periods=1).mean().to_numpy(dtype=np.float64, copy=False)
-    trend_up = btc_ma20 >= btc_ma100
-    mkt_vol_20 = pd.Series(np.nanmean(log_ret, axis=1)).rolling(20, min_periods=1).std(ddof=0).fillna(0.0)
-    mkt_vol_roll = mkt_vol_20.rolling(120, min_periods=1)
-    mkt_vol_z120 = ((mkt_vol_20 - mkt_vol_roll.mean()) / mkt_vol_roll.std(ddof=0)).fillna(0.0).to_numpy(
-        dtype=np.float64,
-        copy=False,
-    )
-    vol_high = mkt_vol_z120 > 0.0
-    regime_code = (trend_up.astype(np.int8) * 2) + vol_high.astype(np.int8)
+    regime_ctx = compute_market_regime_context(aligned=aligned)
+    regime_code = regime_ctx.code_1d
+    regime_names = regime_ctx.name_by_code
     records: list[dict[str, float | int | str]] = []
     group_cols = ["signal_cell"] if use_signal_cells else ["family", "variant"]
     grouped = events.groupby(group_cols, sort=False, dropna=False)
