@@ -16,6 +16,31 @@ from src.domain.futures.strategy.market_regime import RegimeQualityReport, compu
 _logger = logging.getLogger(__name__)
 
 
+def _newey_west_mean_tstat(values: np.ndarray, max_lag: int) -> float:
+    """Return a simple Newey-West t-stat for mean(edge_after_hurdle_bps)."""
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    n_obs = int(finite.shape[0])
+    if n_obs < 2:
+        return 0.0
+    centered = finite - float(np.mean(finite))
+    gamma0 = float(np.dot(centered, centered) / n_obs)
+    if gamma0 <= 0.0:
+        return float("inf") if float(np.mean(finite)) > 0.0 else 0.0
+    lag_cap = min(max(0, int(max_lag)), n_obs - 1)
+    long_run_var = gamma0
+    for lag in range(1, lag_cap + 1):
+        cov = float(np.dot(centered[lag:], centered[:-lag]) / n_obs)
+        weight = 1.0 - (lag / (lag_cap + 1.0))
+        long_run_var += 2.0 * weight * cov
+    if long_run_var <= 0.0:
+        return 0.0
+    se = float(np.sqrt(long_run_var / n_obs))
+    if se <= 0.0:
+        return 0.0
+    return float(np.mean(finite) / se)
+
+
 def log_regime_quality_report(report: RegimeQualityReport) -> None:
     """Emit a compact regime scorecard line for diagnostics."""
     reasons = ",".join(report.reasons) if report.reasons else "none"
@@ -434,6 +459,19 @@ def _summarize_recommendation_variants(
         flip_delta, flip_mean = (None, None)
         if side_flip_lookup is not None:
             flip_delta, flip_mean = side_flip_lookup.get(f"{prefix}{key}", (None, None))
+        rec_edge = rec_group["edge_after_hurdle_bps"].to_numpy(dtype=np.float64, copy=False)
+        breakeven_mean_bps = float(np.mean(rec_edge)) if rec_edge.size > 0 else float("nan")
+        breakeven_tstat = _newey_west_mean_tstat(
+            rec_edge,
+            int(max(1, float(row0.get("expected_holding_bars", 1)) - 1)),
+        )
+        breakeven_hard_pass = (
+            rec_n >= (cfg.min_signal_cell_oos_obs if use_signal_cells else min_obs)
+            and np.isfinite(breakeven_mean_bps)
+            and breakeven_mean_bps > 0.0
+            and np.isfinite(breakeven_tstat)
+            and breakeven_tstat >= cfg.min_rule_ir_t
+        )
         regime_best_name = ""
         regime_best_obs = 0
         regime_best_edge_bps = float("nan")
@@ -441,7 +479,6 @@ def _summarize_recommendation_variants(
         regime_pass = True
         if cfg.regime_diagnostic_enabled:
             rec_entry_idx = rec_group["entry_idx"].to_numpy(dtype=np.int64, copy=False)
-            rec_edge = rec_group["edge_after_hurdle_bps"].to_numpy(dtype=np.float64, copy=False)
             best_edge = -np.inf
             valid_idx = (rec_entry_idx >= 0) & (rec_entry_idx < regime_code.shape[0])
             if np.any(valid_idx):
@@ -479,6 +516,9 @@ def _summarize_recommendation_variants(
                 "oos_payoff_ratio": float(rec_metrics["payoff_ratio"]),
                 "oos_q10_shortfall_fail_rate": float(rec_metrics["q10_shortfall_fail_rate"]),
                 "event_fraction_per_bar": float(rec_n / float(max(1, recommendation_end - recommendation_start))),
+                "breakeven_mean_bps": breakeven_mean_bps,
+                "breakeven_tstat": breakeven_tstat,
+                "breakeven_hard_pass": breakeven_hard_pass,
                 "regime_eligible_count": regime_eligible_count,
                 "regime_best_oos_obs": regime_best_obs,
                 "regime_best_oos_edge_bps": regime_best_edge_bps,
@@ -519,6 +559,9 @@ def _summarize_recommendation_variants(
                 "oos_payoff_ratio",
                 "oos_q10_shortfall_fail_rate",
                 "event_fraction_per_bar",
+                "breakeven_mean_bps",
+                "breakeven_tstat",
+                "breakeven_hard_pass",
                 "regime_eligible_count",
                 "regime_best_oos_obs",
                 "regime_best_oos_edge_bps",
@@ -775,6 +818,10 @@ def _recommendation_threshold_checks(row: pd.Series, cfg: CandidateStrategyConfi
 
     return {
         "min_obs": int(row.get("oos_n", 0)) >= min_obs,
+        "breakeven_hard_gate": (
+            (not cfg.standalone_breakeven_hard_gate_enabled)
+            or bool(row.get("breakeven_hard_pass", False))
+        ),
         "mean_edge": float(row.get("oos_mean_edge_bps", float("nan"))) >= cfg.min_variant_oos_edge_bps,
         "median_edge": median_ok,
         "p10_edge": p10_ok,
@@ -1212,6 +1259,18 @@ def compute_rule_diagnostics(
         "best_group": str(best_row.group) if best_row is not None else "",
         "best_mean_edge": float(best_row.mean_edge_bps) if best_row is not None else float("nan"),
     }
+    keep_variant_keys = {f"variant={value}" for value in recommended_keep_variants}
+    keep_archetypes = sorted(
+        {
+            str(row.archetype)
+            for row in recommendation_variant_summary.itertuples(index=False)
+            if str(row.group) in keep_variant_keys
+        }
+    )
+    decision["keep_archetypes"] = ",".join(keep_archetypes)
+    decision["keep_archetype_count"] = len(keep_archetypes)
+    decision["keep_has_trend"] = int(any(a in {"trend_continuation", "time_series_momentum"} for a in keep_archetypes))
+    decision["keep_has_reversion"] = int(any("reversion" in a for a in keep_archetypes))
 
     recommendation_failure_report: dict[str, Any] | None = None
     if not silent:
