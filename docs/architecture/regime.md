@@ -14,14 +14,15 @@ change_triggers:
   - "src/domain/futures/strategy/market_regime.py"
   - "src/domain/futures/strategy/regime_evaluation.py"
   - "src/execution/opt_main_futures.py"
-last_verified: 2026-06-08
+last_verified: 2026-06-09
 ---
 
 # 1. Overview
 
 BTC를 시장 anchor로 삼아 **2-Layer**로 시장 상태를 표현한다.
-- **연속 Risk Overlay** (`overlay_mult`) — 포트폴리오 gross exposure를 실시간 변조. **실제 배분을 구동하는 유일한 경로.**
-- **이산 Regime Code** (`code_1d`, 6-state) — 진단·평가(C2~C5)·ML feature(`entry_regime_code`)용 라벨. 배분을 직접 구동하지 않음.
+- **연속 Risk Overlay** (`overlay_mult`) — 포트폴리오 gross exposure를 실시간 변조. **gross exposure(리스크)를 구동하는 경로.**
+- **이산 Regime Code** (`code_1d`, 6-state) — 주로 진단·평가(C2~C5)·ML feature(`entry_regime_code`)용 라벨.
+  - **예외 (2026-06-09 reconcile):** active B0 앙상블(`ensemble_conditioning="archetype_regime"`, 기본값)은 `entry_regime_code`로 `mu_net_decision_bps`를 조건화하므로 **alpha(선택·사이징)를 구동함**. 과거 "배분을 직접 구동하지 않음" 서술은 부정확. `archetype_only` 모드로 분리 가능하나 현 추세-단일 신호 풀에서는 OOS IC 악화로 미채택. 상세: `allocation.md` §4 Conditioning axis.
 
 모든 신호는 **causal**: 진입은 `code[t-1]`/`overlay_mult[t-1]`만 소비.
 
