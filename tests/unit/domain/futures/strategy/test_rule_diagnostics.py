@@ -369,6 +369,7 @@ def test_summarize_recommendation_gate_failures_reports_pass_and_fail_reasons() 
                 "edge_stability_bps": 0.0,
                 "oos_pct_edge_pos": 0.60,
                 "oos_payoff_ratio": 1.30,
+                "breakeven_hard_pass": True,
                 "archetype": "mean_reversion",
                 "exit_policy_id": "",
             },
@@ -384,6 +385,7 @@ def test_summarize_recommendation_gate_failures_reports_pass_and_fail_reasons() 
                 "edge_stability_bps": 0.0,
                 "oos_pct_edge_pos": 0.60,
                 "oos_payoff_ratio": 1.30,
+                "breakeven_hard_pass": True,
                 "archetype": "mean_reversion",
                 "exit_policy_id": "",
             },
@@ -399,6 +401,7 @@ def test_summarize_recommendation_gate_failures_reports_pass_and_fail_reasons() 
                 "edge_stability_bps": 0.0,
                 "oos_pct_edge_pos": 0.60,
                 "oos_payoff_ratio": 1.30,
+                "breakeven_hard_pass": True,
                 "archetype": "mean_reversion",
                 "exit_policy_id": "",
             },
@@ -432,6 +435,7 @@ def test_meets_recommendation_thresholds_rejects_bad_p10_tail() -> None:
             "edge_stability_bps": 0.0,
             "oos_pct_edge_pos": 0.6,
             "oos_payoff_ratio": 1.3,
+            "breakeven_hard_pass": True,
         }
     )
     assert not _meets_recommendation_thresholds(row, cfg)
@@ -451,6 +455,7 @@ def test_meets_recommendation_thresholds_rejects_over_dense_variant() -> None:
             "edge_stability_bps": 0.0,
             "oos_pct_edge_pos": 0.6,
             "oos_payoff_ratio": 1.3,
+            "breakeven_hard_pass": True,
         }
     )
     assert not _meets_recommendation_thresholds(row, cfg)
@@ -471,6 +476,7 @@ def test_meets_recommendation_thresholds_accepts_when_all_gates_pass() -> None:
             "edge_stability_bps": -10.0,
             "oos_pct_edge_pos": 0.6,
             "oos_payoff_ratio": 1.3,
+            "breakeven_hard_pass": True,
         }
     )
     assert _meets_recommendation_thresholds(row, cfg)
@@ -599,3 +605,58 @@ def test_compute_rule_diagnostics_accepts_variant_with_positive_regime_edge() ->
     )
 
     assert result.recommended_keep_variants == ("trend_ma:ema_12_72",)
+
+
+def test_breakeven_hard_gate_excludes_subbreakeven_variant() -> None:
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[33], aligned.datetimes[35], aligned.datetimes[37]],
+            "symbol": ["BTCUSDT"] * 3,
+            "family": ["trend_ma"] * 3,
+            "variant": ["ema_12_72"] * 3,
+            "archetype": ["trend_continuation"] * 3,
+            "side": [1] * 3,
+            "raw_score": [0.9, 0.8, 0.7],
+            "score_z": [1.2, 1.1, 1.0],
+            "entry_idx": [34, 36, 38],
+            "expected_holding_bars": [4] * 3,
+            "min_holding_bars": [1] * 3,
+            "stop_atr_mult": [50.0] * 3,
+            "take_profit_atr_mult": [50.0] * 3,
+            "turnover_proxy": [0.1] * 3,
+            "cost_floor_bps": [0.0] * 3,
+            "hurdle_bps": [0.0] * 3,
+            "profitable_after_hurdle_label": [1, 1, 0],
+            "edge_after_hurdle_bps": [100.0, -90.0, 20.0],
+            "mae_bps": [-10.0] * 3,
+            "mfe_bps": [120.0, 20.0, 30.0],
+            "triple_barrier_label": [1, 1, 0],
+        }
+    )
+    cfg = CandidateStrategyConfig(
+        min_variant_oos_obs=1,
+        min_variant_oos_edge_bps=1.0,
+        min_variant_oos_hit_rate=0.5,
+        min_variant_oos_payoff_ratio=1.0,
+        max_variant_oos_q10_fail_rate=1.0,
+        max_variant_event_fraction_per_bar=1.0,
+        regime_diagnostic_enabled=False,
+        standalone_breakeven_hard_gate_enabled=True,
+        min_rule_ir_t=1.0,
+    )
+
+    result = compute_rule_diagnostics(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        min_obs=1,
+        recommendation_start=32,
+        recommendation_end=40,
+        report_start=32,
+        report_end=40,
+    )
+
+    assert result.recommended_keep_variants == ()
+    assert result.recommendation_failure_report is not None
+    assert "breakeven_hard_gate" in result.recommendation_failure_report["rows"][0]["failed_checks"]
