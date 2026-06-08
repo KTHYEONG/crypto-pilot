@@ -362,9 +362,10 @@ def label_candidate_events(
     mae_bps_arr = pd.to_numeric(out["mae_bps"], errors="coerce").to_numpy(dtype=np.float64)
     mfe_bps_arr = pd.to_numeric(out["mfe_bps"], errors="coerce").to_numpy(dtype=np.float64)
     out["risk_unit_bps"] = risk_unit_bps
-    out["net_return_r"] = net_event_bps / _BPS_SCALE
-    out["mae_r"] = mae_bps_arr / _BPS_SCALE
-    out["mfe_r"] = mfe_bps_arr / _BPS_SCALE
+    safe_risk_unit = np.maximum(risk_unit_bps, 1.0)
+    out["net_return_r"] = net_event_bps / safe_risk_unit
+    out["mae_r"] = mae_bps_arr / safe_risk_unit
+    out["mfe_r"] = mfe_bps_arr / safe_risk_unit
 
     _barrier_labels = np.asarray(raw_barrier_label_list, dtype=np.int8)
     _profitable_labels = np.asarray(profitable_label_list, dtype=np.int8)
