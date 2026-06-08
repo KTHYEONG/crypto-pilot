@@ -178,3 +178,76 @@ def test_run_candidate_walk_forward_parallel_path_preserves_fold_order(
 
     assert [out.fold_id for out in outputs] == [0, 1]
     assert all(out.timing_profile is not None for out in outputs)
+
+
+def test_allocation_backend_ensemble_skips_lgbm_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    size = 12
+    dummy_aligned = AlignedMarketData(
+        symbols=("BTC",),
+        datetimes=np.array(pd.date_range("2026-01-01", periods=size, freq="4h")),
+        open_2d=np.ones((size, 1)),
+        high_2d=np.ones((size, 1)),
+        low_2d=np.ones((size, 1)),
+        close_2d=np.ones((size, 1)),
+        volume_2d=np.ones((size, 1)),
+        funding_2d=np.zeros((size, 1)),
+        active_mask=np.ones((size, 1), dtype=bool),
+        warm_mask=np.ones((size, 1), dtype=bool),
+        entry_block_mask=np.zeros((size, 1), dtype=bool),
+        kill_mask=np.zeros((size, 1), dtype=bool),
+    )
+    cfg = CandidateStrategyConfig(min_fit_obs=2, allocation_backend="ensemble_b0")
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_workflow.build_candidate_dataset",
+        lambda *args, **kwargs: DummyDataset(6),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_workflow.fit_candidate_feature_schema",
+        lambda *args, **kwargs: {},
+    )
+    calls = {"ensemble_fit": 0, "ensemble_predict": 0}
+
+    def _fit_stub(*args: object, **kwargs: object) -> object:
+        calls["ensemble_fit"] += 1
+        return object()
+
+    def _predict_stub(*args: object, **kwargs: object) -> object:
+        calls["ensemble_predict"] += 1
+        event_index = kwargs["oos_events"]
+        from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
+
+        return CandidateModelOutput(
+            events=event_index,
+            p_pass=np.ones(len(event_index), dtype=np.float64),
+            expected_net_bps=np.full(len(event_index), 3.0, dtype=np.float64),
+            q10_net_bps=np.full(len(event_index), -2.0, dtype=np.float64),
+            selection_score=np.full(len(event_index), 3.0, dtype=np.float64),
+        )
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_workflow.fit_regime_conditional_ensemble",
+        _fit_stub,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_workflow.predict_regime_conditional_ensemble",
+        _predict_stub,
+    )
+
+    def _forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("LGBM path must not be called for ensemble_b0")
+
+    monkeypatch.setattr("src.domain.futures.strategy.candidate_edge.fit_candidate_edge_models", _forbidden)
+    monkeypatch.setattr("src.domain.futures.strategy.candidate_edge.predict_candidate_edges", _forbidden)
+    monkeypatch.setattr("src.domain.futures.strategy.candidate_gate.fit_candidate_gate", _forbidden)
+    monkeypatch.setattr("src.domain.futures.strategy.candidate_gate.predict_candidate_gate", _forbidden)
+
+    outputs = run_candidate_walk_forward(
+        labeled_events=pd.DataFrame(),
+        aligned=dummy_aligned,
+        cfg=cfg,
+        folds=(WFFold(fit_start=0, fit_end=4, cal_start=4, cal_end=6, oos_start=6, oos_end=10),),
+    )
+
+    assert calls == {"ensemble_fit": 1, "ensemble_predict": 1}
+    assert outputs[0].model_output.expected_net_bps.shape[0] == 6

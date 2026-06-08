@@ -7,7 +7,9 @@ import pytest
 from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel, SignalExitPolicy
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.market_regime import MarketRegimeContext
 from src.domain.futures.strategy.rule_signals import (
+    _attach_signal_context,
     _entry_rising_edge_2d,
     _rolling_max_2d,
     _rolling_min_2d,
@@ -650,3 +652,37 @@ def test_touched_panels_expose_required_metadata() -> None:
         assert not missing, (
             f"{panel.family}:{panel.variant} missing metadata keys: {missing}"
         )
+
+
+def test_mean_reversion_gated_out_of_trending_regime() -> None:
+    panel = CandidateSignalPanel(
+        family="bollinger_reversion",
+        variant="unit",
+        params={},
+        datetimes=np.array([np.datetime64("2025-01-01T00"), np.datetime64("2025-01-01T04")]),
+        symbols=("BTCUSDT",),
+        signed_score_2d=np.ones((2, 1), dtype=np.float64),
+        side_hint_2d=np.ones((2, 1), dtype=np.int8),
+        expected_holding_bars=4,
+        min_holding_bars=1,
+        stop_atr_mult=1.0,
+        take_profit_atr_mult=1.0,
+        turnover_proxy_2d=np.zeros((2, 1), dtype=np.float64),
+        valid_mask_2d=np.ones((2, 1), dtype=bool),
+        metadata={},
+    )
+    regime_ctx = MarketRegimeContext(
+        code_1d=np.array([1, 4], dtype=np.int8),
+        name_by_code=("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash"),
+        trend_score_1d=np.zeros(2, dtype=np.float64),
+        vol_z_1d=np.zeros(2, dtype=np.float64),
+        dispersion_z_1d=np.zeros(2, dtype=np.float64),
+    )
+
+    out = _attach_signal_context(
+        (panel,),
+        cfg=CandidateStrategyConfig(mean_reversion_regime_entry_gating_enabled=True),
+        regime_ctx=regime_ctx,
+    )
+
+    assert out[0].side_hint_2d[:, 0].tolist() == [0, 1]
