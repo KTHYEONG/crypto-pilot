@@ -4,10 +4,10 @@ from argparse import Namespace
 from dataclasses import dataclass
 from typing import Any, Literal
 
-ActivePhase = Literal["full", "ml", "signal", "regime"]
+ActivePhase = Literal["full", "ml", "signal"]
 SyncMode = Literal["full", "fast", "skip"]
 
-_ACTIVE_PHASES: frozenset[str] = frozenset({"full", "ml", "signal", "regime"})
+_ACTIVE_PHASES: frozenset[str] = frozenset({"full", "ml", "signal"})
 _LEGACY_PHASES: frozenset[str] = frozenset({"strategy-smoke", "quick-backtest"})
 _LEGACY_FLAGS: tuple[str, ...] = (
     "alpha_only",
