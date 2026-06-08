@@ -257,7 +257,7 @@ def test_strategy_stage_injects_universe_metadata_before_bridge(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.INFO)
+    caplog.set_level(logging.DEBUG)
     run_config = build_run_config_from_args(
         {
             "phase": "alpha",
