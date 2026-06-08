@@ -95,3 +95,4 @@ graph TD
 - lookup predict는 seen cell과 unseen cell fallback을 모두 정확히 처리해야 합니다.
 - workflow test는 `ensemble_b0`에서 LGBM 호출이 없음을 증명해야 합니다.
 - `phase=ml` 실행은 B0 active path와 ablation/reporting fallback까지 포함해 종료되어야 합니다.
+- `ensemble_b0` 배분 모델의 평가는 OOS 예측값(`expected_net_bps`)과 실제 OOS 실현값 간의 Spearman Rank Correlation(Rank IC)을 계산하여 검증합니다.

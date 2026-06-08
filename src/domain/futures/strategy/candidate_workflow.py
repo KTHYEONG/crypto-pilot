@@ -236,6 +236,30 @@ def _fit_and_predict_single_fold(
         t_step = time.perf_counter()
         ensemble_model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
         timing_profile["edge_fit"] = time.perf_counter() - t_step
+
+        t_step = time.perf_counter()
+        ml_out = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index)
+        timing_profile["inference"] = time.perf_counter() - t_step
+
+        # --- Calculate Rank IC for ensemble_b0 on OOS ---
+        from src.domain.futures.strategy.candidate_edge import _rank_ic
+        pred_oos = ml_out.expected_net_bps
+        realized_oos = np.asarray(
+            oos_set.y_return_bps
+            if oos_set.y_return_bps is not None
+            else (oos_set.y_edge_bps if oos_set.y_edge_bps is not None else np.zeros_like(pred_oos)),
+            dtype=np.float64,
+        )
+        rank_ic_val = _rank_ic(pred_oos, realized_oos) if pred_oos.size >= 2 else 0.0
+        if not np.isfinite(rank_ic_val):
+            rank_ic_val = 0.0
+
+        # Update model output validation diagnostics for logging parity
+        ml_out.validation_diagnostics["prediction_mode"] = "ensemble_b0"
+        ml_out.validation_diagnostics["prior_component_p90_bps"] = (
+            float(np.percentile(pred_oos, 90)) if pred_oos.size > 0 else 0.0
+        )
+
         gate_rep = GateValidationReport(
             enabled=False,
             threshold=0.0,
@@ -251,16 +275,13 @@ def _fit_and_predict_single_fold(
         )
         edge_rep = EdgeValidationReport(
             source=EdgeSource.PRIOR_ONLY,
-            prior_rank_ic=0.0,
+            prior_rank_ic=float(rank_ic_val),
             residual_rank_ic=0.0,
             incremental_log_growth_mean=0.0,
             incremental_log_growth_lcb=0.0,
-            selected=False,
+            selected=True,
             reason="ensemble_b0",
         )
-        t_step = time.perf_counter()
-        ml_out = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index)
-        timing_profile["inference"] = time.perf_counter() - t_step
     else:
         from src.domain.futures.strategy.candidate_edge import fit_candidate_edge_models, predict_candidate_edges
         from src.domain.futures.strategy.candidate_gate import fit_candidate_gate, predict_candidate_gate
