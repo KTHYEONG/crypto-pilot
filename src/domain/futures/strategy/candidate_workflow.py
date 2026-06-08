@@ -17,8 +17,10 @@ from src.domain.futures.strategy.candidate_contracts import (
     GateValidationReport,
 )
 from src.domain.futures.strategy.candidate_dataset import build_candidate_dataset, fit_candidate_feature_schema
-from src.domain.futures.strategy.candidate_edge import fit_candidate_edge_models, predict_candidate_edges
-from src.domain.futures.strategy.candidate_gate import fit_candidate_gate, predict_candidate_gate
+from src.domain.futures.strategy.candidate_ensemble import (
+    fit_regime_conditional_ensemble,
+    predict_regime_conditional_ensemble,
+)
 from src.domain.futures.strategy.candidate_portfolio import select_candidate_events_for_portfolio
 from src.domain.futures.strategy.config import resolve_purge_and_embargo_bars, with_max_holding_bars
 
@@ -222,75 +224,112 @@ def _fit_and_predict_single_fold(
             timing_profile=timing_profile,
         )
 
-    # 3. Fit Gate & Edge models
-    t_step = time.perf_counter()
-    gate_model = fit_candidate_gate(
-        train=fit_set,
-        early_stop=early_stop_set,
-        calibration=calibration_fit_set,
-        calibration_eval=calibration_eval_set,
-        cfg=cfg,
-    )
-    timing_profile["gate_fit"] = time.perf_counter() - t_step
-    t_step = time.perf_counter()
-    edge_models = fit_candidate_edge_models(
-        train=fit_set,
-        valid=early_stop_set,
-        calibration_eval=calibration_eval_set,
-        cfg=cfg,
-    )
-    timing_profile["edge_fit"] = time.perf_counter() - t_step
+    gate_model = None
+    edge_models = None
+    if cfg.allocation_backend == "ensemble_b0":
+        train_events = fit_set.event_index.copy()
+        train_events["net_return_bps"] = (
+            fit_set.y_return_bps
+            if fit_set.y_return_bps is not None
+            else fit_set.y_edge_bps
+        )
+        t_step = time.perf_counter()
+        ensemble_model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
+        timing_profile["edge_fit"] = time.perf_counter() - t_step
+        gate_rep = GateValidationReport(
+            enabled=False,
+            threshold=0.0,
+            raw_brier=0.25,
+            calibrated_brier=0.25,
+            base_brier=0.25,
+            brier_skill=0.0,
+            roc_auc=0.5,
+            average_precision=0.5,
+            decile_lift=0.0,
+            incremental_log_growth_lcb=0.0,
+            reason="ensemble_b0",
+        )
+        edge_rep = EdgeValidationReport(
+            source=EdgeSource.PRIOR_ONLY,
+            prior_rank_ic=0.0,
+            residual_rank_ic=0.0,
+            incremental_log_growth_mean=0.0,
+            incremental_log_growth_lcb=0.0,
+            selected=False,
+            reason="ensemble_b0",
+        )
+        t_step = time.perf_counter()
+        ml_out = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index)
+        timing_profile["inference"] = time.perf_counter() - t_step
+    else:
+        from src.domain.futures.strategy.candidate_edge import fit_candidate_edge_models, predict_candidate_edges
+        from src.domain.futures.strategy.candidate_gate import fit_candidate_gate, predict_candidate_gate
 
-    # 4. Calibration Acceptance & Validation Reports
-    validation = getattr(gate_model, "validation", None)
-    gate_enabled = validation.enabled if validation is not None else False
-    gate_threshold = validation.threshold if validation is not None else 0.5
+        t_step = time.perf_counter()
+        gate_model = fit_candidate_gate(
+            train=fit_set,
+            early_stop=early_stop_set,
+            calibration=calibration_fit_set,
+            calibration_eval=calibration_eval_set,
+            cfg=cfg,
+        )
+        timing_profile["gate_fit"] = time.perf_counter() - t_step
+        t_step = time.perf_counter()
+        edge_models = fit_candidate_edge_models(
+            train=fit_set,
+            valid=early_stop_set,
+            calibration_eval=calibration_eval_set,
+            cfg=cfg,
+        )
+        timing_profile["edge_fit"] = time.perf_counter() - t_step
+        validation = getattr(gate_model, "validation", None)
+        gate_enabled = validation.enabled if validation is not None else False
+        gate_threshold = validation.threshold if validation is not None else 0.5
 
-    gate_rep = GateValidationReport(
-        enabled=gate_enabled,
-        threshold=gate_threshold,
-        raw_brier=float(getattr(validation, "raw_brier", 0.25)),
-        calibrated_brier=float(getattr(validation, "calibrated_brier", 0.25)),
-        base_brier=float(getattr(validation, "base_brier", 0.25)),
-        brier_skill=float(getattr(validation, "brier_skill", 0.0)),
-        roc_auc=float(getattr(validation, "roc_auc", 0.5)),
-        average_precision=float(getattr(validation, "average_precision", 0.5)),
-        decile_lift=float(getattr(validation, "decile_lift", 0.0)),
-        incremental_log_growth_lcb=float(getattr(validation, "incremental_log_growth_lcb", 0.0)),
-        reason=getattr(validation, "reason", "none")
-    )
+        gate_rep = GateValidationReport(
+            enabled=gate_enabled,
+            threshold=gate_threshold,
+            raw_brier=float(getattr(validation, "raw_brier", 0.25)),
+            calibrated_brier=float(getattr(validation, "calibrated_brier", 0.25)),
+            base_brier=float(getattr(validation, "base_brier", 0.25)),
+            brier_skill=float(getattr(validation, "brier_skill", 0.0)),
+            roc_auc=float(getattr(validation, "roc_auc", 0.5)),
+            average_precision=float(getattr(validation, "average_precision", 0.5)),
+            decile_lift=float(getattr(validation, "decile_lift", 0.0)),
+            incremental_log_growth_lcb=float(getattr(validation, "incremental_log_growth_lcb", 0.0)),
+            reason=getattr(validation, "reason", "none"),
+        )
 
-    prediction_mode = edge_models.prediction_mode if edge_models is not None else "disabled"
-    edge_source = {
-        "disabled": EdgeSource.DISABLED,
-        "direct": EdgeSource.DIRECT_MODEL,
-        "prior_only": EdgeSource.PRIOR_ONLY,
-        "prior_residual": EdgeSource.PRIOR_RESIDUAL,
-    }[prediction_mode]
-    edge_val = getattr(edge_models, "validation", None)
-    edge_rep = EdgeValidationReport(
-        source=edge_source,
-        prior_rank_ic=float(getattr(edge_val, "prior_rank_ic", 0.0)),
-        residual_rank_ic=float(getattr(edge_val, "residual_rank_ic", 0.0)),
-        incremental_log_growth_mean=float(getattr(edge_val, "incremental_log_growth_mean", 0.0)),
-        incremental_log_growth_lcb=float(getattr(edge_val, "incremental_log_growth_lcb", 0.0)),
-        selected=bool(edge_source in {EdgeSource.DIRECT_MODEL, EdgeSource.PRIOR_RESIDUAL}),
-        reason=getattr(edge_val, "reason", "none")
-    )
+        prediction_mode = edge_models.prediction_mode if edge_models is not None else "disabled"
+        edge_source = {
+            "disabled": EdgeSource.DISABLED,
+            "direct": EdgeSource.DIRECT_MODEL,
+            "prior_only": EdgeSource.PRIOR_ONLY,
+            "prior_residual": EdgeSource.PRIOR_RESIDUAL,
+        }[prediction_mode]
+        edge_val = getattr(edge_models, "validation", None)
+        edge_rep = EdgeValidationReport(
+            source=edge_source,
+            prior_rank_ic=float(getattr(edge_val, "prior_rank_ic", 0.0)),
+            residual_rank_ic=float(getattr(edge_val, "residual_rank_ic", 0.0)),
+            incremental_log_growth_mean=float(getattr(edge_val, "incremental_log_growth_mean", 0.0)),
+            incremental_log_growth_lcb=float(getattr(edge_val, "incremental_log_growth_lcb", 0.0)),
+            selected=bool(edge_source in {EdgeSource.DIRECT_MODEL, EdgeSource.PRIOR_RESIDUAL}),
+            reason=getattr(edge_val, "reason", "none"),
+        )
 
-    # 5. Inference
-    t_step = time.perf_counter()
-    p_pass = predict_candidate_gate(model=gate_model, dataset=oos_set, cfg=cfg)
-    ml_out = predict_candidate_edges(
-        models=edge_models,
-        dataset=oos_set,
-        p_pass=p_pass,
-        cfg=cfg,
-        gate_enabled=gate_enabled,
-        gate_threshold=gate_threshold,
-        edge_source=edge_source,
-    )
-    timing_profile["inference"] = time.perf_counter() - t_step
+        t_step = time.perf_counter()
+        p_pass = predict_candidate_gate(model=gate_model, dataset=oos_set, cfg=cfg)
+        ml_out = predict_candidate_edges(
+            models=edge_models,
+            dataset=oos_set,
+            p_pass=p_pass,
+            cfg=cfg,
+            gate_enabled=gate_enabled,
+            gate_threshold=gate_threshold,
+            edge_source=edge_source,
+        )
+        timing_profile["inference"] = time.perf_counter() - t_step
 
     t_step = time.perf_counter()
     selected_events = select_candidate_events_for_portfolio(model_output=ml_out, cfg=cfg)
