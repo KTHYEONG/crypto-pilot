@@ -283,7 +283,9 @@ def _attach_signal_context(
         archetype = _resolve_panel_archetype(panel)
         allowed_regimes = _allowed_regimes_for_archetype(archetype)
         side_hint_2d = np.asarray(panel.side_hint_2d, dtype=np.int8).copy()
-        if cfg.regime_signal_gating_enabled:
+        if cfg.regime_signal_gating_enabled or (
+            cfg.mean_reversion_regime_entry_gating_enabled and archetype == "mean_reversion"
+        ):
             allowed_mask = np.isin(regime_names[regime_ctx.code_1d], np.asarray(allowed_regimes, dtype=object))
             side_hint_2d[~allowed_mask, :] = 0
         exit_policies = build_exit_policies_for_panel(
