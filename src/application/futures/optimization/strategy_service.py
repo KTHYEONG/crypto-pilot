@@ -250,7 +250,7 @@ def run_active_strategy_output_bridge(
         live_inference_panel,
         historical_trading_panel,
     )
-    if run_config.phase not in {"full", "ml", "signal"}:
+    if run_config.phase not in {"full", "alo", "signal"}:
         raise ValueError(f"unsupported phase for active strategy bridge: {run_config.phase}")
     if preloaded_data_maps is None:
         raise ValueError("active strategy bridge requires preloaded_data_maps")
