@@ -759,7 +759,10 @@ def predict_candidate_edges(
     mu_return_r = center_component_r + prior_component_r
     q10_return_r = q10_model_r
     q90_return_r = q90_model_r
-    effective_p_pass = _downside_upside_ratio_p_pass(mu_return_r, q10_return_r)
+    effective_p_pass = (
+        p_pass if gate_enabled
+        else _downside_upside_ratio_p_pass(mu_return_r, q10_return_r)
+    )
     mu_net_decision_bps = mu_return_r * risk_unit_bps
     q10_net_bps = q10_return_r * risk_unit_bps
     q90_net_bps = q90_return_r * risk_unit_bps
