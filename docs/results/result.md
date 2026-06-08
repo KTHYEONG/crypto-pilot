@@ -3,14 +3,17 @@
 
 # Mode Full (ALO/Ensemble) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-08 (Ensemble B0 Integrated Redesign — `allocation_backend="ensemble_b0"` 도입)
-**현재 상태:** `READY (Ensemble B0)` — `downside_penalty` 버그 패치 완료, 3-Fold Pass (`Status: wf_eligible`)
+**최신 갱신:** 2026-06-09 (Regime-Alpha 분리 가설 검증 — 反證, 기본 동작 유지 + fallback 개선)
+**현재 상태:** `READY (Ensemble B0)` — 3-Fold Pass (`Status: wf_eligible`). **불변식 미복원**(아래 참조)
 **평가 기준:** `min_variant_oos_edge_bps=10.0`, `breakeven_hard_gate=enabled`, `min_fold_realized_edge_bps=8.0`
-**진단 노트:** 
-- `candidate_portfolio.py`에서 `downside_penalty` 가중치 반영 누락 버그를 수정하여 `Trades=0` 현상을 해소하고, 고단계 Ablation 백테스트를 정상 복구했습니다.
-- 캐리/레버전 엣지의 실질적인 마진을 반영하여 OOS 생존 허들(`min_fold_realized_edge_bps`)을 **8.0 bps**로 완화한 결과, 4개 Fold 중 **3개 Fold(75%)가 합격**하며 **`wf_eligible`** 상태를 획득했습니다.
-- 포트폴리오 캡(`full_portfolio_cap`) 적용 시 CAGR -1.3% / MaxDD 1.1%로 이상적인 리스크 제어를 달성했습니다.
-- C4 OOS Stability의 rho = -0.086 로 레짐 순위 역전 현상이 남아 있으나, 앙상블 우회 및 실거래 허들 조율을 통해 실적 분화를 유도하였습니다.
+**진단 노트 (가설 검증 결과):**
+- **가설(spec):** `regime_code → alpha` 조건화가 OOS 역전 노이즈(C4 rho=-0.086)를 주입해 음의 CAGR을 유발한다. → conditioning을 `archetype_only`로 바꾸면 개선될 것.
+- **검증 결과 = 反證:** `archetype_only`/`auto` 적용 시 Fold 2 Rank IC가 0.036→**-0.102**로 오히려 **악화**. 모든 ML-Ready 8개 신호가 추세 단일 archetype이라 regime cell-mean이 archetype-pooled mean보다 (약하게) 더 예측적임이 드러남. mu_quality_shrinkage도 동일 이유로 selection 왜곡.
+- **조치:** 기본값을 원래 동작인 `ensemble_conditioning="archetype_regime"` + `mu_quality_shrinkage_enabled=False`로 유지(롤백). **따라서 active path는 여전히 `regime_code`로 mu를 조건화** — `regime.md`의 "discrete code는 배분을 구동하지 않음" 불변식은 **이전부터 위반 중이었고 본 작업으로도 복원되지 않음**. `regime.md`/`allocation.md`에 B0 예외를 명시하는 방향으로 문서를 정합화함.
+- **실질 변경:** unseen `(archetype, regime)` cell의 fallback을 `archetype_mu → global_mu` 2단계로 개선(기존 즉시 global). 현 데이터셋에서는 fold 수치 동일(회귀 없음), 미래 sparse-cell 안정성용.
+- **결과:** 4개 Fold 중 **3개 Fold(75%) 합격**, `wf_eligible` 유지. Ablation `full_portfolio_cap`: CAGR -1.3% / MaxDD 1.1% (개선 없음, 회귀 없음).
+- **구조적 블로커(미해소):** C3 flip=N (모든 레짐 동부호 long-bias), C4 rho=-0.086. 복리 양전환은 conditioning 축 변경으로 불가능 — **레짐별 부호 역전 신호(mean-reversion ↔ momentum) 발굴이 선결**. 별도 신호개발 과제.
+- 지식 승격: conditioning 축/fallback/反證 결과는 `docs/architecture/allocation.md` §4 및 `docs/architecture/regime.md` §1 예외 항목에 영구 기록(임시 spec 삭제됨).
 
 ---
 
@@ -126,16 +129,16 @@ Ledger update complete.
 ----------------------------------------------------------------------------------
 | Action       | Count | Details / Selected Strategies                           |
 ----------------------------------------------------------------------------------
-| BLOCKED      | 25    | Fail Reasons: breakeven_hard_gate (24) | Event Overloa |
+| BLOCKED      | 25    | Fail Reasons: breakeven_hard_gate (25) | Event Overloa |
 |              |       | Top Blocked: bcr_48, bb_compress_20, vrr_20, rr_48, fz |
 | RECOMMENDED  | 8     | 1. dual_momentum:dm_24_96                               |
-| (ML Ready)   |       | 2. vol_regime_reversion:vrr_40                          |
-| (ML Ready)   |       | 3. dual_momentum:dm_12_48                               |
-| (ML Ready)   |       | 4. trend_pullback_continuation:tpc_50_200               |
-| (ML Ready)   |       | 5. funding_zscore_carry:fzs_96                          |
-| (ML Ready)   |       | 6. rsi_reversion:rsi_6                                  |
-| (ML Ready)   |       | 7. funding_zscore_carry:fzs_168                         |
-| (ML Ready)   |       | 8. trend_pullback_continuation:tpc_20_100               |
+| (Eligible)   |       | 2. vol_regime_reversion:vrr_40                          |
+| (Eligible)   |       | 3. dual_momentum:dm_12_48                               |
+| (Eligible)   |       | 4. trend_pullback_continuation:tpc_50_200               |
+| (Eligible)   |       | 5. funding_zscore_carry:fzs_96                          |
+| (Eligible)   |       | 6. rsi_reversion:rsi_6                                  |
+| (Eligible)   |       | 7. funding_zscore_carry:fzs_168                         |
+| (Eligible)   |       | 8. trend_pullback_continuation:tpc_20_100               |
 ----------------------------------------------------------------------------------
 
 [WALK-FORWARD FOLD DETAILS]
