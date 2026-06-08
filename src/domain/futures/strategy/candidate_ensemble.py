@@ -116,5 +116,8 @@ def predict_regime_conditional_ensemble(
         q10_net_bps=q10_net_bps,
         q90_net_bps=mu_net_decision_bps,
         selection_score=mu_net_decision_bps.copy(),
-        validation_diagnostics={"allocation_backend": "ensemble_b0"},
+        validation_diagnostics={
+            "allocation_backend": "ensemble_b0",
+            "prediction_mode": "ensemble_b0",
+        },
     )
