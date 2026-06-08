@@ -644,12 +644,20 @@ def run_candidate_strategy_for_universe(
         )
 
         # Collect for summary table
+        _vdiag = getattr(ml_out, "validation_diagnostics", {}) or {}
+        _edge_rep = fold_out.edge_report
+        _mode = str(_vdiag.get("prediction_mode", "n/a"))
+        _rank_ic_val = (
+            _edge_rep.residual_rank_ic
+            if _mode == "prior_residual"
+            else _edge_rep.prior_rank_ic
+        )
         wf_fold_details.append({
             "fold_id": len(fold_selection_reports),
-            "inference_mode": getattr(ml_out, "validation_diagnostics", {}).get("inference_mode", "n/a"),
-            "rank_ic": getattr(ml_out, "validation_diagnostics", {}).get("rank_ic", float("nan")),
+            "inference_mode": _mode,
+            "rank_ic": float(_rank_ic_val),
             "n_events": int(ml_out.events.shape[0]) if ml_out.events is not None else 0,
-            "prior_bps": float(getattr(ml_out, "validation_diagnostics", {}).get("prior_bps", 0.0)),
+            "prior_bps": float(_vdiag.get("prior_component_p90_bps", 0.0)),
             "eu_p90": float(selection_diag_fold.get("waterfall_expected_utility_adj_p90_bps", 0.0)),
             "pass_cost": bool(pass_survival),
         })
