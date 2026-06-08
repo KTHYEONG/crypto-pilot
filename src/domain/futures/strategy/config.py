@@ -53,6 +53,7 @@ class RegimeConfig:
     regime_overlay_min_lift_tstat: float = 1.0
     regime_min_n_eff: int = 60
     regime_quality_gate_enabled: bool = True
+    regime_transition_occupancy: float = 0.10
 
     def __post_init__(self) -> None:
         """Validate regime parameters."""
@@ -71,6 +72,8 @@ class RegimeConfig:
             raise ValueError("crisis_gross_floor must satisfy 0 <= gross_floor <= 1.0")
         if self.regime_min_n_eff < 2:
             raise ValueError("regime_min_n_eff must be >= 2")
+        if not (0.0 < self.regime_transition_occupancy < 0.5):
+            raise ValueError("regime_transition_occupancy must satisfy 0 < value < 0.5")
 
 
 @dataclass(slots=True, frozen=True)
