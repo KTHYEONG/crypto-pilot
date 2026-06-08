@@ -370,6 +370,7 @@ def test_summarize_recommendation_gate_failures_reports_pass_and_fail_reasons() 
                 "oos_pct_edge_pos": 0.60,
                 "oos_payoff_ratio": 1.30,
                 "breakeven_hard_pass": True,
+                "oos_rank_ic": 0.05,
                 "archetype": "mean_reversion",
                 "exit_policy_id": "",
             },
@@ -386,6 +387,7 @@ def test_summarize_recommendation_gate_failures_reports_pass_and_fail_reasons() 
                 "oos_pct_edge_pos": 0.60,
                 "oos_payoff_ratio": 1.30,
                 "breakeven_hard_pass": True,
+                "oos_rank_ic": 0.05,
                 "archetype": "mean_reversion",
                 "exit_policy_id": "",
             },
@@ -402,6 +404,7 @@ def test_summarize_recommendation_gate_failures_reports_pass_and_fail_reasons() 
                 "oos_pct_edge_pos": 0.60,
                 "oos_payoff_ratio": 1.30,
                 "breakeven_hard_pass": True,
+                "oos_rank_ic": 0.05,
                 "archetype": "mean_reversion",
                 "exit_policy_id": "",
             },
@@ -477,6 +480,7 @@ def test_meets_recommendation_thresholds_accepts_when_all_gates_pass() -> None:
             "oos_pct_edge_pos": 0.6,
             "oos_payoff_ratio": 1.3,
             "breakeven_hard_pass": True,
+            "oos_rank_ic": 0.05,
         }
     )
     assert _meets_recommendation_thresholds(row, cfg)
@@ -591,6 +595,8 @@ def test_compute_rule_diagnostics_accepts_variant_with_positive_regime_edge() ->
         max_variant_event_fraction_per_bar=1.0,
         min_regime_variant_oos_obs=1,
         min_regime_variant_oos_edge_bps=2.0,
+        min_oos_rank_ic=0.0,
+        standalone_breakeven_hard_gate_enabled=False,
     )
 
     result = compute_rule_diagnostics(
