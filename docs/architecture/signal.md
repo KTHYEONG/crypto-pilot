@@ -7,88 +7,84 @@ priority: critical
 ai_read_policy: when_related
 related_paths:
   - src/domain/futures/strategy/rule_signals.py
+  - src/domain/futures/strategy/rule_diagnostics.py
   - src/domain/futures/strategy/exit_policies.py
   - src/domain/futures/strategy/candidate_contracts.py
 change_triggers:
   - src/domain/futures/strategy/rule_signals.py
+  - src/domain/futures/strategy/rule_diagnostics.py
   - src/domain/futures/strategy/exit_policies.py
+dependencies:
+  documents:
+    - docs/architecture/regime.md
+    - docs/architecture/allocation.md
 last_verified: 2026-06-08
 ---
 
 # 1. Overview
 
-`my-coin-traider` 프로젝트의 선물(Futures) 전략 시그널 생성 아키텍처는 고속 벡터화 연산을 통해 시장 데이터를 스캔하고, **Candidate Event**(진입 후보 시점)를 추출하는 기반 레이어입니다. 단순 연속형 시계열 예측(Dense)을 지양하고, `Numba`와 `Numpy`를 활용해 의미 있는 시점에만 발화(Sparse Event)하는 패널들을 구성합니다. 생성된 패널은 ML 파이프라인의 핵심 입력이 됩니다.
-
----
+선물 Signal 레이어는 벡터화 Rule 패널을 생성하고, archetype 및 regime 문맥을 부착한 뒤, **공정한 L1 진입 게이트**를 통과한 Candidate Event만 downstream allocation으로 전달합니다.
 
 # 2. Core Components
 
-| Component | 책임 | 파일 |
-|-----------|------|------|
-| Vectorized Indicators | `_ema_2d`, `_rolling_std_2d`, `_atr_2d` 등 Numpy 기반 고속 지표 연산 | `rule_signals.py` |
-| `_entry_rising_edge_2d` | 지속 상태(persistent boolean state)를 False→True 전이 시점(discrete event)으로 변환 | `rule_signals.py:172` |
-| `build_rule_signal_panels` | Rule-based Signal(8+개 전략군) 생성 진입점. (MA, Donchian, Bollinger 등) | `rule_signals.py` |
-| `_resolve_panel_archetype` | 신호의 성격(Archetype)을 분류 (`trend_continuation`, `mean_reversion` 등) | `rule_signals.py` |
-| `filter_rule_signal_panels` | 설정(Allowlist) 및 Variant 기준으로 활성 패널 동적 필터링 | `rule_signals.py` |
-| `CandidateSignalPanel` | 단일 전략 변종의 점수, 진입 방향, Exit Policy 등을 담는 Data Contract | `candidate_contracts.py` |
-| `build_exit_policies_for_panel` | 전략 Archetype 및 Regime에 따른 동적 청산(SL/TP) 장벽 설정 | `exit_policies.py` |
-
----
+| Component | Responsibility | File |
+|-----------|----------------|------|
+| `build_rule_signal_panels` | 20개 family 기반 2D rule panel 생성 | `rule_signals.py` |
+| `_entry_rising_edge_2d` | persistent state를 sparse entry event로 변환 | `rule_signals.py` |
+| `_resolve_panel_archetype` | family를 `trend_continuation`, `mean_reversion` 등 archetype으로 매핑 | `rule_signals.py` |
+| `_allowed_regimes_for_archetype` | archetype별 허용 regime 집합 정의 | `rule_signals.py` |
+| `_attach_signal_context` | archetype, allowed regime, exit policy, regime code를 panel에 주입 | `rule_signals.py` |
+| `candidate_panels_to_events` | 2D panel을 sparse candidate event table로 변환 | `rule_signals.py` |
+| `compute_rule_diagnostics` | standalone breakeven hard gate와 recommendation 진단 수행 | `rule_diagnostics.py` |
+| `build_exit_policies_for_panel` | archetype별 deterministic barrier geometry 부여 | `exit_policies.py` |
 
 # 3. Data Flow
 
 ```mermaid
 graph TD
-    A[AlignedMarketData: OHLCV, Funding] --> B[Vectorized Technical Indicators]
-    B --> C[Rule Signal Families 계산]
-    C --> D[CandidateSignalPanel 2D 행렬화]
-    D --> E[_attach_signal_context: Regime 필터 및 Archetype 할당]
-    E --> F[Exit Policy 생성 및 ATR Multiplier 할당]
-    F --> G[Sparse Candidate Events 추출]
+    A[AlignedMarketData] --> B[Vectorized Indicators]
+    B --> C[Rule Families -> CandidateSignalPanel]
+    C --> D[_attach_signal_context]
+    D --> E[Archetype-selective Entry Gating]
+    E --> F[candidate_panels_to_events]
+    F --> G[label_candidate_events]
+    G --> H[compute_rule_diagnostics]
+    H --> I[L1 Hard Gate: promoted variants only]
 ```
-
----
 
 # 4. Business Rules & Invariants
 
-- **Strict Causality (Look-ahead 차단):** 모든 Vectorized 연산은 미래 데이터를 참조해서는 안 됩니다. 예를 들어 `_rolling_max_2d` (Donchian) 채널 계산 시, T 시점의 판단은 반드시 `shift(1)`을 통해 T-1 시점까지의 고가/저가 채널을 기준으로 이루어집니다.
-- **Sparsity Principle (Rising-Edge Entry):** 패널의 `side_hint_2d`는 임계 상태가 **유지되는 모든 bar**가 아니라, 상태가 **False→True로 전이되는 시점(rising edge)** 에만 진입(Event)을 발화합니다. `_entry_rising_edge_2d`가 이를 강제합니다.
-  - *근거: persistent threshold가 매 bar 재발화하면 이벤트가 자기상관(autocorrelation)되어 HAC t-stat이 붕괴하고 event_density gate에서 차단됨. 전이 시점만 추출하면 통계적 독립성과 진입 품질이 동시에 향상.*
-  - *적용 family: `bollinger_reversion`, `vol_regime_reversion`, `dual_momentum`, `btc_corr_regime`.*
-- **Score-Side Decoupling:** `side_hint_2d`(rising-edge, sparse)와 `signed_score_2d`(연속 level, dense)는 의도적으로 분리됩니다. side는 진입 여부를, score는 ML feature·position sizing 강도를 담당하므로 두 필드를 동기화하지 않습니다. (`side_hint_2d==0`이면서 `signed_score_2d≠0`인 bar는 정상)
-- **Archetype-Regime Alignment:** 신호의 Archetype에 따라 동작이 허용되는 Market Regime이 엄격히 분리됩니다 (`_allowed_regimes_for_archetype`). 
-  - *예: Trend Continuation은 `quiet`나 `volatile` 국면에서 활성화, Reversion 계열은 특정 조건(transition) 등에 매핑.*
-- **Dynamic Risk (ATR-based Barrier):** `Exit Policy`는 고정 비율이 아닌 `ATR (Average True Range)` 배수로 SL(Stop Loss), TP(Take Profit) 장벽 거리를 지정하여, 자산과 국면의 변동성에 따른 동적 청산을 보장합니다.
-
----
+- **Strict causality:** signal score, entry regime, barrier geometry는 모두 `t` 결정 시 미래 bar를 사용하지 않습니다.
+- **Sparse entry only:** `side_hint_2d`는 상태 유지 구간 전체가 아니라 rising-edge 전이 시점에만 발화합니다.
+- **Score/side decoupling:** `signed_score_2d`는 dense conviction, `side_hint_2d`는 sparse entry trigger입니다. `side_hint_2d == 0` 이더라도 score가 남아있는 것은 정상입니다.
+- **Archetype-selective gating:** `mean_reversion_regime_entry_gating_enabled=True`가 기본값이며, mean-reversion archetype은 `bull_volatile`, `bear_volatile`, `crash`에서 진입하지 않습니다.
+- **Fair standalone evaluation:** variant의 breakeven 평가는 archetype-valid regime 안에서만 해석됩니다. reversion을 추세장 손실로 영구 탈락시키지 않는 것이 목적입니다.
+- **Hard breakeven gate:** `standalone_breakeven_hard_gate_enabled=True`면 OOS recommendation window에서 `edge_after_hurdle_bps` 평균이 양수이고 HAC/Newey-West 성격의 t-stat이 `min_rule_ir_t` 이상인 variant만 promotion 후보가 됩니다.
+- **Archetype diversity is diagnostic:** trend/reversion 공존 여부는 `decision["keep_archetypes"]`, `keep_has_trend`, `keep_has_reversion`으로 기록되며 hard fail 조건은 아닙니다.
 
 # 5. Data Schemas
 
-### `CandidateSignalPanel` (2D 텐서 컨트랙트)
-- `signed_score_2d`: `NDArray[float64]` — [-1.0, 1.0] 범위로 정규화된 연속 확신도
-- `side_hint_2d`: `NDArray[int8]` — 진입 방향 힌트 (1=Long, -1=Short, 0=None)
-- `valid_mask_2d`: `NDArray[bool]` — 상장 여부, Kill-switch 등 유효성 마스크
-- `archetype`: `str` — 전략 군 (예: "trend_continuation", "carry_reversion")
-- `exit_policies`: `tuple[SignalExitPolicy, ...]` — 시그널별 청산 정책 리스트
+### `CandidateSignalPanel`
 
-### `SignalExitPolicy` (청산 장벽)
-- `stop_atr_mult`: `float` — ATR 단위 손절 장벽 승수
-- `take_profit_atr_mult`: `float` — ATR 단위 익절 장벽 승수
-- `expected_holding_bars`: `int` — 예상(Time-exit 기준) 보유 시간
+- `signed_score_2d: NDArray[float64]`
+- `side_hint_2d: NDArray[int8]`
+- `valid_mask_2d: NDArray[bool]`
+- `archetype: str`
+- `allowed_regimes: tuple[str, ...]`
+- `exit_policies: tuple[SignalExitPolicy, ...]`
+- `regime_code_1d: NDArray[int8] | None`
 
----
+### Candidate Event Row
 
-# 6. Theory (수식 근거)
+- `family`, `variant`, `signal_cell`
+- `archetype`
+- `entry_idx`, `entry_regime`, `entry_regime_code`
+- `side`, `raw_score`, `score_z`
+- `expected_holding_bars`, `stop_atr_mult`, `take_profit_atr_mult`
 
-- **Robust Normalization:** 신호 강도(`signed_score_2d`)는 시장 충격을 흡수하기 위해 ATR이나 표준편차(Z-score)로 정규화됩니다. 이후 극단값을 억제하기 위해 `np.tanh` 또는 `np.clip`을 사용하여 [-1, 1] 범위로 매핑합니다.
-  - **Trend MA Cross:** `ma_diff = (EMA_fast - EMA_slow) / ATR` → `score = np.tanh(ma_diff)`
-  - **Vol Breakout (Bollinger Compression):** Bollinger Bandwidth의 Z-score가 -1.0 이하일 때(수축), 종가가 BB 2표준편차를 돌파하면 `(Close - BB_mean) / ATR` 로 강도를 산출.
-  - **RSI Reversion:** `(50.0 - RSI) / 20.0` 으로 Z-score 유사 정규화.
+# 6. Testing Expectations
 
----
-
-# 7. Known Limitations
-
-- **Threshold Sensitivity:** 현재 Signal Panel이 생성하는 Candidate Event 수는 하드코딩되거나 설정된 임계값(Threshold)에 직접적인 영향을 받으며, Optuna를 통한 파라미터 최적화와 강하게 결합되어 있습니다.
-- **Collinearity (다중공선성):** 동일 패밀리(Family) 내의 여러 변종(Variant) 시그널들이 동시에 발화할 경우, 다운스트림(Downstream) ML Layer에서 이벤트 집중(Concentration) 제어가 필수적으로 요구됩니다. (rising-edge 전환으로 event_density는 완화되었으나 variant 간 동시발화는 잔존)
-- **Archetype-Regime Entry Gating 미적용:** `regime_signal_gating_enabled=False`(현재 기본값)이므로 mean-reversion 계열도 추세장(bull_volatile/bear_volatile/crash)에서 진입합니다. 추세장의 평균회귀 진입은 구조적으로 hit_rate/payoff가 낮아 ML-Ready gate에서 차단됩니다.
+- mean-reversion panel은 비허용 trending regime에서 `side_hint_2d=0`이어야 합니다.
+- `candidate_panels_to_events`는 `entry_regime_code`와 `archetype`을 누락 없이 배출해야 합니다.
+- breakeven hard gate는 sub-breakeven variant를 recommendation에서 제외해야 합니다.
+- archetype coverage decision fields는 keep set 기준으로 trend/reversion 존재 여부를 반영해야 합니다.
