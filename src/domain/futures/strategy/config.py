@@ -199,9 +199,13 @@ class CandidateStrategyConfig:
     regime_diagnostic_enabled: bool = True
     min_regime_variant_oos_obs: int = 40
     min_regime_variant_oos_edge_bps: float = 2.0
+    allocation_backend: Literal["ensemble_b0", "ml_edge"] = "ensemble_b0"
+    ensemble_shrinkage_k: float = 50.0
     # Set to False to remove hard regime-based signal masking; regime moves to
     # sizing multiplier layer (see regime_as_size_multiplier).
     regime_signal_gating_enabled: bool = False
+    mean_reversion_regime_entry_gating_enabled: bool = True
+    standalone_breakeven_hard_gate_enabled: bool = True
     # When True, apply per-regime continuous weight multipliers at sizing stage.
     regime_as_size_multiplier: bool = False
     regime_size_multipliers: tuple[tuple[str, float], ...] = (
@@ -425,6 +429,10 @@ class CandidateStrategyConfig:
             raise ValueError("diagnostic_top_k must be >= 1")
         if self.min_variant_oos_obs < 1:
             raise ValueError("min_variant_oos_obs must be >= 1")
+        if self.allocation_backend not in {"ensemble_b0", "ml_edge"}:
+            raise ValueError("allocation_backend must be ensemble_b0 or ml_edge")
+        if self.ensemble_shrinkage_k <= 0.0:
+            raise ValueError("ensemble_shrinkage_k must be positive")
         if not (0.0 <= self.min_variant_oos_hit_rate <= 1.0):
             raise ValueError("min_variant_oos_hit_rate must satisfy 0 <= value <= 1")
         if self.min_variant_oos_payoff_ratio < 0.0:
