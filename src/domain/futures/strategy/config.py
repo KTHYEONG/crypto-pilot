@@ -300,7 +300,7 @@ class CandidateStrategyConfig:
         "predicted_mu_tstat", "realized_selected_edge", "realized_log_growth"
     ] = "realized_selected_edge"
     min_fold_selected_events: int = 20
-    min_fold_realized_edge_bps: float = 15.0  # >= 2x RT cost (7.5bps); 0.0은 +0.001bps도 통과
+    min_fold_realized_edge_bps: float = 8.0  # >= 1.07x RT cost (7.5bps); 0.0은 +0.001bps도 통과
     min_fold_log_growth: float = 0.0
     # Edge model utility parameters
     downside_penalty: float = 0.3
