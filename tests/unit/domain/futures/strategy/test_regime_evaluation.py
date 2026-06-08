@@ -22,41 +22,80 @@ _N_REGIMES = 6  # _REGIME_NAMES length
 
 
 def test_c2_stable_regime_has_high_dwell():
-    """100 bars of code 0 then 100 of code 1 → dwell ≥ 6, transition_rate ≈ 0."""
+    """100 bars of code 0 then 100 of code 1 → dwell ≥ 6, transition_rate ≈ 0.
+
+    Both micro codes 0/1 map to macro class 0 (bull), so macro_dwell = 200.
+    Score is computed from macro_dwell ≥ 8 → dwell component = 6.
+    """
     code = np.array([0] * 100 + [1] * 100, dtype=np.int8)
-    dwell, tr, _, score = _compute_c2(code)
+    dwell, tr, _, score, macro_dwell, macro_tr = _compute_c2(code)
     assert dwell >= 6.0
     assert tr <= 0.01
+    # macro_dwell: 200 bars of macro class 0 → single run of 200
+    assert macro_dwell >= 100.0
     assert score >= 7.0
 
 
 def test_c2_whipsaw_has_low_score():
-    """Alternating codes → dwell=1, transition_rate=1.0 → score near 0."""
+    """Alternating micro codes 0/1 stay in macro class 0 (bull) → macro_dwell high, score from tr."""
     code = np.array([0, 1] * 50, dtype=np.int8)
-    dwell, tr, _, score = _compute_c2(code)
+    dwell, tr, _, score, macro_dwell, macro_tr = _compute_c2(code)
     assert dwell == pytest.approx(1.0)
     assert tr == pytest.approx(1.0, rel=0.01)
-    assert score <= 2.0
+    # macro class stays 0 (bull) the whole time → macro_dwell = 100
+    assert macro_dwell >= 50.0
+    # score from transition_rate (micro tr=1.0 → 0 points) + macro_dwell (≥8 → 6 points) = 6.0
+    assert score >= 5.0
 
 
 def test_c2_empty_returns_zero_dwell():
-    dwell, tr, ent, score = _compute_c2(np.array([], dtype=np.int8))
+    dwell, tr, ent, score, macro_dwell, macro_tr = _compute_c2(np.array([], dtype=np.int8))
     assert dwell == 0.0
     assert tr == 1.0
     assert score == 0.0
+    assert macro_dwell == 0.0
+    assert macro_tr == 1.0
 
 
 def test_c2_single_bar_returns_zero():
-    dwell, tr, ent, score = _compute_c2(np.array([2], dtype=np.int8))
+    dwell, tr, ent, score, macro_dwell, macro_tr = _compute_c2(np.array([2], dtype=np.int8))
     assert dwell == 0.0
+    assert macro_dwell == 0.0
 
 
 def test_c2_medium_dwell_partial_score():
-    """Blocks of 4 bars: mid-range dwell → partial score, not perfect."""
+    """Micro blocks of 4 bars alternating 0/1 → same macro class (bull) → macro_dwell=160."""
     code = np.tile([0, 0, 0, 0, 1, 1, 1, 1], 20).astype(np.int8)
-    dwell, _, _, score = _compute_c2(code)
+    dwell, _, _, score, macro_dwell, macro_tr = _compute_c2(code)
+    # micro dwell = 4 (blocks of 4)
     assert 3.0 <= dwell <= 5.0
-    assert 1.0 < score < 8.0
+    # macro: all codes 0/1 → macro class 0 → single run of 160 → score ≥ 6.0
+    assert macro_dwell >= 100.0
+    assert score >= 5.0
+
+
+def test_c2_macro_cross_direction_whipsaw():
+    """Alternating bull(0)/bear(2) blocks of 3 → macro transitions are real direction flips."""
+    code = np.tile([0, 0, 0, 2, 2, 2], 20).astype(np.int8)
+    dwell, tr, _, score, macro_dwell, macro_tr = _compute_c2(code)
+    # micro dwell = 3 → partial
+    assert dwell == pytest.approx(3.0)
+    # macro dwell = 3 (each block of 3 bull then 3 bear)
+    assert macro_dwell == pytest.approx(3.0)
+    # score: macro_dwell=3 (≥2 →1.5) + tr≈0.33 (>0.25 →0) = 1.5
+    assert score == pytest.approx(1.5)
+
+
+def test_c2_macro_transition_state_excluded_from_direction():
+    """Transition state (code 4) maps to macro class 2, not bull/bear — no direction flip."""
+    # 50 bars bull(0), 50 bars transition(4), 50 bars bull(0)
+    code = np.array([0] * 50 + [4] * 50 + [0] * 50, dtype=np.int8)
+    _dwell, _tr, _ent, score, macro_dwell, macro_tr = _compute_c2(code)
+    # macro: bull(0)→transition(2)→bull(0): 2 macro transitions out of 149 steps
+    assert macro_tr == pytest.approx(2 / 149, rel=0.01)
+    # macro dwell: runs of 50, 50, 50 → median = 50
+    assert macro_dwell == pytest.approx(50.0)
+    assert score >= 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -70,10 +109,11 @@ def test_c3_distinct_regimes_pass_kw_and_sign_flip():
     n = 300
     code = np.array([0] * n + [1] * n, dtype=np.int8)
     fwd = np.concatenate([rng.normal(20.0, 3.0, n), rng.normal(-20.0, 3.0, n)])
-    pval, flip, mi, score = _compute_c3(code, fwd, min_n_per_group=10)
+    pval, flip, mi, score, mag_sep = _compute_c3(code, fwd, min_n_per_group=10)
     assert pval < 0.001
     assert flip is True
     assert score >= 7.0
+    assert mag_sep > 0.0
 
 
 def test_c3_indistinct_regimes_high_pvalue():
@@ -82,8 +122,9 @@ def test_c3_indistinct_regimes_high_pvalue():
     n = 100
     code = np.array([0] * n + [1] * n + [2] * n, dtype=np.int8)
     fwd = rng.normal(0.0, 5.0, 3 * n)
-    pval, flip, mi, score = _compute_c3(code, fwd, min_n_per_group=10)
+    pval, flip, mi, score, mag_sep = _compute_c3(code, fwd, min_n_per_group=10)
     assert pval > 0.05 or score <= 5.0
+    assert np.isfinite(mag_sep)
 
 
 def test_c3_nan_values_filtered_safely():
@@ -93,18 +134,34 @@ def test_c3_nan_values_filtered_safely():
     code = np.array([0] * n + [1] * n, dtype=np.int8)
     fwd = np.concatenate([rng.normal(10.0, 2.0, n), rng.normal(-10.0, 2.0, n)])
     fwd[::3] = np.nan
-    pval, flip, mi, score = _compute_c3(code, fwd, min_n_per_group=10)
+    pval, flip, mi, score, mag_sep = _compute_c3(code, fwd, min_n_per_group=10)
     assert np.isfinite(pval)
     assert np.isfinite(mi)
+    assert np.isfinite(mag_sep)
 
 
 def test_c3_insufficient_groups_returns_zeros():
     """Only one regime with enough obs → two-group test impossible."""
     code = np.zeros(50, dtype=np.int8)  # all code 0
     fwd = np.random.default_rng(5).normal(5.0, 2.0, 50)
-    pval, flip, mi, score = _compute_c3(code, fwd, min_n_per_group=10)
+    pval, flip, mi, score, mag_sep = _compute_c3(code, fwd, min_n_per_group=10)
     assert pval == pytest.approx(1.0)
     assert score == 0.0
+    assert mag_sep == pytest.approx(0.0)
+
+
+def test_c3_magnitude_separation_without_sign_flip_achieves_directional():
+    """Magnitude separation >= 1.5 without sign_flip still qualifies as directional."""
+    rng = np.random.default_rng(7)
+    n = 300
+    # Both groups positive but with large mean separation relative to pooled std
+    code = np.array([0] * n + [1] * n, dtype=np.int8)
+    fwd = np.concatenate([rng.normal(30.0, 2.0, n), rng.normal(2.0, 2.0, n)])
+    pval, flip, mi, score, mag_sep = _compute_c3(code, fwd, min_n_per_group=10)
+    assert flip is False  # both means positive → no sign flip
+    assert mag_sep >= 1.5  # large magnitude relative to pooled std
+    assert pval < 0.01
+    assert score >= 7.0  # directional via magnitude_sep → high score
 
 
 # ---------------------------------------------------------------------------
