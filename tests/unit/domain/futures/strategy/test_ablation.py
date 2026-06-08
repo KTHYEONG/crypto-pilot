@@ -499,6 +499,7 @@ def test_validate_candidate_signals_stress_mean_avoids_cost_double_counting() ->
     assert rule_only.net_edge_bps_stress_mean == pytest.approx(25.0 + 7.5 - _stress_rt())
     assert rule_only.net_edge_bps_stress_mean != pytest.approx(25.0 - _stress_rt())
     assert rule_only.decision_bar_count == 4
+    assert rule_only.fail_reasons == ()
 
 
 def test_validate_candidate_signals_mean_path_survives_skewed_payoff() -> None:
@@ -515,6 +516,7 @@ def test_validate_candidate_signals_mean_path_survives_skewed_payoff() -> None:
     rule_only = next(r for r in reports if r.variant == "rule_only_equal_size")
     assert rule_only.net_edge_bps_p50 < 0.0 < rule_only.net_edge_bps_mean
     assert rule_only.survives_cost is True
+    assert rule_only.fail_reasons == ()
 
 
 def test_validate_candidate_signals_legacy_median_path_blocks_skewed_payoff() -> None:
@@ -530,6 +532,7 @@ def test_validate_candidate_signals_legacy_median_path_blocks_skewed_payoff() ->
     # Assert: median-stress (-10 - 11.25 < 0) blocks the skewed-but-profitable variant.
     rule_only = next(r for r in reports if r.variant == "rule_only_equal_size")
     assert rule_only.survives_cost is False
+    assert rule_only.fail_reasons == ()
 
 
 def test_validate_candidate_signals_blocks_when_mean_net_stress_negative() -> None:
@@ -546,6 +549,7 @@ def test_validate_candidate_signals_blocks_when_mean_net_stress_negative() -> No
     rule_only = next(r for r in reports if r.variant == "rule_only_equal_size")
     assert rule_only.net_edge_bps_stress_mean < 0.0
     assert rule_only.survives_cost is False
+    assert "mean_net_stress_below_floor" in rule_only.fail_reasons
 
 
 def test_validate_candidate_signals_empty_oos_reports_not_survived() -> None:
@@ -563,6 +567,7 @@ def test_validate_candidate_signals_empty_oos_reports_not_survived() -> None:
     assert rule_only.n_events == 0
     assert rule_only.survives_cost is False
     assert np.isnan(rule_only.net_edge_bps_stress_mean)
+    assert rule_only.fail_reasons == ("no_oos_events",)
 
 
 def test_validate_candidate_signals_raw_and_promoted_are_distinct() -> None:
@@ -583,3 +588,4 @@ def test_validate_candidate_signals_raw_and_promoted_are_distinct() -> None:
     assert rule_only.n_events == 4
     assert promoted.n_events == 2
     assert promoted.net_edge_bps_mean > rule_only.net_edge_bps_mean
+    assert promoted.fail_reasons == ()

@@ -360,7 +360,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--phase",
         type=str,
-        choices=["full", "ml", "signal", "regime"],
+        choices=["full", "ml", "signal"],
         default="full",
     )
     parser.add_argument(
@@ -606,7 +606,6 @@ def _run_regime_evaluation_stage(
     from src.domain.futures.strategy.common.alignment import align_data_maps
     from src.domain.futures.strategy.market_regime import compute_market_regime_context
     from src.domain.futures.strategy.regime_evaluation import evaluate_regime_classifier
-    from src.domain.futures.strategy.rule_diagnostics import log_regime_scorecard
 
     aligned = align_data_maps(data_stage.data_maps, data_stage.valid_symbols, run_config.timeframe)
     regime_ctx = compute_market_regime_context(aligned=aligned)
@@ -657,7 +656,6 @@ def _run_regime_evaluation_stage(
         c4_proxy_spearman_rho=c4p_rho,
     )
 
-    log_regime_scorecard(scorecard)
     return scorecard, regime_ctx.code_1d
 
 
@@ -682,7 +680,7 @@ def _run_strategy_stage(
 
     def _emit_strategy_profile() -> None:
         profile = _runtime_breakdown(time.perf_counter() - t_strategy_stage, **strategy_steps)
-        _logger.info(
+        _logger.debug(
             (
                 "[STRATEGY-PROF] total=%.4fs map_pick=%.4fs metadata=%.4fs bridge=%.4fs "
                 "report=%.4fs merge=%.4fs evaluation=%.4fs accounted=%.4fs unaccounted=%.4fs"
@@ -851,7 +849,7 @@ def _run_strategy_stage(
         data_stage.valid_symbols, run_config.timeframe,
     )
     strategy_steps["merge"] = time.perf_counter() - t_merge_start
-    _logger.info(
+    _logger.debug(
         "[PROFILE][STAGE] merge_candidate_output_into_is_and_oos took %.4fs",
         strategy_steps["merge"],
     )
@@ -861,9 +859,12 @@ def _run_strategy_stage(
     if isinstance(candidate_report_ref, dict) and candidate_report_ref.get("zero_reason") == "signal_only_mode":
         sv_list = candidate_report_ref.get("signal_validation", [])
         _logger.info("\n[SIGNAL VALIDATION: FILTERING IMPACT]")
-        _logger.info("-" * 82)
-        _logger.info(f"| {'Variant':<22} | {'Events':>8} | {'Hit Rate':>10} | {'Mean Edge':>10} | {'Status':<15} |")
-        _logger.info("-" * 82)
+        _logger.info("-" * 122)
+        _logger.info(
+            f"| {'Variant':<22} | {'Events':>8} | {'Hit Rate':>10} | "
+            f"{'Mean Edge':>10} | {'Status':<15} | {'Fail Reasons':<44} |"
+        )
+        _logger.info("-" * 122)
         mean_unfiltered = mean_filtered = 0.0
         for sv in sv_list:
             v_name = str(sv.get("variant", "unknown"))
@@ -874,13 +875,14 @@ def _run_strategy_stage(
             else:
                 display_name = v_name[:22]
             status_text = "✅ PASS" if sv.get("survives_cost") else "❌ FAIL"
+            fail_text = ",".join(str(v) for v in sv.get("fail_reasons", [])) or "-"
             _logger.info(
                 f"| {display_name:<22} | {sv.get('n_events', 0):>8,} | "
                 f"{float(sv.get('hit_rate', 0.0))*100:>9.1f}% | "
                 f"{float(sv.get('net_edge_bps_mean', 0.0)):>6.1f} bps | "
-                f"{status_text:<14} |"
+                f"{status_text:<14} | {fail_text:<44} |"
             )
-        _logger.info("-" * 82)
+        _logger.info("-" * 122)
         _logger.info(
             ">> Conclusion: Filtering improved Mean Edge by %+0.1f bps. "
             "Proceeding to ML phase.\n",
@@ -921,7 +923,10 @@ def _refresh_regime_c34_gold_standard(
 
     labeled = ml_out.labeled
     if labeled is None or labeled.empty:
-        _logger.debug("[REGIME_C34_GOLD] labeled DataFrame 없음 — gold standard 계산 건너뜀")
+        _logger.info(
+            "[REGIME_C34_GOLD] labeled DataFrame 없음 — baseline scorecard 출력"
+        )
+        log_regime_scorecard(scorecard)
         return
 
     required_cols = {"entry_regime_code", "edge_after_hurdle_bps", "entry_idx"}
@@ -1413,9 +1418,6 @@ def run_pipeline(
     )
     # Step 3.5) regime evaluation (between universe and signal)
     regime_stage_result = _run_regime_evaluation_stage(run_config, data_stage)
-    if run_config.phase == "regime":
-        _logger.info("[PHASE] phase=regime completed; signal and optimization skipped")
-        return RunnerResult(exit_code=0, reason="regime_evaluation_done")
 
     # Step 4) strategy bridge + alpha contract
     t_strategy = time.perf_counter()
