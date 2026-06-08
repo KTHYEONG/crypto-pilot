@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.core.settings import round_trip_cost_bps
 from src.domain.futures.strategy.candidate_labels import label_candidate_events
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
@@ -468,7 +469,7 @@ def _summarize_recommendation_variants(
         breakeven_hard_pass = (
             rec_n >= (cfg.min_signal_cell_oos_obs if use_signal_cells else min_obs)
             and np.isfinite(breakeven_mean_bps)
-            and breakeven_mean_bps > 0.0
+            and breakeven_mean_bps >= max(8.0, float(round_trip_cost_bps()) * 0.6)
             and np.isfinite(breakeven_tstat)
             and breakeven_tstat >= cfg.min_rule_ir_t
         )
