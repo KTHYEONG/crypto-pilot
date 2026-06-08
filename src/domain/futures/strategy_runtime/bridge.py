@@ -720,15 +720,28 @@ def run_candidate_strategy_for_universe(
             int(selection_diag_fold.get("shadow_max_eligible", 0)),
         )
 
-        fold_p_pass_parts.append(ml_out.p_pass)
-        fold_mu_parts.append(ml_out.expected_net_bps)
-        fold_q10_parts.append(ml_out.q10_net_bps)
-        fold_q90_parts.append(ml_out.q90_net_bps)
-        fold_utility_parts.append(ml_out.selection_score)
-        fold_expected_return_r_parts.append(ml_out.expected_return_r)
-        fold_q10_return_r_parts.append(ml_out.q10_return_r)
-        fold_q90_return_r_parts.append(ml_out.q90_return_r)
-        fold_kelly_fraction_parts.append(ml_out.kelly_fraction)
+        _n_fold = int(ml_out.expected_net_bps.shape[0])
+        if pass_survival:
+            fold_p_pass_parts.append(ml_out.p_pass)
+            fold_mu_parts.append(ml_out.expected_net_bps)
+            fold_q10_parts.append(ml_out.q10_net_bps)
+            fold_q90_parts.append(ml_out.q90_net_bps)
+            fold_utility_parts.append(ml_out.selection_score)
+            fold_expected_return_r_parts.append(ml_out.expected_return_r)
+            fold_q10_return_r_parts.append(ml_out.q10_return_r)
+            fold_q90_return_r_parts.append(ml_out.q90_return_r)
+            fold_kelly_fraction_parts.append(ml_out.kelly_fraction)
+        else:
+            _zeros = np.zeros(_n_fold, dtype=np.float64)
+            fold_p_pass_parts.append(_zeros)
+            fold_mu_parts.append(_zeros.copy())
+            fold_q10_parts.append(_zeros.copy())
+            fold_q90_parts.append(_zeros.copy())
+            fold_utility_parts.append(_zeros.copy())
+            fold_expected_return_r_parts.append(_zeros.copy())
+            fold_q10_return_r_parts.append(_zeros.copy())
+            fold_q90_return_r_parts.append(_zeros.copy())
+            fold_kelly_fraction_parts.append(_zeros.copy())
         fold_event_parts.append(ml_out.events)
 
     # Note: fallback behavior down below is preserved using oos_set_fallback

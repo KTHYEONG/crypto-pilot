@@ -3,17 +3,19 @@
 
 # Mode Full (ALO/Ensemble) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-09 (Regime-Alpha 분리 가설 검증 — 反證, 기본 동작 유지 + fallback 개선)
+**최신 갱신:** 2026-06-09 (WF Fold Contamination Fix + Signal oos_rank_ic Gate 도입)
 **현재 상태:** `READY (Ensemble B0)` — 3-Fold Pass (`Status: wf_eligible`). **불변식 미복원**(아래 참조)
-**평가 기준:** `min_variant_oos_edge_bps=10.0`, `breakeven_hard_gate=enabled`, `min_fold_realized_edge_bps=8.0`
-**진단 노트 (가설 검증 결과):**
-- **가설(spec):** `regime_code → alpha` 조건화가 OOS 역전 노이즈(C4 rho=-0.086)를 주입해 음의 CAGR을 유발한다. → conditioning을 `archetype_only`로 바꾸면 개선될 것.
-- **검증 결과 = 反證:** `archetype_only`/`auto` 적용 시 Fold 2 Rank IC가 0.036→**-0.102**로 오히려 **악화**. 모든 ML-Ready 8개 신호가 추세 단일 archetype이라 regime cell-mean이 archetype-pooled mean보다 (약하게) 더 예측적임이 드러남. mu_quality_shrinkage도 동일 이유로 selection 왜곡.
-- **조치:** 기본값을 원래 동작인 `ensemble_conditioning="archetype_regime"` + `mu_quality_shrinkage_enabled=False`로 유지(롤백). **따라서 active path는 여전히 `regime_code`로 mu를 조건화** — `regime.md`의 "discrete code는 배분을 구동하지 않음" 불변식은 **이전부터 위반 중이었고 본 작업으로도 복원되지 않음**. `regime.md`/`allocation.md`에 B0 예외를 명시하는 방향으로 문서를 정합화함.
-- **실질 변경:** unseen `(archetype, regime)` cell의 fallback을 `archetype_mu → global_mu` 2단계로 개선(기존 즉시 global). 현 데이터셋에서는 fold 수치 동일(회귀 없음), 미래 sparse-cell 안정성용.
-- **결과:** 4개 Fold 중 **3개 Fold(75%) 합격**, `wf_eligible` 유지. Ablation `full_portfolio_cap`: CAGR -1.3% / MaxDD 1.1% (개선 없음, 회귀 없음).
-- **구조적 블로커(미해소):** C3 flip=N (모든 레짐 동부호 long-bias), C4 rho=-0.086. 복리 양전환은 conditioning 축 변경으로 불가능 — **레짐별 부호 역전 신호(mean-reversion ↔ momentum) 발굴이 선결**. 별도 신호개발 과제.
-- 지식 승격: conditioning 축/fallback/反證 결과는 `docs/architecture/allocation.md` §4 및 `docs/architecture/regime.md` §1 예외 항목에 영구 기록(임시 spec 삭제됨).
+**평가 기준:** `min_variant_oos_edge_bps=10.0`, `breakeven_hard_gate=enabled`, `min_fold_realized_edge_bps=8.0`, `min_oos_rank_ic=0.01`
+
+**진단 노트 (WF Fold 오염 수정 결과):**
+- **Fix A (bridge.py):** 실패 fold 예측을 0으로 censoring → 실패 fold의 anti-selection이 combined pool에 오염되지 않도록 차단. Fold 1/2 Rank IC가 0.036→**0.175/0.163**으로 대폭 개선 (오염 제거 효과 직접 확인).
+- **Fix B (rule_diagnostics.py):** `min_oos_rank_ic=0.01` 게이트 연결 + `oos_rank_ic` 필드를 recommendation records에 추가. RECOMMENDED 8개→**2개** (dm_24_96, dm_12_48만 생존). `tpc_50_200` 등 IC가 recommendation window 기준 <0.01인 신호 차단.
+- **Fix C (opt_main_futures.py):** "Low OOS IC" 실패 라벨 추가.
+- **WF Fold 구조 변화:** Fold 3이 新규 실패(IC=-0.016). Fold 4가 Pass 전환(이전 실패). CAGR: -1.3%→**-1.2%** (미미한 개선).
+- **C4 OOS Stability 개선:** rho=-0.086→**rho=+0.143** (Score 1.0/10→4.0/10). 오염 제거 후 레짐 예측력이 회복 방향.
+- **잔류 이슈:** `oos_rank_ic` 게이트가 recommendation window Spearman 기준이라 sample이 적거나 binary raw_score 신호(tpc, fzs 등)가 과차단됨. min_oos_rank_ic 임계값 또는 IC 계산 window 재검토 필요.
+- **구조적 블로커(미해소):** C3 flip=N (모든 레짐 동부호 long-bias). 복리 양전환은 **레짐별 부호 역전 신호 발굴이 선결**.
+- 과거 기록: Regime-Alpha conditioning 反證 결과는 `docs/architecture/allocation.md` §4 및 `docs/architecture/regime.md` §1에 영구 기록.
 
 ---
 
@@ -102,7 +104,7 @@ Ledger update complete.
 [CANDIDATE TOP STRATEGIES] --------------------------------------------------------------------------------------------
 | Rank | Strategy Name                       | Sample (OOS) | Profit(bps) | Win Rate |    P/L |  Score | Action | Rec |
 | ---- | ----------------------------------- | ------------ | ----------- | -------- | ------ | ------ | ------ | --- |
-| 1    | trend_pullback_continuation:tpc_... | 760 (309)    |        74.0 |    37.9% |   1.63 |  0.064 | KEEP   | Y   |
+| 1    | trend_pullback_continuation:tpc_... | 760 (309)    |        74.0 |    37.9% |   1.63 |  0.064 | KEEP   | N   |
 | 2    | dual_momentum:dm_24_96              | 1373 (556)   |        68.1 |    42.6% |   1.25 |  0.044 | KEEP   | Y   |
 | 3    | btc_corr_regime:bcr_48              | 107 (77)     |        66.4 |    53.2% |   1.94 |  0.039 | DROP   | N   |
 | 4    | btc_corr_regime:bcr_96              | 47 (40)      |        64.7 |    52.5% |   2.34 | -0.017 | DROP   | N   |
@@ -113,13 +115,13 @@ Ledger update complete.
 | 9    | rsi_reversion:rsi_14                | 2082 (1371)  |        12.2 |    42.4% |   1.06 | -0.095 | DROP   | N   |
 | 10   | cross_sectional_momentum:cs_mom_10  | 5315 (3406)  |        10.0 |    41.9% |   1.25 | -0.064 | KEEP   | N   |
 | 11   | residual_reversion:rr_48            | 1250 (511)   |         9.9 |    40.5% |   0.88 | -0.055 | DROP   | N   |
-| 12   | funding_zscore_carry:fzs_168        | 1594 (983)   |         9.8 |    42.9% |   1.33 | -0.057 | KEEP   | Y   |
-| 13   | vol_regime_reversion:vrr_40         | 824 (572)    |         9.2 |    42.3% |   1.19 |  0.007 | DROP   | Y   |
+| 12   | funding_zscore_carry:fzs_168        | 1594 (983)   |         9.8 |    42.9% |   1.33 | -0.057 | KEEP   | N   |
+| 13   | vol_regime_reversion:vrr_40         | 824 (572)    |         9.2 |    42.3% |   1.19 |  0.007 | DROP   | N   |
 | 14   | funding_acceleration_carry:fac_48   | 7376 (4986)  |         8.4 |    42.6% |   1.18 | -0.046 | DROP   | N   |
 | 15   | cross_sectional_momentum:cs_mom_20  | 7742 (4929)  |         7.9 |    42.3% |   1.23 | -0.061 | KEEP   | N   |
 | 16   | trend_donchian:donchian_18          | 1245 (821)   |         6.4 |    41.9% |   1.36 |  0.010 | KEEP   | N   |
 | 17   | cross_sectional_momentum:cs_mom_5   | 5227 (3343)  |         5.9 |    41.1% |   1.12 | -0.052 | DROP   | N   |
-| 18   | funding_zscore_carry:fzs_96         | 823 (532)    |         4.8 |    41.0% |   1.22 | -0.095 | KEEP   | Y   |
+| 18   | funding_zscore_carry:fzs_96         | 823 (532)    |         4.8 |    41.0% |   1.22 | -0.095 | KEEP   | N   |
 | 19   | funding_acceleration_carry:fac_168  | 7415 (5062)  |         4.7 |    41.7% |   1.10 | -0.021 | DROP   | N   |
 | 20   | funding_carry:funding_24            | 1804 (1176)  |         4.5 |    41.5% |   1.38 | -0.053 | KEEP   | N   |
 -----------------------------------------------------------------------------------------------------------------------
@@ -129,34 +131,28 @@ Ledger update complete.
 ----------------------------------------------------------------------------------
 | Action       | Count | Details / Selected Strategies                           |
 ----------------------------------------------------------------------------------
-| BLOCKED      | 25    | Fail Reasons: breakeven_hard_gate (25) | Event Overloa |
-|              |       | Top Blocked: bcr_48, bb_compress_20, vrr_20, rr_48, fz |
-| RECOMMENDED  | 8     | 1. dual_momentum:dm_24_96                               |
-| (Eligible)   |       | 2. vol_regime_reversion:vrr_40                          |
-| (Eligible)   |       | 3. dual_momentum:dm_12_48                               |
-| (Eligible)   |       | 4. trend_pullback_continuation:tpc_50_200               |
-| (Eligible)   |       | 5. funding_zscore_carry:fzs_96                          |
-| (Eligible)   |       | 6. rsi_reversion:rsi_6                                  |
-| (Eligible)   |       | 7. funding_zscore_carry:fzs_168                         |
-| (Eligible)   |       | 8. trend_pullback_continuation:tpc_20_100               |
+| BLOCKED      | 31    | Fail Reasons: breakeven_hard_gate (25) + Low OOS IC     |
+|              |       | Top Blocked: bcr_48, vrr_40, tpc_50_200, bb_compress_2 |
+| RECOMMENDED  | 2     | 1. dual_momentum:dm_24_96                               |
+| (Eligible)   |       | 2. dual_momentum:dm_12_48                               |
 ----------------------------------------------------------------------------------
 
 [WALK-FORWARD FOLD DETAILS]
 ----------------------------------------------------------------------------------
 | Fold | Mode       |  Rank IC |  Events | PriorP90 |  EU_p90 | Pass   |
 ----------------------------------------------------------------------------------
-| 1    | ensemble_b0 |    0.036 |   1,039 |    61.53 |   61.53 | ✅      |
-| 2    | ensemble_b0 |    0.036 |   1,148 |    37.18 |   37.18 | ✅      |
-| 3    | ensemble_b0 |   -0.010 |   1,585 |    37.88 |   37.88 | ✅      |
-| 4    | ensemble_b0 |   -0.052 |   1,909 |    40.09 |   40.09 | ❌      |
+| 1    | ensemble_b0 |    0.175 |     349 |    59.30 |   59.30 | ✅      |
+| 2    | ensemble_b0 |    0.163 |     254 |    34.72 |   34.72 | ✅      |
+| 3    | ensemble_b0 |   -0.016 |     354 |    37.86 |   37.86 | ❌      |
+| 4    | ensemble_b0 |   -0.052 |     345 |    54.35 |   54.35 | ✅      |
 ----------------------------------------------------------------------------------
 
 [BRIDGE SUMMARY] -----------------------------------
 | Metric             | Value                       |
 | ------------------ | --------------------------- |
-| Active Signals     | 7152 (sel=926)              |
+| Active Signals     | 3977 (sel=259)              |
 | Status             | wf_eligible                 |
-| Execution Time     | 57.94s                      |
+| Execution Time     | 53.35s                      |
 ----------------------------------------------------
 [ABLATION-TASK-PROF] variant=prior_rank_stop_risk total=0.6263s slice=0.0000s atr=0.0193s barriers=0.0063s engine=0.5948s attribution=0.0040s compound_eval=0.0004s accounted=0.6250s unaccounted=0.0013s
 [ABLATION-TASK-PROF] variant=prior_residual_rank_stop_risk total=0.6195s slice=0.0000s atr=0.0263s barriers=0.0082s engine=0.5795s attribution=0.0021s compound_eval=0.0021s accounted=0.6183s unaccounted=0.0013s
@@ -170,11 +166,11 @@ Ledger update complete.
 | Model Alias        |    CAGR |   MaxDD |    MAR |     Equity | Trades | Deploy | Pass  |
 | ------------------ | ------- | ------- | ------ | ---------- | ------ | ------ | ----- |
 | rule_stop_risk     |  -26.5% |   17.5% |  -1.51 |    836,286 |    626 |   1.00 |   N   |
-| prior_rank_stop_ri |   -6.8% |    7.9% |  -0.85 |    960,100 |    150 |   0.25 |   N   |
-| prior_residual_ran |   -6.2% |    6.9% |  -0.90 |    963,784 |    152 |   0.25 |   N   |
-| edge_plus_validate |   -6.2% |    6.9% |  -0.90 |    963,784 |    152 |   0.25 |   N   |
-| edge_plus_gate_eve |   -2.4% |    3.0% |  -0.80 |    985,977 |    149 |   0.25 |   N   |
-| full_portfolio_cap |   -1.3% |    1.1% |  -1.17 |    992,429 |    149 |   0.25 |   N   |
+| prior_rank_stop_ri |   -3.2% |    5.7% |  -0.57 |    981,092 |    151 |   0.25 |   N   |
+| prior_residual_ran |   -6.2% |    7.0% |  -0.89 |    963,245 |    150 |   0.25 |   N   |
+| edge_plus_validate |   -6.2% |    7.0% |  -0.89 |    963,245 |    150 |   0.25 |   N   |
+| edge_plus_gate_eve |   -2.6% |    3.0% |  -0.86 |    984,884 |    128 |   0.25 |   N   |
+| full_portfolio_cap |   -1.2% |    1.4% |  -0.87 |    993,047 |    131 |   0.25 |   N   |
 ------------------------------------------------------------------------------------------
 [EVAL-PROF] total=4.8472s config=0.0001s ablation=4.8459s render=0.0010s accounted=4.8470s unaccounted=0.0002s
 << STRATEGY: 63.23s
@@ -186,11 +182,11 @@ Ledger update complete.
 | Axis                 |  Score  | Key Metrics                                   |
 ----------------------------------------------------------------------------------
 | C2 Persistence       | 3.0/10  | dwell=3.00(micro) macro=3.00 tr=0.162 ent=0.619 |
-| C3 Distinctness      | 6.0/10  | kw_p=0.0000  flip=N  mi=0.0657                |
-| C4 OOS Stability     | 1.0/10  | rho=-0.086  n_regimes=6                       |
+| C3 Distinctness      | 6.0/10  | kw_p=0.0000  flip=N  mi=0.0342                |
+| C4 OOS Stability     | 4.0/10  | rho=+0.143  n_regimes=6                       |
 | C5 Coverage          | 10.0/10 | min=0.089 max=0.224 n_eff=5.77                |
 ----------------------------------------------------------------------------------
-| Weighted C2-C5       |  0.315  | C1(hard_gate=pass)  C6-C8(manual)             |
+| Weighted C2-C5       |  0.375  | C1(hard_gate=pass)  C6-C8(manual)             |
 ----------------------------------------------------------------------------------
 | Occupancy            |   n/a   | bull_q=0.224  bull_vol=0.212  bear_q=0.172    |
 |                      |         | bear_vol=0.141  trans=0.089  crash=0.163      |
