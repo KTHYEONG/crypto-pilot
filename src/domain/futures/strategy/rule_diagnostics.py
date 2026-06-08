@@ -525,6 +525,7 @@ def _summarize_recommendation_variants(
                 "regime_best_oos_edge_bps": regime_best_edge_bps,
                 "regime_best_name": regime_best_name,
                 "regime_pass": regime_pass,
+                "oos_rank_ic": float(rec_metrics["spearman_score_edge"]),
                 "edge_stability_bps": float("nan"),
                 "candidate_action": _candidate_action(
                     n=rec_n,
@@ -559,6 +560,7 @@ def _summarize_recommendation_variants(
                 "oos_pct_edge_pos",
                 "oos_payoff_ratio",
                 "oos_q10_shortfall_fail_rate",
+                "oos_rank_ic",
                 "event_fraction_per_bar",
                 "breakeven_mean_bps",
                 "breakeven_tstat",
@@ -816,6 +818,8 @@ def _recommendation_threshold_checks(row: pd.Series, cfg: CandidateStrategyConfi
         if (cfg.regime_diagnostic_enabled and cfg.promotion_level == "signal_cell")
         else True
     )
+    _oos_rank_ic = float(row.get("oos_rank_ic", float("nan")))
+    oos_rank_ic_ok = np.isfinite(_oos_rank_ic) and _oos_rank_ic >= cfg.min_oos_rank_ic
 
     return {
         "min_obs": int(row.get("oos_n", 0)) >= min_obs,
@@ -831,6 +835,7 @@ def _recommendation_threshold_checks(row: pd.Series, cfg: CandidateStrategyConfi
         "regime_edge": regime_ok,
         "edge_decay": edge_decay_ok,
         "hit_or_payoff": hit_or_payoff_ok,
+        "oos_rank_ic": oos_rank_ic_ok,
         "exit_policy": bool(str(row.get("exit_policy_id", ""))) if is_signal_cell else True,
     }
 
