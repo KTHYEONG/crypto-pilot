@@ -136,7 +136,7 @@ def _selection_component_frame(
     resolved_utility_mode = utility_mode if utility_mode is not None else cfg.selection_utility_mode
     turnover_proxy = _series_or_default(frame, "turnover_proxy", 1.0)
     prob_adjusted_mu_bps = pd.to_numeric(frame["mu_net_decision_bps"], errors="coerce")
-    downside_drag_bps = frame["q10_net_bps"].clip(upper=0.0).abs()
+    downside_drag_bps = float(cfg.downside_penalty) * frame["q10_net_bps"].clip(upper=0.0).abs()
     turnover_drag_bps = cfg.turnover_penalty * turnover_proxy
     expected_utility_raw_bps = prob_adjusted_mu_bps - downside_drag_bps - turnover_drag_bps
     expected_utility_bps = expected_utility_raw_bps.copy()
