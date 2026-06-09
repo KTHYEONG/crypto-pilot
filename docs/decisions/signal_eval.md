@@ -12,6 +12,11 @@ related_paths:
 last_verified: 2026-06-09
 ---
 
+## [2026-06-09] Regime-Cell Conditional Admission (P1)
+- **Delta:** `_regime_cell_admission()` 신규 + `_recommendation_threshold_checks` OR-path 주입. 변이가 특정 regime cell에서 `n_g≥60 ∧ μ_g≥8bps ∧ t_g≥1.0` 충족 시 글로벌 평균 게이트 우회. 5개 config 파라미터(`regime_cell_admission_enabled` 등) + env override(`FUTURES_CANDIDATE_REGIME_CELL_*`) 추가. 활성화 결과: RECOMMENDED 3→10, BLOCKED 30→19, Fold1 −16.1→+20.4bps, Status `blocked`→`wf_eligible`(sel=662).
+- **Rationale:** 글로벌 풀링 게이트가 carry/reversion 분산 신호를 평균 희석으로 학살 → B0 ensemble μ(a,g)가 회전할 직교 자산 부재. 적재적소 복리증식의 전제인 archetype 다양성 확보.
+- **Edge Cases/Trade-offs:** 안전게이트(`min_obs`/`q10_fail`/`event_density`)는 OR-path에서도 필수 유지. σ_g=0 시 ε 가드. **t_g는 NW 미적용 IID SE → 중첩보유 하 낙관편향**; per-cell OOS 선택은 multiple-comparison 위험 증폭 → purged/embargoed nested validation이 라이브 전 후속 과제. default off(회귀 안전).
+
 ## [2026-06-09] Signal Eval 로그/코드 정합성 수정 (P1/P2)
 - **Delta:** (1) BLOCKED `mapping`에 `breakeven_hard_gate` 라벨 추가 → raw key 노출 제거. (2) `[:40]` 절단 폐기 후 `_wrap_segments`로 전체 게이트 분포를 41-char 컬럼에 줄바꿈(82-width 테이블 보존). (3) `[GATE FAILURES: PER-VARIANT]` 신규 — variant별 실패 게이트(상위 20). (4) WF fold 테이블 `PriorP90→RlzdMean`(실제 pass 게이트=`realized_mean≥min_fold_realized_edge_bps`), `Rank IC→IC(diag)`(참고값) relabel + `(★gate)` 서브헤더. bridge.py `wf_fold_details`에 `realized_mean_bps`/`selected_total` 추가.
 - **Rationale:** 13개 게이트 중 5개만 로그 노출 + Pass 결정인자(realized_mean/lift)가 미표시되고 무관한 Rank IC가 옆에 놓여 "음수 IC가 PASS" 오독 유발. pass/fail을 표시 지표로 역검증 불가했음.
