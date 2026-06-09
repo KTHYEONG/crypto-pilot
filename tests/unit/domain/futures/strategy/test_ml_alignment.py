@@ -139,10 +139,10 @@ def test_selection_utility_mode_additive_preserves_legacy() -> None:
         events=events, cfg=cfg
     )
 
-    # Assert — additive_drag formula: mu - |q10| - turnover_penalty
+    # Assert — additive_drag formula: mu - downside_penalty * |q10| - turnover_penalty
     mu = events["mu_net_decision_bps"].to_numpy(dtype=np.float64)
     q10 = np.clip(events["q10_net_bps"].to_numpy(dtype=np.float64), None, 0.0)
-    expected_eu = mu - np.abs(q10) - float(cfg.turnover_penalty)
+    expected_eu = mu - float(cfg.downside_penalty) * np.abs(q10) - float(cfg.turnover_penalty)
     actual = frame["expected_utility_bps"].to_numpy(dtype=np.float64)
     np.testing.assert_allclose(actual, expected_eu, rtol=1e-9)
 
