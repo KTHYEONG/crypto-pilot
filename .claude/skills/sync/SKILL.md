@@ -1,3 +1,8 @@
+---
+name: sync
+description: Documentation Synchronization, ADR Logging, and Cleanup.
+---
+
 # Skill: Sync (Knowledge Synchronizer)
 
 ## Purpose
