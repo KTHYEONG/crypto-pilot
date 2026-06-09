@@ -24,7 +24,7 @@ Establishes a 2-layer causal market state from BTC price action: a continuous ri
 
 **Volatility Targeting**
 - $\hat{\sigma}_{t} = \sqrt{\text{EWMA}[ (r - \bar{r})^2 ]_{t} \cdot \text{bars\_per\_year}}$
-- $\text{vol\_scale}_{t} = \text{clip}\left(\frac{\sigma_{\text{target}}}{\hat{\sigma}_{t}}, 0.25, 1.5\right)$
+- $\text{vol\_scale}_{t} = \text{clip}\left(\frac{\sigma_{\text{target}}}{\hat{\sigma}_{t}}, \text{min\_vol\_scale}, \text{max\_vol\_scale}\right)$
 
 **Trend SNR Gate**
 - $s_{t} = \ln(P_{t}) - \text{EMA}(\ln P)_{t}$
@@ -79,3 +79,7 @@ graph TD
 | **Output**| `overlay_mult_1d` | Continuous risk multiplier applied to final portfolio weights |
 | **Output**| `code_1d` | Discrete regime integer (0-5) used for signal gating and B0 ensemble |
 | **Eval**  | `RegimeScoreCard` | Metrics C2(Persistence), C3(Distinctness), C4(Stability), C5(Coverage) |
+
+# 5. Edge Cases & Handling
+- **Flash Crash / Liquidity Vacuum:** Rapid extreme price drops trigger the CUSUM crisis condition, immediately snapping the `overlay_mult_1d` to `crisis_gross_floor` and ignoring naive volatility targeting bounds until the cooldown period expires.
+- **Zero Volatility (Stale Data):** If exchange feeds freeze (resulting in zero returns and zero MAD), statistical safeguards (small epsilon additions to MAD) prevent division-by-zero during robust Z-score calculation.
