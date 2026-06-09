@@ -57,12 +57,12 @@ graph TD
 
 | Type | Variable | Description |
 |------|----------|-------------|
-| **Input** | `P_{market}` | Raw exchange price (O, H, L, C) |
-| **Param** | `slippage_rate` | Modeled slippage based on volume and depth |
-| **Param** | `taker_fee_rate` | Exchange execution fee |
-| **Param** | `EV_HURDLE` | Minimum expected edge bps required by optimizer |
-| **State** | `Equity E_t` | Live simulation capital |
-| **State** | `Drawdown DD_t` | Peak-to-trough capital reduction fraction |
+| **Input** | `P_{market}` | Raw exchange price (O, H, L, C). Bounds: `P > 0` |
+| **Param** | `slippage_rate` | Modeled slippage based on volume and depth. Bounds: `[0.0, 1.0]` |
+| **Param** | `taker_fee_rate` | Exchange execution fee. Bounds: `[0.0, 1.0]` |
+| **Param** | `EV_HURDLE` | Minimum expected edge bps required by optimizer. Bounds: `[0.0, ∞)` |
+| **State** | `Equity E_t` | Live simulation capital. Bounds: `E_t > 0` (Liquidation at $\leq 0$) |
+| **State** | `Drawdown DD_t` | Peak-to-trough capital reduction fraction. Bounds: `[0.0, 1.0]` |
 | **Output**| `P_{fill}` | Post-friction execution price |
 
 # 5. Edge Cases & Handling
