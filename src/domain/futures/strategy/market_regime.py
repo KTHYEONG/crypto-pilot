@@ -145,6 +145,111 @@ def _compute_dispersion_z(aligned: AlignedMarketData, window: int) -> NDArray[np
     return _zscore_1d(dispersion, window)
 
 
+def _schmitt_directional_state(
+    trend_snr: NDArray[np.float64],
+    enter_theta: float,
+    exit_theta: float,
+    enter_band: NDArray[np.float64] | None = None,
+) -> NDArray[np.int8]:
+    """Stateful Schmitt hysteresis trigger for directional state.
+
+    Eliminates chatter near zero by requiring a larger threshold to enter a
+    directional state (``enter_theta``) than to exit it (``exit_theta``).
+
+    When ``enter_band`` is provided, the per-bar enter threshold is taken from
+    the self-calibrating persistence-targeted band instead of the scalar
+    ``enter_theta`` (the scalar pair is then used only to derive the
+    exit/enter ratio).  This replaces the arbitrary hardcoded threshold with a
+    data-driven one while preserving the hysteresis (exit < enter) invariant.
+
+    States:
+        0 = NEUTRAL, 1 = BULL, 2 = BEAR
+
+    Args:
+        trend_snr: Trend signal-to-noise ratio array [T].
+        enter_theta: Scalar absolute SNR enter threshold (fallback / ratio base).
+        exit_theta: Scalar absolute SNR exit threshold.  Must be < ``enter_theta``.
+        enter_band: Optional per-bar adaptive enter threshold [T].  When finite
+            and positive at bar t, enter=enter_band[t] and exit=ratio·enter_band[t]
+            with ratio = exit_theta/enter_theta.
+
+    Returns:
+        int8 array [T]: 0=NEUTRAL, 1=BULL, 2=BEAR.
+
+    Time complexity: O(T) sequential.
+    Space complexity: O(T).
+    """
+    t_len: int = trend_snr.shape[0]
+    result: NDArray[np.int8] = np.zeros(t_len, dtype=np.int8)
+    ratio: float = exit_theta / enter_theta if enter_theta > 0.0 else 0.4
+    state: int = 0  # 0=NEUTRAL
+    for t in range(t_len):
+        snr = trend_snr[t]
+        if not np.isfinite(snr):
+            result[t] = np.int8(state)
+            continue
+        if enter_band is not None and np.isfinite(enter_band[t]) and enter_band[t] > 0.0:
+            e_th = float(enter_band[t])
+            x_th = ratio * e_th
+        else:
+            e_th = enter_theta
+            x_th = exit_theta
+        if state == 0:  # NEUTRAL
+            if snr >= e_th:
+                state = 1  # → BULL
+            elif snr <= -e_th:
+                state = 2  # → BEAR
+        elif state == 1:  # BULL
+            if snr <= -x_th:
+                state = 0  # → NEUTRAL
+        else:  # BEAR (state == 2)
+            if snr >= x_th:
+                state = 0  # → NEUTRAL
+        result[t] = np.int8(state)
+    return result
+
+
+def _persistence_targeted_band(
+    snr_abs: NDArray[np.float64],
+    target_dwell: float,
+    min_n_eff: int = 60,
+) -> NDArray[np.float64]:
+    """Causal persistence-targeted transition band via Markov p_ii inversion.
+
+    Derives a per-bar band threshold such that the fraction of bars classified
+    as decisive (``|snr| >= band``) approximates the target steady-state
+    probability implied by the desired dwell time.
+
+    Math:
+        E[dwell] = 1 / (1 - p_ii)  →  p_ii = 1 - 1 / target_dwell
+        decisive_fraction ≈ 1 - p_ii = 1 / target_dwell
+        band[t] = quantile(|snr|[0..t], 1 - 1/target_dwell)
+
+    Args:
+        snr_abs: Absolute SNR values [T] (non-negative, finite or NaN).
+        target_dwell: Target expected dwell in bars. Clamped to >= 2.
+        min_n_eff: Bars required before band is updated from default (0.5).
+
+    Returns:
+        float64 band array [T].
+
+    Time complexity: O(T²·logT) causal expanding quantile.
+    Space complexity: O(T).
+    """
+    t_len: int = snr_abs.shape[0]
+    band: NDArray[np.float64] = np.full(t_len, 0.5, dtype=np.float64)
+    safe_dwell = max(float(target_dwell), 2.0)
+    target_p_ii = 1.0 - 1.0 / safe_dwell
+    # Decisive_fraction (|snr| >= band) should equal 1 - target_p_ii = 1/target_dwell.
+    # → band must be the target_p_ii-th quantile so only the top 1/dwell fraction exceeds it.
+    for t in range(min_n_eff, t_len):
+        sample = snr_abs[: t + 1]
+        finite = sample[np.isfinite(sample)]
+        if finite.size > 0:
+            band[t] = float(np.percentile(finite, target_p_ii * 100.0))
+    return band
+
+
 def _continuous_regime_codes(
     *,
     trend_snr: NDArray[np.float64],
@@ -152,6 +257,7 @@ def _continuous_regime_codes(
     crisis_active: NDArray[np.bool_],
     trend_band_arr: NDArray[np.float64] | None = None,
     vol_threshold: NDArray[np.float64] | None = None,
+    schmitt_state: NDArray[np.int8] | None = None,
 ) -> NDArray[np.int8]:
     """Assign 6-state discrete regime codes from continuous overlay signals.
 
@@ -159,11 +265,16 @@ def _continuous_regime_codes(
         trend_snr: Trend signal-to-noise ratio array [T].
         vol_scale: Volatility scaling factor array [T].
         crisis_active: Boolean crisis flag array [T].
-        trend_band_arr: Per-bar transition half-width array [T]. Bars where
+        trend_band_arr: Per-bar transition half-width array [T]. Used only
+            when ``schmitt_state`` is None. Bars where
             ``|trend_snr[t]| < trend_band_arr[t]`` are assigned transition (code 4).
             If None, falls back to fixed 0.5 for all bars (conservative default).
         vol_threshold: Per-bar adaptive threshold for quiet/volatile split [T].
             If None, falls back to fixed value 1.0 (original behaviour).
+        schmitt_state: Optional stateful Schmitt hysteresis state array [T].
+            int8: 0=NEUTRAL, 1=BULL, 2=BEAR. When provided, replaces the
+            stateless sign-cut decisiveness/direction logic; ``trend_band_arr``
+            is ignored. Backward compatible: if None, original stateless logic runs.
 
     Returns:
         int8 array of regime codes [T]:
@@ -174,13 +285,19 @@ def _continuous_regime_codes(
     """
     code = np.full(trend_snr.shape[0], 4, dtype=np.int8)  # transition = default
     finite = np.isfinite(trend_snr) & np.isfinite(vol_scale)
-    tb: NDArray[np.float64] = (
-        trend_band_arr
-        if trend_band_arr is not None
-        else np.full(trend_snr.shape[0], 0.5, dtype=np.float64)
-    )
-    decisive = finite & (np.abs(trend_snr) >= tb)  # band 밖만 방향 확정
-    bull = trend_snr >= 0.0
+    if schmitt_state is not None:
+        # Schmitt stateful path: 0=NEUTRAL → transition, 1=BULL, 2=BEAR
+        decisive = finite & (schmitt_state != 0)
+        bull = schmitt_state == 1
+    else:
+        # Stateless path (backward compat): band-based decisiveness + sign direction
+        tb: NDArray[np.float64] = (
+            trend_band_arr
+            if trend_band_arr is not None
+            else np.full(trend_snr.shape[0], 0.5, dtype=np.float64)
+        )
+        decisive = finite & (np.abs(trend_snr) >= tb)
+        bull = trend_snr >= 0.0
     # adaptive threshold: vol_threshold 제공 시 사용, 아니면 1.0 고정
     vt: NDArray[np.float64] = (
         vol_threshold if vol_threshold is not None else np.ones_like(vol_scale)
@@ -190,7 +307,7 @@ def _continuous_regime_codes(
     code[decisive & bull & ~quiet] = 1
     code[decisive & ~bull & quiet] = 2
     code[decisive & ~bull & ~quiet] = 3
-    # |trend_snr| < trend_band_arr인 finite 구간은 code 4(transition) 유지
+    # decisive==False인 finite 구간은 code 4(transition) 유지
     code[crisis_active] = 5
     return code
 
@@ -392,21 +509,33 @@ def compute_market_regime_context(
         np.ones_like(vol_median),
     ).astype(np.float64)
 
-    # causal per-bar transition band (percentile of |trend_snr|)
-    abs_snr = np.abs(np.nan_to_num(trend_snr, nan=0.0))
-    raw_band = _expanding_quantile_causal(abs_snr, regime_cfg.regime_transition_occupancy)
-    trend_band_arr = np.where(
-        np.arange(raw_band.shape[0]) >= min_n,
-        raw_band,
-        np.full_like(raw_band, 0.5),
-    ).astype(np.float64)
+    # --- P1: Schmitt hysteresis + persistence-targeted band ---
+    # RegimeConfig에 속성이 없는 경우 폴백 기본값 사용
+    enter_theta: float = float(getattr(regime_cfg, "trend_hysteresis_enter", 0.35))
+    exit_theta: float = float(getattr(regime_cfg, "trend_hysteresis_exit", 0.15))
+    target_dwell: float = float(getattr(regime_cfg, "persistence_target_dwell", 6.0))
+
+    trend_snr_clean: NDArray[np.float64] = np.nan_to_num(trend_snr, nan=0.0)
+
+    # persistence-targeted band: self-calibrating adaptive enter threshold
+    abs_snr: NDArray[np.float64] = np.abs(trend_snr_clean)
+    trend_band_arr: NDArray[np.float64] = _persistence_targeted_band(
+        abs_snr, target_dwell, min_n
+    )
+
+    # Schmitt stateful directional state (hysteresis) driven by the adaptive band;
+    # scalar enter/exit thetas only set the exit/enter ratio (and pre-min_n fallback).
+    schmitt_state: NDArray[np.int8] = _schmitt_directional_state(
+        trend_snr_clean, enter_theta, exit_theta, enter_band=trend_band_arr
+    )
 
     code = _continuous_regime_codes(
-        trend_snr=np.nan_to_num(trend_snr, nan=0.0),
+        trend_snr=trend_snr_clean,
         vol_scale=overlay.vol_scale_1d,
         crisis_active=overlay.crisis_active_1d,
         trend_band_arr=trend_band_arr,
         vol_threshold=vol_threshold,
+        schmitt_state=schmitt_state,
     )
 
     return MarketRegimeContext(
