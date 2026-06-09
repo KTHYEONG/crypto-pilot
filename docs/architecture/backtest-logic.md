@@ -64,3 +64,7 @@ graph TD
 | **State** | `Equity E_t` | Live simulation capital |
 | **State** | `Drawdown DD_t` | Peak-to-trough capital reduction fraction |
 | **Output**| `P_{fill}` | Post-friction execution price |
+
+# 5. Edge Cases & Handling
+- **Market Gaps Exceeding Stops:** If the market opens dramatically below a Long stop ($O_{t} < S$), the system does not magically fill at $S$. It fills at $O_{t}$ minus additional slippage, realistically simulating extreme tail-risk losses during flash events.
+- **Cost Accumulation on Ping-Pong Trading:** High-frequency flipping of target weights incurs massive friction. The cost invariant ensures friction is fully subtracted, driving `Expected Net Edge` negative and effectively disabling hyper-active noisy variants during optimization.

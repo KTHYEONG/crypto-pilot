@@ -65,3 +65,7 @@ graph TD
 | **Param** | `min_notional` | Exchange minimum order size limit (default: 20 USDT) |
 | **Output**| `Equity Curve` | Time-series of account equity $E_{T}$ |
 | **Output**| `Trades Log` | Detailed ledger of all fills, prices, and fees |
+
+# 5. Edge Cases & Handling
+- **Insufficient Margin for Any Execution:** If target weight calculation demands margin exceeding current equity bounds despite step quantization, `Q` clamps strictly to maximum viable capital, avoiding over-leverage.
+- **Concurrent Liquidation vs Stop-Loss:** Processed strictly by mathematical severity. If a 1m candle's high/low breaches both Liquidation and Stop levels simultaneously, Liquidation path takes absolute precedence, instantly clearing the position without attempting partial stop execution.
