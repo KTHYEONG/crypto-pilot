@@ -58,11 +58,11 @@ graph TD
 
 | Type | Variable | Description |
 |------|----------|-------------|
-| **Input** | `target_weights_2d` | $[B_{4h}, N]$ array of portfolio target weights |
-| **Input** | `exec_ohlc_1m` | $[B_{1m}, N]$ arrays for simulating intrabar paths |
-| **Input** | `funding_event_mask`| $[B_{1m}, N]$ array indicating funding settlement times |
-| **Param** | `round_trip_cost_bps` | Universal execution cost parameter from `settings.py` |
-| **Param** | `min_notional` | Exchange minimum order size limit (default: 20 USDT) |
+| **Input** | `target_weights_2d` | $[B_{4h}, N]$ array of portfolio target weights. Bounds: `[-1.0, 1.0]` per asset |
+| **Input** | `exec_ohlc_1m` | $[B_{1m}, N]$ arrays for simulating intrabar paths. Bounds: `P > 0` |
+| **Input** | `funding_event_mask`| $[B_{1m}, N]$ array indicating funding settlement times. Bounds: `[0, 1]` |
+| **Param** | `round_trip_cost_bps` | Universal execution cost parameter from `settings.py`. Bounds: `[0.0, ∞)` |
+| **Param** | `min_notional` | Exchange minimum order size limit. Bounds: `(0.0, ∞)` |
 | **Output**| `Equity Curve` | Time-series of account equity $E_{T}$ |
 | **Output**| `Trades Log` | Detailed ledger of all fills, prices, and fees |
 
