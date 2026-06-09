@@ -3,17 +3,17 @@
 
 # Mode Full (ALO/Ensemble) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-09 (Signal Eval 강화 — IC t-stat 게이트 추가, q10_fail 0.90→0.65, BLOCKED 섹션 렌더링 버그 수정)
+**최신 갱신:** 2026-06-09 (로그 정합성 수정 — mapping 버그·절단 제거, WF fold RlzdMean 노출, per-variant 게이트 실패 테이블 추가)
 **현재 상태:** `BLOCKED (Ensemble B0)` — 2-Fold Pass (`Status: blocked`, fold_pass_ratio 2/4 < 60%). **정상 상태**
 **평가 기준:** `min_variant_oos_edge_bps=10.0`, `breakeven_hard_gate=enabled`, `min_fold_realized_edge_bps=8.0`, `min_oos_rank_ic=0.01`, `min_ic_tstat=0.8`, `max_variant_oos_q10_fail_rate=0.65`, `min_wf_fold_pass_ratio=0.60`
 
-**진단 노트 (Signal Eval 강화 결과):**
-- **신규 게이트 (IC t-stat):** `min_ic_tstat=0.8` 추가. Fisher 근사 `t = IC × √(N−2) / √(1−IC²)`. **N은 OOS window 표본 수(`oos_ic_n`)** 사용 — IC가 OOS window에서 계산되므로 IS window 표본 수(`oos_n`)를 쓰면 t-stat이 부풀려짐(예: tpc_20_100 N=772→t=1.04 vs 정직한 N=537→t=0.87). 정직한 t-stat: dm_24_96(N=556, t=1.04), tpc_50_200(N=309, t=1.13), tpc_20_100(N=537, t=0.87) 모두 통과.
-- **q10_fail 강화:** `max_variant_oos_q10_fail_rate: 0.90 → 0.65`. 이전 0.90은 사실상 무효 게이트. 65%로 꼬리 위험 하한 부여.
-- **버그 수정 2건:** (1) `rule_diagnostics.py` 인덴테이션 오류(`recommendation_failure_report` 미설정), (2) `bridge.py` WF fold 실패 조기 반환 경로에 `failure_report` 키 누락 → BLOCKED 섹션 복구.
-- **결과:** RECOMMENDED 3개(dm_24_96, tpc_50_200, tpc_20_100) 유지. BLOCKED 30개 정상 표시. Rec 컬럼 정합(tpc_50_200=Y, dm_12_48=N).
-- **근본 원인:** 신호 풀이 장세 추세(momentum) 편향 → 약세(2025.10~2026.03) OOS 기간에 수익성 악화. Fold 2/4 pass.
-- **다음 선택지:** (1) `min_wf_fold_pass_ratio` 완화(0.60→0.50), (2) mean-reversion/short 신호 추가, (3) 기간/파라미터 재조정.
+**진단 노트 (로그 정합성 수정 결과):**
+- **mapping 버그 수정:** `breakeven_hard_gate` raw key → `Breakeven Gate` 가독 라벨. fail_reasons 40자 절단 제거 → 전체 8개 gate 분포 노출.
+- **WF fold 실제 게이트 지표:** `PriorP90` → `RlzdMean`(실제 pass 기준: realized_mean≥8bps). Fold1=−16.1bps(❌), Fold2=+56.0(✅), Fold3=+90.1(✅), Fold4=+7.5(❌, <8bps). `IC(diag)`으로 relabel — Rank IC는 pass 결정인자 아님 명시.
+- **per-variant 게이트 실패 테이블 추가:** `[GATE FAILURES: PER-VARIANT]` — 30개 blocked 중 상위 20개, 각 variant별 실패 게이트 명시.
+- **핵심 진단:** Fold4 RlzdMean=7.5bps < threshold=8.0bps로 간신히 탈락. `min_fold_realized_edge_bps` 완화(8.0→6.0) 또는 추세 신호 외 pool 확대가 필요.
+- **근본 원인:** 신호 풀 momentum 편향 → 약세(2025.10~2026.03) OOS에서 Fold1 −16.1bps 크게 손실. Fold 2/4 pass.
+- **다음 선택지:** (1) `min_wf_fold_pass_ratio` 완화(0.60→0.50), (2) mean-reversion/short 신호 추가, (3) `min_fold_realized_edge_bps` 8.0→6.0 완화.
 
 ---
 
@@ -128,21 +128,51 @@ Ledger update complete.
 ----------------------------------------------------------------------------------
 | Action       | Count | Details / Selected Strategies                           |
 ----------------------------------------------------------------------------------
-| BLOCKED      | 30    | Fail Reasons: breakeven_hard_gate (25) | Event Overloa |
-|              |       | Top Blocked: bcr_48, vrr_40, dm_12_48, bb_compress_20  |
+| BLOCKED      | 30    | Fail Reasons: Breakeven Gate (25) | Event Overload (8)  |
+|              |       |               Poor Hit/Payoff (18) | Low IC t-stat (30) |
+|              |       |               Low Mean Edge (15) | Low Median (6)       |
+|              |       |               Low Obs (2) | Low OOS IC (28)             |
+|              |       | Top Blocked: bcr_48, vrr_40, dm_12_48, bb_compress_20,  |
 | RECOMMENDED  | 3     | 1. dual_momentum:dm_24_96                               |
 | (Eligible)   |       | 2. trend_pullback_continuation:tpc_50_200               |
 | (Eligible)   |       | 3. trend_pullback_continuation:tpc_20_100               |
 ----------------------------------------------------------------------------------
 
+[GATE FAILURES: PER-VARIANT]
+----------------------------------------------------------------------------------
+| Variant                        | Action           | Failed Gates               |
+----------------------------------------------------------------------------------
+| btc_corr_regime:bcr_48         | INSUFFICIENT_OBS | Low Obs, Breakeven Gate, … |
+| vol_regime_reversion:vrr_40    | KEEP_CANDIDATE   | Low OOS IC, Low IC t-stat  |
+| dual_momentum:dm_12_48         | KEEP_CANDIDATE   | Low OOS IC, Low IC t-stat  |
+| vol_breakout:bb_compress_20    | INSUFFICIENT_OBS | Breakeven Gate, Low OOS I… |
+| funding_zscore_carry:fzs_96    | KEEP_CANDIDATE   | Low OOS IC, Low IC t-stat  |
+| vol_regime_reversion:vrr_20    | INSUFFICIENT_OBS | Breakeven Gate, Low Media… |
+| rsi_reversion:rsi_6            | KEEP_CANDIDATE   | Low OOS IC, Low IC t-stat  |
+| funding_zscore_carry:fzs_168   | KEEP_CANDIDATE   | Low OOS IC, Low IC t-stat  |
+| residual_reversion:rr_48       | DROP_OR_REWORK   | Breakeven Gate, Low Media… |
+| funding_zscore_carry:fzs_48    | KEEP_CANDIDATE   | Breakeven Gate, Low OOS I… |
+| residual_reversion:rr_24       | DROP_OR_REWORK   | Breakeven Gate, Poor Hit/… |
+| rsi_reversion:rsi_14           | DROP_OR_REWORK   | Breakeven Gate, Poor Hit/… |
+| btc_residual_momentum:brm_48   | KEEP_CANDIDATE   | Breakeven Gate, Low OOS I… |
+| funding_acceleration_carry:fac | DROP_OR_REWORK   | Breakeven Gate, Event Ove… |
+| bollinger_reversion:bollinger_ | DROP_OR_REWORK   | Breakeven Gate, Poor Hit/… |
+| trend_donchian:donchian_18     | KEEP_CANDIDATE   | Breakeven Gate, Low Mean … |
+| funding_carry:funding_24       | KEEP_CANDIDATE   | Breakeven Gate, Low Mean … |
+| cross_sectional_momentum:cs_mo | DROP_OR_REWORK   | Breakeven Gate, Low Mean … |
+| btc_corr_regime:bcr_24         | INSUFFICIENT_OBS | Breakeven Gate, Low Mean … |
+| funding_acceleration_carry:fac | DROP_OR_REWORK   | Breakeven Gate, Low Mean … |
+----------------------------------------------------------------------------------
+
 [WALK-FORWARD FOLD DETAILS]
 ----------------------------------------------------------------------------------
-| Fold | Mode       |  Rank IC |  Events | PriorP90 |  EU_p90 | Pass   |
+| Fold | Mode       | IC(diag) |  Events | RlzdMean |  EU_p90 | Pass   |
+|      |            |    (ref) |         |  (★gate) | (★gate) |        |
 ----------------------------------------------------------------------------------
-| 1    | ensemble_b0 |   -0.031 |     393 |   139.01 |  139.01 | ❌      |
-| 2    | ensemble_b0 |   -0.010 |     295 |    79.51 |   79.51 | ✅      |
-| 3    | ensemble_b0 |    0.051 |     341 |    93.50 |   93.50 | ✅      |
-| 4    | ensemble_b0 |   -0.132 |     353 |   101.69 |  101.69 | ❌      |
+| 1    | ensemble_b0 |   -0.031 |     393 |    -16.1 |  139.01 | ❌      |
+| 2    | ensemble_b0 |   -0.010 |     295 |     56.0 |   79.51 | ✅      |
+| 3    | ensemble_b0 |    0.051 |     341 |     90.1 |   93.50 | ✅      |
+| 4    | ensemble_b0 |   -0.132 |     353 |      7.5 |  101.69 | ❌      |
 ----------------------------------------------------------------------------------
 
 [BRIDGE SUMMARY] -----------------------------------
@@ -150,7 +180,7 @@ Ledger update complete.
 | ------------------ | --------------------------- |
 | Active Signals     | 0 (sel=0)                   |
 | Status             | blocked                     |
-| Execution Time     | 53.39s                      |
+| Execution Time     | 54.25s                      |
 ----------------------------------------------------
 
 [ABLATION STUDY FRONTIER] ----------------------------------------------------------------
