@@ -78,6 +78,7 @@ def test_bridge_passes_no_leak_recommendation_window(monkeypatch: Any) -> None:
             recommendation_basis="fit_calibration",
             recommendation_split=(0, 0),
             report_split=(0, 0),
+            recommendation_failure_report=None,
         )
 
     monkeypatch.setattr(
@@ -194,6 +195,7 @@ def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) 
             recommended_keep_signal_cells=(), recommended_flip_signal_cells=(),
             recommendation_basis="fit_calibration",
             recommendation_split=(0, 0), report_split=(0, 0),
+            recommendation_failure_report=None,
         ),
     )
 
@@ -261,7 +263,7 @@ def test_bridge_emits_profile_log_when_raw_events_empty(
     monkeypatch: Any,
     caplog: Any,
 ) -> None:
-    caplog.set_level(logging.INFO)
+    caplog.set_level(logging.DEBUG)
     aligned = SimpleNamespace(
         datetimes=np.asarray([np.datetime64("2026-01-01T00:00:00")], dtype="datetime64[ns]"),
         symbols=("BTCUSDT",),
@@ -392,6 +394,7 @@ def test_bridge_realized_fold_survival_fails_when_selected_realized_edge_is_nega
             recommendation_basis="fit_calibration",
             recommendation_split=(0, 0),
             report_split=(0, 0),
+            recommendation_failure_report=None,
         ),
     )
 
@@ -531,6 +534,8 @@ def test_bridge_reports_shadow_profile_when_production_selection_stays_blocked(m
             "profitable_after_hurdle_label": [1, 1, 1, 1],
             "mae_bps": [-6.0, -8.0, -5.0, -7.0],
             "mfe_bps": [18.0, 22.0, 15.0, 20.0],
+            "archetype": ["trend", "trend", "trend", "trend"],
+            "entry_regime_code": [0, 0, 0, 0],
         }
     )
 
@@ -554,6 +559,7 @@ def test_bridge_reports_shadow_profile_when_production_selection_stays_blocked(m
             recommendation_basis="fit_calibration",
             recommendation_split=(0, 0),
             report_split=(0, 0),
+            recommendation_failure_report=None,
         ),
     )
 
@@ -580,15 +586,15 @@ def test_bridge_reports_shadow_profile_when_production_selection_stays_blocked(m
         lambda *_, **__: _FakeDataset(),
     )
     monkeypatch.setattr(
-        "src.domain.futures.strategy.candidate_workflow.fit_candidate_gate",
+        "src.domain.futures.strategy.candidate_gate.fit_candidate_gate",
         lambda *_, **__: SimpleNamespace(calibration_used=False, calibration_reason="test"),
     )
     monkeypatch.setattr(
-        "src.domain.futures.strategy.candidate_workflow.predict_candidate_gate",
+        "src.domain.futures.strategy.candidate_gate.predict_candidate_gate",
         lambda *_, **__: np.array([0.30, 0.34, 0.31, 0.35], dtype=np.float64),
     )
     monkeypatch.setattr(
-        "src.domain.futures.strategy.candidate_workflow.fit_candidate_edge_models",
+        "src.domain.futures.strategy.candidate_edge.fit_candidate_edge_models",
         lambda *_, **__: None,
     )
 
@@ -624,7 +630,7 @@ def test_bridge_reports_shadow_profile_when_production_selection_stays_blocked(m
             validation_diagnostics={},
         )
 
-    monkeypatch.setattr("src.domain.futures.strategy.candidate_workflow.predict_candidate_edges", fake_predict_edges)
+    monkeypatch.setattr("src.domain.futures.strategy.candidate_edge.predict_candidate_edges", fake_predict_edges)
 
     strategy_cfg = StrategyConfig()
     object.__setattr__(
