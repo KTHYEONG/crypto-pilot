@@ -1,28 +1,30 @@
 ---
 name: implement
-description: Apply blueprint changes with precision, focusing on 100% fidelity and efficiency.
+description: Translate logic and test blueprints into working Python code with L1 validation.
 ---
 
 # Skill: Implement
 
 ## Purpose
-Translate the Blueprint into working code with surgical precision. Follow instructions exactly as defined by the architect.
+Translate the logical Blueprint into working Python code (both `src/` and `tests/`). You are the "Execution Builder". The `spec` phase has solved the algorithms and test scenarios. Your job is syntax and translation.
 
 ## Execution Rules
-1. **Blueprint Truth:** Read the blueprint in `docs/specs/` using `read_file` before acting. Follow `Contract` and `Logic` strictly.
-2. **Surgical Tools:** ALWAYS use `replace` instead of overwriting files whenever possible to minimize token waste and preserve context.
-3. **Local Quality (L1):** After modifying a file, immediately run `uv run ruff check --fix [file]` and `uv run mypy [file]` to ensure the specific change is valid. This prevents cascading errors into the `check` phase.
-4. **No Drift:** Do NOT perform unrelated refactoring or "clean-up" outside the `Surgical Plan`.
-5. **Fallback:** If the Blueprint conflicts with the actual code or if the `replace` tool fails due to context mismatch, **STOP immediately**. Report the conflict and wait for clarification. Do not force the implementation.
-6. **Iteration Limit:** Max 3 attempts to fix local lint/type failures. If unresolved, hand off to `audit` or `spec` for re-evaluation.
+1. **Blueprint Truth:** Read `docs/specs/`. Adhere strictly to the defined `Contract` and `Algorithmic Flow`.
+2. **Double Coding (Src & Test):** 
+   - Write the logic in the target `.py` file.
+   - Write the corresponding test code in `tests/` based on the `Test Scenario Design` provided in the spec.
+3. **Local Validation (L1):** For EVERY modified file (src and test), run:
+   - `uv run ruff check --fix [file]`
+   - `uv run mypy [file]`
+4. **Self-Correction:** Fix syntax/type errors (max 3 tries). If unresolved, **STOP** and return to `spec`.
 
 ## Output Format
 ```md
-### 🏗️ 코드 구현: [Blueprint Name]
-- **작업 파일 목록:** `[Paths]`
-- **Local Check (L1):** [Pass/Fail] (Ruff/Mypy result for modified files)
-- **작업 진행률:**
-  - [ ] Step 1: [Short name]
-  - [ ] Step 2: [Short name]
-- **현재 상태 및 이슈:** [Status / Conflicts noted]
+### 🏗️ Implementation: [Blueprint Name]
+- **Target Files:** `[src/...]`, `[tests/...]`
+- **L1 Validation:** [Pass/Fail]
+- **Progress:**
+  - [ ] Wrote logic for: [X]
+  - [ ] Wrote tests for: [X] (Based on Scenarios 1, 2, 3)
+- **Status:** [Status]
 ```
