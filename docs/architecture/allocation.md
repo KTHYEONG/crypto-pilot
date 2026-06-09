@@ -67,14 +67,14 @@ graph TD
 |------|----------|-------------|
 | **Input** | `events: pd.DataFrame` | Candidate events from L1 signal generation |
 | **Input** | `entry_regime_code: int` | Regime code at the time of signal entry |
-| **Param** | `ensemble_shrinkage_k` | Regularization strength toward global mean |
-| **Param** | `min_oos_rank_ic` | Minimum OOS Spearman Rank IC (default: 0.01) |
-| **Param** | `min_ic_tstat` | Minimum IC t-statistic for signal validity (default: 0.8) |
-| **Param** | `max_variant_oos_q10_fail_rate` | Maximum allowed fraction of events failing q10 threshold (default: 0.65) |
+| **Param** | `ensemble_shrinkage_k` | Regularization strength toward global mean. Bounds: `[0, ∞)` |
+| **Param** | `min_oos_rank_ic` | Minimum OOS Spearman Rank IC. Bounds: `[-1.0, 1.0]` |
+| **Param** | `min_ic_tstat` | Minimum IC t-statistic for signal validity. Bounds: `[0.0, ∞)` |
+| **Param** | `max_variant_oos_q10_fail_rate` | Maximum allowed fraction of events failing q10 threshold. Bounds: `[0.0, 1.0]` |
 | **Output**| `expected_net_bps` | Shrinkage-adjusted expected return per event |
 | **Output**| `target_weights` | Final portfolio allocation weights per event |
 
 # 5. Edge Cases & Handling
-- **Missing OOS Samples (Sparse Signals):** If {oos} < 3$, {stat}$ is forced to 0.0 to strictly prevent division-by-zero or inflated confidence in rare patterns.
+- **Missing OOS Samples (Sparse Signals):** If $N_{oos} < 3$, $t_{stat}$ is forced to 0.0 to strictly prevent division-by-zero or inflated confidence in rare patterns.
 - **Unseen Regimes in Live Trading:** If the system encounters an `(archetype, regime)` tuple missing from the trained ensemble, it falls back gracefully to the archetype mean, then the global mean.
 - **OOS Fold Failure (Contamination Defense):** If a walk-forward fold exhibits deeply negative out-of-sample edge, its predictions are censored (forced to 0) rather than dropped, preserving the matrix shape while neutralizing its allocation power.
