@@ -16,9 +16,9 @@ def test_build_run_config_accepts_full_phase() -> None:
     assert cfg.phase == "full"
 
 
-def test_build_run_config_accepts_ml_phase() -> None:
-    cfg = build_run_config_from_args({"phase": "ml", "timeframe": "4h", "trials": 1})
-    assert cfg.phase == "ml"
+def test_build_run_config_accepts_alo_phase() -> None:
+    cfg = build_run_config_from_args({"phase": "alo", "timeframe": "4h", "trials": 1})
+    assert cfg.phase == "alo"
 
 
 def test_build_run_config_rejects_strategy_phase() -> None:
@@ -29,7 +29,7 @@ def test_build_run_config_rejects_strategy_phase() -> None:
 
 def test_build_run_config_backward_compatibility_alpha() -> None:
     cfg = build_run_config_from_args({"phase": "alpha", "timeframe": "4h", "trials": 1})
-    assert cfg.phase == "ml"
+    assert cfg.phase == "alo"
 
 
 def test_build_run_config_rejects_legacy_quick_backtest_phase() -> None:
