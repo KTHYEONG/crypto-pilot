@@ -30,11 +30,11 @@ Generates a Point-In-Time (PIT) valid, survivorship-bias-free trading universe t
 - Strict requirement: `knowledge_date <= as_of`. No forward-looking metadata or delisting knowledge is allowed.
 
 **7-Stage Funnel Hurdles**
-- **S1 (Structure):** `listing_age_days >= 90`
-- **S2 (Quality):** `min_is_coverage >= 0.80`, `min_coverage_60d >= 0.95`
-- **S3 (Liquidity):** `adv_usdt_median >= 25M`, `max_amihud_30d <= 1.63e-9`
-- **S4 (Cost):** `execution_cost_bps <= 50.0`
-- **S5 (Risk):** $0.05 \leq \text{vol\_30d} \leq 4.0$, $|\text{funding\_zscore}| \leq 2.5$
+- **S1 (Structure):** `listing_age_days >= min_listing_days`
+- **S2 (Quality):** `min_is_coverage >= min_coverage_is`, `min_coverage_60d >= min_coverage_60d_req`
+- **S3 (Liquidity):** `adv_usdt_median >= min_adv_usdt`, `max_amihud_30d <= max_amihud`
+- **S4 (Cost):** `execution_cost_bps <= max_exec_cost_bps`
+- **S5 (Risk):** $\text{min\_vol} \leq \text{vol\_30d} \leq \text{max\_vol}$, $|\text{funding\_zscore}| \leq \text{max\_funding\_zscore}$
 
 # 3. Architecture Flow
 
@@ -61,3 +61,7 @@ graph TD
 | **Param** | `max_exec_cost_bps` | Maximum tolerated round-trip execution cost (default: 50.0) |
 | **Output**| `Universe Snapshot` | Static, timestamped set of valid symbols |
 | **Output**| `Static Metadata` | Metrics passed downstream: `vol_30d`, `friction_score`, `beta_vs_market`, etc. |
+
+# 5. Edge Cases & Handling
+- **Exchange API Rule Changes (e.g., Tick Size):** The universe generation caches API exchange info as-of the `knowledge_date`. If an exchange modifies tick sizes, the snapshot uses the historical structure parameters to maintain exact simulation alignment.
+- **Delisted/Dead Coins:** Symbols that are delisted post-`knowledge_date` remain in the snapshot if they met the criteria at `as_of`. This structurally enforces the inclusion of failing assets to prevent survivorship bias in the backtest.

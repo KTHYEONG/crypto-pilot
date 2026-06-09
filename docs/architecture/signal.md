@@ -63,3 +63,7 @@ graph TD
 | **Param** | `mean_reversion_regime_entry_gating_enabled` | Blocks mean-reversion entries in volatile/crash regimes (boolean) |
 | **Output**| `CandidateSignalPanel` | Dense 2D structure containing `signed_score`, `side_hint`, and `valid_mask` |
 | **Output**| `events: pd.DataFrame` | Sparse tabulated representation of valid entry signals |
+
+# 5. Edge Cases & Handling
+- **Data Gap/Missing Bars:** If input market data has NaNs due to exchange downtime, indicator valid_mask is strictly enforced (False), preventing erroneous signal generation.
+- **Divergent Trend & Reversion Overlap:** Handled gracefully since rule panels are grouped by archetype; if both trigger simultaneously, they produce distinct sparse events evaluated independently by downstream allocators.

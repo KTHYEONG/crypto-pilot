@@ -34,8 +34,10 @@ last_verified: [YYYY-MM-DD]
 - **Constraint:** NO implementation steps. NO history or "how we fixed it" prose.
 - **`1. Purpose`**: 1-line statement of the module's exact role in the system.
 - **`2. Core Logic & Math`**: Complete mathematical formulas ($y = f(x)$) or state machine logic.
+  - **Hybrid Representation:** MUST use parameter/variable names (e.g., `min_ic_tstat`) instead of hardcoded constants (e.g., `0.8`) in formulas. The document holds the mathematical skeleton; the code holds the values.
 - **`3. Architecture Flow`**: MUST use `mermaid` diagrams for visual structural mapping.
-- **`4. Core Variables & I/O`**: Use Markdown Tables strictly for parameters, inputs, and outputs.
+- **`4. Core Variables & I/O`**: Use Markdown Tables strictly for parameters, inputs, and outputs. MUST include logical limits/bounds if applicable.
+- **`5. Edge Cases & Handling`**: 2-3 bullet points defining system fallback mechanisms for physical/data anomalies (e.g., flash crashes, missing data) not covered by standard formulas.
 
 ### 3.2 Decision Records (`docs/decisions/*.md`)
 - **Goal:** Ultra-compressed logic history to prevent file bloat over multiple iterations.

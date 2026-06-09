@@ -39,12 +39,12 @@ Transforms L1 candidate events into optimal portfolio weights via regime-conditi
 - Level 2 (Missing archetype): $\mu(a) \rightarrow \mu_{\text{global}}$
 
 **Signal Evaluation Gates (OOS)**
-- $IC_{\text{rank}} = \text{Spearman}(\text{score}, \text{target})$ over OOS window. Gate: $IC_{\text{rank}} \geq 0.01$
-- $t_{\text{stat}} = IC_{\text{rank}} \times \sqrt{\frac{N_{\text{oos}} - 2}{1 - IC_{\text{rank}}^2}}$. Gate: $t_{\text{stat}} \geq 0.8$
-- Q10 Tail Risk: $\text{Fail Rate} \leq 0.65$
+- $IC_{\text{rank}} = \text{Spearman}(\text{score}, \text{target})$ over OOS window. Gate: $IC_{\text{rank}} \geq \text{min\_oos\_rank\_ic}$
+- $t_{\text{stat}} = IC_{\text{rank}} \times \sqrt{\frac{N_{\text{oos}} - 2}{1 - IC_{\text{rank}}^2}}$. Gate: $t_{\text{stat}} \geq \text{min\_ic\_tstat}$
+- Q10 Tail Risk: $\text{Fail Rate} \leq \text{max\_variant\_oos\_q10\_fail\_rate}$
 
 **Walk-Forward Survival Censoring**
-- If fold realized edge $< 8.0$ bps (expected vs breakeven floor $\approx 3.75$ bps), fold fails.
+- If fold realized edge $<$ `min_fold_realized_edge_bps`, fold fails.
 - Failed fold predictions: $\mu, q10, q90, p_{\text{pass}} \rightarrow 0$ to prevent anti-selection in the portfolio pool.
 
 # 3. Architecture Flow
@@ -73,3 +73,8 @@ graph TD
 | **Param** | `max_variant_oos_q10_fail_rate` | Maximum allowed fraction of events failing q10 threshold (default: 0.65) |
 | **Output**| `expected_net_bps` | Shrinkage-adjusted expected return per event |
 | **Output**| `target_weights` | Final portfolio allocation weights per event |
+
+# 5. Edge Cases & Handling
+- **Missing OOS Samples (Sparse Signals):** If {oos} < 3$, {stat}$ is forced to 0.0 to strictly prevent division-by-zero or inflated confidence in rare patterns.
+- **Unseen Regimes in Live Trading:** If the system encounters an `(archetype, regime)` tuple missing from the trained ensemble, it falls back gracefully to the archetype mean, then the global mean.
+- **OOS Fold Failure (Contamination Defense):** If a walk-forward fold exhibits deeply negative out-of-sample edge, its predictions are censored (forced to 0) rather than dropped, preserving the matrix shape while neutralizing its allocation power.
