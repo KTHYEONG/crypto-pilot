@@ -636,7 +636,22 @@ def run_candidate_ablation(
             if fit_set.y_return_bps is not None
             else fit_set.y_edge_bps
         )
-        ensemble_model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
+        proof_events: pd.DataFrame | None = None
+        proof_fold_ids: np.ndarray | None = None
+        if not calibration_set.event_index.empty:
+            proof_events = calibration_set.event_index.copy()
+            proof_events["net_return_bps"] = (
+                calibration_set.y_return_bps
+                if calibration_set.y_return_bps is not None
+                else calibration_set.y_edge_bps
+            )
+            proof_fold_ids = np.zeros(proof_events.shape[0], dtype=np.int32)
+        ensemble_model = fit_regime_conditional_ensemble(
+            train_events=train_events,
+            cfg=cfg,
+            oos_proof_events=proof_events,
+            fold_ids=proof_fold_ids,
+        )
         ml_out = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index, cfg=cfg)
         p_pass = ml_out.p_pass
     else:

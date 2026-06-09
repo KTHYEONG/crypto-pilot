@@ -5,6 +5,8 @@ import numpy as np
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import RegimeConfig
 from src.domain.futures.strategy.market_regime import (
+    _persistence_targeted_band,
+    _schmitt_directional_state,
     compute_market_regime_context,
     compute_risk_overlay,
     evaluate_regime_quality,
@@ -124,6 +126,159 @@ def test_compute_risk_overlay_when_regime_break_occurs_flags_cusum_crisis() -> N
         cfg.crisis_gross_floor,
         atol=1e-12,
         rtol=0.0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# P1: Schmitt hysteresis + persistence-targeted band tests (S8-S12)
+# ---------------------------------------------------------------------------
+
+
+def test_schmitt_hysteresis_reduces_flips_when_snr_oscillates_near_zero() -> None:
+    # Arrange
+    t = 100
+    snr = np.tile([0.02, -0.02], t // 2).astype(np.float64)
+    stateless_bull = (snr >= 0.0).astype(np.int8)
+    stateless_flips = int(np.sum(stateless_bull[1:] != stateless_bull[:-1]))
+
+    # Act
+    hysteresis_state = _schmitt_directional_state(snr, enter_theta=0.35, exit_theta=0.15)
+    hysteresis_flips = int(np.sum(hysteresis_state[1:] != hysteresis_state[:-1]))
+
+    # Assert
+    assert hysteresis_flips < stateless_flips
+    assert hysteresis_flips <= 2  # near-zero 진동이면 초기 최대 1회 전환만
+
+
+def test_schmitt_bull_state_maintained_above_exit_when_snr_stays_positive() -> None:
+    # Arrange
+    snr = np.array([0.4, 0.2, 0.2, 0.2, 0.2], dtype=np.float64)
+
+    # Act
+    state = _schmitt_directional_state(snr, enter_theta=0.35, exit_theta=0.15)
+
+    # Assert — t=0 진입, t=1..4 BULL 유지 (0.2 > -exit_theta=-0.15)
+    assert all(s == 1 for s in state)
+
+
+def test_schmitt_bull_exits_to_neutral_when_snr_crosses_negative_exit_theta() -> None:
+    # Arrange
+    snr = np.array([0.4, -0.2, -0.2], dtype=np.float64)
+
+    # Act
+    state = _schmitt_directional_state(snr, enter_theta=0.35, exit_theta=0.15)
+
+    # Assert
+    assert state[0] == 1  # BULL 진입 (snr=0.4 >= enter_theta=0.35)
+    assert state[1] == 0  # NEUTRAL (snr=-0.2 <= -exit_theta=-0.15)
+    assert state[2] == 0  # NEUTRAL 유지
+
+
+def test_schmitt_bear_exits_to_neutral_when_snr_crosses_positive_exit_theta() -> None:
+    # Arrange
+    snr = np.array([-0.4, 0.2, 0.2], dtype=np.float64)
+
+    # Act
+    state = _schmitt_directional_state(snr, enter_theta=0.35, exit_theta=0.15)
+
+    # Assert
+    assert state[0] == 2  # BEAR 진입 (snr=-0.4 <= -enter_theta=-0.35)
+    assert state[1] == 0  # NEUTRAL (snr=0.2 >= +exit_theta=0.15)
+    assert state[2] == 0  # NEUTRAL 유지
+
+
+def test_schmitt_nan_snr_preserves_current_state() -> None:
+    # Arrange — NaN 구간에서 이전 상태 유지
+    snr = np.array([0.4, np.nan, np.nan, -0.2], dtype=np.float64)
+
+    # Act
+    state = _schmitt_directional_state(snr, enter_theta=0.35, exit_theta=0.15)
+
+    # Assert
+    assert state[0] == 1   # BULL 진입
+    assert state[1] == 1   # NaN → 상태 유지
+    assert state[2] == 1   # NaN → 상태 유지
+    assert state[3] == 0   # snr=-0.2 <= -0.15 → NEUTRAL
+
+
+def test_persistence_targeted_band_shape_and_default_before_min_n() -> None:
+    # Arrange
+    t = 120
+    snr_abs = np.abs(np.random.default_rng(42).standard_normal(t))
+
+    # Act
+    band = _persistence_targeted_band(snr_abs, target_dwell=6.0, min_n_eff=60)
+
+    # Assert
+    assert band.shape == (t,)
+    # min_n_eff 이전 구간은 기본값 0.5
+    assert np.all(band[:60] == 0.5)
+    # min_n_eff 이후 구간은 양수 (quantile 결과)
+    assert np.all(band[60:] > 0.0)
+
+
+def test_persistence_targeted_band_causal_no_lookahead() -> None:
+    # Arrange — 후반부를 크게 변경해도 전반부 band 불변
+    rng = np.random.default_rng(7)
+    snr_abs = np.abs(rng.standard_normal(200))
+    pivot = 100
+
+    perturbed = snr_abs.copy()
+    perturbed[pivot + 1 :] *= 10.0  # 후반부 magnitude 10배
+
+    # Act
+    band_base = _persistence_targeted_band(snr_abs, target_dwell=8.0, min_n_eff=30)
+    band_perturbed = _persistence_targeted_band(perturbed, target_dwell=8.0, min_n_eff=30)
+
+    # Assert — pivot 이전 구간은 동일 (causal)
+    assert np.allclose(band_base[: pivot + 1], band_perturbed[: pivot + 1], atol=1e-12)
+
+
+def test_compute_market_regime_context_p1_code_range_valid() -> None:
+    # Arrange
+    aligned = _make_aligned()
+
+    # Act
+    regime = compute_market_regime_context(aligned=aligned)
+
+    # Assert — P1 통합 후에도 code가 0-5 범위
+    assert np.all((regime.code_1d >= 0) & (regime.code_1d <= 5))
+
+
+def test_compute_market_regime_context_p1_leakage_unchanged() -> None:
+    """P1 도입 후에도 causal(no-lookahead) 보장 확인."""
+    # Arrange
+    aligned = _make_aligned()
+    pivot = 120
+    perturbed_close = aligned.close_2d.copy()
+    perturbed_close[pivot + 1 :, :] *= 1.15
+    perturbed = AlignedMarketData(
+        datetimes=aligned.datetimes,
+        symbols=aligned.symbols,
+        open_2d=aligned.open_2d,
+        high_2d=aligned.high_2d,
+        low_2d=aligned.low_2d,
+        close_2d=perturbed_close,
+        volume_2d=aligned.volume_2d,
+        funding_2d=aligned.funding_2d,
+        active_mask=aligned.active_mask,
+        warm_mask=aligned.warm_mask,
+        entry_block_mask=aligned.entry_block_mask,
+        kill_mask=aligned.kill_mask,
+        execution_cost_bps_2d=aligned.execution_cost_bps_2d,
+    )
+
+    # Act
+    base_overlay = compute_risk_overlay(aligned=aligned)
+    perturbed_overlay = compute_risk_overlay(aligned=perturbed)
+
+    # Assert — overlay는 causal이므로 pivot 이전 동일해야 함
+    assert np.allclose(
+        base_overlay.overlay_mult_1d[: pivot + 1],
+        perturbed_overlay.overlay_mult_1d[: pivot + 1],
+        atol=1e-12,
+        rtol=0.0,
+        equal_nan=True,
     )
 
 

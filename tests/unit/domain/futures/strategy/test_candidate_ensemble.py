@@ -11,7 +11,6 @@ from src.domain.futures.strategy.candidate_ensemble import (
 )
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -251,3 +250,108 @@ def test_predict_returns_empty_on_empty_oos() -> None:
         cfg=cfg,
     )
     assert out.expected_net_bps.shape[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# P0: Regime Lift Proof Gate
+# ---------------------------------------------------------------------------
+
+
+def test_fit_ensemble_proof_fail_uses_pooled_fallback() -> None:
+    """Proof gate 실패 시 conditioning_path=pooled_fallback, conditioning=archetype_only."""
+    n_train = 200
+    n_oos = 100
+
+    def _make_events(n: int, seed: int) -> pd.DataFrame:
+        rng2 = np.random.default_rng(seed)
+        return pd.DataFrame(
+            {
+                "archetype": ["trend"] * n,
+                "entry_regime_code": rng2.integers(0, 6, n),
+                "net_return_bps": rng2.standard_normal(n) * 5.0,  # pure noise, mean≈0
+                "entry_idx": np.arange(n),
+            }
+        )
+
+    train_events = _make_events(n_train, 0)
+    oos_events = _make_events(n_oos, 1)
+    fold_ids = np.repeat(np.arange(4), n_oos // 4).astype(np.int32)
+
+    cfg = _make_cfg(ensemble_conditioning="archetype_regime")
+    model = fit_regime_conditional_ensemble(
+        train_events=train_events,
+        cfg=cfg,
+        oos_proof_events=oos_events,
+        fold_ids=fold_ids,
+    )
+
+    # pure noise → proof should fail → pooled_fallback
+    assert model.lift_proof is not None
+    assert not model.lift_proof.proof_passed
+    assert model.conditioning_path == "pooled_fallback"
+    assert model.conditioning == "archetype_only"
+
+
+def test_fit_ensemble_no_proof_events_records_path() -> None:
+    """oos_proof_events=None이면 lift_proof=None, conditioning_path 기본값 설정."""
+    rng = np.random.default_rng(1)
+    n = 100
+    train = pd.DataFrame(
+        {
+            "archetype": ["trend"] * n,
+            "entry_regime_code": rng.integers(0, 6, n),
+            "net_return_bps": rng.standard_normal(n),
+            "entry_idx": np.arange(n),
+        }
+    )
+    cfg = _make_cfg(ensemble_conditioning="archetype_regime")
+    model = fit_regime_conditional_ensemble(train_events=train, cfg=cfg)
+
+    assert model.lift_proof is None
+    assert model.conditioning_path in {"regime_conditioned", "pooled_fallback"}
+
+
+def test_predict_ensemble_records_conditioning_path_in_diagnostics() -> None:
+    """predict_regime_conditional_ensemble validation_diagnostics에 conditioning_path 존재."""
+    rng = np.random.default_rng(2)
+    n = 80
+    events = pd.DataFrame(
+        {
+            "archetype": ["trend"] * n,
+            "entry_regime_code": rng.integers(0, 6, n),
+            "net_return_bps": rng.standard_normal(n),
+            "entry_idx": np.arange(n),
+        }
+    )
+    cfg = _make_cfg()
+    model = fit_regime_conditional_ensemble(train_events=events, cfg=cfg)
+    output = predict_regime_conditional_ensemble(model=model, oos_events=events, cfg=cfg)
+
+    assert "conditioning_path" in output.validation_diagnostics
+    assert output.validation_diagnostics["conditioning_path"] in {
+        "regime_conditioned",
+        "pooled_fallback",
+    }
+
+
+def test_predict_ensemble_backward_compat_no_lift_proof() -> None:
+    """lift_proof=None인 legacy model도 예외 없이 작동하고 lift_proof_passed=None."""
+    model = RegimeConditionalEnsemble(
+        cell_mu_bps={},
+        cell_q10_bps={},
+        global_mu_bps=5.0,
+        global_q10_bps=-2.0,
+        conditioning="archetype_only",
+        # conditioning_path, lift_proof → default값 사용
+    )
+    oos = pd.DataFrame(
+        {
+            "archetype": ["trend"],
+            "entry_regime_code": [0],
+        }
+    )
+    output = predict_regime_conditional_ensemble(model=model, oos_events=oos)
+
+    # lift_proof=None → sentinel values: -1 (unset) and NaN
+    assert output.validation_diagnostics["lift_proof_passed"] == -1
+    assert np.isnan(float(output.validation_diagnostics["lift_nw_tstat"]))
