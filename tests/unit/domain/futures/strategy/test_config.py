@@ -20,7 +20,7 @@ def test_candidate_strategy_config_auto_derives_purge_and_embargo_bars() -> None
     assert resolved_cfg.embargo_bars == 44
     assert purge_bars == 44
     assert embargo_bars == 44
-    assert cfg.min_ic_tstat == 1.5
+    assert cfg.min_ic_tstat == 0.8
 
 
 def test_with_max_holding_bars_rederives_from_raw_optional_inputs() -> None:

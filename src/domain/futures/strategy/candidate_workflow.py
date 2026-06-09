@@ -233,8 +233,23 @@ def _fit_and_predict_single_fold(
             if fit_set.y_return_bps is not None
             else fit_set.y_edge_bps
         )
+        proof_events: pd.DataFrame | None = None
+        proof_fold_ids: np.ndarray | None = None
+        if not calibration_eval_set.event_index.empty:
+            proof_events = calibration_eval_set.event_index.copy()
+            proof_events["net_return_bps"] = (
+                calibration_eval_set.y_return_bps
+                if calibration_eval_set.y_return_bps is not None
+                else calibration_eval_set.y_edge_bps
+            )
+            proof_fold_ids = np.full(proof_events.shape[0], fold_idx, dtype=np.int32)
         t_step = time.perf_counter()
-        ensemble_model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
+        ensemble_model = fit_regime_conditional_ensemble(
+            train_events=train_events,
+            cfg=cfg,
+            oos_proof_events=proof_events,
+            fold_ids=proof_fold_ids,
+        )
         timing_profile["edge_fit"] = time.perf_counter() - t_step
 
         t_step = time.perf_counter()
