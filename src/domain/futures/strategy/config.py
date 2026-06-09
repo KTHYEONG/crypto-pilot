@@ -194,7 +194,7 @@ class CandidateStrategyConfig:
     p10_min_fraction_of_stop: float = 1.5
     min_variant_oos_hit_rate: float = 0.50
     min_variant_oos_payoff_ratio: float = 1.20
-    max_variant_oos_q10_fail_rate: float = 0.90
+    max_variant_oos_q10_fail_rate: float = 0.65
     max_variant_event_fraction_per_bar: float = 0.25
     regime_diagnostic_enabled: bool = True
     min_regime_variant_oos_obs: int = 40
@@ -250,7 +250,7 @@ class CandidateStrategyConfig:
     selection_top_quantile: float = 0.10
     min_net_floor_cost_fraction: float = 0.50
     min_oos_rank_ic: float = 0.01
-    min_ic_tstat: float = 1.5
+    min_ic_tstat: float = 0.8
     min_oos_log_growth_uplift: float = 0.0
     max_oos_edge_decay_bps: float = 50.0
     min_gate_brier_skill: float = 0.0
