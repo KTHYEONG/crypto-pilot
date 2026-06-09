@@ -14,6 +14,7 @@ Act as the final logical gatekeeper. Beyond simple bugs, determine if changes al
    - **For Spec-less tasks:** Does the change satisfy the user's request without logical leaps?
 2. **Logical Integrity:** Are there potential race conditions, poor error handling patterns, or inefficient logic missed by the `check` phase (mechanical verification)?
 3. **Knowledge Sync (Strict Separation):**
+   - **Formula Synchronization (Hybrid Math):** If core mathematical logic or algorithms changed in the code, you MUST update the corresponding formulas in `docs/architecture/` maintaining the Hybrid approach (use variables, not constants). Failure to sync formulas is an automatic FAIL.
    - **Architecture (`docs/architecture/`):** Update ONLY if core formulas, variables, or I/O interfaces have changed. Ensure the doc remains comprehensive and highly readable (use Mermaid/Tables). NO history.
    - **Decisions (`docs/decisions/`):** Append an **ULTRA-COMPRESSED** ADR (Max 5-7 lines: Delta, Rationale, Edge Cases) for EVERY logic change. Prevent file bloat. Ensure history is cumulative (newest on top).
    - **Ref:** Follow `documentation.md` for strict templates.
