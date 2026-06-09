@@ -352,6 +352,27 @@ class DataStageResult:
     valid_symbols: list[str]
 
 
+def _wrap_segments(segments: list[str], width: int, sep: str = " | ") -> list[str]:
+    """Pack ``label (count)`` segments into lines no wider than ``width``.
+
+    Splits only on the ``sep`` boundary so individual gate tokens are never cut.
+    Used to render the full BLOCKED gate distribution inside the fixed-width
+    diagnostics table without overflowing the border.
+    """
+    lines: list[str] = []
+    current = ""
+    for seg in segments:
+        candidate = seg if not current else f"{current}{sep}{seg}"
+        if len(candidate) > width and current:
+            lines.append(current)
+            current = seg
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trials", type=int, default=100)
@@ -775,19 +796,35 @@ def _run_strategy_stage(
     _logger.info("-" * 82)
     _logger.info(f"| {'Action':<12} | {'Count':<5} | {'Details / Selected Strategies':<55} |")
     _logger.info("-" * 82)
+    _gate_label: dict[str, str] = {
+        "breakeven_hard_gate": "Breakeven Gate",
+        "min_obs": "Low Obs",
+        "mean_edge": "Low Mean Edge",
+        "median_edge": "Low Median",
+        "p10_edge": "Poor P10",
+        "q10_fail": "High Q10 Fail",
+        "event_density": "Event Overload",
+        "regime_edge": "Regime Filter",
+        "edge_decay": "Edge Decay",
+        "hit_or_payoff": "Poor Hit/Payoff",
+        "oos_rank_ic": "Low OOS IC",
+        "ic_tstat": "Low IC t-stat",
+        "exit_policy": "Exit Policy",
+    }
     if failure_report:
         n_blocked = failure_report.get("n_blocked", 0)
         failure_counts = failure_report.get("failure_counts", {})
-        mapping = {
-            "min_obs": "Low Obs", "mean_edge": "Low Mean Edge", "median_edge": "Low Median Edge",
-            "p10_edge": "Poor P10 Edge", "q10_fail": "High Q10 Fail", "event_density": "Event Overload",
-            "regime_edge": "Regime Filter", "edge_decay": "Edge Decay", "hit_or_payoff": "Poor Hit/Payoff",
-            "oos_rank_ic": "Low OOS IC", "ic_tstat": "Low IC t-stat", "exit_policy": "Exit Policy",
-        }
-        readable_failures = " | ".join([f"{mapping.get(k, k)} ({v})" for k, v in sorted(failure_counts.items())])
+        # Wrap the full gate distribution to fit the 41-char detail column so the
+        # 82-wide table border stays intact while no gate count is dropped.
+        fail_segments = [f"{_gate_label.get(k, k)} ({v})" for k, v in sorted(failure_counts.items())]
+        wrapped_failures = _wrap_segments(fail_segments, width=41) or ["none"]
+        for line_idx, fail_line in enumerate(wrapped_failures):
+            action_cell = "BLOCKED" if line_idx == 0 else ""
+            count_cell = str(n_blocked) if line_idx == 0 else ""
+            prefix = "Fail Reasons: " if line_idx == 0 else " " * 14
+            _logger.info(f"| {action_cell:<12} | {count_cell:<5} | {prefix}{fail_line:<41} |")
         top_blocked = failure_report.get("top_blocked_str", "none")
-        _logger.info(f"| {'BLOCKED':<12} | {n_blocked:<5} | Fail Reasons: {readable_failures[:40]:<40} |")
-        _logger.info(f"| {'':<12} | {'':<5} | Top Blocked: {top_blocked[:41]:<41} |")
+        _logger.info(f"| {'':<12} | {'':<5} | Top Blocked: {top_blocked[:42]:<42} |")
     if keep_variants:
         _logger.info(f"| {'RECOMMENDED':<12} | {len(keep_variants):<5} | 1. {keep_variants[0]:<52} |")
         for i, var in enumerate(keep_variants[1:], 2):
@@ -796,14 +833,37 @@ def _run_strategy_stage(
         _logger.info(f"| {'RECOMMENDED':<12} | {'0':<5} | {'none':<52} |")
     _logger.info("-" * 82)
 
+    # Per-variant gate failure detail (blocked variants only)
+    blocked_rows = failure_report.get("rows", []) if failure_report else []
+    if blocked_rows:
+        _logger.info("\n[GATE FAILURES: PER-VARIANT]")
+        _logger.info("-" * 82)
+        _logger.info(f"| {'Variant':<30} | {'Action':<16} | {'Failed Gates':<26} |")
+        _logger.info("-" * 82)
+        for brow in blocked_rows[:20]:
+            vname = str(brow.get("group", "")).removeprefix("variant=")[:30]
+            action = str(brow.get("candidate_action", ""))[:16]
+            failed_labels = ", ".join(
+                _gate_label.get(g, g) for g in brow.get("failed_checks", [])
+            )
+            # Overview row: truncate with an ellipsis marker (full distribution
+            # lives in the aggregate BLOCKED block above).
+            gates_cell = failed_labels if len(failed_labels) <= 26 else f"{failed_labels[:25]}…"
+            _logger.info(f"| {vname:<30} | {action:<16} | {gates_cell:<26} |")
+        _logger.info("-" * 82)
+
     # 2. Cause: Walk-Forward Performance
     wf_details = candidate_report.get("wf_fold_details", [])
     if wf_details and run_config.phase in {"full", "alo"}:
         _logger.info("\n[WALK-FORWARD FOLD DETAILS]")
         _logger.info("-" * 82)
         _logger.info(
-            f"| {'Fold':<4} | {'Mode':<10} | {'Rank IC':>8} | {'Events':>7} | "
-            f"{'PriorP90':>8} | {'EU_p90':>7} | {'Pass':<6} |"
+            f"| {'Fold':<4} | {'Mode':<10} | {'IC(diag)':>8} | {'Events':>7} | "
+            f"{'RlzdMean':>8} | {'EU_p90':>7} | {'Pass':<6} |"
+        )
+        _logger.info(
+            f"| {'':<4} | {'':<10} | {'(ref)':>8} | {'':<7} | "
+            f"{'(★gate)':>8} | {'(★gate)':>7} | {'':<6} |"
         )
         _logger.info("-" * 82)
         for res in wf_details:
@@ -816,13 +876,18 @@ def _run_strategy_stage(
                 else f"{'n/a':>8}"
             )
             events = res.get("n_events", 0)
-            prior = res.get("prior_bps", 0.0)
+            rlzd_mean = res.get("realized_mean_bps", float("nan"))
+            rlzd_str = (
+                f"{rlzd_mean:>8.1f}"
+                if isinstance(rlzd_mean, (int, float)) and np.isfinite(rlzd_mean)
+                else f"{'n/a':>8}"
+            )
             eu_p90 = res.get("eu_p90", 0.0)
             passed = res.get("pass_cost", False)
             pass_str = "✅" if passed else "❌"
             _logger.info(
                 f"| {fold_id:<4} | {mode:<10} | {rank_ic_str} | {events:>7,} | "
-                f"{prior:>8.2f} | {eu_p90:>7.2f} | {pass_str:<6} |"
+                f"{rlzd_str} | {eu_p90:>7.2f} | {pass_str:<6} |"
             )
         _logger.info("-" * 82)
 
