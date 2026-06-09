@@ -55,6 +55,17 @@ class RegimeConfig:
     regime_quality_gate_enabled: bool = True
     regime_transition_occupancy: float = 0.10
 
+    # P0 — Regime Lift Proof Gate
+    regime_lift_proof_enabled: bool = True
+    regime_lift_nw_tstat_threshold: float = 1.5
+    regime_lift_fold_pass_ratio: float = 0.60
+    regime_lift_max_holding_bars: int = 6
+
+    # P1 — Hysteresis + persistence-targeted band
+    trend_hysteresis_enter: float = 0.35
+    trend_hysteresis_exit: float = 0.15
+    persistence_target_dwell: float = 6.0
+
     def __post_init__(self) -> None:
         """Validate regime parameters."""
         if self.overlay_target_vol_ann <= 0.0:
@@ -74,6 +85,18 @@ class RegimeConfig:
             raise ValueError("regime_min_n_eff must be >= 2")
         if not (0.0 < self.regime_transition_occupancy < 0.5):
             raise ValueError("regime_transition_occupancy must satisfy 0 < value < 0.5")
+        if self.regime_lift_nw_tstat_threshold < 0.0:
+            raise ValueError("regime_lift_nw_tstat_threshold must be >= 0")
+        if not (0.0 < self.regime_lift_fold_pass_ratio <= 1.0):
+            raise ValueError("regime_lift_fold_pass_ratio must be in (0, 1]")
+        if self.regime_lift_max_holding_bars < 1:
+            raise ValueError("regime_lift_max_holding_bars must be >= 1")
+        if self.trend_hysteresis_exit >= self.trend_hysteresis_enter:
+            raise ValueError("trend_hysteresis_exit must be < trend_hysteresis_enter")
+        if self.trend_hysteresis_enter <= 0.0:
+            raise ValueError("trend_hysteresis_enter must be > 0")
+        if self.persistence_target_dwell < 2.0:
+            raise ValueError("persistence_target_dwell must be >= 2")
 
 
 @dataclass(slots=True, frozen=True)
