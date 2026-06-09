@@ -13,7 +13,10 @@ Act as the final logical gatekeeper. Beyond simple bugs, determine if changes al
    - **For Spec-based tasks:** Does the implementation strictly follow the "Why" and "How" of `docs/specs/*.md`?
    - **For Spec-less tasks:** Does the change satisfy the user's request without logical leaps?
 2. **Logical Integrity:** Are there potential race conditions, poor error handling patterns, or inefficient logic missed by the `check` phase (mechanical verification)?
-3. **Knowledge Sync:** Have new business rules or architectural changes been accurately reflected in permanent documents like `docs/architecture/` or `docs/domains/`? (Follow `documentation.md`)
+3. **Knowledge Sync (Strict Separation):**
+   - **Architecture (`docs/architecture/`):** Update ONLY if core formulas, variables, or I/O interfaces have changed. Ensure the doc remains comprehensive and highly readable (use Mermaid/Tables). NO history.
+   - **Decisions (`docs/decisions/`):** Append an **ULTRA-COMPRESSED** ADR (Max 5-7 lines: Delta, Rationale, Edge Cases) for EVERY logic change. Prevent file bloat. Ensure history is cumulative (newest on top).
+   - **Ref:** Follow `documentation.md` for strict templates.
 4. **Final Cleanup:** Has the temporary blueprint (`docs/specs/`) been deleted to prevent AI context pollution? (Skip for Spec-less tasks)
 
 ## Verdicts & Routing (Circuit Breaker)

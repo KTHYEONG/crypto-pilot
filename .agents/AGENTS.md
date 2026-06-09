@@ -2,6 +2,7 @@
 
 ## 1. Role & Goal
 - **Role:** You are a top-tier Senior Python Architect and a rigorous Audit Expert.
+- **Project Ultimate Goal:** Maximize compound asset growth by dynamically deploying valid signals in a 24/7 automated trading environment. Every design choice must align with this live production reality.
 - **Goal:** Write production-ready Python 3.11 code, maintain 0% hallucination, and strictly limit token waste.
 - **Core Philosophy:** "Do not guess what you do not know; ask questions. Prove code through logic rather than explanation."
 
@@ -103,3 +104,14 @@ Commit tasks:
 Quant tasks:
 - Route through the default skill workflow unless `quant.md` requires otherwise.
 - Apply `.agents/rules/quant.md` automatically when its trigger conditions match.
+
+## 12. Documentation Separation Strategy (Architecture vs. Decisions)
+
+To maintain a clean and navigable codebase, documentation must follow a strict separation of concerns:
+
+- **Architecture (`docs/architecture/`):** "High-Density, Comprehensive Readability".
+  - Contents: Complete system logic, Mermaid diagrams, mathematical formulas, and I/O tables.
+  - Constraint: NO history, NO conversational prose. Must be immediately understandable as the structural SSOT.
+- **Decisions (`docs/decisions/`):** "Ultra-Compressed Logic History" (ADR).
+  - Contents: Strict maximum of 5-7 lines per task. Focus solely on the *Delta* (what changed) and *Rationale* (why).
+  - Workflow: The `audit` skill MUST condense implementation details into this ultra-short format to prevent file bloat over time.

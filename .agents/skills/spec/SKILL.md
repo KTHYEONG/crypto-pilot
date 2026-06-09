@@ -44,6 +44,6 @@ Produce high-precision technical specifications for the `implement` agent.
 ```
 
 ## Reasoning Constraints
-1. **Analysis First**: Before writing the spec, you MUST explain to yourself "What is wrong with the current code?". This logic must be reflected in the **Strategy**.
-2. **User-Centric**: The Chat Summary must be readable by a human. Avoid overly cryptic jargon where simple terms suffice.
-3. **No Documentation Overlap**: Keep this file as a throw-away task list. Only record permanent rules in `documentation.md`.
+1. **Analysis First**: Before writing the spec, you MUST explain to yourself "What is wrong with the current code?".
+2. **Contextual Awareness**: Always check `docs/decisions/` for relevant historical decisions and `docs/architecture/` for the current logic SSOT.
+3. **No Documentation Overlap**: Keep this file as a throw-away task list. Permanent knowledge promotion happens in the `audit` phase via `decisions/` and `architecture/`.
