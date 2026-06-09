@@ -223,15 +223,3 @@ Ledger update complete.
 ```
 
 ---
-
-## [주의사항] 배포 전 반드시 검증할 2가지
-
-### 1. Fold4 미통과 = WF 마진이 얇음 (선택 스킬 한계)
-- Fold4는 `RlzdMean=10.3bps(≥8.0)` + `selected_count` 충족에도 **`ml_lift_bps>0` 게이트에서 탈락** — ensemble의 선택이 baseline(해당 fold 전체 OOS 이벤트 평균)을 넘지 못함.
-- 즉 풀은 다양해졌으나 **ensemble의 변이 간 우열 판별력(selection skill)이 일부 fold에서 0/음수**. 3/4 통과는 60% 경계를 간신히 넘은 얇은 마진.
-- **검증 과제:** fold별 `ml_lift_bps` 분포 확인, 4번째 fold(가장 최근·이벤트 2679개 최대 구간)에서 선택력 붕괴 원인 진단. 통과율이 신호 풀 구성/시드에 민감하면 robust하지 않음.
-
-### 2. Regime-Cell Admission의 과적합/낙관편향 리스크
-- cell admission t-stat은 **Newey-West 미적용 IID 근사**(`σ/√n`) → 4h 중첩 보유기간의 serial correlation 하에서 **유의성 과대평가**. `t≥1.0` 게이트가 실제보다 관대.
-- per-regime-cell OOS 선택은 **multiple-comparisons(data-snooping)** 위험을 글로벌 게이트보다 증폭 → 신규 admit된 7개 중 일부가 거짓양성일 수 있음.
-- **검증 과제:** (a) admission 판정에 purged/embargoed nested validation 도입, (b) NW t-stat로 교체 후 생존 신호 재확인, (c) Ablation CAGR 여전히 음수(-0.9%~-26.5%)이므로 **실 복리 성과는 미입증** — 풀 다양성 확보가 곧 수익성은 아님. 별도 OOS 복리 검증 필수.
