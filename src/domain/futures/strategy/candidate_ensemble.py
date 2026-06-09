@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
 from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput, EdgeSource
 from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.regime_evaluation import (
+    RegimeLiftProofResult,
+    evaluate_regime_lift_proof,
+)
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +29,9 @@ class RegimeConditionalEnsemble:
     archetype_mu_bps: dict[str, float] = field(default_factory=dict)
     archetype_q10_bps: dict[str, float] = field(default_factory=dict)
     validation_rank_ic: float = 0.0
+    # P0: Regime Lift Proof Gate fields
+    conditioning_path: str = "pooled_fallback"  # "regime_conditioned" | "pooled_fallback"
+    lift_proof: RegimeLiftProofResult | None = None  # None = proof 미실행 (backward compat)
 
 
 def _require_ensemble_columns(events: pd.DataFrame) -> None:
@@ -41,6 +52,26 @@ def _rank_ic_local(pred: np.ndarray, target: np.ndarray) -> float:
         return 0.0
     rho, _ = spearmanr(pred[finite], target[finite])
     return float(rho) if np.isfinite(rho) else 0.0
+
+
+def _predict_mu_by_event(
+    events: pd.DataFrame,
+    *,
+    cell_mu: dict[tuple[str, int], float],
+    arch_mu: dict[str, float],
+    global_mu: float,
+    use_archetype_only: bool,
+) -> NDArray[np.float64]:
+    """Project ensemble means onto an event frame for proof/prediction paths."""
+    mu = np.empty(len(events), dtype=np.float64)
+    for idx, row in enumerate(events.itertuples(index=False), start=0):
+        arch = str(getattr(row, "archetype", ""))
+        if use_archetype_only:
+            mu[idx] = arch_mu.get(arch, global_mu)
+            continue
+        key = (arch, int(getattr(row, "entry_regime_code", 0)))
+        mu[idx] = cell_mu.get(key, arch_mu.get(arch, global_mu))
+    return mu
 
 
 def _fit_cell_means(
@@ -150,8 +181,20 @@ def fit_regime_conditional_ensemble(
     *,
     train_events: pd.DataFrame,
     cfg: CandidateStrategyConfig,
+    oos_proof_events: pd.DataFrame | None = None,
+    fold_ids: NDArray[np.int32] | None = None,
 ) -> RegimeConditionalEnsemble:
-    """Fit per-cell shrinkage estimates from train-window events."""
+    """Fit per-cell shrinkage estimates from train-window events.
+
+    Args:
+        train_events: Training window events DataFrame.
+        cfg: Candidate strategy configuration.
+        oos_proof_events: Optional OOS events for P0 Regime Lift Proof Gate.
+        fold_ids: Purged walk-forward fold IDs aligned with oos_proof_events.
+
+    Returns:
+        Fitted RegimeConditionalEnsemble with optional lift_proof diagnostics.
+    """
     if train_events.empty:
         return RegimeConditionalEnsemble(
             cell_mu_bps={},
@@ -230,6 +273,92 @@ def fit_regime_conditional_ensemble(
         cell_mu = {}
         cell_q10 = {}
 
+    # P0: Regime Lift Proof Gate
+    lift_proof: RegimeLiftProofResult | None = None
+    conditioning_path = "pooled_fallback"
+
+    if (
+        oos_proof_events is not None
+        and fold_ids is not None
+        and chosen == "archetype_regime"
+        and not oos_proof_events.empty
+        and "net_return_bps" in oos_proof_events.columns
+    ):
+        # Regime Lift Proof: compare realized edge captured by the two prediction
+        # paths on an out-of-fit proof window. `evaluate_regime_lift_proof()`
+        # converts each prediction path to realized signed edge and tests the
+        # per-event lift versus the pooled baseline.
+        proof_events = oos_proof_events.loc[
+            :, ["archetype", "entry_regime_code", "net_return_bps"]
+        ].copy()
+        proof_events["archetype"] = proof_events["archetype"].astype(str)
+        proof_events["entry_regime_code"] = pd.to_numeric(
+            proof_events["entry_regime_code"], errors="coerce"
+        )
+        proof_events["net_return_bps"] = pd.to_numeric(
+            proof_events["net_return_bps"], errors="coerce"
+        )
+        proof_events = proof_events.loc[
+            proof_events["archetype"].ne("")
+            & proof_events["entry_regime_code"].notna()
+            & proof_events["net_return_bps"].notna()
+        ].copy()
+        proof_events["entry_regime_code"] = proof_events["entry_regime_code"].astype(int)
+
+        proof_fold_ids = np.asarray(fold_ids, dtype=np.int32)
+        if proof_events.shape[0] != proof_fold_ids.shape[0]:
+            raise ValueError("oos_proof_events and fold_ids must align")
+
+        realized = proof_events["net_return_bps"].to_numpy(dtype=np.float64, copy=False)
+        mu_regime_arr = _predict_mu_by_event(
+            proof_events,
+            cell_mu=cell_mu,
+            arch_mu=arch_mu,
+            global_mu=global_mu,
+            use_archetype_only=False,
+        )
+        mu_pooled_arr = _predict_mu_by_event(
+            proof_events,
+            cell_mu={},
+            arch_mu=arch_mu,
+            global_mu=global_mu,
+            use_archetype_only=True,
+        )
+
+        regime_cfg = getattr(cfg, "regime", None)
+        proof_enabled: bool = getattr(regime_cfg, "regime_lift_proof_enabled", True)
+        nw_threshold: float = getattr(regime_cfg, "regime_lift_nw_tstat_threshold", 1.5)
+        fold_ratio: float = getattr(regime_cfg, "regime_lift_fold_pass_ratio", 0.60)
+        max_bars: int = getattr(regime_cfg, "regime_lift_max_holding_bars", 6)
+
+        lift_proof = evaluate_regime_lift_proof(
+            regime_cond_edges=mu_regime_arr,
+            pooled_edges=mu_pooled_arr,
+            realized_edges=realized,
+            fold_ids=proof_fold_ids,
+            nw_tstat_threshold=nw_threshold,
+            fold_pass_ratio_threshold=fold_ratio,
+            max_holding_bars=max_bars,
+            proof_enabled=proof_enabled,
+        )
+        conditioning_path = lift_proof.conditioning_path
+        _logger.info(
+            "Regime lift proof: passed=%s nw_tstat=%.3f fold_pass_ratio=%.2f",
+            lift_proof.proof_passed,
+            lift_proof.nw_tstat,
+            lift_proof.fold_pass_ratio,
+        )
+
+        # Proof 실패 시 conditioning을 archetype_only로 강제 downgrade
+        if not lift_proof.proof_passed:
+            chosen = "archetype_only"
+            cell_mu = {}
+            cell_q10 = {}
+
+    elif chosen == "archetype_regime":
+        # proof events 없으면 regime conditioning 그대로 유지
+        conditioning_path = "regime_conditioned"
+
     return RegimeConditionalEnsemble(
         cell_mu_bps=cell_mu,
         cell_q10_bps=cell_q10,
@@ -239,6 +368,8 @@ def fit_regime_conditional_ensemble(
         archetype_mu_bps=arch_mu,
         archetype_q10_bps=arch_q10,
         validation_rank_ic=float(val_ic),
+        conditioning_path=conditioning_path,
+        lift_proof=lift_proof,
     )
 
 
@@ -314,7 +445,14 @@ def predict_regime_conditional_ensemble(
             "allocation_backend": "ensemble_b0",
             "prediction_mode": "ensemble_b0",
             "conditioning": model.conditioning,
+            "conditioning_path": model.conditioning_path,
             "validation_rank_ic": model.validation_rank_ic,
             "mu_shrinkage_lambda": mu_shrinkage_lambda,
+            "lift_proof_passed": (
+                int(model.lift_proof.proof_passed) if model.lift_proof is not None else -1
+            ),
+            "lift_nw_tstat": (
+                model.lift_proof.nw_tstat if model.lift_proof is not None else float("nan")
+            ),
         },
     )
