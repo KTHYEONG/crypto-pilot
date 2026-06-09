@@ -24,7 +24,7 @@ Generates a Point-In-Time (PIT) valid, survivorship-bias-free trading universe t
 - Pre-2020: `half_spread` = Modified Corwin-Schultz OHLC model.
 
 **Snapshot Quality Score**
-- $\text{Score}_{\text{universe}} = \text{fill\_rate} \times \log_{10}\left(\frac{\text{median\_adv\_usdt}}{10^6}\right) \times \frac{1}{\text{mAEC\_bps}}$
+- $\text{Score}_{\text{universe}} = \text{fill\_rate} \times \log_{10}\left(\frac{\text{median\_adv\_usdt}}{\text{adv\_scale\_factor}}\right) \times \frac{1}{\text{mAEC\_bps}}$
 
 **PIT Constraints**
 - Strict requirement: `knowledge_date <= as_of`. No forward-looking metadata or delisting knowledge is allowed.
@@ -56,9 +56,9 @@ graph TD
 | Type | Variable | Description |
 |------|----------|-------------|
 | **Input** | `knowledge_date` | Point-in-time barrier for all historical data queries |
-| **Param** | `min_listing_days` | Minimum days since listing to bypass structural gate (default: 90) |
-| **Param** | `min_adv_usdt` | Minimum 30-day median trading volume (default: 25M) |
-| **Param** | `max_exec_cost_bps` | Maximum tolerated round-trip execution cost (default: 50.0) |
+| **Param** | `min_listing_days` | Minimum days since listing to bypass structural gate. Bounds: `[0, ∞)` |
+| **Param** | `min_adv_usdt` | Minimum 30-day median trading volume. Bounds: `[0, ∞)` |
+| **Param** | `max_exec_cost_bps` | Maximum tolerated round-trip execution cost. Bounds: `[0, ∞)` |
 | **Output**| `Universe Snapshot` | Static, timestamped set of valid symbols |
 | **Output**| `Static Metadata` | Metrics passed downstream: `vol_30d`, `friction_score`, `beta_vs_market`, etc. |
 

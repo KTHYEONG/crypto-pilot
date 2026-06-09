@@ -73,10 +73,10 @@ graph TD
 | Type | Variable | Description |
 |------|----------|-------------|
 | **Input** | `P_t` | BTC Close Price at time $t$ |
-| **Param** | $\sigma_{\text{target}}$ | Target annualized volatility (default: 0.40) |
-| **Param** | `crisis_gross_floor` | Risk override multiplier during crisis (default: 0.15) |
-| **Param** | $k, h$ | CUSUM drift and threshold, derived from target ARL |
-| **Output**| `overlay_mult_1d` | Continuous risk multiplier applied to final portfolio weights |
+| **Param** | $\sigma_{\text{target}}$ | Target annualized volatility. Bounds: `(0.0, 1.0]` |
+| **Param** | `crisis_gross_floor` | Risk override multiplier during crisis. Bounds: `[0.0, 1.0]` |
+| **Param** | $k, h$ | CUSUM drift and threshold, derived from target ARL. Bounds: `ARL > 0` |
+| **Output**| `overlay_mult_1d` | Continuous risk multiplier applied to final portfolio weights. Bounds: `[0.0, max_vol_scale]` |
 | **Output**| `code_1d` | Discrete regime integer (0-5) used for signal gating and B0 ensemble |
 | **Eval**  | `RegimeScoreCard` | Metrics C2(Persistence), C3(Distinctness), C4(Stability), C5(Coverage) |
 
