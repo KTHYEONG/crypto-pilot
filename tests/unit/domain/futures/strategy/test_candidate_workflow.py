@@ -210,11 +210,17 @@ def test_allocation_backend_ensemble_skips_lgbm_calls(monkeypatch: pytest.Monkey
 
     def _fit_stub(*args: object, **kwargs: object) -> object:
         calls["ensemble_fit"] += 1
+        proof_events = kwargs["oos_proof_events"]
+        proof_fold_ids = kwargs["fold_ids"]
+        assert isinstance(proof_events, pd.DataFrame)
+        assert isinstance(proof_fold_ids, np.ndarray)
+        assert len(proof_events) == len(proof_fold_ids)
         return object()
 
     def _predict_stub(*args: object, **kwargs: object) -> object:
         calls["ensemble_predict"] += 1
         event_index = kwargs["oos_events"]
+        assert isinstance(event_index, pd.DataFrame)
         from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
 
         return CandidateModelOutput(
