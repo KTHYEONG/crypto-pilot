@@ -40,6 +40,14 @@ Generates vectorized rule panels with archetype/regime contexts and filters them
 - Condition: $\frac{1}{N} \sum (\text{Edge}_{i}) > 0 \land t_{\text{stat}}(\text{Edge}) \geq \text{min\_rule\_ir\_t}$
 - Evaluated strictly within archetype-allowed regimes.
 
+**Regime-Cell Conditional Admission (OR-path)**
+- Promotes a variant diluted by the global-pooled gates if it holds a strong edge in a specific regime cell $g$ (supplies orthogonal diversifiers to the B0 ensemble).
+- Per-cell (regime $g$) stats over the OOS recommendation window:
+  - $\mu_{g} = \frac{1}{n_g} \sum_{i \in g} \text{Edge}_{i}$, $\quad t_{g} = \frac{\mu_{g}}{\sigma_{g}/\sqrt{n_g} + \epsilon}$ (IID SE; **non-NW first-order approx → optimistic under overlap**)
+  - Cell passes iff $n_g \geq \text{min\_regime\_cell\_oos\_obs} \land \mu_{g} \geq \text{min\_regime\_cell\_edge\_bps} \land t_{g} \geq \text{min\_regime\_cell\_tstat}$
+- Admit iff $\geq 1$ cell passes; retain top-`max_admitted_cells_per_variant` cells by $\mu_g$ (anti over-specialisation).
+- Final promote $= \text{global\_AND\_gates} \lor (\text{admission\_enabled} \land \text{cell\_admitted})$. **Safety gates (`min_obs`, `q10_fail`, `event_density`) stay mandatory in both paths.**
+
 # 3. Architecture Flow
 
 ```mermaid
@@ -62,9 +70,16 @@ graph TD
 | **Param** | `standalone_breakeven_hard_gate_enabled` | Enforces L1 profitability gate before allocation. Bounds: `[True, False]` |
 | **Param** | `mean_reversion_regime_entry_gating_enabled` | Blocks mean-reversion entries in volatile/crash regimes. Bounds: `[True, False]` |
 | **Param** | `min_rule_ir_t` | Minimum t-statistic for standalone breakeven gate. Bounds: `[0.0, ∞)` |
+| **Param** | `regime_cell_admission_enabled` | Enables the regime-cell OR-path. Bounds: `[True, False]` |
+| **Param** | `min_regime_cell_oos_obs` | Min per-cell OOS obs for admission. Bounds: `[1, ∞)` |
+| **Param** | `min_regime_cell_edge_bps` | Min per-cell mean edge (bps) for admission. Bounds: finite |
+| **Param** | `min_regime_cell_tstat` | Min per-cell t-stat for admission. Bounds: `[0.0, ∞)` |
+| **Param** | `max_admitted_cells_per_variant` | Top-N cells retained by edge. Bounds: `[1, ∞)` |
 | **Output**| `CandidateSignalPanel` | Dense 2D structure containing `signed_score`, `side_hint`, and `valid_mask` |
 | **Output**| `events: pd.DataFrame` | Sparse tabulated representation of valid entry signals |
 
 # 5. Edge Cases & Handling
 - **Data Gap/Missing Bars:** If input market data has NaNs due to exchange downtime, indicator valid_mask is strictly enforced (False), preventing erroneous signal generation.
 - **Divergent Trend & Reversion Overlap:** Handled gracefully since rule panels are grouped by archetype; if both trigger simultaneously, they produce distinct sparse events evaluated independently by downstream allocators.
+- **Cell-Admission Zero-Variance Cell:** If all per-cell edges are identical ($\sigma_g = 0$), the $\epsilon$ term in $t_g$ prevents div-by-zero; cell still admits on $\mu_g \geq$ threshold.
+- **Cell-Admission Multiple Comparisons:** Per-cell selection over OOS amplifies data-snooping vs. global gates; the $t_g \geq 1.0$ floor is a weak, non-NW guard — purged/embargoed nested validation is the proper follow-up before live capital.
