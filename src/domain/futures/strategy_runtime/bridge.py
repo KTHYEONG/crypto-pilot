@@ -684,6 +684,8 @@ def run_candidate_strategy_for_universe(
             "prior_bps": float(_vdiag.get("prior_component_p90_bps", 0.0)),
             "eu_p90": float(selection_diag_fold.get("waterfall_expected_utility_adj_p90_bps", 0.0)),
             "pass_cost": bool(pass_survival),
+            "realized_mean_bps": float(realized_mean),   # actual pass gate: >= min_fold_realized_edge_bps
+            "selected_total": int(selected_count),        # actual pass gate: >= min_fold_selected_events
         })
 
         _logger.debug(
