@@ -12,11 +12,12 @@ This document mandates strict quantitative and engineering standards. The AI ass
 
 ## 0. Fundamental Priority Hierarchy
 When design goals conflict, the AI MUST adhere to the following priority:
-1. **Data Integrity & Realism:** Strict prevention of look-ahead bias and information leakage.
-2. **Numerical Stability & Precision:** Handling floating-point edge cases and maintaining math accuracy.
-3. **Memory Safety:** Preventing Out-of-Memory (OOM) errors over raw speed.
-4. **Computational Performance:** Optimization (Vectorization/HPC) for execution speed.
-5. **Code Readability & Simplicity:** Avoiding over-engineering for simple tasks.
+1. **Logic Robustness Over Metrics (Anti-Overfitting):** Prioritize the soundness of the process and underlying logic over specific performance targets (Sharpe, Return, etc.). Strictly avoid "curve-fitting" or artificial adjustments made solely to improve backtest results.
+2. **Data Integrity & Realism:** Strict prevention of look-ahead bias and information leakage.
+3. **Numerical Stability & Precision:** Handling floating-point edge cases and maintaining math accuracy.
+4. **Memory Safety:** Preventing Out-of-Memory (OOM) errors over raw speed.
+5. **Computational Performance:** Optimization (Vectorization/HPC) for execution speed.
+6. **Code Readability & Simplicity:** Avoiding over-engineering for simple tasks.
 
 ## 1. Mathematical Pre-modeling (Logic Before Code) & Scope Rules
 Before implementing any quantitative algorithm, the AI MUST explicitly define the following in the `<plan>`. **(Scope Exemption: For simple data loaders, basic metric calculations, and non-algorithmic configuration, skip complex modeling to maintain simplicity.)**
