@@ -1,7 +1,7 @@
 ---
-title: Futures Universe Management
-domain: futures-universe
-type: domain-spec
+title: Futures Universe Architecture
+domain: futures.universe
+type: architecture
 status: active
 priority: high
 ai_read_policy: when_related
@@ -10,83 +10,54 @@ related_paths:
   - src/application/futures/optimization/universe_service.py
 change_triggers:
   - src/domain/futures/universe/**
-last_verified: 2026-06-05
+last_verified: 2026-06-10
 ---
 
-# Futures Universe Management
+# 1. Purpose
+Generates a Point-In-Time (PIT) valid, survivorship-bias-free trading universe through a strict 7-stage filtration funnel.
 
-## 1. Overview
-거래 가능한 심볼 리스트를 필터링하고, 데이터 충족성 및 상장 기간 등을 고려하여 동적인 트레이딩 유니버스를 관리합니다. PIT(Point-In-Time)를 준수하여 생존/상폐 편향을 원천 차단합니다.
+# 2. Core Logic & Math
 
----
+**Execution Cost Estimation (Stage 4)**
+- $\text{cost\_bps} = 2 \cdot \text{taker\_fee} + 2 \cdot \text{half\_spread} + \text{impact} + \text{tick\_cost}$
+- Post-2020: `half_spread` = empirical median of `bookDepth`.
+- Pre-2020: `half_spread` = Modified Corwin-Schultz OHLC model.
 
-## 2. Core Components
+**Snapshot Quality Score**
+- $\text{Score}_{\text{universe}} = \text{fill\_rate} \times \log_{10}\left(\frac{\text{median\_adv\_usdt}}{10^6}\right) \times \frac{1}{\text{mAEC\_bps}}$
 
-| Component | Responsibility |
-|---|---|
-| `universe_service.py` | 유니버스 생성 및 필터링 오케스트레이션 |
-| `candidate_selector.py` | 거래량, 시총 등 기준 후보 심볼 선택 |
-| `data_readiness.py` | 심볼별 백테스트/트레이딩 가용 데이터 검증 |
-| `pipeline.py` | 7단계 Funnel(Stage 0~6) 순차 실행 |
+**PIT Constraints**
+- Strict requirement: `knowledge_date <= as_of`. No forward-looking metadata or delisting knowledge is allowed.
 
----
+**7-Stage Funnel Hurdles**
+- **S1 (Structure):** `listing_age_days >= 90`
+- **S2 (Quality):** `min_is_coverage >= 0.80`, `min_coverage_60d >= 0.95`
+- **S3 (Liquidity):** `adv_usdt_median >= 25M`, `max_amihud_30d <= 1.63e-9`
+- **S4 (Cost):** `execution_cost_bps <= 50.0`
+- **S5 (Risk):** $0.05 \leq \text{vol\_30d} \leq 4.0$, $|\text{funding\_zscore}| \leq 2.5$
 
-## 3. Data Flow
+# 3. Architecture Flow
 
-```text
-[Exchange Symbols] -> [Eligibility (Stage 0)] -> [Structure (Stage 1)] 
-  -> [Data Quality (Stage 2)] -> [Liquidity (Stage 3)] 
-  -> [Execution Cost (Stage 4)] -> [Risk Events (Stage 5)] 
-  -> [Selection/Ranking (Stage 6)] -> [Universe Snapshot]
+```mermaid
+graph TD
+    A[Exchange Symbol List] --> B[S0: Eligibility]
+    B --> C[S1: Structure & Listing Age]
+    C --> D[S2: Data Quality]
+    D --> E[S3: Liquidity]
+    E --> F[S4: Execution Cost]
+    F --> G[S5: Risk Events]
+    G --> H[S6: Selection & Ranking]
+    H --> I[PIT Universe Snapshot]
+    I --> J[Downstream ML & Candidate Pipeline]
 ```
 
-Stage6 결과는 snapshot에만 머무르지 않고, downstream candidate ML 파이프라인으로 정적 메타데이터를 전달합니다. 현재 전달 항목은 `vol_30d`, `friction_score`, `alpha_capacity_score`, `diversification_score`, `tradeable_score`, `cluster_id`, `beta_vs_market`, `cluster_size`, `anchor_cluster_member` 입니다.
+# 4. Core Variables & I/O
 
----
-
-## 4. Business Rules
-
-### Must Follow
-- **Strict Listing Period:** 최소 상장 기간 90일 미달 심볼 제외 (`listing_age_days >= 90`).
-- **Volume Block:** 30일 Median ADV가 25M USDT 미만인 심볼 차단.
-- **PIT Integrity:** `knowledge_date <= as_of` 조건으로 미래 정보 참조 원천 차단.
-
-### Must Not Do
-- **Survivor Bias:** 상장 폐지된 심볼의 과거 데이터를 누락하여 수익률을 왜곡하지 말 것.
-- **Price Predictive Delisting:** `deliveryDate` 등으로 상폐 시점을 미리 예측하여 청산하지 말 것.
-
----
-
-## 5. Detailed Specifications
-
-### 5.1 7-Stage Funnel Thresholds
-- **Stage 2 (Quality):** `min_is_coverage >= 0.80`, `min_coverage_60d >= 0.95`.
-- **Stage 3 (Liquidity):** `adv_usdt_median >= 25M`, `max_amihud_30d <= 1.63e-9`.
-- **Stage 4 (Cost):** `execution_cost_bps <= 50.0 bps`.
-- **Stage 5 (Risk):** `vol_30d` in `[0.05, 4.0]`, `|funding_zscore| <= 2.5`.
-
-### 5.2 Execution Cost Function
-$$\text{cost\_bps} = 2 \cdot \text{taker} + 2 \cdot \text{half\_spread} + \text{impact} + \text{tick\_cost}$$
-- **half_spread (Post-2020):** `bookDepth` 실측 중앙값.
-- **half_spread (Pre-2020):** `Corwin-Schultz` OHLC 변형 모델 Fallback.
-
-### 5.3 Snapshot Quality Score
-$$Score_{universe} = fill\_rate \times \log_{10}\!\left(\frac{\text{median\_adv\_usdt}}{10^6}\right) \times \frac{1}{\text{mAEC\_bps}}$$
-- **Excellent:** Median Cost < 18.0 bps, Median ADV > 100M USDT.
-
-### 5.4 Downstream Coupling Rules
-- **PIT-safe Metadata**: Stage6 메타데이터는 snapshot 시점에 고정된 정적 값으로만 downstream에 주입되어야 합니다.
-- **No Forced Policy Flip**: 유니버스가 고변동성 자산을 더 많이 포함하더라도, downstream shortfall selection 규칙은 기본적으로 절대 bps 기준을 유지합니다.
-- **Optional Risk Normalization**: `stop_relative` shortfall threshold는 지원되지만 기본값은 꺼져 있으며, 진단 로그로 충분히 검증된 뒤에만 정책 기본값 변경을 검토합니다.
-
----
-
-## 6. Examples
-- **Input:** Symbol 'ABC' listed for 30 days, Min requirement 90 days
-- **Output:** Excluded from Universe (Stage 5 Listing Age Gate)
-
----
-
-## 7. Testing Expectations
-- **Forced Dropout Rate:** 90일 Dwell Time 미달 자산의 비정상 퇴출률이 10% 미만인지 확인.
-- **Universe Consistency Test:** 백테스트와 라이브 트레이딩의 유니버스 선정 결과가 동일 시점에서 일치하는지 확인.
+| Type | Variable | Description |
+|------|----------|-------------|
+| **Input** | `knowledge_date` | Point-in-time barrier for all historical data queries |
+| **Param** | `min_listing_days` | Minimum days since listing to bypass structural gate (default: 90) |
+| **Param** | `min_adv_usdt` | Minimum 30-day median trading volume (default: 25M) |
+| **Param** | `max_exec_cost_bps` | Maximum tolerated round-trip execution cost (default: 50.0) |
+| **Output**| `Universe Snapshot` | Static, timestamped set of valid symbols |
+| **Output**| `Static Metadata` | Metrics passed downstream: `vol_30d`, `friction_score`, `beta_vs_market`, etc. |
