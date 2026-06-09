@@ -255,6 +255,8 @@ def test_compute_rule_diagnostics_promotes_signal_cells_when_present() -> None:
         regime_diagnostic_enabled=False,
         # Use signal_cell promotion to test per-cell granularity explicitly.
         promotion_level="signal_cell",
+        # IC t-stat gate requires N>=3; bypass here since test uses only 2 events
+        min_ic_tstat=0.0,
     )
 
     result = compute_rule_diagnostics(
@@ -308,6 +310,8 @@ def test_rule_recommendations_use_explicit_recommendation_window_not_report_wind
         min_variant_oos_payoff_ratio=1.0,
         max_variant_oos_q10_fail_rate=1.0,
         regime_diagnostic_enabled=False,
+        # IC t-stat requires N>=3; bypass to test recommendation-window logic in isolation
+        min_ic_tstat=0.0,
     )
 
     result = compute_rule_diagnostics(
@@ -360,7 +364,7 @@ def test_summarize_recommendation_gate_failures_reports_pass_and_fail_reasons() 
             {
                 "group": "variant=trend_ma:ema_12_72",
                 "candidate_action": "KEEP_CANDIDATE",
-                "oos_n": 3,
+                "oos_n": 300,
                 "oos_mean_edge_bps": 8.0,
                 "oos_median_edge_bps": 1.0,
                 "oos_p10_edge_bps": -20.0,
@@ -370,7 +374,7 @@ def test_summarize_recommendation_gate_failures_reports_pass_and_fail_reasons() 
                 "oos_pct_edge_pos": 0.60,
                 "oos_payoff_ratio": 1.30,
                 "breakeven_hard_pass": True,
-                "oos_rank_ic": 0.05,
+                "oos_rank_ic": 0.06,
                 "archetype": "mean_reversion",
                 "exit_policy_id": "",
             },
@@ -466,10 +470,11 @@ def test_meets_recommendation_thresholds_rejects_over_dense_variant() -> None:
 
 
 def test_meets_recommendation_thresholds_accepts_when_all_gates_pass() -> None:
+    # oos_n=300 ensures ic_tstat gate passes: t = 0.06 * sqrt(298) / sqrt(1-0.06²) ≈ 1.04 > 0.8
     cfg = CandidateStrategyConfig(min_variant_oos_obs=10)
     row = pd.Series(
         {
-            "oos_n": 12,
+            "oos_n": 300,
             "oos_mean_edge_bps": 7.0,
             "oos_median_edge_bps": 6.0,
             "oos_p10_edge_bps": -40.0,
@@ -480,10 +485,39 @@ def test_meets_recommendation_thresholds_accepts_when_all_gates_pass() -> None:
             "oos_pct_edge_pos": 0.6,
             "oos_payoff_ratio": 1.3,
             "breakeven_hard_pass": True,
-            "oos_rank_ic": 0.05,
+            "oos_rank_ic": 0.06,
         }
     )
     assert _meets_recommendation_thresholds(row, cfg)
+
+
+def test_ic_tstat_gate_uses_oos_ic_n_not_inflated_is_n() -> None:
+    # Arrange: IC=0.0375 with true OOS N=309 gives t≈0.66 < 0.8 (FAIL),
+    # but the IS-window oos_n=772 would inflate t to ≈1.04 (false PASS).
+    # The gate must honor oos_ic_n (true OOS sample) over oos_n.
+    cfg = CandidateStrategyConfig(min_variant_oos_obs=10, min_ic_tstat=0.8)
+    base = {
+        "oos_n": 772,
+        "oos_mean_edge_bps": 7.0,
+        "oos_median_edge_bps": 6.0,
+        "oos_p10_edge_bps": -40.0,
+        "oos_q10_shortfall_fail_rate": 0.2,
+        "event_fraction_per_bar": 0.05,
+        "regime_pass": True,
+        "edge_stability_bps": -10.0,
+        "oos_pct_edge_pos": 0.6,
+        "oos_payoff_ratio": 1.3,
+        "breakeven_hard_pass": True,
+        "oos_rank_ic": 0.0375,
+    }
+
+    # Act: with correct OOS N the t-stat fails; without oos_ic_n it would falsely pass.
+    rejected = _meets_recommendation_thresholds(pd.Series({**base, "oos_ic_n": 309}), cfg)
+    inflated = _meets_recommendation_thresholds(pd.Series(base), cfg)
+
+    # Assert
+    assert rejected is False
+    assert inflated is True
 
 
 def test_compute_rule_diagnostics_rejects_variant_without_positive_regime_edge() -> None:
@@ -597,6 +631,8 @@ def test_compute_rule_diagnostics_accepts_variant_with_positive_regime_edge() ->
         min_regime_variant_oos_edge_bps=2.0,
         min_oos_rank_ic=0.0,
         standalone_breakeven_hard_gate_enabled=False,
+        # IC t-stat gate bypassed to test regime-edge logic in isolation
+        min_ic_tstat=0.0,
     )
 
     result = compute_rule_diagnostics(

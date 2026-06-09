@@ -782,7 +782,7 @@ def _run_strategy_stage(
             "min_obs": "Low Obs", "mean_edge": "Low Mean Edge", "median_edge": "Low Median Edge",
             "p10_edge": "Poor P10 Edge", "q10_fail": "High Q10 Fail", "event_density": "Event Overload",
             "regime_edge": "Regime Filter", "edge_decay": "Edge Decay", "hit_or_payoff": "Poor Hit/Payoff",
-            "oos_rank_ic": "Low OOS IC", "exit_policy": "Exit Policy",
+            "oos_rank_ic": "Low OOS IC", "ic_tstat": "Low IC t-stat", "exit_policy": "Exit Policy",
         }
         readable_failures = " | ".join([f"{mapping.get(k, k)} ({v})" for k, v in sorted(failure_counts.items())])
         top_blocked = failure_report.get("top_blocked_str", "none")
