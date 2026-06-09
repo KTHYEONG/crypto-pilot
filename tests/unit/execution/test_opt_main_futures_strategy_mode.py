@@ -400,10 +400,10 @@ def test_run_from_cli_when_pipeline_raises_runtime_error_returns_one(
     assert exit_code == 1
 
 
-def test_requires_exec_1m_returns_false_for_ml_mode() -> None:
+def test_requires_exec_1m_returns_false_for_alo_mode() -> None:
     run_config = build_run_config_from_args(
         {
-            "phase": "ml",
+            "phase": "alo",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
