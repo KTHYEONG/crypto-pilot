@@ -32,7 +32,7 @@ Generates vectorized rule panels with archetype/regime contexts and filters them
 - Strict Causality: No forward-looking data $t+k$ is used in evaluating $S_{t}$ or $E_{t}$.
 
 **Archetype-Selective Regime Gating**
-- $A_{\text{reversion}}$ (Mean Reversion) entries are blocked ($E_{t} \rightarrow 0$) in `bull_volatile`, `bear_volatile`, and `crash` regimes.
+- $A_{\text{reversion}}$ (Mean Reversion) entries are blocked ($E_{t} \rightarrow 0$) in regimes specified by `mean_reversion_blocked_regimes`.
 
 **L1 Breakeven Hard Gate (Hurdle)**
 - For a variant to be promoted, its OOS mean edge after hurdle must be positive and significant.
@@ -59,8 +59,9 @@ graph TD
 | Type | Variable | Description |
 |------|----------|-------------|
 | **Input** | `AlignedMarketData` | Vectorized pricing and volume data matrices |
-| **Param** | `standalone_breakeven_hard_gate_enabled` | Enforces L1 profitability gate before allocation (boolean) |
-| **Param** | `mean_reversion_regime_entry_gating_enabled` | Blocks mean-reversion entries in volatile/crash regimes (boolean) |
+| **Param** | `standalone_breakeven_hard_gate_enabled` | Enforces L1 profitability gate before allocation. Bounds: `[True, False]` |
+| **Param** | `mean_reversion_regime_entry_gating_enabled` | Blocks mean-reversion entries in volatile/crash regimes. Bounds: `[True, False]` |
+| **Param** | `min_rule_ir_t` | Minimum t-statistic for standalone breakeven gate. Bounds: `[0.0, ∞)` |
 | **Output**| `CandidateSignalPanel` | Dense 2D structure containing `signed_score`, `side_hint`, and `valid_mask` |
 | **Output**| `events: pd.DataFrame` | Sparse tabulated representation of valid entry signals |
 
