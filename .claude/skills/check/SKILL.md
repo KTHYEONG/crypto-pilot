@@ -1,42 +1,35 @@
 ---
 name: check
-description: Confirm implementation completeness based on Spec acceptance criteria and verification scripts.
+description: Run tests, perform Surgical Hotfixes, and Error Triage.
 ---
 
 # Skill: Check
 
 ## Purpose
-Empirically verify mechanical integrity (tests, linting, type-checking) and confirm that changes meet the technical criteria defined in the Spec.
+Empirically verify the implementation via `pytest` and perform "Error Triage" or "Hotfixes" to maintain velocity.
 
 ## Execution Rules
-1. **Systemic Integrity (L2):** Prioritize proving the code *works* (tests) and doesn't break other parts of the system.
-2. **Functional Focus:** Focus on `pytest` execution. Do NOT redundantly run file-specific `ruff` or `mypy` if they were already confirmed in the `implement` phase, unless a project-wide regression is suspected.
-3. **Spec Alignment:** Read `Verification Snippet` and `Acceptance Criteria` in the relevant `docs/specs/` file before verifying.
-4. **Standard Commands:** Use `uv run pytest` with appropriate filters (e.g., `-k`, `--cov`).
-5. **Raw Output:** Include raw tool output summaries (e.g., `5 passed, 2 failed`) without paraphrasing.
-6. **Handoff:** If mechanical checks pass but logical complexity is high, clearly state that deep logic auditing is deferred to the `audit` skill.
-
-## Verification Checklist
-- [ ] **Acceptance:** Does it satisfy all Acceptance Criteria in the Spec?
-- [ ] **Functional:** Does the Verification Snippet output match the Expected Output?
-- [ ] **Regression:** Do related existing tests still pass?
+1. **L2 Verification:** Run `uv run pytest`.
+2. **Surgical Hotfix (Fast-Track - EFFICIENCY)**:
+   - If a failure is caused by a **minor, obvious error** (e.g., missing import, simple typo, obvious off-by-one in a test assertion), you MAY fix it directly using the `replace` tool.
+   - After a Hotfix, re-run tests. If it passes, proceed to AUDIT.
+   - **Limit**: Max 1 Hotfix attempt per file. If it doesn't fix the issue, stop and route.
+3. **Error Triage (Routing Loop)**:
+   - **Scenario A: Logic/Test Failure** (Complex failure, edge case, or Hotfix failed): **Route back to `spec`**.
+   - **Scenario B: Implementation Error** (Code deviates significantly from Spec or has non-obvious bugs): **Route back to `implement`**.
+   - **Scenario C: Regression**: Breaking existing tests. **Route back to `spec`**.
+4. **Spec Alignment**: Ensure all `Test Scenario Design` points from the Spec are covered.
 
 ## Output Format
 ```md
-### ✅ 검사 및 테스트: [PASS / FAIL / PARTIAL]
+### ✅ Testing & Triage: [PASS / FAIL]
 
-**1. 검증 요약**
-- **기준 설계 문서:** `docs/specs/filename.md`
-- **실행 명령어:** `[Commands executed]` (e.g., pytest)
-- **결과 요약:** `[Raw output summary]`
+**1. Results**
+- **Command:** `uv run pytest ...`
+- **Output:** `[Raw Summary]`
 
-**2. 세부 검증 내역**
-- [ ] **완료 기준 1:** [Pass/Fail] - [Brief note]
-- [ ] **완료 기준 2:** [Pass/Fail]
-
-**3. 문제점 및 발견 사항**
-- [Details of failed tests or regressions]
-
-**4. 다음 단계**
-- [Fix direction or Next Step]
+**2. Hotfix / Triage & Routing**
+- **Hotfix applied?**: [Yes (Details) / No]
+- **Diagnosis:** [Why did it fail?]
+- **Next Step:** [Proceed to AUDIT / Return to SPEC (Logic) / Return to IMPLEMENT (Coding)]
 ```
