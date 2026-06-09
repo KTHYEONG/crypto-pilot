@@ -771,6 +771,16 @@ def _log_variant_top_block(
     _logger.info("-" * width)
 
 
+def _ic_tstat(ic: float, n: int) -> float:
+    """Return IC t-statistic using Fisher approximation with df correction."""
+    if n < 3 or not np.isfinite(ic):
+        return 0.0
+    denom = 1.0 - ic * ic
+    if denom <= 0.0:
+        return float("inf") if ic > 0.0 else float("-inf")
+    return float(ic * np.sqrt(n - 2) / np.sqrt(denom))
+
+
 def _recommendation_threshold_checks(row: pd.Series, cfg: CandidateStrategyConfig) -> dict[str, bool]:
     is_signal_cell = str(row.get("group", "")).startswith("cell=")
     min_obs = cfg.min_signal_cell_oos_obs if is_signal_cell else cfg.min_variant_oos_obs
@@ -820,9 +830,14 @@ def _recommendation_threshold_checks(row: pd.Series, cfg: CandidateStrategyConfi
     )
     _oos_rank_ic = float(row.get("oos_rank_ic", float("nan")))
     oos_rank_ic_ok = np.isfinite(_oos_rank_ic) and _oos_rank_ic >= cfg.min_oos_rank_ic
+    _oos_n = int(row.get("oos_n", 0))
+    # IC t-stat must use the OOS-window N the IC was computed on. `oos_ic_n` is populated
+    # when the OOS-window IC was substituted in; fall back to `oos_n` otherwise.
+    _oos_ic_n = int(row.get("oos_ic_n", _oos_n))
+    ic_tstat_ok = _ic_tstat(_oos_rank_ic, _oos_ic_n) >= cfg.min_ic_tstat
 
     return {
-        "min_obs": int(row.get("oos_n", 0)) >= min_obs,
+        "min_obs": _oos_n >= min_obs,
         "breakeven_hard_gate": (
             (not cfg.standalone_breakeven_hard_gate_enabled)
             or bool(row.get("breakeven_hard_pass", False))
@@ -836,6 +851,7 @@ def _recommendation_threshold_checks(row: pd.Series, cfg: CandidateStrategyConfi
         "edge_decay": edge_decay_ok,
         "hit_or_payoff": hit_or_payoff_ok,
         "oos_rank_ic": oos_rank_ic_ok,
+        "ic_tstat": ic_tstat_ok,
         "exit_policy": bool(str(row.get("exit_policy_id", ""))) if is_signal_cell else True,
     }
 
@@ -1243,6 +1259,28 @@ def compute_rule_diagnostics(
         recommendation_start=resolved_recommendation_start,
         recommendation_end=resolved_recommendation_end,
     )
+    # Replace rec-window IC with OOS-window IC from by_variant (report_start..report_end).
+    # Recommendation window = IS+calibration, so its Spearman is in-sample and noisy for
+    # pattern signals. by_variant["oos_rank_ic"] is computed on the same OOS window used
+    # for all other OOS metrics and is the correct source for the IC gate.
+    # We also carry by_variant's OOS sample count as `oos_ic_n` so the IC t-stat uses the
+    # N the IC was actually computed on (rec-window `oos_n` is the IS count and would
+    # inflate the t-stat).
+    if not recommendation_variant_summary.empty and not by_variant.empty and "oos_rank_ic" in by_variant.columns:
+        _bv_indexed = by_variant.set_index("group")
+        _ic_map: pd.Series = _bv_indexed["oos_rank_ic"]
+        recommendation_variant_summary["oos_rank_ic"] = (
+            recommendation_variant_summary["group"].map(_ic_map)
+            .fillna(recommendation_variant_summary["oos_rank_ic"])
+        )
+        if "oos_n" in _bv_indexed.columns:
+            _n_map: pd.Series = _bv_indexed["oos_n"]
+            recommendation_variant_summary["oos_ic_n"] = (
+                recommendation_variant_summary["group"].map(_n_map)
+                .fillna(recommendation_variant_summary["oos_n"])
+                .astype(int)
+            )
+
     recommended_keep_variants, recommended_flip_variants = _build_recommendations(
         by_variant=recommendation_variant_summary,
         flipped_by_variant=recommendation_flipped_summary,
@@ -1294,36 +1332,34 @@ def compute_rule_diagnostics(
         failure_summary = summarize_recommendation_gate_failures(recommendation_variant_summary, cfg)
         blocked_df = failure_summary.loc[~failure_summary["recommended"]].copy()
         if not blocked_df.empty:
-            # Collect failure report stats
-                failure_counts: dict[str, int] = {}
-                for failed in blocked_df["failed_checks"]:
-                    for name in failed:
-                        failure_counts[name] = failure_counts.get(name, 0) + 1
-                ordered_counts = " | ".join(f"{name}x{count}" for name, count in sorted(failure_counts.items()))
-                top_blocked = (
-                    blocked_df
-                    .sort_values(["oos_mean_edge_bps", "group"], ascending=[False, True])
-                    .head(cfg.diagnostic_top_k)
-                )
-                top_names = ", ".join(
-                    str(getattr(r, "variant", str(r.group).removeprefix("variant=")))
-                    for r in top_blocked.itertuples(index=False)
-                )
-                recommendation_failure_report = {
-                    "n_blocked": len(blocked_df),
-                    "fail_gates_str": ordered_counts,
-                    "top_blocked_str": top_names,
-                    "failure_counts": failure_counts,
-                    "rows": [
-                        {
-                            "group": str(r.group),
-                            "candidate_action": str(r.candidate_action),
-                            "failed_checks": list(r.failed_checks),
-                        }
-                        for r in blocked_df.itertuples(index=False)
-                    ],
-                }
-
+            failure_counts: dict[str, int] = {}
+            for failed in blocked_df["failed_checks"]:
+                for name in failed:
+                    failure_counts[name] = failure_counts.get(name, 0) + 1
+            ordered_counts = " | ".join(f"{name}x{count}" for name, count in sorted(failure_counts.items()))
+            top_blocked = (
+                blocked_df
+                .sort_values(["oos_mean_edge_bps", "group"], ascending=[False, True])
+                .head(cfg.diagnostic_top_k)
+            )
+            top_names = ", ".join(
+                str(getattr(r, "variant", str(r.group).removeprefix("variant=")))
+                for r in top_blocked.itertuples(index=False)
+            )
+            recommendation_failure_report = {
+                "n_blocked": len(blocked_df),
+                "fail_gates_str": ordered_counts,
+                "top_blocked_str": top_names,
+                "failure_counts": failure_counts,
+                "rows": [
+                    {
+                        "group": str(r.group),
+                        "candidate_action": str(r.candidate_action),
+                        "failed_checks": list(r.failed_checks),
+                    }
+                    for r in blocked_df.itertuples(index=False)
+                ],
+            }
         _log_recommendation_failure_block(
             recommendation_variant_summary,
             cfg=cfg,
