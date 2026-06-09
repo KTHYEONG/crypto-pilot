@@ -42,6 +42,56 @@ def _newey_west_mean_tstat(values: np.ndarray, max_lag: int) -> float:
     return float(np.mean(finite) / se)
 
 
+def _regime_cell_admission(
+    rec_entry_idx: np.ndarray,
+    rec_edge: np.ndarray,
+    regime_code: np.ndarray,
+    regime_names: list[str],
+    cfg: CandidateStrategyConfig,
+) -> dict[str, Any]:
+    """Evaluate per-regime-cell edge/t-stat for conditional admission.
+
+    Returns admitted=True if any cell clears both min_regime_cell_edge_bps
+    and min_regime_cell_tstat with enough observations. At most
+    max_admitted_cells_per_variant cells are retained (highest edge first).
+    """
+    valid_idx = (rec_entry_idx >= 0) & (rec_entry_idx < regime_code.shape[0])
+    if not np.any(valid_idx):
+        return {"admitted": False, "admitted_cells": [], "cell_edges": {}, "cell_tstats": {}}
+
+    entry_idx_valid = rec_entry_idx[valid_idx]
+    edge_valid = rec_edge[valid_idx]
+    rec_regime_code = regime_code[entry_idx_valid]
+
+    passing: list[tuple[float, str]] = []  # (edge, name)
+    cell_edges: dict[str, float] = {}
+    cell_tstats: dict[str, float] = {}
+
+    for code, name in enumerate(regime_names):
+        mask = rec_regime_code == code
+        obs = int(np.sum(mask))
+        if obs < cfg.min_regime_cell_oos_obs:
+            continue
+        cell_edge_vals = edge_valid[mask]
+        cell_mean = float(np.mean(cell_edge_vals))
+        cell_std = float(np.std(cell_edge_vals, ddof=1))
+        cell_tstat = cell_mean / (cell_std / (obs**0.5) + 1e-12)
+        cell_edges[name] = cell_mean
+        cell_tstats[name] = cell_tstat
+        if cell_mean >= cfg.min_regime_cell_edge_bps and cell_tstat >= cfg.min_regime_cell_tstat:
+            passing.append((cell_mean, name))
+
+    # Retain top-N cells by edge to prevent over-specialisation.
+    passing.sort(key=lambda x: x[0], reverse=True)
+    admitted_cells = [name for _, name in passing[: cfg.max_admitted_cells_per_variant]]
+    return {
+        "admitted": len(admitted_cells) > 0,
+        "admitted_cells": admitted_cells,
+        "cell_edges": cell_edges,
+        "cell_tstats": cell_tstats,
+    }
+
+
 def log_regime_quality_report(report: RegimeQualityReport) -> None:
     """Emit a compact regime scorecard line for diagnostics."""
     reasons = ",".join(report.reasons) if report.reasons else "none"
@@ -478,27 +528,39 @@ def _summarize_recommendation_variants(
         regime_best_edge_bps = float("nan")
         regime_eligible_count = 0
         regime_pass = True
+        regime_cell_admitted = False
+        regime_cell_admitted_cells: list[str] = []
         if cfg.regime_diagnostic_enabled:
             rec_entry_idx = rec_group["entry_idx"].to_numpy(dtype=np.int64, copy=False)
             best_edge = -np.inf
             valid_idx = (rec_entry_idx >= 0) & (rec_entry_idx < regime_code.shape[0])
             if np.any(valid_idx):
-                rec_entry_idx = rec_entry_idx[valid_idx]
-                rec_edge = rec_edge[valid_idx]
-                rec_regime_code = regime_code[rec_entry_idx]
+                _entry_valid = rec_entry_idx[valid_idx]
+                _edge_valid = rec_edge[valid_idx]
+                rec_regime_code = regime_code[_entry_valid]
                 for code, name in enumerate(regime_names):
                     code_mask = rec_regime_code == code
                     obs = int(np.sum(code_mask))
                     if obs < cfg.min_regime_variant_oos_obs:
                         continue
                     regime_eligible_count += 1
-                    mean_edge = float(np.mean(rec_edge[code_mask]))
+                    mean_edge = float(np.mean(_edge_valid[code_mask]))
                     if mean_edge > best_edge:
                         best_edge = mean_edge
                         regime_best_name = name
                         regime_best_obs = obs
                         regime_best_edge_bps = mean_edge
             regime_pass = regime_eligible_count > 0 and regime_best_edge_bps >= cfg.min_regime_variant_oos_edge_bps
+            if cfg.regime_cell_admission_enabled:
+                cell_result = _regime_cell_admission(
+                    rec_entry_idx=rec_entry_idx,
+                    rec_edge=rec_edge,
+                    regime_code=regime_code,
+                    regime_names=list(regime_names),
+                    cfg=cfg,
+                )
+                regime_cell_admitted = bool(cell_result["admitted"])
+                regime_cell_admitted_cells = list(cell_result["admitted_cells"])
         records.append(
             {
                 "group": f"{prefix}{key}",
@@ -525,6 +587,8 @@ def _summarize_recommendation_variants(
                 "regime_best_oos_edge_bps": regime_best_edge_bps,
                 "regime_best_name": regime_best_name,
                 "regime_pass": regime_pass,
+                "regime_cell_admitted": regime_cell_admitted,
+                "regime_cell_admitted_cells": ",".join(regime_cell_admitted_cells),
                 "oos_rank_ic": float(rec_metrics["spearman_score_edge"]),
                 "edge_stability_bps": float("nan"),
                 "candidate_action": _candidate_action(
@@ -570,6 +634,8 @@ def _summarize_recommendation_variants(
                 "regime_best_oos_edge_bps",
                 "regime_best_name",
                 "regime_pass",
+                "regime_cell_admitted",
+                "regime_cell_admitted_cells",
                 "edge_stability_bps",
                 "candidate_action",
             ]
@@ -836,7 +902,7 @@ def _recommendation_threshold_checks(row: pd.Series, cfg: CandidateStrategyConfi
     _oos_ic_n = int(row.get("oos_ic_n", _oos_n))
     ic_tstat_ok = _ic_tstat(_oos_rank_ic, _oos_ic_n) >= cfg.min_ic_tstat
 
-    return {
+    checks = {
         "min_obs": _oos_n >= min_obs,
         "breakeven_hard_gate": (
             (not cfg.standalone_breakeven_hard_gate_enabled)
@@ -854,6 +920,13 @@ def _recommendation_threshold_checks(row: pd.Series, cfg: CandidateStrategyConfi
         "ic_tstat": ic_tstat_ok,
         "exit_policy": bool(str(row.get("exit_policy_id", ""))) if is_signal_cell else True,
     }
+    # Regime-cell OR-path: override per-cell gates only (not safety gates).
+    # Safety gates (min_obs, q10_fail, event_density) remain mandatory in both paths.
+    if cfg.regime_cell_admission_enabled and bool(row.get("regime_cell_admitted", False)):
+        for key in ("breakeven_hard_gate", "mean_edge", "median_edge", "p10_edge",
+                    "regime_edge", "edge_decay", "hit_or_payoff", "oos_rank_ic", "ic_tstat"):
+            checks[key] = True
+    return checks
 
 
 def _meets_recommendation_thresholds(row: pd.Series, cfg: CandidateStrategyConfig) -> bool:
