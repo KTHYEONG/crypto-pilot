@@ -1,58 +1,35 @@
----
-name: audit
-description: Professional Peer Review, Intent Alignment, and Architecture Integrity.
----
-
-# Skill: Audit (Professional Quality Gatekeeper)
+# Skill: Audit (Lightweight Intent Gatekeeper)
 
 ## Purpose
-The final expert gatekeeper. Beyond just matching the Spec, you must critically evaluate the code for performance, maintainability, and global system integrity. You are a Senior Reviewer who trusts no one.
+Verify that the implementation accurately reflects the business logic requirements defined in the Spec. Exclude style or syntax checks to minimize token consumption.
 
 ## Execution Rules
 
-### 1. Zero-Trust Review (Logic & Performance)
-- **Question the Architect**: Even if the code matches `docs/specs/*.md`, ask: "Is this logic actually optimal?"
-- **Quant/Financial Filter**: For trading logic, check for:
-  - Vectorization vs. Loops (prefer NumPy/Pandas ops).
-  - Memory efficiency (avoid unnecessary deep copies).
-  - Numerical stability and floating-point precision.
-- **Error Handling**: Is it too defensive? Or missing critical failure points?
+### 1. Targeted Diff Review (Token Efficiency)
+- **Focus**: Do not re-analyze the entire existing codebase. Concentrate on comparing the `git diff` or changed code snippets directly against the `Algorithmic Flow` in the Spec.
+- **Efficiency**: Minimize internal thinking steps and judge only whether the core logic changes align with the Spec's goals.
 
-### 2. Architecture Integrity (Global Compliance)
-- **Convention Check**: Does the code follow `GEMINI.md` and specific rules in `.agents/rules/` (e.g., `quant.md`, `trading_bot.md`)?
-- **Pattern Match**: Does it use the project's established patterns (Pydantic settings, logging vs. print, etc.)?
-- **Tech Debt**: Does this change introduce "hidden" debt or messy dependencies not mentioned in the Spec?
+### 2. Intent & Logic Alignment
+- **Quant/Financial Core**: Verify that formulas, vectorization (NumPy/Pandas), and trading logic intent match the Spec.
+- **Critical Failure Points**: Briefly check for performance bottlenecks (e.g., unnecessary loops) or fatal logical flaws.
 
-### 3. Spec-to-Code Alignment (Baseline)
-- Verify the implementer followed the `Algorithmic Flow` and `Test Scenarios`.
-- Ensure NO unauthorized deviations or "lazy" implementations.
-
-### 4. Knowledge Promotion & Cleanup
-- Sync core formulas to `docs/architecture/`.
-- Update `docs/decisions/` with a compressed ADR (5 lines).
-- Delete the temporary `docs/specs/*.md`.
+### 3. Skip Mechanical Checks
+- **Delegate to Linter**: Pass off mechanical conventions like Pydantic settings, Logging vs Print, and type hinting to the `check` phase (ruff/mypy).
+- **No Documentation**: Do not perform architecture document updates or ADR logging here. (Delegate to the `sync` skill).
 
 ## Verdicts
-- **PASS**: Code is high-quality, architecturally sound, and intent-aligned.
-- **FAIL (Quality/Integrity)**: Code is suboptimal, violates quant rules, or ignores system conventions. -> **Return to `implement` (or `spec`)** with detailed expert feedback.
+- **PASS**: Core logic is accurately implemented according to the Spec's intent.
+- **FAIL**: Missing logic, incorrect algorithm usage, or severe performance degradation found. -> **Return to `implement`** (or `spec`) with clear feedback.
 
 ## Output Format
 ```md
 ### 🏁 Professional Audit: [PASS / FAIL]
 
-**1. Zero-Trust Review**
-- [ ] Optimal Logic & Performance (NumPy/Pandas/Memory)
-- [ ] Robustness & Error Handling
+**1. Intent Alignment**
+- [ ] Spec Core Logic vs Code Implementation
+- [ ] Quant/Financial Vectorization & Efficiency
 
-**2. Architecture & Global Compliance**
-- [ ] Compliance with `.agents/rules/` (Quant/Trading)
-- [ ] Follows `GEMINI.md` conventions
-
-**3. Alignment & Promotion**
-- [ ] Spec Alignment (Flow & Tests)
-- [ ] SSOT Documentation Synced & Cleanup
-
-**4. Expert Feedback & Next Step**
-- [Expert review comments for the developer]
-- [Next Step: Proceed to COMMIT / Return to X]
+**2. Expert Feedback & Next Step**
+- [Brief and sharp review comments on the core logic]
+- [Next Step: Proceed to SYNC / Return to IMPLEMENT]
 ```

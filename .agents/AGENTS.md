@@ -16,7 +16,7 @@
     - **Existing Files:** When modifying existing files, you MUST use `replace_file_content` or `multi_replace_file_content` to edit only the necessary parts. `write_to_file` is reserved for creating new files only.
     - **Markdown Output:** When explaining code to the user, omit unchanged parts using the `# ... existing code ...` comment.
 - **CONTEXT WINDOW MGMT:** When reading large files (300+ lines), specify line ranges in `view_file` to read only the necessary parts. Avoid reading the entire file.
-- **LANGUAGE:** Respond primarily in Korean as the user is Korean. Use English ONLY for technical terminology.
+- **LANGUAGE:** Respond primarily in Korean. Use English ONLY for technical terminology. The use of **Hanja (Chinese characters)** or the **Chinese language** is strictly prohibited in all outputs and documentation.
 - **EXPLICIT UNCERTAINTY:** If requirements are unclear, explicitly state "Clarification Needed: [item]" and ask questions before writing code.
 
 ## 3. Environment & Execution (Environment & Tool Execution)
@@ -96,6 +96,7 @@ Default non-trivial development workflow:
 3. `implement`
 4. `check`
 5. `audit`
+6. `sync`
 
 Commit tasks:
 - Do not route through the default skill workflow.
@@ -114,4 +115,4 @@ To maintain a clean and navigable codebase, documentation must follow a strict s
   - Constraint: NO history, NO conversational prose. Must be immediately understandable as the structural SSOT.
 - **Decisions (`docs/decisions/`):** "Ultra-Compressed Logic History" (ADR).
   - Contents: Strict maximum of 5-7 lines per task. Focus solely on the *Delta* (what changed) and *Rationale* (why).
-  - Workflow: The `audit` skill MUST condense implementation details into this ultra-short format to prevent file bloat over time.
+  - Workflow: The `sync` skill MUST condense implementation details into this ultra-short format to prevent file bloat over time.
