@@ -90,20 +90,36 @@ def mocked_pipeline_stages(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[An
         "_ensure_cached_symbol_data_for_targets",
         lambda *a, **kw: None,
     )
+    def _mock_universe(*a: Any) -> tuple[Any, ...]:
+        calls["universe"].append(a)
+        return (["BTCUSDT"], {}, (), (), mock_snapshot, {})
+
+    def _mock_data(*a: Any) -> opt_main_futures.DataStageResult:
+        calls["data"].append(a)
+        return data_stage
+
+    def _mock_strategy(*a: Any, **kw: Any) -> None:
+        calls["strategy"].append(a)
+
     monkeypatch.setattr(
         opt_main_futures,
         "_run_universe_stage",
-        lambda *a: calls["universe"].append(a) or (["BTCUSDT"], {}, (), (), mock_snapshot, {}),
+        _mock_universe,
     )
     monkeypatch.setattr(
         opt_main_futures,
         "_run_data_stage",
-        lambda *a: calls["data"].append(a) or data_stage,
+        _mock_data,
+    )
+    monkeypatch.setattr(
+        opt_main_futures,
+        "_run_regime_evaluation_stage",
+        lambda *a: None,
     )
     monkeypatch.setattr(
         opt_main_futures,
         "_run_strategy_stage",
-        lambda *a, **kw: calls["strategy"].append(a),
+        _mock_strategy,
     )
     return calls
 
