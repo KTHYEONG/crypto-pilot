@@ -17,6 +17,14 @@ from src.domain.futures.strategy_runtime.bridge import (
 _logger = logging.getLogger(__name__)
 
 
+def _parse_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in {"true", "1", "yes"}
+
+
 def _parse_str_tuple(value: Any, *, default: tuple[str, ...] = ()) -> tuple[str, ...]:
     if value is None:
         return default
@@ -61,6 +69,22 @@ def build_candidate_strategy_config(
         ),
         min_variant_oos_hit_rate=float(
             opt_config.get("FUTURES_CANDIDATE_MIN_VARIANT_OOS_HIT_RATE", candidate.min_variant_oos_hit_rate)
+        ),
+        regime_cell_admission_enabled=_parse_bool(
+            opt_config.get("FUTURES_CANDIDATE_REGIME_CELL_ADMISSION_ENABLED"),
+            default=candidate.regime_cell_admission_enabled,
+        ),
+        min_regime_cell_oos_obs=int(
+            opt_config.get("FUTURES_CANDIDATE_MIN_REGIME_CELL_OOS_OBS", candidate.min_regime_cell_oos_obs)
+        ),
+        min_regime_cell_edge_bps=float(
+            opt_config.get("FUTURES_CANDIDATE_MIN_REGIME_CELL_EDGE_BPS", candidate.min_regime_cell_edge_bps)
+        ),
+        min_regime_cell_tstat=float(
+            opt_config.get("FUTURES_CANDIDATE_MIN_REGIME_CELL_TSTAT", candidate.min_regime_cell_tstat)
+        ),
+        max_admitted_cells_per_variant=int(
+            opt_config.get("FUTURES_CANDIDATE_MAX_ADMITTED_CELLS_PER_VARIANT", candidate.max_admitted_cells_per_variant)
         ),
         signal_only=signal_only,
     )
