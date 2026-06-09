@@ -1,3 +1,8 @@
+---
+name: audit
+description: Intent Alignment & Core Logic Verification.
+---
+
 # Skill: Audit (Lightweight Intent Gatekeeper)
 
 ## Purpose
