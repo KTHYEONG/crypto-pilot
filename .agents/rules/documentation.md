@@ -7,8 +7,10 @@
 
 ## 1. Core Principles & Trust Order
 - **Doc/Code Synchronization:** When modifying code, related documentation MUST be updated in the same transaction. Discrepancies are treated as stale risks and require re-validation.
-- **Trust Order:** 1. Active Architecture -> 2. Active Domains -> 3. ADRs -> 4. Code -> 5. Tests -> 6. Deprecated.
-- **Structure:** `docs/architecture/` (Systems/Engines), `docs/domains/` (Business Logic/Strategies), `docs/decisions/` (ADR).
+- **Trust Order:** 1. Active Architecture -> 2. Active Domains -> 3. ADRs (Decisions) -> 4. Code -> 5. Tests.
+- **Strict Separation:** 
+  - `docs/architecture/` = "What/Logic/Formulas". Static, concise, SSOT.
+  - `docs/decisions/` = "Why/How/History". Cumulative, decision-centric, ADR.
 
 ## 2. Metadata Standard (Frontmatter)
 Every core document must include the following YAML Frontmatter:
@@ -26,16 +28,32 @@ last_verified: [YYYY-MM-DD]
 ```
 
 ## 3. Standard Templates (AI-Optimized Structure)
-When writing or updating documents, follow this strict, token-efficient structure:
-- **`1. Overview`**: 1-2 lines maximum summary.
-- **`2. Core Components`**: Use lists mapping `[Component Name] -> [Responsibility] -> [File Path]`.
-- **`3. Data Flow`**: Use `mermaid` graphs or simple text arrows (`A -> B -> C`).
-- **`4. Business Rules & Invariants`**: Bullet points of hard rules (e.g., "Must never exceed X amount").
-- **`5. Data Schemas`**: Only core fields, JSON/TypeScript interfaces preferred.
-- **`6. Testing Expectations`**: Which conditions must be covered in tests.
+
+### 3.1 Architecture Documents (`docs/architecture/*.md`)
+- **Goal:** High-density, comprehensive readability. Both humans and AI must instantly understand the complete module structure.
+- **Constraint:** NO implementation steps. NO history or "how we fixed it" prose.
+- **`1. Purpose`**: 1-line statement of the module's exact role in the system.
+- **`2. Core Logic & Math`**: Complete mathematical formulas ($y = f(x)$) or state machine logic.
+- **`3. Architecture Flow`**: MUST use `mermaid` diagrams for visual structural mapping.
+- **`4. Core Variables & I/O`**: Use Markdown Tables strictly for parameters, inputs, and outputs.
+
+### 3.2 Decision Records (`docs/decisions/*.md`)
+- **Goal:** Ultra-compressed logic history to prevent file bloat over multiple iterations.
+- **Constraint:** Maximum 5-7 lines per entry. Focus purely on the *delta* (what changed) and *rationale* (why). Cumulative (newest at the TOP).
+- **Format:**
+  ```markdown
+  ## [YYYY-MM-DD] [Topic]
+  - **Delta:** [1 line: What exact logic/formula was changed or added]
+  - **Rationale:** [1 line: Why it was needed (e.g., bug fix, edge case, new feature)]
+  - **Edge Cases/Trade-offs:** [1-2 bullets: Critical safeguards added (e.g., zero-division defense)]
+  ```
 
 ## 4. AI Document Lifecycle & Integration
 - **[scan] Selective Loading:** Index only documents matching `change_triggers`. Read only necessary headings (e.g., `Business Rules`).
-- **Knowledge Update (Post-Spec):** If a temporary blueprint (`docs/specs/`) introduces new business rules or architectural changes, you MUST update the relevant official document here FIRST, and then the temporary spec file must be deleted.
+- **[audit] Knowledge Promotion (Post-Spec):** 
+  1. If formulas or I/O changed: Update `docs/architecture/` (Strictly only formulas/interfaces).
+  2. For all logic changes: Append a compressed ADR to `docs/decisions/`.
+  3. Delete the temporary spec file (`docs/specs/`).
 - **Anti-Sprawl & SSOT:** Do not duplicate business logic across multiple documentation files. Define common rules in architecture docs and reference them in domain docs.
 - **Archiving:** Mark obsolete logic as `status: deprecated` and specify `replaced_by` immediately.
+
