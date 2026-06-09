@@ -9,6 +9,7 @@ from src.domain.futures.strategy.config import CandidateStrategyConfig
 from src.domain.futures.strategy.rule_diagnostics import (
     _failed_recommendation_checks,
     _meets_recommendation_thresholds,
+    _regime_cell_admission,
     compute_rule_diagnostics,
     summarize_recommendation_gate_failures,
 )
@@ -702,3 +703,184 @@ def test_breakeven_hard_gate_excludes_subbreakeven_variant() -> None:
     assert result.recommended_keep_variants == ()
     assert result.recommendation_failure_report is not None
     assert "breakeven_hard_gate" in result.recommendation_failure_report["rows"][0]["failed_checks"]
+
+
+# ---------------------------------------------------------------------------
+# Regime-cell conditional admission tests
+# ---------------------------------------------------------------------------
+
+def _make_cell_admission_cfg(**overrides: object) -> CandidateStrategyConfig:
+    defaults: dict[str, object] = {
+        "regime_cell_admission_enabled": True,
+        "min_regime_cell_oos_obs": 60,
+        "min_regime_cell_edge_bps": 8.0,
+        "min_regime_cell_tstat": 1.0,
+        "max_admitted_cells_per_variant": 2,
+        "min_variant_oos_obs": 10,
+        "max_variant_oos_q10_fail_rate": 0.65,
+        "max_variant_event_fraction_per_bar": 1.0,
+    }
+    defaults.update(overrides)
+    return CandidateStrategyConfig(**defaults)  # type: ignore[arg-type]
+
+
+def _make_regime_arrays(
+    n_bars: int = 300,
+    n_per_cell: int = 90,
+    cell_code: int = 0,
+    cell_edge: float = 14.0,
+    noise_std: float = 50.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build entry_idx, edge, and regime_code arrays for admission tests.
+
+    Bar layout: first half = cell_code, second half = code 1 (different regime).
+    Returns (rec_entry_idx, rec_edge, regime_code).
+    """
+    rng = np.random.default_rng(42)
+    half = n_bars // 2
+    other_code = 1 if cell_code != 1 else 2
+    regime_code = np.full(n_bars, other_code, dtype=np.int64)
+    regime_code[:half] = cell_code
+    # n_per_cell events in target cell (bars 0..half-1), same count in other cell
+    entry_idx = np.concatenate([
+        np.arange(0, n_per_cell, dtype=np.int64),
+        np.arange(half, half + n_per_cell, dtype=np.int64),
+    ])
+    edge = np.concatenate([
+        rng.normal(cell_edge, noise_std, n_per_cell),
+        rng.normal(2.0, noise_std, n_per_cell),
+    ])
+    return entry_idx, edge, regime_code
+
+
+def test_regime_cell_admission_happy_path_promotes_cell_specialist() -> None:
+    # Arrange: bull_quiet cell has strong edge; global average is weak.
+    cfg = _make_cell_admission_cfg()
+    regime_names = ["bull_quiet", "bear_quiet", "bull_volatile", "bear_volatile", "transition", "crash"]
+    entry_idx, edge, regime_code = _make_regime_arrays(cell_edge=14.0, cell_code=0)
+
+    # Act
+    result = _regime_cell_admission(entry_idx, edge, regime_code, regime_names, cfg)
+
+    # Assert
+    assert result["admitted"] is True
+    assert "bull_quiet" in result["admitted_cells"]
+
+
+def test_regime_cell_admission_rejects_insufficient_obs() -> None:
+    # Arrange: only 30 events in cell — below min_regime_cell_oos_obs=60.
+    cfg = _make_cell_admission_cfg(min_regime_cell_oos_obs=60)
+    regime_names = ["bull_quiet", "bear_quiet"]
+    entry_idx, edge, regime_code = _make_regime_arrays(n_per_cell=30, cell_edge=20.0, cell_code=0)
+
+    # Act
+    result = _regime_cell_admission(entry_idx, edge, regime_code, regime_names, cfg)
+
+    # Assert: cell is ignored due to insufficient obs; no admission from that cell
+    assert "bull_quiet" not in result["admitted_cells"]
+
+
+def test_regime_cell_admission_caps_at_max_cells() -> None:
+    # Arrange: 4 cells each pass, but max_admitted_cells_per_variant=2.
+    cfg = _make_cell_admission_cfg(max_admitted_cells_per_variant=2)
+    regime_names = ["bull_quiet", "bear_quiet", "bull_volatile", "bear_volatile"]
+    rng = np.random.default_rng(0)
+    n_bars, obs_per_cell = 600, 80
+    regime_code = np.repeat(np.arange(4, dtype=np.int64), n_bars // 4)
+    entry_idx = np.arange(obs_per_cell * 4, dtype=np.int64)
+    # Edges: 25, 20, 15, 10 bps — all above threshold=8
+    edge = np.concatenate([rng.normal(e, 30.0, obs_per_cell) for e in (25.0, 20.0, 15.0, 10.0)])
+
+    # Act
+    result = _regime_cell_admission(entry_idx, edge, regime_code, regime_names, cfg)
+
+    # Assert
+    assert len(result["admitted_cells"]) == 2
+    # Top-2 by edge: bull_quiet (25bps) and bear_quiet (20bps)
+    assert result["admitted_cells"][0] == "bull_quiet"
+    assert result["admitted_cells"][1] == "bear_quiet"
+
+
+def test_regime_cell_admission_safety_gate_blocks_high_q10_fail() -> None:
+    # Arrange: cell passes edge/tstat, but q10_shortfall_fail_rate=0.80 > 0.65.
+    cfg = _make_cell_admission_cfg()
+    row = pd.Series({
+        "oos_n": 150,
+        "oos_mean_edge_bps": 4.0,            # fails global mean_edge gate
+        "oos_median_edge_bps": -5.0,
+        "oos_p10_edge_bps": -200.0,
+        "oos_q10_shortfall_fail_rate": 0.80,  # FAILS safety gate
+        "event_fraction_per_bar": 0.05,
+        "regime_pass": False,
+        "edge_stability_bps": float("nan"),
+        "oos_pct_edge_pos": 0.4,
+        "oos_payoff_ratio": 1.1,
+        "breakeven_hard_pass": False,
+        "oos_rank_ic": 0.01,
+        "regime_cell_admitted": True,         # cell path would normally override
+    })
+
+    # Act
+    result = _meets_recommendation_thresholds(row, cfg)
+
+    # Assert: q10_fail safety gate rejects despite cell_admitted=True
+    assert result is False
+    checks = _failed_recommendation_checks(row, cfg)
+    assert "q10_fail" in checks
+
+
+def test_regime_cell_admission_default_off_is_bit_identical() -> None:
+    # Arrange: default config (regime_cell_admission_enabled=False) with a row
+    # that would be admitted via cell path if enabled.
+    cfg_off = CandidateStrategyConfig(
+        min_variant_oos_obs=10,
+        regime_cell_admission_enabled=False,
+    )
+    cfg_on = CandidateStrategyConfig(
+        min_variant_oos_obs=10,
+        regime_cell_admission_enabled=True,
+        min_regime_cell_oos_obs=60,
+        min_regime_cell_edge_bps=8.0,
+        min_regime_cell_tstat=1.0,
+        max_admitted_cells_per_variant=2,
+    )
+    row_no_admission = pd.Series({
+        "oos_n": 150,
+        "oos_mean_edge_bps": 4.0,
+        "oos_median_edge_bps": 3.0,
+        "oos_p10_edge_bps": -200.0,
+        "oos_q10_shortfall_fail_rate": 0.40,
+        "event_fraction_per_bar": 0.05,
+        "regime_pass": False,
+        "edge_stability_bps": float("nan"),
+        "oos_pct_edge_pos": 0.4,
+        "oos_payoff_ratio": 1.1,
+        "breakeven_hard_pass": False,
+        "oos_rank_ic": 0.005,
+        "regime_cell_admitted": False,  # not admitted even if enabled
+    })
+
+    # Act
+    result_off = _meets_recommendation_thresholds(row_no_admission, cfg_off)
+    result_on = _meets_recommendation_thresholds(row_no_admission, cfg_on)
+
+    # Assert: both paths reject identically when no cell_admitted
+    assert result_off is False
+    assert result_on is False
+
+
+def test_regime_cell_admission_zero_std_guard_prevents_nan_tstat() -> None:
+    # Arrange: all edges in cell are identical → std=0.
+    cfg = _make_cell_admission_cfg()
+    regime_names = ["bull_quiet", "bear_quiet"]
+    n_bars = 300
+    regime_code = np.zeros(n_bars, dtype=np.int64)
+    entry_idx = np.arange(80, dtype=np.int64)
+    edge = np.full(80, 15.0, dtype=np.float64)  # std=0 for all 80 events
+
+    # Act
+    result = _regime_cell_admission(entry_idx, edge, regime_code, regime_names, cfg)
+
+    # Assert: tstat is finite (no inf/nan from zero division)
+    assert np.isfinite(result["cell_tstats"].get("bull_quiet", float("nan")))
+    assert result["admitted"] is True

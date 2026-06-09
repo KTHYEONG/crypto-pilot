@@ -833,22 +833,26 @@ def _run_strategy_stage(
         _logger.info(f"| {'RECOMMENDED':<12} | {'0':<5} | {'none':<52} |")
     _logger.info("-" * 82)
 
-    # Per-variant gate failure detail (blocked variants only)
+    # Per-variant gate failure detail (blocked and cell-admitted variants)
     blocked_rows = failure_report.get("rows", []) if failure_report else []
     if blocked_rows:
         _logger.info("\n[GATE FAILURES: PER-VARIANT]")
         _logger.info("-" * 82)
-        _logger.info(f"| {'Variant':<30} | {'Action':<16} | {'Failed Gates':<26} |")
+        _logger.info(f"| {'Variant':<30} | {'Action':<16} | {'Failed Gates / Cells':<26} |")
         _logger.info("-" * 82)
         for brow in blocked_rows[:20]:
             vname = str(brow.get("group", "")).removeprefix("variant=")[:30]
-            action = str(brow.get("candidate_action", ""))[:16]
-            failed_labels = ", ".join(
-                _gate_label.get(g, g) for g in brow.get("failed_checks", [])
-            )
-            # Overview row: truncate with an ellipsis marker (full distribution
-            # lives in the aggregate BLOCKED block above).
-            gates_cell = failed_labels if len(failed_labels) <= 26 else f"{failed_labels[:25]}…"
+            is_admitted = bool(brow.get("regime_cell_admitted", False))
+            if is_admitted:
+                action = "CELL_ADMITTED"
+                admitted_cells = str(brow.get("regime_cell_admitted_cells", ""))
+                gates_cell = admitted_cells if len(admitted_cells) <= 26 else f"{admitted_cells[:25]}…"
+            else:
+                action = str(brow.get("candidate_action", ""))[:16]
+                failed_labels = ", ".join(
+                    _gate_label.get(g, g) for g in brow.get("failed_checks", [])
+                )
+                gates_cell = failed_labels if len(failed_labels) <= 26 else f"{failed_labels[:25]}…"
             _logger.info(f"| {vname:<30} | {action:<16} | {gates_cell:<26} |")
         _logger.info("-" * 82)
 
