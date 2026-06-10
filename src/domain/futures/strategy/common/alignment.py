@@ -28,6 +28,8 @@ class AlignedMarketData:
     kill_mask: NDArray[np.bool_]
     basis_2d: NDArray[np.float64] | None = None
     oi_2d: NDArray[np.float64] | None = None
+    taker_buy_2d: NDArray[np.float64] | None = None
+    trades_2d: NDArray[np.float64] | None = None
     adv_usdt_2d: NDArray[np.float64] | None = None
     execution_cost_bps_2d: NDArray[np.float64] | None = None
     # Phase D: C1 inference panel 전용 마스크 (Stage5 timeline 기반). None이면 미사용.
@@ -73,6 +75,8 @@ def align_data_maps(
     funding_2d: NDArray[np.float64] = np.zeros((eff_len, n), dtype=np.float64)
     basis_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
     oi_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
+    taker_buy_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
+    trades_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
     adv_usdt_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
     execution_cost_bps_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
     active_mask: NDArray[np.bool_] = np.ones((eff_len, n), dtype=bool)
@@ -125,6 +129,12 @@ def align_data_maps(
             oi_2d[:, col] = frame["open_interest"].iloc[start:end].to_numpy(dtype=np.float64)
         elif "oi" in frame.columns:
             oi_2d[:, col] = frame["oi"].iloc[start:end].to_numpy(dtype=np.float64)
+        if "taker_buy_base" in frame.columns:
+            taker_buy_2d[:, col] = frame["taker_buy_base"].iloc[start:end].to_numpy(dtype=np.float64)
+        elif "taker_buy_quote" in frame.columns:
+            taker_buy_2d[:, col] = frame["taker_buy_quote"].iloc[start:end].to_numpy(dtype=np.float64)
+        if "trades" in frame.columns:
+            trades_2d[:, col] = frame["trades"].iloc[start:end].to_numpy(dtype=np.float64)
         if "adv_usdt" in frame.columns:
             adv_usdt_2d[:, col] = frame["adv_usdt"].iloc[start:end].to_numpy(dtype=np.float64)
         if "execution_cost_bps" in frame.columns:
@@ -190,6 +200,8 @@ def align_data_maps(
         funding_2d=funding_2d,
         basis_2d=basis_2d,
         oi_2d=oi_2d,
+        taker_buy_2d=taker_buy_2d,
+        trades_2d=trades_2d,
         adv_usdt_2d=adv_usdt_2d,
         execution_cost_bps_2d=execution_cost_bps_2d,
         active_mask=active_mask,
