@@ -34,5 +34,5 @@ Empirically verify the implementation via `pytest` and perform "Error Triage" or
 **2. Hotfix / Triage & Routing**
 - **Hotfix applied?**: [Yes (Details) / No]
 - **Diagnosis:** [Why did it fail?]
-- **Next Step:** [Proceed to AUDIT / Return to SPEC (Logic) / Return to IMPLEMENT (Coding)]
+- **Next Step:** ✅ `audit` is ready.
 ```
