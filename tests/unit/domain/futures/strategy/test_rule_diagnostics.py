@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.domain.futures.strategy.candidate_labels import label_candidate_events
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
@@ -712,10 +713,12 @@ def test_breakeven_hard_gate_excludes_subbreakeven_variant() -> None:
 def _make_cell_admission_cfg(**overrides: object) -> CandidateStrategyConfig:
     defaults: dict[str, object] = {
         "regime_cell_admission_enabled": True,
-        "min_regime_cell_oos_obs": 60,
+        "min_regime_cell_oos_obs": 10,
         "min_regime_cell_edge_bps": 8.0,
-        "min_regime_cell_tstat": 1.0,
         "max_admitted_cells_per_variant": 2,
+        "min_admission_posterior_prob": 0.70,
+        "admission_use_newey_west": True,
+        "admission_tau_prior_bps": 15.0,
         "min_variant_oos_obs": 10,
         "max_variant_oos_q10_fail_rate": 0.65,
         "max_variant_event_fraction_per_bar": 1.0,
@@ -767,16 +770,16 @@ def test_regime_cell_admission_happy_path_promotes_cell_specialist() -> None:
     assert "bull_quiet" in result["admitted_cells"]
 
 
-def test_regime_cell_admission_rejects_insufficient_obs() -> None:
-    # Arrange: only 30 events in cell — below min_regime_cell_oos_obs=60.
-    cfg = _make_cell_admission_cfg(min_regime_cell_oos_obs=60)
+def test_regime_cell_admission_rejects_below_nw_stability_floor() -> None:
+    # Arrange: only 5 events in cell — below min_regime_cell_oos_obs=10 (NW stability floor).
+    cfg = _make_cell_admission_cfg(min_regime_cell_oos_obs=10)
     regime_names = ["bull_quiet", "bear_quiet"]
-    entry_idx, edge, regime_code = _make_regime_arrays(n_per_cell=30, cell_edge=20.0, cell_code=0)
+    entry_idx, edge, regime_code = _make_regime_arrays(n_per_cell=5, cell_edge=50.0, cell_code=0)
 
     # Act
     result = _regime_cell_admission(entry_idx, edge, regime_code, regime_names, cfg)
 
-    # Assert: cell is ignored due to insufficient obs; no admission from that cell
+    # Assert: cell skipped due to NW instability (obs < floor), even with strong edge
     assert "bull_quiet" not in result["admitted_cells"]
 
 
@@ -839,10 +842,12 @@ def test_regime_cell_admission_default_off_is_bit_identical() -> None:
     cfg_on = CandidateStrategyConfig(
         min_variant_oos_obs=10,
         regime_cell_admission_enabled=True,
-        min_regime_cell_oos_obs=60,
+        min_regime_cell_oos_obs=10,
         min_regime_cell_edge_bps=8.0,
-        min_regime_cell_tstat=1.0,
         max_admitted_cells_per_variant=2,
+        min_admission_posterior_prob=0.70,
+        admission_use_newey_west=True,
+        admission_tau_prior_bps=15.0,
     )
     row_no_admission = pd.Series({
         "oos_n": 150,
@@ -869,18 +874,251 @@ def test_regime_cell_admission_default_off_is_bit_identical() -> None:
     assert result_on is False
 
 
-def test_regime_cell_admission_zero_std_guard_prevents_nan_tstat() -> None:
+def test_regime_cell_admission_zero_std_guard_produces_finite_posterior() -> None:
     # Arrange: all edges in cell are identical → std=0.
     cfg = _make_cell_admission_cfg()
     regime_names = ["bull_quiet", "bear_quiet"]
     n_bars = 300
     regime_code = np.zeros(n_bars, dtype=np.int64)
     entry_idx = np.arange(80, dtype=np.int64)
-    edge = np.full(80, 15.0, dtype=np.float64)  # std=0 for all 80 events
+    edge = np.full(80, 15.0, dtype=np.float64)  # std=0 → NW variance ≈ 0
 
     # Act
     result = _regime_cell_admission(entry_idx, edge, regime_code, regime_names, cfg)
 
-    # Assert: tstat is finite (no inf/nan from zero division)
-    assert np.isfinite(result["cell_tstats"].get("bull_quiet", float("nan")))
+    # Assert: posterior probability is finite (no inf/nan from zero division)
+    p = result["cell_p_admit"].get("bull_quiet", float("nan"))
+    assert np.isfinite(p)
+    mu_post = result["cell_mu_post"].get("bull_quiet", float("nan"))
+    assert np.isfinite(mu_post)
     assert result["admitted"] is True
+
+
+# ============================================================
+# Bayesian Posterior Probability Admission: S1-S9
+# ============================================================
+
+
+def _make_bcr_style_arrays(
+    n_cell: int,
+    edge_mean: float,
+    noise_std: float,
+    n_bars: int = 500,
+    cell_code: int = 0,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Single-cell array builder for Bayesian admission tests."""
+    rng = np.random.default_rng(seed)
+    regime_code = np.full(n_bars, 1, dtype=np.int64)
+    regime_code[:n_cell] = cell_code
+    entry_idx = np.arange(n_cell, dtype=np.int64)
+    edge = rng.normal(edge_mean, noise_std, n_cell)
+    return entry_idx, edge, regime_code
+
+
+def test_bayesian_admission_s1_strong_edge_sparse_cell_admitted() -> None:
+    # S1: 강엣지·희소 신호 — posterior probability가 1.0에 가까워 구출됨
+    # bcr 계열: 39 obs, ~70bps, sigma~30bps → blocked by old obs=60 gate
+    cfg = _make_cell_admission_cfg(
+        min_regime_cell_oos_obs=10,
+        min_regime_cell_edge_bps=8.0,
+        min_admission_posterior_prob=0.70,
+    )
+    rng = np.random.default_rng(10)
+    regime_names = ["bear_quiet", "other"]
+    entry_idx, edge, regime_code = _make_bcr_style_arrays(
+        n_cell=39, edge_mean=70.0, noise_std=30.0, cell_code=0
+    )
+    edge = rng.normal(70.0, 30.0, 39)  # override with controlled seed
+    entry_idx = np.arange(39, dtype=np.int64)
+    n_bars = 500
+    regime_code = np.full(n_bars, 1, dtype=np.int64)
+    regime_code[:39] = 0
+
+    result = _regime_cell_admission(
+        entry_idx, edge, regime_code, regime_names, cfg, arch_prior_bps=10.0
+    )
+
+    assert result["admitted"] is True
+    assert "bear_quiet" in result["admitted_cells"]
+    assert result["cell_p_admit"]["bear_quiet"] >= 0.70
+    # posterior mean shrunken toward prior (not raw 70bps)
+    assert result["cell_mu_post"]["bear_quiet"] < float(np.mean(edge))
+
+
+def test_bayesian_admission_s2_autocorrelated_weak_edge_rejected() -> None:
+    # S2: 약엣지 + 강한 자기상관 → NW SE 증폭 → p_admit < 0.70
+    # 80 obs, mean~10bps, strong AR(1) autocorrelation
+    cfg = _make_cell_admission_cfg(
+        min_regime_cell_oos_obs=10,
+        min_admission_posterior_prob=0.70,
+        min_regime_cell_edge_bps=8.0,
+        admission_use_newey_west=True,
+    )
+    rng = np.random.default_rng(7)
+    n = 80
+    # AR(1) process: rho~0.8 → NW SE >> IID SE
+    ar_series = np.zeros(n)
+    ar_series[0] = rng.normal(10.0, 20.0)
+    for i in range(1, n):
+        ar_series[i] = 0.85 * ar_series[i - 1] + rng.normal(0.0, 10.0)
+    ar_series += 10.0  # shift mean to ~10bps
+
+    regime_names = ["trend", "chop"]
+    n_bars = 400
+    regime_code = np.full(n_bars, 1, dtype=np.int64)
+    regime_code[:n] = 0
+    entry_idx = np.arange(n, dtype=np.int64)
+
+    result = _regime_cell_admission(entry_idx, ar_series, regime_code, regime_names, cfg)
+
+    # With strong AR(1), NW inflates SE → p_admit should be well below 0.70
+    p = result["cell_p_admit"].get("trend", 1.0)
+    assert p < 0.70, f"Expected p_admit < 0.70 for autocorrelated weak signal, got {p:.3f}"
+
+
+def test_bayesian_admission_s3_eb_shrinks_outlier_cell_mean() -> None:
+    # S3: 극소표본(26 obs)에 raw mean=200bps → EB로 대폭 수축 검증
+    cfg = _make_cell_admission_cfg(
+        min_regime_cell_oos_obs=10,
+        admission_tau_prior_bps=15.0,  # tau=15bps → strong shrinkage
+        min_regime_cell_edge_bps=8.0,
+    )
+    rng = np.random.default_rng(99)
+    n = 26
+    edge = rng.normal(200.0, 30.0, n)  # raw mean ≈ 200bps
+    regime_names = ["bull", "bear"]
+    n_bars = 300
+    regime_code = np.full(n_bars, 1, dtype=np.int64)
+    regime_code[:n] = 0
+    entry_idx = np.arange(n, dtype=np.int64)
+
+    result = _regime_cell_admission(
+        entry_idx, edge, regime_code, regime_names, cfg, arch_prior_bps=10.0
+    )
+
+    raw_mean = float(np.mean(edge))
+    mu_post = result["cell_mu_post"]["bull"]
+    arch_prior = 10.0
+    # Posterior mean is between prior and raw mean (EB shrinkage toward prior)
+    assert arch_prior < mu_post < raw_mean, (
+        f"mu_post={mu_post:.1f} should be in ({arch_prior}, {raw_mean:.1f})"
+    )
+    # Shrinkage is non-trivial: at least 3% pulled toward prior
+    shrinkage_frac = (raw_mean - mu_post) / (raw_mean - arch_prior)
+    assert shrinkage_frac > 0.03, f"Expected shrinkage > 3%, got {shrinkage_frac:.3f}"
+
+
+def test_bayesian_admission_s4_below_nw_floor_cell_not_evaluated() -> None:
+    # S4: obs < min_abs_obs(10) → cell skipped entirely
+    cfg = _make_cell_admission_cfg(min_regime_cell_oos_obs=10)
+    regime_names = ["alpha", "beta"]
+    n_bars = 200
+    regime_code = np.full(n_bars, 1, dtype=np.int64)
+    regime_code[:5] = 0  # only 5 obs → below floor
+    entry_idx = np.arange(5, dtype=np.int64)
+    edge = np.full(5, 100.0)  # huge edge but tiny n
+
+    result = _regime_cell_admission(entry_idx, edge, regime_code, regime_names, cfg)
+
+    assert "alpha" not in result["cell_p_admit"]
+    assert "alpha" not in result["cell_edges"]
+
+
+def test_bayesian_admission_s5_bva_obs_exactly_at_floor_included() -> None:
+    # S5: BVA — obs == min_regime_cell_oos_obs (boundary inclusive)
+    cfg = _make_cell_admission_cfg(
+        min_regime_cell_oos_obs=10,
+        min_regime_cell_edge_bps=8.0,
+        min_admission_posterior_prob=0.70,
+    )
+    rng = np.random.default_rng(5)
+    n_exact = 20  # exactly at floor
+    edge = rng.normal(60.0, 25.0, n_exact)
+    regime_names = ["A", "B"]
+    n_bars = 200
+    regime_code = np.full(n_bars, 1, dtype=np.int64)
+    regime_code[:n_exact] = 0
+    entry_idx = np.arange(n_exact, dtype=np.int64)
+
+    result = _regime_cell_admission(entry_idx, edge, regime_code, regime_names, cfg)
+
+    # cell IS evaluated (boundary inclusive)
+    assert "A" in result["cell_p_admit"]
+
+
+def test_bayesian_admission_s6_tau_fallback_when_single_cell() -> None:
+    # S6: only 1 cell above floor → tau cannot be estimated → fallback to admission_tau_prior_bps
+    cfg = _make_cell_admission_cfg(
+        admission_tau_prior_bps=15.0,
+        min_regime_cell_oos_obs=10,
+        min_regime_cell_edge_bps=8.0,
+        min_admission_posterior_prob=0.70,
+    )
+    rng = np.random.default_rng(6)
+    n = 40
+    edge = rng.normal(50.0, 30.0, n)
+    regime_names = ["only_one", "ghost"]  # ghost has 0 obs
+    n_bars = 300
+    regime_code = np.full(n_bars, 0, dtype=np.int64)  # all in code 0
+    entry_idx = np.arange(n, dtype=np.int64)
+
+    result = _regime_cell_admission(entry_idx, edge, regime_code, regime_names, cfg)
+
+    # tau fallback should be used; no error; tau_estimated_bps reflects fallback
+    assert result["tau_estimated_bps"] == pytest.approx(15.0, rel=1e-3)
+    assert np.isfinite(result["cell_p_admit"].get("only_one", float("nan")))
+
+
+def test_bayesian_admission_s7_legacy_iid_mode() -> None:
+    # S7: admission_use_newey_west=False → IID variance path (regression guard)
+    cfg_nw = _make_cell_admission_cfg(admission_use_newey_west=True)
+    cfg_iid = _make_cell_admission_cfg(admission_use_newey_west=False)
+    rng = np.random.default_rng(77)
+    n = 60
+    # IID data (no autocorrelation) so NW ≈ IID, but we just verify no crash
+    edge = rng.normal(20.0, 30.0, n)
+    regime_names = ["up", "down"]
+    n_bars = 300
+    regime_code = np.full(n_bars, 1, dtype=np.int64)
+    regime_code[:n] = 0
+    entry_idx = np.arange(n, dtype=np.int64)
+
+    result_nw = _regime_cell_admission(entry_idx, edge, regime_code, regime_names, cfg_nw)
+    result_iid = _regime_cell_admission(entry_idx, edge, regime_code, regime_names, cfg_iid)
+
+    # Both should produce finite p_admit
+    assert np.isfinite(result_nw["cell_p_admit"].get("up", float("nan")))
+    assert np.isfinite(result_iid["cell_p_admit"].get("up", float("nan")))
+
+
+def test_bayesian_admission_s8_config_posterior_prob_out_of_range() -> None:
+    # S8: min_admission_posterior_prob below 0.5 → ValueError
+    with pytest.raises(ValueError, match="min_admission_posterior_prob"):
+        CandidateStrategyConfig(
+            min_variant_oos_obs=10,
+            min_admission_posterior_prob=0.3,
+        )
+
+
+def test_bayesian_admission_s9_momentum_signal_still_passes() -> None:
+    # S9: Regression — momentum-style signal (12bps, n=120) remains admitted
+    cfg = _make_cell_admission_cfg(
+        min_regime_cell_edge_bps=8.0,
+        min_admission_posterior_prob=0.70,
+    )
+    rng = np.random.default_rng(9)
+    n = 120
+    edge = rng.normal(12.0, 30.0, n)
+    regime_names = ["trend", "flat"]
+    n_bars = 500
+    regime_code = np.full(n_bars, 1, dtype=np.int64)
+    regime_code[:n] = 0
+    entry_idx = np.arange(n, dtype=np.int64)
+
+    result = _regime_cell_admission(entry_idx, edge, regime_code, regime_names, cfg)
+
+    assert result["admitted"] is True
+    assert "trend" in result["admitted_cells"]
+    p = result["cell_p_admit"]["trend"]
+    assert p >= 0.70, f"Momentum signal should pass (p={p:.3f})"
