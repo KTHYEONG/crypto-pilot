@@ -3,16 +3,18 @@
 
 # Mode Full (ALO/Ensemble) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-10 (Baseline ALO — Regime-Cell Admission 미적용)
+**최신 갱신:** 2026-06-10 (Conditioning Bug Fix 적용 — Regime-Cell Admission 미적용)
 **현재 상태:** `blocked` — 0/4 Fold Pass (fold_pass_ratio 0%). **Active Signals = 0**
 **평가 기준:** `min_variant_oos_edge_bps=10.0`, `breakeven_hard_gate=enabled`, `min_fold_realized_edge_bps=8.0`, `min_oos_rank_ic=0.01`, `min_ic_tstat=0.8`, `max_variant_oos_q10_fail_rate=0.65`, `min_wf_fold_pass_ratio=0.60`
 
 **진단 노트:**
 - **RECOMMENDED 7종:** dm_24_96, dm_12_48, tpc_50_200, fzs_96, fzs_168, tpc_20_100, fzs_48. Momentum + Carry 계열 위주.
 - **BLOCKED 17종:** Breakeven Gate(10), Event Overload(8), Low IC t-stat(10) 주요 원인. Regime-cell admission 미적용으로 carry/reversion 계열 다수 탈락.
-- **WF 전 fold 실패:** IC(diag) 전 구간 음수, RlzdMean Fold3만 +43.1bps 기록했으나 EU_p90 gate(44.12) 미달. Ensemble 선택이 baseline 대비 우위 없음.
+- **WF 전 fold 실패:** IC(diag) 전 구간 음수(-0.016~-0.120), RlzdMean Fold3만 +43.1bps 기록했으나 EU_p90 gate(44.12) 미달. Ensemble 선택이 baseline 대비 우위 없음.
+- **[구조 수정 완료] Conditioning Bug Fix:** `ensemble_conditioning` 기본값 `archetype_regime`→`auto`, lift_proof fail-OPEN→fail-SAFE 수정. 이번 실행에서 `conditioning_path=no_oos_evidence_failsafe`(archetype_only 강등) 확인. **WF 수치 불변이 정상**: 풀이 동질적(추세/carry 7종)이라 archetype_only도 저IC. 핵심 블로커 = admission OFF로 인한 풀 다양성 부재.
 - **Ablation Study 전 Variant Fail:** CAGR 최대 −35.0%(rule_stop_risk). 모든 variant가 compound gate + deployment gate 통과 실패.
-- **Regime Scorecard:** C2=10.0/10, C3=10.0/10, C4=4.0/10, C5=10.0/10 → Weighted **0.580**. 전회 대비 C2·C3·C5 대폭 개선.<!-- truncate -->
+- **Regime Scorecard:** C2=10.0/10, C3=10.0/10, C4=4.0/10, C5=10.0/10 → Weighted **0.580**.
+- **다음 블로커:** (1) admission ON + t_g NW 보정 → 풀 다양성 복원. (2) regime 6→4 state 병합 → C4 rho 상향.<!-- truncate -->
 
 ---
 
