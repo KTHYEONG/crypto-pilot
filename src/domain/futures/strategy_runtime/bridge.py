@@ -672,9 +672,13 @@ def run_candidate_strategy_for_universe(
         _edge_rep = fold_out.edge_report
         _mode = str(_vdiag.get("prediction_mode", "n/a"))
         _rank_ic_val = (
-            _edge_rep.residual_rank_ic
-            if _mode == "prior_residual"
-            else _edge_rep.prior_rank_ic
+            _vdiag.get("oos_rank_ic", _edge_rep.prior_rank_ic)
+            if _mode == "ensemble_b0"
+            else (
+                _edge_rep.residual_rank_ic
+                if _mode == "prior_residual"
+                else _edge_rep.prior_rank_ic
+            )
         )
         wf_fold_details.append({
             "fold_id": len(fold_selection_reports),
