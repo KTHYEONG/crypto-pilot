@@ -20,6 +20,8 @@ Empirically verify the implementation via `pytest` and perform "Error Triage" or
    - **Scenario B: Implementation Error** (Code deviates significantly from Spec or has non-obvious bugs): **Route back to `implement`**.
    - **Scenario C: Regression**: Breaking existing tests. **Route back to `spec`**.
 4. **Spec Alignment**: Ensure all `Test Scenario Design` points from the Spec are covered.
+5. **Single Responsibility (DO NOT OVERSTEP):**
+   - You are ONLY the Tester/Triager. Do not write new features (that is `implement`). Do not review business intent (that is `audit`). Stop immediately after tests pass or routing is decided.
 
 ## Output Format
 ```md

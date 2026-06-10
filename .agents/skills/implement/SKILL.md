@@ -16,7 +16,9 @@ Translate the logical Blueprint into working Python code (both `src/` and `tests
 3. **Local Validation (L1):** For EVERY modified file (src and test), run validation to catch bugs early:
    - **Primary Diagnostic (Token-Efficient)**: Consider using Serena MCP (`get_diagnostics`) to check code health. This fetches structured diagnostic issues without raw subprocess noise.
    - **Full Local Pipeline**: Run `uv run ruff check --fix [file]` and `uv run mypy [file]` to ensure complete compiler and linter compliance.
-4. **Self-Correction:** Fix syntax/type errors (max 3 tries). If unresolved, **STOP** and return to `spec`.
+4. **Single Responsibility (DO NOT OVERSTEP):**
+   - You are ONLY the Executor. Do not run `pytest` (that is `check`). Do not audit business logic (that is `audit`). Do not update architecture docs (that is `sync`). Stop immediately after L1 validation.
+5. **Self-Correction:** Fix syntax/type errors (max 3 tries). If unresolved, **STOP** and return to `spec`.
 
 ## Output Format
 ```md
@@ -26,5 +28,5 @@ Translate the logical Blueprint into working Python code (both `src/` and `tests
 - **Progress:**
   - [ ] Wrote logic for: [X]
   - [ ] Wrote tests for: [X] (Based on Scenarios 1, 2, 3)
-- **Status:** [Status]
+- **Next Step:** [STOP. Hand over to `check` skill for L2 testing]
 ```
