@@ -85,18 +85,14 @@ This protocol applies only inside code-writing phases such as `implement`.
 
 ## 11. Skill Orchestration Boundary
 
-Skills define phase-specific workflows only.
+Skills define phase-specific workflows only. **Automatic transition between skills is strictly prohibited.**
 
-Global directives in this document always apply unless a manually activated commit skill or automatically activated quant rule overrides them.
+- **Single Skill Scope**: Once the objective of the active skill is achieved, you must STOP immediately and wait for user feedback.
+- **No Auto-Chaining**: Unless the user explicitly requests a multi-step execution from the start, do not automatically call or proceed to the next skill after completing the current one.
+- **Roadmap vs Pipeline**: The workflow below is a 'Roadmap' for user reference, not an 'Automatic Execution Pipeline' for the AI.
 
-Default non-trivial development workflow:
-
-1. `scan`
-2. `spec` when needed
-3. `implement`
-4. `check`
-5. `audit`
-6. `sync`
+[Manual Development Roadmap (User-led)]
+1. `scan` -> 2. `spec` -> 3. `implement` -> 4. `check` -> 5. `audit` -> 6. `sync`
 
 Commit tasks:
 - Do not route through the default skill workflow.
