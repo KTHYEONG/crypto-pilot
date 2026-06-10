@@ -30,8 +30,9 @@ class RegimeConditionalEnsemble:
     archetype_q10_bps: dict[str, float] = field(default_factory=dict)
     validation_rank_ic: float = 0.0
     # P0: Regime Lift Proof Gate fields
-    conditioning_path: str = "pooled_fallback"  # "regime_conditioned" | "pooled_fallback"
+    conditioning_path: str = "pooled_fallback"  # "regime_conditioned" | "pooled_fallback" | "no_oos_evidence_failsafe"
     lift_proof: RegimeLiftProofResult | None = None  # None = proof 미실행 (backward compat)
+    regime_oos_stability_rho: float | None = None  # 진단 전용 (C4 rho 주입, 게이팅 아님)
 
 
 def _require_ensemble_columns(events: pd.DataFrame) -> None:
@@ -183,6 +184,7 @@ def fit_regime_conditional_ensemble(
     cfg: CandidateStrategyConfig,
     oos_proof_events: pd.DataFrame | None = None,
     fold_ids: NDArray[np.int32] | None = None,
+    regime_oos_stability_rho: float | None = None,
 ) -> RegimeConditionalEnsemble:
     """Fit per-cell shrinkage estimates from train-window events.
 
@@ -356,8 +358,12 @@ def fit_regime_conditional_ensemble(
             cell_q10 = {}
 
     elif chosen == "archetype_regime":
-        # proof events 없으면 regime conditioning 그대로 유지
-        conditioning_path = "regime_conditioned"
+        # OOS 증거 없음 → fail-SAFE: 복잡한 경로를 증거 없이 선택하지 않음
+        chosen = "archetype_only"
+        cell_mu = {}
+        cell_q10 = {}
+        conditioning_path = "no_oos_evidence_failsafe"
+        _logger.info("regime conditioning downgraded: no oos proof window → archetype_only (fail-safe)")
 
     return RegimeConditionalEnsemble(
         cell_mu_bps=cell_mu,
@@ -370,6 +376,7 @@ def fit_regime_conditional_ensemble(
         validation_rank_ic=float(val_ic),
         conditioning_path=conditioning_path,
         lift_proof=lift_proof,
+        regime_oos_stability_rho=regime_oos_stability_rho,
     )
 
 
