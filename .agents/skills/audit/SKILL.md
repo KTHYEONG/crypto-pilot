@@ -42,5 +42,5 @@ Verify that the implementation accurately reflects the business logic requiremen
 
 **2. Expert Feedback & Next Step**
 - [Brief and sharp review comments on the core logic]
-- [Next Step: Proceed to SYNC / Return to IMPLEMENT]
+- [Next Step: ✅ `sync` is ready.]
 ```
