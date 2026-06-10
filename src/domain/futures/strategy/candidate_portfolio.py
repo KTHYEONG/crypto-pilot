@@ -530,6 +530,7 @@ def select_candidate_events_for_portfolio(
     df["p_pass"] = np.asarray(model_output.p_pass, dtype=np.float64)
     df["mu_net_decision_bps"] = np.asarray(model_output.mu_net_decision_bps, dtype=np.float64)
     df["q10_net_bps"] = np.asarray(model_output.q10_net_bps, dtype=np.float64)
+    df["q90_net_bps"] = np.asarray(model_output.q90_net_bps, dtype=np.float64)
     df["utility_score"] = np.asarray(model_output.utility_score, dtype=np.float64)
 
     if cfg.selection_sensitivity_enabled:
@@ -840,7 +841,9 @@ def build_candidate_target_weights(
         if getattr(cfg, "sizing_mode", "stop_risk") == "calibrated_event_kelly":
             mu_return_r = float(row.mu_net_decision_bps) / max(risk_unit_bps, 1e-12)
             q10_return_r = float(getattr(row, "q10_net_bps", 0.0)) / max(risk_unit_bps, 1e-12)
-            second_moment = max(mu_return_r * mu_return_r + q10_return_r * q10_return_r, 1e-6)
+            q90_return_r = float(getattr(row, "q90_net_bps", 0.0)) / max(risk_unit_bps, 1e-12)
+            sigma_r = np.maximum((q90_return_r - q10_return_r) / 2.563, 1e-6)
+            second_moment = max(mu_return_r * mu_return_r + sigma_r * sigma_r, 1e-6)
             raw_abs_w = cfg.kelly_fraction * max(mu_return_r, 0.0) / second_moment
         else:
             raw_abs_w = float(getattr(cfg, "event_risk_budget", 0.0025)) / max(risk_unit_bps * 1e-4, 1e-12)
