@@ -68,6 +68,7 @@ This protocol applies only inside code-writing phases such as `implement`.
 - **Magic Numbers:** Always separate into constants.
 - **Unverified Refactoring:** Prohibit large-scale structural changes without test code or guaranteed behavior.
 - **Ignoring Return Values:** Prohibit neglecting return values or error handling.
+- **No Unsolicited Task Expansion**: Do not perform additional tasks that were not requested. Specifically, overstepping the currently assigned phase in the skill workflow (e.g., executing `check` automatically after `implement` finishes) is considered a waste of tokens and a violation of user control.
 
 ## 9. Rule Isolation & Priority: Commit Skill
 
@@ -85,18 +86,14 @@ This protocol applies only inside code-writing phases such as `implement`.
 
 ## 11. Skill Orchestration Boundary
 
-Skills define phase-specific workflows only.
+Skills define phase-specific workflows only. **스킬 간 자동 전환은 엄격히 금지됩니다.**
 
-Global directives in this document always apply unless a manually activated commit skill or automatically activated quant rule overrides them.
+- **Single Skill Scope**: 활성화된 스킬의 목적이 달성되면 즉시 정지(STOP)하고 사용자 피드백을 기다려야 합니다.
+- **No Auto-Chaining**: 사용자가 처음부터 다단계 실행을 명시적으로 요청하지 않은 경우, 현재 스킬 완료 후 다음 스킬을 자동으로 호출하거나 진행하지 마십시오.
+- **Roadmap vs Pipeline**: 아래 워크플로우는 사용자가 참조할 '로드맵'일 뿐, AI의 '자동 실행 파이프라인'이 아닙니다.
 
-Default non-trivial development workflow:
-
-1. `scan`
-2. `spec` when needed
-3. `implement`
-4. `check`
-5. `audit`
-6. `sync`
+[Manual Development Roadmap (User-led)]
+1. `scan` -> 2. `spec` -> 3. `implement` -> 4. `check` -> 5. `audit` -> 6. `sync`
 
 Commit tasks:
 - Do not route through the default skill workflow.
