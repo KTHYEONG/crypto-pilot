@@ -80,11 +80,18 @@ def build_candidate_strategy_config(
         min_regime_cell_edge_bps=float(
             opt_config.get("FUTURES_CANDIDATE_MIN_REGIME_CELL_EDGE_BPS", candidate.min_regime_cell_edge_bps)
         ),
-        min_regime_cell_tstat=float(
-            opt_config.get("FUTURES_CANDIDATE_MIN_REGIME_CELL_TSTAT", candidate.min_regime_cell_tstat)
-        ),
         max_admitted_cells_per_variant=int(
             opt_config.get("FUTURES_CANDIDATE_MAX_ADMITTED_CELLS_PER_VARIANT", candidate.max_admitted_cells_per_variant)
+        ),
+        min_admission_posterior_prob=float(
+            opt_config.get("FUTURES_CANDIDATE_MIN_ADMISSION_POSTERIOR_PROB", candidate.min_admission_posterior_prob)
+        ),
+        admission_use_newey_west=_parse_bool(
+            opt_config.get("FUTURES_CANDIDATE_ADMISSION_USE_NEWEY_WEST"),
+            default=candidate.admission_use_newey_west,
+        ),
+        admission_tau_prior_bps=float(
+            opt_config.get("FUTURES_CANDIDATE_ADMISSION_TAU_PRIOR_BPS", candidate.admission_tau_prior_bps)
         ),
         signal_only=signal_only,
     )
