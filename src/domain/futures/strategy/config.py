@@ -262,6 +262,14 @@ class CandidateStrategyConfig:
         "trend_pullback_continuation",
         "dual_momentum",
         "mtf_trend_pullback",
+        "residual_reversion",
+        "rsi_reversion",
+        "vol_regime_reversion",
+        "funding_zscore_carry",
+        "taker_imbalance_momentum",
+        "btc_regime_pullback",
+        "mtf_breakout_retest",
+        "bollinger_reversion",
     )
     # Conditioning axis: "auto" (default) picks archetype_regime vs archetype_only via
     # in-fold purged validation Rank IC gain — data-driven, fold-adaptive.
@@ -421,6 +429,25 @@ class CandidateStrategyConfig:
     kelly_use_probability_adjusted_mu: bool = True
     kelly_downside_variance_floor_enabled: bool = True
     candidate_metadata_forward_fill: bool = True
+    double_scaling_guard: bool = True
+    regime_gross_multipliers: dict[int, float] = field(default_factory=lambda: {
+        0: 1.5,
+        1: 1.0,
+        2: 1.5,
+        3: 1.0,
+        4: 0.4,
+        5: 0.3
+    })
+    regime_net_multipliers: dict[int, float] = field(default_factory=lambda: {
+        0: 2.5,
+        1: 1.5,
+        2: 2.5,
+        3: 1.5,
+        4: 0.3,
+        5: 0.1
+    })
+    bl_shrinkage_var_mult: float = 0.20
+    bl_shrinkage_omega_mult: float = 0.10
 
     def __post_init__(self) -> None:
         """Validate candidate strategy parameters."""

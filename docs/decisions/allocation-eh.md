@@ -34,3 +34,9 @@ last_verified: 2026-06-10
 - **Delta:** `select_candidate_events_for_portfolio`에 `q90_net_bps` 칼럼 추가. `build_candidate_target_weights`에서 켈리 분모 계산 시 $q_{10}$ 극단값 제곱을 정규화 변동성 $\sigma_R = \frac{q_{90} - q_{10}}{2.563}$ 제곱으로 대체. Ablation Row 이름 간소화.
 - **Rationale:** 분모에 극단적 꼬리 위험값($q_{10}$)의 제곱을 다이렉트로 대입해 분모가 100~400배 왜곡되고 가중치가 0에 수렴하는 금융공학적 버그 해결. 변동성 스케일을 정상 복구하여 켈리 비중의 실제 영향도 검증을 가능하게 함.
 - **Edge Cases:** `q90` 정보 누락 방지 및 0 분모 클리핑 가드 처리.
+
+## [2026-06-10] 동적 포트폴리오 Cap 및 이중 볼 스케일링 방지 가드 도입
+
+- **Delta:** `build_candidate_target_weights`에 `regime_code_1d` 배선 및 동적 `PortfolioCaps` 생성. `double_scaling_guard` 하이퍼파라미터화 및 `project_all_caps` 연산부 `target_ann_vol` 0/None 분기 핫픽스 적용.
+- **Rationale:** 고정 Cap 제약과 이중 볼 스케일링으로 인한 비중 고사 문제를 해결하고, 켈리 비중의 성과(CAGR +2.6%)를 보존하면서 시장 국면에 유연하게 대응하는 자산 배분 구조 확립.
+- **Edge Cases:** 볼 타겟팅이 생략되는 가드 동작 시에도 국면 multipliers 제약(crash=0.1 net_cap 등)을 정상 적용하여 위험 통제력 유지.
