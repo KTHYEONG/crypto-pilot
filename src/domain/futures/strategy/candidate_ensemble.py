@@ -75,11 +75,81 @@ def _predict_mu_by_event(
     return mu
 
 
+def _log_ensemble_diagnostics(
+    *,
+    frame: pd.DataFrame,
+    global_mu: float,
+    arch_mu: dict[str, float],
+    val_ic: float,
+    chosen: str,
+    adaptive_shrinkage: bool,
+    k_used: float,
+) -> None:
+    """Emit a table-format diagnostic log for IC sign audit.
+
+    Helps identify anti-predictive archetypes (shrunk mean < 0) that may be
+    diluting ensemble IC toward negative territory.
+    """
+    n_total = len(frame)
+    ic_sign = "✅ POSITIVE" if val_ic > 0 else "❌ NEGATIVE"
+
+    header = (
+        "\n[ENSEMBLE DIAGNOSTICS] ─────────────────────────────────────────────\n"
+        f"| {'Metric':<28} | {'Value':<30} |\n"
+        f"| {'─'*28} | {'─'*30} |\n"
+        f"| {'N events (train)':<28} | {n_total:<30} |\n"
+        f"| {'Global mu (bps)':<28} | {global_mu:<30.3f} |\n"
+        f"| {'Validation Rank IC':<28} | {val_ic:<30.4f} |\n"
+        f"| {'IC sign':<28} | {ic_sign:<30} |\n"
+        f"| {'Conditioning chosen':<28} | {chosen:<30} |\n"
+        f"| {'Adaptive shrinkage':<28} | {adaptive_shrinkage!s:<30} |\n"
+        f"| {'k_used (max/fixed)':<28} | {k_used:<30.1f} |\n"
+        "├─────────────────────────────────────────────────────────────────────\n"
+        f"| {'Archetype':<30} | {'Shrunk mu (bps)':<16} | {'Sign':<8} | {'N':<6} |\n"
+        f"| {'─'*30} | {'─'*16} | {'─'*8} | {'─'*6} |\n"
+    )
+    rows = []
+    for arch, mu_val in sorted(arch_mu.items()):
+        n_arch = int((frame["archetype"] == arch).sum())
+        sign_flag = "✅" if mu_val >= 0.0 else "❌ ANTI"
+        rows.append(f"| {arch:<30} | {mu_val:<16.3f} | {sign_flag:<8} | {n_arch:<6} |")
+    footer = "─────────────────────────────────────────────────────────────────────"
+
+    _logger.info("%s%s\n%s", header, "\n".join(rows), footer)
+
+
+def _compute_eb_shrinkage_k(
+    cell_means: list[float],
+    cell_vars: list[float],
+    k_max: float,
+) -> float:
+    """Estimate k_eff via Empirical-Bayes James-Stein principle.
+
+    k_eff = mean_within_var / between_var.
+    - Large between_var (cells are genuinely distinct) → small k → trust cell means.
+    - Small between_var (cells are homogeneous) → large k → shrink toward global.
+    Clipped to [0, k_max].
+    """
+    if len(cell_means) < 2:
+        return k_max
+    mean_within = float(np.mean(cell_vars)) if cell_vars else 0.0
+    grand = float(np.mean(cell_means))
+    between = float(np.mean([(m - grand) ** 2 for m in cell_means]))
+    if between < 1e-12:
+        return k_max
+    k_eff = mean_within / between
+    return float(np.clip(k_eff, 0.0, k_max))
+
+
 def _fit_cell_means(
     frame: pd.DataFrame,
     *,
     shrinkage_k: float,
     axis: str,
+    adaptive_shrinkage: bool = False,
+    shrinkage_k_max: float = 50.0,
+    freq_n_cap: int = 0,
+    min_cell_edge_floor_bps: float = 0.0,
 ) -> tuple[
     dict[tuple[str, int], float],
     dict[tuple[str, int], float],
@@ -92,33 +162,83 @@ def _fit_cell_means(
 
     Returns cell_mu, cell_q10, arch_mu, arch_q10, global_mu, global_q10.
     'archetype' axis still fills cell_* as empty dicts.
+
+    Args:
+        adaptive_shrinkage: If True, derives k_eff from between/within cell variance
+            (James-Stein EB) instead of using fixed shrinkage_k.
+        shrinkage_k_max: Upper bound for adaptive k_eff.
+        freq_n_cap: Clip n to this before computing w=n/(n+k); 0=disabled.
+            Prevents high-frequency noise cells from dominating global pull.
+        min_cell_edge_floor_bps: Cell means below this floor are set to 0.0
+            (no-prediction rather than negative allocation).
     """
     edge = frame["net_return_bps"].to_numpy(dtype=np.float64, copy=False)
     global_mu = float(np.mean(edge))
     global_q10 = float(np.percentile(edge, 10))
 
+    def _effective_n(raw_n: float) -> float:
+        if freq_n_cap > 0:
+            return float(min(raw_n, freq_n_cap))
+        return raw_n
+
     # archetype-only shrinkage
     arch_mu: dict[str, float] = {}
     arch_q10: dict[str, float] = {}
+
+    # Collect raw stats for EB estimation if adaptive
+    arch_raw_means: list[float] = []
+    arch_raw_vars: list[float] = []
+    arch_groups: list[tuple[str, np.ndarray]] = []
     for archetype, grp in frame.groupby("archetype", sort=False):
         vals = grp["net_return_bps"].to_numpy(dtype=np.float64, copy=False)
-        n = float(vals.shape[0])
-        w = n / (n + shrinkage_k)
         a = str(archetype)
-        arch_mu[a] = w * float(np.mean(vals)) + (1.0 - w) * global_mu
+        arch_raw_means.append(float(np.mean(vals)))
+        arch_raw_vars.append(float(np.var(vals)) if len(vals) > 1 else 0.0)
+        arch_groups.append((a, vals))
+
+    k_arch = (
+        _compute_eb_shrinkage_k(arch_raw_means, arch_raw_vars, shrinkage_k_max)
+        if adaptive_shrinkage
+        else shrinkage_k
+    )
+    for a, vals in arch_groups:
+        n_eff = _effective_n(float(vals.shape[0]))
+        w = n_eff / (n_eff + k_arch)
+        raw_mean = float(np.mean(vals))
+        mu_val = w * raw_mean + (1.0 - w) * global_mu
+        if min_cell_edge_floor_bps > 0.0 and mu_val < min_cell_edge_floor_bps:
+            mu_val = 0.0
+        arch_mu[a] = mu_val
         arch_q10[a] = w * float(np.percentile(vals, 10)) + (1.0 - w) * global_q10
 
     cell_mu: dict[tuple[str, int], float] = {}
     cell_q10: dict[tuple[str, int], float] = {}
     if axis == "archetype_regime":
+        cell_raw_means: list[float] = []
+        cell_raw_vars: list[float] = []
+        cell_groups: list[tuple[tuple[str, int], np.ndarray]] = []
         for (archetype, regime_code), grp in frame.groupby(
             ["archetype", "entry_regime_code"], sort=False
         ):
             vals = grp["net_return_bps"].to_numpy(dtype=np.float64, copy=False)
-            n = float(vals.shape[0])
-            w = n / (n + shrinkage_k)
             key = (str(archetype), int(regime_code))
-            cell_mu[key] = w * float(np.mean(vals)) + (1.0 - w) * global_mu
+            cell_raw_means.append(float(np.mean(vals)))
+            cell_raw_vars.append(float(np.var(vals)) if len(vals) > 1 else 0.0)
+            cell_groups.append((key, vals))
+
+        k_cell = (
+            _compute_eb_shrinkage_k(cell_raw_means, cell_raw_vars, shrinkage_k_max)
+            if adaptive_shrinkage
+            else shrinkage_k
+        )
+        for key, vals in cell_groups:
+            n_eff = _effective_n(float(vals.shape[0]))
+            w = n_eff / (n_eff + k_cell)
+            raw_mean = float(np.mean(vals))
+            mu_val = w * raw_mean + (1.0 - w) * global_mu
+            if min_cell_edge_floor_bps > 0.0 and mu_val < min_cell_edge_floor_bps:
+                mu_val = 0.0
+            cell_mu[key] = mu_val
             cell_q10[key] = w * float(np.percentile(vals, 10)) + (1.0 - w) * global_q10
 
     return cell_mu, cell_q10, arch_mu, arch_q10, global_mu, global_q10
@@ -130,6 +250,10 @@ def _internal_validation_rank_ic(
     shrinkage_k: float,
     val_fraction: float,
     axis: str,
+    adaptive_shrinkage: bool = False,
+    shrinkage_k_max: float = 50.0,
+    freq_n_cap: int = 0,
+    min_cell_edge_floor_bps: float = 0.0,
 ) -> float:
     """In-fold purged validation Rank IC for the given axis.
 
@@ -153,13 +277,19 @@ def _internal_validation_rank_ic(
     if sub_fit.shape[0] < 4 or val_set.shape[0] < 4:
         return 0.0
 
+    fit_kwargs: dict[str, object] = {
+        "adaptive_shrinkage": adaptive_shrinkage,
+        "shrinkage_k_max": shrinkage_k_max,
+        "freq_n_cap": freq_n_cap,
+        "min_cell_edge_floor_bps": min_cell_edge_floor_bps,
+    }
     _, _, arch_mu, _, global_mu, _ = _fit_cell_means(
-        sub_fit, shrinkage_k=shrinkage_k, axis="archetype_only"
+        sub_fit, shrinkage_k=shrinkage_k, axis="archetype_only", **fit_kwargs  # type: ignore[arg-type]
     )
 
     if axis == "archetype_regime":
         cell_mu, _, _, _, _, _ = _fit_cell_means(
-            sub_fit, shrinkage_k=shrinkage_k, axis="archetype_regime"
+            sub_fit, shrinkage_k=shrinkage_k, axis="archetype_regime", **fit_kwargs  # type: ignore[arg-type]
         )
 
         def _predict_regime(row: pd.Series) -> float:
@@ -238,17 +368,38 @@ def fit_regime_conditional_ensemble(
     val_fraction = float(cfg.ensemble_internal_val_fraction)
     conditioning_cfg = cfg.ensemble_conditioning
 
+    # EB adaptive shrinkage parameters (IS-only; no OOS leakage)
+    adaptive_shrinkage: bool = bool(getattr(cfg, "ensemble_adaptive_shrinkage", True))
+    shrinkage_k_max: float = float(getattr(cfg, "ensemble_shrinkage_k_max", 50.0))
+    freq_n_cap: int = int(getattr(cfg, "ensemble_freq_n_cap", 200))
+    min_cell_edge_floor_bps: float = float(getattr(cfg, "ensemble_min_cell_edge_floor_bps", 0.0))
+
+    eb_fit_kwargs: dict[str, object] = {
+        "adaptive_shrinkage": adaptive_shrinkage,
+        "shrinkage_k_max": shrinkage_k_max,
+        "freq_n_cap": freq_n_cap,
+        "min_cell_edge_floor_bps": min_cell_edge_floor_bps,
+    }
+
     # Compute archetype-only (always needed for fallback/auto)
     _, _, arch_mu, arch_q10, global_mu, global_q10 = _fit_cell_means(
-        frame, shrinkage_k=shrinkage_k, axis="archetype_only"
+        frame, shrinkage_k=shrinkage_k, axis="archetype_only", **eb_fit_kwargs  # type: ignore[arg-type]
     )
 
     if conditioning_cfg == "auto":
         ic_arch = _internal_validation_rank_ic(
-            frame, shrinkage_k=shrinkage_k, val_fraction=val_fraction, axis="archetype_only"
+            frame,
+            shrinkage_k=shrinkage_k,
+            val_fraction=val_fraction,
+            axis="archetype_only",
+            **eb_fit_kwargs,  # type: ignore[arg-type]
         )
         ic_regime = _internal_validation_rank_ic(
-            frame, shrinkage_k=shrinkage_k, val_fraction=val_fraction, axis="archetype_regime"
+            frame,
+            shrinkage_k=shrinkage_k,
+            val_fraction=val_fraction,
+            axis="archetype_regime",
+            **eb_fit_kwargs,  # type: ignore[arg-type]
         )
         if ic_regime - ic_arch >= cfg.ensemble_min_conditioning_ic_gain:
             chosen = "archetype_regime"
@@ -259,21 +410,41 @@ def fit_regime_conditional_ensemble(
     elif conditioning_cfg == "archetype_regime":
         chosen = "archetype_regime"
         val_ic = _internal_validation_rank_ic(
-            frame, shrinkage_k=shrinkage_k, val_fraction=val_fraction, axis="archetype_regime"
+            frame,
+            shrinkage_k=shrinkage_k,
+            val_fraction=val_fraction,
+            axis="archetype_regime",
+            **eb_fit_kwargs,  # type: ignore[arg-type]
         )
     else:
         chosen = "archetype_only"
         val_ic = _internal_validation_rank_ic(
-            frame, shrinkage_k=shrinkage_k, val_fraction=val_fraction, axis="archetype_only"
+            frame,
+            shrinkage_k=shrinkage_k,
+            val_fraction=val_fraction,
+            axis="archetype_only",
+            **eb_fit_kwargs,  # type: ignore[arg-type]
         )
 
     if chosen == "archetype_regime":
         cell_mu, cell_q10, _, _, _, _ = _fit_cell_means(
-            frame, shrinkage_k=shrinkage_k, axis="archetype_regime"
+            frame, shrinkage_k=shrinkage_k, axis="archetype_regime", **eb_fit_kwargs  # type: ignore[arg-type]
         )
     else:
         cell_mu = {}
         cell_q10 = {}
+
+    # ── Diagnostic table (IC sign audit) ─────────────────────────────────────
+    # Logs archetype-level mean edge vs global to identify anti-predictive variants.
+    _log_ensemble_diagnostics(
+        frame=frame,
+        global_mu=global_mu,
+        arch_mu=arch_mu,
+        val_ic=float(val_ic),
+        chosen=chosen,
+        adaptive_shrinkage=adaptive_shrinkage,
+        k_used=shrinkage_k if not adaptive_shrinkage else shrinkage_k_max,
+    )
 
     # P0: Regime Lift Proof Gate
     lift_proof: RegimeLiftProofResult | None = None
