@@ -28,3 +28,9 @@ last_verified: 2026-06-10
 - **Delta:** `_internal_validation_rank_ic`에서 `v_mu` 정적 평균 대신 `cell_val + v_offset` 동적 예측 적용. `candidate_workflow.py`에서 `oos_rank_ic`를 `ml_out` 진단에 저장하고 `bridge.py`에서 이를 가져와 `rank_ic` 리포트 작성.
 - **Rationale:** 검증 단계와 OOS 예측 단계의 예측 수식 불일치(bug)로 인해 검증 Rank IC가 구조적 음수로 측정되어 shrinkage 및 conditioning 선택에 왜곡 발생. 이를 해결하고 실제 앙상블 OOS IC를 브릿지 요약 테이블에 표시하여 진단 편의성 증대.
 - **Edge Cases:** 변이 관측치 미달 시 offset = 0.0으로 fallback 동작하여 하위 호환성 유지.
+
+## [2026-06-10] calibrated_event_kelly 비중 분모 오류 수정 및 별칭 개편
+
+- **Delta:** `select_candidate_events_for_portfolio`에 `q90_net_bps` 칼럼 추가. `build_candidate_target_weights`에서 켈리 분모 계산 시 $q_{10}$ 극단값 제곱을 정규화 변동성 $\sigma_R = \frac{q_{90} - q_{10}}{2.563}$ 제곱으로 대체. Ablation Row 이름 간소화.
+- **Rationale:** 분모에 극단적 꼬리 위험값($q_{10}$)의 제곱을 다이렉트로 대입해 분모가 100~400배 왜곡되고 가중치가 0에 수렴하는 금융공학적 버그 해결. 변동성 스케일을 정상 복구하여 켈리 비중의 실제 영향도 검증을 가능하게 함.
+- **Edge Cases:** `q90` 정보 누락 방지 및 0 분모 클리핑 가드 처리.
