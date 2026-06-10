@@ -588,6 +588,12 @@ def _summarize_recommendation_variants(
             rec_edge,
             int(max(1, float(row0.get("expected_holding_bars", 1)) - 1)),
         )
+        from scipy.stats import t
+        if rec_n >= 2 and not np.isnan(breakeven_tstat):
+            one_sided_p = float(1.0 - t.cdf(breakeven_tstat, df=rec_n - 1))
+        else:
+            one_sided_p = 1.0
+
         breakeven_hard_pass = (
             rec_n >= (cfg.min_signal_cell_oos_obs if use_signal_cells else min_obs)
             and np.isfinite(breakeven_mean_bps)
@@ -655,6 +661,7 @@ def _summarize_recommendation_variants(
                 "event_fraction_per_bar": float(rec_n / float(max(1, recommendation_end - recommendation_start))),
                 "breakeven_mean_bps": breakeven_mean_bps,
                 "breakeven_tstat": breakeven_tstat,
+                "one_sided_p": one_sided_p,
                 "breakeven_hard_pass": breakeven_hard_pass,
                 "regime_eligible_count": regime_eligible_count,
                 "regime_best_oos_obs": regime_best_obs,
@@ -1089,21 +1096,48 @@ def _build_recommendations(
     by_variant: pd.DataFrame,
     flipped_by_variant: pd.DataFrame,
     cfg: CandidateStrategyConfig,
+    spa_passed: bool = True,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Return keep and flip recommendations from OOS metrics."""
+    """Return keep and flip recommendations from OOS metrics with FDR and SPA controls."""
+    if cfg.spa_gate_enabled and not spa_passed:
+        _logger.warning(
+            "[SPA_GATE] Portfolio SPA bootstrap check failed (or no variants met criteria); blocking all promotions"
+        )
+        return (), ()
+
+    # Gather variant p-values for FDR control
+    variant_pvalues: dict[str, float] = {}
+    for _, row in by_variant.iterrows():
+        if "one_sided_p" in row:
+            variant_pvalues[str(row["group"])] = float(row["one_sided_p"])
+
+    flipped_lookup = flipped_by_variant.set_index("group") if not flipped_by_variant.empty else pd.DataFrame()
+    for _, row in flipped_by_variant.iterrows():
+        if "one_sided_p" in row:
+            variant_pvalues[str(row["group"]) + "_flipped"] = float(row["one_sided_p"])
+
+    from src.domain.futures.validation.gates import apply_fdr_promotion_gate
+    fdr_passed: set[str] = set()
+    if cfg.fdr_gate_enabled and variant_pvalues:
+        fdr_passed = apply_fdr_promotion_gate(variant_pvalues, alpha_fdr=cfg.fdr_alpha)
+
+    _logger.warning("[FDR_DEBUG] variant_pvalues = %s", variant_pvalues)
+    _logger.warning("[FDR_DEBUG] fdr_passed = %s", fdr_passed)
+
     keep_groups: list[str] = []
     for _, row in by_variant.iterrows():
         action = str(row.get("candidate_action", ""))
         cell_admitted = cfg.regime_cell_admission_enabled and bool(row.get("regime_cell_admitted", False))
-        # Regime-cell admitted signals bypass the action pre-filter: they may be INSUFFICIENT_OBS
-        # at the global pooled level but have Bayesian evidence at the cell level.
         if action != "KEEP_CANDIDATE" and not cell_admitted:
             continue
         if _meets_recommendation_thresholds(row, cfg):
-            keep_groups.append(_variant_group_to_key(str(row.get("group", ""))))
+            grp_key = str(row.get("group", ""))
+            if (not cfg.fdr_gate_enabled) or (grp_key in fdr_passed):
+                keep_groups.append(_variant_group_to_key(grp_key))
+            else:
+                _logger.info("[FDR_GATE] Variant %s blocked by FDR control", grp_key)
     recommended_keep = tuple(keep_groups)
 
-    flipped_lookup = flipped_by_variant.set_index("group") if not flipped_by_variant.empty else pd.DataFrame()
     flip_groups: list[str] = []
     for row in by_variant.itertuples(index=False):
         if str(row.candidate_action) != "SIDE_FLIP_CANDIDATE":
@@ -1114,7 +1148,11 @@ def _build_recommendations(
         if isinstance(flip_row, pd.DataFrame):
             continue
         if _meets_recommendation_thresholds(pd.Series(flip_row), cfg):
-            flip_groups.append(_variant_group_to_key(str(row.group)))
+            grp_key = str(row.group)
+            if (not cfg.fdr_gate_enabled) or ((grp_key + "_flipped") in fdr_passed):
+                flip_groups.append(_variant_group_to_key(grp_key))
+            else:
+                _logger.info("[FDR_GATE] Flipped Variant %s blocked by FDR control", grp_key)
 
     return recommended_keep, tuple(flip_groups)
 
@@ -1434,10 +1472,100 @@ def compute_rule_diagnostics(
                 .astype(int)
             )
 
+    spa_passed = True
+    if cfg.spa_gate_enabled and not recommendation_variant_summary.empty:
+        valid_candidates = []
+        for _, row in recommendation_variant_summary.iterrows():
+            grp = str(row.get("group", ""))
+            if (grp.startswith("variant=") or grp.startswith("cell=")) and _meets_recommendation_thresholds(row, cfg):
+                valid_candidates.append(row)
+        
+        flipped_lookup = (
+            recommendation_flipped_summary.set_index("group")
+            if not recommendation_flipped_summary.empty
+            else pd.DataFrame()
+        )
+        for row in recommendation_variant_summary.itertuples(index=False):
+            grp = str(row.group)
+            if (
+                (grp.startswith("variant=") or grp.startswith("cell="))
+                and str(row.candidate_action) == "SIDE_FLIP_CANDIDATE"
+                and grp in getattr(flipped_lookup, "index", [])
+            ):
+                flip_row = flipped_lookup.loc[grp]
+                if (
+                    not isinstance(flip_row, pd.DataFrame)
+                    and _meets_recommendation_thresholds(pd.Series(flip_row), cfg)
+                ):
+                    flip_row_series = pd.Series(flip_row).copy()
+                    flip_row_series["group"] = grp
+                    valid_candidates.append(flip_row_series)
+                        
+        if valid_candidates:
+            best_candidate = max(valid_candidates, key=lambda r: float(r.get("oos_mean_edge_bps", -np.inf)))
+            best_group = str(best_candidate.get("group", ""))
+            
+            is_cell = best_group.startswith("cell=")
+            best_key = best_group.removeprefix("cell=").removeprefix("variant=")
+            
+            if is_cell:
+                best_events = labeled_events.loc[labeled_events["signal_cell"].astype(str) == best_key]
+            else:
+                fam, var = best_key.split(":", 1)
+                best_events = labeled_events.loc[
+                    (labeled_events["family"].astype(str) == fam) &
+                    (labeled_events["variant"].astype(str) == var)
+                ]
+            
+            is_flipped = False
+            if not recommendation_variant_summary.empty:
+                var_row = recommendation_variant_summary.loc[recommendation_variant_summary["group"] == best_group]
+                if not var_row.empty and str(var_row.iloc[0].get("candidate_action", "")) == "SIDE_FLIP_CANDIDATE":
+                    is_flipped = True
+            
+            best_oos = best_events.loc[
+                _window_mask(
+                    best_events["entry_idx"].to_numpy(copy=False),
+                    resolved_recommendation_start,
+                    resolved_recommendation_end,
+                )
+            ].copy()
+            
+            ts_len = resolved_recommendation_end - resolved_recommendation_start
+            ts_edge = np.zeros(ts_len, dtype=np.float64)
+            if not best_oos.empty:
+                if is_flipped:
+                    best_oos["edge_after_hurdle_bps"] = -best_oos["edge_after_hurdle_bps"]
+                
+                daily_mean = best_oos.groupby("entry_idx")["edge_after_hurdle_bps"].mean()
+                for idx, val in daily_mean.items():
+                    ri = int(idx) - resolved_recommendation_start
+                    if 0 <= ri < ts_len:
+                        ts_edge[ri] = val
+                        
+            from src.domain.futures.optimization.evaluator import stationary_bootstrap_spa
+            spa_p = stationary_bootstrap_spa(
+                ts_edge,
+                n_bootstrap=cfg.spa_n_bootstrap,
+                seed=cfg.seed,
+            )
+            spa_passed = spa_p <= cfg.spa_p_value_max
+            _logger.info(
+                "[SPA_GATE] best_candidate=%s, spa_p=%.4f (threshold=%.2f) -> passed=%s",
+                best_group,
+                spa_p,
+                cfg.spa_p_value_max,
+                spa_passed,
+            )
+        else:
+            spa_passed = False
+            _logger.info("[SPA_GATE] No candidates passed individual thresholds; SPA gate automatically failed")
+
     recommended_keep_variants, recommended_flip_variants = _build_recommendations(
         by_variant=recommendation_variant_summary,
         flipped_by_variant=recommendation_flipped_summary,
         cfg=cfg,
+        spa_passed=spa_passed,
     )
     recommended_keep_signal_cells, recommended_keep_variants = _split_recommendation_groups(
         recommended_keep_variants
