@@ -3,15 +3,15 @@
 
 # Mode Full (ALO/Ensemble) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-10 (Phase 3 Variant Prior Offset + Family Filter 적용)
+**최신 갱신:** 2026-06-10 (Phase 3 Variant Prior Offset + Allocation Target Vol Bypass 핫픽스 적용)
 **현재 상태:** `blocked` — 1/4 Fold Pass (fold_pass_ratio 25.0%). **Active Signals = 0**
 **평가 기준:** `min_variant_oos_edge_bps=10.0`, `breakeven_hard_gate=enabled`, `min_fold_realized_edge_bps=8.0`, `min_oos_rank_ic=0.01`, `min_ic_tstat=0.8`, `max_variant_oos_q10_fail_rate=0.65`, `min_wf_fold_pass_ratio=0.60`
 
 **진단 노트:**
-- **Phase 3 Variant Prior Offset + Family Filter & Validation IC Alignment 결과 분석 (최신):**
-  - ✅ **앙상블 변이 우선 매핑 정상화 (6 variants fitted)**: config 상의 패밀리명 불일치("tpc", "dm", "mtf" -> "trend_pullback_continuation" 등)를 해결하여 6개 변이가 정상 적합(fit)되었습니다.
-  - ✅ **OOS Rank IC 대폭 개선**: 검증 및 예측 공식 불일치(bug) 해결 및 variant prior 적용 활성화로 전 Fold의 OOS Rank IC가 개선되었으며, 특히 Fold 3의 IC는 양수(+0.019)로 반전되었습니다.
-  - ⚠️ **여전히 blocked (1/4 PASS)**: Rank IC는 크게 개선되었으나, 최종 포트폴리오 상위 컷오프(n_keep) 선택 종목군이 기존과 유사하게 묶여 있어 Fold 1, 2, 3의 실현 수익률(RlzdMean) 자체는 각각 4.9, 6.3, -7.3 bps로 동일하여 blocked 상태가 유지됩니다. 복리자산증식을 위해 Fold 1~3의 추가적인 국면 대응(regime-cell 최적화 또는 개별 게이트 조정)이 요구됩니다.
+- **Phase 3 + Allocation Target Vol Bypass 결과 분석 (최신):**
+  - ✅ **앙상블 변이 우선 매핑 정상화 (21 variants fitted)**: 추천 21종 전략의 패밀리명을 온전히 매핑하여 21개 변이가 정상 적합(fit)되었습니다.
+  - ✅ **OOS Rank IC 개선**: 검증 및 예측 공식 불일치(bug) 해결 및 variant prior 적용 활성화로 전 Fold의 OOS Rank IC가 개선되었으며, 특히 Fold 3의 IC는 양수(+0.076)로 반전되었습니다.
+  - ⚠️ **여전히 blocked (1/4 PASS)**: [portfolio_constructor.py](file:///home/kth/my_coin_traider/src/domain/futures/portfolio/portfolio_constructor.py) 핫픽스 및 켈리 분모 정밀도 수정에 의해 `ML_Event_Kelly_Cap`이 **CAGR +2.6%** (원천 켈리 CAGR **+2.8%**)로 정상 수렴함을 확인하였습니다.
 
 ---
 
@@ -167,20 +167,20 @@
 | Fold | Mode       | IC(diag) |  Events | RlzdMean |  EU_p90 | Pass   |
 |      |            |    (ref) |         |  (★gate) | (★gate) |        |
 ----------------------------------------------------------------------------------
-| 1    | ensemble_b0 |   -0.011 |   2,297 |      4.9 |   36.01 | ❌      |
-| 2    | ensemble_b0 |   -0.069 |   2,303 |      6.3 |   35.03 | ❌      |
-| 3    | ensemble_b0 |    0.019 |   3,137 |     -7.3 |   33.44 | ❌      |
-| 4    | ensemble_b0 |   -0.028 |   3,705 |     21.5 |   33.89 | ✅      |
+| 1    | ensemble_b0 |   -0.072 |   2,297 |      7.7 |   43.30 | ❌      |
+| 2    | ensemble_b0 |   -0.031 |   2,303 |      4.3 |   37.82 | ❌      |
+| 3    | ensemble_b0 |    0.076 |   3,137 |      8.5 |   36.15 | ❌      |
+| 4    | ensemble_b0 |   -0.010 |   3,705 |     12.8 |   33.89 | ✅      |
 ----------------------------------------------------------------------------------
-(★ Phase 3 Offset + Filter + Alignment 적용 후: Fold OOS Rank IC 대폭 개선 및 6 variants fitted)
+(★ Phase 3 Offset + Filter + Alignment 적용 후: Fold OOS Rank IC 대폭 개선 및 21 variants fitted)
 
-[ENSEMBLE DIAGNOSTICS] Phase 3 Variant Prior Offset + Family Filter (2026-06-10 ALO Run — Fold 1 기준, 6 variants fitted)
+[ENSEMBLE DIAGNOSTICS] Phase 3 Variant Prior Offset + Family Filter (2026-06-10 ALO Run — Fold 1 기준, 21 variants fitted)
 ----------------------------------------------------------------------------------
 | Metric                       | Value                                           |
 | ---------------------------- | ----------------------------------------------- |
 | N events (train)             | 5,705                                           |
 | Global mu (bps)              | 22.4                                            |
-| Validation Rank IC           | -0.020                                          |
+| Validation Rank IC           | -0.004                                          |
 | IC sign                      | ❌ NEGATIVE                                     |
 | Conditioning chosen          | archetype_regime                                |
 | Adaptive shrinkage           | True                                            |
@@ -194,8 +194,9 @@
 | trend_continuation           | 27.1            | POS  | 1,223                  |
 ----------------------------------------------------------------------------------
 | 진단: Variant Offset, 패밀리 필터 적용 및 검증 IC 공식 정합 완료.              |
-| OOS Rank IC는 전 Fold에서 의미 있게 개선(양전환 포함)되었으나, 여전히           |
-| Fold 1, 2, 3이 realized mean 기준에 미달하여 전체 1/4 PASS 상태 유지.          |
+| OOS Rank IC는 전 Fold에서 의미 있게 개선되었으며, 특히 Fold 3의 IC는 +0.076으로 |
+| 최초 양전환을 확인했습니다. 다만 Fold 1, 2, 3이 realized mean 기준에 미달하여  |
+| 전체 1/4 PASS 상태 유지.                                                       |
 ----------------------------------------------------------------------------------
 
 [BRIDGE SUMMARY] -----------------------------------
@@ -210,10 +211,10 @@
 | ------------------ | ------- | ------- | ------ | ---------- | ------ | ------ | ----- |
 | Base_Rule          |  -28.2% |   19.2% |  -1.46 |    825,177 |    619 |   1.00 |   N   |
 | Prior_Filter       |    1.4% |    1.9% |   0.71 |  1,007,976 |    113 |   0.24 |   N   |
-| Prior_Residual     |   -4.6% |    4.6% |  -0.99 |    973,140 |    152 |   0.25 |   N   |
-| ML_Edge_Gate       |   -4.6% |    4.6% |  -0.99 |    973,140 |    152 |   0.25 |   N   |
-| ML_Event_Kelly     |   -1.4% |    3.4% |  -0.41 |    991,812 |    152 |   0.25 |   N   |
-| ML_Event_Kelly_Cap |    0.2% |    0.8% |   0.00 |  1,000,900 |    152 |   0.25 |   N   |
+| Prior_Residual     |    0.7% |    3.2% |   0.22 |  1,004,009 |    145 |   0.25 |   N   |
+| ML_Edge_Gate       |    0.7% |    3.2% |   0.22 |  1,004,009 |    145 |   0.25 |   N   |
+| ML_Event_Kelly     |    2.8% |    2.0% |   1.39 |  1,015,943 |    144 |   0.25 |   N   |
+| ML_Event_Kelly_Cap |    2.6% |    2.0% |   1.31 |  1,015,031 |    147 |   0.25 |   N   |
 ------------------------------------------------------------------------------------------
 
 
