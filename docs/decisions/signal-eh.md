@@ -46,3 +46,7 @@ last_verified: 2026-06-09
 - **Delta:** `CandidateStrategyConfig`에 FDR/SPA 설정 변수 추가. `_summarize_recommendation_variants()`에서 Newey-West 단측 p-value 산출. `compute_rule_diagnostics()`에서 OOS edge circular-block bootstrap(SPA) 연동하여 최종 promote AND-결합 필터링 구현.
 - **Rationale:** G1~G10 신규 패밀리 확장에 따른 alpha 모집단 팽창 시 overfit 생존 후보의 급증을 다중 비교 multiplicity control인 FDR과 SPA 집합검정으로 제어하여 라이브 환경의 오버핏 리스크 최소화.
 - **Edge Cases/Trade-offs:** default off 설정으로 하방 호환성 및 기존 regression 안정성 확보. SPA의 경우 이벤트 부재 시 fail-closed(차단)로 강하게 통제함.
+
+## [2026-06-10] Variant-Edge Hierarchical Prior 개선 (Variant Offset + Family Filter)
+- **Delta:** `RegimeConditionalEnsemble`에 `variant_offset_bps` 추가. 예측 단계에서 변이 고유의 편차(offset)를 실시간 국면 셀 평균(`cell_val`)에 더해 예측하게 하고, `ensemble_variant_prior_families`를 통한 allowed 패밀리 제한 구현.
+- **Rationale:** 절대값 `variant_mu_bps`로 예측값을 강제 덮어쓰던 구조가 OOS 국면 조건화(Regime Gating)를 차단하고 포지션 배분을 분산시킴. 편차 모델링과 필터링을 통해 Fold 4 실현 수익을 10.2에서 21.5 bps로 복원함 (✅ PASS 성공).
