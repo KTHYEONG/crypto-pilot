@@ -10,6 +10,8 @@ from src.domain.futures.strategy.candidate_ensemble import (
     RegimeConditionalEnsemble,
     _compute_eb_shrinkage_k,
     _fit_cell_means,
+    _fit_variant_means,
+    _internal_validation_rank_ic,
     _log_ensemble_diagnostics,
     fit_regime_conditional_ensemble,
     predict_regime_conditional_ensemble,
@@ -57,7 +59,11 @@ def test_regime_conditional_ensemble_shrinks_small_cells_to_global(
     )
     proof = train_events.copy()
     proof_ids = np.zeros(len(proof), dtype=np.int32)
-    cfg = _make_cfg(ensemble_shrinkage_k=50.0, ensemble_conditioning="archetype_regime", ensemble_adaptive_shrinkage=False)
+    cfg = _make_cfg(
+        ensemble_shrinkage_k=50.0,
+        ensemble_conditioning="archetype_regime",
+        ensemble_adaptive_shrinkage=False,
+    )
 
     # lift_proof 통과로 고정 → archetype_regime 유지
     monkeypatch.setattr(
@@ -779,3 +785,288 @@ def test_diagnostic_log_emits_negative_ic_flag(caplog: pytest.LogCaptureFixture)
     assert "anti_predictive" in combined
     assert "ANTI" in combined  # 음수 archetype 표시
     assert "normal" in combined
+
+
+# ---------------------------------------------------------------------------
+# Variant-Edge Hierarchical Prior — S1 ~ S6
+# ---------------------------------------------------------------------------
+
+def _make_variant_frame(
+    *,
+    high_edge_n: int = 200,
+    high_edge_mean: float = 70.0,
+    noise_n: int = 200,
+    noise_mean: float = 5.0,
+    archetype: str = "time_series_momentum",
+    regime: int = 0,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """2 variants in same archetype x regime cell: 'fam:high' (high edge) vs 'fam:noise'."""
+    rng = np.random.default_rng(seed)
+    df_high = pd.DataFrame({
+        "family": ["fam"] * high_edge_n,
+        "variant": ["high"] * high_edge_n,
+        "archetype": [archetype] * high_edge_n,
+        "entry_regime_code": [regime] * high_edge_n,
+        "net_return_bps": rng.normal(high_edge_mean, 5.0, high_edge_n),
+        "entry_idx": np.arange(high_edge_n, dtype=np.int64),
+    })
+    df_noise = pd.DataFrame({
+        "family": ["fam"] * noise_n,
+        "variant": ["noise"] * noise_n,
+        "archetype": [archetype] * noise_n,
+        "entry_regime_code": [regime] * noise_n,
+        "net_return_bps": rng.normal(noise_mean, 5.0, noise_n),
+        "entry_idx": np.arange(noise_n, dtype=np.int64) + high_edge_n,
+    })
+    return pd.concat([df_high, df_noise], ignore_index=True)
+
+
+def test_s1_variant_prior_discriminates_within_cell() -> None:
+    """S1: 동일 셀 내 고엣지 변이 vs noise 변이에 서로 다른 score 부여."""
+    # Arrange
+    frame = _make_variant_frame()
+    cell_mu, _, arch_mu, _, global_mu, _ = _fit_cell_means(
+        frame, shrinkage_k=50.0, axis="archetype_regime"
+    )
+    # cell_mu: (archetype, regime) → single value (둘 다 혼합 평균)
+    cell_anchor = cell_mu[("time_series_momentum", 0)]
+
+    # Act
+    variant_mu = _fit_variant_means(
+        frame,
+        cell_mu=cell_mu,
+        arch_mu=arch_mu,
+        global_mu=global_mu,
+        k_variant=30.0,
+        min_obs=40,
+    )
+
+    # Assert: 고엣지 > 셀 앵커 > noise
+    assert "fam:high" in variant_mu
+    assert "fam:noise" in variant_mu
+    assert variant_mu["fam:high"] > cell_anchor
+    assert variant_mu["fam:noise"] < cell_anchor
+    assert variant_mu["fam:high"] > variant_mu["fam:noise"]
+
+
+def test_s2_variant_prior_improves_rank_ic_sign() -> None:
+    """S2: variant prior 활성화 시 IC가 셀 평균만 사용하는 경우보다 높아야 한다."""
+    # Arrange: 변이 정체성이 수익을 예측하나, 셀 평균은 혼합으로 묘화.
+    # 두 변이를 시계열 전체에 인터리브 → val_set에 양쪽 변이 모두 존재 보장.
+    rng = np.random.default_rng(7)
+    n = 300  # 각 변이가 n/2씩, 인터리브(짝수=A, 홀수=B)
+    variants = ["A" if i % 2 == 0 else "B" for i in range(n)]
+    returns_A = rng.normal(60.0, 5.0, n // 2)
+    returns_B = rng.normal(5.0, 5.0, n // 2)
+    idx_A, idx_B = 0, 0
+    net_returns = []
+    for v in variants:
+        if v == "A":
+            net_returns.append(returns_A[idx_A]); idx_A += 1
+        else:
+            net_returns.append(returns_B[idx_B]); idx_B += 1
+    df = pd.DataFrame({
+        "family": ["fam"] * n,
+        "variant": variants,
+        "archetype": ["momentum"] * n,
+        "entry_regime_code": [0] * n,
+        "net_return_bps": net_returns,
+        "entry_idx": np.arange(n, dtype=np.int64),
+    })
+
+    # Act: IC with and without variant prior
+    ic_no_prior = _internal_validation_rank_ic(
+        df,
+        shrinkage_k=50.0,
+        val_fraction=0.3,
+        axis="archetype_regime",
+        variant_prior_enabled=False,
+    )
+    ic_with_prior = _internal_validation_rank_ic(
+        df,
+        shrinkage_k=50.0,
+        val_fraction=0.3,
+        axis="archetype_regime",
+        variant_prior_enabled=True,
+        variant_shrinkage_k=30.0,
+        variant_min_obs=20,
+    )
+
+    # Assert: variant prior IC > no prior IC
+    assert ic_with_prior > ic_no_prior, (
+        f"variant prior IC({ic_with_prior:.4f}) should > cell-only IC({ic_no_prior:.4f})"
+    )
+    assert ic_with_prior > 0.0, "variant prior IC should be positive"
+
+
+def test_s3_variant_prior_is_only_no_oos_leakage() -> None:
+    """S3: _fit_variant_means가 IS-only sub_fit 데이터만 사용하는지 검증."""
+    # Arrange: 시계열 분할 가능한 frame with entry_idx
+    rng = np.random.default_rng(11)
+    n = 200
+    df = pd.DataFrame({
+        "family": ["fam"] * n,
+        "variant": ["v1"] * n,
+        "archetype": ["momentum"] * n,
+        "entry_regime_code": [0] * n,
+        "net_return_bps": rng.normal(20.0, 5.0, n),
+        "entry_idx": np.arange(n, dtype=np.int64),
+    })
+
+    val_start = int(n * 0.75)
+    val_idx_cutoff = int(df.iloc[val_start]["entry_idx"])
+    sub_fit = df[df["entry_idx"] < val_idx_cutoff - 1]
+    val_set = df[df["entry_idx"] >= val_idx_cutoff]
+
+    # Verify no overlap
+    assert sub_fit["entry_idx"].max() < val_set["entry_idx"].min()
+
+    # Act: fit variant_mu on sub_fit only
+    cell_mu, _, arch_mu, _, global_mu, _ = _fit_cell_means(
+        sub_fit, shrinkage_k=50.0, axis="archetype_regime"
+    )
+    variant_mu = _fit_variant_means(
+        sub_fit,  # IS-only
+        cell_mu=cell_mu,
+        arch_mu=arch_mu,
+        global_mu=global_mu,
+        k_variant=30.0,
+        min_obs=5,
+    )
+
+    # Assert: variant_mu computed from sub_fit rows only
+    # (n_v used for w_v should reflect sub_fit size, not full n)
+    sub_n = int((sub_fit["family"].astype(str) + ":" + sub_fit["variant"].astype(str) == "fam:v1").sum())
+    full_n = n
+    assert sub_n < full_n, "sub_fit subset confirmed smaller than full set"
+    assert "fam:v1" in variant_mu  # was fitted
+
+
+def test_s4_variant_prior_small_sample_falls_back_to_anchor() -> None:
+    """S4: 소표본(n < min_obs) 변이는 spurious high score 차단 → anchor 반환."""
+    # Arrange
+    rng = np.random.default_rng(99)
+    # lucky:rare: n=5 (<<40), raw mean=300bps (spurious)
+    df_rare = pd.DataFrame({
+        "family": ["lucky"] * 5,
+        "variant": ["rare"] * 5,
+        "archetype": ["momentum"] * 5,
+        "entry_regime_code": [0] * 5,
+        "net_return_bps": rng.normal(300.0, 5.0, 5),
+        "entry_idx": np.arange(5, dtype=np.int64),
+    })
+    # bulk: large anchor cell
+    df_bulk = pd.DataFrame({
+        "family": ["bulk"] * 200,
+        "variant": ["normal"] * 200,
+        "archetype": ["momentum"] * 200,
+        "entry_regime_code": [0] * 200,
+        "net_return_bps": rng.normal(20.0, 5.0, 200),
+        "entry_idx": np.arange(200, dtype=np.int64) + 5,
+    })
+    frame = pd.concat([df_rare, df_bulk], ignore_index=True)
+
+    cell_mu, _, arch_mu, _, global_mu, _ = _fit_cell_means(
+        frame, shrinkage_k=50.0, axis="archetype_regime"
+    )
+    anchor = cell_mu.get(("momentum", 0), arch_mu.get("momentum", global_mu))
+
+    # Act
+    variant_mu = _fit_variant_means(
+        frame,
+        cell_mu=cell_mu,
+        arch_mu=arch_mu,
+        global_mu=global_mu,
+        k_variant=30.0,
+        min_obs=40,  # rare n=5 < 40
+    )
+
+    # Assert: rare variant gets anchor, not 300bps
+    assert "lucky:rare" in variant_mu
+    assert variant_mu["lucky:rare"] == pytest.approx(anchor, rel=1e-6)
+    assert variant_mu["lucky:rare"] < 100.0  # not spurious 300bps
+
+
+def test_s5_variant_prior_backward_compat_no_family_variant_cols() -> None:
+    """S5: family/variant 컬럼 없는 frame → 예외 없이 기존 셀 평균 경로 동작."""
+    # Arrange: 기존 스키마 (family/variant 미존재)
+    rng = np.random.default_rng(21)
+    n = 200
+    df = pd.DataFrame({
+        "archetype": ["momentum"] * n,
+        "entry_regime_code": [0] * n,
+        "net_return_bps": rng.normal(20.0, 5.0, n),
+        "entry_idx": np.arange(n, dtype=np.int64),
+    })
+    cfg = _make_cfg(
+        ensemble_variant_prior_enabled=True,
+        ensemble_variant_shrinkage_k=30.0,
+        ensemble_variant_min_obs=40,
+        ensemble_conditioning="archetype_only",
+        ensemble_adaptive_shrinkage=False,
+    )
+
+    # Act: no exception expected
+    model = fit_regime_conditional_ensemble(train_events=df, cfg=cfg)
+
+    # Assert: variant_mu_bps는 빈 dict (컬럼 없음)
+    assert model.variant_mu_bps == {}
+
+    # predict도 예외 없이 동작
+    oos = df.head(10).copy()
+    result = predict_regime_conditional_ensemble(model=model, oos_events=oos, cfg=cfg)
+    assert result.expected_net_bps.shape[0] == 10
+
+
+def test_s6_variant_prior_freq_n_cap_limits_weight() -> None:
+    """S6: freq_n_cap=200이면 n=1000 고빈도 변이도 n_eff=200으로 캡."""
+    # Arrange
+    rng = np.random.default_rng(55)
+    n_hf = 1000  # high-frequency noise variant
+    n_ref = 200
+    df_hf = pd.DataFrame({
+        "family": ["hf"] * n_hf,
+        "variant": ["noise"] * n_hf,
+        "archetype": ["momentum"] * n_hf,
+        "entry_regime_code": [0] * n_hf,
+        "net_return_bps": rng.normal(8.0, 3.0, n_hf),
+        "entry_idx": np.arange(n_hf, dtype=np.int64),
+    })
+    df_ref = pd.DataFrame({
+        "family": ["ref"] * n_ref,
+        "variant": ["normal"] * n_ref,
+        "archetype": ["momentum"] * n_ref,
+        "entry_regime_code": [0] * n_ref,
+        "net_return_bps": rng.normal(20.0, 3.0, n_ref),
+        "entry_idx": np.arange(n_ref, dtype=np.int64) + n_hf,
+    })
+    frame = pd.concat([df_hf, df_ref], ignore_index=True)
+    cell_mu, _, arch_mu, _, global_mu, _ = _fit_cell_means(
+        frame, shrinkage_k=50.0, axis="archetype_regime"
+    )
+    anchor = cell_mu.get(("momentum", 0), arch_mu.get("momentum", global_mu))
+
+    # Act: with freq_n_cap=200
+    v_mu_capped = _fit_variant_means(
+        frame, cell_mu=cell_mu, arch_mu=arch_mu, global_mu=global_mu,
+        k_variant=30.0, min_obs=10, freq_n_cap=200
+    )
+    # Act: without freq_n_cap
+    v_mu_uncapped = _fit_variant_means(
+        frame, cell_mu=cell_mu, arch_mu=arch_mu, global_mu=global_mu,
+        k_variant=30.0, min_obs=10, freq_n_cap=0
+    )
+
+    # Assert: capped w_v = 200/(200+30) < uncapped w_v = 1000/(1000+30)
+    # → capped mu closer to anchor than uncapped
+    w_capped = 200 / (200 + 30.0)
+    w_uncapped = 1000 / (1000 + 30.0)
+    raw_hf = float(frame[frame["variant"] == "noise"]["net_return_bps"].mean())
+    expected_capped = w_capped * raw_hf + (1.0 - w_capped) * anchor
+    expected_uncapped = w_uncapped * raw_hf + (1.0 - w_uncapped) * anchor
+
+    assert v_mu_capped["hf:noise"] == pytest.approx(expected_capped, rel=1e-4)
+    assert v_mu_uncapped["hf:noise"] == pytest.approx(expected_uncapped, rel=1e-4)
+    # capped가 anchor에 더 가까움 (노이즈 억제)
+    assert abs(v_mu_capped["hf:noise"] - anchor) < abs(v_mu_uncapped["hf:noise"] - anchor)
