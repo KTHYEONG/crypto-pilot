@@ -60,6 +60,11 @@ Transforms L1 candidate events into optimal portfolio weights via regime-conditi
 - OR-path: if `regime_cell_admitted=True`, bypasses global pooled gates (`min_obs`, `breakeven_hard_gate`, `mean_edge`, etc.)
 - Replaces: `min_obs=60`, `min_tstat=1.0` (statistically inconsistent; effect-size-agnostic)
 
+**Fractional Kelly Sizing (calibrated_event_kelly)**
+- $\sigma_R = \frac{q_{90\_R} - q_{10\_R}}{2.563}$
+- $second\_moment = \max(\mu_R^2 + \sigma_R^2, 1e-6)$
+- $w = \text{kelly\_fraction} \times \frac{\max(\mu_R, 0.0)}{second\_moment}$
+
 **Walk-Forward Survival Censoring**
 - If fold realized edge $<$ `min_fold_realized_edge_bps`, fold fails.
 - Failed fold predictions: $\mu, q10, q90, p_{\text{pass}} \rightarrow 0$ to prevent anti-selection in the portfolio pool.
