@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
 from src.domain.futures.portfolio.portfolio_constructor import (
     PortfolioCaps,
@@ -13,6 +14,8 @@ from src.domain.futures.portfolio.portfolio_constructor import (
     precompute_rebalance_weights,
     project_all_caps,
 )
+from src.domain.futures.strategy.candidate_portfolio import build_candidate_target_weights
+from src.domain.futures.strategy.config import CandidateStrategyConfig
 
 
 class TestCapsProjection:
@@ -190,3 +193,69 @@ class TestCapsProjection:
             ),
         )
         np.testing.assert_allclose(out, out_with_zero_beta, atol=1e-12)
+
+    def test_dynamic_regime_caps_and_double_scaling_guard(self) -> None:
+        """Scenario 1, 2, 3: 국면별 dynamic cap 및 double scaling guard 동작 검증."""
+        symbols = ("BTCUSDT", "ETHUSDT")
+        close_2d = np.array([
+            [100.0, 100.0],
+            [100.0, 100.0],
+            [100.0, 100.0]
+        ], dtype=np.float64)
+
+        # 2개 이벤트 생성 (t=0에 BTC 롱, t=1에 ETH 롱)
+        selected_events = pd.DataFrame([
+            {
+                "symbol": "BTCUSDT",
+                "entry_idx": 0,
+                "side": 1.0,
+                "risk_unit_bps": 25.0,
+                "expected_holding_bars": 1,
+                "p_pass": 20.0,  # 매우 높은 p_pass로 비중을 증폭시켜 Cap에 걸리도록 유도
+                "mu_net_decision_bps": 50.0,
+                "q10_net_bps": -25.0,
+                "q90_net_bps": 75.0
+            },
+            {
+                "symbol": "ETHUSDT",
+                "entry_idx": 1,
+                "side": 1.0,
+                "risk_unit_bps": 25.0,
+                "expected_holding_bars": 1,
+                "p_pass": 20.0,  # 매우 높은 p_pass로 비중을 증폭시켜 Cap에 걸리도록 유도
+                "mu_net_decision_bps": 50.0,
+                "q10_net_bps": -25.0,
+                "q90_net_bps": 75.0
+            }
+        ])
+
+        # 타임스텝별 국면 코드: t=0: bull_q (0), t=1: crash (5), t=2: bull_vol (1)
+        regime_code_1d = np.array([0, 5, 1], dtype=np.int32)
+
+        cfg = CandidateStrategyConfig(
+            gross_cap=1.2,
+            net_cap=0.3,
+            max_symbol_weight=0.9,
+            sizing_mode="calibrated_event_kelly",
+            double_scaling_guard=True,
+            overlay_sizing_enabled=False
+        )
+
+        weights = build_candidate_target_weights(
+            selected_events=selected_events,
+            close_2d=close_2d,
+            symbols=symbols,
+            beta_2d=None,
+            sigma_3d=None,
+            cfg=cfg,
+            regime_code_1d=regime_code_1d
+        )
+
+        # t=0: bull_q (multiplier gross=1.5, net=2.5) -> gross_cap = 1.8, net_cap = 0.75
+        # 순 노출(net sum)이 net_cap인 0.75에 정확히 수렴해야 한다.
+        np.testing.assert_allclose(np.sum(weights[0]), 0.75, atol=1e-5)
+
+        # t=1: crash (multiplier gross=0.3, net=0.1) -> gross_cap = 1.2 * 0.3 = 0.36, net_cap = 0.3 * 0.1 = 0.03
+        # 순 노출(net sum)이 net_cap인 0.03에 정확히 수렴해야 한다.
+        np.testing.assert_allclose(np.sum(weights[1]), 0.03, atol=1e-5)
+

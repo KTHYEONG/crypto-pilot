@@ -65,6 +65,13 @@ Transforms L1 candidate events into optimal portfolio weights via regime-conditi
 - $second\_moment = \max(\mu_R^2 + \sigma_R^2, 1e-6)$
 - $w = \text{kelly\_fraction} \times \frac{\max(\mu_R, 0.0)}{second\_moment}$
 
+**Dynamic Portfolio Caps & Vol-Targeting Guard**
+- 타임스텝 $t$의 국면 코드 $Regime_t$에 맞춘 동적 Cap 제약:
+  - $Cap_{\text{gross}, t} = Cap_{\text{gross}} \times \text{gross\_multiplier}(Regime_t)$
+  - $Cap_{\text{net}, t} = Cap_{\text{net}} \times \text{net\_multiplier}(Regime_t)$
+- 이중 볼라틸리티 타겟팅 방지 (`double_scaling_guard`):
+  - 켈리/오버레이 사이징을 통해 1차적으로 비중이 스케일링된 경우, 포트폴리오 투영 단계에서 target_ann_vol을 $0.0$으로 처리하여 이중 감쇠(Attenuation)를 우회.
+
 **Walk-Forward Survival Censoring**
 - If fold realized edge $<$ `min_fold_realized_edge_bps`, fold fails.
 - Failed fold predictions: $\mu, q10, q90, p_{\text{pass}} \rightarrow 0$ to prevent anti-selection in the portfolio pool.
@@ -101,6 +108,11 @@ graph TD
 | **Param** | `admission_tau_prior_bps` | Fallback prior std when <2 cells. Bounds: `(0, ∞)` |
 | **Param** | `min_regime_cell_oos_obs` | NW stability floor (not domain gate). Default: 10 |
 | **Param** | `min_regime_cell_edge_bps` | $\delta$: minimum profitable edge. Default: 8.0 bps |
+| **Param** | `double_scaling_guard` | Enable double vol-targeting scaling guard. Default: `True` |
+| **Param** | `regime_gross_multipliers` | Gross cap multipliers per regime. Default HSL tailored |
+| **Param** | `regime_net_multipliers` | Net cap multipliers per regime. Default HSL tailored |
+| **Param** | `bl_shrinkage_var_mult` | Black-Litterman var shrinkage multiplier. Default: `0.20` |
+| **Param** | `bl_shrinkage_omega_mult` | Black-Litterman omega shrinkage multiplier. Default: `0.10` |
 | **Output**| `expected_net_bps` | Shrinkage-adjusted expected return per event |
 | **Output**| `target_weights` | Final portfolio allocation weights per event |
 
