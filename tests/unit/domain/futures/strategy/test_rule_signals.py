@@ -30,6 +30,9 @@ def _make_aligned(t: int = 150, n: int = 2) -> AlignedMarketData:
         close_2d=base.copy(),
         volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
         funding_2d=np.zeros((t, n), dtype=np.float64),
+        basis_2d=np.zeros((t, n), dtype=np.float64),
+        taker_buy_2d=np.full((t, n), 500.0, dtype=np.float64),
+        trades_2d=np.full((t, n), 100.0, dtype=np.float64),
         active_mask=np.ones((t, n), dtype=bool),
         warm_mask=np.ones((t, n), dtype=bool),
         entry_block_mask=np.zeros((t, n), dtype=bool),
@@ -44,7 +47,7 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
     panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
 
     assert isinstance(panels, tuple)
-    # 30 existing variants + 10 new variants = 40
+    # 40 variants (25 base + 15 new G1-G10)
     assert len(panels) == 40
 
     expected_families = {
@@ -56,18 +59,22 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
         "funding_carry",
         "oi_volume_impulse",
         "btc_regime_pullback",
-        "cross_sectional_momentum",
         "funding_zscore_carry",
         "vol_regime_reversion",
-        "btc_corr_regime",
-        "funding_acceleration_carry",
-        "btc_residual_momentum",
         "oi_volume_confirmed_breakout",
         "trend_pullback_continuation",
         "dual_momentum",
-        "liquidation_wick_reversal",
-        "squeeze_unwind",
         "residual_reversion",
+        "mtf_trend_pullback",
+        "mtf_breakout_retest",
+        "oi_price_divergence",
+        "oi_breakout_confirm",
+        "basis_zscore_reversion",
+        "basis_momentum",
+        "taker_imbalance_momentum",
+        "taker_exhaustion_reversal",
+        "funding_extreme_reversal",
+        "vol_term_structure_gate",
     }
 
     for p in panels:
@@ -237,13 +244,11 @@ def test_new_signal_families_shapes_and_side_hints() -> None:
 
     # Assert: 각 신규 family 패널의 shape 및 side_hint 범위 검증
     new_families = {
-        "cross_sectional_momentum",
         "funding_zscore_carry",
         "vol_regime_reversion",
-        "btc_corr_regime",
     }
     new_panels = [p for p in panels if p.family in new_families]
-    assert len(new_panels) == 11  # 3+3+2+3
+    assert len(new_panels) == 5  # 3+2
 
     for p in new_panels:
         assert p.signed_score_2d.shape == (200, 2), f"{p.family}:{p.variant} score shape mismatch"
@@ -262,21 +267,6 @@ def test_new_signal_families_shapes_and_side_hints() -> None:
             )
 
 
-def test_cross_sectional_momentum_no_lookahead() -> None:
-    # The first `lookback` rows should have side_hint == 0 (warmup guard).
-    aligned = _make_aligned(t=100)
-    cfg = CandidateStrategyConfig()
-    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
-
-    cs_panels = [p for p in panels if p.family == "cross_sectional_momentum"]
-    assert len(cs_panels) == 3
-
-    for p in cs_panels:
-        lb = int(p.params["lookback"])
-        warmup_sides = p.side_hint_2d[:lb]
-        assert (warmup_sides == 0).all(), (
-            f"cross_sectional_momentum:{p.variant} has non-zero side_hint in warmup bars [0:{lb}]"
-        )
 
 
 def test_dual_momentum_no_lookahead() -> None:
@@ -302,12 +292,20 @@ def test_new_signal_families_include_metadata_contract() -> None:
     expected_new_families = {
         "trend_pullback_continuation",
         "dual_momentum",
-        "liquidation_wick_reversal",
-        "squeeze_unwind",
         "residual_reversion",
+        "mtf_trend_pullback",
+        "mtf_breakout_retest",
+        "oi_price_divergence",
+        "oi_breakout_confirm",
+        "basis_zscore_reversion",
+        "basis_momentum",
+        "taker_imbalance_momentum",
+        "taker_exhaustion_reversal",
+        "funding_extreme_reversal",
+        "vol_term_structure_gate",
     }
     matched = [panel for panel in panels if panel.family in expected_new_families]
-    assert len(matched) == 10
+    assert len(matched) == 21
     for panel in matched:
         assert panel.metadata["archetype"]
         assert panel.metadata["regime"]
@@ -543,44 +541,6 @@ def test_vol_regime_reversion_no_refire_during_persistent_high_vol() -> None:
                     )
 
 
-def test_btc_corr_regime_no_refire_during_persistent_correlation() -> None:
-    # Arrange — two symbols highly correlated with BTC across many bars
-    t, n = 120, 2
-    # Identical price series → correlation = 1.0 > any threshold
-    close = np.cumsum(np.ones((t, n), dtype=np.float64), axis=0) + 100.0
-    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
-    aligned = AlignedMarketData(
-        datetimes=datetimes,
-        symbols=("BTCUSDT", "ETHUSDT"),
-        open_2d=close.copy(),
-        high_2d=close * 1.01,
-        low_2d=close * 0.99,
-        close_2d=close.copy(),
-        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
-        funding_2d=np.zeros((t, n), dtype=np.float64),
-        active_mask=np.ones((t, n), dtype=bool),
-        warm_mask=np.ones((t, n), dtype=bool),
-        entry_block_mask=np.zeros((t, n), dtype=bool),
-        kill_mask=np.zeros((t, n), dtype=bool),
-        execution_cost_bps_2d=np.full((t, n), 5.0, dtype=np.float64),
-    )
-
-    # Act
-    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
-    cr_panels = [p for p in panels if p.family == "btc_corr_regime"]
-    assert cr_panels, "btc_corr_regime panel must exist"
-
-    for panel in cr_panels:
-        for side_val in (1, -1):
-            side_entries = panel.side_hint_2d == side_val
-            for col in range(n):
-                col_entries = side_entries[:, col]
-                if col_entries.any():
-                    adjacent_fires = bool(np.any(col_entries[:-1] & col_entries[1:]))
-                    assert not adjacent_fires, (
-                        f"btc_corr_regime col={col} side={side_val}"
-                        " re-fires on adjacent bars during persistent correlation"
-                    )
 
 
 # ---------------------------------------------------------------------------
