@@ -3,18 +3,18 @@
 
 # Mode Full (ALO/Ensemble) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-10 (Conditioning Bug Fix 적용 — Regime-Cell Admission 미적용)
-**현재 상태:** `blocked` — 0/4 Fold Pass (fold_pass_ratio 0%). **Active Signals = 0**
+**최신 갱신:** 2026-06-10 (Bayesian Posterior Probability Admission 적용 — 풀 확장 7→15)
+**현재 상태:** `blocked` — 1/4 Fold Pass (fold_pass_ratio 25%). **Active Signals = 0**
 **평가 기준:** `min_variant_oos_edge_bps=10.0`, `breakeven_hard_gate=enabled`, `min_fold_realized_edge_bps=8.0`, `min_oos_rank_ic=0.01`, `min_ic_tstat=0.8`, `max_variant_oos_q10_fail_rate=0.65`, `min_wf_fold_pass_ratio=0.60`
 
 **진단 노트:**
-- **RECOMMENDED 7종:** dm_24_96, dm_12_48, tpc_50_200, fzs_96, fzs_168, tpc_20_100, fzs_48. Momentum + Carry 계열 위주.
-- **BLOCKED 17종:** Breakeven Gate(10), Event Overload(8), Low IC t-stat(10) 주요 원인. Regime-cell admission 미적용으로 carry/reversion 계열 다수 탈락.
-- **WF 전 fold 실패:** IC(diag) 전 구간 음수(-0.016~-0.120), RlzdMean Fold3만 +43.1bps 기록했으나 EU_p90 gate(44.12) 미달. Ensemble 선택이 baseline 대비 우위 없음.
-- **[구조 수정 완료] Conditioning Bug Fix:** `ensemble_conditioning` 기본값 `archetype_regime`→`auto`, lift_proof fail-OPEN→fail-SAFE 수정. 이번 실행에서 `conditioning_path=no_oos_evidence_failsafe`(archetype_only 강등) 확인. **WF 수치 불변이 정상**: 풀이 동질적(추세/carry 7종)이라 archetype_only도 저IC. 핵심 블로커 = admission OFF로 인한 풀 다양성 부재.
-- **Ablation Study 전 Variant Fail:** CAGR 최대 −35.0%(rule_stop_risk). 모든 variant가 compound gate + deployment gate 통과 실패.
-- **Regime Scorecard:** C2=10.0/10, C3=10.0/10, C4=4.0/10, C5=10.0/10 → Weighted **0.580**.
-- **다음 블로커:** (1) admission ON + t_g NW 보정 → 풀 다양성 복원. (2) regime 6→4 state 병합 → C4 rho 상향.<!-- truncate -->
+- **RECOMMENDED 15종 (이전 7종 → +8 구출):** dm_24_96, dm_12_48, tpc_50_200, fzs_96, bollinger_20, fzs_168, tpc_20_100, rsi_14, rsi_6, vrr_20, fzs_48, rr_48, vrr_40, rr_24, btc_pullback_50. 다양성 대폭 확장.
+- **BLOCKED 18종:** Breakeven Gate(13), Event Overload(8) 주요 원인. bcr 계열(IS sparse: 35개 IS이벤트 < 100 min_obs)은 IS 부족 이유 확인됨.
+- **WF 개선:** Fold4 첫 PASS (+31.7bps RlzdMean, EU_p90=35.57). IC(diag): -0.087/-0.085/-0.008/-0.056(이전 -0.016/-0.104/-0.059/-0.120 → 전반적 개선). EU_p90 gate(35~39 수준) 미달로 still blocked.
+- **[핵심 변화] Bayesian Admission:** 단일 P(μ>δ|data)≥0.70 기준으로 7개 magic threshold 대체. data-derived τ²(k0 자동도출), NW 자기상관 보정, OR-path에서 min_obs 포함 override. 결과: 8개 추가 signal 구출.
+- **bcr 진단 확정:** bcr_48/96은 IS+calibration window 이벤트 35~12개로 `min_obs=100` 미달 → Bayesian admission도 IS 희소성에는 무력. look-ahead bias 없이는 구출 불가. IS 데이터 확장(백테스트 윈도우) 또는 min_candidate_obs 완화가 유일한 경로.
+- **Regime Scorecard 개선:** C4 OOS Stability **4.0→9.0/10** (rho=1.000). Weighted **0.580→0.680**.
+- **다음 블로커:** WF EU_p90 gate(기준~35bps) — Fold1~3 EU_p90=35~39(아슬아슬). 풀 다양성 확보로 ensemble IC 개선 여지 있으나 EU_p90 gate 절대값 재검토 필요.<!-- truncate -->
 
 ---
 
@@ -126,18 +126,23 @@
 ----------------------------------------------------------------------------------
 | Action       | Count | Details / Selected Strategies                           |
 ----------------------------------------------------------------------------------
-| BLOCKED      | 17    | Fail Reasons: Breakeven Gate (10) | Event Overload (8)  |
-|              |       |               Poor Hit/Payoff (4) | Low IC t-stat (10)  |
-|              |       |               Low Mean Edge (4) | Low Median (5)        |
-|              |       |               Low Obs (2) | Low OOS IC (8)              |
-|              |       | Top Blocked: bcr_48, bb_compress_20, bcr_24, vrr_40, fa |
-| RECOMMENDED  | 7     | 1. dual_momentum:dm_24_96                               |
+| BLOCKED      | 18    | Fail Reasons: Breakeven Gate (13) | Event Overload (8)  |
+|              |       | Top Blocked: bcr_48, bb_compress_20, bcr_24, fac_168, fa|
+| RECOMMENDED  | 15    | 1. dual_momentum:dm_24_96                               |
 | (Eligible)   |       | 2. dual_momentum:dm_12_48                               |
 | (Eligible)   |       | 3. trend_pullback_continuation:tpc_50_200               |
 | (Eligible)   |       | 4. funding_zscore_carry:fzs_96                          |
-| (Eligible)   |       | 5. funding_zscore_carry:fzs_168                         |
-| (Eligible)   |       | 6. trend_pullback_continuation:tpc_20_100               |
-| (Eligible)   |       | 7. funding_zscore_carry:fzs_48                          |
+| (Eligible)   |       | 5. bollinger_reversion:bollinger_20                     |
+| (Eligible)   |       | 6. funding_zscore_carry:fzs_168                         |
+| (Eligible)   |       | 7. trend_pullback_continuation:tpc_20_100               |
+| (Eligible)   |       | 8. rsi_reversion:rsi_14                                 |
+| (Eligible)   |       | 9. rsi_reversion:rsi_6                                  |
+| (Eligible)   |       | 10. vol_regime_reversion:vrr_20                          |
+| (Eligible)   |       | 11. funding_zscore_carry:fzs_48                         |
+| (Eligible)   |       | 12. residual_reversion:rr_48                            |
+| (Eligible)   |       | 13. vol_regime_reversion:vrr_40                         |
+| (Eligible)   |       | 14. residual_reversion:rr_24                            |
+| (Eligible)   |       | 15. btc_regime_pullback:btc_pullback_50                 |
 ----------------------------------------------------------------------------------
 
 [GATE FAILURES: PER-VARIANT]
@@ -168,10 +173,10 @@
 | Fold | Mode       | IC(diag) |  Events | RlzdMean |  EU_p90 | Pass   |
 |      |            |    (ref) |         |  (★gate) | (★gate) |        |
 ----------------------------------------------------------------------------------
-| 1    | ensemble_b0 |   -0.016 |     908 |    -26.3 |   39.14 | ❌      |
-| 2    | ensemble_b0 |   -0.104 |     871 |    -17.5 |   48.61 | ❌      |
-| 3    | ensemble_b0 |   -0.059 |   1,140 |     43.1 |   44.12 | ❌      |
-| 4    | ensemble_b0 |   -0.120 |   1,360 |      7.2 |   44.59 | ❌      |
+| 1    | ensemble_b0 |   -0.087 |   1,983 |      2.3 |   38.63 | ❌      |
+| 2    | ensemble_b0 |   -0.085 |   2,063 |     -3.2 |   34.61 | ❌      |
+| 3    | ensemble_b0 |   -0.008 |   2,832 |      7.0 |   35.02 | ❌      |
+| 4    | ensemble_b0 |   -0.056 |   3,431 |     31.7 |   35.57 | ✅      |
 ----------------------------------------------------------------------------------
 
 [BRIDGE SUMMARY] -----------------------------------
@@ -201,10 +206,10 @@
 ----------------------------------------------------------------------------------
 | C2 Persistence       | 10.0/10 | dwell=7.00(micro) macro=10.00 tr=0.075 ent=0.340 |
 | C3 Distinctness      | 10.0/10 | kw_p=0.0000  flip=Y  mi=0.0609                |
-| C4 OOS Stability     | 4.0/10  | rho=0.257  n_regimes=6                        |
+| C4 OOS Stability     | 9.0/10  | rho=1.000  n_regimes=6                        |
 | C5 Coverage          | 10.0/10 | min=0.106 max=0.247 n_eff=5.74                |
 ----------------------------------------------------------------------------------
-| Weighted C2-C5       |  0.580  | C1(hard_gate=pass)  C6-C8(manual)             |
+| Weighted C2-C5       |  0.680  | C1(hard_gate=pass)  C6-C8(manual)             |
 ----------------------------------------------------------------------------------
 | Occupancy            |   n/a   | bull_q=0.201  bull_vol=0.172  bear_q=0.111    |
 |                      |         | bear_vol=0.106  trans=0.247  crash=0.163      |

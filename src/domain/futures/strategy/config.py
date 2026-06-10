@@ -222,14 +222,18 @@ class CandidateStrategyConfig:
     regime_diagnostic_enabled: bool = True
     min_regime_variant_oos_obs: int = 40
     min_regime_variant_oos_edge_bps: float = 2.0
-    # Regime-cell conditional admission: promotes a variant if it passes per-cell
-    # edge/t-stat thresholds even when the global-pooled gates fail.
+    # Regime-cell conditional admission: promotes a variant if it passes the
+    # Bayesian posterior probability gate (P(μ > δ | data) ≥ min_admission_posterior_prob)
+    # even when the global-pooled gates fail.
     # Targets carry/reversion specialists diluted by out-of-regime OOS samples.
-    regime_cell_admission_enabled: bool = False
-    min_regime_cell_oos_obs: int = 60
-    min_regime_cell_edge_bps: float = 8.0
-    min_regime_cell_tstat: float = 1.0
+    regime_cell_admission_enabled: bool = True
+    min_regime_cell_oos_obs: int = 10  # NW variance stability floor only; not a domain gate
+    min_regime_cell_edge_bps: float = 8.0  # δ: minimum profitable edge (breakeven proxy)
     max_admitted_cells_per_variant: int = 2
+    # Bayesian posterior probability admission (replaces flat obs/tstat thresholds)
+    min_admission_posterior_prob: float = 0.70   # P(μ > δ | data) gate; Bounds: [0.5, 1.0)
+    admission_use_newey_west: bool = True         # True=NW autocorr-corrected; False=IID legacy
+    admission_tau_prior_bps: float = 15.0        # fallback cross-cell std when < 2 cells; Bounds: (0, ∞)
     allocation_backend: Literal["ensemble_b0", "ml_edge"] = "ensemble_b0"
     ensemble_shrinkage_k: float = 50.0
     # Conditioning axis: "auto" (default) picks archetype_regime vs archetype_only via
@@ -599,10 +603,12 @@ class CandidateStrategyConfig:
             raise ValueError("min_regime_cell_oos_obs must be >= 1")
         if not math.isfinite(self.min_regime_cell_edge_bps):
             raise ValueError("min_regime_cell_edge_bps must be finite")
-        if self.min_regime_cell_tstat < 0.0:
-            raise ValueError("min_regime_cell_tstat must be non-negative")
         if self.max_admitted_cells_per_variant < 1:
             raise ValueError("max_admitted_cells_per_variant must be >= 1")
+        if not (0.5 <= self.min_admission_posterior_prob < 1.0):
+            raise ValueError("min_admission_posterior_prob must be in [0.5, 1.0)")
+        if not (math.isfinite(self.admission_tau_prior_bps) and self.admission_tau_prior_bps > 0.0):
+            raise ValueError("admission_tau_prior_bps must be finite and > 0")
         if self.max_exit_policy_variants_per_signal < 1:
             raise ValueError("max_exit_policy_variants_per_signal must be >= 1")
         if self.min_signal_cell_oos_obs < 1:
