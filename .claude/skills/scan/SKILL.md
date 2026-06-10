@@ -9,8 +9,10 @@ description: Scout and map relevant file paths (code, tests, docs) BEFORE any de
 Act as a lightweight scout. Your ONLY goal is to locate the exact files, tests, and documentation related to the user's request. **DO NOT design solutions, analyze logic, or formulate strategies.** 
 
 ## Scout Guidelines (Strict Token Efficiency)
-1. **Search Only:** Rely heavily on `grep_search`, `glob`, and `list_directory`. 
-2. **Zero Logic Analysis:** Do not read entire files. If you find the target class/function via grep, record its path and line number, then immediately stop reading.
+1. **Search & Discovery Strategy**:
+   - **Primary (Token-Efficient)**: Prioritize Serena MCP tools (`find_symbol`, `find_file`) for precise target matching. This avoids reading large files and saves context tokens.
+   - **Secondary (Fallback/Broad)**: Use `grep_search`, `glob`, or `list_dir` for raw pattern matching, filename wildcards, or to verify file structures.
+2. **Zero Logic Analysis:** Do not read entire files. If you find the target class/function, record its path and line number, then immediately stop reading.
 3. **Trace Ecosystem:** Always find the Holy Trinity for the target:
    - **Core Code:** Where is the logic defined?
    - **Tests:** Where is the `test_*.py` file for it?
