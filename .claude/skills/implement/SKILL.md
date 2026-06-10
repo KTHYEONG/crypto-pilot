@@ -13,9 +13,9 @@ Translate the logical Blueprint into working Python code (both `src/` and `tests
 2. **Double Coding (Src & Test):** 
    - Write the logic in the target `.py` file.
    - Write the corresponding test code in `tests/` based on the `Test Scenario Design` provided in the spec.
-3. **Local Validation (L1):** For EVERY modified file (src and test), run:
-   - `uv run ruff check --fix [file]`
-   - `uv run mypy [file]`
+3. **Local Validation (L1):** For EVERY modified file (src and test), run validation to catch bugs early:
+   - **Primary Diagnostic (Token-Efficient)**: Consider using Serena MCP (`get_diagnostics`) to check code health. This fetches structured diagnostic issues without raw subprocess noise.
+   - **Full Local Pipeline**: Run `uv run ruff check --fix [file]` and `uv run mypy [file]` to ensure complete compiler and linter compliance.
 4. **Self-Correction:** Fix syntax/type errors (max 3 tries). If unresolved, **STOP** and return to `spec`.
 
 ## Output Format
