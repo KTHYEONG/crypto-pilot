@@ -120,12 +120,12 @@ def test_run_candidate_ablation_returns_correct_ablation_dataframe(monkeypatch: 
         }
         assert required_cols.issubset(df_ablation.columns)
         assert {
-            "rule_stop_risk",
-            "prior_rank_stop_risk",
-            "prior_residual_rank_stop_risk",
-            "edge_plus_validated_gate_stop_risk",
-            "edge_plus_gate_event_kelly",
-            "full_portfolio_caps",
+            "Base_Rule",
+            "Prior_Filter",
+            "Prior_Residual",
+            "ML_Edge_Gate",
+            "ML_Event_Kelly",
+            "ML_Event_Kelly_Caps",
         }.issubset(set(df_ablation["variant"]))
     assert "[ABLATION-PROF]" in caplog.text
     assert "[ABLATION-TASK-PROF]" in caplog.text
