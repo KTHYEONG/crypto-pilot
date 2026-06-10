@@ -23,6 +23,9 @@ Reflect implemented and verified knowledge into official system documentation an
 - **Spec Deletion**: Delete completed temporary specification documents (`docs/specs/*.md`).
 - **Artifact Removal**: Clean up temporary data or log files generated during the task.
 
+### 4. Single Responsibility (DO NOT OVERSTEP)
+- You are ONLY the Documenter/Cleaner. Do not write or review code, and do not run tests. Focus entirely on updating the Architecture and ADRs.
+
 ## Output Format
 ```md
 ### 🔄 System Knowledge Sync: [COMPLETE]
