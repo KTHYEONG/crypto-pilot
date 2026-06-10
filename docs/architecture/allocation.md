@@ -34,6 +34,12 @@ Transforms L1 candidate events into optimal portfolio weights via regime-conditi
 - $\mu_{\text{net}} (a, g) = \frac{n_{a,g} \cdot \bar{x}_{a,g} + k \cdot \bar{x}_{\text{global}}}{n_{a,g} + k}$
 - where $a$ = archetype, $g$ = entry_regime_code, $k$ = `ensemble_shrinkage_k`
 
+**Conditioning Axis Selection (`ensemble_conditioning`)**
+- Default `"auto"`: fold마다 IS 내부 검증 Rank IC 비교로 `archetype_regime` vs `archetype_only` 결정.
+  - $\Delta IC = IC_{\text{regime}} - IC_{\text{arch}} \geq \text{ensemble\_min\_conditioning\_ic\_gain}$ 이면 `archetype_regime` 선택.
+- `"archetype_regime"` / `"archetype_only"` 명시 가능 (수동 override).
+- **Fail-SAFE Constraint:** OOS proof window 없이 `archetype_regime`이 선택된 경우 → `archetype_only`로 강등 (`conditioning_path="no_oos_evidence_failsafe"`). 증거 없이 복잡한 경로를 선택하지 않는다.
+
 **Fallback Logic (Two-level)**
 - Level 1 (Missing regime): $\mu(a, g) \rightarrow \mu(a)$
 - Level 2 (Missing archetype): $\mu(a) \rightarrow \mu_{\text{global}}$
@@ -68,6 +74,8 @@ graph TD
 | **Input** | `events: pd.DataFrame` | Candidate events from L1 signal generation |
 | **Input** | `entry_regime_code: int` | Regime code at the time of signal entry |
 | **Param** | `ensemble_shrinkage_k` | Regularization strength toward global mean. Bounds: `[0, ∞)` |
+| **Param** | `ensemble_conditioning` | Conditioning axis: `"auto"` (default, data-driven) \| `"archetype_regime"` \| `"archetype_only"` |
+| **Param** | `ensemble_min_conditioning_ic_gain` | Min IC gain for auto to prefer archetype_regime. Bounds: `[0.0, 1.0]` |
 | **Param** | `min_oos_rank_ic` | Minimum OOS Spearman Rank IC. Bounds: `[-1.0, 1.0]` |
 | **Param** | `min_ic_tstat` | Minimum IC t-statistic for signal validity. Bounds: `[0.0, ∞)` |
 | **Param** | `max_variant_oos_q10_fail_rate` | Maximum allowed fraction of events failing q10 threshold. Bounds: `[0.0, 1.0]` |
@@ -78,3 +86,4 @@ graph TD
 - **Missing OOS Samples (Sparse Signals):** If $N_{oos} < 3$, $t_{stat}$ is forced to 0.0 to strictly prevent division-by-zero or inflated confidence in rare patterns.
 - **Unseen Regimes in Live Trading:** If the system encounters an `(archetype, regime)` tuple missing from the trained ensemble, it falls back gracefully to the archetype mean, then the global mean.
 - **OOS Fold Failure (Contamination Defense):** If a walk-forward fold exhibits deeply negative out-of-sample edge, its predictions are censored (forced to 0) rather than dropped, preserving the matrix shape while neutralizing its allocation power.
+- **No OOS Evidence (Fail-SAFE):** If `archetype_regime` is selected but no OOS proof window exists (e.g. first fold), the system degrades to `archetype_only` rather than proceeding without evidence. `conditioning_path="no_oos_evidence_failsafe"` is emitted for observability.
