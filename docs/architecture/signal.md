@@ -40,6 +40,17 @@ Generates vectorized rule panels with archetype/regime contexts and filters them
 - Condition: $\frac{1}{N} \sum (\text{Edge}_{i}) > 0 \land t_{\text{stat}}(\text{Edge}) \geq \text{min\_rule\_ir\_t}$
 - Evaluated strictly within archetype-allowed regimes.
 
+**Multiplicity Control (BH-FDR & SPA Gates)**
+- To control the inflation of false discoveries under pool expansion:
+  1. **BH-FDR (Benjamini-Hochberg FDR Control):** 
+     - Calculates one-sided p-values: $p_i = 1 - F_{t}(t_{\text{stat}, i}, \text{df} = N_i - 1)$ where $t_{\text{stat}, i}$ is NW-autocorrelation corrected.
+     - Sorts $p_{(1)} \le p_{(2)} \le \dots \le p_{(m)}$ and finds the largest $k$ satisfying: $p_{(k)} \le \frac{k}{m} \alpha_{\text{FDR}}$.
+     - Variants with $p_i$ corresponding to indices $\le k$ are admitted.
+  2. **SPA (Hansen's Single Predictive Ability):**
+     - Runs circular block bootstrap on the OOS edge time-series of the top-performing candidate strategy.
+     - Rejects $H_0: E[\text{Edge}_{\text{best}}] \le 0$ at a family level. If SPA p-value $> p_{\text{max}, \text{SPA}}$, all promotions are blocked (fail-closed).
+  - Final promote $= \text{Gate}_{\text{individual}} \land \text{FDR\_pass} \land \text{SPA\_pass}$
+
 **Regime-Cell Conditional Admission (OR-path)**
 - Promotes a variant diluted by the global-pooled gates if it holds a strong edge in a specific regime cell $g$ (supplies orthogonal diversifiers to the B0 ensemble).
 - Per-cell (regime $g$) stats over the OOS recommendation window:
@@ -59,7 +70,8 @@ graph TD
     E --> F[Archetype-selective Entry Gate]
     F --> G[Sparse Candidate Events]
     G --> H[L1 Breakeven Hard Gate]
-    H --> I[Promoted Candidate Events]
+    H --> I[Multiplicity Gating: FDR & SPA]
+    I --> J[Promoted Candidate Events]
 ```
 
 # 4. Core Variables & I/O
@@ -75,6 +87,11 @@ graph TD
 | **Param** | `min_regime_cell_edge_bps` | Min per-cell mean edge (bps) for admission. Bounds: finite |
 | **Param** | `min_regime_cell_tstat` | Min per-cell t-stat for admission. Bounds: `[0.0, ∞)` |
 | **Param** | `max_admitted_cells_per_variant` | Top-N cells retained by edge. Bounds: `[1, ∞)` |
+| **Param** | `fdr_gate_enabled` | Enables FDR control gate. Default: `False` |
+| **Param** | `spa_gate_enabled` | Enables SPA circular-block bootstrap gate. Default: `False` |
+| **Param** | `fdr_alpha` | Target False Discovery Rate threshold. Default: `0.10` |
+| **Param** | `spa_p_value_max` | Maximum p-value allowed to pass the SPA gate. Default: `0.10` |
+| **Param** | `spa_n_bootstrap` | Number of bootstrap runs for SPA p-value calculation. Default: `2000` |
 | **Output**| `CandidateSignalPanel` | Dense 2D structure containing `signed_score`, `side_hint`, and `valid_mask` |
 | **Output**| `events: pd.DataFrame` | Sparse tabulated representation of valid entry signals |
 
@@ -83,3 +100,4 @@ graph TD
 - **Divergent Trend & Reversion Overlap:** Handled gracefully since rule panels are grouped by archetype; if both trigger simultaneously, they produce distinct sparse events evaluated independently by downstream allocators.
 - **Cell-Admission Zero-Variance Cell:** If all per-cell edges are identical ($\sigma_g = 0$), the $\epsilon$ term in $t_g$ prevents div-by-zero; cell still admits on $\mu_g \geq$ threshold.
 - **Cell-Admission Multiple Comparisons:** Per-cell selection over OOS amplifies data-snooping vs. global gates; the $t_g \geq 1.0$ floor is a weak, non-NW guard — purged/embargoed nested validation is the proper follow-up before live capital.
+- **Multiplicity Gating Fail-Closed:** Under extremely sparse event environments or low expectancy, the SPA gate automatically fails (fail-closed), preventing overfitting noise candidates from leaking.

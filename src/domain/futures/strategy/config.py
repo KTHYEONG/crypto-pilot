@@ -268,6 +268,11 @@ class CandidateStrategyConfig:
     # "variant": promote at family:variant granularity (regime pooled).
     # "signal_cell": legacy per-cell AND-conjunction (fail-closed).
     promotion_level: Literal["signal_cell", "variant"] = "variant"
+    fdr_alpha: float = 0.10
+    fdr_gate_enabled: bool = False
+    spa_gate_enabled: bool = False
+    spa_p_value_max: float = 0.10
+    spa_n_bootstrap: int = 2000
     # Vol-normalised percentile edge (atr_bps column required; skeleton if absent)
     edge_percentile_vol_normalized: bool = False
     min_signal_cell_oos_obs: int = 80
@@ -313,18 +318,22 @@ class CandidateStrategyConfig:
         "funding_carry",
         "oi_volume_impulse",
         "btc_regime_pullback",
-        "cross_sectional_momentum",
         "funding_zscore_carry",
         "vol_regime_reversion",
-        "btc_corr_regime",
-        "funding_acceleration_carry",
-        "btc_residual_momentum",
         "oi_volume_confirmed_breakout",
         "trend_pullback_continuation",
         "dual_momentum",
-        "liquidation_wick_reversal",
-        "squeeze_unwind",
         "residual_reversion",
+        "mtf_trend_pullback",
+        "mtf_breakout_retest",
+        "oi_price_divergence",
+        "oi_breakout_confirm",
+        "basis_zscore_reversion",
+        "basis_momentum",
+        "taker_imbalance_momentum",
+        "taker_exhaustion_reversal",
+        "funding_extreme_reversal",
+        "vol_term_structure_gate",
     )
     # Execution cost model (SSOT; replaces flat 24bps)
     maker_fee_bps: float = 2.0
