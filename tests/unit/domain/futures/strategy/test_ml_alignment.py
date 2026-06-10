@@ -88,6 +88,29 @@ def test_align_data_maps_uses_first_finite_metadata_value(
     assert out.anchor_cluster_1d.tolist() == [1.0]
 
 
+def test_align_data_maps_taker_buy_and_trades(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = _frame().assign(
+        taker_buy_base=np.linspace(100.0, 200.0, 6),
+        trades=np.linspace(10.0, 60.0, 6),
+    )
+    data_maps = {"BTCUSDT": {"4h": frame}}
+    monkeypatch.setattr(
+        alignment,
+        "compute_multi_alignment_info",
+        lambda *_args, **_kwargs: {"eff_ref_len": len(frame), "alignment_offsets": {"BTCUSDT": 0}},
+    )
+
+    out = alignment.align_data_maps(data_maps, ["BTCUSDT"], "4h")
+    assert out.taker_buy_2d is not None
+    assert out.trades_2d is not None
+    assert out.taker_buy_2d.shape == (len(frame), 1)
+    assert out.trades_2d.shape == (len(frame), 1)
+    assert np.allclose(out.taker_buy_2d[:, 0], frame["taker_buy_base"].to_numpy())
+    assert np.allclose(out.trades_2d[:, 0], frame["trades"].to_numpy())
+
+
 # ---------------------------------------------------------------------------
 # Selection utility mode contract tests
 # ---------------------------------------------------------------------------
