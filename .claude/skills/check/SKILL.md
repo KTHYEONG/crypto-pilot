@@ -10,6 +10,7 @@ Empirically verify the implementation via `pytest` and perform "Error Triage" or
 
 ## Execution Rules
 1. **L2 Verification:** Run `uv run pytest`.
+   - **Diagnostic Assistance**: If a test fails, run Serena MCP (`get_diagnostics` on the target module, or `find_implementations` on failing abstract methods/interfaces) to localize type mismatches or incorrect signature compliance before digging deeper.
 2. **Surgical Hotfix (Fast-Track - EFFICIENCY)**:
    - If a failure is caused by a **minor, obvious error** (e.g., missing import, simple typo, obvious off-by-one in a test assertion), you MAY fix it directly using the `replace` tool.
    - After a Hotfix, re-run tests. If it passes, proceed to AUDIT.
