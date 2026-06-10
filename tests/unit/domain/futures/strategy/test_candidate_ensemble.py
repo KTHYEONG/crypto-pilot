@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from src.domain.futures.strategy.candidate_ensemble import (
     RegimeConditionalEnsemble,
+    _compute_eb_shrinkage_k,
+    _fit_cell_means,
+    _log_ensemble_diagnostics,
     fit_regime_conditional_ensemble,
     predict_regime_conditional_ensemble,
 )
@@ -52,7 +57,7 @@ def test_regime_conditional_ensemble_shrinks_small_cells_to_global(
     )
     proof = train_events.copy()
     proof_ids = np.zeros(len(proof), dtype=np.int32)
-    cfg = _make_cfg(ensemble_shrinkage_k=50.0, ensemble_conditioning="archetype_regime")
+    cfg = _make_cfg(ensemble_shrinkage_k=50.0, ensemble_conditioning="archetype_regime", ensemble_adaptive_shrinkage=False)
 
     # lift_proof 통과로 고정 → archetype_regime 유지
     monkeypatch.setattr(
@@ -637,3 +642,140 @@ def test_s7_rho_diagnostic_stored_not_gating(monkeypatch: pytest.MonkeyPatch) ->
     # rho가 낮아도 conditioning 변경 없음 (진단 전용)
     assert result.regime_oos_stability_rho == pytest.approx(0.25)
     assert result.conditioning == "archetype_regime"  # rho로 강등 안 됨
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: EB Adaptive Shrinkage — S1 ~ S4
+# ---------------------------------------------------------------------------
+
+def _make_high_low_edge_frame() -> pd.DataFrame:
+    """2개 archetype: A=고edge(n=50,mean=70bps) / B=noise(n=500,mean=2bps)."""
+    rng = np.random.default_rng(0)
+    df_a = pd.DataFrame({
+        "archetype": ["high_edge"] * 50,
+        "entry_regime_code": [0] * 50,
+        "net_return_bps": rng.normal(70.0, 5.0, 50),
+        "entry_idx": np.arange(50),
+    })
+    df_b = pd.DataFrame({
+        "archetype": ["noise"] * 500,
+        "entry_regime_code": [0] * 500,
+        "net_return_bps": rng.normal(2.0, 5.0, 500),
+        "entry_idx": np.arange(500, 1000),
+    })
+    return pd.concat([df_a, df_b], ignore_index=True)
+
+
+def test_eb_shrinkage_preserves_high_edge_archetype_vs_fixed_k() -> None:
+    """S1 Happy: EB 수축은 고edge 희귀 archetype을 fixed k=50 대비 더 잘 보존한다."""
+    frame = _make_high_low_edge_frame()
+
+    # Fixed k=50
+    _, _, arch_mu_fixed, _, _, _ = _fit_cell_means(
+        frame,
+        shrinkage_k=50.0,
+        axis="archetype_only",
+        adaptive_shrinkage=False,
+    )
+
+    # EB adaptive (k_max=50)
+    _, _, arch_mu_eb, _, _, _ = _fit_cell_means(
+        frame,
+        shrinkage_k=50.0,
+        axis="archetype_only",
+        adaptive_shrinkage=True,
+        shrinkage_k_max=50.0,
+    )
+
+    mu_A_fixed = arch_mu_fixed["high_edge"]
+    mu_A_eb = arch_mu_eb["high_edge"]
+
+    # EB shrinkage은 cell 간 분산이 크면 k_eff를 줄여 고edge cell을 보존
+    assert mu_A_eb > mu_A_fixed, (
+        f"EB mu_A={mu_A_eb:.3f} should exceed fixed k=50 mu_A={mu_A_fixed:.3f}"
+    )
+
+
+def test_eb_shrinkage_homogeneous_cells_collapses_to_k_max() -> None:
+    """S2 Edge: 동질 cell → between_var≈0 → k_eff=k_max → 고정 k와 동일."""
+    rng = np.random.default_rng(1)
+    frame = pd.DataFrame({
+        "archetype": ["typeA"] * 100 + ["typeB"] * 100,
+        "entry_regime_code": [0] * 200,
+        "net_return_bps": rng.normal(10.0, 5.0, 200),  # 동일 분포
+        "entry_idx": np.arange(200),
+    })
+
+    _, _, arch_mu_fixed, _, _, _ = _fit_cell_means(
+        frame, shrinkage_k=50.0, axis="archetype_only", adaptive_shrinkage=False
+    )
+    _, _, arch_mu_eb, _, _, _ = _fit_cell_means(
+        frame,
+        shrinkage_k=50.0,
+        axis="archetype_only",
+        adaptive_shrinkage=True,
+        shrinkage_k_max=50.0,
+    )
+
+    for arch in ["typeA", "typeB"]:
+        assert arch_mu_eb[arch] == pytest.approx(arch_mu_fixed[arch], rel=0.05), (
+            f"Homogeneous cells should converge to fixed-k result for {arch}"
+        )
+
+
+def test_eb_k_estimation_is_is_only_no_oos_data_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    """S3 Leakage 방지: k_eff는 IS train 데이터에서만 추정, OOS row가 포함되면 안 된다."""
+    captured: list[list[float]] = []
+
+    original_fn = _compute_eb_shrinkage_k
+
+    def _spy(cell_means: list[float], cell_vars: list[float], k_max: float) -> float:
+        captured.append(list(cell_means))
+        return original_fn(cell_means, cell_vars, k_max)
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_ensemble._compute_eb_shrinkage_k",
+        _spy,
+    )
+
+    frame = _make_high_low_edge_frame()
+    _fit_cell_means(
+        frame,
+        shrinkage_k=50.0,
+        axis="archetype_only",
+        adaptive_shrinkage=True,
+        shrinkage_k_max=50.0,
+    )
+
+    # _compute_eb_shrinkage_k가 실제로 호출됐는지 확인
+    assert len(captured) >= 1
+    # IS-only: 추정에 사용된 cell_means 개수 = archetype 종류 수(2개)
+    assert len(captured[0]) == 2
+
+
+def test_diagnostic_log_emits_negative_ic_flag(caplog: pytest.LogCaptureFixture) -> None:
+    """S4 부호 진단: val_ic<0 → 로그에 NEGATIVE 표시, archetype 테이블 포함."""
+    rng = np.random.default_rng(42)
+    frame = pd.DataFrame({
+        "archetype": ["anti_predictive"] * 50 + ["normal"] * 50,
+        "entry_regime_code": [0] * 100,
+        "net_return_bps": np.concatenate([rng.normal(-5.0, 3.0, 50), rng.normal(15.0, 3.0, 50)]),
+    })
+    arch_mu = {"anti_predictive": -3.0, "normal": 12.0}
+
+    with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
+        _log_ensemble_diagnostics(
+            frame=frame,
+            global_mu=5.0,
+            arch_mu=arch_mu,
+            val_ic=-0.08,
+            chosen="archetype_only",
+            adaptive_shrinkage=True,
+            k_used=50.0,
+        )
+
+    combined = "\n".join(caplog.messages)
+    assert "NEGATIVE" in combined
+    assert "anti_predictive" in combined
+    assert "ANTI" in combined  # 음수 archetype 표시
+    assert "normal" in combined

@@ -1246,3 +1246,103 @@ def test_compute_rule_diagnostics_fdr_and_spa_gating() -> None:
         min_obs=1,
     )
     assert len(result_spa_fail.recommended_keep_variants) == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Signal Pruning — min_variant_oos_profit_bps
+# ---------------------------------------------------------------------------
+
+def _make_profit_row(oos_mean_edge_bps: float) -> pd.Series:
+    """Minimal row for profit floor gate tests."""
+    return pd.Series({
+        "oos_n": 200,
+        "oos_rank_ic": 0.05,
+        "oos_ic_n": 200,
+        "oos_mean_edge_bps": oos_mean_edge_bps,
+        "oos_median_edge_bps": 0.0,
+        "oos_p10_edge_bps": -200.0,
+        "oos_q10_shortfall_fail_rate": 0.3,
+        "event_fraction_per_bar": 0.05,
+        "regime_cell_admitted": False,
+        "breakeven_hard_pass": True,
+        "exit_policy_id": "stop_loss",
+    })
+
+
+def test_profit_floor_blocks_noise_signals() -> None:
+    """S1 Happy: profit=[68,74,12,9]bps, floor=15 → signals <15bps blocked."""
+    base_cfg_kwargs = {
+        "min_variant_oos_obs": 1,
+        "min_variant_oos_edge_bps": 1.0,
+        "min_variant_oos_hit_rate": 0.0,
+        "min_variant_oos_payoff_ratio": 0.0,
+        "max_variant_oos_q10_fail_rate": 1.0,
+        "min_variant_oos_p10_edge_bps": -9999.0,
+        "min_variant_oos_median_edge_bps": -9999.0,
+        "max_variant_event_fraction_per_bar": 1.0,
+        "standalone_breakeven_hard_gate_enabled": False,
+        "regime_diagnostic_enabled": False,
+        "edge_decay_gate_enabled": False if hasattr(CandidateStrategyConfig, "edge_decay_gate_enabled") else None,
+        "min_ic_tstat": 0.0,
+        "min_oos_rank_ic": 0.0,
+    }
+    # Remove None values
+    base_cfg_kwargs = {k: v for k, v in base_cfg_kwargs.items() if v is not None}
+
+    cfg_floor = CandidateStrategyConfig(min_variant_oos_profit_bps=15.0, **base_cfg_kwargs)  # type: ignore[arg-type]
+    cfg_no_floor = CandidateStrategyConfig(min_variant_oos_profit_bps=0.0, **base_cfg_kwargs)  # type: ignore[arg-type]
+
+    profits = [68.0, 74.0, 12.0, 9.0]
+    results_floor = [_meets_recommendation_thresholds(_make_profit_row(p), cfg_floor) for p in profits]
+    results_no_floor = [_meets_recommendation_thresholds(_make_profit_row(p), cfg_no_floor) for p in profits]
+
+    # With floor=15: only 68 and 74 pass
+    assert results_floor == [True, True, False, False]
+    # Without floor: all pass (min_variant_oos_edge_bps=1.0)
+    assert all(results_no_floor)
+
+
+def test_profit_floor_all_below_blocks_all() -> None:
+    """S2 Edge: 전량 floor 미달 → 모두 blocked."""
+    base_cfg = CandidateStrategyConfig(
+        min_variant_oos_profit_bps=50.0,
+        min_variant_oos_obs=1,
+        min_variant_oos_edge_bps=1.0,
+        min_variant_oos_hit_rate=0.0,
+        min_variant_oos_payoff_ratio=0.0,
+        max_variant_oos_q10_fail_rate=1.0,
+        min_variant_oos_p10_edge_bps=-9999.0,
+        min_variant_oos_median_edge_bps=-9999.0,
+        max_variant_event_fraction_per_bar=1.0,
+        standalone_breakeven_hard_gate_enabled=False,
+        regime_diagnostic_enabled=False,
+        min_ic_tstat=0.0,
+        min_oos_rank_ic=0.0,
+    )
+    for profit in [6.9, 12.0, 11.4, 9.9, 14.6]:
+        assert not _meets_recommendation_thresholds(_make_profit_row(profit), base_cfg), (
+            f"profit={profit} should be blocked by floor=50.0"
+        )
+
+
+def test_profit_floor_boundary_includes_equal() -> None:
+    """S3 경계: profit == floor → 포함 (>=)."""
+    base_cfg = CandidateStrategyConfig(
+        min_variant_oos_profit_bps=15.0,
+        min_variant_oos_obs=1,
+        min_variant_oos_edge_bps=1.0,
+        min_variant_oos_hit_rate=0.0,
+        min_variant_oos_payoff_ratio=0.0,
+        max_variant_oos_q10_fail_rate=1.0,
+        min_variant_oos_p10_edge_bps=-9999.0,
+        min_variant_oos_median_edge_bps=-9999.0,
+        max_variant_event_fraction_per_bar=1.0,
+        standalone_breakeven_hard_gate_enabled=False,
+        regime_diagnostic_enabled=False,
+        min_ic_tstat=0.0,
+        min_oos_rank_ic=0.0,
+    )
+    # Exactly at floor → should pass (>=)
+    assert _meets_recommendation_thresholds(_make_profit_row(15.0), base_cfg)
+    # Just below → should fail
+    assert not _meets_recommendation_thresholds(_make_profit_row(14.99), base_cfg)

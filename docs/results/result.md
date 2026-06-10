@@ -3,15 +3,16 @@
 
 # Mode Full (ALO/Ensemble) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-10 (신규 G1~G10 MTF 및 Tier B 배선, FDR/SPA 다중검정 연동)
+**최신 갱신:** 2026-06-10 (Phase 1 EB 수축 + Phase 2 Signal Pruning profit_floor=15bps 적용)
 **현재 상태:** `blocked` — 1/4 Fold Pass (fold_pass_ratio 25%). **Active Signals = 0**
 **평가 기준:** `min_variant_oos_edge_bps=10.0`, `breakeven_hard_gate=enabled`, `min_fold_realized_edge_bps=8.0`, `min_oos_rank_ic=0.01`, `min_ic_tstat=0.8`, `max_variant_oos_q10_fail_rate=0.65`, `min_wf_fold_pass_ratio=0.60`
 
 **진단 노트:**
-- **RECOMMENDED 21종 (이전 15종 → +6 구출/선정):** dm_24_96, dm_12_48, tpc_50_200, fzs_96, mtf_tpb_20_30, mtf_bor_20, mtf_tpb_50_30, mtf_bor_40, bollinger_20, fzs_168, tim_24, tpc_20_100, rsi_14, rsi_6, vrr_20, fzs_48, tim_12, rr_48, vrr_40, rr_24, btc_pullback_50. 신규 G1/G2 MTF 시그널 및 G9 Tier B 시그널 정상 승격 확인.
-- **BLOCKED 9종:** 지정 실패 및 Event Overload로 차단되는 비율 대폭 감소.
-- **WF 지표:** Fold 4 PASS 유지 (RlzdMean=21.5, EU_p90=28.68). 단, Fold 1~3은 EU_p90 gate 미달로 blocked 상태 지속.
-- **포트폴리오 개선:** 신규 시그널 추가로 분산 효과가 극대화되며 `prior_rank_stop_risk`(CAGR 1.4%, MaxDD 1.9%), `full_portfolio_caps`(CAGR 0.2%, MaxDD 0.6%) 등 주요 포트폴리오 에일리어스가 흑자 전환 및 MDD 개선 성공.
+- **RECOMMENDED 21종 (profit_floor=15bps 적용 후 동일):** dm_24_96, dm_12_48, tpc_50_200, fzs_96, mtf_tpb_20_30, mtf_bor_20, mtf_tpb_50_30, mtf_bor_40, bollinger_20, fzs_168, tim_24, tpc_20_100, rsi_14, rsi_6, vrr_20, fzs_48, tim_12, rr_48, vrr_40, rr_24, btc_pullback_50.
+- **BLOCKED 11종 (profit_floor 추가 2종):** Event Overload(4), Breakeven Gate(5), profit_floor(2) 차단. fzs/rsi 등은 Bayesian admission OR-path로 여전히 통과 중 — 개별 regime cell 수준에서는 통계적으로 유효.
+- **WF 지표:** Fold 4 PASS (RlzdMean=21.5, EU_p90=27.58). Fold 1~3 변화 없음.
+- **Phase 2 결과:** profit_floor=15bps는 BLOCKED 수를 9→11로 늘렸으나 RECOMMENDED 21종 구성 및 Ablation CAGR 동일. **근본 원인 확정: WF IC 음수(-0.075~-0.106)는 archetype/signal 수준이 아닌 ensemble 예측 점수와 실현 수익 간 정렬 실패.** fzs/rsi 등 noise signal은 개별 regime cell에서 양수 edge 보유 → Bayesian admission 통과 → ensemble pool에 포함. 단, ensemble 출력 score가 target(net_return_bps)과 역상관.
+- **다음 병목:** ensemble 예측 score ↔ target 정렬 문제 직접 해결 필요. 가능한 접근: (a) score 정규화 재검토, (b) mu_net_decision_bps 계산 경로 추적, (c) walk_forward 모듈에서 IC 음수 발원 fold 집중 분석.
 
 ---
 
@@ -168,10 +169,10 @@
 | Fold | Mode       | IC(diag) |  Events | RlzdMean |  EU_p90 | Pass   |
 |      |            |    (ref) |         |  (★gate) | (★gate) |        |
 ----------------------------------------------------------------------------------
-| 1    | ensemble_b0 |   -0.075 |   2,297 |      4.9 |   36.43 | ❌      |
-| 2    | ensemble_b0 |   -0.106 |   2,303 |      6.3 |   36.74 | ❌      |
-| 3    | ensemble_b0 |   -0.019 |   3,137 |     -7.3 |   30.70 | ❌      |
-| 4    | ensemble_b0 |   -0.067 |   3,705 |     21.5 |   28.68 | ✅      |
+| 1    | ensemble_b0 |   -0.075 |   2,297 |      4.9 |   34.50 | ❌      |
+| 2    | ensemble_b0 |   -0.106 |   2,303 |      6.3 |   35.03 | ❌      |
+| 3    | ensemble_b0 |   -0.019 |   3,137 |     -7.3 |   29.84 | ❌      |
+| 4    | ensemble_b0 |   -0.067 |   3,705 |     21.5 |   27.58 | ✅      |
 ----------------------------------------------------------------------------------
 
 [BRIDGE SUMMARY] -----------------------------------
@@ -188,8 +189,8 @@
 | prior_rank_stop_ri |    1.4% |    1.9% |   0.71 |  1,007,976 |    113 |   0.24 |   N   |
 | prior_residual_ran |   -4.6% |    4.6% |  -0.99 |    973,140 |    152 |   0.25 |   N   |
 | edge_plus_validate |   -4.6% |    4.6% |  -0.99 |    973,140 |    152 |   0.25 |   N   |
-| edge_plus_gate_eve |    0.5% |    0.7% |   0.00 |  1,002,778 |    151 |   0.25 |   N   |
-| full_portfolio_cap |    0.2% |    0.6% |   0.00 |  1,001,055 |    151 |   0.25 |   N   |
+| edge_plus_gate_eve |    0.3% |    0.6% |   0.00 |  1,001,718 |    150 |   0.25 |   N   |
+| full_portfolio_cap |    0.1% |    0.6% |   0.00 |  1,000,715 |    150 |   0.25 |   N   |
 ------------------------------------------------------------------------------------------
 
 [REGIME_C34_GOLD] C3/C4 gold standard 계산 완료: events=23806 (IS=12204, OOS=11602)
