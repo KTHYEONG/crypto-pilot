@@ -49,6 +49,17 @@ Transforms L1 candidate events into optimal portfolio weights via regime-conditi
 - $t_{\text{stat}} = IC_{\text{rank}} \times \sqrt{\frac{N_{\text{oos}} - 2}{1 - IC_{\text{rank}}^2}}$. Gate: $t_{\text{stat}} \geq \text{min\_ic\_tstat}$
 - Q10 Tail Risk: $\text{Fail Rate} \leq \text{max\_variant\_oos\_q10\_fail\_rate}$
 
+**Regime-Cell Bayesian Admission (Orthogonal Signal Rescue)**
+- Unified admission criterion: $p_{\text{admit}} = P(\mu > \delta \mid \text{data}) \geq p_{\text{admit\_min}}$
+- Prior: $\mu \sim \mathcal{N}(\mu_0, \tau^2)$ where $\tau^2$ = cross-cell variance (data-derived; fallback `admission_tau_prior_bps²`)
+- Likelihood: $\bar{x} \mid \mu \sim \mathcal{N}(\mu, \Omega_{nw}/n)$ with Newey-West long-run variance $\Omega_{nw}$ (Bartlett kernel)
+- N-N conjugate posterior: $\sigma^2_{\text{post}} = 1/(n/\Omega_{nw} + 1/\tau^2)$, $\mu_{\text{post}} = \sigma^2_{\text{post}}(n\bar{x}/\Omega_{nw} + \mu_0/\tau^2)$
+- $p_{\text{admit}} = \Phi((\mu_{\text{post}} - \delta)/\sigma_{\text{post}})$ via survival function; $\delta$ = `min_regime_cell_edge_bps`
+- James-Stein shrinkage: $k_0 = \Omega_{nw}/\tau^2$ derived from data — no hard-coded regularization
+- `min_regime_cell_oos_obs` = NW variance stability floor only (default 10); **not** a domain gate
+- OR-path: if `regime_cell_admitted=True`, bypasses global pooled gates (`min_obs`, `breakeven_hard_gate`, `mean_edge`, etc.)
+- Replaces: `min_obs=60`, `min_tstat=1.0` (statistically inconsistent; effect-size-agnostic)
+
 **Walk-Forward Survival Censoring**
 - If fold realized edge $<$ `min_fold_realized_edge_bps`, fold fails.
 - Failed fold predictions: $\mu, q10, q90, p_{\text{pass}} \rightarrow 0$ to prevent anti-selection in the portfolio pool.
@@ -79,6 +90,12 @@ graph TD
 | **Param** | `min_oos_rank_ic` | Minimum OOS Spearman Rank IC. Bounds: `[-1.0, 1.0]` |
 | **Param** | `min_ic_tstat` | Minimum IC t-statistic for signal validity. Bounds: `[0.0, ∞)` |
 | **Param** | `max_variant_oos_q10_fail_rate` | Maximum allowed fraction of events failing q10 threshold. Bounds: `[0.0, 1.0]` |
+| **Param** | `regime_cell_admission_enabled` | Enable Bayesian per-cell admission (default `True`) |
+| **Param** | `min_admission_posterior_prob` | $p_{\text{admit\_min}}$: minimum posterior probability. Bounds: `[0.5, 1.0)` |
+| **Param** | `admission_use_newey_west` | Use NW autocorr-corrected variance; `False` = IID |
+| **Param** | `admission_tau_prior_bps` | Fallback prior std when <2 cells. Bounds: `(0, ∞)` |
+| **Param** | `min_regime_cell_oos_obs` | NW stability floor (not domain gate). Default: 10 |
+| **Param** | `min_regime_cell_edge_bps` | $\delta$: minimum profitable edge. Default: 8.0 bps |
 | **Output**| `expected_net_bps` | Shrinkage-adjusted expected return per event |
 | **Output**| `target_weights` | Final portfolio allocation weights per event |
 
