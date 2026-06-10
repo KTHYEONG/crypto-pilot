@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm as _norm
 
 from src.core.settings import round_trip_cost_bps
 from src.domain.futures.strategy.candidate_labels import label_candidate_events
@@ -48,47 +50,117 @@ def _regime_cell_admission(
     regime_code: np.ndarray,
     regime_names: list[str],
     cfg: CandidateStrategyConfig,
+    *,
+    arch_prior_bps: float = 0.0,
+    global_prior_bps: float = 0.0,
+    nw_max_lag: int = 6,
 ) -> dict[str, Any]:
-    """Evaluate per-regime-cell edge/t-stat for conditional admission.
+    """Evaluate per-regime-cell edge via Bayesian posterior probability admission.
 
-    Returns admitted=True if any cell clears both min_regime_cell_edge_bps
-    and min_regime_cell_tstat with enough observations. At most
-    max_admitted_cells_per_variant cells are retained (highest edge first).
+    Replaces flat obs/t-stat thresholds with a unified criterion:
+      P(μ > δ | data) ≥ cfg.min_admission_posterior_prob
+    under a Normal-Normal conjugate model with Newey-West corrected variance.
+
+    τ² (prior variance) is estimated from cross-cell heterogeneity; k0 = Ω_nw/τ² is
+    derived from data (James-Stein EB) rather than hard-coded.  cfg.min_regime_cell_oos_obs
+    serves only as a NW variance stability floor (default 20), not a domain gate.
+
+    Returns admitted_cells sorted by posterior mean (highest first).
     """
+    empty_result: dict[str, Any] = {
+        "admitted": False,
+        "admitted_cells": [],
+        "cell_edges": {},
+        "cell_mu_post": {},
+        "cell_p_admit": {},
+        "tau_estimated_bps": float(cfg.admission_tau_prior_bps),
+    }
+
     valid_idx = (rec_entry_idx >= 0) & (rec_entry_idx < regime_code.shape[0])
     if not np.any(valid_idx):
-        return {"admitted": False, "admitted_cells": [], "cell_edges": {}, "cell_tstats": {}}
+        return empty_result
 
     entry_idx_valid = rec_entry_idx[valid_idx]
     edge_valid = rec_edge[valid_idx]
     rec_regime_code = regime_code[entry_idx_valid]
 
-    passing: list[tuple[float, str]] = []  # (edge, name)
-    cell_edges: dict[str, float] = {}
-    cell_tstats: dict[str, float] = {}
+    # Prior mean μ₀: arch preferred, then global, then pooled
+    mu0: float
+    if math.isfinite(arch_prior_bps) and arch_prior_bps != 0.0:
+        mu0 = arch_prior_bps
+    elif math.isfinite(global_prior_bps) and global_prior_bps != 0.0:
+        mu0 = global_prior_bps
+    else:
+        mu0 = float(np.mean(edge_valid))
 
-    for code, name in enumerate(regime_names):
+    # Pass 1: collect cell means for τ² estimation (data-derived prior variance)
+    first_pass_means: list[float] = []
+    for code in range(len(regime_names)):
         mask = rec_regime_code == code
         obs = int(np.sum(mask))
         if obs < cfg.min_regime_cell_oos_obs:
             continue
-        cell_edge_vals = edge_valid[mask]
-        cell_mean = float(np.mean(cell_edge_vals))
-        cell_std = float(np.std(cell_edge_vals, ddof=1))
-        cell_tstat = cell_mean / (cell_std / (obs**0.5) + 1e-12)
-        cell_edges[name] = cell_mean
-        cell_tstats[name] = cell_tstat
-        if cell_mean >= cfg.min_regime_cell_edge_bps and cell_tstat >= cfg.min_regime_cell_tstat:
-            passing.append((cell_mean, name))
+        first_pass_means.append(float(np.mean(edge_valid[mask])))
 
-    # Retain top-N cells by edge to prevent over-specialisation.
+    if len(first_pass_means) >= 2:
+        tau_sq = max(float(np.var(first_pass_means, ddof=1)), 1e-6)
+    else:
+        tau_sq = float(cfg.admission_tau_prior_bps) ** 2
+
+    tau_bps = math.sqrt(tau_sq)
+    delta = cfg.min_regime_cell_edge_bps
+
+    # Pass 2: Bayesian posterior probability per cell
+    passing: list[tuple[float, str]] = []  # (mu_post, name)
+    cell_edges: dict[str, float] = {}
+    cell_mu_post: dict[str, float] = {}
+    cell_p_admit: dict[str, float] = {}
+
+    for code, name in enumerate(regime_names):
+        mask = rec_regime_code == code
+        obs = int(np.sum(mask))
+        if obs < cfg.min_regime_cell_oos_obs:  # NW stability floor
+            continue
+        cell_vals = edge_valid[mask]
+        cell_mean_raw = float(np.mean(cell_vals))
+
+        # Ω_nw: NW long-run variance estimate
+        if cfg.admission_use_newey_west:
+            t_nw = _newey_west_mean_tstat(cell_vals, max_lag=nw_max_lag)
+            se_nw = abs(cell_mean_raw / (t_nw + 1e-12))
+            omega_nw = max((se_nw * float(obs) ** 0.5) ** 2, 1e-6)
+        else:
+            cell_std = float(np.std(cell_vals, ddof=1))
+            omega_nw = max(cell_std**2, 1e-6)
+
+        # N-N conjugate posterior
+        precision_data = float(obs) / omega_nw
+        precision_prior = 1.0 / tau_sq
+        sigma2_post = 1.0 / (precision_data + precision_prior)
+        mu_post = sigma2_post * (precision_data * cell_mean_raw + precision_prior * mu0)
+        sigma_post = math.sqrt(sigma2_post)
+
+        # P(μ > δ | data) via survival function
+        p = float(_norm.sf(delta, loc=mu_post, scale=sigma_post))
+
+        cell_edges[name] = cell_mean_raw
+        cell_mu_post[name] = mu_post
+        cell_p_admit[name] = p
+
+        if p >= cfg.min_admission_posterior_prob:
+            passing.append((mu_post, name))
+
+    # Retain top-N by posterior mean (not raw mean)
     passing.sort(key=lambda x: x[0], reverse=True)
     admitted_cells = [name for _, name in passing[: cfg.max_admitted_cells_per_variant]]
+
     return {
         "admitted": len(admitted_cells) > 0,
         "admitted_cells": admitted_cells,
         "cell_edges": cell_edges,
-        "cell_tstats": cell_tstats,
+        "cell_mu_post": cell_mu_post,
+        "cell_p_admit": cell_p_admit,
+        "tau_estimated_bps": tau_bps,
     }
 
 
@@ -552,12 +624,14 @@ def _summarize_recommendation_variants(
                         regime_best_edge_bps = mean_edge
             regime_pass = regime_eligible_count > 0 and regime_best_edge_bps >= cfg.min_regime_variant_oos_edge_bps
             if cfg.regime_cell_admission_enabled:
+                global_prior = float(np.mean(rec_edge)) if rec_edge.size > 0 else 0.0
                 cell_result = _regime_cell_admission(
                     rec_entry_idx=rec_entry_idx,
                     rec_edge=rec_edge,
                     regime_code=regime_code,
                     regime_names=list(regime_names),
                     cfg=cfg,
+                    global_prior_bps=global_prior,
                 )
                 regime_cell_admitted = bool(cell_result["admitted"])
                 regime_cell_admitted_cells = list(cell_result["admitted_cells"])
@@ -920,10 +994,12 @@ def _recommendation_threshold_checks(row: pd.Series, cfg: CandidateStrategyConfi
         "ic_tstat": ic_tstat_ok,
         "exit_policy": bool(str(row.get("exit_policy_id", ""))) if is_signal_cell else True,
     }
-    # Regime-cell OR-path: override per-cell gates only (not safety gates).
-    # Safety gates (min_obs, q10_fail, event_density) remain mandatory in both paths.
+    # Regime-cell OR-path: Bayesian admission already verified per-cell statistical rigor
+    # (NW-corrected posterior probability ≥ min_admission_posterior_prob), so
+    # global pooled obs and edge gates are overridden.
+    # Hard safety gates (q10_fail, event_density) remain mandatory in both paths.
     if cfg.regime_cell_admission_enabled and bool(row.get("regime_cell_admitted", False)):
-        for key in ("breakeven_hard_gate", "mean_edge", "median_edge", "p10_edge",
+        for key in ("min_obs", "breakeven_hard_gate", "mean_edge", "median_edge", "p10_edge",
                     "regime_edge", "edge_decay", "hit_or_payoff", "oos_rank_ic", "ic_tstat"):
             checks[key] = True
     return checks
@@ -1017,7 +1093,11 @@ def _build_recommendations(
     """Return keep and flip recommendations from OOS metrics."""
     keep_groups: list[str] = []
     for _, row in by_variant.iterrows():
-        if str(row.get("candidate_action", "")) != "KEEP_CANDIDATE":
+        action = str(row.get("candidate_action", ""))
+        cell_admitted = cfg.regime_cell_admission_enabled and bool(row.get("regime_cell_admitted", False))
+        # Regime-cell admitted signals bypass the action pre-filter: they may be INSUFFICIENT_OBS
+        # at the global pooled level but have Bayesian evidence at the cell level.
+        if action != "KEEP_CANDIDATE" and not cell_admitted:
             continue
         if _meets_recommendation_thresholds(row, cfg):
             keep_groups.append(_variant_group_to_key(str(row.get("group", ""))))
