@@ -798,12 +798,12 @@ def run_candidate_ablation(
         return res
 
     tasks = [
-        (rule_w, "rule_stop_risk", None, rule_events),
-        (prior_w, "prior_rank_stop_risk", prior_selected, None),
-        (residual_w, "prior_residual_rank_stop_risk", residual_selected, None),
-        (gate_w, "edge_plus_validated_gate_stop_risk", gate_selected, None),
-        (kelly_w, "edge_plus_gate_event_kelly", gate_selected, None),
-        (full_caps_w, "full_portfolio_caps", gate_selected, None),
+        (rule_w, "Base_Rule", None, rule_events),
+        (prior_w, "Prior_Filter", prior_selected, None),
+        (residual_w, "Prior_Residual", residual_selected, None),
+        (gate_w, "ML_Edge_Gate", gate_selected, None),
+        (kelly_w, "ML_Event_Kelly", gate_selected, None),
+        (full_caps_w, "ML_Event_Kelly_Caps", gate_selected, None),
     ]
 
     t_step = time.perf_counter()
