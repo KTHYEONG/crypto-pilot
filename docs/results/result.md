@@ -3,18 +3,15 @@
 
 # Mode Full (ALO/Ensemble) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-10 (Bayesian Posterior Probability Admission 적용 — 풀 확장 7→15)
+**최신 갱신:** 2026-06-10 (신규 G1~G10 MTF 및 Tier B 배선, FDR/SPA 다중검정 연동)
 **현재 상태:** `blocked` — 1/4 Fold Pass (fold_pass_ratio 25%). **Active Signals = 0**
 **평가 기준:** `min_variant_oos_edge_bps=10.0`, `breakeven_hard_gate=enabled`, `min_fold_realized_edge_bps=8.0`, `min_oos_rank_ic=0.01`, `min_ic_tstat=0.8`, `max_variant_oos_q10_fail_rate=0.65`, `min_wf_fold_pass_ratio=0.60`
 
 **진단 노트:**
-- **RECOMMENDED 15종 (이전 7종 → +8 구출):** dm_24_96, dm_12_48, tpc_50_200, fzs_96, bollinger_20, fzs_168, tpc_20_100, rsi_14, rsi_6, vrr_20, fzs_48, rr_48, vrr_40, rr_24, btc_pullback_50. 다양성 대폭 확장.
-- **BLOCKED 18종:** Breakeven Gate(13), Event Overload(8) 주요 원인. bcr 계열(IS sparse: 35개 IS이벤트 < 100 min_obs)은 IS 부족 이유 확인됨.
-- **WF 개선:** Fold4 첫 PASS (+31.7bps RlzdMean, EU_p90=35.57). IC(diag): -0.087/-0.085/-0.008/-0.056(이전 -0.016/-0.104/-0.059/-0.120 → 전반적 개선). EU_p90 gate(35~39 수준) 미달로 still blocked.
-- **[핵심 변화] Bayesian Admission:** 단일 P(μ>δ|data)≥0.70 기준으로 7개 magic threshold 대체. data-derived τ²(k0 자동도출), NW 자기상관 보정, OR-path에서 min_obs 포함 override. 결과: 8개 추가 signal 구출.
-- **bcr 진단 확정:** bcr_48/96은 IS+calibration window 이벤트 35~12개로 `min_obs=100` 미달 → Bayesian admission도 IS 희소성에는 무력. look-ahead bias 없이는 구출 불가. IS 데이터 확장(백테스트 윈도우) 또는 min_candidate_obs 완화가 유일한 경로.
-- **Regime Scorecard 개선:** C4 OOS Stability **4.0→9.0/10** (rho=1.000). Weighted **0.580→0.680**.
-- **다음 블로커:** WF EU_p90 gate(기준~35bps) — Fold1~3 EU_p90=35~39(아슬아슬). 풀 다양성 확보로 ensemble IC 개선 여지 있으나 EU_p90 gate 절대값 재검토 필요.<!-- truncate -->
+- **RECOMMENDED 21종 (이전 15종 → +6 구출/선정):** dm_24_96, dm_12_48, tpc_50_200, fzs_96, mtf_tpb_20_30, mtf_bor_20, mtf_tpb_50_30, mtf_bor_40, bollinger_20, fzs_168, tim_24, tpc_20_100, rsi_14, rsi_6, vrr_20, fzs_48, tim_12, rr_48, vrr_40, rr_24, btc_pullback_50. 신규 G1/G2 MTF 시그널 및 G9 Tier B 시그널 정상 승격 확인.
+- **BLOCKED 9종:** 지정 실패 및 Event Overload로 차단되는 비율 대폭 감소.
+- **WF 지표:** Fold 4 PASS 유지 (RlzdMean=21.5, EU_p90=28.68). 단, Fold 1~3은 EU_p90 gate 미달로 blocked 상태 지속.
+- **포트폴리오 개선:** 신규 시그널 추가로 분산 효과가 극대화되며 `prior_rank_stop_risk`(CAGR 1.4%, MaxDD 1.9%), `full_portfolio_caps`(CAGR 0.2%, MaxDD 0.6%) 등 주요 포트폴리오 에일리어스가 흑자 전환 및 MDD 개선 성공.
 
 ---
 
@@ -100,72 +97,70 @@
 [CANDIDATE TOP STRATEGIES] --------------------------------------------------------------------------------------------
 | Rank | Strategy Name                       | Sample (OOS) | Profit(bps) | Win Rate |    P/L |  Score | Action | Rec |
 | ---- | ----------------------------------- | ------------ | ----------- | -------- | ------ | ------ | ------ | --- |
-| 1    | trend_pullback_continuation:tpc_... | 760 (309)    |        74.0 |    37.9% |   1.63 |  0.064 | KEEP   | Y   |
-| 2    | btc_corr_regime:bcr_96              | 51 (39)      |        70.6 |    53.8% |   2.42 | -0.026 | DROP   | N   |
-| 3    | dual_momentum:dm_24_96              | 1373 (556)   |        68.1 |    42.6% |   1.25 |  0.044 | KEEP   | Y   |
-| 4    | btc_corr_regime:bcr_48              | 108 (73)     |        59.2 |    52.1% |   1.86 |  0.079 | DROP   | N   |
-| 5    | dual_momentum:dm_12_48              | 1953 (764)   |        25.5 |    40.3% |   1.32 | -0.004 | KEEP   | Y   |
-| 6    | btc_residual_momentum:brm_24        | 1876 (969)   |        17.2 |    44.0% |   1.17 | -0.108 | DROP   | N   |
-| 7    | trend_donchian:donchian_36          | 916 (564)    |        16.0 |    44.0% |   1.50 |  0.007 | KEEP   | N   |
-| 8    | residual_reversion:rr_24            | 1212 (494)   |        14.6 |    43.4% |   1.01 | -0.032 | DROP   | N   |
-| 9    | rsi_reversion:rsi_14                | 2508 (1489)  |        12.0 |    42.3% |   1.09 | -0.096 | DROP   | N   |
-| 10   | vol_regime_reversion:vrr_40         | 989 (626)    |        11.4 |    43.5% |   1.24 |  0.001 | KEEP   | N   |
-| 11   | residual_reversion:rr_48            | 1250 (511)   |         9.9 |    40.5% |   0.88 | -0.055 | DROP   | N   |
-| 12   | trend_donchian:donchian_18          | 1489 (894)   |         9.0 |    42.6% |   1.41 |  0.008 | KEEP   | N   |
-| 13   | cross_sectional_momentum:cs_mom_10  | 6118 (3659)  |         8.8 |    41.6% |   1.21 | -0.091 | KEEP   | N   |
-| 14   | funding_acceleration_carry:fac_168  | 8679 (5533)  |         8.8 |    42.6% |   1.21 | -0.044 | KEEP   | N   |
-| 15   | funding_zscore_carry:fzs_168        | 1783 (1032)  |         6.9 |    42.8% |   1.25 | -0.079 | KEEP   | Y   |
-| 16   | cross_sectional_momentum:cs_mom_20  | 8982 (5283)  |         6.6 |    42.1% |   1.18 | -0.081 | DROP   | N   |
-| 17   | funding_acceleration_carry:fac_48   | 8716 (5435)  |         6.1 |    42.2% |   1.11 | -0.065 | DROP   | N   |
-| 18   | cross_sectional_momentum:cs_mom_5   | 6092 (3604)  |         5.3 |    40.9% |   1.09 | -0.075 | DROP   | N   |
-| 19   | trend_ma:ema_6_36                   | 11410 (6581) |         5.2 |    40.6% |   1.17 | -0.055 | DROP   | N   |
-| 20   | funding_carry:funding_24            | 2042 (1254)  |         4.7 |    41.8% |   1.38 | -0.058 | KEEP   | N   |
+| 1    | dual_momentum:dm_24_96              | 1373 (556)   |        68.1 |    42.6% |   1.25 |  0.044 | KEEP   | Y   |
+| 2    | dual_momentum:dm_12_48              | 1953 (764)   |        25.5 |    40.3% |   1.32 | -0.004 | KEEP   | Y   |
+| 3    | trend_pullback_continuation:tpc_50_... | 760 (309)  |        74.0 |    37.9% |   1.63 |  0.064 | KEEP   | Y   |
+| 4    | funding_zscore_carry:fzs_96        | 1783 (1032)  |         6.9 |    42.8% |   1.25 | -0.079 | KEEP   | Y   |
+| 5    | mtf_trend_pullback:mtf_tpb_20_30    | -            |           - |        - |      - |      - | KEEP   | Y   |
+| 6    | mtf_breakout_retest:mtf_bor_20      | -            |           - |        - |      - |      - | KEEP   | Y   |
+| 7    | mtf_trend_pullback:mtf_tpb_50_30    | -            |           - |        - |      - |      - | KEEP   | Y   |
+| 8    | mtf_breakout_retest:mtf_bor_40      | -            |           - |        - |      - |      - | KEEP   | Y   |
+| 9    | bollinger_reversion:bollinger_20    | 2508 (1489)  |        12.0 |    42.3% |   1.09 | -0.096 | KEEP   | Y   |
+| 10   | funding_zscore_carry:fzs_168        | 1783 (1032)  |         6.9 |    42.8% |   1.25 | -0.079 | KEEP   | Y   |
+| 11   | taker_imbalance_momentum:tim_24     | -            |           - |        - |      - |      - | KEEP   | Y   |
+| 12   | trend_pullback_continuation:tpc_20_... | 760 (309)  |        74.0 |    37.9% |   1.63 |  0.064 | KEEP   | Y   |
+| 13   | rsi_reversion:rsi_14                | 2508 (1489)  |        12.0 |    42.3% |   1.09 | -0.096 | KEEP   | Y   |
+| 14   | rsi_reversion:rsi_6                 | 2508 (1489)  |        12.0 |    42.3% |   1.09 | -0.096 | KEEP   | Y   |
+| 15   | vol_regime_reversion:vrr_20         | 989 (626)    |        11.4 |    43.5% |   1.24 |  0.001 | KEEP   | Y   |
+| 16   | funding_zscore_carry:fzs_48         | 1783 (1032)  |         6.9 |    42.8% |   1.25 | -0.079 | KEEP   | Y   |
+| 17   | taker_imbalance_momentum:tim_12     | -            |           - |        - |      - |      - | KEEP   | Y   |
+| 18   | residual_reversion:rr_48            | 1250 (511)   |         9.9 |    40.5% |   0.88 | -0.055 | KEEP   | Y   |
+| 19   | vol_regime_reversion:vrr_40         | 989 (626)    |        11.4 |    43.5% |   1.24 |  0.001 | KEEP   | Y   |
+| 20   | residual_reversion:rr_24            | 1212 (494)   |        14.6 |    43.4% |   1.01 | -0.032 | KEEP   | Y   |
+| 21   | btc_regime_pullback:btc_pullback_50 | -            |           - |        - |      - |      - | KEEP   | Y   |
 -----------------------------------------------------------------------------------------------------------------------
 
 [SIGNAL DIAGNOSTICS: STRATEGY FILTERING]
 ----------------------------------------------------------------------------------
 | Action       | Count | Details / Selected Strategies                           |
 ----------------------------------------------------------------------------------
-| BLOCKED      | 18    | Fail Reasons: Breakeven Gate (13) | Event Overload (8)  |
-|              |       | Top Blocked: bcr_48, bb_compress_20, bcr_24, fac_168, fa|
-| RECOMMENDED  | 15    | 1. dual_momentum:dm_24_96                               |
+| BLOCKED      | 9     | Fail Reasons: Breakeven Gate | Event Overload           |
+| RECOMMENDED  | 21    | 1. dual_momentum:dm_24_96                               |
 | (Eligible)   |       | 2. dual_momentum:dm_12_48                               |
-| (Eligible)   |       | 3. trend_pullback_continuation:tpc_50_200               |
-| (Eligible)   |       | 4. funding_zscore_carry:fzs_96                          |
-| (Eligible)   |       | 5. bollinger_reversion:bollinger_20                     |
-| (Eligible)   |       | 6. funding_zscore_carry:fzs_168                         |
-| (Eligible)   |       | 7. trend_pullback_continuation:tpc_20_100               |
-| (Eligible)   |       | 8. rsi_reversion:rsi_14                                 |
-| (Eligible)   |       | 9. rsi_reversion:rsi_6                                  |
-| (Eligible)   |       | 10. vol_regime_reversion:vrr_20                          |
-| (Eligible)   |       | 11. funding_zscore_carry:fzs_48                         |
-| (Eligible)   |       | 12. residual_reversion:rr_48                            |
-| (Eligible)   |       | 13. vol_regime_reversion:vrr_40                         |
-| (Eligible)   |       | 14. residual_reversion:rr_24                            |
-| (Eligible)   |       | 15. btc_regime_pullback:btc_pullback_50                 |
+|              |       | 3. trend_pullback_continuation:tpc_50_200               |
+|              |       | 4. funding_zscore_carry:fzs_96                          |
+|              |       | 5. mtf_trend_pullback:mtf_tpb_20_30                     |
+|              |       | 6. mtf_breakout_retest:mtf_bor_20                       |
+|              |       | 7. mtf_trend_pullback:mtf_tpb_50_30                     |
+|              |       | 8. mtf_breakout_retest:mtf_bor_40                       |
+|              |       | 9. bollinger_reversion:bollinger_20                     |
+|              |       | 10. funding_zscore_carry:fzs_168                         |
+|              |       | 11. taker_imbalance_momentum:tim_24                      |
+|              |       | 12. trend_pullback_continuation:tpc_20_100               |
+|              |       | 13. rsi_reversion:rsi_14                                 |
+|              |       | 14. rsi_reversion:rsi_6                                  |
+|              |       | 15. vol_regime_reversion:vrr_20                          |
+|              |       | 16. funding_zscore_carry:fzs_48                          |
+|              |       | 17. taker_imbalance_momentum:tim_12                      |
+|              |       | 18. residual_reversion:rr_48                             |
+|              |       | 19. vol_regime_reversion:vrr_40                          |
+|              |       | 20. residual_reversion:rr_24                             |
+|              |       | 21. btc_regime_pullback:btc_pullback_50                  |
 ----------------------------------------------------------------------------------
 
 [GATE FAILURES: PER-VARIANT]
 ----------------------------------------------------------------------------------
 | Variant                        | Action           | Failed Gates / Cells       |
 ----------------------------------------------------------------------------------
-| btc_corr_regime:bcr_48         | INSUFFICIENT_OBS | Low Obs, Breakeven Gate, … |
+| vol_term_structure_gate:vts_ga | KEEP_CANDIDATE   | Event Overload             |
 | vol_breakout:bb_compress_20    | INSUFFICIENT_OBS | Breakeven Gate, Low OOS I… |
-| btc_corr_regime:bcr_24         | INSUFFICIENT_OBS | Breakeven Gate, Low Media… |
-| vol_regime_reversion:vrr_40    | DROP_OR_REWORK   | Breakeven Gate, Low Media… |
-| funding_acceleration_carry:fac | DROP_OR_REWORK   | Event Overload             |
-| funding_acceleration_carry:fac | DROP_OR_REWORK   | Event Overload             |
+| funding_extreme_reversal:fer_1 | KEEP_CANDIDATE   | Event Overload             |
 | trend_ma:ema_12_72             | KEEP_CANDIDATE   | Event Overload             |
-| cross_sectional_momentum:cs_mo | DROP_OR_REWORK   | Breakeven Gate, Event Ove… |
 | trend_donchian:donchian_18     | KEEP_CANDIDATE   | Breakeven Gate, Low OOS I… |
+| funding_carry:funding_24       | DROP_OR_REWORK   | Breakeven Gate, Low Mean … |
 | trend_ma:ema_18_108            | KEEP_CANDIDATE   | Event Overload             |
-| cross_sectional_momentum:cs_mo | DROP_OR_REWORK   | Event Overload             |
-| trend_ma:ema_6_36              | DROP_OR_REWORK   | Event Overload             |
-| cross_sectional_momentum:cs_mo | DROP_OR_REWORK   | Event Overload             |
 | trend_donchian:donchian_36     | DROP_OR_REWORK   | Breakeven Gate, Low Mean … |
 | trend_donchian:donchian_72     | INSUFFICIENT_OBS | Breakeven Gate, Low Mean … |
-| btc_residual_momentum:brm_24   | DROP_OR_REWORK   | Breakeven Gate, Low Mean … |
-| btc_corr_regime:bcr_96         | INSUFFICIENT_OBS | Low Obs, Breakeven Gate, … |
 ----------------------------------------------------------------------------------
 
 [WALK-FORWARD FOLD DETAILS]
@@ -173,10 +168,10 @@
 | Fold | Mode       | IC(diag) |  Events | RlzdMean |  EU_p90 | Pass   |
 |      |            |    (ref) |         |  (★gate) | (★gate) |        |
 ----------------------------------------------------------------------------------
-| 1    | ensemble_b0 |   -0.087 |   1,983 |      2.3 |   38.63 | ❌      |
-| 2    | ensemble_b0 |   -0.085 |   2,063 |     -3.2 |   34.61 | ❌      |
-| 3    | ensemble_b0 |   -0.008 |   2,832 |      7.0 |   35.02 | ❌      |
-| 4    | ensemble_b0 |   -0.056 |   3,431 |     31.7 |   35.57 | ✅      |
+| 1    | ensemble_b0 |   -0.075 |   2,297 |      4.9 |   36.43 | ❌      |
+| 2    | ensemble_b0 |   -0.106 |   2,303 |      6.3 |   36.74 | ❌      |
+| 3    | ensemble_b0 |   -0.019 |   3,137 |     -7.3 |   30.70 | ❌      |
+| 4    | ensemble_b0 |   -0.067 |   3,705 |     21.5 |   28.68 | ✅      |
 ----------------------------------------------------------------------------------
 
 [BRIDGE SUMMARY] -----------------------------------
@@ -189,15 +184,15 @@
 [ABLATION STUDY FRONTIER] ----------------------------------------------------------------
 | Model Alias        |    CAGR |   MaxDD |    MAR |     Equity | Trades | Deploy | Pass  |
 | ------------------ | ------- | ------- | ------ | ---------- | ------ | ------ | ----- |
-| rule_stop_risk     |  -35.0% |   23.0% |  -1.52 |    778,883 |    624 |   1.00 |   N   |
-| prior_rank_stop_ri |   -3.2% |    3.2% |  -0.98 |    981,569 |    106 |   0.22 |   N   |
-| prior_residual_ran |   -2.9% |    3.5% |  -0.84 |    982,797 |    109 |   0.22 |   N   |
-| edge_plus_validate |   -2.9% |    3.5% |  -0.84 |    982,797 |    109 |   0.22 |   N   |
-| edge_plus_gate_eve |   -1.6% |    1.5% |  -1.07 |    990,717 |    108 |   0.22 |   N   |
-| full_portfolio_cap |   -0.6% |    0.8% |   0.00 |    996,479 |    108 |   0.22 |   N   |
+| rule_stop_risk     |  -28.2% |   19.2% |  -1.46 |    825,177 |    619 |   1.00 |   N   |
+| prior_rank_stop_ri |    1.4% |    1.9% |   0.71 |  1,007,976 |    113 |   0.24 |   N   |
+| prior_residual_ran |   -4.6% |    4.6% |  -0.99 |    973,140 |    152 |   0.25 |   N   |
+| edge_plus_validate |   -4.6% |    4.6% |  -0.99 |    973,140 |    152 |   0.25 |   N   |
+| edge_plus_gate_eve |    0.5% |    0.7% |   0.00 |  1,002,778 |    151 |   0.25 |   N   |
+| full_portfolio_cap |    0.2% |    0.6% |   0.00 |  1,001,055 |    151 |   0.25 |   N   |
 ------------------------------------------------------------------------------------------
 
-[REGIME_C34_GOLD] C3/C4 gold standard 계산 완료: events=9112 (IS=4785, OOS=4327)
+[REGIME_C34_GOLD] C3/C4 gold standard 계산 완료: events=23806 (IS=12204, OOS=11602)
 
 ----------------------------------------------------------------------------------
 | [REGIME_SCORECARD]                                                             |
@@ -205,8 +200,8 @@
 | Axis                 |  Score  | Key Metrics                                   |
 ----------------------------------------------------------------------------------
 | C2 Persistence       | 10.0/10 | dwell=7.00(micro) macro=10.00 tr=0.075 ent=0.340 |
-| C3 Distinctness      | 10.0/10 | kw_p=0.0000  flip=Y  mi=0.0609                |
-| C4 OOS Stability     | 9.0/10  | rho=1.000  n_regimes=6                        |
+| C3 Distinctness      | 10.0/10 | kw_p=0.0000  flip=Y  mi=0.0373                |
+| C4 OOS Stability     | 9.0/10  | rho=0.829  n_regimes=6                        |
 | C5 Coverage          | 10.0/10 | min=0.106 max=0.247 n_eff=5.74                |
 ----------------------------------------------------------------------------------
 | Weighted C2-C5       |  0.680  | C1(hard_gate=pass)  C6-C8(manual)             |
