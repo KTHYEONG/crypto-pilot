@@ -171,6 +171,8 @@ def solve_constrained_weights(
     per_symbol_cap: float,
     current_dd: float,
     kelly_sigma_diag: np.ndarray | None = None,
+    bl_shrinkage_var_mult: float = 0.20,
+    bl_shrinkage_omega_mult: float = 0.10,
 ) -> np.ndarray:
     """Return signed portfolio weights (fractions of equity, before leverage)."""
     mu_v = np.asarray(mu, dtype=np.float64).ravel()
@@ -195,10 +197,10 @@ def solve_constrained_weights(
     omega_diag = np.maximum(sig ** 2, 1e-12)
     try:
         # Adaptive Diagonal Shrinkage (20% mean variance)
-        mean_var = float(np.mean(np.diag(sigma_mat))) * 0.20
+        mean_var = float(np.mean(np.diag(sigma_mat))) * bl_shrinkage_var_mult
         inv_tau_sigma = np.linalg.pinv(tau * sigma_mat + np.eye(n) * (mean_var + 1e-6))
         inv_omega = np.diag(1.0 / omega_diag)
-        mean_inv_omega = float(np.mean(1.0 / omega_diag)) * 0.10
+        mean_inv_omega = float(np.mean(1.0 / omega_diag)) * bl_shrinkage_omega_mult
         bl_cov = np.linalg.pinv(inv_tau_sigma + inv_omega + np.eye(n) * (mean_inv_omega + 1e-6))
         mu_bl = bl_cov @ (inv_omega @ mu_v)
     except Exception:
@@ -269,6 +271,8 @@ def _solve_constrained_weights_numba(
     per_symbol_cap: float,
     current_dd: float,
     kelly_sigma_diag: np.ndarray | None = None,
+    bl_shrinkage_var_mult: float = 0.20,
+    bl_shrinkage_omega_mult: float = 0.10,
 ) -> np.ndarray:
     n = mu.size
     if n == 0:
@@ -288,7 +292,7 @@ def _solve_constrained_weights_numba(
     mean_var = 0.0
     for i in range(n):
         mean_var += sigma[i, i]
-    mean_var = (mean_var / n) * 0.20
+    mean_var = (mean_var / n) * bl_shrinkage_var_mult
 
     tau_sigma = np.zeros((n, n), dtype=np.float64)
     for i in range(n):
@@ -303,7 +307,7 @@ def _solve_constrained_weights_numba(
         val = 1.0 / max(sig[i] ** 2, 1e-12)
         inv_omega_diag[i] = val
         mean_inv_omega += val
-    mean_inv_omega = (mean_inv_omega / n) * 0.10
+    mean_inv_omega = (mean_inv_omega / n) * bl_shrinkage_omega_mult
 
     a_mat = inv_tau_sigma.copy()
     for i in range(n):
@@ -360,6 +364,8 @@ def _precompute_loop_numba(
     per_symbol_cap: float,
     current_dd: float,
     ks_diag_2d: np.ndarray | None = None,
+    bl_shrinkage_var_mult: float = 0.20,
+    bl_shrinkage_omega_mult: float = 0.10,
 ) -> np.ndarray:
     out = np.zeros((n_bars, n_syms), dtype=np.float64)
     for i in range(1, n_bars):
@@ -381,6 +387,8 @@ def _precompute_loop_numba(
             per_symbol_cap,
             current_dd,
             kelly_sigma_diag=ks_diag,
+            bl_shrinkage_var_mult=bl_shrinkage_var_mult,
+            bl_shrinkage_omega_mult=bl_shrinkage_omega_mult,
         )
     return out
 
@@ -422,6 +430,8 @@ def precompute_rebalance_weights(
     btc_beta_2d: np.ndarray | None = None,
     policy_inputs: PortfolioPolicyInputs | None = None,
     use_residual_var_for_kelly: bool = False,
+    bl_shrinkage_var_mult: float = 0.20,
+    bl_shrinkage_omega_mult: float = 0.10,
 ) -> np.ndarray:
     """Sparse target weights: precomputed or rolling LW covariance."""
     c = np.asarray(close_2d, dtype=np.float64)
@@ -490,6 +500,8 @@ def precompute_rebalance_weights(
                 float(per_symbol_cap),
                 float(current_dd),
                 ks_diag_2d=ks_diag_2d,
+                bl_shrinkage_var_mult=bl_shrinkage_var_mult,
+                bl_shrinkage_omega_mult=bl_shrinkage_omega_mult,
             ),
             dtype=np.float64,
         )
@@ -525,6 +537,8 @@ def precompute_rebalance_weights(
                     float(per_symbol_cap),
                     float(current_dd),
                     kelly_sigma_diag=ks_diag,
+                    bl_shrinkage_var_mult=bl_shrinkage_var_mult,
+                    bl_shrinkage_omega_mult=bl_shrinkage_omega_mult,
                 ),
                 dtype=np.float64,
             )
@@ -693,7 +707,7 @@ def project_all_caps(
 
     # Cap 5: vol target scaling
     ann_vol = float(sigma_port) * math.sqrt(max(float(bars_per_year), 1e-9))
-    if ann_vol > 1e-12:
+    if ann_vol > 1e-12 and caps.target_ann_vol is not None and caps.target_ann_vol > 1e-12:
         vol_scale = caps.target_ann_vol / ann_vol
         out = out * min(vol_scale, 1.0)  # 축소만 허용 (확대 금지)
 

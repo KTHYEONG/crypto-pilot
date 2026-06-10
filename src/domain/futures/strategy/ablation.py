@@ -34,6 +34,7 @@ from src.domain.futures.strategy.config import (
     resolve_purge_and_embargo_bars,
     with_max_holding_bars,
 )
+from src.domain.futures.strategy.market_regime import compute_market_regime_context
 from src.domain.futures.strategy.rule_diagnostics import RuleDiagnosticsResult, compute_rule_diagnostics
 from src.domain.futures.strategy.rule_signals import build_rule_signal_panels, candidate_panels_to_events
 from src.domain.futures.strategy_runtime.bridge import _candidate_ml_split_indices, _recommendation_window_indices
@@ -661,6 +662,7 @@ def run_candidate_ablation(
     ablation_prof["predict"] = time.perf_counter() - t_step
 
     # 1. rule_stop_risk (Raw trigger rules with stop-risk sizing and no ML components)
+    regime_code_1d = compute_market_regime_context(aligned=aligned).code_1d.astype(np.int32)
     t_weights = time.perf_counter()
     t_step = time.perf_counter()
     cfg_rule = replace(
@@ -679,6 +681,7 @@ def run_candidate_ablation(
         beta_2d=None,
         sigma_3d=None,
         cfg=cfg_rule,
+        regime_code_1d=regime_code_1d,
     )
     _logger.debug("[PROFILE][ABLATION] 1. rule_w took %.4fs", time.perf_counter() - t_step)
 
@@ -701,6 +704,7 @@ def run_candidate_ablation(
         beta_2d=None,
         sigma_3d=None,
         cfg=replace(cfg, sizing_mode="stop_risk", gross_cap=999.0, net_cap=999.0, beta_cap=999.0, target_ann_vol=999.0),
+        regime_code_1d=regime_code_1d,
     )
     _logger.debug("[PROFILE][ABLATION] 2. prior_w took %.4fs", time.perf_counter() - t_step)
 
@@ -721,6 +725,7 @@ def run_candidate_ablation(
         beta_2d=None,
         sigma_3d=None,
         cfg=replace(cfg, sizing_mode="stop_risk", gross_cap=999.0, net_cap=999.0, beta_cap=999.0, target_ann_vol=999.0),
+        regime_code_1d=regime_code_1d,
     )
     _logger.debug("[PROFILE][ABLATION] 3. residual_w took %.4fs", time.perf_counter() - t_step)
 
@@ -739,6 +744,7 @@ def run_candidate_ablation(
         beta_2d=None,
         sigma_3d=None,
         cfg=replace(cfg, sizing_mode="stop_risk", gross_cap=999.0, net_cap=999.0, beta_cap=999.0, target_ann_vol=999.0),
+        regime_code_1d=regime_code_1d,
     )
     _logger.debug("[PROFILE][ABLATION] 4. gate_w took %.4fs", time.perf_counter() - t_step)
 
@@ -758,6 +764,7 @@ def run_candidate_ablation(
             beta_cap=999.0,
             target_ann_vol=999.0,
         ),
+        regime_code_1d=regime_code_1d,
     )
     _logger.debug("[PROFILE][ABLATION] 5. kelly_w took %.4fs", time.perf_counter() - t_step)
 
@@ -770,6 +777,7 @@ def run_candidate_ablation(
         beta_2d=None,
         sigma_3d=None,
         cfg=replace(cfg, sizing_mode="calibrated_event_kelly"),
+        regime_code_1d=regime_code_1d,
     )
     _logger.debug("[PROFILE][ABLATION] 6. full_caps_w took %.4fs", time.perf_counter() - t_step)
     ablation_prof["weights"] = time.perf_counter() - t_weights

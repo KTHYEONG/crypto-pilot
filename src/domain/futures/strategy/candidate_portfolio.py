@@ -805,6 +805,7 @@ def build_candidate_target_weights(
     beta_2d: NDArray[np.float64] | None,
     sigma_3d: NDArray[np.float64] | None,
     cfg: CandidateStrategyConfig,
+    regime_code_1d: NDArray[np.int32] | None = None,
 ) -> NDArray[np.float64]:
     """Build target_weights_2d for the backtest engine using Fractional Kelly & Caps."""
     n_times, n_symbols = close_2d.shape
@@ -871,15 +872,6 @@ def build_candidate_target_weights(
             if raw_weights[fill_t, s_idx] == 0.0:
                 raw_weights[fill_t, s_idx] = signed_w
 
-    # Apply 5-cap multi-cap projection per timestamp
-    caps = PortfolioCaps(
-        gross=cfg.gross_cap,
-        per_symbol=cfg.max_symbol_weight,
-        net=cfg.net_cap,
-        beta=cfg.beta_cap,
-        target_ann_vol=cfg.target_ann_vol,
-    )
-
     target_weights = np.zeros_like(raw_weights)
     bars_per_year = 2190.0  # Default 4h bars per year (365 * 6)
     if cfg.timeframe == "1h":
@@ -901,6 +893,28 @@ def build_candidate_target_weights(
         else:
             # Simple vol target fallback standard deviation
             sigma_port_t = float(np.nanstd(w_pre)) if np.any(w_pre) else 1e-3
+
+        # 1. 국면 코드 파악
+        regime_code = int(regime_code_1d[t]) if regime_code_1d is not None else 1
+
+        # 2. 국면별 Cap 조절 비율 획득
+        gross_mult = cfg.regime_gross_multipliers.get(regime_code, 1.0)
+        net_mult = cfg.regime_net_multipliers.get(regime_code, 1.0)
+
+        # 3. Double Vol-Targeting Scaling Guard 적용
+        use_double_scaling_guard = cfg.double_scaling_guard and (
+            cfg.sizing_mode == "calibrated_event_kelly" or bool(getattr(cfg, "overlay_sizing_enabled", True))
+        )
+        target_vol = 0.0 if use_double_scaling_guard else cfg.target_ann_vol
+
+        # 4. 동적 PortfolioCaps 인스턴스 생성
+        caps = PortfolioCaps(
+            gross=cfg.gross_cap * gross_mult,
+            per_symbol=cfg.max_symbol_weight,
+            net=cfg.net_cap * net_mult,
+            beta=cfg.beta_cap,
+            target_ann_vol=target_vol,
+        )
 
         target_weights[t] = project_all_caps(
             w=w_pre,
