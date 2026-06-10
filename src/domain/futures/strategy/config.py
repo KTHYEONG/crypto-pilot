@@ -251,6 +251,13 @@ class CandidateStrategyConfig:
     ensemble_freq_n_cap: int = 200  # max effective n per cell; 0=disabled
     # Floor: cell mu_net < this → contribution zeroed (not-predicted rather than negative).
     ensemble_min_cell_edge_floor_bps: float = 0.0
+    # Variant-edge hierarchical prior (3-level James-Stein extension).
+    # Restores within-cell discrimination by blending variant fit-window mean
+    # toward its archetype-regime cell anchor (mode cell).
+    # vmean_v = w_v*raw_v + (1-w_v)*anchor; w_v = n_eff/(n_eff+k_v)
+    ensemble_variant_prior_enabled: bool = True
+    ensemble_variant_shrinkage_k: float = 30.0   # anchor pull for variant James-Stein; Bounds: (0, ∞)
+    ensemble_variant_min_obs: int = 40            # below → w_v≈0, fallback to cell anchor
     # Conditioning axis: "auto" (default) picks archetype_regime vs archetype_only via
     # in-fold purged validation Rank IC gain — data-driven, fold-adaptive.
     # "archetype_regime" forces regime conditioning regardless of evidence.

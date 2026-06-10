@@ -59,6 +59,17 @@ Generates vectorized rule panels with archetype/regime contexts and filters them
 - Controlled by: `ensemble_adaptive_shrinkage`, `ensemble_shrinkage_k_max`, `ensemble_freq_n_cap`.
 - **IS-only**: $k_{\text{eff}}$ computed only on training data; OOS fold IC used as post-hoc diagnostic, not as a shrinkage input.
 
+**Variant-Edge Hierarchical Prior (James-Stein 3-Level Shrinkage)**
+- Restores within-cell variant identity: variants in the same (archetype × regime) cell receive discriminated scores rather than a shared cell mean.
+- Anchor $a_v$ = mode-cell mean of the variant's most common (archetype, regime) pair:
+  - $a_v = \hat{\mu}_{(\text{mode\_arch}_v,\, \text{mode\_regime}_v)}$ → fallback $\hat{\mu}_{\text{arch}}$ → global $\bar{\mu}$
+- Shrinkage weight: $w_v = \frac{n_{\text{eff}}}{n_{\text{eff}} + k_v}$, where $n_{\text{eff}} = \min(n_v, \text{freq\_n\_cap})$ (0 = no cap)
+- Shrunk mean: $\tilde{\mu}_v = w_v \cdot \hat{\mu}_v + (1-w_v) \cdot a_v$
+- Small-sample guard: if $n_v < \text{min\_obs}$, $\tilde{\mu}_v = a_v$ (full anchor; prevents spurious high-edge from n=1~2 luck)
+- **IS-only**: fitted on sub-fit training window; OOS IC diagnostic used post-hoc only.
+- 3-level prediction fallback: `variant_mu[vkey]` → `cell_mu[(arch,regime)]` → `arch_mu[arch]` → `global_mu`
+- Controlled by: `ensemble_variant_prior_enabled`, `ensemble_variant_shrinkage_k`, `ensemble_variant_min_obs`.
+
 **Profit Floor Gate (Hard Economic Floor)**
 - Separate `profit_floor` check outside Bayesian OR-path bypass loop.
 - $\text{pass\_profit\_floor} = \mu_{\text{OOS}} \geq \text{min\_variant\_oos\_profit\_bps}$
@@ -104,6 +115,9 @@ graph TD
 | **Param** | `ensemble_shrinkage_k_max` | Upper bound for $k_{\text{eff}}$. Bounds: `[0, ∞)`. Default: `50.0` |
 | **Param** | `ensemble_freq_n_cap` | Max effective $n$ per cell (0=disabled). Bounds: `[0, ∞)` |
 | **Param** | `min_variant_oos_profit_bps` | Hard economic floor for profit gate (non-bypassable). Default: `0.0` |
+| **Param** | `ensemble_variant_prior_enabled` | Enables variant-level JS shrinkage. Default: `True` |
+| **Param** | `ensemble_variant_shrinkage_k` | Shrinkage strength $k_v$ for variant prior. Default: `30.0` |
+| **Param** | `ensemble_variant_min_obs` | Min obs for variant mean; below this → full anchor fallback. Default: `40` |
 | **Param** | `fdr_gate_enabled` | Enables FDR control gate. Default: `False` |
 | **Param** | `spa_gate_enabled` | Enables SPA circular-block bootstrap gate. Default: `False` |
 | **Param** | `fdr_alpha` | Target False Discovery Rate threshold. Default: `0.10` |

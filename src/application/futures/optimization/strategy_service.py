@@ -70,6 +70,16 @@ def build_candidate_strategy_config(
         min_variant_oos_profit_bps=float(
             opt_config.get("FUTURES_CANDIDATE_MIN_VARIANT_OOS_PROFIT_BPS", candidate.min_variant_oos_profit_bps)
         ),
+        ensemble_variant_prior_enabled=_parse_bool(
+            opt_config.get("FUTURES_CANDIDATE_ENSEMBLE_VARIANT_PRIOR_ENABLED"),
+            default=candidate.ensemble_variant_prior_enabled,
+        ),
+        ensemble_variant_shrinkage_k=float(
+            opt_config.get("FUTURES_CANDIDATE_ENSEMBLE_VARIANT_SHRINKAGE_K", candidate.ensemble_variant_shrinkage_k)
+        ),
+        ensemble_variant_min_obs=int(
+            opt_config.get("FUTURES_CANDIDATE_ENSEMBLE_VARIANT_MIN_OBS", candidate.ensemble_variant_min_obs)
+        ),
         min_variant_oos_hit_rate=float(
             opt_config.get("FUTURES_CANDIDATE_MIN_VARIANT_OOS_HIT_RATE", candidate.min_variant_oos_hit_rate)
         ),
