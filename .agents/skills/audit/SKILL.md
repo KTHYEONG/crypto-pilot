@@ -12,7 +12,10 @@ Verify that the implementation accurately reflects the business logic requiremen
 
 ### 1. Targeted Diff Review (Token Efficiency)
 - **Focus**: Do not re-analyze the entire existing codebase. Concentrate on comparing the `git diff` or changed code snippets directly against the `Algorithmic Flow` in the Spec.
-- **Efficiency**: Minimize internal thinking steps and judge only whether the core logic changes align with the Spec's goals.
+- **Serena Support (Architecture & Dependency Safety)**:
+  - **Structure Check**: Use Serena MCP `get_symbols_overview` on modified files to verify that public API signatures match Spec definitions and do not break architecture constraints.
+  - **Impact Analysis**: Use `find_implementations` to detect external usages of modified components and ensure no downstream modules are broken.
+- **Efficiency**: Minimize internal thinking steps and judge only whether the core logic changes align with the Spec's goals. Use standard file reads strictly as a fallback.
 
 ### 2. Intent & Logic Alignment
 - **Quant/Financial Core**: Verify that formulas, vectorization (NumPy/Pandas), and trading logic intent match the Spec.
