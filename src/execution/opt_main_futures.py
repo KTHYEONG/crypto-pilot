@@ -905,7 +905,6 @@ def _run_strategy_stage(
     workflow_status = str(candidate_report.get("workflow_status", "blocked"))
     _logger.info(f"| {'Active Signals':<18} | {f'{non_zero_weights} (sel={selected_total_bridge})':<27} |")
     _logger.info(f"| {'Status':<18} | {workflow_status:<27} |")
-    _logger.info(f"| {'Execution Time':<18} | {f'{bridge_elapsed:.2f}s':<27} |")
     _logger.info("-" * width)
     strategy_steps["report"] = time.perf_counter() - t_report
 
