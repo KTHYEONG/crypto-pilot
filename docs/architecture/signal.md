@@ -51,6 +51,19 @@ Generates vectorized rule panels with archetype/regime contexts and filters them
      - Rejects $H_0: E[\text{Edge}_{\text{best}}] \le 0$ at a family level. If SPA p-value $> p_{\text{max}, \text{SPA}}$, all promotions are blocked (fail-closed).
   - Final promote $= \text{Gate}_{\text{individual}} \land \text{FDR\_pass} \land \text{SPA\_pass}$
 
+**Empirical-Bayes Ensemble Shrinkage (James-Stein)**
+- Cell-mean $\hat{\mu}_a$ per archetype $a$ is shrunk toward the grand mean $\bar{\mu}$ via:
+  - $k_{\text{eff}} = \frac{\bar{\sigma}^2_{\text{within}}}{\text{between\_var}}$, clamped to $[0, k_{\max}]$
+  - $\tilde{\mu}_a = \frac{n_a \hat{\mu}_a + k_{\text{eff}} \bar{\mu}}{n_a + k_{\text{eff}}}$
+- $\text{between\_var} = \frac{1}{A}\sum_a (\hat{\mu}_a - \bar{\mu})^2$; large $\text{between\_var}$ → $k_{\text{eff}} \approx 0$ → no shrinkage (cell means trusted).
+- Controlled by: `ensemble_adaptive_shrinkage`, `ensemble_shrinkage_k_max`, `ensemble_freq_n_cap`.
+- **IS-only**: $k_{\text{eff}}$ computed only on training data; OOS fold IC used as post-hoc diagnostic, not as a shrinkage input.
+
+**Profit Floor Gate (Hard Economic Floor)**
+- Separate `profit_floor` check outside Bayesian OR-path bypass loop.
+- $\text{pass\_profit\_floor} = \mu_{\text{OOS}} \geq \text{min\_variant\_oos\_profit\_bps}$
+- Cannot be bypassed by regime-cell admission; enforces cost-based minimum unconditionally.
+
 **Regime-Cell Conditional Admission (OR-path)**
 - Promotes a variant diluted by the global-pooled gates if it holds a strong edge in a specific regime cell $g$ (supplies orthogonal diversifiers to the B0 ensemble).
 - Per-cell (regime $g$) stats over the OOS recommendation window:
@@ -87,6 +100,10 @@ graph TD
 | **Param** | `min_regime_cell_edge_bps` | Min per-cell mean edge (bps) for admission. Bounds: finite |
 | **Param** | `min_regime_cell_tstat` | Min per-cell t-stat for admission. Bounds: `[0.0, ∞)` |
 | **Param** | `max_admitted_cells_per_variant` | Top-N cells retained by edge. Bounds: `[1, ∞)` |
+| **Param** | `ensemble_adaptive_shrinkage` | Enables EB James-Stein shrinkage for archetype cell means. Default: `True` |
+| **Param** | `ensemble_shrinkage_k_max` | Upper bound for $k_{\text{eff}}$. Bounds: `[0, ∞)`. Default: `50.0` |
+| **Param** | `ensemble_freq_n_cap` | Max effective $n$ per cell (0=disabled). Bounds: `[0, ∞)` |
+| **Param** | `min_variant_oos_profit_bps` | Hard economic floor for profit gate (non-bypassable). Default: `0.0` |
 | **Param** | `fdr_gate_enabled` | Enables FDR control gate. Default: `False` |
 | **Param** | `spa_gate_enabled` | Enables SPA circular-block bootstrap gate. Default: `False` |
 | **Param** | `fdr_alpha` | Target False Discovery Rate threshold. Default: `0.10` |

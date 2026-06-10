@@ -32,6 +32,11 @@ last_verified: 2026-06-09
 - **Rationale:** RECOMMENDED 추세/모멘텀 3종은 regime 마스킹 무영향 확인. `[[project_regime_alpha_conditioning_disproved]]`와 정합.
 - **Edge Cases/Trade-offs:** REGIME_SCORECARD C4=1.0/10(OOS 불안정)은 (B) allocation 조건화 입력의 신뢰도 경고.
 
+## [2026-06-10] EB Adaptive Shrinkage + Profit Floor Gate (Phase 1+2)
+- **Delta:** (Phase 1) `_compute_eb_shrinkage_k()` 신규 — James-Stein $k_{\text{eff}}=\bar{\sigma}^2_{\text{within}}/\text{between\_var}$, clamped $[0, k_{\max}]$. `_fit_cell_means()` EB 파라미터 수신, `_log_ensemble_diagnostics()` 표 형식 진단 로그 추가. (Phase 2) `profit_floor` 키 — OR-path bypass 루프 외부 배치로 Bayesian admission 우회 불가 hard floor 구현. config 5종 + env override 1종 추가.
+- **Rationale:** 고정 k=50이 희귀 고엣지 신호를 글로벌 평균으로 희석. EB는 between_var↑ → k↓ → 셀 평균 신뢰 방향으로 동적 적응. profit_floor는 Bayesian admission이 구출한 음수 pooled-edge 변이의 경제적 최소 조건 미충족 허점 차단.
+- **Edge Cases/Trade-offs:** 현재 데이터에서 between_var 압도적 → k_eff≈0 → 고정 k와 실질 동등(수학적으로 정직). WF IC(diag) 음수(-0.075~-0.106) **Phase 1+2 이후에도 불변** → ensemble score↔실현수익 역상관의 진짜 원인은 `walk_forward.py` IC 산출 경로에 있음(미해결, 다음 spec 진입 필요). BLOCKED 9→11(+2 profit_floor), RECOMMENDED 21 불변.
+
 ## [2026-06-10] FDR 및 SPA 집합검정 Multiplicity Gate 도입
 - **Delta:** `CandidateStrategyConfig`에 FDR/SPA 설정 변수 추가. `_summarize_recommendation_variants()`에서 Newey-West 단측 p-value 산출. `compute_rule_diagnostics()`에서 OOS edge circular-block bootstrap(SPA) 연동하여 최종 promote AND-결합 필터링 구현.
 - **Rationale:** G1~G10 신규 패밀리 확장에 따른 alpha 모집단 팽창 시 overfit 생존 후보의 급증을 다중 비교 multiplicity control인 FDR과 SPA 집합검정으로 제어하여 라이브 환경의 오버핏 리스크 최소화.
