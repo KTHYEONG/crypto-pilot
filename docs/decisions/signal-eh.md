@@ -37,6 +37,11 @@ last_verified: 2026-06-09
 - **Rationale:** 고정 k=50이 희귀 고엣지 신호를 글로벌 평균으로 희석. EB는 between_var↑ → k↓ → 셀 평균 신뢰 방향으로 동적 적응. profit_floor는 Bayesian admission이 구출한 음수 pooled-edge 변이의 경제적 최소 조건 미충족 허점 차단.
 - **Edge Cases/Trade-offs:** 현재 데이터에서 between_var 압도적 → k_eff≈0 → 고정 k와 실질 동등(수학적으로 정직). WF IC(diag) 음수(-0.075~-0.106) **Phase 1+2 이후에도 불변** → ensemble score↔실현수익 역상관의 진짜 원인은 `walk_forward.py` IC 산출 경로에 있음(미해결, 다음 spec 진입 필요). BLOCKED 9→11(+2 profit_floor), RECOMMENDED 21 불변.
 
+## [2026-06-10] Variant-Edge Hierarchical Prior (Phase 3)
+- **Delta:** `_fit_variant_means()` + `_variant_key()` 신규. `RegimeConditionalEnsemble`에 `variant_mu_bps: dict[str,float]` 추가. `predict_regime_conditional_ensemble`에 3-level fallback(`variant→cell→arch→global`) 삽입. config 3종: `ensemble_variant_prior_enabled`, `ensemble_variant_shrinkage_k`(30.0), `ensemble_variant_min_obs`(40). WF Fold 3 IC -0.019→+0.076(첫 양전환). 전체 pass 0/4(Fold4 RlzdMean 21.5→10.2 퇴행으로 net 개선 미달).
+- **Rationale:** `mu_net_decision_bps` = 순수 (archetype×regime) cell mean → ~24 이산값 → 같은 셀의 dm_24_96(68bps)·fzs_96(6.9bps) 동일 score. variant 레벨 정체성 복원으로 ensemble IC alignment 개선 시도.
+- **Edge Cases/Trade-offs:** Fold 3 양전환은 variant prior 작동 확인. Fold 4 퇴행 = variant 엣지 OOS fold 간 지속성 불균등. 미해결: per-fold variant refit, min_obs 상향(노이즈 차단), 고OOS-IC 변이(tpc/dm/mtf)만 선택적 prior 적용.
+
 ## [2026-06-10] FDR 및 SPA 집합검정 Multiplicity Gate 도입
 - **Delta:** `CandidateStrategyConfig`에 FDR/SPA 설정 변수 추가. `_summarize_recommendation_variants()`에서 Newey-West 단측 p-value 산출. `compute_rule_diagnostics()`에서 OOS edge circular-block bootstrap(SPA) 연동하여 최종 promote AND-결합 필터링 구현.
 - **Rationale:** G1~G10 신규 패밀리 확장에 따른 alpha 모집단 팽창 시 overfit 생존 후보의 급증을 다중 비교 multiplicity control인 FDR과 SPA 집합검정으로 제어하여 라이브 환경의 오버핏 리스크 최소화.
