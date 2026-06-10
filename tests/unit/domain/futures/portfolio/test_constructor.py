@@ -148,20 +148,20 @@ def test_portfolio_constructor_caps_and_beta_remain_enforced() -> None:
 
 def test_precompute_rebalance_weights_ignores_static_current_dd_scaling() -> None:
     close_2d, xs_long, xs_short, sigma_3d = _base_inputs()
-    common_kwargs = dict(
-        close_2d=close_2d,
-        xs_long=xs_long,
-        xs_short=xs_short,
-        rebalance_bars=1,
-        lookback=2,
-        bars_per_year=365.0 * 24.0,
-        kappa=0.3,
-        f_kelly_max=1.0,
-        sigma_target_ann=0.2,
-        gross_cap=1.0,
-        per_symbol_cap=1.0,
-        sigma_3d=sigma_3d,
-    )
+    common_kwargs = {
+        "close_2d": close_2d,
+        "xs_long": xs_long,
+        "xs_short": xs_short,
+        "rebalance_bars": 1,
+        "lookback": 2,
+        "bars_per_year": 365.0 * 24.0,
+        "kappa": 0.3,
+        "f_kelly_max": 1.0,
+        "sigma_target_ann": 0.2,
+        "gross_cap": 1.0,
+        "per_symbol_cap": 1.0,
+        "sigma_3d": sigma_3d,
+    }
     w_dd0 = precompute_rebalance_weights(current_dd=0.0, **common_kwargs)
     w_dd20 = precompute_rebalance_weights(current_dd=0.2, **common_kwargs)
     np.testing.assert_allclose(w_dd0, w_dd20, rtol=0.0, atol=0.0)
@@ -188,20 +188,20 @@ def test_precompute_rebalance_weights_can_use_residual_var_for_kelly() -> None:
         risk_sigma_3d=sigma_3d,
         risk_residual_var_2d=high_resid,
     )
-    kwargs = dict(
-        close_2d=close_2d,
-        xs_long=xs_long,
-        xs_short=xs_short,
-        rebalance_bars=1,
-        lookback=2,
-        bars_per_year=365.0 * 24.0,
-        kappa=0.5,
-        f_kelly_max=1.0,
-        sigma_target_ann=0.2,
-        gross_cap=1.0,
-        per_symbol_cap=1.0,
-        sigma_3d=sigma_3d,
-    )
+    kwargs = {
+        "close_2d": close_2d,
+        "xs_long": xs_long,
+        "xs_short": xs_short,
+        "rebalance_bars": 1,
+        "lookback": 2,
+        "bars_per_year": 365.0 * 24.0,
+        "kappa": 0.5,
+        "f_kelly_max": 1.0,
+        "sigma_target_ann": 0.2,
+        "gross_cap": 1.0,
+        "per_symbol_cap": 1.0,
+        "sigma_3d": sigma_3d,
+    }
 
     w_low = precompute_rebalance_weights(
         policy_inputs=policy_low,
@@ -244,21 +244,64 @@ def test_precompute_rebalance_weights_ignores_residual_var_when_flag_off() -> No
         risk_sigma_3d=sigma_3d,
         risk_residual_var_2d=np.full_like(xs_long, 4e-4),
     )
-    kwargs = dict(
-        close_2d=close_2d,
-        xs_long=xs_long,
-        xs_short=xs_short,
-        rebalance_bars=1,
-        lookback=2,
-        bars_per_year=365.0 * 24.0,
-        kappa=0.5,
-        f_kelly_max=1.0,
-        sigma_target_ann=0.2,
-        gross_cap=1.0,
-        per_symbol_cap=1.0,
-        sigma_3d=sigma_3d,
-    )
+    kwargs = {
+        "close_2d": close_2d,
+        "xs_long": xs_long,
+        "xs_short": xs_short,
+        "rebalance_bars": 1,
+        "lookback": 2,
+        "bars_per_year": 365.0 * 24.0,
+        "kappa": 0.5,
+        "f_kelly_max": 1.0,
+        "sigma_target_ann": 0.2,
+        "gross_cap": 1.0,
+        "per_symbol_cap": 1.0,
+        "sigma_3d": sigma_3d,
+    }
 
     w_low = precompute_rebalance_weights(policy_inputs=policy_low, **kwargs)
     w_high = precompute_rebalance_weights(policy_inputs=policy_high, **kwargs)
     np.testing.assert_allclose(w_low, w_high, rtol=0.0, atol=0.0)
+
+
+def test_solve_constrained_weights_respects_bl_shrinkage_mults() -> None:
+    """solve_constrained_weights에서 bl_shrinkage_var_mult 및 bl_shrinkage_omega_mult가 유동적으로 동작하는지 검증."""
+    mu = np.array([0.005, -0.005], dtype=np.float64)
+    sigma = np.array([
+        [1e-4, 5e-5],
+        [5e-5, 9e-4]  # 비대칭 분산 적용
+    ], dtype=np.float64)
+
+    # 기본값 (0.20, 0.10)
+    w_default = solve_constrained_weights(
+        mu=mu,
+        sigma=sigma,
+        kappa=0.5,
+        f_kelly_max=5.0,
+        sigma_target_ann=0.2,
+        bars_per_year=365.0 * 24.0,
+        gross_cap=1.0,
+        per_symbol_cap=0.5,
+        current_dd=0.0,
+        bl_shrinkage_var_mult=0.20,
+        bl_shrinkage_omega_mult=0.10
+    )
+
+    # 다른 정규화 강도 (0.01, 0.01)
+    w_low_shrink = solve_constrained_weights(
+        mu=mu,
+        sigma=sigma,
+        kappa=0.5,
+        f_kelly_max=5.0,
+        sigma_target_ann=0.2,
+        bars_per_year=365.0 * 24.0,
+        gross_cap=1.0,
+        per_symbol_cap=0.5,
+        current_dd=0.0,
+        bl_shrinkage_var_mult=0.01,
+        bl_shrinkage_omega_mult=0.01
+    )
+
+    # 두 가중치가 정확히 같지 않음을 검증 (정규화 계수 변화로 mu_bl이 달라짐)
+    assert not np.allclose(w_default, w_low_shrink, rtol=1e-5, atol=1e-5)
+
