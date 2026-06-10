@@ -833,7 +833,7 @@ def test_s1_variant_prior_discriminates_within_cell() -> None:
     cell_anchor = cell_mu[("time_series_momentum", 0)]
 
     # Act
-    variant_mu = _fit_variant_means(
+    variant_mu, _ = _fit_variant_means(
         frame,
         cell_mu=cell_mu,
         arch_mu=arch_mu,
@@ -863,9 +863,11 @@ def test_s2_variant_prior_improves_rank_ic_sign() -> None:
     net_returns = []
     for v in variants:
         if v == "A":
-            net_returns.append(returns_A[idx_A]); idx_A += 1
+            net_returns.append(returns_A[idx_A])
+            idx_A += 1
         else:
-            net_returns.append(returns_B[idx_B]); idx_B += 1
+            net_returns.append(returns_B[idx_B])
+            idx_B += 1
     df = pd.DataFrame({
         "family": ["fam"] * n,
         "variant": variants,
@@ -926,7 +928,7 @@ def test_s3_variant_prior_is_only_no_oos_leakage() -> None:
     cell_mu, _, arch_mu, _, global_mu, _ = _fit_cell_means(
         sub_fit, shrinkage_k=50.0, axis="archetype_regime"
     )
-    variant_mu = _fit_variant_means(
+    variant_mu, _ = _fit_variant_means(
         sub_fit,  # IS-only
         cell_mu=cell_mu,
         arch_mu=arch_mu,
@@ -973,7 +975,7 @@ def test_s4_variant_prior_small_sample_falls_back_to_anchor() -> None:
     anchor = cell_mu.get(("momentum", 0), arch_mu.get("momentum", global_mu))
 
     # Act
-    variant_mu = _fit_variant_means(
+    variant_mu, _ = _fit_variant_means(
         frame,
         cell_mu=cell_mu,
         arch_mu=arch_mu,
@@ -1048,12 +1050,12 @@ def test_s6_variant_prior_freq_n_cap_limits_weight() -> None:
     anchor = cell_mu.get(("momentum", 0), arch_mu.get("momentum", global_mu))
 
     # Act: with freq_n_cap=200
-    v_mu_capped = _fit_variant_means(
+    v_mu_capped, _ = _fit_variant_means(
         frame, cell_mu=cell_mu, arch_mu=arch_mu, global_mu=global_mu,
         k_variant=30.0, min_obs=10, freq_n_cap=200
     )
     # Act: without freq_n_cap
-    v_mu_uncapped = _fit_variant_means(
+    v_mu_uncapped, _ = _fit_variant_means(
         frame, cell_mu=cell_mu, arch_mu=arch_mu, global_mu=global_mu,
         k_variant=30.0, min_obs=10, freq_n_cap=0
     )
@@ -1070,3 +1072,109 @@ def test_s6_variant_prior_freq_n_cap_limits_weight() -> None:
     assert v_mu_uncapped["hf:noise"] == pytest.approx(expected_uncapped, rel=1e-4)
     # capped가 anchor에 더 가까움 (노이즈 억제)
     assert abs(v_mu_capped["hf:noise"] - anchor) < abs(v_mu_uncapped["hf:noise"] - anchor)
+
+
+def test_s7_variant_prior_regime_conditional_offset() -> None:
+    """S7: Happy Path - Variant prior predictions vary dynamically by regime while maintaining the offset."""
+    cell_mu = {
+        ("trend_continuation", 1): 20.0,
+        ("trend_continuation", 2): 5.0,
+    }
+    cell_q10 = {
+        ("trend_continuation", 1): -10.0,
+        ("trend_continuation", 2): -10.0,
+    }
+    model = RegimeConditionalEnsemble(
+        cell_mu_bps=cell_mu,
+        cell_q10_bps=cell_q10,
+        global_mu_bps=0.0,
+        global_q10_bps=0.0,
+        conditioning="archetype_regime",
+        archetype_mu_bps={"trend_continuation": 10.0},
+        archetype_q10_bps={"trend_continuation": -5.0},
+        validation_rank_ic=0.0,
+        variant_mu_bps={"tpc:tpc_50_200": 23.0},
+        variant_offset_bps={"tpc:tpc_50_200": 3.0},
+    )
+
+    oos_events = pd.DataFrame(
+        {
+            "family": ["tpc", "tpc"],
+            "variant": ["tpc_50_200", "tpc_50_200"],
+            "archetype": ["trend_continuation", "trend_continuation"],
+            "entry_regime_code": [1, 2],
+        }
+    )
+
+    out = predict_regime_conditional_ensemble(model=model, oos_events=oos_events)
+    # Expected in regime 1: 20.0 (cell) + 3.0 (offset) = 23.0
+    # Expected in regime 2: 5.0 (cell) + 3.0 (offset) = 8.0
+    assert out.expected_net_bps[0] == pytest.approx(23.0)
+    assert out.expected_net_bps[1] == pytest.approx(8.0)
+
+
+def test_s8_variant_prior_family_filtering() -> None:
+    """S8: Edge Case - Family Filtering filters out variants not in ensemble_variant_prior_families."""
+    rng = np.random.default_rng(42)
+    n = 100
+    df = pd.DataFrame(
+        {
+            "family": ["tpc"] * (n // 2) + ["rsi"] * (n // 2),
+            "variant": ["tpc_50_200"] * (n // 2) + ["rsi_14"] * (n // 2),
+            "archetype": ["trend_continuation"] * (n // 2) + ["mean_reversion"] * (n // 2),
+            "entry_regime_code": [1] * n,
+            "net_return_bps": rng.normal(10.0, 5.0, n),
+            "entry_idx": np.arange(n),
+        }
+    )
+
+    cfg = _make_cfg(
+        ensemble_variant_prior_enabled=True,
+        ensemble_variant_prior_families=("tpc",),
+        ensemble_variant_min_obs=5,
+    )
+
+    model = fit_regime_conditional_ensemble(train_events=df, cfg=cfg)
+
+    # tpc:tpc_50_200 should have variant prior and offset
+    assert "tpc:tpc_50_200" in model.variant_mu_bps
+    assert "tpc:tpc_50_200" in model.variant_offset_bps
+
+    # rsi:rsi_14 should be filtered out
+    assert "rsi:rsi_14" not in model.variant_mu_bps
+    assert "rsi:rsi_14" not in model.variant_offset_bps
+
+
+def test_s9_variant_prior_backward_compatibility() -> None:
+    """S9: Backward Compatibility - predict works fine even if variant_offset_bps is missing or empty."""
+    cell_mu = {
+        ("trend_continuation", 1): 20.0,
+    }
+    cell_q10 = {
+        ("trend_continuation", 1): -10.0,
+    }
+    model = RegimeConditionalEnsemble(
+        cell_mu_bps=cell_mu,
+        cell_q10_bps=cell_q10,
+        global_mu_bps=0.0,
+        global_q10_bps=0.0,
+        conditioning="archetype_regime",
+        archetype_mu_bps={"trend_continuation": 10.0},
+        archetype_q10_bps={"trend_continuation": -5.0},
+        validation_rank_ic=0.0,
+        variant_mu_bps={"tpc:tpc_50_200": 23.0},
+        variant_offset_bps={},  # Empty (simulates legacy / missing offset dict)
+    )
+
+    oos_events = pd.DataFrame(
+        {
+            "family": ["tpc"],
+            "variant": ["tpc_50_200"],
+            "archetype": ["trend_continuation"],
+            "entry_regime_code": [1],
+        }
+    )
+
+    out = predict_regime_conditional_ensemble(model=model, oos_events=oos_events)
+    # Expected: cell mean only (offset defaults to 0.0) -> 20.0
+    assert out.expected_net_bps[0] == pytest.approx(20.0)

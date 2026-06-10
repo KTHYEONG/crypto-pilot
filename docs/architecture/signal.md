@@ -59,16 +59,17 @@ Generates vectorized rule panels with archetype/regime contexts and filters them
 - Controlled by: `ensemble_adaptive_shrinkage`, `ensemble_shrinkage_k_max`, `ensemble_freq_n_cap`.
 - **IS-only**: $k_{\text{eff}}$ computed only on training data; OOS fold IC used as post-hoc diagnostic, not as a shrinkage input.
 
-**Variant-Edge Hierarchical Prior (James-Stein 3-Level Shrinkage)**
+**Variant-Edge Hierarchical Prior (James-Stein 3-Level Shrinkage & Variant Offset)**
 - Restores within-cell variant identity: variants in the same (archetype × regime) cell receive discriminated scores rather than a shared cell mean.
-- Anchor $a_v$ = mode-cell mean of the variant's most common (archetype, regime) pair:
-  - $a_v = \hat{\mu}_{(\text{mode\_arch}_v,\, \text{mode\_regime}_v)}$ → fallback $\hat{\mu}_{\text{arch}}$ → global $\bar{\mu}$
+- Anchor $a_v$ = mode-cell mean of the variant's most common (archetype, regime) pair in the training set:
+  - $a_v = \hat{\mu}_{(\text{mode\_arch}_v,\, \text{mode\_regime\_v})}$ → fallback $\hat{\mu}_{\text{arch}}$ → global $\bar{\mu}$
 - Shrinkage weight: $w_v = \frac{n_{\text{eff}}}{n_{\text{eff}} + k_v}$, where $n_{\text{eff}} = \min(n_v, \text{freq\_n\_cap})$ (0 = no cap)
 - Shrunk mean: $\tilde{\mu}_v = w_v \cdot \hat{\mu}_v + (1-w_v) \cdot a_v$
-- Small-sample guard: if $n_v < \text{min\_obs}$, $\tilde{\mu}_v = a_v$ (full anchor; prevents spurious high-edge from n=1~2 luck)
-- **IS-only**: fitted on sub-fit training window; OOS IC diagnostic used post-hoc only.
-- 3-level prediction fallback: `variant_mu[vkey]` → `cell_mu[(arch,regime)]` → `arch_mu[arch]` → `global_mu`
-- Controlled by: `ensemble_variant_prior_enabled`, `ensemble_variant_shrinkage_k`, `ensemble_variant_min_obs`.
+- Variant Offset: $\text{offset}_v = \tilde{\mu}_v - a_v$ (represents variant's shrunk relative strength over its cell anchor)
+- Prediction: $\mu_{\text{pred}, t} = \text{cell\_val}_{(\text{arch},\, \text{regime}_t)} + \text{offset}_v$ (fully preserves dynamic event-level regime conditioning)
+- Family Filtering: only variants belonging to allowed families (`ensemble_variant_prior_families`) receive variant offsets; others regress entirely to cell means to filter noise.
+- Small-sample guard: if $n_v < \text{min\_obs}$, $\tilde{\mu}_v = a_v \implies \text{offset}_v = 0.0$ (full anchor fallback)
+- Controlled by: `ensemble_variant_prior_enabled`, `ensemble_variant_shrinkage_k`, `ensemble_variant_min_obs`, `ensemble_variant_prior_families`.
 
 **Profit Floor Gate (Hard Economic Floor)**
 - Separate `profit_floor` check outside Bayesian OR-path bypass loop.
