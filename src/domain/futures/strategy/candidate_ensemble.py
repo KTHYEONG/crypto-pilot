@@ -387,9 +387,10 @@ def _internal_validation_rank_ic(
         cell_mu = {}
 
     # Fit variant prior on sub_fit only (IS-only, no OOS leakage)
-    v_mu: dict[str, float] = {}
+    _v_mu: dict[str, float] = {}
+    v_offset: dict[str, float] = {}
     if variant_prior_enabled:
-        v_mu, _ = _fit_variant_means(
+        _v_mu, v_offset = _fit_variant_means(
             sub_fit,
             cell_mu=cell_mu,
             arch_mu=arch_mu,
@@ -400,29 +401,31 @@ def _internal_validation_rank_ic(
             allowed_families=allowed_families,
         )
 
-    has_family_variant = variant_prior_enabled and bool(v_mu)
+    has_family_variant = variant_prior_enabled and bool(v_offset)
 
     if axis == "archetype_regime":
         def _predict_regime(row: pd.Series) -> float:
+            key = (str(row["archetype"]), int(row["entry_regime_code"]))
+            cell_val = cell_mu.get(key, arch_mu.get(str(row["archetype"]), global_mu))
             if has_family_variant:
                 fam = str(row.get("family", ""))
                 var = str(row.get("variant", ""))
                 vkey = _variant_key(fam, var)
-                if vkey in v_mu:
-                    return v_mu[vkey]
-            key = (str(row["archetype"]), int(row["entry_regime_code"]))
-            return cell_mu.get(key, arch_mu.get(str(row["archetype"]), global_mu))
+                if vkey in v_offset:
+                    return cell_val + v_offset[vkey]
+            return cell_val
 
         pred = val_set.apply(_predict_regime, axis=1).to_numpy(dtype=np.float64)
     else:
         def _predict_arch(row: pd.Series) -> float:
+            arch_val = arch_mu.get(str(row["archetype"]), global_mu)
             if has_family_variant:
                 fam = str(row.get("family", ""))
                 var = str(row.get("variant", ""))
                 vkey = _variant_key(fam, var)
-                if vkey in v_mu:
-                    return v_mu[vkey]
-            return arch_mu.get(str(row["archetype"]), global_mu)
+                if vkey in v_offset:
+                    return arch_val + v_offset[vkey]
+            return arch_val
 
         pred = val_set.apply(_predict_arch, axis=1).to_numpy(dtype=np.float64)
 
