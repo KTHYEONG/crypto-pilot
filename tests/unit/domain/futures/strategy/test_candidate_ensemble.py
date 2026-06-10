@@ -1178,3 +1178,72 @@ def test_s9_variant_prior_backward_compatibility() -> None:
     out = predict_regime_conditional_ensemble(model=model, oos_events=oos_events)
     # Expected: cell mean only (offset defaults to 0.0) -> 20.0
     assert out.expected_net_bps[0] == pytest.approx(20.0)
+
+
+def test_validation_rank_ic_uses_dynamic_offset_prediction() -> None:
+    """Verify that _internal_validation_rank_ic uses dynamic cell_val + offset prediction."""
+    rng = np.random.default_rng(12345)
+    n = 100
+    # Create 2 variants: v1 (good), v2 (bad) interleaved
+    variants = []
+    net_returns = []
+    for i in range(n):
+        if i % 2 == 0:
+            variants.append("v1")
+            net_returns.append(rng.normal(30.0, 5.0))
+        else:
+            variants.append("v2")
+            net_returns.append(rng.normal(-30.0, 5.0))
+    
+    df = pd.DataFrame({
+        "family": ["fam"] * n,
+        "variant": variants,
+        "archetype": ["momentum"] * n,
+        "entry_regime_code": rng.choice([0, 1], size=n),
+        "net_return_bps": net_returns,
+        "entry_idx": np.arange(n, dtype=np.int64),
+    })
+
+    # Act
+    ic_val = _internal_validation_rank_ic(
+        df,
+        shrinkage_k=10.0,
+        val_fraction=0.3,
+        axis="archetype_regime",
+        variant_prior_enabled=True,
+        variant_shrinkage_k=5.0,
+        variant_min_obs=10,
+    )
+    
+    # Assert: We expect a high positive rank IC because our prediction (which distinguishes v1 vs v2 dynamically)
+    # matches the actual returns (v1 positive, v2 negative).
+    assert ic_val > 0.5, f"Expected strong positive Rank IC, got {ic_val:.4f}"
+
+
+def test_validation_rank_ic_empty_offset_fallback() -> None:
+    """Verify fallback behavior in _internal_validation_rank_ic when no variants meet min_obs."""
+    rng = np.random.default_rng(12345)
+    n = 50
+    df = pd.DataFrame({
+        "family": ["fam"] * n,
+        "variant": [f"v_{i}" for i in range(n)],  # All unique variants (obs = 1 each)
+        "archetype": ["momentum"] * n,
+        "entry_regime_code": [0] * n,
+        "net_return_bps": rng.normal(10.0, 5.0, n),
+        "entry_idx": np.arange(n, dtype=np.int64),
+    })
+
+    # Act
+    ic_val = _internal_validation_rank_ic(
+        df,
+        shrinkage_k=10.0,
+        val_fraction=0.3,
+        axis="archetype_regime",
+        variant_prior_enabled=True,
+        variant_shrinkage_k=5.0,
+        variant_min_obs=10,  # No variant will pass this
+    )
+    # Since variant_min_obs = 10 and each variant has 1 obs, offsets should fall back to 0.0
+    # Thus, all predictions will be the cell mean, which is constant. Constant predictions give IC = 0.0 or nan.
+    # Because of our nan guard, it returns 0.0.
+    assert ic_val == 0.0, f"Expected 0.0 fallback for constant predictions, got {ic_val:.4f}"
