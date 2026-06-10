@@ -990,6 +990,11 @@ def _recommendation_threshold_checks(row: pd.Series, cfg: CandidateStrategyConfi
             or bool(row.get("breakeven_hard_pass", False))
         ),
         "mean_edge": float(row.get("oos_mean_edge_bps", float("nan"))) >= cfg.min_variant_oos_edge_bps,
+        # Hard economic floor: min_variant_oos_profit_bps is NOT bypassable via Bayesian
+        # admission — it enforces a cost-based minimum profitability for all paths.
+        "profit_floor": float(row.get("oos_mean_edge_bps", float("nan"))) >= float(
+            getattr(cfg, "min_variant_oos_profit_bps", 0.0)
+        ),
         "median_edge": median_ok,
         "p10_edge": p10_ok,
         "q10_fail": float(row.get("oos_q10_shortfall_fail_rate", 1.0)) <= cfg.max_variant_oos_q10_fail_rate,
