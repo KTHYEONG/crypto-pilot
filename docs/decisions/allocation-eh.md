@@ -22,3 +22,9 @@ last_verified: 2026-06-10
 - **Delta:** `ensemble_conditioning` 기본값 `"archetype_regime"` → `"auto"`. `oos_proof_events=None`일 때 `archetype_regime` 유지(fail-OPEN) → `archetype_only` 강등(fail-SAFE, `path="no_oos_evidence_failsafe"`). `regime_oos_stability_rho` 진단 필드(비-게이팅) 추가.
 - **Rationale:** 기본값이 `archetype_regime`으로 고정되어 IS 내부검증용 `auto` 분기가 한 번도 발동 안 됨. proof 없는 fold에서 OOS 증거 없이 복잡한 조건화 축을 선택하는 fail-OPEN 구조가 전 fold IC 음수(-0.016~-0.120)의 구조적 기여 요인. 임계값 추가(curve-fitting)가 아닌 기존 메커니즘의 기본값·안전경로 수정.
 - **Edge Cases:** `"archetype_regime"` 명시 시 기존 lift_proof 2차 게이트 유지(하위호환). `auto`가 `archetype_only`를 선택하면 fail-SAFE 미발동. 수치 불변(WF IC 동일)은 예상된 결과 — 근본 블로커는 admission OFF로 인한 풀 다양성 부재.
+
+## [2026-06-10] In-Fold Validation IC Alignment & OOS Rank IC logging
+
+- **Delta:** `_internal_validation_rank_ic`에서 `v_mu` 정적 평균 대신 `cell_val + v_offset` 동적 예측 적용. `candidate_workflow.py`에서 `oos_rank_ic`를 `ml_out` 진단에 저장하고 `bridge.py`에서 이를 가져와 `rank_ic` 리포트 작성.
+- **Rationale:** 검증 단계와 OOS 예측 단계의 예측 수식 불일치(bug)로 인해 검증 Rank IC가 구조적 음수로 측정되어 shrinkage 및 conditioning 선택에 왜곡 발생. 이를 해결하고 실제 앙상블 OOS IC를 브릿지 요약 테이블에 표시하여 진단 편의성 증대.
+- **Edge Cases:** 변이 관측치 미달 시 offset = 0.0으로 fallback 동작하여 하위 호환성 유지.

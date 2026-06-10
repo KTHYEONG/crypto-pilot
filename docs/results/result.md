@@ -8,10 +8,10 @@
 **평가 기준:** `min_variant_oos_edge_bps=10.0`, `breakeven_hard_gate=enabled`, `min_fold_realized_edge_bps=8.0`, `min_oos_rank_ic=0.01`, `min_ic_tstat=0.8`, `max_variant_oos_q10_fail_rate=0.65`, `min_wf_fold_pass_ratio=0.60`
 
 **진단 노트:**
-- **Phase 3 Variant Prior Offset + Family Filter 결과 분석 (신규):**
-  - ✅ **Fold 4 회복 및 통과**: RlzdMean이 10.2에서 **21.5 bps로 급반등하며 ✅ PASS 성공** (자산 배분 분산 문제 해결).
-  - ⚠️ **전체 1/4 PASS로 여전히 blocked**: Fold 1, 2, 3이 통과 기준(8.0 bps)에 미달함 (특히 Fold 3 RlzdMean -7.3 bps로 악화).
-  - **진단**: Variant Offset 도입으로 고이벤트 Fold 4에서 최적 포지션 비중이 보호되었으며, 필터링을 통해 Reversion 계열 노이즈가 제거되어 안정성이 확보되었습니다. 다만, 특정 Fold(Fold 3 등)의 국면 변화에는 추가적인 대책이 필요합니다.
+- **Phase 3 Variant Prior Offset + Family Filter & Validation IC Alignment 결과 분석 (최신):**
+  - ✅ **앙상블 변이 우선 매핑 정상화 (6 variants fitted)**: config 상의 패밀리명 불일치("tpc", "dm", "mtf" -> "trend_pullback_continuation" 등)를 해결하여 6개 변이가 정상 적합(fit)되었습니다.
+  - ✅ **OOS Rank IC 대폭 개선**: 검증 및 예측 공식 불일치(bug) 해결 및 variant prior 적용 활성화로 전 Fold의 OOS Rank IC가 개선되었으며, 특히 Fold 3의 IC는 양수(+0.019)로 반전되었습니다.
+  - ⚠️ **여전히 blocked (1/4 PASS)**: Rank IC는 크게 개선되었으나, 최종 포트폴리오 상위 컷오프(n_keep) 선택 종목군이 기존과 유사하게 묶여 있어 Fold 1, 2, 3의 실현 수익률(RlzdMean) 자체는 각각 4.9, 6.3, -7.3 bps로 동일하여 blocked 상태가 유지됩니다. 복리자산증식을 위해 Fold 1~3의 추가적인 국면 대응(regime-cell 최적화 또는 개별 게이트 조정)이 요구됩니다.
 
 ---
 
@@ -167,20 +167,20 @@
 | Fold | Mode       | IC(diag) |  Events | RlzdMean |  EU_p90 | Pass   |
 |      |            |    (ref) |         |  (★gate) | (★gate) |        |
 ----------------------------------------------------------------------------------
-| 1    | ensemble_b0 |   -0.075 |   2,297 |      4.9 |   34.50 | ❌      |
-| 2    | ensemble_b0 |   -0.106 |   2,303 |      6.3 |   35.03 | ❌      |
-| 3    | ensemble_b0 |   -0.019 |   3,137 |     -7.3 |   29.84 | ❌      |
-| 4    | ensemble_b0 |   -0.067 |   3,705 |     21.5 |   27.58 | ✅      |
+| 1    | ensemble_b0 |   -0.011 |   2,297 |      4.9 |   36.01 | ❌      |
+| 2    | ensemble_b0 |   -0.069 |   2,303 |      6.3 |   35.03 | ❌      |
+| 3    | ensemble_b0 |    0.019 |   3,137 |     -7.3 |   33.44 | ❌      |
+| 4    | ensemble_b0 |   -0.028 |   3,705 |     21.5 |   33.89 | ✅      |
 ----------------------------------------------------------------------------------
-(★ Phase 3 Offset + Filter 적용 후: Fold4 RlzdMean 10.2→21.5 복원 및 ✅ PASS 성공)
+(★ Phase 3 Offset + Filter + Alignment 적용 후: Fold OOS Rank IC 대폭 개선 및 6 variants fitted)
 
-[ENSEMBLE DIAGNOSTICS] Phase 3 Variant Prior Offset + Family Filter (2026-06-10 ALO Run — Fold 1 기준, 0 variants fitted)
+[ENSEMBLE DIAGNOSTICS] Phase 3 Variant Prior Offset + Family Filter (2026-06-10 ALO Run — Fold 1 기준, 6 variants fitted)
 ----------------------------------------------------------------------------------
 | Metric                       | Value                                           |
 | ---------------------------- | ----------------------------------------------- |
 | N events (train)             | 5,705                                           |
 | Global mu (bps)              | 22.4                                            |
-| Validation Rank IC           | -0.044                                          |
+| Validation Rank IC           | -0.020                                          |
 | IC sign                      | ❌ NEGATIVE                                     |
 | Conditioning chosen          | archetype_regime                                |
 | Adaptive shrinkage           | True                                            |
@@ -193,8 +193,9 @@
 | time_series_momentum         | 27.6            | POS  | 1,512                  |
 | trend_continuation           | 27.1            | POS  | 1,223                  |
 ----------------------------------------------------------------------------------
-| 진단: Variant Offset 및 패밀리 필터 적용. Fold 4 realized mean 21.5bps로 복원. |
-| Fold 1, 2, 3이 여전히 통과선에 도달하지 못해 전체 1/4 PASS 상태.               |
+| 진단: Variant Offset, 패밀리 필터 적용 및 검증 IC 공식 정합 완료.              |
+| OOS Rank IC는 전 Fold에서 의미 있게 개선(양전환 포함)되었으나, 여전히           |
+| Fold 1, 2, 3이 realized mean 기준에 미달하여 전체 1/4 PASS 상태 유지.          |
 ----------------------------------------------------------------------------------
 
 [BRIDGE SUMMARY] -----------------------------------

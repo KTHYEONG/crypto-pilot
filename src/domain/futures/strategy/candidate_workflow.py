@@ -279,6 +279,7 @@ def _fit_and_predict_single_fold(
         _lam = float(ml_out.validation_diagnostics.get("mu_shrinkage_lambda", 1.0))
         ml_out.validation_diagnostics["conditioning"] = _conditioning
         ml_out.validation_diagnostics["val_rank_ic"] = _val_ic
+        ml_out.validation_diagnostics["oos_rank_ic"] = rank_ic_val
         ml_out.validation_diagnostics["mu_shrinkage_lambda"] = _lam
 
         gate_rep = GateValidationReport(
