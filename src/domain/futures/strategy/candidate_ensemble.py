@@ -33,6 +33,8 @@ class RegimeConditionalEnsemble:
     # key = "family:variant", value = shrunk mu_bps toward mode archetype-regime cell anchor.
     # Empty dict → backward compat (no variant prior).
     variant_mu_bps: dict[str, float] = field(default_factory=dict)
+    # Variant-level shrunk offsets (deviation from mode cell anchor)
+    variant_offset_bps: dict[str, float] = field(default_factory=dict)
     # P0: Regime Lift Proof Gate fields
     conditioning_path: str = "pooled_fallback"  # "regime_conditioned" | "pooled_fallback" | "no_oos_evidence_failsafe"
     lift_proof: RegimeLiftProofResult | None = None  # None = proof 미실행 (backward compat)
@@ -53,7 +55,8 @@ def _fit_variant_means(
     k_variant: float,
     min_obs: int,
     freq_n_cap: int = 0,
-) -> dict[str, float]:
+    allowed_families: tuple[str, ...] = (),
+) -> tuple[dict[str, float], dict[str, float]]:
     """Fit variant-level shrunk means toward archetype-regime cell anchor.
 
     vmean_v = w_v * raw_v + (1 - w_v) * anchor_v
@@ -61,11 +64,11 @@ def _fit_variant_means(
     w_v = n_eff / (n_eff + k_variant), n_v < min_obs → w_v ≈ 0 (anchor fallback).
 
     Requires frame to have 'family', 'variant', 'archetype', 'entry_regime_code',
-    'net_return_bps' columns. Returns empty dict if columns absent.
+    'net_return_bps' columns. Returns empty dicts if columns absent.
     """
     required = {"family", "variant", "archetype", "entry_regime_code", "net_return_bps"}
     if not required.issubset(frame.columns):
-        return {}
+        return {}, {}
 
     def _effective_n(raw_n: int) -> float:
         if freq_n_cap > 0:
@@ -73,6 +76,7 @@ def _fit_variant_means(
         return float(raw_n)
 
     variant_mu: dict[str, float] = {}
+    variant_offset: dict[str, float] = {}
     fam_col = frame["family"].astype(str)
     var_col = frame["variant"].astype(str)
     vkeys = (fam_col + ":" + var_col).values
@@ -81,6 +85,10 @@ def _fit_variant_means(
     edge_col = pd.to_numeric(frame["net_return_bps"], errors="coerce").values
 
     for vkey in np.unique(vkeys):
+        family = vkey.split(":")[0]
+        if allowed_families and family not in allowed_families:
+            continue
+
         mask = vkeys == vkey
         n_v = int(mask.sum())
         edges = edge_col[mask]
@@ -101,13 +109,16 @@ def _fit_variant_means(
 
         if n_v < min_obs:
             variant_mu[vkey] = anchor
+            variant_offset[vkey] = 0.0
         else:
             n_eff = _effective_n(n_v)
             w_v = n_eff / (n_eff + k_variant)
             raw_mean = float(np.mean(edges))
-            variant_mu[vkey] = w_v * raw_mean + (1.0 - w_v) * anchor
+            shrunk_mean = w_v * raw_mean + (1.0 - w_v) * anchor
+            variant_mu[vkey] = shrunk_mean
+            variant_offset[vkey] = shrunk_mean - anchor
 
-    return variant_mu
+    return variant_mu, variant_offset
 
 
 def _require_ensemble_columns(events: pd.DataFrame) -> None:
@@ -332,6 +343,7 @@ def _internal_validation_rank_ic(
     variant_prior_enabled: bool = False,
     variant_shrinkage_k: float = 30.0,
     variant_min_obs: int = 40,
+    allowed_families: tuple[str, ...] = (),
 ) -> float:
     """In-fold purged validation Rank IC for the given axis.
 
@@ -377,7 +389,7 @@ def _internal_validation_rank_ic(
     # Fit variant prior on sub_fit only (IS-only, no OOS leakage)
     v_mu: dict[str, float] = {}
     if variant_prior_enabled:
-        v_mu = _fit_variant_means(
+        v_mu, _ = _fit_variant_means(
             sub_fit,
             cell_mu=cell_mu,
             arch_mu=arch_mu,
@@ -385,6 +397,7 @@ def _internal_validation_rank_ic(
             k_variant=variant_shrinkage_k,
             min_obs=variant_min_obs,
             freq_n_cap=freq_n_cap,
+            allowed_families=allowed_families,
         )
 
     has_family_variant = variant_prior_enabled and bool(v_mu)
@@ -490,6 +503,9 @@ def fit_regime_conditional_ensemble(
     variant_shrinkage_k: float = float(getattr(cfg, "ensemble_variant_shrinkage_k", 30.0))
     variant_min_obs: int = int(getattr(cfg, "ensemble_variant_min_obs", 40))
 
+    # Pass allowed_families from cfg
+    allowed_families = getattr(cfg, "ensemble_variant_prior_families", ())
+
     eb_fit_kwargs: dict[str, object] = {
         "adaptive_shrinkage": adaptive_shrinkage,
         "shrinkage_k_max": shrinkage_k_max,
@@ -500,6 +516,7 @@ def fit_regime_conditional_ensemble(
         "variant_prior_enabled": variant_prior_enabled,
         "variant_shrinkage_k": variant_shrinkage_k,
         "variant_min_obs": variant_min_obs,
+        "allowed_families": allowed_families,
     }
 
     # Compute archetype-only (always needed for fallback/auto)
@@ -557,8 +574,10 @@ def fit_regime_conditional_ensemble(
 
     # ── Variant-edge hierarchical prior (IS-only) ────────────────────────────
     variant_mu: dict[str, float] = {}
+    variant_offset: dict[str, float] = {}
     if variant_prior_enabled:
-        variant_mu = _fit_variant_means(
+        allowed_families = getattr(cfg, "ensemble_variant_prior_families", ())
+        variant_mu, variant_offset = _fit_variant_means(
             frame,
             cell_mu=cell_mu,
             arch_mu=arch_mu,
@@ -566,6 +585,7 @@ def fit_regime_conditional_ensemble(
             k_variant=variant_shrinkage_k,
             min_obs=variant_min_obs,
             freq_n_cap=freq_n_cap,
+            allowed_families=allowed_families,
         )
         _logger.info("[ENSEMBLE] variant_prior: %d variants fitted", len(variant_mu))
 
@@ -681,6 +701,7 @@ def fit_regime_conditional_ensemble(
         archetype_q10_bps=arch_q10,
         validation_rank_ic=float(val_ic),
         variant_mu_bps=variant_mu,
+        variant_offset_bps=variant_offset,
         conditioning_path=conditioning_path,
         lift_proof=lift_proof,
         regime_oos_stability_rho=regime_oos_stability_rho,
@@ -722,6 +743,15 @@ def predict_regime_conditional_ensemble(
 
     for idx, row in enumerate(event_frame.itertuples(index=False), start=0):
         arch = str(getattr(row, "archetype", ""))
+        regime = int(getattr(row, "entry_regime_code", 0))
+        key = (arch, regime)
+
+        if use_archetype_only:
+            cell_val = model.archetype_mu_bps.get(arch, model.global_mu_bps)
+        else:
+            cell_val = model.cell_mu_bps.get(
+                key, model.archetype_mu_bps.get(arch, model.global_mu_bps)
+            )
 
         # 3-level fallback: variant → cell → archetype → global
         if has_variant_prior:
@@ -729,25 +759,22 @@ def predict_regime_conditional_ensemble(
             var = str(getattr(row, "variant", ""))
             vkey = _variant_key(fam, var)
             if vkey in model.variant_mu_bps:
-                mu_net_decision_bps[idx] = model.variant_mu_bps[vkey]
+                try:
+                    offset = model.variant_offset_bps.get(vkey, 0.0)
+                except AttributeError:
+                    offset = 0.0
+                mu_net_decision_bps[idx] = cell_val + offset
                 q10_net_bps[idx] = model.cell_q10_bps.get(
-                    (arch, int(getattr(row, "entry_regime_code", 0))),
+                    key,
                     model.archetype_q10_bps.get(arch, model.global_q10_bps),
                 )
                 continue
 
-        if use_archetype_only:
-            mu_net_decision_bps[idx] = model.archetype_mu_bps.get(arch, model.global_mu_bps)
-            q10_net_bps[idx] = model.archetype_q10_bps.get(arch, model.global_q10_bps)
-        else:
-            key = (arch, int(getattr(row, "entry_regime_code", 0)))
-            # fallback: archetype → global
-            mu_net_decision_bps[idx] = model.cell_mu_bps.get(
-                key, model.archetype_mu_bps.get(arch, model.global_mu_bps)
-            )
-            q10_net_bps[idx] = model.cell_q10_bps.get(
-                key, model.archetype_q10_bps.get(arch, model.global_q10_bps)
-            )
+        mu_net_decision_bps[idx] = cell_val
+        q10_net_bps[idx] = model.cell_q10_bps.get(
+            key,
+            model.archetype_q10_bps.get(arch, model.global_q10_bps),
+        )
 
     # mu-quality shrinkage: attenuate conviction proportional to in-fold val IC
     mu_shrinkage_lambda = 1.0

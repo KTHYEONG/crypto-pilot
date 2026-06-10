@@ -258,6 +258,7 @@ class CandidateStrategyConfig:
     ensemble_variant_prior_enabled: bool = True
     ensemble_variant_shrinkage_k: float = 30.0   # anchor pull for variant James-Stein; Bounds: (0, ∞)
     ensemble_variant_min_obs: int = 40            # below → w_v≈0, fallback to cell anchor
+    ensemble_variant_prior_families: tuple[str, ...] = ("tpc", "dm", "mtf")
     # Conditioning axis: "auto" (default) picks archetype_regime vs archetype_only via
     # in-fold purged validation Rank IC gain — data-driven, fold-adaptive.
     # "archetype_regime" forces regime conditioning regardless of evidence.
