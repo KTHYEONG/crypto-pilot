@@ -1122,3 +1122,127 @@ def test_bayesian_admission_s9_momentum_signal_still_passes() -> None:
     assert "trend" in result["admitted_cells"]
     p = result["cell_p_admit"]["trend"]
     assert p >= 0.70, f"Momentum signal should pass (p={p:.3f})"
+
+
+def test_compute_rule_diagnostics_fdr_and_spa_gating() -> None:
+    aligned = _make_regime_aligned()
+    # 1. FDR gate test
+    rows = []
+    # 20 events for positive variant in OOS window (entry_idx = 240)
+    for i in range(20):
+        rows.append({
+            "datetime": aligned.datetimes[239],
+            "symbol": "BTCUSDT",
+            "family": "trend_ma",
+            "variant": "ema_12_72",
+            "side": 1,
+            "raw_score": 0.9,
+            "score_z": 0.9,
+            "entry_idx": 240,
+            "expected_holding_bars": 4,
+            "min_holding_bars": 1,
+            "stop_atr_mult": 50.0,
+            "take_profit_atr_mult": 50.0,
+            "turnover_proxy": 0.1,
+            "cost_floor_bps": 0.0,
+            "hurdle_bps": 0.0,
+        })
+    # 20 events for negative variant in OOS window (entry_idx = 240)
+    for i in range(20):
+        rows.append({
+            "datetime": aligned.datetimes[239],
+            "symbol": "BTCUSDT",
+            "family": "rsi_reversion",
+            "variant": "rsi_14",
+            "side": -1,
+            "raw_score": -0.8,
+            "score_z": -0.8,
+            "entry_idx": 240,
+            "expected_holding_bars": 4,
+            "min_holding_bars": 1,
+            "stop_atr_mult": 50.0,
+            "take_profit_atr_mult": 50.0,
+            "turnover_proxy": 0.1,
+            "cost_floor_bps": 0.0,
+            "hurdle_bps": 0.0,
+        })
+    events = pd.DataFrame(rows)
+    labeled = label_candidate_events(
+        events=events,
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(),
+    )
+    # Modify edge_after_hurdle_bps directly to mock high edge vs bad edge
+    for idx, row in labeled.iterrows():
+        if row["family"] == "trend_ma" and row["variant"] == "ema_12_72":
+            labeled.at[idx, "edge_after_hurdle_bps"] = 100.0  # high edge
+        else:
+            labeled.at[idx, "edge_after_hurdle_bps"] = -10.0  # negative edge
+            
+    # Base configuration to relax other unrelated gates
+    cfg_base = {
+        "min_variant_oos_obs": 1,
+        "min_variant_oos_edge_bps": 1.0,
+        "min_variant_oos_hit_rate": 0.0,
+        "min_variant_oos_payoff_ratio": 0.0,
+        "max_variant_oos_q10_fail_rate": 1.0,
+        "min_oos_rank_ic": -1.0,
+        "min_ic_tstat": 0.0,
+        "max_variant_event_fraction_per_bar": 1.0,
+        "standalone_breakeven_hard_gate_enabled": False,
+        "regime_cell_admission_enabled": False,
+    }
+
+    # fdr_gate_enabled=True, spa_gate_enabled=False
+    cfg_fdr = CandidateStrategyConfig(
+        fdr_gate_enabled=True,
+        spa_gate_enabled=False,
+        fdr_alpha=0.10,
+        **cfg_base
+    )
+    result_fdr = compute_rule_diagnostics(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg_fdr,
+        min_obs=1,
+    )
+    import logging
+    logging.warning("BY_VARIANT TABLE:\n%s", result_fdr.by_variant.to_string())
+    logging.warning("DECISION:\n%s", result_fdr.decision)
+    logging.warning("FAILURE REPORT:\n%s", result_fdr.recommendation_failure_report)
+    assert "trend_ma:ema_12_72" in result_fdr.recommended_keep_variants
+    assert "rsi_reversion:rsi_14" not in result_fdr.recommended_keep_variants
+
+    # 2. SPA gate test: Pass scenario
+    cfg_spa_pass = CandidateStrategyConfig(
+        fdr_gate_enabled=False,
+        spa_gate_enabled=True,
+        spa_p_value_max=0.50,
+        spa_n_bootstrap=100,
+        **cfg_base
+    )
+    result_spa_pass = compute_rule_diagnostics(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg_spa_pass,
+        min_obs=1,
+    )
+    assert "trend_ma:ema_12_72" in result_spa_pass.recommended_keep_variants
+
+    # 3. SPA gate test: Fail scenario (fail-closed)
+    labeled_bad = labeled.copy()
+    labeled_bad["edge_after_hurdle_bps"] = -50.0  # all negative
+    cfg_spa_fail = CandidateStrategyConfig(
+        fdr_gate_enabled=False,
+        spa_gate_enabled=True,
+        spa_p_value_max=0.10,
+        spa_n_bootstrap=100,
+        **cfg_base
+    )
+    result_spa_fail = compute_rule_diagnostics(
+        labeled_events=labeled_bad,
+        aligned=aligned,
+        cfg=cfg_spa_fail,
+        min_obs=1,
+    )
+    assert len(result_spa_fail.recommended_keep_variants) == 0

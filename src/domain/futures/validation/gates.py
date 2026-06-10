@@ -570,3 +570,36 @@ def check_hard_gates_ml(
         )
 
     return bool(pbo_ok and dsr_ok and wr_ok and mdd_ok and dir_ok and ev_ok)
+
+
+def apply_fdr_promotion_gate(
+    variant_pvalues: dict[str, float],
+    *,
+    alpha_fdr: float,
+) -> set[str]:
+    """Benjamini-Hochberg FDR control gate.
+
+    Args:
+        variant_pvalues: Dictionary of variant_key -> pvalue (one-sided p for positive expectancy).
+        alpha_fdr: False Discovery Rate target threshold.
+
+    Returns:
+        Set of variant keys that pass the FDR control gate.
+    """
+    if not variant_pvalues:
+        return set()
+
+    # Sort variants by p-value ascending
+    sorted_pvals = sorted(variant_pvalues.items(), key=lambda x: x[1])
+    m = len(sorted_pvals)
+
+    max_k = -1
+    for idx, (vk, p) in enumerate(sorted_pvals):
+        k = idx + 1  # 1-indexed rank
+        if p <= (k / m) * alpha_fdr:
+            max_k = idx  # Update max k (0-indexed index)
+
+    if max_k == -1:
+        return set()
+
+    return {vk for vk, p in sorted_pvals[:max_k + 1]}
