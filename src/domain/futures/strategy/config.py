@@ -203,6 +203,11 @@ class CandidateStrategyConfig:
     diagnostic_top_k: int = 10
     min_variant_oos_obs: int = 100
     min_variant_oos_edge_bps: float = 1.0
+    # Phase 2 signal pruning: additional profit floor (cost-based minimum).
+    # Effective floor = max(min_variant_oos_edge_bps, min_variant_oos_profit_bps).
+    # Set > 0 to prune high-frequency noise signals near breakeven.
+    # Example: 15.0 eliminates fzs/rsi/bollinger/vrr/rr (6~12bps OOS profit).
+    min_variant_oos_profit_bps: float = 0.0
     # Any ATR-stop strategy has median<0 + mean>0 as a structural property.
     # Use mean_edge + hit_or_payoff as economic gates; median is a soft diagnostic.
     min_variant_oos_median_edge_bps: float = -100.0
@@ -236,6 +241,16 @@ class CandidateStrategyConfig:
     admission_tau_prior_bps: float = 15.0        # fallback cross-cell std when < 2 cells; Bounds: (0, ∞)
     allocation_backend: Literal["ensemble_b0", "ml_edge"] = "ensemble_b0"
     ensemble_shrinkage_k: float = 50.0
+    # EB adaptive shrinkage: k_eff = within_var / between_var (James-Stein principle).
+    # When True, replaces fixed k=50 with data-derived k_eff capped at k_max.
+    # This preserves high-edge rare signals from being swamped by high-frequency noise.
+    ensemble_adaptive_shrinkage: bool = True
+    ensemble_shrinkage_k_max: float = 50.0  # upper bound for k_eff; Bounds: (0, ∞)
+    # Frequency cap: clip n to n_cap before computing w=n/(n+k) to prevent
+    # high-frequency noise cells from dominating the global pull.
+    ensemble_freq_n_cap: int = 200  # max effective n per cell; 0=disabled
+    # Floor: cell mu_net < this → contribution zeroed (not-predicted rather than negative).
+    ensemble_min_cell_edge_floor_bps: float = 0.0
     # Conditioning axis: "auto" (default) picks archetype_regime vs archetype_only via
     # in-fold purged validation Rank IC gain — data-driven, fold-adaptive.
     # "archetype_regime" forces regime conditioning regardless of evidence.
