@@ -37,7 +37,12 @@ def _train_df(n: int = 30) -> pd.DataFrame:
 # archetype_regime conditioning (explicit) — original behaviour
 # ---------------------------------------------------------------------------
 
-def test_regime_conditional_ensemble_shrinks_small_cells_to_global() -> None:
+def test_regime_conditional_ensemble_shrinks_small_cells_to_global(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.domain.futures.strategy import candidate_ensemble as _ce
+    from src.domain.futures.strategy.regime_evaluation import RegimeLiftProofResult
+
     train_events = pd.DataFrame(
         {
             "archetype": ["trend_continuation", "trend_continuation", "mean_reversion"],
@@ -45,9 +50,31 @@ def test_regime_conditional_ensemble_shrinks_small_cells_to_global() -> None:
             "net_return_bps": [100.0, 100.0, -100.0],
         }
     )
+    proof = train_events.copy()
+    proof_ids = np.zeros(len(proof), dtype=np.int32)
     cfg = _make_cfg(ensemble_shrinkage_k=50.0, ensemble_conditioning="archetype_regime")
 
-    model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
+    # lift_proof 통과로 고정 → archetype_regime 유지
+    monkeypatch.setattr(
+        _ce,
+        "evaluate_regime_lift_proof",
+        lambda **_kw: RegimeLiftProofResult(
+            proof_passed=True,
+            nw_tstat=2.0,
+            fold_pass_ratio=1.0,
+            conditioning_path="regime_conditioned",
+            nw_tstat_threshold=1.5,
+            fold_pass_ratio_threshold=0.6,
+            mean_lift_bps=5.0,
+            n_eff=10.0,
+            deflated_sharpe=1.0,
+            n_folds_evaluated=1,
+        ),
+    )
+
+    model = fit_regime_conditional_ensemble(
+        train_events=train_events, cfg=cfg, oos_proof_events=proof, fold_ids=proof_ids
+    )
 
     global_mu = (100.0 + 100.0 - 100.0) / 3.0
     shrunk_small_cell = model.cell_mu_bps[("mean_reversion", 4)]
@@ -57,7 +84,12 @@ def test_regime_conditional_ensemble_shrinks_small_cells_to_global() -> None:
     assert model.conditioning == "archetype_regime"
 
 
-def test_ensemble_predict_lookup_matches_cell_estimate() -> None:
+def test_ensemble_predict_lookup_matches_cell_estimate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.domain.futures.strategy import candidate_ensemble as _ce
+    from src.domain.futures.strategy.regime_evaluation import RegimeLiftProofResult
+
     train_events = pd.DataFrame(
         {
             "archetype": ["trend_continuation", "trend_continuation", "mean_reversion"],
@@ -65,8 +97,30 @@ def test_ensemble_predict_lookup_matches_cell_estimate() -> None:
             "net_return_bps": [40.0, 60.0, 10.0],
         }
     )
+    proof = train_events.copy()
+    proof_ids = np.zeros(len(proof), dtype=np.int32)
     cfg = _make_cfg(ensemble_shrinkage_k=1.0, ensemble_conditioning="archetype_regime")
-    model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
+
+    monkeypatch.setattr(
+        _ce,
+        "evaluate_regime_lift_proof",
+        lambda **_kw: RegimeLiftProofResult(
+            proof_passed=True,
+            nw_tstat=2.0,
+            fold_pass_ratio=1.0,
+            conditioning_path="regime_conditioned",
+            nw_tstat_threshold=1.5,
+            fold_pass_ratio_threshold=0.6,
+            mean_lift_bps=5.0,
+            n_eff=10.0,
+            deflated_sharpe=1.0,
+            n_folds_evaluated=1,
+        ),
+    )
+
+    model = fit_regime_conditional_ensemble(
+        train_events=train_events, cfg=cfg, oos_proof_events=proof, fold_ids=proof_ids
+    )
     oos_events = pd.DataFrame(
         {
             "archetype": ["trend_continuation", "mean_reversion", "unseen"],
@@ -308,7 +362,8 @@ def test_fit_ensemble_no_proof_events_records_path() -> None:
     model = fit_regime_conditional_ensemble(train_events=train, cfg=cfg)
 
     assert model.lift_proof is None
-    assert model.conditioning_path in {"regime_conditioned", "pooled_fallback"}
+    # proof 없음 → fail-SAFE 강등 (no_oos_evidence_failsafe) 또는 auto가 archetype_only 선택
+    assert model.conditioning_path in {"regime_conditioned", "pooled_fallback", "no_oos_evidence_failsafe"}
 
 
 def test_predict_ensemble_records_conditioning_path_in_diagnostics() -> None:
@@ -355,3 +410,230 @@ def test_predict_ensemble_backward_compat_no_lift_proof() -> None:
     # lift_proof=None → sentinel values: -1 (unset) and NaN
     assert output.validation_diagnostics["lift_proof_passed"] == -1
     assert np.isnan(float(output.validation_diagnostics["lift_nw_tstat"]))
+
+
+# ---------------------------------------------------------------------------
+# S1~S7: default "auto" + fail-SAFE 검증 (spec: regime_allocation_conditioning_contract)
+# ---------------------------------------------------------------------------
+
+
+def _diverse_train_df(n: int = 80) -> pd.DataFrame:
+    """3 archetype x 4 regime code, strong per-cell signal for auto to pick archetype_regime."""
+    rng = np.random.default_rng(0)
+    archetypes = rng.choice(["trend", "reversion", "carry"], size=n)
+    regimes = rng.integers(0, 4, size=n)
+    # archetype-regime 셀별 뚜렷한 edge 차이 → IC_regime > IC_arch
+    edge = np.where(
+        archetypes == "trend",
+        regimes * 10.0 + rng.normal(0, 2, n),
+        -regimes * 10.0 + rng.normal(0, 2, n),
+    )
+    return pd.DataFrame(
+        {
+            "archetype": archetypes,
+            "entry_regime_code": regimes,
+            "net_return_bps": edge.astype(float),
+            "entry_idx": np.arange(n),
+        }
+    )
+
+
+def _homogeneous_train_df(n: int = 60) -> pd.DataFrame:
+    """단일 archetype, 모든 regime에서 동일 edge → IC 차이 없음."""
+    rng = np.random.default_rng(1)
+    return pd.DataFrame(
+        {
+            "archetype": ["trend"] * n,
+            "entry_regime_code": rng.integers(0, 4, size=n),
+            "net_return_bps": rng.normal(10.0, 3.0, size=n),
+            "entry_idx": np.arange(n),
+        }
+    )
+
+
+def test_s6_default_conditioning_is_auto() -> None:
+    """S6: config 기본값이 "auto"여야 한다."""
+    cfg = CandidateStrategyConfig()
+    assert cfg.ensemble_conditioning == "auto"
+
+
+def test_s3_failsafe_when_no_proof_events_and_auto_picks_regime() -> None:
+    """S3-A: auto가 archetype_regime를 선택했으나 proof window 없음 → fail-SAFE 강등."""
+    train = _diverse_train_df(120)
+    cfg = _make_cfg(
+        ensemble_conditioning="auto",
+        ensemble_min_conditioning_ic_gain=0.0,  # IC 차이 있으면 무조건 regime 선택
+    )
+
+    result = fit_regime_conditional_ensemble(
+        train_events=train,
+        cfg=cfg,
+        oos_proof_events=None,  # proof 없음
+    )
+
+    # auto가 archetype_regime을 선택했더라도 proof 없으면 fail-safe 강등
+    assert result.conditioning == "archetype_only"
+    assert result.conditioning_path == "no_oos_evidence_failsafe"
+    assert result.cell_mu_bps == {}
+
+
+def test_s3_failsafe_explicit_archetype_regime_no_proof() -> None:
+    """S3-B: ensemble_conditioning='archetype_regime' 명시 + proof 없음 → fail-SAFE."""
+    train = _diverse_train_df(80)
+    cfg = _make_cfg(ensemble_conditioning="archetype_regime")
+
+    result = fit_regime_conditional_ensemble(
+        train_events=train,
+        cfg=cfg,
+        oos_proof_events=None,
+    )
+
+    assert result.conditioning == "archetype_only"
+    assert result.conditioning_path == "no_oos_evidence_failsafe"
+    assert result.cell_mu_bps == {}
+
+
+def test_s2_auto_picks_archetype_only_for_homogeneous_pool() -> None:
+    """S2: 동질적 풀에서 IC 차이 < gain_thr → archetype_only 선택."""
+    train = _homogeneous_train_df(60)
+    cfg = _make_cfg(
+        ensemble_conditioning="auto",
+        ensemble_min_conditioning_ic_gain=0.01,
+    )
+
+    result = fit_regime_conditional_ensemble(
+        train_events=train,
+        cfg=cfg,
+        oos_proof_events=None,
+    )
+
+    assert result.conditioning == "archetype_only"
+    assert result.cell_mu_bps == {}
+    assert result.archetype_mu_bps  # archetype fallback은 채워짐
+
+
+def test_s4_lift_proof_failure_still_downgrades(monkeypatch: pytest.MonkeyPatch) -> None:
+    """S4: proof events 존재하나 lift_proof 실패 → archetype_only (기존 동작 불변)."""
+    from src.domain.futures.strategy import candidate_ensemble as _ce
+    from src.domain.futures.strategy.regime_evaluation import RegimeLiftProofResult
+
+    train = _diverse_train_df(120)
+    proof = _diverse_train_df(40)
+    proof_ids = np.zeros(len(proof), dtype=np.int32)
+    cfg = _make_cfg(
+        ensemble_conditioning="archetype_regime",
+        ensemble_min_conditioning_ic_gain=0.0,
+    )
+
+    # lift_proof 항상 실패 반환으로 고정
+    monkeypatch.setattr(
+        _ce,
+        "evaluate_regime_lift_proof",
+        lambda **_kw: RegimeLiftProofResult(
+            proof_passed=False,
+            nw_tstat=-1.0,
+            fold_pass_ratio=0.0,
+            conditioning_path="pooled_fallback",
+            nw_tstat_threshold=1.5,
+            fold_pass_ratio_threshold=0.6,
+            mean_lift_bps=-5.0,
+            n_eff=30.0,
+            deflated_sharpe=-0.5,
+            n_folds_evaluated=1,
+        ),
+    )
+
+    result = fit_regime_conditional_ensemble(
+        train_events=train,
+        cfg=cfg,
+        oos_proof_events=proof,
+        fold_ids=proof_ids,
+    )
+
+    assert result.conditioning == "archetype_only"
+
+
+def test_s5_lift_proof_pass_keeps_archetype_regime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """S5: proof events 존재 + lift_proof 통과 → archetype_regime 유지."""
+    from src.domain.futures.strategy import candidate_ensemble as _ce
+    from src.domain.futures.strategy.regime_evaluation import RegimeLiftProofResult
+
+    train = _diverse_train_df(200)
+    proof = _diverse_train_df(60)
+    proof_ids = np.zeros(len(proof), dtype=np.int32)
+    cfg = _make_cfg(
+        ensemble_conditioning="archetype_regime",
+        ensemble_min_conditioning_ic_gain=0.0,
+    )
+
+    # lift_proof 항상 통과 반환으로 고정
+    monkeypatch.setattr(
+        _ce,
+        "evaluate_regime_lift_proof",
+        lambda **_kw: RegimeLiftProofResult(
+            proof_passed=True,
+            nw_tstat=2.5,
+            fold_pass_ratio=1.0,
+            conditioning_path="regime_conditioned",
+            nw_tstat_threshold=1.5,
+            fold_pass_ratio_threshold=0.6,
+            mean_lift_bps=8.0,
+            n_eff=50.0,
+            deflated_sharpe=1.2,
+            n_folds_evaluated=1,
+        ),
+    )
+
+    result = fit_regime_conditional_ensemble(
+        train_events=train,
+        cfg=cfg,
+        oos_proof_events=proof,
+        fold_ids=proof_ids,
+    )
+
+    assert result.conditioning == "archetype_regime"
+    assert result.conditioning_path == "regime_conditioned"
+    assert result.cell_mu_bps  # cell 채워짐
+
+
+def test_s7_rho_diagnostic_stored_not_gating(monkeypatch: pytest.MonkeyPatch) -> None:
+    """S7: regime_oos_stability_rho는 결과에 저장되지만 conditioning 결정을 변경하지 않는다."""
+    from src.domain.futures.strategy import candidate_ensemble as _ce
+    from src.domain.futures.strategy.regime_evaluation import RegimeLiftProofResult
+
+    train = _diverse_train_df(200)
+    proof = _diverse_train_df(60)
+    proof_ids = np.zeros(len(proof), dtype=np.int32)
+    cfg = _make_cfg(
+        ensemble_conditioning="archetype_regime",
+        ensemble_min_conditioning_ic_gain=0.0,
+    )
+
+    monkeypatch.setattr(
+        _ce,
+        "evaluate_regime_lift_proof",
+        lambda **_kw: RegimeLiftProofResult(
+            proof_passed=True,
+            nw_tstat=2.5,
+            fold_pass_ratio=1.0,
+            conditioning_path="regime_conditioned",
+            nw_tstat_threshold=1.5,
+            fold_pass_ratio_threshold=0.6,
+            mean_lift_bps=8.0,
+            n_eff=50.0,
+            deflated_sharpe=1.2,
+            n_folds_evaluated=1,
+        ),
+    )
+
+    result = fit_regime_conditional_ensemble(
+        train_events=train,
+        cfg=cfg,
+        oos_proof_events=proof,
+        fold_ids=proof_ids,
+        regime_oos_stability_rho=0.25,  # 낮은 rho
+    )
+
+    # rho가 낮아도 conditioning 변경 없음 (진단 전용)
+    assert result.regime_oos_stability_rho == pytest.approx(0.25)
+    assert result.conditioning == "archetype_regime"  # rho로 강등 안 됨

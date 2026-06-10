@@ -232,11 +232,11 @@ class CandidateStrategyConfig:
     max_admitted_cells_per_variant: int = 2
     allocation_backend: Literal["ensemble_b0", "ml_edge"] = "ensemble_b0"
     ensemble_shrinkage_k: float = 50.0
-    # Conditioning axis: "archetype_regime" uses (archetype, regime_code) cells (default,
-    # restores original B0 behaviour with improved two-level fallback),
-    # "archetype_only" strips regime_code from alpha,
-    # "auto" picks via in-fold purged validation Rank IC gain.
-    ensemble_conditioning: Literal["archetype_regime", "archetype_only", "auto"] = "archetype_regime"
+    # Conditioning axis: "auto" (default) picks archetype_regime vs archetype_only via
+    # in-fold purged validation Rank IC gain — data-driven, fold-adaptive.
+    # "archetype_regime" forces regime conditioning regardless of evidence.
+    # "archetype_only" strips regime_code from alpha (most conservative).
+    ensemble_conditioning: Literal["archetype_regime", "archetype_only", "auto"] = "auto"
     ensemble_internal_val_fraction: float = 0.25
     ensemble_min_conditioning_ic_gain: float = 0.01
     # mu-quality shrinkage: lam = clip(val_rank_ic / mu_quality_ic_full_scale, 0, 1)
