@@ -1126,8 +1126,8 @@ def _build_recommendations(
     if cfg.fdr_gate_enabled and variant_pvalues:
         fdr_passed = apply_fdr_promotion_gate(variant_pvalues, alpha_fdr=cfg.fdr_alpha)
 
-    _logger.warning("[FDR_DEBUG] variant_pvalues = %s", variant_pvalues)
-    _logger.warning("[FDR_DEBUG] fdr_passed = %s", fdr_passed)
+    _logger.debug("[FDR_DEBUG] variant_pvalues = %s", variant_pvalues)
+    _logger.debug("[FDR_DEBUG] fdr_passed = %s", fdr_passed)
 
     keep_groups: list[str] = []
     for _, row in by_variant.iterrows():
