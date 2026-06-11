@@ -11,6 +11,7 @@ from typing import Any
 
 import numba
 import numpy as np
+from numpy.typing import NDArray
 from sklearn.covariance import LedoitWolf
 
 from src.domain.futures.portfolio.portfolio_optimizer import PortfolioPolicyInputs
@@ -755,3 +756,102 @@ def quantize_weights(
 
     # 비중으로 재변환
     return qty * p_arr / eq
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: 신규 아키텍처 — Diagonal Kelly (독립 경로)
+# ---------------------------------------------------------------------------
+
+
+def diagonal_kelly_weights(
+    mu_bps: NDArray[np.float64],
+    sigma: NDArray[np.float64],
+    *,
+    kelly_fraction: float,
+    vol_target: float | None,
+    friction_hurdle_bps: NDArray[np.float64],
+    caps: PortfolioCaps,
+    prev_w: NDArray[np.float64],
+    no_trade_band: float,
+    btc_beta: NDArray[np.float64] | None = None,
+    bars_per_year: float = 2190.0,
+) -> NDArray[np.float64]:
+    """신규 아키텍처용 Diagonal Kelly 사이징.
+
+    기존 LW/BL/full-cov 경로와 독립적인 신규 함수. 기존 solve_constrained_weights와 무관.
+
+    처리 순서:
+    1. Friction filter: mu_bps_i < friction_hurdle_bps_i → w_i = 0 (확정 손실 방지)
+    2. Diagonal Kelly: w_raw_i = kelly_fraction * mu_bps_i / max(sigma_i^2, VOL_FLOOR^2)
+    3. vol_target 스케일링 (optional): 포트폴리오 sigma 기준 비례 축소
+    4. No-trade band: |w_i - prev_w_i| < no_trade_band → w_i = prev_w_i (회전율 억제)
+    5. project_all_caps: per_symbol / beta / gross / net / vol_target cap 적용
+
+    Args:
+        mu_bps: 심볼별 기대수익 [N], 단위: bps. SymbolSignal.raw_mu (Layer1 출력).
+        sigma: per-bar sigma [N]. >= VOL_FLOOR 보장 권장.
+        kelly_fraction: 분수 Kelly 계수 (0,1].
+        vol_target: 연율화 포트폴리오 변동성 목표 (None이면 미적용).
+        friction_hurdle_bps: 심볼별 마찰비용 허들 [N], 단위: bps. taker+slip+funding.
+        caps: PortfolioCaps 제약 (5종 cap).
+        prev_w: 이전 bar 비중 [N] (no-trade band 기준).
+        no_trade_band: Δw < band이면 rebalance 생략 (절대값, 예: 0.01=1%).
+        btc_beta: 심볼별 BTC beta [N] (project_all_caps에 전달, None이면 0 벡터).
+        bars_per_year: 연율화 factor (4h=2190, 1h=8760).
+
+    Returns:
+        최종 비중 벡터 [N], float64.
+
+    Note:
+        mu_bps 단위(bps)와 sigma 단위(per-bar return)의 차이:
+        Kelly 계산 시 mu를 per-bar return으로 변환 (mu_bps * 1e-4).
+        friction_hurdle 비교는 bps 단위 유지.
+
+    """
+    # 순환 import 방지 — 함수 내부 로컬 import
+    from src.domain.futures.strategy.cs_rank import VOL_FLOOR
+
+    n = mu_bps.size
+    mu = np.asarray(mu_bps, dtype=np.float64).ravel()
+    sig = np.asarray(sigma, dtype=np.float64).ravel()
+    hurdle = np.asarray(friction_hurdle_bps, dtype=np.float64).ravel()
+    p_w = np.asarray(prev_w, dtype=np.float64).ravel()
+    beta = (
+        np.zeros(n, dtype=np.float64)
+        if btc_beta is None
+        else np.asarray(btc_beta, dtype=np.float64).ravel()
+    )
+
+    # 1. Friction filter: |mu_bps| >= hurdle (long/short 모두 적용)
+    friction_mask: NDArray[np.bool_] = np.abs(mu) >= hurdle
+
+    # 2. Diagonal Kelly (mu를 per-bar return으로 변환: bps → fraction)
+    mu_ret = mu * 1e-4  # bps → per-bar simple return
+    sig_clipped = np.maximum(sig, float(VOL_FLOOR))
+    var = sig_clipped**2
+    w_raw: NDArray[np.float64] = kelly_fraction * mu_ret / var
+    w_raw = np.where(friction_mask, w_raw, 0.0)
+
+    # 3. vol_target 스케일링: caps.target_ann_vol override (project_all_caps에 위임)
+    import dataclasses
+
+    effective_caps = (
+        dataclasses.replace(caps, target_ann_vol=vol_target)
+        if vol_target is not None
+        else caps
+    )
+
+    # 포트폴리오 실현 vol 추정: per_symbol 클립 후 계산
+    # (pre-cap w_raw는 극단값이므로 vol_target scaling을 왜곡함)
+    w_clipped_est = np.clip(w_raw, -caps.per_symbol, caps.per_symbol)
+    sigma_port = float(np.sqrt(float(np.dot(w_clipped_est**2, var))))
+
+    w_capped: NDArray[np.float64] = project_all_caps(
+        w_raw, beta, sigma_port, bars_per_year, effective_caps
+    )
+
+    # 4. No-trade band: |Δw_i| < no_trade_band → 이전 비중 유지
+    delta = np.abs(w_capped - p_w)
+    w_final: NDArray[np.float64] = np.where(delta >= no_trade_band, w_capped, p_w)
+
+    return np.asarray(w_final, dtype=np.float64)
