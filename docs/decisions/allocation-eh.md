@@ -11,6 +11,13 @@ related_paths:
 last_verified: 2026-06-10
 ---
 
+## [2026-06-11] Portfolio Covariance Kelly 反證
+
+- **Delta:** `candidate_portfolio.py` Pass3에 `use_portfolio_kelly` 오버레이 추가 — `w = f_k·(Σ̂+εI)⁻¹μ` via Ledoit-Wolf OAS shrinkage + 부호 가드. `covariance.py` 신규 모듈(4함수, 100% 커버). Ablation Step7 `Ens_CovKelly` 추가.
+- **Rationale:** 대각 Kelly는 종목간 상관 무시 → 공분산 인식 비중 배분으로 CAGR 개선 가설 검증.
+- **Result (Disproven):** OOS Ens_CovKelly = -7.9% vs Ens_Kelly = +2.8%. 이벤트 밀도 부족(~144건/180bar 윈도우)에서 Σ̂ 추정 노이즈가 구조적 이득을 초과 — 전형적 Markowitz 오차 최대화. 구현 결함 아님, 조건 미충족 음성 결과.
+- **Next lever:** deploy_fraction 0.25 상향 또는 regime-conditional sizing multiplier.
+
 ## [2026-06-10] Regime-Cell Admission: Bayesian Posterior Probability 대체
 
 - **Delta:** `min_obs=60 + min_tstat=1.0 + k0=30` 3개 하드코딩 임계값 → 단일 기준 `P(μ > δ | data) ≥ 0.70` (N-N conjugate posterior + Newey-West Ω_nw). `min_regime_cell_oos_obs: 60→10` (NW stability floor만), `regime_cell_admission_enabled: False→True`. `min_obs` OR-path 추가 + `_build_recommendations` cell_admitted bypass.
