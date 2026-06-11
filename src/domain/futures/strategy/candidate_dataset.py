@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from numba import njit
 from numpy.typing import NDArray
 
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
@@ -219,6 +220,22 @@ def _target_cost_hurdle_bps(events: pd.DataFrame) -> NDArray[np.float32]:
     return cost_hurdle
 
 
+@njit(cache=True)  # type: ignore
+def _compute_uniqueness_weights_numba(
+    starts: NDArray[np.int64],
+    ends: NDArray[np.int64],
+    inv_active: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    n_events = starts.shape[0]
+    weights = np.zeros(n_events, dtype=np.float64)
+    for idx in range(n_events):
+        start = starts[idx]
+        end = ends[idx]
+        segment = inv_active[start : end + 1]
+        weights[idx] = segment.mean() if segment.size > 0 else 0.0
+    return weights
+
+
 def _event_uniqueness_weights(
     *,
     entry_idx: NDArray[np.int32],
@@ -243,10 +260,8 @@ def _event_uniqueness_weights(
     positive_mask = active > 0
     inv_active[positive_mask] = 1.0 / active[positive_mask]
 
-    weights = np.zeros((n_events,), dtype=np.float64)
-    for idx, (start, end) in enumerate(zip(starts, ends, strict=True)):
-        segment = inv_active[int(start) : int(end) + 1]
-        weights[idx] = float(segment.mean()) if segment.size > 0 else 0.0
+    # Numba-compiled 가중치 연산 호출
+    weights = _compute_uniqueness_weights_numba(starts, ends, inv_active)
 
     positive = weights > 0.0
     if positive.any():
@@ -296,6 +311,45 @@ def _weighted_tstat(
     return mean / se, n_eff
 
 
+@njit(cache=True)  # type: ignore
+def _compute_bootstrap_means_numba(
+    x: NDArray[np.float64],
+    w: NDArray[np.float64],
+    start_idxs: NDArray[np.int64],
+    block: int,
+) -> NDArray[np.float64]:
+    n_obs = x.shape[0]
+    bootstrap_n = start_idxs.shape[0]
+    num_blocks = start_idxs.shape[1]
+    boot_means = np.zeros(bootstrap_n, dtype=np.float64)
+
+    for boot_idx in range(bootstrap_n):
+        sx = np.zeros(n_obs, dtype=np.float64)
+        sw = np.zeros(n_obs, dtype=np.float64)
+        idx = 0
+        for b in range(num_blocks):
+            start = start_idxs[boot_idx, b]
+            length = block
+            if start + length > n_obs:
+                length = n_obs - start
+            if idx + length > n_obs:
+                length = n_obs - idx
+            if length <= 0:
+                break
+
+            sx[idx : idx + length] = x[start : start + length]
+            sw[idx : idx + length] = w[start : start + length]
+            idx += length
+
+        w_sum = sw.sum()
+        if w_sum > 0.0:
+            boot_means[boot_idx] = (sx * sw).sum() / w_sum
+        else:
+            boot_means[boot_idx] = 0.0
+
+    return boot_means
+
+
 def _block_bootstrap_tstat(
     values: NDArray[np.float64],
     weights: NDArray[np.float64],
@@ -316,21 +370,16 @@ def _block_bootstrap_tstat(
     holding = holding_bars[mask][order]
     n_obs = x.shape[0]
     block = max(1, int(np.rint(np.median(holding))))
+
+    num_blocks = (n_obs + block - 1) // block
     rng = np.random.default_rng(seed)
-    boot_means = np.zeros(bootstrap_n, dtype=np.float64)
-    for boot_idx in range(bootstrap_n):
-        sampled_x: list[NDArray[np.float64]] = []
-        sampled_w: list[NDArray[np.float64]] = []
-        taken = 0
-        while taken < n_obs:
-            start = int(rng.integers(0, n_obs))
-            end = min(start + block, n_obs)
-            sampled_x.append(x[start:end])
-            sampled_w.append(w[start:end])
-            taken += end - start
-        sx = np.concatenate(sampled_x, axis=0)[:n_obs]
-        sw = np.concatenate(sampled_w, axis=0)[:n_obs]
-        boot_means[boot_idx] = float(np.average(sx, weights=sw))
+
+    # 2D 난수 인덱스 사전 일괄 샘플링
+    start_idxs = rng.integers(0, n_obs, size=(bootstrap_n, num_blocks))
+
+    # Numba 컴파일 함수 실행
+    boot_means = _compute_bootstrap_means_numba(x, w, start_idxs, block)
+
     boot_std = float(np.std(boot_means, ddof=1)) if bootstrap_n > 1 else 0.0
     if not np.isfinite(boot_std) or boot_std <= 0.0:
         return 0.0
@@ -707,8 +756,14 @@ def build_candidate_dataset(
     # 6. Assembly
     event_t = events["entry_idx"].values - 1
     valid_mask = event_t >= 20
-    overlay_ctx = compute_risk_overlay(aligned=aligned)
-    regime_ctx = compute_market_regime_context(aligned=aligned)
+    
+    if "overlay_ctx" not in cache:
+        cache["overlay_ctx"] = compute_risk_overlay(aligned=aligned)
+    overlay_ctx = cache["overlay_ctx"]
+
+    if "regime_ctx" not in cache:
+        cache["regime_ctx"] = compute_market_regime_context(aligned=aligned)
+    regime_ctx = cache["regime_ctx"]
 
     x_mat = np.zeros((len(events), len(feature_names)), dtype=np.float32)
 

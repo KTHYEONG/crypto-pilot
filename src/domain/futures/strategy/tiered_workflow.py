@@ -627,6 +627,46 @@ def run_l1_cpcv(
                 ic_val, _ = spearmanr(pred_mu, realized)
                 fold_ics.append(float(ic_val) if not np.isnan(ic_val) else 0.0)
 
+    # timing_profile 집계
+    total_folds = len(futures)
+    if total_folds > 0:
+        avg_profile = dict.fromkeys(
+            (
+                "schema",
+                "dataset_fit",
+                "dataset_early_stop",
+                "dataset_calibration_fit",
+                "dataset_calibration_eval",
+                "dataset_oos",
+                "edge_fit",
+                "inference",
+                "selection",
+            ),
+            0.0,
+        )
+        for _, _, fold_out in futures:
+            prof = getattr(fold_out, "timing_profile", {})
+            for k in avg_profile:
+                avg_profile[k] += prof.get(k, 0.0)
+
+        for k in avg_profile:
+            avg_profile[k] /= total_folds
+
+        logger.info(
+            "[CPCV-PROFILE] Average sub-fold execution breakdown: "
+            "schema=%.3fs, ds_fit=%.3fs, ds_es=%.3fs, ds_cal_fit=%.3fs, ds_cal_eval=%.3fs, "
+            "ds_oos=%.3fs, edge_fit=%.3fs, inference=%.3fs, selection=%.3fs",
+            avg_profile["schema"],
+            avg_profile["dataset_fit"],
+            avg_profile["dataset_early_stop"],
+            avg_profile["dataset_calibration_fit"],
+            avg_profile["dataset_calibration_eval"],
+            avg_profile["dataset_oos"],
+            avg_profile["edge_fit"],
+            avg_profile["inference"],
+            avg_profile["selection"],
+        )
+
     logger.info(
         "[CPCV-END] CPCV L1 signal validation parallel execution completed in %.2fs",
         time.perf_counter() - t_start,
