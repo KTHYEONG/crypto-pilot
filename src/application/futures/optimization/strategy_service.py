@@ -106,6 +106,22 @@ def build_candidate_strategy_config(
         admission_tau_prior_bps=float(
             opt_config.get("FUTURES_CANDIDATE_ADMISSION_TAU_PRIOR_BPS", candidate.admission_tau_prior_bps)
         ),
+        ensemble_score_calibration_enabled=_parse_bool(
+            opt_config.get("FUTURES_CANDIDATE_ENSEMBLE_SCORE_CALIBRATION_ENABLED"),
+            default=candidate.ensemble_score_calibration_enabled,
+        ),
+        ensemble_score_z_clip=float(
+            opt_config.get("FUTURES_CANDIDATE_ENSEMBLE_SCORE_Z_CLIP", candidate.ensemble_score_z_clip)
+        ),
+        ensemble_score_calibration_min_obs=int(
+            opt_config.get(
+                "FUTURES_CANDIDATE_ENSEMBLE_SCORE_CALIBRATION_MIN_OBS",
+                candidate.ensemble_score_calibration_min_obs,
+            )
+        ),
+        ensemble_score_slope_k=float(
+            opt_config.get("FUTURES_CANDIDATE_ENSEMBLE_SCORE_SLOPE_K", candidate.ensemble_score_slope_k)
+        ),
         signal_only=signal_only,
     )
     return replace(strategy_cfg, candidate=candidate)
