@@ -8,8 +8,16 @@ ai_read_policy: when_related
 related_paths:
   - src/domain/futures/strategy/candidate_ensemble.py
   - src/domain/futures/strategy/config.py
-last_verified: 2026-06-10
+last_verified: 2026-06-11
 ---
+
+## [2026-06-11] Direction A/B 구현 — score_z slope 反證 + q90 대칭 산출
+
+- **Delta (Direction B):** `_fit_cell_means` 6-tuple→9-tuple (cell/arch/global q90 추가). Kelly σ_R = (q90_R−q10_R)/2.563 정상화 (이전: q90=μ.copy()→편측 분산, 차원 불일치). predict에서 실산출 q90 lookup.
+- **Delta (Direction A):** `opt_config.py`에 `SCORE_CALIBRATION_ENABLED=True` 직접 주입 (`.env` 비의존). `_internal_validation_rank_ic`에 score path 추가(Fix2: val_ic가 실측 반영). `score_calibration_valid` OOS tail-probe 부호 안정성 게이트(Fix3).
+- **Rationale:** Ensemble B0가 cell lookup으로만 μ 결정 → cross-sectional Rank IC≈0 → pass_lift 실패. score_z를 slope로 재주입해 event간 순위 분화 시도.
+- **Result (Disproven):** `score_calibration: 6 fitted, 3 valid`. val_ic=−0.046, pass_ratio=1/4 불변. `score_z`(within-variant 2160-bar causal percentile)는 cross-variant ranking 정보력 부재 확정. 기구는 정상동작, feature 자체 문제.
+- **Next lever:** cross-sectional 표준화 score 재설계 (variant 간 z-score 또는 regime별 cross-section rank).
 
 ## [2026-06-11] Portfolio Covariance Kelly 反證
 
