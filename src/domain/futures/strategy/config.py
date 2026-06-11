@@ -453,6 +453,13 @@ class CandidateStrategyConfig:
     })
     bl_shrinkage_var_mult: float = 0.20
     bl_shrinkage_omega_mult: float = 0.10
+    # Direction A: score-conditioned ensemble (regime-conditional score calibration)
+    # Fits shrunk-OLS slope beta per regime: mu_pred = alpha + beta * score_z
+    # score_calibration_valid[g] = True only when β > 0 (predictive direction)
+    ensemble_score_calibration_enabled: bool = False
+    ensemble_score_z_clip: float = 3.0
+    ensemble_score_calibration_min_obs: int = 60
+    ensemble_score_slope_k: float = 100.0  # shrinkage strength toward 0 (James-Stein)
 
     def __post_init__(self) -> None:
         """Validate candidate strategy parameters."""
@@ -708,6 +715,12 @@ class CandidateStrategyConfig:
             raise ValueError("cov_ridge_eps must be positive")
         if self.cov_shrinkage != "auto" and not (0.0 <= float(self.cov_shrinkage) <= 1.0):
             raise ValueError("cov_shrinkage must be 'auto' or a float in [0.0, 1.0]")
+        if self.ensemble_score_z_clip <= 0.0:
+            raise ValueError("ensemble_score_z_clip must be positive")
+        if self.ensemble_score_calibration_min_obs < 1:
+            raise ValueError("ensemble_score_calibration_min_obs must be >= 1")
+        if self.ensemble_score_slope_k <= 0.0:
+            raise ValueError("ensemble_score_slope_k must be positive")
 
 
 def with_max_holding_bars(
