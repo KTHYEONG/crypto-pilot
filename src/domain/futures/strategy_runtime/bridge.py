@@ -29,6 +29,76 @@ class _RuntimeBreakdown:
         return max(float(self.total) - self.accounted, 0.0)
 
 
+def verify_data_integrity(
+    aligned: AlignedMarketData,
+    symbols: list[str],
+    min_length: int = 100
+) -> dict[str, dict[str, Any]]:
+    """Verify market data integrity per symbol before running the candidate strategy.
+
+    Args:
+        aligned: Aligned market data structure containing 2D pricing/volume matrices.
+        symbols: List of symbols in the universe.
+        min_length: Minimum data length (rows) required for reliable strategy execution.
+
+    Returns:
+        A dictionary mapping each symbol to its validation results.
+    """
+    report: dict[str, dict[str, Any]] = {}
+    n_bars = aligned.close_2d.shape[0]
+
+    _logger.info("[DATA-INTEGRITY] Starting market data integrity check for %d symbols...", len(symbols))
+    _logger.info("[DATA-INTEGRITY] %-12s | %-6s | %-6s | %-6s | %-6s | %-6s | %s",
+                 "Symbol", "Bars", "NaN%", "Zero%", "VolStd", "Hi>=Lo", "Status (Reason)")
+
+    for col_idx, sym in enumerate(symbols):
+        close = aligned.close_2d[:, col_idx]
+        high = aligned.high_2d[:, col_idx]
+        low = aligned.low_2d[:, col_idx]
+        volume = aligned.volume_2d[:, col_idx]
+
+        nan_count = np.isnan(close).sum() + np.isnan(high).sum() + np.isnan(low).sum() + np.isnan(volume).sum()
+        nan_pct = (nan_count / (4 * n_bars)) * 100 if n_bars > 0 else 100.0
+
+        zero_neg_count = (close <= 0).sum() + (high <= 0).sum() + (low <= 0).sum() + (volume < 0).sum()
+        zero_neg_pct = (zero_neg_count / (4 * n_bars)) * 100 if n_bars > 0 else 100.0
+
+        close_std = float(np.std(close)) if n_bars > 1 else 0.0
+        hi_lo_violation = int((high < low).sum())
+
+        reasons = []
+        if n_bars < min_length:
+            reasons.append("too_short")
+        if nan_pct > 0.0:
+            reasons.append("excessive_nan")
+        if zero_neg_pct > 1.0:
+            reasons.append("invalid_values")
+        if close_std < 1e-8:
+            reasons.append("stuck_price")
+        if hi_lo_violation > 0:
+            reasons.append("hi_lo_violation")
+
+        status = "FAIL" if reasons else "PASS"
+        status_str = f"FAIL ({','.join(reasons)})" if reasons else "PASS"
+
+        _logger.info(
+            "[DATA-INTEGRITY] %-12s | %-6d | %-5.1f%% | %-5.1f%% | %-6.4f | %-6s | %s",
+            sym, n_bars, nan_pct, zero_neg_pct, close_std,
+            "FAIL" if hi_lo_violation > 0 else "PASS", status_str
+        )
+
+        report[sym] = {
+            "status": status,
+            "nan_pct": nan_pct,
+            "zero_neg_pct": zero_neg_pct,
+            "close_std": close_std,
+            "hi_lo_violation": hi_lo_violation,
+            "reasons": reasons,
+        }
+
+    return report
+
+
 def _candidate_ml_split_indices(
     *,
     n_bars: int,
@@ -198,7 +268,7 @@ def run_candidate_strategy_for_universe(
     import time
     from dataclasses import replace
 
-    from src.domain.futures.strategy.ablation import apply_variant_promotions, validate_candidate_signals
+    from src.domain.futures.strategy.ablation import apply_variant_promotions
     from src.domain.futures.strategy.candidate_dataset import build_candidate_dataset
     from src.domain.futures.strategy.candidate_edge import predict_candidate_edges
     from src.domain.futures.strategy.candidate_gate import predict_candidate_gate
@@ -425,53 +495,10 @@ def run_candidate_strategy_for_universe(
         _oos_start_ref, _oos_end_ref = _s[4], _s[5]
         _folds = None  # single-fold path handled below
 
-    # signal_only: validate rule signals, skip ML training
+    # signal_only: validate data integrity and skip ML training
     if strategy_cfg.candidate.signal_only:
-        signal_reports = validate_candidate_signals(
-            labeled_all=labeled_all,
-            labeled_promoted=labeled,
-            cfg=candidate_cfg,
-            oos_start=_oos_start_ref,
-            oos_end=_oos_end_ref,
-        )
-        if strategy_cfg.candidate.blend_survival_require_promoted:
-            promoted_rpt = next((r for r in signal_reports if r.variant == "rule_promo_no_leak"), None)
-            any_passes = bool(promoted_rpt is not None and promoted_rpt.survives_cost)
-        else:
-            any_passes = any(r.survives_cost for r in signal_reports)
-        _logger.info(
-            "[SIGNAL-VALIDATION] variants=%d any_passes=%s",
-            len(signal_reports),
-            any_passes,
-        )
-        _logger.info(
-            "[SIGNAL-VALIDATION] -------------------------------------------------------------------------------"
-        )
-        _logger.info(
-            "[SIGNAL-VALIDATION] | %-20s | %8s | %10s | %7s | %-5s | %s",
-            "Variant",
-            "Events",
-            "StressMean",
-            "HAC t",
-            "Pass",
-            "Fail Reasons",
-        )
-        _logger.info(
-            "[SIGNAL-VALIDATION] -------------------------------------------------------------------------------"
-        )
-        for rpt in signal_reports:
-            _logger.info(
-                "[SIGNAL-VALIDATION] | %-20s | %8d | %10.1f | %7.2f | %-5s | %s",
-                rpt.variant,
-                rpt.n_events,
-                rpt.net_edge_bps_stress_mean,
-                rpt.hac_t_stat,
-                "PASS" if rpt.survives_cost else "FAIL",
-                ",".join(rpt.fail_reasons) if rpt.fail_reasons else "-",
-            )
-        _logger.info(
-            "[SIGNAL-VALIDATION] -------------------------------------------------------------------------------"
-        )
+        integrity_report = verify_data_integrity(aligned=aligned, symbols=symbols)
+        any_passes = any(info["status"] == "PASS" for info in integrity_report.values())
         t_step = time.perf_counter()
         alpha_panel_sv = build_candidate_alpha_panel(
             selected_events=pd.DataFrame(),
@@ -508,20 +535,15 @@ def run_candidate_strategy_for_universe(
                 "failure_report": diag.recommendation_failure_report,
                 "signal_validation": [
                     {
-                        "variant": r.variant,
-                        "n_events": r.n_events,
-                        "net_edge_bps_p50": r.net_edge_bps_p50,
-                        "net_edge_bps_stress_p50": r.net_edge_bps_stress_p50,
-                        "net_edge_bps_mean": r.net_edge_bps_mean,
-                        "net_edge_bps_stress_mean": r.net_edge_bps_stress_mean,
-                        "hit_rate": r.hit_rate,
-                        "hac_t_stat": r.hac_t_stat,
-                        "survives_cost": r.survives_cost,
-                        "deployment_count": r.deployment_count,
-                        "decision_bar_count": r.decision_bar_count,
-                        "fail_reasons": list(r.fail_reasons),
+                        "symbol": sym,
+                        "status": info["status"],
+                        "nan_pct": info["nan_pct"],
+                        "zero_neg_pct": info["zero_neg_pct"],
+                        "close_std": info["close_std"],
+                        "hi_lo_violation": info["hi_lo_violation"],
+                        "fail_reasons": list(info["reasons"]),
                     }
-                    for r in signal_reports
+                    for sym, info in integrity_report.items()
                 ],
                 "signal_validation_pass": any_passes,
             },
