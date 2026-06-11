@@ -50,3 +50,8 @@ last_verified: 2026-06-09
 ## [2026-06-10] Variant-Edge Hierarchical Prior 개선 (Variant Offset + Family Filter)
 - **Delta:** `RegimeConditionalEnsemble`에 `variant_offset_bps` 추가. 예측 단계에서 변이 고유의 편차(offset)를 실시간 국면 셀 평균(`cell_val`)에 더해 예측하게 하고, `ensemble_variant_prior_families`를 통한 allowed 패밀리 제한 구현.
 - **Rationale:** 절대값 `variant_mu_bps`로 예측값을 강제 덮어쓰던 구조가 OOS 국면 조건화(Regime Gating)를 차단하고 포지션 배분을 분산시킴. 편차 모델링과 필터링을 통해 Fold 4 실현 수익을 10.2에서 21.5 bps로 복원함 (✅ PASS 성공).
+
+## [2026-06-12] 데이터 정합성 강화 및 데이터셋 생성 병목 최적화
+- **Delta:** `FDR_DEBUG` 로그 레벨 `DEBUG`로 하향. `SIGNAL-VALIDATION` 로그를 NaN%, Zero%, stuck_price 등 5가지 바리케이드로 구성된 `verify_data_integrity` 검사 모듈과 간소화된 로그 포맷으로 개편. `_compute_score_pct_variant_hist` 파이썬 루프 연산을 `np.searchsorted` $O(N \log N)$ 이진 탐색으로 고속화하고, `n_same` 연산을 인덱스가 보존된 Pandas `groupby.transform("size")`로, `arm` 룩업을 2D NumPy array matrix indexing으로 완전히 벡터화함.
+- **Rationale:** 시그널 생성 전 데이터 결측 및 품질 상태를 명확히 진단하고, CPCV Fold 생성(Dataset Build) 시 발생하던 심각한 $O(N^2)$ 파이썬 루프 연산 병목을 제거하여 `--phase signal` 총 연산 지연을 60초대에서 47.19초로 약 21.6% 대폭 단축함.
+- **Edge Cases/Trade-offs:** 인덱스 비순차 정렬 시 groupby 매핑 오류 방지를 위해 `pd.Series(..., index=events.index)` 핫픽스 적용. 결측치 방어를 위해 `nan_pct > 0.0%`로 엄격화함.
