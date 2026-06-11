@@ -172,11 +172,12 @@ def _compute_score_pct_variant_hist(
         v_entry_sorted = entry_idx_arr[v_pos_sorted]
         v_score_sorted = score_arr[v_pos_sorted]
 
+        # Use np.searchsorted to find the left boundary index O(log N)
+        left_idxs = np.searchsorted(v_entry_sorted, v_entry_sorted - window_bars, side="right")
         for i in range(len(v_pos_sorted)):
-            cutoff = v_entry_sorted[i] - window_bars
-            hist_mask = v_entry_sorted[:i] > cutoff
-            hist_scores = v_score_sorted[:i][hist_mask]
-            if hist_scores.size >= 5:
+            left_idx = left_idxs[i]
+            if i - left_idx >= 5:
+                hist_scores = v_score_sorted[left_idx:i]
                 result[v_pos_sorted[i]] = float(np.mean(hist_scores < v_score_sorted[i]))
 
     return result
@@ -854,34 +855,38 @@ def build_candidate_dataset(
         funding_z20_arr = x_mat[:, feature_names.index("funding_z20")]
         fsa = np.tanh(funding_z20_arr * side_arr).astype(np.float32)
 
-        regime_names_arr = np.asarray(
-            [regime_ctx.name_by_code[int(c)] for c in regime_ctx.code_1d[event_t]],
-            dtype=object,
-        )
+        regime_names_arr = np.asarray(regime_ctx.name_by_code, dtype=object)[regime_ctx.code_1d[event_t]]
         archetype_arr = (
             events.get("archetype", pd.Series("", index=events.index))
             .fillna("")
             .astype(str)
             .values
         )
-        arm = np.asarray(
-            [
-                _ARCHETYPE_REGIME_AFFINITY.get((str(arch), str(reg)), 0.0)
-                for arch, reg in zip(archetype_arr, regime_names_arr, strict=True)
-            ],
-            dtype=np.float32,
-        )
+        
+        _archetypes = [
+            "trend_continuation", "time_series_momentum", "mean_reversion",
+            "carry_reversion", "forced_flow_reversal", "position_unwind",
+            "beta_neutral_reversion"
+        ]
+        _regimes = [
+            "bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile",
+            "transition", "crash"
+        ]
+        _arch_to_idx = {a: idx for idx, a in enumerate(_archetypes)}
+        _reg_to_idx = {r: idx for idx, r in enumerate(_regimes)}
+        
+        _affinity_matrix = np.zeros((len(_archetypes) + 1, len(_regimes) + 1), dtype=np.float32)
+        for (arch, reg), val in _ARCHETYPE_REGIME_AFFINITY.items():
+            if arch in _arch_to_idx and reg in _reg_to_idx:
+                _affinity_matrix[_arch_to_idx[arch], _reg_to_idx[reg]] = val
+                
+        arch_idxs = np.array([_arch_to_idx.get(a, len(_archetypes)) for a in archetype_arr], dtype=np.int32)
+        reg_idxs = np.array([_reg_to_idx.get(r, len(_regimes)) for r in regime_names_arr], dtype=np.int32)
+        arm = _affinity_matrix[arch_idxs, reg_idxs]
 
         if "entry_idx" in events.columns and "symbol" in events.columns and "side" in events.columns:
-            side_sign = np.sign(events["side"].fillna(0)).astype(int)
-            grp_keys = (
-                events["entry_idx"].astype(str)
-                + "_"
-                + events["symbol"].astype(str)
-                + "_"
-                + side_sign.astype(str)
-            )
-            counts = grp_keys.map(grp_keys.value_counts())
+            side_sign = pd.Series(np.sign(events["side"].fillna(0)).astype(np.int32), index=events.index)
+            counts = events.groupby(["entry_idx", "symbol", side_sign]).transform("size")
             n_same = np.log1p(np.maximum(counts.values - 1, 0)).astype(np.float32)
         else:
             n_same = np.zeros(len(events), dtype=np.float32)
