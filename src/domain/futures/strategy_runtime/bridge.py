@@ -234,7 +234,7 @@ def run_candidate_strategy_for_universe(
 
     def _emit_bridge_profile() -> None:
         breakdown = _RuntimeBreakdown(total=time.perf_counter() - bridge_t0, steps=bridge_prof)
-        _logger.debug(
+        _logger.info(
             (
                 "[BRIDGE-PROF] total=%.4fs align=%.4fs rules=%.4fs events=%.4fs "
                 "label=%.4fs diagnostics=%.4fs promotions=%.4fs walk_forward=%.4fs "
