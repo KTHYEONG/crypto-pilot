@@ -39,6 +39,16 @@ class RegimeConditionalEnsemble:
     conditioning_path: str = "pooled_fallback"  # "regime_conditioned" | "pooled_fallback" | "no_oos_evidence_failsafe"
     lift_proof: RegimeLiftProofResult | None = None  # None = proof 미실행 (backward compat)
     regime_oos_stability_rho: float | None = None  # 진단 전용 (C4 rho 주입, 게이팅 아님)
+    # Direction B: q90 실제 산출 (Kelly sizing용 sigma_r 추정)
+    # cell/arch/global q90은 _fit_cell_means에서 계산되며, predict 시 실제 q90으로 사용됨
+    cell_q90_bps: dict[tuple[str, int], float] = field(default_factory=dict)
+    archetype_q90_bps: dict[str, float] = field(default_factory=dict)
+    global_q90_bps: float = 0.0
+    # Direction A: regime-conditional score calibration (score_z slope fitting)
+    # β > 0 regime만 score_calibration_valid=True; β ≤ 0 → fallback to cell lookup
+    regime_score_slope: dict[int, float] = field(default_factory=dict)
+    regime_score_intercept: dict[int, float] = field(default_factory=dict)
+    score_calibration_valid: dict[int, bool] = field(default_factory=dict)
 
 
 def _variant_key(family: str, variant: str) -> str:
@@ -243,10 +253,14 @@ def _fit_cell_means(
     dict[str, float],
     float,
     float,
+    dict[tuple[str, int], float],
+    dict[str, float],
+    float,
 ]:
     """Compute shrunk cell means for given axis ('regime' or 'archetype').
 
-    Returns cell_mu, cell_q10, arch_mu, arch_q10, global_mu, global_q10.
+    Returns cell_mu, cell_q10, arch_mu, arch_q10, global_mu, global_q10,
+    cell_q90, arch_q90, global_q90.
     'archetype' axis still fills cell_* as empty dicts.
 
     Args:
@@ -261,6 +275,7 @@ def _fit_cell_means(
     edge = frame["net_return_bps"].to_numpy(dtype=np.float64, copy=False)
     global_mu = float(np.mean(edge))
     global_q10 = float(np.percentile(edge, 10))
+    global_q90 = float(np.percentile(edge, 90))
 
     def _effective_n(raw_n: float) -> float:
         if freq_n_cap > 0:
@@ -270,6 +285,7 @@ def _fit_cell_means(
     # archetype-only shrinkage
     arch_mu: dict[str, float] = {}
     arch_q10: dict[str, float] = {}
+    arch_q90: dict[str, float] = {}
 
     # Collect raw stats for EB estimation if adaptive
     arch_raw_means: list[float] = []
@@ -296,9 +312,11 @@ def _fit_cell_means(
             mu_val = 0.0
         arch_mu[a] = mu_val
         arch_q10[a] = w * float(np.percentile(vals, 10)) + (1.0 - w) * global_q10
+        arch_q90[a] = w * float(np.percentile(vals, 90)) + (1.0 - w) * global_q90
 
     cell_mu: dict[tuple[str, int], float] = {}
     cell_q10: dict[tuple[str, int], float] = {}
+    cell_q90: dict[tuple[str, int], float] = {}
     if axis == "archetype_regime":
         cell_raw_means: list[float] = []
         cell_raw_vars: list[float] = []
@@ -326,8 +344,9 @@ def _fit_cell_means(
                 mu_val = 0.0
             cell_mu[key] = mu_val
             cell_q10[key] = w * float(np.percentile(vals, 10)) + (1.0 - w) * global_q10
+            cell_q90[key] = w * float(np.percentile(vals, 90)) + (1.0 - w) * global_q90
 
-    return cell_mu, cell_q10, arch_mu, arch_q10, global_mu, global_q10
+    return cell_mu, cell_q10, arch_mu, arch_q10, global_mu, global_q10, cell_q90, arch_q90, global_q90
 
 
 def _internal_validation_rank_ic(
@@ -344,6 +363,10 @@ def _internal_validation_rank_ic(
     variant_shrinkage_k: float = 30.0,
     variant_min_obs: int = 40,
     allowed_families: tuple[str, ...] = (),
+    score_calibration_enabled: bool = False,
+    score_z_clip: float = 3.0,
+    score_calibration_min_obs: int = 60,
+    score_slope_k: float = 100.0,
 ) -> float:
     """In-fold purged validation Rank IC for the given axis.
 
@@ -375,12 +398,12 @@ def _internal_validation_rank_ic(
         "freq_n_cap": freq_n_cap,
         "min_cell_edge_floor_bps": min_cell_edge_floor_bps,
     }
-    _, _, arch_mu, _, global_mu, _ = _fit_cell_means(
+    _, _, arch_mu, _, global_mu, _, _, _, _ = _fit_cell_means(
         sub_fit, shrinkage_k=shrinkage_k, axis="archetype_only", **fit_kwargs  # type: ignore[arg-type]
     )
 
     if axis == "archetype_regime":
-        cell_mu, _, _, _, _, _ = _fit_cell_means(
+        cell_mu, _, _, _, _, _, _, _, _ = _fit_cell_means(
             sub_fit, shrinkage_k=shrinkage_k, axis="archetype_regime", **fit_kwargs  # type: ignore[arg-type]
         )
     else:
@@ -403,31 +426,87 @@ def _internal_validation_rank_ic(
 
     has_family_variant = variant_prior_enabled and bool(v_offset)
 
+    # Direction A (Fix 2): fit score slope on sub_fit; measure IC with score path on val_set
+    _sub_slope: dict[int, float] = {}
+    _sub_intercept: dict[int, float] = {}
+    _sub_valid: dict[int, bool] = {}
+    if score_calibration_enabled and "score_z" in sub_fit.columns and "entry_regime_code" in sub_fit.columns:
+        _sz_col = pd.to_numeric(sub_fit["score_z"], errors="coerce").clip(-score_z_clip, score_z_clip)
+        _sub_z = sub_fit.copy()
+        _sub_z["_sz_cal"] = _sz_col
+        for _rc, _grp in _sub_z.groupby("entry_regime_code", sort=False):
+            _gs = int(_rc)
+            _vm = _grp["_sz_cal"].notna() & _grp["net_return_bps"].notna()
+            _nv = int(_vm.sum())
+            if _nv < score_calibration_min_obs:
+                continue
+            _zs = _grp.loc[_vm, "_sz_cal"].to_numpy(dtype=np.float64)
+            _ys = _grp.loc[_vm, "net_return_bps"].to_numpy(dtype=np.float64)
+            _rho = float(np.corrcoef(_zs, _ys)[0, 1])
+            if not np.isfinite(_rho):
+                continue
+            _sz_std = float(np.std(_zs)) + 1e-12
+            _sy_std = float(np.std(_ys)) + 1e-12
+            _beta_r = _rho * (_sy_std / _sz_std)
+            _ws = _nv / (_nv + score_slope_k)
+            _beta_sh = _ws * _beta_r
+            if _beta_sh <= 0.0:
+                continue
+            _sub_slope[_gs] = _beta_sh
+            _sub_intercept[_gs] = float(np.mean(_ys)) - _beta_sh * float(np.mean(_zs))
+            _sub_valid[_gs] = True
+
+    # Prepare val_set with score_z column when score path is active
+    val_set_p = val_set
+    if _sub_valid and "score_z" in val_set.columns:
+        val_set_p = val_set.copy()
+        val_set_p["_sz_cal"] = pd.to_numeric(val_set["score_z"], errors="coerce").clip(
+            -score_z_clip, score_z_clip
+        )
+
     if axis == "archetype_regime":
         def _predict_regime(row: pd.Series) -> float:
             key = (str(row["archetype"]), int(row["entry_regime_code"]))
-            cell_val = cell_mu.get(key, arch_mu.get(str(row["archetype"]), global_mu))
+            base_val = cell_mu.get(key, arch_mu.get(str(row["archetype"]), global_mu))
             if has_family_variant:
                 fam = str(row.get("family", ""))
                 var = str(row.get("variant", ""))
                 vkey = _variant_key(fam, var)
                 if vkey in v_offset:
-                    return cell_val + v_offset[vkey]
-            return cell_val
+                    base_val = base_val + v_offset[vkey]
+            if _sub_valid:
+                _gr = int(row["entry_regime_code"])
+                if _sub_valid.get(_gr, False):
+                    try:
+                        _zf = float(row.get("_sz_cal", float("nan")))
+                    except (TypeError, ValueError):
+                        _zf = float("nan")
+                    if np.isfinite(_zf):
+                        return _sub_intercept[_gr] + _sub_slope[_gr] * _zf
+            return base_val
 
-        pred = val_set.apply(_predict_regime, axis=1).to_numpy(dtype=np.float64)
+        pred = val_set_p.apply(_predict_regime, axis=1).to_numpy(dtype=np.float64)
     else:
         def _predict_arch(row: pd.Series) -> float:
-            arch_val = arch_mu.get(str(row["archetype"]), global_mu)
+            base_val = arch_mu.get(str(row["archetype"]), global_mu)
             if has_family_variant:
                 fam = str(row.get("family", ""))
                 var = str(row.get("variant", ""))
                 vkey = _variant_key(fam, var)
                 if vkey in v_offset:
-                    return arch_val + v_offset[vkey]
-            return arch_val
+                    base_val = base_val + v_offset[vkey]
+            if _sub_valid:
+                _gr = int(row["entry_regime_code"])
+                if _sub_valid.get(_gr, False):
+                    try:
+                        _zf = float(row.get("_sz_cal", float("nan")))
+                    except (TypeError, ValueError):
+                        _zf = float("nan")
+                    if np.isfinite(_zf):
+                        return _sub_intercept[_gr] + _sub_slope[_gr] * _zf
+            return base_val
 
-        pred = val_set.apply(_predict_arch, axis=1).to_numpy(dtype=np.float64)
+        pred = val_set_p.apply(_predict_arch, axis=1).to_numpy(dtype=np.float64)
 
     realized = val_set["net_return_bps"].to_numpy(dtype=np.float64, copy=False)
     return _rank_ic_local(pred, realized)
@@ -466,7 +545,8 @@ def fit_regime_conditional_ensemble(
 
     _require_ensemble_columns(train_events)
     _variant_cols = [c for c in ("family", "variant") if c in train_events.columns]
-    _base_cols = ["archetype", "entry_regime_code", "net_return_bps", *_variant_cols]
+    _score_cols = [c for c in ("score_z",) if c in train_events.columns]
+    _base_cols = ["archetype", "entry_regime_code", "net_return_bps", *_variant_cols, *_score_cols]
     frame = train_events.loc[:, _base_cols].copy()
     if "entry_idx" in train_events.columns:
         frame["entry_idx"] = train_events["entry_idx"].values
@@ -509,6 +589,12 @@ def fit_regime_conditional_ensemble(
     # Pass allowed_families from cfg
     allowed_families = getattr(cfg, "ensemble_variant_prior_families", ())
 
+    # Score calibration params — read early so val_ic measurement reflects Direction A
+    score_calibration_enabled: bool = bool(getattr(cfg, "ensemble_score_calibration_enabled", False))
+    score_z_clip: float = float(getattr(cfg, "ensemble_score_z_clip", 3.0))
+    score_calibration_min_obs: int = int(getattr(cfg, "ensemble_score_calibration_min_obs", 60))
+    score_slope_k: float = float(getattr(cfg, "ensemble_score_slope_k", 100.0))
+
     eb_fit_kwargs: dict[str, object] = {
         "adaptive_shrinkage": adaptive_shrinkage,
         "shrinkage_k_max": shrinkage_k_max,
@@ -521,9 +607,15 @@ def fit_regime_conditional_ensemble(
         "variant_min_obs": variant_min_obs,
         "allowed_families": allowed_families,
     }
+    score_ic_kwargs: dict[str, object] = {
+        "score_calibration_enabled": score_calibration_enabled,
+        "score_z_clip": score_z_clip,
+        "score_calibration_min_obs": score_calibration_min_obs,
+        "score_slope_k": score_slope_k,
+    }
 
     # Compute archetype-only (always needed for fallback/auto)
-    _, _, arch_mu, arch_q10, global_mu, global_q10 = _fit_cell_means(
+    _, _, arch_mu, arch_q10, global_mu, global_q10, _, arch_q90, global_q90 = _fit_cell_means(
         frame, shrinkage_k=shrinkage_k, axis="archetype_only", **eb_fit_kwargs  # type: ignore[arg-type]
     )
 
@@ -533,14 +625,14 @@ def fit_regime_conditional_ensemble(
             shrinkage_k=shrinkage_k,
             val_fraction=val_fraction,
             axis="archetype_only",
-            **{**eb_fit_kwargs, **variant_ic_kwargs},  # type: ignore[arg-type]
+            **{**eb_fit_kwargs, **variant_ic_kwargs, **score_ic_kwargs},  # type: ignore[arg-type]
         )
         ic_regime = _internal_validation_rank_ic(
             frame,
             shrinkage_k=shrinkage_k,
             val_fraction=val_fraction,
             axis="archetype_regime",
-            **{**eb_fit_kwargs, **variant_ic_kwargs},  # type: ignore[arg-type]
+            **{**eb_fit_kwargs, **variant_ic_kwargs, **score_ic_kwargs},  # type: ignore[arg-type]
         )
         if ic_regime - ic_arch >= cfg.ensemble_min_conditioning_ic_gain:
             chosen = "archetype_regime"
@@ -555,7 +647,7 @@ def fit_regime_conditional_ensemble(
             shrinkage_k=shrinkage_k,
             val_fraction=val_fraction,
             axis="archetype_regime",
-            **{**eb_fit_kwargs, **variant_ic_kwargs},  # type: ignore[arg-type]
+            **{**eb_fit_kwargs, **variant_ic_kwargs, **score_ic_kwargs},  # type: ignore[arg-type]
         )
     else:
         chosen = "archetype_only"
@@ -564,16 +656,17 @@ def fit_regime_conditional_ensemble(
             shrinkage_k=shrinkage_k,
             val_fraction=val_fraction,
             axis="archetype_only",
-            **{**eb_fit_kwargs, **variant_ic_kwargs},  # type: ignore[arg-type]
+            **{**eb_fit_kwargs, **variant_ic_kwargs, **score_ic_kwargs},  # type: ignore[arg-type]
         )
 
     if chosen == "archetype_regime":
-        cell_mu, cell_q10, _, _, _, _ = _fit_cell_means(
+        cell_mu, cell_q10, _, _, _, _, cell_q90, _, _ = _fit_cell_means(
             frame, shrinkage_k=shrinkage_k, axis="archetype_regime", **eb_fit_kwargs  # type: ignore[arg-type]
         )
     else:
         cell_mu = {}
         cell_q10 = {}
+        cell_q90 = {}
 
     # ── Variant-edge hierarchical prior (IS-only) ────────────────────────────
     variant_mu: dict[str, float] = {}
@@ -685,14 +778,83 @@ def fit_regime_conditional_ensemble(
             chosen = "archetype_only"
             cell_mu = {}
             cell_q10 = {}
+            cell_q90 = {}
 
     elif chosen == "archetype_regime":
         # OOS 증거 없음 → fail-SAFE: 복잡한 경로를 증거 없이 선택하지 않음
         chosen = "archetype_only"
         cell_mu = {}
         cell_q10 = {}
+        cell_q90 = {}
         conditioning_path = "no_oos_evidence_failsafe"
         _logger.info("regime conditioning downgraded: no oos proof window → archetype_only (fail-safe)")
+
+    # ── Direction A: regime-conditional score calibration ──────────────────
+    # (score_calibration_enabled / score_z_clip / score_calibration_min_obs / score_slope_k
+    #  already read above for _internal_validation_rank_ic call sites)
+    regime_score_slope: dict[int, float] = {}
+    regime_score_intercept: dict[int, float] = {}
+    score_calibration_valid: dict[int, bool] = {}
+
+    if score_calibration_enabled and "score_z" in frame.columns:
+        score_z_col = pd.to_numeric(frame["score_z"], errors="coerce")
+        frame_with_z = frame.copy()
+        frame_with_z["_score_z"] = score_z_col.clip(-score_z_clip, score_z_clip)
+
+        for regime_code, grp in frame_with_z.groupby("entry_regime_code", sort=False):
+            g = int(regime_code)
+            valid_mask = grp["_score_z"].notna() & grp["net_return_bps"].notna()
+            n_valid = int(valid_mask.sum())
+            if n_valid < score_calibration_min_obs:
+                score_calibration_valid[g] = False
+                continue
+
+            # Fix 3: sort by entry_idx for temporal OOS proof split
+            grp_ordered = (
+                grp[valid_mask].sort_values("entry_idx")
+                if "entry_idx" in grp.columns
+                else grp[valid_mask]
+            )
+
+            z_arr = grp_ordered["_score_z"].to_numpy(dtype=np.float64)
+            y_arr = grp_ordered["net_return_bps"].to_numpy(dtype=np.float64)
+
+            # Full-IS shrunk-OLS (for deployment slope)
+            rho = float(np.corrcoef(z_arr, y_arr)[0, 1])
+            if not np.isfinite(rho):
+                score_calibration_valid[g] = False
+                continue
+
+            sigma_z = float(np.std(z_arr)) + 1e-12
+            sigma_y = float(np.std(y_arr)) + 1e-12
+            beta_raw = rho * (sigma_y / sigma_z)
+
+            # shrinkage: trust proportional to n_valid (James-Stein style)
+            w_slope = n_valid / (n_valid + score_slope_k)
+            beta_shrunk = w_slope * beta_raw  # anchor = 0 (no skill)
+            alpha = float(np.mean(y_arr)) - beta_shrunk * float(np.mean(z_arr))
+
+            regime_score_slope[g] = beta_shrunk
+            regime_score_intercept[g] = alpha
+
+            # Fix 3: OOS proof — sign must hold on held-out probe window
+            probe_start = int(n_valid * (1.0 - val_fraction))
+            oos_sign_ok = False
+            if probe_start >= 10 and (n_valid - probe_start) >= 10:
+                rho_probe = float(np.corrcoef(z_arr[probe_start:], y_arr[probe_start:])[0, 1])
+                oos_sign_ok = np.isfinite(rho_probe) and rho_probe > 0.0
+
+            # Require IS β > 0 AND OOS sign consistency; fall back to IS-only if probe too small
+            if probe_start < 10 or (n_valid - probe_start) < 10:
+                score_calibration_valid[g] = beta_shrunk > 0.0
+            else:
+                score_calibration_valid[g] = (beta_shrunk > 0.0) and oos_sign_ok
+
+        _logger.info(
+            "[ENSEMBLE] score_calibration: %d regimes fitted, %d valid",
+            len(regime_score_slope),
+            sum(score_calibration_valid.values()),
+        )
 
     return RegimeConditionalEnsemble(
         cell_mu_bps=cell_mu,
@@ -708,6 +870,14 @@ def fit_regime_conditional_ensemble(
         conditioning_path=conditioning_path,
         lift_proof=lift_proof,
         regime_oos_stability_rho=regime_oos_stability_rho,
+        # Direction B
+        cell_q90_bps=cell_q90,
+        archetype_q90_bps=arch_q90,
+        global_q90_bps=global_q90,
+        # Direction A
+        regime_score_slope=regime_score_slope,
+        regime_score_intercept=regime_score_intercept,
+        score_calibration_valid=score_calibration_valid,
     )
 
 
@@ -740,9 +910,11 @@ def predict_regime_conditional_ensemble(
     event_frame = oos_events.reset_index(drop=True).copy()
     mu_net_decision_bps = np.empty(len(event_frame), dtype=np.float64)
     q10_net_bps = np.empty(len(event_frame), dtype=np.float64)
+    q90_net_bps = np.empty(len(event_frame), dtype=np.float64)
 
     use_archetype_only = model.conditioning == "archetype_only"
     has_variant_prior = bool(model.variant_mu_bps)
+    has_score_cal = bool(model.regime_score_slope)
 
     for idx, row in enumerate(event_frame.itertuples(index=False), start=0):
         arch = str(getattr(row, "archetype", ""))
@@ -756,6 +928,17 @@ def predict_regime_conditional_ensemble(
                 key, model.archetype_mu_bps.get(arch, model.global_mu_bps)
             )
 
+        # Direction B: q90 실제 lookup
+        q90_val = model.cell_q90_bps.get(
+            key, model.archetype_q90_bps.get(arch, model.global_q90_bps)
+        )
+
+        # Direction A: score-conditioned mu (calibration_valid=True인 regime만 적용)
+        use_score_cal = (
+            has_score_cal
+            and bool(model.score_calibration_valid.get(regime, False))
+        )
+
         # 3-level fallback: variant → cell → archetype → global
         if has_variant_prior:
             fam = str(getattr(row, "family", ""))
@@ -766,18 +949,32 @@ def predict_regime_conditional_ensemble(
                     offset = model.variant_offset_bps.get(vkey, 0.0)
                 except AttributeError:
                     offset = 0.0
-                mu_net_decision_bps[idx] = cell_val + offset
+                if use_score_cal:
+                    z_raw = float(getattr(row, "score_z", 0.0))
+                    beta = model.regime_score_slope.get(regime, 0.0)
+                    alpha = model.regime_score_intercept.get(regime, cell_val)
+                    mu_net_decision_bps[idx] = alpha + beta * z_raw
+                else:
+                    mu_net_decision_bps[idx] = cell_val + offset
                 q10_net_bps[idx] = model.cell_q10_bps.get(
                     key,
                     model.archetype_q10_bps.get(arch, model.global_q10_bps),
                 )
+                q90_net_bps[idx] = q90_val
                 continue
 
-        mu_net_decision_bps[idx] = cell_val
+        if use_score_cal:
+            z_raw = float(getattr(row, "score_z", 0.0))
+            beta = model.regime_score_slope.get(regime, 0.0)
+            alpha = model.regime_score_intercept.get(regime, cell_val)
+            mu_net_decision_bps[idx] = alpha + beta * z_raw
+        else:
+            mu_net_decision_bps[idx] = cell_val
         q10_net_bps[idx] = model.cell_q10_bps.get(
             key,
             model.archetype_q10_bps.get(arch, model.global_q10_bps),
         )
+        q90_net_bps[idx] = q90_val
 
     # mu-quality shrinkage: attenuate conviction proportional to in-fold val IC
     mu_shrinkage_lambda = 1.0
@@ -798,7 +995,7 @@ def predict_regime_conditional_ensemble(
         edge_source=EdgeSource.PRIOR_ONLY,
         expected_net_bps=mu_net_decision_bps,
         q10_net_bps=q10_net_bps,
-        q90_net_bps=mu_net_decision_bps.copy(),
+        q90_net_bps=q90_net_bps,
         selection_score=mu_net_decision_bps.copy(),
         validation_diagnostics={
             "allocation_backend": "ensemble_b0",

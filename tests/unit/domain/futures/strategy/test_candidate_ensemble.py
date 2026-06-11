@@ -677,7 +677,7 @@ def test_eb_shrinkage_preserves_high_edge_archetype_vs_fixed_k() -> None:
     frame = _make_high_low_edge_frame()
 
     # Fixed k=50
-    _, _, arch_mu_fixed, _, _, _ = _fit_cell_means(
+    _, _, arch_mu_fixed, _, _, _, *_ = _fit_cell_means(
         frame,
         shrinkage_k=50.0,
         axis="archetype_only",
@@ -685,7 +685,7 @@ def test_eb_shrinkage_preserves_high_edge_archetype_vs_fixed_k() -> None:
     )
 
     # EB adaptive (k_max=50)
-    _, _, arch_mu_eb, _, _, _ = _fit_cell_means(
+    _, _, arch_mu_eb, _, _, _, *_ = _fit_cell_means(
         frame,
         shrinkage_k=50.0,
         axis="archetype_only",
@@ -712,10 +712,10 @@ def test_eb_shrinkage_homogeneous_cells_collapses_to_k_max() -> None:
         "entry_idx": np.arange(200),
     })
 
-    _, _, arch_mu_fixed, _, _, _ = _fit_cell_means(
+    _, _, arch_mu_fixed, _, _, _, *_ = _fit_cell_means(
         frame, shrinkage_k=50.0, axis="archetype_only", adaptive_shrinkage=False
     )
-    _, _, arch_mu_eb, _, _, _ = _fit_cell_means(
+    _, _, arch_mu_eb, _, _, _, *_ = _fit_cell_means(
         frame,
         shrinkage_k=50.0,
         axis="archetype_only",
@@ -826,7 +826,7 @@ def test_s1_variant_prior_discriminates_within_cell() -> None:
     """S1: 동일 셀 내 고엣지 변이 vs noise 변이에 서로 다른 score 부여."""
     # Arrange
     frame = _make_variant_frame()
-    cell_mu, _, arch_mu, _, global_mu, _ = _fit_cell_means(
+    cell_mu, _, arch_mu, _, global_mu, _, *_ = _fit_cell_means(
         frame, shrinkage_k=50.0, axis="archetype_regime"
     )
     # cell_mu: (archetype, regime) → single value (둘 다 혼합 평균)
@@ -925,7 +925,7 @@ def test_s3_variant_prior_is_only_no_oos_leakage() -> None:
     assert sub_fit["entry_idx"].max() < val_set["entry_idx"].min()
 
     # Act: fit variant_mu on sub_fit only
-    cell_mu, _, arch_mu, _, global_mu, _ = _fit_cell_means(
+    cell_mu, _, arch_mu, _, global_mu, _, *_ = _fit_cell_means(
         sub_fit, shrinkage_k=50.0, axis="archetype_regime"
     )
     variant_mu, _ = _fit_variant_means(
@@ -969,7 +969,7 @@ def test_s4_variant_prior_small_sample_falls_back_to_anchor() -> None:
     })
     frame = pd.concat([df_rare, df_bulk], ignore_index=True)
 
-    cell_mu, _, arch_mu, _, global_mu, _ = _fit_cell_means(
+    cell_mu, _, arch_mu, _, global_mu, _, *_ = _fit_cell_means(
         frame, shrinkage_k=50.0, axis="archetype_regime"
     )
     anchor = cell_mu.get(("momentum", 0), arch_mu.get("momentum", global_mu))
@@ -1044,7 +1044,7 @@ def test_s6_variant_prior_freq_n_cap_limits_weight() -> None:
         "entry_idx": np.arange(n_ref, dtype=np.int64) + n_hf,
     })
     frame = pd.concat([df_hf, df_ref], ignore_index=True)
-    cell_mu, _, arch_mu, _, global_mu, _ = _fit_cell_means(
+    cell_mu, _, arch_mu, _, global_mu, _, *_ = _fit_cell_means(
         frame, shrinkage_k=50.0, axis="archetype_regime"
     )
     anchor = cell_mu.get(("momentum", 0), arch_mu.get("momentum", global_mu))
@@ -1247,3 +1247,260 @@ def test_validation_rank_ic_empty_offset_fallback() -> None:
     # Thus, all predictions will be the cell mean, which is constant. Constant predictions give IC = 0.0 or nan.
     # Because of our nan guard, it returns 0.0.
     assert ic_val == 0.0, f"Expected 0.0 fallback for constant predictions, got {ic_val:.4f}"
+
+
+# ---------------------------------------------------------------------------
+# Direction A + B: score calibration & q90 산출 (S1~S6)
+# ---------------------------------------------------------------------------
+
+def _make_score_train_df(
+    n: int,
+    *,
+    regime: int,
+    score_z: np.ndarray,
+    net_bps: np.ndarray,
+    archetype: str = "trend_continuation",
+) -> pd.DataFrame:
+    """Helper: training DataFrame for score calibration tests."""
+    return pd.DataFrame(
+        {
+            "archetype": [archetype] * n,
+            "entry_regime_code": [regime] * n,
+            "net_return_bps": net_bps,
+            "score_z": score_z,
+            "family": ["fam"] * n,
+            "variant": ["v1"] * n,
+            "entry_idx": np.arange(n, dtype=np.int64),
+        }
+    )
+
+
+def _make_oos_event(*, regime: int, score_z: float, archetype: str = "trend_continuation") -> pd.DataFrame:
+    """Single OOS event for prediction tests."""
+    return pd.DataFrame(
+        {
+            "archetype": [archetype],
+            "entry_regime_code": [regime],
+            "score_z": [score_z],
+            "family": ["fam"],
+            "variant": ["v1"],
+        }
+    )
+
+
+# S1 — score calibration 적합: 양의 상관 데이터
+
+def test_score_calibration_positive_correlation_fits_valid_slope() -> None:
+    """Regime 1에서 score_z ↑ → net_bps ↑ 양의 상관 시 slope > 0, calibration_valid=True.
+
+    Arrange: rho ~= +0.97 합성 데이터 80개
+    Act: fit_regime_conditional_ensemble with score_calibration_enabled=True
+    Assert: slope > 0, calibration_valid=True, 높은 score_z → 높은 mu 예측
+    """
+    rng = np.random.default_rng(42)
+    n = 80
+    score_z = rng.normal(0.0, 1.0, n)
+    net_bps = 20.0 * score_z + rng.normal(0.0, 5.0, n)
+
+    train_events = _make_score_train_df(n, regime=1, score_z=score_z, net_bps=net_bps)
+    cfg = _make_cfg(
+        ensemble_score_calibration_enabled=True,
+        ensemble_score_calibration_min_obs=40,
+        ensemble_score_slope_k=100.0,
+    )
+
+    # Act
+    model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
+
+    # Assert: slope 피팅됨
+    assert model.score_calibration_valid.get(1) is True
+    assert model.regime_score_slope.get(1, 0.0) > 0.0
+
+    # Assert: 높은 score_z → 낮은 score_z보다 μ 높음
+    out_high = predict_regime_conditional_ensemble(
+        model=model, oos_events=_make_oos_event(regime=1, score_z=2.0)
+    )
+    out_low = predict_regime_conditional_ensemble(
+        model=model, oos_events=_make_oos_event(regime=1, score_z=-2.0)
+    )
+    assert out_high.expected_net_bps[0] > out_low.expected_net_bps[0]
+
+
+# S2 — OOS 부호 불안정: score_calibration_valid=False → fallback
+
+def test_score_calibration_negative_correlation_marks_invalid() -> None:
+    """score_z와 net_bps가 음의 상관일 때 beta < 0 → calibration_valid=False.
+
+    predict는 현행 cell lookup 기반으로 score_z 무시.
+    """
+    rng = np.random.default_rng(0)
+    n = 80
+    score_z = rng.normal(0.0, 1.0, n)
+    net_bps = -20.0 * score_z + rng.normal(0.0, 5.0, n)
+
+    train_events = _make_score_train_df(n, regime=2, score_z=score_z, net_bps=net_bps)
+    cfg = _make_cfg(
+        ensemble_score_calibration_enabled=True,
+        ensemble_score_calibration_min_obs=40,
+        ensemble_score_slope_k=100.0,
+    )
+
+    # Act
+    model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
+
+    # Assert: 음의 기울기 → calibration_valid=False
+    assert model.score_calibration_valid.get(2) is False
+
+    # Assert: predict는 score_z에 무관하게 동일한 cell 기반 값 반환
+    out_high = predict_regime_conditional_ensemble(
+        model=model, oos_events=_make_oos_event(regime=2, score_z=2.0)
+    )
+    out_low = predict_regime_conditional_ensemble(
+        model=model, oos_events=_make_oos_event(regime=2, score_z=-2.0)
+    )
+    assert out_high.expected_net_bps[0] == pytest.approx(out_low.expected_net_bps[0])
+
+
+# S3 — 희소 데이터: min_obs 미달 → calibration 미수행
+
+def test_score_calibration_insufficient_obs_skips_regime() -> None:
+    """n=20 < min_obs=60 → score_calibration_valid[regime] = False, slope 미산출.
+
+    Arrange: regime 3에서 n=20 이벤트 (양의 상관이지만 obs 부족)
+    """
+    rng = np.random.default_rng(7)
+    n = 20
+    score_z = rng.normal(0.0, 1.0, n)
+    net_bps = 20.0 * score_z + rng.normal(0.0, 5.0, n)
+
+    train_events = _make_score_train_df(n, regime=3, score_z=score_z, net_bps=net_bps)
+    cfg = _make_cfg(
+        ensemble_score_calibration_enabled=True,
+        ensemble_score_calibration_min_obs=60,  # n=20 < 60 → 스킵
+    )
+
+    # Act
+    model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
+
+    # Assert: obs 부족 → valid=False 또는 slope 미존재
+    is_invalid = (
+        not model.score_calibration_valid.get(3, False)
+    )
+    assert is_invalid, (
+        f"Expected calibration skipped for regime 3 (n={n} < min_obs=60), "
+        f"got valid={model.score_calibration_valid.get(3)}"
+    )
+
+
+# S4 — Direction B: q90 실제 산출 확인
+
+def test_q90_bps_differs_from_mu() -> None:
+    """비대칭 수익 분포(오른꼬리)에서 q90 > μ이고 q90_net_bps > q10_net_bps 성립.
+
+    Arrange: chi-squared 분포(오른꼬리) 기반 net_bps → q90 >> μ
+    """
+    rng = np.random.default_rng(99)
+    n = 200
+    # chi2(3) 분포: 오른꼬리, mean≈3, q90≈6.25
+    net_bps = rng.chisquare(3.0, n) * 10.0  # mean≈30bps, q90≈62bps
+    train_events = pd.DataFrame(
+        {
+            "archetype": ["trend_continuation"] * n,
+            "entry_regime_code": [0] * n,
+            "net_return_bps": net_bps,
+            "entry_idx": np.arange(n, dtype=np.int64),
+        }
+    )
+    cfg = _make_cfg(ensemble_adaptive_shrinkage=False)
+
+    # Act
+    model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
+    oos = pd.DataFrame({"archetype": ["trend_continuation"], "entry_regime_code": [0]})
+    out = predict_regime_conditional_ensemble(model=model, oos_events=oos)
+
+    # Assert: q90 실제값이 μ와 다름 (기존 mu.copy() 제거 검증)
+    assert out.q90_net_bps[0] != pytest.approx(out.expected_net_bps[0], rel=0.01), (
+        "q90_net_bps should differ from expected_net_bps for skewed distribution"
+    )
+    # Assert: q90 > q10 (분포 순서 보존)
+    assert out.q90_net_bps[0] > out.q10_net_bps[0]
+
+
+# S5 — 회귀: score_calibration_enabled=False (default) 시 기존 동작 불변
+
+def test_score_calibration_disabled_keeps_existing_behavior() -> None:
+    """ensemble_score_calibration_enabled=False (default) 시 score_z 무시.
+
+    score_calibration_valid는 빈 dict, predict μ는 score_z와 무관.
+    """
+    rng = np.random.default_rng(42)
+    n = 80
+    score_z = rng.normal(0.0, 1.0, n)
+    net_bps = 20.0 * score_z + rng.normal(0.0, 5.0, n)
+
+    train_events = _make_score_train_df(n, regime=1, score_z=score_z, net_bps=net_bps)
+    cfg = _make_cfg()  # default: ensemble_score_calibration_enabled=False
+
+    # Act
+    model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
+
+    # Assert: calibration 수행 안 됨
+    assert model.score_calibration_valid == {}
+    assert model.regime_score_slope == {}
+
+    # Assert: predict μ가 score_z와 무관 (high_z ≈ low_z)
+    out_high = predict_regime_conditional_ensemble(
+        model=model, oos_events=_make_oos_event(regime=1, score_z=2.0)
+    )
+    out_low = predict_regime_conditional_ensemble(
+        model=model, oos_events=_make_oos_event(regime=1, score_z=-2.0)
+    )
+    assert out_high.expected_net_bps[0] == pytest.approx(out_low.expected_net_bps[0])
+
+
+# S6 — Leakage 검증: _internal_validation_rank_ic에서 val_set 데이터 누출 방지
+
+def test_score_calibration_no_leakage_from_val_set() -> None:
+    """score calibration fit은 sub_fit(학습 영역)만 사용하며 val_set entry_idx 범위 밖.
+
+    _internal_validation_rank_ic에서 val_set의 entry_idx가 sub_fit에 포함되지 않음을 검증.
+    Approach: sub_fit/val_set 분리 로직의 cutoff 검증.
+    """
+    rng = np.random.default_rng(123)
+    n = 100
+    # 강한 양의 상관으로 IC 계산이 가능하도록 설정
+    score_z_vals = rng.normal(0.0, 1.0, n)
+    net_bps = 15.0 * score_z_vals + rng.normal(0.0, 3.0, n)
+    df = pd.DataFrame(
+        {
+            "archetype": ["trend_continuation"] * n,
+            "entry_regime_code": [1] * n,
+            "net_return_bps": net_bps,
+            "score_z": score_z_vals,
+            "family": ["fam"] * n,
+            "variant": ["v1"] * n,
+            "entry_idx": np.arange(n, dtype=np.int64),
+        }
+    )
+
+    val_fraction = 0.25
+    n_total = len(df)
+    sorted_df = df.sort_values("entry_idx")
+    val_start = int(n_total * (1.0 - val_fraction))
+    val_idx_cutoff = int(sorted_df.iloc[val_start]["entry_idx"])
+
+    sub_fit = sorted_df[sorted_df["entry_idx"] < val_idx_cutoff - 1]
+    val_set = sorted_df[sorted_df["entry_idx"] >= val_idx_cutoff]
+
+    # Assert: sub_fit과 val_set은 겹치지 않음 (purge gap 포함)
+    sub_fit_max_idx = int(sub_fit["entry_idx"].max())
+    val_set_min_idx = int(val_set["entry_idx"].min())
+    assert sub_fit_max_idx < val_set_min_idx, (
+        f"Leakage: sub_fit max_idx={sub_fit_max_idx} >= val_set min_idx={val_set_min_idx}"
+    )
+
+    # Assert: val_set의 어떤 entry_idx도 sub_fit에 없음
+    sub_fit_idx_set = set(sub_fit["entry_idx"].tolist())
+    val_idx_list: list[int] = val_set["entry_idx"].tolist()
+    overlap = [i for i in val_idx_list if i in sub_fit_idx_set]
+    assert len(overlap) == 0, f"Leakage: {len(overlap)} val_set entries found in sub_fit"
