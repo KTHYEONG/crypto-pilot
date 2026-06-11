@@ -3,11 +3,18 @@
 
 # Mode Full (ALO/Ensemble) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-11 (Direction A 실제 활성화 — opt_config.py 직접 주입, Fix 2/3 적용)
+**최신 갱신:** 2026-06-11 (3-Layer Tiered Pipeline 통합 — `USE_CS_RANK_ENGINE=True` 기본값 활성화)
 **현재 상태:** `blocked` — 1/4 Fold Pass (fold_pass_ratio 25.0%). **Active Signals = 0**
 **평가 기준:** `min_variant_oos_edge_bps=10.0`, `breakeven_hard_gate=enabled`, `min_fold_realized_edge_bps=8.0`, `min_oos_rank_ic=0.01`, `min_ic_tstat=0.8`, `max_variant_oos_q10_fail_rate=0.65`, `min_wf_fold_pass_ratio=0.60`
 
 **진단 노트:**
+- **3-Layer Tiered Pipeline 첫 실행 결과 (2026-06-11, `--phase signal`):**
+  - ✅ **Tiered pipeline 진입 확인**: `[TIERED] USE_CS_RANK_ENGINE=True — entering Tiered pipeline` 로그 확인. `opt_main_futures.py` 통합 성공.
+  - ❌ **CPCV Fold 1**: N=10,907 events, Global μ=23.43 bps, Val IC=**-0.0043** (archetype_regime). `Regime lift proof: passed=False nw_tstat=-0.359 fold_pass_ratio=0.00` → regime conditioning 무효 확인.
+  - ❌ **CPCV Fold 2+**: N=8,871, Val IC=**-0.0510**, archetype_only으로 fallback. 동일 블록 반복.
+  - ⚠️ **성능 병목 확인**: CPCV fold별로 앙상블 전체(score_calibration + variant_prior) 재피팅 수행. 63 symbols × CPCV folds 조합으로 실행 시간이 10분+ 초과. **L1 gate 최종 결과 미완료 상태로 중단.**
+  - **핵심 진단**: Val IC가 모든 관측 fold에서 음수(-0.004 ~ -0.051) → CPCV L1 gate 통과 불가 예상. 병목=feature 예측력 부재(기존 앙상블 동일 원인).
+
 - **Direction A 실제 활성화 결과 분석 (2026-06-11, `score_calibration: 6 regimes fitted, 3 valid`):**
   - ✅ **실제로 Direction A 가동 확인**: `[ENSEMBLE] score_calibration: 6 regimes fitted, 3 valid` 로그 확인. 이전 run은 `.env` 미반영으로 실제 미가동이었음.
   - ℹ️ **Validation Rank IC -0.046** (Fix 2 적용 후 score path IC 실측): 이전 기준선(-0.004)보다 악화. score path가 in-fold val window에서 anti-predictive.
