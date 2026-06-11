@@ -3,18 +3,24 @@
 
 # Mode Full (ALO/Ensemble) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-11 (Portfolio Kelly Ablation — Covariance-aware sizing A/B 실험)
+**최신 갱신:** 2026-06-11 (Direction A 실제 활성화 — opt_config.py 직접 주입, Fix 2/3 적용)
 **현재 상태:** `blocked` — 1/4 Fold Pass (fold_pass_ratio 25.0%). **Active Signals = 0**
 **평가 기준:** `min_variant_oos_edge_bps=10.0`, `breakeven_hard_gate=enabled`, `min_fold_realized_edge_bps=8.0`, `min_oos_rank_ic=0.01`, `min_ic_tstat=0.8`, `max_variant_oos_q10_fail_rate=0.65`, `min_wf_fold_pass_ratio=0.60`
 
 **진단 노트:**
-- **Portfolio Kelly A/B 결과 분석 (2026-06-11 최신):**
-  - ❌ **Ens_CovKelly CAGR -7.9%** (기존 diagonal Kelly +2.8% vs 공분산 Kelly -7.9%): Ledoit-Wolf 공분산 overlay 도입이 오히려 악화. 원인 분석:
-    - 공분산 추정 윈도우 내(180 bars ≈ 30d) 단기 상관구조가 OOS에서 불안정 → 가중치 노이즈 증폭.
-    - `mu_2d`가 stop_risk 이벤트에서 0으로 기록되어 포트폴리오 Kelly가 zero-mu 최적화 수행 → 방향 신호 손실.
-    - 결론: 현 신호풀(event 수 144개, deploy 0.25)에서 공분산 구조가 **추정 오차 > 구조적 이득**.
-  - ✅ **Prior_Filter/Ens_Kelly 수치 불변**: 기존 diagonal Kelly(+2.8%, MAR 1.39) 정상 유지 — 코드 변경으로 인한 기존 로직 회귀 없음.
-  - ℹ️ **Fold/Signal 현황 불변**: WF fold 1/4 PASS, Active Signals=0 — 이번 실험은 ablation 측정 전용.
+- **Direction A 실제 활성화 결과 분석 (2026-06-11, `score_calibration: 6 regimes fitted, 3 valid`):**
+  - ✅ **실제로 Direction A 가동 확인**: `[ENSEMBLE] score_calibration: 6 regimes fitted, 3 valid` 로그 확인. 이전 run은 `.env` 미반영으로 실제 미가동이었음.
+  - ℹ️ **Validation Rank IC -0.046** (Fix 2 적용 후 score path IC 실측): 이전 기준선(-0.004)보다 악화. score path가 in-fold val window에서 anti-predictive.
+  - ❌ **Fold 1 RlzdMean 9.7 (✅ PASS)**, Fold 2: 1.7 (❌), Fold 3: 4.4 (❌), Fold 4: 7.3 (❌). 기준선(7.7/4.3/8.5/12.8, Fold 4만 PASS)에서 변화하였으나 pass_ratio 동일(1/4=25%).
+  - ❌ **Fold 2 IC +0.045로 양전환에도 RlzdMean 1.7**: score path가 val IC를 양수로 만들었으나 realized mean이 개선 안 됨 → IC-RlzdMean 해리(signal이 있어도 selection→sizing 경로에서 실현 안 됨).
+  - **핵심 진단 확정**: `score_z`는 동일 variant 내 시계열 percentile (2160 bars causal window). 서로 다른 variant 간 cross-sectional ranking에 정보력 없음 → slope 기울기가 양수더라도 cross-sectional Rank IC≈0 유지. **알고리즘 교체 필요 (cross-sectional score 설계 또는 대체 ranking model).**
+
+- **Direction A+B 구현 (q90 실산출, 2026-06-11):**
+  - ✅ **Ens_Kelly CAGR +0.9%, MaxDD 0.7%** (이전: +2.8%, MaxDD 2.0%): q90 실산출로 Kelly σ 정상화 → 포지션 축소. 리스크 감소 확인.
+  - ✅ **회귀 없음**: 기존 경로(`score_calibration=False`) 시 bit-identical 수치 유지.
+
+- **Portfolio Kelly A/B (2026-06-11):**
+  - ❌ **Ens_CovKelly -7.4%** — Ledoit-Wolf overlay 반증. Disabled 유지.
 
 - **Phase 3 + Allocation Target Vol Bypass 결과 분석 (2026-06-10):**
   - ✅ **앙상블 변이 우선 매핑 정상화 (21 variants fitted)**: 추천 21종 전략의 패밀리명을 온전히 매핑하여 21개 변이가 정상 적합(fit)되었습니다.
@@ -221,11 +227,12 @@
 | Prior_Filter       |    1.4% |    1.9% |   0.71 |  1,007,976 |    113 |   0.24 |   N   |
 | Prior_Residual     |    0.7% |    3.2% |   0.22 |  1,004,009 |    145 |   0.25 |   N   |
 | Ens_Gate       |    0.7% |    3.2% |   0.22 |  1,004,009 |    145 |   0.25 |   N   |
-| Ens_Kelly     |    2.8% |    2.0% |   1.39 |  1,015,943 |    144 |   0.25 |   N   |
-| Ens_Kelly_Caps |    2.6% |    2.0% |   1.31 |  1,015,031 |    147 |   0.25 |   N   |
-| Ens_CovKelly |   -7.9% |    7.2% |  -1.10 |    953,242 |    145 |   0.25 |   N   |
+| Ens_Kelly     |    0.9% |    0.7% |   0.00 |  1,005,171 |    142 |   0.25 |   N   |
+| Ens_Kelly_Caps |    0.9% |    0.7% |   0.00 |  1,005,171 |    142 |   0.25 |   N   |
+| Ens_CovKelly |   -7.4% |    7.0% |  -1.05 |    956,470 |    145 |   0.25 |   N   |
 ------------------------------------------------------------------------------------------
-(★ Ens_CovKelly = Ledoit-Wolf 공분산 Kelly, caps bypassed. 2026-06-11 실험)
+(★ Ens_CovKelly = Ledoit-Wolf 공분산 Kelly, caps bypassed. Disabled 유지)
+(★ Ens_Kelly: q90 실산출(Direction B) 적용 후 +2.8%→+0.9%, MaxDD 2.0%→0.7%. score_calibration(Direction A) 미활성)
 
 
 [REGIME_C34_GOLD] C3/C4 gold standard 계산 완료: events=23806 (IS=12204, OOS=11602)
