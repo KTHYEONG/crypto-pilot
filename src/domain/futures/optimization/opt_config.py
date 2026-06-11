@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import datetime as _dt
+from dataclasses import dataclass as _dataclass
 from typing import Any
+
+from dateutil.relativedelta import relativedelta as _relativedelta
 
 # ==============================================================================
 # OPTIMIZATION FUTURES SEARCH SPACE & CONFIGURATION
@@ -53,6 +57,9 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_MC_DSR_FLOOR_CAP": 0.95,
     # Path A: True + PBO_MAX 0.50 for exploration; default off (session 42: 300t HOLD).
     "FUTURES_TIER1_SHIELD_MODE": False,
+    # 3-Layer Tiered Hybrid Architecture (CS Rank + Diagonal Kelly).
+    # True = tiered pipeline 실행 (Phase D allocation 스킵); False = Phase D 유지.
+    "USE_CS_RANK_ENGINE": True,
     # Universal Cross-Sectional Alpha Miner Settings
     "FUTURES_ML_ALPHA_POPULATION": 1500,
     "FUTURES_ALPHA_LONG_BIAS": 2.0,
@@ -482,4 +489,128 @@ def get_quarterly_window(reference_date: Any = None) -> tuple[str, str, str, str
         is_start.strftime("%Y-%m-%d"),
         oos_start.strftime("%Y-%m-%d"),
         oos_end.strftime("%Y-%m-%d"),
+    )
+
+
+# ============================================================
+# Layer-specific Optuna parameter spaces (신규 아키텍처용)
+# ENGINE_PARAM_SPACE_FUTURES 하위 호환 유지 — 삭제 금지
+# ============================================================
+
+# Layer 1 Optuna study: signal quality(IC) 최적화 목적
+# Tune: lookback, noise filter threshold, model HP — Sharpe/CAGR 미사용
+L1_ALPHA_SPACE: dict[str, dict[str, Any]] = {
+    "label_horizon_bars": {"type": "categorical", "choices": (6, 12, 18)},
+    "alpha_emit_select_q": {"type": "float", "low": 0.25, "high": 0.50, "step": 0.05},
+    "alpha_emit_weight_k": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.5},
+    "MIN_SCORE_PERCENTILE": {"type": "float", "low": 0.40, "high": 0.90, "step": 0.10},
+}
+
+# Layer 2 Optuna study: Sharpe/복리 최적화 목적 (L1 OOS 결과 입력)
+# Tune: Top-K, kelly, sector cap, friction hurdle — IC 미사용
+L2_ALLOC_SPACE: dict[str, dict[str, Any]] = {
+    "K_RANK": {"type": "int", "low": 1, "high": 4, "step": 1},
+    "REBALANCE_BARS": {"type": "categorical", "choices": (1, 3, 6)},
+    "CS_Z_SCORE_THRESHOLD": {"type": "float", "low": 0.2, "high": 2.0, "step": 0.1},
+    "RISK_PER_TRADE": {"type": "float", "low": 0.02, "high": 0.10, "step": 0.01},
+    "MAX_EXPOSURE_PER_COIN": {"type": "float", "low": 0.5, "high": 2.5, "step": 0.25},
+    "NORM_VAR_CONSTANT": {"type": "float", "low": 0.1, "high": 1.0, "step": 0.1},
+}
+
+
+# ==============================================================================
+# 3-WAY LAYERED WINDOW  (post-FTX regime-floor aware)
+# ==============================================================================
+
+# post-FTX 정착 + 연 경계: 이전 데이터는 비정상 regime 포함
+REGIME_FLOOR: _dt.date = _dt.date(2023, 1, 1)
+
+
+@_dataclass(frozen=True)
+class LayeredWindow:
+    """3-way sliding window 결과.
+
+    Attributes:
+        fetch_start: fetch 시작일 (warmup buffer 포함).
+        l1_start: Layer1 CPCV 시작일 (≥ REGIME_FLOOR).
+        l2_start: Layer2 AWF 시작일 (= L1 끝).
+        holdout_start: Hold-out 시작일 (= L2 끝).
+        holdout_end: Hold-out 끝일.
+        regime_floor: 실제 적용된 floor 값 (감사용).
+    """
+
+    fetch_start: _dt.date
+    l1_start: _dt.date
+    l2_start: _dt.date
+    holdout_start: _dt.date
+    holdout_end: _dt.date
+    regime_floor: _dt.date
+
+
+def get_layered_window(
+    reference_date: _dt.date | None = None,
+    *,
+    l1_months: int = 18,
+    l2_months: int = 12,
+    holdout_months: int = 6,
+    regime_floor: _dt.date = REGIME_FLOOR,
+    warmup_days: int = 365,
+) -> LayeredWindow:
+    """3-way sliding window 계산.
+
+    reference_date 기준 직전 분기 끝을 holdout_end로,
+    역방향으로 holdout(6mo) → L2(12mo) → L1(18mo) 순으로 계산.
+    l1_start < regime_floor이면 regime_floor로 클램프.
+    fetch_start = l1_start - warmup_days.
+
+    Args:
+        reference_date: 기준일 (None이면 오늘).
+        l1_months: Layer1 CPCV 기간 (월).
+        l2_months: Layer2 AWF 기간 (월).
+        holdout_months: Hold-out 기간 (월).
+        regime_floor: L1 시작 최소 허용일.
+        warmup_days: fetch_start 추가 버퍼 (일).
+
+    Returns:
+        LayeredWindow 인스턴스.
+
+    Time Complexity: O(1).
+    Space Complexity: O(1).
+    """
+    if reference_date is None:
+        reference_date = _dt.date.today()
+
+    # holdout_end = 현재 분기 시작 - 1일
+    current_q_month: int = ((reference_date.month - 1) // 3) * 3 + 1
+    current_q_start: _dt.date = _dt.date(reference_date.year, current_q_month, 1)
+    holdout_end: _dt.date = current_q_start - _dt.timedelta(days=1)
+
+    # 역산: holdout → L2 → L1
+    holdout_start: _dt.date = (
+        holdout_end - _relativedelta(months=holdout_months) + _dt.timedelta(days=1)
+    )
+    l2_start: _dt.date = holdout_start - _relativedelta(months=l2_months)
+    l1_start_raw: _dt.date = l2_start - _relativedelta(months=l1_months)
+
+    # REGIME_FLOOR 클램프
+    l1_start: _dt.date = max(l1_start_raw, regime_floor)
+    if l1_start > l2_start:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "REGIME_FLOOR clamp exceeded l2_start: l1_start=%s > l2_start=%s. "
+            "L1 window is zero-length — check reference_date or regime_floor.",
+            l1_start,
+            l2_start,
+        )
+
+    # fetch warmup buffer
+    fetch_start: _dt.date = l1_start - _dt.timedelta(days=warmup_days)
+
+    return LayeredWindow(
+        fetch_start=fetch_start,
+        l1_start=l1_start,
+        l2_start=l2_start,
+        holdout_start=holdout_start,
+        holdout_end=holdout_end,
+        regime_floor=regime_floor,
     )
