@@ -7,6 +7,7 @@ from itertools import product
 
 import numpy as np
 import pandas as pd
+from numba import njit
 from numpy.typing import NDArray
 
 from src.domain.futures.portfolio.covariance import (
@@ -219,7 +220,7 @@ def compute_selection_waterfall(
 
 def _evaluate_shadow_profile(
     *,
-    events: pd.DataFrame,
+    prebuilt_frame: pd.DataFrame,
     cfg: CandidateStrategyConfig,
     catastrophic_mask: pd.Series,
     utility_floor_base: float,
@@ -227,11 +228,7 @@ def _evaluate_shadow_profile(
     utility_mode: str,
 ) -> dict[str, object]:
     """Evaluate a single shadow profile and return a result record."""
-    frame = _selection_component_frame(
-        events=events,
-        cfg=cfg,
-        utility_mode=utility_mode,
-    )
+    frame = prebuilt_frame
     utility_floor = max(float(utility_floor_base), float(breakeven_fraction) * float(cfg.cost_floor_bps))
     eligible = catastrophic_mask & (frame["expected_utility_bps"] >= utility_floor)
     selected_pre_group = 0
@@ -253,7 +250,6 @@ def _evaluate_shadow_profile(
         )
         selected_pre_group = len(top_idx)
         selected_frame = frame.loc[top_idx].copy()
-        selected_frame["_merge_dt"] = pd.to_datetime(selected_frame["datetime"], utc=True).dt.tz_localize(None)
         selected_frame = (
             selected_frame.sort_values(
                 ["_merge_dt", "symbol", "expected_utility_bps"],
@@ -323,9 +319,20 @@ def compute_shadow_selection_profiles(
     if not cfg.selection_shadow_profiles_enabled or events.empty:
         return pd.DataFrame(columns=columns)
 
-    records: list[dict[str, object]] = []
-    catastrophic_mask = _catastrophic_q10_mask(events, cfg)
+    events_with_dt = events.copy()
+    events_with_dt["_merge_dt"] = pd.to_datetime(events_with_dt["datetime"], utc=True).dt.tz_localize(None)
+
     shadow_utility_modes = list(cfg.selection_shadow_utility_modes) or ["additive_drag"]
+    prebuilt_frames = {}
+    for mode in shadow_utility_modes:
+        prebuilt_frames[mode] = _selection_component_frame(
+            events=events_with_dt,
+            cfg=cfg,
+            utility_mode=mode,
+        )
+
+    records: list[dict[str, object]] = []
+    catastrophic_mask = _catastrophic_q10_mask(events_with_dt, cfg)
     for utility_mode, utility_floor_base, breakeven_fraction in product(
         shadow_utility_modes,
         cfg.selection_shadow_utility_floors_bps,
@@ -333,7 +340,7 @@ def compute_shadow_selection_profiles(
     ):
         records.append(
             _evaluate_shadow_profile(
-                events=events,
+                prebuilt_frame=prebuilt_frames[utility_mode],
                 cfg=cfg,
                 catastrophic_mask=catastrophic_mask,
                 utility_floor_base=float(utility_floor_base),
@@ -350,6 +357,56 @@ def compute_shadow_selection_profiles(
         key=lambda s: (s >= cfg.min_fold_selected_events) if s.name == "selected_total" else s,
     )
     return profiles.head(max(1, int(cfg.selection_shadow_max_profiles))).reset_index(drop=True)
+
+
+@njit(cache=True)  # type: ignore
+def _compute_sensitivity_grids_numba(
+    mu_net: NDArray[np.float64],
+    q10_net: NDArray[np.float64],
+    variant_codes: NDArray[np.int64],
+    num_variants: int,
+    gate_grid: NDArray[np.float64],
+    edge_grid: NDArray[np.float64],
+    q10_grid: NDArray[np.float64],
+) -> tuple[NDArray[np.int64], NDArray[np.int64], NDArray[np.int64]]:
+    n_gate = gate_grid.shape[0]
+    n_edge = edge_grid.shape[0]
+    n_q10 = q10_grid.shape[0]
+    n_events = mu_net.shape[0]
+
+    all_pass_counts = np.zeros((n_gate, n_edge, n_q10), dtype=np.int64)
+    top_variant_codes = np.full((n_gate, n_edge, n_q10), -1, dtype=np.int64)
+    top_variant_counts = np.zeros((n_gate, n_edge, n_q10), dtype=np.int64)
+
+    for g_idx in range(n_gate):
+        for e_idx in range(n_edge):
+            edge_val = edge_grid[e_idx]
+            for q_idx in range(n_q10):
+                q10_val = q10_grid[q_idx]
+
+                pass_count = 0
+                v_counts = np.zeros(num_variants, dtype=np.int64)
+
+                for i in range(n_events):
+                    if mu_net[i] >= edge_val and q10_net[i] >= -q10_val:
+                        pass_count += 1
+                        code = variant_codes[i]
+                        if code >= 0:
+                            v_counts[code] += 1
+
+                all_pass_counts[g_idx, e_idx, q_idx] = pass_count
+
+                max_count = 0
+                best_code = -1
+                for c in range(num_variants):
+                    if v_counts[c] > max_count:
+                        max_count = v_counts[c]
+                        best_code = c
+
+                top_variant_codes[g_idx, e_idx, q_idx] = best_code
+                top_variant_counts[g_idx, e_idx, q_idx] = max_count
+
+    return all_pass_counts, top_variant_codes, top_variant_counts
 
 
 def compute_selection_sensitivity(
@@ -380,42 +437,47 @@ def compute_selection_sensitivity(
 
     records: list[dict[str, float | int | str]] = []
     total = int(events.shape[0])
-    variant_keys = (
-        events["family"].astype(str).str.cat(events["variant"].astype(str), sep=":")
-        if {"family", "variant"}.issubset(events.columns)
-        else pd.Series([""] * total, index=events.index, dtype="object")
+
+    mu_net = events["mu_net_decision_bps"].to_numpy(dtype=np.float64, copy=False)
+    q10_net = events["q10_net_bps"].to_numpy(dtype=np.float64, copy=False)
+
+    if {"family", "variant"}.issubset(events.columns):
+        variant_keys = (events["family"].astype(str) + ":" + events["variant"].astype(str)).to_numpy(dtype=object)
+        uniques, variant_codes = np.unique(variant_keys, return_inverse=True)
+        num_variants = len(uniques)
+    else:
+        uniques = np.array([""])
+        variant_codes = np.zeros(total, dtype=np.int64)
+        num_variants = 1
+
+    g_arr = np.array(gate_grid, dtype=np.float64)
+    e_arr = np.array(edge_grid_bps, dtype=np.float64)
+    q_arr = np.array(q10_grid_bps, dtype=np.float64)
+
+    all_pass_counts, top_codes, top_counts = _compute_sensitivity_grids_numba(
+        mu_net, q10_net, variant_codes.astype(np.int64), num_variants, g_arr, e_arr, q_arr
     )
-    for gate_threshold in gate_grid:
-        gate_mask = pd.Series(True, index=events.index, dtype=bool)
-        for edge_threshold in edge_grid_bps:
-            edge_mask = events["mu_net_decision_bps"] >= edge_threshold
-            for q10_threshold in q10_grid_bps:
-                q10_mask = events["q10_net_bps"] >= -q10_threshold
-                all_mask = gate_mask & edge_mask & q10_mask
-                passed = variant_keys.loc[all_mask]
-                if passed.empty:
-                    top_variant = ""
-                    top_variant_pass = 0
-                else:
-                    counts = passed.value_counts(sort=True)
-                    top_variant = str(counts.index[0])
-                    top_variant_pass = int(counts.iloc[0])
+
+    shortfall_basis = "absolute_bps" if cfg is None else str(cfg.shortfall_threshold_basis)
+    for g_idx, gate_threshold in enumerate(gate_grid):
+        for e_idx, edge_threshold in enumerate(edge_grid_bps):
+            for q_idx, q10_threshold in enumerate(q10_grid_bps):
+                code = top_codes[g_idx, e_idx, q_idx]
+                top_variant = str(uniques[code]) if code >= 0 else ""
                 records.append(
                     {
-                        "shortfall_basis": (
-                            "absolute_bps" if cfg is None else str(cfg.shortfall_threshold_basis)
-                        ),
+                        "shortfall_basis": shortfall_basis,
                         "gate_threshold": float(gate_threshold),
                         "edge_threshold_bps": float(edge_threshold),
                         "q10_shortfall_bps": float(q10_threshold),
                         "total": total,
-                        "gate_pass": int(gate_mask.sum()),
-                        "edge_pass": int(edge_mask.sum()),
-                        "q10_pass": int(q10_mask.sum()),
-                        "all_pass": int(all_mask.sum()),
-                        "all_pass_rate": float(all_mask.mean()),
+                        "gate_pass": total,
+                        "edge_pass": int(np.sum(mu_net >= edge_threshold)),
+                        "q10_pass": int(np.sum(q10_net >= -q10_threshold)),
+                        "all_pass": int(all_pass_counts[g_idx, e_idx, q_idx]),
+                        "all_pass_rate": float(all_pass_counts[g_idx, e_idx, q_idx] / total),
                         "top_variant": top_variant,
-                        "top_variant_pass": top_variant_pass,
+                        "top_variant_pass": int(top_counts[g_idx, e_idx, q_idx]),
                     }
                 )
     return pd.DataFrame.from_records(records)
