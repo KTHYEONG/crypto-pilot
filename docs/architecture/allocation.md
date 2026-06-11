@@ -12,19 +12,25 @@ related_paths:
   - src/domain/futures/strategy/config.py
   - src/domain/futures/strategy/ablation.py
   - src/domain/futures/portfolio/covariance.py
+  - src/domain/futures/strategy/tiered_workflow.py
+  - src/domain/futures/strategy/cs_rank.py
+  - src/domain/futures/portfolio/portfolio_constructor.py
+  - src/domain/futures/strategy/walk_forward.py
+  - src/domain/futures/portfolio/signal_composer.py
 change_triggers:
   - src/domain/futures/strategy/candidate_ensemble.py
   - src/domain/futures/strategy/candidate_workflow.py
-  - src/domain/futures/strategy/candidate_portfolio.py
-  - src/domain/futures/strategy/config.py
-  - src/domain/futures/strategy/ablation.py
-  - src/domain/futures/portfolio/covariance.py
+  - src/domain/futures/strategy/tiered_workflow.py
+  - src/domain/futures/strategy/cs_rank.py
+  - src/domain/futures/portfolio/portfolio_constructor.py
+  - src/domain/futures/strategy/walk_forward.py
+  - src/domain/futures/portfolio/signal_composer.py
 dependencies:
   documents:
     - docs/architecture/signal.md
     - docs/architecture/regime.md
     - docs/architecture/ML.md
-last_verified: 2026-06-11  # Direction A/B 수식 반영
+last_verified: 2026-06-11
 ---
 
 # 1. Purpose
@@ -147,3 +153,75 @@ graph TD
 - **Unseen Regimes in Live Trading:** If the system encounters an `(archetype, regime)` tuple missing from the trained ensemble, it falls back gracefully to the archetype mean, then the global mean.
 - **OOS Fold Failure (Contamination Defense):** If a walk-forward fold exhibits deeply negative out-of-sample edge, its predictions are censored (forced to 0) rather than dropped, preserving the matrix shape while neutralizing its allocation power.
 - **No OOS Evidence (Fail-SAFE):** If `archetype_regime` is selected but no OOS proof window exists (e.g. first fold), the system degrades to `archetype_only` rather than proceeding without evidence. `conditioning_path="no_oos_evidence_failsafe"` is emitted for observability.
+
+---
+
+# 6. 3-Layer Tiered Hybrid Architecture (USE_CS_RANK_ENGINE)
+
+> **Activation:** `OPT_FUTURES_CONFIG["USE_CS_RANK_ENGINE"] = True` (default `False` — Phase D preserved)
+
+## 6.1 Purpose
+Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D ensemble. Activated at `_run_strategy_stage` entry; exceptions fall back to Phase D.
+
+## 6.2 Core Math
+
+**Layer 1 — CPCV Signal Validation**
+- Folds: $C(N_g, k)$ combinations of $N_g$ groups; purge $p$ bars left of each test group; embargo $e$ bars right.
+- OOS stacking: $\mu_{\text{oos},s} = \frac{1}{F} \sum_{f=1}^{F} \mu_{f,s}$ (per-symbol fold average; leakage guard: each fold predicts its own OOS only).
+- HAC IC t-stat (independent-fold approx): $t = \bar{IC} \cdot \sqrt{F} / (\text{std}_{IC} + 10^{-9})$
+- **Gate**: $\bar{IC} \geq 0.030$, $t_{IC} \geq 1.96$, breadth $\geq 0.30$, coverage $\geq 0.80$, fold_pass_ratio $\geq 0.60$
+
+**Layer 2 — CS Rank + Diagonal Kelly AWF**
+- BTC-β neutralization: $\mu_{\text{neutral},i} = \mu_i - \beta_i \cdot \bar{\mu}_{\text{mkt}}$ (CS mean as proxy)
+- Rank selection: $\text{select}_i = (\text{rank}_i \leq K + \text{rank\_buffer})$ with hysteresis on `prev_selection`
+- Diagonal Kelly: $w_i \propto f_k \cdot \mu_i / \sigma_i^2$; friction mask: $|mu_i| \geq \text{hurdle}_i$ (symmetric — supports long AND short)
+- Vol-target scaling: $w \leftarrow w \cdot (\sigma_{\text{target}} / \sigma_{\text{port}})$; caps: gross/per-symbol/net/beta
+- No-trade band: $|\Delta w_i| < \text{band} \rightarrow w_i \leftarrow w_{\text{prev},i}$
+- **Gate**: $\text{Sharpe}_{\text{hybrid}} \geq \text{Sharpe}_{1/N} \times 1.20$ AND $\text{MDD}_{\text{hybrid}} \leq \text{MDD}_{1/N}$
+
+**Layer 3 — Frozen Holdout**
+- Single WFFold covering `[ho_start, ho_end)`, frozen L2 params.
+- CAGR (actual): $\text{CAGR} = (1 + \sum r_t)^{b_{\text{yr}}/n} - 1$ — no vol_proxy approximation.
+- MAR: $\text{CAGR} / (\text{MDD} + 10^{-9})$
+- **Gate**: $\text{Sharpe} \geq \text{Sharpe}_{\text{baseline}}$ AND $\text{MDD} \leq \text{MDD}_{\text{baseline}}$
+
+**Decoupled Optuna**
+- `L1_ALPHA_SPACE` → `objective_l1_ic` (IC only; Sharpe not referenced)
+- `L2_ALLOC_SPACE` → `objective_l2_sharpe` (Sharpe only; IC not referenced)
+- Short-circuit: L1 BLOCKED → L2/L3 = None (skip)
+
+## 6.3 Architecture Flow
+
+```mermaid
+graph TD
+    A[USE_CS_RANK_ENGINE=True] --> B[build_cpcv_folds]
+    B --> C[run_l1_cpcv]
+    C -->|gate PASS| D[run_l2_awf]
+    C -->|gate BLOCKED| Z[return L1, None, None]
+    D -->|gate PASS| E[run_l3_holdout]
+    D -->|gate BLOCKED| Y[return L1, L2, None]
+    E --> F[Layer3Result: CAGR/MDD/MAR]
+```
+
+## 6.4 Key Module Map
+
+| Module | Role |
+|--------|------|
+| `tiered_workflow.py` | L1/L2/L3 orchestrator + `_run_awf_simulation` shared loop |
+| `walk_forward.py` | `CPCVFold` + `build_cpcv_folds` (C(N,k) purge/embargo) |
+| `signal_composer.py` | `compose_symbol_signals`: BarRet → SymbolSignal + HAC t-stat |
+| `cs_rank.py` | `rank_and_select` + `neutralize_cross_section` (BTC-β wired) |
+| `portfolio_constructor.py` | `diagonal_kelly_weights` (friction mask: `abs(mu) >= hurdle`) |
+| `tiered_logging.py` | Pure format functions → pipe-table log strings |
+| `workflow.py` | `suggest_layered_params` + `objective_l1_ic` / `objective_l2_sharpe` |
+
+## 6.5 Integration Status
+- **Active** (`USE_CS_RANK_ENGINE=True` in `OPT_FUTURES_CONFIG`).
+- Bridge 실행 완료 후 tiered 분기 진입 — `ml_out.labeled`(Triple-Barrier events) + `align_data_maps(data_maps)` 사용.
+- Phase D allocation 스킵 (`return None`); 예외 시 Phase D fallback 보존.
+- Phase flag 매핑: `--phase signal` → bridge(신호진단)+L1, `--phase alo` → +L2+L3, `full` → +최적화.
+
+## 6.6 Edge Cases
+- **REGIME_FLOOR clamp**: `l1_start > l2_start` → warning logged, L1 window is zero-length.
+- **CPCV degenerate** (n_bars < min for groups): single fallback fold covering full range.
+- **Total loss** (cumulative pnl ≤ -1): `_cagr()` returns -1.0; MAR computed with `mdd + 1e-9` guard.
