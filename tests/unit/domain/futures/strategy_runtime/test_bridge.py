@@ -788,3 +788,74 @@ def test_bridge_signal_only_silent_diagnostics(monkeypatch: Any) -> None:
     )
 
     assert captured_kwargs.get("silent") is True
+
+
+def test_verify_data_integrity_happy_path() -> None:
+    from src.domain.futures.strategy_runtime.bridge import verify_data_integrity
+    
+    n_bars = 150
+    close = np.linspace(100.0, 110.0, n_bars).reshape(n_bars, 1)
+    high = close + 1.0
+    low = close - 1.0
+    volume = np.full((n_bars, 1), 500.0)
+    
+    close_2d = np.hstack([close, close])
+    high_2d = np.hstack([high, high])
+    low_2d = np.hstack([low, low])
+    volume_2d = np.hstack([volume, volume])
+    
+    aligned = SimpleNamespace(
+        close_2d=close_2d,
+        high_2d=high_2d,
+        low_2d=low_2d,
+        volume_2d=volume_2d,
+    )
+    
+    report = verify_data_integrity(aligned, ["BTC", "ETH"], min_length=100)  # type: ignore
+    assert report["BTC"]["status"] == "PASS"
+    assert report["ETH"]["status"] == "PASS"
+    assert not report["BTC"]["reasons"]
+
+
+def test_verify_data_integrity_edge_cases() -> None:
+    from src.domain.futures.strategy_runtime.bridge import verify_data_integrity
+    
+    n_bars = 50
+    close = np.linspace(100.0, 110.0, n_bars).reshape(n_bars, 1)
+    high = close + 1.0
+    low = close - 1.0
+    volume = np.full((n_bars, 1), 500.0)
+    
+    close_eth = close.copy()
+    close_eth[10] = np.nan
+    
+    close_sol = np.full((n_bars, 1), 100.0)
+    high_sol = np.full((n_bars, 1), 100.0)
+    low_sol = np.full((n_bars, 1), 100.0)
+    
+    high_ada = close - 2.0
+    low_ada = close + 2.0
+    
+    close_2d = np.hstack([close, close_eth, close_sol, close])
+    high_2d = np.hstack([high, high, high_sol, high_ada])
+    low_2d = np.hstack([low, low, low_sol, low_ada])
+    volume_2d = np.hstack([volume, volume, volume, volume])
+    
+    aligned = SimpleNamespace(
+        close_2d=close_2d,
+        high_2d=high_2d,
+        low_2d=low_2d,
+        volume_2d=volume_2d,
+    )
+    
+    report = verify_data_integrity(aligned, ["BTC", "ETH", "SOL", "ADA"], min_length=100)  # type: ignore
+    
+    assert report["BTC"]["status"] == "FAIL"
+    assert "too_short" in report["BTC"]["reasons"]
+    
+    assert "excessive_nan" in report["ETH"]["reasons"]
+    assert "too_short" in report["ETH"]["reasons"]
+    
+    assert "stuck_price" in report["SOL"]["reasons"]
+    
+    assert "hi_lo_violation" in report["ADA"]["reasons"]

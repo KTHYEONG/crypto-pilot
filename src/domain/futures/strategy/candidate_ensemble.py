@@ -188,30 +188,26 @@ def _log_ensemble_diagnostics(
     """
     n_total = len(frame)
     ic_sign = "✅ POSITIVE" if val_ic > 0 else "❌ NEGATIVE"
+    symbol_name = str(frame["symbol"].iloc[0]) if "symbol" in frame.columns and not frame.empty else "UNKNOWN"
 
     header = (
-        "\n[ENSEMBLE DIAGNOSTICS] ─────────────────────────────────────────────\n"
-        f"| {'Metric':<28} | {'Value':<30} |\n"
-        f"| {'─'*28} | {'─'*30} |\n"
-        f"| {'N events (train)':<28} | {n_total:<30} |\n"
-        f"| {'Global mu (bps)':<28} | {global_mu:<30.3f} |\n"
-        f"| {'Validation Rank IC':<28} | {val_ic:<30.4f} |\n"
-        f"| {'IC sign':<28} | {ic_sign:<30} |\n"
-        f"| {'Conditioning chosen':<28} | {chosen:<30} |\n"
-        f"| {'Adaptive shrinkage':<28} | {adaptive_shrinkage!s:<30} |\n"
-        f"| {'k_used (max/fixed)':<28} | {k_used:<30.1f} |\n"
-        "├─────────────────────────────────────────────────────────────────────\n"
-        f"| {'Archetype':<30} | {'Shrunk mu (bps)':<16} | {'Sign':<8} | {'N':<6} |\n"
-        f"| {'─'*30} | {'─'*16} | {'─'*8} | {'─'*6} |\n"
+        f"\n[ENSEMBLE DIAGNOSTICS] Symbol: {symbol_name} | N(train): {n_total} | "
+        f"IC: {val_ic:.4f} ({ic_sign}) | Global mu: {global_mu:.3f} bps\n"
+        f"├─ Cond: {chosen} | Adapt: {adaptive_shrinkage} | k: {k_used:.1f}"
     )
+    
     rows = []
+    items = []
     for arch, mu_val in sorted(arch_mu.items()):
         n_arch = int((frame["archetype"] == arch).sum())
         sign_flag = "✅" if mu_val >= 0.0 else "❌ ANTI"
-        rows.append(f"| {arch:<30} | {mu_val:<16.3f} | {sign_flag:<8} | {n_arch:<6} |")
-    footer = "─────────────────────────────────────────────────────────────────────"
+        items.append(f"[{arch}] mu: {mu_val:.3f} ({sign_flag}) N: {n_arch}")
+    
+    for i in range(0, len(items), 2):
+        chunk = items[i:i+2]
+        rows.append("├─ " + " | ".join(chunk))
 
-    _logger.info("%s%s\n%s", header, "\n".join(rows), footer)
+    _logger.info("%s\n%s", header, "\n".join(rows))
 
 
 def _compute_eb_shrinkage_k(
@@ -547,6 +543,8 @@ def fit_regime_conditional_ensemble(
     _variant_cols = [c for c in ("family", "variant") if c in train_events.columns]
     _score_cols = [c for c in ("score_z",) if c in train_events.columns]
     _base_cols = ["archetype", "entry_regime_code", "net_return_bps", *_variant_cols, *_score_cols]
+    if "symbol" in train_events.columns:
+        _base_cols.append("symbol")
     frame = train_events.loc[:, _base_cols].copy()
     if "entry_idx" in train_events.columns:
         frame["entry_idx"] = train_events["entry_idx"].values
