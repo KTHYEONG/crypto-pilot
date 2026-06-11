@@ -133,3 +133,15 @@ graph TD
 - **Cell-Admission Zero-Variance Cell:** If all per-cell edges are identical ($\sigma_g = 0$), the $\epsilon$ term in $t_g$ prevents div-by-zero; cell still admits on $\mu_g \geq$ threshold.
 - **Cell-Admission Multiple Comparisons:** Per-cell selection over OOS amplifies data-snooping vs. global gates; the $t_g \geq 1.0$ floor is a weak, non-NW guard — purged/embargoed nested validation is the proper follow-up before live capital.
 - **Multiplicity Gating Fail-Closed:** Under extremely sparse event environments or low expectancy, the SPA gate automatically fails (fail-closed), preventing overfitting noise candidates from leaking.
+
+# 6. Data Integrity & Optimization (Robust Validation Guard)
+- **Data Integrity Verification (`verify_data_integrity`):** Before rule signals are composed, a strict multi-point sanity check is executed per symbol on the `AlignedMarketData` object.
+  - *Data Length Check (`too_short`):* Triggers if the history length is below `min_length` (e.g., 100 bars).
+  - *Missing Values Check (`excessive_nan`):* Blocks the symbol if any NaN values exist in close, high, low, or volume arrays (threshold: $> 0.0\%$).
+  - *Invalid Values Check (`invalid_values`):* Detects zero or negative prices/volume.
+  - *Stuck Price Check (`stuck_price`):* Flags frozen prices where the standard deviation of the close series is near-zero ($\sigma_{\text{close}} < 10^{-8}$).
+  - *High-Low Violation Check (`hi_lo_violation`):* Flags any instances where high price is strictly lower than low price ($High < Low$).
+- **Performance Optimizations:**
+  - *Vectorized Percentile (`_compute_score_pct_variant_hist`):* Replaced $O(N^2)$ python masking filters with a vectorized $O(N \log N)$ `np.searchsorted` causal boundary search.
+  - *Confluence Counts (`n_same`):* Upgraded from string concatenation mapping to optimized Pandas `groupby().transform("size")` with index alignment series.
+  - *Affinity Matrix Lookup (`arm`):* Replaced list comprehensions with a high-density 2D numpy lookup table mapping archetype and regime integer keys.
