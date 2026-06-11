@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -63,6 +64,9 @@ _ARCHETYPE_REGIME_AFFINITY: dict[tuple[str, str], float] = {
     ("beta_neutral_reversion", "transition"): 0.3,
     ("beta_neutral_reversion", "crash"): -0.3,
 }
+
+
+_ALIGNED_FEATURE_CACHE: dict[int, dict[str, Any]] = {}
 
 
 @dataclass(slots=True, frozen=True)
@@ -551,31 +555,59 @@ def build_candidate_dataset(
     funding = aligned.funding_2d
     t_len, _ = close.shape
 
-    # 1. Base technicals (T x N)
-    sym_ret_1 = (close[1:] / np.maximum(close[:-1], 1e-12)) - 1.0
-    sym_ret_5 = (close[5:] / np.maximum(close[:-5], 1e-12)) - 1.0
+    aligned_id = id(aligned)
+    if aligned_id not in _ALIGNED_FEATURE_CACHE:
+        _ALIGNED_FEATURE_CACHE[aligned_id] = {}
+    cache = _ALIGNED_FEATURE_CACHE[aligned_id]
 
-    log_ret_2d = np.zeros_like(close)
-    log_ret_2d[1:] = np.diff(np.log(np.maximum(close, 1e-12)), axis=0)
-    sym_vol_20 = pd.DataFrame(log_ret_2d).rolling(20, min_periods=1).std(ddof=0).values
+    if "sym_ret_1" not in cache:
+        sym_ret_1 = (close[1:] / np.maximum(close[:-1], 1e-12)) - 1.0
+        sym_ret_5 = (close[5:] / np.maximum(close[:-5], 1e-12)) - 1.0
 
-    sym_volume_z20 = _rolling_robust_z_2d(volume, window=20)
+        log_ret_2d = np.zeros_like(close)
+        log_ret_2d[1:] = np.diff(np.log(np.maximum(close, 1e-12)), axis=0)
+        sym_vol_20 = pd.DataFrame(log_ret_2d).rolling(20, min_periods=1).std(ddof=0).values
 
-    f_df = pd.DataFrame(funding)
-    funding_z20 = _rolling_robust_z_2d(funding, window=20)
+        sym_volume_z20 = _rolling_robust_z_2d(volume, window=20)
 
-    # 2. Market-wide technicals (T)
-    mkt_ret_1 = np.nanmean(sym_ret_1, axis=1)
-    # pad to T length
-    mkt_ret_1_padded = np.zeros(t_len)
-    mkt_ret_1_padded[1:] = mkt_ret_1
+        f_df = pd.DataFrame(funding)
+        funding_z20 = _rolling_robust_z_2d(funding, window=20)
 
-    mkt_vol_20 = np.nanmean(sym_vol_20, axis=1)
+        # 2. Market-wide technicals (T)
+        mkt_ret_1 = np.nanmean(sym_ret_1, axis=1)
+        # pad to T length
+        mkt_ret_1_padded = np.zeros(t_len)
+        mkt_ret_1_padded[1:] = mkt_ret_1
 
-    ret20_2d = np.zeros_like(close)
-    ret20_2d[20:] = (close[20:] / np.maximum(close[:-20], 1e-12)) - 1.0
-    mkt_dispersion_20 = np.nanstd(ret20_2d, axis=1)
-    market_breadth_20 = np.nanmean(ret20_2d > 0, axis=1)
+        mkt_vol_20 = np.nanmean(sym_vol_20, axis=1)
+
+        ret20_2d = np.zeros_like(close)
+        ret20_2d[20:] = (close[20:] / np.maximum(close[:-20], 1e-12)) - 1.0
+        mkt_dispersion_20 = np.nanstd(ret20_2d, axis=1)
+        market_breadth_20 = np.nanmean(ret20_2d > 0, axis=1)
+
+        cache["sym_ret_1"] = sym_ret_1
+        cache["sym_ret_5"] = sym_ret_5
+        cache["sym_vol_20"] = sym_vol_20
+        cache["sym_volume_z20"] = sym_volume_z20
+        cache["funding_z20"] = funding_z20
+        cache["mkt_ret_1_padded"] = mkt_ret_1_padded
+        cache["mkt_vol_20"] = mkt_vol_20
+        cache["mkt_dispersion_20"] = mkt_dispersion_20
+        cache["market_breadth_20"] = market_breadth_20
+        cache["ret20_2d"] = ret20_2d
+    else:
+        sym_ret_1 = cache["sym_ret_1"]
+        sym_ret_5 = cache["sym_ret_5"]
+        sym_vol_20 = cache["sym_vol_20"]
+        sym_volume_z20 = cache["sym_volume_z20"]
+        funding_z20 = cache["funding_z20"]
+        mkt_ret_1_padded = cache["mkt_ret_1_padded"]
+        mkt_vol_20 = cache["mkt_vol_20"]
+        mkt_dispersion_20 = cache["mkt_dispersion_20"]
+        market_breadth_20 = cache["market_breadth_20"]
+        ret20_2d = cache["ret20_2d"]
+        f_df = pd.DataFrame(funding)
 
     # 3. Market state features (if enabled)
     btc_ret_1_ser = np.zeros(t_len)
@@ -588,26 +620,45 @@ def build_candidate_dataset(
     funding_cs_z_2d = np.zeros_like(close)
 
     if cfg.market_state_features_enabled:
-        btc_idx = _btc_symbol_index(aligned.symbols)
-        btc_close = close[:, btc_idx]
-        btc_ret_1_ser[1:] = (btc_close[1:] / np.maximum(btc_close[:-1], 1e-12)) - 1.0
-        btc_ret_5_ser[5:] = (btc_close[5:] / np.maximum(btc_close[:-5], 1e-12)) - 1.0
-        btc_ma20 = pd.Series(btc_close).rolling(20, min_periods=1).mean().values
-        btc_ma100 = pd.Series(btc_close).rolling(100, min_periods=1).mean().values
-        btc_trend_20_100_ser = (btc_ma20 >= btc_ma100).astype(float)
+        if "btc_ret_1_ser" not in cache:
+            btc_idx = _btc_symbol_index(aligned.symbols)
+            btc_close = close[:, btc_idx]
+            btc_ret_1_ser[1:] = (btc_close[1:] / np.maximum(btc_close[:-1], 1e-12)) - 1.0
+            btc_ret_5_ser[5:] = (btc_close[5:] / np.maximum(btc_close[:-5], 1e-12)) - 1.0
+            btc_ma20 = pd.Series(btc_close).rolling(20, min_periods=1).mean().values
+            btc_ma100 = pd.Series(btc_close).rolling(100, min_periods=1).mean().values
+            btc_trend_20_100_ser = (btc_ma20 >= btc_ma100).astype(float)
 
-        mkt_vol_df = pd.Series(mkt_vol_20).fillna(0)
-        mkt_vol_z120_ser = _rolling_robust_z_1d(mkt_vol_df.to_numpy(dtype=np.float64), window=120)
+            mkt_vol_df = pd.Series(mkt_vol_20).fillna(0)
+            mkt_vol_z120_ser = _rolling_robust_z_1d(mkt_vol_df.to_numpy(dtype=np.float64), window=120)
 
-        mkt_disp_df = pd.Series(mkt_dispersion_20).fillna(0)
-        mkt_disp_z120_ser = _rolling_robust_z_1d(mkt_disp_df.to_numpy(dtype=np.float64), window=120)
+            mkt_disp_df = pd.Series(mkt_dispersion_20).fillna(0)
+            mkt_disp_z120_ser = _rolling_robust_z_1d(mkt_disp_df.to_numpy(dtype=np.float64), window=120)
 
-        symbol_ret_rank_20_2d[20:] = pd.DataFrame(ret20_2d[20:]).rank(axis=1, pct=True).values
+            symbol_ret_rank_20_2d[20:] = pd.DataFrame(ret20_2d[20:]).rank(axis=1, pct=True).values
 
-        sv_df = pd.DataFrame(sym_vol_20).fillna(0)
-        symbol_vol_z120_2d = _rolling_robust_z_2d(sv_df.to_numpy(dtype=np.float64), window=120)
+            sv_df = pd.DataFrame(sym_vol_20).fillna(0)
+            symbol_vol_z120_2d = _rolling_robust_z_2d(sv_df.to_numpy(dtype=np.float64), window=120)
 
-        funding_cs_z_2d = _cross_sectional_robust_z_2d(f_df.fillna(0).to_numpy(dtype=np.float64))
+            funding_cs_z_2d = _cross_sectional_robust_z_2d(f_df.fillna(0).to_numpy(dtype=np.float64))
+
+            cache["btc_ret_1_ser"] = btc_ret_1_ser
+            cache["btc_ret_5_ser"] = btc_ret_5_ser
+            cache["btc_trend_20_100_ser"] = btc_trend_20_100_ser
+            cache["mkt_vol_z120_ser"] = mkt_vol_z120_ser
+            cache["mkt_disp_z120_ser"] = mkt_disp_z120_ser
+            cache["symbol_ret_rank_20_2d"] = symbol_ret_rank_20_2d
+            cache["symbol_vol_z120_2d"] = symbol_vol_z120_2d
+            cache["funding_cs_z_2d"] = funding_cs_z_2d
+        else:
+            btc_ret_1_ser = cache["btc_ret_1_ser"]
+            btc_ret_5_ser = cache["btc_ret_5_ser"]
+            btc_trend_20_100_ser = cache["btc_trend_20_100_ser"]
+            mkt_vol_z120_ser = cache["mkt_vol_z120_ser"]
+            mkt_disp_z120_ser = cache["mkt_disp_z120_ser"]
+            symbol_ret_rank_20_2d = cache["symbol_ret_rank_20_2d"]
+            symbol_vol_z120_2d = cache["symbol_vol_z120_2d"]
+            funding_cs_z_2d = cache["funding_cs_z_2d"]
 
     # 4. Identity Features
     id_matrix: NDArray[np.float32] | None = None
