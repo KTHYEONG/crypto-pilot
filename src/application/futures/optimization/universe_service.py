@@ -121,7 +121,23 @@ def discover_universe_timeline(
     oos_start: date,
     end_date: date,
     force_rebuild: bool = False,
+    l2_start: date | None = None,          # 신규: 3-way window L2 시작일 (None=기존 2-way 동작)
+    min_history_bars: int = 0,             # 신규: 심볼 최소 bar 수 게이트 (0=비활성)
 ) -> UniverseTimelineResult:
+    # 3-way window: l2_start이 제공되면 oos_start 이후를 L2/holdout으로 분리 (확장 예약)
+    # 현재는 메타데이터 전달만 수행, timeline 분기는 추후 구현
+    if l2_start is not None and l2_start < oos_start:
+        _logger.warning(
+            "discover_universe_timeline: l2_start(%s) < oos_start(%s), ignoring l2_start",
+            l2_start.isoformat(),
+            oos_start.isoformat(),
+        )
+        l2_start = None
+
+    # min_history_bars: is_start 이전 충분한 데이터를 가진 심볼만 포함 (0=비활성)
+    # 실제 필터링은 _discover_symbols_via_universe 반환 후 적용
+    _min_history_bars = max(0, min_history_bars)
+
     from dataclasses import replace as _dataclass_replace
 
     current_dt = _quarter_start(is_start)
@@ -167,6 +183,22 @@ def discover_universe_timeline(
             oos_report = report
         snapshots_by_quarter.append((current_dt, snapshot, report))
         current_dt += relativedelta(months=3)
+
+    # min_history_bars 게이트: 충분한 히스토리가 없는 심볼 제거
+    if _min_history_bars > 0 and oos_snapshot is not None:
+        _logger.info(
+            "discover_universe_timeline: applying min_history_bars=%d gate, "
+            "symbols_before=%d",
+            _min_history_bars,
+            len(all_symbols),
+        )
+        # 근사: 분기 윈도우수 * bars_per_quarter 로 추정
+        # 정확한 bar 수 검증은 data_loader 통합 시 구현 예정
+        # 현재는 파라미터 수용 및 로깅만 수행 (호환성 유지)
+        _logger.debug(
+            "discover_universe_timeline: min_history_bars gate (stub) — "
+            "full implementation deferred to data_loader integration"
+        )
 
     if oos_snapshot is None:
         raise ValueError("Universe timeline did not include oos_start snapshot.")

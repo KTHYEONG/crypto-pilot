@@ -8,7 +8,7 @@ import warnings
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, is_dataclass, replace
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import numpy as np
 import optuna
@@ -1465,6 +1465,149 @@ def run_phased_optimization_skeleton(
         phase_b_plan=phase_b_plan,
         phase_c_diagnostics=phase_c_diag,
     )
+
+# ---------------------------------------------------------------------------
+# Tiered Pipeline: Decoupled Optuna Study Support
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TieredContext:
+    """Optuna study context for the Tiered hybrid pipeline."""
+
+    labeled_events: Any
+    aligned: Any          # AlignedMarketData
+    cfg: Any              # CandidateStrategyConfig
+    window: Any           # LayeredWindow
+    caps: Any             # PortfolioCaps
+    tf: str
+    fixed_l1_params: dict[str, Any] | None = None   # L2 study 시 L1 best params 고정
+
+
+def suggest_layered_params(
+    trial: Trial,
+    layer: Literal["L1", "L2"],
+    *,
+    fixed: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """L1_ALPHA_SPACE 또는 L2_ALLOC_SPACE를 Optuna trial로 suggest.
+
+    Args:
+        trial: Optuna Trial 객체.
+        layer: "L1" 또는 "L2" 레이어 구분.
+        fixed: suggest 생략하고 직접 주입할 키-값 딕셔너리.
+
+    Returns:
+        파라미터 딕셔너리 (layer의 전체 키 포함).
+    """
+    from src.domain.futures.optimization.opt_config import L1_ALPHA_SPACE, L2_ALLOC_SPACE
+
+    space = L1_ALPHA_SPACE if layer == "L1" else L2_ALLOC_SPACE
+    result: dict[str, Any] = {}
+    fixed = fixed or {}
+
+    for key, spec in space.items():
+        if key in fixed:
+            result[key] = fixed[key]
+            continue
+        t = spec["type"]
+        if t == "categorical":
+            result[key] = trial.suggest_categorical(key, spec["choices"])
+        elif t == "int":
+            result[key] = trial.suggest_int(
+                key,
+                int(spec["low"]),
+                int(spec["high"]),
+                step=int(spec.get("step", 1)),
+            )
+        elif t == "float":
+            log = bool(spec.get("log", False))
+            result[key] = trial.suggest_float(
+                key,
+                float(spec["low"]),
+                float(spec["high"]),
+                step=float(spec["step"]) if "step" in spec else None,
+                log=log,
+            )
+    return result
+
+
+def objective_l1_ic(trial: Trial, ctx: TieredContext) -> float:
+    """L1 CPCV study objective: HAC mean IC 최대화. Sharpe 미참조(decoupling 보장).
+
+    Args:
+        trial: Optuna Trial 객체.
+        ctx: Tiered 파이프라인 컨텍스트.
+
+    Returns:
+        mean_ic (gate 미통과 시 -inf).
+    """
+    from src.domain.futures.strategy.config import resolve_purge_and_embargo_bars
+    from src.domain.futures.strategy.tiered_workflow import run_l1_cpcv
+    from src.domain.futures.strategy.walk_forward import build_cpcv_folds
+
+    l1_params = suggest_layered_params(trial, "L1")
+    purge_bars, embargo_bars = resolve_purge_and_embargo_bars(ctx.cfg)
+    n_bars = len(ctx.aligned.datetimes) if hasattr(ctx.aligned, "datetimes") else 0
+    if n_bars < 10:
+        return float("-inf")
+
+    folds = build_cpcv_folds(
+        n_bars=n_bars,
+        n_groups=6,
+        n_test_groups=2,
+        embargo_bars=embargo_bars,
+        purge_bars=purge_bars,
+    )
+    result = run_l1_cpcv(
+        labeled_events=ctx.labeled_events,
+        aligned=ctx.aligned,
+        cfg=ctx.cfg,
+        folds=folds,
+        l1_params=l1_params,
+        tf=ctx.tf,
+    )
+    # 오직 IC만 반환 — Sharpe 미참조
+    return float(result.mean_ic) if result.gate_passed else float("-inf")
+
+
+def objective_l2_sharpe(trial: Trial, ctx: TieredContext) -> float:
+    """L2 AWF study objective: Sharpe 최대화. IC 미참조(decoupling 보장).
+
+    Args:
+        trial: Optuna Trial 객체.
+        ctx: Tiered 파이프라인 컨텍스트 (fixed_l1_params에 oos_stacked 포함 필수).
+
+    Returns:
+        sharpe_hybrid (guard 미충족 시 -inf).
+    """
+    from src.domain.futures.strategy.tiered_workflow import run_l2_awf
+    from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
+
+    l2_params = suggest_layered_params(trial, "L2", fixed=ctx.fixed_l1_params or {})
+    if not ctx.fixed_l1_params:
+        _logger.warning(
+            "objective_l2_sharpe called without fixed L1 OOS signals; returning -inf"
+        )
+        return float("-inf")
+
+    # fixed_l1_params에 oos_stacked (dict[str, SymbolSignal]) 이 들어있어야 함
+    l1_oos = ctx.fixed_l1_params.get("oos_stacked")
+    if not l1_oos:
+        return float("-inf")
+
+    n_bars = len(ctx.aligned.datetimes) if hasattr(ctx.aligned, "datetimes") else 0
+    awf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=ctx.cfg)
+    result = run_l2_awf(
+        l1_oos=l1_oos,
+        aligned=ctx.aligned,
+        awf_folds=awf_folds,
+        l2_params=l2_params,
+        caps=ctx.caps,
+        tf=ctx.tf,
+    )
+    # 오직 Sharpe만 반환 — IC 미참조
+    return float(result.sharpe_hybrid)
+
 
 # Break circularity by importing run_optimization_loop at the very end
 from src.domain.futures.optimization.observability.run_tracker import run_optimization_loop
