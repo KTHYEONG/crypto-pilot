@@ -107,7 +107,7 @@ def test_run_candidate_ablation_returns_correct_ablation_dataframe(monkeypatch: 
 
     assert isinstance(df_ablation, pd.DataFrame)
     if not df_ablation.empty:
-        assert df_ablation.shape[0] == 6
+        assert df_ablation.shape[0] == 7
         required_cols = {
             "variant",
             "mean_log_growth",
@@ -123,9 +123,10 @@ def test_run_candidate_ablation_returns_correct_ablation_dataframe(monkeypatch: 
             "Base_Rule",
             "Prior_Filter",
             "Prior_Residual",
-            "ML_Edge_Gate",
-            "ML_Event_Kelly",
-            "ML_Event_Kelly_Caps",
+            "Ens_Gate",
+            "Ens_Kelly",
+            "Ens_Kelly_Caps",
+            "Ens_CovKelly",
         }.issubset(set(df_ablation["variant"]))
     assert "[ABLATION-PROF]" in caplog.text
     assert "[ABLATION-TASK-PROF]" in caplog.text
