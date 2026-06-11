@@ -24,7 +24,7 @@ dependencies:
     - docs/architecture/signal.md
     - docs/architecture/regime.md
     - docs/architecture/ML.md
-last_verified: 2026-06-11
+last_verified: 2026-06-11  # Direction A/B 수식 반영
 ---
 
 # 1. Purpose
@@ -61,6 +61,19 @@ Transforms L1 candidate events into optimal portfolio weights via regime-conditi
 - `min_regime_cell_oos_obs` = NW variance stability floor only (default 10); **not** a domain gate
 - OR-path: if `regime_cell_admitted=True`, bypasses global pooled gates (`min_obs`, `breakeven_hard_gate`, `mean_edge`, etc.)
 - Replaces: `min_obs=60`, `min_tstat=1.0` (statistically inconsistent; effect-size-agnostic)
+
+**Direction A: Regime-Conditional Score Slope (score_z → μ calibration)**
+- Opt-in via `ensemble_score_calibration_enabled=True`. Applied on top of cell lookup.
+- Per-regime shrunk-OLS: $\beta_g = \rho_g \cdot (\sigma_y / \sigma_z)$, shrunk: $\hat{\beta}_g = \frac{n_g}{n_g + k_{\text{slope}}} \cdot \beta_g$ (James-Stein toward 0)
+- Prediction when `score_calibration_valid[g]=True`: $\mu(e) = \alpha_g + \hat{\beta}_g \cdot \text{clip}(z, -Z_{\text{clip}}, Z_{\text{clip}})$
+- Validation: `score_calibration_valid[g]` requires IS $\hat{\beta}_g > 0$ **AND** OOS tail-probe $\rho_{\text{probe}} > 0$ (sign persistence). If probe window < 10 events, IS-only check applies.
+- Fail-safe: `score_calibration_valid[g]=False` → falls back to cell/archetype lookup (regression-free).
+- **Status: Active, but cross-sectional power not confirmed.** `score_z` (within-variant 2160-bar causal percentile) lacks cross-sectional alpha. Realized IC ≈ -0.046 with 3/6 regimes valid.
+
+**Direction B: Symmetric q90 Estimation for Kelly σ**
+- `_fit_cell_means` now returns `cell_q90, arch_q90, global_q90` (9-tuple, previously 6-tuple).
+- $q_{90}^{\text{cell}} = w \cdot \hat{q}_{90}^{\text{raw}} + (1-w) \cdot q_{90}^{\text{global}}$ (symmetric with q10 path)
+- Kelly σ uses proper inter-decile: $\sigma_R = (q_{90\_R} - q_{10\_R})/2.563$ (bilateral ±1.28σ span, valid)
 
 **Fractional Kelly Sizing (calibrated_event_kelly)**
 - $\sigma_R = \frac{q_{90\_R} - q_{10\_R}}{2.563}$
@@ -117,6 +130,10 @@ graph TD
 | **Param** | `admission_tau_prior_bps` | Fallback prior std when <2 cells. Bounds: `(0, ∞)` |
 | **Param** | `min_regime_cell_oos_obs` | NW stability floor (not domain gate). Default: 10 |
 | **Param** | `min_regime_cell_edge_bps` | $\delta$: minimum profitable edge. Default: 8.0 bps |
+| **Param** | `ensemble_score_calibration_enabled` | Enable Direction A score slope. Default: `True` (active in prod). |
+| **Param** | `ensemble_score_z_clip` | score_z clip bound (±). Default: `3.0`. |
+| **Param** | `ensemble_score_calibration_min_obs` | Min events per regime for slope fit. Default: `60`. |
+| **Param** | `ensemble_score_slope_k` | James-Stein shrinkage strength for β. Default: `100.0`. |
 | **Param** | `double_scaling_guard` | Enable double vol-targeting scaling guard. Default: `True` |
 | **Param** | `regime_gross_multipliers` | Gross cap multipliers per regime. Default HSL tailored |
 | **Param** | `regime_net_multipliers` | Net cap multipliers per regime. Default HSL tailored |
