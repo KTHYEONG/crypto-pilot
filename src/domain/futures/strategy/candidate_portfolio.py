@@ -9,6 +9,11 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from src.domain.futures.portfolio.covariance import (
+    active_covariance,
+    compute_log_returns_2d,
+    solve_portfolio_kelly,
+)
 from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps, project_all_caps
 from src.domain.futures.strategy.candidate_contracts import (
     CandidateModelOutput,
@@ -817,6 +822,12 @@ def build_candidate_target_weights(
     # Map symbols to index
     sym_to_idx = {sym: idx for idx, sym in enumerate(symbols)}
 
+    use_port_kelly: bool = bool(getattr(cfg, "use_portfolio_kelly", False))
+    # mu_2d stores signed r-unit expected returns for portfolio Kelly; allocated only when needed
+    mu_2d: NDArray[np.float64] | None = (
+        np.zeros((n_times, n_symbols), dtype=np.float64) if use_port_kelly else None
+    )
+
     # ---------- Pass 1: entry_idx bar에 raw_weight 기록 ----------
     # 각 이벤트의 (entry_idx, symbol) → raw_weight 를 먼저 매핑한다.
     # 타임스텝 정렬된 리스트도 함께 수집해 Pass 2에서 재사용한다.
@@ -847,9 +858,13 @@ def build_candidate_target_weights(
             second_moment = max(mu_return_r * mu_return_r + sigma_r * sigma_r, 1e-6)
             raw_abs_w = cfg.kelly_fraction * max(mu_return_r, 0.0) / second_moment
         else:
+            mu_return_r = float(getattr(row, "mu_net_decision_bps", 0.0)) / max(risk_unit_bps, 1e-12)
             raw_abs_w = float(getattr(cfg, "event_risk_budget", 0.0025)) / max(risk_unit_bps * 1e-4, 1e-12)
         raw_abs_w = raw_abs_w * p_pass_val
         raw_w = min(float(cfg.max_symbol_weight), raw_abs_w)
+
+        if mu_2d is not None:
+            mu_2d[t, s_idx] = float(np.sign(side)) * abs(mu_return_r)
 
         overlay_mult = 1.0
         if bool(getattr(cfg, "overlay_sizing_enabled", True)):
@@ -871,6 +886,13 @@ def build_candidate_target_weights(
         for fill_t in range(entry_t + 1, fill_end):
             if raw_weights[fill_t, s_idx] == 0.0:
                 raw_weights[fill_t, s_idx] = signed_w
+            if mu_2d is not None and mu_2d[fill_t, s_idx] == 0.0 and mu_2d[entry_t, s_idx] != 0.0:
+                mu_2d[fill_t, s_idx] = mu_2d[entry_t, s_idx]
+
+    # ---------- Precompute log-returns for portfolio Kelly ----------
+    logret_2d: NDArray[np.float64] | None = None
+    if use_port_kelly:
+        logret_2d = compute_log_returns_2d(close_2d)
 
     target_weights = np.zeros_like(raw_weights)
     bars_per_year = 2190.0  # Default 4h bars per year (365 * 6)
@@ -879,8 +901,34 @@ def build_candidate_target_weights(
     elif cfg.timeframe == "1d":
         bars_per_year = 365.0
 
+    # Extract portfolio Kelly config params once (avoid repeated getattr in inner loop)
+    _cov_window: int = int(getattr(cfg, "cov_window", 180))
+    _cov_min_obs: int = int(getattr(cfg, "cov_min_obs", 60))
+    _cov_shrinkage_raw = getattr(cfg, "cov_shrinkage", "auto")
+    _cov_shrinkage: float | None = (
+        None if _cov_shrinkage_raw == "auto" else float(_cov_shrinkage_raw)
+    )
+    _cov_ridge_eps: float = float(getattr(cfg, "cov_ridge_eps", 1e-3))
+
     for t in range(n_times):
-        w_pre = raw_weights[t]
+        w_pre = raw_weights[t].copy()
+
+        # ---------- Portfolio Kelly covariance overlay ----------
+        if use_port_kelly and logret_2d is not None and mu_2d is not None:
+            active_idx_arr = np.nonzero(w_pre)[0].astype(np.int64)
+            if len(active_idx_arr) >= 2:
+                cov_s = active_covariance(
+                    logret_2d, t, active_idx_arr, _cov_window, _cov_shrinkage, _cov_min_obs
+                )
+                if cov_s is not None:
+                    mu_s = mu_2d[t, active_idx_arr]
+                    w_s = solve_portfolio_kelly(
+                        mu_s, cov_s, cfg.kelly_fraction, _cov_ridge_eps, cfg.max_symbol_weight
+                    )
+                    w_pre_new = np.zeros(n_symbols, dtype=np.float64)
+                    w_pre_new[active_idx_arr] = w_s
+                    w_pre = w_pre_new
+
         beta_t = beta_2d[t] if beta_2d is not None else np.zeros(n_symbols)
         
         # Portfolio standard deviation calculation

@@ -11,18 +11,20 @@ related_paths:
   - src/domain/futures/strategy/candidate_portfolio.py
   - src/domain/futures/strategy/config.py
   - src/domain/futures/strategy/ablation.py
+  - src/domain/futures/portfolio/covariance.py
 change_triggers:
   - src/domain/futures/strategy/candidate_ensemble.py
   - src/domain/futures/strategy/candidate_workflow.py
   - src/domain/futures/strategy/candidate_portfolio.py
   - src/domain/futures/strategy/config.py
   - src/domain/futures/strategy/ablation.py
+  - src/domain/futures/portfolio/covariance.py
 dependencies:
   documents:
     - docs/architecture/signal.md
     - docs/architecture/regime.md
     - docs/architecture/ML.md
-last_verified: 2026-06-10
+last_verified: 2026-06-11
 ---
 
 # 1. Purpose
@@ -71,6 +73,13 @@ Transforms L1 candidate events into optimal portfolio weights via regime-conditi
   - $Cap_{\text{net}, t} = Cap_{\text{net}} \times \text{net\_multiplier}(Regime_t)$
 - 이중 볼라틸리티 타겟팅 방지 (`double_scaling_guard`):
   - 켈리/오버레이 사이징을 통해 1차적으로 비중이 스케일링된 경우, 포트폴리오 투영 단계에서 target_ann_vol을 $0.0$으로 처리하여 이중 감쇠(Attenuation)를 우회.
+
+**Portfolio Covariance Kelly (Experimental — `use_portfolio_kelly=True`)**
+- Full-covariance extension of diagonal Kelly: $w = f_k \cdot (\hat{\Sigma} + \varepsilon \bar{\sigma}^2 I)^{-1} \mu$
+- Covariance: Ledoit-Wolf OAS shrinkage toward $F = \text{diag}(S)$: $\hat{\Sigma} = \delta F + (1-\delta) S$ with analytic $\delta^* = \frac{(1-2/k)\,\text{tr}(S^2)+\text{tr}(S)^2}{(n+1-2/k)(\text{tr}(S^2)-\text{tr}(S)^2/k)}$
+- Look-ahead safety: window always $[t-W, t)$; ridge $\varepsilon = \text{cov\_ridge\_eps} \times \bar{\sigma}^2$
+- Sign guard: $w_i \leftarrow 0$ if $\text{sign}(w_i) \neq \text{sign}(\mu_i)$
+- **Status: Disproven** — OOS CAGR -7.9% vs diagonal +2.8%. Root cause: Markowitz error-maximisation under noisy Σ̂ at current event density (~144 trades / 180-bar window). Disabled by default (`use_portfolio_kelly=False`).
 
 **Walk-Forward Survival Censoring**
 - If fold realized edge $<$ `min_fold_realized_edge_bps`, fold fails.

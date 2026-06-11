@@ -780,6 +780,27 @@ def run_candidate_ablation(
         regime_code_1d=regime_code_1d,
     )
     _logger.debug("[PROFILE][ABLATION] 6. full_caps_w took %.4fs", time.perf_counter() - t_step)
+
+    # 7. portfolio_kelly (Covariance-aware Kelly w = f_k·Σ̂⁻¹μ, caps bypassed — A/B vs ML_Event_Kelly)
+    t_step = time.perf_counter()
+    port_kelly_w = build_candidate_target_weights(
+        selected_events=gate_selected,
+        close_2d=aligned.close_2d,
+        symbols=symbols,
+        beta_2d=None,
+        sigma_3d=None,
+        cfg=replace(
+            cfg,
+            sizing_mode="calibrated_event_kelly",
+            use_portfolio_kelly=True,
+            gross_cap=999.0,
+            net_cap=999.0,
+            beta_cap=999.0,
+            target_ann_vol=999.0,
+        ),
+        regime_code_1d=regime_code_1d,
+    )
+    _logger.debug("[PROFILE][ABLATION] 7. port_kelly_w took %.4fs", time.perf_counter() - t_step)
     ablation_prof["weights"] = time.perf_counter() - t_weights
 
     from concurrent.futures import ThreadPoolExecutor
@@ -809,9 +830,10 @@ def run_candidate_ablation(
         (rule_w, "Base_Rule", None, rule_events),
         (prior_w, "Prior_Filter", prior_selected, None),
         (residual_w, "Prior_Residual", residual_selected, None),
-        (gate_w, "ML_Edge_Gate", gate_selected, None),
-        (kelly_w, "ML_Event_Kelly", gate_selected, None),
-        (full_caps_w, "ML_Event_Kelly_Caps", gate_selected, None),
+        (gate_w, "Ens_Gate", gate_selected, None),
+        (kelly_w, "Ens_Kelly", gate_selected, None),
+        (full_caps_w, "Ens_Kelly_Caps", gate_selected, None),
+        (port_kelly_w, "Ens_CovKelly", gate_selected, None),
     ]
 
     t_step = time.perf_counter()

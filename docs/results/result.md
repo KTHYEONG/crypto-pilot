@@ -3,15 +3,23 @@
 
 # Mode Full (ALO/Ensemble) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-10 (Phase 3 Variant Prior Offset + Allocation Target Vol Bypass 핫픽스 적용)
+**최신 갱신:** 2026-06-11 (Portfolio Kelly Ablation — Covariance-aware sizing A/B 실험)
 **현재 상태:** `blocked` — 1/4 Fold Pass (fold_pass_ratio 25.0%). **Active Signals = 0**
 **평가 기준:** `min_variant_oos_edge_bps=10.0`, `breakeven_hard_gate=enabled`, `min_fold_realized_edge_bps=8.0`, `min_oos_rank_ic=0.01`, `min_ic_tstat=0.8`, `max_variant_oos_q10_fail_rate=0.65`, `min_wf_fold_pass_ratio=0.60`
 
 **진단 노트:**
-- **Phase 3 + Allocation Target Vol Bypass 결과 분석 (최신):**
+- **Portfolio Kelly A/B 결과 분석 (2026-06-11 최신):**
+  - ❌ **Ens_CovKelly CAGR -7.9%** (기존 diagonal Kelly +2.8% vs 공분산 Kelly -7.9%): Ledoit-Wolf 공분산 overlay 도입이 오히려 악화. 원인 분석:
+    - 공분산 추정 윈도우 내(180 bars ≈ 30d) 단기 상관구조가 OOS에서 불안정 → 가중치 노이즈 증폭.
+    - `mu_2d`가 stop_risk 이벤트에서 0으로 기록되어 포트폴리오 Kelly가 zero-mu 최적화 수행 → 방향 신호 손실.
+    - 결론: 현 신호풀(event 수 144개, deploy 0.25)에서 공분산 구조가 **추정 오차 > 구조적 이득**.
+  - ✅ **Prior_Filter/Ens_Kelly 수치 불변**: 기존 diagonal Kelly(+2.8%, MAR 1.39) 정상 유지 — 코드 변경으로 인한 기존 로직 회귀 없음.
+  - ℹ️ **Fold/Signal 현황 불변**: WF fold 1/4 PASS, Active Signals=0 — 이번 실험은 ablation 측정 전용.
+
+- **Phase 3 + Allocation Target Vol Bypass 결과 분석 (2026-06-10):**
   - ✅ **앙상블 변이 우선 매핑 정상화 (21 variants fitted)**: 추천 21종 전략의 패밀리명을 온전히 매핑하여 21개 변이가 정상 적합(fit)되었습니다.
   - ✅ **OOS Rank IC 개선**: 검증 및 예측 공식 불일치(bug) 해결 및 variant prior 적용 활성화로 전 Fold의 OOS Rank IC가 개선되었으며, 특히 Fold 3의 IC는 양수(+0.076)로 반전되었습니다.
-  - ⚠️ **여전히 blocked (1/4 PASS)**: [portfolio_constructor.py](file:///home/kth/my_coin_traider/src/domain/futures/portfolio/portfolio_constructor.py) 핫픽스 및 켈리 분모 정밀도 수정에 의해 `ML_Event_Kelly_Cap`이 **CAGR +2.6%** (원천 켈리 CAGR **+2.8%**)로 정상 수렴함을 확인하였습니다.
+  - ⚠️ **여전히 blocked (1/4 PASS)**: [portfolio_constructor.py](file:///home/kth/my_coin_traider/src/domain/futures/portfolio/portfolio_constructor.py) 핫픽스 및 켈리 분모 정밀도 수정에 의해 `Ens_Kelly_Caps`이 **CAGR +2.6%** (원천 켈리 CAGR **+2.8%**)로 정상 수렴함을 확인하였습니다.
 
 ---
 
@@ -212,10 +220,12 @@
 | Base_Rule          |  -28.2% |   19.2% |  -1.46 |    825,177 |    619 |   1.00 |   N   |
 | Prior_Filter       |    1.4% |    1.9% |   0.71 |  1,007,976 |    113 |   0.24 |   N   |
 | Prior_Residual     |    0.7% |    3.2% |   0.22 |  1,004,009 |    145 |   0.25 |   N   |
-| ML_Edge_Gate       |    0.7% |    3.2% |   0.22 |  1,004,009 |    145 |   0.25 |   N   |
-| ML_Event_Kelly     |    2.8% |    2.0% |   1.39 |  1,015,943 |    144 |   0.25 |   N   |
-| ML_Event_Kelly_Cap |    2.6% |    2.0% |   1.31 |  1,015,031 |    147 |   0.25 |   N   |
+| Ens_Gate       |    0.7% |    3.2% |   0.22 |  1,004,009 |    145 |   0.25 |   N   |
+| Ens_Kelly     |    2.8% |    2.0% |   1.39 |  1,015,943 |    144 |   0.25 |   N   |
+| Ens_Kelly_Caps |    2.6% |    2.0% |   1.31 |  1,015,031 |    147 |   0.25 |   N   |
+| Ens_CovKelly |   -7.9% |    7.2% |  -1.10 |    953,242 |    145 |   0.25 |   N   |
 ------------------------------------------------------------------------------------------
+(★ Ens_CovKelly = Ledoit-Wolf 공분산 Kelly, caps bypassed. 2026-06-11 실험)
 
 
 [REGIME_C34_GOLD] C3/C4 gold standard 계산 완료: events=23806 (IS=12204, OOS=11602)

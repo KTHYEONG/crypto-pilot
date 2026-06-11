@@ -430,6 +430,11 @@ class CandidateStrategyConfig:
     kelly_downside_variance_floor_enabled: bool = True
     candidate_metadata_forward_fill: bool = True
     double_scaling_guard: bool = True
+    use_portfolio_kelly: bool = False
+    cov_window: int = 180
+    cov_min_obs: int = 60
+    cov_shrinkage: float | Literal["auto"] = "auto"
+    cov_ridge_eps: float = 1e-3
     regime_gross_multipliers: dict[int, float] = field(default_factory=lambda: {
         0: 1.5,
         1: 1.0,
@@ -695,6 +700,14 @@ class CandidateStrategyConfig:
             raise ValueError("min_deployment_capital_fraction must be in [0.0, 1.0]")
         if self.blend_survival_min_net_stress_bps < -50.0:
             raise ValueError("blend_survival_min_net_stress_bps too permissive (< -50)")
+        if self.cov_window < 2:
+            raise ValueError("cov_window must be >= 2")
+        if not (0 < self.cov_min_obs <= self.cov_window):
+            raise ValueError("cov_min_obs must satisfy 0 < cov_min_obs <= cov_window")
+        if self.cov_ridge_eps <= 0.0:
+            raise ValueError("cov_ridge_eps must be positive")
+        if self.cov_shrinkage != "auto" and not (0.0 <= float(self.cov_shrinkage) <= 1.0):
+            raise ValueError("cov_shrinkage must be 'auto' or a float in [0.0, 1.0]")
 
 
 def with_max_holding_bars(
