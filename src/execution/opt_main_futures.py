@@ -689,6 +689,8 @@ def _run_strategy_stage(
     trading_symbols: tuple[str, ...] = (),
     universe_snapshot: UniverseSnapshot | None = None,
 ) -> CandidatePipelineOutput | None:
+    # ─── 기존 Phase D 진입 (공통 설정 → bridge → 선택적 Tiered 분기) ──────────
+
     t_strategy_stage = time.perf_counter()
     strategy_steps: dict[str, float] = {
         "map_pick": 0.0,
@@ -773,7 +775,63 @@ def _run_strategy_stage(
     )
     bridge_elapsed = time.perf_counter() - t_bridge_start
     strategy_steps["bridge"] = bridge_elapsed
-    
+
+    # ─── Tiered Pipeline 분기 (bridge 완료 후 — labeled + aligned 사용 가능) ──
+    if OPT_FUTURES_CONFIG.get("USE_CS_RANK_ENGINE", False):
+        try:
+            from src.domain.futures.optimization.opt_config import get_layered_window
+            from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
+            from src.domain.futures.strategy.common.alignment import align_data_maps
+            from src.domain.futures.strategy.tiered_workflow import run_tiered_pipeline
+
+            _logger.info("[TIERED] USE_CS_RANK_ENGINE=True — entering Tiered pipeline")
+            aligned_tiered = align_data_maps(
+                data_stage.data_maps, data_stage.valid_symbols, run_config.timeframe
+            )
+            labeled_tiered: pd.DataFrame = (
+                ml_out.labeled
+                if ml_out is not None and getattr(ml_out, "labeled", None) is not None
+                else pd.DataFrame()
+            )
+            tiered_window = get_layered_window(
+                reference_date=datetime.strptime(window.end_date, "%Y-%m-%d").date()
+            )
+            tiered_cfg = build_candidate_strategy_config(
+                strategy_cfg=StrategyConfig(name="candidate_ml"),
+                opt_config=OPT_FUTURES_CONFIG,
+                timeframe=run_config.timeframe,
+            ).candidate
+            _futures_policy_t: dict[str, Any] = dict(OPT_FUTURES_CONFIG.get("FUTURES_PORTFOLIO_POLICY") or {})
+            tiered_caps = PortfolioCaps(
+                gross=float(OPT_FUTURES_CONFIG.get("FUTURES_PHASE_A_MAX_GROSS_EXPOSURE", 1.8)),
+                per_symbol=float(_futures_policy_t.get("per_symbol_cap", 0.35)),
+                net=0.5,
+                beta=1.0,
+                target_ann_vol=float(_futures_policy_t.get("target_ann_vol", 0.35)),
+            )
+            l1_res, l2_res, l3_res = run_tiered_pipeline(
+                labeled_events=labeled_tiered,
+                aligned=aligned_tiered,
+                cfg=tiered_cfg,
+                window=tiered_window,
+                l1_params={},
+                l2_params={},
+                caps=tiered_caps,
+                tf=run_config.timeframe,
+            )
+            _logger.info(
+                "[TIERED] pipeline complete: L1.gate=%s L2=%s L3=%s",
+                l1_res.gate_passed,
+                l2_res is not None,
+                l3_res is not None,
+            )
+            return None  # Phase D allocation 스킵 (Tiered가 대체)
+        except Exception as _exc:
+            _logger.warning(
+                "[TIERED] pipeline error=%s — falling back to Phase D", _exc, exc_info=True
+            )
+    # ─── Phase D 계속 (USE_CS_RANK_ENGINE=False 또는 Tiered 예외 fallback) ───
+
     t_report = time.perf_counter()
     # Summary of bridge output — read from alpha_panel["target_weight"] (CandidatePipelineOutput)
     non_zero_weights = 0
