@@ -351,7 +351,7 @@ def run_candidate_strategy_for_universe(
         aligned=aligned,
         cfg=strategy_cfg.candidate,
         min_obs=max(strategy_cfg.candidate.min_candidate_obs, 100),
-        silent=silent,
+        silent=silent or strategy_cfg.candidate.signal_only,
         recommendation_start=recommendation_start,
         recommendation_end=recommendation_end,
         report_start=oos_start,
@@ -439,15 +439,15 @@ def run_candidate_strategy_for_universe(
             any_passes = bool(promoted_rpt is not None and promoted_rpt.survives_cost)
         else:
             any_passes = any(r.survives_cost for r in signal_reports)
-        _logger.debug(
+        _logger.info(
             "[SIGNAL-VALIDATION] variants=%d any_passes=%s",
             len(signal_reports),
             any_passes,
         )
-        _logger.debug(
+        _logger.info(
             "[SIGNAL-VALIDATION] -------------------------------------------------------------------------------"
         )
-        _logger.debug(
+        _logger.info(
             "[SIGNAL-VALIDATION] | %-20s | %8s | %10s | %7s | %-5s | %s",
             "Variant",
             "Events",
@@ -456,11 +456,11 @@ def run_candidate_strategy_for_universe(
             "Pass",
             "Fail Reasons",
         )
-        _logger.debug(
+        _logger.info(
             "[SIGNAL-VALIDATION] -------------------------------------------------------------------------------"
         )
         for rpt in signal_reports:
-            _logger.debug(
+            _logger.info(
                 "[SIGNAL-VALIDATION] | %-20s | %8d | %10.1f | %7.2f | %-5s | %s",
                 rpt.variant,
                 rpt.n_events,
@@ -469,7 +469,7 @@ def run_candidate_strategy_for_universe(
                 "PASS" if rpt.survives_cost else "FAIL",
                 ",".join(rpt.fail_reasons) if rpt.fail_reasons else "-",
             )
-        _logger.debug(
+        _logger.info(
             "[SIGNAL-VALIDATION] -------------------------------------------------------------------------------"
         )
         t_step = time.perf_counter()
