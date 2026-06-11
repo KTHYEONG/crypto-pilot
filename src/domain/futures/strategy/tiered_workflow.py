@@ -526,7 +526,11 @@ def run_l1_cpcv(
     max_workers = min(len(folds), planned_workers)
 
     t_start = time.perf_counter()
-    logger.info("[CPCV-START] Starting CPCV L1 signal validation parallelization with %d folds (max_workers=%d)", len(folds), max_workers)
+    logger.info(
+        "[CPCV-START] Starting CPCV L1 signal validation parallelization with %d folds (max_workers=%d)",
+        len(folds),
+        max_workers,
+    )
 
     signals_per_fold: list[dict[str, SymbolSignal]] = []
     fold_ics: list[float] = []
@@ -579,7 +583,7 @@ def run_l1_cpcv(
         cw._GLOBAL_CFG = None
         cw._GLOBAL_PURGE_BARS = None
 
-    for fold_idx, wf_fold, fold_out in futures:
+    for _fold_idx, wf_fold, fold_out in futures:
         beta_f32 = aligned.beta_vs_market_1d
         beta_f64: NDArray[np.float64] | None = (
             beta_f32.astype(np.float64) if beta_f32 is not None else None
@@ -623,7 +627,10 @@ def run_l1_cpcv(
                 ic_val, _ = spearmanr(pred_mu, realized)
                 fold_ics.append(float(ic_val) if not np.isnan(ic_val) else 0.0)
 
-    logger.info("[CPCV-END] CPCV L1 signal validation parallel execution completed in %.2fs", time.perf_counter() - t_start)
+    logger.info(
+        "[CPCV-END] CPCV L1 signal validation parallel execution completed in %.2fs",
+        time.perf_counter() - t_start,
+    )
 
     # --- OOS stacking ---
     sigs_tuple = tuple(signals_per_fold)
