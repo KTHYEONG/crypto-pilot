@@ -907,3 +907,104 @@ def test_n_same_dir_variants_log_confluence() -> None:
     n_idx = ds.feature_names.index("n_same_dir_variants_log")
     # 3 events in the same group → log1p(3-1) = log1p(2) ≈ 1.099
     assert ds.X[0, n_idx] == pytest.approx(math.log1p(2), rel=1e-4)
+
+
+def test_build_candidate_dataset_features_cached() -> None:
+    from src.domain.futures.strategy.candidate_dataset import _ALIGNED_FEATURE_CACHE
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [26],
+            "exit_idx": [27],
+            "raw_score": [0.5],
+            "score_z": [1.2],
+            "turnover_proxy": [0.1],
+            "triple_barrier_label": [1],
+            "profitable_after_hurdle_label": [1],
+            "edge_after_hurdle_bps": [12.0],
+            "sl_thr_bps": [25.0],
+            "mae_bps": [-6.0],
+            "mfe_bps": [18.0],
+            "ex_ante_cost_bps": [4.0],
+            "family": ["trend_ma"],
+            "variant": ["ema_12_72"],
+            "archetype": ["trend_continuation"],
+        }
+    )
+    cfg = CandidateStrategyConfig(
+        signal_context_features_enabled=True,
+        exclude_immediate_return_features=False,
+    )
+    schema = fit_candidate_feature_schema(
+        labeled_events=labeled, cfg=cfg, split_start=20, split_end=40
+    )
+
+    # 캐시 비우기
+    aligned_id = id(aligned)
+    if aligned_id in _ALIGNED_FEATURE_CACHE:
+        del _ALIGNED_FEATURE_CACHE[aligned_id]
+
+    # Act 1 (최초 계산)
+    _ = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        schema=schema,
+        split_start=20,
+        split_end=40,
+    )
+    assert aligned_id in _ALIGNED_FEATURE_CACHE
+    assert "sym_ret_1" in _ALIGNED_FEATURE_CACHE[aligned_id]
+    assert "overlay_ctx" in _ALIGNED_FEATURE_CACHE[aligned_id]
+    assert "regime_ctx" in _ALIGNED_FEATURE_CACHE[aligned_id]
+
+    # 캐시 값을 수정하여 캐시가 사용되는지 확인
+    cached_ret = _ALIGNED_FEATURE_CACHE[aligned_id]["sym_ret_1"]
+    _ALIGNED_FEATURE_CACHE[aligned_id]["sym_ret_1"] = np.ones_like(cached_ret) * 999.0
+
+    # Act 2 (캐시 재사용)
+    ds2 = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        schema=schema,
+        split_start=20,
+        split_end=40,
+    )
+
+    # Assert
+    idx = ds2.feature_names.index("sym_ret_1")
+    assert ds2.X[0, idx] == pytest.approx(999.0)
+
+
+def test_compute_bootstrap_means_numba() -> None:
+    from src.domain.futures.strategy.candidate_dataset import _compute_bootstrap_means_numba
+    x = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
+    w = np.array([1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float64)
+
+    # 2개의 bootstrap 샘플, 각 샘플당 3개의 블록 시작 인덱스
+    # block=2 로 테스트
+    start_idxs = np.array([
+        [0, 2, 4],  # 블록들: [1,2], [3,4], [5] -> 복사 후 sx=[1,2,3,4,5]
+        [1, 3, 0]   # 블록들: [2,3], [4,5], [1,2] -> 복사 후 sx=[2,3,4,5,1]
+    ], dtype=np.int64)
+
+    means = _compute_bootstrap_means_numba(x, w, start_idxs, block=2)
+    assert means.shape == (2,)
+    assert means[0] == pytest.approx(3.0)
+    assert means[1] == pytest.approx(3.0)
+
+
+def test_compute_uniqueness_weights_numba() -> None:
+    from src.domain.futures.strategy.candidate_dataset import _compute_uniqueness_weights_numba
+    starts = np.array([0, 1, 2], dtype=np.int64)
+    ends = np.array([1, 2, 3], dtype=np.int64)
+    inv_active = np.array([1.0, 0.5, 0.333, 0.25], dtype=np.float64)
+
+    weights = _compute_uniqueness_weights_numba(starts, ends, inv_active)
+    assert weights.shape == (3,)
+    assert weights[0] == pytest.approx(0.75, rel=1e-3)
+    assert weights[1] == pytest.approx(0.4165, rel=1e-3)
