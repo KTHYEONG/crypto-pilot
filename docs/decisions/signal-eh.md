@@ -9,8 +9,13 @@ related_paths:
   - src/execution/opt_main_futures.py
   - src/domain/futures/strategy_runtime/bridge.py
   - src/domain/futures/strategy/rule_diagnostics.py
-last_verified: 2026-06-09
+last_verified: 2026-06-12
 ---
+
+## [2026-06-12] CPCV → SWF-K 전환 + Pooled IC + NW HAC t-stat
+- **Delta:** `build_cpcv_folds`+`_cpcv_to_wf_fold` 폐기 → `build_l1_swf_folds` (K=5 등간격 OOS, expanding fit, `fit_end=oos_start-purge_bars`). `mean_ic`(fold 평균) → `pooled_ic`(전체 이벤트 concat Spearman), `ic_tstat` → `pooled_tstat`(NW HAC Bartlett kernel, Andrews 1991). Gate에서 `fold_pass_ratio≥0.60` 제거(진단용 보존). `SE(IC)=12·√(S_NW/N)` 스케일 보정(미적용 시 |t| 12배 과대평가). 배포 결과: Pooled IC=-0.095, NW t=-4.60, BLOCKED(정직).
+- **Rationale:** CPCV의 3중 결함(disjoint OOS collapse → 이벤트 중복, anti-causal fold, N-무시 equal-weight IC)이 평가 프레임워크 신뢰성을 파괴. SWF-K는 구조적 인과를 보장하면서 statistical power를 극대화(N=5576 pooled vs fold 평균).
+- **Edge Cases/Trade-offs:** Fold 1-2 N=0은 l1_start 기점 warmup 구간 내 OOS 파티션 흡수 현상(데이터 부재, 버그 아님). 현재 BLOCKED는 신호 alpha 부재를 정직하게 반영. NW 보수성으로 경계선 신호의 false positive 위험 감소.
 
 ## [2026-06-09] Regime-Cell Conditional Admission (P1)
 - **Delta:** `_regime_cell_admission()` 신규 + `_recommendation_threshold_checks` OR-path 주입. 변이가 특정 regime cell에서 `n_g≥60 ∧ μ_g≥8bps ∧ t_g≥1.0` 충족 시 글로벌 평균 게이트 우회. 5개 config 파라미터(`regime_cell_admission_enabled` 등) + env override(`FUTURES_CANDIDATE_REGIME_CELL_*`) 추가. 활성화 결과: RECOMMENDED 3→10, BLOCKED 30→19, Fold1 −16.1→+20.4bps, Status `blocked`→`wf_eligible`(sel=662).
