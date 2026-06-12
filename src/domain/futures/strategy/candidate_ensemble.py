@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -49,6 +50,8 @@ class RegimeConditionalEnsemble:
     regime_score_slope: dict[int, float] = field(default_factory=dict)
     regime_score_intercept: dict[int, float] = field(default_factory=dict)
     score_calibration_valid: dict[int, bool] = field(default_factory=dict)
+    # Diagnostics collection for summary table
+    ensemble_diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 def _variant_key(family: str, variant: str) -> str:
@@ -180,34 +183,40 @@ def _log_ensemble_diagnostics(
     chosen: str,
     adaptive_shrinkage: bool,
     k_used: float,
-) -> None:
-    """Emit a table-format diagnostic log for IC sign audit.
+    num_valid_regimes: int = 0,
+) -> dict[str, Any]:
+    """Emit a concise diagnostic log and return data for aggregation.
 
-    Helps identify anti-predictive archetypes (shrunk mean < 0) that may be
-    diluting ensemble IC toward negative territory.
+    Compresses the previous multi-line table into 2 lines to reduce noise.
     """
     n_total = len(frame)
-    ic_sign = "✅ POSITIVE" if val_ic > 0 else "❌ NEGATIVE"
+    ic_sign = "✅" if val_ic > 0 else "❌"
     symbol_name = str(frame["symbol"].iloc[0]) if "symbol" in frame.columns and not frame.empty else "UNKNOWN"
 
-    header = (
-        f"\n[ENSEMBLE DIAGNOSTICS] Symbol: {symbol_name} | N(train): {n_total} | "
-        f"IC: {val_ic:.4f} ({ic_sign}) | Global mu: {global_mu:.3f} bps\n"
-        f"├─ Cond: {chosen} | Adapt: {adaptive_shrinkage} | k: {k_used:.1f}"
+    summary = (
+        f"[ENSEMBLE] {symbol_name} | N: {n_total} | IC: {val_ic:.4f} ({ic_sign}) | "
+        f"Mu: {global_mu:.3f} | {chosen} | k: {k_used:.1f}"
     )
     
-    rows = []
-    items = []
+    arch_items = []
     for arch, mu_val in sorted(arch_mu.items()):
-        n_arch = int((frame["archetype"] == arch).sum())
-        sign_flag = "✅" if mu_val >= 0.0 else "❌ ANTI"
-        items.append(f"[{arch}] mu: {mu_val:.3f} ({sign_flag}) N: {n_arch}")
+        sign = "✅" if mu_val >= 0.0 else "❌"
+        # Extract short label (e.g., ts_mom from time_series_momentum)
+        label = arch.replace("_reversion", "").replace("_continuation", "").replace("time_series_", "ts_")
+        arch_items.append(f"{label}: {mu_val:.1f} ({sign})")
     
-    for i in range(0, len(items), 2):
-        chunk = items[i:i+2]
-        rows.append("├─ " + " | ".join(chunk))
+    detail = f"└─ mu_bps: [{', '.join(arch_items)}] | score_cal: {num_valid_regimes} valid"
+    _logger.info("%s\n%s", summary, detail)
 
-    _logger.info("%s\n%s", header, "\n".join(rows))
+    return {
+        "symbol": symbol_name,
+        "n_events": n_total,
+        "val_ic": val_ic,
+        "global_mu": global_mu,
+        "arch_mu": arch_mu,
+        "chosen": chosen,
+        "num_valid_regimes": num_valid_regimes,
+    }
 
 
 def _compute_eb_shrinkage_k(
@@ -681,11 +690,64 @@ def fit_regime_conditional_ensemble(
             freq_n_cap=freq_n_cap,
             allowed_families=allowed_families,
         )
-        _logger.info("[ENSEMBLE] variant_prior: %d variants fitted", len(variant_mu))
+
+    # Initialize direction A variables so they exist before the diagnostic log
+    regime_score_slope: dict[int, float] = {}
+    regime_score_intercept: dict[int, float] = {}
+    score_calibration_valid: dict[int, bool] = {}
+
+    # ── Direction A: regime-conditional score calibration ──────────────────
+    if score_calibration_enabled and "score_z" in frame.columns:
+        score_z_col = pd.to_numeric(frame["score_z"], errors="coerce")
+        frame_with_z = frame.copy()
+        frame_with_z["_score_z"] = score_z_col.clip(-score_z_clip, score_z_clip)
+
+        for regime_code, grp in frame_with_z.groupby("entry_regime_code", sort=False):
+            g = int(regime_code)
+            valid_mask = grp["_score_z"].notna() & grp["net_return_bps"].notna()
+            n_valid = int(valid_mask.sum())
+            if n_valid < score_calibration_min_obs:
+                score_calibration_valid[g] = False
+                continue
+
+            grp_ordered = (
+                grp[valid_mask].sort_values("entry_idx")
+                if "entry_idx" in grp.columns
+                else grp[valid_mask]
+            )
+
+            z_arr = grp_ordered["_score_z"].to_numpy(dtype=np.float64)
+            y_arr = grp_ordered["net_return_bps"].to_numpy(dtype=np.float64)
+
+            rho = float(np.corrcoef(z_arr, y_arr)[0, 1])
+            if not np.isfinite(rho):
+                score_calibration_valid[g] = False
+                continue
+
+            sigma_z = float(np.std(z_arr)) + 1e-12
+            sigma_y = float(np.std(y_arr)) + 1e-12
+            beta_raw = rho * (sigma_y / sigma_z)
+
+            w_slope = n_valid / (n_valid + score_slope_k)
+            beta_shrunk = w_slope * beta_raw
+            alpha = float(np.mean(y_arr)) - beta_shrunk * float(np.mean(z_arr))
+
+            regime_score_slope[g] = beta_shrunk
+            regime_score_intercept[g] = alpha
+
+            probe_start = int(n_valid * (1.0 - val_fraction))
+            oos_sign_ok = False
+            if probe_start >= 10 and (n_valid - probe_start) >= 10:
+                rho_probe = float(np.corrcoef(z_arr[probe_start:], y_arr[probe_start:])[0, 1])
+                oos_sign_ok = np.isfinite(rho_probe) and rho_probe > 0.0
+
+            if probe_start < 10 or (n_valid - probe_start) < 10:
+                score_calibration_valid[g] = beta_shrunk > 0.0
+            else:
+                score_calibration_valid[g] = (beta_shrunk > 0.0) and oos_sign_ok
 
     # ── Diagnostic table (IC sign audit) ─────────────────────────────────────
-    # Logs archetype-level mean edge vs global to identify anti-predictive variants.
-    _log_ensemble_diagnostics(
+    ensemble_diag = _log_ensemble_diagnostics(
         frame=frame,
         global_mu=global_mu,
         arch_mu=arch_mu,
@@ -693,6 +755,7 @@ def fit_regime_conditional_ensemble(
         chosen=chosen,
         adaptive_shrinkage=adaptive_shrinkage,
         k_used=shrinkage_k if not adaptive_shrinkage else shrinkage_k_max,
+        num_valid_regimes=sum(score_calibration_valid.values()),
     )
 
     # P0: Regime Lift Proof Gate
@@ -706,10 +769,6 @@ def fit_regime_conditional_ensemble(
         and not oos_proof_events.empty
         and "net_return_bps" in oos_proof_events.columns
     ):
-        # Regime Lift Proof: compare realized edge captured by the two prediction
-        # paths on an out-of-fit proof window. `evaluate_regime_lift_proof()`
-        # converts each prediction path to realized signed edge and tests the
-        # per-event lift versus the pooled baseline.
         proof_events = oos_proof_events.loc[
             :, ["archetype", "entry_regime_code", "net_return_bps"]
         ].copy()
@@ -764,14 +823,7 @@ def fit_regime_conditional_ensemble(
             proof_enabled=proof_enabled,
         )
         conditioning_path = lift_proof.conditioning_path
-        _logger.info(
-            "Regime lift proof: passed=%s nw_tstat=%.3f fold_pass_ratio=%.2f",
-            lift_proof.proof_passed,
-            lift_proof.nw_tstat,
-            lift_proof.fold_pass_ratio,
-        )
 
-        # Proof 실패 시 conditioning을 archetype_only로 강제 downgrade
         if not lift_proof.proof_passed:
             chosen = "archetype_only"
             cell_mu = {}
@@ -779,80 +831,11 @@ def fit_regime_conditional_ensemble(
             cell_q90 = {}
 
     elif chosen == "archetype_regime":
-        # OOS 증거 없음 → fail-SAFE: 복잡한 경로를 증거 없이 선택하지 않음
         chosen = "archetype_only"
         cell_mu = {}
         cell_q10 = {}
         cell_q90 = {}
         conditioning_path = "no_oos_evidence_failsafe"
-        _logger.info("regime conditioning downgraded: no oos proof window → archetype_only (fail-safe)")
-
-    # ── Direction A: regime-conditional score calibration ──────────────────
-    # (score_calibration_enabled / score_z_clip / score_calibration_min_obs / score_slope_k
-    #  already read above for _internal_validation_rank_ic call sites)
-    regime_score_slope: dict[int, float] = {}
-    regime_score_intercept: dict[int, float] = {}
-    score_calibration_valid: dict[int, bool] = {}
-
-    if score_calibration_enabled and "score_z" in frame.columns:
-        score_z_col = pd.to_numeric(frame["score_z"], errors="coerce")
-        frame_with_z = frame.copy()
-        frame_with_z["_score_z"] = score_z_col.clip(-score_z_clip, score_z_clip)
-
-        for regime_code, grp in frame_with_z.groupby("entry_regime_code", sort=False):
-            g = int(regime_code)
-            valid_mask = grp["_score_z"].notna() & grp["net_return_bps"].notna()
-            n_valid = int(valid_mask.sum())
-            if n_valid < score_calibration_min_obs:
-                score_calibration_valid[g] = False
-                continue
-
-            # Fix 3: sort by entry_idx for temporal OOS proof split
-            grp_ordered = (
-                grp[valid_mask].sort_values("entry_idx")
-                if "entry_idx" in grp.columns
-                else grp[valid_mask]
-            )
-
-            z_arr = grp_ordered["_score_z"].to_numpy(dtype=np.float64)
-            y_arr = grp_ordered["net_return_bps"].to_numpy(dtype=np.float64)
-
-            # Full-IS shrunk-OLS (for deployment slope)
-            rho = float(np.corrcoef(z_arr, y_arr)[0, 1])
-            if not np.isfinite(rho):
-                score_calibration_valid[g] = False
-                continue
-
-            sigma_z = float(np.std(z_arr)) + 1e-12
-            sigma_y = float(np.std(y_arr)) + 1e-12
-            beta_raw = rho * (sigma_y / sigma_z)
-
-            # shrinkage: trust proportional to n_valid (James-Stein style)
-            w_slope = n_valid / (n_valid + score_slope_k)
-            beta_shrunk = w_slope * beta_raw  # anchor = 0 (no skill)
-            alpha = float(np.mean(y_arr)) - beta_shrunk * float(np.mean(z_arr))
-
-            regime_score_slope[g] = beta_shrunk
-            regime_score_intercept[g] = alpha
-
-            # Fix 3: OOS proof — sign must hold on held-out probe window
-            probe_start = int(n_valid * (1.0 - val_fraction))
-            oos_sign_ok = False
-            if probe_start >= 10 and (n_valid - probe_start) >= 10:
-                rho_probe = float(np.corrcoef(z_arr[probe_start:], y_arr[probe_start:])[0, 1])
-                oos_sign_ok = np.isfinite(rho_probe) and rho_probe > 0.0
-
-            # Require IS β > 0 AND OOS sign consistency; fall back to IS-only if probe too small
-            if probe_start < 10 or (n_valid - probe_start) < 10:
-                score_calibration_valid[g] = beta_shrunk > 0.0
-            else:
-                score_calibration_valid[g] = (beta_shrunk > 0.0) and oos_sign_ok
-
-        _logger.info(
-            "[ENSEMBLE] score_calibration: %d regimes fitted, %d valid",
-            len(regime_score_slope),
-            sum(score_calibration_valid.values()),
-        )
 
     return RegimeConditionalEnsemble(
         cell_mu_bps=cell_mu,
@@ -868,14 +851,13 @@ def fit_regime_conditional_ensemble(
         conditioning_path=conditioning_path,
         lift_proof=lift_proof,
         regime_oos_stability_rho=regime_oos_stability_rho,
-        # Direction B
         cell_q90_bps=cell_q90,
         archetype_q90_bps=arch_q90,
         global_q90_bps=global_q90,
-        # Direction A
         regime_score_slope=regime_score_slope,
         regime_score_intercept=regime_score_intercept,
         score_calibration_valid=score_calibration_valid,
+        ensemble_diagnostics=ensemble_diag,
     )
 
 
