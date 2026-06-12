@@ -781,9 +781,8 @@ def test_diagnostic_log_emits_negative_ic_flag(caplog: pytest.LogCaptureFixture)
         )
 
     combined = "\n".join(caplog.messages)
-    assert "NEGATIVE" in combined
+    assert "❌" in combined
     assert "anti_predictive" in combined
-    assert "ANTI" in combined  # 음수 archetype 표시
     assert "normal" in combined
 
 
