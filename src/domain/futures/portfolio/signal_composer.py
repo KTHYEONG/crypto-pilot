@@ -133,6 +133,8 @@ def compose_symbol_signals(
         # --- HAC(Newey-West) t-stat ---
         if n_obs < 4:
             t_stat: float = 0.0
+        elif float(np.std(grp_bps)) < 1e-6:
+            t_stat = 0.0
         else:
             # embargo_bars: walk-forward 기준 ~5% 샘플 크기
             embargo_bars: int = max(1, n_obs // 20)
