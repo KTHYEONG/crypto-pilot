@@ -89,6 +89,7 @@ def format_layer1_table(
     """
     n_valid: int = getattr(r, "n_valid", 0)
     n_total: int = getattr(r, "n_total", 0)
+    n_trade_scope: int = getattr(r, "n_trade_scope", n_total)
     gate_str: str = _gate(r.gate_passed)
 
     lines: list[str] = [
@@ -99,7 +100,7 @@ def format_layer1_table(
         f"| IC t-stat            | {r.ic_tstat:.2f}    | >1.96 | {'—':<11} |",
         f"| Symbol Breadth       | {r.breadth:.3f}   | >0.3  | {'—':<11} |",
         f"| Valid Coverage       | {_pct(r.valid_coverage):<7} | >80%  | {'—':<11} |",
-        f"| Valid Symbols/N      | {n_valid}/{n_total:<4}   | —     | {'—':<11} |",
+        f"| Valid Symbols/N      | {n_valid}/{n_trade_scope:<4}   | —     | {'—':<11} |",
         f"| CPCV Fold Pass Ratio | {r.fold_pass_ratio:.3f}   | >0.6  | {'—':<11} |",
         f"| L1 Gate              | {'—':<7} | —     | {gate_str:<11} |",
         "------------------------------------------------------",

@@ -591,3 +591,296 @@ def test_cli_mode_signal_is_accepted() -> None:
     parser = opt_main_futures.build_arg_parser()
     args = parser.parse_args(["--phase", "full", "--mode", "signal"])
     assert args.mode == "signal"
+
+
+# ─── Tiered aligned scope fix (Method B) ─────────────────────────────────────
+
+
+def _make_snapshot(selected_symbols: list[str]) -> UniverseSnapshot:
+    """Build a minimal UniverseSnapshot with given selected symbols."""
+    metas = tuple(
+        SymbolMeta(
+            symbol=sym,
+            role="anchor",
+            adv_usdt=1.0,
+            execution_cost_bps=1.0,
+            funding_carry_8h=0.0,
+            beta_vs_market=1.0,
+            cluster_id=0,
+            tradeable_rank=i + 1,
+            basis_annualized_mean=None,
+            basis_vol=None,
+            capacity_clip_usdt_list=(),
+            cluster_size=1.0,
+            anchor_cluster_member=0.0,
+        )
+        for i, sym in enumerate(selected_symbols)
+    )
+    return UniverseSnapshot(
+        as_of="2026-01-01",
+        tf="4h",
+        schema_version=1,
+        config_hash="c",
+        data_manifest_hash="m",
+        basket_ref=(),
+        basket_weights=(),
+        selected=metas,
+        rejected={},
+        generated_at_utc="2026-01-01T00:00:00+00:00",
+        ledger_confidence="high",
+        n_stage0=len(selected_symbols),
+        n_stage1_pass=len(selected_symbols),
+        n_stage2_pass=len(selected_symbols),
+        n_stage3_pass=len(selected_symbols),
+        n_stage4_pass=len(selected_symbols),
+        n_stage5_pass=len(selected_symbols),
+        n_stage6_selected=len(selected_symbols),
+        training_panel=tuple(selected_symbols),
+        live_inference_panel=tuple(selected_symbols),
+    )
+
+
+def _make_window() -> opt_main_futures.QuarterlyWindow:
+    return opt_main_futures.QuarterlyWindow(
+        fetch_start="2025-01-01",
+        is_start="2025-04-01",
+        oos_start="2026-01-01",
+        end_date="2026-04-01",
+        fetch_start_date=datetime.strptime("2025-01-01", "%Y-%m-%d").date(),
+        is_start_date=datetime.strptime("2025-04-01", "%Y-%m-%d").date(),
+        oos_start_date=datetime.strptime("2026-01-01", "%Y-%m-%d").date(),
+        end_date_value=datetime.strptime("2026-04-01", "%Y-%m-%d").date(),
+    )
+
+
+def _patch_tiered_deps(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_symbols: list[list[str]],
+) -> None:
+    """Patch all dependencies needed to reach the align_data_maps call in the tiered block."""
+    from unittest.mock import MagicMock
+
+    from src.domain.futures.strategy.tiered_workflow import Layer1Result
+
+    # OPT_FUTURES_CONFIG must have USE_CS_RANK_ENGINE=True
+    monkeypatch.setattr(
+        opt_main_futures,
+        "OPT_FUTURES_CONFIG",
+        {"USE_CS_RANK_ENGINE": True, "FUTURES_STRATEGY_NAME": "candidate_ml"},
+    )
+
+    # Bridge returns empty output (no labeled events)
+    monkeypatch.setattr(
+        opt_main_futures,
+        "run_active_strategy_output_bridge",
+        lambda *_args, **_kwargs: CandidatePipelineOutput(),
+    )
+    monkeypatch.setattr(
+        opt_main_futures,
+        "merge_candidate_output_into_is_and_oos",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        opt_main_futures,
+        "_run_candidate_evaluation_report",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        opt_main_futures,
+        "build_candidate_strategy_config",
+        lambda *_args, **_kwargs: MagicMock(candidate=MagicMock()),
+    )
+
+    # Lazy-imported dependencies inside the tiered block
+    import src.domain.futures.optimization.opt_config as _opt_cfg
+    import src.domain.futures.portfolio.portfolio_constructor as _pc
+    import src.domain.futures.strategy.common.alignment as _align
+    import src.domain.futures.strategy.tiered_workflow as _tw
+
+    monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kw: MagicMock())
+    monkeypatch.setattr(_pc, "PortfolioCaps", MagicMock(return_value=MagicMock()))
+
+    # Capture symbols arg passed to align_data_maps
+    def fake_align(
+        data_maps: dict[str, object],
+        symbols: list[str],
+        tf: str,
+    ) -> MagicMock:
+        captured_symbols.append(list(symbols))
+        mock_aligned = MagicMock()
+        mock_aligned.symbols = symbols
+        return mock_aligned
+
+    monkeypatch.setattr(_align, "align_data_maps", fake_align)
+
+    # run_tiered_pipeline returns a minimal Layer1Result
+    dummy_l1 = Layer1Result(
+        signals_per_fold=(),
+        oos_stacked={},
+        mean_ic=0.12,
+        ic_tstat=1.64,
+        breadth=1.0,
+        valid_coverage=0.0,
+        fold_pass_ratio=0.71,
+        gate_passed=False,
+        n_valid=12,
+        n_total=12,
+        n_trade_scope=12,
+    )
+    monkeypatch.setattr(
+        _tw,
+        "run_tiered_pipeline",
+        lambda **_kw: (dummy_l1, None, None),
+    )
+
+
+def test_tiered_aligned_scope_s1_happy_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S1: Stage6 OOS(3) ∩ data_maps(10) → align_data_maps receives 3 not 10."""
+    # Arrange
+    stage6_syms = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    all_syms = stage6_syms + [f"SYM{i}USDT" for i in range(7)]  # 10 total in data_maps
+    frame = pd.DataFrame({"datetime": pd.date_range("2026-01-01", periods=4, freq="4h")})
+    data_maps = {sym: {"4h": frame.copy()} for sym in all_syms}
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps=data_maps,
+        oos_data_maps={},
+        valid_symbols=all_syms,  # 10
+    )
+    snapshot = _make_snapshot(stage6_syms)
+    captured: list[list[str]] = []
+    _patch_tiered_deps(monkeypatch, captured)
+
+    # Act
+    run_config = build_run_config_from_args(
+        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full"}
+    )
+    opt_main_futures._run_strategy_stage(
+        run_config,
+        _make_window(),
+        data_stage,
+        universe_snapshot=snapshot,
+    )
+
+    # Assert: align_data_maps called with 3 stage6 symbols, not 10
+    assert len(captured) >= 1, "align_data_maps must be called in tiered block"
+    tiered_call = captured[-1]
+    assert sorted(tiered_call) == sorted(stage6_syms)
+    assert len(tiered_call) == 3
+
+
+def test_tiered_aligned_scope_s2_fallback_when_no_overlap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S2: snapshot symbols not in data_maps → fallback to valid_symbols=10."""
+    # Arrange
+    stage6_syms = ["XYZUSDT", "ABCUSDT"]
+    valid_syms = [f"SYM{i}USDT" for i in range(10)]
+    frame = pd.DataFrame({"datetime": pd.date_range("2026-01-01", periods=4, freq="4h")})
+    data_maps = {sym: {"4h": frame.copy()} for sym in valid_syms}
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps=data_maps,
+        oos_data_maps={},
+        valid_symbols=valid_syms,  # 10
+    )
+    snapshot = _make_snapshot(stage6_syms)  # stage6 syms absent from data_maps
+    captured: list[list[str]] = []
+    _patch_tiered_deps(monkeypatch, captured)
+
+    # Act
+    run_config = build_run_config_from_args(
+        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full"}
+    )
+    opt_main_futures._run_strategy_stage(
+        run_config,
+        _make_window(),
+        data_stage,
+        universe_snapshot=snapshot,
+    )
+
+    # Assert: fallback → valid_symbols (10)
+    assert len(captured) >= 1
+    tiered_call = captured[-1]
+    assert sorted(tiered_call) == sorted(valid_syms)
+
+
+def test_tiered_aligned_scope_s3_regression_breadth_denominator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S3: scope=12, valid=12 → breadth=1.0 not 0.168. tstat=1.64 still blocks."""
+    from src.domain.futures.strategy.tiered_workflow import Layer1Result
+
+    stage6_syms = [f"SYM{i}USDT" for i in range(12)]
+    frame = pd.DataFrame({"datetime": pd.date_range("2026-01-01", periods=4, freq="4h")})
+    data_maps = {sym: {"4h": frame.copy()} for sym in stage6_syms}
+    # valid_symbols had 63; after fix, tiered uses 12
+    valid_syms_63 = stage6_syms + [f"EXTRA{i}USDT" for i in range(51)]
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps=data_maps,
+        oos_data_maps={},
+        valid_symbols=valid_syms_63,  # 63 before fix
+    )
+    snapshot = _make_snapshot(stage6_syms)
+    captured: list[list[str]] = []
+    _patch_tiered_deps(monkeypatch, captured)
+
+    run_config = build_run_config_from_args(
+        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full"}
+    )
+    opt_main_futures._run_strategy_stage(
+        run_config, _make_window(), data_stage, universe_snapshot=snapshot
+    )
+
+    # align_data_maps receives 12 (stage6) not 63 (valid_symbols)
+    assert len(captured) >= 1
+    assert len(captured[-1]) == 12
+
+    # Verify breadth would be 12/12 = 1.0 with correct scope
+    breadth_after_fix = 12 / 12
+    assert breadth_after_fix == pytest.approx(1.0)
+    # tstat 1.64 < 1.96 → gate still BLOCKED (scope fix doesn't fix alpha quality)
+    dummy_l1 = Layer1Result(
+        signals_per_fold=(),
+        oos_stacked={},
+        mean_ic=0.12,
+        ic_tstat=1.64,
+        breadth=breadth_after_fix,
+        valid_coverage=0.0,
+        fold_pass_ratio=0.71,
+        gate_passed=False,
+        n_valid=12,
+        n_total=12,
+        n_trade_scope=12,
+    )
+    assert dummy_l1.gate_passed is False
+    assert dummy_l1.breadth == pytest.approx(1.0)
+
+
+def test_tiered_aligned_scope_s4_partial_overlap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S4: stage6=['A','B','C'], data_maps=['A','B','D','E'] → intersection=['A','B']."""
+    stage6_syms = ["AAUSDT", "BBUSDT", "CCUSDT"]
+    data_map_syms = ["AAUSDT", "BBUSDT", "DDUSDT", "EEUSDT"]
+    frame = pd.DataFrame({"datetime": pd.date_range("2026-01-01", periods=4, freq="4h")})
+    data_maps = {sym: {"4h": frame.copy()} for sym in data_map_syms}
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps=data_maps,
+        oos_data_maps={},
+        valid_symbols=data_map_syms,
+    )
+    snapshot = _make_snapshot(stage6_syms)
+    captured: list[list[str]] = []
+    _patch_tiered_deps(monkeypatch, captured)
+
+    run_config = build_run_config_from_args(
+        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full"}
+    )
+    opt_main_futures._run_strategy_stage(
+        run_config, _make_window(), data_stage, universe_snapshot=snapshot
+    )
+
+    # Assert: only intersection of stage6 ∩ data_maps
+    assert len(captured) >= 1
+    assert sorted(captured[-1]) == ["AAUSDT", "BBUSDT"]
