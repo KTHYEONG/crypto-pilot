@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
@@ -148,7 +149,9 @@ class CandidateModelOutput:
     q90_net_bps: NDArray[np.float64]
     selection_score: NDArray[np.float64]
     kelly_fraction: NDArray[np.float64]
-    validation_diagnostics: dict[str, float | int | str | bool] = field(default_factory=dict)
+    validation_diagnostics: dict[str, object] = field(
+        default_factory=dict
+    )
 
     def __init__(
         self,
@@ -165,7 +168,7 @@ class CandidateModelOutput:
         q90_net_bps: NDArray[np.float64] | None = None,
         selection_score: NDArray[np.float64] | None = None,
         kelly_fraction: NDArray[np.float64] | None = None,
-        validation_diagnostics: dict[str, float | int | str | bool] | None = None,
+        validation_diagnostics: Mapping[str, object] | None = None,
         **kwargs: Any,
     ) -> None:
         object.__setattr__(self, "events", events)
@@ -211,7 +214,7 @@ class CandidateModelOutput:
             if validation_diagnostics is not None
             else kwargs.get("selection_thresholds", {})
         )
-        object.__setattr__(self, "validation_diagnostics", val_diag)
+        object.__setattr__(self, "validation_diagnostics", dict(val_diag))
 
     @property
     def mu_gross_bps(self) -> NDArray[np.float64]:
@@ -240,6 +243,15 @@ class CandidateWorkflowStatus(StrEnum):
     DEPLOYMENT_PROMOTED = "deployment_promoted"
 
 
+FoldFitStatus = Literal[
+    "trained",
+    "insufficient_fit",
+    "empty_oos",
+    "constant_prediction",
+    "failed",
+]
+
+
 @dataclass(slots=True, frozen=True)
 class CandidateFoldOutput:
     """Orchestration fold output contract."""
@@ -251,6 +263,9 @@ class CandidateFoldOutput:
     selected_events: pd.DataFrame
     gate_report: GateValidationReport
     edge_report: EdgeValidationReport
+    fit_status: FoldFitStatus
+    n_fit: int
+    skip_reason: str | None
     gate_model: Any | None = None
     edge_models: Any | None = None
     fit_set: Any | None = None

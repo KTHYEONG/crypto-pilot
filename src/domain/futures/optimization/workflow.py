@@ -1556,17 +1556,17 @@ def objective_l1_ic(trial: Trial, ctx: TieredContext) -> float:
     if n_bars < 10:
         return float("-inf")
 
-    # LayeredWindow.l1_start → warmup bar index (IS 시작점)
+    # LayeredWindow.l1_start → L1 fit 시작 bar index
     # LayeredWindow.l2_start → l1_end bar index (OOS 경계; production OOS는 L3 전용)
     _is_ts = pd.Timestamp(ctx.window.l1_start, tz="UTC")
     _oos_ts = pd.Timestamp(ctx.window.l2_start, tz="UTC")
-    _warmup = int(np.searchsorted(ctx.aligned.datetimes, _is_ts))
+    _l1_start = int(np.searchsorted(ctx.aligned.datetimes, _is_ts))
     _l1_end = int(np.searchsorted(ctx.aligned.datetimes, _oos_ts))
 
     folds = build_l1_swf_folds(
         n_bars=n_bars,
         n_folds=5,
-        warmup_bars=_warmup,
+        l1_start_bars=_l1_start,
         l1_end_bars=_l1_end,
         purge_bars=purge_bars,
         embargo_bars=embargo_bars,

@@ -19,6 +19,7 @@ S_nw_short: N<4 edge case → 0.0
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -100,6 +101,102 @@ def test_run_l1_swf_gate_blocked_when_no_valid_signals() -> None:
     assert isinstance(l1, Layer1Result)
     assert l1.gate_passed is False
     assert l1.pooled_ic == pytest.approx(0.0, abs=1e-6)
+
+
+def test_run_l1_swf_excludes_insufficient_fit_and_constant_prediction_from_pooled_ic() -> None:
+    """SWF pooled IC는 trained fold만 포함해야 한다."""
+    aligned = MagicMock()
+    aligned.close_2d = np.ones((40, 1), dtype=np.float64) * 100.0
+    aligned.symbols = ("BTC",)
+    aligned.datetimes = np.array(
+        [np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(40)],
+        dtype="datetime64[ns]",
+    )
+    aligned.beta_vs_market_1d = None
+    aligned.execution_cost_bps_2d = None
+
+    cfg = MagicMock()
+    cfg.model_early_stop_fraction = 0.1
+    cfg.wf_n_folds = 3
+    cfg.wf_scheme = "anchored"
+    cfg.ml_fit_fraction = 0.6
+    cfg.ml_calibration_fraction = 0.2
+
+    folds = (
+        WFFold(fit_start=5, fit_end=10, cal_start=10, cal_end=12, oos_start=12, oos_end=16),
+        WFFold(fit_start=5, fit_end=14, cal_start=14, cal_end=16, oos_start=16, oos_end=20),
+        WFFold(fit_start=5, fit_end=18, cal_start=18, cal_end=20, oos_start=20, oos_end=24),
+    )
+
+    def _fold_output(
+        *,
+        preds: list[float],
+        realized: list[float],
+        fit_status: str,
+        n_fit: int,
+    ) -> SimpleNamespace:
+        event_index = pd.DataFrame({"symbol": ["BTC"] * len(preds)})
+        return SimpleNamespace(
+            fold_id=0,
+            model_output=SimpleNamespace(
+                events=event_index,
+                expected_net_bps=np.asarray(preds, dtype=np.float64),
+            ),
+            oos_set=SimpleNamespace(
+                y_return_bps=np.asarray(realized, dtype=np.float64),
+                y_edge_bps=None,
+                event_index=event_index,
+            ),
+            fit_status=fit_status,
+            n_fit=n_fit,
+            timing_profile={},
+        )
+
+    fold_outputs = [
+        _fold_output(
+            preds=[4.0, 3.0, 2.0, 1.0],
+            realized=[1.0, 2.0, 3.0, 4.0],
+            fit_status="insufficient_fit",
+            n_fit=0,
+        ),
+        _fold_output(
+            preds=[5.0, 5.0, 5.0, 5.0],
+            realized=[4.0, 1.0, 3.0, 2.0],
+            fit_status="constant_prediction",
+            n_fit=120,
+        ),
+        _fold_output(
+            preds=[1.0, 2.0, 3.0, 4.0],
+            realized=[1.0, 2.0, 3.0, 4.0],
+            fit_status="trained",
+            n_fit=120,
+        ),
+    ]
+
+    valid_signal = SymbolSignal(raw_mu=1.0, volatility=0.01, n_obs=4, t_stat=2.0, valid=True)
+
+    with patch(
+        "os.cpu_count",
+        return_value=1,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold",
+        side_effect=fold_outputs,
+    ), patch(
+        "src.domain.futures.strategy.config.resolve_purge_and_embargo_bars",
+        return_value=(1, 0),
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.compose_symbol_signals",
+        return_value={"BTC": valid_signal},
+    ):
+        l1 = run_l1_swf(
+            labeled_events=pd.DataFrame(),
+            aligned=aligned,
+            cfg=cfg,
+            folds=folds,
+            l1_params={},
+        )
+
+    assert l1.pooled_ic == pytest.approx(1.0, abs=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +512,10 @@ def test_fold_diagnostic_index_alignment_no_mismatch() -> None:
             ic=fold_ic,
             breadth=f_breadth,
             n_valid=f_n_valid,
+            n_eligible=n_total,
             n_events=f_n_events,
+            n_fit=int(getattr(fo, "n_fit", 0)),
+            fit_status=getattr(fo, "fit_status", "trained"),
             passed=fold_ic is not None and fold_ic > 0,
         ))
 
@@ -442,6 +542,7 @@ def test_compute_per_symbol_ic_perfect_positive_correlation() -> None:
     pred_bps = realized_returns * 10000.0  # 완전 양의 rank 상관
 
     fold_out = MagicMock()
+    fold_out.fit_status = "trained"
     fold_out.model_output.expected_net_bps = pred_bps
     fold_out.oos_set = MagicMock()
     fold_out.oos_set.y_return_bps = realized_returns
@@ -463,6 +564,7 @@ def test_compute_per_symbol_ic_perfect_negative_correlation() -> None:
     pred_bps = -realized_returns * 10000.0  # 완전 음의 rank 상관
 
     fold_out = MagicMock()
+    fold_out.fit_status = "trained"
     fold_out.model_output.expected_net_bps = pred_bps
     fold_out.oos_set = MagicMock()
     fold_out.oos_set.y_return_bps = realized_returns
@@ -482,6 +584,7 @@ def test_compute_per_symbol_ic_not_hardcoded_zero() -> None:
     pred_bps = np.arange(n_events, dtype=np.float64)  # 동일 rank 순서
 
     fold_out = MagicMock()
+    fold_out.fit_status = "trained"
     fold_out.model_output.expected_net_bps = pred_bps
     fold_out.oos_set = MagicMock()
     fold_out.oos_set.y_return_bps = realized_returns
@@ -544,7 +647,17 @@ def test_all_folds_ic_none_returns_zero_stats() -> None:
     """S4: 모든 fold가 events=0 → mean_ic=0, ic_tstat=0, gate_passed=False."""
     # Arrange: valid_ics = [] (all folds have ic=None)
     fold_diags: list[FoldDiagnostic] = [
-        FoldDiagnostic(fold=i + 1, ic=None, breadth=0.0, n_valid=0, n_events=0, passed=False)
+        FoldDiagnostic(
+            fold=i + 1,
+            ic=None,
+            breadth=0.0,
+            n_valid=0,
+            n_eligible=0,
+            n_events=0,
+            n_fit=0,
+            fit_status="failed",
+            passed=False,
+        )
         for i in range(5)
     ]
 
@@ -587,6 +700,7 @@ def test_ts_ic_positive_when_crosssectional_variance_zero() -> None:
     pred_bps = realized_returns * 10000.0  # 동일 rank 방향
 
     fold_out = MagicMock()
+    fold_out.fit_status = "trained"
     fold_out.model_output.expected_net_bps = pred_bps
     fold_out.oos_set = MagicMock()
     fold_out.oos_set.y_return_bps = realized_returns

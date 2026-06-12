@@ -3,8 +3,8 @@
 
 # Mode Full (ALO/Ensemble) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-12 (CPCV → SWF-K 전환, Pooled IC + NW HAC t-stat 도입)
-**현재 상태:** `BLOCKED` — SWF-K L1 Gate 차단됨 (실제 Alpha 엣지 부재 확인). **Pooled IC = -0.095 ❌**
+**최신 갱신:** 2026-06-12 (SWF fold/window/warmup 정합성 수정, full `pytest` 통과)
+**현재 상태:** `BLOCKED` — `phase signal` 재실행이 외부 데이터 네트워크 차단으로 중단됨. 최신 SWF fold 수치는 아직 재산출 전.
 **평가 기준:** `min_pooled_ic=0.03`, `min_nw_tstat=1.96`, `min_breadth=0.30`, `min_valid_coverage=0.80`
 
 **진단 노트:**
@@ -21,7 +21,12 @@
 - **Direction A/B 알고리즘 진단:**
   - ✅ **Direction A (Calibration)**: 6개 Regime 중 3개 유효 확인. `score_z` 기반 슬로프 피팅 정상 작동.
   - ✅ **Direction B (Risk)**: q90 실산출을 통한 Kelly Sizing 정상화 완료.
-  - **핵심 결론**: 평가 프레임워크(SWF-K) 신뢰성 확보 완료. 현재 블로커는 신호 알파 자체의 예측 방향성 부재.
+  - **핵심 결론**: 평가 프레임워크(SWF-K) 신뢰성 확보 완료. 현재 블로커는 signal 재검증을 위한 외부 데이터 접근성이다.
+
+- **2026-06-12 추가 검증:**
+  - ✅ `uv run pytest` 전체 통과: `788 passed`
+  - ⚠️ `phase signal --sync full` 실행은 Binance Vision 데이터 다운로드 단계에서 DNS 실패로 타임아웃
+  - ⚠️ 기존 `[SWF FOLD DETAILS]` 표는 재실행 전 데이터라 `stale` 상태로 간주해야 함
 
 ---
 

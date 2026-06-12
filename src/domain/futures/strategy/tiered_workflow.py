@@ -28,6 +28,7 @@ from src.domain.futures.portfolio.signal_composer import (
     composer_sigma_lookback_bars,
     rolling_per_bar_return_std,
 )
+from src.domain.futures.strategy.candidate_contracts import FoldFitStatus
 from src.domain.futures.strategy.candidate_workflow import _fit_and_predict_single_fold
 from src.domain.futures.strategy.cs_rank import (
     VOL_FLOOR,
@@ -164,7 +165,10 @@ class FoldDiagnostic:
     ic: float | None
     breadth: float
     n_valid: int
+    n_eligible: int
     n_events: int
+    n_fit: int
+    fit_status: FoldFitStatus
     passed: bool
 
 
@@ -174,6 +178,7 @@ class FoldDiagnostic:
 
 _BARS_PER_YEAR: float = 2190.0  # 4h 기준
 _VALID_COVERAGE_FLAG_THRESHOLD: float = 0.80  # per-fold valid 비율 임계 (L1 게이트와 일치)
+_TRAINED_FOLD_COVERAGE_THRESHOLD: float = 0.80
 
 
 def _sharpe(rets: list[float], bars_per_year: float = _BARS_PER_YEAR) -> float:
@@ -474,6 +479,62 @@ def _date_to_idx(datetimes: NDArray[np.datetime64], target_date: Any) -> int:
     return min(idx, len(datetimes) - 1)
 
 
+def _is_non_constant_finite_array(values: NDArray[np.float64]) -> bool:
+    """Return whether a finite-valued vector has positive dispersion."""
+    if values.size < 1:
+        return False
+    finite = values[np.isfinite(values)]
+    if finite.size < 1:
+        return False
+    return float(np.nanstd(finite)) > 0.0
+
+
+def _is_trained_fold_output(fold_out: Any) -> bool:
+    """Return whether the fold completed training with non-degenerate predictions."""
+    return getattr(fold_out, "fit_status", "trained") == "trained"
+
+
+def _fold_eligible_symbol_mask(
+    *,
+    aligned: AlignedMarketData,
+    fold: WFFold,
+    min_bar_coverage: float = 0.80,
+) -> NDArray[np.bool_]:
+    """Compute fold-local PIT eligible symbols from OOS universe and warm/kill masks."""
+    if fold.oos_end <= fold.oos_start:
+        return np.zeros(len(aligned.symbols), dtype=bool)
+
+    active_mask = getattr(aligned, "inference_active_mask", None)
+    if not isinstance(active_mask, np.ndarray):
+        active_mask = getattr(aligned, "active_mask", None)
+    if not isinstance(active_mask, np.ndarray):
+        active_mask = np.ones((len(aligned.datetimes), len(aligned.symbols)), dtype=bool)
+
+    warm_mask = getattr(aligned, "inference_entry_warm_mask", None)
+    if not isinstance(warm_mask, np.ndarray):
+        warm_mask = getattr(aligned, "warm_mask", None)
+    if not isinstance(warm_mask, np.ndarray):
+        warm_mask = np.ones((len(aligned.datetimes), len(aligned.symbols)), dtype=bool)
+
+    entry_block_mask = getattr(aligned, "entry_block_mask", None)
+    if not isinstance(entry_block_mask, np.ndarray):
+        entry_block_mask = np.zeros((len(aligned.datetimes), len(aligned.symbols)), dtype=bool)
+
+    kill_mask = getattr(aligned, "kill_mask", None)
+    if not isinstance(kill_mask, np.ndarray):
+        kill_mask = np.zeros((len(aligned.datetimes), len(aligned.symbols)), dtype=bool)
+
+    oos_slice = slice(fold.oos_start, fold.oos_end)
+    eligible_2d = (
+        active_mask[oos_slice]
+        & warm_mask[oos_slice]
+        & ~entry_block_mask[oos_slice]
+        & ~kill_mask[oos_slice]
+    )
+    coverage = np.mean(eligible_2d.astype(np.float64), axis=0)
+    return np.asarray(coverage >= float(min_bar_coverage), dtype=bool)
+
+
 # ---------------------------------------------------------------------------
 # Layer1: 심볼별 time-series rank IC
 # ---------------------------------------------------------------------------
@@ -500,6 +561,8 @@ def compute_per_symbol_ic(
     sym_ic_lists: dict[str, list[float]] = defaultdict(list)
 
     for _, _, fold_out in fold_tuples:
+        if not _is_trained_fold_output(fold_out):
+            continue
         oos_set = getattr(fold_out, "oos_set", None)
         if oos_set is None:
             continue
@@ -530,6 +593,10 @@ def compute_per_symbol_ic(
             r = realized[sym_mask]
             valid_mask = np.isfinite(p) & np.isfinite(r)
             if valid_mask.sum() < 4:
+                continue
+            if not _is_non_constant_finite_array(p[valid_mask]):
+                continue
+            if not _is_non_constant_finite_array(r[valid_mask]):
                 continue
             ic_val, _ = spearmanr(p[valid_mask], r[valid_mask])
             if not np.isnan(ic_val):
@@ -610,6 +677,8 @@ def _compute_fold_ts_ic(*, fold_out: Any) -> float | None:
     oos_set.y_return_bps는 방향·barrier·비용 반영 정준 실현 수익 라벨이다.
     Returns None if oos_set unavailable or fewer than 4 valid events.
     """
+    if not _is_trained_fold_output(fold_out):
+        return None
     oos_set = getattr(fold_out, "oos_set", None)
     if oos_set is None:
         return None
@@ -630,6 +699,10 @@ def _compute_fold_ts_ic(*, fold_out: Any) -> float | None:
 
     mask = np.isfinite(pred) & np.isfinite(realized)
     if mask.sum() < 4:
+        return None
+    if not _is_non_constant_finite_array(pred[mask]):
+        return None
+    if not _is_non_constant_finite_array(realized[mask]):
         return None
 
     ic_val, _ = spearmanr(pred[mask], realized[mask])
@@ -745,30 +818,37 @@ def run_l1_swf(
         beta_f64: NDArray[np.float64] | None = (
             beta_f32.astype(np.float64) if beta_f32 is not None else None
         )
-        fold_sigs = compose_symbol_signals(
-            model_output=fold_out.model_output,
-            close_2d=aligned.close_2d,
-            symbols=symbols,
-            tf=tf,
-            min_obs=min_obs,
-            t_stat_floor=t_stat_floor,
-            beta_vs_market_1d=beta_f64,
-            opt_cfg=None,
-        )
-        signals_per_fold.append(fold_sigs)
+        fold_sigs: dict[str, SymbolSignal] = {}
+        if _is_trained_fold_output(fold_out):
+            fold_sigs = compose_symbol_signals(
+                model_output=fold_out.model_output,
+                close_2d=aligned.close_2d,
+                symbols=symbols,
+                tf=tf,
+                min_obs=min_obs,
+                t_stat_floor=t_stat_floor,
+                beta_vs_market_1d=beta_f64,
+                opt_cfg=None,
+            )
+            signals_per_fold.append(fold_sigs)
 
         # time-series pooled rank IC (expected_net_bps vs oos_set.y_return_bps)
         fold_ic: float | None = _compute_fold_ts_ic(fold_out=fold_out)
 
         f_n_valid = sum(1 for s in fold_sigs.values() if s.valid)
-        f_breadth = f_n_valid / max(1, n_total)
+        eligible_mask = _fold_eligible_symbol_mask(aligned=aligned, fold=_wf_fold)
+        f_n_eligible = int(np.count_nonzero(eligible_mask))
+        f_breadth = f_n_valid / max(1, f_n_eligible)
         f_n_events = len(fold_out.model_output.expected_net_bps)
         fold_diags.append(FoldDiagnostic(
             fold=fold_loop_idx + 1,
             ic=fold_ic,
             breadth=f_breadth,
             n_valid=f_n_valid,
+            n_eligible=f_n_eligible,
             n_events=f_n_events,
+            n_fit=int(getattr(fold_out, "n_fit", 0)),
+            fit_status=getattr(fold_out, "fit_status", "failed"),
             passed=fold_ic is not None and fold_ic > 0,
         ))
 
@@ -828,7 +908,10 @@ def run_l1_swf(
             "ic": d.ic,
             "breadth": d.breadth,
             "n_valid": d.n_valid,
+            "n_eligible": d.n_eligible,
             "n_events": d.n_events,
+            "n_fit": d.n_fit,
+            "fit_status": d.fit_status,
             "pass": d.passed,
         }
         for d in fold_diags
@@ -838,6 +921,8 @@ def run_l1_swf(
     _pred_parts: list[NDArray[np.float64]] = []
     _real_parts: list[NDArray[np.float64]] = []
     for _, _wf_fold, fold_out in futures:
+        if not _is_trained_fold_output(fold_out):
+            continue
         oos = getattr(fold_out, "oos_set", None)
         if oos is None:
             continue
@@ -852,6 +937,10 @@ def run_l1_swf(
             continue
         _mask = np.isfinite(p_arr) & np.isfinite(r_arr)
         if _mask.sum() < 4:
+            continue
+        if not _is_non_constant_finite_array(p_arr[_mask]):
+            continue
+        if not _is_non_constant_finite_array(r_arr[_mask]):
             continue
         _pred_parts.append(p_arr[_mask])
         _real_parts.append(r_arr[_mask])
@@ -883,6 +972,10 @@ def run_l1_swf(
         float(sum(1 for d in fold_diags if d.breadth >= _VALID_COVERAGE_FLAG_THRESHOLD) / len(fold_diags))
         if fold_diags else 0.0
     )
+    trained_fold_coverage = (
+        float(sum(1 for d in fold_diags if d.fit_status == "trained") / len(fold_diags))
+        if fold_diags else 0.0
+    )
 
     # n_valid: oos_stacked 기준
     n_valid = sum(1 for s in oos_stacked.values() if s.valid)
@@ -903,6 +996,8 @@ def run_l1_swf(
         })
 
     gate_passed: bool = bool(
+        (trained_fold_coverage >= _TRAINED_FOLD_COVERAGE_THRESHOLD)
+        and
         (pooled_ic_val >= 0.030)
         and (pooled_tstat_val >= 1.96)
         and (breadth >= 0.30)
@@ -1134,13 +1229,13 @@ def run_tiered_pipeline(
     # Layer1: SWF-K
     _is_ts = pd.Timestamp(window.l1_start, tz="UTC")
     _oos_ts = pd.Timestamp(window.l2_start, tz="UTC")
-    warmup_bars = int(np.searchsorted(aligned.datetimes, np.datetime64(_is_ts.replace(tzinfo=None), "ns")))
+    l1_start_bars = int(np.searchsorted(aligned.datetimes, np.datetime64(_is_ts.replace(tzinfo=None), "ns")))
     l1_end_bars = int(np.searchsorted(aligned.datetimes, np.datetime64(_oos_ts.replace(tzinfo=None), "ns")))
 
     l1_folds = build_l1_swf_folds(
         n_bars=n_bars,
         n_folds=5,
-        warmup_bars=warmup_bars,
+        l1_start_bars=l1_start_bars,
         l1_end_bars=l1_end_bars,
         purge_bars=purge_bars,
         embargo_bars=embargo_bars,
