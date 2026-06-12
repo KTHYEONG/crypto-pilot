@@ -712,6 +712,10 @@ def fit_regime_conditional_ensemble(
             n_valid = int(valid_mask.sum())
             if n_valid < score_calibration_min_obs:
                 score_calibration_valid[g] = False
+                _logger.debug(
+                    "[SCORE-CAL-DIAG] regime=%d REJECT obs_too_low n=%d min=%d",
+                    g, n_valid, score_calibration_min_obs,
+                )
                 continue
 
             grp_ordered = (
@@ -726,6 +730,9 @@ def fit_regime_conditional_ensemble(
             rho = float(np.corrcoef(z_arr, y_arr)[0, 1])
             if not np.isfinite(rho):
                 score_calibration_valid[g] = False
+                _logger.debug(
+                    "[SCORE-CAL-DIAG] regime=%d REJECT invalid_rho n=%d", g, n_valid,
+                )
                 continue
 
             sigma_z = float(np.std(z_arr)) + 1e-12
@@ -746,9 +753,48 @@ def fit_regime_conditional_ensemble(
                 oos_sign_ok = np.isfinite(rho_probe) and rho_probe > 0.0
 
             if probe_start < 10 or (n_valid - probe_start) < 10:
-                score_calibration_valid[g] = beta_shrunk > 0.0
+                _valid = beta_shrunk > 0.0
+                score_calibration_valid[g] = _valid
+                _reason = "ACCEPT(short_probe)" if _valid else "REJECT negative_slope(short_probe)"
+                _logger.debug(
+                    "[SCORE-CAL-DIAG] regime=%d %s beta=%.4f n=%d probe_start=%d",
+                    g, _reason, beta_shrunk, n_valid, probe_start,
+                )
             else:
-                score_calibration_valid[g] = (beta_shrunk > 0.0) and oos_sign_ok
+                _valid = (beta_shrunk > 0.0) and oos_sign_ok
+                score_calibration_valid[g] = _valid
+                if _valid:
+                    _logger.debug(
+                        "[SCORE-CAL-DIAG] regime=%d ACCEPT beta=%.4f oos_sign_ok=%s n=%d",
+                        g, beta_shrunk, oos_sign_ok, n_valid,
+                    )
+                elif beta_shrunk <= 0.0:
+                    _logger.debug(
+                        "[SCORE-CAL-DIAG] regime=%d REJECT negative_slope beta=%.4f n=%d",
+                        g, beta_shrunk, n_valid,
+                    )
+                else:
+                    _logger.debug(
+                        "[SCORE-CAL-DIAG] regime=%d REJECT oos_sign_fail beta=%.4f rho_probe=%.4f n=%d",
+                        g, beta_shrunk, float(np.corrcoef(z_arr[probe_start:], y_arr[probe_start:])[0, 1]), n_valid,
+                    )
+
+    # ── Score-Cal 요약 (INFO, C1 진단) ──────────────────────────────────────
+    if score_calibration_enabled and score_calibration_valid:
+        _n_valid_sc = sum(score_calibration_valid.values())
+        _n_total_sc = len(score_calibration_valid)
+        # obs_too_low: regimes not in score_calibration_valid (skipped via continue)
+        if "score_z" in frame.columns and "net_return_bps" in frame.columns:
+            _all_regimes = set(frame["entry_regime_code"].dropna().astype(int).unique())
+            _n_obs_low = len(_all_regimes - set(score_calibration_valid.keys()))
+        else:
+            _n_obs_low = 0
+        _logger.info(
+            "[SCORE-CAL-DIAG] valid=%d/%d obs_too_low=%d neg_slope_or_oos_fail=%d (min_obs=%d)",
+            _n_valid_sc, _n_total_sc, _n_obs_low,
+            sum(1 for v in score_calibration_valid.values() if not v),
+            score_calibration_min_obs,
+        )
 
     # ── Diagnostic table (IC sign audit) ─────────────────────────────────────
     ensemble_diag = _log_ensemble_diagnostics(
