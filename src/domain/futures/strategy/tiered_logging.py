@@ -96,8 +96,8 @@ def format_layer1_table(
         "[LAYER 1: CPCV SIGNAL VALIDATION] -------------------",
         "| Metric               | Value   | Gate  | Status      |",
         "| -------------------- | ------- | ----- | ----------- |",
-        f"| Mean IC (HAC)        | {r.mean_ic:.3f}   | >0.03 | {gate_str:<11} |",
-        f"| IC t-stat            | {r.ic_tstat:.2f}    | >1.96 | {'—':<11} |",
+        f"| Mean IC (fold)       | {r.mean_ic:.3f}   | >0.03 | {gate_str:<11} |",
+        f"| IC t-stat            | {r.ic_tstat:.2f}    | >1.96 | {'✓ PASS' if r.ic_tstat >= 1.96 else '✗ FAIL':<11} |",
         f"| Symbol Breadth       | {r.breadth:.3f}   | >0.3  | {'—':<11} |",
         f"| Valid Coverage       | {_pct(r.valid_coverage):<7} | >80%  | {'—':<11} |",
         f"| Valid Symbols/N      | {n_valid}/{n_trade_scope:<4}   | —     | {'—':<11} |",
@@ -113,8 +113,10 @@ def format_layer1_table(
         lines.append("| ---- | ------ | ------- | ------- | -------- | ----- |")
         for fd in fold_details:
             pass_str: str = "PASS" if fd.get("pass") else "FAIL"
+            raw_ic = fd.get("ic")
+            ic_str: str = f"{raw_ic:.3f}" if raw_ic is not None else "n/a  "
             lines.append(
-                f"| {fd['fold']:<4} | {fd['ic']:.3f}  | {fd['breadth']:.3f}    | "
+                f"| {fd['fold']:<4} | {ic_str:<6} | {fd['breadth']:.3f}    | "
                 f"{fd['n_valid']:<7} | {fd['n_events']:<8} | {pass_str:<5} |"
             )
         lines.append("------------------------------------------------------")
