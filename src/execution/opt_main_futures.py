@@ -1557,7 +1557,7 @@ def run_pipeline(
         _selected_symbols_from_snapshot(universe_snapshot),
         universe_snapshot=universe_snapshot,
     )
-    _logger.info("<< STRATEGY: %.2fs", time.perf_counter() - t_strategy)
+    _logger.debug("<< STRATEGY: %.2fs", time.perf_counter() - t_strategy)
 
     # Step 4.5) C3/C4 gold standard: 전략 이벤트로 scorecard 갱신
     if regime_stage_result is not None and strategy_out is not None:
@@ -1583,8 +1583,8 @@ def run_pipeline(
         seed=seed,
         resume=resume,
     )
-    _logger.info("<< OPTIMIZE: %.2fs", time.perf_counter() - t_opt_stage)
-    _logger.info(
+    _logger.debug("<< OPTIMIZE: %.2fs", time.perf_counter() - t_opt_stage)
+    _logger.debug(
         "<< PIPELINE_TOTAL: %.2fs",
         time.perf_counter() - pipeline_t0,
     )
