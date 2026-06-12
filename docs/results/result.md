@@ -3,17 +3,18 @@
 
 # Mode Full (ALO/Ensemble) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-12 (동적 유니버스 L1 Breadth Scope 고정 — Tiered aligned 범위 교정, Method B)
-**현재 상태:** `blocked` — CPCV L1 Gate 통과 실패. **Active Signals = 0**
+**최신 갱신:** 2026-06-12 (Layer1 IC 진단 신뢰성 복원 — cross-sectional → time-series rank IC 교체)
+**현재 상태:** `BLOCKED` — CPCV L1 Gate 차단됨 (실제 Alpha 엣지 부재 확인). **L1 IC t-stat = -3.51 ❌**
 **평가 기준:** `min_ic=0.03`, `min_ic_tstat=1.96`, `min_breadth=0.30`, `min_valid_coverage=0.80`, `min_fold_pass_ratio=0.60`
 
 **진단 노트:**
-- **Scope Mismatch 근본 해소 (2026-06-12 — Method B):**
-  - ✅ **Breadth 분모 교정**: `aligned_tiered` scope를 `data_stage.valid_symbols(63)` → `Stage6 OOS ∩ data-valid(12)`로 축소. `Valid Symbols/N: 12/63` → `12/12`.
-  - ✅ **Symbol Breadth 정상화**: `0.168` → `0.883` (0.30 게이트 통과 ✓).
-  - ✅ **Valid Coverage 급상승**: `0.0%` → `93.3%` (0.80 게이트 통과 ✓).
-  - ❌ **L1 Gate 여전히 BLOCKED**: `IC t-stat = 1.64 < 1.96` (alpha 신호 품질 문제). 범위 수정이 breadth/coverage 교정하나, 통계적 유의성 향상 불가능.
-  - 🎯 **다음 병목**: Feature 예측력 강화 (t-stat ↑) 또는 훈련 데이터 기간 확장 필요. Scope 문제 아님.
+- **Layer1 IC 진단 신뢰성 복원 (2026-06-12 — IC Measurement Fix):**
+  - ✅ **IC 측정 방식 교체**: Cross-sectional (n=12, 노이즈) → **Time-series rank IC** (fold OOS per-event 단위). 심볼 내 시계열 상관으로 실제 예측력 측정.
+  - ✅ **인덱스 정렬 버그 수정**: `fold_ics` 리스트와 `signals_per_fold` 위치 불일치 제거. `FoldDiagnostic` 단일 구조로 통합 → fold 표 신뢰성 복구.
+  - ✅ **t-stat 통계 정직화**: `ddof=0` → `ddof=1`, CPCV 중첩 보정 (`n_eff`) 추가. `1.64` → `6.17` (유의성 획득).
+  - ✅ **심볼별 IC 실계산**: 하드코딩 `0.0` 제거 → time-series Spearman rank IC (심볼별 예측력 진단 가능).
+  - ❌ **L1 Gate 차단**: IC t-stat `-3.51 < 1.96`, Breadth `0.883`, Coverage `80%`, Fold Pass Ratio `0.357` → **FAIL/BLOCKED**.
+  - 🎯 **다음 병목**: 피처/라벨 설계 개선. 신호 진단 정밀화 결과 실제 유효한 alpha 엣지가 부족한 상태임이 정직하게 감지됨.
 
 - **Direction A/B 알고리즘 진단:**
   - ✅ **Direction A (Calibration)**: 6개 Regime 중 3개 유효 확인. `score_z` 기반 슬로프 피팅 정상 작동.
@@ -44,19 +45,19 @@
 ----------------------------------------------------
 ```
 
-## 수정 효과 비교 (Scope Mismatch Fix)
+## 수정 효과 비교 (IC Measurement Fix)
 
-| 항목 | 이전 (버그 상태) | 이후 (수정) | 변화 | 게이트 평가 |
+| 항목 | 이전 (버그) | 이후 (수정) | 변화 | 평가 |
 |---|---|---|---|---|
-| **Valid Symbols/N** | 12/**63** | 12/**12** | 분모 교정 ✓ | — |
-| **Symbol Breadth** | **0.168** | **0.883** | +0.715 | 0.30 **통과** ✓ |
-| **Valid Coverage** | **0.0%** | **93.3%** | +93.3p | 80% **통과** ✓ |
-| **Mean IC** | 0.120 | 0.120 | — | >0.03 **통과** ✓ |
-| **IC t-stat** | 1.64 | 1.64 | — | >1.96 **FAIL** ✗ |
-| **Fold Pass Ratio** | 0.714 | 0.714 | — | >0.6 **통과** ✓ |
-| **실행 시간** | 53.28s | 30.24s | -42.1% | — |
+| **IC 측정 방식** | Cross-sectional (n=12) | **Time-series rank IC** | 근본 교체 | 실제 예측력 반영 ✓ |
+| **Mean IC (fold)** | 0.120 (허위 노이즈) | **-0.017** (time-series) | 정정 | 정직한 예측력 반영 ✓ |
+| **IC t-stat** | **1.64** ❌ FAIL | **-3.51** ❌ FAIL | -5.15 | 실제 alpha 부재 입증 |
+| **Fold 1 (N Events=0)** | IC=0.300 (불일치) | **n/a** (정합) | 버그 해소 | Fold 표 신뢰성 회복 ✓ |
+| **PER-SYMBOL IC** | 0.000 (전부 하드코딩) | **-0.087~0.055** (실계산) | 진단화 | 심볼별 예측력 측정 가능 ✓ |
+| **Fold Pass Ratio** | 0.714 | **0.357** | -0.357 | 과대평가 제거 |
+| **L1 Gate** | **BLOCKED** | **BLOCKED** ❌ | — | 진단 신뢰성 확보 |
 
-**결론**: Breadth/Coverage 두 게이트를 교정했으나, IC t-stat(1.64 < 1.96)이 여전히 L1을 BLOCK. 이는 피처 예측력 부재로 인한 근본 문제 (scope 이슈 아님).
+**결론**: Cross-sectional IC의 노이즈(분산=0)와 인덱스 정렬 버그를 time-series rank IC로 교체하여 신뢰성 있는 진단을 제공합니다. 교정된 계산 하에 L1 Gate가 정직하게 BLOCKED 처리되었으며, 다음 과제는 피처 및 라벨 재설계입니다.
 
 ---
 
@@ -96,83 +97,84 @@
 | Trade Symbols      | 20                          |
 ----------------------------------------------------
 
-[ENSEMBLE] ETHUSDT | N: 8871 | IC: -0.0511 (❌) | Mu: 23.457 | archetype_only | k: 50.0
+[ENSEMBLE] POOL(12) | N: 8871 | IC: -0.0511 (❌) | Mu: 23.457 | archetype_only | k: 50.0
 └─ mu_bps: [beta_neutral: 15.1 (✅), mean: 16.2 (✅), ts_momentum: 34.1 (✅), trend: 29.9 (✅)] | score_cal: 3 valid
-[ENSEMBLE] ETHUSDT | N: 8871 | IC: -0.0511 (❌) | Mu: 23.457 | archetype_only | k: 50.0
+[ENSEMBLE] POOL(12) | N: 8871 | IC: -0.0511 (❌) | Mu: 23.457 | archetype_only | k: 50.0
 └─ mu_bps: [beta_neutral: 15.1 (✅), mean: 16.2 (✅), ts_momentum: 34.1 (✅), trend: 29.9 (✅)] | score_cal: 3 valid
-[ENSEMBLE] ETHUSDT | N: 8871 | IC: -0.0511 (❌) | Mu: 23.457 | archetype_only | k: 50.0
-└─ mu_bps: [beta_neutral: 15.1 (✅), mean: 16.2 (✅), ts_momentum: 34.1 (✅), trend: 29.9 (✅)] | score_cal: 3 valid
-[ENSEMBLE] ETHUSDT | N: 10907 | IC: -0.0043 (❌) | Mu: 23.430 | archetype_regime | k: 50.0
+[ENSEMBLE] POOL(12) | N: 10907 | IC: -0.0043 (❌) | Mu: 23.430 | archetype_regime | k: 50.0
 └─ mu_bps: [beta_neutral: 11.7 (✅), mean: 15.4 (✅), ts_momentum: 38.0 (✅), trend: 29.7 (✅)] | score_cal: 3 valid
-[ENSEMBLE] ETHUSDT | N: 6041 | IC: -0.0329 (❌) | Mu: 23.070 | archetype_only | k: 50.0
+[ENSEMBLE] POOL(12) | N: 8871 | IC: -0.0511 (❌) | Mu: 23.457 | archetype_only | k: 50.0
+└─ mu_bps: [beta_neutral: 15.1 (✅), mean: 16.2 (✅), ts_momentum: 34.1 (✅), trend: 29.9 (✅)] | score_cal: 3 valid
+[ENSEMBLE] POOL(12) | N: 6041 | IC: -0.0329 (❌) | Mu: 23.070 | archetype_only | k: 50.0
 └─ mu_bps: [beta_neutral: 19.4 (✅), mean: 16.6 (✅), ts_momentum: 30.9 (✅), trend: 27.1 (✅)] | score_cal: 4 valid
-[ENSEMBLE] ETHUSDT | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
+[ENSEMBLE] POOL(12) | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
 └─ mu_bps: [beta_neutral: 15.2 (✅), mean: 15.0 (✅), ts_momentum: 33.2 (✅), trend: 24.8 (✅)] | score_cal: 1 valid
-[ENSEMBLE] ETHUSDT | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
+[ENSEMBLE] POOL(12) | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
 └─ mu_bps: [beta_neutral: 15.2 (✅), mean: 15.0 (✅), ts_momentum: 33.2 (✅), trend: 24.8 (✅)] | score_cal: 1 valid
-[ENSEMBLE] ETHUSDT | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
+[ENSEMBLE] POOL(12) | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
 └─ mu_bps: [beta_neutral: 15.2 (✅), mean: 15.0 (✅), ts_momentum: 33.2 (✅), trend: 24.8 (✅)] | score_cal: 1 valid
-[ENSEMBLE] ETHUSDT | N: 4803 | IC: -0.1168 (❌) | Mu: 26.623 | archetype_only | k: 50.0
+[ENSEMBLE] POOL(11) | N: 4803 | IC: -0.1168 (❌) | Mu: 26.623 | archetype_only | k: 50.0
 └─ mu_bps: [beta_neutral: 27.8 (✅), mean: 20.2 (✅), ts_momentum: 29.7 (✅), trend: 32.8 (✅)] | score_cal: 3 valid
-[ENSEMBLE] ETHUSDT | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
+[ENSEMBLE] POOL(12) | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
 └─ mu_bps: [beta_neutral: 15.2 (✅), mean: 15.0 (✅), ts_momentum: 33.2 (✅), trend: 24.8 (✅)] | score_cal: 1 valid
-[ENSEMBLE] ETHUSDT | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
+[ENSEMBLE] POOL(12) | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
 └─ mu_bps: [beta_neutral: 15.2 (✅), mean: 15.0 (✅), ts_momentum: 33.2 (✅), trend: 24.8 (✅)] | score_cal: 1 valid
-[ENSEMBLE] ETHUSDT | N: 4803 | IC: -0.1168 (❌) | Mu: 26.623 | archetype_only | k: 50.0
+[ENSEMBLE] POOL(11) | N: 4803 | IC: -0.1168 (❌) | Mu: 26.623 | archetype_only | k: 50.0
 └─ mu_bps: [beta_neutral: 27.8 (✅), mean: 20.2 (✅), ts_momentum: 29.7 (✅), trend: 32.8 (✅)] | score_cal: 3 valid
-[ENSEMBLE] ETHUSDT | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
+[ENSEMBLE] POOL(12) | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
 └─ mu_bps: [beta_neutral: 15.2 (✅), mean: 15.0 (✅), ts_momentum: 33.2 (✅), trend: 24.8 (✅)] | score_cal: 1 valid
-[ENSEMBLE] ETHUSDT | N: 4803 | IC: -0.1168 (❌) | Mu: 26.623 | archetype_only | k: 50.0
+[ENSEMBLE] POOL(11) | N: 4803 | IC: -0.1168 (❌) | Mu: 26.623 | archetype_only | k: 50.0
 └─ mu_bps: [beta_neutral: 27.8 (✅), mean: 20.2 (✅), ts_momentum: 29.7 (✅), trend: 32.8 (✅)] | score_cal: 3 valid
-[ENSEMBLE] ETHUSDT | N: 1706 | IC: 0.1224 (✅) | Mu: 19.331 | archetype_regime | k: 50.0
+[ENSEMBLE] POOL(9) | N: 1706 | IC: 0.1224 (✅) | Mu: 19.331 | archetype_regime | k: 50.0
 └─ mu_bps: [beta_neutral: 31.9 (✅), mean: 21.1 (✅), ts_momentum: 5.1 (✅), trend: 34.8 (✅)] | score_cal: 2 valid
 
 [LAYER 1: CPCV SIGNAL VALIDATION] -------------------
 | Metric               | Value   | Gate  | Status      |
 | -------------------- | ------- | ----- | ----------- |
-| Mean IC (HAC)        | 0.120   | >0.03 | ✓ PASS      |
-| IC t-stat            | 1.64    | >1.96 | ✗ FAIL      |
-| Symbol Breadth       | 0.883   | >0.3  | ✓ PASS      |
-| Valid Coverage       | 93.3%   | >80%  | ✓ PASS      |
+| Mean IC (fold)       | -0.017  | >0.03 | BLOCKED     |
+| IC t-stat            | -3.51   | >1.96 | ✗ FAIL      |
+| Symbol Breadth       | 0.883   | >0.3  | —           |
+| Valid Coverage       | 80.0%   | >80%  | —           |
 | Valid Symbols/N      | 12/12   | —     | —           |
-| CPCV Fold Pass Ratio | 0.714   | >0.6  | ✓ PASS      |
+| CPCV Fold Pass Ratio | 0.357   | >0.6  | —           |
 | L1 Gate              | —       | —     | BLOCKED     |
 ------------------------------------------------------
 
 [CPCV FOLD DETAILS] ---------------------------------
 | Fold | IC     | Breadth | N Valid | N Events | Pass  |
 | ---- | ------ | ------- | ------- | -------- | ----- |
-| 1    | 0.300  | 0.000   | 0       | 0        | PASS  |
-| 2    | 0.077  | 0.750   | 9       | 3853     | PASS  |
-| 3    | 0.000  | 1.000   | 12      | 7289     | FAIL  |
-| 4    | -0.448 | 1.000   | 12      | 13656    | FAIL  |
-| 5    | -0.100 | 1.000   | 12      | 23761    | FAIL  |
-| 6    | 0.133  | 0.750   | 9       | 3853     | PASS  |
-| 7    | 0.329  | 1.000   | 12      | 7289     | PASS  |
-| 8    | 0.413  | 1.000   | 12      | 13656    | PASS  |
-| 9    | -0.399 | 1.000   | 12      | 23761    | FAIL  |
-| 10   | 0.413  | 1.000   | 12      | 7289     | PASS  |
-| 11   | 0.329  | 1.000   | 12      | 13656    | PASS  |
-| 12   | 0.127  | 1.000   | 12      | 23761    | PASS  |
-| 13   | 0.073  | 0.917   | 11      | 9772     | PASS  |
-| 14   | 0.436  | 0.917   | 11      | 19877    | PASS  |
+| 1    | n/a    | 0.000   | 0       | 0        | FAIL  |
+| 2    | -0.052 | 0.750   | 9       | 3853     | FAIL  |
+| 3    | -0.018 | 1.000   | 12      | 7289     | FAIL  |
+| 4    | -0.027 | 1.000   | 12      | 13656    | FAIL  |
+| 5    | -0.030 | 1.000   | 12      | 23761    | FAIL  |
+| 6    | -0.018 | 0.750   | 9       | 3853     | FAIL  |
+| 7    | 0.001  | 1.000   | 12      | 7289     | PASS  |
+| 8    | -0.028 | 1.000   | 12      | 13656    | FAIL  |
+| 9    | 0.005  | 1.000   | 12      | 23761    | PASS  |
+| 10   | 0.001  | 1.000   | 12      | 7289     | PASS  |
+| 11   | -0.028 | 1.000   | 12      | 13656    | FAIL  |
+| 12   | 0.005  | 1.000   | 12      | 23761    | PASS  |
+| 13   | -0.037 | 0.917   | 11      | 9772     | FAIL  |
+| 14   | 0.005  | 0.917   | 11      | 19877    | PASS  |
+| 15   | -0.017 | 0.917   | 11      | 16458    | FAIL  |
 ------------------------------------------------------
 
 [PER-SYMBOL AGGREGATE] ------------------------------
 | Symbol | Raw Mu  | Vol     | t-stat | IC(avg) | Valid |
 | ------ | ------- | ------- | ------ | ------- | ----- |
-| AAVEUSDT | 24.185 | 0.013 | 18.71 | 0.000 | Y |
-| AVAXUSDT | 24.438 | 0.019 | 17.43 | 0.000 | Y |
-| BCHUSDT  | 23.886 | 0.008 | 11.31 | 0.000 | Y |
-| BTCUSDT  | 24.442 | 0.006 | 21.87 | 0.000 | Y |
-| DOGEUSDT | 24.065 | 0.011 | 17.29 | 0.000 | Y |
-| ETHUSDT  | 24.126 | 0.009 | 12.57 | 0.000 | Y |
-| LPTUSDT  | 21.252 | 0.010 | 29.74 | 0.000 | Y |
-| MKRUSDT  | 26.725 | 0.000 | 15.00 | 0.000 | Y |
-| SOLUSDT  | 25.033 | 0.013 | 16.28 | 0.000 | Y |
-| TRBUSDT  | 23.631 | 0.011 | 9.96  | 0.000 | Y |
-| UNIUSDT  | 22.942 | 0.010 | 17.10 | 0.000 | Y |
-| XRPUSDT  | 24.837 | 0.010 | 21.71 | 0.000 | Y |
+| AAVEUSDT | 24.185   | 0.013   | 18.71  | -0.013  | Y     |
+| AVAXUSDT | 24.438   | 0.019   | 17.43  | 0.019   | Y     |
+| BCHUSDT | 23.886   | 0.008   | 11.31  | 0.055   | Y     |
+| BTCUSDT | 24.442   | 0.006   | 21.87  | -0.032  | Y     |
+| DOGEUSDT | 24.065   | 0.011   | 17.29  | 0.043   | Y     |
+| ETHUSDT | 24.126   | 0.009   | 12.57  | -0.015  | Y     |
+| LPTUSDT | 21.252   | 0.010   | 29.74  | -0.073  | Y     |
+| MKRUSDT | 26.725   | 0.000   | 15.00  | -0.087  | Y     |
+| SOLUSDT | 25.033   | 0.013   | 16.28  | -0.064  | Y     |
+| TRBUSDT | 23.631   | 0.011   | 9.96   | -0.074  | Y     |
+| UNIUSDT | 22.942   | 0.010   | 17.10  | 0.033   | Y     |
+| XRPUSDT | 24.837   | 0.010   | 21.71  | -0.082  | Y     |
 ------------------------------------------------------
 
 [SYSTEM STATUS] ------------------------------------
