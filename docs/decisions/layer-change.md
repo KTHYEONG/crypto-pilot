@@ -17,6 +17,11 @@ related_paths:
 last_verified: 2026-06-11
 ---
 
+## [2026-06-12] Tiered aligned scope 교정 (Method B — Scope Mismatch Fix)
+- **Delta:** `opt_main_futures.py:788` `align_data_maps` 인자를 `data_stage.valid_symbols(63)` → `effective_trade_syms = Stage6 OOS ∩ data_maps(12)`로 교체. `Layer1Result`에 `n_trade_scope: int = 0` 관측성 필드 추가. `tiered_logging.py` Valid Symbols/N 행 `n_trade_scope` 표시.
+- **Rationale:** `breadth = n_valid / 63 = 0.168` 구조적 gate 미달(< 0.30) — 분모가 inference union(63) vs 신호 생성 범위(12) scope mismatch. bridge의 `effective_symbols = Stage6 ∩ data_maps`와 tiered의 `aligned.symbols`를 동일 범위로 일치시킴. 교정 후 breadth 0.168→0.883, coverage 0.0%→93.3%으로 두 gate 통과. 잔류 blocker: t-stat 1.64 < 1.96 (alpha 품질).
+- **Trade-off:** aligned_tiered 63→12 축소로 CS feature 해상도 감소. 대신 breadth 분모의 의미론적 정확성 확보.
+
 ## [2026-06-11] Tiered Pipeline 첫 실행 진단 — CPCV Val IC 음수 확인
 
 - **Delta:** `--phase signal` 실행으로 Tiered pipeline 진입 확인(`USE_CS_RANK_ENGINE=True` 로그). CPCV Fold 1: N=10,907, Global μ=23.43 bps, Val IC=-0.0043 (archetype_regime). Regime lift proof: passed=False, nw_tstat=-0.359 → archetype_only fallback. 이후 fold: Val IC=-0.051.
