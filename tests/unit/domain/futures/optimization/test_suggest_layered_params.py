@@ -85,8 +85,8 @@ def test_suggest_layered_params_fixed_skips_suggest() -> None:
 def test_objective_l1_ic_does_not_call_sharpe() -> None:
     """objective_l1_ic 는 run_l2_awf(Sharpe) 를 호출하지 않는다."""
     _l1_result = SimpleNamespace(
-        mean_ic=0.04,
-        ic_tstat=2.1,
+        pooled_ic=0.04,
+        pooled_tstat=2.1,
         gate_passed=True,
         signals_per_fold=(),
         oos_stacked={},
@@ -102,20 +102,24 @@ def test_objective_l1_ic_does_not_call_sharpe() -> None:
             "src.domain.futures.strategy.tiered_workflow.run_l2_awf"
         ) as mock_l2,
         patch(
-            "src.domain.futures.strategy.tiered_workflow.run_l1_cpcv",
+            "src.domain.futures.strategy.tiered_workflow.run_l1_swf",
             return_value=_l1_result,
         ),
         patch(
-            "src.domain.futures.strategy.walk_forward.build_cpcv_folds",
-            return_value=[MagicMock()],
+            "src.domain.futures.strategy.walk_forward.build_l1_swf_folds",
+            return_value=(MagicMock(),),
         ),
         patch(
             "src.domain.futures.strategy.config.resolve_purge_and_embargo_bars",
             return_value=(5, 2),
         ),
+        patch("numpy.searchsorted", return_value=100),
     ):
+        import datetime
         ctx = MagicMock()
-        ctx.aligned.datetimes = list(range(200))
+        ctx.aligned.datetimes.__len__ = MagicMock(return_value=200)
+        ctx.window.l1_start = datetime.date(2023, 1, 1)
+        ctx.window.l2_start = datetime.date(2025, 1, 1)
         ctx.fixed_l1_params = None
 
         study = optuna.create_study(direction="maximize")

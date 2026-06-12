@@ -1,6 +1,6 @@
 """3-Layer 티어드 파이프라인 오케스트레이터.
 
-Layer1 (CPCV Signal Validation) → Layer2 (AWF Portfolio) → Layer3 (Holdout) 순서로
+Layer1 (SWF-K Signal Validation) → Layer2 (AWF Portfolio) → Layer3 (Holdout) 순서로
 게이트 기반 단계적 검증을 수행한다.
 
 Time Complexity: O(F * T * N) — F=folds, T=bars, N=symbols
@@ -41,9 +41,8 @@ from src.domain.futures.strategy.tiered_logging import (
     format_system_status,
 )
 from src.domain.futures.strategy.walk_forward import (
-    CPCVFold,
     WFFold,
-    build_cpcv_folds,
+    build_l1_swf_folds,
     build_walk_forward_folds,
 )
 
@@ -60,16 +59,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True, frozen=True)
 class Layer1Result:
-    """Layer1 CPCV 검증 결과.
+    """Layer1 SWF-K 검증 결과.
 
     Attributes:
         signals_per_fold: fold별 symbol→SymbolSignal 매핑 튜플.
         oos_stacked: fold 횡단 합본 (L2 입력용, look-ahead 없음).
-        mean_ic: fold IC 평균 (HAC 단순화: 독립 fold 가정).
-        ic_tstat: HAC IC t-통계량.
+        pooled_ic: 전 fold OOS pooled Spearman IC (Σ events 기준).
+        pooled_tstat: Newey-West HAC t-stat (autocorrelation 보정).
         breadth: 평균 valid 심볼 비율 (per fold).
         valid_coverage: valid 심볼 비율 ≥ 0.5인 fold 비율.
-        fold_pass_ratio: IC > 0인 fold 비율.
+        fold_pass_ratio: event-weighted fold pass ratio (진단용, gate 미포함).
         gate_passed: L1 통과 여부.
         n_valid: 마지막 fold 기준 valid 심볼 수.
         n_total: 전체 심볼 수 (aligned width).
@@ -78,8 +77,8 @@ class Layer1Result:
 
     signals_per_fold: tuple[dict[str, SymbolSignal], ...]
     oos_stacked: dict[str, SymbolSignal]
-    mean_ic: float
-    ic_tstat: float
+    pooled_ic: float
+    pooled_tstat: float
     breadth: float
     valid_coverage: float
     fold_pass_ratio: float
@@ -425,35 +424,6 @@ def _run_awf_simulation(
     )
 
 
-def _cpcv_to_wf_fold(cpcv: CPCVFold) -> WFFold | None:
-    """CPCVFold → WFFold 변환.
-
-    test_spans 없는 fallback fold는 None 반환.
-
-    Args:
-        cpcv: CPCVFold 인스턴스.
-
-    Returns:
-        WFFold 또는 None (변환 불가).
-    """
-    if not cpcv.fit_spans or not cpcv.test_spans:
-        return None
-    fit_s = min(s for s, _e in cpcv.fit_spans)
-    fit_e = max(e for _s, e in cpcv.fit_spans)
-    oos_s = min(s for s, _e in cpcv.test_spans)
-    oos_e = max(e for _s, e in cpcv.test_spans)
-    cal_len = max(1, (fit_e - fit_s) // 5)
-    cal_s = fit_e - cal_len
-    return WFFold(
-        fit_start=fit_s,
-        fit_end=cal_s,
-        cal_start=cal_s,
-        cal_end=fit_e,
-        oos_start=oos_s,
-        oos_end=oos_e,
-    )
-
-
 def _stack_oos_signals(
     signals_per_fold: tuple[dict[str, SymbolSignal], ...],
 ) -> dict[str, SymbolSignal]:
@@ -568,6 +538,72 @@ def compute_per_symbol_ic(
     return {sym: float(np.mean(ics)) for sym, ics in sym_ic_lists.items() if ics}
 
 
+def _newey_west_ic_tstat(
+    pred: NDArray[np.float64],
+    realized: NDArray[np.float64],
+    max_lag: int | None = None,
+) -> float:
+    """Newey-West HAC t-stat for Spearman rank IC.
+
+    Algorithm:
+        1. rank-transform both series to rp, rr in [0,1]
+        2. u_t = (rp_t - 0.5) * (rr_t - 0.5)
+        3. ic_est = 12.0 * mean(u_t)  (approximation normalized to ~[-1,1])
+        4. HAC: S_NW = (1/N) * sum_{|l|<=L} w_l * gamma_l
+           L = int(4*(N/100)^(2/9)) [Andrews 1991 automatic]
+           w_l = 1 - |l|/(L+1)  (Bartlett kernel)
+           gamma_l = autocovariance(u, lag=l)
+        5. t_stat = ic_est / sqrt(max(S_NW, 1e-12) / N)
+
+    Returns 0.0 if N < 4 or all values identical.
+
+    Args:
+        pred: Predicted values array, shape [N].
+        realized: Realized values array, shape [N].
+        max_lag: NW bandwidth. None → Andrews automatic.
+
+    Returns:
+        NW HAC t-statistic (float).
+
+    Time Complexity: O(N * L)
+    Space Complexity: O(N)
+    """
+    n_obs = len(pred)
+    if n_obs < 4:
+        return 0.0
+
+    from scipy.stats import rankdata
+
+    # rank transform → [0, 1]
+    rp = rankdata(pred).astype(np.float64) / n_obs
+    rr = rankdata(realized).astype(np.float64) / n_obs
+
+    # cross-product series
+    u = (rp - 0.5) * (rr - 0.5)
+    ic_est = 12.0 * float(np.mean(u))
+
+    # HAC bandwidth (Andrews 1991)
+    nw_lag = max_lag if max_lag is not None else int(4.0 * (n_obs / 100.0) ** (2.0 / 9.0))
+    nw_lag = max(1, min(nw_lag, n_obs - 1))
+
+    # autocovariance gamma_l
+    u_dm = u - np.mean(u)
+    gamma_0 = float(np.dot(u_dm, u_dm)) / n_obs
+
+    s_nw = gamma_0
+    for lag in range(1, nw_lag + 1):
+        gamma_l = float(np.dot(u_dm[lag:], u_dm[:-lag])) / n_obs
+        w_l = 1.0 - lag / (nw_lag + 1.0)  # Bartlett kernel
+        s_nw += 2.0 * w_l * gamma_l
+
+    s_nw = max(s_nw, 1e-12)
+    # SE(IC_hat) = 12 * sqrt(S_NW / N) since IC_hat = 12 * mean(u).
+    # 분자(ic_est)와 동일 스케일 적용 — 누락 시 |t| 12배 과대평가.
+    se_ic = 12.0 * np.sqrt(s_nw / n_obs)
+    t_stat = ic_est / (se_ic + 1e-12)
+    return float(t_stat)
+
+
 def _compute_fold_ts_ic(*, fold_out: Any) -> float | None:
     """fold OOS pooled time-series Spearman rank IC (expected_net_bps vs y_return_bps).
 
@@ -601,30 +637,30 @@ def _compute_fold_ts_ic(*, fold_out: Any) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# Layer1: CPCV Signal Validation
+# Layer1: SWF-K Signal Validation
 # ---------------------------------------------------------------------------
 
 
-def run_l1_cpcv(
+def run_l1_swf(
     *,
     labeled_events: pd.DataFrame,
     aligned: AlignedMarketData,
     cfg: CandidateStrategyConfig,
-    folds: tuple[CPCVFold, ...],
+    folds: tuple[WFFold, ...],
     l1_params: dict[str, Any],
     min_obs: int = 20,
     t_stat_floor: float = 1.96,
     tf: str = "4h",
 ) -> Layer1Result:
-    """Layer1 CPCV 신호 검증.
+    """Layer1 SWF-K 신호 검증.
 
-    각 CPCV fold에서 모델 학습/예측 후 SymbolSignal 집계, HAC IC 게이트 적용.
+    각 WFFold에서 모델 학습/예측 후 SymbolSignal 집계, Pooled IC + NW HAC 게이트 적용.
 
     Args:
         labeled_events: 레이블링된 이벤트 DataFrame.
         aligned: AlignedMarketData (close_2d, symbols, datetimes 포함).
         cfg: CandidateStrategyConfig.
-        folds: CPCVFold 튜플.
+        folds: WFFold 튜플 (build_l1_swf_folds 출력).
         l1_params: Layer1 하이퍼파라미터 dict.
         min_obs: QC 최소 관측 수.
         t_stat_floor: QC 최소 |t-stat|.
@@ -652,7 +688,7 @@ def run_l1_cpcv(
 
     t_start = time.perf_counter()
     logger.debug(
-        "[CPCV-START] Starting CPCV L1 signal validation parallelization with %d folds (max_workers=%d)",
+        "[SWF-START] Starting SWF-K L1 signal validation with %d folds (max_workers=%d)",
         len(folds),
         max_workers,
     )
@@ -668,32 +704,28 @@ def run_l1_cpcv(
     cw._GLOBAL_PURGE_BARS = purge_bars
     mp_ctx = multiprocessing.get_context("fork")
 
-    futures = []
+    futures: list[tuple[int, WFFold, Any]] = []
     try:
         if max_workers <= 1 or len(folds) <= 1:
-            for fold_idx, cpcv_fold in enumerate(folds):
-                wf_fold = _cpcv_to_wf_fold(cpcv_fold)
-                if wf_fold is None:
-                    continue
+            for fold_idx, wf_fold in enumerate(folds):
                 try:
                     fold_out = _fit_and_predict_single_fold(
                         fold_idx, wf_fold, labeled_events, aligned, cfg, purge_bars
                     )
                     futures.append((fold_idx, wf_fold, fold_out))
                 except Exception:
-                    logger.warning("run_l1_cpcv: fold %d 학습 실패, 스킵", fold_idx, exc_info=True)
+                    logger.warning("run_l1_swf: fold %d 학습 실패, 스킵", fold_idx, exc_info=True)
         else:
             with ProcessPoolExecutor(max_workers=max_workers, mp_context=mp_ctx) as executor:
-                submits = []
-                for fold_idx, cpcv_fold in enumerate(folds):
-                    wf_fold = _cpcv_to_wf_fold(cpcv_fold)
-                    if wf_fold is None:
-                        continue
+                submits: list[tuple[int, WFFold, Any]] = []
+                for fold_idx, wf_fold in enumerate(folds):
                     submits.append(
                         (
                             fold_idx,
                             wf_fold,
-                            executor.submit(cw._fit_and_predict_single_fold_from_globals, fold_idx, wf_fold)
+                            executor.submit(
+                                cw._fit_and_predict_single_fold_from_globals, fold_idx, wf_fold
+                            ),
                         )
                     )
                 for fold_idx, wf_fold, fut in submits:
@@ -701,7 +733,7 @@ def run_l1_cpcv(
                         fold_out = fut.result()
                         futures.append((fold_idx, wf_fold, fold_out))
                     except Exception:
-                        logger.warning("run_l1_cpcv: fold %d 학습 실패, 스킵", fold_idx, exc_info=True)
+                        logger.warning("run_l1_swf: fold %d 학습 실패, 스킵", fold_idx, exc_info=True)
     finally:
         cw._GLOBAL_LABELED_EVENTS = None
         cw._GLOBAL_ALIGNED = None
@@ -766,7 +798,7 @@ def run_l1_cpcv(
             avg_profile[k] /= total_folds
 
         logger.debug(
-            "[CPCV-PROFILE] Average sub-fold execution breakdown: "
+            "[SWF-PROFILE] Average sub-fold execution breakdown: "
             "schema=%.3fs, ds_fit=%.3fs, ds_es=%.3fs, ds_cal_fit=%.3fs, ds_cal_eval=%.3fs, "
             "ds_oos=%.3fs, edge_fit=%.3fs, inference=%.3fs, selection=%.3fs",
             avg_profile["schema"],
@@ -781,7 +813,7 @@ def run_l1_cpcv(
         )
 
     logger.debug(
-        "[CPCV-END] CPCV L1 signal validation parallel execution completed in %.2fs",
+        "[SWF-END] SWF-K L1 signal validation completed in %.2fs",
         time.perf_counter() - t_start,
     )
 
@@ -789,7 +821,7 @@ def run_l1_cpcv(
     sigs_tuple = tuple(signals_per_fold)
     oos_stacked = _stack_oos_signals(sigs_tuple)
 
-    # --- IC 통계 (fold_diags 기반 — 인덱스 분리 없음) ---
+    # --- IC 통계 (fold_diags 기반) ---
     fold_perf_details: list[dict[str, Any]] = [
         {
             "fold": d.fold,
@@ -802,25 +834,47 @@ def run_l1_cpcv(
         for d in fold_diags
     ]
 
-    valid_ics: list[float] = [d.ic for d in fold_diags if d.ic is not None]
-    if valid_ics:
-        mean_ic = float(np.mean(valid_ics))
-        std_ic = float(np.std(valid_ics, ddof=1)) if len(valid_ics) > 1 else 0.0
-        n_f = len(valid_ics)
-        # CPCV 중첩 보정: 인접 fold IC 자기상관 rho_hat으로 유효 표본 수 축소
-        if n_f >= 3:
-            ic_arr = np.asarray(valid_ics, dtype=np.float64)
-            demeaned = ic_arr - mean_ic
-            rho_hat = float(np.dot(demeaned[:-1], demeaned[1:]) / (np.dot(demeaned, demeaned) + 1e-20))
-            rho_hat = float(np.clip(rho_hat, 0.0, 0.99))
-            n_eff = max(1.0, n_f / (1.0 + 2.0 * rho_hat))
-        else:
-            n_eff = float(n_f)
-        ic_tstat = mean_ic * np.sqrt(n_eff) / (std_ic + 1e-9)
-        fold_pass_ratio = float(sum(1 for ic in valid_ics if ic > 0) / n_f)
+    # ── Pooled IC (primary gate metric) ──────────────────────────────────
+    _pred_parts: list[NDArray[np.float64]] = []
+    _real_parts: list[NDArray[np.float64]] = []
+    for _, _wf_fold, fold_out in futures:
+        oos = getattr(fold_out, "oos_set", None)
+        if oos is None:
+            continue
+        _y_ret = getattr(oos, "y_return_bps", None)
+        _y_edg = getattr(oos, "y_edge_bps", None)
+        y_lab = _y_ret if _y_ret is not None else _y_edg
+        if y_lab is None:
+            continue
+        p_arr = np.asarray(fold_out.model_output.expected_net_bps, dtype=np.float64)
+        r_arr = np.asarray(y_lab, dtype=np.float64)
+        if len(p_arr) != len(r_arr) or len(p_arr) < 4:
+            continue
+        _mask = np.isfinite(p_arr) & np.isfinite(r_arr)
+        if _mask.sum() < 4:
+            continue
+        _pred_parts.append(p_arr[_mask])
+        _real_parts.append(r_arr[_mask])
+
+    if _pred_parts:
+        p_all = np.concatenate(_pred_parts)
+        r_all = np.concatenate(_real_parts)
+        pooled_ic_val_raw, _ = spearmanr(p_all, r_all)
+        pooled_ic_val = float(pooled_ic_val_raw) if not np.isnan(pooled_ic_val_raw) else 0.0
+        pooled_tstat_val = _newey_west_ic_tstat(p_all, r_all)
     else:
-        mean_ic = 0.0
-        ic_tstat = 0.0
+        pooled_ic_val = 0.0
+        pooled_tstat_val = 0.0
+
+    # ── Fold-wise event-weighted (diagnostic only) ─────────────────────
+    _valid_pairs = [(d.ic, d.n_events) for d in fold_diags if d.ic is not None]
+    if _valid_pairs:
+        _w_total = sum(n for _, n in _valid_pairs)
+        fold_pass_ratio = (
+            sum(n for ic, n in _valid_pairs if ic > 0) / _w_total
+            if _w_total > 0 else 0.0
+        )
+    else:
         fold_pass_ratio = 0.0
 
     # --- breadth / valid_coverage (FoldDiagnostic 기반) ---
@@ -849,18 +903,17 @@ def run_l1_cpcv(
         })
 
     gate_passed: bool = bool(
-        (mean_ic >= 0.030)
-        and (ic_tstat >= 1.96)
+        (pooled_ic_val >= 0.030)
+        and (pooled_tstat_val >= 1.96)
         and (breadth >= 0.30)
         and (valid_coverage >= 0.80)
-        and (fold_pass_ratio >= 0.60)
     )
 
     result = Layer1Result(
         signals_per_fold=sigs_tuple,
         oos_stacked=oos_stacked,
-        mean_ic=mean_ic,
-        ic_tstat=ic_tstat,
+        pooled_ic=pooled_ic_val,
+        pooled_tstat=pooled_tstat_val,
         breadth=breadth,
         valid_coverage=valid_coverage,
         fold_pass_ratio=fold_pass_ratio,
@@ -1078,19 +1131,25 @@ def run_tiered_pipeline(
     purge_bars, embargo_bars = resolve_purge_and_embargo_bars(cfg)
     n_bars = len(aligned.datetimes)
 
-    # Layer1: CPCV
-    cpcv_folds = build_cpcv_folds(
+    # Layer1: SWF-K
+    _is_ts = pd.Timestamp(window.l1_start, tz="UTC")
+    _oos_ts = pd.Timestamp(window.l2_start, tz="UTC")
+    warmup_bars = int(np.searchsorted(aligned.datetimes, np.datetime64(_is_ts.replace(tzinfo=None), "ns")))
+    l1_end_bars = int(np.searchsorted(aligned.datetimes, np.datetime64(_oos_ts.replace(tzinfo=None), "ns")))
+
+    l1_folds = build_l1_swf_folds(
         n_bars=n_bars,
-        n_groups=6,
-        n_test_groups=2,
-        embargo_bars=embargo_bars,
+        n_folds=5,
+        warmup_bars=warmup_bars,
+        l1_end_bars=l1_end_bars,
         purge_bars=purge_bars,
+        embargo_bars=embargo_bars,
     )
-    l1 = run_l1_cpcv(
+    l1 = run_l1_swf(
         labeled_events=labeled_events,
         aligned=aligned,
         cfg=cfg,
-        folds=cpcv_folds,
+        folds=l1_folds,
         l1_params=l1_params,
         tf=tf,
     )
