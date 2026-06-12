@@ -677,11 +677,29 @@ def run_l1_cpcv(
     oos_stacked = _stack_oos_signals(sigs_tuple)
 
     # --- IC 통계 ---
+    # --- IC 통계 ---
+    fold_perf_details: list[dict[str, Any]] = []
     if fold_ics:
         mean_ic = float(np.mean(fold_ics))
         std_ic = float(np.std(fold_ics, ddof=0))
         ic_tstat = mean_ic * np.sqrt(len(fold_ics)) / (std_ic + 1e-9)
         fold_pass_ratio = float(sum(1 for ic in fold_ics if ic > 0) / len(fold_ics))
+
+        for i, ic in enumerate(fold_ics):
+            f_sigs = signals_per_fold[i]
+            f_breadth = sum(1 for s in f_sigs.values() if s.valid) / max(1, n_total)
+            f_n_valid = sum(1 for s in f_sigs.values() if s.valid)
+            # Find corresponding fold_out for n_events
+            _, _, f_out = futures[i]
+            f_n_events = len(f_out.model_output.expected_net_bps)
+            fold_perf_details.append({
+                "fold": i + 1,
+                "ic": ic,
+                "breadth": f_breadth,
+                "n_valid": f_n_valid,
+                "n_events": f_n_events,
+                "pass": ic > 0,
+            })
     else:
         mean_ic = 0.0
         ic_tstat = 0.0
@@ -710,6 +728,18 @@ def run_l1_cpcv(
     # n_valid: oos_stacked 기준
     n_valid = sum(1 for s in oos_stacked.values() if s.valid)
 
+    # Final Per-symbol aggregate collection
+    sym_details: list[dict[str, Any]] = []
+    for sym, sig in sorted(oos_stacked.items()):
+        sym_details.append({
+            "symbol": sym,
+            "raw_mu": sig.raw_mu,
+            "vol": sig.volatility,
+            "t_stat": sig.t_stat,
+            "ic": 0.0,  # Rank IC per symbol requires more complex tracking
+            "valid": sig.valid,
+        })
+
     gate_passed: bool = bool(
         (mean_ic >= 0.030)
         and (ic_tstat >= 1.96)
@@ -730,7 +760,7 @@ def run_l1_cpcv(
         n_valid=n_valid,
         n_total=n_total,
     )
-    logger.info(format_layer1_table(result))
+    logger.info(format_layer1_table(result, fold_details=fold_perf_details, per_symbol_top10=sym_details))
     return result
 
 
