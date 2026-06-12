@@ -117,7 +117,7 @@ class TestFormatLayer1Table:
         result = format_layer1_table(r1, per_symbol_top10=symbols)
 
         # Assert
-        assert "PER-SYMBOL DIAGNOSTICS" in result
+        assert "PER-SYMBOL AGGREGATE" in result
         assert "BTCUSDT" in result
 
     def test_valid_coverage_formatted_as_percentage(self) -> None:
