@@ -221,6 +221,13 @@ graph TD
 - Phase D allocation 스킵 (`return None`); 예외 시 Phase D fallback 보존.
 - Phase flag 매핑: `--phase signal` → bridge(신호진단)+L1, `--phase alo` → +L2+L3, `full` → +최적화.
 
+## 6.5.1 Tiered Aligned Scope (Invariant)
+- `aligned_tiered` scope = **`Stage6 OOS selected ∩ data_stage.data_maps`** (bridge와 동일, `effective_trade_syms`).
+- `data_stage.valid_symbols`(inference union)을 분모로 사용하지 않음 — 신호 생성 범위와 breadth 분모 일치 보장.
+- Fallback: `effective_trade_syms`가 공집합이면 `list(data_stage.valid_symbols)` 사용 (하위 호환).
+- **Breadth 의미**: "거래하려는 심볼 중 fold 유효 신호 비율" = `n_valid / len(aligned_tiered.symbols)`.
+- `Layer1Result.n_trade_scope` = `n_total` (scope 교정 후 동일값; 관측성 필드).
+
 ## 6.6 Edge Cases
 - **REGIME_FLOOR clamp**: `l1_start > l2_start` → warning logged, L1 window is zero-length.
 - **CPCV degenerate** (n_bars < min for groups): single fallback fold covering full range.
