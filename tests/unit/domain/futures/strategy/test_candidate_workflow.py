@@ -88,6 +88,9 @@ def test_run_candidate_walk_forward_prior_only_fallback(monkeypatch: pytest.Monk
 
     assert len(outputs) == 1
     assert isinstance(outputs[0], CandidateFoldOutput)
+    assert outputs[0].fit_status == "insufficient_fit"
+    assert outputs[0].n_fit == 10
+    assert outputs[0].skip_reason == "insufficient_observations"
     assert outputs[0].model_output.edge_source == EdgeSource.DISABLED
     assert not outputs[0].gate_report.enabled
     assert not outputs[0].edge_report.selected

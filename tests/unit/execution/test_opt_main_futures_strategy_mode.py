@@ -87,6 +87,8 @@ def test_strategy_mode_pipeline_orchestration_order(
     def fake_universe(
         rc: object,
         win: object,
+        *,
+        layered_window: object | None = None,
     ) -> tuple[
         list[str],
         dict[object, frozenset[str]],
@@ -97,6 +99,7 @@ def test_strategy_mode_pipeline_orchestration_order(
     ]:
         _ = rc
         _ = win
+        _ = layered_window
         called.append("universe")
         return ["BTCUSDT"], {}, (), (), snapshot, {}
 
@@ -108,6 +111,8 @@ def test_strategy_mode_pipeline_orchestration_order(
         inference_panel: tuple[str, ...] = (),
         live_inference_panel: tuple[str, ...] = (),
         inference_timeline: dict[object, frozenset[str]] | None = None,
+        *,
+        layered_window: object | None = None,
     ) -> opt_main_futures.DataStageResult:
         _ = rc
         _ = win
@@ -116,6 +121,7 @@ def test_strategy_mode_pipeline_orchestration_order(
         _ = inference_panel
         _ = live_inference_panel
         _ = inference_timeline
+        _ = layered_window
         called.append("data")
         return data_stage
 
@@ -127,6 +133,8 @@ def test_strategy_mode_pipeline_orchestration_order(
         live_inference_panel: tuple[str, ...] = (),
         trading_symbols: tuple[str, ...] = (),
         universe_snapshot: object | None = None,
+        *,
+        layered_window: object | None = None,
     ) -> None:
         _ = rc
         _ = win
@@ -135,6 +143,7 @@ def test_strategy_mode_pipeline_orchestration_order(
         _ = live_inference_panel
         _ = trading_symbols
         _ = universe_snapshot
+        _ = layered_window
         called.append("strategy")
 
     def fake_optimization(
@@ -211,7 +220,7 @@ def test_alpha_mode_skips_optimization_stage(
     monkeypatch.setattr(
         opt_main_futures,
         "_run_universe_stage",
-        lambda *_: (
+        lambda *_args, **_kwargs: (
             ["BTCUSDT"],
             {},
             (),
@@ -239,7 +248,7 @@ def test_alpha_mode_skips_optimization_stage(
             {},
         ),
     )
-    monkeypatch.setattr(opt_main_futures, "_run_data_stage", lambda *_: data_stage)
+    monkeypatch.setattr(opt_main_futures, "_run_data_stage", lambda *_args, **_kwargs: data_stage)
     monkeypatch.setattr(opt_main_futures, "_run_regime_evaluation_stage", lambda *_: None)
     monkeypatch.setattr(opt_main_futures, "_run_strategy_stage", lambda *_args, **_kwargs: None)
 
@@ -673,7 +682,9 @@ def _patch_tiered_deps(
     monkeypatch.setattr(
         opt_main_futures,
         "run_active_strategy_output_bridge",
-        lambda *_args, **_kwargs: CandidatePipelineOutput(),
+        lambda *_args, **_kwargs: CandidatePipelineOutput(
+            labeled_unfiltered=pd.DataFrame({"symbol": ["BTCUSDT"]})
+        ),
     )
     monkeypatch.setattr(
         opt_main_futures,
@@ -737,7 +748,7 @@ def _patch_tiered_deps(
 def test_tiered_aligned_scope_s1_happy_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """S1: Stage6 OOS(3) ∩ data_maps(10) → align_data_maps receives 3 not 10."""
+    """S1: tiered aligned scope는 current snapshot이 아니라 historical valid_symbols 전체를 사용."""
     # Arrange
     stage6_syms = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
     all_syms = stage6_syms + [f"SYM{i}USDT" for i in range(7)]  # 10 total in data_maps
@@ -763,17 +774,17 @@ def test_tiered_aligned_scope_s1_happy_path(
         universe_snapshot=snapshot,
     )
 
-    # Assert: align_data_maps called with 3 stage6 symbols, not 10
+    # Assert: align_data_maps called with full historical union
     assert len(captured) >= 1, "align_data_maps must be called in tiered block"
     tiered_call = captured[-1]
-    assert sorted(tiered_call) == sorted(stage6_syms)
-    assert len(tiered_call) == 3
+    assert sorted(tiered_call) == sorted(all_syms)
+    assert len(tiered_call) == 10
 
 
 def test_tiered_aligned_scope_s2_fallback_when_no_overlap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """S2: snapshot symbols not in data_maps → fallback to valid_symbols=10."""
+    """S2: snapshot overlap이 없어도 aligned scope는 valid_symbols를 유지한다."""
     # Arrange
     stage6_syms = ["XYZUSDT", "ABCUSDT"]
     valid_syms = [f"SYM{i}USDT" for i in range(10)]
@@ -808,13 +819,13 @@ def test_tiered_aligned_scope_s2_fallback_when_no_overlap(
 def test_tiered_aligned_scope_s3_regression_breadth_denominator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """S3: scope=12, valid=12 → breadth=1.0 not 0.168. tstat=1.64 still blocks."""
+    """S3: current snapshot보다 historical union이 우선이므로 valid_symbols 전체가 전달된다."""
     from src.domain.futures.strategy.tiered_workflow import Layer1Result
 
     stage6_syms = [f"SYM{i}USDT" for i in range(12)]
     frame = pd.DataFrame({"datetime": pd.date_range("2026-01-01", periods=4, freq="4h")})
     data_maps = {sym: {"4h": frame.copy()} for sym in stage6_syms}
-    # valid_symbols had 63; after fix, tiered uses 12
+    # valid_symbols had 63; tiered now uses the historical union instead of current snapshot(12)
     valid_syms_63 = stage6_syms + [f"EXTRA{i}USDT" for i in range(51)]
     data_stage = opt_main_futures.DataStageResult(
         data_maps=data_maps,
@@ -832,9 +843,10 @@ def test_tiered_aligned_scope_s3_regression_breadth_denominator(
         run_config, _make_window(), data_stage, universe_snapshot=snapshot
     )
 
-    # align_data_maps receives 12 (stage6) not 63 (valid_symbols)
+    # align_data_maps receives the full historical union
     assert len(captured) >= 1
-    assert len(captured[-1]) == 12
+    assert len(captured[-1]) == 63
+    assert sorted(captured[-1]) == sorted(valid_syms_63)
 
     # Verify breadth would be 12/12 = 1.0 with correct scope
     breadth_after_fix = 12 / 12
@@ -860,7 +872,7 @@ def test_tiered_aligned_scope_s3_regression_breadth_denominator(
 def test_tiered_aligned_scope_s4_partial_overlap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """S4: stage6=['A','B','C'], data_maps=['A','B','D','E'] → intersection=['A','B']."""
+    """S4: snapshot 부분 겹침이 있어도 tiered aligned scope는 valid_symbols 그대로 유지한다."""
     stage6_syms = ["AAUSDT", "BBUSDT", "CCUSDT"]
     data_map_syms = ["AAUSDT", "BBUSDT", "DDUSDT", "EEUSDT"]
     frame = pd.DataFrame({"datetime": pd.date_range("2026-01-01", periods=4, freq="4h")})
@@ -881,6 +893,187 @@ def test_tiered_aligned_scope_s4_partial_overlap(
         run_config, _make_window(), data_stage, universe_snapshot=snapshot
     )
 
-    # Assert: only intersection of stage6 ∩ data_maps
+    # Assert: snapshot overlap과 무관하게 valid_symbols 유지
     assert len(captured) >= 1
-    assert sorted(captured[-1]) == ["AAUSDT", "BBUSDT"]
+    assert sorted(captured[-1]) == sorted(data_map_syms)
+
+
+def test_tiered_window_uses_run_config_date_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from src.domain.futures.strategy.tiered_workflow import Layer1Result
+
+    captured_reference_dates: list[object] = []
+    frame = pd.DataFrame({"datetime": pd.date_range("2026-01-01", periods=4, freq="4h")})
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps={"BTCUSDT": {"4h": frame.copy()}},
+        oos_data_maps={},
+        valid_symbols=["BTCUSDT"],
+    )
+
+    monkeypatch.setattr(
+        opt_main_futures,
+        "OPT_FUTURES_CONFIG",
+        {"USE_CS_RANK_ENGINE": True, "FUTURES_STRATEGY_NAME": "candidate_ml"},
+    )
+    monkeypatch.setattr(
+        opt_main_futures,
+        "run_active_strategy_output_bridge",
+        lambda *_args, **_kwargs: CandidatePipelineOutput(
+            labeled_unfiltered=pd.DataFrame({"symbol": ["BTCUSDT"]})
+        ),
+    )
+    monkeypatch.setattr(opt_main_futures, "merge_candidate_output_into_is_and_oos", lambda *_a, **_k: None)
+    monkeypatch.setattr(opt_main_futures, "_run_candidate_evaluation_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        opt_main_futures,
+        "build_candidate_strategy_config",
+        lambda *_a, **_k: MagicMock(candidate=MagicMock()),
+    )
+
+    import src.domain.futures.optimization.opt_config as _opt_cfg
+    import src.domain.futures.portfolio.portfolio_constructor as _pc
+    import src.domain.futures.strategy.common.alignment as _align
+    import src.domain.futures.strategy.tiered_workflow as _tw
+
+    def _capture_layered_window(**kwargs: object) -> MagicMock:
+        captured_reference_dates.append(kwargs["reference_date"])
+        return MagicMock()
+
+    monkeypatch.setattr(
+        _opt_cfg,
+        "get_layered_window",
+        _capture_layered_window,
+    )
+    monkeypatch.setattr(_pc, "PortfolioCaps", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        _align,
+        "align_data_maps",
+        lambda data_maps, symbols, tf: MagicMock(symbols=symbols, data_maps=data_maps, tf=tf),
+    )
+    monkeypatch.setattr(
+        _tw,
+        "run_tiered_pipeline",
+        lambda **_kwargs: (
+            Layer1Result(
+                signals_per_fold=(),
+                oos_stacked={},
+                pooled_ic=0.12,
+                pooled_tstat=2.1,
+                breadth=1.0,
+                valid_coverage=1.0,
+                fold_pass_ratio=1.0,
+                gate_passed=True,
+                n_valid=1,
+                n_total=1,
+                n_trade_scope=1,
+            ),
+            None,
+            None,
+        ),
+    )
+
+    run_config = build_run_config_from_args(
+        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full", "date": "2026-05-01"}
+    )
+    opt_main_futures._run_strategy_stage(
+        run_config,
+        _make_window(),
+        data_stage,
+        universe_snapshot=_make_snapshot(["BTCUSDT"]),
+    )
+
+    assert captured_reference_dates == [datetime.strptime("2026-05-01", "%Y-%m-%d").date()]
+
+
+def test_tiered_pipeline_uses_unfiltered_labeled_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from src.domain.futures.strategy.tiered_workflow import Layer1Result
+
+    captured_labeled_events: list[pd.DataFrame] = []
+    frame = pd.DataFrame({"datetime": pd.date_range("2026-01-01", periods=4, freq="4h")})
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps={"BTCUSDT": {"4h": frame.copy()}},
+        oos_data_maps={},
+        valid_symbols=["BTCUSDT"],
+    )
+    filtered = pd.DataFrame({"symbol": ["BTCUSDT"], "variant": ["promoted"]})
+    unfiltered = pd.DataFrame(
+        {"symbol": ["BTCUSDT", "ETHUSDT"], "variant": ["promoted", "candidate"]}
+    )
+
+    monkeypatch.setattr(
+        opt_main_futures,
+        "OPT_FUTURES_CONFIG",
+        {"USE_CS_RANK_ENGINE": True, "FUTURES_STRATEGY_NAME": "candidate_ml"},
+    )
+    monkeypatch.setattr(
+        opt_main_futures,
+        "run_active_strategy_output_bridge",
+        lambda *_args, **_kwargs: CandidatePipelineOutput(
+            labeled=filtered,
+            labeled_unfiltered=unfiltered,
+        ),
+    )
+    monkeypatch.setattr(opt_main_futures, "merge_candidate_output_into_is_and_oos", lambda *_a, **_k: None)
+    monkeypatch.setattr(opt_main_futures, "_run_candidate_evaluation_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        opt_main_futures,
+        "build_candidate_strategy_config",
+        lambda *_a, **_k: MagicMock(candidate=MagicMock()),
+    )
+
+    import src.domain.futures.optimization.opt_config as _opt_cfg
+    import src.domain.futures.portfolio.portfolio_constructor as _pc
+    import src.domain.futures.strategy.common.alignment as _align
+    import src.domain.futures.strategy.tiered_workflow as _tw
+
+    monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kwargs: MagicMock())
+    monkeypatch.setattr(_pc, "PortfolioCaps", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        _align,
+        "align_data_maps",
+        lambda data_maps, symbols, tf: MagicMock(symbols=symbols, data_maps=data_maps, tf=tf),
+    )
+
+    def _capture_tiered(**kwargs: object) -> tuple[Layer1Result, None, None]:
+        labeled_events = kwargs["labeled_events"]
+        assert isinstance(labeled_events, pd.DataFrame)
+        captured_labeled_events.append(labeled_events)
+        return (
+            Layer1Result(
+                signals_per_fold=(),
+                oos_stacked={},
+                pooled_ic=0.12,
+                pooled_tstat=2.1,
+                breadth=1.0,
+                valid_coverage=1.0,
+                fold_pass_ratio=1.0,
+                gate_passed=True,
+                n_valid=1,
+                n_total=1,
+                n_trade_scope=1,
+            ),
+            None,
+            None,
+        )
+
+    monkeypatch.setattr(_tw, "run_tiered_pipeline", _capture_tiered)
+
+    run_config = build_run_config_from_args(
+        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full", "date": "2026-05-01"}
+    )
+    opt_main_futures._run_strategy_stage(
+        run_config,
+        _make_window(),
+        data_stage,
+        universe_snapshot=_make_snapshot(["BTCUSDT"]),
+    )
+
+    assert len(captured_labeled_events) == 1
+    assert captured_labeled_events[0].equals(unfiltered)

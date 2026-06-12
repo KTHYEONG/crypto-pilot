@@ -382,36 +382,106 @@ def _list_usdt_futures_symbols() -> list[str]:
 
 
 def _load_symbol_sync_profiles() -> dict[str, SymbolSyncProfile]:
-    """Load symbol lifecycle profiles from exchangeInfo."""
-    profiles: dict[str, SymbolSyncProfile] = {}
-    client = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET)
-    info = client.exchange.fapiPublicGetExchangeInfo()
-    for sym_info in info.get("symbols", []):
-        symbol = str(sym_info.get("symbol", "")).strip()
-        if not symbol:
-            continue
-        onboard_date: date | None = None
-        delivery_date: date | None = None
-        onboard_raw = sym_info.get("onboardDate")
-        delivery_raw = sym_info.get("deliveryDate")
-        if onboard_raw:
-            try:
-                onboard_date = date.fromtimestamp(int(onboard_raw) / 1000)
-            except Exception:
-                logger.debug("Invalid onboardDate for symbol=%s", symbol)
-        if delivery_raw:
-            try:
-                parsed_delivery = date.fromtimestamp(int(delivery_raw) / 1000)
-                if parsed_delivery.year < 2100:
-                    delivery_date = parsed_delivery
-            except Exception:
-                logger.debug("Invalid deliveryDate for symbol=%s", symbol)
-        profiles[symbol] = SymbolSyncProfile(
-            symbol=symbol,
-            onboard_date=onboard_date,
-            delivery_date=delivery_date,
-            status=str(sym_info.get("status", "")),
-        )
+    """Load symbol lifecycle profiles from local file cache or Binance API."""
+    import json
+    import time
+    from pathlib import Path
+    
+    cache_path = Path(FUTURES_DATA_DIR) / "symbol_sync_profiles.json"
+    cache_valid_seconds = 24 * 3600
+    
+    # 1. Try to load from valid cache
+    if cache_path.exists():
+        try:
+            mtime = cache_path.stat().st_mtime
+            if time.time() - mtime < cache_valid_seconds:
+                with open(cache_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                profiles: dict[str, SymbolSyncProfile] = {}
+                for symbol, item in data.items():
+                    onboard = item.get("onboard_date")
+                    delivery = item.get("delivery_date")
+                    profiles[symbol] = SymbolSyncProfile(
+                        symbol=symbol,
+                        onboard_date=date.fromisoformat(onboard) if onboard else None,
+                        delivery_date=date.fromisoformat(delivery) if delivery else None,
+                        status=item.get("status", ""),
+                    )
+                logger.info("Loaded symbol sync profiles from cache: %s", cache_path)
+                return profiles
+        except Exception as e:
+            logger.warning("Failed to load symbol sync profiles cache: %s", e)
+            
+    # 2. Cache invalid or missing -> Fetch from Binance API
+    profiles = {}
+    api_failed = False
+    try:
+        client = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET)
+        info = client.exchange.fapiPublicGetExchangeInfo()
+        for sym_info in info.get("symbols", []):
+            symbol = str(sym_info.get("symbol", "")).strip()
+            if not symbol:
+                continue
+            onboard_date: date | None = None
+            delivery_date: date | None = None
+            onboard_raw = sym_info.get("onboardDate")
+            delivery_raw = sym_info.get("deliveryDate")
+            if onboard_raw:
+                try:
+                    onboard_date = date.fromtimestamp(int(onboard_raw) / 1000)
+                except Exception:
+                    logger.debug("Invalid onboardDate for symbol=%s", symbol)
+            if delivery_raw:
+                try:
+                    parsed_delivery = date.fromtimestamp(int(delivery_raw) / 1000)
+                    if parsed_delivery.year < 2100:
+                        delivery_date = parsed_delivery
+                except Exception:
+                    logger.debug("Invalid deliveryDate for symbol=%s", symbol)
+            profiles[symbol] = SymbolSyncProfile(
+                symbol=symbol,
+                onboard_date=onboard_date,
+                delivery_date=delivery_date,
+                status=str(sym_info.get("status", "")),
+            )
+            
+        # Write back to cache
+        cache_data = {}
+        for symbol, p in profiles.items():
+            cache_data[symbol] = {
+                "onboard_date": p.onboard_date.isoformat() if p.onboard_date else None,
+                "delivery_date": p.delivery_date.isoformat() if p.delivery_date else None,
+                "status": p.status,
+            }
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(cache_data, f, indent=2)
+        logger.info("Updated symbol sync profiles cache: %s", cache_path)
+        
+    except Exception as e:
+        logger.warning("Failed to fetch symbol profiles from API: %s", e)
+        api_failed = True
+        
+    # 3. API Fetch failed -> Fallback to expired cache if available
+    if api_failed and cache_path.exists():
+        try:
+            logger.info("Fallback: Loading expired symbol sync profiles cache.")
+            with open(cache_path, encoding="utf-8") as f:
+                data = json.load(f)
+            profiles = {}
+            for symbol, item in data.items():
+                onboard = item.get("onboard_date")
+                delivery = item.get("delivery_date")
+                profiles[symbol] = SymbolSyncProfile(
+                    symbol=symbol,
+                    onboard_date=date.fromisoformat(onboard) if onboard else None,
+                    delivery_date=date.fromisoformat(delivery) if delivery else None,
+                    status=item.get("status", ""),
+                )
+            return profiles
+        except Exception as e:
+            logger.error("Critical: Fallback cache load failed: %s", e)
+            
     return profiles
 
 
@@ -768,19 +838,7 @@ def _requested_sync_caches_missing(
         except Exception:
             metadata_cache = {}
 
-    # Fast O(1) Skip: If representative '1h' metadata cache exists and is fully
-    # up-to-date, we can safely treat this symbol as complete.
-    safe_sym = symbol.replace("/", "_")
-    meta_key_1h = f"{safe_sym}::1h"
-    meta_1h = metadata_cache.get(meta_key_1h, {})
-    la_1h = meta_1h.get("latest_available")
-    if la_1h:
-        try:
-            la_dt_1h = pd.to_datetime(la_1h, utc=True)
-            if la_dt_1h >= req_end_ts - pd.Timedelta(hours=8):
-                return False
-        except Exception as exc:
-            logger.debug("Failed to parse la_1h in fast skip: %s", exc)
+
 
     for tf in required_timeframes:
         path = _sync_cache_path(symbol, tf)
