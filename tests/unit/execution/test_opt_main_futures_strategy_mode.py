@@ -717,8 +717,8 @@ def _patch_tiered_deps(
     dummy_l1 = Layer1Result(
         signals_per_fold=(),
         oos_stacked={},
-        mean_ic=0.12,
-        ic_tstat=1.64,
+        pooled_ic=0.12,
+        pooled_tstat=1.64,
         breadth=1.0,
         valid_coverage=0.0,
         fold_pass_ratio=0.71,
@@ -843,8 +843,8 @@ def test_tiered_aligned_scope_s3_regression_breadth_denominator(
     dummy_l1 = Layer1Result(
         signals_per_fold=(),
         oos_stacked={},
-        mean_ic=0.12,
-        ic_tstat=1.64,
+        pooled_ic=0.12,
+        pooled_tstat=1.64,
         breadth=breadth_after_fix,
         valid_coverage=0.0,
         fold_pass_ratio=0.71,

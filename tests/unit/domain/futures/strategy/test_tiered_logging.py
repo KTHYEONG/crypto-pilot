@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -21,31 +22,39 @@ from src.domain.futures.strategy.tiered_logging import (
 )
 
 # ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
+
+def _make_l1_result(**kwargs: object) -> MagicMock:
+    """SWF 기반 Layer1Result mock 생성."""
+    r: MagicMock = MagicMock()
+    r.pooled_ic = kwargs.get("pooled_ic", 0.05)
+    r.pooled_tstat = kwargs.get("pooled_tstat", 2.5)
+    r.breadth = kwargs.get("breadth", 0.85)
+    r.valid_coverage = kwargs.get("valid_coverage", 0.90)
+    r.n_valid = kwargs.get("n_valid", 10)
+    r.n_total = kwargs.get("n_total", 12)
+    r.n_trade_scope = kwargs.get("n_trade_scope", 12)
+    r.gate_passed = kwargs.get("gate_passed", True)
+    return r
+
+# ---------------------------------------------------------------------------
 # TI14: format_layer1_table
 # ---------------------------------------------------------------------------
 
 class TestFormatLayer1Table:
-    """TI14: Layer 1 파이프 테이블 포맷 검증."""
+    """TI14: Layer 1 파이프 테이블 포맷 검증 (SWF-K 기준)."""
 
     def test_basic_pass_contains_required_fields(self) -> None:
-        """gate_passed=True일 때 핵심 메트릭과 PASS 포함 검증."""
+        """gate_passed=True일 때 핵심 메트릭(pooled_ic/pooled_tstat)과 PASS 포함 검증."""
         # Arrange
-        r1 = SimpleNamespace(
-            mean_ic=0.035,
-            ic_tstat=2.1,
-            breadth=0.45,
-            valid_coverage=0.85,
-            fold_pass_ratio=0.67,
-            gate_passed=True,
-            n_valid=8,
-            n_total=10,
-        )
+        r1 = _make_l1_result(pooled_ic=0.035, pooled_tstat=2.1, valid_coverage=0.85)
 
         # Act
         result = format_layer1_table(r1)
 
         # Assert
-        assert "Mean IC (fold)" in result
+        assert "Pooled IC" in result
         assert "PASS" in result
         assert "0.035" in result
         assert "2.10" in result
@@ -53,15 +62,12 @@ class TestFormatLayer1Table:
     def test_blocked_status_when_gate_failed(self) -> None:
         """gate_passed=False일 때 BLOCKED 상태 검증."""
         # Arrange
-        r1 = SimpleNamespace(
-            mean_ic=-0.010,
-            ic_tstat=0.5,
+        r1 = _make_l1_result(
+            pooled_ic=-0.010,
+            pooled_tstat=0.5,
             breadth=0.20,
             valid_coverage=0.60,
-            fold_pass_ratio=0.33,
             gate_passed=False,
-            n_valid=3,
-            n_total=10,
         )
 
         # Act
@@ -72,18 +78,9 @@ class TestFormatLayer1Table:
         assert "PASS" not in result
 
     def test_fold_details_appended_when_provided(self) -> None:
-        """fold_details 있으면 CPCV FOLD DETAILS 테이블 추가 검증."""
+        """fold_details 있으면 SWF FOLD DETAILS 테이블 추가 검증."""
         # Arrange
-        r1 = SimpleNamespace(
-            mean_ic=0.04,
-            ic_tstat=2.0,
-            breadth=0.5,
-            valid_coverage=0.9,
-            fold_pass_ratio=0.8,
-            gate_passed=True,
-            n_valid=9,
-            n_total=10,
-        )
+        r1 = _make_l1_result(pooled_ic=0.04, pooled_tstat=2.0)
         folds = [
             {"fold": 1, "ic": 0.042, "breadth": 0.50, "n_valid": 9, "n_events": 120, "pass": True},
             {"fold": 2, "ic": -0.01, "breadth": 0.30, "n_valid": 7, "n_events": 100, "pass": False},
@@ -93,22 +90,13 @@ class TestFormatLayer1Table:
         result = format_layer1_table(r1, fold_details=folds)
 
         # Assert
-        assert "CPCV FOLD DETAILS" in result
+        assert "SWF FOLD DETAILS" in result
         assert "FAIL" in result
 
     def test_per_symbol_top10_appended_when_provided(self) -> None:
-        """per_symbol_top10 있으면 PER-SYMBOL DIAGNOSTICS 테이블 추가 검증."""
+        """per_symbol_top10 있으면 PER-SYMBOL AGGREGATE 테이블 추가 검증."""
         # Arrange
-        r1 = SimpleNamespace(
-            mean_ic=0.04,
-            ic_tstat=2.0,
-            breadth=0.5,
-            valid_coverage=0.9,
-            fold_pass_ratio=0.8,
-            gate_passed=True,
-            n_valid=9,
-            n_total=10,
-        )
+        r1 = _make_l1_result()
         symbols = [
             {"symbol": "BTCUSDT", "raw_mu": 0.005, "vol": 0.02, "t_stat": 2.5, "ic": 0.04, "valid": True},
         ]
@@ -123,16 +111,7 @@ class TestFormatLayer1Table:
     def test_valid_coverage_formatted_as_percentage(self) -> None:
         """valid_coverage 85% → '85.0%' 포맷 검증."""
         # Arrange
-        r1 = SimpleNamespace(
-            mean_ic=0.035,
-            ic_tstat=2.1,
-            breadth=0.45,
-            valid_coverage=0.85,
-            fold_pass_ratio=0.67,
-            gate_passed=True,
-            n_valid=8,
-            n_total=10,
-        )
+        r1 = _make_l1_result(valid_coverage=0.85)
 
         # Act
         result = format_layer1_table(r1)
@@ -246,12 +225,12 @@ class TestFormatWindowTable:
         assert "Regime Floor" in result
 
     def test_contains_all_segment_labels(self, sample_window: LayeredWindow) -> None:
-        """L1 CPCV, L2 AWF, Holdout 세그먼트 레이블 모두 포함 검증."""
+        """L1 (SWF), L2 AWF, Holdout 세그먼트 레이블 모두 포함 검증."""
         # Act
         result = format_window_table(sample_window)
 
         # Assert
-        assert "L1 (CPCV)" in result
+        assert "L1 (SWF)" in result
         assert "L2 (AWF)" in result
         assert "Holdout" in result
 
@@ -349,3 +328,46 @@ class TestFormatLayer3Table:
         assert "PASS" in result
         assert "L1+L2 Hybrid" in result
         assert "1/N Baseline" in result
+
+
+# ---------------------------------------------------------------------------
+# S11 / S12: SWF 전환 문자열 검증
+# ---------------------------------------------------------------------------
+
+class TestFormatLayer1TableSwfStrings:
+    """S11/S12: CPCV→SWF 교체 및 fold_pass_ratio 메인 테이블 미포함 검증."""
+
+    def test_format_layer1_table_no_cpcv_string(self) -> None:
+        """S11: 출력에 'CPCV' 없고 'SWF', 'Pooled IC' 포함, 'Mean IC (fold)' 없음."""
+        # Arrange
+        r = _make_l1_result()
+        fold_details = [
+            {"fold": 1, "ic": 0.04, "breadth": 0.9, "n_valid": 10, "n_events": 1000, "pass": True},
+        ]
+
+        # Act
+        result = format_layer1_table(r, fold_details=fold_details)
+
+        # Assert
+        assert "CPCV" not in result
+        assert "SWF" in result
+        assert "Pooled IC" in result
+        assert "Mean IC (fold)" not in result
+
+    def test_format_layer1_table_no_fold_pass_ratio_in_main(self) -> None:
+        """S12: 메인 테이블 섹션에 'Fold Pass Ratio' 없고, 'NW HAC' 행 존재."""
+        # Arrange
+        r = _make_l1_result()
+
+        # Act
+        result = format_layer1_table(r)
+        # SWF FOLD DETAILS 이전 부분만 추출 (fold_details 미전달이므로 전체가 메인)
+        main_section = (
+            result.split("[SWF FOLD DETAILS]")[0]
+            if "[SWF FOLD DETAILS]" in result
+            else result
+        )
+
+        # Assert
+        assert "Fold Pass Ratio" not in main_section
+        assert "NW HAC" in result
