@@ -360,3 +360,31 @@ class TestEmptyEvents:
         # Assert
         assert "BTC" in result
         assert result["BTC"].volatility > 0.0
+
+
+class TestConstantSignal:
+    """상수 신호 입력 시 t-stat이 폭발하지 않고 0.0으로 반환되는지 검증."""
+
+    def test_constant_net_bps_tstat_is_zero(self) -> None:
+        # Arrange - 100개의 관측치 모두 17.056 상수로 구성
+        events = pd.DataFrame({"symbol": ["BTC"] * 100})
+        model_out = SimpleNamespace(
+            events=events,
+            expected_net_bps=np.full(100, 17.056, dtype=np.float64),
+        )
+        close_2d = _flat_close_2d(100, 1)
+
+        # Act
+        result = compose_symbol_signals(
+            model_output=model_out,
+            close_2d=close_2d,
+            symbols=("BTC",),
+            tf="4h",
+            min_obs=4,
+            t_stat_floor=0.0,
+        )
+
+        # Assert
+        assert "BTC" in result
+        assert result["BTC"].t_stat == 0.0
+
