@@ -52,7 +52,7 @@ def format_window_table(w: LayeredWindow) -> str:
         "| Segment      | Start      | End        | Duration  |",
         "| ------------ | ---------- | ---------- | --------- |",
         f"| Regime Floor | {_fmt_date(w.regime_floor):<10} | {'—':<10} | (hard LB) |",
-        f"| L1 (CPCV)   | {_fmt_date(w.l1_start):<10} | {_fmt_date(w.l2_start):<10} | 18 months |",
+        f"| L1 (SWF)    | {_fmt_date(w.l1_start):<10} | {_fmt_date(w.l2_start):<10} | 18 months |",
         f"| L2 (AWF)    | {_fmt_date(w.l2_start):<10} | {_fmt_date(w.holdout_start):<10} | 12 months |",
         f"| Holdout     | {_fmt_date(w.holdout_start):<10} | {_fmt_date(w.holdout_end):<10} | 6 months  |",
         "------------------------------------------------------",
@@ -70,12 +70,12 @@ def format_layer1_table(
     fold_details: list[dict[str, Any]] | None = None,
     per_symbol_top10: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Format Layer 1 (CPCV) result as pipe-table string (§9.2).
+    """Format Layer 1 (SWF-K) result as pipe-table string (§9.2).
 
     Args:
         r: Layer1Result-compatible object with fields:
-            mean_ic, ic_tstat, breadth, valid_coverage,
-            n_valid, n_total, fold_pass_ratio, gate_passed.
+            pooled_ic, pooled_tstat, breadth, valid_coverage,
+            n_valid, n_total, fold_pass_ratio (진단용, gate 미포함), gate_passed.
         fold_details: Optional list of dicts with keys:
             fold, ic, breadth, n_valid, n_events, pass.
         per_symbol_top10: Optional list of dicts with keys:
@@ -93,22 +93,22 @@ def format_layer1_table(
     gate_str: str = _gate(r.gate_passed)
 
     lines: list[str] = [
-        "[LAYER 1: CPCV SIGNAL VALIDATION] -------------------",
+        "[LAYER 1: SWF SIGNAL VALIDATION] --------------------",
         "| Metric               | Value   | Gate  | Status      |",
         "| -------------------- | ------- | ----- | ----------- |",
-        f"| Mean IC (fold)       | {r.mean_ic:.3f}   | >0.03 | {gate_str:<11} |",
-        f"| IC t-stat            | {r.ic_tstat:.2f}    | >1.96 | {'✓ PASS' if r.ic_tstat >= 1.96 else '✗ FAIL':<11} |",
+        f"| Pooled IC            | {r.pooled_ic:.3f}   | >0.03 | {gate_str:<11} |",
+        f"| IC t-stat (NW HAC)   | {r.pooled_tstat:.2f}    | >1.96 | "
+        f"{'✓ PASS' if r.pooled_tstat >= 1.96 else '✗ FAIL':<11} |",
         f"| Symbol Breadth       | {r.breadth:.3f}   | >0.3  | {'—':<11} |",
         f"| Valid Coverage       | {_pct(r.valid_coverage):<7} | >80%  | {'—':<11} |",
         f"| Valid Symbols/N      | {n_valid}/{n_trade_scope:<4}   | —     | {'—':<11} |",
-        f"| CPCV Fold Pass Ratio | {r.fold_pass_ratio:.3f}   | >0.6  | {'—':<11} |",
         f"| L1 Gate              | {'—':<7} | —     | {gate_str:<11} |",
         "------------------------------------------------------",
     ]
 
     if fold_details:
         lines.append("")
-        lines.append("[CPCV FOLD DETAILS] ---------------------------------")
+        lines.append("[SWF FOLD DETAILS] ----------------------------------")
         lines.append("| Fold | IC     | Breadth | N Valid | N Events | Pass  |")
         lines.append("| ---- | ------ | ------- | ------- | -------- | ----- |")
         for fd in fold_details:
