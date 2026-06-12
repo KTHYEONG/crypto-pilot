@@ -72,7 +72,8 @@ class Layer1Result:
         fold_pass_ratio: IC > 0인 fold 비율.
         gate_passed: L1 통과 여부.
         n_valid: 마지막 fold 기준 valid 심볼 수.
-        n_total: 전체 심볼 수.
+        n_total: 전체 심볼 수 (aligned width).
+        n_trade_scope: tiered aligned scope 크기 (bridge와 동일한 Stage6 OOS ∩ data-valid).
     """
 
     signals_per_fold: tuple[dict[str, SymbolSignal], ...]
@@ -85,6 +86,7 @@ class Layer1Result:
     gate_passed: bool
     n_valid: int
     n_total: int
+    n_trade_scope: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -526,7 +528,7 @@ def run_l1_cpcv(
     max_workers = min(len(folds), planned_workers)
 
     t_start = time.perf_counter()
-    logger.info(
+    logger.debug(
         "[CPCV-START] Starting CPCV L1 signal validation parallelization with %d folds (max_workers=%d)",
         len(folds),
         max_workers,
@@ -652,7 +654,7 @@ def run_l1_cpcv(
         for k in avg_profile:
             avg_profile[k] /= total_folds
 
-        logger.info(
+        logger.debug(
             "[CPCV-PROFILE] Average sub-fold execution breakdown: "
             "schema=%.3fs, ds_fit=%.3fs, ds_es=%.3fs, ds_cal_fit=%.3fs, ds_cal_eval=%.3fs, "
             "ds_oos=%.3fs, edge_fit=%.3fs, inference=%.3fs, selection=%.3fs",
@@ -667,7 +669,7 @@ def run_l1_cpcv(
             avg_profile["selection"],
         )
 
-    logger.info(
+    logger.debug(
         "[CPCV-END] CPCV L1 signal validation parallel execution completed in %.2fs",
         time.perf_counter() - t_start,
     )
@@ -759,6 +761,7 @@ def run_l1_cpcv(
         gate_passed=gate_passed,
         n_valid=n_valid,
         n_total=n_total,
+        n_trade_scope=n_total,
     )
     logger.info(format_layer1_table(result, fold_details=fold_perf_details, per_symbol_top10=sym_details))
     return result
