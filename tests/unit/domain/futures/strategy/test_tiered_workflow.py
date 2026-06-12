@@ -33,11 +33,18 @@ from src.domain.futures.strategy.tiered_workflow import (
     Layer1Result,
     Layer2Result,
     Layer3Result,
+    StrategySignal,
+    SymbolRealizedStat,
     _cagr,
     _compute_fold_ts_ic,
     _newey_west_ic_tstat,
+    _nw_tstat_realized,
     _stack_oos_signals,
+    compute_breadth_weighted_ic,
+    compute_panel_diversity,
+    compute_per_strategy_oos_validation,
     compute_per_symbol_ic,
+    compute_per_symbol_realized_stats,
     run_l1_swf,
 )
 from src.domain.futures.strategy.walk_forward import WFFold
@@ -217,7 +224,8 @@ def test_stack_oos_signals_averages_raw_mu() -> None:
     # Assert
     assert "BTC" in stacked
     assert stacked["BTC"].raw_mu == pytest.approx(4.0)
-    assert stacked["BTC"].n_obs == 20  # 10 * 2 folds
+    # n_obs는 realized_stats=None 시 0 (보수적 폴백); raw_mu 평균만 검증
+    assert stacked["BTC"].n_obs == 0
 
 
 def test_stack_oos_signals_layer1result_fields() -> None:
@@ -581,7 +589,7 @@ def test_compute_per_symbol_ic_not_hardcoded_zero() -> None:
     """S2c: IC 결과가 0.0 고정이 아닌 실계산값임을 확인."""
     n_events = 10
     realized_returns = np.arange(1, n_events + 1, dtype=np.float64) * 0.001  # 단조증가
-    pred_bps = np.arange(n_events, dtype=np.float64)  # 동일 rank 순서
+    pred_bps: np.ndarray = np.arange(n_events, dtype=np.float64)  # 동일 rank 순서
 
     fold_out = MagicMock()
     fold_out.fit_status = "trained"
@@ -618,7 +626,7 @@ def test_tstat_uses_ddof1_not_ddof0() -> None:
 
 
 def test_layer1_table_label_no_hac() -> None:
-    """S3: format_layer1_table 출력에 '(HAC)' 없고 '(fold)' 포함."""
+    """S3: format_layer1_table 출력에 '(HAC)' 없고 CS 패널 지표 포함."""
     from src.domain.futures.strategy.tiered_logging import format_layer1_table
 
     r = Layer1Result(
@@ -635,7 +643,7 @@ def test_layer1_table_label_no_hac() -> None:
     )
     table_str = format_layer1_table(r)
     assert "(HAC)" not in table_str
-    assert "NW HAC" in table_str or "Pooled IC" in table_str
+    assert "CS IC Mean" in table_str
 
 
 # ---------------------------------------------------------------------------
@@ -751,7 +759,7 @@ def test_newey_west_ic_tstat_conservative_vs_iid() -> None:
     pred_iid = realized_iid + rng.standard_normal(n_obs).astype(np.float64)
 
     # AR(1) 시리즈: 동일 rank IC를 갖도록 동일 seed 재사용 후 AR(1) 래핑
-    ar_base = np.zeros(n_obs, dtype=np.float64)
+    ar_base: np.ndarray = np.zeros(n_obs, dtype=np.float64)
     noise = rng.standard_normal(n_obs).astype(np.float64)
     for i in range(1, n_obs):
         ar_base[i] = 0.8 * ar_base[i - 1] + noise[i]
@@ -850,3 +858,691 @@ def test_newey_west_ic_tstat_short_returns_zero() -> None:
         np.array([1.0, 2.0], dtype=np.float64),
         np.array([1.0, 2.0], dtype=np.float64),
     ) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Phase1: compute_per_symbol_realized_stats 테스트
+# ---------------------------------------------------------------------------
+
+def _make_fold_tuple(
+    syms: list[str],
+    preds: list[float],
+    realized: list[float],
+    fit_status: str = "trained",
+) -> tuple[int, object, object]:
+    """테스트용 fold_tuple 팩토리."""
+    from types import SimpleNamespace
+    event_index = pd.DataFrame({"symbol": syms})
+    fold_out = SimpleNamespace(
+        model_output=SimpleNamespace(
+            events=event_index,
+            expected_net_bps=np.asarray(preds, dtype=np.float64),
+        ),
+        oos_set=SimpleNamespace(
+            y_return_bps=np.asarray(realized, dtype=np.float64),
+            y_edge_bps=None,
+            event_index=event_index,
+        ),
+        fit_status=fit_status,
+        n_fit=len(preds),
+        timing_profile={},
+    )
+    return (0, None, fold_out)
+
+
+def test_compute_per_symbol_realized_stats_happy_path() -> None:
+    """S1: 2 fold, BTC 양(+) 실현 라벨 N=40 → realized_mu_bps>0, valid=True(ic>0 가정)."""
+    rng = np.random.default_rng(42)
+    n = 20
+    r_pos = rng.normal(loc=5.0, scale=2.0, size=n).tolist()  # mean>0
+    fold1 = _make_fold_tuple(["BTC"] * n, preds=[1.0] * n, realized=r_pos)
+    fold2 = _make_fold_tuple(["BTC"] * n, preds=[1.0] * n, realized=r_pos)
+    per_sym_ic = {"BTC": 0.15}  # ic>0
+
+    result = compute_per_symbol_realized_stats(
+        fold_tuples=[fold1, fold2],
+        min_obs=20,
+        t_stat_floor=1.96,
+        per_symbol_ic=per_sym_ic,
+    )
+
+    assert "BTC" in result
+    stat = result["BTC"]
+    assert stat.realized_mu_bps == pytest.approx(5.0, rel=0.3)
+    assert stat.n_obs == 2 * n
+    assert abs(stat.t_stat) > 1.96
+    assert stat.valid is True
+
+
+def test_compute_per_symbol_realized_stats_constant_pred_does_not_fail() -> None:
+    """S2 (BUG-B 무해화): 예측이 -8 상수여도 실현 양·유의이면 valid=True."""
+    rng = np.random.default_rng(7)
+    n = 30
+    r_pos = rng.normal(loc=5.0, scale=1.5, size=n).tolist()
+    # preds 전부 상수 -8 (BUG-B 재발 조건)
+    fold = _make_fold_tuple(["BTC"] * n, preds=[-8.0] * n, realized=r_pos)
+    per_sym_ic = {"BTC": 0.10}
+
+    result = compute_per_symbol_realized_stats(
+        fold_tuples=[fold],
+        min_obs=20,
+        t_stat_floor=1.96,
+        per_symbol_ic=per_sym_ic,
+    )
+
+    assert "BTC" in result
+    # QC가 예측 분산이 아닌 실현에 의존: valid=True
+    assert result["BTC"].valid is True
+
+
+def test_compute_per_symbol_realized_stats_degenerate_returns_zero_tstat() -> None:
+    """S3: 실현 라벨 std<1e-9(상수) → t_stat=0.0, valid=False."""
+    n = 30
+    r_const = [5.0] * n  # 상수 → std = 0
+    fold = _make_fold_tuple(["BTC"] * n, preds=[1.0] * n, realized=r_const)
+    per_sym_ic = {"BTC": 0.10}
+
+    result = compute_per_symbol_realized_stats(
+        fold_tuples=[fold],
+        min_obs=20,
+        t_stat_floor=1.96,
+        per_symbol_ic=per_sym_ic,
+    )
+
+    stat = result["BTC"]
+    assert stat.t_stat == pytest.approx(0.0)
+    assert stat.valid is False
+
+
+def test_compute_per_symbol_realized_stats_sparse_obs() -> None:
+    """S4: n_obs < min_obs → valid=False (t-stat 무관)."""
+    n = 5  # < min_obs=20
+    r = [10.0] * n
+    fold = _make_fold_tuple(["BTC"] * n, preds=[1.0] * n, realized=r)
+    per_sym_ic = {"BTC": 0.50}
+
+    result = compute_per_symbol_realized_stats(
+        fold_tuples=[fold],
+        min_obs=20,
+        t_stat_floor=1.96,
+        per_symbol_ic=per_sym_ic,
+    )
+
+    assert result["BTC"].valid is False
+
+
+def test_compute_per_symbol_realized_stats_negative_ic_blocks_valid() -> None:
+    """S5: 실현 t-stat 유의하지만 ic<0 → valid=False (예측 역방향)."""
+    rng = np.random.default_rng(11)
+    n = 30
+    r_pos = rng.normal(loc=5.0, scale=1.5, size=n).tolist()
+    fold = _make_fold_tuple(["BTC"] * n, preds=[1.0] * n, realized=r_pos)
+    per_sym_ic = {"BTC": -0.10}  # ic < 0
+
+    result = compute_per_symbol_realized_stats(
+        fold_tuples=[fold],
+        min_obs=20,
+        t_stat_floor=1.96,
+        per_symbol_ic=per_sym_ic,
+    )
+
+    assert result["BTC"].valid is False
+
+
+# ---------------------------------------------------------------------------
+# Phase1: compute_breadth_weighted_ic 테스트
+# ---------------------------------------------------------------------------
+
+
+def test_compute_breadth_weighted_ic_event_weighted() -> None:
+    """S6: IC=[0.1(n=100), -0.1(n=10)] → ic_weighted ≈ +0.0818."""
+    ic = {"A": 0.1, "B": -0.1}
+    n = {"A": 100, "B": 10}
+
+    weighted, _ = compute_breadth_weighted_ic(ic, n)
+
+    expected = (0.1 * 100 + -0.1 * 10) / 110  # ≈ 0.0818
+    assert weighted == pytest.approx(expected, rel=1e-6)
+
+
+def test_compute_breadth_weighted_ic_ir_increases_with_consistency() -> None:
+    """S7: 동일 부호 IC 다수 → ic_ir_tstat 크고, 부호 혼재 → ~0."""
+    n_syms = 10
+    # 일관 양수
+    ic_consistent = {f"S{i}": 0.10 for i in range(n_syms)}
+    n_consistent = {f"S{i}": 50 for i in range(n_syms)}
+    _, ir_consistent = compute_breadth_weighted_ic(ic_consistent, n_consistent)
+
+    # 부호 혼재
+    ic_mixed = {f"S{i}": (0.10 if i % 2 == 0 else -0.10) for i in range(n_syms)}
+    n_mixed = {f"S{i}": 50 for i in range(n_syms)}
+    _, ir_mixed = compute_breadth_weighted_ic(ic_mixed, n_mixed)
+
+    assert ir_consistent > 3.0
+    assert abs(ir_mixed) < 1.0
+
+
+def test_compute_breadth_weighted_ic_empty_returns_zeros() -> None:
+    """S8: 빈 입력 → (0.0, 0.0)."""
+    weighted, ir = compute_breadth_weighted_ic({}, {})
+    assert weighted == pytest.approx(0.0)
+    assert ir == pytest.approx(0.0)
+
+
+def test_compute_breadth_weighted_ic_single_sym_ir_zero() -> None:
+    """S7 엣지: S<2 → ic_ir_tstat=0.0."""
+    _, ir = compute_breadth_weighted_ic({"A": 0.5}, {"A": 100})
+    assert ir == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# Phase1: _stack_oos_signals realized_stats 주입 테스트
+# ---------------------------------------------------------------------------
+
+
+def test_stack_oos_signals_uses_realized_stats_not_last_fold() -> None:
+    """S9: 3-fold valid=[F,T,F]이어도 realized_stats 주입값이 우선한다."""
+
+    def _make_sig(v: int) -> SymbolSignal:
+        return SymbolSignal(raw_mu=float(v), volatility=0.01, n_obs=10, t_stat=2.0, valid=bool(v))
+
+    fold1 = {"BTC": _make_sig(0)}  # valid=False
+    fold2 = {"BTC": _make_sig(1)}  # valid=True
+    fold3 = {"BTC": _make_sig(0)}  # valid=False (마지막)
+
+    # realized stat이 valid=True 라면 stacked도 True여야 함 (BUG-A 회귀 방지)
+    realized = {
+        "BTC": SymbolRealizedStat(
+            realized_mu_bps=3.0, t_stat=2.5, n_obs=30, ic=0.12, valid=True
+        )
+    }
+
+    stacked = _stack_oos_signals((fold1, fold2, fold3), realized_stats=realized)
+
+    assert stacked["BTC"].valid is True
+    assert stacked["BTC"].t_stat == pytest.approx(2.5)
+    # raw_mu는 3개 fold 예측 평균
+    assert stacked["BTC"].raw_mu == pytest.approx((0 + 1 + 0) / 3.0)
+
+
+def test_stack_oos_signals_no_realized_falls_back_conservatively() -> None:
+    """realized_stats=None → valid=False (보수적 폴백)."""
+
+    def _make_sig() -> SymbolSignal:
+        return SymbolSignal(raw_mu=5.0, volatility=0.01, n_obs=10, t_stat=3.0, valid=True)
+
+    stacked = _stack_oos_signals(({"BTC": _make_sig()},), realized_stats=None)
+
+    assert stacked["BTC"].valid is False
+
+
+# ---------------------------------------------------------------------------
+# Phase1: _nw_tstat_realized edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_nw_tstat_realized_short_series_returns_zero() -> None:
+    """n<4 → 0.0."""
+    assert _nw_tstat_realized(np.array([1.0, 2.0, 3.0], dtype=np.float64)) == 0.0
+
+
+def test_nw_tstat_realized_degenerate_returns_zero() -> None:
+    """std<1e-9 → 0.0."""
+    arr: np.ndarray = np.full(30, 5.0, dtype=np.float64)
+    assert _nw_tstat_realized(arr) == pytest.approx(0.0)
+
+
+# ===========================================================================
+# C0 — compute_prediction_decomposition_diag (S1~S7)
+# ===========================================================================
+
+from src.domain.futures.strategy.tiered_workflow import (
+    PredictionDecompositionDiag,
+    compute_prediction_decomposition_diag,
+)
+
+
+def _make_diag_fold_tuple(
+    *,
+    expected_net_bps: np.ndarray,
+    y_return_bps: np.ndarray,
+    archetype: list[str],
+    entry_regime_code: list[int],
+    variant: list[str],
+    num_valid_regimes: int = 0,
+) -> tuple[int, object, object]:
+    """Helper for C0 diag tests: (fold_idx=0, wf_fold=None, fold_out)."""
+    n = len(expected_net_bps)
+    event_index = pd.DataFrame(
+        {
+            "symbol": ["SYM"] * n,
+            "archetype": archetype,
+            "entry_regime_code": entry_regime_code,
+            "variant": variant,
+        }
+    )
+    oos_set = SimpleNamespace(
+        event_index=event_index,
+        y_return_bps=y_return_bps,
+        y_edge_bps=None,
+    )
+    model_output = SimpleNamespace(
+        expected_net_bps=expected_net_bps,
+        validation_diagnostics={
+            "ensemble_diagnostics": {"num_valid_regimes": num_valid_regimes}
+        },
+    )
+    fold_out = SimpleNamespace(
+        fit_status="trained",
+        oos_set=oos_set,
+        model_output=model_output,
+    )
+    return (0, None, fold_out)
+
+
+def test_compute_prediction_decomposition_diag_s1_static_prediction() -> None:
+    """S1: 예측이 (arch,regime,variant) 상수 → static_share ≈ 1.0, dynamic ≈ 0.0."""
+    rng = np.random.default_rng(42)
+    n = 100
+    archetypes = ["beta_neutral"] * 50 + ["mean"] * 50
+    regimes = [1] * 50 + [2] * 50
+    variants = ["v1"] * 100
+    pred = np.where(np.array(archetypes) == "beta_neutral", 5.0, -3.0).astype(np.float64)
+    real = rng.normal(0, 1, size=n)
+
+    fold = _make_diag_fold_tuple(
+        expected_net_bps=pred,
+        y_return_bps=real,
+        archetype=archetypes,
+        entry_regime_code=regimes,
+        variant=variants,
+    )
+
+    diag = compute_prediction_decomposition_diag(fold_tuples=[fold])
+
+    assert diag.static_variance_share == pytest.approx(1.0, abs=1e-6)
+    assert diag.dynamic_variance_share == pytest.approx(0.0, abs=1e-6)
+
+
+def test_compute_prediction_decomposition_diag_s2_dynamic_prediction() -> None:
+    """S2: 동일 (arch,regime,variant) 내 예측이 연속 분포 → static_share < 0.5."""
+    rng = np.random.default_rng(7)
+    n = 200
+    pred = rng.normal(0, 5, size=n)  # 연속 분포 — 그룹평균 ≈ 0이 대부분
+    real = rng.normal(0, 1, size=n)
+
+    fold = _make_diag_fold_tuple(
+        expected_net_bps=pred,
+        y_return_bps=real,
+        archetype=["beta_neutral"] * n,
+        entry_regime_code=[1] * n,
+        variant=["v1"] * n,
+    )
+
+    diag = compute_prediction_decomposition_diag(fold_tuples=[fold])
+
+    # 모든 이벤트가 같은 그룹 → 그룹평균은 스칼라 → Var(group_mean) ≈ 0 → static ≈ 0
+    assert diag.static_variance_share == pytest.approx(0.0, abs=0.05)
+    assert diag.dynamic_variance_share > 0.90
+
+
+def test_compute_prediction_decomposition_diag_s3_archetype_sign() -> None:
+    """S3: beta_neutral 양·mean 음 → per_archetype_oos_edge 부호 확인."""
+    rng = np.random.default_rng(99)
+    n_each = 60
+    arch_col = ["beta_neutral"] * n_each + ["mean"] * n_each
+    pred = [5.0] * n_each + [-3.0] * n_each
+    real = np.concatenate([
+        rng.normal(8, 1, size=n_each),   # beta_neutral: 양
+        rng.normal(-5, 1, size=n_each),  # mean: 음
+    ])
+
+    fold = _make_diag_fold_tuple(
+        expected_net_bps=np.array(pred, dtype=np.float64),
+        y_return_bps=real,
+        archetype=arch_col,
+        entry_regime_code=[1] * (2 * n_each),
+        variant=["v1"] * (2 * n_each),
+    )
+
+    diag = compute_prediction_decomposition_diag(fold_tuples=[fold])
+
+    assert "beta_neutral" in diag.per_archetype_oos_edge
+    assert "mean" in diag.per_archetype_oos_edge
+    bn_mu, bn_t = diag.per_archetype_oos_edge["beta_neutral"]
+    m_mu, _ = diag.per_archetype_oos_edge["mean"]
+    assert bn_mu > 0
+    assert bn_t > 1.96
+    assert m_mu < 0
+
+
+def test_compute_prediction_decomposition_diag_s4_decile_lift_positive() -> None:
+    """S4: pred-real 단조 양상관 → decile_lift > 0."""
+    n = 100
+    pred = np.linspace(-10, 10, n)
+    real = pred + np.random.default_rng(1).normal(0, 0.5, size=n)
+
+    fold = _make_diag_fold_tuple(
+        expected_net_bps=pred,
+        y_return_bps=real,
+        archetype=["beta_neutral"] * n,
+        entry_regime_code=[1] * n,
+        variant=["v1"] * n,
+    )
+
+    diag = compute_prediction_decomposition_diag(fold_tuples=[fold])
+
+    assert diag.decile_lift_bps > 5.0
+
+
+def test_compute_prediction_decomposition_diag_s4_decile_lift_uncorrelated() -> None:
+    """S4: pred-real 무상관 → |decile_lift| ≈ 0 (abs < 3.0 tol)."""
+    rng = np.random.default_rng(42)
+    n = 100
+    pred = rng.normal(0, 1, size=n)
+    real = rng.normal(0, 1, size=n)
+
+    fold = _make_diag_fold_tuple(
+        expected_net_bps=pred,
+        y_return_bps=real,
+        archetype=["beta_neutral"] * n,
+        entry_regime_code=[1] * n,
+        variant=["v1"] * n,
+    )
+
+    diag = compute_prediction_decomposition_diag(fold_tuples=[fold])
+
+    assert abs(diag.decile_lift_bps) < 3.0
+
+
+def test_compute_prediction_decomposition_diag_s5_empty_folds() -> None:
+    """S5: fold 0개 → 모든 필드 0.0, dict 빈, 예외 없음."""
+    diag = compute_prediction_decomposition_diag(fold_tuples=[])
+
+    assert diag.static_variance_share == pytest.approx(0.0)
+    assert diag.dynamic_variance_share == pytest.approx(0.0)
+    assert diag.score_cal_valid_ratio == pytest.approx(0.0)
+    assert diag.per_archetype_oos_edge == {}
+    assert diag.decile_lift_bps == pytest.approx(0.0)
+
+
+def test_compute_prediction_decomposition_diag_s6_zero_variance_pred() -> None:
+    """S6: Var(expected_net_bps)=0 → static_share=0.0, NaN 금지."""
+    n = 50
+    pred: np.ndarray = np.zeros(n, dtype=np.float64)
+    real = np.random.default_rng(3).normal(0, 1, size=n)
+
+    fold = _make_diag_fold_tuple(
+        expected_net_bps=pred,
+        y_return_bps=real,
+        archetype=["beta_neutral"] * n,
+        entry_regime_code=[1] * n,
+        variant=["v1"] * n,
+    )
+
+    diag = compute_prediction_decomposition_diag(fold_tuples=[fold])
+
+    assert np.isfinite(diag.static_variance_share)
+    assert diag.static_variance_share == pytest.approx(0.0, abs=1e-6)
+
+
+def test_compute_prediction_decomposition_diag_s7_gate_unchanged() -> None:
+    """S7: C0 추가 후 Layer1Result gate 필드/값 불변 회귀방지."""
+    diag = PredictionDecompositionDiag(
+        static_variance_share=0.95,
+        dynamic_variance_share=0.05,
+        score_cal_valid_ratio=0.3,
+        per_archetype_oos_edge={"beta_neutral": (10.0, 2.5)},
+        decile_lift_bps=3.0,
+    )
+    assert diag.static_variance_share == pytest.approx(0.95)
+    assert diag.dynamic_variance_share == pytest.approx(0.05)
+    assert diag.score_cal_valid_ratio == pytest.approx(0.3)
+    _bn_mu, _bn_t = diag.per_archetype_oos_edge["beta_neutral"]
+    assert _bn_mu == pytest.approx(10.0)
+    assert _bn_t == pytest.approx(2.5)
+    assert diag.decile_lift_bps == pytest.approx(3.0)
+
+
+def _make_strategy_validation_fold(
+    *,
+    fold_id: int,
+    families: list[str] | None,
+    archetypes: list[str] | None,
+    variants: list[str],
+    realized: list[float],
+) -> tuple[int, object, object]:
+    event_index_dict: dict[str, object] = {
+        "symbol": ["SYM"] * len(realized),
+        "variant": variants,
+    }
+    if families is not None:
+        event_index_dict["family"] = families
+    if archetypes is not None:
+        event_index_dict["archetype"] = archetypes
+    event_index = pd.DataFrame(event_index_dict)
+    fold_out = SimpleNamespace(
+        model_output=SimpleNamespace(
+            events=event_index,
+            expected_net_bps=np.asarray(realized, dtype=np.float64),
+        ),
+        oos_set=SimpleNamespace(
+            y_return_bps=np.asarray(realized, dtype=np.float64),
+            y_edge_bps=None,
+            event_index=event_index,
+        ),
+        fit_status="trained",
+        n_fit=len(realized),
+        timing_profile={},
+    )
+    return (fold_id, None, fold_out)
+
+
+def test_compute_per_strategy_oos_validation_blocks_inconsistent_and_fallbacks_family() -> None:
+    fold1 = _make_strategy_validation_fold(
+        fold_id=0,
+        families=None,
+        archetypes=["trend", "trend", "trend", "trend", "swing", "swing", "swing", "swing"],
+        variants=["v1", "v1", "v1", "v1", "v2", "v2", "v2", "v2"],
+        realized=[8.0, 9.0, 10.0, 11.0, 7.0, 8.0, 9.0, 10.0],
+    )
+    fold2 = _make_strategy_validation_fold(
+        fold_id=1,
+        families=None,
+        archetypes=["trend", "trend", "trend", "trend", "swing", "swing", "swing", "swing"],
+        variants=["v1", "v1", "v1", "v1", "v2", "v2", "v2", "v2"],
+        realized=[7.0, 8.0, 9.0, 10.0, -10.0, -9.0, -8.0, -7.0],
+    )
+    panel = compute_per_strategy_oos_validation(
+        fold_tuples=[fold1, fold2],
+        min_obs=6,
+        t_stat_floor=1.0,
+        consistency_floor=0.60,
+    )
+
+    panel_map = {sig.strategy_id: sig for sig in panel}
+    assert "trend:v1" in panel_map
+    assert "swing:v2" in panel_map
+    assert panel_map["trend:v1"].valid is True
+    assert panel_map["trend:v1"].fold_sign_consistency == pytest.approx(1.0)
+    assert panel_map["swing:v2"].valid is False
+    assert panel_map["swing:v2"].fold_sign_consistency == pytest.approx(0.5)
+
+
+def test_compute_panel_diversity_identical_panel_is_zero() -> None:
+    panel = (
+        StrategySignal("a:v1", 8.0, 2.0, 0.7, 1.0, 40, 4, True, ((0, 1.0), (1, 2.0), (2, 3.0), (3, 4.0))),
+        StrategySignal("b:v2", 7.0, 2.0, 0.7, 1.0, 40, 4, True, ((0, 2.0), (1, 4.0), (2, 6.0), (3, 8.0))),
+    )
+
+    assert compute_panel_diversity(panel) == pytest.approx(0.0)
+
+
+def test_compute_panel_diversity_independent_panel_is_high() -> None:
+    panel = (
+        StrategySignal("a:v1", 8.0, 2.0, 0.7, 1.0, 40, 4, True, ((0, 1.0), (1, -1.0), (2, 1.0), (3, -1.0))),
+        StrategySignal("b:v2", 7.0, 2.0, 0.7, 1.0, 40, 4, True, ((0, 1.0), (1, 1.0), (2, -1.0), (3, -1.0))),
+    )
+
+    assert compute_panel_diversity(panel) > 0.9
+
+
+def _make_run_l1_fold_output(
+    *,
+    preds: list[float],
+    realized: list[float],
+) -> SimpleNamespace:
+    event_index = pd.DataFrame({"symbol": ["BTC"] * len(preds)})
+    return SimpleNamespace(
+        model_output=SimpleNamespace(
+            events=event_index,
+            expected_net_bps=np.asarray(preds, dtype=np.float64),
+        ),
+        oos_set=SimpleNamespace(
+            y_return_bps=np.asarray(realized, dtype=np.float64),
+            y_edge_bps=None,
+            event_index=event_index,
+        ),
+        fit_status="trained",
+        n_fit=120,
+        timing_profile={},
+    )
+
+
+def test_run_l1_swf_panel_gate_passes_option_a_thresholds() -> None:
+    aligned = MagicMock()
+    aligned.close_2d = np.ones((80, 1), dtype=np.float64) * 100.0
+    aligned.symbols = ("BTC",)
+    aligned.datetimes = np.array(
+        [np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(80)],
+        dtype="datetime64[ns]",
+    )
+    aligned.beta_vs_market_1d = None
+    aligned.execution_cost_bps_2d = None
+
+    cfg = MagicMock()
+    cfg.model_early_stop_fraction = 0.1
+    cfg.wf_n_folds = 5
+    cfg.wf_scheme = "anchored"
+    cfg.ml_fit_fraction = 0.6
+    cfg.ml_calibration_fraction = 0.2
+    cfg.l1_min_valid_strategies = 5
+    cfg.l1_min_panel_diversity = 0.30
+    cfg.l1_min_cs_fold_pass_ratio = 0.60
+
+    folds = tuple(
+        WFFold(fit_start=5, fit_end=10 + i, cal_start=10 + i, cal_end=12 + i, oos_start=12 + i, oos_end=16 + i)
+        for i in range(5)
+    )
+    fold_outputs = [
+        _make_run_l1_fold_output(preds=[1.0, 2.0, 3.0, 4.0], realized=[1.0, 2.0, 3.0, 4.0]),
+        _make_run_l1_fold_output(preds=[1.0, 2.0, 3.0, 4.0], realized=[2.0, 3.0, 4.0, 5.0]),
+        _make_run_l1_fold_output(preds=[1.0, 2.0, 3.0, 4.0], realized=[3.0, 4.0, 5.0, 6.0]),
+        _make_run_l1_fold_output(preds=[1.0, 2.0, 3.0, 4.0], realized=[4.0, 3.0, 2.0, 1.0]),
+        _make_run_l1_fold_output(preds=[1.0, 2.0, 3.0, 4.0], realized=[5.0, 4.0, 3.0, 2.0]),
+    ]
+    valid_signal = SymbolSignal(raw_mu=1.0, volatility=0.01, n_obs=4, t_stat=2.0, valid=True)
+    panel = tuple(
+        StrategySignal(f"s{i}:v{i}", 8.0 + i, 2.0, 0.7, 0.8, 40, 5, True)
+        for i in range(5)
+    )
+
+    with patch(
+        "os.cpu_count",
+        return_value=1,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold",
+        side_effect=fold_outputs,
+    ), patch(
+        "src.domain.futures.strategy.config.resolve_purge_and_embargo_bars",
+        return_value=(1, 0),
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.compose_symbol_signals",
+        return_value={"BTC": valid_signal},
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.compute_per_strategy_oos_validation",
+        return_value=panel,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.compute_panel_diversity",
+        return_value=0.4,
+    ):
+        l1 = run_l1_swf(
+            labeled_events=pd.DataFrame(),
+            aligned=aligned,
+            cfg=cfg,
+            folds=folds,
+            l1_params={},
+        )
+
+    assert l1.gate_passed is True
+    assert l1.n_valid_strategies == 5
+    assert l1.panel_diversity == pytest.approx(0.4)
+    assert l1.cs_ic_fold_pass_ratio == pytest.approx(0.60)
+
+
+def test_run_l1_swf_panel_gate_blocks_low_diversity() -> None:
+    aligned = MagicMock()
+    aligned.close_2d = np.ones((80, 1), dtype=np.float64) * 100.0
+    aligned.symbols = ("BTC",)
+    aligned.datetimes = np.array(
+        [np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(80)],
+        dtype="datetime64[ns]",
+    )
+    aligned.beta_vs_market_1d = None
+    aligned.execution_cost_bps_2d = None
+
+    cfg = MagicMock()
+    cfg.model_early_stop_fraction = 0.1
+    cfg.wf_n_folds = 5
+    cfg.wf_scheme = "anchored"
+    cfg.ml_fit_fraction = 0.6
+    cfg.ml_calibration_fraction = 0.2
+    cfg.l1_min_valid_strategies = 5
+    cfg.l1_min_panel_diversity = 0.30
+    cfg.l1_min_cs_fold_pass_ratio = 0.60
+
+    folds = tuple(
+        WFFold(fit_start=5, fit_end=10 + i, cal_start=10 + i, cal_end=12 + i, oos_start=12 + i, oos_end=16 + i)
+        for i in range(5)
+    )
+    fold_outputs = [
+        _make_run_l1_fold_output(preds=[1.0, 2.0, 3.0, 4.0], realized=[1.0, 2.0, 3.0, 4.0]),
+        _make_run_l1_fold_output(preds=[1.0, 2.0, 3.0, 4.0], realized=[2.0, 3.0, 4.0, 5.0]),
+        _make_run_l1_fold_output(preds=[1.0, 2.0, 3.0, 4.0], realized=[3.0, 4.0, 5.0, 6.0]),
+        _make_run_l1_fold_output(preds=[1.0, 2.0, 3.0, 4.0], realized=[4.0, 3.0, 2.0, 1.0]),
+        _make_run_l1_fold_output(preds=[1.0, 2.0, 3.0, 4.0], realized=[5.0, 4.0, 3.0, 2.0]),
+    ]
+    valid_signal = SymbolSignal(raw_mu=1.0, volatility=0.01, n_obs=4, t_stat=2.0, valid=True)
+    panel = tuple(
+        StrategySignal(f"s{i}:v{i}", 8.0 + i, 2.0, 0.7, 0.8, 40, 5, True)
+        for i in range(5)
+    )
+
+    with patch(
+        "os.cpu_count",
+        return_value=1,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold",
+        side_effect=fold_outputs,
+    ), patch(
+        "src.domain.futures.strategy.config.resolve_purge_and_embargo_bars",
+        return_value=(1, 0),
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.compose_symbol_signals",
+        return_value={"BTC": valid_signal},
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.compute_per_strategy_oos_validation",
+        return_value=panel,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.compute_panel_diversity",
+        return_value=0.1,
+    ):
+        l1 = run_l1_swf(
+            labeled_events=pd.DataFrame(),
+            aligned=aligned,
+            cfg=cfg,
+            folds=folds,
+            l1_params={},
+        )
+
+    assert l1.gate_passed is False

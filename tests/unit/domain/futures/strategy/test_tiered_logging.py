@@ -28,14 +28,18 @@ from src.domain.futures.strategy.tiered_logging import (
 def _make_l1_result(**kwargs: object) -> MagicMock:
     """SWF 기반 Layer1Result mock 생성."""
     r: MagicMock = MagicMock()
-    r.pooled_ic = kwargs.get("pooled_ic", 0.05)
-    r.pooled_tstat = kwargs.get("pooled_tstat", 2.5)
     r.breadth = kwargs.get("breadth", 0.85)
-    r.valid_coverage = kwargs.get("valid_coverage", 0.90)
     r.n_valid = kwargs.get("n_valid", 10)
     r.n_total = kwargs.get("n_total", 12)
     r.n_trade_scope = kwargs.get("n_trade_scope", 12)
     r.gate_passed = kwargs.get("gate_passed", True)
+    r.cs_ic_mean = kwargs.get("cs_ic_mean", 0.05)
+    r.cs_ic_tstat = kwargs.get("cs_ic_tstat", 2.5)
+    r.cs_ic_fold_pass_ratio = kwargs.get("cs_ic_fold_pass_ratio", 0.85)
+    r.decile_lift_bps = kwargs.get("decile_lift_bps", 3.0)
+    r.strategy_panel = kwargs.get("strategy_panel", ())
+    r.n_valid_strategies = kwargs.get("n_valid_strategies", 5)
+    r.panel_diversity = kwargs.get("panel_diversity", 0.4)
     return r
 
 # ---------------------------------------------------------------------------
@@ -46,15 +50,15 @@ class TestFormatLayer1Table:
     """TI14: Layer 1 파이프 테이블 포맷 검증 (SWF-K 기준)."""
 
     def test_basic_pass_contains_required_fields(self) -> None:
-        """gate_passed=True일 때 핵심 메트릭(pooled_ic/pooled_tstat)과 PASS 포함 검증."""
+        """gate_passed=True일 때 핵심 메트릭(CS IC/panel)과 PASS 포함 검증."""
         # Arrange
-        r1 = _make_l1_result(pooled_ic=0.035, pooled_tstat=2.1, valid_coverage=0.85)
+        r1 = _make_l1_result(cs_ic_mean=0.035, cs_ic_tstat=2.1, cs_ic_fold_pass_ratio=0.85)
 
         # Act
         result = format_layer1_table(r1)
 
         # Assert
-        assert "Pooled IC" in result
+        assert "CS IC Mean" in result
         assert "PASS" in result
         assert "0.035" in result
         assert "2.10" in result
@@ -63,10 +67,10 @@ class TestFormatLayer1Table:
         """gate_passed=False일 때 BLOCKED 상태 검증."""
         # Arrange
         r1 = _make_l1_result(
-            pooled_ic=-0.010,
-            pooled_tstat=0.5,
+            cs_ic_mean=-0.010,
+            cs_ic_tstat=0.5,
             breadth=0.20,
-            valid_coverage=0.60,
+            cs_ic_fold_pass_ratio=0.20,
             gate_passed=False,
         )
 
@@ -80,7 +84,7 @@ class TestFormatLayer1Table:
     def test_fold_details_appended_when_provided(self) -> None:
         """fold_details 있으면 SWF FOLD DETAILS 테이블 추가 검증."""
         # Arrange
-        r1 = _make_l1_result(pooled_ic=0.04, pooled_tstat=2.0)
+        r1 = _make_l1_result(cs_ic_mean=0.04, cs_ic_tstat=2.0)
         folds = [
             {"fold": 1, "ic": 0.042, "breadth": 0.50, "n_valid": 9, "n_events": 120, "pass": True},
             {"fold": 2, "ic": -0.01, "breadth": 0.30, "n_valid": 7, "n_events": 100, "pass": False},
@@ -109,9 +113,9 @@ class TestFormatLayer1Table:
         assert "BTCUSDT" in result
 
     def test_valid_coverage_formatted_as_percentage(self) -> None:
-        """valid_coverage 85% → '85.0%' 포맷 검증."""
+        """cs_ic_fold_pass_ratio 85% → '85.0%' 포맷 검증."""
         # Arrange
-        r1 = _make_l1_result(valid_coverage=0.85)
+        r1 = _make_l1_result(cs_ic_fold_pass_ratio=0.85)
 
         # Act
         result = format_layer1_table(r1)
@@ -188,7 +192,7 @@ class TestFormatSystemStatus:
 class TestFormatWindowTable:
     """TI16: WindowTable 파이프 테이블 포맷 검증."""
 
-    @pytest.fixture
+    @pytest.fixture  # type: ignore[untyped-decorator]
     def sample_window(self) -> LayeredWindow:
         """표준 LayeredWindow 픽스처."""
         return LayeredWindow(
@@ -338,7 +342,7 @@ class TestFormatLayer1TableSwfStrings:
     """S11/S12: CPCV→SWF 교체 및 fold_pass_ratio 메인 테이블 미포함 검증."""
 
     def test_format_layer1_table_no_cpcv_string(self) -> None:
-        """S11: 출력에 'CPCV' 없고 'SWF', 'Pooled IC' 포함, 'Mean IC (fold)' 없음."""
+        """S11: 출력에 'CPCV' 없고 'SWF', 'CS IC' 포함, 'Mean IC (fold)' 없음."""
         # Arrange
         r = _make_l1_result()
         fold_details = [
@@ -351,11 +355,11 @@ class TestFormatLayer1TableSwfStrings:
         # Assert
         assert "CPCV" not in result
         assert "SWF" in result
-        assert "Pooled IC" in result
+        assert "CS IC Mean" in result
         assert "Mean IC (fold)" not in result
 
     def test_format_layer1_table_no_fold_pass_ratio_in_main(self) -> None:
-        """S12: 메인 테이블 섹션에 'Fold Pass Ratio' 없고, 'NW HAC' 행 존재."""
+        """S12: 메인 테이블 섹션에 구식 'Fold Pass Ratio' 없고, 새 CS 행 존재."""
         # Arrange
         r = _make_l1_result()
 
@@ -370,4 +374,4 @@ class TestFormatLayer1TableSwfStrings:
 
         # Assert
         assert "Fold Pass Ratio" not in main_section
-        assert "NW HAC" in result
+        assert "CS Fold Pass%" in result
