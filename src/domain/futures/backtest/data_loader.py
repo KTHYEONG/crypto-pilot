@@ -666,8 +666,26 @@ class DataCollector:
                     "Failed to resolve onboard_date for %s: %s", symbol, exc
                 )
 
-            # 상장일 보정 후 시작 시점보다 캐시 최저점이 뒤에 있고, 그 시간차가 24시간 이상인 경우에만 과거 갭 백필 진행
-            if effective_req_start < cache_min_dt and (cache_min_dt - effective_req_start) > pd.Timedelta(hours=24):
+            # metadata에서 이전에 성공적으로 조회해 본 최소 시점(earliest_searched) 확인
+            earliest_searched = meta.get("earliest_searched")
+            already_searched = False
+            if earliest_searched:
+                try:
+                    es_dt = pd.to_datetime(earliest_searched, utc=True)
+                    if effective_req_start >= es_dt:
+                        already_searched = True
+                except Exception as exc:
+                    self.logger.debug("Parsing earliest_searched failed: %s", exc)
+
+            # 상장일 보정 후 시작 시점보다 캐시 최저점이 뒤에 있고,
+            # 그 시간차가 24시간 이상이고, 아직 조회하지 않은 범위인 경우에만 과거 갭 백필 진행
+            time_gap = cache_min_dt - effective_req_start
+            should_backfill = (
+                not already_searched
+                and effective_req_start < cache_min_dt
+                and time_gap > pd.Timedelta(hours=24)
+            )
+            if should_backfill:
                 gap_start = effective_req_start
                 gap_end = cache_min_dt
                 if not self._is_range_blocked_by_permanent_failure(
@@ -682,6 +700,15 @@ class DataCollector:
                         )
                         if not gap_chunk.empty:
                             new_parts.append(self._normalize_df(gap_chunk))
+                        # 성공적으로 조회했으므로 (데이터가 비어있더라도)
+                        # earliest_searched를 업데이트하여 무한 루프 방지
+                        self._save_meta(
+                            {
+                                self._meta_key(symbol, timeframe): {
+                                    "earliest_searched": str(gap_start),
+                                }
+                            }
+                        )
                     except BinanceKlinePermanentError as exc:
                         self._record_permanent_fetch_failure(
                             symbol=symbol,
@@ -755,6 +782,7 @@ class DataCollector:
                     self._meta_key(symbol, timeframe): {
                         "earliest_available": str(combined["datetime"].min()),
                         "latest_available": str(combined["datetime"].max()),
+                        "earliest_searched": str(req_start),
                     }
                 }
             )
@@ -926,8 +954,26 @@ class DataCollector:
                     "Failed to resolve onboard_date for %s: %s", symbol, exc
                 )
 
-            # 상장일 보정 후 시작 시점보다 캐시 최저점이 뒤에 있고, 그 시간차가 24시간 이상인 경우에만 과거 갭 백필 진행
-            if effective_req_start < cache_min_dt and (cache_min_dt - effective_req_start) > pd.Timedelta(hours=24):
+            # metadata에서 이전에 성공적으로 조회해 본 최소 시점(earliest_searched) 확인
+            earliest_searched = meta.get("earliest_searched")
+            already_searched = False
+            if earliest_searched:
+                try:
+                    es_dt = pd.to_datetime(earliest_searched, utc=True)
+                    if effective_req_start >= es_dt:
+                        already_searched = True
+                except Exception as exc:
+                    self.logger.debug("Parsing earliest_searched failed: %s", exc)
+
+            # 상장일 보정 후 시작 시점보다 캐시 최저점이 뒤에 있고,
+            # 그 시간차가 24시간 이상이고, 아직 조회하지 않은 범위인 경우에만 과거 갭 백필 진행
+            time_gap = cache_min_dt - effective_req_start
+            should_backfill = (
+                not already_searched
+                and effective_req_start < cache_min_dt
+                and time_gap > pd.Timedelta(hours=24)
+            )
+            if should_backfill:
                 gap_start = effective_req_start
                 gap_end = cache_min_dt
                 if not self._is_range_blocked_by_permanent_failure(
@@ -942,6 +988,15 @@ class DataCollector:
                         )
                         if not gap_chunk.empty:
                             new_parts.append(self._normalize_df(gap_chunk))
+                        # 성공적으로 조회했으므로 (데이터가 비어있더라도)
+                        # earliest_searched를 업데이트하여 무한 루프 방지
+                        self._save_meta(
+                            {
+                                self._meta_key(symbol, timeframe): {
+                                    "earliest_searched": str(gap_start),
+                                }
+                            }
+                        )
                     except BinanceKlinePermanentError as exc:
                         self._record_permanent_fetch_failure(
                             symbol=symbol,
@@ -1013,6 +1068,7 @@ class DataCollector:
                     self._meta_key(symbol, timeframe): {
                         "earliest_available": str(combined["datetime"].min()),
                         "latest_available": str(combined["datetime"].max()),
+                        "earliest_searched": str(req_start),
                     }
                 }
             )
