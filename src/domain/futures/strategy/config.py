@@ -387,6 +387,9 @@ class CandidateStrategyConfig:
     wf_n_folds: int = 4
     min_fit_obs: int = 200
     min_wf_fold_pass_ratio: float = 0.60
+    l1_min_valid_strategies: int = 5
+    l1_min_panel_diversity: float = 0.30
+    l1_min_cs_fold_pass_ratio: float = 0.60
     fold_survival_metric: Literal[
         "predicted_mu_tstat", "realized_selected_edge", "realized_log_growth"
     ] = "realized_selected_edge"
@@ -632,6 +635,12 @@ class CandidateStrategyConfig:
             raise ValueError("min_fit_obs must be >= 1")
         if not (0.0 <= self.min_wf_fold_pass_ratio <= 1.0):
             raise ValueError("min_wf_fold_pass_ratio must be in [0.0, 1.0]")
+        if self.l1_min_valid_strategies < 1:
+            raise ValueError("l1_min_valid_strategies must be >= 1")
+        if not (0.0 <= self.l1_min_panel_diversity <= 1.0):
+            raise ValueError("l1_min_panel_diversity must be in [0.0, 1.0]")
+        if not (0.0 <= self.l1_min_cs_fold_pass_ratio <= 1.0):
+            raise ValueError("l1_min_cs_fold_pass_ratio must be in [0.0, 1.0]")
         if self.min_gate_brier_skill < -1.0:
             raise ValueError("min_gate_brier_skill must be >= -1.0")
         if self.min_gate_decile_lift < 0.0:
