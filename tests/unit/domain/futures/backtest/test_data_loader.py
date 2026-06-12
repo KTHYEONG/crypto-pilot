@@ -185,3 +185,122 @@ def test_ensure_funding_data_when_cache_read_fails_does_not_raise(
     )
 
     collector.ensure_funding_data("HOOKUSDT", "2025-01-01", "2025-01-31")
+
+
+def test_ensure_ohlcv_data_backfills_past_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collector = DataCollector()
+    
+    # 2023-10-01 ~ 2026-03-31 캐시 데이터 시뮬레이션
+    mock_cache = pd.DataFrame(
+        {
+            "timestamp": [1696118400000, 1774915200000],  # 2023-10-01, 2026-03-31
+            "datetime": pd.to_datetime(["2023-10-01T00:00:00Z", "2026-03-31T00:00:00Z"], utc=True),
+            "open": [1.0, 2.0],
+            "high": [1.5, 2.5],
+            "low": [0.9, 1.9],
+            "close": [1.1, 2.1],
+            "volume": [10.0, 20.0],
+        }
+    )
+    
+    saved_dfs: list[pd.DataFrame] = []
+    
+    monkeypatch.setattr(collector, "_load_cache", lambda *_args, **_kwargs: mock_cache)
+    monkeypatch.setattr(collector, "_save_cache", lambda symbol, tf, df: saved_dfs.append(df))
+    monkeypatch.setattr(collector, "_load_meta", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(collector, "_save_meta", lambda *_args, **_kwargs: None)
+    
+    # fetch_ohlcv_with_taker 호출 인자 기록
+    fetched_ranges = []
+    
+    def mock_fetch(symbol: str, timeframe: str, start: str, end: str) -> pd.DataFrame:
+        fetched_ranges.append((start, end))
+        # 2022-10-01 ~ 2023-10-01 사이의 데이터 반환 시뮬레이션
+        return pd.DataFrame(
+            {
+                "timestamp": [1664582400000],  # 2022-10-01
+                "datetime": pd.to_datetime(["2022-10-01T00:00:00Z"], utc=True),
+                "open": [0.5],
+                "high": [0.8],
+                "low": [0.4],
+                "close": [0.6],
+                "volume": [5.0],
+            }
+        )
+        
+    monkeypatch.setattr(collector.client, "fetch_ohlcv_with_taker", mock_fetch)
+    
+    # 2022-10-01 ~ 2026-03-31 수집 요청
+    collector.ensure_ohlcv_data("BTCUSDT", "1h", "2022-10-01", "2026-03-31")
+    
+    # 갭(2022-10-01 ~ 2023-10-01)에 대해 fetch가 호출되었는지 검증
+    assert len(fetched_ranges) > 0
+    # 첫 fetch 호출 범위가 갭의 시작점과 끝점인지 확인
+    assert fetched_ranges[0][0] == "2022-10-01 00:00:00+00:00"
+    assert fetched_ranges[0][1] == "2023-10-01 00:00:00+00:00"
+    
+    # 저장된 통합 데이터 검증
+    assert len(saved_dfs) == 1
+    combined_df = saved_dfs[0]
+    # 최저점이 2022-10-01로 갱신되었는지 확인
+    assert combined_df["datetime"].min() == pd.Timestamp("2022-10-01T00:00:00Z", tz="UTC")
+
+
+def test_ensure_ohlcv_data_clips_to_onboard_date_and_prevents_infinite_backfill_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.domain.futures.universe.storage import SymbolSyncProfile
+    collector = DataCollector()
+
+    # 상장일이 2023-07-24인 심볼 프로필 모킹
+    mock_profile = SymbolSyncProfile(
+        symbol="NEWCOINUSDT",
+        onboard_date=pd.Timestamp("2023-07-24").date(),
+        delivery_date=None,
+        status="TRADING",
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.universe.storage._load_symbol_sync_profiles",
+        lambda: {"NEWCOINUSDT": mock_profile},
+    )
+
+    # 캐시의 데이터 시작점이 상장일 당일 08:00 (실제 상장 시각 차이 시뮬레이션)
+    mock_cache = pd.DataFrame(
+        {
+            "timestamp": [1690185600000],  # 2023-07-24 08:00:00 UTC
+            "datetime": pd.to_datetime(["2023-07-24T08:00:00Z"], utc=True),
+            "open": [1.0],
+            "high": [1.5],
+            "low": [0.9],
+            "close": [1.1],
+            "volume": [10.0],
+        }
+    )
+    saved_dfs: list[pd.DataFrame] = []
+    fetched_ranges = []
+
+    monkeypatch.setattr(collector, "_load_cache", lambda *_args, **_kwargs: mock_cache)
+    monkeypatch.setattr(collector, "_save_cache", lambda symbol, tf, df: saved_dfs.append(df))
+    monkeypatch.setattr(collector, "_load_meta", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(collector, "_save_meta", lambda *_args, **_kwargs: None)
+
+    def mock_fetch(symbol: str, timeframe: str, start: str, end: str) -> pd.DataFrame:
+        fetched_ranges.append((start, end))
+        return pd.DataFrame()
+
+    monkeypatch.setattr(collector.client, "fetch_ohlcv_with_taker", mock_fetch)
+
+    # 요청 시작점을 상장일 이전(2022-10-01)으로 설정하고 수집 요청
+    collector.ensure_ohlcv_data("NEWCOINUSDT", "1h", "2022-10-01", "2026-03-31")
+
+    # 상장일 이전 갭(2022-10-01 ~ 2023-07-24)에 대한 API 호출은 없어야 하며,
+    # 오직 캐시 최댓값 이후의 최신 데이터 영역(2023-07-24 08:00:00 ~ )만 요청되어야 함.
+    assert len(fetched_ranges) > 0
+    for start_str, _ in fetched_ranges:
+        start_dt = pd.to_datetime(start_str, utc=True)
+        assert start_dt >= pd.to_datetime("2023-07-24T08:00:00Z", utc=True)
+
+
+
