@@ -95,12 +95,12 @@ def format_layer1_table(
         "[LAYER 1: CPCV SIGNAL VALIDATION] -------------------",
         "| Metric               | Value   | Gate  | Status      |",
         "| -------------------- | ------- | ----- | ----------- |",
-        f"| Mean IC (HAC)        | {r.mean_ic:.3f}   | >0    | {gate_str:<11} |",
-        f"| IC t-stat            | {r.ic_tstat:.2f}    | >1.5  | {'—':<11} |",
+        f"| Mean IC (HAC)        | {r.mean_ic:.3f}   | >0.03 | {gate_str:<11} |",
+        f"| IC t-stat            | {r.ic_tstat:.2f}    | >1.96 | {'—':<11} |",
         f"| Symbol Breadth       | {r.breadth:.3f}   | >0.3  | {'—':<11} |",
-        f"| Valid Coverage       | {_pct(r.valid_coverage):<7} | >70%  | {'—':<11} |",
+        f"| Valid Coverage       | {_pct(r.valid_coverage):<7} | >80%  | {'—':<11} |",
         f"| Valid Symbols/N      | {n_valid}/{n_total:<4}   | —     | {'—':<11} |",
-        f"| CPCV Fold Pass Ratio | {r.fold_pass_ratio:.3f}   | >0.5  | {'—':<11} |",
+        f"| CPCV Fold Pass Ratio | {r.fold_pass_ratio:.3f}   | >0.6  | {'—':<11} |",
         f"| L1 Gate              | {'—':<7} | —     | {gate_str:<11} |",
         "------------------------------------------------------",
     ]
@@ -120,9 +120,9 @@ def format_layer1_table(
 
     if per_symbol_top10:
         lines.append("")
-        lines.append("[PER-SYMBOL DIAGNOSTICS (Top 10)] -------------------")
-        lines.append("| Symbol | Raw Mu  | Vol     | t-stat | IC     | Valid |")
-        lines.append("| ------ | ------- | ------- | ------ | ------ | ----- |")
+        lines.append("[PER-SYMBOL AGGREGATE] ------------------------------")
+        lines.append("| Symbol | Raw Mu  | Vol     | t-stat | IC(avg) | Valid |")
+        lines.append("| ------ | ------- | ------- | ------ | ------- | ----- |")
         for ps in per_symbol_top10:
             valid_str: str = "Y" if ps.get("valid") else "N"
             lines.append(
