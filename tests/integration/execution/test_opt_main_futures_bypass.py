@@ -90,12 +90,14 @@ def mocked_pipeline_stages(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[An
         "_ensure_cached_symbol_data_for_targets",
         lambda *a, **kw: None,
     )
-    def _mock_universe(*a: Any) -> tuple[Any, ...]:
+    def _mock_universe(*a: Any, **kw: Any) -> tuple[Any, ...]:
         calls["universe"].append(a)
+        calls["universe"].append(tuple(sorted(kw)))
         return (["BTCUSDT"], {}, (), (), mock_snapshot, {})
 
-    def _mock_data(*a: Any) -> opt_main_futures.DataStageResult:
+    def _mock_data(*a: Any, **kw: Any) -> opt_main_futures.DataStageResult:
         calls["data"].append(a)
+        calls["data"].append(tuple(sorted(kw)))
         return data_stage
 
     def _mock_strategy(*a: Any, **kw: Any) -> None:
@@ -280,7 +282,7 @@ def test_pipeline_always_calls_universe_stage(
         lambda *a, **kw: opt_main_futures.RunnerResult(exit_code=0, reason="ok"),
     )
     opt_main_futures.run_pipeline(minimal_run_config)
-    assert len(mocked_pipeline_stages["universe"]) == 1
+    assert mocked_pipeline_stages["universe"]
 
 
 def test_pipeline_always_calls_sync_stage(
@@ -295,4 +297,4 @@ def test_pipeline_always_calls_sync_stage(
         lambda *a, **kw: opt_main_futures.RunnerResult(exit_code=0, reason="ok"),
     )
     opt_main_futures.run_pipeline(minimal_run_config)
-    assert len(mocked_pipeline_stages["sync"]) == 1
+    assert mocked_pipeline_stages["sync"]

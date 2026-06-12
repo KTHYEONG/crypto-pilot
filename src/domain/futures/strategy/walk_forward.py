@@ -244,7 +244,7 @@ def build_l1_swf_folds(
     *,
     n_bars: int,
     n_folds: int = 5,
-    warmup_bars: int,
+    l1_start_bars: int,
     l1_end_bars: int,
     purge_bars: int,
     embargo_bars: int,
@@ -252,14 +252,13 @@ def build_l1_swf_folds(
 ) -> tuple[WFFold, ...]:
     """L1 신호 검증용 Purged Sequential Walk-Forward folds.
 
-    [warmup_bars, l1_end_bars]를 n_folds 등간격 OOS 창으로 파티션.
-    fit은 bar 0 기점 expanding (항상 인과: fit_end < oos_start 보장).
-    production OOS [l1_end_bars, n_bars)는 미사용 (L3 전용).
+    [l1_start_bars, l1_end_bars)를 initial-train 1개 + OOS n_folds개 block으로 분할한다.
+    fit은 l1_start_bars 기점 expanding이며 pre-L1 bar는 feature warm-up 전용으로만 사용한다.
 
     Args:
         n_bars: aligned.datetimes 전체 길이.
         n_folds: OOS 창 수 (기본 5).
-        warmup_bars: IS start bar index (searchsorted(aligned.datetimes, is_start_ts)).
+        l1_start_bars: L1 학습 시작 bar index.
         l1_end_bars: production OOS start bar index
             (searchsorted(aligned.datetimes, oos_start_ts)).
         purge_bars: OOS 직전 fit에서 제거할 bar 수 (leakage 방지).
@@ -267,60 +266,48 @@ def build_l1_swf_folds(
         cal_fraction: fit 구간 후반 calibration 비율.
 
     Returns:
-        WFFold 튜플. bar 부족 시 single fallback.
+        WFFold 튜플.
 
     Time Complexity: O(n_folds)
     Space Complexity: O(n_folds)
     """
-    import logging
-
-    _log = logging.getLogger(__name__)
     _ = embargo_bars  # 시그니처 일관성 유지용, 내부 로직 미사용
-
-    available: int = l1_end_bars - warmup_bars
-
-    def _fallback() -> tuple[WFFold, ...]:
-        fold_len = max(1, available // 2)
-        fit_e = l1_end_bars - purge_bars
-        if fit_e <= 0:
-            fit_e = max(1, l1_end_bars - 1)
-        cal_len = max(1, int(fit_e * cal_fraction))
-        cal_s = max(0, fit_e - cal_len)
-        oos_s = max(0, l1_end_bars - fold_len)
-        _log.warning(
-            "build_l1_swf_folds: available=%d < n_folds*2=%d, using single fallback",
-            available,
-            n_folds * 2,
+    if n_folds < 1:
+        raise ValueError("n_folds must be >= 1")
+    if l1_start_bars < 0 or l1_end_bars > n_bars or l1_start_bars >= l1_end_bars:
+        raise ValueError(
+            "invalid L1 bar range: "
+            f"l1_start_bars={l1_start_bars}, l1_end_bars={l1_end_bars}, n_bars={n_bars}"
         )
-        return (WFFold(
-            fit_start=0,
-            fit_end=fit_e,
-            cal_start=cal_s,
-            cal_end=fit_e,
-            oos_start=oos_s,
-            oos_end=l1_end_bars,
-        ),)
 
-    if n_folds < 1 or available < n_folds * 2:
-        return _fallback()
-
-    fold_len: int = available // n_folds
-    if fold_len < 1:
-        return _fallback()
+    available: int = l1_end_bars - l1_start_bars
+    block_len: int = available // (n_folds + 1)
+    if block_len < 1:
+        raise ValueError(
+            "insufficient bars for L1 SWF blocks: "
+            f"available={available}, n_folds={n_folds}"
+        )
 
     folds: list[WFFold] = []
     for k in range(n_folds):
-        oos_s: int = warmup_bars + k * fold_len
-        oos_e: int = (
-            warmup_bars + (k + 1) * fold_len if k < n_folds - 1 else l1_end_bars
-        )
-        fit_e: int = oos_s - purge_bars  # 인과 핵심: fit_end < oos_start
-        if fit_e <= 0:
-            continue
-        cal_len: int = max(1, int(fit_e * cal_fraction))
-        cal_s: int = fit_e - cal_len
+        oos_s = l1_start_bars + (k + 1) * block_len
+        oos_e = l1_start_bars + (k + 2) * block_len if k < n_folds - 1 else l1_end_bars
+        fit_e = oos_s - purge_bars
+        if fit_e <= l1_start_bars:
+            raise ValueError(
+                "insufficient fit span for L1 SWF fold: "
+                f"fold={k}, fit_end={fit_e}, l1_start_bars={l1_start_bars}"
+            )
+        if oos_e <= oos_s:
+            raise ValueError(
+                "invalid OOS span for L1 SWF fold: "
+                f"fold={k}, oos_start={oos_s}, oos_end={oos_e}"
+            )
+        fit_len = fit_e - l1_start_bars
+        cal_len = max(1, int(fit_len * cal_fraction))
+        cal_s = fit_e - cal_len
         folds.append(WFFold(
-            fit_start=0,
+            fit_start=l1_start_bars,
             fit_end=fit_e,
             cal_start=cal_s,
             cal_end=fit_e,
@@ -328,4 +315,4 @@ def build_l1_swf_folds(
             oos_end=oos_e,
         ))
 
-    return tuple(folds) if folds else _fallback()
+    return tuple(folds)
