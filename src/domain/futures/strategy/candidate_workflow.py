@@ -256,6 +256,11 @@ def _fit_and_predict_single_fold(
         ml_out = predict_regime_conditional_ensemble(model=ensemble_model, oos_events=oos_set.event_index, cfg=cfg)
         timing_profile["inference"] = time.perf_counter() - t_step
 
+        # --- Capture Ensemble Diagnostics for aggregation ---
+        diag_data = getattr(ensemble_model, "ensemble_diagnostics", {})
+        if diag_data:
+            ml_out.validation_diagnostics["ensemble_diagnostics"] = diag_data
+
         # --- Calculate Rank IC for ensemble_b0 on OOS ---
         from src.domain.futures.strategy.candidate_edge import _rank_ic
         pred_oos = ml_out.expected_net_bps
