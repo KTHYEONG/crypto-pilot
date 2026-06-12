@@ -74,8 +74,8 @@ def format_layer1_table(
 
     Args:
         r: Layer1Result-compatible object with fields:
-            pooled_ic, pooled_tstat, breadth, valid_coverage,
-            n_valid, n_total, fold_pass_ratio (진단용, gate 미포함), gate_passed.
+            cs_ic_mean, cs_ic_tstat, cs_ic_fold_pass_ratio, breadth,
+            n_valid, n_total, n_valid_strategies, panel_diversity, gate_passed.
         fold_details: Optional list of dicts with keys:
             fold, ic, breadth, n_valid, n_events, pass.
         per_symbol_top10: Optional list of dicts with keys:
@@ -91,6 +91,14 @@ def format_layer1_table(
     n_total: int = getattr(r, "n_total", 0)
     n_trade_scope: int = getattr(r, "n_trade_scope", n_total)
     gate_str: str = _gate(r.gate_passed)
+    cs_ic_mean: float = float(getattr(r, "cs_ic_mean", 0.0))
+    cs_ic_tstat: float = float(getattr(r, "cs_ic_tstat", 0.0))
+    cs_ic_fold_pass_ratio: float = float(getattr(r, "cs_ic_fold_pass_ratio", 0.0))
+    decile_lift_bps: float = float(getattr(r, "decile_lift_bps", 0.0))
+    n_valid_strategies: int = int(getattr(r, "n_valid_strategies", 0))
+    panel_diversity: float = float(getattr(r, "panel_diversity", 0.0))
+    strategy_panel = getattr(r, "strategy_panel", ())
+    strategy_panel_count = len(strategy_panel) if isinstance(strategy_panel, tuple) else 0
 
     def _row(metric: str, value: str, gate: str, status: str) -> str:
         return f"| {metric:<20} | {value:<7} | {gate:<5} | {status:<11} |"
@@ -99,15 +107,13 @@ def format_layer1_table(
         "[LAYER 1: SWF SIGNAL VALIDATION] --------------------",
         "| Metric               | Value   | Gate  | Status      |",
         "| -------------------- | ------- | ----- | ----------- |",
-        _row("Pooled IC", f"{r.pooled_ic:.3f}", ">0.03", gate_str),
-        _row(
-            "IC t-stat (NW HAC)",
-            f"{r.pooled_tstat:.2f}",
-            ">1.96",
-            "✓ PASS" if r.pooled_tstat >= 1.96 else "✗ FAIL"
-        ),
-        _row("Symbol Breadth", f"{r.breadth:.3f}", ">0.3", "—"),
-        _row("Valid Coverage", _pct(r.valid_coverage), ">80%", "—"),
+        _row("CS IC Mean", f"{cs_ic_mean:.3f}", "—", "—"),
+        _row("CS IC t-stat", f"{cs_ic_tstat:.2f}", "—", "—"),
+        _row("CS Fold Pass%", _pct(cs_ic_fold_pass_ratio), "≥60%", "—"),
+        _row("Strategy Panel", f"{n_valid_strategies}/{strategy_panel_count}", "≥5", "—"),
+        _row("Panel Diversity", f"{panel_diversity:.3f}", "≥30%", "—"),
+        _row("Decile Lift", f"{decile_lift_bps:.2f}bps", "—", "—"),
+        _row("Symbol Breadth", f"{getattr(r, 'breadth', 0.0):.3f}", ">0.3", "—"),
         _row("Valid Symbols/N", f"{n_valid}/{n_trade_scope}", "—", "—"),
         _row("L1 Gate", "—", "—", gate_str),
         "------------------------------------------------------",
