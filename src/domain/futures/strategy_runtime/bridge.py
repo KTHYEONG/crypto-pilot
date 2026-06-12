@@ -48,8 +48,9 @@ def verify_data_integrity(
     n_bars = aligned.close_2d.shape[0]
 
     _logger.info("[DATA-INTEGRITY] Starting market data integrity check for %d symbols...", len(symbols))
-    _logger.info("[DATA-INTEGRITY] %-12s | %-6s | %-6s | %-6s | %-6s | %-6s | %s",
-                 "Symbol", "Bars", "NaN%", "Zero%", "VolStd", "Hi>=Lo", "Status (Reason)")
+    
+    passed_symbols = []
+    failed_symbols_info = []
 
     for col_idx, sym in enumerate(symbols):
         close = aligned.close_2d[:, col_idx]
@@ -81,11 +82,12 @@ def verify_data_integrity(
         status = "FAIL" if reasons else "PASS"
         status_str = f"FAIL ({','.join(reasons)})" if reasons else "PASS"
 
-        _logger.info(
-            "[DATA-INTEGRITY] %-12s | %-6d | %-5.1f%% | %-5.1f%% | %-6.4f | %-6s | %s",
-            sym, n_bars, nan_pct, zero_neg_pct, close_std,
-            "FAIL" if hi_lo_violation > 0 else "PASS", status_str
-        )
+        if status == "PASS":
+            passed_symbols.append((sym, n_bars))
+        else:
+            failed_symbols_info.append(
+                (sym, n_bars, nan_pct, zero_neg_pct, close_std, hi_lo_violation, status_str)
+            )
 
         report[sym] = {
             "status": status,
@@ -95,6 +97,29 @@ def verify_data_integrity(
             "hi_lo_violation": hi_lo_violation,
             "reasons": reasons,
         }
+
+    if passed_symbols:
+        bar_lengths = sorted({x[1] for x in passed_symbols})
+        bar_lengths_str = str(bar_lengths[0]) if len(bar_lengths) == 1 else f"{min(bar_lengths)}~{max(bar_lengths)}"
+        _logger.info(
+            "[DATA-INTEGRITY] PASS: %d/%d symbols passed. "
+            "(Bars: %s, NaN: 0.0%%, Zero/Neg: 0.0%%, Hi>=Lo: PASS)",
+            len(passed_symbols), len(symbols), bar_lengths_str
+        )
+
+    if failed_symbols_info:
+        _logger.warning("[DATA-INTEGRITY] FAIL: %d symbols failed integrity check:", len(failed_symbols_info))
+        _logger.warning(
+            "[DATA-INTEGRITY] %-12s | %-6s | %-6s | %-6s | %-6s | %-6s | %s",
+            "Symbol", "Bars", "NaN%", "Zero%", "VolStd", "Hi>=Lo", "Status (Reason)"
+        )
+        for info in failed_symbols_info:
+            sym, n_bars, nan_pct, zero_neg_pct, close_std, hi_lo_violation, status_str = info
+            _logger.warning(
+                "[DATA-INTEGRITY] %-12s | %-6d | %-5.1f%% | %-5.1f%% | %-6.4f | %-6s | %s",
+                sym, n_bars, nan_pct, zero_neg_pct, close_std,
+                "FAIL" if hi_lo_violation > 0 else "PASS", status_str
+            )
 
     return report
 
