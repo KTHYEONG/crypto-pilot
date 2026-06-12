@@ -381,8 +381,15 @@ def _list_usdt_futures_symbols() -> list[str]:
         return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
 
 
+_profiles_cache: dict[str, SymbolSyncProfile] | None = None
+
+
 def _load_symbol_sync_profiles() -> dict[str, SymbolSyncProfile]:
     """Load symbol lifecycle profiles from local file cache or Binance API."""
+    global _profiles_cache
+    if _profiles_cache is not None:
+        return _profiles_cache
+
     import json
     import time
     from pathlib import Path
@@ -408,6 +415,7 @@ def _load_symbol_sync_profiles() -> dict[str, SymbolSyncProfile]:
                         status=item.get("status", ""),
                     )
                 logger.info("Loaded symbol sync profiles from cache: %s", cache_path)
+                _profiles_cache = profiles
                 return profiles
         except Exception as e:
             logger.warning("Failed to load symbol sync profiles cache: %s", e)
@@ -478,10 +486,12 @@ def _load_symbol_sync_profiles() -> dict[str, SymbolSyncProfile]:
                     delivery_date=date.fromisoformat(delivery) if delivery else None,
                     status=item.get("status", ""),
                 )
+            _profiles_cache = profiles
             return profiles
         except Exception as e:
             logger.error("Critical: Fallback cache load failed: %s", e)
             
+    _profiles_cache = profiles
     return profiles
 
 
