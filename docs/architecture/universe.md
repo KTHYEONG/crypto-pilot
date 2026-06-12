@@ -65,3 +65,5 @@ graph TD
 # 5. Edge Cases & Handling
 - **Exchange API Rule Changes (e.g., Tick Size):** The universe generation caches API exchange info as-of the `knowledge_date`. If an exchange modifies tick sizes, the snapshot uses the historical structure parameters to maintain exact simulation alignment.
 - **Delisted/Dead Coins:** Symbols that are delisted post-`knowledge_date` remain in the snapshot if they met the criteria at `as_of`. This structurally enforces the inclusion of failing assets to prevent survivorship bias in the backtest.
+- **New Listings Data Collection Guard:** When backfilling data for newly listed coins, the loader clips the request start date to the symbol's `onboard_date` to prevent queries before listing. Additionally, to avoid infinite request loops due to intra-day listing offsets (e.g. 08:00 listing vs 00:00 clipping), backfills are automatically skipped if the target gap is less than 24 hours.
+
