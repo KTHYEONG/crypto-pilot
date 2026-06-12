@@ -12,6 +12,11 @@ related_paths:
 last_verified: 2026-06-12
 ---
 
+## [2026-06-12] SWF Strategy Panel Gate로 L1 계약 재정의
+- **Delta:** `run_l1_swf`가 전략 패널 검증을 `compute_per_strategy_oos_validation(fold_tuples=futures)` 기본 계약으로 호출하도록 정렬. `format_layer1_table`의 메인 표에서 `Pooled IC`/`IC t-stat`를 제거하고 `CS IC Mean`, `CS IC t-stat`, `CS Fold Pass%`, `Strategy Panel`, `Panel Diversity`, `Decile Lift`만 노출.
+- **Rationale:** 레거시 pooled IC는 gate 판단력이 없고, OOS 전략 패널의 consistency/diversity가 실제 통과 기준을 더 직접적으로 반영함. 메인 표와 gate를 동일한 기준으로 맞춰 해석 오독을 줄임.
+- **Edge Cases/Trade-offs:** legacy IC는 필요 시 진단 로그로만 남길 수 있으나, 평가 입력이나 기본 표에는 쓰지 않음. 기존 sweep 결과와의 비교는 결과 로그에서만 수행.
+
 ## [2026-06-12] CPCV → SWF-K 전환 + Pooled IC + NW HAC t-stat
 - **Delta:** `build_cpcv_folds`+`_cpcv_to_wf_fold` 폐기 → `build_l1_swf_folds` (K=5 등간격 OOS, expanding fit, `fit_end=oos_start-purge_bars`). `mean_ic`(fold 평균) → `pooled_ic`(전체 이벤트 concat Spearman), `ic_tstat` → `pooled_tstat`(NW HAC Bartlett kernel, Andrews 1991). Gate에서 `fold_pass_ratio≥0.60` 제거(진단용 보존). `SE(IC)=12·√(S_NW/N)` 스케일 보정(미적용 시 |t| 12배 과대평가). 배포 결과: Pooled IC=-0.095, NW t=-4.60, BLOCKED(정직).
 - **Rationale:** CPCV의 3중 결함(disjoint OOS collapse → 이벤트 중복, anti-causal fold, N-무시 equal-weight IC)이 평가 프레임워크 신뢰성을 파괴. SWF-K는 구조적 인과를 보장하면서 statistical power를 극대화(N=5576 pooled vs fold 평균).

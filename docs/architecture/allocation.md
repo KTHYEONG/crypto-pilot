@@ -165,11 +165,12 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 
 ## 6.2 Core Math
 
-**Layer 1 — CPCV Signal Validation**
-- Folds: $C(N_g, k)$ combinations of $N_g$ groups; purge $p$ bars left of each test group; embargo $e$ bars right.
-- OOS stacking: $\mu_{\text{oos},s} = \frac{1}{F} \sum_{f=1}^{F} \mu_{f,s}$ (per-symbol fold average; leakage guard: each fold predicts its own OOS only).
-- HAC IC t-stat (independent-fold approx): $t = \bar{IC} \cdot \sqrt{F} / (\text{std}_{IC} + 10^{-9})$
-- **Gate**: $\bar{IC} \geq 0.030$, $t_{IC} \geq 1.96$, breadth $\geq 0.30$, coverage $\geq 0.80$, fold_pass_ratio $\geq 0.60$
+**Layer 1 — SWF Strategy Panel Validation**
+- Folds: `build_l1_swf_folds` with expanding fit, purge bars, and deterministic OOS windows.
+- Panel validation: `compute_per_strategy_oos_validation(fold_tuples=futures)` evaluates the strategy panel with default `min_obs=30`, `t_stat_floor=1.5`, `consistency_floor=0.60`.
+- Fold diagnostics: `cs_ic_mean`, `cs_ic_tstat`, `cs_ic_fold_pass_ratio`, and `decile_lift_bps` are tracked per fold and aggregated for the gate.
+- **Gate**: `trained_fold_coverage >= 0.80`, `n_valid_strategies >= 5`, `panel_diversity >= 0.50`, `cs_ic_fold_pass_ratio >= 0.60`.
+- Legacy pooled IC is no longer a gate input and is not shown in the main table; if emitted, it is diagnostic only.
 
 **Layer 2 — CS Rank + Diagonal Kelly AWF**
 - BTC-β neutralization: $\mu_{\text{neutral},i} = \mu_i - \beta_i \cdot \bar{\mu}_{\text{mkt}}$ (CS mean as proxy)
@@ -220,6 +221,7 @@ graph TD
 - Bridge 실행 완료 후 tiered 분기 진입 — `ml_out.labeled`(Triple-Barrier events) + `align_data_maps(data_maps)` 사용.
 - Phase D allocation 스킵 (`return None`); 예외 시 Phase D fallback 보존.
 - Phase flag 매핑: `--phase signal` → bridge(신호진단)+L1, `--phase alo` → +L2+L3, `full` → +최적화.
+- L1 table rendering uses `CS IC Mean`, `CS IC t-stat`, `CS Fold Pass%`, `Strategy Panel`, `Panel Diversity`, and `Decile Lift`; legacy `Pooled IC` fields are removed from the primary presentation.
 
 ## 6.5.1 Tiered Aligned Scope (Invariant)
 - `aligned_tiered` scope = **`Stage6 OOS selected ∩ data_stage.data_maps`** (bridge와 동일, `effective_trade_syms`).
