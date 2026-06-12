@@ -49,6 +49,10 @@ def build_cpcv_folds(
 ) -> tuple[CPCVFold, ...]:
     """Build Combinatorial Purged Cross-Validation folds.
 
+    .. deprecated::
+        build_l1_swf_folds로 교체됨. CPCV는 disjoint OOS collapse 버그로 인해 L1 검증에 부적합.
+        기존 테스트 호환성을 위해 함수 본체는 유지됨.
+
     Partitions ``n_bars`` into ``n_groups`` equal-sized groups and enumerates
     all C(n_groups, n_test_groups) combinations as test sets.  For each
     combination the adjacent fit groups are trimmed by ``purge_bars`` (on the
@@ -234,3 +238,94 @@ def build_walk_forward_folds(
         ))
 
     return tuple(folds) if folds else _single_fold()
+
+
+def build_l1_swf_folds(
+    *,
+    n_bars: int,
+    n_folds: int = 5,
+    warmup_bars: int,
+    l1_end_bars: int,
+    purge_bars: int,
+    embargo_bars: int,
+    cal_fraction: float = 0.15,
+) -> tuple[WFFold, ...]:
+    """L1 신호 검증용 Purged Sequential Walk-Forward folds.
+
+    [warmup_bars, l1_end_bars]를 n_folds 등간격 OOS 창으로 파티션.
+    fit은 bar 0 기점 expanding (항상 인과: fit_end < oos_start 보장).
+    production OOS [l1_end_bars, n_bars)는 미사용 (L3 전용).
+
+    Args:
+        n_bars: aligned.datetimes 전체 길이.
+        n_folds: OOS 창 수 (기본 5).
+        warmup_bars: IS start bar index (searchsorted(aligned.datetimes, is_start_ts)).
+        l1_end_bars: production OOS start bar index
+            (searchsorted(aligned.datetimes, oos_start_ts)).
+        purge_bars: OOS 직전 fit에서 제거할 bar 수 (leakage 방지).
+        embargo_bars: 미사용 (시그니처 일관성 유지용).
+        cal_fraction: fit 구간 후반 calibration 비율.
+
+    Returns:
+        WFFold 튜플. bar 부족 시 single fallback.
+
+    Time Complexity: O(n_folds)
+    Space Complexity: O(n_folds)
+    """
+    import logging
+
+    _log = logging.getLogger(__name__)
+    _ = embargo_bars  # 시그니처 일관성 유지용, 내부 로직 미사용
+
+    available: int = l1_end_bars - warmup_bars
+
+    def _fallback() -> tuple[WFFold, ...]:
+        fold_len = max(1, available // 2)
+        fit_e = l1_end_bars - purge_bars
+        if fit_e <= 0:
+            fit_e = max(1, l1_end_bars - 1)
+        cal_len = max(1, int(fit_e * cal_fraction))
+        cal_s = max(0, fit_e - cal_len)
+        oos_s = max(0, l1_end_bars - fold_len)
+        _log.warning(
+            "build_l1_swf_folds: available=%d < n_folds*2=%d, using single fallback",
+            available,
+            n_folds * 2,
+        )
+        return (WFFold(
+            fit_start=0,
+            fit_end=fit_e,
+            cal_start=cal_s,
+            cal_end=fit_e,
+            oos_start=oos_s,
+            oos_end=l1_end_bars,
+        ),)
+
+    if n_folds < 1 or available < n_folds * 2:
+        return _fallback()
+
+    fold_len: int = available // n_folds
+    if fold_len < 1:
+        return _fallback()
+
+    folds: list[WFFold] = []
+    for k in range(n_folds):
+        oos_s: int = warmup_bars + k * fold_len
+        oos_e: int = (
+            warmup_bars + (k + 1) * fold_len if k < n_folds - 1 else l1_end_bars
+        )
+        fit_e: int = oos_s - purge_bars  # 인과 핵심: fit_end < oos_start
+        if fit_e <= 0:
+            continue
+        cal_len: int = max(1, int(fit_e * cal_fraction))
+        cal_s: int = fit_e - cal_len
+        folds.append(WFFold(
+            fit_start=0,
+            fit_end=fit_e,
+            cal_start=cal_s,
+            cal_end=fit_e,
+            oos_start=oos_s,
+            oos_end=oos_e,
+        ))
+
+    return tuple(folds) if folds else _fallback()

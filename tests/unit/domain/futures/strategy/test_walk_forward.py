@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.domain.futures.strategy.config import CandidateStrategyConfig, resolve_purge_and_embargo_bars
-from src.domain.futures.strategy.walk_forward import WFFold, build_walk_forward_folds
+from src.domain.futures.strategy.walk_forward import WFFold, build_l1_swf_folds, build_walk_forward_folds
 
 
 def _cfg(**kwargs: object) -> CandidateStrategyConfig:
@@ -89,3 +89,96 @@ def test_wffold_fields_are_valid() -> None:
         assert fold.fit_start < fold.fit_end
         assert fold.cal_start < fold.cal_end
         assert fold.oos_start < fold.oos_end
+
+
+# ---------------------------------------------------------------------------
+# build_l1_swf_folds 테스트
+# ---------------------------------------------------------------------------
+
+
+def test_build_l1_swf_folds_causal_and_expanding() -> None:
+    """S1: 인과 보장 + expanding fit."""
+    # Arrange
+    folds = build_l1_swf_folds(
+        n_bars=10000,
+        n_folds=5,
+        warmup_bars=2000,
+        l1_end_bars=7000,
+        purge_bars=50,
+        embargo_bars=20,
+    )
+
+    # Assert
+    assert len(folds) == 5
+    for fold in folds:
+        assert fold.fit_end < fold.oos_start  # strictly causal
+        assert fold.fit_start == 0            # expanding from bar 0
+
+
+def test_build_l1_swf_folds_oos_bounds() -> None:
+    """S2: OOS 파티션 — l1_end_bars 상한, warmup_bars 하한."""
+    # Arrange
+    folds = build_l1_swf_folds(
+        n_bars=10000,
+        n_folds=5,
+        warmup_bars=2000,
+        l1_end_bars=7000,
+        purge_bars=50,
+        embargo_bars=20,
+    )
+
+    # Assert
+    assert folds[0].oos_start == 2000   # warmup_bars
+    assert folds[-1].oos_end == 7000    # l1_end_bars (n_bars=10000 미사용)
+
+
+def test_build_l1_swf_folds_purge_gap() -> None:
+    """S3: purge 간격 정확성."""
+    # Arrange
+    folds = build_l1_swf_folds(
+        n_bars=10000,
+        n_folds=5,
+        warmup_bars=2000,
+        l1_end_bars=7000,
+        purge_bars=100,
+        embargo_bars=0,
+    )
+
+    # Assert
+    for fold in folds:
+        assert fold.fit_end == fold.oos_start - 100
+
+
+def test_build_l1_swf_folds_insufficient_bars_fallback() -> None:
+    """S4: bar 부족 → single fallback."""
+    # Arrange / Act
+    folds = build_l1_swf_folds(
+        n_bars=100,
+        warmup_bars=90,
+        l1_end_bars=95,
+        n_folds=5,
+        purge_bars=2,
+        embargo_bars=1,
+    )
+
+    # Assert
+    assert len(folds) == 1  # fallback, no ValueError
+
+
+def test_build_l1_swf_folds_equal_partition() -> None:
+    """S5: fold 등간격 (마지막 제외)."""
+    # Arrange
+    folds = build_l1_swf_folds(
+        n_bars=10000,
+        n_folds=5,
+        warmup_bars=1000,
+        l1_end_bars=6000,
+        purge_bars=10,
+        embargo_bars=5,
+    )
+    # available = 5000, fold_len = 1000
+
+    # Assert
+    assert len(folds) == 5
+    for fold in folds[:-1]:
+        assert (fold.oos_end - fold.oos_start) == 1000
