@@ -8,12 +8,14 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
 from src.domain.futures.strategy.candidate_contracts import (
     CandidateFoldOutput,
     CandidateModelOutput,
     EdgeSource,
     EdgeValidationReport,
+    FoldFitStatus,
     GateValidationReport,
 )
 from src.domain.futures.strategy.candidate_dataset import build_candidate_dataset, fit_candidate_feature_schema
@@ -34,6 +36,25 @@ _GLOBAL_LABELED_EVENTS: pd.DataFrame | None = None
 _GLOBAL_ALIGNED: AlignedMarketData | None = None
 _GLOBAL_CFG: CandidateStrategyConfig | None = None
 _GLOBAL_PURGE_BARS: int | None = None
+
+
+def _resolve_fold_fit_status(
+    *,
+    n_fit: int,
+    min_fit_obs: int,
+    n_oos: int,
+    prediction: NDArray[np.float64] | None,
+) -> tuple[FoldFitStatus, str | None]:
+    """Classify fold fit/prediction viability for downstream filtering."""
+    if n_fit < max(2, min_fit_obs):
+        return ("insufficient_fit", "insufficient_observations")
+    if n_oos < 1:
+        return ("empty_oos", "empty_oos")
+    if prediction is None or prediction.size < 1:
+        return ("empty_oos", "empty_oos")
+    if float(np.nanstd(prediction.astype(np.float64))) <= 0.0:
+        return ("constant_prediction", "constant_prediction")
+    return ("trained", None)
 
 
 def _dataset_timing_total(timing_profile: dict[str, float] | None) -> float:
@@ -216,6 +237,9 @@ def _fit_and_predict_single_fold(
             selected_events=selected_events,
             gate_report=gate_rep,
             edge_report=edge_rep,
+            fit_status="insufficient_fit",
+            n_fit=n_fit,
+            skip_reason="insufficient_observations",
             gate_model=None,
             edge_models=None,
             fit_set=fit_set,
@@ -281,7 +305,12 @@ def _fit_and_predict_single_fold(
         )
         _conditioning = getattr(ensemble_model, "conditioning", "ensemble_b0")
         _val_ic = float(getattr(ensemble_model, "validation_rank_ic", 0.0))
-        _lam = float(ml_out.validation_diagnostics.get("mu_shrinkage_lambda", 1.0))
+        _lam_value = ml_out.validation_diagnostics.get("mu_shrinkage_lambda", 1.0)
+        _lam = (
+            float(_lam_value)
+            if isinstance(_lam_value, (int, float, np.integer, np.floating))
+            else 1.0
+        )
         ml_out.validation_diagnostics["conditioning"] = _conditioning
         ml_out.validation_diagnostics["val_rank_ic"] = _val_ic
         ml_out.validation_diagnostics["oos_rank_ic"] = rank_ic_val
@@ -384,6 +413,13 @@ def _fit_and_predict_single_fold(
     timing_profile["selection"] = time.perf_counter() - t_step
     timing_profile["total"] = time.perf_counter() - t_total
 
+    fit_status, skip_reason = _resolve_fold_fit_status(
+        n_fit=n_fit,
+        min_fit_obs=cfg.min_fit_obs,
+        n_oos=len(ml_out.expected_net_bps),
+        prediction=np.asarray(ml_out.expected_net_bps, dtype=np.float64),
+    )
+
     return CandidateFoldOutput(
         fold_id=fold_idx,
         oos_start=fold.oos_start,
@@ -392,6 +428,9 @@ def _fit_and_predict_single_fold(
         selected_events=selected_events,
         gate_report=gate_rep,
         edge_report=edge_rep,
+        fit_status=fit_status,
+        n_fit=n_fit,
+        skip_reason=skip_reason,
         gate_model=gate_model,
         edge_models=edge_models,
         fit_set=fit_set,
