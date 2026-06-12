@@ -1,35 +1,6 @@
 # 목적
 유효한 signal 들을 여러개 생성 후 기존의 1개의 전략으로만 매매하는 한계점을 보완하여 ML으로 동적으로 적재적소에 전략을 사용하여 복리자산증식 전략 도출해내는 것임
 
-# Mode Full (ALO/Ensemble) — 최신 검증 결과
-
-**최신 갱신:** 2026-06-12 (SWF fold/window/warmup 정합성 수정, full `pytest` 통과)
-**현재 상태:** `BLOCKED` — `phase signal` 재실행이 외부 데이터 네트워크 차단으로 중단됨. 최신 SWF fold 수치는 아직 재산출 전.
-**평가 기준:** `min_pooled_ic=0.03`, `min_nw_tstat=1.96`, `min_breadth=0.30`, `min_valid_coverage=0.80`
-
-**진단 노트:**
-- **SWF-K 전환 (2026-06-12 — CPCV → Purged Sequential Walk-Forward):**
-  - ✅ **CPCV 폐기**: OOS collapse 버그(disjoint spans→contiguous mask), anti-causal fold (test_groups=[0,1] → fit=future data), 중첩 fold 중복 이벤트 제거.
-  - ✅ **SWF-K 도입**: K=5 등간격 OOS 창, expanding fit (fit_start=0), `fit_end=oos_start-purge_bars` 구조적 인과 보장.
-  - ✅ **Pooled IC**: fold 평균 IC → 전 fold OOS 이벤트 concat 후 단일 Spearman rank IC. N=5576 기준.
-  - ✅ **NW HAC t-stat**: Newey-West Bartlett kernel, Andrews 1991 자동 대역폭. 자기상관 보정으로 naive t-stat보다 보수적.
-  - ✅ **스케일 버그 수정 (Audit)**: `SE(IC)=12·√(S_NW/N)` 정규화 — 미적용 시 |t| 12배 과대평가(거짓 양성 위험).
-  - ✅ **fold_pass_ratio gate 제거**: 진단용 보존, gate 조건 4개로 단순화.
-  - ❌ **L1 Gate 차단**: Pooled IC `-0.095`, NW HAC t-stat `-4.60`, Breadth `0.017`, Valid Coverage `0.0%` → **BLOCKED**.
-  - 🎯 **다음 병목**: Fold 1-4 유효 심볼 0 (N Valid=0) — l1_start 기점 warmup 구간 내 OOS 파티션 흡수 현상. 신호 alpha 부재 지속.
-
-- **Direction A/B 알고리즘 진단:**
-  - ✅ **Direction A (Calibration)**: 6개 Regime 중 3개 유효 확인. `score_z` 기반 슬로프 피팅 정상 작동.
-  - ✅ **Direction B (Risk)**: q90 실산출을 통한 Kelly Sizing 정상화 완료.
-  - **핵심 결론**: 평가 프레임워크(SWF-K) 신뢰성 확보 완료. 현재 블로커는 signal 재검증을 위한 외부 데이터 접근성이다.
-
-- **2026-06-12 추가 검증:**
-  - ✅ `uv run pytest` 전체 통과: `788 passed`
-  - ⚠️ `phase signal --sync full` 실행은 Binance Vision 데이터 다운로드 단계에서 DNS 실패로 타임아웃
-  - ⚠️ 기존 `[SWF FOLD DETAILS]` 표는 재실행 전 데이터라 `stale` 상태로 간주해야 함
-
----
-
 ## Symbols
 ```text
 [SELECTED SYMBOLS] ---------------------------------
@@ -51,21 +22,6 @@
 | ZENUSDT, ZETAUSDT, ZILUSDT, ZRXUSDT              |
 ----------------------------------------------------
 ```
-
-## 수정 효과 비교 (CPCV → SWF-K)
-
-| 항목 | 이전 (CPCV) | 이후 (SWF-K) | 변화 | 평가 |
-|---|---|---|---|---|
-| **평가 알고리즘** | CPCV (15 folds, OOS collapse 버그) | **SWF-K** (5 folds, 구조적 인과 보장) | 근본 교체 | anti-causal 제거 ✓ |
-| **IC 집계** | fold 평균 (Equal-weight, N 무시) | **Pooled IC** (전체 이벤트 concat) | N-가중 정확화 | 표본 크기 편향 제거 ✓ |
-| **t-stat 방식** | Naive + n_eff 보정 | **NW HAC (Bartlett kernel)** | 자기상관 보정 | 보수적 추정 ✓ |
-| **Fold 1 N=0** | n/a (anti-causal 버그) | n/a (warmup 이전 데이터 없음) | 원인 변경 | 인과 버그 해소 ✓ |
-| **Mean IC** | -0.017 (fold 평균) | **Pooled IC -0.095** | 더 음수 | N-가중으로 정직한 값 |
-| **t-stat** | -3.51 (naive) | **-4.60 (NW HAC)** | 보수적 | 과대평가 제거 ✓ |
-| **fold_pass_ratio gate** | ≥0.60 (gate 포함) | 진단 전용 (gate 제외) | 단순화 | 게이트 오염 제거 ✓ |
-| **L1 Gate** | **BLOCKED** | **BLOCKED** ❌ | — | 진단 신뢰성 확보 |
-
----
 
 ## 최신 실행 요약 (4h Timeframe - Signal Phase, 2026-06-12)
 
