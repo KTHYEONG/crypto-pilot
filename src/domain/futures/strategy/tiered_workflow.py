@@ -144,10 +144,37 @@ class Layer3Result:
 
 
 # ---------------------------------------------------------------------------
+# fold 진단 데이터 구조 (single source of truth — 인덱스 분리 버그 방지)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True, frozen=True)
+class FoldDiagnostic:
+    """CPCV fold별 진단 데이터 (IC·breadth·n_valid·n_events 동일 fold 출처 보장).
+
+    Attributes:
+        fold: 1-based fold 번호.
+        ic: fold 내 pooled time-series Spearman rank IC. None = 유효 이벤트 부족(<4).
+        breadth: valid 심볼 비율.
+        n_valid: valid 심볼 수.
+        n_events: OOS 이벤트 수.
+        passed: ic is not None and ic > 0.
+    """
+
+    fold: int
+    ic: float | None
+    breadth: float
+    n_valid: int
+    n_events: int
+    passed: bool
+
+
+# ---------------------------------------------------------------------------
 # 내부 헬퍼
 # ---------------------------------------------------------------------------
 
 _BARS_PER_YEAR: float = 2190.0  # 4h 기준
+_VALID_COVERAGE_FLAG_THRESHOLD: float = 0.80  # per-fold valid 비율 임계 (L1 게이트와 일치)
 
 
 def _sharpe(rets: list[float], bars_per_year: float = _BARS_PER_YEAR) -> float:
@@ -478,6 +505,102 @@ def _date_to_idx(datetimes: NDArray[np.datetime64], target_date: Any) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Layer1: 심볼별 time-series rank IC
+# ---------------------------------------------------------------------------
+
+
+def compute_per_symbol_ic(
+    *,
+    fold_tuples: list[tuple[int, Any, Any]],
+) -> dict[str, float]:
+    """심볼별 time-series Spearman rank IC (expected_net_bps vs oos_set.y_return_bps).
+
+    oos_set.y_return_bps는 방향·barrier·비용 반영 정준 실현 수익 라벨이다.
+
+    Args:
+        fold_tuples: (fold_idx, wf_fold, fold_out) 리스트.
+            fold_out.oos_set.y_return_bps와 oos_set.event_index가 필요하다.
+
+    Returns:
+        symbol → fold 평균 rank IC dict.
+
+    Time Complexity: O(F * E) — E = events per fold
+    Space Complexity: O(S * F) — S = symbols, F = folds
+    """
+    sym_ic_lists: dict[str, list[float]] = defaultdict(list)
+
+    for _, _, fold_out in fold_tuples:
+        oos_set = getattr(fold_out, "oos_set", None)
+        if oos_set is None:
+            continue
+
+        y_realized = getattr(oos_set, "y_return_bps", None)
+        if y_realized is None:
+            y_realized = getattr(oos_set, "y_edge_bps", None)
+        if y_realized is None:
+            continue
+
+        events_df: pd.DataFrame = getattr(oos_set, "event_index", pd.DataFrame())
+        if events_df.empty or "symbol" not in events_df.columns:
+            continue
+
+        pred: NDArray[np.float64] = np.asarray(
+            fold_out.model_output.expected_net_bps, dtype=np.float64
+        )
+        realized: NDArray[np.float64] = np.asarray(y_realized, dtype=np.float64)
+
+        if len(pred) != len(realized) or len(pred) != len(events_df):
+            continue
+
+        symbols_arr = events_df["symbol"].to_numpy()
+
+        for sym in np.unique(symbols_arr):
+            sym_mask = symbols_arr == sym
+            p = pred[sym_mask]
+            r = realized[sym_mask]
+            valid_mask = np.isfinite(p) & np.isfinite(r)
+            if valid_mask.sum() < 4:
+                continue
+            ic_val, _ = spearmanr(p[valid_mask], r[valid_mask])
+            if not np.isnan(ic_val):
+                sym_ic_lists[str(sym)].append(float(ic_val))
+
+    return {sym: float(np.mean(ics)) for sym, ics in sym_ic_lists.items() if ics}
+
+
+def _compute_fold_ts_ic(*, fold_out: Any) -> float | None:
+    """fold OOS pooled time-series Spearman rank IC (expected_net_bps vs y_return_bps).
+
+    oos_set.y_return_bps는 방향·barrier·비용 반영 정준 실현 수익 라벨이다.
+    Returns None if oos_set unavailable or fewer than 4 valid events.
+    """
+    oos_set = getattr(fold_out, "oos_set", None)
+    if oos_set is None:
+        return None
+
+    y_realized = getattr(oos_set, "y_return_bps", None)
+    if y_realized is None:
+        y_realized = getattr(oos_set, "y_edge_bps", None)
+    if y_realized is None:
+        return None
+
+    pred: NDArray[np.float64] = np.asarray(
+        fold_out.model_output.expected_net_bps, dtype=np.float64
+    )
+    realized: NDArray[np.float64] = np.asarray(y_realized, dtype=np.float64)
+
+    if len(pred) != len(realized) or len(pred) < 4:
+        return None
+
+    mask = np.isfinite(pred) & np.isfinite(realized)
+    if mask.sum() < 4:
+        return None
+
+    ic_val, _ = spearmanr(pred[mask], realized[mask])
+    return float(ic_val) if not np.isnan(ic_val) else None
+
+
+# ---------------------------------------------------------------------------
 # Layer1: CPCV Signal Validation
 # ---------------------------------------------------------------------------
 
@@ -535,7 +658,7 @@ def run_l1_cpcv(
     )
 
     signals_per_fold: list[dict[str, SymbolSignal]] = []
-    fold_ics: list[float] = []
+    fold_diags: list[FoldDiagnostic] = []
     symbols = aligned.symbols
     n_total = len(symbols)
 
@@ -585,7 +708,7 @@ def run_l1_cpcv(
         cw._GLOBAL_CFG = None
         cw._GLOBAL_PURGE_BARS = None
 
-    for _fold_idx, wf_fold, fold_out in futures:
+    for fold_loop_idx, (_fold_idx, _wf_fold, fold_out) in enumerate(futures):
         beta_f32 = aligned.beta_vs_market_1d
         beta_f64: NDArray[np.float64] | None = (
             beta_f32.astype(np.float64) if beta_f32 is not None else None
@@ -602,32 +725,20 @@ def run_l1_cpcv(
         )
         signals_per_fold.append(fold_sigs)
 
-        oos_s = wf_fold.oos_start
-        oos_e = wf_fold.oos_end
-        net_bps = np.asarray(fold_out.model_output.expected_net_bps, dtype=np.float64)
-        events_df: pd.DataFrame = fold_out.model_output.events
+        # time-series pooled rank IC (expected_net_bps vs oos_set.y_return_bps)
+        fold_ic: float | None = _compute_fold_ts_ic(fold_out=fold_out)
 
-        if (
-            len(net_bps) > 0
-            and "symbol" in events_df.columns
-            and oos_e > oos_s
-            and oos_e <= aligned.close_2d.shape[0]
-        ):
-            sym_to_idx = {s: i for i, s in enumerate(symbols)}
-            pred_mu: list[float] = []
-            realized: list[float] = []
-            for sym, sig in fold_sigs.items():
-                if sym in sym_to_idx:
-                    i = sym_to_idx[sym]
-                    c_start = aligned.close_2d[oos_s, i]
-                    c_end = aligned.close_2d[oos_e - 1, i]
-                    if c_start > 0:
-                        realized.append(float((c_end - c_start) / c_start))
-                        pred_mu.append(sig.raw_mu)
-
-            if len(pred_mu) >= 3:
-                ic_val, _ = spearmanr(pred_mu, realized)
-                fold_ics.append(float(ic_val) if not np.isnan(ic_val) else 0.0)
+        f_n_valid = sum(1 for s in fold_sigs.values() if s.valid)
+        f_breadth = f_n_valid / max(1, n_total)
+        f_n_events = len(fold_out.model_output.expected_net_bps)
+        fold_diags.append(FoldDiagnostic(
+            fold=fold_loop_idx + 1,
+            ic=fold_ic,
+            breadth=f_breadth,
+            n_valid=f_n_valid,
+            n_events=f_n_events,
+            passed=fold_ic is not None and fold_ic > 0,
+        ))
 
     # timing_profile 집계
     total_folds = len(futures)
@@ -678,57 +789,52 @@ def run_l1_cpcv(
     sigs_tuple = tuple(signals_per_fold)
     oos_stacked = _stack_oos_signals(sigs_tuple)
 
-    # --- IC 통계 ---
-    # --- IC 통계 ---
-    fold_perf_details: list[dict[str, Any]] = []
-    if fold_ics:
-        mean_ic = float(np.mean(fold_ics))
-        std_ic = float(np.std(fold_ics, ddof=0))
-        ic_tstat = mean_ic * np.sqrt(len(fold_ics)) / (std_ic + 1e-9)
-        fold_pass_ratio = float(sum(1 for ic in fold_ics if ic > 0) / len(fold_ics))
+    # --- IC 통계 (fold_diags 기반 — 인덱스 분리 없음) ---
+    fold_perf_details: list[dict[str, Any]] = [
+        {
+            "fold": d.fold,
+            "ic": d.ic,
+            "breadth": d.breadth,
+            "n_valid": d.n_valid,
+            "n_events": d.n_events,
+            "pass": d.passed,
+        }
+        for d in fold_diags
+    ]
 
-        for i, ic in enumerate(fold_ics):
-            f_sigs = signals_per_fold[i]
-            f_breadth = sum(1 for s in f_sigs.values() if s.valid) / max(1, n_total)
-            f_n_valid = sum(1 for s in f_sigs.values() if s.valid)
-            # Find corresponding fold_out for n_events
-            _, _, f_out = futures[i]
-            f_n_events = len(f_out.model_output.expected_net_bps)
-            fold_perf_details.append({
-                "fold": i + 1,
-                "ic": ic,
-                "breadth": f_breadth,
-                "n_valid": f_n_valid,
-                "n_events": f_n_events,
-                "pass": ic > 0,
-            })
+    valid_ics: list[float] = [d.ic for d in fold_diags if d.ic is not None]
+    if valid_ics:
+        mean_ic = float(np.mean(valid_ics))
+        std_ic = float(np.std(valid_ics, ddof=1)) if len(valid_ics) > 1 else 0.0
+        n_f = len(valid_ics)
+        # CPCV 중첩 보정: 인접 fold IC 자기상관 rho_hat으로 유효 표본 수 축소
+        if n_f >= 3:
+            ic_arr = np.asarray(valid_ics, dtype=np.float64)
+            demeaned = ic_arr - mean_ic
+            rho_hat = float(np.dot(demeaned[:-1], demeaned[1:]) / (np.dot(demeaned, demeaned) + 1e-20))
+            rho_hat = float(np.clip(rho_hat, 0.0, 0.99))
+            n_eff = max(1.0, n_f / (1.0 + 2.0 * rho_hat))
+        else:
+            n_eff = float(n_f)
+        ic_tstat = mean_ic * np.sqrt(n_eff) / (std_ic + 1e-9)
+        fold_pass_ratio = float(sum(1 for ic in valid_ics if ic > 0) / n_f)
     else:
         mean_ic = 0.0
         ic_tstat = 0.0
         fold_pass_ratio = 0.0
 
-    # --- breadth / valid_coverage ---
-    breadth_per_fold: list[float] = []
-    valid_coverage_flags: list[bool] = []
-    for fold_sigs in signals_per_fold:
-        if n_total == 0:
-            breadth_per_fold.append(0.0)
-            valid_coverage_flags.append(False)
-            continue
-        valid_count = sum(1 for s in fold_sigs.values() if s.valid)
-        ratio = valid_count / n_total
-        breadth_per_fold.append(ratio)
-        valid_coverage_flags.append(ratio >= 0.5)
-
-    breadth = float(np.mean(breadth_per_fold)) if breadth_per_fold else 0.0
+    # --- breadth / valid_coverage (FoldDiagnostic 기반) ---
+    breadth = float(np.mean([d.breadth for d in fold_diags])) if fold_diags else 0.0
     valid_coverage = (
-        float(sum(valid_coverage_flags) / len(valid_coverage_flags))
-        if valid_coverage_flags
-        else 0.0
+        float(sum(1 for d in fold_diags if d.breadth >= _VALID_COVERAGE_FLAG_THRESHOLD) / len(fold_diags))
+        if fold_diags else 0.0
     )
 
     # n_valid: oos_stacked 기준
     n_valid = sum(1 for s in oos_stacked.values() if s.valid)
+
+    # Per-symbol time-series rank IC (oos_set.y_return_bps 기반 정준 계산)
+    per_sym_ic = compute_per_symbol_ic(fold_tuples=futures)
 
     # Final Per-symbol aggregate collection
     sym_details: list[dict[str, Any]] = []
@@ -738,7 +844,7 @@ def run_l1_cpcv(
             "raw_mu": sig.raw_mu,
             "vol": sig.volatility,
             "t_stat": sig.t_stat,
-            "ic": 0.0,  # Rank IC per symbol requires more complex tracking
+            "ic": per_sym_ic.get(sym, 0.0),
             "valid": sig.valid,
         })
 

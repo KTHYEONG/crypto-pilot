@@ -191,7 +191,11 @@ def _log_ensemble_diagnostics(
     """
     n_total = len(frame)
     ic_sign = "✅" if val_ic > 0 else "❌"
-    symbol_name = str(frame["symbol"].iloc[0]) if "symbol" in frame.columns and not frame.empty else "UNKNOWN"
+    if "symbol" in frame.columns and not frame.empty:
+        n_syms = int(frame["symbol"].nunique())
+        symbol_name = f"POOL({n_syms})"
+    else:
+        symbol_name = "POOL(0)"
 
     summary = (
         f"[ENSEMBLE] {symbol_name} | N: {n_total} | IC: {val_ic:.4f} ({ic_sign}) | "
