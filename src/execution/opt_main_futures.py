@@ -421,9 +421,36 @@ def _resolve_quarterly_window(reference_date: str | None) -> QuarterlyWindow:
     )
 
 
+def _resolve_layered_window(reference_date: str | None) -> Any:
+    from src.domain.futures.optimization.opt_config import get_layered_window
+
+    parsed_reference = (
+        datetime.strptime(reference_date, "%Y-%m-%d").date()
+        if reference_date is not None
+        else None
+    )
+    return get_layered_window(reference_date=parsed_reference)
+
+
+def _window_with_fetch_start(window: QuarterlyWindow, fetch_start_date: date) -> QuarterlyWindow:
+    fetch_start = fetch_start_date.isoformat()
+    return QuarterlyWindow(
+        fetch_start=fetch_start,
+        is_start=window.is_start,
+        oos_start=window.oos_start,
+        end_date=window.end_date,
+        fetch_start_date=fetch_start_date,
+        is_start_date=window.is_start_date,
+        oos_start_date=window.oos_start_date,
+        end_date_value=window.end_date_value,
+    )
+
+
 def _run_universe_stage(
     run_config: FuturesRunConfig,
     window: QuarterlyWindow,
+    *,
+    layered_window: Any | None = None,
 ) -> tuple[
     list[str],
     dict[date, frozenset[str]],
@@ -439,12 +466,17 @@ def _run_universe_stage(
     live_inference_panel: tuple[str, ...] = ()
 
     t_discover = time.perf_counter()
+    effective_is_start = min(
+        window.is_start_date,
+        layered_window.l1_start if layered_window is not None else window.is_start_date,
+    )
     universe_result = discover_universe_timeline(
         tf=run_config.timeframe,
-        is_start=window.is_start_date,
+        is_start=effective_is_start,
         oos_start=window.oos_start_date,
         end_date=window.end_date_value,
         force_rebuild=run_config.refresh_universe,
+        l2_start=layered_window.l2_start if layered_window is not None else None,
     )
     _logger.debug(
         "[perf-universe] discover_universe_timeline took %.4fs",
@@ -507,6 +539,8 @@ def _run_data_stage(
     inference_panel: tuple[str, ...] = (),
     live_inference_panel: tuple[str, ...] = (),
     inference_timeline: dict[date, frozenset[str]] | None = None,
+    *,
+    layered_window: Any | None = None,
 ) -> DataStageResult:
     load_symbols = _resolve_data_collection_symbols(
         run_config=run_config,
@@ -517,12 +551,17 @@ def _run_data_stage(
     require_exec_1m = _requires_exec_1m(run_config)
 
     scope_name = "stage6_selected"
+    effective_fetch_start_date = min(
+        window.fetch_start_date,
+        layered_window.fetch_start if layered_window is not None else window.fetch_start_date,
+    )
+    effective_fetch_start = effective_fetch_start_date.isoformat()
 
     t_load = time.perf_counter()
     data_maps, oos_data_maps, valid_symbols = load_futures_data_maps_for_symbols(
         list(load_symbols),
         run_config.timeframe,
-        window.fetch_start,
+        effective_fetch_start,
         window.is_start,
         window.oos_start,
         window.end_date,
@@ -564,7 +603,7 @@ def _run_data_stage(
         data_maps=data_maps,
         oos_data_maps=oos_data_maps,
         valid_symbols=valid_symbols,
-        fetch_start=window.fetch_start_date,
+        fetch_start=effective_fetch_start_date,
         is_start=window.is_start_date,
         oos_start=window.oos_start_date,
         end=window.end_date_value,
@@ -680,6 +719,16 @@ def _run_regime_evaluation_stage(
     return scorecard, regime_ctx.code_1d
 
 
+def _tiered_labeled_events(output: CandidatePipelineOutput | None) -> pd.DataFrame:
+    """Return the unfiltered labeled events required by the tiered workflow."""
+    if output is None or getattr(output, "labeled_unfiltered", None) is None:
+        raise ValueError("tiered requires unfiltered labeled events")
+    labeled = output.labeled_unfiltered
+    if not isinstance(labeled, pd.DataFrame):
+        raise ValueError("tiered requires unfiltered labeled events")
+    return labeled
+
+
 def _run_strategy_stage(
     run_config: FuturesRunConfig,
     window: QuarterlyWindow,
@@ -688,6 +737,7 @@ def _run_strategy_stage(
     live_inference_panel: tuple[str, ...] = (),
     trading_symbols: tuple[str, ...] = (),
     universe_snapshot: UniverseSnapshot | None = None,
+    layered_window: Any | None = None,
 ) -> CandidatePipelineOutput | None:
     # ─── 기존 Phase D 진입 (공통 설정 → bridge → 선택적 Tiered 분기) ──────────
 
@@ -756,7 +806,11 @@ def _run_strategy_stage(
     _logger.info(f"| {'Trade Symbols':<18} | {len(trading_symbols or tuple(data_stage.valid_symbols)):<27} |")
     _logger.info("-" * width)
 
-    bridge_trading_symbols = list(trading_symbols or data_stage.valid_symbols)
+    use_tiered = bool(OPT_FUTURES_CONFIG.get("USE_CS_RANK_ENGINE", False))
+    bridge_symbol_scope = tuple(data_stage.valid_symbols) if use_tiered else (
+        trading_symbols or tuple(data_stage.valid_symbols)
+    )
+    bridge_trading_symbols = list(bridge_symbol_scope)
 
     t_bridge_start = time.perf_counter()
     ml_out = run_active_strategy_output_bridge(
@@ -767,50 +821,41 @@ def _run_strategy_stage(
         end_date=window.end_date,
         opt_config=OPT_FUTURES_CONFIG,
         preloaded_data_maps=full_strategy_maps,
-        training_panel=trading_symbols or tuple(data_stage.valid_symbols),
+        training_panel=bridge_symbol_scope,
         inference_panel=effective_inference,
         live_inference_panel=effective_live,
-        trading_symbols=trading_symbols or tuple(data_stage.valid_symbols),
+        trading_symbols=bridge_symbol_scope,
         silent=False,
     )
     bridge_elapsed = time.perf_counter() - t_bridge_start
     strategy_steps["bridge"] = bridge_elapsed
 
     # ─── Tiered Pipeline 분기 (bridge 완료 후 — labeled + aligned 사용 가능) ──
-    if OPT_FUTURES_CONFIG.get("USE_CS_RANK_ENGINE", False):
+    if use_tiered:
         try:
-            from src.domain.futures.optimization.opt_config import get_layered_window
             from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
             from src.domain.futures.strategy.common.alignment import align_data_maps
             from src.domain.futures.strategy.tiered_workflow import run_tiered_pipeline
 
             _logger.info("[TIERED] USE_CS_RANK_ENGINE=True — entering Tiered pipeline")
-            # tiered scope = bridge와 동일: Stage6 OOS(selected) ∩ data-valid
-            _snapshot_syms = (
-                _selected_symbols_from_snapshot(universe_snapshot)
-                if universe_snapshot is not None
-                else ()
-            )
-            effective_trade_syms: list[str] = [
-                s for s in _snapshot_syms if s in data_stage.data_maps
-            ]
-            if not effective_trade_syms:
-                effective_trade_syms = list(data_stage.valid_symbols)
+            effective_trade_syms = list(data_stage.valid_symbols)
             _logger.info(
-                "[TIERED] aligned scope: %d symbols (Stage6 OOS ∩ data-valid)",
+                "[TIERED] aligned scope: %d symbols (historical union ∩ data-valid)",
                 len(effective_trade_syms),
             )
             aligned_tiered = align_data_maps(
                 data_stage.data_maps, effective_trade_syms, run_config.timeframe
             )
-            labeled_tiered: pd.DataFrame = (
-                ml_out.labeled
-                if ml_out is not None and getattr(ml_out, "labeled", None) is not None
-                else pd.DataFrame()
-            )
-            tiered_window = get_layered_window(
-                reference_date=datetime.strptime(window.end_date, "%Y-%m-%d").date()
-            )
+            if layered_window is not None:
+                aligned_start = pd.Timestamp(aligned_tiered.datetimes[0]).date()
+                if aligned_start > layered_window.fetch_start:
+                    raise ValueError(
+                        "tiered warm-up coverage missing: "
+                        f"required_start={layered_window.fetch_start.isoformat()} "
+                        f"actual_start={aligned_start.isoformat()}"
+                    )
+            labeled_tiered = _tiered_labeled_events(ml_out)
+            tiered_window = layered_window or _resolve_layered_window(run_config.date)
             tiered_cfg = build_candidate_strategy_config(
                 strategy_cfg=StrategyConfig(name="candidate_ml"),
                 opt_config=OPT_FUTURES_CONFIG,
@@ -999,36 +1044,29 @@ def _run_strategy_stage(
     candidate_report_ref = getattr(ml_out, "rule_report", {}) or {}
     if isinstance(candidate_report_ref, dict) and candidate_report_ref.get("zero_reason") == "signal_only_mode":
         sv_list = candidate_report_ref.get("signal_validation", [])
-        _logger.info("\n[SIGNAL VALIDATION: FILTERING IMPACT]")
-        _logger.info("-" * 122)
+        _logger.info("\n[SIGNAL VALIDATION: DATA INTEGRITY AUDIT]")
+        _logger.info("-" * 135)
         _logger.info(
-            f"| {'Variant':<22} | {'Events':>8} | {'Hit Rate':>10} | "
-            f"{'Mean Edge':>10} | {'Status':<15} | {'Fail Reasons':<44} |"
+            f"| {'Symbol':<15} | {'Status':<8} | {'NaN %':>8} | {'Zero/Neg %':>12} | "
+            f"{'Close Std':>11} | {'Hi-Lo Viol':>10} | {'Fail Reasons':<50} |"
         )
-        _logger.info("-" * 122)
-        mean_unfiltered = mean_filtered = 0.0
+        _logger.info("-" * 135)
         for sv in sv_list:
-            v_name = str(sv.get("variant", "unknown"))
-            if v_name == "rule_only_equal_size":
-                display_name, mean_unfiltered = "rule_only (Raw)", float(sv.get("net_edge_bps_mean", 0.0))
-            elif v_name == "rule_promo_no_leak":
-                display_name, mean_filtered = "rule_promo (Filter)", float(sv.get("net_edge_bps_mean", 0.0))
-            else:
-                display_name = v_name[:22]
-            status_text = "✅ PASS" if sv.get("survives_cost") else "❌ FAIL"
+            sym = str(sv.get("symbol", "unknown"))
+            status_val = str(sv.get("status", "unknown"))
+            status_text = "✅ PASS" if status_val == "PASS" else f"❌ {status_val}"
+            nan_pct = float(sv.get("nan_pct", 0.0)) * 100
+            zero_neg_pct = float(sv.get("zero_neg_pct", 0.0)) * 100
+            close_std = float(sv.get("close_std", 0.0))
+            hi_lo = int(sv.get("hi_lo_violation", 0))
             fail_text = ",".join(str(v) for v in sv.get("fail_reasons", [])) or "-"
+            
             _logger.info(
-                f"| {display_name:<22} | {sv.get('n_events', 0):>8,} | "
-                f"{float(sv.get('hit_rate', 0.0))*100:>9.1f}% | "
-                f"{float(sv.get('net_edge_bps_mean', 0.0)):>6.1f} bps | "
-                f"{status_text:<14} | {fail_text:<44} |"
+                f"| {sym:<15} | {status_text:<8} | {nan_pct:>7.2f}% | {zero_neg_pct:>11.2f}% | "
+                f"{close_std:>11.4f} | {hi_lo:>10} | {fail_text:<50} |"
             )
-        _logger.info("-" * 122)
-        _logger.info(
-            ">> Conclusion: Filtering improved Mean Edge by %+0.1f bps. "
-            "Proceeding to Ensemble phase.\n",
-            mean_filtered - mean_unfiltered,
-        )
+        _logger.info("-" * 135)
+        _logger.info(">> Data integrity check completed in signal_only_mode.\n")
         _emit_strategy_profile()
         return ml_out
 
@@ -1493,6 +1531,11 @@ def run_pipeline(
     # Step 1) parse run window
     t_window = time.perf_counter()
     window = _resolve_quarterly_window(run_config.date)
+    layered_window = (
+        _resolve_layered_window(run_config.date)
+        if OPT_FUTURES_CONFIG.get("USE_CS_RANK_ENGINE", False)
+        else None
+    )
     elapsed_window = time.perf_counter() - t_window
     header = f"| {'Property':<18} | {'Value':<27} |"
     width = len(header)
@@ -1520,7 +1563,7 @@ def run_pipeline(
         live_inference_panel,
         universe_snapshot,
         inference_timeline,
-    ) = _run_universe_stage(run_config, window)
+    ) = _run_universe_stage(run_config, window, layered_window=layered_window)
     elapsed_universe = time.perf_counter() - t_universe
     _logger.info(f"[UNIVERSE] Discovery complete: {len(discovered_symbols)} symbols ({elapsed_universe:.2f}s)")
 
@@ -1540,9 +1583,14 @@ def run_pipeline(
         inference_panel=inference_panel,
         live_inference_panel=live_inference_panel,
     )
+    cache_window = (
+        _window_with_fetch_start(window, min(window.fetch_start_date, layered_window.fetch_start))
+        if layered_window is not None
+        else window
+    )
     _ensure_cached_symbol_data_for_targets(
         run_config,
-        window,
+        cache_window,
         resolved_load_symbols,
         require_exec_1m=_requires_exec_1m(run_config),
     )
@@ -1556,6 +1604,7 @@ def run_pipeline(
         inference_panel,
         live_inference_panel,
         inference_timeline,
+        layered_window=layered_window,
     )
     # Step 3.5) regime evaluation (between universe and signal)
     regime_stage_result = _run_regime_evaluation_stage(run_config, data_stage)
@@ -1571,6 +1620,7 @@ def run_pipeline(
         live_inference_panel,
         _selected_symbols_from_snapshot(universe_snapshot),
         universe_snapshot=universe_snapshot,
+        layered_window=layered_window,
     )
     _logger.debug("<< STRATEGY: %.2fs", time.perf_counter() - t_strategy)
 

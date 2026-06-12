@@ -69,6 +69,7 @@ def evaluate_symbol_data_sufficiency(
     require_exec_1m: bool,
     warmup_bars_required: int,
     scope_name: str = "unknown",
+    onboard_date: str | None = None,
 ) -> dict[str, Any]:
     frame = symbol_map.get(tf)
     if not isinstance(frame, pd.DataFrame) or frame.empty or "datetime" not in frame.columns:
@@ -84,7 +85,13 @@ def evaluate_symbol_data_sufficiency(
 
     first_dt = dt.iloc[0]
     last_dt = dt.iloc[-1]
-    fetch_ok = first_dt <= pd.Timestamp(fetch_start, tz="UTC") and last_dt >= pd.Timestamp(
+    
+    effective_fetch_start = pd.Timestamp(fetch_start, tz="UTC")
+    if onboard_date is not None:
+        onboard_ts = pd.Timestamp(onboard_date, tz="UTC")
+        effective_fetch_start = max(effective_fetch_start, onboard_ts)
+
+    fetch_ok = first_dt <= effective_fetch_start and last_dt >= pd.Timestamp(
         oos_end, tz="UTC"
     )
 
@@ -198,6 +205,29 @@ def filter_symbols_by_data_sufficiency(
     scope_name: str = "unknown",
 ) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, dict[str, Any]], pd.DataFrame, int]:
     warmup_bars = _resolve_warmup_bars(tf)
+    
+    # Load symbol sync profiles to get onboard_date
+    onboard_dates: dict[str, str] = {}
+    try:
+        import json
+        profiles_path = Path(FUTURES_DATA_DIR) / "symbol_sync_profiles.json"
+        if not profiles_path.exists():
+            try:
+                from src.domain.futures.universe.storage import _load_symbol_sync_profiles
+                _load_symbol_sync_profiles()
+            except Exception as e:
+                _logger.debug("Failed to populate symbol sync profiles: %s", e)
+            
+        if profiles_path.exists():
+            with open(profiles_path, encoding="utf-8") as f:
+                p_data = json.load(f)
+            for s, item in p_data.items():
+                ob = item.get("onboard_date")
+                if ob:
+                    onboard_dates[s] = ob
+    except Exception as e:
+        _logger.warning("Failed to load symbol onboard dates for sufficiency evaluation: %s", e)
+
     rows: list[dict[str, Any]] = []
     kept: list[str] = []
     for symbol in valid_symbols:
@@ -212,6 +242,7 @@ def filter_symbols_by_data_sufficiency(
             require_exec_1m=require_exec_1m,
             warmup_bars_required=warmup_bars,
             scope_name=scope_name,
+            onboard_date=onboard_dates.get(symbol),
         )
         rows.append(rec)
         _logger.debug(
