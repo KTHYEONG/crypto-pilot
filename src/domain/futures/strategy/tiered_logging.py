@@ -92,45 +92,52 @@ def format_layer1_table(
     n_trade_scope: int = getattr(r, "n_trade_scope", n_total)
     gate_str: str = _gate(r.gate_passed)
 
+    def _row(metric: str, value: str, gate: str, status: str) -> str:
+        return f"| {metric:<20} | {value:<7} | {gate:<5} | {status:<11} |"
+
     lines: list[str] = [
         "[LAYER 1: SWF SIGNAL VALIDATION] --------------------",
         "| Metric               | Value   | Gate  | Status      |",
         "| -------------------- | ------- | ----- | ----------- |",
-        f"| Pooled IC            | {r.pooled_ic:.3f}   | >0.03 | {gate_str:<11} |",
-        f"| IC t-stat (NW HAC)   | {r.pooled_tstat:.2f}    | >1.96 | "
-        f"{'✓ PASS' if r.pooled_tstat >= 1.96 else '✗ FAIL':<11} |",
-        f"| Symbol Breadth       | {r.breadth:.3f}   | >0.3  | {'—':<11} |",
-        f"| Valid Coverage       | {_pct(r.valid_coverage):<7} | >80%  | {'—':<11} |",
-        f"| Valid Symbols/N      | {n_valid}/{n_trade_scope:<4}   | —     | {'—':<11} |",
-        f"| L1 Gate              | {'—':<7} | —     | {gate_str:<11} |",
+        _row("Pooled IC", f"{r.pooled_ic:.3f}", ">0.03", gate_str),
+        _row(
+            "IC t-stat (NW HAC)",
+            f"{r.pooled_tstat:.2f}",
+            ">1.96",
+            "✓ PASS" if r.pooled_tstat >= 1.96 else "✗ FAIL"
+        ),
+        _row("Symbol Breadth", f"{r.breadth:.3f}", ">0.3", "—"),
+        _row("Valid Coverage", _pct(r.valid_coverage), ">80%", "—"),
+        _row("Valid Symbols/N", f"{n_valid}/{n_trade_scope}", "—", "—"),
+        _row("L1 Gate", "—", "—", gate_str),
         "------------------------------------------------------",
     ]
 
     if fold_details:
         lines.append("")
         lines.append("[SWF FOLD DETAILS] ----------------------------------")
-        lines.append("| Fold | IC     | Breadth | N Valid | N Events | Pass  |")
-        lines.append("| ---- | ------ | ------- | ------- | -------- | ----- |")
+        lines.append("| Fold | IC      | Breadth | N Valid | N Events | Pass |")
+        lines.append("| ---- | ------- | ------- | ------- | -------- | ---- |")
         for fd in fold_details:
             pass_str: str = "PASS" if fd.get("pass") else "FAIL"
             raw_ic = fd.get("ic")
-            ic_str: str = f"{raw_ic:.3f}" if raw_ic is not None else "n/a  "
+            ic_str: str = f"{raw_ic:.3f}" if raw_ic is not None else "n/a"
             lines.append(
-                f"| {fd['fold']:<4} | {ic_str:<6} | {fd['breadth']:.3f}    | "
-                f"{fd['n_valid']:<7} | {fd['n_events']:<8} | {pass_str:<5} |"
+                f"| {fd['fold']:<4} | {ic_str:<7} | {fd['breadth']:>7.3f} | "
+                f"{fd['n_valid']:>7} | {fd['n_events']:>8} | {pass_str:<4} |"
             )
         lines.append("------------------------------------------------------")
 
     if per_symbol_top10:
         lines.append("")
         lines.append("[PER-SYMBOL AGGREGATE] ------------------------------")
-        lines.append("| Symbol | Raw Mu  | Vol     | t-stat | IC(avg) | Valid |")
-        lines.append("| ------ | ------- | ------- | ------ | ------- | ----- |")
+        lines.append("| Symbol       | Raw Mu    | Vol       | t-stat   | IC(avg)   | Valid |")
+        lines.append("| ------------ | --------- | --------- | -------- | --------- | ----- |")
         for ps in per_symbol_top10:
             valid_str: str = "Y" if ps.get("valid") else "N"
             lines.append(
-                f"| {ps['symbol']!s:<6} | {ps['raw_mu']:.3f}   | {ps['vol']:.3f}    | "
-                f"{ps['t_stat']:.2f}   | {ps['ic']:.3f}  | {valid_str:<5} |"
+                f"| {ps['symbol']!s:<12} | {ps['raw_mu']:>9.3f} | {ps['vol']:>9.4f} | "
+                f"{ps['t_stat']:>8.2f} | {ps['ic']:>9.3f} | {valid_str:<5} |"
             )
         lines.append("------------------------------------------------------")
 

@@ -807,7 +807,23 @@ def _run_strategy_stage(
     _logger.info("-" * width)
 
     use_tiered = bool(OPT_FUTURES_CONFIG.get("USE_CS_RANK_ENGINE", False))
-    bridge_symbol_scope = tuple(data_stage.valid_symbols) if use_tiered else (
+    effective_trade_syms = []
+    if use_tiered:
+        tiered_window = layered_window or _resolve_layered_window(run_config.date)
+        if tiered_window is not None:
+            req_start_ts = pd.Timestamp(tiered_window.fetch_start, tz="UTC")
+            for sym in data_stage.valid_symbols:
+                sym_df = data_stage.data_maps[sym].get(run_config.timeframe)
+                if sym_df is not None and not sym_df.empty:
+                    first_dt = pd.to_datetime(sym_df["datetime"].iloc[0], utc=True)
+                    if first_dt <= req_start_ts:
+                        effective_trade_syms.append(sym)
+        if not effective_trade_syms:
+            effective_trade_syms = list(data_stage.valid_symbols)
+    else:
+        effective_trade_syms = list(data_stage.valid_symbols)
+
+    bridge_symbol_scope = tuple(effective_trade_syms) if use_tiered else (
         trading_symbols or tuple(data_stage.valid_symbols)
     )
     bridge_trading_symbols = list(bridge_symbol_scope)
@@ -838,7 +854,6 @@ def _run_strategy_stage(
             from src.domain.futures.strategy.tiered_workflow import run_tiered_pipeline
 
             _logger.info("[TIERED] USE_CS_RANK_ENGINE=True — entering Tiered pipeline")
-            effective_trade_syms = list(data_stage.valid_symbols)
             _logger.info(
                 "[TIERED] aligned scope: %d symbols (historical union ∩ data-valid)",
                 len(effective_trade_syms),

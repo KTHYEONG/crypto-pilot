@@ -579,6 +579,10 @@ def build_candidate_dataset(
             exit_idx = pd.to_numeric(labeled_events["exit_idx"], errors="coerce")
             mask &= exit_idx.ge(0) & exit_idx.lt(split_end)
     events = labeled_events.loc[mask].copy()
+    if not events.empty:
+        sym_set = set(aligned.symbols)
+        events = events[events["symbol"].isin(sym_set)].copy()
+
     if events.empty:
         return CandidateDataset(
             X=np.zeros((0, len(feature_names)), dtype=np.float32),
@@ -605,10 +609,14 @@ def build_candidate_dataset(
     funding = aligned.funding_2d
     t_len, _ = close.shape
 
+    global _ALIGNED_FEATURE_CACHE
     aligned_id = id(aligned)
     if aligned_id not in _ALIGNED_FEATURE_CACHE:
-        _ALIGNED_FEATURE_CACHE[aligned_id] = {}
+        _ALIGNED_FEATURE_CACHE[aligned_id] = {"__aligned_ref__": aligned}
     cache = _ALIGNED_FEATURE_CACHE[aligned_id]
+    if cache.get("__aligned_ref__") is not aligned:
+        cache.clear()
+        cache["__aligned_ref__"] = aligned
 
     if "sym_ret_1" not in cache:
         sym_ret_1 = (close[1:] / np.maximum(close[:-1], 1e-12)) - 1.0
