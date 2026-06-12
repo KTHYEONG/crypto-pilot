@@ -785,8 +785,23 @@ def _run_strategy_stage(
             from src.domain.futures.strategy.tiered_workflow import run_tiered_pipeline
 
             _logger.info("[TIERED] USE_CS_RANK_ENGINE=True — entering Tiered pipeline")
+            # tiered scope = bridge와 동일: Stage6 OOS(selected) ∩ data-valid
+            _snapshot_syms = (
+                _selected_symbols_from_snapshot(universe_snapshot)
+                if universe_snapshot is not None
+                else ()
+            )
+            effective_trade_syms: list[str] = [
+                s for s in _snapshot_syms if s in data_stage.data_maps
+            ]
+            if not effective_trade_syms:
+                effective_trade_syms = list(data_stage.valid_symbols)
+            _logger.info(
+                "[TIERED] aligned scope: %d symbols (Stage6 OOS ∩ data-valid)",
+                len(effective_trade_syms),
+            )
             aligned_tiered = align_data_maps(
-                data_stage.data_maps, data_stage.valid_symbols, run_config.timeframe
+                data_stage.data_maps, effective_trade_syms, run_config.timeframe
             )
             labeled_tiered: pd.DataFrame = (
                 ml_out.labeled
