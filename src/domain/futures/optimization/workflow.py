@@ -1532,18 +1532,23 @@ def suggest_layered_params(
 
 
 def objective_l1_ic(trial: Trial, ctx: TieredContext) -> float:
-    """L1 CPCV study objective: HAC mean IC 최대화. Sharpe 미참조(decoupling 보장).
+    """L1 SWF-K study objective: pooled IC 최대화. Sharpe 미참조(decoupling 보장).
+
+    IS window [l1_start, l2_start)를 n_folds SWF-K fold로 분할하여
+    purged sequential walk-forward 검증 수행.
 
     Args:
         trial: Optuna Trial 객체.
         ctx: Tiered 파이프라인 컨텍스트.
 
     Returns:
-        mean_ic (gate 미통과 시 -inf).
+        pooled_ic (gate 미통과 시 -inf).
     """
+    import pandas as pd
+
     from src.domain.futures.strategy.config import resolve_purge_and_embargo_bars
-    from src.domain.futures.strategy.tiered_workflow import run_l1_cpcv
-    from src.domain.futures.strategy.walk_forward import build_cpcv_folds
+    from src.domain.futures.strategy.tiered_workflow import run_l1_swf
+    from src.domain.futures.strategy.walk_forward import build_l1_swf_folds
 
     l1_params = suggest_layered_params(trial, "L1")
     purge_bars, embargo_bars = resolve_purge_and_embargo_bars(ctx.cfg)
@@ -1551,14 +1556,22 @@ def objective_l1_ic(trial: Trial, ctx: TieredContext) -> float:
     if n_bars < 10:
         return float("-inf")
 
-    folds = build_cpcv_folds(
+    # LayeredWindow.l1_start → warmup bar index (IS 시작점)
+    # LayeredWindow.l2_start → l1_end bar index (OOS 경계; production OOS는 L3 전용)
+    _is_ts = pd.Timestamp(ctx.window.l1_start, tz="UTC")
+    _oos_ts = pd.Timestamp(ctx.window.l2_start, tz="UTC")
+    _warmup = int(np.searchsorted(ctx.aligned.datetimes, _is_ts))
+    _l1_end = int(np.searchsorted(ctx.aligned.datetimes, _oos_ts))
+
+    folds = build_l1_swf_folds(
         n_bars=n_bars,
-        n_groups=6,
-        n_test_groups=2,
-        embargo_bars=embargo_bars,
+        n_folds=5,
+        warmup_bars=_warmup,
+        l1_end_bars=_l1_end,
         purge_bars=purge_bars,
+        embargo_bars=embargo_bars,
     )
-    result = run_l1_cpcv(
+    result = run_l1_swf(
         labeled_events=ctx.labeled_events,
         aligned=ctx.aligned,
         cfg=ctx.cfg,
@@ -1567,7 +1580,7 @@ def objective_l1_ic(trial: Trial, ctx: TieredContext) -> float:
         tf=ctx.tf,
     )
     # 오직 IC만 반환 — Sharpe 미참조
-    return float(result.mean_ic) if result.gate_passed else float("-inf")
+    return float(result.pooled_ic) if result.gate_passed else float("-inf")
 
 
 def objective_l2_sharpe(trial: Trial, ctx: TieredContext) -> float:
