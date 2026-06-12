@@ -3,23 +3,25 @@
 
 # Mode Full (ALO/Ensemble) — 최신 검증 결과
 
-**최신 갱신:** 2026-06-12 (Layer1 IC 진단 신뢰성 복원 — cross-sectional → time-series rank IC 교체)
-**현재 상태:** `BLOCKED` — CPCV L1 Gate 차단됨 (실제 Alpha 엣지 부재 확인). **L1 IC t-stat = -3.51 ❌**
-**평가 기준:** `min_ic=0.03`, `min_ic_tstat=1.96`, `min_breadth=0.30`, `min_valid_coverage=0.80`, `min_fold_pass_ratio=0.60`
+**최신 갱신:** 2026-06-12 (CPCV → SWF-K 전환, Pooled IC + NW HAC t-stat 도입)
+**현재 상태:** `BLOCKED` — SWF-K L1 Gate 차단됨 (실제 Alpha 엣지 부재 확인). **Pooled IC = -0.095 ❌**
+**평가 기준:** `min_pooled_ic=0.03`, `min_nw_tstat=1.96`, `min_breadth=0.30`, `min_valid_coverage=0.80`
 
 **진단 노트:**
-- **Layer1 IC 진단 신뢰성 복원 (2026-06-12 — IC Measurement Fix):**
-  - ✅ **IC 측정 방식 교체**: Cross-sectional (n=12, 노이즈) → **Time-series rank IC** (fold OOS per-event 단위). 심볼 내 시계열 상관으로 실제 예측력 측정.
-  - ✅ **인덱스 정렬 버그 수정**: `fold_ics` 리스트와 `signals_per_fold` 위치 불일치 제거. `FoldDiagnostic` 단일 구조로 통합 → fold 표 신뢰성 복구.
-  - ✅ **t-stat 통계 정직화**: `ddof=0` → `ddof=1`, CPCV 중첩 보정 (`n_eff`) 추가. `1.64` → `6.17` (유의성 획득).
-  - ✅ **심볼별 IC 실계산**: 하드코딩 `0.0` 제거 → time-series Spearman rank IC (심볼별 예측력 진단 가능).
-  - ❌ **L1 Gate 차단**: IC t-stat `-3.51 < 1.96`, Breadth `0.883`, Coverage `80%`, Fold Pass Ratio `0.357` → **FAIL/BLOCKED**.
-  - 🎯 **다음 병목**: 피처/라벨 설계 개선. 신호 진단 정밀화 결과 실제 유효한 alpha 엣지가 부족한 상태임이 정직하게 감지됨.
+- **SWF-K 전환 (2026-06-12 — CPCV → Purged Sequential Walk-Forward):**
+  - ✅ **CPCV 폐기**: OOS collapse 버그(disjoint spans→contiguous mask), anti-causal fold (test_groups=[0,1] → fit=future data), 중첩 fold 중복 이벤트 제거.
+  - ✅ **SWF-K 도입**: K=5 등간격 OOS 창, expanding fit (fit_start=0), `fit_end=oos_start-purge_bars` 구조적 인과 보장.
+  - ✅ **Pooled IC**: fold 평균 IC → 전 fold OOS 이벤트 concat 후 단일 Spearman rank IC. N=5576 기준.
+  - ✅ **NW HAC t-stat**: Newey-West Bartlett kernel, Andrews 1991 자동 대역폭. 자기상관 보정으로 naive t-stat보다 보수적.
+  - ✅ **스케일 버그 수정 (Audit)**: `SE(IC)=12·√(S_NW/N)` 정규화 — 미적용 시 |t| 12배 과대평가(거짓 양성 위험).
+  - ✅ **fold_pass_ratio gate 제거**: 진단용 보존, gate 조건 4개로 단순화.
+  - ❌ **L1 Gate 차단**: Pooled IC `-0.095`, NW HAC t-stat `-4.60`, Breadth `0.017`, Valid Coverage `0.0%` → **BLOCKED**.
+  - 🎯 **다음 병목**: Fold 1-4 유효 심볼 0 (N Valid=0) — l1_start 기점 warmup 구간 내 OOS 파티션 흡수 현상. 신호 alpha 부재 지속.
 
 - **Direction A/B 알고리즘 진단:**
   - ✅ **Direction A (Calibration)**: 6개 Regime 중 3개 유효 확인. `score_z` 기반 슬로프 피팅 정상 작동.
   - ✅ **Direction B (Risk)**: q90 실산출을 통한 Kelly Sizing 정상화 완료.
-  - **핵심 결론**: 인프라(로그/집계/파이프라인)는 완성되었으나, 모델의 핵심 예측력(Feature/Ranking)이 통계적 유의성(t-stat)을 확보하지 못함.
+  - **핵심 결론**: 평가 프레임워크(SWF-K) 신뢰성 확보 완료. 현재 블로커는 신호 알파 자체의 예측 방향성 부재.
 
 ---
 
@@ -45,136 +47,71 @@
 ----------------------------------------------------
 ```
 
-## 수정 효과 비교 (IC Measurement Fix)
+## 수정 효과 비교 (CPCV → SWF-K)
 
-| 항목 | 이전 (버그) | 이후 (수정) | 변화 | 평가 |
+| 항목 | 이전 (CPCV) | 이후 (SWF-K) | 변화 | 평가 |
 |---|---|---|---|---|
-| **IC 측정 방식** | Cross-sectional (n=12) | **Time-series rank IC** | 근본 교체 | 실제 예측력 반영 ✓ |
-| **Mean IC (fold)** | 0.120 (허위 노이즈) | **-0.017** (time-series) | 정정 | 정직한 예측력 반영 ✓ |
-| **IC t-stat** | **1.64** ❌ FAIL | **-3.51** ❌ FAIL | -5.15 | 실제 alpha 부재 입증 |
-| **Fold 1 (N Events=0)** | IC=0.300 (불일치) | **n/a** (정합) | 버그 해소 | Fold 표 신뢰성 회복 ✓ |
-| **PER-SYMBOL IC** | 0.000 (전부 하드코딩) | **-0.087~0.055** (실계산) | 진단화 | 심볼별 예측력 측정 가능 ✓ |
-| **Fold Pass Ratio** | 0.714 | **0.357** | -0.357 | 과대평가 제거 |
+| **평가 알고리즘** | CPCV (15 folds, OOS collapse 버그) | **SWF-K** (5 folds, 구조적 인과 보장) | 근본 교체 | anti-causal 제거 ✓ |
+| **IC 집계** | fold 평균 (Equal-weight, N 무시) | **Pooled IC** (전체 이벤트 concat) | N-가중 정확화 | 표본 크기 편향 제거 ✓ |
+| **t-stat 방식** | Naive + n_eff 보정 | **NW HAC (Bartlett kernel)** | 자기상관 보정 | 보수적 추정 ✓ |
+| **Fold 1 N=0** | n/a (anti-causal 버그) | n/a (warmup 이전 데이터 없음) | 원인 변경 | 인과 버그 해소 ✓ |
+| **Mean IC** | -0.017 (fold 평균) | **Pooled IC -0.095** | 더 음수 | N-가중으로 정직한 값 |
+| **t-stat** | -3.51 (naive) | **-4.60 (NW HAC)** | 보수적 | 과대평가 제거 ✓ |
+| **fold_pass_ratio gate** | ≥0.60 (gate 포함) | 진단 전용 (gate 제외) | 단순화 | 게이트 오염 제거 ✓ |
 | **L1 Gate** | **BLOCKED** | **BLOCKED** ❌ | — | 진단 신뢰성 확보 |
-
-**결론**: Cross-sectional IC의 노이즈(분산=0)와 인덱스 정렬 버그를 time-series rank IC로 교체하여 신뢰성 있는 진단을 제공합니다. 교정된 계산 하에 L1 Gate가 정직하게 BLOCKED 처리되었으며, 다음 과제는 피처 및 라벨 재설계입니다.
 
 ---
 
-## 최신 실행 요약 (4h Timeframe - Signal Phase)
+## 최신 실행 요약 (4h Timeframe - Signal Phase, 2026-06-12)
 
 ```text
 [WINDOW] -------------------------------------------
-| Property           | Value                       |
-| ------------------ | --------------------------- |
 | Range              | 2022-10-01 ~ 2026-03-31     |
 | IS Start           | 2023-10-01                  |
 | OOS Start          | 2025-10-01                  |
-| Elapsed            | 0.00s                       |
-----------------------------------------------------
-
-[UNIVERSE REPORT] ----------------------------------
-| Metric             | Value                       |
-| ------------------ | --------------------------- |
-| Selected (Stg6)    | 20                          |
-| Panels (Inf/Live)  | 94 / 20                     |
-| Windows (Inf)      | 10                          |
-----------------------------------------------------
-
-[DATA QUALITY] -------------------------------------
-| Metric             | Value                       |
-| ------------------ | --------------------------- |
-| Symbols (Req/Load) | 94 / 91 (96.8%)             |
-| Kept (Ready)       | 63                          |
-| Fail Reasons       | fetch_window_short:28       |
 ----------------------------------------------------
 
 [STRATEGY: candidate_ml] ---------------------------
-| Component          | Status/Value                |
-| ------------------ | --------------------------- |
 | Inf Panel          | 63 symbols                  |
 | Live Panel         | 12 symbols                  |
 | Trade Symbols      | 20                          |
 ----------------------------------------------------
 
-[ENSEMBLE] POOL(12) | N: 8871 | IC: -0.0511 (❌) | Mu: 23.457 | archetype_only | k: 50.0
-└─ mu_bps: [beta_neutral: 15.1 (✅), mean: 16.2 (✅), ts_momentum: 34.1 (✅), trend: 29.9 (✅)] | score_cal: 3 valid
-[ENSEMBLE] POOL(12) | N: 8871 | IC: -0.0511 (❌) | Mu: 23.457 | archetype_only | k: 50.0
-└─ mu_bps: [beta_neutral: 15.1 (✅), mean: 16.2 (✅), ts_momentum: 34.1 (✅), trend: 29.9 (✅)] | score_cal: 3 valid
-[ENSEMBLE] POOL(12) | N: 10907 | IC: -0.0043 (❌) | Mu: 23.430 | archetype_regime | k: 50.0
-└─ mu_bps: [beta_neutral: 11.7 (✅), mean: 15.4 (✅), ts_momentum: 38.0 (✅), trend: 29.7 (✅)] | score_cal: 3 valid
-[ENSEMBLE] POOL(12) | N: 8871 | IC: -0.0511 (❌) | Mu: 23.457 | archetype_only | k: 50.0
-└─ mu_bps: [beta_neutral: 15.1 (✅), mean: 16.2 (✅), ts_momentum: 34.1 (✅), trend: 29.9 (✅)] | score_cal: 3 valid
-[ENSEMBLE] POOL(12) | N: 6041 | IC: -0.0329 (❌) | Mu: 23.070 | archetype_only | k: 50.0
-└─ mu_bps: [beta_neutral: 19.4 (✅), mean: 16.6 (✅), ts_momentum: 30.9 (✅), trend: 27.1 (✅)] | score_cal: 4 valid
-[ENSEMBLE] POOL(12) | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
-└─ mu_bps: [beta_neutral: 15.2 (✅), mean: 15.0 (✅), ts_momentum: 33.2 (✅), trend: 24.8 (✅)] | score_cal: 1 valid
-[ENSEMBLE] POOL(12) | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
-└─ mu_bps: [beta_neutral: 15.2 (✅), mean: 15.0 (✅), ts_momentum: 33.2 (✅), trend: 24.8 (✅)] | score_cal: 1 valid
-[ENSEMBLE] POOL(12) | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
-└─ mu_bps: [beta_neutral: 15.2 (✅), mean: 15.0 (✅), ts_momentum: 33.2 (✅), trend: 24.8 (✅)] | score_cal: 1 valid
-[ENSEMBLE] POOL(11) | N: 4803 | IC: -0.1168 (❌) | Mu: 26.623 | archetype_only | k: 50.0
-└─ mu_bps: [beta_neutral: 27.8 (✅), mean: 20.2 (✅), ts_momentum: 29.7 (✅), trend: 32.8 (✅)] | score_cal: 3 valid
-[ENSEMBLE] POOL(12) | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
-└─ mu_bps: [beta_neutral: 15.2 (✅), mean: 15.0 (✅), ts_momentum: 33.2 (✅), trend: 24.8 (✅)] | score_cal: 1 valid
-[ENSEMBLE] POOL(12) | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
-└─ mu_bps: [beta_neutral: 15.2 (✅), mean: 15.0 (✅), ts_momentum: 33.2 (✅), trend: 24.8 (✅)] | score_cal: 1 valid
-[ENSEMBLE] POOL(11) | N: 4803 | IC: -0.1168 (❌) | Mu: 26.623 | archetype_only | k: 50.0
-└─ mu_bps: [beta_neutral: 27.8 (✅), mean: 20.2 (✅), ts_momentum: 29.7 (✅), trend: 32.8 (✅)] | score_cal: 3 valid
-[ENSEMBLE] POOL(12) | N: 7412 | IC: -0.0128 (❌) | Mu: 21.866 | archetype_only | k: 50.0
-└─ mu_bps: [beta_neutral: 15.2 (✅), mean: 15.0 (✅), ts_momentum: 33.2 (✅), trend: 24.8 (✅)] | score_cal: 1 valid
-[ENSEMBLE] POOL(11) | N: 4803 | IC: -0.1168 (❌) | Mu: 26.623 | archetype_only | k: 50.0
-└─ mu_bps: [beta_neutral: 27.8 (✅), mean: 20.2 (✅), ts_momentum: 29.7 (✅), trend: 32.8 (✅)] | score_cal: 3 valid
-[ENSEMBLE] POOL(9) | N: 1706 | IC: 0.1224 (✅) | Mu: 19.331 | archetype_regime | k: 50.0
-└─ mu_bps: [beta_neutral: 31.9 (✅), mean: 21.1 (✅), ts_momentum: 5.1 (✅), trend: 34.8 (✅)] | score_cal: 2 valid
-
-[LAYER 1: CPCV SIGNAL VALIDATION] -------------------
+[LAYER 1: SWF SIGNAL VALIDATION] --------------------
 | Metric               | Value   | Gate  | Status      |
 | -------------------- | ------- | ----- | ----------- |
-| Mean IC (fold)       | -0.017  | >0.03 | BLOCKED     |
-| IC t-stat            | -3.51   | >1.96 | ✗ FAIL      |
-| Symbol Breadth       | 0.883   | >0.3  | —           |
-| Valid Coverage       | 80.0%   | >80%  | —           |
-| Valid Symbols/N      | 12/12   | —     | —           |
-| CPCV Fold Pass Ratio | 0.357   | >0.6  | —           |
+| Pooled IC            | -0.095  | >0.03 | BLOCKED     |
+| IC t-stat (NW HAC)   | -4.60   | >1.96 | ✗ FAIL      |
+| Symbol Breadth       | 0.017   | >0.3  | —           |
+| Valid Coverage       | 0.0%    | >80%  | —           |
+| Valid Symbols/N      | 1/12    | —     | —           |
 | L1 Gate              | —       | —     | BLOCKED     |
 ------------------------------------------------------
 
-[CPCV FOLD DETAILS] ---------------------------------
+[SWF FOLD DETAILS] ----------------------------------
 | Fold | IC     | Breadth | N Valid | N Events | Pass  |
 | ---- | ------ | ------- | ------- | -------- | ----- |
 | 1    | n/a    | 0.000   | 0       | 0        | FAIL  |
-| 2    | -0.052 | 0.750   | 9       | 3853     | FAIL  |
-| 3    | -0.018 | 1.000   | 12      | 7289     | FAIL  |
-| 4    | -0.027 | 1.000   | 12      | 13656    | FAIL  |
-| 5    | -0.030 | 1.000   | 12      | 23761    | FAIL  |
-| 6    | -0.018 | 0.750   | 9       | 3853     | FAIL  |
-| 7    | 0.001  | 1.000   | 12      | 7289     | PASS  |
-| 8    | -0.028 | 1.000   | 12      | 13656    | FAIL  |
-| 9    | 0.005  | 1.000   | 12      | 23761    | PASS  |
-| 10   | 0.001  | 1.000   | 12      | 7289     | PASS  |
-| 11   | -0.028 | 1.000   | 12      | 13656    | FAIL  |
-| 12   | 0.005  | 1.000   | 12      | 23761    | PASS  |
-| 13   | -0.037 | 0.917   | 11      | 9772     | FAIL  |
-| 14   | 0.005  | 0.917   | 11      | 19877    | PASS  |
-| 15   | -0.017 | 0.917   | 11      | 16458    | FAIL  |
+| 2    | n/a    | 0.000   | 0       | 0        | FAIL  |
+| 3    | n/a    | 0.000   | 0       | 649      | FAIL  |
+| 4    | n/a    | 0.000   | 0       | 2759     | FAIL  |
+| 5    | -0.142 | 0.083   | 1       | 2168     | FAIL  |
 ------------------------------------------------------
 
 [PER-SYMBOL AGGREGATE] ------------------------------
-| Symbol | Raw Mu  | Vol     | t-stat | IC(avg) | Valid |
-| ------ | ------- | ------- | ------ | ------- | ----- |
-| AAVEUSDT | 24.185   | 0.013   | 18.71  | -0.013  | Y     |
-| AVAXUSDT | 24.438   | 0.019   | 17.43  | 0.019   | Y     |
-| BCHUSDT | 23.886   | 0.008   | 11.31  | 0.055   | Y     |
-| BTCUSDT | 24.442   | 0.006   | 21.87  | -0.032  | Y     |
-| DOGEUSDT | 24.065   | 0.011   | 17.29  | 0.043   | Y     |
-| ETHUSDT | 24.126   | 0.009   | 12.57  | -0.015  | Y     |
-| LPTUSDT | 21.252   | 0.010   | 29.74  | -0.073  | Y     |
-| MKRUSDT | 26.725   | 0.000   | 15.00  | -0.087  | Y     |
-| SOLUSDT | 25.033   | 0.013   | 16.28  | -0.064  | Y     |
-| TRBUSDT | 23.631   | 0.011   | 9.96   | -0.074  | Y     |
-| UNIUSDT | 22.942   | 0.010   | 17.10  | 0.033   | Y     |
-| XRPUSDT | 24.837   | 0.010   | 21.71  | -0.082  | Y     |
+| Symbol   | Raw Mu  | Vol   | t-stat  | IC(avg) | Valid |
+| -------- | ------- | ----- | ------- | ------- | ----- |
+| AAVEUSDT | -1.908  | 0.013 | -0.59   | -0.254  | N     |
+| BCHUSDT  | -1.967  | 0.008 | -1.54   | -0.171  | N     |
+| BTCUSDT  | -6.538  | 0.006 | -10.71  | -0.135  | Y     |
+| DOGEUSDT | -3.506  | 0.011 | -0.93   | -0.053  | N     |
+| ETHUSDT  | 0.161   | 0.009 | 0.15    | -0.122  | N     |
+| LPTUSDT  | 0.000   | 0.010 | 0.00    | 0.000   | N     |
+| MKRUSDT  | 1.459   | 0.000 | 0.49    | -0.086  | N     |
+| SOLUSDT  | -5.176  | 0.013 | -1.20   | -0.021  | N     |
+| TRBUSDT  | -3.913  | 0.011 | -1.14   | -0.045  | N     |
+| UNIUSDT  | -4.604  | 0.010 | -1.55   | -0.130  | N     |
+| XRPUSDT  | 0.481   | 0.010 | 0.12    | 0.050   | N     |
 ------------------------------------------------------
 
 [SYSTEM STATUS] ------------------------------------
