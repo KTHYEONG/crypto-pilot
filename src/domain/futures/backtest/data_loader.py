@@ -199,14 +199,13 @@ def summarize_ohlcv_collection_integrity(
             diffs = dt_sorted.diff().dropna()
             if expected_delta is not None:
                 gap_count = float((diffs != expected_delta).sum())
-                if expected_start is not None and expected_end is not None:
-                    if expected_end >= expected_start:
-                        expected_bars = int((expected_end - expected_start) / expected_delta) + 1
-                        expected_bars = max(expected_bars, 1)
-                        actual_bars = int(dt.nunique())
-                        missing_bar_ratio = float(
-                            max(expected_bars - actual_bars, 0) / expected_bars
-                        )
+                if expected_start is not None and expected_end is not None and expected_end >= expected_start:
+                    expected_bars = int((expected_end - expected_start) / expected_delta) + 1
+                    expected_bars = max(expected_bars, 1)
+                    actual_bars = int(dt.nunique())
+                    missing_bar_ratio = float(
+                        max(expected_bars - actual_bars, 0) / expected_bars
+                    )
             if len(dt_raw) > 1:
                 raw_diffs = dt_raw.diff()
                 non_monotonic_dt_count = float((raw_diffs.dropna() < pd.Timedelta(0)).sum())
@@ -453,6 +452,7 @@ class DataCollector:
     def _save_cache(self, symbol: str, timeframe: str, df: pd.DataFrame) -> None:
         if df.empty:
             return
+        df = self._normalize_df(df)
         path = self._cache_path(symbol, timeframe)
         temp_path = path.with_suffix(".tmp.parquet")
         df.to_parquet(temp_path, index=False)
@@ -461,15 +461,27 @@ class DataCollector:
     def _normalize_df(self, df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
             return df
-        if "datetime" in df.columns and pd.api.types.is_datetime64_any_dtype(df["datetime"]):
-            return df
         if "timestamp" in df.columns:
-            # Ensure timestamp is numeric to prevent pandas from parsing it as a date string
-            # and to avoid TypeError during sort_values if there's a mix of int and str
             df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
             df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         elif "datetime" in df.columns:
-            df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+            if not pd.api.types.is_datetime64_any_dtype(df["datetime"]):
+                df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+            elif getattr(df["datetime"].dtype, "tz", None) is None:
+                df["datetime"] = pd.to_datetime(df["datetime"]).dt.tz_localize("UTC")
+            else:
+                df["datetime"] = pd.to_datetime(df["datetime"]).dt.tz_convert("UTC")
+
+        # Automatically normalize any object/string columns (except datetime) to numeric
+        # to prevent PyArrow's ArrowInvalid type-mix errors (e.g. for close_time, ignore, etc.)
+        for col in df.columns:
+            if col == "datetime":
+                continue
+            if df[col].dtype == "object" or pd.api.types.is_string_dtype(df[col]):
+                converted = pd.to_numeric(df[col], errors="coerce")
+                if converted.notna().sum() > 0:
+                    df[col] = converted
+
         return df
 
     def collect_and_save(
@@ -635,6 +647,58 @@ class DataCollector:
                         self.logger.warning(f"Error fetching vision data for {symbol}: {e}")
 
         # 2. API for recent data or gaps
+        
+        # [Fix] 과거 데이터 갭 백필 (req_start ~ 캐시 최저점)
+        if not cache_df.empty:
+            cache_min_dt = cache_df["datetime"].min()
+            
+            # 상장일 프로필 조회하여 시작점 보정
+            effective_req_start = req_start
+            try:
+                from src.domain.futures.universe.storage import _load_symbol_sync_profiles
+                profiles = _load_symbol_sync_profiles()
+                if symbol in profiles and profiles[symbol].onboard_date is not None:
+                    onboard_dt = pd.to_datetime(profiles[symbol].onboard_date, utc=True)
+                    if effective_req_start < onboard_dt:
+                        effective_req_start = onboard_dt
+            except Exception as exc:
+                self.logger.debug(
+                    "Failed to resolve onboard_date for %s: %s", symbol, exc
+                )
+
+            # 상장일 보정 후 시작 시점보다 캐시 최저점이 뒤에 있고, 그 시간차가 24시간 이상인 경우에만 과거 갭 백필 진행
+            if effective_req_start < cache_min_dt and (cache_min_dt - effective_req_start) > pd.Timedelta(hours=24):
+                gap_start = effective_req_start
+                gap_end = cache_min_dt
+                if not self._is_range_blocked_by_permanent_failure(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    requested_start=gap_start,
+                    requested_end=gap_end,
+                ):
+                    try:
+                        gap_chunk = self.client.fetch_ohlcv_with_taker(
+                            symbol, timeframe, str(gap_start), str(gap_end)
+                        )
+                        if not gap_chunk.empty:
+                            new_parts.append(self._normalize_df(gap_chunk))
+                    except BinanceKlinePermanentError as exc:
+                        self._record_permanent_fetch_failure(
+                            symbol=symbol,
+                            timeframe=timeframe,
+                            error=exc,
+                            requested_start=gap_start,
+                            requested_end=gap_end,
+                        )
+                        self.logger.warning(
+                            "Permanent OHLCV API failure for past gap %s %s (%d). range=%s..%s",
+                            symbol,
+                            timeframe,
+                            exc.http_code,
+                            gap_start,
+                            gap_end,
+                        )
+
         latest_cached_dt = cache_df["datetime"].max() if not cache_df.empty else None
         for part in new_parts:
             if part.empty or "datetime" not in part.columns:
@@ -843,6 +907,57 @@ class DataCollector:
                         self.logger.warning(f"Error fetching vision data for {symbol}: {e}")
 
         # 2. API for recent data or gaps
+        
+        # [Fix] 과거 데이터 갭 백필 (req_start ~ 캐시 최저점)
+        if not cache_df.empty:
+            cache_min_dt = cache_df["datetime"].min()
+            
+            # 상장일 프로필 조회하여 시작점 보정
+            effective_req_start = req_start
+            try:
+                from src.domain.futures.universe.storage import _load_symbol_sync_profiles
+                profiles = _load_symbol_sync_profiles()
+                if symbol in profiles and profiles[symbol].onboard_date is not None:
+                    onboard_dt = pd.to_datetime(profiles[symbol].onboard_date, utc=True)
+                    if effective_req_start < onboard_dt:
+                        effective_req_start = onboard_dt
+            except Exception as exc:
+                self.logger.debug(
+                    "Failed to resolve onboard_date for %s: %s", symbol, exc
+                )
+
+            # 상장일 보정 후 시작 시점보다 캐시 최저점이 뒤에 있고, 그 시간차가 24시간 이상인 경우에만 과거 갭 백필 진행
+            if effective_req_start < cache_min_dt and (cache_min_dt - effective_req_start) > pd.Timedelta(hours=24):
+                gap_start = effective_req_start
+                gap_end = cache_min_dt
+                if not self._is_range_blocked_by_permanent_failure(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    requested_start=gap_start,
+                    requested_end=gap_end,
+                ):
+                    try:
+                        gap_chunk = self.client.fetch_ohlcv_with_taker(
+                            symbol, timeframe, str(gap_start), str(gap_end)
+                        )
+                        if not gap_chunk.empty:
+                            new_parts.append(self._normalize_df(gap_chunk))
+                    except BinanceKlinePermanentError as exc:
+                        self._record_permanent_fetch_failure(
+                            symbol=symbol,
+                            timeframe=timeframe,
+                            error=exc,
+                            requested_start=gap_start,
+                            requested_end=gap_end,
+                        )
+                        self.logger.warning(
+                            "Permanent OHLCV API failure for 1m past gap %s (%d). range=%s..%s",
+                            symbol,
+                            exc.http_code,
+                            gap_start,
+                            gap_end,
+                        )
+
         latest_cached_dt = cache_df["datetime"].max() if not cache_df.empty else None
         for part in new_parts:
             if part.empty or "datetime" not in part.columns:
@@ -877,9 +992,8 @@ class DataCollector:
                     requested_end=req_end,
                 )
                 self.logger.warning(
-                    "Permanent OHLCV API failure for %s %s (%d). range=%s..%s",
+                    "Permanent OHLCV API failure for 1m %s (%d). range=%s..%s",
                     symbol,
-                    timeframe,
                     exc.http_code,
                     remaining_start,
                     req_end,
