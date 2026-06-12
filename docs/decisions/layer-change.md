@@ -166,3 +166,7 @@ last_verified: 2026-06-11
 - `candidate_workflow.py` 내에 `[Raw Mu, Volatility]` 반환 및 횡단면 Z-Score 변환 로직 프로토타입 구현.
 - 위 가드레일 및 검증 기준을 반영한 `portfolio_optimizer.py` 제약 조건 절 업데이트.
 - Phase ALO 단계에 위 Pass/Fail 검증 로직을 통합하여 백테스트 전 자동 필터링 체계 구축.
+
+### 10. [2026-06-12] Layer1 IC Diagnostics & Statistics Fix (ADR)
+- **Delta:** Cross-sectional IC 산출 로직을 단일 Fold OOS 이벤트 기준의 Time-series Rank IC로 재정의하였으며, 인덱스 정렬 버그를 `FoldDiagnostic` 객체 통합으로 완전히 해결함.
+- **Rationale:** 횡단면 분산이 극도로 제한적인 조건에서 노이즈가 제거된 정직한 시계열 IC를 확보하고, CPCV 중첩 보정(`n_eff` 도입 및 `ddof=1` 표준편차 반영)으로 통계적 유의성(t-stat)을 복원함.

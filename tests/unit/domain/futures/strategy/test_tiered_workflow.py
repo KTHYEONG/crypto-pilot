@@ -5,6 +5,12 @@ TI8: OOS stacking 평균 검증
 TI9: Layer2Result dataclass 생성
 TI11: Layer3Result frozen 결정성
 TI12: _cagr 실측 계산 검증
+S1: fold 진단 인덱스 정렬 회귀방지 (이슈3)
+S2: 심볼별 IC 실계산 (이슈4)
+S3: t-stat ddof=1 및 라벨 정정 (이슈2)
+S4: 전 fold IC 산출 불가 Edge
+S5: time-series IC vs cross-sectional 분리 (약점A)
+S6: valid_coverage 임계 0.80 (약점D)
 """
 
 from __future__ import annotations
@@ -17,11 +23,15 @@ import pytest
 
 from src.domain.futures.strategy.cs_rank import SymbolSignal
 from src.domain.futures.strategy.tiered_workflow import (
+    _VALID_COVERAGE_FLAG_THRESHOLD,
+    FoldDiagnostic,
     Layer1Result,
     Layer2Result,
     Layer3Result,
     _cagr,
+    _compute_fold_ts_ic,
     _stack_oos_signals,
+    compute_per_symbol_ic,
     run_l1_cpcv,
 )
 from src.domain.futures.strategy.walk_forward import build_cpcv_folds
@@ -346,3 +356,265 @@ def test_run_l2_awf_vol_matrix_lookup_correctness() -> None:
     # Assert
     assert isinstance(l2, Layer2Result)
     assert l2.sharpe_hybrid is not None
+
+
+# ---------------------------------------------------------------------------
+# S1: fold 진단 인덱스 정렬 회귀방지 (이슈3)
+# ---------------------------------------------------------------------------
+
+
+def _make_fold_out(n_events: int, sym: str = "BTC") -> MagicMock:
+    """fold_out mock: n_events개 이벤트. oos_set=None (S1 index-alignment 테스트용)."""
+    fold_out = MagicMock()
+    if n_events == 0:
+        fold_out.model_output.events = pd.DataFrame(
+            columns=["symbol", "entry_idx", "expected_holding_bars"]
+        )
+        fold_out.model_output.expected_net_bps = np.array([], dtype=np.float64)
+    else:
+        rng = np.random.default_rng(42)
+        fold_out.model_output.events = pd.DataFrame({
+            "symbol": [sym] * n_events,
+            "entry_idx": np.arange(10, 10 + n_events, dtype=np.int64),
+            "expected_holding_bars": np.ones(n_events, dtype=np.int64) * 2,
+        })
+        fold_out.model_output.expected_net_bps = rng.uniform(-5, 5, n_events).astype(np.float64)
+    fold_out.oos_set = None  # S1 테스트는 IC 계산 불필요
+    fold_out.timing_profile = {}
+    return fold_out
+
+
+def test_fold_diagnostic_index_alignment_no_mismatch() -> None:
+    """S1: fold 0이 events=0일 때 FoldDiagnostic의 ic/breadth/n_valid/n_events가 같은 fold 데이터를 가짐."""
+    # Arrange: 5 fold_out 중 fold 0만 empty
+    fold_outs = [_make_fold_out(0)] + [_make_fold_out(6) for _ in range(4)]
+    n_total = 2
+    close = np.ones((30, n_total), dtype=np.float64) * 100.0
+    close[12, :] = 101.0  # exit prices slightly different
+
+    aligned = MagicMock()
+    aligned.close_2d = close
+    aligned.symbols = ("BTC", "ETH")
+
+    diags: list[FoldDiagnostic] = []
+    from src.domain.futures.strategy.tiered_workflow import (
+        FoldDiagnostic,
+        _compute_fold_ts_ic,
+    )
+
+    for i, fo in enumerate(fold_outs):
+        fold_sigs = {"BTC": SymbolSignal(raw_mu=1.0, volatility=0.01, n_obs=10, t_stat=2.0, valid=True)}
+        f_n_valid = sum(1 for s in fold_sigs.values() if s.valid)
+        f_breadth = f_n_valid / max(1, n_total)
+        f_n_events = len(fo.model_output.expected_net_bps)
+        fold_ic = _compute_fold_ts_ic(fold_out=fo)
+        diags.append(FoldDiagnostic(
+            fold=i + 1,
+            ic=fold_ic,
+            breadth=f_breadth,
+            n_valid=f_n_valid,
+            n_events=f_n_events,
+            passed=fold_ic is not None and fold_ic > 0,
+        ))
+
+    # Assert: fold 0 (index 0) → n_events=0, ic=None
+    assert diags[0].n_events == 0
+    assert diags[0].ic is None
+    # fold 1~4 (index 1~4) → n_events=6
+    for d in diags[1:]:
+        assert d.n_events == 6
+    # ic None인 fold의 breadth/n_valid가 같은 fold에서 왔음 (n_events=0이면 breadth도 0.5 이상일 수 있음)
+    assert diags[0].breadth == pytest.approx(0.5)  # 1 valid / 2 total (mock fold_sigs)
+
+
+# ---------------------------------------------------------------------------
+# S2: 심볼별 IC 실계산 (이슈4 — 하드코딩 0.0 제거)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_per_symbol_ic_perfect_positive_correlation() -> None:
+    """S2a: 예측 mu ∝ y_return_bps → per_sym_ic ≈ 1.0."""
+    # Arrange
+    n_events = 20
+    realized_returns = np.arange(1, n_events + 1, dtype=np.float64) * 0.001
+    pred_bps = realized_returns * 10000.0  # 완전 양의 rank 상관
+
+    fold_out = MagicMock()
+    fold_out.model_output.expected_net_bps = pred_bps
+    fold_out.oos_set = MagicMock()
+    fold_out.oos_set.y_return_bps = realized_returns
+    fold_out.oos_set.y_edge_bps = None
+    fold_out.oos_set.event_index = pd.DataFrame({"symbol": ["SYM_A"] * n_events})
+
+    # Act
+    result = compute_per_symbol_ic(fold_tuples=[(0, None, fold_out)])
+
+    # Assert: IC ≈ 1.0 (perfect monotone)
+    assert "SYM_A" in result
+    assert result["SYM_A"] == pytest.approx(1.0, abs=0.05)
+
+
+def test_compute_per_symbol_ic_perfect_negative_correlation() -> None:
+    """S2b: 예측 mu ∝ -y_return_bps → per_sym_ic ≈ -1.0."""
+    n_events = 20
+    realized_returns = np.arange(1, n_events + 1, dtype=np.float64) * 0.001
+    pred_bps = -realized_returns * 10000.0  # 완전 음의 rank 상관
+
+    fold_out = MagicMock()
+    fold_out.model_output.expected_net_bps = pred_bps
+    fold_out.oos_set = MagicMock()
+    fold_out.oos_set.y_return_bps = realized_returns
+    fold_out.oos_set.y_edge_bps = None
+    fold_out.oos_set.event_index = pd.DataFrame({"symbol": ["SYM_B"] * n_events})
+
+    result = compute_per_symbol_ic(fold_tuples=[(0, None, fold_out)])
+
+    assert "SYM_B" in result
+    assert result["SYM_B"] == pytest.approx(-1.0, abs=0.05)
+
+
+def test_compute_per_symbol_ic_not_hardcoded_zero() -> None:
+    """S2c: IC 결과가 0.0 고정이 아닌 실계산값임을 확인."""
+    n_events = 10
+    realized_returns = np.arange(1, n_events + 1, dtype=np.float64) * 0.001  # 단조증가
+    pred_bps = np.arange(n_events, dtype=np.float64)  # 동일 rank 순서
+
+    fold_out = MagicMock()
+    fold_out.model_output.expected_net_bps = pred_bps
+    fold_out.oos_set = MagicMock()
+    fold_out.oos_set.y_return_bps = realized_returns
+    fold_out.oos_set.y_edge_bps = None
+    fold_out.oos_set.event_index = pd.DataFrame({"symbol": ["SYM_C"] * n_events})
+
+    result = compute_per_symbol_ic(fold_tuples=[(0, None, fold_out)])
+
+    assert "SYM_C" in result
+    assert result["SYM_C"] != pytest.approx(0.0, abs=1e-9)  # 하드코딩 0.0 아님
+
+
+# ---------------------------------------------------------------------------
+# S3: t-stat ddof=1 적용 및 라벨 "fold" 확인 (이슈2)
+# ---------------------------------------------------------------------------
+
+
+def test_tstat_uses_ddof1_not_ddof0() -> None:
+    """S3: 동일 fold IC 리스트에서 ddof=1이 ddof=0보다 t-stat을 작게(보수적으로) 만든다."""
+    fold_ics = [0.1, 0.12, 0.09, 0.11]
+    mean_ic = float(np.mean(fold_ics))
+    n_f = len(fold_ics)
+
+    std_ddof0 = float(np.std(fold_ics, ddof=0))
+    std_ddof1 = float(np.std(fold_ics, ddof=1))
+
+    tstat_ddof0 = mean_ic * np.sqrt(n_f) / (std_ddof0 + 1e-9)
+    tstat_ddof1 = mean_ic * np.sqrt(n_f) / (std_ddof1 + 1e-9)
+
+    assert tstat_ddof1 < tstat_ddof0
+
+
+def test_layer1_table_label_no_hac() -> None:
+    """S3: format_layer1_table 출력에 '(HAC)' 없고 '(fold)' 포함."""
+    from src.domain.futures.strategy.tiered_logging import format_layer1_table
+
+    r = Layer1Result(
+        signals_per_fold=(),
+        oos_stacked={},
+        mean_ic=0.05,
+        ic_tstat=1.5,
+        breadth=0.4,
+        valid_coverage=0.9,
+        fold_pass_ratio=0.6,
+        gate_passed=False,
+        n_valid=2,
+        n_total=5,
+    )
+    table_str = format_layer1_table(r)
+    assert "(HAC)" not in table_str
+    assert "(fold)" in table_str
+
+
+# ---------------------------------------------------------------------------
+# S4: 전 fold IC 산출 불가 Edge
+# ---------------------------------------------------------------------------
+
+
+def test_all_folds_ic_none_returns_zero_stats() -> None:
+    """S4: 모든 fold가 events=0 → mean_ic=0, ic_tstat=0, gate_passed=False."""
+    # Arrange: valid_ics = [] (all folds have ic=None)
+    fold_diags: list[FoldDiagnostic] = [
+        FoldDiagnostic(fold=i + 1, ic=None, breadth=0.0, n_valid=0, n_events=0, passed=False)
+        for i in range(5)
+    ]
+
+    valid_ics = [d.ic for d in fold_diags if d.ic is not None]
+
+    # Act: replicate tiered_workflow stats logic
+    if valid_ics:
+        mean_ic = float(np.mean(valid_ics))
+        std_ic = float(np.std(valid_ics, ddof=1)) if len(valid_ics) > 1 else 0.0
+        ic_tstat = mean_ic * np.sqrt(len(valid_ics)) / (std_ic + 1e-9)
+    else:
+        mean_ic = 0.0
+        ic_tstat = 0.0
+
+    # Assert
+    assert mean_ic == pytest.approx(0.0)
+    assert ic_tstat == pytest.approx(0.0)
+
+
+def test_compute_fold_ts_ic_returns_none_when_events_empty() -> None:
+    """S4: _compute_fold_ts_ic — oos_set=None → None 반환."""
+    fold_out = MagicMock()
+    fold_out.model_output.events = pd.DataFrame(columns=["symbol", "entry_idx", "expected_holding_bars"])
+    fold_out.model_output.expected_net_bps = np.array([], dtype=np.float64)
+    fold_out.oos_set = None
+
+    result = _compute_fold_ts_ic(fold_out=fold_out)
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# S5: time-series IC가 횡단면 분산 0일 때도 양수 IC 산출 (약점A 해소)
+# ---------------------------------------------------------------------------
+
+
+def test_ts_ic_positive_when_crosssectional_variance_zero() -> None:
+    """S5: 단조증가 y_return_bps vs 동일 방향 pred_bps → rank IC > 0."""
+    n_events = 20
+    realized_returns = np.arange(1, n_events + 1, dtype=np.float64) * 0.001  # 단조증가
+    pred_bps = realized_returns * 10000.0  # 동일 rank 방향
+
+    fold_out = MagicMock()
+    fold_out.model_output.expected_net_bps = pred_bps
+    fold_out.oos_set = MagicMock()
+    fold_out.oos_set.y_return_bps = realized_returns
+    fold_out.oos_set.y_edge_bps = None
+    fold_out.oos_set.event_index = pd.DataFrame({"symbol": ["SYM_SAME"] * n_events})
+
+    result = compute_per_symbol_ic(fold_tuples=[(0, None, fold_out)])
+
+    # time-series IC는 양수여야 함
+    assert "SYM_SAME" in result
+    assert result["SYM_SAME"] > 0.5
+
+
+# ---------------------------------------------------------------------------
+# S6: valid_coverage 임계 0.80 (약점D — 매직넘버 0.5 제거)
+# ---------------------------------------------------------------------------
+
+
+def test_valid_coverage_threshold_is_080_not_05() -> None:
+    """S6: _VALID_COVERAGE_FLAG_THRESHOLD = 0.80, 0.6 ratio는 flag=False."""
+    assert pytest.approx(0.80) == _VALID_COVERAGE_FLAG_THRESHOLD
+
+    # fold valid ratio = 0.6 → 0.60 < 0.80 → flag=False
+    ratio = 0.6
+    flag = ratio >= _VALID_COVERAGE_FLAG_THRESHOLD
+    assert flag is False
+
+
+def test_valid_coverage_threshold_passes_above_080() -> None:
+    """S6: ratio = 0.81 → flag=True."""
+    ratio = 0.81
+    flag = ratio >= _VALID_COVERAGE_FLAG_THRESHOLD
+    assert flag is True

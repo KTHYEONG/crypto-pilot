@@ -45,7 +45,7 @@ class TestFormatLayer1Table:
         result = format_layer1_table(r1)
 
         # Assert
-        assert "Mean IC (HAC)" in result
+        assert "Mean IC (fold)" in result
         assert "PASS" in result
         assert "0.035" in result
         assert "2.10" in result
