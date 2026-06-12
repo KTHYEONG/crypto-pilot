@@ -87,6 +87,66 @@ class Layer1Result:
     n_valid: int
     n_total: int
     n_trade_scope: int = 0
+    cs_ic_mean: float = 0.0
+    cs_ic_tstat: float = 0.0
+    cs_ic_fold_pass_ratio: float = 0.0
+    decile_lift_bps: float = 0.0
+    strategy_panel: tuple[StrategySignal, ...] = ()
+    n_valid_strategies: int = 0
+    panel_diversity: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class StrategySignal:
+    """전략별 OOS 독립검증 결과."""
+
+    strategy_id: str
+    oos_edge_bps: float
+    oos_nw_tstat: float
+    hit_rate: float
+    fold_sign_consistency: float
+    n_obs: int
+    n_folds: int
+    valid: bool
+    _fold_edges: tuple[tuple[int, float], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PredictionDecompositionDiag:
+    """C0 진단: 예측의 정적/동적 분산 분해 + archetype 실현엣지 + decile lift.
+
+    Attributes:
+        static_variance_share: Var 설명 비율 — (arch,regime,variant) 그룹평균으로 설명되는 비율.
+        dynamic_variance_share: 1 - static_variance_share (이벤트 내 잔차 변동).
+        score_cal_valid_ratio: valid regime 비율 (fold 평균).
+        per_archetype_oos_edge: archetype → (mean_bps, nw_tstat) OOS 실현엣지.
+        decile_lift_bps: top10% - bottom10% 실현엣지 (expected_net_bps 정렬 기준).
+    """
+
+    static_variance_share: float
+    dynamic_variance_share: float
+    score_cal_valid_ratio: float
+    per_archetype_oos_edge: dict[str, tuple[float, float]]
+    decile_lift_bps: float
+
+
+@dataclass(frozen=True, slots=True)
+class SymbolRealizedStat:
+    """심볼별 실현 수익 기반 QC 통계 (예측값 독립).
+
+    Attributes:
+        realized_mu_bps: 실현 y_return_bps fold-pooled 평균.
+        t_stat: 실현 엣지 Bartlett NW HAC t-stat.
+        n_obs: fold 합산 유효 이벤트 수.
+        ic: per-symbol TS rank IC (compute_per_symbol_ic 결과).
+        valid: n_obs>=min_obs ∧ |t_stat|>=floor ∧ isfinite ∧ ic>0.
+    """
+
+    realized_mu_bps: float
+    t_stat: float
+    n_obs: int
+    ic: float
+    valid: bool
 
 
 @dataclass(slots=True, frozen=True)
@@ -311,7 +371,7 @@ def _run_awf_simulation(
     signal_total = 0
 
     prev_selection: frozenset[str] = frozenset()
-    prev_w = np.zeros(n_sym, dtype=np.float64)
+    prev_w: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
     last_selected: frozenset[str] = frozenset()
     last_w: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
 
@@ -346,8 +406,8 @@ def _run_awf_simulation(
             last_selected = selected
 
             # 3. mu/sigma 배열 구성
-            mu_arr = np.zeros(n_sym, dtype=np.float64)
-            sig_arr = np.full(n_sym, VOL_FLOOR, dtype=np.float64)
+            mu_arr: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
+            sig_arr: NDArray[np.float64] = np.full(n_sym, VOL_FLOOR, dtype=np.float64)
             for sym, ss in valid_signals.items():
                 if sym in sym_to_idx:
                     i = sym_to_idx[sym]
@@ -431,11 +491,16 @@ def _run_awf_simulation(
 
 def _stack_oos_signals(
     signals_per_fold: tuple[dict[str, SymbolSignal], ...],
+    realized_stats: dict[str, SymbolRealizedStat] | None = None,
 ) -> dict[str, SymbolSignal]:
     """fold별 SymbolSignal을 per-symbol로 집계 (raw_mu 평균).
 
+    raw_mu/vol/beta는 예측 기반 fold 평균(사이징용).
+    t_stat/valid/n_obs는 realized_stats에서 주입(BUG-A 제거: 마지막 fold 편향 제거).
+
     Args:
         signals_per_fold: fold별 symbol→SymbolSignal 매핑 튜플.
+        realized_stats: SymbolRealizedStat 매핑. None이면 보수적 valid=False 처리.
 
     Returns:
         합본 symbol→SymbolSignal 매핑.
@@ -444,22 +509,28 @@ def _stack_oos_signals(
     Space Complexity: O(N)
     """
     sym_mu_lists: dict[str, list[float]] = defaultdict(list)
-    sym_sig_ref: dict[str, SymbolSignal] = {}
+    sym_vol_lists: dict[str, list[float]] = defaultdict(list)
+    sym_beta_lists: dict[str, list[float | None]] = defaultdict(list)
+
     for fold_sigs in signals_per_fold:
         for sym, sig in fold_sigs.items():
             sym_mu_lists[sym].append(sig.raw_mu)
-            sym_sig_ref[sym] = sig  # 마지막 fold 기준 메타 사용
+            sym_vol_lists[sym].append(sig.volatility)
+            sym_beta_lists[sym].append(sig.beta_btc)
 
     oos_stacked: dict[str, SymbolSignal] = {}
     for sym, mus in sym_mu_lists.items():
-        ref = sym_sig_ref[sym]
+        real = realized_stats.get(sym) if realized_stats else None
+        betas = [b for b in sym_beta_lists[sym] if b is not None]
+        avg_beta: float | None = float(np.mean(betas)) if betas else None
+        avg_vol = float(np.mean(sym_vol_lists[sym])) if sym_vol_lists[sym] else VOL_FLOOR
         oos_stacked[sym] = SymbolSignal(
             raw_mu=float(np.mean(mus)),
-            volatility=ref.volatility,
-            n_obs=ref.n_obs * len(mus),
-            t_stat=ref.t_stat,
-            valid=ref.valid,
-            beta_btc=ref.beta_btc,
+            volatility=avg_vol,
+            n_obs=real.n_obs if real is not None else 0,
+            t_stat=real.t_stat if real is not None else 0.0,
+            valid=real.valid if real is not None else False,
+            beta_btc=avg_beta,
         )
     return oos_stacked
 
@@ -605,6 +676,325 @@ def compute_per_symbol_ic(
     return {sym: float(np.mean(ics)) for sym, ics in sym_ic_lists.items() if ics}
 
 
+def _nw_tstat_realized(r_sym: NDArray[np.float64]) -> float:
+    """Bartlett NW HAC t-stat on a realized return series.
+
+    Uses lag m = clip(n//20, 1, n-1) (5-percentile bandwidth).
+    Returns 0.0 for n<4 or degenerate (std<1e-9) series.
+
+    Args:
+        r_sym: 1-D realized return array (bps), shape [N].
+
+    Returns:
+        NW HAC t-statistic.
+
+    Time Complexity: O(N * m)
+    Space Complexity: O(N)
+    """
+    n = len(r_sym)
+    if n < 4:
+        return 0.0
+    if float(np.std(r_sym)) < 1e-9:
+        return 0.0
+    mu = float(np.mean(r_sym))
+    demeaned = r_sym - mu
+    m = min(n - 1, max(1, n // 20))
+    gamma0 = float(np.dot(demeaned, demeaned)) / n
+    gamma_sum = gamma0
+    for j in range(1, m + 1):
+        w = 1.0 - j / (m + 1)
+        gamma_j = float(np.dot(demeaned[j:], demeaned[:-j])) / n
+        gamma_sum += 2.0 * w * gamma_j
+    se_hac = float(np.sqrt(max(gamma_sum, 1e-20) / n))
+    return mu / se_hac if se_hac > 1e-20 else 0.0
+
+
+def _compute_fold_realized_valid_set(
+    fold_out: Any,
+    *,
+    min_obs: int = 20,
+    t_stat_floor: float = 1.96,
+) -> frozenset[str]:
+    """Per-fold: symbols passing realized NW t-stat QC (BUG-B 방어).
+
+    예측값 분산이 아닌 실현 y_return_bps 기반으로 심볼 유효성을 판정한다.
+    → 상수 예측 심볼의 t-stat 폭발이 breadth 측정을 오염하지 않는다.
+
+    Args:
+        fold_out: fold 출력 (oos_set.y_return_bps, oos_set.event_index 필요).
+        min_obs: 최소 이벤트 수.
+        t_stat_floor: 최소 |t-stat|.
+
+    Returns:
+        유효 심볼 frozenset.
+
+    Time Complexity: O(S * E/S) = O(E)  — S=symbols, E=events
+    Space Complexity: O(S)
+    """
+    if not _is_trained_fold_output(fold_out):
+        return frozenset()
+    oos_set = getattr(fold_out, "oos_set", None)
+    if oos_set is None:
+        return frozenset()
+    y_realized = getattr(oos_set, "y_return_bps", None)
+    if y_realized is None:
+        y_realized = getattr(oos_set, "y_edge_bps", None)
+    if y_realized is None:
+        return frozenset()
+    events_df: pd.DataFrame = getattr(oos_set, "event_index", pd.DataFrame())
+    if events_df.empty or "symbol" not in events_df.columns:
+        return frozenset()
+
+    realized = np.asarray(y_realized, dtype=np.float64)
+    symbols_arr = events_df["symbol"].to_numpy()
+    if len(realized) != len(symbols_arr):
+        return frozenset()
+
+    valid_syms: set[str] = set()
+    for sym in np.unique(symbols_arr):
+        mask = symbols_arr == sym
+        r_sym = realized[mask]
+        r_sym = r_sym[np.isfinite(r_sym)]
+        if len(r_sym) < min_obs:
+            continue
+        t = _nw_tstat_realized(r_sym)
+        if abs(t) >= t_stat_floor:
+            valid_syms.add(str(sym))
+    return frozenset(valid_syms)
+
+
+def compute_per_symbol_realized_stats(
+    *,
+    fold_tuples: list[tuple[int, Any, Any]],
+    min_obs: int,
+    t_stat_floor: float,
+    per_symbol_ic: dict[str, float],
+) -> dict[str, SymbolRealizedStat]:
+    """fold-pooled 실현 수익 기반 per-symbol QC (BUG-A+B 교정).
+
+    QC 기준: 실현 엣지 NW t-stat (예측값 독립) + IC 부호 정합성.
+    예측이 상수여도 실현 라벨이 유의 양이면 valid=True (BUG-B 무해화).
+
+    Args:
+        fold_tuples: (fold_idx, wf_fold, fold_out) 리스트.
+        min_obs: 최소 이벤트 수 (fold 합산).
+        t_stat_floor: 최소 |t-stat|.
+        per_symbol_ic: compute_per_symbol_ic 결과 (IC 부호 정합 검증용).
+
+    Returns:
+        symbol → SymbolRealizedStat 매핑.
+
+    Time Complexity: O(F * E)
+    Space Complexity: O(S * E/S) = O(E)
+    """
+    sym_returns: dict[str, list[float]] = defaultdict(list)
+
+    for _, _, fold_out in fold_tuples:
+        if not _is_trained_fold_output(fold_out):
+            continue
+        oos_set = getattr(fold_out, "oos_set", None)
+        if oos_set is None:
+            continue
+        y_realized = getattr(oos_set, "y_return_bps", None)
+        if y_realized is None:
+            y_realized = getattr(oos_set, "y_edge_bps", None)
+        if y_realized is None:
+            continue
+        events_df: pd.DataFrame = getattr(oos_set, "event_index", pd.DataFrame())
+        if events_df.empty or "symbol" not in events_df.columns:
+            continue
+
+        realized = np.asarray(y_realized, dtype=np.float64)
+        symbols_arr = events_df["symbol"].to_numpy()
+        if len(realized) != len(symbols_arr):
+            continue
+
+        for sym in np.unique(symbols_arr):
+            mask = symbols_arr == sym
+            r_sym = realized[mask]
+            r_valid = r_sym[np.isfinite(r_sym)]
+            sym_returns[str(sym)].extend(r_valid.tolist())
+
+    result: dict[str, SymbolRealizedStat] = {}
+    for sym, returns_list in sym_returns.items():
+        r_arr = np.asarray(returns_list, dtype=np.float64)
+        n = len(r_arr)
+        mu = float(np.mean(r_arr)) if n > 0 else 0.0
+        t = _nw_tstat_realized(r_arr) if n >= 4 else 0.0
+        ic = per_symbol_ic.get(sym, 0.0)
+        valid = (
+            n >= min_obs
+            and abs(t) >= t_stat_floor
+            and bool(np.isfinite(mu))
+            and bool(np.isfinite(t))
+            and ic > 0.0
+        )
+        result[sym] = SymbolRealizedStat(
+            realized_mu_bps=mu,
+            t_stat=t,
+            n_obs=n,
+            ic=ic,
+            valid=valid,
+        )
+    return result
+
+
+def compute_per_strategy_oos_validation(
+    *,
+    fold_tuples: list[tuple[int, Any, Any]],
+    min_obs: int = 30,
+    t_stat_floor: float = 1.5,
+    consistency_floor: float = 0.60,
+) -> tuple[StrategySignal, ...]:
+    """rule-family:variant별 OOS 독립검증."""
+    per_strategy_realized: dict[str, list[float]] = defaultdict(list)
+    per_strategy_fold_edge: dict[str, dict[int, float]] = defaultdict(dict)
+
+    for fold_idx, _, fold_out in fold_tuples:
+        if not _is_trained_fold_output(fold_out):
+            continue
+        oos_set = getattr(fold_out, "oos_set", None)
+        if oos_set is None:
+            continue
+
+        y_realized = getattr(oos_set, "y_return_bps", None)
+        if y_realized is None:
+            y_realized = getattr(oos_set, "y_edge_bps", None)
+        events_df: pd.DataFrame = getattr(oos_set, "event_index", pd.DataFrame())
+        if y_realized is None or events_df.empty:
+            continue
+
+        realized = np.asarray(y_realized, dtype=np.float64)
+        if len(realized) != len(events_df):
+            continue
+
+        if "family" in events_df.columns:
+            family_col = events_df["family"].astype(str)
+        elif "archetype" in events_df.columns:
+            family_col = events_df["archetype"].astype(str)
+        else:
+            family_col = pd.Series(["_unknown"] * len(events_df), index=events_df.index, dtype="object")
+        if "variant" in events_df.columns:
+            variant_col = events_df["variant"].astype(str)
+        else:
+            variant_col = pd.Series(["_unknown"] * len(events_df), index=events_df.index, dtype="object")
+
+        fold_bucket: dict[str, list[float]] = defaultdict(list)
+        for idx, value in enumerate(realized):
+            if not np.isfinite(value):
+                continue
+            strategy_id = f"{family_col.iat[idx]}:{variant_col.iat[idx]}"
+            per_strategy_realized[strategy_id].append(float(value))
+            fold_bucket[strategy_id].append(float(value))
+
+        for strategy_id, values in fold_bucket.items():
+            if values:
+                per_strategy_fold_edge[strategy_id][fold_idx] = float(np.mean(values))
+
+    panel: list[StrategySignal] = []
+    for strategy_id in sorted(per_strategy_realized):
+        realized_clean = np.asarray(per_strategy_realized[strategy_id], dtype=np.float64)
+        if len(realized_clean) == 0:
+            continue
+        fold_edges = tuple(
+            sorted((int(fold_id), float(edge)) for fold_id, edge in per_strategy_fold_edge.get(strategy_id, {}).items())
+        )
+        n_folds = len(fold_edges)
+        fold_consistency = (
+            float(sum(1 for _, edge in fold_edges if edge > 0.0) / n_folds)
+            if n_folds > 0 else 0.0
+        )
+        nw_tstat = _nw_tstat_realized(realized_clean)
+        panel.append(
+            StrategySignal(
+                strategy_id=strategy_id,
+                oos_edge_bps=float(np.mean(realized_clean)),
+                oos_nw_tstat=nw_tstat,
+                hit_rate=float(np.mean(realized_clean > 0.0)),
+                fold_sign_consistency=fold_consistency,
+                n_obs=len(realized_clean),
+                n_folds=n_folds,
+                valid=bool(
+                    len(realized_clean) >= min_obs
+                    and nw_tstat >= t_stat_floor
+                    and fold_consistency >= consistency_floor
+                ),
+                _fold_edges=fold_edges,
+            )
+        )
+    return tuple(panel)
+
+
+def compute_panel_diversity(panel: tuple[StrategySignal, ...]) -> float:
+    """유효 전략 fold-edge 상관 기반 다양성."""
+    valid_panel = [sig for sig in panel if sig.valid]
+    if len(valid_panel) < 2:
+        return 0.0
+
+    pairwise_abs_corr: list[float] = []
+    for idx, left in enumerate(valid_panel[:-1]):
+        left_map = dict(left._fold_edges)
+        for right in valid_panel[idx + 1:]:
+            right_map = dict(right._fold_edges)
+            common_folds = sorted(set(left_map) & set(right_map))
+            if len(common_folds) < 2:
+                pairwise_abs_corr.append(1.0)
+                continue
+            left_vec = np.asarray([left_map[k] for k in common_folds], dtype=np.float64)
+            right_vec = np.asarray([right_map[k] for k in common_folds], dtype=np.float64)
+            if not _is_non_constant_finite_array(left_vec) or not _is_non_constant_finite_array(right_vec):
+                pairwise_abs_corr.append(1.0)
+                continue
+            corr = float(np.corrcoef(left_vec, right_vec)[0, 1])
+            pairwise_abs_corr.append(abs(corr) if np.isfinite(corr) else 1.0)
+
+    if not pairwise_abs_corr:
+        return 0.0
+    return float(np.clip(1.0 - float(np.mean(pairwise_abs_corr)), 0.0, 1.0))
+
+
+def compute_breadth_weighted_ic(
+    per_symbol_ic: dict[str, float],
+    per_symbol_n: dict[str, int],
+) -> tuple[float, float]:
+    """이벤트 가중 평균 per-symbol IC + cross-symbol IC IR t-stat (BUG-C 교정).
+
+    글로벌 풀 Spearman 대비: 이종 심볼 vol/레벨 rank 오염 없이 타이밍 알파를 측정.
+
+    ic_mean_weighted = Σ(n_i · IC_i) / Σn_i
+    ic_ir_tstat      = mean(IC_i) / (std(IC_i) / sqrt(S))   [cross-symbol IC IR]
+
+    Args:
+        per_symbol_ic: symbol → TS rank IC.
+        per_symbol_n: symbol → 이벤트 수 (가중치).
+
+    Returns:
+        (ic_mean_weighted, ic_ir_tstat) 튜플.
+
+    Time Complexity: O(S)
+    Space Complexity: O(S)
+    """
+    if not per_symbol_ic:
+        return 0.0, 0.0
+
+    syms = list(per_symbol_ic.keys())
+    ic_arr = np.array([per_symbol_ic[s] for s in syms], dtype=np.float64)
+    n_arr = np.array([float(max(per_symbol_n.get(s, 1), 1)) for s in syms], dtype=np.float64)
+
+    total_n = float(n_arr.sum())
+    ic_weighted = float(np.dot(ic_arr, n_arr) / total_n) if total_n > 0 else 0.0
+
+    s = len(syms)
+    if s < 2:
+        return ic_weighted, 0.0
+
+    ic_mean = float(ic_arr.mean())
+    ic_std = float(ic_arr.std(ddof=1))
+    ic_ir = ic_mean / (ic_std / np.sqrt(s) + 1e-12)
+
+    return ic_weighted, float(ic_ir)
+
+
 def _newey_west_ic_tstat(
     pred: NDArray[np.float64],
     realized: NDArray[np.float64],
@@ -707,6 +1097,257 @@ def _compute_fold_ts_ic(*, fold_out: Any) -> float | None:
 
     ic_val, _ = spearmanr(pred[mask], realized[mask])
     return float(ic_val) if not np.isnan(ic_val) else None
+
+
+# ---------------------------------------------------------------------------
+# C0 Diagnostic: Prediction Decomposition
+# ---------------------------------------------------------------------------
+
+_N_REGIMES_DEFAULT: int = 6  # Binance regime codes 1-6
+
+
+def compute_prediction_decomposition_diag(
+    *,
+    fold_tuples: list[tuple[int, Any, Any]],
+) -> PredictionDecompositionDiag:
+    """OOS 이벤트에서 예측의 정적/동적 분산 분해 + archetype 엣지 + decile lift (진단 전용).
+
+    어떤 게이트 값도 변경하지 않는다. 순수 관측.
+
+    Args:
+        fold_tuples: (fold_idx, wf_fold, fold_out) 리스트.
+
+    Returns:
+        PredictionDecompositionDiag — 분석 결과.
+
+    Time Complexity: O(F * E)
+    Space Complexity: O(E) — 전 fold 이벤트 합산
+    """
+    all_pred: list[NDArray[np.float64]] = []
+    all_real: list[NDArray[np.float64]] = []
+    all_archetype: list[list[str]] = []
+    all_regime: list[list[int]] = []
+    all_variant: list[list[str]] = []
+    score_cal_ratios: list[float] = []
+
+    for _, _, fold_out in fold_tuples:
+        if not _is_trained_fold_output(fold_out):
+            continue
+        oos_set = getattr(fold_out, "oos_set", None)
+        if oos_set is None:
+            continue
+
+        y_realized = getattr(oos_set, "y_return_bps", None)
+        if y_realized is None:
+            y_realized = getattr(oos_set, "y_edge_bps", None)
+        if y_realized is None:
+            continue
+
+        events_df: pd.DataFrame = getattr(oos_set, "event_index", pd.DataFrame())
+        if events_df.empty:
+            continue
+
+        pred: NDArray[np.float64] = np.asarray(
+            fold_out.model_output.expected_net_bps, dtype=np.float64
+        )
+        real: NDArray[np.float64] = np.asarray(y_realized, dtype=np.float64)
+
+        if len(pred) != len(real) or len(pred) != len(events_df):
+            continue
+
+        mask = np.isfinite(pred) & np.isfinite(real)
+        if mask.sum() < 4:
+            continue
+
+        pred_m = pred[mask]
+        real_m = real[mask]
+        ev_m = events_df.loc[mask.tolist() if not isinstance(mask, np.ndarray) else events_df.index[mask]]
+
+        n_m = int(mask.sum())
+        arch_col = (
+            ev_m["archetype"].astype(str).tolist() if "archetype" in ev_m.columns
+            else ["_unknown"] * n_m
+        )
+        regime_col: list[int] = []
+        if "entry_regime_code" in ev_m.columns:
+            regime_col = [int(v) if pd.notna(v) else -1 for v in ev_m["entry_regime_code"]]
+        else:
+            regime_col = [-1] * n_m
+        variant_col = (
+            ev_m["variant"].astype(str).tolist() if "variant" in ev_m.columns
+            else ["_unknown"] * n_m
+        )
+
+        all_pred.append(pred_m)
+        all_real.append(real_m)
+        all_archetype.append(arch_col)
+        all_regime.append(regime_col)
+        all_variant.append(variant_col)
+
+        # score_cal_valid_ratio 집계
+        val_diag = getattr(fold_out.model_output, "validation_diagnostics", {})
+        ens_diag = val_diag.get("ensemble_diagnostics", {}) if isinstance(val_diag, dict) else {}
+        n_valid_reg = int(ens_diag.get("num_valid_regimes", 0)) if isinstance(ens_diag, dict) else 0
+        n_unique_reg = max(len(set(regime_col) - {-1}), 1)
+        score_cal_ratios.append(float(n_valid_reg) / float(n_unique_reg))
+
+    # ── 빈 케이스 ────────────────────────────────────────────────────────────
+    if not all_pred:
+        return PredictionDecompositionDiag(
+            static_variance_share=0.0,
+            dynamic_variance_share=0.0,
+            score_cal_valid_ratio=0.0,
+            per_archetype_oos_edge={},
+            decile_lift_bps=0.0,
+        )
+
+    pred_arr = np.concatenate(all_pred, axis=0)   # [E]
+    real_arr = np.concatenate(all_real, axis=0)   # [E]
+    arch_arr = np.array([a for sub in all_archetype for a in sub])
+    regime_arr = np.array([r for sub in all_regime for r in sub], dtype=np.int32)
+    variant_arr = np.array([v for sub in all_variant for v in sub])
+
+    n_total = len(pred_arr)
+
+    # ── 정적 분산 비율 ─────────────────────────────────────────────────────
+    total_var = float(np.var(pred_arr)) if n_total > 1 else 0.0
+    static_var = 0.0
+    if total_var > 1e-20:
+        group_keys = [f"{a}|{r}|{v}" for a, r, v in zip(arch_arr, regime_arr, variant_arr, strict=True)]
+        group_key_arr = np.array(group_keys)
+        group_mean_arr: NDArray[np.float64] = np.zeros(n_total, dtype=np.float64)
+        for gk in np.unique(group_key_arr):
+            gm = group_key_arr == gk
+            n_g = int(gm.sum())
+            if n_g < 2:
+                group_mean_arr[gm] = pred_arr[gm]
+                continue
+            group_mean_arr[gm] = float(np.mean(pred_arr[gm]))
+        static_var = float(np.var(group_mean_arr)) if n_total > 1 else 0.0
+
+    static_share = float(np.clip(static_var / (total_var + 1e-20), 0.0, 1.0))
+    dynamic_share = float(max(0.0, 1.0 - static_share))
+
+    # ── archetype 실현엣지 ─────────────────────────────────────────────────
+    per_archetype_oos_edge: dict[str, tuple[float, float]] = {}
+    for arch in np.unique(arch_arr):
+        a_mask = arch_arr == arch
+        r_sub: NDArray[np.float64] = real_arr[a_mask]
+        if len(r_sub) < 4:
+            continue
+        mu_arch = float(np.mean(r_sub))
+        t_arch = _nw_tstat_realized(r_sub)
+        per_archetype_oos_edge[str(arch)] = (mu_arch, t_arch)
+
+    # ── decile lift ────────────────────────────────────────────────────────
+    decile_lift_bps = 0.0
+    if n_total >= 20:
+        n10 = max(1, n_total // 10)
+        order = np.argsort(pred_arr)
+        top_real = real_arr[order[-n10:]]
+        bot_real = real_arr[order[:n10]]
+        decile_lift_bps = float(np.mean(top_real) - np.mean(bot_real))
+
+    score_cal_valid_ratio = float(np.mean(score_cal_ratios)) if score_cal_ratios else 0.0
+
+    return PredictionDecompositionDiag(
+        static_variance_share=static_share,
+        dynamic_variance_share=dynamic_share,
+        score_cal_valid_ratio=score_cal_valid_ratio,
+        per_archetype_oos_edge=per_archetype_oos_edge,
+        decile_lift_bps=decile_lift_bps,
+    )
+
+
+# ---------------------------------------------------------------------------
+# C5 Diagnostic: Fold-level Regime & Archetype Analysis
+# ---------------------------------------------------------------------------
+
+
+def _log_fold_regime_analysis(
+    *,
+    fold_tuples: list[tuple[int, Any, Any]],
+    datetimes: NDArray[np.datetime64],
+) -> None:
+    """각 fold OOS 날짜 범위·regime 분포·archetype별 실현mu를 [SWF-DIAG-FOLDn] 로깅.
+
+    게이트 불변. 순수 진단. fold 5 비정상성 원인 파악용.
+
+    Args:
+        fold_tuples: (fold_idx, wf_fold, fold_out) 리스트.
+        datetimes: aligned.datetimes — bar 인덱스 → 날짜 변환에 사용.
+    """
+    n_bars = len(datetimes)
+
+    for fold_idx, wf_fold, fold_out in fold_tuples:
+        # 날짜 범위
+        oos_s = int(getattr(wf_fold, "oos_start", 0))
+        oos_e = int(getattr(wf_fold, "oos_end", 0))
+        oos_s_clamp = max(0, min(oos_s, n_bars - 1))
+        oos_e_clamp = max(0, min(oos_e - 1, n_bars - 1))
+        date_start = str(datetimes[oos_s_clamp])[:10]
+        date_end = str(datetimes[oos_e_clamp])[:10]
+
+        if not _is_trained_fold_output(fold_out):
+            logger.info(
+                "[SWF-DIAG-FOLD%d] %s~%s fit_status=%s SKIP",
+                fold_idx + 1, date_start, date_end,
+                getattr(fold_out, "fit_status", "unknown"),
+            )
+            continue
+
+        oos_set = getattr(fold_out, "oos_set", None)
+        if oos_set is None:
+            logger.info("[SWF-DIAG-FOLD%d] %s~%s oos_set=None SKIP", fold_idx + 1, date_start, date_end)
+            continue
+
+        events_df: pd.DataFrame = getattr(oos_set, "event_index", pd.DataFrame())
+        y_raw = getattr(oos_set, "y_return_bps", None)
+        if events_df.empty or y_raw is None:
+            logger.info("[SWF-DIAG-FOLD%d] %s~%s no_events SKIP", fold_idx + 1, date_start, date_end)
+            continue
+
+        y_arr: NDArray[np.float64] = np.asarray(y_raw, dtype=np.float64)
+        n_ev = len(y_arr)
+
+        # regime 분포
+        regime_dist = ""
+        if "entry_regime_code" in events_df.columns and n_ev > 0:
+            rc = events_df["entry_regime_code"].dropna().astype(int)
+            counts = rc.value_counts().sort_index()
+            regime_dist = " ".join(f"r{k}:{v}" for k, v in counts.items())
+
+        # archetype별 realized mu
+        arch_mu_str = ""
+        if "archetype" in events_df.columns and n_ev == len(events_df):
+            arch_col = events_df["archetype"].astype(str).to_numpy()
+            arch_parts = []
+            for arch in np.unique(arch_col):
+                mask = arch_col == arch
+                r_sub = y_arr[mask]
+                finite = r_sub[np.isfinite(r_sub)]
+                if len(finite) >= 4:
+                    mu = float(np.mean(finite))
+                    label = arch.replace("_reversion", "").replace("_continuation", "").replace("time_series_", "ts_")
+                    arch_parts.append(f"{label}:{mu:.1f}(n={len(finite)})")
+            arch_mu_str = " | ".join(arch_parts)
+
+        # CS IC (fold_ic)
+        pred_arr: NDArray[np.float64] = np.asarray(
+            fold_out.model_output.expected_net_bps, dtype=np.float64
+        )
+        cs_ic_str = "ic=N/A"
+        if len(pred_arr) == n_ev and n_ev >= 4:
+            mask_f = np.isfinite(pred_arr) & np.isfinite(y_arr)
+            if mask_f.sum() >= 4:
+                from scipy.stats import spearmanr as _sr
+                _ic, _ = _sr(pred_arr[mask_f], y_arr[mask_f])
+                cs_ic_str = f"ic={float(_ic):.4f}"
+
+        logger.info(
+            "[SWF-DIAG-FOLD%d] %s~%s n=%d %s | regime[%s] | arch[%s]",
+            fold_idx + 1, date_start, date_end, n_ev, cs_ic_str, regime_dist, arch_mu_str,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -835,9 +1476,14 @@ def run_l1_swf(
         # time-series pooled rank IC (expected_net_bps vs oos_set.y_return_bps)
         fold_ic: float | None = _compute_fold_ts_ic(fold_out=fold_out)
 
-        f_n_valid = sum(1 for s in fold_sigs.values() if s.valid)
         eligible_mask = _fold_eligible_symbol_mask(aligned=aligned, fold=_wf_fold)
         f_n_eligible = int(np.count_nonzero(eligible_mask))
+        # BUG-B fix: realized 기반 per-fold valid (예측 분산 오염 제거)
+        fold_realized_valid = _compute_fold_realized_valid_set(
+            fold_out, min_obs=min_obs, t_stat_floor=t_stat_floor
+        )
+        eligible_syms = {s for s, e in zip(symbols, eligible_mask, strict=True) if e}
+        f_n_valid = len(fold_realized_valid & eligible_syms)
         f_breadth = f_n_valid / max(1, f_n_eligible)
         f_n_events = len(fold_out.model_output.expected_net_bps)
         fold_diags.append(FoldDiagnostic(
@@ -897,9 +1543,23 @@ def run_l1_swf(
         time.perf_counter() - t_start,
     )
 
-    # --- OOS stacking ---
+    # ── Per-symbol IC (정준: 예측 vs 실현, BUG-C 기반) ──────────────────
+    per_sym_ic = compute_per_symbol_ic(fold_tuples=futures)
+
+    # ── Realized stats: fold-pooled 실현 엣지 QC (BUG-A+B 교정) ─────────
+    per_sym_realized = compute_per_symbol_realized_stats(
+        fold_tuples=futures,
+        min_obs=min_obs,
+        t_stat_floor=t_stat_floor,
+        per_symbol_ic=per_sym_ic,
+    )
+
+    # ── OOS stacking (realized stats 주입: BUG-A 제거) ───────────────────
     sigs_tuple = tuple(signals_per_fold)
-    oos_stacked = _stack_oos_signals(sigs_tuple)
+    oos_stacked = _stack_oos_signals(sigs_tuple, realized_stats=per_sym_realized)
+    strategy_panel = compute_per_strategy_oos_validation(fold_tuples=futures)
+    n_valid_strategies = sum(1 for sig in strategy_panel if sig.valid)
+    panel_diversity = compute_panel_diversity(strategy_panel)
 
     # --- IC 통계 (fold_diags 기반) ---
     fold_perf_details: list[dict[str, Any]] = [
@@ -917,7 +1577,23 @@ def run_l1_swf(
         for d in fold_diags
     ]
 
-    # ── Pooled IC (primary gate metric) ──────────────────────────────────
+    valid_fold_ics = [float(d.ic) for d in fold_diags if d.ic is not None]
+    if valid_fold_ics:
+        cs_ic_mean = float(np.mean(valid_fold_ics))
+        cs_ic_fold_pass_ratio = float(sum(1 for ic in valid_fold_ics if ic > 0.0) / len(valid_fold_ics))
+        if len(valid_fold_ics) >= 2:
+            cs_ic_std = float(np.std(valid_fold_ics, ddof=1))
+            cs_ic_tstat = float(
+                cs_ic_mean / (cs_ic_std / np.sqrt(len(valid_fold_ics)) + 1e-12)
+            )
+        else:
+            cs_ic_tstat = 0.0
+    else:
+        cs_ic_mean = 0.0
+        cs_ic_tstat = 0.0
+        cs_ic_fold_pass_ratio = 0.0
+
+    # ── Diagnostic: 글로벌 풀 Spearman IC (강등, 게이트 미사용) ─────────
     _pred_parts: list[NDArray[np.float64]] = []
     _real_parts: list[NDArray[np.float64]] = []
     for _, _wf_fold, fold_out in futures:
@@ -946,14 +1622,23 @@ def run_l1_swf(
         _real_parts.append(r_arr[_mask])
 
     if _pred_parts:
-        p_all = np.concatenate(_pred_parts)
-        r_all = np.concatenate(_real_parts)
-        pooled_ic_val_raw, _ = spearmanr(p_all, r_all)
-        pooled_ic_val = float(pooled_ic_val_raw) if not np.isnan(pooled_ic_val_raw) else 0.0
-        pooled_tstat_val = _newey_west_ic_tstat(p_all, r_all)
+        _p_all = np.concatenate(_pred_parts)
+        _r_all = np.concatenate(_real_parts)
+        _global_ic_raw, _ = spearmanr(_p_all, _r_all)
+        _global_ic = float(_global_ic_raw) if not np.isnan(_global_ic_raw) else 0.0
+        _global_tstat = _newey_west_ic_tstat(_p_all, _r_all)
     else:
-        pooled_ic_val = 0.0
-        pooled_tstat_val = 0.0
+        _global_ic = 0.0
+        _global_tstat = 0.0
+    logger.debug(
+        "[SWF-IC-DIAG] global_pooled_ic=%.4f global_tstat=%.2f (diagnostic, not gate)",
+        _global_ic,
+        _global_tstat,
+    )
+
+    # ── Primary gate metrics: breadth-weighted IC + IC IR (BUG-C 교정) ──
+    per_sym_n: dict[str, int] = {sym: s.n_obs for sym, s in per_sym_realized.items()}
+    pooled_ic_val, pooled_tstat_val = compute_breadth_weighted_ic(per_sym_ic, per_sym_n)
 
     # ── Fold-wise event-weighted (diagnostic only) ─────────────────────
     _valid_pairs = [(d.ic, d.n_events) for d in fold_diags if d.ic is not None]
@@ -966,7 +1651,7 @@ def run_l1_swf(
     else:
         fold_pass_ratio = 0.0
 
-    # --- breadth / valid_coverage (FoldDiagnostic 기반) ---
+    # --- breadth / valid_coverage (FoldDiagnostic 기반, realized breadth) ---
     breadth = float(np.mean([d.breadth for d in fold_diags])) if fold_diags else 0.0
     valid_coverage = (
         float(sum(1 for d in fold_diags if d.breadth >= _VALID_COVERAGE_FLAG_THRESHOLD) / len(fold_diags))
@@ -977,31 +1662,28 @@ def run_l1_swf(
         if fold_diags else 0.0
     )
 
-    # n_valid: oos_stacked 기준
-    n_valid = sum(1 for s in oos_stacked.values() if s.valid)
+    # n_valid: realized stats 기준 (BUG-A 제거)
+    n_valid = sum(1 for s in per_sym_realized.values() if s.valid)
 
-    # Per-symbol time-series rank IC (oos_set.y_return_bps 기반 정준 계산)
-    per_sym_ic = compute_per_symbol_ic(fold_tuples=futures)
-
-    # Final Per-symbol aggregate collection
+    # Final Per-symbol aggregate (realized t_stat/valid 사용, BUG-A 제거)
     sym_details: list[dict[str, Any]] = []
     for sym, sig in sorted(oos_stacked.items()):
+        real = per_sym_realized.get(sym)
         sym_details.append({
             "symbol": sym,
             "raw_mu": sig.raw_mu,
             "vol": sig.volatility,
-            "t_stat": sig.t_stat,
+            "t_stat": real.t_stat if real is not None else 0.0,
             "ic": per_sym_ic.get(sym, 0.0),
-            "valid": sig.valid,
+            "valid": real.valid if real is not None else False,
         })
 
+    _diag = compute_prediction_decomposition_diag(fold_tuples=futures)
     gate_passed: bool = bool(
         (trained_fold_coverage >= _TRAINED_FOLD_COVERAGE_THRESHOLD)
-        and
-        (pooled_ic_val >= 0.030)
-        and (pooled_tstat_val >= 1.96)
-        and (breadth >= 0.30)
-        and (valid_coverage >= 0.80)
+        and (n_valid_strategies >= cfg.l1_min_valid_strategies)
+        and (panel_diversity >= cfg.l1_min_panel_diversity)
+        and (cs_ic_fold_pass_ratio >= cfg.l1_min_cs_fold_pass_ratio)
     )
 
     result = Layer1Result(
@@ -1016,8 +1698,56 @@ def run_l1_swf(
         n_valid=n_valid,
         n_total=n_total,
         n_trade_scope=n_total,
+        cs_ic_mean=cs_ic_mean,
+        cs_ic_tstat=cs_ic_tstat,
+        cs_ic_fold_pass_ratio=cs_ic_fold_pass_ratio,
+        decile_lift_bps=_diag.decile_lift_bps,
+        strategy_panel=strategy_panel,
+        n_valid_strategies=n_valid_strategies,
+        panel_diversity=panel_diversity,
     )
     logger.info(format_layer1_table(result, fold_details=fold_perf_details, per_symbol_top10=sym_details))
+    if strategy_panel:
+        top_panel = sorted(
+            strategy_panel,
+            key=lambda item: (item.valid, item.oos_edge_bps, item.oos_nw_tstat),
+            reverse=True,
+        )[: min(10, len(strategy_panel))]
+        panel_str = ", ".join(
+            (
+                f"{sig.strategy_id}:edge={sig.oos_edge_bps:.1f}"
+                f"/t={sig.oos_nw_tstat:.2f}"
+                f"/cons={sig.fold_sign_consistency:.2f}"
+                f"/valid={'Y' if sig.valid else 'N'}"
+            )
+            for sig in top_panel
+        )
+        logger.info("[STRATEGY-PANEL] valid=%d diversity=%.3f | %s", n_valid_strategies, panel_diversity, panel_str)
+    logger.info(
+        "[SWF-LEGACY-IC] pooled_ic=%.4f pooled_tstat=%.2f breadth=%.3f valid_coverage=%.3f",
+        pooled_ic_val,
+        pooled_tstat_val,
+        breadth,
+        valid_coverage,
+    )
+
+    # ── C0 Diagnostic (게이트 불변, 관측 전용) ────────────────────────────
+    logger.info(
+        "[SWF-DIAG] static_share=%.3f dynamic_share=%.3f score_cal_ratio=%.3f decile_lift=%.2fbps",
+        _diag.static_variance_share,
+        _diag.dynamic_variance_share,
+        _diag.score_cal_valid_ratio,
+        _diag.decile_lift_bps,
+    )
+    if _diag.per_archetype_oos_edge:
+        arch_lines = ", ".join(
+            f"{a}: mu={m:.2f} t={t:.2f}" for a, (m, t) in sorted(_diag.per_archetype_oos_edge.items())
+        )
+        logger.info("[SWF-DIAG-ARCH] %s", arch_lines)
+
+    # ── C5 Diagnostic: fold-level regime/archetype 분석 ────────────────────
+    _log_fold_regime_analysis(fold_tuples=futures, datetimes=aligned.datetimes)
+
     return result
 
 
