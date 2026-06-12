@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+import numba
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -90,23 +91,34 @@ def filter_rule_signal_panels(
 
 # --- Vectorized Technical Indicator Helpers ---
 
+@numba.njit(cache=True, fastmath=True)  # type: ignore
+def _ema_2d_jit(arr: np.ndarray, span: int) -> np.ndarray:
+    t_len, n_sym = arr.shape
+    out = np.empty((t_len, n_sym), dtype=np.float64)
+    out.fill(np.nan)
+    alpha = 2.0 / (float(span) + 1.0)
+    
+    last = np.zeros(n_sym, dtype=np.float64)
+    initialized = np.zeros(n_sym, dtype=np.bool_)
+    
+    for t in range(t_len):
+        for c in range(n_sym):
+            val = arr[t, c]
+            if np.isfinite(val):
+                if initialized[c]:
+                    last[c] = (1.0 - alpha) * last[c] + alpha * val
+                else:
+                    last[c] = val
+                    initialized[c] = True
+            if initialized[c]:
+                out[t, c] = last[c]
+    return out
+
+
 def _ema_2d(arr: NDArray[np.float64], span: int) -> NDArray[np.float64]:
     if span <= 1:
         return arr.copy()
-    alpha = 2.0 / (float(span) + 1.0)
-    out = np.full_like(arr, np.nan, dtype=np.float64)
-    last = np.zeros(arr.shape[1], dtype=np.float64)
-    initialized = np.zeros(arr.shape[1], dtype=bool)
-    for t in range(arr.shape[0]):
-        row = arr[t]
-        finite = np.isfinite(row)
-        upd = finite & initialized
-        init = finite & ~initialized
-        last[upd] = (1.0 - alpha) * last[upd] + alpha * row[upd]
-        last[init] = row[init]
-        initialized[init] = True
-        out[t, initialized] = last[initialized]
-    return out
+    return _ema_2d_jit(arr, span)
 
 
 def _rolling_mean_2d(arr: NDArray[np.float64], window: int) -> NDArray[np.float64]:

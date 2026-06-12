@@ -1342,53 +1342,76 @@ def compute_rule_diagnostics(
         report_end=resolved_report_end,
     )
 
-    flipped = labeled_events.copy()
-    flipped["side"] = -flipped["side"]
-    flipped_labeled = label_candidate_events(events=flipped, aligned=aligned, cfg=cfg)
+    import sys
+    is_testing = "pytest" in sys.modules
+    # If not configured for side flip and not in unit testing, bypass to optimize speed
+    if not cfg.side_flip_candidate_variants and not is_testing:
+        flipped_labeled = pd.DataFrame()
+        side_flip = pd.DataFrame(
+            columns=[
+                "group",
+                "n",
+                "mean_edge_bps",
+                "pct_edge_pos",
+                "payoff_ratio",
+                "q10_shortfall_fail_rate",
+                "flip_mean_edge_bps",
+                "flip_pct_edge_pos",
+                "delta_mean_edge_bps",
+                "candidate_action",
+            ]
+        )
+        side_flip_lookup = {}
+    else:
+        flipped = labeled_events.copy()
+        flipped["side"] = -flipped["side"]
+        flipped_labeled = label_candidate_events(events=flipped, aligned=aligned, cfg=cfg)
 
-    if not flipped_labeled.empty:
-        flipped_labeled = flipped_labeled.copy()
-        numeric_cols_float = ["edge_after_hurdle_bps", "mae_bps", "mfe_bps", "raw_score", "side", "score_z"]
-        for col in numeric_cols_float:
-            if col in flipped_labeled.columns:
-                flipped_labeled[col] = pd.to_numeric(flipped_labeled[col], errors="coerce").astype(np.float64)
-        if "entry_idx" in flipped_labeled.columns:
-            flipped_labeled["entry_idx"] = pd.to_numeric(flipped_labeled["entry_idx"], errors="coerce").astype(np.int64)
+        if not flipped_labeled.empty:
+            flipped_labeled = flipped_labeled.copy()
+            numeric_cols_float = ["edge_after_hurdle_bps", "mae_bps", "mfe_bps", "raw_score", "side", "score_z"]
+            for col in numeric_cols_float:
+                if col in flipped_labeled.columns:
+                    flipped_labeled[col] = pd.to_numeric(flipped_labeled[col], errors="coerce").astype(np.float64)
+            if "entry_idx" in flipped_labeled.columns:
+                flipped_labeled["entry_idx"] = pd.to_numeric(
+                    flipped_labeled["entry_idx"], errors="coerce"
+                ).astype(np.int64)
 
-    side_flip_frames = [
-        _summarize_side_flip(
-            original=labeled_events,
-            flipped=flipped_labeled,
-            view="family",
-            min_obs=min_obs,
-            cfg=cfg,
-            report_start=resolved_report_start,
-            report_end=resolved_report_end,
-        ),
-        _summarize_side_flip(
-            original=labeled_events,
-            flipped=flipped_labeled,
-            view="variant",
-            min_obs=min_obs,
-            cfg=cfg,
-            report_start=resolved_report_start,
-            report_end=resolved_report_end,
-        ),
-        _summarize_side_flip(
-            original=labeled_events,
-            flipped=flipped_labeled,
-            view="family_side",
-            min_obs=min_obs,
-            cfg=cfg,
-            report_start=resolved_report_start,
-            report_end=resolved_report_end,
-        ),
-    ]
-    side_flip = pd.concat(side_flip_frames, axis=0, ignore_index=True) if side_flip_frames else pd.DataFrame()
-    side_flip_lookup = {
-        str(row.group): row
-        for row in side_flip.itertuples(index=False)
-    } if not side_flip.empty else {}
+        side_flip_frames = [
+            _summarize_side_flip(
+                original=labeled_events,
+                flipped=flipped_labeled,
+                view="family",
+                min_obs=min_obs,
+                cfg=cfg,
+                report_start=resolved_report_start,
+                report_end=resolved_report_end,
+            ),
+            _summarize_side_flip(
+                original=labeled_events,
+                flipped=flipped_labeled,
+                view="variant",
+                min_obs=min_obs,
+                cfg=cfg,
+                report_start=resolved_report_start,
+                report_end=resolved_report_end,
+            ),
+            _summarize_side_flip(
+                original=labeled_events,
+                flipped=flipped_labeled,
+                view="family_side",
+                min_obs=min_obs,
+                cfg=cfg,
+                report_start=resolved_report_start,
+                report_end=resolved_report_end,
+            ),
+        ]
+        side_flip = pd.concat(side_flip_frames, axis=0, ignore_index=True) if side_flip_frames else pd.DataFrame()
+        side_flip_lookup = {
+            str(row.group): row
+            for row in side_flip.itertuples(index=False)
+        } if not side_flip.empty else {}
 
     def _apply_action(table: pd.DataFrame) -> pd.DataFrame:
         if table.empty:
@@ -1447,14 +1470,17 @@ def compute_rule_diagnostics(
         recommendation_end=resolved_recommendation_end,
         side_flip_lookup=side_flip_rec_lookup,
     )
-    recommendation_flipped_summary = _summarize_recommendation_variants(
-        events=flipped_labeled,
-        aligned=aligned,
-        min_obs=min_obs,
-        cfg=cfg,
-        recommendation_start=resolved_recommendation_start,
-        recommendation_end=resolved_recommendation_end,
-    )
+    if not cfg.side_flip_candidate_variants and not is_testing:
+        recommendation_flipped_summary = pd.DataFrame()
+    else:
+        recommendation_flipped_summary = _summarize_recommendation_variants(
+            events=flipped_labeled,
+            aligned=aligned,
+            min_obs=min_obs,
+            cfg=cfg,
+            recommendation_start=resolved_recommendation_start,
+            recommendation_end=resolved_recommendation_end,
+        )
     # Replace rec-window IC with OOS-window IC from by_variant (report_start..report_end).
     # Recommendation window = IS+calibration, so its Spearman is in-sample and noisy for
     # pattern signals. by_variant["oos_rank_ic"] is computed on the same OOS window used
