@@ -18,7 +18,7 @@ dependencies:
   documents:
     - docs/architecture/regime.md
     - docs/architecture/allocation.md
-last_verified: 2026-06-10
+last_verified: 2026-06-13
 ---
 
 # 1. Purpose
@@ -159,7 +159,18 @@ graph TD
 - Net targets and cost-derived metrics are excluded from Layer1 model execution.
 - Label-free inference: In candidate dataset building, exit indices for OOS prediction are inferred via $\text{entry\_idx} + \max(\text{expected\_holding\_bars} - 1, 0)$ when labels/exits are unavailable.
 
+**Qualification Key & OOS Activation (Regime Decoupling)**
+- `l1_qualify_by_regime=False` (default): evidence grouping key = `(symbol, strategy_id)` — all regime cells pooled to `"all"`. Restores statistical power (effective_n, fold count, t-stat, FDR) by eliminating sample fragmentation.
+- `l1_qualify_by_regime=True`: legacy behavior — key = `(symbol, strategy_id, activation_context)`.
+- `l1_activation_match_regime=False` (default): OOS activation filter relaxed to `(symbol, strategy_id)` match only; regime context is not required to match the fit registry entry.
+- Regime demoted to **risk overlay** (sizing/exposure scaling in Layer2+), not a qualification dimension. Non-stationarity defense retained via `positive_fold_ratio` gate.
+
+**Opportunity IC Mode**
+- `l1_opp_ic_mode="time_series"` (default): per-symbol Spearman IC over event timeline (≥3 events per symbol). Eliminates cross-section synchrony requirement; enables IC measurement with few ready symbols.
+- `l1_opp_ic_mode="cross_section"`: legacy per-bar cross-section IC (≥`l1_min_cross_section` symbols per bar required).
+
 **Hard Gate Evaluation**
 - **Requirements**: Gate checks include `fold_cov`, `sym_count`, `sym_ratio`, `fold_ratio`, `opp_ic`, `opp_tstat`, `probe_bps`, `probe_tstat`.
 - **Failure Handling**: Any single gate check failure triggers `gate_passed = False`, resulting in no final inference artifact.
+- **Config defaults (post-refactor)**: `l1_pair_min_folds=2`, `l1_min_cross_section=2`, `l1_opp_ic_mode="time_series"`, `l1_qualify_by_regime=False`, `l1_activation_match_regime=False`.
 
