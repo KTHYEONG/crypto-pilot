@@ -138,16 +138,16 @@ class TestFormatLayer1Table:
 def test_format_layer1_gate_table_uses_explicit_checks() -> None:
     report = Layer1GateReport(
         checks=(
-            Layer1GateCheck("stable_ready_symbol_count", 2.0, 6.0, "ge", False, "2.000"),
-            Layer1GateCheck("probe_gross_edge_bps", 0.8, 0.0, "gt", True, None),
+            Layer1GateCheck("sym_count", 2.0, 6.0, "ge", False, "2.000"),
+            Layer1GateCheck("probe_bps", 0.8, 0.0, "gt", True, None),
         ),
         passed=False,
-        blockers=("stable_ready_symbol_count:2.000",),
+        blockers=("sym_count:2.000",),
     )
 
     result = format_layer1_gate_table(report)
 
-    assert "stable_ready_symbol_count" in result
+    assert "Sym-Count" in result
     assert "FAIL" in result
     assert "BLOCKED" in result
 
@@ -163,7 +163,7 @@ def test_format_layer1_outer_fold_table_shows_ready_symbol_count() -> None:
             valid_opportunity_timestamp_count=4,
             opportunity_ic=0.12,
             opportunity_ic_series=(0.1, 0.14),
-            probe_gross_edge_bps=1.5,
+            probe_bps=1.5,
             probe_gross_edge_series_bps=(1.0, 2.0),
             passed=True,
             blockers=(),
