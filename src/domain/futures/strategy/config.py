@@ -391,7 +391,7 @@ class CandidateStrategyConfig:
     l1_min_panel_diversity: float = 0.30
     l1_min_cs_fold_pass_ratio: float = 0.60
     l1_pair_min_effective_obs: float = 30.0
-    l1_pair_min_folds: int = 3
+    l1_pair_min_folds: int = 2
     l1_pair_min_mean_gross_bps: float = 0.0
     l1_pair_min_incremental_bps: float = 0.0
     l1_pair_min_incremental_tstat: float = 1.96
@@ -407,7 +407,10 @@ class CandidateStrategyConfig:
     l1_min_sym_ratio: float = 0.30
     l1_min_fold_ratio: float = 0.60
     l1_min_opportunity_timestamps: int = 3
-    l1_min_cross_section: int = 3
+    l1_min_cross_section: int = 2
+    l1_qualify_by_regime: bool = False         # False=전략단위 풀링, True=regime-cell 검증
+    l1_activation_match_regime: bool = False   # OOS 발화 시 regime 일치 요구 여부
+    l1_opp_ic_mode: Literal["cross_section", "time_series"] = "time_series"
     l1_min_opp_ic: float = 0.02
     l1_min_opp_tstat: float = 1.96
     l1_probe_top_k: int = 3
@@ -668,6 +671,8 @@ class CandidateStrategyConfig:
             raise ValueError("l1_pair_min_effective_obs must be >= 1.0")
         if self.l1_pair_min_folds < 1:
             raise ValueError("l1_pair_min_folds must be >= 1")
+        if self.l1_opp_ic_mode not in ("cross_section", "time_series"):
+            raise ValueError("l1_opp_ic_mode must be 'cross_section' or 'time_series'")
         if not (0.0 <= self.l1_pair_min_positive_fold_ratio <= 1.0):
             raise ValueError("l1_pair_min_positive_fold_ratio must be in [0.0, 1.0]")
         if not (0.0 < self.l1_pair_fdr_alpha <= 1.0):
