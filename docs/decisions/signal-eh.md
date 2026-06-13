@@ -38,7 +38,7 @@ last_verified: 2026-06-12
 - **Edge Cases/Trade-offs:** P3/P4는 게이트 임계 변경 → 백테스트 재검증 필수. 미착수.
 
 ## [2026-06-09] Regime 모듈의 signal 영향 범위 확정
-- **Delta:** regime는 signal pass/fail을 **직접 게이팅하지 않음**. 4기능: (A) 진입 마스킹 — `regime_signal_gating_enabled=False`(전역 off), `mean_reversion_regime_entry_gating_enabled=True`로 mean_reversion archetype만 발효. (B) `regime_code` 라벨 부착 → allocation 조건화 입력. (C) archetype+regime별 exit 정책. (D) 진단 `regime_pass`는 promotion_level=variant→강제 True(비게이팅).
+- **Delta:** regime는 signal pass/fail을 **직접 게이팅하지 않음**. 4기능: (A) 진입 마스킹 — `regime_signal_gating_enabled=False`(전역 off), `mean_rev_gating_enabled=True`로 mean_rev archetype만 발효. (B) `regime_code` 라벨 부착 → allocation 조건화 입력. (C) archetype+regime별 exit 정책. (D) 진단 `regime_pass`는 promotion_level=variant→강제 True(비게이팅).
 - **Rationale:** RECOMMENDED 추세/모멘텀 3종은 regime 마스킹 무영향 확인. `[[project_regime_alpha_conditioning_disproved]]`와 정합.
 - **Edge Cases/Trade-offs:** REGIME_SCORECARD C4=1.0/10(OOS 불안정)은 (B) allocation 조건화 입력의 신뢰도 경고.
 
