@@ -145,3 +145,21 @@ graph TD
   - *Vectorized Percentile (`_compute_score_pct_variant_hist`):* Replaced $O(N^2)$ python masking filters with a vectorized $O(N \log N)$ `np.searchsorted` causal boundary search.
   - *Confluence Counts (`n_same`):* Upgraded from string concatenation mapping to optimized Pandas `groupby().transform("size")` with index alignment series.
   - *Affinity Matrix Lookup (`arm`):* Replaced list comprehensions with a high-density 2D numpy lookup table mapping archetype and regime integer keys.
+
+# 7. Layer1 Nested SWF & Readiness Gate
+
+**Nested Anchored Walk-Forward (Nested SWF)**
+- **Structure**: Splitting history into $K$ nested anchored folds. 
+  - `outer_train_k` internally creates `inner_folds` to perform inner fit $\rightarrow$ inner OOS evaluation $\rightarrow$ compute `fold_registry_k` evidence.
+  - `outer_oos_k` uses `fold_registry_k` as a frozen selection registry to generate label-free predictions, joining realized outcomes only at the end for fold evaluation.
+- **Invariants**: Purge and embargo boundary isolation: $\max(\text{inner\_oos\_exit\_idx}) < \text{outer\_oos\_start\_k}$.
+
+**Target Contract Reform**
+- **Strict Gross Alignment**: Regression targets are strictly mapped to `gross_event_bps` or `gross_return_r`. 
+- Net targets and cost-derived metrics are excluded from Layer1 model execution.
+- Label-free inference: In candidate dataset building, exit indices for OOS prediction are inferred via $\text{entry\_idx} + \max(\text{expected\_holding\_bars} - 1, 0)$ when labels/exits are unavailable.
+
+**Hard Gate Evaluation**
+- **Requirements**: Gate checks include `trained_outer_fold_coverage`, `stable_ready_symbol_count`, `stable_ready_symbol_ratio`, `ready_outer_fold_ratio`, `opportunity_ic_mean`, `opportunity_ic_tstat`, `probe_gross_edge_bps`, `probe_gross_edge_tstat`.
+- **Failure Handling**: Any single gate check failure triggers `gate_passed = False`, resulting in no final inference artifact.
+
