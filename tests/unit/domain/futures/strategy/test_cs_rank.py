@@ -70,7 +70,7 @@ def test_neutralize_cross_section_demean_output_shape() -> None:
 # T1b — CS Neutralization (beta_btc 사용)
 # ---------------------------------------------------------------------------
 
-def test_neutralize_cross_section_beta_neutralize() -> None:
+def test_neutralize_cross_section_beta_neutize() -> None:
     """beta_btc=[1,1,1]: 결과 평균≈0 (μ_mkt 전량 차감)."""
     # Arrange
     mu = np.array([2.0, 1.0, 0.0], dtype=np.float64)
@@ -83,7 +83,7 @@ def test_neutralize_cross_section_beta_neutralize() -> None:
     assert pytest.approx(float(result.mean()), abs=1e-10) == 0.0
 
 
-def test_neutralize_cross_section_beta_neutralize_zero_beta() -> None:
+def test_neutralize_cross_section_beta_neutize_zero_beta() -> None:
     """beta=0이면 mu 그대로 + demean만 적용."""
     # Arrange
     mu = np.array([3.0, 2.0, 1.0], dtype=np.float64)
