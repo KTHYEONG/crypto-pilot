@@ -227,7 +227,7 @@ def _log_ensemble_diagnostics(
     )
 
     # Archetype performance display (1-letter abbreviations)
-    DISPLAY_ARCH_MAP = {
+    display_arch_map = {
         "beta_neut": "B",
         "flow_rev": "F",
         "mean_rev": "M",
@@ -239,7 +239,7 @@ def _log_ensemble_diagnostics(
     arch_items = []
     for arch, mu_val in sorted(arch_mu.items()):
         sign = "✅" if mu_val >= 0.0 else "❌"
-        label = DISPLAY_ARCH_MAP.get(arch, arch[:1].upper())
+        label = display_arch_map.get(arch, arch[:1].upper())
         arch_items.append(f"{label}:{mu_val:.1f}{sign}")
 
     # Sub-line: Mu component detail
@@ -512,49 +512,44 @@ def _internal_validation_rank_ic(
             -score_z_clip, score_z_clip
         )
 
+    # Verify index alignment prior to metric calculation
+    assert (val_set_p.index == val_set.index).all(), "Index mismatch between prediction frame and label frame"
+
+    archetypes = val_set_p["archetype"].values.astype(str)
+    regimes = val_set_p["entry_regime_code"].values.astype(int)
+
     if axis == "archetype_regime":
-        def _predict_regime(row: pd.Series) -> float:
-            key = (str(row["archetype"]), int(row["entry_regime_code"]))
-            base_val = cell_mu.get(key, arch_mu.get(str(row["archetype"]), global_mu))
-            if has_family_variant:
-                fam = str(row.get("family", ""))
-                var = str(row.get("variant", ""))
-                vkey = _variant_key(fam, var)
-                if vkey in v_offset:
-                    base_val = base_val + v_offset[vkey]
-            if _sub_valid:
-                _gr = int(row["entry_regime_code"])
-                if _sub_valid.get(_gr, False):
-                    try:
-                        _zf = float(row.get("_sz_cal", float("nan")))
-                    except (TypeError, ValueError):
-                        _zf = float("nan")
-                    if np.isfinite(_zf):
-                        return _sub_intercept[_gr] + _sub_slope[_gr] * _zf
-            return base_val
-
-        pred = val_set_p.apply(_predict_regime, axis=1).to_numpy(dtype=np.float64)
+        base_vals = np.array([
+            cell_mu.get((arch, reg), arch_mu.get(arch, global_mu))
+            for arch, reg in zip(archetypes, regimes, strict=True)
+        ], dtype=np.float64)
     else:
-        def _predict_arch(row: pd.Series) -> float:
-            base_val = arch_mu.get(str(row["archetype"]), global_mu)
-            if has_family_variant:
-                fam = str(row.get("family", ""))
-                var = str(row.get("variant", ""))
-                vkey = _variant_key(fam, var)
-                if vkey in v_offset:
-                    base_val = base_val + v_offset[vkey]
-            if _sub_valid:
-                _gr = int(row["entry_regime_code"])
-                if _sub_valid.get(_gr, False):
-                    try:
-                        _zf = float(row.get("_sz_cal", float("nan")))
-                    except (TypeError, ValueError):
-                        _zf = float("nan")
-                    if np.isfinite(_zf):
-                        return _sub_intercept[_gr] + _sub_slope[_gr] * _zf
-            return base_val
+        base_vals = np.array([
+            arch_mu.get(arch, global_mu)
+            for arch in archetypes
+        ], dtype=np.float64)
 
-        pred = val_set_p.apply(_predict_arch, axis=1).to_numpy(dtype=np.float64)
+    if has_family_variant:
+        families = val_set_p["family"].values.astype(str)
+        variants = val_set_p["variant"].values.astype(str)
+        offsets = np.array([
+            v_offset.get(f"{fam}:{var}", 0.0)
+            for fam, var in zip(families, variants, strict=True)
+        ], dtype=np.float64)
+        base_vals += offsets
+
+    if _sub_valid:
+        slopes = np.array([_sub_slope.get(reg, 0.0) for reg in regimes], dtype=np.float64)
+        intercepts = np.array([_sub_intercept.get(reg, 0.0) for reg in regimes], dtype=np.float64)
+        valid_mask = np.array([_sub_valid.get(reg, False) for reg in regimes], dtype=bool)
+
+        zf_vals = val_set_p["_sz_cal"].to_numpy(dtype=np.float64)
+        finite_mask = np.isfinite(zf_vals)
+
+        apply_mask = valid_mask & finite_mask
+        base_vals[apply_mask] = intercepts[apply_mask] + slopes[apply_mask] * zf_vals[apply_mask]
+
+    pred = base_vals
 
     realized = val_set[_resolve_ensemble_target_column(val_set)].to_numpy(dtype=np.float64, copy=False)
     return _rank_ic_local(pred, realized)
