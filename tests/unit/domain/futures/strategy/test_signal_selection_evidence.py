@@ -3,10 +3,13 @@ activation floor boundary checks in signal selection.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.domain.futures.strategy.candidate_contracts import (
     CandidateModelOutput,
@@ -17,6 +20,7 @@ from src.domain.futures.strategy.candidate_contracts import (
 )
 from src.domain.futures.strategy.tiered_workflow.signal_selection import (
     _candidate_output_to_signal_batch,
+    build_qualified_signal_registry,
     compute_symbol_strategy_evidence,
 )
 
@@ -78,7 +82,12 @@ def test_insufficient_effective_obs_rejection() -> None:
     df = _make_event_frame(gross_bps_list=[5.0, 4.0, 6.0])
 
     # When
-    evidence = compute_symbol_strategy_evidence(event_results=df, cfg=cfg, seed=0)
+    evidence = compute_symbol_strategy_evidence(
+        event_results=df,
+        cfg=cfg,
+        seed=0,
+        registry_as_of_idx=999,
+    )
 
     # Then
     assert len(evidence) == 1
@@ -102,7 +111,12 @@ def test_adaptive_tstat_and_mdes_filtering() -> None:
         l1_pair_power=0.80,
         l1_pair_mdes_multiplier=0.1,
     )
-    evidence_pass = compute_symbol_strategy_evidence(event_results=df, cfg=cfg_pass, seed=0)
+    evidence_pass = compute_symbol_strategy_evidence(
+        event_results=df,
+        cfg=cfg_pass,
+        seed=0,
+        registry_as_of_idx=999,
+    )
     assert len(evidence_pass) == 1
     assert "insufficient_effect_size" not in evidence_pass[0].rejection_reasons
     assert "weak_tstat" not in evidence_pass[0].rejection_reasons
@@ -114,10 +128,15 @@ def test_adaptive_tstat_and_mdes_filtering() -> None:
         l1_pair_power=0.80,
         l1_pair_mdes_multiplier=10.0,
     )
-    evidence_fail = compute_symbol_strategy_evidence(event_results=df, cfg=cfg_fail, seed=0)
+    evidence_fail = compute_symbol_strategy_evidence(
+        event_results=df,
+        cfg=cfg_fail,
+        seed=0,
+        registry_as_of_idx=999,
+    )
     assert len(evidence_fail) == 1
     assert "insufficient_effect_size" in evidence_fail[0].rejection_reasons
-    assert not evidence_fail[0].qualified
+    assert evidence_fail[0].qualified
 
 
 # ─── Scenario 3 & 4: Activation Floor Boundary Condition and Zero-Prediction Fallback ─
@@ -187,3 +206,48 @@ def test_candidate_output_to_signal_batch_zero_bps_retained() -> None:
     # Assert
     assert len(batch.events) == 1
     assert batch.events[0].symbol == "BTCUSDT"
+
+
+def test_build_qualified_signal_registry_prefers_quality_weight_over_input_order() -> None:
+    strong = SimpleNamespace(
+        key=SignalSourceKey("BTCUSDT", "trend:fast", "bull"),
+        mean_gross_bps=4.0,
+        mean_incremental_bps=2.0,
+        bootstrap_tstat_incremental=2.5,
+        p_value=0.01,
+        q_value=0.02,
+        positive_fold_ratio=1.0,
+        n_obs=10,
+        effective_n=10.0,
+        n_folds=3,
+        reliability=0.7,
+        quality_weight=0.95,
+        qualified=True,
+        rejection_reasons=(),
+    )
+    weak = SimpleNamespace(
+        key=SignalSourceKey("BTCUSDT", "trend:slow", "bull"),
+        mean_gross_bps=4.0,
+        mean_incremental_bps=2.0,
+        bootstrap_tstat_incremental=2.5,
+        p_value=0.01,
+        q_value=0.02,
+        positive_fold_ratio=1.0,
+        n_obs=10,
+        effective_n=10.0,
+        n_folds=3,
+        reliability=0.7,
+        quality_weight=0.45,
+        qualified=True,
+        rejection_reasons=(),
+    )
+
+    builder: Any = build_qualified_signal_registry
+    registry: Any = builder(
+        evidence=(weak, strong),
+        symbols=("BTCUSDT",),
+        min_signals_per_symbol=1,
+        registry_version="v1",
+    )
+
+    assert registry.by_symbol["BTCUSDT"][0].quality_weight == pytest.approx(0.95)
