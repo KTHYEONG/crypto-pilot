@@ -32,7 +32,7 @@ def _train_df(n: int = 30) -> pd.DataFrame:
     rng = np.random.default_rng(42)
     return pd.DataFrame(
         {
-            "archetype": rng.choice(["trend_continuation", "mean_reversion"], size=n),
+            "archetype": rng.choice(["trend", "mean_rev"], size=n),
             "entry_regime_code": rng.integers(0, 4, size=n),
             "net_return_bps": rng.normal(10.0, 30.0, size=n),
             "entry_idx": np.arange(n),
@@ -52,7 +52,7 @@ def test_regime_conditional_ensemble_shrinks_small_cells_to_global(
 
     train_events = pd.DataFrame(
         {
-            "archetype": ["trend_continuation", "trend_continuation", "mean_reversion"],
+            "archetype": ["trend", "trend", "mean_rev"],
             "entry_regime_code": [0, 0, 4],
             "net_return_bps": [100.0, 100.0, -100.0],
         }
@@ -88,7 +88,7 @@ def test_regime_conditional_ensemble_shrinks_small_cells_to_global(
     )
 
     global_mu = (100.0 + 100.0 - 100.0) / 3.0
-    shrunk_small_cell = model.cell_mu_bps[("mean_reversion", 4)]
+    shrunk_small_cell = model.cell_mu_bps[("mean_rev", 4)]
 
     assert model.global_mu_bps == pytest.approx(global_mu)
     assert -100.0 < shrunk_small_cell < global_mu
@@ -103,7 +103,7 @@ def test_ensemble_predict_lookup_matches_cell_estimate(
 
     train_events = pd.DataFrame(
         {
-            "archetype": ["trend_continuation", "trend_continuation", "mean_reversion"],
+            "archetype": ["trend", "trend", "mean_rev"],
             "entry_regime_code": [0, 0, 4],
             "net_return_bps": [40.0, 60.0, 10.0],
         }
@@ -134,7 +134,7 @@ def test_ensemble_predict_lookup_matches_cell_estimate(
     )
     oos_events = pd.DataFrame(
         {
-            "archetype": ["trend_continuation", "mean_reversion", "unseen"],
+            "archetype": ["trend", "mean_rev", "unseen"],
             "entry_regime_code": [0, 4, 9],
         }
     )
@@ -143,7 +143,7 @@ def test_ensemble_predict_lookup_matches_cell_estimate(
     out = predict_regime_conditional_ensemble(model=model, oos_events=oos_events)
 
     assert out.expected_net_bps[0] > 0.0
-    assert out.expected_net_bps[1] == pytest.approx(model.cell_mu_bps[("mean_reversion", 4)])
+    assert out.expected_net_bps[1] == pytest.approx(model.cell_mu_bps[("mean_rev", 4)])
     # "unseen" archetype → global fallback
     assert out.expected_net_bps[2] == pytest.approx(model.global_mu_bps)
     assert np.all(out.p_pass == 1.0)
@@ -153,7 +153,7 @@ def test_ensemble_fit_uses_train_window_only() -> None:
     """Unseen (arch, regime) in archetype_regime mode falls back to archetype mean."""
     train_events = pd.DataFrame(
         {
-            "archetype": ["trend_continuation", "trend_continuation"],
+            "archetype": ["trend", "trend"],
             "entry_regime_code": [0, 0],
             "net_return_bps": [10.0, 20.0],
         }
@@ -163,19 +163,19 @@ def test_ensemble_fit_uses_train_window_only() -> None:
     model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
     out = predict_regime_conditional_ensemble(
         model=model,
-        oos_events=pd.DataFrame({"archetype": ["trend_continuation"], "entry_regime_code": [7]}),
+        oos_events=pd.DataFrame({"archetype": ["trend"], "entry_regime_code": [7]}),
     )
 
-    assert ("trend_continuation", 7) not in model.cell_mu_bps
-    # fallback: archetype_mu_bps["trend_continuation"] (not global)
-    expected = model.archetype_mu_bps.get("trend_continuation", model.global_mu_bps)
+    assert ("trend", 7) not in model.cell_mu_bps
+    # fallback: archetype_mu_bps["trend"] (not global)
+    expected = model.archetype_mu_bps.get("trend", model.global_mu_bps)
     assert out.expected_net_bps[0] == pytest.approx(expected)
 
 
 def test_ensemble_prefers_gross_targets_over_legacy_net_targets() -> None:
     train_events = pd.DataFrame(
         {
-            "archetype": ["trend_continuation", "trend_continuation", "mean_reversion"],
+            "archetype": ["trend", "trend", "mean_rev"],
             "entry_regime_code": [0, 0, 4],
             "gross_event_bps": [40.0, 60.0, 20.0],
             "net_return_bps": [-100.0, -100.0, -100.0],
@@ -188,7 +188,7 @@ def test_ensemble_prefers_gross_targets_over_legacy_net_targets() -> None:
     out = predict_regime_conditional_ensemble(
         model=model,
         oos_events=pd.DataFrame(
-            {"archetype": ["trend_continuation"], "entry_regime_code": [0]}
+            {"archetype": ["trend"], "entry_regime_code": [0]}
         ),
         cfg=cfg,
     )
@@ -205,7 +205,7 @@ def test_ensemble_prefers_gross_targets_over_legacy_net_targets() -> None:
 def test_archetype_only_ignores_regime_code() -> None:
     train_events = pd.DataFrame(
         {
-            "archetype": ["trend_continuation"] * 6 + ["mean_reversion"] * 6,
+            "archetype": ["trend"] * 6 + ["mean_rev"] * 6,
             "entry_regime_code": [0, 1, 2, 3, 4, 5] * 2,
             "net_return_bps": [50.0] * 6 + [-20.0] * 6,
         }
@@ -217,8 +217,8 @@ def test_archetype_only_ignores_regime_code() -> None:
     assert model.cell_mu_bps == {}
     assert model.conditioning == "archetype_only"
 
-    oos_regime0 = pd.DataFrame({"archetype": ["trend_continuation"], "entry_regime_code": [0]})
-    oos_regime3 = pd.DataFrame({"archetype": ["trend_continuation"], "entry_regime_code": [3]})
+    oos_regime0 = pd.DataFrame({"archetype": ["trend"], "entry_regime_code": [0]})
+    oos_regime3 = pd.DataFrame({"archetype": ["trend"], "entry_regime_code": [3]})
     out0 = predict_regime_conditional_ensemble(model=model, oos_events=oos_regime0)
     out3 = predict_regime_conditional_ensemble(model=model, oos_events=oos_regime3)
 
@@ -238,13 +238,13 @@ def test_mu_quality_shrinkage_flattens_when_ic_zero() -> None:
         global_mu_bps=0.0,
         global_q10_bps=0.0,
         conditioning="archetype_only",
-        archetype_mu_bps={"trend_continuation": 30.0, "mean_reversion": -10.0},
-        archetype_q10_bps={"trend_continuation": 0.0, "mean_reversion": -20.0},
+        archetype_mu_bps={"trend": 30.0, "mean_rev": -10.0},
+        archetype_q10_bps={"trend": 0.0, "mean_rev": -20.0},
         validation_rank_ic=0.0,
     )
     cfg = _make_cfg(mu_quality_shrinkage_enabled=True, mu_quality_ic_full_scale=0.05)
     oos = pd.DataFrame(
-        {"archetype": ["trend_continuation", "mean_reversion"], "entry_regime_code": [0, 0]}
+        {"archetype": ["trend", "mean_rev"], "entry_regime_code": [0, 0]}
     )
     out = predict_regime_conditional_ensemble(model=model, oos_events=oos, cfg=cfg)
 
@@ -262,13 +262,13 @@ def test_mu_quality_shrinkage_full_conviction_when_ic_full_scale() -> None:
         global_mu_bps=0.0,
         global_q10_bps=0.0,
         conditioning="archetype_only",
-        archetype_mu_bps={"trend_continuation": 40.0, "mean_reversion": -15.0},
-        archetype_q10_bps={"trend_continuation": 0.0, "mean_reversion": -25.0},
+        archetype_mu_bps={"trend": 40.0, "mean_rev": -15.0},
+        archetype_q10_bps={"trend": 0.0, "mean_rev": -25.0},
         validation_rank_ic=0.05,
     )
     cfg = _make_cfg(mu_quality_shrinkage_enabled=True, mu_quality_ic_full_scale=0.05)
     oos = pd.DataFrame(
-        {"archetype": ["trend_continuation", "mean_reversion"], "entry_regime_code": [0, 0]}
+        {"archetype": ["trend", "mean_rev"], "entry_regime_code": [0, 0]}
     )
     out = predict_regime_conditional_ensemble(model=model, oos_events=oos, cfg=cfg)
 
@@ -285,7 +285,7 @@ def test_auto_conditioning_selects_archetype_only_without_entry_idx() -> None:
     """Without entry_idx, internal IC=0 for both axes → auto picks archetype_only."""
     train_events = pd.DataFrame(
         {
-            "archetype": ["trend_continuation"] * 10 + ["mean_reversion"] * 10,
+            "archetype": ["trend"] * 10 + ["mean_rev"] * 10,
             "entry_regime_code": list(range(10)) + list(range(10)),
             "net_return_bps": [20.0] * 10 + [-5.0] * 10,
         }
@@ -328,7 +328,7 @@ def test_predict_returns_empty_on_empty_oos() -> None:
     model = fit_regime_conditional_ensemble(
         train_events=pd.DataFrame(
             {
-                "archetype": ["trend_continuation"],
+                "archetype": ["trend"],
                 "entry_regime_code": [0],
                 "net_return_bps": [10.0],
             }
@@ -810,8 +810,9 @@ def test_diagnostic_log_emits_negative_ic_flag(caplog: pytest.LogCaptureFixture)
 
     combined = "\n".join(caplog.messages)
     assert "❌" in combined
-    assert "anti_predictive" in combined
-    assert "normal" in combined
+    assert "Anti_" in combined
+    assert "Norma" in combined
+    assert "Archetype-Only" in combined
 
 
 # ---------------------------------------------------------------------------
@@ -824,7 +825,7 @@ def _make_variant_frame(
     high_edge_mean: float = 70.0,
     noise_n: int = 200,
     noise_mean: float = 5.0,
-    archetype: str = "time_series_momentum",
+    archetype: str = "ts_mom",
     regime: int = 0,
     seed: int = 42,
 ) -> pd.DataFrame:
@@ -857,7 +858,7 @@ def test_s1_variant_prior_discriminates_within_cell() -> None:
         frame, shrinkage_k=50.0, axis="archetype_regime"
     )
     # cell_mu: (archetype, regime) → single value (둘 다 혼합 평균)
-    cell_anchor = cell_mu[("time_series_momentum", 0)]
+    cell_anchor = cell_mu[("ts_mom", 0)]
 
     # Act
     variant_mu, _ = _fit_variant_means(
@@ -1104,12 +1105,12 @@ def test_s6_variant_prior_freq_n_cap_limits_weight() -> None:
 def test_s7_variant_prior_regime_conditional_offset() -> None:
     """S7: Happy Path - Variant prior predictions vary dynamically by regime while maintaining the offset."""
     cell_mu = {
-        ("trend_continuation", 1): 20.0,
-        ("trend_continuation", 2): 5.0,
+        ("trend", 1): 20.0,
+        ("trend", 2): 5.0,
     }
     cell_q10 = {
-        ("trend_continuation", 1): -10.0,
-        ("trend_continuation", 2): -10.0,
+        ("trend", 1): -10.0,
+        ("trend", 2): -10.0,
     }
     model = RegimeConditionalEnsemble(
         cell_mu_bps=cell_mu,
@@ -1117,8 +1118,8 @@ def test_s7_variant_prior_regime_conditional_offset() -> None:
         global_mu_bps=0.0,
         global_q10_bps=0.0,
         conditioning="archetype_regime",
-        archetype_mu_bps={"trend_continuation": 10.0},
-        archetype_q10_bps={"trend_continuation": -5.0},
+        archetype_mu_bps={"trend": 10.0},
+        archetype_q10_bps={"trend": -5.0},
         validation_rank_ic=0.0,
         variant_mu_bps={"tpc:tpc_50_200": 23.0},
         variant_offset_bps={"tpc:tpc_50_200": 3.0},
@@ -1128,7 +1129,7 @@ def test_s7_variant_prior_regime_conditional_offset() -> None:
         {
             "family": ["tpc", "tpc"],
             "variant": ["tpc_50_200", "tpc_50_200"],
-            "archetype": ["trend_continuation", "trend_continuation"],
+            "archetype": ["trend", "trend"],
             "entry_regime_code": [1, 2],
         }
     )
@@ -1148,7 +1149,7 @@ def test_s8_variant_prior_family_filtering() -> None:
         {
             "family": ["tpc"] * (n // 2) + ["rsi"] * (n // 2),
             "variant": ["tpc_50_200"] * (n // 2) + ["rsi_14"] * (n // 2),
-            "archetype": ["trend_continuation"] * (n // 2) + ["mean_reversion"] * (n // 2),
+            "archetype": ["trend"] * (n // 2) + ["mean_rev"] * (n // 2),
             "entry_regime_code": [1] * n,
             "net_return_bps": rng.normal(10.0, 5.0, n),
             "entry_idx": np.arange(n),
@@ -1175,10 +1176,10 @@ def test_s8_variant_prior_family_filtering() -> None:
 def test_s9_variant_prior_backward_compatibility() -> None:
     """S9: Backward Compatibility - predict works fine even if variant_offset_bps is missing or empty."""
     cell_mu = {
-        ("trend_continuation", 1): 20.0,
+        ("trend", 1): 20.0,
     }
     cell_q10 = {
-        ("trend_continuation", 1): -10.0,
+        ("trend", 1): -10.0,
     }
     model = RegimeConditionalEnsemble(
         cell_mu_bps=cell_mu,
@@ -1186,8 +1187,8 @@ def test_s9_variant_prior_backward_compatibility() -> None:
         global_mu_bps=0.0,
         global_q10_bps=0.0,
         conditioning="archetype_regime",
-        archetype_mu_bps={"trend_continuation": 10.0},
-        archetype_q10_bps={"trend_continuation": -5.0},
+        archetype_mu_bps={"trend": 10.0},
+        archetype_q10_bps={"trend": -5.0},
         validation_rank_ic=0.0,
         variant_mu_bps={"tpc:tpc_50_200": 23.0},
         variant_offset_bps={},  # Empty (simulates legacy / missing offset dict)
@@ -1197,7 +1198,7 @@ def test_s9_variant_prior_backward_compatibility() -> None:
         {
             "family": ["tpc"],
             "variant": ["tpc_50_200"],
-            "archetype": ["trend_continuation"],
+            "archetype": ["trend"],
             "entry_regime_code": [1],
         }
     )
@@ -1286,7 +1287,7 @@ def _make_score_train_df(
     regime: int,
     score_z: np.ndarray,
     net_bps: np.ndarray,
-    archetype: str = "trend_continuation",
+    archetype: str = "trend",
 ) -> pd.DataFrame:
     """Helper: training DataFrame for score calibration tests."""
     return pd.DataFrame(
@@ -1302,7 +1303,7 @@ def _make_score_train_df(
     )
 
 
-def _make_oos_event(*, regime: int, score_z: float, archetype: str = "trend_continuation") -> pd.DataFrame:
+def _make_oos_event(*, regime: int, score_z: float, archetype: str = "trend") -> pd.DataFrame:
     """Single OOS event for prediction tests."""
     return pd.DataFrame(
         {
@@ -1432,7 +1433,7 @@ def test_q90_bps_differs_from_mu() -> None:
     net_bps = rng.chisquare(3.0, n) * 10.0  # mean≈30bps, q90≈62bps
     train_events = pd.DataFrame(
         {
-            "archetype": ["trend_continuation"] * n,
+            "archetype": ["trend"] * n,
             "entry_regime_code": [0] * n,
             "net_return_bps": net_bps,
             "entry_idx": np.arange(n, dtype=np.int64),
@@ -1442,7 +1443,7 @@ def test_q90_bps_differs_from_mu() -> None:
 
     # Act
     model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
-    oos = pd.DataFrame({"archetype": ["trend_continuation"], "entry_regime_code": [0]})
+    oos = pd.DataFrame({"archetype": ["trend"], "entry_regime_code": [0]})
     out = predict_regime_conditional_ensemble(model=model, oos_events=oos)
 
     # Assert: q90 실제값이 μ와 다름 (기존 mu.copy() 제거 검증)
@@ -1500,7 +1501,7 @@ def test_score_calibration_no_leakage_from_val_set() -> None:
     net_bps = 15.0 * score_z_vals + rng.normal(0.0, 3.0, n)
     df = pd.DataFrame(
         {
-            "archetype": ["trend_continuation"] * n,
+            "archetype": ["trend"] * n,
             "entry_regime_code": [1] * n,
             "net_return_bps": net_bps,
             "score_z": score_z_vals,

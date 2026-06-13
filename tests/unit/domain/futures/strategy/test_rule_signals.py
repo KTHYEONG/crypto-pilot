@@ -164,12 +164,12 @@ def test_candidate_panels_to_events_normalizes_score_z_per_bar() -> None:
         turnover_proxy_2d=np.zeros_like(scores),
         valid_mask_2d=np.array([[False, False], [True, True]], dtype=bool),
         metadata={},
-        archetype="trend_continuation",
+        archetype="trend",
         allowed_regimes=("bull_quiet",),
         exit_policies=(
             SignalExitPolicy(
                 policy_id="base",
-                archetype="trend_continuation",
+                archetype="trend",
                 stop_atr_mult=1.0,
                 take_profit_atr_mult=1.0,
                 expected_holding_bars=8,
@@ -331,11 +331,11 @@ def test_candidate_panels_to_events_uses_entry_regime_for_exit_policy() -> None:
         take_profit_atr_mult=3.0,
         turnover_proxy_2d=np.zeros((6, 1), dtype=np.float64),
         valid_mask_2d=np.ones((6, 1), dtype=bool),
-        archetype="trend_continuation",
+        archetype="trend",
         allowed_regimes=("bull_quiet", "bull_volatile", "crash"),
         exit_policies=(
-            SignalExitPolicy("trend_grind", "trend_continuation", 1.25, 3.5, 8, 2),
-            SignalExitPolicy("trend_fast_fail", "trend_continuation", 0.9, 2.25, 8, 2),
+            SignalExitPolicy("trend_grind", "trend", 1.25, 3.5, 8, 2),
+            SignalExitPolicy("trend_fast_fail", "trend", 0.9, 2.25, 8, 2),
         ),
         regime_code_1d=np.array([0, 1, 5, 0, 0, 0], dtype=np.int8),
         regime_name_by_code=("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash"),
@@ -614,7 +614,7 @@ def test_touched_panels_expose_required_metadata() -> None:
         )
 
 
-def test_mean_reversion_gated_out_of_trending_regime() -> None:
+def test_mean_rev_gated_out_of_trending_regime() -> None:
     panel = CandidateSignalPanel(
         family="bollinger_reversion",
         variant="unit",
@@ -641,7 +641,7 @@ def test_mean_reversion_gated_out_of_trending_regime() -> None:
 
     out = _attach_signal_context(
         (panel,),
-        cfg=CandidateStrategyConfig(mean_reversion_regime_entry_gating_enabled=True),
+        cfg=CandidateStrategyConfig(mean_rev_gating_enabled=True),
         regime_ctx=regime_ctx,
     )
 

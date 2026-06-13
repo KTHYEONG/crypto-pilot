@@ -571,7 +571,7 @@ def evaluate_outer_signal_opportunities(
             valid_opportunity_timestamp_count=0,
             opportunity_ic=0.0,
             opportunity_ic_series=(),
-            probe_gross_edge_bps=0.0,
+            probe_bps=0.0,
             probe_gross_edge_series_bps=(),
             passed=False,
             blockers=("empty_opportunities",),
@@ -627,7 +627,7 @@ def evaluate_outer_signal_opportunities(
             valid_opportunity_timestamp_count=0,
             opportunity_ic=0.0,
             opportunity_ic_series=(),
-            probe_gross_edge_bps=0.0,
+            probe_bps=0.0,
             probe_gross_edge_series_bps=(),
             passed=False,
             blockers=("empty_realized_merge",),
@@ -672,7 +672,7 @@ def evaluate_outer_signal_opportunities(
     opportunity_ic = float(np.mean(ic_series)) if ic_series else 0.0
     probe_gross_edge = float(np.mean(probe_series)) if probe_series else 0.0
     blockers: list[str] = []
-    fold_min_ready_symbols = max(1, min(int(cfg.l1_min_ready_symbols), int(cfg.l1_min_cross_section)))
+    fold_min_ready_symbols = max(1, min(int(cfg.l1_min_sym_count), int(cfg.l1_min_cross_section)))
     if len(ready_symbols) < fold_min_ready_symbols:
         blockers.append("insufficient_ready_symbols")
     if len(ic_series) < int(cfg.l1_min_opportunity_timestamps):
@@ -690,7 +690,7 @@ def evaluate_outer_signal_opportunities(
         valid_opportunity_timestamp_count=len(ic_series),
         opportunity_ic=opportunity_ic,
         opportunity_ic_series=tuple(ic_series),
-        probe_gross_edge_bps=probe_gross_edge,
+        probe_bps=probe_gross_edge,
         probe_gross_edge_series_bps=tuple(probe_series),
         passed=not blockers,
         blockers=tuple(blockers),
@@ -700,7 +700,7 @@ def evaluate_outer_signal_opportunities(
 def evaluate_layer1_readiness(
     *,
     fold_reports: tuple[Layer1FoldReadiness, ...],
-    trained_outer_fold_coverage: float,
+    fold_cov: float,
     trade_scope_count: int,
     cfg: CandidateStrategyConfig,
 ) -> Layer1GateReport:
@@ -719,26 +719,26 @@ def evaluate_layer1_readiness(
         for symbol, count in symbol_counter.items()
         if count >= int(cfg.l1_min_ready_outer_folds)
     ]
-    ready_outer_fold_ratio = float(ready_fold_count / len(fold_reports)) if fold_reports else 0.0
-    opportunity_ic_mean = float(np.mean(ic_series)) if ic_series else 0.0
-    opportunity_ic_tstat = _series_tstat(np.asarray(ic_series, dtype=np.float64))
-    probe_gross_edge_bps = float(np.mean(probe_series)) if probe_series else 0.0
-    probe_gross_edge_tstat = _series_tstat(np.asarray(probe_series, dtype=np.float64))
-    stable_ready_symbol_ratio = float(len(stable_ready_symbols) / max(1, trade_scope_count))
+    fold_ratio = float(ready_fold_count / len(fold_reports)) if fold_reports else 0.0
+    opp_ic = float(np.mean(ic_series)) if ic_series else 0.0
+    opp_tstat = _series_tstat(np.asarray(ic_series, dtype=np.float64))
+    probe_bps = float(np.mean(probe_series)) if probe_series else 0.0
+    probe_tstat = _series_tstat(np.asarray(probe_series, dtype=np.float64))
+    sym_ratio = float(len(stable_ready_symbols) / max(1, trade_scope_count))
     check_specs = (
         (
-            "trained_outer_fold_coverage",
-            trained_outer_fold_coverage,
-            float(getattr(cfg, "l1_min_trained_outer_fold_coverage", 0.8)),
+            "fold_cov",
+            fold_cov,
+            float(getattr(cfg, "l1_min_fold_cov", 0.8)),
             "ge",
         ),
-        ("stable_ready_symbol_count", float(len(stable_ready_symbols)), float(cfg.l1_min_ready_symbols), "ge"),
-        ("stable_ready_symbol_ratio", stable_ready_symbol_ratio, float(cfg.l1_min_ready_symbol_ratio), "ge"),
-        ("ready_outer_fold_ratio", ready_outer_fold_ratio, float(cfg.l1_min_ready_outer_fold_ratio), "ge"),
-        ("opportunity_ic_mean", opportunity_ic_mean, float(cfg.l1_min_opportunity_ic), "ge"),
-        ("opportunity_ic_tstat", opportunity_ic_tstat, float(cfg.l1_min_opportunity_ic_tstat), "ge"),
-        ("probe_gross_edge_bps", probe_gross_edge_bps, float(cfg.l1_min_probe_gross_edge_bps), "gt"),
-        ("probe_gross_edge_tstat", probe_gross_edge_tstat, float(cfg.l1_min_probe_gross_edge_tstat), "ge"),
+        ("sym_count", float(len(stable_ready_symbols)), float(cfg.l1_min_sym_count), "ge"),
+        ("sym_ratio", sym_ratio, float(cfg.l1_min_sym_ratio), "ge"),
+        ("fold_ratio", fold_ratio, float(cfg.l1_min_fold_ratio), "ge"),
+        ("opp_ic", opp_ic, float(cfg.l1_min_opp_ic), "ge"),
+        ("opp_tstat", opp_tstat, float(cfg.l1_min_opp_tstat), "ge"),
+        ("probe_bps", probe_bps, float(cfg.l1_min_probe_bps), "gt"),
+        ("probe_tstat", probe_tstat, float(cfg.l1_min_probe_tstat), "ge"),
     )
     checks: list[Layer1GateCheck] = []
     blockers: list[str] = []

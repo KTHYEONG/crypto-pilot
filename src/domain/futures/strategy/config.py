@@ -212,8 +212,8 @@ class CandidateStrategyConfig:
     # Use mean_edge + hit_or_payoff as economic gates; median is a soft diagnostic.
     min_variant_oos_median_edge_bps: float = -100.0
     median_gate_skew_exempt_archetypes: tuple[str, ...] = (
-        "trend_continuation",
-        "time_series_momentum",
+        "trend",
+        "ts_mom",
     )
     # p10 for crypto futures with 1.5-2.5x ATR stops is structurally -300~-500bps.
     # Primary tail guard is q10_fail_rate; p10 is a hard outlier filter only.
@@ -286,7 +286,7 @@ class CandidateStrategyConfig:
     # Set to False to remove hard regime-based signal masking; regime moves to
     # sizing multiplier layer (see regime_as_size_multiplier).
     regime_signal_gating_enabled: bool = False
-    mean_reversion_regime_entry_gating_enabled: bool = True
+    mean_rev_gating_enabled: bool = True
     standalone_breakeven_hard_gate_enabled: bool = True
     # When True, apply per-regime continuous weight multipliers at sizing stage.
     regime_as_size_multiplier: bool = False
@@ -401,18 +401,18 @@ class CandidateStrategyConfig:
     l1_bootstrap_samples: int = 200
     l1_signal_activation_floor_bps: float = 0.0
     l1_min_signals_per_symbol: int = 1
-    l1_min_trained_outer_fold_coverage: float = 0.80
+    l1_min_fold_cov: float = 0.80
     l1_min_ready_outer_folds: int = 2
-    l1_min_ready_symbols: int = 6
-    l1_min_ready_symbol_ratio: float = 0.30
-    l1_min_ready_outer_fold_ratio: float = 0.60
+    l1_min_sym_count: int = 6
+    l1_min_sym_ratio: float = 0.30
+    l1_min_fold_ratio: float = 0.60
     l1_min_opportunity_timestamps: int = 3
     l1_min_cross_section: int = 3
-    l1_min_opportunity_ic: float = 0.02
-    l1_min_opportunity_ic_tstat: float = 1.96
+    l1_min_opp_ic: float = 0.02
+    l1_min_opp_tstat: float = 1.96
     l1_probe_top_k: int = 3
-    l1_min_probe_gross_edge_bps: float = 0.0
-    l1_min_probe_gross_edge_tstat: float = 1.96
+    l1_min_probe_bps: float = 0.0
+    l1_min_probe_tstat: float = 1.96
     fold_survival_metric: Literal[
         "predicted_mu_tstat", "realized_selected_edge", "realized_log_growth"
     ] = "realized_selected_edge"
@@ -678,16 +678,16 @@ class CandidateStrategyConfig:
             raise ValueError("l1_bootstrap_samples must be >= 1")
         if self.l1_min_signals_per_symbol < 1:
             raise ValueError("l1_min_signals_per_symbol must be >= 1")
-        if not (0.0 <= self.l1_min_trained_outer_fold_coverage <= 1.0):
-            raise ValueError("l1_min_trained_outer_fold_coverage must be in [0.0, 1.0]")
+        if not (0.0 <= self.l1_min_fold_cov <= 1.0):
+            raise ValueError("l1_min_fold_cov must be in [0.0, 1.0]")
         if self.l1_min_ready_outer_folds < 1:
             raise ValueError("l1_min_ready_outer_folds must be >= 1")
-        if self.l1_min_ready_symbols < 1:
-            raise ValueError("l1_min_ready_symbols must be >= 1")
-        if not (0.0 <= self.l1_min_ready_symbol_ratio <= 1.0):
-            raise ValueError("l1_min_ready_symbol_ratio must be in [0.0, 1.0]")
-        if not (0.0 <= self.l1_min_ready_outer_fold_ratio <= 1.0):
-            raise ValueError("l1_min_ready_outer_fold_ratio must be in [0.0, 1.0]")
+        if self.l1_min_sym_count < 1:
+            raise ValueError("l1_min_sym_count must be >= 1")
+        if not (0.0 <= self.l1_min_sym_ratio <= 1.0):
+            raise ValueError("l1_min_sym_ratio must be in [0.0, 1.0]")
+        if not (0.0 <= self.l1_min_fold_ratio <= 1.0):
+            raise ValueError("l1_min_fold_ratio must be in [0.0, 1.0]")
         if self.l1_min_opportunity_timestamps < 1:
             raise ValueError("l1_min_opportunity_timestamps must be >= 1")
         if self.l1_min_cross_section < 1:

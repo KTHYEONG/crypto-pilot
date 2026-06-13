@@ -42,7 +42,7 @@ def build_exit_policies_for_panel(
     base_min = min(base_hold, max(1, int(base_min_holding_bars)))
     policies: list[SignalExitPolicy] = []
 
-    if archetype == "trend_continuation":
+    if archetype == "trend":
         policies.append(
             _policy(
                 policy_id="trend_grind",
@@ -66,7 +66,7 @@ def build_exit_policies_for_panel(
                     description="Trend continuation with tighter fail-fast exit.",
                 )
             )
-    elif archetype == "time_series_momentum":
+    elif archetype == "ts_mom":
         policies.append(
             _policy(
                 policy_id="momentum_follow",
@@ -78,7 +78,7 @@ def build_exit_policies_for_panel(
                 description="Momentum follow-through exit.",
             )
         )
-    elif archetype in {"mean_reversion", "beta_neutral_reversion"}:
+    elif archetype in {"mean_rev", "beta_neut"}:
         policies.append(
             _policy(
                 policy_id="snapback",
@@ -90,7 +90,7 @@ def build_exit_policies_for_panel(
                 description="Fast mean reversion snapback exit.",
             )
         )
-    elif archetype in {"forced_flow_reversal", "position_unwind"}:
+    elif archetype in {"flow_rev", "unwind"}:
         policies.append(
             _policy(
                 policy_id="flow_exhaustion",
@@ -102,7 +102,7 @@ def build_exit_policies_for_panel(
                 description="Short-lived flow exhaustion exit.",
             )
         )
-    elif archetype == "carry_reversion":
+    elif archetype == "carry_rev":
         policies.append(
             _policy(
                 policy_id="carry_decay",
@@ -119,7 +119,7 @@ def build_exit_policies_for_panel(
         policies.append(
             _policy(
                 policy_id="legacy",
-                archetype="mean_reversion",
+                archetype="mean_rev",
                 stop_atr_mult=(
                     float(fallback_stop_atr_mult)
                     if fallback_stop_atr_mult is not None and fallback_stop_atr_mult > 0.0
