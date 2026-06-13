@@ -1033,7 +1033,9 @@ def test_tiered_pipeline_uses_unfiltered_labeled_events(
     import src.domain.futures.strategy.common.alignment as _align
     import src.domain.futures.strategy.tiered_workflow as _tw
 
-    monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kwargs: MagicMock())
+    mock_win = MagicMock()
+    mock_win.fetch_start = datetime(1900, 1, 1).date()
+    monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kwargs: mock_win)
     monkeypatch.setattr(_pc, "PortfolioCaps", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr(
         _align,

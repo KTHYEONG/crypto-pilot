@@ -891,10 +891,13 @@ def predict_candidate_edges(
         edge_source=edge_source,
         expected_return_r=mu_return_r,
         expected_net_bps=mu_net_decision_bps,
+        expected_gross_bps=mu_net_decision_bps,
         q10_return_r=q10_return_r,
         q10_net_bps=q10_net_bps,
+        q10_gross_bps=q10_net_bps,
         q90_return_r=q90_return_r,
         q90_net_bps=q90_net_bps,
+        q90_gross_bps=q90_net_bps,
         selection_score=utility_score,
         kelly_fraction=kelly_fraction_arr,
         validation_diagnostics=cast(
