@@ -211,32 +211,39 @@ def _log_ensemble_diagnostics(
     n_total = len(frame)
     ic_sign = "✅" if val_ic > 0 else "❌"
     n_syms = int(frame["symbol"].nunique()) if "symbol" in frame.columns and not frame.empty else 0
+    
+    # [ENS] Header line (Option 1: Aligned)
     sym_info = f"ActiveSyms({n_syms})"
+    mode_short = chosen.replace("archetype_", "").replace("_", "-").title()
+    if mode_short == "Regime":
+        mode_short = "Arch-Regime"
+    elif mode_short == "Only":
+        mode_short = "Arch-Only"
 
-    # [ENSEMBLE] Header line
     summary = (
-        f"[ENSEMBLE] {sym_info} | N: {n_total:,} | IC: {val_ic:.4f} {ic_sign} | "
-        f"Mu: {global_mu:.2f} | Mode: {chosen.replace('_', '-').title()} | k: {k_used:.1f}"
+        f"[ENS] Sym:{n_syms:<2}  N:{n_total:,}  "
+        f"IC:{val_ic:.3f}{ic_sign}  Mu:{global_mu:.1f}  "
+        f"Mode:{mode_short}  k:{k_used:.1f}"
     )
 
-    # Archetype performance display
+    # Archetype performance display (1-letter abbreviations)
     DISPLAY_ARCH_MAP = {
-        "beta_neut": "Beta",
-        "mean_rev": "Mean",
-        "unwind": "Unwnd",
-        "ts_mom": "Mom",
-        "trend": "Trnd",
-        "flow_rev": "Flow",
-        "carry_rev": "Carry",
+        "beta_neut": "B",
+        "flow_rev": "F",
+        "mean_rev": "M",
+        "trend": "T",
+        "ts_mom": "m",
+        "unwind": "U",
+        "carry_rev": "C",
     }
     arch_items = []
     for arch, mu_val in sorted(arch_mu.items()):
         sign = "✅" if mu_val >= 0.0 else "❌"
-        label = DISPLAY_ARCH_MAP.get(arch, arch[:5].title())
+        label = DISPLAY_ARCH_MAP.get(arch, arch[:1].upper())
         arch_items.append(f"{label}:{mu_val:.1f}{sign}")
 
-    # Sub-line 1: mu_bps
-    detail = f"└─ Mu(bps): [{', '.join(arch_items)}]"
+    # Sub-line: Mu component detail
+    detail = f"└─Mu: {' '.join(arch_items)}"
     if score_cal_summary:
         detail += f" | {score_cal_summary}"
 
@@ -824,8 +831,8 @@ def fit_regime_conditional_ensemble(
             _n_obs_low = 0
             
         score_cal_summary = (
-            f"ScoreCal:{_n_valid_sc}/{_n_total_sc} valid "
-            f"(LowObs:{_n_obs_low}, Fail:{sum(1 for v in score_calibration_valid.values() if not v)})"
+            f"Score:{_n_valid_sc}/{_n_total_sc} "
+            f"(L:{_n_obs_low},F:{sum(1 for v in score_calibration_valid.values() if not v)})"
         )
 
     # ── Diagnostic table (IC sign audit) ─────────────────────────────────────
