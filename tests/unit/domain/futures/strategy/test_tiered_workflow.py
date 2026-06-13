@@ -2090,3 +2090,17 @@ def test_evaluate_outer_signal_opportunities_fail_closed_on_unmatched_realized_r
 
     assert "insufficient_realized_match_ratio" in result.blockers
     assert result.probe_bps == pytest.approx(10.0)
+
+
+def test_resolve_safe_nested_workers_oom_guard() -> None:
+    """Scenario 3: Verify OOM guard dynamically limits worker counts."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import resolve_safe_nested_workers
+
+    # 1. Normal memory scenario where n_tasks or CPU limits apply
+    workers = resolve_safe_nested_workers(n_tasks=10, frame_memory_bytes=100 * 1024 * 1024)
+    assert 1 <= workers <= 6
+
+    # 2. Extremely large memory scenario (e.g. 50GB) where memory limit forces 1 worker
+    huge_df_bytes = 50 * 1024 * 1024 * 1024
+    workers_restricted = resolve_safe_nested_workers(n_tasks=10, frame_memory_bytes=huge_df_bytes)
+    assert workers_restricted == 1
