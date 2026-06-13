@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
@@ -152,11 +153,17 @@ def discover_universe_timeline(
 
     while current_dt <= end_date:
         ref_dt = current_dt + relativedelta(months=3)
+        t_quarter = time.perf_counter()
         symbols, snapshot, report = _discover_symbols_via_universe(
             tf=tf,
             reference_date=ref_dt.isoformat(),
             force_rebuild=force_rebuild,
             previous_selection=previous_selection,
+        )
+        _logger.debug(
+            "[perf-universe] _discover_symbols_via_universe for quarter=%s took %.4fs",
+            current_dt.isoformat(),
+            time.perf_counter() - t_quarter,
         )
         current_set = frozenset(symbols)
         timeline_by_quarter[current_dt] = current_set

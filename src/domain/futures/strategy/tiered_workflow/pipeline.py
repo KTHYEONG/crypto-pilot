@@ -169,6 +169,7 @@ def build_l1_prequential_evidence_snapshots(
         )
 
         flat_results = []
+        t_exec = time.perf_counter()
         try:
             with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as executor:
                 submits = [
@@ -181,6 +182,10 @@ def build_l1_prequential_evidence_snapshots(
             cw._GLOBAL_ALIGNED = None
             cw._GLOBAL_CFG = None
             cw._GLOBAL_PURGE_BARS = None
+        logger.debug(
+            "[perf-tiered] build_l1_prequential_evidence_snapshots parallel execution took %.4fs",
+            time.perf_counter() - t_exec,
+        )
 
         for evidence_idx, evidence_out in enumerate(flat_results):
             if _is_trained_fold_output(evidence_out):
@@ -672,6 +677,7 @@ def run_l1_nested_swf(
     )
 
     outer_results = []
+    t_exec = time.perf_counter()
     try:
         with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as executor:
             submits = [
@@ -684,6 +690,10 @@ def run_l1_nested_swf(
         cw._GLOBAL_ALIGNED = None
         cw._GLOBAL_CFG = None
         cw._GLOBAL_PURGE_BARS = None
+    logger.debug(
+        "[perf-tiered] run_l1_nested_swf outer parallel execution took %.4fs",
+        time.perf_counter() - t_exec,
+    )
 
     for outer_idx, outer_fold in enumerate(outer_folds):
         snapshot = snapshots_by_idx.get(outer_fold.oos_start)
@@ -951,6 +961,7 @@ def run_tiered_pipeline(
     
     # Layer 1 Header is already printed in opt_main_futures _run_strategy_stage
     
+    t_l1 = time.perf_counter()
     outer_folds = _tw.build_l1_nested_swf_folds(
         n_bars=n_bars,
         l1_start_idx=l1_start_bars,
@@ -965,6 +976,7 @@ def run_tiered_pipeline(
         cfg=cfg,
         seed=int(getattr(cfg, "seed", 42)),
     )
+    logger.debug("[perf-tiered] run_tiered_pipeline Layer 1 total took %.4fs", time.perf_counter() - t_l1)
 
     if not l1.gate_passed:
         logger.info("\n>> LAYER 1 RESULT: [BLOCKED] -> gate_passed=False")
@@ -974,6 +986,7 @@ def run_tiered_pipeline(
 
     # ─── Layer 2: AWF Portfolio Optimization ─────────────────────────────────
     logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
+    t_l2 = time.perf_counter()
     awf_folds = _tw.build_walk_forward_folds(n_bars=n_bars, cfg=cfg)
     l2 = _tw.run_l2_awf(
         l1_oos=l1.oos_stacked,
@@ -983,6 +996,7 @@ def run_tiered_pipeline(
         caps=caps,
         tf=tf,
     )
+    logger.debug("[perf-tiered] run_tiered_pipeline Layer 2 total took %.4fs", time.perf_counter() - t_l2)
 
     if not l2.gate_passed:
         logger.info("\n>> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False")
@@ -992,6 +1006,7 @@ def run_tiered_pipeline(
 
     # ─── Layer 3: Final Holdout Backtest ─────────────────────────────────────
     logger.info(format_layer_header(3, "Final Holdout & Deployment Readiness"))
+    t_l3 = time.perf_counter()
     ho_start_idx = _date_to_idx(aligned.datetimes, window.holdout_start)
     ho_end_idx = _date_to_idx(aligned.datetimes, window.holdout_end)
     l3 = _tw.run_l3_holdout(
@@ -1002,6 +1017,7 @@ def run_tiered_pipeline(
         caps=caps,
         tf=tf,
     )
+    logger.debug("[perf-tiered] run_tiered_pipeline Layer 3 total took %.4fs", time.perf_counter() - t_l3)
     
     logger.info("\n" + "="*80)
     logger.info("[FINAL PIPELINE STATUS]")
