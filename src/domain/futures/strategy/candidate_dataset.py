@@ -88,6 +88,8 @@ class CandidateDataset:
     feature_schema_version: str = "candidate_v6"
     y_return_r: NDArray[np.float32] | None = None
     y_return_bps: NDArray[np.float32] | None = None
+    y_gross_return_bps: NDArray[np.float32] | None = None
+    y_gross_return_r: NDArray[np.float32] | None = None
     y_mae_r: NDArray[np.float32] | None = None
     risk_unit_bps: NDArray[np.float32] | None = None
 
@@ -219,6 +221,69 @@ def _target_cost_hurdle_bps(events: pd.DataFrame) -> NDArray[np.float32]:
         np.nan_to_num(hurdle, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         cost_hurdle = cost_hurdle + hurdle
     return cost_hurdle
+
+
+def _resolve_gross_target_bps(
+    events: pd.DataFrame,
+    *,
+    allow_label_free: bool,
+) -> NDArray[np.float32]:
+    for column in ("gross_return_bps", "gross_event_bps", "gross_fwd_bps"):
+        if column in events.columns:
+            values = pd.to_numeric(events[column], errors="coerce").to_numpy(dtype=np.float32, copy=False)
+            return np.asarray(values, dtype=np.float32)
+    if allow_label_free:
+        return np.zeros((len(events),), dtype=np.float32)
+    for legacy_column in ("net_event_bps", "edge_after_hurdle_bps", "net_return_bps"):
+        if legacy_column in events.columns:
+            _logger.warning("[DATASET] legacy_target_fallback=%s", legacy_column)
+            values = pd.to_numeric(events[legacy_column], errors="coerce").to_numpy(dtype=np.float32, copy=False)
+            return np.asarray(values, dtype=np.float32)
+    raise ValueError("missing gross target columns: ['gross_return_bps', 'gross_event_bps', 'gross_fwd_bps']")
+
+
+def _resolve_gross_target_r(
+    events: pd.DataFrame,
+    *,
+    gross_bps: NDArray[np.float32],
+    risk_unit: NDArray[np.float32],
+    allow_label_free: bool,
+) -> NDArray[np.float32]:
+    if "gross_return_r" in events.columns:
+        values = pd.to_numeric(events["gross_return_r"], errors="coerce").to_numpy(dtype=np.float32, copy=False)
+        return np.asarray(values, dtype=np.float32)
+    if allow_label_free and not any(
+        column in events.columns for column in ("gross_return_bps", "gross_event_bps", "gross_fwd_bps")
+    ):
+        return np.zeros((len(events),), dtype=np.float32)
+    return (gross_bps / np.maximum(risk_unit, 1e-6)).astype(np.float32, copy=False)
+
+
+def _resolve_effective_exit_idx(
+    events: pd.DataFrame,
+    *,
+    split_end: int,
+) -> NDArray[np.int32]:
+    if "exit_idx" in events.columns:
+        exit_idx = pd.to_numeric(events["exit_idx"], errors="coerce")
+        if exit_idx.notna().all():
+            return np.asarray(exit_idx.to_numpy(dtype=np.int32, copy=False), dtype=np.int32)
+    entry_idx = np.asarray(
+        pd.to_numeric(events["entry_idx"], errors="coerce").fillna(-1).to_numpy(dtype=np.int32, copy=False),
+        dtype=np.int32,
+    )
+    if "expected_holding_bars" in events.columns:
+        holding = np.asarray(
+            pd.to_numeric(events["expected_holding_bars"], errors="coerce")
+            .fillna(1)
+            .clip(lower=1)
+            .to_numpy(dtype=np.int32, copy=False),
+            dtype=np.int32,
+        )
+    else:
+        holding = np.ones((len(events),), dtype=np.int32)
+    inferred = entry_idx + np.maximum(holding - 1, 0)
+    return np.clip(inferred, entry_idx, max(split_end - 1, 0)).astype(np.int32, copy=False)
 
 
 @njit(cache=True)  # type: ignore
@@ -599,6 +664,8 @@ def build_candidate_dataset(
             feature_schema_version=active_schema.version,
             y_return_r=np.zeros((0,), dtype=np.float32),
             y_return_bps=np.zeros((0,), dtype=np.float32),
+            y_gross_return_bps=np.zeros((0,), dtype=np.float32),
+            y_gross_return_r=np.zeros((0,), dtype=np.float32),
             y_mae_r=np.zeros((0,), dtype=np.float32),
             risk_unit_bps=np.zeros((0,), dtype=np.float32),
         )
@@ -952,18 +1019,19 @@ def build_candidate_dataset(
             feature_schema_version=active_schema.version,
             y_return_r=np.zeros((0,), dtype=np.float32),
             y_return_bps=np.zeros((0,), dtype=np.float32),
+            y_gross_return_bps=np.zeros((0,), dtype=np.float32),
+            y_gross_return_r=np.zeros((0,), dtype=np.float32),
             y_mae_r=np.zeros((0,), dtype=np.float32),
             risk_unit_bps=np.zeros((0,), dtype=np.float32),
         )
 
     gate_label_col = cfg.gate_label_column
-    if gate_label_col not in kept_events.columns:
+    if gate_label_col not in kept_events.columns and require_label_within_split:
         raise ValueError(f"missing configured gate label column: {gate_label_col}")
-    y_gate = kept_events[gate_label_col].to_numpy(dtype=np.int8, copy=False)
-    y_return_bps = kept_events.get("net_event_bps", kept_events["edge_after_hurdle_bps"]).to_numpy(
-        dtype=np.float32,
-        copy=False,
-    )
+    if gate_label_col in kept_events.columns:
+        y_gate = kept_events[gate_label_col].to_numpy(dtype=np.int8, copy=False)
+    else:
+        y_gate = np.zeros((kept_events.shape[0],), dtype=np.int8)
     min_risk_unit = np.float32(getattr(cfg, "min_risk_unit_bps", 25.0))
     if "risk_unit_bps" in kept_events.columns:
         risk_unit = kept_events["risk_unit_bps"].to_numpy(dtype=np.float32, copy=False)
@@ -972,19 +1040,29 @@ def build_candidate_dataset(
     else:
         risk_unit = np.full((kept_events.shape[0],), min_risk_unit, dtype=np.float32)
     risk_unit = np.maximum(risk_unit, min_risk_unit)
-    if "net_return_r" in kept_events.columns:
-        y_return_r = kept_events["net_return_r"].to_numpy(dtype=np.float32, copy=False)
-    else:
-        y_return_r = (y_return_bps / np.maximum(risk_unit, 1e-6)).astype(np.float32, copy=False)
+    y_gross_return_bps = _resolve_gross_target_bps(
+        kept_events,
+        allow_label_free=not require_label_within_split,
+    )
+    y_gross_return_r = _resolve_gross_target_r(
+        kept_events,
+        gross_bps=y_gross_return_bps,
+        risk_unit=risk_unit,
+        allow_label_free=not require_label_within_split,
+    )
+    y_return_bps = y_gross_return_bps
+    y_return_r = y_gross_return_r
     if "mae_r" in kept_events.columns:
         y_mae_r = kept_events["mae_r"].to_numpy(dtype=np.float32, copy=False)
-    else:
+    elif "mae_bps" in kept_events.columns:
         mae_raw = kept_events["mae_bps"].to_numpy(dtype=np.float32, copy=False)
         y_mae_r = (mae_raw / np.maximum(risk_unit, 1e-6)).astype(np.float32, copy=False)
-    legacy_return_bps = (y_return_r * risk_unit).astype(np.float32, copy=False)
+    else:
+        y_mae_r = np.zeros((kept_events.shape[0],), dtype=np.float32)
+    legacy_return_bps = y_gross_return_bps.astype(np.float32, copy=False)
     uniqueness_weight, effective_sample_size = _event_uniqueness_weights(
         entry_idx=kept_events["entry_idx"].to_numpy(dtype=np.int32, copy=False),
-        exit_idx=kept_events["exit_idx"].to_numpy(dtype=np.int32, copy=False),
+        exit_idx=_resolve_effective_exit_idx(kept_events, split_end=split_end),
         split_start=split_start,
         split_end=split_end,
     )
@@ -1082,6 +1160,8 @@ def build_candidate_dataset(
         feature_schema_version=active_schema.version,
         y_return_r=y_return_r.astype(np.float32, copy=False),
         y_return_bps=y_return_bps.astype(np.float32, copy=False),
+        y_gross_return_bps=y_gross_return_bps.astype(np.float32, copy=False),
+        y_gross_return_r=y_gross_return_r.astype(np.float32, copy=False),
         y_mae_r=y_mae_r.astype(np.float32, copy=False),
         risk_unit_bps=risk_unit.astype(np.float32, copy=False),
     )

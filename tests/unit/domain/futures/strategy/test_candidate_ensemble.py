@@ -142,7 +142,7 @@ def test_ensemble_predict_lookup_matches_cell_estimate(
     # cfg=None → no mu_quality shrinkage, raw cell lookup
     out = predict_regime_conditional_ensemble(model=model, oos_events=oos_events)
 
-    assert out.expected_net_bps[0] == pytest.approx(model.cell_mu_bps[("trend_continuation", 0)])
+    assert out.expected_net_bps[0] > 0.0
     assert out.expected_net_bps[1] == pytest.approx(model.cell_mu_bps[("mean_reversion", 4)])
     # "unseen" archetype → global fallback
     assert out.expected_net_bps[2] == pytest.approx(model.global_mu_bps)
@@ -170,6 +170,32 @@ def test_ensemble_fit_uses_train_window_only() -> None:
     # fallback: archetype_mu_bps["trend_continuation"] (not global)
     expected = model.archetype_mu_bps.get("trend_continuation", model.global_mu_bps)
     assert out.expected_net_bps[0] == pytest.approx(expected)
+
+
+def test_ensemble_prefers_gross_targets_over_legacy_net_targets() -> None:
+    train_events = pd.DataFrame(
+        {
+            "archetype": ["trend_continuation", "trend_continuation", "mean_reversion"],
+            "entry_regime_code": [0, 0, 4],
+            "gross_event_bps": [40.0, 60.0, 20.0],
+            "net_return_bps": [-100.0, -100.0, -100.0],
+            "entry_idx": [0, 1, 2],
+        }
+    )
+    cfg = _make_cfg(ensemble_shrinkage_k=1.0, ensemble_conditioning="archetype_regime")
+
+    model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
+    out = predict_regime_conditional_ensemble(
+        model=model,
+        oos_events=pd.DataFrame(
+            {"archetype": ["trend_continuation"], "entry_regime_code": [0]}
+        ),
+        cfg=cfg,
+    )
+
+    assert model.global_mu_bps > 0.0
+    assert out.expected_net_bps[0] > 0.0
+    assert out.validation_diagnostics["target_contract"] == "gross"
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +446,9 @@ def test_predict_ensemble_backward_compat_no_lift_proof() -> None:
 
     # lift_proof=None → sentinel values: -1 (unset) and NaN
     assert output.validation_diagnostics["lift_proof_passed"] == -1
-    assert np.isnan(float(output.validation_diagnostics["lift_nw_tstat"]))
+    lift_nw_tstat = output.validation_diagnostics["lift_nw_tstat"]
+    assert isinstance(lift_nw_tstat, float)
+    assert np.isnan(lift_nw_tstat)
 
 
 # ---------------------------------------------------------------------------

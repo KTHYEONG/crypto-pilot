@@ -150,6 +150,80 @@ def format_layer1_table(
     return "\n".join(lines)
 
 
+def format_layer1_gate_table(report: Any) -> str:
+    """Format Layer1 hard-gate checks from a gate report."""
+    checks = tuple(getattr(report, "checks", ()) or ())
+    passed = bool(getattr(report, "passed", False))
+    blockers = tuple(getattr(report, "blockers", ()) or ())
+    lines = [
+        "[LAYER 1 HARD GATE] --------------------------------",
+        "| Gate                        | Value   | Threshold | Status  | Blocker |",
+        "| --------------------------- | ------- | --------- | ------- | ------- |",
+    ]
+    for check in checks:
+        comparator = ">=" if getattr(check, "comparator", "ge") == "ge" else ">"
+        threshold = f"{comparator}{getattr(check, 'threshold', 0.0):.3f}"
+        status = "PASS" if bool(getattr(check, "passed", False)) else "FAIL"
+        blocker = getattr(check, "blocker", None) or "-"
+        value = float(getattr(check, "value", 0.0))
+        lines.append(
+            f"| {getattr(check, 'key', ''):<27} | {value:>7.3f} | {threshold:<9} | {status:<7} | {blocker:<7} |"
+        )
+    lines.append(
+        f"| {'Layer1 Gate':<27} | {'-':<7} | {'ALL':<9} | {_gate(passed):<7} | "
+        f"{('; '.join(blockers) if blockers else '-'): <7} |"
+    )
+    lines.append("------------------------------------------------------")
+    return "\n".join(lines)
+
+
+def format_layer1_outer_fold_table(reports: tuple[Any, ...]) -> str:
+    """Format outer-fold readiness diagnostics."""
+    lines = [
+        "[LAYER 1 OUTER FOLDS] ------------------------------",
+        "| Fold | Registry Source End | Outer Start | Ready Symbols | Times | IC     | Probe  | Status |",
+        "| ---- | ------------------- | ----------- | ------------- | ----- | ------ | ------ | ------ |",
+    ]
+    for report in reports:
+        ready_count = len(tuple(getattr(report, "ready_symbols", ()) or ()))
+        status = "PASS" if bool(getattr(report, "passed", False)) else "FAIL"
+        lines.append(
+            f"| {int(getattr(report, 'fold_id', 0)):<4} | {int(getattr(report, 'registry_source_end_idx', 0)):<19} | "
+            f"{int(getattr(report, 'outer_oos_start_idx', 0)):<11} | {ready_count:<13} | "
+            f"{int(getattr(report, 'valid_opportunity_timestamp_count', 0)):<5} | "
+            f"{float(getattr(report, 'opportunity_ic', 0.0)):<6.3f} | "
+            f"{float(getattr(report, 'probe_gross_edge_bps', 0.0)):<6.2f} | {status:<6} |"
+        )
+    lines.append("------------------------------------------------------")
+    return "\n".join(lines)
+
+
+def format_layer1_deployment_registry_table(registry: Any) -> str:
+    """Format deployment registry entries."""
+    by_symbol = getattr(registry, "by_symbol", {}) or {}
+    lines = [
+        "[LAYER 1 DEPLOYMENT REGISTRY] ----------------------",
+        "| Symbol | Strategy | Context | Gross | Incremental | Effective N | Bootstrap t | q-value |",
+        "| ------ | -------- | ------- | ----- | ----------- | ----------- | ----------- | ------- |",
+    ]
+    for symbol in sorted(by_symbol):
+        evidence_items = tuple(by_symbol.get(symbol, ()) or ())
+        for evidence in evidence_items:
+            key = getattr(evidence, "key", None)
+            strategy = getattr(key, "strategy_id", "")
+            context = getattr(key, "activation_context", "")
+            lines.append(
+                f"| {symbol:<6} | {strategy:<8} | {context:<7} | "
+                f"{float(getattr(evidence, 'mean_gross_bps', 0.0)):<5.2f} | "
+                f"{float(getattr(evidence, 'mean_incremental_bps', 0.0)):<11.2f} | "
+                f"{float(getattr(evidence, 'effective_n', 0.0)):<11.2f} | "
+                f"{float(getattr(evidence, 'bootstrap_tstat_incremental', 0.0)):<11.2f} | "
+                f"{float(getattr(evidence, 'q_value', 0.0)):<7.3f} |"
+            )
+    lines.append("------------------------------------------------------")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # §9.3 Layer 2 table
 # ---------------------------------------------------------------------------
