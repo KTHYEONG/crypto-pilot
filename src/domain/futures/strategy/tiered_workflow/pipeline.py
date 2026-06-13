@@ -32,6 +32,8 @@ from src.domain.futures.strategy.tiered_logging import (
     format_layer1_table,
     format_layer2_table,
     format_layer3_table,
+    format_layer_header,
+    format_system_status,
 )
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     _run_awf_simulation,
@@ -435,8 +437,8 @@ def run_l1_swf(
             )
             for sig in top_panel
         )
-        logger.info("[STRATEGY-PANEL] valid=%d diversity=%.3f | %s", n_valid_strategies, panel_diversity, panel_str)
-    logger.info(
+        logger.debug("[STRATEGY-PANEL] valid=%d diversity=%.3f | %s", n_valid_strategies, panel_diversity, panel_str)
+    logger.debug(
         "[SWF-LEGACY-IC] pooled_ic=%.4f pooled_tstat=%.2f breadth=%.3f valid_coverage=%.3f",
         pooled_ic_val,
         pooled_tstat_val,
@@ -444,7 +446,7 @@ def run_l1_swf(
         valid_coverage,
     )
 
-    logger.info(
+    logger.debug(
         "[SWF-DIAG] static_share=%.3f dynamic_share=%.3f score_cal_ratio=%.3f decile_lift=%.2fbps",
         _diag.static_variance_share,
         _diag.dynamic_variance_share,
@@ -455,7 +457,7 @@ def run_l1_swf(
         arch_lines = ", ".join(
             f"{a}: mu={m:.2f} t={t:.2f}" for a, (m, t) in sorted(_diag.per_archetype_oos_edge.items())
         )
-        logger.info("[SWF-DIAG-ARCH] %s", arch_lines)
+        logger.debug("[SWF-DIAG-ARCH] %s", arch_lines)
 
     _log_fold_regime_analysis(fold_tuples=futures, datetimes=aligned.datetimes)
 
@@ -566,7 +568,7 @@ def run_l1_nested_swf(
                 seed=seed + outer_idx,
             )
         )
-    trained_outer_fold_coverage = (
+    fold_cov = (
         float(trained_count / len(outer_folds))
         if outer_folds
         else 0.0
@@ -583,12 +585,12 @@ def run_l1_nested_swf(
     )
     gate_report = evaluate_layer1_readiness(
         fold_reports=tuple(outer_reports),
-        trained_outer_fold_coverage=trained_outer_fold_coverage,
+        fold_cov=fold_cov,
         trade_scope_count=len(aligned.symbols),
         cfg=cfg,
     )
-    logger.info(format_layer1_gate_table(gate_report))
     logger.info(format_layer1_outer_fold_table(tuple(outer_reports)))
+    logger.info(format_layer1_gate_table(gate_report))
     deployment_registry: QualifiedSignalRegistry | None = None
     inference_artifact: Layer1InferenceArtifact | None = None
     oos_stacked: dict[str, SymbolSignal] = {}
@@ -774,6 +776,9 @@ def run_tiered_pipeline(
     l1_end_bars = int(np.searchsorted(aligned.datetimes, np.datetime64(_oos_ts.replace(tzinfo=None), "ns")))
 
     import src.domain.futures.strategy.tiered_workflow as _tw
+    
+    # Layer 1 Header is already printed in opt_main_futures _run_strategy_stage
+    
     outer_folds = _tw.build_l1_nested_swf_folds(
         n_bars=n_bars,
         l1_start_idx=l1_start_bars,
@@ -790,9 +795,13 @@ def run_tiered_pipeline(
     )
 
     if not l1.gate_passed:
-        logger.info(_tw.format_system_status(l1, None, None))
+        logger.info(f"\n>> LAYER 1 RESULT: [BLOCKED] -> gate_passed=False")
         return (l1, None, None)
+    
+    logger.info(f"\n>> LAYER 1 RESULT: [PASS] -> Proceeding to Layer 2.")
 
+    # ─── Layer 2: AWF Portfolio Optimization ─────────────────────────────────
+    logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
     awf_folds = _tw.build_walk_forward_folds(n_bars=n_bars, cfg=cfg)
     l2 = _tw.run_l2_awf(
         l1_oos=l1.oos_stacked,
@@ -804,9 +813,13 @@ def run_tiered_pipeline(
     )
 
     if not l2.gate_passed:
-        logger.info(_tw.format_system_status(l1, l2, None))
+        logger.info(f"\n>> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False")
         return (l1, l2, None)
+    
+    logger.info(f"\n>> LAYER 2 RESULT: [PASS] -> Proceeding to Final Holdout.")
 
+    # ─── Layer 3: Final Holdout Backtest ─────────────────────────────────────
+    logger.info(format_layer_header(3, "Final Holdout & Deployment Readiness"))
     ho_start_idx = _date_to_idx(aligned.datetimes, window.holdout_start)
     ho_end_idx = _date_to_idx(aligned.datetimes, window.holdout_end)
     l3 = _tw.run_l3_holdout(
@@ -817,6 +830,16 @@ def run_tiered_pipeline(
         caps=caps,
         tf=tf,
     )
+    
+    logger.info("\n" + "="*80)
+    logger.info("[FINAL PIPELINE STATUS]")
+    logger.info(f">> ROUTING: L1({'PASS' if l1.gate_passed else 'FAIL'}) -> "
+                f"L2({'PASS' if l2.gate_passed else 'FAIL'}) -> "
+                f"L3({'PASS' if l3.gate_passed else 'FAIL'})")
+    if l3.gate_passed:
+        logger.info(">> ACTION:  DEPLOYMENT ELIGIBLE 🚀")
+    else:
+        logger.info(">> ACTION:  REJECTED - Fails Final Holdout Gate")
+    logger.info("="*80)
 
-    logger.info(_tw.format_system_status(l1, l2, l3))
     return (l1, l2, l3)

@@ -498,7 +498,7 @@ def _log_fold_regime_analysis(
         date_end = str(datetimes[oos_e_clamp])[:10]
 
         if not _is_trained_fold_output(fold_out):
-            logger.info(
+            logger.debug(
                 "[SWF-DIAG-FOLD%d] %s~%s fit_status=%s SKIP",
                 fold_idx + 1, date_start, date_end,
                 getattr(fold_out, "fit_status", "unknown"),
@@ -507,13 +507,13 @@ def _log_fold_regime_analysis(
 
         oos_set = getattr(fold_out, "oos_set", None)
         if oos_set is None:
-            logger.info("[SWF-DIAG-FOLD%d] %s~%s oos_set=None SKIP", fold_idx + 1, date_start, date_end)
+            logger.debug("[SWF-DIAG-FOLD%d] %s~%s oos_set=None SKIP", fold_idx + 1, date_start, date_end)
             continue
 
         events_df: pd.DataFrame = getattr(oos_set, "event_index", pd.DataFrame())
         y_raw = getattr(oos_set, "y_return_bps", None)
         if events_df.empty or y_raw is None:
-            logger.info("[SWF-DIAG-FOLD%d] %s~%s no_events SKIP", fold_idx + 1, date_start, date_end)
+            logger.debug("[SWF-DIAG-FOLD%d] %s~%s no_events SKIP", fold_idx + 1, date_start, date_end)
             continue
 
         y_arr: NDArray[np.float64] = np.asarray(y_raw, dtype=np.float64)
@@ -550,7 +550,7 @@ def _log_fold_regime_analysis(
                 _ic, _ = _sr(pred_arr[mask_f], y_arr[mask_f])
                 cs_ic_str = f"ic={float(_ic):.4f}"
 
-        logger.info(
+        logger.debug(
             "[SWF-DIAG-FOLD%d] %s~%s n=%d %s | regime[%s] | arch[%s]",
             fold_idx + 1, date_start, date_end, n_ev, cs_ic_str, regime_dist, arch_mu_str,
         )
