@@ -316,3 +316,74 @@ def build_l1_swf_folds(
         ))
 
     return tuple(folds)
+
+
+def build_l1_nested_swf_folds(
+    *,
+    n_bars: int,
+    l1_start_idx: int,
+    l1_end_idx: int,
+    max_label_horizon_bars: int,
+    cfg: CandidateStrategyConfig,
+) -> tuple[WFFold, ...]:
+    """Build outer anchored folds for nested Layer1 SWF validation.
+
+    The first block is reserved as initial train history and the remaining
+    blocks become sequential non-overlapping outer OOS windows.
+    """
+    if l1_start_idx < 0 or l1_end_idx > n_bars or l1_start_idx >= l1_end_idx:
+        raise ValueError(
+            "invalid L1 nested bar range: "
+            f"l1_start_idx={l1_start_idx}, l1_end_idx={l1_end_idx}, n_bars={n_bars}"
+        )
+    n_folds = max(1, int(getattr(cfg, "wf_n_folds", 1)))
+    available = l1_end_idx - l1_start_idx
+    block_len = available // (n_folds + 1)
+    if block_len < 1:
+        raise ValueError(
+            "insufficient bars for nested L1 SWF blocks: "
+            f"available={available}, n_folds={n_folds}"
+        )
+    purge_cfg = int(getattr(cfg, "purge_bars", 0) or 0)
+    embargo_cfg = int(getattr(cfg, "embargo_bars", 0) or 0)
+    purge_bars = max(int(max_label_horizon_bars), purge_cfg)
+    embargo_bars = max(0, embargo_cfg)
+    cal_fraction = float(getattr(cfg, "ml_calibration_fraction", 0.2))
+
+    folds: list[WFFold] = []
+    for fold_idx in range(n_folds):
+        oos_start = l1_start_idx + (fold_idx + 1) * block_len
+        oos_end = (
+            l1_start_idx + (fold_idx + 2) * block_len
+            if fold_idx < n_folds - 1
+            else l1_end_idx
+        )
+        fit_end = oos_start - purge_bars
+        if fit_end <= l1_start_idx:
+            raise ValueError(
+                "insufficient fit span for nested L1 fold: "
+                f"fold={fold_idx}, fit_end={fit_end}, l1_start_idx={l1_start_idx}"
+            )
+        cal_end = fit_end
+        fit_len = fit_end - l1_start_idx
+        cal_len = max(1, int(fit_len * cal_fraction))
+        cal_start = max(l1_start_idx + 1, cal_end - cal_len)
+        fit_train_end = max(l1_start_idx + 1, cal_start - embargo_bars)
+        if fit_train_end <= l1_start_idx:
+            fit_train_end = max(l1_start_idx + 1, cal_start)
+        if oos_end <= oos_start:
+            raise ValueError(
+                "invalid nested L1 OOS span: "
+                f"fold={fold_idx}, oos_start={oos_start}, oos_end={oos_end}"
+            )
+        folds.append(
+            WFFold(
+                fit_start=l1_start_idx,
+                fit_end=fit_train_end,
+                cal_start=cal_start,
+                cal_end=cal_end,
+                oos_start=oos_start,
+                oos_end=oos_end,
+            )
+        )
+    return tuple(folds)
