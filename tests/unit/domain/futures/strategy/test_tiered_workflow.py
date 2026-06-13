@@ -20,12 +20,25 @@ S_nw_short: N<4 edge case → 0.0
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from src.domain.futures.strategy.candidate_contracts import (
+    CandidateModelOutput,
+    EdgeSource,
+    Layer1FoldReadiness,
+    Layer1GateReport,
+    QualifiedSignalRegistry,
+    SignalSourceKey,
+    SymbolStrategyEvidence,
+    ValidatedSignalBatch,
+    ValidatedSignalEvent,
+)
+from src.domain.futures.strategy.config import CandidateStrategyConfig
 from src.domain.futures.strategy.cs_rank import SymbolSignal
 from src.domain.futures.strategy.tiered_workflow import (
     _VALID_COVERAGE_FLAG_THRESHOLD,
@@ -36,16 +49,22 @@ from src.domain.futures.strategy.tiered_workflow import (
     StrategySignal,
     SymbolRealizedStat,
     _cagr,
+    _candidate_output_to_signal_batch,
     _compute_fold_ts_ic,
     _newey_west_ic_tstat,
     _nw_tstat_realized,
     _stack_oos_signals,
+    build_qualified_signal_registry,
     compute_breadth_weighted_ic,
     compute_panel_diversity,
     compute_per_strategy_oos_validation,
     compute_per_symbol_ic,
     compute_per_symbol_realized_stats,
+    compute_symbol_strategy_evidence,
+    evaluate_layer1_readiness,
     run_l1_swf,
+    run_tiered_pipeline,
+    select_outer_symbol_opportunities,
 )
 from src.domain.futures.strategy.walk_forward import WFFold
 
@@ -1546,3 +1565,358 @@ def test_run_l1_swf_panel_gate_blocks_low_diversity() -> None:
         )
 
     assert l1.gate_passed is False
+
+
+def test_run_tiered_pipeline_routes_layer1_through_nested_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Top-level tiered pipeline must use nested Layer1 builder/executor, not legacy SWF."""
+    import src.domain.futures.strategy.config as _cfg
+    import src.domain.futures.strategy.tiered_workflow as _tw
+
+    # Arrange
+    aligned = cast(
+        Any,
+        SimpleNamespace(
+            datetimes=np.array(
+                [
+                    np.datetime64("2024-01-01T00:00:00"),
+                    np.datetime64("2024-01-02T00:00:00"),
+                    np.datetime64("2024-01-03T00:00:00"),
+                    np.datetime64("2024-01-04T00:00:00"),
+                    np.datetime64("2024-01-05T00:00:00"),
+                    np.datetime64("2024-01-06T00:00:00"),
+                ],
+                dtype="datetime64[ns]",
+            ),
+            symbols=("BTCUSDT",),
+        ),
+    )
+    window = cast(
+        Any,
+        SimpleNamespace(
+            l1_start="2024-01-02",
+            l2_start="2024-01-05",
+            holdout_start="2024-01-05",
+            holdout_end="2024-01-06",
+        ),
+    )
+    cfg = MagicMock(spec=CandidateStrategyConfig)
+    cfg.wf_n_folds = 2
+
+    built_outer_folds = (
+        WFFold(fit_start=0, fit_end=2, cal_start=1, cal_end=2, oos_start=2, oos_end=3),
+        WFFold(fit_start=0, fit_end=3, cal_start=2, cal_end=3, oos_start=3, oos_end=4),
+    )
+    nested_builder_calls: list[dict[str, object]] = []
+    nested_runner_calls: list[dict[str, object]] = []
+    logged_messages: list[str] = []
+    blocked_l1 = Layer1Result(
+        signals_per_fold=(),
+        oos_stacked={},
+        pooled_ic=0.0,
+        pooled_tstat=0.0,
+        breadth=0.0,
+        valid_coverage=0.0,
+        fold_pass_ratio=0.0,
+        gate_passed=False,
+        n_valid=0,
+        n_total=1,
+        n_trade_scope=1,
+        outer_fold_reports=(),
+        gate_report=Layer1GateReport(checks=(), passed=False, blockers=("too_few_ready_symbols",)),
+    )
+
+    monkeypatch.setattr(_cfg, "resolve_purge_and_embargo_bars", lambda _cfg_obj: (3, 1))
+
+    def _capture_nested_folds(**kwargs: object) -> tuple[WFFold, ...]:
+        nested_builder_calls.append(dict(kwargs))
+        return built_outer_folds
+
+    def _capture_nested_runner(**kwargs: object) -> Layer1Result:
+        nested_runner_calls.append(dict(kwargs))
+        return blocked_l1
+
+    monkeypatch.setattr(
+        _tw,
+        "build_l1_nested_swf_folds",
+        _capture_nested_folds,
+        raising=False,
+    )
+    monkeypatch.setattr(_tw, "run_l1_nested_swf", _capture_nested_runner)
+    monkeypatch.setattr(
+        _tw,
+        "run_l1_swf",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy run_l1_swf should not be called from run_tiered_pipeline")
+        ),
+    )
+    monkeypatch.setattr(_tw, "format_system_status", lambda l1, l2, l3: "NESTED_LAYER1_BLOCKED")
+    monkeypatch.setattr(_tw.logger, "info", lambda message: logged_messages.append(str(message)))
+
+    # Act
+    result = run_tiered_pipeline(
+        labeled_events=pd.DataFrame(),
+        aligned=aligned,
+        cfg=cfg,
+        window=window,
+        l1_params={},
+        l2_params={},
+        tf="4h",
+    )
+
+    # Assert
+    assert result == (blocked_l1, None, None)
+    assert len(nested_builder_calls) == 1
+    assert nested_builder_calls[0]["n_bars"] == len(aligned.datetimes)
+    assert nested_builder_calls[0]["l1_start_idx"] == 1
+    assert nested_builder_calls[0]["l1_end_idx"] == 4
+    assert nested_builder_calls[0]["cfg"] is cfg
+    assert len(nested_runner_calls) == 1
+    assert nested_runner_calls[0]["outer_folds"] == built_outer_folds
+    assert nested_runner_calls[0]["cfg"] is cfg
+    assert logged_messages == ["NESTED_LAYER1_BLOCKED"]
+
+
+def test_candidate_output_to_signal_batch_requires_explicit_gross_targets() -> None:
+    """Layer1 runtime batch must not synthesize gross targets from legacy net outputs."""
+    # Arrange
+    events = pd.DataFrame(
+        [
+            {
+                "entry_idx": 2,
+                "symbol": "BTCUSDT",
+                "family": "trend",
+                "variant": "fast",
+                "entry_regime": "bull",
+                "side": 1,
+                "expected_holding_bars": 3,
+            }
+        ]
+    )
+    model_output = CandidateModelOutput(
+        events=events,
+        p_pass=np.asarray([1.0], dtype=np.float64),
+        edge_source=EdgeSource.PRIOR_ONLY,
+        expected_net_bps=np.asarray([12.0], dtype=np.float64),
+        q10_net_bps=np.asarray([-4.0], dtype=np.float64),
+        q90_net_bps=np.asarray([20.0], dtype=np.float64),
+    )
+    evidence = SymbolStrategyEvidence(
+        key=SignalSourceKey("BTCUSDT", "trend:fast", "bull"),
+        mean_gross_bps=5.0,
+        mean_incremental_bps=2.0,
+        bootstrap_tstat_incremental=2.1,
+        p_value=0.02,
+        q_value=0.03,
+        positive_fold_ratio=1.0,
+        n_obs=12,
+        effective_n=12.0,
+        n_folds=3,
+        reliability=0.8,
+        qualified=True,
+        rejection_reasons=(),
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={"BTCUSDT": (evidence,)},
+        ready_symbols=("BTCUSDT",),
+        trade_scope_count=1,
+        registry_version="deployment",
+    )
+    datetimes = np.array(
+        [
+            np.datetime64("2024-01-01T00:00:00"),
+            np.datetime64("2024-01-01T04:00:00"),
+            np.datetime64("2024-01-01T08:00:00"),
+        ],
+        dtype="datetime64[ns]",
+    )
+
+    # Act
+    batch = _candidate_output_to_signal_batch(
+        model_output=model_output,
+        registry=registry,
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        model_version="m1",
+        activation_floor_bps=0.0,
+    )
+
+    # Assert
+    assert model_output.expected_gross_bps[0] == pytest.approx(0.0)
+    assert len(batch.events) == 0
+
+
+def test_compute_symbol_strategy_evidence_rejects_non_incremental_pair() -> None:
+    cfg = CandidateStrategyConfig(
+        l1_pair_min_effective_obs=2.0,
+        l1_pair_min_folds=2,
+        l1_pair_min_mean_gross_bps=0.0,
+        l1_pair_min_incremental_bps=0.1,
+        l1_pair_min_incremental_tstat=0.0,
+        l1_pair_min_positive_fold_ratio=0.5,
+        l1_pair_fdr_alpha=1.0,
+    )
+    events = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"] * 4,
+            "strategy_id": ["trend:fast"] * 4,
+            "activation_context": ["bull"] * 4,
+            "gross_event_bps": [1.0, 1.0, 1.0, 1.0],
+            "baseline_gross_bps": [1.0, 1.0, 1.0, 1.0],
+            "expected_holding_bars": [4, 4, 4, 4],
+            "side": [1, 1, 1, 1],
+            "uniqueness_weight": [1.0, 1.0, 1.0, 1.0],
+            "fold_id": [0, 0, 1, 1],
+        }
+    )
+
+    evidence = compute_symbol_strategy_evidence(
+        event_results=events,
+        cfg=cfg,
+        seed=7,
+    )
+
+    assert len(evidence) == 1
+    assert evidence[0].qualified is False
+    assert "no_incremental_edge" in evidence[0].rejection_reasons
+
+
+def test_build_qualified_signal_registry_requires_min_signals_per_symbol() -> None:
+    evidence = (
+        SymbolStrategyEvidence(
+            key=SignalSourceKey("BTCUSDT", "trend:fast", "bull"),
+            mean_gross_bps=4.0,
+            mean_incremental_bps=2.0,
+            bootstrap_tstat_incremental=2.5,
+            p_value=0.01,
+            q_value=0.02,
+            positive_fold_ratio=1.0,
+            n_obs=10,
+            effective_n=10.0,
+            n_folds=3,
+            reliability=0.8,
+            qualified=True,
+            rejection_reasons=(),
+        ),
+    )
+
+    registry = build_qualified_signal_registry(
+        evidence=evidence,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        min_signals_per_symbol=2,
+        registry_version="v1",
+    )
+
+    assert registry.ready_symbols == ()
+    assert registry.by_symbol == {}
+
+
+def test_select_outer_symbol_opportunities_keeps_best_real_event_per_symbol() -> None:
+    batch = ValidatedSignalBatch(
+        events=(
+            ValidatedSignalEvent(
+                decision_idx=10,
+                decision_time=np.datetime64("2024-01-01T00:00:00"),
+                symbol="BTCUSDT",
+                strategy_id="trend:fast",
+                activation_context="bull",
+                side=1,
+                expected_gross_bps=6.0,
+                q10_gross_bps=3.0,
+                q90_gross_bps=8.0,
+                expected_holding_bars=3,
+                reliability=0.9,
+                registry_version="r1",
+                model_version="m1",
+            ),
+            ValidatedSignalEvent(
+                decision_idx=10,
+                decision_time=np.datetime64("2024-01-01T00:00:00"),
+                symbol="BTCUSDT",
+                strategy_id="reversion:slow",
+                activation_context="bull",
+                side=1,
+                expected_gross_bps=4.0,
+                q10_gross_bps=2.0,
+                q90_gross_bps=6.0,
+                expected_holding_bars=6,
+                reliability=0.5,
+                registry_version="r1",
+                model_version="m1",
+            ),
+        ),
+        start_idx=10,
+        end_idx=12,
+        symbols=("BTCUSDT",),
+        registry_version="r1",
+        model_version="m1",
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={},
+        ready_symbols=("BTCUSDT",),
+        trade_scope_count=1,
+        registry_version="r1",
+    )
+
+    selected = select_outer_symbol_opportunities(
+        predictions=batch,
+        registry=registry,
+    )
+
+    assert len(selected.events) == 1
+    assert selected.events[0].strategy_id == "trend:fast"
+
+
+def test_evaluate_layer1_readiness_uses_stable_symbol_counts_and_outer_series() -> None:
+    cfg = CandidateStrategyConfig(
+        l1_min_ready_outer_folds=2,
+        l1_min_ready_symbols=2,
+        l1_min_ready_symbol_ratio=0.5,
+        l1_min_ready_outer_fold_ratio=0.5,
+        l1_min_opportunity_ic=0.01,
+        l1_min_opportunity_ic_tstat=0.0,
+        l1_min_probe_gross_edge_bps=0.0,
+        l1_min_probe_gross_edge_tstat=0.0,
+    )
+    reports = (
+        Layer1FoldReadiness(
+            fold_id=1,
+            registry_source_end_idx=90,
+            outer_oos_start_idx=100,
+            outer_oos_end_idx=120,
+            ready_symbols=("BTCUSDT", "ETHUSDT"),
+            valid_opportunity_timestamp_count=3,
+            opportunity_ic=0.10,
+            opportunity_ic_series=(0.10, 0.12),
+            probe_gross_edge_bps=1.5,
+            probe_gross_edge_series_bps=(1.0, 2.0),
+            passed=True,
+            blockers=(),
+        ),
+        Layer1FoldReadiness(
+            fold_id=2,
+            registry_source_end_idx=110,
+            outer_oos_start_idx=120,
+            outer_oos_end_idx=140,
+            ready_symbols=("BTCUSDT", "ETHUSDT"),
+            valid_opportunity_timestamp_count=3,
+            opportunity_ic=0.08,
+            opportunity_ic_series=(0.08, 0.09),
+            probe_gross_edge_bps=1.0,
+            probe_gross_edge_series_bps=(0.8, 1.2),
+            passed=True,
+            blockers=(),
+        ),
+    )
+
+    report = evaluate_layer1_readiness(
+        fold_reports=reports,
+        trained_outer_fold_coverage=1.0,
+        trade_scope_count=2,
+        cfg=cfg,
+    )
+
+    assert report.passed is True
+    ready_symbol_check = next(check for check in report.checks if check.key == "stable_ready_symbol_count")
+    assert ready_symbol_check.value == pytest.approx(2.0)

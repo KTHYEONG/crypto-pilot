@@ -3,11 +3,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from src.domain.futures.strategy.candidate_dataset import CandidateFeatureSchema
+    from src.domain.futures.strategy.candidate_ensemble import RegimeConditionalEnsemble
 
 SignalArchetype = Literal[
     "trend_continuation",
@@ -143,12 +147,16 @@ class CandidateModelOutput:
     edge_source: EdgeSource
     expected_return_r: NDArray[np.float64]
     expected_net_bps: NDArray[np.float64]
+    expected_gross_bps: NDArray[np.float64]
     q10_return_r: NDArray[np.float64]
     q10_net_bps: NDArray[np.float64]
+    q10_gross_bps: NDArray[np.float64]
     q90_return_r: NDArray[np.float64]
     q90_net_bps: NDArray[np.float64]
+    q90_gross_bps: NDArray[np.float64]
     selection_score: NDArray[np.float64]
     kelly_fraction: NDArray[np.float64]
+    prediction_scale_bps: NDArray[np.float64]
     validation_diagnostics: dict[str, object] = field(
         default_factory=dict
     )
@@ -162,12 +170,16 @@ class CandidateModelOutput:
         edge_source: EdgeSource = EdgeSource.PRIOR_ONLY,
         expected_return_r: NDArray[np.float64] | None = None,
         expected_net_bps: NDArray[np.float64] | None = None,
+        expected_gross_bps: NDArray[np.float64] | None = None,
         q10_return_r: NDArray[np.float64] | None = None,
         q10_net_bps: NDArray[np.float64] | None = None,
+        q10_gross_bps: NDArray[np.float64] | None = None,
         q90_return_r: NDArray[np.float64] | None = None,
         q90_net_bps: NDArray[np.float64] | None = None,
+        q90_gross_bps: NDArray[np.float64] | None = None,
         selection_score: NDArray[np.float64] | None = None,
         kelly_fraction: NDArray[np.float64] | None = None,
+        prediction_scale_bps: NDArray[np.float64] | None = None,
         validation_diagnostics: Mapping[str, object] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -181,22 +193,28 @@ class CandidateModelOutput:
 
         net_bps = expected_net_bps if expected_net_bps is not None else kwargs.get("mu_net_decision_bps")
         if net_bps is None:
-            net_bps = kwargs.get("mu_gross_bps")
-        if net_bps is None:
             net_bps = np.zeros(size, dtype=np.float64)
         object.__setattr__(self, "expected_net_bps", net_bps)
+        gross_bps = expected_gross_bps if expected_gross_bps is not None else kwargs.get("mu_gross_bps")
+        if gross_bps is None:
+            gross_bps = np.zeros(size, dtype=np.float64)
+        object.__setattr__(self, "expected_gross_bps", gross_bps)
 
         ret_r = expected_return_r if expected_return_r is not None else net_bps / 25.0
         object.__setattr__(self, "expected_return_r", ret_r)
 
         q10_bps_val = q10_net_bps if q10_net_bps is not None else np.zeros(size, dtype=np.float64)
         object.__setattr__(self, "q10_net_bps", q10_bps_val)
+        q10_gross_val = q10_gross_bps if q10_gross_bps is not None else np.zeros(size, dtype=np.float64)
+        object.__setattr__(self, "q10_gross_bps", q10_gross_val)
 
         q10_r_val = q10_return_r if q10_return_r is not None else q10_bps_val / 25.0
         object.__setattr__(self, "q10_return_r", q10_r_val)
 
         q90_bps_val = q90_net_bps if q90_net_bps is not None else np.zeros(size, dtype=np.float64)
         object.__setattr__(self, "q90_net_bps", q90_bps_val)
+        q90_gross_val = q90_gross_bps if q90_gross_bps is not None else np.zeros(size, dtype=np.float64)
+        object.__setattr__(self, "q90_gross_bps", q90_gross_val)
 
         q90_r_val = q90_return_r if q90_return_r is not None else q90_bps_val / 25.0
         object.__setattr__(self, "q90_return_r", q90_r_val)
@@ -208,6 +226,8 @@ class CandidateModelOutput:
 
         k_frac = kelly_fraction if kelly_fraction is not None else np.zeros(size, dtype=np.float64)
         object.__setattr__(self, "kelly_fraction", k_frac)
+        scale = prediction_scale_bps if prediction_scale_bps is not None else np.abs(gross_bps)
+        object.__setattr__(self, "prediction_scale_bps", scale)
 
         val_diag = (
             validation_diagnostics
@@ -218,8 +238,8 @@ class CandidateModelOutput:
 
     @property
     def mu_gross_bps(self) -> NDArray[np.float64]:
-        """Backward-compatible alias for expected_net_bps."""
-        return self.expected_net_bps
+        """Backward-compatible alias for expected_gross_bps."""
+        return self.expected_gross_bps
 
     @property
     def mu_net_decision_bps(self) -> NDArray[np.float64]:
@@ -272,3 +292,116 @@ class CandidateFoldOutput:
     calibration_set: Any | None = None
     oos_set: Any | None = None
     timing_profile: dict[str, float] | None = None
+
+
+GateComparator = Literal["ge", "gt"]
+
+
+@dataclass(slots=True, frozen=True)
+class SignalSourceKey:
+    symbol: str
+    strategy_id: str
+    activation_context: str
+
+
+@dataclass(slots=True, frozen=True)
+class MatchedBaselineKey:
+    symbol: str
+    side: Literal[-1, 1]
+    holding_bucket: int
+
+
+@dataclass(slots=True, frozen=True)
+class SymbolStrategyEvidence:
+    key: SignalSourceKey
+    mean_gross_bps: float
+    mean_incremental_bps: float
+    bootstrap_tstat_incremental: float
+    p_value: float
+    q_value: float
+    positive_fold_ratio: float
+    n_obs: int
+    effective_n: float
+    n_folds: int
+    reliability: float
+    qualified: bool
+    rejection_reasons: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class QualifiedSignalRegistry:
+    by_symbol: dict[str, tuple[SymbolStrategyEvidence, ...]]
+    ready_symbols: tuple[str, ...]
+    trade_scope_count: int
+    registry_version: str
+
+
+@dataclass(slots=True, frozen=True)
+class ValidatedSignalEvent:
+    decision_idx: int
+    decision_time: np.datetime64
+    symbol: str
+    strategy_id: str
+    activation_context: str
+    side: Literal[-1, 1]
+    expected_gross_bps: float
+    q10_gross_bps: float
+    q90_gross_bps: float
+    expected_holding_bars: int
+    reliability: float
+    registry_version: str
+    model_version: str
+
+
+@dataclass(slots=True, frozen=True)
+class ValidatedSignalBatch:
+    events: tuple[ValidatedSignalEvent, ...]
+    start_idx: int
+    end_idx: int
+    symbols: tuple[str, ...]
+    registry_version: str
+    model_version: str
+
+
+@dataclass(slots=True, frozen=True)
+class Layer1FoldReadiness:
+    fold_id: int
+    registry_source_end_idx: int
+    outer_oos_start_idx: int
+    outer_oos_end_idx: int
+    ready_symbols: tuple[str, ...]
+    valid_opportunity_timestamp_count: int
+    opportunity_ic: float
+    opportunity_ic_series: tuple[float, ...]
+    probe_gross_edge_bps: float
+    probe_gross_edge_series_bps: tuple[float, ...]
+    passed: bool
+    blockers: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class Layer1GateCheck:
+    key: str
+    value: float
+    threshold: float
+    comparator: GateComparator
+    passed: bool
+    blocker: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class Layer1GateReport:
+    checks: tuple[Layer1GateCheck, ...]
+    passed: bool
+    blockers: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class Layer1InferenceArtifact:
+    feature_schema: CandidateFeatureSchema
+    model: RegimeConditionalEnsemble
+    deployment_registry: QualifiedSignalRegistry
+    baseline_by_key: dict[MatchedBaselineKey, float]
+    l1_fit_end_idx: int
+    model_version: str
+    config_hash: str

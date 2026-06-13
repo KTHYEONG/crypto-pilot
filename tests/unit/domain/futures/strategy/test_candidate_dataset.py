@@ -273,6 +273,104 @@ def test_build_candidate_dataset_builds_risk_unit_return_targets() -> None:
     assert ds.y_mfe_bps.tolist() == [12.0]
 
 
+def test_build_candidate_dataset_prefers_gross_targets_over_legacy_net_targets() -> None:
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [26],
+            "exit_idx": [27],
+            "raw_score": [0.5],
+            "score_z": [1.2],
+            "turnover_proxy": [0.1],
+            "triple_barrier_label": [1],
+            "profitable_after_hurdle_label": [1],
+            "gross_event_bps": [25.0],
+            "gross_return_r": [1.0],
+            "net_event_bps": [5.0],
+            "edge_after_hurdle_bps": [5.0],
+            "mae_bps": [-6.0],
+            "mfe_bps": [18.0],
+            "ex_ante_cost_bps": [4.0],
+            "risk_unit_bps": [25.0],
+        }
+    )
+
+    ds = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(),
+        schema=fit_candidate_feature_schema(
+            labeled_events=labeled,
+            cfg=CandidateStrategyConfig(),
+            split_start=20,
+            split_end=40,
+        ),
+        split_start=20,
+        split_end=40,
+    )
+
+    assert ds.y_return_bps is not None
+    assert ds.y_return_r is not None
+    assert ds.y_return_bps.tolist() == [25.0]
+    assert ds.y_return_r.tolist() == [1.0]
+    assert ds.y_gross_return_bps is not None
+    assert ds.y_gross_return_r is not None
+    assert ds.y_gross_return_bps.tolist() == [25.0]
+    assert ds.y_gross_return_r.tolist() == [1.0]
+
+
+def test_build_candidate_dataset_supports_label_free_inference_without_exit_idx() -> None:
+    aligned = _make_aligned()
+    unlabeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25], aligned.datetimes[30]],
+            "symbol": ["BTCUSDT", "ETHUSDT"],
+            "side": [1, -1],
+            "entry_idx": [26, 31],
+            "raw_score": [0.5, -0.4],
+            "score_z": [1.2, -0.8],
+            "turnover_proxy": [0.1, 0.2],
+            "expected_holding_bars": [3, 5],
+            "min_holding_bars": [1, 1],
+            "stop_atr_mult": [2.0, 2.0],
+            "take_profit_atr_mult": [4.0, 4.0],
+            "family": ["trend_ma", "trend_ma"],
+            "variant": ["fast", "slow"],
+            "archetype": ["trend_continuation", "trend_continuation"],
+            "ex_ante_cost_bps": [4.0, 4.0],
+        }
+    )
+    cfg = CandidateStrategyConfig()
+    schema = fit_candidate_feature_schema(
+        labeled_events=unlabeled,
+        cfg=cfg,
+        split_start=20,
+        split_end=40,
+    )
+
+    ds = build_candidate_dataset(
+        labeled_events=unlabeled,
+        aligned=aligned,
+        cfg=cfg,
+        schema=schema,
+        split_start=20,
+        split_end=40,
+        require_label_within_split=False,
+    )
+
+    assert ds.X.shape[0] == 2
+    assert ds.y_gate.tolist() == [0, 0]
+    assert ds.y_return_bps is not None
+    assert ds.y_return_bps.tolist() == [0.0, 0.0]
+    assert ds.y_gross_return_bps is not None
+    assert ds.y_gross_return_bps.tolist() == [0.0, 0.0]
+    assert ds.groups.tolist() == [25, 30]
+    assert ds.effective_sample_size > 0.0
+
+
 def test_build_candidate_dataset_imputes_missing_values_without_dropping_rows() -> None:
     aligned = _make_aligned()
     labeled = pd.DataFrame(

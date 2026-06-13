@@ -217,10 +217,13 @@ def _fit_and_predict_single_fold(
             edge_source=EdgeSource.DISABLED,
             expected_return_r=np.zeros(n_oos, dtype=np.float64),
             expected_net_bps=np.zeros(n_oos, dtype=np.float64),
+            expected_gross_bps=np.zeros(n_oos, dtype=np.float64),
             q10_return_r=np.zeros(n_oos, dtype=np.float64),
             q10_net_bps=np.zeros(n_oos, dtype=np.float64),
+            q10_gross_bps=np.zeros(n_oos, dtype=np.float64),
             q90_return_r=np.zeros(n_oos, dtype=np.float64),
             q90_net_bps=np.zeros(n_oos, dtype=np.float64),
+            q90_gross_bps=np.zeros(n_oos, dtype=np.float64),
             selection_score=np.zeros(n_oos, dtype=np.float64),
             kelly_fraction=np.zeros(n_oos, dtype=np.float64),
             validation_diagnostics={}
