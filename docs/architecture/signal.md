@@ -148,11 +148,11 @@ graph TD
 
 # 7. Layer1 Nested SWF & Readiness Gate
 
-**Nested Anchored Walk-Forward (Nested SWF)**
-- **Structure**: Splitting history into $K$ nested anchored folds. 
-  - `outer_train_k` internally creates `inner_folds` to perform inner fit $\rightarrow$ inner OOS evaluation $\rightarrow$ compute `fold_registry_k` evidence.
-  - `outer_oos_k` uses `fold_registry_k` as a frozen selection registry to generate label-free predictions, joining realized outcomes only at the end for fold evaluation.
-- **Invariants**: Purge and embargo boundary isolation: $\max(\text{inner\_oos\_exit\_idx}) < \text{outer\_oos\_start\_k}$.
+**Prequential Evidence Snapshot SWF**
+- **Structure**: Split history into anchored evidence folds once, then build `Layer1EvidenceSnapshot(as_of_idx, evidence, registry, matured_event_count)` from causal evidence snapshots keyed by `as_of_idx`.
+  - `build_l1_prequential_evidence_snapshots(...)` runs evidence folds once and reuses the resulting registry for each outer OOS boundary.
+  - `run_l1_nested_swf(...)` no longer retrains a fresh inner fold tree per outer fold; it selects the latest snapshot at `outer_oos_start_k` and falls back to an empty registry when no snapshot is available.
+- **Invariants**: Causal ordering is preserved by snapshot cutoff; `matured_event_count` only counts events with `exit_idx < as_of_idx` and optional `l1_evidence_lookback_bars`.
 
 **Target Contract Reform**
 - **Strict Gross Alignment**: Regression targets are strictly mapped to `gross_event_bps` or `gross_return_r`. 
@@ -166,18 +166,20 @@ graph TD
 - **D2 Override Enforce**: Layer 1의 훈련/검증 단계(`run_l1_nested_swf` 및 `fit_layer1_inference_artifact`)에서 `ensemble_conditioning="archetype_only"` 및 `ensemble_score_calibration_enabled=False` 설정을 명시적으로 주입하여, 게이트 연산 및 모델 피팅 시 regime $\mu$ 조건화와 선형 점수 보정을 완전히 배제하고 pooled(Arch-Only) 모드로 통일함.
 - Regime demoted to **risk overlay** (sizing/exposure scaling in Layer2+), not a qualification dimension. Non-stationarity defense retained via `positive_fold_ratio` gate.
 
+**Quality Weight & Evidence Filter**
+- `l1_quality_weight_enabled=True` (default): `quality_weight` participates in evidence scoring and rank selection; compatibility `qualified` remains `hard_eligible and quality_weight > 0.0`.
+- `l1_evidence_lookback_bars`: optional retrospective cap on matured evidence used for snapshot construction.
+- `l1_min_prediction_unique_values`: minimum distinct prediction values required before IC-style evidence is computed.
+
 **Opportunity IC Mode**
 - `l1_opp_ic_mode="time_series"` (default): per-symbol Spearman IC over event timeline (≥3 events per symbol). Eliminates cross-section synchrony requirement; enables IC measurement with few ready symbols.
 - `l1_opp_ic_mode="cross_section"`: legacy per-bar cross-section IC (≥`l1_min_cross_section` symbols per bar required).
 
 **Hard Gate Evaluation & Adaptive Thresholds**
-- **Requirements**: Gate checks include `fold_cov`, `sym_count`, `sym_ratio`, `fold_ratio`, `opp_ic`, `opp_tstat`, `probe_bps`, `probe_tstat`.
+- **Requirements**: Gate checks include `fold_cov`, `match_ratio`, `sym_count`, `fold_ratio`, `probe_lcb_bps`.
 - **Adaptive Student's t-Threshold**: 소표본 크기에 연동되는 단측 $t$-임계치 적용:
   $$t_{\text{crit}} = F^{-1}_{t(df)}\left(1 - \alpha\right)$$
   ($df = N_{\text{eff}} - 1.0$, $df < 2.0$ 인 소표본의 경우 $t_{\text{crit}} = \infty$로 자동 필터링)
-- **MDES (Minimum Detectable Effect Size) Filter**: 유의 검정력을 충족하는 최소 우위 bps 하한선 규정:
-  $$\text{MDES\_bps} = \frac{t_{\text{crit}} + t_{\text{power}}}{\sqrt{N_{\text{eff}}}} \times S_{\text{incremental}}$$
-  조건: $\text{mean\_incremental\_bps} > \text{MDES\_bps} \times \text{l1\_pair\_mdes\_multiplier}$
+- **Probe Lower Bound**: Bootstrap lower confidence bound on mean probe edge. `probe_lcb_bps > 0` is the production readiness criterion.
 - **Failure Handling**: Any single gate check failure triggers `gate_passed = False`, resulting in no final inference artifact.
-- **Config defaults (post-refactor)**: `l1_pair_min_folds=2`, `l1_min_cross_section=2`, `l1_opp_ic_mode="time_series"`, `l1_qualify_by_regime=False`, `l1_activation_match_regime=False`, `l1_pair_min_effective_obs=5.0`.
-
+- **Config defaults (post-refactor)**: `l1_pair_min_folds=2`, `l1_min_cross_section=2`, `l1_opp_ic_mode="time_series"`, `l1_qualify_by_regime=False`, `l1_activation_match_regime=False`, `l1_pair_min_effective_obs=5.0`, `l1_min_realized_match_ratio=1.0`, `l1_min_matched_events_per_fold=20`, `l1_min_prediction_unique_values=3`, `l1_quality_weight_enabled=True`.
