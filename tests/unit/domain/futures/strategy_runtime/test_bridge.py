@@ -295,10 +295,9 @@ def test_bridge_emits_profile_log_when_raw_events_empty(
     )
 
     assert result.alpha_panel is not None
-    assert "[BRIDGE-PROF]" in caplog.text
-    assert "post_wf=" in caplog.text
-    assert "accounted=" in caplog.text
-    assert "unaccounted=" in caplog.text
+    assert "[BRIDGE PERFORMANCE]" in caplog.text
+    assert "Accounted:" in caplog.text
+    assert "Alpha Panel" in caplog.text
 
     strategy_cfg = StrategyConfig()
     object.__setattr__(
