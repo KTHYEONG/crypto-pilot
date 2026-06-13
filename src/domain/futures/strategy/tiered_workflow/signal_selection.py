@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import pandas as pd
+import scipy.stats as stats
 from numpy.typing import NDArray
 from scipy.stats import spearmanr
 
@@ -363,16 +364,35 @@ def compute_symbol_strategy_evidence(
         )
         t_stat = _series_tstat(incremental)
         p_value = _one_sided_p_value(t_stat)
+
+        # 1. 자유도 기반 적응적 t-critical value 계산
+        df = effective_n - 1.0
+        if df >= 2.0:
+            t_crit = float(stats.t.ppf(1.0 - getattr(cfg, "l1_pair_alpha", 0.05), df))
+            t_power = float(stats.t.ppf(getattr(cfg, "l1_pair_power", 0.80), df))
+        else:
+            t_crit = np.inf
+            t_power = 0.0
+
+        # 2. MDES (Minimum Detectable Effect Size) 기반 유의 효과 크기(bps) 역산
+        std_incremental = float(np.std(incremental, ddof=1)) if len(incremental) >= 2 else 0.0
+        if effective_n > 0.0 and np.isfinite(t_crit):
+            mdes_standardized = (t_crit + t_power) / np.sqrt(effective_n)
+            mdes_bps = mdes_standardized * std_incremental
+        else:
+            mdes_bps = 0.0
+
         reliability = float(
             np.clip(
                 max(mean_incremental, 0.0)
                 * max(t_stat, 0.0)
-                / max(float(getattr(cfg, "l1_pair_min_incremental_tstat", 1.0)), 1.0)
+                / max(t_crit if np.isfinite(t_crit) else 1.96, 1.0)
                 / max(abs(float(getattr(cfg, "l1_pair_min_mean_gross_bps", 1.0))) + 1.0, 1.0),
                 0.0,
                 1.0,
             )
         )
+
         rejection_reasons: list[str] = []
         if effective_n < float(cfg.l1_pair_min_effective_obs):
             rejection_reasons.append("insufficient_effective_obs")
@@ -382,8 +402,16 @@ def compute_symbol_strategy_evidence(
             rejection_reasons.append("negative_gross_edge")
         if mean_incremental <= float(cfg.l1_pair_min_incremental_bps):
             rejection_reasons.append("no_incremental_edge")
-        if t_stat < float(cfg.l1_pair_min_incremental_tstat):
+
+        # 적응형 t-검정 적용
+        if t_stat < t_crit:
             rejection_reasons.append("weak_tstat")
+
+        # MDES 필터링 적용 (평균 증분 우위가 최소 탐지 효과 크기를 넘는지 검증)
+        mdes_mult = float(getattr(cfg, "l1_pair_mdes_multiplier", 0.5))
+        if mean_incremental <= (mdes_bps * mdes_mult):
+            rejection_reasons.append("insufficient_effect_size")
+
         if positive_fold_ratio < float(cfg.l1_pair_min_positive_fold_ratio):
             rejection_reasons.append("unstable_folds")
         evidence_list.append(
@@ -541,7 +569,7 @@ def _candidate_output_to_signal_batch(
             if (key.symbol, key.strategy_id) not in source_keys_relaxed:
                 continue
         pred = float(gross[idx]) if idx < gross.size else 0.0
-        if pred <= activation_floor_bps:
+        if pred < activation_floor_bps:
             continue
         entry_idx = int(pd.to_numeric(row.get("entry_idx", 0), errors="coerce"))
         decision_idx = entry_idx - 1
