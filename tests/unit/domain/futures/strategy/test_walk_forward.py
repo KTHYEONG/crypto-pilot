@@ -5,7 +5,12 @@ import inspect
 import pytest
 
 from src.domain.futures.strategy.config import CandidateStrategyConfig, resolve_purge_and_embargo_bars
-from src.domain.futures.strategy.walk_forward import WFFold, build_l1_swf_folds, build_walk_forward_folds
+from src.domain.futures.strategy.walk_forward import (
+    WFFold,
+    build_l1_nested_swf_folds,
+    build_l1_swf_folds,
+    build_walk_forward_folds,
+)
 
 
 def _cfg(**kwargs: object) -> CandidateStrategyConfig:
@@ -195,3 +200,33 @@ def test_build_l1_swf_folds_equal_partition() -> None:
     assert len(folds) == 5
     for fold in folds:
         assert (fold.oos_end - fold.oos_start) == 1000
+
+
+def test_build_l1_nested_swf_folds_are_causal_and_expanding() -> None:
+    cfg = _cfg(wf_n_folds=4, ml_calibration_fraction=0.2, purge_bars=12, embargo_bars=6)
+    folds = build_l1_nested_swf_folds(
+        n_bars=400,
+        l1_start_idx=40,
+        l1_end_idx=280,
+        max_label_horizon_bars=10,
+        cfg=cfg,
+    )
+
+    assert len(folds) == 4
+    for fold in folds:
+        assert fold.fit_start == 40
+        assert fold.fit_end <= fold.cal_start
+        assert fold.cal_end <= fold.oos_start - 10
+        assert fold.oos_start < fold.oos_end
+
+
+def test_build_l1_nested_swf_folds_invalid_range_raises() -> None:
+    cfg = _cfg(wf_n_folds=2)
+    with pytest.raises(ValueError, match="invalid L1 nested bar range"):
+        build_l1_nested_swf_folds(
+            n_bars=120,
+            l1_start_idx=90,
+            l1_end_idx=80,
+            max_label_horizon_bars=5,
+            cfg=cfg,
+        )
