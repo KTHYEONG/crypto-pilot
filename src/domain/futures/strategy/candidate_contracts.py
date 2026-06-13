@@ -157,6 +157,7 @@ class CandidateModelOutput:
     selection_score: NDArray[np.float64]
     kelly_fraction: NDArray[np.float64]
     prediction_scale_bps: NDArray[np.float64]
+    _has_explicit_expected_gross_bps: bool = field(init=False, repr=False, default=False)
     validation_diagnostics: dict[str, object] = field(
         default_factory=dict
     )
@@ -199,6 +200,11 @@ class CandidateModelOutput:
         if gross_bps is None:
             gross_bps = np.zeros(size, dtype=np.float64)
         object.__setattr__(self, "expected_gross_bps", gross_bps)
+        object.__setattr__(
+            self,
+            "_has_explicit_expected_gross_bps",
+            bool(expected_gross_bps is not None or "mu_gross_bps" in kwargs),
+        )
 
         ret_r = expected_return_r if expected_return_r is not None else net_bps / 25.0
         object.__setattr__(self, "expected_return_r", ret_r)
@@ -311,21 +317,96 @@ class MatchedBaselineKey:
     holding_bucket: int
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True, frozen=True, init=False)
 class SymbolStrategyEvidence:
     key: SignalSourceKey
     mean_gross_bps: float
     mean_incremental_bps: float
-    bootstrap_tstat_incremental: float
+    block_tstat_incremental: float
+    probability_positive: float
     p_value: float
     q_value: float
     positive_fold_ratio: float
     n_obs: int
     effective_n: float
     n_folds: int
-    reliability: float
-    qualified: bool
-    rejection_reasons: tuple[str, ...]
+    quality_weight: float
+    hard_eligible: bool
+    structural_reasons: tuple[str, ...]
+    diagnostic_flags: tuple[str, ...]
+
+    def __init__(
+        self,
+        *,
+        key: SignalSourceKey,
+        mean_gross_bps: float,
+        mean_incremental_bps: float,
+        block_tstat_incremental: float | None = None,
+        probability_positive: float = 0.0,
+        p_value: float,
+        q_value: float,
+        positive_fold_ratio: float,
+        n_obs: int,
+        effective_n: float,
+        n_folds: int,
+        quality_weight: float | None = None,
+        hard_eligible: bool | None = None,
+        structural_reasons: tuple[str, ...] = (),
+        diagnostic_flags: tuple[str, ...] = (),
+        bootstrap_tstat_incremental: float | None = None,
+        reliability: float | None = None,
+        qualified: bool | None = None,
+        rejection_reasons: tuple[str, ...] | None = None,
+    ) -> None:
+        compat_tstat = (
+            block_tstat_incremental
+            if block_tstat_incremental is not None
+            else float(bootstrap_tstat_incremental or 0.0)
+        )
+        compat_weight = (
+            quality_weight if quality_weight is not None else float(reliability or 0.0)
+        )
+        compat_hard_eligible = (
+            hard_eligible if hard_eligible is not None else bool(qualified)
+        )
+        compat_structural = (
+            structural_reasons if structural_reasons else tuple(rejection_reasons or ())
+        )
+        object.__setattr__(self, "key", key)
+        object.__setattr__(self, "mean_gross_bps", mean_gross_bps)
+        object.__setattr__(self, "mean_incremental_bps", mean_incremental_bps)
+        object.__setattr__(self, "block_tstat_incremental", float(compat_tstat))
+        object.__setattr__(
+            self,
+            "probability_positive",
+            float(max(0.0, min(1.0, probability_positive))),
+        )
+        object.__setattr__(self, "p_value", float(p_value))
+        object.__setattr__(self, "q_value", float(q_value))
+        object.__setattr__(self, "positive_fold_ratio", float(positive_fold_ratio))
+        object.__setattr__(self, "n_obs", int(n_obs))
+        object.__setattr__(self, "effective_n", float(effective_n))
+        object.__setattr__(self, "n_folds", int(n_folds))
+        object.__setattr__(self, "quality_weight", float(compat_weight))
+        object.__setattr__(self, "hard_eligible", bool(compat_hard_eligible))
+        object.__setattr__(self, "structural_reasons", tuple(compat_structural))
+        object.__setattr__(self, "diagnostic_flags", tuple(diagnostic_flags))
+
+    @property
+    def bootstrap_tstat_incremental(self) -> float:
+        return self.block_tstat_incremental
+
+    @property
+    def reliability(self) -> float:
+        return self.quality_weight
+
+    @property
+    def qualified(self) -> bool:
+        return self.hard_eligible and self.quality_weight > 0.0
+
+    @property
+    def rejection_reasons(self) -> tuple[str, ...]:
+        return self.structural_reasons + self.diagnostic_flags
 
 
 @dataclass(slots=True, frozen=True)
@@ -337,6 +418,14 @@ class QualifiedSignalRegistry:
 
 
 @dataclass(slots=True, frozen=True)
+class Layer1EvidenceSnapshot:
+    as_of_idx: int
+    evidence: tuple[SymbolStrategyEvidence, ...]
+    registry: QualifiedSignalRegistry
+    matured_event_count: int
+
+
+@dataclass(slots=True, frozen=True, init=False)
 class ValidatedSignalEvent:
     decision_idx: int
     decision_time: np.datetime64
@@ -348,9 +437,49 @@ class ValidatedSignalEvent:
     q10_gross_bps: float
     q90_gross_bps: float
     expected_holding_bars: int
-    reliability: float
+    quality_weight: float
     registry_version: str
     model_version: str
+
+    def __init__(
+        self,
+        *,
+        decision_idx: int,
+        decision_time: np.datetime64,
+        symbol: str,
+        strategy_id: str,
+        activation_context: str,
+        side: Literal[-1, 1],
+        expected_gross_bps: float,
+        q10_gross_bps: float,
+        q90_gross_bps: float,
+        expected_holding_bars: int,
+        quality_weight: float | None = None,
+        reliability: float | None = None,
+        registry_version: str,
+        model_version: str,
+    ) -> None:
+        object.__setattr__(self, "decision_idx", int(decision_idx))
+        object.__setattr__(self, "decision_time", decision_time)
+        object.__setattr__(self, "symbol", symbol)
+        object.__setattr__(self, "strategy_id", strategy_id)
+        object.__setattr__(self, "activation_context", activation_context)
+        object.__setattr__(self, "side", side)
+        object.__setattr__(self, "expected_gross_bps", float(expected_gross_bps))
+        object.__setattr__(self, "q10_gross_bps", float(q10_gross_bps))
+        object.__setattr__(self, "q90_gross_bps", float(q90_gross_bps))
+        object.__setattr__(self, "expected_holding_bars", int(expected_holding_bars))
+        object.__setattr__(
+            self,
+            "quality_weight",
+            float(quality_weight if quality_weight is not None else (reliability or 0.0)),
+        )
+        object.__setattr__(self, "registry_version", registry_version)
+        object.__setattr__(self, "model_version", model_version)
+
+    @property
+    def reliability(self) -> float:
+        return self.quality_weight
 
 
 @dataclass(slots=True, frozen=True)
@@ -363,20 +492,111 @@ class ValidatedSignalBatch:
     model_version: str
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True, frozen=True, init=False)
 class Layer1FoldReadiness:
     fold_id: int
     registry_source_end_idx: int
     outer_oos_start_idx: int
     outer_oos_end_idx: int
     ready_symbols: tuple[str, ...]
-    valid_opportunity_timestamp_count: int
-    opportunity_ic: float
-    opportunity_ic_series: tuple[float, ...]
+    matched_event_count: int
+    unmatched_event_count: int
+    realized_match_ratio: float
+    unique_decision_count: int
+    prediction_unique_count: int
+    opportunity_ic: float | None
+    opportunity_ic_tstat: float
     probe_bps: float
-    probe_gross_edge_series_bps: tuple[float, ...]
+    probe_lcb_bps: float
+    probe_series_bps: tuple[float, ...]
+    effective_symbol_count: float
     passed: bool
     blockers: tuple[str, ...]
+    _compat_ic_series: tuple[float, ...]
+
+    def __init__(
+        self,
+        *,
+        fold_id: int,
+        registry_source_end_idx: int,
+        outer_oos_start_idx: int,
+        outer_oos_end_idx: int,
+        ready_symbols: tuple[str, ...],
+        matched_event_count: int = 0,
+        unmatched_event_count: int = 0,
+        realized_match_ratio: float = 0.0,
+        unique_decision_count: int = 0,
+        prediction_unique_count: int = 0,
+        opportunity_ic: float | None = None,
+        opportunity_ic_tstat: float = 0.0,
+        probe_bps: float = 0.0,
+        probe_lcb_bps: float = 0.0,
+        probe_series_bps: tuple[float, ...] = (),
+        effective_symbol_count: float = 0.0,
+        passed: bool = False,
+        blockers: tuple[str, ...] = (),
+        valid_opportunity_timestamp_count: int | None = None,
+        opportunity_ic_series: tuple[float, ...] | None = None,
+        probe_gross_edge_series_bps: tuple[float, ...] | None = None,
+    ) -> None:
+        compat_ic_series = tuple(opportunity_ic_series or ())
+        compat_probe_series = tuple(probe_series_bps or probe_gross_edge_series_bps or ())
+        legacy_compat = (
+            valid_opportunity_timestamp_count is not None
+            or opportunity_ic_series is not None
+            or probe_gross_edge_series_bps is not None
+        )
+        compat_match_count = (
+            matched_event_count
+            if matched_event_count
+            else (valid_opportunity_timestamp_count if valid_opportunity_timestamp_count is not None else 0)
+        )
+        compat_unique_count = unique_decision_count if unique_decision_count else compat_match_count
+        compat_pred_count = prediction_unique_count if prediction_unique_count else compat_match_count
+        compat_ratio = float(realized_match_ratio)
+        if legacy_compat and compat_ratio <= 0.0 and compat_match_count > 0:
+            compat_ratio = 1.0
+        compat_effective_symbol_count = (
+            float(effective_symbol_count) if effective_symbol_count > 0.0 else float(len(ready_symbols))
+        )
+        compat_probe_lcb = float(probe_lcb_bps)
+        if legacy_compat and compat_probe_lcb == 0.0:
+            compat_probe_lcb = float(
+                probe_bps
+                if probe_bps != 0.0
+                else float(np.mean(np.asarray(compat_probe_series, dtype=np.float64)))
+            )
+        object.__setattr__(self, "fold_id", int(fold_id))
+        object.__setattr__(self, "registry_source_end_idx", int(registry_source_end_idx))
+        object.__setattr__(self, "outer_oos_start_idx", int(outer_oos_start_idx))
+        object.__setattr__(self, "outer_oos_end_idx", int(outer_oos_end_idx))
+        object.__setattr__(self, "ready_symbols", tuple(ready_symbols))
+        object.__setattr__(self, "matched_event_count", int(compat_match_count))
+        object.__setattr__(self, "unmatched_event_count", int(unmatched_event_count))
+        object.__setattr__(self, "realized_match_ratio", float(compat_ratio))
+        object.__setattr__(self, "unique_decision_count", int(compat_unique_count))
+        object.__setattr__(self, "prediction_unique_count", int(compat_pred_count))
+        object.__setattr__(self, "opportunity_ic", opportunity_ic)
+        object.__setattr__(self, "opportunity_ic_tstat", float(opportunity_ic_tstat))
+        object.__setattr__(self, "probe_bps", float(probe_bps))
+        object.__setattr__(self, "probe_lcb_bps", float(compat_probe_lcb))
+        object.__setattr__(self, "probe_series_bps", compat_probe_series)
+        object.__setattr__(self, "effective_symbol_count", float(compat_effective_symbol_count))
+        object.__setattr__(self, "passed", bool(passed))
+        object.__setattr__(self, "blockers", tuple(blockers))
+        object.__setattr__(self, "_compat_ic_series", compat_ic_series)
+
+    @property
+    def valid_opportunity_timestamp_count(self) -> int:
+        return self.matched_event_count
+
+    @property
+    def opportunity_ic_series(self) -> tuple[float, ...]:
+        return self._compat_ic_series
+
+    @property
+    def probe_gross_edge_series_bps(self) -> tuple[float, ...]:
+        return self.probe_series_bps
 
 
 @dataclass(slots=True, frozen=True)
