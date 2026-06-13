@@ -57,27 +57,27 @@ Ledger update complete.
   STATUS: ❌ BLOCKED (0/4 Folds Ready)
 
   [❌] Fold #0 (Fit:2602 → OOS:2848)
-       ReadySyms: 0 | Times: 0 | IC: 0.000 | Probe: 0.000
-       └─ Blockers: empty_opportunities
+       ReadySyms: 2 | Times: 0 | IC: 0.000 | Probe: 0.000
+       └─ Blockers: insufficient_opportunity_timestamps, non_positive_probe
 
   [❌] Fold #1 (Fit:3129 → OOS:3506)
-       ReadySyms: 0 | Times: 0 | IC: 0.000 | Probe: 0.000
-       └─ Blockers: empty_opportunities
+       ReadySyms: 2 | Times: 0 | IC: 0.000 | Probe: 0.000
+       └─ Blockers: insufficient_opportunity_timestamps, non_positive_probe
 
   [❌] Fold #2 (Fit:3655 → OOS:4164)
-       ReadySyms: 0 | Times: 0 | IC: 0.000 | Probe: 0.000
-       └─ Blockers: empty_opportunities
+       ReadySyms: 3 | Times: 0 | IC: 0.000 | Probe: 0.000
+       └─ Blockers: insufficient_opportunity_timestamps, non_positive_probe
 
   [❌] Fold #3 (Fit:4182 → OOS:4822)
-       ReadySyms: 2 | Times: 0 | IC: 0.000 | Probe: 0.000
+       ReadySyms: 11 | Times: 0 | IC: 0.000 | Probe: 0.000
        └─ Blockers: insufficient_opportunity_timestamps, non_positive_probe
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [LAYER 1 HARD GATE] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   STATUS: ❌ BLOCKED (1/8 Passed)
 
   [✅] Fold-Cov        :   1.000 (>=0.800 )
-  [❌] Sym-Count       :   0.000 (>=6.000 )  ← BLOCKER
-  [❌] Sym-Ratio       :   0.000 (>=0.300 )  ← BLOCKER
+  [❌] Sym-Count       :   3.000 (>=6.000 )  ← BLOCKER
+  [❌] Sym-Ratio       :   0.054 (>=0.300 )  ← BLOCKER
   [❌] Fold-Ratio      :   0.000 (>=0.600 )  ← BLOCKER
   [❌] Opp-IC          :   0.000 (>=0.020 )  ← BLOCKER
   [❌] Opp-Tstat       :   0.000 (>=1.960 )  ← BLOCKER
