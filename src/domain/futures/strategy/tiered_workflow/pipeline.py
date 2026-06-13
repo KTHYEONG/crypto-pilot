@@ -20,6 +20,7 @@ from src.domain.futures.portfolio.signal_composer import (
     rolling_per_bar_return_std,
 )
 from src.domain.futures.strategy.candidate_contracts import (
+    Layer1EvidenceSnapshot,
     Layer1FoldReadiness,
     Layer1InferenceArtifact,
     QualifiedSignalRegistry,
@@ -101,6 +102,75 @@ def _is_non_constant_finite_array(values: NDArray[np.float64]) -> bool:
     if finite.size < 1:
         return False
     return float(np.nanstd(finite)) > 0.0
+
+
+def build_l1_prequential_evidence_snapshots(
+    *,
+    labeled_events: pd.DataFrame,
+    aligned: AlignedMarketData,
+    evidence_folds: tuple[WFFold, ...],
+    snapshot_indices: tuple[int, ...],
+    cfg: CandidateStrategyConfig,
+    seed: int,
+) -> tuple[Layer1EvidenceSnapshot, ...]:
+    """Build causal evidence snapshots from a single pass over evidence folds."""
+    import src.domain.futures.strategy.tiered_workflow as _tw
+    from src.domain.futures.strategy.config import resolve_purge_and_embargo_bars
+
+    purge_bars, _embargo_bars = resolve_purge_and_embargo_bars(cfg)
+    evidence_frames: list[pd.DataFrame] = []
+    for evidence_idx, evidence_fold in enumerate(evidence_folds):
+        evidence_out = _tw._fit_and_predict_single_fold(
+            evidence_idx,
+            evidence_fold,
+            labeled_events,
+            aligned,
+            cfg,
+            purge_bars,
+        )
+        if _is_trained_fold_output(evidence_out):
+            evidence_frames.append(
+                _event_results_from_fold_output(
+                    fold_id=evidence_idx,
+                    fold_out=evidence_out,
+                )
+            )
+    all_evidence_events = (
+        pd.concat(evidence_frames, ignore_index=True)
+        if evidence_frames
+        else pd.DataFrame()
+    )
+    snapshots: list[Layer1EvidenceSnapshot] = []
+    for snapshot_offset, as_of_idx in enumerate(sorted(set(snapshot_indices))):
+        evidence = compute_symbol_strategy_evidence(
+            event_results=all_evidence_events,
+            cfg=cfg,
+            seed=seed + snapshot_offset,
+            registry_as_of_idx=as_of_idx,
+        )
+        registry = build_qualified_signal_registry(
+            evidence=evidence,
+            symbols=aligned.symbols,
+            min_signals_per_symbol=int(cfg.l1_min_signals_per_symbol),
+            registry_version=f"snapshot-{as_of_idx}",
+        )
+        matured_event_count = 0
+        if not all_evidence_events.empty and "exit_idx" in all_evidence_events.columns:
+            exit_idx = pd.to_numeric(all_evidence_events["exit_idx"], errors="coerce").fillna(np.inf)
+            mature_mask = exit_idx < float(as_of_idx)
+            lookback_bars = getattr(cfg, "l1_evidence_lookback_bars", None)
+            if lookback_bars is not None:
+                mature_mask &= exit_idx >= float(as_of_idx - int(lookback_bars))
+            matured_event_count = int(mature_mask.sum())
+        snapshots.append(
+            Layer1EvidenceSnapshot(
+                as_of_idx=int(as_of_idx),
+                evidence=evidence,
+                registry=registry,
+                matured_event_count=matured_event_count,
+            )
+        )
+    return tuple(snapshots)
 
 
 def run_l1_swf(
@@ -496,58 +566,48 @@ def run_l1_nested_swf(
     outer_reports: list[Layer1FoldReadiness] = []
     outer_event_frames: list[pd.DataFrame] = []
     trained_count = 0
+    import src.domain.futures.strategy.tiered_workflow as _tw
+
+    evidence_start = min((fold.fit_start for fold in outer_folds), default=0)
+    evidence_end = max((fold.oos_start for fold in outer_folds), default=0)
+    try:
+        evidence_folds = _tw.build_l1_swf_folds(
+            n_bars=evidence_end,
+            n_folds=max(1, min(int(getattr(cfg, "wf_n_folds", 1)), 3)),
+            l1_start_bars=evidence_start,
+            l1_end_bars=evidence_end,
+            purge_bars=purge_bars,
+            embargo_bars=embargo_bars,
+        )
+    except ValueError:
+        evidence_folds = ()
+    evidence_snapshots = build_l1_prequential_evidence_snapshots(
+        labeled_events=labeled_events,
+        aligned=aligned,
+        evidence_folds=evidence_folds,
+        snapshot_indices=tuple(fold.oos_start for fold in outer_folds),
+        cfg=l1_cfg,
+        seed=seed,
+    )
+    snapshots_by_idx = {snapshot.as_of_idx: snapshot for snapshot in evidence_snapshots}
+
     for outer_idx, outer_fold in enumerate(outer_folds):
-        inner_train_end = outer_fold.oos_start
-        try:
-            import src.domain.futures.strategy.tiered_workflow as _tw
-            inner_folds = _tw.build_l1_swf_folds(
-                n_bars=inner_train_end,
-                n_folds=max(1, min(int(getattr(cfg, "wf_n_folds", 1)), 3)),
-                l1_start_bars=outer_fold.fit_start,
-                l1_end_bars=inner_train_end,
-                purge_bars=purge_bars,
-                embargo_bars=embargo_bars,
+        snapshot = snapshots_by_idx.get(outer_fold.oos_start)
+        evidence = snapshot.evidence if snapshot is not None else ()
+        registry = (
+            snapshot.registry
+            if snapshot is not None
+            else QualifiedSignalRegistry(
+                by_symbol={},
+                ready_symbols=(),
+                trade_scope_count=len(aligned.symbols),
+                registry_version=f"snapshot-{outer_fold.oos_start}",
             )
-        except ValueError:
-            inner_folds = ()
-        inner_frames: list[pd.DataFrame] = []
-        for inner_idx, inner_fold in enumerate(inner_folds):
-            import src.domain.futures.strategy.tiered_workflow as _tw
-            inner_out = _tw._fit_and_predict_single_fold(
-                inner_idx,
-                inner_fold,
-                labeled_events,
-                aligned,
-                l1_cfg,
-                purge_bars,
-            )
-            if _is_trained_fold_output(inner_out):
-                inner_frames.append(
-                    _event_results_from_fold_output(
-                        fold_id=inner_idx,
-                        fold_out=inner_out,
-                    )
-                )
-        inner_event_results = (
-            pd.concat(inner_frames, ignore_index=True)
-            if inner_frames
-            else pd.DataFrame()
-        )
-        evidence = compute_symbol_strategy_evidence(
-            event_results=inner_event_results,
-            cfg=cfg,
-            seed=seed + outer_idx,
-        )
-        registry = build_qualified_signal_registry(
-            evidence=evidence,
-            symbols=aligned.symbols,
-            min_signals_per_symbol=int(cfg.l1_min_signals_per_symbol),
-            registry_version=f"outer-{outer_idx}",
         )
         if not registry.ready_symbols:
             logger.warning(
                 "[L1-NESTED] Outer fold %d: registry empty — "
-                "inner evidence produced %d pairs, 0 qualified. "
+                "prequential evidence produced %d pairs, 0 qualified. "
                 "Check l1_pair_* thresholds.",
                 outer_idx,
                 len(evidence),
@@ -585,6 +645,7 @@ def run_l1_nested_swf(
                 opportunities=opportunities,
                 realized_event_results=outer_events,
                 volatility_2d=volatility_2d,
+                aligned_symbols=aligned.symbols,
                 fold=outer_fold,
                 fold_id=outer_idx,
                 cfg=cfg,
@@ -605,6 +666,7 @@ def run_l1_nested_swf(
         event_results=deployment_event_results,
         cfg=cfg,
         seed=seed,
+        registry_as_of_idx=max((fold.oos_end for fold in outer_folds), default=0) + 1,
     )
     gate_report = evaluate_layer1_readiness(
         fold_reports=tuple(outer_reports),

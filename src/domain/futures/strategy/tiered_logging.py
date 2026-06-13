@@ -52,8 +52,7 @@ def format_system_context_dashboard(
         top = "┌" + "─" * width + "┐"
         bottom = "└" + "─" * width + "┘"
         lines = [top]
-        for line in content:
-            lines.append(f"│ {line:<{width-2}} │")
+        lines.extend(f"│ {line:<{width-2}} │" for line in content)
         lines.append(bottom)
         return "\n".join(lines)
 
@@ -252,15 +251,12 @@ def format_layer1_gate_table(report: Any) -> str:
     checks = tuple(getattr(report, "checks", ()) or ())
     passed = bool(getattr(report, "passed", False))
     
-    DISPLAY_GATE_MAP = {
+    display_gate_map = {
         "fold_cov": "Fold-Cov",
+        "match_ratio": "Match-Ratio",
         "sym_count": "Sym-Count",
-        "sym_ratio": "Sym-Ratio",
         "fold_ratio": "Fold-Ratio",
-        "opp_ic": "Opp-IC",
-        "opp_tstat": "Opp-Tstat",
-        "probe_bps": "Probe-bps",
-        "probe_tstat": "Probe-Tstat",
+        "probe_lcb_bps": "Probe-LCB",
     }
     
     n_checks = len(checks)
@@ -282,7 +278,7 @@ def format_layer1_gate_table(report: Any) -> str:
         icon = "✅" if check_passed else "❌"
         
         key_str = getattr(check, "key", "")
-        display_key = DISPLAY_GATE_MAP.get(key_str, key_str)
+        display_key = display_gate_map.get(key_str, key_str)
         
         value = float(getattr(check, "value", 0.0))
         comparator = ">=" if getattr(check, "comparator", "ge") == "ge" else ">"
@@ -323,7 +319,8 @@ def format_layer1_outer_fold_table(reports: tuple[Any, ...]) -> str:
         
         ready_count = len(tuple(getattr(r, "ready_symbols", ()) or ()))
         times = int(getattr(r, "valid_opportunity_timestamp_count", 0))
-        ic = float(getattr(r, "opportunity_ic", 0.0))
+        raw_ic = getattr(r, "opportunity_ic", None)
+        ic = float(raw_ic) if raw_ic is not None else 0.0
         probe = float(getattr(r, "probe_bps", 0.0))
         
         lines.append(f"  [{icon}] Fold #{fold_id} (Fit:{fit_end} → OOS:{oos_start})")
