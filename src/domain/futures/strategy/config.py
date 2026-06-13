@@ -421,6 +421,11 @@ class CandidateStrategyConfig:
     l1_probe_top_k: int = 3
     l1_min_probe_bps: float = 0.0
     l1_min_probe_tstat: float = 1.96
+    l1_min_realized_match_ratio: float = 1.0
+    l1_min_matched_events_per_fold: int = 20
+    l1_min_prediction_unique_values: int = 3
+    l1_quality_weight_enabled: bool = True
+    l1_evidence_lookback_bars: int | None = None
     fold_survival_metric: Literal[
         "predicted_mu_tstat", "realized_selected_edge", "realized_log_growth"
     ] = "realized_selected_edge"
@@ -706,6 +711,14 @@ class CandidateStrategyConfig:
             raise ValueError("l1_min_cross_section must be >= 1")
         if self.l1_probe_top_k < 1:
             raise ValueError("l1_probe_top_k must be >= 1")
+        if not (0.0 < self.l1_min_realized_match_ratio <= 1.0):
+            raise ValueError("l1_min_realized_match_ratio must be in (0.0, 1.0]")
+        if self.l1_min_matched_events_per_fold < 1:
+            raise ValueError("l1_min_matched_events_per_fold must be >= 1")
+        if self.l1_min_prediction_unique_values < 2:
+            raise ValueError("l1_min_prediction_unique_values must be >= 2")
+        if self.l1_evidence_lookback_bars is not None and self.l1_evidence_lookback_bars < 1:
+            raise ValueError("l1_evidence_lookback_bars must be >= 1 when set")
         if self.min_gate_brier_skill < -1.0:
             raise ValueError("min_gate_brier_skill must be >= -1.0")
         if self.min_gate_decile_lift < 0.0:

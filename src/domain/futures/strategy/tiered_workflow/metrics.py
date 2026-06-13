@@ -150,6 +150,54 @@ def _series_tstat(values: NDArray[np.float64]) -> float:
     return float(np.mean(finite) / (sigma / np.sqrt(finite.size)))
 
 
+def moving_block_bootstrap_mean(
+    values: NDArray[np.float64],
+    decision_idx: NDArray[np.int64],
+    *,
+    block_bars: int,
+    n_bootstrap: int,
+    seed: int,
+) -> NDArray[np.float64]:
+    """Bootstrap mean distribution over decision-index blocks."""
+    if values.size == 0 or decision_idx.size == 0 or values.size != decision_idx.size:
+        return np.zeros((0,), dtype=np.float64)
+    mask = np.isfinite(values) & np.isfinite(decision_idx)
+    if int(mask.sum()) < 2:
+        return np.zeros((0,), dtype=np.float64)
+    ordered_idx = np.argsort(decision_idx[mask], kind="stable")
+    x = values[mask][ordered_idx]
+    d = decision_idx[mask][ordered_idx]
+    unique_decisions, inverse = np.unique(d, return_inverse=True)
+    cluster_means = np.zeros(unique_decisions.shape[0], dtype=np.float64)
+    cluster_counts = np.zeros(unique_decisions.shape[0], dtype=np.float64)
+    np.add.at(cluster_means, inverse, x)
+    np.add.at(cluster_counts, inverse, 1.0)
+    cluster_means = np.divide(
+        cluster_means,
+        np.maximum(cluster_counts, 1.0),
+        out=np.zeros_like(cluster_means),
+        where=cluster_counts > 0.0,
+    )
+    n_clusters = cluster_means.size
+    if n_clusters < 2 or n_bootstrap < 1:
+        return np.zeros((0,), dtype=np.float64)
+    block = max(1, int(block_bars))
+    num_blocks = max(1, (n_clusters + block - 1) // block)
+    rng = np.random.default_rng(seed)
+    boot = np.zeros((n_bootstrap,), dtype=np.float64)
+    for boot_idx in range(n_bootstrap):
+        sample: list[float] = []
+        for _ in range(num_blocks):
+            start = int(rng.integers(0, n_clusters))
+            end = min(n_clusters, start + block)
+            sample.extend(cluster_means[start:end].tolist())
+            if len(sample) >= n_clusters:
+                break
+        if sample:
+            boot[boot_idx] = float(np.mean(np.asarray(sample[:n_clusters], dtype=np.float64)))
+    return boot
+
+
 def _one_sided_p_value(t_stat: float) -> float:
     if not np.isfinite(t_stat):
         return 1.0
