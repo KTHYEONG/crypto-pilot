@@ -553,6 +553,7 @@ def run_l1_nested_swf(
             symbols=aligned.symbols,
             model_version=f"outer-{outer_idx}",
             activation_floor_bps=float(cfg.l1_signal_activation_floor_bps),
+            cfg=cfg,
         )
         opportunities = select_outer_symbol_opportunities(
             predictions=prediction_batch,
