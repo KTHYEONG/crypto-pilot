@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from dataclasses import replace
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -54,6 +55,66 @@ def _holding_bucket(holding_bars: int) -> int:
     if holding_bars <= 24:
         return 24
     return int(max(holding_bars, 1))
+
+
+def _compute_incremental_bps(
+    frame: pd.DataFrame,
+    *,
+    mode: Literal["peer_exclusive", "absolute"],
+) -> pd.Series:
+    """Compute per-event incremental bps relative to peer strategies.
+
+    Args:
+        frame: Event DataFrame with columns gross_event_bps, symbol, side,
+            holding_bucket, strategy_id.
+        mode: ``peer_exclusive`` uses leave-self-out peer mean as baseline.
+            ``absolute`` sets baseline=0 (incremental == gross).
+
+    Returns:
+        pd.Series of incremental bps aligned with frame.index.
+
+    Note:
+        Time complexity: O(N) two-pass groupby.
+        Space: O(B*S) where B=buckets, S=strategies.
+        peer_count==0 (single strategy in bucket) falls back to absolute
+        (baseline=0) to avoid ``incremental ≡ 0`` degenerate case.
+    """
+    # gross: shape [N_events]
+    gross = frame["gross_event_bps"]
+    if mode == "absolute":
+        return gross.copy()
+
+    bucket_key = ["symbol", "side", "holding_bucket"]
+    strategy_key = [*bucket_key, "strategy_id"]
+
+    # Aggregate per (symbol, side, holding_bucket) bucket
+    bucket_stats = frame.groupby(bucket_key, sort=False)["gross_event_bps"].agg(
+        _bucket_sum="sum", _bucket_count="count"
+    )
+    # Aggregate per (symbol, side, holding_bucket, strategy_id)
+    strat_stats = frame.groupby(strategy_key, sort=False)["gross_event_bps"].agg(
+        _strat_sum="sum", _strat_count="count"
+    )
+
+    merged = frame[strategy_key].copy()
+    merged = merged.join(bucket_stats, on=bucket_key)
+    merged = merged.join(strat_stats, on=strategy_key)
+
+    peer_count = merged["_bucket_count"] - merged["_strat_count"]
+    peer_sum = merged["_bucket_sum"] - merged["_strat_sum"]
+
+    # peer_count == 0 → single strategy in bucket → absolute fallback (baseline=0)
+    safe_peer_count = peer_count.clip(lower=1)
+    peer_mean = np.where(
+        peer_count > 0,
+        peer_sum.to_numpy(dtype=np.float64) / safe_peer_count.to_numpy(dtype=np.float64),
+        0.0,
+    )
+
+    return pd.Series(
+        gross.to_numpy(dtype=np.float64) - peer_mean,
+        index=frame.index,
+    )
 
 
 def _expected_gross_bps(model_output: CandidateModelOutput) -> NDArray[np.float64]:
@@ -272,25 +333,8 @@ def compute_symbol_strategy_evidence(
         .astype(int)
     )
     frame["holding_bucket"] = frame["expected_holding_bars"].map(_holding_bucket)
-    if "baseline_gross_bps" not in frame.columns:
-        baseline_map = (
-            frame.groupby(["symbol", "side", "holding_bucket"], sort=False)["gross_event_bps"]
-            .mean()
-            .to_dict()
-        )
-        frame["baseline_gross_bps"] = [
-            baseline_map.get((str(symbol), int(side), int(bucket)), 0.0)
-            for symbol, side, bucket in zip(
-                frame["symbol"],
-                frame["side"],
-                frame["holding_bucket"],
-                strict=True,
-            )
-        ]
-    frame["incremental_bps"] = frame["gross_event_bps"] - pd.to_numeric(
-        frame["baseline_gross_bps"],
-        errors="coerce",
-    ).fillna(0.0)
+    baseline_mode: Literal["peer_exclusive", "absolute"] = getattr(cfg, "l1_baseline_mode", "peer_exclusive")
+    frame["incremental_bps"] = _compute_incremental_bps(frame, mode=baseline_mode)
     grouped = frame.groupby(["symbol", "strategy_id", "activation_context"], sort=True)
     evidence_list: list[SymbolStrategyEvidence] = []
     raw_p_values: list[float] = []
@@ -589,6 +633,7 @@ def evaluate_outer_signal_opportunities(
     realized_event_results: pd.DataFrame,
     volatility_2d: NDArray[np.float64],
     fold: WFFold,
+    fold_id: int,
     cfg: CandidateStrategyConfig,
     seed: int,
 ) -> Layer1FoldReadiness:
@@ -596,7 +641,7 @@ def evaluate_outer_signal_opportunities(
     opp_frame = _batch_to_frame(opportunities)
     if opp_frame.empty:
         return Layer1FoldReadiness(
-            fold_id=0,
+            fold_id=fold_id,
             registry_source_end_idx=fold.fit_end,
             outer_oos_start_idx=fold.oos_start,
             outer_oos_end_idx=fold.oos_end,
@@ -652,7 +697,7 @@ def evaluate_outer_signal_opportunities(
         ].copy()
     if merged.empty:
         return Layer1FoldReadiness(
-            fold_id=0,
+            fold_id=fold_id,
             registry_source_end_idx=fold.fit_end,
             outer_oos_start_idx=fold.oos_start,
             outer_oos_end_idx=fold.oos_end,
@@ -696,7 +741,11 @@ def evaluate_outer_signal_opportunities(
                 d_idx = int(getattr(row, "decision_idx", 0))
                 if symbol_idx is None or d_idx < 0 or d_idx >= volatility_2d.shape[0]:
                     continue
-                vol = float(volatility_2d[d_idx, symbol_idx])
+                vol = (
+                    float(volatility_2d[d_idx, symbol_idx])
+                    if volatility_2d.ndim == 2
+                    else float(volatility_2d[d_idx])
+                )
                 denom = max(vol, VOL_FLOOR)
                 risk_scores_ts.append((abs(float(row.expected_gross_bps)) / denom, row_i))
             if risk_scores_ts:
@@ -751,7 +800,7 @@ def evaluate_outer_signal_opportunities(
     if probe_gross_edge <= 0.0:
         blockers.append("non_positive_probe")
     return Layer1FoldReadiness(
-        fold_id=fold.oos_start,
+        fold_id=fold_id,
         registry_source_end_idx=fold.fit_end,
         outer_oos_start_idx=fold.oos_start,
         outer_oos_end_idx=fold.oos_end,
@@ -866,7 +915,9 @@ def fit_layer1_inference_artifact(
     if gross_targets is None:
         gross_targets = fit_set.y_return_bps
     train_events["gross_return_bps"] = np.asarray(gross_targets, dtype=np.float64)
-    model = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
+    # D2: Layer1은 regime μ 조건화 배제 — archetype_only 고정 (regime → Layer2 risk overlay 전용)
+    l1_cfg = replace(cfg, ensemble_conditioning="archetype_only", ensemble_score_calibration_enabled=False)
+    model = fit_regime_conditional_ensemble(train_events=train_events, cfg=l1_cfg)
     baseline_by_key: dict[MatchedBaselineKey, float] = {}
     baseline_frame = fit_set.event_index.copy()
     if "gross_event_bps" not in baseline_frame.columns and gross_targets is not None:

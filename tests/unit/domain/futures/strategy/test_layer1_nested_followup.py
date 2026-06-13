@@ -308,6 +308,7 @@ def test_evaluate_outer_time_series_ic_single_symbol(cfg_factory, sample_aligned
         realized_event_results=realized,
         volatility_2d=vol,
         fold=fold,
+        fold_id=0,
         cfg=cfg,
         seed=0,
     )
@@ -339,6 +340,7 @@ def test_evaluate_outer_empty_opportunities_blocker(cfg_factory, sample_aligned)
         realized_event_results=realized,
         volatility_2d=vol,
         fold=fold,
+        fold_id=0,
         cfg=cfg,
         seed=0,
     )

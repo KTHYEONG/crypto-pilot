@@ -33,7 +33,6 @@ from src.domain.futures.strategy.tiered_logging import (
     format_layer2_table,
     format_layer3_table,
     format_layer_header,
-    format_system_status,
 )
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     _run_awf_simulation,
@@ -473,7 +472,21 @@ def run_l1_nested_swf(
     seed: int,
 ) -> Layer1Result:
     """Run nested Layer1 validation using inner selection and outer evaluation."""
+    import dataclasses
+    from copy import copy
+
     from src.domain.futures.strategy.config import resolve_purge_and_embargo_bars
+
+    if dataclasses.is_dataclass(cfg):
+        l1_cfg = dataclasses.replace(
+            cfg,
+            ensemble_conditioning="archetype_only",
+            ensemble_score_calibration_enabled=False,
+        )
+    else:
+        l1_cfg = copy(cfg)
+        l1_cfg.ensemble_conditioning = "archetype_only"
+        l1_cfg.ensemble_score_calibration_enabled = False
 
     purge_bars, embargo_bars = resolve_purge_and_embargo_bars(cfg)
     volatility_2d = rolling_per_bar_return_std(
@@ -505,7 +518,7 @@ def run_l1_nested_swf(
                 inner_fold,
                 labeled_events,
                 aligned,
-                cfg,
+                l1_cfg,
                 purge_bars,
             )
             if _is_trained_fold_output(inner_out):
@@ -536,7 +549,7 @@ def run_l1_nested_swf(
             outer_fold,
             labeled_events,
             aligned,
-            cfg,
+            l1_cfg,
             purge_bars,
         )
         if _is_trained_fold_output(outer_out):
@@ -565,6 +578,7 @@ def run_l1_nested_swf(
                 realized_event_results=outer_events,
                 volatility_2d=volatility_2d,
                 fold=outer_fold,
+                fold_id=outer_idx,
                 cfg=cfg,
                 seed=seed + outer_idx,
             )
@@ -796,10 +810,10 @@ def run_tiered_pipeline(
     )
 
     if not l1.gate_passed:
-        logger.info(f"\n>> LAYER 1 RESULT: [BLOCKED] -> gate_passed=False")
+        logger.info("\n>> LAYER 1 RESULT: [BLOCKED] -> gate_passed=False")
         return (l1, None, None)
     
-    logger.info(f"\n>> LAYER 1 RESULT: [PASS] -> Proceeding to Layer 2.")
+    logger.info("\n>> LAYER 1 RESULT: [PASS] -> Proceeding to Layer 2.")
 
     # ─── Layer 2: AWF Portfolio Optimization ─────────────────────────────────
     logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
@@ -814,10 +828,10 @@ def run_tiered_pipeline(
     )
 
     if not l2.gate_passed:
-        logger.info(f"\n>> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False")
+        logger.info("\n>> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False")
         return (l1, l2, None)
     
-    logger.info(f"\n>> LAYER 2 RESULT: [PASS] -> Proceeding to Final Holdout.")
+    logger.info("\n>> LAYER 2 RESULT: [PASS] -> Proceeding to Final Holdout.")
 
     # ─── Layer 3: Final Holdout Backtest ─────────────────────────────────────
     logger.info(format_layer_header(3, "Final Holdout & Deployment Readiness"))

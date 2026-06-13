@@ -163,6 +163,7 @@ graph TD
 - `l1_qualify_by_regime=False` (default): evidence grouping key = `(symbol, strategy_id)` — all regime cells pooled to `"all"`. Restores statistical power (effective_n, fold count, t-stat, FDR) by eliminating sample fragmentation.
 - `l1_qualify_by_regime=True`: legacy behavior — key = `(symbol, strategy_id, activation_context)`.
 - `l1_activation_match_regime=False` (default): OOS activation filter relaxed to `(symbol, strategy_id)` match only; regime context is not required to match the fit registry entry.
+- **D2 Override Enforce**: Layer 1의 훈련/검증 단계(`run_l1_nested_swf` 및 `fit_layer1_inference_artifact`)에서 `ensemble_conditioning="archetype_only"` 및 `ensemble_score_calibration_enabled=False` 설정을 명시적으로 주입하여, 게이트 연산 및 모델 피팅 시 regime $\mu$ 조건화와 선형 점수 보정을 완전히 배제하고 pooled(Arch-Only) 모드로 통일함.
 - Regime demoted to **risk overlay** (sizing/exposure scaling in Layer2+), not a qualification dimension. Non-stationarity defense retained via `positive_fold_ratio` gate.
 
 **Opportunity IC Mode**
