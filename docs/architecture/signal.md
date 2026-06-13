@@ -32,7 +32,7 @@ Generates vectorized rule panels with archetype/regime contexts and filters them
 - Strict Causality: No forward-looking data $t+k$ is used in evaluating $S_{t}$ or $E_{t}$.
 
 **Archetype-Selective Regime Gating**
-- $A_{\text{reversion}}$ (Mean Reversion) entries are blocked ($E_{t} \rightarrow 0$) in regimes specified by `mean_reversion_blocked_regimes`.
+- $A_{\text{reversion}}$ (Mean Reversion) entries are blocked ($E_{t} \rightarrow 0$) in regimes specified by `mean_rev_blocked_regimes`.
 
 **L1 Breakeven Hard Gate (Hurdle)**
 - For a variant to be promoted, its OOS mean edge after hurdle must be positive and significant.
@@ -105,7 +105,7 @@ graph TD
 |------|----------|-------------|
 | **Input** | `AlignedMarketData` | Vectorized pricing and volume data matrices |
 | **Param** | `standalone_breakeven_hard_gate_enabled` | Enforces L1 profitability gate before allocation. Bounds: `[True, False]` |
-| **Param** | `mean_reversion_regime_entry_gating_enabled` | Blocks mean-reversion entries in volatile/crash regimes. Bounds: `[True, False]` |
+| **Param** | `mean_rev_gating_enabled` | Blocks mean-reversion entries in volatile/crash regimes. Bounds: `[True, False]` |
 | **Param** | `min_rule_ir_t` | Minimum t-statistic for standalone breakeven gate. Bounds: `[0.0, ∞)` |
 | **Param** | `regime_cell_admission_enabled` | Enables the regime-cell OR-path. Bounds: `[True, False]` |
 | **Param** | `min_regime_cell_oos_obs` | Min per-cell OOS obs for admission. Bounds: `[1, ∞)` |
@@ -160,6 +160,6 @@ graph TD
 - Label-free inference: In candidate dataset building, exit indices for OOS prediction are inferred via $\text{entry\_idx} + \max(\text{expected\_holding\_bars} - 1, 0)$ when labels/exits are unavailable.
 
 **Hard Gate Evaluation**
-- **Requirements**: Gate checks include `trained_outer_fold_coverage`, `stable_ready_symbol_count`, `stable_ready_symbol_ratio`, `ready_outer_fold_ratio`, `opportunity_ic_mean`, `opportunity_ic_tstat`, `probe_gross_edge_bps`, `probe_gross_edge_tstat`.
+- **Requirements**: Gate checks include `fold_cov`, `sym_count`, `sym_ratio`, `fold_ratio`, `opp_ic`, `opp_tstat`, `probe_bps`, `probe_tstat`.
 - **Failure Handling**: Any single gate check failure triggers `gate_passed = False`, resulting in no final inference artifact.
 
