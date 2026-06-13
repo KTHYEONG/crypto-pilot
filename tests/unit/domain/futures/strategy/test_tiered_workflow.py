@@ -1748,6 +1748,7 @@ def test_candidate_output_to_signal_batch_requires_explicit_gross_targets() -> N
 
 
 def test_compute_symbol_strategy_evidence_rejects_non_incremental_pair() -> None:
+    # peer-exclusive 모드: 전략 A(gross=0.05)가 B(gross=1.0) 대비 peer mean 이하 → qualified=False
     cfg = CandidateStrategyConfig(
         l1_pair_min_effective_obs=2.0,
         l1_pair_min_folds=2,
@@ -1757,17 +1758,17 @@ def test_compute_symbol_strategy_evidence_rejects_non_incremental_pair() -> None
         l1_pair_min_positive_fold_ratio=0.5,
         l1_pair_fdr_alpha=1.0,
     )
+    # A: gross=0.05 (낮음), B: gross=1.0 (높음), 같은 bucket
     events = pd.DataFrame(
         {
-            "symbol": ["BTCUSDT"] * 4,
-            "strategy_id": ["trend:fast"] * 4,
-            "activation_context": ["bull"] * 4,
-            "gross_event_bps": [1.0, 1.0, 1.0, 1.0],
-            "baseline_gross_bps": [1.0, 1.0, 1.0, 1.0],
-            "expected_holding_bars": [4, 4, 4, 4],
-            "side": [1, 1, 1, 1],
-            "uniqueness_weight": [1.0, 1.0, 1.0, 1.0],
-            "fold_id": [0, 0, 1, 1],
+            "symbol": ["BTCUSDT"] * 8,
+            "strategy_id": ["trend:fast"] * 4 + ["trend:slow"] * 4,
+            "activation_context": ["all"] * 8,
+            "gross_event_bps": [0.05] * 4 + [1.0] * 4,
+            "expected_holding_bars": [4] * 8,
+            "side": [1] * 8,
+            "uniqueness_weight": [1.0] * 8,
+            "fold_id": [0, 0, 1, 1] * 2,
         }
     )
 
@@ -1777,9 +1778,11 @@ def test_compute_symbol_strategy_evidence_rejects_non_incremental_pair() -> None
         seed=7,
     )
 
-    assert len(evidence) == 1
-    assert evidence[0].qualified is False
-    assert "no_incremental_edge" in evidence[0].rejection_reasons
+    # trend:fast의 peer mean = 1.0, incremental ≈ 0.05 - 1.0 = -0.95 < 0.1 → qualified=False
+    assert len(evidence) == 2
+    fast_ev = next(e for e in evidence if e.key.strategy_id == "trend:fast")
+    assert fast_ev.qualified is False
+    assert "no_incremental_edge" in fast_ev.rejection_reasons
 
 
 def test_build_qualified_signal_registry_requires_min_signals_per_symbol() -> None:
