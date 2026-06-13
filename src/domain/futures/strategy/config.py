@@ -390,6 +390,29 @@ class CandidateStrategyConfig:
     l1_min_valid_strategies: int = 5
     l1_min_panel_diversity: float = 0.30
     l1_min_cs_fold_pass_ratio: float = 0.60
+    l1_pair_min_effective_obs: float = 30.0
+    l1_pair_min_folds: int = 3
+    l1_pair_min_mean_gross_bps: float = 0.0
+    l1_pair_min_incremental_bps: float = 0.0
+    l1_pair_min_incremental_tstat: float = 1.96
+    l1_pair_min_positive_fold_ratio: float = 0.60
+    l1_pair_fdr_alpha: float = 0.10
+    l1_bootstrap_block_bars: int = 6
+    l1_bootstrap_samples: int = 200
+    l1_signal_activation_floor_bps: float = 0.0
+    l1_min_signals_per_symbol: int = 1
+    l1_min_trained_outer_fold_coverage: float = 0.80
+    l1_min_ready_outer_folds: int = 2
+    l1_min_ready_symbols: int = 6
+    l1_min_ready_symbol_ratio: float = 0.30
+    l1_min_ready_outer_fold_ratio: float = 0.60
+    l1_min_opportunity_timestamps: int = 3
+    l1_min_cross_section: int = 3
+    l1_min_opportunity_ic: float = 0.02
+    l1_min_opportunity_ic_tstat: float = 1.96
+    l1_probe_top_k: int = 3
+    l1_min_probe_gross_edge_bps: float = 0.0
+    l1_min_probe_gross_edge_tstat: float = 1.96
     fold_survival_metric: Literal[
         "predicted_mu_tstat", "realized_selected_edge", "realized_log_growth"
     ] = "realized_selected_edge"
@@ -641,6 +664,36 @@ class CandidateStrategyConfig:
             raise ValueError("l1_min_panel_diversity must be in [0.0, 1.0]")
         if not (0.0 <= self.l1_min_cs_fold_pass_ratio <= 1.0):
             raise ValueError("l1_min_cs_fold_pass_ratio must be in [0.0, 1.0]")
+        if self.l1_pair_min_effective_obs < 1.0:
+            raise ValueError("l1_pair_min_effective_obs must be >= 1.0")
+        if self.l1_pair_min_folds < 1:
+            raise ValueError("l1_pair_min_folds must be >= 1")
+        if not (0.0 <= self.l1_pair_min_positive_fold_ratio <= 1.0):
+            raise ValueError("l1_pair_min_positive_fold_ratio must be in [0.0, 1.0]")
+        if not (0.0 < self.l1_pair_fdr_alpha <= 1.0):
+            raise ValueError("l1_pair_fdr_alpha must be in (0.0, 1.0]")
+        if self.l1_bootstrap_block_bars < 1:
+            raise ValueError("l1_bootstrap_block_bars must be >= 1")
+        if self.l1_bootstrap_samples < 1:
+            raise ValueError("l1_bootstrap_samples must be >= 1")
+        if self.l1_min_signals_per_symbol < 1:
+            raise ValueError("l1_min_signals_per_symbol must be >= 1")
+        if not (0.0 <= self.l1_min_trained_outer_fold_coverage <= 1.0):
+            raise ValueError("l1_min_trained_outer_fold_coverage must be in [0.0, 1.0]")
+        if self.l1_min_ready_outer_folds < 1:
+            raise ValueError("l1_min_ready_outer_folds must be >= 1")
+        if self.l1_min_ready_symbols < 1:
+            raise ValueError("l1_min_ready_symbols must be >= 1")
+        if not (0.0 <= self.l1_min_ready_symbol_ratio <= 1.0):
+            raise ValueError("l1_min_ready_symbol_ratio must be in [0.0, 1.0]")
+        if not (0.0 <= self.l1_min_ready_outer_fold_ratio <= 1.0):
+            raise ValueError("l1_min_ready_outer_fold_ratio must be in [0.0, 1.0]")
+        if self.l1_min_opportunity_timestamps < 1:
+            raise ValueError("l1_min_opportunity_timestamps must be >= 1")
+        if self.l1_min_cross_section < 1:
+            raise ValueError("l1_min_cross_section must be >= 1")
+        if self.l1_probe_top_k < 1:
+            raise ValueError("l1_probe_top_k must be >= 1")
         if self.min_gate_brier_skill < -1.0:
             raise ValueError("min_gate_brier_skill must be >= -1.0")
         if self.min_gate_decile_lift < 0.0:

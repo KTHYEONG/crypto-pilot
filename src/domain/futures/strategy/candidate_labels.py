@@ -99,6 +99,7 @@ def _find_symbol_index(symbols: tuple[str, ...], symbol: str) -> int:
 def _invalid_label_payload() -> dict[str, float | int | str]:
     return {
         "gross_event_bps": float("nan"),
+        "gross_return_bps": float("nan"),
         "execution_cost_bps": float("nan"),
         "realized_funding_bps": float("nan"),
         "net_event_bps": float("nan"),
@@ -117,6 +118,7 @@ def _invalid_label_payload() -> dict[str, float | int | str]:
         "mae_r": float("nan"),
         "mfe_r": float("nan"),
         "risk_unit_bps": float("nan"),
+        "gross_return_r": float("nan"),
     }
 
 
@@ -334,6 +336,7 @@ def label_candidate_events(
     out["profitable_after_hurdle_label"] = np.asarray(profitable_label_list, dtype=np.int8)
     out["event_id"] = np.arange(len(out), dtype=np.int64)
     out["gross_event_bps"] = np.asarray(gross_list, dtype=np.float64)
+    out["gross_return_bps"] = np.asarray(gross_list, dtype=np.float64)
     out["gross_fwd_bps"] = np.asarray(gross_list, dtype=np.float64)
     out["gross_direction_label"] = (np.asarray(gross_list, dtype=np.float64) > 0.0).astype(np.int8)
     out["execution_cost_bps"] = np.asarray(cost_list, dtype=np.float64)
@@ -363,6 +366,8 @@ def label_candidate_events(
     mfe_bps_arr = pd.to_numeric(out["mfe_bps"], errors="coerce").to_numpy(dtype=np.float64)
     out["risk_unit_bps"] = risk_unit_bps
     safe_risk_unit = np.maximum(risk_unit_bps, 1.0)
+    gross_event_bps = pd.to_numeric(out["gross_event_bps"], errors="coerce").to_numpy(dtype=np.float64)
+    out["gross_return_r"] = gross_event_bps / safe_risk_unit
     out["net_return_r"] = net_event_bps / safe_risk_unit
     out["mae_r"] = mae_bps_arr / safe_risk_unit
     out["mfe_r"] = mfe_bps_arr / safe_risk_unit
