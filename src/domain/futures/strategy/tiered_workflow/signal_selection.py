@@ -68,23 +68,38 @@ def _q90_gross_bps(model_output: CandidateModelOutput) -> NDArray[np.float64]:
     return np.asarray(model_output.q90_gross_bps, dtype=np.float64)
 
 
-def _signal_source_key_from_row(row: pd.Series) -> SignalSourceKey:
+def _resolve_activation_context(
+    row: pd.Series,
+    *,
+    qualify_by_regime: bool,
+) -> str:
+    """Resolve activation_context for evidence grouping/activation key.
+
+    When qualify_by_regime=False, collapses all regime cells to "all",
+    restoring statistical power via sample pooling.
+    """
+    if not qualify_by_regime:
+        return "all"
+    return str(
+        row.get(
+            "activation_context",
+            row.get("signal_cell", row.get("entry_regime", "all")),
+        )
+    ) or "all"
+
+
+def _signal_source_key_from_row(row: pd.Series, *, qualify_by_regime: bool = True) -> SignalSourceKey:
     strategy_id = str(
         row.get(
             "strategy_id",
             f"{row.get('family', '')}:{row.get('variant', '')}",
         )
     )
-    activation_context = str(
-        row.get(
-            "activation_context",
-            row.get("signal_cell", row.get("entry_regime", "all")),
-        )
-    )
+    activation_context = _resolve_activation_context(row, qualify_by_regime=qualify_by_regime)
     return SignalSourceKey(
         symbol=str(row.get("symbol", "")),
         strategy_id=strategy_id,
-        activation_context=activation_context or "all",
+        activation_context=activation_context,
     )
 
 
@@ -228,6 +243,9 @@ def compute_symbol_strategy_evidence(
             "signal_cell",
             frame.get("entry_regime", pd.Series("all", index=frame.index)),
         ).astype(str)
+    qualify_by_regime: bool = bool(getattr(cfg, "l1_qualify_by_regime", True))
+    if not qualify_by_regime:
+        frame["activation_context"] = "all"
     if "uniqueness_weight" not in frame.columns:
         frame["uniqueness_weight"] = 1.0
     frame["gross_event_bps"] = pd.to_numeric(
@@ -437,6 +455,7 @@ def _candidate_output_to_signal_batch(
     symbols: tuple[str, ...],
     model_version: str,
     activation_floor_bps: float,
+    cfg: CandidateStrategyConfig | None = None,
 ) -> ValidatedSignalBatch:
     frame = model_output.events.reset_index(drop=True).copy()
     if frame.empty:
@@ -451,18 +470,32 @@ def _candidate_output_to_signal_batch(
     gross = _expected_gross_bps(model_output)
     q10 = _q10_gross_bps(model_output)
     q90 = _q90_gross_bps(model_output)
-    source_keys = {
-        (item.key.symbol, item.key.strategy_id, item.key.activation_context)
-        for items in registry.by_symbol.values()
-        for item in items
-    }
+    activation_match_regime: bool = bool(getattr(cfg, "l1_activation_match_regime", True)) if cfg is not None else True
+    source_keys: set[tuple[str, str, str]] = set()
+    source_keys_relaxed: set[tuple[str, str]] = set()
+    if activation_match_regime:
+        source_keys = {
+            (item.key.symbol, item.key.strategy_id, item.key.activation_context)
+            for items in registry.by_symbol.values()
+            for item in items
+        }
+    else:
+        source_keys_relaxed = {
+            (item.key.symbol, item.key.strategy_id)
+            for items in registry.by_symbol.values()
+            for item in items
+        }
     events: list[ValidatedSignalEvent] = []
     start_idx = int(frame["entry_idx"].min()) if "entry_idx" in frame.columns and not frame.empty else 0
     end_idx = int(frame["entry_idx"].max()) + 1 if "entry_idx" in frame.columns and not frame.empty else 0
     for idx, row in frame.iterrows():
-        key = _signal_source_key_from_row(row)
-        if (key.symbol, key.strategy_id, key.activation_context) not in source_keys:
-            continue
+        key = _signal_source_key_from_row(row, qualify_by_regime=activation_match_regime)
+        if activation_match_regime:
+            if (key.symbol, key.strategy_id, key.activation_context) not in source_keys:
+                continue
+        else:
+            if (key.symbol, key.strategy_id) not in source_keys_relaxed:
+                continue
         pred = float(gross[idx]) if idx < gross.size else 0.0
         if pred <= activation_floor_bps:
             continue
@@ -637,37 +670,73 @@ def evaluate_outer_signal_opportunities(
     }
     ic_series: list[float] = []
     probe_series: list[float] = []
-    for decision_idx, group in merged.groupby("decision_idx", sort=True):
-        group = group.drop_duplicates(subset=["symbol"], keep="first")
-        if group.shape[0] < int(cfg.l1_min_cross_section):
-            continue
-        pred = (
-            group["side"].to_numpy(dtype=np.float64, copy=False)
-            * group["expected_gross_bps"].to_numpy(dtype=np.float64, copy=False)
-            / np.maximum(group["expected_holding_bars"].to_numpy(dtype=np.float64, copy=False), 1.0)
-        )
-        real = (
-            group["side"].to_numpy(dtype=np.float64, copy=False)
-            * group["realized_side_adjusted_gross_bps"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
-            / np.maximum(group["expected_holding_bars"].to_numpy(dtype=np.float64, copy=False), 1.0)
-        )
-        ic_val, _ = spearmanr(pred, real)
-        if np.isfinite(ic_val):
-            ic_series.append(float(ic_val))
-        risk_scores: list[tuple[float, int]] = []
-        for row_idx, row in enumerate(group.itertuples(index=False)):
-            symbol_idx = symbol_to_idx.get(str(row.symbol))
-            if symbol_idx is None or decision_idx < 0 or decision_idx >= volatility_2d.shape[0]:
+    ic_mode: str = str(getattr(cfg, "l1_opp_ic_mode", "cross_section"))
+
+    if ic_mode == "time_series":
+        for _symbol, sym_group in merged.groupby("symbol", sort=True):
+            sym_group = sym_group.drop_duplicates(subset=["decision_idx"], keep="first")
+            if sym_group.shape[0] < 3:
                 continue
-            vol = float(volatility_2d[int(decision_idx), symbol_idx])
-            denom = max(vol, VOL_FLOOR)
-            risk_scores.append((abs(float(row.expected_gross_bps)) / denom, row_idx))
-        if risk_scores:
-            risk_scores.sort(reverse=True)
-            selected_idx = [row_idx for _, row_idx in risk_scores[: int(cfg.l1_probe_top_k)]]
-            selected_real = real[np.asarray(selected_idx, dtype=np.int64)]
-            if selected_real.size > 0:
-                probe_series.append(float(np.mean(selected_real)))
+            pred_ts = (
+                sym_group["side"].to_numpy(dtype=np.float64)
+                * sym_group["expected_gross_bps"].to_numpy(dtype=np.float64)
+                / np.maximum(sym_group["expected_holding_bars"].to_numpy(dtype=np.float64), 1.0)
+            )
+            real_ts = (
+                sym_group["side"].to_numpy(dtype=np.float64)
+                * sym_group["realized_side_adjusted_gross_bps"].fillna(0.0).to_numpy(dtype=np.float64)
+                / np.maximum(sym_group["expected_holding_bars"].to_numpy(dtype=np.float64), 1.0)
+            )
+            ic_val, _ = spearmanr(pred_ts, real_ts)
+            if np.isfinite(ic_val):
+                ic_series.append(float(ic_val))
+            risk_scores_ts: list[tuple[float, int]] = []
+            for row_i, row in enumerate(sym_group.itertuples(index=False)):
+                symbol_idx = symbol_to_idx.get(str(row.symbol))
+                d_idx = int(getattr(row, "decision_idx", 0))
+                if symbol_idx is None or d_idx < 0 or d_idx >= volatility_2d.shape[0]:
+                    continue
+                vol = float(volatility_2d[d_idx, symbol_idx])
+                denom = max(vol, VOL_FLOOR)
+                risk_scores_ts.append((abs(float(row.expected_gross_bps)) / denom, row_i))
+            if risk_scores_ts:
+                risk_scores_ts.sort(reverse=True)
+                selected_idx_arr = [ri for _, ri in risk_scores_ts[: int(cfg.l1_probe_top_k)]]
+                selected_real = real_ts[np.asarray(selected_idx_arr, dtype=np.int64)]
+                if selected_real.size > 0:
+                    probe_series.append(float(np.mean(selected_real)))
+    else:
+        for decision_idx, group in merged.groupby("decision_idx", sort=True):
+            group = group.drop_duplicates(subset=["symbol"], keep="first")
+            if group.shape[0] < int(cfg.l1_min_cross_section):
+                continue
+            pred = (
+                group["side"].to_numpy(dtype=np.float64, copy=False)
+                * group["expected_gross_bps"].to_numpy(dtype=np.float64, copy=False)
+                / np.maximum(group["expected_holding_bars"].to_numpy(dtype=np.float64, copy=False), 1.0)
+            )
+            real = (
+                group["side"].to_numpy(dtype=np.float64, copy=False)
+                * group["realized_side_adjusted_gross_bps"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
+                / np.maximum(group["expected_holding_bars"].to_numpy(dtype=np.float64, copy=False), 1.0)
+            )
+            ic_val, _ = spearmanr(pred, real)
+            if np.isfinite(ic_val):
+                ic_series.append(float(ic_val))
+            risk_scores: list[tuple[float, int]] = []
+            for row_idx, row in enumerate(group.itertuples(index=False)):
+                symbol_idx = symbol_to_idx.get(str(row.symbol))
+                if symbol_idx is None or decision_idx < 0 or decision_idx >= volatility_2d.shape[0]:
+                    continue
+                vol = float(volatility_2d[int(decision_idx), symbol_idx])
+                denom = max(vol, VOL_FLOOR)
+                risk_scores.append((abs(float(row.expected_gross_bps)) / denom, row_idx))
+            if risk_scores:
+                risk_scores.sort(reverse=True)
+                selected_idx = [row_idx for _, row_idx in risk_scores[: int(cfg.l1_probe_top_k)]]
+                selected_real = real[np.asarray(selected_idx, dtype=np.int64)]
+                if selected_real.size > 0:
+                    probe_series.append(float(np.mean(selected_real)))
     ready_symbols = tuple(sorted(str(symbol) for symbol in merged["symbol"].dropna().unique()))
     opportunity_ic = float(np.mean(ic_series)) if ic_series else 0.0
     probe_gross_edge = float(np.mean(probe_series)) if probe_series else 0.0
@@ -855,4 +924,5 @@ def predict_layer1_signals(
         symbols=aligned.symbols,
         model_version=artifact.model_version,
         activation_floor_bps=float(cfg.l1_signal_activation_floor_bps),
+        cfg=cfg,
     )
