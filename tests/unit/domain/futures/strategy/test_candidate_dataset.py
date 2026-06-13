@@ -339,7 +339,7 @@ def test_build_candidate_dataset_supports_label_free_inference_without_exit_idx(
             "take_profit_atr_mult": [4.0, 4.0],
             "family": ["trend_ma", "trend_ma"],
             "variant": ["fast", "slow"],
-            "archetype": ["trend_continuation", "trend_continuation"],
+            "archetype": ["trend", "trend"],
             "ex_ante_cost_bps": [4.0, 4.0],
         }
     )
@@ -826,7 +826,7 @@ def _make_labeled_with_variants(aligned: AlignedMarketData) -> pd.DataFrame:
             "ex_ante_cost_bps": [4.0, 4.0, 4.0],
             "family": ["trend_ma", "mean_rev", "trend_ma"],
             "variant": ["ema_12_72", "rsi_14", "ema_12_72"],
-            "archetype": ["trend_continuation", "mean_reversion", "trend_continuation"],
+            "archetype": ["trend", "mean_rev", "trend"],
         }
     )
 
@@ -957,10 +957,10 @@ def test_funding_side_alignment_direction() -> None:
 def test_archetype_regime_match_lookup() -> None:
     from src.domain.futures.strategy.candidate_dataset import _ARCHETYPE_REGIME_AFFINITY
 
-    assert _ARCHETYPE_REGIME_AFFINITY[("trend_continuation", "bull_quiet")] == pytest.approx(1.0)
-    assert _ARCHETYPE_REGIME_AFFINITY[("mean_reversion", "bull_volatile")] == pytest.approx(0.8)
-    assert _ARCHETYPE_REGIME_AFFINITY[("trend_continuation", "crash")] == pytest.approx(-1.0)
-    assert _ARCHETYPE_REGIME_AFFINITY[("position_unwind", "crash")] == pytest.approx(1.0)
+    assert _ARCHETYPE_REGIME_AFFINITY[("trend", "bull_quiet")] == pytest.approx(1.0)
+    assert _ARCHETYPE_REGIME_AFFINITY[("mean_rev", "bull_volatile")] == pytest.approx(0.8)
+    assert _ARCHETYPE_REGIME_AFFINITY[("trend", "crash")] == pytest.approx(-1.0)
+    assert _ARCHETYPE_REGIME_AFFINITY[("unwind", "crash")] == pytest.approx(1.0)
 
 
 def test_n_same_dir_variants_log_confluence() -> None:
@@ -985,7 +985,7 @@ def test_n_same_dir_variants_log_confluence() -> None:
             "ex_ante_cost_bps": [4.0, 4.0, 4.0],
             "family": ["trend_ma", "dual_momentum", "trend_donchian"],
             "variant": ["ema_12_72", "dm_12_48", "donchian_36"],
-            "archetype": ["trend_continuation", "time_series_momentum", "trend_continuation"],
+            "archetype": ["trend", "ts_mom", "trend"],
         }
     )
     cfg = CandidateStrategyConfig(signal_context_features_enabled=True)
@@ -1029,7 +1029,7 @@ def test_build_candidate_dataset_features_cached() -> None:
             "ex_ante_cost_bps": [4.0],
             "family": ["trend_ma"],
             "variant": ["ema_12_72"],
-            "archetype": ["trend_continuation"],
+            "archetype": ["trend"],
         }
     )
     cfg = CandidateStrategyConfig(
