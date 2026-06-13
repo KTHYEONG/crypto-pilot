@@ -544,6 +544,14 @@ def run_l1_nested_swf(
             min_signals_per_symbol=int(cfg.l1_min_signals_per_symbol),
             registry_version=f"outer-{outer_idx}",
         )
+        if not registry.ready_symbols:
+            logger.warning(
+                "[L1-NESTED] Outer fold %d: registry empty — "
+                "inner evidence produced %d pairs, 0 qualified. "
+                "Check l1_pair_* thresholds.",
+                outer_idx,
+                len(evidence),
+            )
         outer_out = _tw._fit_and_predict_single_fold(
             outer_idx,
             outer_fold,
