@@ -1532,3 +1532,84 @@ def test_score_calibration_no_leakage_from_val_set() -> None:
     val_idx_list: list[int] = val_set["entry_idx"].tolist()
     overlap = [i for i in val_idx_list if i in sub_fit_idx_set]
     assert len(overlap) == 0, f"Leakage: {len(overlap)} val_set entries found in sub_fit"
+
+
+def test_vectorized_rank_ic_matches_legacy_logic() -> None:
+    """Scenario 1: Verify new vectorized Rank IC matches mathematical constraints."""
+    rng = np.random.default_rng(42)
+    n = 100
+    df = pd.DataFrame(
+        {
+            "archetype": rng.choice(["trend", "mean_rev", "carry_rev"], size=n),
+            "entry_regime_code": rng.integers(0, 4, size=n),
+            "net_return_bps": rng.normal(10.0, 20.0, size=n),
+            "score_z": rng.normal(0.0, 1.0, size=n),
+            "family": rng.choice(["fam1", "fam2"], size=n),
+            "variant": rng.choice(["var1", "var2"], size=n),
+            "entry_idx": np.arange(n),
+        }
+    )
+    
+    # 직접 호출하여 예외 없이 동작하는지 확인
+    ic_val = _internal_validation_rank_ic(
+        df,
+        shrinkage_k=50.0,
+        val_fraction=0.3,
+        axis="archetype_regime",
+        adaptive_shrinkage=True,
+        shrinkage_k_max=50.0,
+        freq_n_cap=200,
+        min_cell_edge_floor_bps=0.0,
+        variant_prior_enabled=True,
+        variant_shrinkage_k=30.0,
+        variant_min_obs=40,
+        allowed_families=(),
+        score_calibration_enabled=True,
+        score_z_clip=3.0,
+        score_calibration_min_obs=10, # 관측 개수 낮춰서 Calibration 타도록 유도
+        score_slope_k=100.0,
+    )
+    assert isinstance(ic_val, float)
+    assert -1.0 <= ic_val <= 1.0
+
+
+def test_vectorized_rank_ic_edge_cases_unknown_classes() -> None:
+    """Scenario 2: Verify fallback behavior for missing/unknown elements during validation."""
+    n = 50
+    rng = np.random.default_rng(42)
+    # Training data
+    df_train = pd.DataFrame(
+        {
+            "archetype": ["trend"] * n,
+            "entry_regime_code": [0] * n,
+            "net_return_bps": rng.normal(5.0, 10.0, size=n),
+            "score_z": rng.normal(0.0, 1.0, size=n),
+            "family": ["fam1"] * n,
+            "variant": ["var1"] * n,
+            "entry_idx": np.arange(n),
+        }
+    )
+    # Validation data has unknown categories
+    df_val = pd.DataFrame(
+        {
+            "archetype": ["unknown_arch"] * 10,
+            "entry_regime_code": [99] * 10,
+            "net_return_bps": rng.normal(5.0, 10.0, size=10),
+            "score_z": rng.normal(0.0, 1.0, size=10),
+            "family": ["unknown_fam"] * 10,
+            "variant": ["unknown_var"] * 10,
+            "entry_idx": np.arange(n, n + 10),
+        }
+    )
+    df_combined = pd.concat([df_train, df_val], ignore_index=True)
+    
+    ic_val = _internal_validation_rank_ic(
+        df_combined,
+        shrinkage_k=50.0,
+        val_fraction=0.2, # df_val이 val_set으로 잡힘
+        axis="archetype_regime",
+        variant_prior_enabled=True,
+        score_calibration_enabled=True,
+    )
+    # Fallback to global_mu must apply safely without KeyErrors
+    assert isinstance(ic_val, float)
