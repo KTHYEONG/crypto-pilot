@@ -45,13 +45,13 @@ def test_run_l1_nested_swf_emits_new_runtime_tables() -> None:
         patch("src.domain.futures.strategy.config.resolve_purge_and_embargo_bars", return_value=(1, 0)),
         patch("src.domain.futures.strategy.tiered_workflow.build_l1_swf_folds", return_value=()),
         patch("src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold", return_value=empty_out),
-        patch("src.domain.futures.strategy.tiered_workflow.format_layer1_gate_table", return_value="gate-table"),
-        patch("src.domain.futures.strategy.tiered_workflow.format_layer1_outer_fold_table", return_value="outer-table"),
+        patch("src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_gate_table", return_value="gate-table"),
+        patch("src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_outer_fold_table", return_value="outer-table"),
         patch(
-            "src.domain.futures.strategy.tiered_workflow.format_layer1_deployment_registry_table",
+            "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_deployment_registry_table",
             return_value="registry-table",
         ),
-        patch("src.domain.futures.strategy.tiered_workflow.logger.info") as mock_log,
+        patch("src.domain.futures.strategy.tiered_workflow.pipeline.logger.info") as mock_log,
     ):
         result = run_l1_nested_swf(
             labeled_events=pd.DataFrame(),
