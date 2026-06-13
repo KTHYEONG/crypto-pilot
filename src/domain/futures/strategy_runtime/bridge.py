@@ -47,7 +47,7 @@ def verify_data_integrity(
     report: dict[str, dict[str, Any]] = {}
     n_bars = aligned.close_2d.shape[0]
 
-    _logger.info("[DATA-INTEGRITY] Starting market data integrity check for %d symbols...", len(symbols))
+    _logger.info("[DATA-INTEGRITY] 💠 Starting audit for %d symbols...", len(symbols))
     
     passed_symbols = []
     failed_symbols_info = []
@@ -98,14 +98,18 @@ def verify_data_integrity(
             "reasons": reasons,
         }
 
+    from src.domain.futures.strategy.tiered_logging import format_data_integrity_summary
+
     if passed_symbols:
         bar_lengths = sorted({x[1] for x in passed_symbols})
-        bar_lengths_str = str(bar_lengths[0]) if len(bar_lengths) == 1 else f"{min(bar_lengths)}~{max(bar_lengths)}"
-        _logger.info(
-            "[DATA-INTEGRITY] PASS: %d/%d symbols passed. "
-            "(Bars: %s, NaN: 0.0%%, Zero/Neg: 0.0%%, Hi>=Lo: PASS)",
-            len(passed_symbols), len(symbols), bar_lengths_str
-        )
+        avg_bars = int(np.mean(bar_lengths)) if bar_lengths else 0
+        _logger.info(format_data_integrity_summary(
+            total=len(symbols),
+            passed=len(passed_symbols),
+            bars=avg_bars,
+            nan_pct=0.0,
+            zero_pct=0.0
+        ))
 
     if failed_symbols_info:
         _logger.warning("[DATA-INTEGRITY] FAIL: %d symbols failed integrity check:", len(failed_symbols_info))
@@ -328,29 +332,37 @@ def run_candidate_strategy_for_universe(
     }
 
     def _emit_bridge_profile() -> None:
-        breakdown = _RuntimeBreakdown(total=time.perf_counter() - bridge_t0, steps=bridge_prof)
-        _logger.info(
-            (
-                "[BRIDGE-PROF] total=%.4fs align=%.4fs rules=%.4fs events=%.4fs "
-                "label=%.4fs diagnostics=%.4fs promotions=%.4fs walk_forward=%.4fs "
-                "post_wf=%.4fs selection=%.4fs weights=%.4fs alpha_panel=%.4fs "
-                "accounted=%.4fs unaccounted=%.4fs"
-            ),
-            breakdown.total,
-            bridge_prof["align"],
-            bridge_prof["rules"],
-            bridge_prof["events"],
-            bridge_prof["label"],
-            bridge_prof["diagnostics"],
-            bridge_prof["promotions"],
-            bridge_prof["walk_forward"],
-            bridge_prof["post_wf"],
-            bridge_prof["selection"],
-            bridge_prof["weights"],
-            bridge_prof["alpha_panel"],
-            breakdown.accounted,
-            breakdown.unaccounted,
-        )
+        total_time = time.perf_counter() - bridge_t0
+        breakdown = _RuntimeBreakdown(total=total_time, steps=bridge_prof)
+        
+        width = 60
+        border = "━" * width
+        lines = [
+            f"[BRIDGE PERFORMANCE] {border}",
+            f"  Total Runtime: {total_time:.2f}s (Accounted: {breakdown.accounted/total_time:.1%})",
+            ""
+        ]
+        
+        # Sort steps by duration for the bar chart
+        sorted_steps = sorted(bridge_prof.items(), key=lambda x: x[1], reverse=True)
+        max_step_time = max(bridge_prof.values()) if bridge_prof else 1.0
+        
+        for name, duration in sorted_steps:
+            if duration < 0.01 and name != sorted_steps[0][0]:
+                continue
+            
+            bar_width = int((duration / max_step_time) * 20)
+            bar = "█" * bar_width
+            pct = (duration / total_time) * 100
+            
+            # Add fire emoji for the top bottleneck if it's significant
+            suffix = " 🔥" if name == sorted_steps[0][0] and pct > 30 else ""
+            
+            label = name.replace("_", " ").title()
+            lines.append(f"  {label:<15}: {bar:<20} {duration:>6.2f}s ({pct:>5.1f}%){suffix}")
+            
+        lines.append(border)
+        _logger.debug("\n".join(lines))
 
     t_step = time.perf_counter()
     aligned = align_data_maps(preloaded_data_maps, symbols, tf)
