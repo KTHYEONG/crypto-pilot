@@ -859,6 +859,7 @@ def _run_strategy_stage(
                 beta=1.0,
                 target_ann_vol=float(_futures_policy_t.get("target_ann_vol", 0.35)),
             )
+            assert tiered_window is not None, "tiered_window is missing under use_tiered option"
             l1_res, l2_res, l3_res = run_tiered_pipeline(
                 labeled_events=labeled_tiered,
                 aligned=aligned_tiered,
