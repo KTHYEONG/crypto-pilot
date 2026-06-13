@@ -41,6 +41,7 @@ class SymbolSignal:
     t_stat: float
     valid: bool
     beta_btc: float | None = None
+    quality_weight: float = 1.0
 
 
 def neutralize_cross_section(
@@ -123,7 +124,8 @@ def rank_and_select(
 
     # mu 배열 구성 — float64 강제
     mu_arr: NDArray[np.float64] = np.array(
-        [valid_sigs[s].raw_mu for s in syms], dtype=np.float64
+        [valid_sigs[s].raw_mu * max(valid_sigs[s].quality_weight, 0.0) for s in syms],
+        dtype=np.float64,
     )
     vol_arr: NDArray[np.float64] = np.array(
         [max(valid_sigs[s].volatility, VOL_FLOOR) for s in syms], dtype=np.float64

@@ -1229,7 +1229,7 @@ def test_compute_prediction_decomposition_diag_s3_archetype_sign() -> None:
     assert "beta_neut" in diag.per_archetype_oos_edge
     assert "mean_rev" in diag.per_archetype_oos_edge
     bn_mu, bn_t = diag.per_archetype_oos_edge["beta_neut"]
-    m_mu, m_t = diag.per_archetype_oos_edge["mean_rev"]
+    m_mu, _m_t = diag.per_archetype_oos_edge["mean_rev"]
     assert bn_mu > 0
     assert bn_t > 1.96
     assert m_mu < 0
@@ -1776,6 +1776,7 @@ def test_compute_symbol_strategy_evidence_rejects_non_incremental_pair() -> None
         event_results=events,
         cfg=cfg,
         seed=7,
+        registry_as_of_idx=999,
     )
 
     # trend:fast의 peer mean = 1.0, incremental ≈ 0.05 - 1.0 = -0.95 < 0.1 → qualified=False
@@ -1923,3 +1924,169 @@ def test_evaluate_layer1_readiness_uses_stable_symbol_counts_and_outer_series() 
     assert report.passed is True
     ready_symbol_check = next(check for check in report.checks if check.key == "sym_count")
     assert ready_symbol_check.value == pytest.approx(2.0)
+
+
+def test_evaluate_outer_signal_opportunities_static_prediction_keeps_probe_without_ic() -> None:
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+        evaluate_outer_signal_opportunities,
+    )
+
+    batch = ValidatedSignalBatch(
+        events=(
+            ValidatedSignalEvent(
+                decision_idx=10,
+                decision_time=np.datetime64("2024-01-01T00:00:00"),
+                symbol="BTC",
+                strategy_id="strat:v1",
+                activation_context="all",
+                side=1,
+                expected_gross_bps=3.0,
+                q10_gross_bps=2.0,
+                q90_gross_bps=4.0,
+                expected_holding_bars=4,
+                reliability=0.5,
+                registry_version="test",
+                model_version="test",
+            ),
+            ValidatedSignalEvent(
+                decision_idx=10,
+                decision_time=np.datetime64("2024-01-01T00:00:00"),
+                symbol="ETH",
+                strategy_id="strat:v1",
+                activation_context="all",
+                side=1,
+                expected_gross_bps=3.0,
+                q10_gross_bps=2.0,
+                q90_gross_bps=4.0,
+                expected_holding_bars=4,
+                reliability=0.5,
+                registry_version="test",
+                model_version="test",
+            ),
+            ValidatedSignalEvent(
+                decision_idx=10,
+                decision_time=np.datetime64("2024-01-01T00:00:00"),
+                symbol="SOL",
+                strategy_id="strat:v1",
+                activation_context="all",
+                side=1,
+                expected_gross_bps=3.0,
+                q10_gross_bps=2.0,
+                q90_gross_bps=4.0,
+                expected_holding_bars=4,
+                reliability=0.5,
+                registry_version="test",
+                model_version="test",
+            ),
+        ),
+        start_idx=10,
+        end_idx=11,
+        symbols=("BTC", "ETH", "SOL"),
+        registry_version="test",
+        model_version="test",
+    )
+    realized = pd.DataFrame(
+        {
+            "entry_idx": [11, 11, 11],
+            "symbol": ["BTC", "ETH", "SOL"],
+            "strategy_id": ["strat:v1"] * 3,
+            "activation_context": ["all"] * 3,
+            "realized_side_adjusted_gross_bps": [4.0, 5.0, 6.0],
+            "exit_idx": [14, 14, 14],
+        }
+    )
+    fold = WFFold(fit_start=0, fit_end=10, cal_start=10, cal_end=10, oos_start=10, oos_end=20)
+    cfg = MagicMock()
+    cfg.l1_opp_ic_mode = "cross_section"
+    cfg.l1_min_cross_section = 3
+    cfg.l1_probe_top_k = 1
+    cfg.l1_min_sym_count = 1
+    cfg.l1_min_sym_ratio = 0.0
+    cfg.l1_min_fold_ratio = 0.0
+    cfg.l1_min_opportunity_timestamps = 1
+    cfg.l1_min_realized_match_ratio = 1.0
+    vol = np.ones((20, 3), dtype=np.float64)
+
+    result = evaluate_outer_signal_opportunities(
+        opportunities=batch,
+        realized_event_results=realized,
+        volatility_2d=vol,
+        aligned_symbols=("BTC", "ETH", "SOL"),
+        fold=fold,
+        fold_id=0,
+        cfg=cfg,
+        seed=0,
+    )
+
+    assert result.opportunity_ic is None
+    assert result.probe_bps == pytest.approx(6.0)
+    assert result.passed is True
+
+
+def test_evaluate_outer_signal_opportunities_fail_closed_on_unmatched_realized_rows() -> None:
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+        evaluate_outer_signal_opportunities,
+    )
+
+    symbols = tuple(f"S{i:02d}" for i in range(20))
+    events = tuple(
+        ValidatedSignalEvent(
+            decision_idx=10,
+            decision_time=np.datetime64("2024-01-01T00:00:00"),
+            symbol=symbol,
+            strategy_id="strat:v1",
+            activation_context="all",
+            side=1,
+            expected_gross_bps=float(idx + 1),
+            q10_gross_bps=float(idx) + 0.5,
+            q90_gross_bps=float(idx) + 1.5,
+            expected_holding_bars=4,
+            reliability=0.5,
+            registry_version="test",
+            model_version="test",
+        )
+        for idx, symbol in enumerate(symbols)
+    )
+    batch = ValidatedSignalBatch(
+        events=events,
+        start_idx=10,
+        end_idx=11,
+        symbols=symbols,
+        registry_version="test",
+        model_version="test",
+    )
+    realized = pd.DataFrame(
+        {
+            "entry_idx": [11] * 19,
+            "symbol": list(symbols[:-1]),
+            "strategy_id": ["strat:v1"] * 19,
+            "activation_context": ["all"] * 19,
+            "realized_side_adjusted_gross_bps": [10.0] * 19,
+            "exit_idx": [14] * 19,
+        }
+    )
+    fold = WFFold(fit_start=0, fit_end=10, cal_start=10, cal_end=10, oos_start=10, oos_end=20)
+    cfg = MagicMock()
+    cfg.l1_opp_ic_mode = "cross_section"
+    cfg.l1_min_cross_section = 2
+    cfg.l1_probe_top_k = 1
+    cfg.l1_min_sym_count = 1
+    cfg.l1_min_sym_ratio = 0.0
+    cfg.l1_min_fold_ratio = 0.0
+    cfg.l1_min_opportunity_timestamps = 1
+    cfg.l1_min_realized_match_ratio = 1.0
+    vol = np.ones((20, len(symbols)), dtype=np.float64)
+
+    result = evaluate_outer_signal_opportunities(
+        opportunities=batch,
+        realized_event_results=realized,
+        volatility_2d=vol,
+        aligned_symbols=symbols,
+        fold=fold,
+        fold_id=0,
+        cfg=cfg,
+        seed=0,
+    )
+
+    assert "insufficient_realized_match_ratio" in result.blockers
+    assert result.probe_bps == pytest.approx(10.0)

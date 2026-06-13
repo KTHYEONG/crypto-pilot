@@ -6,6 +6,7 @@ Covers: SymbolSignal, neutralize_cross_section, rank_and_select.
 from __future__ import annotations
 
 import dataclasses
+from typing import Any
 
 import numpy as np
 import pytest
@@ -366,3 +367,35 @@ class TestNeutralizeWithBtcBeta:
 
         # Assert
         assert sig.beta_btc is None
+
+
+def test_rank_and_select_respects_quality_weight_compatibility() -> None:
+    strong_ctor: Any = SymbolSignal
+    strong = strong_ctor(
+        raw_mu=8.0,
+        volatility=0.01,
+        n_obs=100,
+        t_stat=2.0,
+        valid=True,
+        quality_weight=0.40,
+    )
+    weak_ctor: Any = SymbolSignal
+    weak = weak_ctor(
+        raw_mu=5.0,
+        volatility=0.01,
+        n_obs=100,
+        t_stat=2.0,
+        valid=True,
+        quality_weight=1.00,
+    )
+
+    selected, _ = rank_and_select(
+        {"strong": strong, "weak": weak},
+        k_rank=1,
+        sector_cap=10,
+        prev_selection=frozenset(),
+        rank_buffer=0,
+    )
+
+    assert "weak" in selected
+    assert "strong" not in selected

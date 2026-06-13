@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import replace
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -38,6 +38,7 @@ from src.domain.futures.strategy.cs_rank import VOL_FLOOR, SymbolSignal
 from src.domain.futures.strategy.tiered_workflow.metrics import (
     _one_sided_p_value,
     _series_tstat,
+    moving_block_bootstrap_mean,
 )
 
 if TYPE_CHECKING:
@@ -197,13 +198,68 @@ def _batch_to_frame(batch: ValidatedSignalBatch) -> pd.DataFrame:
                 "q10_gross_bps": event.q10_gross_bps,
                 "q90_gross_bps": event.q90_gross_bps,
                 "expected_holding_bars": event.expected_holding_bars,
-                "reliability": event.reliability,
+                "quality_weight": event.quality_weight,
                 "registry_version": event.registry_version,
                 "model_version": event.model_version,
             }
             for event in batch.events
         ]
     )
+
+
+def align_outer_opportunities_with_realized(
+    *,
+    opportunities: ValidatedSignalBatch,
+    realized_event_results: pd.DataFrame,
+    activation_match_regime: bool,
+) -> tuple[pd.DataFrame, int]:
+    opp_frame = _batch_to_frame(opportunities)
+    if opp_frame.empty:
+        return opp_frame, 0
+    realized = realized_event_results.copy()
+    if "strategy_id" not in realized.columns:
+        realized["strategy_id"] = (
+            realized.get("family", pd.Series("", index=realized.index)).astype(str)
+            + ":"
+            + realized.get("variant", pd.Series("", index=realized.index)).astype(str)
+        )
+    if "activation_context" not in realized.columns:
+        realized["activation_context"] = realized.get(
+            "signal_cell",
+            realized.get("entry_regime", pd.Series("all", index=realized.index)),
+        ).astype(str)
+    realized["decision_idx"] = (
+        pd.to_numeric(
+            realized.get("entry_idx", pd.Series(0, index=realized.index)),
+            errors="coerce",
+        )
+        .fillna(0)
+        .astype(int)
+        - 1
+    )
+    if "realized_side_adjusted_gross_bps" not in realized.columns:
+        realized["realized_side_adjusted_gross_bps"] = pd.to_numeric(
+            realized.get("gross_event_bps", pd.Series(np.nan, index=realized.index)),
+            errors="coerce",
+        )
+    merge_keys = ["decision_idx", "symbol", "strategy_id"]
+    if activation_match_regime:
+        merge_keys.append("activation_context")
+    duplicate_mask = realized.duplicated(subset=merge_keys, keep=False)
+    if bool(duplicate_mask.any()):
+        raise ValueError("duplicate realized opportunity key")
+    merge_cols = [*merge_keys, "realized_side_adjusted_gross_bps"]
+    if "exit_idx" in realized.columns:
+        merge_cols.append("exit_idx")
+    merged = opp_frame.merge(
+        realized[merge_cols],
+        on=merge_keys,
+        how="left",
+        indicator=True,
+    )
+    unmatched_count = int((merged["_merge"] != "both").sum())
+    merged = merged.loc[merged["_merge"] == "both"].drop(columns="_merge").copy()
+    return merged, unmatched_count
 
 
 def _by_q_values(p_values: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -288,9 +344,9 @@ def compute_symbol_strategy_evidence(
     event_results: pd.DataFrame,
     cfg: CandidateStrategyConfig,
     seed: int,
+    registry_as_of_idx: int,
 ) -> tuple[SymbolStrategyEvidence, ...]:
     """Compute per-source signal evidence from event-level OOS results."""
-    del seed
     if event_results.empty:
         return ()
     frame = event_results.copy()
@@ -333,6 +389,17 @@ def compute_symbol_strategy_evidence(
         .fillna(0)
         .astype(int)
     )
+    if "exit_idx" in frame.columns:
+        exit_idx = pd.to_numeric(frame["exit_idx"], errors="coerce").fillna(np.inf).astype(float)
+        frame = frame.loc[
+            exit_idx < float(registry_as_of_idx)
+        ].copy()
+        lookback_bars = getattr(cfg, "l1_evidence_lookback_bars", None)
+        if lookback_bars is not None:
+            min_exit_idx = float(registry_as_of_idx - int(lookback_bars))
+            frame = frame.loc[exit_idx.loc[frame.index] >= min_exit_idx].copy()
+    if frame.empty:
+        return ()
     frame["holding_bucket"] = frame["expected_holding_bars"].map(_holding_bucket)
     baseline_mode: Literal["peer_exclusive", "absolute"] = getattr(cfg, "l1_baseline_mode", "peer_exclusive")
     frame["incremental_bps"] = _compute_incremental_bps(frame, mode=baseline_mode)
@@ -364,12 +431,32 @@ def compute_symbol_strategy_evidence(
         )
         t_stat = _series_tstat(incremental)
         p_value = _one_sided_p_value(t_stat)
+        boot_means = moving_block_bootstrap_mean(
+            incremental.astype(np.float64, copy=False),
+            group.get("decision_idx", group.get("entry_idx", pd.Series(0, index=group.index)))
+            .to_numpy(dtype=np.int64, copy=False),
+            block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 1)),
+            n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 1)),
+            seed=seed + int(abs(hash((symbol, strategy_id, activation_context))) % 10_000),
+        )
+        probability_positive = (
+            float(np.mean(boot_means > 0.0))
+            if boot_means.size > 0
+            else (1.0 if mean_incremental > 0.0 else 0.0)
+        )
+        block_tstat = (
+            float(mean_incremental / (np.std(boot_means, ddof=1) + 1e-12))
+            if boot_means.size >= 2 and float(np.std(boot_means, ddof=1)) > 0.0
+            else t_stat
+        )
 
         # 1. 자유도 기반 적응적 t-critical value 계산
         df = effective_n - 1.0
         if df >= 2.0:
-            t_crit = float(stats.t.ppf(1.0 - getattr(cfg, "l1_pair_alpha", 0.05), df))
-            t_power = float(stats.t.ppf(getattr(cfg, "l1_pair_power", 0.80), df))
+            alpha = float(getattr(cfg, "l1_pair_alpha", 0.05))
+            power = float(getattr(cfg, "l1_pair_power", 0.80))
+            t_crit = float(np.asarray(stats.t.ppf(1.0 - alpha, float(df)), dtype=np.float64))
+            t_power = float(np.asarray(stats.t.ppf(power, float(df)), dtype=np.float64))
         else:
             t_crit = np.inf
             t_power = 0.0
@@ -382,38 +469,35 @@ def compute_symbol_strategy_evidence(
         else:
             mdes_bps = 0.0
 
-        reliability = float(
-            np.clip(
-                max(mean_incremental, 0.0)
-                * max(t_stat, 0.0)
-                / max(t_crit if np.isfinite(t_crit) else 1.96, 1.0)
-                / max(abs(float(getattr(cfg, "l1_pair_min_mean_gross_bps", 1.0))) + 1.0, 1.0),
-                0.0,
-                1.0,
-            )
-        )
-
-        rejection_reasons: list[str] = []
+        structural_reasons: list[str] = []
         if effective_n < float(cfg.l1_pair_min_effective_obs):
-            rejection_reasons.append("insufficient_effective_obs")
+            structural_reasons.append("insufficient_effective_obs")
         if len(fold_means) < int(cfg.l1_pair_min_folds):
-            rejection_reasons.append("insufficient_folds")
+            structural_reasons.append("insufficient_folds")
         if mean_gross <= float(cfg.l1_pair_min_mean_gross_bps):
-            rejection_reasons.append("negative_gross_edge")
+            structural_reasons.append("negative_gross_edge")
         if mean_incremental <= float(cfg.l1_pair_min_incremental_bps):
-            rejection_reasons.append("no_incremental_edge")
+            structural_reasons.append("no_incremental_edge")
 
-        # 적응형 t-검정 적용
+        diagnostic_flags: list[str] = []
         if t_stat < t_crit:
-            rejection_reasons.append("weak_tstat")
-
-        # MDES 필터링 적용 (평균 증분 우위가 최소 탐지 효과 크기를 넘는지 검증)
+            diagnostic_flags.append("weak_tstat")
         mdes_mult = float(getattr(cfg, "l1_pair_mdes_multiplier", 0.5))
         if mean_incremental <= (mdes_bps * mdes_mult):
-            rejection_reasons.append("insufficient_effect_size")
-
+            diagnostic_flags.append("insufficient_effect_size")
         if positive_fold_ratio < float(cfg.l1_pair_min_positive_fold_ratio):
-            rejection_reasons.append("unstable_folds")
+            diagnostic_flags.append("unstable_folds")
+        hard_eligible = not structural_reasons
+        n_target = max(float(cfg.l1_pair_min_effective_obs) * 2.0, 1.0)
+        sample_scale = min(1.0, np.sqrt(effective_n / n_target)) if effective_n > 0.0 else 0.0
+        quality_weight = 0.0
+        if hard_eligible:
+            if bool(getattr(cfg, "l1_quality_weight_enabled", True)):
+                quality_weight = max(0.0, 2.0 * probability_positive - 1.0)
+                quality_weight *= max(positive_fold_ratio, 0.0)
+                quality_weight *= sample_scale
+            else:
+                quality_weight = 1.0
         evidence_list.append(
             SymbolStrategyEvidence(
                 key=SignalSourceKey(
@@ -423,41 +507,48 @@ def compute_symbol_strategy_evidence(
                 ),
                 mean_gross_bps=mean_gross,
                 mean_incremental_bps=mean_incremental,
-                bootstrap_tstat_incremental=t_stat,
+                block_tstat_incremental=block_tstat,
+                probability_positive=probability_positive,
                 p_value=p_value,
                 q_value=1.0,
                 positive_fold_ratio=positive_fold_ratio,
                 n_obs=n_obs,
                 effective_n=effective_n,
                 n_folds=len(fold_means),
-                reliability=reliability,
-                qualified=False,
-                rejection_reasons=tuple(rejection_reasons),
+                quality_weight=quality_weight,
+                hard_eligible=hard_eligible,
+                structural_reasons=tuple(structural_reasons),
+                diagnostic_flags=tuple(diagnostic_flags),
             )
         )
         raw_p_values.append(p_value)
     q_values = _by_q_values(np.asarray(raw_p_values, dtype=np.float64))
     final_evidence: list[SymbolStrategyEvidence] = []
     for idx, evidence in enumerate(evidence_list):
-        reasons = list(evidence.rejection_reasons)
         q_value = float(q_values[idx])
+        diag_flags = list(evidence.diagnostic_flags)
+        quality_weight = evidence.quality_weight
         if q_value > float(cfg.l1_pair_fdr_alpha):
-            reasons.append("fdr_reject")
+            diag_flags.append("fdr_reject")
+        if evidence.hard_eligible and bool(getattr(cfg, "l1_quality_weight_enabled", True)):
+            quality_weight *= max(0.0, 1.0 - q_value)
         final_evidence.append(
             SymbolStrategyEvidence(
                 key=evidence.key,
                 mean_gross_bps=evidence.mean_gross_bps,
                 mean_incremental_bps=evidence.mean_incremental_bps,
-                bootstrap_tstat_incremental=evidence.bootstrap_tstat_incremental,
+                block_tstat_incremental=evidence.block_tstat_incremental,
+                probability_positive=evidence.probability_positive,
                 p_value=evidence.p_value,
                 q_value=q_value,
                 positive_fold_ratio=evidence.positive_fold_ratio,
                 n_obs=evidence.n_obs,
                 effective_n=evidence.effective_n,
                 n_folds=evidence.n_folds,
-                reliability=evidence.reliability,
-                qualified=not reasons,
-                rejection_reasons=tuple(reasons),
+                quality_weight=quality_weight,
+                hard_eligible=evidence.hard_eligible,
+                structural_reasons=evidence.structural_reasons,
+                diagnostic_flags=tuple(diag_flags),
             )
         )
     return tuple(final_evidence)
@@ -472,7 +563,9 @@ def build_qualified_signal_registry(
 ) -> QualifiedSignalRegistry:
     grouped: dict[str, list[SymbolStrategyEvidence]] = defaultdict(list)
     for item in evidence:
-        if item.qualified:
+        hard_eligible = bool(getattr(item, "hard_eligible", getattr(item, "qualified", False)))
+        quality_weight = float(getattr(item, "quality_weight", getattr(item, "reliability", 0.0)))
+        if hard_eligible and quality_weight > 0.0:
             grouped[item.key.symbol].append(item)
     by_symbol: dict[str, tuple[SymbolStrategyEvidence, ...]] = {}
     ready_symbols: list[str] = []
@@ -481,9 +574,15 @@ def build_qualified_signal_registry(
             sorted(
                 grouped.get(symbol, ()),
                 key=lambda candidate: (
-                    candidate.reliability,
-                    candidate.mean_incremental_bps,
-                    candidate.bootstrap_tstat_incremental,
+                    float(getattr(candidate, "quality_weight", getattr(candidate, "reliability", 0.0))),
+                    float(getattr(candidate, "mean_incremental_bps", 0.0)),
+                    float(
+                        getattr(
+                            candidate,
+                            "block_tstat_incremental",
+                            getattr(candidate, "bootstrap_tstat_incremental", 0.0),
+                        )
+                    ),
                 ),
                 reverse=True,
             )
@@ -512,9 +611,10 @@ def _registry_to_symbol_signals(
             raw_mu=float(best.mean_gross_bps),
             volatility=VOL_FLOOR,
             n_obs=max(round(best.effective_n), 0),
-            t_stat=float(best.bootstrap_tstat_incremental),
-            valid=True,
+            t_stat=float(best.block_tstat_incremental),
+            valid=best.quality_weight > 0.0,
             beta_btc=None,
+            quality_weight=float(best.quality_weight),
         )
     return adapted
 
@@ -560,6 +660,7 @@ def _candidate_output_to_signal_batch(
     events: list[ValidatedSignalEvent] = []
     start_idx = int(frame["entry_idx"].min()) if "entry_idx" in frame.columns and not frame.empty else 0
     end_idx = int(frame["entry_idx"].max()) + 1 if "entry_idx" in frame.columns and not frame.empty else 0
+    has_explicit_gross = bool(getattr(model_output, "_has_explicit_expected_gross_bps", True))
     for idx, row in frame.iterrows():
         key = _signal_source_key_from_row(row, qualify_by_regime=activation_match_regime)
         if activation_match_regime:
@@ -568,6 +669,8 @@ def _candidate_output_to_signal_batch(
         else:
             if (key.symbol, key.strategy_id) not in source_keys_relaxed:
                 continue
+        if not has_explicit_gross:
+            continue
         pred = float(gross[idx]) if idx < gross.size else 0.0
         if pred < activation_floor_bps:
             continue
@@ -578,10 +681,10 @@ def _candidate_output_to_signal_batch(
         side_val = int(pd.to_numeric(row.get("side", 1), errors="coerce"))
         side: int = 1 if side_val >= 0 else -1
         holding = max(int(pd.to_numeric(row.get("expected_holding_bars", 1), errors="coerce")), 1)
-        reliability = 0.0
+        quality_weight = 0.0
         for evidence in registry.by_symbol.get(key.symbol, ()):
             if evidence.key == key:
-                reliability = evidence.reliability
+                quality_weight = evidence.quality_weight
                 break
         events.append(
             ValidatedSignalEvent(
@@ -595,7 +698,7 @@ def _candidate_output_to_signal_batch(
                 q10_gross_bps=float(q10[idx]) if idx < q10.size else pred,
                 q90_gross_bps=float(q90[idx]) if idx < q90.size else pred,
                 expected_holding_bars=holding,
-                reliability=reliability,
+                quality_weight=quality_weight,
                 registry_version=registry.registry_version,
                 model_version=model_version,
             )
@@ -627,12 +730,12 @@ def select_outer_symbol_opportunities(
         current_score = (
             event.expected_gross_bps
             / max(event.expected_holding_bars, 1)
-            * max(event.reliability, 0.0)
+            * max(event.quality_weight, 0.0)
         )
         best_score = (
             candidate.expected_gross_bps
             / max(candidate.expected_holding_bars, 1)
-            * max(candidate.reliability, 0.0)
+            * max(candidate.quality_weight, 0.0)
         )
         if current_score > best_score or (
             np.isclose(current_score, best_score)
@@ -660,12 +763,12 @@ def evaluate_outer_signal_opportunities(
     opportunities: ValidatedSignalBatch,
     realized_event_results: pd.DataFrame,
     volatility_2d: NDArray[np.float64],
+    aligned_symbols: tuple[str, ...],
     fold: WFFold,
     fold_id: int,
     cfg: CandidateStrategyConfig,
     seed: int,
 ) -> Layer1FoldReadiness:
-    del seed
     opp_frame = _batch_to_frame(opportunities)
     if opp_frame.empty:
         return Layer1FoldReadiness(
@@ -674,50 +777,24 @@ def evaluate_outer_signal_opportunities(
             outer_oos_start_idx=fold.oos_start,
             outer_oos_end_idx=fold.oos_end,
             ready_symbols=(),
-            valid_opportunity_timestamp_count=0,
-            opportunity_ic=0.0,
-            opportunity_ic_series=(),
+            matched_event_count=0,
+            unmatched_event_count=0,
+            realized_match_ratio=0.0,
+            unique_decision_count=0,
+            prediction_unique_count=0,
+            opportunity_ic=None,
+            opportunity_ic_tstat=0.0,
             probe_bps=0.0,
-            probe_gross_edge_series_bps=(),
+            probe_lcb_bps=0.0,
+            probe_series_bps=(),
+            effective_symbol_count=0.0,
             passed=False,
             blockers=("empty_opportunities",),
         )
-    realized = realized_event_results.copy()
-    if "strategy_id" not in realized.columns:
-        realized["strategy_id"] = (
-            realized.get("family", pd.Series("", index=realized.index)).astype(str)
-            + ":"
-            + realized.get("variant", pd.Series("", index=realized.index)).astype(str)
-        )
-    if "activation_context" not in realized.columns:
-        realized["activation_context"] = realized.get(
-            "signal_cell",
-            realized.get("entry_regime", pd.Series("all", index=realized.index)),
-        ).astype(str)
-    realized["decision_idx"] = (
-        pd.to_numeric(realized.get("entry_idx", pd.Series(0, index=realized.index)), errors="coerce")
-        .fillna(0)
-        .astype(int)
-        - 1
-    )
-    if "realized_side_adjusted_gross_bps" not in realized.columns:
-        realized["realized_side_adjusted_gross_bps"] = pd.to_numeric(
-            realized.get("gross_event_bps", pd.Series(0.0, index=realized.index)),
-            errors="coerce",
-        ).fillna(0.0)
-    merge_cols = [
-        "decision_idx",
-        "symbol",
-        "strategy_id",
-        "activation_context",
-        "realized_side_adjusted_gross_bps",
-    ]
-    if "exit_idx" in realized.columns:
-        merge_cols.append("exit_idx")
-    merged = opp_frame.merge(
-        realized[merge_cols],
-        on=["decision_idx", "symbol", "strategy_id", "activation_context"],
-        how="left",
+    merged, unmatched_count = align_outer_opportunities_with_realized(
+        opportunities=opportunities,
+        realized_event_results=realized_event_results,
+        activation_match_regime=bool(getattr(cfg, "l1_activation_match_regime", True)),
     )
     if "exit_idx" in merged.columns:
         merged = merged.loc[
@@ -730,37 +807,44 @@ def evaluate_outer_signal_opportunities(
             outer_oos_start_idx=fold.oos_start,
             outer_oos_end_idx=fold.oos_end,
             ready_symbols=(),
-            valid_opportunity_timestamp_count=0,
-            opportunity_ic=0.0,
-            opportunity_ic_series=(),
+            matched_event_count=0,
+            unmatched_event_count=unmatched_count,
+            realized_match_ratio=0.0,
+            unique_decision_count=0,
+            prediction_unique_count=0,
+            opportunity_ic=None,
+            opportunity_ic_tstat=0.0,
             probe_bps=0.0,
-            probe_gross_edge_series_bps=(),
+            probe_lcb_bps=0.0,
+            probe_series_bps=(),
+            effective_symbol_count=0.0,
             passed=False,
             blockers=("empty_realized_merge",),
         )
-    symbol_to_idx = {
-        symbol: idx for idx, symbol in enumerate(opportunities.symbols)
-    }
+    symbol_to_idx = {symbol: idx for idx, symbol in enumerate(aligned_symbols)}
     ic_series: list[float] = []
     probe_series: list[float] = []
     ic_mode: str = str(getattr(cfg, "l1_opp_ic_mode", "cross_section"))
+    prediction_unique_count = 0
 
     if ic_mode == "time_series":
+        prediction_unique_threshold = int(getattr(cfg, "l1_min_prediction_unique_values", 3))
         for _symbol, sym_group in merged.groupby("symbol", sort=True):
             sym_group = sym_group.drop_duplicates(subset=["decision_idx"], keep="first")
-            if sym_group.shape[0] < 3:
-                continue
-            pred_ts = (
-                sym_group["side"].to_numpy(dtype=np.float64)
-                * sym_group["expected_gross_bps"].to_numpy(dtype=np.float64)
-                / np.maximum(sym_group["expected_holding_bars"].to_numpy(dtype=np.float64), 1.0)
+            pred_ts = sym_group["expected_gross_bps"].to_numpy(dtype=np.float64)
+            real_ts = sym_group["realized_side_adjusted_gross_bps"].fillna(0.0).to_numpy(dtype=np.float64)
+            pred_unique_count = int(np.unique(np.round(pred_ts, decimals=12)).size)
+            prediction_unique_count = max(
+                prediction_unique_count,
+                pred_unique_count,
             )
-            real_ts = (
-                sym_group["side"].to_numpy(dtype=np.float64)
-                * sym_group["realized_side_adjusted_gross_bps"].fillna(0.0).to_numpy(dtype=np.float64)
-                / np.maximum(sym_group["expected_holding_bars"].to_numpy(dtype=np.float64), 1.0)
-            )
-            ic_val, _ = spearmanr(pred_ts, real_ts)
+            if (
+                sym_group.shape[0] >= max(3, prediction_unique_threshold)
+                and pred_unique_count >= prediction_unique_threshold
+            ):
+                ic_val, _ = spearmanr(pred_ts, real_ts)
+            else:
+                ic_val = np.nan
             if np.isfinite(ic_val):
                 ic_series.append(float(ic_val))
             risk_scores_ts: list[tuple[float, int]] = []
@@ -775,7 +859,9 @@ def evaluate_outer_signal_opportunities(
                     else float(volatility_2d[d_idx])
                 )
                 denom = max(vol, VOL_FLOOR)
-                risk_scores_ts.append((abs(float(row.expected_gross_bps)) / denom, row_i))
+                risk_scores_ts.append(
+                    (abs(float(row.expected_gross_bps)) * max(float(row.quality_weight), 0.0) / denom, row_i)
+                )
             if risk_scores_ts:
                 risk_scores_ts.sort(reverse=True)
                 selected_idx_arr = [ri for _, ri in risk_scores_ts[: int(cfg.l1_probe_top_k)]]
@@ -783,21 +869,22 @@ def evaluate_outer_signal_opportunities(
                 if selected_real.size > 0:
                     probe_series.append(float(np.mean(selected_real)))
     else:
+        prediction_unique_threshold = int(getattr(cfg, "l1_min_prediction_unique_values", 3))
         for decision_idx, group in merged.groupby("decision_idx", sort=True):
             group = group.drop_duplicates(subset=["symbol"], keep="first")
             if group.shape[0] < int(cfg.l1_min_cross_section):
                 continue
-            pred = (
-                group["side"].to_numpy(dtype=np.float64, copy=False)
-                * group["expected_gross_bps"].to_numpy(dtype=np.float64, copy=False)
-                / np.maximum(group["expected_holding_bars"].to_numpy(dtype=np.float64, copy=False), 1.0)
+            pred = group["expected_gross_bps"].to_numpy(dtype=np.float64, copy=False)
+            real = group["realized_side_adjusted_gross_bps"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
+            pred_unique_count = int(np.unique(np.round(pred, decimals=12)).size)
+            prediction_unique_count = max(
+                prediction_unique_count,
+                pred_unique_count,
             )
-            real = (
-                group["side"].to_numpy(dtype=np.float64, copy=False)
-                * group["realized_side_adjusted_gross_bps"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
-                / np.maximum(group["expected_holding_bars"].to_numpy(dtype=np.float64, copy=False), 1.0)
-            )
-            ic_val, _ = spearmanr(pred, real)
+            if pred_unique_count >= prediction_unique_threshold:
+                ic_val, _ = spearmanr(pred, real)
+            else:
+                ic_val = np.nan
             if np.isfinite(ic_val):
                 ic_series.append(float(ic_val))
             risk_scores: list[tuple[float, int]] = []
@@ -807,7 +894,9 @@ def evaluate_outer_signal_opportunities(
                     continue
                 vol = float(volatility_2d[int(decision_idx), symbol_idx])
                 denom = max(vol, VOL_FLOOR)
-                risk_scores.append((abs(float(row.expected_gross_bps)) / denom, row_idx))
+                risk_scores.append(
+                    (abs(float(row.expected_gross_bps)) * max(float(row.quality_weight), 0.0) / denom, row_idx)
+                )
             if risk_scores:
                 risk_scores.sort(reverse=True)
                 selected_idx = [row_idx for _, row_idx in risk_scores[: int(cfg.l1_probe_top_k)]]
@@ -815,17 +904,30 @@ def evaluate_outer_signal_opportunities(
                 if selected_real.size > 0:
                     probe_series.append(float(np.mean(selected_real)))
     ready_symbols = tuple(sorted(str(symbol) for symbol in merged["symbol"].dropna().unique()))
-    opportunity_ic = float(np.mean(ic_series)) if ic_series else 0.0
+    opportunity_ic = float(np.mean(ic_series)) if ic_series else None
+    opportunity_ic_tstat = _series_tstat(np.asarray(ic_series, dtype=np.float64))
     probe_gross_edge = float(np.mean(probe_series)) if probe_series else 0.0
+    probe_boot = moving_block_bootstrap_mean(
+        np.asarray(probe_series, dtype=np.float64),
+        np.arange(len(probe_series), dtype=np.int64),
+        block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 1)),
+        n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 1)),
+        seed=seed + fold_id,
+    )
+    probe_lcb = float(np.quantile(probe_boot, 0.05)) if probe_boot.size > 0 else probe_gross_edge
+    matched_event_count = int(merged.shape[0])
+    unique_decision_count = int(merged["decision_idx"].nunique()) if "decision_idx" in merged.columns else 0
+    realized_match_ratio = float(matched_event_count / max(1, matched_event_count + unmatched_count))
+    effective_symbol_count = float(len(ready_symbols))
     blockers: list[str] = []
     fold_min_ready_symbols = max(1, min(int(cfg.l1_min_sym_count), int(cfg.l1_min_cross_section)))
     if len(ready_symbols) < fold_min_ready_symbols:
         blockers.append("insufficient_ready_symbols")
-    if len(ic_series) < int(cfg.l1_min_opportunity_timestamps):
-        blockers.append("insufficient_opportunity_timestamps")
-    if not np.isfinite(opportunity_ic):
-        blockers.append("non_finite_ic")
-    if probe_gross_edge <= 0.0:
+    if realized_match_ratio < float(getattr(cfg, "l1_min_realized_match_ratio", 1.0)):
+        blockers.append("insufficient_realized_match_ratio")
+    if matched_event_count < int(getattr(cfg, "l1_min_matched_events_per_fold", 1)):
+        blockers.append("insufficient_matched_events")
+    if probe_lcb <= float(getattr(cfg, "l1_min_probe_bps", 0.0)):
         blockers.append("non_positive_probe")
     return Layer1FoldReadiness(
         fold_id=fold_id,
@@ -833,11 +935,17 @@ def evaluate_outer_signal_opportunities(
         outer_oos_start_idx=fold.oos_start,
         outer_oos_end_idx=fold.oos_end,
         ready_symbols=ready_symbols,
-        valid_opportunity_timestamp_count=len(ic_series),
+        matched_event_count=matched_event_count,
+        unmatched_event_count=unmatched_count,
+        realized_match_ratio=realized_match_ratio,
+        unique_decision_count=unique_decision_count,
+        prediction_unique_count=prediction_unique_count,
         opportunity_ic=opportunity_ic,
-        opportunity_ic_series=tuple(ic_series),
+        opportunity_ic_tstat=opportunity_ic_tstat,
         probe_bps=probe_gross_edge,
-        probe_gross_edge_series_bps=tuple(probe_series),
+        probe_lcb_bps=probe_lcb,
+        probe_series_bps=tuple(probe_series),
+        effective_symbol_count=effective_symbol_count,
         passed=not blockers,
         blockers=tuple(blockers),
     )
@@ -850,27 +958,23 @@ def evaluate_layer1_readiness(
     trade_scope_count: int,
     cfg: CandidateStrategyConfig,
 ) -> Layer1GateReport:
-    symbol_counter: Counter[str] = Counter()
-    ic_series: list[float] = []
+    effective_symbol_count = 0.0
     probe_series: list[float] = []
+    match_ratios: list[float] = []
+    probe_lcbs: list[float] = []
     ready_fold_count = 0
     for report in fold_reports:
         if report.passed:
             ready_fold_count += 1
-        symbol_counter.update(report.ready_symbols)
-        ic_series.extend([value for value in report.opportunity_ic_series if np.isfinite(value)])
-        probe_series.extend([value for value in report.probe_gross_edge_series_bps if np.isfinite(value)])
-    stable_ready_symbols = [
-        symbol
-        for symbol, count in symbol_counter.items()
-        if count >= int(cfg.l1_min_ready_outer_folds)
-    ]
+        effective_symbol_count = max(effective_symbol_count, report.effective_symbol_count)
+        match_ratios.append(report.realized_match_ratio)
+        probe_series.extend([value for value in report.probe_series_bps if np.isfinite(value)])
+        probe_lcbs.append(report.probe_lcb_bps)
     fold_ratio = float(ready_fold_count / len(fold_reports)) if fold_reports else 0.0
-    opp_ic = float(np.mean(ic_series)) if ic_series else 0.0
-    opp_tstat = _series_tstat(np.asarray(ic_series, dtype=np.float64))
+    match_ratio = float(np.mean(match_ratios)) if match_ratios else 0.0
     probe_bps = float(np.mean(probe_series)) if probe_series else 0.0
-    probe_tstat = _series_tstat(np.asarray(probe_series, dtype=np.float64))
-    sym_ratio = float(len(stable_ready_symbols) / max(1, trade_scope_count))
+    probe_lcb = float(np.mean(probe_lcbs)) if probe_lcbs else probe_bps
+    sym_threshold = max(float(cfg.l1_min_sym_count), float(cfg.l1_min_sym_ratio) * max(1, trade_scope_count))
     check_specs = (
         (
             "fold_cov",
@@ -878,13 +982,10 @@ def evaluate_layer1_readiness(
             float(getattr(cfg, "l1_min_fold_cov", 0.8)),
             "ge",
         ),
-        ("sym_count", float(len(stable_ready_symbols)), float(cfg.l1_min_sym_count), "ge"),
-        ("sym_ratio", sym_ratio, float(cfg.l1_min_sym_ratio), "ge"),
+        ("match_ratio", match_ratio, float(getattr(cfg, "l1_min_realized_match_ratio", 1.0)), "ge"),
+        ("sym_count", effective_symbol_count, sym_threshold, "ge"),
         ("fold_ratio", fold_ratio, float(cfg.l1_min_fold_ratio), "ge"),
-        ("opp_ic", opp_ic, float(cfg.l1_min_opp_ic), "ge"),
-        ("opp_tstat", opp_tstat, float(cfg.l1_min_opp_tstat), "ge"),
-        ("probe_bps", probe_bps, float(cfg.l1_min_probe_bps), "gt"),
-        ("probe_tstat", probe_tstat, float(cfg.l1_min_probe_tstat), "ge"),
+        ("probe_lcb_bps", probe_lcb, float(cfg.l1_min_probe_bps), "gt"),
     )
     checks: list[Layer1GateCheck] = []
     blockers: list[str] = []

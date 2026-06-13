@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -10,6 +11,9 @@ import pytest
 from src.domain.futures.strategy.candidate_contracts import (
     CandidateModelOutput,
     EdgeSource,
+    QualifiedSignalRegistry,
+    SignalSourceKey,
+    SymbolStrategyEvidence,
     ValidatedSignalBatch,
     ValidatedSignalEvent,
 )
@@ -51,8 +55,14 @@ def test_run_l1_nested_swf_emits_new_runtime_tables() -> None:
         patch("src.domain.futures.strategy.config.resolve_purge_and_embargo_bars", return_value=(1, 0)),
         patch("src.domain.futures.strategy.tiered_workflow.build_l1_swf_folds", return_value=()),
         patch("src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold", return_value=empty_out),
-        patch("src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_gate_table", return_value="gate-table"),
-        patch("src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_outer_fold_table", return_value="outer-table"),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_gate_table",
+            return_value="gate-table",
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_outer_fold_table",
+            return_value="outer-table",
+        ),
         patch(
             "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_deployment_registry_table",
             return_value="registry-table",
@@ -104,13 +114,115 @@ def test_candidate_model_output_net_fields_do_not_fallback_from_gross() -> None:
     assert output.q90_net_bps[0] == pytest.approx(0.0)
 
 
+def test_candidate_output_to_signal_batch_respects_activation_match_regime() -> None:
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+        _candidate_output_to_signal_batch,
+    )
+
+    events = pd.DataFrame(
+        {
+            "entry_idx": [5],
+            "symbol": ["BTCUSDT"],
+            "family": ["trend"],
+            "variant": ["fast"],
+            "entry_regime": ["all"],
+            "side": [1],
+            "expected_holding_bars": [4],
+        }
+    )
+    model_output = CandidateModelOutput(
+        events=events,
+        p_pass=np.asarray([1.0], dtype=np.float64),
+        edge_source=EdgeSource.PRIOR_ONLY,
+        expected_gross_bps=np.asarray([6.0], dtype=np.float64),
+        q10_gross_bps=np.asarray([4.0], dtype=np.float64),
+        q90_gross_bps=np.asarray([8.0], dtype=np.float64),
+    )
+    evidence = SymbolStrategyEvidence(
+        key=SignalSourceKey("BTCUSDT", "trend:fast", "bull"),
+        mean_gross_bps=4.0,
+        mean_incremental_bps=2.0,
+        bootstrap_tstat_incremental=2.5,
+        p_value=0.01,
+        q_value=0.02,
+        positive_fold_ratio=1.0,
+        n_obs=10,
+        effective_n=10.0,
+        n_folds=3,
+        reliability=0.8,
+        qualified=True,
+        rejection_reasons=(),
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={"BTCUSDT": (evidence,)},
+        ready_symbols=("BTCUSDT",),
+        trade_scope_count=1,
+        registry_version="v1",
+    )
+    datetimes = np.array(
+        [
+            np.datetime64("2024-01-01T00:00:00", "ns"),
+            np.datetime64("2024-01-01T04:00:00", "ns"),
+            np.datetime64("2024-01-01T08:00:00", "ns"),
+            np.datetime64("2024-01-01T12:00:00", "ns"),
+            np.datetime64("2024-01-01T16:00:00", "ns"),
+        ],
+        dtype="datetime64[ns]",
+    )
+
+    relaxed_batch = _candidate_output_to_signal_batch(
+        model_output=model_output,
+        registry=registry,
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        model_version="m1",
+        activation_floor_bps=0.0,
+        cfg=MagicMock(l1_activation_match_regime=False),
+    )
+    strict_batch = _candidate_output_to_signal_batch(
+        model_output=model_output,
+        registry=registry,
+        datetimes=datetimes,
+        symbols=("BTCUSDT",),
+        model_version="m1",
+        activation_floor_bps=0.0,
+        cfg=MagicMock(l1_activation_match_regime=True),
+    )
+
+    assert len(relaxed_batch.events) == 1
+    assert relaxed_batch.events[0].activation_context == "all"
+    assert len(strict_batch.events) == 0
+
+
+def test_symbol_strategy_evidence_qualified_ignores_diagnostic_flags() -> None:
+    evidence = SymbolStrategyEvidence(
+        key=SignalSourceKey("BTCUSDT", "trend:fast", "all"),
+        mean_gross_bps=4.0,
+        mean_incremental_bps=2.0,
+        block_tstat_incremental=0.1,
+        probability_positive=0.6,
+        p_value=0.4,
+        q_value=0.4,
+        positive_fold_ratio=1.0,
+        n_obs=8,
+        effective_n=8.0,
+        n_folds=2,
+        quality_weight=0.5,
+        hard_eligible=True,
+        structural_reasons=(),
+        diagnostic_flags=("weak_tstat",),
+    )
+
+    assert evidence.qualified is True
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
-def cfg_factory():
+def cfg_factory() -> Callable[..., CandidateStrategyConfig]:
     """Factory for CandidateStrategyConfig with selective overrides."""
 
     def _make(**overrides: object) -> CandidateStrategyConfig:
@@ -143,7 +255,7 @@ def cfg_factory():
 
 
 @pytest.fixture
-def sample_aligned():
+def sample_aligned() -> SimpleNamespace:
     """Minimal AlignedMarketData-like namespace for tests."""
     n_bars = 30
     symbols = ("BTC",)
@@ -204,7 +316,9 @@ def _make_events(
 # ---------------------------------------------------------------------------
 
 
-def test_compute_evidence_pooling_when_qualify_by_regime_false(cfg_factory) -> None:
+def test_compute_evidence_pooling_when_qualify_by_regime_false(
+    cfg_factory: Callable[..., CandidateStrategyConfig],
+) -> None:
     """l1_qualify_by_regime=False → regime A/B 이벤트가 단일 cell로 풀링되어 qualified=True."""
     events_a = _make_events(30, regime="1", fold_id=0)
     events_b = _make_events(30, regime="2", fold_id=1)
@@ -213,7 +327,12 @@ def test_compute_evidence_pooling_when_qualify_by_regime_false(cfg_factory) -> N
 
     from src.domain.futures.strategy.tiered_workflow.signal_selection import compute_symbol_strategy_evidence
 
-    evidence = compute_symbol_strategy_evidence(event_results=combined, cfg=cfg, seed=0)
+    evidence = compute_symbol_strategy_evidence(
+        event_results=combined,
+        cfg=cfg,
+        seed=0,
+        registry_as_of_idx=999,
+    )
 
     assert len(evidence) == 1, "풀링 시 단일 cell만 생성돼야 함"
     assert evidence[0].key.activation_context == "all"
@@ -221,7 +340,9 @@ def test_compute_evidence_pooling_when_qualify_by_regime_false(cfg_factory) -> N
     assert evidence[0].qualified is True
 
 
-def test_compute_evidence_regime_split_when_qualify_by_regime_true(cfg_factory) -> None:
+def test_compute_evidence_regime_split_when_qualify_by_regime_true(
+    cfg_factory: Callable[..., CandidateStrategyConfig],
+) -> None:
     """l1_qualify_by_regime=True → 동일 이벤트가 regime별 2 cell로 분리, 각 30obs."""
     events_a = _make_events(30, regime="1", fold_id=0)
     events_b = _make_events(30, regime="2", fold_id=1)
@@ -230,14 +351,21 @@ def test_compute_evidence_regime_split_when_qualify_by_regime_true(cfg_factory) 
 
     from src.domain.futures.strategy.tiered_workflow.signal_selection import compute_symbol_strategy_evidence
 
-    evidence = compute_symbol_strategy_evidence(event_results=combined, cfg=cfg, seed=0)
+    evidence = compute_symbol_strategy_evidence(
+        event_results=combined,
+        cfg=cfg,
+        seed=0,
+        registry_as_of_idx=999,
+    )
 
     assert len(evidence) == 2, "regime별 분리 시 2 cell 생성"
     contexts = {e.key.activation_context for e in evidence}
     assert contexts == {"1", "2"}
 
 
-def test_compute_evidence_qualified_with_two_folds(cfg_factory) -> None:
+def test_compute_evidence_qualified_with_two_folds(
+    cfg_factory: Callable[..., CandidateStrategyConfig],
+) -> None:
     """l1_pair_min_folds=2, cell이 2 fold 출현 → qualified=True."""
     events = pd.concat([
         _make_events(20, regime="all", fold_id=0),
@@ -247,14 +375,22 @@ def test_compute_evidence_qualified_with_two_folds(cfg_factory) -> None:
 
     from src.domain.futures.strategy.tiered_workflow.signal_selection import compute_symbol_strategy_evidence
 
-    evidence = compute_symbol_strategy_evidence(event_results=events, cfg=cfg, seed=0)
+    evidence = compute_symbol_strategy_evidence(
+        event_results=events,
+        cfg=cfg,
+        seed=0,
+        registry_as_of_idx=999,
+    )
 
     assert len(evidence) >= 1
     assert evidence[0].n_folds == 2
     assert "insufficient_folds" not in evidence[0].rejection_reasons
 
 
-def test_evaluate_outer_time_series_ic_single_symbol(cfg_factory, sample_aligned) -> None:
+def test_evaluate_outer_time_series_ic_single_symbol(
+    cfg_factory: Callable[..., CandidateStrategyConfig],
+    sample_aligned: SimpleNamespace,
+) -> None:
     """l1_opp_ic_mode='time_series' → 단일 심볼 이벤트도 IC 측정 가능."""
     from src.domain.futures.strategy.tiered_workflow.signal_selection import evaluate_outer_signal_opportunities
 
@@ -307,18 +443,23 @@ def test_evaluate_outer_time_series_ic_single_symbol(cfg_factory, sample_aligned
         opportunities=batch,
         realized_event_results=realized,
         volatility_2d=vol,
+        aligned_symbols=tuple(sample_aligned.symbols),
         fold=fold,
         fold_id=0,
         cfg=cfg,
         seed=0,
     )
 
+    assert result.opportunity_ic is not None, f"time_series IC는 None이 아님, got {result.opportunity_ic}"
     assert result.opportunity_ic > 0.0, f"time_series IC는 양수여야 함, got {result.opportunity_ic}"
     assert result.valid_opportunity_timestamp_count >= 1
     assert "non_positive_probe" not in result.blockers
 
 
-def test_evaluate_outer_empty_opportunities_blocker(cfg_factory, sample_aligned) -> None:
+def test_evaluate_outer_empty_opportunities_blocker(
+    cfg_factory: Callable[..., CandidateStrategyConfig],
+    sample_aligned: SimpleNamespace,
+) -> None:
     """기존 빈 배치 → empty_opportunities 블로커 유지 (회귀)."""
     from src.domain.futures.strategy.tiered_workflow.signal_selection import evaluate_outer_signal_opportunities
 
@@ -339,6 +480,7 @@ def test_evaluate_outer_empty_opportunities_blocker(cfg_factory, sample_aligned)
         opportunities=batch,
         realized_event_results=realized,
         volatility_2d=vol,
+        aligned_symbols=tuple(sample_aligned.symbols),
         fold=fold,
         fold_id=0,
         cfg=cfg,
@@ -349,7 +491,10 @@ def test_evaluate_outer_empty_opportunities_blocker(cfg_factory, sample_aligned)
     assert result.passed is False
 
 
-def test_candidate_output_activation_match_false(cfg_factory, sample_aligned) -> None:
+def test_candidate_output_activation_match_false(
+    cfg_factory: Callable[..., CandidateStrategyConfig],
+    sample_aligned: SimpleNamespace,
+) -> None:
     """l1_activation_match_regime=False → OOS row가 다른 regime이어도 발화됨."""
     from src.domain.futures.strategy.tiered_workflow.signal_selection import (
         build_qualified_signal_registry,
@@ -364,7 +509,12 @@ def test_candidate_output_activation_match_false(cfg_factory, sample_aligned) ->
         l1_activation_match_regime=False,
         l1_pair_min_folds=2,
     )
-    evidence = compute_symbol_strategy_evidence(event_results=combined, cfg=cfg, seed=0)
+    evidence = compute_symbol_strategy_evidence(
+        event_results=combined,
+        cfg=cfg,
+        seed=0,
+        registry_as_of_idx=999,
+    )
     registry = build_qualified_signal_registry(
         evidence=evidence,
         symbols=("BTC",),
@@ -373,3 +523,101 @@ def test_candidate_output_activation_match_false(cfg_factory, sample_aligned) ->
     )
     assert "BTC" in registry.by_symbol, "registry에 BTC가 있어야 함 (사전조건)"
     assert not bool(getattr(cfg, "l1_activation_match_regime", True)), "cfg 플래그 확인"
+
+
+def test_compute_symbol_strategy_evidence_respects_lookback_and_quality_flag(
+    cfg_factory: Callable[..., CandidateStrategyConfig],
+) -> None:
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import compute_symbol_strategy_evidence
+
+    event_results = pd.DataFrame(
+        {
+            "symbol": ["BTC", "BTC"],
+            "strategy_id": ["strat:v1", "strat:v1"],
+            "activation_context": ["all", "all"],
+            "gross_event_bps": [5.0, 7.0],
+            "baseline_gross_bps": [0.0, 0.0],
+            "side": [1, 1],
+            "expected_holding_bars": [4, 4],
+            "fold_id": [0, 1],
+            "uniqueness_weight": [1.0, 1.0],
+            "entry_idx": [10, 20],
+            "exit_idx": [12, 22],
+        }
+    )
+    cfg = cfg_factory(
+        l1_pair_min_folds=1,
+        l1_pair_min_effective_obs=1.0,
+        l1_quality_weight_enabled=False,
+        l1_evidence_lookback_bars=5,
+    )
+
+    evidence = compute_symbol_strategy_evidence(
+        event_results=event_results,
+        cfg=cfg,
+        seed=0,
+        registry_as_of_idx=25,
+    )
+
+    assert len(evidence) == 1
+    assert evidence[0].n_obs == 1
+    assert evidence[0].quality_weight == pytest.approx(1.0)
+
+
+def test_run_l1_nested_swf_builds_prequential_snapshots_once() -> None:
+    aligned = MagicMock()
+    aligned.close_2d = np.ones((32, 1), dtype=np.float64)
+    aligned.datetimes = np.array(
+        [np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(32)],
+        dtype="datetime64[ns]",
+    )
+    aligned.symbols = ("BTC",)
+
+    cfg = MagicMock()
+    cfg.wf_n_folds = 2
+    cfg.l1_min_signals_per_symbol = 1
+    cfg.l1_signal_activation_floor_bps = 0.0
+
+    empty_out = SimpleNamespace(
+        fit_status="trained",
+        model_output=SimpleNamespace(
+            events=pd.DataFrame(),
+            expected_gross_bps=np.zeros((0,), dtype=np.float64),
+            q10_gross_bps=np.zeros((0,), dtype=np.float64),
+            q90_gross_bps=np.zeros((0,), dtype=np.float64),
+        ),
+        oos_set=SimpleNamespace(
+            edge_weight=np.zeros((0,), dtype=np.float64),
+            y_return_bps=np.zeros((0,), dtype=np.float64),
+        ),
+    )
+    evidence_folds = (
+        WFFold(0, 4, 4, 6, 6, 10),
+        WFFold(0, 10, 10, 12, 12, 16),
+    )
+    outer_folds = (
+        WFFold(0, 12, 12, 16, 16, 20),
+        WFFold(0, 16, 16, 20, 20, 24),
+    )
+
+    with (
+        patch("src.domain.futures.strategy.config.resolve_purge_and_embargo_bars", return_value=(1, 0)),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.build_l1_swf_folds",
+            return_value=evidence_folds,
+        ) as mock_build,
+        patch(
+            "src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold",
+            return_value=empty_out,
+        ) as mock_fit,
+    ):
+        run_l1_nested_swf(
+            labeled_events=pd.DataFrame(),
+            aligned=aligned,
+            outer_folds=outer_folds,
+            cfg=cfg,
+            seed=3,
+        )
+
+    assert mock_build.call_count == 1
+    assert mock_fit.call_count == len(evidence_folds) + len(outer_folds)
