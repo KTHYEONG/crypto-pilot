@@ -14,13 +14,13 @@ if TYPE_CHECKING:
     from src.domain.futures.strategy.candidate_ensemble import RegimeConditionalEnsemble
 
 SignalArchetype = Literal[
-    "trend_continuation",
-    "time_series_momentum",
-    "mean_reversion",
-    "forced_flow_reversal",
-    "position_unwind",
-    "carry_reversion",
-    "beta_neutral_reversion",
+    "trend",
+    "ts_mom",
+    "mean_rev",
+    "flow_rev",
+    "unwind",
+    "carry_rev",
+    "beta_neut",
 ]
 
 RegimeName = Literal[
@@ -64,7 +64,7 @@ class CandidateSignalPanel:
     turnover_proxy_2d: NDArray[np.float64]
     valid_mask_2d: NDArray[np.bool_]
     metadata: dict[str, Any] = field(default_factory=dict)
-    archetype: SignalArchetype | str = "mean_reversion"
+    archetype: SignalArchetype | str = "mean_rev"
     allowed_regimes: tuple[RegimeName | str, ...] = ()
     exit_policies: tuple[SignalExitPolicy, ...] = ()
     regime_code_1d: NDArray[np.int8] | None = None
@@ -373,7 +373,7 @@ class Layer1FoldReadiness:
     valid_opportunity_timestamp_count: int
     opportunity_ic: float
     opportunity_ic_series: tuple[float, ...]
-    probe_gross_edge_bps: float
+    probe_bps: float
     probe_gross_edge_series_bps: tuple[float, ...]
     passed: bool
     blockers: tuple[str, ...]

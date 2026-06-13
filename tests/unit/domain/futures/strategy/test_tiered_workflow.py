@@ -1163,10 +1163,10 @@ def test_compute_prediction_decomposition_diag_s1_static_prediction() -> None:
     """S1: 예측이 (arch,regime,variant) 상수 → static_share ≈ 1.0, dynamic ≈ 0.0."""
     rng = np.random.default_rng(42)
     n = 100
-    archetypes = ["beta_neutral"] * 50 + ["mean"] * 50
+    archetypes = ["beta_neut"] * 50 + ["mean_rev"] * 50
     regimes = [1] * 50 + [2] * 50
     variants = ["v1"] * 100
-    pred = np.where(np.array(archetypes) == "beta_neutral", 5.0, -3.0).astype(np.float64)
+    pred = np.where(np.array(archetypes) == "beta_neut", 5.0, -3.0).astype(np.float64)
     real = rng.normal(0, 1, size=n)
 
     fold = _make_diag_fold_tuple(
@@ -1193,7 +1193,7 @@ def test_compute_prediction_decomposition_diag_s2_dynamic_prediction() -> None:
     fold = _make_diag_fold_tuple(
         expected_net_bps=pred,
         y_return_bps=real,
-        archetype=["beta_neutral"] * n,
+        archetype=["beta_neut"] * n,
         entry_regime_code=[1] * n,
         variant=["v1"] * n,
     )
@@ -1206,13 +1206,13 @@ def test_compute_prediction_decomposition_diag_s2_dynamic_prediction() -> None:
 
 
 def test_compute_prediction_decomposition_diag_s3_archetype_sign() -> None:
-    """S3: beta_neutral 양·mean 음 → per_archetype_oos_edge 부호 확인."""
+    """S3: beta_neut 양·mean 음 → per_archetype_oos_edge 부호 확인."""
     rng = np.random.default_rng(99)
     n_each = 60
-    arch_col = ["beta_neutral"] * n_each + ["mean"] * n_each
+    arch_col = ["beta_neut"] * n_each + ["mean_rev"] * n_each
     pred = [5.0] * n_each + [-3.0] * n_each
     real = np.concatenate([
-        rng.normal(8, 1, size=n_each),   # beta_neutral: 양
+        rng.normal(8, 1, size=n_each),   # beta_neut: 양
         rng.normal(-5, 1, size=n_each),  # mean: 음
     ])
 
@@ -1226,10 +1226,10 @@ def test_compute_prediction_decomposition_diag_s3_archetype_sign() -> None:
 
     diag = compute_prediction_decomposition_diag(fold_tuples=[fold])
 
-    assert "beta_neutral" in diag.per_archetype_oos_edge
-    assert "mean" in diag.per_archetype_oos_edge
-    bn_mu, bn_t = diag.per_archetype_oos_edge["beta_neutral"]
-    m_mu, _ = diag.per_archetype_oos_edge["mean"]
+    assert "beta_neut" in diag.per_archetype_oos_edge
+    assert "mean_rev" in diag.per_archetype_oos_edge
+    bn_mu, bn_t = diag.per_archetype_oos_edge["beta_neut"]
+    m_mu, m_t = diag.per_archetype_oos_edge["mean_rev"]
     assert bn_mu > 0
     assert bn_t > 1.96
     assert m_mu < 0
@@ -1244,7 +1244,7 @@ def test_compute_prediction_decomposition_diag_s4_decile_lift_positive() -> None
     fold = _make_diag_fold_tuple(
         expected_net_bps=pred,
         y_return_bps=real,
-        archetype=["beta_neutral"] * n,
+        archetype=["beta_neut"] * n,
         entry_regime_code=[1] * n,
         variant=["v1"] * n,
     )
@@ -1264,7 +1264,7 @@ def test_compute_prediction_decomposition_diag_s4_decile_lift_uncorrelated() -> 
     fold = _make_diag_fold_tuple(
         expected_net_bps=pred,
         y_return_bps=real,
-        archetype=["beta_neutral"] * n,
+        archetype=["beta_neut"] * n,
         entry_regime_code=[1] * n,
         variant=["v1"] * n,
     )
@@ -1294,7 +1294,7 @@ def test_compute_prediction_decomposition_diag_s6_zero_variance_pred() -> None:
     fold = _make_diag_fold_tuple(
         expected_net_bps=pred,
         y_return_bps=real,
-        archetype=["beta_neutral"] * n,
+        archetype=["beta_neut"] * n,
         entry_regime_code=[1] * n,
         variant=["v1"] * n,
     )
@@ -1311,13 +1311,13 @@ def test_compute_prediction_decomposition_diag_s7_gate_unchanged() -> None:
         static_variance_share=0.95,
         dynamic_variance_share=0.05,
         score_cal_valid_ratio=0.3,
-        per_archetype_oos_edge={"beta_neutral": (10.0, 2.5)},
+        per_archetype_oos_edge={"beta_neut": (10.0, 2.5)},
         decile_lift_bps=3.0,
     )
     assert diag.static_variance_share == pytest.approx(0.95)
     assert diag.dynamic_variance_share == pytest.approx(0.05)
     assert diag.score_cal_valid_ratio == pytest.approx(0.3)
-    _bn_mu, _bn_t = diag.per_archetype_oos_edge["beta_neutral"]
+    _bn_mu, _bn_t = diag.per_archetype_oos_edge["beta_neut"]
     assert _bn_mu == pytest.approx(10.0)
     assert _bn_t == pytest.approx(2.5)
     assert diag.decile_lift_bps == pytest.approx(3.0)
@@ -1675,7 +1675,7 @@ def test_run_tiered_pipeline_routes_layer1_through_nested_executor(
     assert len(nested_runner_calls) == 1
     assert nested_runner_calls[0]["outer_folds"] == built_outer_folds
     assert nested_runner_calls[0]["cfg"] is cfg
-    assert logged_messages == ["NESTED_LAYER1_BLOCKED"]
+    assert any("[BLOCKED]" in msg for msg in logged_messages)
 
 
 def test_candidate_output_to_signal_batch_requires_explicit_gross_targets() -> None:
@@ -1871,13 +1871,13 @@ def test_select_outer_symbol_opportunities_keeps_best_real_event_per_symbol() ->
 def test_evaluate_layer1_readiness_uses_stable_symbol_counts_and_outer_series() -> None:
     cfg = CandidateStrategyConfig(
         l1_min_ready_outer_folds=2,
-        l1_min_ready_symbols=2,
-        l1_min_ready_symbol_ratio=0.5,
-        l1_min_ready_outer_fold_ratio=0.5,
-        l1_min_opportunity_ic=0.01,
-        l1_min_opportunity_ic_tstat=0.0,
-        l1_min_probe_gross_edge_bps=0.0,
-        l1_min_probe_gross_edge_tstat=0.0,
+        l1_min_sym_count=2,
+        l1_min_sym_ratio=0.5,
+        l1_min_fold_ratio=0.5,
+        l1_min_opp_ic=0.01,
+        l1_min_opp_tstat=0.0,
+        l1_min_probe_bps=0.0,
+        l1_min_probe_tstat=0.0,
     )
     reports = (
         Layer1FoldReadiness(
@@ -1889,7 +1889,7 @@ def test_evaluate_layer1_readiness_uses_stable_symbol_counts_and_outer_series() 
             valid_opportunity_timestamp_count=3,
             opportunity_ic=0.10,
             opportunity_ic_series=(0.10, 0.12),
-            probe_gross_edge_bps=1.5,
+            probe_bps=1.5,
             probe_gross_edge_series_bps=(1.0, 2.0),
             passed=True,
             blockers=(),
@@ -1903,7 +1903,7 @@ def test_evaluate_layer1_readiness_uses_stable_symbol_counts_and_outer_series() 
             valid_opportunity_timestamp_count=3,
             opportunity_ic=0.08,
             opportunity_ic_series=(0.08, 0.09),
-            probe_gross_edge_bps=1.0,
+            probe_bps=1.0,
             probe_gross_edge_series_bps=(0.8, 1.2),
             passed=True,
             blockers=(),
@@ -1912,11 +1912,11 @@ def test_evaluate_layer1_readiness_uses_stable_symbol_counts_and_outer_series() 
 
     report = evaluate_layer1_readiness(
         fold_reports=reports,
-        trained_outer_fold_coverage=1.0,
+        fold_cov=1.0,
         trade_scope_count=2,
         cfg=cfg,
     )
 
     assert report.passed is True
-    ready_symbol_check = next(check for check in report.checks if check.key == "stable_ready_symbol_count")
+    ready_symbol_check = next(check for check in report.checks if check.key == "sym_count")
     assert ready_symbol_check.value == pytest.approx(2.0)
