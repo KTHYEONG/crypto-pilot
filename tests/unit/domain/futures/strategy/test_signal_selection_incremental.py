@@ -137,7 +137,12 @@ def test_compute_symbol_strategy_evidence_regime_exclusion_pooled() -> None:
     cfg = _make_cfg(l1_qualify_by_regime=False)
 
     # Act
-    evidence = compute_symbol_strategy_evidence(event_results=frame, cfg=cfg, seed=0)
+    evidence = compute_symbol_strategy_evidence(
+        event_results=frame,
+        cfg=cfg,
+        seed=0,
+        registry_as_of_idx=999,
+    )
 
     # Assert — single row with activation_context="all", not 3 separate regime cells
     assert len(evidence) == 1
@@ -174,6 +179,7 @@ def test_evaluate_outer_signal_opportunities_fold_id_propagated() -> None:
         opportunities=batch,
         realized_event_results=pd.DataFrame(),
         volatility_2d=vols,
+        aligned_symbols=(),
         fold=fold,
         fold_id=2,
         cfg=cfg,
@@ -182,3 +188,174 @@ def test_evaluate_outer_signal_opportunities_fold_id_propagated() -> None:
 
     # Assert — fold_id must not be hardcoded 0
     assert result.fold_id == 2
+
+
+def test_evaluate_outer_signal_opportunities_preserves_side_adjusted_gross_sign() -> None:
+    from src.domain.futures.strategy.candidate_contracts import (
+        ValidatedSignalBatch,
+        ValidatedSignalEvent,
+    )
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+        evaluate_outer_signal_opportunities,
+    )
+    from src.domain.futures.strategy.walk_forward import WFFold
+
+    batch = ValidatedSignalBatch(
+        events=(
+            ValidatedSignalEvent(
+                decision_idx=10,
+                decision_time=np.datetime64("2024-01-01T00:00:00"),
+                symbol="BTC",
+                strategy_id="strat:v1",
+                activation_context="all",
+                side=-1,
+                expected_gross_bps=12.0,
+                q10_gross_bps=10.0,
+                q90_gross_bps=14.0,
+                expected_holding_bars=4,
+                reliability=0.9,
+                registry_version="test",
+                model_version="test",
+            ),
+        ),
+        start_idx=10,
+        end_idx=11,
+        symbols=("BTC",),
+        registry_version="test",
+        model_version="test",
+    )
+    realized = pd.DataFrame(
+        {
+            "entry_idx": [11],
+            "symbol": ["BTC"],
+            "strategy_id": ["strat:v1"],
+            "activation_context": ["all"],
+            "realized_side_adjusted_gross_bps": [12.0],
+            "exit_idx": [14],
+        }
+    )
+    fold = WFFold(fit_start=0, fit_end=10, cal_start=10, cal_end=10, oos_start=10, oos_end=20)
+    cfg = _make_cfg(
+        l1_opp_ic_mode="cross_section",
+        l1_min_cross_section=1,
+        l1_probe_top_k=1,
+        l1_min_sym_count=1,
+        l1_min_opportunity_timestamps=1,
+        l1_min_fold_ratio=0.0,
+    )
+    vol = np.ones((20, 1), dtype=np.float64)
+
+    result = evaluate_outer_signal_opportunities(
+        opportunities=batch,
+        realized_event_results=realized,
+        volatility_2d=vol,
+        aligned_symbols=("BTC",),
+        fold=fold,
+        fold_id=0,
+        cfg=cfg,
+        seed=0,
+    )
+
+    assert result.probe_bps == pytest.approx(12.0)
+    assert "non_positive_probe" not in result.blockers
+
+
+def test_evaluate_outer_signal_opportunities_uses_aligned_symbol_volatility_order() -> None:
+    from src.domain.futures.strategy.candidate_contracts import (
+        ValidatedSignalBatch,
+        ValidatedSignalEvent,
+    )
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+        evaluate_outer_signal_opportunities,
+    )
+    from src.domain.futures.strategy.walk_forward import WFFold
+
+    symbols = ("SOL", "BTC", "ETH")
+    batch = ValidatedSignalBatch(
+        events=(
+            ValidatedSignalEvent(
+                decision_idx=10,
+                decision_time=np.datetime64("2024-01-01T00:00:00"),
+                symbol="SOL",
+                strategy_id="strat:v1",
+                activation_context="all",
+                side=1,
+                expected_gross_bps=1.0,
+                q10_gross_bps=0.8,
+                q90_gross_bps=1.2,
+                expected_holding_bars=4,
+                reliability=0.9,
+                registry_version="test",
+                model_version="test",
+            ),
+            ValidatedSignalEvent(
+                decision_idx=10,
+                decision_time=np.datetime64("2024-01-01T00:00:00"),
+                symbol="BTC",
+                strategy_id="strat:v1",
+                activation_context="all",
+                side=1,
+                expected_gross_bps=1.0,
+                q10_gross_bps=0.8,
+                q90_gross_bps=1.2,
+                expected_holding_bars=4,
+                reliability=0.9,
+                registry_version="test",
+                model_version="test",
+            ),
+            ValidatedSignalEvent(
+                decision_idx=10,
+                decision_time=np.datetime64("2024-01-01T00:00:00"),
+                symbol="ETH",
+                strategy_id="strat:v1",
+                activation_context="all",
+                side=1,
+                expected_gross_bps=1.0,
+                q10_gross_bps=0.8,
+                q90_gross_bps=1.2,
+                expected_holding_bars=4,
+                reliability=0.9,
+                registry_version="test",
+                model_version="test",
+            ),
+        ),
+        start_idx=10,
+        end_idx=11,
+        symbols=symbols,
+        registry_version="test",
+        model_version="test",
+    )
+    realized = pd.DataFrame(
+        {
+            "entry_idx": [11, 11, 11],
+            "symbol": ["SOL", "BTC", "ETH"],
+            "strategy_id": ["strat:v1"] * 3,
+            "activation_context": ["all"] * 3,
+            "realized_side_adjusted_gross_bps": [9.0, 1.0, 5.0],
+            "exit_idx": [14, 14, 14],
+        }
+    )
+    fold = WFFold(fit_start=0, fit_end=10, cal_start=10, cal_end=10, oos_start=10, oos_end=20)
+    cfg = _make_cfg(
+        l1_opp_ic_mode="cross_section",
+        l1_min_cross_section=3,
+        l1_probe_top_k=1,
+        l1_min_sym_count=1,
+        l1_min_opportunity_timestamps=1,
+        l1_min_fold_ratio=0.0,
+    )
+    vol = np.zeros((20, 3), dtype=np.float64)
+    vol[10] = np.asarray([0.01, 0.2, 0.1], dtype=np.float64)
+
+    result = evaluate_outer_signal_opportunities(
+        opportunities=batch,
+        realized_event_results=realized,
+        volatility_2d=vol,
+        aligned_symbols=("BTC", "ETH", "SOL"),
+        fold=fold,
+        fold_id=0,
+        cfg=cfg,
+        seed=0,
+    )
+
+    assert result.probe_bps == pytest.approx(1.0)
