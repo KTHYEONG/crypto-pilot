@@ -104,6 +104,27 @@ def _is_non_constant_finite_array(values: NDArray[np.float64]) -> bool:
     return float(np.nanstd(finite)) > 0.0
 
 
+def resolve_safe_nested_workers(n_tasks: int, frame_memory_bytes: int) -> int:
+    """Compute safe worker count dynamically under WSL constraints."""
+    import os
+
+    import psutil
+
+    physical_cores = os.cpu_count() or 4
+    cpu_limit = max(1, physical_cores // 2)
+
+    mem = psutil.virtual_memory()
+    available_gb = mem.available / (1024 ** 3)
+    safe_mem_gb = available_gb * 0.70
+
+    frame_gb = frame_memory_bytes / (1024 ** 3)
+    estimated_proc_gb = 0.3 + max(0.1, frame_gb * 3.0)
+
+    mem_limit = max(1, int(safe_mem_gb // estimated_proc_gb))
+
+    return max(1, min(n_tasks, cpu_limit, mem_limit, 6))
+
+
 def build_l1_prequential_evidence_snapshots(
     *,
     labeled_events: pd.DataFrame,
@@ -114,32 +135,66 @@ def build_l1_prequential_evidence_snapshots(
     seed: int,
 ) -> tuple[Layer1EvidenceSnapshot, ...]:
     """Build causal evidence snapshots from a single pass over evidence folds."""
-    import src.domain.futures.strategy.tiered_workflow as _tw
     from src.domain.futures.strategy.config import resolve_purge_and_embargo_bars
 
     purge_bars, _embargo_bars = resolve_purge_and_embargo_bars(cfg)
     evidence_frames: list[pd.DataFrame] = []
-    for evidence_idx, evidence_fold in enumerate(evidence_folds):
-        evidence_out = _tw._fit_and_predict_single_fold(
-            evidence_idx,
-            evidence_fold,
-            labeled_events,
-            aligned,
-            cfg,
-            purge_bars,
+
+    if not evidence_folds:
+        all_evidence_events = pd.DataFrame()
+    else:
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+
+        import src.domain.futures.strategy.candidate_workflow as cw
+
+        # Set process globals to minimize IPC size under fork
+        cw._GLOBAL_LABELED_EVENTS = labeled_events
+        cw._GLOBAL_ALIGNED = aligned
+        cw._GLOBAL_CFG = cfg
+        cw._GLOBAL_PURGE_BARS = purge_bars
+        mp_ctx = multiprocessing.get_context("fork")
+
+        # Calculate memory consumption dynamically
+        try:
+            frame_memory_bytes = int(labeled_events.memory_usage(deep=True).sum())
+        except Exception:
+            frame_memory_bytes = int(labeled_events.memory_usage().sum())
+
+        workers = resolve_safe_nested_workers(len(evidence_folds), frame_memory_bytes)
+        logger.debug(
+            "[EVIDENCE-PREQ] Fitting %d evidence folds in parallel with %d workers (WSL OOM Guard)",
+            len(evidence_folds),
+            workers,
         )
-        if _is_trained_fold_output(evidence_out):
-            evidence_frames.append(
-                _event_results_from_fold_output(
-                    fold_id=evidence_idx,
-                    fold_out=evidence_out,
+
+        flat_results = []
+        try:
+            with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as executor:
+                submits = [
+                    executor.submit(cw._fit_and_predict_single_fold_from_globals, idx, fold)
+                    for idx, fold in enumerate(evidence_folds)
+                ]
+                flat_results = [fut.result() for fut in submits]
+        finally:
+            cw._GLOBAL_LABELED_EVENTS = None
+            cw._GLOBAL_ALIGNED = None
+            cw._GLOBAL_CFG = None
+            cw._GLOBAL_PURGE_BARS = None
+
+        for evidence_idx, evidence_out in enumerate(flat_results):
+            if _is_trained_fold_output(evidence_out):
+                evidence_frames.append(
+                    _event_results_from_fold_output(
+                        fold_id=evidence_idx,
+                        fold_out=evidence_out,
+                    )
                 )
-            )
-    all_evidence_events = (
-        pd.concat(evidence_frames, ignore_index=True)
-        if evidence_frames
-        else pd.DataFrame()
-    )
+        all_evidence_events = (
+            pd.concat(evidence_frames, ignore_index=True)
+            if evidence_frames
+            else pd.DataFrame()
+        )
     snapshots: list[Layer1EvidenceSnapshot] = []
     for snapshot_offset, as_of_idx in enumerate(sorted(set(snapshot_indices))):
         evidence = compute_symbol_strategy_evidence(
@@ -591,6 +646,45 @@ def run_l1_nested_swf(
     )
     snapshots_by_idx = {snapshot.as_of_idx: snapshot for snapshot in evidence_snapshots}
 
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
+    import src.domain.futures.strategy.candidate_workflow as cw
+
+    # Set process globals to minimize IPC size under fork
+    cw._GLOBAL_LABELED_EVENTS = labeled_events
+    cw._GLOBAL_ALIGNED = aligned
+    cw._GLOBAL_CFG = l1_cfg
+    cw._GLOBAL_PURGE_BARS = purge_bars
+    mp_ctx = multiprocessing.get_context("fork")
+
+    # Calculate memory consumption dynamically
+    try:
+        frame_memory_bytes = int(labeled_events.memory_usage(deep=True).sum())
+    except Exception:
+        frame_memory_bytes = int(labeled_events.memory_usage().sum())
+
+    workers = resolve_safe_nested_workers(len(outer_folds), frame_memory_bytes)
+    logger.debug(
+        "[L1-NESTED-OUTER] Fitting %d outer folds in parallel with %d workers (WSL OOM Guard)",
+        len(outer_folds),
+        workers,
+    )
+
+    outer_results = []
+    try:
+        with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as executor:
+            submits = [
+                executor.submit(cw._fit_and_predict_single_fold_from_globals, idx, fold)
+                for idx, fold in enumerate(outer_folds)
+            ]
+            outer_results = [fut.result() for fut in submits]
+    finally:
+        cw._GLOBAL_LABELED_EVENTS = None
+        cw._GLOBAL_ALIGNED = None
+        cw._GLOBAL_CFG = None
+        cw._GLOBAL_PURGE_BARS = None
+
     for outer_idx, outer_fold in enumerate(outer_folds):
         snapshot = snapshots_by_idx.get(outer_fold.oos_start)
         evidence = snapshot.evidence if snapshot is not None else ()
@@ -612,14 +706,7 @@ def run_l1_nested_swf(
                 outer_idx,
                 len(evidence),
             )
-        outer_out = _tw._fit_and_predict_single_fold(
-            outer_idx,
-            outer_fold,
-            labeled_events,
-            aligned,
-            l1_cfg,
-            purge_bars,
-        )
+        outer_out = outer_results[outer_idx]
         if _is_trained_fold_output(outer_out):
             trained_count += 1
         outer_events = _event_results_from_fold_output(
