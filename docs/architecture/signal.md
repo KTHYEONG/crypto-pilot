@@ -170,8 +170,14 @@ graph TD
 - `l1_opp_ic_mode="time_series"` (default): per-symbol Spearman IC over event timeline (≥3 events per symbol). Eliminates cross-section synchrony requirement; enables IC measurement with few ready symbols.
 - `l1_opp_ic_mode="cross_section"`: legacy per-bar cross-section IC (≥`l1_min_cross_section` symbols per bar required).
 
-**Hard Gate Evaluation**
+**Hard Gate Evaluation & Adaptive Thresholds**
 - **Requirements**: Gate checks include `fold_cov`, `sym_count`, `sym_ratio`, `fold_ratio`, `opp_ic`, `opp_tstat`, `probe_bps`, `probe_tstat`.
+- **Adaptive Student's t-Threshold**: 소표본 크기에 연동되는 단측 $t$-임계치 적용:
+  $$t_{\text{crit}} = F^{-1}_{t(df)}\left(1 - \alpha\right)$$
+  ($df = N_{\text{eff}} - 1.0$, $df < 2.0$ 인 소표본의 경우 $t_{\text{crit}} = \infty$로 자동 필터링)
+- **MDES (Minimum Detectable Effect Size) Filter**: 유의 검정력을 충족하는 최소 우위 bps 하한선 규정:
+  $$\text{MDES\_bps} = \frac{t_{\text{crit}} + t_{\text{power}}}{\sqrt{N_{\text{eff}}}} \times S_{\text{incremental}}$$
+  조건: $\text{mean\_incremental\_bps} > \text{MDES\_bps} \times \text{l1\_pair\_mdes\_multiplier}$
 - **Failure Handling**: Any single gate check failure triggers `gate_passed = False`, resulting in no final inference artifact.
-- **Config defaults (post-refactor)**: `l1_pair_min_folds=2`, `l1_min_cross_section=2`, `l1_opp_ic_mode="time_series"`, `l1_qualify_by_regime=False`, `l1_activation_match_regime=False`.
+- **Config defaults (post-refactor)**: `l1_pair_min_folds=2`, `l1_min_cross_section=2`, `l1_opp_ic_mode="time_series"`, `l1_qualify_by_regime=False`, `l1_activation_match_regime=False`, `l1_pair_min_effective_obs=5.0`.
 
