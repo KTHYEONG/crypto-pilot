@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -422,6 +423,7 @@ def _internal_validation_rank_ic(
     When variant_prior_enabled=True, predictions use 3-level fallback:
     variant_mu → cell_mu → arch_mu → global_mu.
     """
+    t_start = time.perf_counter()
     if "entry_idx" not in frame.columns or frame.shape[0] < 10:
         return 0.0
 
@@ -552,6 +554,8 @@ def _internal_validation_rank_ic(
     pred = base_vals
 
     realized = val_set[_resolve_ensemble_target_column(val_set)].to_numpy(dtype=np.float64, copy=False)
+    elapsed = time.perf_counter() - t_start
+    _logger.debug("[perf-ensemble] _internal_validation_rank_ic axis=%s took %.4fs", axis, elapsed)
     return _rank_ic_local(pred, realized)
 
 
@@ -574,6 +578,7 @@ def fit_regime_conditional_ensemble(
     Returns:
         Fitted RegimeConditionalEnsemble with optional lift_proof diagnostics.
     """
+    t_fit_start = time.perf_counter()
     if train_events.empty:
         return RegimeConditionalEnsemble(
             cell_mu_bps={},
@@ -923,6 +928,11 @@ def fit_regime_conditional_ensemble(
         cell_q90 = {}
         conditioning_path = "no_oos_evidence_failsafe"
 
+    _logger.debug(
+        "[perf-ensemble] fit_regime_conditional_ensemble finished in %.4fs (N=%d)",
+        time.perf_counter() - t_fit_start,
+        len(frame),
+    )
     return RegimeConditionalEnsemble(
         cell_mu_bps=cell_mu,
         cell_q10_bps=cell_q10,
