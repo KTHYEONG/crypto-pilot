@@ -16,6 +16,8 @@ from src.domain.futures.strategy.regime_evaluation import (
 )
 
 _logger = logging.getLogger(__name__)
+_GROSS_TARGET_COLUMNS = ("gross_return_bps", "gross_event_bps", "gross_fwd_bps")
+_LEGACY_TARGET_COLUMNS = ("net_return_bps", "net_event_bps", "edge_after_hurdle_bps")
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +61,23 @@ def _variant_key(family: str, variant: str) -> str:
     return f"{family}:{variant}"
 
 
+def _resolve_ensemble_target_column(events: pd.DataFrame) -> str:
+    for column in _GROSS_TARGET_COLUMNS:
+        if column in events.columns:
+            return column
+    for column in _LEGACY_TARGET_COLUMNS:
+        if column in events.columns:
+            return column
+    raise ValueError(
+        "missing ensemble target column; expected one of "
+        f"{[*_GROSS_TARGET_COLUMNS, *_LEGACY_TARGET_COLUMNS]}"
+    )
+
+
+def _target_contract_kind(events: pd.DataFrame) -> str:
+    return "gross" if any(column in events.columns for column in _GROSS_TARGET_COLUMNS) else "legacy_net"
+
+
 def _fit_variant_means(
     frame: pd.DataFrame,
     *,
@@ -77,11 +96,12 @@ def _fit_variant_means(
     w_v = n_eff / (n_eff + k_variant), n_v < min_obs → w_v ≈ 0 (anchor fallback).
 
     Requires frame to have 'family', 'variant', 'archetype', 'entry_regime_code',
-    'net_return_bps' columns. Returns empty dicts if columns absent.
+    and one supported target column. Returns empty dicts if columns absent.
     """
-    required = {"family", "variant", "archetype", "entry_regime_code", "net_return_bps"}
+    required = {"family", "variant", "archetype", "entry_regime_code"}
     if not required.issubset(frame.columns):
         return {}, {}
+    target_column = _resolve_ensemble_target_column(frame)
 
     def _effective_n(raw_n: int) -> float:
         if freq_n_cap > 0:
@@ -95,7 +115,7 @@ def _fit_variant_means(
     vkeys = (fam_col + ":" + var_col).values
     arch_col = frame["archetype"].astype(str).values
     regime_col = pd.to_numeric(frame["entry_regime_code"], errors="coerce").fillna(0).astype(int).values
-    edge_col = pd.to_numeric(frame["net_return_bps"], errors="coerce").values
+    edge_col = pd.to_numeric(frame[target_column], errors="coerce").values
 
     for vkey in np.unique(vkeys):
         family = vkey.split(":")[0]
@@ -135,10 +155,11 @@ def _fit_variant_means(
 
 
 def _require_ensemble_columns(events: pd.DataFrame) -> None:
-    required = {"archetype", "entry_regime_code", "net_return_bps"}
+    required = {"archetype", "entry_regime_code"}
     missing = sorted(required.difference(events.columns))
     if missing:
         raise ValueError(f"missing required ensemble columns: {missing}")
+    _resolve_ensemble_target_column(events)
 
 
 def _rank_ic_local(pred: np.ndarray, target: np.ndarray) -> float:
@@ -281,7 +302,8 @@ def _fit_cell_means(
         min_cell_edge_floor_bps: Cell means below this floor are set to 0.0
             (no-prediction rather than negative allocation).
     """
-    edge = frame["net_return_bps"].to_numpy(dtype=np.float64, copy=False)
+    target_column = _resolve_ensemble_target_column(frame)
+    edge = frame[target_column].to_numpy(dtype=np.float64, copy=False)
     global_mu = float(np.mean(edge))
     global_q10 = float(np.percentile(edge, 10))
     global_q90 = float(np.percentile(edge, 90))
@@ -301,7 +323,7 @@ def _fit_cell_means(
     arch_raw_vars: list[float] = []
     arch_groups: list[tuple[str, np.ndarray]] = []
     for archetype, grp in frame.groupby("archetype", sort=False):
-        vals = grp["net_return_bps"].to_numpy(dtype=np.float64, copy=False)
+        vals = grp[target_column].to_numpy(dtype=np.float64, copy=False)
         a = str(archetype)
         arch_raw_means.append(float(np.mean(vals)))
         arch_raw_vars.append(float(np.var(vals)) if len(vals) > 1 else 0.0)
@@ -333,7 +355,7 @@ def _fit_cell_means(
         for (archetype, regime_code), grp in frame.groupby(
             ["archetype", "entry_regime_code"], sort=False
         ):
-            vals = grp["net_return_bps"].to_numpy(dtype=np.float64, copy=False)
+            vals = grp[target_column].to_numpy(dtype=np.float64, copy=False)
             key = (str(archetype), int(regime_code))
             cell_raw_means.append(float(np.mean(vals)))
             cell_raw_vars.append(float(np.var(vals)) if len(vals) > 1 else 0.0)
@@ -440,17 +462,18 @@ def _internal_validation_rank_ic(
     _sub_intercept: dict[int, float] = {}
     _sub_valid: dict[int, bool] = {}
     if score_calibration_enabled and "score_z" in sub_fit.columns and "entry_regime_code" in sub_fit.columns:
+        target_column = _resolve_ensemble_target_column(sub_fit)
         _sz_col = pd.to_numeric(sub_fit["score_z"], errors="coerce").clip(-score_z_clip, score_z_clip)
         _sub_z = sub_fit.copy()
         _sub_z["_sz_cal"] = _sz_col
         for _rc, _grp in _sub_z.groupby("entry_regime_code", sort=False):
             _gs = int(_rc)
-            _vm = _grp["_sz_cal"].notna() & _grp["net_return_bps"].notna()
+            _vm = _grp["_sz_cal"].notna() & _grp[target_column].notna()
             _nv = int(_vm.sum())
             if _nv < score_calibration_min_obs:
                 continue
             _zs = _grp.loc[_vm, "_sz_cal"].to_numpy(dtype=np.float64)
-            _ys = _grp.loc[_vm, "net_return_bps"].to_numpy(dtype=np.float64)
+            _ys = _grp.loc[_vm, target_column].to_numpy(dtype=np.float64)
             _rho = float(np.corrcoef(_zs, _ys)[0, 1])
             if not np.isfinite(_rho):
                 continue
@@ -517,7 +540,7 @@ def _internal_validation_rank_ic(
 
         pred = val_set_p.apply(_predict_arch, axis=1).to_numpy(dtype=np.float64)
 
-    realized = val_set["net_return_bps"].to_numpy(dtype=np.float64, copy=False)
+    realized = val_set[_resolve_ensemble_target_column(val_set)].to_numpy(dtype=np.float64, copy=False)
     return _rank_ic_local(pred, realized)
 
 
@@ -553,9 +576,10 @@ def fit_regime_conditional_ensemble(
         )
 
     _require_ensemble_columns(train_events)
+    target_column = _resolve_ensemble_target_column(train_events)
     _variant_cols = [c for c in ("family", "variant") if c in train_events.columns]
     _score_cols = [c for c in ("score_z",) if c in train_events.columns]
-    _base_cols = ["archetype", "entry_regime_code", "net_return_bps", *_variant_cols, *_score_cols]
+    _base_cols = ["archetype", "entry_regime_code", target_column, *_variant_cols, *_score_cols]
     if "symbol" in train_events.columns:
         _base_cols.append("symbol")
     frame = train_events.loc[:, _base_cols].copy()
@@ -563,11 +587,11 @@ def fit_regime_conditional_ensemble(
         frame["entry_idx"] = train_events["entry_idx"].values
     frame["archetype"] = frame["archetype"].astype(str)
     frame["entry_regime_code"] = pd.to_numeric(frame["entry_regime_code"], errors="coerce")
-    frame["net_return_bps"] = pd.to_numeric(frame["net_return_bps"], errors="coerce")
+    frame[target_column] = pd.to_numeric(frame[target_column], errors="coerce")
     frame = frame.loc[
         frame["archetype"].ne("")
         & frame["entry_regime_code"].notna()
-        & frame["net_return_bps"].notna()
+        & frame[target_column].notna()
     ].copy()
     if frame.empty:
         return RegimeConditionalEnsemble(
@@ -708,7 +732,7 @@ def fit_regime_conditional_ensemble(
 
         for regime_code, grp in frame_with_z.groupby("entry_regime_code", sort=False):
             g = int(regime_code)
-            valid_mask = grp["_score_z"].notna() & grp["net_return_bps"].notna()
+            valid_mask = grp["_score_z"].notna() & grp[target_column].notna()
             n_valid = int(valid_mask.sum())
             if n_valid < score_calibration_min_obs:
                 score_calibration_valid[g] = False
@@ -725,7 +749,7 @@ def fit_regime_conditional_ensemble(
             )
 
             z_arr = grp_ordered["_score_z"].to_numpy(dtype=np.float64)
-            y_arr = grp_ordered["net_return_bps"].to_numpy(dtype=np.float64)
+            y_arr = grp_ordered[target_column].to_numpy(dtype=np.float64)
 
             rho = float(np.corrcoef(z_arr, y_arr)[0, 1])
             if not np.isfinite(rho):
@@ -784,7 +808,7 @@ def fit_regime_conditional_ensemble(
         _n_valid_sc = sum(score_calibration_valid.values())
         _n_total_sc = len(score_calibration_valid)
         # obs_too_low: regimes not in score_calibration_valid (skipped via continue)
-        if "score_z" in frame.columns and "net_return_bps" in frame.columns:
+        if "score_z" in frame.columns:
             _all_regimes = set(frame["entry_regime_code"].dropna().astype(int).unique())
             _n_obs_low = len(_all_regimes - set(score_calibration_valid.keys()))
         else:
@@ -807,6 +831,7 @@ def fit_regime_conditional_ensemble(
         k_used=shrinkage_k if not adaptive_shrinkage else shrinkage_k_max,
         num_valid_regimes=sum(score_calibration_valid.values()),
     )
+    ensemble_diag["target_contract"] = _target_contract_kind(train_events)
 
     # P0: Regime Lift Proof Gate
     lift_proof: RegimeLiftProofResult | None = None
@@ -817,22 +842,22 @@ def fit_regime_conditional_ensemble(
         and fold_ids is not None
         and chosen == "archetype_regime"
         and not oos_proof_events.empty
-        and "net_return_bps" in oos_proof_events.columns
     ):
+        proof_target_column = _resolve_ensemble_target_column(oos_proof_events)
         proof_events = oos_proof_events.loc[
-            :, ["archetype", "entry_regime_code", "net_return_bps"]
+            :, ["archetype", "entry_regime_code", proof_target_column]
         ].copy()
         proof_events["archetype"] = proof_events["archetype"].astype(str)
         proof_events["entry_regime_code"] = pd.to_numeric(
             proof_events["entry_regime_code"], errors="coerce"
         )
-        proof_events["net_return_bps"] = pd.to_numeric(
-            proof_events["net_return_bps"], errors="coerce"
+        proof_events[proof_target_column] = pd.to_numeric(
+            proof_events[proof_target_column], errors="coerce"
         )
         proof_events = proof_events.loc[
             proof_events["archetype"].ne("")
             & proof_events["entry_regime_code"].notna()
-            & proof_events["net_return_bps"].notna()
+            & proof_events[proof_target_column].notna()
         ].copy()
         proof_events["entry_regime_code"] = proof_events["entry_regime_code"].astype(int)
 
@@ -840,7 +865,7 @@ def fit_regime_conditional_ensemble(
         if proof_events.shape[0] != proof_fold_ids.shape[0]:
             raise ValueError("oos_proof_events and fold_ids must align")
 
-        realized = proof_events["net_return_bps"].to_numpy(dtype=np.float64, copy=False)
+        realized = proof_events[proof_target_column].to_numpy(dtype=np.float64, copy=False)
         mu_regime_arr = _predict_mu_by_event(
             proof_events,
             cell_mu=cell_mu,
@@ -926,10 +951,16 @@ def predict_regime_conditional_ensemble(
             gate_threshold=0.0,
             edge_source=EdgeSource.PRIOR_ONLY,
             expected_net_bps=np.zeros((0,), dtype=np.float64),
+            expected_gross_bps=np.zeros((0,), dtype=np.float64),
             q10_net_bps=np.zeros((0,), dtype=np.float64),
+            q10_gross_bps=np.zeros((0,), dtype=np.float64),
             q90_net_bps=np.zeros((0,), dtype=np.float64),
+            q90_gross_bps=np.zeros((0,), dtype=np.float64),
             selection_score=np.zeros((0,), dtype=np.float64),
-            validation_diagnostics={"allocation_backend": "ensemble_b0"},
+            validation_diagnostics={
+                "allocation_backend": "ensemble_b0",
+                "target_contract": model.ensemble_diagnostics.get("target_contract", "gross"),
+            },
         )
 
     required = {"archetype", "entry_regime_code"}
@@ -1016,6 +1047,9 @@ def predict_regime_conditional_ensemble(
         cs_mean = float(np.mean(mu_net_decision_bps))
         mu_net_decision_bps = lam * mu_net_decision_bps + (1.0 - lam) * cs_mean
 
+    q10_net_bps = np.minimum(q10_net_bps, mu_net_decision_bps)
+    q90_net_bps = np.maximum(q90_net_bps, mu_net_decision_bps)
+
     p_pass = np.ones(len(event_frame), dtype=np.float64)
     return CandidateModelOutput(
         events=oos_events.copy(),
@@ -1024,11 +1058,15 @@ def predict_regime_conditional_ensemble(
         gate_threshold=0.0,
         edge_source=EdgeSource.PRIOR_ONLY,
         expected_net_bps=mu_net_decision_bps,
+        expected_gross_bps=mu_net_decision_bps.copy(),
         q10_net_bps=q10_net_bps,
+        q10_gross_bps=q10_net_bps.copy(),
         q90_net_bps=q90_net_bps,
+        q90_gross_bps=q90_net_bps.copy(),
         selection_score=mu_net_decision_bps.copy(),
         validation_diagnostics={
             "allocation_backend": "ensemble_b0",
+            "target_contract": model.ensemble_diagnostics.get("target_contract", "gross"),
             "prediction_mode": "ensemble_b0",
             "conditioning": model.conditioning,
             "conditioning_path": model.conditioning_path,

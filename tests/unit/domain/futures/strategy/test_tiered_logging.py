@@ -13,7 +13,18 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.domain.futures.optimization.opt_config import LayeredWindow
+from src.domain.futures.strategy.candidate_contracts import (
+    Layer1FoldReadiness,
+    Layer1GateCheck,
+    Layer1GateReport,
+    QualifiedSignalRegistry,
+    SignalSourceKey,
+    SymbolStrategyEvidence,
+)
 from src.domain.futures.strategy.tiered_logging import (
+    format_layer1_deployment_registry_table,
+    format_layer1_gate_table,
+    format_layer1_outer_fold_table,
     format_layer1_table,
     format_layer2_table,
     format_layer3_table,
@@ -124,6 +135,78 @@ class TestFormatLayer1Table:
         assert "85.0%" in result
 
 
+def test_format_layer1_gate_table_uses_explicit_checks() -> None:
+    report = Layer1GateReport(
+        checks=(
+            Layer1GateCheck("stable_ready_symbol_count", 2.0, 6.0, "ge", False, "2.000"),
+            Layer1GateCheck("probe_gross_edge_bps", 0.8, 0.0, "gt", True, None),
+        ),
+        passed=False,
+        blockers=("stable_ready_symbol_count:2.000",),
+    )
+
+    result = format_layer1_gate_table(report)
+
+    assert "stable_ready_symbol_count" in result
+    assert "FAIL" in result
+    assert "BLOCKED" in result
+
+
+def test_format_layer1_outer_fold_table_shows_ready_symbol_count() -> None:
+    reports = (
+        Layer1FoldReadiness(
+            fold_id=10,
+            registry_source_end_idx=100,
+            outer_oos_start_idx=110,
+            outer_oos_end_idx=140,
+            ready_symbols=("BTCUSDT", "ETHUSDT"),
+            valid_opportunity_timestamp_count=4,
+            opportunity_ic=0.12,
+            opportunity_ic_series=(0.1, 0.14),
+            probe_gross_edge_bps=1.5,
+            probe_gross_edge_series_bps=(1.0, 2.0),
+            passed=True,
+            blockers=(),
+        ),
+    )
+
+    result = format_layer1_outer_fold_table(reports)
+
+    assert "LAYER 1 OUTER FOLDS" in result
+    assert "2" in result
+    assert "PASS" in result
+
+
+def test_format_layer1_deployment_registry_table_lists_strategy_rows() -> None:
+    evidence = SymbolStrategyEvidence(
+        key=SignalSourceKey("BTCUSDT", "trend:fast", "bull"),
+        mean_gross_bps=4.0,
+        mean_incremental_bps=1.5,
+        bootstrap_tstat_incremental=2.1,
+        p_value=0.02,
+        q_value=0.04,
+        positive_fold_ratio=0.75,
+        n_obs=20,
+        effective_n=15.0,
+        n_folds=3,
+        reliability=0.9,
+        qualified=True,
+        rejection_reasons=(),
+    )
+    registry = QualifiedSignalRegistry(
+        by_symbol={"BTCUSDT": (evidence,)},
+        ready_symbols=("BTCUSDT",),
+        trade_scope_count=1,
+        registry_version="deployment",
+    )
+
+    result = format_layer1_deployment_registry_table(registry)
+
+    assert "trend:fast" in result
+    assert "bull" in result
+    assert "BTCUSDT" in result
+
+
 # ---------------------------------------------------------------------------
 # TI15: format_system_status
 # ---------------------------------------------------------------------------
@@ -192,7 +275,7 @@ class TestFormatSystemStatus:
 class TestFormatWindowTable:
     """TI16: WindowTable 파이프 테이블 포맷 검증."""
 
-    @pytest.fixture  # type: ignore[untyped-decorator]
+    @pytest.fixture
     def sample_window(self) -> LayeredWindow:
         """표준 LayeredWindow 픽스처."""
         return LayeredWindow(
