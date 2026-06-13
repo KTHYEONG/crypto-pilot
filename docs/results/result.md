@@ -1,9 +1,7 @@
+## phase signal latest run (2026-06-13)
+
 discover_universe_timeline: l2_start(2024-10-01) < oos_start(2025-10-01), ignoring l2_start
-[CACHE] Backfill: 2022-04-01 ~ 2026-03-31 | Symbols: 94 | Last: 2026-04-01
-Sync mode=full targeted_symbols=94
-Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/symbol_sync_profiles.json
-[SYNC-COVERAGE] rows=36 file=/home/kth/my_coin_traider/logs/futures/universe/sync_coverage_report.parquet
-Ledger update complete.
+[CACHE] Skip backfill as requested
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ [SYSTEM CONTEXT: INFRASTRUCTURE & DATA PREPARATION]                          │
 │ ────────────────────────────────────────────────────────────────────────────── │
@@ -51,38 +49,36 @@ Ledger update complete.
 └─Mu: B:20.9✅ M:7.0✅ T:17.4✅ m:10.1✅ U:20.8✅
 [ENS] Sym:18  N:29,690  IC:0.007✅  Mu:14.7  Mode:Arch-Only  k:50.0
 └─Mu: B:52.7✅ F:4.8✅ M:9.3✅ T:38.5✅ m:24.3✅ U:13.1✅
+[L1-NESTED] Outer fold 0: registry empty — prequential evidence produced 0 pairs, 0 qualified. Check l1_pair_* thresholds.
 [ENS] Sym:18  N:33,368  IC:0.055✅  Mu:13.6  Mode:Arch-Only  k:50.0
 └─Mu: B:56.8✅ F:3.9✅ M:8.3✅ T:29.4✅ m:22.7✅ U:22.3✅
+[L1-NESTED] Outer fold 1: registry empty — prequential evidence produced 513 pairs, 0 qualified. Check l1_pair_* thresholds.
 [LAYER 1 OUTER FOLDS] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  STATUS: ❌ BLOCKED (0/4 Folds Ready)
+  STATUS: ✅ READY (1/4 Folds Ready)
 
   [❌] Fold #0 (Fit:2602 → OOS:2848)
-       ReadySyms: 2 | Times: 0 | IC: 0.000 | Probe: 0.000
-       └─ Blockers: insufficient_opportunity_timestamps, non_positive_probe
+       ReadySyms: 0 | Times: 0 | IC: 0.000 | Probe: 0.000
+       └─ Blockers: empty_opportunities
 
   [❌] Fold #1 (Fit:3129 → OOS:3506)
-       ReadySyms: 2 | Times: 0 | IC: 0.000 | Probe: 0.000
-       └─ Blockers: insufficient_opportunity_timestamps, non_positive_probe
+       ReadySyms: 0 | Times: 0 | IC: 0.000 | Probe: 0.000
+       └─ Blockers: empty_opportunities
 
-  [❌] Fold #2 (Fit:3655 → OOS:4164)
-       ReadySyms: 3 | Times: 0 | IC: 0.000 | Probe: 0.000
-       └─ Blockers: insufficient_opportunity_timestamps, non_positive_probe
+  [✅] Fold #2 (Fit:3655 → OOS:4164)
+       ReadySyms: 3 | Times: 78 | IC: 0.000 | Probe: 8.057
 
   [❌] Fold #3 (Fit:4182 → OOS:4822)
-       ReadySyms: 11 | Times: 0 | IC: 0.000 | Probe: 0.000
-       └─ Blockers: insufficient_opportunity_timestamps, non_positive_probe
+       ReadySyms: 4 | Times: 91 | IC: 0.000 | Probe: 21.229
+       └─ Blockers: non_positive_probe
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [LAYER 1 HARD GATE] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  STATUS: ❌ BLOCKED (1/8 Passed)
+  STATUS: ❌ BLOCKED (1/5 Passed)
 
   [✅] Fold-Cov        :   1.000 (>=0.800 )
-  [❌] Sym-Count       :   3.000 (>=6.000 )  ← BLOCKER
-  [❌] Sym-Ratio       :   0.054 (>=0.300 )  ← BLOCKER
-  [❌] Fold-Ratio      :   0.000 (>=0.600 )  ← BLOCKER
-  [❌] Opp-IC          :   0.000 (>=0.020 )  ← BLOCKER
-  [❌] Opp-Tstat       :   0.000 (>=1.960 )  ← BLOCKER
-  [❌] Probe-bps       :   0.000 (>0.000  )  ← BLOCKER
-  [❌] Probe-Tstat     :   0.000 (>=1.960 )  ← BLOCKER
+  [❌] Match-Ratio     :   0.500 (>=1.000 )  ← BLOCKER
+  [❌] Sym-Count       :   4.000 (>=16.800)  ← BLOCKER
+  [❌] Fold-Ratio      :   0.250 (>=0.600 )  ← BLOCKER
+  [❌] Probe-LCB       : -25.679 (>0.000  )  ← BLOCKER
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 >> LAYER 1 RESULT: [BLOCKED] -> gate_passed=False
