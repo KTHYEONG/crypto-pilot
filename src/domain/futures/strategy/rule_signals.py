@@ -297,26 +297,26 @@ def _resolve_panel_archetype(panel: CandidateSignalPanel) -> str:
     if archetype:
         return archetype
     if family in {"trend_ma", "trend_donchian", "vol_breakout", "trend_pullback_continuation", "mtf_trend_pullback", "mtf_breakout_retest", "oi_breakout_confirm", "vol_term_structure_gate"}:
-        return "trend_continuation"
+        return "trend"
     if family in {"dual_momentum", "taker_imbalance_momentum"}:
-        return "time_series_momentum"
+        return "ts_mom"
     if family in {"funding_carry", "funding_zscore_carry", "basis_zscore_reversion", "basis_momentum"}:
-        return "carry_reversion"
+        return "carry_rev"
     if family in {"residual_reversion"}:
-        return "beta_neutral_reversion"
+        return "beta_neut"
     if family in {"oi_price_divergence", "funding_extreme_reversal"}:
-        return "position_unwind"
+        return "unwind"
     if family in {"taker_exhaustion_reversal"}:
-        return "forced_flow_reversal"
-    return "mean_reversion"
+        return "flow_rev"
+    return "mean_rev"
 
 
 def _allowed_regimes_for_archetype(archetype: str) -> tuple[str, ...]:
-    if archetype in {"trend_continuation", "time_series_momentum"}:
+    if archetype in {"trend", "ts_mom"}:
         return ("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile")
-    if archetype in {"forced_flow_reversal", "position_unwind"}:
+    if archetype in {"flow_rev", "unwind"}:
         return ("bull_volatile", "bear_volatile", "crash")
-    if archetype == "carry_reversion":
+    if archetype == "carry_rev":
         return ("bull_quiet", "bear_quiet", "transition")
     return ("bull_quiet", "bear_quiet", "transition")
 
@@ -324,7 +324,7 @@ def _allowed_regimes_for_archetype(archetype: str) -> tuple[str, ...]:
 def _legacy_exit_policy(panel: CandidateSignalPanel) -> SignalExitPolicy:
     return SignalExitPolicy(
         policy_id="legacy",
-        archetype="mean_reversion",
+        archetype="mean_rev",
         stop_atr_mult=float(panel.stop_atr_mult),
         take_profit_atr_mult=float(panel.take_profit_atr_mult),
         expected_holding_bars=int(panel.expected_holding_bars),
@@ -362,7 +362,7 @@ def _attach_signal_context(
         allowed_regimes = _allowed_regimes_for_archetype(archetype)
         side_hint_2d = np.asarray(panel.side_hint_2d, dtype=np.int8).copy()
         if cfg.regime_signal_gating_enabled or (
-            cfg.mean_reversion_regime_entry_gating_enabled and archetype == "mean_reversion"
+            cfg.mean_rev_gating_enabled and archetype == "mean_rev"
         ):
             allowed_mask = np.isin(regime_names[regime_ctx.code_1d], np.asarray(allowed_regimes, dtype=object))
             side_hint_2d[~allowed_mask, :] = 0
@@ -944,7 +944,7 @@ def build_rule_signal_panels(
                 ),
                 valid_mask_2d=valid_mask,
                 metadata={
-                    "archetype": "trend_continuation",
+                    "archetype": "trend",
                     "regime": "established_trend_pullback",
                     "edge_hypothesis": (
                         "pullback recovery inside an established trend improves continuation "
@@ -982,7 +982,7 @@ def build_rule_signal_panels(
                 turnover_proxy_2d=np.abs(np.diff(np.clip(_dm_score, -1.0, 1.0), axis=0, prepend=0.0)),
                 valid_mask_2d=valid_mask,
                 metadata={
-                    "archetype": "time_series_momentum",
+                    "archetype": "ts_mom",
                     "regime": "multi_horizon_trend_agreement",
                     "edge_hypothesis": (
                         "aligned short and long horizon momentum produces more durable "
@@ -1025,7 +1025,7 @@ def build_rule_signal_panels(
                 turnover_proxy_2d=np.abs(np.diff(_rr_score.astype(np.float64, copy=False), axis=0, prepend=0.0)),
                 valid_mask_2d=valid_mask,
                 metadata={
-                    "archetype": "beta_neutral_reversion",
+                    "archetype": "beta_neut",
                     "regime": "btc_adjusted_overextension",
                     "edge_hypothesis": (
                         "large BTC-adjusted residual moves mean revert when they reflect "
@@ -1082,7 +1082,7 @@ def build_rule_signal_panels(
                 turnover_proxy_2d=np.abs(np.diff(np.clip(_g1_score, -1.0, 1.0), axis=0, prepend=0.0)),
                 valid_mask_2d=valid_mask,
                 metadata={
-                    "archetype": "trend_continuation",
+                    "archetype": "trend",
                     "regime": "top_down_trend_pullback",
                     "edge_hypothesis": "1d trend direction filters 4h rsi oversold/overbought pullback trigger entries"
                 }
@@ -1128,7 +1128,7 @@ def build_rule_signal_panels(
                 turnover_proxy_2d=np.abs(np.diff(np.clip(_g2_score, -1.0, 1.0), axis=0, prepend=0.0)),
                 valid_mask_2d=valid_mask,
                 metadata={
-                    "archetype": "trend_continuation",
+                    "archetype": "trend",
                     "regime": "retest_breakout",
                     "edge_hypothesis": "1d breakout channel level retested on 4h grid with subsequent continuation bounce"
                 }
@@ -1163,7 +1163,7 @@ def build_rule_signal_panels(
                 turnover_proxy_2d=np.abs(np.diff(_g3_score, axis=0, prepend=0.0)),
                 valid_mask_2d=valid_mask,
                 metadata={
-                    "archetype": "position_unwind",
+                    "archetype": "unwind",
                     "regime": "price_oi_divergence",
                     "edge_hypothesis": "price rise on oi drop indicates weak short cover; price fall on oi rise indicates aggressive shorts"
                 }
@@ -1206,7 +1206,7 @@ def build_rule_signal_panels(
                 turnover_proxy_2d=np.abs(np.diff(_g4_score, axis=0, prepend=0.0)),
                 valid_mask_2d=valid_mask,
                 metadata={
-                    "archetype": "trend_continuation",
+                    "archetype": "trend",
                     "regime": "oi_backed_breakout",
                     "edge_hypothesis": "breakouts confirmed by 12h trend increase in OI ensure institutional positioning backing"
                 }
@@ -1241,7 +1241,7 @@ def build_rule_signal_panels(
                 turnover_proxy_2d=np.abs(np.diff(_g5_score, axis=0, prepend=0.0)),
                 valid_mask_2d=valid_mask,
                 metadata={
-                    "archetype": "carry_reversion",
+                    "archetype": "carry_rev",
                     "regime": "basis_overextension",
                     "edge_hypothesis": "extreme futures basis premium/discount reverts to long-term rolling mean"
                 }
@@ -1282,7 +1282,7 @@ def build_rule_signal_panels(
                 turnover_proxy_2d=np.abs(np.diff(_g6_score, axis=0, prepend=0.0)),
                 valid_mask_2d=valid_mask,
                 metadata={
-                    "archetype": "carry_reversion",
+                    "archetype": "carry_rev",
                     "regime": "basis_momentum",
                     "edge_hypothesis": "1d basis momentum bias aligns with 4h price direction for carry momentum follow-through"
                 }
@@ -1317,7 +1317,7 @@ def build_rule_signal_panels(
                 turnover_proxy_2d=np.abs(np.diff(_g7_score, axis=0, prepend=0.0)),
                 valid_mask_2d=valid_mask,
                 metadata={
-                    "archetype": "time_series_momentum",
+                    "archetype": "ts_mom",
                     "regime": "orderflow_momentum",
                     "edge_hypothesis": "order-flow imbalance (CVD slope) persistent trends drive near-term price momentum"
                 }
@@ -1364,7 +1364,7 @@ def build_rule_signal_panels(
                 turnover_proxy_2d=np.abs(np.diff(_g8_score, axis=0, prepend=0.0)),
                 valid_mask_2d=valid_mask,
                 metadata={
-                    "archetype": "forced_flow_reversal",
+                    "archetype": "flow_rev",
                     "regime": "taker_exhaustion",
                     "edge_hypothesis": "reversal of aggressive orderflow exhaustion at 1d trend extremities captures swift mean reversion"
                 }
@@ -1398,7 +1398,7 @@ def build_rule_signal_panels(
                 turnover_proxy_2d=np.abs(np.diff(_g9_score, axis=0, prepend=0.0)),
                 valid_mask_2d=valid_mask,
                 metadata={
-                    "archetype": "position_unwind",
+                    "archetype": "unwind",
                     "regime": "funding_extreme",
                     "edge_hypothesis": "extreme funding rates indicate overcrowded positioning and trigger rapid liquidation/unwind reversion"
                 }
@@ -1447,7 +1447,7 @@ def build_rule_signal_panels(
                 turnover_proxy_2d=np.abs(np.diff(_g10_score, axis=0, prepend=0.0)),
                 valid_mask_2d=valid_mask,
                 metadata={
-                    "archetype": "trend_continuation",
+                    "archetype": "trend",
                     "regime": "vol_ratio_gated_trend",
                     "edge_hypothesis": "breakouts are filtered to execute only during high HTF realized vol vs LTF realized vol (low volatility regimes) to avoid whipsaws"
                 }

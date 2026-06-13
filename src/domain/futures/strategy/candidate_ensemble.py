@@ -205,36 +205,45 @@ def _log_ensemble_diagnostics(
     adaptive_shrinkage: bool,
     k_used: float,
     num_valid_regimes: int = 0,
+    score_cal_summary: str | None = None,
 ) -> dict[str, Any]:
-    """Emit a concise diagnostic log and return data for aggregation.
-
-    Compresses the previous multi-line table into 2 lines to reduce noise.
-    """
+    """Emit a consolidated diagnostic log for ensemble fitting."""
     n_total = len(frame)
     ic_sign = "✅" if val_ic > 0 else "❌"
-    if "symbol" in frame.columns and not frame.empty:
-        n_syms = int(frame["symbol"].nunique())
-        symbol_name = f"POOL({n_syms})"
-    else:
-        symbol_name = "POOL(0)"
+    n_syms = int(frame["symbol"].nunique()) if "symbol" in frame.columns and not frame.empty else 0
+    sym_info = f"ActiveSyms({n_syms})"
 
+    # [ENSEMBLE] Header line
     summary = (
-        f"[ENSEMBLE] {symbol_name} | N: {n_total} | IC: {val_ic:.4f} ({ic_sign}) | "
-        f"Mu: {global_mu:.3f} | {chosen} | k: {k_used:.1f}"
+        f"[ENSEMBLE] {sym_info} | N: {n_total:,} | IC: {val_ic:.4f} {ic_sign} | "
+        f"Mu: {global_mu:.2f} | Mode: {chosen.replace('_', '-').title()} | k: {k_used:.1f}"
     )
-    
+
+    # Archetype performance display
+    DISPLAY_ARCH_MAP = {
+        "beta_neut": "Beta",
+        "mean_rev": "Mean",
+        "unwind": "Unwnd",
+        "ts_mom": "Mom",
+        "trend": "Trnd",
+        "flow_rev": "Flow",
+        "carry_rev": "Carry",
+    }
     arch_items = []
     for arch, mu_val in sorted(arch_mu.items()):
         sign = "✅" if mu_val >= 0.0 else "❌"
-        # Extract short label (e.g., ts_mom from time_series_momentum)
-        label = arch.replace("_reversion", "").replace("_continuation", "").replace("time_series_", "ts_")
-        arch_items.append(f"{label}: {mu_val:.1f} ({sign})")
-    
-    detail = f"└─ mu_bps: [{', '.join(arch_items)}] | score_cal: {num_valid_regimes} valid"
+        label = DISPLAY_ARCH_MAP.get(arch, arch[:5].title())
+        arch_items.append(f"{label}:{mu_val:.1f}{sign}")
+
+    # Sub-line 1: mu_bps
+    detail = f"└─ Mu(bps): [{', '.join(arch_items)}]"
+    if score_cal_summary:
+        detail += f" | {score_cal_summary}"
+
     _logger.info("%s\n%s", summary, detail)
 
     return {
-        "symbol": symbol_name,
+        "symbol": sym_info,
         "n_events": n_total,
         "val_ic": val_ic,
         "global_mu": global_mu,
@@ -803,21 +812,20 @@ def fit_regime_conditional_ensemble(
                         g, beta_shrunk, float(np.corrcoef(z_arr[probe_start:], y_arr[probe_start:])[0, 1]), n_valid,
                     )
 
-    # ── Score-Cal 요약 (INFO, C1 진단) ──────────────────────────────────────
+    # ── Score-Cal 요약 (Consolidated into Ensemble log) ──────────────────────
+    score_cal_summary = None
     if score_calibration_enabled and score_calibration_valid:
         _n_valid_sc = sum(score_calibration_valid.values())
         _n_total_sc = len(score_calibration_valid)
-        # obs_too_low: regimes not in score_calibration_valid (skipped via continue)
         if "score_z" in frame.columns:
             _all_regimes = set(frame["entry_regime_code"].dropna().astype(int).unique())
             _n_obs_low = len(_all_regimes - set(score_calibration_valid.keys()))
         else:
             _n_obs_low = 0
-        _logger.info(
-            "[SCORE-CAL-DIAG] valid=%d/%d obs_too_low=%d neg_slope_or_oos_fail=%d (min_obs=%d)",
-            _n_valid_sc, _n_total_sc, _n_obs_low,
-            sum(1 for v in score_calibration_valid.values() if not v),
-            score_calibration_min_obs,
+            
+        score_cal_summary = (
+            f"ScoreCal:{_n_valid_sc}/{_n_total_sc} valid "
+            f"(LowObs:{_n_obs_low}, Fail:{sum(1 for v in score_calibration_valid.values() if not v)})"
         )
 
     # ── Diagnostic table (IC sign audit) ─────────────────────────────────────
@@ -830,6 +838,7 @@ def fit_regime_conditional_ensemble(
         adaptive_shrinkage=adaptive_shrinkage,
         k_used=shrinkage_k if not adaptive_shrinkage else shrinkage_k_max,
         num_valid_regimes=sum(score_calibration_valid.values()),
+        score_cal_summary=score_cal_summary,
     )
     ensemble_diag["target_contract"] = _target_contract_kind(train_events)
 

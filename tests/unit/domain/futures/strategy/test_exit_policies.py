@@ -3,9 +3,9 @@ from __future__ import annotations
 from src.domain.futures.strategy.exit_policies import build_exit_policies_for_panel
 
 
-def test_build_exit_policies_for_trend_continuation_volatile_adds_fail_fast() -> None:
+def test_build_exit_policies_for_trend_volatile_adds_fail_fast() -> None:
     policies = build_exit_policies_for_panel(
-        archetype="trend_continuation",
+        archetype="trend",
         regime_name="bull_volatile",
         base_expected_holding_bars=12,
         base_min_holding_bars=4,
@@ -17,9 +17,9 @@ def test_build_exit_policies_for_trend_continuation_volatile_adds_fail_fast() ->
     assert policies[1].min_holding_bars <= 3
 
 
-def test_build_exit_policies_for_mean_reversion_uses_snapback() -> None:
+def test_build_exit_policies_for_mean_rev_uses_snapback() -> None:
     policies = build_exit_policies_for_panel(
-        archetype="mean_reversion",
+        archetype="mean_rev",
         regime_name="transition",
         base_expected_holding_bars=10,
         base_min_holding_bars=3,

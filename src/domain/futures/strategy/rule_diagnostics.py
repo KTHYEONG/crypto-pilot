@@ -1625,7 +1625,7 @@ def compute_rule_diagnostics(
     )
     decision["keep_archetypes"] = ",".join(keep_archetypes)
     decision["keep_archetype_count"] = len(keep_archetypes)
-    decision["keep_has_trend"] = int(any(a in {"trend_continuation", "time_series_momentum"} for a in keep_archetypes))
+    decision["keep_has_trend"] = int(any(a in {"trend", "ts_mom"} for a in keep_archetypes))
     decision["keep_has_reversion"] = int(any("reversion" in a for a in keep_archetypes))
 
     recommendation_failure_report: dict[str, Any] | None = None
