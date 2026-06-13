@@ -32,6 +32,93 @@ def _fmt_date(d: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# §9.0 System Dashboard & Headers
+# ---------------------------------------------------------------------------
+
+def format_system_context_dashboard(
+    *,
+    window: Any,
+    universe_report: dict[str, Any],
+    data_quality: dict[str, Any],
+    strategy_info: dict[str, Any],
+) -> str:
+    """Consolidate initialization metadata into a single box dashboard."""
+    w = window
+    u = universe_report
+    dq = data_quality
+    s = strategy_info
+
+    def _box(content: list[str], width: int = 78) -> str:
+        top = "┌" + "─" * width + "┐"
+        bottom = "└" + "─" * width + "┘"
+        lines = [top]
+        for line in content:
+            lines.append(f"│ {line:<{width-2}} │")
+        lines.append(bottom)
+        return "\n".join(lines)
+
+    # Convert window to string
+    window_str = f"Range: {w.fetch_start} ~ {w.end_date} (IS:{w.is_start}, OOS:{w.oos_start})"
+    
+    # Universe string
+    u_str = (
+        f"Discovered: {u.get('discovered', 0)} symbols | "
+        f"Selected: {u.get('selected', 0)} | "
+        f"Live Panel: {u.get('live_panel', 0)}"
+    )
+
+    # Data Quality string
+    dq_str = (
+        f"Loaded: {dq.get('loaded_ratio', '0%')} ({dq.get('loaded_count', 0)}/{dq.get('req_count', 0)}) | "
+        f"Ready: {dq.get('ready_count', 0)} | "
+        f"Dropped: {dq.get('fail_summary', '-')}"
+    )
+
+    # Strategy info
+    engine_name = s.get("engine", "Alpha-Ensemble Engine")
+    s_str = (
+        f"Engine: {engine_name} | "
+        f"Inf Panel: {s.get('inf_panel', 0)} | "
+        f"Trade Scope: {s.get('trade_scope', 0)}"
+    )
+
+    content = [
+        "[SYSTEM CONTEXT: INFRASTRUCTURE & DATA PREPARATION]",
+        "─" * 78,
+        f"Window:   {window_str}",
+        f"Universe: {u_str}",
+        f"Quality:  {dq_str}",
+        f"Strategy: {s_str}",
+    ]
+    return _box(content)
+
+
+def format_layer_header(layer: int, title: str) -> str:
+    """Format a prominent section header for a logic layer."""
+    bar = "=" * 80
+    return f"\n{bar}\n[LAYER {layer}: {title.upper()}]\n{bar}"
+
+
+def format_data_integrity_summary(
+    total: int,
+    passed: int,
+    bars: int,
+    nan_pct: float,
+    zero_pct: float,
+) -> str:
+    """Return a clean one-liner if all pass, or a summary of failures."""
+    if total == passed:
+        return (
+            f"[DATA-INTEGRITY] ✅ ALL {total} SYMBOLS PASSED "
+            f"(Bars: {bars:,} | NaN: {nan_pct:.1f}% | Zero/Neg: {zero_pct:.1f}%)"
+        )
+    return (
+        f"[DATA-INTEGRITY] ❌ {total - passed}/{total} SYMBOLS FAILED "
+        f"(Bars: {bars:,} | NaN: {nan_pct:.1f}% | Zero/Neg: {zero_pct:.1f}%)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # §9.1 Window table
 # ---------------------------------------------------------------------------
 
@@ -155,6 +242,18 @@ def format_layer1_gate_table(report: Any) -> str:
     checks = tuple(getattr(report, "checks", ()) or ())
     passed = bool(getattr(report, "passed", False))
     blockers = tuple(getattr(report, "blockers", ()) or ())
+    
+    DISPLAY_GATE_MAP = {
+        "fold_cov": "Fold-Cov",
+        "sym_count": "Sym-Count",
+        "sym_ratio": "Sym-Ratio",
+        "fold_ratio": "Fold-Ratio",
+        "opp_ic": "Opp-IC",
+        "opp_tstat": "Opp-Tstat",
+        "probe_bps": "Probe-bps",
+        "probe_tstat": "Probe-Tstat",
+    }
+    
     lines = [
         "[LAYER 1 HARD GATE] --------------------------------",
         "| Gate                        | Value   | Threshold | Status  | Blocker |",
@@ -166,12 +265,24 @@ def format_layer1_gate_table(report: Any) -> str:
         status = "PASS" if bool(getattr(check, "passed", False)) else "FAIL"
         blocker = getattr(check, "blocker", None) or "-"
         value = float(getattr(check, "value", 0.0))
+        key_str = getattr(check, "key", "")
+        display_key = DISPLAY_GATE_MAP.get(key_str, key_str)
         lines.append(
-            f"| {getattr(check, 'key', ''):<27} | {value:>7.3f} | {threshold:<9} | {status:<7} | {blocker:<7} |"
+            f"| {display_key:<27} | {value:>7.3f} | {threshold:<9} | {status:<7} | {blocker:<7} |"
         )
+        
+    display_blockers = []
+    for blk in blockers:
+        parts = blk.split(":")
+        if len(parts) == 2:
+            display_blockers.append(f"{DISPLAY_GATE_MAP.get(parts[0], parts[0])}:{parts[1]}")
+        else:
+            display_blockers.append(blk)
+    blockers_str = "; ".join(display_blockers) if display_blockers else "-"
+
     lines.append(
         f"| {'Layer1 Gate':<27} | {'-':<7} | {'ALL':<9} | {_gate(passed):<7} | "
-        f"{('; '.join(blockers) if blockers else '-'): <7} |"
+        f"{blockers_str: <7} |"
     )
     lines.append("------------------------------------------------------")
     return "\n".join(lines)
@@ -192,7 +303,7 @@ def format_layer1_outer_fold_table(reports: tuple[Any, ...]) -> str:
             f"{int(getattr(report, 'outer_oos_start_idx', 0)):<11} | {ready_count:<13} | "
             f"{int(getattr(report, 'valid_opportunity_timestamp_count', 0)):<5} | "
             f"{float(getattr(report, 'opportunity_ic', 0.0)):<6.3f} | "
-            f"{float(getattr(report, 'probe_gross_edge_bps', 0.0)):<6.2f} | {status:<6} |"
+            f"{float(getattr(report, 'probe_bps', 0.0)):<6.3f} | {status:<6} |"
         )
     lines.append("------------------------------------------------------")
     return "\n".join(lines)
