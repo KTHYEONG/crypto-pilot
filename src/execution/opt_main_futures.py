@@ -826,7 +826,7 @@ def _run_strategy_stage(
             from src.domain.futures.strategy.tiered_workflow import run_tiered_pipeline
 
             _logger.info(
-                "[TIERED] aligned scope: %d symbols (historical union ∩ data-valid)",
+                "[TIERED] 💠 Scope: %d symbols (Historical Union ∩ Data-Valid)",
                 len(effective_trade_syms),
             )
             aligned_tiered = align_data_maps(

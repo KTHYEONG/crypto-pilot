@@ -148,8 +148,10 @@ def test_format_layer1_gate_table_uses_explicit_checks() -> None:
     result = format_layer1_gate_table(report)
 
     assert "Sym-Count" in result
-    assert "FAIL" in result
+    assert "❌" in result
+    assert "BLOCKER" in result
     assert "BLOCKED" in result
+    assert "1/2 Passed" in result
 
 
 def test_format_layer1_outer_fold_table_shows_ready_symbol_count() -> None:
@@ -174,7 +176,10 @@ def test_format_layer1_outer_fold_table_shows_ready_symbol_count() -> None:
 
     assert "LAYER 1 OUTER FOLDS" in result
     assert "2" in result
-    assert "PASS" in result
+    assert "READY" in result
+    assert "✅" in result
+    assert "Fold #10" in result
+    assert "ReadySyms: 2" in result
 
 
 def test_format_layer1_deployment_registry_table_lists_strategy_rows() -> None:

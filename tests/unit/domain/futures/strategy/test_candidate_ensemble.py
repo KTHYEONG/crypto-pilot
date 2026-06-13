@@ -810,9 +810,9 @@ def test_diagnostic_log_emits_negative_ic_flag(caplog: pytest.LogCaptureFixture)
 
     combined = "\n".join(caplog.messages)
     assert "❌" in combined
-    assert "Anti_" in combined
-    assert "Norma" in combined
-    assert "Archetype-Only" in combined
+    assert "A:-3.0❌" in combined
+    assert "N:12.0✅" in combined
+    assert "Arch-Only" in combined
 
 
 # ---------------------------------------------------------------------------
