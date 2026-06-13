@@ -1,9 +1,5 @@
 discover_universe_timeline: l2_start(2024-10-01) < oos_start(2025-10-01), ignoring l2_start
-[CACHE] Backfill: 2022-04-01 ~ 2026-03-31 | Symbols: 94 | Last: 2026-04-01
-Sync mode=full targeted_symbols=94
-Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/symbol_sync_profiles.json
-[SYNC-COVERAGE] rows=36 file=/home/kth/my_coin_traider/logs/futures/universe/sync_coverage_report.parquet
-Ledger update complete.
+[CACHE] Skip backfill as requested
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ [SYSTEM CONTEXT: INFRASTRUCTURE & DATA PREPARATION]                          │
 │ ────────────────────────────────────────────────────────────────────────────── │
@@ -64,20 +60,20 @@ Ledger update complete.
        ReadySyms: 0 | Times: 0 | IC: 0.000 | Probe: 0.000
        └─ Blockers: empty_opportunities
 
-  [❌] Fold #4164 (Fit:3655 → OOS:4164)
-       ReadySyms: 1 | Times: 0 | IC: 0.000 | Probe: 0.000
-       └─ Blockers: insufficient_ready_symbols, insufficient_opportunity_timestamps, non_positive_probe
+  [❌] Fold #0 (Fit:3655 → OOS:4164)
+       ReadySyms: 0 | Times: 0 | IC: 0.000 | Probe: 0.000
+       └─ Blockers: empty_opportunities
 
-  [❌] Fold #4822 (Fit:4182 → OOS:4822)
-       ReadySyms: 1 | Times: 0 | IC: 0.000 | Probe: 0.000
-       └─ Blockers: insufficient_ready_symbols, insufficient_opportunity_timestamps, non_positive_probe
+  [❌] Fold #0 (Fit:4182 → OOS:4822)
+       ReadySyms: 0 | Times: 0 | IC: 0.000 | Probe: 0.000
+       └─ Blockers: empty_opportunities
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [LAYER 1 HARD GATE] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   STATUS: ❌ BLOCKED (1/8 Passed)
 
   [✅] Fold-Cov        :   1.000 (>=0.800 )
-  [❌] Sym-Count       :   1.000 (>=6.000 )  ← BLOCKER
-  [❌] Sym-Ratio       :   0.018 (>=0.300 )  ← BLOCKER
+  [❌] Sym-Count       :   0.000 (>=6.000 )  ← BLOCKER
+  [❌] Sym-Ratio       :   0.000 (>=0.300 )  ← BLOCKER
   [❌] Fold-Ratio      :   0.000 (>=0.600 )  ← BLOCKER
   [❌] Opp-IC          :   0.000 (>=0.020 )  ← BLOCKER
   [❌] Opp-Tstat       :   0.000 (>=1.960 )  ← BLOCKER
