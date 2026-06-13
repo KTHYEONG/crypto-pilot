@@ -106,16 +106,26 @@ def format_data_integrity_summary(
     nan_pct: float,
     zero_pct: float,
 ) -> str:
-    """Return a clean one-liner if all pass, or a summary of failures."""
+    """Return a clean dashboard summary for data integrity audit."""
+    width = 60
+    border = "━" * width
+    
     if total == passed:
-        return (
-            f"[DATA-INTEGRITY] ✅ ALL {total} SYMBOLS PASSED "
-            f"(Bars: {bars:,} | NaN: {nan_pct:.1f}% | Zero/Neg: {zero_pct:.1f}%)"
-        )
-    return (
-        f"[DATA-INTEGRITY] ❌ {total - passed}/{total} SYMBOLS FAILED "
-        f"(Bars: {bars:,} | NaN: {nan_pct:.1f}% | Zero/Neg: {zero_pct:.1f}%)"
-    )
+        lines = [
+            f"[DATA-INTEGRITY] {border}",
+            f"  STATUS: ✅ ALL {total} SYMBOLS PASSED (Bars: {bars:,})",
+            f"  AUDIT:  [NaN: {nan_pct:.1f}%] [Zero/Neg: {zero_pct:.1f}%] [Hi>=Lo: PASS]",
+            border
+        ]
+        return "\n".join(lines)
+        
+    lines = [
+        f"[DATA-INTEGRITY] {border}",
+        f"  STATUS: ❌ {total - passed}/{total} SYMBOLS FAILED (Bars: {bars:,})",
+        f"  AUDIT:  [NaN: {nan_pct:.1f}%] [Zero/Neg: {zero_pct:.1f}%]",
+        border
+    ]
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -238,10 +248,9 @@ def format_layer1_table(
 
 
 def format_layer1_gate_table(report: Any) -> str:
-    """Format Layer1 hard-gate checks from a gate report."""
+    """Format Layer1 hard-gate checks from a gate report (Dashboard List Type)."""
     checks = tuple(getattr(report, "checks", ()) or ())
     passed = bool(getattr(report, "passed", False))
-    blockers = tuple(getattr(report, "blockers", ()) or ())
     
     DISPLAY_GATE_MAP = {
         "fold_cov": "Fold-Cov",
@@ -254,58 +263,83 @@ def format_layer1_gate_table(report: Any) -> str:
         "probe_tstat": "Probe-Tstat",
     }
     
+    n_checks = len(checks)
+    n_passed = sum(1 for c in checks if bool(getattr(c, "passed", False)))
+    
+    status_icon = "✅" if passed else "❌"
+    status_text = "PASSED" if passed else "BLOCKED"
+    
+    width = 60
+    border = "━" * width
     lines = [
-        "[LAYER 1 HARD GATE] --------------------------------",
-        "| Gate                        | Value   | Threshold | Status  | Blocker |",
-        "| --------------------------- | ------- | --------- | ------- | ------- |",
+        f"[LAYER 1 HARD GATE] {border}",
+        f"  STATUS: {status_icon} {status_text} ({n_passed}/{n_checks} Passed)",
+        ""
     ]
+    
     for check in checks:
-        comparator = ">=" if getattr(check, "comparator", "ge") == "ge" else ">"
-        threshold = f"{comparator}{getattr(check, 'threshold', 0.0):.3f}"
-        status = "PASS" if bool(getattr(check, "passed", False)) else "FAIL"
-        blocker = getattr(check, "blocker", None) or "-"
-        value = float(getattr(check, "value", 0.0))
+        check_passed = bool(getattr(check, "passed", False))
+        icon = "✅" if check_passed else "❌"
+        
         key_str = getattr(check, "key", "")
         display_key = DISPLAY_GATE_MAP.get(key_str, key_str)
+        
+        value = float(getattr(check, "value", 0.0))
+        comparator = ">=" if getattr(check, "comparator", "ge") == "ge" else ">"
+        threshold = f"{comparator}{getattr(check, 'threshold', 0.0):.3f}"
+        
+        blocker_suffix = "  ← BLOCKER" if not check_passed else ""
+        
         lines.append(
-            f"| {display_key:<27} | {value:>7.3f} | {threshold:<9} | {status:<7} | {blocker:<7} |"
+            f"  [{icon}] {display_key:<15} : {value:>7.3f} ({threshold:<8}){blocker_suffix}"
         )
         
-    display_blockers = []
-    for blk in blockers:
-        parts = blk.split(":")
-        if len(parts) == 2:
-            display_blockers.append(f"{DISPLAY_GATE_MAP.get(parts[0], parts[0])}:{parts[1]}")
-        else:
-            display_blockers.append(blk)
-    blockers_str = "; ".join(display_blockers) if display_blockers else "-"
-
-    lines.append(
-        f"| {'Layer1 Gate':<27} | {'-':<7} | {'ALL':<9} | {_gate(passed):<7} | "
-        f"{blockers_str: <7} |"
-    )
-    lines.append("------------------------------------------------------")
+    lines.append(border)
     return "\n".join(lines)
 
 
 def format_layer1_outer_fold_table(reports: tuple[Any, ...]) -> str:
-    """Format outer-fold readiness diagnostics."""
+    """Format outer-fold readiness diagnostics (Dashboard List Type)."""
+    n_folds = len(reports)
+    n_passed = sum(1 for r in reports if bool(getattr(r, "passed", False)))
+    
+    status_icon = "✅" if n_passed > 0 else "❌"
+    status_text = "READY" if n_passed > 0 else "BLOCKED"
+    
+    width = 60
+    border = "━" * width
     lines = [
-        "[LAYER 1 OUTER FOLDS] ------------------------------",
-        "| Fold | Registry Source End | Outer Start | Ready Symbols | Times | IC     | Probe  | Status |",
-        "| ---- | ------------------- | ----------- | ------------- | ----- | ------ | ------ | ------ |",
+        f"[LAYER 1 OUTER FOLDS] {border}",
+        f"  STATUS: {status_icon} {status_text} ({n_passed}/{n_folds} Folds Ready)",
+        ""
     ]
-    for report in reports:
-        ready_count = len(tuple(getattr(report, "ready_symbols", ()) or ()))
-        status = "PASS" if bool(getattr(report, "passed", False)) else "FAIL"
-        lines.append(
-            f"| {int(getattr(report, 'fold_id', 0)):<4} | {int(getattr(report, 'registry_source_end_idx', 0)):<19} | "
-            f"{int(getattr(report, 'outer_oos_start_idx', 0)):<11} | {ready_count:<13} | "
-            f"{int(getattr(report, 'valid_opportunity_timestamp_count', 0)):<5} | "
-            f"{float(getattr(report, 'opportunity_ic', 0.0)):<6.3f} | "
-            f"{float(getattr(report, 'probe_bps', 0.0)):<6.3f} | {status:<6} |"
-        )
-    lines.append("------------------------------------------------------")
+    
+    for r in reports:
+        passed = bool(getattr(r, "passed", False))
+        icon = "✅" if passed else "❌"
+        fold_id = int(getattr(r, "fold_id", 0))
+        fit_end = int(getattr(r, "registry_source_end_idx", 0))
+        oos_start = int(getattr(r, "outer_oos_start_idx", 0))
+        
+        ready_count = len(tuple(getattr(r, "ready_symbols", ()) or ()))
+        times = int(getattr(r, "valid_opportunity_timestamp_count", 0))
+        ic = float(getattr(r, "opportunity_ic", 0.0))
+        probe = float(getattr(r, "probe_bps", 0.0))
+        
+        lines.append(f"  [{icon}] Fold #{fold_id} (Fit:{fit_end} → OOS:{oos_start})")
+        lines.append(f"       ReadySyms: {ready_count} | Times: {times} | IC: {ic:.3f} | Probe: {probe:.3f}")
+        
+        if not passed:
+            blockers = tuple(getattr(r, "blockers", ()) or ())
+            if blockers:
+                blocker_str = ", ".join(blockers)
+                lines.append(f"       └─ Blockers: {blocker_str}")
+        lines.append("")
+        
+    if lines[-1] == "":
+        lines.pop()
+        
+    lines.append(border)
     return "\n".join(lines)
 
 
