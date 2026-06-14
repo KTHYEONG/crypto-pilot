@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
+from threadpoolctl import threadpool_limits
 
 from src.domain.futures.strategy.candidate_contracts import (
     CandidateFoldOutput,
@@ -101,13 +102,21 @@ def _fit_and_predict_single_fold(
     purge_bars: int,
 ) -> CandidateFoldOutput:
     """Run model fitting and out-of-sample prediction for a single fold."""
-    import os
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["MKL_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    with threadpool_limits(limits=1, user_api="blas"):
+        return _fit_and_predict_single_fold_inner(
+            fold_idx, fold, labeled_events, aligned, cfg, purge_bars
+        )
 
+
+def _fit_and_predict_single_fold_inner(
+    fold_idx: int,
+    fold: WFFold,
+    labeled_events: pd.DataFrame,
+    aligned: AlignedMarketData,
+    cfg: CandidateStrategyConfig,
+    purge_bars: int,
+) -> CandidateFoldOutput:
+    """Inner fold execution under BLAS single-thread context (called from _fit_and_predict_single_fold)."""
     t_total = time.perf_counter()
     timing_profile: dict[str, float] = {
         "schema": 0.0,
