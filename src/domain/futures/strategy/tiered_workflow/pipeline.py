@@ -232,6 +232,8 @@ def build_l1_prequential_evidence_snapshots(
         )
     return tuple(snapshots)
 
+_L1_SWF_FOLD_CACHE: dict[tuple[Any, ...], Any] = {}
+
 
 def run_l1_swf(
     *,
@@ -266,48 +268,82 @@ def run_l1_swf(
     symbols = aligned.symbols
     n_total = len(symbols)
 
-    cw._GLOBAL_LABELED_EVENTS = labeled_events
-    cw._GLOBAL_ALIGNED = aligned
-    cw._GLOBAL_CFG = cfg
-    cw._GLOBAL_PURGE_BARS = purge_bars
-    mp_ctx = multiprocessing.get_context("fork")
-
     futures: list[tuple[int, WFFold, Any]] = []
-    try:
-        if max_workers <= 1 or len(folds) <= 1:
-            for fold_idx, wf_fold in enumerate(folds):
-                try:
-                    import src.domain.futures.strategy.tiered_workflow as _tw
-                    fold_out = _tw._fit_and_predict_single_fold(
-                        fold_idx, wf_fold, labeled_events, aligned, cfg, purge_bars
-                    )
-                    futures.append((fold_idx, wf_fold, fold_out))
-                except Exception:
-                    logger.warning("run_l1_swf: fold %d 학습 실패, 스킵", fold_idx, exc_info=True)
+    missing_folds: list[tuple[int, WFFold]] = []
+
+    for fold_idx, wf_fold in enumerate(folds):
+        cache_key = (
+            wf_fold.fit_start, wf_fold.fit_end,
+            wf_fold.cal_start, wf_fold.cal_end,
+            wf_fold.oos_start, wf_fold.oos_end,
+            id(labeled_events), id(aligned), id(cfg)
+        )
+        if cache_key in _L1_SWF_FOLD_CACHE:
+            futures.append((fold_idx, wf_fold, _L1_SWF_FOLD_CACHE[cache_key]))
         else:
-            with ProcessPoolExecutor(max_workers=max_workers, mp_context=mp_ctx) as executor:
-                submits: list[tuple[int, WFFold, Any]] = []
-                for fold_idx, wf_fold in enumerate(folds):
-                    submits.append(
-                        (
-                            fold_idx,
-                            wf_fold,
-                            executor.submit(
-                                cw._fit_and_predict_single_fold_from_globals, fold_idx, wf_fold
-                            ),
-                        )
-                    )
-                for fold_idx, wf_fold, fut in submits:
+            missing_folds.append((fold_idx, wf_fold))
+
+    if missing_folds:
+        cw._GLOBAL_LABELED_EVENTS = labeled_events
+        cw._GLOBAL_ALIGNED = aligned
+        cw._GLOBAL_CFG = cfg
+        cw._GLOBAL_PURGE_BARS = purge_bars
+        mp_ctx = multiprocessing.get_context("fork")
+
+        try:
+            if max_workers <= 1 or len(missing_folds) <= 1:
+                for fold_idx, wf_fold in missing_folds:
                     try:
-                        fold_out = fut.result()
+                        import src.domain.futures.strategy.tiered_workflow as _tw
+                        fold_out = _tw._fit_and_predict_single_fold(
+                            fold_idx, wf_fold, labeled_events, aligned, cfg, purge_bars
+                        )
                         futures.append((fold_idx, wf_fold, fold_out))
+                        cache_key = (
+                            wf_fold.fit_start, wf_fold.fit_end,
+                            wf_fold.cal_start, wf_fold.cal_end,
+                            wf_fold.oos_start, wf_fold.oos_end,
+                            id(labeled_events), id(aligned), id(cfg)
+                        )
+                        _L1_SWF_FOLD_CACHE[cache_key] = fold_out
                     except Exception:
                         logger.warning("run_l1_swf: fold %d 학습 실패, 스킵", fold_idx, exc_info=True)
-    finally:
-        cw._GLOBAL_LABELED_EVENTS = None
-        cw._GLOBAL_ALIGNED = None
-        cw._GLOBAL_CFG = None
-        cw._GLOBAL_PURGE_BARS = None
+            else:
+                with ProcessPoolExecutor(
+                    max_workers=min(len(missing_folds), max_workers),
+                    mp_context=mp_ctx,
+                ) as executor:
+                    submits: list[tuple[int, WFFold, Any]] = []
+                    for fold_idx, wf_fold in missing_folds:
+                        submits.append(
+                            (
+                                fold_idx,
+                                wf_fold,
+                                executor.submit(
+                                    cw._fit_and_predict_single_fold_from_globals, fold_idx, wf_fold
+                                ),
+                            )
+                        )
+                    for fold_idx, wf_fold, fut in submits:
+                        try:
+                            fold_out = fut.result()
+                            futures.append((fold_idx, wf_fold, fold_out))
+                            cache_key = (
+                                wf_fold.fit_start, wf_fold.fit_end,
+                                wf_fold.cal_start, wf_fold.cal_end,
+                                wf_fold.oos_start, wf_fold.oos_end,
+                                id(labeled_events), id(aligned), id(cfg)
+                            )
+                            _L1_SWF_FOLD_CACHE[cache_key] = fold_out
+                        except Exception:
+                            logger.warning("run_l1_swf: fold %d 학습 실패, 스킵", fold_idx, exc_info=True)
+        finally:
+            cw._GLOBAL_LABELED_EVENTS = None
+            cw._GLOBAL_ALIGNED = None
+            cw._GLOBAL_CFG = None
+            cw._GLOBAL_PURGE_BARS = None
+
+    futures.sort(key=lambda x: x[0])
 
     for fold_loop_idx, (_fold_idx, _wf_fold, fold_out) in enumerate(futures):
         beta_f32 = aligned.beta_vs_market_1d

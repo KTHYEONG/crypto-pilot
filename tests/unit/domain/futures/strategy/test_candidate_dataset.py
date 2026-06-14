@@ -1106,3 +1106,48 @@ def test_compute_uniqueness_weights_numba() -> None:
     assert weights.shape == (3,)
     assert weights[0] == pytest.approx(0.75, rel=1e-3)
     assert weights[1] == pytest.approx(0.4165, rel=1e-3)
+
+
+def test_build_candidate_dataset_skip_features() -> None:
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25]],
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [26],
+            "exit_idx": [27],
+            "raw_score": [0.5],
+            "score_z": [1.2],
+            "turnover_proxy": [0.1],
+            "triple_barrier_label": [1],
+            "profitable_after_hurdle_label": [1],
+            "edge_after_hurdle_bps": [12.0],
+            "sl_thr_bps": [25.0],
+            "mae_bps": [-6.0],
+            "mfe_bps": [18.0],
+            "ex_ante_cost_bps": [4.0],
+            "family": ["trend_ma"],
+            "variant": ["ema_12_72"],
+            "archetype": ["trend"],
+        }
+    )
+    cfg = CandidateStrategyConfig(
+        allocation_backend="ensemble_b0",
+        signal_context_features_enabled=True,
+    )
+
+    # 1. Using explicit skip_features=True
+    ds = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=cfg,
+        split_start=20,
+        split_end=40,
+        skip_features=True,
+    )
+    assert ds.X.shape[1] == 0
+    assert len(ds.feature_names) == 0
+    assert len(ds.y_gate) == 1
+    assert ds.y_gate[0] == 1
+    assert ds.y_edge_bps[0] == pytest.approx(12.0)
