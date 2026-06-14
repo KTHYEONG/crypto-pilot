@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -52,10 +52,16 @@ def test_run_l1_nested_swf_emits_new_runtime_tables() -> None:
     )
     outer_folds = (WFFold(0, 4, 4, 6, 6, 10),)
 
+    import concurrent.futures
+    class SafeThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+        def __init__(self, *args, mp_context=None, **kwargs):
+            super().__init__(*args, **kwargs)
     with (
         patch("src.domain.futures.strategy.config.resolve_purge_and_embargo_bars", return_value=(1, 0)),
         patch("src.domain.futures.strategy.tiered_workflow.build_l1_swf_folds", return_value=()),
         patch("src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold", return_value=empty_out),
+        patch("src.domain.futures.strategy.candidate_workflow._fit_and_predict_single_fold", return_value=empty_out),
+        patch("concurrent.futures.ProcessPoolExecutor", new=SafeThreadPoolExecutor),
         patch(
             "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_gate_table",
             return_value="gate-table",
@@ -601,6 +607,10 @@ def test_run_l1_nested_swf_builds_prequential_snapshots_once() -> None:
         WFFold(0, 16, 16, 20, 20, 24),
     )
 
+    import concurrent.futures
+    class SafeThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+        def __init__(self, *args, mp_context=None, **kwargs):
+            super().__init__(*args, **kwargs)
     with (
         patch("src.domain.futures.strategy.config.resolve_purge_and_embargo_bars", return_value=(1, 0)),
         patch(
@@ -608,9 +618,10 @@ def test_run_l1_nested_swf_builds_prequential_snapshots_once() -> None:
             return_value=evidence_folds,
         ) as mock_build,
         patch(
-            "src.domain.futures.strategy.tiered_workflow._fit_and_predict_single_fold",
+            "src.domain.futures.strategy.candidate_workflow._fit_and_predict_single_fold",
             return_value=empty_out,
         ) as mock_fit,
+        patch("concurrent.futures.ProcessPoolExecutor", new=SafeThreadPoolExecutor),
     ):
         run_l1_nested_swf(
             labeled_events=pd.DataFrame(),
@@ -700,7 +711,7 @@ def test_format_layer1_outer_fold_table_renders_none_ic_as_na() -> None:
 
     assert "n/a" in result, f"'n/a' 미포함: {result!r}"
     # "IC: n/a" 확인, Probe 값의 "0.000"은 허용
-    assert "IC:   n/a" in result, f"IC 필드에 'n/a' 미포함: {result!r}"
+    assert "IC: n/a" in result, f"IC 필드에 'n/a' 미포함: {result!r}"
     assert "IC: 0.000" not in result, f"IC 필드에 '0.000' 오기록: {result!r}"
 
 
