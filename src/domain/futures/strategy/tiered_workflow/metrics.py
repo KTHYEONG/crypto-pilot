@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+from numba import njit
 from numpy.typing import NDArray
 from scipy.stats import norm
 
@@ -150,6 +151,35 @@ def _series_tstat(values: NDArray[np.float64]) -> float:
     return float(np.mean(finite) / (sigma / np.sqrt(finite.size)))
 
 
+@njit(fastmath=False, cache=True)  # type: ignore[untyped-decorator]
+def _numba_moving_block_bootstrap_mean(
+    cluster_means: NDArray[np.float64],
+    n_clusters: int,
+    block: int,
+    n_bootstrap: int,
+    rand_indices: NDArray[np.int64],
+) -> NDArray[np.float64]:
+    boot = np.zeros(n_bootstrap, dtype=np.float64)
+    num_blocks = rand_indices.shape[1]
+    
+    for boot_idx in range(n_bootstrap):
+        sample_arr = np.zeros(n_clusters + block, dtype=np.float64)
+        curr_len = 0
+        for j in range(num_blocks):
+            start = rand_indices[boot_idx, j]
+            end = min(n_clusters, start + block)
+            length = end - start
+            if length > 0:
+                sample_arr[curr_len : curr_len + length] = cluster_means[start:end]
+                curr_len += length
+            if curr_len >= n_clusters:
+                break
+        if curr_len > 0:
+            use_len = min(curr_len, n_clusters)
+            boot[boot_idx] = np.mean(sample_arr[:use_len])
+    return boot
+
+
 def moving_block_bootstrap_mean(
     values: NDArray[np.float64],
     decision_idx: NDArray[np.int64],
@@ -184,18 +214,15 @@ def moving_block_bootstrap_mean(
     block = max(1, int(block_bars))
     num_blocks = max(1, (n_clusters + block - 1) // block)
     rng = np.random.default_rng(seed)
-    boot = np.zeros((n_bootstrap,), dtype=np.float64)
-    for boot_idx in range(n_bootstrap):
-        sample: list[float] = []
-        for _ in range(num_blocks):
-            start = int(rng.integers(0, n_clusters))
-            end = min(n_clusters, start + block)
-            sample.extend(cluster_means[start:end].tolist())
-            if len(sample) >= n_clusters:
-                break
-        if sample:
-            boot[boot_idx] = float(np.mean(np.asarray(sample[:n_clusters], dtype=np.float64)))
-    return boot
+    rand_indices = rng.integers(0, n_clusters, size=(n_bootstrap, num_blocks), dtype=np.int64)
+    
+    return _numba_moving_block_bootstrap_mean(  # type: ignore[no-any-return]
+        np.ascontiguousarray(cluster_means),
+        n_clusters,
+        block,
+        n_bootstrap,
+        np.ascontiguousarray(rand_indices),
+    )
 
 
 def _one_sided_p_value(t_stat: float) -> float:

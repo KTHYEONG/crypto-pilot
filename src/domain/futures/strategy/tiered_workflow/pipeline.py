@@ -20,6 +20,7 @@ from src.domain.futures.portfolio.signal_composer import (
     rolling_per_bar_return_std,
 )
 from src.domain.futures.strategy.candidate_contracts import (
+    CandidateFoldOutput,
     Layer1EvidenceSnapshot,
     Layer1FoldReadiness,
     Layer1InferenceArtifact,
@@ -123,7 +124,7 @@ def resolve_safe_nested_workers(
     import psutil
 
     physical_cores = os.cpu_count() or 4
-    cpu_limit = max(1, physical_cores // 2)
+    cpu_limit = max(1, int(physical_cores * 0.75))
 
     mem = psutil.virtual_memory()
     available_gb = mem.available / (1024 ** 3)
@@ -145,6 +146,7 @@ def build_l1_prequential_evidence_snapshots(
     snapshot_indices: tuple[int, ...],
     cfg: CandidateStrategyConfig,
     seed: int,
+    precomputed_results: list[CandidateFoldOutput] | None = None,
 ) -> tuple[Layer1EvidenceSnapshot, ...]:
     """Build causal evidence snapshots from a single pass over evidence folds."""
     from src.domain.futures.strategy.config import resolve_purge_and_embargo_bars
@@ -154,11 +156,31 @@ def build_l1_prequential_evidence_snapshots(
 
     if not evidence_folds:
         all_evidence_events = pd.DataFrame()
+    elif precomputed_results is not None:
+        flat_results = precomputed_results
+        for evidence_idx, evidence_out in enumerate(flat_results):
+            if _is_trained_fold_output(evidence_out):
+                evidence_frames.append(
+                    _event_results_from_fold_output(
+                        fold_id=evidence_idx,
+                        fold_out=evidence_out,
+                    )
+                )
+        all_evidence_events = (
+            pd.concat(evidence_frames, ignore_index=True)
+            if evidence_frames
+            else pd.DataFrame()
+        )
     else:
         import multiprocessing
         from concurrent.futures import ProcessPoolExecutor
 
         import src.domain.futures.strategy.candidate_workflow as cw
+
+        assert cw._GLOBAL_LABELED_EVENTS is None, "Global state collision: _GLOBAL_LABELED_EVENTS must be None"
+        assert cw._GLOBAL_ALIGNED is None
+        assert cw._GLOBAL_CFG is None
+        assert cw._GLOBAL_PURGE_BARS is None
 
         # Set process globals to minimize IPC size under fork
         cw._GLOBAL_LABELED_EVENTS = labeled_events
@@ -697,20 +719,29 @@ def run_l1_nested_swf(
         )
     except ValueError:
         evidence_folds = ()
-    evidence_snapshots = build_l1_prequential_evidence_snapshots(
-        labeled_events=labeled_events,
-        aligned=aligned,
-        evidence_folds=evidence_folds,
-        snapshot_indices=tuple(fold.oos_start for fold in outer_folds),
-        cfg=l1_cfg,
-        seed=seed,
-    )
-    snapshots_by_idx = {snapshot.as_of_idx: snapshot for snapshot in evidence_snapshots}
+
+    combined_folds = tuple(evidence_folds) + tuple(outer_folds)
+    num_evidence = len(evidence_folds)
 
     import multiprocessing
     from concurrent.futures import ProcessPoolExecutor
 
     import src.domain.futures.strategy.candidate_workflow as cw
+    from src.domain.futures.strategy.candidate_dataset import prime_aligned_feature_cache
+
+    # Assert global states to prevent nested collisions
+    assert cw._GLOBAL_LABELED_EVENTS is None, "Global state collision: _GLOBAL_LABELED_EVENTS must be None"
+    assert cw._GLOBAL_ALIGNED is None
+    assert cw._GLOBAL_CFG is None
+    assert cw._GLOBAL_PURGE_BARS is None
+
+    # Prime the feature cache on the parent process before multiprocessing fork
+    logger.debug("[L1-NESTED] Priming aligned feature cache on parent process")
+    prime_aligned_feature_cache(
+        labeled_events=labeled_events,
+        aligned=aligned,
+        cfg=l1_cfg,
+    )
 
     # Set process globals to minimize IPC size under fork
     cw._GLOBAL_LABELED_EVENTS = labeled_events
@@ -726,35 +757,51 @@ def run_l1_nested_swf(
         frame_memory_bytes = int(labeled_events.memory_usage().sum())
 
     workers = resolve_safe_nested_workers(
-        len(outer_folds),
+        len(combined_folds),
         frame_memory_bytes,
         pinned=getattr(cfg, "l1_nested_workers", None),
     )
     logger.debug(
-        "[L1-NESTED-OUTER] Fitting %d outer folds in parallel with %d workers (WSL OOM Guard, pinned=%s)",
+        "[L1-NESTED-COMBINED] Fitting %d folds (evidence=%d, outer=%d) in parallel with %d workers (pinned=%s)",
+        len(combined_folds),
+        num_evidence,
         len(outer_folds),
         workers,
         getattr(cfg, "l1_nested_workers", None),
     )
 
-    outer_results = []
+    combined_results = []
     t_exec = time.perf_counter()
     try:
         with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as executor:
             submits = [
                 executor.submit(cw._fit_and_predict_single_fold_from_globals, idx, fold)
-                for idx, fold in enumerate(outer_folds)
+                for idx, fold in enumerate(combined_folds)
             ]
-            outer_results = [fut.result() for fut in submits]
+            combined_results = [fut.result() for fut in submits]
     finally:
         cw._GLOBAL_LABELED_EVENTS = None
         cw._GLOBAL_ALIGNED = None
         cw._GLOBAL_CFG = None
         cw._GLOBAL_PURGE_BARS = None
     logger.debug(
-        "[perf-tiered] run_l1_nested_swf outer parallel execution took %.4fs",
+        "[perf-tiered] run_l1_nested_swf combined parallel execution took %.4fs",
         time.perf_counter() - t_exec,
     )
+
+    evidence_results = combined_results[:num_evidence]
+    outer_results = combined_results[num_evidence:]
+
+    evidence_snapshots = build_l1_prequential_evidence_snapshots(
+        labeled_events=labeled_events,
+        aligned=aligned,
+        evidence_folds=evidence_folds,
+        snapshot_indices=tuple(fold.oos_start for fold in outer_folds),
+        cfg=l1_cfg,
+        seed=seed,
+        precomputed_results=evidence_results,
+    )
+    snapshots_by_idx = {snapshot.as_of_idx: snapshot for snapshot in evidence_snapshots}
 
     for outer_idx, outer_fold in enumerate(outer_folds):
         snapshot = snapshots_by_idx.get(outer_fold.oos_start)
