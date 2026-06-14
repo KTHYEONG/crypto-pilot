@@ -809,6 +809,7 @@ def run_l1_nested_swf(
         fold_cov=fold_cov,
         trade_scope_count=len(aligned.symbols),
         cfg=cfg,
+        seed=seed,
     )
     logger.info(format_layer1_outer_fold_table(tuple(outer_reports)))
     logger.info(format_layer1_gate_table(gate_report))

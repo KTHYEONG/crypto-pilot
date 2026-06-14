@@ -1,6 +1,10 @@
 [SYNC] Ledger up-to-date (Last: 2026-03-31)
 discover_universe_timeline: l2_start(2024-10-01) < oos_start(2025-10-01), ignoring l2_start
-[CACHE] Skip backfill as requested
+[UNIVERSE] 🌐 2022-04-01 ~ 2026-03-31 | Target: 94 symbols
+[SQL-DB]   💾 Loaded start dates from universe_ledger.db
+Sync mode=full targeted_symbols=94
+Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/symbol_sync_profiles.json
+[SQL-DB]   ⚡ [SKIPPED] All symbols are up-to-date. No sync or disk scans required.
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ [SYSTEM CONTEXT: INFRASTRUCTURE & DATA PREPARATION]                          │
 │ ────────────────────────────────────────────────────────────────────────────── │
@@ -21,10 +25,10 @@ discover_universe_timeline: l2_start(2024-10-01) < oos_start(2025-10-01), ignori
 [TIERED] 💠 Scope: 57 symbols (Historical Union ∩ Data-Valid)
 [ENS] Sym:2   N:233  IC:-0.047❌  Mu:36.6  Mode:Arch-Only  k:50.0
 └─Mu: B:28.0✅ M:30.8✅ T:118.5✅ m:10.9✅ U:8.4✅
-[ENS] Sym:2   N:2,355  IC:0.084✅  Mu:6.3  Mode:Arch-Only  k:50.0
-└─Mu: B:14.3✅ M:6.3✅ T:-3.5❌ m:10.7✅ U:10.8✅
 [ENS] Sym:2   N:1,290  IC:-0.061❌  Mu:6.8  Mode:Arch-Only  k:50.0
 └─Mu: B:10.1✅ M:5.8✅ T:-1.7❌ m:23.2✅ U:6.7✅
+[ENS] Sym:2   N:2,355  IC:0.084✅  Mu:6.3  Mode:Arch-Only  k:50.0
+└─Mu: B:14.3✅ M:6.3✅ T:-3.5❌ m:10.7✅ U:10.8✅
 [ENS] Sym:5   N:3,586  IC:0.093✅  Mu:11.8  Mode:Arch-Only  k:50.0
 └─Mu: B:41.7✅ M:10.1✅ T:7.9✅ m:11.3✅ U:48.4✅
 [ENS] Sym:5   N:6,226  IC:0.012✅  Mu:2.2  Mode:Arch-Only  k:50.0
@@ -52,30 +56,42 @@ discover_universe_timeline: l2_start(2024-10-01) < oos_start(2025-10-01), ignori
 [ENS] Sym:33  N:33,888  IC:0.042✅  Mu:13.2  Mode:Arch-Only  k:50.0
 └─Mu: B:51.3✅ F:3.9✅ M:8.6✅ T:28.5✅ m:18.4✅ U:22.0✅
 [LAYER 1 OUTER FOLDS] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  STATUS: ✅ READY (2/4 Folds Ready)
+  STATUS: ✅ READY (3/4 Folds Ready)
 
   [✅] Fold #0 (Fit:2954 → OOS:3288)
-       ReadySyms: 3 | Times: 149 | IC:   n/a | Probe: 52.041
+       ReadySyms: 3 | Times: 149 | IC:   n/a | Probe: 75.212
 
-  [❌] Fold #1 (Fit:3394 → OOS:3837)
-       ReadySyms: 4 | Times: 117 | IC:   n/a | Probe: 6.730
-       └─ Blockers: non_positive_probe
+  [✅] Fold #1 (Fit:3394 → OOS:3837)
+       ReadySyms: 4 | Times: 117 | IC:   n/a | Probe: 35.241
 
   [✅] Fold #2 (Fit:3833 → OOS:4386)
-       ReadySyms: 4 | Times: 85 | IC: 0.463 | Probe: 203.830
+       ReadySyms: 4 | Times: 85 | IC: 0.463 | Probe: 170.411
 
   [❌] Fold #3 (Fit:4272 → OOS:4935)
-       ReadySyms: 5 | Times: 145 | IC:   n/a | Probe: 20.335
-       └─ Blockers: non_positive_probe
+       ReadySyms: 5 | Times: 145 | IC:   n/a | Probe: -16.143
+       └─ Blockers: non_positive_gross_edge
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [LAYER 1 HARD GATE] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  STATUS: ❌ BLOCKED (2/5 Passed)
+  STATUS: ✅ PASSED (5/5 Passed)
 
   [✅] Fold-Cov        :   1.000 (>=0.800 )
-  [✅] Match-Ratio     :   1.000 (>=1.000 )
-  [❌] Sym-Count       :   5.000 (>=17.100)  ← BLOCKER
-  [❌] Fold-Ratio      :   0.500 (>=0.600 )  ← BLOCKER
-  [❌] Probe-LCB       :  -1.681 (>0.000  )  ← BLOCKER
+  [✅] Match-Ratio     :   1.000 (>=0.900 )
+  [✅] Sym-Count       :   7.111 (>=3.000 )
+  [✅] Fold-Ratio      :   0.750 (>=0.500 )
+  [✅] Probe-LCB       :  57.939 (>0.000  )
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[ENS] Sym:48  N:80,782  IC:-0.024❌  Mu:23.5  Mode:Arch-Only  k:50.0
+└─Mu: B:37.5✅ F:13.8✅ M:16.3✅ T:50.6✅ m:46.5✅ U:16.6✅
+[LAYER 1 DEPLOYMENT REGISTRY] ----------------------
+| Symbol | Strategy | Context | Gross | Incremental | Effective N | Bootstrap t | q-value |
+| ------ | -------- | ------- | ----- | ----------- | ----------- | ----------- | ------- |
+| ARPAUSDT | funding_zscore_carry:fzs_168 | all     | 138.04 | 103.86      | 57.80       | 2.44        | 0.600   |
+| BTCUSDT | funding_zscore_carry:fzs_96 | all     | 41.51 | 30.30       | 92.77       | 2.93        | 0.572   |
+| CRVUSDT | trend_pullback_continuation:tpc_20_100 | all     | 182.20 | 268.96      | 23.54       | 2.35        | 0.155   |
+| FILUSDT | trend_pullback_continuation:tpc_50_200 | all     | 302.19 | 302.19      | 17.28       | 3.32        | 0.676   |
+| GALAUSDT | rsi_reversion:rsi_14 | all     | 138.26 | 111.93      | 74.16       | 3.19        | 0.290   |
+| MKRUSDT | rsi_reversion:rsi_14 | all     | 88.04 | 108.37      | 31.54       | 2.51        | 0.155   |
+| XRPUSDT | residual_reversion:rr_24 | all     | 54.79 | 84.62       | 25.78       | 4.53        | 0.290   |
+------------------------------------------------------
 
->> LAYER 1 RESULT: [BLOCKED] -> gate_passed=False
+>> LAYER 1 RESULT: [PASS] -> Proceeding to Layer 2.

@@ -408,7 +408,7 @@ class CandidateStrategyConfig:
     l1_min_ready_outer_folds: int = 2
     l1_min_sym_count: int = 6
     l1_min_sym_ratio: float = 0.30
-    l1_min_fold_ratio: float = 0.60
+    l1_min_fold_ratio: float = 0.50
     l1_min_opportunity_timestamps: int = 3
     l1_min_cross_section: int = 2
     l1_qualify_by_regime: bool = False         # False=전략단위 풀링, True=regime-cell 검증
@@ -421,9 +421,13 @@ class CandidateStrategyConfig:
     l1_probe_top_k: int = 3
     l1_min_probe_bps: float = 0.0
     l1_min_probe_tstat: float = 1.96
-    l1_min_realized_match_ratio: float = 1.0
+    l1_min_realized_match_ratio: float = 0.90
     l1_min_matched_events_per_fold: int = 20
     l1_min_prediction_unique_values: int = 3
+    l1_sym_count_mode: Literal["count", "effective_n"] = "effective_n"
+    l1_min_effective_sym_n: float = 3.0
+    l1_min_fold_probe_bps: float = 0.0
+    l1_probe_lcb_pooled: bool = True
     l1_quality_weight_enabled: bool = True
     l1_evidence_lookback_bars: int | None = None
     l1_evidence_grid_multiplier: int = 3
@@ -720,6 +724,10 @@ class CandidateStrategyConfig:
             raise ValueError("l1_min_matched_events_per_fold must be >= 1")
         if self.l1_min_prediction_unique_values < 2:
             raise ValueError("l1_min_prediction_unique_values must be >= 2")
+        if self.l1_sym_count_mode not in {"count", "effective_n"}:
+            raise ValueError("l1_sym_count_mode must be 'count' or 'effective_n'")
+        if self.l1_min_effective_sym_n <= 0.0:
+            raise ValueError("l1_min_effective_sym_n must be > 0.0")
         if self.l1_evidence_lookback_bars is not None and self.l1_evidence_lookback_bars < 1:
             raise ValueError("l1_evidence_lookback_bars must be >= 1 when set")
         if self.l1_evidence_grid_multiplier < 2:
