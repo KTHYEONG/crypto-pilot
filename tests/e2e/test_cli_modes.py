@@ -13,7 +13,7 @@ def test_rejects_legacy_alpha_only_flag(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--phase", "full", "--alpha-only"],
+        ["opt_main_futures.py", "--phase", "l3", "--alpha-only"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -23,7 +23,7 @@ def test_rejects_legacy_hmm_only_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--phase", "full", "--hmm-only"],
+        ["opt_main_futures.py", "--phase", "l3", "--hmm-only"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 2
@@ -57,30 +57,25 @@ def test_strategy_mode_uses_default_full(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(
         sys,
         "argv",
-        ["opt_main_futures.py", "--phase", "full"],
+        ["opt_main_futures.py", "--phase", "l3"],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 0
-    assert captured["phase"] == "full"
+    assert captured["phase"] == "l3"
 
 
-def test_accepts_full_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rejects_full_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    """full phase는 choices에서 제거되어 unrecognized argument 오류(exit 2)를 반환해야 한다."""
     monkeypatch.setattr(
         sys,
         "argv",
         ["opt_main_futures.py", "--phase", "full"],
     )
-    # This should now succeed as full is an active phase
-    monkeypatch.setattr(
-        opt_main_futures,
-        "run_pipeline",
-        lambda *a, **kw: opt_main_futures.RunnerResult(exit_code=0, reason="ok"),
-    )
     exit_code = opt_main_futures.main()
-    assert exit_code == 0
+    assert exit_code == 2
 
 
-def test_full_mode_enters_pipeline(
+def test_l3_mode_enters_pipeline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_mode = {"value": None}
@@ -94,7 +89,7 @@ def test_full_mode_enters_pipeline(
         _ = seed
         _ = resume
         captured_mode["value"] = run_config.phase
-        return opt_main_futures.RunnerResult(exit_code=0, reason="full_done")
+        return opt_main_futures.RunnerResult(exit_code=0, reason="l3_done")
 
     monkeypatch.setattr(opt_main_futures, "run_pipeline", fake_run_pipeline)
     monkeypatch.setattr(
@@ -103,11 +98,11 @@ def test_full_mode_enters_pipeline(
         [
             "opt_main_futures.py",
             "--phase",
-            "full",
+            "l3",
             "--trials",
             "1",
         ],
     )
     exit_code = opt_main_futures.main()
     assert exit_code == 0
-    assert captured_mode["value"] == "full"
+    assert captured_mode["value"] == "l3"
