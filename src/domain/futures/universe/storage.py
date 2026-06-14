@@ -20,6 +20,7 @@ from src.core.exchange.binance_vision import BinanceVisionDownloader
 from src.core.settings import BINANCE_API_KEY, BINANCE_SECRET, FUTURES_DATA_DIR, LOG_DIR
 
 from .models import (
+    DEFAULT_LEDGER_PATH,
     FilterReport,
     LedgerRow,
     ManifestRow,
@@ -834,6 +835,11 @@ def _requested_sync_caches_missing(
     
     req_start_ts = pd.Timestamp(requested_start, tz="UTC")
     req_end_ts = pd.Timestamp(requested_end, tz="UTC")
+
+    effective_end_ts = req_end_ts
+    if profile is not None and profile.delivery_date is not None:
+        delivery_ts = pd.Timestamp(profile.delivery_date, tz="UTC")
+        effective_end_ts = min(effective_end_ts, delivery_ts)
     
     # Load metadata cache if not provided
     if metadata_cache is None:
@@ -847,8 +853,6 @@ def _requested_sync_caches_missing(
                 metadata_cache = {}
         except Exception:
             metadata_cache = {}
-
-
 
     for tf in required_timeframes:
         path = _sync_cache_path(symbol, tf)
@@ -880,9 +884,13 @@ def _requested_sync_caches_missing(
                 la_dt = pd.to_datetime(la, utc=True)
                 # If cached range covers requested range (clipped to onboard date),
                 # this timeframe is not missing.
+                curr_eff_end = effective_end_ts
+                if la_dt < req_end_ts - pd.Timedelta(days=180):
+                    curr_eff_end = min(curr_eff_end, la_dt)
+
                 if (
                     ea_dt <= effective_start_ts
-                    and la_dt >= req_end_ts - pd.Timedelta(hours=8)
+                    and la_dt >= curr_eff_end - pd.Timedelta(hours=8)
                 ):
                     continue
             except Exception as exc:
@@ -905,7 +913,12 @@ def _requested_sync_caches_missing(
             onboard_ts = pd.Timestamp(profile.onboard_date, tz="UTC")
             slow_start_ts = max(slow_start_ts, onboard_ts)
 
-        if dt.min() > slow_start_ts or dt.max() < req_end_ts:
+        slow_end_ts = effective_end_ts
+        max_dt = dt.max()
+        if max_dt < req_end_ts - pd.Timedelta(days=180):
+            slow_end_ts = min(slow_end_ts, max_dt)
+
+        if dt.min() > slow_start_ts or max_dt < slow_end_ts:
             return True
             
     return False
@@ -923,13 +936,22 @@ def run_historical_sync(
     sync_1m: bool = False,
 ) -> None:
     """메인 동기화 오케스트레이터."""
-    ledger_path = FUTURES_DATA_DIR / "universe_ledger.parquet"
+    ledger_path = DEFAULT_LEDGER_PATH
     symbol_start_dates = {}
     if ledger_path.exists() and not force:
         try:
-            df_ledger = pd.read_parquet(ledger_path, columns=["symbol", "date"])
-            df_ledger["date"] = pd.to_datetime(df_ledger["date"], utc=True, errors="coerce").dt.date
-            symbol_start_dates = df_ledger.groupby("symbol")["date"].max().to_dict()
+            import sqlite3
+            logger.info(f"[SQL-DB]   💾 Loaded start dates from {ledger_path.name}")
+            conn = sqlite3.connect(str(ledger_path))
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT count(name) FROM sqlite_master WHERE type='table' AND name='ledger'")
+                if cursor.fetchone()[0] > 0:
+                    df_ledger = pd.read_sql_query("SELECT symbol, max(date) as date FROM ledger GROUP BY symbol", conn)
+                    df_ledger["date"] = pd.to_datetime(df_ledger["date"], utc=True, errors="coerce").dt.date
+                    symbol_start_dates = df_ledger.set_index("symbol")["date"].to_dict()
+            finally:
+                conn.close()
         except Exception as e:
             logger.warning(f"Ledger load failed: {e}")
 
@@ -944,6 +966,7 @@ def run_historical_sync(
         if limit:
             symbols = symbols[:limit]
         logger.info("Sync mode=full_history_master symbols=%d", len(symbols))
+
     sync_tasks = []
 
     # Fix 2 Step C: FAPI exchangeInfo에서 onboardDate 일괄 조회
@@ -953,6 +976,24 @@ def run_historical_sync(
         logger.debug("symbol lifecycle profile loaded: %d symbols", len(sync_profiles))
     except Exception as e:
         logger.warning("symbol lifecycle profile load failed: %s", e)
+
+    # Short-circuit Bypass: Skip sync and file checks if SQLite ledger is already fully updated
+    if not force and symbols and symbol_start_dates and sync_profiles:
+        fully_updated = True
+        for sym in symbols:
+            if sym not in symbol_start_dates:
+                fully_updated = False
+                break
+            profile = sync_profiles.get(sym)
+            target_end = end_date
+            if profile is not None and profile.delivery_date is not None:
+                target_end = min(target_end, profile.delivery_date)
+            if symbol_start_dates[sym] < target_end:
+                fully_updated = False
+                break
+        if fully_updated:
+            logger.info("[SQL-DB]   ⚡ [SKIPPED] All symbols are up-to-date. No sync or disk scans required.")
+            return
 
     # Pre-load parquet cache metadata to optimize range checks
     metadata_cache = {}
