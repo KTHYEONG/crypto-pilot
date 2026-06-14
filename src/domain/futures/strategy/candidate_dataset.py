@@ -846,11 +846,12 @@ def build_candidate_dataset(
         regime_ctx = cache["regime_ctx"]
 
         x_mat = np.zeros((len(events), len(feature_names)), dtype=np.float32)
+        feat_to_idx = {n: i for i, n in enumerate(feature_names)}
 
         # Helper function to set feature values dynamically based on name index
         def _set_feat(name: str, values: NDArray[np.float32] | NDArray[np.float64]) -> None:
-            if name in feature_names:
-                idx = feature_names.index(name)
+            idx = feat_to_idx.get(name)
+            if idx is not None:
                 x_mat[:, idx] = values
 
         cols_from_events = [
@@ -871,41 +872,56 @@ def build_candidate_dataset(
                 _set_feat("raw_score", events["score"].fillna(0).values.astype(np.float32))
 
         if not exclude_leaky:
-            idx_ret1 = feature_names.index("sym_ret_1")
-            x_mat[valid_mask, idx_ret1] = sym_ret_1[
-                event_t[valid_mask] - 1, event_sym_idxs[valid_mask]
+            idx_ret1 = feat_to_idx.get("sym_ret_1")
+            if idx_ret1 is not None:
+                x_mat[valid_mask, idx_ret1] = sym_ret_1[
+                    event_t[valid_mask] - 1, event_sym_idxs[valid_mask]
+                ]
+
+        idx_ret5 = feat_to_idx.get("sym_ret_5")
+        if idx_ret5 is not None:
+            x_mat[valid_mask, idx_ret5] = sym_ret_5[
+                event_t[valid_mask] - 5, event_sym_idxs[valid_mask]
+            ]
+        idx_vol20 = feat_to_idx.get("sym_vol_20")
+        if idx_vol20 is not None:
+            x_mat[valid_mask, idx_vol20] = sym_vol_20[
+                event_t[valid_mask], event_sym_idxs[valid_mask]
+            ]
+        idx_volume_z20 = feat_to_idx.get("sym_volume_z20")
+        if idx_volume_z20 is not None:
+            x_mat[valid_mask, idx_volume_z20] = sym_volume_z20[
+                event_t[valid_mask], event_sym_idxs[valid_mask]
             ]
 
-        x_mat[valid_mask, feature_names.index("sym_ret_5")] = sym_ret_5[
-            event_t[valid_mask] - 5, event_sym_idxs[valid_mask]
-        ]
-        x_mat[valid_mask, feature_names.index("sym_vol_20")] = sym_vol_20[
-            event_t[valid_mask], event_sym_idxs[valid_mask]
-        ]
-        x_mat[valid_mask, feature_names.index("sym_volume_z20")] = sym_volume_z20[
-            event_t[valid_mask], event_sym_idxs[valid_mask]
-        ]
-
         if not exclude_leaky:
-            idx_mkt_ret1 = feature_names.index("mkt_ret_1")
-            x_mat[valid_mask, idx_mkt_ret1] = mkt_ret_1_padded[event_t[valid_mask]]
+            idx_mkt_ret1 = feat_to_idx.get("mkt_ret_1")
+            if idx_mkt_ret1 is not None:
+                x_mat[valid_mask, idx_mkt_ret1] = mkt_ret_1_padded[event_t[valid_mask]]
 
-        x_mat[valid_mask, feature_names.index("mkt_vol_20")] = mkt_vol_20[event_t[valid_mask]]
-        x_mat[valid_mask, feature_names.index("mkt_dispersion_20")] = mkt_dispersion_20[
-            event_t[valid_mask]
-        ]
+        idx_mkt_vol20 = feat_to_idx.get("mkt_vol_20")
+        if idx_mkt_vol20 is not None:
+            x_mat[valid_mask, idx_mkt_vol20] = mkt_vol_20[event_t[valid_mask]]
+        idx_mkt_dispersion_20 = feat_to_idx.get("mkt_dispersion_20")
+        if idx_mkt_dispersion_20 is not None:
+            x_mat[valid_mask, idx_mkt_dispersion_20] = mkt_dispersion_20[
+                event_t[valid_mask]
+            ]
 
         if "ex_ante_cost_bps" in events.columns:
             _set_feat("ex_ante_cost_bps", events["ex_ante_cost_bps"].fillna(0).values.astype(np.float32))
         elif aligned.execution_cost_bps_2d is not None:
-            idx_cost = feature_names.index("ex_ante_cost_bps")
-            x_mat[valid_mask, idx_cost] = aligned.execution_cost_bps_2d[
+            idx_cost = feat_to_idx.get("ex_ante_cost_bps")
+            if idx_cost is not None:
+                x_mat[valid_mask, idx_cost] = aligned.execution_cost_bps_2d[
+                    event_t[valid_mask], event_sym_idxs[valid_mask]
+                ]
+
+        idx_funding_z20 = feat_to_idx.get("funding_z20")
+        if idx_funding_z20 is not None:
+            x_mat[valid_mask, idx_funding_z20] = funding_z20[
                 event_t[valid_mask], event_sym_idxs[valid_mask]
             ]
-
-        x_mat[valid_mask, feature_names.index("funding_z20")] = funding_z20[
-            event_t[valid_mask], event_sym_idxs[valid_mask]
-        ]
 
         curr = len(base_feat_names)
         x_mat[:, curr : curr + len(uni_feat_names)] = uni_matrix
@@ -921,18 +937,26 @@ def build_candidate_dataset(
             x_mat[valid_mask, curr + 6] = symbol_ret_rank_20_2d[event_t[valid_mask], event_sym_idxs[valid_mask]]
             x_mat[valid_mask, curr + 7] = symbol_vol_z120_2d[event_t[valid_mask], event_sym_idxs[valid_mask]]
             x_mat[valid_mask, curr + 8] = funding_cs_z_2d[event_t[valid_mask], event_sym_idxs[valid_mask]]
-            vol_20_vals = x_mat[:, feature_names.index("sym_vol_20")]
-            cost_bps_vals = x_mat[:, feature_names.index("ex_ante_cost_bps")]
-            x_mat[:, curr + 9] = cost_bps_vals / np.maximum(vol_20_vals * 1e4, 1.0)
+            vol_20_idx = feat_to_idx.get("sym_vol_20")
+            cost_bps_idx = feat_to_idx.get("ex_ante_cost_bps")
+            if vol_20_idx is not None and cost_bps_idx is not None:
+                vol_20_vals = x_mat[:, vol_20_idx]
+                cost_bps_vals = x_mat[:, cost_bps_idx]
+                x_mat[:, curr + 9] = cost_bps_vals / np.maximum(vol_20_vals * 1e4, 1.0)
             curr += 10
 
         if sig_feat_names:
             win = int(getattr(cfg, "score_pct_variant_hist_window_bars", 2160))
             score_pct = _compute_score_pct_variant_hist(events, window_bars=win)
 
-            side_arr = x_mat[:, feature_names.index("side")]
-            funding_z20_arr = x_mat[:, feature_names.index("funding_z20")]
-            fsa = np.tanh(funding_z20_arr * side_arr).astype(np.float32)
+            side_idx = feat_to_idx.get("side")
+            funding_z20_idx = feat_to_idx.get("funding_z20")
+            if side_idx is not None and funding_z20_idx is not None:
+                side_arr = x_mat[:, side_idx]
+                funding_z20_arr = x_mat[:, funding_z20_idx]
+                fsa = np.tanh(funding_z20_arr * side_arr).astype(np.float32)
+            else:
+                fsa = np.zeros(len(events), dtype=np.float32)
 
             regime_names_arr = np.asarray(regime_ctx.name_by_code, dtype=object)[regime_ctx.code_1d[event_t]]
             archetype_arr = (
@@ -971,13 +995,16 @@ def build_candidate_dataset(
                 n_same = np.zeros(len(events), dtype=np.float32)
 
             def _set_sig(name: str, values: NDArray[np.float32]) -> None:
-                if name in feature_names:
-                    x_mat[:, feature_names.index(name)] = values
+                idx = feat_to_idx.get(name)
+                if idx is not None:
+                    x_mat[:, idx] = values
 
             _set_sig("overlay_mult_entry", overlay_ctx.overlay_mult_1d[event_t].astype(np.float32))
-            x_mat[valid_mask, feature_names.index("crisis_active_entry")] = (
-                overlay_ctx.crisis_active_1d[event_t[valid_mask]].astype(np.float32)
-            )
+            crisis_idx = feat_to_idx.get("crisis_active_entry")
+            if crisis_idx is not None:
+                x_mat[valid_mask, crisis_idx] = (
+                    overlay_ctx.crisis_active_1d[event_t[valid_mask]].astype(np.float32)
+                )
             _set_sig("funding_side_alignment", fsa)
             _set_sig("score_pct_variant_hist_90d", score_pct)
             _set_sig("archetype_regime_match", arm)
@@ -1203,3 +1230,23 @@ def build_candidate_dataset(
         y_mae_r=y_mae_r.astype(np.float32, copy=False),
         risk_unit_bps=risk_unit.astype(np.float32, copy=False),
     )
+
+
+def prime_aligned_feature_cache(
+    labeled_events: pd.DataFrame,
+    aligned: AlignedMarketData,
+    cfg: CandidateStrategyConfig,
+) -> None:
+    """부모 프로세스에서 전체 범위에 대한 피처 계산을 1회 수행하여 캐시를 사전 프라이밍합니다."""
+    if aligned.close_2d.size == 0:
+        return
+    build_candidate_dataset(
+        labeled_events=labeled_events,
+        aligned=aligned,
+        cfg=cfg,
+        split_start=0,
+        split_end=aligned.close_2d.shape[0],
+        require_label_within_split=False,
+        skip_features=False,
+    )
+
