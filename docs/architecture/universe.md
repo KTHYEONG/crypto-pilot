@@ -66,4 +66,11 @@ graph TD
 - **Exchange API Rule Changes (e.g., Tick Size):** The universe generation caches API exchange info as-of the `knowledge_date`. If an exchange modifies tick sizes, the snapshot uses the historical structure parameters to maintain exact simulation alignment.
 - **Delisted/Dead Coins:** Symbols that are delisted post-`knowledge_date` remain in the snapshot if they met the criteria at `as_of`. This structurally enforces the inclusion of failing assets to prevent survivorship bias in the backtest.
 - **New Listings Data Collection Guard:** When backfilling data for newly listed coins, the loader clips the request start date to the symbol's `onboard_date` to prevent queries before listing. Additionally, to avoid infinite request loops due to intra-day listing offsets (e.g. 08:00 listing vs 00:00 clipping), backfills are automatically skipped if the target gap is less than 24 hours.
+- **Delisted Symbol Infinite Sync Prevention:** When checking for missing cached intervals, symbols that have no data update for more than 180 days past the requested end timestamp (or those that have surpassed their configured lifecycle `delivery_date` in `SymbolSyncProfile`) are categorized as delisted/inactive. Their sync end range is clipped accordingly to bypass redundant API network backfill attempts.
+
+
+# 6. Storage & Persistence (SQLite)
+- **Database Backend:** All point-in-time universe selection history is persisted in `universe_ledger.db` utilizing SQLite.
+- **Index Optimization:** A composite unique index on `(symbol, tf, date, knowledge_date)` prevents duplicates, ensuring idempotent upsert updates.
+- **Query Slicing:** Instead of loading full historical ledger files, slice queries leverage SQLite index scans (`WHERE tf = ? AND date <= ? AND knowledge_date <= ?`) to optimize I/O and runtime memory footprint.
 
