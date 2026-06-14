@@ -144,6 +144,8 @@ def label_candidate_events(
     atr_2d = _compute_yang_zhang_vol_2d(aligned)
     out = events.copy()
     t_len = aligned.close_2d.shape[0]
+    # O(1) symbol lookup: build once before the per-event loop
+    _sym_to_idx: dict[str, int] = {sym: idx for idx, sym in enumerate(aligned.symbols)}
     cost_model = ExecutionCostModel(
         maker_fee_bps=float(getattr(cfg, "maker_fee_bps", 2.0)),
         taker_fee_bps=float(getattr(cfg, "taker_fee_bps", 5.0)),
@@ -179,7 +181,9 @@ def label_candidate_events(
         stop_mult = float(row.stop_atr_mult)
         tp_mult = float(row.take_profit_atr_mult)
 
-        sym_idx = _find_symbol_index(aligned.symbols, symbol)
+        sym_idx = _sym_to_idx.get(symbol, -1)
+        if sym_idx == -1:
+            raise KeyError(f"unknown symbol: {symbol}")
         decision_idx = entry_idx - 1
         if decision_idx < 0 or entry_idx >= t_len:
             invalid = _invalid_label_payload()
