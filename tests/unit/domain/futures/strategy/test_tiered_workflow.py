@@ -1874,6 +1874,7 @@ def test_select_outer_symbol_opportunities_keeps_best_real_event_per_symbol() ->
 
 def test_evaluate_layer1_readiness_uses_stable_symbol_counts_and_outer_series() -> None:
     cfg = CandidateStrategyConfig(
+        l1_sym_count_mode="count",
         l1_min_ready_outer_folds=2,
         l1_min_sym_count=2,
         l1_min_sym_ratio=0.5,
