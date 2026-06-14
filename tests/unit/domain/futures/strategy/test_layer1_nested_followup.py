@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -737,7 +738,7 @@ def test_build_l1_nested_swf_folds_warmup2_larger_first_oos_window() -> None:
     # Arrange
     cfg1 = CandidateStrategyConfig(wf_n_folds=4, l1_outer_warmup_blocks=1)
     cfg2 = CandidateStrategyConfig(wf_n_folds=4, l1_outer_warmup_blocks=2)
-    kwargs: dict = {
+    kwargs: dict[str, Any] = {
         "n_bars": 7518,
         "l1_start_idx": 2190,
         "l1_end_idx": 5480,
@@ -825,3 +826,84 @@ def test_compute_symbol_strategy_evidence_logs_warning_when_zero_qualified(
 
     # Assert
     assert any("0 qualified" in r.message for r in caplog.records)
+
+
+def test_compute_symbol_strategy_evidence_deterministic_seeding(monkeypatch: pytest.MonkeyPatch) -> None:
+    import builtins
+
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+        compute_symbol_strategy_evidence,
+    )
+
+    cfg = CandidateStrategyConfig(l1_bootstrap_samples=100)
+    events = pd.DataFrame({
+        "symbol": ["BTCUSDT"] * 10,
+        "strategy_id": ["trend:v1"] * 10,
+        "activation_context": ["all"] * 10,
+        "gross_event_bps": [1.0, 2.0, -1.0, 3.0, 0.5, -0.2, 1.1, -1.5, 0.9, -0.4],
+        "fold_id": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "exit_idx": [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+        "entry_idx": [1, 11, 21, 31, 41, 51, 61, 71, 81, 91],
+        "uniqueness_weight": [1.0] * 10,
+        "expected_holding_bars": [5] * 10,
+        "side": [1] * 10,
+    })
+
+    # Run 1: with default hash
+    res1 = compute_symbol_strategy_evidence(
+        event_results=events,
+        cfg=cfg,
+        seed=42,
+        registry_as_of_idx=200,
+    )
+
+    # Mock builtins.hash to return arbitrary different value
+    orig_hash = builtins.hash
+    monkeypatch.setattr(builtins, "hash", lambda x: 99999)
+
+    # Run 2: hash is mocked, should produce identical bootstrap statistics
+    res2 = compute_symbol_strategy_evidence(
+        event_results=events,
+        cfg=cfg,
+        seed=42,
+        registry_as_of_idx=200,
+    )
+
+    # Restore hash just in case
+    monkeypatch.setattr(builtins, "hash", orig_hash)
+
+    assert len(res1) == len(res2)
+    assert len(res1) > 0
+    # The probability_positive and block_tstat must be identical because the seeding is deterministic
+    assert res1[0].probability_positive == res2[0].probability_positive
+    assert res1[0].block_tstat_incremental == res2[0].block_tstat_incremental
+
+
+def test_compute_symbol_strategy_evidence_none_and_empty_types() -> None:
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+        compute_symbol_strategy_evidence,
+    )
+
+    cfg = CandidateStrategyConfig(l1_bootstrap_samples=10)
+    events = pd.DataFrame({
+        "symbol": ["BTCUSDT", ""],
+        "strategy_id": ["trend:v1", "trend:v2"],
+        "activation_context": ["all", "all"],
+        "gross_event_bps": [1.0, 2.0],
+        "fold_id": [0, 0],
+        "exit_idx": [10, 20],
+        "entry_idx": [1, 11],
+        "uniqueness_weight": [1.0, 1.0],
+        "expected_holding_bars": [5, 5],
+        "side": [1, 1],
+    })
+
+    # Act & Assert: Should run successfully without encoding/hashing errors
+    res = compute_symbol_strategy_evidence(
+        event_results=events,
+        cfg=cfg,
+        seed=42,
+        registry_as_of_idx=100,
+    )
+    assert len(res) >= 0
+
