@@ -147,7 +147,7 @@ def test_format_layer1_gate_table_uses_explicit_checks() -> None:
 
     result = format_layer1_gate_table(report)
 
-    assert "Sym-Count" in result
+    assert "Symbol-Breadth" in result
     assert "❌" in result
     assert "BLOCKER" in result
     assert "BLOCKED" in result
@@ -174,12 +174,11 @@ def test_format_layer1_outer_fold_table_shows_ready_symbol_count() -> None:
 
     result = format_layer1_outer_fold_table(reports)
 
-    assert "LAYER 1 OUTER FOLDS" in result
-    assert "2" in result
+    assert "LAYER 1 OUTER FOLD READINESS" in result
+    assert "2 symbols loaded" in result
     assert "READY" in result
     assert "✅" in result
     assert "Fold #10" in result
-    assert "ReadySyms: 2" in result
 
 
 def test_format_layer1_deployment_registry_table_lists_strategy_rows() -> None:
@@ -207,8 +206,8 @@ def test_format_layer1_deployment_registry_table_lists_strategy_rows() -> None:
 
     result = format_layer1_deployment_registry_table(registry)
 
-    assert "trend:fast" in result
-    assert "bull" in result
+    assert "L1 FINAL PROMOTION SUMMARY" in result
+    assert "trend (fast) [bull]" in result
     assert "BTCUSDT" in result
 
 
