@@ -60,7 +60,7 @@ from src.application.futures.optimization.universe_service import (
     discover_universe_timeline,
     validate_universe_quality,
 )
-from src.core.settings import BASE_DIR, FUTURES_DATA_DIR
+from src.core.settings import BASE_DIR
 from src.domain.futures.optimization.observability.run_tracker import (
     build_joint_study_name,
     build_run_id,
@@ -129,23 +129,27 @@ def _requires_exec_1m(run_config: FuturesRunConfig) -> bool:
 
 
 def _ensure_universe_ledger_sync(run_config: FuturesRunConfig, window: QuarterlyWindow) -> None:
-    """Ensure universe ledger coverage for the required window."""
-    ledger_path = FUTURES_DATA_DIR / "universe_ledger.parquet"
+    """Ensure universe ledger coverage for the required window (SQLite-backed)."""
+    import sqlite3
+
+    from src.domain.futures.universe.models import DEFAULT_LEDGER_PATH
+
     needs_sync = False
     last_ledger_date = date(2023, 1, 1)
 
-    if not ledger_path.exists():
+    if not DEFAULT_LEDGER_PATH.exists():
         _logger.info("[SYNC] Ledger missing -> Initiating first sync")
         needs_sync = True
     else:
         try:
-            # We only need the 'date' column to check the last coverage
-            df_ledger = pd.read_parquet(ledger_path, columns=["date"])
-            if df_ledger.empty:
+            with sqlite3.connect(DEFAULT_LEDGER_PATH) as conn:
+                row = conn.execute("SELECT MAX(date) FROM ledger").fetchone()
+            max_date_str = row[0] if row else None
+            if not max_date_str:
+                _logger.info("[SYNC] Ledger empty -> Initiating first sync")
                 needs_sync = True
             else:
-                last_ledger_date = pd.to_datetime(df_ledger["date"]).max().date()
-                # If the ledger doesn't cover up to the required OOS end date, we need more data
+                last_ledger_date = date.fromisoformat(max_date_str)
                 if last_ledger_date < window.end_date_value:
                     _logger.info(
                         "[SYNC] Ledger outdated (Last: %s, Required: %s) -> Syncing...",
@@ -153,9 +157,14 @@ def _ensure_universe_ledger_sync(run_config: FuturesRunConfig, window: Quarterly
                         window.end_date_value,
                     )
                     needs_sync = True
+                else:
+                    _logger.info(
+                        "[SYNC] Ledger up-to-date (Last: %s)",
+                        last_ledger_date,
+                    )
         except Exception as e:
             _logger.warning(
-                "[SYNC] Verification failed (%s) -> Force sync",
+                "[SYNC] Ledger read failed (%s) -> Force sync",
                 type(e).__name__,
             )
             needs_sync = True
