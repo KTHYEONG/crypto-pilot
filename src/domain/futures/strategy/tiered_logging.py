@@ -49,10 +49,17 @@ def format_system_context_dashboard(
     s = strategy_info
 
     def _box(content: list[str], width: int = 78) -> str:
-        top = "┌" + "─" * width + "┐"
-        bottom = "└" + "─" * width + "┘"
+        # width는 내부 텍스트가 들어갈 가용 공간 (padding 제외)
+        # 전체 가로 길이는 ┌ + 공백 + width + 공백 + ┐ = width + 4
+        top = "┌" + "─" * (width + 2) + "┐"
+        bottom = "└" + "─" * (width + 2) + "┘"
         lines = [top]
-        lines.extend(f"│ {line:<{width-2}} │" for line in content)
+        for line in content:
+            if line == "SEP":
+                # 구분선은 박스 내부 너비 전체를 채움
+                lines.append("├" + "─" * (width + 2) + "┤")
+            else:
+                lines.append(f"│ {line:<{width}} │")
         lines.append(bottom)
         return "\n".join(lines)
 
@@ -82,8 +89,8 @@ def format_system_context_dashboard(
     )
 
     content = [
-        "[SYSTEM CONTEXT: INFRASTRUCTURE & DATA PREPARATION]",
-        "─" * 78,
+        "● [SYSTEM CONTEXT: INFRASTRUCTURE & DATA PREPARATION]",
+        "SEP",
         f"Window:   {window_str}",
         f"Universe: {u_str}",
         f"Quality:  {dq_str}",
@@ -93,9 +100,9 @@ def format_system_context_dashboard(
 
 
 def format_layer_header(layer: int, title: str) -> str:
-    """Format a prominent section header for a logic layer."""
-    bar = "=" * 80
-    return f"\n{bar}\n[LAYER {layer}: {title.upper()}]\n{bar}"
+    """섹션 상/하단에 굵은 선을 배치한 레이어 헤더 스타일."""
+    border = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    return f"\n{border}\n● [LAYER {layer}: {title.upper()}]\n{border}"
 
 
 def format_data_integrity_summary(
@@ -105,24 +112,31 @@ def format_data_integrity_summary(
     nan_pct: float,
     zero_pct: float,
 ) -> str:
-    """Return a clean dashboard summary for data integrity audit."""
-    width = 60
-    border = "━" * width
+    """하단 얇은 선과 트리 구조를 적용한 데이터 무결성 감사 결과."""
+    sep = "──────────────────────────────────────────────────────────────────────────────"
     
     if total == passed:
         lines = [
-            f"[DATA-INTEGRITY] {border}",
-            f"  STATUS: ✅ ALL {total} SYMBOLS PASSED (Bars: {bars:,})",
-            f"  AUDIT:  [NaN: {nan_pct:.1f}%] [Zero/Neg: {zero_pct:.1f}%] [Hi>=Lo: PASS]",
-            border
+            "",
+            "● [DATA-INTEGRITY AUDIT]",
+            sep,
+            f"  STATUS  : ✅ ALL {total} SYMBOLS PASSED",
+            f"  METRICS : Total Bars: {bars:,}",
+            f"  DETAIL  : [NaN: {nan_pct:.1f}%] [Zero/Neg: {zero_pct:.1f}%] [Range: PASS]",
+            sep,
+            ""
         ]
         return "\n".join(lines)
         
     lines = [
-        f"[DATA-INTEGRITY] {border}",
-        f"  STATUS: ❌ {total - passed}/{total} SYMBOLS FAILED (Bars: {bars:,})",
-        f"  AUDIT:  [NaN: {nan_pct:.1f}%] [Zero/Neg: {zero_pct:.1f}%]",
-        border
+        "",
+        "● [DATA-INTEGRITY AUDIT]",
+        sep,
+        f"  STATUS  : ❌ {total - passed}/{total} SYMBOLS FAILED",
+        f"  METRICS : Total Bars: {bars:,}",
+        f"  DETAIL  : [NaN: {nan_pct:.1f}%] [Zero/Neg: {zero_pct:.1f}%]",
+        sep,
+        ""
     ]
     return "\n".join(lines)
 
@@ -247,16 +261,16 @@ def format_layer1_table(
 
 
 def format_layer1_gate_table(report: Any) -> str:
-    """Format Layer1 hard-gate checks from a gate report (Dashboard List Type)."""
+    """하드 게이트 체크 항목을 미니멀리스트 리스트 형태로 변경."""
     checks = tuple(getattr(report, "checks", ()) or ())
     passed = bool(getattr(report, "passed", False))
     
     display_gate_map = {
-        "fold_cov": "Fold-Cov",
-        "match_ratio": "Match-Ratio",
-        "sym_count": "Sym-Count",
-        "fold_ratio": "Fold-Ratio",
-        "probe_lcb_bps": "Probe-LCB",
+        "fold_cov": "Time-Coverage",
+        "match_ratio": "Signal-Quality",
+        "sym_count": "Symbol-Breadth",
+        "fold_ratio": "Stable-Folds",
+        "probe_lcb_bps": "Min-Profit",
     }
     
     n_checks = len(checks)
@@ -265,11 +279,12 @@ def format_layer1_gate_table(report: Any) -> str:
     status_icon = "✅" if passed else "❌"
     status_text = "PASSED" if passed else "BLOCKED"
     
-    width = 60
-    border = "━" * width
+    sep = "──────────────────────────────────────────────────────────────────────────────"
     lines = [
-        f"[LAYER 1 HARD GATE] {border}",
-        f"  STATUS: {status_icon} {status_text} ({n_passed}/{n_checks} Passed)",
+        "",
+        "● [LAYER 1 HARD GATE CHECKS]",
+        sep,
+        f"  STATUS  : {status_icon} {status_text} ({n_passed}/{n_checks} Passed)",
         ""
     ]
     
@@ -284,29 +299,31 @@ def format_layer1_gate_table(report: Any) -> str:
         comparator = ">=" if getattr(check, "comparator", "ge") == "ge" else ">"
         threshold = f"{comparator}{getattr(check, 'threshold', 0.0):.3f}"
         
-        blocker_suffix = "  ← BLOCKER" if not check_passed else ""
+        blocker_suffix = "  ← [BLOCKER]" if not check_passed else ""
         
         lines.append(
-            f"  [{icon}] {display_key:<15} : {value:>7.3f} ({threshold:<8}){blocker_suffix}"
+            f"  {icon} [{display_key:<15}] : {value:>8.3f} (Target {threshold:<8}){blocker_suffix}"
         )
         
-    lines.append(border)
+    lines.append(sep)
+    lines.append("")
     return "\n".join(lines)
 
 
 def format_layer1_outer_fold_table(reports: tuple[Any, ...]) -> str:
-    """Format outer-fold readiness diagnostics (Dashboard List Type)."""
+    """폴드별 준비 상태 진단을 트리 뷰 구조로 변경."""
     n_folds = len(reports)
     n_passed = sum(1 for r in reports if bool(getattr(r, "passed", False)))
     
     status_icon = "✅" if n_passed > 0 else "❌"
     status_text = "READY" if n_passed > 0 else "BLOCKED"
     
-    width = 60
-    border = "━" * width
+    sep = "──────────────────────────────────────────────────────────────────────────────"
     lines = [
-        f"[LAYER 1 OUTER FOLDS] {border}",
-        f"  STATUS: {status_icon} {status_text} ({n_passed}/{n_folds} Folds Ready)",
+        "",
+        "● [LAYER 1 OUTER FOLD READINESS]",
+        sep,
+        f"  STATUS  : {status_icon} {status_text} ({n_passed}/{n_folds} Folds Ready)",
         ""
     ]
     
@@ -320,23 +337,22 @@ def format_layer1_outer_fold_table(reports: tuple[Any, ...]) -> str:
         ready_count = len(tuple(getattr(r, "ready_symbols", ()) or ()))
         times = int(getattr(r, "valid_opportunity_timestamp_count", 0))
         raw_ic = getattr(r, "opportunity_ic", None)
-        ic_str = f"{float(raw_ic):.3f}" if raw_ic is not None else "  n/a"
+        ic_str = f"{float(raw_ic):.3f}" if raw_ic is not None else "n/a"
         probe = float(getattr(r, "probe_bps", 0.0))
 
-        lines.append(f"  [{icon}] Fold #{fold_id} (Fit:{fit_end} → OOS:{oos_start})")
-        lines.append(f"       ReadySyms: {ready_count} | Times: {times} | IC: {ic_str} | Probe: {probe:.3f}")
+        lines.append(f"  [{icon}] Fold #{fold_id} (Fit: {fit_end} → OOS: {oos_start})")
+        lines.append(f"       ├─ Symbols : {ready_count} symbols loaded")
+        lines.append(f"       ├─ Events  : {times} unique events")
+        lines.append(f"       └─ Quality : IC: {ic_str:<7} | Edge: {probe:.2f} bps")
         
         if not passed:
             blockers = tuple(getattr(r, "blockers", ()) or ())
             if blockers:
                 blocker_str = ", ".join(blockers)
-                lines.append(f"       └─ Blockers: {blocker_str}")
+                lines.append(f"       └─ BLOCKERS: {blocker_str}")
         lines.append("")
         
-    if lines[-1] == "":
-        lines.pop()
-        
-    lines.append(border)
+    lines.append(sep)
     return "\n".join(lines)
 
 
