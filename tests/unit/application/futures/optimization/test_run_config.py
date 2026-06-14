@@ -7,29 +7,41 @@ from src.application.futures.optimization.config import build_run_config_from_ar
 
 def test_build_run_config_defaults_to_trials_100() -> None:
     cfg = build_run_config_from_args({"timeframe": "4h"})
-    assert cfg.phase == "full"
+    assert cfg.phase == "l3"
     assert cfg.trials == 100
 
 
-def test_build_run_config_accepts_full_phase() -> None:
-    cfg = build_run_config_from_args({"phase": "full", "timeframe": "4h", "trials": 1})
-    assert cfg.phase == "full"
+def test_build_run_config_accepts_l3_phase() -> None:
+    cfg = build_run_config_from_args({"phase": "l3", "timeframe": "4h", "trials": 1})
+    assert cfg.phase == "l3"
 
 
-def test_build_run_config_accepts_alo_phase() -> None:
-    cfg = build_run_config_from_args({"phase": "alo", "timeframe": "4h", "trials": 1})
-    assert cfg.phase == "alo"
+def test_build_run_config_accepts_l2_phase() -> None:
+    cfg = build_run_config_from_args({"phase": "l2", "timeframe": "4h", "trials": 1})
+    assert cfg.phase == "l2"
 
 
-def test_build_run_config_rejects_strategy_phase() -> None:
-    """strategy alias는 제거됨; full을 사용해야 한다."""
+def test_build_run_config_accepts_l1_phase() -> None:
+    cfg = build_run_config_from_args({"phase": "l1", "timeframe": "4h", "trials": 1})
+    assert cfg.phase == "l1"
+
+
+def test_build_run_config_rejects_full_phase() -> None:
+    """full alias는 제거됨; l3을 사용해야 한다."""
     with pytest.raises(ValueError, match="invalid active phase"):
-        build_run_config_from_args({"phase": "strategy", "timeframe": "4h", "trials": 1})
+        build_run_config_from_args({"phase": "full", "timeframe": "4h", "trials": 1})
 
 
-def test_build_run_config_backward_compatibility_alpha() -> None:
-    cfg = build_run_config_from_args({"phase": "alpha", "timeframe": "4h", "trials": 1})
-    assert cfg.phase == "alo"
+def test_build_run_config_rejects_signal_phase() -> None:
+    """signal alias는 제거됨; l1을 사용해야 한다."""
+    with pytest.raises(ValueError, match="invalid active phase"):
+        build_run_config_from_args({"phase": "signal", "timeframe": "4h", "trials": 1})
+
+
+def test_build_run_config_rejects_alo_phase() -> None:
+    """alo alias는 제거됨; l2를 사용해야 한다."""
+    with pytest.raises(ValueError, match="invalid active phase"):
+        build_run_config_from_args({"phase": "alo", "timeframe": "4h", "trials": 1})
 
 
 def test_build_run_config_rejects_legacy_quick_backtest_phase() -> None:
@@ -47,7 +59,7 @@ def test_build_run_config_rejects_legacy_flags() -> None:
     with pytest.raises(ValueError, match="legacy flag"):
         build_run_config_from_args(
             {
-                "phase": "full",
+                "phase": "l3",
                 "alpha_only": True,
             }
         )
@@ -75,7 +87,7 @@ def test_build_run_config_rejects_skip_universe_flag() -> None:
     with pytest.raises(ValueError, match="legacy flag"):
         build_run_config_from_args(
             {
-                "phase": "full",
+                "phase": "l3",
                 "timeframe": "4h",
                 "trials": 1,
                 "skip_universe": True,
@@ -88,7 +100,7 @@ def test_build_run_config_rejects_skip_data_sync_flag() -> None:
     with pytest.raises(ValueError, match="legacy flag"):
         build_run_config_from_args(
             {
-                "phase": "full",
+                "phase": "l3",
                 "timeframe": "4h",
                 "trials": 1,
                 "skip_data_sync": True,
