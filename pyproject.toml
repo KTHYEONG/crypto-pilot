@@ -27,6 +27,7 @@ dependencies = [
     "tqdm>=4.67.0",
     "joblib>=1.4.0",
     "redis>=7.4.0",
+    "threadpoolctl>=3.6.0",
 ]
 
 [project.optional-dependencies]

@@ -104,9 +104,21 @@ def _is_non_constant_finite_array(values: NDArray[np.float64]) -> bool:
     return float(np.nanstd(finite)) > 0.0
 
 
-def resolve_safe_nested_workers(n_tasks: int, frame_memory_bytes: int) -> int:
-    """Compute safe worker count dynamically under WSL constraints."""
-    import os
+def resolve_safe_nested_workers(
+    n_tasks: int,
+    frame_memory_bytes: int,
+    *,
+    pinned: int | None = None,
+) -> int:
+    """Compute safe worker count dynamically under WSL constraints.
+
+    Args:
+        n_tasks: Number of tasks to parallelize.
+        frame_memory_bytes: Estimated DataFrame size in bytes for OOM guard.
+        pinned: If set, fix worker count to this value (reproducibility mode).
+    """
+    if isinstance(pinned, int) and pinned >= 1:
+        return max(1, min(n_tasks, pinned))
 
     import psutil
 
@@ -161,11 +173,16 @@ def build_l1_prequential_evidence_snapshots(
         except Exception:
             frame_memory_bytes = int(labeled_events.memory_usage().sum())
 
-        workers = resolve_safe_nested_workers(len(evidence_folds), frame_memory_bytes)
+        workers = resolve_safe_nested_workers(
+            len(evidence_folds),
+            frame_memory_bytes,
+            pinned=getattr(cfg, "l1_nested_workers", None),
+        )
         logger.debug(
-            "[EVIDENCE-PREQ] Fitting %d evidence folds in parallel with %d workers (WSL OOM Guard)",
+            "[EVIDENCE-PREQ] Fitting %d evidence folds in parallel with %d workers (WSL OOM Guard, pinned=%s)",
             len(evidence_folds),
             workers,
+            getattr(cfg, "l1_nested_workers", None),
         )
 
         flat_results = []
@@ -655,9 +672,9 @@ def run_l1_nested_swf(
         l1_cfg.ensemble_score_calibration_enabled = False
 
     purge_bars, embargo_bars = resolve_purge_and_embargo_bars(cfg)
-    volatility_2d = rolling_per_bar_return_std(
-        aligned.close_2d,
-        composer_sigma_lookback_bars("4h"),
+    _vol_window = composer_sigma_lookback_bars("4h")
+    volatility_2d = np.column_stack(
+        [rolling_per_bar_return_std(aligned.close_2d[:, i], _vol_window) for i in range(aligned.close_2d.shape[1])]
     )
     outer_reports: list[Layer1FoldReadiness] = []
     outer_event_frames: list[pd.DataFrame] = []
@@ -708,11 +725,16 @@ def run_l1_nested_swf(
     except Exception:
         frame_memory_bytes = int(labeled_events.memory_usage().sum())
 
-    workers = resolve_safe_nested_workers(len(outer_folds), frame_memory_bytes)
+    workers = resolve_safe_nested_workers(
+        len(outer_folds),
+        frame_memory_bytes,
+        pinned=getattr(cfg, "l1_nested_workers", None),
+    )
     logger.debug(
-        "[L1-NESTED-OUTER] Fitting %d outer folds in parallel with %d workers (WSL OOM Guard)",
+        "[L1-NESTED-OUTER] Fitting %d outer folds in parallel with %d workers (WSL OOM Guard, pinned=%s)",
         len(outer_folds),
         workers,
+        getattr(cfg, "l1_nested_workers", None),
     )
 
     outer_results = []
