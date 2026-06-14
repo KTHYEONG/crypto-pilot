@@ -320,11 +320,11 @@ def format_layer1_outer_fold_table(reports: tuple[Any, ...]) -> str:
         ready_count = len(tuple(getattr(r, "ready_symbols", ()) or ()))
         times = int(getattr(r, "valid_opportunity_timestamp_count", 0))
         raw_ic = getattr(r, "opportunity_ic", None)
-        ic = float(raw_ic) if raw_ic is not None else 0.0
+        ic_str = f"{float(raw_ic):.3f}" if raw_ic is not None else "  n/a"
         probe = float(getattr(r, "probe_bps", 0.0))
-        
+
         lines.append(f"  [{icon}] Fold #{fold_id} (Fit:{fit_end} → OOS:{oos_start})")
-        lines.append(f"       ReadySyms: {ready_count} | Times: {times} | IC: {ic:.3f} | Probe: {probe:.3f}")
+        lines.append(f"       ReadySyms: {ready_count} | Times: {times} | IC: {ic_str} | Probe: {probe:.3f}")
         
         if not passed:
             blockers = tuple(getattr(r, "blockers", ()) or ())

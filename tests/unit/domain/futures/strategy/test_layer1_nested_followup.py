@@ -621,3 +621,83 @@ def test_run_l1_nested_swf_builds_prequential_snapshots_once() -> None:
 
     assert mock_build.call_count == 1
     assert mock_fit.call_count == len(evidence_folds) + len(outer_folds)
+
+
+# ---------------------------------------------------------------------------
+# Fix A·B: evidence 격자 세밀화 검증
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_grid_folds_multiplied_by_outer_count() -> None:
+    """A1: outer_n_folds=4, mult=3 → ev_n_folds=12, 첫 evidence oos_start < 첫 outer oos_start."""
+    from src.domain.futures.strategy.walk_forward import build_l1_swf_folds
+
+    outer_n_folds = 4
+    mult = 3
+    # outer block_len=500 가정: total available = outer_n_folds * 500
+    l1_start = 0
+    l1_end = outer_n_folds * 500  # 2000
+    ev_n_folds = outer_n_folds * mult  # 12
+
+    # outer 첫 oos_start: l1_start + block_len = l1_start + l1_end//(outer_n_folds+1)
+    outer_block = l1_end // (outer_n_folds + 1)
+    first_outer_oos = l1_start + outer_block
+
+    ev_folds = build_l1_swf_folds(
+        n_bars=l1_end,
+        n_folds=ev_n_folds,
+        l1_start_bars=l1_start,
+        l1_end_bars=l1_end,
+        purge_bars=0,
+        embargo_bars=0,
+    )
+
+    assert len(ev_folds) == ev_n_folds, f"ev_n_folds={ev_n_folds} 기대, got {len(ev_folds)}"
+    first_ev_oos = ev_folds[0].oos_start
+    ev_block = ev_folds[0].oos_end - ev_folds[0].oos_start
+    assert first_ev_oos < first_outer_oos, (
+        f"첫 evidence oos_start({first_ev_oos}) < 첫 outer oos_start({first_outer_oos}) 기대"
+    )
+    assert ev_block < outer_block, (
+        f"evidence block_len({ev_block}) < outer block_len({outer_block}) 기대"
+    )
+
+
+def test_evidence_grid_max_folds_cap_applied() -> None:
+    """A2: outer_n_folds=20, mult=3, l1_evidence_max_folds=32 → ev_n_folds=32 (상한 적용)."""
+    outer_n_folds = 20
+    mult = 3
+    l1_evidence_max_folds = 32
+
+    ev_n_folds = min(outer_n_folds * mult, l1_evidence_max_folds)
+
+    assert ev_n_folds == 32, f"상한 32 기대, got {ev_n_folds}"
+
+
+# ---------------------------------------------------------------------------
+# Fix C: IC None → "n/a" 렌더링 검증
+# ---------------------------------------------------------------------------
+
+
+def test_format_layer1_outer_fold_table_renders_none_ic_as_na() -> None:
+    """C3: opportunity_ic=None → 테이블에 'n/a' 포함, '0.000' 미포함."""
+    from src.domain.futures.strategy.candidate_contracts import Layer1FoldReadiness
+    from src.domain.futures.strategy.tiered_logging import format_layer1_outer_fold_table
+
+    report = Layer1FoldReadiness(
+        fold_id=0,
+        registry_source_end_idx=100,
+        outer_oos_start_idx=200,
+        outer_oos_end_idx=300,
+        ready_symbols=(),
+        opportunity_ic=None,
+        passed=False,
+        blockers=("empty_opportunities",),
+    )
+
+    result = format_layer1_outer_fold_table(reports=(report,))
+
+    assert "n/a" in result, f"'n/a' 미포함: {result!r}"
+    # "IC: n/a" 확인, Probe 값의 "0.000"은 허용
+    assert "IC:   n/a" in result, f"IC 필드에 'n/a' 미포함: {result!r}"
+    assert "IC: 0.000" not in result, f"IC 필드에 '0.000' 오기록: {result!r}"
