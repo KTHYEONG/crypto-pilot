@@ -12,7 +12,6 @@ import numpy as np
 import pandas as pd
 import scipy.stats as stats
 from numpy.typing import NDArray
-from scipy.stats import spearmanr
 
 from src.domain.futures.strategy.candidate_contracts import (
     CandidateModelOutput,
@@ -849,31 +848,13 @@ def evaluate_outer_signal_opportunities(
             blockers=("empty_realized_merge",),
         )
     symbol_to_idx = {symbol: idx for idx, symbol in enumerate(aligned_symbols)}
-    ic_series: list[float] = []
     probe_series: list[float] = []
-    ic_mode: str = str(getattr(cfg, "l1_opp_ic_mode", "cross_section"))
-    prediction_unique_count = 0
+    probe_mode: str = str(getattr(cfg, "l1_opp_ic_mode", "cross_section"))
 
-    if ic_mode == "time_series":
-        prediction_unique_threshold = int(getattr(cfg, "l1_min_prediction_unique_values", 3))
+    if probe_mode == "time_series":
         for _symbol, sym_group in merged.groupby("symbol", sort=True):
             sym_group = sym_group.drop_duplicates(subset=["decision_idx"], keep="first")
-            pred_ts = sym_group["expected_gross_bps"].to_numpy(dtype=np.float64)
             real_ts = sym_group["realized_side_adjusted_gross_bps"].fillna(0.0).to_numpy(dtype=np.float64)
-            pred_unique_count = int(np.unique(np.round(pred_ts, decimals=12)).size)
-            prediction_unique_count = max(
-                prediction_unique_count,
-                pred_unique_count,
-            )
-            if (
-                sym_group.shape[0] >= max(3, prediction_unique_threshold)
-                and pred_unique_count >= prediction_unique_threshold
-            ):
-                ic_val, _ = spearmanr(pred_ts, real_ts)
-            else:
-                ic_val = np.nan
-            if np.isfinite(ic_val):
-                ic_series.append(float(ic_val))
             risk_scores_ts: list[tuple[float, int]] = []
             for row_i, row in enumerate(sym_group.itertuples(index=False)):
                 symbol_idx = symbol_to_idx.get(str(row.symbol))
@@ -896,24 +877,11 @@ def evaluate_outer_signal_opportunities(
                 if selected_real.size > 0:
                     probe_series.append(float(np.mean(selected_real)))
     else:
-        prediction_unique_threshold = int(getattr(cfg, "l1_min_prediction_unique_values", 3))
         for decision_idx, group in merged.groupby("decision_idx", sort=True):
             group = group.drop_duplicates(subset=["symbol"], keep="first")
             if group.shape[0] < int(cfg.l1_min_cross_section):
                 continue
-            pred = group["expected_gross_bps"].to_numpy(dtype=np.float64, copy=False)
             real = group["realized_side_adjusted_gross_bps"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
-            pred_unique_count = int(np.unique(np.round(pred, decimals=12)).size)
-            prediction_unique_count = max(
-                prediction_unique_count,
-                pred_unique_count,
-            )
-            if pred_unique_count >= prediction_unique_threshold:
-                ic_val, _ = spearmanr(pred, real)
-            else:
-                ic_val = np.nan
-            if np.isfinite(ic_val):
-                ic_series.append(float(ic_val))
             risk_scores: list[tuple[float, int]] = []
             for row_idx, row in enumerate(group.itertuples(index=False)):
                 symbol_idx = symbol_to_idx.get(str(row.symbol))
@@ -931,8 +899,6 @@ def evaluate_outer_signal_opportunities(
                 if selected_real.size > 0:
                     probe_series.append(float(np.mean(selected_real)))
     ready_symbols = tuple(sorted(str(symbol) for symbol in merged["symbol"].dropna().unique()))
-    opportunity_ic = float(np.mean(ic_series)) if ic_series else None
-    opportunity_ic_tstat = _series_tstat(np.asarray(ic_series, dtype=np.float64))
     probe_gross_edge = float(np.mean(probe_series)) if probe_series else 0.0
     probe_boot = moving_block_bootstrap_mean(
         np.asarray(probe_series, dtype=np.float64),
@@ -967,9 +933,9 @@ def evaluate_outer_signal_opportunities(
         unmatched_event_count=unmatched_count,
         realized_match_ratio=realized_match_ratio,
         unique_decision_count=unique_decision_count,
-        prediction_unique_count=prediction_unique_count,
-        opportunity_ic=opportunity_ic,
-        opportunity_ic_tstat=opportunity_ic_tstat,
+        prediction_unique_count=0,
+        opportunity_ic=None,
+        opportunity_ic_tstat=0.0,
         probe_bps=probe_gross_edge,
         probe_lcb_bps=probe_lcb,
         probe_series_bps=tuple(probe_series),
