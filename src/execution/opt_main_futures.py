@@ -277,24 +277,12 @@ def _ensure_cached_symbol_data_for_targets(
     if run_config.sync == "skip":
         _logger.info("[CACHE] Skip backfill as requested")
         return
-    ledger_path = FUTURES_DATA_DIR / "universe_ledger.parquet"
-    last_ledger_date = date(2023, 1, 1)
-    if ledger_path.exists():
-        try:
-            df_ledger = pd.read_parquet(ledger_path, columns=["date"])
-            if not df_ledger.empty:
-                last_ledger_date = pd.to_datetime(df_ledger["date"]).max().date()
-        except Exception as e:
-            _logger.warning(
-                "!! SYNC: check_ledger_date failed (%s)", type(e).__name__
-            )
     sync_start_date = window.fetch_start_date
     _logger.info(
-        "[CACHE] Backfill: %s ~ %s | Symbols: %d | Last: %s",
+        "[UNIVERSE] 🌐 %s ~ %s | Target: %d symbols",
         sync_start_date,
         window.end_date_value,
         len(symbols),
-        last_ledger_date,
     )
     t_sync_main = time.perf_counter()
     run_historical_sync(
@@ -712,7 +700,7 @@ def _run_strategy_stage(
     layered_window: Any | None = None,
 ) -> CandidatePipelineOutput | None:
     # ─── 기존 Phase D 진입 (공통 설정 → bridge → 선택적 Tiered 분기) ──────────
-    from src.domain.futures.strategy.tiered_logging import format_layer_header, format_data_integrity_summary
+    from src.domain.futures.strategy.tiered_logging import format_data_integrity_summary, format_layer_header
 
     t_strategy_stage = time.perf_counter()
     strategy_steps: dict[str, float] = {
