@@ -12,3 +12,16 @@ During `phase signal` execution in `opt_main_futures.py`, the Ensemble (`[ENS]`)
 ## Consequences
 - Validation calculations completed in less than 22ms for 10,000 events, achieving near-instantaneous execution.
 - Parallel worker counts scale safely between 1 to 6 processes depending on current host RAM availability, successfully executing futures optimization pipeline runs without OOM risk.
+
+---
+
+# ADR: Pipeline Optimizations (v2) - Feature Bypass, Cache Guard & Inactive Stop
+
+## Decision
+1. **Feature Bypass**: Skip high-overhead rolling features and Z-score building (`skip_features=True`) for `ensemble_b0` since it only requires target labels.
+2. **Delisted Sync Skip**: Guard delisted/inactive symbols (latest cache timestamp > 180 days past requested date or delivery_date reached) in `_requested_sync_caches_missing` to prevent infinite network sync loops.
+3. **Global Fold Caching**: Implement `_L1_SWF_FOLD_CACHE` to share historical WFFold results in Optuna studies and skip duplicate process pool invocations.
+4. **Single Thread Clamp**: Clamp subprocess thread pools (`OMP_NUM_THREADS=1`) to eliminate inter-process core throttling under resource-capped environments.
+
+## Consequences
+- Optimization pipeline execution time cut down to ~57s (80%+ speedup) with CPU core thrashing resolved.
