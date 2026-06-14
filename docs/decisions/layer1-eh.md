@@ -1,5 +1,10 @@
 # Layer 1 Architectural Decisions
 
+## L1-ADR-006: Deterministic Bootstrap Seeding for Layer 1 Folds (2026-06-14)
+- **Delta**: Replaced Python's built-in `hash()` with a SHA-256 byte-convert integer offset (`int.from_bytes(sha256(...).digest()[:4]) % 10000`) for L1 bootstrap seed generation.
+- **Rationale**: Built-in `hash()` is subject to process-level startup hash randomization. Replacing it with SHA-256 guarantees fully deterministic bootstrap seeds across runs/processes, ensuring perfect reproducibility of L1 validation.
+- **Status**: Accepted
+
 ## L1-ADR-005: Layer 1 Hard Gate Reform (2026-06-14)
 - **Delta**: Relaxed `l1_min_realized_match_ratio` (1.0 $\rightarrow$ 0.9) and `l1_min_fold_ratio` (0.6 $\rightarrow$ 0.5). Added HHI-based `l1_sym_count_mode="effective_n"` ($\ge 3.0$) and `l1_probe_lcb_pooled=True` (pooled OOS bootstrap LCB). Relaxed fold-level gate from bootstrap LCB to gross edge positive check (`probe_bps > 0`).
 - **Rationale**: Solves the double-counting statistical penalty that rejected viable signals due to small-sample volatility in fold-level bootstrap estimations. Standardizes global validity on pooled samples while preserving robustness via HHI diversification.
