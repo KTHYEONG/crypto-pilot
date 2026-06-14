@@ -12,7 +12,7 @@ related_paths:
   - src/domain/futures/strategy/config.py
   - src/domain/futures/strategy/ablation.py
   - src/domain/futures/portfolio/covariance.py
-  - src/domain/futures/strategy/tiered_workflow.py
+  - src/domain/futures/strategy/tiered_workflow/pipeline.py
   - src/domain/futures/strategy/cs_rank.py
   - src/domain/futures/portfolio/portfolio_constructor.py
   - src/domain/futures/strategy/walk_forward.py
@@ -20,7 +20,7 @@ related_paths:
 change_triggers:
   - src/domain/futures/strategy/candidate_ensemble.py
   - src/domain/futures/strategy/candidate_workflow.py
-  - src/domain/futures/strategy/tiered_workflow.py
+  - src/domain/futures/strategy/tiered_workflow/pipeline.py
   - src/domain/futures/strategy/cs_rank.py
   - src/domain/futures/portfolio/portfolio_constructor.py
   - src/domain/futures/strategy/walk_forward.py
@@ -30,7 +30,7 @@ dependencies:
     - docs/architecture/signal.md
     - docs/architecture/regime.md
     - docs/architecture/ML.md
-last_verified: 2026-06-11
+last_verified: 2026-06-14
 ---
 
 # 1. Purpose
@@ -166,7 +166,7 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 ## 6.2 Core Math
 
 **Layer 1 — SWF Strategy Panel Validation**
-- Folds: `build_l1_swf_folds` with expanding fit, purge bars, and deterministic OOS windows.
+- Folds: `build_l1_nested_swf_folds` with anchored prequential evidence snapshots and expanding fit.
 - Panel validation: `compute_per_strategy_oos_validation(fold_tuples=futures)` evaluates the strategy panel with default `min_obs=30`, `t_stat_floor=1.5`, `consistency_floor=0.60`.
 - Fold diagnostics: `cs_ic_mean`, `cs_ic_tstat`, `cs_ic_fold_pass_ratio`, and `decile_lift_bps` are tracked per fold and aggregated for the gate.
 - **Gate**: `trained_fold_coverage >= 0.80`, `n_valid_strategies >= 5`, `panel_diversity >= 0.50`, `cs_ic_fold_pass_ratio >= 0.60`.
@@ -195,8 +195,8 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 
 ```mermaid
 graph TD
-    A[USE_CS_RANK_ENGINE=True] --> B[build_cpcv_folds]
-    B --> C[run_l1_cpcv]
+    A[USE_CS_RANK_ENGINE=True] --> B[build_l1_nested_swf_folds]
+    B --> C[run_l1_nested_swf]
     C -->|gate PASS| D[run_l2_awf]
     C -->|gate BLOCKED| Z[return L1, None, None]
     D -->|gate PASS| E[run_l3_holdout]
@@ -208,8 +208,8 @@ graph TD
 
 | Module | Role |
 |--------|------|
-| `tiered_workflow.py` | L1/L2/L3 orchestrator + `_run_awf_simulation` shared loop |
-| `walk_forward.py` | `CPCVFold` + `build_cpcv_folds` (C(N,k) purge/embargo) |
+| `tiered_workflow/` | L1/L2/L3 orchestrator (`pipeline.py`) + `awf_sim.py` shared loop |
+| `walk_forward.py` | `WFFold` + `build_l1_nested_swf_folds` (anchored evidence snapshots, expanding fit) |
 | `signal_composer.py` | `compose_symbol_signals`: BarRet → SymbolSignal + HAC t-stat |
 | `cs_rank.py` | `rank_and_select` + `neutralize_cross_section` (BTC-β wired) |
 | `portfolio_constructor.py` | `diagonal_kelly_weights` (friction mask: `abs(mu) >= hurdle`) |
@@ -232,5 +232,5 @@ graph TD
 
 ## 6.6 Edge Cases
 - **REGIME_FLOOR clamp**: `l1_start > l2_start` → warning logged, L1 window is zero-length.
-- **CPCV degenerate** (n_bars < min for groups): single fallback fold covering full range.
+- **SWF degenerate** (insufficient bars for minimal OOS window): single fallback fold covering full range.
 - **Total loss** (cumulative pnl ≤ -1): `_cagr()` returns -1.0; MAR computed with `mdd + 1e-9` guard.
