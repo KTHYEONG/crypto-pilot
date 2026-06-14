@@ -6,7 +6,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.domain.futures.universe.models import SymbolMeta, UniverseSnapshot
+from src.domain.futures.universe.models import (
+    SymbolMeta,
+    UniverseSnapshot,
+    load_ledger_slice,
+    update_ledger,
+)
 from src.domain.futures.universe.storage import (
     SymbolSyncProfile,
     _requested_sync_caches_missing,
@@ -215,3 +220,117 @@ def test_snapshot_payload_roundtrip_preserves_stage5_research_panel() -> None:
     assert roundtrip.selected[0].anchor_cluster_member == 1.0
     assert roundtrip.selected[0].vol_30d == 0.35
     assert roundtrip.selected[0].tradeable_score == 0.69
+
+
+def test_requested_sync_caches_missing_delisted_guard(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from src.domain.futures.universe.storage import SymbolSyncProfile
+    monkeypatch.setattr("src.domain.futures.universe.storage.FUTURES_DATA_DIR", tmp_path)
+    symbol = "ZUSDT"
+    
+    # 2024-01-01부터 2024-01-31까지의 데이터 준비
+    dt = pd.date_range("2024-01-01", "2024-01-31", freq="4h", tz="UTC")
+    pd.DataFrame({"datetime": dt}).to_parquet(tmp_path / f"{symbol}_1h.parquet")
+
+    # 1. delivery_date가 2024-01-31로 주어지고, 요청 범위는 2026-06-14까지일 때
+    # delivery_date 때문에 sync 범위가 2024-01-31로 잘리고,
+    # 이미 2024-01-31까지 데이터가 존재하므로 missing이 아니어야 함.
+    profile = SymbolSyncProfile(
+        symbol=symbol,
+        onboard_date=date(2024, 1, 1),
+        delivery_date=date(2024, 1, 31),
+        status="DELISTED",
+    )
+    
+    assert not _requested_sync_caches_missing(
+        symbol,
+        sync_1d=False,
+        sync_4h=False,
+        sync_1m=False,
+        requested_start=date(2024, 1, 1),
+        requested_end=date(2026, 6, 14),
+        profile=profile,
+    )
+
+    # 2. 메타데이터 캐시 상의 latest_available가 180일 이전(예: 2024-01-31)이고, 요청 범위는 2026-06-14일 때
+    # 180일 이상 경과했으므로 상장폐지된 것으로 간주하여 missing이 아니어야 함 (False 반환).
+    metadata_cache = {
+        "ZUSDT::1h": {
+            "earliest_available": "2024-01-01T00:00:00Z",
+            "latest_available": "2024-01-31T00:00:00Z"
+        }
+    }
+    
+    assert not _requested_sync_caches_missing(
+        symbol,
+        sync_1d=False,
+        sync_4h=False,
+        sync_1m=False,
+        requested_start=date(2024, 1, 1),
+        requested_end=date(2026, 6, 14),
+        metadata_cache=metadata_cache,
+    )
+
+
+def test_sqlite_ledger_happy_path(tmp_path: Path) -> None:
+    db_path = tmp_path / "universe_ledger.db"
+    
+    # 1. new_rows가 비어있을 때 예외 없이 무시되는지 테스트
+    update_ledger(pd.DataFrame(), ledger_path=db_path)
+    assert not db_path.exists()
+    
+    # 2. 정상 적재 검증
+    new_rows = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT", "ETHUSDT"],
+            "tf": ["4h", "4h"],
+            "date": ["2026-06-14", "2026-06-14"],
+            "knowledge_date": ["2026-06-14", "2026-06-14"],
+            "is_listed": [1, 1],
+            "is_trading": [1, 1],
+            "extra_col": [4.0, 5.0],
+        }
+    )
+    update_ledger(new_rows, ledger_path=db_path)
+    assert db_path.exists()
+    
+    # 3. 슬라이스 쿼리 및 schema/정렬 정합성 테스트
+    df_slice = load_ledger_slice(
+        as_of="2026-06-14",
+        tf="4h",
+        columns=("extra_col",),
+        symbols=("BTCUSDT", "ETHUSDT"),
+        ledger_path=db_path,
+        enforce_eligibility=True,
+    )
+    
+    assert not df_slice.empty
+    assert "extra_col" in df_slice.columns
+    assert "symbol" in df_slice.columns
+    
+    # UPSERT 멱등성 검증
+    update_ledger(new_rows, ledger_path=db_path)
+    
+    df_slice_2 = load_ledger_slice(
+        as_of="2026-06-14",
+        tf="4h",
+        columns=("extra_col",),
+        symbols=("BTCUSDT", "ETHUSDT"),
+        ledger_path=db_path,
+        enforce_eligibility=True,
+    )
+    assert len(df_slice_2) == len(df_slice)
+
+
+def test_sqlite_ledger_file_missing(tmp_path: Path) -> None:
+    # 존재하지 않는 파일 경로 쿼리 시도 -> 에러 없이 빈 DataFrame 반환
+    db_path = tmp_path / "non_existent_ledger.db"
+    df_slice = load_ledger_slice(
+        as_of="2026-06-14",
+        tf="4h",
+        columns=("extra_col",),
+        ledger_path=db_path,
+    )
+    assert df_slice.empty
