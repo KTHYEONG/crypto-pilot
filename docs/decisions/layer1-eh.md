@@ -1,5 +1,10 @@
 # Layer 1 Architectural Decisions
 
+## L1-ADR-008: IC 지표 제거 및 Probe-Only 검증 (2026-06-14)
+- **Delta**: Removed IC calculation (`spearmanr` calls, `opportunity_ic=None` always). Removed IC from ENS log output. Removed IC column from Outer Fold table. Kept `probe_bps`/`probe_lcb_bps` as sole profitability metrics.
+- **Rationale**: Arch-Only mode produces constant prediction arrays per archetype → Spearman IC = numerical noise. IC unmapped to gate inputs (5-Gate: fold_cov, match_ratio, sym_count, fold_ratio, probe_lcb_bps). Removed diagnostic noise. L1 passes 3/3 runs (Min-Profit 45-94 bps, t-stat 2.5-4.25). Test suite: 436 passed.
+- **Status**: Accepted
+
 ## L1-ADR-007: Retention of Time-Series Selection and Rejection of Coupled Pooled IC (2026-06-14)
 - **Delta**: Retained default `l1_opp_ic_mode="time_series"` and reverted `pooled` mode changes. Fixed test suite to globally patch `ProcessPoolExecutor` to `ThreadPoolExecutor` for safe synchronous mocked test execution.
 - **Rationale**: Changing `l1_opp_ic_mode` to `"pooled"` coupled with `probe_series` logic, changing signal selection from high-performance symbol-wise time-series to noisy bar-wise cross-sectional selection, dropping edge from +45.7 bps to -0.45 bps (blocking L1). Reverted code changes to preserve original performance while maintaining unit test fixes.

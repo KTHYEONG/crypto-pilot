@@ -398,7 +398,7 @@ def test_evaluate_outer_time_series_ic_single_symbol(
     cfg_factory: Callable[..., CandidateStrategyConfig],
     sample_aligned: SimpleNamespace,
 ) -> None:
-    """l1_opp_ic_mode='time_series' → 단일 심볼 이벤트도 IC 측정 가능."""
+    """l1_opp_ic_mode='time_series' → probe_bps 양수, opportunity_ic는 항상 None."""
     from src.domain.futures.strategy.tiered_workflow.signal_selection import evaluate_outer_signal_opportunities
 
     rng = np.random.default_rng(0)
@@ -457,8 +457,8 @@ def test_evaluate_outer_time_series_ic_single_symbol(
         seed=0,
     )
 
-    assert result.opportunity_ic is not None, f"time_series IC는 None이 아님, got {result.opportunity_ic}"
-    assert result.opportunity_ic > 0.0, f"time_series IC는 양수여야 함, got {result.opportunity_ic}"
+    assert result.opportunity_ic is None, "IC 계산 제거 후 항상 None"
+    assert result.probe_bps > 0.0, f"probe_bps는 양수여야 함, got {result.probe_bps}"
     assert result.valid_opportunity_timestamp_count >= 1
     assert "non_positive_probe" not in result.blockers
 
@@ -692,7 +692,7 @@ def test_evidence_grid_max_folds_cap_applied() -> None:
 
 
 def test_format_layer1_outer_fold_table_renders_none_ic_as_na() -> None:
-    """C3: opportunity_ic=None → 테이블에 'n/a' 포함, '0.000' 미포함."""
+    """C3: IC 컬럼 제거 후 테이블에 'IC:' 없음, 'Edge:' bps 값 포함."""
     from src.domain.futures.strategy.candidate_contracts import Layer1FoldReadiness
     from src.domain.futures.strategy.tiered_logging import format_layer1_outer_fold_table
 
@@ -709,10 +709,9 @@ def test_format_layer1_outer_fold_table_renders_none_ic_as_na() -> None:
 
     result = format_layer1_outer_fold_table(reports=(report,))
 
-    assert "n/a" in result, f"'n/a' 미포함: {result!r}"
-    # "IC: n/a" 확인, Probe 값의 "0.000"은 허용
-    assert "IC: n/a" in result, f"IC 필드에 'n/a' 미포함: {result!r}"
-    assert "IC: 0.000" not in result, f"IC 필드에 '0.000' 오기록: {result!r}"
+    assert "IC:" not in result, f"IC 컬럼 제거 후 'IC:' 미존재 기대: {result!r}"
+    assert "Edge:" in result, f"'Edge:' bps 표시 기대: {result!r}"
+    assert "0.00 bps" in result, f"probe_bps=0.0 기본값 표시 기대: {result!r}"
 
 
 # ---------------------------------------------------------------------------

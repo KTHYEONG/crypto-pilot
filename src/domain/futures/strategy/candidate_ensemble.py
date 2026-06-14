@@ -211,9 +211,8 @@ def _log_ensemble_diagnostics(
 ) -> dict[str, Any]:
     """Emit a consolidated diagnostic log for ensemble fitting."""
     n_total = len(frame)
-    ic_sign = "✅" if val_ic > 0 else "❌"
     n_syms = int(frame["symbol"].nunique()) if "symbol" in frame.columns and not frame.empty else 0
-    
+
     # [TAG] Header line (Option 1: Aligned)
     sym_info = f"ActiveSyms({n_syms})"
     mode_short = chosen.replace("archetype_", "").replace("_", "-").title()
@@ -224,8 +223,7 @@ def _log_ensemble_diagnostics(
 
     summary = (
         f"[{tag}] Sym:{n_syms:<2}  N:{n_total:,}  "
-        f"IC:{val_ic:.3f}{ic_sign}  Mu:{global_mu:.1f}  "
-        f"Mode:{mode_short}  k:{k_used:.1f}"
+        f"Mu:{global_mu:.1f}  Mode:{mode_short}  k:{k_used:.1f}"
     )
 
     # Archetype performance display (1-letter abbreviations)
@@ -255,7 +253,6 @@ def _log_ensemble_diagnostics(
         "tag": tag,
         "symbol": sym_info,
         "n_events": n_total,
-        "val_ic": val_ic,
         "global_mu": global_mu,
         "arch_mu": arch_mu,
         "chosen": chosen,
