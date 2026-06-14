@@ -357,28 +357,81 @@ def format_layer1_outer_fold_table(reports: tuple[Any, ...]) -> str:
 
 
 def format_layer1_deployment_registry_table(registry: Any) -> str:
-    """Format deployment registry entries."""
+    """Format deployment registry entries with enhanced visualization."""
     by_symbol = getattr(registry, "by_symbol", {}) or {}
-    lines = [
-        "[LAYER 1 DEPLOYMENT REGISTRY] ----------------------",
-        "| Symbol | Strategy | Context | Gross | Incremental | Effective N | Bootstrap t | q-value |",
-        "| ------ | -------- | ------- | ----- | ----------- | ----------- | ----------- | ------- |",
-    ]
-    for symbol in sorted(by_symbol):
+    
+    # Flatten all evidence items to sort and rank them
+    all_entries = []
+    for symbol in by_symbol:
         evidence_items = tuple(by_symbol.get(symbol, ()) or ())
-        for evidence in evidence_items:
-            key = getattr(evidence, "key", None)
-            strategy = getattr(key, "strategy_id", "")
-            context = getattr(key, "activation_context", "")
-            lines.append(
-                f"| {symbol:<6} | {strategy:<8} | {context:<7} | "
-                f"{float(getattr(evidence, 'mean_gross_bps', 0.0)):<5.2f} | "
-                f"{float(getattr(evidence, 'mean_incremental_bps', 0.0)):<11.2f} | "
-                f"{float(getattr(evidence, 'effective_n', 0.0)):<11.2f} | "
-                f"{float(getattr(evidence, 'bootstrap_tstat_incremental', 0.0)):<11.2f} | "
-                f"{float(getattr(evidence, 'q_value', 0.0)):<7.3f} |"
-            )
-    lines.append("------------------------------------------------------")
+        for ev in evidence_items:
+            key = getattr(ev, "key", None)
+            strategy_id = getattr(key, "strategy_id", "")
+            context = getattr(key, "activation_context", "all")
+            all_entries.append({
+                "symbol": symbol,
+                "strategy_id": strategy_id,
+                "context": context,
+                "edge": float(getattr(ev, "mean_incremental_bps", 0.0)),
+                "tstat": float(getattr(ev, "bootstrap_tstat_incremental", 0.0)),
+                "q_value": float(getattr(ev, "q_value", 0.0)),
+                "effective_n": float(getattr(ev, "effective_n", 0.0)),
+            })
+    
+    # Sort by t-stat descending for ranking
+    all_entries.sort(key=lambda x: x["tstat"], reverse=True)
+    
+    lines = [
+        "",  # Leading newline for separation
+        "[L1 FINAL PROMOTION SUMMARY] 🚀",
+        "--------------------------------------------------------------------------------------------",
+        " RANK | SYMBOL   | STRATEGY (Family)              | EDGE(bps) | SIG(t-stat) | CONF(q) | STATUS",
+        "--------------------------------------------------------------------------------------------",
+    ]
+    
+    for i, entry in enumerate(all_entries, 1):
+        # Strategy family extraction
+        strat_parts = entry["strategy_id"].split(":")
+        family = strat_parts[0] if len(strat_parts) > 1 else entry["strategy_id"]
+        variant = strat_parts[1] if len(strat_parts) > 1 else ""
+        
+        # Include context if not 'all'
+        ctx_suffix = f" [{entry['context']}]" if entry['context'] != "all" else ""
+        strat_display = f"{family} ({variant}){ctx_suffix}" if variant else f"{family}{ctx_suffix}"
+        
+        # Star rating for t-stat
+        t = entry["tstat"]
+        if t >= 4.0:
+            stars = "★★★★★"
+        elif t >= 3.0:
+            stars = "★★★★☆"
+        elif t >= 2.0:
+            stars = "★★★☆☆"
+        elif t >= 1.0:
+            stars = "★★☆☆☆"
+        else:
+            stars = "★☆☆☆☆"
+            
+        # Status based on q-value
+        q = entry["q_value"]
+        if q <= 0.15:
+            status = "PROMOTED (Best Q)"
+        elif q <= 0.30:
+            status = "PROMOTED"
+        elif q <= 0.70:
+            status = "WATCH"
+        else:
+            status = "REJECTED"
+            
+        lines.append(
+            f"  #{i:<2} | {entry['symbol']:<8} | {strat_display[:28]:<30} | "
+            f"{entry['edge']:>+9.1f} | {stars} {t:>4.2f} |  {q:>5.3f}  | {status}"
+        )
+        
+    lines.append("--------------------------------------------------------------------------------------------")
+    if not all_entries:
+        lines.append("  (No variants promoted to Layer 2)")
+        
     return "\n".join(lines)
 
 
