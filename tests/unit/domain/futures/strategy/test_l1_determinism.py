@@ -135,7 +135,7 @@ class TestFitFoldThreadpoolLimits:
 
 
 # ---------------------------------------------------------------------------
-# Scenario 1 (단위): moving_block_bootstrap_mean 재현성
+# Scenario 1 (단위): moving_block_bootstrap_mean 재현성 및 가속 확인
 # ---------------------------------------------------------------------------
 
 class TestBootstrapReproducibility:
@@ -164,3 +164,75 @@ class TestBootstrapReproducibility:
         result_b = moving_block_bootstrap_mean(values, idx, block_bars=6, n_bootstrap=200, seed=9999)
 
         assert not np.array_equal(result_a, result_b), "다른 seed인데 bootstrap 결과가 같음 (예상치 못한 충돌)"
+
+    def test_bootstrap_numba_performance(self) -> None:
+        """Numba 가속 후 속도가 충분히 빠른지 검증 (웜업 포함)."""
+        import time
+
+        from src.domain.futures.strategy.tiered_workflow.metrics import moving_block_bootstrap_mean
+
+        rng = np.random.default_rng(123)
+        values = rng.standard_normal(100).astype(np.float64)
+        idx = np.arange(100, dtype=np.int64)
+
+        # 웜업 컴파일용 호출
+        moving_block_bootstrap_mean(values, idx, block_bars=5, n_bootstrap=10, seed=1)
+
+        t0 = time.perf_counter()
+        # 대량 연산 실행
+        moving_block_bootstrap_mean(values, idx, block_bars=5, n_bootstrap=5000, seed=1)
+        duration = time.perf_counter() - t0
+
+        # 대량 연산이 Numba 덕에 매우 순식간(0.2초 이내)에 끝나야 함
+        assert duration < 0.2, f"Bootstrap execution is too slow: {duration:.4f}s"
+
+
+# ---------------------------------------------------------------------------
+# Scenario 3 (캐시): 캐시 프라이밍 및 중복 연산 방지 검증
+# ---------------------------------------------------------------------------
+
+class TestFeatureCachePriming:
+    def test_prime_aligned_feature_cache_populates_global_cache(self) -> None:
+        """prime_aligned_feature_cache 호출 시 _ALIGNED_FEATURE_CACHE에 정상 등록 확인."""
+        import pandas as pd
+
+        from src.domain.futures.strategy.candidate_dataset import _ALIGNED_FEATURE_CACHE, prime_aligned_feature_cache
+        from src.domain.futures.strategy.common.alignment import AlignedMarketData
+        from src.domain.futures.strategy.config import CandidateStrategyConfig
+
+        # mock aligned data
+        size = 100
+        arr = np.ones((size, 1), dtype=np.float64)
+        aligned = AlignedMarketData(
+            symbols=("BTC",),
+            datetimes=np.array(pd.date_range("2026-01-01", periods=size, freq="4h")),
+            open_2d=arr, high_2d=arr, low_2d=arr, close_2d=arr, volume_2d=arr,
+            funding_2d=np.zeros((size, 1)),
+            active_mask=np.ones((size, 1), dtype=bool),
+            warm_mask=np.ones((size, 1), dtype=bool),
+            entry_block_mask=np.zeros((size, 1), dtype=bool),
+            kill_mask=np.zeros((size, 1), dtype=bool),
+        )
+
+        labeled_events = pd.DataFrame({
+            "entry_idx": [25, 50, 75],
+            "exit_idx": [30, 60, 80],
+            "symbol": ["BTC", "BTC", "BTC"],
+            "side": [1, -1, 1],
+            "score": [0.5, -0.2, 0.8]
+        })
+
+        cfg = CandidateStrategyConfig(market_state_features_enabled=True)
+
+        aligned_id = id(aligned)
+        if aligned_id in _ALIGNED_FEATURE_CACHE:
+            del _ALIGNED_FEATURE_CACHE[aligned_id]
+
+        prime_aligned_feature_cache(labeled_events, aligned, cfg)
+
+        # Assert: 캐시 엔트리가 생성되었고 핵심 피처가 캐싱되었는지 확인
+        assert aligned_id in _ALIGNED_FEATURE_CACHE
+        cache = _ALIGNED_FEATURE_CACHE[aligned_id]
+        assert "sym_ret_1" in cache
+        assert "btc_ret_1_ser" in cache
+
