@@ -18,7 +18,7 @@ def test_strategy_mode_pipeline_orchestration_order(
 ) -> None:
     run_config = build_run_config_from_args(
         {
-            "phase": "full",
+            "phase": "l3",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -180,15 +180,15 @@ def test_strategy_mode_pipeline_orchestration_order(
     assert called == ["window", "universe", "data", "strategy", "optimization"]
 
 
-def test_alpha_mode_skips_optimization_stage(
+def test_l2_mode_skips_optimization_stage(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Alpha 모드는 strategy bridge 후 optimization 없이 종료해야 한다."""
+    """l2 모드는 strategy bridge 후 optimization 없이 종료해야 한다."""
     caplog.set_level(logging.INFO)
     run_config = build_run_config_from_args(
         {
-            "phase": "alpha",
+            "phase": "l2",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -269,7 +269,7 @@ def test_strategy_stage_injects_universe_metadata_before_bridge(
     caplog.set_level(logging.DEBUG)
     run_config = build_run_config_from_args(
         {
-            "phase": "alpha",
+            "phase": "l2",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -377,7 +377,7 @@ def test_run_from_cli_when_pipeline_returns_nonzero_propagates_exit_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Arrange
-    argv = ["--phase", "full"]
+    argv = ["--phase", "l3"]
     monkeypatch.setattr(
         opt_main_futures,
         "run_pipeline",
@@ -395,7 +395,7 @@ def test_run_from_cli_when_pipeline_raises_runtime_error_returns_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Arrange
-    argv = ["--phase", "full"]
+    argv = ["--phase", "l3"]
 
     def _raise_runtime_error(*_args: object, **_kwargs: object) -> opt_main_futures.RunnerResult:
         raise RuntimeError("boom")
@@ -409,10 +409,10 @@ def test_run_from_cli_when_pipeline_raises_runtime_error_returns_one(
     assert exit_code == 1
 
 
-def test_requires_exec_1m_returns_false_for_alo_mode() -> None:
+def test_requires_exec_1m_returns_false_for_l2_mode() -> None:
     run_config = build_run_config_from_args(
         {
-            "phase": "alo",
+            "phase": "l2",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -421,10 +421,10 @@ def test_requires_exec_1m_returns_false_for_alo_mode() -> None:
     assert opt_main_futures._requires_exec_1m(run_config) is False
 
 
-def test_requires_exec_1m_returns_false_for_strategy_phase() -> None:
+def test_requires_exec_1m_returns_false_for_l1_mode() -> None:
     run_config = build_run_config_from_args(
         {
-            "phase": "full",
+            "phase": "l1",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -436,7 +436,7 @@ def test_requires_exec_1m_returns_false_for_strategy_phase() -> None:
 def test_resolve_data_collection_symbols_uses_inference_panel() -> None:
     run_config = build_run_config_from_args(
         {
-            "phase": "full",
+            "phase": "l3",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -455,7 +455,7 @@ def test_resolve_data_collection_symbols_uses_inference_panel() -> None:
 def test_resolve_data_collection_symbols_uses_live_panel_when_inference_panel_is_empty() -> None:
     run_config = build_run_config_from_args(
         {
-            "phase": "full",
+            "phase": "l3",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -479,7 +479,7 @@ def test_ensure_universe_ledger_sync_always_passes_none_symbols(
 ) -> None:
     run_config = build_run_config_from_args(
         {
-            "phase": "full",
+            "phase": "l3",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -502,7 +502,10 @@ def test_ensure_universe_ledger_sync_always_passes_none_symbols(
         "run_historical_sync",
         lambda **kwargs: calls.append(kwargs),
     )
-    monkeypatch.setattr(opt_main_futures, "FUTURES_DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        "src.domain.futures.universe.models.DEFAULT_LEDGER_PATH",
+        tmp_path / "universe_ledger.sqlite",
+    )
     opt_main_futures._ensure_universe_ledger_sync(run_config, window)
     assert calls
     assert calls[0].get("symbols") is None
@@ -513,7 +516,7 @@ def test_ensure_cached_symbol_data_uses_fetch_start_for_backfill(
 ) -> None:
     run_config = build_run_config_from_args(
         {
-            "phase": "full",
+            "phase": "l3",
             "timeframe": "4h",
             "trials": 1,
             "sync": "full",
@@ -583,23 +586,6 @@ def test_active_signals_count_reads_alpha_panel_not_missing_attr(
     tw_arr = alpha_panel_check["target_weight"].to_numpy(dtype=np.float64)
     non_zero_weights = int(np.count_nonzero(np.abs(tw_arr) > 1e-9))
     assert non_zero_weights == 3, f"Expected 3 nonzero weights, got {non_zero_weights}"
-
-
-# ─── --mode signal ────────────────────────────────────────────────────────────
-
-def test_build_run_config_accepts_mode_signal() -> None:
-    # "--mode signal" is mapped to phase="signal" for backward compatibility
-    cfg = build_run_config_from_args(
-        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full", "mode": "signal"}
-    )
-    assert cfg.phase == "signal"
-
-
-def test_cli_mode_signal_is_accepted() -> None:
-    """--mode signal parsed from CLI args must be accepted."""
-    parser = opt_main_futures.build_arg_parser()
-    args = parser.parse_args(["--phase", "full", "--mode", "signal"])
-    assert args.mode == "signal"
 
 
 # ─── Tiered aligned scope fix (Method B) ─────────────────────────────────────
@@ -765,7 +751,7 @@ def test_tiered_aligned_scope_s1_happy_path(
 
     # Act
     run_config = build_run_config_from_args(
-        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
     )
     opt_main_futures._run_strategy_stage(
         run_config,
@@ -801,7 +787,7 @@ def test_tiered_aligned_scope_s2_fallback_when_no_overlap(
 
     # Act
     run_config = build_run_config_from_args(
-        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
     )
     opt_main_futures._run_strategy_stage(
         run_config,
@@ -837,7 +823,7 @@ def test_tiered_aligned_scope_s3_regression_breadth_denominator(
     _patch_tiered_deps(monkeypatch, captured)
 
     run_config = build_run_config_from_args(
-        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
     )
     opt_main_futures._run_strategy_stage(
         run_config, _make_window(), data_stage, universe_snapshot=snapshot
@@ -887,7 +873,7 @@ def test_tiered_aligned_scope_s4_partial_overlap(
     _patch_tiered_deps(monkeypatch, captured)
 
     run_config = build_run_config_from_args(
-        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
     )
     opt_main_futures._run_strategy_stage(
         run_config, _make_window(), data_stage, universe_snapshot=snapshot
@@ -976,7 +962,7 @@ def test_tiered_window_uses_run_config_date_reference(
     )
 
     run_config = build_run_config_from_args(
-        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full", "date": "2026-05-01"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full", "date": "2026-05-01"}
     )
     opt_main_futures._run_strategy_stage(
         run_config,
@@ -1068,7 +1054,7 @@ def test_tiered_pipeline_uses_unfiltered_labeled_events(
     monkeypatch.setattr(_tw, "run_tiered_pipeline", _capture_tiered)
 
     run_config = build_run_config_from_args(
-        {"phase": "full", "timeframe": "4h", "trials": 1, "sync": "full", "date": "2026-05-01"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full", "date": "2026-05-01"}
     )
     opt_main_futures._run_strategy_stage(
         run_config,
