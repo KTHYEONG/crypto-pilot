@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+import logging
+from collections import Counter, defaultdict
 from dataclasses import replace
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -45,6 +46,8 @@ if TYPE_CHECKING:
     from src.domain.futures.strategy.common.alignment import AlignedMarketData
     from src.domain.futures.strategy.config import CandidateStrategyConfig
     from src.domain.futures.strategy.walk_forward import WFFold
+
+logger = logging.getLogger(__name__)
 
 
 def _holding_bucket(holding_bars: int) -> int:
@@ -550,6 +553,27 @@ def compute_symbol_strategy_evidence(
                 structural_reasons=evidence.structural_reasons,
                 diagnostic_flags=tuple(diag_flags),
             )
+        )
+    # 진단: registry 공집합 경고
+    qualified_count = sum(
+        1 for ev in final_evidence
+        if ev.hard_eligible and ev.quality_weight > 0.0
+    )
+    if qualified_count == 0 and final_evidence:
+        reasons: Counter[str] = Counter(
+            r for ev in final_evidence for r in ev.structural_reasons
+        )
+        qw_zero = sum(
+            1 for ev in final_evidence
+            if ev.hard_eligible and ev.quality_weight <= 0.0
+        )
+        logger.warning(
+            "[L1-EVIDENCE] as_of=%d: %d pairs, 0 qualified. "
+            "structural_reasons=%s, hard_eligible_but_qw_zero=%d",
+            registry_as_of_idx,
+            len(final_evidence),
+            dict(reasons),
+            qw_zero,
         )
     return tuple(final_evidence)
 

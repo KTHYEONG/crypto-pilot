@@ -115,6 +115,7 @@ graph TD
 | **Param** | `ensemble_variant_prior_enabled` | Enables variant-level JS shrinkage. Default: `True` |
 | **Param** | `l1_evidence_grid_multiplier` | Evidence fold count = `outer_n × multiplier` (effective min 3). Prevents early-fold starvation. Default: `3` |
 | **Param** | `l1_evidence_max_folds` | Upper bound on evidence fold count. Default: `32` |
+| **Param** | `l1_outer_warmup_blocks` | Warm-up blocks reserved before first outer OOS. `block_len = available // (n_folds + warmup)`. Default: `2` (ensures ≥2 evidence blocks before fold 0, satisfying `l1_pair_min_folds=2`) |
 | **Param** | `l1_opp_ic_mode` | Mode for L1 Opportunity IC: `"time_series"` (default) or `"cross_section"` |
 | **Output**| `CandidateSignalPanel` | Dense 2D structure containing `signed_score`, `side_hint`, and `valid_mask` |
 | **Output**| `ValidatedSignalBatch` | Tabulated representation of validated entry signals with OOS statistics |
@@ -145,6 +146,7 @@ graph TD
 - `run_l1_nested_swf` selects the precomputed snapshot at `outer_oos_start_k` rather than retraining a fresh inner fold tree per outer fold, dramatically optimizing computational load.
 - **Invariants**: Causal ordering is preserved by snapshot cutoff; `matured_event_count` strictly counts events with `exit_idx < as_of_idx`.
 - **Evidence Grid Separation (Anti-Starvation)**: The evidence fold count is decoupled from the outer fold count via `l1_evidence_grid_multiplier` (default 3). `ev_n_folds = min(outer_n × multiplier, l1_evidence_max_folds)`. This ensures that each outer fold's `as_of_idx` snapshot has at least `l1_pair_min_folds` matured evidence blocks before it, preventing structural qualification starvation in early outer folds. Multiplier effective minimum is 3 regardless of config value.
+- **Outer Warm-Up Block Reservation (Cold-Start Defense)**: `l1_outer_warmup_blocks` (default 2) reserves evidence blocks before the first outer OOS fold. `block_len = available // (n_folds + warmup)`. Fold 0 OOS starts at `l1_start + warmup × block_len`, guaranteeing ≥ `warmup` evidence blocks satisfy `l1_pair_min_folds=2` qualification. OOS total coverage shrinks by `n/(n+warmup)` (≈17% for warmup=2, n=4) — net positive since fold 0 becomes evaluable. Look-ahead preserved: evidence still filtered by `exit_idx < as_of_idx`.
 
 **Qualification Key & OOS Activation (Regime Decoupling)**
 - **D2 Override Enforce**: In Layer 1 training/validation (`run_l1_nested_swf` and `fit_layer1_inference_artifact`), `ensemble_conditioning="archetype_only"` and `ensemble_score_calibration_enabled=False` are explicitly injected. This completely disables regime $\mu$ conditioning and linear score calibration, enforcing a pooled (Arch-Only) mode.
