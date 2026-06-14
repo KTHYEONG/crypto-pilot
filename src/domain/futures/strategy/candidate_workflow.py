@@ -101,6 +101,13 @@ def _fit_and_predict_single_fold(
     purge_bars: int,
 ) -> CandidateFoldOutput:
     """Run model fitting and out-of-sample prediction for a single fold."""
+    import os
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
     t_total = time.perf_counter()
     timing_profile: dict[str, float] = {
         "schema": 0.0,
@@ -130,6 +137,8 @@ def _fit_and_predict_single_fold(
     )
     timing_profile["schema"] = time.perf_counter() - t_step
 
+    skip_feat = (cfg.allocation_backend == "ensemble_b0")
+
     # 2. Split Datasets
     t_step = time.perf_counter()
     fit_set = build_candidate_dataset(
@@ -140,6 +149,7 @@ def _fit_and_predict_single_fold(
         split_start=fold.fit_start,
         split_end=train_end,
         is_fit_split=True,
+        skip_features=skip_feat,
     )
     timing_profile["dataset_fit"] = time.perf_counter() - t_step
     t_step = time.perf_counter()
@@ -150,6 +160,7 @@ def _fit_and_predict_single_fold(
         schema=schema,
         split_start=early_stop_start,
         split_end=fold.fit_end,
+        skip_features=skip_feat,
     )
     timing_profile["dataset_early_stop"] = time.perf_counter() - t_step
     cal_fit_end = max(
@@ -166,6 +177,7 @@ def _fit_and_predict_single_fold(
         schema=schema,
         split_start=fold.cal_start,
         split_end=min(cal_fit_end, fold.cal_end),
+        skip_features=skip_feat,
     )
     timing_profile["dataset_calibration_fit"] = time.perf_counter() - t_step
     t_step = time.perf_counter()
@@ -176,6 +188,7 @@ def _fit_and_predict_single_fold(
         schema=schema,
         split_start=min(cal_fit_end, fold.cal_end),
         split_end=fold.cal_end,
+        skip_features=skip_feat,
     )
     timing_profile["dataset_calibration_eval"] = time.perf_counter() - t_step
     t_step = time.perf_counter()
@@ -186,6 +199,7 @@ def _fit_and_predict_single_fold(
         schema=schema,
         split_start=fold.oos_start,
         split_end=fold.oos_end,
+        skip_features=skip_feat,
     )
     timing_profile["dataset_oos"] = time.perf_counter() - t_step
 
