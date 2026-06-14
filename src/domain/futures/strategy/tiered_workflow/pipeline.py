@@ -667,9 +667,12 @@ def run_l1_nested_swf(
     evidence_start = min((fold.fit_start for fold in outer_folds), default=0)
     evidence_end = max((fold.oos_start for fold in outer_folds), default=0)
     try:
+        _outer_n = len(outer_folds)
+        _mult = max(3, int(getattr(cfg, "l1_evidence_grid_multiplier", 3)))
+        _ev_n_folds = min(_outer_n * _mult, int(getattr(cfg, "l1_evidence_max_folds", 32)))
         evidence_folds = _tw.build_l1_swf_folds(
             n_bars=evidence_end,
-            n_folds=max(1, min(int(getattr(cfg, "wf_n_folds", 1)), 3)),
+            n_folds=_ev_n_folds,
             l1_start_bars=evidence_start,
             l1_end_bars=evidence_end,
             purge_bars=purge_bars,

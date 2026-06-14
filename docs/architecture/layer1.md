@@ -113,6 +113,8 @@ graph TD
 | **Param** | `spa_p_value_max` | Maximum p-value allowed to pass the SPA gate. Default: `0.10` |
 | **Param** | `ensemble_adaptive_shrinkage` | Enables EB James-Stein shrinkage for archetype cell means. Default: `True` |
 | **Param** | `ensemble_variant_prior_enabled` | Enables variant-level JS shrinkage. Default: `True` |
+| **Param** | `l1_evidence_grid_multiplier` | Evidence fold count = `outer_n × multiplier` (effective min 3). Prevents early-fold starvation. Default: `3` |
+| **Param** | `l1_evidence_max_folds` | Upper bound on evidence fold count. Default: `32` |
 | **Param** | `l1_opp_ic_mode` | Mode for L1 Opportunity IC: `"time_series"` (default) or `"cross_section"` |
 | **Output**| `CandidateSignalPanel` | Dense 2D structure containing `signed_score`, `side_hint`, and `valid_mask` |
 | **Output**| `ValidatedSignalBatch` | Tabulated representation of validated entry signals with OOS statistics |
@@ -142,6 +144,7 @@ graph TD
 - **Structure**: Split history into anchored evidence folds once via `build_l1_prequential_evidence_snapshots`, then build `Layer1EvidenceSnapshot(as_of_idx, evidence, registry, matured_event_count)`.
 - `run_l1_nested_swf` selects the precomputed snapshot at `outer_oos_start_k` rather than retraining a fresh inner fold tree per outer fold, dramatically optimizing computational load.
 - **Invariants**: Causal ordering is preserved by snapshot cutoff; `matured_event_count` strictly counts events with `exit_idx < as_of_idx`.
+- **Evidence Grid Separation (Anti-Starvation)**: The evidence fold count is decoupled from the outer fold count via `l1_evidence_grid_multiplier` (default 3). `ev_n_folds = min(outer_n × multiplier, l1_evidence_max_folds)`. This ensures that each outer fold's `as_of_idx` snapshot has at least `l1_pair_min_folds` matured evidence blocks before it, preventing structural qualification starvation in early outer folds. Multiplier effective minimum is 3 regardless of config value.
 
 **Qualification Key & OOS Activation (Regime Decoupling)**
 - **D2 Override Enforce**: In Layer 1 training/validation (`run_l1_nested_swf` and `fit_layer1_inference_artifact`), `ensemble_conditioning="archetype_only"` and `ensemble_score_calibration_enabled=False` are explicitly injected. This completely disables regime $\mu$ conditioning and linear score calibration, enforcing a pooled (Arch-Only) mode.
