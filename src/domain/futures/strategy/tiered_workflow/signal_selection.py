@@ -437,8 +437,8 @@ def compute_symbol_strategy_evidence(
             incremental.astype(np.float64, copy=False),
             group.get("decision_idx", group.get("entry_idx", pd.Series(0, index=group.index)))
             .to_numpy(dtype=np.int64, copy=False),
-            block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 1)),
-            n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 1)),
+            block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 6)),
+            n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
             seed=seed + int.from_bytes(
                 sha256(f"{symbol}:{strategy_id}:{activation_context}".encode()).digest()[:4],
                 byteorder="big",
@@ -903,8 +903,8 @@ def evaluate_outer_signal_opportunities(
     probe_boot = moving_block_bootstrap_mean(
         np.asarray(probe_series, dtype=np.float64),
         np.arange(len(probe_series), dtype=np.int64),
-        block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 1)),
-        n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 1)),
+        block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 6)),
+        n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
         seed=seed + fold_id,
     )
     probe_lcb = float(np.quantile(probe_boot, 0.05)) if probe_boot.size > 0 else probe_gross_edge
