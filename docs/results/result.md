@@ -40,63 +40,62 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 ──────────────────────────────────────────────────────────────────────────────
 
 [TIERED] 💠 Scope: 54 symbols (Historical Union ∩ Data-Valid)
-[ENS] Sym:3   N:353  IC:-0.039❌  Mu:40.8  Mode:Arch-Only  k:50.0
+[ENS] Sym:3   N:353  Mu:40.8  Mode:Arch-Only  k:50.0
 └─Mu: B:-13.4❌ M:26.2✅ T:214.7✅ m:32.4✅ U:8.3✅
-[ENS] Sym:3   N:2,101  IC:-0.025❌  Mu:12.9  Mode:Arch-Only  k:50.0
+[ENS] Sym:3   N:2,101  Mu:12.9  Mode:Arch-Only  k:50.0
 └─Mu: B:-4.0❌ M:9.9✅ T:25.8✅ m:40.3✅ U:9.8✅
-[ENS] Sym:3   N:3,755  IC:-0.032❌  Mu:12.6  Mode:Arch-Only  k:50.0
+[ENS] Sym:3   N:3,755  Mu:12.6  Mode:Arch-Only  k:50.0
 └─Mu: B:-0.1❌ M:10.8✅ T:19.4✅ m:25.1✅ U:16.4✅
-[ENS] Sym:18  N:6,587  IC:-0.010❌  Mu:15.2  Mode:Arch-Only  k:50.0
+[ENS] Sym:18  N:6,587  Mu:15.2  Mode:Arch-Only  k:50.0
 └─Mu: B:30.7✅ M:13.0✅ T:19.0✅ m:16.8✅ U:52.2✅
-[ENS] Sym:18  N:16,309  IC:-0.032❌  Mu:5.1  Mode:Arch-Only  k:50.0
+[ENS] Sym:18  N:16,309  Mu:5.1  Mode:Arch-Only  k:50.0
 └─Mu: B:21.2✅ M:3.7✅ T:11.3✅ m:6.0✅ U:11.6✅
-[ENS] Sym:18  N:26,073  IC:-0.017❌  Mu:13.4  Mode:Arch-Only  k:50.0
+[ENS] Sym:18  N:26,073  Mu:13.4  Mode:Arch-Only  k:50.0
 └─Mu: B:13.7✅ M:10.5✅ T:48.3✅ m:17.8✅ U:3.3✅
-[ENS] Sym:26  N:34,059  IC:-0.023❌  Mu:9.5  Mode:Arch-Only  k:50.0
+[ENS] Sym:26  N:34,059  Mu:9.5  Mode:Arch-Only  k:50.0
 └─Mu: B:10.1✅ M:6.6✅ T:37.2✅ m:19.6✅ U:-0.0❌
-[ENS] Sym:26  N:42,600  IC:-0.053❌  Mu:15.0  Mode:Arch-Only  k:50.0
+[ENS] Sym:26  N:42,600  Mu:15.0  Mode:Arch-Only  k:50.0
 └─Mu: B:21.2✅ F:2.7✅ M:11.1✅ T:52.7✅ m:20.5✅ U:6.6✅
-[ENS] Sym:26  N:49,357  IC:-0.089❌  Mu:15.8  Mode:Arch-Only  k:50.0
+[ENS] Sym:26  N:49,357  Mu:15.8  Mode:Arch-Only  k:50.0
 └─Mu: B:24.0✅ F:4.7✅ M:12.1✅ T:44.1✅ m:23.3✅ U:13.5✅
-[ENS] Sym:30  N:56,130  IC:-0.096❌  Mu:16.2  Mode:Arch-Only  k:50.0
+[ENS] Sym:30  N:56,130  Mu:16.2  Mode:Arch-Only  k:50.0
 └─Mu: B:24.3✅ F:6.0✅ M:12.4✅ T:44.5✅ m:21.7✅ U:17.8✅
-[ENS] Sym:34  N:61,011  IC:-0.046❌  Mu:16.5  Mode:Arch-Only  k:50.0
+[ENS] Sym:34  N:61,011  Mu:16.5  Mode:Arch-Only  k:50.0
 └─Mu: B:24.6✅ F:6.3✅ M:13.0✅ T:40.6✅ m:21.2✅ U:18.5✅
-[ENS] Sym:34  N:67,028  IC:-0.047❌  Mu:16.6  Mode:Arch-Only  k:50.0
+[ENS] Sym:34  N:67,028  Mu:16.6  Mode:Arch-Only  k:50.0
 └─Mu: B:32.7✅ F:6.9✅ M:12.7✅ T:46.3✅ m:19.9✅ U:7.9✅
-[ENS] Sym:3   N:4,989  IC:-0.042❌  Mu:11.0  Mode:Arch-Only  k:50.0
+[ENS] Sym:3   N:4,989  Mu:11.0  Mode:Arch-Only  k:50.0
 └─Mu: B:11.2✅ M:9.3✅ T:12.1✅ m:20.6✅ U:29.3✅
-[ENS] Sym:18  N:24,739  IC:-0.037❌  Mu:13.6  Mode:Arch-Only  k:50.0
+[ENS] Sym:18  N:24,739  Mu:13.6  Mode:Arch-Only  k:50.0
 └─Mu: B:16.3✅ M:10.8✅ T:46.5✅ m:18.7✅ U:2.0✅
-[ENS] Sym:26  N:42,534  IC:-0.058❌  Mu:15.1  Mode:Arch-Only  k:50.0
+[ENS] Sym:26  N:42,534  Mu:15.1  Mode:Arch-Only  k:50.0
 └─Mu: B:21.1✅ F:2.8✅ M:11.3✅ T:52.5✅ m:20.5✅ U:6.9✅
-[ENS] Sym:34  N:56,216  IC:-0.098❌  Mu:16.0  Mode:Arch-Only  k:50.0
+[ENS] Sym:34  N:56,216  Mu:16.0  Mode:Arch-Only  k:50.0
 └─Mu: B:24.5✅ F:6.0✅ M:12.4✅ T:43.4✅ m:20.5✅ U:17.7✅
 
 ● [LAYER 1 OUTER FOLD READINESS]
 ──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ✅ READY (3/4 Folds Ready)
+  STATUS  : ✅ READY (4/4 Folds Ready)
 
   [✅] Fold #0 (Fit: 2954 → OOS: 3288)
        ├─ Symbols : 7 symbols loaded
        ├─ Events  : 390 unique events
-       └─ Quality : IC: n/a     | Edge: 77.65 bps
+       └─ Quality : Edge: 124.81 bps
 
   [✅] Fold #1 (Fit: 3394 → OOS: 3837)
        ├─ Symbols : 7 symbols loaded
        ├─ Events  : 259 unique events
-       └─ Quality : IC: n/a     | Edge: 27.93 bps
+       └─ Quality : Edge: 50.81 bps
 
   [✅] Fold #2 (Fit: 3833 → OOS: 4386)
        ├─ Symbols : 7 symbols loaded
        ├─ Events  : 141 unique events
-       └─ Quality : IC: n/a     | Edge: 163.69 bps
+       └─ Quality : Edge: 245.64 bps
 
-  [❌] Fold #3 (Fit: 4272 → OOS: 4935)
+  [✅] Fold #3 (Fit: 4272 → OOS: 4935)
        ├─ Symbols : 7 symbols loaded
        ├─ Events  : 115 unique events
-       └─ Quality : IC: n/a     | Edge: -24.58 bps
-       └─ BLOCKERS: non_positive_gross_edge
+       └─ Quality : Edge: 6.30 bps
 
 ──────────────────────────────────────────────────────────────────────────────
 
@@ -107,11 +106,11 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
   ✅ [Time-Coverage  ] :    1.000 (Target >=0.800 )
   ✅ [Signal-Quality ] :    1.000 (Target >=0.900 )
   ✅ [Symbol-Breadth ] :   13.517 (Target >=3.000 )
-  ✅ [Stable-Folds   ] :    0.750 (Target >=0.500 )
-  ✅ [Min-Profit     ] :   45.733 (Target >0.000  )
+  ✅ [Stable-Folds   ] :    1.000 (Target >=0.500 )
+  ✅ [Min-Profit     ] :   49.227 (Target >0.000  )
 ──────────────────────────────────────────────────────────────────────────────
 
-[ENS-FINAL] Sym:45  N:100,404  IC:-0.055❌  Mu:22.3  Mode:Arch-Only  k:50.0
+[ENS-FINAL] Sym:45  N:100,404  Mu:22.3  Mode:Arch-Only  k:50.0
 └─Mu: B:27.2✅ F:12.3✅ M:16.3✅ T:52.7✅ m:41.7✅ U:15.2✅
 
 [L1 FINAL PROMOTION SUMMARY] 🚀
