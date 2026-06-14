@@ -433,6 +433,7 @@ class CandidateStrategyConfig:
     l1_evidence_grid_multiplier: int = 3
     l1_evidence_max_folds: int = 32
     l1_outer_warmup_blocks: int = 2
+    l1_nested_workers: int | None = None  # None=동적(기존), int=고정(재현성 모드)
     fold_survival_metric: Literal[
         "predicted_mu_tstat", "realized_selected_edge", "realized_log_growth"
     ] = "realized_selected_edge"
@@ -736,6 +737,8 @@ class CandidateStrategyConfig:
             raise ValueError("l1_evidence_max_folds must be >= 1")
         if self.l1_outer_warmup_blocks < 1:
             raise ValueError("l1_outer_warmup_blocks must be >= 1")
+        if self.l1_nested_workers is not None and self.l1_nested_workers < 1:
+            raise ValueError("l1_nested_workers must be >= 1 when set")
         if self.min_gate_brier_skill < -1.0:
             raise ValueError("min_gate_brier_skill must be >= -1.0")
         if self.min_gate_decile_lift < 0.0:
