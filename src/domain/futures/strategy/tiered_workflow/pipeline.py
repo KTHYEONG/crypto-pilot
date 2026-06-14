@@ -976,6 +976,7 @@ def run_tiered_pipeline(
     l2_params: dict[str, Any],
     caps: PortfolioCaps | None = None,
     tf: str = "4h",
+    target_phase: str = "l3",
 ) -> tuple[Layer1Result, Layer2Result | None, Layer3Result | None]:
     """3-Layer 티어드 파이프라인 실행."""
     from src.domain.futures.strategy.config import resolve_purge_and_embargo_bars
@@ -1023,6 +1024,10 @@ def run_tiered_pipeline(
         return (l1, None, None)
     
     logger.info("\n>> LAYER 1 RESULT: [PASS] -> Proceeding to Layer 2.")
+    
+    if target_phase == "l1":
+        logger.info(">> TARGET PHASE l1 REACHED -> Stopping pipeline.")
+        return (l1, None, None)
 
     # ─── Layer 2: AWF Portfolio Optimization ─────────────────────────────────
     logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
@@ -1043,6 +1048,10 @@ def run_tiered_pipeline(
         return (l1, l2, None)
     
     logger.info("\n>> LAYER 2 RESULT: [PASS] -> Proceeding to Final Holdout.")
+    
+    if target_phase == "l2":
+        logger.info(">> TARGET PHASE l2 REACHED -> Stopping pipeline.")
+        return (l1, l2, None)
 
     # ─── Layer 3: Final Holdout Backtest ─────────────────────────────────────
     logger.info(format_layer_header(3, "Final Holdout & Deployment Readiness"))
