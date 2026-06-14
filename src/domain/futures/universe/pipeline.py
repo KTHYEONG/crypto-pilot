@@ -86,8 +86,17 @@ def _filter_report_path(*, tf: str, as_of: date, root: Path) -> Path:
 def _existing_ledger_columns(*, ledger_path: Path) -> tuple[str, ...]:
     if not ledger_path.exists():
         return ()
-    parquet_file = cast(Any, pq.ParquetFile)(ledger_path)
-    return tuple(str(name) for name in parquet_file.schema.names)
+    import sqlite3
+    conn = sqlite3.connect(str(ledger_path))
+    try:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(ledger)")
+        cols = [row[1] for row in cursor.fetchall()]
+        return tuple(cols)
+    except Exception:
+        return ()
+    finally:
+        conn.close()
 
 
 def _to_symbol_meta(frame: pd.DataFrame) -> tuple[SymbolMeta, ...]:
