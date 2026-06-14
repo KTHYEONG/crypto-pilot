@@ -310,7 +310,7 @@ def run_active_strategy_output_bridge(
         live_inference_panel,
         historical_trading_panel,
     )
-    if run_config.phase not in {"full", "alo", "signal"}:
+    if run_config.phase not in {"l1", "l2", "l3"}:
         raise ValueError(f"unsupported phase for active strategy bridge: {run_config.phase}")
     if preloaded_data_maps is None:
         raise ValueError("active strategy bridge requires preloaded_data_maps")
@@ -320,7 +320,7 @@ def run_active_strategy_output_bridge(
         strategy_cfg=StrategyConfig(name=strategy_name),
         opt_config=opt_config,
         timeframe=run_config.timeframe,
-        signal_only=(run_config.phase == "signal"),
+        signal_only=(run_config.phase == "l1"),
     )
     candidate_scope = list(trading_symbols or tuple(symbols))
     if training_panel:

@@ -378,22 +378,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--phase",
         type=str,
-        choices=["full", "alo", "signal"],
-        default="full",
+        choices=["l3", "l2", "l1"],
+        default="l3",
     )
     parser.add_argument(
         "--sync",
         type=str,
         default="full",
         choices=["full", "fast", "skip"],
-    )
-    parser.add_argument(
-        "--mode",
-        type=str,
-        choices=["full", "signal"],
-        default="full",
-        help=argparse.SUPPRESS,
-        dest="mode",
     )
     parser.add_argument("--refresh-universe", action="store_true")
     return parser
@@ -866,6 +858,7 @@ def _run_strategy_stage(
                 l2_params={},
                 caps=tiered_caps,
                 tf=run_config.timeframe,
+                target_phase=run_config.phase,
             )
             return None  # Phase D allocation 스킵 (Tiered가 대체)
         except Exception as _exc:
@@ -958,7 +951,7 @@ def _run_strategy_stage(
 
     # 2. Cause: Walk-Forward Performance
     wf_details = candidate_report.get("wf_fold_details", [])
-    if wf_details and run_config.phase in {"full", "alo"}:
+    if wf_details and run_config.phase in {"l3", "l2"}:
         _logger.info("\n[WALK-FORWARD FOLD DETAILS]")
         _logger.info("-" * 82)
         _logger.info(
@@ -1068,7 +1061,7 @@ def _run_strategy_stage(
         _emit_strategy_profile()
         return ml_out
 
-    if run_config.phase in {"full", "alo"}:
+    if run_config.phase in {"l3", "l2"}:
         t_eval = time.perf_counter()
         _run_candidate_evaluation_report(
             ml_out,
@@ -1466,7 +1459,7 @@ def _run_optimization_stage(
 
     if study_ml is None or best_trial is None:
         strategy_name = str(OPT_FUTURES_CONFIG.get("FUTURES_STRATEGY_NAME", "candidate_ml"))
-        if run_config.phase == "full" and strategy_name in {"candidate_ml", "rule_baseline"}:
+        if run_config.phase == "l3" and strategy_name in {"candidate_ml", "rule_baseline"}:
             return RunnerResult(exit_code=0, reason="candidate_smoke_no_candidate")
         return RunnerResult(exit_code=1, reason="no_candidate")
 
@@ -1634,11 +1627,11 @@ def run_pipeline(
     # Step 4.5) C3/C4 gold standard: 전략 이벤트로 scorecard 갱신
     if regime_stage_result is not None and strategy_out is not None:
         _refresh_regime_c34_gold_standard(*regime_stage_result, strategy_out)
-    if run_config.phase == "signal":
-        return RunnerResult(exit_code=0, reason="signal_mode_done")
-    if run_config.phase == "alo":
+    if run_config.phase == "l1":
+        return RunnerResult(exit_code=0, reason="l1_mode_done")
+    if run_config.phase == "l2":
         _logger.info(
-            "[PHASE] phase=alo completed strategy/candidate evaluation only; optimization/training skipped"
+            "[PHASE] phase=l2 completed strategy/candidate evaluation only; optimization/training skipped"
         )
         return RunnerResult(exit_code=0, reason="candidate_evaluation_done")
     # Step 5) optimization + final OOS evaluation
