@@ -207,13 +207,14 @@ def _log_ensemble_diagnostics(
     k_used: float,
     num_valid_regimes: int = 0,
     score_cal_summary: str | None = None,
+    tag: str = "ENS",
 ) -> dict[str, Any]:
     """Emit a consolidated diagnostic log for ensemble fitting."""
     n_total = len(frame)
     ic_sign = "✅" if val_ic > 0 else "❌"
     n_syms = int(frame["symbol"].nunique()) if "symbol" in frame.columns and not frame.empty else 0
     
-    # [ENS] Header line (Option 1: Aligned)
+    # [TAG] Header line (Option 1: Aligned)
     sym_info = f"ActiveSyms({n_syms})"
     mode_short = chosen.replace("archetype_", "").replace("_", "-").title()
     if mode_short == "Regime":
@@ -222,7 +223,7 @@ def _log_ensemble_diagnostics(
         mode_short = "Arch-Only"
 
     summary = (
-        f"[ENS] Sym:{n_syms:<2}  N:{n_total:,}  "
+        f"[{tag}] Sym:{n_syms:<2}  N:{n_total:,}  "
         f"IC:{val_ic:.3f}{ic_sign}  Mu:{global_mu:.1f}  "
         f"Mode:{mode_short}  k:{k_used:.1f}"
     )
@@ -251,6 +252,7 @@ def _log_ensemble_diagnostics(
     _logger.info("%s\n%s", summary, detail)
 
     return {
+        "tag": tag,
         "symbol": sym_info,
         "n_events": n_total,
         "val_ic": val_ic,
@@ -566,6 +568,7 @@ def fit_regime_conditional_ensemble(
     oos_proof_events: pd.DataFrame | None = None,
     fold_ids: NDArray[np.int32] | None = None,
     regime_oos_stability_rho: float | None = None,
+    tag: str = "ENS",
 ) -> RegimeConditionalEnsemble:
     """Fit per-cell shrinkage estimates from train-window events.
 
@@ -846,6 +849,7 @@ def fit_regime_conditional_ensemble(
         k_used=shrinkage_k if not adaptive_shrinkage else shrinkage_k_max,
         num_valid_regimes=sum(score_calibration_valid.values()),
         score_cal_summary=score_cal_summary,
+        tag=tag,
     )
     ensemble_diag["target_contract"] = _target_contract_kind(train_events)
 
