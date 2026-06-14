@@ -316,11 +316,12 @@ def run_active_strategy_output_bridge(
         raise ValueError("active strategy bridge requires preloaded_data_maps")
 
     strategy_name = str(opt_config.get("FUTURES_STRATEGY_NAME", "candidate_ml"))
+    use_tiered = bool(opt_config.get("USE_CS_RANK_ENGINE", False))
     strategy_cfg = build_candidate_strategy_config(
         strategy_cfg=StrategyConfig(name=strategy_name),
         opt_config=opt_config,
         timeframe=run_config.timeframe,
-        signal_only=(run_config.phase == "l1"),
+        signal_only=(run_config.phase == "l1") or use_tiered,
     )
     candidate_scope = list(trading_symbols or tuple(symbols))
     if training_panel:
