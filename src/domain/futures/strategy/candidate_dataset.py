@@ -615,11 +615,13 @@ def build_candidate_dataset(
     split_end: int,
     require_label_within_split: bool = True,
     is_fit_split: bool = False,
+    skip_features: bool = False,
 ) -> CandidateDataset:
     """Build model matrix for candidate gate and edge models.
 
     Fully vectorized implementation for high performance.
     """
+    global _ALIGNED_FEATURE_CACHE
     if split_end <= split_start:
         raise ValueError("split_end must be greater than split_start")
 
@@ -670,338 +672,374 @@ def build_candidate_dataset(
             risk_unit_bps=np.zeros((0,), dtype=np.float32),
         )
 
-    # Pre-calculate features
-    close = aligned.close_2d
-    volume = aligned.volume_2d
-    funding = aligned.funding_2d
-    t_len, _ = close.shape
+    # Check bypass flag
+    if not skip_features:
+        # Pre-calculate features
+        close = aligned.close_2d
+        volume = aligned.volume_2d
+        funding = aligned.funding_2d
+        t_len, _ = close.shape
 
-    global _ALIGNED_FEATURE_CACHE
-    aligned_id = id(aligned)
-    if aligned_id not in _ALIGNED_FEATURE_CACHE:
-        _ALIGNED_FEATURE_CACHE[aligned_id] = {"__aligned_ref__": aligned}
-    cache = _ALIGNED_FEATURE_CACHE[aligned_id]
-    if cache.get("__aligned_ref__") is not aligned:
-        cache.clear()
-        cache["__aligned_ref__"] = aligned
+        aligned_id = id(aligned)
+        if aligned_id not in _ALIGNED_FEATURE_CACHE:
+            _ALIGNED_FEATURE_CACHE[aligned_id] = {"__aligned_ref__": aligned}
+        cache = _ALIGNED_FEATURE_CACHE[aligned_id]
+        if cache.get("__aligned_ref__") is not aligned:
+            cache.clear()
+            cache["__aligned_ref__"] = aligned
 
-    if "sym_ret_1" not in cache:
-        sym_ret_1 = (close[1:] / np.maximum(close[:-1], 1e-12)) - 1.0
-        sym_ret_5 = (close[5:] / np.maximum(close[:-5], 1e-12)) - 1.0
+        if "sym_ret_1" not in cache:
+            sym_ret_1 = (close[1:] / np.maximum(close[:-1], 1e-12)) - 1.0
+            sym_ret_5 = (close[5:] / np.maximum(close[:-5], 1e-12)) - 1.0
 
-        log_ret_2d = np.zeros_like(close)
-        log_ret_2d[1:] = np.diff(np.log(np.maximum(close, 1e-12)), axis=0)
-        sym_vol_20 = pd.DataFrame(log_ret_2d).rolling(20, min_periods=1).std(ddof=0).values
+            log_ret_2d = np.zeros_like(close)
+            log_ret_2d[1:] = np.diff(np.log(np.maximum(close, 1e-12)), axis=0)
+            sym_vol_20 = pd.DataFrame(log_ret_2d).rolling(20, min_periods=1).std(ddof=0).values
 
-        sym_volume_z20 = _rolling_robust_z_2d(volume, window=20)
+            sym_volume_z20 = _rolling_robust_z_2d(volume, window=20)
 
-        f_df = pd.DataFrame(funding)
-        funding_z20 = _rolling_robust_z_2d(funding, window=20)
+            f_df = pd.DataFrame(funding)
+            funding_z20 = _rolling_robust_z_2d(funding, window=20)
 
-        # 2. Market-wide technicals (T)
-        mkt_ret_1 = np.nanmean(sym_ret_1, axis=1)
-        # pad to T length
-        mkt_ret_1_padded = np.zeros(t_len)
-        mkt_ret_1_padded[1:] = mkt_ret_1
+            # 2. Market-wide technicals (T)
+            mkt_ret_1 = np.nanmean(sym_ret_1, axis=1)
+            # pad to T length
+            mkt_ret_1_padded = np.zeros(t_len)
+            mkt_ret_1_padded[1:] = mkt_ret_1
 
-        mkt_vol_20 = np.nanmean(sym_vol_20, axis=1)
+            mkt_vol_20 = np.nanmean(sym_vol_20, axis=1)
 
-        ret20_2d = np.zeros_like(close)
-        ret20_2d[20:] = (close[20:] / np.maximum(close[:-20], 1e-12)) - 1.0
-        mkt_dispersion_20 = np.nanstd(ret20_2d, axis=1)
-        market_breadth_20 = np.nanmean(ret20_2d > 0, axis=1)
+            ret20_2d = np.zeros_like(close)
+            ret20_2d[20:] = (close[20:] / np.maximum(close[:-20], 1e-12)) - 1.0
+            mkt_dispersion_20 = np.nanstd(ret20_2d, axis=1)
+            market_breadth_20 = np.nanmean(ret20_2d > 0, axis=1)
 
-        cache["sym_ret_1"] = sym_ret_1
-        cache["sym_ret_5"] = sym_ret_5
-        cache["sym_vol_20"] = sym_vol_20
-        cache["sym_volume_z20"] = sym_volume_z20
-        cache["funding_z20"] = funding_z20
-        cache["mkt_ret_1_padded"] = mkt_ret_1_padded
-        cache["mkt_vol_20"] = mkt_vol_20
-        cache["mkt_dispersion_20"] = mkt_dispersion_20
-        cache["market_breadth_20"] = market_breadth_20
-        cache["ret20_2d"] = ret20_2d
-    else:
-        sym_ret_1 = cache["sym_ret_1"]
-        sym_ret_5 = cache["sym_ret_5"]
-        sym_vol_20 = cache["sym_vol_20"]
-        sym_volume_z20 = cache["sym_volume_z20"]
-        funding_z20 = cache["funding_z20"]
-        mkt_ret_1_padded = cache["mkt_ret_1_padded"]
-        mkt_vol_20 = cache["mkt_vol_20"]
-        mkt_dispersion_20 = cache["mkt_dispersion_20"]
-        market_breadth_20 = cache["market_breadth_20"]
-        ret20_2d = cache["ret20_2d"]
-        f_df = pd.DataFrame(funding)
-
-    # 3. Market state features (if enabled)
-    btc_ret_1_ser = np.zeros(t_len)
-    btc_ret_5_ser = np.zeros(t_len)
-    btc_trend_20_100_ser = np.zeros(t_len)
-    mkt_vol_z120_ser = np.zeros(t_len)
-    mkt_disp_z120_ser = np.zeros(t_len)
-    symbol_ret_rank_20_2d = np.zeros_like(close)
-    symbol_vol_z120_2d = np.zeros_like(close)
-    funding_cs_z_2d = np.zeros_like(close)
-
-    if cfg.market_state_features_enabled:
-        if "btc_ret_1_ser" not in cache:
-            btc_idx = _btc_symbol_index(aligned.symbols)
-            btc_close = close[:, btc_idx]
-            btc_ret_1_ser[1:] = (btc_close[1:] / np.maximum(btc_close[:-1], 1e-12)) - 1.0
-            btc_ret_5_ser[5:] = (btc_close[5:] / np.maximum(btc_close[:-5], 1e-12)) - 1.0
-            btc_ma20 = pd.Series(btc_close).rolling(20, min_periods=1).mean().values
-            btc_ma100 = pd.Series(btc_close).rolling(100, min_periods=1).mean().values
-            btc_trend_20_100_ser = (btc_ma20 >= btc_ma100).astype(float)
-
-            mkt_vol_df = pd.Series(mkt_vol_20).fillna(0)
-            mkt_vol_z120_ser = _rolling_robust_z_1d(mkt_vol_df.to_numpy(dtype=np.float64), window=120)
-
-            mkt_disp_df = pd.Series(mkt_dispersion_20).fillna(0)
-            mkt_disp_z120_ser = _rolling_robust_z_1d(mkt_disp_df.to_numpy(dtype=np.float64), window=120)
-
-            symbol_ret_rank_20_2d[20:] = pd.DataFrame(ret20_2d[20:]).rank(axis=1, pct=True).values
-
-            sv_df = pd.DataFrame(sym_vol_20).fillna(0)
-            symbol_vol_z120_2d = _rolling_robust_z_2d(sv_df.to_numpy(dtype=np.float64), window=120)
-
-            funding_cs_z_2d = _cross_sectional_robust_z_2d(f_df.fillna(0).to_numpy(dtype=np.float64))
-
-            cache["btc_ret_1_ser"] = btc_ret_1_ser
-            cache["btc_ret_5_ser"] = btc_ret_5_ser
-            cache["btc_trend_20_100_ser"] = btc_trend_20_100_ser
-            cache["mkt_vol_z120_ser"] = mkt_vol_z120_ser
-            cache["mkt_disp_z120_ser"] = mkt_disp_z120_ser
-            cache["symbol_ret_rank_20_2d"] = symbol_ret_rank_20_2d
-            cache["symbol_vol_z120_2d"] = symbol_vol_z120_2d
-            cache["funding_cs_z_2d"] = funding_cs_z_2d
+            cache["sym_ret_1"] = sym_ret_1
+            cache["sym_ret_5"] = sym_ret_5
+            cache["sym_vol_20"] = sym_vol_20
+            cache["sym_volume_z20"] = sym_volume_z20
+            cache["funding_z20"] = funding_z20
+            cache["mkt_ret_1_padded"] = mkt_ret_1_padded
+            cache["mkt_vol_20"] = mkt_vol_20
+            cache["mkt_dispersion_20"] = mkt_dispersion_20
+            cache["market_breadth_20"] = market_breadth_20
+            cache["ret20_2d"] = ret20_2d
         else:
-            btc_ret_1_ser = cache["btc_ret_1_ser"]
-            btc_ret_5_ser = cache["btc_ret_5_ser"]
-            btc_trend_20_100_ser = cache["btc_trend_20_100_ser"]
-            mkt_vol_z120_ser = cache["mkt_vol_z120_ser"]
-            mkt_disp_z120_ser = cache["mkt_disp_z120_ser"]
-            symbol_ret_rank_20_2d = cache["symbol_ret_rank_20_2d"]
-            symbol_vol_z120_2d = cache["symbol_vol_z120_2d"]
-            funding_cs_z_2d = cache["funding_cs_z_2d"]
+            sym_ret_1 = cache["sym_ret_1"]
+            sym_ret_5 = cache["sym_ret_5"]
+            sym_vol_20 = cache["sym_vol_20"]
+            sym_volume_z20 = cache["sym_volume_z20"]
+            funding_z20 = cache["funding_z20"]
+            mkt_ret_1_padded = cache["mkt_ret_1_padded"]
+            mkt_vol_20 = cache["mkt_vol_20"]
+            mkt_dispersion_20 = cache["mkt_dispersion_20"]
+            market_breadth_20 = cache["market_breadth_20"]
+            ret20_2d = cache["ret20_2d"]
+            f_df = pd.DataFrame(funding)
 
-    # 4. Identity Features
-    id_matrix: NDArray[np.float32] | None = None
-    if cfg.candidate_identity_features_enabled and len(id_feat_names) > 0:
-        id_matrix = np.zeros((len(events), len(id_feat_names)), dtype=np.float32)
-        if "family" in events.columns:
-            for i, name in enumerate(id_feat_names):
-                if name.startswith("family="):
-                    fam = name.split("=", 1)[1]
-                    id_matrix[:, i] = (events["family"].astype(str) == fam).astype(float)
-        if "archetype" in events.columns:
-            for i, name in enumerate(id_feat_names):
-                if name.startswith("archetype="):
-                    archetype = name.split("=", 1)[1]
-                    id_matrix[:, i] = (events["archetype"].astype(str) == archetype).astype(float)
-        long_idx = id_feat_names.index("side_is_long") if "side_is_long" in id_feat_names else -1
-        short_idx = id_feat_names.index("side_is_short") if "side_is_short" in id_feat_names else -1
-        if long_idx >= 0:
-            id_matrix[:, long_idx] = (events["side"] > 0).astype(float)
-        if short_idx >= 0:
-            id_matrix[:, short_idx] = (events["side"] < 0).astype(float)
+        # 3. Market state features (if enabled)
+        btc_ret_1_ser = np.zeros(t_len)
+        btc_ret_5_ser = np.zeros(t_len)
+        btc_trend_20_100_ser = np.zeros(t_len)
+        mkt_vol_z120_ser = np.zeros(t_len)
+        mkt_disp_z120_ser = np.zeros(t_len)
+        symbol_ret_rank_20_2d = np.zeros_like(close)
+        symbol_vol_z120_2d = np.zeros_like(close)
+        funding_cs_z_2d = np.zeros_like(close)
 
-    # 5. Universe Features
-    uni_matrix = np.zeros((len(events), len(uni_feat_names)), dtype=np.float32)
-    sym_to_idx = {s: i for i, s in enumerate(aligned.symbols)}
-    event_sym_idxs = events["symbol"].map(sym_to_idx).values
-    if len(uni_feat_names) > 0 and aligned.vol_30d_1d is not None:
-        uni_matrix[:, 0] = aligned.vol_30d_1d[event_sym_idxs]
-    if len(uni_feat_names) > 1 and aligned.friction_score_1d is not None:
-        uni_matrix[:, 1] = aligned.friction_score_1d[event_sym_idxs]
-    if len(uni_feat_names) > 2 and aligned.alpha_capacity_score_1d is not None:
-        uni_matrix[:, 2] = aligned.alpha_capacity_score_1d[event_sym_idxs]
-    if len(uni_feat_names) > 3 and aligned.diversification_score_1d is not None:
-        uni_matrix[:, 3] = aligned.diversification_score_1d[event_sym_idxs]
-    if len(uni_feat_names) > 4 and aligned.tradeable_score_1d is not None:
-        uni_matrix[:, 4] = aligned.tradeable_score_1d[event_sym_idxs]
-    if len(uni_feat_names) > 5 and aligned.cluster_id_1d is not None:
-        uni_matrix[:, 5] = aligned.cluster_id_1d[event_sym_idxs]
-    if len(uni_feat_names) > 6 and aligned.beta_vs_market_1d is not None:
-        uni_matrix[:, 6] = aligned.beta_vs_market_1d[event_sym_idxs]
-    if len(uni_feat_names) > 7 and aligned.cluster_size_1d is not None:
-        uni_matrix[:, 7] = aligned.cluster_size_1d[event_sym_idxs]
-    if len(uni_feat_names) > 8 and aligned.anchor_cluster_1d is not None:
-        uni_matrix[:, 8] = aligned.anchor_cluster_1d[event_sym_idxs]
+        if cfg.market_state_features_enabled:
+            if "btc_ret_1_ser" not in cache:
+                btc_idx = _btc_symbol_index(aligned.symbols)
+                btc_close = close[:, btc_idx]
+                btc_close = close[:, btc_idx]
+                btc_ret_1_ser[1:] = (btc_close[1:] / np.maximum(btc_close[:-1], 1e-12)) - 1.0
+                btc_ret_5_ser[5:] = (btc_close[5:] / np.maximum(btc_close[:-5], 1e-12)) - 1.0
+                btc_ma20 = pd.Series(btc_close).rolling(20, min_periods=1).mean().values
+                btc_ma100 = pd.Series(btc_close).rolling(100, min_periods=1).mean().values
+                btc_trend_20_100_ser = (btc_ma20 >= btc_ma100).astype(float)
 
-    # 6. Assembly
-    event_t = events["entry_idx"].values - 1
-    valid_mask = event_t >= 20
-    
-    if "overlay_ctx" not in cache:
-        cache["overlay_ctx"] = compute_risk_overlay(aligned=aligned)
-    overlay_ctx = cache["overlay_ctx"]
+                mkt_vol_df = pd.Series(mkt_vol_20).fillna(0)
+                mkt_vol_z120_ser = _rolling_robust_z_1d(mkt_vol_df.to_numpy(dtype=np.float64), window=120)
 
-    if "regime_ctx" not in cache:
-        cache["regime_ctx"] = compute_market_regime_context(aligned=aligned)
-    regime_ctx = cache["regime_ctx"]
+                mkt_disp_df = pd.Series(mkt_dispersion_20).fillna(0)
+                mkt_disp_z120_ser = _rolling_robust_z_1d(mkt_disp_df.to_numpy(dtype=np.float64), window=120)
 
-    x_mat = np.zeros((len(events), len(feature_names)), dtype=np.float32)
+                symbol_ret_rank_20_2d[20:] = pd.DataFrame(ret20_2d[20:]).rank(axis=1, pct=True).values
 
-    # Helper function to set feature values dynamically based on name index
-    def _set_feat(name: str, values: NDArray[np.float32] | NDArray[np.float64]) -> None:
-        if name in feature_names:
-            idx = feature_names.index(name)
-            x_mat[:, idx] = values
+                sv_df = pd.DataFrame(sym_vol_20).fillna(0)
+                symbol_vol_z120_2d = _rolling_robust_z_2d(sv_df.to_numpy(dtype=np.float64), window=120)
 
-    cols_from_events = [
-        "side",
-        "raw_score",
-        "score_z",
-        "turnover_proxy",
-        "expected_holding_bars",
-        "min_holding_bars",
-        "stop_atr_mult",
-        "sl_thr_bps",
-        "take_profit_atr_mult",
-    ]
-    for col in cols_from_events:
-        if col in events.columns:
-            _set_feat(col, events[col].fillna(0).values.astype(np.float32))
-        elif col == "raw_score" and "score" in events.columns:
-            _set_feat("raw_score", events["score"].fillna(0).values.astype(np.float32))
+                funding_cs_z_2d = _cross_sectional_robust_z_2d(f_df.fillna(0).to_numpy(dtype=np.float64))
 
-    if not exclude_leaky:
-        idx_ret1 = feature_names.index("sym_ret_1")
-        x_mat[valid_mask, idx_ret1] = sym_ret_1[
-            event_t[valid_mask] - 1, event_sym_idxs[valid_mask]
+                cache["btc_ret_1_ser"] = btc_ret_1_ser
+                cache["btc_ret_5_ser"] = btc_ret_5_ser
+                cache["btc_trend_20_100_ser"] = btc_trend_20_100_ser
+                cache["mkt_vol_z120_ser"] = mkt_vol_z120_ser
+                cache["mkt_disp_z120_ser"] = mkt_disp_z120_ser
+                cache["symbol_ret_rank_20_2d"] = symbol_ret_rank_20_2d
+                cache["symbol_vol_z120_2d"] = symbol_vol_z120_2d
+                cache["funding_cs_z_2d"] = funding_cs_z_2d
+            else:
+                btc_ret_1_ser = cache["btc_ret_1_ser"]
+                btc_ret_5_ser = cache["btc_ret_5_ser"]
+                btc_trend_20_100_ser = cache["btc_trend_20_100_ser"]
+                mkt_vol_z120_ser = cache["mkt_vol_z120_ser"]
+                mkt_disp_z120_ser = cache["mkt_disp_z120_ser"]
+                symbol_ret_rank_20_2d = cache["symbol_ret_rank_20_2d"]
+                symbol_vol_z120_2d = cache["symbol_vol_z120_2d"]
+                funding_cs_z_2d = cache["funding_cs_z_2d"]
+
+        # 4. Identity Features
+        id_matrix: NDArray[np.float32] | None = None
+        if cfg.candidate_identity_features_enabled and len(id_feat_names) > 0:
+            id_matrix = np.zeros((len(events), len(id_feat_names)), dtype=np.float32)
+            if "family" in events.columns:
+                for i, name in enumerate(id_feat_names):
+                    if name.startswith("family="):
+                        fam = name.split("=", 1)[1]
+                        id_matrix[:, i] = (events["family"].astype(str) == fam).astype(float)
+            if "archetype" in events.columns:
+                for i, name in enumerate(id_feat_names):
+                    if name.startswith("archetype="):
+                        archetype = name.split("=", 1)[1]
+                        id_matrix[:, i] = (events["archetype"].astype(str) == archetype).astype(float)
+            long_idx = id_feat_names.index("side_is_long") if "side_is_long" in id_feat_names else -1
+            short_idx = id_feat_names.index("side_is_short") if "side_is_short" in id_feat_names else -1
+            if long_idx >= 0:
+                id_matrix[:, long_idx] = (events["side"] > 0).astype(float)
+            if short_idx >= 0:
+                id_matrix[:, short_idx] = (events["side"] < 0).astype(float)
+
+        # 5. Universe Features
+        uni_matrix = np.zeros((len(events), len(uni_feat_names)), dtype=np.float32)
+        sym_to_idx = {s: i for i, s in enumerate(aligned.symbols)}
+        event_sym_idxs = events["symbol"].map(sym_to_idx).values
+        if len(uni_feat_names) > 0 and aligned.vol_30d_1d is not None:
+            uni_matrix[:, 0] = aligned.vol_30d_1d[event_sym_idxs]
+        if len(uni_feat_names) > 1 and aligned.friction_score_1d is not None:
+            uni_matrix[:, 1] = aligned.friction_score_1d[event_sym_idxs]
+        if len(uni_feat_names) > 2 and aligned.alpha_capacity_score_1d is not None:
+            uni_matrix[:, 2] = aligned.alpha_capacity_score_1d[event_sym_idxs]
+        if len(uni_feat_names) > 3 and aligned.diversification_score_1d is not None:
+            uni_matrix[:, 3] = aligned.diversification_score_1d[event_sym_idxs]
+        if len(uni_feat_names) > 4 and aligned.tradeable_score_1d is not None:
+            uni_matrix[:, 4] = aligned.tradeable_score_1d[event_sym_idxs]
+        if len(uni_feat_names) > 5 and aligned.cluster_id_1d is not None:
+            uni_matrix[:, 5] = aligned.cluster_id_1d[event_sym_idxs]
+        if len(uni_feat_names) > 6 and aligned.beta_vs_market_1d is not None:
+            uni_matrix[:, 6] = aligned.beta_vs_market_1d[event_sym_idxs]
+        if len(uni_feat_names) > 7 and aligned.cluster_size_1d is not None:
+            uni_matrix[:, 7] = aligned.cluster_size_1d[event_sym_idxs]
+        if len(uni_feat_names) > 8 and aligned.anchor_cluster_1d is not None:
+            uni_matrix[:, 8] = aligned.anchor_cluster_1d[event_sym_idxs]
+
+        # 6. Assembly
+        event_t = events["entry_idx"].values - 1
+        valid_mask = event_t >= 20
+        
+        if "overlay_ctx" not in cache:
+            cache["overlay_ctx"] = compute_risk_overlay(aligned=aligned)
+        overlay_ctx = cache["overlay_ctx"]
+
+        if "regime_ctx" not in cache:
+            cache["regime_ctx"] = compute_market_regime_context(aligned=aligned)
+        regime_ctx = cache["regime_ctx"]
+
+        x_mat = np.zeros((len(events), len(feature_names)), dtype=np.float32)
+
+        # Helper function to set feature values dynamically based on name index
+        def _set_feat(name: str, values: NDArray[np.float32] | NDArray[np.float64]) -> None:
+            if name in feature_names:
+                idx = feature_names.index(name)
+                x_mat[:, idx] = values
+
+        cols_from_events = [
+            "side",
+            "raw_score",
+            "score_z",
+            "turnover_proxy",
+            "expected_holding_bars",
+            "min_holding_bars",
+            "stop_atr_mult",
+            "sl_thr_bps",
+            "take_profit_atr_mult",
         ]
+        for col in cols_from_events:
+            if col in events.columns:
+                _set_feat(col, events[col].fillna(0).values.astype(np.float32))
+            elif col == "raw_score" and "score" in events.columns:
+                _set_feat("raw_score", events["score"].fillna(0).values.astype(np.float32))
 
-    x_mat[valid_mask, feature_names.index("sym_ret_5")] = sym_ret_5[
-        event_t[valid_mask] - 5, event_sym_idxs[valid_mask]
-    ]
-    x_mat[valid_mask, feature_names.index("sym_vol_20")] = sym_vol_20[
-        event_t[valid_mask], event_sym_idxs[valid_mask]
-    ]
-    x_mat[valid_mask, feature_names.index("sym_volume_z20")] = sym_volume_z20[
-        event_t[valid_mask], event_sym_idxs[valid_mask]
-    ]
+        if not exclude_leaky:
+            idx_ret1 = feature_names.index("sym_ret_1")
+            x_mat[valid_mask, idx_ret1] = sym_ret_1[
+                event_t[valid_mask] - 1, event_sym_idxs[valid_mask]
+            ]
 
-    if not exclude_leaky:
-        idx_mkt_ret1 = feature_names.index("mkt_ret_1")
-        x_mat[valid_mask, idx_mkt_ret1] = mkt_ret_1_padded[event_t[valid_mask]]
-
-    x_mat[valid_mask, feature_names.index("mkt_vol_20")] = mkt_vol_20[event_t[valid_mask]]
-    x_mat[valid_mask, feature_names.index("mkt_dispersion_20")] = mkt_dispersion_20[
-        event_t[valid_mask]
-    ]
-
-    if "ex_ante_cost_bps" in events.columns:
-        _set_feat("ex_ante_cost_bps", events["ex_ante_cost_bps"].fillna(0).values.astype(np.float32))
-    elif aligned.execution_cost_bps_2d is not None:
-        idx_cost = feature_names.index("ex_ante_cost_bps")
-        x_mat[valid_mask, idx_cost] = aligned.execution_cost_bps_2d[
+        x_mat[valid_mask, feature_names.index("sym_ret_5")] = sym_ret_5[
+            event_t[valid_mask] - 5, event_sym_idxs[valid_mask]
+        ]
+        x_mat[valid_mask, feature_names.index("sym_vol_20")] = sym_vol_20[
+            event_t[valid_mask], event_sym_idxs[valid_mask]
+        ]
+        x_mat[valid_mask, feature_names.index("sym_volume_z20")] = sym_volume_z20[
             event_t[valid_mask], event_sym_idxs[valid_mask]
         ]
 
-    x_mat[valid_mask, feature_names.index("funding_z20")] = funding_z20[
-        event_t[valid_mask], event_sym_idxs[valid_mask]
-    ]
+        if not exclude_leaky:
+            idx_mkt_ret1 = feature_names.index("mkt_ret_1")
+            x_mat[valid_mask, idx_mkt_ret1] = mkt_ret_1_padded[event_t[valid_mask]]
 
-    curr = len(base_feat_names)
-    x_mat[:, curr : curr + len(uni_feat_names)] = uni_matrix
-    curr += len(uni_feat_names)
-
-    if cfg.market_state_features_enabled:
-        x_mat[valid_mask, curr] = btc_ret_1_ser[event_t[valid_mask]]
-        x_mat[valid_mask, curr + 1] = btc_ret_5_ser[event_t[valid_mask]]
-        x_mat[valid_mask, curr + 2] = btc_trend_20_100_ser[event_t[valid_mask]]
-        x_mat[valid_mask, curr + 3] = mkt_vol_z120_ser[event_t[valid_mask]]
-        x_mat[valid_mask, curr + 4] = mkt_disp_z120_ser[event_t[valid_mask]]
-        x_mat[valid_mask, curr + 5] = market_breadth_20[event_t[valid_mask]]
-        x_mat[valid_mask, curr + 6] = symbol_ret_rank_20_2d[event_t[valid_mask], event_sym_idxs[valid_mask]]
-        x_mat[valid_mask, curr + 7] = symbol_vol_z120_2d[event_t[valid_mask], event_sym_idxs[valid_mask]]
-        x_mat[valid_mask, curr + 8] = funding_cs_z_2d[event_t[valid_mask], event_sym_idxs[valid_mask]]
-        vol_20_vals = x_mat[:, feature_names.index("sym_vol_20")]
-        cost_bps_vals = x_mat[:, feature_names.index("ex_ante_cost_bps")]
-        x_mat[:, curr + 9] = cost_bps_vals / np.maximum(vol_20_vals * 1e4, 1.0)
-        curr += 10
-
-    if sig_feat_names:
-        win = int(getattr(cfg, "score_pct_variant_hist_window_bars", 2160))
-        score_pct = _compute_score_pct_variant_hist(events, window_bars=win)
-
-        side_arr = x_mat[:, feature_names.index("side")]
-        funding_z20_arr = x_mat[:, feature_names.index("funding_z20")]
-        fsa = np.tanh(funding_z20_arr * side_arr).astype(np.float32)
-
-        regime_names_arr = np.asarray(regime_ctx.name_by_code, dtype=object)[regime_ctx.code_1d[event_t]]
-        archetype_arr = (
-            events.get("archetype", pd.Series("", index=events.index))
-            .fillna("")
-            .astype(str)
-            .values
-        )
-        
-        _archetypes = [
-            "trend", "ts_mom", "mean_rev",
-            "carry_rev", "flow_rev", "unwind",
-            "beta_neut"
+        x_mat[valid_mask, feature_names.index("mkt_vol_20")] = mkt_vol_20[event_t[valid_mask]]
+        x_mat[valid_mask, feature_names.index("mkt_dispersion_20")] = mkt_dispersion_20[
+            event_t[valid_mask]
         ]
-        _regimes = [
-            "bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile",
-            "transition", "crash"
+
+        if "ex_ante_cost_bps" in events.columns:
+            _set_feat("ex_ante_cost_bps", events["ex_ante_cost_bps"].fillna(0).values.astype(np.float32))
+        elif aligned.execution_cost_bps_2d is not None:
+            idx_cost = feature_names.index("ex_ante_cost_bps")
+            x_mat[valid_mask, idx_cost] = aligned.execution_cost_bps_2d[
+                event_t[valid_mask], event_sym_idxs[valid_mask]
+            ]
+
+        x_mat[valid_mask, feature_names.index("funding_z20")] = funding_z20[
+            event_t[valid_mask], event_sym_idxs[valid_mask]
         ]
-        _arch_to_idx = {a: idx for idx, a in enumerate(_archetypes)}
-        _reg_to_idx = {r: idx for idx, r in enumerate(_regimes)}
-        
-        _affinity_matrix = np.zeros((len(_archetypes) + 1, len(_regimes) + 1), dtype=np.float32)
-        for (arch, reg), val in _ARCHETYPE_REGIME_AFFINITY.items():
-            if arch in _arch_to_idx and reg in _reg_to_idx:
-                _affinity_matrix[_arch_to_idx[arch], _reg_to_idx[reg]] = val
-                
-        arch_idxs = np.array([_arch_to_idx.get(a, len(_archetypes)) for a in archetype_arr], dtype=np.int32)
-        reg_idxs = np.array([_reg_to_idx.get(r, len(_regimes)) for r in regime_names_arr], dtype=np.int32)
-        arm = _affinity_matrix[arch_idxs, reg_idxs]
 
-        if "entry_idx" in events.columns and "symbol" in events.columns and "side" in events.columns:
-            side_sign = pd.Series(np.sign(events["side"].fillna(0)).astype(np.int32), index=events.index)
-            counts = events.groupby(["entry_idx", "symbol", side_sign]).transform("size")
-            n_same = np.log1p(np.maximum(counts.values - 1, 0)).astype(np.float32)
-        else:
-            n_same = np.zeros(len(events), dtype=np.float32)
+        curr = len(base_feat_names)
+        x_mat[:, curr : curr + len(uni_feat_names)] = uni_matrix
+        curr += len(uni_feat_names)
 
-        def _set_sig(name: str, values: NDArray[np.float32]) -> None:
-            if name in feature_names:
-                x_mat[:, feature_names.index(name)] = values
+        if cfg.market_state_features_enabled:
+            x_mat[valid_mask, curr] = btc_ret_1_ser[event_t[valid_mask]]
+            x_mat[valid_mask, curr + 1] = btc_ret_5_ser[event_t[valid_mask]]
+            x_mat[valid_mask, curr + 2] = btc_trend_20_100_ser[event_t[valid_mask]]
+            x_mat[valid_mask, curr + 3] = mkt_vol_z120_ser[event_t[valid_mask]]
+            x_mat[valid_mask, curr + 4] = mkt_disp_z120_ser[event_t[valid_mask]]
+            x_mat[valid_mask, curr + 5] = market_breadth_20[event_t[valid_mask]]
+            x_mat[valid_mask, curr + 6] = symbol_ret_rank_20_2d[event_t[valid_mask], event_sym_idxs[valid_mask]]
+            x_mat[valid_mask, curr + 7] = symbol_vol_z120_2d[event_t[valid_mask], event_sym_idxs[valid_mask]]
+            x_mat[valid_mask, curr + 8] = funding_cs_z_2d[event_t[valid_mask], event_sym_idxs[valid_mask]]
+            vol_20_vals = x_mat[:, feature_names.index("sym_vol_20")]
+            cost_bps_vals = x_mat[:, feature_names.index("ex_ante_cost_bps")]
+            x_mat[:, curr + 9] = cost_bps_vals / np.maximum(vol_20_vals * 1e4, 1.0)
+            curr += 10
 
-        _set_sig("overlay_mult_entry", overlay_ctx.overlay_mult_1d[event_t].astype(np.float32))
-        x_mat[valid_mask, feature_names.index("crisis_active_entry")] = (
-            overlay_ctx.crisis_active_1d[event_t[valid_mask]].astype(np.float32)
-        )
-        _set_sig("funding_side_alignment", fsa)
-        _set_sig("score_pct_variant_hist_90d", score_pct)
-        _set_sig("archetype_regime_match", arm)
-        _set_sig("n_same_dir_variants_log", n_same)
-        curr += len(sig_feat_names)
+        if sig_feat_names:
+            win = int(getattr(cfg, "score_pct_variant_hist_window_bars", 2160))
+            score_pct = _compute_score_pct_variant_hist(events, window_bars=win)
 
-    if id_matrix is not None:
-        x_mat[:, curr : curr + id_matrix.shape[1]] = id_matrix
+            side_arr = x_mat[:, feature_names.index("side")]
+            funding_z20_arr = x_mat[:, feature_names.index("funding_z20")]
+            fsa = np.tanh(funding_z20_arr * side_arr).astype(np.float32)
 
-    x_mat, n_imputed = _impute_feature_matrix(x_mat, valid_mask)
-    finite_mask = np.all(np.isfinite(x_mat), axis=1) & valid_mask
-    x_final = x_mat[finite_mask]
-    kept_events = events[finite_mask].copy()
-    groups_final = event_t[finite_mask].astype(np.int32)
-    event_t_kept = event_t[finite_mask].astype(np.int32, copy=False)
-    if kept_events.shape[0] > 0:
-        kept_events["overlay_mult"] = overlay_ctx.overlay_mult_1d[event_t_kept]
-        kept_events["crisis_active"] = overlay_ctx.crisis_active_1d[event_t_kept]
-        kept_events["entry_regime_code"] = regime_ctx.code_1d[event_t_kept]
-        kept_events["entry_regime"] = np.asarray(
-            [regime_ctx.name_by_code[int(code)] for code in regime_ctx.code_1d[event_t_kept]],
-            dtype=object,
-        )
-    if n_imputed > 0:
-        _logger.debug("[DATASET] imputed_missing_values=%d valid_events=%d", n_imputed, int(valid_mask.sum()))
-    dropped_events = int(valid_mask.sum()) - int(finite_mask.sum())
-    if dropped_events > 0:
-        _logger.debug("[DATASET] dropped_invalid_events=%d valid_events=%d", dropped_events, int(valid_mask.sum()))
+            regime_names_arr = np.asarray(regime_ctx.name_by_code, dtype=object)[regime_ctx.code_1d[event_t]]
+            archetype_arr = (
+                events.get("archetype", pd.Series("", index=events.index))
+                .fillna("")
+                .astype(str)
+                .values
+            )
+            
+            _archetypes = [
+                "trend", "ts_mom", "mean_rev",
+                "carry_rev", "flow_rev", "unwind",
+                "beta_neut"
+            ]
+            _regimes = [
+                "bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile",
+                "transition", "crash"
+            ]
+            _arch_to_idx = {a: idx for idx, a in enumerate(_archetypes)}
+            _reg_to_idx = {r: idx for idx, r in enumerate(_regimes)}
+            
+            _affinity_matrix = np.zeros((len(_archetypes) + 1, len(_regimes) + 1), dtype=np.float32)
+            for (arch, reg), val in _ARCHETYPE_REGIME_AFFINITY.items():
+                if arch in _arch_to_idx and reg in _reg_to_idx:
+                    _affinity_matrix[_arch_to_idx[arch], _reg_to_idx[reg]] = val
+                    
+            arch_idxs = np.array([_arch_to_idx.get(a, len(_archetypes)) for a in archetype_arr], dtype=np.int32)
+            reg_idxs = np.array([_reg_to_idx.get(r, len(_regimes)) for r in regime_names_arr], dtype=np.int32)
+            arm = _affinity_matrix[arch_idxs, reg_idxs]
+
+            if "entry_idx" in events.columns and "symbol" in events.columns and "side" in events.columns:
+                side_sign = pd.Series(np.sign(events["side"].fillna(0)).astype(np.int32), index=events.index)
+                counts = events.groupby(["entry_idx", "symbol", side_sign]).transform("size")
+                n_same = np.log1p(np.maximum(counts.values - 1, 0)).astype(np.float32)
+            else:
+                n_same = np.zeros(len(events), dtype=np.float32)
+
+            def _set_sig(name: str, values: NDArray[np.float32]) -> None:
+                if name in feature_names:
+                    x_mat[:, feature_names.index(name)] = values
+
+            _set_sig("overlay_mult_entry", overlay_ctx.overlay_mult_1d[event_t].astype(np.float32))
+            x_mat[valid_mask, feature_names.index("crisis_active_entry")] = (
+                overlay_ctx.crisis_active_1d[event_t[valid_mask]].astype(np.float32)
+            )
+            _set_sig("funding_side_alignment", fsa)
+            _set_sig("score_pct_variant_hist_90d", score_pct)
+            _set_sig("archetype_regime_match", arm)
+            _set_sig("n_same_dir_variants_log", n_same)
+            curr += len(sig_feat_names)
+
+        if id_matrix is not None:
+            x_mat[:, curr : curr + id_matrix.shape[1]] = id_matrix
+
+        x_mat, n_imputed = _impute_feature_matrix(x_mat, valid_mask)
+        finite_mask = np.all(np.isfinite(x_mat), axis=1) & valid_mask
+        x_final = x_mat[finite_mask]
+        kept_events = events[finite_mask].copy()
+        groups_final = event_t[finite_mask].astype(np.int32)
+        event_t_kept = event_t[finite_mask].astype(np.int32, copy=False)
+        if kept_events.shape[0] > 0:
+            kept_events["overlay_mult"] = overlay_ctx.overlay_mult_1d[event_t_kept]
+            kept_events["crisis_active"] = overlay_ctx.crisis_active_1d[event_t_kept]
+            kept_events["entry_regime_code"] = regime_ctx.code_1d[event_t_kept]
+            kept_events["entry_regime"] = np.asarray(
+                [regime_ctx.name_by_code[int(code)] for code in regime_ctx.code_1d[event_t_kept]],
+                dtype=object,
+            )
+        if n_imputed > 0:
+            _logger.debug("[DATASET] imputed_missing_values=%d valid_events=%d", n_imputed, int(valid_mask.sum()))
+        dropped_events = int(valid_mask.sum()) - int(finite_mask.sum())
+        if dropped_events > 0:
+            _logger.debug("[DATASET] dropped_invalid_events=%d valid_events=%d", dropped_events, int(valid_mask.sum()))
+    else:
+        # Fast bypass mode: Skip high-cost feature building
+        event_t = events["entry_idx"].values - 1
+        valid_mask = event_t >= 20
+
+        aligned_id = id(aligned)
+        if aligned_id not in _ALIGNED_FEATURE_CACHE:
+            _ALIGNED_FEATURE_CACHE[aligned_id] = {"__aligned_ref__": aligned}
+        cache = _ALIGNED_FEATURE_CACHE[aligned_id]
+        if cache.get("__aligned_ref__") is not aligned:
+            cache.clear()
+            cache["__aligned_ref__"] = aligned
+
+        if "overlay_ctx" not in cache:
+            cache["overlay_ctx"] = compute_risk_overlay(aligned=aligned)
+        overlay_ctx = cache["overlay_ctx"]
+
+        if "regime_ctx" not in cache:
+            cache["regime_ctx"] = compute_market_regime_context(aligned=aligned)
+        regime_ctx = cache["regime_ctx"]
+
+        kept_events = events[valid_mask].copy()
+        groups_final = event_t[valid_mask].astype(np.int32)
+        event_t_kept = event_t[valid_mask].astype(np.int32, copy=False)
+        if kept_events.shape[0] > 0:
+            kept_events["overlay_mult"] = overlay_ctx.overlay_mult_1d[event_t_kept]
+            kept_events["crisis_active"] = overlay_ctx.crisis_active_1d[event_t_kept]
+            kept_events["entry_regime_code"] = regime_ctx.code_1d[event_t_kept]
+            kept_events["entry_regime"] = np.asarray(
+                [regime_ctx.name_by_code[int(code)] for code in regime_ctx.code_1d[event_t_kept]],
+                dtype=object,
+            )
+        x_final = np.zeros((len(kept_events), 0), dtype=np.float32)
+        feature_names = ()
 
     if x_final.shape[0] == 0:
         return CandidateDataset(
