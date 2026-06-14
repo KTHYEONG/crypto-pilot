@@ -47,7 +47,7 @@ def verify_data_integrity(
     report: dict[str, dict[str, Any]] = {}
     n_bars = aligned.close_2d.shape[0]
 
-    _logger.info("[DATA-INTEGRITY] 💠 Starting audit for %d symbols...", len(symbols))
+    _logger.debug("[DATA-INTEGRITY] 💠 Starting audit for %d symbols...", len(symbols))
     
     passed_symbols = []
     failed_symbols_info = []
