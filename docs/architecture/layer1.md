@@ -161,10 +161,12 @@ graph TD
 **Hard Gate Evaluation & Adaptive Thresholds**
 - `evaluate_layer1_readiness` applies strict readiness checks over outer fold reports. Requirements include:
   - `fold_cov >= l1_min_fold_cov` (default 0.80)
-  - `match_ratio >= l1_min_realized_match_ratio` (default 1.0)
-  - `sym_count >= l1_min_sym_count` and ratio bounds
-  - `fold_ratio >= l1_min_fold_ratio` (default 0.60)
-  - `probe_lcb_bps > l1_min_probe_bps` (default 0.0)
+  - `match_ratio >= l1_min_realized_match_ratio` (default 0.90, relaxed from 1.00)
+  - `sym_count`: Measured via HHI-based `effective_sym_metric >= l1_min_effective_sym_n` (default 3.0, replacing legacy absolute symbol count check when `l1_sym_count_mode="effective_n"`)
+    $$N_{\text{eff}} = \frac{1}{\sum_{i} p_i^2} \ge 3.0$$
+  - `fold_ratio >= l1_min_fold_ratio` (default 0.50, relaxed from 0.60)
+  - `probe_lcb_bps > l1_min_probe_bps` (default 0.0). Calculated as a single **Pooled Bootstrap LCB** over all passed folds' combined OOS trade series, eliminating the double-counting statistical penalty of averaging fold-level LCBs.
+- **Fold-Level Gate (Gross Edge Check)**: Fold-level readiness check is relaxed from bootstrap LCB to gross edge positive check (`probe_bps > l1_min_fold_probe_bps`, default 0.0), shifting the statistical significance test entirely to the global pooled gate.
 - **Adaptive Student's t-Threshold**: When computing evidence, a small-sample adapted one-sided $t$-threshold is applied based on $N_{\text{eff}}$:
   $$t_{\text{crit}} = F^{-1}_{t(df)}\left(1 - \alpha\right)$$
   ($df = N_{\text{eff}} - 1.0$; if $df < 2.0$, $t_{\text{crit}} = \infty$ enforcing an automatic filter).

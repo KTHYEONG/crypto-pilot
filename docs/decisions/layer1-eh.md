@@ -1,5 +1,10 @@
 # Layer 1 Architectural Decisions
 
+## L1-ADR-005: Layer 1 Hard Gate Reform (2026-06-14)
+- **Delta**: Relaxed `l1_min_realized_match_ratio` (1.0 $\rightarrow$ 0.9) and `l1_min_fold_ratio` (0.6 $\rightarrow$ 0.5). Added HHI-based `l1_sym_count_mode="effective_n"` ($\ge 3.0$) and `l1_probe_lcb_pooled=True` (pooled OOS bootstrap LCB). Relaxed fold-level gate from bootstrap LCB to gross edge positive check (`probe_bps > 0`).
+- **Rationale**: Solves the double-counting statistical penalty that rejected viable signals due to small-sample volatility in fold-level bootstrap estimations. Standardizes global validity on pooled samples while preserving robustness via HHI diversification.
+- **Status**: Accepted
+
 ## L1-ADR-004: Outer Warm-Up Block Reservation (2026-06-14)
 - **Delta**: `build_l1_nested_swf_folds` changed `block_len = available//(n_folds+1)` → `available//(n_folds+warmup)` and `oos_start = l1_start+(fold_idx+warmup)*block_len`. `l1_outer_warmup_blocks=2` added to config. Diagnostic warning (`Counter(structural_reasons)`) added to `compute_symbol_strategy_evidence` when qualified=0.
 - **Rationale**: Anchored nested-SWF reserved only 1 block (~658 bars) before fold 0 OOS. With `l1_pair_min_folds=2` and `score_pct_variant_hist_window_bars=2160`, first snapshot was structurally underpowered (126 pairs, 0 qualified). warmup=2 expands fold 0 evidence window to ≈2×, recovering `ReadySyms:3, Probe:52bps`.

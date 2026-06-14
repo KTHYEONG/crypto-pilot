@@ -951,8 +951,9 @@ def evaluate_outer_signal_opportunities(
         blockers.append("insufficient_realized_match_ratio")
     if matched_event_count < int(getattr(cfg, "l1_min_matched_events_per_fold", 1)):
         blockers.append("insufficient_matched_events")
-    if probe_lcb <= float(getattr(cfg, "l1_min_probe_bps", 0.0)):
-        blockers.append("non_positive_probe")
+    l1_min_fold_probe = float(getattr(cfg, "l1_min_fold_probe_bps", 0.0))
+    if probe_gross_edge <= l1_min_fold_probe:
+        blockers.append("non_positive_gross_edge")
     return Layer1FoldReadiness(
         fold_id=fold_id,
         registry_source_end_idx=fold.fit_end,
@@ -975,12 +976,61 @@ def evaluate_outer_signal_opportunities(
     )
 
 
+def _compute_effective_sym_n(
+    fold_reports: tuple[Layer1FoldReadiness, ...],
+) -> float:
+    """
+    HHI 기반 실질 분산 심볼 수 계산.
+    각 fold의 ready_symbols를 통합 후 HHI -> 1/HHI.
+
+    Returns:
+        float: Effective N (완전집중=1.0, 완전분산=심볼수)
+    """
+    symbol_counts: Counter[str] = Counter()
+    for report in fold_reports:
+        symbol_counts.update(report.ready_symbols)
+    if not symbol_counts:
+        return 0.0
+    total = sum(symbol_counts.values())
+    hhi = sum((count / total) ** 2 for count in symbol_counts.values())
+    return 1.0 / hhi if hhi > 0 else 0.0
+
+
+def _compute_pooled_probe_lcb(
+    fold_reports: tuple[Layer1FoldReadiness, ...],
+    cfg: CandidateStrategyConfig,
+    seed: int,
+) -> float:
+    """
+    passed fold의 probe_series_bps를 pool하여 단일 bootstrap LCB 계산.
+
+    Returns:
+        float: 5th percentile bootstrap mean (bps)
+    """
+    pooled: list[float] = []
+    for r in fold_reports:
+        if r.passed:
+            pooled.extend(r.probe_series_bps)
+    if not pooled:
+        return -float("inf")
+    series = np.asarray(pooled, dtype=np.float64)
+    boot = moving_block_bootstrap_mean(
+        series,
+        np.arange(len(series), dtype=np.int64),
+        block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 6)),
+        n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
+        seed=seed,
+    )
+    return float(np.quantile(boot, 0.05)) if boot.size > 0 else float(np.mean(series))
+
+
 def evaluate_layer1_readiness(
     *,
     fold_reports: tuple[Layer1FoldReadiness, ...],
     fold_cov: float,
     trade_scope_count: int,
     cfg: CandidateStrategyConfig,
+    seed: int = 0,
 ) -> Layer1GateReport:
     effective_symbol_count = 0.0
     probe_series: list[float] = []
@@ -997,8 +1047,20 @@ def evaluate_layer1_readiness(
     fold_ratio = float(ready_fold_count / len(fold_reports)) if fold_reports else 0.0
     match_ratio = float(np.mean(match_ratios)) if match_ratios else 0.0
     probe_bps = float(np.mean(probe_series)) if probe_series else 0.0
-    probe_lcb = float(np.mean(probe_lcbs)) if probe_lcbs else probe_bps
-    sym_threshold = max(float(cfg.l1_min_sym_count), float(cfg.l1_min_sym_ratio) * max(1, trade_scope_count))
+    
+    if bool(getattr(cfg, "l1_probe_lcb_pooled", True)):
+        probe_lcb = _compute_pooled_probe_lcb(fold_reports, cfg, seed=seed)
+    else:
+        probe_lcb = float(np.mean(probe_lcbs)) if probe_lcbs else probe_bps
+
+    sym_count_mode = str(getattr(cfg, "l1_sym_count_mode", "effective_n"))
+    if sym_count_mode == "effective_n":
+        effective_sym_metric = _compute_effective_sym_n(fold_reports)
+        sym_threshold = float(getattr(cfg, "l1_min_effective_sym_n", 3.0))
+    else:
+        effective_sym_metric = effective_symbol_count
+        sym_threshold = max(float(cfg.l1_min_sym_count), float(cfg.l1_min_sym_ratio) * max(1, trade_scope_count))
+
     check_specs = (
         (
             "fold_cov",
@@ -1006,8 +1068,8 @@ def evaluate_layer1_readiness(
             float(getattr(cfg, "l1_min_fold_cov", 0.8)),
             "ge",
         ),
-        ("match_ratio", match_ratio, float(getattr(cfg, "l1_min_realized_match_ratio", 1.0)), "ge"),
-        ("sym_count", effective_symbol_count, sym_threshold, "ge"),
+        ("match_ratio", match_ratio, float(getattr(cfg, "l1_min_realized_match_ratio", 0.90)), "ge"),
+        ("sym_count", effective_sym_metric, sym_threshold, "ge"),
         ("fold_ratio", fold_ratio, float(cfg.l1_min_fold_ratio), "ge"),
         ("probe_lcb_bps", probe_lcb, float(cfg.l1_min_probe_bps), "gt"),
     )
