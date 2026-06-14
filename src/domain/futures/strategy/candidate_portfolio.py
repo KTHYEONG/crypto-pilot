@@ -1069,8 +1069,6 @@ def build_candidate_alpha_panel(
         )
         return empty
 
-    rows: list[pd.DataFrame] = []
-
     # Map symbols to index
     sym_to_idx = {sym: idx for idx, sym in enumerate(symbols)}
 
@@ -1098,24 +1096,42 @@ def build_candidate_alpha_panel(
             df_selected["_entry_idx"] = df_selected["entry_idx"].astype(int)
             grouped = {int(key): group for key, group in df_selected.groupby("_entry_idx")}
 
+    # -- Pre-allocate output arrays (n_times x n_symbols rows total) ----------
+    total_rows = n_times * n_symbols
+    _dt_arr     = np.empty(total_rows, dtype="datetime64[ns]")
+    _sym_arr    = np.empty(total_rows, dtype=object)
+    _al_arr     = np.zeros(total_rows, dtype=np.float64)
+    _as_arr     = np.zeros(total_rows, dtype=np.float64)
+    _tw_arr     = np.zeros(total_rows, dtype=np.float64)
+    _fam_arr    = np.empty(total_rows, dtype=object)
+    _var_arr    = np.empty(total_rows, dtype=object)
+    _pp_arr     = np.zeros(total_rows, dtype=np.float64)
+    _mu_arr     = np.zeros(total_rows, dtype=np.float64)
+    _q10_arr    = np.zeros(total_rows, dtype=np.float64)
+    _ut_arr     = np.zeros(total_rows, dtype=np.float64)
+    _satr_arr   = np.zeros(total_rows, dtype=np.float64)
+    _tpatr_arr  = np.zeros(total_rows, dtype=np.float64)
+
+    # Initialise string columns with empty string
+    _fam_arr[:] = ""
+    _var_arr[:] = ""
+
+    sym_list = list(symbols)
+    dt_arr_typed = datetimes.astype("datetime64[ns]")
+
     for t in range(n_times):
-        # Default empty attributes
-        alpha_long = np.zeros(n_symbols, dtype=np.float64)
-        alpha_short = np.zeros(n_symbols, dtype=np.float64)
+        base = t * n_symbols
+        end  = base + n_symbols
         target_w = target_weights_2d[t]
 
-        # Extract direction components
-        alpha_long[target_w > 0.0] = target_w[target_w > 0.0]
-        alpha_short[target_w < 0.0] = -target_w[target_w < 0.0]
+        _dt_arr[base:end]  = dt_arr_typed[t]
+        _sym_arr[base:end] = sym_list
+        _tw_arr[base:end]  = target_w
 
-        families = [""] * n_symbols
-        variants = [""] * n_symbols
-        p_pass = np.zeros(n_symbols, dtype=np.float64)
-        mu_bps = np.zeros(n_symbols, dtype=np.float64)
-        q10_bps = np.zeros(n_symbols, dtype=np.float64)
-        utility = np.zeros(n_symbols, dtype=np.float64)
-        stop_atr_mult = np.zeros(n_symbols, dtype=np.float64)
-        take_profit_atr_mult = np.zeros(n_symbols, dtype=np.float64)
+        long_mask  = target_w > 0.0
+        short_mask = target_w < 0.0
+        _al_arr[base:end][long_mask]  = target_w[long_mask]
+        _as_arr[base:end][short_mask] = -target_w[short_mask]
 
         if t in grouped:
             dt_group = grouped[t]
@@ -1123,33 +1139,17 @@ def build_candidate_alpha_panel(
                 sym = str(row.symbol)
                 if sym in sym_to_idx:
                     s_idx = sym_to_idx[sym]
-                    families[s_idx] = str(row.family)
-                    variants[s_idx] = str(row.variant)
-                    p_pass[s_idx] = float(row.p_pass)
-                    mu_bps[s_idx] = float(row.mu_net_decision_bps)
-                    q10_bps[s_idx] = float(row.q10_net_bps)
-                    utility[s_idx] = float(row.utility_score)
-                    stop_atr_mult[s_idx] = float(getattr(row, "stop_atr_mult", 0.0))
-                    take_profit_atr_mult[s_idx] = float(getattr(row, "take_profit_atr_mult", 0.0))
+                    i = base + s_idx
+                    _fam_arr[i]  = str(row.family)
+                    _var_arr[i]  = str(row.variant)
+                    _pp_arr[i]   = float(row.p_pass)
+                    _mu_arr[i]   = float(row.mu_net_decision_bps)
+                    _q10_arr[i]  = float(row.q10_net_bps)
+                    _ut_arr[i]   = float(row.utility_score)
+                    _satr_arr[i] = float(getattr(row, "stop_atr_mult", 0.0))
+                    _tpatr_arr[i]= float(getattr(row, "take_profit_atr_mult", 0.0))
 
-        df_t = pd.DataFrame({
-            "datetime": datetimes[t],
-            "symbol": list(symbols),
-            "alpha_long": alpha_long,
-            "alpha_short": alpha_short,
-            "target_weight": target_w,
-            "candidate_family": families,
-            "candidate_variant": variants,
-            "p_pass": p_pass,
-            "mu_net_decision_bps": mu_bps,
-            "q10_net_bps": q10_bps,
-            "utility_score": utility,
-            "candidate_stop_atr_mult": stop_atr_mult,
-            "candidate_take_profit_atr_mult": take_profit_atr_mult,
-        })
-        rows.append(df_t)
-
-    if not rows:
+    if total_rows == 0:
         empty_df = pd.DataFrame(columns=[
             "alpha_long", "alpha_short", "target_weight", "candidate_family",
             "candidate_variant", "p_pass", "mu_net_decision_bps", "q10_net_bps", "utility_score",
@@ -1162,7 +1162,21 @@ def build_candidate_alpha_panel(
         return empty_df
 
     panel = (
-        pd.concat(rows, axis=0, ignore_index=True)
+        pd.DataFrame({
+            "datetime":                      pd.to_datetime(_dt_arr),
+            "symbol":                        _sym_arr,
+            "alpha_long":                    _al_arr,
+            "alpha_short":                   _as_arr,
+            "target_weight":                 _tw_arr,
+            "candidate_family":              _fam_arr,
+            "candidate_variant":             _var_arr,
+            "p_pass":                        _pp_arr,
+            "mu_net_decision_bps":           _mu_arr,
+            "q10_net_bps":                   _q10_arr,
+            "utility_score":                 _ut_arr,
+            "candidate_stop_atr_mult":       _satr_arr,
+            "candidate_take_profit_atr_mult":_tpatr_arr,
+        })
         .set_index(["datetime", "symbol"])
         .sort_index()
     )
