@@ -337,12 +337,13 @@ def build_l1_nested_swf_folds(
             f"l1_start_idx={l1_start_idx}, l1_end_idx={l1_end_idx}, n_bars={n_bars}"
         )
     n_folds = max(1, int(getattr(cfg, "wf_n_folds", 1)))
+    warmup = max(1, int(getattr(cfg, "l1_outer_warmup_blocks", 2)))
     available = l1_end_idx - l1_start_idx
-    block_len = available // (n_folds + 1)
+    block_len = available // (n_folds + warmup)
     if block_len < 1:
         raise ValueError(
             "insufficient bars for nested L1 SWF blocks: "
-            f"available={available}, n_folds={n_folds}"
+            f"available={available}, n_folds={n_folds}, warmup={warmup}"
         )
     purge_cfg = int(getattr(cfg, "purge_bars", 0) or 0)
     embargo_cfg = int(getattr(cfg, "embargo_bars", 0) or 0)
@@ -352,9 +353,9 @@ def build_l1_nested_swf_folds(
 
     folds: list[WFFold] = []
     for fold_idx in range(n_folds):
-        oos_start = l1_start_idx + (fold_idx + 1) * block_len
+        oos_start = l1_start_idx + (fold_idx + warmup) * block_len
         oos_end = (
-            l1_start_idx + (fold_idx + 2) * block_len
+            l1_start_idx + (fold_idx + warmup + 1) * block_len
             if fold_idx < n_folds - 1
             else l1_end_idx
         )
