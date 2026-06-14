@@ -19,65 +19,63 @@ discover_universe_timeline: l2_start(2024-10-01) < oos_start(2025-10-01), ignori
   AUDIT:  [NaN: 0.0%] [Zero/Neg: 0.0%] [Hi>=Lo: PASS]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [TIERED] 💠 Scope: 57 symbols (Historical Union ∩ Data-Valid)
-[WORKFLOW] Fold 0 skipped Ensemble (fit=185 < 2)
-[ENS] Sym:2   N:1,183  IC:-0.065❌  Mu:10.1  Mode:Arch-Only  k:50.0
-└─Mu: B:12.4✅ M:8.6✅ T:2.9✅ m:29.4✅ U:10.5✅
+[ENS] Sym:2   N:233  IC:-0.047❌  Mu:36.6  Mode:Arch-Only  k:50.0
+└─Mu: B:28.0✅ M:30.8✅ T:118.5✅ m:10.9✅ U:8.4✅
+[ENS] Sym:2   N:2,355  IC:0.084✅  Mu:6.3  Mode:Arch-Only  k:50.0
+└─Mu: B:14.3✅ M:6.3✅ T:-3.5❌ m:10.7✅ U:10.8✅
+[ENS] Sym:2   N:1,290  IC:-0.061❌  Mu:6.8  Mode:Arch-Only  k:50.0
+└─Mu: B:10.1✅ M:5.8✅ T:-1.7❌ m:23.2✅ U:6.7✅
+[ENS] Sym:5   N:3,586  IC:0.093✅  Mu:11.8  Mode:Arch-Only  k:50.0
+└─Mu: B:41.7✅ M:10.1✅ T:7.9✅ m:11.3✅ U:48.4✅
+[ENS] Sym:5   N:6,226  IC:0.012✅  Mu:2.2  Mode:Arch-Only  k:50.0
+└─Mu: B:32.1✅ M:1.2✅ T:-6.9❌ m:3.9✅ U:30.9✅
+[ENS] Sym:5   N:8,792  IC:-0.004❌  Mu:9.3  Mode:Arch-Only  k:50.0
+└─Mu: B:18.9✅ M:7.7✅ T:21.0✅ m:8.2✅ U:20.2✅
+[ENS] Sym:18  N:11,760  IC:-0.030❌  Mu:5.0  Mode:Arch-Only  k:50.0
+└─Mu: B:20.1✅ M:3.4✅ T:13.1✅ m:6.4✅ U:14.2✅
+[ENS] Sym:18  N:20,242  IC:-0.049❌  Mu:13.9  Mode:Arch-Only  k:50.0
+└─Mu: B:61.6✅ F:1.1✅ M:9.3✅ T:45.6✅ m:9.3✅ U:10.7✅
+[ENS] Sym:18  N:27,380  IC:0.013✅  Mu:14.1  Mode:Arch-Only  k:50.0
+└─Mu: B:52.3✅ F:3.9✅ M:8.9✅ T:39.3✅ m:21.6✅ U:12.9✅
+[ENS] Sym:27  N:33,800  IC:0.042✅  Mu:13.5  Mode:Arch-Only  k:50.0
+└─Mu: B:51.3✅ F:4.0✅ M:8.6✅ T:30.2✅ m:20.4✅ U:22.0✅
+[ENS] Sym:33  N:38,947  IC:0.001✅  Mu:14.7  Mode:Arch-Only  k:50.0
+└─Mu: B:47.6✅ F:5.0✅ M:10.4✅ T:28.2✅ m:20.2✅ U:22.9✅
+[ENS] Sym:33  N:45,345  IC:-0.004❌  Mu:15.3  Mode:Arch-Only  k:50.0
+└─Mu: B:55.7✅ F:6.2✅ M:10.2✅ T:38.9✅ m:19.4✅ U:7.5✅
 [ENS] Sym:2   N:3,153  IC:0.042✅  Mu:5.2  Mode:Arch-Only  k:50.0
 └─Mu: B:16.2✅ M:4.7✅ T:0.1✅ m:7.3✅ U:17.9✅
-[ENS] Sym:2   N:2,189  IC:0.172✅  Mu:6.5  Mode:Arch-Only  k:50.0
-└─Mu: B:14.4✅ M:6.2✅ T:-2.9❌ m:15.5✅ U:5.4✅
-[ENS] Sym:5   N:5,764  IC:0.056✅  Mu:3.0  Mode:Arch-Only  k:50.0
-└─Mu: B:32.8✅ M:2.0✅ T:-6.0❌ m:5.0✅ U:33.1✅
-[ENS] Sym:5   N:7,983  IC:-0.078❌  Mu:9.0  Mode:Arch-Only  k:50.0
-└─Mu: B:22.8✅ M:6.9✅ T:20.3✅ m:12.7✅ U:21.1✅
-[ENS] Sym:5   N:10,588  IC:0.016✅  Mu:7.9  Mode:Arch-Only  k:50.0
-└─Mu: B:20.7✅ M:6.4✅ T:16.6✅ m:7.3✅ U:19.9✅
-[ENS] Sym:18  N:17,164  IC:-0.027❌  Mu:10.5  Mode:Arch-Only  k:50.0
-└─Mu: B:43.1✅ F:-5.3❌ M:6.4✅ T:23.4✅ m:24.2✅ U:18.0✅
-[ENS] Sym:18  N:24,298  IC:-0.051❌  Mu:10.9  Mode:Arch-Only  k:50.0
-└─Mu: B:54.5✅ F:1.0✅ M:7.4✅ T:23.5✅ m:10.7✅ U:17.4✅
-[ENS] Sym:18  N:32,613  IC:0.034✅  Mu:14.2  Mode:Arch-Only  k:50.0
-└─Mu: B:56.6✅ F:4.5✅ M:8.9✅ T:32.7✅ m:23.7✅ U:18.5✅
-[ENS] Sym:33  N:34,977  IC:-0.020❌  Mu:14.2  Mode:Arch-Only  k:50.0
-└─Mu: B:49.1✅ F:4.9✅ M:9.6✅ T:29.6✅ m:18.8✅ U:22.3✅
-[ENS] Sym:33  N:42,719  IC:-0.004❌  Mu:13.7  Mode:Arch-Only  k:50.0
-└─Mu: B:44.1✅ F:4.1✅ M:10.1✅ T:24.0✅ m:18.5✅ U:16.8✅
-[ENS] Sym:2   N:1,493  IC:-0.111❌  Mu:7.9  Mode:Arch-Only  k:50.0
-└─Mu: B:10.8✅ M:8.2✅ T:0.1✅ m:11.9✅ U:5.8✅
-[ENS] Sym:5   N:5,381  IC:0.123✅  Mu:1.7  Mode:Arch-Only  k:50.0
-└─Mu: B:35.7✅ M:1.2✅ T:-10.8❌ m:-0.4❌ U:31.9✅
-[ENS] Sym:18  N:13,161  IC:0.019✅  Mu:3.0  Mode:Arch-Only  k:50.0
-└─Mu: B:15.0✅ M:1.4✅ T:7.3✅ m:9.2✅ U:13.2✅
-[ENS] Sym:18  N:33,368  IC:0.055✅  Mu:13.6  Mode:Arch-Only  k:50.0
-└─Mu: B:56.8✅ F:3.9✅ M:8.3✅ T:29.4✅ m:22.7✅ U:22.3✅
-[L1-NESTED] Outer fold 0: registry empty — prequential evidence produced 126 pairs, 0 qualified. Check l1_pair_* thresholds.
+[ENS] Sym:5   N:8,420  IC:-0.102❌  Mu:9.5  Mode:Arch-Only  k:50.0
+└─Mu: B:22.7✅ M:7.8✅ T:19.8✅ m:10.2✅ U:19.7✅
+[ENS] Sym:18  N:20,170  IC:-0.041❌  Mu:14.0  Mode:Arch-Only  k:50.0
+└─Mu: B:61.5✅ F:1.2✅ M:9.4✅ T:45.8✅ m:9.9✅ U:10.5✅
+[ENS] Sym:33  N:33,888  IC:0.042✅  Mu:13.2  Mode:Arch-Only  k:50.0
+└─Mu: B:51.3✅ F:3.9✅ M:8.6✅ T:28.5✅ m:18.4✅ U:22.0✅
 [LAYER 1 OUTER FOLDS] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  STATUS: ❌ BLOCKED (0/4 Folds Ready)
+  STATUS: ✅ READY (2/4 Folds Ready)
 
-  [❌] Fold #0 (Fit:2602 → OOS:2848)
-       ReadySyms: 0 | Times: 0 | IC:   n/a | Probe: 0.000
-       └─ Blockers: empty_opportunities
+  [✅] Fold #0 (Fit:2954 → OOS:3288)
+       ReadySyms: 3 | Times: 149 | IC:   n/a | Probe: 52.041
 
-  [❌] Fold #1 (Fit:3129 → OOS:3506)
-       ReadySyms: 1 | Times: 38 | IC:   n/a | Probe: -40.602
-       └─ Blockers: insufficient_ready_symbols, non_positive_probe
-
-  [❌] Fold #2 (Fit:3655 → OOS:4164)
-       ReadySyms: 8 | Times: 203 | IC: 0.562 | Probe: -74.339
+  [❌] Fold #1 (Fit:3394 → OOS:3837)
+       ReadySyms: 4 | Times: 117 | IC:   n/a | Probe: 6.730
        └─ Blockers: non_positive_probe
 
-  [❌] Fold #3 (Fit:4182 → OOS:4822)
-       ReadySyms: 9 | Times: 263 | IC: 0.315 | Probe: 6.827
+  [✅] Fold #2 (Fit:3833 → OOS:4386)
+       ReadySyms: 4 | Times: 85 | IC: 0.463 | Probe: 203.830
+
+  [❌] Fold #3 (Fit:4272 → OOS:4935)
+       ReadySyms: 5 | Times: 145 | IC:   n/a | Probe: 20.335
        └─ Blockers: non_positive_probe
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [LAYER 1 HARD GATE] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  STATUS: ❌ BLOCKED (1/5 Passed)
+  STATUS: ❌ BLOCKED (2/5 Passed)
 
   [✅] Fold-Cov        :   1.000 (>=0.800 )
-  [❌] Match-Ratio     :   0.750 (>=1.000 )  ← BLOCKER
-  [❌] Sym-Count       :   9.000 (>=17.100)  ← BLOCKER
-  [❌] Fold-Ratio      :   0.000 (>=0.600 )  ← BLOCKER
-  [❌] Probe-LCB       : -47.261 (>0.000  )  ← BLOCKER
+  [✅] Match-Ratio     :   1.000 (>=1.000 )
+  [❌] Sym-Count       :   5.000 (>=17.100)  ← BLOCKER
+  [❌] Fold-Ratio      :   0.500 (>=0.600 )  ← BLOCKER
+  [❌] Probe-LCB       :  -1.681 (>0.000  )  ← BLOCKER
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 >> LAYER 1 RESULT: [BLOCKED] -> gate_passed=False
