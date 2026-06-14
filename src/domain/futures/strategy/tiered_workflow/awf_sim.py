@@ -52,6 +52,15 @@ def _run_awf_simulation(
     tf: str = "4h",
 ) -> _AwfSimResult:
     """AWF 시뮬레이션 핵심 루프 (L2/L3 공용)."""
+    import logging
+    import time
+    logger = logging.getLogger("src.domain.futures.strategy.tiered_workflow")
+    t_start_total = time.perf_counter()
+    prof_prep = 0.0
+    prof_rank = 0.0
+    prof_alloc = 0.0
+    prof_eval = 0.0
+
     k_rank = int(l2_params.get("K_RANK", 3))
     rank_buffer = int(l2_params.get("rank_buffer", 1))
     kelly_fraction = float(l2_params.get("kelly_fraction", 0.25))
@@ -66,11 +75,13 @@ def _run_awf_simulation(
     sym_to_idx = {s: i for i, s in enumerate(symbols)}
     lookback = composer_sigma_lookback_bars(tf)
 
+    t0_prep = time.perf_counter()
     vol_matrix = np.full_like(aligned.close_2d, VOL_FLOOR)
     for i in range(n_sym):
         close_col = aligned.close_2d[:, i]
         v_std = rolling_per_bar_return_std(close_col, lookback)
         vol_matrix[:, i] = np.maximum(v_std, VOL_FLOOR)
+    prof_prep += time.perf_counter() - t0_prep
 
     all_rets_hybrid: list[float] = []
     all_rets_baseline: list[float] = []
@@ -87,6 +98,7 @@ def _run_awf_simulation(
         for t in range(fold.oos_start, fold.oos_end - 1, rebalance_bars):
             t_end = min(t + rebalance_bars, fold.oos_end - 1)
 
+            t0_prep = time.perf_counter()
             valid_signals: dict[str, SymbolSignal] = {}
             for sym, sig in l1_oos.items():
                 if sym not in sym_to_idx:
@@ -101,7 +113,9 @@ def _run_awf_simulation(
                     valid=sig.valid,
                     beta_btc=sig.beta_btc,
                 )
+            prof_prep += time.perf_counter() - t0_prep
 
+            t0_rank = time.perf_counter()
             selected, _z_scores = rank_and_select(
                 valid_signals,
                 k_rank=k_rank,
@@ -110,7 +124,9 @@ def _run_awf_simulation(
                 rank_buffer=rank_buffer,
             )
             last_selected = selected
+            prof_rank += time.perf_counter() - t0_rank
 
+            t0_alloc = time.perf_counter()
             mu_arr: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
             sig_arr: NDArray[np.float64] = np.full(n_sym, VOL_FLOOR, dtype=np.float64)
             for sym, ss in valid_signals.items():
@@ -144,7 +160,9 @@ def _run_awf_simulation(
                 btc_beta=btc_beta,
             )
             last_w = w
+            prof_alloc += time.perf_counter() - t0_alloc
 
+            t0_eval = time.perf_counter()
             turnover = float(np.sum(np.abs(w - prev_w))) / 2.0
             all_turnovers.append(turnover)
             selected_idxs = [sym_to_idx[s] for s in selected if s in sym_to_idx]
@@ -178,6 +196,16 @@ def _run_awf_simulation(
 
             prev_selection = selected
             prev_w = w
+            prof_eval += time.perf_counter() - t0_eval
+
+    logger.debug(
+        "[L2-AWF-PROF] total=%.4fs | prep=%.4fs rank=%.4fs alloc=%.4fs eval=%.4fs",
+        time.perf_counter() - t_start_total,
+        prof_prep,
+        prof_rank,
+        prof_alloc,
+        prof_eval,
+    )
 
     return _AwfSimResult(
         rets_hybrid=all_rets_hybrid,
