@@ -440,7 +440,10 @@ def compute_symbol_strategy_evidence(
             .to_numpy(dtype=np.int64, copy=False),
             block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 1)),
             n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 1)),
-            seed=seed + int(abs(hash((symbol, strategy_id, activation_context))) % 10_000),
+            seed=seed + int.from_bytes(
+                sha256(f"{symbol}:{strategy_id}:{activation_context}".encode()).digest()[:4],
+                byteorder="big",
+            ) % 10_000,
         )
         probability_positive = (
             float(np.mean(boot_means > 0.0))
