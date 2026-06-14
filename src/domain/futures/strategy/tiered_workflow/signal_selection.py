@@ -1132,7 +1132,7 @@ def fit_layer1_inference_artifact(
     train_events["gross_return_bps"] = np.asarray(gross_targets, dtype=np.float64)
     # D2: Layer1은 regime μ 조건화 배제 — archetype_only 고정 (regime → Layer2 risk overlay 전용)
     l1_cfg = replace(cfg, ensemble_conditioning="archetype_only", ensemble_score_calibration_enabled=False)
-    model = fit_regime_conditional_ensemble(train_events=train_events, cfg=l1_cfg)
+    model = fit_regime_conditional_ensemble(train_events=train_events, cfg=l1_cfg, tag="ENS-FINAL")
     baseline_by_key: dict[MatchedBaselineKey, float] = {}
     baseline_frame = fit_set.event_index.copy()
     if "gross_event_bps" not in baseline_frame.columns and gross_targets is not None:
