@@ -701,3 +701,127 @@ def test_format_layer1_outer_fold_table_renders_none_ic_as_na() -> None:
     # "IC: n/a" 확인, Probe 값의 "0.000"은 허용
     assert "IC:   n/a" in result, f"IC 필드에 'n/a' 미포함: {result!r}"
     assert "IC: 0.000" not in result, f"IC 필드에 '0.000' 오기록: {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — warmup 격자 검증
+# ---------------------------------------------------------------------------
+
+def test_build_l1_nested_swf_folds_warmup_shifts_first_oos() -> None:
+    from src.domain.futures.strategy.walk_forward import build_l1_nested_swf_folds
+
+    # Arrange
+    cfg = CandidateStrategyConfig(wf_n_folds=4, l1_outer_warmup_blocks=2)
+    l1_start, l1_end, n_bars = 2190, 5480, 7518
+    max_label = 10
+
+    # Act
+    folds = build_l1_nested_swf_folds(
+        n_bars=n_bars,
+        l1_start_idx=l1_start,
+        l1_end_idx=l1_end,
+        max_label_horizon_bars=max_label,
+        cfg=cfg,
+    )
+
+    # Assert
+    assert len(folds) == 4
+    block_len = (l1_end - l1_start) // (4 + 2)
+    assert folds[0].oos_start == l1_start + 2 * block_len
+    assert folds[-1].oos_end == l1_end
+
+
+def test_build_l1_nested_swf_folds_warmup2_larger_first_oos_window() -> None:
+    from src.domain.futures.strategy.walk_forward import build_l1_nested_swf_folds
+
+    # Arrange
+    cfg1 = CandidateStrategyConfig(wf_n_folds=4, l1_outer_warmup_blocks=1)
+    cfg2 = CandidateStrategyConfig(wf_n_folds=4, l1_outer_warmup_blocks=2)
+    kwargs: dict = {
+        "n_bars": 7518,
+        "l1_start_idx": 2190,
+        "l1_end_idx": 5480,
+        "max_label_horizon_bars": 10,
+    }
+
+    # Act
+    folds1 = build_l1_nested_swf_folds(**kwargs, cfg=cfg1)
+    folds2 = build_l1_nested_swf_folds(**kwargs, cfg=cfg2)
+
+    # Assert: warmup=2이면 첫 OOS 이전 증거 윈도우가 더 김
+    assert folds2[0].oos_start > folds1[0].oos_start
+
+
+def test_build_l1_nested_swf_folds_causality_invariant() -> None:
+    from src.domain.futures.strategy.walk_forward import build_l1_nested_swf_folds
+
+    # Arrange
+    cfg = CandidateStrategyConfig(wf_n_folds=4, l1_outer_warmup_blocks=2)
+
+    # Act
+    folds = build_l1_nested_swf_folds(
+        n_bars=7518,
+        l1_start_idx=2190,
+        l1_end_idx=5480,
+        max_label_horizon_bars=10,
+        cfg=cfg,
+    )
+
+    # Assert
+    for fold in folds:
+        assert fold.fit_end <= fold.oos_start
+        assert fold.oos_start < fold.oos_end
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — config validate
+# ---------------------------------------------------------------------------
+
+def test_config_validate_rejects_zero_warmup_blocks() -> None:
+    # Arrange / Act / Assert
+    with pytest.raises(ValueError, match="l1_outer_warmup_blocks"):
+        CandidateStrategyConfig(l1_outer_warmup_blocks=0)
+
+
+# ---------------------------------------------------------------------------
+# Fix 3 — 진단 로깅
+# ---------------------------------------------------------------------------
+
+def test_compute_symbol_strategy_evidence_logs_warning_when_zero_qualified(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+        compute_symbol_strategy_evidence,
+    )
+
+    # Arrange: effective_n<5를 강제하는 소량 합성 데이터
+    cfg = CandidateStrategyConfig()
+    events = pd.DataFrame({
+        "symbol": ["BTCUSDT"] * 3,
+        "strategy_id": ["trend:v1"] * 3,
+        "activation_context": ["all"] * 3,
+        "gross_event_bps": [1.0, 2.0, -1.0],
+        "fold_id": [0, 0, 0],
+        "exit_idx": [10, 20, 30],
+        "entry_idx": [1, 11, 21],
+        "uniqueness_weight": [1.0, 1.0, 1.0],
+        "expected_holding_bars": [5, 5, 5],
+        "side": [1, 1, 1],
+    })
+
+    # Act
+    with caplog.at_level(
+        logging.WARNING,
+        logger="src.domain.futures.strategy.tiered_workflow.signal_selection",
+    ):
+        _evidence = compute_symbol_strategy_evidence(
+            event_results=events,
+            cfg=cfg,
+            seed=42,
+            registry_as_of_idx=100,
+        )
+
+    # Assert
+    assert any("0 qualified" in r.message for r in caplog.records)
