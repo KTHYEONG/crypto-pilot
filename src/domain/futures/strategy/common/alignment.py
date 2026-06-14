@@ -49,13 +49,37 @@ class AlignedMarketData:
 
 
 
+_ALIGNED_DATA_MAPS_CACHE: dict[
+    tuple[int, tuple[str, ...], str],
+    tuple[AlignedMarketData, dict[str, tuple[int, int]]],
+] = {}
+
+
 def align_data_maps(
     data_maps: dict[str, dict[str, Any]],
-    symbols: list[str],
+    symbols: list[str] | tuple[str, ...],
     tf: str,
 ) -> AlignedMarketData:
     """Align symbol frames into dense [T, N] arrays."""
-    info = compute_multi_alignment_info(data_maps, symbols, tf, embargo=0)
+    cache_key = (id(data_maps), tuple(sorted(symbols)), tf)
+    if cache_key in _ALIGNED_DATA_MAPS_CACHE:
+        cached_val, expected_shapes = _ALIGNED_DATA_MAPS_CACHE[cache_key]
+        match = True
+        for sym in symbols:
+            if sym in data_maps and tf in data_maps[sym]:
+                df = data_maps[sym][tf]
+                if sym not in expected_shapes or (len(df), len(df.columns)) != expected_shapes[sym]:
+                    match = False
+                    break
+            else:
+                if sym in expected_shapes:
+                    match = False
+                    break
+        if match:
+            return cached_val
+
+    info = compute_multi_alignment_info(data_maps, list(symbols), tf, embargo=0)
+
     if info is None:
         raise ValueError("unable to align data maps")
     eff_len = int(info["eff_ref_len"])
@@ -189,7 +213,7 @@ def align_data_maps(
         for col, vals in _sym_meta_lists.items()
         if any(np.isfinite(v) for v in vals)
     } or None
-    return AlignedMarketData(
+    result = AlignedMarketData(
         datetimes=datetimes,
         symbols=valid_symbols,
         open_2d=open_2d,
@@ -225,3 +249,10 @@ def align_data_maps(
         anchor_cluster_1d=None if symbol_meta is None else symbol_meta.get("anchor_cluster_member"),
         symbol_meta=symbol_meta,
     )
+    shapes = {}
+    for sym in symbols:
+        if sym in data_maps and tf in data_maps[sym]:
+            df = data_maps[sym][tf]
+            shapes[sym] = (len(df), len(df.columns))
+    _ALIGNED_DATA_MAPS_CACHE[cache_key] = (result, shapes)
+    return result

@@ -111,6 +111,37 @@ def test_align_data_maps_taker_buy_and_trades(
     assert np.allclose(out.trades_2d[:, 0], frame["trades"].to_numpy())
 
 
+def test_align_data_maps_caching(monkeypatch: pytest.MonkeyPatch) -> None:
+    from typing import Any
+    frame = _frame()
+    data_maps = {"BTCUSDT": {"4h": frame}}
+    
+    call_count = 0
+    
+    def fake_compute(*args: Any, **kwargs: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        return {"eff_ref_len": len(frame), "alignment_offsets": {"BTCUSDT": 0}}
+        
+    monkeypatch.setattr(alignment, "compute_multi_alignment_info", fake_compute)
+    
+    # 캐시 비우기
+    alignment._ALIGNED_DATA_MAPS_CACHE.clear()
+    
+    # 1. 첫 실행 -> 캐시 미스
+    out1 = alignment.align_data_maps(data_maps, ["BTCUSDT"], "4h")
+    assert call_count == 1
+    
+    # 2. 두 번째 실행 -> 캐시 히트
+    out2 = alignment.align_data_maps(data_maps, ["BTCUSDT"], "4h")
+    assert call_count == 1
+    assert out1 is out2
+    
+    # 3. 다른 인자 -> 캐시 미스
+    _ = alignment.align_data_maps(data_maps, ["BTCUSDT", "ETHUSDT"], "4h")
+    assert call_count == 2
+
+
 # ---------------------------------------------------------------------------
 # Selection utility mode contract tests
 # ---------------------------------------------------------------------------

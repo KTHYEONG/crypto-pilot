@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -14,7 +15,9 @@ import pandas as pd
 
 from src.core.settings import FUTURES_DATA_DIR
 
-DEFAULT_LEDGER_PATH = FUTURES_DATA_DIR / "universe_ledger.parquet"
+logger = logging.getLogger(__name__)
+
+DEFAULT_LEDGER_PATH = FUTURES_DATA_DIR / "universe_ledger.db"
 LEVERAGED_TOKEN_PATTERNS = ("UP", "DOWN", "BULL", "BEAR")
 
 
@@ -295,13 +298,43 @@ def load_ledger_slice(
     ledger_path: Path = DEFAULT_LEDGER_PATH,
     enforce_eligibility: bool = True,
 ) -> pd.DataFrame:
-    """Load partitioned parquet ledger and apply PIT query."""
+    """Load SQLite ledger slice and apply PIT query."""
+    import sqlite3
+
     needed = set(columns) | {"symbol", "tf", "date", "knowledge_date"}
     if enforce_eligibility:
         needed |= {"is_listed", "is_trading"}
-    dataset = pd.read_parquet(ledger_path, columns=sorted(needed))
+
+    if not ledger_path.exists():
+        return pd.DataFrame(columns=sorted(needed))
+
+    as_of_date = _to_date(as_of)
+    as_of_str = as_of_date.isoformat()
+
+    cols_str = ", ".join([f'"{col}"' for col in sorted(needed)])
+    conn = sqlite3.connect(str(ledger_path))
+    try:
+        logger.info(f"[SQL-DB]   🔑 Loading ledger slice from {ledger_path.name} (as_of={as_of_str}, tf={tf})")
+        query = f"SELECT {cols_str} FROM ledger WHERE tf = ? AND date <= ? AND knowledge_date <= ?"  # noqa: S608
+        params = [tf, as_of_str, as_of_str]
+        
+        if symbols is not None:
+            placeholders = ", ".join(["?"] * len(symbols))
+            query += f" AND symbol IN ({placeholders})"
+            params.extend(symbols)
+            
+        if enforce_eligibility:
+            query += " AND is_listed = 1 AND is_trading = 1"
+            
+        df = pd.read_sql_query(query, conn, params=params)
+    except Exception as e:
+        logger.debug(f"[SQLite] Ledger slice query bypassed: {e}")
+        df = pd.DataFrame(columns=sorted(needed))
+    finally:
+        conn.close()
+
     return query_ledger_as_of(
-        dataset,
+        df,
         as_of=as_of,
         tf=tf,
         symbols=symbols,
@@ -310,18 +343,31 @@ def load_ledger_slice(
 
 
 def update_ledger(new_rows: pd.DataFrame, *, ledger_path: Path = DEFAULT_LEDGER_PATH) -> None:
-    """Append new rows to ledger storage in an idempotent way."""
+    """Append new rows to ledger storage in an idempotent way using SQLite."""
     if new_rows.empty:
         return
-    if ledger_path.exists():
-        old = pd.read_parquet(ledger_path)
-        merged = pd.concat([old, new_rows], ignore_index=True)
-    else:
-        merged = new_rows.copy()
-    merged = merged.drop_duplicates(subset=["symbol", "tf", "date", "knowledge_date"], keep="last")
-    merged = merged.sort_values(["symbol", "tf", "date", "knowledge_date"])
+    import sqlite3
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    merged.to_parquet(ledger_path, index=False)
+    
+    logger.info(f"[SQL-DB]   💾 Updating ledger: {len(new_rows)} rows -> {ledger_path.name}")
+    conn = sqlite3.connect(str(ledger_path))
+    try:
+        new_rows.to_sql("temp_ledger", conn, if_exists="replace", index=False)
+        
+        cursor = conn.cursor()
+        cursor.execute("SELECT count(name) FROM sqlite_master WHERE type='table' AND name='ledger'")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("CREATE TABLE ledger AS SELECT * FROM temp_ledger WHERE 1=0")
+            cursor.execute(
+                "CREATE UNIQUE INDEX idx_ledger ON ledger (symbol, tf, date, knowledge_date)"
+            )
+            
+        cols = ", ".join([f'"{col}"' for col in new_rows.columns])
+        cursor.execute(f"INSERT OR REPLACE INTO ledger ({cols}) SELECT {cols} FROM temp_ledger")  # noqa: S608
+        cursor.execute("DROP TABLE temp_ledger")
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def apply_structure_stage(
