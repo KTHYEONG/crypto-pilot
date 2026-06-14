@@ -138,6 +138,12 @@ graph TD
   - *Ensemble Feature Bypass (`skip_features`):* If `skip_features=True` is provided to `build_candidate_dataset`, high-cost rolling feature computations (robust Z-scores, dispersion, btc market state, etc.) are bypassed. Since `ensemble_b0` only maps event metadata to target returns, this cuts feature building overhead down to zero.
   - *Global Fold Memoization Cache (`_L1_SWF_FOLD_CACHE`):* Caches `WFFold` training outputs in `pipeline.py` based on split configurations and references. In nested Optuna studies, this bypasses process pool execution for identical trials.
   - *Subprocess Thread Ceiling:* Clamps child process threads (`OMP_NUM_THREADS=1`) to eliminate inter-process core throttling under resource-capped WSL environments.
+  - *Numba JIT Acceleration (`_numba_moving_block_bootstrap_mean`):* Replaced pure Python loops in `moving_block_bootstrap_mean` with a Numba-accelerated (`@njit(fastmath=False, cache=True)`) inner function and pre-generated random index matrices to ensure zero-overhead deterministic execution.
+  - *Unified Subprocess Pool:* Consolidated two separate multiprocessing pools into a single combined parallel execution run inside `run_l1_nested_swf`, reducing subprocess spawning overhead.
+  - *Parent-Process Feature Priming (`prime_aligned_feature_cache`):* Engineering features once in the parent process before fork to let child processes bypass redundant computations.
+  - *O(1) Feature Map Lookup:* Replaced linear list searches with $O(1)$ dictionary lookups (`feat_to_idx`) inside `build_candidate_dataset`.
+  - *vCPU Scaling Optimization:* Dynamically scales worker processes up to 75% of available vCPUs (`physical_cores * 0.75`), maximizing core utilization safely under resource-capped environments.
+
 
 # 7. Layer1 Nested SWF & Readiness Gate
 
