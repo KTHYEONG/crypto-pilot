@@ -7,6 +7,11 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-15 Layer2 이벤트 계약 분리 및 support-preserving projection
+- **Delta:** `ValidatedSignalBatch` 기반 event schedule을 L2 입력 SSOT로 고정하고, `rank_and_select`는 `signed`/`absolute` 모드로 분리했다.
+- **Rationale:** L1의 방향·holding·net edge를 bar-level 포지션 계약으로 보존해야 short symmetry와 기존 legacy rank를 동시에 유지할 수 있다.
+- **Edge Cases:** `project_all_caps`는 support 밖 신규 non-zero를 만들지 않으며, malformed mock mask/funding 입력은 fail-open으로 처리한다.
+
 ## 2026-06-15 L2 AWF 정합성 강화 (P0+P1)
 - **Delta:** 5개 결함 수정 — 복리 CAGR, 로그 필드명, taker 비용 차감, net edge 핸드오프, AWF 윈도우 look-ahead 제거 + 4중 게이트 도입
 - **Rationale:** audit 점수 43/100 → 구조 정합성 확보. 복리 목적(사용자 요구)과 비용 현실성(quant.md §4) 직접 충돌 제거
