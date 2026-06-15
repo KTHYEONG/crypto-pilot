@@ -243,9 +243,9 @@ class Layer2AllocationConfig:
     l2_min_psr: float = 0.90
     l2_min_friction_pass: float = 0.50
     fixed_cost_safety_mult: float = 1.25
-    l2_min_dsr: float = 0.95
+    l2_min_dsr: float = 0.75
     l2_max_cvar_95: float = 0.03
-    l2_min_active_blocks: int = 4
+    l2_min_active_blocks: int = 3
     l2_growth_lcb_z: float = 1.0
 
     @staticmethod
@@ -289,9 +289,9 @@ class Layer2AllocationConfig:
                 params.get("fixed_cost_safety_mult", 1.25),
                 1.25,
             ),
-            l2_min_dsr=cls._as_float(params.get("l2_min_dsr", 0.95), 0.95),
+            l2_min_dsr=cls._as_float(params.get("l2_min_dsr", 0.75), 0.75),
             l2_max_cvar_95=cls._as_float(params.get("l2_max_cvar_95", 0.03), 0.03),
-            l2_min_active_blocks=cls._as_int(params.get("l2_min_active_blocks", 4), 4),
+            l2_min_active_blocks=cls._as_int(params.get("l2_min_active_blocks", 3), 3),
             l2_growth_lcb_z=cls._as_float(params.get("l2_growth_lcb_z", 1.0), 1.0),
         )
 

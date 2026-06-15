@@ -1762,7 +1762,11 @@ def evaluate_l2_trial(
         float(np.mean(sim.all_gross_exposures)) if sim.all_gross_exposures else 0.0
     )
     total_cost_bps = float(sim.total_cost_hybrid * 1e4)
-    active_block_count = int(np.sum(np.abs(block_growth_hybrid) > 0.0))
+    # FIX-1: active_block_count 정의 통일 — 최종 게이트(pipeline.py)와 동일한 AWF fold 기반.
+    # contiguous-block 기반(이전)과 달리 pipeline 게이트가 보는 len(block_metrics)와 일치.
+    active_block_count = len([m for m in block_metrics if m.active_rebalances > 0])
+    # FIX-2/4: 순수 1/N EW baseline Sharpe (uplift 제약 전용)
+    sharpe_hac_baseline_ew = _sharpe_hac(list(sim.rets_baseline_ew), bars_per_year=bars_per_year)
     cap_saturation_ratio = (
         float(sim.cap_saturation_count) / float(sim.rebalance_count)
         if sim.rebalance_count > 0
@@ -1786,6 +1790,8 @@ def evaluate_l2_trial(
         float(growth_lcb_baseline + float(config.l2_min_growth_uplift) - finite_score),
         float(cvar_95_hybrid - float(config.l2_max_cvar_95)),
         float(float(config.l2_min_active_blocks) - active_block_count),
+        # FIX-4: uplift 제약 — 순수 EW 대비 Sharpe 우위 없으면 infeasible (≤0 feasible)
+        float(sharpe_hac_baseline_ew + float(config.l2_min_sharpe_uplift) - sharpe_hac_hybrid),
     )
     objective_value = finite_score if np.isfinite(finite_score) else -1e6
     return Layer2TrialEvaluation(
@@ -1861,7 +1867,7 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
 def layer2_constraints_from_trial(trial: FrozenTrial) -> tuple[float, ...]:
     raw = trial.user_attrs.get("l2_constraint_values")
     if not isinstance(raw, (list, tuple)):
-        return (1.0,) * 9
+        return (1.0,) * 10
     resolved: list[float] = []
     for item in raw:
         try:
