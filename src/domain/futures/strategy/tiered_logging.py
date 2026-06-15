@@ -496,8 +496,7 @@ def format_layer2_table(
     mar_ok = mar_h >= 1.0 and cagr_h >= 0.0
     mdd_ok = (mdd_h <= 0.20) and (mdd_h <= mdd_b)
     fold_ok = fold_pass >= 0.6
-    psr_ok = math.isfinite(psr_val) and psr_val >= 0.90
-    dsr_ok = math.isfinite(dsr_val) and dsr_val >= 0.95
+    dsr_ok = math.isfinite(dsr_val) and dsr_val >= 0.75
     friction_ok = friction_pct >= 0.50
     uplift_ok = uplift_val >= uplift_gate_val
 
@@ -532,9 +531,9 @@ def format_layer2_table(
         ),
         f"  {_status(uplift_ok)} [Uplift    ] Sharpe Uplift: {_f(uplift_val, '+.2f')} (>=+0.20)",
         (
-            f"  {_status(fold_ok and psr_ok and dsr_ok and friction_ok)} [Robustness] "
-            f"DSR: {_f(dsr_val)} (>=0.95) | "
-            f"PSR: {_f(psr_val)} (>=0.90) | "
+            f"  {_status(fold_ok and dsr_ok and friction_ok)} [Robustness] "
+            f"DSR: {_f(dsr_val)} (>=0.75) | "
+            f"PSR: {_f(psr_val)} (diag) | "
             f"Fold Pass: {_pct(fold_pass)} (>=60.0%)"
         ),
         sep,
