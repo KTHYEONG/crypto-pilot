@@ -1158,6 +1158,15 @@ def run_l3_holdout(
     return result
 
 
+def _to_utc_timestamp(val: Any) -> pd.Timestamp:
+    if hasattr(val, "_mock_return_value") or "mock" in type(val).__name__.lower():
+        return pd.Timestamp("2026-06-15", tz="UTC")
+    ts = pd.to_datetime(val)
+    if ts.tzinfo is None:
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
+
+
 def run_tiered_pipeline(
     *,
     labeled_events: pd.DataFrame,
@@ -1189,14 +1198,6 @@ def run_tiered_pipeline(
 
     purge_bars, embargo_bars = strategy_config.resolve_purge_and_embargo_bars(cfg)
     n_bars = len(aligned.datetimes)
-
-    def _to_utc_timestamp(val: Any) -> pd.Timestamp:
-        if hasattr(val, "_mock_return_value") or "mock" in type(val).__name__.lower():
-            return pd.Timestamp("2026-06-15", tz="UTC")
-        ts = pd.to_datetime(val)
-        if ts.tzinfo is None:
-            return ts.tz_localize("UTC")
-        return ts.tz_convert("UTC")
 
     _is_ts = _to_utc_timestamp(window.l1_start)
     _oos_ts = _to_utc_timestamp(window.l2_start)
@@ -1234,13 +1235,13 @@ def run_tiered_pipeline(
             logger.info("\n>> LAYER 1 RESULT: [BLOCKED] -> gate_passed=False")
         return (l1, None, None)
 
-    if verbose:
-        logger.info("\n>> LAYER 1 RESULT: [PASS] -> Proceeding to Layer 2.")
-
     if target_phase == "l1":
         if verbose:
-            logger.info(">> TARGET PHASE l1 REACHED -> Stopping pipeline.")
+            logger.info("\n>> LAYER 1 RESULT: [PASS] -> Target phase L1 reached. Stopping pipeline.")
         return (l1, None, None)
+
+    if verbose and l1_result_override is None:
+        logger.info("\n>> LAYER 1 RESULT: [PASS] -> Proceeding to Layer 2.")
 
     # ─── Layer 2: AWF Portfolio Optimization ─────────────────────────────────
     if verbose:
