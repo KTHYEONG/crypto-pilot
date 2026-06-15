@@ -950,28 +950,65 @@ def run_l2_awf(
     sharpe_baseline = _sharpe(sim.rets_baseline)
     mdd_hybrid = _mdd(sim.rets_hybrid)
     mdd_baseline = _mdd(sim.rets_baseline)
+    cagr_hybrid = _cagr(sim.rets_hybrid)
+    cagr_baseline = _cagr(sim.rets_baseline)
+    mar_hybrid = cagr_hybrid / (mdd_hybrid + 1e-9)
+    mar_baseline = cagr_baseline / (mdd_baseline + 1e-9)
     avg_turnover = float(np.mean(sim.all_turnovers)) if sim.all_turnovers else 0.0
     friction_pass_pct = (
         sim.friction_pass_total / sim.signal_total if sim.signal_total > 0 else 0.0
     )
 
-    # fold별 Sharpe 계산: 수익 fold 비율로 일관성 측정.
-    # 전체 fold 정렬 유지 (빈 fold는 _sharpe→0.0). zip(strict=True) 길이 정합 보장.
-    fold_sharpes_h = [_sharpe(fr) for fr in sim.fold_rets_hybrid]
-    _nonempty_sharpes = [s for s, fr in zip(fold_sharpes_h, sim.fold_rets_hybrid, strict=True) if fr]
+    # fold별 복리 수익 여부: prod(1+r)>1.0 기준 (Sharpe>0보다 엄격).
+    # 전체 fold 정렬 유지 (빈 fold 제외, 분모=nonempty). zip(strict=True) 길이 정합.
+    fold_compound_pass = [
+        float(np.prod(1.0 + np.asarray(fr, dtype=np.float64))) > 1.0
+        if fr else None
+        for fr in sim.fold_rets_hybrid
+    ]
+    _nonempty_fold_pass = [v for v in fold_compound_pass if v is not None]
     fold_pass_ratio = (
-        sum(1 for s in _nonempty_sharpes if s > 0.0) / len(_nonempty_sharpes)
-        if _nonempty_sharpes
+        sum(1 for v in _nonempty_fold_pass if v) / len(_nonempty_fold_pass)
+        if _nonempty_fold_pass
         else 0.0
     )
 
-    _abs_sharpe_floor = 0.30
-    gate_passed: bool = bool(
-        (sharpe_hybrid >= sharpe_baseline * 1.20)
-        and (mdd_hybrid <= mdd_baseline)
-        and (sharpe_hybrid >= _abs_sharpe_floor)
-        and (fold_pass_ratio >= 0.50)
+    # gate config 키 (l2_params 우선, default=원칙값)
+    _min_cagr = float(l2_params.get("l2_min_cagr", 0.0))
+    _min_mar = float(l2_params.get("l2_min_mar", 0.5))
+    _min_sharpe_abs = float(l2_params.get("l2_min_sharpe_abs", 0.5))
+    _max_mdd_abs = float(l2_params.get("l2_max_mdd_abs", 0.50))
+    _min_fold_pass = float(l2_params.get("l2_min_fold_pass_ratio", 0.60))
+    _min_uplift = float(l2_params.get("l2_min_sharpe_uplift", 0.20))
+
+    # Stage 0: deployment sanity — NaN/무거래 명시 차단
+    _deployment_ok = (
+        sim.signal_total > 0
+        and friction_pass_pct > 0.0
+        and np.isfinite(sharpe_hybrid)
+        and np.isfinite(cagr_hybrid)
     )
+
+    blocker_reason = ""
+    gate_passed = False
+    if not _deployment_ok:
+        blocker_reason = "no_deployment"
+    elif cagr_hybrid <= _min_cagr:
+        blocker_reason = "cagr"
+    elif mar_hybrid < _min_mar:
+        blocker_reason = "mar"
+    elif sharpe_hybrid < _min_sharpe_abs:
+        blocker_reason = "sharpe_abs"
+    elif mdd_hybrid > mdd_baseline:
+        blocker_reason = "mdd_rel"
+    elif mdd_hybrid > _max_mdd_abs:
+        blocker_reason = "mdd_abs"
+    elif fold_pass_ratio < _min_fold_pass:
+        blocker_reason = "fold"
+    elif sharpe_hybrid < sharpe_baseline + _min_uplift:
+        blocker_reason = "uplift"
+    else:
+        gate_passed = True
 
     result = Layer2Result(
         selected_last=sim.last_selected,
@@ -984,12 +1021,24 @@ def run_l2_awf(
         sharpe_baseline=sharpe_baseline,
         mdd_hybrid=mdd_hybrid,
         mdd_baseline=mdd_baseline,
+        cagr_hybrid=cagr_hybrid,
+        cagr_baseline=cagr_baseline,
+        mar_hybrid=mar_hybrid,
+        mar_baseline=mar_baseline,
+        fold_pass_ratio=fold_pass_ratio,
         turnover=avg_turnover,
         friction_pass_pct=friction_pass_pct,
         gate_passed=gate_passed,
+        blocker_reason=blocker_reason,
     )
+    fold_sharpes_h = [_sharpe(fr) for fr in sim.fold_rets_hybrid]
     awf_fold_diags = [
-        {"fold": i + 1, "sharpe": s, "mdd": _mdd(fr), "pass": s > 0.0}
+        {
+            "fold": i + 1,
+            "sharpe": s,
+            "mdd": _mdd(fr),
+            "pass": fold_compound_pass[i] is True,
+        }
         for i, (s, fr) in enumerate(zip(fold_sharpes_h, sim.fold_rets_hybrid, strict=True))
     ]
     logger.info(format_layer2_table(result, awf_folds=awf_fold_diags))
