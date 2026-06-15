@@ -58,9 +58,12 @@ def _mdd(rets: list[float]) -> float:
     arr = np.asarray(rets, dtype=np.float64)
     if not np.all(np.isfinite(arr)):
         return float("nan")
-    cum = np.cumsum(arr)
-    running_max = np.maximum.accumulate(cum)
-    drawdown = running_max - cum
+    equity = np.cumprod(1.0 + arr)
+    running_max = np.maximum.accumulate(equity)
+    drawdown = 1.0 - np.divide(
+        equity,
+        np.maximum(running_max, 1e-12),
+    )
     return float(np.max(drawdown))
 
 
