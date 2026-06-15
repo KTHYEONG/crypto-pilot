@@ -509,15 +509,15 @@ L1_ALPHA_SPACE: dict[str, dict[str, Any]] = {
 }
 
 # Layer 2 Optuna study: 복리자산증식 최적화 (L1 OOS 결과 입력)
-# Tune: K_RANK, kelly_fraction, friction_safety_mult, vol_target — dead params 제거됨
-L2_ALLOC_SPACE: dict[str, dict[str, Any]] = {
+# Tune: K_RANK, REBALANCE_BARS, CS_Z_SCORE_THRESHOLD, kelly_fraction, max_ann_vol
+L2_ALLOC_SPACE_V2: dict[str, dict[str, Any]] = {
     "K_RANK":               {"type": "int",         "low": 1, "high": 6, "step": 1},
     "REBALANCE_BARS":       {"type": "categorical",  "choices": (1, 3, 6)},
     "CS_Z_SCORE_THRESHOLD": {"type": "float",        "low": 0.0, "high": 1.5, "step": 0.1},
     "kelly_fraction":       {"type": "float",        "low": 0.10, "high": 1.0, "step": 0.05},
-    "friction_safety_mult": {"type": "float",        "low": 0.5, "high": 2.0, "step": 0.1},
-    "vol_target":           {"type": "float",        "low": 0.20, "high": 0.80, "step": 0.05},
+    "max_ann_vol":          {"type": "float",        "low": 0.20, "high": 0.80, "step": 0.05},
 }
+L2_ALLOC_SPACE = L2_ALLOC_SPACE_V2
 
 
 # ==============================================================================

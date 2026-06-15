@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -1065,3 +1066,80 @@ def test_tiered_pipeline_uses_unfiltered_labeled_events(
 
     assert len(captured_labeled_events) == 1
     assert captured_labeled_events[0].equals(unfiltered)
+
+
+def test_tiered_layer3_terminal_failure_does_not_fallback_to_phase_d(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """L3 terminal error는 legacy Phase D fallback 없이 종료되어야 한다."""
+    from unittest.mock import MagicMock
+
+    from src.domain.futures.strategy.tiered_workflow import Layer3ExecutionError
+    from src.domain.futures.strategy_runtime.bridge import CandidatePipelineOutput
+
+    frame = pd.DataFrame({"datetime": pd.date_range("2026-01-01", periods=4, freq="4h")})
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps={"BTCUSDT": {"4h": frame.copy()}},
+        oos_data_maps={},
+        valid_symbols=["BTCUSDT"],
+    )
+
+    monkeypatch.setattr(
+        opt_main_futures,
+        "OPT_FUTURES_CONFIG",
+        {"USE_CS_RANK_ENGINE": True, "FUTURES_STRATEGY_NAME": "candidate_ml"},
+    )
+    monkeypatch.setattr(
+        opt_main_futures,
+        "run_active_strategy_output_bridge",
+        lambda *_args, **_kwargs: CandidatePipelineOutput(
+            labeled_unfiltered=pd.DataFrame({"symbol": ["BTCUSDT"]})
+        ),
+    )
+    monkeypatch.setattr(opt_main_futures, "merge_candidate_output_into_is_and_oos", lambda *_a, **_k: None)
+    monkeypatch.setattr(opt_main_futures, "_run_candidate_evaluation_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        opt_main_futures,
+        "build_candidate_strategy_config",
+        lambda *_a, **_k: MagicMock(candidate=MagicMock()),
+    )
+
+    import src.domain.futures.optimization.opt_config as _opt_cfg
+    import src.domain.futures.portfolio.portfolio_constructor as _pc
+    import src.domain.futures.strategy.common.alignment as _align
+    import src.domain.futures.strategy.tiered_workflow as _tw
+
+    mock_win = MagicMock()
+    mock_win.fetch_start = datetime(1900, 1, 1).date()
+    monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kwargs: mock_win)
+    monkeypatch.setattr(_pc, "PortfolioCaps", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        _align,
+        "align_data_maps",
+        lambda data_maps, symbols, tf: MagicMock(symbols=symbols, datetimes=np.array([], dtype="datetime64[ns]")),
+    )
+    def _raise_l3_error(**_kwargs: object) -> object:
+        raise Layer3ExecutionError("layer3_signal_prediction_failed")
+
+    monkeypatch.setattr(
+        _tw,
+        "run_tiered_pipeline",
+        _raise_l3_error,
+    )
+
+    caplog.set_level(logging.INFO)
+
+    run_config = build_run_config_from_args(
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full", "date": "2026-05-01"}
+    )
+    result = opt_main_futures._run_strategy_stage(
+        run_config,
+        _make_window(),
+        data_stage,
+        universe_snapshot=_make_snapshot(["BTCUSDT"]),
+    )
+
+    assert result is None
+    assert "Phase D fallback suppressed" in caplog.text
+    assert "[SIGNAL DIAGNOSTICS: STRATEGY FILTERING]" not in caplog.text
