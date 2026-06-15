@@ -64,6 +64,7 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     _cagr,
     _mdd,
     _newey_west_ic_tstat,
+    _psr,
     _sharpe,
     compute_breadth_weighted_ic,
 )
@@ -996,6 +997,7 @@ def run_l2_awf(
     cagr_baseline = _cagr(sim.rets_baseline)
     mar_hybrid = cagr_hybrid / (mdd_hybrid + 1e-9)
     mar_baseline = cagr_baseline / (mdd_baseline + 1e-9)
+    psr_hybrid = _psr(sim.rets_hybrid)
     avg_turnover = float(np.mean(sim.all_turnovers)) if sim.all_turnovers else 0.0
     friction_pass_pct = (
         sim.friction_pass_total / sim.signal_total if sim.signal_total > 0 else 0.0
@@ -1022,6 +1024,8 @@ def run_l2_awf(
     _max_mdd_abs = float(config.l2_max_mdd_abs)
     _min_fold_pass = float(config.l2_min_fold_pass_ratio)
     _min_uplift = float(config.l2_min_sharpe_uplift)
+    _min_psr = float(config.l2_min_psr)
+    _min_friction_pass = float(config.l2_min_friction_pass)
 
     # Stage 0: deployment sanity — NaN/무거래 명시 차단
     _deployment_ok = (
@@ -1048,6 +1052,10 @@ def run_l2_awf(
         blocker_reason = "mdd_abs"
     elif fold_pass_ratio < _min_fold_pass:
         blocker_reason = "fold"
+    elif psr_hybrid < _min_psr:
+        blocker_reason = "psr"
+    elif friction_pass_pct < _min_friction_pass:
+        blocker_reason = "friction"
     elif sharpe_hybrid < sharpe_baseline + _min_uplift:
         blocker_reason = "uplift"
     else:
@@ -1073,6 +1081,7 @@ def run_l2_awf(
         friction_pass_pct=friction_pass_pct,
         gate_passed=gate_passed,
         blocker_reason=blocker_reason,
+        psr_hybrid=psr_hybrid,
     )
     fold_sharpes_h = [_sharpe(fr) for fr in sim.fold_rets_hybrid]
     awf_fold_diags = [
