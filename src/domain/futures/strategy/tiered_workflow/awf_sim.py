@@ -74,6 +74,7 @@ class _AwfSimResult:
     fold_rets_baseline: list[list[float]]  # fold별 baseline returns
     block_rets_hybrid: tuple[tuple[float, ...], ...]
     block_rets_baseline: tuple[tuple[float, ...], ...]
+    rets_baseline_ew: list[float]          # 순수 1/N EW baseline (uplift 측정 전용)
 
 
 def _event_strength(event: ValidatedSignalEvent) -> float:
@@ -259,6 +260,60 @@ def build_directional_risk_matched_equal_weight(
     )
 
 
+def build_directional_equal_weight_baseline(
+    *,
+    signed_net_mu_bps: NDArray[np.float64],
+    strategy_weights: NDArray[np.float64],
+    sigma: NDArray[np.float64],
+    btc_beta: NDArray[np.float64],
+    caps: PortfolioCaps,
+    bars_per_year: float,
+) -> NDArray[np.float64]:
+    """Uplift 측정용 순수 1/N EW baseline (sigma-match 미적용).
+
+    Args:
+        signed_net_mu_bps: 심볼별 signed net edge (방향 결정용).
+        strategy_weights: 전략 비중 (support 마스크 결정용).
+        sigma: 심볼별 변동성 (cap 투영에만 사용; sizing 미사용).
+        btc_beta: BTC beta 배열 (cap 투영 전달용).
+        caps: PortfolioCaps (per_symbol/gross/net/beta cap).
+        bars_per_year: 연율화 팩터.
+
+    Returns:
+        순수 1/N 방향성 비중 (cap 투영 후). support 없으면 zeros.
+
+    Time Complexity: O(K) — K=support 심볼 수.
+    Space Complexity: O(N) — N=전체 심볼 수.
+    """
+    support = np.abs(np.asarray(strategy_weights, dtype=np.float64)) > 1e-12
+    if not np.any(support):
+        return np.zeros_like(strategy_weights, dtype=np.float64)
+
+    n_support = int(np.sum(support))
+    direction = np.sign(np.asarray(signed_net_mu_bps, dtype=np.float64))
+    if direction.shape != support.shape:
+        direction = np.sign(np.asarray(strategy_weights, dtype=np.float64))
+    direction = np.where(support, direction, 0.0)
+    if not np.any(direction != 0.0):
+        return np.zeros_like(strategy_weights, dtype=np.float64)
+
+    # 순수 1/N: sigma-match 없음, 단순 방향 균등 비중
+    w = direction / float(n_support)
+
+    sigma_arr = np.maximum(np.asarray(sigma, dtype=np.float64), VOL_FLOOR)
+    sigma_port = float(
+        np.sqrt(np.dot(np.clip(w, -caps.per_symbol, caps.per_symbol) ** 2, sigma_arr**2))
+    )
+    return project_all_caps(
+        w,
+        np.asarray(btc_beta, dtype=np.float64),
+        sigma_port,
+        bars_per_year,
+        caps,
+        support_mask=support,
+    )
+
+
 def _resolve_tradeable_mask(
     *,
     aligned: AlignedMarketData,
@@ -354,6 +409,7 @@ def _run_awf_simulation(
 
     all_rets_hybrid: list[float] = []
     all_rets_baseline: list[float] = []
+    all_rets_baseline_ew: list[float] = []
     all_turnovers: list[float] = []
     all_turnovers_baseline: list[float] = []
     all_gross_exposures: list[float] = []
@@ -371,6 +427,7 @@ def _run_awf_simulation(
     prev_selection: frozenset[str] = frozenset()
     prev_w: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
     prev_w_baseline: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
+    prev_w_baseline_ew: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
     last_selected: frozenset[str] = frozenset()
     last_w: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
     schedule = build_layer2_signal_schedule(
@@ -490,6 +547,15 @@ def _run_awf_simulation(
                 bars_per_year=bars_per_year,
             )
             w_base = np.where(tradeable_mask, w_base, 0.0)
+            w_base_ew = build_directional_equal_weight_baseline(
+                signed_net_mu_bps=mu_arr,
+                strategy_weights=w,
+                sigma=sig_arr,
+                btc_beta=beta_arr,
+                caps=caps,
+                bars_per_year=bars_per_year,
+            )
+            w_base_ew = np.where(tradeable_mask, w_base_ew, 0.0)
             prof_alloc += time.perf_counter() - t0_alloc
 
             t0_eval = time.perf_counter()
@@ -526,6 +592,11 @@ def _run_awf_simulation(
                 target_weights=w_base,
                 round_trip_cost_bps=hurdle,
             )
+            rebal_cost_baseline_ew = compute_rebalance_cost(
+                previous_weights=prev_w_baseline_ew,
+                target_weights=w_base_ew,
+                round_trip_cost_bps=hurdle,
+            )
             total_cost_hybrid += rebal_cost
             total_cost_baseline += rebal_cost_baseline
 
@@ -545,20 +616,28 @@ def _run_awf_simulation(
                 # 거래비용은 리밸런싱 첫 bar에만 차감
                 cost = rebal_cost if t2 == t else 0.0
                 cost_baseline = rebal_cost_baseline if t2 == t else 0.0
+                cost_baseline_ew = rebal_cost_baseline_ew if t2 == t else 0.0
                 r_h = gross_ret - cost
                 r_b = compute_futures_bar_return(
                     weights=w_base,
                     price_returns=bar_ret,
                     funding_rates=funding_rates,
                 ) - cost_baseline
+                r_b_ew = compute_futures_bar_return(
+                    weights=w_base_ew,
+                    price_returns=bar_ret,
+                    funding_rates=funding_rates,
+                ) - cost_baseline_ew
                 all_rets_hybrid.append(r_h)
                 all_rets_baseline.append(r_b)
+                all_rets_baseline_ew.append(r_b_ew)
                 _fold_h.append(r_h)
                 _fold_b.append(r_b)
 
             prev_selection = selected
             prev_w = w
             prev_w_baseline = w_base
+            prev_w_baseline_ew = w_base_ew
             prof_eval += time.perf_counter() - t0_eval
 
         fold_rets_hybrid.append(_fold_h)
@@ -593,6 +672,7 @@ def _run_awf_simulation(
         fold_rets_baseline=fold_rets_baseline,
         block_rets_hybrid=tuple(tuple(block) for block in fold_rets_hybrid),
         block_rets_baseline=tuple(tuple(block) for block in fold_rets_baseline),
+        rets_baseline_ew=all_rets_baseline_ew,
     )
 
 
