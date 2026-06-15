@@ -124,9 +124,15 @@ class Layer2Result:
         sharpe_baseline: Equal-weight 기준 Sharpe.
         mdd_hybrid: 전략 최대 낙폭 (양수).
         mdd_baseline: 기준 최대 낙폭 (양수).
+        cagr_hybrid: 전략 연율화 복리 수익률 (비용 차감 후).
+        cagr_baseline: 1/N 기준 CAGR.
+        mar_hybrid: 전략 MAR ratio (CAGR / MDD).
+        mar_baseline: 1/N 기준 MAR ratio.
+        fold_pass_ratio: 복리 기준 수익 fold 비율 (prod(1+r)>1).
         turnover: 평균 단방향 회전율.
-        friction_pass_pct: 마찰 허들 통과 심볼 비율.
+        friction_pass_pct: 마찰 허들 통과 심볼 비율 (진단용).
         gate_passed: L2 통과 여부.
+        blocker_reason: 실패 원인 키. "" = 통과. 값: no_deployment/cagr/mar/sharpe_abs/mdd_rel/mdd_abs/fold/uplift.
     """
 
     selected_last: frozenset[str]
@@ -135,9 +141,15 @@ class Layer2Result:
     sharpe_baseline: float
     mdd_hybrid: float
     mdd_baseline: float
+    cagr_hybrid: float
+    cagr_baseline: float
+    mar_hybrid: float
+    mar_baseline: float
+    fold_pass_ratio: float
     turnover: float
     friction_pass_pct: float
     gate_passed: bool
+    blocker_reason: str
 
 
 @dataclass(slots=True, frozen=True)
