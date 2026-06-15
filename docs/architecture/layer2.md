@@ -175,14 +175,21 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 **Layer 2 — CS Rank + Diagonal Kelly AWF**
 - BTC-β neutralization: $\mu_{\text{neutral},i} = \mu_i - \beta_i \cdot \bar{\mu}_{\text{mkt}}$ (CS mean as proxy)
 - Rank selection: $\text{select}_i = (\text{rank}_i \leq K + \text{rank\_buffer})$ with hysteresis on `prev_selection`
-- Diagonal Kelly: $w_i \propto f_k \cdot \mu_i / \sigma_i^2$; friction mask: $|mu_i| \geq \text{hurdle}_i$ (symmetric — supports long AND short)
+- **Net edge handoff**: `raw_mu = mean_incremental_bps` (cost-adjusted; NOT gross). Prevents systematic over-sizing.
+- Diagonal Kelly: $w_i \propto f_k \cdot \mu_i / \sigma_i^2$; friction mask: $|\mu_i| \geq \text{hurdle}_i$ (symmetric — supports long AND short)
 - Vol-target scaling: $w \leftarrow w \cdot (\sigma_{\text{target}} / \sigma_{\text{port}})$; caps: gross/per-symbol/net/beta
 - No-trade band: $|\Delta w_i| < \text{band} \rightarrow w_i \leftarrow w_{\text{prev},i}$
-- **Gate**: $\text{Sharpe}_{\text{hybrid}} \geq \text{Sharpe}_{1/N} \times 1.20$ AND $\text{MDD}_{\text{hybrid}} \leq \text{MDD}_{1/N}$
+- **Taker cost deduction**: $r_t^{\text{net}} = w \cdot r_t^{\text{gross}} - \text{turnover}_t \times \bar{\delta} \times 10^{-4}$ (applied only on rebalance bars; $\bar{\delta}$ = mean hurdle bps)
+- **AWF Window Constraint**: OOS folds restricted to $[\text{l2\_start\_idx},\ \text{holdout\_start\_idx})$. No overlap with L1 evidence or L3 holdout.
+- **Gate** (4-condition, all must hold):
+  1. $\text{Sharpe}_{\text{hybrid}} \geq \text{Sharpe}_{1/N} \times 1.20$
+  2. $\text{MDD}_{\text{hybrid}} \leq \text{MDD}_{1/N}$
+  3. $\text{Sharpe}_{\text{hybrid}} \geq 0.30$ (absolute floor)
+  4. $\text{fold\_pass\_ratio} \geq 0.50$ (fraction of folds with $\text{Sharpe} > 0$)
 
 **Layer 3 — Frozen Holdout**
 - Single WFFold covering `[ho_start, ho_end)`, frozen L2 params.
-- CAGR (actual): $\text{CAGR} = (1 + \sum r_t)^{b_{\text{yr}}/n} - 1$ — no vol_proxy approximation.
+- CAGR (compound): $\text{CAGR} = \left(\prod_{t=1}^{n}(1+r_t)\right)^{b_{\text{yr}}/n} - 1$ — arithmetic sum approximation removed; total loss ($\prod \leq 0$) returns $-1.0$.
 - MAR: $\text{CAGR} / (\text{MDD} + 10^{-9})$
 - **Gate**: $\text{Sharpe} \geq \text{Sharpe}_{\text{baseline}}$ AND $\text{MDD} \leq \text{MDD}_{\text{baseline}}$
 
