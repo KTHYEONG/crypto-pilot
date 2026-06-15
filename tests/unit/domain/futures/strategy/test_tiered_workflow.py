@@ -45,6 +45,7 @@ from src.domain.futures.strategy.tiered_workflow import (
     _VALID_COVERAGE_FLAG_THRESHOLD,
     FoldDiagnostic,
     Layer1Result,
+    Layer2AllocationConfig,
     Layer2Result,
     Layer3Result,
     StrategySignal,
@@ -2508,3 +2509,32 @@ def test_layer2_gate_all_pass_regression() -> None:
     assert r.gate_passed
     assert r.blocker_reason == ""
     assert r.psr_hybrid == pytest.approx(0.92)
+
+
+# ---------------------------------------------------------------------------
+# S5 — friction_pass amortization 회귀 (spec: layer2-signal-utilization.md §2.2)
+# ---------------------------------------------------------------------------
+
+
+def test_layer2_allocation_config_friction_safety_mult_default() -> None:
+    """S5: Layer2AllocationConfig.friction_safety_mult 기본값=1.0."""
+    config = Layer2AllocationConfig()
+
+    assert config.friction_safety_mult == pytest.approx(1.0)
+
+
+def test_layer2_allocation_config_from_mapping_parses_friction_safety_mult() -> None:
+    """S7: from_mapping({'friction_safety_mult': 1.5}) → 필드 정확 반영."""
+    params: dict[str, object] = {"kelly_fraction": 0.5, "friction_safety_mult": 1.5}
+
+    config = Layer2AllocationConfig.from_mapping(params)
+
+    assert config.kelly_fraction == pytest.approx(0.5)
+    assert config.friction_safety_mult == pytest.approx(1.5)
+
+
+def test_layer2_allocation_config_from_mapping_friction_safety_mult_default() -> None:
+    """S7b: friction_safety_mult 미지정 시 기본값 1.0."""
+    config = Layer2AllocationConfig.from_mapping({})
+
+    assert config.friction_safety_mult == pytest.approx(1.0)
