@@ -10,7 +10,7 @@ Layer 1(L1)은 전략 후보군의 통계적 유의성과 견고함(Robustness)�
 
 ---
 
-## 2. 최신 실행 결과 분석 (2026-06-14)
+## 2. 최신 실행 결과 분석 (2026-06-15)
 
 [SYNC] Ledger up-to-date (Last: 2026-03-31)
 discover_universe_timeline: l2_start(2024-10-01) < oos_start(2025-10-01), ignoring l2_start
@@ -145,31 +145,33 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 
   [ RETURN & EFFICIENCY ]
   ──────────────────────────────────────────────────────────────────────────
-  Metric                   Strategy    ( 1/N Base )            Gate   Status
+  Metric                   Strategy    ( EW Bench )            Gate   Status
   ──────────────────────────────────────────────────────────────────────────
-  CAGR                 [   -46.9% ] (     -62.0% )          > 0.0%       ❌
-  Sharpe               [   -0.906 ] (     -0.848 )         >= 0.50       ❌
-  MAR (CAGR/MDD)       [   -1.174 ] (     -0.919 )         >= 0.50       ❌
+  CAGR                 [   +36.4% ] (     -81.3% )        >= 15.0%       ✅
+  Sharpe               [    2.512 ] (     -1.158 )         >= 1.00       ✅
+  MAR (CAGR/MDD)       [    6.965 ] (  n/a(loss) )         >= 1.00       ✅
 
   [ RISK & UPLIFT ]
   ──────────────────────────────────────────────────────────────────────────
-  MDD                  [    40.0% ] (      67.5% )        <= 50.0%       ✅
-  Sharpe Uplift        [    -0.06 ] (       Base )        >= +0.20       ❌
-  Turnover / Rebal     [    0.008 ] (          — )               —       —
+  MDD                  [     5.2% ] (      60.7% )        <= 20.0%       ✅
+  Sharpe Uplift        [    +3.67 ] (       Base )    >= Base+0.20       ✅
+  Turnover / Rebal     [    0.043 ] (          — )               —       —
 
   [ ROBUSTNESS & DIAGNOSTICS ]
   ──────────────────────────────────────────────────────────────────────────
-  Fold Pass Ratio      [    33.3% ] (          — )        >= 60.0%       ❌
-  Friction Pass%       [   100.0% ] (          — )               —       —
+  Fold Pass Ratio      [   100.0% ] (          — )        >= 60.0%       ✅
+  PSR (Anti-Overfit)   [    0.968 ] (          — )         >= 0.90       ✅
+  Friction Pass%       [    34.5% ] (          — )        >= 50.0%       ❌
   ──────────────────────────────────────────────────────────────────────────
 
-  >> FINAL RESULT : BLOCKED (cagr)
+  >> FINAL RESULT : BLOCKED (friction)
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ❌ Sharpe: -2.979 | MDD:   36.0% | Status: FAIL
-  ├─ Fold #2 : ✅ Sharpe:  0.934 | MDD:   21.6% | Status: PASS
-  └─ Fold #3 : ❌ Sharpe: -0.344 | MDD:   31.5% | Status: FAIL
+  ├─ Fold #1 : ✅ Sharpe:  0.674 | MDD:    3.8% | Status: PASS
+  ├─ Fold #2 : ✅ Sharpe:  0.993 | MDD:    3.3% | Status: PASS
+  └─ Fold #3 : ✅ Sharpe:  4.842 | MDD:    4.7% | Status: PASS
 
->> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False
+>> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False (blocker: friction)
+>> TARGET PHASE l2 REACHED -> Stopping pipeline.
 [PHASE] phase=l2 completed strategy/candidate evaluation only; optimization/training skipped
