@@ -213,23 +213,47 @@ def _deflated_sharpe_probability(
     arr = _clean_rets_array(selected_rets)
     if arr.size < 2 or effective_trial_count <= 0.0:
         return 0.0
-    observed = _sharpe_hac(arr, bars_per_year=bars_per_year, max_lag=max_lag)
-    if not np.isfinite(observed):
+    
+    # 1. Annualized Sharpe Ratio
+    observed_ann = _sharpe_hac(arr, bars_per_year=bars_per_year, max_lag=max_lag)
+    if not np.isfinite(observed_ann):
         return 0.0
-    sr_pool = np.asarray(completed_trial_sharpes, dtype=np.float64)
-    sr_pool = sr_pool[np.isfinite(sr_pool)]
-    if sr_pool.size == 0:
+        
+    # 2. Convert to per-bar scale
+    observed_per_bar = observed_ann / np.sqrt(bars_per_year)
+    
+    # 3. Convert trial pool Sharpe ratios to per-bar scale
+    sr_pool_ann = np.asarray(completed_trial_sharpes, dtype=np.float64)
+    sr_pool_ann = sr_pool_ann[np.isfinite(sr_pool_ann)]
+    if sr_pool_ann.size == 0:
         return _psr(arr.tolist(), bars_per_year=bars_per_year)
-    benchmark = float(
-        np.mean(sr_pool)
-        + np.std(sr_pool, ddof=0) * np.sqrt(2.0 * np.log(max(effective_trial_count, 1.0)))
+        
+    sr_pool_per_bar = sr_pool_ann / np.sqrt(bars_per_year)
+    
+    # 4. Calculate per-bar benchmark
+    benchmark_per_bar = float(
+        np.mean(sr_pool_per_bar)
+        + np.std(sr_pool_per_bar, ddof=0) * np.sqrt(2.0 * np.log(max(effective_trial_count, 1.0)))
     )
+    
+    # 5. Effective sample size
     n_eff = _effective_sample_size_hac(arr, max_lag=max_lag)
     if n_eff <= 1.0:
         return 0.0
-    variance = max(1.0 / n_eff, 1e-12)
-    z_score = (observed - benchmark) / float(np.sqrt(variance))
+        
+    # 6. Standard error under Bailey & López de Prado (2012)
+    from scipy.stats import kurtosis as _kurt
+    from scipy.stats import skew as _skew
+    skew_val = float(_skew(arr))
+    kurt_val = float(_kurt(arr, fisher=True))
+    
+    denom = 1.0 - skew_val * observed_per_bar + (kurt_val + 2.0) / 4.0 * observed_per_bar**2
+    variance = 1.0 / (n_eff - 1.0) if denom <= 0.0 else denom / (n_eff - 1.0)
+        
+    variance = max(variance, 1e-12)
+    z_score = (observed_per_bar - benchmark_per_bar) / float(np.sqrt(variance))
     return float(norm.cdf(z_score))
+
 
 
 def _is_non_constant_finite_array(values: NDArray[np.float64]) -> bool:

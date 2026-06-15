@@ -7,6 +7,10 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-15 Layer 2 DSR 수식 교정 및 Scorecard 가독성 개선
+- **Delta:** `metrics.py`의 `_deflated_sharpe_probability` 함수 내에서 연율화 Sharpe와 per-bar 표준오차 간의 단위 혼용을 per-bar 스케일로 통일하고 Bailey & Prado (2012) 표준오차 정밀 수식으로 수정. `tiered_logging.py`에서 성과표의 각 지표 옆에 심플한 통과 기호(예: `>=15.0%`, `<=baseline`)를 출력하도록 수정.
+- **Rationale:** 단위 불일치로 DSR이 항상 0.000으로 차단되던 수학적 오류를 정정하고, 사용자가 각 지표의 패스 기준 장벽을 로그에서 직관적으로 파악할 수 있도록 하기 위함임.
+
 ## 2026-06-15 Layer 2 DSR 챔피언 선정 및 Replay 검증 도입
 - **Delta:** [selection.py](file:///src/domain/futures/strategy/tiered_workflow/selection.py)를 신설하여 DSR-corrected champion selection(`select_layer2_champion`) 로직을 구축함. `opt_main_futures.py`에서 `_layer2_experiment_key`로 Study를 영속 로드하고 `override_dsr` 브릿지로 최종 pipeline에 DSR을 동기화함. 시뮬레이션 재실행 결과 지표와 stored 지표 간 오차를 비교하는 deterministic replay 검증을 추가함.
 - **Rationale:** 최적화 구간의 최고 CAGR을 편향되게 선택하는 것을 배제하고, 여러 trial 간의 Sharpe 분산 및 유효 검정 횟수를 반영하여 보정된 기대 복리성장 성과 지표(DSR)를 챔피언 승격 기준으로 삼기 위함임.

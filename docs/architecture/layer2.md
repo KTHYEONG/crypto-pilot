@@ -212,7 +212,7 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 **Decoupled Optuna**
 - `L1_ALPHA_SPACE` → `objective_l1_ic` (IC only; Sharpe not referenced)
 - `L2_ALLOC_SPACE` → `objective_l2_growth` (보수적 기대 복리성장 LCB 최대화; 제약 조건은 TPESampler의 `constraints_func`로 전달)
-- **DSR-Corrected Selection & Replay**: [selection.py](file:///src/domain/futures/strategy/tiered_workflow/selection.py)에서 완료 trial들의 block signature로 `n_trials_eff`를 연산하고, 최종 챔피언에 대해 DSR 검증(DSR >= min_dsr) 및 결정적 일치 검증(cagr/mdd/growth_lcb)을 강제함.
+- **DSR-Corrected Selection & Replay**: [selection.py](file:///src/domain/futures/strategy/tiered_workflow/selection.py)에서 완료 trial들의 block signature로 `n_trials_eff`를 연산하고, 최종 챔피언에 대해 DSR 검증(DSR >= min_dsr, Bailey & López de Prado (2012) 기반 per-bar 스케일 교정 수식 적용) 및 결정적 일치 검증(cagr/mdd/growth_lcb)을 강제함.
 - Short-circuit: L1 BLOCKED → L2/L3 = None (skip)
 
 **Optuna L2 Execution Flow (Step A→B→C→D):**

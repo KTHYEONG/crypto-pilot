@@ -144,16 +144,14 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
     - Study Name : l2_study_4h_fc72f8e5e9ac
     - Config     : 50 trials
   ────────────────────────────────────────────────────────────────────────────
-[L2-SELECTION] DSR 컷오프(>=0.950) 만족 후보 없음 -> dsr 차단 처리
-[TIERED] L1 override 사용 — L1 재실행 스킵
 ● [LAYER 2 PORTFOLIO SCORECARD]
 ──────────────────────────────────────────────────────────────────────────────
   STATUS  : ❌ BLOCKED (active_blocks)
 
-  ✅ [Return    ] CAGR: +26.9% | Sharpe: 1.688 | MAR: 4.268
-  ✅ [Risk      ] MDD: 6.3% | Turnover: 0.025
-  ❌ [Uplift    ] Sharpe Uplift: +0.00 (Target: >= +0.20)
-  ❌ [Robustness] PSR: 0.889 (Target: >= 0.90) | Fold Pass: 100.0%
+  ✅ [Return    ] CAGR: +26.9% (>=15.0%) | Sharpe: 1.688 (>=1.000) | MAR: 4.268 (>=1.000)
+  ✅ [Risk      ] MDD: 6.3% (<=20.0% & <=baseline: 6.3%) | Turnover: 0.025
+  ❌ [Uplift    ] Sharpe Uplift: +0.00 (>=+0.20)
+  ❌ [Robustness] DSR: 0.218 (>=0.95) | PSR: 0.889 (>=0.90) | Fold Pass: 100.0% (>=60.0%)
 ──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
