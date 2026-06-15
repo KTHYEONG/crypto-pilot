@@ -10,7 +10,7 @@ related_paths:
   - src/application/futures/optimization/universe_service.py
 change_triggers:
   - src/domain/futures/universe/**
-last_verified: 2026-06-10
+last_verified: 2026-06-15
 ---
 
 # 1. Purpose
@@ -70,7 +70,8 @@ graph TD
 
 
 # 6. Storage & Persistence (SQLite)
-- **Database Backend:** All point-in-time universe selection history is persisted in `universe_ledger.db` utilizing SQLite.
+- **Database Backend:** SQLite remains the SSOT backend for persistent universe history in `universe_ledger.db`.
+- **Compatibility Layer:** `load_ledger_slice(...)` now dispatches by suffix. `.db/.sqlite/.sqlite3/""` use SQLite slices; `.parquet/.pq` use parquet load followed by the same PIT filter path.
+- **Failure Contract:** Existing files no longer fall through to silent empty frames on read failure. Backend errors are raised with backend context; only genuinely missing files may return an empty frame.
 - **Index Optimization:** A composite unique index on `(symbol, tf, date, knowledge_date)` prevents duplicates, ensuring idempotent upsert updates.
-- **Query Slicing:** Instead of loading full historical ledger files, slice queries leverage SQLite index scans (`WHERE tf = ? AND date <= ? AND knowledge_date <= ?`) to optimize I/O and runtime memory footprint.
-
+- **Query Slicing:** Both backend paths converge through `query_ledger_as_of(...)`, preserving `date <= as_of` and `knowledge_date <= as_of` semantics.
