@@ -135,11 +135,19 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
   #16 | CRVUSDT  | trend_ma (ema_12_72)           |     +69.2 | ★★★☆☆ 2.10 |  0.939  | REJECTED
 --------------------------------------------------------------------------------------------
 
->> LAYER 1 RESULT: [PASS] -> Proceeding to Layer 2.
+>> LAYER 1 RESULT: [PASS] -> Target phase L1 reached. Stopping pipeline.
+
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ● [LAYER 2: PORTFOLIO ALLOCATION & RISK OPTIMIZATION]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ● [HYPERPARAMETER OPTIMIZATION]
+    - Study Name : tiered_l2_sharpe_4h_2024-10-01_2025-10-01
+    - Config     : 50 trials
+  ────────────────────────────────────────────────────────────────────────────
+   [OPTUNA] Storage: redis://127.0.0.1:6379/0
+[L2-OPT] Progress: 50/50 trials | Best CAGR: 24.75% | Current Trial PnL: BLOCKED
+[TIERED] L1 override 사용 — L1 재실행 스킵
 ● [AWF PORTFOLIO PERFORMANCE SCORECARD]
 ──────────────────────────────────────────────────────────────────────────────
 
@@ -147,20 +155,20 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
   ──────────────────────────────────────────────────────────────────────────
   Metric                   Strategy    ( EW Bench )            Gate   Status
   ──────────────────────────────────────────────────────────────────────────
-  CAGR                 [   +23.2% ] (     +31.5% )        >= 15.0%       ✅
-  Sharpe               [    2.390 ] (      0.877 )         >= 1.00       ✅
-  MAR (CAGR/MDD)       [    6.102 ] (      1.370 )         >= 1.00       ✅
+  CAGR                 [   +24.8% ] (     +39.9% )        >= 15.0%       ✅
+  Sharpe               [    2.578 ] (      1.247 )         >= 1.00       ✅
+  MAR (CAGR/MDD)       [    5.835 ] (      2.027 )         >= 1.00       ✅
 
   [ RISK & UPLIFT ]
   ──────────────────────────────────────────────────────────────────────────
-  MDD                  [     3.8% ] (      23.0% )        <= 20.0%       ✅
-  Sharpe Uplift        [    +1.51 ] (       Base )    >= Base+0.20       ✅
-  Turnover / Rebal     [    0.036 ] (          — )               —       —
+  MDD                  [     4.2% ] (      19.7% )        <= 20.0%       ✅
+  Sharpe Uplift        [    +1.33 ] (       Base )    >= Base+0.20       ✅
+  Turnover / Rebal     [    0.030 ] (          — )               —       —
 
   [ ROBUSTNESS & DIAGNOSTICS ]
   ──────────────────────────────────────────────────────────────────────────
   Fold Pass Ratio      [    66.7% ] (          — )        >= 60.0%       ✅
-  PSR (Anti-Overfit)   [    0.969 ] (          — )         >= 0.90       ✅
+  PSR (Anti-Overfit)   [    0.976 ] (          — )         >= 0.90       ✅
   Friction Pass%       [   100.0% ] (          — )        >= 50.0%       ✅
   ──────────────────────────────────────────────────────────────────────────
 
@@ -168,9 +176,9 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ❌ Sharpe: -1.286 | MDD:    3.1% | Status: FAIL
-  ├─ Fold #2 : ✅ Sharpe:  2.157 | MDD:    2.4% | Status: PASS
-  └─ Fold #3 : ✅ Sharpe:  5.341 | MDD:    1.7% | Status: PASS
+  ├─ Fold #1 : ❌ Sharpe: -1.367 | MDD:    4.2% | Status: FAIL
+  ├─ Fold #2 : ✅ Sharpe:  1.772 | MDD:    2.2% | Status: PASS
+  └─ Fold #3 : ✅ Sharpe:  6.236 | MDD:    1.4% | Status: PASS
 
 >> LAYER 2 RESULT: [PASS] -> Proceeding to Final Holdout.
 >> TARGET PHASE l2 REACHED -> Stopping pipeline.

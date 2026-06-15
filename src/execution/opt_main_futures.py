@@ -769,7 +769,10 @@ def _run_tiered_l2_study(
     study_name = (
         f"tiered_l2_sharpe_{tf}_{window.l2_start.isoformat()}_{window.holdout_start.isoformat()}"
     )
-    _logger.info("[L2-OPT] Optuna L2 study 시작: name=%s n_trials=%d", study_name, n_trials)
+    _logger.info("  ● [HYPERPARAMETER OPTIMIZATION]")
+    _logger.info("    - Study Name : %s", study_name)
+    _logger.info("    - Config     : %d trials", n_trials)
+    _logger.info("  ────────────────────────────────────────────────────────────────────────────")
 
     try:
         # setup_optuna_storage를 1회만 호출하여 로그 중복 제거
@@ -1012,12 +1015,16 @@ def _run_strategy_stage(
             if not l1_res.gate_passed:
                 return None  # L1 BLOCKED → 조기 종료
 
-            # ── Step B: L2 window 신호 예측 ──────────────────────────────────
+            # ── Step B: L2 Optimization Header ──────────────────────────────
+            _logger.info("")  # LAYER 1 결과와 간격 확보
+            _logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
+
+            # ── Step C: L2 window 신호 예측 ──────────────────────────────────
             l2_signals = _build_l2_signal_batch(
                 l1_res, labeled_tiered, aligned_tiered, tiered_cfg, tiered_window
             )
 
-            # ── Step C: Optuna L2 파라미터 탐색 ──────────────────────────────
+            # ── Step D: Optuna L2 파라미터 탐색 ──────────────────────────────
             _seed = int(run_config.seed) if hasattr(run_config, "seed") else 42
             n_l2_trials = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_TRIALS", 50))
             best_l2_params = _run_tiered_l2_study(
@@ -1031,7 +1038,7 @@ def _run_strategy_stage(
                 seed=_seed,
             )
 
-            # ── Step D: 최적 params + L1 override로 최종 실행 ────────────────
+            # ── Step E: 최적 params + L1 override로 최종 실행 ────────────────
             run_tiered_pipeline(
                 labeled_events=labeled_tiered,
                 aligned=aligned_tiered,
@@ -1043,6 +1050,7 @@ def _run_strategy_stage(
                 tf=run_config.timeframe,
                 target_phase=run_config.phase,
                 l1_result_override=l1_res,
+                verbose=True,  # 최종 실행시 상세 결과 출력
             )
             return None  # Phase D allocation 스킵 (Tiered가 대체)
         except Exception as _exc:
