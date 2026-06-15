@@ -48,6 +48,7 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     FoldDiagnostic,
     Layer1Result,
     Layer2AllocationConfig,
+    Layer2BlockMetric,
     Layer2Result,
     Layer3Result,
 )
@@ -62,11 +63,18 @@ from src.domain.futures.strategy.tiered_workflow.diagnostics import (
     compute_prediction_decomposition_diag,
 )
 from src.domain.futures.strategy.tiered_workflow.metrics import (
+    _bars_per_year_for_tf,
     _cagr,
+    _contiguous_block_log_growth,
+    _cvar_loss,
+    _deflated_sharpe_probability,
+    _effective_sample_size_hac,
+    _growth_lower_confidence_bound,
     _mdd,
     _newey_west_ic_tstat,
     _psr,
     _sharpe,
+    _sharpe_hac,
     compute_breadth_weighted_ic,
 )
 from src.domain.futures.strategy.tiered_workflow.signal_selection import (
@@ -94,6 +102,18 @@ _VALID_COVERAGE_FLAG_THRESHOLD: float = 0.80
 _TRAINED_FOLD_COVERAGE_THRESHOLD: float = 0.80
 
 
+class TieredPipelineError(RuntimeError):
+    """Base error for tiered pipeline execution after tiered bootstrapping succeeds."""
+
+
+class Layer3WindowError(TieredPipelineError):
+    """Raised when the Layer 3 holdout window resolves to an empty span."""
+
+
+class Layer3ExecutionError(TieredPipelineError):
+    """Raised when Layer 3 signal prediction or execution fails after L1/L2 succeed."""
+
+
 def _can_prime_feature_cache(labeled_events: pd.DataFrame) -> bool:
     return not labeled_events.empty and "entry_idx" in labeled_events.columns
 
@@ -103,6 +123,36 @@ def _date_to_idx(datetimes: NDArray[np.datetime64], target_date: Any) -> int:
     target = np.datetime64(target_date, "D")
     idx = int(np.searchsorted(datetimes.astype("datetime64[D]"), target))
     return min(idx, len(datetimes) - 1)
+
+
+def _date_to_left_idx(datetimes: NDArray[np.datetime64], target_date: Any) -> int:
+    """Resolve a left-closed date boundary to a bar index."""
+    target = np.datetime64(target_date, "D")
+    idx = int(np.searchsorted(datetimes.astype("datetime64[D]"), target, side="left"))
+    return min(max(idx, 0), len(datetimes))
+
+
+def _date_to_right_exclusive_idx(datetimes: NDArray[np.datetime64], target_date: Any) -> int:
+    """Resolve an inclusive date boundary to the next exclusive bar index."""
+    target = np.datetime64(target_date, "D") + np.timedelta64(1, "D")
+    idx = int(np.searchsorted(datetimes.astype("datetime64[D]"), target, side="left"))
+    return min(max(idx, 0), len(datetimes))
+
+
+def _resolve_holdout_span(
+    datetimes: NDArray[np.datetime64],
+    holdout_start: Any,
+    holdout_end: Any,
+) -> tuple[int, int]:
+    """Resolve Layer 3 holdout span as [start, end) on the aligned bar grid."""
+    if len(datetimes) == 0:
+        raise Layer3WindowError("empty_holdout_window")
+
+    ho_start_idx = _date_to_left_idx(datetimes, holdout_start)
+    ho_end_idx = _date_to_right_exclusive_idx(datetimes, holdout_end)
+    if ho_end_idx <= ho_start_idx:
+        raise Layer3WindowError("empty_holdout_window")
+    return (ho_start_idx, ho_end_idx)
 
 
 def _is_non_constant_finite_array(values: NDArray[np.float64]) -> bool:
@@ -977,6 +1027,7 @@ def run_l2_awf(
     caps: PortfolioCaps,
     tf: str = "4h",
     verbose: bool = True,
+    override_dsr: float | None = None,
 ) -> Layer2Result:
     """Layer2 AWF 포트폴리오 시뮬레이션."""
     sim = _run_awf_simulation(
@@ -990,18 +1041,73 @@ def run_l2_awf(
     symbols = aligned.symbols
     sym_to_idx = {s: i for i, s in enumerate(symbols)}
 
-    sharpe_hybrid = _sharpe(sim.rets_hybrid)
-    sharpe_baseline = _sharpe(sim.rets_baseline)
+    bars_per_year = _bars_per_year_for_tf(tf)
+    sharpe_hybrid = _sharpe(sim.rets_hybrid, bars_per_year=bars_per_year)
+    sharpe_baseline = _sharpe(sim.rets_baseline, bars_per_year=bars_per_year)
+    sharpe_hac_hybrid = _sharpe_hac(sim.rets_hybrid, bars_per_year=bars_per_year)
+    sharpe_hac_baseline = _sharpe_hac(sim.rets_baseline, bars_per_year=bars_per_year)
     mdd_hybrid = _mdd(sim.rets_hybrid)
     mdd_baseline = _mdd(sim.rets_baseline)
-    cagr_hybrid = _cagr(sim.rets_hybrid)
-    cagr_baseline = _cagr(sim.rets_baseline)
+    cagr_hybrid = _cagr(sim.rets_hybrid, bars_per_year=bars_per_year)
+    cagr_baseline = _cagr(sim.rets_baseline, bars_per_year=bars_per_year)
     mar_hybrid = cagr_hybrid / (mdd_hybrid + 1e-9)
     mar_baseline = cagr_baseline / (mdd_baseline + 1e-9)
     psr_hybrid = _psr(sim.rets_hybrid)
     avg_turnover = float(np.mean(sim.all_turnovers)) if sim.all_turnovers else 0.0
+    avg_gross_exposure = float(np.mean(sim.all_gross_exposures)) if sim.all_gross_exposures else 0.0
+    avg_net_exposure = float(np.mean(np.abs(sim.all_net_exposures))) if sim.all_net_exposures else 0.0
+    cap_saturation_ratio = (
+        float(sim.cap_saturation_count) / float(sim.rebalance_count)
+        if sim.rebalance_count > 0
+        else 0.0
+    )
+    total_cost_bps = float(sim.total_cost_hybrid * 1e4)
+    cvar_95_hybrid = _cvar_loss(sim.rets_hybrid, alpha=0.95)
+    hybrid_blocks = _contiguous_block_log_growth(
+        sim.rets_hybrid,
+        block_bars=max(int(config.rebalance_bars), 1),
+    )
+    baseline_blocks = _contiguous_block_log_growth(
+        sim.rets_baseline,
+        block_bars=max(int(config.rebalance_bars), 1),
+    )
+    blocks_per_year = bars_per_year / max(int(config.rebalance_bars), 1)
+    growth_lcb_hybrid = _growth_lower_confidence_bound(
+        hybrid_blocks,
+        blocks_per_year=blocks_per_year,
+        z_value=float(config.l2_growth_lcb_z),
+    )
+    growth_lcb_baseline = _growth_lower_confidence_bound(
+        baseline_blocks,
+        blocks_per_year=blocks_per_year,
+        z_value=float(config.l2_growth_lcb_z),
+    )
+    if override_dsr is not None:
+        dsr_hybrid = float(override_dsr)
+    else:
+        completed_trial_sharpes = np.asarray([sharpe_hac_hybrid], dtype=np.float64)
+        dsr_hybrid = _deflated_sharpe_probability(
+            selected_rets=sim.rets_hybrid,
+            completed_trial_sharpes=completed_trial_sharpes,
+            effective_trial_count=max(_effective_sample_size_hac(sim.rets_hybrid), 1.0),
+            bars_per_year=bars_per_year,
+        )
     friction_pass_pct = (
         sim.friction_pass_total / sim.signal_total if sim.signal_total > 0 else 0.0
+    )
+    block_metrics = tuple(
+        Layer2BlockMetric(
+            start_idx=fold.oos_start,
+            end_idx=fold.oos_end,
+            log_growth_hybrid=float(np.sum(np.log1p(np.asarray(block_h, dtype=np.float64)))) if block_h else 0.0,
+            log_growth_baseline=float(np.sum(np.log1p(np.asarray(block_b, dtype=np.float64)))) if block_b else 0.0,
+            mdd_hybrid=_mdd(list(block_h)),
+            turnover_hybrid=float(sim.all_turnovers[idx]) if idx < len(sim.all_turnovers) else 0.0,
+            active_rebalances=1 if block_h else 0,
+        )
+        for idx, (fold, block_h, block_b) in enumerate(
+            zip(awf_folds, sim.block_rets_hybrid, sim.block_rets_baseline, strict=False)
+        )
     )
 
     # fold별 복리 수익 여부: prod(1+r)>1.0 기준 (Sharpe>0보다 엄격).
@@ -1027,6 +1133,10 @@ def run_l2_awf(
     _min_uplift = float(config.l2_min_sharpe_uplift)
     _min_psr = float(config.l2_min_psr)
     _min_friction_pass = float(config.l2_min_friction_pass)
+    _min_dsr = float(config.l2_min_dsr)
+    _max_cvar_95 = float(config.l2_max_cvar_95)
+    _min_growth_uplift = float(config.l2_min_growth_uplift)
+    _min_active_blocks = int(config.l2_min_active_blocks)
 
     # Stage 0: deployment sanity — NaN/무거래 명시 차단
     _deployment_ok = (
@@ -1053,11 +1163,19 @@ def run_l2_awf(
         blocker_reason = "mdd_abs"
     elif fold_pass_ratio < _min_fold_pass:
         blocker_reason = "fold"
+    elif len(block_metrics) < _min_active_blocks:
+        blocker_reason = "active_blocks"
     elif psr_hybrid < _min_psr:
         blocker_reason = "psr"
+    elif dsr_hybrid < _min_dsr:
+        blocker_reason = "dsr"
     elif friction_pass_pct < _min_friction_pass:
         blocker_reason = "friction"
-    elif sharpe_hybrid < sharpe_baseline + _min_uplift:
+    elif cvar_95_hybrid > _max_cvar_95:
+        blocker_reason = "cvar_95"
+    elif growth_lcb_hybrid < growth_lcb_baseline + _min_growth_uplift:
+        blocker_reason = "growth_lcb"
+    elif sharpe_hac_hybrid < sharpe_hac_baseline + _min_uplift:
         blocker_reason = "uplift"
     else:
         gate_passed = True
@@ -1082,7 +1200,20 @@ def run_l2_awf(
         friction_pass_pct=friction_pass_pct,
         gate_passed=gate_passed,
         blocker_reason=blocker_reason,
+        allocation_policy="diagonal_kelly",
         psr_hybrid=psr_hybrid,
+        growth_lcb_hybrid=growth_lcb_hybrid,
+        growth_lcb_baseline=growth_lcb_baseline,
+        sharpe_hac_hybrid=sharpe_hac_hybrid,
+        sharpe_hac_baseline=sharpe_hac_baseline,
+        dsr_hybrid=dsr_hybrid,
+        cvar_95_hybrid=cvar_95_hybrid,
+        average_gross_exposure=avg_gross_exposure,
+        average_net_exposure=avg_net_exposure,
+        cap_saturation_ratio=cap_saturation_ratio,
+        total_cost_bps=total_cost_bps,
+        n_rebalances=sim.rebalance_count,
+        block_metrics=block_metrics,
     )
     fold_sharpes_h = [_sharpe(fr) for fr in sim.fold_rets_hybrid]
     awf_fold_diags = [
@@ -1107,10 +1238,57 @@ def run_l3_holdout(
     config: Layer2AllocationConfig,
     caps: PortfolioCaps,
     tf: str = "4h",
+    holdout_labels: tuple[str, str] | None = None,
     verbose: bool = True,
 ) -> Layer3Result:
     """Layer3 Holdout 최종 검증."""
     ho_start, ho_end = holdout_span
+    label_start, label_end = holdout_labels or (str(ho_start), str(ho_end))
+    if ho_end <= ho_start:
+        result = Layer3Result(
+            cagr=0.0,
+            mdd=0.0,
+            sharpe=0.0,
+            mar=0.0,
+            cagr_baseline=0.0,
+            mdd_baseline=0.0,
+            sharpe_baseline=0.0,
+            mar_baseline=0.0,
+            gate_passed=False,
+            blocker_reason="empty_holdout_window",
+        )
+        if verbose:
+            logger.info(
+                format_layer3_table(
+                    result,
+                    holdout_start=label_start,
+                    holdout_end=label_end,
+                )
+            )
+        return result
+    if not signal_batch.events:
+        result = Layer3Result(
+            cagr=0.0,
+            mdd=0.0,
+            sharpe=0.0,
+            mar=0.0,
+            cagr_baseline=0.0,
+            mdd_baseline=0.0,
+            sharpe_baseline=0.0,
+            mar_baseline=0.0,
+            gate_passed=False,
+            blocker_reason="no_holdout_signals",
+        )
+        if verbose:
+            logger.info(
+                format_layer3_table(
+                    result,
+                    holdout_start=label_start,
+                    holdout_end=label_end,
+                )
+            )
+        return result
+
     dummy_fold = WFFold(
         fit_start=0,
         fit_end=ho_start,
@@ -1137,10 +1315,31 @@ def run_l3_holdout(
     cagr_baseline = _cagr(sim.rets_baseline)
     mar = cagr / (mdd + 1e-9)
     mar_baseline = cagr_baseline / (mdd_baseline + 1e-9)
-
-    gate_passed: bool = bool(
-        (sharpe >= sharpe_baseline) and (mdd <= mdd_baseline)
+    metrics_finite = all(
+        np.isfinite(val)
+        for val in (
+            sharpe,
+            sharpe_baseline,
+            mdd,
+            mdd_baseline,
+            cagr,
+            cagr_baseline,
+        )
     )
+    blocker_reason = ""
+    gate_passed = False
+    if not sim.rets_hybrid or not sim.rets_baseline:
+        blocker_reason = "no_holdout_returns"
+    elif not metrics_finite:
+        blocker_reason = "non_finite"
+    elif cagr < 0.0:
+        blocker_reason = "cagr"
+    elif sharpe < sharpe_baseline:
+        blocker_reason = "sharpe_rel"
+    elif mdd > mdd_baseline:
+        blocker_reason = "mdd_rel"
+    else:
+        gate_passed = True
 
     result = Layer3Result(
         cagr=cagr,
@@ -1152,9 +1351,16 @@ def run_l3_holdout(
         sharpe_baseline=sharpe_baseline,
         mar_baseline=mar_baseline,
         gate_passed=gate_passed,
+        blocker_reason=blocker_reason,
     )
     if verbose:
-        logger.info(format_layer3_table(result, ho_start=str(ho_start), ho_end=str(ho_end)))
+        logger.info(
+            format_layer3_table(
+                result,
+                holdout_start=label_start,
+                holdout_end=label_end,
+            )
+        )
     return result
 
 
@@ -1180,6 +1386,7 @@ def run_tiered_pipeline(
     target_phase: str = "l3",
     l1_result_override: Layer1Result | None = None,
     verbose: bool = True,
+    override_dsr: float | None = None,
 ) -> tuple[Layer1Result, Layer2Result | None, Layer3Result | None]:
     """3-Layer 티어드 파이프라인 실행.
 
@@ -1297,6 +1504,7 @@ def run_tiered_pipeline(
         caps=caps,
         tf=tf,
         verbose=verbose,
+        override_dsr=override_dsr,
     )
     logger.debug("[perf-tiered] run_tiered_pipeline Layer 2 total took %.4fs", time.perf_counter() - t_l2)
 
@@ -1317,16 +1525,45 @@ def run_tiered_pipeline(
     if verbose:
         logger.info(format_layer_header(3, "Final Holdout & Deployment Readiness"))
     t_l3 = time.perf_counter()
-    ho_start_idx = _date_to_idx(aligned.datetimes, window.holdout_start)
-    ho_end_idx = _date_to_idx(aligned.datetimes, window.holdout_end)
-    l3_signal_batch = predict_layer1_signals(
-        artifact=l1.inference_artifact,
-        candidate_events=labeled_events,
-        aligned=aligned,
-        start_idx=ho_start_idx,
-        end_idx=ho_end_idx,
-        cfg=cfg,
-    )
+    try:
+        ho_start_idx, ho_end_idx = _resolve_holdout_span(
+            aligned.datetimes,
+            window.holdout_start,
+            window.holdout_end,
+        )
+    except Layer3WindowError:
+        l3 = Layer3Result(
+            cagr=0.0,
+            mdd=0.0,
+            sharpe=0.0,
+            mar=0.0,
+            cagr_baseline=0.0,
+            mdd_baseline=0.0,
+            sharpe_baseline=0.0,
+            mar_baseline=0.0,
+            gate_passed=False,
+            blocker_reason="empty_holdout_window",
+        )
+        if verbose:
+            logger.info(
+                format_layer3_table(
+                    l3,
+                    holdout_start=str(window.holdout_start),
+                    holdout_end=str(window.holdout_end),
+                )
+            )
+        return (l1, l2, l3)
+    try:
+        l3_signal_batch = predict_layer1_signals(
+            artifact=l1.inference_artifact,
+            candidate_events=labeled_events,
+            aligned=aligned,
+            start_idx=ho_start_idx,
+            end_idx=ho_end_idx,
+            cfg=cfg,
+        )
+    except Exception as exc:
+        raise Layer3ExecutionError("layer3_signal_prediction_failed") from exc
     l3 = _tw.run_l3_holdout(
         signal_batch=l3_signal_batch,
         aligned=aligned,
@@ -1334,6 +1571,7 @@ def run_tiered_pipeline(
         config=l2_config,
         caps=caps,
         tf=tf,
+        holdout_labels=(str(window.holdout_start), str(window.holdout_end)),
         verbose=verbose,
     )
     logger.debug("[perf-tiered] run_tiered_pipeline Layer 3 total took %.4fs", time.perf_counter() - t_l3)
