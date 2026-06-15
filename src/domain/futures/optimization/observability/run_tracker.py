@@ -138,16 +138,19 @@ def log_optuna_contract(
         },
         "storage_url": storage_url,
     }
+    
+    # Layer2 스타일 헤더의 연장선으로 심플하게 출력
+    _logger.info(f"   [OPTUNA] Storage: {storage_url}")
     _logger.info(
-        "[OPTUNA-CONTRACT] requested_trials_per_phase=%d total_planned_trials=%d phases=A1,A2,B",
-        int(requested_trials_per_phase),
-        planned_total,
+        f"   [PHASES] Total: {planned_total} "
+        f"(A1:{phase_trials['phase_a1']}, A2:{phase_trials['phase_a2']}, B:{phase_trials['phase_b']})"
     )
+    
     for phase_key in ("phase_a1", "phase_a2", "phase_b"):
         rationale = ""
         if phase_key == "phase_b" and int(normalized_workers.get(phase_key, 1)) == 1:
             rationale = " rationale=sqlite_complete_trial_race_prevention"
-        _logger.info(
+        _logger.debug(
             "[OPTUNA-CONTRACT] phase=%s sampler=%s pruner=%s workers=%d trials=%d%s",
             phase_key,
             sampler_by_phase[phase_key],
@@ -168,11 +171,14 @@ def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages
     """Set up Optuna storage via Redis JournalStorage."""
     del project_root
     storage_url = _resolve_redis_storage_url()
-    _logger.info("   [OPTUNA] Storage: %s", storage_url)
+    # _logger.info("   [OPTUNA] Storage: %s", storage_url)
     _preflight_redis_endpoint(storage_url)
-    storage: optuna.storages.BaseStorage = optuna.storages.JournalStorage(
-        optuna.storages.journal.JournalRedisBackend(storage_url)
-    )
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=FutureWarning, module="optuna.storages")
+        storage: optuna.storages.BaseStorage = optuna.storages.JournalStorage(
+            optuna.storages.journal.JournalRedisBackend(storage_url)
+        )
     return storage_url, storage
 
 
@@ -381,9 +387,12 @@ def optimize_worker(s_name: str, s_url: str, chunk_size: int) -> None:
     # Each process loads the study and runs its portion of trials
     inner_storage: optuna.storages.BaseStorage
     if s_url.startswith("redis://"):
-        inner_storage = optuna.storages.JournalStorage(
-            optuna.storages.JournalRedisStorage(s_url)
-        )
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning, module="optuna.storages")
+            inner_storage = optuna.storages.JournalStorage(
+                optuna.storages.journal.JournalRedisBackend(s_url)
+            )
     else:
         inner_storage = optuna.storages.RDBStorage(
             s_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}}
@@ -415,10 +424,7 @@ def optimize_worker(s_name: str, s_url: str, chunk_size: int) -> None:
             summary = build_compact_trial_summary(tr, elapsed_sec=elapsed)
             # Replace [TRIAL] prefix with [PRUNE] for easier grep
             prune_msg = summary.replace("[TRIAL]", "[PRUNE]", 1)
-            if tr.number < 5:
-                _logger.info("%s", prune_msg)
-            else:
-                _logger.debug("%s", prune_msg)
+            _logger.debug("%s", prune_msg)
 
     study.optimize(
         _objective_with_timeout,
@@ -847,9 +853,12 @@ def run_optimization_loop(
     def progress_poller(s_name: str, s_url: str, target: int, r_id: str | None) -> None:
         poller_storage: optuna.storages.BaseStorage
         if s_url.startswith("redis://"):
-            poller_storage = optuna.storages.JournalStorage(
-                optuna.storages.JournalRedisStorage(s_url)
-            )
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=FutureWarning, module="optuna.storages")
+                poller_storage = optuna.storages.JournalStorage(
+                    optuna.storages.journal.JournalRedisBackend(s_url)
+                )
         else:
             poller_storage = optuna.storages.RDBStorage(
                 s_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}}
