@@ -649,6 +649,8 @@ def project_all_caps(
     sigma_port: float,
     bars_per_year: float,
     caps: PortfolioCaps | None = None,
+    *,
+    support_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """5-cap 투영: gross, per_symbol, net, beta, vol_target.
 
@@ -671,6 +673,14 @@ def project_all_caps(
     n = int(out.size)
     if n == 0:
         return out
+    support = (
+        np.abs(out) > 1e-12
+        if support_mask is None
+        else np.asarray(support_mask, dtype=bool).ravel()
+    )
+    if support.size != n:
+        support = np.abs(out) > 1e-12
+    out = np.where(support, out, 0.0)
 
     beta_arr = np.asarray(btc_beta, dtype=np.float64).ravel()
     if beta_arr.size != n:
@@ -688,15 +698,25 @@ def project_all_caps(
         # per_symbol 재적용
         out = np.clip(out, -caps.per_symbol, caps.per_symbol)
 
-    # Cap 3: net cap (signed sum)
+    # Cap 3: net cap (signed sum) — 기존 support와 부호를 보존한 채 축소
     net = float(np.sum(out))
-    if abs(net) > caps.net + 1e-9:
-        # net 초과분을 비례 축소
+    if net > caps.net + 1e-9:
+        pos_mask = support & (out > 0.0)
+        pos_total = float(np.sum(out[pos_mask]))
+        excess = net - caps.net
+        if pos_total > 1e-12:
+            scale = max((pos_total - excess) / pos_total, 0.0)
+            out[pos_mask] = out[pos_mask] * scale
+        out = np.where(support, out, 0.0)
+        out = np.clip(out, -caps.per_symbol, caps.per_symbol)
+    elif net < -caps.net - 1e-9:
+        neg_mask = support & (out < 0.0)
+        neg_total = float(np.sum(np.abs(out[neg_mask])))
         excess = abs(net) - caps.net
-        if abs(net) > 1e-12:
-            correction = np.sign(net) * excess / n
-            out = out - correction
-        # per_symbol 재적용
+        if neg_total > 1e-12:
+            scale = max((neg_total - excess) / neg_total, 0.0)
+            out[neg_mask] = out[neg_mask] * scale
+        out = np.where(support, out, 0.0)
         out = np.clip(out, -caps.per_symbol, caps.per_symbol)
 
     # Cap 4: beta cap
@@ -705,15 +725,18 @@ def project_all_caps(
         # beta 초과분을 beta 방향으로 축소
         scale = caps.beta / abs(beta_exp)
         out = out * scale
+        out = np.where(support, out, 0.0)
 
     # Cap 5: vol target scaling
     ann_vol = float(sigma_port) * math.sqrt(max(float(bars_per_year), 1e-9))
     if ann_vol > 1e-12 and caps.target_ann_vol is not None and caps.target_ann_vol > 1e-12:
         vol_scale = caps.target_ann_vol / ann_vol
         out = out * min(vol_scale, 1.0)  # 축소만 허용 (확대 금지)
+        out = np.where(support, out, 0.0)
 
     # 최종 per_symbol 재확인
     out = np.clip(out, -caps.per_symbol, caps.per_symbol)
+    out = np.where(support, out, 0.0)
 
     return out
 
@@ -775,6 +798,7 @@ def diagonal_kelly_weights(
     no_trade_band: float,
     btc_beta: NDArray[np.float64] | None = None,
     bars_per_year: float = 2190.0,
+    support_mask: NDArray[np.bool_] | None = None,
 ) -> NDArray[np.float64]:
     """신규 아키텍처용 Diagonal Kelly 사이징.
 
@@ -821,16 +845,24 @@ def diagonal_kelly_weights(
         if btc_beta is None
         else np.asarray(btc_beta, dtype=np.float64).ravel()
     )
+    support = (
+        np.abs(mu) > 1e-12
+        if support_mask is None
+        else np.asarray(support_mask, dtype=bool).ravel()
+    )
+    if support.size != n:
+        support = np.abs(mu) > 1e-12
 
     # 1. Friction filter: |mu_bps| >= hurdle (long/short 모두 적용)
     friction_mask: NDArray[np.bool_] = np.abs(mu) >= hurdle
+    support = support & friction_mask
 
     # 2. Diagonal Kelly (mu를 per-bar return으로 변환: bps → fraction)
     mu_ret = mu * 1e-4  # bps → per-bar simple return
     sig_clipped = np.maximum(sig, float(VOL_FLOOR))
     var = sig_clipped**2
     w_raw: NDArray[np.float64] = kelly_fraction * mu_ret / var
-    w_raw = np.where(friction_mask, w_raw, 0.0)
+    w_raw = np.where(support, w_raw, 0.0)
 
     # 3. vol_target 스케일링: caps.target_ann_vol override (project_all_caps에 위임)
     import dataclasses
@@ -847,11 +879,12 @@ def diagonal_kelly_weights(
     sigma_port = float(np.sqrt(float(np.dot(w_clipped_est**2, var))))
 
     w_capped: NDArray[np.float64] = project_all_caps(
-        w_raw, beta, sigma_port, bars_per_year, effective_caps
+        w_raw, beta, sigma_port, bars_per_year, effective_caps, support_mask=support
     )
 
     # 4. No-trade band: |Δw_i| < no_trade_band → 이전 비중 유지
     delta = np.abs(w_capped - p_w)
     w_final: NDArray[np.float64] = np.where(delta >= no_trade_band, w_capped, p_w)
+    w_final = np.where(support, w_final, 0.0)
 
     return np.asarray(w_final, dtype=np.float64)
