@@ -280,46 +280,222 @@ def test_stack_oos_signals_layer1result_fields() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _make_l2result(**kwargs: Any) -> Layer2Result:
+    """Layer2Result 기본 PASS 상태 팩토리 (테스트용)."""
+    defaults: dict[str, Any] = {
+        "selected_last": frozenset(["BTC"]),
+        "weights_last": {"BTC": 0.1},
+        "sharpe_hybrid": 0.8,
+        "sharpe_baseline": 0.5,
+        "mdd_hybrid": 0.25,
+        "mdd_baseline": 0.40,
+        "cagr_hybrid": 0.30,
+        "cagr_baseline": 0.15,
+        "mar_hybrid": 1.2,
+        "mar_baseline": 0.5,
+        "fold_pass_ratio": 0.75,
+        "turnover": 0.05,
+        "friction_pass_pct": 0.8,
+        "gate_passed": True,
+        "blocker_reason": "",
+    }
+    defaults.update(kwargs)
+    return Layer2Result(**defaults)
+
+
 def test_layer2result_dataclass_creation() -> None:
-    """Layer2Result 직접 생성 및 필드 검증."""
+    """TI9: Layer2Result 신규 필드 포함 생성 및 기본 검증."""
     # Arrange / Act
-    r2 = Layer2Result(
-        selected_last=frozenset(["BTC"]),
-        weights_last={"BTC": 0.1},
-        sharpe_hybrid=1.5,
-        sharpe_baseline=1.0,
-        mdd_hybrid=0.08,
-        mdd_baseline=0.12,
-        turnover=0.05,
-        friction_pass_pct=0.8,
-        gate_passed=True,
-    )
+    r2 = _make_l2result()
 
     # Assert
     assert r2.gate_passed is True
+    assert r2.blocker_reason == ""
     assert "BTC" in r2.selected_last
-    assert r2.weights_last["BTC"] == pytest.approx(0.1)
-    assert r2.sharpe_hybrid == pytest.approx(1.5)
+    assert r2.sharpe_hybrid == pytest.approx(0.8)
+    assert r2.cagr_hybrid == pytest.approx(0.30)
+    assert r2.mar_hybrid == pytest.approx(1.2)
+    assert r2.fold_pass_ratio == pytest.approx(0.75)
     assert r2.mdd_hybrid < r2.mdd_baseline
 
 
-def test_layer2result_gate_blocked_when_sharpe_below_threshold() -> None:
-    """Layer2Result: sharpe_hybrid < sharpe_baseline * 1.20 → gate_passed=False 기대."""
+def test_layer2result_gate_blocked_with_blocker_reason() -> None:
+    """Layer2Result: gate_passed=False시 blocker_reason 기록 확인."""
     # Arrange / Act
-    r2 = Layer2Result(
-        selected_last=frozenset(["ETH"]),
-        weights_last={"ETH": 0.05},
-        sharpe_hybrid=0.9,
-        sharpe_baseline=1.0,
-        mdd_hybrid=0.10,
-        mdd_baseline=0.12,
-        turnover=0.03,
-        friction_pass_pct=0.6,
-        gate_passed=False,
-    )
+    r2 = _make_l2result(gate_passed=False, blocker_reason="cagr", cagr_hybrid=-0.05)
 
     # Assert
     assert r2.gate_passed is False
+    assert r2.blocker_reason == "cagr"
+
+
+# ---------------------------------------------------------------------------
+# S1~S9: L2 게이트 재설계 시나리오 (spec: layer2-gate-redesign.md)
+# ---------------------------------------------------------------------------
+
+def _evaluate_l2_gate(
+    *,
+    sharpe_hybrid: float,
+    sharpe_baseline: float,
+    mdd_hybrid: float,
+    mdd_baseline: float,
+    cagr_hybrid: float,
+    mar_hybrid: float,
+    fold_pass_ratio: float,
+    signal_total: int = 10,
+    friction_pass_pct: float = 0.5,
+    # config keys
+    l2_min_cagr: float = 0.0,
+    l2_min_mar: float = 0.5,
+    l2_min_sharpe_abs: float = 0.5,
+    l2_max_mdd_abs: float = 0.50,
+    l2_min_fold_pass_ratio: float = 0.60,
+    l2_min_sharpe_uplift: float = 0.20,
+) -> tuple[bool, str]:
+    """spec 게이트 로직 순수함수 (pipeline.py 로직 미러)."""
+    import math
+
+    deployment_ok = (
+        signal_total > 0
+        and friction_pass_pct > 0.0
+        and math.isfinite(sharpe_hybrid)
+        and math.isfinite(cagr_hybrid)
+    )
+    if not deployment_ok:
+        return False, "no_deployment"
+    if cagr_hybrid <= l2_min_cagr:
+        return False, "cagr"
+    if mar_hybrid < l2_min_mar:
+        return False, "mar"
+    if sharpe_hybrid < l2_min_sharpe_abs:
+        return False, "sharpe_abs"
+    if mdd_hybrid > mdd_baseline:
+        return False, "mdd_rel"
+    if mdd_hybrid > l2_max_mdd_abs:
+        return False, "mdd_abs"
+    if fold_pass_ratio < l2_min_fold_pass_ratio:
+        return False, "fold"
+    if sharpe_hybrid < sharpe_baseline + l2_min_sharpe_uplift:
+        return False, "uplift"
+    return True, ""
+
+
+class TestL2GateRedesign:
+    """S1~S9: layer2-gate-redesign.md 시나리오 검증."""
+
+    def test_s1_happy_path_all_conditions_pass(self) -> None:
+        """S1: 8조건 모두 충족 → gate=True, blocker=""."""
+        gate, reason = _evaluate_l2_gate(
+            sharpe_hybrid=0.9, sharpe_baseline=0.5,
+            mdd_hybrid=0.30, mdd_baseline=0.50,
+            cagr_hybrid=0.40, mar_hybrid=0.8,
+            fold_pass_ratio=0.75,
+        )
+        assert gate is True
+        assert reason == ""
+
+    def test_s2_sign_safety_negative_baseline_blocks_loss_strategy(self) -> None:
+        """S2 (D1 회귀가드): sharpe_h=-0.9, sharpe_base=-0.85 → 구식 곱셈식이면 통과, 신식 가산식은 FAIL."""
+        # 구식: -0.9 >= -0.85*1.20=-1.02 → 통과 (버그).
+        # 신식: cagr<0 먼저 차단.
+        gate, reason = _evaluate_l2_gate(
+            sharpe_hybrid=-0.9, sharpe_baseline=-0.85,
+            mdd_hybrid=0.30, mdd_baseline=0.50,
+            cagr_hybrid=-0.10, mar_hybrid=-0.3,
+            fold_pass_ratio=0.75,
+        )
+        assert gate is False
+        assert reason == "cagr"
+
+    def test_s3_absolute_cagr_fail_blocks_even_if_beats_baseline(self) -> None:
+        """S3: CAGR=-0.05 → 절대손실 → blocker=cagr."""
+        gate, reason = _evaluate_l2_gate(
+            sharpe_hybrid=0.9, sharpe_baseline=0.5,
+            mdd_hybrid=0.20, mdd_baseline=0.40,
+            cagr_hybrid=-0.05, mar_hybrid=-0.2,
+            fold_pass_ratio=0.75,
+        )
+        assert gate is False
+        assert reason == "cagr"
+
+    def test_s4_mar_fail(self) -> None:
+        """S4: CAGR=0.1, MDD=0.45 → MAR≈0.22<0.5 → blocker=mar."""
+        gate, reason = _evaluate_l2_gate(
+            sharpe_hybrid=0.9, sharpe_baseline=0.5,
+            mdd_hybrid=0.45, mdd_baseline=0.60,
+            cagr_hybrid=0.10, mar_hybrid=0.10 / (0.45 + 1e-9),
+            fold_pass_ratio=0.75,
+        )
+        assert gate is False
+        assert reason == "mar"
+
+    def test_s5_absolute_mdd_upper_bound(self) -> None:
+        """S5: mdd_h=0.55, mdd_base=0.67 (상대는 통과) → 절대상한 FAIL → blocker=mdd_abs."""
+        gate, reason = _evaluate_l2_gate(
+            sharpe_hybrid=0.9, sharpe_baseline=0.5,
+            mdd_hybrid=0.55, mdd_baseline=0.67,
+            cagr_hybrid=0.30, mar_hybrid=0.30 / (0.55 + 1e-9),
+            fold_pass_ratio=0.75,
+        )
+        assert gate is False
+        assert reason == "mdd_abs"
+
+    def test_s6_fold_consistency_fail(self) -> None:
+        """S6: fold 비율=0.25<0.60 → blocker=fold."""
+        gate, reason = _evaluate_l2_gate(
+            sharpe_hybrid=0.9, sharpe_baseline=0.5,
+            mdd_hybrid=0.25, mdd_baseline=0.40,
+            cagr_hybrid=0.30, mar_hybrid=1.2,
+            fold_pass_ratio=0.25,
+        )
+        assert gate is False
+        assert reason == "fold"
+
+    def test_s7_deployment_nan_blocked(self) -> None:
+        """S7: signal_total=0 → no_deployment, 나머지 미평가."""
+        gate, reason = _evaluate_l2_gate(
+            sharpe_hybrid=float("nan"), sharpe_baseline=0.5,
+            mdd_hybrid=0.20, mdd_baseline=0.40,
+            cagr_hybrid=float("nan"), mar_hybrid=float("nan"),
+            fold_pass_ratio=0.75,
+            signal_total=0, friction_pass_pct=0.0,
+        )
+        assert gate is False
+        assert reason == "no_deployment"
+
+    def test_s8_uplift_boundary_exact(self) -> None:
+        """S8: sharpe_h == sharpe_base+0.20 정확히 → uplift 경계 PASS."""
+        gate, reason = _evaluate_l2_gate(
+            sharpe_hybrid=0.70, sharpe_baseline=0.50,
+            mdd_hybrid=0.25, mdd_baseline=0.40,
+            cagr_hybrid=0.30, mar_hybrid=1.2,
+            fold_pass_ratio=0.75,
+        )
+        assert gate is True
+        assert reason == ""
+
+    def test_s8_uplift_just_below_boundary_fail(self) -> None:
+        """S8: sharpe_h = sharpe_base+0.19 → uplift FAIL."""
+        gate, reason = _evaluate_l2_gate(
+            sharpe_hybrid=0.69, sharpe_baseline=0.50,
+            mdd_hybrid=0.25, mdd_baseline=0.40,
+            cagr_hybrid=0.30, mar_hybrid=1.2,
+            fold_pass_ratio=0.75,
+        )
+        assert gate is False
+        assert reason == "uplift"
+
+    def test_s9_fold_compound_vs_sharpe_positive_distinction(self) -> None:
+        """S9: prod(1+r)>1 vs mean>0 판정 차이 — 변동성 드래그로 prod<1이나 mean>0 케이스."""
+        # 변동성 드래그(volatility drag): 평균수익>0이어도 prod(1+r) < 1 가능.
+        # 예: +10%, -10% 반복 → mean=0, prod=(1.1*0.9)^n = 0.99^n < 1.
+        import numpy as np
+        rets = [0.10, -0.10, 0.10, -0.10]  # mean=0, prod=(1.1*0.9)^2≈0.9801<1
+        prod_val = float(np.prod(1.0 + np.array(rets)))
+        mean_positive = float(np.mean(rets)) > 0  # mean=0, not >0
+
+        assert prod_val < 1.0  # 복리 기준 FAIL (변동성 드래그)
+        assert not mean_positive  # mean도 0 → fold 복리 기준이 더 엄격함을 확인
 
 
 # ---------------------------------------------------------------------------
