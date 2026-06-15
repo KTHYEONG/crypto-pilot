@@ -816,7 +816,7 @@ def _run_tiered_l2_study(
             sampler=TPESampler(
                 seed=seed,
                 multivariate=True,
-                n_startup_trials=min(n_trials, max(4 * len(L2_ALLOC_SPACE), 10)),
+                n_startup_trials=min(n_trials, max(2 * len(L2_ALLOC_SPACE), 8)),
                 constraints_func=layer2_constraints_from_trial,
             ),
             study_name=study_name,
