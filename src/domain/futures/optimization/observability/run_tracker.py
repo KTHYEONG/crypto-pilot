@@ -168,17 +168,10 @@ def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages
     """Set up Optuna storage via Redis JournalStorage."""
     del project_root
     storage_url = _resolve_redis_storage_url()
-    parsed = urlparse(storage_url)
-    _logger.info(
-        "[OPTUNA-STORAGE] scheme=%s host=%s port=%s db=%s",
-        parsed.scheme or "redis",
-        parsed.hostname or "127.0.0.1",
-        parsed.port or 6379,
-        (parsed.path or "/0").lstrip("/"),
-    )
+    _logger.info("   [OPTUNA] Storage: %s", storage_url)
     _preflight_redis_endpoint(storage_url)
     storage: optuna.storages.BaseStorage = optuna.storages.JournalStorage(
-        optuna.storages.JournalRedisStorage(storage_url)
+        optuna.storages.journal.JournalRedisBackend(storage_url)
     )
     return storage_url, storage
 
