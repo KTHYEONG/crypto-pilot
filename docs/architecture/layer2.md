@@ -30,7 +30,7 @@ dependencies:
     - docs/architecture/signal.md
     - docs/architecture/regime.md
     - docs/architecture/ML.md
-last_verified: 2026-06-14
+last_verified: 2026-06-15
 ---
 
 # 1. Purpose
@@ -174,17 +174,17 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 
 **Layer 2 — CS Rank + Diagonal Kelly AWF**
 - BTC-β neutralization: $\mu_{\text{neutral},i} = \mu_i - \beta_i \cdot \bar{\mu}_{\text{mkt}}$ (CS mean as proxy)
-- Rank selection: $\text{select}_i = (\text{rank}_i \leq K + \text{rank\_buffer})$ with hysteresis on `prev_selection`
-- **Net edge handoff**: `raw_mu = mean_incremental_bps` (cost-adjusted; NOT gross). Prevents systematic over-sizing.
-- Diagonal Kelly: $w_i \propto f_k \cdot \mu_i / \sigma_i^2$; friction mask: $|\mu_i| \geq \text{hurdle}_i$ (symmetric — supports long AND short)
-- Vol-target scaling: $w \leftarrow w \cdot (\sigma_{\text{target}} / \sigma_{\text{port}})$; caps: gross/per-symbol/net/beta
+- Rank selection: legacy `selection_mode="signed"` preserves historical top-K; Layer 2 uses `selection_mode="absolute"` so strong shorts rank symmetrically.
+- **Event-level net edge handoff**: `ValidatedSignalBatch -> Layer2SignalSchedule`, then per-bar `raw_mu = side * expected_net_bps / expected_holding_bars` so direction and holding horizon survive the handoff.
+- Diagonal Kelly: $w_i \propto f_k \cdot \mu_i / \sigma_i^2$; friction mask: $|\mu_i| \geq \text{hurdle}_i$; support mask prevents new non-zero support from being created by projection.
+- Vol-target scaling: $w \leftarrow w \cdot (\sigma_{\text{target}} / \sigma_{\text{port}})$; caps: gross/per-symbol/net/beta, then revalidate support-preserving projection.
 - No-trade band: $|\Delta w_i| < \text{band} \rightarrow w_i \leftarrow w_{\text{prev},i}$
-- **Taker cost deduction**: $r_t^{\text{net}} = w \cdot r_t^{\text{gross}} - \text{turnover}_t \times \bar{\delta} \times 10^{-4}$ (applied only on rebalance bars; $\bar{\delta}$ = mean hurdle bps)
-- **Time-based AWF Signal Matching**: AWF 시뮬레이션 시점 $t$가 속한 L1 Outer Fold를 탐색하여 해당 Fold의 동적 예측치를 적용 (인덱스 불일치로 인한 오매핑 차단).
-- **Numerical Stability & NaN Protection**: 거래비용 허들, 베타 계수 및 개별 바 수익률 연산 시 NaN/Inf 값을 감지하고 치환하여 수치 오염 전파를 완벽히 통제.
-- **AWF Window Constraint**: OOS folds restricted to $[\text{l2\_start\_idx},\ \text{holdout\_start\_idx})$. No overlap with L1 evidence or L3 holdout.
+- **Taker cost deduction**: `compute_rebalance_cost(previous_weights, target_weights, round_trip_cost_bps)` uses actual weight delta and applies cost only on rebalance bars.
+- **Causal signal schedule**: active events are resolved from `decision_idx` and `expected_holding_bars`; non-overlapping events never create synthetic positions for inactive bars.
+- **Numerical Stability & NaN Protection**: tradeable mask and funding rows fail open on malformed mocks; NaN/Inf values are zeroed before sizing and return accounting.
+- **AWF Window Constraint**: OOS folds are restricted to `[\text{l2\_start\_idx},\ \text{holdout\_start\_idx})`. No overlap with L1 evidence or L3 holdout.
 - **Gate** (8-condition sequential AND; first failure → `blocker_reason`):
-  - **Stage 0 (Deployment Sanity):** `signal_total > 0` AND `friction_pass_pct > 0` AND `isfinite(sharpe, cagr)` → `no_deployment`
+  - **Stage 0 (Deployment Sanity):** `signal_total > 0` AND `friction_pass_pct > 0` AND `support_leak_count == 0` AND `isfinite(sharpe, cagr)` → `no_deployment`
   - **Stage A (Absolute Compound Growth — PRIMARY):**
     1. $\text{CAGR}_{\text{hybrid}} > l2\_min\_cagr$ (default 0.0) — post-cost ∏$(1+r) > 1$. Non-negotiable.
     2. $\text{MAR}_{\text{hybrid}} \geq l2\_min\_mar$ (default 0.5) — CAGR/MDD compound efficiency.
@@ -241,6 +241,7 @@ graph TD
 - Phase D allocation 스킵 (`return None`); 예외 시 Phase D fallback 보존.
 - Phase flag 매핑: `--phase signal` → bridge(신호진단)+L1, `--phase alo` → +L2+L3, `full` → +최적화.
 - L1 table rendering uses `CS IC Mean`, `CS IC t-stat`, `CS Fold Pass%`, `Strategy Panel`, `Panel Diversity`, and `Decile Lift`; legacy `Pooled IC` fields are removed from the primary presentation.
+- L2 uses `ValidatedSignalBatch` directly; legacy symbol-level averaging is no longer the production contract.
 
 ## 6.5.1 Tiered Aligned Scope (Invariant)
 - `aligned_tiered` scope = **`Stage6 OOS selected ∩ data_stage.data_maps`** (bridge와 동일, `effective_trade_syms`).
