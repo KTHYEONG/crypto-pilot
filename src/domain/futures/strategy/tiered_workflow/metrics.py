@@ -60,20 +60,20 @@ def _mdd(rets: list[float]) -> float:
 
 
 def _cagr(rets: list[float], bars_per_year: float = _BARS_PER_YEAR) -> float:
-    """연율화 CAGR 계산.
+    """연율화 CAGR 계산 (복리).
 
     Args:
         rets: per-bar 수익률 리스트.
         bars_per_year: 연율화 팩터.
 
     Returns:
-        CAGR. 빈 리스트면 0.0, total loss(합산 pnl <= -1.0)면 -1.0.
+        CAGR. 빈 리스트면 0.0, total loss(복리곱 <= 0)면 -1.0.
     """
     if not rets:
         return 0.0
-    total_pnl = float(np.sum(np.asarray(rets, dtype=np.float64)))
-    n = len(rets)
-    base = 1.0 + total_pnl
+    arr = np.asarray(rets, dtype=np.float64)
+    n = len(arr)
+    base = float(np.prod(1.0 + arr))
     if base <= 0.0:
         return -1.0
     return float(base ** (bars_per_year / n) - 1.0)
