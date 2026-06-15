@@ -10,14 +10,18 @@ Covers:
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import optuna
 import pytest
+from optuna.trial import FrozenTrial
 
 from src.domain.futures.optimization.workflow import (
     TieredContext,
+    layer2_constraints_from_trial,
     objective_l1_ic,
+    objective_l2_growth,
     suggest_layered_params,
 )
 
@@ -129,3 +133,61 @@ def test_objective_l1_ic_does_not_call_sharpe() -> None:
 
     assert val == pytest.approx(0.04)
     mock_l2.assert_not_called()   # Sharpe 미참조 핵심 검증
+
+
+def test_objective_l2_growth_sets_constraint_attrs() -> None:
+    evaluation = SimpleNamespace(
+        objective_value=0.12,
+        constraint_values=(-1.0, -0.1, 0.0, -0.2, -0.3, 0.0, -0.05, -0.01, -1.0),
+        cagr_hybrid=0.25,
+        cagr_baseline=0.10,
+        growth_lcb_hybrid=0.12,
+        growth_lcb_baseline=0.03,
+        sharpe_hac_hybrid=1.1,
+        sharpe_hac_baseline=0.8,
+        psr_hybrid=0.9,
+        mdd_hybrid=0.08,
+        cvar_95_hybrid=0.02,
+        fold_pass_ratio=0.75,
+        break_even_pass_pct=0.8,
+        average_gross_exposure=0.4,
+        cap_saturation_ratio=0.0,
+        total_cost_bps=12.0,
+        block_metrics=(SimpleNamespace(log_growth_hybrid=0.02),),
+    )
+
+    with (
+        patch(
+            "src.domain.futures.optimization.workflow._resolve_l2_signal_batch_and_folds",
+            return_value=("signal_batch", (MagicMock(),)),
+        ),
+        patch(
+            "src.domain.futures.optimization.workflow.evaluate_l2_trial",
+            return_value=evaluation,
+        ),
+    ):
+        ctx = TieredContext(
+            labeled_events=MagicMock(),
+            aligned=MagicMock(),
+            cfg=MagicMock(),
+            window=MagicMock(),
+            caps=MagicMock(),
+            tf="4h",
+            fixed_l1_params={"signal_batch": object()},
+        )
+        study = optuna.create_study(direction="maximize")
+        trial = study.ask()
+
+        value = objective_l2_growth(trial, ctx)
+
+    assert value == pytest.approx(0.12)
+    assert trial.user_attrs["l2_constraint_values"] == list(evaluation.constraint_values)
+    assert trial.user_attrs["l2_block_log_growth_signature"] == [0.02]
+
+
+def test_layer2_constraints_from_trial_reads_saved_values() -> None:
+    trial = cast(FrozenTrial, SimpleNamespace(user_attrs={"l2_constraint_values": [0, -1, 2.5]}))
+
+    constraints = layer2_constraints_from_trial(trial)
+
+    assert constraints == (0.0, -1.0, 2.5)
