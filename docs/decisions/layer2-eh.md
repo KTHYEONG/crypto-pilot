@@ -7,6 +7,11 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-15 L2 Optuna 최적화 및 Tiered 파이프라인 연동
+- **Delta:** `opt_main_futures.py`에 Step A→B→C→D 흐름 구축(`_build_l2_signal_batch`, `_run_tiered_l2_study` 추가). `run_tiered_pipeline`에 `l1_result_override` 파라미터 추가하여 L1 재실행 방지. `L2_OPTUNA_TRIALS` 설정 추가.
+- **Rationale:** 기존에는 L2 최적화 파라미터가 파이프라인에 주입되지 않고 빈 딕셔너리로 고정되어 최적화 혜택을 받지 못함. L1 중복 피팅을 제거하고 L2에 특화된 Optuna Sharpe 최적화 및 holdout 검증까지의 엔드투엔드 파이프라인 완결성 확보.
+- **Edge Cases:** MagicMock 객체와의 호환성을 위해 `_to_utc_timestamp` 헬퍼 함수를 통해 Timestamp 변환 오류를 방지하고, L1 import 바인딩 충돌을 config 네임스페이스 접근으로 우회.
+
 ## 2026-06-15 L2 게이트 재보정 — 보수적 임계값 + PSR/Friction 게이트 + EW Bench baseline
 - **Delta:** 임계값 강화(CAGR 0→15%, Sharpe 0.5→1.0, MAR 0.5→1.0, MDD 50→20%). PSR≥0.90·Friction≥0.50 신규 게이트 배선(dead config 활성화). Baseline: valid-전체-EW→Top-K-EW. 음수MAR `n/a(loss)` 표기 가드.
 - **Rationale:** 기존 PASS는 느슨한 절대 게이트 + strawman baseline(EW-of-all=-81% CAGR)으로 상대 게이트 자동통과. PSR/Friction config가 opt_config.py에 선언만 되고 L2 로직 미배선 상태. 재보정 결과 BLOCKED(friction=34.5%<50%) — 신호 2/3 비용 허들 미달 노출.
