@@ -146,12 +146,12 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
   ────────────────────────────────────────────────────────────────────────────
 ● [LAYER 2 PORTFOLIO SCORECARD]
 ──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ❌ BLOCKED (active_blocks)
+  STATUS  : ❌ BLOCKED (dsr)
 
   ✅ [Return    ] CAGR: +26.9% (>=15.0%) | Sharpe: 1.688 (>=1.000) | MAR: 4.268 (>=1.000)
   ✅ [Risk      ] MDD: 6.3% (<=20.0% & <=baseline: 6.3%) | Turnover: 0.025
-  ❌ [Uplift    ] Sharpe Uplift: +0.00 (>=+0.20)
-  ❌ [Robustness] DSR: 0.218 (>=0.95) | PSR: 0.889 (>=0.90) | Fold Pass: 100.0% (>=60.0%)
+  ✅ [Uplift    ] Sharpe Uplift: +1.24 (>=+0.20)
+  ❌ [Robustness] DSR: 0.228 (>=0.75) | PSR: 0.889 (diag) | Fold Pass: 100.0% (>=60.0%)
 ──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
