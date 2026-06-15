@@ -183,21 +183,24 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 - **Causal signal schedule**: active events are resolved from `decision_idx` and `expected_holding_bars`; non-overlapping events never create synthetic positions for inactive bars.
 - **Numerical Stability & NaN Protection**: tradeable mask and funding rows fail open on malformed mocks; NaN/Inf values are zeroed before sizing and return accounting.
 - **AWF Window Constraint**: OOS folds are restricted to `[\text{l2\_start\_idx},\ \text{holdout\_start\_idx})`. No overlap with L1 evidence or L3 holdout.
-- **Gate** (8-condition sequential AND; first failure → `blocker_reason`):
+- **EW Bench baseline**: `w_base = 1/len(selected)` for Top-K selected symbols only — isolates Kelly sizing contribution. (Previously: all valid signals EW, which produced structurally negative baselines and invalidated relative gates.)
+- **Gate** (10-condition sequential AND; first failure → `blocker_reason`):
   - **Stage 0 (Deployment Sanity):** `signal_total > 0` AND `friction_pass_pct > 0` AND `support_leak_count == 0` AND `isfinite(sharpe, cagr)` → `no_deployment`
   - **Stage A (Absolute Compound Growth — PRIMARY):**
-    1. $\text{CAGR}_{\text{hybrid}} > l2\_min\_cagr$ (default 0.0) — post-cost ∏$(1+r) > 1$. Non-negotiable.
-    2. $\text{MAR}_{\text{hybrid}} \geq l2\_min\_mar$ (default 0.5) — CAGR/MDD compound efficiency.
-    3. $\text{Sharpe}_{\text{hybrid}} \geq l2\_min\_sharpe\_abs$ (default 0.5) — absolute floor.
+    1. $\text{CAGR}_{\text{hybrid}} \geq l2\_min\_cagr$ (default **0.15**) — post-cost compound growth ≥15%.
+    2. $\text{MAR}_{\text{hybrid}} \geq l2\_min\_mar$ (default **1.0**) — CAGR/MDD ≥ 1 (annual gain ≥ max drawdown).
+    3. $\text{Sharpe}_{\text{hybrid}} \geq l2\_min\_sharpe\_abs$ (default **1.0**) — institutional floor for leveraged crypto futures.
   - **Stage B (Risk Control):**
-    4. $\text{MDD}_{\text{hybrid}} \leq \text{MDD}_{1/N}$ — relative risk guard.
-    5. $\text{MDD}_{\text{hybrid}} \leq l2\_max\_mdd\_abs$ (default 0.50) — absolute cap.
+    4. $\text{MDD}_{\text{hybrid}} \leq \text{MDD}_{\text{EW Bench}}$ — relative risk guard vs EW Bench.
+    5. $\text{MDD}_{\text{hybrid}} \leq l2\_max\_mdd\_abs$ (default **0.20**) — absolute cap (50% DD requires +100% recovery; 20% cap enforced).
   - **Stage C (Robustness / Anti-overfit):**
     6. $\text{fold\_pass\_ratio} \geq l2\_min\_fold\_pass\_ratio$ (default 0.60); pass = $\prod(1+r_{\text{fold}}) > 1.0$ (compound, not Sharpe-positive).
+    7. $\text{PSR} \geq l2\_min\_psr$ (default **0.90**) — Probabilistic Sharpe Ratio (Bailey & López de Prado, 2012): $\text{PSR} = \Phi\!\left(\frac{(\widehat{SR} - SR^*)\sqrt{n-1}}{\sqrt{1 - \gamma_3\widehat{SR} + \frac{\gamma_4-1}{4}\widehat{SR}^2}}\right)$, where $\gamma_3$=skew, $\gamma_4$=non-excess kurtosis. Guards against lucky Sharpe due to skewness/fat tails.
+    8. $\text{friction\_pass\_pct} \geq l2\_min\_friction\_pass$ (default **0.50**) — ≥50% of signals must cover their own transaction cost hurdle. Prevents concentration in few high-edge signals.
   - **Stage D (Relative Advantage — SECONDARY, sign-safe additive):**
-    7. $\text{Sharpe}_{\text{hybrid}} \geq \text{Sharpe}_{1/N} + l2\_min\_sharpe\_uplift$ (default 0.20). Additive replaces multiplicative ×1.20 (sign-reversal bug when baseline < 0).
-  - All thresholds configurable via `l2_params` keys; default values are conservative principle values — do NOT tune to pass a specific backtest.
-  - `friction_pass_pct` is diagnostic only (not a gate condition beyond Stage 0 sanity).
+    9. $\text{Sharpe}_{\text{hybrid}} \geq \text{Sharpe}_{\text{EW Bench}} + l2\_min\_sharpe\_uplift$ (default 0.20). Additive form prevents sign-reversal when baseline Sharpe < 0.
+  - All thresholds configurable via `l2_params` keys; default values are crypto-futures conservative floors — do NOT tune to pass a specific backtest.
+  - **MAR display guard**: `cagr < 0` → shown as `n/a(loss)` (MAR is non-monotone when CAGR < 0).
 
 **Layer 3 — Frozen Holdout**
 - Single WFFold covering `[ho_start, ho_end)`, frozen L2 params.
