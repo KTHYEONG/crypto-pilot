@@ -184,22 +184,25 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 - **Causal signal schedule**: active events are resolved from `decision_idx` and `expected_holding_bars`; non-overlapping events never create synthetic positions for inactive bars.
 - **Numerical Stability & NaN Protection**: tradeable mask and funding rows fail open on malformed mocks; NaN/Inf values are zeroed before sizing and return accounting.
 - **AWF Window Constraint**: OOS folds are restricted to `[\text{l2\_start\_idx},\ \text{holdout\_start\_idx})`. No overlap with L1 evidence or L3 holdout.
-- **EW Bench baseline**: `w_base = 1/len(selected)` for Top-K selected symbols only — isolates Kelly sizing contribution. (Previously: all valid signals EW, which produced structurally negative baselines and invalidated relative gates.)
-- **Gate** (10-condition sequential AND; first failure → `blocker_reason`):
+- **Dual Baseline Design**:
+  - **MDD 상대 게이트**: `build_directional_risk_matched_equal_weight` (sigma-match 적용, risk-matched inverse-vol) — risk exposure 동일 조건에서 MDD 비교.
+  - **Uplift 게이트 & Sharpe 표시**: `build_directional_equal_weight_baseline` (순수 1/N EW, sigma-match 미적용) — "Kelly 할당이 naive 분산투자 대비 실가치를 추가하는가"를 정직하게 측정. risk-matched는 대각 공분산에서 diagonal-Kelly와 수학적으로 동일해 uplift를 구조적으로 0으로 만드는 self-defeat 문제를 해소.
+- **Gate** (9-condition sequential AND; first failure → `blocker_reason`):
   - **Stage 0 (Deployment Sanity):** `signal_total > 0` AND `friction_pass_pct > 0` AND `support_leak_count == 0` AND `isfinite(sharpe, cagr)` → `no_deployment`
   - **Stage A (Absolute Compound Growth — PRIMARY):**
     1. $\text{CAGR}_{\text{hybrid}} \geq l2\_min\_cagr$ (default **0.15**) — post-cost compound growth ≥15%.
     2. $\text{MAR}_{\text{hybrid}} \geq l2\_min\_mar$ (default **1.0**) — CAGR/MDD ≥ 1 (annual gain ≥ max drawdown).
     3. $\text{Sharpe}_{\text{hybrid}} \geq l2\_min\_sharpe\_abs$ (default **1.0**) — institutional floor for leveraged crypto futures.
   - **Stage B (Risk Control):**
-    4. $\text{MDD}_{\text{hybrid}} \leq \text{MDD}_{\text{EW Bench}}$ — relative risk guard vs EW Bench.
+    4. $\text{MDD}_{\text{hybrid}} \leq \text{MDD}_{\text{risk-matched EW}}$ — relative risk guard vs risk-matched EW (MDD 전용).
     5. $\text{MDD}_{\text{hybrid}} \leq l2\_max\_mdd\_abs$ (default **0.20**) — absolute cap (50% DD requires +100% recovery; 20% cap enforced).
   - **Stage C (Robustness / Anti-overfit):**
     6. $\text{fold\_pass\_ratio} \geq l2\_min\_fold\_pass\_ratio$ (default 0.60); pass = $\prod(1+r_{\text{fold}}) > 1.0$ (compound, not Sharpe-positive).
-    7. $\text{PSR} \geq l2\_min\_psr$ (default **0.90**) — Probabilistic Sharpe Ratio (Bailey & López de Prado, 2012): $\text{PSR} = \Phi\!\left(\frac{(\widehat{SR} - SR^*)\sqrt{n-1}}{\sqrt{1 - \gamma_3\widehat{SR} + \frac{\gamma_4-1}{4}\widehat{SR}^2}}\right)$, where $\gamma_3$=skew, $\gamma_4$=non-excess kurtosis. Guards against lucky Sharpe due to skewness/fat tails.
-    8. $\text{friction\_pass\_pct} \geq l2\_min\_friction\_pass$ (default **0.50**) — ≥50% of signals must cover their own transaction cost hurdle. Prevents concentration in few high-edge signals.
+    7. `active_blocks >= l2_min_active_blocks` (default **3**) — AWF fold 단위로 계산; `len([m for m in block_metrics if m.active_rebalances > 0])`. (Optuna 제약과 최종 게이트 동일 정의.)
+    8. $\text{DSR} \geq l2\_min\_dsr$ (default **0.75**) — Deflated Sharpe Ratio (Bailey & López de Prado, 2012): trial-pool 선택편향을 보정한 후 SR > 0 확률. PSR을 포섭(이중 차감 제거). **PSR은 진단 전용** (게이트에서 제거됨).
+    9. $\text{friction\_pass\_pct} \geq l2\_min\_friction\_pass$ (default **0.50**) — ≥50% of signals must cover their own transaction cost hurdle.
   - **Stage D (Relative Advantage — SECONDARY, sign-safe additive):**
-    9. $\text{Sharpe}_{\text{hybrid}} \geq \text{Sharpe}_{\text{EW Bench}} + l2\_min\_sharpe\_uplift$ (default 0.20). Additive form prevents sign-reversal when baseline Sharpe < 0.
+    10. $\text{Sharpe}_{\text{hybrid}} \geq \text{Sharpe}_{\text{pure 1/N EW}} + l2\_min\_sharpe\_uplift$ (default 0.20). **Baseline = 순수 1/N EW** (sigma-match 제거; risk-matched는 MDD 게이트 전용). Additive form prevents sign-reversal when baseline Sharpe < 0.
   - All thresholds configurable via `l2_params` keys; default values are crypto-futures conservative floors — do NOT tune to pass a specific backtest.
   - **MAR display guard**: `cagr < 0` → shown as `n/a(loss)` (MAR is non-monotone when CAGR < 0).
 
@@ -211,7 +214,7 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 
 **Decoupled Optuna**
 - `L1_ALPHA_SPACE` → `objective_l1_ic` (IC only; Sharpe not referenced)
-- `L2_ALLOC_SPACE` → `objective_l2_growth` (보수적 기대 복리성장 LCB 최대화; 제약 조건은 TPESampler의 `constraints_func`로 전달)
+- `L2_ALLOC_SPACE` → `objective_l2_growth` (보수적 기대 복리성장 LCB 최대화; 제약 조건은 TPESampler의 `constraints_func`로 전달). **10개 제약**: deployment/mdd/sharpe_abs/fold/friction/support_leak/growth_lcb/cvar/active_blocks/**uplift**. uplift 제약 추가로 Optuna 탐색이 최종 게이트 방향으로 수렴. `n_startup_trials = max(2·|param_space|, 8)` (≈10; 이전 40% 랜덤 구간 축소).
 - **DSR-Corrected Selection & Replay**: [selection.py](file:///src/domain/futures/strategy/tiered_workflow/selection.py)에서 완료 trial들의 block signature로 `n_trials_eff`를 연산하고, 최종 챔피언에 대해 DSR 검증(DSR >= min_dsr, Bailey & López de Prado (2012) 기반 per-bar 스케일 교정 수식 적용) 및 결정적 일치 검증(cagr/mdd/growth_lcb)을 강제함.
 - Short-circuit: L1 BLOCKED → L2/L3 = None (skip)
 
