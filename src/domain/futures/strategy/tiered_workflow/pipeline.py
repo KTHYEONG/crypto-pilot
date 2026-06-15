@@ -25,6 +25,7 @@ from src.domain.futures.strategy.candidate_contracts import (
     Layer1FoldReadiness,
     Layer1InferenceArtifact,
     QualifiedSignalRegistry,
+    ValidatedSignalBatch,
 )
 from src.domain.futures.strategy.cs_rank import SymbolSignal
 from src.domain.futures.strategy.tiered_logging import (
@@ -668,6 +669,32 @@ def run_l1_swf(
     return result
 
 
+def _opportunities_to_symbol_signals(opportunities: ValidatedSignalBatch) -> dict[str, SymbolSignal]:
+    from collections import defaultdict
+
+    from src.domain.futures.strategy.cs_rank import VOL_FLOOR, SymbolSignal
+    
+    sym_events = defaultdict(list)
+    for event in opportunities.events:
+        sym_events[event.symbol].append(event)
+        
+    adapted: dict[str, SymbolSignal] = {}
+    for sym, evs in sym_events.items():
+        mus = [float(e.expected_gross_bps * e.side) for e in evs if np.isfinite(e.expected_gross_bps)]
+        avg_mu = float(np.mean(mus)) if mus else 0.0
+        qw = float(np.mean([e.quality_weight for e in evs])) if evs else 1.0
+        adapted[sym] = SymbolSignal(
+            raw_mu=avg_mu,
+            volatility=VOL_FLOOR,
+            n_obs=len(evs),
+            t_stat=0.0,
+            valid=True,
+            beta_btc=None,
+            quality_weight=qw,
+        )
+    return adapted
+
+
 def run_l1_nested_swf(
     *,
     labeled_events: pd.DataFrame,
@@ -700,6 +727,7 @@ def run_l1_nested_swf(
     )
     outer_reports: list[Layer1FoldReadiness] = []
     outer_event_frames: list[pd.DataFrame] = []
+    signals_per_fold: list[dict[str, SymbolSignal]] = []
     trained_count = 0
     import src.domain.futures.strategy.tiered_workflow as _tw
 
@@ -845,6 +873,8 @@ def run_l1_nested_swf(
             predictions=prediction_batch,
             registry=registry,
         )
+        fold_sigs = _opportunities_to_symbol_signals(opportunities)
+        signals_per_fold.append(fold_sigs)
         outer_reports.append(
             evaluate_outer_signal_opportunities(
                 opportunities=opportunities,
@@ -906,7 +936,7 @@ def run_l1_nested_swf(
         )
         logger.info(format_layer1_deployment_registry_table(deployment_registry))
     return Layer1Result(
-        signals_per_fold=(),
+        signals_per_fold=tuple(signals_per_fold),
         oos_stacked=oos_stacked,
         pooled_ic=0.0,
         pooled_tstat=0.0,
@@ -933,6 +963,8 @@ def run_l2_awf(
     l2_params: dict[str, Any],
     caps: PortfolioCaps,
     tf: str = "4h",
+    signals_per_fold: tuple[dict[str, SymbolSignal], ...] | None = None,
+    l1_outer_folds: tuple[WFFold, ...] | None = None,
 ) -> Layer2Result:
     """Layer2 AWF 포트폴리오 시뮬레이션."""
     sim = _run_awf_simulation(
@@ -942,6 +974,8 @@ def run_l2_awf(
         l2_params=l2_params,
         caps=caps,
         tf=tf,
+        signals_per_fold=signals_per_fold,
+        l1_outer_folds=l1_outer_folds,
     )
     symbols = aligned.symbols
     sym_to_idx = {s: i for i, s in enumerate(symbols)}
@@ -1206,6 +1240,8 @@ def run_tiered_pipeline(
         l2_params=l2_params,
         caps=caps,
         tf=tf,
+        signals_per_fold=l1.signals_per_fold,
+        l1_outer_folds=outer_folds,
     )
     logger.debug("[perf-tiered] run_tiered_pipeline Layer 2 total took %.4fs", time.perf_counter() - t_l2)
 
