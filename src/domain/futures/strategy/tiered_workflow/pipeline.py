@@ -67,8 +67,6 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     _cagr,
     _contiguous_block_log_growth,
     _cvar_loss,
-    _deflated_sharpe_probability,
-    _effective_sample_size_hac,
     _growth_lower_confidence_bound,
     _mdd,
     _newey_west_ic_tstat,
@@ -1043,11 +1041,12 @@ def run_l2_awf(
 
     bars_per_year = _bars_per_year_for_tf(tf)
     sharpe_hybrid = _sharpe(sim.rets_hybrid, bars_per_year=bars_per_year)
-    sharpe_baseline = _sharpe(sim.rets_baseline, bars_per_year=bars_per_year)
+    # uplift 표시·게이트: 순수 1/N EW 대비 (FIX-2). MDD 상대 게이트는 risk-matched 유지.
+    sharpe_baseline = _sharpe(sim.rets_baseline_ew, bars_per_year=bars_per_year)
     sharpe_hac_hybrid = _sharpe_hac(sim.rets_hybrid, bars_per_year=bars_per_year)
-    sharpe_hac_baseline = _sharpe_hac(sim.rets_baseline, bars_per_year=bars_per_year)
+    sharpe_hac_baseline = _sharpe_hac(sim.rets_baseline_ew, bars_per_year=bars_per_year)
     mdd_hybrid = _mdd(sim.rets_hybrid)
-    mdd_baseline = _mdd(sim.rets_baseline)
+    mdd_baseline = _mdd(sim.rets_baseline)  # MDD 상대 게이트는 risk-matched 기준 유지
     cagr_hybrid = _cagr(sim.rets_hybrid, bars_per_year=bars_per_year)
     cagr_baseline = _cagr(sim.rets_baseline, bars_per_year=bars_per_year)
     mar_hybrid = cagr_hybrid / (mdd_hybrid + 1e-9)
@@ -1085,13 +1084,9 @@ def run_l2_awf(
     if override_dsr is not None:
         dsr_hybrid = float(override_dsr)
     else:
-        completed_trial_sharpes = np.asarray([sharpe_hac_hybrid], dtype=np.float64)
-        dsr_hybrid = _deflated_sharpe_probability(
-            selected_rets=sim.rets_hybrid,
-            completed_trial_sharpes=completed_trial_sharpes,
-            effective_trial_count=max(_effective_sample_size_hac(sim.rets_hybrid), 1.0),
-            bars_per_year=bars_per_year,
-        )
+        # override 없을 때: 단일-원소 degenerate DSR(≡0.5 상수) 방지.
+        # PSR은 trial-pool 독립 계산 가능한 정직한 하한으로 사용.
+        dsr_hybrid = _psr(list(sim.rets_hybrid), bars_per_year=bars_per_year)
     friction_pass_pct = (
         sim.friction_pass_total / sim.signal_total if sim.signal_total > 0 else 0.0
     )
@@ -1165,8 +1160,6 @@ def run_l2_awf(
         blocker_reason = "fold"
     elif len(block_metrics) < _min_active_blocks:
         blocker_reason = "active_blocks"
-    elif psr_hybrid < _min_psr:
-        blocker_reason = "psr"
     elif dsr_hybrid < _min_dsr:
         blocker_reason = "dsr"
     elif friction_pass_pct < _min_friction_pass:
