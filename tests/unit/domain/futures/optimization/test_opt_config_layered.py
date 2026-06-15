@@ -158,3 +158,42 @@ def test_get_layered_window_frozen() -> None:
 
     with pytest.raises((dataclasses.FrozenInstanceError, AttributeError)):
         w.fetch_start = datetime.date(2020, 1, 1)  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# S6 — L2_ALLOC_SPACE 재배선 (spec: layer2-signal-utilization.md §2.3)
+# ---------------------------------------------------------------------------
+
+from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE
+
+
+def test_l2_alloc_space_contains_new_params() -> None:
+    """S6: L2_ALLOC_SPACE에 kelly_fraction, friction_safety_mult, vol_target 포함."""
+    assert "kelly_fraction" in L2_ALLOC_SPACE
+    assert "friction_safety_mult" in L2_ALLOC_SPACE
+    assert "vol_target" in L2_ALLOC_SPACE
+
+
+def test_l2_alloc_space_excludes_dead_params() -> None:
+    """S6: RISK_PER_TRADE, MAX_EXPOSURE_PER_COIN, NORM_VAR_CONSTANT 제거됨."""
+    assert "RISK_PER_TRADE" not in L2_ALLOC_SPACE
+    assert "MAX_EXPOSURE_PER_COIN" not in L2_ALLOC_SPACE
+    assert "NORM_VAR_CONSTANT" not in L2_ALLOC_SPACE
+
+
+def test_l2_alloc_space_friction_safety_mult_range() -> None:
+    """S6: friction_safety_mult ∈ [0.5, 2.0] 범위 검증."""
+    spec = L2_ALLOC_SPACE["friction_safety_mult"]
+
+    assert spec["type"] == "float"
+    assert spec["low"] == pytest.approx(0.5)
+    assert spec["high"] == pytest.approx(2.0)
+
+
+def test_l2_alloc_space_kelly_fraction_range() -> None:
+    """S6: kelly_fraction ∈ [0.10, 1.0]."""
+    spec = L2_ALLOC_SPACE["kelly_fraction"]
+
+    assert spec["type"] == "float"
+    assert spec["low"] == pytest.approx(0.10)
+    assert spec["high"] == pytest.approx(1.0)
