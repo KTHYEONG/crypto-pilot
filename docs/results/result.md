@@ -137,49 +137,29 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 
 >> LAYER 1 RESULT: [PASS] -> Target phase L1 reached. Stopping pipeline.
 
-
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ● [LAYER 2: PORTFOLIO ALLOCATION & RISK OPTIMIZATION]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ● [HYPERPARAMETER OPTIMIZATION]
-    - Study Name : tiered_l2_sharpe_4h_2024-10-01_2025-10-01
+    - Study Name : l2_study_4h_fc72f8e5e9ac
     - Config     : 50 trials
   ────────────────────────────────────────────────────────────────────────────
-   [OPTUNA] Storage: redis://127.0.0.1:6379/0
-[L2-OPT] Progress: 50/50 trials | Best CAGR: 24.75% | Current Trial PnL: BLOCKED
+[L2-SELECTION] DSR 컷오프(>=0.950) 만족 후보 없음 -> dsr 차단 처리
 [TIERED] L1 override 사용 — L1 재실행 스킵
-● [AWF PORTFOLIO PERFORMANCE SCORECARD]
+● [LAYER 2 PORTFOLIO SCORECARD]
 ──────────────────────────────────────────────────────────────────────────────
+  STATUS  : ❌ BLOCKED (active_blocks)
 
-  [ RETURN & EFFICIENCY ]
-  ──────────────────────────────────────────────────────────────────────────
-  Metric                   Strategy    ( EW Bench )            Gate   Status
-  ──────────────────────────────────────────────────────────────────────────
-  CAGR                 [   +24.8% ] (     +39.9% )        >= 15.0%       ✅
-  Sharpe               [    2.578 ] (      1.247 )         >= 1.00       ✅
-  MAR (CAGR/MDD)       [    5.835 ] (      2.027 )         >= 1.00       ✅
-
-  [ RISK & UPLIFT ]
-  ──────────────────────────────────────────────────────────────────────────
-  MDD                  [     4.2% ] (      19.7% )        <= 20.0%       ✅
-  Sharpe Uplift        [    +1.33 ] (       Base )    >= Base+0.20       ✅
-  Turnover / Rebal     [    0.030 ] (          — )               —       —
-
-  [ ROBUSTNESS & DIAGNOSTICS ]
-  ──────────────────────────────────────────────────────────────────────────
-  Fold Pass Ratio      [    66.7% ] (          — )        >= 60.0%       ✅
-  PSR (Anti-Overfit)   [    0.976 ] (          — )         >= 0.90       ✅
-  Friction Pass%       [   100.0% ] (          — )        >= 50.0%       ✅
-  ──────────────────────────────────────────────────────────────────────────
-
-  >> FINAL RESULT : PASS 
+  ✅ [Return    ] CAGR: +26.9% | Sharpe: 1.688 | MAR: 4.268
+  ✅ [Risk      ] MDD: 6.3% | Turnover: 0.025
+  ❌ [Uplift    ] Sharpe Uplift: +0.00 (Target: >= +0.20)
+  ❌ [Robustness] PSR: 0.889 (Target: >= 0.90) | Fold Pass: 100.0%
+──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ❌ Sharpe: -1.367 | MDD:    4.2% | Status: FAIL
-  ├─ Fold #2 : ✅ Sharpe:  1.772 | MDD:    2.2% | Status: PASS
-  └─ Fold #3 : ✅ Sharpe:  6.236 | MDD:    1.4% | Status: PASS
-
->> LAYER 2 RESULT: [PASS] -> Proceeding to Final Holdout.
->> TARGET PHASE l2 REACHED -> Stopping pipeline.
-[PHASE] phase=l2 completed strategy/candidate evaluation only; optimization/training skipped
+  ├─ Fold #1 : ✅ Sharpe:  0.817 | MDD:    4.9% | Status: PASS
+  ├─ Fold #2 : ✅ Sharpe:  1.093 | MDD:    5.3% | Status: PASS
+  └─ Fold #3 : ✅ Sharpe:  2.853 | MDD:    6.3% | Status: PASS
+>> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False
+!! FAIL: exit_code=1 reason=layer2_blocked

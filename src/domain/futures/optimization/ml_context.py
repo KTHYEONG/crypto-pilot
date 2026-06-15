@@ -976,7 +976,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     _as_nz2_slice = (
                         float(np.mean(_as_nz2_slice_list)) if _as_nz2_slice_list else 0.0
                     )
-                    _logger.info(
+                    _logger.debug(
                         "[ALPHA-ALIGN] leg=%d range=[%d,%d) bars=%d "
                         "full_long_nz=%.3f full_short_nz=%.3f "
                         "leg_long_nz=%.3f leg_short_nz=%.3f",

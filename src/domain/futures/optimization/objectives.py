@@ -388,7 +388,7 @@ def _run_portfolio_numba_block(
                     sym_block = entry_block_2d[:, s_idx] > 0.0
                     if not np.any(sym_block):
                         continue
-                    _logger.info(
+                    _logger.debug(
                         "[MEMBERSHIP-MASK] symbol=%s active_ratio=%.4f warm_ratio=%.4f "
                         "forced_exit_count=%d blocked_entry_count=%d",
                         str(symbol),
@@ -409,7 +409,7 @@ def _run_portfolio_numba_block(
             trial_number is None
         )
         if should_log_weight:
-            _logger.info(
+            _logger.debug(
                 " [WEIGHT-STAGE-DIAG] trial=%s %s",
                 trial_number if trial_number is not None else "replay",
                 _weight_stage_diag(
@@ -644,7 +644,7 @@ def _evaluate_awf_phase_d_aggregate(
                 if isinstance(_path_diag_leg, dict)
                 else 0.0
             )
-            _logger.info(
+            _logger.debug(
                 "[STRAT-PATH] trial=%d leg=%d range=(%d,%d) bars=%d"
                 " alpha_nz=%.4f merge_nz=%.4f trades=%d long=%d short=%d",
                 _trial_num_leg,
@@ -698,7 +698,7 @@ def _evaluate_awf_phase_d_aggregate(
                 if (leg_idx == 0 and log_ret < -0.1 and trial is not None)
                 else ""
             )
-            _logger.info(
+            _logger.debug(
                 "[LEG] trial=%d leg=%d log_ret=%.3f mdd=%.1f%%%s",
                 _trial_num_leg,
                 leg_idx,

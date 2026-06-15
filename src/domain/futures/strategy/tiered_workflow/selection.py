@@ -170,7 +170,6 @@ def select_layer2_champion(
 
     # 5. DSR 컷 오프에 모두 막힌 경우
     if champion_trial is None:
-        _logger.warning("[L2-SELECTION] DSR 컷오프(>=%.3f) 만족 후보 없음 -> dsr 차단 처리", min_dsr)
         fallback_trial = feasible_sorted[0]
         fallback_config = Layer2AllocationConfig.from_mapping(dict(fallback_trial.params))
         fallback_eval = evaluate_l2_trial(
