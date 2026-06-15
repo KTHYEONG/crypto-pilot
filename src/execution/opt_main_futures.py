@@ -590,18 +590,10 @@ def _run_data_stage(
     )
     _logger.debug("[perf-data] evaluate_data_readiness took %.4fs", time.perf_counter() - t_ready)
     report_df = readiness.report
-    fail_reasons: dict[str, int] = {}
     if isinstance(report_df, pd.DataFrame) and not report_df.empty and "pass" in report_df.columns:
         fail_df = report_df.loc[~report_df["pass"].astype(bool)]
         if not fail_df.empty and "reason" in fail_df.columns:
-            fail_reasons = {
-                str(k): int(v)
-                for k, v in fail_df["reason"].value_counts(dropna=False).to_dict().items()
-            }
-    # We can infer audit metrics from the readiness report
-    req_count = len(load_symbols)
-    actual_load = len(valid_symbols)
-    coverage = actual_load / req_count if req_count > 0 else 0.0
+            _logger.debug("[data-readiness] fail reasons: %s", fail_df["reason"].value_counts().to_dict())
 
     valid_symbols = list(readiness.kept_symbols)
     if not valid_symbols:
@@ -688,6 +680,130 @@ def _tiered_labeled_events(output: CandidatePipelineOutput | None) -> pd.DataFra
     if not isinstance(labeled, pd.DataFrame):
         raise ValueError("tiered requires unfiltered labeled events")
     return labeled
+
+
+def _build_l2_signal_batch(
+    l1_res: Any,
+    labeled_events: pd.DataFrame,
+    aligned: Any,
+    cfg: Any,
+    window: Any,
+) -> Any:
+    """L1 artifact로 L2 window 신호 예측.
+
+    Args:
+        l1_res: Layer1Result (gate_passed=True, inference_artifact 필수).
+        labeled_events: 전체 labeled event DataFrame.
+        aligned: AlignedMarketData.
+        cfg: CandidateStrategyConfig.
+        window: LayeredWindow.
+
+    Returns:
+        ValidatedSignalBatch for the L2 window [l2_start, holdout_start).
+
+    Raises:
+        ValueError: l1_res.inference_artifact가 None인 경우.
+    """
+    from src.domain.futures.strategy.tiered_workflow import predict_layer1_signals
+
+    artifact = getattr(l1_res, "inference_artifact", None)
+    if artifact is None:
+        raise ValueError("L1 artifact 없음 — l1_result.inference_artifact is None (L1 gate_passed=False 상태)")
+
+    datetimes = aligned.datetimes
+    l2_start_ts = pd.Timestamp(window.l2_start, tz="UTC")
+    ho_start_ts = pd.Timestamp(window.holdout_start, tz="UTC")
+    l2_start_bar = int(np.searchsorted(datetimes, np.datetime64(l2_start_ts.replace(tzinfo=None), "ns")))
+    ho_start_bar = int(np.searchsorted(datetimes, np.datetime64(ho_start_ts.replace(tzinfo=None), "ns")))
+
+    return predict_layer1_signals(
+        artifact=artifact,
+        candidate_events=labeled_events,
+        aligned=aligned,
+        start_idx=l2_start_bar,
+        end_idx=ho_start_bar,
+        cfg=cfg,
+    )
+
+
+def _run_tiered_l2_study(
+    *,
+    signal_batch: Any,
+    aligned: Any,
+    cfg: Any,
+    window: Any,
+    caps: Any,
+    tf: str,
+    n_trials: int,
+    seed: int,
+) -> dict[str, Any]:
+    """Optuna objective_l2_sharpe로 best l2_params 탐색.
+
+    Returns:
+        best_l2_params: 최고 Sharpe trial의 파라미터 dict.
+                        전체 실패 시 {} (기본값 fallback, WARNING 로그).
+    """
+    import optuna as _optuna
+    from optuna.samplers import TPESampler
+
+    from src.domain.futures.optimization.workflow import TieredContext, objective_l2_sharpe
+
+    ctx = TieredContext(
+        labeled_events=pd.DataFrame(),  # signal_batch에 이미 예측됨, labeles 불필요
+        aligned=aligned,
+        cfg=cfg,
+        window=window,
+        caps=caps,
+        tf=tf,
+        fixed_l1_params={"signal_batch": signal_batch},
+    )
+
+    study_name = (
+        f"tiered_l2_sharpe_{tf}_{window.l2_start.isoformat()}_{window.holdout_start.isoformat()}"
+    )
+    _logger.info("[L2-OPT] Optuna L2 study 시작: name=%s n_trials=%d", study_name, n_trials)
+
+    try:
+        _, _del_storage = setup_optuna_storage(str(BASE_DIR))
+        _optuna.delete_study(study_name=study_name, storage=_del_storage)
+    except Exception:
+        _logger.debug("[L2-OPT] 기존 study 없음 — 신규 생성")
+
+    try:
+        _, storage = setup_optuna_storage(str(BASE_DIR))
+        study = _optuna.create_study(
+            direction="maximize",
+            sampler=TPESampler(seed=seed, n_startup_trials=min(10, n_trials)),
+            study_name=study_name,
+            storage=storage,
+            load_if_exists=False,
+        )
+        study.optimize(
+            lambda trial: objective_l2_sharpe(trial, ctx),
+            n_trials=n_trials,
+            n_jobs=1,
+            show_progress_bar=False,
+        )
+    except Exception as exc:
+        _logger.warning("[L2-OPT] Optuna study 실패: %s — 기본 l2_params 사용", exc)
+        return {}
+
+    complete_trials = [
+        t for t in study.trials
+        if t.state == optuna.trial.TrialState.COMPLETE
+        and t.value is not None
+        and t.value > float("-inf")
+    ]
+    if not complete_trials:
+        _logger.warning("[L2-OPT] 모든 %d trials 실패/pruned — 기본 l2_params 사용", n_trials)
+        return {}
+
+    best_trial = max(complete_trials, key=lambda t: t.value or float("-inf"))
+    _logger.info(
+        "[L2-OPT] Best trial #%d: Sharpe=%.4f params=%s",
+        best_trial.number, best_trial.value, best_trial.params,
+    )
+    return dict(best_trial.params)
 
 
 def _run_strategy_stage(
@@ -849,7 +965,9 @@ def _run_strategy_stage(
                 target_ann_vol=float(_futures_policy_t.get("target_ann_vol", 0.35)),
             )
             assert tiered_window is not None, "tiered_window is missing under use_tiered option"
-            l1_res, l2_res, l3_res = run_tiered_pipeline(
+
+            # ── Step A: L1 only ──────────────────────────────────────────────
+            l1_res, _, _ = run_tiered_pipeline(
                 labeled_events=labeled_tiered,
                 aligned=aligned_tiered,
                 cfg=tiered_cfg,
@@ -858,7 +976,42 @@ def _run_strategy_stage(
                 l2_params={},
                 caps=tiered_caps,
                 tf=run_config.timeframe,
+                target_phase="l1",
+            )
+            if not l1_res.gate_passed:
+                return None  # L1 BLOCKED → 조기 종료
+
+            # ── Step B: L2 window 신호 예측 ──────────────────────────────────
+            l2_signals = _build_l2_signal_batch(
+                l1_res, labeled_tiered, aligned_tiered, tiered_cfg, tiered_window
+            )
+
+            # ── Step C: Optuna L2 파라미터 탐색 ──────────────────────────────
+            _seed = int(run_config.seed) if hasattr(run_config, "seed") else 42
+            n_l2_trials = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_TRIALS", 50))
+            best_l2_params = _run_tiered_l2_study(
+                signal_batch=l2_signals,
+                aligned=aligned_tiered,
+                cfg=tiered_cfg,
+                window=tiered_window,
+                caps=tiered_caps,
+                tf=run_config.timeframe,
+                n_trials=n_l2_trials,
+                seed=_seed,
+            )
+
+            # ── Step D: 최적 params + L1 override로 최종 실행 ────────────────
+            run_tiered_pipeline(
+                labeled_events=labeled_tiered,
+                aligned=aligned_tiered,
+                cfg=tiered_cfg,
+                window=tiered_window,
+                l1_params={},
+                l2_params=best_l2_params,
+                caps=tiered_caps,
+                tf=run_config.timeframe,
                 target_phase=run_config.phase,
+                l1_result_override=l1_res,
             )
             return None  # Phase D allocation 스킵 (Tiered가 대체)
         except Exception as _exc:
@@ -1042,7 +1195,8 @@ def _run_strategy_stage(
             )
             _logger.info("-" * 135)
             for sv in sv_list:
-                if sv.get("status") == "PASS": continue
+                if sv.get("status") == "PASS":
+                    continue
                 sym = str(sv.get("symbol", "unknown"))
                 status_val = str(sv.get("status", "unknown"))
                 status_text = f"❌ {status_val}"
@@ -1527,12 +1681,12 @@ def run_pipeline(
         if OPT_FUTURES_CONFIG.get("USE_CS_RANK_ENGINE", False)
         else None
     )
-    elapsed_window = time.perf_counter() - t_window
+    _logger.debug("[perf] window resolve: %.4fs", time.perf_counter() - t_window)
 
     # Step 1.5) Ensure universe ledger is synchronized for the required window
     t_sync = time.perf_counter()
     _ensure_universe_ledger_sync(run_config, window)
-    elapsed_sync = time.perf_counter() - t_sync
+    _logger.debug("[perf] universe sync: %.4fs", time.perf_counter() - t_sync)
 
     # Step 2) universe timeline/quality gate
     t_universe = time.perf_counter()
@@ -1544,7 +1698,7 @@ def run_pipeline(
         universe_snapshot,
         inference_timeline,
     ) = _run_universe_stage(run_config, window, layered_window=layered_window)
-    elapsed_universe = time.perf_counter() - t_universe
+    _logger.debug("[perf] universe stage: %.4fs", time.perf_counter() - t_universe)
 
     resolved_load_symbols = _resolve_data_collection_symbols(
         run_config=run_config,
@@ -1575,7 +1729,7 @@ def run_pipeline(
         inference_timeline,
         layered_window=layered_window,
     )
-    elapsed_data = time.perf_counter() - t_data_start
+    _logger.debug("[perf] data stage: %.4fs", time.perf_counter() - t_data_start)
 
     # Consolidate all initialization info into the System Dashboard
     from src.domain.futures.strategy.tiered_logging import format_system_context_dashboard
@@ -1586,12 +1740,18 @@ def run_pipeline(
         "live_panel": len(live_inference_panel),
     }
     
+    _loaded_ratio = (
+        f"{(len(data_stage.data_maps) / len(resolved_load_symbols)):.1%}"
+        if resolved_load_symbols
+        else "0%"
+    )
+    _all_ready = len(data_stage.valid_symbols) == len(data_stage.data_maps)
     dq_report = {
-        "loaded_ratio": f"{(len(data_stage.data_maps)/len(resolved_load_symbols)):.1%}" if resolved_load_symbols else "0%",
+        "loaded_ratio": _loaded_ratio,
         "loaded_count": len(data_stage.data_maps),
         "req_count": len(resolved_load_symbols),
         "ready_count": len(data_stage.valid_symbols),
-        "fail_summary": "None" if len(data_stage.valid_symbols) == len(data_stage.data_maps) else "See logs",
+        "fail_summary": "None" if _all_ready else "See logs",
     }
     
     strategy_info = {

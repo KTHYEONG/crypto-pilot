@@ -358,3 +358,156 @@ class TestAdditionalEdgeCases:
 
         # Assert
         np.testing.assert_allclose(w_none, w_zero, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# S1-S4 — Amortized Friction Hurdle (spec: layer2-signal-utilization.md §2.1)
+# ---------------------------------------------------------------------------
+
+
+class TestAmortizedFrictionHurdle:
+    """amortized hurdle = round_trip / holding_bars * safety_mult."""
+
+    def test_s1_long_holding_makes_weak_signal_pass(self) -> None:
+        # Arrange: mu=2.0bps, hurdle=3.8bps → 기존 로직 FAIL, amortized(6bars) PASS
+        mu_bps = np.array([2.0], dtype=np.float64)
+        hurdle = np.array([3.8], dtype=np.float64)
+        sigma = np.array([0.002], dtype=np.float64)
+        prev_w = np.zeros(1, dtype=np.float64)
+        caps = PortfolioCaps(gross=3.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=0.5)
+
+        # Act: holding_bars=6 → eff_hurdle = 3.8/6 ≈ 0.63 < 2.0 → PASS
+        w = diagonal_kelly_weights(
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            friction_hurdle_bps=hurdle,
+            holding_bars=6,
+            friction_safety_mult=1.0,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
+        )
+
+        # Assert: w_i > 0 (통과)
+        assert w[0] > 0.0
+
+    def test_s2_short_holding_blocks_weak_signal(self) -> None:
+        # Arrange: holding_bars=1 → eff_hurdle=3.8 → mu=2.0 FAIL
+        mu_bps = np.array([2.0], dtype=np.float64)
+        hurdle = np.array([3.8], dtype=np.float64)
+        sigma = np.array([0.002], dtype=np.float64)
+        prev_w = np.zeros(1, dtype=np.float64)
+        caps = PortfolioCaps(gross=3.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=0.5)
+
+        # Act
+        w = diagonal_kelly_weights(
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            friction_hurdle_bps=hurdle,
+            holding_bars=1,
+            friction_safety_mult=1.0,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
+        )
+
+        # Assert: w_i = 0 (차단)
+        assert w[0] == pytest.approx(0.0)
+
+    def test_s3_safety_mult_boundary(self) -> None:
+        # Arrange: friction_safety_mult=2.0, holding_bars=6, hurdle=3.8
+        # eff_hurdle = 3.8 * 2.0 / 6 ≈ 1.267
+        # mu=1.0 → FAIL (1.0 < 1.267), mu=1.5 → PASS (1.5 >= 1.267)
+        hurdle = np.array([3.8, 3.8], dtype=np.float64)
+        sigma = np.array([0.002, 0.002], dtype=np.float64)
+        prev_w = np.zeros(2, dtype=np.float64)
+        caps = PortfolioCaps(gross=3.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=0.5)
+
+        mu_fail = np.array([1.0, 0.0], dtype=np.float64)
+        mu_pass = np.array([0.0, 1.5], dtype=np.float64)
+
+        w_fail = diagonal_kelly_weights(
+            mu_bps=mu_fail,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            friction_hurdle_bps=hurdle,
+            holding_bars=6,
+            friction_safety_mult=2.0,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
+        )
+        w_pass = diagonal_kelly_weights(
+            mu_bps=mu_pass,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            friction_hurdle_bps=hurdle,
+            holding_bars=6,
+            friction_safety_mult=2.0,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
+        )
+
+        assert w_fail[0] == pytest.approx(0.0)
+        assert w_pass[1] > 0.0
+
+    def test_s4_holding_bars_zero_guard_no_zero_division(self) -> None:
+        # Arrange: holding_bars=0 → max(.,1) 가드 → ZeroDivision 없음
+        mu_bps = np.array([5.0], dtype=np.float64)
+        hurdle = np.array([3.8], dtype=np.float64)
+        sigma = np.array([0.002], dtype=np.float64)
+        prev_w = np.zeros(1, dtype=np.float64)
+        caps = PortfolioCaps(gross=3.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=0.5)
+
+        # Act: should not raise
+        w = diagonal_kelly_weights(
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            friction_hurdle_bps=hurdle,
+            holding_bars=0,
+            friction_safety_mult=1.0,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
+        )
+
+        # Assert: finite output, no crash
+        assert np.all(np.isfinite(w))
+
+
+class TestS8DefaultBackwardCompatibility:
+    """S8: use_portfolio_kelly 제거 후 diagonal 경로 기본 동작 불변 (회귀)."""
+
+    def test_s8_default_params_give_same_result_as_before(self) -> None:
+        # Arrange: holding_bars=1(default), friction_safety_mult=1.0(default)
+        # 기존 로직: |mu| >= hurdle → holding=1, mult=1 → eff_hurdle=hurdle
+        mu_bps = np.array([5.0, 2.0], dtype=np.float64)
+        sigma = np.array([0.002, 0.002], dtype=np.float64)
+        hurdle = np.array([3.8, 3.8], dtype=np.float64)
+        prev_w = np.zeros(2, dtype=np.float64)
+        caps = PortfolioCaps(gross=3.0, per_symbol=0.5, net=1.0, beta=2.0, target_ann_vol=0.5)
+
+        # Act: with defaults (holding_bars=1, friction_safety_mult=1.0)
+        w_default = diagonal_kelly_weights(
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            friction_hurdle_bps=hurdle,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
+        )
+
+        # Assert: [0] 5.0>=3.8 → PASS (w>0), [1] 2.0<3.8 → FAIL (w=0)
+        assert w_default[0] > 0.0
+        assert w_default[1] == pytest.approx(0.0)
