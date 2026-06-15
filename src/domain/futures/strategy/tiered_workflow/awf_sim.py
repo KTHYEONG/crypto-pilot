@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -12,6 +12,7 @@ from numpy.typing import NDArray
 from src.domain.futures.portfolio.portfolio_constructor import (
     PortfolioCaps,
     diagonal_kelly_weights,
+    project_all_caps,
 )
 from src.domain.futures.portfolio.signal_composer import (
     composer_sigma_lookback_bars,
@@ -37,6 +38,18 @@ if TYPE_CHECKING:
     from src.domain.futures.strategy.tiered_workflow.dataclasses import SymbolRealizedStat
     from src.domain.futures.strategy.walk_forward import WFFold
 
+EdgeBasis = Literal["gross", "net"]
+
+
+@dataclass(slots=True, frozen=True)
+class Layer2ExpectedEdge:
+    """Layer2 sizing에 사용할 per-bar edge contract."""
+
+    signed_gross_bps_per_bar: float
+    signed_net_bps_per_bar: float
+    expected_cost_bps_per_bar: float
+    basis: EdgeBasis
+
 
 @dataclass(slots=True)
 class _AwfSimResult:
@@ -47,11 +60,20 @@ class _AwfSimResult:
     last_selected: frozenset[str]
     last_w: NDArray[np.float64]
     all_turnovers: list[float]
+    all_turnovers_baseline: list[float]
+    all_gross_exposures: list[float]
+    all_net_exposures: list[float]
     friction_pass_total: int
     signal_total: int
     support_leak_count: int
+    total_cost_hybrid: float
+    total_cost_baseline: float
+    cap_saturation_count: int
+    rebalance_count: int
     fold_rets_hybrid: list[list[float]]    # fold별 strategy returns
     fold_rets_baseline: list[list[float]]  # fold별 baseline returns
+    block_rets_hybrid: tuple[tuple[float, ...], ...]
+    block_rets_baseline: tuple[tuple[float, ...], ...]
 
 
 def _event_strength(event: ValidatedSignalEvent) -> float:
@@ -64,7 +86,7 @@ def _event_strength(event: ValidatedSignalEvent) -> float:
 
 def _is_better_event(candidate: ValidatedSignalEvent, incumbent: ValidatedSignalEvent) -> bool:
     if candidate.decision_idx != incumbent.decision_idx:
-        return candidate.decision_idx > incumbent.decision_idx
+        return bool(candidate.decision_idx > incumbent.decision_idx)
     return _event_strength(candidate) > _event_strength(incumbent)
 
 
@@ -152,6 +174,91 @@ def compute_futures_bar_return(
     return gross_price_return + funding_return
 
 
+def compute_expected_layer2_edge(
+    *,
+    side: int,
+    expected_gross_bps: float,
+    expected_net_bps: float,
+    expected_holding_bars: int,
+    execution_cost_bps: float,
+    edge_basis: EdgeBasis,
+    fixed_cost_safety_mult: float,
+) -> Layer2ExpectedEdge:
+    """Gross/net event prediction을 보수적 per-bar net edge로 정규화한다."""
+    if fixed_cost_safety_mult < 1.0:
+        raise ValueError("fixed_cost_safety_mult must be >= 1.0")
+
+    direction = 1.0 if side >= 0 else -1.0
+    holding_bars = max(int(expected_holding_bars), 1)
+    gross_per_bar = direction * float(expected_gross_bps) / float(holding_bars)
+    net_per_bar = direction * float(expected_net_bps) / float(holding_bars)
+    cost_per_bar = float(execution_cost_bps) * float(fixed_cost_safety_mult) / float(holding_bars)
+
+    if edge_basis == "gross":
+        signed_net = np.sign(gross_per_bar) * max(abs(gross_per_bar) - cost_per_bar, 0.0)
+        return Layer2ExpectedEdge(
+            signed_gross_bps_per_bar=gross_per_bar,
+            signed_net_bps_per_bar=float(signed_net),
+            expected_cost_bps_per_bar=cost_per_bar,
+            basis=edge_basis,
+        )
+
+    return Layer2ExpectedEdge(
+        signed_gross_bps_per_bar=gross_per_bar,
+        signed_net_bps_per_bar=net_per_bar,
+        expected_cost_bps_per_bar=cost_per_bar,
+        basis=edge_basis,
+    )
+
+
+def build_directional_risk_matched_equal_weight(
+    *,
+    signed_net_mu_bps: NDArray[np.float64],
+    strategy_weights: NDArray[np.float64],
+    sigma: NDArray[np.float64],
+    btc_beta: NDArray[np.float64],
+    caps: PortfolioCaps,
+    bars_per_year: float,
+) -> NDArray[np.float64]:
+    """같은 support/방향에서 전략과 ex-ante risk를 맞추는 directional EW baseline."""
+    support = np.abs(np.asarray(strategy_weights, dtype=np.float64)) > 1e-12
+    if not np.any(support):
+        return np.zeros_like(strategy_weights, dtype=np.float64)
+
+    sigma_arr = np.maximum(np.asarray(sigma, dtype=np.float64), VOL_FLOOR)
+    direction = np.sign(np.asarray(signed_net_mu_bps, dtype=np.float64))
+    if direction.shape != support.shape:
+        direction = np.sign(np.asarray(strategy_weights, dtype=np.float64))
+    direction = np.where(support, direction, 0.0)
+    if not np.any(direction != 0.0):
+        return np.zeros_like(strategy_weights, dtype=np.float64)
+
+    inv_sigma = np.where(support, 1.0 / sigma_arr, 0.0)
+    baseline = direction * inv_sigma
+
+    strategy_sigma = float(np.sqrt(np.dot(np.asarray(strategy_weights, dtype=np.float64) ** 2, sigma_arr**2)))
+    baseline_sigma = float(np.sqrt(np.dot(baseline**2, sigma_arr**2)))
+    strategy_gross = float(np.sum(np.abs(strategy_weights)))
+    baseline_gross = float(np.sum(np.abs(baseline)))
+
+    if baseline_sigma > 1e-12 and strategy_sigma > 1e-12:
+        baseline = baseline * (strategy_sigma / baseline_sigma)
+    elif baseline_gross > 1e-12 and strategy_gross > 1e-12:
+        baseline = baseline * (strategy_gross / baseline_gross)
+    else:
+        return np.zeros_like(strategy_weights, dtype=np.float64)
+
+    sigma_port = float(np.sqrt(np.dot(np.clip(baseline, -caps.per_symbol, caps.per_symbol) ** 2, sigma_arr**2)))
+    return project_all_caps(
+        baseline,
+        np.asarray(btc_beta, dtype=np.float64),
+        sigma_port,
+        bars_per_year,
+        caps,
+        support_mask=support,
+    )
+
+
 def _resolve_tradeable_mask(
     *,
     aligned: AlignedMarketData,
@@ -184,6 +291,24 @@ def _resolve_funding_row(
     return np.zeros(n_sym, dtype=np.float64)
 
 
+def _is_cap_saturated(
+    *,
+    weights: NDArray[np.float64],
+    btc_beta: NDArray[np.float64],
+    caps: PortfolioCaps,
+) -> bool:
+    gross = float(np.sum(np.abs(weights)))
+    net = float(np.sum(weights))
+    beta_exp = float(np.dot(weights, btc_beta))
+    per_symbol_hit = bool(np.any(np.isclose(np.abs(weights), caps.per_symbol, atol=1e-9)))
+    return bool(
+        per_symbol_hit
+        or np.isclose(gross, caps.gross, atol=1e-9)
+        or np.isclose(abs(net), caps.net, atol=1e-9)
+        or np.isclose(abs(beta_exp), caps.beta, atol=1e-9)
+    )
+
+
 def _run_awf_simulation(
     *,
     signal_batch: ValidatedSignalBatch,
@@ -206,10 +331,10 @@ def _run_awf_simulation(
     k_rank = int(config.k_rank)
     rank_buffer = int(config.rank_buffer)
     kelly_fraction = float(config.kelly_fraction)
-    vol_target = config.vol_target
+    vol_target = config.max_ann_vol
     no_trade_band = float(config.no_trade_band)
     rebalance_bars = int(config.rebalance_bars)
-    friction_safety_mult = float(getattr(config, "friction_safety_mult", 1.0))
+    fixed_cost_safety_mult = float(getattr(config, "fixed_cost_safety_mult", 1.25))
 
     symbols = aligned.symbols
     n_sym = len(symbols)
@@ -230,14 +355,22 @@ def _run_awf_simulation(
     all_rets_hybrid: list[float] = []
     all_rets_baseline: list[float] = []
     all_turnovers: list[float] = []
+    all_turnovers_baseline: list[float] = []
+    all_gross_exposures: list[float] = []
+    all_net_exposures: list[float] = []
     friction_pass_total = 0
     signal_total = 0
     support_leak_count = 0
+    total_cost_hybrid = 0.0
+    total_cost_baseline = 0.0
+    cap_saturation_count = 0
+    rebalance_count = 0
     fold_rets_hybrid: list[list[float]] = []
     fold_rets_baseline: list[list[float]] = []
 
     prev_selection: frozenset[str] = frozenset()
     prev_w: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
+    prev_w_baseline: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
     last_selected: frozenset[str] = frozenset()
     last_w: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
     schedule = build_layer2_signal_schedule(
@@ -258,17 +391,52 @@ def _run_awf_simulation(
                 t=t,
                 n_sym=n_sym,
             )
-            valid_signals = resolve_active_symbol_signals(
-                schedule=schedule,
-                t=t,
-                symbols=symbols,
-                volatility_1d=vol_matrix[t],
-            )
-            valid_signals = {
-                symbol: signal
-                for symbol, signal in valid_signals.items()
-                if tradeable_mask[sym_to_idx[symbol]]
-            }
+            if (
+                aligned.execution_cost_bps_2d is not None
+                and t < aligned.execution_cost_bps_2d.shape[0]
+            ):
+                hurdle = aligned.execution_cost_bps_2d[t].astype(np.float64)
+                hurdle = np.nan_to_num(hurdle, nan=3.8, posinf=3.8, neginf=3.8)
+            else:
+                hurdle = np.full(n_sym, 3.8, dtype=np.float64)
+
+            btc_beta: NDArray[np.float64] | None = None
+            if aligned.beta_vs_market_1d is not None:
+                btc_beta = aligned.beta_vs_market_1d.astype(np.float64)
+                btc_beta = np.nan_to_num(btc_beta, nan=0.0)
+            beta_arr = np.zeros(n_sym, dtype=np.float64) if btc_beta is None else btc_beta
+
+            valid_signals: dict[str, SymbolSignal] = {}
+            gross_edge_by_symbol: dict[str, float] = {}
+            for symbol, event in schedule._events_by_bar[t - schedule.start_idx].items():
+                sym_idx = sym_to_idx.get(symbol)
+                if sym_idx is None or not tradeable_mask[sym_idx]:
+                    continue
+                basis: EdgeBasis = (
+                    "gross" if np.isfinite(float(event.expected_gross_bps)) and float(event.expected_gross_bps) != 0.0
+                    else "net"
+                )
+                edge = compute_expected_layer2_edge(
+                    side=int(event.side),
+                    expected_gross_bps=float(event.expected_gross_bps),
+                    expected_net_bps=float(event.expected_net_bps),
+                    expected_holding_bars=int(event.expected_holding_bars),
+                    execution_cost_bps=float(hurdle[sym_idx]),
+                    edge_basis=basis,
+                    fixed_cost_safety_mult=fixed_cost_safety_mult,
+                )
+                gross_edge_by_symbol[symbol] = edge.signed_gross_bps_per_bar
+                if not np.isfinite(edge.signed_net_bps_per_bar) or edge.signed_net_bps_per_bar == 0.0:
+                    continue
+                valid_signals[symbol] = SymbolSignal(
+                    raw_mu=edge.signed_net_bps_per_bar,
+                    volatility=float(max(vol_matrix[t, sym_idx], VOL_FLOOR)),
+                    n_obs=1,
+                    t_stat=0.0,
+                    valid=True,
+                    beta_btc=None,
+                    quality_weight=float(event.quality_weight),
+                )
             prof_prep += time.perf_counter() - t0_prep
 
             t0_rank = time.perf_counter()
@@ -294,20 +462,6 @@ def _run_awf_simulation(
                         mu_arr[i] = ss.raw_mu
                     sig_arr[i] = ss.volatility
 
-            if (
-                aligned.execution_cost_bps_2d is not None
-                and t < aligned.execution_cost_bps_2d.shape[0]
-            ):
-                hurdle = aligned.execution_cost_bps_2d[t].astype(np.float64)
-                hurdle = np.nan_to_num(hurdle, nan=3.8, posinf=3.8, neginf=3.8)
-            else:
-                hurdle = np.full(n_sym, 3.8, dtype=np.float64)
-
-            btc_beta: NDArray[np.float64] | None = None
-            if aligned.beta_vs_market_1d is not None:
-                btc_beta = aligned.beta_vs_market_1d.astype(np.float64)
-                btc_beta = np.nan_to_num(btc_beta, nan=0.0)
-
             support_mask = mu_arr != 0.0
             w = diagonal_kelly_weights(
                 mu_bps=mu_arr,
@@ -316,7 +470,7 @@ def _run_awf_simulation(
                 vol_target=vol_target,
                 friction_hurdle_bps=hurdle,
                 holding_bars=rebalance_bars,
-                friction_safety_mult=friction_safety_mult,
+                friction_safety_mult=fixed_cost_safety_mult,
                 caps=caps,
                 prev_w=prev_w,
                 no_trade_band=no_trade_band,
@@ -326,33 +480,54 @@ def _run_awf_simulation(
             )
             w = np.where(tradeable_mask, w, 0.0)
             last_w = w
+
+            w_base = build_directional_risk_matched_equal_weight(
+                signed_net_mu_bps=mu_arr,
+                strategy_weights=w,
+                sigma=sig_arr,
+                btc_beta=beta_arr,
+                caps=caps,
+                bars_per_year=bars_per_year,
+            )
+            w_base = np.where(tradeable_mask, w_base, 0.0)
             prof_alloc += time.perf_counter() - t0_alloc
 
             t0_eval = time.perf_counter()
             turnover = float(np.sum(np.abs(w - prev_w))) / 2.0
             all_turnovers.append(turnover)
+            turnover_baseline = float(np.sum(np.abs(w_base - prev_w_baseline))) / 2.0
+            all_turnovers_baseline.append(turnover_baseline)
+            all_gross_exposures.append(float(np.sum(np.abs(w))))
+            all_net_exposures.append(float(np.sum(w)))
             support_leak_count += int(np.sum((np.abs(w) > 1e-12) & ~support_mask))
             selected_idxs = [sym_to_idx[s] for s in selected if s in sym_to_idx]
             if selected_idxs:
                 sel_idx_arr = np.array(selected_idxs, dtype=np.intp)
-                eff_hurdle = hurdle * friction_safety_mult / max(rebalance_bars, 1)
-                friction_pass = int(np.sum(np.abs(mu_arr[sel_idx_arr]) >= eff_hurdle[sel_idx_arr]))
+                gross_edges = np.array(
+                    [gross_edge_by_symbol.get(symbols[idx], 0.0) for idx in sel_idx_arr],
+                    dtype=np.float64,
+                )
+                expected_cost = hurdle[sel_idx_arr] / max(rebalance_bars, 1)
+                friction_pass = int(np.sum(np.abs(gross_edges) >= expected_cost))
             else:
                 friction_pass = 0
             friction_pass_total += friction_pass
             signal_total += len(selected)
+            cap_saturation_count += int(_is_cap_saturated(weights=w, btc_beta=beta_arr, caps=caps))
+            rebalance_count += 1
 
-            # EW Bench: Top-K 선택 심볼만 동일가중 (Kelly 기여만 분리)
-            n_sel = max(1, len(selected))
-            w_base = np.array(
-                [1.0 / n_sel if s in selected else 0.0 for s in symbols],
-                dtype=np.float64,
-            )
             rebal_cost = compute_rebalance_cost(
                 previous_weights=prev_w,
                 target_weights=w,
                 round_trip_cost_bps=hurdle,
             )
+            rebal_cost_baseline = compute_rebalance_cost(
+                previous_weights=prev_w_baseline,
+                target_weights=w_base,
+                round_trip_cost_bps=hurdle,
+            )
+            total_cost_hybrid += rebal_cost
+            total_cost_baseline += rebal_cost_baseline
 
             for t2 in range(t, t_end):
                 if t2 + 1 >= aligned.close_2d.shape[0]:
@@ -369,12 +544,13 @@ def _run_awf_simulation(
                 )
                 # 거래비용은 리밸런싱 첫 bar에만 차감
                 cost = rebal_cost if t2 == t else 0.0
+                cost_baseline = rebal_cost_baseline if t2 == t else 0.0
                 r_h = gross_ret - cost
                 r_b = compute_futures_bar_return(
                     weights=w_base,
                     price_returns=bar_ret,
                     funding_rates=funding_rates,
-                )
+                ) - cost_baseline
                 all_rets_hybrid.append(r_h)
                 all_rets_baseline.append(r_b)
                 _fold_h.append(r_h)
@@ -382,6 +558,7 @@ def _run_awf_simulation(
 
             prev_selection = selected
             prev_w = w
+            prev_w_baseline = w_base
             prof_eval += time.perf_counter() - t0_eval
 
         fold_rets_hybrid.append(_fold_h)
@@ -402,11 +579,20 @@ def _run_awf_simulation(
         last_selected=last_selected,
         last_w=last_w,
         all_turnovers=all_turnovers,
+        all_turnovers_baseline=all_turnovers_baseline,
+        all_gross_exposures=all_gross_exposures,
+        all_net_exposures=all_net_exposures,
         friction_pass_total=friction_pass_total,
         signal_total=signal_total,
         support_leak_count=support_leak_count,
+        total_cost_hybrid=total_cost_hybrid,
+        total_cost_baseline=total_cost_baseline,
+        cap_saturation_count=cap_saturation_count,
+        rebalance_count=rebalance_count,
         fold_rets_hybrid=fold_rets_hybrid,
         fold_rets_baseline=fold_rets_baseline,
+        block_rets_hybrid=tuple(tuple(block) for block in fold_rets_hybrid),
+        block_rets_baseline=tuple(tuple(block) for block in fold_rets_baseline),
     )
 
 

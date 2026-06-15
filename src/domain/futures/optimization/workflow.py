@@ -1585,39 +1585,21 @@ def objective_l1_ic(trial: Trial, ctx: TieredContext) -> float:
     return float(result.pooled_ic) if result.gate_passed else float("-inf")
 
 
-def objective_l2_sharpe(trial: Trial, ctx: TieredContext) -> float:
-    """L2 AWF study objective: Sharpe 최대화. IC 미참조(decoupling 보장).
-
-    Args:
-        trial: Optuna Trial 객체.
-        ctx: Tiered 파이프라인 컨텍스트 (fixed_l1_params에 oos_stacked 포함 필수).
-
-    Returns:
-        sharpe_hybrid (guard 미충족 시 -inf).
-    """
-    from src.domain.futures.strategy.tiered_workflow import (
-        Layer2AllocationConfig,
-        predict_layer1_signals,
-        run_l2_awf,
-    )
+def _resolve_l2_signal_batch_and_folds(ctx: TieredContext) -> tuple[Any, tuple[Any, ...]]:
+    from src.domain.futures.strategy.tiered_workflow import predict_layer1_signals
     from src.domain.futures.strategy.walk_forward import WFFold, build_walk_forward_folds
 
-    l2_params = suggest_layered_params(trial, "L2", fixed=ctx.fixed_l1_params or {})
-    if not ctx.fixed_l1_params:
-        _logger.warning(
-            "objective_l2_sharpe called without fixed L1 OOS signals; returning -inf"
-        )
-        return float("-inf")
-
-    signal_batch = ctx.fixed_l1_params.get("signal_batch")
+    signal_batch = None
+    if ctx.fixed_l1_params:
+        signal_batch = ctx.fixed_l1_params.get("signal_batch")
     if signal_batch is None:
-        artifact = ctx.fixed_l1_params.get("inference_artifact")
+        artifact = (ctx.fixed_l1_params or {}).get("inference_artifact")
         if artifact is None:
-            return float("-inf")
+            return None, ()
         n_bars = len(ctx.aligned.datetimes) if hasattr(ctx.aligned, "datetimes") else 0
         awf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=ctx.cfg)
         if not awf_folds:
-            return float("-inf")
+            return None, ()
         start_idx = min(fold.oos_start for fold in awf_folds)
         end_idx = max(fold.oos_end for fold in awf_folds)
         signal_batch = predict_layer1_signals(
@@ -1629,47 +1611,282 @@ def objective_l2_sharpe(trial: Trial, ctx: TieredContext) -> float:
             cfg=ctx.cfg,
         )
     if signal_batch is None:
-        return float("-inf")
+        return None, ()
 
     n_bars = len(ctx.aligned.datetimes) if hasattr(ctx.aligned, "datetimes") else 0
     awf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=ctx.cfg)
 
-    # L2 window 경계 필터링: pipeline.py와 동일하게 제한
     import numpy as np
 
     from src.domain.futures.strategy.tiered_workflow.pipeline import _date_to_idx, _to_utc_timestamp
 
-    _oos_ts = _to_utc_timestamp(ctx.window.l2_start)
-    l1_end_bars = int(np.searchsorted(ctx.aligned.datetimes, np.datetime64(_oos_ts.tz_localize(None), "ns")))
+    l2_start_ts = _to_utc_timestamp(ctx.window.l2_start)
+    l1_end_bars = int(
+        np.searchsorted(
+            ctx.aligned.datetimes,
+            np.datetime64(l2_start_ts.tz_localize(None), "ns"),
+        )
+    )
     ho_start_idx_l2 = _date_to_idx(ctx.aligned.datetimes, ctx.window.holdout_start)
 
-    awf_folds = tuple(
-        f for f in awf_folds
-        if f.oos_start >= l1_end_bars and f.oos_end <= ho_start_idx_l2
+    bounded_folds = tuple(
+        fold
+        for fold in awf_folds
+        if fold.oos_start >= l1_end_bars and fold.oos_end <= ho_start_idx_l2
     )
-    if not awf_folds:
-        cal_end = max(l1_end_bars - 1, 1)
-        awf_folds = (WFFold(
+    if bounded_folds:
+        return signal_batch, bounded_folds
+    cal_end = max(l1_end_bars - 1, 1)
+    return signal_batch, (
+        WFFold(
             fit_start=0,
             fit_end=cal_end,
             cal_start=max(0, cal_end - max(1, cal_end // 5)),
             cal_end=cal_end,
             oos_start=l1_end_bars,
             oos_end=ho_start_idx_l2,
-        ),)
+        ),
+    )
 
-    result = run_l2_awf(
+
+def evaluate_l2_trial(
+    *,
+    signal_batch: Any,
+    aligned: Any,
+    awf_folds: tuple[Any, ...],
+    config: Any,
+    caps: Any,
+    tf: str,
+) -> Any:
+    from src.domain.futures.portfolio.signal_composer import hours_per_bar_tf
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+        Layer2BlockMetric,
+        Layer2TrialEvaluation,
+    )
+    from src.domain.futures.strategy.tiered_workflow.metrics import (
+        _bars_per_year_for_tf,
+        _cagr,
+        _contiguous_block_log_growth,
+        _cvar_loss,
+        _growth_lower_confidence_bound,
+        _mdd,
+        _psr,
+        _sharpe_hac,
+    )
+
+    sim = _run_awf_simulation(
+        signal_batch=signal_batch,
+        aligned=aligned,
+        awf_folds=awf_folds,
+        config=config,
+        caps=caps,
+        tf=tf,
+    )
+    hours_per_bar = max(float(hours_per_bar_tf(tf)), 1e-9)
+    bars_per_year = _bars_per_year_for_tf(tf)
+    block_size = max(1, round((24.0 * 30.0) / hours_per_bar))
+    rets_hybrid = list(sim.rets_hybrid)
+    rets_baseline = list(sim.rets_baseline)
+
+    cagr_hybrid = _cagr(rets_hybrid, bars_per_year=bars_per_year)
+    cagr_baseline = _cagr(rets_baseline, bars_per_year=bars_per_year)
+    sharpe_hac_hybrid = _sharpe_hac(rets_hybrid, bars_per_year=bars_per_year)
+    sharpe_hac_baseline = _sharpe_hac(rets_baseline, bars_per_year=bars_per_year)
+    psr_hybrid = _psr(rets_hybrid, bars_per_year=bars_per_year)
+    mdd_hybrid = _mdd(rets_hybrid)
+    cvar_95_hybrid = _cvar_loss(rets_hybrid)
+
+    block_growth_hybrid = _contiguous_block_log_growth(
+        rets_hybrid,
+        block_bars=block_size,
+    )
+    block_growth_baseline = _contiguous_block_log_growth(
+        rets_baseline,
+        block_bars=block_size,
+    )
+    blocks_per_year = bars_per_year / float(block_size)
+    growth_lcb_hybrid = _growth_lower_confidence_bound(
+        block_growth_hybrid,
+        blocks_per_year=blocks_per_year,
+        z_value=float(config.l2_growth_lcb_z),
+    )
+    growth_lcb_baseline = _growth_lower_confidence_bound(
+        block_growth_baseline,
+        blocks_per_year=blocks_per_year,
+        z_value=float(config.l2_growth_lcb_z),
+    )
+
+    block_metrics: list[Layer2BlockMetric] = []
+    n_blocks = max(len(block_growth_hybrid), len(block_growth_baseline))
+    for block_idx in range(n_blocks):
+        start_idx = block_idx * block_size
+        end_idx = min((block_idx + 1) * block_size, len(rets_hybrid))
+        turnover_slice = sim.all_turnovers[block_idx:block_idx + 1]
+        block_metrics.append(
+            Layer2BlockMetric(
+                start_idx=start_idx,
+                end_idx=end_idx,
+                log_growth_hybrid=(
+                    float(block_growth_hybrid[block_idx])
+                    if block_idx < len(block_growth_hybrid)
+                    else 0.0
+                ),
+                log_growth_baseline=(
+                    float(block_growth_baseline[block_idx])
+                    if block_idx < len(block_growth_baseline)
+                    else 0.0
+                ),
+                mdd_hybrid=_mdd(rets_hybrid[start_idx:end_idx]),
+                turnover_hybrid=float(np.mean(turnover_slice)) if turnover_slice else 0.0,
+                active_rebalances=int(sum(1 for value in turnover_slice if abs(value) > 0.0)),
+            )
+        )
+
+    fold_compound_pass = [
+        float(np.prod(1.0 + np.asarray(fr, dtype=np.float64))) > 1.0 if fr else None
+        for fr in sim.fold_rets_hybrid
+    ]
+    nonempty_fold_pass = [value for value in fold_compound_pass if value is not None]
+    fold_pass_ratio = (
+        sum(1 for value in nonempty_fold_pass if value) / len(nonempty_fold_pass)
+        if nonempty_fold_pass
+        else 0.0
+    )
+    break_even_pass_pct = (
+        float(sim.friction_pass_total) / float(sim.signal_total)
+        if sim.signal_total > 0
+        else 0.0
+    )
+    average_gross_exposure = (
+        float(np.mean(sim.all_gross_exposures)) if sim.all_gross_exposures else 0.0
+    )
+    total_cost_bps = float(sim.total_cost_hybrid * 1e4)
+    active_block_count = int(np.sum(np.abs(block_growth_hybrid) > 0.0))
+    cap_saturation_ratio = (
+        float(sim.cap_saturation_count) / float(sim.rebalance_count)
+        if sim.rebalance_count > 0
+        else 0.0
+    )
+
+    finite_score = float(growth_lcb_hybrid) if np.isfinite(growth_lcb_hybrid) else -1e6
+    deployment_failed = (
+        sim.signal_total <= 0
+        or sim.support_leak_count > 0
+        or not np.isfinite(cagr_hybrid)
+        or not np.isfinite(sharpe_hac_hybrid)
+    )
+    constraint_values = (
+        1.0 if deployment_failed else -1.0,
+        float(mdd_hybrid - float(config.l2_max_mdd_abs)),
+        float(float(config.l2_min_sharpe_abs) - sharpe_hac_hybrid),
+        float(float(config.l2_min_fold_pass_ratio) - fold_pass_ratio),
+        float(float(config.l2_min_friction_pass) - break_even_pass_pct),
+        float(sim.support_leak_count),
+        float(growth_lcb_baseline + float(config.l2_min_growth_uplift) - finite_score),
+        float(cvar_95_hybrid - float(config.l2_max_cvar_95)),
+        float(float(config.l2_min_active_blocks) - active_block_count),
+    )
+    objective_value = finite_score if np.isfinite(finite_score) else -1e6
+    return Layer2TrialEvaluation(
+        objective_value=float(objective_value),
+        constraint_values=constraint_values,
+        cagr_hybrid=float(cagr_hybrid),
+        cagr_baseline=float(cagr_baseline),
+        growth_lcb_hybrid=float(growth_lcb_hybrid),
+        growth_lcb_baseline=float(growth_lcb_baseline),
+        sharpe_hac_hybrid=float(sharpe_hac_hybrid),
+        sharpe_hac_baseline=float(sharpe_hac_baseline),
+        psr_hybrid=float(psr_hybrid),
+        mdd_hybrid=float(mdd_hybrid),
+        cvar_95_hybrid=float(cvar_95_hybrid),
+        fold_pass_ratio=float(fold_pass_ratio),
+        break_even_pass_pct=float(break_even_pass_pct),
+        average_gross_exposure=float(average_gross_exposure),
+        cap_saturation_ratio=float(cap_saturation_ratio),
+        total_cost_bps=float(total_cost_bps),
+        block_metrics=tuple(block_metrics),
+        returns_hybrid=tuple(rets_hybrid),
+        returns_baseline=tuple(rets_baseline),
+    )
+
+
+def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
+    """L2 AWF study objective: 보수적 log-growth LCB 최대화."""
+    from src.domain.futures.strategy.tiered_workflow import Layer2AllocationConfig
+
+    l2_params = suggest_layered_params(trial, "L2", fixed=ctx.fixed_l1_params or {})
+    if not ctx.fixed_l1_params:
+        _logger.warning(
+            "objective_l2_growth called without fixed L1 OOS signals; returning finite penalty"
+        )
+        return -1e6
+
+    signal_batch, awf_folds = _resolve_l2_signal_batch_and_folds(ctx)
+    if signal_batch is None or not awf_folds:
+        return -1e6
+
+    evaluation = evaluate_l2_trial(
         signal_batch=signal_batch,
         aligned=ctx.aligned,
         awf_folds=awf_folds,
         config=Layer2AllocationConfig.from_mapping(l2_params),
         caps=ctx.caps,
         tf=ctx.tf,
-        verbose=False,
     )
-    if not result.gate_passed:
-        return float("-inf")
-    return float(result.cagr_hybrid)
+
+    _set_float_attr(trial, "l2_objective_value", evaluation.objective_value)
+    _set_float_attr(trial, "cagr_hybrid", evaluation.cagr_hybrid)
+    _set_float_attr(trial, "cagr_baseline", evaluation.cagr_baseline)
+    _set_float_attr(trial, "growth_lcb_hybrid", evaluation.growth_lcb_hybrid)
+    _set_float_attr(trial, "growth_lcb_baseline", evaluation.growth_lcb_baseline)
+    _set_float_attr(trial, "sharpe_hac_hybrid", evaluation.sharpe_hac_hybrid)
+    _set_float_attr(trial, "sharpe_hac_baseline", evaluation.sharpe_hac_baseline)
+    _set_float_attr(trial, "psr_hybrid", evaluation.psr_hybrid)
+    _set_float_attr(trial, "mdd_hybrid", evaluation.mdd_hybrid)
+    _set_float_attr(trial, "cvar_95_hybrid", evaluation.cvar_95_hybrid)
+    _set_float_attr(trial, "fold_pass_ratio", evaluation.fold_pass_ratio)
+    _set_float_attr(trial, "break_even_pass_pct", evaluation.break_even_pass_pct)
+    _set_float_attr(trial, "average_gross_exposure", evaluation.average_gross_exposure)
+    _set_float_attr(trial, "cap_saturation_ratio", evaluation.cap_saturation_ratio)
+    _set_float_attr(trial, "total_cost_bps", evaluation.total_cost_bps)
+    trial.set_user_attr("l2_constraint_values", list(evaluation.constraint_values))
+    trial.set_user_attr(
+        "l2_block_log_growth_signature",
+        [metric.log_growth_hybrid for metric in evaluation.block_metrics],
+    )
+    return float(evaluation.objective_value)
+
+
+def layer2_constraints_from_trial(trial: FrozenTrial) -> tuple[float, ...]:
+    raw = trial.user_attrs.get("l2_constraint_values")
+    if not isinstance(raw, (list, tuple)):
+        return (1.0,) * 9
+    resolved: list[float] = []
+    for item in raw:
+        try:
+            resolved.append(float(item))
+        except Exception:
+            resolved.append(1.0)
+    return tuple(resolved)
+
+
+def objective_l2_sharpe(trial: Trial, ctx: TieredContext) -> float:
+    """Deprecated wrapper. 유지 기간 동안 growth objective로 위임.
+
+    Args:
+        trial: Optuna Trial 객체.
+        ctx: Tiered 파이프라인 컨텍스트 (fixed_l1_params에 oos_stacked 포함 필수).
+
+    Returns:
+        growth_lcb objective value.
+    """
+    warnings.warn(
+        "objective_l2_sharpe is deprecated; use objective_l2_growth instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return float(objective_l2_growth(trial, ctx))
 
 
 # Break circularity by importing run_optimization_loop at the very end
