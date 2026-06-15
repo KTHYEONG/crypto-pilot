@@ -125,12 +125,24 @@ def _expected_gross_bps(model_output: CandidateModelOutput) -> NDArray[np.float6
     return np.asarray(model_output.expected_gross_bps, dtype=np.float64)
 
 
+def _expected_net_bps(model_output: CandidateModelOutput) -> NDArray[np.float64]:
+    return np.asarray(model_output.expected_net_bps, dtype=np.float64)
+
+
 def _q10_gross_bps(model_output: CandidateModelOutput) -> NDArray[np.float64]:
     return np.asarray(model_output.q10_gross_bps, dtype=np.float64)
 
 
+def _q10_net_bps(model_output: CandidateModelOutput) -> NDArray[np.float64]:
+    return np.asarray(model_output.q10_net_bps, dtype=np.float64)
+
+
 def _q90_gross_bps(model_output: CandidateModelOutput) -> NDArray[np.float64]:
     return np.asarray(model_output.q90_gross_bps, dtype=np.float64)
+
+
+def _q90_net_bps(model_output: CandidateModelOutput) -> NDArray[np.float64]:
+    return np.asarray(model_output.q90_net_bps, dtype=np.float64)
 
 
 def _resolve_activation_context(
@@ -666,8 +678,11 @@ def _candidate_output_to_signal_batch(
             model_version=model_version,
         )
     gross = _expected_gross_bps(model_output)
+    net = _expected_net_bps(model_output)
     q10 = _q10_gross_bps(model_output)
+    q10_net = _q10_net_bps(model_output)
     q90 = _q90_gross_bps(model_output)
+    q90_net = _q90_net_bps(model_output)
     activation_match_regime: bool = bool(getattr(cfg, "l1_activation_match_regime", True)) if cfg is not None else True
     source_keys: set[tuple[str, str, str]] = set()
     source_keys_relaxed: set[tuple[str, str]] = set()
@@ -720,8 +735,11 @@ def _candidate_output_to_signal_batch(
                 strategy_id=key.strategy_id,
                 activation_context=key.activation_context,
                 side=1 if side >= 0 else -1,
+                expected_net_bps=float(net[idx]) if idx < net.size else pred,
                 expected_gross_bps=pred,
+                q10_net_bps=float(q10_net[idx]) if idx < q10_net.size else float(q10[idx]) if idx < q10.size else pred,
                 q10_gross_bps=float(q10[idx]) if idx < q10.size else pred,
+                q90_net_bps=float(q90_net[idx]) if idx < q90_net.size else float(q90[idx]) if idx < q90.size else pred,
                 q90_gross_bps=float(q90[idx]) if idx < q90.size else pred,
                 expected_holding_bars=holding,
                 quality_weight=quality_weight,

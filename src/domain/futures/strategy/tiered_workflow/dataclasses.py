@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
         Layer1InferenceArtifact,
         QualifiedSignalRegistry,
         SymbolStrategyEvidence,
+        ValidatedSignalEvent,
     )
     from src.domain.futures.strategy.cs_rank import SymbolSignal
 
@@ -150,6 +151,90 @@ class Layer2Result:
     friction_pass_pct: float
     gate_passed: bool
     blocker_reason: str
+
+
+@dataclass(slots=True, frozen=True)
+class Layer2AllocationConfig:
+    """Typed Layer2 allocation and gate configuration."""
+
+    k_rank: int = 3
+    rebalance_bars: int = 3
+    kelly_fraction: float = 0.25
+    min_abs_rank_z: float = 0.0
+    rank_buffer: int = 1
+    no_trade_band: float = 0.01
+    vol_target: float | None = None
+    l2_min_cagr: float = 0.0
+    l2_min_mar: float = 0.5
+    l2_min_sharpe_abs: float = 0.5
+    l2_max_mdd_abs: float = 0.50
+    l2_min_fold_pass_ratio: float = 0.60
+    l2_min_sharpe_uplift: float = 0.20
+
+    @staticmethod
+    def _as_int(value: object, default: int) -> int:
+        if isinstance(value, (int, float, str)):
+            return int(value)
+        return default
+
+    @staticmethod
+    def _as_float(value: object, default: float) -> float:
+        if isinstance(value, (int, float, str)):
+            return float(value)
+        return default
+
+    @classmethod
+    def from_mapping(cls, params: dict[str, object] | None) -> Layer2AllocationConfig:
+        params = params or {}
+        vol_target = params.get("vol_target")
+        if not isinstance(vol_target, float):
+            vol_target = None
+        min_abs_rank_z = params.get("min_abs_rank_z", params.get("CS_Z_SCORE_THRESHOLD", 0.0))
+        return cls(
+            k_rank=cls._as_int(params.get("K_RANK", 3), 3),
+            rebalance_bars=cls._as_int(params.get("REBALANCE_BARS", 3), 3),
+            kelly_fraction=cls._as_float(params.get("kelly_fraction", 0.25), 0.25),
+            min_abs_rank_z=cls._as_float(min_abs_rank_z, 0.0),
+            rank_buffer=cls._as_int(params.get("rank_buffer", 1), 1),
+            no_trade_band=cls._as_float(params.get("no_trade_band", 0.01), 0.01),
+            vol_target=vol_target,
+            l2_min_cagr=cls._as_float(params.get("l2_min_cagr", 0.0), 0.0),
+            l2_min_mar=cls._as_float(params.get("l2_min_mar", 0.5), 0.5),
+            l2_min_sharpe_abs=cls._as_float(params.get("l2_min_sharpe_abs", 0.5), 0.5),
+            l2_max_mdd_abs=cls._as_float(params.get("l2_max_mdd_abs", 0.50), 0.50),
+            l2_min_fold_pass_ratio=cls._as_float(params.get("l2_min_fold_pass_ratio", 0.60), 0.60),
+            l2_min_sharpe_uplift=cls._as_float(params.get("l2_min_sharpe_uplift", 0.20), 0.20),
+        )
+
+
+@dataclass(slots=True, frozen=True)
+class Layer2SignalSchedule:
+    """Causal Layer2 event schedule materialized per bar."""
+
+    events: tuple[ValidatedSignalEvent, ...]
+    start_idx: int
+    end_idx: int
+    _events_by_bar: tuple[dict[str, ValidatedSignalEvent], ...] = field(
+        default=(),
+        repr=False,
+    )
+
+
+@dataclass(slots=True, frozen=True)
+class Layer2SimulationDiagnostics:
+    """Layer2 simulation observability payload."""
+
+    signal_event_count: int
+    active_signal_bar_ratio: float
+    mean_active_positions: float
+    mean_gross_exposure: float
+    mean_net_exposure: float
+    mean_long_exposure: float
+    mean_short_exposure: float
+    support_leak_count: int
+    cap_saturation_ratio: float
+    execution_cost_return: float
+    funding_return: float
 
 
 @dataclass(slots=True, frozen=True)
