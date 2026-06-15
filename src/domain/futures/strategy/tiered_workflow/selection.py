@@ -1,0 +1,246 @@
+# src/domain/futures/strategy/tiered_workflow/selection.py
+from __future__ import annotations
+
+import hashlib
+import logging
+from typing import Any
+
+import numpy as np
+import optuna
+
+from src.domain.futures.optimization.evaluator import calc_n_trials_eff_entropy
+from src.domain.futures.optimization.workflow import evaluate_l2_trial, layer2_constraints_from_trial
+from src.domain.futures.strategy.tiered_workflow import Layer2AllocationConfig
+from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+    Layer2StudyResult,
+)
+from src.domain.futures.strategy.tiered_workflow.metrics import (
+    _bars_per_year_for_tf,
+    _deflated_sharpe_probability,
+)
+
+_logger = logging.getLogger(__name__)
+
+
+def _layer2_experiment_key(
+    *,
+    tf: str,
+    window: Any,
+    signal_batch: Any,
+    search_space_version: str,
+) -> str:
+    """같은 experiment key의 study를 매 실행마다 보존하기 위한 고유 키 생성."""
+    events = getattr(signal_batch, "events", ())
+    event_count = len(events)
+    # timeframe, l2_start, holdout_start, events_count 및 search_space_version을 고유 요소로 바인딩
+    hash_input = (
+        f"{tf}_{window.l2_start.isoformat()}_{window.holdout_start.isoformat()}_"
+        f"{event_count}_{search_space_version}"
+    )
+    h = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()[:12]
+    return f"l2_study_{tf}_{h}"
+
+
+def select_layer2_champion(
+    *,
+    study: optuna.Study,
+    tf: str,
+    min_dsr: float,
+    signal_batch: Any,
+    aligned: Any,
+    awf_folds: tuple[Any, ...],
+    caps: Any,
+) -> Layer2StudyResult:
+    """feasible completed trials 중 DSR 조건을 충족하는 최적의 챔피언 선정 및 검증.
+
+    Algorithm:
+        1. feasible completed trials를 objective (t.value) 내림차순 정렬
+        2. completed trials의 block log growth signature를 기반으로 n_trials_eff 계산
+        3. 정렬된 후보들에 대해 simulation을 1회 재실행하고 DSR 계산
+        4. DSR >= min_dsr 조건 만족하는 첫 후보 선택
+        5. 조건 만족 후보가 없으면 L2 BLOCKED ("dsr") 처리
+        6. 선정된 챔피언에 대해 deterministic replay 검증 (stored cagr/mdd/growth_lcb 비교)
+        7. 결과 반환
+    """
+    complete_trials = [
+        t for t in study.trials
+        if t.state == optuna.trial.TrialState.COMPLETE
+        and t.value is not None
+        and t.value > -1e6
+        and "l2_block_log_growth_signature" in t.user_attrs
+        and "sharpe_hac_hybrid" in t.user_attrs
+    ]
+
+    if not complete_trials:
+        _logger.warning("[L2-SELECTION] 완료된 trials가 없어 study_error 반환")
+        return Layer2StudyResult(
+            best_params={},
+            best_trial_number=None,
+            best_evaluation=None,
+            dsr=0.0,
+            effective_trial_count=0.0,
+            completed_trials=0,
+            feasible_trials=0,
+            blocker_reason="no_complete_trials",
+        )
+
+    # 1. effective trial count 계산 (calc_n_trials_eff_entropy 사용)
+    signatures = []
+    for t in complete_trials:
+        sig = t.user_attrs["l2_block_log_growth_signature"]
+        signatures.append(sig)
+    
+    signatures_arr = np.array(signatures, dtype=np.float64)
+    weights_arr = np.ones(len(complete_trials), dtype=np.float64)
+
+    if len(complete_trials) >= 2:
+        try:
+            n_trials_eff = float(calc_n_trials_eff_entropy(signatures_arr, weights_arr))
+            n_trials_eff = float(np.clip(n_trials_eff, 1.0, float(len(complete_trials))))
+        except Exception as e:
+            _logger.warning("[L2-SELECTION] n_trials_eff 계산 실패: %s", e)
+            n_trials_eff = float(len(complete_trials))
+    else:
+        n_trials_eff = float(len(complete_trials))
+
+    # 2. feasible completed trials 분류
+    feasible_trials = [
+        t for t in complete_trials
+        if all(c <= 0.0 for c in layer2_constraints_from_trial(t))
+    ]
+
+    # 3. objective 값 기준으로 내림차순 정렬
+    feasible_sorted = sorted(
+        feasible_trials,
+        key=lambda t: t.value if t.value is not None else -1e6,
+        reverse=True
+    )
+
+    if not feasible_sorted:
+        _logger.warning("[L2-SELECTION] feasible한 trials가 없음 -> dsr 차단 및 fallback")
+        best_overall = max(complete_trials, key=lambda t: t.value if t.value is not None else -1e6)
+        return Layer2StudyResult(
+            best_params=dict(best_overall.params),
+            best_trial_number=int(best_overall.number),
+            best_evaluation=None,
+            dsr=0.0,
+            effective_trial_count=n_trials_eff,
+            completed_trials=len(complete_trials),
+            feasible_trials=0,
+            blocker_reason="no_feasible_trials",
+        )
+
+    bars_per_year = _bars_per_year_for_tf(tf)
+    completed_trial_sharpes = np.array(
+        [t.user_attrs["sharpe_hac_hybrid"] for t in complete_trials],
+        dtype=np.float64
+    )
+
+    champion_trial = None
+    champion_evaluation = None
+    champion_dsr = 0.0
+
+    # 4. DSR 조건을 만족하는 최초 후보 탐색
+    for trial in feasible_sorted:
+        l2_params = dict(trial.params)
+        config = Layer2AllocationConfig.from_mapping(l2_params)
+
+        evaluation = evaluate_l2_trial(
+            signal_batch=signal_batch,
+            aligned=aligned,
+            awf_folds=awf_folds,
+            config=config,
+            caps=caps,
+            tf=tf,
+        )
+
+        rets_hybrid = evaluation.returns_hybrid
+        dsr_val = _deflated_sharpe_probability(
+            selected_rets=rets_hybrid,
+            completed_trial_sharpes=completed_trial_sharpes,
+            effective_trial_count=n_trials_eff,
+            bars_per_year=bars_per_year,
+        )
+
+        if dsr_val >= min_dsr:
+            champion_trial = trial
+            champion_evaluation = evaluation
+            champion_dsr = dsr_val
+            break
+
+    # 5. DSR 컷 오프에 모두 막힌 경우
+    if champion_trial is None:
+        _logger.warning("[L2-SELECTION] DSR 컷오프(>=%.3f) 만족 후보 없음 -> dsr 차단 처리", min_dsr)
+        fallback_trial = feasible_sorted[0]
+        fallback_config = Layer2AllocationConfig.from_mapping(dict(fallback_trial.params))
+        fallback_eval = evaluate_l2_trial(
+            signal_batch=signal_batch,
+            aligned=aligned,
+            awf_folds=awf_folds,
+            config=fallback_config,
+            caps=caps,
+            tf=tf,
+        )
+        fallback_dsr = _deflated_sharpe_probability(
+            selected_rets=fallback_eval.returns_hybrid,
+            completed_trial_sharpes=completed_trial_sharpes,
+            effective_trial_count=n_trials_eff,
+            bars_per_year=bars_per_year,
+        )
+        return Layer2StudyResult(
+            best_params=dict(fallback_trial.params),
+            best_trial_number=int(fallback_trial.number),
+            best_evaluation=fallback_eval,
+            dsr=fallback_dsr,
+            effective_trial_count=n_trials_eff,
+            completed_trials=len(complete_trials),
+            feasible_trials=len(feasible_trials),
+            blocker_reason="dsr",
+        )
+
+    # 6. 결정적 일치 검증 (Deterministic Replay)
+    assert champion_trial is not None
+    assert champion_evaluation is not None
+    stored_cagr = float(champion_trial.user_attrs.get("cagr_hybrid", 0.0))
+    stored_growth_lcb = float(champion_trial.user_attrs.get("growth_lcb_hybrid", 0.0))
+    stored_mdd = float(champion_trial.user_attrs.get("mdd_hybrid", 0.0))
+
+    eps = 1e-5
+    if (
+        abs(champion_evaluation.cagr_hybrid - stored_cagr) > eps
+        or abs(champion_evaluation.growth_lcb_hybrid - stored_growth_lcb) > eps
+        or abs(champion_evaluation.mdd_hybrid - stored_mdd) > eps
+    ):
+        _logger.error(
+            "[L2-SELECTION] Non-deterministic replay detected: stored_cagr=%.6f vs replayed_cagr=%.6f",
+            stored_cagr,
+            champion_evaluation.cagr_hybrid,
+        )
+        return Layer2StudyResult(
+            best_params=dict(champion_trial.params),
+            best_trial_number=int(champion_trial.number),
+            best_evaluation=champion_evaluation,
+            dsr=champion_dsr,
+            effective_trial_count=n_trials_eff,
+            completed_trials=len(complete_trials),
+            feasible_trials=len(feasible_trials),
+            blocker_reason="non_deterministic_replay",
+        )
+
+    _logger.info(
+        "[L2-SELECTION] Champion selected. Trial #%d, Objective=%.4f, DSR=%.4f (n_eff=%.2f)",
+        champion_trial.number,
+        champion_trial.value,
+        champion_dsr,
+        n_trials_eff
+    )
+    return Layer2StudyResult(
+        best_params=dict(champion_trial.params),
+        best_trial_number=int(champion_trial.number),
+        best_evaluation=champion_evaluation,
+        dsr=champion_dsr,
+        effective_trial_count=n_trials_eff,
+        completed_trials=len(complete_trials),
+        feasible_trials=len(feasible_trials),
+        blocker_reason="",
+    )
