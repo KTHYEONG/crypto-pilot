@@ -145,6 +145,7 @@ graph TD
 | **Param** | `regime_net_multipliers` | Net cap multipliers per regime. Default HSL tailored |
 | **Param** | `bl_shrinkage_var_mult` | Black-Litterman var shrinkage multiplier. Default: `0.20` |
 | **Param** | `bl_shrinkage_omega_mult` | Black-Litterman omega shrinkage multiplier. Default: `0.10` |
+| **Param** | `L2_OPTUNA_TRIALS` | Number of trials for L2 Optuna hyperparameter optimization. Default: `50` |
 | **Output**| `expected_net_bps` | Shrinkage-adjusted expected return per event |
 | **Output**| `target_weights` | Final portfolio allocation weights per event |
 
@@ -213,13 +214,19 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 - `L2_ALLOC_SPACE` → `objective_l2_sharpe` (Sharpe only; IC not referenced)
 - Short-circuit: L1 BLOCKED → L2/L3 = None (skip)
 
+**Optuna L2 Execution Flow (Step A→B→C→D):**
+- **Step A (L1 Validation):** Executes `run_tiered_pipeline` with `target_phase="l1"` to obtain L1 results. If L1 is blocked, execution returns early.
+- **Step B (L2 Signal Batching):** Builds a causal signal batch using the Layer 1 validation results and historical L2 training windows via `_build_l2_signal_batch`.
+- **Step C (L2 Study Optimization):** Runs `_run_tiered_l2_study` with `objective_l2_sharpe` for `L2_OPTUNA_TRIALS` iterations. If all trials fail, falls back to default `l2_params`.
+- **Step D (Final Pipeline Run):** Executes `run_tiered_pipeline` with `l1_result_override` containing the L1 result and `l2_params` containing the best parameters found. L1 execution is skipped, directly running the L2 AWF simulation.
+
 ## 6.3 Architecture Flow
 
 ```mermaid
 graph TD
     A[USE_CS_RANK_ENGINE=True] --> B[build_l1_nested_swf_folds]
     B --> C[run_l1_nested_swf]
-    C -->|gate PASS| D[run_l2_awf]
+    C -->|gate PASS| D[run_l2_awf / _run_tiered_l2_study]
     C -->|gate BLOCKED| Z[return L1, None, None]
     D -->|gate PASS| E[run_l3_holdout]
     D -->|gate BLOCKED| Y[return L1, L2, None]
