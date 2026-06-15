@@ -7,6 +7,10 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-15 Layer 2 DSR 챔피언 선정 및 Replay 검증 도입
+- **Delta:** [selection.py](file:///src/domain/futures/strategy/tiered_workflow/selection.py)를 신설하여 DSR-corrected champion selection(`select_layer2_champion`) 로직을 구축함. `opt_main_futures.py`에서 `_layer2_experiment_key`로 Study를 영속 로드하고 `override_dsr` 브릿지로 최종 pipeline에 DSR을 동기화함. 시뮬레이션 재실행 결과 지표와 stored 지표 간 오차를 비교하는 deterministic replay 검증을 추가함.
+- **Rationale:** 최적화 구간의 최고 CAGR을 편향되게 선택하는 것을 배제하고, 여러 trial 간의 Sharpe 분산 및 유효 검정 횟수를 반영하여 보정된 기대 복리성장 성과 지표(DSR)를 챔피언 승격 기준으로 삼기 위함임.
+
 ## 2026-06-15 L2 AWF 평가 폴드 동기화 및 로그 중복 제거
 - **Delta:** `objective_l2_sharpe` 내 AWF 평가 폴드를 L2 윈도우 `[l2_start, holdout_start)` 범위로 통일. 스터디 설정/생성 로그 억제, `FutureWarning` 경고 차단, 튜닝 완료 후의 중복 챔피언 파라미터 출력 구문을 차단했습니다.
 - **Rationale:** 최적화와 최종 파이프라인 간의 폴드 불일치로 인한 수학적 수치 오차를 정정하고, 최종 단계의 `[AWF PORTFOLIO PERFORMANCE SCORECARD]` 출력이 유일한 챔피언 매개변수 결과 노출지가 되도록 정합성을 통일했습니다.
