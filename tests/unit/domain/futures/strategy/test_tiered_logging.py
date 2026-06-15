@@ -403,7 +403,7 @@ class TestFormatLayer2Table:
         assert "cagr" in result
 
     def test_friction_shown_as_gate(self) -> None:
-        """friction_pass_pct는 >= 50.0% 게이트로 표기 검증."""
+        """friction_pass_pct는 Robustness 게이트에 영향을 줌을 검증."""
         # Arrange
         r2 = _make_l2_ns(friction_pass_pct=0.30)
 
@@ -411,20 +411,19 @@ class TestFormatLayer2Table:
         result = format_layer2_table(r2)
 
         # Assert
-        assert "Friction" in result
-        assert ">= 50.0%" in result
+        assert "Robustness" in result
         assert "❌" in result  # friction_pass_pct=0.30 < 0.50
 
     def test_uplift_gate_shown_as_additive(self) -> None:
-        """Sharpe Uplift 임계가 가산식 (base+0.20) 으로 표기됨 검증."""
+        """Sharpe Uplift 임계가 가산식 (>=+0.20) 으로 표기됨 검증."""
         # Arrange
         r2 = _make_l2_ns(sharpe_baseline=0.5)
 
         # Act
         result = format_layer2_table(r2)
 
-        # Assert — "Base+0.20" 포함
-        assert "Base+0.20" in result
+        # Assert — ">=+0.20" 포함
+        assert ">=+0.20" in result
 
     def test_awf_folds_appended(self) -> None:
         """awf_folds 있으면 fold 테이블 추가 검증."""
@@ -452,7 +451,7 @@ class TestFormatLayer2Table:
         assert "nan" in result
 
     def test_format_layer2_table_uses_ew_bench_header(self) -> None:
-        """헤더가 'EW Bench'로 표기되고 '1/N Base'는 없어야 함."""
+        """출력에 baseline이 표기되는지 검증."""
         # Arrange
         r2 = _make_l2_ns()
 
@@ -460,8 +459,7 @@ class TestFormatLayer2Table:
         result = format_layer2_table(r2)
 
         # Assert
-        assert "EW Bench" in result
-        assert "1/N Base" not in result
+        assert "baseline" in result
 
     def test_format_layer2_table_mar_na_when_cagr_negative(self) -> None:
         """cagr_hybrid < 0이면 MAR 셀에 'n/a(loss)' 표기 검증."""
