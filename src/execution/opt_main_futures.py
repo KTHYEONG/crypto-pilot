@@ -769,6 +769,30 @@ def _run_tiered_l2_study(
     except Exception:
         _logger.debug("[L2-OPT] 기존 study 없음 — 신규 생성")
 
+    class L2OptunaProgressCallback:
+        def __init__(self, total_trials: int):
+            self.total_trials = total_trials
+            self.best_val = float("-inf")
+
+        def __call__(self, study: Any, trial: Any) -> None:
+            import sys
+            val = trial.value
+            if val is not None and val > self.best_val:
+                self.best_val = val
+            current = len(study.trials)
+            
+            best_disp = f"{self.best_val * 100:.2f}%" if self.best_val > float("-inf") else "N/A"
+            current_disp = f"{val * 100:.2f}%" if (val is not None and val > float("-inf")) else "BLOCKED"
+            
+            sys.stdout.write(
+                f"\r[L2-OPT] Progress: {current}/{self.total_trials} trials | "
+                f"Best CAGR: {best_disp} | Current Trial PnL: {current_disp}"
+            )
+            sys.stdout.flush()
+            if current >= self.total_trials:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+
     try:
         _, storage = setup_optuna_storage(str(BASE_DIR))
         study = _optuna.create_study(
@@ -778,11 +802,16 @@ def _run_tiered_l2_study(
             storage=storage,
             load_if_exists=False,
         )
+        # Suppress verbose optuna logs
+        _optuna.logging.set_verbosity(_optuna.logging.WARNING)
+        
+        progress_cb = L2OptunaProgressCallback(n_trials)
         study.optimize(
             lambda trial: objective_l2_sharpe(trial, ctx),
             n_trials=n_trials,
             n_jobs=1,
             show_progress_bar=False,
+            callbacks=[progress_cb],
         )
     except Exception as exc:
         _logger.warning("[L2-OPT] Optuna study 실패: %s — 기본 l2_params 사용", exc)
@@ -790,7 +819,7 @@ def _run_tiered_l2_study(
 
     complete_trials = [
         t for t in study.trials
-        if t.state == optuna.trial.TrialState.COMPLETE
+        if t.state == _optuna.trial.TrialState.COMPLETE
         and t.value is not None
         and t.value > float("-inf")
     ]
@@ -800,7 +829,7 @@ def _run_tiered_l2_study(
 
     best_trial = max(complete_trials, key=lambda t: t.value or float("-inf"))
     _logger.info(
-        "[L2-OPT] Best trial #%d: Sharpe=%.4f params=%s",
+        "[L2-OPT] Best trial #%d: CAGR=%.4f params=%s",
         best_trial.number, best_trial.value, best_trial.params,
     )
     return dict(best_trial.params)
