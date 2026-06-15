@@ -320,6 +320,8 @@ def test_layer2result_dataclass_creation() -> None:
     assert r2.mar_hybrid == pytest.approx(1.2)
     assert r2.fold_pass_ratio == pytest.approx(0.75)
     assert r2.mdd_hybrid < r2.mdd_baseline
+    assert r2.growth_lcb_hybrid == pytest.approx(0.0)
+    assert r2.block_metrics == ()
 
 
 def test_layer2result_gate_blocked_with_blocker_reason() -> None:
@@ -519,6 +521,7 @@ def test_layer3result_frozen_fields() -> None:
         sharpe_baseline=1.0,
         mar_baseline=1.5,
         gate_passed=True,
+        blocker_reason="",
     )
 
     # Assert
@@ -532,7 +535,7 @@ def test_layer3result_frozen_fields() -> None:
     import dataclasses
 
     with pytest.raises(dataclasses.FrozenInstanceError):
-        r3.cagr = 0.99  # type: ignore[misc]
+        cast(Any, r3).cagr = 0.99
 
 
 def test_layer3result_gate_blocked() -> None:
@@ -548,11 +551,58 @@ def test_layer3result_gate_blocked() -> None:
         sharpe_baseline=1.2,
         mar_baseline=0.83,
         gate_passed=False,
+        blocker_reason="sharpe_rel",
     )
 
     # Assert
     assert r3.gate_passed is False
     assert r3.sharpe < r3.sharpe_baseline
+    assert r3.blocker_reason == "sharpe_rel"
+
+
+def test_resolve_holdout_span_uses_exclusive_end() -> None:
+    """Layer3 holdout span은 end를 right-exclusive로 계산해야 한다."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import _resolve_holdout_span
+
+    datetimes = np.array(
+        [
+            np.datetime64("2024-01-01T00:00:00"),
+            np.datetime64("2024-01-02T00:00:00"),
+            np.datetime64("2024-01-03T00:00:00"),
+            np.datetime64("2024-01-04T00:00:00"),
+            np.datetime64("2024-01-05T00:00:00"),
+            np.datetime64("2024-01-06T00:00:00"),
+        ],
+        dtype="datetime64[ns]",
+    )
+
+    ho_start, ho_end = _resolve_holdout_span(
+        datetimes,
+        "2024-01-05",
+        "2024-01-06",
+    )
+
+    assert ho_start == 4
+    assert ho_end == 6
+
+
+def test_resolve_holdout_span_raises_when_window_empty() -> None:
+    """Layer3 holdout span이 비면 ValueError 대신 Layer3WindowError를 올려야 한다."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import (
+        Layer3WindowError,
+        _resolve_holdout_span,
+    )
+
+    datetimes = np.array(
+        [
+            np.datetime64("2024-01-01T00:00:00"),
+            np.datetime64("2024-01-02T00:00:00"),
+        ],
+        dtype="datetime64[ns]",
+    )
+
+    with pytest.raises(Layer3WindowError, match="empty_holdout_window"):
+        _resolve_holdout_span(datetimes, "2024-01-03", "2024-01-03")
 
 
 # ---------------------------------------------------------------------------
@@ -2231,7 +2281,7 @@ def test_evaluate_outer_signal_opportunities_static_prediction_keeps_probe_witho
     cfg.l1_min_fold_ratio = 0.0
     cfg.l1_min_opportunity_timestamps = 1
     cfg.l1_min_realized_match_ratio = 1.0
-    vol = np.ones((20, 3), dtype=np.float64)
+    vol: np.ndarray = np.ones((20, 3), dtype=np.float64)
 
     result = evaluate_outer_signal_opportunities(
         opportunities=batch,
@@ -2301,7 +2351,7 @@ def test_evaluate_outer_signal_opportunities_fail_closed_on_unmatched_realized_r
     cfg.l1_min_fold_ratio = 0.0
     cfg.l1_min_opportunity_timestamps = 1
     cfg.l1_min_realized_match_ratio = 1.0
-    vol = np.ones((20, len(symbols)), dtype=np.float64)
+    vol: np.ndarray = np.ones((20, len(symbols)), dtype=np.float64)
 
     result = evaluate_outer_signal_opportunities(
         opportunities=batch,
@@ -2516,25 +2566,236 @@ def test_layer2_gate_all_pass_regression() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_layer2_allocation_config_friction_safety_mult_default() -> None:
-    """S5: Layer2AllocationConfig.friction_safety_mult 기본값=1.0."""
+def test_layer2_allocation_config_fixed_cost_safety_mult_default() -> None:
+    """S5: Layer2AllocationConfig.fixed_cost_safety_mult 기본값=1.25."""
     config = Layer2AllocationConfig()
 
-    assert config.friction_safety_mult == pytest.approx(1.0)
+    assert config.fixed_cost_safety_mult == pytest.approx(1.25)
 
 
-def test_layer2_allocation_config_from_mapping_parses_friction_safety_mult() -> None:
-    """S7: from_mapping({'friction_safety_mult': 1.5}) → 필드 정확 반영."""
-    params: dict[str, object] = {"kelly_fraction": 0.5, "friction_safety_mult": 1.5}
+def test_layer2_allocation_config_from_mapping_parses_fixed_cost_safety_mult() -> None:
+    """S7: from_mapping({'fixed_cost_safety_mult': 1.5}) → 필드 정확 반영."""
+    params: dict[str, object] = {"kelly_fraction": 0.5, "fixed_cost_safety_mult": 1.5}
 
     config = Layer2AllocationConfig.from_mapping(params)
 
     assert config.kelly_fraction == pytest.approx(0.5)
-    assert config.friction_safety_mult == pytest.approx(1.5)
+    assert config.fixed_cost_safety_mult == pytest.approx(1.5)
 
 
-def test_layer2_allocation_config_from_mapping_friction_safety_mult_default() -> None:
-    """S7b: friction_safety_mult 미지정 시 기본값 1.0."""
+def test_layer2_allocation_config_from_mapping_fixed_cost_safety_mult_default() -> None:
+    """S7b: fixed_cost_safety_mult 미지정 시 기본값 1.25."""
     config = Layer2AllocationConfig.from_mapping({})
 
-    assert config.friction_safety_mult == pytest.approx(1.0)
+    assert config.fixed_cost_safety_mult == pytest.approx(1.25)
+
+
+def test_layer2_allocation_config_from_mapping_rejects_legacy_friction_safety_mult() -> None:
+    """Legacy friction_safety_mult는 조용히 허용하지 않고 즉시 차단한다."""
+    with pytest.raises(ValueError, match="friction_safety_mult"):
+        Layer2AllocationConfig.from_mapping({"friction_safety_mult": 1.5})
+
+
+def test_layer2_allocation_config_from_mapping_parses_max_ann_vol_alias() -> None:
+    params: dict[str, object] = {"max_ann_vol": 0.18}
+
+    config = Layer2AllocationConfig.from_mapping(params)
+
+    assert config.max_ann_vol == pytest.approx(0.18)
+
+
+def test_compute_expected_layer2_edge_converts_gross_to_conservative_net() -> None:
+    """Layer2 gross edge를 holding/cost 기준 conservative net edge로 변환한다."""
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import compute_expected_layer2_edge
+
+    long_edge = compute_expected_layer2_edge(
+        side=1,
+        expected_gross_bps=12.0,
+        expected_net_bps=0.0,
+        expected_holding_bars=2,
+        execution_cost_bps=4.0,
+        edge_basis="gross",
+        fixed_cost_safety_mult=1.0,
+    )
+    short_edge = compute_expected_layer2_edge(
+        side=-1,
+        expected_gross_bps=12.0,
+        expected_net_bps=0.0,
+        expected_holding_bars=2,
+        execution_cost_bps=4.0,
+        edge_basis="gross",
+        fixed_cost_safety_mult=1.0,
+    )
+    clipped_edge = compute_expected_layer2_edge(
+        side=1,
+        expected_gross_bps=2.0,
+        expected_net_bps=0.0,
+        expected_holding_bars=1,
+        execution_cost_bps=4.0,
+        edge_basis="gross",
+        fixed_cost_safety_mult=1.0,
+    )
+
+    assert long_edge.signed_gross_bps_per_bar == pytest.approx(6.0)
+    assert long_edge.expected_cost_bps_per_bar == pytest.approx(2.0)
+    assert long_edge.signed_net_bps_per_bar == pytest.approx(4.0)
+    assert short_edge.signed_gross_bps_per_bar == pytest.approx(-6.0)
+    assert short_edge.signed_net_bps_per_bar == pytest.approx(-4.0)
+    assert clipped_edge.signed_net_bps_per_bar == pytest.approx(0.0)
+
+
+def test_build_directional_risk_matched_equal_weight_preserves_direction_and_risk() -> None:
+    """Directional EW baseline은 같은 방향을 유지하고 strategy ex-ante risk를 맞춘다."""
+    from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+        build_directional_risk_matched_equal_weight,
+    )
+
+    sigma = np.array([0.02, 0.04], dtype=np.float64)
+    strategy_weights = np.array([0.30, -0.10], dtype=np.float64)
+    baseline = build_directional_risk_matched_equal_weight(
+        signed_net_mu_bps=np.array([5.0, -3.0], dtype=np.float64),
+        strategy_weights=strategy_weights,
+        sigma=sigma,
+        btc_beta=np.zeros(2, dtype=np.float64),
+        caps=PortfolioCaps(gross=2.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=10.0),
+        bars_per_year=2190.0,
+    )
+
+    strategy_sigma = float(np.sqrt(np.dot(strategy_weights**2, sigma**2)))
+    baseline_sigma = float(np.sqrt(np.dot(baseline**2, sigma**2)))
+
+    assert baseline[0] > 0.0
+    assert baseline[1] < 0.0
+    assert baseline_sigma == pytest.approx(strategy_sigma, rel=1e-6, abs=1e-9)
+
+
+def test_run_awf_simulation_tracks_baseline_costs_and_diagnostics() -> None:
+    """Baseline turnover/cost는 baseline 자신의 이전 비중으로 추적되고 diagnostics가 노출된다."""
+    from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
+
+    n_bars = 5
+    datetimes = np.array(
+        [np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(n_bars)],
+        dtype="datetime64[ns]",
+    )
+    close = np.ones((n_bars, 2), dtype=np.float64) * 100.0
+
+    aligned = MagicMock()
+    aligned.close_2d = close
+    aligned.symbols = ("BTC", "ETH")
+    aligned.datetimes = datetimes
+    aligned.funding_2d = np.zeros((n_bars, 2), dtype=np.float64)
+    aligned.active_mask = np.ones((n_bars, 2), dtype=bool)
+    aligned.warm_mask = np.ones((n_bars, 2), dtype=bool)
+    aligned.entry_block_mask = np.zeros((n_bars, 2), dtype=bool)
+    aligned.kill_mask = np.zeros((n_bars, 2), dtype=bool)
+    aligned.execution_cost_bps_2d = np.full((n_bars, 2), 4.0, dtype=np.float64)
+    aligned.beta_vs_market_1d = np.zeros(2, dtype=np.float64)
+
+    signal_batch = ValidatedSignalBatch(
+        events=(
+            ValidatedSignalEvent(
+                decision_idx=0,
+                decision_time=datetimes[0],
+                symbol="BTC",
+                strategy_id="trend:fast",
+                activation_context="all",
+                side=1,
+                expected_net_bps=0.0,
+                expected_gross_bps=20.0,
+                q10_net_bps=0.0,
+                q10_gross_bps=10.0,
+                q90_net_bps=0.0,
+                q90_gross_bps=30.0,
+                expected_holding_bars=1,
+                reliability=0.9,
+                registry_version="test",
+                model_version="test",
+            ),
+            ValidatedSignalEvent(
+                decision_idx=0,
+                decision_time=datetimes[0],
+                symbol="ETH",
+                strategy_id="trend:fast",
+                activation_context="all",
+                side=-1,
+                expected_net_bps=0.0,
+                expected_gross_bps=5.0,
+                q10_net_bps=0.0,
+                q10_gross_bps=2.0,
+                q90_net_bps=0.0,
+                q90_gross_bps=8.0,
+                expected_holding_bars=1,
+                reliability=0.9,
+                registry_version="test",
+                model_version="test",
+            ),
+            ValidatedSignalEvent(
+                decision_idx=1,
+                decision_time=datetimes[1],
+                symbol="BTC",
+                strategy_id="trend:fast",
+                activation_context="all",
+                side=1,
+                expected_net_bps=0.0,
+                expected_gross_bps=5.0,
+                q10_net_bps=0.0,
+                q10_gross_bps=2.0,
+                q90_net_bps=0.0,
+                q90_gross_bps=8.0,
+                expected_holding_bars=1,
+                reliability=0.9,
+                registry_version="test",
+                model_version="test",
+            ),
+            ValidatedSignalEvent(
+                decision_idx=1,
+                decision_time=datetimes[1],
+                symbol="ETH",
+                strategy_id="trend:fast",
+                activation_context="all",
+                side=-1,
+                expected_net_bps=0.0,
+                expected_gross_bps=20.0,
+                q10_net_bps=0.0,
+                q10_gross_bps=10.0,
+                q90_net_bps=0.0,
+                q90_gross_bps=30.0,
+                expected_holding_bars=1,
+                reliability=0.9,
+                registry_version="test",
+                model_version="test",
+            ),
+        ),
+        start_idx=1,
+        end_idx=3,
+        symbols=("BTC", "ETH"),
+        registry_version="test",
+        model_version="test",
+    )
+    awf_folds = (
+        WFFold(fit_start=0, fit_end=1, cal_start=1, cal_end=1, oos_start=1, oos_end=4),
+    )
+    config = Layer2AllocationConfig(k_rank=2, rebalance_bars=1, no_trade_band=0.0)
+    caps = PortfolioCaps(gross=2.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=10.0)
+
+    sim = _run_awf_simulation(
+        signal_batch=signal_batch,
+        aligned=aligned,
+        awf_folds=awf_folds,
+        config=config,
+        caps=caps,
+    )
+
+    assert len(sim.all_turnovers) == 2
+    assert len(sim.all_turnovers_baseline) == 2
+    assert sim.all_turnovers_baseline[0] > 0.0
+    assert sim.all_turnovers_baseline[1] >= 0.0
+    assert sim.total_cost_baseline == pytest.approx(sum(sim.all_turnovers_baseline) * 4.0e-4)
+    assert sim.total_cost_hybrid >= sim.total_cost_baseline
+    assert len(sim.all_gross_exposures) == sim.rebalance_count
+    assert len(sim.all_net_exposures) == sim.rebalance_count
+    assert sim.block_rets_hybrid == tuple(tuple(block) for block in sim.fold_rets_hybrid)
+    assert sim.block_rets_baseline == tuple(tuple(block) for block in sim.fold_rets_baseline)

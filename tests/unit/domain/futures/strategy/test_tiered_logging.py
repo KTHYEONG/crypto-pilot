@@ -271,6 +271,17 @@ class TestFormatSystemStatus:
         assert "SKIP" not in result
         assert "BLOCKED" not in result
 
+    def test_l3_error_is_reported_separately(self) -> None:
+        """l3 error 상태는 L3_ERROR로 구분 표시."""
+        r1 = SimpleNamespace(gate_passed=True)
+        r2 = SimpleNamespace(gate_passed=True)
+        r3 = SimpleNamespace(gate_passed=False, blocker_reason="empty_holdout_window", status="L3_ERROR")
+
+        result = format_system_status(r1, r2, r3)
+
+        assert "L3_ERROR" in result
+        assert "empty_holdout_window" in result
+
 
 # ---------------------------------------------------------------------------
 # TI16: format_window_table
@@ -479,34 +490,67 @@ class TestFormatLayer2Table:
 class TestFormatLayer3Table:
     """format_layer3_table 기본 포맷 검증."""
 
-    def test_contains_holdout_dates_and_gate(self) -> None:
-        """호 기간 날짜와 게이트 상태 포함 검증."""
-        # Arrange
+    def test_uses_actual_layer3result_field_names(self) -> None:
+        """실제 Layer3Result 필드명(cagr/mdd/sharpe/...) 기준으로 렌더링."""
         r3 = SimpleNamespace(
-            cagr_hybrid=0.45,
-            mdd_hybrid=0.15,
-            sharpe_hybrid=1.8,
-            mar_hybrid=3.0,
-            cagr_1n=0.30,
-            mdd_1n=0.20,
-            sharpe_1n=1.2,
-            mar_1n=1.5,
-            cagr_vs=0.15,
-            mdd_vs=-0.05,
-            sharpe_vs=0.6,
-            mar_vs=1.5,
+            cagr=0.45,
+            mdd=0.15,
+            sharpe=1.8,
+            mar=3.0,
+            cagr_baseline=0.30,
+            mdd_baseline=0.20,
+            sharpe_baseline=1.2,
+            mar_baseline=1.5,
             gate_passed=True,
         )
 
-        # Act
         result = format_layer3_table(r3, ho_start="2025-07-01", ho_end="2026-01-01")
 
-        # Assert
         assert "2025-07-01" in result
         assert "2026-01-01" in result
+        assert "FINAL HOLDOUT SCORECARD" in result
+        assert "Strategy" in result
+        assert "Baseline" in result
+        assert "Delta" in result
         assert "PASS" in result
-        assert "L1+L2 Hybrid" in result
-        assert "1/N Baseline" in result
+        assert "45.0%" in result
+        assert "30.0%" in result
+        assert "+0.60" in result
+
+    def test_blocked_shows_blocker_reason(self) -> None:
+        """gate_passed=False + blocker_reason이면 BLOCKED 요약 표시."""
+        r3 = SimpleNamespace(
+            cagr=0.08,
+            mdd=0.18,
+            sharpe=0.9,
+            mar=0.44,
+            cagr_baseline=0.10,
+            mdd_baseline=0.16,
+            sharpe_baseline=1.1,
+            mar_baseline=0.63,
+            gate_passed=False,
+            blocker_reason="growth_lcb",
+        )
+
+        result = format_layer3_table(r3, ho_start="2025-07-01", ho_end="2026-01-01")
+
+        assert "FINAL STATUS: BLOCKED (growth_lcb)" in result
+        assert "[BLOCKED]" in result
+
+    def test_error_renders_summary_instead_of_metric_table(self) -> None:
+        """error 상태면 메트릭 표 대신 짧은 error summary 출력."""
+        r3 = SimpleNamespace(
+            gate_passed=False,
+            blocker_reason="no_holdout_signals",
+            status="ERROR",
+        )
+
+        result = format_layer3_table(r3, ho_start="2025-07-01", ho_end="2026-01-01")
+
+        assert "Error Summary" in result
+        assert "no_holdout_signals" in result
+        assert "Metric           Strategy" not in result
+        assert "FINAL STATUS: ERROR (no_holdout_signals)" in result
 
 
 # ---------------------------------------------------------------------------
