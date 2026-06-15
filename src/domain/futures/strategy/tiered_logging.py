@@ -578,56 +578,173 @@ def format_layer2_table(
 def format_layer3_table(
     r: Any,
     *,
-    ho_start: str,
-    ho_end: str,
+    ho_start: str | None = None,
+    ho_end: str | None = None,
+    holdout_start: str | None = None,
+    holdout_end: str | None = None,
 ) -> str:
-    """Format Layer 3 (Hold-out Backtest) result as pipe-table string (§9.4).
+    """Format Layer 3 holdout result as a compact scorecard (§9.4).
 
     Args:
         r: Layer3Result-compatible object with fields:
-            cagr_hybrid, mdd_hybrid, sharpe_hybrid, mar_hybrid,
-            cagr_1n, mdd_1n, sharpe_1n, mar_1n,
-            cagr_vs, mdd_vs, sharpe_vs, mar_vs,
-            gate_passed.
-        ho_start: Hold-out start date string (ISO format).
-        ho_end: Hold-out end date string (ISO format).
+            cagr, mdd, sharpe, mar, cagr_baseline, mdd_baseline,
+            sharpe_baseline, mar_baseline, gate_passed, blocker_reason.
+        ho_start: Legacy hold-out start date string (ISO format).
+        ho_end: Legacy hold-out end date string (ISO format).
+        holdout_start: Preferred hold-out start date string (ISO format).
+        holdout_end: Preferred hold-out end date string (ISO format).
 
     Returns:
-        Multi-line pipe-table string for Layer 3 hold-out diagnostics.
+        Multi-line fixed-width scorecard string for Layer 3 hold-out diagnostics.
 
     Time Complexity: O(1).
     Space Complexity: O(1).
     """
-    gate_str: str = _gate(r.gate_passed)
+    start = holdout_start or ho_start or "—"
+    end = holdout_end or ho_end or "—"
 
-    cagr_h: float = getattr(r, "cagr_hybrid", 0.0)
-    mdd_h: float = getattr(r, "mdd_hybrid", 0.0)
-    sharpe_h: float = getattr(r, "sharpe_hybrid", 0.0)
-    mar_h: float = getattr(r, "mar_hybrid", 0.0)
+    def _resolve_status(result: Any) -> tuple[str, str]:
+        blocker = str(
+            getattr(result, "blocker_reason", "")
+            or getattr(result, "blocker", "")
+            or ""
+        )
+        raw_status = str(getattr(result, "status", "") or "").upper()
+        if raw_status == "L3_ERROR":
+            return "ERROR", blocker or "layer3_execution_error"
+        if raw_status in {"ERROR", "BLOCKED", "PASS"}:
+            return raw_status, blocker
+        if bool(getattr(result, "error", False) or getattr(result, "errored", False)):
+            return "ERROR", blocker or "layer3_execution_error"
+        if bool(getattr(result, "gate_passed", False)):
+            return "PASS", blocker
+        if blocker:
+            return "BLOCKED", blocker
+        return "BLOCKED", ""
 
-    cagr_1n: float = getattr(r, "cagr_1n", 0.0)
-    mdd_1n: float = getattr(r, "mdd_1n", 0.0)
-    sharpe_1n: float = getattr(r, "sharpe_1n", 0.0)
-    mar_1n: float = getattr(r, "mar_1n", 0.0)
+    def _fmt_ratio(v: float) -> str:
+        return f"{v:+.2f}"
 
-    cagr_vs: float = getattr(r, "cagr_vs", cagr_h - cagr_1n)
-    mdd_vs: float = getattr(r, "mdd_vs", mdd_h - mdd_1n)
-    sharpe_vs: float = getattr(r, "sharpe_vs", sharpe_h - sharpe_1n)
-    mar_vs: float = getattr(r, "mar_vs", mar_h - mar_1n)
+    def _fmt_bps(v: float) -> str:
+        return f"{v / 100:+.1%}"
 
+    def _metric_row(
+        label: str,
+        strategy: float,
+        baseline: float | None,
+        *,
+        formatter: Any,
+        lower_is_better: bool = False,
+        force_gate: str | None = None,
+    ) -> str:
+        baseline_str = "—" if baseline is None else formatter(baseline)
+        delta_str = "—" if baseline is None else formatter(strategy - baseline)
+        gate = force_gate or (
+            "—"
+            if baseline is None
+            else _gate(strategy <= baseline if lower_is_better else strategy >= baseline)
+        )
+        return (
+            f"  {label:<14} "
+            f"{formatter(strategy):>12} "
+            f"{baseline_str:>12} "
+            f"{delta_str:>12} "
+            f"{gate:>8}"
+        )
+
+    status, blocker = _resolve_status(r)
+    final_status = status if not blocker else f"{status} ({blocker})"
     lines: list[str] = [
-        f"[LAYER 3: HOLD-OUT BACKTEST ({ho_start} ~ {ho_end})] --------",
-        "| Model         |   CAGR  |  MaxDD  |  Sharpe |   MAR   | Pass        |",
-        "| ------------- | ------- | ------- | ------- | ------- | ----------- |",
-        f"| L1+L2 Hybrid  | {_pct(cagr_h):<7} | {_pct(mdd_h):<7}"
-        f" | {sharpe_h:.2f}    | {mar_h:.2f}    | {gate_str:<11} |",
-        f"| 1/N Baseline  | {_pct(cagr_1n):<7} | {_pct(mdd_1n):<7}"
-        f" | {sharpe_1n:.2f}    | {mar_1n:.2f}    | {'—':<11} |",
-        f"| vs Baseline   | {_pct(cagr_vs):<7} | {_pct(mdd_vs):<7}"
-        f" | {sharpe_vs:.2f}    | {mar_vs:.2f}    | {gate_str:<11} |",
-        f"| L3 Gate       | {'—':<7} | {'—':<7} | {'—':<7} | {'—':<7} | {gate_str:<11} |",
-        "------------------------------------------------------",
+        f"[LAYER 3: HOLDOUT VALIDATION {start} ~ {end}]",
+        "",
+        f"  [ FINAL HOLDOUT SCORECARD ] [{status}]",
     ]
+    if status == "ERROR":
+        lines.extend(
+            [
+                f"  Error Summary   {blocker or 'layer3_execution_error'}",
+                "",
+                f"  FINAL STATUS: {final_status}",
+            ]
+        )
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            "  Metric           Strategy     Baseline        Delta     Gate",
+            _metric_row(
+                "CAGR",
+                float(getattr(r, "cagr", 0.0)),
+                float(getattr(r, "cagr_baseline", 0.0)),
+                formatter=_pct,
+            ),
+            _metric_row(
+                "MDD",
+                float(getattr(r, "mdd", 0.0)),
+                float(getattr(r, "mdd_baseline", 0.0)),
+                formatter=_pct,
+                lower_is_better=True,
+            ),
+            _metric_row(
+                "Sharpe",
+                float(getattr(r, "sharpe", 0.0)),
+                float(getattr(r, "sharpe_baseline", 0.0)),
+                formatter=_fmt_ratio,
+            ),
+            _metric_row(
+                "MAR",
+                float(getattr(r, "mar", 0.0)),
+                float(getattr(r, "mar_baseline", 0.0)),
+                formatter=_fmt_ratio,
+            ),
+        ]
+    )
+
+    optional_metrics: list[str] = []
+    if hasattr(r, "growth_lcb") or hasattr(r, "growth_lcb_baseline"):
+        optional_metrics.append(
+            _metric_row(
+                "Growth LCB",
+                float(getattr(r, "growth_lcb", 0.0)),
+                float(getattr(r, "growth_lcb_baseline", 0.0)),
+                formatter=_pct,
+            )
+        )
+    if hasattr(r, "sharpe_hac") or hasattr(r, "sharpe_hac_baseline"):
+        optional_metrics.append(
+            _metric_row(
+                "Sharpe(HAC)",
+                float(getattr(r, "sharpe_hac", 0.0)),
+                float(getattr(r, "sharpe_hac_baseline", 0.0)),
+                formatter=_fmt_ratio,
+            )
+        )
+    if hasattr(r, "cvar_95") or hasattr(r, "cvar_95_baseline"):
+        optional_metrics.append(
+            _metric_row(
+                "CVaR(95)",
+                float(getattr(r, "cvar_95", 0.0)),
+                float(getattr(r, "cvar_95_baseline", 0.0)),
+                formatter=_pct,
+                lower_is_better=True,
+            )
+        )
+    if hasattr(r, "total_cost_bps"):
+        baseline_cost = getattr(r, "total_cost_bps_baseline", None)
+        baseline_value = None if baseline_cost is None else float(baseline_cost)
+        optional_metrics.append(
+            _metric_row(
+                "Cost Drag",
+                float(getattr(r, "total_cost_bps", 0.0)),
+                baseline_value,
+                formatter=_fmt_bps,
+                lower_is_better=True,
+            )
+        )
+    if optional_metrics:
+        lines.extend(optional_metrics)
+
+    lines.extend(["", f"  FINAL STATUS: {final_status}"])
     return "\n".join(lines)
 
 
@@ -659,11 +776,18 @@ def format_system_status(
             return "SKIP", "—"
         if r is None:
             return "SKIP", "—"
+        raw_status = str(getattr(r, "status", "") or "").upper()
+        blocker: str = str(
+            getattr(r, "blocker_reason", "")
+            or getattr(r, "blocker", "")
+            or "—"
+        )
+        if raw_status == "L3_ERROR" or bool(getattr(r, "error", False) or getattr(r, "errored", False)):
+            return "L3_ERROR", blocker
         passed: bool = getattr(r, "gate_passed", False)
         if passed:
             return "PASS", "—"
-        blocker: str = getattr(r, "blocker_reason", "gate_passed=False")
-        return "BLOCKED", blocker
+        return "BLOCKED", blocker if blocker != "—" else "gate_passed=False"
 
     l1_status, l1_blocker = _layer_status(l1, skip_if_none=False)
     l2_status, l2_blocker = _layer_status(l2)
