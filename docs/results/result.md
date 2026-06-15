@@ -134,3 +134,42 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
   #15 | ANKRUSDT | trend_ma (ema_12_72)           |     +46.5 | ★★★☆☆ 2.18 |  0.437  | WATCH
   #16 | CRVUSDT  | trend_ma (ema_12_72)           |     +69.2 | ★★★☆☆ 2.10 |  0.939  | REJECTED
 --------------------------------------------------------------------------------------------
+
+>> LAYER 1 RESULT: [PASS] -> Proceeding to Layer 2.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+● [LAYER 2: PORTFOLIO ALLOCATION & RISK OPTIMIZATION]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+● [AWF PORTFOLIO PERFORMANCE SCORECARD]
+──────────────────────────────────────────────────────────────────────────────
+
+  [ RETURN & EFFICIENCY ]
+  ──────────────────────────────────────────────────────────────────────────
+  Metric                   Strategy    ( 1/N Base )            Gate   Status
+  ──────────────────────────────────────────────────────────────────────────
+  CAGR                 [      nan ] (     -62.0% )          > 0.0%       ❌
+  Sharpe               [      nan ] (     -0.848 )         >= 0.50       ❌
+  MAR (CAGR/MDD)       [      nan ] (     -0.919 )         >= 0.50       ❌
+
+  [ RISK & UPLIFT ]
+  ──────────────────────────────────────────────────────────────────────────
+  MDD                  [     nan% ] (      67.5% )        <= 50.0%       ❌
+  Sharpe Uplift        [      nan ] (       Base )        >= +0.20       ❌
+  Turnover / Rebal     [    0.000 ] (          — )               —       —
+
+  [ ROBUSTNESS & DIAGNOSTICS ]
+  ──────────────────────────────────────────────────────────────────────────
+  Fold Pass Ratio      [     0.0% ] (          — )        >= 60.0%       ❌
+  Friction Pass%       [     0.0% ] (          — )               —       —
+  ──────────────────────────────────────────────────────────────────────────
+
+  >> FINAL RESULT : BLOCKED (no_deployment)
+
+  [ FOLD DETAIL BREAKDOWN ]
+  ──────────────────────────────────────────────────────────────────────────
+  ├─ Fold #1 : ❌ Sharpe:    nan | MDD:    nan% | Status: FAIL
+  ├─ Fold #2 : ❌ Sharpe:    nan | MDD:    nan% | Status: FAIL
+  └─ Fold #3 : ❌ Sharpe:    nan | MDD:    nan% | Status: FAIL
+
+>> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False
+[PHASE] phase=l2 completed strategy/candidate evaluation only; optimization/training skipped

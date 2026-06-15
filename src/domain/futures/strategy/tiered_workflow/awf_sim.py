@@ -52,6 +52,8 @@ def _run_awf_simulation(
     l2_params: dict[str, Any],
     caps: PortfolioCaps,
     tf: str = "4h",
+    signals_per_fold: tuple[dict[str, SymbolSignal], ...] | None = None,
+    l1_outer_folds: tuple[WFFold, ...] | None = None,
 ) -> _AwfSimResult:
     """AWF 시뮬레이션 핵심 루프 (L2/L3 공용)."""
     import logging
@@ -98,7 +100,7 @@ def _run_awf_simulation(
     last_selected: frozenset[str] = frozenset()
     last_w: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
 
-    for fold in awf_folds:
+    for _fold_idx, fold in enumerate(awf_folds):
         _fold_h: list[float] = []
         _fold_b: list[float] = []
         for t in range(fold.oos_start, fold.oos_end - 1, rebalance_bars):
@@ -106,7 +108,20 @@ def _run_awf_simulation(
 
             t0_prep = time.perf_counter()
             valid_signals: dict[str, SymbolSignal] = {}
-            for sym, sig in l1_oos.items():
+            
+            fold_sigs = l1_oos
+            if signals_per_fold is not None and l1_outer_folds is not None:
+                matched_idx = None
+                for f_idx, f in enumerate(l1_outer_folds):
+                    if f.oos_start <= t < f.oos_end:
+                        matched_idx = f_idx
+                        break
+                if matched_idx is not None and matched_idx < len(signals_per_fold):
+                    fold_sigs = signals_per_fold[matched_idx]
+            if not fold_sigs and l1_oos:
+                fold_sigs = l1_oos
+
+            for sym, sig in fold_sigs.items():
                 if sym not in sym_to_idx:
                     continue
                 i = sym_to_idx[sym]
@@ -147,12 +162,14 @@ def _run_awf_simulation(
                 and t < aligned.execution_cost_bps_2d.shape[0]
             ):
                 hurdle = aligned.execution_cost_bps_2d[t].astype(np.float64)
+                hurdle = np.nan_to_num(hurdle, nan=3.8, posinf=3.8, neginf=3.8)
             else:
                 hurdle = np.full(n_sym, 3.8, dtype=np.float64)
 
             btc_beta: NDArray[np.float64] | None = None
             if aligned.beta_vs_market_1d is not None:
                 btc_beta = aligned.beta_vs_market_1d.astype(np.float64)
+                btc_beta = np.nan_to_num(btc_beta, nan=0.0)
 
             w = diagonal_kelly_weights(
                 mu_bps=mu_arr,
@@ -201,6 +218,7 @@ def _run_awf_simulation(
                 c_cur = aligned.close_2d[t2]
                 c_nxt = aligned.close_2d[t2 + 1]
                 bar_ret = np.where(c_cur > 0, (c_nxt - c_cur) / c_cur, 0.0)
+                bar_ret = np.nan_to_num(bar_ret, nan=0.0, posinf=0.0, neginf=0.0)
                 gross_ret = float(np.dot(w, bar_ret))
                 # 거래비용은 리밸런싱 첫 bar에만 차감
                 cost = rebal_cost if t2 == t else 0.0
