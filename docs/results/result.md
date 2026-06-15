@@ -147,29 +147,29 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
   ──────────────────────────────────────────────────────────────────────────
   Metric                   Strategy    ( 1/N Base )            Gate   Status
   ──────────────────────────────────────────────────────────────────────────
-  CAGR                 [      nan ] (     -62.0% )          > 0.0%       ❌
-  Sharpe               [      nan ] (     -0.848 )         >= 0.50       ❌
-  MAR (CAGR/MDD)       [      nan ] (     -0.919 )         >= 0.50       ❌
+  CAGR                 [   -46.9% ] (     -62.0% )          > 0.0%       ❌
+  Sharpe               [   -0.906 ] (     -0.848 )         >= 0.50       ❌
+  MAR (CAGR/MDD)       [   -1.174 ] (     -0.919 )         >= 0.50       ❌
 
   [ RISK & UPLIFT ]
   ──────────────────────────────────────────────────────────────────────────
-  MDD                  [     nan% ] (      67.5% )        <= 50.0%       ❌
-  Sharpe Uplift        [      nan ] (       Base )        >= +0.20       ❌
-  Turnover / Rebal     [    0.000 ] (          — )               —       —
+  MDD                  [    40.0% ] (      67.5% )        <= 50.0%       ✅
+  Sharpe Uplift        [    -0.06 ] (       Base )        >= +0.20       ❌
+  Turnover / Rebal     [    0.008 ] (          — )               —       —
 
   [ ROBUSTNESS & DIAGNOSTICS ]
   ──────────────────────────────────────────────────────────────────────────
-  Fold Pass Ratio      [     0.0% ] (          — )        >= 60.0%       ❌
-  Friction Pass%       [     0.0% ] (          — )               —       —
+  Fold Pass Ratio      [    33.3% ] (          — )        >= 60.0%       ❌
+  Friction Pass%       [   100.0% ] (          — )               —       —
   ──────────────────────────────────────────────────────────────────────────
 
-  >> FINAL RESULT : BLOCKED (no_deployment)
+  >> FINAL RESULT : BLOCKED (cagr)
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ❌ Sharpe:    nan | MDD:    nan% | Status: FAIL
-  ├─ Fold #2 : ❌ Sharpe:    nan | MDD:    nan% | Status: FAIL
-  └─ Fold #3 : ❌ Sharpe:    nan | MDD:    nan% | Status: FAIL
+  ├─ Fold #1 : ❌ Sharpe: -2.979 | MDD:   36.0% | Status: FAIL
+  ├─ Fold #2 : ✅ Sharpe:  0.934 | MDD:   21.6% | Status: PASS
+  └─ Fold #3 : ❌ Sharpe: -0.344 | MDD:   31.5% | Status: FAIL
 
 >> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False
 [PHASE] phase=l2 completed strategy/candidate evaluation only; optimization/training skipped
