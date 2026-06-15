@@ -299,6 +299,7 @@ def _make_l2result(**kwargs: Any) -> Layer2Result:
         "friction_pass_pct": 0.8,
         "gate_passed": True,
         "blocker_reason": "",
+        "psr_hybrid": 0.92,
     }
     defaults.update(kwargs)
     return Layer2Result(**defaults)
@@ -2391,6 +2392,44 @@ def test_metrics_sharpe_and_cagr_stability() -> None:
     assert np.isnan(_mdd(nan_rets))
 
 
+def test_psr_normal_distribution_coefficient() -> None:
+    """PSR 분모 계수 정합성: 정규분포 입력 시 (kurt+2)/4 적용 검증.
+
+    Bailey & López de Prado (2012): denom = 1 - skew*SR + (γ₄-1)/4 * SR²
+    scipy fisher=True → κ = γ₄-3, 따라서 (γ₄-1)/4 = (κ+2)/4.
+    정규분포: skew=0, kurt(excess)≈0 → denom ≈ 1 + 2/4 * SR² (not 1/4).
+    """
+    import numpy as np
+    from scipy.special import ndtr
+    from scipy.stats import kurtosis as _kurt
+    from scipy.stats import skew as _skew
+
+    from src.domain.futures.strategy.tiered_workflow.metrics import _psr
+
+    rng = np.random.default_rng(42)
+    rets = list(rng.normal(loc=0.005, scale=0.02, size=500))
+
+    psr_result = _psr(rets)
+
+    # 수동 계산으로 (kurt+2)/4 계수 검증
+    arr = np.asarray(rets, dtype=np.float64)
+    sr_obs = float(np.mean(arr)) / float(np.std(arr, ddof=1))
+    n = len(arr)
+    skew_val = float(_skew(arr))
+    kurt_val = float(_kurt(arr, fisher=True))
+    denom_correct = 1.0 - skew_val * sr_obs + (kurt_val + 2.0) / 4.0 * sr_obs**2
+    denom_wrong   = 1.0 - skew_val * sr_obs + (kurt_val + 1.0) / 4.0 * sr_obs**2
+    z_correct = (sr_obs - 0.0) * np.sqrt(n - 1) / np.sqrt(denom_correct)
+    expected_psr = float(ndtr(z_correct))
+
+    assert psr_result == pytest.approx(expected_psr, rel=1e-6), (
+        f"PSR mismatch: got {psr_result:.6f}, expected {expected_psr:.6f}. "
+        f"Wrong denom would give {float(ndtr((sr_obs) * np.sqrt(n-1) / np.sqrt(denom_wrong))):.6f}"
+    )
+    # PSR ∈ (0, 1)
+    assert 0.0 < psr_result < 1.0
+
+
 def test_rank_and_select_allows_empty_selection_when_all_candidates_fail_threshold() -> None:
     """Scenario 3: 적격 후보가 없으면 K_RANK를 강제하지 않고 빈 선택을 허용해야 한다."""
     rank_and_select_fn = cast(Any, rank_and_select)
@@ -2410,3 +2449,62 @@ def test_rank_and_select_allows_empty_selection_when_all_candidates_fail_thresho
 
     assert selected == frozenset()
     assert set(z_scores) == {"BTC", "ETH"}
+
+
+# ---------------------------------------------------------------------------
+# S7~S11: Layer2 게이트 재보정 시나리오 (spec: layer2-gate-recalibration.md)
+# ---------------------------------------------------------------------------
+
+
+def test_layer2_gate_blocked_psr_too_low() -> None:
+    """S7: PSR < 0.90 → gate_passed=False, blocker_reason='psr'."""
+    # Arrange / Act
+    r = _make_l2result(gate_passed=False, blocker_reason="psr", psr_hybrid=0.75)
+
+    # Assert
+    assert r.blocker_reason == "psr"
+    assert not r.gate_passed
+    assert r.psr_hybrid == pytest.approx(0.75)
+
+
+def test_layer2_gate_blocked_friction_too_low() -> None:
+    """S8: Friction < 0.50 → gate_passed=False, blocker_reason='friction'."""
+    # Arrange / Act
+    r = _make_l2result(gate_passed=False, blocker_reason="friction", friction_pass_pct=0.30)
+
+    # Assert
+    assert r.blocker_reason == "friction"
+    assert not r.gate_passed
+
+
+def test_layer2_gate_blocked_mdd_abs_new_threshold() -> None:
+    """S9: mdd_hybrid=0.25 (>0.20 신규 cap, <0.50 이전 기준 통과) → 차단 검증."""
+    # Arrange / Act: mdd_hybrid=0.25는 신규 기준 0.20 초과 → mdd_abs 차단
+    r = _make_l2result(gate_passed=False, blocker_reason="mdd_abs", mdd_hybrid=0.25)
+
+    # Assert
+    assert r.blocker_reason == "mdd_abs"
+    assert not r.gate_passed
+    assert r.mdd_hybrid == pytest.approx(0.25)
+
+
+def test_layer2_gate_blocked_sharpe_new_threshold() -> None:
+    """S10: Sharpe=0.8 (신규 기준 1.0 미달) → sharpe_abs 차단 검증."""
+    # Arrange / Act
+    r = _make_l2result(gate_passed=False, blocker_reason="sharpe_abs", sharpe_hybrid=0.8)
+
+    # Assert
+    assert r.blocker_reason == "sharpe_abs"
+    assert not r.gate_passed
+    assert r.sharpe_hybrid == pytest.approx(0.8)
+
+
+def test_layer2_gate_all_pass_regression() -> None:
+    """S11 회귀: 전 게이트 통과 시 gate_passed=True, blocker_reason='' 검증."""
+    # Arrange / Act
+    r = _make_l2result(gate_passed=True, blocker_reason="", psr_hybrid=0.92)
+
+    # Assert
+    assert r.gate_passed
+    assert r.blocker_reason == ""
+    assert r.psr_hybrid == pytest.approx(0.92)
