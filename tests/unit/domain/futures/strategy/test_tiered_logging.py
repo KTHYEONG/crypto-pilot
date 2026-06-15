@@ -355,6 +355,7 @@ def _make_l2_ns(**kwargs: object) -> SimpleNamespace:
         "friction_pass_pct": 0.75,
         "gate_passed": True,
         "blocker_reason": "",
+        "psr_hybrid": 0.92,
     }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
@@ -390,8 +391,8 @@ class TestFormatLayer2Table:
         assert "BLOCKED" in result
         assert "cagr" in result
 
-    def test_friction_shown_as_diagnostic(self) -> None:
-        """friction_pass_pct는 게이트 임계 없이 (diagnostic) 표기 검증."""
+    def test_friction_shown_as_gate(self) -> None:
+        """friction_pass_pct는 >= 50.0% 게이트로 표기 검증."""
         # Arrange
         r2 = _make_l2_ns(friction_pass_pct=0.30)
 
@@ -400,7 +401,8 @@ class TestFormatLayer2Table:
 
         # Assert
         assert "Friction" in result
-        assert "diag" in result.lower() or "—" in result
+        assert ">= 50.0%" in result
+        assert "❌" in result  # friction_pass_pct=0.30 < 0.50
 
     def test_uplift_gate_shown_as_additive(self) -> None:
         """Sharpe Uplift 임계가 가산식 (base+0.20) 으로 표기됨 검증."""
@@ -437,6 +439,41 @@ class TestFormatLayer2Table:
 
         # Assert
         assert "nan" in result
+
+    def test_format_layer2_table_uses_ew_bench_header(self) -> None:
+        """헤더가 'EW Bench'로 표기되고 '1/N Base'는 없어야 함."""
+        # Arrange
+        r2 = _make_l2_ns()
+
+        # Act
+        result = format_layer2_table(r2)
+
+        # Assert
+        assert "EW Bench" in result
+        assert "1/N Base" not in result
+
+    def test_format_layer2_table_mar_na_when_cagr_negative(self) -> None:
+        """cagr_hybrid < 0이면 MAR 셀에 'n/a(loss)' 표기 검증."""
+        # Arrange
+        r2 = _make_l2_ns(cagr_hybrid=-0.10, mar_hybrid=-2.0)
+
+        # Act
+        result = format_layer2_table(r2)
+
+        # Assert
+        assert "n/a(loss)" in result
+
+    def test_format_layer2_table_psr_gate_shown(self) -> None:
+        """PSR 행이 표시되고 psr_hybrid=0.85 < 0.90이면 ❌ 상태 검증."""
+        # Arrange
+        r2 = _make_l2_ns(psr_hybrid=0.85)
+
+        # Act
+        result = format_layer2_table(r2)
+
+        # Assert
+        assert "PSR" in result
+        assert "❌" in result  # psr_hybrid=0.85 < 0.90
 
 
 class TestFormatLayer3Table:

@@ -151,6 +151,7 @@ class Layer2Result:
     friction_pass_pct: float
     gate_passed: bool
     blocker_reason: str
+    psr_hybrid: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -164,12 +165,14 @@ class Layer2AllocationConfig:
     rank_buffer: int = 1
     no_trade_band: float = 0.01
     vol_target: float | None = None
-    l2_min_cagr: float = 0.0
-    l2_min_mar: float = 0.5
-    l2_min_sharpe_abs: float = 0.5
-    l2_max_mdd_abs: float = 0.50
+    l2_min_cagr: float = 0.15
+    l2_min_mar: float = 1.0
+    l2_min_sharpe_abs: float = 1.0
+    l2_max_mdd_abs: float = 0.20
     l2_min_fold_pass_ratio: float = 0.60
     l2_min_sharpe_uplift: float = 0.20
+    l2_min_psr: float = 0.90
+    l2_min_friction_pass: float = 0.50
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -198,12 +201,14 @@ class Layer2AllocationConfig:
             rank_buffer=cls._as_int(params.get("rank_buffer", 1), 1),
             no_trade_band=cls._as_float(params.get("no_trade_band", 0.01), 0.01),
             vol_target=vol_target,
-            l2_min_cagr=cls._as_float(params.get("l2_min_cagr", 0.0), 0.0),
-            l2_min_mar=cls._as_float(params.get("l2_min_mar", 0.5), 0.5),
-            l2_min_sharpe_abs=cls._as_float(params.get("l2_min_sharpe_abs", 0.5), 0.5),
-            l2_max_mdd_abs=cls._as_float(params.get("l2_max_mdd_abs", 0.50), 0.50),
+            l2_min_cagr=cls._as_float(params.get("l2_min_cagr", 0.15), 0.15),
+            l2_min_mar=cls._as_float(params.get("l2_min_mar", 1.0), 1.0),
+            l2_min_sharpe_abs=cls._as_float(params.get("l2_min_sharpe_abs", 1.0), 1.0),
+            l2_max_mdd_abs=cls._as_float(params.get("l2_max_mdd_abs", 0.20), 0.20),
             l2_min_fold_pass_ratio=cls._as_float(params.get("l2_min_fold_pass_ratio", 0.60), 0.60),
             l2_min_sharpe_uplift=cls._as_float(params.get("l2_min_sharpe_uplift", 0.20), 0.20),
+            l2_min_psr=cls._as_float(params.get("l2_min_psr", 0.90), 0.90),
+            l2_min_friction_pass=cls._as_float(params.get("l2_min_friction_pass", 0.50), 0.50),
         )
 
 
