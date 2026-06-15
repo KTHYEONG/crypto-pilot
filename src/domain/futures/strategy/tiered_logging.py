@@ -443,71 +443,66 @@ def format_layer2_table(
     awf_folds: list[dict[str, Any]] | None = None,
     topk_selection: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Format Layer 2 (AWF) result as pipe-table string (§9.3).
+    """Layer2 AWF 결과 로그 테이블.
 
     Args:
-        r: Layer2Result-compatible object with fields:
-            top_k, friction_pass_pct, sharpe_hybrid, sharpe_1n,
-            mdd_hybrid, mdd_1n, avg_active_positions, turnover,
-            gate_passed.
-        awf_folds: Optional list of dicts with keys:
-            fold, sharpe, mdd, active_pos, pass.
-        topk_selection: Optional list of dicts with keys:
-            rank, symbol, score, selected.
+        r: Layer2Result (sharpe_hybrid, sharpe_baseline, mdd_hybrid,
+           mdd_baseline, turnover, friction_pass_pct, gate_passed 필드 필요).
+        awf_folds: Optional fold 상세 (fold, sharpe, mdd, pass 키).
+        topk_selection: Optional Top-K 선택 (rank, symbol, score, selected 키).
 
     Returns:
-        Multi-line pipe-table string for Layer 2 diagnostics.
+        Multi-line 파이프 테이블 문자열.
 
     Time Complexity: O(n) where n = len(awf_folds) + len(topk_selection).
     Space Complexity: O(n).
     """
-    gate_str: str = _gate(r.gate_passed)
-    sharpe_vs: float = getattr(r, "sharpe_hybrid", 0.0) - getattr(r, "sharpe_1n", 0.0)
-    mdd_reduced: bool = getattr(r, "mdd_hybrid", 1.0) < getattr(r, "mdd_1n", 1.0)
-    mdd_reduced_str: str = "Y" if mdd_reduced else "N"
+    sharpe_h: float = getattr(r, "sharpe_hybrid", 0.0)
+    sharpe_b: float = getattr(r, "sharpe_baseline", 0.0)
+    mdd_h: float = getattr(r, "mdd_hybrid", 0.0)
+    mdd_b: float = getattr(r, "mdd_baseline", 0.0)
+    turnover: float = getattr(r, "turnover", 0.0)
+    friction_pct: float = getattr(r, "friction_pass_pct", 0.0)
+    gate_passed: bool = getattr(r, "gate_passed", False)
+
+    # 실제 게이트 조건: sharpe_h >= sharpe_b*1.20 AND mdd_h <= mdd_b
+    sharpe_gate = f">={sharpe_b * 1.20:.2f}"
+    mdd_gate = f"<={_pct(mdd_b)}"
+    gate_str: str = _gate(gate_passed)
 
     lines: list[str] = [
-        "[LAYER 2: AWF PORTFOLIO VALIDATION] -----------------",
-        "| Metric                 | Value   | Gate  | Status      |",
-        "| ---------------------- | ------- | ----- | ----------- |",
-        f"| Top-K                  | {getattr(r, 'top_k', 0):<7} | —     | {'—':<11} |",
-        f"| Friction Filter Pass%  | {_pct(getattr(r, 'friction_pass_pct', 0.0)):<7} | >50%  | {'—':<11} |",
-        f"| Sharpe (Hybrid)        | {getattr(r, 'sharpe_hybrid', 0.0):.2f}    | >1.0  | {'—':<11} |",
-        f"| Sharpe (1/N)           | {getattr(r, 'sharpe_1n', 0.0):.2f}    | —     | {'—':<11} |",
-        f"| Sharpe vs 1/N          | {sharpe_vs:+.2f}   | >0    | {'—':<11} |",
-        f"| MDD (Hybrid)           | {_pct(getattr(r, 'mdd_hybrid', 0.0)):<7} | <20%  | {'—':<11} |",
-        f"| MDD (1/N)              | {_pct(getattr(r, 'mdd_1n', 0.0)):<7} | —     | {'—':<11} |",
-        f"| MDD Reduced            | {mdd_reduced_str:<7} | Y     | {'—':<11} |",
-        f"| Avg Active Positions   | {getattr(r, 'avg_active_positions', 0.0):.2f}    | —     | {'—':<11} |",
-        f"| Turnover/rebal         | {getattr(r, 'turnover', 0.0):.3f}   | —     | {'—':<11} |",
-        f"| L2 Gate                | {'—':<7} | —     | {gate_str:<11} |",
-        "------------------------------------------------------",
+        "● [LAYER 2: AWF PORTFOLIO VALIDATION]",
+        "──────────────────────────────────────────────────────────────────────────────",
+        f"  {'Metric':<22} {'Value':>8}  {'Gate':>10}",
+        f"  {'Sharpe (Strategy)':<22} {sharpe_h:>8.3f}  {sharpe_gate:>10}",
+        f"  {'Sharpe (1/N Baseline)':<22} {sharpe_b:>8.3f}  {'—':>10}",
+        f"  {'MDD (Strategy)':<22} {_pct(mdd_h):>8}  {mdd_gate:>10}",
+        f"  {'MDD (1/N Baseline)':<22} {_pct(mdd_b):>8}  {'—':>10}",
+        f"  {'Turnover/rebal':<22} {turnover:>8.3f}  {'—':>10}",
+        f"  {'Friction Pass%':<22} {_pct(friction_pct):>8}  {'>50%':>10}",
+        f"  {'L2 Gate':<22} {'':>8}  {gate_str:>10}",
+        "──────────────────────────────────────────────────────────────────────────────",
     ]
 
     if awf_folds:
         lines.append("")
-        lines.append("[AWF FOLD DETAILS] ----------------------------------")
-        lines.append("| Fold | Sharpe | MDD     | Active Pos | Pass  |")
-        lines.append("| ---- | ------ | ------- | ---------- | ----- |")
+        lines.append(f"  {'Fold':<5} {'Sharpe':>7} {'MDD':>8} {'Pass':>6}")
+        lines.append(f"  {'-'*5} {'-'*7} {'-'*8} {'-'*6}")
         for af in awf_folds:
             pass_str = "PASS" if af.get("pass") else "FAIL"
             lines.append(
-                f"| {af['fold']:<4} | {af['sharpe']:.2f}   | {_pct(af['mdd']):<7} | "
-                f"{af['active_pos']:.2f}       | {pass_str:<5} |"
+                f"  {af['fold']:<5} {af['sharpe']:>7.3f} {_pct(af['mdd']):>8} {pass_str:>6}"
             )
-        lines.append("------------------------------------------------------")
 
     if topk_selection:
         lines.append("")
-        lines.append("[TOP-K SELECTION] -----------------------------------")
-        lines.append("| Rank | Symbol | Score   | Selected |")
-        lines.append("| ---- | ------ | ------- | -------- |")
+        lines.append(f"  {'Rank':<5} {'Symbol':<12} {'Score':>7} {'Sel':>4}")
+        lines.append(f"  {'-'*5} {'-'*12} {'-'*7} {'-'*4}")
         for ts in topk_selection:
             sel_str: str = "Y" if ts.get("selected") else "N"
             lines.append(
-                f"| {ts['rank']:<4} | {ts['symbol']!s:<6} | {ts['score']:.3f}   | {sel_str:<8} |"
+                f"  {ts['rank']:<5} {ts['symbol']!s:<12} {ts['score']:>7.3f} {sel_str:>4}"
             )
-        lines.append("------------------------------------------------------")
 
     return "\n".join(lines)
 

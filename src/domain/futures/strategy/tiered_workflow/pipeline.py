@@ -955,8 +955,22 @@ def run_l2_awf(
         sim.friction_pass_total / sim.signal_total if sim.signal_total > 0 else 0.0
     )
 
+    # fold별 Sharpe 계산: 수익 fold 비율로 일관성 측정.
+    # 전체 fold 정렬 유지 (빈 fold는 _sharpe→0.0). zip(strict=True) 길이 정합 보장.
+    fold_sharpes_h = [_sharpe(fr) for fr in sim.fold_rets_hybrid]
+    _nonempty_sharpes = [s for s, fr in zip(fold_sharpes_h, sim.fold_rets_hybrid, strict=True) if fr]
+    fold_pass_ratio = (
+        sum(1 for s in _nonempty_sharpes if s > 0.0) / len(_nonempty_sharpes)
+        if _nonempty_sharpes
+        else 0.0
+    )
+
+    _abs_sharpe_floor = 0.30
     gate_passed: bool = bool(
-        (sharpe_hybrid >= sharpe_baseline * 1.20) and (mdd_hybrid <= mdd_baseline)
+        (sharpe_hybrid >= sharpe_baseline * 1.20)
+        and (mdd_hybrid <= mdd_baseline)
+        and (sharpe_hybrid >= _abs_sharpe_floor)
+        and (fold_pass_ratio >= 0.50)
     )
 
     result = Layer2Result(
@@ -974,7 +988,11 @@ def run_l2_awf(
         friction_pass_pct=friction_pass_pct,
         gate_passed=gate_passed,
     )
-    logger.info(format_layer2_table(result))
+    awf_fold_diags = [
+        {"fold": i + 1, "sharpe": s, "mdd": _mdd(fr), "pass": s > 0.0}
+        for i, (s, fr) in enumerate(zip(fold_sharpes_h, sim.fold_rets_hybrid, strict=True))
+    ]
+    logger.info(format_layer2_table(result, awf_folds=awf_fold_diags))
     return result
 
 
@@ -1102,6 +1120,36 @@ def run_tiered_pipeline(
     logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
     t_l2 = time.perf_counter()
     awf_folds = _tw.build_walk_forward_folds(n_bars=n_bars, cfg=cfg)
+
+    # L2 window 경계 필터링: OOS 구간이 [l2_start, holdout_start) 내로 제한
+    # → l1_end_bars == l2_start bar index (Line 1068 참조)
+    ho_start_idx_l2 = _date_to_idx(aligned.datetimes, window.holdout_start)
+    awf_folds = tuple(
+        f for f in awf_folds
+        if f.oos_start >= l1_end_bars and f.oos_end <= ho_start_idx_l2
+    )
+    if not awf_folds:
+        logger.warning(
+            "[L2] build_walk_forward_folds 결과 없음: L2 단일 폴드 fallback [%d, %d)",
+            l1_end_bars,
+            ho_start_idx_l2,
+        )
+        cal_end = max(l1_end_bars - 1, 1)
+        awf_folds = (WFFold(
+            fit_start=0,
+            fit_end=cal_end,
+            cal_start=max(0, cal_end - max(1, cal_end // 5)),
+            cal_end=cal_end,
+            oos_start=l1_end_bars,
+            oos_end=ho_start_idx_l2,
+        ),)
+    logger.debug(
+        "[L2] AWF window: L2_start_bar=%d, ho_start_bar=%d, n_folds=%d",
+        l1_end_bars,
+        ho_start_idx_l2,
+        len(awf_folds),
+    )
+
     l2 = _tw.run_l2_awf(
         l1_oos=l1.oos_stacked,
         aligned=aligned,
