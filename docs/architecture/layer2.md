@@ -211,14 +211,14 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 
 **Decoupled Optuna**
 - `L1_ALPHA_SPACE` → `objective_l1_ic` (IC only; Sharpe not referenced)
-- `L2_ALLOC_SPACE` → `objective_l2_sharpe` (Sharpe only; IC not referenced)
+- `L2_ALLOC_SPACE` → `objective_l2_sharpe` (CAGR only under L2 gate constraints; IC/Sharpe not directly referenced for ranking, though Sharpe is checked in the gate)
 - Short-circuit: L1 BLOCKED → L2/L3 = None (skip)
 
 **Optuna L2 Execution Flow (Step A→B→C→D):**
 - **Step A (L1 Validation):** Executes `run_tiered_pipeline` with `target_phase="l1"` to obtain L1 results. If L1 is blocked, execution returns early.
 - **Step B (L2 Signal Batching):** Builds a causal signal batch using the Layer 1 validation results and historical L2 training windows via `_build_l2_signal_batch`.
-- **Step C (L2 Study Optimization):** Runs `_run_tiered_l2_study` with `objective_l2_sharpe` for `L2_OPTUNA_TRIALS` iterations. If all trials fail, falls back to default `l2_params`.
-- **Step D (Final Pipeline Run):** Executes `run_tiered_pipeline` with `l1_result_override` containing the L1 result and `l2_params` containing the best parameters found. L1 execution is skipped, directly running the L2 AWF simulation.
+- **Step C (L2 Study Optimization):** Runs `_run_tiered_l2_study` with `objective_l2_sharpe` (maximizing CAGR, returning `-inf` on gate failures) for `L2_OPTUNA_TRIALS` iterations. Verbose table logging is suppressed via `verbose=False` passed to `run_l2_awf`, and a carriage-return (`\r`) callback displays progress as a single line. If all trials fail, falls back to default `l2_params`.
+- **Step D (Final Pipeline Run):** Executes `run_tiered_pipeline` with `l1_result_override` containing the L1 result and `l2_params` containing the best parameters found. L1 execution is skipped, directly running the L2 AWF simulation with `verbose=True` to print the final scorecard exactly once.
 
 ## 6.3 Architecture Flow
 

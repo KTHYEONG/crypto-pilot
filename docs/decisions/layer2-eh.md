@@ -7,6 +7,10 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-15 L2 Optuna 로그 억제 및 CAGR 목적함수 최적화
+- **Delta:** `run_tiered_pipeline`, `run_l2_awf` 등에 `verbose: bool` 옵션 배선 및 Trial 구동 시 `verbose=False`로 스코어카드 출력 차단. `\r`을 사용한 1줄 진행률 표시 callback 연동. `objective_l2_sharpe`를 L2 리스크 게이트 검증을 거친 CAGR(복리연수익률) 극대화 지표로 개편 및 미통과 시 `-inf` 패널티 반환 적용.
+- **Rationale:** 수십 회의 최적화 Trial 동안 거대한 포맷 테이블들이 콘솔을 지저분하게 채우던 환경을 단 한 줄의 캐리지 리턴 진행률 모니터링으로 개선하고, 자산 복리증식 목적을 직접 최적화하여 튜닝 결과의 아키텍처적 정합성을 강화함.
+
 ## 2026-06-15 L2 Optuna 최적화 및 Tiered 파이프라인 연동
 - **Delta:** `opt_main_futures.py`에 Step A→B→C→D 흐름 구축(`_build_l2_signal_batch`, `_run_tiered_l2_study` 추가). `run_tiered_pipeline`에 `l1_result_override` 파라미터 추가하여 L1 재실행 방지. `L2_OPTUNA_TRIALS` 설정 추가.
 - **Rationale:** 기존에는 L2 최적화 파라미터가 파이프라인에 주입되지 않고 빈 딕셔너리로 고정되어 최적화 혜택을 받지 못함. L1 중복 피팅을 제거하고 L2에 특화된 Optuna Sharpe 최적화 및 holdout 검증까지의 엔드투엔드 파이프라인 완결성 확보.

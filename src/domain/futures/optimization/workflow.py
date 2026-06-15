@@ -1640,9 +1640,11 @@ def objective_l2_sharpe(trial: Trial, ctx: TieredContext) -> float:
         config=Layer2AllocationConfig.from_mapping(l2_params),
         caps=ctx.caps,
         tf=ctx.tf,
+        verbose=False,
     )
-    # 오직 Sharpe만 반환 — IC 미참조
-    return float(result.sharpe_hybrid)
+    if not result.gate_passed:
+        return float("-inf")
+    return float(result.cagr_hybrid)
 
 
 # Break circularity by importing run_optimization_loop at the very end
