@@ -1244,7 +1244,7 @@ def run_tiered_pipeline(
         logger.info("\n>> LAYER 1 RESULT: [PASS] -> Proceeding to Layer 2.")
 
     # ─── Layer 2: AWF Portfolio Optimization ─────────────────────────────────
-    if verbose:
+    if verbose and l1_result_override is None:
         logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
     t_l2 = time.perf_counter()
     awf_folds = _tw.build_walk_forward_folds(n_bars=n_bars, cfg=cfg)
