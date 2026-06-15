@@ -40,6 +40,8 @@ class _AwfSimResult:
     all_turnovers: list[float]
     friction_pass_total: int
     signal_total: int
+    fold_rets_hybrid: list[list[float]]    # fold별 strategy returns
+    fold_rets_baseline: list[list[float]]  # fold별 baseline returns
 
 
 def _run_awf_simulation(
@@ -88,6 +90,8 @@ def _run_awf_simulation(
     all_turnovers: list[float] = []
     friction_pass_total = 0
     signal_total = 0
+    fold_rets_hybrid: list[list[float]] = []
+    fold_rets_baseline: list[list[float]] = []
 
     prev_selection: frozenset[str] = frozenset()
     prev_w: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
@@ -95,6 +99,8 @@ def _run_awf_simulation(
     last_w: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
 
     for fold in awf_folds:
+        _fold_h: list[float] = []
+        _fold_b: list[float] = []
         for t in range(fold.oos_start, fold.oos_end - 1, rebalance_bars):
             t_end = min(t + rebalance_bars, fold.oos_end - 1)
 
@@ -185,18 +191,32 @@ def _run_awf_simulation(
                 dtype=np.float64,
             )
 
+            # 리밸런싱 비용: 편도 회전율 * taker bps (bps -> fraction)
+            avg_hurdle = float(np.mean(hurdle)) if hurdle.size > 0 else 3.8
+            rebal_cost = turnover * avg_hurdle * 1e-4
+
             for t2 in range(t, t_end):
                 if t2 + 1 >= aligned.close_2d.shape[0]:
                     break
                 c_cur = aligned.close_2d[t2]
                 c_nxt = aligned.close_2d[t2 + 1]
                 bar_ret = np.where(c_cur > 0, (c_nxt - c_cur) / c_cur, 0.0)
-                all_rets_hybrid.append(float(np.dot(w, bar_ret)))
-                all_rets_baseline.append(float(np.dot(w_base, bar_ret)))
+                gross_ret = float(np.dot(w, bar_ret))
+                # 거래비용은 리밸런싱 첫 bar에만 차감
+                cost = rebal_cost if t2 == t else 0.0
+                r_h = gross_ret - cost
+                r_b = float(np.dot(w_base, bar_ret))
+                all_rets_hybrid.append(r_h)
+                all_rets_baseline.append(r_b)
+                _fold_h.append(r_h)
+                _fold_b.append(r_b)
 
             prev_selection = selected
             prev_w = w
             prof_eval += time.perf_counter() - t0_eval
+
+        fold_rets_hybrid.append(_fold_h)
+        fold_rets_baseline.append(_fold_b)
 
     logger.debug(
         "[L2-AWF-PROF] total=%.4fs | prep=%.4fs rank=%.4fs alloc=%.4fs eval=%.4fs",
@@ -215,6 +235,8 @@ def _run_awf_simulation(
         all_turnovers=all_turnovers,
         friction_pass_total=friction_pass_total,
         signal_total=signal_total,
+        fold_rets_hybrid=fold_rets_hybrid,
+        fold_rets_baseline=fold_rets_baseline,
     )
 
 
