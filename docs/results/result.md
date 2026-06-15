@@ -147,31 +147,31 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
   ──────────────────────────────────────────────────────────────────────────
   Metric                   Strategy    ( EW Bench )            Gate   Status
   ──────────────────────────────────────────────────────────────────────────
-  CAGR                 [   +15.3% ] (      +1.4% )        >= 15.0%       ✅
-  Sharpe               [    1.394 ] (      0.241 )         >= 1.00       ✅
-  MAR (CAGR/MDD)       [    2.744 ] (      0.060 )         >= 1.00       ✅
+  CAGR                 [   +23.2% ] (     +31.5% )        >= 15.0%       ✅
+  Sharpe               [    2.390 ] (      0.877 )         >= 1.00       ✅
+  MAR (CAGR/MDD)       [    6.102 ] (      1.370 )         >= 1.00       ✅
 
   [ RISK & UPLIFT ]
   ──────────────────────────────────────────────────────────────────────────
-  MDD                  [     5.6% ] (      23.6% )        <= 20.0%       ✅
-  Sharpe Uplift        [    +1.15 ] (       Base )    >= Base+0.20       ✅
-  Turnover / Rebal     [    0.015 ] (          — )               —       —
+  MDD                  [     3.8% ] (      23.0% )        <= 20.0%       ✅
+  Sharpe Uplift        [    +1.51 ] (       Base )    >= Base+0.20       ✅
+  Turnover / Rebal     [    0.036 ] (          — )               —       —
 
   [ ROBUSTNESS & DIAGNOSTICS ]
   ──────────────────────────────────────────────────────────────────────────
-  Fold Pass Ratio      [   100.0% ] (          — )        >= 60.0%       ✅
-  PSR (Anti-Overfit)   [    0.842 ] (          — )         >= 0.90       ❌
-  Friction Pass%       [    45.2% ] (          — )        >= 50.0%       ❌
+  Fold Pass Ratio      [    66.7% ] (          — )        >= 60.0%       ✅
+  PSR (Anti-Overfit)   [    0.969 ] (          — )         >= 0.90       ✅
+  Friction Pass%       [   100.0% ] (          — )        >= 50.0%       ✅
   ──────────────────────────────────────────────────────────────────────────
 
-  >> FINAL RESULT : BLOCKED (psr)
+  >> FINAL RESULT : PASS 
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ✅ Sharpe:  0.741 | MDD:    2.5% | Status: PASS
-  ├─ Fold #2 : ✅ Sharpe:  1.155 | MDD:    2.5% | Status: PASS
-  └─ Fold #3 : ✅ Sharpe:  2.021 | MDD:    5.6% | Status: PASS
+  ├─ Fold #1 : ❌ Sharpe: -1.286 | MDD:    3.1% | Status: FAIL
+  ├─ Fold #2 : ✅ Sharpe:  2.157 | MDD:    2.4% | Status: PASS
+  └─ Fold #3 : ✅ Sharpe:  5.341 | MDD:    1.7% | Status: PASS
 
->> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False
+>> LAYER 2 RESULT: [PASS] -> Proceeding to Final Holdout.
 >> TARGET PHASE l2 REACHED -> Stopping pipeline.
 [PHASE] phase=l2 completed strategy/candidate evaluation only; optimization/training skipped

@@ -14,6 +14,7 @@ import pandas as pd
 from numpy.typing import NDArray
 from scipy.stats import spearmanr
 
+import src.domain.futures.strategy.config as strategy_config
 from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
 from src.domain.futures.portfolio.signal_composer import (
     composer_sigma_lookback_bars,
@@ -27,7 +28,6 @@ from src.domain.futures.strategy.candidate_contracts import (
     QualifiedSignalRegistry,
     ValidatedSignalBatch,
 )
-import src.domain.futures.strategy.config as strategy_config
 from src.domain.futures.strategy.cs_rank import SymbolSignal
 from src.domain.futures.strategy.tiered_logging import (
     format_layer1_deployment_registry_table,
@@ -291,6 +291,7 @@ def run_l1_swf(
     min_obs: int = 20,
     t_stat_floor: float = 1.96,
     tf: str = "4h",
+    verbose: bool = True,
 ) -> Layer1Result:
     """Layer1 SWF-K 신호 검증."""
     purge_bars, _embargo_bars = strategy_config.resolve_purge_and_embargo_bars(cfg)
@@ -630,7 +631,8 @@ def run_l1_swf(
         n_valid_strategies=n_valid_strategies,
         panel_diversity=panel_diversity,
     )
-    logger.info(format_layer1_table(result, fold_details=fold_perf_details, per_symbol_top10=sym_details))
+    if verbose:
+        logger.info(format_layer1_table(result, fold_details=fold_perf_details, per_symbol_top10=sym_details))
     if strategy_panel:
         top_panel = sorted(
             strategy_panel,
@@ -706,6 +708,7 @@ def run_l1_nested_swf(
     outer_folds: tuple[WFFold, ...],
     cfg: CandidateStrategyConfig,
     seed: int,
+    verbose: bool = True,
 ) -> Layer1Result:
     """Run nested Layer1 validation using inner selection and outer evaluation."""
     import dataclasses
@@ -918,8 +921,9 @@ def run_l1_nested_swf(
         cfg=cfg,
         seed=seed,
     )
-    logger.info(format_layer1_outer_fold_table(tuple(outer_reports)))
-    logger.info(format_layer1_gate_table(gate_report))
+    if verbose:
+        logger.info(format_layer1_outer_fold_table(tuple(outer_reports)))
+        logger.info(format_layer1_gate_table(gate_report))
     deployment_registry: QualifiedSignalRegistry | None = None
     inference_artifact: Layer1InferenceArtifact | None = None
     oos_stacked: dict[str, SymbolSignal] = {}
@@ -942,7 +946,8 @@ def run_l1_nested_swf(
             cfg=cfg,
             seed=seed,
         )
-        logger.info(format_layer1_deployment_registry_table(deployment_registry))
+        if verbose:
+            logger.info(format_layer1_deployment_registry_table(deployment_registry))
     return Layer1Result(
         signals_per_fold=tuple(signals_per_fold),
         oos_stacked=oos_stacked,
@@ -971,6 +976,7 @@ def run_l2_awf(
     config: Layer2AllocationConfig,
     caps: PortfolioCaps,
     tf: str = "4h",
+    verbose: bool = True,
 ) -> Layer2Result:
     """Layer2 AWF 포트폴리오 시뮬레이션."""
     sim = _run_awf_simulation(
@@ -1088,7 +1094,8 @@ def run_l2_awf(
         }
         for i, (s, fr) in enumerate(zip(fold_sharpes_h, sim.fold_rets_hybrid, strict=True))
     ]
-    logger.info(format_layer2_table(result, awf_folds=awf_fold_diags))
+    if verbose:
+        logger.info(format_layer2_table(result, awf_folds=awf_fold_diags))
     return result
 
 
@@ -1100,6 +1107,7 @@ def run_l3_holdout(
     config: Layer2AllocationConfig,
     caps: PortfolioCaps,
     tf: str = "4h",
+    verbose: bool = True,
 ) -> Layer3Result:
     """Layer3 Holdout 최종 검증."""
     ho_start, ho_end = holdout_span
@@ -1145,7 +1153,8 @@ def run_l3_holdout(
         mar_baseline=mar_baseline,
         gate_passed=gate_passed,
     )
-    logger.info(format_layer3_table(result, ho_start=str(ho_start), ho_end=str(ho_end)))
+    if verbose:
+        logger.info(format_layer3_table(result, ho_start=str(ho_start), ho_end=str(ho_end)))
     return result
 
 
@@ -1161,6 +1170,7 @@ def run_tiered_pipeline(
     tf: str = "4h",
     target_phase: str = "l3",
     l1_result_override: Layer1Result | None = None,
+    verbose: bool = True,
 ) -> tuple[Layer1Result, Layer2Result | None, Layer3Result | None]:
     """3-Layer 티어드 파이프라인 실행.
 
@@ -1199,7 +1209,8 @@ def run_tiered_pipeline(
     t_l1 = time.perf_counter()
     if l1_result_override is not None:
         l1 = l1_result_override
-        logger.info("[TIERED] L1 override 사용 — L1 재실행 스킵")
+        if verbose:
+            logger.info("[TIERED] L1 override 사용 — L1 재실행 스킵")
     else:
         outer_folds = _tw.build_l1_nested_swf_folds(
             n_bars=n_bars,
@@ -1214,21 +1225,26 @@ def run_tiered_pipeline(
             outer_folds=outer_folds,
             cfg=cfg,
             seed=int(getattr(cfg, "seed", 42)),
+            verbose=verbose,
         )
     logger.debug("[perf-tiered] run_tiered_pipeline Layer 1 total took %.4fs", time.perf_counter() - t_l1)
 
     if not l1.gate_passed:
-        logger.info("\n>> LAYER 1 RESULT: [BLOCKED] -> gate_passed=False")
+        if verbose:
+            logger.info("\n>> LAYER 1 RESULT: [BLOCKED] -> gate_passed=False")
         return (l1, None, None)
 
-    logger.info("\n>> LAYER 1 RESULT: [PASS] -> Proceeding to Layer 2.")
+    if verbose:
+        logger.info("\n>> LAYER 1 RESULT: [PASS] -> Proceeding to Layer 2.")
 
     if target_phase == "l1":
-        logger.info(">> TARGET PHASE l1 REACHED -> Stopping pipeline.")
+        if verbose:
+            logger.info(">> TARGET PHASE l1 REACHED -> Stopping pipeline.")
         return (l1, None, None)
 
     # ─── Layer 2: AWF Portfolio Optimization ─────────────────────────────────
-    logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
+    if verbose:
+        logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
     t_l2 = time.perf_counter()
     awf_folds = _tw.build_walk_forward_folds(n_bars=n_bars, cfg=cfg)
 
@@ -1279,21 +1295,26 @@ def run_tiered_pipeline(
         config=l2_config,
         caps=caps,
         tf=tf,
+        verbose=verbose,
     )
     logger.debug("[perf-tiered] run_tiered_pipeline Layer 2 total took %.4fs", time.perf_counter() - t_l2)
 
     if not l2.gate_passed:
-        logger.info("\n>> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False")
+        if verbose:
+            logger.info("\n>> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False")
         return (l1, l2, None)
 
-    logger.info("\n>> LAYER 2 RESULT: [PASS] -> Proceeding to Final Holdout.")
+    if verbose:
+        logger.info("\n>> LAYER 2 RESULT: [PASS] -> Proceeding to Final Holdout.")
 
     if target_phase == "l2":
-        logger.info(">> TARGET PHASE l2 REACHED -> Stopping pipeline.")
+        if verbose:
+            logger.info(">> TARGET PHASE l2 REACHED -> Stopping pipeline.")
         return (l1, l2, None)
 
     # ─── Layer 3: Final Holdout Backtest ─────────────────────────────────────
-    logger.info(format_layer_header(3, "Final Holdout & Deployment Readiness"))
+    if verbose:
+        logger.info(format_layer_header(3, "Final Holdout & Deployment Readiness"))
     t_l3 = time.perf_counter()
     ho_start_idx = _date_to_idx(aligned.datetimes, window.holdout_start)
     ho_end_idx = _date_to_idx(aligned.datetimes, window.holdout_end)
@@ -1312,8 +1333,10 @@ def run_tiered_pipeline(
         config=l2_config,
         caps=caps,
         tf=tf,
+        verbose=verbose,
     )
     logger.debug("[perf-tiered] run_tiered_pipeline Layer 3 total took %.4fs", time.perf_counter() - t_l3)
 
-    logger.info("\n" + "="*80)
+    if verbose:
+        logger.info("\n" + "="*80)
     return (l1, l2, l3)
