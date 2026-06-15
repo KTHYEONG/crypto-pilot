@@ -168,10 +168,9 @@ from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE
 
 
 def test_l2_alloc_space_contains_new_params() -> None:
-    """S6: L2_ALLOC_SPACE에 kelly_fraction, friction_safety_mult, vol_target 포함."""
+    """S6: L2_ALLOC_SPACE에 kelly_fraction, max_ann_vol 포함."""
     assert "kelly_fraction" in L2_ALLOC_SPACE
-    assert "friction_safety_mult" in L2_ALLOC_SPACE
-    assert "vol_target" in L2_ALLOC_SPACE
+    assert "max_ann_vol" in L2_ALLOC_SPACE
 
 
 def test_l2_alloc_space_excludes_dead_params() -> None:
@@ -181,13 +180,13 @@ def test_l2_alloc_space_excludes_dead_params() -> None:
     assert "NORM_VAR_CONSTANT" not in L2_ALLOC_SPACE
 
 
-def test_l2_alloc_space_friction_safety_mult_range() -> None:
-    """S6: friction_safety_mult ∈ [0.5, 2.0] 범위 검증."""
-    spec = L2_ALLOC_SPACE["friction_safety_mult"]
+def test_l2_alloc_space_max_ann_vol_range() -> None:
+    """S6: max_ann_vol ∈ [0.20, 0.80] 범위 검증."""
+    spec = L2_ALLOC_SPACE["max_ann_vol"]
 
     assert spec["type"] == "float"
-    assert spec["low"] == pytest.approx(0.5)
-    assert spec["high"] == pytest.approx(2.0)
+    assert spec["low"] == pytest.approx(0.20)
+    assert spec["high"] == pytest.approx(0.80)
 
 
 def test_l2_alloc_space_kelly_fraction_range() -> None:

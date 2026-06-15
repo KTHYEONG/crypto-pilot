@@ -736,17 +736,14 @@ def _run_tiered_l2_study(
     tf: str,
     n_trials: int,
     seed: int,
-) -> dict[str, Any]:
-    """Optuna objective_l2_sharpe로 best l2_params 탐색.
-
-    Returns:
-        best_l2_params: 최고 Sharpe trial의 파라미터 dict.
-                        전체 실패 시 {} (기본값 fallback, WARNING 로그).
-    """
+) -> Any:
+    """Optuna objective_l2_growth로 best l2_params 탐색."""
     import warnings
 
     import optuna as _optuna
     from optuna.samplers import TPESampler
+
+    from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE
 
     # JournalRedisStorage 감쇠 경고 억제
     warnings.filterwarnings("ignore", category=FutureWarning, module="optuna")
@@ -754,7 +751,17 @@ def _run_tiered_l2_study(
     # Optuna 스터디 정보 로그 억제
     _optuna.logging.set_verbosity(_optuna.logging.WARNING)
 
-    from src.domain.futures.optimization.workflow import TieredContext, objective_l2_sharpe
+    from src.domain.futures.optimization.workflow import (
+        TieredContext,
+        layer2_constraints_from_trial,
+        objective_l2_growth,
+    )
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2StudyResult
+    from src.domain.futures.strategy.tiered_workflow.selection import (
+        _layer2_experiment_key,
+        select_layer2_champion,
+    )
+    from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
 
     ctx = TieredContext(
         labeled_events=pd.DataFrame(),  # signal_batch에 이미 예측됨, labeles 불필요
@@ -766,8 +773,11 @@ def _run_tiered_l2_study(
         fixed_l1_params={"signal_batch": signal_batch},
     )
 
-    study_name = (
-        f"tiered_l2_sharpe_{tf}_{window.l2_start.isoformat()}_{window.holdout_start.isoformat()}"
+    study_name = _layer2_experiment_key(
+        tf=tf,
+        window=window,
+        signal_batch=signal_batch,
+        search_space_version="v2",
     )
     _logger.info("  ● [HYPERPARAMETER OPTIMIZATION]")
     _logger.info("    - Study Name : %s", study_name)
@@ -777,15 +787,10 @@ def _run_tiered_l2_study(
     try:
         # setup_optuna_storage를 1회만 호출하여 로그 중복 제거
         _, storage = setup_optuna_storage(str(BASE_DIR))
-        try:
-            _optuna.delete_study(study_name=study_name, storage=storage)
-        except Exception:
-            _logger.debug("[L2-OPT] 기존 study 없음 — 신규 생성")
-
         class L2OptunaProgressCallback:
             def __init__(self, total_trials: int):
                 self.total_trials = total_trials
-                self.best_val = float("-inf")
+                self.best_val = float("-1e6")
 
             def __call__(self, study: Any, trial: Any) -> None:
                 import sys
@@ -794,8 +799,8 @@ def _run_tiered_l2_study(
                     self.best_val = val
                 current = len(study.trials)
                 
-                best_disp = f"{self.best_val * 100:.2f}%" if self.best_val > float("-inf") else "N/A"
-                current_disp = f"{val * 100:.2f}%" if (val is not None and val > float("-inf")) else "BLOCKED"
+                best_disp = f"{self.best_val * 100:.2f}%" if self.best_val > float("-1e6") else "N/A"
+                current_disp = f"{val * 100:.2f}%" if (val is not None and val > float("-1e6")) else "BLOCKED"
                 
                 sys.stdout.write(
                     f"\r[L2-OPT] Progress: {current}/{self.total_trials} trials | "
@@ -808,15 +813,20 @@ def _run_tiered_l2_study(
 
         study = _optuna.create_study(
             direction="maximize",
-            sampler=TPESampler(seed=seed, n_startup_trials=min(10, n_trials)),
+            sampler=TPESampler(
+                seed=seed,
+                multivariate=True,
+                n_startup_trials=min(n_trials, max(4 * len(L2_ALLOC_SPACE), 10)),
+                constraints_func=layer2_constraints_from_trial,
+            ),
             study_name=study_name,
             storage=storage,
-            load_if_exists=False,
+            load_if_exists=True,
         )
         
         progress_cb = L2OptunaProgressCallback(n_trials)
         study.optimize(
-            lambda trial: objective_l2_sharpe(trial, ctx),
+            lambda trial: objective_l2_growth(trial, ctx),
             n_trials=n_trials,
             n_jobs=1,
             show_progress_bar=False,
@@ -824,20 +834,72 @@ def _run_tiered_l2_study(
         )
     except Exception as exc:
         _logger.warning("[L2-OPT] Optuna study 실패: %s — 기본 l2_params 사용", exc)
-        return {}
+        return Layer2StudyResult(
+            best_params={},
+            best_trial_number=None,
+            best_evaluation=None,
+            dsr=0.0,
+            effective_trial_count=0.0,
+            completed_trials=0,
+            feasible_trials=0,
+            blocker_reason="study_error",
+        )
 
     complete_trials = [
         t for t in study.trials
         if t.state == _optuna.trial.TrialState.COMPLETE
         and t.value is not None
-        and t.value > float("-inf")
+        and t.value > float("-1e6")
     ]
     if not complete_trials:
         _logger.warning("[L2-OPT] 모든 %d trials 실패/pruned — 기본 l2_params 사용", n_trials)
-        return {}
+        return Layer2StudyResult(
+            best_params={},
+            best_trial_number=None,
+            best_evaluation=None,
+            dsr=0.0,
+            effective_trial_count=0.0,
+            completed_trials=0,
+            feasible_trials=0,
+            blocker_reason="no_complete_trials",
+        )
 
-    best_trial = max(complete_trials, key=lambda t: t.value or float("-inf"))
-    return dict(best_trial.params)
+    # walk forward folds 구성 및 필터링하여 select_layer2_champion에 전달
+    awf_folds = build_walk_forward_folds(n_bars=len(aligned.datetimes), cfg=cfg)
+    ho_ts = pd.Timestamp(window.holdout_start).tz_localize(None)
+    ho_start_idx_l2 = int(np.searchsorted(aligned.datetimes, np.datetime64(ho_ts, "ns")))
+    l2_ts = pd.Timestamp(window.l2_start).tz_localize(None)
+    l1_end_bars = int(np.searchsorted(aligned.datetimes, np.datetime64(l2_ts, "ns")))
+
+    awf_folds_l2 = tuple(
+        f for f in awf_folds
+        if f.oos_start >= l1_end_bars and f.oos_end <= ho_start_idx_l2
+    )
+    if not awf_folds_l2:
+        cal_end = max(l1_end_bars - 1, 1)
+        from src.domain.futures.strategy.walk_forward import WFFold
+        awf_folds_l2 = (WFFold(
+            fit_start=0,
+            fit_end=cal_end,
+            cal_start=max(0, cal_end - max(1, cal_end // 5)),
+            cal_end=cal_end,
+            oos_start=l1_end_bars,
+            oos_end=ho_start_idx_l2,
+        ),)
+
+    from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+    min_dsr = float(OPT_FUTURES_CONFIG.get("l2_min_dsr", 0.95))
+
+    l2_study_result = select_layer2_champion(
+        study=study,
+        tf=tf,
+        min_dsr=min_dsr,
+        signal_batch=signal_batch,
+        aligned=aligned,
+        awf_folds=awf_folds_l2,
+        caps=caps,
+    )
+    return l2_study_result
 
 
 def _run_strategy_stage(
@@ -962,7 +1024,10 @@ def _run_strategy_stage(
         try:
             from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
             from src.domain.futures.strategy.common.alignment import align_data_maps
-            from src.domain.futures.strategy.tiered_workflow import run_tiered_pipeline
+            from src.domain.futures.strategy.tiered_workflow import (
+                TieredPipelineError,
+                run_tiered_pipeline,
+            )
 
             _logger.info(
                 "[TIERED] 💠 Scope: %d symbols (Historical Union ∩ Data-Valid)",
@@ -1027,7 +1092,7 @@ def _run_strategy_stage(
             # ── Step D: Optuna L2 파라미터 탐색 ──────────────────────────────
             _seed = int(run_config.seed) if hasattr(run_config, "seed") else 42
             n_l2_trials = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_TRIALS", 50))
-            best_l2_params = _run_tiered_l2_study(
+            l2_study_result = _run_tiered_l2_study(
                 signal_batch=l2_signals,
                 aligned=aligned_tiered,
                 cfg=tiered_cfg,
@@ -1037,6 +1102,7 @@ def _run_strategy_stage(
                 n_trials=n_l2_trials,
                 seed=_seed,
             )
+            best_l2_params = dict(getattr(l2_study_result, "best_params", {}))
 
             # ── Step E: 최적 params + L1 override로 최종 실행 ────────────────
             run_tiered_pipeline(
@@ -1051,8 +1117,16 @@ def _run_strategy_stage(
                 target_phase=run_config.phase,
                 l1_result_override=l1_res,
                 verbose=True,  # 최종 실행시 상세 결과 출력
+                override_dsr=l2_study_result.dsr,
             )
             return None  # Phase D allocation 스킵 (Tiered가 대체)
+        except TieredPipelineError as _tiered_exc:
+            _logger.error(
+                "[TIERED] terminal tiered failure=%s — Phase D fallback suppressed",
+                _tiered_exc,
+                exc_info=True,
+            )
+            return None
         except Exception as _exc:
             _logger.warning(
                 "[TIERED] pipeline error=%s — falling back to Phase D", _exc, exc_info=True
