@@ -39,7 +39,9 @@ def _sharpe(rets: list[float], bars_per_year: float = _BARS_PER_YEAR) -> float:
     arr = np.asarray(rets, dtype=np.float64)
     mu = float(np.mean(arr))
     sd = float(np.std(arr, ddof=1))
-    return float(mu * bars_per_year / (sd * np.sqrt(bars_per_year) + 1e-9))
+    if sd < 1e-9:
+        return 0.0
+    return float(mu * bars_per_year / (sd * np.sqrt(bars_per_year)))
 
 
 def _mdd(rets: list[float]) -> float:
@@ -53,7 +55,10 @@ def _mdd(rets: list[float]) -> float:
     """
     if not rets:
         return 0.0
-    cum = np.cumsum(np.asarray(rets, dtype=np.float64))
+    arr = np.asarray(rets, dtype=np.float64)
+    if not np.all(np.isfinite(arr)):
+        return float("nan")
+    cum = np.cumsum(arr)
     running_max = np.maximum.accumulate(cum)
     drawdown = running_max - cum
     return float(np.max(drawdown))
@@ -72,9 +77,11 @@ def _cagr(rets: list[float], bars_per_year: float = _BARS_PER_YEAR) -> float:
     if not rets:
         return 0.0
     arr = np.asarray(rets, dtype=np.float64)
+    if not np.all(np.isfinite(arr)):
+        return float("nan")
     n = len(arr)
     base = float(np.prod(1.0 + arr))
-    if base <= 0.0:
+    if not np.isfinite(base) or base <= 0.0:
         return -1.0
     return float(base ** (bars_per_year / n) - 1.0)
 
