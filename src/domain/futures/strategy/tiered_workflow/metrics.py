@@ -269,6 +269,53 @@ def compute_panel_diversity(panel: tuple[StrategySignal, ...]) -> float:
     return float(np.clip(1.0 - float(np.mean(pairwise_abs_corr)), 0.0, 1.0))
 
 
+def _psr(
+    rets: list[float],
+    sr_benchmark: float = 0.0,
+    bars_per_year: float = _BARS_PER_YEAR,
+) -> float:
+    """Probabilistic Sharpe Ratio (Bailey & López de Prado, 2012).
+
+    PSR = Φ( (SR_obs - SR_bench) * sqrt(n-1)
+             / sqrt(1 - skew*SR_obs + (kurt-1)/4 * SR_obs^2) )
+    SR_obs는 per-bar(비연율화) Sharpe. n<2이면 0.0.
+
+    Args:
+        rets: per-bar 수익률 리스트.
+        sr_benchmark: 비교 기준 Sharpe (기본값 0.0).
+        bars_per_year: 연율화 팩터 (미사용, 시그니처 일관성 유지).
+
+    Returns:
+        PSR ∈ [0, 1]. 데이터 부족 또는 비정상 입력 시 0.0.
+
+    Time Complexity: O(n).
+    Space Complexity: O(n).
+    """
+    if len(rets) < 2:
+        return 0.0
+    arr = np.asarray(rets, dtype=np.float64)
+    if not np.all(np.isfinite(arr)):
+        return 0.0
+    mu = float(np.mean(arr))
+    sd = float(np.std(arr, ddof=1))
+    if sd < 1e-9:
+        return 0.0
+    # per-bar(비연율화) Sharpe
+    sr_obs = mu / sd
+    n = len(arr)
+    from scipy.stats import kurtosis as _kurt
+    from scipy.stats import skew as _skew
+    skew_val = float(_skew(arr))
+    kurt_val = float(_kurt(arr, fisher=True))  # excess kurtosis κ = γ₄ - 3 (normal=0)
+    # Bailey & López de Prado (2012): (γ₄ - 1)/4 = (κ + 3 - 1)/4 = (κ + 2)/4
+    denom = 1.0 - skew_val * sr_obs + (kurt_val + 2.0) / 4.0 * sr_obs**2
+    if denom <= 0.0:
+        return 0.0
+    from scipy.special import ndtr
+    z = (sr_obs - sr_benchmark) * float(np.sqrt(n - 1)) / float(np.sqrt(denom))
+    return float(ndtr(z))
+
+
 def compute_breadth_weighted_ic(
     per_symbol_ic: dict[str, float],
     per_symbol_n: dict[str, int],
