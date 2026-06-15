@@ -181,11 +181,21 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 - No-trade band: $|\Delta w_i| < \text{band} \rightarrow w_i \leftarrow w_{\text{prev},i}$
 - **Taker cost deduction**: $r_t^{\text{net}} = w \cdot r_t^{\text{gross}} - \text{turnover}_t \times \bar{\delta} \times 10^{-4}$ (applied only on rebalance bars; $\bar{\delta}$ = mean hurdle bps)
 - **AWF Window Constraint**: OOS folds restricted to $[\text{l2\_start\_idx},\ \text{holdout\_start\_idx})$. No overlap with L1 evidence or L3 holdout.
-- **Gate** (4-condition, all must hold):
-  1. $\text{Sharpe}_{\text{hybrid}} \geq \text{Sharpe}_{1/N} \times 1.20$
-  2. $\text{MDD}_{\text{hybrid}} \leq \text{MDD}_{1/N}$
-  3. $\text{Sharpe}_{\text{hybrid}} \geq 0.30$ (absolute floor)
-  4. $\text{fold\_pass\_ratio} \geq 0.50$ (fraction of folds with $\text{Sharpe} > 0$)
+- **Gate** (8-condition sequential AND; first failure → `blocker_reason`):
+  - **Stage 0 (Deployment Sanity):** `signal_total > 0` AND `friction_pass_pct > 0` AND `isfinite(sharpe, cagr)` → `no_deployment`
+  - **Stage A (Absolute Compound Growth — PRIMARY):**
+    1. $\text{CAGR}_{\text{hybrid}} > l2\_min\_cagr$ (default 0.0) — post-cost ∏$(1+r) > 1$. Non-negotiable.
+    2. $\text{MAR}_{\text{hybrid}} \geq l2\_min\_mar$ (default 0.5) — CAGR/MDD compound efficiency.
+    3. $\text{Sharpe}_{\text{hybrid}} \geq l2\_min\_sharpe\_abs$ (default 0.5) — absolute floor.
+  - **Stage B (Risk Control):**
+    4. $\text{MDD}_{\text{hybrid}} \leq \text{MDD}_{1/N}$ — relative risk guard.
+    5. $\text{MDD}_{\text{hybrid}} \leq l2\_max\_mdd\_abs$ (default 0.50) — absolute cap.
+  - **Stage C (Robustness / Anti-overfit):**
+    6. $\text{fold\_pass\_ratio} \geq l2\_min\_fold\_pass\_ratio$ (default 0.60); pass = $\prod(1+r_{\text{fold}}) > 1.0$ (compound, not Sharpe-positive).
+  - **Stage D (Relative Advantage — SECONDARY, sign-safe additive):**
+    7. $\text{Sharpe}_{\text{hybrid}} \geq \text{Sharpe}_{1/N} + l2\_min\_sharpe\_uplift$ (default 0.20). Additive replaces multiplicative ×1.20 (sign-reversal bug when baseline < 0).
+  - All thresholds configurable via `l2_params` keys; default values are conservative principle values — do NOT tune to pass a specific backtest.
+  - `friction_pass_pct` is diagnostic only (not a gate condition beyond Stage 0 sanity).
 
 **Layer 3 — Frozen Holdout**
 - Single WFFold covering `[ho_start, ho_end)`, frozen L2 params.

@@ -8,6 +8,7 @@ Space Complexity: O(n) for output string construction.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from src.domain.futures.optimization.opt_config import LayeredWindow
@@ -447,7 +448,9 @@ def format_layer2_table(
 
     Args:
         r: Layer2Result (sharpe_hybrid, sharpe_baseline, mdd_hybrid,
-           mdd_baseline, turnover, friction_pass_pct, gate_passed 필드 필요).
+           mdd_baseline, cagr_hybrid, cagr_baseline, mar_hybrid, mar_baseline,
+           fold_pass_ratio, turnover, friction_pass_pct, gate_passed,
+           blocker_reason 필드 필요).
         awf_folds: Optional fold 상세 (fold, sharpe, mdd, pass 키).
         topk_selection: Optional Top-K 선택 (rank, symbol, score, selected 키).
 
@@ -461,26 +464,40 @@ def format_layer2_table(
     sharpe_b: float = getattr(r, "sharpe_baseline", 0.0)
     mdd_h: float = getattr(r, "mdd_hybrid", 0.0)
     mdd_b: float = getattr(r, "mdd_baseline", 0.0)
+    cagr_h: float = getattr(r, "cagr_hybrid", float("nan"))
+    cagr_b: float = getattr(r, "cagr_baseline", float("nan"))
+    mar_h: float = getattr(r, "mar_hybrid", float("nan"))
+    mar_b: float = getattr(r, "mar_baseline", float("nan"))
+    fold_pass: float = getattr(r, "fold_pass_ratio", 0.0)
     turnover: float = getattr(r, "turnover", 0.0)
     friction_pct: float = getattr(r, "friction_pass_pct", 0.0)
     gate_passed: bool = getattr(r, "gate_passed", False)
+    blocker: str = getattr(r, "blocker_reason", "")
 
-    # 실제 게이트 조건: sharpe_h >= sharpe_b*1.20 AND mdd_h <= mdd_b
-    sharpe_gate = f">={sharpe_b * 1.20:.2f}"
-    mdd_gate = f"<={_pct(mdd_b)}"
+    # 가산식 uplift 게이트 (부호 무관): base+0.20
+    sharpe_uplift_gate = f">={sharpe_b + 0.20:.2f}(base+0.20)"
+    mdd_rel_gate = f"<={_pct(mdd_b)}"
     gate_str: str = _gate(gate_passed)
+    blocker_str = f"  ({blocker})" if blocker else ""
+
+    def _f(v: float, fmt: str = ".3f") -> str:
+        return "nan" if not math.isfinite(v) else format(v, fmt)
 
     lines: list[str] = [
         "● [LAYER 2: AWF PORTFOLIO VALIDATION]",
         "──────────────────────────────────────────────────────────────────────────────",
-        f"  {'Metric':<22} {'Value':>8}  {'Gate':>10}",
-        f"  {'Sharpe (Strategy)':<22} {sharpe_h:>8.3f}  {sharpe_gate:>10}",
-        f"  {'Sharpe (1/N Baseline)':<22} {sharpe_b:>8.3f}  {'—':>10}",
-        f"  {'MDD (Strategy)':<22} {_pct(mdd_h):>8}  {mdd_gate:>10}",
-        f"  {'MDD (1/N Baseline)':<22} {_pct(mdd_b):>8}  {'—':>10}",
-        f"  {'Turnover/rebal':<22} {turnover:>8.3f}  {'—':>10}",
-        f"  {'Friction Pass%':<22} {_pct(friction_pct):>8}  {'>50%':>10}",
-        f"  {'L2 Gate':<22} {'':>8}  {gate_str:>10}",
+        f"  {'Metric':<26} {'Strategy':>9} {'1/N Base':>9}  {'Gate':>18}",
+        "  ──────────────────────────────────────────────────────────────────────────",
+        f"  {'CAGR':<26} {_f(cagr_h, '+.1%'):>9} {_f(cagr_b, '+.1%'):>9}  {'>0.0%':>18}",
+        f"  {'MAR (CAGR/MDD)':<26} {_f(mar_h):>9} {_f(mar_b):>9}  {'>=0.50':>18}",
+        f"  {'Sharpe':<26} {_f(sharpe_h):>9} {_f(sharpe_b):>9}  {'>=0.50':>18}",
+        f"  {'MDD':<26} {_pct(mdd_h):>9} {_pct(mdd_b):>9}  {mdd_rel_gate + ' & <=50%':>18}",
+        f"  {'Fold Pass% (compound)':<26} {_pct(fold_pass):>9} {'—':>9}  {'>=60%':>18}",
+        f"  {'Sharpe Uplift vs 1/N':<26} {_f(sharpe_h - sharpe_b):>9} {'—':>9}  {sharpe_uplift_gate:>18}",
+        f"  {'Turnover/rebal':<26} {turnover:>9.3f} {'—':>9}  {'—':>18}",
+        f"  {'Friction Pass% (diag)':<26} {_pct(friction_pct):>9} {'—':>9}  {'—':>18}",
+        "  ──────────────────────────────────────────────────────────────────────────",
+        f"  {'L2 Gate':<26} {gate_str + blocker_str}",
         "──────────────────────────────────────────────────────────────────────────────",
     ]
 
@@ -490,8 +507,12 @@ def format_layer2_table(
         lines.append(f"  {'-'*5} {'-'*7} {'-'*8} {'-'*6}")
         for af in awf_folds:
             pass_str = "PASS" if af.get("pass") else "FAIL"
+            sharpe_v = af["sharpe"]
+            sharpe_str = "nan" if not math.isfinite(sharpe_v) else f"{sharpe_v:.3f}"
+            mdd_v = af["mdd"]
+            mdd_str = "nan%" if not math.isfinite(mdd_v) else _pct(mdd_v)
             lines.append(
-                f"  {af['fold']:<5} {af['sharpe']:>7.3f} {_pct(af['mdd']):>8} {pass_str:>6}"
+                f"  {af['fold']:<5} {sharpe_str:>7} {mdd_str:>8} {pass_str:>6}"
             )
 
     if topk_selection:
