@@ -7,6 +7,11 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-15 L2 게이트 재보정 — 보수적 임계값 + PSR/Friction 게이트 + EW Bench baseline
+- **Delta:** 임계값 강화(CAGR 0→15%, Sharpe 0.5→1.0, MAR 0.5→1.0, MDD 50→20%). PSR≥0.90·Friction≥0.50 신규 게이트 배선(dead config 활성화). Baseline: valid-전체-EW→Top-K-EW. 음수MAR `n/a(loss)` 표기 가드.
+- **Rationale:** 기존 PASS는 느슨한 절대 게이트 + strawman baseline(EW-of-all=-81% CAGR)으로 상대 게이트 자동통과. PSR/Friction config가 opt_config.py에 선언만 되고 L2 로직 미배선 상태. 재보정 결과 BLOCKED(friction=34.5%<50%) — 신호 2/3 비용 허들 미달 노출.
+- **Edge Cases:** PSR 분모 off-by-one(fisher=True κ→(κ+2)/4, 기존 (κ+1)/4) audit에서 발견·수정. MAR CAGR<0 무의미(단조성 파괴) → 표기만 가드, 수식 불변.
+
 ## 2026-06-15 Layer2 이벤트 계약 분리 및 support-preserving projection
 - **Delta:** `ValidatedSignalBatch` 기반 event schedule을 L2 입력 SSOT로 고정하고, `rank_and_select`는 `signed`/`absolute` 모드로 분리했다.
 - **Rationale:** L1의 방향·holding·net edge를 bar-level 포지션 계약으로 보존해야 short symmetry와 기존 legacy rank를 동시에 유지할 수 있다.
