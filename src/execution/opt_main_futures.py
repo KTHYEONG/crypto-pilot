@@ -793,23 +793,23 @@ def _run_tiered_l2_study(
                 self.best_val = float("-1e6")
 
             def __call__(self, study: Any, trial: Any) -> None:
-                import sys
                 val = trial.value
                 if val is not None and val > self.best_val:
                     self.best_val = val
-                current = len(study.trials)
                 
-                best_disp = f"{self.best_val * 100:.2f}%" if self.best_val > float("-1e6") else "N/A"
-                current_disp = f"{val * 100:.2f}%" if (val is not None and val > float("-1e6")) else "BLOCKED"
-                
-                sys.stdout.write(
-                    f"\r[L2-OPT] Progress: {current}/{self.total_trials} trials | "
-                    f"Best CAGR: {best_disp} | Current Trial PnL: {current_disp}"
-                )
-                sys.stdout.flush()
-                if current >= self.total_trials:
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
+                # 로그 출력을 위해 사용되었으나 노이즈 제거를 위해 주석 처리됨.
+                # current = len(study.trials)
+                # best_disp = f"{self.best_val * 100:.2f}%" if self.best_val > float("-1e6") else "N/A"
+                # current_disp = f"{val * 100:.2f}%" if (val is not None and val > float("-1e6")) else "BLOCKED"
+                # import sys
+                # sys.stdout.write(
+                #     f"\r[L2-OPT] Progress: {current}/{self.total_trials} trials | "
+                #     f"Best CAGR: {best_disp} | Current Trial PnL: {current_disp}"
+                # )
+                # sys.stdout.flush()
+                # if current >= self.total_trials:
+                #     sys.stdout.write("\n")
+                #     sys.stdout.flush()
 
         study = _optuna.create_study(
             direction="maximize",
@@ -911,7 +911,7 @@ def _run_strategy_stage(
     trading_symbols: tuple[str, ...] = (),
     universe_snapshot: UniverseSnapshot | None = None,
     layered_window: Any | None = None,
-) -> CandidatePipelineOutput | None:
+) -> CandidatePipelineOutput | RunnerResult | None:
     # ─── 기존 Phase D 진입 (공통 설정 → bridge → 선택적 Tiered 분기) ──────────
     from src.domain.futures.strategy.tiered_logging import format_data_integrity_summary, format_layer_header
 
@@ -1081,7 +1081,6 @@ def _run_strategy_stage(
                 return None  # L1 BLOCKED → 조기 종료
 
             # ── Step B: L2 Optimization Header ──────────────────────────────
-            _logger.info("")  # LAYER 1 결과와 간격 확보
             _logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
 
             # ── Step C: L2 window 신호 예측 ──────────────────────────────────
@@ -1105,7 +1104,8 @@ def _run_strategy_stage(
             best_l2_params = dict(getattr(l2_study_result, "best_params", {}))
 
             # ── Step E: 최적 params + L1 override로 최종 실행 ────────────────
-            run_tiered_pipeline(
+            from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
+            _, l2_final, _ = run_tiered_pipeline(
                 labeled_events=labeled_tiered,
                 aligned=aligned_tiered,
                 cfg=tiered_cfg,
@@ -1119,6 +1119,15 @@ def _run_strategy_stage(
                 verbose=True,  # 최종 실행시 상세 결과 출력
                 override_dsr=l2_study_result.dsr,
             )
+            
+            # Layer 2 BLOCKED 시 즉시 종료 (Step 5 optimization 진입 방지)
+            if l2_final is None or not l2_final.gate_passed:
+                return RunnerResult(exit_code=1, reason="layer2_blocked")
+            
+            # Tiered Pipeline이 L3까지 수행했으므로 여기서 종료 (레거시 ML 단계 스킵)
+            if run_config.phase in ("alo", "full", "l3"):
+                return RunnerResult(exit_code=0, reason="tiered_pipeline_completed")
+
             return None  # Phase D allocation 스킵 (Tiered가 대체)
         except TieredPipelineError as _tiered_exc:
             _logger.error(
@@ -1591,25 +1600,15 @@ def _run_optimization_stage(
         seed=seed,
         storage_url=storage_url,
     )
-    header = f"| {'Parameter':<18} | {'Value':<27} |"
-    width = len(header)
-    title = "[OPTIMIZATION] "
-    _logger.info("\n" + title + "-" * (width - len(title)))
-    _logger.info(header)
-    _logger.info(f"| {'-'*18:<18} | {'-'*27:<27} |")
-    _logger.info(f"| {'Target Symbols':<18} | {len(data_stage.valid_symbols):<27} |")
-    _logger.info(f"| {'Total Trials':<18} | {int(run_config.trials):<27} |")
-    _logger.info(f"| {'Parallel Workers':<18} | {safe_workers_b:<27} |")
-    _logger.info("-" * width)
 
     t_opt = time.perf_counter()
     opt_res = run_optimization(opt_req)
     opt_elapsed = time.perf_counter() - t_opt
-    _logger.info(f"[OPTIMIZE] Optimization complete in {opt_elapsed:.2f}s")
+    _logger.debug(f"[OPTIMIZE] Optimization complete in {opt_elapsed:.2f}s")
     
     precompute_profile = getattr(opt_res.base_ctx, "precompute_profile", None)
     if isinstance(precompute_profile, dict):
-        _logger.info(
+        _logger.debug(
             (
                 "[RUN_PROF] step=ml_precompute total=%.2fs align=%.2fs "
                 "covariance=%.2fs awf_refit=%.2fs calibrator=%.2fs "
@@ -1897,6 +1896,9 @@ def run_pipeline(
     )
     _logger.debug("<< STRATEGY: %.2fs", time.perf_counter() - t_strategy)
 
+    if isinstance(strategy_out, RunnerResult):
+        return strategy_out
+
     # Step 4.5) C3/C4 gold standard: 전략 이벤트로 scorecard 갱신
     if regime_stage_result is not None and strategy_out is not None:
         _refresh_regime_c34_gold_standard(*regime_stage_result, strategy_out)
@@ -1909,9 +1911,13 @@ def run_pipeline(
         return RunnerResult(exit_code=0, reason="candidate_evaluation_done")
     # Step 5) optimization + final OOS evaluation
     _logger.info(
-        ">> OPTIMIZE: n=%d trials=%d",
-        len(data_stage.valid_symbols),
-        int(run_config.trials),
+        "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "● [LAYER 3: ML PHASE B OPTIMIZATION & ENSEMBLE]\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "  ● [HYPERPARAMETER OPTIMIZATION]\n"
+        f"    - Target Symbols : {len(data_stage.valid_symbols)}\n"
+        f"    - Total Trials   : {int(run_config.trials)}\n"
+        "  ────────────────────────────────────────────────────────────────────────────"
     )
     t_opt_stage = time.perf_counter()
     result = _run_optimization_stage(

@@ -1417,8 +1417,6 @@ def run_tiered_pipeline(
     t_l1 = time.perf_counter()
     if l1_result_override is not None:
         l1 = l1_result_override
-        if verbose:
-            logger.info("[TIERED] L1 override 사용 — L1 재실행 스킵")
     else:
         outer_folds = _tw.build_l1_nested_swf_folds(
             n_bars=n_bars,
@@ -1439,16 +1437,16 @@ def run_tiered_pipeline(
 
     if not l1.gate_passed:
         if verbose:
-            logger.info("\n>> LAYER 1 RESULT: [BLOCKED] -> gate_passed=False")
+            logger.info(">> LAYER 1 RESULT: [BLOCKED] -> gate_passed=False")
         return (l1, None, None)
 
     if target_phase == "l1":
         if verbose:
-            logger.info("\n>> LAYER 1 RESULT: [PASS] -> Target phase L1 reached. Stopping pipeline.")
+            logger.info(">> LAYER 1 RESULT: [PASS] -> Target phase L1 reached. Stopping pipeline.")
         return (l1, None, None)
 
     if verbose and l1_result_override is None:
-        logger.info("\n>> LAYER 1 RESULT: [PASS] -> Proceeding to Layer 2.")
+        logger.info(">> LAYER 1 RESULT: [PASS] -> Proceeding to Layer 2.")
 
     # ─── Layer 2: AWF Portfolio Optimization ─────────────────────────────────
     if verbose and l1_result_override is None:
@@ -1510,11 +1508,11 @@ def run_tiered_pipeline(
 
     if not l2.gate_passed:
         if verbose:
-            logger.info("\n>> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False")
+            logger.info(">> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False")
         return (l1, l2, None)
 
     if verbose:
-        logger.info("\n>> LAYER 2 RESULT: [PASS] -> Proceeding to Final Holdout.")
+        logger.info(">> LAYER 2 RESULT: [PASS] -> Proceeding to Final Holdout.")
 
     if target_phase == "l2":
         if verbose:
