@@ -508,14 +508,13 @@ class TestFormatLayer3Table:
 
         assert "2025-07-01" in result
         assert "2026-01-01" in result
-        assert "FINAL HOLDOUT SCORECARD" in result
+        assert "HOLDOUT VALIDATION SCORECARD" in result
         assert "Strategy" in result
-        assert "Baseline" in result
-        assert "Delta" in result
-        assert "PASS" in result
+        assert "( EW Bench )" in result
+        assert "✅" in result
         assert "45.0%" in result
         assert "30.0%" in result
-        assert "+0.60" in result
+        assert "1.800" in result
 
     def test_blocked_shows_blocker_reason(self) -> None:
         """gate_passed=False + blocker_reason이면 BLOCKED 요약 표시."""
@@ -534,8 +533,7 @@ class TestFormatLayer3Table:
 
         result = format_layer3_table(r3, ho_start="2025-07-01", ho_end="2026-01-01")
 
-        assert "FINAL STATUS: BLOCKED (growth_lcb)" in result
-        assert "[BLOCKED]" in result
+        assert ">> FINAL RESULT : ❌ BLOCKED (Reason: growth_lcb)" in result
 
     def test_error_renders_summary_instead_of_metric_table(self) -> None:
         """error 상태면 메트릭 표 대신 짧은 error summary 출력."""
@@ -549,8 +547,8 @@ class TestFormatLayer3Table:
 
         assert "Error Summary" in result
         assert "no_holdout_signals" in result
-        assert "Metric           Strategy" not in result
-        assert "FINAL STATUS: ERROR (no_holdout_signals)" in result
+        assert "CAGR" not in result
+        assert ">> FINAL RESULT : ❌ ERROR (no_holdout_signals)" in result
 
 
 # ---------------------------------------------------------------------------
