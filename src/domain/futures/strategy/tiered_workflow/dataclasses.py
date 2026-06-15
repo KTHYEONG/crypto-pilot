@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from src.domain.futures.strategy.candidate_contracts import (
@@ -16,6 +16,9 @@ if TYPE_CHECKING:
         ValidatedSignalEvent,
     )
     from src.domain.futures.strategy.cs_rank import SymbolSignal
+
+
+AllocationPolicy = Literal["diagonal_kelly", "directional_equal_weight"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -115,6 +118,58 @@ class SymbolRealizedStat:
 
 
 @dataclass(slots=True, frozen=True)
+class Layer2BlockMetric:
+    """Layer2 연속 블록 단위 성장/리스크 요약."""
+
+    start_idx: int
+    end_idx: int
+    log_growth_hybrid: float
+    log_growth_baseline: float
+    mdd_hybrid: float
+    turnover_hybrid: float
+    active_rebalances: int
+
+
+@dataclass(slots=True, frozen=True)
+class Layer2TrialEvaluation:
+    """Layer2 단일 trial 성장/제약 평가 결과."""
+
+    objective_value: float
+    constraint_values: tuple[float, ...]
+    cagr_hybrid: float
+    cagr_baseline: float
+    growth_lcb_hybrid: float
+    growth_lcb_baseline: float
+    sharpe_hac_hybrid: float
+    sharpe_hac_baseline: float
+    psr_hybrid: float
+    mdd_hybrid: float
+    cvar_95_hybrid: float
+    fold_pass_ratio: float
+    break_even_pass_pct: float
+    average_gross_exposure: float
+    cap_saturation_ratio: float
+    total_cost_bps: float
+    block_metrics: tuple[Layer2BlockMetric, ...]
+    returns_hybrid: tuple[float, ...] = ()
+    returns_baseline: tuple[float, ...] = ()
+
+
+@dataclass(slots=True, frozen=True)
+class Layer2StudyResult:
+    """Layer2 study 최종 챔피언 선택 결과."""
+
+    best_params: dict[str, object]
+    best_trial_number: int | None
+    best_evaluation: Layer2TrialEvaluation | None
+    dsr: float
+    effective_trial_count: float
+    completed_trials: int
+    feasible_trials: int
+    blocker_reason: str
+
+
+@dataclass(slots=True, frozen=True)
 class Layer2Result:
     """Layer2 AWF 포트폴리오 검증 결과.
 
@@ -151,7 +206,20 @@ class Layer2Result:
     friction_pass_pct: float
     gate_passed: bool
     blocker_reason: str
+    allocation_policy: AllocationPolicy = "diagonal_kelly"
     psr_hybrid: float = 0.0
+    growth_lcb_hybrid: float = 0.0
+    growth_lcb_baseline: float = 0.0
+    sharpe_hac_hybrid: float = 0.0
+    sharpe_hac_baseline: float = 0.0
+    dsr_hybrid: float = 0.0
+    cvar_95_hybrid: float = 0.0
+    average_gross_exposure: float = 0.0
+    average_net_exposure: float = 0.0
+    cap_saturation_ratio: float = 0.0
+    total_cost_bps: float = 0.0
+    n_rebalances: int = 0
+    block_metrics: tuple[Layer2BlockMetric, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -164,16 +232,21 @@ class Layer2AllocationConfig:
     min_abs_rank_z: float = 0.0
     rank_buffer: int = 1
     no_trade_band: float = 0.01
-    vol_target: float | None = None
+    max_ann_vol: float | None = None
     l2_min_cagr: float = 0.15
     l2_min_mar: float = 1.0
     l2_min_sharpe_abs: float = 1.0
     l2_max_mdd_abs: float = 0.20
     l2_min_fold_pass_ratio: float = 0.60
     l2_min_sharpe_uplift: float = 0.20
+    l2_min_growth_uplift: float = 0.0
     l2_min_psr: float = 0.90
     l2_min_friction_pass: float = 0.50
-    friction_safety_mult: float = 1.0
+    fixed_cost_safety_mult: float = 1.25
+    l2_min_dsr: float = 0.95
+    l2_max_cvar_95: float = 0.03
+    l2_min_active_blocks: int = 4
+    l2_growth_lcb_z: float = 1.0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -190,9 +263,10 @@ class Layer2AllocationConfig:
     @classmethod
     def from_mapping(cls, params: dict[str, object] | None) -> Layer2AllocationConfig:
         params = params or {}
-        vol_target = params.get("vol_target")
-        if not isinstance(vol_target, float):
-            vol_target = None
+        if "friction_safety_mult" in params:
+            raise ValueError("friction_safety_mult is deprecated; use fixed_cost_safety_mult")
+        raw_vol_target = params.get("max_ann_vol", params.get("vol_target"))
+        vol_target = float(raw_vol_target) if isinstance(raw_vol_target, (int, float)) else None
         min_abs_rank_z = params.get("min_abs_rank_z", params.get("CS_Z_SCORE_THRESHOLD", 0.0))
         return cls(
             k_rank=cls._as_int(params.get("K_RANK", 3), 3),
@@ -201,16 +275,24 @@ class Layer2AllocationConfig:
             min_abs_rank_z=cls._as_float(min_abs_rank_z, 0.0),
             rank_buffer=cls._as_int(params.get("rank_buffer", 1), 1),
             no_trade_band=cls._as_float(params.get("no_trade_band", 0.01), 0.01),
-            vol_target=vol_target,
+            max_ann_vol=vol_target,
             l2_min_cagr=cls._as_float(params.get("l2_min_cagr", 0.15), 0.15),
             l2_min_mar=cls._as_float(params.get("l2_min_mar", 1.0), 1.0),
             l2_min_sharpe_abs=cls._as_float(params.get("l2_min_sharpe_abs", 1.0), 1.0),
             l2_max_mdd_abs=cls._as_float(params.get("l2_max_mdd_abs", 0.20), 0.20),
             l2_min_fold_pass_ratio=cls._as_float(params.get("l2_min_fold_pass_ratio", 0.60), 0.60),
             l2_min_sharpe_uplift=cls._as_float(params.get("l2_min_sharpe_uplift", 0.20), 0.20),
+            l2_min_growth_uplift=cls._as_float(params.get("l2_min_growth_uplift", 0.0), 0.0),
             l2_min_psr=cls._as_float(params.get("l2_min_psr", 0.90), 0.90),
             l2_min_friction_pass=cls._as_float(params.get("l2_min_friction_pass", 0.50), 0.50),
-            friction_safety_mult=cls._as_float(params.get("friction_safety_mult", 1.0), 1.0),
+            fixed_cost_safety_mult=cls._as_float(
+                params.get("fixed_cost_safety_mult", 1.25),
+                1.25,
+            ),
+            l2_min_dsr=cls._as_float(params.get("l2_min_dsr", 0.95), 0.95),
+            l2_max_cvar_95=cls._as_float(params.get("l2_max_cvar_95", 0.03), 0.03),
+            l2_min_active_blocks=cls._as_int(params.get("l2_min_active_blocks", 4), 4),
+            l2_growth_lcb_z=cls._as_float(params.get("l2_growth_lcb_z", 1.0), 1.0),
         )
 
 
@@ -258,6 +340,7 @@ class Layer3Result:
         sharpe_baseline: 기준 전략 Sharpe.
         mar_baseline: 기준 전략 MAR.
         gate_passed: L3 통과 여부.
+        blocker_reason: 실패 원인 키. 통과 시 빈 문자열.
     """
 
     cagr: float
@@ -269,6 +352,7 @@ class Layer3Result:
     sharpe_baseline: float
     mar_baseline: float
     gate_passed: bool
+    blocker_reason: str = ""
 
 
 @dataclass(slots=True, frozen=True)

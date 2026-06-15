@@ -15,6 +15,223 @@ if TYPE_CHECKING:
 _BARS_PER_YEAR: float = 2190.0  # 4h 기준
 
 
+def _bars_per_year_for_tf(tf: str) -> float:
+    """Timeframe 문자열로부터 연간 bar 수를 계산."""
+    from src.domain.futures.portfolio.signal_composer import hours_per_bar_tf
+
+    hours_per_bar = float(hours_per_bar_tf(tf))
+    if not np.isfinite(hours_per_bar) or hours_per_bar <= 0.0:
+        return _BARS_PER_YEAR
+    return float((24.0 * 365.0) / hours_per_bar)
+
+
+def _clean_rets_array(rets: list[float] | NDArray[np.float64]) -> NDArray[np.float64]:
+    arr = np.asarray(rets, dtype=np.float64)
+    if arr.ndim != 1 or arr.size == 0:
+        return np.zeros((0,), dtype=np.float64)
+    if not np.all(np.isfinite(arr)):
+        return np.zeros((0,), dtype=np.float64)
+    return arr
+
+
+def _default_hac_lag(n_obs: int) -> int:
+    if n_obs <= 1:
+        return 0
+    lag = int(4.0 * (n_obs / 100.0) ** (2.0 / 9.0))
+    return max(1, min(lag, n_obs - 1))
+
+
+def _hac_long_run_variance(
+    values: NDArray[np.float64],
+    max_lag: int | None = None,
+) -> float:
+    if values.ndim != 1 or values.size < 2 or not np.all(np.isfinite(values)):
+        return 0.0
+    demeaned = values - float(np.mean(values))
+    gamma_0 = float(np.dot(demeaned, demeaned)) / float(values.size)
+    lag = _default_hac_lag(values.size) if max_lag is None else max(0, min(int(max_lag), values.size - 1))
+    long_run_var = gamma_0
+    for j in range(1, lag + 1):
+        weight = 1.0 - (j / float(lag + 1))
+        gamma_j = float(np.dot(demeaned[j:], demeaned[:-j])) / float(values.size)
+        long_run_var += 2.0 * weight * gamma_j
+    return float(max(long_run_var, 0.0))
+
+
+def _effective_sample_size_hac(
+    rets: list[float] | NDArray[np.float64],
+    max_lag: int | None = None,
+) -> float:
+    arr = _clean_rets_array(rets)
+    if arr.size < 2:
+        return 0.0
+    var_iid = float(np.var(arr, ddof=1))
+    if not np.isfinite(var_iid) or var_iid <= 1e-12:
+        return 0.0
+    long_run_var = _hac_long_run_variance(arr, max_lag=max_lag)
+    if long_run_var <= 1e-12:
+        return float(arr.size)
+    n_eff = float(arr.size) * var_iid / long_run_var
+    return float(np.clip(n_eff, 1.0, float(arr.size)))
+
+
+def _hac_sharpe(
+    rets: list[float] | NDArray[np.float64],
+    *,
+    bars_per_year: float = _BARS_PER_YEAR,
+    max_lag: int | None = None,
+) -> float:
+    arr = _clean_rets_array(rets)
+    if arr.size < 2:
+        return 0.0
+    sigma_hac = float(np.sqrt(max(_hac_long_run_variance(arr, max_lag=max_lag), 0.0)))
+    if sigma_hac <= 1e-12:
+        return 0.0
+    return float((float(np.mean(arr)) / sigma_hac) * np.sqrt(bars_per_year))
+
+
+def _annualized_log_growth(
+    rets: list[float] | NDArray[np.float64],
+    *,
+    bars_per_year: float = _BARS_PER_YEAR,
+) -> float:
+    arr = _clean_rets_array(rets)
+    if arr.size == 0 or np.any(arr <= -1.0):
+        return float("nan")
+    return float(bars_per_year * np.mean(np.log1p(arr)))
+
+
+def _block_log_growth(
+    rets: list[float] | NDArray[np.float64],
+    *,
+    bars_per_year: float = _BARS_PER_YEAR,
+    block_size: int,
+) -> NDArray[np.float64]:
+    arr = _clean_rets_array(rets)
+    if arr.size == 0 or block_size <= 0 or np.any(arr <= -1.0):
+        return np.zeros((0,), dtype=np.float64)
+    blocks: list[float] = []
+    for start in range(0, arr.size, block_size):
+        block = arr[start : start + block_size]
+        if block.size == 0:
+            continue
+        blocks.append(float(bars_per_year * np.mean(np.log1p(block))))
+    return np.asarray(blocks, dtype=np.float64)
+
+
+def _growth_lcb(
+    block_log_growth: list[float] | NDArray[np.float64],
+    *,
+    z_lcb: float = 1.0,
+) -> float:
+    arr = _clean_rets_array(block_log_growth)
+    if arr.size == 0:
+        return float("-1e6")
+    if arr.size == 1:
+        return float(arr[0])
+    stderr = float(np.std(arr, ddof=1)) / float(np.sqrt(arr.size))
+    return float(np.mean(arr) - (z_lcb * stderr))
+
+
+def _cvar_95(rets: list[float] | NDArray[np.float64]) -> float:
+    arr = _clean_rets_array(rets)
+    if arr.size == 0:
+        return float("inf")
+    losses = -arr
+    var_cut = float(np.quantile(losses, 0.95))
+    tail = losses[losses >= var_cut]
+    if tail.size == 0:
+        return max(var_cut, 0.0)
+    return float(np.maximum(np.mean(tail), 0.0))
+
+
+def _sharpe_hac(
+    rets: list[float] | NDArray[np.float64],
+    *,
+    bars_per_year: float,
+    max_lag: int | None = None,
+) -> float:
+    return _hac_sharpe(rets, bars_per_year=bars_per_year, max_lag=max_lag)
+
+
+def _contiguous_block_log_growth(
+    rets: list[float] | NDArray[np.float64],
+    *,
+    block_bars: int,
+) -> NDArray[np.float64]:
+    arr = _clean_rets_array(rets)
+    if arr.size == 0 or block_bars <= 0 or np.any(arr <= -1.0):
+        return np.zeros((0,), dtype=np.float64)
+    blocks: list[float] = []
+    for start in range(0, arr.size, int(block_bars)):
+        block = arr[start : start + int(block_bars)]
+        if block.size == 0:
+            continue
+        blocks.append(float(np.sum(np.log1p(block), dtype=np.float64)))
+    return np.asarray(blocks, dtype=np.float64)
+
+
+def _growth_lower_confidence_bound(
+    block_log_growth: NDArray[np.float64],
+    *,
+    blocks_per_year: float,
+    z_value: float,
+) -> float:
+    if block_log_growth.size == 0 or not np.all(np.isfinite(block_log_growth)):
+        return float("-1e6")
+    annualized = block_log_growth * float(blocks_per_year)
+    if annualized.size == 1:
+        return float(np.expm1(annualized[0]))
+    stderr = float(np.std(annualized, ddof=1)) / float(np.sqrt(annualized.size))
+    return float(np.expm1(float(np.mean(annualized)) - (float(z_value) * stderr)))
+
+
+def _cvar_loss(
+    rets: list[float] | NDArray[np.float64],
+    *,
+    alpha: float = 0.95,
+) -> float:
+    arr = _clean_rets_array(rets)
+    if arr.size == 0:
+        return float("inf")
+    losses = -arr
+    var_cut = float(np.quantile(losses, alpha))
+    tail = losses[losses >= var_cut]
+    if tail.size == 0:
+        return float(max(var_cut, 0.0))
+    return float(np.maximum(np.mean(tail), 0.0))
+
+
+def _deflated_sharpe_probability(
+    *,
+    selected_rets: list[float] | NDArray[np.float64],
+    completed_trial_sharpes: NDArray[np.float64],
+    effective_trial_count: float,
+    bars_per_year: float,
+    max_lag: int | None = None,
+) -> float:
+    arr = _clean_rets_array(selected_rets)
+    if arr.size < 2 or effective_trial_count <= 0.0:
+        return 0.0
+    observed = _sharpe_hac(arr, bars_per_year=bars_per_year, max_lag=max_lag)
+    if not np.isfinite(observed):
+        return 0.0
+    sr_pool = np.asarray(completed_trial_sharpes, dtype=np.float64)
+    sr_pool = sr_pool[np.isfinite(sr_pool)]
+    if sr_pool.size == 0:
+        return _psr(arr.tolist(), bars_per_year=bars_per_year)
+    benchmark = float(
+        np.mean(sr_pool)
+        + np.std(sr_pool, ddof=0) * np.sqrt(2.0 * np.log(max(effective_trial_count, 1.0)))
+    )
+    n_eff = _effective_sample_size_hac(arr, max_lag=max_lag)
+    if n_eff <= 1.0:
+        return 0.0
+    variance = max(1.0 / n_eff, 1e-12)
+    z_score = (observed - benchmark) / float(np.sqrt(variance))
+    return float(norm.cdf(z_score))
+
+
 def _is_non_constant_finite_array(values: NDArray[np.float64]) -> bool:
     """배열이 모두 유한하고 상수(모든 원소가 동일)가 아닌지 여부 검증."""
     if values.size == 0:
