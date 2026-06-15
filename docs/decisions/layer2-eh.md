@@ -7,6 +7,10 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-15 L2 AWF 평가 폴드 동기화 및 로그 중복 제거
+- **Delta:** `objective_l2_sharpe` 내 AWF 평가 폴드를 L2 윈도우 `[l2_start, holdout_start)` 범위로 통일. 스터디 설정/생성 로그 억제, `FutureWarning` 경고 차단, 튜닝 완료 후의 중복 챔피언 파라미터 출력 구문을 차단했습니다.
+- **Rationale:** 최적화와 최종 파이프라인 간의 폴드 불일치로 인한 수학적 수치 오차를 정정하고, 최종 단계의 `[AWF PORTFOLIO PERFORMANCE SCORECARD]` 출력이 유일한 챔피언 매개변수 결과 노출지가 되도록 정합성을 통일했습니다.
+
 ## 2026-06-15 L2 Optuna 로그 억제 및 CAGR 목적함수 최적화
 - **Delta:** `run_tiered_pipeline`, `run_l2_awf` 등에 `verbose: bool` 옵션 배선 및 Trial 구동 시 `verbose=False`로 스코어카드 출력 차단. `\r`을 사용한 1줄 진행률 표시 callback 연동. `objective_l2_sharpe`를 L2 리스크 게이트 검증을 거친 CAGR(복리연수익률) 극대화 지표로 개편 및 미통과 시 `-inf` 패널티 반환 적용.
 - **Rationale:** 수십 회의 최적화 Trial 동안 거대한 포맷 테이블들이 콘솔을 지저분하게 채우던 환경을 단 한 줄의 캐리지 리턴 진행률 모니터링으로 개선하고, 자산 복리증식 목적을 직접 최적화하여 튜닝 결과의 아키텍처적 정합성을 강화함.
