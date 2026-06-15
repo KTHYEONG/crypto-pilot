@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.domain.futures.portfolio.portfolio_constructor import (
     PortfolioCaps,
@@ -55,6 +58,34 @@ class TestCapsProjection:
             bars_per_year=bars_per_year,
         )
         assert abs(float(np.sum(w_proj))) <= 0.30 + 1e-6, f"net cap 초과: {np.sum(w_proj):.4f}"
+
+    @pytest.mark.parametrize("signed_weight", [0.35, -0.35])
+    def test_net_cap_projection_preserves_support_without_creating_new_positions(
+        self,
+        signed_weight: float,
+    ) -> None:
+        """Net cap 보정은 기존 support 내부에서만 축소되어야 한다."""
+        w = np.zeros(54, dtype=np.float64)
+        w[:3] = signed_weight
+        support_mask = np.zeros(54, dtype=np.bool_)
+        support_mask[:3] = True
+        btc_beta = np.zeros(54, dtype=np.float64)
+
+        w_proj = cast(Any, project_all_caps)(
+            w,
+            btc_beta=btc_beta,
+            sigma_port=0.01,
+            bars_per_year=2190.0,
+            support_mask=support_mask,
+        )
+
+        inactive = ~support_mask
+        np.testing.assert_allclose(w_proj[inactive], 0.0, atol=1e-12)
+        assert np.count_nonzero(np.abs(w_proj) > 1e-12) <= int(np.sum(support_mask))
+        assert np.all(w_proj[support_mask] * w[support_mask] >= -1e-12)
+        assert abs(float(np.sum(w_proj))) <= 0.30 + 1e-6
+        assert float(np.sum(np.abs(w_proj))) <= 3.0 + 1e-6
+        assert float(np.max(np.abs(w_proj))) <= 0.10 + 1e-6
 
     def test_beta_cap_enforced(self) -> None:
         """beta_exposure = 1.0 > 0.50 → 투영 후 |beta_exp| ≤ 0.50."""
@@ -258,4 +289,3 @@ class TestCapsProjection:
         # t=1: crash (multiplier gross=0.3, net=0.1) -> gross_cap = 1.2 * 0.3 = 0.36, net_cap = 0.3 * 0.1 = 0.03
         # 순 노출(net sum)이 net_cap인 0.03에 정확히 수렴해야 한다.
         np.testing.assert_allclose(np.sum(weights[1]), 0.03, atol=1e-5)
-
