@@ -471,25 +471,34 @@ def format_layer2_table(
     fold_pass: float = getattr(r, "fold_pass_ratio", 0.0)
     turnover: float = getattr(r, "turnover", 0.0)
     friction_pct: float = getattr(r, "friction_pass_pct", 0.0)
+    psr_val: float = getattr(r, "psr_hybrid", float("nan"))
     gate_passed: bool = getattr(r, "gate_passed", False)
     blocker: str = getattr(r, "blocker_reason", "")
 
     # 가산식 uplift 게이트 (부호 무관): base+0.20
     uplift_val = sharpe_h - sharpe_b
     uplift_gate_val = 0.20
-    
+
     def _f(v: float, fmt: str = ".3f") -> str:
         return "nan" if not math.isfinite(v) else format(v, fmt)
 
     def _status(passed: bool) -> str:
         return "✅" if passed else "❌"
 
-    # Status determination
-    cagr_ok = cagr_h > 0.0
-    sharpe_ok = sharpe_h >= 0.5
-    mar_ok = mar_h >= 0.5
-    mdd_ok = (mdd_h <= 0.5) and (mdd_h <= mdd_b)
+    def _mar_str(mar_val: float, cagr_val: float) -> str:
+        """MAR 표기: 음수 CAGR이면 n/a(loss) 반환."""
+        if not math.isfinite(mar_val) or cagr_val < 0.0:
+            return "n/a(loss)"
+        return format(mar_val, ".3f")
+
+    # Status determination (보수적 임계값)
+    cagr_ok = cagr_h >= 0.15
+    sharpe_ok = sharpe_h >= 1.0
+    mar_ok = mar_h >= 1.0 and cagr_h >= 0.0
+    mdd_ok = (mdd_h <= 0.20) and (mdd_h <= mdd_b)
     fold_ok = fold_pass >= 0.6
+    psr_ok = math.isfinite(psr_val) and psr_val >= 0.90
+    friction_ok = friction_pct >= 0.50
     uplift_ok = uplift_val >= uplift_gate_val
 
     lines: list[str] = [
@@ -498,15 +507,21 @@ def format_layer2_table(
         "",
         "  [ RETURN & EFFICIENCY ]",
         "  ──────────────────────────────────────────────────────────────────────────",
-        f"  {'Metric':<20} {'Strategy':>12} {'( 1/N Base )':>15}  {'Gate':>14} {'Status':>8}",
+        f"  {'Metric':<20} {'Strategy':>12} {'( EW Bench )':>15}  {'Gate':>14} {'Status':>8}",
         "  ──────────────────────────────────────────────────────────────────────────",
-        f"  {'CAGR':<20} [ {_f(cagr_h, '+.1%'):>8} ] ({_f(cagr_b, '+.1%'):>11} )  {'> 0.0%':>14} {_status(cagr_ok):>7}",
-        f"  {'Sharpe':<20} [ {_f(sharpe_h):>8} ] ({_f(sharpe_b):>11} )  {'>= 0.50':>14} {_status(sharpe_ok):>7}",
-        f"  {'MAR (CAGR/MDD)':<20} [ {_f(mar_h):>8} ] ({_f(mar_b):>11} )  {'>= 0.50':>14} {_status(mar_ok):>7}",
+        (
+            f"  {'CAGR':<20} [ {_f(cagr_h, '+.1%'):>8} ]"
+            f" ({_f(cagr_b, '+.1%'):>11} )  {'>= 15.0%':>14} {_status(cagr_ok):>7}"
+        ),
+        f"  {'Sharpe':<20} [ {_f(sharpe_h):>8} ] ({_f(sharpe_b):>11} )  {'>= 1.00':>14} {_status(sharpe_ok):>7}",
+        (
+            f"  {'MAR (CAGR/MDD)':<20} [ {_mar_str(mar_h, cagr_h):>8} ]"
+            f" ({_mar_str(mar_b, cagr_b):>11} )  {'>= 1.00':>14} {_status(mar_ok):>7}"
+        ),
         "",
         "  [ RISK & UPLIFT ]",
         "  ──────────────────────────────────────────────────────────────────────────",
-        f"  {'MDD':<20} [ {_pct(mdd_h):>8} ] ({_pct(mdd_b):>11} )  {'<= 50.0%':>14} {_status(mdd_ok):>7}",
+        f"  {'MDD':<20} [ {_pct(mdd_h):>8} ] ({_pct(mdd_b):>11} )  {'<= 20.0%':>14} {_status(mdd_ok):>7}",
         f"  {'Sharpe Uplift':<20} [ {_f(uplift_val, '+.2f'):>8} ] ({'Base':>11} )  "
         f"{'>= Base+0.20':>14} {_status(uplift_ok):>7}",
         f"  {'Turnover / Rebal':<20} [ {turnover:>8.3f} ] ({'—':>11} )  {'—':>14} {'—':>7}",
@@ -514,7 +529,11 @@ def format_layer2_table(
         "  [ ROBUSTNESS & DIAGNOSTICS ]",
         "  ──────────────────────────────────────────────────────────────────────────",
         f"  {'Fold Pass Ratio':<20} [ {_pct(fold_pass):>8} ] ({'—':>11} )  {'>= 60.0%':>14} {_status(fold_ok):>7}",
-        f"  {'Friction Pass%':<20} [ {_pct(friction_pct):>8} ] ({'—':>11} )  {'—':>14} {'—':>7}",
+        f"  {'PSR (Anti-Overfit)':<20} [ {_f(psr_val):>8} ] ({'—':>11} )  {'>= 0.90':>14} {_status(psr_ok):>7}",
+        (
+            f"  {'Friction Pass%':<20} [ {_pct(friction_pct):>8} ]"
+            f" ({'—':>11} )  {'>= 50.0%':>14} {_status(friction_ok):>7}"
+        ),
         "  ──────────────────────────────────────────────────────────────────────────",
         "",
         f"  >> FINAL RESULT : {_gate(gate_passed)} {'(' + blocker + ')' if blocker else ''}",
