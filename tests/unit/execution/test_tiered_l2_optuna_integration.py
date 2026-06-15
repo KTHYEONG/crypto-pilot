@@ -1,13 +1,13 @@
 """Tiered L2 Optuna integration tests (spec: tiered-l2-optuna-integration.md).
 
-S1: _run_tiered_l2_study — Optuna 성공 시 kelly_fraction/friction_safety_mult 반환
+S1: _run_tiered_l2_study — Optuna 성공 시 Layer2StudyResult.best_params 반환
 S2: _build_l2_signal_batch — inference_artifact=None 시 ValueError
 S3: _run_tiered_l2_study — 모든 trials 실패 → {} 반환 + WARNING
 S4: run_tiered_pipeline(target_phase="l2") → l3_res is None
 S5: run_tiered_pipeline(target_phase="l3", L2 PASS) → l3_res not None
 S6: run_tiered_pipeline(target_phase="l3", L2 BLOCKED) → l3_res is None
 S7: run_tiered_pipeline(l1_result_override=...) → L1 fitting 경로 스킵
-S8: suggest_layered_params("L2") → kelly_fraction/friction_safety_mult/vol_target 포함,
+S8: suggest_layered_params("L2") → kelly_fraction/max_ann_vol 포함,
     RISK_PER_TRADE/MAX_EXPOSURE_PER_COIN 제외
 """
 from __future__ import annotations
@@ -31,7 +31,7 @@ def _make_frozen_trial(number: int, value: float | None, state_complete: bool = 
     state.name = "COMPLETE" if state_complete else "FAIL"
     # TrialState.COMPLETE 비교는 is로 하므로 직접 패치
     trial.state = state
-    trial.params = {"kelly_fraction": 0.3, "friction_safety_mult": 1.5, "vol_target": 0.15}
+    trial.params = {"kelly_fraction": 0.3, "max_ann_vol": 0.15}
     return trial
 
 
@@ -48,16 +48,17 @@ def _make_l1_result(gate_passed: bool, artifact: Any = None) -> MagicMock:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TestS1RunTieredL2StudyHappyPath:
-    def test_returns_kelly_fraction_and_friction_safety_mult(self) -> None:
-        """성공 trial 존재 시 kelly_fraction, friction_safety_mult 포함 dict 반환."""
+    def test_returns_study_result_with_best_params(self) -> None:
+        """성공 trial 존재 시 Layer2StudyResult.best_params를 반환."""
         from optuna.trial import TrialState
 
-        best_params = {"kelly_fraction": 0.3, "friction_safety_mult": 1.5, "vol_target": 0.15}
+        best_params = {"kelly_fraction": 0.3, "max_ann_vol": 0.15}
         mock_trial = MagicMock()
         mock_trial.number = 0
         mock_trial.value = 1.2
         mock_trial.state = TrialState.COMPLETE
         mock_trial.params = best_params
+        mock_trial.user_attrs = {"dsr_hybrid": 0.8, "l2_constraint_values": [-1.0] * 9}
 
         mock_study = MagicMock()
         mock_study.trials = [mock_trial]
@@ -65,9 +66,7 @@ class TestS1RunTieredL2StudyHappyPath:
         with (
             patch("src.execution.opt_main_futures.setup_optuna_storage", return_value=("url", MagicMock())),
             patch("optuna.create_study", return_value=mock_study),
-            patch("optuna.delete_study"),
-            # objective_l2_sharpe/TieredContext은 _run_tiered_l2_study 내부에서 lazy import됨
-            patch("src.domain.futures.optimization.workflow.objective_l2_sharpe", return_value=1.2),
+            patch("src.domain.futures.optimization.workflow.objective_l2_growth", return_value=1.2),
             patch("src.domain.futures.optimization.workflow.TieredContext"),
         ):
             from src.execution.opt_main_futures import _run_tiered_l2_study
@@ -83,8 +82,8 @@ class TestS1RunTieredL2StudyHappyPath:
                 seed=42,
             )
 
-        assert "kelly_fraction" in result
-        assert "friction_safety_mult" in result
+        assert result.best_params["kelly_fraction"] == pytest.approx(0.3)
+        assert result.best_params["max_ann_vol"] == pytest.approx(0.15)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -129,7 +128,6 @@ class TestS3AllTrialsFail:
         with (
             patch("src.execution.opt_main_futures.setup_optuna_storage", return_value=("url", MagicMock())),
             patch("optuna.create_study", return_value=mock_study),
-            patch("optuna.delete_study"),
             patch("src.domain.futures.optimization.workflow.TieredContext"),
             caplog.at_level(logging.WARNING, logger="opt_main_futures"),
         ):
@@ -146,7 +144,7 @@ class TestS3AllTrialsFail:
                 seed=42,
             )
 
-        assert result == {}
+        assert result.best_params == {}
         assert any("실패" in r.message or "기본 l2_params" in r.message for r in caplog.records)
 
 
@@ -167,7 +165,8 @@ def _pipeline_patches(l2_gate_passed: bool, mock_l3_result: Any = None):  # type
     patches = [
         # pipeline 모듈 수준으로 import된 predict_layer1_signals
         patch("src.domain.futures.strategy.tiered_workflow.pipeline.predict_layer1_signals"),
-        # _date_to_idx: bar index 계산 스킵
+        # L3 holdout span 계산 스킵
+        patch("src.domain.futures.strategy.tiered_workflow.pipeline._resolve_holdout_span", return_value=(0, 1)),
         patch("src.domain.futures.strategy.tiered_workflow.pipeline._date_to_idx", return_value=0),
         # _tw = src.domain.futures.strategy.tiered_workflow (lazy import)
         patch(
@@ -184,7 +183,7 @@ def _pipeline_patches(l2_gate_passed: bool, mock_l3_result: Any = None):  # type
         ),
         # cfg.replace() 사용하는 내부 함수 스킵
         patch(
-            "src.domain.futures.strategy.config.resolve_purge_and_embargo_bars",
+            "src.domain.futures.strategy.tiered_workflow.pipeline.strategy_config.resolve_purge_and_embargo_bars",
             return_value=(0, 0),
         ),
     ]
@@ -201,7 +200,7 @@ class TestS4PipelineL2PhaseStopsBeforeL3:
         mock_l1 = _make_l1_result(gate_passed=True, artifact=MagicMock())
         patches, _ = _pipeline_patches(l2_gate_passed=True)
 
-        with patches[0], patches[1], patches[2], patches[3], patches[4] as mock_l3_call, patches[5]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5] as mock_l3_call, patches[6]:
             from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
 
             _, _l2_res, l3_res = run_tiered_pipeline(
@@ -234,7 +233,7 @@ class TestS5PipelineL3PhaseRunsWhenL2Passes:
         mock_l3 = MagicMock(spec=Layer3Result)
         patches, _ = _pipeline_patches(l2_gate_passed=True, mock_l3_result=mock_l3)
 
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
             from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
 
             _, _l2_res, l3_res = run_tiered_pipeline(
@@ -263,7 +262,7 @@ class TestS6PipelineL3BlockedWhenL2Fails:
         mock_l1 = _make_l1_result(gate_passed=True, artifact=MagicMock())
         patches, _ = _pipeline_patches(l2_gate_passed=False)
 
-        with patches[0], patches[1], patches[2], patches[3], patches[4] as mock_l3_call, patches[5]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5] as mock_l3_call, patches[6]:
             from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
 
             _, _l2_res, l3_res = run_tiered_pipeline(
@@ -283,6 +282,82 @@ class TestS6PipelineL3BlockedWhenL2Fails:
         mock_l3_call.assert_not_called()
 
 
+class TestS6bPipelineL3FailureHandling:
+    def test_empty_holdout_window_returns_blocked_l3_result(self) -> None:
+        """빈 holdout window면 L3 blocked result를 반환하고 예외로 터뜨리지 않는다."""
+        from src.domain.futures.strategy.tiered_workflow.pipeline import Layer3WindowError
+
+        mock_l1 = _make_l1_result(gate_passed=True, artifact=MagicMock())
+        patches, _ = _pipeline_patches(l2_gate_passed=True)
+
+        with (
+            patches[0],
+            patch(
+                "src.domain.futures.strategy.tiered_workflow.pipeline._resolve_holdout_span",
+                side_effect=Layer3WindowError("empty_holdout_window"),
+            ),
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+        ):
+            from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
+
+            _, _l2_res, l3_res = run_tiered_pipeline(
+                labeled_events=MagicMock(),
+                aligned=MagicMock(),
+                cfg=MagicMock(),
+                window=MagicMock(),
+                l1_params={},
+                l2_params={},
+                caps=MagicMock(),
+                tf="4h",
+                target_phase="l3",
+                l1_result_override=mock_l1,
+            )
+
+        assert l3_res is not None
+        assert l3_res.gate_passed is False
+        assert l3_res.blocker_reason == "empty_holdout_window"
+
+    def test_l3_signal_prediction_failure_raises_tiered_error(self) -> None:
+        """L3 신호 예측 실패는 Layer3ExecutionError로 승격되어야 한다."""
+        mock_l1 = _make_l1_result(gate_passed=True, artifact=MagicMock())
+        patches, _ = _pipeline_patches(l2_gate_passed=True)
+
+        with (
+            patch(
+                "src.domain.futures.strategy.tiered_workflow.pipeline.predict_layer1_signals",
+                side_effect=[MagicMock(), ValueError("bad holdout split")],
+            ),
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+        ):
+            from src.domain.futures.strategy.tiered_workflow.pipeline import (
+                Layer3ExecutionError,
+                run_tiered_pipeline,
+            )
+
+            with pytest.raises(Layer3ExecutionError, match="layer3_signal_prediction_failed"):
+                run_tiered_pipeline(
+                    labeled_events=MagicMock(),
+                    aligned=MagicMock(),
+                    cfg=MagicMock(),
+                    window=MagicMock(),
+                    l1_params={},
+                    l2_params={},
+                    caps=MagicMock(),
+                    tf="4h",
+                    target_phase="l3",
+                    l1_result_override=mock_l1,
+                )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # S7 — l1_result_override 제공 시 L1 fitting 코드 스킵
 # ──────────────────────────────────────────────────────────────────────────────
@@ -300,7 +375,7 @@ class TestS7L1OverrideSkipsL1Fitting:
             patch(
                 "src.domain.futures.strategy.tiered_workflow.run_l1_nested_swf"
             ) as mock_run_l1,
-            patches[0], patches[1], patches[2], patches[3], patches[4], patches[5],
+            patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6],
         ):
             from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
 
@@ -322,13 +397,13 @@ class TestS7L1OverrideSkipsL1Fitting:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# S8 — suggest_layered_params("L2"): kelly_fraction, friction_safety_mult 포함,
+# S8 — suggest_layered_params("L2"): kelly_fraction, max_ann_vol 포함,
 #      RISK_PER_TRADE, MAX_EXPOSURE_PER_COIN 제외
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TestS8SuggestLayeredParamsL2Rewired:
     def test_l2_space_includes_new_params_and_excludes_dead_params(self) -> None:
-        """suggest_layered_params('L2')가 kelly_fraction/friction_safety_mult/vol_target를 포함
+        """suggest_layered_params('L2')가 kelly_fraction/max_ann_vol를 포함
         하고 RISK_PER_TRADE/MAX_EXPOSURE_PER_COIN을 제외함."""
         import optuna
 
@@ -344,8 +419,7 @@ class TestS8SuggestLayeredParamsL2Rewired:
         trial = study.best_trial
 
         assert "kelly_fraction" in trial.params, "kelly_fraction 누락"
-        assert "friction_safety_mult" in trial.params, "friction_safety_mult 누락"
-        assert "vol_target" in trial.params, "vol_target 누락"
+        assert "max_ann_vol" in trial.params, "max_ann_vol 누락"
         assert "RISK_PER_TRADE" not in trial.params, "dead param RISK_PER_TRADE 잔존"
         assert "MAX_EXPOSURE_PER_COIN" not in trial.params, "dead param MAX_EXPOSURE_PER_COIN 잔존"
 
@@ -362,6 +436,7 @@ class TestL2LoggingAndCagrOptimizationTarget:
 
         with (
             patches[0], patches[1], patches[2], patches[3], patches[4], patches[5],
+            patches[6],
             patch("src.domain.futures.strategy.tiered_workflow.pipeline.logger") as mock_logger,
         ):
             from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
@@ -386,63 +461,42 @@ class TestL2LoggingAndCagrOptimizationTarget:
                 assert "● [" not in msg, f"테이블 로그 출력됨: {msg}"
                 assert "AWF PORTFOLIO" not in msg
 
-    def test_objective_l2_cagr_returns_negative_inf_when_gate_fails(self) -> None:
-        """L2 gate_passed=False인 경우 objective_l2_sharpe가 -inf를 반환하는지 검증."""
-        from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2Result
-
-        mock_l2 = MagicMock(spec=Layer2Result)
-        mock_l2.gate_passed = False
-        mock_l2.cagr_hybrid = 0.25
+    def test_objective_l2_growth_returns_finite_penalty_without_l1_context(self) -> None:
+        """fixed_l1_params가 없으면 finite penalty를 반환한다."""
 
         mock_ctx = MagicMock()
-        mock_ctx.fixed_l1_params = {"signal_batch": MagicMock()}
+        mock_ctx.fixed_l1_params = None
 
-        with (
-            patch("src.domain.futures.optimization.workflow.suggest_layered_params", return_value={}),
-            patch("src.domain.futures.strategy.walk_forward.build_walk_forward_folds"),
-            patch("src.domain.futures.strategy.tiered_workflow.run_l2_awf", return_value=mock_l2) as mock_run_l2,
-        ):
-            from src.domain.futures.optimization.workflow import objective_l2_sharpe
-
-            val = objective_l2_sharpe(MagicMock(), mock_ctx)
-
-            assert val == float("-inf")
-            # verbose=False로 호출됨을 검증
-            mock_run_l2.assert_called_once()
-            assert mock_run_l2.call_args[1].get("verbose") is False
-
-    def test_objective_l2_cagr_returns_cagr_when_gate_passes(self) -> None:
-        """L2 gate_passed=True인 경우 objective_l2_sharpe가 cagr_hybrid를 반환하는지 검증."""
-        from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2Result
-
-        mock_l2 = MagicMock(spec=Layer2Result)
-        mock_l2.gate_passed = True
-        mock_l2.cagr_hybrid = 0.35
-
-        mock_ctx = MagicMock()
-        mock_ctx.fixed_l1_params = {"signal_batch": MagicMock()}
-
-        with (
-            patch("src.domain.futures.optimization.workflow.suggest_layered_params", return_value={}),
-            patch("src.domain.futures.strategy.walk_forward.build_walk_forward_folds"),
-            patch("src.domain.futures.strategy.tiered_workflow.run_l2_awf", return_value=mock_l2),
-        ):
-            from src.domain.futures.optimization.workflow import objective_l2_sharpe
-
-            val = objective_l2_sharpe(MagicMock(), mock_ctx)
-
-            assert val == pytest.approx(0.35)
+        from src.domain.futures.optimization.workflow import objective_l2_growth
+        val = objective_l2_growth(MagicMock(), mock_ctx)
+        assert val == pytest.approx(-1e6)
 
     def test_objective_l2_cagr_filters_folds_to_l2_window(self) -> None:
-        """L2 최적화 시 objective_l2_sharpe가 AWF 폴드를 L2 윈도우로 필터링하는지 검증."""
+        """L2 최적화 시 objective_l2_growth가 AWF 폴드를 L2 윈도우로 필터링하는지 검증."""
         import numpy as np
 
-        from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2Result
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2TrialEvaluation
         from src.domain.futures.strategy.walk_forward import WFFold
 
-        mock_l2 = MagicMock(spec=Layer2Result)
-        mock_l2.gate_passed = True
-        mock_l2.cagr_hybrid = 0.35
+        evaluation = Layer2TrialEvaluation(
+            objective_value=0.2,
+            constraint_values=(-1.0,) * 9,
+            cagr_hybrid=0.35,
+            cagr_baseline=0.1,
+            growth_lcb_hybrid=0.2,
+            growth_lcb_baseline=0.1,
+            sharpe_hac_hybrid=1.2,
+            sharpe_hac_baseline=0.8,
+            psr_hybrid=0.9,
+            mdd_hybrid=0.1,
+            cvar_95_hybrid=0.02,
+            fold_pass_ratio=1.0,
+            break_even_pass_pct=1.0,
+            average_gross_exposure=0.5,
+            cap_saturation_ratio=0.0,
+            total_cost_bps=5.0,
+            block_metrics=(),
+        )
 
         mock_ctx = MagicMock()
         mock_ctx.fixed_l1_params = {"signal_batch": MagicMock()}
@@ -464,19 +518,17 @@ class TestL2LoggingAndCagrOptimizationTarget:
         with (
             patch("src.domain.futures.optimization.workflow.suggest_layered_params", return_value={}),
             patch("src.domain.futures.strategy.walk_forward.build_walk_forward_folds", return_value=all_folds),
-            patch("src.domain.futures.strategy.tiered_workflow.run_l2_awf", return_value=mock_l2) as mock_run_l2,
+            patch("src.domain.futures.optimization.workflow.evaluate_l2_trial", return_value=evaluation) as mock_eval,
             patch(
                 "src.domain.futures.strategy.tiered_workflow.pipeline._date_to_idx",
                 side_effect=lambda datetimes, date: 2
             ),
         ):
-            from src.domain.futures.optimization.workflow import objective_l2_sharpe
+            from src.domain.futures.optimization.workflow import objective_l2_growth
 
-            objective_l2_sharpe(MagicMock(), mock_ctx)
+            objective_l2_growth(MagicMock(), mock_ctx)
 
-            # run_l2_awf에 전달된 awf_folds 검증
-            called_folds = mock_run_l2.call_args[1].get("awf_folds")
+            called_folds = mock_eval.call_args[1].get("awf_folds")
             assert len(called_folds) == 1
             assert called_folds[0].oos_start == 1
             assert called_folds[0].oos_end == 2
-
