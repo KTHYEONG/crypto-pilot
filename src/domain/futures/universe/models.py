@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -19,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_LEDGER_PATH = FUTURES_DATA_DIR / "universe_ledger.db"
 LEVERAGED_TOKEN_PATTERNS = ("UP", "DOWN", "BULL", "BEAR")
+_SQLITE_LEDGER_SUFFIXES = (".db", ".sqlite", ".sqlite3", "")
+_PARQUET_LEDGER_SUFFIXES = (".parquet", ".pq")
 
 
 class RejectCode(StrEnum):
@@ -298,9 +301,7 @@ def load_ledger_slice(
     ledger_path: Path = DEFAULT_LEDGER_PATH,
     enforce_eligibility: bool = True,
 ) -> pd.DataFrame:
-    """Load SQLite ledger slice and apply PIT query."""
-    import sqlite3
-
+    """Load PIT-safe ledger slice from SQLite or parquet storage."""
     needed = set(columns) | {"symbol", "tf", "date", "knowledge_date"}
     if enforce_eligibility:
         needed |= {"is_listed", "is_trading"}
@@ -308,30 +309,27 @@ def load_ledger_slice(
     if not ledger_path.exists():
         return pd.DataFrame(columns=sorted(needed))
 
-    as_of_date = _to_date(as_of)
-    as_of_str = as_of_date.isoformat()
-
-    cols_str = ", ".join([f'"{col}"' for col in sorted(needed)])
-    conn = sqlite3.connect(str(ledger_path))
-    try:
-        logger.info(f"[SQL-DB]   🔑 Loading ledger slice from {ledger_path.name} (as_of={as_of_str}, tf={tf})")
-        query = f"SELECT {cols_str} FROM ledger WHERE tf = ? AND date <= ? AND knowledge_date <= ?"  # noqa: S608
-        params = [tf, as_of_str, as_of_str]
-        
-        if symbols is not None:
-            placeholders = ", ".join(["?"] * len(symbols))
-            query += f" AND symbol IN ({placeholders})"
-            params.extend(symbols)
-            
-        if enforce_eligibility:
-            query += " AND is_listed = 1 AND is_trading = 1"
-            
-        df = pd.read_sql_query(query, conn, params=params)
-    except Exception as e:
-        logger.debug(f"[SQLite] Ledger slice query bypassed: {e}")
-        df = pd.DataFrame(columns=sorted(needed))
-    finally:
-        conn.close()
+    suffix = ledger_path.suffix.lower()
+    if suffix in _PARQUET_LEDGER_SUFFIXES:
+        df = _load_parquet_ledger_slice(
+            as_of=as_of,
+            tf=tf,
+            needed=needed,
+            symbols=symbols,
+            ledger_path=ledger_path,
+            enforce_eligibility=enforce_eligibility,
+        )
+    elif suffix in _SQLITE_LEDGER_SUFFIXES:
+        df = _load_sqlite_ledger_slice(
+            as_of=as_of,
+            tf=tf,
+            needed=needed,
+            symbols=symbols,
+            ledger_path=ledger_path,
+            enforce_eligibility=enforce_eligibility,
+        )
+    else:
+        raise ValueError(f"unsupported ledger backend: {ledger_path.suffix or '<empty>'}")
 
     return query_ledger_as_of(
         df,
@@ -340,6 +338,77 @@ def load_ledger_slice(
         symbols=symbols,
         enforce_eligibility=enforce_eligibility,
     )
+
+
+def _load_sqlite_ledger_slice(
+    *,
+    as_of: str | date,
+    tf: str,
+    needed: set[str],
+    symbols: tuple[str, ...] | None,
+    ledger_path: Path,
+    enforce_eligibility: bool,
+) -> pd.DataFrame:
+    as_of_date = _to_date(as_of)
+    as_of_str = as_of_date.isoformat()
+    cols_str = ", ".join([f'"{col}"' for col in sorted(needed)])
+    query = f"SELECT {cols_str} FROM ledger WHERE tf = ? AND date <= ? AND knowledge_date <= ?"  # noqa: S608
+    params: list[str] = [tf, as_of_str, as_of_str]
+    if symbols is not None:
+        placeholders = ", ".join(["?"] * len(symbols))
+        query += f" AND symbol IN ({placeholders})"
+        params.extend(symbols)
+    if enforce_eligibility:
+        query += " AND is_listed = 1 AND is_trading = 1"
+    logger.info(
+        "[SQL-DB]   🔑 Loading ledger slice from %s (as_of=%s, tf=%s)",
+        ledger_path.name,
+        as_of_str,
+        tf,
+    )
+    try:
+        conn = sqlite3.connect(str(ledger_path))
+        try:
+            return pd.read_sql_query(query, conn, params=params)
+        finally:
+            conn.close()
+    except (sqlite3.DatabaseError, pd.errors.DatabaseError, ValueError) as exc:
+        raise ValueError(
+            f"Failed to load sqlite ledger slice from {ledger_path}: {exc}"
+        ) from exc
+
+
+def _load_parquet_ledger_slice(
+    *,
+    as_of: str | date,
+    tf: str,
+    needed: set[str],
+    symbols: tuple[str, ...] | None,
+    ledger_path: Path,
+    enforce_eligibility: bool,
+) -> pd.DataFrame:
+    try:
+        logger.info(
+            "[PARQUET] Loading ledger slice from %s (as_of=%s, tf=%s)",
+            ledger_path.name,
+            _to_date(as_of).isoformat(),
+            tf,
+        )
+        frame = pd.read_parquet(ledger_path)
+    except Exception as exc:
+        raise ValueError(f"Failed to load parquet ledger slice from {ledger_path}: {exc}") from exc
+
+    missing = needed.difference(frame.columns)
+    synth_allowed = {"is_listed", "is_trading"} if enforce_eligibility else set()
+    extra_missing = missing.difference(synth_allowed)
+    if extra_missing:
+        raise ValueError(
+            f"Parquet ledger missing required columns: {sorted(extra_missing)} from {ledger_path}"
+        )
+    for column in synth_allowed.intersection(missing):
+        frame[column] = True
+
+    return frame
 
 
 def update_ledger(new_rows: pd.DataFrame, *, ledger_path: Path = DEFAULT_LEDGER_PATH) -> None:
