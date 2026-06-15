@@ -60,6 +60,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # 3-Layer Tiered Hybrid Architecture (CS Rank + Diagonal Kelly).
     # True = tiered pipeline 실행 (Phase D allocation 스킵); False = Phase D 유지.
     "USE_CS_RANK_ENGINE": True,
+    # Tiered L2 AWF Optuna 탐색 trial 수 (Phase D와 별도)
+    "L2_OPTUNA_TRIALS": 50,
     # Universal Cross-Sectional Alpha Miner Settings
     "FUTURES_ML_ALPHA_POPULATION": 1500,
     "FUTURES_ALPHA_LONG_BIAS": 2.0,
@@ -506,15 +508,15 @@ L1_ALPHA_SPACE: dict[str, dict[str, Any]] = {
     "MIN_SCORE_PERCENTILE": {"type": "float", "low": 0.40, "high": 0.90, "step": 0.10},
 }
 
-# Layer 2 Optuna study: Sharpe/복리 최적화 목적 (L1 OOS 결과 입력)
-# Tune: Top-K, kelly, sector cap, friction hurdle — IC 미사용
+# Layer 2 Optuna study: 복리자산증식 최적화 (L1 OOS 결과 입력)
+# Tune: K_RANK, kelly_fraction, friction_safety_mult, vol_target — dead params 제거됨
 L2_ALLOC_SPACE: dict[str, dict[str, Any]] = {
-    "K_RANK": {"type": "int", "low": 1, "high": 4, "step": 1},
-    "REBALANCE_BARS": {"type": "categorical", "choices": (1, 3, 6)},
-    "CS_Z_SCORE_THRESHOLD": {"type": "float", "low": 0.2, "high": 2.0, "step": 0.1},
-    "RISK_PER_TRADE": {"type": "float", "low": 0.02, "high": 0.10, "step": 0.01},
-    "MAX_EXPOSURE_PER_COIN": {"type": "float", "low": 0.5, "high": 2.5, "step": 0.25},
-    "NORM_VAR_CONSTANT": {"type": "float", "low": 0.1, "high": 1.0, "step": 0.1},
+    "K_RANK":               {"type": "int",         "low": 1, "high": 6, "step": 1},
+    "REBALANCE_BARS":       {"type": "categorical",  "choices": (1, 3, 6)},
+    "CS_Z_SCORE_THRESHOLD": {"type": "float",        "low": 0.0, "high": 1.5, "step": 0.1},
+    "kelly_fraction":       {"type": "float",        "low": 0.10, "high": 1.0, "step": 0.05},
+    "friction_safety_mult": {"type": "float",        "low": 0.5, "high": 2.0, "step": 0.1},
+    "vol_target":           {"type": "float",        "low": 0.20, "high": 0.80, "step": 0.05},
 }
 
 

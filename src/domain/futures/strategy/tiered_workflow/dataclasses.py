@@ -173,6 +173,7 @@ class Layer2AllocationConfig:
     l2_min_sharpe_uplift: float = 0.20
     l2_min_psr: float = 0.90
     l2_min_friction_pass: float = 0.50
+    friction_safety_mult: float = 1.0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -209,6 +210,7 @@ class Layer2AllocationConfig:
             l2_min_sharpe_uplift=cls._as_float(params.get("l2_min_sharpe_uplift", 0.20), 0.20),
             l2_min_psr=cls._as_float(params.get("l2_min_psr", 0.90), 0.90),
             l2_min_friction_pass=cls._as_float(params.get("l2_min_friction_pass", 0.50), 0.50),
+            friction_safety_mult=cls._as_float(params.get("friction_safety_mult", 1.0), 1.0),
         )
 
 

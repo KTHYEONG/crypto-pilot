@@ -793,6 +793,8 @@ def diagonal_kelly_weights(
     kelly_fraction: float,
     vol_target: float | None,
     friction_hurdle_bps: NDArray[np.float64],
+    holding_bars: NDArray[np.float64] | int = 1,
+    friction_safety_mult: float = 1.0,
     caps: PortfolioCaps,
     prev_w: NDArray[np.float64],
     no_trade_band: float,
@@ -805,7 +807,8 @@ def diagonal_kelly_weights(
     기존 LW/BL/full-cov 경로와 독립적인 신규 함수. 기존 solve_constrained_weights와 무관.
 
     처리 순서:
-    1. Friction filter: mu_bps_i < friction_hurdle_bps_i → w_i = 0 (확정 손실 방지)
+    1. Friction filter: effective_hurdle = hurdle * safety_mult / holding_bars
+       mu_bps_i < effective_hurdle_i → w_i = 0 (확정 손실 방지)
     2. Diagonal Kelly: w_raw_i = kelly_fraction * mu_bps_i / max(sigma_i^2, VOL_FLOOR^2)
     3. vol_target 스케일링 (optional): 포트폴리오 sigma 기준 비례 축소
     4. No-trade band: |w_i - prev_w_i| < no_trade_band → w_i = prev_w_i (회전율 억제)
@@ -813,10 +816,14 @@ def diagonal_kelly_weights(
 
     Args:
         mu_bps: 심볼별 기대수익 [N], 단위: bps. SymbolSignal.raw_mu (Layer1 출력).
+            per-bar NET edge (비용 이미 차감된 값).
         sigma: per-bar sigma [N]. >= VOL_FLOOR 보장 권장.
         kelly_fraction: 분수 Kelly 계수 (0,1].
         vol_target: 연율화 포트폴리오 변동성 목표 (None이면 미적용).
-        friction_hurdle_bps: 심볼별 마찰비용 허들 [N], 단위: bps. taker+slip+funding.
+        friction_hurdle_bps: 심볼별 round-trip 마찰비용 [N], 단위: bps.
+        holding_bars: 심볼별 평균 보유 기간 [N 또는 scalar]. hurdle 분할에 사용.
+        friction_safety_mult: hurdle 여유배수. eff_hurdle = hurdle * mult / holding_bars.
+            1.0 = break-even 기준, >1.0 = 추가 안전마진.
         caps: PortfolioCaps 제약 (5종 cap).
         prev_w: 이전 bar 비중 [N] (no-trade band 기준).
         no_trade_band: Δw < band이면 rebalance 생략 (절대값, 예: 0.01=1%).
@@ -853,8 +860,16 @@ def diagonal_kelly_weights(
     if support.size != n:
         support = np.abs(mu) > 1e-12
 
-    # 1. Friction filter: |mu_bps| >= hurdle (long/short 모두 적용)
-    friction_mask: NDArray[np.bool_] = np.abs(mu) >= hurdle
+    # 1. Friction filter: amortized hurdle (round-trip → per-bar 기준 정합)
+    # mu_bps = per-bar NET edge. hurdle = round-trip cost.
+    # holding 기간 동안 누적 net = mu_bps * holding_bars 가 round-trip 비용 넘어야 함.
+    h_bars: NDArray[np.float64]
+    if isinstance(holding_bars, np.ndarray):
+        h_bars = np.maximum(holding_bars.ravel().astype(np.float64), 1.0)
+    else:
+        h_bars = np.full(n, max(float(holding_bars), 1.0), dtype=np.float64)
+    effective_hurdle = hurdle * float(friction_safety_mult) / h_bars
+    friction_mask: NDArray[np.bool_] = np.abs(mu) >= effective_hurdle
     support = support & friction_mask
 
     # 2. Diagonal Kelly (mu를 per-bar return으로 변환: bps → fraction)
