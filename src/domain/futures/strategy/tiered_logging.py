@@ -521,16 +521,25 @@ def format_layer2_table(
         "",
         (
             f"  {_status(return_ok)} [Return    ] "
-            f"CAGR: {_f(cagr_h, '+.1%')} | Sharpe: {_f(sharpe_h)} | MAR: {_mar_str(mar_h, cagr_h)}"
+            f"CAGR: {_f(cagr_h, '+.1%')} (>=15.0%) | "
+            f"Sharpe: {_f(sharpe_h)} (>=1.000) | "
+            f"MAR: {_mar_str(mar_h, cagr_h)} (>=1.000)"
         ),
-        f"  {_status(risk_ok)} [Risk      ] MDD: {_pct(mdd_h)} | Turnover: {turnover:.3f}",
-        f"  {_status(uplift_ok)} [Uplift    ] Sharpe Uplift: {_f(uplift_val, '+.2f')} (Target: >= +0.20)",
+        (
+            f"  {_status(risk_ok)} [Risk      ] "
+            f"MDD: {_pct(mdd_h)} (<=20.0% & <=baseline: {_pct(mdd_b)}) | "
+            f"Turnover: {turnover:.3f}"
+        ),
+        f"  {_status(uplift_ok)} [Uplift    ] Sharpe Uplift: {_f(uplift_val, '+.2f')} (>=+0.20)",
         (
             f"  {_status(fold_ok and psr_ok and dsr_ok and friction_ok)} [Robustness] "
-            f"DSR: {_f(dsr_val)} (>= 0.95) | PSR: {_f(psr_val)} | Fold Pass: {_pct(fold_pass)}"
+            f"DSR: {_f(dsr_val)} (>=0.95) | "
+            f"PSR: {_f(psr_val)} (>=0.90) | "
+            f"Fold Pass: {_pct(fold_pass)} (>=60.0%)"
         ),
         sep,
     ]
+
 
     if awf_folds:
         lines.append("")
