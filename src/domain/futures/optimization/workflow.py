@@ -1600,7 +1600,7 @@ def objective_l2_sharpe(trial: Trial, ctx: TieredContext) -> float:
         predict_layer1_signals,
         run_l2_awf,
     )
-    from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
+    from src.domain.futures.strategy.walk_forward import WFFold, build_walk_forward_folds
 
     l2_params = suggest_layered_params(trial, "L2", fixed=ctx.fixed_l1_params or {})
     if not ctx.fixed_l1_params:
@@ -1633,6 +1633,31 @@ def objective_l2_sharpe(trial: Trial, ctx: TieredContext) -> float:
 
     n_bars = len(ctx.aligned.datetimes) if hasattr(ctx.aligned, "datetimes") else 0
     awf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=ctx.cfg)
+
+    # L2 window 경계 필터링: pipeline.py와 동일하게 제한
+    import numpy as np
+
+    from src.domain.futures.strategy.tiered_workflow.pipeline import _date_to_idx, _to_utc_timestamp
+
+    _oos_ts = _to_utc_timestamp(ctx.window.l2_start)
+    l1_end_bars = int(np.searchsorted(ctx.aligned.datetimes, np.datetime64(_oos_ts.tz_localize(None), "ns")))
+    ho_start_idx_l2 = _date_to_idx(ctx.aligned.datetimes, ctx.window.holdout_start)
+
+    awf_folds = tuple(
+        f for f in awf_folds
+        if f.oos_start >= l1_end_bars and f.oos_end <= ho_start_idx_l2
+    )
+    if not awf_folds:
+        cal_end = max(l1_end_bars - 1, 1)
+        awf_folds = (WFFold(
+            fit_start=0,
+            fit_end=cal_end,
+            cal_start=max(0, cal_end - max(1, cal_end // 5)),
+            cal_end=cal_end,
+            oos_start=l1_end_bars,
+            oos_end=ho_start_idx_l2,
+        ),)
+
     result = run_l2_awf(
         signal_batch=signal_batch,
         aligned=ctx.aligned,
