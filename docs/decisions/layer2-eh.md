@@ -25,3 +25,7 @@ ai_read_policy: when_related
 ## 2026-06-15 AWF fold pass_ratio zip 버그 수정
 - **Delta:** `fold_sharpes_h = [_sharpe(fr) for fr in sim.fold_rets_hybrid if fr]` → `if fr` 필터 제거, `zip(strict=True)` 길이 불일치 런타임 오류 수정
 - **Rationale:** 빈 fold 존재 시 `ValueError` 발생. 전체 정렬 유지 + 분모 별도 분리로 수정
+
+## 2026-06-15 L2 AWF 신호 동적 매핑 및 수치적 안정성 확보 (P0)
+- **Delta:** `run_l1_nested_swf`에서 `signals_per_fold` 수집 및 AWF 백테스팅 연동. 시점 $t$ 기준 L1 fold 시간 매핑 적용. 비용 허들, 베타 및 수익률 NaN 방어 추가.
+- **Rationale:** L1 Nested SWF의 동적 예측 신호 유실로 인한 고정 신호 강제 및 오매핑 버그 해결. 거래 비용 및 수익률 계산에 NaN 유입 시 가중치가 0.0으로 유실되어 스코어카드가 nan이 되는 현상 방지.

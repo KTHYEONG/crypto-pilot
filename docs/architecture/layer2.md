@@ -180,6 +180,8 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 - Vol-target scaling: $w \leftarrow w \cdot (\sigma_{\text{target}} / \sigma_{\text{port}})$; caps: gross/per-symbol/net/beta
 - No-trade band: $|\Delta w_i| < \text{band} \rightarrow w_i \leftarrow w_{\text{prev},i}$
 - **Taker cost deduction**: $r_t^{\text{net}} = w \cdot r_t^{\text{gross}} - \text{turnover}_t \times \bar{\delta} \times 10^{-4}$ (applied only on rebalance bars; $\bar{\delta}$ = mean hurdle bps)
+- **Time-based AWF Signal Matching**: AWF 시뮬레이션 시점 $t$가 속한 L1 Outer Fold를 탐색하여 해당 Fold의 동적 예측치를 적용 (인덱스 불일치로 인한 오매핑 차단).
+- **Numerical Stability & NaN Protection**: 거래비용 허들, 베타 계수 및 개별 바 수익률 연산 시 NaN/Inf 값을 감지하고 치환하여 수치 오염 전파를 완벽히 통제.
 - **AWF Window Constraint**: OOS folds restricted to $[\text{l2\_start\_idx},\ \text{holdout\_start\_idx})$. No overlap with L1 evidence or L3 holdout.
 - **Gate** (8-condition sequential AND; first failure → `blocker_reason`):
   - **Stage 0 (Deployment Sanity):** `signal_total > 0` AND `friction_pass_pct > 0` AND `isfinite(sharpe, cagr)` → `no_deployment`

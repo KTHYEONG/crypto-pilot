@@ -475,45 +475,69 @@ def format_layer2_table(
     blocker: str = getattr(r, "blocker_reason", "")
 
     # 가산식 uplift 게이트 (부호 무관): base+0.20
-    sharpe_uplift_gate = f">={sharpe_b + 0.20:.2f}(base+0.20)"
-    mdd_rel_gate = f"<={_pct(mdd_b)}"
-    gate_str: str = _gate(gate_passed)
-    blocker_str = f"  ({blocker})" if blocker else ""
-
+    uplift_val = sharpe_h - sharpe_b
+    uplift_gate_val = 0.20
+    
     def _f(v: float, fmt: str = ".3f") -> str:
         return "nan" if not math.isfinite(v) else format(v, fmt)
 
+    def _status(passed: bool) -> str:
+        return "✅" if passed else "❌"
+
+    # Status determination
+    cagr_ok = cagr_h > 0.0
+    sharpe_ok = sharpe_h >= 0.5
+    mar_ok = mar_h >= 0.5
+    mdd_ok = (mdd_h <= 0.5) and (mdd_h <= mdd_b)
+    fold_ok = fold_pass >= 0.6
+    uplift_ok = uplift_val >= uplift_gate_val
+
     lines: list[str] = [
-        "● [LAYER 2: AWF PORTFOLIO VALIDATION]",
+        "● [AWF PORTFOLIO PERFORMANCE SCORECARD]",
         "──────────────────────────────────────────────────────────────────────────────",
-        f"  {'Metric':<26} {'Strategy':>9} {'1/N Base':>9}  {'Gate':>18}",
+        "",
+        "  [ RETURN & EFFICIENCY ]",
         "  ──────────────────────────────────────────────────────────────────────────",
-        f"  {'CAGR':<26} {_f(cagr_h, '+.1%'):>9} {_f(cagr_b, '+.1%'):>9}  {'>0.0%':>18}",
-        f"  {'MAR (CAGR/MDD)':<26} {_f(mar_h):>9} {_f(mar_b):>9}  {'>=0.50':>18}",
-        f"  {'Sharpe':<26} {_f(sharpe_h):>9} {_f(sharpe_b):>9}  {'>=0.50':>18}",
-        f"  {'MDD':<26} {_pct(mdd_h):>9} {_pct(mdd_b):>9}  {mdd_rel_gate + ' & <=50%':>18}",
-        f"  {'Fold Pass% (compound)':<26} {_pct(fold_pass):>9} {'—':>9}  {'>=60%':>18}",
-        f"  {'Sharpe Uplift vs 1/N':<26} {_f(sharpe_h - sharpe_b):>9} {'—':>9}  {sharpe_uplift_gate:>18}",
-        f"  {'Turnover/rebal':<26} {turnover:>9.3f} {'—':>9}  {'—':>18}",
-        f"  {'Friction Pass% (diag)':<26} {_pct(friction_pct):>9} {'—':>9}  {'—':>18}",
+        f"  {'Metric':<20} {'Strategy':>12} {'( 1/N Base )':>15}  {'Gate':>14} {'Status':>8}",
         "  ──────────────────────────────────────────────────────────────────────────",
-        f"  {'L2 Gate':<26} {gate_str + blocker_str}",
-        "──────────────────────────────────────────────────────────────────────────────",
+        f"  {'CAGR':<20} [ {_f(cagr_h, '+.1%'):>8} ] ({_f(cagr_b, '+.1%'):>11} )  {'> 0.0%':>14} {_status(cagr_ok):>7}",
+        f"  {'Sharpe':<20} [ {_f(sharpe_h):>8} ] ({_f(sharpe_b):>11} )  {'>= 0.50':>14} {_status(sharpe_ok):>7}",
+        f"  {'MAR (CAGR/MDD)':<20} [ {_f(mar_h):>8} ] ({_f(mar_b):>11} )  {'>= 0.50':>14} {_status(mar_ok):>7}",
+        "",
+        "  [ RISK & UPLIFT ]",
+        "  ──────────────────────────────────────────────────────────────────────────",
+        f"  {'MDD':<20} [ {_pct(mdd_h):>8} ] ({_pct(mdd_b):>11} )  {'<= 50.0%':>14} {_status(mdd_ok):>7}",
+        f"  {'Sharpe Uplift':<20} [ {_f(uplift_val, '+.2f'):>8} ] ({'Base':>11} )  "
+        f"{'>= +0.20':>14} {_status(uplift_ok):>7}",
+        f"  {'Turnover / Rebal':<20} [ {turnover:>8.3f} ] ({'—':>11} )  {'—':>14} {'—':>7}",
+        "",
+        "  [ ROBUSTNESS & DIAGNOSTICS ]",
+        "  ──────────────────────────────────────────────────────────────────────────",
+        f"  {'Fold Pass Ratio':<20} [ {_pct(fold_pass):>8} ] ({'—':>11} )  {'>= 60.0%':>14} {_status(fold_ok):>7}",
+        f"  {'Friction Pass%':<20} [ {_pct(friction_pct):>8} ] ({'—':>11} )  {'—':>14} {'—':>7}",
+        "  ──────────────────────────────────────────────────────────────────────────",
+        "",
+        f"  >> FINAL RESULT : {_gate(gate_passed)} {'(' + blocker + ')' if blocker else ''}",
     ]
 
     if awf_folds:
         lines.append("")
-        lines.append(f"  {'Fold':<5} {'Sharpe':>7} {'MDD':>8} {'Pass':>6}")
-        lines.append(f"  {'-'*5} {'-'*7} {'-'*8} {'-'*6}")
-        for af in awf_folds:
-            pass_str = "PASS" if af.get("pass") else "FAIL"
+        lines.append("  [ FOLD DETAIL BREAKDOWN ]")
+        lines.append("  ──────────────────────────────────────────────────────────────────────────")
+        for i, af in enumerate(awf_folds):
+            is_last = (i == len(awf_folds) - 1)
+            prefix = "└─" if is_last else "├─"
+            pass_icon = "✅" if af.get("pass") else "❌"
             sharpe_v = af["sharpe"]
             sharpe_str = "nan" if not math.isfinite(sharpe_v) else f"{sharpe_v:.3f}"
             mdd_v = af["mdd"]
             mdd_str = "nan%" if not math.isfinite(mdd_v) else _pct(mdd_v)
-            lines.append(
-                f"  {af['fold']:<5} {sharpe_str:>7} {mdd_str:>8} {pass_str:>6}"
+            
+            line = (
+                f"  {prefix} Fold #{af['fold']} : {pass_icon} Sharpe: {sharpe_str:>6} | "
+                f"MDD: {mdd_str:>7} | Status: {'PASS' if af.get('pass') else 'FAIL'}"
             )
+            lines.append(line)
 
     if topk_selection:
         lines.append("")
