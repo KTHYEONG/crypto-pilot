@@ -343,16 +343,14 @@ class TestFormatLayer2Table:
     """format_layer2_table 기본 포맷 검증."""
 
     def test_basic_pass_contains_gate(self) -> None:
-        """gate_passed=True → PASS, Top-K 포함 검증."""
-        # Arrange
+        """gate_passed=True → PASS, Sharpe 값 포함 검증 (필드명 정정 후)."""
+        # Arrange — Layer2Result 실제 필드명 사용
         r2 = SimpleNamespace(
-            top_k=5,
             friction_pass_pct=0.75,
             sharpe_hybrid=1.5,
-            sharpe_1n=1.0,
+            sharpe_baseline=1.0,
             mdd_hybrid=0.12,
-            mdd_1n=0.18,
-            avg_active_positions=3.5,
+            mdd_baseline=0.18,
             turnover=0.15,
             gate_passed=True,
         )
@@ -362,30 +360,29 @@ class TestFormatLayer2Table:
 
         # Assert
         assert "PASS" in result
-        assert "Top-K" in result
-        assert "1.50" in result
+        assert "Sharpe" in result
+        assert "1.500" in result
 
     def test_awf_folds_appended(self) -> None:
-        """awf_folds 있으면 AWF FOLD DETAILS 추가 검증."""
+        """awf_folds 있으면 fold 테이블 추가 검증."""
         # Arrange
         r2 = SimpleNamespace(
-            top_k=5,
             friction_pass_pct=0.75,
             sharpe_hybrid=1.5,
-            sharpe_1n=1.0,
+            sharpe_baseline=1.0,
             mdd_hybrid=0.12,
-            mdd_1n=0.18,
-            avg_active_positions=3.5,
+            mdd_baseline=0.18,
             turnover=0.15,
             gate_passed=True,
         )
-        folds = [{"fold": 1, "sharpe": 1.4, "mdd": 0.11, "active_pos": 3.2, "pass": True}]
+        folds = [{"fold": 1, "sharpe": 1.4, "mdd": 0.11, "pass": True}]
 
         # Act
         result = format_layer2_table(r2, awf_folds=folds)
 
-        # Assert
-        assert "AWF FOLD DETAILS" in result
+        # Assert — 새 포맷: "Fold" 헤더 + PASS 포함
+        assert "Fold" in result
+        assert "PASS" in result
 
 
 class TestFormatLayer3Table:

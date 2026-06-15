@@ -397,8 +397,9 @@ def test_cagr_known_value() -> None:
     # Act
     result = _cagr(rets, bars_per_year=bars_per_year)
 
-    # Assert: (1.10)^(2190/1000) - 1
-    expected = (1.10 ** (bars_per_year / n_bars)) - 1.0
+    # Assert: 복리 base = (1+per_bar)^n_bars, CAGR = base^(bars_per_year/n_bars) - 1
+    compound_base = (1.0 + per_bar) ** n_bars
+    expected = compound_base ** (bars_per_year / n_bars) - 1.0
     assert result == pytest.approx(expected, rel=1e-6)
 
 
