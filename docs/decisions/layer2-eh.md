@@ -7,6 +7,11 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-15 L2 BLOCKED 교정 — Objective↔Gate 정렬, Dual Baseline, DSR 재보정
+- **Delta:** (1) `build_directional_equal_weight_baseline`(순수 1/N) 신설 — uplift 게이트/표시 전용. risk-matched는 MDD 상대 게이트 전용 유지. (2) Optuna 제약 10번째에 uplift 제약 추가 → 탐색이 게이트로 수렴. (3) `l2_min_active_blocks 4→3` (AWF fold 기반 정의 통일), `l2_min_dsr 0.95→0.75`, PSR 게이트 제거(진단 강등). (4) DSR fallback 단일원소 degenerate 경로 → PSR 정직 하한. (5) `n_startup_trials` 40%→20%.
+- **Rationale:** objective(growth_lcb)와 차단 기준(DSR·uplift)이 분리된 구조적 오설계 + risk-matched baseline self-defeat(diagonal-Kelly와 수학적 동일 → uplift≡0) + active_blocks 정의 불일치(fold 수 3 < 임계 4). DSR·PSR 이중 차감도 동시 제거.
+- **Edge Cases:** `rets_baseline_ew` 빈 list 방어(`_sharpe_hac` → 0.0 반환 유지), `mdd_baseline`은 risk-matched 유지(MDD 상대 게이트 불변).
+
 ## 2026-06-15 Layer 2 DSR 수식 교정 및 Scorecard 가독성 개선
 - **Delta:** `metrics.py`의 `_deflated_sharpe_probability` 함수 내에서 연율화 Sharpe와 per-bar 표준오차 간의 단위 혼용을 per-bar 스케일로 통일하고 Bailey & Prado (2012) 표준오차 정밀 수식으로 수정. `tiered_logging.py`에서 성과표의 각 지표 옆에 심플한 통과 기호(예: `>=15.0%`, `<=baseline`)를 출력하도록 수정.
 - **Rationale:** 단위 불일치로 DSR이 항상 0.000으로 차단되던 수학적 오류를 정정하고, 사용자가 각 지표의 패스 기준 장벽을 로그에서 직관적으로 파악할 수 있도록 하기 위함임.
