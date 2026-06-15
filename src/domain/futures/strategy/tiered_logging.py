@@ -508,7 +508,7 @@ def format_layer2_table(
         "  ──────────────────────────────────────────────────────────────────────────",
         f"  {'MDD':<20} [ {_pct(mdd_h):>8} ] ({_pct(mdd_b):>11} )  {'<= 50.0%':>14} {_status(mdd_ok):>7}",
         f"  {'Sharpe Uplift':<20} [ {_f(uplift_val, '+.2f'):>8} ] ({'Base':>11} )  "
-        f"{'>= +0.20':>14} {_status(uplift_ok):>7}",
+        f"{'>= Base+0.20':>14} {_status(uplift_ok):>7}",
         f"  {'Turnover / Rebal':<20} [ {turnover:>8.3f} ] ({'—':>11} )  {'—':>14} {'—':>7}",
         "",
         "  [ ROBUSTNESS & DIAGNOSTICS ]",

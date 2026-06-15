@@ -6,6 +6,7 @@ import logging
 import math
 import warnings
 from collections.abc import Callable, Iterable
+from contextlib import suppress
 from dataclasses import dataclass, is_dataclass, replace
 from types import SimpleNamespace
 from typing import Any, Literal, cast
@@ -384,8 +385,8 @@ def build_phase_a2_sampler(seed: int) -> optuna.samplers.BaseSampler:
             sig = inspect.signature(BoTorchSampler.__init__)
             if "constraints_func" in sig.parameters:
                 kwargs["constraints_func"] = phase_a2_constraints
-        except Exception:
-            pass
+        except Exception as exc:
+            _logger.debug("BoTorchSampler signature inspection failed: %s", exc)
         return cast(optuna.samplers.BaseSampler, BoTorchSampler(**kwargs))
     except Exception:
         return optuna.samplers.TPESampler(
@@ -453,7 +454,8 @@ def _metric(trial: Trial, *keys: str, default: float = 0.0) -> float:
             continue
         try:
             return float(value)
-        except Exception:
+        except Exception as exc:
+            _logger.debug("trial user attr %s is not numeric: %s", key, exc)
             continue
     return float(default)
 
@@ -483,7 +485,8 @@ def _metric_vector(trial: Trial, *keys: str) -> list[float]:
         for item in raw:
             try:
                 num = float(item)
-            except Exception:
+            except Exception as exc:
+                _logger.debug("trial user attr %s item is not numeric: %s", key, exc)
                 continue
             if math.isfinite(num):
                 vals.append(num)
@@ -1152,7 +1155,8 @@ def _tag_phase_trials(study: optuna.Study, *, phase: str, run_id: str | None) ->
             storage.set_trial_user_attr(trial_id, "phase", phase)
             if run_id:
                 storage.set_trial_user_attr(trial_id, "run_id", run_id)
-        except Exception:
+        except Exception as exc:
+            _logger.debug("failed to tag trial metadata for %s: %s", tr.number, exc)
             continue
 
 
@@ -1444,10 +1448,8 @@ def run_phased_optimization_skeleton(
     )
     _logger.debug("[PROF] PhasedOpt phase_b elapsed_s=%.4f", time.perf_counter() - t_phase_b)
     if phase_b_plan is not None:
-        try:
+        with suppress(Exception):
             study_b.set_user_attr("phase_b_plan", phase_b_plan.importance_report)
-        except Exception:
-            pass
     phase_c_diag = evaluate_phase_c_robustness(
         study_b=study_b,
         target_seeds=target_seeds or [seed],
@@ -1593,7 +1595,11 @@ def objective_l2_sharpe(trial: Trial, ctx: TieredContext) -> float:
     Returns:
         sharpe_hybrid (guard 미충족 시 -inf).
     """
-    from src.domain.futures.strategy.tiered_workflow import run_l2_awf
+    from src.domain.futures.strategy.tiered_workflow import (
+        Layer2AllocationConfig,
+        predict_layer1_signals,
+        run_l2_awf,
+    )
     from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
 
     l2_params = suggest_layered_params(trial, "L2", fixed=ctx.fixed_l1_params or {})
@@ -1603,18 +1609,35 @@ def objective_l2_sharpe(trial: Trial, ctx: TieredContext) -> float:
         )
         return float("-inf")
 
-    # fixed_l1_params에 oos_stacked (dict[str, SymbolSignal]) 이 들어있어야 함
-    l1_oos = ctx.fixed_l1_params.get("oos_stacked")
-    if not l1_oos:
+    signal_batch = ctx.fixed_l1_params.get("signal_batch")
+    if signal_batch is None:
+        artifact = ctx.fixed_l1_params.get("inference_artifact")
+        if artifact is None:
+            return float("-inf")
+        n_bars = len(ctx.aligned.datetimes) if hasattr(ctx.aligned, "datetimes") else 0
+        awf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=ctx.cfg)
+        if not awf_folds:
+            return float("-inf")
+        start_idx = min(fold.oos_start for fold in awf_folds)
+        end_idx = max(fold.oos_end for fold in awf_folds)
+        signal_batch = predict_layer1_signals(
+            artifact=artifact,
+            candidate_events=ctx.labeled_events,
+            aligned=ctx.aligned,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            cfg=ctx.cfg,
+        )
+    if signal_batch is None:
         return float("-inf")
 
     n_bars = len(ctx.aligned.datetimes) if hasattr(ctx.aligned, "datetimes") else 0
     awf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=ctx.cfg)
     result = run_l2_awf(
-        l1_oos=l1_oos,
+        signal_batch=signal_batch,
         aligned=ctx.aligned,
         awf_folds=awf_folds,
-        l2_params=l2_params,
+        config=Layer2AllocationConfig.from_mapping(l2_params),
         caps=ctx.caps,
         tf=ctx.tf,
     )
@@ -1623,4 +1646,4 @@ def objective_l2_sharpe(trial: Trial, ctx: TieredContext) -> float:
 
 
 # Break circularity by importing run_optimization_loop at the very end
-from src.domain.futures.optimization.observability.run_tracker import run_optimization_loop
+from src.domain.futures.optimization.observability.run_tracker import run_optimization_loop  # noqa: E402

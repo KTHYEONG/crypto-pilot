@@ -410,8 +410,8 @@ class TestFormatLayer2Table:
         # Act
         result = format_layer2_table(r2)
 
-        # Assert — "base+0.20" 포함
-        assert "base+0.20" in result
+        # Assert — "Base+0.20" 포함
+        assert "Base+0.20" in result
 
     def test_awf_folds_appended(self) -> None:
         """awf_folds 있으면 fold 테이블 추가 검증."""

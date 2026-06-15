@@ -399,3 +399,35 @@ def test_rank_and_select_respects_quality_weight_compatibility() -> None:
 
     assert "weak" in selected
     assert "strong" not in selected
+
+
+def test_rank_and_select_absolute_mode_prefers_stronger_short() -> None:
+    signals = {
+        "LONG12": _make_signal(12.0),
+        "SHORT30": _make_signal(-30.0),
+        "LONG5": _make_signal(5.0),
+    }
+
+    selected, z_scores = rank_and_select(
+        signals,
+        k_rank=1,
+        sector_cap=10,
+        prev_selection=frozenset(),
+        rank_buffer=0,
+        selection_mode="absolute",
+    )
+
+    assert selected == frozenset({"SHORT30"})
+    assert z_scores["SHORT30"] < 0.0
+
+
+def test_rank_and_select_rejects_unknown_selection_mode() -> None:
+    with pytest.raises(ValueError, match="unsupported selection_mode"):
+        rank_and_select(
+            {"A": _make_signal(1.0)},
+            k_rank=1,
+            sector_cap=10,
+            prev_selection=frozenset(),
+            rank_buffer=0,
+            selection_mode="weird",  # type: ignore[arg-type]
+        )
