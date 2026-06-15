@@ -465,13 +465,12 @@ def format_layer2_table(
     mdd_h: float = getattr(r, "mdd_hybrid", 0.0)
     mdd_b: float = getattr(r, "mdd_baseline", 0.0)
     cagr_h: float = getattr(r, "cagr_hybrid", float("nan"))
-    cagr_b: float = getattr(r, "cagr_baseline", float("nan"))
     mar_h: float = getattr(r, "mar_hybrid", float("nan"))
-    mar_b: float = getattr(r, "mar_baseline", float("nan"))
     fold_pass: float = getattr(r, "fold_pass_ratio", 0.0)
     turnover: float = getattr(r, "turnover", 0.0)
     friction_pct: float = getattr(r, "friction_pass_pct", 0.0)
     psr_val: float = getattr(r, "psr_hybrid", float("nan"))
+    dsr_val: float = getattr(r, "dsr_hybrid", float("nan"))
     gate_passed: bool = getattr(r, "gate_passed", False)
     blocker: str = getattr(r, "blocker_reason", "")
 
@@ -498,45 +497,39 @@ def format_layer2_table(
     mdd_ok = (mdd_h <= 0.20) and (mdd_h <= mdd_b)
     fold_ok = fold_pass >= 0.6
     psr_ok = math.isfinite(psr_val) and psr_val >= 0.90
+    dsr_ok = math.isfinite(dsr_val) and dsr_val >= 0.95
     friction_ok = friction_pct >= 0.50
     uplift_ok = uplift_val >= uplift_gate_val
 
+    # Style 3: Minimalist Grouped Summary
+    sep = "──────────────────────────────────────────────────────────────────────────────"
+    
+    # Overall Status line
+    status_icon = "✅" if gate_passed else "❌"
+    result_str = _gate(gate_passed)
+    if blocker:
+        result_str += f" ({blocker})"
+        
+    # Categorize status for group icons
+    return_ok = cagr_ok and sharpe_ok and mar_ok
+    risk_ok = mdd_ok
+    
     lines: list[str] = [
-        "● [AWF PORTFOLIO PERFORMANCE SCORECARD]",
-        "──────────────────────────────────────────────────────────────────────────────",
+        "● [LAYER 2 PORTFOLIO SCORECARD]",
+        sep,
+        f"  STATUS  : {status_icon} {result_str}",
         "",
-        "  [ RETURN & EFFICIENCY ]",
-        "  ──────────────────────────────────────────────────────────────────────────",
-        f"  {'Metric':<20} {'Strategy':>12} {'( EW Bench )':>15}  {'Gate':>14} {'Status':>8}",
-        "  ──────────────────────────────────────────────────────────────────────────",
         (
-            f"  {'CAGR':<20} [ {_f(cagr_h, '+.1%'):>8} ]"
-            f" ({_f(cagr_b, '+.1%'):>11} )  {'>= 15.0%':>14} {_status(cagr_ok):>7}"
+            f"  {_status(return_ok)} [Return    ] "
+            f"CAGR: {_f(cagr_h, '+.1%')} | Sharpe: {_f(sharpe_h)} | MAR: {_mar_str(mar_h, cagr_h)}"
         ),
-        f"  {'Sharpe':<20} [ {_f(sharpe_h):>8} ] ({_f(sharpe_b):>11} )  {'>= 1.00':>14} {_status(sharpe_ok):>7}",
+        f"  {_status(risk_ok)} [Risk      ] MDD: {_pct(mdd_h)} | Turnover: {turnover:.3f}",
+        f"  {_status(uplift_ok)} [Uplift    ] Sharpe Uplift: {_f(uplift_val, '+.2f')} (Target: >= +0.20)",
         (
-            f"  {'MAR (CAGR/MDD)':<20} [ {_mar_str(mar_h, cagr_h):>8} ]"
-            f" ({_mar_str(mar_b, cagr_b):>11} )  {'>= 1.00':>14} {_status(mar_ok):>7}"
+            f"  {_status(fold_ok and psr_ok and dsr_ok and friction_ok)} [Robustness] "
+            f"DSR: {_f(dsr_val)} (>= 0.95) | PSR: {_f(psr_val)} | Fold Pass: {_pct(fold_pass)}"
         ),
-        "",
-        "  [ RISK & UPLIFT ]",
-        "  ──────────────────────────────────────────────────────────────────────────",
-        f"  {'MDD':<20} [ {_pct(mdd_h):>8} ] ({_pct(mdd_b):>11} )  {'<= 20.0%':>14} {_status(mdd_ok):>7}",
-        f"  {'Sharpe Uplift':<20} [ {_f(uplift_val, '+.2f'):>8} ] ({'Base':>11} )  "
-        f"{'>= Base+0.20':>14} {_status(uplift_ok):>7}",
-        f"  {'Turnover / Rebal':<20} [ {turnover:>8.3f} ] ({'—':>11} )  {'—':>14} {'—':>7}",
-        "",
-        "  [ ROBUSTNESS & DIAGNOSTICS ]",
-        "  ──────────────────────────────────────────────────────────────────────────",
-        f"  {'Fold Pass Ratio':<20} [ {_pct(fold_pass):>8} ] ({'—':>11} )  {'>= 60.0%':>14} {_status(fold_ok):>7}",
-        f"  {'PSR (Anti-Overfit)':<20} [ {_f(psr_val):>8} ] ({'—':>11} )  {'>= 0.90':>14} {_status(psr_ok):>7}",
-        (
-            f"  {'Friction Pass%':<20} [ {_pct(friction_pct):>8} ]"
-            f" ({'—':>11} )  {'>= 50.0%':>14} {_status(friction_ok):>7}"
-        ),
-        "  ──────────────────────────────────────────────────────────────────────────",
-        "",
-        f"  >> FINAL RESULT : {_gate(gate_passed)} {'(' + blocker + ')' if blocker else ''}",
+        sep,
     ]
 
     if awf_folds:
@@ -583,22 +576,18 @@ def format_layer3_table(
     holdout_start: str | None = None,
     holdout_end: str | None = None,
 ) -> str:
-    """Format Layer 3 holdout result as a compact scorecard (§9.4).
+    """Layer3 Holdout 최종 검증 결과 로그 테이블.
 
     Args:
-        r: Layer3Result-compatible object with fields:
-            cagr, mdd, sharpe, mar, cagr_baseline, mdd_baseline,
-            sharpe_baseline, mar_baseline, gate_passed, blocker_reason.
+        r: Layer3Result (cagr, mdd, sharpe, mar, cagr_baseline, mdd_baseline,
+           sharpe_baseline, mar_baseline, gate_passed, blocker_reason 필드 필요).
         ho_start: Legacy hold-out start date string (ISO format).
         ho_end: Legacy hold-out end date string (ISO format).
         holdout_start: Preferred hold-out start date string (ISO format).
         holdout_end: Preferred hold-out end date string (ISO format).
 
     Returns:
-        Multi-line fixed-width scorecard string for Layer 3 hold-out diagnostics.
-
-    Time Complexity: O(1).
-    Space Complexity: O(1).
+        Multi-line scorecard string for Layer 3 hold-out diagnostics.
     """
     start = holdout_start or ho_start or "—"
     end = holdout_end or ho_end or "—"
@@ -622,130 +611,96 @@ def format_layer3_table(
             return "BLOCKED", blocker
         return "BLOCKED", ""
 
-    def _fmt_ratio(v: float) -> str:
-        return f"{v:+.2f}"
+    def _f(v: float, fmt: str = ".3f") -> str:
+        return "nan" if not math.isfinite(v) else format(v, fmt)
 
-    def _fmt_bps(v: float) -> str:
-        return f"{v / 100:+.1%}"
+    def _status(passed: bool) -> str:
+        return "✅" if passed else "❌"
 
-    def _metric_row(
-        label: str,
-        strategy: float,
-        baseline: float | None,
-        *,
-        formatter: Any,
-        lower_is_better: bool = False,
-        force_gate: str | None = None,
-    ) -> str:
-        baseline_str = "—" if baseline is None else formatter(baseline)
-        delta_str = "—" if baseline is None else formatter(strategy - baseline)
-        gate = force_gate or (
-            "—"
-            if baseline is None
-            else _gate(strategy <= baseline if lower_is_better else strategy >= baseline)
-        )
-        return (
-            f"  {label:<14} "
-            f"{formatter(strategy):>12} "
-            f"{baseline_str:>12} "
-            f"{delta_str:>12} "
-            f"{gate:>8}"
-        )
+    def _mar_str(mar_val: float, cagr_val: float) -> str:
+        if not math.isfinite(mar_val) or cagr_val < 0.0:
+            return "n/a(loss)"
+        return format(mar_val, ".3f")
 
     status, blocker = _resolve_status(r)
-    final_status = status if not blocker else f"{status} ({blocker})"
+    
+    # Header & Initial summary
+    sep_main = "──────────────────────────────────────────────────────────────────────────────"
+    sep_sub = "  ──────────────────────────────────────────────────────────────────────────"
+    
     lines: list[str] = [
-        f"[LAYER 3: HOLDOUT VALIDATION {start} ~ {end}]",
+        f"● [LAYER 3: HOLDOUT VALIDATION SCORECARD] ({start} ~ {end})",
+        sep_main,
         "",
-        f"  [ FINAL HOLDOUT SCORECARD ] [{status}]",
+        "  [ OUT-OF-SAMPLE PERFORMANCE ]",
+        sep_sub,
+        f"  {'Metric':<20} {'Strategy':>12} {'( EW Bench )':>15}  {'Gate':>14} {'Status':>8}",
+        sep_sub,
     ]
+
     if status == "ERROR":
-        lines.extend(
-            [
-                f"  Error Summary   {blocker or 'layer3_execution_error'}",
-                "",
-                f"  FINAL STATUS: {final_status}",
-            ]
-        )
+        lines.extend([
+            f"  {'STATUS':<20} [ {'ERROR':>8} ] ({'—':>11} )  {'—':>14} {'❌':>7}",
+            f"  Error Summary   {blocker or 'layer3_execution_error'}",
+            "",
+            f"  >> FINAL RESULT : ❌ ERROR ({blocker or 'layer3_execution_error'})"
+        ])
         return "\n".join(lines)
 
-    lines.extend(
-        [
-            "  Metric           Strategy     Baseline        Delta     Gate",
-            _metric_row(
-                "CAGR",
-                float(getattr(r, "cagr", 0.0)),
-                float(getattr(r, "cagr_baseline", 0.0)),
-                formatter=_pct,
-            ),
-            _metric_row(
-                "MDD",
-                float(getattr(r, "mdd", 0.0)),
-                float(getattr(r, "mdd_baseline", 0.0)),
-                formatter=_pct,
-                lower_is_better=True,
-            ),
-            _metric_row(
-                "Sharpe",
-                float(getattr(r, "sharpe", 0.0)),
-                float(getattr(r, "sharpe_baseline", 0.0)),
-                formatter=_fmt_ratio,
-            ),
-            _metric_row(
-                "MAR",
-                float(getattr(r, "mar", 0.0)),
-                float(getattr(r, "mar_baseline", 0.0)),
-                formatter=_fmt_ratio,
-            ),
-        ]
+    # Metrics
+    cagr_h = float(getattr(r, "cagr", 0.0))
+    cagr_b = float(getattr(r, "cagr_baseline", 0.0))
+    mdd_h = float(getattr(r, "mdd", 0.0))
+    mdd_b = float(getattr(r, "mdd_baseline", 0.0))
+    sharpe_h = float(getattr(r, "sharpe", 0.0))
+    sharpe_b = float(getattr(r, "sharpe_baseline", 0.0))
+    mar_h = float(getattr(r, "mar", 0.0))
+    mar_b = float(getattr(r, "mar_baseline", 0.0))
+
+    lines.append(
+        f"  {'CAGR':<20} [ {_f(cagr_h, '+.1%'):>8} ] ({_f(cagr_b, '+.1%'):>11} )  {'>= Bench':>14} "
+        f"{_status(cagr_h >= cagr_b):>7}"
+    )
+    lines.append(
+        f"  {'MDD':<20} [ {_pct(mdd_h):>8} ] ({_pct(mdd_b):>11} )  {'<= Bench':>14} "
+        f"{_status(mdd_h <= mdd_b):>7}"
+    )
+    lines.append(
+        f"  {'Sharpe':<20} [ {_f(sharpe_h):>8} ] ({_f(sharpe_b):>11} )  {'>= Bench':>14} "
+        f"{_status(sharpe_h >= sharpe_b):>7}"
+    )
+    lines.append(
+        f"  {'MAR (CAGR/MDD)':<20} [ {_mar_str(mar_h, cagr_h):>8} ] ({_mar_str(mar_b, cagr_b):>11} )  {'>= Bench':>14} "
+        f"{_status(mar_h >= mar_b):>7}"
     )
 
-    optional_metrics: list[str] = []
+    # Optional Metrics (if present)
     if hasattr(r, "growth_lcb") or hasattr(r, "growth_lcb_baseline"):
-        optional_metrics.append(
-            _metric_row(
-                "Growth LCB",
-                float(getattr(r, "growth_lcb", 0.0)),
-                float(getattr(r, "growth_lcb_baseline", 0.0)),
-                formatter=_pct,
-            )
+        val_h = float(getattr(r, "growth_lcb", 0.0))
+        val_b = float(getattr(r, "growth_lcb_baseline", 0.0))
+        lines.append(
+            f"  {'Growth LCB':<20} [ {_pct(val_h):>8} ] ({_pct(val_b):>11} )  {'>= Bench':>14} "
+            f"{_status(val_h >= val_b):>7}"
         )
-    if hasattr(r, "sharpe_hac") or hasattr(r, "sharpe_hac_baseline"):
-        optional_metrics.append(
-            _metric_row(
-                "Sharpe(HAC)",
-                float(getattr(r, "sharpe_hac", 0.0)),
-                float(getattr(r, "sharpe_hac_baseline", 0.0)),
-                formatter=_fmt_ratio,
-            )
-        )
-    if hasattr(r, "cvar_95") or hasattr(r, "cvar_95_baseline"):
-        optional_metrics.append(
-            _metric_row(
-                "CVaR(95)",
-                float(getattr(r, "cvar_95", 0.0)),
-                float(getattr(r, "cvar_95_baseline", 0.0)),
-                formatter=_pct,
-                lower_is_better=True,
-            )
-        )
+    
     if hasattr(r, "total_cost_bps"):
-        baseline_cost = getattr(r, "total_cost_bps_baseline", None)
-        baseline_value = None if baseline_cost is None else float(baseline_cost)
-        optional_metrics.append(
-            _metric_row(
-                "Cost Drag",
-                float(getattr(r, "total_cost_bps", 0.0)),
-                baseline_value,
-                formatter=_fmt_bps,
-                lower_is_better=True,
-            )
+        val_h = float(getattr(r, "total_cost_bps", 0.0))
+        val_b = float(getattr(r, "total_cost_bps_baseline", 0.0))
+        # lower is better for cost
+        lines.append(
+            f"  {'Cost Drag':<20} [ {val_h/100:>+8.1%} ] ({val_b/100:>+11.1%} )  {'<= Bench':>14} "
+            f"{_status(val_h <= val_b):>7}"
         )
-    if optional_metrics:
-        lines.extend(optional_metrics)
 
-    lines.extend(["", f"  FINAL STATUS: {final_status}"])
+    lines.append(sep_sub)
+    lines.append("")
+    
+    final_icon = "✅" if status == "PASS" else "❌"
+    final_status = f"{status} (Reason: {blocker})" if blocker else status
+    lines.append(f"  >> FINAL RESULT : {final_icon} {final_status}")
+    
     return "\n".join(lines)
+
 
 
 # ---------------------------------------------------------------------------
