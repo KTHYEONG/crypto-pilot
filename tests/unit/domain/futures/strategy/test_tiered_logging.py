@@ -339,21 +339,34 @@ class TestFormatWindowTable:
 # Additional edge-case tests
 # ---------------------------------------------------------------------------
 
+def _make_l2_ns(**kwargs: object) -> SimpleNamespace:
+    """format_layer2_table용 SimpleNamespace 팩토리 (신규 필드 포함)."""
+    defaults = {
+        "sharpe_hybrid": 1.5,
+        "sharpe_baseline": 1.0,
+        "mdd_hybrid": 0.12,
+        "mdd_baseline": 0.18,
+        "cagr_hybrid": 0.40,
+        "cagr_baseline": 0.20,
+        "mar_hybrid": 3.3,
+        "mar_baseline": 1.1,
+        "fold_pass_ratio": 0.75,
+        "turnover": 0.15,
+        "friction_pass_pct": 0.75,
+        "gate_passed": True,
+        "blocker_reason": "",
+    }
+    defaults.update(kwargs)
+    return SimpleNamespace(**defaults)
+
+
 class TestFormatLayer2Table:
     """format_layer2_table 기본 포맷 검증."""
 
     def test_basic_pass_contains_gate(self) -> None:
-        """gate_passed=True → PASS, Sharpe 값 포함 검증 (필드명 정정 후)."""
-        # Arrange — Layer2Result 실제 필드명 사용
-        r2 = SimpleNamespace(
-            friction_pass_pct=0.75,
-            sharpe_hybrid=1.5,
-            sharpe_baseline=1.0,
-            mdd_hybrid=0.12,
-            mdd_baseline=0.18,
-            turnover=0.15,
-            gate_passed=True,
-        )
+        """gate_passed=True → PASS, Sharpe/CAGR 값 포함 검증."""
+        # Arrange
+        r2 = _make_l2_ns()
 
         # Act
         result = format_layer2_table(r2)
@@ -362,27 +375,68 @@ class TestFormatLayer2Table:
         assert "PASS" in result
         assert "Sharpe" in result
         assert "1.500" in result
+        assert "CAGR" in result
+        assert "MAR" in result
+
+    def test_blocked_shows_blocker_reason(self) -> None:
+        """gate_passed=False + blocker_reason → 로그에 reason 포함."""
+        # Arrange
+        r2 = _make_l2_ns(gate_passed=False, blocker_reason="cagr", cagr_hybrid=-0.05)
+
+        # Act
+        result = format_layer2_table(r2)
+
+        # Assert
+        assert "BLOCKED" in result
+        assert "cagr" in result
+
+    def test_friction_shown_as_diagnostic(self) -> None:
+        """friction_pass_pct는 게이트 임계 없이 (diagnostic) 표기 검증."""
+        # Arrange
+        r2 = _make_l2_ns(friction_pass_pct=0.30)
+
+        # Act
+        result = format_layer2_table(r2)
+
+        # Assert
+        assert "Friction" in result
+        assert "diag" in result.lower() or "—" in result
+
+    def test_uplift_gate_shown_as_additive(self) -> None:
+        """Sharpe Uplift 임계가 가산식 (base+0.20) 으로 표기됨 검증."""
+        # Arrange
+        r2 = _make_l2_ns(sharpe_baseline=0.5)
+
+        # Act
+        result = format_layer2_table(r2)
+
+        # Assert — "base+0.20" 포함
+        assert "base+0.20" in result
 
     def test_awf_folds_appended(self) -> None:
         """awf_folds 있으면 fold 테이블 추가 검증."""
         # Arrange
-        r2 = SimpleNamespace(
-            friction_pass_pct=0.75,
-            sharpe_hybrid=1.5,
-            sharpe_baseline=1.0,
-            mdd_hybrid=0.12,
-            mdd_baseline=0.18,
-            turnover=0.15,
-            gate_passed=True,
-        )
+        r2 = _make_l2_ns()
         folds = [{"fold": 1, "sharpe": 1.4, "mdd": 0.11, "pass": True}]
 
         # Act
         result = format_layer2_table(r2, awf_folds=folds)
 
-        # Assert — 새 포맷: "Fold" 헤더 + PASS 포함
+        # Assert
         assert "Fold" in result
         assert "PASS" in result
+
+    def test_nan_fold_shown_safely(self) -> None:
+        """fold sharpe=nan → 'nan' 문자열로 안전 렌더링."""
+        # Arrange
+        r2 = _make_l2_ns()
+        folds = [{"fold": 1, "sharpe": float("nan"), "mdd": float("nan"), "pass": False}]
+
+        # Act
+        result = format_layer2_table(r2, awf_folds=folds)
+
+        # Assert
+        assert "nan" in result
 
 
 class TestFormatLayer3Table:
