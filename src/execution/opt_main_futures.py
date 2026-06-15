@@ -743,8 +743,16 @@ def _run_tiered_l2_study(
         best_l2_params: 최고 Sharpe trial의 파라미터 dict.
                         전체 실패 시 {} (기본값 fallback, WARNING 로그).
     """
+    import warnings
+
     import optuna as _optuna
     from optuna.samplers import TPESampler
+
+    # JournalRedisStorage 감쇠 경고 억제
+    warnings.filterwarnings("ignore", category=FutureWarning, module="optuna")
+    
+    # Optuna 스터디 정보 로그 억제
+    _optuna.logging.set_verbosity(_optuna.logging.WARNING)
 
     from src.domain.futures.optimization.workflow import TieredContext, objective_l2_sharpe
 
@@ -764,37 +772,37 @@ def _run_tiered_l2_study(
     _logger.info("[L2-OPT] Optuna L2 study 시작: name=%s n_trials=%d", study_name, n_trials)
 
     try:
-        _, _del_storage = setup_optuna_storage(str(BASE_DIR))
-        _optuna.delete_study(study_name=study_name, storage=_del_storage)
-    except Exception:
-        _logger.debug("[L2-OPT] 기존 study 없음 — 신규 생성")
-
-    class L2OptunaProgressCallback:
-        def __init__(self, total_trials: int):
-            self.total_trials = total_trials
-            self.best_val = float("-inf")
-
-        def __call__(self, study: Any, trial: Any) -> None:
-            import sys
-            val = trial.value
-            if val is not None and val > self.best_val:
-                self.best_val = val
-            current = len(study.trials)
-            
-            best_disp = f"{self.best_val * 100:.2f}%" if self.best_val > float("-inf") else "N/A"
-            current_disp = f"{val * 100:.2f}%" if (val is not None and val > float("-inf")) else "BLOCKED"
-            
-            sys.stdout.write(
-                f"\r[L2-OPT] Progress: {current}/{self.total_trials} trials | "
-                f"Best CAGR: {best_disp} | Current Trial PnL: {current_disp}"
-            )
-            sys.stdout.flush()
-            if current >= self.total_trials:
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-
-    try:
+        # setup_optuna_storage를 1회만 호출하여 로그 중복 제거
         _, storage = setup_optuna_storage(str(BASE_DIR))
+        try:
+            _optuna.delete_study(study_name=study_name, storage=storage)
+        except Exception:
+            _logger.debug("[L2-OPT] 기존 study 없음 — 신규 생성")
+
+        class L2OptunaProgressCallback:
+            def __init__(self, total_trials: int):
+                self.total_trials = total_trials
+                self.best_val = float("-inf")
+
+            def __call__(self, study: Any, trial: Any) -> None:
+                import sys
+                val = trial.value
+                if val is not None and val > self.best_val:
+                    self.best_val = val
+                current = len(study.trials)
+                
+                best_disp = f"{self.best_val * 100:.2f}%" if self.best_val > float("-inf") else "N/A"
+                current_disp = f"{val * 100:.2f}%" if (val is not None and val > float("-inf")) else "BLOCKED"
+                
+                sys.stdout.write(
+                    f"\r[L2-OPT] Progress: {current}/{self.total_trials} trials | "
+                    f"Best CAGR: {best_disp} | Current Trial PnL: {current_disp}"
+                )
+                sys.stdout.flush()
+                if current >= self.total_trials:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+
         study = _optuna.create_study(
             direction="maximize",
             sampler=TPESampler(seed=seed, n_startup_trials=min(10, n_trials)),
@@ -802,8 +810,6 @@ def _run_tiered_l2_study(
             storage=storage,
             load_if_exists=False,
         )
-        # Suppress verbose optuna logs
-        _optuna.logging.set_verbosity(_optuna.logging.WARNING)
         
         progress_cb = L2OptunaProgressCallback(n_trials)
         study.optimize(
@@ -828,10 +834,6 @@ def _run_tiered_l2_study(
         return {}
 
     best_trial = max(complete_trials, key=lambda t: t.value or float("-inf"))
-    _logger.info(
-        "[L2-OPT] Best trial #%d: CAGR=%.4f params=%s",
-        best_trial.number, best_trial.value, best_trial.params,
-    )
     return dict(best_trial.params)
 
 

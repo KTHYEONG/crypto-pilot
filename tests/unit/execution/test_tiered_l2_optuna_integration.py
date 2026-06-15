@@ -433,3 +433,50 @@ class TestL2LoggingAndCagrOptimizationTarget:
 
             assert val == pytest.approx(0.35)
 
+    def test_objective_l2_cagr_filters_folds_to_l2_window(self) -> None:
+        """L2 최적화 시 objective_l2_sharpe가 AWF 폴드를 L2 윈도우로 필터링하는지 검증."""
+        import numpy as np
+
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2Result
+        from src.domain.futures.strategy.walk_forward import WFFold
+
+        mock_l2 = MagicMock(spec=Layer2Result)
+        mock_l2.gate_passed = True
+        mock_l2.cagr_hybrid = 0.35
+
+        mock_ctx = MagicMock()
+        mock_ctx.fixed_l1_params = {"signal_batch": MagicMock()}
+        mock_ctx.aligned.datetimes = [
+            np.datetime64("2024-01-01"),
+            np.datetime64("2024-01-02"),
+            np.datetime64("2024-01-03"),
+        ]
+        mock_ctx.window.l2_start = "2024-01-02"
+        mock_ctx.window.holdout_start = "2024-01-03"
+
+        # oos_start가 l2_start 이전이거나 oos_end가 holdout_start 이후인 폴드를 설정
+        all_folds = (
+            WFFold(fit_start=0, fit_end=0, cal_start=0, cal_end=0, oos_start=0, oos_end=1),   # 이른 폴드
+            WFFold(fit_start=0, fit_end=1, cal_start=0, cal_end=1, oos_start=1, oos_end=2),   # L2 윈도우 내 폴드
+            WFFold(fit_start=0, fit_end=2, cal_start=0, cal_end=2, oos_start=2, oos_end=3),   # 늦은 폴드
+        )
+
+        with (
+            patch("src.domain.futures.optimization.workflow.suggest_layered_params", return_value={}),
+            patch("src.domain.futures.strategy.walk_forward.build_walk_forward_folds", return_value=all_folds),
+            patch("src.domain.futures.strategy.tiered_workflow.run_l2_awf", return_value=mock_l2) as mock_run_l2,
+            patch(
+                "src.domain.futures.strategy.tiered_workflow.pipeline._date_to_idx",
+                side_effect=lambda datetimes, date: 2
+            ),
+        ):
+            from src.domain.futures.optimization.workflow import objective_l2_sharpe
+
+            objective_l2_sharpe(MagicMock(), mock_ctx)
+
+            # run_l2_awf에 전달된 awf_folds 검증
+            called_folds = mock_run_l2.call_args[1].get("awf_folds")
+            assert len(called_folds) == 1
+            assert called_folds[0].oos_start == 1
+            assert called_folds[0].oos_end == 2
+
