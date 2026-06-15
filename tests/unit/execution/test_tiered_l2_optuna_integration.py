@@ -348,3 +348,88 @@ class TestS8SuggestLayeredParamsL2Rewired:
         assert "vol_target" in trial.params, "vol_target 누락"
         assert "RISK_PER_TRADE" not in trial.params, "dead param RISK_PER_TRADE 잔존"
         assert "MAX_EXPOSURE_PER_COIN" not in trial.params, "dead param MAX_EXPOSURE_PER_COIN 잔존"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# L2 Logging & CAGR Optimization Target Tests (spec: l2-optuna-logging-optimization.md)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestL2LoggingAndCagrOptimizationTarget:
+    def test_verbose_false_suppresses_log_tables(self) -> None:
+        """verbose=False로 실행 시 포맷팅된 테이블 출력을 차단함을 검증."""
+        mock_l1 = _make_l1_result(gate_passed=True, artifact=MagicMock())
+        patches, _ = _pipeline_patches(l2_gate_passed=True)
+
+        with (
+            patches[0], patches[1], patches[2], patches[3], patches[4], patches[5],
+            patch("src.domain.futures.strategy.tiered_workflow.pipeline.logger") as mock_logger,
+        ):
+            from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
+
+            run_tiered_pipeline(
+                labeled_events=MagicMock(),
+                aligned=MagicMock(),
+                cfg=MagicMock(),
+                window=MagicMock(),
+                l1_params={},
+                l2_params={},
+                caps=MagicMock(),
+                tf="4h",
+                target_phase="l2",
+                l1_result_override=mock_l1,
+                verbose=False,
+            )
+
+            # logger.info 호출 중 포맷 테이블이 있는지 점검
+            for call in mock_logger.info.call_args_list:
+                msg = call[0][0] if call[0] else ""
+                assert "● [" not in msg, f"테이블 로그 출력됨: {msg}"
+                assert "AWF PORTFOLIO" not in msg
+
+    def test_objective_l2_cagr_returns_negative_inf_when_gate_fails(self) -> None:
+        """L2 gate_passed=False인 경우 objective_l2_sharpe가 -inf를 반환하는지 검증."""
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2Result
+
+        mock_l2 = MagicMock(spec=Layer2Result)
+        mock_l2.gate_passed = False
+        mock_l2.cagr_hybrid = 0.25
+
+        mock_ctx = MagicMock()
+        mock_ctx.fixed_l1_params = {"signal_batch": MagicMock()}
+
+        with (
+            patch("src.domain.futures.optimization.workflow.suggest_layered_params", return_value={}),
+            patch("src.domain.futures.strategy.walk_forward.build_walk_forward_folds"),
+            patch("src.domain.futures.strategy.tiered_workflow.run_l2_awf", return_value=mock_l2) as mock_run_l2,
+        ):
+            from src.domain.futures.optimization.workflow import objective_l2_sharpe
+
+            val = objective_l2_sharpe(MagicMock(), mock_ctx)
+
+            assert val == float("-inf")
+            # verbose=False로 호출됨을 검증
+            mock_run_l2.assert_called_once()
+            assert mock_run_l2.call_args[1].get("verbose") is False
+
+    def test_objective_l2_cagr_returns_cagr_when_gate_passes(self) -> None:
+        """L2 gate_passed=True인 경우 objective_l2_sharpe가 cagr_hybrid를 반환하는지 검증."""
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2Result
+
+        mock_l2 = MagicMock(spec=Layer2Result)
+        mock_l2.gate_passed = True
+        mock_l2.cagr_hybrid = 0.35
+
+        mock_ctx = MagicMock()
+        mock_ctx.fixed_l1_params = {"signal_batch": MagicMock()}
+
+        with (
+            patch("src.domain.futures.optimization.workflow.suggest_layered_params", return_value={}),
+            patch("src.domain.futures.strategy.walk_forward.build_walk_forward_folds"),
+            patch("src.domain.futures.strategy.tiered_workflow.run_l2_awf", return_value=mock_l2),
+        ):
+            from src.domain.futures.optimization.workflow import objective_l2_sharpe
+
+            val = objective_l2_sharpe(MagicMock(), mock_ctx)
+
+            assert val == pytest.approx(0.35)
+
