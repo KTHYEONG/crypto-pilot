@@ -634,7 +634,7 @@ def _registry_to_symbol_signals(
             continue
         best = evidence_items[0]
         adapted[symbol] = SymbolSignal(
-            raw_mu=float(best.mean_gross_bps),
+            raw_mu=float(best.mean_incremental_bps),   # gross → incremental (net) edge
             volatility=VOL_FLOOR,
             n_obs=max(round(best.effective_n), 0),
             t_stat=float(best.block_tstat_incremental),
