@@ -338,14 +338,10 @@ def _run_awf_simulation(
             friction_pass_total += friction_pass
             signal_total += len(selected)
 
-            n_valid_sym = max(1, sum(1 for ss in valid_signals.values() if ss.valid))
+            # EW Bench: Top-K 선택 심볼만 동일가중 (Kelly 기여만 분리)
+            n_sel = max(1, len(selected))
             w_base = np.array(
-                [
-                    1.0 / n_valid_sym
-                    if s in valid_signals and valid_signals[s].valid
-                    else 0.0
-                    for s in symbols
-                ],
+                [1.0 / n_sel if s in selected else 0.0 for s in symbols],
                 dtype=np.float64,
             )
             rebal_cost = compute_rebalance_cost(
