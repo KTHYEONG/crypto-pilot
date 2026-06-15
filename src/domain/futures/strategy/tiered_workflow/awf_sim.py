@@ -209,6 +209,7 @@ def _run_awf_simulation(
     vol_target = config.vol_target
     no_trade_band = float(config.no_trade_band)
     rebalance_bars = int(config.rebalance_bars)
+    friction_safety_mult = float(getattr(config, "friction_safety_mult", 1.0))
 
     symbols = aligned.symbols
     n_sym = len(symbols)
@@ -314,6 +315,8 @@ def _run_awf_simulation(
                 kelly_fraction=kelly_fraction,
                 vol_target=vol_target,
                 friction_hurdle_bps=hurdle,
+                holding_bars=rebalance_bars,
+                friction_safety_mult=friction_safety_mult,
                 caps=caps,
                 prev_w=prev_w,
                 no_trade_band=no_trade_band,
@@ -332,7 +335,8 @@ def _run_awf_simulation(
             selected_idxs = [sym_to_idx[s] for s in selected if s in sym_to_idx]
             if selected_idxs:
                 sel_idx_arr = np.array(selected_idxs, dtype=np.intp)
-                friction_pass = int(np.sum(np.abs(mu_arr[sel_idx_arr]) >= hurdle[sel_idx_arr]))
+                eff_hurdle = hurdle * friction_safety_mult / max(rebalance_bars, 1)
+                friction_pass = int(np.sum(np.abs(mu_arr[sel_idx_arr]) >= eff_hurdle[sel_idx_arr]))
             else:
                 friction_pass = 0
             friction_pass_total += friction_pass
