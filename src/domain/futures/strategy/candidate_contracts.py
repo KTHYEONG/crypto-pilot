@@ -433,8 +433,11 @@ class ValidatedSignalEvent:
     strategy_id: str
     activation_context: str
     side: Literal[-1, 1]
+    expected_net_bps: float
     expected_gross_bps: float
+    q10_net_bps: float
     q10_gross_bps: float
+    q90_net_bps: float
     q90_gross_bps: float
     expected_holding_bars: int
     quality_weight: float
@@ -450,8 +453,11 @@ class ValidatedSignalEvent:
         strategy_id: str,
         activation_context: str,
         side: Literal[-1, 1],
+        expected_net_bps: float | None = None,
         expected_gross_bps: float,
+        q10_net_bps: float | None = None,
         q10_gross_bps: float,
+        q90_net_bps: float | None = None,
         q90_gross_bps: float,
         expected_holding_bars: int,
         quality_weight: float | None = None,
@@ -465,8 +471,23 @@ class ValidatedSignalEvent:
         object.__setattr__(self, "strategy_id", strategy_id)
         object.__setattr__(self, "activation_context", activation_context)
         object.__setattr__(self, "side", side)
+        object.__setattr__(
+            self,
+            "expected_net_bps",
+            float(expected_gross_bps if expected_net_bps is None else expected_net_bps),
+        )
         object.__setattr__(self, "expected_gross_bps", float(expected_gross_bps))
+        object.__setattr__(
+            self,
+            "q10_net_bps",
+            float(q10_gross_bps if q10_net_bps is None else q10_net_bps),
+        )
         object.__setattr__(self, "q10_gross_bps", float(q10_gross_bps))
+        object.__setattr__(
+            self,
+            "q90_net_bps",
+            float(q90_gross_bps if q90_net_bps is None else q90_net_bps),
+        )
         object.__setattr__(self, "q90_gross_bps", float(q90_gross_bps))
         object.__setattr__(self, "expected_holding_bars", int(expected_holding_bars))
         object.__setattr__(

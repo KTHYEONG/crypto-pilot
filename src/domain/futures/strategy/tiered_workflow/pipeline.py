@@ -46,6 +46,7 @@ from src.domain.futures.strategy.tiered_workflow.awf_sim import (
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     FoldDiagnostic,
     Layer1Result,
+    Layer2AllocationConfig,
     Layer2Result,
     Layer3Result,
 )
@@ -75,6 +76,7 @@ from src.domain.futures.strategy.tiered_workflow.signal_selection import (
     evaluate_layer1_readiness,
     evaluate_outer_signal_opportunities,
     fit_layer1_inference_artifact,
+    predict_layer1_signals,
     select_outer_symbol_opportunities,
 )
 from src.domain.futures.strategy.walk_forward import WFFold
@@ -88,6 +90,10 @@ logger = logging.getLogger("src.domain.futures.strategy.tiered_workflow")
 
 _VALID_COVERAGE_FLAG_THRESHOLD: float = 0.80
 _TRAINED_FOLD_COVERAGE_THRESHOLD: float = 0.80
+
+
+def _can_prime_feature_cache(labeled_events: pd.DataFrame) -> bool:
+    return not labeled_events.empty and "entry_idx" in labeled_events.columns
 
 
 def _date_to_idx(datetimes: NDArray[np.datetime64], target_date: Any) -> int:
@@ -764,12 +770,18 @@ def run_l1_nested_swf(
     assert cw._GLOBAL_PURGE_BARS is None
 
     # Prime the feature cache on the parent process before multiprocessing fork
-    logger.debug("[L1-NESTED] Priming aligned feature cache on parent process")
-    prime_aligned_feature_cache(
-        labeled_events=labeled_events,
-        aligned=aligned,
-        cfg=l1_cfg,
-    )
+    if _can_prime_feature_cache(labeled_events):
+        logger.debug("[L1-NESTED] Priming aligned feature cache on parent process")
+        try:
+            prime_aligned_feature_cache(
+                labeled_events=labeled_events,
+                aligned=aligned,
+                cfg=l1_cfg,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.debug("[L1-NESTED] Feature cache priming skipped: %s", exc)
+    else:
+        logger.debug("[L1-NESTED] Feature cache priming skipped: insufficient labeled event schema")
 
     # Set process globals to minimize IPC size under fork
     cw._GLOBAL_LABELED_EVENTS = labeled_events
@@ -957,25 +969,21 @@ def run_l1_nested_swf(
 
 def run_l2_awf(
     *,
-    l1_oos: dict[str, SymbolSignal],
+    signal_batch: ValidatedSignalBatch,
     aligned: AlignedMarketData,
     awf_folds: tuple[WFFold, ...],
-    l2_params: dict[str, Any],
+    config: Layer2AllocationConfig,
     caps: PortfolioCaps,
     tf: str = "4h",
-    signals_per_fold: tuple[dict[str, SymbolSignal], ...] | None = None,
-    l1_outer_folds: tuple[WFFold, ...] | None = None,
 ) -> Layer2Result:
     """Layer2 AWF 포트폴리오 시뮬레이션."""
     sim = _run_awf_simulation(
-        l1_oos=l1_oos,
+        signal_batch=signal_batch,
         aligned=aligned,
         awf_folds=awf_folds,
-        l2_params=l2_params,
+        config=config,
         caps=caps,
         tf=tf,
-        signals_per_fold=signals_per_fold,
-        l1_outer_folds=l1_outer_folds,
     )
     symbols = aligned.symbols
     sym_to_idx = {s: i for i, s in enumerate(symbols)}
@@ -1008,12 +1016,12 @@ def run_l2_awf(
     )
 
     # gate config 키 (l2_params 우선, default=원칙값)
-    _min_cagr = float(l2_params.get("l2_min_cagr", 0.0))
-    _min_mar = float(l2_params.get("l2_min_mar", 0.5))
-    _min_sharpe_abs = float(l2_params.get("l2_min_sharpe_abs", 0.5))
-    _max_mdd_abs = float(l2_params.get("l2_max_mdd_abs", 0.50))
-    _min_fold_pass = float(l2_params.get("l2_min_fold_pass_ratio", 0.60))
-    _min_uplift = float(l2_params.get("l2_min_sharpe_uplift", 0.20))
+    _min_cagr = float(config.l2_min_cagr)
+    _min_mar = float(config.l2_min_mar)
+    _min_sharpe_abs = float(config.l2_min_sharpe_abs)
+    _max_mdd_abs = float(config.l2_max_mdd_abs)
+    _min_fold_pass = float(config.l2_min_fold_pass_ratio)
+    _min_uplift = float(config.l2_min_sharpe_uplift)
 
     # Stage 0: deployment sanity — NaN/무거래 명시 차단
     _deployment_ok = (
@@ -1021,6 +1029,7 @@ def run_l2_awf(
         and friction_pass_pct > 0.0
         and np.isfinite(sharpe_hybrid)
         and np.isfinite(cagr_hybrid)
+        and sim.support_leak_count == 0
     )
 
     blocker_reason = ""
@@ -1081,10 +1090,10 @@ def run_l2_awf(
 
 def run_l3_holdout(
     *,
-    l1_oos: dict[str, SymbolSignal],
+    signal_batch: ValidatedSignalBatch,
     aligned: AlignedMarketData,
     holdout_span: tuple[int, int],
-    frozen_params: dict[str, Any],
+    config: Layer2AllocationConfig,
     caps: PortfolioCaps,
     tf: str = "4h",
 ) -> Layer3Result:
@@ -1100,10 +1109,10 @@ def run_l3_holdout(
     )
 
     sim = _run_awf_simulation(
-        l1_oos=l1_oos,
+        signal_batch=signal_batch,
         aligned=aligned,
         awf_folds=(dummy_fold,),
-        l2_params=frozen_params,
+        config=config,
         caps=caps,
         tf=tf,
     )
@@ -1233,15 +1242,25 @@ def run_tiered_pipeline(
         len(awf_folds),
     )
 
+    if l1.inference_artifact is None:
+        raise ValueError("Layer2 requires a fitted Layer1InferenceArtifact")
+
+    l2_config = Layer2AllocationConfig.from_mapping(l2_params)
+    l2_signal_batch = predict_layer1_signals(
+        artifact=l1.inference_artifact,
+        candidate_events=labeled_events,
+        aligned=aligned,
+        start_idx=l1_end_bars,
+        end_idx=ho_start_idx_l2,
+        cfg=cfg,
+    )
     l2 = _tw.run_l2_awf(
-        l1_oos=l1.oos_stacked,
+        signal_batch=l2_signal_batch,
         aligned=aligned,
         awf_folds=awf_folds,
-        l2_params=l2_params,
+        config=l2_config,
         caps=caps,
         tf=tf,
-        signals_per_fold=l1.signals_per_fold,
-        l1_outer_folds=outer_folds,
     )
     logger.debug("[perf-tiered] run_tiered_pipeline Layer 2 total took %.4fs", time.perf_counter() - t_l2)
 
@@ -1260,11 +1279,19 @@ def run_tiered_pipeline(
     t_l3 = time.perf_counter()
     ho_start_idx = _date_to_idx(aligned.datetimes, window.holdout_start)
     ho_end_idx = _date_to_idx(aligned.datetimes, window.holdout_end)
+    l3_signal_batch = predict_layer1_signals(
+        artifact=l1.inference_artifact,
+        candidate_events=labeled_events,
+        aligned=aligned,
+        start_idx=ho_start_idx,
+        end_idx=ho_end_idx,
+        cfg=cfg,
+    )
     l3 = _tw.run_l3_holdout(
-        l1_oos=l1.oos_stacked,
+        signal_batch=l3_signal_batch,
         aligned=aligned,
         holdout_span=(ho_start_idx, ho_end_idx),
-        frozen_params=l2_params,
+        config=l2_config,
         caps=caps,
         tf=tf,
     )

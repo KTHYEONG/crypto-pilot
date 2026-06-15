@@ -19,6 +19,7 @@ S_nw_short: N<4 edge case → 0.0
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -39,7 +40,7 @@ from src.domain.futures.strategy.candidate_contracts import (
     ValidatedSignalEvent,
 )
 from src.domain.futures.strategy.config import CandidateStrategyConfig
-from src.domain.futures.strategy.cs_rank import SymbolSignal
+from src.domain.futures.strategy.cs_rank import SymbolSignal, rank_and_select
 from src.domain.futures.strategy.tiered_workflow import (
     _VALID_COVERAGE_FLAG_THRESHOLD,
     FoldDiagnostic,
@@ -632,11 +633,6 @@ def test_run_l2_awf_vol_matrix_lookup_correctness() -> None:
     aligned.beta_vs_market_1d = np.array([1.0, 0.8], dtype=np.float64)
     aligned.execution_cost_bps_2d = None
 
-    l1_oos = {
-        "BTC": SymbolSignal(raw_mu=10.0, volatility=0.02, n_obs=100, t_stat=2.5, valid=True, beta_btc=1.0),
-        "ETH": SymbolSignal(raw_mu=12.0, volatility=0.03, n_obs=100, t_stat=2.2, valid=True, beta_btc=0.8),
-    }
-
     from src.domain.futures.strategy.walk_forward import WFFold
     awf_folds = (
         WFFold(fit_start=0, fit_end=30, cal_start=30, cal_end=30, oos_start=30, oos_end=50),
@@ -645,14 +641,64 @@ def test_run_l2_awf_vol_matrix_lookup_correctness() -> None:
     from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
     caps = PortfolioCaps(gross=1.8, per_symbol=0.35, net=0.5, beta=1.0, target_ann_vol=0.35)
 
-    from src.domain.futures.strategy.tiered_workflow import run_l2_awf
+    from src.domain.futures.strategy.tiered_workflow import (
+        Layer2AllocationConfig,
+        run_l2_awf,
+    )
+
+    signal_batch = ValidatedSignalBatch(
+        events=(
+            ValidatedSignalEvent(
+                decision_idx=29,
+                decision_time=datetimes[29],
+                symbol="BTC",
+                strategy_id="trend:fast",
+                activation_context="all",
+                side=1,
+                expected_net_bps=10.0,
+                expected_gross_bps=12.0,
+                q10_net_bps=5.0,
+                q10_gross_bps=6.0,
+                q90_net_bps=15.0,
+                q90_gross_bps=18.0,
+                expected_holding_bars=2,
+                reliability=0.9,
+                registry_version="test",
+                model_version="test",
+            ),
+            ValidatedSignalEvent(
+                decision_idx=29,
+                decision_time=datetimes[29],
+                symbol="ETH",
+                strategy_id="trend:fast",
+                activation_context="all",
+                side=1,
+                expected_net_bps=12.0,
+                expected_gross_bps=14.0,
+                q10_net_bps=6.0,
+                q10_gross_bps=7.0,
+                q90_net_bps=18.0,
+                q90_gross_bps=21.0,
+                expected_holding_bars=2,
+                reliability=0.8,
+                registry_version="test",
+                model_version="test",
+            ),
+        ),
+        start_idx=30,
+        end_idx=50,
+        symbols=("BTC", "ETH"),
+        registry_version="test",
+        model_version="test",
+    )
+    config = Layer2AllocationConfig(k_rank=1, rebalance_bars=1)
 
     # Act
     l2 = run_l2_awf(
-        l1_oos=l1_oos,
+        signal_batch=signal_batch,
         aligned=aligned,
         awf_folds=awf_folds,
-        l2_params={"K_RANK": 1, "REBALANCE_BARS": 1},
+        config=config,
         caps=caps,
     )
 
@@ -2285,70 +2331,42 @@ def test_resolve_safe_nested_workers_oom_guard() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Layer2 AWF 백테스팅 신호 동적 연결 및 평가지표 안정화 검증 테스트
+# Layer2 신호 handoff / ranking 계약 회귀 방지 테스트
 # ---------------------------------------------------------------------------
 
-def test_run_l2_awf_dynamic_signal_routing_happy_path() -> None:
-    """Scenario 1: 각 fold별로 동적 OOS 예측치가 주입되어 리밸런싱이 정상 구동되는지 검증."""
-    from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
-    from src.domain.futures.strategy.cs_rank import SymbolSignal
+def test_run_l2_awf_signature_excludes_legacy_fold_fallback_inputs() -> None:
+    """Scenario 4: production handoff는 legacy fold fallback 입력에 의존하지 않아야 한다."""
     from src.domain.futures.strategy.tiered_workflow import run_l2_awf
-    from src.domain.futures.strategy.walk_forward import WFFold
 
-    n_bars = 40
-    n_syms = 2
-    close = np.ones((n_bars, n_syms), dtype=np.float64) * 100.0
-    # 가격 변동 주기적으로 줘서 수익률 발생 유도
-    for t in range(n_bars):
-        close[t, 0] = 100.0 + (t % 5) * 2.0
-        close[t, 1] = 100.0 - (t % 5) * 1.5
+    params = inspect.signature(run_l2_awf).parameters
 
-    datetimes = np.array(
-        [np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(n_bars)],
-        dtype="datetime64[ns]",
-    )
+    assert "signal_batch" in params
+    assert "config" in params
+    assert "l1_oos" not in params
+    assert "signals_per_fold" not in params
+    assert "l1_outer_folds" not in params
 
-    aligned = MagicMock()
-    aligned.close_2d = close
-    aligned.symbols = ("BTC", "ETH")
-    aligned.datetimes = datetimes
-    aligned.beta_vs_market_1d = np.array([1.0, 0.8], dtype=np.float64)
-    aligned.execution_cost_bps_2d = None
 
-    # fold 0: BTC 강세 신호 / ETH 약세 신호
-    fold0_sigs = {
-        "BTC": SymbolSignal(raw_mu=20.0, volatility=0.01, n_obs=50, t_stat=2.0, valid=True, beta_btc=1.0),
-        "ETH": SymbolSignal(raw_mu=-15.0, volatility=0.02, n_obs=50, t_stat=1.5, valid=True, beta_btc=0.8),
+def test_rank_and_select_prefers_stronger_short_by_absolute_edge() -> None:
+    """Scenario 2: 동일 변동성에서는 절대 edge가 큰 short가 선택되어야 한다."""
+    rank_and_select_fn = cast(Any, rank_and_select)
+    signals = {
+        "LONG12": SymbolSignal(raw_mu=12.0, volatility=0.01, n_obs=20, t_stat=2.0, valid=True),
+        "SHORT30": SymbolSignal(raw_mu=-30.0, volatility=0.01, n_obs=20, t_stat=2.0, valid=True),
+        "LONG5": SymbolSignal(raw_mu=5.0, volatility=0.01, n_obs=20, t_stat=2.0, valid=True),
     }
-    # fold 1: ETH 강세 신호 / BTC 약세 신호
-    fold1_sigs = {
-        "BTC": SymbolSignal(raw_mu=-10.0, volatility=0.01, n_obs=50, t_stat=1.2, valid=True, beta_btc=1.0),
-        "ETH": SymbolSignal(raw_mu=25.0, volatility=0.02, n_obs=50, t_stat=2.5, valid=True, beta_btc=0.8),
-    }
-    signals_per_fold = (fold0_sigs, fold1_sigs)
 
-    awf_folds = (
-        WFFold(fit_start=0, fit_end=15, cal_start=15, cal_end=15, oos_start=15, oos_end=25),
-        WFFold(fit_start=0, fit_end=25, cal_start=25, cal_end=25, oos_start=25, oos_end=35),
-    )
-    caps = PortfolioCaps(gross=2.0, per_symbol=0.4, net=0.5, beta=1.0, target_ann_vol=0.2)
-    l2_params = {"K_RANK": 1, "REBALANCE_BARS": 1, "kelly_fraction": 0.5}
-
-    l2 = run_l2_awf(
-        l1_oos=fold0_sigs, # oos_stacked fallback용
-        aligned=aligned,
-        awf_folds=awf_folds,
-        l2_params=l2_params,
-        caps=caps,
-        tf="4h",
-        signals_per_fold=signals_per_fold,
-        l1_outer_folds=awf_folds,
+    selected, _z_scores = rank_and_select_fn(
+        signals,
+        k_rank=1,
+        sector_cap=3,
+        prev_selection=frozenset(),
+        rank_buffer=1,
+        min_abs_z=0.0,
+        selection_mode="absolute",
     )
 
-    assert l2.sharpe_hybrid is not None
-    # 0이나 nan이 아닌 다른 값이 계산되어 반환되는지 확인
-    assert not np.isnan(l2.sharpe_hybrid)
-    assert not np.isnan(l2.cagr_hybrid)
+    assert selected == frozenset({"SHORT30"})
 
 
 def test_metrics_sharpe_and_cagr_stability() -> None:
@@ -2373,49 +2391,22 @@ def test_metrics_sharpe_and_cagr_stability() -> None:
     assert np.isnan(_mdd(nan_rets))
 
 
-def test_run_l2_awf_fallback_empty_signals() -> None:
-    """Scenario 3: signals_per_fold가 빈 튜플일 때 l1_oos로 안전하게 fallback하는지 검증."""
-    from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
-    from src.domain.futures.strategy.cs_rank import SymbolSignal
-    from src.domain.futures.strategy.tiered_workflow import run_l2_awf
-    from src.domain.futures.strategy.walk_forward import WFFold
-
-    n_bars = 30
-    n_syms = 2
-    close = np.ones((n_bars, n_syms), dtype=np.float64) * 100.0
-
-    datetimes = np.array(
-        [np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(n_bars)],
-        dtype="datetime64[ns]",
-    )
-
-    aligned = MagicMock()
-    aligned.close_2d = close
-    aligned.symbols = ("BTC", "ETH")
-    aligned.datetimes = datetimes
-    aligned.beta_vs_market_1d = np.array([1.0, 0.8], dtype=np.float64)
-    aligned.execution_cost_bps_2d = None
-
-    l1_oos = {
-        "BTC": SymbolSignal(raw_mu=10.0, volatility=0.01, n_obs=50, t_stat=2.0, valid=True, beta_btc=1.0),
-        "ETH": SymbolSignal(raw_mu=8.0, volatility=0.02, n_obs=50, t_stat=1.5, valid=True, beta_btc=0.8),
+def test_rank_and_select_allows_empty_selection_when_all_candidates_fail_threshold() -> None:
+    """Scenario 3: 적격 후보가 없으면 K_RANK를 강제하지 않고 빈 선택을 허용해야 한다."""
+    rank_and_select_fn = cast(Any, rank_and_select)
+    signals = {
+        "BTC": SymbolSignal(raw_mu=3.0, volatility=0.01, n_obs=20, t_stat=2.0, valid=True),
+        "ETH": SymbolSignal(raw_mu=-2.0, volatility=0.01, n_obs=20, t_stat=2.0, valid=True),
     }
 
-    awf_folds = (
-        WFFold(fit_start=0, fit_end=15, cal_start=15, cal_end=15, oos_start=15, oos_end=25),
-    )
-    caps = PortfolioCaps(gross=2.0, per_symbol=0.4, net=0.5, beta=1.0, target_ann_vol=0.2)
-    l2_params = {"K_RANK": 1, "REBALANCE_BARS": 1}
-
-    l2 = run_l2_awf(
-        l1_oos=l1_oos,
-        aligned=aligned,
-        awf_folds=awf_folds,
-        l2_params=l2_params,
-        caps=caps,
-        tf="4h",
-        signals_per_fold=(), # 빈 튜플
+    selected, z_scores = rank_and_select_fn(
+        signals,
+        k_rank=2,
+        sector_cap=2,
+        prev_selection=frozenset(),
+        rank_buffer=1,
+        min_abs_z=10.0,
     )
 
-    assert l2.sharpe_hybrid is not None
-    assert not np.isnan(l2.sharpe_hybrid)
+    assert selected == frozenset()
+    assert set(z_scores) == {"BTC", "ETH"}

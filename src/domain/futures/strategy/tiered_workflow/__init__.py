@@ -18,11 +18,18 @@ from src.domain.futures.strategy.tiered_logging import (
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     _run_awf_simulation,
     _stack_oos_signals,
+    build_layer2_signal_schedule,
+    compute_futures_bar_return,
+    compute_rebalance_cost,
+    resolve_active_symbol_signals,
 )
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     FoldDiagnostic,
     Layer1Result,
+    Layer2AllocationConfig,
     Layer2Result,
+    Layer2SignalSchedule,
+    Layer2SimulationDiagnostics,
     Layer3Result,
     PredictionDecompositionDiag,
     StrategySignal,
@@ -63,6 +70,7 @@ from src.domain.futures.strategy.tiered_workflow.signal_selection import (
     evaluate_layer1_readiness,
     evaluate_outer_signal_opportunities,
     fit_layer1_inference_artifact,
+    predict_layer1_signals,
     select_outer_symbol_opportunities,
 )
 from src.domain.futures.strategy.walk_forward import (
@@ -75,45 +83,44 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "_TRAINED_FOLD_COVERAGE_THRESHOLD",
-    # Public & Private Pipeline / Constants
     "_VALID_COVERAGE_FLAG_THRESHOLD",
     "FoldDiagnostic",
-    # Public & Private Dataclasses
     "Layer1Result",
+    "Layer2AllocationConfig",
     "Layer2Result",
+    "Layer2SignalSchedule",
+    "Layer2SimulationDiagnostics",
     "Layer3Result",
     "PredictionDecompositionDiag",
     "StrategySignal",
     "SymbolRealizedStat",
-    # Public & Private Metrics
     "_cagr",
-    # Public & Private Signal Selection
     "_candidate_output_to_signal_batch",
-    # Public & Private Diagnostics
     "_compute_fold_ts_ic",
     "_event_results_from_fold_output",
-    # Mocking target functions in tests
     "_fit_and_predict_single_fold",
     "_fold_eligible_symbol_mask",
     "_mdd",
     "_newey_west_ic_tstat",
     "_nw_tstat_realized",
     "_registry_to_symbol_signals",
-    # Public & Private AWF Sim
     "_run_awf_simulation",
     "_sharpe",
     "_stack_oos_signals",
     "build_l1_nested_swf_folds",
     "build_l1_swf_folds",
+    "build_layer2_signal_schedule",
     "build_qualified_signal_registry",
     "build_walk_forward_folds",
     "compose_symbol_signals",
     "compute_breadth_weighted_ic",
+    "compute_futures_bar_return",
     "compute_panel_diversity",
     "compute_per_strategy_oos_validation",
     "compute_per_symbol_ic",
     "compute_per_symbol_realized_stats",
     "compute_prediction_decomposition_diag",
+    "compute_rebalance_cost",
     "compute_symbol_strategy_evidence",
     "evaluate_layer1_readiness",
     "evaluate_outer_signal_opportunities",
@@ -126,6 +133,8 @@ __all__ = [
     "format_layer3_table",
     "format_system_status",
     "logger",
+    "predict_layer1_signals",
+    "resolve_active_symbol_signals",
     "run_l1_nested_swf",
     "run_l1_swf",
     "run_l2_awf",

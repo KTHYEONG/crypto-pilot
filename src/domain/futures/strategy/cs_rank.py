@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -86,6 +87,8 @@ def rank_and_select(
     sector_cap: int,
     prev_selection: frozenset[str],
     rank_buffer: int,
+    min_abs_z: float = 0.0,
+    selection_mode: Literal["signed", "absolute"] = "signed",
 ) -> tuple[frozenset[str], dict[str, float]]:
     """횡단면 Z-score 랭킹으로 Top-K 선택. hysteresis buffer 적용.
 
@@ -101,6 +104,8 @@ def rank_and_select(
         sector_cap: 동일 sector 최대 선택 수 (현재 미사용, 확장 예약).
         prev_selection: 이전 bar 선택 집합 (hysteresis 기준).
         rank_buffer: prev_selection 유지를 위한 랭크 여유 폭.
+        min_abs_z: 최소 절대 Z-score. 미만 후보는 선택 제외.
+        selection_mode: "signed"는 legacy top-k, "absolute"는 futures 대칭 선택.
 
     Returns:
         Tuple of:
@@ -142,40 +147,45 @@ def rank_and_select(
     # CS beta-neutralize
     mu_neutral: NDArray[np.float64] = neutralize_cross_section(mu_arr, beta_btc_arr)
 
-    # Sharpe Z-score
     sharpe_neutral: NDArray[np.float64] = mu_neutral / vol_arr
-    sharpe_std: float = float(sharpe_neutral.std())
-    z: NDArray[np.float64] = (
-        sharpe_neutral - sharpe_neutral.mean()
-    ) / (sharpe_std + 1e-12)
+    if selection_mode == "signed":
+        rank_metric = sharpe_neutral
+        rank_order = [syms[i] for i in np.argsort(rank_metric)[::-1].tolist()]
+        metric_std = float(rank_metric.std())
+        z_metric: NDArray[np.float64] = (rank_metric - rank_metric.mean()) / (metric_std + 1e-12)
+    elif selection_mode == "absolute":
+        rank_metric = np.abs(sharpe_neutral)
+        rank_order = [syms[i] for i in np.argsort(rank_metric)[::-1].tolist()]
+        metric_std = float(rank_metric.std())
+        rank_z = (rank_metric - rank_metric.mean()) / (metric_std + 1e-12)
+        z_metric = np.sign(sharpe_neutral) * rank_z
+    else:
+        raise ValueError(f"unsupported selection_mode: {selection_mode}")
 
     # 심볼 → z_score 매핑
-    z_scores_dict: dict[str, float] = {syms[i]: float(z[i]) for i in range(n)}
+    z_scores_dict: dict[str, float] = {syms[i]: float(z_metric[i]) for i in range(n)}
+    eligible_symbols: set[str] = {syms[i] for i in range(n) if float(abs(z_metric[i])) >= min_abs_z}
 
-    # 내림차순 랭킹 (0-based: 0 = 최고)
-    rank_order: list[str] = [
-        syms[i] for i in np.argsort(z)[::-1].tolist()
-    ]
     rank_of: dict[str, int] = {s: idx + 1 for idx, s in enumerate(rank_order)}
 
     # Hysteresis: prev_selection 중 rank ≤ k_rank + rank_buffer 유지
     sticky: set[str] = {
         s
         for s in prev_selection
-        if s in z_scores_dict and rank_of[s] <= k_rank + rank_buffer
+        if s in eligible_symbols and rank_of[s] <= k_rank + rank_buffer
     }
 
     # 새로 진입할 Top candidates (sticky 제외, 여유 슬롯만큼)
     fresh_slots: int = max(0, k_rank - len(sticky))
-    fresh: list[str] = [s for s in rank_order if s not in sticky][:fresh_slots]
+    fresh: list[str] = [
+        s for s in rank_order if s not in sticky and s in eligible_symbols
+    ][:fresh_slots]
 
     selected: set[str] = sticky | set(fresh)
 
-    # k_rank 초과 시 z_score 낮은 것 제거 (sticky 과잉 시)
+    # k_rank 초과 시 기존 랭킹 우선순위로 trimming
     if len(selected) > k_rank:
-        selected = set(
-            sorted(selected, key=lambda s: z_scores_dict[s], reverse=True)[:k_rank]
-        )
+        selected = set([s for s in rank_order if s in selected][:k_rank])
 
     _logger.debug(
         "rank_and_select: n_valid=%d, k_rank=%d, sticky=%d, fresh=%d, selected=%d",
