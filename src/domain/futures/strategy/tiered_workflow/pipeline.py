@@ -1128,7 +1128,8 @@ def run_l2_awf(
     _min_uplift = float(config.l2_min_sharpe_uplift)
     _min_psr = float(config.l2_min_psr)
     _min_friction_pass = float(config.l2_min_friction_pass)
-    _min_dsr = float(config.l2_min_dsr)
+    _mdd_material_floor = float(config.l2_mdd_material_floor)
+    _mdd_rel_tol = float(config.l2_mdd_rel_tol)
     _max_cvar_95 = float(config.l2_max_cvar_95)
     _min_growth_uplift = float(config.l2_min_growth_uplift)
     _min_active_blocks = int(config.l2_min_active_blocks)
@@ -1152,7 +1153,7 @@ def run_l2_awf(
         blocker_reason = "mar"
     elif sharpe_hybrid < _min_sharpe_abs:
         blocker_reason = "sharpe_abs"
-    elif mdd_hybrid > mdd_baseline:
+    elif mdd_hybrid > _mdd_material_floor and mdd_hybrid > mdd_baseline * (1.0 + _mdd_rel_tol):
         blocker_reason = "mdd_rel"
     elif mdd_hybrid > _max_mdd_abs:
         blocker_reason = "mdd_abs"
@@ -1160,8 +1161,6 @@ def run_l2_awf(
         blocker_reason = "fold"
     elif len(block_metrics) < _min_active_blocks:
         blocker_reason = "active_blocks"
-    elif dsr_hybrid < _min_dsr:
-        blocker_reason = "dsr"
     elif friction_pass_pct < _min_friction_pass:
         blocker_reason = "friction"
     elif cvar_95_hybrid > _max_cvar_95:

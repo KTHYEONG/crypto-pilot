@@ -181,18 +181,18 @@ def test_l2_alloc_space_excludes_dead_params() -> None:
 
 
 def test_l2_alloc_space_max_ann_vol_range() -> None:
-    """S6: max_ann_vol ∈ [0.20, 0.80] 범위 검증."""
+    """C2: max_ann_vol ∈ [0.20, 1.20] (배치천장 개방, V3)."""
     spec = L2_ALLOC_SPACE["max_ann_vol"]
 
     assert spec["type"] == "float"
     assert spec["low"] == pytest.approx(0.20)
-    assert spec["high"] == pytest.approx(0.80)
+    assert spec["high"] == pytest.approx(1.20)
 
 
 def test_l2_alloc_space_kelly_fraction_range() -> None:
-    """S6: kelly_fraction ∈ [0.10, 1.0]."""
+    """S5: kelly_fraction ∈ [0.15, 0.55] (fractional Kelly 이론 정합, V3)."""
     spec = L2_ALLOC_SPACE["kelly_fraction"]
 
     assert spec["type"] == "float"
-    assert spec["low"] == pytest.approx(0.10)
-    assert spec["high"] == pytest.approx(1.0)
+    assert spec["low"] == pytest.approx(0.15)
+    assert spec["high"] == pytest.approx(0.55)
