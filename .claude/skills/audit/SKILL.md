@@ -34,13 +34,17 @@ Verify that the implementation accurately reflects the business logic requiremen
 
 ## Output Format
 ```md
-### 🏁 Professional Audit: [PASS / FAIL]
+### 🏁 Audit Result: [PASS / FAIL]
 
-**1. Intent Alignment**
-- [ ] Spec Core Logic vs Code Implementation
-- [ ] Quant/Financial Vectorization & Efficiency
+#### 🚀 Executive Summary
+- [1-2 sentences summarizing the alignment between Spec intent and Code implementation.]
 
-**2. Expert Feedback & Next Step**
-- [Brief and sharp review comments on the core logic]
-- [Next Step: ✅ `sync` is ready.]
+#### 🔍 Gap Analysis (Required ONLY if FAIL)
+*Focus on specific mismatches. Use line numbers or function names instead of long code blocks to save tokens.*
+- **Spec Requirement:** [Which part of the spec logic is missing or wrong?]
+- **Implementation Issue:** [Briefly explain the flaw or performance bottleneck.]
+- **Location:** [File Path and Line/Function reference]
+
+#### ➡️ Next Step
+- [Next Step: e.g., "Return to `implement` to fix the gap." or "✅ `sync` is ready."]
 ```

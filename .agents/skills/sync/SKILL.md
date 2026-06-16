@@ -6,38 +6,52 @@ description: Documentation Synchronization, ADR Logging, and Cleanup.
 # Skill: Sync (Knowledge Synchronizer)
 
 ## Purpose
-Reflect implemented and verified knowledge into official system documentation and clean up temporary files created during the task to maintain the Single Source of Truth (SSOT).
+Enforce the Single Source of Truth (SSOT). Finalize the task by promoting ephemeral implementation knowledge into official documentation and purging all temporary artifacts to maintain a clean workspace.
 
 ## Execution Rules
 
-### 1. Knowledge Promotion (Architecture Sync)
-- **API and Schema Mapping**: Utilize Serena MCP (`get_symbols_overview`) to inspect the final shape of implemented classes, methods, and types. This ensures precise mapping of inputs/outputs in system documents.
-- **Core Formulas**: Update core formulas or algorithms in the relevant documents within `docs/architecture/`.
-- **Domain Logic**: Reflect changed domain rules or data flows. Use direct file reads only to pull out implementation blocks if strictly needed for code snippets.
+### 1. Truth Promotion
+- **Conceptual Distinction**:
+  - **EH (docs/decisions/)**: "The Why" - Logs decisions, deltas, and rationale to provide context for future AI agents.
+  - **Architecture (docs/architecture/)**: "The What" - Represents the current, verified state of the system structure.
+- **Architecture Consolidation (NO BLOAT)**:
+  - **Primary Files Only**: Strictly use primary domain files (e.g., `layer1.md`, `layer2.md`, `universe.md`).
+  - **Update Policy**: Do NOT create new architecture files for sub-features. Locate the primary domain file and update the relevant section or append a new sub-section.
+  - **On-Touch Cleanup**: Only perform minor structural cleanup on the *file being modified* if it exceeds 500 lines or becomes unreadable. Avoid global refactoring.
+- **ADR Consolidation (EH Update)**: 
+  - **Append to Domain EH**: Always append new ADR entries to the existing domain-specific EH file (e.g., `layer1-eh.md`). Prohibit new EH file creation.
+  - **Content**: Log Delta and Rationale concisely for future AI context.
 
-### 2. ADR (Architectural Decision Record) Logging
-- **Decision Capture**: Record significant design choices made during implementation in `docs/decisions/` as a compressed ADR (max 5 lines).
-- **Context**: Focus on "why" this approach was chosen to provide context for future maintainers.
+### 2. Zero-Residue Cleanup (CRITICAL)
+- **Purge Specs**: Proactively delete all `.md` files in `docs/specs/` related to the current task ID or feature.
+- **Wipe Artifacts**: Remove any temporary test data, logs, or intermediate files (`.tmp`, `.bak`) generated during `implement` or `check`.
+- **Verify Clean State**: Ensure no new untracked files (except legitimate docs) remain in the workspace.
 
-### 3. Workspace Cleanup
-- **Spec Deletion**: Delete completed temporary specification documents (`docs/specs/*.md`).
-- **Artifact Removal**: Clean up temporary data or log files generated during the task.
+### 3. Single Responsibility
+- Do not re-test or re-audit. Focus exclusively on Document Synchronization and Workspace Hygiene.
 
-### 4. Single Responsibility (DO NOT OVERSTEP)
-- You are ONLY the Documenter/Cleaner. Do not write or review code, and do not run tests. Focus entirely on updating the Architecture and ADRs.
-
-## Output Format
+## Output Format (Sync Manifest)
 ```md
-### 🔄 System Knowledge Sync: [COMPLETE]
+### [SYNC_MANIFEST]
 
-**1. Documentation Update**
-- [ ] Updated `docs/architecture/*.md` (List files)
-- [ ] Logged ADR in `docs/decisions/*.md`
+**1. Documentation State**
+- **Promoted:** `[List of updated docs/architecture/*.md]`
+- **Consolidated ADR:** `[Path to the REUSED docs/decisions/*.md]`
 
-**2. Cleanup**
-- [ ] Deleted temporary spec: `docs/specs/*.md`
-- [ ] Removed workspace artifacts
+**2. Cleanup State**
+- **Deleted Specs:** `[File names]`
+- **Removed Artifacts:** `[List of purged files]`
 
-**3. Next Step**
-- [Next Step: ✅ `commit` is ready.]
+**3. Final Status**
+- ✅ Workspace is synchronized and clean. Proceed to `commit`.
+```
+s/architecture/*.md]`
+- **Logged ADR:** `[Path to docs/decisions/*.md]`
+
+**2. Cleanup State**
+- **Deleted Specs:** `[File names]`
+- **Removed Artifacts:** `[List of purged files]`
+
+**3. Final Status**
+- ✅ Workspace is synchronized and clean. Proceed to `commit`.
 ```
