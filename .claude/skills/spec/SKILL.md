@@ -44,5 +44,5 @@ Provide a clean summary with:
 2. **No Blind Coding**: Delegate Python syntax to `implement`. Focus on the "What" and "How".
 3. **Contextual Awareness**: Check `docs/decisions/` and `docs/architecture/` as SSOT.
 4. **Token Optimization & Contract Inspections**:
-   - **Primary**: Utilize Serena MCP (`get_symbols_overview`, `find_implementations`) to inspect interface layouts, class boundaries, and inheritance lines without fetching file bodies.
+    - **Primary**: Utilize Serena MCP (`get_symbols_overview`, `find_declaration`/`find_referencing_symbols`) to inspect interface layouts, class boundaries, and inheritance lines without fetching file bodies.
    - **Secondary**: Use `view_file` or `read_file` with precise line ranges (e.g., `StartLine` and `EndLine` parameters) only to study actual implementation details if pseudo-code design requires it. Avoid reading whole files.
