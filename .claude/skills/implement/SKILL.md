@@ -7,10 +7,14 @@ description: Translate logic and test blueprints into working Python code with L
 
 ## Purpose
 Translate the logical Blueprint into working Python code (both `src/` and `tests/`). You are the "Execution Builder". The `spec` phase has solved the algorithms and test scenarios. Your job is syntax and translation.
-
 ## Execution Rules
 1. **Blueprint Truth:** Read `docs/specs/`. Adhere strictly to the defined `Contract` and `Algorithmic Flow`.
-2. **Double Coding (Src & Test):** 
+2. **Sub-agent Delegation (EFFICIENCY & QUALITY)**:
+   - When delegating to a sub-agent (e.g., `code-worker`), DO NOT explain the logic in the prompt. 
+   - **Instruction**: Pass ONLY the file path of the blueprint (e.g., `Read docs/specs/feature-x.md and implement exactly.`) and the `SCAN_MANIFEST`.
+   - **Benefit**: This minimizes input tokens and ensures the sub-agent relies on the high-reasoning spec rather than a degraded chat summary.
+3. **Double Coding (Src & Test):** 
+...
    - Write the logic in the target `.py` file.
    - Write the corresponding test code in `tests/` based on the `Test Scenario Design` provided in the spec.
 3. **Local Validation (L1):** For EVERY modified file (src and test), run validation to catch bugs early:
