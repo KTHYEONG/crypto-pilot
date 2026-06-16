@@ -285,6 +285,57 @@ def _sharpe(rets: list[float], bars_per_year: float = _BARS_PER_YEAR) -> float:
     return float(mu * bars_per_year / (sd * np.sqrt(bars_per_year)))
 
 
+def _sortino(
+    rets: list[float] | NDArray[np.float64],
+    *,
+    bars_per_year: float = _BARS_PER_YEAR,
+    target: float = 0.0,
+) -> float:
+    """연율화 Sortino 비율 계산 (하방편차 기준 위험효율).
+
+    Args:
+        rets: per-bar 수익률 리스트 또는 배열.
+        bars_per_year: 연율화 팩터.
+        target: 하방편차 기준점 (기본 0.0).
+
+    Returns:
+        연율화 Sortino. 데이터 부족 또는 무손실(dd≈0) degenerate 시 0.0.
+
+    Time Complexity: O(n). Space Complexity: O(n).
+    """
+    arr = _clean_rets_array(rets)
+    if arr.size < 2:
+        return 0.0
+    mean_r = float(np.mean(arr))
+    downside = arr[arr < target]
+    if downside.size == 0:
+        return 0.0
+    dd = float(np.sqrt(np.mean(np.square(downside - target))))
+    if dd < 1e-12:
+        return 0.0
+    return float((mean_r - target) / dd * np.sqrt(bars_per_year))
+
+
+def _terminal_multiple(rets: list[float] | NDArray[np.float64]) -> float:
+    """누적 복리 배수 ∏(1+r) 계산 ("PnL multiple").
+
+    Args:
+        rets: per-bar 수익률 리스트 또는 배열.
+
+    Returns:
+        복리 배수. 빈 배열 → 1.0. 전손(∏<=0) → 0.0.
+
+    Time Complexity: O(n). Space Complexity: O(n).
+    """
+    arr = _clean_rets_array(rets)
+    if arr.size == 0:
+        return 1.0
+    multiple = float(np.prod(1.0 + arr))
+    if not np.isfinite(multiple) or multiple <= 0.0:
+        return 0.0
+    return multiple
+
+
 def _mdd(rets: list[float]) -> float:
     """최대 낙폭 계산 (양수 반환).
 

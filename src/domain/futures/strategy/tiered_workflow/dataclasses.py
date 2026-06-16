@@ -153,6 +153,8 @@ class Layer2TrialEvaluation:
     block_metrics: tuple[Layer2BlockMetric, ...]
     returns_hybrid: tuple[float, ...] = ()
     returns_baseline: tuple[float, ...] = ()
+    sortino_hybrid: float = 0.0
+    trade_count: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -188,7 +190,8 @@ class Layer2Result:
         turnover: 평균 단방향 회전율.
         friction_pass_pct: 마찰 허들 통과 심볼 비율 (진단용).
         gate_passed: L2 통과 여부.
-        blocker_reason: 실패 원인 키. "" = 통과. 값: no_deployment/cagr/mar/sharpe_abs/mdd_rel/mdd_abs/fold/uplift.
+        blocker_reason: 실패 원인 키. "" = 통과. 값: no_deployment/low_trades/cagr/sharpe_abs/
+            sortino/mar/mdd_abs/cvar_95/fold/active_blocks/friction/growth_lcb/uplift.
     """
 
     selected_last: frozenset[str]
@@ -220,6 +223,11 @@ class Layer2Result:
     total_cost_bps: float = 0.0
     n_rebalances: int = 0
     block_metrics: tuple[Layer2BlockMetric, ...] = ()
+    sortino_hybrid: float = 0.0
+    terminal_multiple: float = 1.0
+    total_pnl_pct: float = 0.0
+    trade_count: int = 0
+    risk_utilization: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -236,7 +244,7 @@ class Layer2AllocationConfig:
     l2_min_cagr: float = 0.30
     l2_min_mar: float = 1.0
     l2_min_sharpe_abs: float = 1.0
-    l2_max_mdd_abs: float = 0.20
+    l2_max_mdd_abs: float = 0.30
     l2_mdd_material_floor: float = 0.05
     l2_mdd_rel_tol: float = 0.25
     l2_min_fold_pass_ratio: float = 0.60
@@ -246,8 +254,10 @@ class Layer2AllocationConfig:
     l2_min_friction_pass: float = 0.50
     fixed_cost_safety_mult: float = 1.25
     l2_min_dsr: float = 0.75
-    l2_max_cvar_95: float = 0.03
+    l2_max_cvar_95: float = 0.06
     l2_min_active_blocks: int = 3
+    l2_min_sortino_abs: float = 1.5
+    l2_min_trades: int = 30
     l2_growth_lcb_z: float = 0.0
     edge_throttle_enabled: bool = True
     edge_floor_bps: float = 0.0
@@ -285,7 +295,7 @@ class Layer2AllocationConfig:
             l2_min_cagr=cls._as_float(params.get("l2_min_cagr", 0.30), 0.30),
             l2_min_mar=cls._as_float(params.get("l2_min_mar", 1.0), 1.0),
             l2_min_sharpe_abs=cls._as_float(params.get("l2_min_sharpe_abs", 1.0), 1.0),
-            l2_max_mdd_abs=cls._as_float(params.get("l2_max_mdd_abs", 0.20), 0.20),
+            l2_max_mdd_abs=cls._as_float(params.get("l2_max_mdd_abs", 0.30), 0.30),
             l2_mdd_material_floor=cls._as_float(params.get("l2_mdd_material_floor", 0.05), 0.05),
             l2_mdd_rel_tol=cls._as_float(params.get("l2_mdd_rel_tol", 0.25), 0.25),
             l2_min_fold_pass_ratio=cls._as_float(params.get("l2_min_fold_pass_ratio", 0.60), 0.60),
@@ -298,8 +308,10 @@ class Layer2AllocationConfig:
                 1.25,
             ),
             l2_min_dsr=cls._as_float(params.get("l2_min_dsr", 0.75), 0.75),
-            l2_max_cvar_95=cls._as_float(params.get("l2_max_cvar_95", 0.03), 0.03),
+            l2_max_cvar_95=cls._as_float(params.get("l2_max_cvar_95", 0.06), 0.06),
             l2_min_active_blocks=cls._as_int(params.get("l2_min_active_blocks", 3), 3),
+            l2_min_sortino_abs=cls._as_float(params.get("l2_min_sortino_abs", 1.5), 1.5),
+            l2_min_trades=cls._as_int(params.get("l2_min_trades", 30), 30),
             l2_growth_lcb_z=cls._as_float(params.get("l2_growth_lcb_z", 0.0), 0.0),
             edge_throttle_enabled=bool(params.get("edge_throttle_enabled", True)),
             edge_floor_bps=cls._as_float(params.get("edge_floor_bps", 0.0), 0.0),

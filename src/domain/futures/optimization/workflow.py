@@ -1673,6 +1673,7 @@ def evaluate_l2_trial(
         _mdd,
         _psr,
         _sharpe_hac,
+        _sortino,
     )
 
     sim = _run_awf_simulation(
@@ -1696,6 +1697,8 @@ def evaluate_l2_trial(
     psr_hybrid = _psr(rets_hybrid, bars_per_year=bars_per_year)
     mdd_hybrid = _mdd(rets_hybrid)
     cvar_95_hybrid = _cvar_loss(rets_hybrid)
+    sortino_hybrid = _sortino(rets_hybrid, bars_per_year=bars_per_year)
+    trade_count = int(sim.trade_count)
 
     block_growth_hybrid = _contiguous_block_log_growth(
         rets_hybrid,
@@ -1792,6 +1795,9 @@ def evaluate_l2_trial(
         float(float(config.l2_min_active_blocks) - active_block_count),
         # FIX-4: uplift 제약 — 순수 EW 대비 Sharpe 우위 없으면 infeasible (≤0 feasible)
         float(sharpe_hac_baseline_ew + float(config.l2_min_sharpe_uplift) - sharpe_hac_hybrid),
+        # 2026-06-16 평가체계 재편: Sortino 효율 + 표본수(trade_count) 제약 추가.
+        float(float(config.l2_min_sortino_abs) - sortino_hybrid),
+        float(float(config.l2_min_trades) - trade_count),
     )
     objective_value = finite_score if np.isfinite(finite_score) else -1e6
     return Layer2TrialEvaluation(
@@ -1814,6 +1820,8 @@ def evaluate_l2_trial(
         block_metrics=tuple(block_metrics),
         returns_hybrid=tuple(rets_hybrid),
         returns_baseline=tuple(rets_baseline),
+        sortino_hybrid=float(sortino_hybrid),
+        trade_count=trade_count,
     )
 
 
@@ -1856,6 +1864,8 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
     _set_float_attr(trial, "average_gross_exposure", evaluation.average_gross_exposure)
     _set_float_attr(trial, "cap_saturation_ratio", evaluation.cap_saturation_ratio)
     _set_float_attr(trial, "total_cost_bps", evaluation.total_cost_bps)
+    _set_float_attr(trial, "sortino_hybrid", evaluation.sortino_hybrid)
+    trial.set_user_attr("trade_count", evaluation.trade_count)
 
     # DSR-in-the-loop 제거 (2026-06-16): DSR은 pool-상대 benchmark가 trial 수와
     # 동반 상승하는 구조적 편향 + L3 frozen holdout과 중복 검증 → diagnostic 강등.
@@ -1870,14 +1880,14 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
 def layer2_constraints_from_trial(trial: FrozenTrial) -> tuple[float, ...]:
     raw = trial.user_attrs.get("l2_constraint_values")
     if not isinstance(raw, (list, tuple)):
-        return (1.0,) * 10
+        return (1.0,) * 12
     resolved: list[float] = []
     for item in raw:
         try:
             resolved.append(float(item))
         except Exception:
             resolved.append(1.0)
-    while len(resolved) < 10:
+    while len(resolved) < 12:
         resolved.append(1.0)
     return tuple(resolved)
 
