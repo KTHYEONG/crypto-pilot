@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -102,6 +102,7 @@ def _edge_throttle_multiplier(
     floor_bps: float,
     ref_bps: float,
     gamma: float,
+    min_active_mult: float = 0.0,
 ) -> float:
     """score_bps → [0, 1] throttle 승수. 선형(gamma=1) 또는 볼록(gamma>1).
 
@@ -112,7 +113,72 @@ def _edge_throttle_multiplier(
         return 0.0
     span = max(ref_bps - floor_bps, 1e-9)
     x = float(np.clip((score_bps - floor_bps) / span, 0.0, 1.0))
-    return float(x ** max(gamma, 1e-9))
+    raw = float(x ** max(gamma, 1e-9))
+    if raw <= 0.0:
+        return 0.0
+    floor = float(np.clip(min_active_mult, 0.0, 1.0))
+    return float(floor + (1.0 - floor) * raw)
+
+
+def _apply_risk_budget_floor(
+    *,
+    weights: NDArray[np.float64],
+    sigma: NDArray[np.float64],
+    bars_per_year: float,
+    vol_target: float | None,
+    floor_ratio: float,
+    max_scale: float,
+    caps: PortfolioCaps,
+    btc_beta: NDArray[np.float64] | None,
+    support_mask: NDArray[np.bool_],
+) -> NDArray[np.float64]:
+    """Scale an under-deployed book toward a target-vol floor without adding support."""
+    w = np.asarray(weights, dtype=np.float64)
+    sig = np.asarray(sigma, dtype=np.float64)
+    support = np.asarray(support_mask, dtype=np.bool_)
+    if (
+        vol_target is None
+        or floor_ratio <= 0.0
+        or max_scale <= 1.0
+        or w.size == 0
+        or sig.size != w.size
+        or support.size != w.size
+        or float(np.sum(np.abs(w))) <= 1e-12
+    ):
+        return w
+
+    sigma_port_bar = float(np.sqrt(float(np.dot(w**2, sig**2))))
+    ann_vol = sigma_port_bar * float(np.sqrt(max(bars_per_year, 1e-12)))
+    floor_ann_vol = float(vol_target) * float(floor_ratio)
+    if (
+        not np.isfinite(ann_vol)
+        or not np.isfinite(floor_ann_vol)
+        or ann_vol <= 1e-12
+        or ann_vol >= floor_ann_vol
+    ):
+        return w
+
+    scale = min(floor_ann_vol / ann_vol, float(max_scale))
+    if not np.isfinite(scale) or scale <= 1.0:
+        return w
+
+    beta = (
+        np.zeros(w.size, dtype=np.float64)
+        if btc_beta is None or btc_beta.size != w.size
+        else np.asarray(btc_beta, dtype=np.float64)
+    )
+    scaled = np.where(support, w * scale, 0.0)
+    scaled_sigma_port_bar = sigma_port_bar * scale
+    effective_caps = replace(caps, target_ann_vol=float(vol_target))
+    projected = project_all_caps(
+        scaled,
+        beta,
+        scaled_sigma_port_bar,
+        bars_per_year,
+        effective_caps,
+        support_mask=support,
+    )
+    return np.asarray(np.where(support, projected, 0.0), dtype=np.float64)
 
 
 def _event_strength(event: ValidatedSignalEvent) -> float:
@@ -428,10 +494,14 @@ def _run_awf_simulation(
     no_trade_band = float(config.no_trade_band)
     rebalance_bars = int(config.rebalance_bars)
     fixed_cost_safety_mult = float(getattr(config, "fixed_cost_safety_mult", 1.25))
+    deploy_cost_safety_mult = float(getattr(config, "deploy_cost_safety_mult", fixed_cost_safety_mult))
     edge_throttle_enabled = bool(getattr(config, "edge_throttle_enabled", True))
     edge_floor_bps = float(getattr(config, "edge_floor_bps", 0.0))
     edge_ref_bps = float(getattr(config, "edge_ref_bps", 5.0))
     edge_throttle_gamma = float(getattr(config, "edge_throttle_gamma", 1.0))
+    edge_throttle_min_active_mult = float(getattr(config, "edge_throttle_min_active_mult", 0.0))
+    risk_budget_floor_ratio = float(getattr(config, "risk_budget_floor_ratio", 0.0))
+    risk_budget_max_scale = float(getattr(config, "risk_budget_max_scale", 3.0))
 
     symbols = aligned.symbols
     n_sym = len(symbols)
@@ -571,7 +641,7 @@ def _run_awf_simulation(
                 vol_target=vol_target,
                 friction_hurdle_bps=hurdle,
                 holding_bars=rebalance_bars,
-                friction_safety_mult=fixed_cost_safety_mult,
+                friction_safety_mult=deploy_cost_safety_mult,
                 caps=caps,
                 prev_w=prev_w,
                 no_trade_band=no_trade_band,
@@ -580,15 +650,28 @@ def _run_awf_simulation(
                 support_mask=support_mask,
             )
             if edge_throttle_enabled:
-                eff_hurdle = hurdle * fixed_cost_safety_mult / max(float(rebalance_bars), 1.0)
+                eff_hurdle = hurdle * deploy_cost_safety_mult / max(float(rebalance_bars), 1.0)
                 score = _book_edge_score(w, mu_arr, eff_hurdle)
                 m = _edge_throttle_multiplier(
                     score,
                     floor_bps=edge_floor_bps,
                     ref_bps=edge_ref_bps,
                     gamma=edge_throttle_gamma,
+                    min_active_mult=edge_throttle_min_active_mult,
                 )
                 w = w * m
+            if risk_budget_floor_ratio > 0.0 and vol_target is not None:
+                w = _apply_risk_budget_floor(
+                    weights=w,
+                    sigma=sig_arr,
+                    bars_per_year=bars_per_year,
+                    vol_target=vol_target,
+                    floor_ratio=risk_budget_floor_ratio,
+                    max_scale=risk_budget_max_scale,
+                    caps=caps,
+                    btc_beta=btc_beta,
+                    support_mask=support_mask,
+                )
             w = np.where(tradeable_mask, w, 0.0)
             last_w = w
 
