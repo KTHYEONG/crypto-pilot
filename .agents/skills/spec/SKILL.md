@@ -38,7 +38,6 @@ Provide a clean summary with:
 1. **🚀 Executive Summary (TL;DR):** What is changing and why? (1-2 sentences).
 2. **🧩 Key Changes:** High-level bullet points explaining the logic or architecture change without code blocks.
 3. **✅ Expected Impact:** How this solves the problem or improves the system.
-4. **➡️ Next Step:** "The design is complete. Should we proceed with implementation using the `implement` skill or Codex?"
 
 ## Reasoning Constraints
 1. **Test Ownership**: You must design the test scenarios. If you don't define it, the implementer won't build it correctly.
