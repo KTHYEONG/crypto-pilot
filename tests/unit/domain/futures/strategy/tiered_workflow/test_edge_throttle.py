@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
+from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+    _apply_risk_budget_floor,
     _book_edge_score,
     _edge_throttle_multiplier,
 )
@@ -66,6 +69,82 @@ class TestEdgeThrottleMultiplier:
         m = _edge_throttle_multiplier(2.0, floor_bps=0.0, ref_bps=5.0, gamma=0.0)
         assert m == pytest.approx(1.0, rel=1e-4)
 
+    def test_min_active_multiplier_lifts_positive_score(self) -> None:
+        """Positive edge keeps minimum active deployment while raw zero stays flat."""
+        m = _edge_throttle_multiplier(
+            1.0,
+            floor_bps=0.0,
+            ref_bps=5.0,
+            gamma=1.0,
+            min_active_mult=0.25,
+        )
+
+        assert m == pytest.approx(0.40, rel=1e-6)
+        assert m > 0.20
+
+    def test_min_active_multiplier_does_not_lift_floor_score(self) -> None:
+        """Score at floor remains flat even when min_active_mult is high."""
+        m = _edge_throttle_multiplier(
+            0.0,
+            floor_bps=0.0,
+            ref_bps=5.0,
+            gamma=1.0,
+            min_active_mult=0.60,
+        )
+
+        assert m == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# _apply_risk_budget_floor
+# ---------------------------------------------------------------------------
+
+class TestRiskBudgetFloor:
+    def test_under_deployed_book_scales_up_without_support_leak(self) -> None:
+        weights = np.array([0.05, -0.05, 0.0], dtype=np.float64)
+        sigma = np.array([0.01, 0.01, 0.01], dtype=np.float64)
+        support = np.array([True, True, False], dtype=np.bool_)
+        bars_per_year = 2190.0
+        floor_ann_vol = 1.0 * 0.30
+        before_vol = float(np.sqrt(float(np.dot(weights**2, sigma**2)))) * float(np.sqrt(bars_per_year))
+
+        out = _apply_risk_budget_floor(
+            weights=weights,
+            sigma=sigma,
+            bars_per_year=bars_per_year,
+            vol_target=1.0,
+            floor_ratio=0.30,
+            max_scale=3.0,
+            caps=PortfolioCaps(gross=3.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=1.0),
+            btc_beta=None,
+            support_mask=support,
+        )
+        after_vol = float(np.sqrt(float(np.dot(out**2, sigma**2)))) * float(np.sqrt(bars_per_year))
+
+        assert float(np.sum(np.abs(out))) > float(np.sum(np.abs(weights)))
+        assert out[2] == pytest.approx(0.0)
+        assert abs(floor_ann_vol - after_vol) < abs(floor_ann_vol - before_vol)
+        assert after_vol <= 1.0
+
+    def test_empty_or_disabled_risk_budget_floor_returns_original(self) -> None:
+        weights = np.array([0.0, 0.0], dtype=np.float64)
+        sigma = np.array([0.01, 0.01], dtype=np.float64)
+        support = np.array([False, False], dtype=np.bool_)
+
+        out = _apply_risk_budget_floor(
+            weights=weights,
+            sigma=sigma,
+            bars_per_year=2190.0,
+            vol_target=1.0,
+            floor_ratio=0.30,
+            max_scale=3.0,
+            caps=PortfolioCaps(),
+            btc_beta=None,
+            support_mask=support,
+        )
+
+        assert np.array_equal(out, weights)
+
 
 # ---------------------------------------------------------------------------
 # _book_edge_score
@@ -74,9 +153,9 @@ class TestEdgeThrottleMultiplier:
 class TestBookEdgeScore:
     def test_s7_empty_book(self) -> None:
         """S7: all weights zero → 0.0."""
-        w = np.zeros(4, dtype=np.float64)
+        w: NDArray[np.float64] = np.zeros(4, dtype=np.float64)
         mu = np.array([3.0, 5.0, 2.0, 7.0], dtype=np.float64)
-        hurdle = np.full(4, 1.0, dtype=np.float64)
+        hurdle: NDArray[np.float64] = np.full(4, 1.0, dtype=np.float64)
         assert _book_edge_score(w, mu, hurdle) == pytest.approx(0.0)
 
     def test_equal_weight_simple(self) -> None:
@@ -172,7 +251,9 @@ class TestConfigPlumbing:
             "edge_floor_bps": 1.5,
             "edge_ref_bps": 8.0,
             "edge_throttle_gamma": 2.0,
+            "edge_throttle_min_active_mult": 0.25,
         })
         assert cfg.edge_floor_bps == pytest.approx(1.5)
         assert cfg.edge_ref_bps == pytest.approx(8.0)
         assert cfg.edge_throttle_gamma == pytest.approx(2.0)
+        assert cfg.edge_throttle_min_active_mult == pytest.approx(0.25)
