@@ -53,6 +53,11 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
   - `edge_throttle_min_active_mult` preserves a non-zero floor for positive edge books.
   - `risk_budget_floor_ratio` scales under-deployed books toward the target-vol floor without creating new support.
   - `risk_budget_max_scale` caps the upward scaling applied by the floor logic.
+- **Adaptive Breadth & Objective Shaping**:
+  - `adaptive_breadth_enabled` can widen `K_RANK` when the previous book under-uses the vol budget.
+  - `adaptive_k_extra` limits the breadth expansion window.
+  - `adaptive_expand_below_vol_ratio` defines the low-utilization trigger against the annual vol target.
+  - `l2_objective_risk_util_target` and `l2_objective_trade_target` shape Optuna toward more active deployment without replacing `growth_lcb` as the primary objective.
 - **Dynamic Scaling**: Volatility targeting ($\sigma_{target} / \sigma_{port}$) combined with regime-specific gross/net caps. Includes double-scaling guards.
 - **L2 Objective Gate (12-Condition AND)**:
   - *Sanity*: Active signals, safe deployments, trade count $\ge 30$.
@@ -102,10 +107,15 @@ graph TD
 | **Param** | `edge_throttle_min_active_mult` | Minimum active multiplier for positive edge books |
 | **Param** | `risk_budget_floor_ratio` | Minimum annual vol ratio used to lift under-deployed books |
 | **Param** | `risk_budget_max_scale` | Upper bound for risk-budget floor scaling |
-| **Param** | `L2_ALLOC_SPACE` | Active L2 Optuna search space (`V4`) |
+| **Param** | `adaptive_breadth_enabled` | Enables adaptive widening of `K_RANK` under low vol utilization |
+| **Param** | `adaptive_k_extra` | Extra rank width allowed when breadth is expanded |
+| **Param** | `adaptive_expand_below_vol_ratio` | Low-utilization trigger ratio for adaptive breadth |
+| **Param** | `L2_ALLOC_SPACE` | Active L2 Optuna search space (`V5`) |
 | **Param** | `L2_OPTUNA_TRIALS` | Optimization budget for Layer 2. Default: 120 |
 | **Param** | `regime_gross_multipliers` | Gross portfolio cap limits mapped to specific regimes |
 | **Param** | `double_scaling_guard` | Prevents redundant attenuation during portfolio projection |
+| **Param** | `risk_utilization` | Diagnostic ratio of realized MDD versus the configured MDD cap |
+| **Param** | `deployment_objective_bonus` | Shaped objective uplift used only inside Optuna |
 | **Output**| `target_weights` | Causal vector of capital allocations per asset |
 
 # 6. Edge Cases & Resilience
