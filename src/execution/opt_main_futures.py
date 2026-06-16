@@ -1027,16 +1027,24 @@ def _run_strategy_stage(
             except (TypeError, ValueError):
                 # Fallback for MagicMocks or non-standard formats in tests
                 req_start_ts = pd.Timestamp("1900-01-01", tz="UTC")
+            try:
+                req_end_ts = pd.to_datetime(tiered_window.holdout_end, utc=True)
+            except (TypeError, ValueError):
+                req_end_ts = pd.Timestamp("2100-01-01", tz="UTC")
 
             for sym in data_stage.valid_symbols:
-                if sym not in data_stage.data_maps:
+                if sym not in full_strategy_maps:
                     continue
-                sym_df = data_stage.data_maps[sym].get(run_config.timeframe)
+                sym_df = full_strategy_maps[sym].get(run_config.timeframe)
                 if sym_df is not None and not sym_df.empty:
                     first_dt = pd.to_datetime(sym_df["datetime"].iloc[0], utc=True)
-                    if first_dt <= req_start_ts:
+                    last_dt = pd.to_datetime(sym_df["datetime"].iloc[-1], utc=True)
+                    if first_dt <= req_start_ts and last_dt >= req_end_ts:
                         effective_trade_syms.append(sym)
         if not effective_trade_syms:
+            _logger.warning(
+                "[TIERED] END-coverage 심볼 0개 → 전체 fallback; holdout 절단 위험"
+            )
             effective_trade_syms = list(data_stage.valid_symbols)
     else:
         effective_trade_syms = list(data_stage.valid_symbols)
@@ -1079,7 +1087,7 @@ def _run_strategy_stage(
                 len(effective_trade_syms),
             )
             aligned_tiered = align_data_maps(
-                data_stage.data_maps, effective_trade_syms, run_config.timeframe
+                full_strategy_maps, effective_trade_syms, run_config.timeframe
             )
             if tiered_window is not None:
                 try:
@@ -1093,6 +1101,20 @@ def _run_strategy_stage(
                         "tiered warm-up coverage missing: "
                         f"required_start={tiered_window.fetch_start.isoformat()} "
                         f"actual_start={aligned_start.isoformat()}"
+                    )
+
+                try:
+                    aligned_end = pd.Timestamp(aligned_tiered.datetimes[-1]).date()
+                except (TypeError, ValueError, IndexError):
+                    # Fallback for MagicMocks in tests
+                    aligned_end = pd.Timestamp("2100-01-01").date()
+
+                if aligned_end < tiered_window.holdout_start:
+                    raise ValueError(
+                        "tiered holdout coverage missing: "
+                        f"required_holdout_start={tiered_window.holdout_start.isoformat()} "
+                        f"actual_end={aligned_end.isoformat()} "
+                        "(intersection tail truncated — check delisted symbols in panel)"
                     )
             labeled_tiered = _tiered_labeled_events(ml_out)
             tiered_cfg = build_candidate_strategy_config(
@@ -1182,10 +1204,16 @@ def _run_strategy_stage(
             )
             return None
         except Exception as _exc:
-            _logger.warning(
-                "[TIERED] pipeline error=%s — falling back to Phase D", _exc, exc_info=True
+            _logger.error(
+                "[TIERED] terminal tiered failure=%s — Phase D fallback removed (legacy fallback disabled)",
+                _exc,
+                exc_info=True,
             )
-    # ─── Phase D 계속 (USE_CS_RANK_ENGINE=False 또는 Tiered 예외 fallback) ───
+            return RunnerResult(
+                exit_code=1,
+                reason=f"tiered_pipeline_error:{type(_exc).__name__}",
+            )
+    # ─── Phase D (USE_CS_RANK_ENGINE=False 전용 legacy 경로) ───
 
     t_report = time.perf_counter()
     # Summary of bridge output — read from alpha_panel["target_weight"] (CandidatePipelineOutput)

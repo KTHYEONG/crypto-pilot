@@ -23,6 +23,73 @@ def test_pick_strategy_data_maps_strips_is_start_idx() -> None:
     assert "is_start_idx_4h" not in picked["BTCUSDT"]
 
 
+def test_pick_strategy_data_maps_merges_is_and_oos_frames_s11() -> None:
+    """S11: IS+OOS 병합 — 결과 프레임은 IS 시작부터 OOS 끝까지 정렬·중복없이 이어진다."""
+    # Arrange
+    is_df = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2022-04-01", "2022-04-02", "2022-04-03"]),
+            "close": [1.0, 2.0, 3.0],
+        }
+    )
+    oos_df = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2022-04-03", "2022-04-04", "2022-04-05"]),
+            "close": [3.0, 4.0, 5.0],
+        }
+    )
+    is_data_maps = {"A": {"4h": is_df, "is_start_idx_4h": 0}}
+    oos_data_maps = {"A": {"4h": oos_df}}
+
+    # Act
+    result = pick_strategy_data_maps(oos_data_maps, is_data_maps, ["A"], "4h")
+
+    # Assert
+    merged = result["A"]["4h"]
+    assert isinstance(merged, pd.DataFrame)
+    assert merged["datetime"].iloc[0] == pd.Timestamp("2022-04-01")
+    assert merged["datetime"].iloc[-1] == pd.Timestamp("2022-04-05")
+    assert merged["datetime"].is_monotonic_increasing
+    assert merged["datetime"].duplicated().sum() == 0
+    assert len(merged) == 5  # 3 + 3 - 1 duplicate (2022-04-03)
+
+
+def test_pick_strategy_data_maps_missing_oos_symbol_keeps_is_frame_s12() -> None:
+    """S12: OOS 누락 심볼 — IS 프레임이 에러 없이 그대로 반환된다."""
+    # Arrange
+    is_df = pd.DataFrame(
+        {"datetime": pd.to_datetime(["2022-04-01", "2022-04-02"]), "close": [1.0, 2.0]}
+    )
+    is_data_maps = {"A": {"4h": is_df}}
+    oos_data_maps: dict[str, dict[str, pd.DataFrame]] = {}
+
+    # Act
+    result = pick_strategy_data_maps(oos_data_maps, is_data_maps, ["A"], "4h")
+
+    # Assert
+    merged = result["A"]["4h"]
+    pd.testing.assert_frame_equal(merged.reset_index(drop=True), is_df.reset_index(drop=True))
+
+
+def test_pick_strategy_data_maps_filters_by_valid_symbols_s13() -> None:
+    """S13: valid_symbols 필터링 — is_data_maps에 3개 심볼이 있어도 2개만 통과한다."""
+    # Arrange
+    frame = pd.DataFrame({"datetime": pd.to_datetime(["2022-04-01"]), "close": [1.0]})
+    is_data_maps = {
+        "A": {"4h": frame.copy()},
+        "B": {"4h": frame.copy()},
+        "C": {"4h": frame.copy()},
+    }
+    oos_data_maps: dict[str, dict[str, pd.DataFrame]] = {}
+
+    # Act
+    result = pick_strategy_data_maps(oos_data_maps, is_data_maps, ["A", "B"], "4h")
+
+    # Assert
+    assert sorted(result.keys()) == ["A", "B"]
+    assert "C" not in result
+
+
 def test_assert_candidate_output_ready_requires_target_weight() -> None:
     out = CandidatePipelineOutput(
         alpha_panel=pd.DataFrame({"alpha_long": [0.1]}),
