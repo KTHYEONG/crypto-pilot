@@ -471,6 +471,12 @@ def format_layer2_table(
     friction_pct: float = getattr(r, "friction_pass_pct", 0.0)
     psr_val: float = getattr(r, "psr_hybrid", float("nan"))
     dsr_val: float = getattr(r, "dsr_hybrid", float("nan"))
+    cvar_h: float = getattr(r, "cvar_95_hybrid", float("nan"))
+    sortino_h: float = getattr(r, "sortino_hybrid", 0.0)
+    terminal_mult: float = getattr(r, "terminal_multiple", 1.0)
+    total_pnl_pct: float = getattr(r, "total_pnl_pct", 0.0)
+    trade_count: int = getattr(r, "trade_count", 0)
+    risk_util: float = getattr(r, "risk_utilization", 0.0)
     gate_passed: bool = getattr(r, "gate_passed", False)
     blocker: str = getattr(r, "blocker_reason", "")
 
@@ -490,52 +496,70 @@ def format_layer2_table(
             return "n/a(loss)"
         return format(mar_val, ".3f")
 
-    # Status determination (2026-06-16 게이트 재설계: 배치천장 개방 + DSR 강등)
+    # Status determination (2026-06-16 평가체계 재편: 복리성장+위험효율+꼬리위험+표본강건성)
     cagr_ok = cagr_h >= 0.30
     sharpe_ok = sharpe_h >= 1.0
+    sortino_ok = sortino_h >= 1.5
     mar_ok = mar_h >= 1.0 and cagr_h >= 0.0
-    # relative-MDD: 절대 5% 미만은 노이즈 구간으로 면제, 그 외 baseline*1.25 tolerance
-    mdd_rel_ok = (mdd_h <= 0.05) or (mdd_h <= mdd_b * 1.25)
-    mdd_ok = (mdd_h <= 0.20) and mdd_rel_ok
+    mdd_ok = mdd_h <= 0.30
+    cvar_ok = math.isfinite(cvar_h) and cvar_h <= 0.06
     fold_ok = fold_pass >= 0.6
+    trades_ok = trade_count >= 30
     friction_ok = friction_pct >= 0.50
     uplift_ok = uplift_val >= uplift_gate_val
+    # 진단 전용 (게이트 미반영): 상대MDD 표시
+    mdd_rel_display = (mdd_h / mdd_b) if mdd_b > 1e-9 else float("nan")
 
     # Style 3: Minimalist Grouped Summary
     sep = "──────────────────────────────────────────────────────────────────────────────"
-    
+
     # Overall Status line
     status_icon = "✅" if gate_passed else "❌"
     result_str = _gate(gate_passed)
     if blocker:
         result_str += f" ({blocker})"
-        
+
     # Categorize status for group icons
-    return_ok = cagr_ok and sharpe_ok and mar_ok
-    risk_ok = mdd_ok
-    
+    growth_ok = cagr_ok
+    efficiency_ok = sharpe_ok and sortino_ok and mar_ok
+    risk_ok = mdd_ok and cvar_ok
+    robust_ok = fold_ok and trades_ok and friction_ok
+
     lines: list[str] = [
         "● [LAYER 2 PORTFOLIO SCORECARD]",
         sep,
         f"  STATUS  : {status_icon} {result_str}",
         "",
         (
-            f"  {_status(return_ok)} [Return    ] "
+            f"  {_status(growth_ok)} [Growth    ] "
             f"CAGR: {_f(cagr_h, '+.1%')} (>=30.0%) | "
+            f"PnL: {_f(total_pnl_pct, '+.1%')} | "
+            f"Equity x{_f(terminal_mult, '.2f')}"
+        ),
+        (
+            f"  {_status(efficiency_ok)} [Efficiency] "
             f"Sharpe: {_f(sharpe_h)} (>=1.000) | "
-            f"MAR: {_mar_str(mar_h, cagr_h)} (>=1.000)"
+            f"Sortino: {_f(sortino_h)} (>=1.500) | "
+            f"Calmar: {_mar_str(mar_h, cagr_h)} (>=1.000)"
         ),
         (
             f"  {_status(risk_ok)} [Risk      ] "
-            f"MDD: {_pct(mdd_h)} (<=20.0% & <=baseline*1.25 if >5%) | "
-            f"Turnover: {turnover:.3f}"
+            f"MDD: {_pct(mdd_h)} (<=30.0%) | "
+            f"CVaR95: {_f(cvar_h, '.1%')} (<=6.0%) | "
+            f"RiskUtil: {_f(risk_util, '.1%')}"
+        ),
+        (
+            f"  {_status(robust_ok)} [Robust    ] "
+            f"Fold: {_pct(fold_pass)} (>=60.0%) | "
+            f"Trades: {trade_count} (>=30) | "
+            f"Friction: {_f(friction_pct, '.1%')}"
         ),
         f"  {_status(uplift_ok)} [Uplift    ] Sharpe Uplift: {_f(uplift_val, '+.2f')} (>=+0.20)",
         (
-            f"  {_status(fold_ok and friction_ok)} [Robustness] "
-            f"DSR: {_f(dsr_val)} (diag) | "
+            f"  [Diag     ] DSR: {_f(dsr_val)} (diag) | "
             f"PSR: {_f(psr_val)} (diag) | "
-            f"Fold Pass: {_pct(fold_pass)} (>=60.0%)"
+            f"RelMDD: {_f(mdd_rel_display, '.2f')}x | "
+            f"Turnover: {turnover:.3f}"
         ),
         sep,
     ]
