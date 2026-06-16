@@ -32,5 +32,4 @@ Translate the logical Blueprint into working Python code (both `src/` and `tests
 - **Progress:**
   - [ ] Wrote logic for: [X]
   - [ ] Wrote tests for: [X] (Based on Scenarios 1, 2, 3)
-- **Next Step:** ✅ `check` is ready.
 ```
