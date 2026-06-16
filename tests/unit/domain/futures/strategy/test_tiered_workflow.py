@@ -2590,6 +2590,7 @@ def test_layer2_allocation_config_from_mapping_parses_fixed_cost_safety_mult() -
     assert config.deploy_cost_safety_mult == pytest.approx(1.1)
     assert config.risk_budget_floor_ratio == pytest.approx(0.35)
     assert config.risk_budget_max_scale == pytest.approx(2.0)
+    assert config.adaptive_breadth_enabled is False
 
 
 def test_layer2_allocation_config_from_mapping_fixed_cost_safety_mult_default() -> None:
@@ -2601,6 +2602,11 @@ def test_layer2_allocation_config_from_mapping_fixed_cost_safety_mult_default() 
     assert config.edge_throttle_min_active_mult == pytest.approx(0.0)
     assert config.risk_budget_floor_ratio == pytest.approx(0.0)
     assert config.risk_budget_max_scale == pytest.approx(3.0)
+    assert config.adaptive_k_extra == 0
+    assert config.adaptive_expand_below_vol_ratio == pytest.approx(0.0)
+    assert config.l2_objective_risk_util_target == pytest.approx(0.35)
+    assert config.l2_objective_trade_target == 90
+    assert config.l2_replay_max_fallbacks == 5
 
 
 def test_layer2_allocation_config_from_mapping_rejects_legacy_friction_safety_mult() -> None:
@@ -2617,6 +2623,38 @@ def test_layer2_allocation_config_from_mapping_rejects_invalid_deploy_cost_safet
 def test_layer2_allocation_config_from_mapping_rejects_invalid_risk_floor() -> None:
     with pytest.raises(ValueError, match="risk_budget_floor_ratio"):
         Layer2AllocationConfig.from_mapping({"risk_budget_floor_ratio": 1.1})
+
+
+def test_layer2_allocation_config_from_mapping_parses_adaptive_breadth_and_objective_fields() -> None:
+    config = Layer2AllocationConfig.from_mapping(
+        {
+            "adaptive_breadth_enabled": True,
+            "adaptive_k_extra": 4,
+            "adaptive_expand_below_vol_ratio": 0.35,
+            "l2_objective_risk_util_target": 0.5,
+            "l2_objective_risk_util_weight": 0.04,
+            "l2_objective_trade_target": 120,
+            "l2_objective_trade_weight": 0.03,
+            "l2_replay_max_fallbacks": 7,
+        }
+    )
+
+    assert config.adaptive_breadth_enabled is True
+    assert config.adaptive_k_extra == 4
+    assert config.adaptive_expand_below_vol_ratio == pytest.approx(0.35)
+    assert config.l2_objective_risk_util_target == pytest.approx(0.5)
+    assert config.l2_objective_risk_util_weight == pytest.approx(0.04)
+    assert config.l2_objective_trade_target == 120
+    assert config.l2_objective_trade_weight == pytest.approx(0.03)
+    assert config.l2_replay_max_fallbacks == 7
+
+
+def test_layer2_allocation_config_from_mapping_rejects_invalid_objective_targets() -> None:
+    with pytest.raises(ValueError, match="l2_objective_risk_util_target"):
+        Layer2AllocationConfig.from_mapping({"l2_objective_risk_util_target": 0.0})
+
+    with pytest.raises(ValueError, match="l2_replay_max_fallbacks"):
+        Layer2AllocationConfig.from_mapping({"l2_replay_max_fallbacks": 0})
 
 
 def test_layer2_allocation_config_from_mapping_parses_max_ann_vol_alias() -> None:
