@@ -256,8 +256,8 @@ def test_uplift_constraint_is_negative_when_hybrid_sharpe_above_threshold() -> N
     )
 
 
-def test_layer2_constraints_tuple_length_is_ten() -> None:
-    """C3: DSR-in-loop 제거 후 layer2_constraints_from_trial fallback 크기가 10으로 복원됐는지 확인."""
+def test_layer2_constraints_tuple_length_is_twelve() -> None:
+    """C1/C2: Sortino+trades 제약 추가 후 layer2_constraints_from_trial fallback 크기가 12인지 확인."""
     # Arrange (Given): l2_constraint_values 미존재 trial 시뮬레이션
     from unittest.mock import MagicMock
 
@@ -270,28 +270,48 @@ def test_layer2_constraints_tuple_length_is_ten() -> None:
     fallback = layer2_constraints_from_trial(mock_trial)
 
     # Assert (Then)
-    assert len(fallback) == 10, (
-        f"fallback 크기 {len(fallback)} ≠ 10. DSR-in-loop 제거 후 10-tuple이어야 함."
+    assert len(fallback) == 12, (
+        f"fallback 크기 {len(fallback)} != 12. Sortino+trades 제약 추가 후 12-tuple이어야 함."
     )
     assert all(v == 1.0 for v in fallback), "모든 fallback 값이 1.0 (infeasible) 이어야 함"
 
 
-def test_layer2_constraints_ten_element_feasible() -> None:
-    """C3: 10개 constraint_values 모두 feasible(≤0)이면 통과 판정."""
+def test_layer2_constraints_twelve_element_feasible() -> None:
+    """C1: 12개 constraint_values 모두 feasible(≤0)이면 통과 판정."""
     from unittest.mock import MagicMock
 
     from src.domain.futures.optimization.workflow import layer2_constraints_from_trial
 
-    # Arrange: 10개 feasible
+    # Arrange: 12개 feasible
+    mock_trial = MagicMock()
+    mock_trial.user_attrs = {"l2_constraint_values": [-1.0] * 12}
+
+    # Act
+    result = layer2_constraints_from_trial(mock_trial)
+
+    # Assert
+    assert len(result) == 12
+    assert all(c <= 0.0 for c in result), "모든 제약이 ≤0 이면 feasible이어야 함"
+
+
+def test_layer2_constraints_legacy_ten_tuple_pads_to_twelve() -> None:
+    """C2: 구 10-tuple user_attr이 12-tuple로 하위호환 패딩(1.0)되는지 확인."""
+    from unittest.mock import MagicMock
+
+    from src.domain.futures.optimization.workflow import layer2_constraints_from_trial
+
+    # Arrange: 구 버전 10-tuple (sortino/trades 제약 도입 전)
     mock_trial = MagicMock()
     mock_trial.user_attrs = {"l2_constraint_values": [-1.0] * 10}
 
     # Act
     result = layer2_constraints_from_trial(mock_trial)
 
-    # Assert
-    assert len(result) == 10
-    assert all(c <= 0.0 for c in result), "모든 제약이 ≤0 이면 feasible이어야 함"
+    # Assert: 10개는 원본 유지, 마지막 2개는 패딩(1.0, infeasible)
+    assert len(result) == 12
+    assert all(c == -1.0 for c in result[:10])
+    assert result[10] == 1.0
+    assert result[11] == 1.0
 
 
 # ---------------------------------------------------------------------------

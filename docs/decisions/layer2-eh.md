@@ -7,6 +7,11 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-16 L2 평가체계 5측면 재편 — Sortino/CVaR완화/MDD30%/Trade수 게이트
+- **Delta:** (1) `l2_max_mdd_abs` 0.20→0.30, `l2_max_cvar_95` 0.03→0.06(핵심 unlock). (2) 신규 `l2_min_sortino_abs=1.5`(efficiency), `l2_min_trades=30`(sample floor) 게이트+표시 추가. (3) 상대MDD(`mdd_rel`) 게이트 완전 제거→진단(`RelMDD` display). (4) 게이트 체인 9→12조건: Stage0(sanity+`low_trades`)→A(cagr)→B(sharpe/sortino/mar)→C(mdd_abs/cvar_95)→D(fold/active_blocks/friction)→E(growth_lcb/uplift). (5) `evaluate_l2_trial` 제약 10→12-tuple(sortino+trade_count), `layer2_constraints_from_trial` 패딩 동기화. (6) `Layer2Result`에 `sortino_hybrid/terminal_multiple/total_pnl_pct/trade_count/risk_utilization` 표시필드 추가. (7) scorecard를 Growth/Efficiency/Risk/Robust/Uplift/Diag 5그룹으로 재편.
+- **Rationale:** CAGR 17.6% BLOCKED인데 Sharpe 2.747/MAR 6.297/MDD 2.8% 우수 — 알파부족이 아니라 위험예산(MDD20%) 14%만 사용하는 under-deployment. binding 제약 1순위 = per-bar CVaR 캡(3%). 사용자 결정: 복리자산증식 극대화가 목적(자동매매·심리개입 없음)이므로 MDD를 깊게 제한하지 않되 통계신뢰성(Sortino/Calmar=scale-invariant, 레버리지로 curve-fit 불가)으로 신뢰축을 분리. under-deployment는 하드 floor 대신 Soft(진단표시+캡완화로 objective가 자연유도).
+- **Edge Cases:** `_sortino` dd<1e-12(무손실)→0.0 방어. `_terminal_multiple` 전손(∏≤0)→0.0. trade_count는 `prev_support→new_support` 신규진입만 카운트(리밸런스 유지는 미포함). DSR/PSR/상대MDD 모두 진단 전용 유지(과거 결정 존중). `L2_ALLOC_SPACE` 탐색공간 불변(anti-curve-fit, 게이트 임계값만 조정).
+
 ## 2026-06-16 Growth-Gate 재설계(C1-C4) — LCB z=0, 배치천장 개방, 게이트 재배선, l1-tmp 폐기
 - **Delta:** (1) `l2_growth_lcb_z` 1.0→0.0(분산 패널티 제거), `l2_min_cagr` 0.15→0.30. (2) `L2_ALLOC_SPACE_V3.max_ann_vol` high 0.50→1.20(MDD≤20% 생존 제약으로 탐색 위임). (3) DSR 하드게이트(`l2_min_dsr`) 완전 제거 → 진단 전용; relative-MDD를 hard `<=baseline`에서 material floor(0.05) 면제 + 25% tolerance band로 교체. (4) `select_layer2_champion`이 DSR 컷오프 루프 없이 objective(growth_lcb) 최상위 feasible trial을 직접 챔피언으로 선정. (5) `docs/specs/l1-tmp.md`(L1 비정상성 별도 트랙) 폐기.
 - **Rationale:** CAGR 12.2%/Sharpe 2.433/fold 100% pass인데도 구조적으로 under-deployed — 원인은 (a) LCB z=1.0의 과도한 분산 패널티가 objective를 왜곡, (b) `max_ann_vol<=0.50` 배치천장이 growth 최대화를 인위적으로 제한, (c) DSR이 trial-pool 상대 benchmark라 trial 수와 동반 상승하는 구조적 편향 + L3 frozen holdout과 중복 검증.
