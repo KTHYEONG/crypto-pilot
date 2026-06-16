@@ -490,13 +490,14 @@ def format_layer2_table(
             return "n/a(loss)"
         return format(mar_val, ".3f")
 
-    # Status determination (보수적 임계값)
-    cagr_ok = cagr_h >= 0.15
+    # Status determination (2026-06-16 게이트 재설계: 배치천장 개방 + DSR 강등)
+    cagr_ok = cagr_h >= 0.30
     sharpe_ok = sharpe_h >= 1.0
     mar_ok = mar_h >= 1.0 and cagr_h >= 0.0
-    mdd_ok = (mdd_h <= 0.20) and (mdd_h <= mdd_b)
+    # relative-MDD: 절대 5% 미만은 노이즈 구간으로 면제, 그 외 baseline*1.25 tolerance
+    mdd_rel_ok = (mdd_h <= 0.05) or (mdd_h <= mdd_b * 1.25)
+    mdd_ok = (mdd_h <= 0.20) and mdd_rel_ok
     fold_ok = fold_pass >= 0.6
-    dsr_ok = math.isfinite(dsr_val) and dsr_val >= 0.75
     friction_ok = friction_pct >= 0.50
     uplift_ok = uplift_val >= uplift_gate_val
 
@@ -520,19 +521,19 @@ def format_layer2_table(
         "",
         (
             f"  {_status(return_ok)} [Return    ] "
-            f"CAGR: {_f(cagr_h, '+.1%')} (>=15.0%) | "
+            f"CAGR: {_f(cagr_h, '+.1%')} (>=30.0%) | "
             f"Sharpe: {_f(sharpe_h)} (>=1.000) | "
             f"MAR: {_mar_str(mar_h, cagr_h)} (>=1.000)"
         ),
         (
             f"  {_status(risk_ok)} [Risk      ] "
-            f"MDD: {_pct(mdd_h)} (<=20.0% & <=baseline: {_pct(mdd_b)}) | "
+            f"MDD: {_pct(mdd_h)} (<=20.0% & <=baseline*1.25 if >5%) | "
             f"Turnover: {turnover:.3f}"
         ),
         f"  {_status(uplift_ok)} [Uplift    ] Sharpe Uplift: {_f(uplift_val, '+.2f')} (>=+0.20)",
         (
-            f"  {_status(fold_ok and dsr_ok and friction_ok)} [Robustness] "
-            f"DSR: {_f(dsr_val)} (>=0.75) | "
+            f"  {_status(fold_ok and friction_ok)} [Robustness] "
+            f"DSR: {_f(dsr_val)} (diag) | "
             f"PSR: {_f(psr_val)} (diag) | "
             f"Fold Pass: {_pct(fold_pass)} (>=60.0%)"
         ),

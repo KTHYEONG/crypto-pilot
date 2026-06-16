@@ -186,8 +186,9 @@ def test_objective_l2_growth_sets_constraint_attrs() -> None:
 
 
 def test_layer2_constraints_from_trial_reads_saved_values() -> None:
+    """C3: DSR-in-loop 제거 후 10-tuple로 패딩(짧은 saved values는 1.0/infeasible로 패딩)."""
     trial = cast(FrozenTrial, SimpleNamespace(user_attrs={"l2_constraint_values": [0, -1, 2.5]}))
 
     constraints = layer2_constraints_from_trial(trial)
 
-    assert constraints == (0.0, -1.0, 2.5)
+    assert constraints == (0.0, -1.0, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)

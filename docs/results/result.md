@@ -141,23 +141,24 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 ● [LAYER 2: PORTFOLIO ALLOCATION & RISK OPTIMIZATION]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ● [HYPERPARAMETER OPTIMIZATION]
-    - Study Name : l2_study_4h_fc72f8e5e9ac
-    - Config     : 50 trials
+    - Study Name : l2_study_4h_6066b04a55ec
+    - Config     : 120 trials
   ────────────────────────────────────────────────────────────────────────────
+[L2-SELECTION] Non-deterministic replay detected: stored_cagr=0.176062 vs replayed_cagr=0.142156
 ● [LAYER 2 PORTFOLIO SCORECARD]
 ──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ❌ BLOCKED (dsr)
+  STATUS  : ❌ BLOCKED (cagr)
 
-  ✅ [Return    ] CAGR: +26.9% (>=15.0%) | Sharpe: 1.688 (>=1.000) | MAR: 4.268 (>=1.000)
-  ✅ [Risk      ] MDD: 6.3% (<=20.0% & <=baseline: 6.3%) | Turnover: 0.025
-  ✅ [Uplift    ] Sharpe Uplift: +1.24 (>=+0.20)
-  ❌ [Robustness] DSR: 0.228 (>=0.75) | PSR: 0.889 (diag) | Fold Pass: 100.0% (>=60.0%)
+  ❌ [Return    ] CAGR: +17.6% (>=30.0%) | Sharpe: 2.747 (>=1.000) | MAR: 6.297 (>=1.000)
+  ✅ [Risk      ] MDD: 2.8% (<=20.0% & <=baseline*1.25 if >5%) | Turnover: 0.045
+  ✅ [Uplift    ] Sharpe Uplift: +2.34 (>=+0.20)
+  ✅ [Robustness] DSR: 0.103 (diag) | PSR: 0.986 (diag) | Fold Pass: 66.7% (>=60.0%)
 ──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ✅ Sharpe:  0.817 | MDD:    4.9% | Status: PASS
-  ├─ Fold #2 : ✅ Sharpe:  1.093 | MDD:    5.3% | Status: PASS
-  └─ Fold #3 : ✅ Sharpe:  2.853 | MDD:    6.3% | Status: PASS
+  ├─ Fold #1 : ❌ Sharpe: -1.423 | MDD:    2.6% | Status: FAIL
+  ├─ Fold #2 : ✅ Sharpe:  1.921 | MDD:    2.2% | Status: PASS
+  └─ Fold #3 : ✅ Sharpe:  5.897 | MDD:    1.2% | Status: PASS
 >> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False
 !! FAIL: exit_code=1 reason=layer2_blocked
