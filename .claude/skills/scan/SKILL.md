@@ -31,7 +31,4 @@ Act as a high-speed scout to generate a "Context Manifest". Your only goal is to
 - **Tests:** `[Path]` (Status: Found/Missing)
 - **Documentation:** `[Path]` (Status: Found/Missing)
 - **Dependencies:** `[Path]` (Key dependency for this task)
-
-**3. Intent Transfer**
-- Proceed to `spec` using this manifest as the base context.
 ```
