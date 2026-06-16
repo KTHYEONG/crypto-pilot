@@ -34,7 +34,4 @@ Empirically verify the implementation via `pytest` and perform "Error Triage" or
 - **Command:** `uv run pytest [target] ...`
 - **Status:** [Total Passed / Total Failed]
 - **Failures (if any):** [List only the name of failing test cases and the final error line. Avoid full tracebacks.]
-
-#### ➡️ Next Step
-- [Next Step: e.g., "✅ `audit` is ready." or "Returning to `implement` for logic correction."]
 ```

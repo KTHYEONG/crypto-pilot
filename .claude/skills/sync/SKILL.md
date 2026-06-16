@@ -38,15 +38,5 @@ Enforce the Single Source of Truth (SSOT). Finalize the task by promoting epheme
 - **Removed Artifacts:** `[List of purged files]`
 
 **3. Final Status**
-- ✅ Workspace is synchronized and clean. Proceed to `commit`.
-```
-s/architecture/*.md]`
-- **Logged ADR:** `[Path to docs/decisions/*.md]`
-
-**2. Cleanup State**
-- **Deleted Specs:** `[File names]`
-- **Removed Artifacts:** `[List of purged files]`
-
-**3. Final Status**
-- ✅ Workspace is synchronized and clean. Proceed to `commit`.
+- ✅ Workspace is synchronized and clean.
 ```
