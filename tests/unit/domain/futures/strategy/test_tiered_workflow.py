@@ -20,6 +20,7 @@ S_nw_short: N<4 edge case → 0.0
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -46,6 +47,7 @@ from src.domain.futures.strategy.tiered_workflow import (
     FoldDiagnostic,
     Layer1Result,
     Layer2AllocationConfig,
+    Layer2BlockMetric,
     Layer2Result,
     Layer3Result,
     StrategySignal,
@@ -68,6 +70,7 @@ from src.domain.futures.strategy.tiered_workflow import (
     run_tiered_pipeline,
     select_outer_symbol_opportunities,
 )
+from src.domain.futures.strategy.tiered_workflow.pipeline import _date_to_idx
 from src.domain.futures.strategy.walk_forward import WFFold
 
 # ---------------------------------------------------------------------------
@@ -603,6 +606,267 @@ def test_resolve_holdout_span_raises_when_window_empty() -> None:
 
     with pytest.raises(Layer3WindowError, match="empty_holdout_window"):
         _resolve_holdout_span(datetimes, "2024-01-03", "2024-01-03")
+
+
+# ---------------------------------------------------------------------------
+# S5-S9: run_l3_holdout 신규 메트릭 산출 및 게이트 (docs/specs/layer3-holdout-integrity.md)
+#
+# Mock 지침(spec §Test Scenario Design & Mocks): _AwfSimResult는 실제 dataclass
+# 인스턴스로 구성(순수 로직 — mock 금지). pipeline.run_l3_holdout이 내부에서 호출하는
+# _run_awf_simulation만 patch하여(boundary 격리), 게이트 임계값을 정밀하게 제어한다.
+# ---------------------------------------------------------------------------
+
+
+def _make_l3_signal_batch() -> ValidatedSignalBatch:
+    """run_l3_holdout의 empty-signal early-exit을 피하기 위한 최소 비공 신호 배치."""
+    return ValidatedSignalBatch(
+        events=(
+            ValidatedSignalEvent(
+                decision_idx=0,
+                decision_time=np.datetime64("2025-10-01", "ns"),
+                symbol="BTC",
+                strategy_id="trend:fast",
+                activation_context="all",
+                side=1,
+                expected_net_bps=5.0,
+                expected_gross_bps=10.0,
+                q10_net_bps=0.0,
+                q10_gross_bps=5.0,
+                q90_net_bps=10.0,
+                q90_gross_bps=15.0,
+                expected_holding_bars=1,
+                reliability=0.9,
+                registry_version="test",
+                model_version="test",
+            ),
+        ),
+        start_idx=0,
+        end_idx=1,
+        symbols=("BTC",),
+        registry_version="test",
+        model_version="test",
+    )
+
+
+def _make_awf_sim_result(
+    *,
+    rets_hybrid: list[float],
+    rets_baseline: list[float],
+    trade_count: int,
+    all_gross_exposures: list[float] | None = None,
+) -> Any:
+    """run_l3_holdout이 의존하는 _AwfSimResult 실제 dataclass 인스턴스를 구성."""
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import _AwfSimResult
+
+    n = len(rets_hybrid)
+    return _AwfSimResult(
+        rets_hybrid=rets_hybrid,
+        rets_baseline=rets_baseline,
+        last_selected=frozenset({"BTC"}),
+        last_w=np.array([0.5]),
+        all_turnovers=[0.1] * n,
+        all_turnovers_baseline=[0.05] * n,
+        all_gross_exposures=all_gross_exposures if all_gross_exposures is not None else [0.5] * n,
+        all_net_exposures=[0.3] * n,
+        friction_pass_total=n,
+        signal_total=n,
+        support_leak_count=0,
+        total_cost_hybrid=0.001,
+        total_cost_baseline=0.0005,
+        cap_saturation_count=0,
+        rebalance_count=n,
+        trade_count=trade_count,
+        fold_rets_hybrid=[rets_hybrid],
+        fold_rets_baseline=[rets_baseline],
+        block_rets_hybrid=(tuple(rets_hybrid),),
+        block_rets_baseline=(tuple(rets_baseline),),
+        rets_baseline_ew=rets_baseline,
+    )
+
+
+def _l3_caps() -> Any:
+    from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
+
+    return PortfolioCaps(gross=2.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=10.0)
+
+
+def test_run_l3_holdout_computes_new_compounding_metrics() -> None:
+    """S5: 신규 메트릭 산출 — total_return/equity_multiple/n_trades/sortino가 정확히 계산된다."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_l3_holdout
+
+    # Arrange: ∏(1+r) ≈ 1.10 인 양수 누적 수익 시퀀스 (40 bars, 모두 양수 → 회귀 안정적)
+    n_bars = 40
+    per_bar_ret = 1.10 ** (1.0 / n_bars) - 1.0
+    rets_hybrid = [per_bar_ret] * n_bars
+    rets_baseline = [per_bar_ret * 0.5] * n_bars
+    sim_result = _make_awf_sim_result(
+        rets_hybrid=rets_hybrid,
+        rets_baseline=rets_baseline,
+        trade_count=42,
+    )
+
+    with patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+        return_value=sim_result,
+    ):
+        result = run_l3_holdout(
+            signal_batch=_make_l3_signal_batch(),
+            aligned=MagicMock(symbols=("BTC",)),
+            holdout_span=(0, n_bars),
+            config=Layer2AllocationConfig(),
+            caps=_l3_caps(),
+            verbose=False,
+        )
+
+    # Assert
+    assert result.total_return == pytest.approx(0.10, rel=1e-3)
+    assert result.equity_multiple == pytest.approx(1.10, rel=1e-3)
+    assert result.n_trades == 42
+    assert np.isfinite(result.sortino)
+
+
+def test_run_l3_holdout_gate_blocked_when_trade_count_below_minimum() -> None:
+    """S6: 게이트 — trade_count(3) < min_trades(10) → insufficient_trades."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_l3_holdout
+
+    # Arrange: 충분한 양수 수익이지만 체결 수가 sanity 임계 미달
+    n_bars = 40
+    per_bar_ret = 1.10 ** (1.0 / n_bars) - 1.0
+    rets_hybrid = [per_bar_ret] * n_bars
+    rets_baseline = [per_bar_ret * 0.5] * n_bars
+    sim_result = _make_awf_sim_result(
+        rets_hybrid=rets_hybrid,
+        rets_baseline=rets_baseline,
+        trade_count=3,
+    )
+
+    with patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+        return_value=sim_result,
+    ):
+        result = run_l3_holdout(
+            signal_batch=_make_l3_signal_batch(),
+            aligned=MagicMock(symbols=("BTC",)),
+            holdout_span=(0, n_bars),
+            config=Layer2AllocationConfig(),
+            caps=_l3_caps(),
+            min_trades=10,
+            verbose=False,
+        )
+
+    # Assert
+    assert result.gate_passed is False
+    assert result.blocker_reason == "insufficient_trades"
+
+
+def test_run_l3_holdout_gate_blocked_when_mdd_exceeds_absolute_cap() -> None:
+    """S7: 게이트 — mdd(0.40) > max_mdd_abs(0.35)이고 mdd<=mdd_baseline은 만족 → mdd_abs."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_l3_holdout
+
+    # Arrange: 초입 +10% 상승 후 -42% 낙폭, 이후 완만한 회복으로 양의 누적수익을 유지한다.
+    # baseline은 더 큰 낙폭(-50%)으로 mdd<=mdd_baseline 게이트는 통과시키되, 절대캡(0.35)은 초과시킨다.
+    rets_hybrid = [0.10, -0.42] + [0.02] * 38
+    rets_baseline = [0.10, -0.50] + [0.005] * 38
+    sim_result = _make_awf_sim_result(
+        rets_hybrid=rets_hybrid,
+        rets_baseline=rets_baseline,
+        trade_count=42,
+    )
+
+    with patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+        return_value=sim_result,
+    ):
+        result = run_l3_holdout(
+            signal_batch=_make_l3_signal_batch(),
+            aligned=MagicMock(symbols=("BTC",)),
+            holdout_span=(0, len(rets_hybrid)),
+            config=Layer2AllocationConfig(),
+            caps=_l3_caps(),
+            min_trades=10,
+            max_mdd_abs=0.35,
+            verbose=False,
+        )
+
+    # Assert
+    assert result.mdd > 0.35
+    assert result.mdd <= result.mdd_baseline
+    assert result.blocker_reason == "mdd_abs"
+    assert result.gate_passed is False
+
+
+def test_run_l3_holdout_gate_blocked_when_total_return_negative() -> None:
+    """S8: 게이트 — 누적 손실(total_return<0) → negative_return."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_l3_holdout
+
+    # Arrange: ∏(1+r) < 1.0 인 음수 누적 수익. sharpe_baseline은 더 낮게 설정해
+    # sharpe_rel 게이트보다 앞선 negative_return에서 우선 차단되는지 검증.
+    n_bars = 40
+    per_bar_loss = 0.95 ** (1.0 / n_bars) - 1.0
+    rets_hybrid = [per_bar_loss] * n_bars
+    rets_baseline = [per_bar_loss * 1.5] * n_bars
+    sim_result = _make_awf_sim_result(
+        rets_hybrid=rets_hybrid,
+        rets_baseline=rets_baseline,
+        trade_count=42,
+    )
+
+    with patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+        return_value=sim_result,
+    ):
+        result = run_l3_holdout(
+            signal_batch=_make_l3_signal_batch(),
+            aligned=MagicMock(symbols=("BTC",)),
+            holdout_span=(0, n_bars),
+            config=Layer2AllocationConfig(),
+            caps=_l3_caps(),
+            min_trades=10,
+            verbose=False,
+        )
+
+    # Assert
+    assert result.total_return < 0.0
+    assert result.sharpe >= result.sharpe_baseline
+    assert result.blocker_reason == "negative_return"
+    assert result.gate_passed is False
+
+
+def test_run_l3_holdout_gate_passed_when_all_thresholds_satisfied() -> None:
+    """S9: 게이트 — n_trades/total_return/sharpe/mdd 전부 통과 → gate_passed=True."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_l3_holdout
+
+    # Arrange: ∏(1+r) ≈ 1.17, baseline보다 낮은 변동성/낙폭으로 sharpe·mdd 상대 게이트 모두 통과
+    n_bars = 50
+    per_bar_ret = 1.17 ** (1.0 / n_bars) - 1.0
+    rets_hybrid = [per_bar_ret] * n_bars
+    rets_baseline = [per_bar_ret * 0.3] * n_bars
+    sim_result = _make_awf_sim_result(
+        rets_hybrid=rets_hybrid,
+        rets_baseline=rets_baseline,
+        trade_count=50,
+    )
+
+    with patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+        return_value=sim_result,
+    ):
+        result = run_l3_holdout(
+            signal_batch=_make_l3_signal_batch(),
+            aligned=MagicMock(symbols=("BTC",)),
+            holdout_span=(0, n_bars),
+            config=Layer2AllocationConfig(),
+            caps=_l3_caps(),
+            min_trades=10,
+            max_mdd_abs=0.35,
+            verbose=False,
+        )
+
+    # Assert
+    assert result.n_trades == 50
+    assert result.total_return == pytest.approx(0.17, rel=1e-3)
+    assert result.gate_passed is True
+    assert result.blocker_reason == ""
 
 
 # ---------------------------------------------------------------------------
@@ -2860,3 +3124,221 @@ def test_run_awf_simulation_tracks_baseline_costs_and_diagnostics() -> None:
     assert len(sim.all_net_exposures) == sim.rebalance_count
     assert sim.block_rets_hybrid == tuple(tuple(block) for block in sim.fold_rets_hybrid)
     assert sim.block_rets_baseline == tuple(tuple(block) for block in sim.fold_rets_baseline)
+
+
+# ---------------------------------------------------------------------------
+# PART 5 (layer3-holdout-integrity.md, C7/P5-A): L2 AWF fold 기하구조 anchor 복원
+# ---------------------------------------------------------------------------
+
+
+def _build_part5_aligned_and_window(*, extend_to_holdout_end: bool) -> tuple[Any, Any]:
+    """PART5 테스트용 aligned/window 픽스처.
+
+    `extend_to_holdout_end=False`: datetimes가 holdout_start에서 끝남 (구 동작 가정).
+    `extend_to_holdout_end=True`: datetimes가 holdout_end까지 확장됨 (PART4 이후 실제 상태).
+    """
+    all_dates = pd.date_range("2024-01-01", periods=40, freq="D")
+    end_n = 30 if extend_to_holdout_end else 20
+    aligned = cast(
+        Any,
+        SimpleNamespace(
+            datetimes=all_dates[:end_n].to_numpy(dtype="datetime64[ns]"),
+            symbols=("BTCUSDT",),
+        ),
+    )
+    window = cast(
+        Any,
+        SimpleNamespace(
+            l1_start="2024-01-02",
+            l2_start="2024-01-10",
+            holdout_start="2024-01-20",
+            holdout_end="2024-01-30",
+        ),
+    )
+    return aligned, window
+
+
+def _passing_l1_result() -> Layer1Result:
+    """L2 단계까지 진행 가능한 L1 PASS 결과(inference_artifact 보유)."""
+    return Layer1Result(
+        signals_per_fold=(),
+        oos_stacked={},
+        pooled_ic=0.0,
+        pooled_tstat=0.0,
+        breadth=0.0,
+        valid_coverage=0.0,
+        fold_pass_ratio=0.0,
+        gate_passed=True,
+        n_valid=1,
+        n_total=1,
+        n_trade_scope=1,
+        inference_artifact=MagicMock(),
+    )
+
+
+def _run_pipeline_to_l2_and_capture_awf_call(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    extend_to_holdout_end: bool,
+) -> tuple[dict[str, object], tuple[WFFold, ...]]:
+    """run_tiered_pipeline을 target_phase='l2'까지 실행하고 build_walk_forward_folds 호출 인자를 캡처."""
+    import src.domain.futures.strategy.tiered_workflow as _tw
+
+    aligned, window = _build_part5_aligned_and_window(extend_to_holdout_end=extend_to_holdout_end)
+    cfg = replace(CandidateStrategyConfig(), wf_n_folds=2)
+
+    awf_calls: list[dict[str, object]] = []
+
+    def _capture_awf_folds(**kwargs: object) -> tuple[WFFold, ...]:
+        awf_calls.append(dict(kwargs))
+        n_bars = cast(int, kwargs["n_bars"])
+        oos_len = max(1, n_bars // 5)
+        return (
+            WFFold(
+                fit_start=0,
+                fit_end=max(1, n_bars - 2 * oos_len),
+                cal_start=max(0, n_bars - 2 * oos_len),
+                cal_end=max(1, n_bars - oos_len),
+                oos_start=max(1, n_bars - oos_len),
+                oos_end=n_bars,
+            ),
+        )
+
+    def _stub_run_l2_awf(**kwargs: object) -> Layer2Result:
+        folds = cast(tuple[WFFold, ...], kwargs["awf_folds"])
+        block_metrics = tuple(
+            Layer2BlockMetric(
+                start_idx=f.oos_start,
+                end_idx=f.oos_end,
+                log_growth_hybrid=0.0,
+                log_growth_baseline=0.0,
+                mdd_hybrid=0.0,
+                turnover_hybrid=0.0,
+                active_rebalances=0,
+            )
+            for f in folds
+        )
+        return _make_l2result(block_metrics=block_metrics)
+
+    monkeypatch.setattr(_tw, "build_walk_forward_folds", _capture_awf_folds)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.tiered_workflow.pipeline.predict_layer1_signals",
+        lambda **_kwargs: ValidatedSignalBatch(
+            events=(),
+            start_idx=0,
+            end_idx=0,
+            symbols=(),
+            registry_version="test",
+            model_version="test",
+        ),
+    )
+    monkeypatch.setattr(_tw, "run_l2_awf", _stub_run_l2_awf)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer_header",
+        lambda *_a, **_k: "",
+    )
+
+    result = run_tiered_pipeline(
+        labeled_events=pd.DataFrame(),
+        aligned=aligned,
+        cfg=cfg,
+        window=window,
+        l1_params={},
+        l2_params={},
+        l1_result_override=_passing_l1_result(),
+        target_phase="l2",
+        tf="4h",
+        verbose=False,
+    )
+
+    assert len(awf_calls) == 1
+    returned_folds = result[1].block_metrics if result[1] is not None else ()
+    return awf_calls[0], cast(tuple[WFFold, ...], returned_folds)
+
+
+def test_run_tiered_pipeline_l2_awf_folds_anchored_to_holdout_start_not_full_n_bars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S16: build_walk_forward_folds는 holdout_start idx를, len(datetimes) 전체를 받지 않아야 한다."""
+
+    aligned, window = _build_part5_aligned_and_window(extend_to_holdout_end=True)
+    expected_ho_start_idx = _date_to_idx(aligned.datetimes, window.holdout_start)
+
+    # Arrange
+    assert expected_ho_start_idx != len(aligned.datetimes), (
+        "fixture must make holdout_start strictly precede the end of aligned.datetimes"
+    )
+
+    awf_call, _ = _run_pipeline_to_l2_and_capture_awf_call(monkeypatch, extend_to_holdout_end=True)
+
+    # Assert
+    assert awf_call["n_bars"] == expected_ho_start_idx
+    assert awf_call["n_bars"] != len(aligned.datetimes)
+
+
+def test_run_tiered_pipeline_l2_awf_fold_count_unaffected_by_holdout_tail_extension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S17: aligned.datetimes가 holdout_end까지 확장돼도 L2 fold geometry는 불변이어야 한다."""
+    awf_call_short, _ = _run_pipeline_to_l2_and_capture_awf_call(monkeypatch, extend_to_holdout_end=False)
+    awf_call_extended, _ = _run_pipeline_to_l2_and_capture_awf_call(monkeypatch, extend_to_holdout_end=True)
+
+    # Assert: holdout_start가 두 fixture에서 동일하므로 n_bars(=ho_start_idx_l2)도 동일해야 한다.
+    assert awf_call_short["n_bars"] == awf_call_extended["n_bars"]
+    assert awf_call_short["cfg"] is not None
+    assert awf_call_extended["cfg"] is not None
+
+
+def test_run_tiered_pipeline_l1_nested_swf_folds_still_receive_full_n_bars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S18: PART5 변경 후에도 L1 build_l1_nested_swf_folds는 len(aligned.datetimes) 전체를 그대로 받는다."""
+    import src.domain.futures.strategy.config as _cfg
+    import src.domain.futures.strategy.tiered_workflow as _tw
+
+    # Arrange
+    aligned, window = _build_part5_aligned_and_window(extend_to_holdout_end=True)
+    cfg = MagicMock(spec=CandidateStrategyConfig)
+    cfg.wf_n_folds = 2
+
+    nested_builder_calls: list[dict[str, object]] = []
+    blocked_l1 = Layer1Result(
+        signals_per_fold=(),
+        oos_stacked={},
+        pooled_ic=0.0,
+        pooled_tstat=0.0,
+        breadth=0.0,
+        valid_coverage=0.0,
+        fold_pass_ratio=0.0,
+        gate_passed=False,
+        n_valid=0,
+        n_total=1,
+        n_trade_scope=1,
+        gate_report=Layer1GateReport(checks=(), passed=False, blockers=("too_few_ready_symbols",)),
+    )
+
+    monkeypatch.setattr(_cfg, "resolve_purge_and_embargo_bars", lambda _cfg_obj: (3, 1))
+
+    def _capture_nested_folds(**kwargs: object) -> tuple[WFFold, ...]:
+        nested_builder_calls.append(dict(kwargs))
+        return ()
+
+    monkeypatch.setattr(_tw, "build_l1_nested_swf_folds", _capture_nested_folds, raising=False)
+    monkeypatch.setattr(_tw, "run_l1_nested_swf", lambda **_kwargs: blocked_l1)
+
+    # Act
+    result = run_tiered_pipeline(
+        labeled_events=pd.DataFrame(),
+        aligned=aligned,
+        cfg=cfg,
+        window=window,
+        l1_params={},
+        l2_params={},
+        tf="4h",
+        verbose=False,
+    )
+
+    # Assert
+    assert result == (blocked_l1, None, None)
+    assert len(nested_builder_calls) == 1
+    assert nested_builder_calls[0]["n_bars"] == len(aligned.datetimes)
