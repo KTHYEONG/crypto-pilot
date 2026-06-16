@@ -6,31 +6,32 @@ description: Scout and map relevant file paths (code, tests, docs) BEFORE any de
 # Skill: Scan (File Discovery & Mapping)
 
 ## Purpose
-Act as a lightweight scout. Your ONLY goal is to locate the exact files, tests, and documentation related to the user's request. **DO NOT design solutions, analyze logic, or formulate strategies.** 
+Act as a high-speed scout to generate a "Context Manifest". Your only goal is to provide the `spec` agent with the exact URI and functional purpose of relevant files, minimizing redundant exploration in later phases.
 
-## Scout Guidelines (Strict Token Efficiency)
+## Scout Guidelines (Strict AI Efficiency)
 1. **Search & Discovery Strategy**:
-   - **Primary (Token-Efficient)**: Prioritize Serena MCP tools (`find_symbol`, `find_file`) for precise target matching. This avoids reading large files and saves context tokens.
-   - **Secondary (Fallback/Broad)**: Use `grep_search`, `glob`, or `list_dir` for raw pattern matching, filename wildcards, or to verify file structures.
-2. **Zero Logic Analysis:** Do not read entire files. If you find the target class/function, record its path and line number, then immediately stop reading.
-3. **Trace Ecosystem:** Always find the Holy Trinity for the target:
-   - **Core Code:** Where is the logic defined?
-   - **Tests:** Where is the `test_*.py` file for it?
-   - **Docs:** Which `docs/domains/*.md` or `docs/architecture/*.md` governs this?
-4. **No Guesses:** If you cannot find a related test or doc, explicitly state `None found`. Do not hallucinate paths.
+   - **Primary (High Precision)**: Prioritize Serena MCP tools (`find_symbol`, `find_file`, `get_symbols_overview`) to map internal structures without reading raw bytes.
+   - **Secondary (Broad Coverage)**: Use `grep_search` or `glob` to find indirect references or usage patterns.
+2. **Zero-Read Policy:** Do NOT read file bodies. Identify the target, confirm its existence and signature via MCP, and move on.
+3. **The Manifest (Holy Trinity Mapping)**:
+   - For every feature request, you MUST locate:
+     - **Implementation (Core):** The primary logic file.
+     - **Validation (Tests):** The corresponding `test_*.py` file.
+     - **Context (Docs):** The governing `docs/architecture/` or `docs/domains/` file.
+4. **No Hallucinations:** If a test or doc is missing, explicitly mark it as `MISSING`.
 
-## Output Format
+## Output Format (Scan Manifest)
 ```md
-### 🔍 File Exploration Completed
+### [SCAN_MANIFEST]
 
-**1. Core Target Files**
-- `[File Path]` (Line: X) - *[Short Description: e.g., ML Gate logic definition]*
+**1. Primary Targets**
+- `[Path]` (Symbol: [X]) : [One-sentence functional purpose]
 
 **2. Related Ecosystem**
-- **Dependencies/References:** `[Related module path]`
-- **Test Files:** `[test_*.py path]` (or 'None found')
-- **Related Documentation:** `[docs/*.md path]` (or 'None found')
+- **Tests:** `[Path]` (Status: Found/Missing)
+- **Documentation:** `[Path]` (Status: Found/Missing)
+- **Dependencies:** `[Path]` (Key dependency for this task)
 
-**3. Next Step**
-- ➡️ Proceed to `spec` skill for detailed design based on the discovered paths.
+**3. Intent Transfer**
+- Proceed to `spec` using this manifest as the base context.
 ```
