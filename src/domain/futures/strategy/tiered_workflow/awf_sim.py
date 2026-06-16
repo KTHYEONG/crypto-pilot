@@ -77,6 +77,43 @@ class _AwfSimResult:
     rets_baseline_ew: list[float]          # 순수 1/N EW baseline (uplift 측정 전용)
 
 
+def _book_edge_score(
+    w: NDArray[np.float64],
+    mu_bps: NDArray[np.float64],
+    effective_hurdle_bps: NDArray[np.float64],
+) -> float:
+    """사이징된 비중의 gross-weighted 평균 net-of-cost edge (bps/bar).
+
+    Returns:
+        0.0 if no active positions or all edges are non-positive.
+    """
+    abs_w = np.abs(w)
+    den = float(np.sum(abs_w))
+    if den < 1e-12:
+        return 0.0
+    net_edge = np.maximum(np.abs(mu_bps) - effective_hurdle_bps, 0.0)
+    return float(np.dot(abs_w, net_edge) / den)
+
+
+def _edge_throttle_multiplier(
+    score_bps: float,
+    *,
+    floor_bps: float,
+    ref_bps: float,
+    gamma: float,
+) -> float:
+    """score_bps → [0, 1] throttle 승수. 선형(gamma=1) 또는 볼록(gamma>1).
+
+    Returns:
+        0.0 when score <= floor, 1.0 when score >= ref.
+    """
+    if not np.isfinite(score_bps):
+        return 0.0
+    span = max(ref_bps - floor_bps, 1e-9)
+    x = float(np.clip((score_bps - floor_bps) / span, 0.0, 1.0))
+    return float(x ** max(gamma, 1e-9))
+
+
 def _event_strength(event: ValidatedSignalEvent) -> float:
     return (
         abs(float(event.expected_net_bps))
@@ -390,6 +427,10 @@ def _run_awf_simulation(
     no_trade_band = float(config.no_trade_band)
     rebalance_bars = int(config.rebalance_bars)
     fixed_cost_safety_mult = float(getattr(config, "fixed_cost_safety_mult", 1.25))
+    edge_throttle_enabled = bool(getattr(config, "edge_throttle_enabled", True))
+    edge_floor_bps = float(getattr(config, "edge_floor_bps", 0.0))
+    edge_ref_bps = float(getattr(config, "edge_ref_bps", 5.0))
+    edge_throttle_gamma = float(getattr(config, "edge_throttle_gamma", 1.0))
 
     symbols = aligned.symbols
     n_sym = len(symbols)
@@ -535,6 +576,16 @@ def _run_awf_simulation(
                 bars_per_year=bars_per_year,
                 support_mask=support_mask,
             )
+            if edge_throttle_enabled:
+                eff_hurdle = hurdle * fixed_cost_safety_mult / max(float(rebalance_bars), 1.0)
+                score = _book_edge_score(w, mu_arr, eff_hurdle)
+                m = _edge_throttle_multiplier(
+                    score,
+                    floor_bps=edge_floor_bps,
+                    ref_bps=edge_ref_bps,
+                    gamma=edge_throttle_gamma,
+                )
+                w = w * m
             w = np.where(tradeable_mask, w, 0.0)
             last_w = w
 
