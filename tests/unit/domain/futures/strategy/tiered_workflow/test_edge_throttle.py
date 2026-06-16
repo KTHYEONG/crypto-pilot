@@ -21,6 +21,8 @@ from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     _apply_risk_budget_floor,
     _book_edge_score,
     _edge_throttle_multiplier,
+    _estimate_annual_vol,
+    _resolve_adaptive_k_rank,
 )
 from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
 
@@ -144,6 +146,45 @@ class TestRiskBudgetFloor:
         )
 
         assert np.array_equal(out, weights)
+
+
+class TestAdaptiveBreadth:
+    def test_estimate_annual_vol_returns_zero_on_shape_mismatch(self) -> None:
+        out = _estimate_annual_vol(
+            np.array([0.1, 0.2], dtype=np.float64),
+            np.array([0.01], dtype=np.float64),
+            2190.0,
+        )
+
+        assert out == pytest.approx(0.0)
+
+    def test_expand_when_prev_book_under_uses_risk_budget(self) -> None:
+        out = _resolve_adaptive_k_rank(
+            base_k=3,
+            n_valid=9,
+            prev_weights=np.array([0.02, 0.02, 0.0, 0.0], dtype=np.float64),
+            sigma=np.array([0.01, 0.01, 0.01, 0.01], dtype=np.float64),
+            bars_per_year=2190.0,
+            vol_target=1.0,
+            expand_below_vol_ratio=0.35,
+            max_extra=4,
+        )
+
+        assert out == 7
+
+    def test_no_expand_when_prev_book_already_uses_risk_budget(self) -> None:
+        out = _resolve_adaptive_k_rank(
+            base_k=3,
+            n_valid=9,
+            prev_weights=np.array([0.80, 0.80, 0.0, 0.0], dtype=np.float64),
+            sigma=np.array([0.01, 0.01, 0.01, 0.01], dtype=np.float64),
+            bars_per_year=2190.0,
+            vol_target=1.0,
+            expand_below_vol_ratio=0.35,
+            max_extra=4,
+        )
+
+        assert out == 3
 
 
 # ---------------------------------------------------------------------------
