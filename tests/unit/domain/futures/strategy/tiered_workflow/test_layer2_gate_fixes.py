@@ -337,12 +337,22 @@ def test_l2_alloc_space_v3_max_ann_vol_range() -> None:
 
 
 def test_l2_alloc_space_alias_points_to_v3() -> None:
-    """S5: L2_ALLOC_SPACE가 V3를 가리키는지 확인 (V2 kelly 상한=1.0 ≠ V3 0.55)."""
+    """S5: L2_ALLOC_SPACE가 active-deployment V4를 가리키는지 확인."""
     from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE
 
-    assert L2_ALLOC_SPACE["kelly_fraction"]["high"] == pytest.approx(0.55), (
-        "L2_ALLOC_SPACE가 V3를 가리켜야 함 (kelly high=0.55)"
+    assert L2_ALLOC_SPACE["kelly_fraction"]["high"] == pytest.approx(0.80), (
+        "L2_ALLOC_SPACE가 V4를 가리켜야 함 (kelly high=0.80)"
     )
+
+
+def test_l2_alloc_space_v4_active_deployment_bounds() -> None:
+    """V4: active L1 signal deployment 탐색공간 경계 검증."""
+    from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE, L2_ALLOC_SPACE_V4
+
+    assert L2_ALLOC_SPACE == L2_ALLOC_SPACE_V4
+    assert L2_ALLOC_SPACE_V4["risk_budget_floor_ratio"]["high"] == pytest.approx(0.75)
+    assert L2_ALLOC_SPACE_V4["deploy_cost_safety_mult"]["low"] == pytest.approx(1.0)
+    assert L2_ALLOC_SPACE_V4["max_ann_vol"]["high"] == pytest.approx(1.50)
 
 
 # ---------------------------------------------------------------------------

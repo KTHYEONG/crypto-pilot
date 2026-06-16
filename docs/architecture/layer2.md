@@ -48,6 +48,11 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
   - Symmetric $q_{10}, q_{90}$ estimation for volatility: $\sigma_R = (q_{90} - q_{10})/2.563$.
   - Fractional Diagonal Kelly: $w_i \propto f_k \cdot \mu_i / \sigma_i^2$ subject to friction masks.
 - **Edge-Conditional Throttle**: Time-varying conviction multiplier $m_t \in [0,1]$ applied based on gross-weighted net-of-cost edge.
+- **Active Deployment Controls**:
+  - `deploy_cost_safety_mult` isolates deployment friction from gross-edge conversion.
+  - `edge_throttle_min_active_mult` preserves a non-zero floor for positive edge books.
+  - `risk_budget_floor_ratio` scales under-deployed books toward the target-vol floor without creating new support.
+  - `risk_budget_max_scale` caps the upward scaling applied by the floor logic.
 - **Dynamic Scaling**: Volatility targeting ($\sigma_{target} / \sigma_{port}$) combined with regime-specific gross/net caps. Includes double-scaling guards.
 - **L2 Objective Gate (12-Condition AND)**:
   - *Sanity*: Active signals, safe deployments, trade count $\ge 30$.
@@ -93,6 +98,11 @@ graph TD
 | **Param** | `USE_CS_RANK_ENGINE` | Core architecture flag. Set to `True` for Tiered Hybrid. |
 | **Param** | `kelly_fraction` | Target fractional Kelly sizing bound [0.15, 0.55] |
 | **Param** | `edge_throttle_enabled` | Toggles the time-varying conviction multiplier |
+| **Param** | `deploy_cost_safety_mult` | Deployment-stage friction safety multiplier |
+| **Param** | `edge_throttle_min_active_mult` | Minimum active multiplier for positive edge books |
+| **Param** | `risk_budget_floor_ratio` | Minimum annual vol ratio used to lift under-deployed books |
+| **Param** | `risk_budget_max_scale` | Upper bound for risk-budget floor scaling |
+| **Param** | `L2_ALLOC_SPACE` | Active L2 Optuna search space (`V4`) |
 | **Param** | `L2_OPTUNA_TRIALS` | Optimization budget for Layer 2. Default: 120 |
 | **Param** | `regime_gross_multipliers` | Gross portfolio cap limits mapped to specific regimes |
 | **Param** | `double_scaling_guard` | Prevents redundant attenuation during portfolio projection |
