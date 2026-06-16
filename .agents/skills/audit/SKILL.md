@@ -48,7 +48,4 @@ Verify that the implementation accurately reflects the business logic requiremen
 - **Spec Requirement:** [Which part of the spec logic is missing or wrong?]
 - **Implementation Issue:** [Briefly explain the flaw or performance bottleneck.]
 - **Location:** [File Path and Line/Function reference]
-
-#### ➡️ Next Step
-- [Next Step: e.g., "Return to `implement` to fix the gap." or "✅ `sync` is ready."]
 ```
