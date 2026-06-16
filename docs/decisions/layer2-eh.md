@@ -7,6 +7,11 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-16 Layer 2 active deployment 재배선 — 비용 허들/스로틀/위험예산 분리, V4 탐색공간 공개
+- **Delta:** (1) `fixed_cost_safety_mult`의 역할을 gross-edge 보수화로 유지하고, deployment 단계에는 `deploy_cost_safety_mult`를 분리 배선. (2) `edge_throttle_min_active_mult`로 positive edge book의 최소 활성 비중을 허용. (3) `risk_budget_floor_ratio` + `risk_budget_max_scale`로 목표 vol 대비 under-deployed book을 상향 조정하되 support는 보존. (4) `L2_ALLOC_SPACE_V4` 공개 및 `search_space_version="v4"`로 study hash를 분리. (5) `Layer2AllocationConfig.from_mapping`에 신규 필드와 범위 검증 추가.
+- **Rationale:** 결과가 CAGR 14.8%, MDD 1.5%, RiskUtil 5.0%로 나타난 것은 알파 부족보다 under-deployment에 가깝다. L1 신호를 더 크게 쓰되, 비용 모델과 look-ahead 방어는 유지해야 하므로 배치 강도와 비용 허들을 분리해야 했다. 기존 게이트를 완화하는 대신 자본 배분 경로를 적극화해 복리 성장 목적에 정렬했다.
+- **Edge Cases:** 새 파라미터가 없는 기존 trial params는 `from_mapping` default로 호환. `risk_budget_floor_ratio<=0` 또는 `vol_target is None`이면 floor 적용을 건너뛴다. support 밖 신규 non-zero 생성은 금지.
+
 ## 2026-06-16 L2 평가체계 5측면 재편 — Sortino/CVaR완화/MDD30%/Trade수 게이트
 - **Delta:** (1) `l2_max_mdd_abs` 0.20→0.30, `l2_max_cvar_95` 0.03→0.06(핵심 unlock). (2) 신규 `l2_min_sortino_abs=1.5`(efficiency), `l2_min_trades=30`(sample floor) 게이트+표시 추가. (3) 상대MDD(`mdd_rel`) 게이트 완전 제거→진단(`RelMDD` display). (4) 게이트 체인 9→12조건: Stage0(sanity+`low_trades`)→A(cagr)→B(sharpe/sortino/mar)→C(mdd_abs/cvar_95)→D(fold/active_blocks/friction)→E(growth_lcb/uplift). (5) `evaluate_l2_trial` 제약 10→12-tuple(sortino+trade_count), `layer2_constraints_from_trial` 패딩 동기화. (6) `Layer2Result`에 `sortino_hybrid/terminal_multiple/total_pnl_pct/trade_count/risk_utilization` 표시필드 추가. (7) scorecard를 Growth/Efficiency/Risk/Robust/Uplift/Diag 5그룹으로 재편.
 - **Rationale:** CAGR 17.6% BLOCKED인데 Sharpe 2.747/MAR 6.297/MDD 2.8% 우수 — 알파부족이 아니라 위험예산(MDD20%) 14%만 사용하는 under-deployment. binding 제약 1순위 = per-bar CVaR 캡(3%). 사용자 결정: 복리자산증식 극대화가 목적(자동매매·심리개입 없음)이므로 MDD를 깊게 제한하지 않되 통계신뢰성(Sortino/Calmar=scale-invariant, 레버리지로 curve-fit 불가)으로 신뢰축을 분리. under-deployment는 하드 floor 대신 Soft(진단표시+캡완화로 objective가 자연유도).

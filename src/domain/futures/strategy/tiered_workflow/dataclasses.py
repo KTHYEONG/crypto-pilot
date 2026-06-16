@@ -263,6 +263,10 @@ class Layer2AllocationConfig:
     edge_floor_bps: float = 0.0
     edge_ref_bps: float = 5.0
     edge_throttle_gamma: float = 1.0
+    deploy_cost_safety_mult: float = 1.25
+    edge_throttle_min_active_mult: float = 0.0
+    risk_budget_floor_ratio: float = 0.0
+    risk_budget_max_scale: float = 3.0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -276,6 +280,13 @@ class Layer2AllocationConfig:
             return float(value)
         return default
 
+    @staticmethod
+    def _validate_range(name: str, value: float, lower: float, upper: float | None = None) -> float:
+        if value < lower or (upper is not None and value > upper):
+            suffix = f", {upper}" if upper is not None else ", inf"
+            raise ValueError(f"{name} must be in range [{lower}{suffix}]")
+        return value
+
     @classmethod
     def from_mapping(cls, params: dict[str, object] | None) -> Layer2AllocationConfig:
         params = params or {}
@@ -284,6 +295,33 @@ class Layer2AllocationConfig:
         raw_vol_target = params.get("max_ann_vol", params.get("vol_target"))
         vol_target = float(raw_vol_target) if isinstance(raw_vol_target, (int, float)) else None
         min_abs_rank_z = params.get("min_abs_rank_z", params.get("CS_Z_SCORE_THRESHOLD", 0.0))
+        fixed_cost_safety_mult = cls._validate_range(
+            "fixed_cost_safety_mult",
+            cls._as_float(params.get("fixed_cost_safety_mult", 1.25), 1.25),
+            1.0,
+        )
+        deploy_cost_safety_mult = cls._validate_range(
+            "deploy_cost_safety_mult",
+            cls._as_float(params.get("deploy_cost_safety_mult", 1.25), 1.25),
+            1.0,
+        )
+        edge_throttle_min_active_mult = cls._validate_range(
+            "edge_throttle_min_active_mult",
+            cls._as_float(params.get("edge_throttle_min_active_mult", 0.0), 0.0),
+            0.0,
+            1.0,
+        )
+        risk_budget_floor_ratio = cls._validate_range(
+            "risk_budget_floor_ratio",
+            cls._as_float(params.get("risk_budget_floor_ratio", 0.0), 0.0),
+            0.0,
+            1.0,
+        )
+        risk_budget_max_scale = cls._validate_range(
+            "risk_budget_max_scale",
+            cls._as_float(params.get("risk_budget_max_scale", 3.0), 3.0),
+            1.0,
+        )
         return cls(
             k_rank=cls._as_int(params.get("K_RANK", 3), 3),
             rebalance_bars=cls._as_int(params.get("REBALANCE_BARS", 3), 3),
@@ -303,10 +341,7 @@ class Layer2AllocationConfig:
             l2_min_growth_uplift=cls._as_float(params.get("l2_min_growth_uplift", 0.0), 0.0),
             l2_min_psr=cls._as_float(params.get("l2_min_psr", 0.90), 0.90),
             l2_min_friction_pass=cls._as_float(params.get("l2_min_friction_pass", 0.50), 0.50),
-            fixed_cost_safety_mult=cls._as_float(
-                params.get("fixed_cost_safety_mult", 1.25),
-                1.25,
-            ),
+            fixed_cost_safety_mult=fixed_cost_safety_mult,
             l2_min_dsr=cls._as_float(params.get("l2_min_dsr", 0.75), 0.75),
             l2_max_cvar_95=cls._as_float(params.get("l2_max_cvar_95", 0.06), 0.06),
             l2_min_active_blocks=cls._as_int(params.get("l2_min_active_blocks", 3), 3),
@@ -317,6 +352,10 @@ class Layer2AllocationConfig:
             edge_floor_bps=cls._as_float(params.get("edge_floor_bps", 0.0), 0.0),
             edge_ref_bps=cls._as_float(params.get("edge_ref_bps", 5.0), 5.0),
             edge_throttle_gamma=cls._as_float(params.get("edge_throttle_gamma", 1.0), 1.0),
+            deploy_cost_safety_mult=deploy_cost_safety_mult,
+            edge_throttle_min_active_mult=edge_throttle_min_active_mult,
+            risk_budget_floor_ratio=risk_budget_floor_ratio,
+            risk_budget_max_scale=risk_budget_max_scale,
         )
 
 
