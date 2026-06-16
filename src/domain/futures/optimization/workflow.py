@@ -1856,6 +1856,9 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
     _set_float_attr(trial, "average_gross_exposure", evaluation.average_gross_exposure)
     _set_float_attr(trial, "cap_saturation_ratio", evaluation.cap_saturation_ratio)
     _set_float_attr(trial, "total_cost_bps", evaluation.total_cost_bps)
+
+    # DSR-in-the-loop 제거 (2026-06-16): DSR은 pool-상대 benchmark가 trial 수와
+    # 동반 상승하는 구조적 편향 + L3 frozen holdout과 중복 검증 → diagnostic 강등.
     trial.set_user_attr("l2_constraint_values", list(evaluation.constraint_values))
     trial.set_user_attr(
         "l2_block_log_growth_signature",
@@ -1874,6 +1877,8 @@ def layer2_constraints_from_trial(trial: FrozenTrial) -> tuple[float, ...]:
             resolved.append(float(item))
         except Exception:
             resolved.append(1.0)
+    while len(resolved) < 10:
+        resolved.append(1.0)
     return tuple(resolved)
 
 

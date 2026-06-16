@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from numpy.typing import NDArray
 
 from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
@@ -23,20 +22,19 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     Layer2AllocationConfig,
     Layer2BlockMetric,
 )
-from src.domain.futures.strategy.tiered_workflow.metrics import _psr, _sharpe_hac
-
+from src.domain.futures.strategy.tiered_workflow.metrics import _psr
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture()
+@pytest.fixture
 def caps_default() -> PortfolioCaps:
     """기본 PortfolioCaps (per_symbol=0.5, gross=1.5, net=0.5, beta=1.0)."""
     return PortfolioCaps(per_symbol=0.5, gross=1.5, net=0.5, beta=1.0)
 
 
-@pytest.fixture()
+@pytest.fixture
 def default_config() -> Layer2AllocationConfig:
     """FIX-1 반영된 기본 설정 (l2_min_active_blocks=3, l2_min_dsr=0.75)."""
     return Layer2AllocationConfig()
@@ -116,7 +114,6 @@ def test_active_block_count_fold_based_matches_pipeline_definition() -> None:
 def test_ew_baseline_differs_from_risk_matched_baseline(caps_default: PortfolioCaps) -> None:
     """FIX-2: 동질적 edge + 대각 공분산에서 EW vs risk-matched가 구조적으로 달라야 함."""
     # Arrange (Given): K=3 심볼, 불균일 vol → risk-matched는 vol 역비례, EW는 1/3
-    rng = np.random.default_rng(42)
     n = 3
     bars_per_year = 8760.0
     # 불균일 vol — risk-matched와 EW가 벌어지도록
@@ -260,9 +257,10 @@ def test_uplift_constraint_is_negative_when_hybrid_sharpe_above_threshold() -> N
 
 
 def test_layer2_constraints_tuple_length_is_ten() -> None:
-    """FIX-4: layer2_constraints_from_trial fallback 크기가 10으로 갱신됐는지 확인."""
+    """C3: DSR-in-loop 제거 후 layer2_constraints_from_trial fallback 크기가 10으로 복원됐는지 확인."""
     # Arrange (Given): l2_constraint_values 미존재 trial 시뮬레이션
     from unittest.mock import MagicMock
+
     from src.domain.futures.optimization.workflow import layer2_constraints_from_trial
 
     mock_trial = MagicMock()
@@ -273,9 +271,58 @@ def test_layer2_constraints_tuple_length_is_ten() -> None:
 
     # Assert (Then)
     assert len(fallback) == 10, (
-        f"fallback 크기 {len(fallback)} ≠ 10. constraint_values 튜플과 불일치."
+        f"fallback 크기 {len(fallback)} ≠ 10. DSR-in-loop 제거 후 10-tuple이어야 함."
     )
     assert all(v == 1.0 for v in fallback), "모든 fallback 값이 1.0 (infeasible) 이어야 함"
+
+
+def test_layer2_constraints_ten_element_feasible() -> None:
+    """C3: 10개 constraint_values 모두 feasible(≤0)이면 통과 판정."""
+    from unittest.mock import MagicMock
+
+    from src.domain.futures.optimization.workflow import layer2_constraints_from_trial
+
+    # Arrange: 10개 feasible
+    mock_trial = MagicMock()
+    mock_trial.user_attrs = {"l2_constraint_values": [-1.0] * 10}
+
+    # Act
+    result = layer2_constraints_from_trial(mock_trial)
+
+    # Assert
+    assert len(result) == 10
+    assert all(c <= 0.0 for c in result), "모든 제약이 ≤0 이면 feasible이어야 함"
+
+
+# ---------------------------------------------------------------------------
+# S5: Range BVA — L2_ALLOC_SPACE_V3 경계 검증
+# ---------------------------------------------------------------------------
+
+def test_l2_alloc_space_v3_kelly_range() -> None:
+    """S5: L2_ALLOC_SPACE_V3의 kelly_fraction 범위가 [0.15, 0.55]인지 확인."""
+    from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE_V3
+
+    spec = L2_ALLOC_SPACE_V3["kelly_fraction"]
+    assert spec["low"] == pytest.approx(0.15), "kelly_fraction 하한이 0.15이어야 함"
+    assert spec["high"] == pytest.approx(0.55), "kelly_fraction 상한이 0.55이어야 함"
+
+
+def test_l2_alloc_space_v3_max_ann_vol_range() -> None:
+    """C2: L2_ALLOC_SPACE_V3의 max_ann_vol 범위가 배치천장 개방 후 [0.20, 1.20]인지 확인."""
+    from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE_V3
+
+    spec = L2_ALLOC_SPACE_V3["max_ann_vol"]
+    assert spec["low"] == pytest.approx(0.20), "max_ann_vol 하한이 0.20이어야 함"
+    assert spec["high"] == pytest.approx(1.20), "max_ann_vol 상한이 1.20이어야 함"
+
+
+def test_l2_alloc_space_alias_points_to_v3() -> None:
+    """S5: L2_ALLOC_SPACE가 V3를 가리키는지 확인 (V2 kelly 상한=1.0 ≠ V3 0.55)."""
+    from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE
+
+    assert L2_ALLOC_SPACE["kelly_fraction"]["high"] == pytest.approx(0.55), (
+        "L2_ALLOC_SPACE가 V3를 가리켜야 함 (kelly high=0.55)"
+    )
 
 
 # ---------------------------------------------------------------------------

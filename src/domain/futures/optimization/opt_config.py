@@ -61,7 +61,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # True = tiered pipeline 실행 (Phase D allocation 스킵); False = Phase D 유지.
     "USE_CS_RANK_ENGINE": True,
     # Tiered L2 AWF Optuna 탐색 trial 수 (Phase D와 별도)
-    "L2_OPTUNA_TRIALS": 50,
+    "L2_OPTUNA_TRIALS": 120,
     # Universal Cross-Sectional Alpha Miner Settings
     "FUTURES_ML_ALPHA_POPULATION": 1500,
     "FUTURES_ALPHA_LONG_BIAS": 2.0,
@@ -517,7 +517,17 @@ L2_ALLOC_SPACE_V2: dict[str, dict[str, Any]] = {
     "kelly_fraction":       {"type": "float",        "low": 0.10, "high": 1.0, "step": 0.05},
     "max_ann_vol":          {"type": "float",        "low": 0.20, "high": 0.80, "step": 0.05},
 }
-L2_ALLOC_SPACE = L2_ALLOC_SPACE_V2
+# V3: fractional Kelly 이론 정합 범위. 추정오차 하에서 full Kelly는 변동성 폭발;
+# 0.15-0.55 구간이 실현 복리성장률 최대·분산 절반. vol 0.20-1.20: MDD<=20% 생존제약 내에서
+# optimizer가 배치 천장을 직접 탐색(과거 0.50 천장이 실현 vol 3~5%에서 미접촉 → under-deployment).
+L2_ALLOC_SPACE_V3: dict[str, dict[str, Any]] = {
+    "K_RANK":               {"type": "int",        "low": 1, "high": 6, "step": 1},
+    "REBALANCE_BARS":       {"type": "categorical", "choices": (1, 3, 6)},
+    "CS_Z_SCORE_THRESHOLD": {"type": "float",       "low": 0.0, "high": 1.5, "step": 0.1},
+    "kelly_fraction":       {"type": "float",       "low": 0.15, "high": 0.55, "step": 0.05},
+    "max_ann_vol":          {"type": "float",       "low": 0.20, "high": 1.20, "step": 0.05},
+}
+L2_ALLOC_SPACE = L2_ALLOC_SPACE_V3
 
 
 # ==============================================================================

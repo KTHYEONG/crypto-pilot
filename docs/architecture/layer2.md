@@ -30,7 +30,7 @@ dependencies:
     - docs/architecture/signal.md
     - docs/architecture/regime.md
     - docs/architecture/ML.md
-last_verified: 2026-06-15
+last_verified: 2026-06-16
 ---
 
 # 1. Purpose
@@ -145,7 +145,12 @@ graph TD
 | **Param** | `regime_net_multipliers` | Net cap multipliers per regime. Default HSL tailored |
 | **Param** | `bl_shrinkage_var_mult` | Black-Litterman var shrinkage multiplier. Default: `0.20` |
 | **Param** | `bl_shrinkage_omega_mult` | Black-Litterman omega shrinkage multiplier. Default: `0.10` |
-| **Param** | `L2_OPTUNA_TRIALS` | Number of trials for L2 Optuna hyperparameter optimization. Default: `50` |
+| **Param** | `L2_OPTUNA_TRIALS` | Number of trials for L2 Optuna hyperparameter optimization. Default: `120` |
+| **Param** | `L2_ALLOC_SPACE` (V3) | Fractional Kelly range: `kelly_fraction[0.15,0.55]`, `max_ann_vol[0.20,0.50]`. Narrowed from V2 to reduce pool SR variance and DSR benchmark inflation. |
+| **Param** | `edge_throttle_enabled` | Enable time-varying conviction throttle. Default: `True`. |
+| **Param** | `edge_floor_bps` | Net edge ≤ floor → $m=0$ (flat). Default: `0.0`. NOT Optuna-tuned. |
+| **Param** | `edge_ref_bps` | Net edge ≥ ref → $m=1$ (full). Default: `5.0`. NOT Optuna-tuned. |
+| **Param** | `edge_throttle_gamma` | Throttle curve exponent ($\gamma$). Default: `1.0` (linear). NOT Optuna-tuned. |
 | **Output**| `expected_net_bps` | Shrinkage-adjusted expected return per event |
 | **Output**| `target_weights` | Final portfolio allocation weights per event |
 
@@ -178,6 +183,7 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 - Rank selection: legacy `selection_mode="signed"` preserves historical top-K; Layer 2 uses `selection_mode="absolute"` so strong shorts rank symmetrically.
 - **Event-level net edge handoff**: `ValidatedSignalBatch -> Layer2SignalSchedule`, then per-bar `raw_mu = side * expected_net_bps / expected_holding_bars` so direction and holding horizon survive the handoff.
 - Diagonal Kelly: $w_i \propto f_k \cdot \mu_i / \sigma_i^2$; friction mask: $|\mu_i| \geq \text{hurdle}_i$; support mask prevents new non-zero support from being created by projection.
+- **Edge-Conditional Throttle (시변 conviction multiplier)**: 사이징 직후 $w \leftarrow w \cdot m_t$, $m_t \in [0,1]$. $m_t = \text{clip}\!\left(\frac{s_t - \text{floor}}{\text{ref} - \text{floor}}, 0, 1\right)^{\gamma}$. $s_t = \frac{\sum_i |w_i| \cdot \max(|\mu_i| - \tilde{h}_i, 0)}{\sum_i |w_i|}$ (gross-weighted net-of-cost edge; $\tilde{h}_i = h_i \cdot c_{\text{safety}} / T_{\text{rebal}}$). baseline 미적용(게이트 보수성). 비활성 시 $m_t \equiv 1$. 이론: conviction-weighted Kelly — 추정오차 하에서 edge에 비례한 베팅이 E[log growth] 최대. vol-target이 덮어쓴 비례성 복원.
 - Vol-target scaling: $w \leftarrow w \cdot (\sigma_{\text{target}} / \sigma_{\text{port}})$; caps: gross/per-symbol/net/beta, then revalidate support-preserving projection.
 - No-trade band: $|\Delta w_i| < \text{band} \rightarrow w_i \leftarrow w_{\text{prev},i}$
 - **Taker cost deduction**: `compute_rebalance_cost(previous_weights, target_weights, round_trip_cost_bps)` uses actual weight delta and applies cost only on rebalance bars.
@@ -190,19 +196,19 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 - **Gate** (9-condition sequential AND; first failure → `blocker_reason`):
   - **Stage 0 (Deployment Sanity):** `signal_total > 0` AND `friction_pass_pct > 0` AND `support_leak_count == 0` AND `isfinite(sharpe, cagr)` → `no_deployment`
   - **Stage A (Absolute Compound Growth — PRIMARY):**
-    1. $\text{CAGR}_{\text{hybrid}} \geq l2\_min\_cagr$ (default **0.15**) — post-cost compound growth ≥15%.
+    1. $\text{CAGR}_{\text{hybrid}} \geq l2\_min\_cagr$ (default **0.30**, was 0.15 — deployment ceiling 개방(C2)에 따른 재보정) — post-cost compound growth ≥30%.
     2. $\text{MAR}_{\text{hybrid}} \geq l2\_min\_mar$ (default **1.0**) — CAGR/MDD ≥ 1 (annual gain ≥ max drawdown).
     3. $\text{Sharpe}_{\text{hybrid}} \geq l2\_min\_sharpe\_abs$ (default **1.0**) — institutional floor for leveraged crypto futures.
   - **Stage B (Risk Control):**
-    4. $\text{MDD}_{\text{hybrid}} \leq \text{MDD}_{\text{risk-matched EW}}$ — relative risk guard vs risk-matched EW (MDD 전용).
+    4. **Relative-MDD tolerance band** (was hard `MDD_hybrid <= MDD_baseline`): exempt if $\text{MDD}_{\text{hybrid}} \leq l2\_mdd\_material\_floor$ (default **0.05**, noise floor); else require $\text{MDD}_{\text{hybrid}} \leq \text{MDD}_{\text{baseline}} \times (1 + l2\_mdd\_rel\_tol)$ (default tolerance **0.25**).
     5. $\text{MDD}_{\text{hybrid}} \leq l2\_max\_mdd\_abs$ (default **0.20**) — absolute cap (50% DD requires +100% recovery; 20% cap enforced).
   - **Stage C (Robustness / Anti-overfit):**
     6. $\text{fold\_pass\_ratio} \geq l2\_min\_fold\_pass\_ratio$ (default 0.60); pass = $\prod(1+r_{\text{fold}}) > 1.0$ (compound, not Sharpe-positive).
     7. `active_blocks >= l2_min_active_blocks` (default **3**) — AWF fold 단위로 계산; `len([m for m in block_metrics if m.active_rebalances > 0])`. (Optuna 제약과 최종 게이트 동일 정의.)
-    8. $\text{DSR} \geq l2\_min\_dsr$ (default **0.75**) — Deflated Sharpe Ratio (Bailey & López de Prado, 2012): trial-pool 선택편향을 보정한 후 SR > 0 확률. PSR을 포섭(이중 차감 제거). **PSR은 진단 전용** (게이트에서 제거됨).
-    9. $\text{friction\_pass\_pct} \geq l2\_min\_friction\_pass$ (default **0.50**) — ≥50% of signals must cover their own transaction cost hurdle.
+    8. $\text{friction\_pass\_pct} \geq l2\_min\_friction\_pass$ (default **0.50**) — ≥50% of signals must cover their own transaction cost hurdle.
   - **Stage D (Relative Advantage — SECONDARY, sign-safe additive):**
-    10. $\text{Sharpe}_{\text{hybrid}} \geq \text{Sharpe}_{\text{pure 1/N EW}} + l2\_min\_sharpe\_uplift$ (default 0.20). **Baseline = 순수 1/N EW** (sigma-match 제거; risk-matched는 MDD 게이트 전용). Additive form prevents sign-reversal when baseline Sharpe < 0.
+    9. $\text{Sharpe}_{\text{hybrid}} \geq \text{Sharpe}_{\text{pure 1/N EW}} + l2\_min\_sharpe\_uplift$ (default 0.20). **Baseline = 순수 1/N EW** (sigma-match 제거; risk-matched는 MDD 게이트 전용). Additive form prevents sign-reversal when baseline Sharpe < 0.
+  - **DSR/PSR은 게이트에서 완전히 제거되어 진단 전용**(diagnostic-only display) — pool-상대 benchmark가 trial 수와 동반 상승하는 구조적 편향 + L3 frozen holdout과의 3중 중복 검증이 이유 (2026-06-16).
   - All thresholds configurable via `l2_params` keys; default values are crypto-futures conservative floors — do NOT tune to pass a specific backtest.
   - **MAR display guard**: `cagr < 0` → shown as `n/a(loss)` (MAR is non-monotone when CAGR < 0).
 
@@ -214,14 +220,16 @@ Cross-sectional ranking + Diagonal Kelly pipeline as a parallel seam to Phase D 
 
 **Decoupled Optuna**
 - `L1_ALPHA_SPACE` → `objective_l1_ic` (IC only; Sharpe not referenced)
-- `L2_ALLOC_SPACE` → `objective_l2_growth` (보수적 기대 복리성장 LCB 최대화; 제약 조건은 TPESampler의 `constraints_func`로 전달). **10개 제약**: deployment/mdd/sharpe_abs/fold/friction/support_leak/growth_lcb/cvar/active_blocks/**uplift**. uplift 제약 추가로 Optuna 탐색이 최종 게이트 방향으로 수렴. `n_startup_trials = max(2·|param_space|, 8)` (≈10; 이전 40% 랜덤 구간 축소).
-- **DSR-Corrected Selection & Replay**: [selection.py](file:///src/domain/futures/strategy/tiered_workflow/selection.py)에서 완료 trial들의 block signature로 `n_trials_eff`를 연산하고, 최종 챔피언에 대해 DSR 검증(DSR >= min_dsr, Bailey & López de Prado (2012) 기반 per-bar 스케일 교정 수식 적용) 및 결정적 일치 검증(cagr/mdd/growth_lcb)을 강제함.
+- `L2_ALLOC_SPACE` (V3, `max_ann_vol` ∈ [0.20, 1.20] — 배치천장 개방(C2)) → `objective_l2_growth` (보수적 기대 복리성장 LCB(z=0, 분산 패널티 없음) 최대화; 제약 조건은 TPESampler의 `constraints_func`로 전달). **10개 제약**: deployment/mdd_rel/mdd_abs/sharpe_abs/fold/friction/support_leak/growth_lcb/cvar/active_blocks/uplift. DSR-in-loop(과거 11번째 제약)은 구조적 편향으로 제거됨(2026-06-16). `n_startup_trials = max(2·|param_space|, 8)` (≈10).
+- **Champion Selection**: [selection.py](file:///src/domain/futures/strategy/tiered_workflow/selection.py)에서 feasible completed trial 중 objective(`growth_lcb`) 최상위를 챔피언으로 직접 선정(DSR 컷오프 루프 제거). DSR/PSR은 챔피언 확정 후 1회만 계산해 결과에 진단으로 첨부.
+- **Study Lifecycle (매 실행 완전 초기화)**: `get_or_create_study(resume=False)`로 동일 `study_name`의 기존 trial을 항상 `delete_study` 후 재생성. 과거에는 `load_if_exists=True`로 코드 변경(search space bounds 변경 등) 후에도 이종 trial이 한 study에 누적되어, TPESampler가 동일 파라미터의 distribution 불일치를 "dynamic search space"로 오판 → RandomSampler fallback 경고 + trial 수가 `L2_OPTUNA_TRIALS`(120)를 초과 누적되는 버그가 있었음(2026-06-16 수정).
+- **Champion Store (영구 레저)**: `l2_champion_store_{tf}` study(절대 미초기화, `optimize`/`ask` 미호출 — 순수 기록용)에 run마다 챔피언의 `(params, growth_lcb_hybrid)`를 기록. 새 값이 기존 레저 최고값보다 클 때만 `update_champion_store`가 `add_trial`로 갱신(`run_tracker.py`). 다음 run의 warm-start anchor는 이 레저의 `best_trial.params`를 우선 사용(레저 키가 현재 `L2_ALLOC_SPACE`에 없으면 무시 — dead-param 방어), 없으면 검증된 기본값(`K_RANK:3, REBALANCE_BARS:3, CS_Z:0.5, kelly:0.25, vol:0.35`)으로 보강.
 - Short-circuit: L1 BLOCKED → L2/L3 = None (skip)
 
 **Optuna L2 Execution Flow (Step A→B→C→D):**
 - **Step A (L1 Validation):** Executes `run_tiered_pipeline` with `target_phase="l1"` to obtain L1 results. If L1 is blocked, execution returns early.
 - **Step B (L2 Signal Batching):** Builds a causal signal batch using the Layer 1 validation results and historical L2 training windows via `_build_l2_signal_batch`.
-- **Step C (L2 Study Optimization):** Runs `_run_tiered_l2_study` with `objective_l2_sharpe` (maximizing CAGR, returning `-inf` on gate failures) for `L2_OPTUNA_TRIALS` iterations. Within the objective function, AWF folds are filtered to the L2 window `[l2_start, holdout_start)` to align exactly with the pipeline's evaluation bounds. Verbose table logging is suppressed via `verbose=False` passed to `run_l2_awf`, and a carriage-return (`\r`) callback displays progress as a single line. If all trials fail, falls back to default `l2_params`.
+- **Step C (L2 Study Optimization):** Runs `_run_tiered_l2_study` with `objective_l2_growth` (maximizing growth LCB, returning `-inf` on gate failures) for `L2_OPTUNA_TRIALS`(120) iterations on a freshly-reset study (`get_or_create_study(resume=False)`). Within the objective function, AWF folds are filtered to the L2 window `[l2_start, holdout_start)` to align exactly with the pipeline's evaluation bounds. If all trials fail, falls back to default `l2_params`.
 - **Step D (Final Pipeline Run):** Executes `run_tiered_pipeline` with `l1_result_override` containing the L1 result and `l2_params` containing the best parameters found. L1 execution is skipped, directly running the L2 AWF simulation with `verbose=True` to print the final scorecard exactly once.
 
 ## 6.3 Architecture Flow

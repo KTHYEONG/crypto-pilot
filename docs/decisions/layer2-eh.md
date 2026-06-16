@@ -7,6 +7,26 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-16 Growth-Gate 재설계(C1-C4) — LCB z=0, 배치천장 개방, 게이트 재배선, l1-tmp 폐기
+- **Delta:** (1) `l2_growth_lcb_z` 1.0→0.0(분산 패널티 제거), `l2_min_cagr` 0.15→0.30. (2) `L2_ALLOC_SPACE_V3.max_ann_vol` high 0.50→1.20(MDD≤20% 생존 제약으로 탐색 위임). (3) DSR 하드게이트(`l2_min_dsr`) 완전 제거 → 진단 전용; relative-MDD를 hard `<=baseline`에서 material floor(0.05) 면제 + 25% tolerance band로 교체. (4) `select_layer2_champion`이 DSR 컷오프 루프 없이 objective(growth_lcb) 최상위 feasible trial을 직접 챔피언으로 선정. (5) `docs/specs/l1-tmp.md`(L1 비정상성 별도 트랙) 폐기.
+- **Rationale:** CAGR 12.2%/Sharpe 2.433/fold 100% pass인데도 구조적으로 under-deployed — 원인은 (a) LCB z=1.0의 과도한 분산 패널티가 objective를 왜곡, (b) `max_ann_vol<=0.50` 배치천장이 growth 최대화를 인위적으로 제한, (c) DSR이 trial-pool 상대 benchmark라 trial 수와 동반 상승하는 구조적 편향 + L3 frozen holdout과 중복 검증.
+- **Edge Cases:** `l2_min_dsr` 필드는 코드에 잔존(과거 호환/진단용)하나 게이트 어디서도 read 안 됨. `mdd_h<=0.05`는 노이즈로 간주해 상대 게이트 전부 면제.
+
+## 2026-06-16 Optuna Study 오염 수정 — 매 실행 초기화 + 영구 챔피언 레저
+- **Delta:** (1) L2 study 생성을 `_optuna.create_study(load_if_exists=True)`→`get_or_create_study(resume=False)`로 전환(매 실행 `delete_study`후 재생성). (2) 별도 `l2_champion_store_{tf}` study 신설(절대 미초기화, `optimize`/`ask` 미호출 — 순수 기록용); `load_champion_params`/`update_champion_store`(`run_tracker.py`)로 run간 챔피언이 개선될 때만 갱신. (3) 다음 run의 warm-start anchor가 레저 best params를 우선 사용(현재 `L2_ALLOC_SPACE` 키만 필터).
+- **Rationale:** `study_name` 해시가 search-space 내용을 반영하지 않아(`search_space_version` 리터럴) 코드 변경(bounds 조정 등) 후에도 동일 study에 이종 trial 누적 → TPESampler가 동일 파라미터의 distribution 불일치를 "dynamic search space"로 오판해 RandomSampler fallback 경고 발생 + `study.optimize(n_trials=120)`가 매 실행 기존 trial에 120개씩 누적(Trial#361 관측). 오염 study 2건 Redis에서 즉시 삭제.
+- **Edge Cases:** 챔피언 레저는 `optimize` 대상이 아니므로 search space 변경에도 dynamic-search-space 경고 무관. 레저에 과거 dead-param이 있어도 anchor 병합 시 현재 space 키만 채택해 무시.
+
+## 2026-06-16 Edge-Conditional Throttle — 시변 conviction multiplier 도입
+- **Delta:** `awf_sim._run_awf_simulation` 사이징 직후 `w *= m_t`. `m_t = clip((s-floor)/(ref-floor),0,1)**γ`. `s = Σ|w_i|·max(|μ_i|−h̃_i,0)/Σ|w_i|`, `h̃_i=h_i·safety_mult/rebal_bars`. `Layer2AllocationConfig` 4필드(enabled/floor/ref/gamma) 추가. Optuna 탐색 미추가(anti-curve-fit).
+- **Rationale:** Sharpe/DSR은 척도-불변(`Sharpe(c·r)=Sharpe(r)`) → kelly_fraction·max_ann_vol 튜닝은 DSR 구조적 무이동. 유일한 DSR 레버 = 수익 분포 재형성(시변 승수). Fold#1 Sharpe−2.08 구간(저-edge)을 down-weight → aggregate Sharpe↑·좌측 tail↓ → DSR 2경로 상승.
+- **Edge Cases:** baseline 미적용(게이트 보수성). `safety_mult` 포함(`eff_hurdle=hurdle*safety_mult/rebal_bars`)으로 내부 friction filter와 산식 일관. NaN score→m=0. disabled→m≡1(기존 동작 비트-동일).
+
+## 2026-06-16 DSR-Optuna 정렬 — 11번째 제약 + V3 Range + Warm-start
+- **Delta:** (1) `L2_ALLOC_SPACE_V3` 신설: `kelly[0.15,0.55]·vol[0.20,0.50]` 축소(V2: 0.10–1.0/0.20–0.80) → `std(pool_SR)↓` 직접 반영. (2) `objective_l2_growth`에 running-DSR 11번째 Optuna 제약 추가(`_DSR_LOOP_MIN_POOL=8` startup 면제). (3) `L2_OPTUNA_TRIALS` 50→120, warm-start anchor trial, `search_space_version="v3"`.
+- **Rationale:** DSR 0.228 차단은 신호 한계 아님 — benchmark(`E[max pool SR]≈2.46`) > champion(1.69). 원인: (a) DSR이 탐색 루프 밖 → TPE가 DSR 방향 학습 불가. (b) 넓은 range가 pool SR 분산 과부풀. 11번째 제약으로 TPE feasibility 모델이 저-DSR 영역 회피, range 축소로 benchmark 직접 하강.
+- **Edge Cases:** 구버전 10-element `l2_constraint_values`는 11번째 `1.0` 자동 패딩(backward compat). Bailey-LdP 원형(전 complete trial 풀) 유지. DSR 11번째 제약은 selection.py `all(c<=0)`에 자동 포함(tuple 길이 무관).
+
 ## 2026-06-15 L2 BLOCKED 교정 — Objective↔Gate 정렬, Dual Baseline, DSR 재보정
 - **Delta:** (1) `build_directional_equal_weight_baseline`(순수 1/N) 신설 — uplift 게이트/표시 전용. risk-matched는 MDD 상대 게이트 전용 유지. (2) Optuna 제약 10번째에 uplift 제약 추가 → 탐색이 게이트로 수렴. (3) `l2_min_active_blocks 4→3` (AWF fold 기반 정의 통일), `l2_min_dsr 0.95→0.75`, PSR 게이트 제거(진단 강등). (4) DSR fallback 단일원소 degenerate 경로 → PSR 정직 하한. (5) `n_startup_trials` 40%→20%.
 - **Rationale:** objective(growth_lcb)와 차단 기준(DSR·uplift)이 분리된 구조적 오설계 + risk-matched baseline self-defeat(diagonal-Kelly와 수학적 동일 → uplift≡0) + active_blocks 정의 불일치(fold 수 3 < 임계 4). DSR·PSR 이중 차감도 동시 제거.
