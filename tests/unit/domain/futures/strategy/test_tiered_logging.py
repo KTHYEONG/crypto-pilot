@@ -548,6 +548,40 @@ class TestFormatLayer3Table:
         assert "CAGR" not in result
         assert ">> FINAL RESULT : ❌ ERROR (no_holdout_signals)" in result
 
+    def test_renders_new_compounding_and_sanity_fields(self) -> None:
+        """S10: total_return/equity_multiple/n_trades 신규 필드와 DEPLOY-READY 라벨 렌더링."""
+        # Arrange
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer3Result
+
+        r3 = Layer3Result(
+            cagr=0.35,
+            mdd=0.12,
+            sharpe=1.6,
+            mar=2.9,
+            cagr_baseline=0.20,
+            mdd_baseline=0.18,
+            sharpe_baseline=1.1,
+            mar_baseline=1.1,
+            gate_passed=True,
+            blocker_reason="",
+            total_return=0.17,
+            equity_multiple=1.17,
+            sortino=1.4,
+            sortino_baseline=0.9,
+            n_trades=58,
+            cvar95=0.03,
+            avg_gross_exposure=0.45,
+        )
+
+        # Act
+        result = format_layer3_table(r3, holdout_start="2025-10-01", holdout_end="2026-03-31")
+
+        # Assert
+        assert "+17.0%" in result
+        assert "1.17" in result
+        assert "58" in result
+        assert "DEPLOY-READY" in result
+
 
 # ---------------------------------------------------------------------------
 # S11 / S12: SWF 전환 문자열 검증
