@@ -17,7 +17,11 @@ Verify that the implementation accurately reflects the business logic requiremen
   - **Impact Analysis**: Use `find_implementations` to detect external usages of modified components and ensure no downstream modules are broken.
 - **Efficiency**: Minimize internal thinking steps and judge only whether the core logic changes align with the Spec's goals. Use standard file reads strictly as a fallback.
 
-### 2. Intent & Logic Alignment
+### 2. Circuit Breaker (Anti-Loop)
+- **3-Strike Rule**: If the code fails to align with the Spec intent for **3 consecutive audit attempts**, STOP.
+- **Action**: Report the "Persistent Mismatch" and request **Human Intervention** to clarify the Spec or override the implementation.
+
+### 3. Intent & Logic Alignment
 - **Quant/Financial Core**: Verify that formulas, vectorization (NumPy/Pandas), and trading logic intent match the Spec.
 - **Critical Failure Points**: Briefly check for performance bottlenecks (e.g., unnecessary loops) or fatal logical flaws.
 
