@@ -7,11 +7,14 @@ description: Run tests, perform Surgical Hotfixes, and Error Triage.
 
 ## Purpose
 Empirically verify the implementation via `pytest` and perform "Error Triage" or "Hotfixes" to maintain velocity.
-
 ## Execution Rules
 1. **Targeted L2 Verification:** Do NOT run the entire test suite unless necessary. Run `uv run pytest [specific_test_file]` or use `-k [keyword]` to filter tests related to the modified code.
    - **Diagnostic Assistance**: If a test fails, use Serena MCP (`get_diagnostics` or `find_implementations`) to localize issues. Limit raw output analysis to save tokens.
-2. **Surgical Hotfix (Fast-Track - EFFICIENCY)**:
+2. **Circuit Breaker (Anti-Loop)**:
+   - **3-Strike Rule**: If the same test failure or logic gap persists for **3 consecutive routing cycles** (e.g., check -> implement -> check), STOP all automated attempts.
+   - **Action**: Summarize the blockage clearly and request **Human Intervention**. Do not waste more tokens on repetitive failures.
+3. **Surgical Hotfix (Fast-Track - EFFICIENCY)**:
+...
    - If a failure is caused by a **minor, obvious error** (e.g., missing import, simple typo, obvious off-by-one), fix it directly using the `replace` tool.
    - **Limit**: Max 1 Hotfix attempt per file. If it fails, stop and route immediately.
 3. **Error Triage (Routing Loop)**:
