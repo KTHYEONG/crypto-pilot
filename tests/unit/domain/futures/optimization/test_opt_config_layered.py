@@ -3,9 +3,8 @@
 Covers: REGIME_FLOOR clamp, segment ordering, warmup buffer, duration approximation.
 """
 
-from __future__ import annotations
-
 import datetime
+from typing import Any, cast
 
 import pytest
 from dateutil.relativedelta import relativedelta
@@ -157,7 +156,7 @@ def test_get_layered_window_frozen() -> None:
     import dataclasses
 
     with pytest.raises((dataclasses.FrozenInstanceError, AttributeError)):
-        w.fetch_start = datetime.date(2020, 1, 1)  # type: ignore[misc]
+        cast(Any, w).fetch_start = datetime.date(2020, 1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -181,18 +180,18 @@ def test_l2_alloc_space_excludes_dead_params() -> None:
 
 
 def test_l2_alloc_space_max_ann_vol_range() -> None:
-    """C2: max_ann_vol ∈ [0.20, 1.20] (배치천장 개방, V3)."""
+    """C2: max_ann_vol ∈ [0.30, 2.00] (V5 active deployment 확장)."""
     spec = L2_ALLOC_SPACE["max_ann_vol"]
 
     assert spec["type"] == "float"
-    assert spec["low"] == pytest.approx(0.20)
-    assert spec["high"] == pytest.approx(1.20)
+    assert spec["low"] == pytest.approx(0.30)
+    assert spec["high"] == pytest.approx(2.00)
 
 
 def test_l2_alloc_space_kelly_fraction_range() -> None:
-    """S5: kelly_fraction ∈ [0.15, 0.55] (fractional Kelly 이론 정합, V3)."""
+    """S5: kelly_fraction ∈ [0.20, 0.80] (V5 active deployment 범위)."""
     spec = L2_ALLOC_SPACE["kelly_fraction"]
 
     assert spec["type"] == "float"
-    assert spec["low"] == pytest.approx(0.15)
-    assert spec["high"] == pytest.approx(0.55)
+    assert spec["low"] == pytest.approx(0.20)
+    assert spec["high"] == pytest.approx(0.80)

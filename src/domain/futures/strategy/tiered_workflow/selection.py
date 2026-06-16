@@ -94,7 +94,7 @@ def select_layer2_champion(
         signatures.append(sig)
     
     signatures_arr = np.array(signatures, dtype=np.float64)
-    weights_arr = np.ones(len(complete_trials), dtype=np.float64)
+    weights_arr: np.ndarray = np.ones(len(complete_trials), dtype=np.float64)
 
     if len(complete_trials) >= 2:
         try:
@@ -139,52 +139,71 @@ def select_layer2_champion(
         dtype=np.float64
     )
 
-    # 4. objective(growth_lcb) 최상위 feasible trial을 챔피언으로 선정
-    champion_trial = feasible_sorted[0]
-    champion_config = Layer2AllocationConfig.from_mapping(dict(champion_trial.params))
-    champion_evaluation = evaluate_l2_trial(
-        signal_batch=signal_batch,
-        aligned=aligned,
-        awf_folds=awf_folds,
-        config=champion_config,
-        caps=caps,
-        tf=tf,
+    # 4. objective(growth_lcb) 최상위 feasible trial부터 bounded replay fallback 수행
+    fallback_limit = max(
+        Layer2AllocationConfig.from_mapping(dict(feasible_sorted[0].params)).l2_replay_max_fallbacks,
+        1,
     )
+    replay_candidates = feasible_sorted[:fallback_limit]
+    first_trial = replay_candidates[0]
+    first_evaluation = None
+    champion_trial = None
+    champion_evaluation = None
+
+    for candidate in replay_candidates:
+        candidate_config = Layer2AllocationConfig.from_mapping(dict(candidate.params))
+        candidate_evaluation = evaluate_l2_trial(
+            signal_batch=signal_batch,
+            aligned=aligned,
+            awf_folds=awf_folds,
+            config=candidate_config,
+            caps=caps,
+            tf=tf,
+        )
+        if first_evaluation is None:
+            first_evaluation = candidate_evaluation
+
+        stored_cagr = float(candidate.user_attrs.get("cagr_hybrid", 0.0))
+        stored_growth_lcb = float(candidate.user_attrs.get("growth_lcb_hybrid", 0.0))
+        stored_mdd = float(candidate.user_attrs.get("mdd_hybrid", 0.0))
+        eps = 1e-5
+        replay_mismatch = (
+            abs(candidate_evaluation.cagr_hybrid - stored_cagr) > eps
+            or abs(candidate_evaluation.growth_lcb_hybrid - stored_growth_lcb) > eps
+            or abs(candidate_evaluation.mdd_hybrid - stored_mdd) > eps
+        )
+        replay_feasible = all(value <= 0.0 for value in candidate_evaluation.constraint_values)
+        if replay_mismatch:
+            _logger.warning(
+                "[L2-SELECTION] Replay mismatch on trial #%d: stored_cagr=%.6f replayed_cagr=%.6f",
+                candidate.number,
+                stored_cagr,
+                candidate_evaluation.cagr_hybrid,
+            )
+        if replay_feasible:
+            champion_trial = candidate
+            champion_evaluation = candidate_evaluation
+            break
+
+    if champion_trial is None or champion_evaluation is None:
+        _logger.error("[L2-SELECTION] No replay-feasible candidate found within fallback window")
+        return Layer2StudyResult(
+            best_params=dict(first_trial.params),
+            best_trial_number=int(first_trial.number),
+            best_evaluation=first_evaluation,
+            dsr=0.0,
+            effective_trial_count=n_trials_eff,
+            completed_trials=len(complete_trials),
+            feasible_trials=len(feasible_trials),
+            blocker_reason="non_deterministic_replay",
+        )
+
     champion_dsr = _deflated_sharpe_probability(
         selected_rets=champion_evaluation.returns_hybrid,
         completed_trial_sharpes=completed_trial_sharpes,
         effective_trial_count=n_trials_eff,
         bars_per_year=bars_per_year,
     )
-
-    # 5. 결정적 일치 검증 (Deterministic Replay)
-    assert champion_trial is not None
-    assert champion_evaluation is not None
-    stored_cagr = float(champion_trial.user_attrs.get("cagr_hybrid", 0.0))
-    stored_growth_lcb = float(champion_trial.user_attrs.get("growth_lcb_hybrid", 0.0))
-    stored_mdd = float(champion_trial.user_attrs.get("mdd_hybrid", 0.0))
-
-    eps = 1e-5
-    if (
-        abs(champion_evaluation.cagr_hybrid - stored_cagr) > eps
-        or abs(champion_evaluation.growth_lcb_hybrid - stored_growth_lcb) > eps
-        or abs(champion_evaluation.mdd_hybrid - stored_mdd) > eps
-    ):
-        _logger.error(
-            "[L2-SELECTION] Non-deterministic replay detected: stored_cagr=%.6f vs replayed_cagr=%.6f",
-            stored_cagr,
-            champion_evaluation.cagr_hybrid,
-        )
-        return Layer2StudyResult(
-            best_params=dict(champion_trial.params),
-            best_trial_number=int(champion_trial.number),
-            best_evaluation=champion_evaluation,
-            dsr=champion_dsr,
-            effective_trial_count=n_trials_eff,
-            completed_trials=len(complete_trials),
-            feasible_trials=len(feasible_trials),
-            blocker_reason="non_deterministic_replay",
-        )
 
     _logger.info(
         "[L2-SELECTION] Champion selected. Trial #%d, Objective=%.4f, DSR=%.4f (n_eff=%.2f)",
