@@ -141,27 +141,29 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 ● [LAYER 2: PORTFOLIO ALLOCATION & RISK OPTIMIZATION]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ● [HYPERPARAMETER OPTIMIZATION]
-    - Study Name : l2_study_4h_3188d59f8b1c
+    - Study Name : l2_study_4h_09eb97d7f27f
     - Config     : 120 trials
   ────────────────────────────────────────────────────────────────────────────
-[L2-SELECTION] Non-deterministic replay detected: stored_cagr=0.312994 vs replayed_cagr=0.345894
+[L2-SELECTION] Replay mismatch on trial #92: stored_cagr=0.328186 replayed_cagr=0.473765
+[L2-SELECTION] Champion selected. Trial #92, Objective=0.3097, DSR=0.3297 (n_eff=5.27)
+  ● [CHAMPION STORE] 신규 챔피언 갱신 (tf=4h, growth_lcb=0.4170)
 ● [LAYER 2 PORTFOLIO SCORECARD]
 ──────────────────────────────────────────────────────────────────────────────
   STATUS  : ✅ PASS
 
-  ✅ [Growth    ] CAGR: +31.3% (>=30.0%) | PnL: +14.5% | Equity x1.15
-  ✅ [Efficiency] Sharpe: 2.296 (>=1.000) | Sortino: 2.665 (>=1.500) | Calmar: 8.659 (>=1.000)
-  ✅ [Risk      ] MDD: 3.6% (<=30.0%) | CVaR95: 0.5% (<=6.0%) | RiskUtil: 12.0%
+  ✅ [Growth    ] CAGR: +32.8% (>=30.0%) | PnL: +15.2% | Equity x1.15
+  ✅ [Efficiency] Sharpe: 1.959 (>=1.000) | Sortino: 2.142 (>=1.500) | Calmar: 5.213 (>=1.000)
+  ✅ [Risk      ] MDD: 6.3% (<=30.0%) | CVaR95: 0.8% (<=6.0%) | RiskUtil: 21.0%
   ✅ [Robust    ] Fold: 100.0% (>=60.0%) | Trades: 58 (>=30) | Friction: 100.0%
-  ✅ [Uplift    ] Sharpe Uplift: +2.40 (>=+0.20)
-  [Diag     ] DSR: 0.350 (diag) | PSR: 0.957 (diag) | RelMDD: 1.10x | Turnover: 0.045
+  ✅ [Uplift    ] Sharpe Uplift: +2.07 (>=+0.20)
+  [Diag     ] DSR: 0.330 (diag) | PSR: 0.924 (diag) | RelMDD: 1.22x | Turnover: 0.055
 ──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ✅ Sharpe:  0.349 | MDD:    3.0% | Status: PASS
-  ├─ Fold #2 : ✅ Sharpe:  1.941 | MDD:    3.0% | Status: PASS
-  └─ Fold #3 : ✅ Sharpe:  4.020 | MDD:    3.6% | Status: PASS
+  ├─ Fold #1 : ✅ Sharpe:  1.874 | MDD:    3.4% | Status: PASS
+  ├─ Fold #2 : ✅ Sharpe:  1.232 | MDD:    4.4% | Status: PASS
+  └─ Fold #3 : ✅ Sharpe:  2.721 | MDD:    6.3% | Status: PASS
 >> LAYER 2 RESULT: [PASS] -> Proceeding to Final Holdout.
 >> TARGET PHASE l2 REACHED -> Stopping pipeline.
 [PHASE] phase=l2 completed strategy/candidate evaluation only; optimization/training skipped
