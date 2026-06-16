@@ -13,6 +13,7 @@ from typing import Any, Literal, cast
 
 import numpy as np
 import optuna
+from numpy.typing import NDArray
 from optuna.trial import FrozenTrial, Trial, TrialState
 
 from src.domain.futures.optimization.ml_context import MLPhaseDContext
@@ -27,13 +28,13 @@ warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning
 
 # --- Phase Metrics ---
 
-def _as_finite_array(values: Iterable[float]) -> np.ndarray:
-    arr = np.asarray(list(values), dtype=np.float64)
+def _as_finite_array(values: Iterable[float]) -> NDArray[np.float64]:
+    arr: NDArray[np.float64] = cast(NDArray[np.float64], np.asarray(list(values), dtype=np.float64))
     if arr.size == 0:
-        return np.asarray([0.0], dtype=np.float64)
+        return cast(NDArray[np.float64], np.array([0.0], dtype=np.float64))
     arr = arr[np.isfinite(arr)]
     if arr.size == 0:
-        return np.asarray([0.0], dtype=np.float64)
+        return cast(NDArray[np.float64], np.array([0.0], dtype=np.float64))
     return arr
 
 
@@ -1172,11 +1173,15 @@ def _ctx_for_phase(
     inherited_ranges = dict(getattr(base_ctx, "phase_ranges", None) or {})
     inherited_ranges.update(dict(phase_ranges or {}))
     if is_dataclass(base_ctx):
-        return replace(
-            base_ctx,
-            coordinate_phase=phase,
-            coordinate_frozen_params=inherited_frozen,
-            phase_ranges=inherited_ranges,
+        dataclass_ctx = cast(Any, base_ctx)
+        return cast(
+            MLPhaseDContext,
+            replace(
+                dataclass_ctx,
+                coordinate_phase=phase,
+                coordinate_frozen_params=inherited_frozen,
+                phase_ranges=inherited_ranges,
+            ),
         )
     payload = dict(getattr(base_ctx, "__dict__", {}))
     payload["coordinate_phase"] = phase
@@ -1649,6 +1654,27 @@ def _resolve_l2_signal_batch_and_folds(ctx: TieredContext) -> tuple[Any, tuple[A
     )
 
 
+def _deployment_shaped_l2_objective(
+    *,
+    growth_lcb: float,
+    risk_utilization: float,
+    trade_count: int,
+    risk_util_target: float,
+    risk_util_weight: float,
+    trade_target: int,
+    trade_weight: float,
+) -> float:
+    """Keep growth primary while nudging the search toward active deployment."""
+    if not np.isfinite(growth_lcb):
+        return -1e6
+    bounded_risk_target = max(float(risk_util_target), 1e-12)
+    bounded_trade_target = max(int(trade_target), 1)
+    risk_score = min(max(float(risk_utilization), 0.0), bounded_risk_target) / bounded_risk_target
+    trade_score = min(max(int(trade_count), 0), bounded_trade_target) / float(bounded_trade_target)
+    bonus = float(risk_util_weight) * risk_score + float(trade_weight) * trade_score
+    return float(growth_lcb + bonus)
+
+
 def evaluate_l2_trial(
     *,
     signal_batch: Any,
@@ -1777,6 +1803,17 @@ def evaluate_l2_trial(
     )
 
     finite_score = float(growth_lcb_hybrid) if np.isfinite(growth_lcb_hybrid) else -1e6
+    risk_utilization = float(mdd_hybrid) / max(float(config.l2_max_mdd_abs), 1e-9)
+    objective_value = _deployment_shaped_l2_objective(
+        growth_lcb=finite_score,
+        risk_utilization=risk_utilization,
+        trade_count=trade_count,
+        risk_util_target=float(config.l2_objective_risk_util_target),
+        risk_util_weight=float(config.l2_objective_risk_util_weight),
+        trade_target=int(config.l2_objective_trade_target),
+        trade_weight=float(config.l2_objective_trade_weight),
+    )
+    deployment_objective_bonus = float(objective_value - finite_score)
     deployment_failed = (
         sim.signal_total <= 0
         or sim.support_leak_count > 0
@@ -1799,7 +1836,6 @@ def evaluate_l2_trial(
         float(float(config.l2_min_sortino_abs) - sortino_hybrid),
         float(float(config.l2_min_trades) - trade_count),
     )
-    objective_value = finite_score if np.isfinite(finite_score) else -1e6
     return Layer2TrialEvaluation(
         objective_value=float(objective_value),
         constraint_values=constraint_values,
@@ -1822,6 +1858,8 @@ def evaluate_l2_trial(
         returns_baseline=tuple(rets_baseline),
         sortino_hybrid=float(sortino_hybrid),
         trade_count=trade_count,
+        risk_utilization=float(risk_utilization),
+        deployment_objective_bonus=float(deployment_objective_bonus),
     )
 
 
@@ -1864,8 +1902,14 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
     _set_float_attr(trial, "average_gross_exposure", evaluation.average_gross_exposure)
     _set_float_attr(trial, "cap_saturation_ratio", evaluation.cap_saturation_ratio)
     _set_float_attr(trial, "total_cost_bps", evaluation.total_cost_bps)
-    _set_float_attr(trial, "sortino_hybrid", evaluation.sortino_hybrid)
-    trial.set_user_attr("trade_count", evaluation.trade_count)
+    _set_float_attr(trial, "sortino_hybrid", float(getattr(evaluation, "sortino_hybrid", 0.0)))
+    _set_float_attr(trial, "risk_utilization", float(getattr(evaluation, "risk_utilization", 0.0)))
+    _set_float_attr(
+        trial,
+        "deployment_objective_bonus",
+        float(getattr(evaluation, "deployment_objective_bonus", 0.0)),
+    )
+    trial.set_user_attr("trade_count", getattr(evaluation, "trade_count", 0))
 
     # DSR-in-the-loop 제거 (2026-06-16): DSR은 pool-상대 benchmark가 trial 수와
     # 동반 상승하는 구조적 편향 + L3 frozen holdout과 중복 검증 → diagnostic 강등.

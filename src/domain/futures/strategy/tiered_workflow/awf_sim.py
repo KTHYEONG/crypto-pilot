@@ -120,6 +120,21 @@ def _edge_throttle_multiplier(
     return float(floor + (1.0 - floor) * raw)
 
 
+def _estimate_annual_vol(
+    weights: NDArray[np.float64],
+    sigma: NDArray[np.float64],
+    bars_per_year: float,
+) -> float:
+    """Estimate annualized portfolio volatility from diagonal per-bar sigma."""
+    w = np.asarray(weights, dtype=np.float64)
+    sig = np.asarray(sigma, dtype=np.float64)
+    if w.size == 0 or sig.size != w.size:
+        return 0.0
+    sigma_port_bar = float(np.sqrt(float(np.dot(w**2, sig**2))))
+    ann_vol = sigma_port_bar * float(np.sqrt(max(bars_per_year, 1e-12)))
+    return float(ann_vol) if np.isfinite(ann_vol) else 0.0
+
+
 def _apply_risk_budget_floor(
     *,
     weights: NDArray[np.float64],
@@ -148,7 +163,7 @@ def _apply_risk_budget_floor(
         return w
 
     sigma_port_bar = float(np.sqrt(float(np.dot(w**2, sig**2))))
-    ann_vol = sigma_port_bar * float(np.sqrt(max(bars_per_year, 1e-12)))
+    ann_vol = _estimate_annual_vol(w, sig, bars_per_year)
     floor_ann_vol = float(vol_target) * float(floor_ratio)
     if (
         not np.isfinite(ann_vol)
@@ -179,6 +194,34 @@ def _apply_risk_budget_floor(
         support_mask=support,
     )
     return np.asarray(np.where(support, projected, 0.0), dtype=np.float64)
+
+
+def _resolve_adaptive_k_rank(
+    *,
+    base_k: int,
+    n_valid: int,
+    prev_weights: NDArray[np.float64],
+    sigma: NDArray[np.float64],
+    bars_per_year: float,
+    vol_target: float | None,
+    expand_below_vol_ratio: float,
+    max_extra: int,
+) -> int:
+    """Expand breadth when the prior book used too little of the risk budget."""
+    bounded_base = max(0, min(int(base_k), int(n_valid)))
+    if (
+        bounded_base <= 0
+        or n_valid <= 0
+        or vol_target is None
+        or expand_below_vol_ratio <= 0.0
+        or max_extra <= 0
+    ):
+        return bounded_base
+    prev_ann_vol = _estimate_annual_vol(prev_weights, sigma, bars_per_year)
+    trigger_vol = float(vol_target) * float(expand_below_vol_ratio)
+    if not np.isfinite(prev_ann_vol) or not np.isfinite(trigger_vol) or prev_ann_vol >= trigger_vol:
+        return bounded_base
+    return min(bounded_base + int(max_extra), int(n_valid))
 
 
 def _event_strength(event: ValidatedSignalEvent) -> float:
@@ -502,6 +545,11 @@ def _run_awf_simulation(
     edge_throttle_min_active_mult = float(getattr(config, "edge_throttle_min_active_mult", 0.0))
     risk_budget_floor_ratio = float(getattr(config, "risk_budget_floor_ratio", 0.0))
     risk_budget_max_scale = float(getattr(config, "risk_budget_max_scale", 3.0))
+    adaptive_breadth_enabled = bool(getattr(config, "adaptive_breadth_enabled", False))
+    adaptive_k_extra = int(getattr(config, "adaptive_k_extra", 0))
+    adaptive_expand_below_vol_ratio = float(
+        getattr(config, "adaptive_expand_below_vol_ratio", 0.0)
+    )
 
     symbols = aligned.symbols
     n_sym = len(symbols)
@@ -611,9 +659,26 @@ def _run_awf_simulation(
             prof_prep += time.perf_counter() - t0_prep
 
             t0_rank = time.perf_counter()
+            rank_sig_arr: NDArray[np.float64] = np.full(n_sym, VOL_FLOOR, dtype=np.float64)
+            for sym, ss in valid_signals.items():
+                idx = sym_to_idx.get(sym)
+                if idx is not None:
+                    rank_sig_arr[idx] = ss.volatility
+            effective_k_rank = k_rank
+            if adaptive_breadth_enabled:
+                effective_k_rank = _resolve_adaptive_k_rank(
+                    base_k=k_rank,
+                    n_valid=len(valid_signals),
+                    prev_weights=prev_w,
+                    sigma=rank_sig_arr,
+                    bars_per_year=bars_per_year,
+                    vol_target=vol_target,
+                    expand_below_vol_ratio=adaptive_expand_below_vol_ratio,
+                    max_extra=adaptive_k_extra,
+                )
             selected, _z_scores = rank_and_select(
                 valid_signals,
-                k_rank=k_rank,
+                k_rank=effective_k_rank,
                 sector_cap=n_sym,
                 prev_selection=prev_selection,
                 rank_buffer=rank_buffer,

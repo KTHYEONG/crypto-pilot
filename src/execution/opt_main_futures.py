@@ -780,7 +780,7 @@ def _run_tiered_l2_study(
         tf=tf,
         window=window,
         signal_batch=signal_batch,
-        search_space_version="v4",
+        search_space_version="v5",
     )
     _logger.info("  ● [HYPERPARAMETER OPTIMIZATION]")
     _logger.info("    - Study Name : %s", study_name)
@@ -843,6 +843,9 @@ def _run_tiered_l2_study(
             "risk_budget_max_scale": 2.0,
             "no_trade_band": 0.0,
             "rank_buffer": 0,
+            "adaptive_breadth_enabled": True,
+            "adaptive_k_extra": 4,
+            "adaptive_expand_below_vol_ratio": 0.35,
         }
         _champion_anchor = load_champion_params(tag=tf, storage=storage) or {}
         _anchor_params = {
