@@ -780,7 +780,7 @@ def _run_tiered_l2_study(
         tf=tf,
         window=window,
         signal_batch=signal_batch,
-        search_space_version="v3",
+        search_space_version="v4",
     )
     _logger.info("  ● [HYPERPARAMETER OPTIMIZATION]")
     _logger.info("    - Study Name : %s", study_name)
@@ -837,6 +837,12 @@ def _run_tiered_l2_study(
             "CS_Z_SCORE_THRESHOLD": 0.5,
             "kelly_fraction": 0.25,
             "max_ann_vol": 0.35,
+            "deploy_cost_safety_mult": 1.0,
+            "edge_throttle_min_active_mult": 0.25,
+            "risk_budget_floor_ratio": 0.35,
+            "risk_budget_max_scale": 2.0,
+            "no_trade_band": 0.0,
+            "rank_buffer": 0,
         }
         _champion_anchor = load_champion_params(tag=tf, storage=storage) or {}
         _anchor_params = {

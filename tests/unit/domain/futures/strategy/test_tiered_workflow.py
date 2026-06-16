@@ -2575,12 +2575,21 @@ def test_layer2_allocation_config_fixed_cost_safety_mult_default() -> None:
 
 def test_layer2_allocation_config_from_mapping_parses_fixed_cost_safety_mult() -> None:
     """S7: from_mapping({'fixed_cost_safety_mult': 1.5}) → 필드 정확 반영."""
-    params: dict[str, object] = {"kelly_fraction": 0.5, "fixed_cost_safety_mult": 1.5}
+    params: dict[str, object] = {
+        "kelly_fraction": 0.5,
+        "fixed_cost_safety_mult": 1.5,
+        "deploy_cost_safety_mult": 1.1,
+        "risk_budget_floor_ratio": 0.35,
+        "risk_budget_max_scale": 2.0,
+    }
 
     config = Layer2AllocationConfig.from_mapping(params)
 
     assert config.kelly_fraction == pytest.approx(0.5)
     assert config.fixed_cost_safety_mult == pytest.approx(1.5)
+    assert config.deploy_cost_safety_mult == pytest.approx(1.1)
+    assert config.risk_budget_floor_ratio == pytest.approx(0.35)
+    assert config.risk_budget_max_scale == pytest.approx(2.0)
 
 
 def test_layer2_allocation_config_from_mapping_fixed_cost_safety_mult_default() -> None:
@@ -2588,12 +2597,26 @@ def test_layer2_allocation_config_from_mapping_fixed_cost_safety_mult_default() 
     config = Layer2AllocationConfig.from_mapping({})
 
     assert config.fixed_cost_safety_mult == pytest.approx(1.25)
+    assert config.deploy_cost_safety_mult == pytest.approx(1.25)
+    assert config.edge_throttle_min_active_mult == pytest.approx(0.0)
+    assert config.risk_budget_floor_ratio == pytest.approx(0.0)
+    assert config.risk_budget_max_scale == pytest.approx(3.0)
 
 
 def test_layer2_allocation_config_from_mapping_rejects_legacy_friction_safety_mult() -> None:
     """Legacy friction_safety_mult는 조용히 허용하지 않고 즉시 차단한다."""
     with pytest.raises(ValueError, match="friction_safety_mult"):
         Layer2AllocationConfig.from_mapping({"friction_safety_mult": 1.5})
+
+
+def test_layer2_allocation_config_from_mapping_rejects_invalid_deploy_cost_safety_mult() -> None:
+    with pytest.raises(ValueError, match="deploy_cost_safety_mult"):
+        Layer2AllocationConfig.from_mapping({"deploy_cost_safety_mult": 0.9})
+
+
+def test_layer2_allocation_config_from_mapping_rejects_invalid_risk_floor() -> None:
+    with pytest.raises(ValueError, match="risk_budget_floor_ratio"):
+        Layer2AllocationConfig.from_mapping({"risk_budget_floor_ratio": 1.1})
 
 
 def test_layer2_allocation_config_from_mapping_parses_max_ann_vol_alias() -> None:
