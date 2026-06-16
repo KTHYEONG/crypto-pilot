@@ -10,7 +10,7 @@ import signal
 import socket
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -214,6 +214,78 @@ def get_or_create_study(
 
     study = optuna.create_study(**create_kwargs)
     return study
+
+
+def champion_store_study_name(tag: str) -> str:
+    """전역 챔피언 레저(영구 보존, 매 실행 초기화 대상에서 제외) study 이름."""
+    return f"l2_champion_store_{tag}"
+
+
+def _distribution_for_spec(spec: Mapping[str, Any]) -> optuna.distributions.BaseDistribution:
+    spec_type = spec["type"]
+    if spec_type == "categorical":
+        return optuna.distributions.CategoricalDistribution(spec["choices"])
+    if spec_type == "int":
+        return optuna.distributions.IntDistribution(
+            int(spec["low"]), int(spec["high"]), step=int(spec.get("step", 1))
+        )
+    return optuna.distributions.FloatDistribution(
+        float(spec["low"]),
+        float(spec["high"]),
+        step=float(spec["step"]) if "step" in spec else None,
+        log=bool(spec.get("log", False)),
+    )
+
+
+def load_champion_params(tag: str, storage: optuna.storages.BaseStorage) -> dict[str, Any] | None:
+    """영구 챔피언 레저에서 현재까지의 최고 파라미터를 조회. 레저가 비어있으면 None."""
+    try:
+        study = optuna.load_study(study_name=champion_store_study_name(tag), storage=storage)
+    except KeyError:
+        return None
+    if not study.trials:
+        return None
+    try:
+        return dict(study.best_trial.params)
+    except ValueError:
+        return None
+
+
+def update_champion_store(
+    tag: str,
+    storage: optuna.storages.BaseStorage,
+    params: Mapping[str, Any],
+    value: float,
+    space: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    """현 run의 챔피언이 영구 레저의 기존 최고값보다 우수하면 갱신.
+
+    레저 study는 `get_or_create_study(resume=False)` 초기화 대상이 아니며,
+    `optimize()`/`ask()`로 샘플링되지 않는 순수 기록용이므로 search space가
+    실행마다 바뀌어도 dynamic-search-space 경고와 무관하다.
+
+    Returns:
+        True면 신규 챔피언으로 갱신됨, False면 기존 챔피언이 더 우수해 유지됨.
+    """
+    study_name = champion_store_study_name(tag)
+    try:
+        study = optuna.load_study(study_name=study_name, storage=storage)
+    except KeyError:
+        study = optuna.create_study(study_name=study_name, storage=storage, direction="maximize")
+
+    prior_best = study.best_value if study.trials else float("-inf")
+    if value <= prior_best:
+        return False
+
+    distributions = {key: _distribution_for_spec(space[key]) for key in params if key in space}
+    trial = optuna.trial.create_trial(
+        params={k: v for k, v in params.items() if k in distributions},
+        distributions=distributions,
+        value=value,
+        state=TrialState.COMPLETE,
+    )
+    study.add_trial(trial)
+    return True
 
 
 def _nsga2_constraints(trial: optuna.trial.FrozenTrial) -> list[float]:
