@@ -19,6 +19,7 @@ from optuna.trial import FrozenTrial
 
 from src.domain.futures.optimization.workflow import (
     TieredContext,
+    _deployment_shaped_l2_objective,
     layer2_constraints_from_trial,
     objective_l1_ic,
     objective_l2_growth,
@@ -59,6 +60,52 @@ def test_suggest_layered_params_l2_keys_only_l2_space() -> None:
 
     assert set(result.keys()) == set(L2_ALLOC_SPACE.keys())
     assert not (set(result.keys()) & set(L1_ALPHA_SPACE.keys()))
+
+
+def test_deployment_shaped_objective_prefers_better_deployment_at_same_growth() -> None:
+    low = _deployment_shaped_l2_objective(
+        growth_lcb=0.20,
+        risk_utilization=0.10,
+        trade_count=40,
+        risk_util_target=0.35,
+        risk_util_weight=0.03,
+        trade_target=90,
+        trade_weight=0.02,
+    )
+    high = _deployment_shaped_l2_objective(
+        growth_lcb=0.20,
+        risk_utilization=0.30,
+        trade_count=85,
+        risk_util_target=0.35,
+        risk_util_weight=0.03,
+        trade_target=90,
+        trade_weight=0.02,
+    )
+
+    assert high > low
+
+
+def test_deployment_shaped_objective_keeps_growth_primary() -> None:
+    higher_growth = _deployment_shaped_l2_objective(
+        growth_lcb=0.18,
+        risk_utilization=0.20,
+        trade_count=50,
+        risk_util_target=0.35,
+        risk_util_weight=0.03,
+        trade_target=90,
+        trade_weight=0.02,
+    )
+    lower_growth = _deployment_shaped_l2_objective(
+        growth_lcb=0.17,
+        risk_utilization=0.20,
+        trade_count=50,
+        risk_util_target=0.35,
+        risk_util_weight=0.03,
+        trade_target=90,
+        trade_weight=0.02,
+    )
+
+    assert higher_growth > lower_growth
 
 
 # ---------------------------------------------------------------------------
@@ -164,8 +211,8 @@ def test_objective_l2_growth_sets_constraint_attrs() -> None:
         patch(
             "src.domain.futures.optimization.workflow.evaluate_l2_trial",
             return_value=evaluation,
-        ),
-    ):
+    ),
+):
         ctx = TieredContext(
             labeled_events=MagicMock(),
             aligned=MagicMock(),
@@ -186,9 +233,9 @@ def test_objective_l2_growth_sets_constraint_attrs() -> None:
 
 
 def test_layer2_constraints_from_trial_reads_saved_values() -> None:
-    """C3: DSR-in-loop 제거 후 10-tuple로 패딩(짧은 saved values는 1.0/infeasible로 패딩)."""
+    """C3: DSR-in-loop 제거 후 12-tuple로 패딩(짧은 saved values는 1.0/infeasible로 패딩)."""
     trial = cast(FrozenTrial, SimpleNamespace(user_attrs={"l2_constraint_values": [0, -1, 2.5]}))
 
     constraints = layer2_constraints_from_trial(trial)
 
-    assert constraints == (0.0, -1.0, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    assert constraints == (0.0, -1.0, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
