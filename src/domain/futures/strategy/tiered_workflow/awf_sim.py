@@ -70,6 +70,7 @@ class _AwfSimResult:
     total_cost_baseline: float
     cap_saturation_count: int
     rebalance_count: int
+    trade_count: int
     fold_rets_hybrid: list[list[float]]    # fold별 strategy returns
     fold_rets_baseline: list[list[float]]  # fold별 baseline returns
     block_rets_hybrid: tuple[tuple[float, ...], ...]
@@ -462,6 +463,8 @@ def _run_awf_simulation(
     total_cost_baseline = 0.0
     cap_saturation_count = 0
     rebalance_count = 0
+    trade_count = 0
+    prev_support: set[int] = set()
     fold_rets_hybrid: list[list[float]] = []
     fold_rets_baseline: list[list[float]] = []
 
@@ -632,6 +635,9 @@ def _run_awf_simulation(
             signal_total += len(selected)
             cap_saturation_count += int(_is_cap_saturated(weights=w, btc_beta=beta_arr, caps=caps))
             rebalance_count += 1
+            new_support = set(np.flatnonzero(np.abs(w) > 1e-12).tolist())
+            trade_count += len(new_support - prev_support)
+            prev_support = new_support
 
             rebal_cost = compute_rebalance_cost(
                 previous_weights=prev_w,
@@ -719,6 +725,7 @@ def _run_awf_simulation(
         total_cost_baseline=total_cost_baseline,
         cap_saturation_count=cap_saturation_count,
         rebalance_count=rebalance_count,
+        trade_count=trade_count,
         fold_rets_hybrid=fold_rets_hybrid,
         fold_rets_baseline=fold_rets_baseline,
         block_rets_hybrid=tuple(tuple(block) for block in fold_rets_hybrid),

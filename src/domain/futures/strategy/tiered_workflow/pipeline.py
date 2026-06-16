@@ -73,6 +73,8 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     _psr,
     _sharpe,
     _sharpe_hac,
+    _sortino,
+    _terminal_multiple,
     compute_breadth_weighted_ic,
 )
 from src.domain.futures.strategy.tiered_workflow.signal_selection import (
@@ -1133,8 +1135,17 @@ def run_l2_awf(
     _max_cvar_95 = float(config.l2_max_cvar_95)
     _min_growth_uplift = float(config.l2_min_growth_uplift)
     _min_active_blocks = int(config.l2_min_active_blocks)
+    _min_sortino = float(config.l2_min_sortino_abs)
+    _min_trades = int(config.l2_min_trades)
 
-    # Stage 0: deployment sanity — NaN/무거래 명시 차단
+    # 신규 표시 metric (2026-06-16 평가체계 재편: 복리성장+위험효율+배치건전성)
+    sortino_hybrid = _sortino(sim.rets_hybrid, bars_per_year=bars_per_year)
+    terminal_multiple = _terminal_multiple(sim.rets_hybrid)
+    total_pnl_pct = terminal_multiple - 1.0
+    trade_count = int(sim.trade_count)
+    risk_utilization = mdd_hybrid / max(_max_mdd_abs, 1e-9)
+
+    # Stage 0: deployment sanity — NaN/무거래/저표본 명시 차단
     _deployment_ok = (
         sim.signal_total > 0
         and friction_pass_pct > 0.0
@@ -1147,30 +1158,34 @@ def run_l2_awf(
     gate_passed = False
     if not _deployment_ok:
         blocker_reason = "no_deployment"
+    elif trade_count < _min_trades:
+        blocker_reason = "low_trades"
     elif cagr_hybrid <= _min_cagr:
         blocker_reason = "cagr"
-    elif mar_hybrid < _min_mar:
-        blocker_reason = "mar"
     elif sharpe_hybrid < _min_sharpe_abs:
         blocker_reason = "sharpe_abs"
-    elif mdd_hybrid > _mdd_material_floor and mdd_hybrid > mdd_baseline * (1.0 + _mdd_rel_tol):
-        blocker_reason = "mdd_rel"
+    elif sortino_hybrid < _min_sortino:
+        blocker_reason = "sortino"
+    elif mar_hybrid < _min_mar:
+        blocker_reason = "mar"
     elif mdd_hybrid > _max_mdd_abs:
         blocker_reason = "mdd_abs"
+    elif cvar_95_hybrid > _max_cvar_95:
+        blocker_reason = "cvar_95"
     elif fold_pass_ratio < _min_fold_pass:
         blocker_reason = "fold"
     elif len(block_metrics) < _min_active_blocks:
         blocker_reason = "active_blocks"
     elif friction_pass_pct < _min_friction_pass:
         blocker_reason = "friction"
-    elif cvar_95_hybrid > _max_cvar_95:
-        blocker_reason = "cvar_95"
     elif growth_lcb_hybrid < growth_lcb_baseline + _min_growth_uplift:
         blocker_reason = "growth_lcb"
     elif sharpe_hac_hybrid < sharpe_hac_baseline + _min_uplift:
         blocker_reason = "uplift"
     else:
         gate_passed = True
+    # 진단 전용 (게이트 미반영): 상대MDD, mdd_material_floor — 성장중심 결정에 따라 표시만.
+    _ = _mdd_material_floor, _mdd_rel_tol, _min_psr
 
     result = Layer2Result(
         selected_last=sim.last_selected,
@@ -1206,6 +1221,11 @@ def run_l2_awf(
         total_cost_bps=total_cost_bps,
         n_rebalances=sim.rebalance_count,
         block_metrics=block_metrics,
+        sortino_hybrid=sortino_hybrid,
+        terminal_multiple=terminal_multiple,
+        total_pnl_pct=total_pnl_pct,
+        trade_count=trade_count,
+        risk_utilization=risk_utilization,
     )
     fold_sharpes_h = [_sharpe(fr) for fr in sim.fold_rets_hybrid]
     awf_fold_diags = [
