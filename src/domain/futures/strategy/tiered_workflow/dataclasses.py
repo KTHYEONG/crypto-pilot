@@ -467,6 +467,13 @@ class Layer3Result:
         mar_baseline: 기준 전략 MAR.
         gate_passed: L3 통과 여부.
         blocker_reason: 실패 원인 키. 통과 시 빈 문자열.
+        total_return: 홀드아웃 종료 시 누적수익률 (terminal_multiple - 1).
+        equity_multiple: 누적 복리 배수 (terminal_multiple).
+        sortino: 연율화 Sortino (하방위험 조정, 진단용).
+        sortino_baseline: 기준 전략 Sortino (진단용).
+        n_trades: 홀드아웃 체결 수 (통계적 유의성 sanity).
+        cvar95: per-bar 95% CVaR loss (꼬리위험, 양수, 진단용).
+        avg_gross_exposure: 평균 총노출 (실제 배치 여부 진단용).
     """
 
     cagr: float
@@ -479,6 +486,14 @@ class Layer3Result:
     mar_baseline: float
     gate_passed: bool
     blocker_reason: str = ""
+    # ── 신규: 단일 OOS 복리/배치 건전성 (lean) ──
+    total_return: float = 0.0
+    equity_multiple: float = 1.0
+    sortino: float = 0.0
+    sortino_baseline: float = 0.0
+    n_trades: int = 0
+    cvar95: float = 0.0
+    avg_gross_exposure: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
