@@ -7,6 +7,11 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-16 L2 AWF fold anchoring 복원 (PART4 data-merge regression fix)
+- **Delta:** `run_tiered_pipeline`에서 `build_walk_forward_folds(n_bars=...)` 호출 시 `n_bars`(전체 aligned 길이, holdout 포함)가 아니라 `ho_start_idx_l2`(holdout_start까지 bar 수)를 전달하도록 anchoring 복원.
+- **Rationale:** 같은 날 적용된 IS+OOS 데이터 병합(L3 빈 holdout 수정)으로 `aligned.datetimes`가 holdout_end까지 늘어나면서, `n_bars`에 비례하던 L2 fold 생성 공식의 global OOS 구간이 holdout_start 너머로 밀려나 fold 3개→1개로 붕괴(Optuna feasible trial 0건, DSR=0.000 fallback, Trades 58→29 BLOCKED).
+- **Edge Cases:** L1(`build_l1_nested_swf_folds`)은 명시적 `l1_start_idx`/`l1_end_idx`로 anchored되어 이 영향을 받지 않음(수정 전후 byte-identical 출력으로 확인). 수정 후 fold 4개/Trades 99로 회복, 정당한 Sortino 게이트 미달로 BLOCKED — 데이터 버그 아님.
+
 ## 2026-06-16 Layer 2 active deployment 재배선 — 비용 허들/스로틀/위험예산 분리, V4 탐색공간 공개
 - **Delta:** (1) `fixed_cost_safety_mult`의 역할을 gross-edge 보수화로 유지하고, deployment 단계에는 `deploy_cost_safety_mult`를 분리 배선. (2) `edge_throttle_min_active_mult`로 positive edge book의 최소 활성 비중을 허용. (3) `risk_budget_floor_ratio` + `risk_budget_max_scale`로 목표 vol 대비 under-deployed book을 상향 조정하되 support는 보존. (4) `L2_ALLOC_SPACE_V4` 공개 및 `search_space_version="v4"`로 study hash를 분리. (5) `Layer2AllocationConfig.from_mapping`에 신규 필드와 범위 검증 추가.
 - **Rationale:** 결과가 CAGR 14.8%, MDD 1.5%, RiskUtil 5.0%로 나타난 것은 알파 부족보다 under-deployment에 가깝다. L1 신호를 더 크게 쓰되, 비용 모델과 look-ahead 방어는 유지해야 하므로 배치 강도와 비용 허들을 분리해야 했다. 기존 게이트를 완화하는 대신 자본 배분 경로를 적극화해 복리 성장 목적에 정렬했다.
