@@ -21,7 +21,6 @@ class TestLayer2Selection(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tf = "4h"
-        self.min_dsr = 0.95
         self.signal_batch = MagicMock()
         self.signal_batch.events = [MagicMock()]
         self.aligned = MagicMock()
@@ -61,7 +60,6 @@ class TestLayer2Selection(unittest.TestCase):
         res = select_layer2_champion(
             study=study,
             tf=self.tf,
-            min_dsr=self.min_dsr,
             signal_batch=self.signal_batch,
             aligned=self.aligned,
             awf_folds=self.awf_folds,
@@ -91,7 +89,6 @@ class TestLayer2Selection(unittest.TestCase):
         res = select_layer2_champion(
             study=study,
             tf=self.tf,
-            min_dsr=self.min_dsr,
             signal_batch=self.signal_batch,
             aligned=self.aligned,
             awf_folds=self.awf_folds,
@@ -110,7 +107,7 @@ class TestLayer2Selection(unittest.TestCase):
         mock_constraints: MagicMock,
         mock_evaluate: MagicMock,
     ) -> None:
-        """DSR 조건을 충족하고 검증을 통과하는 최적의 챔피언이 정상적으로 선정되는지 테스트."""
+        """objective(growth_lcb) 최상위 feasible trial이 검증을 통과해 챔피언으로 선정되는지 테스트."""
         study = MagicMock(spec=optuna.Study)
         trial = MagicMock(spec=optuna.trial.FrozenTrial)
         trial.state = optuna.trial.TrialState.COMPLETE
@@ -153,13 +150,12 @@ class TestLayer2Selection(unittest.TestCase):
         )
         mock_evaluate.return_value = eval_mock
 
-        # DSR 컷오프 통과: 0.97 >= 0.95
+        # DSR은 diagnostic으로만 첨부됨 (게이트 미적용)
         mock_dsp.return_value = 0.97
 
         res = select_layer2_champion(
             study=study,
             tf=self.tf,
-            min_dsr=self.min_dsr,
             signal_batch=self.signal_batch,
             aligned=self.aligned,
             awf_folds=self.awf_folds,
@@ -174,13 +170,13 @@ class TestLayer2Selection(unittest.TestCase):
     @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
     @patch("src.domain.futures.strategy.tiered_workflow.selection.layer2_constraints_from_trial")
     @patch("src.domain.futures.strategy.tiered_workflow.selection._deflated_sharpe_probability")
-    def test_select_champion_blocked_by_dsr(
+    def test_select_champion_low_dsr_is_diagnostic_not_blocking(
         self,
         mock_dsp: MagicMock,
         mock_constraints: MagicMock,
         mock_evaluate: MagicMock,
     ) -> None:
-        """DSR 컷오프를 충족하는 trial이 전혀 없을 때 blocker_reason='dsr'과 fallback trial 반환 여부 검증."""
+        """C3: DSR이 낮아도(0.90) hard-gate가 아니므로 champion 선정·blocker_reason==''이 유지되는지 검증."""
         study = MagicMock(spec=optuna.Study)
         trial = MagicMock(spec=optuna.trial.FrozenTrial)
         trial.state = optuna.trial.TrialState.COMPLETE
@@ -221,20 +217,19 @@ class TestLayer2Selection(unittest.TestCase):
         )
         mock_evaluate.return_value = eval_mock
 
-        # DSR 컷오프 미달: 0.90 < 0.95
+        # DSR 낮음(0.90)이지만 더 이상 hard-gate가 아님 — 챔피언 선정에 영향 없음
         mock_dsp.return_value = 0.90
 
         res = select_layer2_champion(
             study=study,
             tf=self.tf,
-            min_dsr=self.min_dsr,
             signal_batch=self.signal_batch,
             aligned=self.aligned,
             awf_folds=self.awf_folds,
             caps=self.caps,
         )
 
-        assert res.blocker_reason == "dsr"
+        assert res.blocker_reason == ""
         assert res.best_trial_number == 2
         assert res.dsr == 0.9
         assert res.best_evaluation is not None
