@@ -133,14 +133,41 @@ def pick_strategy_data_maps(
     valid_symbols: list[str],
     tf: str,
 ) -> dict[str, dict[str, Any]]:
-    del oos_data_maps, valid_symbols
+    """Merge IS and OOS frames per symbol/timeframe into one contiguous map.
+
+    Time Complexity: O(sum(len(is_df) + len(oos_df))) for concat+sort+dedup per symbol.
+    Space Complexity: O(sum(len(is_df) + len(oos_df))) for the merged result.
+
+    Args:
+        oos_data_maps: Out-of-sample frames keyed by symbol -> timeframe -> DataFrame.
+        is_data_maps: In-sample frames keyed by symbol -> timeframe -> DataFrame.
+        valid_symbols: Symbols eligible for the merged result; others are dropped.
+        tf: Timeframe key to merge (e.g. "4h").
+
+    Returns:
+        Mapping of symbol -> dict (timeframe -> merged DataFrame, plus passthrough
+        metadata keys excluding `is_start_idx_{tf}`).
+    """
     is_start_key = f"is_start_idx_{tf}"
+    valid_set = set(valid_symbols)
     result: dict[str, dict[str, Any]] = {}
     for sym, sym_dict in is_data_maps.items():
-        if is_start_key in sym_dict:
-            result[sym] = {k: v for k, v in sym_dict.items() if k != is_start_key}
-        else:
-            result[sym] = sym_dict
+        if sym not in valid_set:
+            continue
+        merged_sym: dict[str, Any] = {k: v for k, v in sym_dict.items() if k != is_start_key}
+        is_df = sym_dict.get(tf)
+        oos_df = oos_data_maps.get(sym, {}).get(tf)
+        if isinstance(is_df, pd.DataFrame) and isinstance(oos_df, pd.DataFrame) and not oos_df.empty:
+            if is_df.empty:
+                merged_sym[tf] = oos_df
+            else:
+                merged_sym[tf] = (
+                    pd.concat([is_df, oos_df], ignore_index=True)
+                    .sort_values("datetime")
+                    .drop_duplicates(subset="datetime", keep="first")
+                    .reset_index(drop=True)
+                )
+        result[sym] = merged_sym
     return result
 
 

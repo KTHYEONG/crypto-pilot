@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -354,6 +354,10 @@ def test_strategy_stage_injects_universe_metadata_before_bridge(
     monkeypatch.setattr(opt_main_futures, "run_active_strategy_output_bridge", fake_bridge)
     monkeypatch.setattr(opt_main_futures, "merge_candidate_output_into_is_and_oos", lambda *_: None)
     monkeypatch.setattr(opt_main_futures, "_run_candidate_evaluation_report", lambda *_: None)
+    # This test targets legacy Phase D (universe-metadata injection), not the tiered
+    # pipeline — force non-tiered mode so it doesn't take the tiered try/except branch
+    # (which now exits early via RunnerResult instead of falling back to Phase D).
+    monkeypatch.setitem(opt_main_futures.OPT_FUTURES_CONFIG, "USE_CS_RANK_ENGINE", False)
 
     opt_main_futures._run_strategy_stage(
         run_config,
@@ -1022,6 +1026,7 @@ def test_tiered_pipeline_uses_unfiltered_labeled_events(
 
     mock_win = MagicMock()
     mock_win.fetch_start = datetime(1900, 1, 1).date()
+    mock_win.holdout_start = datetime(1900, 1, 1).date()
     monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kwargs: mock_win)
     monkeypatch.setattr(_pc, "PortfolioCaps", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr(
@@ -1112,6 +1117,7 @@ def test_tiered_layer3_terminal_failure_does_not_fallback_to_phase_d(
 
     mock_win = MagicMock()
     mock_win.fetch_start = datetime(1900, 1, 1).date()
+    mock_win.holdout_start = datetime(1900, 1, 1).date()
     monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kwargs: mock_win)
     monkeypatch.setattr(_pc, "PortfolioCaps", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr(
@@ -1143,3 +1149,317 @@ def test_tiered_layer3_terminal_failure_does_not_fallback_to_phase_d(
     assert result is None
     assert "Phase D fallback suppressed" in caplog.text
     assert "[SIGNAL DIAGNOSTICS: STRATEGY FILTERING]" not in caplog.text
+
+
+# ─── Layer3 holdout integrity: END-coverage filter/guard (layer3-holdout-integrity.md) ──
+
+
+def _make_layered_window(
+    *,
+    fetch_start: date,
+    holdout_start: date,
+    holdout_end: date,
+) -> object:
+    """Build a real LayeredWindow with explicit date boundaries (no MagicMock dates)."""
+    from src.domain.futures.optimization.opt_config import LayeredWindow
+
+    return LayeredWindow(
+        fetch_start=fetch_start,
+        l1_start=fetch_start,
+        l2_start=holdout_start,
+        holdout_start=holdout_start,
+        holdout_end=holdout_end,
+        regime_floor=fetch_start,
+    )
+
+
+def test_effective_trade_syms_s1_excludes_symbol_delisted_before_holdout_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S1: END-coverage 필터 — holdout_end 전 폐지 심볼은 effective_trade_syms에서 제외된다."""
+    # Arrange: A/B는 holdout_end까지 거래, C는 holdout_start 전에 폐지(last_dt < holdout_end)
+    fetch_start = date(2025, 1, 1)
+    holdout_start = date(2025, 10, 1)
+    holdout_end = date(2026, 3, 31)
+
+    full_coverage = pd.DataFrame(
+        {"datetime": pd.date_range("2025-01-01", "2026-04-07", freq="7D", tz="UTC")}
+    )
+    delisted_coverage = pd.DataFrame(
+        {"datetime": pd.date_range("2025-01-01", "2025-08-01", freq="7D", tz="UTC")}
+    )
+    data_maps = {
+        "AAUSDT": {"4h": full_coverage.copy()},
+        "BBUSDT": {"4h": full_coverage.copy()},
+        "CCUSDT": {"4h": delisted_coverage.copy()},
+    }
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps=data_maps,
+        oos_data_maps={},
+        valid_symbols=["AAUSDT", "BBUSDT", "CCUSDT"],
+    )
+    captured: list[list[str]] = []
+    _patch_tiered_deps(monkeypatch, captured)
+
+    import src.domain.futures.optimization.opt_config as _opt_cfg
+
+    layered_window = _make_layered_window(
+        fetch_start=fetch_start, holdout_start=holdout_start, holdout_end=holdout_end
+    )
+    monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kw: layered_window)
+
+    run_config = build_run_config_from_args(
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
+    )
+
+    # Act
+    opt_main_futures._run_strategy_stage(
+        run_config,
+        _make_window(),
+        data_stage,
+        universe_snapshot=_make_snapshot(["AAUSDT", "BBUSDT", "CCUSDT"]),
+    )
+
+    # Assert: effective_trade_syms == [AA, BB] (CC delisted before holdout_end, excluded)
+    assert len(captured) >= 1
+    tiered_call = captured[-1]
+    assert sorted(tiered_call) == ["AAUSDT", "BBUSDT"]
+    assert "CCUSDT" not in tiered_call
+
+
+def test_tiered_pipeline_s2_raises_when_aligned_end_before_holdout_start(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """S2 (갱신): END-coverage guard — align_data_maps가 holdout_start 전에 잘린 datetimes를
+    반환하면 ValueError("tiered holdout coverage missing")가 raise되고, 상위 generic except이
+    이를 포착해 즉시 RunnerResult(exit_code=1)로 종료한다. Phase D fallback은 더 이상 발생하지
+    않는다(PART 3 — Phase D Silent Fallback 제거).
+    """
+    from datetime import date
+    from unittest.mock import MagicMock
+
+    from src.domain.futures.strategy.tiered_workflow import Layer1Result
+
+    fetch_start = date(2025, 1, 1)
+    holdout_start = date(2025, 10, 1)
+    holdout_end = date(2026, 3, 31)
+
+    frame = pd.DataFrame({"datetime": pd.date_range("2025-01-01", periods=4, freq="4h")})
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps={"BTCUSDT": {"4h": frame.copy()}},
+        oos_data_maps={},
+        valid_symbols=["BTCUSDT"],
+    )
+
+    monkeypatch.setattr(
+        opt_main_futures,
+        "OPT_FUTURES_CONFIG",
+        {"USE_CS_RANK_ENGINE": True, "FUTURES_STRATEGY_NAME": "candidate_ml"},
+    )
+    monkeypatch.setattr(
+        opt_main_futures,
+        "run_active_strategy_output_bridge",
+        lambda *_args, **_kwargs: CandidatePipelineOutput(
+            labeled_unfiltered=pd.DataFrame({"symbol": ["BTCUSDT"]})
+        ),
+    )
+    monkeypatch.setattr(opt_main_futures, "merge_candidate_output_into_is_and_oos", lambda *_a, **_k: None)
+    monkeypatch.setattr(opt_main_futures, "_run_candidate_evaluation_report", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        opt_main_futures,
+        "build_candidate_strategy_config",
+        lambda *_a, **_k: MagicMock(candidate=MagicMock()),
+    )
+
+    import src.domain.futures.optimization.opt_config as _opt_cfg
+    import src.domain.futures.portfolio.portfolio_constructor as _pc
+    import src.domain.futures.strategy.common.alignment as _align
+    import src.domain.futures.strategy.tiered_workflow as _tw
+
+    layered_window = _make_layered_window(
+        fetch_start=fetch_start, holdout_start=holdout_start, holdout_end=holdout_end
+    )
+    monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kw: layered_window)
+    monkeypatch.setattr(_pc, "PortfolioCaps", MagicMock(return_value=MagicMock()))
+
+    # align_data_maps (boundary mock, autospec=True) returns aligned datetimes whose
+    # last bar is before holdout_start — simulates intersection-tail truncation.
+    truncated_datetimes = np.array(
+        [np.datetime64("2025-01-01") + np.timedelta64(i, "D") for i in range(5)],
+        dtype="datetime64[ns]",
+    )
+    from unittest.mock import create_autospec
+
+    real_align = _align.align_data_maps
+    fake_align = create_autospec(real_align, spec_set=True)
+    fake_align.return_value = MagicMock(
+        symbols=["BTCUSDT"],
+        datetimes=truncated_datetimes,
+    )
+    monkeypatch.setattr(_align, "align_data_maps", fake_align)
+
+    monkeypatch.setattr(
+        _tw,
+        "run_tiered_pipeline",
+        lambda **_kw: (
+            Layer1Result(
+                signals_per_fold=(),
+                oos_stacked={},
+                pooled_ic=0.0,
+                pooled_tstat=0.0,
+                breadth=0.0,
+                valid_coverage=0.0,
+                fold_pass_ratio=0.0,
+                gate_passed=True,
+                n_valid=1,
+                n_total=1,
+                n_trade_scope=1,
+            ),
+            None,
+            None,
+        ),
+    )
+
+    run_config = build_run_config_from_args(
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
+    )
+    caplog.set_level(logging.INFO)
+
+    # Act: the ValueError is raised inside the tiered try-block, caught by the
+    # generic `except Exception` clause — terminal failure, no Phase D fallback.
+    result = opt_main_futures._run_strategy_stage(
+        run_config,
+        _make_window(),
+        data_stage,
+        universe_snapshot=_make_snapshot(["BTCUSDT"]),
+    )
+
+    # Assert: terminal failure surfaced as RunnerResult, not a silent Phase D fallback.
+    assert result is not None
+    assert result.exit_code == 1
+    assert result.reason.startswith("tiered_pipeline_error:")
+    assert "ValueError" in result.reason
+    assert "tiered holdout coverage missing" in caplog.text
+    assert "Phase D fallback removed" in caplog.text
+    assert "[SIGNAL DIAGNOSTICS" not in caplog.text
+
+
+# ─── PART 4: IS/OOS 데이터 병합 — END-coverage 필터/align이 병합 맵을 사용 ────────
+
+
+def test_effective_trade_syms_s14_uses_merged_full_strategy_maps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S14: END-coverage 필터는 full_strategy_maps(IS+OOS 병합)를 기준으로 동작한다.
+    data_stage.data_maps(IS-only)만으로는 holdout_end 커버리지가 없지만, IS+OOS 병합
+    결과(full_strategy_maps)에는 holdout_end까지 커버리지가 있으므로 effective_trade_syms에
+    포함되어야 한다(회귀 방어 — pick_strategy_data_maps가 IS-only를 반환하던 버그 재발 방지).
+    """
+    # Arrange: IS-only data_maps는 holdout_start 이전에서 끝남(END-coverage 미달)
+    fetch_start = date(2025, 1, 1)
+    holdout_start = date(2025, 10, 1)
+    holdout_end = date(2026, 3, 31)
+
+    is_only_coverage = pd.DataFrame(
+        {"datetime": pd.date_range("2025-01-01", "2025-09-01", freq="7D", tz="UTC")}
+    )
+    # OOS frame extends coverage through holdout_end
+    oos_coverage = pd.DataFrame(
+        {"datetime": pd.date_range("2025-09-08", "2026-04-07", freq="7D", tz="UTC")}
+    )
+    full_merged_coverage = pd.concat(
+        [is_only_coverage, oos_coverage], ignore_index=True
+    ).sort_values("datetime").reset_index(drop=True)
+
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps={"BTCUSDT": {"4h": is_only_coverage.copy()}},
+        oos_data_maps={"BTCUSDT": {"4h": oos_coverage.copy()}},
+        valid_symbols=["BTCUSDT"],
+    )
+    captured: list[list[str]] = []
+    _patch_tiered_deps(monkeypatch, captured)
+
+    # pick_strategy_data_maps is real (not mocked) — exercises C5 merge logic so
+    # full_strategy_maps carries the merged (IS+OOS) coverage through holdout_end.
+    monkeypatch.setattr(
+        opt_main_futures,
+        "pick_strategy_data_maps",
+        lambda **_kw: {"BTCUSDT": {"4h": full_merged_coverage.copy()}},
+    )
+
+    import src.domain.futures.optimization.opt_config as _opt_cfg
+
+    layered_window = _make_layered_window(
+        fetch_start=fetch_start, holdout_start=holdout_start, holdout_end=holdout_end
+    )
+    monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kw: layered_window)
+
+    run_config = build_run_config_from_args(
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
+    )
+
+    # Act
+    opt_main_futures._run_strategy_stage(
+        run_config,
+        _make_window(),
+        data_stage,
+        universe_snapshot=_make_snapshot(["BTCUSDT"]),
+    )
+
+    # Assert: BTCUSDT passes END-coverage filter (using merged full_strategy_maps),
+    # not excluded as it would be if data_stage.data_maps (IS-only) were checked.
+    assert len(captured) >= 1
+    tiered_call = captured[-1]
+    assert "BTCUSDT" in tiered_call
+
+
+def test_align_data_maps_s15_receives_merged_full_strategy_maps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S15: align_data_maps 호출 시 첫 인자가 full_strategy_maps(병합 맵)여야 한다
+    (회귀 방어 — data_stage.data_maps(IS-only)를 넘기면 empty_holdout_window 재발).
+    """
+    from unittest.mock import MagicMock
+
+    frame_is = pd.DataFrame({"datetime": pd.date_range("2025-01-01", periods=4, freq="4h")})
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps={"BTCUSDT": {"4h": frame_is.copy()}},
+        oos_data_maps={},
+        valid_symbols=["BTCUSDT"],
+    )
+    captured: list[list[str]] = []
+    _patch_tiered_deps(monkeypatch, captured)
+
+    merged_frame = pd.DataFrame({"datetime": pd.date_range("2025-01-01", periods=10, freq="4h")})
+    merged_sentinel_maps = {"BTCUSDT": {"4h": merged_frame}}
+    monkeypatch.setattr(
+        opt_main_futures,
+        "pick_strategy_data_maps",
+        lambda **_kw: merged_sentinel_maps,
+    )
+
+    captured_align_data_maps: list[object] = []
+    import src.domain.futures.strategy.common.alignment as _align
+
+    def _capturing_align(data_maps: object, symbols: list[str], tf: str) -> object:
+        captured_align_data_maps.append(data_maps)
+        return MagicMock(symbols=symbols, datetimes=np.array([], dtype="datetime64[ns]"))
+
+    monkeypatch.setattr(_align, "align_data_maps", _capturing_align)
+
+    run_config = build_run_config_from_args(
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
+    )
+
+    # Act
+    opt_main_futures._run_strategy_stage(
+        run_config,
+        _make_window(),
+        data_stage,
+        universe_snapshot=_make_snapshot(["BTCUSDT"]),
+    )
+
+    # Assert: align_data_maps received full_strategy_maps (merged), not data_stage.data_maps.
+    assert len(captured_align_data_maps) >= 1
+    assert captured_align_data_maps[-1] is merged_sentinel_maps

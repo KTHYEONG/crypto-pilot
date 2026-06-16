@@ -151,6 +151,14 @@ def _resolve_holdout_span(
     ho_start_idx = _date_to_left_idx(datetimes, holdout_start)
     ho_end_idx = _date_to_right_exclusive_idx(datetimes, holdout_end)
     if ho_end_idx <= ho_start_idx:
+        last_dt = datetimes[-1] if len(datetimes) > 0 else None
+        logger.warning(
+            "[L3] holdout span empty: start_idx=%d end_idx=%d n_bars=%d last_dt=%s",
+            ho_start_idx,
+            ho_end_idx,
+            len(datetimes),
+            last_dt,
+        )
         raise Layer3WindowError("empty_holdout_window")
     return (ho_start_idx, ho_end_idx)
 
@@ -1251,6 +1259,8 @@ def run_l3_holdout(
     caps: PortfolioCaps,
     tf: str = "4h",
     holdout_labels: tuple[str, str] | None = None,
+    min_trades: int = 10,
+    max_mdd_abs: float = 0.35,
     verbose: bool = True,
 ) -> Layer3Result:
     """Layer3 Holdout 최종 검증."""
@@ -1319,14 +1329,27 @@ def run_l3_holdout(
         tf=tf,
     )
 
-    sharpe = _sharpe(sim.rets_hybrid)
-    sharpe_baseline = _sharpe(sim.rets_baseline)
+    bars_per_year = _bars_per_year_for_tf(tf)
+    sharpe = _sharpe(sim.rets_hybrid, bars_per_year=bars_per_year)
+    sharpe_baseline = _sharpe(sim.rets_baseline, bars_per_year=bars_per_year)
     mdd = _mdd(sim.rets_hybrid)
     mdd_baseline = _mdd(sim.rets_baseline)
-    cagr = _cagr(sim.rets_hybrid)
-    cagr_baseline = _cagr(sim.rets_baseline)
+    cagr = _cagr(sim.rets_hybrid, bars_per_year=bars_per_year)
+    cagr_baseline = _cagr(sim.rets_baseline, bars_per_year=bars_per_year)
     mar = cagr / (mdd + 1e-9)
     mar_baseline = cagr_baseline / (mdd_baseline + 1e-9)
+
+    # 단일패스 복리/건전성 지표 (P2-A) — L2 헬퍼 재사용, 신규 수학 없음.
+    equity_multiple = _terminal_multiple(sim.rets_hybrid)
+    total_return = equity_multiple - 1.0
+    sortino = _sortino(sim.rets_hybrid, bars_per_year=bars_per_year)
+    sortino_baseline = _sortino(sim.rets_baseline, bars_per_year=bars_per_year)
+    n_trades = int(sim.trade_count)
+    cvar95 = _cvar_loss(sim.rets_hybrid, alpha=0.95)
+    avg_gross_exposure = (
+        float(np.mean(sim.all_gross_exposures)) if sim.all_gross_exposures else 0.0
+    )
+
     metrics_finite = all(
         np.isfinite(val)
         for val in (
@@ -1336,6 +1359,8 @@ def run_l3_holdout(
             mdd_baseline,
             cagr,
             cagr_baseline,
+            total_return,
+            equity_multiple,
         )
     )
     blocker_reason = ""
@@ -1344,12 +1369,16 @@ def run_l3_holdout(
         blocker_reason = "no_holdout_returns"
     elif not metrics_finite:
         blocker_reason = "non_finite"
-    elif cagr < 0.0:
-        blocker_reason = "cagr"
+    elif n_trades < min_trades:
+        blocker_reason = "insufficient_trades"
+    elif total_return <= 0.0:
+        blocker_reason = "negative_return"
     elif sharpe < sharpe_baseline:
         blocker_reason = "sharpe_rel"
     elif mdd > mdd_baseline:
         blocker_reason = "mdd_rel"
+    elif mdd > max_mdd_abs:
+        blocker_reason = "mdd_abs"
     else:
         gate_passed = True
 
@@ -1364,6 +1393,13 @@ def run_l3_holdout(
         mar_baseline=mar_baseline,
         gate_passed=gate_passed,
         blocker_reason=blocker_reason,
+        total_return=total_return,
+        equity_multiple=equity_multiple,
+        sortino=sortino,
+        sortino_baseline=sortino_baseline,
+        n_trades=n_trades,
+        cvar95=cvar95,
+        avg_gross_exposure=avg_gross_exposure,
     )
     if verbose:
         logger.info(
@@ -1464,10 +1500,10 @@ def run_tiered_pipeline(
     if verbose and l1_result_override is None:
         logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
     t_l2 = time.perf_counter()
-    awf_folds = _tw.build_walk_forward_folds(n_bars=n_bars, cfg=cfg)
+    ho_start_idx_l2 = _date_to_idx(aligned.datetimes, window.holdout_start)
+    awf_folds = _tw.build_walk_forward_folds(n_bars=ho_start_idx_l2, cfg=cfg)
 
     # L2 window 경계 필터링: OOS 구간이 [l2_start, holdout_start) 내로 제한
-    ho_start_idx_l2 = _date_to_idx(aligned.datetimes, window.holdout_start)
     awf_folds = tuple(
         f for f in awf_folds
         if f.oos_start >= l1_end_bars and f.oos_end <= ho_start_idx_l2
