@@ -155,6 +155,8 @@ class Layer2TrialEvaluation:
     returns_baseline: tuple[float, ...] = ()
     sortino_hybrid: float = 0.0
     trade_count: int = 0
+    risk_utilization: float = 0.0
+    deployment_objective_bonus: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -267,6 +269,14 @@ class Layer2AllocationConfig:
     edge_throttle_min_active_mult: float = 0.0
     risk_budget_floor_ratio: float = 0.0
     risk_budget_max_scale: float = 3.0
+    adaptive_breadth_enabled: bool = False
+    adaptive_k_extra: int = 0
+    adaptive_expand_below_vol_ratio: float = 0.0
+    l2_objective_risk_util_target: float = 0.35
+    l2_objective_risk_util_weight: float = 0.03
+    l2_objective_trade_target: int = 90
+    l2_objective_trade_weight: float = 0.02
+    l2_replay_max_fallbacks: int = 5
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -322,6 +332,51 @@ class Layer2AllocationConfig:
             cls._as_float(params.get("risk_budget_max_scale", 3.0), 3.0),
             1.0,
         )
+        adaptive_k_extra = int(
+            cls._validate_range(
+                "adaptive_k_extra",
+                cls._as_int(params.get("adaptive_k_extra", 0), 0),
+                0,
+            )
+        )
+        adaptive_expand_below_vol_ratio = cls._validate_range(
+            "adaptive_expand_below_vol_ratio",
+            cls._as_float(params.get("adaptive_expand_below_vol_ratio", 0.0), 0.0),
+            0.0,
+            1.0,
+        )
+        l2_objective_risk_util_target = cls._validate_range(
+            "l2_objective_risk_util_target",
+            cls._as_float(params.get("l2_objective_risk_util_target", 0.35), 0.35),
+            0.0,
+            1.0,
+        )
+        if l2_objective_risk_util_target <= 0.0:
+            raise ValueError("l2_objective_risk_util_target must be in range (0.0, 1.0]")
+        l2_objective_risk_util_weight = cls._validate_range(
+            "l2_objective_risk_util_weight",
+            cls._as_float(params.get("l2_objective_risk_util_weight", 0.03), 0.03),
+            0.0,
+        )
+        l2_objective_trade_target = int(
+            cls._validate_range(
+                "l2_objective_trade_target",
+                cls._as_int(params.get("l2_objective_trade_target", 90), 90),
+                1,
+            )
+        )
+        l2_objective_trade_weight = cls._validate_range(
+            "l2_objective_trade_weight",
+            cls._as_float(params.get("l2_objective_trade_weight", 0.02), 0.02),
+            0.0,
+        )
+        l2_replay_max_fallbacks = int(
+            cls._validate_range(
+                "l2_replay_max_fallbacks",
+                cls._as_int(params.get("l2_replay_max_fallbacks", 5), 5),
+                1,
+            )
+        )
         return cls(
             k_rank=cls._as_int(params.get("K_RANK", 3), 3),
             rebalance_bars=cls._as_int(params.get("REBALANCE_BARS", 3), 3),
@@ -356,6 +411,14 @@ class Layer2AllocationConfig:
             edge_throttle_min_active_mult=edge_throttle_min_active_mult,
             risk_budget_floor_ratio=risk_budget_floor_ratio,
             risk_budget_max_scale=risk_budget_max_scale,
+            adaptive_breadth_enabled=bool(params.get("adaptive_breadth_enabled", False)),
+            adaptive_k_extra=adaptive_k_extra,
+            adaptive_expand_below_vol_ratio=adaptive_expand_below_vol_ratio,
+            l2_objective_risk_util_target=l2_objective_risk_util_target,
+            l2_objective_risk_util_weight=l2_objective_risk_util_weight,
+            l2_objective_trade_target=l2_objective_trade_target,
+            l2_objective_trade_weight=l2_objective_trade_weight,
+            l2_replay_max_fallbacks=l2_replay_max_fallbacks,
         )
 
 

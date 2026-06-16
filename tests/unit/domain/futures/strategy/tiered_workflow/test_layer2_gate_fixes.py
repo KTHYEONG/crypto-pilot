@@ -28,13 +28,11 @@ from src.domain.futures.strategy.tiered_workflow.metrics import _psr
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
 def caps_default() -> PortfolioCaps:
     """기본 PortfolioCaps (per_symbol=0.5, gross=1.5, net=0.5, beta=1.0)."""
     return PortfolioCaps(per_symbol=0.5, gross=1.5, net=0.5, beta=1.0)
 
 
-@pytest.fixture
 def default_config() -> Layer2AllocationConfig:
     """FIX-1 반영된 기본 설정 (l2_min_active_blocks=3, l2_min_dsr=0.75)."""
     return Layer2AllocationConfig()
@@ -44,10 +42,10 @@ def default_config() -> Layer2AllocationConfig:
 # Scenario 1: active_blocks 정의 통일 회귀 테스트
 # ---------------------------------------------------------------------------
 
-def test_l2_min_active_blocks_default_is_3(default_config: Layer2AllocationConfig) -> None:
+def test_l2_min_active_blocks_default_is_3() -> None:
     """FIX-1: l2_min_active_blocks 기본값이 3으로 현실화됐는지 확인."""
     # Arrange (Given)
-    config = default_config
+    config = default_config()
 
     # Act (When)
     threshold = config.l2_min_active_blocks
@@ -111,7 +109,7 @@ def test_active_block_count_fold_based_matches_pipeline_definition() -> None:
 # Scenario 2: 순수 EW baseline이 risk-matched와 구조적으로 다름
 # ---------------------------------------------------------------------------
 
-def test_ew_baseline_differs_from_risk_matched_baseline(caps_default: PortfolioCaps) -> None:
+def test_ew_baseline_differs_from_risk_matched_baseline() -> None:
     """FIX-2: 동질적 edge + 대각 공분산에서 EW vs risk-matched가 구조적으로 달라야 함."""
     # Arrange (Given): K=3 심볼, 불균일 vol → risk-matched는 vol 역비례, EW는 1/3
     n = 3
@@ -119,7 +117,7 @@ def test_ew_baseline_differs_from_risk_matched_baseline(caps_default: PortfolioC
     # 불균일 vol — risk-matched와 EW가 벌어지도록
     sigma = np.array([0.01, 0.05, 0.10], dtype=np.float64)
     mu_bps = np.array([1.0, 1.0, 1.0], dtype=np.float64)   # 동질적 edge
-    btc_beta = np.zeros(n, dtype=np.float64)
+    btc_beta: np.ndarray = np.zeros(n, dtype=np.float64)
     # strategy_weights: Kelly 비중은 mu/sigma^2에 비례 (불균일)
     strategy_weights = mu_bps / (sigma**2 + 1e-12)
     strategy_weights = strategy_weights / np.sum(np.abs(strategy_weights))  # 정규화
@@ -130,7 +128,7 @@ def test_ew_baseline_differs_from_risk_matched_baseline(caps_default: PortfolioC
         strategy_weights=strategy_weights,
         sigma=sigma,
         btc_beta=btc_beta,
-        caps=caps_default,
+        caps=caps_default(),
         bars_per_year=bars_per_year,
     )
     w_ew = build_directional_equal_weight_baseline(
@@ -138,7 +136,7 @@ def test_ew_baseline_differs_from_risk_matched_baseline(caps_default: PortfolioC
         strategy_weights=strategy_weights,
         sigma=sigma,
         btc_beta=btc_beta,
-        caps=caps_default,
+        caps=caps_default(),
         bars_per_year=bars_per_year,
     )
 
@@ -155,9 +153,9 @@ def test_ew_baseline_is_equal_weight_in_direction() -> None:
     # Arrange (Given): K=3, vol 균일 (cap 클리핑 없음)
     n = 3
     caps = PortfolioCaps(per_symbol=1.0, gross=3.0, net=1.0, beta=2.0)
-    sigma = np.full(n, 0.01, dtype=np.float64)
+    sigma: np.ndarray = np.full(n, 0.01, dtype=np.float64)
     mu_bps = np.array([1.0, 1.0, 1.0], dtype=np.float64)
-    btc_beta = np.zeros(n, dtype=np.float64)
+    btc_beta: np.ndarray = np.zeros(n, dtype=np.float64)
     strategy_weights = np.array([0.33, 0.33, 0.34], dtype=np.float64)
 
     # Act (When)
@@ -336,37 +334,38 @@ def test_l2_alloc_space_v3_max_ann_vol_range() -> None:
     assert spec["high"] == pytest.approx(1.20), "max_ann_vol 상한이 1.20이어야 함"
 
 
-def test_l2_alloc_space_alias_points_to_v3() -> None:
-    """S5: L2_ALLOC_SPACE가 active-deployment V4를 가리키는지 확인."""
+def test_l2_alloc_space_alias_points_to_v5() -> None:
+    """S5: L2_ALLOC_SPACE가 adaptive breadth V5를 가리키는지 확인."""
     from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE
 
     assert L2_ALLOC_SPACE["kelly_fraction"]["high"] == pytest.approx(0.80), (
-        "L2_ALLOC_SPACE가 V4를 가리켜야 함 (kelly high=0.80)"
+        "L2_ALLOC_SPACE가 V5를 가리켜야 함 (kelly high=0.80)"
     )
 
 
-def test_l2_alloc_space_v4_active_deployment_bounds() -> None:
-    """V4: active L1 signal deployment 탐색공간 경계 검증."""
-    from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE, L2_ALLOC_SPACE_V4
+def test_l2_alloc_space_v5_adaptive_deployment_bounds() -> None:
+    """V5: adaptive breadth + active deployment 탐색공간 경계 검증."""
+    from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE, L2_ALLOC_SPACE_V5
 
-    assert L2_ALLOC_SPACE == L2_ALLOC_SPACE_V4
-    assert L2_ALLOC_SPACE_V4["risk_budget_floor_ratio"]["high"] == pytest.approx(0.75)
-    assert L2_ALLOC_SPACE_V4["deploy_cost_safety_mult"]["low"] == pytest.approx(1.0)
-    assert L2_ALLOC_SPACE_V4["max_ann_vol"]["high"] == pytest.approx(1.50)
+    assert L2_ALLOC_SPACE == L2_ALLOC_SPACE_V5
+    assert L2_ALLOC_SPACE_V5["risk_budget_floor_ratio"]["high"] == pytest.approx(1.00)
+    assert L2_ALLOC_SPACE_V5["deploy_cost_safety_mult"]["low"] == pytest.approx(1.0)
+    assert L2_ALLOC_SPACE_V5["max_ann_vol"]["high"] == pytest.approx(2.00)
+    assert L2_ALLOC_SPACE_V5["adaptive_breadth_enabled"]["choices"] == (False, True)
 
 
 # ---------------------------------------------------------------------------
 # Scenario 5: 빈 support → zeros 반환 (edge case)
 # ---------------------------------------------------------------------------
 
-def test_ew_baseline_returns_zeros_when_no_support(caps_default: PortfolioCaps) -> None:
+def test_ew_baseline_returns_zeros_when_no_support() -> None:
     """FIX-2 edge case: strategy_weights=zeros → build_directional_equal_weight_baseline returns zeros."""
     # Arrange (Given)
     n = 5
-    strategy_weights = np.zeros(n, dtype=np.float64)
-    mu_bps = np.ones(n, dtype=np.float64)
-    sigma = np.full(n, 0.01, dtype=np.float64)
-    btc_beta = np.zeros(n, dtype=np.float64)
+    strategy_weights: np.ndarray = np.zeros(n, dtype=np.float64)
+    mu_bps: np.ndarray = np.ones(n, dtype=np.float64)
+    sigma: np.ndarray = np.full(n, 0.01, dtype=np.float64)
+    btc_beta: np.ndarray = np.zeros(n, dtype=np.float64)
 
     # Act (When)
     result = build_directional_equal_weight_baseline(
@@ -374,7 +373,7 @@ def test_ew_baseline_returns_zeros_when_no_support(caps_default: PortfolioCaps) 
         strategy_weights=strategy_weights,
         sigma=sigma,
         btc_beta=btc_beta,
-        caps=caps_default,
+        caps=caps_default(),
         bars_per_year=8760.0,
     )
 
@@ -383,14 +382,14 @@ def test_ew_baseline_returns_zeros_when_no_support(caps_default: PortfolioCaps) 
     assert np.all(result == 0.0), "support 없을 때 zeros를 반환해야 함"
 
 
-def test_ew_baseline_returns_zeros_when_direction_all_zero(caps_default: PortfolioCaps) -> None:
+def test_ew_baseline_returns_zeros_when_direction_all_zero() -> None:
     """FIX-2 edge case: mu=0이면 direction=0 → zeros 반환."""
     # Arrange (Given)
     n = 3
     strategy_weights = np.array([0.33, 0.33, 0.34], dtype=np.float64)
-    mu_bps = np.zeros(n, dtype=np.float64)  # 방향 없음
-    sigma = np.full(n, 0.01, dtype=np.float64)
-    btc_beta = np.zeros(n, dtype=np.float64)
+    mu_bps: np.ndarray = np.zeros(n, dtype=np.float64)  # 방향 없음
+    sigma: np.ndarray = np.full(n, 0.01, dtype=np.float64)
+    btc_beta: np.ndarray = np.zeros(n, dtype=np.float64)
 
     # Act (When)
     result = build_directional_equal_weight_baseline(
@@ -398,7 +397,7 @@ def test_ew_baseline_returns_zeros_when_direction_all_zero(caps_default: Portfol
         strategy_weights=strategy_weights,
         sigma=sigma,
         btc_beta=btc_beta,
-        caps=caps_default,
+        caps=caps_default(),
         bars_per_year=8760.0,
     )
 
