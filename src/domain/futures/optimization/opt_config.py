@@ -542,7 +542,23 @@ L2_ALLOC_SPACE_V4: dict[str, dict[str, Any]] = {
     "no_trade_band":                {"type": "float",       "low": 0.00, "high": 0.02, "step": 0.0025},
     "rank_buffer":                  {"type": "int",         "low": 0, "high": 2, "step": 1},
 }
-L2_ALLOC_SPACE = L2_ALLOC_SPACE_V4
+L2_ALLOC_SPACE_V5: dict[str, dict[str, Any]] = {
+    "K_RANK":                        {"type": "int",         "low": 1, "high": 8, "step": 1},
+    "REBALANCE_BARS":                {"type": "categorical", "choices": (1, 2, 3, 6)},
+    "CS_Z_SCORE_THRESHOLD":          {"type": "float",       "low": 0.0, "high": 1.2, "step": 0.1},
+    "kelly_fraction":                {"type": "float",       "low": 0.20, "high": 0.80, "step": 0.05},
+    "max_ann_vol":                   {"type": "float",       "low": 0.30, "high": 2.00, "step": 0.05},
+    "deploy_cost_safety_mult":       {"type": "float",       "low": 1.00, "high": 1.25, "step": 0.05},
+    "edge_throttle_min_active_mult": {"type": "float",       "low": 0.00, "high": 0.60, "step": 0.05},
+    "risk_budget_floor_ratio":       {"type": "float",       "low": 0.00, "high": 1.00, "step": 0.05},
+    "risk_budget_max_scale":         {"type": "float",       "low": 1.00, "high": 6.00, "step": 0.25},
+    "no_trade_band":                 {"type": "float",       "low": 0.00, "high": 0.02, "step": 0.0025},
+    "rank_buffer":                   {"type": "int",         "low": 0, "high": 2, "step": 1},
+    "adaptive_breadth_enabled":      {"type": "categorical", "choices": (False, True)},
+    "adaptive_k_extra":              {"type": "int",         "low": 0, "high": 8, "step": 1},
+    "adaptive_expand_below_vol_ratio": {"type": "float",     "low": 0.0, "high": 0.80, "step": 0.05},
+}
+L2_ALLOC_SPACE = L2_ALLOC_SPACE_V5
 
 
 # ==============================================================================
