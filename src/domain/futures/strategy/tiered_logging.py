@@ -613,7 +613,9 @@ def format_layer3_table(
 
     Args:
         r: Layer3Result (cagr, mdd, sharpe, mar, cagr_baseline, mdd_baseline,
-           sharpe_baseline, mar_baseline, gate_passed, blocker_reason 필드 필요).
+           sharpe_baseline, mar_baseline, gate_passed, blocker_reason,
+           total_return, equity_multiple, sortino, sortino_baseline,
+           n_trades, cvar95, avg_gross_exposure 필드 필요).
         ho_start: Legacy hold-out start date string (ISO format).
         ho_end: Legacy hold-out end date string (ISO format).
         holdout_start: Preferred hold-out start date string (ISO format).
@@ -690,21 +692,48 @@ def format_layer3_table(
     mar_h = float(getattr(r, "mar", 0.0))
     mar_b = float(getattr(r, "mar_baseline", 0.0))
 
+    # ── 신규: 단일 OOS 복리/배치 건전성 (lean) ──
+    total_return = float(getattr(r, "total_return", 0.0))
+    equity_multiple = float(getattr(r, "equity_multiple", 1.0))
+    sortino_h = float(getattr(r, "sortino", 0.0))
+    sortino_b = float(getattr(r, "sortino_baseline", 0.0))
+    cvar95 = float(getattr(r, "cvar95", 0.0))
+    avg_gross_exposure = float(getattr(r, "avg_gross_exposure", 0.0))
+    n_trades = int(getattr(r, "n_trades", 0))
+    min_trades = int(getattr(r, "min_trades", 10))
+
+    lines.append(
+        f"  {'Total Return':<20} [ {_f(total_return, '+.1%'):>8} ]  {'—':>13}  {'> 0':>14} "
+        f"{_status(total_return > 0.0):>7}"
+    )
+    lines.append(
+        f"  {'Equity Multiple':<20} [ x{equity_multiple:>7.2f} ]  {'—':>13}  {'—':>14} {'—':>7}"
+    )
     lines.append(
         f"  {'CAGR':<20} [ {_f(cagr_h, '+.1%'):>8} ] ({_f(cagr_b, '+.1%'):>11} )  {'>= Bench':>14} "
         f"{_status(cagr_h >= cagr_b):>7}"
-    )
-    lines.append(
-        f"  {'MDD':<20} [ {_pct(mdd_h):>8} ] ({_pct(mdd_b):>11} )  {'<= Bench':>14} "
-        f"{_status(mdd_h <= mdd_b):>7}"
     )
     lines.append(
         f"  {'Sharpe':<20} [ {_f(sharpe_h):>8} ] ({_f(sharpe_b):>11} )  {'>= Bench':>14} "
         f"{_status(sharpe_h >= sharpe_b):>7}"
     )
     lines.append(
+        f"  {'Sortino':<20} [ {_f(sortino_h):>8} ] ({_f(sortino_b):>11} )  {'—(diag)':>14} {'—':>7}"
+    )
+    lines.append(
+        f"  {'MDD':<20} [ {_pct(mdd_h):>8} ] ({_pct(mdd_b):>11} )  {'<= Bench':>14} "
+        f"{_status(mdd_h <= mdd_b):>7}"
+    )
+    lines.append(
         f"  {'MAR (CAGR/MDD)':<20} [ {_mar_str(mar_h, cagr_h):>8} ] ({_mar_str(mar_b, cagr_b):>11} )  {'>= Bench':>14} "
         f"{_status(mar_h >= mar_b):>7}"
+    )
+    lines.append(
+        f"  {'CVaR95 / Exposure':<20} [ {_pct(cvar95):>8} / {_pct(avg_gross_exposure):>5} ]  {'(diag)':>14}"
+    )
+    lines.append(
+        f"  {'Trades':<20} [ {n_trades:>8d} ]  {'—':>13}  {'>= ' + str(min_trades):>14} "
+        f"{_status(n_trades >= min_trades):>7}"
     )
 
     # Optional Metrics (if present)
@@ -729,7 +758,8 @@ def format_layer3_table(
     lines.append("")
     
     final_icon = "✅" if status == "PASS" else "❌"
-    final_status = f"{status} (Reason: {blocker})" if blocker else status
+    final_label = "DEPLOY-READY" if status == "PASS" else status
+    final_status = f"{final_label} (Reason: {blocker})" if blocker else final_label
     lines.append(f"  >> FINAL RESULT : {final_icon} {final_status}")
     
     return "\n".join(lines)

@@ -18,7 +18,7 @@ dependencies:
   documents:
     - docs/architecture/layer1.md
     - docs/architecture/layer2.md
-last_verified: 2026-06-14
+last_verified: 2026-06-16
 ---
 
 # 1. Purpose
@@ -33,15 +33,27 @@ Operates as the final verification seam for the CS Rank + Diagonal Kelly (Layer 
 - Uses the optimal `l2_params` identified during the Layer 2 AWF simulation.
 - Hyperparameters are **frozen**; no refitting or parameter adjustment occurs in Layer 3.
 
-**Performance Metrics:**
-- **CAGR (Actual):** $\text{CAGR} = (1 + \sum r_t)^{b_{\text{yr}}/n} - 1$ (Computed on actual portfolio returns, avoiding vol-proxy approximation).
-- **MDD:** Maximum peak-to-trough drawdown of the hybrid portfolio.
+**Performance Metrics (Lean 5-Gate, single-pass compounding focus):**
+- **CAGR / Sharpe / Sortino:** Computed on actual hybrid and baseline (1/N) returns using `bars_per_year(tf)` annualization (no vol-proxy approximation).
+- **MDD / CVaR95:** Maximum peak-to-trough drawdown and 95% tail loss of the hybrid portfolio.
 - **MAR:** $\text{MAR} = \frac{\text{CAGR}}{\text{MDD} + 10^{-9}}$
-- **Sharpe Ratio:** Evaluated for both the hybrid and baseline (1/N) portfolios.
+- **`total_return` / `equity_multiple`:** Single-pass terminal compounding result (`equity_multiple - 1`), reusing the L2 terminal-multiple helper — no new math, lean reuse per design decision (L3 favors realized compounding over Optuna-grade diagnostics).
+- **`n_trades`:** Realized trade count over the holdout window — feeds the `insufficient_trades` gate.
+- **`avg_gross_exposure`:** Mean gross exposure across the holdout AWF simulation, diagnostic only.
 
-**Holdout Gate (L3 Gate):**
-- $\text{Sharpe}_{\text{hybrid}} \geq \text{Sharpe}_{\text{baseline}}$ AND $\text{MDD}_{\text{hybrid}} \leq \text{MDD}_{\text{baseline}}$
-- Ensures the active allocation logic strictly outperforms the naive equal-weight baseline in the most recent unseen market regime.
+**Holdout Gate (L3 Gate, ordered short-circuit):**
+1. `no_holdout_returns` — holdout span produced zero returns.
+2. `non_finite` — any of CAGR/MDD/Sharpe/Sortino/total_return/equity_multiple is non-finite.
+3. `insufficient_trades` — $n_{\text{trades}} < \text{min\_trades}$ (default 10).
+4. `negative_return` — $\text{total\_return} \leq 0$.
+5. `sharpe_rel` — $\text{Sharpe}_{\text{hybrid}} < \text{Sharpe}_{\text{baseline}}$.
+6. `mdd_rel` — $\text{MDD}_{\text{hybrid}} > \text{MDD}_{\text{baseline}}$.
+7. `mdd_abs` — $\text{MDD}_{\text{hybrid}} > \text{max\_mdd\_abs}$ (default 0.35), absolute capital-protection cap independent of baseline.
+- Replaces the legacy single `cagr < 0.0` check — `negative_return`(on `total_return`) is the direct single-pass compounding check; absolute MDD cap defends against a baseline that itself crashed.
+
+**Holdout Data Scope (Data Integrity Fix, 2026-06-16):**
+- `aligned.datetimes` passed into `run_l3_holdout` MUST span `[fetch_start, holdout_end]` — i.e. the IS and OOS per-symbol frames merged via `pick_strategy_data_maps` (see `docs/architecture/layer2.md` §2 Data Scope). Previously `aligned` was IS-only (ending at `holdout_start`), making `_resolve_holdout_span` always raise `empty_holdout_window` — a structural bug, not a strategy/data quality finding.
+- `_resolve_holdout_span` now logs `start_idx/end_idx/n_bars/last_dt` on the empty-window error path for fast diagnosis if the merge ever regresses.
 
 ## 2.2 Layer 3 — Multi-Seed Stability Check (Optimization Stage)
 When full Optuna optimization is executed, `check_stability_layer3` enforces that the selected champion strategy demonstrates parameter stability across different random seeds.
@@ -74,7 +86,7 @@ graph TD
 |--------|------|
 | `tiered_workflow/pipeline.py` | Implements `run_l3_holdout`, defining the dummy fold and calling the AWF sim. |
 | `tiered_workflow/awf_sim.py` | Shared simulation loop (`_run_awf_simulation`) executed with frozen L2 params. |
-| `tiered_workflow/dataclasses.py`| Defines `Layer3Result` (CAGR, MDD, Sharpe, MAR, gate_passed). |
+| `tiered_workflow/dataclasses.py`| Defines `Layer3Result` (CAGR, MDD, Sharpe, Sortino, MAR, total_return, equity_multiple, n_trades, cvar95, avg_gross_exposure, gate_passed, blocker_reason). |
 | `optimization/candidate_selector.py` | Implements `check_stability_layer3` for multi-seed validation. |
 | `optimization/final_evaluator.py` | Orchestrates the final champion evaluation, invoking Layer 3 stability checks. |
 
