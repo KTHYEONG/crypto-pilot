@@ -45,22 +45,25 @@ def select_layer2_champion(
     *,
     study: optuna.Study,
     tf: str,
-    min_dsr: float,
     signal_batch: Any,
     aligned: Any,
     awf_folds: tuple[Any, ...],
     caps: Any,
 ) -> Layer2StudyResult:
-    """feasible completed trials 중 DSR 조건을 충족하는 최적의 챔피언 선정 및 검증.
+    """feasible completed trials 중 growth_lcb(objective) 최상위 챔피언 선정 및 검증.
+
+    DSR은 2026-06-16부로 hard-gate에서 diagnostic으로 강등(pool-상대 benchmark가
+    trial 수와 동반 상승하는 구조적 편향 + L3 frozen holdout과 3중 중복). 챔피언
+    선정은 growth_lcb(objective) 최상위 feasible trial로 결정하고, DSR은 참고
+    지표로만 계산해 결과에 첨부한다.
 
     Algorithm:
         1. feasible completed trials를 objective (t.value) 내림차순 정렬
         2. completed trials의 block log growth signature를 기반으로 n_trials_eff 계산
-        3. 정렬된 후보들에 대해 simulation을 1회 재실행하고 DSR 계산
-        4. DSR >= min_dsr 조건 만족하는 첫 후보 선택
-        5. 조건 만족 후보가 없으면 L2 BLOCKED ("dsr") 처리
-        6. 선정된 챔피언에 대해 deterministic replay 검증 (stored cagr/mdd/growth_lcb 비교)
-        7. 결과 반환
+        3. objective 최상위 feasible trial을 챔피언으로 선정, simulation 1회 재실행
+        4. 챔피언에 대해 DSR diagnostic 계산 (게이트 미적용)
+        5. 선정된 챔피언에 대해 deterministic replay 검증 (stored cagr/mdd/growth_lcb 비교)
+        6. 결과 반환
     """
     complete_trials = [
         t for t in study.trials
@@ -117,7 +120,7 @@ def select_layer2_champion(
     )
 
     if not feasible_sorted:
-        _logger.warning("[L2-SELECTION] feasible한 trials가 없음 -> dsr 차단 및 fallback")
+        _logger.warning("[L2-SELECTION] feasible한 trials가 없음 -> fallback")
         best_overall = max(complete_trials, key=lambda t: t.value if t.value is not None else -1e6)
         return Layer2StudyResult(
             best_params=dict(best_overall.params),
@@ -136,68 +139,25 @@ def select_layer2_champion(
         dtype=np.float64
     )
 
-    champion_trial = None
-    champion_evaluation = None
-    champion_dsr = 0.0
+    # 4. objective(growth_lcb) 최상위 feasible trial을 챔피언으로 선정
+    champion_trial = feasible_sorted[0]
+    champion_config = Layer2AllocationConfig.from_mapping(dict(champion_trial.params))
+    champion_evaluation = evaluate_l2_trial(
+        signal_batch=signal_batch,
+        aligned=aligned,
+        awf_folds=awf_folds,
+        config=champion_config,
+        caps=caps,
+        tf=tf,
+    )
+    champion_dsr = _deflated_sharpe_probability(
+        selected_rets=champion_evaluation.returns_hybrid,
+        completed_trial_sharpes=completed_trial_sharpes,
+        effective_trial_count=n_trials_eff,
+        bars_per_year=bars_per_year,
+    )
 
-    # 4. DSR 조건을 만족하는 최초 후보 탐색
-    for trial in feasible_sorted:
-        l2_params = dict(trial.params)
-        config = Layer2AllocationConfig.from_mapping(l2_params)
-
-        evaluation = evaluate_l2_trial(
-            signal_batch=signal_batch,
-            aligned=aligned,
-            awf_folds=awf_folds,
-            config=config,
-            caps=caps,
-            tf=tf,
-        )
-
-        rets_hybrid = evaluation.returns_hybrid
-        dsr_val = _deflated_sharpe_probability(
-            selected_rets=rets_hybrid,
-            completed_trial_sharpes=completed_trial_sharpes,
-            effective_trial_count=n_trials_eff,
-            bars_per_year=bars_per_year,
-        )
-
-        if dsr_val >= min_dsr:
-            champion_trial = trial
-            champion_evaluation = evaluation
-            champion_dsr = dsr_val
-            break
-
-    # 5. DSR 컷 오프에 모두 막힌 경우
-    if champion_trial is None:
-        fallback_trial = feasible_sorted[0]
-        fallback_config = Layer2AllocationConfig.from_mapping(dict(fallback_trial.params))
-        fallback_eval = evaluate_l2_trial(
-            signal_batch=signal_batch,
-            aligned=aligned,
-            awf_folds=awf_folds,
-            config=fallback_config,
-            caps=caps,
-            tf=tf,
-        )
-        fallback_dsr = _deflated_sharpe_probability(
-            selected_rets=fallback_eval.returns_hybrid,
-            completed_trial_sharpes=completed_trial_sharpes,
-            effective_trial_count=n_trials_eff,
-            bars_per_year=bars_per_year,
-        )
-        return Layer2StudyResult(
-            best_params=dict(fallback_trial.params),
-            best_trial_number=int(fallback_trial.number),
-            best_evaluation=fallback_eval,
-            dsr=fallback_dsr,
-            effective_trial_count=n_trials_eff,
-            completed_trials=len(complete_trials),
-            feasible_trials=len(feasible_trials),
-            blocker_reason="dsr",
-        )
-
-    # 6. 결정적 일치 검증 (Deterministic Replay)
+    # 5. 결정적 일치 검증 (Deterministic Replay)
     assert champion_trial is not None
     assert champion_evaluation is not None
     stored_cagr = float(champion_trial.user_attrs.get("cagr_hybrid", 0.0))

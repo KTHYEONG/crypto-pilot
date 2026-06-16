@@ -233,10 +233,12 @@ class Layer2AllocationConfig:
     rank_buffer: int = 1
     no_trade_band: float = 0.01
     max_ann_vol: float | None = None
-    l2_min_cagr: float = 0.15
+    l2_min_cagr: float = 0.30
     l2_min_mar: float = 1.0
     l2_min_sharpe_abs: float = 1.0
     l2_max_mdd_abs: float = 0.20
+    l2_mdd_material_floor: float = 0.05
+    l2_mdd_rel_tol: float = 0.25
     l2_min_fold_pass_ratio: float = 0.60
     l2_min_sharpe_uplift: float = 0.20
     l2_min_growth_uplift: float = 0.0
@@ -246,7 +248,11 @@ class Layer2AllocationConfig:
     l2_min_dsr: float = 0.75
     l2_max_cvar_95: float = 0.03
     l2_min_active_blocks: int = 3
-    l2_growth_lcb_z: float = 1.0
+    l2_growth_lcb_z: float = 0.0
+    edge_throttle_enabled: bool = True
+    edge_floor_bps: float = 0.0
+    edge_ref_bps: float = 5.0
+    edge_throttle_gamma: float = 1.0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -276,10 +282,12 @@ class Layer2AllocationConfig:
             rank_buffer=cls._as_int(params.get("rank_buffer", 1), 1),
             no_trade_band=cls._as_float(params.get("no_trade_band", 0.01), 0.01),
             max_ann_vol=vol_target,
-            l2_min_cagr=cls._as_float(params.get("l2_min_cagr", 0.15), 0.15),
+            l2_min_cagr=cls._as_float(params.get("l2_min_cagr", 0.30), 0.30),
             l2_min_mar=cls._as_float(params.get("l2_min_mar", 1.0), 1.0),
             l2_min_sharpe_abs=cls._as_float(params.get("l2_min_sharpe_abs", 1.0), 1.0),
             l2_max_mdd_abs=cls._as_float(params.get("l2_max_mdd_abs", 0.20), 0.20),
+            l2_mdd_material_floor=cls._as_float(params.get("l2_mdd_material_floor", 0.05), 0.05),
+            l2_mdd_rel_tol=cls._as_float(params.get("l2_mdd_rel_tol", 0.25), 0.25),
             l2_min_fold_pass_ratio=cls._as_float(params.get("l2_min_fold_pass_ratio", 0.60), 0.60),
             l2_min_sharpe_uplift=cls._as_float(params.get("l2_min_sharpe_uplift", 0.20), 0.20),
             l2_min_growth_uplift=cls._as_float(params.get("l2_min_growth_uplift", 0.0), 0.0),
@@ -292,7 +300,11 @@ class Layer2AllocationConfig:
             l2_min_dsr=cls._as_float(params.get("l2_min_dsr", 0.75), 0.75),
             l2_max_cvar_95=cls._as_float(params.get("l2_max_cvar_95", 0.03), 0.03),
             l2_min_active_blocks=cls._as_int(params.get("l2_min_active_blocks", 3), 3),
-            l2_growth_lcb_z=cls._as_float(params.get("l2_growth_lcb_z", 1.0), 1.0),
+            l2_growth_lcb_z=cls._as_float(params.get("l2_growth_lcb_z", 0.0), 0.0),
+            edge_throttle_enabled=bool(params.get("edge_throttle_enabled", True)),
+            edge_floor_bps=cls._as_float(params.get("edge_floor_bps", 0.0), 0.0),
+            edge_ref_bps=cls._as_float(params.get("edge_ref_bps", 5.0), 5.0),
+            edge_throttle_gamma=cls._as_float(params.get("edge_throttle_gamma", 1.0), 1.0),
         )
 
 
