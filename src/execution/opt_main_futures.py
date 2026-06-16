@@ -64,9 +64,12 @@ from src.core.settings import BASE_DIR
 from src.domain.futures.optimization.observability.run_tracker import (
     build_joint_study_name,
     build_run_id,
+    get_or_create_study,
+    load_champion_params,
     log_optuna_contract,
     resolve_futures_parallel_policy,
     setup_optuna_storage,
+    update_champion_store,
 )
 from src.domain.futures.optimization.opt_config import (
     FUTURES_ANCHOR_SYMBOLS,
@@ -777,7 +780,7 @@ def _run_tiered_l2_study(
         tf=tf,
         window=window,
         signal_batch=signal_batch,
-        search_space_version="v2",
+        search_space_version="v3",
     )
     _logger.info("  ● [HYPERPARAMETER OPTIMIZATION]")
     _logger.info("    - Study Name : %s", study_name)
@@ -811,19 +814,40 @@ def _run_tiered_l2_study(
                 #     sys.stdout.write("\n")
                 #     sys.stdout.flush()
 
-        study = _optuna.create_study(
-            direction="maximize",
+        # 매 실행마다 완전 초기화 (resume=False): 이종 search-space trial이 한
+        # study에 섞여 TPESampler가 dynamic search space로 오판 -> RandomSampler
+        # fallback 경고 및 trial 누적(120 초과)을 유발하던 근본원인 제거.
+        study = get_or_create_study(
+            study_name=study_name,
+            storage=storage,
             sampler=TPESampler(
                 seed=seed,
                 multivariate=True,
                 n_startup_trials=min(n_trials, max(2 * len(L2_ALLOC_SPACE), 8)),
                 constraints_func=layer2_constraints_from_trial,
             ),
-            study_name=study_name,
-            storage=storage,
-            load_if_exists=True,
+            resume=False,
         )
-        
+
+        # Warm-start anchor: 영구 챔피언 레저(과거 run 중 최고 성과)가 있으면 우선
+        # 사용하고, 레저가 비었거나 일부 키가 비어있으면 검증된 기본값으로 보강.
+        _default_anchor = {
+            "K_RANK": 3,
+            "REBALANCE_BARS": 3,
+            "CS_Z_SCORE_THRESHOLD": 0.5,
+            "kelly_fraction": 0.25,
+            "max_ann_vol": 0.35,
+        }
+        _champion_anchor = load_champion_params(tag=tf, storage=storage) or {}
+        _anchor_params = {
+            **_default_anchor,
+            **{k: v for k, v in _champion_anchor.items() if k in L2_ALLOC_SPACE},
+        }
+        if not any(t.state == _optuna.trial.TrialState.COMPLETE for t in study.trials):
+            import contextlib
+            with contextlib.suppress(Exception):
+                study.enqueue_trial(_anchor_params)
+
         progress_cb = L2OptunaProgressCallback(n_trials)
         study.optimize(
             lambda trial: objective_l2_growth(trial, ctx),
@@ -887,18 +911,30 @@ def _run_tiered_l2_study(
             oos_end=ho_start_idx_l2,
         ),)
 
-    from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
-    min_dsr = float(OPT_FUTURES_CONFIG.get("l2_min_dsr", 0.95))
-
     l2_study_result = select_layer2_champion(
         study=study,
         tf=tf,
-        min_dsr=min_dsr,
         signal_batch=signal_batch,
         aligned=aligned,
         awf_folds=awf_folds_l2,
         caps=caps,
     )
+
+    if l2_study_result.blocker_reason == "" and l2_study_result.best_evaluation is not None:
+        updated = update_champion_store(
+            tag=tf,
+            storage=storage,
+            params=l2_study_result.best_params,
+            value=l2_study_result.best_evaluation.growth_lcb_hybrid,
+            space=L2_ALLOC_SPACE,
+        )
+        if updated:
+            _logger.info(
+                "  ● [CHAMPION STORE] 신규 챔피언 갱신 (tf=%s, growth_lcb=%.4f)",
+                tf,
+                l2_study_result.best_evaluation.growth_lcb_hybrid,
+            )
+
     return l2_study_result
 
 
