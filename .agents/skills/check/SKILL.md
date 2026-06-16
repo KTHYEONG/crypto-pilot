@@ -9,30 +9,29 @@ description: Run tests, perform Surgical Hotfixes, and Error Triage.
 Empirically verify the implementation via `pytest` and perform "Error Triage" or "Hotfixes" to maintain velocity.
 
 ## Execution Rules
-1. **L2 Verification:** Run `uv run pytest`.
-   - **Diagnostic Assistance**: If a test fails, run Serena MCP (`get_diagnostics` on the target module, or `find_implementations` on failing abstract methods/interfaces) to localize type mismatches or incorrect signature compliance before digging deeper.
+1. **Targeted L2 Verification:** Do NOT run the entire test suite unless necessary. Run `uv run pytest [specific_test_file]` or use `-k [keyword]` to filter tests related to the modified code.
+   - **Diagnostic Assistance**: If a test fails, use Serena MCP (`get_diagnostics` or `find_implementations`) to localize issues. Limit raw output analysis to save tokens.
 2. **Surgical Hotfix (Fast-Track - EFFICIENCY)**:
-   - If a failure is caused by a **minor, obvious error** (e.g., missing import, simple typo, obvious off-by-one in a test assertion), you MAY fix it directly using the `replace` tool.
-   - After a Hotfix, re-run tests. If it passes, proceed to AUDIT.
-   - **Limit**: Max 1 Hotfix attempt per file. If it doesn't fix the issue, stop and route.
+   - If a failure is caused by a **minor, obvious error** (e.g., missing import, simple typo, obvious off-by-one), fix it directly using the `replace` tool.
+   - **Limit**: Max 1 Hotfix attempt per file. If it fails, stop and route immediately.
 3. **Error Triage (Routing Loop)**:
-   - **Scenario A: Logic/Test Failure** (Complex failure, edge case, or Hotfix failed): **Route back to `spec`**.
-   - **Scenario B: Implementation Error** (Code deviates significantly from Spec or has non-obvious bugs): **Route back to `implement`**.
-   - **Scenario C: Regression**: Breaking existing tests. **Route back to `spec`**.
-4. **Spec Alignment**: Ensure all `Test Scenario Design` points from the Spec are covered.
-5. **Single Responsibility (DO NOT OVERSTEP):**
-   - You are ONLY the Tester/Triager. Do not write new features (that is `implement`). Do not review business intent (that is `audit`). Stop immediately after tests pass or routing is decided.
+   - **Scenario A: Logic/Test Failure**: Route back to `spec`.
+   - **Scenario B: Implementation Error**: Route back to `implement`.
+4. **Single Responsibility (DO NOT OVERSTEP):**
+   - You are ONLY the Tester/Triager. Stop immediately after tests pass or routing is decided. Do not add new features.
 
 ## Output Format
 ```md
 ### ✅ Testing & Triage: [PASS / FAIL]
 
-**1. Results**
-- **Command:** `uv run pytest ...`
-- **Output:** `[Raw Summary]`
+#### 🚀 Executive Summary
+- [1-sentence summary: e.g., "All 5 tests passed for the new indicator logic" or "1 test failed due to a dimension mismatch."]
 
-**2. Hotfix / Triage & Routing**
-- **Hotfix applied?**: [Yes (Details) / No]
-- **Diagnosis:** [Why did it fail?]
-- **Next Step:** ✅ `audit` is ready.
+#### 📊 Test Results (Token-Optimized)
+- **Command:** `uv run pytest [target] ...`
+- **Status:** [Total Passed / Total Failed]
+- **Failures (if any):** [List only the name of failing test cases and the final error line. Avoid full tracebacks.]
+
+#### ➡️ Next Step
+- [Next Step: e.g., "✅ `audit` is ready." or "Returning to `implement` for logic correction."]
 ```
