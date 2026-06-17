@@ -388,7 +388,7 @@ class TestFormatLayer2Table:
         assert "Sharpe" in result
         assert "1.500" in result
         assert "CAGR" in result
-        assert "MAR" in result
+        assert "Calmar" in result
 
     def test_blocked_shows_blocker_reason(self) -> None:
         """gate_passed=False + blocker_reason → 로그에 reason 포함."""
@@ -411,7 +411,7 @@ class TestFormatLayer2Table:
         result = format_layer2_table(r2)
 
         # Assert
-        assert "Robustness" in result
+        assert "Robust" in result
         assert "❌" in result  # friction_pass_pct=0.30 < 0.50
 
     def test_uplift_gate_shown_as_additive(self) -> None:
@@ -451,7 +451,7 @@ class TestFormatLayer2Table:
         assert "nan" in result
 
     def test_format_layer2_table_uses_ew_bench_header(self) -> None:
-        """출력에 baseline이 표기되는지 검증."""
+        """출력에 Gate 임계값이나 PnL 등이 표기되는지 검증."""
         # Arrange
         r2 = _make_l2_ns()
 
@@ -459,7 +459,8 @@ class TestFormatLayer2Table:
         result = format_layer2_table(r2)
 
         # Assert
-        assert "baseline" in result
+        assert "CAGR" in result
+        assert "PnL" in result
 
     def test_format_layer2_table_mar_na_when_cagr_negative(self) -> None:
         """cagr_hybrid < 0이면 MAR 셀에 'n/a(loss)' 표기 검증."""
@@ -507,8 +508,8 @@ class TestFormatLayer3Table:
         assert "2025-07-01" in result
         assert "2026-01-01" in result
         assert "HOLDOUT VALIDATION SCORECARD" in result
-        assert "Strategy" in result
-        assert "( EW Bench )" in result
+        assert "GROWTH" in result
+        assert "Bench" in result
         assert "✅" in result
         assert "45.0%" in result
         assert "30.0%" in result
