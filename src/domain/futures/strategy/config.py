@@ -151,8 +151,8 @@ class CandidateStrategyConfig:
     gate_lgbm_reg_lambda: float = 30.0
     edge_lgbm_max_depth: int = 3
     edge_lgbm_reg_lambda: float = 30.0
-    ml_fit_fraction: float = 0.60
-    ml_calibration_fraction: float = 0.20
+    ml_fit_fraction: float = 0.55
+    ml_calibration_fraction: float = 0.15
     model_early_stop_fraction: float = 0.15
     calibration_fit_fraction: float = 0.50
     promotion_decision_split: Literal["fit", "calibration", "fit_calibration"] = "fit_calibration"
