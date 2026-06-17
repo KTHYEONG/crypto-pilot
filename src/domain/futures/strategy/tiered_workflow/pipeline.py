@@ -1248,7 +1248,7 @@ def run_l2_awf(
         for i, (s, fr) in enumerate(zip(fold_sharpes_h, sim.fold_rets_hybrid, strict=True))
     ]
     if verbose:
-        logger.info(format_layer2_table(result, awf_folds=awf_fold_diags))
+        logger.info(format_layer2_table(result, awf_folds=awf_fold_diags, min_dsr=float(config.l2_min_dsr)))
     return result
 
 
