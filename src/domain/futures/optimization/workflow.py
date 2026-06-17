@@ -1804,8 +1804,21 @@ def evaluate_l2_trial(
 
     finite_score = float(growth_lcb_hybrid) if np.isfinite(growth_lcb_hybrid) else -1e6
     risk_utilization = float(mdd_hybrid) / max(float(config.l2_max_mdd_abs), 1e-9)
+
+    # STEP 5: worst-fold Sharpe soft penalty (비정상성 방어, RC-5).
+    # fold_rets_hybrid: list of per-fold OOS return sequences.
+    # Time Complexity: O(F·T) where F=n_folds, T=fold OOS bars.
+    _fold_sharpes: list[float] = [
+        float(_sharpe_hac(list(fr), bars_per_year=bars_per_year)) if fr else 0.0
+        for fr in sim.fold_rets_hybrid
+    ]
+    worst_fold_sharpe: float = min(_fold_sharpes) if _fold_sharpes else 0.0
+    _wf_threshold = float(config.l2_worst_fold_penalty_threshold)
+    _wf_weight = float(config.l2_worst_fold_penalty_weight)
+    fold_penalty = max(0.0, _wf_threshold - worst_fold_sharpe) * _wf_weight
+
     objective_value = _deployment_shaped_l2_objective(
-        growth_lcb=finite_score,
+        growth_lcb=finite_score - fold_penalty,
         risk_utilization=risk_utilization,
         trade_count=trade_count,
         risk_util_target=float(config.l2_objective_risk_util_target),
@@ -1860,6 +1873,7 @@ def evaluate_l2_trial(
         trade_count=trade_count,
         risk_utilization=float(risk_utilization),
         deployment_objective_bonus=float(deployment_objective_bonus),
+        worst_fold_sharpe=worst_fold_sharpe,
     )
 
 
@@ -1909,6 +1923,7 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
         "deployment_objective_bonus",
         float(getattr(evaluation, "deployment_objective_bonus", 0.0)),
     )
+    _set_float_attr(trial, "worst_fold_sharpe", float(getattr(evaluation, "worst_fold_sharpe", 0.0)))
     trial.set_user_attr("trade_count", getattr(evaluation, "trade_count", 0))
 
     # DSR-in-the-loop 제거 (2026-06-16): DSR은 pool-상대 benchmark가 trial 수와
