@@ -1178,10 +1178,6 @@ def _run_strategy_stage(
                     "[L2] selection blocked (%s) — L3 승격 차단",
                     l2_study_result.blocker_reason,
                 )
-                return RunnerResult(
-                    exit_code=1,
-                    reason=f"layer2_blocked:{l2_study_result.blocker_reason}",
-                )
 
             # ── Step E: 최적 params + L1 override로 최종 실행 ────────────────
             from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
@@ -1202,7 +1198,8 @@ def _run_strategy_stage(
             
             # Layer 2 BLOCKED 시 즉시 종료 (Step 5 optimization 진입 방지)
             if l2_final is None or not l2_final.gate_passed:
-                return RunnerResult(exit_code=1, reason="layer2_blocked")
+                final_reason = l2_study_result.blocker_reason or getattr(l2_final, "blocker_reason", "unknown")
+                return RunnerResult(exit_code=1, reason=f"layer2_blocked:{final_reason}")
             
             # Tiered Pipeline이 L3까지 수행했으므로 여기서 종료 (레거시 ML 단계 스킵)
             if run_config.phase in ("alo", "full", "l3"):
