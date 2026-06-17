@@ -141,28 +141,26 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 ● [LAYER 2: PORTFOLIO ALLOCATION & RISK OPTIMIZATION]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ● [HYPERPARAMETER OPTIMIZATION]
-    - Study Name : l2_study_4h_9b0db73f76fc
-    - Config     : 120 trials
+    - Study Name : l2_study_4h_eb61306242f5
+    - Config     : 200 trials
   ────────────────────────────────────────────────────────────────────────────
- [OPT] Deleted existing study 'l2_study_4h_9b0db73f76fc' for a fresh start.
-[L2-SELECTION] feasible한 trials가 없음 -> fallback
+[L2-SELECTION] Champion selected. Trial #94, Objective=0.1949, DSR=0.3051 (n_eff=5.23)
 ● [LAYER 2 PORTFOLIO SCORECARD]
 ──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ❌ BLOCKED (sortino)
+  STATUS  : ❌ BLOCKED (cagr)
 
-  ✅ [Growth    ] CAGR: +30.9% (>=30.0%) | PnL: +20.1% | Equity x1.20
-  ❌ [Efficiency] Sharpe: 1.297 (>=1.000) | Sortino: 1.310 (>=1.500) | Calmar: 2.213 (>=1.000)
-  ✅ [Risk      ] MDD: 14.0% (<=30.0%) | CVaR95: 1.1% (<=6.0%) | RiskUtil: 46.5%
-  ✅ [Robust    ] Fold: 75.0% (>=60.0%) | Trades: 99 (>=30) | Friction: 100.0%
-  ✅ [Uplift    ] Sharpe Uplift: +0.35 (>=+0.20)
-  [Diag     ] DSR: 0.000 (diag) | PSR: 0.859 (diag) | RelMDD: 1.16x | Turnover: 0.077
+  ❌ [Growth    ] CAGR: +24.1% (>=30.0%) | PnL: +18.2% | Equity x1.18
+  ✅ [Efficiency] Sharpe: 1.458 (>=1.000) | Sortino: 2.318 (>=1.500) | Calmar: 2.592 (>=1.000)
+  ✅ [Risk      ] MDD: 9.3% (<=30.0%) | CVaR95: 0.8% (<=6.0%) | RiskUtil: 31.0%
+  ✅ [Robust    ] Fold: 100.0% (>=60.0%) | Trades: 98 (>=30) | Friction: 100.0%
+  ✅ [Uplift    ] Sharpe Uplift: +1.55 (>=+0.20)
+  [Diag     ] DSR: 0.305 (diag) | PSR: 0.905 (diag) | RelMDD: 1.12x | Turnover: 0.065
 ──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ✅ Sharpe:  3.389 | MDD:    5.4% | Status: PASS
-  ├─ Fold #2 : ✅ Sharpe:  0.155 | MDD:    8.4% | Status: PASS
-  ├─ Fold #3 : ✅ Sharpe:  3.331 | MDD:    7.1% | Status: PASS
-  └─ Fold #4 : ❌ Sharpe: -1.041 | MDD:   12.7% | Status: FAIL
+  ├─ Fold #1 : ✅ Sharpe:  0.767 | MDD:    5.6% | Status: PASS
+  ├─ Fold #2 : ✅ Sharpe:  1.302 | MDD:    9.3% | Status: PASS
+  └─ Fold #3 : ✅ Sharpe:  2.208 | MDD:    8.6% | Status: PASS
 >> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False
 !! FAIL: exit_code=1 reason=layer2_blocked
