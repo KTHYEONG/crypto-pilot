@@ -443,6 +443,7 @@ def format_layer2_table(
     *,
     awf_folds: list[dict[str, Any]] | None = None,
     topk_selection: list[dict[str, Any]] | None = None,
+    min_dsr: float = 0.60,
 ) -> str:
     """Layer2 AWF 결과 로그 테이블.
 
@@ -507,6 +508,7 @@ def format_layer2_table(
     trades_ok = trade_count >= 30
     friction_ok = friction_pct >= 0.50
     uplift_ok = uplift_val >= uplift_gate_val
+    dsr_ok = dsr_val >= min_dsr
     # 진단 전용 (게이트 미반영): 상대MDD 표시
     mdd_rel_display = (mdd_h / mdd_b) if mdd_b > 1e-9 else float("nan")
 
@@ -524,6 +526,7 @@ def format_layer2_table(
     efficiency_ok = sharpe_ok and sortino_ok and mar_ok
     risk_ok = mdd_ok and cvar_ok
     robust_ok = fold_ok and trades_ok and friction_ok
+    integrity_ok = dsr_ok
 
     lines: list[str] = [
         "● [LAYER 2 PORTFOLIO SCORECARD]",
@@ -556,8 +559,12 @@ def format_layer2_table(
         ),
         f"  {_status(uplift_ok)} [Uplift    ] Sharpe Uplift: {_f(uplift_val, '+.2f')} (>=+0.20)",
         (
-            f"  [Diag     ] DSR: {_f(dsr_val)} (diag) | "
-            f"PSR: {_f(psr_val)} (diag) | "
+            f"  {_status(integrity_ok)} [Integrity ] "
+            f"DSR: {_f(dsr_val)} (>={min_dsr:.2f}) | "
+            f"PSR: {_f(psr_val)} (diag)"
+        ),
+        (
+            f"  [Diag     ] "
             f"RelMDD: {_f(mdd_rel_display, '.2f')}x | "
             f"Turnover: {turnover:.3f}"
         ),
@@ -706,8 +713,10 @@ def format_layer3_table(
     lines.extend([
         "  [ GROWTH ]",
         sep_sub,
-        f"  {_status(cagr_h >= cagr_b)} CAGR          : [ {_f(cagr_h, '+.1%'):>8} ] ({_f(cagr_b, '+.1%'):>11} ) | Gate: >= Bench",
-        f"  {_status(total_return > 0.0)} Total Return  : [ {_f(total_return, '+.1%'):>8} ] | Equity: x{equity_multiple:>4.2f} | Gate: > 0",
+        f"  {_status(cagr_h >= cagr_b)} CAGR          : [ {_f(cagr_h, '+.1%'):>8} ] "
+        f"({_f(cagr_b, '+.1%'):>11} ) | Gate: >= Bench",
+        f"  {_status(total_return > 0.0)} Total Return  : [ {_f(total_return, '+.1%'):>8} ] | "
+        f"Equity: x{equity_multiple:>4.2f} | Gate: > 0",
         ""
     ])
 
@@ -715,9 +724,11 @@ def format_layer3_table(
     lines.extend([
         "  [ EFFICIENCY ]",
         sep_sub,
-        f"  {_status(sharpe_h >= sharpe_b)} Sharpe        : [ {_f(sharpe_h):>8} ] ({_f(sharpe_b):>11} ) | Gate: >= Bench",
+        f"  {_status(sharpe_h >= sharpe_b)} Sharpe        : [ {_f(sharpe_h):>8} ] "
+        f"({_f(sharpe_b):>11} ) | Gate: >= Bench",
         f"     Sortino       : [ {_f(sortino_h):>8} ] ({_f(sortino_b):>11} ) | (diag)",
-        f"  {_status(mar_h >= mar_b)} MAR (Calmar)  : [ {_mar_str(mar_h, cagr_h):>8} ] ({_mar_str(mar_b, cagr_b):>11} ) | Gate: >= Bench",
+        f"  {_status(mar_h >= mar_b)} MAR (Calmar)  : [ {_mar_str(mar_h, cagr_h):>8} ] "
+        f"({_mar_str(mar_b, cagr_b):>11} ) | Gate: >= Bench",
         ""
     ])
 

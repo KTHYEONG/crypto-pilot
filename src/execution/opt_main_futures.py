@@ -920,6 +920,7 @@ def _run_tiered_l2_study(
             oos_end=ho_start_idx_l2,
         ),)
 
+    _min_dsr = float(OPT_FUTURES_CONFIG.get("FUTURES_L2_MIN_DSR", 0.60))
     l2_study_result = select_layer2_champion(
         study=study,
         tf=tf,
@@ -927,6 +928,7 @@ def _run_tiered_l2_study(
         aligned=aligned,
         awf_folds=awf_folds_l2,
         caps=caps,
+        min_dsr=_min_dsr,
     )
 
     if l2_study_result.blocker_reason == "" and l2_study_result.best_evaluation is not None:
