@@ -293,6 +293,10 @@ class Layer2AllocationConfig:
     l2_replay_max_fallbacks: int = 24
     l2_worst_fold_penalty_threshold: float = -0.30
     l2_worst_fold_penalty_weight: float = 0.005
+    # Fix-A: 결정론적 리스크 배치 파라미터
+    l2_deploy_enabled: bool = True
+    l2_deploy_mdd_margin: float = 0.30
+    l2_deploy_l_hard_cap: float = 4.0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -441,6 +445,9 @@ class Layer2AllocationConfig:
             l2_worst_fold_penalty_weight=cls._as_float(
                 params.get("l2_worst_fold_penalty_weight", 0.005), 0.005
             ),
+            l2_deploy_enabled=bool(params.get("l2_deploy_enabled", True)),
+            l2_deploy_mdd_margin=cls._as_float(params.get("l2_deploy_mdd_margin", 0.30), 0.30),
+            l2_deploy_l_hard_cap=cls._as_float(params.get("l2_deploy_l_hard_cap", 4.0), 4.0),
         )
 
 
