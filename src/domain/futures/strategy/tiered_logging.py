@@ -663,14 +663,15 @@ def format_layer3_table(
     sep_main = "──────────────────────────────────────────────────────────────────────────────"
     sep_sub = "  ──────────────────────────────────────────────────────────────────────────"
     
+    final_icon = "✅" if status == "PASS" else "❌"
+    final_label = "DEPLOY-READY" if status == "PASS" else status
+    final_status = f"{final_label} (Reason: {blocker})" if blocker else final_label
+
     lines: list[str] = [
         f"● [LAYER 3: HOLDOUT VALIDATION SCORECARD] ({start} ~ {end})",
         sep_main,
+        f"  STATUS  : {final_icon} {final_status}",
         "",
-        "  [ OUT-OF-SAMPLE PERFORMANCE ]",
-        sep_sub,
-        f"  {'Metric':<20} {'Strategy':>12} {'( EW Bench )':>15}  {'Gate':>14} {'Status':>8}",
-        sep_sub,
     ]
 
     if status == "ERROR":
@@ -692,7 +693,6 @@ def format_layer3_table(
     mar_h = float(getattr(r, "mar", 0.0))
     mar_b = float(getattr(r, "mar_baseline", 0.0))
 
-    # ── 신규: 단일 OOS 복리/배치 건전성 (lean) ──
     total_return = float(getattr(r, "total_return", 0.0))
     equity_multiple = float(getattr(r, "equity_multiple", 1.0))
     sortino_h = float(getattr(r, "sortino", 0.0))
@@ -702,64 +702,61 @@ def format_layer3_table(
     n_trades = int(getattr(r, "n_trades", 0))
     min_trades = int(getattr(r, "min_trades", 10))
 
-    lines.append(
-        f"  {'Total Return':<20} [ {_f(total_return, '+.1%'):>8} ]  {'—':>13}  {'> 0':>14} "
-        f"{_status(total_return > 0.0):>7}"
-    )
-    lines.append(
-        f"  {'Equity Multiple':<20} [ x{equity_multiple:>7.2f} ]  {'—':>13}  {'—':>14} {'—':>7}"
-    )
-    lines.append(
-        f"  {'CAGR':<20} [ {_f(cagr_h, '+.1%'):>8} ] ({_f(cagr_b, '+.1%'):>11} )  {'>= Bench':>14} "
-        f"{_status(cagr_h >= cagr_b):>7}"
-    )
-    lines.append(
-        f"  {'Sharpe':<20} [ {_f(sharpe_h):>8} ] ({_f(sharpe_b):>11} )  {'>= Bench':>14} "
-        f"{_status(sharpe_h >= sharpe_b):>7}"
-    )
-    lines.append(
-        f"  {'Sortino':<20} [ {_f(sortino_h):>8} ] ({_f(sortino_b):>11} )  {'—(diag)':>14} {'—':>7}"
-    )
-    lines.append(
-        f"  {'MDD':<20} [ {_pct(mdd_h):>8} ] ({_pct(mdd_b):>11} )  {'<= Bench':>14} "
-        f"{_status(mdd_h <= mdd_b):>7}"
-    )
-    lines.append(
-        f"  {'MAR (CAGR/MDD)':<20} [ {_mar_str(mar_h, cagr_h):>8} ] ({_mar_str(mar_b, cagr_b):>11} )  {'>= Bench':>14} "
-        f"{_status(mar_h >= mar_b):>7}"
-    )
-    lines.append(
-        f"  {'CVaR95 / Exposure':<20} [ {_pct(cvar95):>8} / {_pct(avg_gross_exposure):>5} ]  {'(diag)':>14}"
-    )
-    lines.append(
-        f"  {'Trades':<20} [ {n_trades:>8d} ]  {'—':>13}  {'>= ' + str(min_trades):>14} "
-        f"{_status(n_trades >= min_trades):>7}"
-    )
+    # [ GROWTH ]
+    lines.extend([
+        "  [ GROWTH ]",
+        sep_sub,
+        f"  {_status(cagr_h >= cagr_b)} CAGR          : [ {_f(cagr_h, '+.1%'):>8} ] ({_f(cagr_b, '+.1%'):>11} ) | Gate: >= Bench",
+        f"  {_status(total_return > 0.0)} Total Return  : [ {_f(total_return, '+.1%'):>8} ] | Equity: x{equity_multiple:>4.2f} | Gate: > 0",
+        ""
+    ])
+
+    # [ EFFICIENCY ]
+    lines.extend([
+        "  [ EFFICIENCY ]",
+        sep_sub,
+        f"  {_status(sharpe_h >= sharpe_b)} Sharpe        : [ {_f(sharpe_h):>8} ] ({_f(sharpe_b):>11} ) | Gate: >= Bench",
+        f"     Sortino       : [ {_f(sortino_h):>8} ] ({_f(sortino_b):>11} ) | (diag)",
+        f"  {_status(mar_h >= mar_b)} MAR (Calmar)  : [ {_mar_str(mar_h, cagr_h):>8} ] ({_mar_str(mar_b, cagr_b):>11} ) | Gate: >= Bench",
+        ""
+    ])
+
+    # [ RISK ]
+    lines.extend([
+        "  [ RISK ]",
+        sep_sub,
+        f"  {_status(mdd_h <= mdd_b)} MDD           : [ {_pct(mdd_h):>8} ] ({_pct(mdd_b):>11} ) | Gate: <= Bench",
+        f"     CVaR95        : [ {_pct(cvar95):>8} ] | Exposure: {_pct(avg_gross_exposure)} | (diag)",
+        ""
+    ])
+
+    # [ ROBUSTNESS ]
+    lines.extend([
+        "  [ ROBUSTNESS ]",
+        sep_sub,
+        f"  {_status(n_trades >= min_trades)} Trades        : [ {n_trades:>8d} ] | Gate: >= {min_trades}",
+        sep_sub,
+        ""
+    ])
 
     # Optional Metrics (if present)
     if hasattr(r, "growth_lcb") or hasattr(r, "growth_lcb_baseline"):
         val_h = float(getattr(r, "growth_lcb", 0.0))
         val_b = float(getattr(r, "growth_lcb_baseline", 0.0))
         lines.append(
-            f"  {'Growth LCB':<20} [ {_pct(val_h):>8} ] ({_pct(val_b):>11} )  {'>= Bench':>14} "
-            f"{_status(val_h >= val_b):>7}"
+            f"  {_status(val_h >= val_b)} Growth LCB   : [ {_pct(val_h):>8} ] ({_pct(val_b):>11} ) | Gate: >= Bench"
         )
     
     if hasattr(r, "total_cost_bps"):
         val_h = float(getattr(r, "total_cost_bps", 0.0))
         val_b = float(getattr(r, "total_cost_bps_baseline", 0.0))
-        # lower is better for cost
         lines.append(
-            f"  {'Cost Drag':<20} [ {val_h/100:>+8.1%} ] ({val_b/100:>+11.1%} )  {'<= Bench':>14} "
-            f"{_status(val_h <= val_b):>7}"
+            f"  {_status(val_h <= val_b)} Cost Drag    : [ {val_h/100:>+8.1%} ] ({val_b/100:>+11.1%} ) | Gate: <= Bench"
         )
-
-    lines.append(sep_sub)
-    lines.append("")
     
-    final_icon = "✅" if status == "PASS" else "❌"
-    final_label = "DEPLOY-READY" if status == "PASS" else status
-    final_status = f"{final_label} (Reason: {blocker})" if blocker else final_label
+    if hasattr(r, "growth_lcb") or hasattr(r, "total_cost_bps"):
+        lines.append("")
+
     lines.append(f"  >> FINAL RESULT : {final_icon} {final_status}")
     
     return "\n".join(lines)
