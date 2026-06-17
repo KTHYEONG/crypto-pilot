@@ -701,6 +701,7 @@ def compute_v3_score(
     excess_turnover: float,
     funding_drag: float,
     aum_impact_penalty: float,
+    disable_risk_penalty: bool = False,
 ) -> float:
     """v3.0 고정 λ 기반 6항 score 공식.
 
@@ -711,12 +712,15 @@ def compute_v3_score(
         excess_turnover: 정규화된 초과 회전율.
         funding_drag: 0~1 scale 펀딩 비용 비율.
         aum_impact_penalty: 0~1 scale AUM 충격 패널티.
+        disable_risk_penalty: MDD·CVaR 소프트 페널티를 비활성화한다.
+            True 시 λ_mdd·MDD 및 λ_cvar·CVaR 항이 0이 된다 (L2 목적함수 전용).
+            λ_down(semidev), λ_turnover, λ_funding, λ_capacity는 항상 유지된다.
 
     Returns:
         score = mean(log_tw)
                 - λ_down * semidev
-                - λ_mdd * worst_mdd
-                - λ_cvar * cvar_5
+                - (0 if disable_risk_penalty else λ_mdd * worst_mdd)
+                - (0 if disable_risk_penalty else λ_cvar * cvar_5)
                 - λ_turnover * excess_turnover
                 - λ_funding * funding_drag
                 - λ_capacity * aum_impact_penalty
@@ -730,11 +734,14 @@ def compute_v3_score(
     downside = arr[arr < 0.0]
     semidev = float(np.std(downside, ddof=0)) if downside.size > 1 else 0.0
 
+    mdd_term = 0.0 if disable_risk_penalty else _V3_LAMBDA_MDD * float(worst_mdd)
+    cvar_term = 0.0 if disable_risk_penalty else _V3_LAMBDA_CVAR * float(cvar_5)
+
     return float(
         mu
         - _V3_LAMBDA_DOWN * semidev
-        - _V3_LAMBDA_MDD * float(worst_mdd)
-        - _V3_LAMBDA_CVAR * float(cvar_5)
+        - mdd_term
+        - cvar_term
         - _V3_LAMBDA_TURNOVER * float(excess_turnover)
         - _V3_LAMBDA_FUNDING * float(funding_drag)
         - _V3_LAMBDA_CAPACITY * float(aum_impact_penalty)

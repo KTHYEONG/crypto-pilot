@@ -581,7 +581,11 @@ L2_ALLOC_SPACE_V7: dict[str, dict[str, Any]] = {
     "risk_budget_floor_ratio":       {"type": "float",       "low": 0.00, "high": 1.00, "step": 0.05},
     "risk_budget_max_scale":         {"type": "float",       "low": 1.00, "high": 6.00, "step": 0.25},
 }
-L2_ALLOC_SPACE = L2_ALLOC_SPACE_V7
+L2_ALLOC_SPACE_V8: dict[str, dict[str, Any]] = {
+    k: v for k, v in L2_ALLOC_SPACE_V7.items()
+    if k not in {"kelly_fraction", "max_ann_vol"}
+}
+L2_ALLOC_SPACE = L2_ALLOC_SPACE_V8
 
 
 # ==============================================================================
