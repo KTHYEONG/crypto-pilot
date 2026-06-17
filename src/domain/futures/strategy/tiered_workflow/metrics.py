@@ -310,7 +310,9 @@ def _sortino(
     downside = arr[arr < target]
     if downside.size == 0:
         return 0.0
-    dd = float(np.sqrt(np.mean(np.square(downside - target))))
+    # 표준 Target Downside Deviation(TDD): 전표본 N으로 정규화 (Sortino & Price 1994)
+    # ÷downside.size(비표준)가 아닌 ÷arr.size(전표본)으로 Sharpe와 분모 기준 일치
+    dd = float(np.sqrt(np.sum(np.square(downside - target)) / arr.size))
     if dd < 1e-12:
         return 0.0
     return float((mean_r - target) / dd * np.sqrt(bars_per_year))
