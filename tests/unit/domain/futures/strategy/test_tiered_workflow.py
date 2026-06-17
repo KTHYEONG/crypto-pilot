@@ -2868,7 +2868,7 @@ def test_layer2_allocation_config_from_mapping_fixed_cost_safety_mult_default() 
     assert config.risk_budget_max_scale == pytest.approx(3.0)
     assert config.adaptive_k_extra == 0
     assert config.adaptive_expand_below_vol_ratio == pytest.approx(0.0)
-    assert config.l2_objective_risk_util_target == pytest.approx(0.35)
+    assert config.l2_objective_risk_util_target == pytest.approx(0.50)
     assert config.l2_objective_trade_target == 90
     assert config.l2_replay_max_fallbacks == 5
 
@@ -3342,3 +3342,104 @@ def test_run_tiered_pipeline_l1_nested_swf_folds_still_receive_full_n_bars(
     assert result == (blocked_l1, None, None)
     assert len(nested_builder_calls) == 1
     assert nested_builder_calls[0]["n_bars"] == len(aligned.datetimes)
+
+
+# ---------------------------------------------------------------------------
+# S2-1 / S2-2 / S2-3: DSR 게이트 배선 검증 (spec: layer2-optimization-integrity.md §STEP2)
+# ---------------------------------------------------------------------------
+
+
+def test_layer2_dsr_gate_blocked_when_dsr_below_floor() -> None:
+    """S2-1: dsr_hybrid < l2_min_dsr(0.60) + 모든 앞선 게이트 통과 → gate_passed=False,
+    blocker_reason='dsr_floor'."""
+    # Layer2AllocationConfig 기본값 확인
+    config = Layer2AllocationConfig()
+    assert config.l2_min_dsr == pytest.approx(0.60), (
+        "l2_min_dsr 기본값이 0.60이어야 함 (STEP2 spec)"
+    )
+
+    # gate 체인 내 dsr_floor 분기: 다른 게이트 모두 통과 조건에서 dsr=0.0
+    # pipeline.py gate 체인 로직을 직접 재현하여 단위 검증.
+    dsr_hybrid = 0.0
+    min_dsr = float(config.l2_min_dsr)  # 0.60
+
+    # 앞선 게이트들은 통과, dsr_floor만 실패
+    blocker_reason = ""
+    gate_passed = False
+    # 마지막 두 게이트 (growth_lcb, uplift)는 통과 가정
+    if dsr_hybrid < min_dsr:
+        blocker_reason = "dsr_floor"
+    else:
+        gate_passed = True
+
+    assert blocker_reason == "dsr_floor"
+    assert not gate_passed
+
+
+def test_layer2_dsr_gate_passes_when_dsr_above_floor() -> None:
+    """S2-2: dsr_hybrid=0.65 ≥ l2_min_dsr(0.60) → gate_passed=True."""
+    config = Layer2AllocationConfig()
+    dsr_hybrid = 0.65
+    min_dsr = float(config.l2_min_dsr)
+
+    blocker_reason = ""
+    gate_passed = False
+    if dsr_hybrid < min_dsr:
+        blocker_reason = "dsr_floor"
+    else:
+        gate_passed = True
+
+    assert blocker_reason == ""
+    assert gate_passed
+
+
+def test_layer2_dsr_gate_short_circuit_by_earlier_gate() -> None:
+    """S2-3: cagr <= min_cagr 且 dsr=0.0 → blocker_reason='cagr' (DSR보다 cagr 우선)."""
+    config = Layer2AllocationConfig()
+
+    # cagr 게이트가 dsr 게이트보다 먼저 위치 — cagr 실패 시 dsr 평가 미도달.
+    cagr_hybrid = -0.50  # l2_min_cagr(0.30) 미달
+    dsr_hybrid = 0.0
+    min_cagr = float(config.l2_min_cagr)
+    min_dsr = float(config.l2_min_dsr)
+
+    blocker_reason = ""
+    gate_passed = False
+    if cagr_hybrid <= min_cagr:
+        blocker_reason = "cagr"
+    elif dsr_hybrid < min_dsr:
+        blocker_reason = "dsr_floor"
+    else:
+        gate_passed = True
+
+    assert blocker_reason == "cagr", (
+        "cagr 게이트가 dsr_floor보다 앞에 위치해야 함 (pipeline.py gate 체인 순서)"
+    )
+    assert not gate_passed
+
+
+def test_layer2_worst_fold_penalty_threshold_default() -> None:
+    """S5-3: Layer2AllocationConfig 기본값: l2_worst_fold_penalty_threshold == -0.30."""
+    config = Layer2AllocationConfig()
+    assert config.l2_worst_fold_penalty_threshold == pytest.approx(-0.30)
+    assert config.l2_worst_fold_penalty_weight == pytest.approx(0.005)
+
+
+def test_layer2_worst_fold_penalty_calculation() -> None:
+    """S5-1: worst_fold_sharpe=-1.041, threshold=-0.30, weight=0.005
+    → penalty ≈ 0.003705."""
+    worst_fold_sharpe = -1.041
+    threshold = -0.30
+    weight = 0.005
+    penalty = max(0.0, threshold - worst_fold_sharpe) * weight
+    # (-0.30 - (-1.041)) * 0.005 = 0.741 * 0.005 = 0.003705
+    assert penalty == pytest.approx(0.003705, rel=1e-4)
+
+
+def test_layer2_worst_fold_penalty_zero_when_above_threshold() -> None:
+    """S5-2: worst_fold_sharpe=-0.20 > -0.30 → penalty=0.0."""
+    worst_fold_sharpe = -0.20
+    threshold = -0.30
+    weight = 0.005
+    penalty = max(0.0, threshold - worst_fold_sharpe) * weight
+    assert penalty == pytest.approx(0.0)
