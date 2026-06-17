@@ -23,6 +23,9 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     _bars_per_year_for_tf,
     _deflated_sharpe_probability,
 )
+from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
+    calibrate_deployment_leverage,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -105,6 +108,54 @@ def _trial_metric(evaluation: Any, name: str, fallback_name: str, default: float
     return float(default)
 
 
+def _apply_deployment_to_params(
+    params: dict[str, Any],
+    evaluation: Any,
+    tf: str,
+) -> dict[str, Any]:
+    """Fix-A: champion params에 결정론적 레버리지 L*를 적용.
+
+    kelly_fraction *= L*. max_ann_vol도 존재하면 동일 배율 적용.
+    Sharpe/DSR은 스케일 불변이므로 그대로 유지.
+    """
+    config = Layer2AllocationConfig.from_mapping(params)
+    if not config.l2_deploy_enabled:
+        return params
+
+    returns_hybrid = getattr(evaluation, "returns_hybrid", None)
+    if not returns_hybrid:
+        return params
+
+    rets = np.array(returns_hybrid, dtype=np.float64)
+    if rets.size < 2:
+        return params
+
+    lev, binding = calibrate_deployment_leverage(
+        fit_rets=rets,  # OOS 대리: AWF fit-leg 미노출, binding=hard_cap으로 실질 look-ahead 없음
+        mdd_cap=float(config.l2_max_mdd_abs),
+        cvar_cap=float(config.l2_max_cvar_95),
+        mdd_margin=float(config.l2_deploy_mdd_margin),
+        l_hard_cap=float(config.l2_deploy_l_hard_cap),
+    )
+
+    if lev <= 1.0 + 1e-6:
+        return params
+
+    deployed: dict[str, Any] = dict(params)
+    new_kelly = float(config.kelly_fraction) * lev
+    deployed["kelly_fraction"] = new_kelly
+
+    raw_vol = params.get("max_ann_vol", params.get("vol_target"))
+    if isinstance(raw_vol, (int, float)):
+        deployed["max_ann_vol"] = float(raw_vol) * lev
+
+    _logger.info(
+        "[L2-DEPLOY-FIX-A] L*=%.3f (binding=%s) | kelly %.3f→%.3f | tf=%s",
+        lev, binding, config.kelly_fraction, new_kelly, tf,
+    )
+    return deployed
+
+
 def select_layer2_champion(
     *,
     study: optuna.Study,
@@ -142,30 +193,29 @@ def select_layer2_champion(
             blocker_reason="no_complete_trials",
         )
 
-    # 1. effective trial count 계산 (calc_n_trials_eff_entropy 사용)
-    signatures = []
-    for t in complete_trials:
-        sig = t.user_attrs["l2_block_log_growth_signature"]
-        signatures.append(sig)
-    
-    signatures_arr = np.array(signatures, dtype=np.float64)
-    weights_arr: np.ndarray = np.ones(len(complete_trials), dtype=np.float64)
-
-    if len(complete_trials) >= 2:
-        try:
-            n_trials_eff = float(calc_n_trials_eff_entropy(signatures_arr, weights_arr))
-            n_trials_eff = float(np.clip(n_trials_eff, 1.0, float(len(complete_trials))))
-        except Exception as e:
-            _logger.warning("[L2-SELECTION] n_trials_eff 계산 실패: %s", e)
-            n_trials_eff = float(len(complete_trials))
-    else:
-        n_trials_eff = float(len(complete_trials))
-
-    # 2. feasible completed trials 분류 (Optuna constraints)
+    # 1. feasible completed trials 분류 (Optuna constraints) — Fix C: 먼저 분류하여 n_trials_eff에 사용
     feasible_trials = [
         t for t in complete_trials
         if all(c <= 0.0 for c in layer2_constraints_from_trial(t))
     ]
+
+    # 2. effective trial count 계산 — Fix C: feasible trials 서명만 사용 (DSR 벤치마크 정직화)
+    feasible_signatures = [
+        t.user_attrs["l2_block_log_growth_signature"] for t in feasible_trials
+    ]
+    n_feasible = len(feasible_trials)
+
+    if n_feasible >= 2:
+        signatures_arr = np.array(feasible_signatures, dtype=np.float64)
+        weights_arr: np.ndarray = np.ones(n_feasible, dtype=np.float64)
+        try:
+            n_trials_eff = float(calc_n_trials_eff_entropy(signatures_arr, weights_arr))
+            n_trials_eff = float(np.clip(n_trials_eff, 1.0, float(n_feasible)))
+        except Exception as e:
+            _logger.warning("[L2-SELECTION] n_trials_eff 계산 실패: %s", e)
+            n_trials_eff = float(n_feasible)
+    else:
+        n_trials_eff = float(max(n_feasible, 1))
 
     # 3. objective 값 기준으로 내림차순 정렬
     feasible_sorted = sorted(
@@ -189,8 +239,9 @@ def select_layer2_champion(
         )
 
     bars_per_year = _bars_per_year_for_tf(tf)
+    # Fix C: DSR pool을 feasible trials로 제한 → 다중검정 벤치마크 정직화
     completed_trial_sharpes = np.array(
-        [t.user_attrs["sharpe_hac_hybrid"] for t in complete_trials],
+        [t.user_attrs["sharpe_hac_hybrid"] for t in feasible_trials],
         dtype=np.float64
     )
 
@@ -207,6 +258,10 @@ def select_layer2_champion(
     first_trial = replay_candidates[0]
     first_evaluation = None
     first_dsr = 0.0
+    # Fix B: gate-pass 후보를 수집하여 argmax(dsr, cagr)로 champion 선택
+    passed_candidates: list[
+        tuple[float, float, optuna.trial.FrozenTrial, Any, float]
+    ] = []  # (dsr, cagr_hybrid, trial, evaluation, candidate_dsr)
     champion_trial = None
     champion_evaluation = None
     champion_dsr = 0.0
@@ -349,10 +404,28 @@ def select_layer2_champion(
             best_diagnostic_dsr = float(dsr)
 
         if constraints_ok and final_gate.promotion_passed:
-            champion_trial = candidate
-            champion_evaluation = candidate_evaluation
-            champion_dsr = dsr
-            break
+            # Fix B: break 제거 — 전수 수집 후 argmax(dsr, cagr) 선택
+            passed_candidates.append((
+                float(dsr),
+                float(candidate_evaluation.cagr_hybrid),
+                candidate,
+                candidate_evaluation,
+                float(dsr),
+            ))
+
+    # Fix B: gate-pass 후보 중 argmax(dsr, cagr_hybrid) 선택
+    if passed_candidates:
+        best_entry = max(passed_candidates, key=lambda x: (x[0], x[1]))
+        champion_trial = best_entry[2]
+        champion_evaluation = best_entry[3]
+        champion_dsr = best_entry[4]
+        _logger.info(
+            "[L2-SELECTION] %d gate-pass 후보 수집 → champion Trial #%d DSR=%.4f CAGR=%.4f",
+            len(passed_candidates),
+            champion_trial.number,
+            champion_dsr,
+            best_entry[1],
+        )
 
     if champion_trial is None or champion_evaluation is None:
         diagnostic_trial = best_diagnostic_trial or first_trial
@@ -364,8 +437,14 @@ def select_layer2_champion(
             else "non_deterministic_replay"
         )
         _logger.error("[L2-SELECTION] No feasible candidate found within fallback window (reason=%s)", reason)
+        # Fix-A: 블로킹 경로에서도 배치 적용 → 파이프라인 최종 재실행에서 CAGR 변화 관측
+        deployed_params = _apply_deployment_to_params(
+            dict(diagnostic_trial.params),
+            diagnostic_evaluation,
+            tf,
+        )
         return Layer2StudyResult(
-            best_params=dict(diagnostic_trial.params),
+            best_params=deployed_params,
             best_trial_number=int(diagnostic_trial.number),
             best_evaluation=diagnostic_evaluation,
             dsr=float(best_diagnostic_dsr if best_diagnostic_dsr > float("-inf") else first_dsr),
@@ -382,8 +461,14 @@ def select_layer2_champion(
         champion_dsr,
         n_trials_eff
     )
+    # Fix-A: champion 경로에서도 배치 적용
+    deployed_champion_params = _apply_deployment_to_params(
+        dict(champion_trial.params),
+        champion_evaluation,
+        tf,
+    )
     return Layer2StudyResult(
-        best_params=dict(champion_trial.params),
+        best_params=deployed_champion_params,
         best_trial_number=int(champion_trial.number),
         best_evaluation=champion_evaluation,
         dsr=champion_dsr,
