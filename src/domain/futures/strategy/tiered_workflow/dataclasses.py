@@ -157,6 +157,7 @@ class Layer2TrialEvaluation:
     trade_count: int = 0
     risk_utilization: float = 0.0
     deployment_objective_bonus: float = 0.0
+    worst_fold_sharpe: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -255,12 +256,12 @@ class Layer2AllocationConfig:
     l2_min_psr: float = 0.90
     l2_min_friction_pass: float = 0.50
     fixed_cost_safety_mult: float = 1.25
-    l2_min_dsr: float = 0.75
+    l2_min_dsr: float = 0.60
     l2_max_cvar_95: float = 0.06
     l2_min_active_blocks: int = 3
     l2_min_sortino_abs: float = 1.5
     l2_min_trades: int = 30
-    l2_growth_lcb_z: float = 0.0
+    l2_growth_lcb_z: float = 0.5
     edge_throttle_enabled: bool = True
     edge_floor_bps: float = 0.0
     edge_ref_bps: float = 5.0
@@ -272,11 +273,13 @@ class Layer2AllocationConfig:
     adaptive_breadth_enabled: bool = False
     adaptive_k_extra: int = 0
     adaptive_expand_below_vol_ratio: float = 0.0
-    l2_objective_risk_util_target: float = 0.35
+    l2_objective_risk_util_target: float = 0.50
     l2_objective_risk_util_weight: float = 0.03
     l2_objective_trade_target: int = 90
     l2_objective_trade_weight: float = 0.02
     l2_replay_max_fallbacks: int = 5
+    l2_worst_fold_penalty_threshold: float = -0.30
+    l2_worst_fold_penalty_weight: float = 0.005
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -347,7 +350,7 @@ class Layer2AllocationConfig:
         )
         l2_objective_risk_util_target = cls._validate_range(
             "l2_objective_risk_util_target",
-            cls._as_float(params.get("l2_objective_risk_util_target", 0.35), 0.35),
+            cls._as_float(params.get("l2_objective_risk_util_target", 0.50), 0.50),
             0.0,
             1.0,
         )
@@ -397,12 +400,12 @@ class Layer2AllocationConfig:
             l2_min_psr=cls._as_float(params.get("l2_min_psr", 0.90), 0.90),
             l2_min_friction_pass=cls._as_float(params.get("l2_min_friction_pass", 0.50), 0.50),
             fixed_cost_safety_mult=fixed_cost_safety_mult,
-            l2_min_dsr=cls._as_float(params.get("l2_min_dsr", 0.75), 0.75),
+            l2_min_dsr=cls._as_float(params.get("l2_min_dsr", 0.60), 0.60),
             l2_max_cvar_95=cls._as_float(params.get("l2_max_cvar_95", 0.06), 0.06),
             l2_min_active_blocks=cls._as_int(params.get("l2_min_active_blocks", 3), 3),
             l2_min_sortino_abs=cls._as_float(params.get("l2_min_sortino_abs", 1.5), 1.5),
             l2_min_trades=cls._as_int(params.get("l2_min_trades", 30), 30),
-            l2_growth_lcb_z=cls._as_float(params.get("l2_growth_lcb_z", 0.0), 0.0),
+            l2_growth_lcb_z=cls._as_float(params.get("l2_growth_lcb_z", 0.5), 0.5),
             edge_throttle_enabled=bool(params.get("edge_throttle_enabled", True)),
             edge_floor_bps=cls._as_float(params.get("edge_floor_bps", 0.0), 0.0),
             edge_ref_bps=cls._as_float(params.get("edge_ref_bps", 5.0), 5.0),
@@ -419,6 +422,12 @@ class Layer2AllocationConfig:
             l2_objective_trade_target=l2_objective_trade_target,
             l2_objective_trade_weight=l2_objective_trade_weight,
             l2_replay_max_fallbacks=l2_replay_max_fallbacks,
+            l2_worst_fold_penalty_threshold=cls._as_float(
+                params.get("l2_worst_fold_penalty_threshold", -0.30), -0.30
+            ),
+            l2_worst_fold_penalty_weight=cls._as_float(
+                params.get("l2_worst_fold_penalty_weight", 0.005), 0.005
+            ),
         )
 
 
