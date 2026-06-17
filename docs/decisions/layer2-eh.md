@@ -7,6 +7,16 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-17 L2 최적화 무결성 강화 — 선정차단·DSR게이트·OOS보강·V6·worst-fold
+- **Delta:** (1) `opt_main_futures.py`: `blocker_reason!=""||best_evaluation is None` → `layer2_blocked` 즉시 반환(infeasible 챔피언 L3 승격 차단). (2) `pipeline.py`: `dsr_floor`(≥0.60) 게이트 13번째 조건 추가. (3) `config.py`: `ml_fit_fraction` 0.60→0.55, `ml_calibration_fraction` 0.20→0.15 (OOS 20%→30%). (4) `opt_config.py`: `L2_ALLOC_SPACE_V6`(8-param, V5 14-param 보조항 6개 동결), `L2_OPTUNA_TRIALS` 120→200. (5) `workflow.py`: worst-fold Sharpe soft-penalty(`max(0,-0.30-worst)×0.005`) objective 차감.
+- **Rationale:** L3 홀드아웃 −7% 원인은 `feasible=0→infeasible fallback 무단 승격` + `14-param×OOS 20%` 구조적 과적합(E_max=+3.09σ, DSR=0.000). CAGR 문제 아님. OOS 보강+탐색공간 축소로 과적합 토양 제거, 무결성 차단으로 false-positive 소멸.
+- **Edge Cases/Trade-offs:** DSR 임계 0.75→0.60 완화(구조 개선 전 달성가능 보수적 하한). 게이트 임계(Sortino 1.5 등) 동결. IS 5% 단축 수용. worst-fold는 soft(feasible pool 보존). 동결 파라미터의 고정값은 `from_mapping` default로 하위호환.
+
+## 2026-06-17 L2 Sortino 분모 표준화 + Objective 보수화
+- **Delta:** (1) `metrics.py::_sortino` 분모를 `÷N_down(비표준)` → `÷N(전표본, Sortino&Price 1994 TDD)`으로 교정. (2) `l2_growth_lcb_z` 기본값 0.0→0.5 (fold 일관성 보상). (3) `l2_objective_risk_util_target` 기본값 0.35→0.50 (deployment headroom 확장).
+- **Rationale:** 비표준 분모가 실효 게이트 요구치를 ~2.1로 상향시켜 0/120 feasible trials 유발. Sortino≈Sharpe(1.310≈1.297)은 분모가 full-σ로 수렴한 측정오류의 지문. 게이트 임계 1.5는 동결(이중조정 금지). z=0 point-estimate가 Fold#4 Sharpe=-1.041 붕괴 허용. RiskUtil=46.5%>target=35%로 CAGR deployment bonus 조기 포화.
+- **Edge Cases:** 게이트 1.5 동결 — 분모 교정만으로 게이트 통과 여부 자연 결정. `l2_objective_risk_util_target` 상향 시 MDD/CVaR 게이트 재실행으로 동시 충족 확인 필요.
+
 ## 2026-06-16 L2 AWF fold anchoring 복원 (PART4 data-merge regression fix)
 - **Delta:** `run_tiered_pipeline`에서 `build_walk_forward_folds(n_bars=...)` 호출 시 `n_bars`(전체 aligned 길이, holdout 포함)가 아니라 `ho_start_idx_l2`(holdout_start까지 bar 수)를 전달하도록 anchoring 복원.
 - **Rationale:** 같은 날 적용된 IS+OOS 데이터 병합(L3 빈 holdout 수정)으로 `aligned.datetimes`가 holdout_end까지 늘어나면서, `n_bars`에 비례하던 L2 fold 생성 공식의 global OOS 구간이 holdout_start 너머로 밀려나 fold 3개→1개로 붕괴(Optuna feasible trial 0건, DSR=0.000 fallback, Trades 58→29 BLOCKED).

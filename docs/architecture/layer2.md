@@ -63,13 +63,16 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
   - `adaptive_expand_below_vol_ratio` defines the low-utilization trigger against the annual vol target.
   - `l2_objective_risk_util_target` and `l2_objective_trade_target` shape Optuna toward more active deployment without replacing `growth_lcb` as the primary objective.
 - **Dynamic Scaling**: Volatility targeting ($\sigma_{target} / \sigma_{port}$) combined with regime-specific gross/net caps. Includes double-scaling guards.
-- **L2 Objective Gate (12-Condition AND)**:
+- **L2 Objective Gate (13-Condition AND)**:
   - *Sanity*: Active signals, safe deployments, trade count $\ge 30$.
   - *Growth*: Post-cost $\text{CAGR} > 0.30$.
-  - *Efficiency*: $\text{Sharpe} \ge 1.0$, $\text{Sortino} \ge 1.5$, $\text{MAR} \ge 1.0$.
+  - *Efficiency*: $\text{Sharpe} \ge 1.0$, $\text{Sortino} \ge 1.5$ (표준 TDD: $\sqrt{\frac{1}{N}\sum\min(r_i-T,0)^2}$, 전표본 N 정규화), $\text{MAR} \ge 1.0$.
   - *Risk*: $\text{MDD} \le 0.30$, $\text{CVaR}_{95} \le 0.06$.
   - *Robustness*: Fold pass ratio $\ge 0.60$, friction pass $\ge 0.50$, active blocks $\ge 3$.
   - *Relative Edge*: $\text{Uplift LCB} > 0$, $\text{Sharpe Uplift} > 0.20$ vs 1/N baseline.
+  - *Integrity*: $\text{DSR} \ge 0.60$ — 다중검정 보정(Bailey & López de Prado) 후 잔존 스킬 확률; `blocker_reason != ""` 또는 `best_evaluation is None`인 챔피언은 L3 승격 **불가(hard block)**.
+- **OOS Fraction**: `ml_fit_fraction=0.55` + `ml_calibration_fraction=0.15` → **OOS 30%** (fold당 ~27일). 구조적 과적합 방지 목적.
+- **Worst-Fold Soft Penalty**: objective에 `max(0, -0.30 − worst_fold_sharpe) × 0.005` 차감. 최신 fold 파국붕괴(-1.0↓)를 비용화 (하드 제약 아님 — feasible pool 보존).
 
 **Layer 3: Frozen Holdout**
 - Tests the L2 champion on an untouched WFFold.
@@ -80,7 +83,7 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
 Optimization runs independently per layer, prioritizing conservative growth metrics (LCB).
 - **Step A (L1 Valid)**: Pipeline targets `l1`. Early exit if blocked.
 - **Step B (L2 Prep)**: Builds causal signal batch from L1 results using historical training windows.
-- **Step C (L2 Study)**: Maximizes `growth_lcb` via TPESampler. Constrained by the 12-stage L2 Gate. Features a Champion Store ledger for safe warm-starts.
+- **Step C (L2 Study)**: Maximizes `growth_lcb - worst_fold_penalty` via TPESampler (`V6` 8-param, 200 trials). Constrained by the 13-stage L2 Gate. Features a Champion Store ledger for safe warm-starts. `blocker_reason != ""` 챔피언은 Step D 진입 **차단**.
 - **Step D (L3 Eval)**: Runs final pipeline simulation applying `l2_params` and evaluates the frozen holdout.
 
 # 4. Architecture Flow
@@ -111,11 +114,11 @@ graph TD
 | **Param** | `edge_throttle_min_active_mult` | Minimum active multiplier for positive edge books |
 | **Param** | `risk_budget_floor_ratio` | Minimum annual vol ratio used to lift under-deployed books |
 | **Param** | `risk_budget_max_scale` | Upper bound for risk-budget floor scaling |
-| **Param** | `adaptive_breadth_enabled` | Enables adaptive widening of `K_RANK` under low vol utilization |
-| **Param** | `adaptive_k_extra` | Extra rank width allowed when breadth is expanded |
-| **Param** | `adaptive_expand_below_vol_ratio` | Low-utilization trigger ratio for adaptive breadth |
-| **Param** | `L2_ALLOC_SPACE` | Active L2 Optuna search space (`V5`) |
-| **Param** | `L2_OPTUNA_TRIALS` | Optimization budget for Layer 2. Default: 120 |
+| **Param** | `adaptive_breadth_enabled` | 동결: `False` (V6에서 탐색공간 제외) |
+| **Param** | `adaptive_k_extra` | 동결: `0` |
+| **Param** | `adaptive_expand_below_vol_ratio` | 동결: `0.0` |
+| **Param** | `L2_ALLOC_SPACE` | Active L2 Optuna search space (`V6`, 8-param — V5 14-param 대비 다중검정 deflation 축소) |
+| **Param** | `L2_OPTUNA_TRIALS` | Optimization budget for Layer 2. Default: 200 |
 | **Param** | `regime_gross_multipliers` | Gross portfolio cap limits mapped to specific regimes |
 | **Param** | `double_scaling_guard` | Prevents redundant attenuation during portfolio projection |
 | **Param** | `risk_utilization` | Diagnostic ratio of realized MDD versus the configured MDD cap |
