@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from src.domain.futures.strategy.tiered_workflow.metrics import (
+    _sharpe,
     _sortino,
     _terminal_multiple,
 )
@@ -21,11 +22,17 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
 # ---------------------------------------------------------------------------
 
 def test_sortino_happy_path_matches_hand_calculation() -> None:
-    """S1: 알려진 downside dd 수기계산값과 일치 (rel=1e-4)."""
+    """S1: 표준 TDD(전표본 N 정규화) 수기계산값과 일치 (rel=1e-4).
+
+    rets=[0.02,-0.01,0.03,-0.02], mean=0.005, target=0.0
+    downside=[-0.01,-0.02], 제곱합=1e-4+4e-4=5e-4
+    TDD=sqrt(5e-4/4)=0.011180... → Sortino=0.005/0.011180*sqrt(2190)
+    """
     # Arrange (Given)
     rets = [0.02, -0.01, 0.03, -0.02]
     bars_per_year = 2190.0
-    expected = 14.798648586948742  # mean=0.005, dd=sqrt(mean([0.0001,0.0004]))
+    # dd=sqrt(sum([1e-4,4e-4])/4)=sqrt(1.25e-4)=0.011180339...
+    expected = 0.005 / (5e-4 / 4) ** 0.5 * 2190.0 ** 0.5  # ≈ 20.929
 
     # Act (When)
     result = _sortino(rets, bars_per_year=bars_per_year)
@@ -72,11 +79,32 @@ def test_sortino_handles_target_offset() -> None:
     result = _sortino(rets, target=target)
 
     # Assert (Then): downside = [r for r in rets if r < target] = [-0.01, -0.02]
+    # 표준 TDD: 제곱합을 전표본(4)으로 나눔
+    arr = np.array(rets)
     downside = np.array([-0.01, -0.02])
-    dd = float(np.sqrt(np.mean(np.square(downside - target))))
+    dd = float(np.sqrt(np.sum(np.square(downside - target)) / arr.size))
     mean_r = float(np.mean(rets))
     expected = (mean_r - target) / dd * np.sqrt(2190.0)
     assert result == pytest.approx(expected, rel=1e-6)
+
+
+def test_sortino_exceeds_sharpe_for_mixed_returns() -> None:
+    """S2-불변식: 표준 TDD에서 Sortino는 항상 Sharpe 이상 (하방만 벌점).
+
+    비표준 분모(÷N_down)에서는 분모가 커져 이 불변식이 깨짐.
+    """
+    # Arrange (Given)
+    rets = [0.03, -0.01, 0.02, -0.005, 0.04, -0.015]
+    bars_per_year = 2190.0
+
+    # Act (When)
+    sortino_val = _sortino(rets, bars_per_year=bars_per_year)
+    sharpe_val = _sharpe(rets, bars_per_year=bars_per_year)
+
+    # Assert (Then)
+    assert sortino_val > sharpe_val, (
+        f"표준 Sortino({sortino_val:.4f}) must exceed Sharpe({sharpe_val:.4f})"
+    )
 
 
 # ---------------------------------------------------------------------------
