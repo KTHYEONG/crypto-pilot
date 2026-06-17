@@ -780,7 +780,7 @@ def _run_tiered_l2_study(
         tf=tf,
         window=window,
         signal_batch=signal_batch,
-        search_space_version="v6",
+        search_space_version="v7",
     )
     _logger.info("  ● [HYPERPARAMETER OPTIMIZATION]")
     _logger.info("    - Study Name : %s", study_name)
@@ -823,7 +823,12 @@ def _run_tiered_l2_study(
             sampler=TPESampler(
                 seed=seed,
                 multivariate=True,
-                n_startup_trials=min(n_trials, max(2 * len(L2_ALLOC_SPACE), 8)),
+                group=True,
+                n_ei_candidates=48,
+                n_startup_trials=min(
+                    n_trials,
+                    max(24, min(int(n_trials * 0.20), 4 * len(L2_ALLOC_SPACE))),
+                ),
                 constraints_func=layer2_constraints_from_trial,
             ),
             resume=False,
@@ -839,13 +844,10 @@ def _run_tiered_l2_study(
             "max_ann_vol": 0.35,
             "deploy_cost_safety_mult": 1.0,
             "edge_throttle_min_active_mult": 0.25,
+            "edge_ref_bps": 5.0,
+            "edge_throttle_gamma": 1.0,
             "risk_budget_floor_ratio": 0.35,
             "risk_budget_max_scale": 2.0,
-            "no_trade_band": 0.0,
-            "rank_buffer": 0,
-            "adaptive_breadth_enabled": True,
-            "adaptive_k_extra": 4,
-            "adaptive_expand_below_vol_ratio": 0.35,
         }
         _champion_anchor = load_champion_params(tag=tf, storage=storage) or {}
         _anchor_params = {
@@ -897,10 +899,10 @@ def _run_tiered_l2_study(
             blocker_reason="no_complete_trials",
         )
 
-    # walk forward folds 구성 및 필터링하여 select_layer2_champion에 전달
-    awf_folds = build_walk_forward_folds(n_bars=len(aligned.datetimes), cfg=cfg)
     ho_ts = pd.Timestamp(window.holdout_start).tz_localize(None)
     ho_start_idx_l2 = int(np.searchsorted(aligned.datetimes, np.datetime64(ho_ts, "ns")))
+    # walk forward folds 구성 및 필터링하여 select_layer2_champion에 전달
+    awf_folds = build_walk_forward_folds(n_bars=ho_start_idx_l2, cfg=cfg)
     l2_ts = pd.Timestamp(window.l2_start).tz_localize(None)
     l1_end_bars = int(np.searchsorted(aligned.datetimes, np.datetime64(l2_ts, "ns")))
 

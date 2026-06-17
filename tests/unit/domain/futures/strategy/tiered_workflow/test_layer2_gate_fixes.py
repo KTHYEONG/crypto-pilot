@@ -254,8 +254,8 @@ def test_uplift_constraint_is_negative_when_hybrid_sharpe_above_threshold() -> N
     )
 
 
-def test_layer2_constraints_tuple_length_is_twelve() -> None:
-    """C1/C2: Sortino+trades 제약 추가 후 layer2_constraints_from_trial fallback 크기가 12인지 확인."""
+def test_layer2_constraints_tuple_length_is_eight() -> None:
+    """Optuna safety constraints fallback 크기가 8인지 확인."""
     # Arrange (Given): l2_constraint_values 미존재 trial 시뮬레이션
     from unittest.mock import MagicMock
 
@@ -268,48 +268,46 @@ def test_layer2_constraints_tuple_length_is_twelve() -> None:
     fallback = layer2_constraints_from_trial(mock_trial)
 
     # Assert (Then)
-    assert len(fallback) == 12, (
-        f"fallback 크기 {len(fallback)} != 12. Sortino+trades 제약 추가 후 12-tuple이어야 함."
+    assert len(fallback) == 8, (
+        f"fallback 크기 {len(fallback)} != 8. Optuna safety constraints 8-tuple이어야 함."
     )
     assert all(v == 1.0 for v in fallback), "모든 fallback 값이 1.0 (infeasible) 이어야 함"
 
 
-def test_layer2_constraints_twelve_element_feasible() -> None:
-    """C1: 12개 constraint_values 모두 feasible(≤0)이면 통과 판정."""
+def test_layer2_constraints_eight_element_feasible() -> None:
+    """Optuna safety constraints 8개가 모두 feasible(≤0)이면 통과 판정."""
     from unittest.mock import MagicMock
 
     from src.domain.futures.optimization.workflow import layer2_constraints_from_trial
 
     # Arrange: 12개 feasible
     mock_trial = MagicMock()
-    mock_trial.user_attrs = {"l2_constraint_values": [-1.0] * 12}
+    mock_trial.user_attrs = {"l2_optuna_constraint_values": [-1.0] * 8}
 
     # Act
     result = layer2_constraints_from_trial(mock_trial)
 
     # Assert
-    assert len(result) == 12
+    assert len(result) == 8
     assert all(c <= 0.0 for c in result), "모든 제약이 ≤0 이면 feasible이어야 함"
 
 
-def test_layer2_constraints_legacy_ten_tuple_pads_to_twelve() -> None:
-    """C2: 구 10-tuple user_attr이 12-tuple로 하위호환 패딩(1.0)되는지 확인."""
+def test_layer2_constraints_legacy_values_pad_to_eight() -> None:
+    """구 saved values는 8-tuple Optuna safety constraints로 하위호환 패딩된다."""
     from unittest.mock import MagicMock
 
     from src.domain.futures.optimization.workflow import layer2_constraints_from_trial
 
-    # Arrange: 구 버전 10-tuple (sortino/trades 제약 도입 전)
+    # Arrange: 구 버전 짧은 constraint list
     mock_trial = MagicMock()
-    mock_trial.user_attrs = {"l2_constraint_values": [-1.0] * 10}
+    mock_trial.user_attrs = {"l2_constraint_values": [-1.0] * 3}
 
     # Act
     result = layer2_constraints_from_trial(mock_trial)
 
-    # Assert: 10개는 원본 유지, 마지막 2개는 패딩(1.0, infeasible)
-    assert len(result) == 12
-    assert all(c == -1.0 for c in result[:10])
-    assert result[10] == 1.0
-    assert result[11] == 1.0
+    assert len(result) == 8
+    assert all(c == -1.0 for c in result[:3])
+    assert result[3:] == (1.0, 1.0, 1.0, 1.0, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -343,15 +341,15 @@ def test_l2_alloc_space_alias_points_to_v5() -> None:
     )
 
 
-def test_l2_alloc_space_v5_adaptive_deployment_bounds() -> None:
-    """V5: adaptive breadth + active deployment 탐색공간 경계 검증."""
-    from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE, L2_ALLOC_SPACE_V5
+def test_l2_alloc_space_v7_adaptive_deployment_bounds() -> None:
+    """V7: adaptive breadth + deployment edge 탐색공간 경계 검증."""
+    from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE, L2_ALLOC_SPACE_V7
 
-    assert L2_ALLOC_SPACE == L2_ALLOC_SPACE_V5
-    assert L2_ALLOC_SPACE_V5["risk_budget_floor_ratio"]["high"] == pytest.approx(1.00)
-    assert L2_ALLOC_SPACE_V5["deploy_cost_safety_mult"]["low"] == pytest.approx(1.0)
-    assert L2_ALLOC_SPACE_V5["max_ann_vol"]["high"] == pytest.approx(2.00)
-    assert L2_ALLOC_SPACE_V5["adaptive_breadth_enabled"]["choices"] == (False, True)
+    assert L2_ALLOC_SPACE == L2_ALLOC_SPACE_V7
+    assert L2_ALLOC_SPACE_V7["risk_budget_floor_ratio"]["high"] == pytest.approx(1.00)
+    assert L2_ALLOC_SPACE_V7["deploy_cost_safety_mult"]["low"] == pytest.approx(1.0)
+    assert L2_ALLOC_SPACE_V7["max_ann_vol"]["high"] == pytest.approx(2.00)
+    assert "adaptive_breadth_enabled" not in L2_ALLOC_SPACE_V7
 
 
 # ---------------------------------------------------------------------------
@@ -409,13 +407,13 @@ def test_ew_baseline_returns_zeros_when_direction_all_zero() -> None:
 # Config 기본값 회귀 테스트
 # ---------------------------------------------------------------------------
 
-def test_l2_min_dsr_default_is_0_75() -> None:
-    """FIX-3: l2_min_dsr 기본값이 0.75로 현실화됐는지 확인."""
+def test_l2_min_dsr_default_is_0_60() -> None:
+    """FIX-3: l2_min_dsr 기본값이 0.60으로 설정됐는지 확인."""
     # Arrange / Act
     config = Layer2AllocationConfig()
 
     # Assert
-    assert config.l2_min_dsr == pytest.approx(0.75, rel=1e-9)
+    assert config.l2_min_dsr == pytest.approx(0.60, rel=1e-9)
 
 
 def test_from_mapping_respects_new_defaults() -> None:
@@ -425,4 +423,4 @@ def test_from_mapping_respects_new_defaults() -> None:
 
     # Assert
     assert config.l2_min_active_blocks == 3
-    assert config.l2_min_dsr == pytest.approx(0.75, rel=1e-9)
+    assert config.l2_min_dsr == pytest.approx(0.60, rel=1e-9)

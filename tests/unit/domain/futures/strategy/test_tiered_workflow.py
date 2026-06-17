@@ -2870,7 +2870,7 @@ def test_layer2_allocation_config_from_mapping_fixed_cost_safety_mult_default() 
     assert config.adaptive_expand_below_vol_ratio == pytest.approx(0.0)
     assert config.l2_objective_risk_util_target == pytest.approx(0.50)
     assert config.l2_objective_trade_target == 90
-    assert config.l2_replay_max_fallbacks == 5
+    assert config.l2_replay_max_fallbacks == 24
 
 
 def test_layer2_allocation_config_from_mapping_rejects_legacy_friction_safety_mult() -> None:
