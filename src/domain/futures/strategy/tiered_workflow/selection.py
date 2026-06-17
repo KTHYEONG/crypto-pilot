@@ -139,6 +139,7 @@ def select_layer2_champion(
     replay_candidates = feasible_sorted[:fallback_limit]
     first_trial = replay_candidates[0]
     first_evaluation = None
+    first_dsr = 0.0
     champion_trial = None
     champion_evaluation = None
     champion_dsr = 0.0
@@ -154,9 +155,7 @@ def select_layer2_champion(
             caps=caps,
             tf=tf,
         )
-        if first_evaluation is None:
-            first_evaluation = candidate_evaluation
-
+        
         # Calculate DSR for this candidate
         dsr = _deflated_sharpe_probability(
             selected_rets=candidate_evaluation.returns_hybrid,
@@ -164,6 +163,10 @@ def select_layer2_champion(
             effective_trial_count=n_trials_eff,
             bars_per_year=bars_per_year,
         )
+
+        if first_evaluation is None:
+            first_evaluation = candidate_evaluation
+            first_dsr = dsr
 
         stored_cagr = float(candidate.user_attrs.get("cagr_hybrid", 0.0))
         stored_growth_lcb = float(candidate.user_attrs.get("growth_lcb_hybrid", 0.0))
@@ -202,7 +205,7 @@ def select_layer2_champion(
             best_params=dict(first_trial.params),
             best_trial_number=int(first_trial.number),
             best_evaluation=first_evaluation,
-            dsr=0.0,
+            dsr=first_dsr,
             effective_trial_count=n_trials_eff,
             completed_trials=len(complete_trials),
             feasible_trials=len(feasible_trials),
