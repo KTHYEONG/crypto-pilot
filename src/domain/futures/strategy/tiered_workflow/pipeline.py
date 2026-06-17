@@ -1190,6 +1190,8 @@ def run_l2_awf(
         blocker_reason = "growth_lcb"
     elif sharpe_hac_hybrid < sharpe_hac_baseline + _min_uplift:
         blocker_reason = "uplift"
+    elif dsr_hybrid < float(config.l2_min_dsr):
+        blocker_reason = "dsr_floor"
     else:
         gate_passed = True
     # 진단 전용 (게이트 미반영): 상대MDD, mdd_material_floor — 성장중심 결정에 따라 표시만.
