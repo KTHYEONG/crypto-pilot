@@ -898,6 +898,7 @@ def _evaluate_awf_phase_d_aggregate(
         excess_turnover=turnover_cost_ratio,
         funding_drag=funding_drag_ratio,
         aum_impact_penalty=0.0,
+        disable_risk_penalty=True,
     )
 
     total_trades_agg = float(np.sum(leg_trade_counts)) if leg_trade_counts else 0.0
