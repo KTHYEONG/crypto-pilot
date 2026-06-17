@@ -28,6 +28,7 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     Layer1Result,
     Layer2AllocationConfig,
     Layer2BlockMetric,
+    Layer2GateEvaluation,
     Layer2Result,
     Layer2SignalSchedule,
     Layer2SimulationDiagnostics,
@@ -45,6 +46,9 @@ from src.domain.futures.strategy.tiered_workflow.diagnostics import (
     compute_per_symbol_ic,
     compute_per_symbol_realized_stats,
     compute_prediction_decomposition_diag,
+)
+from src.domain.futures.strategy.tiered_workflow.l2_gate import (
+    evaluate_layer2_gate,
 )
 from src.domain.futures.strategy.tiered_workflow.metrics import (
     _cagr,
@@ -98,6 +102,7 @@ __all__ = [
     "Layer1Result",
     "Layer2AllocationConfig",
     "Layer2BlockMetric",
+    "Layer2GateEvaluation",
     "Layer2Result",
     "Layer2SignalSchedule",
     "Layer2SimulationDiagnostics",
@@ -140,6 +145,7 @@ __all__ = [
     "compute_rebalance_cost",
     "compute_symbol_strategy_evidence",
     "evaluate_layer1_readiness",
+    "evaluate_layer2_gate",
     "evaluate_outer_signal_opportunities",
     "fit_layer1_inference_artifact",
     "format_layer1_deployment_registry_table",

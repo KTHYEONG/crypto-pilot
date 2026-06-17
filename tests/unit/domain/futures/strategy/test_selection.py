@@ -124,13 +124,13 @@ class TestLayer2Selection(unittest.TestCase):
         study.trials = [trial]
 
         # 제약 충족: 모든 값이 <= 0.0
-        mock_constraints.return_value = (-1.0, 0.0)
+        mock_constraints.return_value = (-1.0,) * 8
 
         # evaluate_l2_trial 반환 설정
         eval_mock = Layer2TrialEvaluation(
             objective_value=0.15,
-            constraint_values=(-1.0, 0.0),
-            cagr_hybrid=0.25,
+            constraint_values=(-1.0,) * 8,
+            cagr_hybrid=0.35,
             cagr_baseline=0.10,
             growth_lcb_hybrid=0.15,
             growth_lcb_baseline=0.08,
@@ -141,12 +141,16 @@ class TestLayer2Selection(unittest.TestCase):
             cvar_95_hybrid=0.02,
             fold_pass_ratio=1.0,
             break_even_pass_pct=1.0,
+            sortino_hybrid=1.5,
+            trade_count=120,
             average_gross_exposure=1.0,
             cap_saturation_ratio=0.1,
             total_cost_bps=20.0,
-            block_metrics=(),
+            block_metrics=(MagicMock(), MagicMock(), MagicMock()),
             returns_hybrid=(0.01, 0.02),
             returns_baseline=(0.005, 0.01),
+            sharpe_hybrid=2.3,
+            sharpe_hac_baseline_ew=1.0,
         )
         mock_evaluate.return_value = eval_mock
 
@@ -170,13 +174,13 @@ class TestLayer2Selection(unittest.TestCase):
     @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
     @patch("src.domain.futures.strategy.tiered_workflow.selection.layer2_constraints_from_trial")
     @patch("src.domain.futures.strategy.tiered_workflow.selection._deflated_sharpe_probability")
-    def test_select_champion_low_dsr_is_diagnostic_not_blocking(
+    def test_select_champion_low_dsr_blocks_promotion(
         self,
         mock_dsp: MagicMock,
         mock_constraints: MagicMock,
         mock_evaluate: MagicMock,
     ) -> None:
-        """C3: DSR이 낮아도(0.90) hard-gate가 아니므로 champion 선정·blocker_reason==''이 유지되는지 검증."""
+        """DSR이 낮으면 최종 promotion blocker가 dsr_floor인지 검증."""
         study = MagicMock(spec=optuna.Study)
         trial = MagicMock(spec=optuna.trial.FrozenTrial)
         trial.state = optuna.trial.TrialState.COMPLETE
@@ -185,19 +189,19 @@ class TestLayer2Selection(unittest.TestCase):
         trial.user_attrs = {
             "l2_block_log_growth_signature": [0.02] * 11,
             "sharpe_hac_hybrid": 1.5,
-            "cagr_hybrid": 0.20,
+            "cagr_hybrid": 0.35,
             "growth_lcb_hybrid": 0.10,
             "mdd_hybrid": 0.08,
         }
         trial.params = {"K_RANK": 2}
         study.trials = [trial]
 
-        mock_constraints.return_value = (-1.0, 0.0)
+        mock_constraints.return_value = (-1.0,) * 8
 
         eval_mock = Layer2TrialEvaluation(
             objective_value=0.10,
-            constraint_values=(-1.0, 0.0),
-            cagr_hybrid=0.20,
+            constraint_values=(-1.0,) * 8,
+            cagr_hybrid=0.35,
             cagr_baseline=0.10,
             growth_lcb_hybrid=0.10,
             growth_lcb_baseline=0.08,
@@ -208,17 +212,20 @@ class TestLayer2Selection(unittest.TestCase):
             cvar_95_hybrid=0.03,
             fold_pass_ratio=1.0,
             break_even_pass_pct=1.0,
+            sortino_hybrid=1.5,
+            trade_count=120,
             average_gross_exposure=1.0,
             cap_saturation_ratio=0.1,
             total_cost_bps=20.0,
-            block_metrics=(),
+            block_metrics=(MagicMock(), MagicMock(), MagicMock()),
             returns_hybrid=(0.01, 0.015),
             returns_baseline=(0.005, 0.01),
+            sharpe_hybrid=1.8,
+            sharpe_hac_baseline_ew=1.0,
         )
         mock_evaluate.return_value = eval_mock
 
-        # DSR 낮음(0.90)이지만 더 이상 hard-gate가 아님 — 챔피언 선정에 영향 없음
-        mock_dsp.return_value = 0.90
+        mock_dsp.return_value = 0.30
 
         res = select_layer2_champion(
             study=study,
@@ -229,9 +236,9 @@ class TestLayer2Selection(unittest.TestCase):
             caps=self.caps,
         )
 
-        assert res.blocker_reason == ""
+        assert res.blocker_reason == "dsr_floor"
         assert res.best_trial_number == 2
-        assert res.dsr == 0.9
+        assert res.dsr == 0.3
         assert res.best_evaluation is not None
 
     @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
@@ -270,11 +277,11 @@ class TestLayer2Selection(unittest.TestCase):
         }
         trial_2.params = {"K_RANK": 3, "l2_replay_max_fallbacks": 3}
         study.trials = [trial_1, trial_2]
-        mock_constraints.return_value = (-1.0,) * 12
+        mock_constraints.return_value = (-1.0,) * 8
 
         replay_infeasible = Layer2TrialEvaluation(
             objective_value=0.17,
-            constraint_values=(-1.0,) * 11 + (1.0,),
+            constraint_values=(1.0,) + (-1.0,) * 7,
             cagr_hybrid=0.34,
             cagr_baseline=0.10,
             growth_lcb_hybrid=0.17,
@@ -286,17 +293,21 @@ class TestLayer2Selection(unittest.TestCase):
             cvar_95_hybrid=0.02,
             fold_pass_ratio=1.0,
             break_even_pass_pct=1.0,
+            sortino_hybrid=1.5,
+            trade_count=120,
             average_gross_exposure=1.0,
             cap_saturation_ratio=0.1,
             total_cost_bps=20.0,
-            block_metrics=(),
+            block_metrics=(MagicMock(), MagicMock(), MagicMock()),
             returns_hybrid=(0.01, 0.02),
             returns_baseline=(0.005, 0.01),
+            sharpe_hybrid=2.1,
+            sharpe_hac_baseline_ew=1.0,
         )
         replay_feasible = Layer2TrialEvaluation(
             objective_value=0.18,
-            constraint_values=(-1.0,) * 12,
-            cagr_hybrid=0.29,
+            constraint_values=(-1.0,) * 8,
+            cagr_hybrid=0.35,
             cagr_baseline=0.10,
             growth_lcb_hybrid=0.18,
             growth_lcb_baseline=0.08,
@@ -307,12 +318,16 @@ class TestLayer2Selection(unittest.TestCase):
             cvar_95_hybrid=0.02,
             fold_pass_ratio=1.0,
             break_even_pass_pct=1.0,
+            sortino_hybrid=1.5,
+            trade_count=120,
             average_gross_exposure=1.0,
             cap_saturation_ratio=0.1,
             total_cost_bps=20.0,
-            block_metrics=(),
+            block_metrics=(MagicMock(), MagicMock(), MagicMock()),
             returns_hybrid=(0.01, 0.02),
             returns_baseline=(0.005, 0.01),
+            sharpe_hybrid=2.1,
+            sharpe_hac_baseline_ew=1.0,
         )
         mock_evaluate.side_effect = [replay_infeasible, replay_feasible]
         mock_dsp.return_value = 0.88
@@ -351,10 +366,10 @@ class TestLayer2Selection(unittest.TestCase):
         }
         trial.params = {"K_RANK": 4, "l2_replay_max_fallbacks": 1}
         study.trials = [trial]
-        mock_constraints.return_value = (-1.0,) * 12
+        mock_constraints.return_value = (-1.0,) * 8
         mock_evaluate.return_value = Layer2TrialEvaluation(
             objective_value=0.17,
-            constraint_values=(1.0,) + (-1.0,) * 11,
+            constraint_values=(1.0,) + (-1.0,) * 7,
             cagr_hybrid=0.34,
             cagr_baseline=0.10,
             growth_lcb_hybrid=0.17,
@@ -366,12 +381,16 @@ class TestLayer2Selection(unittest.TestCase):
             cvar_95_hybrid=0.02,
             fold_pass_ratio=1.0,
             break_even_pass_pct=1.0,
+            sortino_hybrid=1.5,
+            trade_count=120,
             average_gross_exposure=1.0,
             cap_saturation_ratio=0.1,
             total_cost_bps=20.0,
-            block_metrics=(),
+            block_metrics=(MagicMock(), MagicMock(), MagicMock()),
             returns_hybrid=(0.01, 0.02),
             returns_baseline=(0.005, 0.01),
+            sharpe_hybrid=2.1,
+            sharpe_hac_baseline_ew=1.0,
         )
 
         res = select_layer2_champion(
@@ -383,5 +402,5 @@ class TestLayer2Selection(unittest.TestCase):
             caps=self.caps,
         )
 
-        assert res.blocker_reason == "non_deterministic_replay"
+        assert res.blocker_reason == "no_deployment"
         assert res.best_trial_number == 12

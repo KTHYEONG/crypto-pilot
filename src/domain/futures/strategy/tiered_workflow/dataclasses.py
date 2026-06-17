@@ -153,11 +153,24 @@ class Layer2TrialEvaluation:
     block_metrics: tuple[Layer2BlockMetric, ...]
     returns_hybrid: tuple[float, ...] = ()
     returns_baseline: tuple[float, ...] = ()
+    sharpe_hybrid: float = 0.0
+    sharpe_hac_baseline_ew: float = 0.0
     sortino_hybrid: float = 0.0
     trade_count: int = 0
     risk_utilization: float = 0.0
     deployment_objective_bonus: float = 0.0
     worst_fold_sharpe: float = 0.0
+    gate: Layer2GateEvaluation | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class Layer2GateEvaluation:
+    """Layer2 Optuna safety constraints and final promotion gate diagnostics."""
+
+    optuna_constraint_values: tuple[float, ...]
+    promotion_passed: bool
+    promotion_blocker: str
+    promotion_constraint_values: tuple[float, ...]
 
 
 @dataclass(slots=True, frozen=True)
@@ -277,7 +290,7 @@ class Layer2AllocationConfig:
     l2_objective_risk_util_weight: float = 0.03
     l2_objective_trade_target: int = 90
     l2_objective_trade_weight: float = 0.02
-    l2_replay_max_fallbacks: int = 5
+    l2_replay_max_fallbacks: int = 24
     l2_worst_fold_penalty_threshold: float = -0.30
     l2_worst_fold_penalty_weight: float = 0.005
 
@@ -376,7 +389,7 @@ class Layer2AllocationConfig:
         l2_replay_max_fallbacks = int(
             cls._validate_range(
                 "l2_replay_max_fallbacks",
-                cls._as_int(params.get("l2_replay_max_fallbacks", 5), 5),
+                cls._as_int(params.get("l2_replay_max_fallbacks", 24), 24),
                 1,
             )
         )

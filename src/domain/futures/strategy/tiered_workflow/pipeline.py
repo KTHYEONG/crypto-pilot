@@ -62,6 +62,9 @@ from src.domain.futures.strategy.tiered_workflow.diagnostics import (
     compute_per_symbol_realized_stats,
     compute_prediction_decomposition_diag,
 )
+from src.domain.futures.strategy.tiered_workflow.l2_gate import (
+    evaluate_layer2_gate,
+)
 from src.domain.futures.strategy.tiered_workflow.metrics import (
     _bars_per_year_for_tf,
     _cagr,
@@ -1130,21 +1133,7 @@ def run_l2_awf(
     )
 
     # gate config 키 (l2_params 우선, default=원칙값)
-    _min_cagr = float(config.l2_min_cagr)
-    _min_mar = float(config.l2_min_mar)
-    _min_sharpe_abs = float(config.l2_min_sharpe_abs)
     _max_mdd_abs = float(config.l2_max_mdd_abs)
-    _min_fold_pass = float(config.l2_min_fold_pass_ratio)
-    _min_uplift = float(config.l2_min_sharpe_uplift)
-    _min_psr = float(config.l2_min_psr)
-    _min_friction_pass = float(config.l2_min_friction_pass)
-    _mdd_material_floor = float(config.l2_mdd_material_floor)
-    _mdd_rel_tol = float(config.l2_mdd_rel_tol)
-    _max_cvar_95 = float(config.l2_max_cvar_95)
-    _min_growth_uplift = float(config.l2_min_growth_uplift)
-    _min_active_blocks = int(config.l2_min_active_blocks)
-    _min_sortino = float(config.l2_min_sortino_abs)
-    _min_trades = int(config.l2_min_trades)
 
     # 신규 표시 metric (2026-06-16 평가체계 재편: 복리성장+위험효율+배치건전성)
     sortino_hybrid = _sortino(sim.rets_hybrid, bars_per_year=bars_per_year)
@@ -1162,41 +1151,28 @@ def run_l2_awf(
         and sim.support_leak_count == 0
     )
 
-    blocker_reason = ""
-    gate_passed = False
-    if not _deployment_ok:
-        blocker_reason = "no_deployment"
-    elif trade_count < _min_trades:
-        blocker_reason = "low_trades"
-    elif cagr_hybrid <= _min_cagr:
-        blocker_reason = "cagr"
-    elif sharpe_hybrid < _min_sharpe_abs:
-        blocker_reason = "sharpe_abs"
-    elif sortino_hybrid < _min_sortino:
-        blocker_reason = "sortino"
-    elif mar_hybrid < _min_mar:
-        blocker_reason = "mar"
-    elif mdd_hybrid > _max_mdd_abs:
-        blocker_reason = "mdd_abs"
-    elif cvar_95_hybrid > _max_cvar_95:
-        blocker_reason = "cvar_95"
-    elif fold_pass_ratio < _min_fold_pass:
-        blocker_reason = "fold"
-    elif len(block_metrics) < _min_active_blocks:
-        blocker_reason = "active_blocks"
-    elif friction_pass_pct < _min_friction_pass:
-        blocker_reason = "friction"
-    elif growth_lcb_hybrid < growth_lcb_baseline + _min_growth_uplift:
-        blocker_reason = "growth_lcb"
-    elif sharpe_hac_hybrid < sharpe_hac_baseline + _min_uplift:
-        blocker_reason = "uplift"
-    elif dsr_hybrid < float(config.l2_min_dsr):
-        blocker_reason = "dsr_floor"
-    else:
-        gate_passed = True
-    # 진단 전용 (게이트 미반영): 상대MDD, mdd_material_floor — 성장중심 결정에 따라 표시만.
-    _ = _mdd_material_floor, _mdd_rel_tol, _min_psr
-
+    gate = evaluate_layer2_gate(
+        deployment_failed=not _deployment_ok,
+        support_leak_count=int(sim.support_leak_count),
+        cagr_hybrid=float(cagr_hybrid),
+        sharpe_hybrid=float(sharpe_hybrid),
+        sharpe_hac_hybrid=float(sharpe_hac_hybrid),
+        sharpe_hac_baseline=float(sharpe_hac_baseline),
+        sortino_hybrid=float(sortino_hybrid),
+        mar_hybrid=float(mar_hybrid),
+        mdd_hybrid=float(mdd_hybrid),
+        cvar_95_hybrid=float(cvar_95_hybrid),
+        fold_pass_ratio=float(fold_pass_ratio),
+        active_block_count=len(block_metrics),
+        friction_pass_pct=float(friction_pass_pct),
+        trade_count=int(trade_count),
+        growth_lcb_hybrid=float(growth_lcb_hybrid),
+        growth_lcb_baseline=float(growth_lcb_baseline),
+        dsr_hybrid=float(dsr_hybrid),
+        config=config,
+    )
+    blocker_reason = gate.promotion_blocker
+    gate_passed = gate.promotion_passed
     result = Layer2Result(
         selected_last=sim.last_selected,
         weights_last={

@@ -13,6 +13,8 @@ related_paths:
   - src/domain/futures/strategy/ablation.py
   - src/domain/futures/portfolio/covariance.py
   - src/domain/futures/strategy/tiered_workflow/pipeline.py
+  - src/domain/futures/strategy/tiered_workflow/selection.py
+  - src/domain/futures/strategy/tiered_workflow/l2_gate.py
   - src/domain/futures/strategy/cs_rank.py
   - src/domain/futures/portfolio/portfolio_constructor.py
   - src/domain/futures/strategy/walk_forward.py
@@ -21,6 +23,8 @@ change_triggers:
   - src/domain/futures/strategy/candidate_ensemble.py
   - src/domain/futures/strategy/candidate_workflow.py
   - src/domain/futures/strategy/tiered_workflow/pipeline.py
+  - src/domain/futures/strategy/tiered_workflow/selection.py
+  - src/domain/futures/strategy/tiered_workflow/l2_gate.py
   - src/domain/futures/strategy/cs_rank.py
   - src/domain/futures/portfolio/portfolio_constructor.py
   - src/domain/futures/strategy/walk_forward.py
@@ -30,7 +34,7 @@ dependencies:
     - docs/architecture/signal.md
     - docs/architecture/regime.md
     - docs/architecture/ML.md
-last_verified: 2026-06-16
+last_verified: 2026-06-17
 ---
 
 # 1. Purpose
@@ -57,22 +61,18 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
   - `edge_throttle_min_active_mult` preserves a non-zero floor for positive edge books.
   - `risk_budget_floor_ratio` scales under-deployed books toward the target-vol floor without creating new support.
   - `risk_budget_max_scale` caps the upward scaling applied by the floor logic.
-- **Adaptive Breadth & Objective Shaping**:
-  - `adaptive_breadth_enabled` can widen `K_RANK` when the previous book under-uses the vol budget.
-  - `adaptive_k_extra` limits the breadth expansion window.
-  - `adaptive_expand_below_vol_ratio` defines the low-utilization trigger against the annual vol target.
-  - `l2_objective_risk_util_target` and `l2_objective_trade_target` shape Optuna toward more active deployment without replacing `growth_lcb` as the primary objective.
+- **Search Space V7**:
+  - `deploy_cost_safety_mult`, `edge_ref_bps`, and `edge_throttle_gamma` are the exposed L2 deployment-shaping dimensions.
+  - `L2_ALLOC_SPACE` aliases `L2_ALLOC_SPACE_V7` and is hashed into the study key via `search_space_version="v7"`.
 - **Dynamic Scaling**: Volatility targeting ($\sigma_{target} / \sigma_{port}$) combined with regime-specific gross/net caps. Includes double-scaling guards.
-- **L2 Objective Gate (13-Condition AND)**:
-  - *Sanity*: Active signals, safe deployments, trade count $\ge 30$.
-  - *Growth*: Post-cost $\text{CAGR} > 0.30$.
-  - *Efficiency*: $\text{Sharpe} \ge 1.0$, $\text{Sortino} \ge 1.5$ (표준 TDD: $\sqrt{\frac{1}{N}\sum\min(r_i-T,0)^2}$, 전표본 N 정규화), $\text{MAR} \ge 1.0$.
-  - *Risk*: $\text{MDD} \le 0.30$, $\text{CVaR}_{95} \le 0.06$.
-  - *Robustness*: Fold pass ratio $\ge 0.60$, friction pass $\ge 0.50$, active blocks $\ge 3$.
-  - *Relative Edge*: $\text{Uplift LCB} > 0$, $\text{Sharpe Uplift} > 0.20$ vs 1/N baseline.
-  - *Integrity*: $\text{DSR} \ge 0.60$ — 다중검정 보정(Bailey & López de Prado) 후 잔존 스킬 확률; `blocker_reason != ""` 또는 `best_evaluation is None`인 챔피언은 L3 승격 **불가(hard block)**.
+- **L2 Gate Contract**:
+  - `Layer2GateEvaluation.optuna_constraint_values` is the 8-value safety vector fed to `TPESampler(constraints_func=...)`.
+  - `Layer2GateEvaluation.promotion_constraint_values` is the full replay gate vector used for champion promotion.
+  - Optuna feasibility covers deployment/leak/risk/coverage/trade floors only.
+  - Final promotion gate additionally checks `CAGR`, `Sharpe`, `Sortino`, `MAR`, `growth_lcb`, `uplift`, and `DSR`.
+  - `CAGR >= 0.30` remains a hard promotion gate and is not embedded as an Optuna objective bonus.
 - **OOS Fraction**: `ml_fit_fraction=0.55` + `ml_calibration_fraction=0.15` → **OOS 30%** (fold당 ~27일). 구조적 과적합 방지 목적.
-- **Worst-Fold Soft Penalty**: objective에 `max(0, -0.30 − worst_fold_sharpe) × 0.005` 차감. 최신 fold 파국붕괴(-1.0↓)를 비용화 (하드 제약 아님 — feasible pool 보존).
+- **Replay Championing**: `select_layer2_champion` replays a broader frontier and re-evaluates the promotion gate with replay-time DSR to keep the champion contract aligned with the pipeline gate.
 
 **Layer 3: Frozen Holdout**
 - Tests the L2 champion on an untouched WFFold.
@@ -112,12 +112,12 @@ graph TD
 | **Param** | `edge_throttle_enabled` | Toggles the time-varying conviction multiplier |
 | **Param** | `deploy_cost_safety_mult` | Deployment-stage friction safety multiplier |
 | **Param** | `edge_throttle_min_active_mult` | Minimum active multiplier for positive edge books |
+| **Param** | `edge_ref_bps` | Deployment edge reference used by the throttle shape |
+| **Param** | `edge_throttle_gamma` | Throttle curvature exponent |
 | **Param** | `risk_budget_floor_ratio` | Minimum annual vol ratio used to lift under-deployed books |
 | **Param** | `risk_budget_max_scale` | Upper bound for risk-budget floor scaling |
-| **Param** | `adaptive_breadth_enabled` | 동결: `False` (V6에서 탐색공간 제외) |
-| **Param** | `adaptive_k_extra` | 동결: `0` |
-| **Param** | `adaptive_expand_below_vol_ratio` | 동결: `0.0` |
-| **Param** | `L2_ALLOC_SPACE` | Active L2 Optuna search space (`V6`, 8-param — V5 14-param 대비 다중검정 deflation 축소) |
+| **Param** | `Layer2GateEvaluation` | Split gate contract: safety vs promotion |
+| **Param** | `L2_ALLOC_SPACE` | Active L2 Optuna search space (`V7`, 11-param) |
 | **Param** | `L2_OPTUNA_TRIALS` | Optimization budget for Layer 2. Default: 200 |
 | **Param** | `regime_gross_multipliers` | Gross portfolio cap limits mapped to specific regimes |
 | **Param** | `double_scaling_guard` | Prevents redundant attenuation during portfolio projection |
@@ -127,5 +127,5 @@ graph TD
 
 # 6. Edge Cases & Resilience
 - **Survival Censoring**: Negative out-of-sample edge folds have predictions zeroed to prevent capital allocation into degrading factors.
-- **Fail-SAFE Logic**: If OOS proof logic falters, architecture falls back to unconditionally stable `archetype_only` conditioning.
+- **Fail-SAFE Logic**: If OOS proof logic falters, replay selection falls back to the best diagnostic candidate while preserving the final blocker reason.
 - **NaN Protection**: Tradeable masks naturally sever allocations on corrupted data points without crashing execution.
