@@ -471,8 +471,8 @@ class TestS7L1OverrideSkipsL1Fitting:
 
 class TestS8SuggestLayeredParamsL2Rewired:
     def test_l2_space_includes_new_params_and_excludes_dead_params(self) -> None:
-        """suggest_layered_params('L2')가 kelly_fraction/max_ann_vol를 포함
-        하고 RISK_PER_TRADE/MAX_EXPOSURE_PER_COIN을 제외함."""
+        """Fix C: V8 — kelly_fraction/max_ann_vol 탐색 제외 (Phase B 결정론 배치로 대체).
+        signal 차원(K_RANK, CS_Z_SCORE_THRESHOLD 등)은 유지, dead params도 제거됨."""
         import optuna
 
         from src.domain.futures.optimization.workflow import suggest_layered_params
@@ -486,8 +486,11 @@ class TestS8SuggestLayeredParamsL2Rewired:
         study.optimize(objective, n_trials=1)
         trial = study.best_trial
 
-        assert "kelly_fraction" in trial.params, "kelly_fraction 누락"
-        assert "max_ann_vol" in trial.params, "max_ann_vol 누락"
+        # Fix C: leverage 차원은 V8에서 제거됨
+        assert "kelly_fraction" not in trial.params, "kelly_fraction은 V8에서 제거됨"
+        assert "max_ann_vol" not in trial.params, "max_ann_vol은 V8에서 제거됨"
+        # signal 차원은 유지
+        assert "K_RANK" in trial.params, "K_RANK 누락"
         assert "RISK_PER_TRADE" not in trial.params, "dead param RISK_PER_TRADE 잔존"
         assert "MAX_EXPOSURE_PER_COIN" not in trial.params, "dead param MAX_EXPOSURE_PER_COIN 잔존"
 
