@@ -367,6 +367,7 @@ def _make_l2_ns(**kwargs: object) -> SimpleNamespace:
         "gate_passed": True,
         "blocker_reason": "",
         "psr_hybrid": 0.92,
+        "dsr_hybrid": 0.85,
     }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
@@ -389,6 +390,8 @@ class TestFormatLayer2Table:
         assert "1.500" in result
         assert "CAGR" in result
         assert "Calmar" in result
+        assert "DSR" in result
+        assert "0.850" in result
 
     def test_blocked_shows_blocker_reason(self) -> None:
         """gate_passed=False + blocker_reason → 로그에 reason 포함."""
@@ -473,17 +476,19 @@ class TestFormatLayer2Table:
         # Assert
         assert "n/a(loss)" in result
 
-    def test_format_layer2_table_psr_gate_shown(self) -> None:
-        """PSR 행이 표시되고 psr_hybrid=0.85 < 0.90이면 ❌ 상태 검증."""
+    def test_format_layer2_table_dsr_gate_shown(self) -> None:
+        """DSR 행이 표시되고 dsr_hybrid=0.50 < 0.60이면 ❌ 상태 검증."""
         # Arrange
-        r2 = _make_l2_ns(psr_hybrid=0.85)
+        r2 = _make_l2_ns(dsr_hybrid=0.50)
 
         # Act
-        result = format_layer2_table(r2)
+        result = format_layer2_table(r2, min_dsr=0.60)
 
         # Assert
-        assert "PSR" in result
-        assert "❌" in result  # psr_hybrid=0.85 < 0.90
+        assert "Integrity" in result
+        assert "DSR" in result
+        assert "❌" in result  # dsr_hybrid=0.50 < 0.60
+
 
 
 class TestFormatLayer3Table:

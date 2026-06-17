@@ -49,21 +49,12 @@ def select_layer2_champion(
     aligned: Any,
     awf_folds: tuple[Any, ...],
     caps: Any,
+    min_dsr: float = 0.60,
 ) -> Layer2StudyResult:
     """feasible completed trials 중 growth_lcb(objective) 최상위 챔피언 선정 및 검증.
 
-    DSR은 2026-06-16부로 hard-gate에서 diagnostic으로 강등(pool-상대 benchmark가
-    trial 수와 동반 상승하는 구조적 편향 + L3 frozen holdout과 3중 중복). 챔피언
-    선정은 growth_lcb(objective) 최상위 feasible trial로 결정하고, DSR은 참고
-    지표로만 계산해 결과에 첨부한다.
-
-    Algorithm:
-        1. feasible completed trials를 objective (t.value) 내림차순 정렬
-        2. completed trials의 block log growth signature를 기반으로 n_trials_eff 계산
-        3. objective 최상위 feasible trial을 챔피언으로 선정, simulation 1회 재실행
-        4. 챔피언에 대해 DSR diagnostic 계산 (게이트 미적용)
-        5. 선정된 챔피언에 대해 deterministic replay 검증 (stored cagr/mdd/growth_lcb 비교)
-        6. 결과 반환
+    DSR은 2026-06-16부로 diagnostic으로 강등되었으나, 2026-06-17 무결성 강화
+    결정에 따라 pipeline 하드 게이트와 동기화하여 선정 단계에서도 필터링을 수행한다.
     """
     complete_trials = [
         t for t in study.trials
@@ -106,7 +97,7 @@ def select_layer2_champion(
     else:
         n_trials_eff = float(len(complete_trials))
 
-    # 2. feasible completed trials 분류
+    # 2. feasible completed trials 분류 (Optuna constraints)
     feasible_trials = [
         t for t in complete_trials
         if all(c <= 0.0 for c in layer2_constraints_from_trial(t))
@@ -140,15 +131,18 @@ def select_layer2_champion(
     )
 
     # 4. objective(growth_lcb) 최상위 feasible trial부터 bounded replay fallback 수행
+    # + DSR 하드 게이트 필터링 (2026-06-17)
     fallback_limit = max(
         Layer2AllocationConfig.from_mapping(dict(feasible_sorted[0].params)).l2_replay_max_fallbacks,
-        1,
+        5,
     )
     replay_candidates = feasible_sorted[:fallback_limit]
     first_trial = replay_candidates[0]
     first_evaluation = None
     champion_trial = None
     champion_evaluation = None
+    champion_dsr = 0.0
+    failed_due_to_dsr = False
 
     for candidate in replay_candidates:
         candidate_config = Layer2AllocationConfig.from_mapping(dict(candidate.params))
@@ -163,6 +157,14 @@ def select_layer2_champion(
         if first_evaluation is None:
             first_evaluation = candidate_evaluation
 
+        # Calculate DSR for this candidate
+        dsr = _deflated_sharpe_probability(
+            selected_rets=candidate_evaluation.returns_hybrid,
+            completed_trial_sharpes=completed_trial_sharpes,
+            effective_trial_count=n_trials_eff,
+            bars_per_year=bars_per_year,
+        )
+
         stored_cagr = float(candidate.user_attrs.get("cagr_hybrid", 0.0))
         stored_growth_lcb = float(candidate.user_attrs.get("growth_lcb_hybrid", 0.0))
         stored_mdd = float(candidate.user_attrs.get("mdd_hybrid", 0.0))
@@ -172,7 +174,11 @@ def select_layer2_champion(
             or abs(candidate_evaluation.growth_lcb_hybrid - stored_growth_lcb) > eps
             or abs(candidate_evaluation.mdd_hybrid - stored_mdd) > eps
         )
-        replay_feasible = all(value <= 0.0 for value in candidate_evaluation.constraint_values)
+        
+        # Check both Optuna constraints and DSR gate
+        constraints_ok = all(value <= 0.0 for value in candidate_evaluation.constraint_values)
+        dsr_ok = dsr >= min_dsr
+
         if replay_mismatch:
             _logger.warning(
                 "[L2-SELECTION] Replay mismatch on trial #%d: stored_cagr=%.6f replayed_cagr=%.6f",
@@ -180,13 +186,18 @@ def select_layer2_champion(
                 stored_cagr,
                 candidate_evaluation.cagr_hybrid,
             )
-        if replay_feasible:
+        
+        if constraints_ok and dsr_ok:
             champion_trial = candidate
             champion_evaluation = candidate_evaluation
+            champion_dsr = dsr
             break
+        elif constraints_ok and not dsr_ok:
+            failed_due_to_dsr = True
 
     if champion_trial is None or champion_evaluation is None:
-        _logger.error("[L2-SELECTION] No replay-feasible candidate found within fallback window")
+        reason = "dsr_floor" if failed_due_to_dsr else "non_deterministic_replay"
+        _logger.error("[L2-SELECTION] No feasible candidate found within fallback window (reason=%s)", reason)
         return Layer2StudyResult(
             best_params=dict(first_trial.params),
             best_trial_number=int(first_trial.number),
@@ -195,15 +206,8 @@ def select_layer2_champion(
             effective_trial_count=n_trials_eff,
             completed_trials=len(complete_trials),
             feasible_trials=len(feasible_trials),
-            blocker_reason="non_deterministic_replay",
+            blocker_reason=reason,
         )
-
-    champion_dsr = _deflated_sharpe_probability(
-        selected_rets=champion_evaluation.returns_hybrid,
-        completed_trial_sharpes=completed_trial_sharpes,
-        effective_trial_count=n_trials_eff,
-        bars_per_year=bars_per_year,
-    )
 
     _logger.info(
         "[L2-SELECTION] Champion selected. Trial #%d, Objective=%.4f, DSR=%.4f (n_eff=%.2f)",
