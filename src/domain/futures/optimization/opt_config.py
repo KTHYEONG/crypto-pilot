@@ -61,7 +61,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # True = tiered pipeline 실행 (Phase D allocation 스킵); False = Phase D 유지.
     "USE_CS_RANK_ENGINE": True,
     # Tiered L2 AWF Optuna 탐색 trial 수 (Phase D와 별도)
-    "L2_OPTUNA_TRIALS": 120,
+    "L2_OPTUNA_TRIALS": 200,
     # Universal Cross-Sectional Alpha Miner Settings
     "FUTURES_ML_ALPHA_POPULATION": 1500,
     "FUTURES_ALPHA_LONG_BIAS": 2.0,
@@ -558,7 +558,17 @@ L2_ALLOC_SPACE_V5: dict[str, dict[str, Any]] = {
     "adaptive_k_extra":              {"type": "int",         "low": 0, "high": 8, "step": 1},
     "adaptive_expand_below_vol_ratio": {"type": "float",     "low": 0.0, "high": 0.80, "step": 0.05},
 }
-L2_ALLOC_SPACE = L2_ALLOC_SPACE_V5
+L2_ALLOC_SPACE_V6: dict[str, dict[str, Any]] = {
+    "K_RANK":                        {"type": "int",         "low": 1, "high": 8, "step": 1},
+    "REBALANCE_BARS":                {"type": "categorical", "choices": (1, 2, 3, 6)},
+    "CS_Z_SCORE_THRESHOLD":          {"type": "float",       "low": 0.0, "high": 1.2, "step": 0.1},
+    "kelly_fraction":                {"type": "float",       "low": 0.20, "high": 0.80, "step": 0.05},
+    "max_ann_vol":                   {"type": "float",       "low": 0.30, "high": 2.00, "step": 0.05},
+    "edge_throttle_min_active_mult": {"type": "float",       "low": 0.00, "high": 0.60, "step": 0.05},
+    "risk_budget_floor_ratio":       {"type": "float",       "low": 0.00, "high": 1.00, "step": 0.05},
+    "risk_budget_max_scale":         {"type": "float",       "low": 1.00, "high": 6.00, "step": 0.25},
+}
+L2_ALLOC_SPACE = L2_ALLOC_SPACE_V6
 
 
 # ==============================================================================
