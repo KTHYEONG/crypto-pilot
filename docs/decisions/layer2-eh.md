@@ -7,6 +7,11 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-17 L2 DSR-First 구조 개혁 — Fix A(결정론적 배치) + Fix B(목적함수 정렬) + Fix C(DSR pool 정직화)
+- **Delta:** (A) `risk_deployment.py` 신설: `calibrate_deployment_leverage(fit_rets, mdd_cap, l_hard_cap=4.0)` 이분탐색 → champion kelly/vol 사후 스케일링(L*≤4). (B) `compute_v3_score`에 `disable_risk_penalty=True` 추가 — L2 objective에서 MDD/CVaR 소프트 패널티 제거. champion 선택을 `argmax(dsr, cagr)`로 변경(이전: 첫 gate-pass break). (C) `L2_ALLOC_SPACE_V8`(V7 − kelly − max_ann_vol, 9-param). DSR pool = feasible-only → benchmark 하락 → DSR 0.270→0.502 관측.
+- **Rationale:** 진단: CW1=목적함수↔게이트 불일치(MDD/CVaR penalty가 under-deployment 보상), CW2=DSR pool 오염(infeasible trials의 Sharpe가 벤치마크 인플레이션), CW3=kelly/vol이 보수적 목적함수에 공동 종속. DSR/Sharpe는 L 스케일에 불변 → CAGR과 DSR 문제 분리 가능 → Fix A로 CAGR, Fix B+C로 DSR 독립 공략.
+- **Edge Cases:** `binding=hard_cap`이면 OOS-fit 분포 이격 무관(L* 결정에 데이터 미활용). fit-leg 수익률 미노출 → OOS 대리 사용; `mdd_margin=0.30`으로 완충. 향후 AWF `fold_fit_rets` 노출 시 per-fold calibration 전환.
+
 ## 2026-06-17 L2 replay gate contract 정렬 — raw Sharpe / EW baseline Sharpe 보존
 - **Delta:** `Layer2TrialEvaluation`에 `sharpe_hybrid`와 `sharpe_hac_baseline_ew`를 추가해 replay 시 final gate를 원본 pipeline 입력과 동일한 계약으로 재계산하도록 정렬. `select_layer2_champion`은 DSR를 주입하기 전후 모두 같은 promotion gate helper를 사용하고, replay candidate의 `promotion_blocker`를 canonical blocker로 유지한다.
 - **Rationale:** 기존 replay 경로는 `sharpe_hac_hybrid`를 raw Sharpe 대용으로 쓰고 baseline도 EW가 아닌 HAC baseline으로 대체해, pipeline과 champion selection의 gate 의미가 어긋날 수 있었다. DSR는 replay-time diagnostic으로만 추가하고, gate 정의 자체는 pipeline과 동일해야 L2/L3 불협화음을 줄일 수 있다.
