@@ -1173,11 +1173,7 @@ def _run_strategy_stage(
             best_l2_params = dict(getattr(l2_study_result, "best_params", {}))
 
             # ── INTEGRITY GUARD: infeasible 챔피언 L3 승격 차단 ─────────────
-            if l2_study_result.blocker_reason != "" or l2_study_result.best_evaluation is None:
-                _logger.warning(
-                    "[L2] selection blocked (%s) — L3 승격 차단",
-                    l2_study_result.blocker_reason,
-                )
+            # 차단 로그는 최종 pipeline 내부 또는 종료 시점에 출력되므로 생략
 
             # ── Step E: 최적 params + L1 override로 최종 실행 ────────────────
             from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
