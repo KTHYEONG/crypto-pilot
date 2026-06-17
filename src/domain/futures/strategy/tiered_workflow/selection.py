@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -12,7 +13,11 @@ from src.domain.futures.optimization.evaluator import calc_n_trials_eff_entropy
 from src.domain.futures.optimization.workflow import evaluate_l2_trial, layer2_constraints_from_trial
 from src.domain.futures.strategy.tiered_workflow import Layer2AllocationConfig
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+    Layer2GateEvaluation,
     Layer2StudyResult,
+)
+from src.domain.futures.strategy.tiered_workflow.l2_gate import (
+    evaluate_layer2_gate,
 )
 from src.domain.futures.strategy.tiered_workflow.metrics import (
     _bars_per_year_for_tf,
@@ -39,6 +44,65 @@ def _layer2_experiment_key(
     )
     h = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()[:12]
     return f"l2_study_{tf}_{h}"
+
+
+def _build_layer2_replay_frontier(
+    feasible_trials: Sequence[optuna.trial.FrozenTrial],
+    *,
+    fallback_limit: int,
+) -> list[optuna.trial.FrozenTrial]:
+    if not feasible_trials:
+        return []
+
+    def _value_key(trial: optuna.trial.FrozenTrial) -> tuple[float, int]:
+        value = float(trial.value) if trial.value is not None else -1e6
+        return (value, -int(trial.number))
+
+    def _attr_key(name: str) -> Any:
+        def _key(trial: optuna.trial.FrozenTrial) -> tuple[float, int]:
+            return (
+                float(trial.user_attrs.get(name, -1e6)),
+                -int(trial.number),
+            )
+
+        return _key
+
+    frontier: dict[int, optuna.trial.FrozenTrial] = {}
+
+    def _take_top(
+        trials: Sequence[optuna.trial.FrozenTrial],
+        limit: int,
+        key: Any,
+    ) -> None:
+        for trial in sorted(trials, key=key, reverse=True)[: max(limit, 0)]:
+            frontier[int(trial.number)] = trial
+
+    _take_top(feasible_trials, fallback_limit, _value_key)
+    half_limit = max(fallback_limit // 2, 1)
+    _take_top(feasible_trials, half_limit, _attr_key("growth_lcb_hybrid"))
+    _take_top(feasible_trials, half_limit, _attr_key("sharpe_hac_hybrid"))
+    _take_top(feasible_trials, half_limit, _attr_key("cagr_hybrid"))
+
+    return sorted(
+        frontier.values(),
+        key=lambda trial: (
+            float(trial.value) if trial.value is not None else -1e6,
+            float(trial.user_attrs.get("sharpe_hac_hybrid", -1e6)),
+            float(trial.user_attrs.get("cagr_hybrid", -1e6)),
+            -int(trial.number),
+        ),
+        reverse=True,
+    )
+
+
+def _trial_metric(evaluation: Any, name: str, fallback_name: str, default: float = 0.0) -> float:
+    value = getattr(evaluation, name, None)
+    if isinstance(value, (int, float)):
+        return float(value)
+    fallback = getattr(evaluation, fallback_name, None)
+    if isinstance(fallback, (int, float)):
+        return float(fallback)
+    return float(default)
 
 
 def select_layer2_champion(
@@ -134,16 +198,22 @@ def select_layer2_champion(
     # + DSR 하드 게이트 필터링 (2026-06-17)
     fallback_limit = max(
         Layer2AllocationConfig.from_mapping(dict(feasible_sorted[0].params)).l2_replay_max_fallbacks,
-        5,
+        24,
     )
-    replay_candidates = feasible_sorted[:fallback_limit]
+    replay_candidates = _build_layer2_replay_frontier(
+        feasible_sorted,
+        fallback_limit=fallback_limit,
+    )
     first_trial = replay_candidates[0]
     first_evaluation = None
     first_dsr = 0.0
     champion_trial = None
     champion_evaluation = None
     champion_dsr = 0.0
-    failed_due_to_dsr = False
+    best_diagnostic_trial = None
+    best_diagnostic_evaluation = None
+    best_diagnostic_gate: Layer2GateEvaluation | None = None
+    best_diagnostic_dsr = float("-inf")
 
     for candidate in replay_candidates:
         candidate_config = Layer2AllocationConfig.from_mapping(dict(candidate.params))
@@ -178,34 +248,127 @@ def select_layer2_champion(
             or abs(candidate_evaluation.mdd_hybrid - stored_mdd) > eps
         )
         
-        # Check both Optuna constraints and DSR gate
-        constraints_ok = all(value <= 0.0 for value in candidate_evaluation.constraint_values)
-        dsr_ok = dsr >= min_dsr
+        pre_dsr_gate = getattr(candidate_evaluation, "gate", None)
+        if pre_dsr_gate is None:
+            raw_sharpe = _trial_metric(
+                candidate_evaluation,
+                "sharpe_hybrid",
+                "sharpe_hac_hybrid",
+            )
+            sharpe_hac_baseline_ew = _trial_metric(
+                candidate_evaluation,
+                "sharpe_hac_baseline_ew",
+                "sharpe_hac_baseline",
+            )
+            pre_dsr_gate = evaluate_layer2_gate(
+                deployment_failed=bool(candidate_evaluation.constraint_values[0] > 0.0),
+                support_leak_count=0,
+                cagr_hybrid=float(candidate_evaluation.cagr_hybrid),
+                sharpe_hybrid=raw_sharpe,
+                sharpe_hac_hybrid=float(candidate_evaluation.sharpe_hac_hybrid),
+                sharpe_hac_baseline=sharpe_hac_baseline_ew,
+                sortino_hybrid=float(candidate_evaluation.sortino_hybrid),
+                mar_hybrid=float(
+                    candidate_evaluation.cagr_hybrid / (candidate_evaluation.mdd_hybrid + 1e-9)
+                ),
+                mdd_hybrid=float(candidate_evaluation.mdd_hybrid),
+                cvar_95_hybrid=float(candidate_evaluation.cvar_95_hybrid),
+                fold_pass_ratio=float(candidate_evaluation.fold_pass_ratio),
+                active_block_count=len(candidate_evaluation.block_metrics),
+                friction_pass_pct=float(candidate_evaluation.break_even_pass_pct),
+                trade_count=int(candidate_evaluation.trade_count),
+                growth_lcb_hybrid=float(candidate_evaluation.growth_lcb_hybrid),
+                growth_lcb_baseline=float(candidate_evaluation.growth_lcb_baseline),
+                dsr_hybrid=None,
+                config=candidate_config,
+            )
+        constraints_ok = all(value <= 0.0 for value in pre_dsr_gate.optuna_constraint_values)
+        raw_sharpe = _trial_metric(
+            candidate_evaluation,
+            "sharpe_hybrid",
+            "sharpe_hac_hybrid",
+        )
+        sharpe_hac_baseline_ew = _trial_metric(
+            candidate_evaluation,
+            "sharpe_hac_baseline_ew",
+            "sharpe_hac_baseline",
+        )
+        final_gate = evaluate_layer2_gate(
+            deployment_failed=bool(pre_dsr_gate.optuna_constraint_values[0] > 0.0),
+            support_leak_count=0,
+            cagr_hybrid=float(candidate_evaluation.cagr_hybrid),
+            sharpe_hybrid=raw_sharpe,
+            sharpe_hac_hybrid=float(candidate_evaluation.sharpe_hac_hybrid),
+            sharpe_hac_baseline=sharpe_hac_baseline_ew,
+            sortino_hybrid=float(candidate_evaluation.sortino_hybrid),
+            mar_hybrid=float(
+                candidate_evaluation.cagr_hybrid / (candidate_evaluation.mdd_hybrid + 1e-9)
+            ),
+            mdd_hybrid=float(candidate_evaluation.mdd_hybrid),
+            cvar_95_hybrid=float(candidate_evaluation.cvar_95_hybrid),
+            fold_pass_ratio=float(candidate_evaluation.fold_pass_ratio),
+            active_block_count=len(candidate_evaluation.block_metrics),
+            friction_pass_pct=float(candidate_evaluation.break_even_pass_pct),
+            trade_count=int(candidate_evaluation.trade_count),
+            growth_lcb_hybrid=float(candidate_evaluation.growth_lcb_hybrid),
+            growth_lcb_baseline=float(candidate_evaluation.growth_lcb_baseline),
+            dsr_hybrid=float(dsr),
+            config=candidate_config,
+        )
 
         if replay_mismatch:
-            _logger.warning(
+            _logger.debug(
                 "[L2-SELECTION] Replay mismatch on trial #%d: stored_cagr=%.6f replayed_cagr=%.6f",
                 candidate.number,
                 stored_cagr,
                 candidate_evaluation.cagr_hybrid,
             )
-        
-        if constraints_ok and dsr_ok:
+
+        if (
+            best_diagnostic_trial is None
+            or (
+                int(final_gate.promotion_passed),
+                float(dsr),
+                float(candidate_evaluation.objective_value),
+                float(candidate_evaluation.growth_lcb_hybrid),
+                float(candidate_evaluation.cagr_hybrid),
+                -int(candidate.number),
+            )
+            > (
+                int(best_diagnostic_gate.promotion_passed) if best_diagnostic_gate is not None else 0,
+                float(best_diagnostic_dsr),
+                float(best_diagnostic_evaluation.objective_value) if best_diagnostic_evaluation is not None else -1e6,
+                float(best_diagnostic_evaluation.growth_lcb_hybrid) if best_diagnostic_evaluation is not None else -1e6,
+                float(best_diagnostic_evaluation.cagr_hybrid) if best_diagnostic_evaluation is not None else -1e6,
+                -int(best_diagnostic_trial.number),
+            )
+        ):
+            best_diagnostic_trial = candidate
+            best_diagnostic_evaluation = candidate_evaluation
+            best_diagnostic_gate = final_gate
+            best_diagnostic_dsr = float(dsr)
+
+        if constraints_ok and final_gate.promotion_passed:
             champion_trial = candidate
             champion_evaluation = candidate_evaluation
             champion_dsr = dsr
             break
-        elif constraints_ok and not dsr_ok:
-            failed_due_to_dsr = True
 
     if champion_trial is None or champion_evaluation is None:
-        reason = "dsr_floor" if failed_due_to_dsr else "non_deterministic_replay"
+        diagnostic_trial = best_diagnostic_trial or first_trial
+        diagnostic_evaluation = best_diagnostic_evaluation or first_evaluation
+        diagnostic_gate = best_diagnostic_gate
+        reason = (
+            diagnostic_gate.promotion_blocker
+            if diagnostic_gate is not None and diagnostic_gate.promotion_blocker
+            else "non_deterministic_replay"
+        )
         _logger.error("[L2-SELECTION] No feasible candidate found within fallback window (reason=%s)", reason)
         return Layer2StudyResult(
-            best_params=dict(first_trial.params),
-            best_trial_number=int(first_trial.number),
-            best_evaluation=first_evaluation,
-            dsr=first_dsr,
+            best_params=dict(diagnostic_trial.params),
+            best_trial_number=int(diagnostic_trial.number),
+            best_evaluation=diagnostic_evaluation,
+            dsr=float(best_diagnostic_dsr if best_diagnostic_dsr > float("-inf") else first_dsr),
             effective_trial_count=n_trials_eff,
             completed_trials=len(complete_trials),
             feasible_trials=len(feasible_trials),

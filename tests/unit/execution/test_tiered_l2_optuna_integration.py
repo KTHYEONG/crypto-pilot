@@ -62,7 +62,10 @@ class TestS1RunTieredL2StudyHappyPath:
         mock_trial.value = 1.2
         mock_trial.state = TrialState.COMPLETE
         mock_trial.params = best_params
-        mock_trial.user_attrs = {"dsr_hybrid": 0.8, "l2_constraint_values": [-1.0] * 9}
+        mock_trial.user_attrs = {
+            "dsr_hybrid": 0.8,
+            "l2_optuna_constraint_values": [-1.0] * 8,
+        }
 
         mock_study = MagicMock()
         mock_study.trials = [mock_trial]
@@ -78,7 +81,7 @@ class TestS1RunTieredL2StudyHappyPath:
         # Mock Layer2TrialEvaluation을 직접 반환하는 select_layer2_champion
         mock_l2_eval = Layer2TrialEvaluation(
             objective_value=1.2,
-            constraint_values=tuple([-1.0] * 9),
+            constraint_values=tuple([-1.0] * 8),
             cagr_hybrid=0.40,
             cagr_baseline=0.20,
             growth_lcb_hybrid=0.35,
@@ -111,7 +114,7 @@ class TestS1RunTieredL2StudyHappyPath:
                 "src.execution.opt_main_futures.setup_optuna_storage",
                 return_value=("url", MagicMock()),
             ),
-            patch("optuna.create_study", return_value=mock_study),
+            patch("src.execution.opt_main_futures.get_or_create_study", return_value=mock_study),
             patch(
                 "src.domain.futures.optimization.workflow.objective_l2_growth",
                 return_value=1.2,
@@ -192,7 +195,7 @@ class TestS3AllTrialsFail:
 
         with (
             patch("src.execution.opt_main_futures.setup_optuna_storage", return_value=("url", MagicMock())),
-            patch("optuna.create_study", return_value=mock_study),
+            patch("src.execution.opt_main_futures.get_or_create_study", return_value=mock_study),
             patch("src.domain.futures.optimization.workflow.TieredContext"),
             caplog.at_level(logging.WARNING, logger="opt_main_futures"),
         ):
@@ -545,7 +548,7 @@ class TestL2LoggingAndCagrOptimizationTarget:
 
         evaluation = Layer2TrialEvaluation(
             objective_value=0.2,
-            constraint_values=(-1.0,) * 9,
+            constraint_values=(-1.0,) * 8,
             cagr_hybrid=0.35,
             cagr_baseline=0.1,
             growth_lcb_hybrid=0.2,
@@ -618,7 +621,7 @@ def _make_l2_study_result(
     if has_evaluation:
         evaluation = Layer2TrialEvaluation(
             objective_value=1.0,
-            constraint_values=(-1.0,) * 12,
+            constraint_values=(-1.0,) * 8,
             cagr_hybrid=0.40,
             cagr_baseline=0.20,
             growth_lcb_hybrid=0.35,
