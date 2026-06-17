@@ -780,7 +780,7 @@ def _run_tiered_l2_study(
         tf=tf,
         window=window,
         signal_batch=signal_batch,
-        search_space_version="v5",
+        search_space_version="v6",
     )
     _logger.info("  ● [HYPERPARAMETER OPTIMIZATION]")
     _logger.info("    - Study Name : %s", study_name)
@@ -1169,6 +1169,17 @@ def _run_strategy_stage(
                 seed=_seed,
             )
             best_l2_params = dict(getattr(l2_study_result, "best_params", {}))
+
+            # ── INTEGRITY GUARD: infeasible 챔피언 L3 승격 차단 ─────────────
+            if l2_study_result.blocker_reason != "" or l2_study_result.best_evaluation is None:
+                _logger.warning(
+                    "[L2] selection blocked (%s) — L3 승격 차단",
+                    l2_study_result.blocker_reason,
+                )
+                return RunnerResult(
+                    exit_code=1,
+                    reason=f"layer2_blocked:{l2_study_result.blocker_reason}",
+                )
 
             # ── Step E: 최적 params + L1 override로 최종 실행 ────────────────
             from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
