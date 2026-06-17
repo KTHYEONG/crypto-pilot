@@ -7,6 +7,11 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-17 L2 replay gate contract 정렬 — raw Sharpe / EW baseline Sharpe 보존
+- **Delta:** `Layer2TrialEvaluation`에 `sharpe_hybrid`와 `sharpe_hac_baseline_ew`를 추가해 replay 시 final gate를 원본 pipeline 입력과 동일한 계약으로 재계산하도록 정렬. `select_layer2_champion`은 DSR를 주입하기 전후 모두 같은 promotion gate helper를 사용하고, replay candidate의 `promotion_blocker`를 canonical blocker로 유지한다.
+- **Rationale:** 기존 replay 경로는 `sharpe_hac_hybrid`를 raw Sharpe 대용으로 쓰고 baseline도 EW가 아닌 HAC baseline으로 대체해, pipeline과 champion selection의 gate 의미가 어긋날 수 있었다. DSR는 replay-time diagnostic으로만 추가하고, gate 정의 자체는 pipeline과 동일해야 L2/L3 불협화음을 줄일 수 있다.
+- **Edge Cases/Trade-offs:** legacy trial attrs는 `l2_constraint_values` fallback으로 유지한다. replay 입력이 없는 구 trial은 기존 HAC 기반 근사값으로만 복원되므로, 새 contract가 존재하는 trial보다 blocker 정밀도가 낮을 수 있다.
+
 ## 2026-06-17 L2 최적화 무결성 강화 — 선정차단·DSR게이트·OOS보강·V6·worst-fold
 - **Delta:** (1) `opt_main_futures.py`: `blocker_reason!=""||best_evaluation is None` → `layer2_blocked` 즉시 반환(infeasible 챔피언 L3 승격 차단). (2) `pipeline.py`: `dsr_floor`(≥0.60) 게이트 13번째 조건 추가. (3) `config.py`: `ml_fit_fraction` 0.60→0.55, `ml_calibration_fraction` 0.20→0.15 (OOS 20%→30%). (4) `opt_config.py`: `L2_ALLOC_SPACE_V6`(8-param, V5 14-param 보조항 6개 동결), `L2_OPTUNA_TRIALS` 120→200. (5) `workflow.py`: worst-fold Sharpe soft-penalty(`max(0,-0.30-worst)×0.005`) objective 차감.
 - **Rationale:** L3 홀드아웃 −7% 원인은 `feasible=0→infeasible fallback 무단 승격` + `14-param×OOS 20%` 구조적 과적합(E_max=+3.09σ, DSR=0.000). CAGR 문제 아님. OOS 보강+탐색공간 축소로 과적합 토양 제거, 무결성 차단으로 false-positive 소멸.
