@@ -5,7 +5,7 @@ import inspect
 import logging
 import math
 import warnings
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, is_dataclass, replace
 from types import SimpleNamespace
@@ -1593,6 +1593,10 @@ def objective_l1_ic(trial: Trial, ctx: TieredContext) -> float:
 def _resolve_l2_signal_batch_and_folds(ctx: TieredContext) -> tuple[Any, tuple[Any, ...]]:
     from src.domain.futures.strategy.tiered_workflow import predict_layer1_signals
     from src.domain.futures.strategy.walk_forward import WFFold, build_walk_forward_folds
+    from src.domain.futures.strategy.tiered_workflow.pipeline import _date_to_idx, _to_utc_timestamp
+    import numpy as np
+
+    ho_start_idx_l2 = _date_to_idx(ctx.aligned.datetimes, ctx.window.holdout_start)
 
     signal_batch = None
     if ctx.fixed_l1_params:
@@ -1601,8 +1605,7 @@ def _resolve_l2_signal_batch_and_folds(ctx: TieredContext) -> tuple[Any, tuple[A
         artifact = (ctx.fixed_l1_params or {}).get("inference_artifact")
         if artifact is None:
             return None, ()
-        n_bars = len(ctx.aligned.datetimes) if hasattr(ctx.aligned, "datetimes") else 0
-        awf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=ctx.cfg)
+        awf_folds = build_walk_forward_folds(n_bars=ho_start_idx_l2, cfg=ctx.cfg)
         if not awf_folds:
             return None, ()
         start_idx = min(fold.oos_start for fold in awf_folds)
@@ -1618,12 +1621,7 @@ def _resolve_l2_signal_batch_and_folds(ctx: TieredContext) -> tuple[Any, tuple[A
     if signal_batch is None:
         return None, ()
 
-    n_bars = len(ctx.aligned.datetimes) if hasattr(ctx.aligned, "datetimes") else 0
-    awf_folds = build_walk_forward_folds(n_bars=n_bars, cfg=ctx.cfg)
-
-    import numpy as np
-
-    from src.domain.futures.strategy.tiered_workflow.pipeline import _date_to_idx, _to_utc_timestamp
+    awf_folds = build_walk_forward_folds(n_bars=ho_start_idx_l2, cfg=ctx.cfg)
 
     l2_start_ts = _to_utc_timestamp(ctx.window.l2_start)
     l1_end_bars = int(
@@ -1632,7 +1630,6 @@ def _resolve_l2_signal_batch_and_folds(ctx: TieredContext) -> tuple[Any, tuple[A
             np.datetime64(l2_start_ts.tz_localize(None), "ns"),
         )
     )
-    ho_start_idx_l2 = _date_to_idx(ctx.aligned.datetimes, ctx.window.holdout_start)
 
     bounded_folds = tuple(
         fold
@@ -1657,22 +1654,26 @@ def _resolve_l2_signal_batch_and_folds(ctx: TieredContext) -> tuple[Any, tuple[A
 def _deployment_shaped_l2_objective(
     *,
     growth_lcb: float,
-    risk_utilization: float,
-    trade_count: int,
-    risk_util_target: float,
-    risk_util_weight: float,
-    trade_target: int,
-    trade_weight: float,
+    block_log_growth: Sequence[float],
+    worst_fold_sharpe: float,
+    worst_fold_threshold: float,
+    worst_fold_weight: float,
 ) -> float:
-    """Keep growth primary while nudging the search toward active deployment."""
+    """Prioritize stable post-cost compounding rather than gate-shaped bonuses."""
     if not np.isfinite(growth_lcb):
         return -1e6
-    bounded_risk_target = max(float(risk_util_target), 1e-12)
-    bounded_trade_target = max(int(trade_target), 1)
-    risk_score = min(max(float(risk_utilization), 0.0), bounded_risk_target) / bounded_risk_target
-    trade_score = min(max(int(trade_count), 0), bounded_trade_target) / float(bounded_trade_target)
-    bonus = float(risk_util_weight) * risk_score + float(trade_weight) * trade_score
-    return float(growth_lcb + bonus)
+    arr = np.asarray(list(block_log_growth), dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        arr = np.array([0.0], dtype=np.float64)
+    downside_lpm = float(np.mean(np.maximum(0.0, -arr)))
+    median = float(np.median(arr))
+    mad = float(np.mean(np.abs(arr - median)))
+    worst_fold_penalty = (
+        max(0.0, float(worst_fold_threshold) - float(worst_fold_sharpe))
+        * float(worst_fold_weight)
+    )
+    return float(growth_lcb - 0.10 * downside_lpm - 0.05 * mad - worst_fold_penalty)
 
 
 def evaluate_l2_trial(
@@ -1690,6 +1691,7 @@ def evaluate_l2_trial(
         Layer2BlockMetric,
         Layer2TrialEvaluation,
     )
+    from src.domain.futures.strategy.tiered_workflow.l2_gate import evaluate_layer2_gate
     from src.domain.futures.strategy.tiered_workflow.metrics import (
         _bars_per_year_for_tf,
         _cagr,
@@ -1698,6 +1700,7 @@ def evaluate_l2_trial(
         _growth_lower_confidence_bound,
         _mdd,
         _psr,
+        _sharpe,
         _sharpe_hac,
         _sortino,
     )
@@ -1718,6 +1721,7 @@ def evaluate_l2_trial(
 
     cagr_hybrid = _cagr(rets_hybrid, bars_per_year=bars_per_year)
     cagr_baseline = _cagr(rets_baseline, bars_per_year=bars_per_year)
+    sharpe_hybrid = _sharpe(rets_hybrid, bars_per_year=bars_per_year)
     sharpe_hac_hybrid = _sharpe_hac(rets_hybrid, bars_per_year=bars_per_year)
     sharpe_hac_baseline = _sharpe_hac(rets_baseline, bars_per_year=bars_per_year)
     psr_hybrid = _psr(rets_hybrid, bars_per_year=bars_per_year)
@@ -1725,6 +1729,7 @@ def evaluate_l2_trial(
     cvar_95_hybrid = _cvar_loss(rets_hybrid)
     sortino_hybrid = _sortino(rets_hybrid, bars_per_year=bars_per_year)
     trade_count = int(sim.trade_count)
+    mar_hybrid = cagr_hybrid / (mdd_hybrid + 1e-9)
 
     block_growth_hybrid = _contiguous_block_log_growth(
         rets_hybrid,
@@ -1815,16 +1820,13 @@ def evaluate_l2_trial(
     worst_fold_sharpe: float = min(_fold_sharpes) if _fold_sharpes else 0.0
     _wf_threshold = float(config.l2_worst_fold_penalty_threshold)
     _wf_weight = float(config.l2_worst_fold_penalty_weight)
-    fold_penalty = max(0.0, _wf_threshold - worst_fold_sharpe) * _wf_weight
 
     objective_value = _deployment_shaped_l2_objective(
-        growth_lcb=finite_score - fold_penalty,
-        risk_utilization=risk_utilization,
-        trade_count=trade_count,
-        risk_util_target=float(config.l2_objective_risk_util_target),
-        risk_util_weight=float(config.l2_objective_risk_util_weight),
-        trade_target=int(config.l2_objective_trade_target),
-        trade_weight=float(config.l2_objective_trade_weight),
+        growth_lcb=finite_score,
+        block_log_growth=tuple(float(x) for x in block_growth_hybrid),
+        worst_fold_sharpe=worst_fold_sharpe,
+        worst_fold_threshold=_wf_threshold,
+        worst_fold_weight=_wf_weight,
     )
     deployment_objective_bonus = float(objective_value - finite_score)
     deployment_failed = (
@@ -1833,25 +1835,29 @@ def evaluate_l2_trial(
         or not np.isfinite(cagr_hybrid)
         or not np.isfinite(sharpe_hac_hybrid)
     )
-    constraint_values = (
-        1.0 if deployment_failed else -1.0,
-        float(mdd_hybrid - float(config.l2_max_mdd_abs)),
-        float(float(config.l2_min_sharpe_abs) - sharpe_hac_hybrid),
-        float(float(config.l2_min_fold_pass_ratio) - fold_pass_ratio),
-        float(float(config.l2_min_friction_pass) - break_even_pass_pct),
-        float(sim.support_leak_count),
-        float(growth_lcb_baseline + float(config.l2_min_growth_uplift) - finite_score),
-        float(cvar_95_hybrid - float(config.l2_max_cvar_95)),
-        float(float(config.l2_min_active_blocks) - active_block_count),
-        # FIX-4: uplift 제약 — 순수 EW 대비 Sharpe 우위 없으면 infeasible (≤0 feasible)
-        float(sharpe_hac_baseline_ew + float(config.l2_min_sharpe_uplift) - sharpe_hac_hybrid),
-        # 2026-06-16 평가체계 재편: Sortino 효율 + 표본수(trade_count) 제약 추가.
-        float(float(config.l2_min_sortino_abs) - sortino_hybrid),
-        float(float(config.l2_min_trades) - trade_count),
+    gate = evaluate_layer2_gate(
+        deployment_failed=deployment_failed,
+        support_leak_count=int(sim.support_leak_count),
+        cagr_hybrid=float(cagr_hybrid),
+        sharpe_hybrid=float(sharpe_hybrid),
+        sharpe_hac_hybrid=float(sharpe_hac_hybrid),
+        sharpe_hac_baseline=float(sharpe_hac_baseline_ew),
+        sortino_hybrid=float(sortino_hybrid),
+        mar_hybrid=float(mar_hybrid),
+        mdd_hybrid=float(mdd_hybrid),
+        cvar_95_hybrid=float(cvar_95_hybrid),
+        fold_pass_ratio=float(fold_pass_ratio),
+        active_block_count=int(active_block_count),
+        friction_pass_pct=float(break_even_pass_pct),
+        trade_count=int(trade_count),
+        growth_lcb_hybrid=float(growth_lcb_hybrid),
+        growth_lcb_baseline=float(growth_lcb_baseline),
+        dsr_hybrid=None,
+        config=config,
     )
     return Layer2TrialEvaluation(
         objective_value=float(objective_value),
-        constraint_values=constraint_values,
+        constraint_values=gate.optuna_constraint_values,
         cagr_hybrid=float(cagr_hybrid),
         cagr_baseline=float(cagr_baseline),
         growth_lcb_hybrid=float(growth_lcb_hybrid),
@@ -1869,11 +1875,14 @@ def evaluate_l2_trial(
         block_metrics=tuple(block_metrics),
         returns_hybrid=tuple(rets_hybrid),
         returns_baseline=tuple(rets_baseline),
+        sharpe_hybrid=float(sharpe_hybrid),
+        sharpe_hac_baseline_ew=float(sharpe_hac_baseline_ew),
         sortino_hybrid=float(sortino_hybrid),
         trade_count=trade_count,
         risk_utilization=float(risk_utilization),
         deployment_objective_bonus=float(deployment_objective_bonus),
         worst_fold_sharpe=worst_fold_sharpe,
+        gate=gate,
     )
 
 
@@ -1925,10 +1934,18 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
     )
     _set_float_attr(trial, "worst_fold_sharpe", float(getattr(evaluation, "worst_fold_sharpe", 0.0)))
     trial.set_user_attr("trade_count", getattr(evaluation, "trade_count", 0))
+    gate = getattr(evaluation, "gate", None)
 
-    # DSR-in-the-loop 제거 (2026-06-16): DSR은 pool-상대 benchmark가 trial 수와
-    # 동반 상승하는 구조적 편향 + L3 frozen holdout과 중복 검증 → diagnostic 강등.
+    # DSR-in-the-loop 제거: TPE는 safety constraints만 학습하고 final promotion은 replay 단계에서 검증.
     trial.set_user_attr("l2_constraint_values", list(evaluation.constraint_values))
+    trial.set_user_attr("l2_optuna_constraint_values", list(evaluation.constraint_values))
+    if gate is not None:
+        trial.set_user_attr(
+            "l2_promotion_constraint_values",
+            list(gate.promotion_constraint_values),
+        )
+        trial.set_user_attr("l2_promotion_passed", bool(gate.promotion_passed))
+        trial.set_user_attr("l2_promotion_blocker", gate.promotion_blocker)
     trial.set_user_attr(
         "l2_block_log_growth_signature",
         [metric.log_growth_hybrid for metric in evaluation.block_metrics],
@@ -1937,16 +1954,18 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
 
 
 def layer2_constraints_from_trial(trial: FrozenTrial) -> tuple[float, ...]:
-    raw = trial.user_attrs.get("l2_constraint_values")
+    raw = trial.user_attrs.get("l2_optuna_constraint_values")
     if not isinstance(raw, (list, tuple)):
-        return (1.0,) * 12
+        raw = trial.user_attrs.get("l2_constraint_values")
+    if not isinstance(raw, (list, tuple)):
+        return (1.0,) * 8
     resolved: list[float] = []
     for item in raw:
         try:
             resolved.append(float(item))
         except Exception:
             resolved.append(1.0)
-    while len(resolved) < 12:
+    while len(resolved) < 8:
         resolved.append(1.0)
     return tuple(resolved)
 

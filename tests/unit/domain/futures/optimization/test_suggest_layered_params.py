@@ -62,24 +62,20 @@ def test_suggest_layered_params_l2_keys_only_l2_space() -> None:
     assert not (set(result.keys()) & set(L1_ALPHA_SPACE.keys()))
 
 
-def test_deployment_shaped_objective_prefers_better_deployment_at_same_growth() -> None:
+def test_deployment_shaped_objective_penalizes_downside_and_instability() -> None:
     low = _deployment_shaped_l2_objective(
         growth_lcb=0.20,
-        risk_utilization=0.10,
-        trade_count=40,
-        risk_util_target=0.35,
-        risk_util_weight=0.03,
-        trade_target=90,
-        trade_weight=0.02,
+        block_log_growth=(-0.08, 0.01, 0.00),
+        worst_fold_sharpe=0.30,
+        worst_fold_threshold=0.50,
+        worst_fold_weight=0.20,
     )
     high = _deployment_shaped_l2_objective(
         growth_lcb=0.20,
-        risk_utilization=0.30,
-        trade_count=85,
-        risk_util_target=0.35,
-        risk_util_weight=0.03,
-        trade_target=90,
-        trade_weight=0.02,
+        block_log_growth=(0.01, 0.02, 0.015),
+        worst_fold_sharpe=0.80,
+        worst_fold_threshold=0.50,
+        worst_fold_weight=0.20,
     )
 
     assert high > low
@@ -88,21 +84,17 @@ def test_deployment_shaped_objective_prefers_better_deployment_at_same_growth() 
 def test_deployment_shaped_objective_keeps_growth_primary() -> None:
     higher_growth = _deployment_shaped_l2_objective(
         growth_lcb=0.18,
-        risk_utilization=0.20,
-        trade_count=50,
-        risk_util_target=0.35,
-        risk_util_weight=0.03,
-        trade_target=90,
-        trade_weight=0.02,
+        block_log_growth=(0.01, 0.02),
+        worst_fold_sharpe=0.80,
+        worst_fold_threshold=0.50,
+        worst_fold_weight=0.20,
     )
     lower_growth = _deployment_shaped_l2_objective(
         growth_lcb=0.17,
-        risk_utilization=0.20,
-        trade_count=50,
-        risk_util_target=0.35,
-        risk_util_weight=0.03,
-        trade_target=90,
-        trade_weight=0.02,
+        block_log_growth=(0.01, 0.02),
+        worst_fold_sharpe=0.80,
+        worst_fold_threshold=0.50,
+        worst_fold_weight=0.20,
     )
 
     assert higher_growth > lower_growth
@@ -183,9 +175,15 @@ def test_objective_l1_ic_does_not_call_sharpe() -> None:
 
 
 def test_objective_l2_growth_sets_constraint_attrs() -> None:
+    gate = SimpleNamespace(
+        optuna_constraint_values=(-1.0, -0.1, 0.0, -0.2, -0.3, 0.0, -0.05, -0.01),
+        promotion_constraint_values=(-1.0,) * 14,
+        promotion_passed=False,
+        promotion_blocker="cagr",
+    )
     evaluation = SimpleNamespace(
         objective_value=0.12,
-        constraint_values=(-1.0, -0.1, 0.0, -0.2, -0.3, 0.0, -0.05, -0.01, -1.0),
+        constraint_values=gate.optuna_constraint_values,
         cagr_hybrid=0.25,
         cagr_baseline=0.10,
         growth_lcb_hybrid=0.12,
@@ -201,6 +199,7 @@ def test_objective_l2_growth_sets_constraint_attrs() -> None:
         cap_saturation_ratio=0.0,
         total_cost_bps=12.0,
         block_metrics=(SimpleNamespace(log_growth_hybrid=0.02),),
+        gate=gate,
     )
 
     with (
@@ -229,13 +228,20 @@ def test_objective_l2_growth_sets_constraint_attrs() -> None:
 
     assert value == pytest.approx(0.12)
     assert trial.user_attrs["l2_constraint_values"] == list(evaluation.constraint_values)
+    assert trial.user_attrs["l2_optuna_constraint_values"] == list(evaluation.constraint_values)
+    assert trial.user_attrs["l2_promotion_constraint_values"] == list(gate.promotion_constraint_values)
+    assert trial.user_attrs["l2_promotion_passed"] is False
+    assert trial.user_attrs["l2_promotion_blocker"] == "cagr"
     assert trial.user_attrs["l2_block_log_growth_signature"] == [0.02]
 
 
 def test_layer2_constraints_from_trial_reads_saved_values() -> None:
-    """C3: DSR-in-loop 제거 후 12-tuple로 패딩(짧은 saved values는 1.0/infeasible로 패딩)."""
-    trial = cast(FrozenTrial, SimpleNamespace(user_attrs={"l2_constraint_values": [0, -1, 2.5]}))
+    """Optuna safety constraints는 8-tuple로 패딩된다."""
+    trial = cast(
+        FrozenTrial,
+        SimpleNamespace(user_attrs={"l2_optuna_constraint_values": [0, -1, 2.5]}),
+    )
 
     constraints = layer2_constraints_from_trial(trial)
 
-    assert constraints == (0.0, -1.0, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    assert constraints == (0.0, -1.0, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0)
