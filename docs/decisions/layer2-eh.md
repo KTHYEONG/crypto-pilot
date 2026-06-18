@@ -7,6 +7,11 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-18 L2 realization 정합 복구 — C4 천장주입 제거 + 수익률 직접 스케일 + exchange_cap
+- **Delta:** `project_all_caps` Cap5 하향전용(`min(vol_scale,1.0)`) + per_symbol=0.15 ceiling 선행 binding 확인 → `max_ann_vol/gross *= L*`가 구조적 no-op 판정. `selection._apply_deployment_to_params`에서 천장주입 제거, 추적(l2_deploy_leverage)만 보존. `run_l2_awf(deploy_leverage=L*)` 파라미터 추가 → `apply_deployment(rets, L*)` 단일 경로로 최종 스코어카드 CAGR/MDD/CVaR 재산출. `calibrate_deployment_leverage`에 `exchange_leverage_cap`(기본 10×) 추가 — binding argmin 통일. `l2_deploy_cvar_margin` 노브 공식화. `pipeline.py` 호출부에서 `l2_params["l2_deploy_leverage"]` SSOT 전달.
+- **Rationale:** 결함 #3: trial-path(apply_deployment → CAGR 133.6%) vs 최종스코어카드(C4 천장주입 무효 → CAGR 5.5%) 이중 경로 불일치. 정합 복구로 `BLOCKED(cagr)` 허상 해소. exchange_cap=10×: L*=19.5 → notional 58× notional은 Binance perp 한도 초과 → 실행불가 차단.
+- **Edge Cases:** RiskUtil 정합 가드(binding=mdd 시 `|risk_util-(1-margin)|>0.15` warning) — 결함 #1/#2 재발 자동 감지. champion L* SSOT 미전달 시 내부 recalibrate fallback(결정론적, 동일값 보장).
+
 ## 2026-06-18 L2 CAGR 배치 갭 수정 — C1(fit-leg book) + C2(trial 내 L*) + C4(vol/gross 노브)
 - **Delta:** (C1) `awf_sim.py` fit-leg 루프를 equal-weight 시장수익률 평균 → OOS와 동일한 체인(rank→kelly→throttle→tradeable→cost→funding) per-bar book 수익률로 교체. (C2) `evaluate_l2_trial`에서 L* = `calibrate_deployment_leverage(fit_rets_hybrid)` 호출 → `cagr/mdd/cvar`를 deployed 값으로 갱신; `sortino/sharpe/psr`는 unit-vol 유지. `Layer2TrialEvaluation`에 `deploy_leverage/deploy_binding` 필드 추가. (C4) `selection._apply_deployment_to_params`에서 kelly 배율 제거, `max_ann_vol=vol_base×L*`·`gross_exposure_cap=base_gross×L*`로 실제 배치 노브 전환. `l_hard_cap` 기본값 4.0→20.0 유지.
 - **Rationale:** RC-2: fit-leg가 시장 MDD≈25%를 참조해 L*≈1 고정(전략 unit-vol MDD≈1%). RC-3: kelly 배율이 `project_all_caps(target_ann_vol)` 재정규화로 상쇄(dead code) — vol_target·gross_cap만이 실제 scale 노브. RC-4(throttle): m_t≈1.0 확인(무죄). 이론 CAGR(L*=20 적용 시)≈91%, 실측 3.3%는 순수 미배치 문제.
