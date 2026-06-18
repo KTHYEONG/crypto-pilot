@@ -177,9 +177,9 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 ──────────────────────────────────────────────────────────────────────────────
   STATUS  : ❌ BLOCKED (Reason: negative_return)
 
-  ❌ [GROWTH    ] CAGR: -1.3% | Total Return: -0.6% (> 0.0%) | Equity x0.99
+  ❌ [GROWTH    ] CAGR: -31.7% | Total Return: -14.9% (> 0.0%) | Equity x0.85
   ✅ [EFFICIENCY] Sharpe: -0.480 | Sortino: -0.686 | Calmar: n/a(loss)
-  ✅ [RISK      ] MDD: 1.7% (<= 35.0%) | CVaR95: 0.1% | Exposure: 0.0x
+  ✅ [RISK      ] MDD: 29.9% (<= 35.0%) | CVaR95: 2.9% | Exposure: 0.4x
   ✅ [ROBUST    ] Trades: 36 (>= 10)
 ──────────────────────────────────────────────────────────────────────────────
 
