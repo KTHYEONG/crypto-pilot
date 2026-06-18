@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -40,6 +41,10 @@ from src.core.settings import (
     LOG_DIR,
     LOG_MAX_BYTES,
 )
+
+# Performance measurement level (Level 15 is between DEBUG=10 and INFO=20)
+PERF = 15
+logging.addLevelName(PERF, "PERF")
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -100,11 +105,24 @@ def setup_logger(
     if logger.handlers:
         return logger
 
-    logger.setLevel(logging.INFO)
+    # 환경 변수에서 로그 레벨 로드 (기본값 INFO)
+    log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+    try:
+        log_level = getattr(logging, log_level_str)
+    except AttributeError:
+        # PERF 등 사용자 정의 레벨 처리
+        if log_level_str == "PERF":
+            log_level = PERF
+        elif log_level_str == "TRACE":
+            log_level = 5  # TRACE
+        else:
+            log_level = logging.INFO
+
+    logger.setLevel(log_level)
     logger.propagate = False
 
     stream_handler = FlushingStreamHandler(sys.stdout)
-    stream_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    stream_handler.setFormatter(logging.Formatter("%(message)s"))
     logger.addHandler(stream_handler)
 
     if not write_file:

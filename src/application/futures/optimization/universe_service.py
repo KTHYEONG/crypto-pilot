@@ -10,6 +10,7 @@ import pandas as pd
 from dateutil.relativedelta import relativedelta
 
 from src.core.settings import LOG_DIR
+from src.core.utils.utils import PERF
 from src.domain.futures.optimization.opt_config import get_quarterly_window
 from src.domain.futures.universe import (
     UniverseSnapshot,
@@ -161,7 +162,8 @@ def discover_universe_timeline(
             force_rebuild=force_rebuild,
             previous_selection=previous_selection,
         )
-        _logger.debug(
+        _logger.log(
+            PERF,
             "[perf-universe] _discover_symbols_via_universe for quarter=%s took %.4fs",
             current_dt.isoformat(),
             time.perf_counter() - t_quarter,
