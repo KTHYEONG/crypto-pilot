@@ -1174,12 +1174,23 @@ def run_l2_awf(
         )
     )
 
-    # fold별 복리 수익 여부: prod(1+r)>1.0 기준 (Sharpe>0보다 엄격).
-    # 전체 fold 정렬 유지 (빈 fold 제외, 분모=nonempty). zip(strict=True) 길이 정합.
-    fold_compound_pass = [
-        float(np.prod(1.0 + np.asarray(fr, dtype=np.float64))) > 1.0
-        if fr else None
+    fold_sharpes_h = [_sharpe(fr) for fr in sim.fold_rets_hybrid]
+    # deployed 기준 fold 지표: apply_deployment(fold_rets, L*)로 정확한 compounding 반영.
+    # unit-vol MDD(~1%)와 달리 실제 리스크 수준(~15-31%)과 구간별 실현 CAGR을 표시.
+    _fold_deployed = [
+        apply_deployment(
+            rets=np.asarray(fr, dtype=np.float64),
+            leverage=_l_star,
+            bars_per_year=bars_per_year,
+        )
+        if fr
+        else None
         for fr in sim.fold_rets_hybrid
+    ]
+
+    # fold별 통과 여부는 deployed CAGR 양수 기준으로 판정한다.
+    fold_compound_pass = [
+        (_fd.cagr > 0.0) if _fd is not None else None for _fd in _fold_deployed
     ]
     _nonempty_fold_pass = [v for v in fold_compound_pass if v is not None]
     fold_pass_ratio = (
@@ -1187,6 +1198,23 @@ def run_l2_awf(
         if _nonempty_fold_pass
         else 0.0
     )
+    recent_fold_diag = next(
+        (
+            (passed, sharp, deployed)
+            for passed, sharp, deployed in zip(
+                reversed(fold_compound_pass),
+                reversed(fold_sharpes_h),
+                reversed(_fold_deployed),
+                strict=True,
+            )
+            if deployed is not None
+        ),
+        None,
+    )
+    recent_fold_passed = recent_fold_diag[0] if recent_fold_diag is not None else None
+    recent_fold_sharpe = recent_fold_diag[1] if recent_fold_diag is not None else None
+    recent_fold_cagr = recent_fold_diag[2].cagr if recent_fold_diag is not None else 0.0
+    recent_fold_mdd = recent_fold_diag[2].mdd if recent_fold_diag is not None else 0.0
 
     # gate config 키 (l2_params 우선, default=원칙값)
     _max_mdd_abs = float(config.l2_max_mdd_abs)
@@ -1225,6 +1253,8 @@ def run_l2_awf(
         growth_lcb_hybrid=float(growth_lcb_hybrid),
         growth_lcb_baseline=float(growth_lcb_baseline),
         dsr_hybrid=float(dsr_hybrid),
+        recent_fold_passed=recent_fold_passed,
+        recent_fold_sharpe=recent_fold_sharpe,
         config=config,
     )
     blocker_reason = gate.promotion_blocker
@@ -1268,18 +1298,24 @@ def run_l2_awf(
         total_pnl_pct=total_pnl_pct,
         trade_count=trade_count,
         risk_utilization=risk_utilization,
+        recent_fold_passed=recent_fold_passed,
+        recent_fold_sharpe=float(recent_fold_sharpe) if recent_fold_sharpe is not None else 0.0,
+        recent_fold_cagr=float(recent_fold_cagr),
+        recent_fold_mdd=float(recent_fold_mdd),
     )
-    fold_sharpes_h = [_sharpe(fr) for fr in sim.fold_rets_hybrid]
-    # deployed 기준 fold 지표: apply_deployment(fold_rets, L*)로 정확한 compounding 반영.
-    # unit-vol MDD(~1%)와 달리 실제 리스크 수준(~15-31%)과 구간별 실현 CAGR을 표시.
-    _fold_deployed = [
-        apply_deployment(
-            rets=np.asarray(fr, dtype=np.float64),
-            leverage=_l_star,
-            bars_per_year=bars_per_year,
-        ) if fr else None
-        for fr in sim.fold_rets_hybrid
-    ]
+
+    def _idx_to_date_label(idx: int) -> str:
+        if not hasattr(aligned, "datetimes") or len(aligned.datetimes) == 0:
+            return str(idx)
+        safe_idx = max(0, min(int(idx), len(aligned.datetimes) - 1))
+        return str(pd.Timestamp(aligned.datetimes[safe_idx]).date())
+
+    l2_eval_start = _idx_to_date_label(awf_folds[0].oos_start) if awf_folds else None
+    l2_eval_end = (
+        _idx_to_date_label(max(awf_folds[-1].oos_end - 1, awf_folds[-1].oos_start))
+        if awf_folds
+        else None
+    )
     awf_fold_diags = [
         {
             "fold": i + 1,
@@ -1287,11 +1323,25 @@ def run_l2_awf(
             "mdd": _fd.mdd if _fd is not None else 0.0,
             "cagr": _fd.cagr if _fd is not None else 0.0,
             "pass": fold_compound_pass[i] is True,
+            "period": (
+                f"{_idx_to_date_label(fold.oos_start)} ~ "
+                f"{_idx_to_date_label(max(fold.oos_end - 1, fold.oos_start))}"
+            ),
         }
-        for i, (s, _fd) in enumerate(zip(fold_sharpes_h, _fold_deployed, strict=True))
+        for i, (fold, s, _fd) in enumerate(
+            zip(awf_folds, fold_sharpes_h, _fold_deployed, strict=True)
+        )
     ]
     if verbose:
-        logger.info(format_layer2_table(result, awf_folds=awf_fold_diags, min_dsr=float(config.l2_min_dsr)))
+        logger.info(
+            format_layer2_table(
+                result,
+                evaluation_start=l2_eval_start,
+                evaluation_end=l2_eval_end,
+                awf_folds=awf_fold_diags,
+                min_dsr=float(config.l2_min_dsr),
+            )
+        )
     return result
 
 
@@ -1306,6 +1356,9 @@ def run_l3_holdout(
     holdout_labels: tuple[str, str] | None = None,
     min_trades: int = 10,
     max_mdd_abs: float = 0.35,
+    min_sharpe: float = 0.0,
+    min_sortino: float = 0.0,
+    max_cvar95: float = 0.06,
     verbose: bool = True,
     deploy_leverage: float | None = None,
 ) -> Layer3Result:
@@ -1436,6 +1489,12 @@ def run_l3_holdout(
         blocker_reason = "negative_return"
     elif mdd > max_mdd_abs:
         blocker_reason = "mdd_abs"
+    elif cvar95 > max_cvar95:
+        blocker_reason = "cvar_95"
+    elif sharpe < min_sharpe:
+        blocker_reason = "sharpe_abs"
+    elif sortino < min_sortino:
+        blocker_reason = "sortino_abs"
     else:
         gate_passed = True
 
@@ -1458,6 +1517,11 @@ def run_l3_holdout(
         cvar95=cvar95,
         avg_gross_exposure=avg_gross_exposure,
         deploy_leverage=l_star,
+        min_trades=min_trades,
+        max_mdd_abs=max_mdd_abs,
+        min_sharpe=min_sharpe,
+        min_sortino=min_sortino,
+        max_cvar95=max_cvar95,
     )
     if verbose:
         logger.info(
