@@ -90,6 +90,11 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
 - **Replay Championing**:
   - `select_layer2_champion`이 frontier 전수를 replay하여 gate-pass 후보를 **전수 수집** → `argmax(sortino_hybrid, cagr)` 선택 (이전: argmax(dsr, cagr) — D4 변경).
 
+**Layer 3 Deployment Parity**
+- `run_tiered_pipeline`는 L2 champion의 `l2_deploy_leverage`를 L3 holdout에도 동일하게 전달한다.
+- `run_l3_holdout(deploy_leverage=L*)`는 L2 final scorecard와 동일한 `apply_deployment(rets, L*)` 경로로 hybrid holdout의 CAGR/MDD/CVaR/terminal compounding을 재계산한다.
+- `deploy_leverage`는 1.0 이하 또는 비유한값이면 무효화되어 unit path를 유지한다.
+
 **Layer 3: Frozen Holdout**
 - Tests the L2 champion on an untouched WFFold.
 - **Gate**: $\text{Sharpe} \ge \text{Sharpe}_{baseline} \land \text{MDD} \le \text{MDD}_{baseline}$.
