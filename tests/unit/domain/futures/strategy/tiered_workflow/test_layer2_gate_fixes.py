@@ -345,16 +345,24 @@ def test_l2_alloc_space_alias_points_to_v8() -> None:
     )
 
 
-def test_l2_alloc_space_v8_retains_signal_dims() -> None:
-    """Fix C: L2_ALLOC_SPACE_V8이 신호 혼합 파라미터를 유지하는지 확인."""
-    from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE, L2_ALLOC_SPACE_V8
+def test_l2_alloc_space_v9_retains_signal_dims() -> None:
+    """D2: L2_ALLOC_SPACE가 V9를 가리키며 신호 혼합 파라미터를 유지하는지 확인."""
+    from src.domain.futures.optimization.opt_config import (
+        L2_ALLOC_SPACE,
+        L2_ALLOC_SPACE_V8,
+        L2_ALLOC_SPACE_V9,
+    )
 
-    assert L2_ALLOC_SPACE is L2_ALLOC_SPACE_V8
-    assert "K_RANK" in L2_ALLOC_SPACE_V8
-    assert "REBALANCE_BARS" in L2_ALLOC_SPACE_V8
-    assert "risk_budget_floor_ratio" in L2_ALLOC_SPACE_V8
-    assert L2_ALLOC_SPACE_V8["risk_budget_floor_ratio"]["high"] == pytest.approx(1.00)
-    assert L2_ALLOC_SPACE_V8["deploy_cost_safety_mult"]["low"] == pytest.approx(1.0)
+    # V9가 현재 active alias — V8 더 이상 alias 아님
+    assert L2_ALLOC_SPACE is L2_ALLOC_SPACE_V9
+    assert L2_ALLOC_SPACE is not L2_ALLOC_SPACE_V8
+
+    # 핵심 파라미터 보존 확인
+    assert "K_RANK" in L2_ALLOC_SPACE_V9
+    assert "REBALANCE_BARS" in L2_ALLOC_SPACE_V9
+    assert "risk_budget_floor_ratio" in L2_ALLOC_SPACE_V9
+    assert L2_ALLOC_SPACE_V9["risk_budget_floor_ratio"]["high"] == pytest.approx(1.00)
+    assert L2_ALLOC_SPACE_V9["deploy_cost_safety_mult"]["low"] == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------
