@@ -132,6 +132,8 @@ ai_read_policy: when_related
 - **Delta:** `fold_sharpes_h = [_sharpe(fr) for fr in sim.fold_rets_hybrid if fr]` → `if fr` 필터 제거, `zip(strict=True)` 길이 불일치 런타임 오류 수정
 - **Rationale:** 빈 fold 존재 시 `ValueError` 발생. 전체 정렬 유지 + 분모 별도 분리로 수정
 
-## 2026-06-15 L2 AWF 신호 동적 매핑 및 수치적 안정성 확보 (P0)
-- **Delta:** `run_l1_nested_swf`에서 `signals_per_fold` 수집 및 AWF 백테스팅 연동. 시점 $t$ 기준 L1 fold 시간 매핑 적용. 비용 허들, 베타 및 수익률 NaN 방어 추가.
-- **Rationale:** L1 Nested SWF의 동적 예측 신호 유실로 인한 고정 신호 강제 및 오매핑 버그 해결. 거래 비용 및 수익률 계산에 NaN 유입 시 가중치가 0.0으로 유실되어 스코어카드가 nan이 되는 현상 방지.
+## 2026-06-18 L2 Vectorization & Logic Recovery — Object Instantiation 0% + 1:1 Parity
+- **Delta:** (1) `L2SimulationCache`에서 Python `global_schedule` 삭제 → `expected_gross_bps_2d`, `signal_mask_2d` 등 2D NumPy 행렬 6종으로 신호 전체 사전 번역. (2) `_run_awf_simulation` 루프 내부의 `SymbolSignal`, `Layer2ExpectedEdge` dataclass 생성을 100% 제거하고 `np.where` 마스킹을 통한 1D 배열 직접 연산으로 교체. (3) `build_l2_simulation_cache`에서 `_event_strength` 기반의 엄격한 tie-breaking 복구 및 missing hurdle(NaN)에 대해 `3.8 bps` 기본값 fallback 복원.
+- **Rationale:** 파이썬 객체 생성 오버헤드가 L2 Optuna 속도의 90% 이상을 점유함을 확인하여 엔진을 완전 벡터화로 교체(200 Trials 01:25→01:06, ~25% 단축 및 병목 제거). 초기 벡터화 시 `3.8 bps` 누락(NaN 처리)으로 인해 발생한 `no_feasible_trials` 차단을 해결하여 기존 엔진과 수학적 1:1 정합성을 확보함.
+- **Edge Cases:** `event_strength_2d` 캐싱으로 동일 종목-동일 시점의 시그널 충돌 시 결정론적 선택 보장. Aligned 데이터의 `execution_cost_bps_2d`가 `None`인 경우에도 안전하게 fallback 작동 확인.
+

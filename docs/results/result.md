@@ -137,7 +137,6 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 
 >> LAYER 1 RESULT: [PASS] -> Target phase L1 reached. Stopping pipeline.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ● [LAYER 2: PORTFOLIO ALLOCATION & RISK OPTIMIZATION]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ● [HYPERPARAMETER OPTIMIZATION]
@@ -145,27 +144,27 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
     - Config     : 200 trials
   ────────────────────────────────────────────────────────────────────────────
  [OPT] Deleted existing study 'l2_study_4h_03972e5343cd' for a fresh start.
-    - Progress: 100%|████████████████████████████████████████████████████████████████████████| 200/200 [01:25<00:00,  2.33it/s, Best=432.97%]
-[L2-SELECTION] 3 gate-pass 후보 수집 → champion Trial #91 Sortino=2.4136 CAGR=0.7947
-[L2-SELECTION] Champion selected. Trial #91, Objective=2.1346, DSR=0.8191 (n_eff=1.71)
-[L2-DEPLOY-C4] L*=4.999 (binding=mdd) | vol 1.000→4.999 | gross 3.000→14.998 | kelly=0.250(불변) | tf=4h
+[L2-OPT]: 100%|██████████████████████████████████████████████████████| 200/200 [01:06<00:00,  3.01it/s, Best CAGR: 423.00% | Current: 92.04%]
+[L2-SELECTION] 2 gate-pass 후보 수집 → champion Trial #187 Sortino=2.6040 CAGR=1.3361
+[L2-SELECTION] Champion selected. Trial #187, Objective=2.2028, DSR=0.8312 (n_eff=3.00)
+[L2-DEPLOY-C4] L*=19.527 (binding=mdd) | vol 1.000→19.527 | gross 3.000→58.580 | kelly=0.250(불변) | tf=4h
 ● [LAYER 2 PORTFOLIO SCORECARD]
 ──────────────────────────────────────────────────────────────────────────────
   STATUS  : ❌ BLOCKED (cagr)
 
-  ❌ [Growth    ] CAGR: +14.4% (>=30.0%) | PnL: +10.9% | Equity x1.11
-  ✅ [Efficiency] Sharpe: 1.482 (>=1.000) | Sortino: 2.414 (>=1.500) | Calmar: 2.402 (>=1.000)
-  ✅ [Risk      ] MDD: 6.0% (<=30.0%) | CVaR95: 0.5% (<=6.0%) | RiskUtil: 19.9%
-  ✅ [Robust    ] Fold: 100.0% (>=60.0%) | Trades: 98 (>=30) | Friction: 100.0%
-  ✅ [Uplift    ] Sharpe Uplift: +1.57 (>=+0.20)
-  ✅ [Integrity ] DSR: 0.819 (>=0.60) | PSR: 0.910 (diag)
-  [Diag     ] RelMDD: 1.04x | Turnover: 0.041
+  ❌ [Growth    ] CAGR: +5.5% (>=30.0%) | PnL: +4.2% | Equity x1.04
+  ✅ [Efficiency] Sharpe: 1.621 (>=1.000) | Sortino: 2.604 (>=1.500) | Calmar: 3.511 (>=1.000)
+  ✅ [Risk      ] MDD: 1.6% (<=30.0%) | CVaR95: 0.2% (<=6.0%) | RiskUtil: 5.2%
+  ✅ [Robust    ] Fold: 66.7% (>=60.0%) | Trades: 111 (>=30) | Friction: 100.0%
+  ✅ [Uplift    ] Sharpe Uplift: +1.48 (>=+0.20)
+  ✅ [Integrity ] DSR: 0.831 (>=0.60) | PSR: 0.928 (diag)
+  [Diag     ] RelMDD: 0.69x | Turnover: 0.014
 ──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ✅ Sharpe:  1.374 | MDD:    2.5% | Status: PASS
-  ├─ Fold #2 : ✅ Sharpe:  1.725 | MDD:    4.5% | Status: PASS
-  └─ Fold #3 : ✅ Sharpe:  1.342 | MDD:    6.0% | Status: PASS
+  ├─ Fold #1 : ✅ Sharpe:  2.513 | MDD:    0.8% | Status: PASS
+  ├─ Fold #2 : ✅ Sharpe:  2.582 | MDD:    1.5% | Status: PASS
+  └─ Fold #3 : ❌ Sharpe: -0.362 | MDD:    1.6% | Status: FAIL
 >> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False
 !! FAIL: exit_code=1 reason=layer2_blocked:cagr
