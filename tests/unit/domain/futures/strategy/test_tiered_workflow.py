@@ -681,6 +681,7 @@ def _make_awf_sim_result(
         block_rets_hybrid=(tuple(rets_hybrid),),
         block_rets_baseline=(tuple(rets_baseline),),
         rets_baseline_ew=rets_baseline,
+        fold_selected_symbols=(("BTC",),),
     )
 
 
@@ -2600,7 +2601,7 @@ def test_run_tiered_pipeline_routes_layer1_through_nested_executor(
     assert len(nested_runner_calls) == 1
     assert nested_runner_calls[0]["outer_folds"] == built_outer_folds
     assert nested_runner_calls[0]["cfg"] is cfg
-    assert any("[BLOCKED]" in msg for msg in logged_messages)
+    assert any("BLOCKED" in msg for msg in logged_messages)
 
 
 def test_candidate_output_to_signal_batch_requires_explicit_gross_targets() -> None:

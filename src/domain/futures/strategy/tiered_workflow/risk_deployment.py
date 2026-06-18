@@ -9,11 +9,13 @@ look-ahead 방지: L은 champion의 히스토리컬 OOS 수익률에서 산출�
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
+
+from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2FoldDiagnostics
 
 _logger = logging.getLogger(__name__)
 
@@ -31,6 +33,44 @@ class DeploymentResult:
     mdd: float
     cvar_95: float
     binding_constraint: str  # "mdd" | "cvar" | "hard_cap" | "none"
+
+
+def _annualized_cagr_from_returns(
+    returns: NDArray[np.float64],
+    *,
+    bars_per_year: float,
+) -> float:
+    if returns.size == 0:
+        return 0.0
+    clipped = np.clip(returns, -1.0 + 1e-9, None)
+    log_growth = float(np.sum(np.log1p(clipped)))
+    years = float(returns.size) / max(float(bars_per_year), 1e-9)
+    if years <= 1e-9:
+        return 0.0
+    return float(np.expm1(log_growth / years))
+
+
+def _mdd_from_returns(returns: NDArray[np.float64]) -> float:
+    if returns.size == 0:
+        return 0.0
+    equity = np.cumprod(1.0 + returns)
+    peak = np.maximum.accumulate(equity)
+    drawdown = (peak - equity) / np.maximum(peak, 1e-12)
+    return float(np.max(drawdown)) if drawdown.size else 0.0
+
+
+def _sharpe_from_returns(
+    returns: NDArray[np.float64],
+    *,
+    bars_per_year: float,
+) -> float:
+    if returns.size < 2:
+        return 0.0
+    mean = float(np.mean(returns))
+    std = float(np.std(returns, ddof=1))
+    if std <= 1e-12:
+        return 0.0
+    return float((mean / std) * np.sqrt(max(float(bars_per_year), 1e-9)))
 
 
 def _mdd_at_leverage(rets: NDArray[np.float64], leverage: float) -> float:
@@ -175,4 +215,81 @@ def apply_deployment(
         mdd=mdd,
         cvar_95=cvar_95,
         binding_constraint="",
+    )
+
+
+def compute_layer2_fold_diagnostics(
+    *,
+    fold_rets_hybrid: Sequence[Sequence[float]],
+    fold_selected_symbols: Sequence[Sequence[str]],
+    leverage: float,
+    bars_per_year: float,
+) -> Layer2FoldDiagnostics:
+    """Compute fold-level deployment diagnostics for Layer2."""
+    fold_compound_pass: list[bool | None] = []
+    fold_unit_sharpes: list[float] = []
+    fold_deployed_cagrs: list[float | None] = []
+    fold_deployed_mdds: list[float | None] = []
+    selected_symbols: list[tuple[str, ...]] = []
+    deployed_cagrs_nonempty: list[float] = []
+    recent_fold_passed: bool | None = None
+    recent_fold_sharpe: float | None = None
+    recent_fold_cagr = 0.0
+    recent_fold_mdd = 0.0
+
+    for fold_idx, fold_rets in enumerate(fold_rets_hybrid):
+        fold_arr = np.asarray(fold_rets, dtype=np.float64)
+        if fold_idx < len(fold_selected_symbols):
+            selected = tuple(sorted(str(sym) for sym in fold_selected_symbols[fold_idx]))
+        else:
+            selected = ()
+        selected_symbols.append(selected)
+
+        if fold_arr.size == 0:
+            fold_compound_pass.append(None)
+            fold_unit_sharpes.append(0.0)
+            fold_deployed_cagrs.append(None)
+            fold_deployed_mdds.append(None)
+            continue
+
+        unit_sharpe = _sharpe_from_returns(fold_arr, bars_per_year=bars_per_year)
+        deployed = apply_deployment(
+            rets=fold_arr,
+            leverage=float(leverage),
+            bars_per_year=bars_per_year,
+        )
+        fold_unit_sharpes.append(unit_sharpe)
+        fold_compound_pass.append(bool(deployed.cagr > 0.0))
+        fold_deployed_cagrs.append(float(deployed.cagr))
+        fold_deployed_mdds.append(float(deployed.mdd))
+        deployed_cagrs_nonempty.append(float(deployed.cagr))
+        recent_fold_passed = bool(deployed.cagr > 0.0)
+        recent_fold_sharpe = unit_sharpe
+        recent_fold_cagr = float(deployed.cagr)
+        recent_fold_mdd = float(deployed.mdd)
+
+    nonempty_pass = [value for value in fold_compound_pass if value is not None]
+    fold_pass_ratio = (
+        sum(1 for value in nonempty_pass if value) / len(nonempty_pass)
+        if nonempty_pass
+        else 0.0
+    )
+    latest_to_median_cagr = 0.0
+    if deployed_cagrs_nonempty:
+        median_cagr = float(np.median(np.asarray(deployed_cagrs_nonempty, dtype=np.float64)))
+        if abs(median_cagr) > 1e-12:
+            latest_to_median_cagr = float(recent_fold_cagr / median_cagr)
+
+    return Layer2FoldDiagnostics(
+        fold_pass_ratio=float(fold_pass_ratio),
+        fold_compound_pass=tuple(fold_compound_pass),
+        fold_unit_sharpes=tuple(fold_unit_sharpes),
+        fold_deployed_cagrs=tuple(fold_deployed_cagrs),
+        fold_deployed_mdds=tuple(fold_deployed_mdds),
+        fold_selected_symbols=tuple(selected_symbols),
+        recent_fold_passed=recent_fold_passed,
+        recent_fold_sharpe=recent_fold_sharpe,
+        recent_fold_cagr=float(recent_fold_cagr),
+        recent_fold_mdd=float(recent_fold_mdd),
+        latest_to_median_cagr=float(latest_to_median_cagr),
     )

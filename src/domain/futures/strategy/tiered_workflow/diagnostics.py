@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -12,6 +13,7 @@ from numpy.typing import NDArray
 from scipy.stats import spearmanr
 
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+    LayerUniverseAudit,
     PredictionDecompositionDiag,
     StrategySignal,
     SymbolRealizedStat,
@@ -31,6 +33,154 @@ logger = logging.getLogger(__name__)
 def _is_trained_fold_output(fold_out: Any) -> bool:
     """Return whether the fold completed training with non-degenerate predictions."""
     return getattr(fold_out, "fit_status", "trained") == "trained"
+
+
+def _as_bool_mask(value: Any, *, shape: tuple[int, int], default: bool) -> NDArray[np.bool_]:
+    if value is None:
+        return np.full(shape, default, dtype=bool)
+    arr = np.asarray(value, dtype=bool)
+    if arr.shape != shape:
+        return np.full(shape, default, dtype=bool)
+    return arr
+
+
+def _resolve_layer_window_bounds(
+    *,
+    n_bars: int,
+    start_idx: int,
+    end_idx: int,
+) -> tuple[int, int]:
+    start = max(0, min(int(start_idx), n_bars))
+    end = max(start, min(int(end_idx), n_bars))
+    return start, end
+
+
+def _date_label(datetimes: NDArray[np.datetime64], idx: int) -> str:
+    if idx < 0 or idx >= len(datetimes):
+        return "—"
+    return str(pd.Timestamp(datetimes[idx]).date())
+
+
+def _resolve_audit_symbols(
+    *,
+    aligned: AlignedMarketData,
+    symbols: Sequence[str] | None,
+) -> tuple[str, ...]:
+    if symbols is None:
+        return tuple(aligned.symbols)
+    available = set(aligned.symbols)
+    return tuple(sym for sym in symbols if sym in available)
+
+
+def build_layer_universe_audit(
+    *,
+    aligned: AlignedMarketData,
+    layer: str,
+    start_idx: int,
+    end_idx: int,
+    symbols: Sequence[str] | None = None,
+) -> LayerUniverseAudit:
+    """Build a causal universe audit for a layer window."""
+    n_bars = len(aligned.datetimes)
+    start, end = _resolve_layer_window_bounds(n_bars=n_bars, start_idx=start_idx, end_idx=end_idx)
+    audit_symbols = _resolve_audit_symbols(aligned=aligned, symbols=symbols)
+    symbol_index = {sym: idx for idx, sym in enumerate(aligned.symbols)}
+    symbol_positions = tuple(symbol_index[sym] for sym in audit_symbols if sym in symbol_index)
+    if not audit_symbols or end <= start or not symbol_positions:
+        return LayerUniverseAudit(
+            layer=layer,
+            start_idx=start,
+            end_idx=end,
+            start_date=_date_label(aligned.datetimes, start),
+            end_date=_date_label(aligned.datetimes, max(end - 1, start)),
+            symbol_count=len(symbol_positions),
+            active_symbol_count_min=0,
+            active_symbol_count_median=0.0,
+            active_symbol_count_max=0,
+            entry_block_count=0,
+            kill_count=0,
+            symbols=audit_symbols,
+            warnings=("empty_window",),
+        )
+
+    col_idx = np.asarray(symbol_positions, dtype=np.intp)
+    slice_obj = slice(start, end)
+    active_mask = getattr(aligned, "inference_active_mask", None)
+    if not isinstance(active_mask, np.ndarray):
+        active_mask = getattr(aligned, "active_mask", None)
+    active_mask = _as_bool_mask(active_mask, shape=(n_bars, len(aligned.symbols)), default=True)
+    warm_mask = getattr(aligned, "inference_entry_warm_mask", None)
+    if not isinstance(warm_mask, np.ndarray):
+        warm_mask = getattr(aligned, "warm_mask", None)
+    warm_mask = _as_bool_mask(warm_mask, shape=(n_bars, len(aligned.symbols)), default=True)
+    entry_block_mask = _as_bool_mask(
+        getattr(aligned, "entry_block_mask", None),
+        shape=(n_bars, len(aligned.symbols)),
+        default=False,
+    )
+    kill_mask = _as_bool_mask(
+        getattr(aligned, "kill_mask", None),
+        shape=(n_bars, len(aligned.symbols)),
+        default=False,
+    )
+
+    effective_mask = (
+        active_mask[slice_obj][:, col_idx]
+        & warm_mask[slice_obj][:, col_idx]
+        & ~entry_block_mask[slice_obj][:, col_idx]
+        & ~kill_mask[slice_obj][:, col_idx]
+    )
+    active_counts = np.sum(effective_mask, axis=1, dtype=np.int64)
+    entry_counts = np.sum(entry_block_mask[slice_obj][:, col_idx], axis=1, dtype=np.int64)
+    kill_counts = np.sum(kill_mask[slice_obj][:, col_idx], axis=1, dtype=np.int64)
+
+    window_len = int(end - start)
+    tail_len = max(int(np.ceil(window_len * 0.2)), 1)
+    tail_slice = slice(max(end - tail_len, start), end)
+    tail_active_counts = np.sum(
+        active_mask[tail_slice][:, col_idx]
+        & warm_mask[tail_slice][:, col_idx]
+        & ~entry_block_mask[tail_slice][:, col_idx]
+        & ~kill_mask[tail_slice][:, col_idx],
+        axis=1,
+        dtype=np.int64,
+    )
+    tail_entry_counts = np.sum(entry_block_mask[tail_slice][:, col_idx], axis=1, dtype=np.int64)
+    tail_kill_counts = np.sum(kill_mask[tail_slice][:, col_idx], axis=1, dtype=np.int64)
+
+    active_median = float(np.median(active_counts)) if active_counts.size else 0.0
+    tail_active_median = float(np.median(tail_active_counts)) if tail_active_counts.size else 0.0
+    entry_median = float(np.median(entry_counts)) if entry_counts.size else 0.0
+    tail_entry_median = float(np.median(tail_entry_counts)) if tail_entry_counts.size else 0.0
+    kill_median = float(np.median(kill_counts)) if kill_counts.size else 0.0
+    tail_kill_median = float(np.median(tail_kill_counts)) if tail_kill_counts.size else 0.0
+
+    warnings_list: list[str] = []
+    if window_len <= 0:
+        warnings_list.append("empty_window")
+    else:
+        if active_median > 0.0 and tail_active_median < 0.8 * active_median:
+            warnings_list.append("low_active_tail")
+        if tail_entry_median > 2.0 * entry_median:
+            warnings_list.append("entry_block_spike")
+        if tail_kill_median > 2.0 * kill_median:
+            warnings_list.append("kill_spike")
+
+    return LayerUniverseAudit(
+        layer=layer,
+        start_idx=start,
+        end_idx=end,
+        start_date=_date_label(aligned.datetimes, start),
+        end_date=_date_label(aligned.datetimes, max(end - 1, start)),
+        symbol_count=len(symbol_positions),
+        active_symbol_count_min=int(np.min(active_counts)) if active_counts.size else 0,
+        active_symbol_count_median=active_median,
+        active_symbol_count_max=int(np.max(active_counts)) if active_counts.size else 0,
+        entry_block_count=int(np.sum(entry_counts)) if entry_counts.size else 0,
+        kill_count=int(np.sum(kill_counts)) if kill_counts.size else 0,
+        symbols=audit_symbols,
+        warnings=tuple(warnings_list),
+    )
 
 
 def _fold_eligible_symbol_mask(
