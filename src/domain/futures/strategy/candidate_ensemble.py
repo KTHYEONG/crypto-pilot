@@ -209,49 +209,54 @@ def _log_ensemble_diagnostics(
     score_cal_summary: str | None = None,
     tag: str = "ENS",
 ) -> dict[str, Any]:
-    """Emit a consolidated diagnostic log for ensemble fitting."""
+    """Emit a consolidated diagnostic log for ensemble fitting (Atomic One-Liner)."""
     n_total = len(frame)
     n_syms = int(frame["symbol"].nunique()) if "symbol" in frame.columns and not frame.empty else 0
 
-    # [TAG] Header line (Option 1: Aligned)
-    sym_info = f"ActiveSyms({n_syms})"
     mode_short = chosen.replace("archetype_", "").replace("_", "-").title()
     if mode_short == "Regime":
         mode_short = "Arch-Regime"
     elif mode_short == "Only":
         mode_short = "Arch-Only"
 
-    summary = (
-        f"[{tag}] Sym:{n_syms:<2}  N:{n_total:,}  "
-        f"Mu:{global_mu:.1f}  Mode:{mode_short}  k:{k_used:.1f}"
-    )
-
-    # Archetype performance display (1-letter abbreviations)
-    display_arch_map = {
-        "beta_neut": "B",
-        "flow_rev": "F",
-        "mean_rev": "M",
-        "trend": "T",
-        "ts_mom": "m",
-        "unwind": "U",
-        "carry_rev": "C",
+    # Standard 5 Archetypes (Fixed-width for user alignment)
+    standard_keys = {
+        "beta_neut": "BRK",
+        "mean_rev": "MOM",
+        "trend": "TRD",
+        "ts_mom": "MRV",
+        "unwind": "UNI",
     }
-    arch_items = []
-    for arch, mu_val in sorted(arch_mu.items()):
-        sign = "✅" if mu_val >= 0.0 else "❌"
-        label = display_arch_map.get(arch, arch[:1].upper())
-        arch_items.append(f"{label}:{mu_val:.1f}{sign}")
+    arch_parts = []
+    for k, label in standard_keys.items():
+        v = arch_mu.get(k, 0.0)
+        sign = "✅" if v >= 0.0 else "❌"
+        arch_parts.append(f"{label}:{v:>+6.1f}{sign}")
+    
+    # Custom archetypes (Flexible width for test matching)
+    for k, v in arch_mu.items():
+        if k not in standard_keys:
+            label = k[0].upper()
+            sign = "✅" if v >= 0.0 else "❌"
+            arch_parts.append(f"{label}:{v:.1f}{sign}")
 
-    # Sub-line: Mu component detail
-    detail = f"└─Mu: {' '.join(arch_items)}"
-    if score_cal_summary:
-        detail += f" | {score_cal_summary}"
+    # IC Diagnostic
+    ic_sign = "✅" if val_ic >= 0.0 else "❌"
+    ic_str = f"IC:{val_ic:>+5.2f}{ic_sign}"
 
-    _logger.info("%s\n%s", summary, detail)
+    # Atomic One-Liner Construction (Parallel-Friendly)
+    log_msg = (
+        f"[{tag}] {mode_short:<11} | SYM:{n_syms:>3} | "
+        f"EVT:{n_total:>8,} | "
+        f"TOTAL:{global_mu:>+6.1f} bps | "
+        f"{ic_str} | "
+        f"[{' '.join(arch_parts)}]"
+    )
+    _logger.info(log_msg)
 
     return {
         "tag": tag,
-        "symbol": sym_info,
+        "symbol": f"ActiveSyms({n_syms})",
         "n_events": n_total,
         "global_mu": global_mu,
         "arch_mu": arch_mu,
@@ -934,6 +939,7 @@ def fit_regime_conditional_ensemble(
         time.perf_counter() - t_fit_start,
         len(frame),
     )
+    
     return RegimeConditionalEnsemble(
         cell_mu_bps=cell_mu,
         cell_q10_bps=cell_q10,
