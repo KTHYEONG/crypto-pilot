@@ -161,6 +161,7 @@ class Layer2TrialEvaluation:
     deployment_objective_bonus: float = 0.0
     worst_fold_sharpe: float = 0.0
     gate: Layer2GateEvaluation | None = None
+    fit_returns_hybrid: tuple[float, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -259,7 +260,9 @@ class Layer2AllocationConfig:
     max_ann_vol: float | None = None
     l2_min_cagr: float = 0.30
     l2_min_mar: float = 1.0
-    l2_min_sharpe_abs: float = 1.0
+    l2_min_sortino: float = 1.5
+    l2_min_sharpe_abs: float = 0.7
+    l2_min_calmar: float = 0.5
     l2_max_mdd_abs: float = 0.30
     l2_mdd_material_floor: float = 0.05
     l2_mdd_rel_tol: float = 0.25
@@ -293,10 +296,12 @@ class Layer2AllocationConfig:
     l2_replay_max_fallbacks: int = 24
     l2_worst_fold_penalty_threshold: float = -0.30
     l2_worst_fold_penalty_weight: float = 0.005
-    # Fix-A: 결정론적 리스크 배치 파라미터
+    # D3: 결정론적 리스크 배치 파라미터 (fit-leg 기반, look-ahead-free)
     l2_deploy_enabled: bool = True
     l2_deploy_mdd_margin: float = 0.30
-    l2_deploy_l_hard_cap: float = 4.0
+    # fit-leg 사용 시 MDD/CVaR 예산이 실제 binding → hard_cap 완화해도 안전.
+    # OOS 대리(fallback) 시에도 mdd_margin=0.30이 완충.
+    l2_deploy_l_hard_cap: float = 20.0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -447,7 +452,7 @@ class Layer2AllocationConfig:
             ),
             l2_deploy_enabled=bool(params.get("l2_deploy_enabled", True)),
             l2_deploy_mdd_margin=cls._as_float(params.get("l2_deploy_mdd_margin", 0.30), 0.30),
-            l2_deploy_l_hard_cap=cls._as_float(params.get("l2_deploy_l_hard_cap", 4.0), 4.0),
+            l2_deploy_l_hard_cap=cls._as_float(params.get("l2_deploy_l_hard_cap", 20.0), 20.0),
         )
 
 
