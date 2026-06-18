@@ -42,15 +42,17 @@ Operates as the final verification seam for the CS Rank + Diagonal Kelly (Layer 
 - **`total_return` / `equity_multiple`:** Single-pass terminal compounding result (`equity_multiple - 1`), reusing the L2 terminal-multiple helper — no new math, lean reuse per design decision (L3 favors realized compounding over Optuna-grade diagnostics).
 - **`n_trades`:** Realized trade count over the holdout window — feeds the `insufficient_trades` gate.
 - **`avg_gross_exposure`:** Mean gross exposure across the holdout AWF simulation, diagnostic only.
+- **`min_trades` / `max_mdd_abs` / `min_sharpe` / `min_sortino` / `max_cvar95`:** Gate thresholds are persisted on `Layer3Result` and rendered in the scorecard for exact replay alignment.
 
 **Holdout Gate (L3 Gate, ordered short-circuit):**
 1. `no_holdout_returns` — holdout span produced zero returns.
 2. `non_finite` — any of CAGR/MDD/Sharpe/Sortino/total_return/equity_multiple is non-finite.
 3. `insufficient_trades` — $n_{\text{trades}} < \text{min\_trades}$ (default 10).
 4. `negative_return` — $\text{total\_return} \leq 0$.
-5. `sharpe_rel` — $\text{Sharpe}_{\text{hybrid}} < \text{Sharpe}_{\text{baseline}}$.
-6. `mdd_rel` — $\text{MDD}_{\text{hybrid}} > \text{MDD}_{\text{baseline}}$.
-7. `mdd_abs` — $\text{MDD}_{\text{hybrid}} > \text{max\_mdd\_abs}$ (default 0.35), absolute capital-protection cap independent of baseline.
+5. `mdd_abs` — $\text{MDD}_{\text{hybrid}} > \text{max\_mdd\_abs}$ (default 0.35), absolute capital-protection cap independent of baseline.
+6. `cvar_95` — $\text{CVaR95}_{\text{hybrid}} > \text{max\_cvar95}$ (default 0.06).
+7. `sharpe_abs` — $\text{Sharpe}_{\text{hybrid}} < \text{min\_sharpe}$ (default 0.0).
+8. `sortino_abs` — $\text{Sortino}_{\text{hybrid}} < \text{min\_sortino}$ (default 0.0).
 - Replaces the legacy single `cagr < 0.0` check — `negative_return`(on `total_return`) is the direct single-pass compounding check; absolute MDD cap defends against a baseline that itself crashed.
 
 **Holdout Data Scope (Data Integrity Fix, 2026-06-16):**

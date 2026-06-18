@@ -7,6 +7,11 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-18 L2 final promotion hardening — recent fold gate + exchange cap default restore
+- **Delta:** final replay promotion now requires the latest non-empty deployed fold to pass `recent_fold` when enabled. Fold pass ratio is computed from deployed fold CAGR instead of unit-path compounding. `Layer2AllocationConfig.from_mapping` now restores the absent-key default `l2_max_exchange_leverage=10.0` and keeps explicit `None` as a deliberate cap disable.
+- **Rationale:** L2 already exposed a last-fold collapse before L3. Promotion on stale aggregate fold ratio hid the deterioration, and the missing exchange cap default allowed oversizing beyond the documented contract.
+- **Edge Cases:** recent fold gate is optional through config, but enabled by default. The recent fold Sharpe floor is replay-only and does not affect Optuna feasibility.
+
 ## 2026-06-18 L2 realization 정합 복구 — C4 천장주입 제거 + 수익률 직접 스케일 + exchange_cap
 - **Delta:** `project_all_caps` Cap5 하향전용(`min(vol_scale,1.0)`) + per_symbol=0.15 ceiling 선행 binding 확인 → `max_ann_vol/gross *= L*`가 구조적 no-op 판정. `selection._apply_deployment_to_params`에서 천장주입 제거, 추적(l2_deploy_leverage)만 보존. `run_l2_awf(deploy_leverage=L*)` 파라미터 추가 → `apply_deployment(rets, L*)` 단일 경로로 최종 스코어카드 CAGR/MDD/CVaR 재산출. `calibrate_deployment_leverage`에 `exchange_leverage_cap`(기본 10×) 추가 — binding argmin 통일. `l2_deploy_cvar_margin` 노브 공식화. `pipeline.py` 호출부에서 `l2_params["l2_deploy_leverage"]` SSOT 전달.
 - **Rationale:** 결함 #3: trial-path(apply_deployment → CAGR 133.6%) vs 최종스코어카드(C4 천장주입 무효 → CAGR 5.5%) 이중 경로 불일치. 정합 복구로 `BLOCKED(cagr)` 허상 해소. exchange_cap=10×: L*=19.5 → notional 58× notional은 Binance perp 한도 초과 → 실행불가 차단.
