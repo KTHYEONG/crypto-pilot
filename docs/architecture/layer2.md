@@ -69,11 +69,12 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
   - $J = \text{Sortino\_HAC\_unit} - \lambda_w \cdot \max(0, \tau_{wf} - \text{worst\_fold\_Sortino}) - \lambda_d \cdot \text{downside\_dispersion}$
   - `Sortino_HAC_unit` = unit-vol 정규화 book의 HAC downside deviation 기반 Sortino. 레버리지 불변 → 사후 L*와 정합(RC-2 해소).
   - `growth_lcb`는 **diagnostic**으로 강등(목적에서 제외).
-- **Phase B: fit-leg 기반 결정론적 리스크 배치 (`risk_deployment.py`, D3)**:
-  - AWF가 `fit_rets_hybrid`(fit-leg 수익률) 노출 → `calibrate_deployment_leverage(fit_rets=fit_rets_hybrid, l_hard_cap=20.0)` → L* 산출.
-  - `L* = clip(min(L_mdd, L_cvar), 1.0, l_hard_cap=20.0)`. kelly/vol 사후 스케일링.
-  - Sortino/Sharpe는 L 스케일에 불변 → CAGR만 증폭.
-  - fit-leg 미노출 시 OOS 대리(fallback) + `mdd_margin=0.30` 완충. `binding=hard_cap` 시 look-ahead 없음.
+- **Phase B: fit-leg 기반 결정론적 리스크 배치 (`risk_deployment.py`)**:
+  - **C1 - fit-leg book 정확도**: AWF fit-leg 루프가 OOS와 동일한 체인(rank→kelly→throttle→tradeable mask→cost→funding)으로 per-bar book 수익률 수집. 과거 equal-weight 시장수익률 평균(market MDD~25%)이 L*를 1로 압착하던 RC-2 수정.
+  - **C2 - trial-내 L* 결정**: `evaluate_l2_trial`이 `calibrate_deployment_leverage(fit_rets=fit_rets_hybrid, l_hard_cap=20.0)` 호출 → `L* = clip(min(L_mdd, L_cvar), 1.0, 20.0)`. `cagr_hybrid/mdd_hybrid/cvar_95_hybrid`는 `apply_deployment(rets, L*)`의 deployed 값. `sortino/sharpe/psr`는 unit-vol(scale-invariant) 유지. `deploy_leverage` 필드로 기록.
+  - **C3 - gate 자동 정렬**: gate가 `candidate_evaluation.cagr_hybrid`(deployed) 직접 사용 → C2 변경으로 자동 정렬(코드 수정 불필요).
+  - **C4 - 배치 노브 정정**: `kelly_fraction` 배율 제거(vol-targeting이 kelly scale을 취소). 실제 노브: `max_ann_vol = vol_base × L*`, `gross_exposure_cap = base_gross × L*`. RC-3(dead code kelly 배율) 해소.
+  - fit-leg 미노출 시 OOS proxy fallback + `mdd_margin=0.30` 완충. `binding=hard_cap` 시 look-ahead 없음.
 - **Dynamic Scaling**: Volatility targeting ($\sigma_{target} / \sigma_{port}$) combined with regime-specific gross/net caps. Includes double-scaling guards.
 - **L2 Gate Contract (D1/D4)**:
   - `Layer2GateEvaluation.optuna_constraint_values` is the 8-value safety vector fed to `TPESampler(constraints_func=...)`.
