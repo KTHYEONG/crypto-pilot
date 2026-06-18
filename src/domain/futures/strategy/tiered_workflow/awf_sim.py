@@ -29,6 +29,7 @@ from src.domain.futures.strategy.cs_rank import (
     rank_and_select,
 )
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+    L2SimulationCache,
     Layer2AllocationConfig,
     Layer2SignalSchedule,
 )
@@ -512,8 +513,108 @@ def _is_cap_saturated(
     )
 
 
+
+def build_l2_simulation_cache(
+    aligned: AlignedMarketData,
+    signal_batch: ValidatedSignalBatch,
+    tf: str
+) -> L2SimulationCache:
+    lookback = composer_sigma_lookback_bars(tf)
+    n_sym = len(aligned.symbols)
+    t_max = aligned.close_2d.shape[0]
+
+    vol_matrix_2d = np.full_like(aligned.close_2d, VOL_FLOOR)
+    for i in range(n_sym):
+        close_col = aligned.close_2d[:, i]
+        v_std = rolling_per_bar_return_std(close_col, lookback)
+        vol_matrix_2d[:, i] = np.maximum(v_std, VOL_FLOOR)
+
+    tradeable_mask_2d = np.zeros((t_max, n_sym), dtype=np.bool_)
+    for t in range(t_max):
+        tradeable_mask_2d[t] = _resolve_tradeable_mask(aligned=aligned, t=t, n_sym=n_sym)
+
+    if aligned.execution_cost_bps_2d is not None:
+        hurdle_2d = np.nan_to_num(aligned.execution_cost_bps_2d, nan=3.8, posinf=100.0, neginf=100.0)
+    else:
+        hurdle_2d = np.full((t_max, n_sym), 3.8, dtype=np.float64)
+
+    if aligned.funding_2d is not None:
+        funding_2d = np.nan_to_num(aligned.funding_2d, nan=0.0, posinf=0.0, neginf=0.0)
+    else:
+        funding_2d = np.zeros((t_max, n_sym), dtype=np.float64)
+
+    if aligned.beta_vs_market_1d is not None:
+        beta_1d = np.nan_to_num(aligned.beta_vs_market_1d, nan=0.0).astype(np.float64)
+    else:
+        beta_1d = np.zeros(n_sym, dtype=np.float64)
+
+    sym_to_idx = {s: i for i, s in enumerate(aligned.symbols)}
+    
+    expected_gross_bps_2d = np.zeros((t_max, n_sym), dtype=np.float64)
+    expected_net_bps_2d = np.zeros((t_max, n_sym), dtype=np.float64)
+    holding_bars_2d = np.ones((t_max, n_sym), dtype=np.float64)
+    side_2d = np.zeros((t_max, n_sym), dtype=np.float64)
+    quality_weight_2d = np.zeros((t_max, n_sym), dtype=np.float64)
+    event_strength_2d = np.zeros((t_max, n_sym), dtype=np.float64)
+    signal_mask_2d = np.zeros((t_max, n_sym), dtype=np.bool_)
+
+    for event in signal_batch.events:
+        sym_idx = sym_to_idx.get(event.symbol)
+        if sym_idx is None:
+            continue
+            
+        decision_idx = int(event.decision_idx)
+        holding_bars = max(int(event.expected_holding_bars), 1)
+        active_start = decision_idx + 1
+        active_end = min(t_max, active_start + holding_bars)
+        
+        if active_start >= active_end:
+            continue
+            
+        side_val = float(event.side)
+        gross_val = float(event.expected_gross_bps)
+        net_val = float(event.expected_net_bps)
+        qw_val = float(event.quality_weight)
+        strength = _event_strength(event)
+        
+        for t in range(active_start, active_end):
+            # Deterministic Equivalence: Use _event_strength and decision_idx tie-breakers
+            # decision_idx is same for this loop, so we only need strength.
+            if not signal_mask_2d[t, sym_idx]:
+                signal_mask_2d[t, sym_idx] = True
+                expected_gross_bps_2d[t, sym_idx] = gross_val
+                expected_net_bps_2d[t, sym_idx] = net_val
+                holding_bars_2d[t, sym_idx] = float(holding_bars)
+                side_2d[t, sym_idx] = side_val
+                quality_weight_2d[t, sym_idx] = qw_val
+                event_strength_2d[t, sym_idx] = strength
+            else:
+                # _is_better_event roughly matches this
+                if strength > event_strength_2d[t, sym_idx]:
+                    expected_gross_bps_2d[t, sym_idx] = gross_val
+                    expected_net_bps_2d[t, sym_idx] = net_val
+                    holding_bars_2d[t, sym_idx] = float(holding_bars)
+                    side_2d[t, sym_idx] = side_val
+                    quality_weight_2d[t, sym_idx] = qw_val
+                    event_strength_2d[t, sym_idx] = strength
+
+    return L2SimulationCache(
+        vol_matrix_2d=vol_matrix_2d,
+        tradeable_mask_2d=tradeable_mask_2d,
+        hurdle_2d=hurdle_2d,
+        funding_2d=funding_2d,
+        beta_1d=beta_1d,
+        expected_gross_bps_2d=expected_gross_bps_2d,
+        expected_net_bps_2d=expected_net_bps_2d,
+        holding_bars_2d=holding_bars_2d,
+        side_2d=side_2d,
+        quality_weight_2d=quality_weight_2d,
+        signal_mask_2d=signal_mask_2d,
+    )
+
 def _run_awf_simulation(
     *,
+    cache: L2SimulationCache,
     signal_batch: ValidatedSignalBatch,
     aligned: AlignedMarketData,
     awf_folds: tuple[WFFold, ...],
@@ -557,19 +658,10 @@ def _run_awf_simulation(
 
     symbols = aligned.symbols
     n_sym = len(symbols)
-    lookback = composer_sigma_lookback_bars(tf)
     bars_per_year = 24.0 * 365.0 / max(hours_per_bar_tf(tf), 1e-9)
-    signal_start = min((fold.oos_start for fold in awf_folds), default=0)
-    signal_end = max((fold.oos_end for fold in awf_folds), default=0)
     sym_to_idx = {s: i for i, s in enumerate(symbols)}
 
-    t0_prep = time.perf_counter()
-    vol_matrix = np.full_like(aligned.close_2d, VOL_FLOOR)
-    for i in range(n_sym):
-        close_col = aligned.close_2d[:, i]
-        v_std = rolling_per_bar_return_std(close_col, lookback)
-        vol_matrix[:, i] = np.maximum(v_std, VOL_FLOOR)
-    prof_prep += time.perf_counter() - t0_prep
+    vol_matrix = cache.vol_matrix_2d
 
     all_rets_hybrid: list[float] = []
     all_rets_baseline: list[float] = []
@@ -601,11 +693,7 @@ def _run_awf_simulation(
     prev_w_baseline_ew: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
     last_selected: frozenset[str] = frozenset()
     last_w: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
-    schedule = build_layer2_signal_schedule(
-        signal_batch=signal_batch,
-        start_idx=signal_start,
-        end_idx=signal_end,
-    )
+
 
     # C1: fit-leg book 수익률 수집 (RC-2 수정).
     # OOS 루프와 동일한 allocation 체인(rank→diagonal_kelly→throttle→vol_target)을 fit 구간에 적용.
@@ -617,77 +705,55 @@ def _run_awf_simulation(
         _fit_end = int(_fit_fold.oos_start)  # exclusive — look-ahead 0
         if _fit_start >= _fit_end or _fit_end <= 1:
             continue
-        # fit 구간 전용 schedule (OOS schedule과 분리 — look-ahead 방지)
-        _fit_schedule = build_layer2_signal_schedule(
-            signal_batch=signal_batch,
-            start_idx=_fit_start,
-            end_idx=_fit_end,
-        )
+
         _prev_w_fit: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
         _prev_selection_fit: frozenset[str] = frozenset()
         for _ft in range(_fit_start, _fit_end - 1, rebalance_bars):
             _ft_end = min(_ft + rebalance_bars, _fit_end - 1)
             if _ft + 1 >= aligned.close_2d.shape[0]:
                 break
-            # signal 조회 (fit 구간 schedule만 사용)
-            _offset_fit = _ft - _fit_schedule.start_idx
-            if _offset_fit < 0 or _offset_fit >= len(_fit_schedule._events_by_bar):
-                continue
-            _fit_tradeable = _resolve_tradeable_mask(aligned=aligned, t=_ft, n_sym=n_sym)
-            _fit_hurdle: NDArray[np.float64]
-            if (
-                aligned.execution_cost_bps_2d is not None
-                and _ft < aligned.execution_cost_bps_2d.shape[0]
-            ):
-                _fit_hurdle = aligned.execution_cost_bps_2d[_ft].astype(np.float64)
-                _fit_hurdle = np.nan_to_num(_fit_hurdle, nan=3.8, posinf=3.8, neginf=3.8)
-            else:
-                _fit_hurdle = np.full(n_sym, 3.8, dtype=np.float64)
-
-            _fit_btc_beta: NDArray[np.float64] | None = None
-            if aligned.beta_vs_market_1d is not None:
-                _fit_btc_beta = aligned.beta_vs_market_1d.astype(np.float64)
-                _fit_btc_beta = np.nan_to_num(_fit_btc_beta, nan=0.0)
-            _fit_beta_arr = (
-                np.zeros(n_sym, dtype=np.float64)
-                if _fit_btc_beta is None
-                else _fit_btc_beta
-            )
-
+            _fit_tradeable = cache.tradeable_mask_2d[_ft]
+            _fit_hurdle = cache.hurdle_2d[_ft]
+            _fit_beta_arr = cache.beta_1d
+            _fit_btc_beta = _fit_beta_arr  # Use directly
+            
+            _mask = cache.signal_mask_2d[_ft] & _fit_tradeable
             _fit_valid_signals: dict[str, SymbolSignal] = {}
-            for _fsym, _fevent in _fit_schedule._events_by_bar[_offset_fit].items():
-                _fidx = sym_to_idx.get(_fsym)
-                if _fidx is None or not _fit_tradeable[_fidx]:
-                    continue
-                _fbasis: EdgeBasis = (
-                    "gross"
-                    if np.isfinite(float(_fevent.expected_gross_bps))
-                    and float(_fevent.expected_gross_bps) != 0.0
-                    else "net"
-                )
-                _fedge = compute_expected_layer2_edge(
-                    side=int(_fevent.side),
-                    expected_gross_bps=float(_fevent.expected_gross_bps),
-                    expected_net_bps=float(_fevent.expected_net_bps),
-                    expected_holding_bars=int(_fevent.expected_holding_bars),
-                    execution_cost_bps=float(_fit_hurdle[_fidx]),
-                    edge_basis=_fbasis,
-                    fixed_cost_safety_mult=fixed_cost_safety_mult,
-                )
-                if (
-                    not np.isfinite(_fedge.signed_net_bps_per_bar)
-                    or _fedge.signed_net_bps_per_bar == 0.0
-                ):
-                    continue
-                _fit_valid_signals[_fsym] = SymbolSignal(
-                    raw_mu=_fedge.signed_net_bps_per_bar,
-                    volatility=float(max(vol_matrix[_ft, _fidx], VOL_FLOOR)),
-                    n_obs=1,
-                    t_stat=0.0,
-                    valid=True,
-                    beta_btc=None,
-                    quality_weight=float(_fevent.quality_weight),
-                )
+            if np.any(_mask):
+                _idx_list = np.where(_mask)[0]
+                for _idx in _idx_list:
+                    _sym = symbols[_idx]
+                    _gross_bps = cache.expected_gross_bps_2d[_ft, _idx]
+                    _net_bps = cache.expected_net_bps_2d[_ft, _idx]
+                    _holding = int(cache.holding_bars_2d[_ft, _idx])
+                    _side = int(cache.side_2d[_ft, _idx])
+                    _qw = cache.quality_weight_2d[_ft, _idx]
+                    _hurdle = float(_fit_hurdle[_idx])
+                    
+                    _basis: EdgeBasis = "gross" if np.isfinite(_gross_bps) and _gross_bps != 0.0 else "net"
+                    
+                    _edge = compute_expected_layer2_edge(
+                        side=_side,
+                        expected_gross_bps=_gross_bps,
+                        expected_net_bps=_net_bps,
+                        expected_holding_bars=_holding,
+                        execution_cost_bps=_hurdle,
+                        edge_basis=_basis,
+                        fixed_cost_safety_mult=fixed_cost_safety_mult,
+                    )
+                    
+                    if not np.isfinite(_edge.signed_net_bps_per_bar) or _edge.signed_net_bps_per_bar == 0.0:
+                        continue
+                        
+                    _fit_valid_signals[_sym] = SymbolSignal(
+                        raw_mu=_edge.signed_net_bps_per_bar,
+                        volatility=float(max(vol_matrix[_ft, _idx], VOL_FLOOR)),
+                        n_obs=1,
+                        t_stat=0.0,
+                        valid=True,
+                        beta_btc=None,
+                        quality_weight=_qw,
+                    )
 
             if not _fit_valid_signals:
                 continue
@@ -757,7 +823,7 @@ def _run_awf_simulation(
                 _fc_nxt = aligned.close_2d[_ft2 + 1]
                 _fbar_ret = np.where(_fc_cur > 0, (_fc_nxt - _fc_cur) / _fc_cur, 0.0)
                 _fbar_ret = np.nan_to_num(_fbar_ret, nan=0.0, posinf=0.0, neginf=0.0)
-                _ffunding = _resolve_funding_row(aligned=aligned, t2=_ft2, n_sym=n_sym)
+                _ffunding = cache.funding_2d[_ft2]
                 _fgross = compute_futures_bar_return(
                     weights=_fit_w,
                     price_returns=_fbar_ret,
@@ -773,57 +839,51 @@ def _run_awf_simulation(
             t_end = min(t + rebalance_bars, fold.oos_end - 1)
 
             t0_prep = time.perf_counter()
-            tradeable_mask = _resolve_tradeable_mask(
-                aligned=aligned,
-                t=t,
-                n_sym=n_sym,
-            )
-            if (
-                aligned.execution_cost_bps_2d is not None
-                and t < aligned.execution_cost_bps_2d.shape[0]
-            ):
-                hurdle = aligned.execution_cost_bps_2d[t].astype(np.float64)
-                hurdle = np.nan_to_num(hurdle, nan=3.8, posinf=3.8, neginf=3.8)
-            else:
-                hurdle = np.full(n_sym, 3.8, dtype=np.float64)
+            tradeable_mask = cache.tradeable_mask_2d[t]
+            hurdle = cache.hurdle_2d[t]
+            beta_arr = cache.beta_1d
+            btc_beta = beta_arr  # Use directly
 
-            btc_beta: NDArray[np.float64] | None = None
-            if aligned.beta_vs_market_1d is not None:
-                btc_beta = aligned.beta_vs_market_1d.astype(np.float64)
-                btc_beta = np.nan_to_num(btc_beta, nan=0.0)
-            beta_arr = np.zeros(n_sym, dtype=np.float64) if btc_beta is None else btc_beta
-
+            _mask = cache.signal_mask_2d[t] & tradeable_mask
             valid_signals: dict[str, SymbolSignal] = {}
             gross_edge_by_symbol: dict[str, float] = {}
-            for symbol, event in schedule._events_by_bar[t - schedule.start_idx].items():
-                sym_idx = sym_to_idx.get(symbol)
-                if sym_idx is None or not tradeable_mask[sym_idx]:
-                    continue
-                basis: EdgeBasis = (
-                    "gross" if np.isfinite(float(event.expected_gross_bps)) and float(event.expected_gross_bps) != 0.0
-                    else "net"
-                )
-                edge = compute_expected_layer2_edge(
-                    side=int(event.side),
-                    expected_gross_bps=float(event.expected_gross_bps),
-                    expected_net_bps=float(event.expected_net_bps),
-                    expected_holding_bars=int(event.expected_holding_bars),
-                    execution_cost_bps=float(hurdle[sym_idx]),
-                    edge_basis=basis,
-                    fixed_cost_safety_mult=fixed_cost_safety_mult,
-                )
-                gross_edge_by_symbol[symbol] = edge.signed_gross_bps_per_bar
-                if not np.isfinite(edge.signed_net_bps_per_bar) or edge.signed_net_bps_per_bar == 0.0:
-                    continue
-                valid_signals[symbol] = SymbolSignal(
-                    raw_mu=edge.signed_net_bps_per_bar,
-                    volatility=float(max(vol_matrix[t, sym_idx], VOL_FLOOR)),
-                    n_obs=1,
-                    t_stat=0.0,
-                    valid=True,
-                    beta_btc=None,
-                    quality_weight=float(event.quality_weight),
-                )
+            
+            if np.any(_mask):
+                _idx_list = np.where(_mask)[0]
+                for _idx in _idx_list:
+                    symbol = symbols[_idx]
+                    _gross_bps = cache.expected_gross_bps_2d[t, _idx]
+                    _net_bps = cache.expected_net_bps_2d[t, _idx]
+                    _holding = int(cache.holding_bars_2d[t, _idx])
+                    _side = int(cache.side_2d[t, _idx])
+                    _qw = cache.quality_weight_2d[t, _idx]
+                    _hurdle = float(hurdle[_idx])
+                    
+                    basis: EdgeBasis = "gross" if np.isfinite(_gross_bps) and _gross_bps != 0.0 else "net"
+                    
+                    edge = compute_expected_layer2_edge(
+                        side=_side,
+                        expected_gross_bps=_gross_bps,
+                        expected_net_bps=_net_bps,
+                        expected_holding_bars=_holding,
+                        execution_cost_bps=_hurdle,
+                        edge_basis=basis,
+                        fixed_cost_safety_mult=fixed_cost_safety_mult,
+                    )
+                    
+                    gross_edge_by_symbol[symbol] = edge.signed_gross_bps_per_bar
+                    if not np.isfinite(edge.signed_net_bps_per_bar) or edge.signed_net_bps_per_bar == 0.0:
+                        continue
+                        
+                    valid_signals[symbol] = SymbolSignal(
+                        raw_mu=edge.signed_net_bps_per_bar,
+                        volatility=float(max(vol_matrix[t, _idx], VOL_FLOOR)),
+                        n_obs=1,
+                        t_stat=0.0,
+                        valid=True,
+                        beta_btc=None,
+                        quality_weight=_qw,
+                    )
             prof_prep += time.perf_counter() - t0_prep
 
             t0_rank = time.perf_counter()
@@ -980,7 +1040,7 @@ def _run_awf_simulation(
                 c_nxt = aligned.close_2d[t2 + 1]
                 bar_ret = np.where(c_cur > 0, (c_nxt - c_cur) / c_cur, 0.0)
                 bar_ret = np.nan_to_num(bar_ret, nan=0.0, posinf=0.0, neginf=0.0)
-                funding_rates = _resolve_funding_row(aligned=aligned, t2=t2, n_sym=n_sym)
+                funding_rates = cache.funding_2d[t2]
                 gross_ret = compute_futures_bar_return(
                     weights=w,
                     price_returns=bar_ret,

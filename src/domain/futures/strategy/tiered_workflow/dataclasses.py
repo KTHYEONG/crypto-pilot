@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
+import numpy as np
+from numpy.typing import NDArray
+
 if TYPE_CHECKING:
     from src.domain.futures.strategy.candidate_contracts import (
         FoldFitStatus,
@@ -469,6 +472,25 @@ class Layer2SignalSchedule:
         default=(),
         repr=False,
     )
+
+
+@dataclass(frozen=True)
+class L2SimulationCache:
+    """Pre-computed matrices for L2 simulation."""
+
+    vol_matrix_2d: NDArray[np.float64]
+    tradeable_mask_2d: NDArray[np.bool_]
+    hurdle_2d: NDArray[np.float64]
+    funding_2d: NDArray[np.float64]
+    beta_1d: NDArray[np.float64]
+
+    # Vectorized Signal Matrices (Shape: [T, N])
+    expected_gross_bps_2d: NDArray[np.float64]
+    expected_net_bps_2d: NDArray[np.float64]
+    holding_bars_2d: NDArray[np.float64]
+    side_2d: NDArray[np.float64]
+    quality_weight_2d: NDArray[np.float64]
+    signal_mask_2d: NDArray[np.bool_]
 
 
 @dataclass(slots=True, frozen=True)
