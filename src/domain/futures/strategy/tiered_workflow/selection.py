@@ -331,6 +331,8 @@ def select_layer2_champion(
                 growth_lcb_baseline=float(candidate_evaluation.growth_lcb_baseline),
                 dsr_hybrid=None,
                 psr_hybrid=float(candidate_evaluation.psr_hybrid),
+                recent_fold_passed=getattr(candidate_evaluation, "recent_fold_passed", None),
+                recent_fold_sharpe=getattr(candidate_evaluation, "recent_fold_sharpe", None),
                 config=candidate_config,
             )
         constraints_ok = all(value <= 0.0 for value in pre_dsr_gate.optuna_constraint_values)
@@ -365,6 +367,8 @@ def select_layer2_champion(
             growth_lcb_baseline=float(candidate_evaluation.growth_lcb_baseline),
             dsr_hybrid=float(dsr),
             psr_hybrid=float(candidate_evaluation.psr_hybrid),
+            recent_fold_passed=getattr(candidate_evaluation, "recent_fold_passed", None),
+            recent_fold_sharpe=getattr(candidate_evaluation, "recent_fold_sharpe", None),
             config=candidate_config,
         )
 

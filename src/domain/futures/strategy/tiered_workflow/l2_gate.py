@@ -85,17 +85,6 @@ def evaluate_layer2_gate(
     Returns:
         Layer2GateEvaluation.
     """
-    optuna_constraint_values = (
-        1.0 if deployment_failed else -1.0,
-        float(max(support_leak_count, 0)),
-        _finite_or_fail(mdd_hybrid - float(config.l2_max_mdd_abs)),
-        _finite_or_fail(cvar_95_hybrid - float(config.l2_max_cvar_95)),
-        _finite_or_fail(float(config.l2_min_fold_pass_ratio) - fold_pass_ratio),
-        _finite_or_fail(float(int(config.l2_min_active_blocks) - active_block_count)),
-        _finite_or_fail(float(config.l2_min_friction_pass) - friction_pass_pct),
-        _finite_or_fail(float(int(config.l2_min_trades) - trade_count)),
-    )
-
     # calmar = CAGR / MDD; mar_hybrid 이미 동일 계산이나 명시적 calmar 분리
     calmar_hybrid = float(cagr_hybrid) / (float(mdd_hybrid) + 1e-9)
 
@@ -114,6 +103,17 @@ def evaluate_layer2_gate(
                 recent_fold_constraint,
                 _finite_or_fail(float(config.l2_min_recent_fold_sharpe) - float(recent_fold_sharpe)),
             )
+    optuna_constraint_values = (
+        1.0 if deployment_failed else -1.0,
+        float(max(support_leak_count, 0)),
+        _finite_or_fail(mdd_hybrid - float(config.l2_max_mdd_abs)),
+        _finite_or_fail(cvar_95_hybrid - float(config.l2_max_cvar_95)),
+        _finite_or_fail(float(config.l2_min_fold_pass_ratio) - fold_pass_ratio),
+        recent_fold_constraint,
+        _finite_or_fail(float(int(config.l2_min_active_blocks) - active_block_count)),
+        _finite_or_fail(float(config.l2_min_friction_pass) - friction_pass_pct),
+        _finite_or_fail(float(int(config.l2_min_trades) - trade_count)),
+    )
 
     promotion_constraint_values = (
         1.0 if deployment_failed else -1.0,

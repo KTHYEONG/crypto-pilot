@@ -129,7 +129,8 @@ def discover_universe_timeline(
     # 현재는 메타데이터 전달만 수행, timeline 분기는 추후 구현
     if l2_start is not None and l2_start < oos_start:
         _logger.warning(
-            "discover_universe_timeline: l2_start(%s) < oos_start(%s), ignoring l2_start",
+            "discover_universe_timeline: l2_start(%s) < oos_start(%s), "
+            "current universe timeline is still 2-way and does not treat l2_start as a separate boundary",
             l2_start.isoformat(),
             oos_start.isoformat(),
         )
