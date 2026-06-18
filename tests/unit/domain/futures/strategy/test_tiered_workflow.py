@@ -959,6 +959,174 @@ def test_run_l3_holdout_gate_passed_when_all_thresholds_satisfied() -> None:
     assert result.blocker_reason == ""
 
 
+def test_run_l3_holdout_applies_deployment_leverage_when_provided() -> None:
+    """L3 holdout은 L2 champion leverage로 deployed 경로 지표를 재계산해야 한다."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_l3_holdout
+    from src.domain.futures.strategy.tiered_workflow.risk_deployment import apply_deployment
+
+    n_bars = 40
+    unit_rets = [0.001, -0.0005, 0.0015, -0.0002] * 10
+    sim_result = _make_awf_sim_result(
+        rets_hybrid=unit_rets,
+        rets_baseline=[0.0002] * n_bars,
+        trade_count=40,
+        all_gross_exposures=[0.25] * n_bars,
+    )
+
+    def _make_mock_cache(n_bars: int = 100, n_syms: int = 1) -> MagicMock:
+        cache = MagicMock()
+        cache.vol_matrix_2d = np.full((n_bars, n_syms), 0.0001, dtype=np.float64)
+        cache.tradeable_mask_2d = np.ones((n_bars, n_syms), dtype=bool)
+        cache.hurdle_2d = np.full((n_bars, n_syms), 3.8, dtype=np.float64)
+        cache.funding_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.beta_1d = np.zeros(n_syms, dtype=np.float64)
+        cache.expected_gross_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.expected_net_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.holding_bars_2d = np.ones((n_bars, n_syms), dtype=np.float64)
+        cache.side_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.quality_weight_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
+        return cache
+
+    with patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+        return_value=sim_result,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    ):
+        result = run_l3_holdout(
+            signal_batch=_make_l3_signal_batch(),
+            aligned=MagicMock(symbols=("BTC",)),
+            holdout_span=(0, n_bars),
+            config=Layer2AllocationConfig(),
+            caps=_l3_caps(),
+            deploy_leverage=10.0,
+            verbose=False,
+        )
+
+    dep = apply_deployment(
+        rets=np.asarray(unit_rets, dtype=np.float64),
+        leverage=10.0,
+        bars_per_year=2190.0,
+    )
+    assert result.deploy_leverage == pytest.approx(10.0)
+    assert result.cagr == pytest.approx(dep.cagr)
+    assert result.mdd == pytest.approx(dep.mdd)
+    assert result.cvar95 == pytest.approx(dep.cvar_95)
+    assert result.total_return == pytest.approx(
+        float(np.prod(1.0 + dep.scaled_rets)) - 1.0,
+        rel=1e-9,
+    )
+    assert result.avg_gross_exposure == pytest.approx(0.25 * 10.0)
+
+
+@pytest.mark.parametrize("deploy_leverage", [None, 1.0])
+def test_run_l3_holdout_uses_unit_path_when_no_effective_leverage(
+    deploy_leverage: float | None,
+) -> None:
+    """deploy_leverage가 없거나 1.0 이하면 unit path와 동일한 결과를 유지해야 한다."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_l3_holdout
+    from src.domain.futures.strategy.tiered_workflow.risk_deployment import apply_deployment
+
+    n_bars = 40
+    unit_rets = [0.001, -0.0005, 0.0015, -0.0002] * 10
+    sim_result = _make_awf_sim_result(
+        rets_hybrid=unit_rets,
+        rets_baseline=[0.0002] * n_bars,
+        trade_count=40,
+        all_gross_exposures=[0.25] * n_bars,
+    )
+
+    def _make_mock_cache(n_bars: int = 100, n_syms: int = 1) -> MagicMock:
+        cache = MagicMock()
+        cache.vol_matrix_2d = np.full((n_bars, n_syms), 0.0001, dtype=np.float64)
+        cache.tradeable_mask_2d = np.ones((n_bars, n_syms), dtype=bool)
+        cache.hurdle_2d = np.full((n_bars, n_syms), 3.8, dtype=np.float64)
+        cache.funding_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.beta_1d = np.zeros(n_syms, dtype=np.float64)
+        cache.expected_gross_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.expected_net_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.holding_bars_2d = np.ones((n_bars, n_syms), dtype=np.float64)
+        cache.side_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.quality_weight_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
+        return cache
+
+    with patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+        return_value=sim_result,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    ):
+        result = run_l3_holdout(
+            signal_batch=_make_l3_signal_batch(),
+            aligned=MagicMock(symbols=("BTC",)),
+            holdout_span=(0, n_bars),
+            config=Layer2AllocationConfig(),
+            caps=_l3_caps(),
+            deploy_leverage=deploy_leverage,
+            verbose=False,
+        )
+
+    dep = apply_deployment(
+        rets=np.asarray(unit_rets, dtype=np.float64),
+        leverage=1.0,
+        bars_per_year=2190.0,
+    )
+    assert result.deploy_leverage == pytest.approx(1.0)
+    assert result.cagr == pytest.approx(dep.cagr)
+    assert result.mdd == pytest.approx(dep.mdd)
+    assert result.cvar95 == pytest.approx(dep.cvar_95)
+
+
+def test_run_l3_holdout_blocks_on_non_finite_deployed_metrics() -> None:
+    """배치된 수익률이 비유한값이면 L3는 non_finite로 차단되어야 한다."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_l3_holdout
+
+    sim_result = _make_awf_sim_result(
+        rets_hybrid=[0.001, np.nan, 0.002, -0.001] * 10,
+        rets_baseline=[0.0001] * 40,
+        trade_count=40,
+    )
+
+    def _make_mock_cache(n_bars: int = 100, n_syms: int = 1) -> MagicMock:
+        cache = MagicMock()
+        cache.vol_matrix_2d = np.full((n_bars, n_syms), 0.0001, dtype=np.float64)
+        cache.tradeable_mask_2d = np.ones((n_bars, n_syms), dtype=bool)
+        cache.hurdle_2d = np.full((n_bars, n_syms), 3.8, dtype=np.float64)
+        cache.funding_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.beta_1d = np.zeros(n_syms, dtype=np.float64)
+        cache.expected_gross_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.expected_net_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.holding_bars_2d = np.ones((n_bars, n_syms), dtype=np.float64)
+        cache.side_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.quality_weight_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
+        return cache
+
+    with patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+        return_value=sim_result,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=_make_mock_cache(n_bars=40, n_syms=1),
+    ):
+        result = run_l3_holdout(
+            signal_batch=_make_l3_signal_batch(),
+            aligned=MagicMock(symbols=("BTC",)),
+            holdout_span=(0, 40),
+            config=Layer2AllocationConfig(),
+            caps=_l3_caps(),
+            deploy_leverage=10.0,
+            verbose=False,
+        )
+
+    assert result.gate_passed is False
+    assert result.blocker_reason == "non_finite"
+
+
 # ---------------------------------------------------------------------------
 # TI12: _cagr 실측 CAGR 계산 (C1 수정 검증)
 # ---------------------------------------------------------------------------

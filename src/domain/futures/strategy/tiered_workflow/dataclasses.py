@@ -541,6 +541,7 @@ class Layer3Result:
         n_trades: 홀드아웃 체결 수 (통계적 유의성 sanity).
         cvar95: per-bar 95% CVaR loss (꼬리위험, 양수, 진단용).
         avg_gross_exposure: 평균 총노출 (실제 배치 여부 진단용).
+        deploy_leverage: L2 champion deployment scalar applied to hybrid holdout returns.
     """
 
     cagr: float
@@ -561,6 +562,7 @@ class Layer3Result:
     n_trades: int = 0
     cvar95: float = 0.0
     avg_gross_exposure: float = 0.0
+    deploy_leverage: float = 1.0
 
 
 @dataclass(slots=True, frozen=True)
