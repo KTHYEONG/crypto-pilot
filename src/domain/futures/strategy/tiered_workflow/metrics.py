@@ -202,6 +202,55 @@ def _cvar_loss(
     return float(np.maximum(np.mean(tail), 0.0))
 
 
+def _sortino_hac_unit(
+    rets: list[float] | NDArray[np.float64],
+    *,
+    bars_per_year: float = _BARS_PER_YEAR,
+    target: float = 0.0,
+    max_lag: int | None = None,
+) -> float:
+    """HAC 조정 downside deviation 기반 scale-invariant Sortino 비율.
+
+    Scale-invariant 특성: leverage -> kL 변환 시 E[r]·sigma_down 동비율 변화 -> Sortino 불변.
+    Sortino_HAC_unit은 unit-vol 정규화 book의 shape metric으로 사용.
+
+    Args:
+        rets: per-bar 수익률 리스트 또는 배열.
+        bars_per_year: 연율화 팩터 (4h=2190).
+        target: 하방편차 기준점 (기본 0.0).
+        max_lag: HAC 최대 lag (None=자동).
+
+    Returns:
+        HAC 조정 연율화 Sortino. 데이터 부족·비수렴 시 0.0.
+
+    Time Complexity: O(n·max_lag). Space Complexity: O(n).
+    """
+    arr = _clean_rets_array(rets)
+    if arr.size < 2:
+        return 0.0
+    mean_r = float(np.mean(arr))
+
+    # downside HAC: HAC long-run variance를 downside 표본에 적용
+    downside_mask = arr < target
+    if not np.any(downside_mask):
+        return 0.0
+    downside = arr[downside_mask] - target  # 양수 절대값 손실
+
+    # HAC long-run variance on downside deviations (전표본 N 정규화 — Sortino & Price 1994)
+    # downside.size << arr.size이므로 lag 자동 조정
+    lrv = _hac_long_run_variance(
+        downside,
+        max_lag=_default_hac_lag(downside.size) if max_lag is None else max_lag,
+    )
+    # 전표본 N 정규화: TDD = sqrt(sum(d^2) / N_total)와 정합
+    # HAC 분산은 downside 표본에서 계산하므로 N_down→N_total 보정
+    n_ratio = float(downside.size) / float(arr.size)
+    dd_hac = float(np.sqrt(max(lrv * n_ratio, 0.0)))
+    if dd_hac < 1e-12:
+        return 0.0
+    return float((mean_r - target) / dd_hac * np.sqrt(bars_per_year))
+
+
 def _deflated_sharpe_probability(
     *,
     selected_rets: list[float] | NDArray[np.float64],
@@ -230,10 +279,11 @@ def _deflated_sharpe_probability(
         
     sr_pool_per_bar = sr_pool_ann / np.sqrt(bars_per_year)
     
-    # 4. Calculate per-bar benchmark
+    # 4. Calculate per-bar benchmark — Bailey & López de Prado (2014) null SR=0 정론.
+    # +mean(pool) 항 제거: 동일 신호셋 파라미터 섭동(독립 가설 불성립) → 자기참조 제거.
+    # benchmark = std(pool) * sqrt(2 * ln(N_eff)) only.
     benchmark_per_bar = float(
-        np.mean(sr_pool_per_bar)
-        + np.std(sr_pool_per_bar, ddof=0) * np.sqrt(2.0 * np.log(max(effective_trial_count, 1.0)))
+        np.std(sr_pool_per_bar, ddof=0) * np.sqrt(2.0 * np.log(max(effective_trial_count, 1.0)))
     )
     
     # 5. Effective sample size
