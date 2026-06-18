@@ -92,6 +92,7 @@ def calibrate_deployment_leverage(
     mdd_margin: float = 0.30,
     cvar_margin: float = 0.20,
     l_hard_cap: float = 20.0,
+    exchange_leverage_cap: float | None = None,
 ) -> tuple[float, str]:
     """히스토리컬 수익률에서 배치 레버리지 L*를 결정론적으로 산출.
 
@@ -99,6 +100,7 @@ def calibrate_deployment_leverage(
     fit-leg 수익률은 전략 unit-vol book의 실현 수익률이므로 MDD/CVaR 예산이
     실제 binding이 된다 → l_hard_cap=20.0으로 완화해도 budget이 진짜 제약.
     `mdd_margin=0.30` / `cvar_margin=0.20` 안전여유가 OOS-fit 분포 이격 완충.
+    `exchange_leverage_cap`으로 거래소 실행가능 notional 상한 제한(trading_bot.md §4).
 
     Args:
         fit_rets: 캘리브레이션용 per-bar simple return 배열 [T].
@@ -108,9 +110,11 @@ def calibrate_deployment_leverage(
         mdd_margin: MDD 목표 = mdd_cap*(1-margin). 기본 30% 안전여유.
         cvar_margin: CVaR95 목표 = cvar_cap*(1-margin). 기본 20% 안전여유.
         l_hard_cap: 레버리지 절대 상한.
+        exchange_leverage_cap: 거래소 실행가능 notional 레버리지 상한. None=무제한.
+            Binance perp 기본 10x. L* > cap 이면 "exchange_cap" binding으로 차단.
 
     Returns:
-        (L*, binding_constraint) — 바인딩 제약 식별자 포함.
+        (L*, binding_constraint) — binding ∈ {"mdd","cvar","hard_cap","exchange_cap","none"}.
     """
     arr = np.asarray(fit_rets, dtype=np.float64)
     if arr.size < 2:
@@ -123,12 +127,16 @@ def calibrate_deployment_leverage(
     l_mdd = _bisect_max_leverage(arr, _mdd_at_leverage, mdd_target, 1.0, l_search_hi)
     l_cvar = _bisect_max_leverage(arr, _cvar_95_at_leverage, cvar_target, 1.0, l_search_hi)
 
-    l_optimal = min(l_mdd, l_cvar)
+    # 모든 제약 후보 수집 → argmin으로 binding 결정 (realism: trading_bot.md §4)
+    candidates: list[tuple[float, str]] = [
+        (l_mdd, "mdd"),
+        (l_cvar, "cvar"),
+        (l_hard_cap, "hard_cap"),
+    ]
+    if exchange_leverage_cap is not None and exchange_leverage_cap > 0.0:
+        candidates.append((exchange_leverage_cap, "exchange_cap"))
 
-    if l_optimal >= l_hard_cap:
-        return l_hard_cap, "hard_cap"
-
-    binding: str = "mdd" if l_mdd <= l_cvar else "cvar"
+    l_optimal, binding = min(candidates, key=lambda x: x[0])
     l_final = max(l_optimal, 1.0)
     return l_final, binding
 
