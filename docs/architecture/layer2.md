@@ -73,8 +73,8 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
   - **C1 - fit-leg book 정확도**: AWF fit-leg 루프가 OOS와 동일한 체인(rank→kelly→throttle→tradeable mask→cost→funding)으로 per-bar book 수익률 수집. 과거 equal-weight 시장수익률 평균(market MDD~25%)이 L*를 1로 압착하던 RC-2 수정.
   - **C2 - trial-내 L* 결정**: `evaluate_l2_trial`이 `calibrate_deployment_leverage(fit_rets=fit_rets_hybrid, l_hard_cap=20.0)` 호출 → `L* = clip(min(L_mdd, L_cvar), 1.0, 20.0)`. `cagr_hybrid/mdd_hybrid/cvar_95_hybrid`는 `apply_deployment(rets, L*)`의 deployed 값. `sortino/sharpe/psr`는 unit-vol(scale-invariant) 유지. `deploy_leverage` 필드로 기록.
   - **C3 - gate 자동 정렬**: gate가 `candidate_evaluation.cagr_hybrid`(deployed) 직접 사용 → C2 변경으로 자동 정렬(코드 수정 불필요).
-  - **C4 - 배치 노브 정정**: `kelly_fraction` 배율 제거(vol-targeting이 kelly scale을 취소). 실제 노브: `max_ann_vol = vol_base × L*`, `gross_exposure_cap = base_gross × L*`. RC-3(dead code kelly 배율) 해소.
-  - fit-leg 미노출 시 OOS proxy fallback + `mdd_margin=0.30` 완충. `binding=hard_cap` 시 look-ahead 없음.
+  - **C4 - 배치 실현 경로 정정 (2026-06-18 재정의)**: `max_ann_vol/gross_cap` 천장주입(구조적 no-op)을 **수익률 직접 스케일**로 교체. `run_l2_awf(deploy_leverage=L*)`가 `apply_deployment(sim.rets_hybrid, L*)` 호출 → `cagr/mdd/cvar` 재산출. Sharpe/Sortino/PSR는 unit-vol 유지(레버리지 불변). `exchange_leverage_cap`(기본 10×)으로 거래소 실행가능 상한 제한. `l2_deploy_cvar_margin`(기본 0.20) 노브 추가.
+  - fit-leg 미노출 시 OOS proxy fallback + `mdd_margin=0.30` 완충. `binding ∈ {mdd, cvar, hard_cap, exchange_cap, none}`. champion L*는 `l2_params["l2_deploy_leverage"]`로 SSOT 전달(recalibrate drift 0).
 - **Dynamic Scaling**: Volatility targeting ($\sigma_{target} / \sigma_{port}$) combined with regime-specific gross/net caps. Includes double-scaling guards.
 - **L2 Gate Contract (D1/D4)**:
   - `Layer2GateEvaluation.optuna_constraint_values` is the 8-value safety vector fed to `TPESampler(constraints_func=...)`.
