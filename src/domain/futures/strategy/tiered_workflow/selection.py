@@ -275,9 +275,13 @@ def select_layer2_champion(
     best_diagnostic_gate: Layer2GateEvaluation | None = None
     best_diagnostic_dsr = float("-inf")
 
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+    cache = build_l2_simulation_cache(aligned, signal_batch, tf)
+
     for candidate in replay_candidates:
         candidate_config = Layer2AllocationConfig.from_mapping(dict(candidate.params))
         candidate_evaluation = evaluate_l2_trial(
+            cache=cache,
             signal_batch=signal_batch,
             aligned=aligned,
             awf_folds=awf_folds,
