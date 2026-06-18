@@ -232,30 +232,25 @@ def test_layer2_allocation_config_default_max_ann_vol_is_none() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_apply_deployment_uses_fit_leg_over_oos_proxy() -> None:
-    """fit_returns_hybrid 있으면 returns_hybrid(OOS 대리) 대신 fit-leg를 캘리브레이션에 사용.
+def test_apply_deployment_uses_evaluation_deploy_leverage() -> None:
+    """C4: _apply_deployment_to_params가 evaluation.deploy_leverage를 재사용(재계산 금지).
 
-    Spec D3: fit-leg 기반 look-ahead-free L* — binding이 hard_cap 아닌 mdd/cvar여야 함.
-    l2_deploy_l_hard_cap=20.0으로 완화 → MDD 예산이 실제 binding.
+    kelly_fraction 불변, max_ann_vol *= L*, gross_exposure_cap *= L*.
     """
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import MagicMock
 
     from src.domain.futures.strategy.tiered_workflow.selection import (
         _apply_deployment_to_params,
     )
 
-    # Arrange: 낮은 변동성 fit-leg → L*가 MDD 예산에 걸릴 수 있음 (hard_cap=20 완화 후)
-    rng = np.random.default_rng(7)
-    # 작은 수익률 → MDD 작음 → L*가 MDD binding에 앞서 hard_cap에 걸릴 가능성 낮음
-    fit_rets = rng.normal(0.0005, 0.002, 500).tolist()
-    oos_rets = rng.normal(0.0001, 0.005, 100).tolist()  # 더 변동성 큼 → L_mdd 작게 나옴
-
+    # Arrange
     eval_mock = MagicMock()
-    eval_mock.fit_returns_hybrid = fit_rets
-    eval_mock.returns_hybrid = oos_rets
+    eval_mock.deploy_leverage = 12.0
+    eval_mock.deploy_binding = "hard_cap"
 
     base_params: dict[str, float | int | str] = {
         "kelly_fraction": 0.25,
+        "gross_exposure_cap": 3.0,
         "l2_deploy_enabled": True,
         "l2_deploy_mdd_margin": 0.30,
         "l2_deploy_l_hard_cap": 20.0,
@@ -263,50 +258,30 @@ def test_apply_deployment_uses_fit_leg_over_oos_proxy() -> None:
         "l2_max_cvar_95": 0.06,
     }
 
-    captured: dict[str, object] = {}
+    # Act
+    result = _apply_deployment_to_params(base_params, eval_mock, tf="4h")
 
-    original_fn = __import__(
-        "src.domain.futures.strategy.tiered_workflow.risk_deployment",
-        fromlist=["calibrate_deployment_leverage"],
-    ).calibrate_deployment_leverage
-
-    def _spy_calibrate(**kwargs: object) -> tuple[float, str]:
-        captured.update(kwargs)
-        return original_fn(**kwargs)  # type: ignore[arg-type]
-
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.selection.calibrate_deployment_leverage",
-        side_effect=_spy_calibrate,
-    ):
-        result = _apply_deployment_to_params(base_params, eval_mock, tf="4h")
-
-    # Assert: fit-leg가 캘리브레이션에 전달됨 (OOS 대리 아님)
-    assert "fit_rets" in captured
-    passed_arr = np.array(captured["fit_rets"])
-    expected_arr = np.array(fit_rets)
-    assert passed_arr.shape == expected_arr.shape
-    assert float(np.mean(np.abs(passed_arr - expected_arr))) == pytest.approx(0.0, abs=1e-12)
-
-    # kelly가 상향됐거나(L*>1) 그대로(L*≈1)여야 함 — 음수/기본값 손상 없음
-    new_kelly = result.get("kelly_fraction", 0.25)
-    assert isinstance(new_kelly, float)
-    assert new_kelly >= 0.25 - 1e-9
+    # Assert: kelly 불변
+    assert result.get("kelly_fraction", 0.25) == pytest.approx(0.25, rel=1e-6)
+    # Assert: vol_target *= 12 (base=1.0), gross *= 12
+    assert result["max_ann_vol"] == pytest.approx(1.0 * 12.0, rel=1e-6)
+    assert result["gross_exposure_cap"] == pytest.approx(3.0 * 12.0, rel=1e-6)
+    # Assert: 추적 필드
+    assert result.get("l2_deploy_leverage") == pytest.approx(12.0, rel=1e-6)
 
 
 def test_apply_deployment_fallback_to_oos_when_fit_leg_empty() -> None:
-    """fit_returns_hybrid가 빈 tuple이면 returns_hybrid(OOS 대리)로 fallback."""
-    from unittest.mock import MagicMock, patch
+    """C4: deploy_leverage=1.0 → params 변경 없음 (no-op 경로)."""
+    from unittest.mock import MagicMock
 
     from src.domain.futures.strategy.tiered_workflow.selection import (
         _apply_deployment_to_params,
     )
 
-    rng = np.random.default_rng(13)
-    oos_rets = rng.normal(0.001, 0.003, 200).tolist()
-
+    # Arrange: evaluation이 L*=1.0 (no deployment)
     eval_mock = MagicMock()
-    eval_mock.fit_returns_hybrid = ()  # 빈 tuple → fallback 경로
-    eval_mock.returns_hybrid = oos_rets
+    eval_mock.deploy_leverage = 1.0
+    eval_mock.deploy_binding = "none"
 
     base_params: dict[str, float | int | str] = {
         "kelly_fraction": 0.25,
@@ -317,28 +292,11 @@ def test_apply_deployment_fallback_to_oos_when_fit_leg_empty() -> None:
         "l2_max_cvar_95": 0.06,
     }
 
-    captured: dict[str, object] = {}
+    # Act
+    result = _apply_deployment_to_params(base_params, eval_mock, tf="4h")
 
-    original_fn = __import__(
-        "src.domain.futures.strategy.tiered_workflow.risk_deployment",
-        fromlist=["calibrate_deployment_leverage"],
-    ).calibrate_deployment_leverage
-
-    def _spy_calibrate(**kwargs: object) -> tuple[float, str]:
-        captured.update(kwargs)
-        return original_fn(**kwargs)  # type: ignore[arg-type]
-
-    with patch(
-        "src.domain.futures.strategy.tiered_workflow.selection.calibrate_deployment_leverage",
-        side_effect=_spy_calibrate,
-    ):
-        _apply_deployment_to_params(base_params, eval_mock, tf="4h")
-
-    # fallback: OOS 수익률이 전달됐어야 함
-    assert "fit_rets" in captured
-    passed_arr = np.array(captured["fit_rets"])
-    expected_arr = np.array(oos_rets)
-    assert passed_arr.shape == expected_arr.shape
+    # Assert: 변경 없음
+    assert result is base_params or result == base_params
 
 
 # ---------------------------------------------------------------------------
