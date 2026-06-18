@@ -11,6 +11,7 @@ import pandas as pd
 from numpy.typing import NDArray
 from threadpoolctl import threadpool_limits
 
+from src.core.utils.utils import PERF
 from src.domain.futures.strategy.candidate_contracts import (
     CandidateFoldOutput,
     CandidateModelOutput,
@@ -444,6 +445,22 @@ def _fit_and_predict_single_fold_inner(
         min_fit_obs=cfg.min_fit_obs,
         n_oos=len(ml_out.expected_net_bps),
         prediction=np.asarray(ml_out.expected_net_bps, dtype=np.float64),
+    )
+
+    _logger.log(PERF,
+        "[CANDIDATE-FOLD] fold=%d fit_status=%s total=%.3fs schema=%.3fs ds_fit=%.3fs ds_es=%.3fs "
+        "ds_cal_fit=%.3fs ds_cal_eval=%.3fs ds_oos=%.3fs edge_fit=%.3fs inference=%.3fs selection=%.3fs",
+        fold_idx, fit_status,
+        timing_profile.get("total", 0),
+        timing_profile.get("schema", 0),
+        timing_profile.get("dataset_fit", 0),
+        timing_profile.get("dataset_early_stop", 0),
+        timing_profile.get("dataset_calibration_fit", 0),
+        timing_profile.get("dataset_calibration_eval", 0),
+        timing_profile.get("dataset_oos", 0),
+        timing_profile.get("edge_fit", 0),
+        timing_profile.get("inference", 0),
+        timing_profile.get("selection", 0),
     )
 
     return CandidateFoldOutput(
