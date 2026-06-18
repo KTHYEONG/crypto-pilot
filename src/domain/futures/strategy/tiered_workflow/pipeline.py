@@ -15,6 +15,7 @@ from numpy.typing import NDArray
 from scipy.stats import spearmanr
 
 import src.domain.futures.strategy.config as strategy_config
+from src.core.utils.utils import PERF
 from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
 from src.domain.futures.portfolio.signal_composer import (
     composer_sigma_lookback_bars,
@@ -28,6 +29,8 @@ from src.domain.futures.strategy.candidate_contracts import (
     QualifiedSignalRegistry,
     ValidatedSignalBatch,
 )
+from src.domain.futures.strategy.common.alignment import AlignedMarketData
+from src.domain.futures.strategy.config import CandidateStrategyConfig
 from src.domain.futures.strategy.cs_rank import SymbolSignal
 from src.domain.futures.strategy.tiered_logging import (
     format_layer1_deployment_registry_table,
@@ -101,8 +104,6 @@ from src.domain.futures.strategy.walk_forward import WFFold
 
 if TYPE_CHECKING:
     from src.domain.futures.optimization.opt_config import LayeredWindow
-    from src.domain.futures.strategy.common.alignment import AlignedMarketData
-    from src.domain.futures.strategy.config import CandidateStrategyConfig
 
 logger = logging.getLogger("src.domain.futures.strategy.tiered_workflow")
 
@@ -273,7 +274,7 @@ def build_l1_prequential_evidence_snapshots(
             frame_memory_bytes,
             pinned=getattr(cfg, "l1_nested_workers", None),
         )
-        logger.debug(
+        logger.log(PERF, 
             "[EVIDENCE-PREQ] Fitting %d evidence folds in parallel with %d workers (WSL OOM Guard, pinned=%s)",
             len(evidence_folds),
             workers,
@@ -294,7 +295,7 @@ def build_l1_prequential_evidence_snapshots(
             cw._GLOBAL_ALIGNED = None
             cw._GLOBAL_CFG = None
             cw._GLOBAL_PURGE_BARS = None
-        logger.debug(
+        logger.log(PERF, 
             "[perf-tiered] build_l1_prequential_evidence_snapshots parallel execution took %.4fs",
             time.perf_counter() - t_exec,
         )
@@ -367,17 +368,23 @@ def run_l1_swf(
     planned_workers = max(1, (os.cpu_count() or 4) // 2)
     max_workers = min(len(folds), planned_workers)
 
+    symbols = aligned.symbols
+    n_total = len(symbols)
+
     t_start = time.perf_counter()
-    logger.debug(
+    logger.log(PERF, 
         "[SWF-START] Starting SWF-K L1 signal validation with %d folds (max_workers=%d)",
         len(folds),
         max_workers,
     )
+    logger.log(PERF,
+        "[SWF-CTX] n_symbols=%d n_bars=%d n_folds=%d purge=%d embargo=%d cfg=%s",
+        n_total, len(aligned.datetimes), len(folds), purge_bars, _embargo_bars,
+        getattr(cfg, 'candidate_name', cfg.__class__.__name__),
+    )
 
     signals_per_fold: list[dict[str, SymbolSignal]] = []
     fold_diags: list[FoldDiagnostic] = []
-    symbols = aligned.symbols
-    n_total = len(symbols)
 
     futures: list[tuple[int, WFFold, Any]] = []
     missing_folds: list[tuple[int, WFFold]] = []
@@ -523,7 +530,7 @@ def run_l1_swf(
         for k in avg_profile:
             avg_profile[k] /= total_folds
 
-        logger.debug(
+        logger.log(PERF, 
             "[SWF-PROFILE] Average sub-fold execution breakdown: "
             "schema=%.3fs, ds_fit=%.3fs, ds_es=%.3fs, ds_cal_fit=%.3fs, ds_cal_eval=%.3fs, "
             "ds_oos=%.3fs, edge_fit=%.3fs, inference=%.3fs, selection=%.3fs",
@@ -538,7 +545,7 @@ def run_l1_swf(
             avg_profile["selection"],
         )
 
-    logger.debug(
+    logger.log(PERF, 
         "[SWF-END] SWF-K L1 signal validation completed in %.2fs",
         time.perf_counter() - t_start,
     )
@@ -626,7 +633,7 @@ def run_l1_swf(
     else:
         _global_ic = 0.0
         _global_tstat = 0.0
-    logger.debug(
+    logger.log(PERF, 
         "[SWF-IC-DIAG] global_pooled_ic=%.4f global_tstat=%.2f (diagnostic, not gate)",
         _global_ic,
         _global_tstat,
@@ -715,7 +722,7 @@ def run_l1_swf(
             for sig in top_panel
         )
         logger.debug("[STRATEGY-PANEL] valid=%d diversity=%.3f | %s", n_valid_strategies, panel_diversity, panel_str)
-    logger.debug(
+    logger.log(PERF, 
         "[SWF-LEGACY-IC] pooled_ic=%.4f pooled_tstat=%.2f breadth=%.3f valid_coverage=%.3f",
         pooled_ic_val,
         pooled_tstat_val,
@@ -723,7 +730,7 @@ def run_l1_swf(
         valid_coverage,
     )
 
-    logger.debug(
+    logger.log(PERF, 
         "[SWF-DIAG] static_share=%.3f dynamic_share=%.3f score_cal_ratio=%.3f decile_lift=%.2fbps",
         _diag.static_variance_share,
         _diag.dynamic_variance_share,
@@ -866,13 +873,18 @@ def run_l1_nested_swf(
         frame_memory_bytes,
         pinned=getattr(cfg, "l1_nested_workers", None),
     )
-    logger.debug(
+    logger.log(PERF, 
         "[L1-NESTED-COMBINED] Fitting %d folds (evidence=%d, outer=%d) in parallel with %d workers (pinned=%s)",
         len(combined_folds),
         num_evidence,
         len(outer_folds),
         workers,
         getattr(cfg, "l1_nested_workers", None),
+    )
+    logger.log(PERF,
+        "[L1-CTX] n_symbols=%d n_events=%d cfg_seed=%d volatility_shape=%s",
+        len(aligned.symbols), len(labeled_events), seed,
+        str(volatility_2d.shape),
     )
 
     combined_results = []
@@ -889,7 +901,7 @@ def run_l1_nested_swf(
         cw._GLOBAL_ALIGNED = None
         cw._GLOBAL_CFG = None
         cw._GLOBAL_PURGE_BARS = None
-    logger.debug(
+    logger.log(PERF, 
         "[perf-tiered] run_l1_nested_swf combined parallel execution took %.4fs",
         time.perf_counter() - t_exec,
     )
@@ -897,6 +909,7 @@ def run_l1_nested_swf(
     evidence_results = combined_results[:num_evidence]
     outer_results = combined_results[num_evidence:]
 
+    t_ev_snap = time.perf_counter()
     evidence_snapshots = build_l1_prequential_evidence_snapshots(
         labeled_events=labeled_events,
         aligned=aligned,
@@ -906,9 +919,15 @@ def run_l1_nested_swf(
         seed=seed,
         precomputed_results=evidence_results,
     )
+    logger.log(PERF,
+        "[perf-tiered] build_l1_prequential_evidence_snapshots (+registry) took %.4fs",
+        time.perf_counter() - t_ev_snap,
+    )
     snapshots_by_idx = {snapshot.as_of_idx: snapshot for snapshot in evidence_snapshots}
 
+    t_outer = time.perf_counter()
     for outer_idx, outer_fold in enumerate(outer_folds):
+        t_fold = time.perf_counter()
         snapshot = snapshots_by_idx.get(outer_fold.oos_start)
         evidence = snapshot.evidence if snapshot is not None else ()
         registry = (
@@ -964,6 +983,16 @@ def run_l1_nested_swf(
                 seed=seed + outer_idx,
             )
         )
+        logger.log(PERF,
+            "[L1-FOLD] outer_fold=%d/%d oos=[%d,%d) train_count=%d events=%d took=%.4fs",
+            outer_idx + 1, len(outer_folds),
+            outer_fold.oos_start, outer_fold.oos_end,
+            trained_count,
+            len(outer_events) if not outer_events.empty else 0,
+            time.perf_counter() - t_fold,
+        )
+    logger.log(PERF, "[perf-tiered] Outer fold loop processing took %.4fs", time.perf_counter() - t_outer)
+
     fold_cov = (
         float(trained_count / len(outer_folds))
         if outer_folds
@@ -974,11 +1003,17 @@ def run_l1_nested_swf(
         if outer_event_frames
         else pd.DataFrame()
     )
+    t_ev_deploy = time.perf_counter()
     deployment_evidence = compute_symbol_strategy_evidence(
         event_results=deployment_event_results,
         cfg=cfg,
         seed=seed,
         registry_as_of_idx=max((fold.oos_end for fold in outer_folds), default=0) + 1,
+    )
+    logger.log(
+        PERF,
+        "[perf-tiered] deployment compute_symbol_strategy_evidence took %.4fs",
+        time.perf_counter() - t_ev_deploy,
     )
     gate_report = evaluate_layer1_readiness(
         fold_reports=tuple(outer_reports),
@@ -1008,6 +1043,7 @@ def run_l1_nested_swf(
         oos_stacked = _registry_to_symbol_signals(deployment_registry)
         fit_start_idx = min((fold.fit_start for fold in outer_folds), default=0)
         fit_end_idx = max((fold.oos_end for fold in outer_folds), default=0)
+        t_art = time.perf_counter()
         inference_artifact = fit_layer1_inference_artifact(
             labeled_events=labeled_events,
             aligned=aligned,
@@ -1017,6 +1053,7 @@ def run_l1_nested_swf(
             cfg=cfg,
             seed=seed,
         )
+        logger.log(PERF, "[perf-tiered] fit_layer1_inference_artifact took %.4fs", time.perf_counter() - t_art)
         if verbose:
             logger.info(format_layer1_deployment_registry_table(deployment_registry))
     return Layer1Result(
@@ -1612,7 +1649,7 @@ def run_tiered_pipeline(
             seed=int(getattr(cfg, "seed", 42)),
             verbose=verbose,
         )
-    logger.debug("[perf-tiered] run_tiered_pipeline Layer 1 total took %.4fs", time.perf_counter() - t_l1)
+    logger.log(PERF, "[perf-tiered] run_tiered_pipeline Layer 1 total took %.4fs", time.perf_counter() - t_l1)
 
     if not l1.gate_passed:
         if verbose:
@@ -1666,7 +1703,7 @@ def run_tiered_pipeline(
             oos_start=l1_end_bars,
             oos_end=ho_start_idx_l2,
         ),)
-    logger.debug(
+    logger.log(PERF, 
         "[L2] AWF window: L2_start_bar=%d, ho_start_bar=%d, n_folds=%d",
         l1_end_bars,
         ho_start_idx_l2,
@@ -1701,7 +1738,7 @@ def run_tiered_pipeline(
         override_dsr=override_dsr,
         deploy_leverage=_champion_l_star if (_champion_l_star is not None and _champion_l_star > 1.0) else None,
     )
-    logger.debug("[perf-tiered] run_tiered_pipeline Layer 2 total took %.4fs", time.perf_counter() - t_l2)
+    logger.log(PERF, "[perf-tiered] run_tiered_pipeline Layer 2 total took %.4fs", time.perf_counter() - t_l2)
 
     if verbose:
         logger.info(
@@ -1797,7 +1834,7 @@ def run_tiered_pipeline(
         verbose=verbose,
         deploy_leverage=_champion_l_star if (_champion_l_star is not None and _champion_l_star > 1.0) else None,
     )
-    logger.debug("[perf-tiered] run_tiered_pipeline Layer 3 total took %.4fs", time.perf_counter() - t_l3)
+    logger.log(PERF, "[perf-tiered] run_tiered_pipeline Layer 3 total took %.4fs", time.perf_counter() - t_l3)
 
     if verbose:
         logger.info("\n" + "="*80)

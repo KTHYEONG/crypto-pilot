@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections import Counter, defaultdict
 from dataclasses import replace
 from hashlib import sha256
@@ -13,6 +14,7 @@ import pandas as pd
 import scipy.stats as stats
 from numpy.typing import NDArray
 
+from src.core.utils.utils import PERF
 from src.domain.futures.strategy.candidate_contracts import (
     CandidateModelOutput,
     Layer1FoldReadiness,
@@ -420,7 +422,13 @@ def compute_symbol_strategy_evidence(
     grouped = frame.groupby(["symbol", "strategy_id", "activation_context"], sort=True)
     evidence_list: list[SymbolStrategyEvidence] = []
     raw_p_values: list[float] = []
+
+    t_core = time.perf_counter()
+    t_prep_total = 0.0
+    t_stats_total = 0.0
+    t_qualify_total = 0.0
     for (symbol, strategy_id, activation_context), group in grouped:
+        t_step = time.perf_counter()
         weights = pd.to_numeric(group["uniqueness_weight"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
         gross = group["gross_event_bps"].to_numpy(dtype=np.float64, copy=False)
         incremental = group["incremental_bps"].to_numpy(dtype=np.float64, copy=False)
@@ -466,6 +474,9 @@ def compute_symbol_strategy_evidence(
             if boot_means.size >= 2 and float(np.std(boot_means, ddof=1)) > 0.0
             else t_stat
         )
+        t_prep_total += time.perf_counter() - t_step
+
+        t_qs = time.perf_counter()
 
         # 1. 자유도 기반 적응적 t-critical value 계산
         df = effective_n - 1.0
@@ -515,6 +526,9 @@ def compute_symbol_strategy_evidence(
                 quality_weight *= sample_scale
             else:
                 quality_weight = 1.0
+        t_stats_total += time.perf_counter() - t_qs
+
+        t_qf = time.perf_counter()
         evidence_list.append(
             SymbolStrategyEvidence(
                 key=SignalSourceKey(
@@ -539,6 +553,7 @@ def compute_symbol_strategy_evidence(
             )
         )
         raw_p_values.append(p_value)
+        t_qualify_total += time.perf_counter() - t_qf
     q_values = _by_q_values(np.asarray(raw_p_values, dtype=np.float64))
     final_evidence: list[SymbolStrategyEvidence] = []
     for idx, evidence in enumerate(evidence_list):
@@ -568,11 +583,19 @@ def compute_symbol_strategy_evidence(
                 diagnostic_flags=tuple(diag_flags),
             )
         )
-    # 진단: registry 공집합 경고
     qualified_count = sum(
         1 for ev in final_evidence
         if ev.hard_eligible and ev.quality_weight > 0.0
     )
+    t_elapsed = time.perf_counter() - t_core
+    logger.log(
+        PERF,
+        "[SIGNAL-EVIDENCE] n_pairs=%d n_qualified=%d "
+        "total=%.4fs prep=%.4fs stats=%.4fs qualify=%.4fs",
+        len(evidence_list), qualified_count,
+        t_elapsed, t_prep_total, t_stats_total, t_qualify_total,
+    )
+    # 진단: registry 공집합 경고
     if qualified_count == 0 and final_evidence:
         reasons: Counter[str] = Counter(
             r for ev in final_evidence for r in ev.structural_reasons

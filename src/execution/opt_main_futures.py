@@ -61,6 +61,7 @@ from src.application.futures.optimization.universe_service import (
     validate_universe_quality,
 )
 from src.core.settings import BASE_DIR
+from src.core.utils.utils import PERF, setup_logger
 from src.domain.futures.optimization.observability.run_tracker import (
     build_joint_study_name,
     build_run_id,
@@ -90,7 +91,7 @@ from src.domain.futures.universe import UniverseSnapshot
 from src.domain.futures.universe.membership import inject_membership_masks_into_maps
 from src.domain.futures.universe.storage import run_historical_sync
 
-_logger = logging.getLogger("opt_main_futures")
+_logger = setup_logger("opt_main_futures", write_file=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -470,7 +471,7 @@ def _run_universe_stage(
         force_rebuild=run_config.refresh_universe,
         l2_start=layered_window.l2_start if layered_window is not None else None,
     )
-    _logger.debug(
+    _logger.log(PERF, 
         "[perf-universe] discover_universe_timeline took %.4fs",
         time.perf_counter() - t_discover,
     )
@@ -483,7 +484,7 @@ def _run_universe_stage(
         tf=run_config.timeframe,
     ):
         raise RuntimeError("universe_quality_rejected")
-    _logger.debug(
+    _logger.log(PERF, 
         "[perf-universe] validate_universe_quality took %.4fs",
         time.perf_counter() - t_quality,
     )
@@ -550,7 +551,7 @@ def _run_data_stage(
         requested_symbols_count=len(load_symbols),
         scope_name=scope_name,
     )
-    _logger.debug(
+    _logger.log(PERF, 
         "[perf-data] load_futures_data_maps_for_symbols took %.4fs",
         time.perf_counter() - t_load,
     )
@@ -573,7 +574,7 @@ def _run_data_stage(
             warmup_bars_required=warmup_bars_required,
             inference_timeline=inference_timeline or None,
         )
-        _logger.debug(
+        _logger.log(PERF, 
             "[perf-data] inject_membership_masks_into_maps took %.4fs",
             time.perf_counter() - t_inject,
         )
@@ -759,14 +760,13 @@ def _run_tiered_l2_study(
         layer2_constraints_from_trial,
         objective_l2_growth,
     )
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
     from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2StudyResult
     from src.domain.futures.strategy.tiered_workflow.selection import (
         _layer2_experiment_key,
         select_layer2_champion,
     )
     from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
-
-    from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
     
     l2_sim_cache = build_l2_simulation_cache(aligned, signal_batch, tf)
 
@@ -976,7 +976,7 @@ def _run_strategy_stage(
 
     def _emit_strategy_profile() -> None:
         profile = _runtime_breakdown(time.perf_counter() - t_strategy_stage, **strategy_steps)
-        _logger.debug(
+        _logger.log(PERF, 
             (
                 "[STRATEGY-PROF] total=%.4fs map_pick=%.4fs metadata=%.4fs bridge=%.4fs "
                 "report=%.4fs merge=%.4fs evaluation=%.4fs accounted=%.4fs unaccounted=%.4fs"
@@ -1149,7 +1149,13 @@ def _run_strategy_stage(
                 target_phase="l1",
             )
             if not l1_res.gate_passed:
-                return None  # L1 BLOCKED → 조기 종료
+                _logger.info("[TIERED] L1 BLOCKED — gate_passed=False")
+                return None
+
+            _recognized_multilayer = {"l2", "l3"}
+            if run_config.phase not in _recognized_multilayer:
+                _logger.info("[TIERED] Phase=%s — stopping after L1 (not a multilayer phase)", run_config.phase)
+                return l1_res
 
             # ── Step B: L2 Optimization Header ──────────────────────────────
             _logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
@@ -1199,8 +1205,8 @@ def _run_strategy_stage(
                 final_reason = l2_study_result.blocker_reason or getattr(l2_final, "blocker_reason", "unknown")
                 return RunnerResult(exit_code=1, reason=f"layer2_blocked:{final_reason}")
             
-            # Tiered Pipeline이 L3까지 수행했으므로 여기서 종료 (레거시 ML 단계 스킵)
-            if run_config.phase in ("alo", "full", "l3"):
+            # Tiered Pipeline이 L3까지 수행했으므로 여기서 종료
+            if run_config.phase == "l3":
                 return RunnerResult(exit_code=0, reason="tiered_pipeline_completed")
 
             return None  # Phase D allocation 스킵 (Tiered가 대체)
@@ -1366,7 +1372,7 @@ def _run_strategy_stage(
         data_stage.valid_symbols, run_config.timeframe,
     )
     strategy_steps["merge"] = time.perf_counter() - t_merge_start
-    _logger.debug(
+    _logger.log(PERF, 
         "[PROFILE][STAGE] merge_candidate_output_into_is_and_oos took %.4fs",
         strategy_steps["merge"],
     )
@@ -1689,7 +1695,7 @@ def _run_optimization_stage(
     
     precompute_profile = getattr(opt_res.base_ctx, "precompute_profile", None)
     if isinstance(precompute_profile, dict):
-        _logger.debug(
+        _logger.log(PERF, 
             (
                 "[RUN_PROF] step=ml_precompute total=%.2fs align=%.2fs "
                 "covariance=%.2fs awf_refit=%.2fs calibrator=%.2fs "
@@ -2009,7 +2015,7 @@ def run_pipeline(
         resume=resume,
     )
     _logger.debug("<< OPTIMIZE: %.2fs", time.perf_counter() - t_opt_stage)
-    _logger.debug(
+    _logger.log(PERF, 
         "<< PIPELINE_TOTAL: %.2fs",
         time.perf_counter() - pipeline_t0,
     )
