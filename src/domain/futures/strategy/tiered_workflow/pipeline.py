@@ -37,6 +37,7 @@ from src.domain.futures.strategy.tiered_logging import (
     format_layer2_table,
     format_layer3_table,
     format_layer_header,
+    format_layer_universe_audit_table,
 )
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     _run_awf_simulation,
@@ -58,6 +59,7 @@ from src.domain.futures.strategy.tiered_workflow.diagnostics import (
     _fold_eligible_symbol_mask,
     _is_trained_fold_output,
     _log_fold_regime_analysis,
+    build_layer_universe_audit,
     compute_per_symbol_ic,
     compute_per_symbol_realized_stats,
     compute_prediction_decomposition_diag,
@@ -986,7 +988,12 @@ def run_l1_nested_swf(
         seed=seed,
     )
     if verbose:
-        logger.info(format_layer1_outer_fold_table(tuple(outer_reports)))
+        logger.info(
+            format_layer1_outer_fold_table(
+                tuple(outer_reports),
+                datetimes=aligned.datetimes,
+            )
+        )
         logger.info(format_layer1_gate_table(gate_report))
     deployment_registry: QualifiedSignalRegistry | None = None
     inference_artifact: Layer1InferenceArtifact | None = None
@@ -1323,6 +1330,8 @@ def run_l2_awf(
             "mdd": _fd.mdd if _fd is not None else 0.0,
             "cagr": _fd.cagr if _fd is not None else 0.0,
             "pass": fold_compound_pass[i] is True,
+            "symbols": tuple(sim.fold_selected_symbols[i]) if i < len(sim.fold_selected_symbols) else (),
+            "symbol_count": len(sim.fold_selected_symbols[i]) if i < len(sim.fold_selected_symbols) else 0,
             "period": (
                 f"{_idx_to_date_label(fold.oos_start)} ~ "
                 f"{_idx_to_date_label(max(fold.oos_end - 1, fold.oos_start))}"
@@ -1607,19 +1616,31 @@ def run_tiered_pipeline(
 
     if not l1.gate_passed:
         if verbose:
-            logger.info(">> LAYER 1 RESULT: [BLOCKED] -> gate_passed=False")
+            logger.info(">> LAYER 1: BLOCKED -> gate_passed=False")
         return (l1, None, None)
 
     if target_phase == "l1":
         if verbose:
-            logger.info(">> LAYER 1 RESULT: [PASS] -> Target phase L1 reached. Stopping pipeline.")
+            logger.info(
+                format_layer_universe_audit_table(
+                    (
+                        build_layer_universe_audit(
+                            aligned=aligned,
+                            layer="L1",
+                            start_idx=l1_start_bars,
+                            end_idx=l1_end_bars,
+                        ),
+                    )
+                )
+            )
+            logger.info("\n>> LAYER 1: PASS -> Target phase L1 reached. Stopping pipeline.")
         return (l1, None, None)
 
-    if verbose and l1_result_override is None:
-        logger.info(">> LAYER 1 RESULT: [PASS] -> Proceeding to Layer 2.")
+    if verbose:
+        logger.info("\n>> LAYER 1: PASS -> Proceeding to Layer 2.")
 
     # ─── Layer 2: AWF Portfolio Optimization ─────────────────────────────────
-    if verbose and l1_result_override is None:
+    if verbose:
         logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
     t_l2 = time.perf_counter()
     ho_start_idx_l2 = _date_to_idx(aligned.datetimes, window.holdout_start)
@@ -1682,13 +1703,27 @@ def run_tiered_pipeline(
     )
     logger.debug("[perf-tiered] run_tiered_pipeline Layer 2 total took %.4fs", time.perf_counter() - t_l2)
 
+    if verbose:
+        logger.info(
+            format_layer_universe_audit_table(
+                (
+                    build_layer_universe_audit(
+                        aligned=aligned,
+                        layer="L2",
+                        start_idx=l1_end_bars,
+                        end_idx=ho_start_idx_l2,
+                    ),
+                )
+            )
+        )
+
     if not l2.gate_passed:
         if verbose:
-            logger.info(">> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False")
+            logger.info(">> LAYER 2: BLOCKED -> gate_passed=False")
         return (l1, l2, None)
 
     if verbose:
-        logger.info(">> LAYER 2 RESULT: [PASS] -> Proceeding to Final Holdout.")
+        logger.info(">> LAYER 2: PASS -> Proceeding to Final Holdout.")
 
     if target_phase == "l2":
         if verbose:
@@ -1727,6 +1762,19 @@ def run_tiered_pipeline(
                 )
             )
         return (l1, l2, l3)
+    if verbose:
+        logger.info(
+            format_layer_universe_audit_table(
+                (
+                    build_layer_universe_audit(
+                        aligned=aligned,
+                        layer="L3",
+                        start_idx=ho_start_idx,
+                        end_idx=ho_end_idx,
+                    ),
+                )
+            )
+        )
     try:
         l3_signal_batch = predict_layer1_signals(
             artifact=l1.inference_artifact,
