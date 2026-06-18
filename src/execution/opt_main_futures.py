@@ -1137,6 +1137,7 @@ def _run_strategy_stage(
             assert tiered_window is not None, "tiered_window is missing under use_tiered option"
 
             # ── Step A: L1 only ──────────────────────────────────────────────
+            _recognized_multilayer = {"l2", "l3"}
             l1_res, _, _ = run_tiered_pipeline(
                 labeled_events=labeled_tiered,
                 aligned=aligned_tiered,
@@ -1147,15 +1148,16 @@ def _run_strategy_stage(
                 caps=tiered_caps,
                 tf=run_config.timeframe,
                 target_phase="l1",
+                verbose=True,
             )
             if not l1_res.gate_passed:
                 _logger.info("[TIERED] L1 BLOCKED — gate_passed=False")
                 return None
-
-            _recognized_multilayer = {"l2", "l3"}
             if run_config.phase not in _recognized_multilayer:
                 _logger.info("[TIERED] Phase=%s — stopping after L1 (not a multilayer phase)", run_config.phase)
                 return l1_res
+
+            _logger.info("\n>> LAYER 1: PASS -> Proceeding to Layer 2.")
 
             # ── Step B: L2 Optimization Header ──────────────────────────────
             _logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
