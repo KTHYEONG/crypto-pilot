@@ -7,6 +7,11 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-18 L2 Sortino-Shape 재설계 — D1(목적함수) + D2(vol복원) + D3(fit-leg) + D4(DSR→PSR)
+- **Delta:** (D1) Optuna 목적 `growth_lcb` → `Sortino_HAC_unit`(scale-invariant). 게이트 3단: Sortino≥1.5(1차) + Sharpe≥0.7(sanity floor, 기존 1.0 이완) + Calmar≥0.5(복리앵커). `metrics.py::_sortino_hac_unit` 신설(HAC downside dev). (D2) `vol_target=None→1.0` 강제 — RC-1 cascade 3종(vol-targeting·risk_budget_floor·adaptive_breadth) 재활성. (D3) AWF fit-leg 수익률 수집(`_AwfSimResult.fit_rets_hybrid`) → `_apply_deployment_to_params`에서 OOS 대리 대신 fit-leg 우선 소비. `l2_deploy_l_hard_cap` 4.0→20.0(MDD/CVaR가 실제 binding). (D4) `dsr_floor` BLOCKER 제거 → `psr_floor`/`sortino_floor`/`calmar_floor` 신설. DSR = diagnostic 잔존(계산·로깅 유지). `L2_ALLOC_SPACE_V9` = V7 구조 복원.
+- **Rationale:** RC-1: V8가 `max_ann_vol` 제거 → `vol_target=None` silent cascade. RC-2: scale-dep `growth_lcb`를 고정 kelly=0.25에서 최적화 → objective 표면 평탄 → shape 노이즈 선택 → Sharpe 0.839. RC-3: DSR pool = 동일 신호셋 파라미터 섭동(독립 가설 불성립) → 자기참조 → DSR≈0.5 고정 → V8 절단을 강제. Crypto 비대칭 수익 → Sortino(하방전용)가 Sharpe보다 shape 측정 타당. Sharpe floor(≥0.7)는 하방 표본 희소 시 Sortino 인플레이션 방어.
+- **Edge Cases:** `l_hard_cap=20.0` + fit-leg 저변동 → L*가 MDD binding에서 결정. fit_rets_hybrid 빈 경우 OOS fallback 유지. Calmar 게이트 불가도달 구간 없음(BLOCKER 순서: calmar_floor < mdd_abs, 수치 조합으로 테스트 확인).
+
 ## 2026-06-17 L2 DSR-First 구조 개혁 — Fix A(결정론적 배치) + Fix B(목적함수 정렬) + Fix C(DSR pool 정직화)
 - **Delta:** (A) `risk_deployment.py` 신설: `calibrate_deployment_leverage(fit_rets, mdd_cap, l_hard_cap=4.0)` 이분탐색 → champion kelly/vol 사후 스케일링(L*≤4). (B) `compute_v3_score`에 `disable_risk_penalty=True` 추가 — L2 objective에서 MDD/CVaR 소프트 패널티 제거. champion 선택을 `argmax(dsr, cagr)`로 변경(이전: 첫 gate-pass break). (C) `L2_ALLOC_SPACE_V8`(V7 − kelly − max_ann_vol, 9-param). DSR pool = feasible-only → benchmark 하락 → DSR 0.270→0.502 관측.
 - **Rationale:** 진단: CW1=목적함수↔게이트 불일치(MDD/CVaR penalty가 under-deployment 보상), CW2=DSR pool 오염(infeasible trials의 Sharpe가 벤치마크 인플레이션), CW3=kelly/vol이 보수적 목적함수에 공동 종속. DSR/Sharpe는 L 스케일에 불변 → CAGR과 DSR 문제 분리 가능 → Fix A로 CAGR, Fix B+C로 DSR 독립 공략.
