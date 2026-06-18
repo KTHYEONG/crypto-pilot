@@ -34,7 +34,7 @@ dependencies:
     - docs/architecture/signal.md
     - docs/architecture/regime.md
     - docs/architecture/ML.md
-last_verified: 2026-06-17
+last_verified: 2026-06-18
 ---
 
 # 1. Purpose
@@ -55,33 +55,39 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
 - **Kelly Sizing**:
   - Symmetric $q_{10}, q_{90}$ estimation for volatility: $\sigma_R = (q_{90} - q_{10})/2.563$.
   - Fractional Diagonal Kelly: $w_i \propto f_k \cdot \mu_i / \sigma_i^2$ subject to friction masks.
+  - `vol_target` **항상 활성**: `max_ann_vol=None` 시 unit-vol 정규화(`vol_target=1.0`) 강제 → `risk_budget_floor`·`adaptive_breadth` 재활성 보장(RC-1 cascade 방지).
 - **Edge-Conditional Throttle**: Time-varying conviction multiplier $m_t \in [0,1]$ applied based on gross-weighted net-of-cost edge.
 - **Active Deployment Controls**:
   - `deploy_cost_safety_mult` isolates deployment friction from gross-edge conversion.
   - `edge_throttle_min_active_mult` preserves a non-zero floor for positive edge books.
   - `risk_budget_floor_ratio` scales under-deployed books toward the target-vol floor without creating new support.
   - `risk_budget_max_scale` caps the upward scaling applied by the floor logic.
-- **Search Space V8 (Fix C)**:
-  - `kelly_fraction` / `max_ann_vol` 제거 — Phase B 결정론적 레버리지 캘리브레이션으로 대체.
-  - Signal 차원 9개: `K_RANK`, `REBALANCE_BARS`, `CS_Z_SCORE_THRESHOLD`, `deploy_cost_safety_mult`, `edge_throttle_min_active_mult`, `edge_ref_bps`, `edge_throttle_gamma`, `risk_budget_floor_ratio`, `risk_budget_max_scale`.
-  - `L2_ALLOC_SPACE` aliases `L2_ALLOC_SPACE_V8`. N_eff↓·DSR 벤치마크 압력 완화 효과.
-- **Phase B: 결정론적 리스크 배치 (`risk_deployment.py`)**:
-  - Champion 선택 완료 후, `calibrate_deployment_leverage(fit_rets, mdd_cap, mdd_margin, l_hard_cap=4.0)` → 이분탐색으로 L* 산출.
-  - `L* = clip(min(L_mdd, L_cvar), 1.0, l_hard_cap)`. `kelly_fraction *= L*`, `max_ann_vol *= L*`.
-  - DSR/Sharpe는 L 스케일에 불변(mean·std 동비율 변화) → CAGR만 증폭, DSR 보존.
-  - 현재 구현: `binding=hard_cap`(L*=4.0) — `mdd_margin=0.30` 안전여유로 OOS-fit 분포 이격 완충.
+- **Search Space V9**:
+  - 9 free dims: `K_RANK`, `REBALANCE_BARS`, `CS_Z_SCORE_THRESHOLD`, `deploy_cost_safety_mult`, `edge_throttle_min_active_mult`, `edge_ref_bps`, `edge_throttle_gamma`, `risk_budget_floor_ratio`, `risk_budget_max_scale`.
+  - `L2_ALLOC_SPACE` aliases `L2_ALLOC_SPACE_V9`. `kelly_fraction`·`max_ann_vol`는 shape 정규화로 흡수(Optuna 탐색 불필요).
+- **Optuna Objective — Scale-Invariant Sortino_HAC (D1)**:
+  - $J = \text{Sortino\_HAC\_unit} - \lambda_w \cdot \max(0, \tau_{wf} - \text{worst\_fold\_Sortino}) - \lambda_d \cdot \text{downside\_dispersion}$
+  - `Sortino_HAC_unit` = unit-vol 정규화 book의 HAC downside deviation 기반 Sortino. 레버리지 불변 → 사후 L*와 정합(RC-2 해소).
+  - `growth_lcb`는 **diagnostic**으로 강등(목적에서 제외).
+- **Phase B: fit-leg 기반 결정론적 리스크 배치 (`risk_deployment.py`, D3)**:
+  - AWF가 `fit_rets_hybrid`(fit-leg 수익률) 노출 → `calibrate_deployment_leverage(fit_rets=fit_rets_hybrid, l_hard_cap=20.0)` → L* 산출.
+  - `L* = clip(min(L_mdd, L_cvar), 1.0, l_hard_cap=20.0)`. kelly/vol 사후 스케일링.
+  - Sortino/Sharpe는 L 스케일에 불변 → CAGR만 증폭.
+  - fit-leg 미노출 시 OOS 대리(fallback) + `mdd_margin=0.30` 완충. `binding=hard_cap` 시 look-ahead 없음.
 - **Dynamic Scaling**: Volatility targeting ($\sigma_{target} / \sigma_{port}$) combined with regime-specific gross/net caps. Includes double-scaling guards.
-- **L2 Gate Contract**:
+- **L2 Gate Contract (D1/D4)**:
   - `Layer2GateEvaluation.optuna_constraint_values` is the 8-value safety vector fed to `TPESampler(constraints_func=...)`.
   - `Layer2GateEvaluation.promotion_constraint_values` is the full replay gate vector used for champion promotion.
   - Optuna feasibility covers deployment/leak/risk/coverage/trade floors only.
-  - Final promotion gate additionally checks `CAGR`, `Sharpe`, `Sortino`, `MAR`, `growth_lcb`, `uplift`, and `DSR`.
+  - Final promotion gate (3단): **Sortino ≥ 1.5** (1차) + **Sharpe ≥ 0.7** (sanity floor; 하방 표본 희소 시 Sortino 인플레이션 방어) + **Calmar ≥ 0.5** (복리 앵커) + `CAGR`, `MAR`, `PSR`, `growth_lcb`, `uplift`.
   - `CAGR >= 0.30` remains a hard promotion gate and is not embedded as an Optuna objective bonus.
+- **DSR Role (D4)**:
+  - **L2**: `dsr_floor` BLOCKER 제거 → **PSR(N=1) gate**(`psr_floor ≥ 0.90`) 신설. DSR = diagnostic 잔존(계산·로깅·스코어카드, 차단 권한 없음).
+  - **DSR 근거**: L2 pool = 동일 신호셋 파라미터 섭동 → 독립 가설 불성립 → 자기참조 → DSR≈0.5 고정(실엣지 무관). 진짜 다중검정 방어는 L1 DSR 게이트 + L3 multi-seed stability.
+  - **DSR 벤치마크**: Bailey-LdP null SR=0 정론 적용 — `+mean(pool)` 항 제거(`std(pool)·√(2·ln N_eff)` only).
 - **OOS Fraction**: `ml_fit_fraction=0.55` + `ml_calibration_fraction=0.15` → **OOS 30%** (fold당 ~27일). 구조적 과적합 방지 목적.
-- **Replay Championing & DSR Pool (Fix B+C)**:
-  - `select_layer2_champion`이 frontier 전수를 replay하여 gate-pass 후보를 **전수 수집** → `argmax(dsr, cagr)` 선택 (이전: 첫 gate-pass에서 break).
-  - **DSR pool = feasible trials만** (Fix C): `completed_trial_sharpes` 및 `n_trials_eff` 엔트로피를 feasible subset으로 제한 → 벤치마크 압력 하락 → DSR 상승. (이전: 전체 complete trials → 0.270, 이후: feasible-only → 0.502 관측).
-  - **DSR 불변성 보장**: DSR pool 필터링은 선택된 Sharpe(SR_obs)를 변경하지 않고 벤치마크만 낮춤 → 수학적으로 엄밀.
+- **Replay Championing**:
+  - `select_layer2_champion`이 frontier 전수를 replay하여 gate-pass 후보를 **전수 수집** → `argmax(sortino_hybrid, cagr)` 선택 (이전: argmax(dsr, cagr) — D4 변경).
 
 **Layer 3: Frozen Holdout**
 - Tests the L2 champion on an untouched WFFold.
