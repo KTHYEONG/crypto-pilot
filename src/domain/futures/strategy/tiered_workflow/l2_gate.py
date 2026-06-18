@@ -22,6 +22,7 @@ _PROMOTION_BLOCKERS: tuple[str, ...] = (
     "mdd_abs",
     "cvar_95",
     "fold",
+    "recent_fold",
     "active_blocks",
     "friction",
     "growth_lcb",
@@ -54,6 +55,8 @@ def evaluate_layer2_gate(
     growth_lcb_baseline: float,
     dsr_hybrid: float | None,
     psr_hybrid: float | None = None,
+    recent_fold_passed: bool | None = None,
+    recent_fold_sharpe: float | None = None,
     config: Layer2AllocationConfig = _DEFAULT_L2_CONFIG,
 ) -> Layer2GateEvaluation:
     """Build Optuna safety constraints and final L2 promotion gate diagnostics.
@@ -102,6 +105,15 @@ def evaluate_layer2_gate(
         if psr_hybrid is None
         else _finite_or_fail(float(config.l2_min_psr) - float(psr_hybrid))
     )
+    recent_fold_constraint = -1.0
+    if config.l2_require_recent_fold_pass:
+        if recent_fold_passed is False:
+            recent_fold_constraint = 1.0
+        elif recent_fold_sharpe is not None:
+            recent_fold_constraint = max(
+                recent_fold_constraint,
+                _finite_or_fail(float(config.l2_min_recent_fold_sharpe) - float(recent_fold_sharpe)),
+            )
 
     promotion_constraint_values = (
         1.0 if deployment_failed else -1.0,
@@ -114,6 +126,7 @@ def evaluate_layer2_gate(
         _finite_or_fail(mdd_hybrid - float(config.l2_max_mdd_abs)),
         _finite_or_fail(cvar_95_hybrid - float(config.l2_max_cvar_95)),
         _finite_or_fail(float(config.l2_min_fold_pass_ratio) - fold_pass_ratio),
+        recent_fold_constraint,
         _finite_or_fail(float(int(config.l2_min_active_blocks) - active_block_count)),
         _finite_or_fail(float(config.l2_min_friction_pass) - friction_pass_pct),
         _finite_or_fail(

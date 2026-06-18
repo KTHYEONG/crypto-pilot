@@ -214,6 +214,10 @@ class Layer2Result:
         gate_passed: L2 통과 여부.
         blocker_reason: 실패 원인 키. "" = 통과. 값: no_deployment/low_trades/cagr/sharpe_abs/
             sortino/mar/mdd_abs/cvar_95/fold/active_blocks/friction/growth_lcb/uplift.
+        recent_fold_passed: 최신 non-empty fold deployed CAGR 양수 여부.
+        recent_fold_sharpe: 최신 non-empty fold Sharpe.
+        recent_fold_cagr: 최신 non-empty fold deployed CAGR.
+        recent_fold_mdd: 최신 non-empty fold deployed MDD.
     """
 
     selected_last: frozenset[str]
@@ -250,6 +254,10 @@ class Layer2Result:
     total_pnl_pct: float = 0.0
     trade_count: int = 0
     risk_utilization: float = 0.0
+    recent_fold_passed: bool | None = None
+    recent_fold_sharpe: float = 0.0
+    recent_fold_cagr: float = 0.0
+    recent_fold_mdd: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -310,6 +318,8 @@ class Layer2AllocationConfig:
     l2_deploy_l_hard_cap: float = 20.0
     # 거래소 실행가능 notional 레버리지 상한 (None=무제한). Binance perp 기본 10x.
     l2_max_exchange_leverage: float | None = 10.0
+    l2_require_recent_fold_pass: bool = True
+    l2_min_recent_fold_sharpe: float = 0.0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -378,6 +388,17 @@ class Layer2AllocationConfig:
             0.0,
             1.0,
         )
+        raw_exchange_cap = params.get("l2_max_exchange_leverage", 10.0)
+        if "l2_max_exchange_leverage" not in params:
+            l2_max_exchange_leverage: float | None = 10.0
+        elif raw_exchange_cap is None:
+            l2_max_exchange_leverage = None
+        else:
+            l2_max_exchange_leverage = cls._validate_range(
+                "l2_max_exchange_leverage",
+                cls._as_float(raw_exchange_cap, 10.0),
+                0.0,
+            )
         l2_objective_risk_util_target = cls._validate_range(
             "l2_objective_risk_util_target",
             cls._as_float(params.get("l2_objective_risk_util_target", 0.50), 0.50),
@@ -462,10 +483,11 @@ class Layer2AllocationConfig:
             l2_deploy_mdd_margin=cls._as_float(params.get("l2_deploy_mdd_margin", 0.30), 0.30),
             l2_deploy_cvar_margin=cls._as_float(params.get("l2_deploy_cvar_margin", 0.20), 0.20),
             l2_deploy_l_hard_cap=cls._as_float(params.get("l2_deploy_l_hard_cap", 20.0), 20.0),
-            l2_max_exchange_leverage=(
-                cls._as_float(params["l2_max_exchange_leverage"], 10.0)
-                if isinstance(params.get("l2_max_exchange_leverage"), (int, float))
-                else None
+            l2_max_exchange_leverage=l2_max_exchange_leverage,
+            l2_require_recent_fold_pass=bool(params.get("l2_require_recent_fold_pass", True)),
+            l2_min_recent_fold_sharpe=cls._as_float(
+                params.get("l2_min_recent_fold_sharpe", 0.0),
+                0.0,
             ),
         )
 
@@ -563,6 +585,11 @@ class Layer3Result:
     cvar95: float = 0.0
     avg_gross_exposure: float = 0.0
     deploy_leverage: float = 1.0
+    min_trades: int = 10
+    max_mdd_abs: float = 0.35
+    min_sharpe: float = 0.0
+    min_sortino: float = 0.0
+    max_cvar95: float = 0.06
 
 
 @dataclass(slots=True, frozen=True)

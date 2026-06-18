@@ -441,6 +441,8 @@ def format_layer1_deployment_registry_table(registry: Any) -> str:
 def format_layer2_table(
     r: Any,
     *,
+    evaluation_start: str | None = None,
+    evaluation_end: str | None = None,
     awf_folds: list[dict[str, Any]] | None = None,
     topk_selection: list[dict[str, Any]] | None = None,
     min_dsr: float = 0.60,
@@ -528,8 +530,12 @@ def format_layer2_table(
     robust_ok = fold_ok and trades_ok and friction_ok
     integrity_ok = dsr_ok
 
+    header = "● [LAYER 2 PORTFOLIO SCORECARD]"
+    if evaluation_start and evaluation_end:
+        header = f"{header} ({evaluation_start} ~ {evaluation_end})"
+
     lines: list[str] = [
-        "● [LAYER 2 PORTFOLIO SCORECARD]",
+        header,
         sep,
         f"  STATUS  : {status_icon} {result_str}",
         "",
@@ -586,11 +592,14 @@ def format_layer2_table(
             mdd_str = "nan%" if not math.isfinite(mdd_v) else _pct(mdd_v)
             cagr_v = af.get("cagr", float("nan"))
             cagr_str = "nan%" if not math.isfinite(cagr_v) else f"{cagr_v:+.1%}"
+            period_str = af.get("period")
 
             line = (
                 f"  {prefix} Fold #{af['fold']} : {pass_icon} Sharpe: {sharpe_str:>6} | "
                 f"CAGR: {cagr_str:>8} | MDD: {mdd_str:>6} | Status: {'PASS' if af.get('pass') else 'FAIL'}"
             )
+            if period_str:
+                line = f"{line} | Period: {period_str}"
             lines.append(line)
 
     if topk_selection:
@@ -661,17 +670,10 @@ def format_layer3_table(
     def _status(passed: bool) -> str:
         return "✅" if passed else "❌"
 
-    def _mar_str(mar_val: float, cagr_val: float) -> str:
-        if not math.isfinite(mar_val) or cagr_val < 0.0:
-            return "n/a(loss)"
-        return format(mar_val, ".3f")
-
     status, blocker = _resolve_status(r)
     
     # Header & Initial summary
     sep_main = "──────────────────────────────────────────────────────────────────────────────"
-    sep_sub = "  ──────────────────────────────────────────────────────────────────────────"
-    
     final_icon = "✅" if status == "PASS" else "❌"
     final_label = "DEPLOY-READY" if status == "PASS" else status
     final_status = f"{final_label} (Reason: {blocker})" if blocker else final_label
@@ -696,7 +698,7 @@ def format_layer3_table(
     cagr_h = float(getattr(r, "cagr", 0.0))
     mdd_h = float(getattr(r, "mdd", 0.0))
     sharpe_h = float(getattr(r, "sharpe", 0.0))
-    mar_h = float(getattr(r, "mar", 0.0))
+    sharpe_b = float(getattr(r, "sharpe_baseline", 0.0))
 
     total_return = float(getattr(r, "total_return", 0.0))
     equity_multiple = float(getattr(r, "equity_multiple", 1.0))
@@ -705,11 +707,15 @@ def format_layer3_table(
     avg_gross_exposure = float(getattr(r, "avg_gross_exposure", 0.0))
     n_trades = int(getattr(r, "n_trades", 0))
     min_trades = int(getattr(r, "min_trades", 10))
+    max_mdd_abs = float(getattr(r, "max_mdd_abs", 0.35))
+    min_sharpe = float(getattr(r, "min_sharpe", 0.0))
+    min_sortino = float(getattr(r, "min_sortino", 0.0))
+    max_cvar95 = float(getattr(r, "max_cvar95", 0.06))
 
     # Category status determination (Absolute gates)
     growth_ok = (total_return > 0.0)
-    efficiency_ok = math.isfinite(sharpe_h)
-    risk_ok = (mdd_h <= 0.35)  # Global L3 absolute MDD gate
+    efficiency_ok = sharpe_h >= min_sharpe and sortino_h >= min_sortino
+    risk_ok = mdd_h <= max_mdd_abs and cvar95 <= max_cvar95
     robust_ok = (n_trades >= min_trades)
 
     lines.extend([
@@ -721,18 +727,18 @@ def format_layer3_table(
         ),
         (
             f"  {_status(efficiency_ok)} [EFFICIENCY] "
-            f"Sharpe: {_f(sharpe_h)} | "
-            f"Sortino: {_f(sortino_h)} | "
-            f"Calmar: {_mar_str(mar_h, cagr_h)}"
+            f"Sharpe: {_f(sharpe_h)} (>={min_sharpe:.3f}) | "
+            f"Sortino: {_f(sortino_h)} (>={min_sortino:.3f}) | "
+            f"Baseline Sharpe: {_f(sharpe_b)}"
         ),
         (
             f"  {_status(risk_ok)} [RISK      ] "
-            f"MDD: {_pct(mdd_h)} (<= 35.0%) | "
-            f"CVaR95: {_pct(cvar95)} | "
+            f"MDD: {_pct(mdd_h)} (<= {max_mdd_abs:.1%}) | "
+            f"CVaR95: {_pct(cvar95)} (<= {max_cvar95:.1%}) | "
             f"Exposure: {avg_gross_exposure:.1f}x"
         ),
         (
-            f"  {_status(robust_ok)} [ROBUST    ] "
+            f"  {_status(robust_ok)} [DEPLOY-READY] "
             f"Trades: {n_trades} (>= {min_trades})"
         ),
         sep_main,
