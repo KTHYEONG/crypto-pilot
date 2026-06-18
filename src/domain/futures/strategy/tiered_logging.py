@@ -582,12 +582,14 @@ def format_layer2_table(
             pass_icon = "✅" if af.get("pass") else "❌"
             sharpe_v = af["sharpe"]
             sharpe_str = "nan" if not math.isfinite(sharpe_v) else f"{sharpe_v:.3f}"
-            mdd_v = af["mdd"]
+            mdd_v = af.get("mdd", float("nan"))
             mdd_str = "nan%" if not math.isfinite(mdd_v) else _pct(mdd_v)
-            
+            cagr_v = af.get("cagr", float("nan"))
+            cagr_str = "nan%" if not math.isfinite(cagr_v) else f"{cagr_v:+.1%}"
+
             line = (
                 f"  {prefix} Fold #{af['fold']} : {pass_icon} Sharpe: {sharpe_str:>6} | "
-                f"MDD: {mdd_str:>7} | Status: {'PASS' if af.get('pass') else 'FAIL'}"
+                f"CAGR: {cagr_str:>8} | MDD: {mdd_str:>6} | Status: {'PASS' if af.get('pass') else 'FAIL'}"
             )
             lines.append(line)
 
