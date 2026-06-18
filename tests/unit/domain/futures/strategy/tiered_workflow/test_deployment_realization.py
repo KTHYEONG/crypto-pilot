@@ -9,6 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
 from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
     apply_deployment,
     calibrate_deployment_leverage,
@@ -55,9 +56,6 @@ class TestScenario1RealizationConsistency:
         rets = _make_unit_vol_rets(n=2190, mu_bps=3.0, sigma_bps=16.0, seed=42)
         l_star = 10.0
         unit_rets_arr = np.asarray(rets, dtype=np.float64)
-        equity_unit = np.cumprod(1.0 + unit_rets_arr)
-        peak_unit = np.maximum.accumulate(equity_unit)
-        unit_mdd = float(np.max((peak_unit - equity_unit) / np.maximum(peak_unit, 1e-12)))
 
         # Act
         dep = apply_deployment(rets=rets, leverage=l_star, bars_per_year=BARS_PER_YEAR)
@@ -195,6 +193,22 @@ class TestScenario3ExchangeCapBinding:
         # Assert
         assert binding != "exchange_cap"
         assert l_star == pytest.approx(20.0, abs=1.0)  # hard_cap binding 예상
+
+
+class TestLayer2AllocationConfigParsing:
+    """Layer2AllocationConfig 기본 exchange cap 파싱 정합."""
+
+    def test_default_exchange_cap_preserved_when_key_absent(self) -> None:
+        """빈 mapping이면 기본 거래소 cap 10배가 유지되어야 한다."""
+        cfg = Layer2AllocationConfig.from_mapping({})
+
+        assert cfg.l2_max_exchange_leverage == pytest.approx(10.0)
+
+    def test_explicit_none_exchange_cap_disables_cap(self) -> None:
+        """명시적 None 입력은 cap 비활성화로 해석되어야 한다."""
+        cfg = Layer2AllocationConfig.from_mapping({"l2_max_exchange_leverage": None})
+
+        assert cfg.l2_max_exchange_leverage is None
 
 
 # ---------------------------------------------------------------------------
