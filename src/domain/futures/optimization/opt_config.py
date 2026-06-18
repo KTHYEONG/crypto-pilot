@@ -585,7 +585,14 @@ L2_ALLOC_SPACE_V8: dict[str, dict[str, Any]] = {
     k: v for k, v in L2_ALLOC_SPACE_V7.items()
     if k not in {"kelly_fraction", "max_ann_vol"}
 }
-L2_ALLOC_SPACE = L2_ALLOC_SPACE_V8
+# V9: D2 vol-normalization 채택 — max_ann_vol=None → unit vol-target(1.0) 강제(awf_sim.py).
+# kelly/vol을 search에서 제거해도 RC-1 cascade가 해제되므로 search dim 무증가.
+# V7 대비 변경 없음 (V8와 동일 구조). vol_target은 shape 정규화로 흡수됨.
+L2_ALLOC_SPACE_V9: dict[str, dict[str, Any]] = {
+    k: v for k, v in L2_ALLOC_SPACE_V7.items()
+    if k not in {"kelly_fraction", "max_ann_vol"}
+}
+L2_ALLOC_SPACE = L2_ALLOC_SPACE_V9
 
 
 # ==============================================================================
