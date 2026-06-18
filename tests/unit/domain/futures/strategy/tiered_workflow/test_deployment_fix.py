@@ -339,7 +339,12 @@ class TestS6SelectionKnobC4:
             "l2_deploy_l_hard_cap": 20.0,
         }
 
-    def test_vol_target_and_gross_scaled_by_l_star(self) -> None:
+    def test_deploy_leverage_tracked_no_ceiling_injection(self) -> None:
+        """C4 변경: 천장 주입 제거 — l2_deploy_leverage 추적만, vol/gross 불변.
+
+        vol-targeting 하향전용(결함 #2) 확정으로 천장주입은 구조적 no-op.
+        realized_mode=return_scaling으로 전환: L*는 run_l2_awf에 직접 전달.
+        """
         from src.domain.futures.strategy.tiered_workflow.selection import (
             _apply_deployment_to_params,
         )
@@ -351,10 +356,11 @@ class TestS6SelectionKnobC4:
         # Act
         deployed = _apply_deployment_to_params(params, evaluation, tf="4h")
 
-        # Assert: vol * 12, gross * 12
-        vol_base = 1.0  # config.max_ann_vol=None → vol_base=1.0
-        assert deployed["max_ann_vol"] == pytest.approx(vol_base * 12.0, rel=1e-6)
-        assert deployed["gross_exposure_cap"] == pytest.approx(3.0 * 12.0, rel=1e-6)
+        # Assert: vol/gross 불변 (천장주입 없음)
+        assert "max_ann_vol" not in deployed  # 삽입되지 않아야 함
+        assert deployed.get("gross_exposure_cap", 3.0) == pytest.approx(3.0, rel=1e-6)
+        # 추적 필드 보존
+        assert deployed["l2_deploy_leverage"] == pytest.approx(12.0, rel=1e-6)
 
     def test_kelly_fraction_unchanged(self) -> None:
         """C4 핵심: kelly_fraction은 L*에 의해 변경되지 않아야 한다."""
