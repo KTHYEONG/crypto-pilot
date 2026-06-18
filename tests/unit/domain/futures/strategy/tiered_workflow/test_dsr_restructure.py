@@ -263,9 +263,9 @@ def test_apply_deployment_uses_evaluation_deploy_leverage() -> None:
 
     # Assert: kelly 불변
     assert result.get("kelly_fraction", 0.25) == pytest.approx(0.25, rel=1e-6)
-    # Assert: vol_target *= 12 (base=1.0), gross *= 12
-    assert result["max_ann_vol"] == pytest.approx(1.0 * 12.0, rel=1e-6)
-    assert result["gross_exposure_cap"] == pytest.approx(3.0 * 12.0, rel=1e-6)
+    # Assert: 천장 주입 없음 (realized_mode=return_scaling으로 변경 — 결함 #2 해소)
+    assert "max_ann_vol" not in result
+    assert result.get("gross_exposure_cap", 3.0) == pytest.approx(3.0, rel=1e-6)
     # Assert: 추적 필드
     assert result.get("l2_deploy_leverage") == pytest.approx(12.0, rel=1e-6)
 
