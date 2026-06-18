@@ -91,17 +91,14 @@ def calibrate_deployment_leverage(
     cvar_cap: float = 0.06,
     mdd_margin: float = 0.30,
     cvar_margin: float = 0.20,
-    l_hard_cap: float = 4.0,
+    l_hard_cap: float = 20.0,
 ) -> tuple[float, str]:
     """히스토리컬 수익률에서 배치 레버리지 L*를 결정론적으로 산출.
 
     Spec 설계: fit-leg 수익률로 L*를 산출하고 OOS leg에 적용(look-ahead 방지).
-    현재 구현 단순화: AWF가 fit-leg 수익률을 `Layer2TrialEvaluation`에 노출하지
-    않으므로 champion의 전체 OOS 경로를 대리 변수로 사용한다.
-    실질 look-ahead 위험 완화 근거:
-      - `l_hard_cap`(기본 4.0)이 L*를 상한 clip → 실거래에서 `binding=hard_cap`이면
-        OOS 데이터가 L* 결정에 영향 없음 (관측된 모든 run에서 `binding=hard_cap`).
-      - `mdd_margin=0.30` / `cvar_margin=0.20` 안전여유가 OOS-fit 분포 이격 완충.
+    fit-leg 수익률은 전략 unit-vol book의 실현 수익률이므로 MDD/CVaR 예산이
+    실제 binding이 된다 → l_hard_cap=20.0으로 완화해도 budget이 진짜 제약.
+    `mdd_margin=0.30` / `cvar_margin=0.20` 안전여유가 OOS-fit 분포 이격 완충.
 
     Args:
         fit_rets: 캘리브레이션용 per-bar simple return 배열 [T].

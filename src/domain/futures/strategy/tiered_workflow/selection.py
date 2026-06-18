@@ -23,9 +23,6 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     _bars_per_year_for_tf,
     _deflated_sharpe_probability,
 )
-from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
-    calibrate_deployment_leverage,
-)
 
 _logger = logging.getLogger(__name__)
 
@@ -113,56 +110,53 @@ def _apply_deployment_to_params(
     evaluation: Any,
     tf: str,
 ) -> dict[str, Any]:
-    """D3: champion params에 fit-leg 기반 결정론적 레버리지 L*를 적용.
+    """C4: champion params에 evaluation.deploy_leverage(L*)를 vol_target/gross에 주입.
 
-    kelly_fraction *= L*. max_ann_vol도 존재하면 동일 배율 적용.
-    Sortino/Sharpe는 스케일 불변이므로 그대로 유지.
+    kelly_fraction은 변경 금지(kelly *= L*는 vol-targeting이 덮어쓰므로 무효).
+    max_ann_vol *= L*, gross_exposure_cap *= L* 를 적용해 book scale을 확장한다.
+    L*는 evaluate_l2_trial에서 이미 산정되어 evaluation.deploy_leverage에 있음 — 재계산 금지.
 
-    D3 우선순위: fit_returns_hybrid(look-ahead-free) > returns_hybrid(OOS 대리).
-    fit-leg 사용 시 l_hard_cap 무제한(MDD/CVaR 예산이 실제 binding) → CAGR↑.
+    Spec §C4:
+        deployed["max_ann_vol"] = vol_base * l_star  (None fallback=1.0)
+        deployed["gross_exposure_cap"] = base_gross * l_star
+        deployed["l2_deploy_leverage"] = l_star  (추적용)
+        kelly_fraction 불변.
     """
     config = Layer2AllocationConfig.from_mapping(params)
     if not config.l2_deploy_enabled:
         return params
 
-    # D3: fit-leg 수익률 우선 사용 (look-ahead-free)
-    fit_returns = getattr(evaluation, "fit_returns_hybrid", None)
-    if fit_returns:
-        rets = np.array(fit_returns, dtype=np.float64)
-        _source = "fit_leg"
-    else:
-        # fallback: OOS 대리 (fit-leg 미노출 시, binding=hard_cap으로 실질 look-ahead 없음)
-        returns_hybrid = getattr(evaluation, "returns_hybrid", None)
-        if not returns_hybrid:
-            return params
-        rets = np.array(returns_hybrid, dtype=np.float64)
-        _source = "oos_proxy"
+    # evaluation.deploy_leverage 재사용 (재계산 금지 — 단일 SSOT)
+    l_star = float(getattr(evaluation, "deploy_leverage", 1.0))
+    _l_binding = str(getattr(evaluation, "deploy_binding", ""))
 
-    if rets.size < 2:
-        return params
-
-    lev, binding = calibrate_deployment_leverage(
-        fit_rets=rets,
-        mdd_cap=float(config.l2_max_mdd_abs),
-        cvar_cap=float(config.l2_max_cvar_95),
-        mdd_margin=float(config.l2_deploy_mdd_margin),
-        l_hard_cap=float(config.l2_deploy_l_hard_cap),
-    )
-
-    if lev <= 1.0 + 1e-6:
+    if l_star <= 1.0 + 1e-6:
         return params
 
     deployed: dict[str, Any] = dict(params)
-    new_kelly = float(config.kelly_fraction) * lev
-    deployed["kelly_fraction"] = new_kelly
 
-    raw_vol = params.get("max_ann_vol", params.get("vol_target"))
-    if isinstance(raw_vol, (int, float)):
-        deployed["max_ann_vol"] = float(raw_vol) * lev
+    # vol_target 노브: None → 1.0 fallback (unit-vol book 기준)
+    vol_base = float(config.max_ann_vol) if config.max_ann_vol is not None else 1.0
+    deployed["max_ann_vol"] = vol_base * l_star
+
+    # gross_exposure_cap 노브: params에서 직접 가져오거나 기본값 3.0 사용
+    _raw_gross = params.get("gross_exposure_cap", 3.0)
+    base_gross = float(_raw_gross) if isinstance(_raw_gross, (int, float)) else 3.0
+    deployed["gross_exposure_cap"] = base_gross * l_star
+
+    # 추적용 — 파이프라인 로그에서 검증 가능
+    deployed["l2_deploy_leverage"] = l_star
 
     _logger.info(
-        "[L2-DEPLOY-D3] L*=%.3f (binding=%s, src=%s) | kelly %.3f→%.3f | tf=%s",
-        lev, binding, _source, config.kelly_fraction, new_kelly, tf,
+        "[L2-DEPLOY-C4] L*=%.3f (binding=%s) | vol %.3f→%.3f | gross %.3f→%.3f | kelly=%.3f(불변) | tf=%s",
+        l_star,
+        _l_binding,
+        vol_base,
+        vol_base * l_star,
+        base_gross,
+        base_gross * l_star,
+        float(config.kelly_fraction),
+        tf,
     )
     return deployed
 

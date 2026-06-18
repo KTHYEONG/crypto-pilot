@@ -162,6 +162,8 @@ class Layer2TrialEvaluation:
     worst_fold_sharpe: float = 0.0
     gate: Layer2GateEvaluation | None = None
     fit_returns_hybrid: tuple[float, ...] = ()
+    deploy_leverage: float = 1.0
+    deploy_binding: str = ""
 
 
 @dataclass(slots=True, frozen=True)
