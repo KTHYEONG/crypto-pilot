@@ -131,6 +131,7 @@ class TestS1RunTieredL2StudyHappyPath:
                 "src.execution.opt_main_futures.update_champion_store",
                 return_value=False,
             ),
+            patch("src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache", return_value=MagicMock()),
         ):
             from src.domain.futures.strategy.walk_forward import WFFold
             from src.execution.opt_main_futures import _run_tiered_l2_study
@@ -197,6 +198,7 @@ class TestS3AllTrialsFail:
             patch("src.execution.opt_main_futures.setup_optuna_storage", return_value=("url", MagicMock())),
             patch("src.execution.opt_main_futures.get_or_create_study", return_value=mock_study),
             patch("src.domain.futures.optimization.workflow.TieredContext"),
+            patch("src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache", return_value=MagicMock()),
             caplog.at_level(logging.WARNING, logger="opt_main_futures"),
         ):
             from src.execution.opt_main_futures import _run_tiered_l2_study
