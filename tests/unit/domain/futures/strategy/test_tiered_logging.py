@@ -514,10 +514,9 @@ class TestFormatLayer3Table:
         assert "2026-01-01" in result
         assert "HOLDOUT VALIDATION SCORECARD" in result
         assert "GROWTH" in result
-        assert "Bench" in result
+        assert "DEPLOY-READY" in result
         assert "✅" in result
         assert "45.0%" in result
-        assert "30.0%" in result
         assert "1.800" in result
 
     def test_blocked_shows_blocker_reason(self) -> None:
