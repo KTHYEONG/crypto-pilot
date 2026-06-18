@@ -23,7 +23,7 @@ Enforce the Single Source of Truth (SSOT). Finalize the task by promoting epheme
   - **Content**: Log Delta and Rationale concisely for future AI context.
 
 ### 2. Zero-Residue Cleanup (CRITICAL)
-- **Purge Specs**: Proactively delete all `.md` files in `docs/specs/` related to the current task ID or feature.
+- **Purge Specs**: Proactively delete all `.md` files in `docs/specs/` related to the current task ID or feature. **Keep the `docs/specs/` directory itself; do not remove the folder.**
 - **Wipe Artifacts**: Remove any temporary test data, logs, or intermediate files (`.tmp`, `.bak`) generated during `implement` or `check`.
 - **Verify Clean State**: Ensure no new untracked files (except legitimate docs) remain in the workspace.
 
