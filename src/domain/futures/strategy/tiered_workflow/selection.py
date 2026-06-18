@@ -110,16 +110,15 @@ def _apply_deployment_to_params(
     evaluation: Any,
     tf: str,
 ) -> dict[str, Any]:
-    """C4: champion params에 evaluation.deploy_leverage(L*)를 vol_target/gross에 주입.
+    """champion params에 evaluation.deploy_leverage(L*)를 추적용으로만 기록.
 
-    kelly_fraction은 변경 금지(kelly *= L*는 vol-targeting이 덮어쓰므로 무효).
-    max_ann_vol *= L*, gross_exposure_cap *= L* 를 적용해 book scale을 확장한다.
-    L*는 evaluate_l2_trial에서 이미 산정되어 evaluation.deploy_leverage에 있음 — 재계산 금지.
+    구조적 no-op 판정에 따라 max_ann_vol / gross_exposure_cap 스케일링 제거:
+    - vol-targeting이 하향 전용(min(scale,1.0))이라 max_ann_vol *= L*는 무효(결함 #2).
+    - gross_exposure_cap *= L* 는 per_symbol이 먼저 binding → 영구 미도달(결함 #2).
+    실제 배치는 run_l2_awf(deploy_leverage=L*)에서 수익률 직접 스케일로 실현됨(결함 #3 해소).
 
-    Spec §C4:
-        deployed["max_ann_vol"] = vol_base * l_star  (None fallback=1.0)
-        deployed["gross_exposure_cap"] = base_gross * l_star
-        deployed["l2_deploy_leverage"] = l_star  (추적용)
+    보존:
+        deployed["l2_deploy_leverage"] = l_star  (추적 및 run_l2_awf 전달용)
         kelly_fraction 불변.
     """
     config = Layer2AllocationConfig.from_mapping(params)
@@ -135,26 +134,13 @@ def _apply_deployment_to_params(
 
     deployed: dict[str, Any] = dict(params)
 
-    # vol_target 노브: None → 1.0 fallback (unit-vol book 기준)
-    vol_base = float(config.max_ann_vol) if config.max_ann_vol is not None else 1.0
-    deployed["max_ann_vol"] = vol_base * l_star
-
-    # gross_exposure_cap 노브: params에서 직접 가져오거나 기본값 3.0 사용
-    _raw_gross = params.get("gross_exposure_cap", 3.0)
-    base_gross = float(_raw_gross) if isinstance(_raw_gross, (int, float)) else 3.0
-    deployed["gross_exposure_cap"] = base_gross * l_star
-
-    # 추적용 — 파이프라인 로그에서 검증 가능
+    # 추적 및 run_l2_awf deploy_leverage 전달용 — 천장 스케일링 없음 (realized_mode=return_scaling)
     deployed["l2_deploy_leverage"] = l_star
 
     _logger.info(
-        "[L2-DEPLOY-C4] L*=%.3f (binding=%s) | vol %.3f→%.3f | gross %.3f→%.3f | kelly=%.3f(불변) | tf=%s",
+        "[L2-DEPLOY-C4] L*=%.3f (binding=%s) | realized_mode=return_scaling | kelly=%.3f(불변) | tf=%s",
         l_star,
         _l_binding,
-        vol_base,
-        vol_base * l_star,
-        base_gross,
-        base_gross * l_star,
         float(config.kelly_fraction),
         tf,
     )

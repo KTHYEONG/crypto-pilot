@@ -80,6 +80,10 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     _terminal_multiple,
     compute_breadth_weighted_ic,
 )
+from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
+    apply_deployment,
+    calibrate_deployment_leverage,
+)
 from src.domain.futures.strategy.tiered_workflow.signal_selection import (
     _candidate_output_to_signal_batch,
     _event_results_from_fold_output,
@@ -1039,8 +1043,14 @@ def run_l2_awf(
     tf: str = "4h",
     verbose: bool = True,
     override_dsr: float | None = None,
+    deploy_leverage: float | None = None,
 ) -> Layer2Result:
-    """Layer2 AWF 포트폴리오 시뮬레이션."""
+    """Layer2 AWF 포트폴리오 시뮬레이션.
+
+    Args:
+        deploy_leverage: champion L* (trial-path SSOT). None → 내부 calibrate.
+            None fallback 시 config.l2_deploy_enabled + sim.fit_rets_hybrid 사용.
+    """
     from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
     cache = build_l2_simulation_cache(aligned, signal_batch, tf)
 
@@ -1062,13 +1072,56 @@ def run_l2_awf(
     sharpe_baseline = _sharpe(sim.rets_baseline_ew, bars_per_year=bars_per_year)
     sharpe_hac_hybrid = _sharpe_hac(sim.rets_hybrid, bars_per_year=bars_per_year)
     sharpe_hac_baseline = _sharpe_hac(sim.rets_baseline_ew, bars_per_year=bars_per_year)
-    mdd_hybrid = _mdd(sim.rets_hybrid)
     mdd_baseline = _mdd(sim.rets_baseline)  # MDD 상대 게이트는 risk-matched 기준 유지
-    cagr_hybrid = _cagr(sim.rets_hybrid, bars_per_year=bars_per_year)
     cagr_baseline = _cagr(sim.rets_baseline, bars_per_year=bars_per_year)
-    mar_hybrid = cagr_hybrid / (mdd_hybrid + 1e-9)
     mar_baseline = cagr_baseline / (mdd_baseline + 1e-9)
     psr_hybrid = _psr(sim.rets_hybrid)
+
+    # ── L* 결정 (SSOT 우선: deploy_leverage 파라미터 → 내부 calibrate → 1.0) ──
+    fit_rets_arr = np.asarray(sim.fit_rets_hybrid, dtype=np.float64)
+    _l_star: float
+    _binding: str
+    if deploy_leverage is not None and deploy_leverage > 1.0:
+        _l_star, _binding = deploy_leverage, "champion"
+    elif config.l2_deploy_enabled and fit_rets_arr.size >= 2:
+        _l_star, _binding = calibrate_deployment_leverage(
+            fit_rets=fit_rets_arr,
+            mdd_cap=config.l2_max_mdd_abs,
+            cvar_cap=config.l2_max_cvar_95,
+            mdd_margin=config.l2_deploy_mdd_margin,
+            cvar_margin=config.l2_deploy_cvar_margin,
+            l_hard_cap=config.l2_deploy_l_hard_cap,
+            exchange_leverage_cap=config.l2_max_exchange_leverage,
+        )
+    else:
+        _l_star, _binding = 1.0, "none"
+
+    # deployed 지표 재계산 — trial-path(apply_deployment)와 동일 경로 (결함 #3 해소)
+    _rets_hybrid_arr = np.asarray(sim.rets_hybrid, dtype=np.float64)
+    _dep = apply_deployment(rets=_rets_hybrid_arr, leverage=_l_star, bars_per_year=bars_per_year)
+    cagr_hybrid: float = _dep.cagr
+    mdd_hybrid: float = _dep.mdd
+    cvar_95_hybrid: float = _dep.cvar_95
+    mar_hybrid: float = cagr_hybrid / (mdd_hybrid + 1e-9)
+
+    # RiskUtil 정합 검증 — binding=mdd 시 risk_util ≈ (1 - mdd_margin), 이탈 시 결함 #1/#2 재발.
+    _risk_util_check = mdd_hybrid / max(config.l2_max_mdd_abs, 1e-9)
+    logger.info(
+        "[L2-DEPLOY] L*=%.4f binding=%s | CAGR=%.4f MDD=%.4f CVaR95=%.4f RiskUtil=%.3f",
+        _l_star,
+        _binding,
+        cagr_hybrid,
+        mdd_hybrid,
+        cvar_95_hybrid,
+        _risk_util_check,
+    )
+    if _binding == "mdd" and abs(_risk_util_check - (1.0 - config.l2_deploy_mdd_margin)) > 0.15:
+        logger.warning(
+            "[L2-DEPLOY] realization gap: risk_util=%.3f expected≈%.3f"
+            " (결함 #1/#2 재발 의심 — vol-targeting 또는 gross 제약 확인 요망)",
+            _risk_util_check,
+            1.0 - config.l2_deploy_mdd_margin,
+        )
     avg_turnover = float(np.mean(sim.all_turnovers)) if sim.all_turnovers else 0.0
     avg_gross_exposure = float(np.mean(sim.all_gross_exposures)) if sim.all_gross_exposures else 0.0
     avg_net_exposure = float(np.mean(np.abs(sim.all_net_exposures))) if sim.all_net_exposures else 0.0
@@ -1078,7 +1131,7 @@ def run_l2_awf(
         else 0.0
     )
     total_cost_bps = float(sim.total_cost_hybrid * 1e4)
-    cvar_95_hybrid = _cvar_loss(sim.rets_hybrid, alpha=0.95)
+    # cvar_95_hybrid: apply_deployment에서 이미 산출 (unit-vol 중복 산출 제거)
     hybrid_blocks = _contiguous_block_log_growth(
         sim.rets_hybrid,
         block_bars=max(int(config.rebalance_bars), 1),
@@ -1528,6 +1581,11 @@ def run_tiered_pipeline(
         end_idx=ho_start_idx_l2,
         cfg=cfg,
     )
+    # champion L* SSOT 전달: selection이 l2_params에 기록한 값 재사용 → recalibrate drift 0 보장
+    _raw_l_star = l2_params.get("l2_deploy_leverage")
+    _champion_l_star: float | None = (
+        float(_raw_l_star) if isinstance(_raw_l_star, (int, float)) else None
+    )
     l2 = _tw.run_l2_awf(
         signal_batch=l2_signal_batch,
         aligned=aligned,
@@ -1537,6 +1595,7 @@ def run_tiered_pipeline(
         tf=tf,
         verbose=verbose,
         override_dsr=override_dsr,
+        deploy_leverage=_champion_l_star if (_champion_l_star is not None and _champion_l_star > 1.0) else None,
     )
     logger.debug("[perf-tiered] run_tiered_pipeline Layer 2 total took %.4fs", time.perf_counter() - t_l2)
 
