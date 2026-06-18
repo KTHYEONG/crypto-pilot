@@ -1591,10 +1591,11 @@ def objective_l1_ic(trial: Trial, ctx: TieredContext) -> float:
 
 
 def _resolve_l2_signal_batch_and_folds(ctx: TieredContext) -> tuple[Any, tuple[Any, ...]]:
-    from src.domain.futures.strategy.tiered_workflow import predict_layer1_signals
-    from src.domain.futures.strategy.walk_forward import WFFold, build_walk_forward_folds
-    from src.domain.futures.strategy.tiered_workflow.pipeline import _date_to_idx, _to_utc_timestamp
     import numpy as np
+
+    from src.domain.futures.strategy.tiered_workflow import predict_layer1_signals
+    from src.domain.futures.strategy.tiered_workflow.pipeline import _date_to_idx, _to_utc_timestamp
+    from src.domain.futures.strategy.walk_forward import WFFold, build_walk_forward_folds
 
     ho_start_idx_l2 = _date_to_idx(ctx.aligned.datetimes, ctx.window.holdout_start)
 
@@ -1651,6 +1652,42 @@ def _resolve_l2_signal_batch_and_folds(ctx: TieredContext) -> tuple[Any, tuple[A
     )
 
 
+def _shape_efficiency_l2_objective(
+    *,
+    sortino_hac_unit: float,
+    worst_fold_sortino: float,
+    worst_fold_threshold: float,
+    worst_fold_weight: float,
+    downside_dispersion: float,
+) -> float:
+    """Scale-invariant Sortino_HAC_unit 기반 shape 최적화 목적함수.
+
+    J = Sortino_HAC_unit - lambda_w * max(0, tau_wf - worst_fold_sortino) - lambda_d * downside_dispersion
+
+    scale-invariant 특성 보장: leverage 사후 부여(D3)와 정합.
+    growth_lcb는 diagnostic으로 강등 — 목적에 포함하지 않음(RC-2 해소).
+
+    Args:
+        sortino_hac_unit: HAC 조정 unit-vol Sortino (1차 목적, scale-invariant).
+        worst_fold_sortino: 최악 fold Sortino (단조 패널티 입력).
+        worst_fold_threshold: worst-fold 페널티 임계값 (≤ → 패널티).
+        worst_fold_weight: worst-fold 페널티 가중치 λ_w.
+        downside_dispersion: 하방 분산 λ_d·dispersion 항.
+
+    Returns:
+        float: 목적함수 값. 비정상 입력 시 -1e6 fail-fast 반환.
+
+    Time Complexity: O(1). Space Complexity: O(1).
+    """
+    if not np.isfinite(sortino_hac_unit):
+        return -1e6
+    worst_fold_penalty = (
+        max(0.0, float(worst_fold_threshold) - float(worst_fold_sortino))
+        * float(worst_fold_weight)
+    )
+    return float(sortino_hac_unit - worst_fold_penalty - float(downside_dispersion))
+
+
 def _deployment_shaped_l2_objective(
     *,
     growth_lcb: float,
@@ -1659,7 +1696,10 @@ def _deployment_shaped_l2_objective(
     worst_fold_threshold: float,
     worst_fold_weight: float,
 ) -> float:
-    """Prioritize stable post-cost compounding rather than gate-shaped bonuses."""
+    """Deprecated: growth_lcb 기반 목적함수 (RC-2로 인해 _shape_efficiency_l2_objective로 대체).
+
+    backward-compat 유지용 shim. 직접 호출 금지.
+    """
     if not np.isfinite(growth_lcb):
         return -1e6
     arr = np.asarray(list(block_log_growth), dtype=np.float64)
@@ -1703,6 +1743,7 @@ def evaluate_l2_trial(
         _sharpe,
         _sharpe_hac,
         _sortino,
+        _sortino_hac_unit,
     )
 
     sim = _run_awf_simulation(
@@ -1810,24 +1851,38 @@ def evaluate_l2_trial(
     finite_score = float(growth_lcb_hybrid) if np.isfinite(growth_lcb_hybrid) else -1e6
     risk_utilization = float(mdd_hybrid) / max(float(config.l2_max_mdd_abs), 1e-9)
 
-    # STEP 5: worst-fold Sharpe soft penalty (비정상성 방어, RC-5).
+    # STEP 5: worst-fold Sortino soft penalty (비정상성 방어, D1 shape 목적 정합).
     # fold_rets_hybrid: list of per-fold OOS return sequences.
     # Time Complexity: O(F·T) where F=n_folds, T=fold OOS bars.
+    _fold_sortinos: list[float] = [
+        float(_sortino(list(fr), bars_per_year=bars_per_year)) if fr else 0.0
+        for fr in sim.fold_rets_hybrid
+    ]
     _fold_sharpes: list[float] = [
         float(_sharpe_hac(list(fr), bars_per_year=bars_per_year)) if fr else 0.0
         for fr in sim.fold_rets_hybrid
     ]
+    worst_fold_sortino: float = min(_fold_sortinos) if _fold_sortinos else 0.0
     worst_fold_sharpe: float = min(_fold_sharpes) if _fold_sharpes else 0.0
     _wf_threshold = float(config.l2_worst_fold_penalty_threshold)
     _wf_weight = float(config.l2_worst_fold_penalty_weight)
 
-    objective_value = _deployment_shaped_l2_objective(
-        growth_lcb=finite_score,
-        block_log_growth=tuple(float(x) for x in block_growth_hybrid),
-        worst_fold_sharpe=worst_fold_sharpe,
+    # D1: Sortino_HAC_unit 기반 scale-invariant shape 목적함수
+    sortino_hac_unit = _sortino_hac_unit(rets_hybrid, bars_per_year=bars_per_year)
+    # downside_dispersion: block-level 하방 변동성 (안정성 패널티)
+    _block_arr = np.asarray(list(block_growth_hybrid), dtype=np.float64)
+    _block_arr = _block_arr[np.isfinite(_block_arr)]
+    _block_downside = _block_arr[_block_arr < 0.0]
+    downside_dispersion = float(np.std(_block_downside, ddof=1)) * 0.05 if _block_downside.size > 1 else 0.0
+
+    objective_value = _shape_efficiency_l2_objective(
+        sortino_hac_unit=sortino_hac_unit,
+        worst_fold_sortino=worst_fold_sortino,
         worst_fold_threshold=_wf_threshold,
         worst_fold_weight=_wf_weight,
+        downside_dispersion=downside_dispersion,
     )
+    # growth_lcb는 diagnostic으로 강등 — objective에서 제외 (RC-2 해소)
     deployment_objective_bonus = float(objective_value - finite_score)
     deployment_failed = (
         sim.signal_total <= 0
@@ -1853,6 +1908,7 @@ def evaluate_l2_trial(
         growth_lcb_hybrid=float(growth_lcb_hybrid),
         growth_lcb_baseline=float(growth_lcb_baseline),
         dsr_hybrid=None,
+        psr_hybrid=float(psr_hybrid),
         config=config,
     )
     return Layer2TrialEvaluation(
@@ -1883,6 +1939,7 @@ def evaluate_l2_trial(
         deployment_objective_bonus=float(deployment_objective_bonus),
         worst_fold_sharpe=worst_fold_sharpe,
         gate=gate,
+        fit_returns_hybrid=tuple(sim.fit_rets_hybrid),
     )
 
 
