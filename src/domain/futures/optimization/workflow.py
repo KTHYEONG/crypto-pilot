@@ -1488,6 +1488,7 @@ class TieredContext:
     caps: Any             # PortfolioCaps
     tf: str
     fixed_l1_params: dict[str, Any] | None = None   # L2 study 시 L1 best params 고정
+    l2_sim_cache: L2SimulationCache | None = None
 
 
 def suggest_layered_params(
@@ -1718,6 +1719,7 @@ def _deployment_shaped_l2_objective(
 
 def evaluate_l2_trial(
     *,
+    cache: L2SimulationCache,
     signal_batch: Any,
     aligned: Any,
     awf_folds: tuple[Any, ...],
@@ -1750,6 +1752,7 @@ def evaluate_l2_trial(
     )
 
     sim = _run_awf_simulation(
+        cache=cache,
         signal_batch=signal_batch,
         aligned=aligned,
         awf_folds=awf_folds,
@@ -1997,7 +2000,13 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
     if signal_batch is None or not awf_folds:
         return -1e6
 
+    # Ensure cache is built if not already present
+    if getattr(ctx, "l2_sim_cache", None) is None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+        object.__setattr__(ctx, "l2_sim_cache", build_l2_simulation_cache(ctx.aligned, signal_batch, ctx.tf))
+
     evaluation = evaluate_l2_trial(
+        cache=ctx.l2_sim_cache,
         signal_batch=signal_batch,
         aligned=ctx.aligned,
         awf_folds=awf_folds,
