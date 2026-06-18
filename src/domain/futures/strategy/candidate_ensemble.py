@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from src.core.utils.utils import PERF
 from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput, EdgeSource
 from src.domain.futures.strategy.config import CandidateStrategyConfig
 from src.domain.futures.strategy.regime_evaluation import (
@@ -559,7 +560,7 @@ def _internal_validation_rank_ic(
 
     realized = val_set[_resolve_ensemble_target_column(val_set)].to_numpy(dtype=np.float64, copy=False)
     elapsed = time.perf_counter() - t_start
-    _logger.debug("[perf-ensemble] _internal_validation_rank_ic axis=%s took %.4fs", axis, elapsed)
+    _logger.log(PERF, "[perf-ensemble] _internal_validation_rank_ic axis=%s took %.4fs", axis, elapsed)
     return _rank_ic_local(pred, realized)
 
 
@@ -934,11 +935,13 @@ def fit_regime_conditional_ensemble(
         cell_q90 = {}
         conditioning_path = "no_oos_evidence_failsafe"
 
-    _logger.debug(
+    _logger.log(
+        PERF,
         "[perf-ensemble] fit_regime_conditional_ensemble finished in %.4fs (N=%d)",
         time.perf_counter() - t_fit_start,
-        len(frame),
+        len(train_events),
     )
+
     
     return RegimeConditionalEnsemble(
         cell_mu_bps=cell_mu,

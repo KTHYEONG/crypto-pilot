@@ -19,6 +19,10 @@ from numpy.typing import NDArray
 
 _logger = logging.getLogger(__name__)
 
+# Trace level for high-volume debug logs
+TRACE = 5
+logging.addLevelName(TRACE, "TRACE")
+
 # VOL_FLOOR: 무한 레버리지 방지용 하한 (~1% daily sigma 기준의 4h bar 환산)
 VOL_FLOOR: float = 1e-4  # per-bar sigma 최소값
 
@@ -124,6 +128,7 @@ def rank_and_select(
         _logger.debug("rank_and_select: no valid signals, returning empty selection")
         return frozenset(), {}
 
+
     syms: list[str] = list(valid_sigs.keys())
     n: int = len(syms)
 
@@ -187,7 +192,8 @@ def rank_and_select(
     if len(selected) > k_rank:
         selected = set([s for s in rank_order if s in selected][:k_rank])
 
-    _logger.debug(
+    _logger.log(
+        TRACE,
         "rank_and_select: n_valid=%d, k_rank=%d, sticky=%d, fresh=%d, selected=%d",
         n,
         k_rank,
