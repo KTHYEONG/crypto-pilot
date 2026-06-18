@@ -76,6 +76,7 @@ class _AwfSimResult:
     block_rets_hybrid: tuple[tuple[float, ...], ...]
     block_rets_baseline: tuple[tuple[float, ...], ...]
     rets_baseline_ew: list[float]          # 순수 1/N EW baseline (uplift 측정 전용)
+    fit_rets_hybrid: tuple[float, ...] = ()  # D3: fit-leg 수익률 (look-ahead-free L* calibration용)
 
 
 def _book_edge_score(
@@ -533,7 +534,10 @@ def _run_awf_simulation(
     k_rank = int(config.k_rank)
     rank_buffer = int(config.rank_buffer)
     kelly_fraction = float(config.kelly_fraction)
-    vol_target = config.max_ann_vol
+    # D2: vol_target=None → unit vol-target(1.0) 강제 — RC-1 cascade 해제.
+    # max_ann_vol=None이면 vol-targeting·risk_budget_floor·adaptive_breadth가 전부 사망.
+    # 1.0 고정으로 shape 정규화 유지, scale은 D3 closed-form L*가 전담.
+    vol_target: float | None = config.max_ann_vol if config.max_ann_vol is not None else 1.0
     no_trade_band = float(config.no_trade_band)
     rebalance_bars = int(config.rebalance_bars)
     fixed_cost_safety_mult = float(getattr(config, "fixed_cost_safety_mult", 1.25))
@@ -586,6 +590,11 @@ def _run_awf_simulation(
     fold_rets_hybrid: list[list[float]] = []
     fold_rets_baseline: list[list[float]] = []
 
+    # D3: fit-leg 수익률 수집 (look-ahead-free L* calibration용)
+    # fit-leg = fold.fit_start → fold.oos_start (OOS 이전). 독립 상태로 수집.
+    # 모든 fold fit-leg 연결 → fit_rets_hybrid (closed-form L* 입력).
+    all_fit_rets_hybrid: list[float] = []
+
     prev_selection: frozenset[str] = frozenset()
     prev_w: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
     prev_w_baseline: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
@@ -597,6 +606,26 @@ def _run_awf_simulation(
         start_idx=signal_start,
         end_idx=signal_end,
     )
+
+    # D3: fit-leg 수익률 수집 루프 (OOS 루프 이전, look-ahead-free)
+    # fold.fit_start < fold.oos_start 보장 — fit 기간 내 equal-weight 평균 수익률 수집.
+    # 독립 상태(prev_w_fit=0)로 별도 시뮬 없이 단순 bar-return 평균만 기록.
+    # Time Complexity: O(F·(oos_start-fit_start)) where F=n_folds.
+    for _fit_fold in awf_folds:
+        fit_start = int(_fit_fold.fit_start)
+        fit_end = int(_fit_fold.oos_start)  # oos_start 이전까지만 (look-ahead 0)
+        if fit_start >= fit_end or fit_end <= 1:
+            continue
+        for _ft in range(fit_start, fit_end - 1):
+            if _ft + 1 >= aligned.close_2d.shape[0]:
+                break
+            close_t = aligned.close_2d[_ft].astype(np.float64)
+            close_t1 = aligned.close_2d[_ft + 1].astype(np.float64)
+            valid = (close_t > 0.0) & (close_t1 > 0.0)
+            if not np.any(valid):
+                continue
+            bar_ret = np.where(valid, (close_t1 - close_t) / close_t, 0.0)
+            all_fit_rets_hybrid.append(float(np.mean(bar_ret[valid])))
 
     for _fold_idx, fold in enumerate(awf_folds):
         _fold_h: list[float] = []
@@ -879,6 +908,7 @@ def _run_awf_simulation(
         block_rets_hybrid=tuple(tuple(block) for block in fold_rets_hybrid),
         block_rets_baseline=tuple(tuple(block) for block in fold_rets_baseline),
         rets_baseline_ew=all_rets_baseline_ew,
+        fit_rets_hybrid=tuple(all_fit_rets_hybrid),
     )
 
 
