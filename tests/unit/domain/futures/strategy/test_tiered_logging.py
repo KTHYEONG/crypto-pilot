@@ -10,6 +10,7 @@ import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 from src.domain.futures.optimization.opt_config import LayeredWindow
@@ -28,6 +29,7 @@ from src.domain.futures.strategy.tiered_logging import (
     format_layer1_table,
     format_layer2_table,
     format_layer3_table,
+    format_layer_universe_audit_table,
     format_system_status,
     format_window_table,
 )
@@ -179,6 +181,61 @@ def test_format_layer1_outer_fold_table_shows_ready_symbol_count() -> None:
     assert "READY" in result
     assert "✅" in result
     assert "Fold #10" in result
+
+
+def test_format_layer1_outer_fold_table_uses_calendar_periods_and_symbol_preview() -> None:
+    reports = (
+        Layer1FoldReadiness(
+            fold_id=1,
+            registry_source_end_idx=3,
+            outer_oos_start_idx=3,
+            outer_oos_end_idx=6,
+            ready_symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT"),
+            valid_opportunity_timestamp_count=7,
+            probe_bps=1.2,
+            passed=True,
+        ),
+    )
+    datetimes = np.array(
+        [
+            np.datetime64("2025-01-01"),
+            np.datetime64("2025-01-02"),
+            np.datetime64("2025-01-03"),
+            np.datetime64("2025-01-04"),
+            np.datetime64("2025-01-05"),
+            np.datetime64("2025-01-06"),
+        ]
+    )
+
+    result = format_layer1_outer_fold_table(reports, datetimes=datetimes, max_symbols=2)
+
+    assert "FitEnd: 2025-01-03" in result
+    assert "OOS: 2025-01-04 ~ 2025-01-06" in result
+    assert "BTCUSDT, ETHUSDT, +1 more" in result
+
+
+def test_format_layer_universe_audit_table_renders_rows() -> None:
+    audit = SimpleNamespace(
+        layer="L2",
+        start_idx=10,
+        end_idx=20,
+        start_date="2025-01-01",
+        end_date="2025-01-10",
+        symbol_count=12,
+        active_symbol_count_min=3,
+        active_symbol_count_median=7.0,
+        active_symbol_count_max=10,
+        entry_block_count=4,
+        kill_count=2,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        warnings=("low_active_tail",),
+    )
+
+    result = format_layer_universe_audit_table((audit,))
+
+    assert "LAYER UNIVERSE AUDIT" in result
+    assert "L2" in result
+    assert "low_active_tail" in result
 
 
 def test_format_layer1_deployment_registry_table_lists_strategy_rows() -> None:
@@ -440,6 +497,24 @@ class TestFormatLayer2Table:
         assert "Fold" in result
         assert "PASS" in result
         assert "Period: 2025-01-01 ~ 2025-03-31" in result
+
+    def test_awf_folds_render_selected_symbols(self) -> None:
+        r2 = _make_l2_ns()
+        folds = [
+            {
+                "fold": 1,
+                "sharpe": 1.4,
+                "mdd": 0.11,
+                "cagr": 0.32,
+                "pass": True,
+                "period": "2025-01-01 ~ 2025-03-31",
+                "symbols": ("BTCUSDT", "ETHUSDT", "SOLUSDT"),
+            }
+        ]
+
+        result = format_layer2_table(r2, awf_folds=folds)
+
+        assert "Symbols: 3 [BTCUSDT, ETHUSDT, SOLUSDT]" in result
 
     def test_nan_fold_shown_safely(self) -> None:
         """fold sharpe=nan → 'nan' 문자열로 안전 렌더링."""
