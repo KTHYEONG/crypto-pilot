@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
+
+from src.core.utils.utils import PERF
 
 if TYPE_CHECKING:
     from src.domain.futures.strategy.config import CandidateStrategyConfig
@@ -484,7 +487,6 @@ def run_candidate_ablation(
     cached_output: CandidatePipelineOutput | None = None,
 ) -> pd.DataFrame:
     """Run ablation variants to prove each complexity layer adds compounding value."""
-    import time
 
     t_start_all = time.perf_counter()
     ablation_prof: dict[str, float] = {
@@ -585,7 +587,7 @@ def run_candidate_ablation(
             oos_start=oos_start,
             oos_end=oos_end,
         )
-        _logger.debug(
+        _logger.log(PERF, 
             "[DIAG][RULE_RECOMMEND_ABLATION] keep=%s flip=%s",
             ",".join(diag.recommended_keep_variants) if diag.recommended_keep_variants else "",
             ",".join(diag.recommended_flip_variants) if diag.recommended_flip_variants else "",
@@ -686,7 +688,7 @@ def run_candidate_ablation(
         cfg=cfg_rule,
         regime_code_1d=regime_code_1d,
     )
-    _logger.debug("[PROFILE][ABLATION] 1. rule_w took %.4fs", time.perf_counter() - t_step)
+    _logger.log(PERF, "[PROFILE][ABLATION] 1. rule_w took %.4fs", time.perf_counter() - t_step)
 
     # 2. prior_rank_stop_risk (Rule candidates filtered by prior variant-level rank selection only)
     t_step = time.perf_counter()
@@ -709,7 +711,7 @@ def run_candidate_ablation(
         cfg=replace(cfg, sizing_mode="stop_risk", gross_cap=999.0, net_cap=999.0, beta_cap=999.0, target_ann_vol=999.0),
         regime_code_1d=regime_code_1d,
     )
-    _logger.debug("[PROFILE][ABLATION] 2. prior_w took %.4fs", time.perf_counter() - t_step)
+    _logger.log(PERF, "[PROFILE][ABLATION] 2. prior_w took %.4fs", time.perf_counter() - t_step)
 
     # 3. prior_residual_rank_stop_risk (Adds ML residual model to rank selection, but no gate veto)
     t_step = time.perf_counter()
@@ -730,7 +732,7 @@ def run_candidate_ablation(
         cfg=replace(cfg, sizing_mode="stop_risk", gross_cap=999.0, net_cap=999.0, beta_cap=999.0, target_ann_vol=999.0),
         regime_code_1d=regime_code_1d,
     )
-    _logger.debug("[PROFILE][ABLATION] 3. residual_w took %.4fs", time.perf_counter() - t_step)
+    _logger.log(PERF, "[PROFILE][ABLATION] 3. residual_w took %.4fs", time.perf_counter() - t_step)
 
     # 4. edge_plus_validated_gate_stop_risk (Adds ML gate veto to selection, retains stop-risk sizing)
     t_step = time.perf_counter()
@@ -749,7 +751,7 @@ def run_candidate_ablation(
         cfg=replace(cfg, sizing_mode="stop_risk", gross_cap=999.0, net_cap=999.0, beta_cap=999.0, target_ann_vol=999.0),
         regime_code_1d=regime_code_1d,
     )
-    _logger.debug("[PROFILE][ABLATION] 4. gate_w took %.4fs", time.perf_counter() - t_step)
+    _logger.log(PERF, "[PROFILE][ABLATION] 4. gate_w took %.4fs", time.perf_counter() - t_step)
 
     # 5. edge_plus_gate_event_kelly (Replaces stop-risk sizing with calibrated event Kelly, portfolio caps bypassed)
     t_step = time.perf_counter()
@@ -769,7 +771,7 @@ def run_candidate_ablation(
         ),
         regime_code_1d=regime_code_1d,
     )
-    _logger.debug("[PROFILE][ABLATION] 5. kelly_w took %.4fs", time.perf_counter() - t_step)
+    _logger.log(PERF, "[PROFILE][ABLATION] 5. kelly_w took %.4fs", time.perf_counter() - t_step)
 
     # 6. full_portfolio_caps (Applies final portfolio constraints/caps projection to Kelly weights)
     t_step = time.perf_counter()
@@ -782,7 +784,7 @@ def run_candidate_ablation(
         cfg=replace(cfg, sizing_mode="calibrated_event_kelly"),
         regime_code_1d=regime_code_1d,
     )
-    _logger.debug("[PROFILE][ABLATION] 6. full_caps_w took %.4fs", time.perf_counter() - t_step)
+    _logger.log(PERF, "[PROFILE][ABLATION] 6. full_caps_w took %.4fs", time.perf_counter() - t_step)
 
     # 7. portfolio_kelly (Covariance-aware Kelly w = f_k·Σ̂⁻¹μ, caps bypassed — A/B vs ML_Event_Kelly)
     t_step = time.perf_counter()
@@ -803,7 +805,7 @@ def run_candidate_ablation(
         ),
         regime_code_1d=regime_code_1d,
     )
-    _logger.debug("[PROFILE][ABLATION] 7. port_kelly_w took %.4fs", time.perf_counter() - t_step)
+    _logger.log(PERF, "[PROFILE][ABLATION] 7. port_kelly_w took %.4fs", time.perf_counter() - t_step)
     ablation_prof["weights"] = time.perf_counter() - t_weights
 
     from concurrent.futures import ThreadPoolExecutor
@@ -826,7 +828,7 @@ def run_candidate_ablation(
             barrier_events=barrier_ev,
             fold_oos_boundaries=_fold_oos_boundaries,
         )
-        _logger.debug("[PROFILE][ABLATION] Backtest task %s took %.4fs", variant_name, time.perf_counter() - t_task)
+        _logger.log(PERF, "[PROFILE][ABLATION] Backtest task %s took %.4fs", variant_name, time.perf_counter() - t_task)
         return res
 
     tasks = [
@@ -886,7 +888,7 @@ def run_candidate_ablation(
         breakdown.accounted,
         breakdown.unaccounted,
     )
-    _logger.debug("[PROFILE][ABLATION] Total ablation study run took %.4fs", breakdown.total)
+    _logger.log(PERF, "[PROFILE][ABLATION] Total ablation study run took %.4fs", breakdown.total)
 
     return df_results
 
@@ -1018,7 +1020,6 @@ def _run_backtest_and_evaluate(
             are not used for attribution).  When both are provided,
             ``barrier_events`` wins for barrier construction.
     """
-    import time
 
     t_task = time.perf_counter()
     task_prof: dict[str, float] = {
@@ -1166,7 +1167,7 @@ def _run_backtest_and_evaluate(
     )
 
     if cfg.edge_attribution_enabled:
-        _logger.debug(
+        _logger.log(PERF, 
             "[DIAG][EDGE_ATTRIB] variant=%s trades=%d deployed=%.3f "
             "pred_p50=%.1fbps real_p50=%.1fbps capture=%.3f "
             "cost=%.1fbps pass_deploy=%s",
