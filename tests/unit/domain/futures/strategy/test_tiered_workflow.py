@@ -741,6 +741,9 @@ def test_run_l3_holdout_computes_new_compounding_metrics() -> None:
     assert result.equity_multiple == pytest.approx(1.10, rel=1e-3)
     assert result.n_trades == 42
     assert np.isfinite(result.sortino)
+    assert result.max_cvar95 == pytest.approx(0.06)
+    assert result.min_sharpe == pytest.approx(0.0)
+    assert result.min_sortino == pytest.approx(0.0)
 
 
 def test_run_l3_holdout_gate_blocked_when_trade_count_below_minimum() -> None:
@@ -846,6 +849,58 @@ def test_run_l3_holdout_gate_blocked_when_mdd_exceeds_absolute_cap() -> None:
     assert result.mdd > 0.35
     assert result.mdd <= result.mdd_baseline
     assert result.blocker_reason == "mdd_abs"
+    assert result.gate_passed is False
+
+
+def test_run_l3_holdout_gate_blocked_when_cvar_exceeds_absolute_cap() -> None:
+    """양수 수익이어도 CVaR95 절대상한 초과면 cvar_95로 차단되어야 한다."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_l3_holdout
+
+    rets_hybrid = [0.20, -0.15] * 20
+    rets_baseline = [0.08, -0.05] * 20
+    sim_result = _make_awf_sim_result(
+        rets_hybrid=rets_hybrid,
+        rets_baseline=rets_baseline,
+        trade_count=40,
+    )
+
+    def _make_mock_cache(n_bars: int = 100, n_syms: int = 1) -> MagicMock:
+        cache = MagicMock()
+        cache.vol_matrix_2d = np.full((n_bars, n_syms), 0.0001, dtype=np.float64)
+        cache.tradeable_mask_2d = np.ones((n_bars, n_syms), dtype=bool)
+        cache.hurdle_2d = np.full((n_bars, n_syms), 3.8, dtype=np.float64)
+        cache.funding_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.beta_1d = np.zeros(n_syms, dtype=np.float64)
+        cache.expected_gross_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.expected_net_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.holding_bars_2d = np.ones((n_bars, n_syms), dtype=np.float64)
+        cache.side_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.quality_weight_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
+        return cache
+
+    with patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+        return_value=sim_result,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=_make_mock_cache(n_bars=len(rets_hybrid), n_syms=1),
+    ):
+        result = run_l3_holdout(
+            signal_batch=_make_l3_signal_batch(),
+            aligned=MagicMock(symbols=("BTC",)),
+            holdout_span=(0, len(rets_hybrid)),
+            config=Layer2AllocationConfig(),
+            caps=_l3_caps(),
+            min_trades=10,
+            max_mdd_abs=0.90,
+            max_cvar95=0.06,
+            verbose=False,
+        )
+
+    assert result.total_return > 0.0
+    assert result.cvar95 > 0.06
+    assert result.blocker_reason == "cvar_95"
     assert result.gate_passed is False
 
 
@@ -957,6 +1012,60 @@ def test_run_l3_holdout_gate_passed_when_all_thresholds_satisfied() -> None:
     assert result.total_return == pytest.approx(0.17, rel=1e-3)
     assert result.gate_passed is True
     assert result.blocker_reason == ""
+
+
+def test_run_l3_holdout_gate_blocked_when_sharpe_or_sortino_below_floor() -> None:
+    """양수 수익이어도 Sharpe/Sortino floor 미달이면 절대 기준에서 차단되어야 한다."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_l3_holdout
+
+    rets_hybrid = [0.012, -0.009] * 20
+    rets_baseline = [0.002, -0.002] * 20
+    sim_result = _make_awf_sim_result(
+        rets_hybrid=rets_hybrid,
+        rets_baseline=rets_baseline,
+        trade_count=40,
+    )
+
+    def _make_mock_cache(n_bars: int = 100, n_syms: int = 1) -> MagicMock:
+        cache = MagicMock()
+        cache.vol_matrix_2d = np.full((n_bars, n_syms), 0.0001, dtype=np.float64)
+        cache.tradeable_mask_2d = np.ones((n_bars, n_syms), dtype=bool)
+        cache.hurdle_2d = np.full((n_bars, n_syms), 3.8, dtype=np.float64)
+        cache.funding_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.beta_1d = np.zeros(n_syms, dtype=np.float64)
+        cache.expected_gross_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.expected_net_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.holding_bars_2d = np.ones((n_bars, n_syms), dtype=np.float64)
+        cache.side_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.quality_weight_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
+        return cache
+
+    with patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+        return_value=sim_result,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=_make_mock_cache(n_bars=len(rets_hybrid), n_syms=1),
+    ):
+        result = run_l3_holdout(
+            signal_batch=_make_l3_signal_batch(),
+            aligned=MagicMock(symbols=("BTC",)),
+            holdout_span=(0, len(rets_hybrid)),
+            config=Layer2AllocationConfig(),
+            caps=_l3_caps(),
+            min_trades=10,
+            max_mdd_abs=0.90,
+            max_cvar95=0.90,
+            min_sharpe=7.0,
+            min_sortino=7.0,
+            verbose=False,
+        )
+
+    assert result.total_return > 0.0
+    assert result.sharpe < 7.0
+    assert result.blocker_reason == "sharpe_abs"
+    assert result.gate_passed is False
 
 
 def test_run_l3_holdout_applies_deployment_leverage_when_provided() -> None:
