@@ -93,27 +93,18 @@ def _compute_incremental_bps(
     bucket_key = ["symbol", "side", "holding_bucket"]
     strategy_key = [*bucket_key, "strategy_id"]
 
-    # Aggregate per (symbol, side, holding_bucket) bucket
-    bucket_stats = frame.groupby(bucket_key, sort=False)["gross_event_bps"].agg(
-        _bucket_sum="sum", _bucket_count="count"
-    )
-    # Aggregate per (symbol, side, holding_bucket, strategy_id)
-    strat_stats = frame.groupby(strategy_key, sort=False)["gross_event_bps"].agg(
-        _strat_sum="sum", _strat_count="count"
-    )
+    bucket_sum = frame.groupby(bucket_key)["gross_event_bps"].transform("sum")
+    bucket_count = frame.groupby(bucket_key)["gross_event_bps"].transform("count")
+    strat_sum = frame.groupby(strategy_key)["gross_event_bps"].transform("sum")
+    strat_count = frame.groupby(strategy_key)["gross_event_bps"].transform("count")
 
-    merged = frame[strategy_key].copy()
-    merged = merged.join(bucket_stats, on=bucket_key)
-    merged = merged.join(strat_stats, on=strategy_key)
+    peer_count = bucket_count - strat_count
+    peer_sum = bucket_sum - strat_sum
 
-    peer_count = merged["_bucket_count"] - merged["_strat_count"]
-    peer_sum = merged["_bucket_sum"] - merged["_strat_sum"]
-
-    # peer_count == 0 → single strategy in bucket → absolute fallback (baseline=0)
-    safe_peer_count = peer_count.clip(lower=1)
+    safe = peer_count.clip(lower=1)
     peer_mean = np.where(
         peer_count > 0,
-        peer_sum.to_numpy(dtype=np.float64) / safe_peer_count.to_numpy(dtype=np.float64),
+        peer_sum.to_numpy(dtype=np.float64) / safe.to_numpy(dtype=np.float64),
         0.0,
     )
 
@@ -285,13 +276,10 @@ def _by_q_values(p_values: NDArray[np.float64]) -> NDArray[np.float64]:
     ordered = p_values[order]
     m = float(p_values.size)
     harmonic = float(np.sum(1.0 / np.arange(1, p_values.size + 1, dtype=np.float64)))
-    adjusted = np.empty_like(ordered)
-    running = 1.0
-    for idx in range(ordered.size - 1, -1, -1):
-        rank = float(idx + 1)
-        candidate = min(1.0, ordered[idx] * m * harmonic / rank)
-        running = min(running, candidate)
-        adjusted[idx] = running
+    n = ordered.size
+    ranks = np.arange(n, 0, -1, dtype=np.float64)
+    candidates = np.minimum(1.0, ordered * m * harmonic / ranks)
+    adjusted = np.minimum.accumulate(candidates[::-1])[::-1]
     out = np.empty_like(adjusted)
     out[order] = adjusted
     return out
@@ -407,19 +395,18 @@ def compute_symbol_strategy_evidence(
     )
     if "exit_idx" in frame.columns:
         exit_idx = pd.to_numeric(frame["exit_idx"], errors="coerce").fillna(np.inf).astype(float)
-        frame = frame.loc[
-            exit_idx < float(registry_as_of_idx)
-        ].copy()
+        mature = exit_idx < float(registry_as_of_idx)
         lookback_bars = getattr(cfg, "l1_evidence_lookback_bars", None)
         if lookback_bars is not None:
             min_exit_idx = float(registry_as_of_idx - int(lookback_bars))
-            frame = frame.loc[exit_idx.loc[frame.index] >= min_exit_idx].copy()
+            mature = mature & (exit_idx >= min_exit_idx)
+        frame = frame.loc[mature]
     if frame.empty:
         return ()
     frame["holding_bucket"] = frame["expected_holding_bars"].map(_holding_bucket)
     baseline_mode: Literal["peer_exclusive", "absolute"] = getattr(cfg, "l1_baseline_mode", "peer_exclusive")
     frame["incremental_bps"] = _compute_incremental_bps(frame, mode=baseline_mode)
-    grouped = frame.groupby(["symbol", "strategy_id", "activation_context"], sort=True)
+    grouped = frame.groupby(["symbol", "strategy_id", "activation_context"], sort=False)
     evidence_list: list[SymbolStrategyEvidence] = []
     raw_p_values: list[float] = []
 

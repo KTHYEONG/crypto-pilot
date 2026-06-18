@@ -652,12 +652,13 @@ def select_candidate_events_for_portfolio(
             top_idx: list[int] = []
             max_variant_fraction = float(getattr(cfg, "max_variant_selection_fraction", 1.0))
             max_events_per_bar = getattr(cfg, "selection_max_events_per_bar", None)
-            for _, group in eligible_df.groupby("_merge_dt", sort=True):
+            eligible_df = eligible_df.sort_values(
+                ["_merge_dt", primary_sort_col, "mu_net_decision_bps", "q10_net_bps"],
+                ascending=[True, False, False, False],
+            )
+            for _, group in eligible_df.groupby("_merge_dt", sort=False):
                 deduped = (
-                    group.reset_index().sort_values(
-                        [primary_sort_col, "mu_net_decision_bps", "q10_net_bps"],
-                        ascending=[False, False, False],
-                    )
+                    group.reset_index()
                     .groupby("symbol", sort=False, as_index=False)
                     .first()
                 )
@@ -667,18 +668,10 @@ def select_candidate_events_for_portfolio(
                 n_keep += keep_for_bar
                 if max_variant_fraction < 1.0 and keep_for_bar > 1 and {"family", "variant"}.issubset(deduped.columns):
                     max_per_variant = max(1, math.ceil(keep_for_bar * max_variant_fraction))
-                    variant_counts: dict[tuple[str, str], int] = {}
-                    selected_for_bar = 0
-                    for row in deduped.itertuples(index=False):
-                        key = (str(row.family), str(row.variant))
-                        current = variant_counts.get(key, 0)
-                        if current >= max_per_variant:
-                            continue
-                        top_idx.append(int(row.index))
-                        variant_counts[key] = current + 1
-                        selected_for_bar += 1
-                        if selected_for_bar >= keep_for_bar:
-                            break
+                    deduped["_vr"] = deduped.groupby(["family", "variant"], sort=False).cumcount()
+                    deduped = deduped[deduped["_vr"] < max_per_variant].head(keep_for_bar)
+                    if not deduped.empty:
+                        top_idx.extend(int(i) for i in deduped["index"].tolist())
                 else:
                     top_idx.extend(int(idx) for idx in deduped.head(keep_for_bar)["index"].tolist())
             mask = pd.Series(False, index=df.index, dtype=bool)
