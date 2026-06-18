@@ -145,12 +145,11 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
     - Config     : 200 trials
   ────────────────────────────────────────────────────────────────────────────
  [OPT] Deleted existing study 'l2_study_4h_03972e5343cd' for a fresh start.
-[L2-OPT]: 100%|██████████████████████████████████████████████████████| 200/200 [01:12<00:00,  2.77it/s, Best CAGR: 423.00% | Current: 92.04%]
+[L2-OPT]: 100%|██████████████████████████████████████████████████████| 200/200 [01:10<00:00,  2.82it/s, Best CAGR: 423.00% | Current: 92.04%]
 [L2-SELECTION] 2 gate-pass 후보 수집 → champion Trial #187 Sortino=2.6040 CAGR=1.3361
 [L2-SELECTION] Champion selected. Trial #187, Objective=2.2028, DSR=0.8312 (n_eff=3.00)
 [L2-DEPLOY-C4] L*=19.527 (binding=mdd) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
-[L2-DEPLOY] L*=19.5266 binding=mdd | CAGR=1.3361 MDD=0.2745 CVaR95=0.0321 RiskUtil=0.915
-[L2-DEPLOY] realization gap: risk_util=0.915 expected≈0.700 (결함 #1/#2 재발 의심 — vol-targeting 또는 gross 제약 확인 요망)
+[L2-DEPLOY] L*=19.5266 binding=champion | CAGR=1.3361 MDD=0.2745 CVaR95=0.0321 RiskUtil=0.915
 ● [LAYER 2 PORTFOLIO SCORECARD]
 ──────────────────────────────────────────────────────────────────────────────
   STATUS  : ✅ PASS
@@ -166,9 +165,9 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ✅ Sharpe:  2.513 | MDD:    0.8% | Status: PASS
-  ├─ Fold #2 : ✅ Sharpe:  2.582 | MDD:    1.5% | Status: PASS
-  └─ Fold #3 : ❌ Sharpe: -0.362 | MDD:    1.6% | Status: FAIL
+  ├─ Fold #1 : ✅ Sharpe:  2.513 | CAGR:  +272.1% | MDD:  14.8% | Status: PASS
+  ├─ Fold #2 : ✅ Sharpe:  2.582 | CAGR:  +420.5% | MDD:  25.7% | Status: PASS
+  └─ Fold #3 : ❌ Sharpe: -0.362 | CAGR:   -33.7% | MDD:  27.4% | Status: FAIL
 >> LAYER 2 RESULT: [PASS] -> Proceeding to Final Holdout.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
