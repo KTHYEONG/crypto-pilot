@@ -607,25 +607,164 @@ def _run_awf_simulation(
         end_idx=signal_end,
     )
 
-    # D3: fit-leg 수익률 수집 루프 (OOS 루프 이전, look-ahead-free)
-    # fold.fit_start < fold.oos_start 보장 — fit 기간 내 equal-weight 평균 수익률 수집.
-    # 독립 상태(prev_w_fit=0)로 별도 시뮬 없이 단순 bar-return 평균만 기록.
-    # Time Complexity: O(F·(oos_start-fit_start)) where F=n_folds.
+    # C1: fit-leg book 수익률 수집 (RC-2 수정).
+    # OOS 루프와 동일한 allocation 체인(rank→diagonal_kelly→throttle→vol_target)을 fit 구간에 적용.
+    # 독립 prev_w_fit=0 초기화; signal schedule은 fit 구간 events만 사용 (look-ahead 0).
+    # fit_end = fold.oos_start (exclusive) → look-ahead 엄수.
+    # Time Complexity: O(F·T_fit·N) where F=n_folds, T_fit=fit bars, N=n_sym.
     for _fit_fold in awf_folds:
-        fit_start = int(_fit_fold.fit_start)
-        fit_end = int(_fit_fold.oos_start)  # oos_start 이전까지만 (look-ahead 0)
-        if fit_start >= fit_end or fit_end <= 1:
+        _fit_start = int(_fit_fold.fit_start)
+        _fit_end = int(_fit_fold.oos_start)  # exclusive — look-ahead 0
+        if _fit_start >= _fit_end or _fit_end <= 1:
             continue
-        for _ft in range(fit_start, fit_end - 1):
+        # fit 구간 전용 schedule (OOS schedule과 분리 — look-ahead 방지)
+        _fit_schedule = build_layer2_signal_schedule(
+            signal_batch=signal_batch,
+            start_idx=_fit_start,
+            end_idx=_fit_end,
+        )
+        _prev_w_fit: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
+        _prev_selection_fit: frozenset[str] = frozenset()
+        for _ft in range(_fit_start, _fit_end - 1, rebalance_bars):
+            _ft_end = min(_ft + rebalance_bars, _fit_end - 1)
             if _ft + 1 >= aligned.close_2d.shape[0]:
                 break
-            close_t = aligned.close_2d[_ft].astype(np.float64)
-            close_t1 = aligned.close_2d[_ft + 1].astype(np.float64)
-            valid = (close_t > 0.0) & (close_t1 > 0.0)
-            if not np.any(valid):
+            # signal 조회 (fit 구간 schedule만 사용)
+            _offset_fit = _ft - _fit_schedule.start_idx
+            if _offset_fit < 0 or _offset_fit >= len(_fit_schedule._events_by_bar):
                 continue
-            bar_ret = np.where(valid, (close_t1 - close_t) / close_t, 0.0)
-            all_fit_rets_hybrid.append(float(np.mean(bar_ret[valid])))
+            _fit_tradeable = _resolve_tradeable_mask(aligned=aligned, t=_ft, n_sym=n_sym)
+            _fit_hurdle: NDArray[np.float64]
+            if (
+                aligned.execution_cost_bps_2d is not None
+                and _ft < aligned.execution_cost_bps_2d.shape[0]
+            ):
+                _fit_hurdle = aligned.execution_cost_bps_2d[_ft].astype(np.float64)
+                _fit_hurdle = np.nan_to_num(_fit_hurdle, nan=3.8, posinf=3.8, neginf=3.8)
+            else:
+                _fit_hurdle = np.full(n_sym, 3.8, dtype=np.float64)
+
+            _fit_btc_beta: NDArray[np.float64] | None = None
+            if aligned.beta_vs_market_1d is not None:
+                _fit_btc_beta = aligned.beta_vs_market_1d.astype(np.float64)
+                _fit_btc_beta = np.nan_to_num(_fit_btc_beta, nan=0.0)
+            _fit_beta_arr = (
+                np.zeros(n_sym, dtype=np.float64)
+                if _fit_btc_beta is None
+                else _fit_btc_beta
+            )
+
+            _fit_valid_signals: dict[str, SymbolSignal] = {}
+            for _fsym, _fevent in _fit_schedule._events_by_bar[_offset_fit].items():
+                _fidx = sym_to_idx.get(_fsym)
+                if _fidx is None or not _fit_tradeable[_fidx]:
+                    continue
+                _fbasis: EdgeBasis = (
+                    "gross"
+                    if np.isfinite(float(_fevent.expected_gross_bps))
+                    and float(_fevent.expected_gross_bps) != 0.0
+                    else "net"
+                )
+                _fedge = compute_expected_layer2_edge(
+                    side=int(_fevent.side),
+                    expected_gross_bps=float(_fevent.expected_gross_bps),
+                    expected_net_bps=float(_fevent.expected_net_bps),
+                    expected_holding_bars=int(_fevent.expected_holding_bars),
+                    execution_cost_bps=float(_fit_hurdle[_fidx]),
+                    edge_basis=_fbasis,
+                    fixed_cost_safety_mult=fixed_cost_safety_mult,
+                )
+                if (
+                    not np.isfinite(_fedge.signed_net_bps_per_bar)
+                    or _fedge.signed_net_bps_per_bar == 0.0
+                ):
+                    continue
+                _fit_valid_signals[_fsym] = SymbolSignal(
+                    raw_mu=_fedge.signed_net_bps_per_bar,
+                    volatility=float(max(vol_matrix[_ft, _fidx], VOL_FLOOR)),
+                    n_obs=1,
+                    t_stat=0.0,
+                    valid=True,
+                    beta_btc=None,
+                    quality_weight=float(_fevent.quality_weight),
+                )
+
+            if not _fit_valid_signals:
+                continue
+
+            _fit_selected, _ = rank_and_select(
+                _fit_valid_signals,
+                k_rank=k_rank,
+                sector_cap=n_sym,
+                prev_selection=_prev_selection_fit,
+                rank_buffer=rank_buffer,
+                min_abs_z=float(config.min_abs_rank_z),
+                selection_mode="absolute",
+            )
+            _prev_selection_fit = _fit_selected
+
+            _fit_mu_arr: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
+            _fit_sig_arr: NDArray[np.float64] = np.full(n_sym, VOL_FLOOR, dtype=np.float64)
+            for _fs, _fss in _fit_valid_signals.items():
+                if _fs in sym_to_idx:
+                    _fi = sym_to_idx[_fs]
+                    if _fs in _fit_selected:
+                        _fit_mu_arr[_fi] = _fss.raw_mu
+                    _fit_sig_arr[_fi] = _fss.volatility
+
+            _fit_support_mask = _fit_mu_arr != 0.0
+            _fit_w = diagonal_kelly_weights(
+                mu_bps=_fit_mu_arr,
+                sigma=_fit_sig_arr,
+                kelly_fraction=kelly_fraction,
+                vol_target=vol_target,
+                friction_hurdle_bps=_fit_hurdle,
+                holding_bars=rebalance_bars,
+                friction_safety_mult=deploy_cost_safety_mult,
+                caps=caps,
+                prev_w=_prev_w_fit,
+                no_trade_band=no_trade_band,
+                btc_beta=_fit_btc_beta,
+                bars_per_year=bars_per_year,
+                support_mask=_fit_support_mask,
+            )
+            if edge_throttle_enabled:
+                _fit_eff_hurdle = _fit_hurdle * deploy_cost_safety_mult / max(float(rebalance_bars), 1.0)
+                _fit_score = _book_edge_score(_fit_w, _fit_mu_arr, _fit_eff_hurdle)
+                _fit_m = _edge_throttle_multiplier(
+                    _fit_score,
+                    floor_bps=edge_floor_bps,
+                    ref_bps=edge_ref_bps,
+                    gamma=edge_throttle_gamma,
+                    min_active_mult=edge_throttle_min_active_mult,
+                )
+                _fit_w = _fit_w * _fit_m
+            _fit_w = np.where(_fit_tradeable, _fit_w, 0.0)
+
+            # 리밸런싱 비용
+            _fit_rebal_cost = compute_rebalance_cost(
+                previous_weights=_prev_w_fit,
+                target_weights=_fit_w,
+                round_trip_cost_bps=_fit_hurdle,
+            )
+            _prev_w_fit = _fit_w
+
+            # 비중 보유 기간 내 per-bar book return 수집
+            for _ft2 in range(_ft, _ft_end):
+                if _ft2 + 1 >= aligned.close_2d.shape[0]:
+                    break
+                _fc_cur = aligned.close_2d[_ft2]
+                _fc_nxt = aligned.close_2d[_ft2 + 1]
+                _fbar_ret = np.where(_fc_cur > 0, (_fc_nxt - _fc_cur) / _fc_cur, 0.0)
+                _fbar_ret = np.nan_to_num(_fbar_ret, nan=0.0, posinf=0.0, neginf=0.0)
+                _ffunding = _resolve_funding_row(aligned=aligned, t2=_ft2, n_sym=n_sym)
+                _fgross = compute_futures_bar_return(
+                    weights=_fit_w,
+                    price_returns=_fbar_ret,
+                    funding_rates=_ffunding,
+                )
+                _fcost = _fit_rebal_cost if _ft2 == _ft else 0.0
+                all_fit_rets_hybrid.append(_fgross - _fcost)
 
     for _fold_idx, fold in enumerate(awf_folds):
         _fold_h: list[float] = []
