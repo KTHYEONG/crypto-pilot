@@ -1656,24 +1656,24 @@ def run_tiered_pipeline(
             logger.info(">> LAYER 1: BLOCKED -> gate_passed=False")
         return (l1, None, None)
 
-    if target_phase == "l1":
-        if verbose:
-            logger.info(
-                format_layer_universe_audit_table(
-                    (
-                        build_layer_universe_audit(
-                            aligned=aligned,
-                            layer="L1",
-                            start_idx=l1_start_bars,
-                            end_idx=l1_end_bars,
-                        ),
-                    )
+    if verbose and l1_result_override is None:
+        logger.info(
+            format_layer_universe_audit_table(
+                (
+                    build_layer_universe_audit(
+                        aligned=aligned,
+                        layer="L1",
+                        start_idx=l1_start_bars,
+                        end_idx=l1_end_bars,
+                    ),
                 )
             )
-            logger.info("\n>> LAYER 1: PASS -> Target phase L1 reached. Stopping pipeline.")
+        )
+
+    if target_phase == "l1":
         return (l1, None, None)
 
-    if verbose:
+    if verbose and l1_result_override is None:
         logger.info("\n>> LAYER 1: PASS -> Proceeding to Layer 2.")
 
     # ─── Layer 2: AWF Portfolio Optimization ─────────────────────────────────
