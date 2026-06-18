@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from src.core.utils.utils import PERF
 from src.domain.futures.portfolio.portfolio_constructor import (
     PortfolioCaps,
     diagonal_kelly_weights,
@@ -835,6 +836,7 @@ def _run_awf_simulation(
                 all_fit_rets_hybrid.append(_fgross - _fcost)
 
     for _fold_idx, fold in enumerate(awf_folds):
+        t_fold_start = time.perf_counter()
         _fold_h: list[float] = []
         _fold_b: list[float] = []
         _fold_selected: set[str] = set()
@@ -1081,14 +1083,19 @@ def _run_awf_simulation(
         fold_rets_hybrid.append(_fold_h)
         fold_rets_baseline.append(_fold_b)
         fold_selected_symbols.append(tuple(sorted(_fold_selected)))
+        logger.log(PERF,
+            "[AWF-FOLD] fold=%d/%d oos_bars=%d took=%.4fs",
+            _fold_idx + 1, len(awf_folds),
+            fold.oos_end - fold.oos_start,
+            time.perf_counter() - t_fold_start,
+        )
 
-    logger.debug(
-        "[L2-AWF-PROF] total=%.4fs | prep=%.4fs rank=%.4fs alloc=%.4fs eval=%.4fs",
+    logger.log(PERF,
+        "[AWF-PERF] total=%.4fs prep=%.4fs rank=%.4fs alloc=%.4fs eval=%.4fs "
+        "n_folds=%d n_rebalances=%d",
         time.perf_counter() - t_start_total,
-        prof_prep,
-        prof_rank,
-        prof_alloc,
-        prof_eval,
+        prof_prep, prof_rank, prof_alloc, prof_eval,
+        len(awf_folds), rebalance_count,
     )
 
     return _AwfSimResult(
