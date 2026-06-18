@@ -32,10 +32,12 @@ Operates as the final verification seam for the CS Rank + Diagonal Kelly (Layer 
 **Frozen Parameters:**
 - Uses the optimal `l2_params` identified during the Layer 2 AWF simulation.
 - Hyperparameters are **frozen**; no refitting or parameter adjustment occurs in Layer 3.
+- `l2_deploy_leverage`가 존재하면 L3 holdout도 동일 배치 레버리지로 평가한다.
 
 **Performance Metrics (Lean 5-Gate, single-pass compounding focus):**
 - **CAGR / Sharpe / Sortino:** Computed on actual hybrid and baseline (1/N) returns using `bars_per_year(tf)` annualization (no vol-proxy approximation).
 - **MDD / CVaR95:** Maximum peak-to-trough drawdown and 95% tail loss of the hybrid portfolio.
+- **Deployment Parity:** L3 hybrid metrics are computed on `apply_deployment(rets, L*)` output when `deploy_leverage > 1.0`; otherwise L3 stays on the unit path.
 - **MAR:** $\text{MAR} = \frac{\text{CAGR}}{\text{MDD} + 10^{-9}}$
 - **`total_return` / `equity_multiple`:** Single-pass terminal compounding result (`equity_multiple - 1`), reusing the L2 terminal-multiple helper — no new math, lean reuse per design decision (L3 favors realized compounding over Optuna-grade diagnostics).
 - **`n_trades`:** Realized trade count over the holdout window — feeds the `insufficient_trades` gate.
@@ -86,7 +88,7 @@ graph TD
 |--------|------|
 | `tiered_workflow/pipeline.py` | Implements `run_l3_holdout`, defining the dummy fold and calling the AWF sim. |
 | `tiered_workflow/awf_sim.py` | Shared simulation loop (`_run_awf_simulation`) executed with frozen L2 params. |
-| `tiered_workflow/dataclasses.py`| Defines `Layer3Result` (CAGR, MDD, Sharpe, Sortino, MAR, total_return, equity_multiple, n_trades, cvar95, avg_gross_exposure, gate_passed, blocker_reason). |
+| `tiered_workflow/dataclasses.py`| Defines `Layer3Result` (CAGR, MDD, Sharpe, Sortino, MAR, total_return, equity_multiple, n_trades, cvar95, avg_gross_exposure, deploy_leverage, gate_passed, blocker_reason). |
 | `optimization/candidate_selector.py` | Implements `check_stability_layer3` for multi-seed validation. |
 | `optimization/final_evaluator.py` | Orchestrates the final champion evaluation, invoking Layer 3 stability checks. |
 

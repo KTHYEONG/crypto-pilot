@@ -142,3 +142,7 @@ ai_read_policy: when_related
 - **Rationale:** 파이썬 객체 생성 오버헤드가 L2 Optuna 속도의 90% 이상을 점유함을 확인하여 엔진을 완전 벡터화로 교체(200 Trials 01:25→01:06, ~25% 단축 및 병목 제거). 초기 벡터화 시 `3.8 bps` 누락(NaN 처리)으로 인해 발생한 `no_feasible_trials` 차단을 해결하여 기존 엔진과 수학적 1:1 정합성을 확보함.
 - **Edge Cases:** `event_strength_2d` 캐싱으로 동일 종목-동일 시점의 시그널 충돌 시 결정론적 선택 보장. Aligned 데이터의 `execution_cost_bps_2d`가 `None`인 경우에도 안전하게 fallback 작동 확인.
 
+## 2026-06-18 L2→L3 deployment parity 정합화
+- **Delta:** `run_tiered_pipeline`가 L2 champion의 `l2_deploy_leverage`를 L3 holdout에도 그대로 전달하고, `run_l3_holdout(deploy_leverage=L*)`가 L2 final scorecard와 동일한 `apply_deployment(rets, L*)` 경로로 deployed hybrid 지표를 재계산하도록 정렬. `Layer3Result`에 `deploy_leverage` 추적 필드 추가.
+- **Rationale:** L2 champion이 배치까지 통과했더라도 L3가 unit path로 평가되면, holdout 결과가 L2 scorecard와 계약상 불일치하여 false-negative/false-positive 판정이 발생한다. 동일 배치 계약을 L3에 명시적으로 주입해 백테스트 정합성을 복구한다.
+- **Edge Cases:** `deploy_leverage<=1.0` 또는 비유한값은 무효화되어 기존 unit path를 유지한다. baseline 수익률은 배치하지 않는다.
