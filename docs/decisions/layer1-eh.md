@@ -41,3 +41,9 @@
 - Decision: preserve `quality_weight` in ranking while keeping compatibility `qualified` tied to `hard_eligible and quality_weight > 0.0`.
 - Consequence: production readiness now depends on `fold_cov`, `match_ratio`, `sym_count`, `fold_ratio`, and `probe_lcb_bps`; CPCV stays out of the production path.
 - Status: Accepted
+
+## L1-ADR-009: L1 PERF(15) 로그 계층적 타이밍 시스템 도입 (2026-06-18)
+- **Delta**: `src.core.utils.utils.PERF=15` 로그 레벨을 모든 L1 서브페이즈에 적용. 기존 `logger.debug` → `logger.log(PERF)` 이관. 신규 마커 `[L1-CTX]`, `[L1-FOLD]`, `[CANDIDATE-FOLD]`, `[SIGNAL-EVIDENCE]`, `[AWF-PERF]` (`[L2-AWF-PROF]` 대체) 추가. `run_l1_nested_swf` evidence_snapshots 타이밍, outer fold per-fold 타이밍, candidate_workflow 워커 내 timing_profile PERF emit 추가. `signal_selection.py` evidence loop prep/stats/qualify 3단계 분해 타이밍. `awf_sim.py` DEBUG→PERF 마이그레이션 + per-fold 로그. `opt_main_futures.py` `"alo"/"full"` 레거시 phase 제거, L1-only 방어형 가드 `{"l2","l3"}` 도입.
+- **Rationale**: L1 병목탐지가 DEBUG(10) 레벨에 흩어져 있어 운영 중 실시간 모니터링 불가. PERF(15)로 통일하여 `--phase l1` 실행 시 계층적 소요시간 로그만으로 병목지점 식별 가능하게 함. 실제 54심볼 측정 결과 `selection` 70-90%, `SIGNAL-EVIDENCE.prep` 78-84%가 주요 병목으로 확인됨.
+- **Files Changed**: `pipeline.py`, `candidate_workflow.py`, `signal_selection.py`, `awf_sim.py`, `opt_main_futures.py`, `test_l1_determinism.py`.
+- **Status**: Accepted
