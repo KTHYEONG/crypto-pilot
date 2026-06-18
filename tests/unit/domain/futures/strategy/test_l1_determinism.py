@@ -236,3 +236,128 @@ class TestFeatureCachePriming:
         assert "sym_ret_1" in cache
         assert "btc_ret_1_ser" in cache
 
+
+# ---------------------------------------------------------------------------
+# Scenario 4: PERF(15) 로그 커버리지 검증
+# ---------------------------------------------------------------------------
+
+class TestPerfLogCoverage:
+    """L1 PERF 로그 출력 검증: 병목탐지용 로그가 정상 emit되는지 확인."""
+
+    def test_perf_log_emit_in_compute_symbol_strategy_evidence(self, caplog: pytest.LogCaptureFixture) -> None:
+        """compute_symbol_strategy_evidence에서 [SIGNAL-EVIDENCE] PERF 로그가 emit되는지 검증."""
+        import pandas as pd
+
+        from src.core.utils.utils import PERF
+        from src.domain.futures.strategy.config import CandidateStrategyConfig
+        from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+            compute_symbol_strategy_evidence,
+        )
+
+        caplog.set_level(PERF)
+
+        cfg = CandidateStrategyConfig(
+            l1_pair_min_effective_obs=3,
+            l1_pair_min_folds=1,
+            l1_pair_min_mean_gross_bps=-9999,
+            l1_pair_min_incremental_bps=-9999,
+            l1_pair_min_positive_fold_ratio=0.0,
+            l1_pair_fdr_alpha=0.25,
+            l1_bootstrap_block_bars=2,
+            l1_bootstrap_samples=10,
+            l1_quality_weight_enabled=False,
+        )
+        event_results = pd.DataFrame({
+            "symbol": ["BTC", "ETH"],
+            "strategy_id": ["mom:a", "mom:b"],
+            "activation_context": ["all", "all"],
+            "fold_id": [0, 0],
+            "expected_holding_bars": [1, 1],
+            "gross_event_bps": [10.0, 5.0],
+            "incremental_bps": [8.0, 3.0],
+            "uniqueness_weight": [1.0, 1.0],
+            "decision_idx": [0, 0],
+            "batch_size": [1, 1],
+        })
+
+        result = compute_symbol_strategy_evidence(
+            event_results=event_results,
+            cfg=cfg,
+            seed=42,
+            registry_as_of_idx=0,
+        )
+
+        assert len(result) > 0
+        assert any("[SIGNAL-EVIDENCE]" in rec.message for rec in caplog.records)
+        assert any("n_pairs=" in rec.message for rec in caplog.records)
+        assert any("prep=" in rec.message for rec in caplog.records)
+
+    def test_awf_perf_log_migrated_from_debug(self, caplog: pytest.LogCaptureFixture) -> None:
+        """_run_awf_simulation 종료 시 [AWF-PERF] 로그가 PERF 레벨로 emit되는지 검증."""
+        from unittest.mock import MagicMock
+
+        import numpy as np
+
+        from src.core.utils.utils import PERF
+        from src.domain.futures.strategy.tiered_workflow import _run_awf_simulation
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+            Layer2AllocationConfig,
+        )
+
+        caplog.set_level(PERF)
+
+        cache = MagicMock()
+        cache.tradeable_mask_2d = np.zeros((5, 2), dtype=bool)
+        cache.signal_mask_2d = np.zeros((5, 2), dtype=bool)
+        cache.hurdle_2d = np.zeros((5, 2), dtype=np.float64)
+        cache.beta_1d = np.zeros(2, dtype=np.float64)
+        cache.vol_matrix_2d = np.ones((5, 2), dtype=np.float64) * 0.02
+        cache.expected_gross_bps_2d = np.zeros((5, 2), dtype=np.float64)
+        cache.expected_net_bps_2d = np.zeros((5, 2), dtype=np.float64)
+        cache.holding_bars_2d = np.ones((5, 2), dtype=np.float64)
+        cache.side_2d = np.ones((5, 2), dtype=np.float64)
+        cache.quality_weight_2d = np.ones((5, 2), dtype=np.float64)
+        cache.funding_2d = np.zeros((5, 2), dtype=np.float64)
+
+        aligned = MagicMock()
+        aligned.symbols = ("BTC", "ETH")
+        aligned.close_2d = np.ones((6, 2), dtype=np.float64) * 100.0
+        aligned.datetimes = np.array([f"2024-01-0{d}T00:00:00" for d in range(1, 7)], dtype="datetime64[ns]")
+
+        from src.domain.futures.strategy.walk_forward import WFFold
+        fold = WFFold(
+            fit_start=0, fit_end=1,
+            cal_start=0, cal_end=1,
+            oos_start=1, oos_end=5,
+        )
+        awf_folds = (fold,)
+
+        config = Layer2AllocationConfig(
+            k_rank=2, rank_buffer=0, kelly_fraction=0.5,
+            no_trade_band=0.0, rebalance_bars=1,
+        )
+
+        from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
+
+        result = _run_awf_simulation(
+            signal_batch=MagicMock(),
+            awf_folds=awf_folds,
+            aligned=aligned,
+            cache=cache,
+            config=config,
+            caps=PortfolioCaps(),
+            tf="4h",
+        )
+
+        assert result is not None
+        perf_messages = [rec.message for rec in caplog.records if rec.levelno == PERF]
+        assert any("[AWF-PERF]" in m for m in perf_messages), (
+            f"[AWF-PERF] not found in PERF logs. Got: {perf_messages}"
+        )
+        assert any("[AWF-FOLD]" in m for m in perf_messages), (
+            f"[AWF-FOLD] not found in PERF logs. Got: {perf_messages}"
+        )
+        assert not any("L2-AWF-PROF" in m for m in perf_messages), (
+            "Legacy [L2-AWF-PROF] DEBUG log should be migrated to PERF"
+        )
+
