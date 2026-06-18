@@ -1987,7 +1987,14 @@ def run_pipeline(
         return strategy_out
 
     # Step 4.5) C3/C4 gold standard: 전략 이벤트로 scorecard 갱신
-    if regime_stage_result is not None and strategy_out is not None:
+    # Layer1Result는 labeled 속성이 없으므로 isinstance guard
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result
+
+    if (
+        regime_stage_result is not None
+        and strategy_out is not None
+        and not isinstance(strategy_out, Layer1Result)
+    ):
         _refresh_regime_c34_gold_standard(*regime_stage_result, strategy_out)
     if run_config.phase == "l1":
         return RunnerResult(exit_code=0, reason="l1_mode_done")

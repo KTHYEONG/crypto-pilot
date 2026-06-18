@@ -42,6 +42,12 @@
 - Consequence: production readiness now depends on `fold_cov`, `match_ratio`, `sym_count`, `fold_ratio`, and `probe_lcb_bps`; CPCV stays out of the production path.
 - Status: Accepted
 
+## L1-ADR-010: L1 Pipeline 성능 최적화 — Python loop 제거 및 vectorization (2026-06-18)
+- **Delta**: 4개 파일 최적화: (1) `_by_q_values` backward loop → `np.minimum.accumulate`, (2) `_compute_incremental_bps` agg+join → transform, (3) `compute_symbol_strategy_evidence` 중복 .copy() 제거 + bool mask 단일화 + sort=False, (4) `select_candidate_events_for_portfolio` per-group sort → pre-sort + itertuples() → cumcount().
+- **Rationale**: L1 PERF 실측 결과 (48.95s) 기반. `selection` 70-90%(1.1~3.7s/fold)와 `prep` 78-84%(0.6~1.6s/snapshot)가 주요 병목. 품질 훼손 없는 내부 알고리즘 최적화로 40~60% 단축 예상. + `--phase l1` 실행 시 `Layer1Result.labeled` 미존재로 인한 `AttributeError` 수정 (isinstance guard).
+- **Files Changed**: `opt_main_futures.py`, `signal_selection.py`, `candidate_portfolio.py`.
+- **Status**: Accepted
+
 ## L1-ADR-009: L1 PERF(15) 로그 계층적 타이밍 시스템 도입 (2026-06-18)
 - **Delta**: `src.core.utils.utils.PERF=15` 로그 레벨을 모든 L1 서브페이즈에 적용. 기존 `logger.debug` → `logger.log(PERF)` 이관. 신규 마커 `[L1-CTX]`, `[L1-FOLD]`, `[CANDIDATE-FOLD]`, `[SIGNAL-EVIDENCE]`, `[AWF-PERF]` (`[L2-AWF-PROF]` 대체) 추가. `run_l1_nested_swf` evidence_snapshots 타이밍, outer fold per-fold 타이밍, candidate_workflow 워커 내 timing_profile PERF emit 추가. `signal_selection.py` evidence loop prep/stats/qualify 3단계 분해 타이밍. `awf_sim.py` DEBUG→PERF 마이그레이션 + per-fold 로그. `opt_main_futures.py` `"alo"/"full"` 레거시 phase 제거, L1-only 방어형 가드 `{"l2","l3"}` 도입.
 - **Rationale**: L1 병목탐지가 DEBUG(10) 레벨에 흩어져 있어 운영 중 실시간 모니터링 불가. PERF(15)로 통일하여 `--phase l1` 실행 시 계층적 소요시간 로그만으로 병목지점 식별 가능하게 함. 실제 54심볼 측정 결과 `selection` 70-90%, `SIGNAL-EVIDENCE.prep` 78-84%가 주요 병목으로 확인됨.
