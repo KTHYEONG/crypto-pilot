@@ -113,25 +113,36 @@ def _apply_deployment_to_params(
     evaluation: Any,
     tf: str,
 ) -> dict[str, Any]:
-    """Fix-A: champion params에 결정론적 레버리지 L*를 적용.
+    """D3: champion params에 fit-leg 기반 결정론적 레버리지 L*를 적용.
 
     kelly_fraction *= L*. max_ann_vol도 존재하면 동일 배율 적용.
-    Sharpe/DSR은 스케일 불변이므로 그대로 유지.
+    Sortino/Sharpe는 스케일 불변이므로 그대로 유지.
+
+    D3 우선순위: fit_returns_hybrid(look-ahead-free) > returns_hybrid(OOS 대리).
+    fit-leg 사용 시 l_hard_cap 무제한(MDD/CVaR 예산이 실제 binding) → CAGR↑.
     """
     config = Layer2AllocationConfig.from_mapping(params)
     if not config.l2_deploy_enabled:
         return params
 
-    returns_hybrid = getattr(evaluation, "returns_hybrid", None)
-    if not returns_hybrid:
-        return params
+    # D3: fit-leg 수익률 우선 사용 (look-ahead-free)
+    fit_returns = getattr(evaluation, "fit_returns_hybrid", None)
+    if fit_returns:
+        rets = np.array(fit_returns, dtype=np.float64)
+        _source = "fit_leg"
+    else:
+        # fallback: OOS 대리 (fit-leg 미노출 시, binding=hard_cap으로 실질 look-ahead 없음)
+        returns_hybrid = getattr(evaluation, "returns_hybrid", None)
+        if not returns_hybrid:
+            return params
+        rets = np.array(returns_hybrid, dtype=np.float64)
+        _source = "oos_proxy"
 
-    rets = np.array(returns_hybrid, dtype=np.float64)
     if rets.size < 2:
         return params
 
     lev, binding = calibrate_deployment_leverage(
-        fit_rets=rets,  # OOS 대리: AWF fit-leg 미노출, binding=hard_cap으로 실질 look-ahead 없음
+        fit_rets=rets,
         mdd_cap=float(config.l2_max_mdd_abs),
         cvar_cap=float(config.l2_max_cvar_95),
         mdd_margin=float(config.l2_deploy_mdd_margin),
@@ -150,8 +161,8 @@ def _apply_deployment_to_params(
         deployed["max_ann_vol"] = float(raw_vol) * lev
 
     _logger.info(
-        "[L2-DEPLOY-FIX-A] L*=%.3f (binding=%s) | kelly %.3f→%.3f | tf=%s",
-        lev, binding, config.kelly_fraction, new_kelly, tf,
+        "[L2-DEPLOY-D3] L*=%.3f (binding=%s, src=%s) | kelly %.3f→%.3f | tf=%s",
+        lev, binding, _source, config.kelly_fraction, new_kelly, tf,
     )
     return deployed
 
@@ -335,6 +346,7 @@ def select_layer2_champion(
                 growth_lcb_hybrid=float(candidate_evaluation.growth_lcb_hybrid),
                 growth_lcb_baseline=float(candidate_evaluation.growth_lcb_baseline),
                 dsr_hybrid=None,
+                psr_hybrid=float(candidate_evaluation.psr_hybrid),
                 config=candidate_config,
             )
         constraints_ok = all(value <= 0.0 for value in pre_dsr_gate.optuna_constraint_values)
@@ -368,6 +380,7 @@ def select_layer2_champion(
             growth_lcb_hybrid=float(candidate_evaluation.growth_lcb_hybrid),
             growth_lcb_baseline=float(candidate_evaluation.growth_lcb_baseline),
             dsr_hybrid=float(dsr),
+            psr_hybrid=float(candidate_evaluation.psr_hybrid),
             config=candidate_config,
         )
 
@@ -404,26 +417,28 @@ def select_layer2_champion(
             best_diagnostic_dsr = float(dsr)
 
         if constraints_ok and final_gate.promotion_passed:
-            # Fix B: break 제거 — 전수 수집 후 argmax(dsr, cagr) 선택
+            # D4: argmax(dsr, cagr) → argmax(sortino, cagr) 교체.
+            # DSR은 자기참조(동일 신호셋 파라미터 섭동) → 독립성 불성립.
+            # Sortino가 하방위험 조정 shape를 직접 반영 (shape 최적화 D1과 정합).
             passed_candidates.append((
-                float(dsr),
+                float(candidate_evaluation.sortino_hybrid),
                 float(candidate_evaluation.cagr_hybrid),
                 candidate,
                 candidate_evaluation,
                 float(dsr),
             ))
 
-    # Fix B: gate-pass 후보 중 argmax(dsr, cagr_hybrid) 선택
+    # D4: gate-pass 후보 중 argmax(sortino_hybrid, cagr_hybrid) 선택
     if passed_candidates:
         best_entry = max(passed_candidates, key=lambda x: (x[0], x[1]))
         champion_trial = best_entry[2]
         champion_evaluation = best_entry[3]
         champion_dsr = best_entry[4]
         _logger.info(
-            "[L2-SELECTION] %d gate-pass 후보 수집 → champion Trial #%d DSR=%.4f CAGR=%.4f",
+            "[L2-SELECTION] %d gate-pass 후보 수집 → champion Trial #%d Sortino=%.4f CAGR=%.4f",
             len(passed_candidates),
             champion_trial.number,
-            champion_dsr,
+            best_entry[0],
             best_entry[1],
         )
 
