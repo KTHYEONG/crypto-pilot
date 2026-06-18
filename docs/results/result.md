@@ -150,19 +150,19 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 ──────────────────────────────────────────────────────────────────────────────
   STATUS  : ❌ BLOCKED (cagr)
 
-  ❌ [Growth    ] CAGR: +14.0% (>=30.0%) | PnL: +10.7% | Equity x1.11
-  ✅ [Efficiency] Sharpe: 1.855 (>=1.000) | Sortino: 3.129 (>=1.500) | Calmar: 3.171 (>=1.000)
-  ✅ [Risk      ] MDD: 4.4% (<=30.0%) | CVaR95: 0.4% (<=6.0%) | RiskUtil: 14.7%
+  ❌ [Growth    ] CAGR: +3.3% (>=30.0%) | PnL: +2.5% | Equity x1.03
+  ✅ [Efficiency] Sharpe: 1.813 (>=1.000) | Sortino: 3.041 (>=1.500) | Calmar: 3.210 (>=1.000)
+  ✅ [Risk      ] MDD: 1.0% (<=30.0%) | CVaR95: 0.1% (<=6.0%) | RiskUtil: 3.4%
   ✅ [Robust    ] Fold: 100.0% (>=60.0%) | Trades: 111 (>=30) | Friction: 100.0%
-  ✅ [Uplift    ] Sharpe Uplift: +1.82 (>=+0.20)
-  ❌ [Integrity ] DSR: 0.270 (>=0.60) | PSR: 0.957 (diag)
-  [Diag     ] RelMDD: 1.06x | Turnover: 0.036
+  ✅ [Uplift    ] Sharpe Uplift: +1.78 (>=+0.20)
+  ✅ [Integrity ] DSR: 0.849 (>=0.60) | PSR: 0.952 (diag)
+  [Diag     ] RelMDD: 1.01x | Turnover: 0.009
 ──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ✅ Sharpe:  2.180 | MDD:    2.0% | Status: PASS
-  ├─ Fold #2 : ✅ Sharpe:  2.416 | MDD:    2.8% | Status: PASS
-  └─ Fold #3 : ✅ Sharpe:  0.874 | MDD:    4.4% | Status: PASS
+  ├─ Fold #1 : ✅ Sharpe:  2.179 | MDD:    0.4% | Status: PASS
+  ├─ Fold #2 : ✅ Sharpe:  1.914 | MDD:    0.8% | Status: PASS
+  └─ Fold #3 : ✅ Sharpe:  1.313 | MDD:    1.0% | Status: PASS
 >> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False
 !! FAIL: exit_code=1 reason=layer2_blocked:cagr
