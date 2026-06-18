@@ -10,6 +10,8 @@ Scenarios:
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -22,6 +24,8 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     Layer2AllocationConfig,
     Layer2BlockMetric,
 )
+from src.domain.futures.strategy.tiered_workflow.diagnostics import build_layer_universe_audit
+from src.domain.futures.strategy.tiered_workflow.l2_gate import evaluate_layer2_gate
 from src.domain.futures.strategy.tiered_workflow.metrics import _psr
 
 # ---------------------------------------------------------------------------
@@ -255,7 +259,7 @@ def test_uplift_constraint_is_negative_when_hybrid_sharpe_above_threshold() -> N
 
 
 def test_layer2_constraints_tuple_length_is_eight() -> None:
-    """Optuna safety constraints fallback 크기가 8인지 확인."""
+    """Optuna safety constraints fallback 크기가 9인지 확인."""
     # Arrange (Given): l2_constraint_values 미존재 trial 시뮬레이션
     from unittest.mock import MagicMock
 
@@ -268,32 +272,32 @@ def test_layer2_constraints_tuple_length_is_eight() -> None:
     fallback = layer2_constraints_from_trial(mock_trial)
 
     # Assert (Then)
-    assert len(fallback) == 8, (
-        f"fallback 크기 {len(fallback)} != 8. Optuna safety constraints 8-tuple이어야 함."
+    assert len(fallback) == 9, (
+        f"fallback 크기 {len(fallback)} != 9. Optuna safety constraints 9-tuple이어야 함."
     )
     assert all(v == 1.0 for v in fallback), "모든 fallback 값이 1.0 (infeasible) 이어야 함"
 
 
 def test_layer2_constraints_eight_element_feasible() -> None:
-    """Optuna safety constraints 8개가 모두 feasible(≤0)이면 통과 판정."""
+    """Optuna safety constraints 9개가 모두 feasible(≤0)이면 통과 판정."""
     from unittest.mock import MagicMock
 
     from src.domain.futures.optimization.workflow import layer2_constraints_from_trial
 
     # Arrange: 12개 feasible
     mock_trial = MagicMock()
-    mock_trial.user_attrs = {"l2_optuna_constraint_values": [-1.0] * 8}
+    mock_trial.user_attrs = {"l2_optuna_constraint_values": [-1.0] * 9}
 
     # Act
     result = layer2_constraints_from_trial(mock_trial)
 
     # Assert
-    assert len(result) == 8
+    assert len(result) == 9
     assert all(c <= 0.0 for c in result), "모든 제약이 ≤0 이면 feasible이어야 함"
 
 
 def test_layer2_constraints_legacy_values_pad_to_eight() -> None:
-    """구 saved values는 8-tuple Optuna safety constraints로 하위호환 패딩된다."""
+    """구 saved values는 9-tuple Optuna safety constraints로 하위호환 패딩된다."""
     from unittest.mock import MagicMock
 
     from src.domain.futures.optimization.workflow import layer2_constraints_from_trial
@@ -305,9 +309,9 @@ def test_layer2_constraints_legacy_values_pad_to_eight() -> None:
     # Act
     result = layer2_constraints_from_trial(mock_trial)
 
-    assert len(result) == 8
+    assert len(result) == 9
     assert all(c == -1.0 for c in result[:3])
-    assert result[3:] == (1.0, 1.0, 1.0, 1.0, 1.0)
+    assert result[3:] == (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +441,61 @@ def test_from_mapping_respects_new_defaults() -> None:
     # Assert
     assert config.l2_min_active_blocks == 3
     assert config.l2_min_dsr == pytest.approx(0.60, rel=1e-9)
+    assert config.l2_min_sharpe_abs == pytest.approx(0.70, rel=1e-9)
+    assert config.l2_min_sortino == pytest.approx(1.5, rel=1e-9)
+    assert config.l2_min_calmar == pytest.approx(0.5, rel=1e-9)
+
+
+def test_build_layer_universe_audit_detects_low_active_tail() -> None:
+    active_mask = np.ones((10, 4), dtype=bool)
+    active_mask[8:, 2:] = False
+    aligned = SimpleNamespace(
+        datetimes=np.array([np.datetime64(f"2025-01-{day:02d}") for day in range(1, 11)]),
+        symbols=("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"),
+        active_mask=active_mask,
+        warm_mask=np.ones((10, 4), dtype=bool),
+        entry_block_mask=np.zeros((10, 4), dtype=bool),
+        kill_mask=np.zeros((10, 4), dtype=bool),
+    )
+
+    audit = build_layer_universe_audit(
+        aligned=aligned,
+        layer="L2",
+        start_idx=0,
+        end_idx=10,
+    )
+
+    assert "low_active_tail" in audit.warnings
+
+
+def test_recent_fold_gate_enters_optuna_constraints() -> None:
+    gate = evaluate_layer2_gate(
+        deployment_failed=False,
+        support_leak_count=0,
+        cagr_hybrid=0.4,
+        sharpe_hybrid=1.2,
+        sharpe_hac_hybrid=1.2,
+        sharpe_hac_baseline=0.8,
+        sortino_hybrid=1.8,
+        mar_hybrid=1.5,
+        mdd_hybrid=0.2,
+        cvar_95_hybrid=0.04,
+        fold_pass_ratio=0.8,
+        active_block_count=3,
+        friction_pass_pct=0.8,
+        trade_count=100,
+        growth_lcb_hybrid=0.1,
+        growth_lcb_baseline=0.05,
+        dsr_hybrid=None,
+        psr_hybrid=0.95,
+        recent_fold_passed=False,
+        recent_fold_sharpe=-0.2,
+        config=Layer2AllocationConfig(),
+    )
+
+    assert len(gate.optuna_constraint_values) == 9
+    assert gate.optuna_constraint_values[5] > 0.0
+    assert gate.promotion_blocker == "recent_fold"
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +581,7 @@ def test_s8_dsr_pool_restricted_to_feasible_trials() -> None:
         t = MagicMock()
         t.user_attrs = {
             "sharpe_hac_hybrid": sharpe,
-            "l2_optuna_constraint_values": [-1.0] * 8 if feasible else [1.0] * 8,
+                "l2_optuna_constraint_values": [-1.0] * 9 if feasible else [1.0] * 9,
         }
         return t
 

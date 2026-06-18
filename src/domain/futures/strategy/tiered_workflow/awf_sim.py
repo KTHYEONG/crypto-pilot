@@ -74,6 +74,7 @@ class _AwfSimResult:
     trade_count: int
     fold_rets_hybrid: list[list[float]]    # fold별 strategy returns
     fold_rets_baseline: list[list[float]]  # fold별 baseline returns
+    fold_selected_symbols: tuple[tuple[str, ...], ...]
     block_rets_hybrid: tuple[tuple[float, ...], ...]
     block_rets_baseline: tuple[tuple[float, ...], ...]
     rets_baseline_ew: list[float]          # 순수 1/N EW baseline (uplift 측정 전용)
@@ -681,6 +682,7 @@ def _run_awf_simulation(
     prev_support: set[int] = set()
     fold_rets_hybrid: list[list[float]] = []
     fold_rets_baseline: list[list[float]] = []
+    fold_selected_symbols: list[tuple[str, ...]] = []
 
     # D3: fit-leg 수익률 수집 (look-ahead-free L* calibration용)
     # fit-leg = fold.fit_start → fold.oos_start (OOS 이전). 독립 상태로 수집.
@@ -835,6 +837,7 @@ def _run_awf_simulation(
     for _fold_idx, fold in enumerate(awf_folds):
         _fold_h: list[float] = []
         _fold_b: list[float] = []
+        _fold_selected: set[str] = set()
         for t in range(fold.oos_start, fold.oos_end - 1, rebalance_bars):
             t_end = min(t + rebalance_bars, fold.oos_end - 1)
 
@@ -914,6 +917,8 @@ def _run_awf_simulation(
                 selection_mode="absolute",
             )
             last_selected = selected
+            if selected:
+                _fold_selected.update(selected)
             prof_rank += time.perf_counter() - t0_rank
 
             t0_alloc = time.perf_counter()
@@ -1075,6 +1080,7 @@ def _run_awf_simulation(
 
         fold_rets_hybrid.append(_fold_h)
         fold_rets_baseline.append(_fold_b)
+        fold_selected_symbols.append(tuple(sorted(_fold_selected)))
 
     logger.debug(
         "[L2-AWF-PROF] total=%.4fs | prep=%.4fs rank=%.4fs alloc=%.4fs eval=%.4fs",
@@ -1104,6 +1110,7 @@ def _run_awf_simulation(
         trade_count=trade_count,
         fold_rets_hybrid=fold_rets_hybrid,
         fold_rets_baseline=fold_rets_baseline,
+        fold_selected_symbols=tuple(fold_selected_symbols),
         block_rets_hybrid=tuple(tuple(block) for block in fold_rets_hybrid),
         block_rets_baseline=tuple(tuple(block) for block in fold_rets_baseline),
         rets_baseline_ew=all_rets_baseline_ew,

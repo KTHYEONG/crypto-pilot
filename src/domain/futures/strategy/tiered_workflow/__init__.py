@@ -3,9 +3,6 @@
 import logging
 
 from src.domain.futures.portfolio.signal_composer import compose_symbol_signals
-from src.domain.futures.strategy.candidate_workflow import (
-    _fit_and_predict_single_fold,
-)
 from src.domain.futures.strategy.tiered_logging import (
     format_layer1_deployment_registry_table,
     format_layer1_gate_table,
@@ -13,6 +10,7 @@ from src.domain.futures.strategy.tiered_logging import (
     format_layer1_table,
     format_layer2_table,
     format_layer3_table,
+    format_layer_universe_audit_table,
     format_system_status,
 )
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
@@ -28,6 +26,7 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     Layer1Result,
     Layer2AllocationConfig,
     Layer2BlockMetric,
+    Layer2FoldDiagnostics,
     Layer2GateEvaluation,
     Layer2Result,
     Layer2SignalSchedule,
@@ -35,6 +34,7 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     Layer2StudyResult,
     Layer2TrialEvaluation,
     Layer3Result,
+    LayerUniverseAudit,
     PredictionDecompositionDiag,
     StrategySignal,
     SymbolRealizedStat,
@@ -42,6 +42,7 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
 from src.domain.futures.strategy.tiered_workflow.diagnostics import (
     _compute_fold_ts_ic,
     _fold_eligible_symbol_mask,
+    build_layer_universe_audit,
     compute_per_strategy_oos_validation,
     compute_per_symbol_ic,
     compute_per_symbol_realized_stats,
@@ -70,6 +71,9 @@ from src.domain.futures.strategy.tiered_workflow.pipeline import (
     run_l2_awf,
     run_l3_holdout,
     run_tiered_pipeline,
+)
+from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
+    compute_layer2_fold_diagnostics,
 )
 from src.domain.futures.strategy.tiered_workflow.selection import (
     _layer2_experiment_key,
@@ -102,6 +106,7 @@ __all__ = [
     "Layer1Result",
     "Layer2AllocationConfig",
     "Layer2BlockMetric",
+    "Layer2FoldDiagnostics",
     "Layer2GateEvaluation",
     "Layer2Result",
     "Layer2SignalSchedule",
@@ -111,6 +116,7 @@ __all__ = [
     "Layer3ExecutionError",
     "Layer3Result",
     "Layer3WindowError",
+    "LayerUniverseAudit",
     "PredictionDecompositionDiag",
     "StrategySignal",
     "SymbolRealizedStat",
@@ -132,11 +138,13 @@ __all__ = [
     "build_l1_nested_swf_folds",
     "build_l1_swf_folds",
     "build_layer2_signal_schedule",
+    "build_layer_universe_audit",
     "build_qualified_signal_registry",
     "build_walk_forward_folds",
     "compose_symbol_signals",
     "compute_breadth_weighted_ic",
     "compute_futures_bar_return",
+    "compute_layer2_fold_diagnostics",
     "compute_panel_diversity",
     "compute_per_strategy_oos_validation",
     "compute_per_symbol_ic",
@@ -154,6 +162,7 @@ __all__ = [
     "format_layer1_table",
     "format_layer2_table",
     "format_layer3_table",
+    "format_layer_universe_audit_table",
     "format_system_status",
     "logger",
     "predict_layer1_signals",
@@ -166,3 +175,15 @@ __all__ = [
     "select_layer2_champion",
     "select_outer_symbol_opportunities",
 ]
+
+
+def __getattr__(name: str):
+    if name == "_fit_and_predict_single_fold":
+        from src.domain.futures.strategy.candidate_workflow import (
+            _fit_and_predict_single_fold,
+        )
+
+        _f: object = _fit_and_predict_single_fold
+        globals()[name] = _f
+        return _f
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
