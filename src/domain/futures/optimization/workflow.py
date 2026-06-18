@@ -1736,7 +1736,6 @@ def evaluate_l2_trial(
         _bars_per_year_for_tf,
         _cagr,
         _contiguous_block_log_growth,
-        _cvar_loss,
         _growth_lower_confidence_bound,
         _mdd,
         _psr,
@@ -1744,6 +1743,10 @@ def evaluate_l2_trial(
         _sharpe_hac,
         _sortino,
         _sortino_hac_unit,
+    )
+    from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
+        apply_deployment,
+        calibrate_deployment_leverage,
     )
 
     sim = _run_awf_simulation(
@@ -1760,16 +1763,50 @@ def evaluate_l2_trial(
     rets_hybrid = list(sim.rets_hybrid)
     rets_baseline = list(sim.rets_baseline)
 
-    cagr_hybrid = _cagr(rets_hybrid, bars_per_year=bars_per_year)
     cagr_baseline = _cagr(rets_baseline, bars_per_year=bars_per_year)
     sharpe_hybrid = _sharpe(rets_hybrid, bars_per_year=bars_per_year)
     sharpe_hac_hybrid = _sharpe_hac(rets_hybrid, bars_per_year=bars_per_year)
     sharpe_hac_baseline = _sharpe_hac(rets_baseline, bars_per_year=bars_per_year)
     psr_hybrid = _psr(rets_hybrid, bars_per_year=bars_per_year)
-    mdd_hybrid = _mdd(rets_hybrid)
-    cvar_95_hybrid = _cvar_loss(rets_hybrid)
+    # scale-invariant 지표: unit-vol(L=1) 기준 유지 (sharpe/sortino/calmar/psr 모두)
     sortino_hybrid = _sortino(rets_hybrid, bars_per_year=bars_per_year)
     trade_count = int(sim.trade_count)
+
+    # C2: L* 산정 — fit-leg book 수익률 우선, 없으면 OOS proxy fallback.
+    # cagr/mdd/cvar_hybrid는 deployed 값으로 교체. sortino/sharpe/calmar는 unit-vol 유지.
+    _deploy_enabled = bool(getattr(config, "l2_deploy_enabled", True))
+    _fit_rets_raw = sim.fit_rets_hybrid
+    _l_star: float = 1.0
+    _l_binding: str = "none"
+    if _deploy_enabled:
+        if _fit_rets_raw:
+            _calib_rets = np.asarray(_fit_rets_raw, dtype=np.float64)
+            _calib_src = "fit_leg"
+        else:
+            # fallback: OOS proxy (mdd_margin 완충 + hard_cap=20 → look-ahead 실질 영향 최소)
+            _calib_rets = np.asarray(rets_hybrid, dtype=np.float64)
+            _calib_src = "oos_proxy"
+        if _calib_rets.size >= 2:
+            _l_star, _l_binding = calibrate_deployment_leverage(
+                fit_rets=_calib_rets,
+                mdd_cap=float(config.l2_max_mdd_abs),
+                cvar_cap=float(config.l2_max_cvar_95),
+                mdd_margin=float(config.l2_deploy_mdd_margin),
+                l_hard_cap=float(config.l2_deploy_l_hard_cap),
+            )
+            _logger.debug(
+                "[L2-EVAL] L*=%.3f (binding=%s, src=%s)",
+                _l_star, _l_binding, _calib_src,
+            )
+
+    _dep = apply_deployment(
+        rets=np.asarray(rets_hybrid, dtype=np.float64),
+        leverage=_l_star,
+        bars_per_year=bars_per_year,
+    )
+    cagr_hybrid = _dep.cagr
+    mdd_hybrid = _dep.mdd
+    cvar_95_hybrid = _dep.cvar_95
     mar_hybrid = cagr_hybrid / (mdd_hybrid + 1e-9)
 
     block_growth_hybrid = _contiguous_block_log_growth(
@@ -1940,6 +1977,8 @@ def evaluate_l2_trial(
         worst_fold_sharpe=worst_fold_sharpe,
         gate=gate,
         fit_returns_hybrid=tuple(sim.fit_rets_hybrid),
+        deploy_leverage=float(_l_star),
+        deploy_binding=str(_l_binding),
     )
 
 
