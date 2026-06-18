@@ -304,9 +304,12 @@ class Layer2AllocationConfig:
     # D3: 결정론적 리스크 배치 파라미터 (fit-leg 기반, look-ahead-free)
     l2_deploy_enabled: bool = True
     l2_deploy_mdd_margin: float = 0.30
+    l2_deploy_cvar_margin: float = 0.20
     # fit-leg 사용 시 MDD/CVaR 예산이 실제 binding → hard_cap 완화해도 안전.
     # OOS 대리(fallback) 시에도 mdd_margin=0.30이 완충.
     l2_deploy_l_hard_cap: float = 20.0
+    # 거래소 실행가능 notional 레버리지 상한 (None=무제한). Binance perp 기본 10x.
+    l2_max_exchange_leverage: float | None = 10.0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -457,7 +460,13 @@ class Layer2AllocationConfig:
             ),
             l2_deploy_enabled=bool(params.get("l2_deploy_enabled", True)),
             l2_deploy_mdd_margin=cls._as_float(params.get("l2_deploy_mdd_margin", 0.30), 0.30),
+            l2_deploy_cvar_margin=cls._as_float(params.get("l2_deploy_cvar_margin", 0.20), 0.20),
             l2_deploy_l_hard_cap=cls._as_float(params.get("l2_deploy_l_hard_cap", 20.0), 20.0),
+            l2_max_exchange_leverage=(
+                cls._as_float(params["l2_max_exchange_leverage"], 10.0)
+                if isinstance(params.get("l2_max_exchange_leverage"), (int, float))
+                else None
+            ),
         )
 
 

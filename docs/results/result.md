@@ -137,6 +137,7 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 
 >> LAYER 1 RESULT: [PASS] -> Target phase L1 reached. Stopping pipeline.
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ● [LAYER 2: PORTFOLIO ALLOCATION & RISK OPTIMIZATION]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ● [HYPERPARAMETER OPTIMIZATION]
@@ -144,21 +145,23 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
     - Config     : 200 trials
   ────────────────────────────────────────────────────────────────────────────
  [OPT] Deleted existing study 'l2_study_4h_03972e5343cd' for a fresh start.
-[L2-OPT]: 100%|██████████████████████████████████████████████████████| 200/200 [01:06<00:00,  3.01it/s, Best CAGR: 423.00% | Current: 92.04%]
+[L2-OPT]: 100%|██████████████████████████████████████████████████████| 200/200 [01:12<00:00,  2.77it/s, Best CAGR: 423.00% | Current: 92.04%]
 [L2-SELECTION] 2 gate-pass 후보 수집 → champion Trial #187 Sortino=2.6040 CAGR=1.3361
 [L2-SELECTION] Champion selected. Trial #187, Objective=2.2028, DSR=0.8312 (n_eff=3.00)
-[L2-DEPLOY-C4] L*=19.527 (binding=mdd) | vol 1.000→19.527 | gross 3.000→58.580 | kelly=0.250(불변) | tf=4h
+[L2-DEPLOY-C4] L*=19.527 (binding=mdd) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
+[L2-DEPLOY] L*=19.5266 binding=mdd | CAGR=1.3361 MDD=0.2745 CVaR95=0.0321 RiskUtil=0.915
+[L2-DEPLOY] realization gap: risk_util=0.915 expected≈0.700 (결함 #1/#2 재발 의심 — vol-targeting 또는 gross 제약 확인 요망)
 ● [LAYER 2 PORTFOLIO SCORECARD]
 ──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ❌ BLOCKED (cagr)
+  STATUS  : ✅ PASS
 
-  ❌ [Growth    ] CAGR: +5.5% (>=30.0%) | PnL: +4.2% | Equity x1.04
-  ✅ [Efficiency] Sharpe: 1.621 (>=1.000) | Sortino: 2.604 (>=1.500) | Calmar: 3.511 (>=1.000)
-  ✅ [Risk      ] MDD: 1.6% (<=30.0%) | CVaR95: 0.2% (<=6.0%) | RiskUtil: 5.2%
+  ✅ [Growth    ] CAGR: +133.6% (>=30.0%) | PnL: +4.2% | Equity x1.04
+  ✅ [Efficiency] Sharpe: 1.621 (>=1.000) | Sortino: 2.604 (>=1.500) | Calmar: 4.868 (>=1.000)
+  ✅ [Risk      ] MDD: 27.4% (<=30.0%) | CVaR95: 3.2% (<=6.0%) | RiskUtil: 91.5%
   ✅ [Robust    ] Fold: 66.7% (>=60.0%) | Trades: 111 (>=30) | Friction: 100.0%
   ✅ [Uplift    ] Sharpe Uplift: +1.48 (>=+0.20)
   ✅ [Integrity ] DSR: 0.831 (>=0.60) | PSR: 0.928 (diag)
-  [Diag     ] RelMDD: 0.69x | Turnover: 0.014
+  [Diag     ] RelMDD: 12.12x | Turnover: 0.014
 ──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
@@ -166,5 +169,36 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
   ├─ Fold #1 : ✅ Sharpe:  2.513 | MDD:    0.8% | Status: PASS
   ├─ Fold #2 : ✅ Sharpe:  2.582 | MDD:    1.5% | Status: PASS
   └─ Fold #3 : ❌ Sharpe: -0.362 | MDD:    1.6% | Status: FAIL
->> LAYER 2 RESULT: [BLOCKED] -> gate_passed=False
-!! FAIL: exit_code=1 reason=layer2_blocked:cagr
+>> LAYER 2 RESULT: [PASS] -> Proceeding to Final Holdout.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+● [LAYER 3: FINAL HOLDOUT & DEPLOYMENT READINESS]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+● [LAYER 3: HOLDOUT VALIDATION SCORECARD] (2025-10-01 ~ 2026-03-31)
+──────────────────────────────────────────────────────────────────────────────
+  STATUS  : ❌ BLOCKED (Reason: negative_return)
+
+  [ GROWTH ]
+  ──────────────────────────────────────────────────────────────────────────
+  ❌ CAGR          : [    -1.3% ] (      -0.3% ) | Gate: >= Bench
+  ❌ Total Return  : [    -0.6% ] | Equity: x0.99 | Gate: > 0
+
+  [ EFFICIENCY ]
+  ──────────────────────────────────────────────────────────────────────────
+  ❌ Sharpe        : [   -0.480 ] (     -0.104 ) | Gate: >= Bench
+     Sortino       : [   -0.686 ] (     -0.151 ) | (diag)
+  ❌ MAR (Calmar)  : [ n/a(loss) ] (  n/a(loss) ) | Gate: >= Bench
+
+  [ RISK ]
+  ──────────────────────────────────────────────────────────────────────────
+  ❌ MDD           : [     1.7% ] (       1.6% ) | Gate: <= Bench
+     CVaR95        : [     0.1% ] | Exposure: 2.1% | (diag)
+
+  [ ROBUSTNESS ]
+  ──────────────────────────────────────────────────────────────────────────
+  ✅ Trades        : [       36 ] | Gate: >= 10
+  ──────────────────────────────────────────────────────────────────────────
+
+  >> FINAL RESULT : ❌ BLOCKED (Reason: negative_return)
+
+================================================================================
