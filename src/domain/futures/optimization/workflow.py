@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, is_dataclass, replace
 from types import SimpleNamespace
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import optuna
@@ -20,6 +20,9 @@ from src.domain.futures.optimization.ml_context import MLPhaseDContext
 from src.domain.futures.optimization.objectives import objective_ml_phase_d
 from src.domain.futures.optimization.observability.trial_observability import set_trial_event_attrs
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+
+if TYPE_CHECKING:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
 
 _logger = logging.getLogger(__name__)
 
@@ -1749,6 +1752,7 @@ def evaluate_l2_trial(
     from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
         apply_deployment,
         calibrate_deployment_leverage,
+        compute_layer2_fold_diagnostics,
     )
 
     sim = _run_awf_simulation(
@@ -1795,7 +1799,9 @@ def evaluate_l2_trial(
                 mdd_cap=float(config.l2_max_mdd_abs),
                 cvar_cap=float(config.l2_max_cvar_95),
                 mdd_margin=float(config.l2_deploy_mdd_margin),
+                cvar_margin=float(config.l2_deploy_cvar_margin),
                 l_hard_cap=float(config.l2_deploy_l_hard_cap),
+                exchange_leverage_cap=getattr(config, "l2_max_exchange_leverage", None),
             )
             _logger.debug(
                 "[L2-EVAL] L*=%.3f (binding=%s, src=%s)",
@@ -1858,16 +1864,13 @@ def evaluate_l2_trial(
             )
         )
 
-    fold_compound_pass = [
-        float(np.prod(1.0 + np.asarray(fr, dtype=np.float64))) > 1.0 if fr else None
-        for fr in sim.fold_rets_hybrid
-    ]
-    nonempty_fold_pass = [value for value in fold_compound_pass if value is not None]
-    fold_pass_ratio = (
-        sum(1 for value in nonempty_fold_pass if value) / len(nonempty_fold_pass)
-        if nonempty_fold_pass
-        else 0.0
+    fold_diag = compute_layer2_fold_diagnostics(
+        fold_rets_hybrid=sim.fold_rets_hybrid,
+        fold_selected_symbols=sim.fold_selected_symbols,
+        leverage=float(_l_star),
+        bars_per_year=bars_per_year,
     )
+    fold_pass_ratio = float(fold_diag.fold_pass_ratio)
     break_even_pass_pct = (
         float(sim.friction_pass_total) / float(sim.signal_total)
         if sim.signal_total > 0
@@ -1949,6 +1952,8 @@ def evaluate_l2_trial(
         growth_lcb_baseline=float(growth_lcb_baseline),
         dsr_hybrid=None,
         psr_hybrid=float(psr_hybrid),
+        recent_fold_passed=fold_diag.recent_fold_passed,
+        recent_fold_sharpe=fold_diag.recent_fold_sharpe,
         config=config,
     )
     return Layer2TrialEvaluation(
@@ -1982,6 +1987,13 @@ def evaluate_l2_trial(
         fit_returns_hybrid=tuple(sim.fit_rets_hybrid),
         deploy_leverage=float(_l_star),
         deploy_binding=str(_l_binding),
+        recent_fold_passed=fold_diag.recent_fold_passed,
+        recent_fold_sharpe=float(fold_diag.recent_fold_sharpe or 0.0),
+        recent_fold_cagr=float(fold_diag.recent_fold_cagr),
+        recent_fold_mdd=float(fold_diag.recent_fold_mdd),
+        latest_to_median_cagr=float(fold_diag.latest_to_median_cagr),
+        fold_deployed_cagrs=tuple(fold_diag.fold_deployed_cagrs),
+        fold_selected_symbols=tuple(fold_diag.fold_selected_symbols),
     )
 
 
@@ -2005,8 +2017,10 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
         object.__setattr__(ctx, "l2_sim_cache", build_l2_simulation_cache(ctx.aligned, signal_batch, ctx.tf))
 
+    cache = ctx.l2_sim_cache
+    assert cache is not None
     evaluation = evaluate_l2_trial(
-        cache=ctx.l2_sim_cache,
+        cache=cache,
         signal_batch=signal_batch,
         aligned=ctx.aligned,
         awf_folds=awf_folds,
@@ -2032,6 +2046,14 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
     _set_float_attr(trial, "total_cost_bps", evaluation.total_cost_bps)
     _set_float_attr(trial, "sortino_hybrid", float(getattr(evaluation, "sortino_hybrid", 0.0)))
     _set_float_attr(trial, "risk_utilization", float(getattr(evaluation, "risk_utilization", 0.0)))
+    _set_float_attr(trial, "recent_fold_sharpe", float(getattr(evaluation, "recent_fold_sharpe", 0.0)))
+    _set_float_attr(trial, "recent_fold_cagr", float(getattr(evaluation, "recent_fold_cagr", 0.0)))
+    _set_float_attr(
+        trial,
+        "latest_to_median_cagr",
+        float(getattr(evaluation, "latest_to_median_cagr", 0.0)),
+    )
+    _set_float_attr(trial, "deploy_leverage", float(getattr(evaluation, "deploy_leverage", 1.0)))
     _set_float_attr(
         trial,
         "deployment_objective_bonus",
@@ -2039,6 +2061,11 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
     )
     _set_float_attr(trial, "worst_fold_sharpe", float(getattr(evaluation, "worst_fold_sharpe", 0.0)))
     trial.set_user_attr("trade_count", getattr(evaluation, "trade_count", 0))
+    trial.set_user_attr(
+        "recent_fold_passed",
+        getattr(evaluation, "recent_fold_passed", None),
+    )
+    trial.set_user_attr("deploy_binding", str(getattr(evaluation, "deploy_binding", "")))
     gate = getattr(evaluation, "gate", None)
 
     # DSR-in-the-loop 제거: TPE는 safety constraints만 학습하고 final promotion은 replay 단계에서 검증.
@@ -2063,14 +2090,14 @@ def layer2_constraints_from_trial(trial: FrozenTrial) -> tuple[float, ...]:
     if not isinstance(raw, (list, tuple)):
         raw = trial.user_attrs.get("l2_constraint_values")
     if not isinstance(raw, (list, tuple)):
-        return (1.0,) * 8
+        return (1.0,) * 9
     resolved: list[float] = []
     for item in raw:
         try:
             resolved.append(float(item))
         except Exception:
             resolved.append(1.0)
-    while len(resolved) < 8:
+    while len(resolved) < 9:
         resolved.append(1.0)
     return tuple(resolved)
 

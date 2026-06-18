@@ -410,3 +410,108 @@ class TestLayer2Selection(unittest.TestCase):
 
         assert res.blocker_reason == "no_deployment"
         assert res.best_trial_number == 12
+
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.layer2_constraints_from_trial")
+    @patch("src.domain.futures.strategy.tiered_workflow.selection._deflated_sharpe_probability")
+    def test_select_champion_prefers_recent_fold_passed_candidate(
+        self,
+        mock_dsp: MagicMock,
+        mock_constraints: MagicMock,
+        mock_evaluate: MagicMock,
+    ) -> None:
+        study = MagicMock(spec=optuna.Study)
+        trial_a = MagicMock(spec=optuna.trial.FrozenTrial)
+        trial_a.state = optuna.trial.TrialState.COMPLETE
+        trial_a.value = 0.20
+        trial_a.number = 21
+        trial_a.user_attrs = {
+            "l2_block_log_growth_signature": [0.03] * 8,
+            "sharpe_hac_hybrid": 2.0,
+            "cagr_hybrid": 0.40,
+            "growth_lcb_hybrid": 0.20,
+            "mdd_hybrid": 0.08,
+        }
+        trial_a.params = {"K_RANK": 4}
+        trial_b = MagicMock(spec=optuna.trial.FrozenTrial)
+        trial_b.state = optuna.trial.TrialState.COMPLETE
+        trial_b.value = 0.18
+        trial_b.number = 22
+        trial_b.user_attrs = {
+            "l2_block_log_growth_signature": [0.02] * 8,
+            "sharpe_hac_hybrid": 1.9,
+            "cagr_hybrid": 0.35,
+            "growth_lcb_hybrid": 0.18,
+            "mdd_hybrid": 0.07,
+        }
+        trial_b.params = {"K_RANK": 3}
+        study.trials = [trial_a, trial_b]
+        mock_constraints.return_value = (-1.0,) * 9
+        mock_dsp.return_value = 0.75
+        mock_evaluate.side_effect = [
+            Layer2TrialEvaluation(
+                objective_value=0.20,
+                constraint_values=(-1.0,) * 9,
+                cagr_hybrid=0.40,
+                cagr_baseline=0.10,
+                growth_lcb_hybrid=0.20,
+                growth_lcb_baseline=0.08,
+                sharpe_hac_hybrid=2.0,
+                sharpe_hac_baseline=1.0,
+                psr_hybrid=0.95,
+                mdd_hybrid=0.08,
+                cvar_95_hybrid=0.02,
+                fold_pass_ratio=0.8,
+                break_even_pass_pct=1.0,
+                sortino_hybrid=1.9,
+                trade_count=120,
+                average_gross_exposure=1.0,
+                cap_saturation_ratio=0.1,
+                total_cost_bps=20.0,
+                block_metrics=(MagicMock(), MagicMock(), MagicMock()),
+                returns_hybrid=(0.01, 0.02),
+                returns_baseline=(0.005, 0.01),
+                sharpe_hybrid=2.1,
+                sharpe_hac_baseline_ew=1.0,
+                recent_fold_passed=False,
+                recent_fold_sharpe=-0.2,
+            ),
+            Layer2TrialEvaluation(
+                objective_value=0.18,
+                constraint_values=(-1.0,) * 9,
+                cagr_hybrid=0.35,
+                cagr_baseline=0.10,
+                growth_lcb_hybrid=0.18,
+                growth_lcb_baseline=0.08,
+                sharpe_hac_hybrid=1.9,
+                sharpe_hac_baseline=1.0,
+                psr_hybrid=0.95,
+                mdd_hybrid=0.07,
+                cvar_95_hybrid=0.02,
+                fold_pass_ratio=0.8,
+                break_even_pass_pct=1.0,
+                sortino_hybrid=1.6,
+                trade_count=120,
+                average_gross_exposure=1.0,
+                cap_saturation_ratio=0.1,
+                total_cost_bps=20.0,
+                block_metrics=(MagicMock(), MagicMock(), MagicMock()),
+                returns_hybrid=(0.01, 0.02),
+                returns_baseline=(0.005, 0.01),
+                sharpe_hybrid=2.0,
+                sharpe_hac_baseline_ew=1.0,
+                recent_fold_passed=True,
+                recent_fold_sharpe=0.5,
+            ),
+        ]
+
+        res = select_layer2_champion(
+            study=study,
+            tf=self.tf,
+            signal_batch=self.signal_batch,
+            aligned=self.aligned,
+            awf_folds=self.awf_folds,
+            caps=self.caps,
+        )
+
+        assert res.best_trial_number == 22

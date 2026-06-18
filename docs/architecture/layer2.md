@@ -77,7 +77,7 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
   - fit-leg 미노출 시 OOS proxy fallback + `mdd_margin=0.30` 완충. `binding ∈ {mdd, cvar, hard_cap, exchange_cap, none}`. champion L*는 `l2_params["l2_deploy_leverage"]`로 SSOT 전달(recalibrate drift 0).
 - **Dynamic Scaling**: Volatility targeting ($\sigma_{target} / \sigma_{port}$) combined with regime-specific gross/net caps. Includes double-scaling guards.
 - **L2 Gate Contract (D1/D4)**:
-  - `Layer2GateEvaluation.optuna_constraint_values` is the 8-value safety vector fed to `TPESampler(constraints_func=...)`.
+  - `Layer2GateEvaluation.optuna_constraint_values` is the 9-value safety vector (deployment, leak, mdd, cvar, fold_pass_ratio, **recent_fold**, active_blocks, friction, trades) fed to `TPESampler(constraints_func=...)`.
   - `Layer2GateEvaluation.promotion_constraint_values` is the full replay gate vector used for champion promotion.
   - Optuna feasibility covers deployment/leak/risk/coverage/trade floors only.
   - Final promotion gate (3단): **Sortino ≥ 1.5** (1차) + **Sharpe ≥ 0.7** (sanity floor; 하방 표본 희소 시 Sortino 인플레이션 방어) + **Calmar ≥ 0.5** (복리 앵커) + `CAGR`, `MAR`, `PSR`, `growth_lcb`, `uplift`.
@@ -91,6 +91,9 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
 - **OOS Fraction**: `ml_fit_fraction=0.55` + `ml_calibration_fraction=0.15` → **OOS 30%** (fold당 ~27일). 구조적 과적합 방지 목적.
 - **Replay Championing**:
   - `select_layer2_champion`이 frontier 전수를 replay하여 gate-pass 후보를 **전수 수집** → `argmax(sortino_hybrid, cagr)` 선택 (이전: argmax(dsr, cagr) — D4 변경).
+- **Layer2FoldDiagnostics**: `compute_layer2_fold_diagnostics()`가 각 fold의 unit Sharpe, deployed CAGR/MDD, compound pass, selected symbols를 산출. `Layer2TrialEvaluation`에 `recent_fold_passed/sharpe/cagr/mdd`, `latest_to_median_cagr`, `fold_deployed_cagrs`, `fold_selected_symbols` 필드 저장 → Optuna attr 기록 및 gate 입력.
+- **Config Defaults**: `l2_min_sharpe_abs` fallback 1.0→0.7; `l2_min_sortino` passthrough (legacy `l2_min_sortino_abs` fallback); `l2_min_calmar=0.5` 추가.
+- **Universe Audit**: `build_layer_universe_audit()`가 레이어별 window slice의 active/entry_block/kill mask 통계를 산출하여 `LayerUniverseAudit` 반환. `run_tiered_pipeline` L1/L2/L3 각 단계에서 `format_layer_universe_audit_table()` 로깅. 진단 전용(포트폴리오 무게 미변경).
 
 **Layer 3 Deployment Parity**
 - `run_tiered_pipeline`는 L2 champion의 `l2_deploy_leverage`를 L3 holdout에도 동일하게 전달한다.
