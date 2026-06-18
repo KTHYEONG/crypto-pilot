@@ -1271,14 +1271,25 @@ def run_l2_awf(
         risk_utilization=risk_utilization,
     )
     fold_sharpes_h = [_sharpe(fr) for fr in sim.fold_rets_hybrid]
+    # deployed 기준 fold 지표: apply_deployment(fold_rets, L*)로 정확한 compounding 반영.
+    # unit-vol MDD(~1%)와 달리 실제 리스크 수준(~15-31%)과 구간별 실현 CAGR을 표시.
+    _fold_deployed = [
+        apply_deployment(
+            rets=np.asarray(fr, dtype=np.float64),
+            leverage=_l_star,
+            bars_per_year=bars_per_year,
+        ) if fr else None
+        for fr in sim.fold_rets_hybrid
+    ]
     awf_fold_diags = [
         {
             "fold": i + 1,
             "sharpe": s,
-            "mdd": _mdd(fr),
+            "mdd": _fd.mdd if _fd is not None else 0.0,
+            "cagr": _fd.cagr if _fd is not None else 0.0,
             "pass": fold_compound_pass[i] is True,
         }
-        for i, (s, fr) in enumerate(zip(fold_sharpes_h, sim.fold_rets_hybrid, strict=True))
+        for i, (s, _fd) in enumerate(zip(fold_sharpes_h, _fold_deployed, strict=True))
     ]
     if verbose:
         logger.info(format_layer2_table(result, awf_folds=awf_fold_diags, min_dsr=float(config.l2_min_dsr)))
