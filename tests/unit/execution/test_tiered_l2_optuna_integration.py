@@ -131,7 +131,10 @@ class TestS1RunTieredL2StudyHappyPath:
                 "src.execution.opt_main_futures.update_champion_store",
                 return_value=False,
             ),
-            patch("src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache", return_value=MagicMock()),
+            patch(
+                "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+                return_value=MagicMock(),
+            ),
         ):
             from src.domain.futures.strategy.walk_forward import WFFold
             from src.execution.opt_main_futures import _run_tiered_l2_study
@@ -198,7 +201,10 @@ class TestS3AllTrialsFail:
             patch("src.execution.opt_main_futures.setup_optuna_storage", return_value=("url", MagicMock())),
             patch("src.execution.opt_main_futures.get_or_create_study", return_value=mock_study),
             patch("src.domain.futures.optimization.workflow.TieredContext"),
-            patch("src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache", return_value=MagicMock()),
+            patch(
+                "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+                return_value=MagicMock(),
+            ),
             caplog.at_level(logging.WARNING, logger="opt_main_futures"),
         ):
             from src.execution.opt_main_futures import _run_tiered_l2_study
@@ -320,6 +326,43 @@ class TestS5PipelineL3PhaseRunsWhenL2Passes:
             )
 
         assert l3_res is not None
+
+
+class TestS5bPipelineForwardsChampionLeverageToL3:
+    def test_l2_champion_leverage_is_forwarded_to_l3(self) -> None:
+        """L2 champion leverage는 L2 실행과 L3 holdout 모두에 동일하게 전달되어야 한다."""
+        mock_l1 = _make_l1_result(gate_passed=True, artifact=MagicMock())
+        patches, _ = _pipeline_patches(l2_gate_passed=True)
+        l2_params = {"l2_deploy_leverage": 7.5}
+
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4] as mock_l2_call,
+            patches[5] as mock_l3_call,
+            patches[6],
+        ):
+            from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
+
+            run_tiered_pipeline(
+                labeled_events=MagicMock(),
+                aligned=MagicMock(),
+                cfg=MagicMock(),
+                window=MagicMock(),
+                l1_params={},
+                l2_params=l2_params,
+                caps=MagicMock(),
+                tf="4h",
+                target_phase="l3",
+                l1_result_override=mock_l1,
+            )
+
+        assert mock_l2_call.call_args is not None
+        assert mock_l3_call.call_args is not None
+        assert mock_l2_call.call_args.kwargs["deploy_leverage"] == pytest.approx(7.5)
+        assert mock_l3_call.call_args.kwargs["deploy_leverage"] == pytest.approx(7.5)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

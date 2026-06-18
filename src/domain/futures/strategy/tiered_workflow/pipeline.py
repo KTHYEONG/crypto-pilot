@@ -69,7 +69,6 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     _bars_per_year_for_tf,
     _cagr,
     _contiguous_block_log_growth,
-    _cvar_loss,
     _growth_lower_confidence_bound,
     _mdd,
     _newey_west_ic_tstat,
@@ -1308,6 +1307,7 @@ def run_l3_holdout(
     min_trades: int = 10,
     max_mdd_abs: float = 0.35,
     verbose: bool = True,
+    deploy_leverage: float | None = None,
 ) -> Layer3Result:
     """Layer3 Holdout 최종 검증."""
     ho_start, ho_end = holdout_span
@@ -1380,24 +1380,34 @@ def run_l3_holdout(
     )
 
     bars_per_year = _bars_per_year_for_tf(tf)
-    sharpe = _sharpe(sim.rets_hybrid, bars_per_year=bars_per_year)
+    l_star = (
+        float(deploy_leverage)
+        if deploy_leverage is not None
+        and np.isfinite(deploy_leverage)
+        and deploy_leverage > 1.0
+        else 1.0
+    )
+    unit_rets = np.asarray(sim.rets_hybrid, dtype=np.float64)
+    dep = apply_deployment(rets=unit_rets, leverage=l_star, bars_per_year=bars_per_year)
+    deployed_rets = dep.scaled_rets
+    sharpe = _sharpe(deployed_rets.tolist(), bars_per_year=bars_per_year)
     sharpe_baseline = _sharpe(sim.rets_baseline, bars_per_year=bars_per_year)
-    mdd = _mdd(sim.rets_hybrid)
+    mdd = dep.mdd
     mdd_baseline = _mdd(sim.rets_baseline)
-    cagr = _cagr(sim.rets_hybrid, bars_per_year=bars_per_year)
+    cagr = dep.cagr
     cagr_baseline = _cagr(sim.rets_baseline, bars_per_year=bars_per_year)
     mar = cagr / (mdd + 1e-9)
     mar_baseline = cagr_baseline / (mdd_baseline + 1e-9)
 
     # 단일패스 복리/건전성 지표 (P2-A) — L2 헬퍼 재사용, 신규 수학 없음.
-    equity_multiple = _terminal_multiple(sim.rets_hybrid)
+    equity_multiple = _terminal_multiple(deployed_rets)
     total_return = equity_multiple - 1.0
-    sortino = _sortino(sim.rets_hybrid, bars_per_year=bars_per_year)
+    sortino = _sortino(deployed_rets.tolist(), bars_per_year=bars_per_year)
     sortino_baseline = _sortino(sim.rets_baseline, bars_per_year=bars_per_year)
     n_trades = int(sim.trade_count)
-    cvar95 = _cvar_loss(sim.rets_hybrid, alpha=0.95)
+    cvar95 = dep.cvar_95
     avg_gross_exposure = (
-        float(np.mean(sim.all_gross_exposures)) if sim.all_gross_exposures else 0.0
+        float(np.mean(sim.all_gross_exposures)) * l_star if sim.all_gross_exposures else 0.0
     )
 
     metrics_finite = all(
@@ -1411,6 +1421,7 @@ def run_l3_holdout(
             cagr_baseline,
             total_return,
             equity_multiple,
+            cvar95,
         )
     )
     blocker_reason = ""
@@ -1446,6 +1457,7 @@ def run_l3_holdout(
         n_trades=n_trades,
         cvar95=cvar95,
         avg_gross_exposure=avg_gross_exposure,
+        deploy_leverage=l_star,
     )
     if verbose:
         logger.info(
@@ -1671,6 +1683,7 @@ def run_tiered_pipeline(
         tf=tf,
         holdout_labels=(str(window.holdout_start), str(window.holdout_end)),
         verbose=verbose,
+        deploy_leverage=_champion_l_star if (_champion_l_star is not None and _champion_l_star > 1.0) else None,
     )
     logger.debug("[perf-tiered] run_tiered_pipeline Layer 3 total took %.4fs", time.perf_counter() - t_l3)
 
