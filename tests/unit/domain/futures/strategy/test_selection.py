@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import optuna
+import pytest
 
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     Layer2TrialEvaluation,
@@ -174,13 +175,17 @@ class TestLayer2Selection(unittest.TestCase):
     @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
     @patch("src.domain.futures.strategy.tiered_workflow.selection.layer2_constraints_from_trial")
     @patch("src.domain.futures.strategy.tiered_workflow.selection._deflated_sharpe_probability")
-    def test_select_champion_low_dsr_blocks_promotion(
+    def test_select_champion_low_dsr_does_not_block_promotion(
         self,
         mock_dsp: MagicMock,
         mock_constraints: MagicMock,
         mock_evaluate: MagicMock,
     ) -> None:
-        """DSR이 낮으면 최종 promotion blocker가 dsr_floor인지 검증."""
+        """DSR이 낮아도 dsr_floor는 더 이상 promotion을 차단하지 않는다 (diagnostic only).
+
+        D4 변경: dsr_floor BLOCKER 제거, PSR gate 신설.
+        DSR=0.30(낮음) + PSR=0.95(통과) → promotion 성공.
+        """
         study = MagicMock(spec=optuna.Study)
         trial = MagicMock(spec=optuna.trial.FrozenTrial)
         trial.state = optuna.trial.TrialState.COMPLETE
@@ -236,9 +241,10 @@ class TestLayer2Selection(unittest.TestCase):
             caps=self.caps,
         )
 
-        assert res.blocker_reason == "dsr_floor"
+        # DSR=0.30이지만 dsr_floor는 BLOCKER에서 제거됨 → 차단 없음
+        assert res.blocker_reason == ""
         assert res.best_trial_number == 2
-        assert res.dsr == 0.3
+        assert res.dsr == pytest.approx(0.3)
         assert res.best_evaluation is not None
 
     @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
