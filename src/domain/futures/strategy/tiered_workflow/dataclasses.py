@@ -134,6 +134,42 @@ class Layer2BlockMetric:
 
 
 @dataclass(slots=True, frozen=True)
+class LayerUniverseAudit:
+    """Layer universe contract audit payload."""
+
+    layer: str
+    start_idx: int
+    end_idx: int
+    start_date: str
+    end_date: str
+    symbol_count: int
+    active_symbol_count_min: int
+    active_symbol_count_median: float
+    active_symbol_count_max: int
+    entry_block_count: int
+    kill_count: int
+    symbols: tuple[str, ...]
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(slots=True, frozen=True)
+class Layer2FoldDiagnostics:
+    """Layer2 fold-level deployment diagnostics."""
+
+    fold_pass_ratio: float
+    fold_compound_pass: tuple[bool | None, ...]
+    fold_unit_sharpes: tuple[float, ...]
+    fold_deployed_cagrs: tuple[float | None, ...]
+    fold_deployed_mdds: tuple[float | None, ...]
+    fold_selected_symbols: tuple[tuple[str, ...], ...]
+    recent_fold_passed: bool | None
+    recent_fold_sharpe: float | None
+    recent_fold_cagr: float
+    recent_fold_mdd: float
+    latest_to_median_cagr: float
+
+
+@dataclass(slots=True, frozen=True)
 class Layer2TrialEvaluation:
     """Layer2 단일 trial 성장/제약 평가 결과."""
 
@@ -167,6 +203,13 @@ class Layer2TrialEvaluation:
     fit_returns_hybrid: tuple[float, ...] = ()
     deploy_leverage: float = 1.0
     deploy_binding: str = ""
+    recent_fold_passed: bool | None = None
+    recent_fold_sharpe: float = 0.0
+    recent_fold_cagr: float = 0.0
+    recent_fold_mdd: float = 0.0
+    latest_to_median_cagr: float = 0.0
+    fold_deployed_cagrs: tuple[float | None, ...] = ()
+    fold_selected_symbols: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -441,7 +484,12 @@ class Layer2AllocationConfig:
             max_ann_vol=vol_target,
             l2_min_cagr=cls._as_float(params.get("l2_min_cagr", 0.30), 0.30),
             l2_min_mar=cls._as_float(params.get("l2_min_mar", 1.0), 1.0),
-            l2_min_sharpe_abs=cls._as_float(params.get("l2_min_sharpe_abs", 1.0), 1.0),
+            l2_min_sortino=cls._as_float(
+                params.get("l2_min_sortino", params.get("l2_min_sortino_abs", 1.5)),
+                1.5,
+            ),
+            l2_min_sharpe_abs=cls._as_float(params.get("l2_min_sharpe_abs", 0.7), 0.7),
+            l2_min_calmar=cls._as_float(params.get("l2_min_calmar", 0.5), 0.5),
             l2_max_mdd_abs=cls._as_float(params.get("l2_max_mdd_abs", 0.30), 0.30),
             l2_mdd_material_floor=cls._as_float(params.get("l2_mdd_material_floor", 0.05), 0.05),
             l2_mdd_rel_tol=cls._as_float(params.get("l2_mdd_rel_tol", 0.25), 0.25),
