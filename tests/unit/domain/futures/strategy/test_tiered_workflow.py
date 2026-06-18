@@ -705,9 +705,27 @@ def test_run_l3_holdout_computes_new_compounding_metrics() -> None:
         trade_count=42,
     )
 
+    def _make_mock_cache(n_bars: int = 100, n_syms: int = 1) -> MagicMock:
+        cache = MagicMock()
+        cache.vol_matrix_2d = np.full((n_bars, n_syms), 0.0001, dtype=np.float64)
+        cache.tradeable_mask_2d = np.ones((n_bars, n_syms), dtype=bool)
+        cache.hurdle_2d = np.full((n_bars, n_syms), 3.8, dtype=np.float64)
+        cache.funding_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.beta_1d = np.zeros(n_syms, dtype=np.float64)
+        cache.expected_gross_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.expected_net_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.holding_bars_2d = np.ones((n_bars, n_syms), dtype=np.float64)
+        cache.side_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.quality_weight_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
+        return cache
+
     with patch(
         "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
         return_value=sim_result,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -740,9 +758,27 @@ def test_run_l3_holdout_gate_blocked_when_trade_count_below_minimum() -> None:
         trade_count=3,
     )
 
+    def _make_mock_cache(n_bars: int = 100, n_syms: int = 1) -> MagicMock:
+        cache = MagicMock()
+        cache.vol_matrix_2d = np.full((n_bars, n_syms), 0.0001, dtype=np.float64)
+        cache.tradeable_mask_2d = np.ones((n_bars, n_syms), dtype=bool)
+        cache.hurdle_2d = np.full((n_bars, n_syms), 3.8, dtype=np.float64)
+        cache.funding_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.beta_1d = np.zeros(n_syms, dtype=np.float64)
+        cache.expected_gross_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.expected_net_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.holding_bars_2d = np.ones((n_bars, n_syms), dtype=np.float64)
+        cache.side_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.quality_weight_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
+        return cache
+
     with patch(
         "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
         return_value=sim_result,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -773,9 +809,27 @@ def test_run_l3_holdout_gate_blocked_when_mdd_exceeds_absolute_cap() -> None:
         trade_count=42,
     )
 
+    def _make_mock_cache(n_bars: int = 100, n_syms: int = 1) -> MagicMock:
+        cache = MagicMock()
+        cache.vol_matrix_2d = np.full((n_bars, n_syms), 0.0001, dtype=np.float64)
+        cache.tradeable_mask_2d = np.ones((n_bars, n_syms), dtype=bool)
+        cache.hurdle_2d = np.full((n_bars, n_syms), 3.8, dtype=np.float64)
+        cache.funding_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.beta_1d = np.zeros(n_syms, dtype=np.float64)
+        cache.expected_gross_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.expected_net_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.holding_bars_2d = np.ones((n_bars, n_syms), dtype=np.float64)
+        cache.side_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.quality_weight_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
+        return cache
+
     with patch(
         "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
         return_value=sim_result,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=_make_mock_cache(n_bars=len(rets_hybrid), n_syms=1),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -811,9 +865,27 @@ def test_run_l3_holdout_gate_blocked_when_total_return_negative() -> None:
         trade_count=42,
     )
 
+    def _make_mock_cache(n_bars: int = 100, n_syms: int = 1) -> MagicMock:
+        cache = MagicMock()
+        cache.vol_matrix_2d = np.full((n_bars, n_syms), 0.0001, dtype=np.float64)
+        cache.tradeable_mask_2d = np.ones((n_bars, n_syms), dtype=bool)
+        cache.hurdle_2d = np.full((n_bars, n_syms), 3.8, dtype=np.float64)
+        cache.funding_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.beta_1d = np.zeros(n_syms, dtype=np.float64)
+        cache.expected_gross_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.expected_net_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.holding_bars_2d = np.ones((n_bars, n_syms), dtype=np.float64)
+        cache.side_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.quality_weight_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
+        return cache
+
     with patch(
         "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
         return_value=sim_result,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -847,9 +919,27 @@ def test_run_l3_holdout_gate_passed_when_all_thresholds_satisfied() -> None:
         trade_count=50,
     )
 
+    def _make_mock_cache(n_bars: int = 100, n_syms: int = 1) -> MagicMock:
+        cache = MagicMock()
+        cache.vol_matrix_2d = np.full((n_bars, n_syms), 0.0001, dtype=np.float64)
+        cache.tradeable_mask_2d = np.ones((n_bars, n_syms), dtype=bool)
+        cache.hurdle_2d = np.full((n_bars, n_syms), 3.8, dtype=np.float64)
+        cache.funding_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.beta_1d = np.zeros(n_syms, dtype=np.float64)
+        cache.expected_gross_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.expected_net_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.holding_bars_2d = np.ones((n_bars, n_syms), dtype=np.float64)
+        cache.side_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.quality_weight_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
+        return cache
+
     with patch(
         "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
         return_value=sim_result,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
     ):
         result = run_l3_holdout(
             signal_batch=_make_l3_signal_batch(),
@@ -1010,13 +1100,32 @@ def test_run_l2_awf_vol_matrix_lookup_correctness() -> None:
     config = Layer2AllocationConfig(k_rank=1, rebalance_bars=1)
 
     # Act
-    l2 = run_l2_awf(
-        signal_batch=signal_batch,
-        aligned=aligned,
-        awf_folds=awf_folds,
-        config=config,
-        caps=caps,
-    )
+    def _make_mock_cache(n_bars: int = 100, n_syms: int = 1) -> MagicMock:
+        cache = MagicMock()
+        cache.vol_matrix_2d = np.full((n_bars, n_syms), 0.0001, dtype=np.float64)
+        cache.tradeable_mask_2d = np.ones((n_bars, n_syms), dtype=bool)
+        cache.hurdle_2d = np.full((n_bars, n_syms), 3.8, dtype=np.float64)
+        cache.funding_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.beta_1d = np.zeros(n_syms, dtype=np.float64)
+        cache.expected_gross_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.expected_net_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.holding_bars_2d = np.ones((n_bars, n_syms), dtype=np.float64)
+        cache.side_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.quality_weight_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
+        return cache
+
+    with patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=_make_mock_cache(n_bars=50, n_syms=2),
+    ):
+        l2 = run_l2_awf(
+            signal_batch=signal_batch,
+            aligned=aligned,
+            awf_folds=awf_folds,
+            config=config,
+            caps=caps,
+        )
 
     # Assert
     assert isinstance(l2, Layer2Result)
@@ -3106,7 +3215,9 @@ def test_run_awf_simulation_tracks_baseline_costs_and_diagnostics() -> None:
     config = Layer2AllocationConfig(k_rank=2, rebalance_bars=1, no_trade_band=0.0)
     caps = PortfolioCaps(gross=2.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=10.0)
 
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
     sim = _run_awf_simulation(
+        cache=build_l2_simulation_cache(aligned, signal_batch, "4h"),
         signal_batch=signal_batch,
         aligned=aligned,
         awf_folds=awf_folds,
