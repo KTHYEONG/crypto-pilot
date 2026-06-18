@@ -81,7 +81,9 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
   - `Layer2GateEvaluation.promotion_constraint_values` is the full replay gate vector used for champion promotion.
   - Optuna feasibility covers deployment/leak/risk/coverage/trade floors only.
   - Final promotion gate (3단): **Sortino ≥ 1.5** (1차) + **Sharpe ≥ 0.7** (sanity floor; 하방 표본 희소 시 Sortino 인플레이션 방어) + **Calmar ≥ 0.5** (복리 앵커) + `CAGR`, `MAR`, `PSR`, `growth_lcb`, `uplift`.
+  - Replay promotion also requires the latest non-empty deployed fold to pass `recent_fold` when enabled; the recent fold is evaluated on deployed `CAGR > 0` and optional minimum Sharpe floor.
   - `CAGR >= 0.30` remains a hard promotion gate and is not embedded as an Optuna objective bonus.
+  - `l2_max_exchange_leverage` defaults to `10.0` when absent, and explicit `None` is reserved for disabling the exchange cap.
 - **DSR Role (D4)**:
   - **L2**: `dsr_floor` BLOCKER 제거 → **PSR(N=1) gate**(`psr_floor ≥ 0.90`) 신설. DSR = diagnostic 잔존(계산·로깅·스코어카드, 차단 권한 없음).
   - **DSR 근거**: L2 pool = 동일 신호셋 파라미터 섭동 → 독립 가설 불성립 → 자기참조 → DSR≈0.5 고정(실엣지 무관). 진짜 다중검정 방어는 L1 DSR 게이트 + L3 multi-seed stability.
