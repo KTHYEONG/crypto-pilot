@@ -9,7 +9,11 @@ Space Complexity: O(n) for output string construction.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from typing import Any
+
+import numpy as np
+from numpy.typing import NDArray
 
 from src.domain.futures.optimization.opt_config import LayeredWindow
 
@@ -30,6 +34,16 @@ def _pct(v: float) -> str:
 def _fmt_date(d: Any) -> str:
     """Format a date-like object as ISO string."""
     return str(d)
+
+
+def _format_symbol_preview(symbols: Sequence[Any], *, max_symbols: int = 8) -> str:
+    preview = [str(sym) for sym in symbols[: max(max_symbols, 0)]]
+    if not preview:
+        return ""
+    extra = max(len(symbols) - len(preview), 0)
+    if extra > 0:
+        preview.append(f"+{extra} more")
+    return ", ".join(preview)
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +325,12 @@ def format_layer1_gate_table(report: Any) -> str:
     return "\n".join(lines)
 
 
-def format_layer1_outer_fold_table(reports: tuple[Any, ...]) -> str:
+def format_layer1_outer_fold_table(
+    reports: tuple[Any, ...],
+    *,
+    datetimes: NDArray[np.datetime64] | None = None,
+    max_symbols: int = 8,
+) -> str:
     """폴드별 준비 상태 진단을 트리 뷰 구조로 변경."""
     n_folds = len(reports)
     n_passed = sum(1 for r in reports if bool(getattr(r, "passed", False)))
@@ -334,13 +353,34 @@ def format_layer1_outer_fold_table(reports: tuple[Any, ...]) -> str:
         fold_id = int(getattr(r, "fold_id", 0))
         fit_end = int(getattr(r, "registry_source_end_idx", 0))
         oos_start = int(getattr(r, "outer_oos_start_idx", 0))
+        oos_end = int(getattr(r, "outer_oos_end_idx", 0))
         
-        ready_count = len(tuple(getattr(r, "ready_symbols", ()) or ()))
+        ready_symbols = tuple(getattr(r, "ready_symbols", ()) or ())
+        ready_count = len(ready_symbols)
         times = int(getattr(r, "valid_opportunity_timestamp_count", 0))
         probe = float(getattr(r, "probe_bps", 0.0))
 
-        lines.append(f"  [{icon}] Fold #{fold_id} (Fit: {fit_end} → OOS: {oos_start})")
-        lines.append(f"       ├─ Symbols : {ready_count} symbols loaded")
+        if (
+            datetimes is not None
+            and len(datetimes) > 0
+            and 0 < fit_end <= len(datetimes)
+            and 0 <= oos_start < len(datetimes)
+            and 0 < oos_end <= len(datetimes)
+        ):
+            # Extract date part (YYYY-MM-DD) for cleaner logs
+            fit_label = str(datetimes[fit_end - 1]).split("T")[0]
+            oos_start_label = str(datetimes[oos_start]).split("T")[0]
+            oos_end_label = str(datetimes[oos_end - 1]).split("T")[0]
+            fold_label = f"Fold #{fold_id} (FitEnd: {fit_label} -> OOS: {oos_start_label} ~ {oos_end_label})"
+        else:
+            fold_label = f"Fold #{fold_id} (Fit: {fit_end} → OOS: {oos_start})"
+
+        lines.append(f"  [{icon}] {fold_label}")
+        symbol_preview = _format_symbol_preview(ready_symbols, max_symbols=max_symbols)
+        if symbol_preview:
+            lines.append(f"       ├─ Symbols : {ready_count} symbols loaded [{symbol_preview}]")
+        else:
+            lines.append(f"       ├─ Symbols : {ready_count} symbols loaded")
         lines.append(f"       ├─ Events  : {times} unique events")
         lines.append(f"       └─ Quality : Edge: {probe:.2f} bps")
         
@@ -355,82 +395,95 @@ def format_layer1_outer_fold_table(reports: tuple[Any, ...]) -> str:
     return "\n".join(lines)
 
 
-def format_layer1_deployment_registry_table(registry: Any) -> str:
-    """Format deployment registry entries with enhanced visualization."""
-    by_symbol = getattr(registry, "by_symbol", {}) or {}
+def format_layer_universe_audit_table(audits: Sequence[Any]) -> str:
+    """Format layer universe audit records with a cleaner, borderless table."""
+    sep = "──────────────────────────────────────────────────────────────────────────────"
+    # SYMS(>4), ENTRY(>9), KILL(>6) 등 숫자 컬럼은 우측 정렬 적용
+    header = f"  {'LAYER':<6} {'WINDOW RANGE':<31} {'SYMS':>4}   {'ACTIVE (min/med/max)':<21} {'ENTRY':>10}  {'KILL':>6}  {'WARNINGS'}"
+    divider = f"  {'─'*5:<6} {'─'*30:<31} {'─'*4:>4}   {'─'*20:<21} {'─'*10:>10}  {'─'*6:>6}  {'─'*8}"
     
-    # Flatten all evidence items to sort and rank them
+    lines: list[str] = [
+        "",
+        "● [LAYER UNIVERSE AUDIT]",
+        sep,
+        header,
+        divider,
+    ]
+    for audit in audits:
+        layer = str(getattr(audit, "layer", "")).upper()[:5]
+        start = str(getattr(audit, "start_date", "—"))
+        end = str(getattr(audit, "end_date", "—"))
+        window = f"{start} ~ {end}"
+        symbol_count = int(getattr(audit, "symbol_count", 0))
+        amin = int(getattr(audit, "active_symbol_count_min", 0))
+        amed = float(getattr(audit, "active_symbol_count_median", 0.0))
+        amax = int(getattr(audit, "active_symbol_count_max", 0))
+        active_str = f"{amin:>3} / {amed:>5.1f} / {amax:<3}"
+        entry_count = int(getattr(audit, "entry_block_count", 0))
+        kill_count = int(getattr(audit, "kill_count", 0))
+        warnings = tuple(getattr(audit, "warnings", ()) or ())
+        warning_str = ", ".join(warnings) if warnings else "—"
+        
+        lines.append(
+            f"  {layer:<6} {window:<31} {symbol_count:>4}   {active_str:<21} {entry_count:>10,}  {kill_count:>6}  {warning_str}"
+        )
+    lines.append(sep)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def format_layer1_deployment_registry_table(registry: Any) -> str:
+    """Format deployment registry entries with a cleaner, borderless table."""
+    by_symbol = getattr(registry, "by_symbol", {}) or {}
     all_entries = []
     for symbol in by_symbol:
         evidence_items = tuple(by_symbol.get(symbol, ()) or ())
         for ev in evidence_items:
             key = getattr(ev, "key", None)
-            strategy_id = getattr(key, "strategy_id", "")
-            context = getattr(key, "activation_context", "all")
             all_entries.append({
                 "symbol": symbol,
-                "strategy_id": strategy_id,
-                "context": context,
+                "strategy_id": getattr(key, "strategy_id", ""),
+                "context": getattr(key, "activation_context", "all"),
                 "edge": float(getattr(ev, "mean_incremental_bps", 0.0)),
                 "tstat": float(getattr(ev, "bootstrap_tstat_incremental", 0.0)),
                 "q_value": float(getattr(ev, "q_value", 0.0)),
-                "effective_n": float(getattr(ev, "effective_n", 0.0)),
             })
     
-    # Sort by t-stat descending for ranking
     all_entries.sort(key=lambda x: x["tstat"], reverse=True)
     
-    lines = [
-        "",  # Leading newline for separation
-        "[L1 FINAL PROMOTION SUMMARY] 🚀",
-        "--------------------------------------------------------------------------------------------",
-        " RANK | SYMBOL   | STRATEGY (Family)              | EDGE(bps) | SIG(t-stat) | CONF(q) | STATUS",
-        "--------------------------------------------------------------------------------------------",
-    ]
+    header = f"  {'RANK':<5} {'SYMBOL':<12} {'STRATEGY (Family)':<32} {'EDGE(bps)':>9}  {'SIG(t-stat)':<15} {'STATUS'}"
+    divider = f"  {'─'*4:<5} {'─'*10:<12} {'─'*31:<32} {'─'*9:>9}  {'─'*14:<15} {'─'*18}"
+    
+    lines: list[str] = ["", "[L1 FINAL PROMOTION SUMMARY] 🚀", header, divider]
     
     for i, entry in enumerate(all_entries, 1):
-        # Strategy family extraction
         strat_parts = entry["strategy_id"].split(":")
         family = strat_parts[0] if len(strat_parts) > 1 else entry["strategy_id"]
         variant = strat_parts[1] if len(strat_parts) > 1 else ""
-        
-        # Include context if not 'all'
         ctx_suffix = f" [{entry['context']}]" if entry['context'] != "all" else ""
         strat_display = f"{family} ({variant}){ctx_suffix}" if variant else f"{family}{ctx_suffix}"
-        
-        # Star rating for t-stat
+        if len(strat_display) > 31:
+            strat_display = strat_display[:28] + "..."
+            
         t = entry["tstat"]
-        if t >= 4.0:
-            stars = "★★★★★"
-        elif t >= 3.0:
-            stars = "★★★★☆"
-        elif t >= 2.0:
-            stars = "★★★☆☆"
-        elif t >= 1.0:
-            stars = "★★☆☆☆"
-        else:
-            stars = "★☆☆☆☆"
-            
-        # Status based on q-value
+        stars_n = min(5, max(1, round(t)))
+        sig_display = f"[{stars_n}/5] {t:.2f}"
+        
         q = entry["q_value"]
-        if q <= 0.15:
-            status = "PROMOTED (Best Q)"
-        elif q <= 0.30:
-            status = "PROMOTED"
-        elif q <= 0.70:
-            status = "WATCH"
-        else:
-            status = "REJECTED"
-            
+        if q <= 0.15: status = "PROMOTED (Best Q)"
+        elif q <= 0.30: status = "PROMOTED"
+        elif q <= 0.70: status = "WATCH"
+        else: status = "REJECTED"
+        
         lines.append(
-            f"  #{i:<2} | {entry['symbol']:<8} | {strat_display[:28]:<30} | "
-            f"{entry['edge']:>+9.1f} | {stars} {t:>4.2f} |  {q:>5.3f}  | {status}"
+            f"  #{i:<4} {entry['symbol']:<12} {strat_display:<32} {entry['edge']:>+9.1f}  {sig_display:<15} {status}"
         )
         
-    lines.append("--------------------------------------------------------------------------------------------")
     if not all_entries:
         lines.append("  (No variants promoted to Layer 2)")
-        
+    
+    lines.append(divider)
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -601,6 +654,12 @@ def format_layer2_table(
             if period_str:
                 line = f"{line} | Period: {period_str}"
             lines.append(line)
+            symbols = tuple(af.get("symbols", ()) or ())
+            if symbols:
+                symbol_preview = _format_symbol_preview(symbols, max_symbols=8)
+                lines.append(
+                    f"       Symbols: {len(symbols)} [{symbol_preview}]"
+                )
 
     if topk_selection:
         lines.append("")
