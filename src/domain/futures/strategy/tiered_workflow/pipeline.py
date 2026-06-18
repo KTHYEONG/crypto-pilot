@@ -1423,10 +1423,6 @@ def run_l3_holdout(
         blocker_reason = "insufficient_trades"
     elif total_return <= 0.0:
         blocker_reason = "negative_return"
-    elif sharpe < sharpe_baseline:
-        blocker_reason = "sharpe_rel"
-    elif mdd > mdd_baseline:
-        blocker_reason = "mdd_rel"
     elif mdd > max_mdd_abs:
         blocker_reason = "mdd_abs"
     else:

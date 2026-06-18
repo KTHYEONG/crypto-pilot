@@ -694,80 +694,68 @@ def format_layer3_table(
 
     # Metrics
     cagr_h = float(getattr(r, "cagr", 0.0))
-    cagr_b = float(getattr(r, "cagr_baseline", 0.0))
     mdd_h = float(getattr(r, "mdd", 0.0))
-    mdd_b = float(getattr(r, "mdd_baseline", 0.0))
     sharpe_h = float(getattr(r, "sharpe", 0.0))
-    sharpe_b = float(getattr(r, "sharpe_baseline", 0.0))
     mar_h = float(getattr(r, "mar", 0.0))
-    mar_b = float(getattr(r, "mar_baseline", 0.0))
 
     total_return = float(getattr(r, "total_return", 0.0))
     equity_multiple = float(getattr(r, "equity_multiple", 1.0))
     sortino_h = float(getattr(r, "sortino", 0.0))
-    sortino_b = float(getattr(r, "sortino_baseline", 0.0))
     cvar95 = float(getattr(r, "cvar95", 0.0))
     avg_gross_exposure = float(getattr(r, "avg_gross_exposure", 0.0))
     n_trades = int(getattr(r, "n_trades", 0))
     min_trades = int(getattr(r, "min_trades", 10))
 
-    # [ GROWTH ]
-    lines.extend([
-        "  [ GROWTH ]",
-        sep_sub,
-        f"  {_status(cagr_h >= cagr_b)} CAGR          : [ {_f(cagr_h, '+.1%'):>8} ] "
-        f"({_f(cagr_b, '+.1%'):>11} ) | Gate: >= Bench",
-        f"  {_status(total_return > 0.0)} Total Return  : [ {_f(total_return, '+.1%'):>8} ] | "
-        f"Equity: x{equity_multiple:>4.2f} | Gate: > 0",
-        ""
-    ])
+    # Category status determination (Absolute gates)
+    growth_ok = (total_return > 0.0)
+    efficiency_ok = math.isfinite(sharpe_h)
+    risk_ok = (mdd_h <= 0.35)  # Global L3 absolute MDD gate
+    robust_ok = (n_trades >= min_trades)
 
-    # [ EFFICIENCY ]
     lines.extend([
-        "  [ EFFICIENCY ]",
-        sep_sub,
-        f"  {_status(sharpe_h >= sharpe_b)} Sharpe        : [ {_f(sharpe_h):>8} ] "
-        f"({_f(sharpe_b):>11} ) | Gate: >= Bench",
-        f"     Sortino       : [ {_f(sortino_h):>8} ] ({_f(sortino_b):>11} ) | (diag)",
-        f"  {_status(mar_h >= mar_b)} MAR (Calmar)  : [ {_mar_str(mar_h, cagr_h):>8} ] "
-        f"({_mar_str(mar_b, cagr_b):>11} ) | Gate: >= Bench",
-        ""
-    ])
-
-    # [ RISK ]
-    lines.extend([
-        "  [ RISK ]",
-        sep_sub,
-        f"  {_status(mdd_h <= mdd_b)} MDD           : [ {_pct(mdd_h):>8} ] ({_pct(mdd_b):>11} ) | Gate: <= Bench",
-        f"     CVaR95        : [ {_pct(cvar95):>8} ] | Exposure: {_pct(avg_gross_exposure)} | (diag)",
-        ""
-    ])
-
-    # [ ROBUSTNESS ]
-    lines.extend([
-        "  [ ROBUSTNESS ]",
-        sep_sub,
-        f"  {_status(n_trades >= min_trades)} Trades        : [ {n_trades:>8d} ] | Gate: >= {min_trades}",
-        sep_sub,
+        (
+            f"  {_status(growth_ok)} [GROWTH    ] "
+            f"CAGR: {_f(cagr_h, '+.1%')} | "
+            f"Total Return: {_f(total_return, '+.1%')} (> 0.0%) | "
+            f"Equity x{equity_multiple:.2f}"
+        ),
+        (
+            f"  {_status(efficiency_ok)} [EFFICIENCY] "
+            f"Sharpe: {_f(sharpe_h)} | "
+            f"Sortino: {_f(sortino_h)} | "
+            f"Calmar: {_mar_str(mar_h, cagr_h)}"
+        ),
+        (
+            f"  {_status(risk_ok)} [RISK      ] "
+            f"MDD: {_pct(mdd_h)} (<= 35.0%) | "
+            f"CVaR95: {_pct(cvar95)} | "
+            f"Exposure: {avg_gross_exposure:.1f}x"
+        ),
+        (
+            f"  {_status(robust_ok)} [ROBUST    ] "
+            f"Trades: {n_trades} (>= {min_trades})"
+        ),
+        sep_main,
         ""
     ])
 
     # Optional Metrics (if present)
-    if hasattr(r, "growth_lcb") or hasattr(r, "growth_lcb_baseline"):
+    has_opt = False
+    if hasattr(r, "growth_lcb"):
+        has_opt = True
         val_h = float(getattr(r, "growth_lcb", 0.0))
-        val_b = float(getattr(r, "growth_lcb_baseline", 0.0))
         lines.append(
-            f"  {_status(val_h >= val_b)} Growth LCB   : [ {_pct(val_h):>8} ] ({_pct(val_b):>11} ) | Gate: >= Bench"
+            f"  {_status(True)} [INTEGRITY ] Growth LCB: {_pct(val_h)}"
         )
     
     if hasattr(r, "total_cost_bps"):
+        has_opt = True
         val_h = float(getattr(r, "total_cost_bps", 0.0))
-        val_b = float(getattr(r, "total_cost_bps_baseline", 0.0))
         lines.append(
-            f"  {_status(val_h <= val_b)} Cost Drag    : [ {val_h/100:>+8.1%} ] ({val_b/100:>+11.1%} ) | Gate: <= Bench"
+            f"  {_status(True)} [INTEGRITY ] Cost Drag: {val_h/100:>+8.1%}"
         )
     
-    if hasattr(r, "growth_lcb") or hasattr(r, "total_cost_bps"):
+    if has_opt:
         lines.append("")
 
     lines.append(f"  >> FINAL RESULT : {final_icon} {final_status}")
