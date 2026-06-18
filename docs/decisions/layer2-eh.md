@@ -7,6 +7,11 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## 2026-06-18 L2 CAGR 배치 갭 수정 — C1(fit-leg book) + C2(trial 내 L*) + C4(vol/gross 노브)
+- **Delta:** (C1) `awf_sim.py` fit-leg 루프를 equal-weight 시장수익률 평균 → OOS와 동일한 체인(rank→kelly→throttle→tradeable→cost→funding) per-bar book 수익률로 교체. (C2) `evaluate_l2_trial`에서 L* = `calibrate_deployment_leverage(fit_rets_hybrid)` 호출 → `cagr/mdd/cvar`를 deployed 값으로 갱신; `sortino/sharpe/psr`는 unit-vol 유지. `Layer2TrialEvaluation`에 `deploy_leverage/deploy_binding` 필드 추가. (C4) `selection._apply_deployment_to_params`에서 kelly 배율 제거, `max_ann_vol=vol_base×L*`·`gross_exposure_cap=base_gross×L*`로 실제 배치 노브 전환. `l_hard_cap` 기본값 4.0→20.0 유지.
+- **Rationale:** RC-2: fit-leg가 시장 MDD≈25%를 참조해 L*≈1 고정(전략 unit-vol MDD≈1%). RC-3: kelly 배율이 `project_all_caps(target_ann_vol)` 재정규화로 상쇄(dead code) — vol_target·gross_cap만이 실제 scale 노브. RC-4(throttle): m_t≈1.0 확인(무죄). 이론 CAGR(L*=20 적용 시)≈91%, 실측 3.3%는 순수 미배치 문제.
+- **Edge Cases:** fit-leg loop에서 `risk_budget_floor` 미적용(경미, 위험 완충). fit_rets_hybrid 빈 경우 OOS proxy fallback 보존. opt_main_futures.py tqdm 변경은 scope creep(선언된 의존성, 기능 무관).
+
 ## 2026-06-18 L2 Sortino-Shape 재설계 — D1(목적함수) + D2(vol복원) + D3(fit-leg) + D4(DSR→PSR)
 - **Delta:** (D1) Optuna 목적 `growth_lcb` → `Sortino_HAC_unit`(scale-invariant). 게이트 3단: Sortino≥1.5(1차) + Sharpe≥0.7(sanity floor, 기존 1.0 이완) + Calmar≥0.5(복리앵커). `metrics.py::_sortino_hac_unit` 신설(HAC downside dev). (D2) `vol_target=None→1.0` 강제 — RC-1 cascade 3종(vol-targeting·risk_budget_floor·adaptive_breadth) 재활성. (D3) AWF fit-leg 수익률 수집(`_AwfSimResult.fit_rets_hybrid`) → `_apply_deployment_to_params`에서 OOS 대리 대신 fit-leg 우선 소비. `l2_deploy_l_hard_cap` 4.0→20.0(MDD/CVaR가 실제 binding). (D4) `dsr_floor` BLOCKER 제거 → `psr_floor`/`sortino_floor`/`calmar_floor` 신설. DSR = diagnostic 잔존(계산·로깅 유지). `L2_ALLOC_SPACE_V9` = V7 구조 복원.
 - **Rationale:** RC-1: V8가 `max_ann_vol` 제거 → `vol_target=None` silent cascade. RC-2: scale-dep `growth_lcb`를 고정 kelly=0.25에서 최적화 → objective 표면 평탄 → shape 노이즈 선택 → Sharpe 0.839. RC-3: DSR pool = 동일 신호셋 파라미터 섭동(독립 가설 불성립) → 자기참조 → DSR≈0.5 고정 → V8 절단을 강제. Crypto 비대칭 수익 → Sortino(하방전용)가 Sharpe보다 shape 측정 타당. Sharpe floor(≥0.7)는 하방 표본 희소 시 Sortino 인플레이션 방어.
