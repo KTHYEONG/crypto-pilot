@@ -1041,7 +1041,11 @@ def run_l2_awf(
     override_dsr: float | None = None,
 ) -> Layer2Result:
     """Layer2 AWF 포트폴리오 시뮬레이션."""
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+    cache = build_l2_simulation_cache(aligned, signal_batch, tf)
+
     sim = _run_awf_simulation(
+        cache=cache,
         signal_batch=signal_batch,
         aligned=aligned,
         awf_folds=awf_folds,
@@ -1298,7 +1302,11 @@ def run_l3_holdout(
         oos_end=ho_end,
     )
 
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+    cache = build_l2_simulation_cache(aligned, signal_batch, tf)
+
     sim = _run_awf_simulation(
+        cache=cache,
         signal_batch=signal_batch,
         aligned=aligned,
         awf_folds=(dummy_fold,),

@@ -766,6 +766,10 @@ def _run_tiered_l2_study(
     )
     from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
 
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+    
+    l2_sim_cache = build_l2_simulation_cache(aligned, signal_batch, tf)
+
     ctx = TieredContext(
         labeled_events=pd.DataFrame(),  # signal_batch에 이미 예측됨, labeles 불필요
         aligned=aligned,
@@ -774,6 +778,7 @@ def _run_tiered_l2_study(
         caps=caps,
         tf=tf,
         fixed_l1_params={"signal_batch": signal_batch},
+        l2_sim_cache=l2_sim_cache,
     )
 
     study_name = _layer2_experiment_key(
@@ -790,9 +795,10 @@ def _run_tiered_l2_study(
     try:
         # setup_optuna_storage를 1회만 호출하여 로그 중복 제거
         _, storage = setup_optuna_storage(str(BASE_DIR))
+        from tqdm import tqdm
         class L2OptunaProgressCallback:
             def __init__(self, total_trials: int):
-                self.total_trials = total_trials
+                self.pbar = tqdm(total=total_trials, desc="[L2-OPT]", leave=True)
                 self.best_val = float("-1e6")
 
             def __call__(self, study: Any, trial: Any) -> None:
@@ -800,19 +806,10 @@ def _run_tiered_l2_study(
                 if val is not None and val > self.best_val:
                     self.best_val = val
                 
-                # 로그 출력을 위해 사용되었으나 노이즈 제거를 위해 주석 처리됨.
-                # current = len(study.trials)
-                # best_disp = f"{self.best_val * 100:.2f}%" if self.best_val > float("-1e6") else "N/A"
-                # current_disp = f"{val * 100:.2f}%" if (val is not None and val > float("-1e6")) else "BLOCKED"
-                # import sys
-                # sys.stdout.write(
-                #     f"\r[L2-OPT] Progress: {current}/{self.total_trials} trials | "
-                #     f"Best CAGR: {best_disp} | Current Trial PnL: {current_disp}"
-                # )
-                # sys.stdout.flush()
-                # if current >= self.total_trials:
-                #     sys.stdout.write("\n")
-                #     sys.stdout.flush()
+                best_disp = f"{self.best_val * 100:.2f}%" if self.best_val > float("-1e6") else "N/A"
+                current_disp = f"{val * 100:.2f}%" if (val is not None and val > float("-1e6")) else "BLOCKED"
+                self.pbar.set_postfix_str(f"Best CAGR: {best_disp} | Current: {current_disp}")
+                self.pbar.update(1)
 
         # 매 실행마다 완전 초기화 (resume=False): 이종 search-space trial이 한
         # study에 섞여 TPESampler가 dynamic search space로 오판 -> RandomSampler
@@ -860,13 +857,16 @@ def _run_tiered_l2_study(
                 study.enqueue_trial(_anchor_params)
 
         progress_cb = L2OptunaProgressCallback(n_trials)
-        study.optimize(
-            lambda trial: objective_l2_growth(trial, ctx),
-            n_trials=n_trials,
-            n_jobs=1,
-            show_progress_bar=False,
-            callbacks=[progress_cb],
-        )
+        try:
+            study.optimize(
+                lambda trial: objective_l2_growth(trial, ctx),
+                n_trials=n_trials,
+                n_jobs=1,
+                show_progress_bar=False,
+                callbacks=[progress_cb],
+            )
+        finally:
+            progress_cb.pbar.close()
     except Exception as exc:
         _logger.warning("[L2-OPT] Optuna study 실패: %s — 기본 l2_params 사용", exc)
         return Layer2StudyResult(
