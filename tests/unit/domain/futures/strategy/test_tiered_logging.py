@@ -389,7 +389,6 @@ class TestFormatLayer2Table:
         assert "Sharpe" in result
         assert "1.500" in result
         assert "CAGR" in result
-        assert "Calmar" in result
         assert "DSR" in result
         assert "0.850" in result
 
@@ -432,7 +431,7 @@ class TestFormatLayer2Table:
         """awf_folds 있으면 fold 테이블 추가 검증."""
         # Arrange
         r2 = _make_l2_ns()
-        folds = [{"fold": 1, "sharpe": 1.4, "mdd": 0.11, "pass": True}]
+        folds = [{"fold": 1, "sharpe": 1.4, "mdd": 0.11, "pass": True, "period": "2025-01-01 ~ 2025-03-31"}]
 
         # Act
         result = format_layer2_table(r2, awf_folds=folds)
@@ -440,6 +439,7 @@ class TestFormatLayer2Table:
         # Assert
         assert "Fold" in result
         assert "PASS" in result
+        assert "Period: 2025-01-01 ~ 2025-03-31" in result
 
     def test_nan_fold_shown_safely(self) -> None:
         """fold sharpe=nan → 'nan' 문자열로 안전 렌더링."""
@@ -476,6 +476,18 @@ class TestFormatLayer2Table:
         # Assert
         assert "n/a(loss)" in result
 
+    def test_format_layer2_table_renders_evaluation_period_in_header(self) -> None:
+        """L2 scorecard header에 실제 평가 기간이 표시되어야 한다."""
+        r2 = _make_l2_ns()
+
+        result = format_layer2_table(
+            r2,
+            evaluation_start="2025-10-01",
+            evaluation_end="2026-03-31",
+        )
+
+        assert "[LAYER 2 PORTFOLIO SCORECARD] (2025-10-01 ~ 2026-03-31)" in result
+
     def test_format_layer2_table_dsr_gate_shown(self) -> None:
         """DSR 행이 표시되고 dsr_hybrid=0.50 < 0.60이면 ❌ 상태 검증."""
         # Arrange
@@ -506,6 +518,9 @@ class TestFormatLayer3Table:
             sharpe_baseline=1.2,
             mar_baseline=1.5,
             gate_passed=True,
+            sortino=1.6,
+            cvar95=0.03,
+            n_trades=24,
         )
 
         result = format_layer3_table(r3, ho_start="2025-07-01", ho_end="2026-01-01")
@@ -518,6 +533,8 @@ class TestFormatLayer3Table:
         assert "✅" in result
         assert "45.0%" in result
         assert "1.800" in result
+        assert "CVaR95" in result
+        assert "Calmar" not in result
 
     def test_blocked_shows_blocker_reason(self) -> None:
         """gate_passed=False + blocker_reason이면 BLOCKED 요약 표시."""
@@ -532,6 +549,9 @@ class TestFormatLayer3Table:
             mar_baseline=0.63,
             gate_passed=False,
             blocker_reason="growth_lcb",
+            sortino=-0.2,
+            cvar95=0.02,
+            n_trades=5,
         )
 
         result = format_layer3_table(r3, ho_start="2025-07-01", ho_end="2026-01-01")
@@ -586,6 +606,39 @@ class TestFormatLayer3Table:
         assert "1.17" in result
         assert "58" in result
         assert "DEPLOY-READY" in result
+
+    def test_layer3_efficiency_and_risk_thresholds_render(self) -> None:
+        """L3는 Sharpe/Sortino/CVaR/MDD threshold를 명시해야 한다."""
+        r3 = SimpleNamespace(
+            cagr=0.12,
+            mdd=0.22,
+            sharpe=-0.1,
+            mar=0.55,
+            cagr_baseline=0.08,
+            mdd_baseline=0.24,
+            sharpe_baseline=0.2,
+            mar_baseline=0.33,
+            gate_passed=False,
+            blocker_reason="sharpe_abs",
+            total_return=0.05,
+            equity_multiple=1.05,
+            sortino=-0.3,
+            cvar95=0.07,
+            avg_gross_exposure=0.4,
+            n_trades=12,
+            min_trades=10,
+            max_mdd_abs=0.20,
+            min_sharpe=0.0,
+            min_sortino=0.0,
+            max_cvar95=0.06,
+        )
+
+        result = format_layer3_table(r3, holdout_start="2025-10-01", holdout_end="2026-03-31")
+
+        assert "Sharpe: -0.100 (>=0.000)" in result
+        assert "Sortino: -0.300 (>=0.000)" in result
+        assert "CVaR95: 7.0% (<= 6.0%)" in result
+        assert "MDD: 22.0% (<= 20.0%)" in result
 
 
 # ---------------------------------------------------------------------------
