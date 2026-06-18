@@ -145,7 +145,7 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
     - Config     : 200 trials
   ────────────────────────────────────────────────────────────────────────────
  [OPT] Deleted existing study 'l2_study_4h_03972e5343cd' for a fresh start.
-[L2-OPT]: 100%|██████████████████████████████████████████████████████| 200/200 [01:10<00:00,  2.82it/s, Best CAGR: 423.00% | Current: 92.04%]
+[L2-OPT]: 100%|██████████████████████████████████████████████████████| 200/200 [01:09<00:00,  2.88it/s, Best CAGR: 423.00% | Current: 92.04%]
 [L2-SELECTION] 2 gate-pass 후보 수집 → champion Trial #187 Sortino=2.6040 CAGR=1.3361
 [L2-SELECTION] Champion selected. Trial #187, Objective=2.2028, DSR=0.8312 (n_eff=3.00)
 [L2-DEPLOY-C4] L*=19.527 (binding=mdd) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
@@ -177,26 +177,11 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 ──────────────────────────────────────────────────────────────────────────────
   STATUS  : ❌ BLOCKED (Reason: negative_return)
 
-  [ GROWTH ]
-  ──────────────────────────────────────────────────────────────────────────
-  ❌ CAGR          : [    -1.3% ] (      -0.3% ) | Gate: >= Bench
-  ❌ Total Return  : [    -0.6% ] | Equity: x0.99 | Gate: > 0
-
-  [ EFFICIENCY ]
-  ──────────────────────────────────────────────────────────────────────────
-  ❌ Sharpe        : [   -0.480 ] (     -0.104 ) | Gate: >= Bench
-     Sortino       : [   -0.686 ] (     -0.151 ) | (diag)
-  ❌ MAR (Calmar)  : [ n/a(loss) ] (  n/a(loss) ) | Gate: >= Bench
-
-  [ RISK ]
-  ──────────────────────────────────────────────────────────────────────────
-  ❌ MDD           : [     1.7% ] (       1.6% ) | Gate: <= Bench
-     CVaR95        : [     0.1% ] | Exposure: 2.1% | (diag)
-
-  [ ROBUSTNESS ]
-  ──────────────────────────────────────────────────────────────────────────
-  ✅ Trades        : [       36 ] | Gate: >= 10
-  ──────────────────────────────────────────────────────────────────────────
+  ❌ [GROWTH    ] CAGR: -1.3% | Total Return: -0.6% (> 0.0%) | Equity x0.99
+  ✅ [EFFICIENCY] Sharpe: -0.480 | Sortino: -0.686 | Calmar: n/a(loss)
+  ✅ [RISK      ] MDD: 1.7% (<= 35.0%) | CVaR95: 0.1% | Exposure: 0.0x
+  ✅ [ROBUST    ] Trades: 36 (>= 10)
+──────────────────────────────────────────────────────────────────────────────
 
   >> FINAL RESULT : ❌ BLOCKED (Reason: negative_return)
 
