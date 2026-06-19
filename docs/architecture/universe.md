@@ -10,63 +10,75 @@ related_paths:
   - src/application/futures/optimization/universe_service.py
 change_triggers:
   - src/domain/futures/universe/**
-last_verified: 2026-06-15
+last_verified: 2026-06-19
 ---
 
 # 1. Purpose
-Generates a Point-In-Time (PIT) valid, survivorship-bias-free trading universe through a strict 7-stage filtration funnel.
+Produces a bar-by-bar PIT-valid `UniverseStateCube [T, N]` for Binance USDT perpetual futures — no survivorship bias, no look-ahead. Replaces the legacy Stage2-6 ranked selection with per-bar execution eligibility rules evaluated at `available_at <= decision_at`.
 
 # 2. Core Logic & Math
 
-**Execution Cost Estimation (Stage 4)**
+**PIT Eligibility Rule (per bar, per instrument)**
+- $\text{eligible}[t, n] = 1 \iff \forall r \in \text{ExecutionRules}: r(\text{obs}_{t,n}) = \text{PASS}$
+- `available_at ≤ decision_at` strictly enforced for every observation.
+- Fail-closed: missing data → `eligible = False`.
+
+**Execution Cost Estimation**
 - $\text{cost\_bps} = 2 \cdot \text{taker\_fee} + 2 \cdot \text{half\_spread} + \text{impact} + \text{tick\_cost}$
-- Post-2020: `half_spread` = empirical median of `bookDepth`.
+- Post-2020: `half_spread` = empirical median bookDepth.
 - Pre-2020: `half_spread` = Modified Corwin-Schultz OHLC model.
 
-**Snapshot Quality Score**
-- $\text{Score}_{\text{universe}} = \text{fill\_rate} \times \log_{10}\left(\frac{\text{median\_adv\_usdt}}{\text{adv\_scale\_factor}}\right) \times \frac{1}{\text{mAEC\_bps}}$
+**Capacity Clip**
+- $\text{capacity\_usdt}[t, n] = \text{adv\_usdt}_{30d}[t, n] \times \text{max\_participation\_rate}$
+- Order sizing clips to capacity: $w \leftarrow \min(w, \text{capacity\_usdt}[t, n] / \text{nav})$. Min order 5 USDT; below threshold → $w = 0$.
 
-**PIT Constraints**
-- Strict requirement: `knowledge_date <= as_of`. No forward-looking metadata or delisting knowledge is allowed.
+**Top-N cap (optional)**
+- `PITUniverseConfig.k_in > 0`: select top-k by `capacity_usdt` descending. `k_in = 0` → no cap.
 
-**7-Stage Funnel Hurdles**
-- **S1 (Structure):** `listing_age_days >= min_listing_days`
-- **S2 (Quality):** `min_is_coverage >= min_coverage_is`, `min_coverage_60d >= min_coverage_60d_req`
-- **S3 (Liquidity):** `adv_usdt_median >= min_adv_usdt`, `max_amihud_30d <= max_amihud`
-- **S4 (Cost):** `execution_cost_bps <= max_exec_cost_bps`
-- **S5 (Risk):** $\text{min\_vol} \leq \text{vol\_30d} \leq \text{max\_vol}$, $|\text{funding\_zscore}| \leq \text{max\_funding\_zscore}$
+**Snapshot Quality Score (legacy, retained for audit)**
+- $\text{Score} = \text{fill\_rate} \times \log_{10}\left(\frac{\text{median\_adv\_usdt}}{\text{adv\_scale\_factor}}\right) \times \frac{1}{\text{mAEC\_bps}}$
 
 # 3. Architecture Flow
 
 ```mermaid
 graph TD
-    A[Exchange Symbol List] --> B[S0: Eligibility]
-    B --> C[S1: Structure & Listing Age]
-    C --> D[S2: Data Quality]
-    D --> E[S3: Liquidity]
-    E --> F[S4: Execution Cost]
-    F --> G[S5: Risk Events]
-    G --> H[S6: Selection & Ranking]
-    H --> I[PIT Universe Snapshot]
-    I --> J[Downstream ML & Candidate Pipeline]
+    A[Universe Ledger parquet] --> B[InstrumentRegistry: available_at filter]
+    B --> C[MarketObservations: per-bar PIT metrics]
+    C --> D[ExecutionEligibility: per-instrument rules]
+    D --> E[UniverseStateCube eligible T×N]
+    E --> F[build_universe → UniverseSnapshot + selected]
+    F --> G[_run_universe_stage → state_cube forwarded]
+    G --> H[align_data_maps: state_cube injected]
+    H --> I[L1 SWF: active_mask = state_cube slice]
+    I --> J[SymbolLifecycleRecord: promotion_available_at gate]
+    J --> K[L2 oos_stacked filtered]
+    K --> L[awf_sim: capacity_usdt clip]
 ```
+
+**Quarterly dispatch (`discover_universe_timeline`):**
+- `cfg.universe_engine == "pit"` (default) → `_discover_universe_timeline_pit`: quarterly loop, pit_cubes forward-filled into merged `eligible [T, N]`.
+- `cfg is None` → raises `ValueError` (Stage6 path removed).
 
 # 4. Core Variables & I/O
 
 | Type | Variable | Description |
 |------|----------|-------------|
-| **Input** | `knowledge_date` | Point-in-time barrier for all historical data queries |
-| **Param** | `min_listing_days` | Minimum days since listing to bypass structural gate. Bounds: `[0, ∞)` |
-| **Param** | `min_adv_usdt` | Minimum 30-day median trading volume. Bounds: `[0, ∞)` |
-| **Param** | `max_exec_cost_bps` | Maximum tolerated round-trip execution cost. Bounds: `[0, ∞)` |
-| **Output**| `Universe Snapshot` | Static, timestamped set of valid symbols |
-| **Output**| `Static Metadata` | Metrics passed downstream: `vol_30d`, `friction_score`, `beta_vs_market`, etc. |
+| **Input** | `knowledge_date` | PIT barrier: `available_at <= decision_at` enforced |
+| **Input** | `available_at` | Observation release timestamp (distinct from event timestamp) |
+| **Param** | `PITUniverseConfig.k_in` | Top-N cap by capacity_usdt; `0` = no cap (default 50) |
+| **Param** | `max_participation_rate` | Fraction of ADV per order for capacity (default 0.01) |
+| **Param** | `max_round_trip_cost_bps` | Hard execution-cost ceiling (default 50.0 bps) |
+| **Output** | `UniverseStateCube.eligible [T, N]` | Bool array; SSOT for bar-by-bar eligibility |
+| **Output** | `capacity_usdt [T, N]` | float64; injected into awf_sim for position sizing |
+| **Output** | `UniverseSnapshot.selected` | Eligible symbols at as_of, no fixed k_in rotation |
+| **Internal** | `SymbolLifecycleRecord` | Per-symbol L1 fold status + `promotion_available_at: date\|None` |
 
 # 5. Edge Cases & Handling
-- **Exchange API Rule Changes (e.g., Tick Size):** The universe generation caches API exchange info as-of the `knowledge_date`. If an exchange modifies tick sizes, the snapshot uses the historical structure parameters to maintain exact simulation alignment.
-- **Delisted/Dead Coins:** Symbols that are delisted post-`knowledge_date` remain in the snapshot if they met the criteria at `as_of`. This structurally enforces the inclusion of failing assets to prevent survivorship bias in the backtest.
-- **New Listings Data Collection Guard:** When backfilling data for newly listed coins, the loader clips the request start date to the symbol's `onboard_date` to prevent queries before listing. Additionally, to avoid infinite request loops due to intra-day listing offsets (e.g. 08:00 listing vs 00:00 clipping), backfills are automatically skipped if the target gap is less than 24 hours.
-- **Delisted Symbol Infinite Sync Prevention:** When checking for missing cached intervals, symbols that have no data update for more than 180 days past the requested end timestamp (or those that have surpassed their configured lifecycle `delivery_date` in `SymbolSyncProfile`) are categorized as delisted/inactive. Their sync end range is clipped accordingly to bypass redundant API network backfill attempts.
+- **Exchange API Rule Changes (e.g., Tick Size):** Universe caches API exchange info as-of `knowledge_date`; historical structure parameters used for simulation alignment.
+- **Delisted/Dead Coins:** Symbols delisted post-`knowledge_date` remain in snapshot if eligible at `as_of` — enforces inclusion to prevent survivorship bias.
+- **New Listings Guard:** Loader clips request start to `onboard_date`; backfills skipped if gap < 24 hours.
+- **Delisted Symbol Sync Prevention:** Symbols with no data update > 180 days past requested end are treated as inactive; sync range clipped accordingly.
+- **Mid-listing Promotion Gate:** `SymbolLifecycleRecord.promotion_available_at > l2_start` → symbol excluded from L2 `oos_stacked`; prevents look-ahead from mid-window listing entry.
 
 
 # 6. Storage & Persistence (SQLite)
