@@ -7,12 +7,13 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from src.core.settings import FUTURES_DATA_DIR, LOG_DIR
 
 from .config import UniverseConfig, hash_config
-from .contracts import DataConfidence, ExecutionRules
+from .contracts import DataConfidence, ExecutionRules, UniverseStateCube
 from .eligibility import (
     ExecutionEligibilityConfig,
     RuleFallbackPolicy,
@@ -35,6 +36,7 @@ from .store import (
     compute_universe_run_id,
     load_universe_store_run,
     materialize_snapshot_from_store,
+    validate_materializable_pit_store_run,
     write_universe_store_run,
 )
 
@@ -139,13 +141,62 @@ def _save_snapshot(
     )
 
 
+def _selected_meta_to_frame(selected_meta: tuple[SymbolMeta, ...]) -> pd.DataFrame:
+    rows = [
+        {
+            "symbol": meta.symbol,
+            "role": meta.role,
+            "rank": meta.tradeable_rank,
+            "tradeable_score": meta.tradeable_score,
+            "alpha_capacity_score": meta.alpha_capacity_score,
+            "vol_30d": meta.vol_30d,
+            "friction_score": meta.friction_score,
+            "diversification_score": meta.diversification_score,
+            "adv_usdt_median": meta.adv_usdt,
+            "execution_cost_bps": meta.execution_cost_bps,
+            "funding_rate_8h": meta.funding_carry_8h,
+            "beta_vs_market": meta.beta_vs_market,
+            "cluster_id": meta.cluster_id,
+            "cluster_size": meta.cluster_size,
+            "anchor_cluster_member": meta.anchor_cluster_member,
+            "basis_annualized_mean": meta.basis_annualized_mean,
+            "basis_vol": meta.basis_vol,
+            "capacity_clip_usdt_list": meta.capacity_clip_usdt_list,
+        }
+        for meta in selected_meta
+    ]
+    return pd.DataFrame(rows)
+
+
+def _metric_from_row(
+    row: pd.Series | None,
+    column: str,
+    *,
+    default: float = 0.0,
+) -> float:
+    if row is None or column not in row.index:
+        return default
+    value = row.get(column)
+    if pd.isna(value):
+        return default
+    return float(value)
+
+
+def _is_incomplete_pit_store_run(
+    *,
+    decisions: pd.DataFrame,
+    cube: Any | None,
+) -> bool:
+    return not validate_materializable_pit_store_run(decisions=decisions, cube=cube)
+
+
 def load_universe_snapshot(
     *,
     as_of: str | date,
     tf: str,
     snapshot_root: Path = DEFAULT_SNAPSHOT_ROOT,
 ) -> pd.DataFrame | None:
-    """Load selected universe symbols from store decisions, if already materialized."""
+    """Load selected universe symbols from the latest validated store run."""
     as_of_date = _to_date(as_of)
     run_base = DEFAULT_UNIVERSE_STORE_ROOT / "runs" / f"tf={tf}" / f"as_of={as_of_date.isoformat()}"
     if not run_base.exists():
@@ -157,32 +208,35 @@ def load_universe_snapshot(
     )
     if not run_dirs:
         return None
-    decisions_path = run_dirs[0] / "decisions.parquet"
-    if not decisions_path.exists():
+    manifest_path = run_dirs[0] / "manifest.parquet"
+    if not manifest_path.exists():
         return None
-    decisions = pd.read_parquet(decisions_path)
-    selected = decisions.loc[decisions["stage6_selected"].astype(bool)]
-    if selected.empty:
+    try:
+        manifest_df = pd.read_parquet(manifest_path)
+    except Exception:
         return None
-    col_map = {
-        "tradeable_score": "tradeable_score",
-        "execution_pool_score": "execution_pool_score",
-        "rank": "rank",
-        "role": "role",
-        "adv_usdt_median": "adv_usdt_median",
-        "execution_cost_bps": "execution_cost_bps",
-        "funding_rate_8h": "funding_rate_8h",
-        "beta_vs_market": "beta_vs_market",
-        "cluster_id": "cluster_id",
-        "cluster_size": "cluster_size",
-        "anchor_cluster_member": "anchor_cluster_member",
-        "basis_annualized_mean": "basis_annualized_mean",
-        "basis_vol": "basis_vol",
-        "capacity_clip_usdt_list": "capacity_clip_usdt_list",
-        "stage5_pass": "stage5_pass",
-    }
-    keep = [c for c in col_map if c in selected.columns]
-    return selected[["symbol", *keep]].copy() if keep else selected[["symbol"]].copy()
+    if manifest_df.empty:
+        return None
+    manifest_row = manifest_df.iloc[0]
+    store_run = load_universe_store_run(
+        as_of=as_of_date,
+        tf=tf,
+        config_hash=str(manifest_row["config_hash"]),
+        data_manifest_hash=str(manifest_row["data_manifest_hash"]),
+        root=DEFAULT_UNIVERSE_STORE_ROOT,
+    )
+    if store_run is None:
+        return None
+    manifest, decisions, report, cube = store_run
+    if not validate_materializable_pit_store_run(decisions=decisions, cube=cube):
+        return None
+    _snapshot, selected_frame, _report = materialize_snapshot_from_store(
+        manifest=manifest,
+        decisions=decisions,
+        report=report,
+        cube=cube,
+    )
+    return selected_frame
 
 
 # ---------------------------------------------------------------------------
@@ -462,10 +516,21 @@ def build_universe(
             stage6_frame=empty,
             report=report,
         )
+        empty_cube = UniverseStateCube(
+            calendar=pd.DatetimeIndex([]),
+            instrument_ids=(),
+            eligible=np.empty((0, 0), dtype=bool),
+            entry_block=np.empty((0, 0), dtype=bool),
+            exit_required=np.empty((0, 0), dtype=bool),
+            capacity_usdt=np.empty((0, 0), dtype=np.float64),
+            risk_scale=np.empty((0, 0), dtype=np.float64),
+            cost_bps=np.empty((0, 0), dtype=np.float64),
+        )
         snapshot, selected, report = materialize_snapshot_from_store(
             manifest=manifest,
             decisions=decisions,
             report=report,
+            cube=empty_cube,
         )
         _save_snapshot(manifest, snapshot, selected, decisions, report, root=snapshot_root)
         return snapshot, selected, report
@@ -518,6 +583,7 @@ def build_universe(
         e.instrument_id: e.capacity_usdt
         for e in snapshot_elig.eligibilities
     }
+    latest_by_symbol = latest.set_index("symbol", drop=False)
     eligible_syms_all = [
         sym
         for sym in latest["symbol"].tolist()
@@ -546,35 +612,46 @@ def build_universe(
                 return e.capacity_usdt
         return 0.0
 
-    selected_meta: tuple[SymbolMeta, ...] = tuple(
-        SymbolMeta(
-            symbol=sym,
-            role="regular",
-            adv_usdt=float(
-                latest.loc[latest["symbol"] == sym, "adv_usdt_median"].iloc[0]
-                if sym in latest["symbol"].values and "adv_usdt_median" in latest.columns
-                else 0.0
-            ),
-            execution_cost_bps=_cost_for(sym),
-            funding_carry_8h=float(
-                latest.loc[latest["symbol"] == sym, "funding_rate_8h"].iloc[0]
-                if sym in latest["symbol"].values and "funding_rate_8h" in latest.columns
-                else 0.0
-            ),
-            beta_vs_market=0.0,
-            cluster_id=-1,
-            tradeable_rank=idx + 1,
-            basis_annualized_mean=None,
-            basis_vol=None,
-            capacity_clip_usdt_list=(_capacity_for(sym),),
-            vol_30d=float(
-                latest.loc[latest["symbol"] == sym, "vol_30d"].iloc[0]
-                if sym in latest["symbol"].values and "vol_30d" in latest.columns
-                else 0.0
-            ),
+    selected_meta_items: list[SymbolMeta] = []
+    for idx, sym in enumerate(eligible_syms):
+        source_row = latest_by_symbol.loc[sym] if sym in latest_by_symbol.index else None
+        selected_meta_items.append(
+            SymbolMeta(
+                symbol=sym,
+                role="regular",
+                adv_usdt=_metric_from_row(source_row, "adv_usdt_median"),
+                execution_cost_bps=_cost_for(sym),
+                funding_carry_8h=_metric_from_row(source_row, "funding_rate_8h"),
+                beta_vs_market=_metric_from_row(source_row, "beta_vs_market"),
+                cluster_id=int(_metric_from_row(source_row, "cluster_id", default=-1.0)),
+                tradeable_rank=idx + 1,
+                basis_annualized_mean=(
+                    None
+                    if source_row is None
+                    or "basis_annualized_mean" not in source_row.index
+                    or pd.isna(source_row.get("basis_annualized_mean"))
+                    else float(source_row.get("basis_annualized_mean"))
+                ),
+                basis_vol=(
+                    None
+                    if source_row is None
+                    or "basis_vol" not in source_row.index
+                    or pd.isna(source_row.get("basis_vol"))
+                    else float(source_row.get("basis_vol"))
+                ),
+                capacity_clip_usdt_list=(_capacity_for(sym),),
+                cluster_size=_metric_from_row(source_row, "cluster_size", default=1.0),
+                anchor_cluster_member=_metric_from_row(source_row, "anchor_cluster_member"),
+                vol_30d=_metric_from_row(source_row, "vol_30d"),
+                alpha_capacity_score=(
+                    _metric_from_row(source_row, "alpha_capacity_score")
+                    if source_row is not None and "alpha_capacity_score" in source_row.index
+                    else _metric_from_row(source_row, "execution_pool_score")
+                ),
+                tradeable_score=_metric_from_row(source_row, "tradeable_score"),
+            )
         )
-        for idx, sym in enumerate(eligible_syms)
-    )
+    selected_meta = tuple(selected_meta_items)
 
     n_eligible = len(eligible_syms)
     generated_at_utc = datetime.now(tz=UTC).isoformat()
@@ -625,13 +702,8 @@ def build_universe(
         state_transition_summary={"n_eligible": n_eligible},
         pit_state_cube=state_cube,
     )
-    eligible_df = pd.DataFrame(
-        {
-            "symbol": eligible_syms,
-            "instrument_id": [f"binance_usdt_perpetual:{s}" for s in eligible_syms],
-        }
-    )
-    report_df = pd.DataFrame(
+    selected_frame = _selected_meta_to_frame(selected_meta)
+    eligibility_report_df = pd.DataFrame(
         [
             {
                 "symbol": (
@@ -646,14 +718,65 @@ def build_universe(
             for e in snapshot_elig.eligibilities
         ]
     )
+    selection_report_df = pd.DataFrame(
+        [
+            {
+                "symbol": sym,
+                "stage": "stage6_selection",
+                "passed": True,
+                "reason": "selected",
+            }
+            for sym in eligible_syms
+        ]
+    )
+    non_selected_syms = [
+        sym
+        for sym in eligible_syms_all
+        if sym not in set(eligible_syms)
+    ]
+    if non_selected_syms:
+        selection_report_df = pd.concat(
+            [
+                selection_report_df,
+                pd.DataFrame(
+                    [
+                        {
+                            "symbol": sym,
+                            "stage": "stage6_selection",
+                            "passed": False,
+                            "reason": "not_selected",
+                        }
+                        for sym in non_selected_syms
+                    ]
+                ),
+            ],
+            ignore_index=True,
+        )
+    report_df = pd.concat(
+        [eligibility_report_df, selection_report_df],
+        ignore_index=True,
+    )
     _log.info(
         "PIT universe built: as_of=%s n_instruments=%d n_eligible=%d",
         as_of_date.isoformat(),
         pit_manifest.n_stage0,
         n_eligible,
     )
-    _save_snapshot(pit_manifest, pit_snapshot, eligible_df, pd.DataFrame(), report_df, root=snapshot_root)
-    return pit_snapshot, eligible_df, report_df
+    decisions = build_decision_frame(
+        manifest=pit_manifest,
+        stage5_frame=selected_frame,
+        stage6_frame=selected_frame,
+        report=report_df,
+    )
+    _save_snapshot(
+        pit_manifest,
+        pit_snapshot,
+        selected_frame,
+        decisions,
+        report_df,
+        root=snapshot_root,
+    )
+    return pit_snapshot, selected_frame, report_df
 
 
 def load_or_build_universe_snapshot(
@@ -687,12 +810,20 @@ def load_or_build_universe_snapshot(
     )
     if store_run is not None:
         manifest, decisions, report, cube = store_run
-        return materialize_snapshot_from_store(
-            manifest=manifest,
-            decisions=decisions,
-            report=report,
-            cube=cube,
-        )
+        if _is_incomplete_pit_store_run(decisions=decisions, cube=cube):
+            _log.warning(
+                "Rebuilding incomplete PIT store run: as_of=%s tf=%s run_id=%s",
+                as_of_date.isoformat(),
+                tf,
+                manifest.run_id,
+            )
+        else:
+            return materialize_snapshot_from_store(
+                manifest=manifest,
+                decisions=decisions,
+                report=report,
+                cube=cube,
+            )
 
     return build_universe(
         as_of=as_of,
