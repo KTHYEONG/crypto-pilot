@@ -751,7 +751,7 @@ def _run_tiered_l2_study(
 
     # JournalRedisStorage 감쇠 경고 억제
     warnings.filterwarnings("ignore", category=FutureWarning, module="optuna")
-    
+
     # Optuna 스터디 정보 로그 억제
     _optuna.logging.set_verbosity(_optuna.logging.WARNING)
 
@@ -764,10 +764,11 @@ def _run_tiered_l2_study(
     from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2StudyResult
     from src.domain.futures.strategy.tiered_workflow.selection import (
         _layer2_experiment_key,
+        _signal_batch_fingerprint,
         select_layer2_champion,
     )
     from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
-    
+
     l2_sim_cache = build_l2_simulation_cache(aligned, signal_batch, tf)
 
     ctx = TieredContext(
@@ -787,9 +788,19 @@ def _run_tiered_l2_study(
         signal_batch=signal_batch,
         search_space_version="v7",
     )
+    signal_batch_fingerprint = _signal_batch_fingerprint(signal_batch)
+    unique_symbols = ",".join(
+        sorted({str(event.symbol) for event in signal_batch.events})
+    ) or "-"
     _logger.info("  ● [HYPERPARAMETER OPTIMIZATION]")
     _logger.info("    - Study Name : %s", study_name)
     _logger.info("    - Config     : %d trials", n_trials)
+    _logger.info(
+        "    - Provenance : events=%d unique_symbols=%s fp=%s",
+        len(signal_batch.events),
+        unique_symbols,
+        signal_batch_fingerprint[:12],
+    )
     _logger.info("  ────────────────────────────────────────────────────────────────────────────")
 
     try:
