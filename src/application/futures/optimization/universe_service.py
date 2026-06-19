@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from dataclasses import replace as dataclass_replace
 from datetime import date, datetime
 
 import numpy as np
@@ -138,58 +137,12 @@ def _snapshot_selected_meta_map(snapshot: UniverseSnapshot) -> dict[str, SymbolM
 
 
 def _snapshot_quality_symbols(snapshot: UniverseSnapshot) -> tuple[str, ...]:
-    trading_panel = tuple(
-        str(symbol).strip()
-        for symbol in snapshot.historical_trading_panel
-        if str(symbol).strip()
-    )
-    if trading_panel:
-        return tuple(dict.fromkeys(trading_panel))
     selected = tuple(
         str(meta.symbol).strip()
         for meta in snapshot.selected
         if str(meta.symbol).strip()
     )
     return tuple(dict.fromkeys(selected))
-
-
-def _resolve_trading_membership(
-    *,
-    snapshot: UniverseSnapshot,
-    discovered_symbols: tuple[str, ...],
-) -> frozenset[str]:
-    trading_panel = tuple(
-        str(symbol).strip()
-        for symbol in snapshot.historical_trading_panel
-        if str(symbol).strip()
-    )
-    if trading_panel:
-        return frozenset(trading_panel)
-    return frozenset(discovered_symbols)
-
-
-def _resolve_inference_membership(
-    *,
-    snapshot: UniverseSnapshot,
-    quarter_start: date,
-    trading_membership: frozenset[str],
-) -> frozenset[str]:
-    quarter_members = snapshot.inference_panel_quarter_membership.get(quarter_start)
-    if quarter_members:
-        resolved = tuple(str(symbol).strip() for symbol in quarter_members if str(symbol).strip())
-        if resolved:
-            return frozenset(resolved)
-
-    for panel in (
-        snapshot.live_inference_panel,
-        snapshot.training_panel,
-        snapshot.inference_panel,
-    ):
-        resolved = tuple(str(symbol).strip() for symbol in panel if str(symbol).strip())
-        if resolved:
-            return frozenset(resolved)
-
-    return trading_membership
 
 
 def _discover_universe_timeline_pit(
@@ -403,13 +356,6 @@ def _discover_universe_timeline_pit(
         )
         previous_symbols = q_sym
 
-    # Update oos_snapshot to use merged instrument_ids — no panel fallback
-    oos_snapshot = dataclass_replace(
-        oos_snapshot,
-        inference_panel=instrument_ids,
-        historical_trading_panel=instrument_ids,
-    )
-
     audit = pd.DataFrame(
         audit_rows,
         columns=[
@@ -477,250 +423,16 @@ def discover_universe_timeline(
         )
         l2_start = None
 
-    # ── PIT path ─────────────────────────────────────────────────────────────
-    _is_pit = cfg is not None and getattr(cfg, "universe_engine", "stage6") == "pit"
-    if _is_pit:
-        return _discover_universe_timeline_pit(
-            tf=tf,
-            is_start=is_start,
-            oos_start=oos_start,
-            end_date=end_date,
-            force_rebuild=force_rebuild,
-            cfg=cfg,  # type: ignore[arg-type]  # narrowed: cfg is not None when _is_pit
-        )
-    # ── end PIT path ─────────────────────────────────────────────────────────
-
-    current_dt = _quarter_start(is_start)
-    all_symbols: set[str] = set()
-    oos_snapshot: UniverseSnapshot | None = None
-    oos_report = pd.DataFrame()
-    previous_selection: tuple[str, ...] | None = None
-    timeline_by_quarter: dict[date, frozenset[str]] = {}
-    snapshots_by_quarter: list[tuple[date, UniverseSnapshot, pd.DataFrame]] = []
-    inference_panel_quarter_membership: dict[date, frozenset[str]] = {}
-    inference_symbols_set: set[str] = set()
-    _min_history_bars = max(0, min_history_bars)
-
-    while current_dt <= end_date:
-        ref_dt = current_dt + relativedelta(months=3)
-        t_quarter = time.perf_counter()
-        symbols, snapshot, report = _discover_symbols_via_universe(
-            tf=tf,
-            reference_date=ref_dt.isoformat(),
-            force_rebuild=force_rebuild,
-            previous_selection=previous_selection,
-        )
-        _logger.log(
-            PERF,
-            "[perf-universe] _discover_symbols_via_universe for quarter=%s took %.4fs",
-            current_dt.isoformat(),
-            time.perf_counter() - t_quarter,
-        )
-        current_set = _resolve_trading_membership(
-            snapshot=snapshot,
-            discovered_symbols=symbols,
-        )
-        timeline_by_quarter[current_dt] = current_set
-        all_symbols.update(current_set)
-        ml_panel = _resolve_inference_membership(
-            snapshot=snapshot,
-            quarter_start=current_dt,
-            trading_membership=current_set,
-        )
-        inference_panel_quarter_membership[current_dt] = ml_panel
-        inference_symbols_set.update(ml_panel)
-        previous_set = set(previous_selection or ())
-        new_symbols = sorted(current_set - previous_set)
-        dropped_symbols = sorted(previous_set - set(current_set))
-        retained_symbols = sorted(previous_set & set(current_set))
-        _logger.debug(
-            ".. UNIVERSE_T: quarter=%s active=%d new=%d drop=%d ret=%d ml=%d",
-            current_dt.isoformat(),
-            len(current_set),
-            len(new_symbols),
-            len(dropped_symbols),
-            len(retained_symbols),
-            len(ml_panel),
-        )
-        previous_selection = tuple(sorted(current_set))
-        if current_dt == oos_start:
-            oos_snapshot = snapshot
-            oos_report = report
-        snapshots_by_quarter.append((current_dt, snapshot, report))
-        current_dt += relativedelta(months=3)
-
-    if oos_snapshot is None:
-        raise ValueError("Universe timeline did not include oos_start snapshot.")
-
-    if _min_history_bars > 0:
-        _logger.info(
-            "discover_universe_timeline: applying min_history_bars=%d gate, symbols_before=%d",
-            _min_history_bars,
-            len(all_symbols),
-        )
-        _logger.debug(
-            "discover_universe_timeline: min_history_bars gate (stub) — "
-            "full implementation deferred to data_loader integration"
-        )
-
-    instrument_ids = tuple(sorted(all_symbols))
-    calendar = pd.date_range(
-        start=pd.Timestamp(is_start, tz="UTC"),
-        end=pd.Timestamp(end_date, tz="UTC"),
-        freq=tf,
-    )
-    eligible = np.zeros((len(calendar), len(instrument_ids)), dtype=np.bool_)
-    entry_block = np.zeros_like(eligible)
-    exit_required = np.zeros_like(eligible)
-    capacity_usdt = np.zeros((len(calendar), len(instrument_ids)), dtype=np.float64)
-    risk_scale = np.ones((len(calendar), len(instrument_ids)), dtype=np.float64)
-    cost_bps = np.zeros((len(calendar), len(instrument_ids)), dtype=np.float64)
-    symbol_to_idx = {symbol: idx for idx, symbol in enumerate(instrument_ids)}
-    audit_rows: list[dict[str, object]] = []
-
-    windows: list[UniverseMembershipWindow] = []
-    previous_symbols: frozenset[str] = frozenset()
-    for idx, (quarter_start, snapshot, _report) in enumerate(snapshots_by_quarter):
-        quarter_symbols = timeline_by_quarter[quarter_start]
-        selected_meta_map = _snapshot_selected_meta_map(snapshot)
-        next_start = (
-            pd.Timestamp(snapshots_by_quarter[idx + 1][0], tz="UTC")
-            if idx + 1 < len(snapshots_by_quarter)
-            else None
-        )
-        quarter_ts = pd.Timestamp(quarter_start, tz="UTC")
-        audit_previous = previous_symbols
-        windows.append(
-            UniverseMembershipWindow(
-                effective_from=quarter_ts,
-                effective_to=next_start,
-                snapshot_as_of=snapshot.as_of,
-                active_symbols=tuple(sorted(quarter_symbols)),
-                entry_symbols=tuple(sorted(quarter_symbols - previous_symbols)),
-                exit_symbols=tuple(sorted(previous_symbols - quarter_symbols)),
-            )
-        )
-        start_pos = int(calendar.searchsorted(quarter_ts, side="left"))
-        end_boundary = (
-            next_start
-            if next_start is not None
-            else pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(tf)
-        )
-        end_pos = int(calendar.searchsorted(end_boundary, side="left"))
-        if end_pos < start_pos:
-            previous_symbols = quarter_symbols
-            continue
-        active_idx = np.array([symbol_to_idx[symbol] for symbol in quarter_symbols], dtype=np.int64)
-        if active_idx.size > 0:
-            eligible[start_pos:end_pos, active_idx] = True
-        for symbol in quarter_symbols:
-            symbol_idx = symbol_to_idx[symbol]
-            meta = selected_meta_map.get(symbol)
-            if meta is None:
-                risk_scale[start_pos:end_pos, symbol_idx] = 0.0
-                continue
-            execution_cost = float(getattr(meta, "execution_cost_bps", 0.0))
-            capacity_values = getattr(meta, "capacity_clip_usdt_list", ())
-            capacity = float(max(capacity_values)) if capacity_values else 0.0
-            cost_bps[start_pos:end_pos, symbol_idx] = max(execution_cost, 0.0)
-            capacity_usdt[start_pos:end_pos, symbol_idx] = max(capacity, 0.0)
-            risk_scale[start_pos:end_pos, symbol_idx] = 1.0
-        for symbol in previous_symbols - quarter_symbols:
-            symbol_idx = symbol_to_idx[symbol]
-            if start_pos < len(calendar):
-                exit_required[start_pos, symbol_idx] = True
-                entry_block[start_pos:, symbol_idx] = True
-        audit_rows.extend(
-            {
-                "quarter_start": quarter_start.isoformat(),
-                "symbol": symbol,
-                "eligible": symbol in quarter_symbols,
-                "snapshot_as_of": snapshot.as_of,
-                "entry": symbol in quarter_symbols - audit_previous,
-                "exit": symbol in audit_previous - quarter_symbols,
-                "cost_bps": float(cost_bps[start_pos, symbol_to_idx[symbol]]) if start_pos < len(calendar) else 0.0,
-                "capacity_usdt": (
-                    float(capacity_usdt[start_pos, symbol_to_idx[symbol]])
-                    if start_pos < len(calendar)
-                    else 0.0
-                ),
-            }
-            for symbol in instrument_ids
-        )
-        previous_symbols = quarter_symbols
-
-    inference_windows: list[UniverseMembershipWindow] = []
-    previous_inference_symbols: frozenset[str] = frozenset()
-    for idx, (quarter_start, snapshot, _report) in enumerate(snapshots_by_quarter):
-        members = inference_panel_quarter_membership.get(quarter_start, frozenset())
-        next_start = (
-            pd.Timestamp(snapshots_by_quarter[idx + 1][0], tz="UTC")
-            if idx + 1 < len(snapshots_by_quarter)
-            else None
-        )
-        inference_windows.append(
-            UniverseMembershipWindow(
-                effective_from=pd.Timestamp(quarter_start, tz="UTC"),
-                effective_to=next_start,
-                snapshot_as_of=snapshot.as_of,
-                active_symbols=tuple(sorted(members)),
-                entry_symbols=tuple(sorted(members - previous_inference_symbols)),
-                exit_symbols=tuple(sorted(previous_inference_symbols - members)),
-            )
-        )
-        previous_inference_symbols = members
-
-    oos_snapshot = dataclass_replace(
-        oos_snapshot,
-        inference_panel=tuple(sorted(inference_symbols_set)),
-        historical_trading_panel=instrument_ids,
-        inference_panel_quarter_membership={
-            quarter: tuple(sorted(members))
-            for quarter, members in inference_panel_quarter_membership.items()
-        },
-    )
-    audit = pd.DataFrame(
-        audit_rows,
-        columns=(
-            "quarter_start",
-            "symbol",
-            "eligible",
-            "snapshot_as_of",
-            "entry",
-            "exit",
-            "cost_bps",
-            "capacity_usdt",
-        ),
-    )
-    state_cube = UniverseStateCube(
-        calendar=calendar,
-        instrument_ids=instrument_ids,
-        eligible=eligible,
-        entry_block=entry_block,
-        exit_required=exit_required,
-        capacity_usdt=capacity_usdt,
-        risk_scale=risk_scale,
-        cost_bps=cost_bps,
-    )
-
-    _write_universe_audit_parquet(
-        snapshots_by_quarter=snapshots_by_quarter,
-        windows=tuple(windows),
-    )
-    return UniverseTimelineResult(
-        symbols=instrument_ids,
-        timeline=UniverseMembershipTimeline(tf=tf, windows=tuple(windows)),
-        state_cube=state_cube,
-        snapshots=tuple(snap for _, snap, _ in snapshots_by_quarter),
-        snapshot=oos_snapshot,
-        report=oos_report,
-        audit=audit,
-        inference_symbols=tuple(sorted(inference_symbols_set)),
-        inference_timeline=UniverseMembershipTimeline(tf=tf, windows=tuple(inference_windows)),
-        inference_panel_quarter_membership={
-            quarter: frozenset(members)
-            for quarter, members in inference_panel_quarter_membership.items()
-        },
+    # ── PIT-only path (Stage6 legacy path removed) ──
+    if cfg is None:
+        raise ValueError("universe_engine=pit required; stage6 path removed")
+    return _discover_universe_timeline_pit(
+        tf=tf,
+        is_start=is_start,
+        oos_start=oos_start,
+        end_date=end_date,
+        force_rebuild=force_rebuild,
+        cfg=cfg,
     )
 
 
