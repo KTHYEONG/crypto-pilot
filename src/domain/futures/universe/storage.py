@@ -179,6 +179,7 @@ def snapshot_to_payload(snapshot: UniverseSnapshot) -> dict[str, Any]:
             for qd, syms in snapshot.inference_panel_quarter_membership.items()
         },
         "stage5_research_panel": list(snapshot.stage5_research_panel),
+        "state_transition_summary": dict(snapshot.state_transition_summary),
     }
 
 
@@ -218,6 +219,10 @@ def snapshot_from_payload(payload: dict[str, Any]) -> UniverseSnapshot:
             for k, v in payload.get("inference_panel_quarter_membership", {}).items()
         },
         stage5_research_panel=tuple(str(s) for s in payload.get("stage5_research_panel", [])),
+        state_transition_summary={
+            str(key): int(value)
+            for key, value in dict(payload.get("state_transition_summary", {})).items()
+        },
     )
 
 
