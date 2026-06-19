@@ -792,9 +792,6 @@ def diagonal_kelly_weights(
     *,
     kelly_fraction: float,
     vol_target: float | None,
-    friction_hurdle_bps: NDArray[np.float64],
-    holding_bars: NDArray[np.float64] | int = 1,
-    friction_safety_mult: float = 1.0,
     caps: PortfolioCaps,
     prev_w: NDArray[np.float64],
     no_trade_band: float,
@@ -807,12 +804,14 @@ def diagonal_kelly_weights(
     기존 LW/BL/full-cov 경로와 독립적인 신규 함수. 기존 solve_constrained_weights와 무관.
 
     처리 순서:
-    1. Friction filter: effective_hurdle = hurdle * safety_mult / holding_bars
-       mu_bps_i < effective_hurdle_i → w_i = 0 (확정 손실 방지)
-    2. Diagonal Kelly: w_raw_i = kelly_fraction * mu_bps_i / max(sigma_i^2, VOL_FLOOR^2)
-    3. vol_target 스케일링 (optional): 포트폴리오 sigma 기준 비례 축소
-    4. No-trade band: |w_i - prev_w_i| < no_trade_band → w_i = prev_w_i (회전율 억제)
-    5. project_all_caps: per_symbol / beta / gross / net / vol_target cap 적용
+    1. Diagonal Kelly: w_raw_i = kelly_fraction * mu_bps_i / max(sigma_i^2, VOL_FLOOR^2)
+    2. vol_target 스케일링 (optional): 포트폴리오 sigma 기준 비례 축소
+    3. No-trade band: |w_i - prev_w_i| < no_trade_band → w_i = prev_w_i (회전율 억제)
+    4. project_all_caps: per_symbol / beta / gross / net / vol_target cap 적용
+
+    Note: Friction filter removed. mu_bps is already net-of-cost per caller contract
+    (signed_net_bps_per_bar in awf_sim.py subtracts execution cost before calling here).
+    Re-applying would double-count execution cost and zero valid signals.
 
     Args:
         mu_bps: 심볼별 기대수익 [N], 단위: bps. SymbolSignal.raw_mu (Layer1 출력).
@@ -820,10 +819,6 @@ def diagonal_kelly_weights(
         sigma: per-bar sigma [N]. >= VOL_FLOOR 보장 권장.
         kelly_fraction: 분수 Kelly 계수 (0,1].
         vol_target: 연율화 포트폴리오 변동성 목표 (None이면 미적용).
-        friction_hurdle_bps: 심볼별 round-trip 마찰비용 [N], 단위: bps.
-        holding_bars: 심볼별 평균 보유 기간 [N 또는 scalar]. hurdle 분할에 사용.
-        friction_safety_mult: hurdle 여유배수. eff_hurdle = hurdle * mult / holding_bars.
-            1.0 = break-even 기준, >1.0 = 추가 안전마진.
         caps: PortfolioCaps 제약 (5종 cap).
         prev_w: 이전 bar 비중 [N] (no-trade band 기준).
         no_trade_band: Δw < band이면 rebalance 생략 (절대값, 예: 0.01=1%).
@@ -833,11 +828,6 @@ def diagonal_kelly_weights(
     Returns:
         최종 비중 벡터 [N], float64.
 
-    Note:
-        mu_bps 단위(bps)와 sigma 단위(per-bar return)의 차이:
-        Kelly 계산 시 mu를 per-bar return으로 변환 (mu_bps * 1e-4).
-        friction_hurdle 비교는 bps 단위 유지.
-
     """
     # 순환 import 방지 — 함수 내부 로컬 import
     from src.domain.futures.strategy.cs_rank import VOL_FLOOR
@@ -845,7 +835,6 @@ def diagonal_kelly_weights(
     n = mu_bps.size
     mu = np.asarray(mu_bps, dtype=np.float64).ravel()
     sig = np.asarray(sigma, dtype=np.float64).ravel()
-    hurdle = np.asarray(friction_hurdle_bps, dtype=np.float64).ravel()
     p_w = np.asarray(prev_w, dtype=np.float64).ravel()
     beta = (
         np.zeros(n, dtype=np.float64)
@@ -860,17 +849,9 @@ def diagonal_kelly_weights(
     if support.size != n:
         support = np.abs(mu) > 1e-12
 
-    # 1. Friction filter: amortized hurdle (round-trip → per-bar 기준 정합)
-    # mu_bps = per-bar NET edge. hurdle = round-trip cost.
-    # holding 기간 동안 누적 net = mu_bps * holding_bars 가 round-trip 비용 넘어야 함.
-    h_bars: NDArray[np.float64]
-    if isinstance(holding_bars, np.ndarray):
-        h_bars = np.maximum(holding_bars.ravel().astype(np.float64), 1.0)
-    else:
-        h_bars = np.full(n, max(float(holding_bars), 1.0), dtype=np.float64)
-    effective_hurdle = hurdle * float(friction_safety_mult) / h_bars
-    friction_mask: NDArray[np.bool_] = np.abs(mu) >= effective_hurdle
-    support = support & friction_mask
+    # Step 1 (friction filter) removed: mu_bps is already net-of-cost per caller contract.
+    # See awf_sim.py caller — signed_net_bps_per_bar already subtracts hurdle*safety_mult.
+    # Re-applying the filter double-counts execution cost and zeroes valid signals.
 
     # 2. Diagonal Kelly (mu를 per-bar return으로 변환: bps → fraction)
     mu_ret = mu * 1e-4  # bps → per-bar simple return

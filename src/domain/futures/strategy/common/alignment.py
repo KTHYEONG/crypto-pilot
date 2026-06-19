@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,6 +10,8 @@ from numpy.typing import NDArray
 
 from src.domain.futures.optimization.optimizer import compute_multi_alignment_info
 from src.domain.futures.universe.contracts import UniverseStateCube
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -271,6 +274,16 @@ def align_data_maps(
             _sym_key = _cube_iid.split(":")[-1] if ":" in _cube_iid else _cube_iid
             cube_sym_idx[_sym_key] = _cube_n
 
+        _logger.debug(
+            "[ALIGN-CUBE] injecting state_cube: calendar_range=[%s, %s] instruments=%d "
+            "aligned_datetimes=%d symbols=%d cube_valid_symbols=%d",
+            state_cube.calendar[0],
+            state_cube.calendar[-1],
+            len(state_cube.instrument_ids),
+            len(datetimes),
+            n,
+            sum(1 for sym in valid_symbols if sym in cube_sym_idx),
+        )
         for col, sym in enumerate(valid_symbols):
             if sym not in cube_sym_idx:
                 continue
@@ -286,6 +299,14 @@ def align_data_maps(
             entry_block_mask[t_valid, col] = state_cube.entry_block[p_valid, cube_n]
             adv_usdt_2d[t_valid, col] = state_cube.capacity_usdt[p_valid, cube_n]
             execution_cost_bps_2d[t_valid, col] = state_cube.cost_bps[p_valid, cube_n]
+        active_ratio = float(active_mask.mean())
+        if active_ratio < 0.99:
+            _logger.warning(
+                "[ALIGN-CUBE] post-join active_mask mean=%.4f entry_block_mean=%.4f "
+                "(was 1.0 / 0.0 before cube injection)",
+                active_ratio,
+                float(entry_block_mask.mean()),
+            )
     # ── end state_cube join ──────────────────────────────────────────────────
 
     # ── PIT readiness_cube join ───────────────────────────────────────────────
