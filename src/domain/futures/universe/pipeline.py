@@ -6,19 +6,20 @@ import logging
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pandas as pd
-import pyarrow.parquet as pq
 
 from src.core.settings import FUTURES_DATA_DIR, LOG_DIR
 
 from .config import UniverseConfig, hash_config
-from .data_quality import apply_data_quality_stage
-from .filters import (
-    apply_cost_model_stage,
-    apply_liquidity_stage,
-    apply_risk_events_stage,
+from .contracts import DataConfidence, ExecutionRules
+from .eligibility import (
+    ExecutionEligibilityConfig,
+    RuleFallbackPolicy,
+    build_universe_state_cube,
+    evaluate_execution_eligibility,
+    resolve_execution_rules,
 )
 from .models import (
     DEFAULT_LEDGER_PATH,
@@ -28,10 +29,8 @@ from .models import (
     SymbolMeta,
     UniverseRunManifest,
     UniverseSnapshot,
-    apply_structure_stage,
     load_ledger_slice,
 )
-from .selection import apply_selection_stage
 from .storage import (
     hash_manifest_rows,
     load_snapshot_json,
@@ -414,6 +413,178 @@ def load_universe_snapshot(
     return pd.read_parquet(target)
 
 
+# ---------------------------------------------------------------------------
+# PIT path helpers (Phase 1)
+# ---------------------------------------------------------------------------
+
+def _instrument_df_from_ledger(latest_df: pd.DataFrame) -> pd.DataFrame:
+    """Convert latest ledger rows to InstrumentRecord-schema DataFrame.
+
+    Args:
+        latest_df: One row per symbol from the ledger (latest knowledge_date).
+
+    Returns:
+        DataFrame with instrument registry columns.
+    """
+    rows: list[dict[str, object]] = []
+    for _, row in latest_df.iterrows():
+        sym = str(row["symbol"])
+        iid = f"binance_usdt_perpetual:{sym}"
+        kd = row.get("knowledge_date") or row.get("date")
+        if hasattr(kd, "to_pydatetime"):
+            kd = kd.to_pydatetime()
+        elif isinstance(kd, str):
+            kd = datetime.fromisoformat(kd).replace(tzinfo=UTC)
+        elif isinstance(kd, date) and not isinstance(kd, datetime):
+            kd = datetime(kd.year, kd.month, kd.day, tzinfo=UTC)
+        if hasattr(kd, "tzinfo") and kd.tzinfo is None:
+            kd = kd.replace(tzinfo=UTC)
+        rows.append(
+            {
+                "instrument_id": iid,
+                "symbol": sym,
+                "pair": sym.replace("USDT", ""),
+                "quote_asset": str(row.get("quote_asset", "USDT")),
+                "margin_asset": str(row.get("margin_asset", "USDT")),
+                "contract_type": str(row.get("contract_type", "PERPETUAL")),
+                "onboard_at": kd,
+                "status": str(row.get("status", "TRADING")),
+                "state_valid_from": kd,
+                "available_at": kd,
+                "confidence": DataConfidence.RECONSTRUCTED.value,
+            }
+        )
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "instrument_id", "symbol", "pair", "quote_asset", "margin_asset",
+                "contract_type", "onboard_at", "status", "state_valid_from",
+                "available_at", "confidence",
+            ]
+        )
+    return pd.DataFrame(rows)
+
+
+def _observation_df_from_ledger(
+    latest_df: pd.DataFrame, *, decision_at: datetime
+) -> pd.DataFrame:
+    """Convert ledger metrics to MarketObservation-schema DataFrame.
+
+    Maps: adv_usdt_median→adv30_usdt, amihud_30d→amihud30, vol_30d→vol30,
+    mark_price→last_price. available_at is set to decision_at (bootstrapped).
+
+    Args:
+        latest_df: One row per symbol from the ledger.
+        decision_at: Point-in-time decision timestamp (UTC).
+
+    Returns:
+        DataFrame with market observation columns.
+    """
+    metric_map: dict[str, str] = {
+        "adv_usdt_median": "adv30_usdt",
+        "amihud_30d": "amihud30",
+        "vol_30d": "vol30",
+        "mark_price": "last_price",
+    }
+    rows: list[dict[str, object]] = []
+    for _, row in latest_df.iterrows():
+        sym = str(row["symbol"])
+        iid = f"binance_usdt_perpetual:{sym}"
+        kd = row.get("knowledge_date") or row.get("date")
+        if hasattr(kd, "to_pydatetime"):
+            observed_at: datetime = kd.to_pydatetime()
+        elif isinstance(kd, str):
+            observed_at = datetime.fromisoformat(kd)
+        else:
+            observed_at = decision_at
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=UTC)
+        for ledger_col, metric_name in metric_map.items():
+            val = row.get(ledger_col)
+            if val is None:
+                continue
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                continue
+            if pd.isna(fval):
+                continue
+            rows.append(
+                {
+                    "instrument_id": iid,
+                    "metric": metric_name,
+                    "observed_at": observed_at,
+                    "available_at": min(observed_at, decision_at),
+                    "value": fval,
+                    "source": "ledger_bootstrap",
+                    "confidence": DataConfidence.RECONSTRUCTED.value,
+                }
+            )
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "instrument_id", "metric", "observed_at", "available_at",
+                "value", "source", "confidence",
+            ]
+        )
+    return pd.DataFrame(rows)
+
+
+def _rules_from_ledger(
+    latest_df: pd.DataFrame, *, decision_at: datetime
+) -> dict[str, ExecutionRules]:
+    """Build ExecutionRules mapping from ledger tick_size and taker_fee_bps.
+
+    Args:
+        latest_df: One row per symbol from the ledger.
+        decision_at: Point-in-time decision timestamp (UTC).
+
+    Returns:
+        Mapping of instrument_id → ExecutionRules.
+    """
+    fallback = RuleFallbackPolicy(allow_reconstructed=True)
+    rule_history_rows: list[dict[str, object]] = []
+    for _, row in latest_df.iterrows():
+        sym = str(row["symbol"])
+        iid = f"binance_usdt_perpetual:{sym}"
+        tick = row.get("tick_size")
+        fee = row.get("taker_fee_bps")
+        try:
+            tick_val = float(tick) if tick is not None else None
+            tick_val = fallback.conservative_tick_size if (tick_val is None or pd.isna(tick_val)) else tick_val
+        except (TypeError, ValueError):
+            tick_val = fallback.conservative_tick_size
+        try:
+            fee_val = float(fee) if fee is not None else None
+            fee_val = fallback.conservative_taker_fee_bps if (fee_val is None or pd.isna(fee_val)) else fee_val
+        except (TypeError, ValueError):
+            fee_val = fallback.conservative_taker_fee_bps
+        rule_history_rows.append(
+            {
+                "instrument_id": iid,
+                "available_at": decision_at,
+                "tick_size": tick_val,
+                "step_size": fallback.conservative_step_size,
+                "min_qty": fallback.conservative_min_qty,
+                "min_notional": fallback.conservative_min_notional,
+                "taker_fee_bps": fee_val,
+                "confidence": DataConfidence.RECONSTRUCTED.value,
+            }
+        )
+    if not rule_history_rows:
+        return {}
+    rule_history = pd.DataFrame(rule_history_rows)
+    result: dict[str, ExecutionRules] = {}
+    for iid in rule_history["instrument_id"].unique():
+        result[iid] = resolve_execution_rules(
+            iid,
+            decision_at=decision_at,
+            rule_history=rule_history,
+            fallback_policy=fallback,
+        )
+    return result
+
+
 def build_universe(
     *,
     as_of: str | date,
@@ -503,8 +674,8 @@ def build_universe(
             data_manifest_hash=manifest_hash,
             generated_at_utc=generated_at_utc,
             ledger_confidence=config.ledger_confidence,
-            basket_ref=config.stage6.basket_ref,
-            basket_weights=config.stage6.basket_weights,
+            basket_ref=(),
+            basket_weights=(),
             n_stage0=0,
             n_stage1_pass=0,
             n_stage2_pass=0,
@@ -532,79 +703,185 @@ def build_universe(
         .groupby("symbol", as_index=False)
         .tail(1)
     )
-    s1, r1 = apply_structure_stage(latest)
-    s2, r2 = apply_data_quality_stage(s1, config=config.stage2)
-    s3, r3 = apply_liquidity_stage(s2, config=config.stage3)
-    s4, r4 = apply_cost_model_stage(
-        s3,
-        config=config.stage4,
-        as_of=as_of_date,
-    )
-    s5, r5 = apply_risk_events_stage(s4, config=config.stage5)
-    s6, r6 = apply_selection_stage(
-        s5,
-        config=config.stage6,
-        max_symbols=int(config.stage6.k_in),
-        previous_selection=previous_selection,
-        k_in=int(config.stage6.k_in),
-        k_out=int(config.stage6.k_out),
-    )
-    report = pd.concat([r1, r2, r3, r4, r5, r6], ignore_index=True)
+    decision_at = datetime.combine(as_of_date, datetime.min.time()).replace(tzinfo=UTC)
 
+    instruments_df = _instrument_df_from_ledger(latest)
+    observations_df = _observation_df_from_ledger(latest, decision_at=decision_at)
+    rules = _rules_from_ledger(latest, decision_at=decision_at)
+
+    elig_config = ExecutionEligibilityConfig(
+        max_staleness_bars=config.pit_config.max_market_data_staleness_bars,
+        min_metric_observations=config.pit_config.min_metric_observations,
+        max_round_trip_cost_bps=config.pit_config.max_round_trip_cost_bps,
+        max_participation_rate=config.pit_config.max_participation_rate,
+        min_data_confidence=DataConfidence(config.pit_config.min_data_confidence),
+        default_intended_notional_usdt=config.pit_config.default_intended_notional_usdt,
+    )
+    intended_notional: dict[str, float] = {
+        f"binance_usdt_perpetual:{sym}": config.pit_config.default_intended_notional_usdt
+        for sym in latest["symbol"].tolist()
+    }
+
+    snapshot_elig = evaluate_execution_eligibility(
+        decision_at=decision_at,
+        instruments=instruments_df,
+        observations=observations_df,
+        rules=rules,
+        intended_notional_usdt=intended_notional,
+        config=elig_config,
+    )
+
+    calendar = pd.DatetimeIndex([pd.Timestamp(decision_at)])
+    all_instrument_ids: tuple[str, ...] = tuple(
+        f"binance_usdt_perpetual:{sym}" for sym in sorted(latest["symbol"].tolist())
+    )
+    state_cube = build_universe_state_cube(
+        calendar=calendar,
+        instruments=all_instrument_ids,
+        snapshots=[snapshot_elig],
+    )
+
+    eligible_ids = {e.instrument_id for e in snapshot_elig.eligibilities if e.eligible}
+    _cap_lookup: dict[str, float] = {
+        e.instrument_id: e.capacity_usdt
+        for e in snapshot_elig.eligibilities
+    }
+    eligible_syms_all = [
+        sym
+        for sym in latest["symbol"].tolist()
+        if f"binance_usdt_perpetual:{sym}" in eligible_ids
+    ]
+    # Sort by capacity_usdt descending → apply k_in cap if > 0
+    eligible_syms_all.sort(
+        key=lambda s: _cap_lookup.get(f"binance_usdt_perpetual:{s}", 0.0),
+        reverse=True,
+    )
+    _k = config.pit_config.k_in
+    eligible_syms: list[str] = eligible_syms_all[:_k] if _k > 0 else eligible_syms_all
+
+    # Build SymbolMeta for eligible instruments using actual SymbolMeta fields.
+    def _cost_for(sym: str) -> float:
+        iid = f"binance_usdt_perpetual:{sym}"
+        for e in snapshot_elig.eligibilities:
+            if e.instrument_id == iid:
+                return e.cost_bps
+        return 0.0
+
+    def _capacity_for(sym: str) -> float:
+        iid = f"binance_usdt_perpetual:{sym}"
+        for e in snapshot_elig.eligibilities:
+            if e.instrument_id == iid:
+                return e.capacity_usdt
+        return 0.0
+
+    selected_meta: tuple[SymbolMeta, ...] = tuple(
+        SymbolMeta(
+            symbol=sym,
+            role="regular",
+            adv_usdt=float(
+                latest.loc[latest["symbol"] == sym, "adv_usdt_median"].iloc[0]
+                if sym in latest["symbol"].values and "adv_usdt_median" in latest.columns
+                else 0.0
+            ),
+            execution_cost_bps=_cost_for(sym),
+            funding_carry_8h=float(
+                latest.loc[latest["symbol"] == sym, "funding_rate_8h"].iloc[0]
+                if sym in latest["symbol"].values and "funding_rate_8h" in latest.columns
+                else 0.0
+            ),
+            beta_vs_market=0.0,
+            cluster_id=-1,
+            tradeable_rank=idx + 1,
+            basis_annualized_mean=None,
+            basis_vol=None,
+            capacity_clip_usdt_list=(_capacity_for(sym),),
+            vol_30d=float(
+                latest.loc[latest["symbol"] == sym, "vol_30d"].iloc[0]
+                if sym in latest["symbol"].values and "vol_30d" in latest.columns
+                else 0.0
+            ),
+        )
+        for idx, sym in enumerate(eligible_syms)
+    )
+
+    n_eligible = len(eligible_syms)
     generated_at_utc = datetime.now(tz=UTC).isoformat()
-    manifest = UniverseRunManifest(
+    run_id = compute_universe_run_id(
+        as_of=as_of_date,
+        tf=tf,
+        config_hash=hash_config(config),
+        data_manifest_hash=manifest_hash,
+    )
+    pit_manifest = UniverseRunManifest(
         as_of=as_of_date.isoformat(),
         tf=tf,
         schema_version=SCHEMA_VERSION,
-        run_id=compute_universe_run_id(
-            as_of=as_of_date,
-            tf=tf,
-            config_hash=hash_config(config),
-            data_manifest_hash=manifest_hash,
-        ),
+        run_id=run_id,
         config_hash=hash_config(config),
         data_manifest_hash=manifest_hash,
         generated_at_utc=generated_at_utc,
         ledger_confidence=config.ledger_confidence,
-        basket_ref=config.stage6.basket_ref,
-        basket_weights=config.stage6.basket_weights,
+        basket_ref=(),
+        basket_weights=(),
         n_stage0=int(latest["symbol"].nunique()),
-        n_stage1_pass=int(s1["symbol"].nunique()),
-        n_stage2_pass=int(s2["symbol"].nunique()),
-        n_stage3_pass=int(s3["symbol"].nunique()),
-        n_stage4_pass=int(s4["symbol"].nunique()),
-        n_stage5_pass=int(s5["symbol"].nunique()),
-        n_stage6_selected=int(s6["symbol"].nunique()),
+        n_stage1_pass=0,
+        n_stage2_pass=0,
+        n_stage3_pass=0,
+        n_stage4_pass=0,
+        n_stage5_pass=0,
+        n_stage6_selected=n_eligible,
     )
-    decisions = build_decision_frame(
-        manifest=manifest,
-        stage5_frame=s5,
-        stage6_frame=s6,
-        report=report,
+    pit_snapshot = UniverseSnapshot(
+        as_of=as_of_date.isoformat(),
+        tf=tf,
+        schema_version=SCHEMA_VERSION,
+        config_hash=hash_config(config),
+        data_manifest_hash=manifest_hash,
+        generated_at_utc=generated_at_utc,
+        ledger_confidence=config.ledger_confidence,
+        basket_ref=(),
+        basket_weights=(),
+        selected=selected_meta,
+        rejected={},
+        n_stage0=pit_manifest.n_stage0,
+        n_stage1_pass=0,
+        n_stage2_pass=0,
+        n_stage3_pass=0,
+        n_stage4_pass=0,
+        n_stage5_pass=0,
+        n_stage6_selected=n_eligible,
+        state_transition_summary={"n_eligible": n_eligible},
+        pit_state_cube=state_cube,
     )
-    snapshot, selected, report = materialize_snapshot_from_store(
-        manifest=manifest,
-        decisions=decisions,
-        report=report,
+    eligible_df = pd.DataFrame(
+        {
+            "symbol": eligible_syms,
+            "instrument_id": [f"binance_usdt_perpetual:{s}" for s in eligible_syms],
+        }
     )
-
-    # [P1-3] 유니버스 충원율(fill-rate) 경보 게이트
-    _n_selected = snapshot.n_stage6_selected
-    _k_in = int(config.stage6.k_in)
-    _fill_rate = _n_selected / max(1, _k_in)
-    if _fill_rate < 0.25:
-        _log.error(
-            "Universe fill-rate critical: %d/%d (%.0f%%) — stage filter over-rejection suspected",
-            _n_selected, _k_in, _fill_rate * 100,
-        )
-    elif _fill_rate < 0.50:
-        _log.warning(
-            "Universe fill-rate low: %d/%d (%.0f%%) — check stage filters",
-            _n_selected, _k_in, _fill_rate * 100,
-        )
-
-    _save_snapshot(manifest, snapshot, selected, decisions, report, root=snapshot_root)
-    return snapshot, selected, report
+    report_df = pd.DataFrame(
+        [
+            {
+                "symbol": (
+                    e.instrument_id.split(":")[-1]
+                    if ":" in e.instrument_id
+                    else e.instrument_id
+                ),
+                "stage": "pit_eligibility",
+                "passed": e.eligible,
+                "reason": e.code.value,
+            }
+            for e in snapshot_elig.eligibilities
+        ]
+    )
+    _log.info(
+        "PIT universe built: as_of=%s n_instruments=%d n_eligible=%d",
+        as_of_date.isoformat(),
+        pit_manifest.n_stage0,
+        n_eligible,
+    )
+    _save_snapshot(pit_manifest, pit_snapshot, eligible_df, pd.DataFrame(), report_df, root=snapshot_root)
+    return pit_snapshot, eligible_df, report_df
 
 
 def load_or_build_universe_snapshot(

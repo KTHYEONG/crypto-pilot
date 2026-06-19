@@ -376,6 +376,12 @@ def write_universe_store_run(
     report: pd.DataFrame,
     root: Path = DEFAULT_UNIVERSE_STORE_ROOT,
 ) -> Path:
+    # PIT 경로는 Stage6 decisions 스키마 없음 — 빈 DataFrame 허용
+    if decisions.empty:
+        run_dir = _run_dir(as_of=manifest.as_of, tf=manifest.tf, run_id=manifest.run_id, root=root)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _manifest_to_frame(manifest).to_parquet(run_dir / "manifest.parquet", index=False)
+        return run_dir
     missing_columns = [column for column in UNIVERSE_DECISION_COLUMNS if column not in decisions.columns]
     if missing_columns:
         raise ValueError(f"universe decisions missing columns: {missing_columns}")
