@@ -224,6 +224,65 @@ def _resolve_universe_state_cube(universe_result: Any | None) -> UniverseStateCu
     return cube if isinstance(cube, UniverseStateCube) else None
 
 
+def _log_cube_coverage(
+    cube: UniverseStateCube | None,
+    *,
+    symbols: tuple[str, ...],
+    aligned_datetimes: np.ndarray,
+) -> None:
+    """Log PIT cube diagnostic: eligible/entry_block coverage for the aligned window."""
+    if cube is None:
+        _logger.debug(
+            "[PIT-CUBE] cube=None symbols=%d aligned_bars=%d",
+            len(symbols),
+            len(aligned_datetimes),
+        )
+        return
+    cube_ts_ns = np.asarray(cube.calendar.view(np.int64), dtype=np.int64)
+    aligned_ts_ns = aligned_datetimes.astype("datetime64[ns]").view(np.int64)
+    positions = np.searchsorted(cube_ts_ns, aligned_ts_ns, side="right") - 1
+    valid_mask = positions >= 0
+    t_valid = np.where(valid_mask)[0]
+    p_valid = positions[valid_mask]
+    n_bars_valid = t_valid.size
+    n_total = len(symbols)
+    eligible_zeros = 0
+    eligible_total_bars = 0
+    entry_total_bars = 0
+    n_covered = 0
+    cube_sym_map: dict[str, int] = {}
+    for _n, _iid in enumerate(cube.instrument_ids):
+        _sym = _iid.split(":")[-1] if ":" in _iid else _iid
+        cube_sym_map[_sym] = _n
+    for sym in symbols:
+        cube_n = cube_sym_map.get(sym)
+        if cube_n is None:
+            continue
+        n_covered += 1
+        if n_bars_valid == 0:
+            eligible_zeros += 1
+            continue
+        eligible_slice = cube.eligible[p_valid, cube_n]
+        eligible_total_bars += int(eligible_slice.sum())
+        entry_total_bars += int(cube.entry_block[p_valid, cube_n].sum())
+        if eligible_slice.sum() == 0:
+            eligible_zeros += 1
+    eligible_mean = eligible_total_bars / max(1, n_covered * n_bars_valid)
+    entry_mean = entry_total_bars / max(1, n_covered * n_bars_valid)
+    _logger.debug(
+        "[PIT-CUBE] symbols=%d covered=%d eligible_mean=%.4f entry_mean=%.4f "
+        "eligible_zeros=%d/%d aligned_bars=%d cube_bars=%d",
+        n_total,
+        n_covered,
+        eligible_mean,
+        entry_mean,
+        eligible_zeros,
+        n_total,
+        len(aligned_datetimes),
+        len(cube.calendar),
+    )
+
+
 def _universe_metadata_by_symbol(
     snapshot: UniverseSnapshot,
 ) -> dict[str, tuple[float, float, float, float, float, float, float, float, float]]:
@@ -1095,7 +1154,6 @@ def _run_strategy_stage(
     # ─── Tiered Pipeline 분기 (bridge 완료 후 — labeled + aligned 사용 가능) ──
     if use_tiered:
         try:
-            import dataclasses
 
             from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
             from src.domain.futures.strategy.common.alignment import align_data_maps
@@ -1103,9 +1161,6 @@ def _run_strategy_stage(
                 TieredPipelineError,
                 run_tiered_pipeline,
             )
-            from src.domain.futures.universe.contracts import StrategyRequirement
-            from src.domain.futures.universe.readiness import evaluate_strategy_readiness
-
             _logger.info(
                 "[TIERED] 💠 Scope: %d symbols (Historical Union ∩ Data-Valid)",
                 len(effective_trade_syms),
@@ -1118,31 +1173,11 @@ def _run_strategy_stage(
                 state_cube=_pit_state_cube,
             )
             if _pit_state_cube is not None:
-                _lookback: int = int(getattr(run_config, "wf_lookback_bars", 100))
-                _pit_req: StrategyRequirement = StrategyRequirement(
-                    strategy="default_price",
-                    required_lookback_bars=_lookback,
+                _log_cube_coverage(
+                    _pit_state_cube,
+                    symbols=tuple(effective_trade_syms),
+                    aligned_datetimes=aligned_tiered.datetimes,
                 )
-                try:
-                    _readiness_cube = evaluate_strategy_readiness(
-                        aligned=aligned_tiered,
-                        requirements={"default_price": _pit_req},
-                        eligibility=_pit_state_cube,
-                    )
-                    aligned_tiered = dataclasses.replace(
-                        aligned_tiered,
-                        strategy_readiness_mask=_readiness_cube.ready[0],
-                    )
-                    _logger.info(
-                        "[TIERED][PIT] readiness_cube built: ready_ratio=%.3f",
-                        float(_readiness_cube.ready[0].mean())
-                        if _readiness_cube.ready[0].size > 0
-                        else 0.0,
-                    )
-                except ValueError as _exc:
-                    _logger.warning(
-                        "[TIERED][PIT] evaluate_strategy_readiness skipped: %s", _exc
-                    )
             if tiered_window is not None:
                 try:
                     aligned_start = pd.Timestamp(aligned_tiered.datetimes[0]).date()
