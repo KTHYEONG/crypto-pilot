@@ -1021,32 +1021,15 @@ def load_or_build_universe_snapshot(
                         / "filter_report.parquet"
                     )
                 report = pd.read_parquet(report_path) if report_path.exists() else pd.DataFrame()
-                selected_symbols = tuple(
-                    str(symbol).strip()
-                    for symbol in loaded["symbol"].astype(str).tolist()
-                    if str(symbol).strip()
-                )
-                selected_set = set(selected_symbols)
-                inference_panel = tuple(loaded_snapshot.inference_panel)
-                stage5_research_panel = (
-                    tuple(loaded_snapshot.stage5_research_panel)
-                    or _stage5_symbols_from_report(report)
-                )
-                training_panel = tuple(loaded_snapshot.training_panel)
-                live_inference_panel = tuple(loaded_snapshot.live_inference_panel)
+                stage5_research_panel = _stage5_symbols_from_report(report)
                 has_required_metadata = {"cluster_size", "anchor_cluster_member"}.issubset(
                     set(loaded.columns)
                 )
-                if not training_panel or set(training_panel) != selected_set:
-                    training_panel = selected_symbols
-                if not live_inference_panel or set(live_inference_panel) != selected_set:
-                    live_inference_panel = selected_symbols
                 if (
                     has_required_metadata
                     and loaded_snapshot.schema_version == SCHEMA_VERSION
                     and loaded_snapshot.config_hash == expected_config_hash
                     and loaded_snapshot.data_manifest_hash == expected_manifest_hash
-                    and (not inference_panel or set(inference_panel) == selected_set)
                 ):
                     manifest = UniverseRunManifest(
                         as_of=loaded_snapshot.as_of,
@@ -1085,14 +1068,6 @@ def load_or_build_universe_snapshot(
                         manifest=manifest,
                         decisions=decisions,
                         report=report,
-                    )
-                    snapshot = replace(
-                        snapshot,
-                        inference_panel=inference_panel,
-                        historical_trading_panel=tuple(loaded_snapshot.historical_trading_panel),
-                        inference_panel_quarter_membership=dict(
-                            loaded_snapshot.inference_panel_quarter_membership
-                        ),
                     )
                     _save_snapshot(
                         manifest,

@@ -435,12 +435,6 @@ def materialize_snapshot_from_store(
         ["_anchor_priority", "rank", "symbol"],
         na_position="last",
     ).reset_index(drop=True)
-    stage5_symbols = tuple(
-        sorted(
-            decisions.loc[decisions["stage5_pass"].astype(bool), "symbol"].dropna().astype(str).tolist()
-        )
-    )
-    stage6_symbols = tuple(selected["symbol"].dropna().astype(str).tolist())
     selected_meta = tuple(
         SymbolMeta(
             symbol=str(row.symbol),
@@ -480,12 +474,6 @@ def materialize_snapshot_from_store(
         n_stage4_pass=manifest.n_stage4_pass,
         n_stage5_pass=manifest.n_stage5_pass,
         n_stage6_selected=manifest.n_stage6_selected,
-        training_panel=stage6_symbols,
-        inference_panel=(),
-        live_inference_panel=stage6_symbols,
-        historical_trading_panel=(),
-        inference_panel_quarter_membership={},
-        stage5_research_panel=stage5_symbols,
     )
     selected_frame = selected.loc[
         :,
