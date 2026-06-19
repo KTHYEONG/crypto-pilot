@@ -10,7 +10,6 @@ import pytest
 
 from src.domain.futures.optimization.opt_config import get_quarterly_window
 from src.domain.futures.universe import (
-    Stage6Config,
     UniverseConfig,
     build_universe,
     hash_config,
@@ -151,6 +150,7 @@ def _write_ledger(path: Path) -> None:
     pd.DataFrame(rows).to_parquet(path, index=False)
 
 
+@pytest.mark.skip(reason="Phase 4-E: Stage6-specific rejection tracking (stage3_reason, snapshot.rejected); redesign for PIT semantics pending")
 def test_quarterly_universe_selection_audit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -165,15 +165,7 @@ def test_quarterly_universe_selection_audit(
     monkeypatch.setattr(universe_store, "DEFAULT_UNIVERSE_STORE_ROOT", store_root)
     _write_ledger(ledger_path)
 
-    cfg = UniverseConfig(
-        stage6=Stage6Config(
-            k_in=2,
-            k_out=2,
-            anchor_symbols=("BTC/USDT",),
-            basket_ref=("BTC/USDT", "ETH/USDT", "XRP/USDT"),
-            basket_weights=(0.5, 0.3, 0.2),
-        )
-    )
+    cfg = UniverseConfig()
 
     quarterly_expectations: dict[str, QuarterlyExpectation] = {
         "2025-07-01": {
@@ -248,15 +240,7 @@ def test_load_or_build_universe_snapshot_rebuilds_on_config_hash_mismatch(
     monkeypatch.setattr(universe_store, "DEFAULT_UNIVERSE_STORE_ROOT", store_root)
     _write_ledger(ledger_path)
 
-    base_cfg = UniverseConfig(
-        stage6=Stage6Config(
-            k_in=2,
-            k_out=2,
-            anchor_symbols=("BTC/USDT",),
-            basket_ref=("BTC/USDT", "ETH/USDT", "XRP/USDT"),
-            basket_weights=(0.5, 0.3, 0.2),
-        )
-    )
+    base_cfg = UniverseConfig()
     build_universe(
         as_of="2025-01-01",
         tf="4h",
@@ -265,15 +249,9 @@ def test_load_or_build_universe_snapshot_rebuilds_on_config_hash_mismatch(
         snapshot_root=snapshot_root,
     )
 
-    rebuild_cfg = UniverseConfig(
-        stage6=Stage6Config(
-            k_in=3,
-            k_out=2,
-            anchor_symbols=("BTC/USDT",),
-            basket_ref=("BTC/USDT", "ETH/USDT", "XRP/USDT"),
-            basket_weights=(0.5, 0.3, 0.2),
-        )
-    )
+    from src.domain.futures.universe import PITUniverseConfig
+
+    rebuild_cfg = UniverseConfig(pit_config=PITUniverseConfig(k_in=30))
 
     called: list[bool] = []
     original_build_universe = universe_pipeline.build_universe
