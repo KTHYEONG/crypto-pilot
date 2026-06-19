@@ -239,6 +239,10 @@ class UniverseSnapshot:
     )
     # Current-quarter Stage5 survivors retained for audit and research only.
     stage5_research_panel: tuple[str, ...] = field(default_factory=tuple)
+    # PIT state summary for compatibility with the PIT universe rewrite.
+    state_transition_summary: dict[str, int] = field(default_factory=dict)
+    # Transient PIT state cube — not persisted in JSON/parquet serialization.
+    pit_state_cube: Any = None
 
 
 def _to_date(value: str | date) -> date:
