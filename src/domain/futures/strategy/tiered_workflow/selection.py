@@ -10,7 +10,11 @@ import numpy as np
 import optuna
 
 from src.domain.futures.optimization.evaluator import calc_n_trials_eff_entropy
-from src.domain.futures.optimization.workflow import evaluate_l2_trial, layer2_constraints_from_trial
+from src.domain.futures.optimization.workflow import (
+    evaluate_l2_trial,
+    layer2_constraints_from_trial,
+)
+from src.domain.futures.strategy.candidate_contracts import ValidatedSignalBatch
 from src.domain.futures.strategy.tiered_workflow import Layer2AllocationConfig
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     Layer2GateEvaluation,
@@ -27,20 +31,89 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
 _logger = logging.getLogger(__name__)
 
 
+def _update_hashed_value(
+    hasher: Any,
+    *,
+    name: str,
+    value: bytes,
+) -> None:
+    """Append a length-prefixed named value to the hash stream."""
+    name_bytes = name.encode("utf-8")
+    hasher.update(len(name_bytes).to_bytes(8, "big", signed=False))
+    hasher.update(name_bytes)
+    hasher.update(len(value).to_bytes(8, "big", signed=False))
+    hasher.update(value)
+
+
+def _signal_batch_fingerprint(signal_batch: ValidatedSignalBatch) -> str:
+    """Return a deterministic SHA-256 digest for the complete L2 signal input."""
+    hasher = hashlib.sha256()
+    _update_hashed_value(hasher, name="schema", value=b"l2-signal-batch-v1")
+    _update_hashed_value(hasher, name="start_idx", value=str(int(signal_batch.start_idx)).encode("utf-8"))
+    _update_hashed_value(hasher, name="end_idx", value=str(int(signal_batch.end_idx)).encode("utf-8"))
+    _update_hashed_value(hasher, name="event_count", value=str(len(signal_batch.events)).encode("utf-8"))
+    _update_hashed_value(hasher, name="registry_version", value=signal_batch.registry_version.encode("utf-8"))
+    _update_hashed_value(hasher, name="model_version", value=signal_batch.model_version.encode("utf-8"))
+
+    symbols = signal_batch.symbols
+    _update_hashed_value(hasher, name="symbol_count", value=str(len(symbols)).encode("utf-8"))
+    for symbol in symbols:
+        _update_hashed_value(hasher, name="symbol", value=symbol.encode("utf-8"))
+
+    for event in signal_batch.events:
+        decision_time_ns = int(np.asarray(event.decision_time, dtype="datetime64[ns]").astype(np.int64))
+        _update_hashed_value(hasher, name="decision_idx", value=str(int(event.decision_idx)).encode("utf-8"))
+        _update_hashed_value(
+            hasher,
+            name="decision_time",
+            value=str(decision_time_ns).encode("utf-8"),
+        )
+        _update_hashed_value(hasher, name="symbol", value=event.symbol.encode("utf-8"))
+        _update_hashed_value(hasher, name="strategy_id", value=event.strategy_id.encode("utf-8"))
+        _update_hashed_value(
+            hasher,
+            name="activation_context",
+            value=event.activation_context.encode("utf-8"),
+        )
+        _update_hashed_value(hasher, name="side", value=str(int(event.side)).encode("utf-8"))
+        _update_hashed_value(hasher, name="expected_net_bps", value=float(event.expected_net_bps).hex().encode("utf-8"))
+        _update_hashed_value(
+            hasher,
+            name="expected_gross_bps",
+            value=float(event.expected_gross_bps).hex().encode("utf-8"),
+        )
+        _update_hashed_value(hasher, name="q10_net_bps", value=float(event.q10_net_bps).hex().encode("utf-8"))
+        _update_hashed_value(hasher, name="q10_gross_bps", value=float(event.q10_gross_bps).hex().encode("utf-8"))
+        _update_hashed_value(hasher, name="q90_net_bps", value=float(event.q90_net_bps).hex().encode("utf-8"))
+        _update_hashed_value(hasher, name="q90_gross_bps", value=float(event.q90_gross_bps).hex().encode("utf-8"))
+        _update_hashed_value(
+            hasher,
+            name="expected_holding_bars",
+            value=str(int(event.expected_holding_bars)).encode("utf-8"),
+        )
+        _update_hashed_value(
+            hasher,
+            name="quality_weight",
+            value=float(event.quality_weight).hex().encode("utf-8"),
+        )
+        _update_hashed_value(hasher, name="registry_version", value=event.registry_version.encode("utf-8"))
+        _update_hashed_value(hasher, name="model_version", value=event.model_version.encode("utf-8"))
+
+    return hasher.hexdigest()
+
+
 def _layer2_experiment_key(
     *,
     tf: str,
     window: Any,
-    signal_batch: Any,
+    signal_batch: ValidatedSignalBatch,
     search_space_version: str,
 ) -> str:
     """같은 experiment key의 study를 매 실행마다 보존하기 위한 고유 키 생성."""
-    events = getattr(signal_batch, "events", ())
-    event_count = len(events)
-    # timeframe, l2_start, holdout_start, events_count 및 search_space_version을 고유 요소로 바인딩
+    signal_batch_fingerprint = _signal_batch_fingerprint(signal_batch)
     hash_input = (
         f"{tf}_{window.l2_start.isoformat()}_{window.holdout_start.isoformat()}_"
-        f"{event_count}_{search_space_version}"
+        f"{signal_batch_fingerprint}_{search_space_version}"
     )
     h = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()[:12]
     return f"l2_study_{tf}_{h}"

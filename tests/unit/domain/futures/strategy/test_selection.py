@@ -2,17 +2,26 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
+from datetime import datetime
+from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import optuna
 import pytest
 
+from src.domain.futures.strategy.candidate_contracts import (
+    ValidatedSignalBatch,
+    ValidatedSignalEvent,
+)
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     Layer2TrialEvaluation,
 )
 from src.domain.futures.strategy.tiered_workflow.selection import (
     _layer2_experiment_key,
+    _signal_batch_fingerprint,
     select_layer2_champion,
 )
 
@@ -22,22 +31,115 @@ class TestLayer2Selection(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tf = "4h"
-        self.signal_batch = MagicMock()
-        self.signal_batch.events = [MagicMock()]
+        self.signal_batch = self._make_signal_batch()
         self.aligned = MagicMock()
         self.aligned.datetimes = np.array(["2026-06-15T00:00:00"], dtype="datetime64[ns]")
         self.awf_folds = (MagicMock(),)
         self.caps = MagicMock()
 
-        # Mock window
-        self.window = MagicMock()
-        self.window.l2_start = MagicMock()
-        self.window.l2_start.isoformat.return_value = "2026-06-15"
-        self.window.holdout_start = MagicMock()
-        self.window.holdout_start.isoformat.return_value = "2026-09-15"
+        self.window = SimpleNamespace(
+            l2_start=datetime(2026, 6, 15),
+            holdout_start=datetime(2026, 9, 15),
+        )
+
+    @staticmethod
+    def _make_event(
+        *,
+        decision_idx: int,
+        decision_time: str,
+        symbol: str,
+        strategy_id: str,
+        activation_context: str,
+        side: Literal[-1, 1],
+        expected_net_bps: float,
+        expected_gross_bps: float,
+        q10_net_bps: float,
+        q10_gross_bps: float,
+        q90_net_bps: float,
+        q90_gross_bps: float,
+        expected_holding_bars: int,
+        quality_weight: float,
+        registry_version: str,
+        model_version: str,
+    ) -> ValidatedSignalEvent:
+        return ValidatedSignalEvent(
+            decision_idx=decision_idx,
+            decision_time=np.datetime64(decision_time, "ns"),
+            symbol=symbol,
+            strategy_id=strategy_id,
+            activation_context=activation_context,
+            side=side,
+            expected_net_bps=expected_net_bps,
+            expected_gross_bps=expected_gross_bps,
+            q10_net_bps=q10_net_bps,
+            q10_gross_bps=q10_gross_bps,
+            q90_net_bps=q90_net_bps,
+            q90_gross_bps=q90_gross_bps,
+            expected_holding_bars=expected_holding_bars,
+            quality_weight=quality_weight,
+            registry_version=registry_version,
+            model_version=model_version,
+        )
+
+    @classmethod
+    def _make_signal_batch(
+        cls,
+        *,
+        registry_version: str = "reg-1",
+        model_version: str = "model-1",
+        start_idx: int = 10,
+        end_idx: int = 20,
+        first_symbol: str = "BTCUSDT",
+        first_expected_gross_bps: float = 14.0,
+    ) -> ValidatedSignalBatch:
+        first_event = cls._make_event(
+            decision_idx=3,
+            decision_time="2026-06-15T00:00:00",
+            symbol=first_symbol,
+            strategy_id="trend_v1",
+            activation_context="l2",
+            side=1,
+            expected_net_bps=12.5,
+            expected_gross_bps=first_expected_gross_bps,
+            q10_net_bps=4.0,
+            q10_gross_bps=5.0,
+            q90_net_bps=20.0,
+            q90_gross_bps=22.0,
+            expected_holding_bars=6,
+            quality_weight=0.9,
+            registry_version=registry_version,
+            model_version=model_version,
+        )
+        second_event = cls._make_event(
+            decision_idx=7,
+            decision_time="2026-06-15T04:00:00",
+            symbol="ETHUSDT",
+            strategy_id="mean_rev_v2",
+            activation_context="l2",
+            side=-1,
+            expected_net_bps=8.0,
+            expected_gross_bps=9.5,
+            q10_net_bps=1.5,
+            q10_gross_bps=2.0,
+            q90_net_bps=13.0,
+            q90_gross_bps=15.0,
+            expected_holding_bars=4,
+            quality_weight=0.7,
+            registry_version=registry_version,
+            model_version=model_version,
+        )
+        return ValidatedSignalBatch(
+            events=(first_event, second_event),
+            start_idx=start_idx,
+            end_idx=end_idx,
+            symbols=(first_symbol, "ETHUSDT"),
+            registry_version=registry_version,
+            model_version=model_version,
+        )
 
     def test_experiment_key_generation(self) -> None:
         """_layer2_experiment_key의 고유 해시 기반 키 생성이 일관적인지 검증."""
+        signal_batch_copy = self._make_signal_batch()
         key1 = _layer2_experiment_key(
             tf=self.tf,
             window=self.window,
@@ -47,11 +149,56 @@ class TestLayer2Selection(unittest.TestCase):
         key2 = _layer2_experiment_key(
             tf=self.tf,
             window=self.window,
-            signal_batch=self.signal_batch,
+            signal_batch=signal_batch_copy,
             search_space_version="v2",
         )
+        batch_fp_1 = _signal_batch_fingerprint(self.signal_batch)
+        batch_fp_2 = _signal_batch_fingerprint(signal_batch_copy)
         assert key1 == key2
         assert key1.startswith("l2_study_4h_")
+        assert batch_fp_1 == batch_fp_2
+
+        symbol_changed_batch = self._make_signal_batch(first_symbol="SOLUSDT")
+        edge_changed_batch = self._make_signal_batch(first_expected_gross_bps=14.5)
+        version_changed_batch = replace(self.signal_batch, registry_version="reg-2")
+        model_changed_batch = replace(self.signal_batch, model_version="model-2")
+        window_changed = SimpleNamespace(
+            l2_start=datetime(2026, 6, 22),
+            holdout_start=datetime(2026, 9, 15),
+        )
+
+        assert _signal_batch_fingerprint(symbol_changed_batch) != batch_fp_1
+        assert _signal_batch_fingerprint(edge_changed_batch) != batch_fp_1
+        assert _signal_batch_fingerprint(version_changed_batch) != batch_fp_1
+        assert _signal_batch_fingerprint(model_changed_batch) != batch_fp_1
+
+        assert (
+            _layer2_experiment_key(
+                tf=self.tf,
+                window=window_changed,
+                signal_batch=self.signal_batch,
+                search_space_version="v2",
+            )
+            != key1
+        )
+        assert (
+            _layer2_experiment_key(
+                tf=self.tf,
+                window=self.window,
+                signal_batch=self.signal_batch,
+                search_space_version="v3",
+            )
+            != key1
+        )
+        assert (
+            _layer2_experiment_key(
+                tf=self.tf,
+                window=self.window,
+                signal_batch=symbol_changed_batch,
+                search_space_version="v2",
+            )
+            != key1
+        )
 
     def test_select_champion_no_complete_trials(self) -> None:
         """완료된 trial이 없을 때 blocker_reason='no_complete_trials' 반환 검증."""
