@@ -683,7 +683,9 @@ def _candidate_output_to_signal_batch(
     cfg: CandidateStrategyConfig | None = None,
 ) -> ValidatedSignalBatch:
     frame = model_output.events.reset_index(drop=True).copy()
+    logger.debug("[L2-SIGNAL] raw_events=%d", len(frame))
     if frame.empty:
+        logger.warning("[L2-SIGNAL] model_output.events is empty — no predictions")
         return ValidatedSignalBatch(
             events=(),
             start_idx=0,
@@ -717,6 +719,11 @@ def _candidate_output_to_signal_batch(
     start_idx = int(frame["entry_idx"].min()) if "entry_idx" in frame.columns and not frame.empty else 0
     end_idx = int(frame["entry_idx"].max()) + 1 if "entry_idx" in frame.columns and not frame.empty else 0
     has_explicit_gross = bool(getattr(model_output, "_has_explicit_expected_gross_bps", True))
+    n_raw = len(frame)
+    n_registry_pass = 0
+    n_gross_pass = 0
+    n_threshold_pass = 0
+    n_decision_pass = 0
     for idx, row in frame.iterrows():
         key = _signal_source_key_from_row(row, qualify_by_regime=activation_match_regime)
         if activation_match_regime:
@@ -725,15 +732,19 @@ def _candidate_output_to_signal_batch(
         else:
             if (key.symbol, key.strategy_id) not in source_keys_relaxed:
                 continue
+        n_registry_pass += 1
         if not has_explicit_gross:
             continue
+        n_gross_pass += 1
         pred = float(gross[idx]) if idx < gross.size else 0.0
         if pred < activation_floor_bps:
             continue
+        n_threshold_pass += 1
         entry_idx = int(pd.to_numeric(row.get("entry_idx", 0), errors="coerce"))
         decision_idx = entry_idx - 1
         if decision_idx < 0 or decision_idx >= datetimes.shape[0]:
             continue
+        n_decision_pass += 1
         side_val = int(pd.to_numeric(row.get("side", 1), errors="coerce"))
         side: int = 1 if side_val >= 0 else -1
         holding = max(int(pd.to_numeric(row.get("expected_holding_bars", 1), errors="coerce")), 1)
@@ -762,6 +773,10 @@ def _candidate_output_to_signal_batch(
                 model_version=model_version,
             )
         )
+    logger.debug(
+        "[L2-SIGNAL] gates: raw=%d registry=%d gross=%d threshold=%d decision=%d final=%d activation_floor=%.1f",
+        n_raw, n_registry_pass, n_gross_pass, n_threshold_pass, n_decision_pass, len(events), activation_floor_bps,
+    )
     events.sort(key=lambda item: (item.decision_idx, item.symbol, item.strategy_id, item.activation_context))
     return ValidatedSignalBatch(
         events=tuple(events),
@@ -1184,6 +1199,13 @@ def predict_layer1_signals(
         model=artifact.model,
         oos_events=inference_set.event_index,
         cfg=cfg,
+    )
+    logger.info(
+        "[L2-SIGNAL-PRE] predict_layer1_signals: registry_symbols=%d activation_floor=%.1f start_idx=%d end_idx=%d",
+        len(artifact.deployment_registry.by_symbol),
+        float(cfg.l1_signal_activation_floor_bps),
+        start_idx,
+        end_idx,
     )
     return _candidate_output_to_signal_batch(
         model_output=prediction,

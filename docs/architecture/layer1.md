@@ -72,7 +72,7 @@ graph TD
 
 **Capacity Clip (awf_sim)**
 - Per-bar capacity from `adv_usdt_2d [T, N]`: `intended_notional < 5 USDT → w = 0`; `> capacity → proportional clip`.
-- Applied independently on fit-leg and OOS-leg of each fold.
+- Active only when `portfolio_nav` is provided (unit-NAV simulation skips the clip: weights are fractions, not USDT notional).
 
 **Data Integrity & Optimizations**
 - **Guards**: NaN/stuck-price blocks, length minimums, high-low violation checks.

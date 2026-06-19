@@ -677,7 +677,8 @@ def _run_awf_simulation(
     # Phase 3-5: capacity_usdt clip 상수
     # portfolio_nav=None → 단위 NAV(1.0) 기준 시뮬레이션
     _portfolio_nav: float = portfolio_nav if portfolio_nav is not None else 1.0
-    _min_order_usdt: float = 5.0  # 최소주문 미달 시 weight=0
+    _min_order_usdt: float = 5.0
+    _capacity_clip_enabled: bool = portfolio_nav is not None  # unit-NAV(1.0)일 때 skip
 
     vol_matrix = cache.vol_matrix_2d
 
@@ -803,9 +804,6 @@ def _run_awf_simulation(
                 sigma=_fit_sig_arr,
                 kelly_fraction=kelly_fraction,
                 vol_target=vol_target,
-                friction_hurdle_bps=_fit_hurdle,
-                holding_bars=rebalance_bars,
-                friction_safety_mult=deploy_cost_safety_mult,
                 caps=caps,
                 prev_w=_prev_w_fit,
                 no_trade_band=no_trade_band,
@@ -827,9 +825,9 @@ def _run_awf_simulation(
             _fit_w = np.where(_fit_tradeable, _fit_w, 0.0)
 
             # Phase 3-5: capacity_usdt clip (fit-leg)
-            # Time: O(N), Space: O(1) per symbol
+            # portfolio_nav=None 시 unit-NAV → skip
             _fit_adv = getattr(aligned, "adv_usdt_2d", None)
-            if isinstance(_fit_adv, np.ndarray) and _ft < _fit_adv.shape[0]:
+            if _capacity_clip_enabled and isinstance(_fit_adv, np.ndarray) and _ft < _fit_adv.shape[0]:
                 _fit_cap_row = np.nan_to_num(_fit_adv[_ft], nan=0.0, posinf=0.0, neginf=0.0)
                 for _cn in range(n_sym):
                     _intended = abs(_fit_w[_cn]) * _portfolio_nav
@@ -887,6 +885,10 @@ def _run_awf_simulation(
             
             if np.any(_mask):
                 _idx_list = np.where(_mask)[0]
+                n_edge_pass = 0
+                n_edge_fail = 0
+                n_edge_fail_zero = 0
+                n_edge_fail_nan = 0
                 for _idx in _idx_list:
                     symbol = symbols[_idx]
                     _gross_bps = cache.expected_gross_bps_2d[t, _idx]
@@ -909,8 +911,15 @@ def _run_awf_simulation(
                     )
                     
                     gross_edge_by_symbol[symbol] = edge.signed_gross_bps_per_bar
-                    if not np.isfinite(edge.signed_net_bps_per_bar) or edge.signed_net_bps_per_bar == 0.0:
+                    if not np.isfinite(edge.signed_net_bps_per_bar):
+                        n_edge_fail += 1
+                        n_edge_fail_nan += 1
                         continue
+                    if edge.signed_net_bps_per_bar == 0.0:
+                        n_edge_fail += 1
+                        n_edge_fail_zero += 1
+                        continue
+                    n_edge_pass += 1
                         
                     valid_signals[symbol] = SymbolSignal(
                         raw_mu=edge.signed_net_bps_per_bar,
@@ -920,6 +929,13 @@ def _run_awf_simulation(
                         valid=True,
                         beta_btc=None,
                         quality_weight=_qw,
+                    )
+                if n_edge_pass + n_edge_fail > 0:
+                    logger.debug(
+                        "[AWF-EDGE] t=%d mask_count=%d edge_pass=%d fail=%d (zero=%d nan=%d) hurdle_sample=%.1f",
+                        t, len(_idx_list), n_edge_pass, n_edge_fail,
+                        n_edge_fail_zero, n_edge_fail_nan,
+                        float(hurdle[_idx_list[0]]) if len(_idx_list) > 0 else 0.0,
                     )
             prof_prep += time.perf_counter() - t0_prep
 
@@ -971,9 +987,6 @@ def _run_awf_simulation(
                 sigma=sig_arr,
                 kelly_fraction=kelly_fraction,
                 vol_target=vol_target,
-                friction_hurdle_bps=hurdle,
-                holding_bars=rebalance_bars,
-                friction_safety_mult=deploy_cost_safety_mult,
                 caps=caps,
                 prev_w=prev_w,
                 no_trade_band=no_trade_band,
@@ -1007,10 +1020,9 @@ def _run_awf_simulation(
             w = np.where(tradeable_mask, w, 0.0)
 
             # Phase 3-5: capacity_usdt clip (OOS)
-            # 최소주문 5 USDT 미달 → weight=0; capacity 초과 → 비례 클립
-            # Time: O(N), Space: O(N) for cap_row read
+            # portfolio_nav=None 시 unit-NAV → skip
             _adv = getattr(aligned, "adv_usdt_2d", None)
-            if isinstance(_adv, np.ndarray) and t < _adv.shape[0]:
+            if _capacity_clip_enabled and isinstance(_adv, np.ndarray) and t < _adv.shape[0]:
                 _cap_row = np.nan_to_num(_adv[t], nan=0.0, posinf=0.0, neginf=0.0)
                 for _n in range(n_sym):
                     _intended = abs(w[_n]) * _portfolio_nav
