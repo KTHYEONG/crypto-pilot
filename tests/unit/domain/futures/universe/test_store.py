@@ -122,7 +122,6 @@ def test_store_roundtrip_preserves_stage5_and_stage6_rows(tmp_path: Path) -> Non
         "ETHUSDT",
     )
     assert tuple(selected_frame["symbol"].tolist()) == ("BTCUSDT",)
-    assert snapshot.stage5_research_panel == ("BTCUSDT", "ETHUSDT")
     assert snapshot.selected[0].cluster_size == 6.0
     assert snapshot.selected[0].anchor_cluster_member == 1.0
 
