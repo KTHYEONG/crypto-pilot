@@ -89,6 +89,7 @@ from src.domain.futures.strategy_runtime.bridge import (
     merge_candidate_output_into_is_and_oos,
 )
 from src.domain.futures.universe import UniverseSnapshot
+from src.domain.futures.universe.contracts import UniverseStateCube
 from src.domain.futures.universe.membership import inject_membership_masks_into_maps
 from src.domain.futures.universe.storage import run_historical_sync
 
@@ -213,6 +214,14 @@ def _selected_symbols_from_snapshot(snapshot: UniverseSnapshot) -> tuple[str, ..
         for meta in snapshot.selected
         if str(meta.symbol).strip()
     )
+
+
+def _resolve_universe_state_cube(universe_result: Any | None) -> UniverseStateCube | None:
+    """Return the PIT state cube when the universe stage produced one."""
+    if universe_result is None:
+        return None
+    cube = getattr(universe_result, "state_cube", None)
+    return cube if isinstance(cube, UniverseStateCube) else None
 
 
 def _universe_metadata_by_symbol(
@@ -1101,22 +1110,14 @@ def _run_strategy_stage(
                 "[TIERED] 💠 Scope: %d symbols (Historical Union ∩ Data-Valid)",
                 len(effective_trade_syms),
             )
-            _is_pit: bool = (
-                universe_result is not None
-                and getattr(run_config, "universe_engine", "stage6") == "pit"
-            )
-            _pit_state_cube = (
-                universe_result.state_cube  # type: ignore[union-attr]
-                if _is_pit
-                else None
-            )
+            _pit_state_cube = _resolve_universe_state_cube(universe_result)
             aligned_tiered = align_data_maps(
                 full_strategy_maps,
                 effective_trade_syms,
                 run_config.timeframe,
                 state_cube=_pit_state_cube,
             )
-            if _is_pit and _pit_state_cube is not None:
+            if _pit_state_cube is not None:
                 _lookback: int = int(getattr(run_config, "wf_lookback_bars", 100))
                 _pit_req: StrategyRequirement = StrategyRequirement(
                     strategy="default_price",

@@ -67,8 +67,10 @@ from .storage import (
 )
 from .store import (
     compute_universe_run_id,
+    is_exact_selected_feature_schema,
     load_universe_store_run,
     materialize_snapshot_from_store,
+    validate_materializable_pit_store_run,
     write_universe_store_run,
 )
 
@@ -111,6 +113,7 @@ __all__ = [
     "evaluate_strategy_readiness",
     "hash_config",
     "hash_manifest_rows",
+    "is_exact_selected_feature_schema",
     "load_ledger_slice",
     "load_or_build_universe_snapshot",
     "load_snapshot_json",
@@ -127,5 +130,6 @@ __all__ = [
     "snapshot_from_payload",
     "snapshot_to_payload",
     "update_ledger",
+    "validate_materializable_pit_store_run",
     "write_universe_store_run",
 ]
