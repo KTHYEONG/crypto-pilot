@@ -595,7 +595,28 @@ def build_universe(
         reverse=True,
     )
     _k = config.pit_config.k_in
-    eligible_syms: list[str] = eligible_syms_all[:_k] if _k > 0 else eligible_syms_all
+    if _k > 0:
+        # Legacy fixed-N path (backward-compat)
+        eligible_syms: list[str] = eligible_syms_all[:_k]
+    else:
+        # Capacity-coverage prefix: smallest prefix whose cumulative capacity >= target * total
+        _target = config.pit_config.capacity_coverage_target
+        _k_max = config.pit_config.k_max
+        _caps = [_cap_lookup.get(f"binance_usdt_perpetual:{s}", 0.0) for s in eligible_syms_all]
+        _total = sum(_caps)
+        if _total <= 0.0:
+            # fail-open: keep all eligible up to k_max
+            eligible_syms = eligible_syms_all[:_k_max]
+        else:
+            _csum = 0.0
+            _n = len(eligible_syms_all)
+            _prefix = _n  # default: take all if threshold never reached
+            for _i, _c in enumerate(_caps):
+                _csum += _c
+                if _csum >= _target * _total:
+                    _prefix = _i + 1
+                    break
+            eligible_syms = eligible_syms_all[:min(_prefix, _k_max)]
 
     # Build SymbolMeta for eligible instruments using actual SymbolMeta fields.
     def _cost_for(sym: str) -> float:
