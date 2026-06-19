@@ -102,7 +102,7 @@ def test_strategy_mode_pipeline_orchestration_order(
         _ = win
         _ = layered_window
         called.append("universe")
-        return ["BTCUSDT"], {}, (), (), snapshot, {}
+        return ["BTCUSDT"], {}, (), (), snapshot, {}, None
 
     def fake_data(
         rc: object,
@@ -136,6 +136,7 @@ def test_strategy_mode_pipeline_orchestration_order(
         universe_snapshot: object | None = None,
         *,
         layered_window: object | None = None,
+        universe_result: object | None = None,
     ) -> None:
         _ = rc
         _ = win
@@ -247,6 +248,7 @@ def test_l2_mode_skips_optimization_stage(
                 n_stage6_selected=0,
             ),
             {},
+            None,
         ),
     )
     monkeypatch.setattr(opt_main_futures, "_run_data_stage", lambda *_args, **_kwargs: data_stage)
@@ -707,6 +709,7 @@ def _patch_tiered_deps(
         data_maps: dict[str, object],
         symbols: list[str],
         tf: str,
+        **kwargs: object,
     ) -> MagicMock:
         captured_symbols.append(list(symbols))
         mock_aligned = MagicMock()
@@ -942,7 +945,7 @@ def test_tiered_window_uses_run_config_date_reference(
     monkeypatch.setattr(
         _align,
         "align_data_maps",
-        lambda data_maps, symbols, tf: MagicMock(symbols=symbols, data_maps=data_maps, tf=tf),
+        lambda data_maps, symbols, tf, **_kw: MagicMock(symbols=symbols, data_maps=data_maps, tf=tf),
     )
     monkeypatch.setattr(
         _tw,
@@ -1032,7 +1035,7 @@ def test_tiered_pipeline_uses_unfiltered_labeled_events(
     monkeypatch.setattr(
         _align,
         "align_data_maps",
-        lambda data_maps, symbols, tf: MagicMock(symbols=symbols, data_maps=data_maps, tf=tf),
+        lambda data_maps, symbols, tf, **_kw: MagicMock(symbols=symbols, data_maps=data_maps, tf=tf),
     )
 
     def _capture_tiered(**kwargs: object) -> tuple[Layer1Result, None, None]:
@@ -1123,7 +1126,7 @@ def test_tiered_layer3_terminal_failure_does_not_fallback_to_phase_d(
     monkeypatch.setattr(
         _align,
         "align_data_maps",
-        lambda data_maps, symbols, tf: MagicMock(symbols=symbols, datetimes=np.array([], dtype="datetime64[ns]")),
+        lambda data_maps, symbols, tf, **_kw: MagicMock(symbols=symbols, datetimes=np.array([], dtype="datetime64[ns]")),
     )
     def _raise_l3_error(**_kwargs: object) -> object:
         raise Layer3ExecutionError("layer3_signal_prediction_failed")
@@ -1442,7 +1445,7 @@ def test_align_data_maps_s15_receives_merged_full_strategy_maps(
     captured_align_data_maps: list[object] = []
     import src.domain.futures.strategy.common.alignment as _align
 
-    def _capturing_align(data_maps: object, symbols: list[str], tf: str) -> object:
+    def _capturing_align(data_maps: object, symbols: list[str], tf: str, **kwargs: object) -> object:
         captured_align_data_maps.append(data_maps)
         return MagicMock(symbols=symbols, datetimes=np.array([], dtype="datetime64[ns]"))
 
