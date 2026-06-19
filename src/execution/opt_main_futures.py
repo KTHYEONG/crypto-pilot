@@ -498,8 +498,8 @@ def _run_universe_stage(
         window.effective_from.date(): frozenset(window.active_symbols)
         for window in timeline_obj.windows
     }
-    inference_panel = universe_result.snapshot.inference_panel
-    live_inference_panel = universe_result.snapshot.live_inference_panel
+    inference_panel = universe_result.inference_symbols
+    live_inference_panel = universe_result.inference_symbols
     inference_timeline = {}
     inf_tl = universe_result.inference_timeline
     if isinstance(inf_tl, UniverseMembershipTimeline):
@@ -971,8 +971,6 @@ def _run_strategy_stage(
     run_config: FuturesRunConfig,
     window: QuarterlyWindow,
     data_stage: DataStageResult,
-    inference_panel: tuple[str, ...] = (),
-    live_inference_panel: tuple[str, ...] = (),
     trading_symbols: tuple[str, ...] = (),
     universe_snapshot: UniverseSnapshot | None = None,
     layered_window: Any | None = None,
@@ -1031,11 +1029,6 @@ def _run_strategy_stage(
         )
         strategy_steps["metadata"] = time.perf_counter() - t_step
 
-    # inference_panel은 데이터가 실제 로드된 심볼만 필터링하여 전달
-    loaded_sym_set = set(data_stage.data_maps.keys())
-    effective_inference = tuple(s for s in inference_panel if s in loaded_sym_set) or None
-    effective_live = tuple(s for s in live_inference_panel if s in loaded_sym_set) or None
-    
     use_tiered = bool(OPT_FUTURES_CONFIG.get("USE_CS_RANK_ENGINE", False))
     effective_trade_syms = []
     tiered_window = None
@@ -1084,9 +1077,6 @@ def _run_strategy_stage(
         end_date=window.end_date,
         opt_config=OPT_FUTURES_CONFIG,
         preloaded_data_maps=full_strategy_maps,
-        training_panel=bridge_symbol_scope,
-        inference_panel=effective_inference,
-        live_inference_panel=effective_live,
         trading_symbols=bridge_symbol_scope,
         silent=False,
     )
@@ -2037,8 +2027,6 @@ def run_pipeline(
         run_config,
         window,
         data_stage,
-        inference_panel,
-        live_inference_panel,
         _selected_symbols_from_snapshot(universe_snapshot),
         universe_snapshot=universe_snapshot,
         layered_window=layered_window,

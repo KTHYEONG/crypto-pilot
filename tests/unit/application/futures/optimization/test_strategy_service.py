@@ -163,7 +163,6 @@ def test_run_active_strategy_output_bridge_uses_stage6_trading_scope(
         end_date="2025-04-01",
         opt_config={"FUTURES_STRATEGY_NAME": "candidate_ml"},
         preloaded_data_maps={"BTCUSDT": {}, "ETHUSDT": {}, "SOLUSDT": {}},
-        training_panel=("BTCUSDT", "SOLUSDT"),
         trading_symbols=("BTCUSDT",),
     )
 
@@ -185,6 +184,5 @@ def test_run_active_strategy_output_bridge_when_scope_is_empty_raises_value_erro
             end_date="2025-04-01",
             opt_config={"FUTURES_STRATEGY_NAME": "candidate_ml"},
             preloaded_data_maps={"ETHUSDT": {}},
-            training_panel=("BTCUSDT",),
             trading_symbols=("BTCUSDT",),
         )

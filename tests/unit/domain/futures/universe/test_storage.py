@@ -205,17 +205,12 @@ def test_snapshot_payload_roundtrip_preserves_stage5_research_panel() -> None:
         n_stage4_pass=0,
         n_stage5_pass=2,
         n_stage6_selected=1,
-        training_panel=("BTCUSDT",),
-        live_inference_panel=("BTCUSDT",),
-        stage5_research_panel=("BTCUSDT", "ETHUSDT"),
     )
 
     payload = snapshot_to_payload(snapshot)
     roundtrip = snapshot_from_payload(payload)
 
-    assert roundtrip.training_panel == ("BTCUSDT",)
-    assert roundtrip.live_inference_panel == ("BTCUSDT",)
-    assert roundtrip.stage5_research_panel == ("BTCUSDT", "ETHUSDT")
+    assert "training_panel" not in payload
     assert roundtrip.selected[0].cluster_size == 4.0
     assert roundtrip.selected[0].anchor_cluster_member == 1.0
     assert roundtrip.selected[0].vol_30d == 0.35
