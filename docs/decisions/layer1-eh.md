@@ -1,5 +1,10 @@
 # Layer 1 Architectural Decisions
 
+## L1-ADR-009: PIT state_cube 통합 + lifecycle gate + capacity clip (2026-06-19)
+- **Delta:** `run_l1_nested_swf`에 `l2_start: date | None` 파라미터 추가. `SymbolLifecycleRecord` dataclass 도입(`fold_status`, `promotion_available_at`). `Layer1Result.symbol_lifecycle` 필드 추가. `active_mask`(state_cube 파생)로 per-symbol `promotion_available_at` 결정. `awf_sim` fit/OOS 루프에 `capacity_usdt` clip + 5 USDT min order.
+- **Rationale:** PIT universe state_cube가 L1 fold에 반영되지 않으면 all-True active_mask로 look-ahead 노출. Lifecycle gate는 `promotion_available_at > l2_start` 심볼이 L2 `oos_stacked`에 포함되는 것을 차단. Capacity clip은 micro-position 거래비용 현실화.
+- **Edge Cases:** `active_mask` all-True (stage6 경로 호환) → 모든 심볼 `promo_at = datetimes[l1_start_bars].date() <= l2_start` → 제외 없음(기존 동작 보존).
+
 ## L1-ADR-008: IC 지표 제거 및 Probe-Only 검증 (2026-06-14)
 - **Delta**: Removed IC calculation (`spearmanr` calls, `opportunity_ic=None` always). Removed IC from ENS log output. Removed IC column from Outer Fold table. Kept `probe_bps`/`probe_lcb_bps` as sole profitability metrics.
 - **Rationale**: Arch-Only mode produces constant prediction arrays per archetype → Spearman IC = numerical noise. IC unmapped to gate inputs (5-Gate: fold_cov, match_ratio, sym_count, fold_ratio, probe_lcb_bps). Removed diagnostic noise. L1 passes 3/3 runs (Min-Profit 45-94 bps, t-stat 2.5-4.25). Test suite: 436 passed.
