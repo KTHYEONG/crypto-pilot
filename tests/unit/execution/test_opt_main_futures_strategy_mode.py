@@ -76,8 +76,6 @@ def test_strategy_mode_pipeline_orchestration_order(
         n_stage4_pass=1,
         n_stage5_pass=1,
         n_stage6_selected=1,
-        training_panel=("BTCUSDT",),
-        live_inference_panel=("BTCUSDT",),
     )
 
     def fake_window(reference_date: str | None) -> opt_main_futures.QuarterlyWindow:
@@ -130,8 +128,6 @@ def test_strategy_mode_pipeline_orchestration_order(
         rc: object,
         win: object,
         ds: object,
-        inference_panel: tuple[str, ...] = (),
-        live_inference_panel: tuple[str, ...] = (),
         trading_symbols: tuple[str, ...] = (),
         universe_snapshot: object | None = None,
         *,
@@ -141,8 +137,6 @@ def test_strategy_mode_pipeline_orchestration_order(
         _ = rc
         _ = win
         _ = ds
-        _ = inference_panel
-        _ = live_inference_panel
         _ = trading_symbols
         _ = universe_snapshot
         _ = layered_window
@@ -338,8 +332,6 @@ def test_strategy_stage_injects_universe_metadata_before_bridge(
         n_stage4_pass=1,
         n_stage5_pass=1,
         n_stage6_selected=1,
-        training_panel=("BTCUSDT",),
-        live_inference_panel=("BTCUSDT",),
     )
     injected: dict[str, float] = {}
 
@@ -365,8 +357,6 @@ def test_strategy_stage_injects_universe_metadata_before_bridge(
         run_config,
         window,
         data_stage,
-        inference_panel=("BTCUSDT",),
-        live_inference_panel=("BTCUSDT",),
         trading_symbols=("BTCUSDT",),
         universe_snapshot=snapshot,
     )
@@ -637,8 +627,6 @@ def _make_snapshot(selected_symbols: list[str]) -> UniverseSnapshot:
         n_stage4_pass=len(selected_symbols),
         n_stage5_pass=len(selected_symbols),
         n_stage6_selected=len(selected_symbols),
-        training_panel=tuple(selected_symbols),
-        live_inference_panel=tuple(selected_symbols),
     )
 
 
