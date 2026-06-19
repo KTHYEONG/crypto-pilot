@@ -533,6 +533,7 @@ class Layer1FoldReadiness:
     effective_symbol_count: float
     passed: bool
     blockers: tuple[str, ...]
+    dropped_by_maturity_count: int
     _compat_ic_series: tuple[float, ...]
 
     def __init__(
@@ -556,6 +557,7 @@ class Layer1FoldReadiness:
         effective_symbol_count: float = 0.0,
         passed: bool = False,
         blockers: tuple[str, ...] = (),
+        dropped_by_maturity_count: int = 0,
         valid_opportunity_timestamp_count: int | None = None,
         opportunity_ic_series: tuple[float, ...] | None = None,
         probe_gross_edge_series_bps: tuple[float, ...] | None = None,
@@ -605,6 +607,7 @@ class Layer1FoldReadiness:
         object.__setattr__(self, "effective_symbol_count", float(compat_effective_symbol_count))
         object.__setattr__(self, "passed", bool(passed))
         object.__setattr__(self, "blockers", tuple(blockers))
+        object.__setattr__(self, "dropped_by_maturity_count", int(dropped_by_maturity_count))
         object.__setattr__(self, "_compat_ic_series", compat_ic_series)
 
     @property

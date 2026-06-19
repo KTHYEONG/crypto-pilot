@@ -9,6 +9,7 @@ Space Complexity: O(n) for output string construction.
 from __future__ import annotations
 
 import math
+from collections import Counter
 from collections.abc import Sequence
 from typing import Any
 
@@ -359,6 +360,7 @@ def format_layer1_outer_fold_table(
         ready_count = len(ready_symbols)
         times = int(getattr(r, "valid_opportunity_timestamp_count", 0))
         probe = float(getattr(r, "probe_bps", 0.0))
+        dropped = int(getattr(r, "dropped_by_maturity_count", 0))
 
         if (
             datetimes is not None
@@ -382,7 +384,8 @@ def format_layer1_outer_fold_table(
         else:
             lines.append(f"       ├─ Symbols : {ready_count} symbols loaded")
         lines.append(f"       ├─ Events  : {times} unique events")
-        lines.append(f"       └─ Quality : Edge: {probe:.2f} bps")
+        maturity_suffix = f" [censored: {dropped}]" if dropped > 0 else ""
+        lines.append(f"       └─ Quality : Edge: {probe:.2f} bps{maturity_suffix}")
         
         if not passed:
             blockers = tuple(getattr(r, "blockers", ()) or ())
@@ -399,7 +402,7 @@ def format_layer_universe_audit_table(audits: Sequence[Any]) -> str:
     """Format layer universe audit records with a cleaner, borderless table."""
     sep = "──────────────────────────────────────────────────────────────────────────────"
     # SYMS(>4), ENTRY(>9), KILL(>6) 등 숫자 컬럼은 우측 정렬 적용
-    header = f"  {'LAYER':<6} {'WINDOW RANGE':<31} {'SYMS':>4}   {'ACTIVE (min/med/max)':<21} {'ENTRY':>10}  {'KILL':>6}  {'WARNINGS'}"
+    header = f"  {'LAYER':<6} {'WINDOW RANGE':<31} {'SYMS':>4}   {'ACTIVE (min/med/max)':<21} {'ENTRY':>10}  {'KILL':>6}  {'WARNINGS'}"  # noqa: E501
     divider = f"  {'─'*5:<6} {'─'*30:<31} {'─'*4:>4}   {'─'*20:<21} {'─'*10:>10}  {'─'*6:>6}  {'─'*8}"
     
     lines: list[str] = [
@@ -425,16 +428,40 @@ def format_layer_universe_audit_table(audits: Sequence[Any]) -> str:
         warning_str = ", ".join(warnings) if warnings else "—"
         
         lines.append(
-            f"  {layer:<6} {window:<31} {symbol_count:>4}   {active_str:<21} {entry_count:>10,}  {kill_count:>6}  {warning_str}"
+            f"  {layer:<6} {window:<31} {symbol_count:>4}   {active_str:<21} {entry_count:>10,}  {kill_count:>6}  {warning_str}"  # noqa: E501
         )
     lines.append(sep)
     lines.append("")
     return "\n".join(lines)
 
 
-def format_layer1_deployment_registry_table(registry: Any) -> str:
-    """Format deployment registry entries with a cleaner, borderless table."""
+def format_layer1_deployment_registry_table(
+    registry: Any,
+    *,
+    all_evidence: tuple[Any, ...] = (),
+    max_fail_reasons: int = 3,
+) -> str:
+    """Format deployment registry entries with PASS/FAIL separation.
+
+    Args:
+        registry: QualifiedSignalRegistry — only admitted (L2-bound) entries.
+        all_evidence: Full evidence tuple (pre-admission) for FAIL summary.
+            If empty, FAIL section is omitted (backward-compatible).
+        max_fail_reasons: Max number of structural reasons shown in FAIL summary.
+    """
     by_symbol = getattr(registry, "by_symbol", {}) or {}
+
+    # Build admitted key set for FAIL detection
+    admitted_keys: set[tuple[str, str, str]] = {
+        (
+            sym,
+            getattr(getattr(ev, "key", None), "strategy_id", ""),
+            getattr(getattr(ev, "key", None), "activation_context", "all"),
+        )
+        for sym, evs in by_symbol.items()
+        for ev in (evs or ())
+    }
+
     all_entries = []
     for symbol in by_symbol:
         evidence_items = tuple(by_symbol.get(symbol, ()) or ())
@@ -448,14 +475,14 @@ def format_layer1_deployment_registry_table(registry: Any) -> str:
                 "tstat": float(getattr(ev, "bootstrap_tstat_incremental", 0.0)),
                 "q_value": float(getattr(ev, "q_value", 0.0)),
             })
-    
+
     all_entries.sort(key=lambda x: x["tstat"], reverse=True)
-    
+
     header = f"  {'RANK':<5} {'SYMBOL':<12} {'STRATEGY (Family)':<32} {'EDGE(bps)':>9}  {'SIG(t-stat)':<15} {'STATUS'}"
     divider = f"  {'─'*4:<5} {'─'*10:<12} {'─'*31:<32} {'─'*9:>9}  {'─'*14:<15} {'─'*18}"
-    
+
     lines: list[str] = ["", "[L1 FINAL PROMOTION SUMMARY] 🚀", header, divider]
-    
+
     for i, entry in enumerate(all_entries, 1):
         strat_parts = entry["strategy_id"].split(":")
         family = strat_parts[0] if len(strat_parts) > 1 else entry["strategy_id"]
@@ -464,25 +491,51 @@ def format_layer1_deployment_registry_table(registry: Any) -> str:
         strat_display = f"{family} ({variant}){ctx_suffix}" if variant else f"{family}{ctx_suffix}"
         if len(strat_display) > 31:
             strat_display = strat_display[:28] + "..."
-            
+
         t = entry["tstat"]
         stars_n = min(5, max(1, round(t)))
         sig_display = f"[{stars_n}/5] {t:.2f}"
-        
+
         q = entry["q_value"]
-        if q <= 0.15: status = "PROMOTED (Best Q)"
-        elif q <= 0.30: status = "PROMOTED"
-        elif q <= 0.70: status = "WATCH"
-        else: status = "REJECTED"
-        
+        if q <= 0.30:
+            quality = "Q:hi"
+        elif q <= 0.70:
+            quality = "Q:mid"
+        else:
+            quality = "Q:lo"
+        status = f"[L2-PASS] {quality}"
+
         lines.append(
             f"  #{i:<4} {entry['symbol']:<12} {strat_display:<32} {entry['edge']:>+9.1f}  {sig_display:<15} {status}"
         )
-        
+
     if not all_entries:
         lines.append("  (No variants promoted to Layer 2)")
-    
+
     lines.append(divider)
+
+    # FAIL summary — only when all_evidence is provided
+    if all_evidence:
+        failed = [
+            ev for ev in all_evidence
+            if (
+                getattr(getattr(ev, "key", None), "symbol", ""),
+                getattr(getattr(ev, "key", None), "strategy_id", ""),
+                getattr(getattr(ev, "key", None), "activation_context", "all"),
+            ) not in admitted_keys
+        ]
+        if failed:
+            reason_counter: Counter[str] = Counter(
+                r
+                for ev in failed
+                for r in (tuple(getattr(ev, "structural_reasons", None) or ()) or ("quality_weight_zero",))
+            )
+            top_reasons = ", ".join(
+                f"{reason}x{cnt}"
+                for reason, cnt in reason_counter.most_common(max_fail_reasons)
+            )
+            lines.append(f"  [NOT PROMOTED] {len(failed)} pairs | top: {top_reasons}")
+
     lines.append("")
     return "\n".join(lines)
 
