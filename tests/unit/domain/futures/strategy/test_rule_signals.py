@@ -234,6 +234,72 @@ def test_build_rule_signal_panels_respects_entry_warm_and_block_masks() -> None:
         assert not panel.valid_mask_2d[:20].any()
 
 
+def test_build_rule_signal_panels_prefers_inference_active_mask_for_l1_scope() -> None:
+    aligned = _make_aligned()
+    t, n = aligned.close_2d.shape
+    active_mask = np.zeros((t, n), dtype=bool)
+    inference_active_mask = np.ones((t, n), dtype=bool)
+    aligned = AlignedMarketData(
+        datetimes=aligned.datetimes,
+        symbols=aligned.symbols,
+        open_2d=aligned.open_2d,
+        high_2d=aligned.high_2d,
+        low_2d=aligned.low_2d,
+        close_2d=aligned.close_2d,
+        volume_2d=aligned.volume_2d,
+        funding_2d=aligned.funding_2d,
+        active_mask=active_mask,
+        warm_mask=aligned.warm_mask,
+        entry_block_mask=aligned.entry_block_mask,
+        kill_mask=aligned.kill_mask,
+        inference_active_mask=inference_active_mask,
+        execution_cost_bps_2d=aligned.execution_cost_bps_2d,
+    )
+
+    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+
+    assert panels
+    for panel in panels:
+        assert panel.valid_mask_2d.any()
+
+
+def test_build_rule_signal_panels_applies_optional_eligibility_masks() -> None:
+    aligned = _make_aligned()
+    t, n = aligned.close_2d.shape
+    execution_eligibility_mask = np.ones((t, n), dtype=bool)
+    strategy_readiness_mask = np.ones((t, n), dtype=bool)
+    promotion_active_mask = np.ones((t, n), dtype=bool)
+    execution_eligibility_mask[:, 0] = False
+    strategy_readiness_mask[30:60, 1] = False
+    promotion_active_mask[80:, :] = False
+    aligned = AlignedMarketData(
+        datetimes=aligned.datetimes,
+        symbols=aligned.symbols,
+        open_2d=aligned.open_2d,
+        high_2d=aligned.high_2d,
+        low_2d=aligned.low_2d,
+        close_2d=aligned.close_2d,
+        volume_2d=aligned.volume_2d,
+        funding_2d=aligned.funding_2d,
+        active_mask=aligned.active_mask,
+        warm_mask=aligned.warm_mask,
+        entry_block_mask=aligned.entry_block_mask,
+        kill_mask=aligned.kill_mask,
+        execution_eligibility_mask=execution_eligibility_mask,
+        strategy_readiness_mask=strategy_readiness_mask,
+        promotion_active_mask=promotion_active_mask,
+        execution_cost_bps_2d=aligned.execution_cost_bps_2d,
+    )
+
+    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+
+    assert panels
+    for panel in panels:
+        assert not panel.valid_mask_2d[:, 0].any()
+        assert not panel.valid_mask_2d[30:60, 1].any()
+        assert not panel.valid_mask_2d[80:, :].any()
+
+
 def test_new_signal_families_shapes_and_side_hints() -> None:
     # Arrange
     aligned = _make_aligned(t=200)
