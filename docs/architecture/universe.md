@@ -32,8 +32,17 @@ Produces a bar-by-bar PIT-valid `UniverseStateCube [T, N]` for Binance USDT perp
 - $\text{capacity\_usdt}[t, n] = \text{adv\_usdt}_{30d}[t, n] \times \text{max\_participation\_rate}$
 - Order sizing clips to capacity: $w \leftarrow \min(w, \text{capacity\_usdt}[t, n] / \text{nav})$. Min order 5 USDT; below threshold → $w = 0$.
 
-**Top-N cap (optional)**
-- `PITUniverseConfig.k_in > 0`: select top-k by `capacity_usdt` descending. `k_in = 0` → no cap.
+**Capacity-Coverage Cap (quarterly snapshot)**
+- `PITUniverseConfig.k_in > 0` (legacy): select top-k by `capacity_usdt` descending. `k_in = 0` (default) → capacity-coverage mode.
+- **Capacity-coverage mode**: select minimum prefix of `eligible_syms_all` (sorted by `capacity_usdt` desc) such that $\sum_{\text{prefix}} \text{capacity} \ge \text{capacity\_coverage\_target} \times \sum_{\text{all}} \text{capacity}$. Prefix clipped to `k_max`.
+- Fail-open: if total capacity = 0, falls back to `eligible_syms_all[:k_max]`.
+
+**PIT Sub-window Admission (tiered pipeline scope)**
+- Replaces full-window END-coverage filter that forced survivorship bias. Applied in `_resolve_tradeable_scope` before tiered pipeline entry.
+- Three guards (all must pass):
+  1. `datetimes.min() ≤ fetch_start` — warm-up coverage: symbol must predate fetch window start so intersection of all admitted symbols preserves full warm-up.
+  2. `bars_in_window ≥ _TIERED_MIN_WINDOW_BARS` — minimum data density within `[fetch_start, holdout_end]`.
+  3. `covered_oos_span / total_oos_span ≥ min_holdout_coverage` — symbol must span ≥ 90% of `[oos_start, holdout_end]` (protects against holdout-truncated/delisted symbols).
 
 **Snapshot Quality Score (legacy, retained for audit)**
 - $\text{Score} = \text{fill\_rate} \times \log_{10}\left(\frac{\text{median\_adv\_usdt}}{\text{adv\_scale\_factor}}\right) \times \frac{1}{\text{mAEC\_bps}}$
@@ -70,7 +79,11 @@ graph TD
 |------|----------|-------------|
 | **Input** | `knowledge_date` | PIT barrier: `available_at <= decision_at` enforced |
 | **Input** | `available_at` | Observation release timestamp (distinct from event timestamp) |
-| **Param** | `PITUniverseConfig.k_in` | Top-N cap by capacity_usdt; `0` = no cap (default 50) |
+| **Param** | `PITUniverseConfig.k_in` | Legacy top-N cap; `0` (default) = capacity-coverage mode |
+| **Param** | `capacity_coverage_target` | Cumulative capacity fraction to cover (default 0.90) |
+| **Param** | `k_max` | Hard cap on admitted symbols in coverage mode (default 100) |
+| **Param** | `_TIERED_MIN_WINDOW_BARS` | Min bars in `[fetch_start, holdout_end]` for tiered admission (1500) |
+| **Param** | `min_holdout_coverage` | Min fraction of OOS span a symbol must cover for tiered admission (0.90) |
 | **Param** | `max_participation_rate` | Fraction of ADV per order for capacity (default 0.01) |
 | **Param** | `max_round_trip_cost_bps` | Hard execution-cost ceiling (default 50.0 bps) |
 | **Output** | `UniverseStateCube.eligible [T, N]` | Bool array; SSOT for bar-by-bar eligibility |
