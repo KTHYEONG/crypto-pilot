@@ -40,6 +40,7 @@ Generates vectorized rule panels with archetype/regime contexts, filtered throug
 
 **Ensemble Shrinkage**
 - Empirical-Bayes James-Stein shrinkage applies to both archetype cell means ($\hat{\mu}_a \to \bar{\mu}$) and variant-level priors.
+- `predict_regime_conditional_ensemble` output: `validation_rank_ic` (diagnostic only, 0.0 default) in `validation_diagnostics`. IC is NOT a gate input; `mu_quality_shrinkage` feature is removed (was dead: validation_rank_ic=0.0 → lam=0 → mu collapse).
 
 # 3. Architecture Flow
 
