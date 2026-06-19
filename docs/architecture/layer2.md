@@ -46,6 +46,8 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
 
 **L2 Fold Anchoring (`n_bars` invariant):** `build_walk_forward_folds`'s `global_oos_start/end` are computed *proportionally* to its `n_bars` argument (unlike L1's `build_l1_nested_swf_folds`, which is anchored by explicit `l1_start_idx`/`l1_end_idx` and uses `n_bars` only as an upper-bound check). Because of this, `run_tiered_pipeline` MUST pass `n_bars=ho_start_idx_l2` (bars up to `window.holdout_start`) to `build_walk_forward_folds` — never `len(aligned.datetimes)` — even though `aligned` itself spans the full IS+OOS+holdout range for L3's benefit. Passing the full length collapses the AWF fold count (regression observed: 3→1 folds, Optuna feasible-trial count → 0) since most generated folds land past `holdout_start` and get filtered out by the `[l2_start, holdout_start)` post-filter.
 
+**L2 Signal Provenance:** `ValidatedSignalBatch` is the L2 input SSOT. `_signal_batch_fingerprint()` hashes batch boundaries, symbols, registry/model versions, event count, and every event field in tuple order with streaming SHA-256. `_layer2_experiment_key()` binds study identity to the window and this fingerprint, so equal event counts with different batch content resolve to different study names. `_run_tiered_l2_study()` logs event count, unique symbols, and the fingerprint prefix for replay provenance.
+
 **Layer 1: SWF Strategy Panel Validation**
 - Validates incoming signal panels via prequential evidence.
 - **Gate**: Fold coverage $\ge 0.80$, valid strategies $\ge 5$, diversity $\ge 0.50$, CS fold pass ratio $\ge 0.60$.
@@ -150,6 +152,8 @@ graph TD
 | **Param** | `double_scaling_guard` | Prevents redundant attenuation during portfolio projection |
 | **Param** | `risk_utilization` | Diagnostic ratio of realized MDD versus the configured MDD cap |
 | **Param** | `deployment_objective_bonus` | Shaped objective uplift used only inside Optuna |
+| **Param** | `l2_signal_fingerprint` | Deterministic replay fingerprint for `ValidatedSignalBatch` |
+| **Output**| `l2_study_name` | SHA-256 study identity bound to window and signal fingerprint |
 | **Output**| `target_weights` | Causal vector of capital allocations per asset |
 
 # 6. Edge Cases & Resilience
