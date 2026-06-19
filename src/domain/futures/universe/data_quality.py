@@ -2,20 +2,40 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 
-from .config import Stage2Config
+
+@dataclass(frozen=True, slots=True)
+class _DataQualityConfig:
+    """Data quality gates (private; use apply_data_quality_stage defaults).
+
+    Notes:
+        min_is_bars_4h = 9개월 x 30일 x 6 bars/day x 80% coverage = 1,296 bars.
+        Stage 5의 listing_age_days >= 90이 단기 상장 종목을 걸러주므로,
+        Stage 2는 롤링 지표(ADV-30d, vol-30d, coverage-60d) 계산에 충분한 기간만
+        요구한다. 백테스트 IS 윈도우 충분성은 optimizer fold에서 별도 검증.
+    """
+
+    min_is_coverage: float = 0.80
+    min_is_bars_4h: int = 1_296
+    min_coverage_60d: float = 0.95
+    max_zero_volume_bars_60d: int = 1
+    max_gap_bars: int = 200
+    max_gap_count: int = 1
+    max_frozen_bars_60d: int = 4
 
 
 def apply_data_quality_stage(
     frame: pd.DataFrame,
-    config: Stage2Config | None = None,
+    config: _DataQualityConfig | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Filter symbols by continuity and data validity constraints."""
     if frame.empty:
         return frame.copy(), pd.DataFrame(columns=["symbol", "stage", "passed", "reason"])
-    cfg = config or Stage2Config()
+    cfg = config or _DataQualityConfig()
 
     coverage = frame.get("last_60d_coverage", pd.Series(0.0, index=frame.index)).fillna(0.0)
     zero_bars = frame.get("n_zero_volume_bars_60d", pd.Series(999, index=frame.index)).fillna(999)
