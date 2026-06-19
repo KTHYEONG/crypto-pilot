@@ -201,7 +201,7 @@ def _discover_universe_timeline_pit(
             len(symbols),
             time.perf_counter() - t_quarter,
         )
-        # PIT mode: use ALL eligible symbols — no panel fallback, no k_in cap
+        # PIT mode: quarterly union — k_in cap applied per quarter via selected_frame
         current_set: frozenset[str] = frozenset(
             str(s).strip() for s in symbols if str(s).strip()
         )

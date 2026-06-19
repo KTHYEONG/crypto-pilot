@@ -1244,11 +1244,13 @@ def test_effective_trade_syms_s1_excludes_symbol_delisted_before_holdout_end(
     holdout_start = date(2025, 10, 1)
     holdout_end = date(2026, 3, 31)
 
+    # 4h bars from 2022-01-01: ~7700 bars to 2026-04-07 (>> min_window_bars=1500)
     full_coverage = pd.DataFrame(
-        {"datetime": pd.date_range("2025-01-01", "2026-04-07", freq="7D", tz="UTC")}
+        {"datetime": pd.date_range("2022-01-01", "2026-04-07", freq="4h", tz="UTC")}
     )
+    # Delisted: also > 1500 bars, but ends 2025-08-01 (< holdout_start=2025-10-01 → 0% OOS coverage)
     delisted_coverage = pd.DataFrame(
-        {"datetime": pd.date_range("2025-01-01", "2025-08-01", freq="7D", tz="UTC")}
+        {"datetime": pd.date_range("2022-01-01", "2025-08-01", freq="4h", tz="UTC")}
     )
     data_maps = {
         "AAUSDT": {"4h": full_coverage.copy()},
@@ -1634,3 +1636,119 @@ def test_run_strategy_stage_passes_pit_state_cube_with_real_run_config(
 
     assert captured["state_cube"] is cube
     assert captured["eligibility"] is cube
+
+
+# ---------------------------------------------------------------------------
+# C1 — _resolve_tradeable_scope unit tests
+# ---------------------------------------------------------------------------
+
+def _make_sym_df(
+    start: str,
+    end: str,
+    freq: str = "4h",
+    tf: str = "4h",
+) -> dict[str, pd.DataFrame]:
+    """Build a minimal strategy_maps entry for a single symbol."""
+    dts = pd.date_range(start, end, freq=freq, tz="UTC")
+    df = pd.DataFrame({"datetime": dts})
+    return {tf: df}
+
+
+def test_resolve_tradeable_scope_scenario1_early_listed_delisted_mid_oos_admitted() -> None:
+    """Scenario 1 (Happy Path): symbol listed before fetch_start but delisted before
+    holdout_end is admitted if OOS coverage >= 90%.
+
+    The old END-coverage filter (last_dt >= holdout_end) would reject symB.
+    The new sub-window admission admits symB because it covers >90% of OOS.
+    symC is listed AFTER fetch_start → rejected by warm-up guard regardless of OOS coverage.
+    """
+    # Arrange
+    fetch_start = pd.Timestamp("2022-10-01", tz="UTC")
+    oos_start = pd.Timestamp("2025-10-01", tz="UTC")
+    holdout_end = pd.Timestamp("2026-04-01", tz="UTC")
+
+    strategy_maps: dict[str, dict[str, pd.DataFrame]] = {
+        "symA": _make_sym_df("2022-10-01", "2026-04-01"),  # full window
+        "symB": _make_sym_df("2022-10-01", "2026-03-15"),  # delisted 17d before holdout_end
+        "symC": _make_sym_df("2023-06-01", "2026-04-01"),  # listed after fetch_start
+    }
+
+    # Act
+    result = opt_main_futures._resolve_tradeable_scope(
+        valid_symbols=["symA", "symB", "symC"],
+        strategy_maps=strategy_maps,
+        tf="4h",
+        fetch_start=fetch_start,
+        oos_start=oos_start,
+        holdout_end=holdout_end,
+        min_window_bars=1,
+        min_holdout_coverage=0.90,
+    )
+
+    # symA: admitted (full coverage); symB: admitted (OOS cov ~97% > 90%, starts ≤ fetch_start)
+    # symC: rejected (starts 2023-06 > fetch_start → warm-up guard fails)
+    assert set(result) == {"symA", "symB"}
+    assert "symC" not in result
+
+
+def test_resolve_tradeable_scope_scenario2_holdout_truncation_excluded() -> None:
+    """Scenario 2 (Holdout-truncation guard): symbol delisted before OOS excluded.
+
+    symD has data only [fetch_start, oos_start], zero OOS coverage → excluded.
+    """
+    # Arrange
+    fetch_start = pd.Timestamp("2022-10-01", tz="UTC")
+    oos_start = pd.Timestamp("2025-10-01", tz="UTC")
+    holdout_end = pd.Timestamp("2026-04-01", tz="UTC")
+
+    strategy_maps: dict[str, dict[str, pd.DataFrame]] = {
+        "symD": _make_sym_df("2022-10-01", "2025-09-30"),  # ends before oos_start
+    }
+
+    # Act
+    result = opt_main_futures._resolve_tradeable_scope(
+        valid_symbols=["symD"],
+        strategy_maps=strategy_maps,
+        tf="4h",
+        fetch_start=fetch_start,
+        oos_start=oos_start,
+        holdout_end=holdout_end,
+        min_window_bars=1,
+        min_holdout_coverage=0.90,
+    )
+
+    # Assert — symD excluded due to zero OOS coverage
+    assert "symD" not in result
+    assert result == []
+
+
+def test_resolve_tradeable_scope_scenario3_min_bars_guard_excluded() -> None:
+    """Scenario 3 (min_bars guard): symbol with fewer bars than min_window_bars excluded.
+
+    symE has only 10 bars; min_window_bars=1500 → excluded.
+    """
+    # Arrange
+    fetch_start = pd.Timestamp("2022-10-01", tz="UTC")
+    oos_start = pd.Timestamp("2025-10-01", tz="UTC")
+    holdout_end = pd.Timestamp("2026-04-01", tz="UTC")
+
+    # 10 bars spaced 4h apart — well within the window but far below 1500
+    dts = pd.date_range("2025-10-01", periods=10, freq="4h", tz="UTC")
+    df = pd.DataFrame({"datetime": dts})
+    strategy_maps: dict[str, dict[str, pd.DataFrame]] = {"symE": {"4h": df}}
+
+    # Act
+    result = opt_main_futures._resolve_tradeable_scope(
+        valid_symbols=["symE"],
+        strategy_maps=strategy_maps,
+        tf="4h",
+        fetch_start=fetch_start,
+        oos_start=oos_start,
+        holdout_end=holdout_end,
+        min_window_bars=1500,
+        min_holdout_coverage=0.90,
+    )
+
+    # Assert — symE excluded because n_bars (10) < min_window_bars (1500)
+    assert "symE" not in result
+    assert result == []
