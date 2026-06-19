@@ -416,14 +416,37 @@ def build_rule_signal_panels(
     vol = aligned.volume_2d
     funding = aligned.funding_2d
     oi = aligned.oi_2d if aligned.oi_2d is not None else np.zeros_like(close)
+    signal_active_mask = (
+        aligned.inference_active_mask
+        if aligned.inference_active_mask is not None
+        else aligned.active_mask
+    )
     entry_warm_mask = (
         aligned.inference_entry_warm_mask
         if aligned.inference_entry_warm_mask is not None
         else aligned.warm_mask
     )
+    execution_eligibility_mask = (
+        aligned.execution_eligibility_mask
+        if aligned.execution_eligibility_mask is not None
+        else np.ones_like(signal_active_mask, dtype=bool)
+    )
+    strategy_readiness_mask = (
+        aligned.strategy_readiness_mask
+        if aligned.strategy_readiness_mask is not None
+        else np.ones_like(signal_active_mask, dtype=bool)
+    )
+    promotion_active_mask = (
+        aligned.promotion_active_mask
+        if aligned.promotion_active_mask is not None
+        else np.ones_like(signal_active_mask, dtype=bool)
+    )
     valid_mask = (
-        aligned.active_mask
+        signal_active_mask
         & entry_warm_mask
+        & execution_eligibility_mask
+        & strategy_readiness_mask
+        & promotion_active_mask
         & ~aligned.entry_block_mask
         & ~aligned.kill_mask
         & np.isfinite(close)

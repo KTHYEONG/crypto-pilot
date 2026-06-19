@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from src.domain.futures.strategy.regime_evaluation import RegimeScoreCard
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result
     from src.domain.futures.strategy_runtime.bridge import CandidatePipelineOutput
 
 import numpy as np
@@ -451,6 +452,7 @@ def _run_universe_stage(
     tuple[str, ...],
     UniverseSnapshot,
     dict[date, frozenset[str]],
+    Any,
 ]:
     discovered_symbols: list[str] = []
     timeline: dict[date, frozenset[str]] = {}
@@ -484,10 +486,12 @@ def _run_universe_stage(
         tf=run_config.timeframe,
     ):
         raise RuntimeError("universe_quality_rejected")
-    _logger.log(PERF, 
+    _logger.log(
+        PERF,
         "[perf-universe] validate_universe_quality took %.4fs",
         time.perf_counter() - t_quality,
     )
+
     discovered_symbols = list(universe_result.symbols)
     timeline_obj: UniverseMembershipTimeline = universe_result.timeline
     timeline = {
@@ -496,7 +500,7 @@ def _run_universe_stage(
     }
     inference_panel = universe_result.snapshot.inference_panel
     live_inference_panel = universe_result.snapshot.live_inference_panel
-    # Stage6 quarterly membership → inference_timeline for dual mask injection
+    inference_timeline = {}
     inf_tl = universe_result.inference_timeline
     if isinstance(inf_tl, UniverseMembershipTimeline):
         inference_timeline = {
@@ -510,6 +514,7 @@ def _run_universe_stage(
         live_inference_panel,
         universe_result.snapshot,
         inference_timeline,
+        universe_result,
     )
 
 
@@ -971,7 +976,8 @@ def _run_strategy_stage(
     trading_symbols: tuple[str, ...] = (),
     universe_snapshot: UniverseSnapshot | None = None,
     layered_window: Any | None = None,
-) -> CandidatePipelineOutput | RunnerResult | None:
+    universe_result: Any | None = None,
+) -> CandidatePipelineOutput | RunnerResult | Layer1Result | None:
     # ─── 기존 Phase D 진입 (공통 설정 → bridge → 선택적 Tiered 분기) ──────────
     from src.domain.futures.strategy.tiered_logging import format_data_integrity_summary, format_layer_header
 
@@ -1090,20 +1096,62 @@ def _run_strategy_stage(
     # ─── Tiered Pipeline 분기 (bridge 완료 후 — labeled + aligned 사용 가능) ──
     if use_tiered:
         try:
+            import dataclasses
+
             from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
             from src.domain.futures.strategy.common.alignment import align_data_maps
             from src.domain.futures.strategy.tiered_workflow import (
                 TieredPipelineError,
                 run_tiered_pipeline,
             )
+            from src.domain.futures.universe.contracts import StrategyRequirement
+            from src.domain.futures.universe.readiness import evaluate_strategy_readiness
 
             _logger.info(
                 "[TIERED] 💠 Scope: %d symbols (Historical Union ∩ Data-Valid)",
                 len(effective_trade_syms),
             )
-            aligned_tiered = align_data_maps(
-                full_strategy_maps, effective_trade_syms, run_config.timeframe
+            _is_pit: bool = (
+                universe_result is not None
+                and getattr(run_config, "universe_engine", "stage6") == "pit"
             )
+            _pit_state_cube = (
+                universe_result.state_cube  # type: ignore[union-attr]
+                if _is_pit
+                else None
+            )
+            aligned_tiered = align_data_maps(
+                full_strategy_maps,
+                effective_trade_syms,
+                run_config.timeframe,
+                state_cube=_pit_state_cube,
+            )
+            if _is_pit and _pit_state_cube is not None:
+                _lookback: int = int(getattr(run_config, "wf_lookback_bars", 100))
+                _pit_req: StrategyRequirement = StrategyRequirement(
+                    strategy="default_price",
+                    required_lookback_bars=_lookback,
+                )
+                try:
+                    _readiness_cube = evaluate_strategy_readiness(
+                        aligned=aligned_tiered,
+                        requirements={"default_price": _pit_req},
+                        eligibility=_pit_state_cube,
+                    )
+                    aligned_tiered = dataclasses.replace(
+                        aligned_tiered,
+                        strategy_readiness_mask=_readiness_cube.ready[0],
+                    )
+                    _logger.info(
+                        "[TIERED][PIT] readiness_cube built: ready_ratio=%.3f",
+                        float(_readiness_cube.ready[0].mean())
+                        if _readiness_cube.ready[0].size > 0
+                        else 0.0,
+                    )
+                except ValueError as _exc:
+                    _logger.warning(
+                        "[TIERED][PIT] evaluate_strategy_readiness skipped: %s", _exc
+                    )
             if tiered_window is not None:
                 try:
                     aligned_start = pd.Timestamp(aligned_tiered.datetimes[0]).date()
@@ -1909,6 +1957,7 @@ def run_pipeline(
         live_inference_panel,
         universe_snapshot,
         inference_timeline,
+        _universe_result,
     ) = _run_universe_stage(run_config, window, layered_window=layered_window)
     _logger.debug("[perf] universe stage: %.4fs", time.perf_counter() - t_universe)
 
@@ -1993,6 +2042,7 @@ def run_pipeline(
         _selected_symbols_from_snapshot(universe_snapshot),
         universe_snapshot=universe_snapshot,
         layered_window=layered_window,
+        universe_result=_universe_result,
     )
     _logger.debug("<< STRATEGY: %.2fs", time.perf_counter() - t_strategy)
 
