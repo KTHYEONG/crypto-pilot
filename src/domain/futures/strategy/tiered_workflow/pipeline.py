@@ -1082,7 +1082,7 @@ def run_l1_nested_swf(
         )
         logger.log(PERF, "[perf-tiered] fit_layer1_inference_artifact took %.4fs", time.perf_counter() - t_art)
         if verbose:
-            logger.info(format_layer1_deployment_registry_table(deployment_registry))
+            logger.info(format_layer1_deployment_registry_table(deployment_registry, all_evidence=deployment_evidence))
     logger.log(
         PERF,
         "[perf-tiered] run_l1_nested_swf audit tables formatting took %.4fs",
