@@ -1,5 +1,10 @@
 # Layer 1 Architectural Decisions
 
+## L1-ADR-010: IC 제거 완성 + mu_quality_shrinkage dead-code 제거 (2026-06-19)
+- **Delta:** `predict_regime_conditional_ensemble`에서 `mu_quality_shrinkage` 블록(4줄) 제거. `mu_shrinkage_lambda` diagnostics 키 제거. `test_mu_quality_shrinkage_*` 테스트 2건 삭제. `test_auto_conditioning_exposes_diagnostics`에서 `mu_shrinkage_lambda` absent 검증으로 전환.
+- **Rationale:** L1-ADR-008(Accepted)에서 IC 계산 제거 후 `validation_rank_ic=0.0`이 항상 기본값 → `lam=clip(0/0.05,0,1)=0.0` → mu가 단면평균으로 붕괴 (신호 차별성 전멸). `mu_quality_shrinkage_enabled=False` 기본값이라 현재 실행에서는 무영향이었으나 silent landmine. 완전 제거.
+- **Edge Cases:** `mu_quality_shrinkage_enabled=True`로 켜던 외부 실험은 설정 무효화됨(기능 자체 삭제). `validation_rank_ic` 필드는 dataclass에 유지(진단용 0.0 기본값).
+
 ## L1-ADR-009: PIT state_cube 통합 + lifecycle gate + capacity clip (2026-06-19)
 - **Delta:** `run_l1_nested_swf`에 `l2_start: date | None` 파라미터 추가. `SymbolLifecycleRecord` dataclass 도입(`fold_status`, `promotion_available_at`). `Layer1Result.symbol_lifecycle` 필드 추가. `active_mask`(state_cube 파생)로 per-symbol `promotion_available_at` 결정. `awf_sim` fit/OOS 루프에 `capacity_usdt` clip + 5 USDT min order.
 - **Rationale:** PIT universe state_cube가 L1 fold에 반영되지 않으면 all-True active_mask로 look-ahead 노출. Lifecycle gate는 `promotion_available_at > l2_start` 심볼이 L2 `oos_stacked`에 포함되는 것을 차단. Capacity clip은 micro-position 거래비용 현실화.
