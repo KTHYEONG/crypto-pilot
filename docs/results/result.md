@@ -85,29 +85,29 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 [L1 FINAL PROMOTION SUMMARY] 🚀
   RANK  SYMBOL       STRATEGY (Family)                EDGE(bps)  SIG(t-stat)     STATUS
   ────  ──────────   ───────────────────────────────  ─────────  ──────────────  ──────────────────
-  #1    UNIUSDT      mtf_breakout_retest (mtf_bor...     +476.2  [5/5] 8.05      WATCH
-  #2    LTCUSDT      funding_zscore_carry (fzs_96)        +65.5  [4/5] 4.10      PROMOTED
-  #3    LTCUSDT      funding_carry (funding_24)           +52.7  [4/5] 4.10      PROMOTED
-  #4    LTCUSDT      funding_zscore_carry (fzs_48)        +69.9  [4/5] 4.01      WATCH
-  #5    DOGEUSDT     funding_carry (funding_24)           +84.7  [4/5] 3.64      PROMOTED (Best Q)
-  #6    XRPUSDT      rsi_reversion (rsi_6)                +45.5  [3/5] 3.06      WATCH
-  #7    BTCUSDT      funding_zscore_carry (fzs_48)        +33.4  [3/5] 3.03      REJECTED
-  #8    SOLUSDT      vol_breakout (bb_compress_20)       +123.9  [3/5] 3.03      PROMOTED
-  #9    LTCUSDT      dual_momentum (dm_12_48)             +62.0  [3/5] 2.89      WATCH
-  #10   BTCUSDT      funding_zscore_carry (fzs_96)        +30.5  [3/5] 2.86      WATCH
-  #11   ATOMUSDT     funding_zscore_carry (fzs_48)        +76.9  [3/5] 2.79      WATCH
-  #12   XLMUSDT      dual_momentum (dm_24_96)            +137.0  [3/5] 2.54      REJECTED
-  #13   BNBUSDT      mtf_breakout_retest (mtf_bor...     +345.4  [2/5] 2.41      REJECTED
-  #14   LTCUSDT      funding_zscore_carry (fzs_168)       +39.3  [2/5] 2.40      WATCH
-  #15   CRVUSDT      trend_pullback_continuation ...     +255.1  [2/5] 2.37      PROMOTED
-  #16   TRBUSDT      trend_pullback_continuation ...     +253.6  [2/5] 2.30      WATCH
-  #17   ANKRUSDT     trend_ma (ema_12_72)                 +47.0  [2/5] 2.20      WATCH
-  #18   UNIUSDT      funding_carry (funding_24)           +87.4  [2/5] 2.13      WATCH
-  #19   ADAUSDT      funding_zscore_carry (fzs_168)       +53.7  [2/5] 1.99      REJECTED
-  #20   ATOMUSDT     funding_zscore_carry (fzs_96)        +71.1  [2/5] 1.98      REJECTED
-  #21   FTMUSDT      trend_pullback_continuation ...     +116.7  [2/5] 1.77      REJECTED
-  #22   LINKUSDT     funding_zscore_carry (fzs_168)       +48.0  [2/5] 1.72      WATCH
-  #23   LINKUSDT     funding_zscore_carry (fzs_96)        +51.4  [2/5] 1.63      WATCH
+  #1    UNIUSDT      mtf_breakout_retest (mtf_bor...     +476.2  [5/5] 8.05      [L2-PASS] Q:mid
+  #2    LTCUSDT      funding_zscore_carry (fzs_96)        +65.5  [4/5] 4.10      [L2-PASS] Q:hi
+  #3    LTCUSDT      funding_carry (funding_24)           +52.7  [4/5] 4.10      [L2-PASS] Q:hi
+  #4    LTCUSDT      funding_zscore_carry (fzs_48)        +69.9  [4/5] 4.01      [L2-PASS] Q:mid
+  #5    DOGEUSDT     funding_carry (funding_24)           +84.7  [4/5] 3.64      [L2-PASS] Q:hi
+  #6    XRPUSDT      rsi_reversion (rsi_6)                +45.5  [3/5] 3.06      [L2-PASS] Q:mid
+  #7    BTCUSDT      funding_zscore_carry (fzs_48)        +33.4  [3/5] 3.03      [L2-PASS] Q:lo
+  #8    SOLUSDT      vol_breakout (bb_compress_20)       +123.9  [3/5] 3.03      [L2-PASS] Q:hi
+  #9    LTCUSDT      dual_momentum (dm_12_48)             +62.0  [3/5] 2.89      [L2-PASS] Q:mid
+  #10   BTCUSDT      funding_zscore_carry (fzs_96)        +30.5  [3/5] 2.86      [L2-PASS] Q:mid
+  #11   ATOMUSDT     funding_zscore_carry (fzs_48)        +76.9  [3/5] 2.79      [L2-PASS] Q:mid
+  #12   XLMUSDT      dual_momentum (dm_24_96)            +137.0  [3/5] 2.54      [L2-PASS] Q:lo
+  #13   BNBUSDT      mtf_breakout_retest (mtf_bor...     +345.4  [2/5] 2.41      [L2-PASS] Q:lo
+  #14   LTCUSDT      funding_zscore_carry (fzs_168)       +39.3  [2/5] 2.40      [L2-PASS] Q:mid
+  #15   CRVUSDT      trend_pullback_continuation ...     +255.1  [2/5] 2.37      [L2-PASS] Q:hi
+  #16   TRBUSDT      trend_pullback_continuation ...     +253.6  [2/5] 2.30      [L2-PASS] Q:mid
+  #17   ANKRUSDT     trend_ma (ema_12_72)                 +47.0  [2/5] 2.20      [L2-PASS] Q:mid
+  #18   UNIUSDT      funding_carry (funding_24)           +87.4  [2/5] 2.13      [L2-PASS] Q:mid
+  #19   ADAUSDT      funding_zscore_carry (fzs_168)       +53.7  [2/5] 1.99      [L2-PASS] Q:lo
+  #20   ATOMUSDT     funding_zscore_carry (fzs_96)        +71.1  [2/5] 1.98      [L2-PASS] Q:lo
+  #21   FTMUSDT      trend_pullback_continuation ...     +116.7  [2/5] 1.77      [L2-PASS] Q:lo
+  #22   LINKUSDT     funding_zscore_carry (fzs_168)       +48.0  [2/5] 1.72      [L2-PASS] Q:mid
+  #23   LINKUSDT     funding_zscore_carry (fzs_96)        +51.4  [2/5] 1.63      [L2-PASS] Q:mid
   ────  ──────────   ───────────────────────────────  ─────────  ──────────────  ──────────────────
 
 
@@ -126,11 +126,11 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [L2-SIGNAL-PRE] predict_layer1_signals: registry_symbols=15 activation_floor=0.0 start_idx=5484 end_idx=7674
   ● [HYPERPARAMETER OPTIMIZATION]
-    - Study Name : l2_study_4h_6cf5b582e370
+    - Study Name : l2_study_4h_92f620416aa6
     - Config     : 200 trials
-    - Provenance : events=2184 unique_symbols=ADAUSDT,BNBUSDT,BTCUSDT,CRVUSDT,DOGEUSDT,FTMUSDT,LINKUSDT,LTCUSDT,SOLUSDT,TRBUSDT,UNIUSDT,XLMUSDT,XRPUSDT fp=a26626e53ad7
+    - Provenance : events=2184 unique_symbols=ADAUSDT,BNBUSDT,BTCUSDT,CRVUSDT,DOGEUSDT,FTMUSDT,LINKUSDT,LTCUSDT,SOLUSDT,TRBUSDT,UNIUSDT,XLMUSDT,XRPUSDT fp=70b2ea744431
   ────────────────────────────────────────────────────────────────────────────
-[L2-OPT]: 100%|███████████████████████████████████████████████████████| 200/200 [01:09<00:00,  2.89it/s, Best CAGR: 0.00% | Current: -75.53%]
+[L2-OPT]: 100%|███████████████████████████████████████████████████████| 200/200 [01:08<00:00,  2.92it/s, Best CAGR: 0.00% | Current: -75.53%]
 [L2-SELECTION] No feasible candidate found within fallback window (reason=cagr)
 [L2-DEPLOY-C4] L*=1.918 (binding=mdd) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
 

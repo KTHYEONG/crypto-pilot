@@ -870,10 +870,13 @@ def evaluate_outer_signal_opportunities(
         realized_event_results=realized_event_results,
         activation_match_regime=bool(getattr(cfg, "l1_activation_match_regime", True)),
     )
+    dropped_by_maturity = 0
     if "exit_idx" in merged.columns:
+        before_maturity = len(merged)
         merged = merged.loc[
             pd.to_numeric(merged["exit_idx"], errors="coerce").fillna(fold.oos_end - 1).astype(int) < fold.oos_end
         ].copy()
+        dropped_by_maturity = before_maturity - len(merged)
     if merged.empty:
         return Layer1FoldReadiness(
             fold_id=fold_id,
@@ -894,6 +897,7 @@ def evaluate_outer_signal_opportunities(
             effective_symbol_count=0.0,
             passed=False,
             blockers=("empty_realized_merge",),
+            dropped_by_maturity_count=dropped_by_maturity,
         )
     symbol_to_idx = {symbol: idx for idx, symbol in enumerate(aligned_symbols)}
     probe_series: list[float] = []
@@ -990,6 +994,7 @@ def evaluate_outer_signal_opportunities(
         effective_symbol_count=effective_symbol_count,
         passed=not blockers,
         blockers=tuple(blockers),
+        dropped_by_maturity_count=dropped_by_maturity,
     )
 
 

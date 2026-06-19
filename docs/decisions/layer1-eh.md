@@ -1,5 +1,11 @@
 # Layer 1 Architectural Decisions
 
+## L1-ADR-012: Promotion Summary 로그 PASS/FAIL 분리 + 우측절단 진단 (2026-06-19)
+- **Delta:** `format_layer1_deployment_registry_table`에 `all_evidence` 파라미터 추가 → admit된 쌍은 `[L2-PASS] Q:hi/mid/lo` 전체 출력, 미admit 쌍은 `[NOT PROMOTED] N pairs | top: <reason>xN` 1줄 요약. `Layer1FoldReadiness`에 `dropped_by_maturity_count` 필드 추가 → Outer Fold 로그에 `[censored: N]` 노출. STATUS 어휘 PROMOTED/WATCH/REJECTED 제거 (오해 유발: "REJECTED"도 L2 전달됨). `pipeline.py` 호출부에 `all_evidence=deployment_evidence` 배선 완료.
+- **Rationale:** PROMOTION SUMMARY의 STATUS는 q_value 버킷 표시 전용이며 실제 L2 전달 게이트(`build_qualified_signal_registry`)와 무관. "REJECTED" 심볼도 전부 L2로 유입 → 과대-전달 오독 방지. Fold #3 Edge 30bps가 실제 약세인지 우측절단 편향인지 분리 불가 문제 해소.
+- **Edge Cases:** `all_evidence=()` 생략 시 기존 동작(FAIL 섹션 미출력) 보장. `dropped_by_maturity_count=0` 시 `[censored:]` 미노출.
+
+
 ## L1-ADR-010: IC 제거 완성 + mu_quality_shrinkage dead-code 제거 (2026-06-19)
 - **Delta:** `predict_regime_conditional_ensemble`에서 `mu_quality_shrinkage` 블록(4줄) 제거. `mu_shrinkage_lambda` diagnostics 키 제거. `test_mu_quality_shrinkage_*` 테스트 2건 삭제. `test_auto_conditioning_exposes_diagnostics`에서 `mu_shrinkage_lambda` absent 검증으로 전환.
 - **Rationale:** L1-ADR-008(Accepted)에서 IC 계산 제거 후 `validation_rank_ic=0.0`이 항상 기본값 → `lam=clip(0/0.05,0,1)=0.0` → mu가 단면평균으로 붕괴 (신호 차별성 전멸). `mu_quality_shrinkage_enabled=False` 기본값이라 현재 실행에서는 무영향이었으나 silent landmine. 완전 제거.
