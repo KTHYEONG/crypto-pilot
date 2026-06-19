@@ -323,19 +323,12 @@ def run_active_strategy_output_bridge(
     end_date: str | None,
     opt_config: dict[str, Any],
     preloaded_data_maps: dict[str, dict[str, Any]] | None = None,
-    training_panel: tuple[str, ...] | None = None,
     trading_symbols: tuple[str, ...] | None = None,
-    inference_panel: tuple[str, ...] | None = None,
-    live_inference_panel: tuple[str, ...] | None = None,
-    historical_trading_panel: tuple[str, ...] | None = None,
     silent: bool = False,
 ) -> CandidatePipelineOutput:
     del (
         fetch_start,
         end_date,
-        inference_panel,
-        live_inference_panel,
-        historical_trading_panel,
     )
     if run_config.phase not in {"l1", "l2", "l3"}:
         raise ValueError(f"unsupported phase for active strategy bridge: {run_config.phase}")
@@ -351,9 +344,6 @@ def run_active_strategy_output_bridge(
         signal_only=(run_config.phase == "l1") or use_tiered,
     )
     candidate_scope = list(trading_symbols or tuple(symbols))
-    if training_panel:
-        allowed = set(training_panel)
-        candidate_scope = [sym for sym in candidate_scope if sym in allowed]
     effective_symbols = [sym for sym in dict.fromkeys(candidate_scope) if sym in preloaded_data_maps]
     if not effective_symbols:
         raise ValueError("candidate ML scope is empty")

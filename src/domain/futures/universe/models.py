@@ -224,21 +224,6 @@ class UniverseSnapshot:
     n_stage4_pass: int
     n_stage5_pass: int
     n_stage6_selected: int
-    # Current-quarter Stage6 selected symbols for candidate ML training.
-    training_panel: tuple[str, ...] = field(default_factory=tuple)
-    # Historical quarterly Stage6 union for candidate ML loading.
-    inference_panel: tuple[str, ...] = field(default_factory=tuple)
-    # Current-quarter Stage6 selected symbols for candidate ML inference.
-    live_inference_panel: tuple[str, ...] = field(default_factory=tuple)
-    # Historical quarterly Stage6 union for trading membership.
-    historical_trading_panel: tuple[str, ...] = field(default_factory=tuple)
-    # SSOT: quarterly Stage6 members for candidate ML membership masks.
-    # dict key = quarter_start date (isoformat str로 직렬화), value = tuple of symbols (sorted)
-    inference_panel_quarter_membership: dict[date, tuple[str, ...]] = field(
-        default_factory=dict
-    )
-    # Current-quarter Stage5 survivors retained for audit and research only.
-    stage5_research_panel: tuple[str, ...] = field(default_factory=tuple)
     # PIT state summary for compatibility with the PIT universe rewrite.
     state_transition_summary: dict[str, int] = field(default_factory=dict)
     # Transient PIT state cube — not persisted in JSON/parquet serialization.
