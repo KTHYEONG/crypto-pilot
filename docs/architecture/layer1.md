@@ -66,4 +66,4 @@ graph TD
 
 **Data Integrity & Optimizations**
 - **Guards**: NaN/stuck-price blocks, length minimums, high-low violation checks.
-- **Performance**: Numba JIT bootstrap, $O(N \log N)$ vectorized percentiles, parent-process feature priming, and unified OMP-clamped multiprocessing pools.
+- **Performance**: Numba JIT bootstrap, $O(N \log N)$ vectorized percentiles, parent-process feature priming, Numba-JIT accelerated rolling/cross-sectional robust z-score loops to bypass pandas rolling overhead, and unified OMP-clamped multiprocessing pools.
