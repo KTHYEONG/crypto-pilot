@@ -311,34 +311,24 @@ def test_by_q_values_happy_path() -> None:
 
     from src.domain.futures.strategy.tiered_workflow.signal_selection import _by_q_values
 
-    # Test with standard p-values
     p_vals = np.array([0.01, 0.05, 0.20], dtype=np.float64)
     q_vals = _by_q_values(p_vals)
-
-    # Let's verify FDR/BY logic:
-    # m = 3
-    # harmonic = 1 + 1/2 + 1/3 = 1.8333333333333333
-    # m * harmonic = 5.5
-    # Sorted: 0.01 (rank 1), 0.05 (rank 2), 0.20 (rank 3)
-    # candidates:
-    # rank 3 (0.20): candidate = min(1.0, 0.20 * 5.5 / 3) = min(1.0, 0.36667) = 0.36667
-    # rank 2 (0.05): candidate = min(1.0, 0.05 * 5.5 / 2) = min(1.0, 0.1375) = 0.1375
-    # rank 1 (0.01): candidate = min(1.0, 0.01 * 5.5 / 1) = min(1.0, 0.055) = 0.055
-    # Running minimum accumulation backwards:
-    # adjusted[2] = 0.36667
-    # adjusted[1] = min(0.36667, 0.1375) = 0.1375
-    # adjusted[0] = min(0.1375, 0.055) = 0.055
-    # Result should be exactly [0.055, 0.1375, 0.36667] aligned with original order
     np.testing.assert_allclose(q_vals, [0.055, 0.1375, 0.36666667], rtol=1e-5)
 
+    shuffled_idx = np.array([2, 0, 1])
+    shuffled_q_vals = _by_q_values(p_vals[shuffled_idx])
+    np.testing.assert_allclose(shuffled_q_vals[np.argsort(shuffled_idx)], q_vals, rtol=1e-12)
 
-def test_by_q_values_empty() -> None:
-    import numpy as np
+    singleton = np.array([0.123], dtype=np.float64)
+    singleton_q = _by_q_values(singleton)
+    np.testing.assert_allclose(singleton_q, singleton, rtol=1e-12)
 
-    from src.domain.futures.strategy.tiered_workflow.signal_selection import _by_q_values
+    # Empty input must preserve dtype and shape.
+    empty = np.array([], dtype=np.float64)
+    empty_q = _by_q_values(empty)
+    assert empty_q.size == 0
+    assert empty_q.dtype == np.float64
 
-    p_vals = np.array([], dtype=np.float64)
-    q_vals = _by_q_values(p_vals)
-    assert q_vals.size == 0
-    assert q_vals.dtype == np.float64
-
+    # Regression lock: the reversed-rank bug must not match the corrected output.
+    reversed_rank_expected = np.array([0.018333333333333333, 0.1375, 1.0], dtype=np.float64)
+    assert not np.allclose(q_vals, reversed_rank_expected)
