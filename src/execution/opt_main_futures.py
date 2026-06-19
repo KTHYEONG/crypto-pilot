@@ -14,7 +14,7 @@ import logging
 import os
 import time
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
@@ -94,6 +94,11 @@ from src.domain.futures.universe.membership import inject_membership_masks_into_
 from src.domain.futures.universe.storage import run_historical_sync
 
 _logger = setup_logger("opt_main_futures", write_file=False)
+
+# Minimum bars a symbol must provide within [fetch_start, holdout_end] for tiered admission.
+# Derived from score_pct_variant_hist_window_bars default (2160) but floored at 1500 to
+# allow shorter-listed symbols that still cover the OOS window.
+_TIERED_MIN_WINDOW_BARS: int = 1500
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +193,70 @@ def _ensure_universe_ledger_sync(run_config: FuturesRunConfig, window: Quarterly
                 sync_4h=True,
                 sync_1m=False,
             )
+
+
+def _resolve_tradeable_scope(
+    *,
+    valid_symbols: Sequence[str],
+    strategy_maps: Mapping[str, Mapping[str, pd.DataFrame]],
+    tf: str,
+    fetch_start: pd.Timestamp,
+    oos_start: pd.Timestamp,
+    holdout_end: pd.Timestamp,
+    min_window_bars: int,
+    min_holdout_coverage: float,
+) -> list[str]:
+    """PIT sub-window admission: admits symbols with sufficient OOS coverage.
+
+    Replaces the full-window END-coverage filter that caused survivorship bias.
+    Per-bar look-ahead is enforced downstream by state_cube.active_mask.
+
+    Args:
+        valid_symbols: Candidate symbols that loaded usable window data.
+        strategy_maps: Nested mapping ``{symbol -> {tf -> DataFrame}}``.
+        tf: Timeframe string (e.g. ``"4h"``).
+        fetch_start: Start of the full fetch window (UTC).
+        oos_start: Start of the OOS holdout period (UTC).
+        holdout_end: End of the holdout period (UTC).
+        min_window_bars: Minimum number of bars within ``[fetch_start, holdout_end]``.
+        min_holdout_coverage: Fraction of ``[oos_start, holdout_end]`` the symbol
+            must cover (0-1).  Protects against holdout-truncated / delisted symbols.
+
+    Returns:
+        Symbols that pass both the bar-count and OOS-coverage guards.
+
+    Time Complexity: O(S * T) where S = len(valid_symbols), T = max bars per symbol.
+    Space Complexity: O(S) admitted list + O(T) per-symbol datetime Series.
+    """
+    oos_span = (holdout_end - oos_start).total_seconds()
+    admitted: list[str] = []
+    for sym in valid_symbols:
+        if sym not in strategy_maps:
+            continue
+        sym_df = strategy_maps[sym].get(tf)
+        if sym_df is None or sym_df.empty:
+            continue
+        datetimes = pd.to_datetime(sym_df["datetime"], utc=True)
+        # Guard 1: symbol data must start at or before fetch_start so the tiered
+        # pipeline intersection preserves the full warm-up window.
+        if datetimes.min() > fetch_start:
+            continue
+        # Count bars within the full window [fetch_start, holdout_end]
+        mask_window = (datetimes >= fetch_start) & (datetimes <= holdout_end)
+        n_bars = int(mask_window.sum())
+        if n_bars < min_window_bars:
+            continue
+        # OOS holdout coverage: symbol must span >= min_holdout_coverage of [oos_start, holdout_end]
+        if oos_span > 0:
+            oos_data = datetimes[(datetimes >= oos_start) & (datetimes <= holdout_end)]
+            if len(oos_data) == 0:
+                continue
+            covered_span = (oos_data.max() - oos_data.min()).total_seconds()
+            coverage = covered_span / oos_span
+            if coverage < min_holdout_coverage:
+                continue
+        admitted.append(sym)
+    return admitted
 
 
 def _resolve_data_collection_symbols(
@@ -1114,18 +1183,29 @@ def _run_strategy_stage(
             except (TypeError, ValueError):
                 req_end_ts = pd.Timestamp("2100-01-01", tz="UTC")
 
-            for sym in data_stage.valid_symbols:
-                if sym not in full_strategy_maps:
-                    continue
-                sym_df = full_strategy_maps[sym].get(run_config.timeframe)
-                if sym_df is not None and not sym_df.empty:
-                    first_dt = pd.to_datetime(sym_df["datetime"].iloc[0], utc=True)
-                    last_dt = pd.to_datetime(sym_df["datetime"].iloc[-1], utc=True)
-                    if first_dt <= req_start_ts and last_dt >= req_end_ts:
-                        effective_trade_syms.append(sym)
+            try:
+                req_oos_start_ts = pd.to_datetime(tiered_window.holdout_start, utc=True)
+            except (TypeError, ValueError):
+                req_oos_start_ts = req_start_ts
+            effective_trade_syms = _resolve_tradeable_scope(
+                valid_symbols=data_stage.valid_symbols,
+                strategy_maps=full_strategy_maps,
+                tf=run_config.timeframe,
+                fetch_start=req_start_ts,
+                oos_start=req_oos_start_ts,
+                holdout_end=req_end_ts,
+                min_window_bars=_TIERED_MIN_WINDOW_BARS,
+                min_holdout_coverage=0.90,
+            )
+            _logger.info(
+                "[TIERED] Sub-window admission: %d/%d symbols admitted (min_bars=%d, oos_cov>=90%%)",
+                len(effective_trade_syms),
+                len(data_stage.valid_symbols),
+                _TIERED_MIN_WINDOW_BARS,
+            )
         if not effective_trade_syms:
             _logger.warning(
-                "[TIERED] END-coverage 심볼 0개 → 전체 fallback; holdout 절단 위험"
+                "[TIERED] sub-window admission 0개 → 전체 fallback; holdout 절단 위험"
             )
             effective_trade_syms = list(data_stage.valid_symbols)
     else:

@@ -70,7 +70,18 @@ class PITUniverseConfig:
     max_participation_rate: float = 0.01
     min_data_confidence: str = "reconstructed"  # DataConfidence value
     default_intended_notional_usdt: float = 10_000.0
-    k_in: int = 50  # top-N cap by capacity_usdt; 0 = no cap (all eligible)
+    k_in: int = 0  # 0 = no hard top-N (capacity_coverage_target governs); >0 = legacy fixed-N
+    capacity_coverage_target: float = 0.90  # cumulative capacity_usdt fraction to retain
+    k_max: int = 100  # compute ceiling (hard upper bound)
+
+    def __post_init__(self) -> None:
+        """Validate field constraints."""
+        if not (0 < self.capacity_coverage_target <= 1.0):
+            raise ValueError(
+                f"capacity_coverage_target must be in (0, 1]; got {self.capacity_coverage_target}"
+            )
+        if self.k_max < 1:
+            raise ValueError(f"k_max must be >= 1; got {self.k_max}")
 
     def to_payload(self) -> dict[str, Any]:
         """Return canonical payload for persistence and hashing."""
