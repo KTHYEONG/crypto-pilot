@@ -304,3 +304,41 @@ def test_scenario_4_backward_compat() -> None:
 
     assert report.passed is False
     assert any("sym_count" in b for b in report.blockers)
+
+
+def test_by_q_values_happy_path() -> None:
+    import numpy as np
+
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import _by_q_values
+
+    # Test with standard p-values
+    p_vals = np.array([0.01, 0.05, 0.20], dtype=np.float64)
+    q_vals = _by_q_values(p_vals)
+
+    # Let's verify FDR/BY logic:
+    # m = 3
+    # harmonic = 1 + 1/2 + 1/3 = 1.8333333333333333
+    # m * harmonic = 5.5
+    # Sorted: 0.01 (rank 1), 0.05 (rank 2), 0.20 (rank 3)
+    # candidates:
+    # rank 3 (0.20): candidate = min(1.0, 0.20 * 5.5 / 3) = min(1.0, 0.36667) = 0.36667
+    # rank 2 (0.05): candidate = min(1.0, 0.05 * 5.5 / 2) = min(1.0, 0.1375) = 0.1375
+    # rank 1 (0.01): candidate = min(1.0, 0.01 * 5.5 / 1) = min(1.0, 0.055) = 0.055
+    # Running minimum accumulation backwards:
+    # adjusted[2] = 0.36667
+    # adjusted[1] = min(0.36667, 0.1375) = 0.1375
+    # adjusted[0] = min(0.1375, 0.055) = 0.055
+    # Result should be exactly [0.055, 0.1375, 0.36667] aligned with original order
+    np.testing.assert_allclose(q_vals, [0.055, 0.1375, 0.36666667], rtol=1e-5)
+
+
+def test_by_q_values_empty() -> None:
+    import numpy as np
+
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import _by_q_values
+
+    p_vals = np.array([], dtype=np.float64)
+    q_vals = _by_q_values(p_vals)
+    assert q_vals.size == 0
+    assert q_vals.dtype == np.float64
+
