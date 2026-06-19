@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -110,40 +110,154 @@ def _find_symbol_index(symbols: tuple[str, ...], symbol: str) -> int:
     raise KeyError(f"unknown symbol: {symbol}")
 
 
+@njit(cache=True)  # type: ignore[untyped-decorator]
+def _numba_median(arr: NDArray[np.float64]) -> float:
+    n = arr.size
+    if n == 0:
+        return 0.0
+    sorted_arr = np.sort(arr)
+    half = n // 2
+    if n % 2 == 1:
+        return float(sorted_arr[half])
+    else:
+        return float((sorted_arr[half - 1] + sorted_arr[half]) / 2.0)
+
+
+@njit(cache=True)  # type: ignore[untyped-decorator]
+def _numba_rolling_robust_z_1d(
+    values: NDArray[np.float64],
+    window: int,
+    eps: float,
+    clip_val: float,
+) -> NDArray[np.float64]:
+    n = values.size
+    out = np.zeros(n, dtype=np.float64)
+    if n == 0:
+        return out
+
+    # We need a buffer to store non-NaN values for computing median/MAD
+    # The maximum size of the buffer is the window size
+    buf = np.empty(window, dtype=np.float64)
+    mad_buf = np.empty(window, dtype=np.float64)
+
+    for i in range(n):
+        # Gather non-NaN/non-Inf values in the rolling window [max(0, i - window + 1), i]
+        start_idx = max(0, i - window + 1)
+        count = 0
+        for j in range(start_idx, i + 1):
+            val = values[j]
+            if not np.isnan(val) and not np.isinf(val):
+                buf[count] = val
+                count += 1
+
+        if count == 0:
+            out[i] = 0.0
+            continue
+
+        valid_slice = buf[:count]
+        med = _numba_median(valid_slice)
+
+        # Compute MAD
+        for j in range(count):
+            mad_buf[j] = abs(valid_slice[j] - med)
+
+        mad = _numba_median(mad_buf[:count])
+        mad_scaled = mad * 1.4826
+
+        denom = mad_scaled if mad_scaled > eps else eps
+        curr_val = values[i]
+        if np.isnan(curr_val) or np.isinf(curr_val):
+            out[i] = 0.0
+        else:
+            z = (curr_val - med) / denom
+            if z > clip_val:
+                out[i] = clip_val
+            elif z < -clip_val:
+                out[i] = -clip_val
+            else:
+                out[i] = z
+    return out
+
+
+@njit(cache=True)  # type: ignore[untyped-decorator]
+def _numba_rolling_robust_z_2d(
+    values: NDArray[np.float64],
+    window: int,
+    eps: float,
+    clip_val: float,
+) -> NDArray[np.float64]:
+    h, w = values.shape
+    out = np.zeros((h, w), dtype=np.float64)
+    for col_idx in range(w):
+        # We need to copy or pass slice
+        col_vals = values[:, col_idx]
+        out[:, col_idx] = _numba_rolling_robust_z_1d(col_vals, window, eps, clip_val)
+    return out
+
+
+@njit(cache=True)  # type: ignore[untyped-decorator]
+def _numba_cross_sectional_robust_z_2d(
+    values: NDArray[np.float64],
+    eps: float,
+    clip_val: float,
+) -> NDArray[np.float64]:
+    h, w = values.shape
+    out = np.zeros((h, w), dtype=np.float64)
+
+    # Temporary buffers for cross-sectional operations per row
+    row_buf = np.empty(w, dtype=np.float64)
+    indices_buf = np.empty(w, dtype=np.int32)
+    mad_buf = np.empty(w, dtype=np.float64)
+
+    for row_idx in range(h):
+        count = 0
+        for col_idx in range(w):
+            val = values[row_idx, col_idx]
+            if not np.isnan(val) and not np.isinf(val):
+                row_buf[count] = val
+                indices_buf[count] = col_idx
+                count += 1
+
+        if count == 0:
+            continue
+
+        valid_vals = row_buf[:count]
+        med = _numba_median(valid_vals)
+
+        for j in range(count):
+            mad_buf[j] = abs(valid_vals[j] - med)
+
+        mad = _numba_median(mad_buf[:count])
+        mad_scaled = mad * 1.4826
+
+        denom = mad_scaled if mad_scaled > eps else eps
+
+        for j in range(count):
+            col_idx = indices_buf[j]
+            curr_val = values[row_idx, col_idx]
+            z = (curr_val - med) / denom
+            if z > clip_val:
+                out[row_idx, col_idx] = clip_val
+            elif z < -clip_val:
+                out[row_idx, col_idx] = -clip_val
+            else:
+                out[row_idx, col_idx] = z
+    return out
+
+
 def _rolling_robust_z_1d(values: NDArray[np.float64], window: int) -> NDArray[np.float64]:
-    series = pd.Series(values).replace([np.inf, -np.inf], np.nan)
-    median = series.rolling(window, min_periods=1).median()
-    mad = series.rolling(window, min_periods=1).apply(
-        lambda x: float(np.median(np.abs(x - np.median(x)))),
-        raw=True,
-    )
-    z = (series - median) / np.maximum(mad * 1.4826, _ROBUST_Z_EPS)
-    return np.asarray(
-        z.fillna(0.0).clip(-_ROBUST_Z_CLIP, _ROBUST_Z_CLIP).to_numpy(),
-        dtype=np.float64,
-    )
+    res = _numba_rolling_robust_z_1d(values, window, _ROBUST_Z_EPS, _ROBUST_Z_CLIP)
+    return cast(NDArray[np.float64], res)
 
 
 def _rolling_robust_z_2d(values: NDArray[np.float64], window: int) -> NDArray[np.float64]:
-    out = np.zeros_like(values, dtype=np.float64)
-    for col_idx in range(values.shape[1]):
-        out[:, col_idx] = _rolling_robust_z_1d(values[:, col_idx], window)
-    return out
+    res = _numba_rolling_robust_z_2d(values, window, _ROBUST_Z_EPS, _ROBUST_Z_CLIP)
+    return cast(NDArray[np.float64], res)
 
 
 def _cross_sectional_robust_z_2d(values: NDArray[np.float64]) -> NDArray[np.float64]:
-    out = np.zeros_like(values, dtype=np.float64)
-    for row_idx in range(values.shape[0]):
-        row = values[row_idx]
-        finite_mask = np.isfinite(row)
-        if not bool(finite_mask.any()):
-            continue
-        finite_row = row[finite_mask]
-        median = float(np.median(finite_row))
-        mad = float(np.median(np.abs(finite_row - median)) * 1.4826)
-        if mad > _ROBUST_Z_EPS:
-            out[row_idx, finite_mask] = np.clip((finite_row - median) / mad, -_ROBUST_Z_CLIP, _ROBUST_Z_CLIP)
-    return out
+    res = _numba_cross_sectional_robust_z_2d(values, _ROBUST_Z_EPS, _ROBUST_Z_CLIP)
+    return cast(NDArray[np.float64], res)
 
 
 def _compute_score_pct_variant_hist(

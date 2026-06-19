@@ -53,3 +53,16 @@
 - **Rationale**: L1 병목탐지가 DEBUG(10) 레벨에 흩어져 있어 운영 중 실시간 모니터링 불가. PERF(15)로 통일하여 `--phase l1` 실행 시 계층적 소요시간 로그만으로 병목지점 식별 가능하게 함. 실제 54심볼 측정 결과 `selection` 70-90%, `SIGNAL-EVIDENCE.prep` 78-84%가 주요 병목으로 확인됨.
 - **Files Changed**: `pipeline.py`, `candidate_workflow.py`, `signal_selection.py`, `awf_sim.py`, `opt_main_futures.py`, `test_l1_determinism.py`.
 - **Status**: Accepted
+
+## L1-ADR-011: L1 성능 최적화 2차 — Numba JIT 도입 및 q-value 롤백 (2026-06-19)
+- **Delta**: 
+  - `candidate_dataset.py` 의 `_rolling_robust_z_1d`, `_rolling_robust_z_2d`, `_cross_sectional_robust_z_2d` 함수들을 Numba JIT (`@njit(cache=True)`)을 사용한 C레벨 고성능 연산 루프로 전면 재구현.
+  - `signal_selection.py` 의 `_by_q_values` FDR 조정을 기존 numpy vectorization 버전에서 루프 기반 백프로파게이션 방식으로 롤백.
+  - `pipeline.py` 의 tiered_workflow 로거에 `LOG_LEVEL=PERF` 동적 환경 변수 활성화 조건 추가.
+- **Rationale**: 
+  - 1차 성능 최적화 후에도 L1 Pipeline Total 소요시간이 47.90초로 큰 진전이 없었음.
+  - 초정밀 타이밍 프로파일링 분석 결과, 전체 실행 시간의 58.3%가 `prime_aligned_feature_cache` (27.78초) 한 곳에서 발생했으며, 이는 Pandas rolling apply(Python lambda) 연산 오버헤드가 원인이었음.
+  - 이를 Numba JIT로 가속하여 캐시 프라이밍 시간을 27.78초에서 **7.75초(72.1% 단축)**로 단축하고, L1 전체 소요시간을 47.64초에서 **25.17초(47.2% 단축)**로 단축시킴.
+  - 또한, N<=200 이하 소표본 환경에서 numpy slicing 오버헤드로 회귀를 일으켰던 `_by_q_values`를 루프 기반으로 롤백하여 정합성 복구 및 가속 효과를 순증으로 돌려놓음.
+- **Status**: Accepted
+

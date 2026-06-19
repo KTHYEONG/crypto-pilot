@@ -277,12 +277,17 @@ def _by_q_values(p_values: NDArray[np.float64]) -> NDArray[np.float64]:
     m = float(p_values.size)
     harmonic = float(np.sum(1.0 / np.arange(1, p_values.size + 1, dtype=np.float64)))
     n = ordered.size
-    ranks = np.arange(n, 0, -1, dtype=np.float64)
-    candidates = np.minimum(1.0, ordered * m * harmonic / ranks)
-    adjusted = np.minimum.accumulate(candidates[::-1])[::-1]
+    adjusted = np.empty_like(ordered)
+    running = 1.0
+    for idx in range(n - 1, -1, -1):
+        rank = idx + 1
+        candidate = min(1.0, ordered[idx] * m * harmonic / rank)
+        running = min(running, candidate)
+        adjusted[idx] = running
     out = np.empty_like(adjusted)
     out[order] = adjusted
     return out
+
 
 
 def _event_results_from_fold_output(
