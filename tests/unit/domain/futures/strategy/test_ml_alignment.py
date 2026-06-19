@@ -88,6 +88,40 @@ def test_align_data_maps_uses_first_finite_metadata_value(
     assert out.anchor_cluster_1d.tolist() == [1.0]
 
 
+def test_align_data_maps_reads_optional_universe_state_masks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = _frame().assign(
+        execution_eligibility_mask=[True, False, True, True, True, True],
+        strategy_readiness_mask=[True, True, False, True, True, True],
+        promotion_active_mask=[True, True, True, False, True, True],
+    )
+    data_maps = {"BTCUSDT": {"4h": frame}}
+    monkeypatch.setattr(
+        alignment,
+        "compute_multi_alignment_info",
+        lambda *_args, **_kwargs: {"eff_ref_len": len(frame), "alignment_offsets": {"BTCUSDT": 0}},
+    )
+
+    out = alignment.align_data_maps(data_maps, ["BTCUSDT"], "4h")
+
+    assert out.execution_eligibility_mask is not None
+    assert out.strategy_readiness_mask is not None
+    assert out.promotion_active_mask is not None
+    np.testing.assert_array_equal(
+        out.execution_eligibility_mask[:, 0],
+        frame["execution_eligibility_mask"].to_numpy(dtype=bool),
+    )
+    np.testing.assert_array_equal(
+        out.strategy_readiness_mask[:, 0],
+        frame["strategy_readiness_mask"].to_numpy(dtype=bool),
+    )
+    np.testing.assert_array_equal(
+        out.promotion_active_mask[:, 0],
+        frame["promotion_active_mask"].to_numpy(dtype=bool),
+    )
+
+
 def test_align_data_maps_taker_buy_and_trades(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
