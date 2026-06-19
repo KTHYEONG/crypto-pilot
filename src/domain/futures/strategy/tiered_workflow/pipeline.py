@@ -7,7 +7,8 @@ import multiprocessing
 import os
 import time
 from concurrent.futures import ProcessPoolExecutor
-from typing import TYPE_CHECKING, Any
+from datetime import date
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -55,6 +56,7 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     Layer2BlockMetric,
     Layer2Result,
     Layer3Result,
+    SymbolLifecycleRecord,
 )
 from src.domain.futures.strategy.tiered_workflow.diagnostics import (
     _compute_fold_realized_valid_set,
@@ -106,7 +108,6 @@ if TYPE_CHECKING:
     from src.domain.futures.optimization.opt_config import LayeredWindow
 
 logger = logging.getLogger("src.domain.futures.strategy.tiered_workflow")
-import os
 if os.environ.get("LOG_LEVEL") == "PERF":
     logger.setLevel(15)
 
@@ -787,6 +788,7 @@ def run_l1_nested_swf(
     cfg: CandidateStrategyConfig,
     seed: int,
     verbose: bool = True,
+    l2_start: date | None = None,
 ) -> Layer1Result:
     """Run nested Layer1 validation using inner selection and outer evaluation."""
     import dataclasses
@@ -1086,7 +1088,7 @@ def run_l1_nested_swf(
         "[perf-tiered] run_l1_nested_swf audit tables formatting took %.4fs",
         time.perf_counter() - t_log,
     )
-    return Layer1Result(
+    _l1_result = Layer1Result(
         signals_per_fold=tuple(signals_per_fold),
         oos_stacked=oos_stacked,
         pooled_ic=0.0,
@@ -1104,6 +1106,52 @@ def run_l1_nested_swf(
         deployment_registry=deployment_registry,
         inference_artifact=inference_artifact,
     )
+
+    # ── Lifecycle computation (Phase 3) ─────────────────────────────────────
+    # Time: O(N * L1_T), Space: O(N)  where N=n_symbols, L1_T=l1 bar span
+    _l1_fit_start = min(fold.fit_start for fold in outer_folds)
+    _l1_fit_end = max(fold.oos_end for fold in outer_folds)
+    _active = aligned.active_mask  # NDArray[bool_] | None
+    if _active is None:
+        # stage6 path — no PIT mask; treat all bars as eligible
+        _active = np.ones((len(aligned.datetimes), len(aligned.symbols)), dtype=np.bool_)
+
+    _ready_syms: set[str] = (
+        set(deployment_registry.ready_symbols) if deployment_registry is not None else set()
+    )
+    _lifecycle_records: list[SymbolLifecycleRecord] = []
+    for _col, _sym in enumerate(aligned.symbols):
+        _mask_slice = _active[_l1_fit_start:_l1_fit_end, _col]  # shape: [L1_T]
+        if not _mask_slice.any():
+            _lifecycle_records.append(
+                SymbolLifecycleRecord(
+                    symbol=_sym,
+                    fold_status="not_evaluated",
+                    promotion_available_at=None,
+                )
+            )
+            continue
+
+        _first_offset = int(np.argmax(_mask_slice))
+        _first_abs = _l1_fit_start + _first_offset
+        _promo_at: date = pd.Timestamp(aligned.datetimes[_first_abs]).date()
+
+        if _sym in _ready_syms:
+            _status: Literal["promoted", "evaluated", "failed", "not_ready", "not_evaluated"] = "promoted"
+        elif _sym in oos_stacked:
+            _status = "evaluated"
+        else:
+            _status = "failed"
+
+        _lifecycle_records.append(
+            SymbolLifecycleRecord(
+                symbol=_sym,
+                fold_status=_status,
+                promotion_available_at=_promo_at,
+            )
+        )
+
+    return dataclasses.replace(_l1_result, symbol_lifecycle=tuple(_lifecycle_records))
 
 
 def run_l2_awf(
@@ -1678,6 +1726,11 @@ def run_tiered_pipeline(
             cfg=cfg,
             seed=int(getattr(cfg, "seed", 42)),
             verbose=verbose,
+            l2_start=(
+                window.l2_start if isinstance(window.l2_start, date)
+                else None if window.l2_start is None
+                else pd.Timestamp(window.l2_start).date()
+            ),
         )
     logger.log(PERF, "[perf-tiered] run_tiered_pipeline Layer 1 total took %.4fs", time.perf_counter() - t_l1)
 
@@ -1685,6 +1738,26 @@ def run_tiered_pipeline(
         if verbose:
             logger.info(">> LAYER 1: BLOCKED -> gate_passed=False")
         return (l1, None, None)
+
+    # ── Lifecycle gate (Phase 3): exclude symbols whose promotion_available_at > l2_start ──
+    if l1.symbol_lifecycle and window.l2_start is not None:
+        import dataclasses as _dc
+        _l2_date: date = (
+            window.l2_start if isinstance(window.l2_start, date)
+            else pd.Timestamp(window.l2_start).date()
+        )
+        _late = {r.symbol for r in l1.symbol_lifecycle
+                 if r.promotion_available_at is not None and r.promotion_available_at > _l2_date}
+        if _late:
+            logger.info(
+                "[L1-LIFECYCLE] %d symbol(s) excluded: promotion_available_at > l2_start=%s",
+                len(_late),
+                _l2_date,
+            )
+            l1 = _dc.replace(
+                l1,
+                oos_stacked={k: v for k, v in l1.oos_stacked.items() if k not in _late},
+            )
 
     if verbose and l1_result_override is None:
         logger.info(

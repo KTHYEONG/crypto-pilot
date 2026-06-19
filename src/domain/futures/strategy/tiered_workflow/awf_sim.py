@@ -479,9 +479,20 @@ def _resolve_tradeable_mask(
 
     active_mask = _mask_row("active_mask", True)
     warm_mask = _mask_row("warm_mask", True)
+    execution_eligibility_mask = _mask_row("execution_eligibility_mask", True)
+    strategy_readiness_mask = _mask_row("strategy_readiness_mask", True)
+    promotion_active_mask = _mask_row("promotion_active_mask", True)
     entry_block_mask = _mask_row("entry_block_mask", False)
     kill_mask = _mask_row("kill_mask", False)
-    return active_mask & warm_mask & ~entry_block_mask & ~kill_mask
+    return (
+        active_mask
+        & warm_mask
+        & execution_eligibility_mask
+        & strategy_readiness_mask
+        & promotion_active_mask
+        & ~entry_block_mask
+        & ~kill_mask
+    )
 
 
 def _resolve_funding_row(
@@ -623,6 +634,7 @@ def _run_awf_simulation(
     config: Layer2AllocationConfig,
     caps: PortfolioCaps,
     tf: str = "4h",
+    portfolio_nav: float | None = None,
 ) -> _AwfSimResult:
     """AWF 시뮬레이션 핵심 루프 (L2/L3 공용)."""
     import logging
@@ -662,6 +674,10 @@ def _run_awf_simulation(
     n_sym = len(symbols)
     bars_per_year = 24.0 * 365.0 / max(hours_per_bar_tf(tf), 1e-9)
     sym_to_idx = {s: i for i, s in enumerate(symbols)}
+    # Phase 3-5: capacity_usdt clip 상수
+    # portfolio_nav=None → 단위 NAV(1.0) 기준 시뮬레이션
+    _portfolio_nav: float = portfolio_nav if portfolio_nav is not None else 1.0
+    _min_order_usdt: float = 5.0  # 최소주문 미달 시 weight=0
 
     vol_matrix = cache.vol_matrix_2d
 
@@ -809,6 +825,22 @@ def _run_awf_simulation(
                 )
                 _fit_w = _fit_w * _fit_m
             _fit_w = np.where(_fit_tradeable, _fit_w, 0.0)
+
+            # Phase 3-5: capacity_usdt clip (fit-leg)
+            # Time: O(N), Space: O(1) per symbol
+            _fit_adv = getattr(aligned, "adv_usdt_2d", None)
+            if isinstance(_fit_adv, np.ndarray) and _ft < _fit_adv.shape[0]:
+                _fit_cap_row = np.nan_to_num(_fit_adv[_ft], nan=0.0, posinf=0.0, neginf=0.0)
+                for _cn in range(n_sym):
+                    _intended = abs(_fit_w[_cn]) * _portfolio_nav
+                    if _intended < _min_order_usdt:
+                        _fit_w[_cn] = 0.0
+                        continue
+                    _cap = _fit_cap_row[_cn]
+                    if _cap > 0.0:
+                        _max_w = _cap / max(_portfolio_nav, 1.0)
+                        if abs(_fit_w[_cn]) > _max_w:
+                            _fit_w[_cn] = np.sign(_fit_w[_cn]) * _max_w
 
             # 리밸런싱 비용
             _fit_rebal_cost = compute_rebalance_cost(
@@ -973,6 +1005,24 @@ def _run_awf_simulation(
                     support_mask=support_mask,
                 )
             w = np.where(tradeable_mask, w, 0.0)
+
+            # Phase 3-5: capacity_usdt clip (OOS)
+            # 최소주문 5 USDT 미달 → weight=0; capacity 초과 → 비례 클립
+            # Time: O(N), Space: O(N) for cap_row read
+            _adv = getattr(aligned, "adv_usdt_2d", None)
+            if isinstance(_adv, np.ndarray) and t < _adv.shape[0]:
+                _cap_row = np.nan_to_num(_adv[t], nan=0.0, posinf=0.0, neginf=0.0)
+                for _n in range(n_sym):
+                    _intended = abs(w[_n]) * _portfolio_nav
+                    if _intended < _min_order_usdt:
+                        w[_n] = 0.0
+                        continue
+                    _cap = _cap_row[_n]
+                    if _cap > 0.0:
+                        _max_w = _cap / max(_portfolio_nav, 1.0)
+                        if abs(w[_n]) > _max_w:
+                            w[_n] = np.sign(w[_n]) * _max_w
+
             last_w = w
 
             w_base = build_directional_risk_matched_equal_weight(

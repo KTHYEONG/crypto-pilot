@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -22,6 +23,26 @@ if TYPE_CHECKING:
 
 
 AllocationPolicy = Literal["diagonal_kelly", "directional_equal_weight"]
+
+
+@dataclass(frozen=True, slots=True)
+class SymbolLifecycleRecord:
+    """Per-symbol L1 fold lifecycle tracking for PIT promotion gate.
+
+    Attributes:
+        symbol: 심볼 식별자.
+        fold_status: L1 fold 내 심볼 수명주기 상태.
+            - ``not_evaluated``: active_mask 전구간 False — L2 제외.
+            - ``not_ready``: promotion_available_at > l2_start — 아직 미승인.
+            - ``evaluated``: oos_stacked 진입했으나 ready_symbols 미포함.
+            - ``failed``: eligible bars 존재하나 oos_stacked 미진입.
+            - ``promoted``: deployment_registry.ready_symbols 포함 + promotion_available_at <= l2_start.
+        promotion_available_at: 첫 eligible bar 날짜. not_evaluated 시 ``None``.
+    """
+
+    symbol: str
+    fold_status: Literal["promoted", "evaluated", "failed", "not_ready", "not_evaluated"]
+    promotion_available_at: date | None  # None iff not_evaluated / no active bars in L1
 
 
 @dataclass(slots=True, frozen=True)
@@ -64,6 +85,7 @@ class Layer1Result:
     deployment_evidence: tuple[SymbolStrategyEvidence, ...] = ()
     gate_report: Layer1GateReport | None = None
     deployment_registry: QualifiedSignalRegistry | None = None
+    symbol_lifecycle: tuple[SymbolLifecycleRecord, ...] = ()
     inference_artifact: Layer1InferenceArtifact | None = None
 
 
