@@ -47,17 +47,22 @@ graph TD
     C --> D[ExecutionEligibility: per-instrument rules]
     D --> E[UniverseStateCube eligible T×N]
     E --> F[build_universe → UniverseSnapshot + selected]
+    F --> G_store[write_universe_store_run: cube.parquet]
     F --> G[_run_universe_stage → state_cube forwarded]
     G --> H[align_data_maps: state_cube injected]
     H --> I[L1 SWF: active_mask = state_cube slice]
     I --> J[SymbolLifecycleRecord: promotion_available_at gate]
     J --> K[L2 oos_stacked filtered]
     K --> L[awf_sim: capacity_usdt clip]
+    F -.-> M[load_or_build_universe_snapshot]
+    M --> M_store[load_universe_store_run: hash match?]
+    M_store -- hit --> N[materialize_snapshot_from_store + cube]
+    M_store -- miss --> F
 ```
 
 **Quarterly dispatch (`discover_universe_timeline`):**
 - `cfg.universe_engine == "pit"` (default) → `_discover_universe_timeline_pit`: quarterly loop, pit_cubes forward-filled into merged `eligible [T, N]`.
-- `cfg is None` → raises `ValueError` (Stage6 path removed).
+- `cfg is None` → defaults to `UniverseConfig()` (PIT-only).
 
 # 4. Core Variables & I/O
 
@@ -81,9 +86,22 @@ graph TD
 - **Mid-listing Promotion Gate:** `SymbolLifecycleRecord.promotion_available_at > l2_start` → symbol excluded from L2 `oos_stacked`; prevents look-ahead from mid-window listing entry.
 
 
-# 6. Storage & Persistence (SQLite)
+# 6. Storage & Persistence
+
+## Ledger Layer (SQLite / Parquet)
 - **Database Backend:** SQLite remains the SSOT backend for persistent universe history in `universe_ledger.db`.
 - **Compatibility Layer:** `load_ledger_slice(...)` now dispatches by suffix. `.db/.sqlite/.sqlite3/""` use SQLite slices; `.parquet/.pq` use parquet load followed by the same PIT filter path.
 - **Failure Contract:** Existing files no longer fall through to silent empty frames on read failure. Backend errors are raised with backend context; only genuinely missing files may return an empty frame.
 - **Index Optimization:** A composite unique index on `(symbol, tf, date, knowledge_date)` prevents duplicates, ensuring idempotent upsert updates.
 - **Query Slicing:** Both backend paths converge through `query_ledger_as_of(...)`, preserving `date <= as_of` and `knowledge_date <= as_of` semantics.
+
+## Store Layer (Parquet-only Run Cache)
+- **Single canonical location:** `store/v1/runs/tf={tf}/as_of={date}/run_id={sha256[:16]}/`
+  - `manifest.parquet` — UniverseRunManifest (1-row)
+  - `decisions.parquet` — UNIVERSE_DECISION_COLUMNS (27-column)
+  - `filter_report.parquet` — per-symbol stage/passed/reason
+  - `cube.parquet` — UniverseStateCube (numpy arrays serialized via tobytes)
+- **Run identity:** SHA256(`tf|as_of|config_hash|data_manifest_hash`). Config or manifest change → different run_id → natural cache invalidation.
+- **Storage-only path:** `load_or_build_universe_snapshot` checks store hit first. Miss falls back to `build_universe` which writes a complete store run.
+- **Cube round-trip:** `pit_state_cube` is persisted via `cube.parquet` and restored on store hit. No transient data loss.
+- **GC:** `gc_stale_store_runs(tf, as_of, keep_latest=1)` removes stale run directories by mtime, keeping latest N per as_of.

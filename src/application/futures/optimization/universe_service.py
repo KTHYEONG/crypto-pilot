@@ -425,7 +425,7 @@ def discover_universe_timeline(
 
     # ── PIT-only path (Stage6 legacy path removed) ──
     if cfg is None:
-        raise ValueError("universe_engine=pit required; stage6 path removed")
+        cfg = UniverseConfig()
     return _discover_universe_timeline_pit(
         tf=tf,
         is_start=is_start,

@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import date
 
 import pandas as pd
-import pytest
 from _pytest.monkeypatch import MonkeyPatch
 
 from src.application.futures.optimization import universe_service
@@ -33,14 +32,55 @@ def _empty_snapshot() -> UniverseSnapshot:
     )
 
 
-def test_discover_universe_timeline_raises_when_cfg_is_none() -> None:
-    with pytest.raises(ValueError, match="universe_engine=pit required; stage6 path removed"):
-        universe_service.discover_universe_timeline(
-            tf="4h",
-            is_start=date(2025, 1, 1),
-            oos_start=date(2025, 4, 1),
-            end_date=date(2025, 7, 1),
+def test_discover_universe_timeline_defaults_cfg_when_none(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from src.domain.futures.universe.config import UniverseConfig
+    from src.domain.futures.universe.contracts import UniverseStateCube
+
+    captured: list[object] = []
+
+    def fake_pit(**kwargs: object) -> object:
+        captured.append(kwargs["cfg"])
+        empty = pd.DatetimeIndex([], tz="UTC")
+        return universe_service.UniverseTimelineResult(
+            symbols=(),
+            timeline=universe_service.UniverseMembershipTimeline(tf="4h", windows=()),
+            snapshots=(),
+            state_cube=UniverseStateCube(
+                calendar=empty, instrument_ids=(),
+                eligible=np.empty((0, 0), dtype=np.bool_),
+                entry_block=np.empty((0, 0), dtype=np.bool_),
+                exit_required=np.empty((0, 0), dtype=np.bool_),
+                capacity_usdt=np.empty((0, 0), dtype=np.float64),
+                risk_scale=np.empty((0, 0), dtype=np.float64),
+                cost_bps=np.empty((0, 0), dtype=np.float64),
+            ),
+            report=pd.DataFrame(),
+            audit=pd.DataFrame(),
+            snapshot=_empty_snapshot(),
+            inference_symbols=(),
+            inference_timeline=None,
+            inference_panel_quarter_membership={},
         )
+
+    monkeypatch.setattr(
+        universe_service,
+        "_discover_universe_timeline_pit",
+        fake_pit,
+    )
+    universe_service.discover_universe_timeline(
+        tf="4h",
+        is_start=date(2025, 1, 1),
+        oos_start=date(2025, 4, 1),
+        end_date=date(2025, 7, 1),
+    )
+    assert len(captured) == 1
+    cfg = captured[0]
+    assert isinstance(cfg, UniverseConfig)
+    assert cfg.universe_engine == "pit"
 
 
 def test_discover_universe_timeline_does_not_promote_rejected_symbols_into_state_cube(
