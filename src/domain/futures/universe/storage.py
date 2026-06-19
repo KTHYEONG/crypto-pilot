@@ -170,15 +170,6 @@ def snapshot_to_payload(snapshot: UniverseSnapshot) -> dict[str, Any]:
         "n_stage4_pass": snapshot.n_stage4_pass,
         "n_stage5_pass": snapshot.n_stage5_pass,
         "n_stage6_selected": snapshot.n_stage6_selected,
-        "training_panel": list(snapshot.training_panel),
-        "inference_panel": list(snapshot.inference_panel),
-        "live_inference_panel": list(snapshot.live_inference_panel),
-        "historical_trading_panel": list(snapshot.historical_trading_panel),
-        "inference_panel_quarter_membership": {
-            qd.isoformat() if hasattr(qd, "isoformat") else str(qd): list(syms)
-            for qd, syms in snapshot.inference_panel_quarter_membership.items()
-        },
-        "stage5_research_panel": list(snapshot.stage5_research_panel),
         "state_transition_summary": dict(snapshot.state_transition_summary),
     }
 
@@ -208,17 +199,6 @@ def snapshot_from_payload(payload: dict[str, Any]) -> UniverseSnapshot:
         n_stage4_pass=int(payload["n_stage4_pass"]),
         n_stage5_pass=int(payload["n_stage5_pass"]),
         n_stage6_selected=int(payload["n_stage6_selected"]),
-        training_panel=tuple(str(s) for s in payload.get("training_panel", [])),
-        inference_panel=tuple(str(s) for s in payload.get("inference_panel", [])),
-        live_inference_panel=tuple(str(s) for s in payload.get("live_inference_panel", [])),
-        historical_trading_panel=tuple(
-            str(s) for s in payload.get("historical_trading_panel", [])
-        ),
-        inference_panel_quarter_membership={
-            date.fromisoformat(k): tuple(str(s) for s in v)
-            for k, v in payload.get("inference_panel_quarter_membership", {}).items()
-        },
-        stage5_research_panel=tuple(str(s) for s in payload.get("stage5_research_panel", [])),
         state_transition_summary={
             str(key): int(value)
             for key, value in dict(payload.get("state_transition_summary", {})).items()
