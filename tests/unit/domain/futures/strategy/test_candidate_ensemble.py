@@ -230,53 +230,6 @@ def test_archetype_only_ignores_regime_code() -> None:
 # mu-quality shrinkage
 # ---------------------------------------------------------------------------
 
-def test_mu_quality_shrinkage_flattens_when_ic_zero() -> None:
-    """val IC=0 → lam=0 → all mu collapsed to cross-sectional mean."""
-    model = RegimeConditionalEnsemble(
-        cell_mu_bps={},
-        cell_q10_bps={},
-        global_mu_bps=0.0,
-        global_q10_bps=0.0,
-        conditioning="archetype_only",
-        archetype_mu_bps={"trend": 30.0, "mean_rev": -10.0},
-        archetype_q10_bps={"trend": 0.0, "mean_rev": -20.0},
-        validation_rank_ic=0.0,
-    )
-    cfg = _make_cfg(mu_quality_shrinkage_enabled=True, mu_quality_ic_full_scale=0.05)
-    oos = pd.DataFrame(
-        {"archetype": ["trend", "mean_rev"], "entry_regime_code": [0, 0]}
-    )
-    out = predict_regime_conditional_ensemble(model=model, oos_events=oos, cfg=cfg)
-
-    # lam=0 → all values = cross-sectional mean = mean(30, -10) = 10
-    assert out.expected_net_bps[0] == pytest.approx(10.0)
-    assert out.expected_net_bps[1] == pytest.approx(10.0)
-    assert out.validation_diagnostics["mu_shrinkage_lambda"] == pytest.approx(0.0)
-
-
-def test_mu_quality_shrinkage_full_conviction_when_ic_full_scale() -> None:
-    """val_rank_ic = mu_quality_ic_full_scale → lam=1 → predictions unchanged."""
-    model = RegimeConditionalEnsemble(
-        cell_mu_bps={},
-        cell_q10_bps={},
-        global_mu_bps=0.0,
-        global_q10_bps=0.0,
-        conditioning="archetype_only",
-        archetype_mu_bps={"trend": 40.0, "mean_rev": -15.0},
-        archetype_q10_bps={"trend": 0.0, "mean_rev": -25.0},
-        validation_rank_ic=0.05,
-    )
-    cfg = _make_cfg(mu_quality_shrinkage_enabled=True, mu_quality_ic_full_scale=0.05)
-    oos = pd.DataFrame(
-        {"archetype": ["trend", "mean_rev"], "entry_regime_code": [0, 0]}
-    )
-    out = predict_regime_conditional_ensemble(model=model, oos_events=oos, cfg=cfg)
-
-    assert out.expected_net_bps[0] == pytest.approx(40.0)
-    assert out.expected_net_bps[1] == pytest.approx(-15.0)
-    assert out.validation_diagnostics["mu_shrinkage_lambda"] == pytest.approx(1.0)
-
-
 # ---------------------------------------------------------------------------
 # auto conditioning — selects archetype_only when gain is marginal
 # ---------------------------------------------------------------------------
@@ -308,7 +261,7 @@ def test_auto_conditioning_exposes_diagnostics() -> None:
     diags = out.validation_diagnostics
     assert "conditioning" in diags
     assert "validation_rank_ic" in diags
-    assert "mu_shrinkage_lambda" in diags
+    assert "mu_shrinkage_lambda" not in diags
     assert diags["conditioning"] in {"archetype_regime", "archetype_only"}
 
 
@@ -423,6 +376,7 @@ def test_predict_ensemble_records_conditioning_path_in_diagnostics() -> None:
     assert output.validation_diagnostics["conditioning_path"] in {
         "regime_conditioned",
         "pooled_fallback",
+        "no_oos_evidence_failsafe",
     }
 
 
@@ -788,7 +742,7 @@ def test_eb_k_estimation_is_is_only_no_oos_data_used(monkeypatch: pytest.MonkeyP
 
 
 def test_diagnostic_log_emits_negative_ic_flag(caplog: pytest.LogCaptureFixture) -> None:
-    """S4 부호 진단: val_ic<0 → 로그에 NEGATIVE 표시, archetype 테이블 포함."""
+    """S4 부호 진단: IC 제거 후 로그에 archetype 테이블은 포함되나 IC: 세그먼트는 없다."""
     rng = np.random.default_rng(42)
     frame = pd.DataFrame({
         "archetype": ["anti_predictive"] * 50 + ["normal"] * 50,
@@ -802,17 +756,75 @@ def test_diagnostic_log_emits_negative_ic_flag(caplog: pytest.LogCaptureFixture)
             frame=frame,
             global_mu=5.0,
             arch_mu=arch_mu,
-            val_ic=-0.08,
             chosen="archetype_only",
             adaptive_shrinkage=True,
             k_used=50.0,
         )
 
     combined = "\n".join(caplog.messages)
+    assert "IC:" not in combined
     assert "❌" in combined
     assert "A:-3.0❌" in combined
     assert "N:12.0✅" in combined
     assert "Arch-Only" in combined
+
+
+def test_scenario5_ic_not_in_log_and_rank_ic_not_called(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Scenario 5 (spec universe-l1-breadth-integrity): L1-ADR-008 완료.
+
+    Given: ensemble fit producing a log line.
+    When: capture _logger.info.
+    Then:
+      - "IC:" not in log_msg.
+      - _internal_validation_rank_ic not called (call_count == 0).
+      - Existing "Arch-Only" / "SYM:" / "TOTAL:" assertions still pass.
+    """
+    from src.domain.futures.strategy import candidate_ensemble as _ce
+
+    call_count: list[int] = [0]
+
+    original_fn = _ce._internal_validation_rank_ic
+
+    def _spy(*args: object, **kwargs: object) -> float:
+        call_count[0] += 1
+        return original_fn(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(_ce, "_internal_validation_rank_ic", _spy)
+
+    # Arrange: minimal archetype_only frame (no IC path triggered)
+    rng = np.random.default_rng(0)
+    n = 40
+    train_events = pd.DataFrame({
+        "archetype": rng.choice(["trend", "mean_rev"], size=n),
+        "entry_regime_code": rng.integers(0, 3, size=n),
+        "net_return_bps": rng.normal(10.0, 5.0, size=n),
+        "entry_idx": np.arange(n),
+        "symbol": rng.choice(["BTC", "ETH", "SOL"], size=n),
+    })
+    cfg = _make_cfg(ensemble_conditioning="archetype_only")
+
+    # Act
+    with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
+        _ = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg)
+
+    # Assert — IC removed from log
+    ens_lines = [m for m in caplog.messages if "[ENS]" in m]
+    assert len(ens_lines) >= 1, "Expected at least one [ENS] log line"
+    log_msg = ens_lines[0]
+    assert "IC:" not in log_msg, f"IC: still present in log: {log_msg!r}"
+
+    # Assert — _internal_validation_rank_ic not called from hot path
+    assert call_count[0] == 0, (
+        f"_internal_validation_rank_ic was called {call_count[0]} time(s); expected 0"
+    )
+
+    # Assert — structural tokens still present
+    assert "Arch-Only" in log_msg
+    assert "SYM:" in log_msg
+    assert "TOTAL:" in log_msg
 
 
 # ---------------------------------------------------------------------------

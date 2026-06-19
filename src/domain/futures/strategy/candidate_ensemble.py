@@ -202,7 +202,6 @@ def _log_ensemble_diagnostics(
     frame: pd.DataFrame,
     global_mu: float,
     arch_mu: dict[str, float],
-    val_ic: float,
     chosen: str,
     adaptive_shrinkage: bool,
     k_used: float,
@@ -233,7 +232,7 @@ def _log_ensemble_diagnostics(
         v = arch_mu.get(k, 0.0)
         sign = "✅" if v >= 0.0 else "❌"
         arch_parts.append(f"{label}:{v:>+6.1f}{sign}")
-    
+
     # Custom archetypes (Flexible width for test matching)
     for k, v in arch_mu.items():
         if k not in standard_keys:
@@ -241,16 +240,11 @@ def _log_ensemble_diagnostics(
             sign = "✅" if v >= 0.0 else "❌"
             arch_parts.append(f"{label}:{v:.1f}{sign}")
 
-    # IC Diagnostic
-    ic_sign = "✅" if val_ic >= 0.0 else "❌"
-    ic_str = f"IC:{val_ic:>+5.2f}{ic_sign}"
-
     # Atomic One-Liner Construction (Parallel-Friendly)
     log_msg = (
         f"[{tag}] {mode_short:<11} | SYM:{n_syms:>3} | "
         f"EVT:{n_total:>8,} | "
         f"TOTAL:{global_mu:>+6.1f} bps | "
-        f"{ic_str} | "
         f"[{' '.join(arch_parts)}]"
     )
     _logger.info(log_msg)
@@ -658,63 +652,14 @@ def fit_regime_conditional_ensemble(
         "freq_n_cap": freq_n_cap,
         "min_cell_edge_floor_bps": min_cell_edge_floor_bps,
     }
-    variant_ic_kwargs: dict[str, object] = {
-        "variant_prior_enabled": variant_prior_enabled,
-        "variant_shrinkage_k": variant_shrinkage_k,
-        "variant_min_obs": variant_min_obs,
-        "allowed_families": allowed_families,
-    }
-    score_ic_kwargs: dict[str, object] = {
-        "score_calibration_enabled": score_calibration_enabled,
-        "score_z_clip": score_z_clip,
-        "score_calibration_min_obs": score_calibration_min_obs,
-        "score_slope_k": score_slope_k,
-    }
-
     # Compute archetype-only (always needed for fallback/auto)
     _, _, arch_mu, arch_q10, global_mu, global_q10, _, arch_q90, global_q90 = _fit_cell_means(
         frame, shrinkage_k=shrinkage_k, axis="archetype_only", **eb_fit_kwargs  # type: ignore[arg-type]
     )
 
-    if conditioning_cfg == "auto":
-        ic_arch = _internal_validation_rank_ic(
-            frame,
-            shrinkage_k=shrinkage_k,
-            val_fraction=val_fraction,
-            axis="archetype_only",
-            **{**eb_fit_kwargs, **variant_ic_kwargs, **score_ic_kwargs},  # type: ignore[arg-type]
-        )
-        ic_regime = _internal_validation_rank_ic(
-            frame,
-            shrinkage_k=shrinkage_k,
-            val_fraction=val_fraction,
-            axis="archetype_regime",
-            **{**eb_fit_kwargs, **variant_ic_kwargs, **score_ic_kwargs},  # type: ignore[arg-type]
-        )
-        if ic_regime - ic_arch >= cfg.ensemble_min_conditioning_ic_gain:
-            chosen = "archetype_regime"
-            val_ic = ic_regime
-        else:
-            chosen = "archetype_only"
-            val_ic = ic_arch
-    elif conditioning_cfg == "archetype_regime":
-        chosen = "archetype_regime"
-        val_ic = _internal_validation_rank_ic(
-            frame,
-            shrinkage_k=shrinkage_k,
-            val_fraction=val_fraction,
-            axis="archetype_regime",
-            **{**eb_fit_kwargs, **variant_ic_kwargs, **score_ic_kwargs},  # type: ignore[arg-type]
-        )
-    else:
-        chosen = "archetype_only"
-        val_ic = _internal_validation_rank_ic(
-            frame,
-            shrinkage_k=shrinkage_k,
-            val_fraction=val_fraction,
-            axis="archetype_only",
-            **{**eb_fit_kwargs, **variant_ic_kwargs, **score_ic_kwargs},  # type: ignore[arg-type]
-        )
+    # L1-ADR-008: degenerate Arch-Only IC removed.
+    # auto → try archetype_regime first; lift_proof gate downgrades if no OOS evidence.
+    chosen = "archetype_only" if conditioning_cfg == "archetype_only" else "archetype_regime"
 
     if chosen == "archetype_regime":
         cell_mu, cell_q10, _, _, _, _, cell_q90, _, _ = _fit_cell_means(
@@ -841,12 +786,11 @@ def fit_regime_conditional_ensemble(
             f"(L:{_n_obs_low},F:{sum(1 for v in score_calibration_valid.values() if not v)})"
         )
 
-    # ── Diagnostic table (IC sign audit) ─────────────────────────────────────
+    # ── Diagnostic table ──────────────────────────────────────────────────────
     ensemble_diag = _log_ensemble_diagnostics(
         frame=frame,
         global_mu=global_mu,
         arch_mu=arch_mu,
-        val_ic=float(val_ic),
         chosen=chosen,
         adaptive_shrinkage=adaptive_shrinkage,
         k_used=shrinkage_k if not adaptive_shrinkage else shrinkage_k_max,
@@ -951,7 +895,6 @@ def fit_regime_conditional_ensemble(
         conditioning=chosen,
         archetype_mu_bps=arch_mu,
         archetype_q10_bps=arch_q10,
-        validation_rank_ic=float(val_ic),
         variant_mu_bps=variant_mu,
         variant_offset_bps=variant_offset,
         conditioning_path=conditioning_path,
@@ -1068,16 +1011,6 @@ def predict_regime_conditional_ensemble(
         )
         q90_net_bps[idx] = q90_val
 
-    # mu-quality shrinkage: attenuate conviction proportional to in-fold val IC
-    mu_shrinkage_lambda = 1.0
-    if cfg is not None and cfg.mu_quality_shrinkage_enabled and mu_net_decision_bps.size > 0:
-        lam = float(
-            np.clip(model.validation_rank_ic / cfg.mu_quality_ic_full_scale, 0.0, 1.0)
-        )
-        mu_shrinkage_lambda = lam
-        cs_mean = float(np.mean(mu_net_decision_bps))
-        mu_net_decision_bps = lam * mu_net_decision_bps + (1.0 - lam) * cs_mean
-
     q10_net_bps = np.minimum(q10_net_bps, mu_net_decision_bps)
     q90_net_bps = np.maximum(q90_net_bps, mu_net_decision_bps)
 
@@ -1102,7 +1035,6 @@ def predict_regime_conditional_ensemble(
             "conditioning": model.conditioning,
             "conditioning_path": model.conditioning_path,
             "validation_rank_ic": model.validation_rank_ic,
-            "mu_shrinkage_lambda": mu_shrinkage_lambda,
             "lift_proof_passed": (
                 int(model.lift_proof.proof_passed) if model.lift_proof is not None else -1
             ),
