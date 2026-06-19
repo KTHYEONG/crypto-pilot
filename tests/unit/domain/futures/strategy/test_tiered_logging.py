@@ -269,6 +269,187 @@ def test_format_layer1_deployment_registry_table_lists_strategy_rows() -> None:
 
 
 # ---------------------------------------------------------------------------
+# TI-REG: format_layer1_deployment_registry_table 확장 테스트 (spec S1~S5)
+# ---------------------------------------------------------------------------
+
+def _make_evidence(
+    symbol: str,
+    strategy_id: str,
+    q_value: float,
+    hard_eligible: bool = True,
+    structural_reasons: tuple[str, ...] = (),
+) -> SymbolStrategyEvidence:
+    return SymbolStrategyEvidence(
+        key=SignalSourceKey(symbol, strategy_id, "all"),
+        mean_gross_bps=5.0,
+        mean_incremental_bps=2.0,
+        bootstrap_tstat_incremental=2.5,
+        p_value=0.02,
+        q_value=q_value,
+        positive_fold_ratio=0.75,
+        n_obs=20,
+        effective_n=15.0,
+        n_folds=3,
+        hard_eligible=hard_eligible,
+        structural_reasons=structural_reasons,
+        quality_weight=0.8 if hard_eligible else 0.0,
+    )
+
+
+def _make_registry(*evidence_items: SymbolStrategyEvidence) -> QualifiedSignalRegistry:
+    by_symbol: dict[str, tuple[SymbolStrategyEvidence, ...]] = {}
+    for ev in evidence_items:
+        sym = ev.key.symbol
+        by_symbol.setdefault(sym, ())
+        by_symbol[sym] = by_symbol[sym] + (ev,)
+    return QualifiedSignalRegistry(
+        by_symbol=by_symbol,
+        ready_symbols=tuple(by_symbol.keys()),
+        trade_scope_count=len(by_symbol),
+        registry_version="test",
+    )
+
+
+class TestDeploymentRegistryTablePassFail:
+    """S1~S5: PASS/FAIL 분리, 라벨, maturity, 하위호환 검증."""
+
+    def test_s1_pass_full_fail_summary(self) -> None:
+        """S1 (Happy): 2 PASS + 3 FAIL all_evidence → PASS 전체 + [NOT PROMOTED] 1줄."""
+        # Arrange
+        pass_ev1 = _make_evidence("BTCUSDT", "trend:fast", q_value=0.20)
+        pass_ev2 = _make_evidence("ETHUSDT", "mom:slow", q_value=0.60)
+        fail_ev1 = _make_evidence(
+            "SOLUSDT", "rsi:6", q_value=0.90, hard_eligible=False, structural_reasons=("insufficient_folds",)
+        )
+        fail_ev2 = _make_evidence(
+            "DOGEUSDT", "rsi:6", q_value=0.95, hard_eligible=False, structural_reasons=("insufficient_folds",)
+        )
+        fail_ev3 = _make_evidence(
+            "XRPUSDT", "bb:20", q_value=0.99, hard_eligible=False, structural_reasons=("no_incremental_edge",)
+        )
+        registry = _make_registry(pass_ev1, pass_ev2)
+        all_ev = (pass_ev1, pass_ev2, fail_ev1, fail_ev2, fail_ev3)
+
+        # Act
+        result = format_layer1_deployment_registry_table(registry, all_evidence=all_ev)
+
+        # Assert
+        assert "[NOT PROMOTED] 3 pairs" in result
+        assert "insufficient_foldsx2" in result
+        assert "no_incremental_edgex1" in result
+        assert "BTCUSDT" in result
+        assert "ETHUSDT" in result
+
+    def test_s2_backward_compat_no_fail_section(self) -> None:
+        """S2 (하위호환): all_evidence=() → FAIL 섹션 미출력."""
+        # Arrange
+        ev = _make_evidence("BTCUSDT", "trend:fast", q_value=0.10)
+        registry = _make_registry(ev)
+
+        # Act
+        result = format_layer1_deployment_registry_table(registry)
+
+        # Assert
+        assert "[NOT PROMOTED]" not in result
+        assert "L1 FINAL PROMOTION SUMMARY" in result
+
+    def test_s4_label_no_rejected_keyword(self) -> None:
+        """S4 (라벨): q=0.10/0.50/0.80 모두 [L2-PASS], REJECTED 문자열 없음."""
+        # Arrange
+        ev_hi = _make_evidence("BTCUSDT", "trend:fast", q_value=0.10)
+        ev_mid = _make_evidence("ETHUSDT", "mom:slow", q_value=0.50)
+        ev_lo = _make_evidence("SOLUSDT", "rsi:6", q_value=0.80)
+        registry = _make_registry(ev_hi, ev_mid, ev_lo)
+
+        # Act
+        result = format_layer1_deployment_registry_table(registry)
+
+        # Assert
+        assert "REJECTED" not in result
+        assert "WATCH" not in result
+        assert "PROMOTED" not in result
+        assert "[L2-PASS] Q:hi" in result
+        assert "[L2-PASS] Q:mid" in result
+        assert "[L2-PASS] Q:lo" in result
+
+    def test_s5_empty_registry_with_fail_evidence(self) -> None:
+        """S5 (Empty registry): 빈 registry + all_evidence 3 fail → 미전달 메시지 + FAIL 요약."""
+        # Arrange
+        empty_registry = QualifiedSignalRegistry(
+            by_symbol={},
+            ready_symbols=(),
+            trade_scope_count=0,
+            registry_version="test",
+        )
+        fail_evs = tuple(
+            _make_evidence(
+                f"SYM{i}USDT", "rsi:6", q_value=0.99, hard_eligible=False, structural_reasons=("insufficient_folds",)
+            )
+            for i in range(3)
+        )
+
+        # Act
+        result = format_layer1_deployment_registry_table(empty_registry, all_evidence=fail_evs)
+
+        # Assert
+        assert "No variants promoted to Layer 2" in result
+        assert "[NOT PROMOTED] 3 pairs" in result
+
+
+# ---------------------------------------------------------------------------
+# TI-MAT: format_layer1_outer_fold_table maturity censoring 노출
+# ---------------------------------------------------------------------------
+
+class TestOuterFoldTableMaturityDisplay:
+    """S3: dropped_by_maturity_count > 0 → [censored: N] 노출."""
+
+    def test_s3_censored_count_shown_when_nonzero(self) -> None:
+        """dropped_by_maturity_count=5 → Quality 라인에 [censored: 5] 표시."""
+        # Arrange
+        report = Layer1FoldReadiness(
+            fold_id=0,
+            registry_source_end_idx=100,
+            outer_oos_start_idx=80,
+            outer_oos_end_idx=100,
+            ready_symbols=("BTCUSDT", "ETHUSDT"),
+            matched_event_count=50,
+            probe_bps=42.5,
+            probe_lcb_bps=30.0,
+            passed=True,
+            dropped_by_maturity_count=5,
+        )
+
+        # Act
+        result = format_layer1_outer_fold_table((report,))
+
+        # Assert
+        assert "[censored: 5]" in result
+        assert "42.50 bps" in result
+
+    def test_s3_no_censored_label_when_zero(self) -> None:
+        """dropped_by_maturity_count=0 → [censored:] 미노출."""
+        # Arrange
+        report = Layer1FoldReadiness(
+            fold_id=0,
+            registry_source_end_idx=100,
+            outer_oos_start_idx=80,
+            outer_oos_end_idx=100,
+            ready_symbols=("BTCUSDT",),
+            matched_event_count=30,
+            probe_bps=55.0,
+            probe_lcb_bps=40.0,
+            passed=True,
+            dropped_by_maturity_count=0,
+        )
+
+        # Act
+        result = format_layer1_outer_fold_table((report,))
+
+        # Assert
+        assert "[censored:" not in result
+
+
+# ---------------------------------------------------------------------------
 # TI15: format_system_status
 # ---------------------------------------------------------------------------
 
