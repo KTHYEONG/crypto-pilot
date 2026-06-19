@@ -106,6 +106,11 @@ if TYPE_CHECKING:
     from src.domain.futures.optimization.opt_config import LayeredWindow
 
 logger = logging.getLogger("src.domain.futures.strategy.tiered_workflow")
+import os
+if os.environ.get("LOG_LEVEL") == "PERF":
+    logger.setLevel(15)
+
+
 
 _VALID_COVERAGE_FLAG_THRESHOLD: float = 0.80
 _TRAINED_FOLD_COVERAGE_THRESHOLD: float = 0.80
@@ -800,8 +805,14 @@ def run_l1_nested_swf(
 
     purge_bars, embargo_bars = strategy_config.resolve_purge_and_embargo_bars(cfg)
     _vol_window = composer_sigma_lookback_bars("4h")
+    t_vol = time.perf_counter()
     volatility_2d = np.column_stack(
         [rolling_per_bar_return_std(aligned.close_2d[:, i], _vol_window) for i in range(aligned.close_2d.shape[1])]
+    )
+    logger.log(
+        PERF,
+        "[perf-tiered] run_l1_nested_swf volatility_2d calculation took %.4fs",
+        time.perf_counter() - t_vol,
     )
     outer_reports: list[Layer1FoldReadiness] = []
     outer_event_frames: list[pd.DataFrame] = []
@@ -842,6 +853,7 @@ def run_l1_nested_swf(
     assert cw._GLOBAL_PURGE_BARS is None
 
     # Prime the feature cache on the parent process before multiprocessing fork
+    t_prime = time.perf_counter()
     if _can_prime_feature_cache(labeled_events):
         logger.debug("[L1-NESTED] Priming aligned feature cache on parent process")
         try:
@@ -854,13 +866,20 @@ def run_l1_nested_swf(
             logger.debug("[L1-NESTED] Feature cache priming skipped: %s", exc)
     else:
         logger.debug("[L1-NESTED] Feature cache priming skipped: insufficient labeled event schema")
+    logger.log(
+        PERF,
+        "[perf-tiered] run_l1_nested_swf prime_aligned_feature_cache took %.4fs",
+        time.perf_counter() - t_prime,
+    )
 
+    t_mp_prep = time.perf_counter()
     # Set process globals to minimize IPC size under fork
     cw._GLOBAL_LABELED_EVENTS = labeled_events
     cw._GLOBAL_ALIGNED = aligned
     cw._GLOBAL_CFG = l1_cfg
     cw._GLOBAL_PURGE_BARS = purge_bars
     mp_ctx = multiprocessing.get_context("fork")
+
 
     # Calculate memory consumption dynamically
     try:
@@ -887,6 +906,11 @@ def run_l1_nested_swf(
         str(volatility_2d.shape),
     )
 
+    logger.log(
+        PERF,
+        "[perf-tiered] run_l1_nested_swf multiprocessing prep took %.4fs",
+        time.perf_counter() - t_mp_prep,
+    )
     combined_results = []
     t_exec = time.perf_counter()
     try:
@@ -1022,6 +1046,7 @@ def run_l1_nested_swf(
         cfg=cfg,
         seed=seed,
     )
+    t_log = time.perf_counter()
     if verbose:
         logger.info(
             format_layer1_outer_fold_table(
@@ -1056,6 +1081,11 @@ def run_l1_nested_swf(
         logger.log(PERF, "[perf-tiered] fit_layer1_inference_artifact took %.4fs", time.perf_counter() - t_art)
         if verbose:
             logger.info(format_layer1_deployment_registry_table(deployment_registry))
+    logger.log(
+        PERF,
+        "[perf-tiered] run_l1_nested_swf audit tables formatting took %.4fs",
+        time.perf_counter() - t_log,
+    )
     return Layer1Result(
         signals_per_fold=tuple(signals_per_fold),
         oos_stacked=oos_stacked,
