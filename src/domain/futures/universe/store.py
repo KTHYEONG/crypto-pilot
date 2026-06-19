@@ -41,7 +41,10 @@ UNIVERSE_DECISION_COLUMNS = (
     "role",
     "rank",
     "tradeable_score",
-    "execution_pool_score",
+    "vol_30d",
+    "friction_score",
+    "alpha_capacity_score",
+    "diversification_score",
     "adv_usdt_median",
     "execution_cost_bps",
     "funding_rate_8h",
@@ -59,8 +62,92 @@ UNIVERSE_DECISION_COLUMNS = (
 _BASE_REPORT_COLUMNS = {"symbol", "stage", "passed", "reason"}
 
 
+def _selected_frame_columns() -> list[str]:
+    return [
+        "symbol",
+        "tradeable_score",
+        "alpha_capacity_score",
+        "vol_30d",
+        "friction_score",
+        "diversification_score",
+        "rank",
+        "role",
+        "adv_usdt_median",
+        "execution_cost_bps",
+        "funding_rate_8h",
+        "beta_vs_market",
+        "cluster_id",
+        "cluster_size",
+        "anchor_cluster_member",
+        "basis_annualized_mean",
+        "basis_vol",
+        "capacity_clip_usdt_list",
+    ]
+
+
 def _to_date(value: str | date) -> date:
     return value if isinstance(value, date) else date.fromisoformat(value)
+
+
+def is_exact_selected_feature_schema(decisions: pd.DataFrame) -> bool:
+    required = {
+        "tradeable_score",
+        "vol_30d",
+        "friction_score",
+        "alpha_capacity_score",
+        "diversification_score",
+    }
+    return required.issubset(decisions.columns)
+
+
+def validate_materializable_pit_store_run(
+    *,
+    decisions: pd.DataFrame,
+    cube: UniverseStateCube | None,
+) -> bool:
+    if cube is None or "stage6_selected" not in decisions.columns:
+        return False
+    selected = decisions.loc[decisions["stage6_selected"].astype(bool)]
+    if selected.empty:
+        cube_eligible = getattr(cube, "eligible", None)
+        if cube_eligible is None:
+            return False
+        return not np.asarray(cube_eligible).any()
+    return is_exact_selected_feature_schema(decisions)
+
+
+def _decision_metric(row: Any, column: str, default: float = 0.0) -> float:
+    if not hasattr(row, column):
+        return default
+    value = getattr(row, column)
+    if pd.isna(value):
+        return default
+    return float(value)
+
+
+def _symbol_meta_from_decision_row(row: Any) -> SymbolMeta:
+    return SymbolMeta(
+        symbol=str(row.symbol),
+        role=str(row.role),
+        adv_usdt=float(row.adv_usdt_median),
+        execution_cost_bps=float(row.execution_cost_bps),
+        funding_carry_8h=float(row.funding_rate_8h),
+        beta_vs_market=float(row.beta_vs_market),
+        cluster_id=int(row.cluster_id),
+        tradeable_rank=int(row.rank) if pd.notna(row.rank) else 0,
+        basis_annualized_mean=(
+            None if pd.isna(row.basis_annualized_mean) else float(row.basis_annualized_mean)
+        ),
+        basis_vol=None if pd.isna(row.basis_vol) else float(row.basis_vol),
+        capacity_clip_usdt_list=tuple(float(item) for item in row.capacity_clip_usdt_list),
+        cluster_size=float(row.cluster_size),
+        anchor_cluster_member=float(row.anchor_cluster_member),
+        vol_30d=_decision_metric(row, "vol_30d"),
+        friction_score=_decision_metric(row, "friction_score"),
+        alpha_capacity_score=_decision_metric(row, "alpha_capacity_score"),
+        diversification_score=_decision_metric(row, "diversification_score"),
+        tradeable_score=_decision_metric(row, "tradeable_score"),
+    )
 
 
 def _run_dir(*, as_of: str | date, tf: str, run_id: str, root: Path) -> Path:
@@ -361,8 +448,23 @@ def build_decision_frame(
                     if source_row is not None
                     else 0.0
                 ),
-                "execution_pool_score": (
-                    float(source_row.get("execution_pool_score", 0.0))
+                "vol_30d": (
+                    float(source_row.get("vol_30d", 0.0))
+                    if source_row is not None
+                    else 0.0
+                ),
+                "friction_score": (
+                    float(source_row.get("friction_score", 0.0))
+                    if source_row is not None
+                    else 0.0
+                ),
+                "alpha_capacity_score": (
+                    float(source_row.get("alpha_capacity_score", 0.0))
+                    if source_row is not None
+                    else 0.0
+                ),
+                "diversification_score": (
+                    float(source_row.get("diversification_score", 0.0))
                     if source_row is not None
                     else 0.0
                 ),
@@ -502,34 +604,24 @@ def materialize_snapshot_from_store(
     report: pd.DataFrame,
     cube: UniverseStateCube | None = None,
 ) -> tuple[UniverseSnapshot, pd.DataFrame, pd.DataFrame]:
+    if not validate_materializable_pit_store_run(decisions=decisions, cube=cube):
+        raise ValueError("invalid PIT store run for materialization")
     selected = decisions.loc[decisions["stage6_selected"].astype(bool)].copy()
-    selected["_anchor_priority"] = (
-        selected["role"].astype(str).str.lower().eq("anchor").astype(int) * -1
-    )
-    selected = selected.sort_values(
-        ["_anchor_priority", "rank", "symbol"],
-        na_position="last",
-    ).reset_index(drop=True)
-    selected_meta = tuple(
-        SymbolMeta(
-            symbol=str(row.symbol),
-            role=str(row.role),
-            adv_usdt=float(row.adv_usdt_median),
-            execution_cost_bps=float(row.execution_cost_bps),
-            funding_carry_8h=float(row.funding_rate_8h),
-            beta_vs_market=float(row.beta_vs_market),
-            cluster_id=int(row.cluster_id),
-            tradeable_rank=int(row.rank) if pd.notna(row.rank) else 0,
-            basis_annualized_mean=(
-                None if pd.isna(row.basis_annualized_mean) else float(row.basis_annualized_mean)
-            ),
-            basis_vol=None if pd.isna(row.basis_vol) else float(row.basis_vol),
-            capacity_clip_usdt_list=tuple(float(item) for item in row.capacity_clip_usdt_list),
-            cluster_size=float(row.cluster_size),
-            anchor_cluster_member=float(row.anchor_cluster_member),
+    if selected.empty:
+        selected_meta: tuple[SymbolMeta, ...] = ()
+        selected_frame = pd.DataFrame(columns=_selected_frame_columns())
+    else:
+        selected["_anchor_priority"] = (
+            selected["role"].astype(str).str.lower().eq("anchor").astype(int) * -1
         )
-        for row in selected.itertuples(index=False)
-    )
+        selected = selected.sort_values(
+            ["_anchor_priority", "rank", "symbol"],
+            na_position="last",
+        ).reset_index(drop=True)
+        selected_meta = tuple(
+            _symbol_meta_from_decision_row(row) for row in selected.itertuples(index=False)
+        )
+        selected_frame = selected.loc[:, _selected_frame_columns()].copy()
     snapshot = UniverseSnapshot(
         as_of=manifest.as_of,
         tf=manifest.tf,
@@ -551,26 +643,6 @@ def materialize_snapshot_from_store(
         n_stage6_selected=manifest.n_stage6_selected,
         pit_state_cube=cube,
     )
-    selected_frame = selected.loc[
-        :,
-        [
-            "symbol",
-            "tradeable_score",
-            "execution_pool_score",
-            "rank",
-            "role",
-            "adv_usdt_median",
-            "execution_cost_bps",
-            "funding_rate_8h",
-            "beta_vs_market",
-            "cluster_id",
-            "cluster_size",
-            "anchor_cluster_member",
-            "basis_annualized_mean",
-            "basis_vol",
-            "capacity_clip_usdt_list",
-        ],
-    ].copy()
     return snapshot, selected_frame, report.copy()
 
 
