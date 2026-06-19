@@ -415,13 +415,10 @@ def discover_universe_timeline(
     cfg: UniverseConfig | None = None,
 ) -> UniverseTimelineResult:
     if l2_start is not None and l2_start < oos_start:
-        _logger.warning(
-            "discover_universe_timeline: l2_start(%s) < oos_start(%s), "
-            "current universe timeline is still 2-way and does not treat l2_start as a separate boundary",
-            l2_start.isoformat(),
-            oos_start.isoformat(),
+        raise ValueError(
+            "separate l2_start boundary is not implemented: "
+            f"l2_start={l2_start.isoformat()} oos_start={oos_start.isoformat()}"
         )
-        l2_start = None
 
     # ── PIT-only path (Stage6 legacy path removed) ──
     if cfg is None:

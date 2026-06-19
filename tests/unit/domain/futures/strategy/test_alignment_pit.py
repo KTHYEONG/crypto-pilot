@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.domain.futures.universe.contracts import UniverseStateCube
 
@@ -193,3 +194,25 @@ class TestAlignDataMapsWithStateCube:
         # Assert
         assert aligned_no_cube.active_mask.all()
         assert not aligned_with_cube.active_mask.any()
+
+    @pytest.mark.xfail(
+        reason="P2 semantic cleanup for PIT cube ADV/capacity split is not implemented yet",
+        strict=True,
+    )
+    def test_align_data_maps_state_cube_keeps_market_adv_usdt(self) -> None:
+        """state_cube capacity_usdt must not overwrite market ADV semantics."""
+        symbols = ["SYM0"]
+        tf = "4h"
+        n_bars = _MIN_BARS
+        data_maps = _make_data_maps(symbols, tf, n_bars)
+        data_maps["SYM0"][tf] = data_maps["SYM0"][tf].assign(
+            adv_usdt=np.full(n_bars, 123.0, dtype=np.float64)
+        )
+        cube = _make_state_cube(symbols, n_bars, eligible_flags={"SYM0": True})
+        cube.capacity_usdt[:, 0] = 999.0
+
+        from src.domain.futures.strategy.common.alignment import align_data_maps
+
+        aligned = align_data_maps(data_maps, symbols, tf, state_cube=cube)
+
+        np.testing.assert_allclose(aligned.adv_usdt_2d[:, 0], 123.0)

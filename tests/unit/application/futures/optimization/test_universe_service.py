@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 
 import pandas as pd
+import pytest
 from _pytest.monkeypatch import MonkeyPatch
 
 from src.application.futures.optimization import universe_service
@@ -81,6 +82,28 @@ def test_discover_universe_timeline_defaults_cfg_when_none(
     cfg = captured[0]
     assert isinstance(cfg, UniverseConfig)
     assert cfg.universe_engine == "pit"
+
+
+def test_discover_universe_timeline_rejects_separate_l2_start_boundary(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    def fail_if_called(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("_discover_universe_timeline_pit must not be called when l2_start < oos_start")
+
+    monkeypatch.setattr(
+        universe_service,
+        "_discover_universe_timeline_pit",
+        fail_if_called,
+    )
+
+    with pytest.raises(ValueError, match="separate l2_start boundary is not implemented"):
+        universe_service.discover_universe_timeline(
+            tf="4h",
+            is_start=date(2025, 1, 1),
+            oos_start=date(2025, 4, 1),
+            end_date=date(2025, 7, 1),
+            l2_start=date(2025, 3, 1),
+        )
 
 
 def test_discover_universe_timeline_does_not_promote_rejected_symbols_into_state_cube(
