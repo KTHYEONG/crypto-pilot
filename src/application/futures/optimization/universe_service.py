@@ -414,11 +414,14 @@ def discover_universe_timeline(
     min_history_bars: int = 0,
     cfg: UniverseConfig | None = None,
 ) -> UniverseTimelineResult:
-    if l2_start is not None and l2_start < oos_start:
-        raise ValueError(
-            "separate l2_start boundary is not implemented: "
-            f"l2_start={l2_start.isoformat()} oos_start={oos_start.isoformat()}"
+    if l2_start is not None and l2_start < oos_start and l2_start < is_start:
+        _logger.warning(
+            "discover_universe_timeline: l2_start(%s) < is_start(%s), "
+            "extending timeline start to l2_start for L2 boundary coverage",
+            l2_start.isoformat(),
+            is_start.isoformat(),
         )
+        is_start = l2_start
 
     # ── PIT-only path (Stage6 legacy path removed) ──
     if cfg is None:
