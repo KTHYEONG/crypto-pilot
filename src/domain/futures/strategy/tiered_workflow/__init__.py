@@ -37,6 +37,7 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     LayerUniverseAudit,
     PredictionDecompositionDiag,
     StrategySignal,
+    SymbolLifecycleRecord,
     SymbolRealizedStat,
 )
 from src.domain.futures.strategy.tiered_workflow.diagnostics import (
@@ -119,6 +120,7 @@ __all__ = [
     "LayerUniverseAudit",
     "PredictionDecompositionDiag",
     "StrategySignal",
+    "SymbolLifecycleRecord",
     "SymbolRealizedStat",
     "TieredPipelineError",
     "_cagr",
