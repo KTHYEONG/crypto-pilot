@@ -3,12 +3,75 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import date
 
 import numpy as np
 import pandas as pd
 
-from .config import Stage3Config, Stage4Config, Stage5Config
+
+@dataclass(frozen=True, slots=True)
+class Stage3Config:
+    """Liquidity and execution feasibility gates."""
+
+    min_adv_usdt_median: float = 50_000_000.0
+    max_amihud_30d: float = 1.00e-9
+    max_clip_to_adv: float = 0.0025
+    enable_oi_adv_crowding_gate: bool = True
+    max_oi_to_adv: float = 12.0
+    screening_tier: str = "mid"
+    screening_clip_usdt_by_tier: dict[str, float] = field(
+        default_factory=lambda: {
+            "seed": 1_000.0,
+            "small": 5_000.0,
+            "mid": 10_000.0,
+            "large": 25_000.0,
+            "xlarge": 50_000.0,
+        }
+    )
+    capacity_clip_usdt_list: tuple[float, ...] = (50_000.0, 100_000.0)
+
+
+@dataclass(frozen=True, slots=True)
+class Stage4Config:
+    """Execution-cost model gates."""
+
+    max_execution_cost_bps: float = 35.0
+    default_taker_fee_bps: float = 5.0
+    default_half_spread_bps: float = 1.0
+    spread_source_switch_date: str = "2020-01-01"
+    pre2020_half_spread_bps: float = 2.5
+    post2020_half_spread_bps: float = 1.0
+    default_impact_coef_bps: float = 18.0
+
+
+@dataclass(frozen=True, slots=True)
+class Stage5Config:
+    """Risk-event and anomaly gates.
+
+    Notes:
+        vol_30d는 4h 바 기준 연율화 변동성 (std * sqrt(6*365)).
+        median ~0.75, p90 ~1.81 수준의 스케일.
+        min=0.05(5% 연율, 사실상 거래 없는 코인 제거),
+        max=4.0(400% 연율, 극단적 meme 제거).
+
+        funding_sign_flip_min_abs: 부호 반전이 이상치로 인정받으려면
+        양쪽 모두 절대값이 이 임계값 이상이어야 한다.
+        +0.001% → -0.001% 수준의 중립 진동은 이상치에서 제외.
+    """
+
+    min_listing_age_days: int = 180
+    min_vol_30d: float = 0.05   # 5% annualized — 거래 없는 죽은 코인 제거
+    max_vol_30d: float = 4.0    # 400% annualized — 극단적 meme/junk 제거
+    max_abs_funding_z: float = 2.5
+    enable_funding_sign_flip: bool = True
+    funding_sign_flip_min_abs: float = 0.001  # |funding| > threshold 양쪽 모두여야 flip 이상치
+    funding_sign_flip_columns: tuple[str, ...] = (
+        "funding_sign_flip_1d",
+        "funding_sign_reversal_1d",
+        "funding_sign_change_1d",
+    )
+    funding_prev_rate_column: str = "funding_rate_8h_prev"
 
 HalfSpreadFallback = Callable[[pd.DataFrame, Stage4Config, date], pd.Series]
 _OI_SOURCE_COLUMNS: tuple[str, ...] = (
