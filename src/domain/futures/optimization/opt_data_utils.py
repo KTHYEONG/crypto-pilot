@@ -191,6 +191,73 @@ def evaluate_symbol_data_sufficiency(
     }
 
 
+def data_observable(
+    *,
+    symbol: str,
+    tf: str,
+    symbol_map: dict[str, Any],
+    onboard_date: str | None = None,
+) -> dict[str, Any]:
+    """Lifecycle-aware data observability check (PIT-safe).
+
+    Unlike ``evaluate_symbol_data_sufficiency``, this function does NOT require:
+    - Data coverage until OOS end (allows symbols that delist mid-period).
+    - Full IS/OOS bar counts.
+    - exec_1m coverage.
+
+    Only checks: frame exists, has datetime column, non-empty, basic reachability.
+    Strategy lookback readiness is delegated to StrategyReadinessCube.
+
+    Args:
+        symbol: Instrument symbol key.
+        tf: Timeframe key (e.g. "4h").
+        symbol_map: Dict mapping timeframe -> DataFrame for one symbol.
+        onboard_date: ISO date string of exchange onboarding; adjusts effective
+            start if later than first observed bar.
+
+    Returns:
+        Dict with keys: symbol, tf, pass (bool), reason, and optional
+        first_dt, last_dt, effective_start, n_bars, is_historical_stage5.
+
+    Time Complexity: O(n) where n = len(frame).
+    Space Complexity: O(1) auxiliary (no copy of the frame).
+    """
+    frame = symbol_map.get(tf)
+    if not isinstance(frame, pd.DataFrame) or frame.empty or "datetime" not in frame.columns:
+        return {"symbol": symbol, "tf": tf, "pass": False, "reason": "missing_tf_frame"}
+
+    dt_col = frame["datetime"]
+    if not pd.api.types.is_datetime64_any_dtype(dt_col):
+        dt: pd.Series = pd.to_datetime(dt_col, utc=True, errors="coerce").dropna().sort_values()
+    else:
+        dt = dt_col.dropna().sort_values()
+
+    if dt.empty:
+        return {"symbol": symbol, "tf": tf, "pass": False, "reason": "empty_datetime"}
+
+    first_dt: pd.Timestamp = dt.iloc[0]
+    last_dt: pd.Timestamp = dt.iloc[-1]
+
+    if onboard_date is not None:
+        onboard_ts = pd.Timestamp(onboard_date, tz="UTC")
+        effective_start: pd.Timestamp = max(first_dt, onboard_ts)
+    else:
+        effective_start = first_dt
+
+    n_bars = len(dt)
+    return {
+        "symbol": symbol,
+        "tf": tf,
+        "pass": True,
+        "reason": "data_observable",
+        "first_dt": first_dt.isoformat(),
+        "last_dt": last_dt.isoformat(),
+        "effective_start": effective_start.isoformat(),
+        "n_bars": n_bars,
+        "is_historical_stage5": False,
+    }
+
+
 def filter_symbols_by_data_sufficiency(
     *,
     tf: str,
