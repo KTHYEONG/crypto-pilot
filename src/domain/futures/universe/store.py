@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import shutil
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from src.core.settings import LOG_DIR
 
+from .contracts import UniverseStateCube
 from .models import (
     FilterReport,
     RejectCode,
@@ -19,6 +23,8 @@ from .models import (
     UniverseRunManifest,
     UniverseSnapshot,
 )
+
+_log = logging.getLogger(__name__)
 
 DEFAULT_UNIVERSE_STORE_ROOT = LOG_DIR / "futures/universe/store/v1"
 UNIVERSE_DECISION_COLUMNS = (
@@ -59,6 +65,56 @@ def _to_date(value: str | date) -> date:
 
 def _run_dir(*, as_of: str | date, tf: str, run_id: str, root: Path) -> Path:
     return root / "runs" / f"tf={tf}" / f"as_of={_to_date(as_of).isoformat()}" / f"run_id={run_id}"
+
+
+def _cube_parquet_path(run_dir: Path) -> Path:
+    return run_dir / "cube.parquet"
+
+
+def _cube_to_df(cube: UniverseStateCube) -> pd.DataFrame:
+    n_bar, n_inst = cube.eligible.shape
+    instrument_ids_str = [str(iid) for iid in cube.instrument_ids]
+    data = {
+        "instrument_ids": [instrument_ids_str],
+        "instrument_ids_raw": [list(cube.instrument_ids)],
+        "calendar_iso": [[str(ts) for ts in cube.calendar]],
+        "eligible": [cube.eligible.tobytes()],
+        "entry_block": [cube.entry_block.tobytes()],
+        "exit_required": [cube.exit_required.tobytes()],
+        "capacity_usdt": [cube.capacity_usdt.tobytes()],
+        "risk_scale": [cube.risk_scale.tobytes()],
+        "cost_bps": [cube.cost_bps.tobytes()],
+        "n_bar": [n_bar],
+        "n_inst": [n_inst],
+    }
+    return pd.DataFrame(data)
+
+
+def _cube_from_df(df: pd.DataFrame) -> UniverseStateCube:
+    row = df.iloc[0]
+    n_bar = int(row["n_bar"])
+    n_inst = int(row["n_inst"])
+    instrument_ids_raw = list(row["instrument_ids_raw"])
+    instrument_ids: tuple[str, ...] = tuple(str(s) for s in instrument_ids_raw)
+    calendar = pd.DatetimeIndex(
+        [pd.Timestamp(s) for s in list(row["calendar_iso"])], tz="UTC"
+    )
+    eligible = np.frombuffer(bytes(row["eligible"]), dtype=np.bool_).reshape(n_bar, n_inst)
+    entry_block = np.frombuffer(bytes(row["entry_block"]), dtype=np.bool_).reshape(n_bar, n_inst)
+    exit_required = np.frombuffer(bytes(row["exit_required"]), dtype=np.bool_).reshape(n_bar, n_inst)
+    capacity_usdt = np.frombuffer(bytes(row["capacity_usdt"]), dtype=np.float64).reshape(n_bar, n_inst)
+    risk_scale = np.frombuffer(bytes(row["risk_scale"]), dtype=np.float64).reshape(n_bar, n_inst)
+    cost_bps = np.frombuffer(bytes(row["cost_bps"]), dtype=np.float64).reshape(n_bar, n_inst)
+    return UniverseStateCube(
+        calendar=calendar,
+        instrument_ids=instrument_ids,
+        eligible=eligible,
+        entry_block=entry_block,
+        exit_required=exit_required,
+        capacity_usdt=capacity_usdt,
+        risk_scale=risk_scale,
+        cost_bps=cost_bps,
+    )
 
 
 def _manifest_to_frame(manifest: UniverseRunManifest) -> pd.DataFrame:
@@ -375,22 +431,33 @@ def write_universe_store_run(
     decisions: pd.DataFrame,
     report: pd.DataFrame,
     root: Path = DEFAULT_UNIVERSE_STORE_ROOT,
+    snapshot: UniverseSnapshot | None = None,
 ) -> Path:
-    # PIT 경로는 Stage6 decisions 스키마 없음 — 빈 DataFrame 허용
-    if decisions.empty:
-        run_dir = _run_dir(as_of=manifest.as_of, tf=manifest.tf, run_id=manifest.run_id, root=root)
-        run_dir.mkdir(parents=True, exist_ok=True)
-        _manifest_to_frame(manifest).to_parquet(run_dir / "manifest.parquet", index=False)
-        return run_dir
-    missing_columns = [column for column in UNIVERSE_DECISION_COLUMNS if column not in decisions.columns]
-    if missing_columns:
-        raise ValueError(f"universe decisions missing columns: {missing_columns}")
+    # Always write all three files (manifest, decisions, report) so store is
+    # self-consistent for load_universe_store_run.  Empty decisions get a
+    # schema-only DataFrame with UNIVERSE_DECISION_COLUMNS.
+    if decisions.empty and not set(UNIVERSE_DECISION_COLUMNS).issubset(decisions.columns):
+        decisions = pd.DataFrame(columns=list(UNIVERSE_DECISION_COLUMNS))
+    elif not decisions.empty:
+        missing_columns = [c for c in UNIVERSE_DECISION_COLUMNS if c not in decisions.columns]
+        if missing_columns:
+            raise ValueError(f"universe decisions missing columns: {missing_columns}")
     run_dir = _run_dir(as_of=manifest.as_of, tf=manifest.tf, run_id=manifest.run_id, root=root)
     run_dir.mkdir(parents=True, exist_ok=True)
     _manifest_to_frame(manifest).to_parquet(run_dir / "manifest.parquet", index=False)
     decisions.loc[:, list(UNIVERSE_DECISION_COLUMNS)].to_parquet(run_dir / "decisions.parquet", index=False)
     report.to_parquet(run_dir / "filter_report.parquet", index=False)
+    _maybe_write_cube(run_dir, snapshot)
     return run_dir
+
+
+def _maybe_write_cube(run_dir: Path, snapshot: UniverseSnapshot | None) -> None:
+    if snapshot is None:
+        return
+    cube: Any = getattr(snapshot, "pit_state_cube", None)
+    if cube is None:
+        return
+    _cube_to_df(cube).to_parquet(_cube_parquet_path(run_dir), index=False)
 
 
 def load_universe_store_run(
@@ -400,7 +467,7 @@ def load_universe_store_run(
     config_hash: str,
     data_manifest_hash: str,
     root: Path = DEFAULT_UNIVERSE_STORE_ROOT,
-) -> tuple[UniverseRunManifest, pd.DataFrame, pd.DataFrame] | None:
+) -> tuple[UniverseRunManifest, pd.DataFrame, pd.DataFrame, UniverseStateCube | None] | None:
     run_id = compute_universe_run_id(
         as_of=as_of,
         tf=tf,
@@ -418,7 +485,14 @@ def load_universe_store_run(
     report = pd.read_parquet(report_path)
     if manifest.config_hash != config_hash or manifest.data_manifest_hash != data_manifest_hash:
         return None
-    return manifest, decisions, report
+    cube: UniverseStateCube | None = None
+    cube_path = _cube_parquet_path(run_dir)
+    if cube_path.exists():
+        try:
+            cube = _cube_from_df(pd.read_parquet(cube_path))
+        except Exception as exc:
+            _log.warning("Failed to load cube.parquet: %s", exc)
+    return manifest, decisions, report, cube
 
 
 def materialize_snapshot_from_store(
@@ -426,6 +500,7 @@ def materialize_snapshot_from_store(
     manifest: UniverseRunManifest,
     decisions: pd.DataFrame,
     report: pd.DataFrame,
+    cube: UniverseStateCube | None = None,
 ) -> tuple[UniverseSnapshot, pd.DataFrame, pd.DataFrame]:
     selected = decisions.loc[decisions["stage6_selected"].astype(bool)].copy()
     selected["_anchor_priority"] = (
@@ -474,6 +549,7 @@ def materialize_snapshot_from_store(
         n_stage4_pass=manifest.n_stage4_pass,
         n_stage5_pass=manifest.n_stage5_pass,
         n_stage6_selected=manifest.n_stage6_selected,
+        pit_state_cube=cube,
     )
     selected_frame = selected.loc[
         :,
@@ -496,3 +572,44 @@ def materialize_snapshot_from_store(
         ],
     ].copy()
     return snapshot, selected_frame, report.copy()
+
+
+def gc_stale_store_runs(
+    *,
+    tf: str | None = None,
+    as_of: date | None = None,
+    root: Path = DEFAULT_UNIVERSE_STORE_ROOT,
+    keep_latest: int = 1,
+) -> int:
+    """Remove stale run_id directories, keeping only latest per as_of.
+
+    Args:
+        tf: Timeframe filter; if None, process all timeframes.
+        as_of: Specific as_of date; if None, process all as_of dirs.
+        root: Universe store root.
+        keep_latest: Number of latest runs to keep per as_of.
+
+    Returns:
+        Number of deleted run directories.
+    """
+    runs_root = root / "runs"
+    if not runs_root.exists():
+        return 0
+    tf_dirs = [d for d in runs_root.iterdir() if d.is_dir()]
+    if tf is not None:
+        tf_dirs = [d for d in tf_dirs if d.name == f"tf={tf}"]
+    deleted = 0
+    for tf_dir in tf_dirs:
+        as_of_dirs = [d for d in tf_dir.iterdir() if d.is_dir()]
+        if as_of is not None:
+            as_of_dirs = [d for d in as_of_dirs if d.name == f"as_of={as_of.isoformat()}"]
+        for as_of_dir in as_of_dirs:
+            run_dirs = sorted(
+                [d for d in as_of_dir.iterdir() if d.is_dir()],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for stale_dir in run_dirs[keep_latest:]:
+                shutil.rmtree(stale_dir)
+                deleted += 1
+    return deleted
