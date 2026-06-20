@@ -260,3 +260,41 @@ def test_allocation_backend_ensemble_skips_lgbm_calls(monkeypatch: pytest.Monkey
 
     assert calls == {"ensemble_fit": 1, "ensemble_predict": 1}
     assert outputs[0].model_output.expected_net_bps.shape[0] == 6
+
+
+def test_empty_dataset_fallback_accepts_dict_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    size = 8
+    dummy_aligned = AlignedMarketData(
+        symbols=("BTC",),
+        datetimes=np.array(pd.date_range("2026-01-01", periods=size, freq="4h")),
+        open_2d=np.ones((size, 1)),
+        high_2d=np.ones((size, 1)),
+        low_2d=np.ones((size, 1)),
+        close_2d=np.ones((size, 1)),
+        volume_2d=np.ones((size, 1)),
+        funding_2d=np.zeros((size, 1)),
+        active_mask=np.ones((size, 1), dtype=bool),
+        warm_mask=np.ones((size, 1), dtype=bool),
+        entry_block_mask=np.zeros((size, 1), dtype=bool),
+        kill_mask=np.zeros((size, 1), dtype=bool),
+    )
+    cfg = CandidateStrategyConfig(min_fit_obs=100, allocation_backend="ensemble_b0")
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_workflow.build_candidate_dataset",
+        lambda *args, **kwargs: DummyDataset(4),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_workflow.fit_candidate_feature_schema",
+        lambda *args, **kwargs: {},
+    )
+
+    outputs = run_candidate_walk_forward(
+        labeled_events=pd.DataFrame(),
+        aligned=dummy_aligned,
+        cfg=cfg,
+        folds=(WFFold(fit_start=0, fit_end=2, cal_start=2, cal_end=2, oos_start=2, oos_end=6),),
+    )
+
+    assert len(outputs) == 1
+    assert outputs[0].fit_status == "insufficient_fit"

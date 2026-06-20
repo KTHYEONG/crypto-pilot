@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
 
@@ -249,6 +249,8 @@ def build_l1_swf_folds(
     purge_bars: int,
     embargo_bars: int,
     cal_fraction: float = 0.15,
+    boundary_mode: Literal["exact_label_interval", "fixed_gap"] = "exact_label_interval",
+    allocation_backend: Literal["ensemble_b0", "ml_edge"] = "ensemble_b0",
 ) -> tuple[WFFold, ...]:
     """L1 신호 검증용 Purged Sequential Walk-Forward folds.
 
@@ -271,7 +273,7 @@ def build_l1_swf_folds(
     Time Complexity: O(n_folds)
     Space Complexity: O(n_folds)
     """
-    _ = embargo_bars  # 시그니처 일관성 유지용, 내부 로직 미사용
+    _ = embargo_bars  # exact_label_interval에서는 미사용, fixed_gap에서만 purge 사용
     if n_folds < 1:
         raise ValueError("n_folds must be >= 1")
     if l1_start_bars < 0 or l1_end_bars > n_bars or l1_start_bars >= l1_end_bars:
@@ -292,7 +294,7 @@ def build_l1_swf_folds(
     for k in range(n_folds):
         oos_s = l1_start_bars + (k + 1) * block_len
         oos_e = l1_start_bars + (k + 2) * block_len if k < n_folds - 1 else l1_end_bars
-        fit_e = oos_s - purge_bars
+        fit_e = oos_s if boundary_mode == "exact_label_interval" else oos_s - purge_bars
         if fit_e <= l1_start_bars:
             raise ValueError(
                 "insufficient fit span for L1 SWF fold: "
@@ -303,14 +305,20 @@ def build_l1_swf_folds(
                 "invalid OOS span for L1 SWF fold: "
                 f"fold={k}, oos_start={oos_s}, oos_end={oos_e}"
             )
-        fit_len = fit_e - l1_start_bars
-        cal_len = max(1, int(fit_len * cal_fraction))
-        cal_s = fit_e - cal_len
+        if boundary_mode == "exact_label_interval" and allocation_backend == "ensemble_b0":
+            fit_e = oos_s
+            cal_s = oos_s
+            cal_end = oos_s
+        else:
+            fit_len = fit_e - l1_start_bars
+            cal_len = max(1, int(fit_len * cal_fraction))
+            cal_s = fit_e - cal_len
+            cal_end = oos_s if boundary_mode == "exact_label_interval" else fit_e
         folds.append(WFFold(
             fit_start=l1_start_bars,
             fit_end=fit_e,
             cal_start=cal_s,
-            cal_end=fit_e,
+            cal_end=cal_end,
             oos_start=oos_s,
             oos_end=oos_e,
         ))
@@ -347,6 +355,14 @@ def build_l1_nested_swf_folds(
         )
     purge_cfg = int(getattr(cfg, "purge_bars", 0) or 0)
     embargo_cfg = int(getattr(cfg, "embargo_bars", 0) or 0)
+    boundary_mode = cast(
+        Literal["exact_label_interval", "fixed_gap"],
+        getattr(cfg, "l1_boundary_mode", "exact_label_interval"),
+    )
+    allocation_backend = cast(
+        Literal["ensemble_b0", "ml_edge"],
+        getattr(cfg, "allocation_backend", "ensemble_b0"),
+    )
     purge_bars = max(int(max_label_horizon_bars), purge_cfg)
     embargo_bars = max(0, embargo_cfg)
     cal_fraction = float(getattr(cfg, "ml_calibration_fraction", 0.2))
@@ -359,19 +375,31 @@ def build_l1_nested_swf_folds(
             if fold_idx < n_folds - 1
             else l1_end_idx
         )
-        fit_end = oos_start - purge_bars
-        if fit_end <= l1_start_idx:
+        outer_fit_end = oos_start if boundary_mode == "exact_label_interval" else oos_start - purge_bars
+        if outer_fit_end <= l1_start_idx:
             raise ValueError(
                 "insufficient fit span for nested L1 fold: "
-                f"fold={fold_idx}, fit_end={fit_end}, l1_start_idx={l1_start_idx}"
+                f"fold={fold_idx}, fit_end={outer_fit_end}, l1_start_idx={l1_start_idx}"
             )
-        cal_end = fit_end
-        fit_len = fit_end - l1_start_idx
-        cal_len = max(1, int(fit_len * cal_fraction))
-        cal_start = max(l1_start_idx + 1, cal_end - cal_len)
-        fit_train_end = max(l1_start_idx + 1, cal_start - embargo_bars)
-        if fit_train_end <= l1_start_idx:
-            fit_train_end = max(l1_start_idx + 1, cal_start)
+        if boundary_mode == "exact_label_interval":
+            if allocation_backend == "ensemble_b0":
+                fit_train_end = outer_fit_end
+                cal_start = outer_fit_end
+                cal_end = outer_fit_end
+            else:
+                fit_len = outer_fit_end - l1_start_idx
+                cal_len = max(1, int(fit_len * cal_fraction))
+                cal_start = max(l1_start_idx + 1, outer_fit_end - cal_len)
+                cal_end = outer_fit_end
+                fit_train_end = cal_start
+        else:
+            cal_end = outer_fit_end
+            fit_len = outer_fit_end - l1_start_idx
+            cal_len = max(1, int(fit_len * cal_fraction))
+            cal_start = max(l1_start_idx + 1, cal_end - cal_len)
+            fit_train_end = max(l1_start_idx + 1, cal_start - embargo_bars)
+            if fit_train_end <= l1_start_idx:
+                fit_train_end = max(l1_start_idx + 1, cal_start)
         if oos_end <= oos_start:
             raise ValueError(
                 "invalid nested L1 OOS span: "
@@ -388,3 +416,36 @@ def build_l1_nested_swf_folds(
             )
         )
     return tuple(folds)
+
+
+def build_l2_simulation_folds(
+    *,
+    n_bars: int,
+    l2_start_idx: int,
+    holdout_start_idx: int,
+    cfg: CandidateStrategyConfig,
+) -> tuple[WFFold, ...]:
+    """Build L2 AWF folds without supervised purge/embargo gaps."""
+    from dataclasses import replace
+
+    if l2_start_idx < 0 or holdout_start_idx > n_bars or l2_start_idx >= holdout_start_idx:
+        raise ValueError(
+            "invalid L2 simulation bar range: "
+            f"l2_start_idx={l2_start_idx}, holdout_start_idx={holdout_start_idx}, n_bars={n_bars}"
+        )
+    sim_cfg = replace(cfg, purge_bars=0, embargo_bars=0)
+    folds = build_walk_forward_folds(n_bars=holdout_start_idx, cfg=sim_cfg)
+    filtered = tuple(
+        fold for fold in folds if fold.oos_start >= l2_start_idx and fold.oos_end <= holdout_start_idx
+    )
+    if filtered:
+        return filtered
+    cal_end = max(l2_start_idx - 1, 1)
+    return (WFFold(
+        fit_start=0,
+        fit_end=cal_end,
+        cal_start=max(0, cal_end - max(1, cal_end // 5)),
+        cal_end=cal_end,
+        oos_start=l2_start_idx,
+        oos_end=holdout_start_idx,
+    ),)

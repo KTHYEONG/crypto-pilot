@@ -4,6 +4,7 @@ import logging
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -97,6 +98,7 @@ def test_strategy_mode_pipeline_orchestration_order(
         tuple[str, ...],
         UniverseSnapshot,
         dict[object, frozenset[str]],
+        object,
     ]:
         _ = rc
         _ = win
@@ -420,7 +422,11 @@ def test_strategy_stage_injects_universe_metadata_before_bridge(
     # This test targets legacy Phase D (universe-metadata injection), not the tiered
     # pipeline — force non-tiered mode so it doesn't take the tiered try/except branch
     # (which now exits early via RunnerResult instead of falling back to Phase D).
-    monkeypatch.setitem(opt_main_futures.OPT_FUTURES_CONFIG, "USE_CS_RANK_ENGINE", False)
+    monkeypatch.setitem(
+        cast(dict[str, object], opt_main_futures.__dict__["OPT_FUTURES_CONFIG"]),
+        "USE_CS_RANK_ENGINE",
+        False,
+    )
 
     opt_main_futures._run_strategy_stage(
         run_config,
@@ -714,6 +720,8 @@ def _make_window() -> opt_main_futures.QuarterlyWindow:
 def _patch_tiered_deps(
     monkeypatch: pytest.MonkeyPatch,
     captured_symbols: list[list[str]],
+    *,
+    stub_admission_to_base_scope: bool = False,
 ) -> None:
     """Patch all dependencies needed to reach the align_data_maps call in the tiered block."""
     from unittest.mock import MagicMock
@@ -774,6 +782,23 @@ def _patch_tiered_deps(
 
     monkeypatch.setattr(_align, "align_data_maps", fake_align)
 
+    if stub_admission_to_base_scope:
+        monkeypatch.setattr(
+            opt_main_futures,
+            "_resolve_tradeable_scope",
+            lambda **kwargs: opt_main_futures.TradeableScopeResult(
+                admitted=tuple(kwargs["valid_symbols"]),
+                dropped_by_reason={
+                    "missing_map": (),
+                    "empty_frame": (),
+                    "late_start": (),
+                    "min_bars": (),
+                    "no_holdout": (),
+                    "holdout_coverage": (),
+                },
+            ),
+        )
+
     # run_tiered_pipeline returns a minimal Layer1Result
     dummy_l1 = Layer1Result(
         signals_per_fold=(),
@@ -795,6 +820,24 @@ def _patch_tiered_deps(
     )
 
 
+def _stub_tradeable_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        opt_main_futures,
+        "_resolve_tradeable_scope",
+        lambda **kwargs: opt_main_futures.TradeableScopeResult(
+            admitted=tuple(kwargs["valid_symbols"]),
+            dropped_by_reason={
+                "missing_map": (),
+                "empty_frame": (),
+                "late_start": (),
+                "min_bars": (),
+                "no_holdout": (),
+                "holdout_coverage": (),
+            },
+        ),
+    )
+
+
 def test_tiered_aligned_scope_s1_happy_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -811,7 +854,7 @@ def test_tiered_aligned_scope_s1_happy_path(
     )
     snapshot = _make_snapshot(stage6_syms)
     captured: list[list[str]] = []
-    _patch_tiered_deps(monkeypatch, captured)
+    _patch_tiered_deps(monkeypatch, captured, stub_admission_to_base_scope=True)
 
     # Act
     run_config = build_run_config_from_args(
@@ -847,7 +890,7 @@ def test_tiered_aligned_scope_s2_fallback_when_no_overlap(
     )
     snapshot = _make_snapshot(stage6_syms)  # stage6 syms absent from data_maps
     captured: list[list[str]] = []
-    _patch_tiered_deps(monkeypatch, captured)
+    _patch_tiered_deps(monkeypatch, captured, stub_admission_to_base_scope=True)
 
     # Act
     run_config = build_run_config_from_args(
@@ -884,7 +927,7 @@ def test_tiered_aligned_scope_s3_regression_breadth_denominator(
     )
     snapshot = _make_snapshot(stage6_syms)
     captured: list[list[str]] = []
-    _patch_tiered_deps(monkeypatch, captured)
+    _patch_tiered_deps(monkeypatch, captured, stub_admission_to_base_scope=True)
 
     run_config = build_run_config_from_args(
         {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
@@ -893,10 +936,10 @@ def test_tiered_aligned_scope_s3_regression_breadth_denominator(
         run_config, _make_window(), data_stage, universe_snapshot=snapshot
     )
 
-    # align_data_maps receives the full historical union
+    # align_data_maps receives the admitted subset only; missing symbols are dropped.
     assert len(captured) >= 1
-    assert len(captured[-1]) == 63
-    assert sorted(captured[-1]) == sorted(valid_syms_63)
+    assert len(captured[-1]) == 12
+    assert sorted(captured[-1]) == sorted(stage6_syms)
 
     # Verify breadth would be 12/12 = 1.0 with correct scope
     breadth_after_fix = 12 / 12
@@ -934,7 +977,7 @@ def test_tiered_aligned_scope_s4_partial_overlap(
     )
     snapshot = _make_snapshot(stage6_syms)
     captured: list[list[str]] = []
-    _patch_tiered_deps(monkeypatch, captured)
+    _patch_tiered_deps(monkeypatch, captured, stub_admission_to_base_scope=True)
 
     run_config = build_run_config_from_args(
         {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
@@ -1024,6 +1067,7 @@ def test_tiered_window_uses_run_config_date_reference(
             None,
         ),
     )
+    _stub_tradeable_scope(monkeypatch)
 
     run_config = build_run_config_from_args(
         {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full", "date": "2026-05-01"}
@@ -1117,6 +1161,7 @@ def test_tiered_pipeline_uses_unfiltered_labeled_events(
         )
 
     monkeypatch.setattr(_tw, "run_tiered_pipeline", _capture_tiered)
+    _stub_tradeable_scope(monkeypatch)
 
     run_config = build_run_config_from_args(
         {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full", "date": "2026-05-01"}
@@ -1196,6 +1241,7 @@ def test_tiered_layer3_terminal_failure_does_not_fallback_to_phase_d(
         "run_tiered_pipeline",
         _raise_l3_error,
     )
+    _stub_tradeable_scope(monkeypatch)
 
     caplog.set_level(logging.INFO)
 
@@ -1284,7 +1330,7 @@ def test_effective_trade_syms_s1_excludes_symbol_delisted_before_holdout_end(
         universe_snapshot=_make_snapshot(["AAUSDT", "BBUSDT", "CCUSDT"]),
     )
 
-    # Assert: effective_trade_syms == [AA, BB] (CC delisted before holdout_end, excluded)
+    # Assert: effective_trade_syms excludes CC because no_holdout is a drop reason.
     assert len(captured) >= 1
     tiered_call = captured[-1]
     assert sorted(tiered_call) == ["AAUSDT", "BBUSDT"]
@@ -1385,6 +1431,7 @@ def test_tiered_pipeline_s2_raises_when_aligned_end_before_holdout_start(
             None,
         ),
     )
+    _stub_tradeable_scope(monkeypatch)
 
     run_config = build_run_config_from_args(
         {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
@@ -1402,6 +1449,7 @@ def test_tiered_pipeline_s2_raises_when_aligned_end_before_holdout_start(
 
     # Assert: terminal failure surfaced as RunnerResult, not a silent Phase D fallback.
     assert result is not None
+    assert isinstance(result, opt_main_futures.RunnerResult)
     assert result.exit_code == 1
     assert result.reason.startswith("tiered_pipeline_error:")
     assert "ValueError" in result.reason
@@ -1441,7 +1489,7 @@ def test_effective_trade_syms_s14_uses_merged_full_strategy_maps(
         valid_symbols=["BTCUSDT"],
     )
     captured: list[list[str]] = []
-    _patch_tiered_deps(monkeypatch, captured)
+    _patch_tiered_deps(monkeypatch, captured, stub_admission_to_base_scope=True)
 
     # pick_strategy_data_maps is real (not mocked) — exercises C5 merge logic so
     # full_strategy_maps carries the merged (IS+OOS) coverage through holdout_end.
@@ -1492,7 +1540,7 @@ def test_align_data_maps_s15_receives_merged_full_strategy_maps(
         valid_symbols=["BTCUSDT"],
     )
     captured: list[list[str]] = []
-    _patch_tiered_deps(monkeypatch, captured)
+    _patch_tiered_deps(monkeypatch, captured, stub_admission_to_base_scope=True)
 
     merged_frame = pd.DataFrame({"datetime": pd.date_range("2025-01-01", periods=10, freq="4h")})
     merged_sentinel_maps = {"BTCUSDT": {"4h": merged_frame}}
@@ -1581,7 +1629,6 @@ def test_run_strategy_stage_passes_pit_state_cube_with_real_run_config(
     import src.domain.futures.portfolio.portfolio_constructor as _pc
     import src.domain.futures.strategy.common.alignment as _align
     import src.domain.futures.strategy.tiered_workflow as _tw
-    import src.domain.futures.universe.readiness as _readiness
 
     monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kw: MagicMock())
     monkeypatch.setattr(_pc, "PortfolioCaps", MagicMock(return_value=MagicMock()))
@@ -1620,6 +1667,7 @@ def test_run_strategy_stage_passes_pit_state_cube_with_real_run_config(
 
     monkeypatch.setattr(_align, "align_data_maps", fake_align)
     monkeypatch.setattr(_tw, "run_tiered_pipeline", lambda **_kw: (dummy_l1, None, None))
+    _stub_tradeable_scope(monkeypatch)
 
     opt_main_futures._run_strategy_stage(
         run_config,
@@ -1630,6 +1678,27 @@ def test_run_strategy_stage_passes_pit_state_cube_with_real_run_config(
     )
 
     assert captured["state_cube"] is cube
+
+
+# ---------------------------------------------------------------------------
+# C0 — _resolve_base_symbol_scope unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_base_symbol_scope_filters_missing_and_empty_frames() -> None:
+    strategy_maps: dict[str, dict[str, pd.DataFrame]] = {
+        "symA": {"4h": pd.DataFrame({"datetime": pd.date_range("2026-01-01", periods=2, freq="4h", tz="UTC")})},
+        "symB": {"4h": pd.DataFrame({"datetime": []})},
+        "symC": {"1h": pd.DataFrame({"datetime": pd.date_range("2026-01-01", periods=2, freq="1h", tz="UTC")})},
+    }
+
+    result = opt_main_futures._resolve_base_symbol_scope(
+        valid_symbols=["symZ", "symA", "symB", "symC"],
+        strategy_maps=strategy_maps,
+        tf="4h",
+    )
+
+    assert result == ("symA",)
 
 
 # ---------------------------------------------------------------------------
@@ -1679,10 +1748,9 @@ def test_resolve_tradeable_scope_scenario1_early_listed_delisted_mid_oos_admitte
         min_holdout_coverage=0.90,
     )
 
-    # symA: admitted (full coverage); symB: admitted (OOS cov ~97% > 90%, starts ≤ fetch_start)
-    # symC: rejected (starts 2023-06 > fetch_start → warm-up guard fails)
-    assert set(result) == {"symA", "symB"}
-    assert "symC" not in result
+    # symA: admitted (full coverage); symB: admitted; symC: excluded by late_start.
+    assert set(result.admitted) == {"symA", "symB"}
+    assert "symC" in result.dropped_by_reason["late_start"]
 
 
 def test_resolve_tradeable_scope_scenario2_holdout_truncation_excluded() -> None:
@@ -1711,9 +1779,9 @@ def test_resolve_tradeable_scope_scenario2_holdout_truncation_excluded() -> None
         min_holdout_coverage=0.90,
     )
 
-    # Assert — symD excluded due to zero OOS coverage
-    assert "symD" not in result
-    assert result == []
+    # Assert — symD excluded because it has no holdout coverage.
+    assert result.admitted == ()
+    assert result.dropped_by_reason["no_holdout"] == ("symD",)
 
 
 def test_resolve_tradeable_scope_scenario3_min_bars_guard_excluded() -> None:
@@ -1744,5 +1812,79 @@ def test_resolve_tradeable_scope_scenario3_min_bars_guard_excluded() -> None:
     )
 
     # Assert — symE excluded because n_bars (10) < min_window_bars (1500)
-    assert "symE" not in result
-    assert result == []
+    assert result.admitted == ()
+    assert result.dropped_by_reason["min_bars"] == ("symE",)
+
+
+def test_resolve_tradeable_scope_reason_counts_sum_to_base_scope() -> None:
+    fetch_start = pd.Timestamp("2022-10-01", tz="UTC")
+    oos_start = pd.Timestamp("2025-10-01", tz="UTC")
+    holdout_end = pd.Timestamp("2026-04-01", tz="UTC")
+    strategy_maps: dict[str, dict[str, pd.DataFrame]] = {
+        "symA": _make_sym_df("2022-10-01", "2026-04-01"),
+        "symB": _make_sym_df("2023-06-01", "2026-04-01"),
+        "symC": {"4h": pd.DataFrame({"datetime": pd.date_range("2025-10-01", periods=10, freq="4h", tz="UTC")})},
+        "symD": _make_sym_df("2022-10-01", "2025-09-30"),
+    }
+    base_scope = opt_main_futures._resolve_base_symbol_scope(
+        valid_symbols=["symA", "symB", "symC", "symD", "missing"],
+        strategy_maps=strategy_maps,
+        tf="4h",
+    )
+
+    result = opt_main_futures._resolve_tradeable_scope(
+        valid_symbols=base_scope,
+        strategy_maps=strategy_maps,
+        tf="4h",
+        fetch_start=fetch_start,
+        oos_start=oos_start,
+        holdout_end=holdout_end,
+        min_window_bars=1500,
+        min_holdout_coverage=0.90,
+    )
+
+    dropped_total = sum(len(v) for v in result.dropped_by_reason.values())
+    assert len(result.admitted) + dropped_total == len(base_scope)
+
+
+def test_tiered_empty_admission_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.domain.futures.strategy.tiered_workflow import TieredPipelineError
+
+    fetch_start = date(2025, 1, 1)
+    holdout_start = date(2025, 10, 1)
+    holdout_end = date(2026, 3, 31)
+
+    delisted_coverage = pd.DataFrame(
+        {"datetime": pd.date_range("2022-01-01", "2025-08-01", freq="4h", tz="UTC")}
+    )
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps={
+            "AAUSDT": {"4h": delisted_coverage.copy()},
+            "BBUSDT": {"4h": delisted_coverage.copy()},
+        },
+        oos_data_maps={},
+        valid_symbols=["AAUSDT", "BBUSDT"],
+    )
+    captured: list[list[str]] = []
+    _patch_tiered_deps(monkeypatch, captured)
+
+    import src.domain.futures.optimization.opt_config as _opt_cfg
+
+    layered_window = _make_layered_window(
+        fetch_start=fetch_start, holdout_start=holdout_start, holdout_end=holdout_end
+    )
+    monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kw: layered_window)
+
+    run_config = build_run_config_from_args(
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
+    )
+
+    with pytest.raises(TieredPipelineError, match="tiered tradeable scope is empty"):
+        opt_main_futures._run_strategy_stage(
+            run_config,
+            _make_window(),
+            data_stage,
+            universe_snapshot=_make_snapshot(["AAUSDT", "BBUSDT"]),
+        )
