@@ -808,6 +808,4 @@ def load_futures_data_maps_for_symbols(
 
     return data_maps, oos_data_maps, valid_symbols
 
-    return data_maps, oos_data_maps, valid_symbols
-
 
