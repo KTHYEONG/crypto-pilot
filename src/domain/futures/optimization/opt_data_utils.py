@@ -620,6 +620,13 @@ def load_single_symbol_data(
             if not pd.api.types.is_datetime64_any_dtype(df["datetime"]):
                 df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
 
+            # Pre-convert meta columns to numeric to avoid alignment runtime overhead
+            for _mc in ("coverage_60d", "last_60d_coverage", "vol_30d", "friction_score", 
+                        "alpha_capacity_score", "diversification_score", "tradeable_score", 
+                        "cluster_id", "beta_vs_market", "cluster_size", "anchor_cluster_member"):
+                if _mc in df.columns:
+                    df[_mc] = pd.to_numeric(df[_mc], errors="coerce")
+
             is_start_dt = pd.Timestamp(start, tz="UTC")
             is_end_dt = pd.Timestamp(is_end, tz="UTC")
 
@@ -727,9 +734,11 @@ def load_futures_data_maps_for_symbols(
     # [Fix] Filter out non-ASCII symbols before processing
     symbols = [s for s in symbols if all(ord(c) < 128 for c in s)]
 
-    # [Optimization] Use ProcessPoolExecutor to bypass GIL for CPU-bound pandas operations (merge, integrity check).
-    # Since we are loading 90+ symbols, the CPU overhead of thread serialization is significant.
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max(1, (os.cpu_count() or 4) // 2)) as executor:
+    # [Optimization] Use ThreadPoolExecutor instead of ProcessPoolExecutor.
+    # ProcessPoolExecutor introduces massive serialization (pickle) overhead when passing large DataFrame maps.
+    # Since I/O-bound parquet reading and pandas underlying C extension functions release the GIL,
+    # ThreadPool is superior.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 4) * 2)) as executor:
         futures = [
             executor.submit(
                 load_single_symbol_data,

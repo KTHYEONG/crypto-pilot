@@ -215,8 +215,14 @@ def align_data_maps(
         # Phase D/E: per-symbol 정적 메타 (PIT-safe: aligned window의 첫 유효값 사용)
         for _mc in _meta_cols_to_read:
             if _mc in frame.columns:
-                _meta_series = pd.to_numeric(frame[_mc].iloc[start:end], errors="coerce").dropna()
-                _meta_value = float(_meta_series.iloc[0]) if not _meta_series.empty else float("nan")
+                # Fast numpy-backed array scanning to extract first non-NaN value
+                arr = (
+                    frame[_mc].values[start:end]
+                    if hasattr(frame[_mc], "values")
+                    else frame[_mc].iloc[start:end].to_numpy()
+                )
+                mask_valid = ~np.isnan(arr)
+                _meta_value = float(arr[mask_valid][0]) if mask_valid.any() else float("nan")
                 _sym_meta_lists[_mc].append(_meta_value)
             else:
                 _sym_meta_lists[_mc].append(float("nan"))
