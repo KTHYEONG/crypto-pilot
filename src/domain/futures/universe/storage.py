@@ -425,6 +425,193 @@ def _resolve_effective_sync_window(
     return eff_start, eff_end
 
 
+def _tf_to_offset(tf: str) -> str:
+    """Map timeframe string to pandas offset alias.
+
+    Args:
+        tf: Timeframe string e.g. ``"4h"``, ``"1h"``, ``"1d"``.
+
+    Returns:
+        Pandas offset alias string.
+    """
+    # Normalize: "1d" → "1D" for pandas compatibility
+    if tf.endswith("d") and not tf.endswith("D"):
+        return tf[:-1] + "D"
+    return tf
+
+
+def compute_continuity_metrics(
+    klines_tf: pd.DataFrame,
+    *,
+    onboard_date: date,
+    as_of_date: date,
+    tf: str,
+) -> dict[str, Any]:
+    """Compute data continuity quality metrics from kline DataFrame.
+
+    Compares actual observed bars against expected PIT-safe grid derived
+    from ``onboard_date`` to ``as_of_date``. The denominator is clamped to
+    the post-onboard period only, preventing survival-bias penalization of
+    newly-listed symbols.
+
+    Args:
+        klines_tf: OHLCV DataFrame with ``datetime`` column (UTC-aware
+            or UTC-naive). Must contain columns: ``open``, ``high``,
+            ``low``, ``close``, ``volume``. ``quote_vol`` is optional.
+        onboard_date: First valid trading date for this symbol (PIT anchor).
+        as_of_date: Evaluation cut-off date (inclusive, PIT-safe upper bound).
+        tf: Timeframe string e.g. ``"4h"``, ``"1h"``, ``"1d"``.
+
+    Returns:
+        Dict with keys matching ``LedgerRow`` continuity fields:
+        - ``n_bar_gaps``: int — distinct gap runs (missing expected bars)
+        - ``max_gap_bars``: int — length of longest continuous gap
+        - ``coverage_ratio``: float — observed_bars / expected_bars
+        - ``frozen_bars``: int — longest run of consecutive identical close
+        - ``n_zero_volume_bars_60d``: int — bars with quote_vol ≤ 1e-8 in
+          last 60 calendar days from as_of_date
+        - ``has_nan``: bool — any NaN in OHLCV columns
+        - ``has_inf``: bool — any inf in OHLCV columns
+        - ``has_timestamp_issues``: bool — duplicate or non-monotonic datetime
+
+    Notes:
+        Time: O(T log T) for sort + diff. Space: O(T) where T = bar count.
+        Array shapes: expected_grid [E], observed_set [T], missing [E-T].
+    """
+    # ── OHLCV columns to check (use .get for safety) ─────────────────────
+    ohlcv_cols: list[str] = ["open", "high", "low", "close", "volume", "quote_vol"]
+    present_cols: list[str] = [c for c in ohlcv_cols if c in klines_tf.columns]
+
+    # Default safe values for empty input
+    if klines_tf.empty:
+        return {
+            "n_bar_gaps": 0,
+            "max_gap_bars": 0,
+            "coverage_ratio": 0.0,
+            "frozen_bars": 0,
+            "n_zero_volume_bars_60d": 0,
+            "has_nan": False,
+            "has_inf": False,
+            "has_timestamp_issues": False,
+        }
+
+    # ── NaN / inf checks ─────────────────────────────────────────────────
+    has_nan: bool = bool(klines_tf[present_cols].isnull().any().any())
+    has_inf: bool = bool(
+        klines_tf[present_cols]
+        .apply(lambda s: np.isinf(pd.to_numeric(s, errors="coerce")))
+        .any()
+        .any()
+    )
+
+    # ── Timestamp issues: duplicate or non-monotonic ──────────────────────
+    dt_col = klines_tf["datetime"]
+    dt_utc = pd.to_datetime(dt_col, utc=True, errors="coerce")
+    has_timestamp_issues: bool = bool(dt_utc.duplicated().any()) or not bool(
+        dt_utc.is_monotonic_increasing
+    )
+
+    # ── Build expected grid (PIT-safe: onboard_date → as_of_date) ────────
+    offset_str = _tf_to_offset(tf)
+    try:
+        expected_grid = pd.date_range(
+            start=pd.Timestamp(onboard_date, tz="UTC"),
+            end=pd.Timestamp(as_of_date, tz="UTC"),
+            freq=offset_str,
+        )
+    except Exception as exc:
+        logger.warning(
+            "compute_continuity_metrics: date_range failed tf=%s offset=%s err=%s",
+            tf,
+            offset_str,
+            exc,
+        )
+        expected_grid = pd.DatetimeIndex([])
+
+    expected_count: int = len(expected_grid)
+
+    # ── Clamp observed bars to PIT boundary ──────────────────────────────
+    pit_upper = pd.Timestamp(as_of_date, tz="UTC") + pd.Timedelta(days=1)
+    observed_dt = dt_utc[
+        (dt_utc >= pd.Timestamp(onboard_date, tz="UTC")) & (dt_utc < pit_upper)
+    ].dropna()
+    observed_count: int = len(observed_dt)
+
+    coverage_ratio: float = (
+        float(observed_count) / float(expected_count) if expected_count > 0 else 0.0
+    )
+    coverage_ratio = min(coverage_ratio, 1.0)  # cap at 100%
+
+    # ── Gap analysis: missing bars from expected grid ─────────────────────
+    # Use .asi8 for both Series and DatetimeIndex to guarantee same internal
+    # int unit (pandas 2.x may use us instead of ns — .asi8 is consistent).
+    n_bar_gaps: int = 0
+    max_gap_bars: int = 0
+    if expected_count > 0:
+        exp_ints: np.ndarray = expected_grid.asi8
+        obs_ints: set[int] = set(pd.DatetimeIndex(observed_dt).asi8)
+        missing_mask = ~np.isin(exp_ints, list(obs_ints))
+        missing_sorted = np.sort(exp_ints[missing_mask])
+        if len(missing_sorted) > 0:
+            # Bar interval from expected grid (consistent unit with .asi8)
+            bar_interval = int(exp_ints[1] - exp_ints[0]) if len(exp_ints) >= 2 else 1
+            if bar_interval <= 0:
+                bar_interval = 1
+            diffs = np.diff(missing_sorted)
+            # Consecutive missing bars: diff == bar_interval
+            breaks = np.where(diffs != bar_interval)[0]
+            # Number of distinct gap runs
+            n_bar_gaps = int(len(breaks) + 1)
+            # Length of each run
+            run_ends = np.append(breaks, len(missing_sorted) - 1)
+            run_starts = np.append(0, breaks + 1)
+            run_lengths = run_ends - run_starts + 1
+            max_gap_bars = int(run_lengths.max())
+
+    # ── Frozen bars: longest consecutive run with identical close ─────────
+    frozen_bars: int = 0
+    if "close" in klines_tf.columns and len(klines_tf) >= 2:
+        close_vals = pd.to_numeric(klines_tf["close"], errors="coerce").values
+        # diff==0 means next bar has same close as previous
+        same = np.diff(close_vals) == 0.0
+        # Run-length encoding on 'same' mask
+        if same.any():
+            # Identify run boundaries
+            padded = np.concatenate(([False], same, [False]))
+            changes = np.diff(padded.astype(np.int8))
+            run_starts_f = np.where(changes == 1)[0]
+            run_ends_f = np.where(changes == -1)[0]
+            run_lens = run_ends_f - run_starts_f
+            # run_lens here = consecutive same-close pairs → bars in frozen run = pairs+1
+            frozen_bars = int((run_lens + 1).max()) if len(run_lens) > 0 else 0
+
+    # ── Zero volume bars in last 60 calendar days ─────────────────────────
+    n_zero_volume_bars_60d: int = 0
+    window_start_60d = pd.Timestamp(as_of_date, tz="UTC") - pd.Timedelta(days=60)
+    recent_mask = (dt_utc >= window_start_60d) & (dt_utc < pit_upper)
+    if "quote_vol" in klines_tf.columns:
+        qvol = pd.to_numeric(
+            klines_tf.loc[recent_mask.values, "quote_vol"], errors="coerce"
+        ).fillna(0.0)
+        n_zero_volume_bars_60d = int((qvol <= 1e-8).sum())
+    elif "volume" in klines_tf.columns:
+        vol = pd.to_numeric(
+            klines_tf.loc[recent_mask.values, "volume"], errors="coerce"
+        ).fillna(0.0)
+        n_zero_volume_bars_60d = int((vol <= 1e-8).sum())
+
+    return {
+        "n_bar_gaps": n_bar_gaps,
+        "max_gap_bars": max_gap_bars,
+        "coverage_ratio": coverage_ratio,
+        "frozen_bars": frozen_bars,
+        "n_zero_volume_bars_60d": n_zero_volume_bars_60d,
+        "has_nan": has_nan,
+        "has_inf": has_inf,
+        "has_timestamp_issues": has_timestamp_issues,
+    }
+
+
 def smart_filter_symbols(limit: int | None = None) -> list[str]:
     """Fast-mode filter: top-volume elite symbols (optional acceleration mode)."""
     logger.info("Starting Smart Early-Exit Filtering (elite_fast)...")
@@ -650,6 +837,34 @@ def sync_single_symbol_data(
     daily_df = daily_df[(daily_df.index >= start_date) & (daily_df.index <= end_date)]
     records = daily_df.reset_index().to_dict('records')
     
+    # ── Compute continuity metrics once per symbol (full window, O(T log T)) ──
+    # klines_4h has a 'datetime' column; ensure it is UTC-aware for the grid.
+    _continuity = compute_continuity_metrics(
+        klines_4h,
+        onboard_date=true_first_date,
+        as_of_date=end_date,
+        tf="4h",
+    )
+    _n_bar_gaps: int = int(_continuity["n_bar_gaps"])
+    _max_gap_bars: int = int(_continuity["max_gap_bars"])
+    _coverage_ratio: float = float(_continuity["coverage_ratio"])
+    _frozen_bars: int = int(_continuity["frozen_bars"])
+    _n_zero_vol_60d: int = int(_continuity["n_zero_volume_bars_60d"])
+    _has_nan: bool = bool(_continuity["has_nan"])
+    _has_inf: bool = bool(_continuity["has_inf"])
+    _has_timestamp_issues: bool = bool(_continuity["has_timestamp_issues"])
+
+    # expected_is_bars: bars from onboard_date to end_date on 4h grid
+    try:
+        _expected_grid = pd.date_range(
+            start=pd.Timestamp(true_first_date, tz="UTC"),
+            end=pd.Timestamp(end_date, tz="UTC"),
+            freq="4h",
+        )
+        _expected_is_bars: int = len(_expected_grid)
+    except Exception:
+        _expected_is_bars = max(1, len(klines_4h))
+
     daily_rows = []
     for r in records:
         day = r['date']
@@ -663,19 +878,23 @@ def sync_single_symbol_data(
 
         knowledge_date = (day + timedelta(days=1)).isoformat()
         listing_age = max(0, (day - true_first_date).days)
-        
+
         daily_rows.append(LedgerRow(
             symbol=symbol, date=day.isoformat(), knowledge_date=knowledge_date,
             is_listed=True, is_trading=True, status="TRADING",
             first_kline_date=true_first_date.isoformat(),
             adv_usdt_median=adv, adv_usdt_mean=adv,
-            has_kline=True, has_funding=not funding.empty, n_bar_gaps=0, max_gap_bars=0,
-            frozen_bars=0, last_60d_coverage=1.0, n_zero_volume_bars_60d=0,
+            has_kline=True, has_funding=not funding.empty,
+            n_bar_gaps=_n_bar_gaps, max_gap_bars=_max_gap_bars,
+            frozen_bars=_frozen_bars, last_60d_coverage=_coverage_ratio,
+            n_zero_volume_bars_60d=_n_zero_vol_60d,
+            has_nan=_has_nan, has_inf=_has_inf,
+            has_timestamp_issues=_has_timestamp_issues,
             funding_rate_8h=fr, listing_age_days=listing_age,
             vol_30d=vol_30d_val, risk_event_override=None,
             updated_at_utc=datetime.now().isoformat(),
-            is_coverage=True,
-            n_is_bars=pit_bars, expected_is_bars=pit_bars, tf="4h",
+            is_coverage=_coverage_ratio >= 0.95,
+            n_is_bars=pit_bars, expected_is_bars=_expected_is_bars, tf="4h",
             amihud_30d=amihud, mark_price=last_price, funding_zscore=fz,
         ))
     return daily_rows, len(klines_4h)
