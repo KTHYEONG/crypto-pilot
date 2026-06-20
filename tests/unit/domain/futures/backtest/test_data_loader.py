@@ -303,4 +303,118 @@ def test_ensure_ohlcv_data_clips_to_onboard_date_and_prevents_infinite_backfill_
         assert start_dt >= pd.to_datetime("2023-07-24T08:00:00Z", utc=True)
 
 
+# ── OPT-5: Baggage columns dropped in _load_cache ──────────────────────
+
+
+def test_load_cache_drops_baggage_columns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OPT-5: _load_cache drops close_time, no_trades, ignore columns."""
+    import tempfile
+
+    df = pd.DataFrame({
+        "timestamp": [1704067200000, 1704153600000],
+        "open": [1.0, 2.0],
+        "high": [1.1, 2.1],
+        "low": [0.9, 1.9],
+        "close": [1.05, 2.05],
+        "volume": [100.0, 200.0],
+        "close_time": ["1710000000000", "1710000000001"],
+        "no_trades": ["100", "200"],
+        "ignore": ["0", "0"],
+        "datetime": pd.to_datetime(["2024-01-01", "2024-01-02"], utc=True),
+    })
+    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+        tmp_path = f.name
+    df.to_parquet(tmp_path, index=False)
+
+    collector = DataCollector()
+    monkeypatch.setattr(collector, "_cache_path", lambda *a, **kw: Path(tmp_path))
+    monkeypatch.setattr(collector, "_normalize_df", lambda x: x)
+
+    result = collector._load_cache("TESTUSDT", "1h")
+    assert "close_time" not in result.columns
+    assert "no_trades" not in result.columns
+    assert "ignore" not in result.columns
+    assert "open" in result.columns
+    assert "close" in result.columns
+    assert "datetime" in result.columns
+    Path(tmp_path).unlink(missing_ok=True)
+
+
+def test_load_cache_no_baggage_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OPT-5: _load_cache unchanged when no baggage columns present."""
+    import tempfile
+
+    df = pd.DataFrame({
+        "timestamp": [1704067200000],
+        "open": [1.0],
+        "high": [1.1],
+        "low": [0.9],
+        "close": [1.05],
+        "volume": [100.0],
+        "datetime": pd.to_datetime(["2024-01-01"], utc=True),
+    })
+    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+        tmp_path = f.name
+    df.to_parquet(tmp_path, index=False)
+
+    collector = DataCollector()
+    monkeypatch.setattr(collector, "_cache_path", lambda *a, **kw: Path(tmp_path))
+    monkeypatch.setattr(collector, "_normalize_df", lambda x: x)
+
+    result = collector._load_cache("TESTUSDT", "1h")
+    assert list(result.columns) == list(df.columns)
+    Path(tmp_path).unlink(missing_ok=True)
+
+
+# ── OPT-6: _normalize_df early exit for numeric cols ────────────────────
+
+
+def test_normalize_df_returns_early_when_all_numeric() -> None:
+    """OPT-6: _normalize_df skips string loop when all non-datetime cols are numeric."""
+    df = pd.DataFrame({
+        "open": pd.array([1.0, 2.0], dtype="Float64"),
+        "close": pd.array([3.0, 4.0], dtype="Float64"),
+        "volume": pd.array([100.0, 200.0], dtype="Float64"),
+        "datetime": pd.to_datetime(["2024-01-01", "2024-01-02"], utc=True),
+    })
+    collector = DataCollector()
+    result = collector._normalize_df(df)
+    pd.testing.assert_frame_equal(result, df)
+
+
+def test_normalize_df_still_converts_mixed_cols() -> None:
+    """OPT-6: _normalize_df still runs string loop when non-numeric cols present."""
+    df = pd.DataFrame({
+        "open": ["1.0", "2.0"],
+        "close": ["3.0", "4.0"],
+        "datetime": pd.to_datetime(["2024-01-01", "2024-01-02"], utc=True),
+    })
+    collector = DataCollector()
+    result = collector._normalize_df(df)
+    assert result["open"].dtype != "object"
+    assert float(result["open"].iloc[0]) == 1.0
+
+
+# ── OPT-7: No redundant .copy() in collect_and_save ────────────────────
+
+
+def test_collect_and_save_no_redundant_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OPT-7: collect_and_save w/ fetch_network=False returns loc[mask] directly."""
+    df = pd.DataFrame({
+        "open": [1.0, 2.0, 3.0],
+        "close": [1.1, 2.1, 3.1],
+        "datetime": pd.to_datetime(
+            ["2024-01-01", "2024-01-02", "2024-01-03"], utc=True
+        ),
+    })
+    collector = DataCollector()
+    monkeypatch.setattr(collector, "_load_cache", lambda *a, **kw: df)
+    result = collector.collect_and_save(
+        "TESTUSDT", "1h", "2024-01-01", "2024-01-02", fetch_network=False,
+    )
+    assert len(result) == 2
+    assert result["open"].iloc[0] == 1.0
+    assert result["open"].iloc[1] == 2.0
+
+
 
