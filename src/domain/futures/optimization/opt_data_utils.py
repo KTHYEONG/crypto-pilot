@@ -471,7 +471,15 @@ def _feature_group_coverage(df: pd.DataFrame) -> dict[str, dict[str, float]]:
         if not cols:
             out[group] = {"col_count": 0.0, "non_null_coverage": 0.0, "non_zero_coverage": 0.0}
             continue
-        sub = df[cols].apply(pd.to_numeric, errors="coerce")
+        sub_df = df[cols]
+        numeric_cols = sub_df.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) == len(cols):
+            sub = sub_df
+        else:
+            non_numeric_cols = [c for c in cols if c not in numeric_cols]
+            sub_numeric = sub_df[numeric_cols]
+            sub_non_numeric = sub_df[non_numeric_cols].apply(pd.to_numeric, errors="coerce")
+            sub = pd.concat([sub_numeric, sub_non_numeric], axis=1)[cols]
         out[group] = {
             "col_count": float(len(cols)),
             "non_null_coverage": float(1.0 - (sub.isna().sum().sum() / max(sub.size, 1))),
@@ -530,6 +538,7 @@ def load_single_symbol_data(
 
         # [Optimization] Pre-load and prepare funding and metrics data once
         # to avoid redundant I/O and processing per TF.
+        funding_df = None
         funding_df_prepared = None
         metrics_df_prepared = None
         if not skip_metrics:
@@ -578,12 +587,15 @@ def load_single_symbol_data(
 
             try:
                 # [Optimization] Use pre-prepared data outside the loop for high-speed merge
+                # Copy dataframe once to minimize copy overhead (Time: O(M + F) when sorted, Space: O(M))
                 df = raw_df.copy()
                 if funding_df_prepared is not None and not funding_df_prepared.empty:
                     if "timestamp" not in df.columns:
                         df["timestamp"] = _to_unix_ms(df["datetime"])
+                    if not df["timestamp"].is_monotonic_increasing:
+                        df = df.sort_values("timestamp")
                     df = pd.merge_asof(
-                        df.sort_values("timestamp"),
+                        df,
                         funding_df_prepared,
                         on="timestamp",
                         direction="backward",
@@ -592,8 +604,10 @@ def load_single_symbol_data(
                 if metrics_df_prepared is not None and not metrics_df_prepared.empty:
                     if "timestamp" not in df.columns:
                         df["timestamp"] = _to_unix_ms(df["datetime"])
+                    if not df["timestamp"].is_monotonic_increasing:
+                        df = df.sort_values("timestamp")
                     df = pd.merge_asof(
-                        df.sort_values("timestamp"),
+                        df,
                         metrics_df_prepared,
                         on="timestamp",
                         direction="backward",
@@ -670,10 +684,16 @@ def load_single_symbol_data(
                     if "datetime" not in exec_1m.columns and len(exec_1m.columns) > 0:
                         exec_1m = exec_1m.rename(columns={str(exec_1m.columns[0]): "datetime"})
                 if "datetime" in exec_1m.columns:
-                    exec_1m = exec_1m.copy()
-                    exec_1m["datetime"] = pd.to_datetime(exec_1m["datetime"], utc=True)
-                    exec_1m.sort_values("datetime", inplace=True)
-                    exec_1m.reset_index(drop=True, inplace=True)
+                    dt_ser = exec_1m["datetime"]
+                    needs_convert = not pd.api.types.is_datetime64_any_dtype(dt_ser)
+                    needs_sort = not dt_ser.is_monotonic_increasing
+                    if needs_convert or needs_sort:
+                        exec_1m = exec_1m.copy()
+                        if needs_convert:
+                            exec_1m["datetime"] = pd.to_datetime(exec_1m["datetime"], utc=True)
+                        if needs_sort or not exec_1m["datetime"].is_monotonic_increasing:
+                            exec_1m.sort_values("datetime", inplace=True)
+                            exec_1m.reset_index(drop=True, inplace=True)
                     temp_is["exec_1m"] = exec_1m[exec_1m["datetime"] < is_end_dt].copy()
                     mask_exec_is = temp_is["exec_1m"]["datetime"] >= is_start_dt
                     temp_is["is_start_idx_exec_1m"] = (

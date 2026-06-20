@@ -1260,12 +1260,14 @@ def run_historical_sync(
     # Ledger에 있는 데이터 중 가장 최신 날짜를 기준으로 상장 폐지 여부 판단 (180일 이상 지연시 중단)
     global_max = max(symbol_start_dates.values()) if symbol_start_dates else end_date
 
-    for symbol in symbols:
-        profile = sync_profiles.get(symbol)
-        sym_start = start_date
-        if symbol in symbol_start_dates:
-            last = symbol_start_dates[symbol]
-            caches_missing = _requested_sync_caches_missing(
+    # ThreadPoolExecutor를 사용한 _requested_sync_caches_missing 병렬화
+    # Time: O(N) with parallel disk I/O, Space: O(N)
+    from concurrent.futures import ThreadPoolExecutor
+    caches_missing_map: dict[str, bool] = {}
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = {
+            symbol: executor.submit(
+                _requested_sync_caches_missing,
                 symbol,
                 sync_1d=sync_1d,
                 sync_4h=sync_4h,
@@ -1273,8 +1275,19 @@ def run_historical_sync(
                 requested_start=start_date,
                 requested_end=end_date,
                 metadata_cache=metadata_cache,
-                profile=profile,
+                profile=sync_profiles.get(symbol),
             )
+            for symbol in symbols
+        }
+        for symbol, fut in futures.items():
+            caches_missing_map[symbol] = fut.result()
+
+    for symbol in symbols:
+        profile = sync_profiles.get(symbol)
+        sym_start = start_date
+        caches_missing = caches_missing_map[symbol]
+        if symbol in symbol_start_dates:
+            last = symbol_start_dates[symbol]
             if last >= end_date and not caches_missing:
                 continue
             if last >= end_date and caches_missing:
