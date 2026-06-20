@@ -56,6 +56,38 @@ def _confidence_ge(a: DataConfidence, b: DataConfidence) -> bool:
     return _CONFIDENCE_LEVEL[a] >= _CONFIDENCE_LEVEL[b]
 
 
+# Phase 2: confidence derivation from ledger integrity fields (spec C2 / R2)
+def _resolve_confidence(row: pd.Series[object]) -> DataConfidence:
+    """Derive real DataConfidence from ledger row integrity fields.
+
+    Replaces RECONSTRUCTED hard-coding in _instrument_df_from_ledger.
+
+    Args:
+        row: A pandas Series row from the ledger DataFrame containing
+             optional fields: has_nan, has_inf, has_timestamp_issues,
+             last_60d_coverage.
+
+    Returns:
+        DataConfidence.UNKNOWN if integrity flags are set.
+        DataConfidence.RECONSTRUCTED if coverage < 0.80.
+        DataConfidence.OBSERVED otherwise.
+    """
+    if (
+        bool(row.get("has_nan", False))
+        or bool(row.get("has_inf", False))
+        or bool(row.get("has_timestamp_issues", False))
+    ):
+        return DataConfidence.UNKNOWN
+    cov = float(row.get("last_60d_coverage", 1.0))
+    if cov < 0.80:
+        return DataConfidence.RECONSTRUCTED
+    return DataConfidence.OBSERVED
+
+
+# Phase 3: leveraged token structural exclusion patterns (spec C3 / G0)
+_LEVERAGED_PATTERNS: tuple[str, ...] = ("UP", "DOWN", "BULL", "BEAR")
+
+
 # ---------------------------------------------------------------------------
 # Supporting dataclasses
 # ---------------------------------------------------------------------------
@@ -96,6 +128,15 @@ class ExecutionEligibilityConfig:
         min_data_confidence: Minimum acceptable DataConfidence for instruments.
         default_intended_notional_usdt: Bootstrap notional for eligibility
             evaluation; overridden by actual L2 target at execution time.
+        exclude_leveraged: Exclude leveraged tokens (UP/DOWN/BULL/BEAR) via G0.
+        min_coverage_ratio: Minimum 60d coverage ratio (G6).
+        max_gap_count: Maximum number of bar gaps in 60d window (G6).
+        max_gap_bars: Maximum single gap length in bars (G6).
+        max_frozen_bars: Maximum frozen-price bars in 60d window (G6).
+        max_zero_volume_bars: Maximum zero-volume bars in 60d window (G6).
+        reject_on_nan_inf: Reject instruments with NaN/Inf in OHLCV (G6).
+        reject_on_timestamp_issues: Reject instruments with timestamp anomalies (G6).
+        min_adv_usdt: Minimum ADV in USDT (absolute floor, not ranking cut).
     """
 
     max_staleness_bars: int = 1
@@ -104,6 +145,16 @@ class ExecutionEligibilityConfig:
     max_participation_rate: float = 0.01
     min_data_confidence: DataConfidence = DataConfidence.RECONSTRUCTED
     default_intended_notional_usdt: float = 10_000.0
+    # Phase 3 additions (spec C3)
+    exclude_leveraged: bool = True
+    min_coverage_ratio: float = 0.95
+    max_gap_count: int = 3
+    max_gap_bars: int = 6
+    max_frozen_bars: int = 6
+    max_zero_volume_bars: int = 3
+    reject_on_nan_inf: bool = True
+    reject_on_timestamp_issues: bool = True
+    min_adv_usdt: float = 2_000_000.0
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +404,40 @@ def evaluate_execution_eligibility(
         )
 
         # ------------------------------------------------------------------
+        # Gate 0: LEVERAGED_TOKEN - structural exclusion (spec G0 / R6)
+        # Leveraged tokens (UP/DOWN/BULL/BEAR) have tracking error and
+        # roll costs that make them structurally unsuitable for directional alpha.
+        # ------------------------------------------------------------------
+        _excl_lev = (
+            config.exclude_leveraged
+            if hasattr(config, "exclude_leveraged")
+            else True
+        )
+        if _excl_lev:
+            _sym_upper = iid.upper()
+            if any(pat in _sym_upper for pat in _LEVERAGED_PATTERNS):
+                eligibilities.append(
+                    ExecutionEligibility(
+                        instrument_id=iid,
+                        decision_at=decision_at,
+                        eligible=False,
+                        code=EligibilityCode.LEVERAGED_TOKEN,
+                        reasons=(
+                            EligibilityReason(
+                                code=EligibilityCode.LEVERAGED_TOKEN,
+                                hard=True,
+                                observed_value=None,
+                                threshold=None,
+                                source="symbol_pattern",
+                                confidence=DataConfidence.OBSERVED,
+                            ),
+                        ),
+                        intended_notional_usdt=notional,
+                    )
+                )
+                continue
+
+        # ------------------------------------------------------------------
         # Gate 1: NOT_ONBOARDED - instrument available_at > decision_at or NaT
         # ------------------------------------------------------------------
         avail_at = inst_row.get("available_at")
@@ -460,7 +545,8 @@ def evaluate_execution_eligibility(
             continue
 
         # ------------------------------------------------------------------
-        # Gate 5: STALE_MARKET_DATA - adv30_usdt metric must be present
+        # Gate 5: STALE_MARKET_DATA - adv30_usdt metric must be present;
+        #         also check recency via staleness_bars field (spec G5 fix / R4)
         # ------------------------------------------------------------------
         adv30 = _extract_metric(obs_pivot, iid, "adv30_usdt")
         if math.isnan(adv30):
@@ -485,8 +571,117 @@ def evaluate_execution_eligibility(
             )
             continue
 
+        # Recency sub-check: last bar age from staleness_bars field in obs_row
+        # obs_row is the instrument row from instruments DataFrame
+        _staleness = int(inst_row.get("staleness_bars", 0)) if "staleness_bars" in inst_row.index else 0
+        _max_stale = (
+            config.max_staleness_bars if hasattr(config, "max_staleness_bars") else 2
+        )
+        if _staleness > _max_stale:
+            eligibilities.append(
+                ExecutionEligibility(
+                    instrument_id=iid,
+                    decision_at=decision_at,
+                    eligible=False,
+                    code=EligibilityCode.STALE_MARKET_DATA,
+                    reasons=(
+                        EligibilityReason(
+                            code=EligibilityCode.STALE_MARKET_DATA,
+                            hard=True,
+                            observed_value=float(_staleness),
+                            threshold=float(_max_stale),
+                            source="instrument_registry",
+                            confidence=DataConfidence.OBSERVED,
+                        ),
+                    ),
+                    intended_notional_usdt=notional,
+                )
+            )
+            continue
+
         # ------------------------------------------------------------------
-        # Gate 6: ORDER_TOO_SMALL
+        # Gate 6: DATA_INTEGRITY_FAIL - real continuity metric checks (spec G6 / R1,R5)
+        # Uses compute_continuity_metrics values written to ledger (Phase 1).
+        # ------------------------------------------------------------------
+        _n_gaps = int(inst_row.get("n_bar_gaps", 0)) if "n_bar_gaps" in inst_row.index else 0
+        _max_gap = int(inst_row.get("max_gap_bars", 0)) if "max_gap_bars" in inst_row.index else 0
+        _frozen = int(inst_row.get("frozen_bars", 0)) if "frozen_bars" in inst_row.index else 0
+        _zero_vol = int(inst_row.get("n_zero_volume_bars_60d", 0)) if "n_zero_volume_bars_60d" in inst_row.index else 0
+        _coverage = float(inst_row.get("last_60d_coverage", 1.0)) if "last_60d_coverage" in inst_row.index else 1.0
+        _has_nan = bool(inst_row.get("has_nan", False)) if "has_nan" in inst_row.index else False
+        _has_inf = bool(inst_row.get("has_inf", False)) if "has_inf" in inst_row.index else False
+        _has_ts = (
+            bool(inst_row.get("has_timestamp_issues", False))
+            if "has_timestamp_issues" in inst_row.index
+            else False
+        )
+
+        _min_cov = config.min_coverage_ratio if hasattr(config, "min_coverage_ratio") else 0.95
+        _max_gap_cnt = config.max_gap_count if hasattr(config, "max_gap_count") else 3
+        _max_gap_bars = config.max_gap_bars if hasattr(config, "max_gap_bars") else 6
+        _max_frozen = config.max_frozen_bars if hasattr(config, "max_frozen_bars") else 6
+        _max_zero_vol = config.max_zero_volume_bars if hasattr(config, "max_zero_volume_bars") else 3
+        _rej_nan_inf = config.reject_on_nan_inf if hasattr(config, "reject_on_nan_inf") else True
+        _rej_ts = config.reject_on_timestamp_issues if hasattr(config, "reject_on_timestamp_issues") else True
+
+        _integrity_fail = (
+            _coverage < _min_cov
+            or _n_gaps > _max_gap_cnt
+            or _max_gap > _max_gap_bars
+            or _frozen > _max_frozen
+            or _zero_vol > _max_zero_vol
+            or (_rej_nan_inf and (_has_nan or _has_inf))
+            or (_rej_ts and _has_ts)
+        )
+        if _integrity_fail:
+            eligibilities.append(
+                ExecutionEligibility(
+                    instrument_id=iid,
+                    decision_at=decision_at,
+                    eligible=False,
+                    code=EligibilityCode.DATA_INTEGRITY_FAIL,
+                    reasons=(
+                        EligibilityReason(
+                            code=EligibilityCode.DATA_INTEGRITY_FAIL,
+                            hard=True,
+                            observed_value=_coverage,
+                            threshold=_min_cov,
+                            source="continuity_metrics",
+                            confidence=DataConfidence.OBSERVED,
+                        ),
+                    ),
+                    intended_notional_usdt=notional,
+                )
+            )
+            continue
+
+        # ADV floor: absolute executability floor, NOT a ranking cut (spec C3)
+        _adv_median = adv30  # adv30_usdt from observations pivot
+        _min_adv = config.min_adv_usdt if hasattr(config, "min_adv_usdt") else 2_000_000.0
+        if _adv_median < _min_adv:
+            eligibilities.append(
+                ExecutionEligibility(
+                    instrument_id=iid,
+                    decision_at=decision_at,
+                    eligible=False,
+                    code=EligibilityCode.ADV_FLOOR_FAIL,
+                    reasons=(
+                        EligibilityReason(
+                            code=EligibilityCode.ADV_FLOOR_FAIL,
+                            hard=True,
+                            observed_value=_adv_median,
+                            threshold=_min_adv,
+                            source="market_observations",
+                            confidence=DataConfidence.OBSERVED,
+                        ),
+                    ),
+                    intended_notional_usdt=notional,
+                )
+            )
+            continue
+
+        # ------------------------------------------------------------------
+        # Gate 7: ORDER_TOO_SMALL
         # ------------------------------------------------------------------
         last_price = _extract_metric(obs_pivot, iid, "last_price")
         rounded_qty = float("nan")
@@ -522,7 +717,7 @@ def evaluate_execution_eligibility(
                 continue
 
         # ------------------------------------------------------------------
-        # Gate 7: COST_TOO_HIGH
+        # Gate 8: COST_TOO_HIGH
         # ------------------------------------------------------------------
         round_trip_cost = _compute_round_trip_cost(
             notional, adv30, exec_rules.taker_fee_bps
