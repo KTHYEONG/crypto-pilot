@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -121,6 +121,13 @@ def build_candidate_strategy_config(
         ),
         ensemble_score_slope_k=float(
             opt_config.get("FUTURES_CANDIDATE_ENSEMBLE_SCORE_SLOPE_K", candidate.ensemble_score_slope_k)
+        ),
+        l1_boundary_mode=cast(
+            Literal["exact_label_interval", "fixed_gap"],
+            str(opt_config.get("FUTURES_L1_BOUNDARY_MODE", candidate.l1_boundary_mode)),
+        ),
+        l1_boundary_buffer_bars=int(
+            opt_config.get("FUTURES_L1_BOUNDARY_BUFFER_BARS", candidate.l1_boundary_buffer_bars)
         ),
         signal_only=signal_only,
     )

@@ -727,6 +727,7 @@ def build_candidate_dataset(
     schema: CandidateFeatureSchema | None = None,
     split_start: int,
     split_end: int,
+    label_end_exclusive: int | None = None,
     require_label_within_split: bool = True,
     is_fit_split: bool = False,
     skip_features: bool = False,
@@ -738,6 +739,8 @@ def build_candidate_dataset(
     global _ALIGNED_FEATURE_CACHE
     if split_end <= split_start:
         raise ValueError("split_end must be greater than split_start")
+    if label_end_exclusive is not None and label_end_exclusive <= split_start:
+        raise ValueError("label_end_exclusive must be greater than split_start")
 
     active_schema = schema or fit_candidate_feature_schema(
         labeled_events=labeled_events,
@@ -751,6 +754,7 @@ def build_candidate_dataset(
     id_feat_names = active_schema.identity_categories
     feature_names = active_schema.feature_names
     exclude_leaky = bool(getattr(cfg, "exclude_immediate_return_features", False))
+    effective_label_end = split_end if label_end_exclusive is None else label_end_exclusive
 
     mask = (labeled_events["entry_idx"] >= split_start) & (labeled_events["entry_idx"] < split_end)
     if require_label_within_split:
@@ -758,7 +762,7 @@ def build_candidate_dataset(
             mask &= False
         else:
             exit_idx = pd.to_numeric(labeled_events["exit_idx"], errors="coerce")
-            mask &= exit_idx.ge(0) & exit_idx.lt(split_end)
+            mask &= exit_idx.ge(0) & exit_idx.lt(effective_label_end)
     events = labeled_events.loc[mask].copy()
     if not events.empty:
         sym_set = set(aligned.symbols)
@@ -1363,4 +1367,3 @@ def prime_aligned_feature_cache(
         require_label_within_split=False,
         skip_features=False,
     )
-

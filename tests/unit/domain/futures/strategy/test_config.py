@@ -38,3 +38,15 @@ def test_candidate_strategy_config_validates_ensemble_backend_fields() -> None:
 
     with pytest.raises(ValueError, match="ensemble_shrinkage_k"):
         CandidateStrategyConfig(ensemble_shrinkage_k=0.0)
+
+
+def test_candidate_strategy_config_defaults_exact_l1_boundary() -> None:
+    cfg = CandidateStrategyConfig()
+
+    assert cfg.l1_boundary_mode == "exact_label_interval"
+    assert cfg.l1_boundary_buffer_bars == 0
+
+
+def test_candidate_strategy_config_rejects_negative_l1_boundary_buffer() -> None:
+    with pytest.raises(ValueError, match="l1_boundary_buffer_bars"):
+        CandidateStrategyConfig(l1_boundary_buffer_bars=-1)
