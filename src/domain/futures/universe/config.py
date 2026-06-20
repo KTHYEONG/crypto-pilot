@@ -72,7 +72,18 @@ class PITUniverseConfig:
     default_intended_notional_usdt: float = 10_000.0
     k_in: int = 0  # 0 = no hard top-N (capacity_coverage_target governs); >0 = legacy fixed-N
     capacity_coverage_target: float = 0.90  # cumulative capacity_usdt fraction to retain
-    k_max: int = 100  # compute ceiling (hard upper bound)
+    k_max: int = 150  # compute ceiling (hard upper bound, breadth-maximizing per spec C4)
+    # data integrity thresholds (Phase 3 G6 gate — spec C3)
+    min_coverage_ratio: float = 0.95
+    max_gap_count: int = 3
+    max_gap_bars: int = 6          # 4h * 6 = 24h continuous gap threshold
+    max_frozen_bars: int = 6
+    max_zero_volume_bars: int = 3
+    max_staleness_bars: int = 2    # bars since last fresh bar (=8h at 4h resolution)
+    reject_on_nan_inf: bool = True
+    reject_on_timestamp_issues: bool = True
+    # ADV executability floor (absolute floor only, NOT a ranking cut per spec C3)
+    min_adv_usdt: float = 2_000_000.0
 
     def __post_init__(self) -> None:
         """Validate field constraints."""
