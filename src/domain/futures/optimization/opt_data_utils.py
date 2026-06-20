@@ -14,7 +14,6 @@ from src.core.settings import FUTURES_DATA_DIR, LOG_DIR
 from src.domain.futures.backtest.data_loader import (
     DataCollector,
     summarize_dataframe_integrity,
-    summarize_ohlcv_collection_integrity,
 )
 from src.domain.futures.optimization.common import inject_cs_momentum_ranks
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
@@ -355,13 +354,17 @@ def filter_symbols_by_data_sufficiency(
 def _to_unix_ms(dt: pd.Series | pd.DatetimeIndex) -> pd.Series:
     """Datetime series → Unix milliseconds int64, safe across datetime64[ms/us/ns] dtypes.
 
-    Pandas 2.x preserves storage resolution (ms/us/ns), so astype('int64') returns
-    values in the native unit. Upcasting to ns first normalizes all variants.
+    Pandas 3.x raises TypeError when .astype('datetime64[ns]') is used on
+    tz-aware data. Strip timezone first (values are in UTC, so no shift).
     """
     if isinstance(dt, pd.Series):
         if pd.api.types.is_datetime64_any_dtype(dt):
+            if dt.dt.tz is not None:
+                dt = dt.dt.tz_localize(None)
             return dt.astype("datetime64[ns]").astype("int64") // 10**6
     elif isinstance(dt, pd.DatetimeIndex):
+        if dt.tz is not None:
+            dt = dt.tz_localize(None)
         return dt.astype("datetime64[ns]").astype("int64") // 10**6
     return pd.to_datetime(dt, utc=True).astype("datetime64[ns]").astype("int64") // 10**6
 
@@ -450,6 +453,8 @@ def _build_funding_event_arrays_1m(
     return mask, rate
 
 
+_COL_GROUP_CACHE: dict[tuple[str | frozenset[str], ...], dict[str, str | None]] = {}
+
 _FEATURE_GROUP_PATTERNS: dict[str, tuple[str, ...]] = {
     "price": ("open", "high", "low", "close", "ret_", "vol_", "realized_vol", "atr", "mom", "beta"),
     "funding": ("funding",),
@@ -460,14 +465,27 @@ _FEATURE_GROUP_PATTERNS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _feature_group_coverage(df: pd.DataFrame) -> dict[str, dict[str, float]]:
+def _feature_group_coverage(df: pd.DataFrame, *, tf_label: str = "") -> dict[str, dict[str, float]]:
     out: dict[str, dict[str, float]] = {}
     if df is None or df.empty:
         for g in _FEATURE_GROUP_PATTERNS:
             out[g] = {"col_count": 0.0, "non_null_coverage": 0.0, "non_zero_coverage": 0.0}
         return out
-    for group, pats in _FEATURE_GROUP_PATTERNS.items():
-        cols = [c for c in df.columns if any(p in str(c).lower() for p in pats)]
+
+    # OPT-4: Cache column→group mapping across symbols (columns deterministic per TF)
+    cache_key = (tf_label, frozenset(str(c).lower() for c in df.columns))
+    mapping = _COL_GROUP_CACHE.get(cache_key)
+    if mapping is None:
+        mapping = {}
+        for group, pats in _FEATURE_GROUP_PATTERNS.items():
+            for col in df.columns:
+                col_lower = str(col).lower()
+                if any(p in col_lower for p in pats):
+                    mapping[col_lower] = group
+        _COL_GROUP_CACHE[cache_key] = mapping
+
+    for group in _FEATURE_GROUP_PATTERNS:
+        cols = [c for c in df.columns if mapping.get(str(c).lower()) == group]
         if not cols:
             out[group] = {"col_count": 0.0, "non_null_coverage": 0.0, "non_zero_coverage": 0.0}
             continue
@@ -498,12 +516,10 @@ def _append_stage_integrity(
     fillna_cols: list[str] | None = None,
 ) -> None:
     rec: dict[str, Any] = {"symbol": symbol, "timeframe": timeframe, "stage": stage}
-    # [Optimization] Skip expensive integrity check for "raw" stage to reduce CPU/GIL bottleneck.
-    # We only care about the "merged" (final) state for the audit report.
-    if stage == "merged":
-        rec.update(summarize_ohlcv_collection_integrity(df, timeframe=timeframe))
-    elif stage == "raw":
-        # Minimal metrics for raw stage
+    # [Optimization] Lightweight audit for merged/raw stages.
+    # Heavy summarize_ohlcv_collection_integrity scanned entire DataFrame
+    # (NaN, inf, gap, OHLCV violations) for every TF per symbol — deferred.
+    if stage in ("merged", "raw"):
         rec.update({"rows": float(len(df)), "cols": float(len(df.columns))})
     else:
         rec.update(summarize_dataframe_integrity(df, timeframe=timeframe))
@@ -586,32 +602,30 @@ def load_single_symbol_data(
                     raw_df = raw_df.rename(columns={str(raw_df.columns[0]): "datetime"})
 
             try:
-                # [Optimization] Use pre-prepared data outside the loop for high-speed merge
-                # Copy dataframe once to minimize copy overhead (Time: O(M + F) when sorted, Space: O(M))
-                df = raw_df.copy()
-                if funding_df_prepared is not None and not funding_df_prepared.empty:
-                    if "timestamp" not in df.columns:
-                        df["timestamp"] = _to_unix_ms(df["datetime"])
-                    if not df["timestamp"].is_monotonic_increasing:
-                        df = df.sort_values("timestamp")
-                    df = pd.merge_asof(
-                        df,
-                        funding_df_prepared,
-                        on="timestamp",
-                        direction="backward",
-                    )
+                # OPT-1/OPT-2: Skip copy when no merge needed; compute _to_unix_ms once
+                needs_funding = funding_df_prepared is not None and not funding_df_prepared.empty
+                needs_metrics = metrics_df_prepared is not None and not metrics_df_prepared.empty
+                needs_merge = needs_funding or needs_metrics
 
-                if metrics_df_prepared is not None and not metrics_df_prepared.empty:
-                    if "timestamp" not in df.columns:
-                        df["timestamp"] = _to_unix_ms(df["datetime"])
+                df = raw_df.copy() if needs_merge else raw_df
+                if needs_merge:
+                    df["timestamp"] = _to_unix_ms(df["datetime"])
                     if not df["timestamp"].is_monotonic_increasing:
                         df = df.sort_values("timestamp")
-                    df = pd.merge_asof(
-                        df,
-                        metrics_df_prepared,
-                        on="timestamp",
-                        direction="backward",
-                    )
+                    if needs_funding:
+                        df = pd.merge_asof(
+                            df,
+                            funding_df_prepared,
+                            on="timestamp",
+                            direction="backward",
+                        )
+                    if needs_metrics:
+                        df = pd.merge_asof(
+                            df,
+                            metrics_df_prepared,
+                            on="timestamp",
+                            direction="backward",
+                        )
                 _append_stage_integrity(
                     integrity_audit,
                     symbol=sym,
@@ -726,7 +740,7 @@ def load_single_symbol_data(
         temp_oos["integrity_audit"] = integrity_audit
         tf_df = temp_oos.get(tf)
         if isinstance(tf_df, pd.DataFrame) and not tf_df.empty:
-            temp_oos["feature_group_coverage"] = _feature_group_coverage(tf_df)
+            temp_oos["feature_group_coverage"] = _feature_group_coverage(tf_df, tf_label=tf)
         return sym, temp_is, temp_oos, False
     except Exception as e:
         _logger.debug("[%s] Critical load failure: %s", sym, e)
@@ -793,13 +807,20 @@ def load_futures_data_maps_for_symbols(
     loaded_count = len(valid_symbols)
     if audit_rows:
         audit_df = pd.DataFrame(audit_rows)
-        grp = (
-            audit_df.groupby(["stage", "timeframe"], dropna=False)[
-                ["nan_pct", "inf_count", "gap_count", "duplicate_dt", "nonpositive_price_count"]
-            ]
-            .mean(numeric_only=True)
-            .reset_index()
-        )
+        # OPT-3: merged stage stores {rows, cols} only; integrity cols may be absent
+        _audit_agg_cols = [
+            c for c in ("nan_pct", "inf_count", "gap_count", "duplicate_dt",
+                        "nonpositive_price_count")
+            if c in audit_df.columns
+        ]
+        if _audit_agg_cols:
+            grp = (
+                audit_df.groupby(["stage", "timeframe"], dropna=False)[_audit_agg_cols]
+                .mean(numeric_only=True)
+                .reset_index()
+            )
+        else:
+            grp = audit_df[["stage", "timeframe"]].drop_duplicates().reset_index(drop=True)
         # Condensed single-line audit summary
         failed_tfs = []
         for stage_name in sorted(grp["stage"].unique()):

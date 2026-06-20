@@ -99,6 +99,17 @@
   - Doing `pd.to_numeric` on 12 meta columns inside the alignment loop caused `S * M` Series allocations. Pre-converting at ingestion and using raw NumPy scanning during alignment optimized critical latency paths while keeping 100% data fidelity and look-ahead safety.
 - **Status**: Accepted
 
+## L1-ADR-015: L1 Post-SKIP 병목 제거 — raw_df.copy/audit/coverage CPU 최적화 (2026-06-20)
+- **Delta:**
+  - (OPT-1) `load_single_symbol_data` — `raw_df.copy()`를 `needs_merge` 조건으로 게이트. funding/metrics 모두 None이면 copy 생략 (view 참조). merge 필요 시 copy 경로 유지.
+  - (OPT-2) `_to_unix_ms` 호출을 TF당 1회로 축소. `needs_merge` 블록 내에서 1회 계산 후 `df["timestamp"]`로 재사용 (기존: funding/metrics merge 각각 1회씩 2회 중복).
+  - (OPT-3) `_append_stage_integrity("merged")`에서 `summarize_ohlcv_collection_integrity` 대신 `{rows, cols}`만 저장. downstream `load_futures_data_maps_for_symbols`의 `audit_df.groupby`는 존재하는 컬럼만 조건부 선택하여 `KeyError` 방지.
+  - (OPT-4) `_feature_group_coverage`에 `_COL_GROUP_CACHE` 모듈-레벨 캐시 도입. `(tf_label, frozenset(col_lower))` 키로 column→group 매핑을 TF 세션당 1회 pre-compute. 동일 컬럼셋 심볼에 대해 O(C×P)→O(C) 단축.
+  - (Hotfix) `_to_unix_ms` pandas 3.x 호환: tz-aware datetime에 `tz_localize(None)` guard 후 `.astype("datetime64[ns]")` 적용 (`DataCollector._normalize_df`가 tz-aware UTC 반환).
+- **Rationale:** `[SKIPPED]` ledger sync 로그 후 `SYSTEM CONTEXT` 대시보드 도달까지 평균 ~40-50s 소요. 실측 trace 결과 `load_futures_data_maps_for_symbols`가 95% 이상 점유. 4개 OPT로 50심볼 기준 약 10-19s 단축 예상 (~20-30s). 잔여 20-30s는 PyArrow parquet I/O (hard floor).
+- **Edge Cases:** OPT-3 merged audit에서 `audit_df` groupby가 integrity 컬럼(NaN%, gap, duplicate) 부재 시 `KeyError` 발생 — 존재하는 컬럼만 선택하도록 조건부 처리 완료. pandas 3.x `to_unix_ms` tz-aware guard 없으면 `astype("datetime64[ns]")` 실패 — `tz_localize(None)` 도입으로 해결.
+- **Status:** Accepted
+
 ## L1-ADR-014: L1 데이터 준비 병목 최적화 — Numba 및 DatetimeIndex.isin 기반 최적화 (2026-06-20)
 - **Delta:** 
   - `membership.py`에 Numba `@njit` 가속화된 `_calculate_warm_ready_numba`를 도입하여 Pandas groupby-cumsum 루프를 대체하였고, `build_membership_mask_bundle` 내 날짜비교를 `pd.Timestamp`와 `DatetimeIndex.isin` 기반 벡터화로 고속화하여 `datetime.date` 객체 생성 오버헤드를 우회함.
