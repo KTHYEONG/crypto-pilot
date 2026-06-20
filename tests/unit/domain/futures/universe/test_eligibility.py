@@ -94,7 +94,7 @@ def _standard_config() -> ExecutionEligibilityConfig:
     )
 
 
-def _eligible_obs(iid: str, available_at: datetime, adv30: float = 1_000_000.0) -> list[dict]:
+def _eligible_obs(iid: str, available_at: datetime, adv30: float = 3_000_000.0) -> list[dict]:
     """Return a minimal set of observations that passes all metric gates."""
     return [
         {
@@ -430,7 +430,7 @@ class TestScenario4OrderRules:
                 "instrument_id": iid,
                 "metric": "adv30_usdt",
                 "available_at": available_at,
-                "value": 1_000_000.0,
+                "value": 3_000_000.0,  # above 2M ADV floor (Phase 3)
                 "source": "kline",
                 "confidence": "observed",
             },
@@ -480,7 +480,7 @@ class TestScenario4OrderRules:
         assert result.code == EligibilityCode.ORDER_TOO_SMALL
 
     def test_cost_too_high_with_very_low_adv(self) -> None:
-        """Very low ADV → high impact → COST_TOO_HIGH."""
+        """Very low ADV (50 USDT) → ADV_FLOOR_FAIL (Phase 3 gate precedes COST_TOO_HIGH)."""
         # Arrange
         decision = _dt("2024-06-01T00:00:00")
         iid = "SYM_LOW_ADV"
@@ -531,7 +531,7 @@ class TestScenario4OrderRules:
         # Assert
         result = snap.eligibilities[0]
         assert result.eligible is False
-        assert result.code == EligibilityCode.COST_TOO_HIGH
+        assert result.code == EligibilityCode.ADV_FLOOR_FAIL
 
     def test_capacity_clipped_when_notional_near_adv_limit(self) -> None:
         """ELIGIBLE but capacity_usdt < intended_notional when ADV is limited."""
@@ -548,14 +548,14 @@ class TestScenario4OrderRules:
                 }
             ]
         )
-        # ADV = 1_000_000; participation cap = 1% = 10_000 USDT
+        # ADV = 5_000_000 (above 2M floor); participation cap = 1% = 50_000 USDT
         obs = _make_observations(
-            _eligible_obs(iid, available_at=_dt("2024-05-31T00:00:00"), adv30=1_000_000.0)
+            _eligible_obs(iid, available_at=_dt("2024-05-31T00:00:00"), adv30=5_000_000.0)
         )
         rules = {iid: _make_rules(iid, decision_at=decision, taker_fee_bps=4.0)}
         config = ExecutionEligibilityConfig(
             max_round_trip_cost_bps=50.0,
-            max_participation_rate=0.01,  # capacity = 1% * 1_000_000 = 10_000
+            max_participation_rate=0.01,  # capacity = 1% * 5_000_000 = 50_000
         )
 
         # Act
@@ -572,8 +572,8 @@ class TestScenario4OrderRules:
         result = snap.eligibilities[0]
         assert result.eligible is True
         assert result.code == EligibilityCode.ELIGIBLE
-        # capacity_usdt should be capped at participation limit
-        assert result.capacity_usdt <= 10_000.0 + 1e-6
+        # capacity_usdt should be capped at participation limit (1% * 5M = 50k)
+        assert result.capacity_usdt <= 50_000.0 + 1e-6
 
 
 # ===========================================================================
