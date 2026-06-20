@@ -253,7 +253,10 @@ def _resolve_tradeable_scope(
         if sym_df is None or sym_df.empty:
             dropped["empty_frame"].append(sym)
             continue
-        datetimes = pd.to_datetime(sym_df["datetime"], utc=True)
+        if pd.api.types.is_datetime64_any_dtype(sym_df["datetime"]):
+            datetimes = sym_df["datetime"]
+        else:
+            datetimes = pd.to_datetime(sym_df["datetime"], utc=True)
         # Count bars within the full window [fetch_start, holdout_end]
         mask_window = (datetimes >= fetch_start) & (datetimes <= holdout_end)
         n_bars = int(mask_window.sum())
