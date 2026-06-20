@@ -406,6 +406,8 @@ def run_candidate_strategy_for_universe(
         return CandidatePipelineOutput(
             alpha_panel=alpha_panel,
             target_weights=np.zeros_like(aligned.close_2d),
+            labeled=pd.DataFrame(),
+            labeled_unfiltered=pd.DataFrame(),
             rule_report={
                 "events_total": 0,
                 "labeled_total": 0,
@@ -493,6 +495,8 @@ def run_candidate_strategy_for_universe(
             return CandidatePipelineOutput(
                 alpha_panel=alpha_panel,
                 target_weights=np.zeros_like(aligned.close_2d),
+                labeled=labeled,
+                labeled_unfiltered=labeled_all,
                 rule_report={
                     "events_total": len(raw_events),
                     "labeled_total": len(labeled),

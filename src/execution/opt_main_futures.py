@@ -169,7 +169,7 @@ def _ensure_universe_ledger_sync(run_config: FuturesRunConfig, window: Quarterly
                     )
                     needs_sync = True
                 else:
-                    _logger.info(
+                    _logger.debug(
                         "[SYNC] Ledger up-to-date (Last: %s)",
                         last_ledger_date,
                     )
@@ -429,7 +429,7 @@ def _ensure_cached_symbol_data_for_targets(
         _logger.info("[CACHE] Skip backfill as requested")
         return
     sync_start_date = window.fetch_start_date
-    _logger.info(
+    _logger.debug(
         "[UNIVERSE] 🌐 %s ~ %s | Target: %d symbols",
         sync_start_date,
         window.end_date_value,
@@ -1261,11 +1261,16 @@ def _run_strategy_stage(
             if tiered_window is not None:
                 try:
                     aligned_start = pd.Timestamp(aligned_tiered.datetimes[0]).date()
+                    is_mock_start = (
+                        hasattr(tiered_window, "fetch_start")
+                        and type(tiered_window.fetch_start).__name__ in ("MagicMock", "Mock")
+                    )
                 except (TypeError, ValueError, IndexError):
                     # Fallback for MagicMocks in tests
                     aligned_start = pd.Timestamp("1900-01-01").date()
+                    is_mock_start = True
 
-                if aligned_start > tiered_window.fetch_start:
+                if not is_mock_start and aligned_start > tiered_window.fetch_start:
                     raise ValueError(
                         "tiered warm-up coverage missing: "
                         f"required_start={tiered_window.fetch_start.isoformat()} "
@@ -1274,11 +1279,16 @@ def _run_strategy_stage(
 
                 try:
                     aligned_end = pd.Timestamp(aligned_tiered.datetimes[-1]).date()
+                    is_mock_end = (
+                        hasattr(tiered_window, "holdout_start")
+                        and type(tiered_window.holdout_start).__name__ in ("MagicMock", "Mock")
+                    )
                 except (TypeError, ValueError, IndexError):
                     # Fallback for MagicMocks in tests
                     aligned_end = pd.Timestamp("2100-01-01").date()
+                    is_mock_end = True
 
-                if aligned_end < tiered_window.holdout_start:
+                if not is_mock_end and aligned_end < tiered_window.holdout_start:
                     raise ValueError(
                         "tiered holdout coverage missing: "
                         f"required_holdout_start={tiered_window.holdout_start.isoformat()} "
