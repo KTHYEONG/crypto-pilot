@@ -1,71 +1,77 @@
-[SYNC] Ledger up-to-date (Last: 2026-03-31)
-[UNIVERSE] 🌐 2022-04-01 ~ 2026-03-31 | Target: 245 symbols
-[SQL-DB]   💾 Loaded start dates from universe_ledger.db
-Sync mode=full targeted_symbols=245
-Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/symbol_sync_profiles.json
-[SQL-DB]   ⚡ [SKIPPED] All symbols are up-to-date. No sync or disk scans required.
-┌────────────────────────────────────────────────────────────────────────────────┐
-│ ● [SYSTEM CONTEXT: INFRASTRUCTURE & DATA PREPARATION]                          │
-├────────────────────────────────────────────────────────────────────────────────┤
-│ Window:   Range: 2022-10-01 ~ 2026-03-31 (IS:2023-10-01, OOS:2025-10-01)       │
-│ Universe: Discovered: 245 symbols | Selected: 57 | Live Panel: 245             │
-│ Quality:  Loaded: 24.1% (59/245) | Ready: 59 | Dropped: None                   │
-│ Strategy: Engine: Alpha-Ensemble Engine | Inf Panel: 245 | Trade Scope: 59     │
-└────────────────────────────────────────────────────────────────────────────────┘
+================================================================================
+LOCAL DATA STORAGE (LEDGER & CACHE STATUS)
+================================================================================
+
+  Sync Mode: FULL (Pre-loaded from cache)
+  [SKIPPED] All records in 'universe_ledger.db' are up-to-date. (No sync required)
+
+--------------------------------------------------------------------------------
+================================================================================
+SYSTEM CONTEXT | DATA PIPELINE PREPARATION
+================================================================================
+
+TIME PROFILE
+  Test Horizon  : 2022-10-01 ~ 2026-03-31
+  IS / OOS Split: 2025-10-01 (In-Sample Cutoff)
+
+UNIVERSE FUNNEL
+  [1] Market Pool     : 426 symbols discovered (Binance USDT-M)
+  [2] Capacity Limit  : 150 symbols selected (Top-N Liquidity)
+  [3] Integrity Pass  : 61 symbols loaded (Passed Gaps & Frozen checks)
+
+STRATEGY ENGINE
+  Active Engine : Alpha-Ensemble Engine
+  Target Scope  : 61 symbols ready for Layer 1 execution
+
+--------------------------------------------------------------------------------
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ● [LAYER 1: SIGNAL ROBUSTNESS & ENSEMBLE VERIFICATION]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[TIERED] Sub-window admission: 54/59 symbols admitted (min_bars=1500, oos_cov>=90%)
-
-● [DATA-INTEGRITY AUDIT]
-──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ✅ ALL 54 SYMBOLS PASSED
-  METRICS : Total Bars: 8,605
-  DETAIL  : [NaN: 0.0%] [Zero/Neg: 0.0%] [Range: PASS]
-──────────────────────────────────────────────────────────────────────────────
-
-[TIERED] 💠 Scope: 54 symbols (Historical Union ∩ Data-Valid)
-[ENS] Arch-Only   | SYM: 12 | EVT:   1,399 | TOTAL: +19.2 bps | [BRK: +26.2✅ MOM: +21.7✅ TRD: +33.9✅ MRV: -13.6❌ UNI: +21.8✅]
-[ENS] Arch-Only   | SYM: 12 | EVT:   9,518 | TOTAL: +31.0 bps | [BRK: +30.8✅ MOM: +26.2✅ TRD: +59.7✅ MRV: +57.9✅ UNI: +28.9✅]
-[ENS] Arch-Only   | SYM: 12 | EVT:  16,658 | TOTAL: +28.2 bps | [BRK: +14.0✅ MOM: +22.3✅ TRD: +64.1✅ MRV: +68.6✅ UNI: +13.0✅]
-[ENS] Arch-Only   | SYM: 30 | EVT:  21,168 | TOTAL: +23.8 bps | [BRK: +33.5✅ MOM: +18.1✅ TRD: +35.3✅ MRV: +62.3✅ UNI: +24.2✅]
-[ENS] Arch-Only   | SYM: 30 | EVT:  31,108 | TOTAL: +14.7 bps | [BRK: +28.7✅ MOM: +10.1✅ TRD: +25.7✅ MRV: +46.1✅ UNI: +13.8✅]
-[ENS] Arch-Only   | SYM: 30 | EVT:  41,234 | TOTAL: +18.0 bps | [BRK: +20.5✅ MOM: +13.7✅ TRD: +44.4✅ MRV: +43.7✅ UNI:  +7.9✅]
-[ENS] Arch-Only   | SYM: 36 | EVT:  50,840 | TOTAL: +14.0 bps | [BRK: +16.4✅ MOM: +10.1✅ TRD: +38.5✅ MRV: +39.7✅ UNI:  +3.6✅]
-[ENS] Arch-Only   | SYM: 36 | EVT:  61,558 | TOTAL: +17.8 bps | [BRK: +19.5✅ MOM: +13.9✅ TRD: +45.8✅ MRV: +40.0✅ UNI:  +6.9✅]
-[ENS] Arch-Only   | SYM: 36 | EVT:  70,386 | TOTAL: +19.1 bps | [BRK: +22.0✅ MOM: +14.7✅ TRD: +45.0✅ MRV: +44.6✅ UNI: +11.9✅]
-[ENS] Arch-Only   | SYM: 41 | EVT:  79,954 | TOTAL: +20.0 bps | [BRK: +24.4✅ MOM: +16.0✅ TRD: +40.3✅ MRV: +44.0✅ UNI: +15.0✅]
-[ENS] Arch-Only   | SYM: 43 | EVT:  88,310 | TOTAL: +20.5 bps | [BRK: +25.9✅ MOM: +16.8✅ TRD: +37.7✅ MRV: +42.8✅ UNI: +15.3✅]
-[ENS] Arch-Only   | SYM: 43 | EVT:  98,706 | TOTAL: +21.0 bps | [BRK: +34.1✅ MOM: +16.6✅ TRD: +46.5✅ MRV: +41.0✅ UNI:  +5.8✅]
-[ENS] Arch-Only   | SYM: 30 | EVT:  22,059 | TOTAL: +19.8 bps | [BRK: +33.1✅ MOM: +14.1✅ TRD: +31.9✅ MRV: +59.1✅ UNI: +17.6✅]
-[ENS] Arch-Only   | SYM: 30 | EVT:  43,978 | TOTAL: +15.8 bps | [BRK: +19.0✅ MOM: +11.7✅ TRD: +39.5✅ MRV: +41.9✅ UNI:  +7.3✅]
-[ENS] Arch-Only   | SYM: 36 | EVT:  65,560 | TOTAL: +17.8 bps | [BRK: +21.4✅ MOM: +14.3✅ TRD: +38.3✅ MRV: +39.3✅ UNI: +12.2✅]
-[ENS] Arch-Only   | SYM: 43 | EVT:  84,202 | TOTAL: +20.4 bps | [BRK: +25.0✅ MOM: +16.9✅ TRD: +37.0✅ MRV: +42.5✅ UNI: +14.5✅]
+[TIERED] Sub-window admission: 56/61 symbols admitted (min_bars=1500, oos_cov>=90%)
+[PROMO_FILTER] no variants recommended by diagnostics; blocking all candidates (fail-closed)
+[TIERED] 💠 Scope: 56 symbols (Historical Union ∩ Data-Valid)
+[ALIGN-CUBE] post-join active_mask mean=0.9107 entry_block_mean=0.0893 (was 1.0 / 0.0 before cube injection)
+[WORKFLOW] Fold 0 skipped Ensemble (fit=0 < 2)
+[WORKFLOW] Fold 1 skipped Ensemble (fit=0 < 2)
+[WORKFLOW] Fold 2 skipped Ensemble (fit=9 < 2)
+[ENS] Arch-Only   | SYM: 55 | EVT:   5,145 | TOTAL:  +9.3 bps | [BRK: +37.8✅ MOM:  +9.6✅ TRD:  -7.8❌ MRV: -11.8❌ UNI: +52.5✅]
+[ENS] Arch-Only   | SYM: 55 | EVT:  36,341 | TOTAL:  +3.7 bps | [BRK: +28.2✅ MOM:  +2.5✅ TRD:  +6.6✅ MRV:  +4.3✅ UNI:  +4.9✅ F:11.0✅]
+[ENS] Arch-Only   | SYM: 55 | EVT:  66,073 | TOTAL: +15.0 bps | [BRK: +18.5✅ MOM: +12.3✅ TRD: +49.1✅ MRV: +20.2✅ UNI:  -1.0❌ F:32.2✅]
+[ENS] Arch-Only   | SYM: 56 | EVT:  96,345 | TOTAL: +11.5 bps | [BRK: +12.1✅ MOM:  +8.6✅ TRD: +40.6✅ MRV: +24.8✅ UNI:  -2.0❌ F:11.3✅]
+[ENS] Arch-Only   | SYM: 56 | EVT: 124,607 | TOTAL: +17.4 bps | [BRK: +23.9✅ MOM: +13.6✅ TRD: +55.1✅ MRV: +24.6✅ UNI:  +3.6✅ F:13.6✅]
+[ENS] Arch-Only   | SYM: 56 | EVT: 148,054 | TOTAL: +18.3 bps | [BRK: +25.5✅ MOM: +14.1✅ TRD: +52.2✅ MRV: +28.6✅ UNI:  +8.3✅ F:14.5✅]
+[ENS] Arch-Only   | SYM: 56 | EVT: 173,050 | TOTAL: +20.0 bps | [BRK: +32.3✅ MOM: +15.9✅ TRD: +46.7✅ MRV: +32.9✅ UNI: +14.4✅ F:16.0✅]
+[ENS] Arch-Only   | SYM: 55 | EVT:   7,495 | TOTAL: -12.0 bps | [BRK: +39.8✅ MOM: -12.2❌ TRD: -28.1❌ MRV: -37.5❌ UNI: +16.3✅]
+[ENS] Arch-Only   | SYM: 56 | EVT: 188,265 | TOTAL: +20.3 bps | [BRK: +33.3✅ MOM: +16.1✅ TRD: +44.5✅ MRV: +33.3✅ UNI: +14.3✅ F:16.3✅]
+[ENS] Arch-Only   | SYM: 56 | EVT: 206,656 | TOTAL: +21.2 bps | [BRK: +40.6✅ MOM: +16.4✅ TRD: +53.9✅ MRV: +30.6✅ UNI:  +6.2✅ F:17.1✅]
+[ENS] Arch-Only   | SYM: 55 | EVT:  74,526 | TOTAL: +14.2 bps | [BRK: +16.4✅ MOM: +11.5✅ TRD: +41.9✅ MRV: +22.2✅ UNI:  +4.0✅ F:13.7✅]
+[ENS] Arch-Only   | SYM: 56 | EVT: 135,260 | TOTAL: +17.5 bps | [BRK: +24.5✅ MOM: +14.0✅ TRD: +48.0✅ MRV: +25.0✅ UNI:  +9.9✅ F:13.8✅]
+[ENS] Arch-Only   | SYM: 56 | EVT: 180,639 | TOTAL: +20.5 bps | [BRK: +32.5✅ MOM: +16.4✅ TRD: +44.3✅ MRV: +33.5✅ UNI: +14.1✅ F:16.4✅]
 
 ● [LAYER 1 OUTER FOLD READINESS]
 ──────────────────────────────────────────────────────────────────────────────
   STATUS  : ✅ READY (4/4 Folds Ready)
 
   [✅] Fold #0 (FitEnd: 2023-08-14 -> OOS: 2023-10-01 ~ 2023-12-31)
-       ├─ Symbols : 6 symbols loaded [ETHUSDT, FILUSDT, FTMUSDT, SOLUSDT, XLMUSDT, XRPUSDT]
-       ├─ Events  : 280 unique events
-       └─ Quality : Edge: 182.64 bps
+       ├─ Symbols : 7 symbols loaded [ARPAUSDT, LINKUSDT, MANAUSDT, MKRUSDT, NEOUSDT, THETAUSDT, XRPUSDT]
+       ├─ Events  : 350 unique events
+       └─ Quality : Edge: 59.93 bps
 
   [✅] Fold #1 (FitEnd: 2023-10-31 -> OOS: 2023-12-31 ~ 2024-03-31)
-       ├─ Symbols : 2 symbols loaded [1000SHIBUSDT, BTCUSDT]
-       ├─ Events  : 48 unique events
-       └─ Quality : Edge: 86.59 bps
+       ├─ Symbols : 24 symbols loaded [ANKRUSDT, ARPAUSDT, BANDUSDT, BCHUSDT, BLZUSDT, BNBUSDT, BTCUSDT, CRVUSDT, +16 more]
+       ├─ Events  : 866 unique events
+       └─ Quality : Edge: 82.00 bps
 
   [✅] Fold #2 (FitEnd: 2024-01-17 -> OOS: 2024-04-01 ~ 2024-07-01)
-       ├─ Symbols : 11 symbols loaded [BNBUSDT, BTCUSDT, CRVUSDT, DOGEUSDT, DOTUSDT, FILUSDT, FTMUSDT, LINKUSDT, +3 more]
-       ├─ Events  : 281 unique events
-       └─ Quality : Edge: 131.82 bps
+       ├─ Symbols : 28 symbols loaded [ADAUSDT, ANKRUSDT, BANDUSDT, BCHUSDT, BNBUSDT, BTCUSDT, CRVUSDT, DOGEUSDT, +20 more]
+       ├─ Events  : 874 unique events
+       └─ Quality : Edge: 98.44 bps
 
   [✅] Fold #3 (FitEnd: 2024-04-04 -> OOS: 2024-07-01 ~ 2024-09-30)
-       ├─ Symbols : 16 symbols loaded [ANKRUSDT, ATOMUSDT, BNBUSDT, BTCUSDT, DOGEUSDT, DOTUSDT, FTMUSDT, GALAUSDT, +8 more]
-       ├─ Events  : 428 unique events
-       └─ Quality : Edge: 30.27 bps
+       ├─ Symbols : 34 symbols loaded [1000SHIBUSDT, 1000XECUSDT, ADAUSDT, ANKRUSDT, ARPAUSDT, ARUSDT, ATOMUSDT, BLZUSDT, +26 more]
+       ├─ Events  : 1148 unique events
+       └─ Quality : Edge: 74.06 bps
 
 ──────────────────────────────────────────────────────────────────────────────
 
@@ -75,98 +81,85 @@ Loaded symbol sync profiles from cache: /home/kth/my_coin_traider/data/futures/s
 
   ✅ [Time-Coverage  ] :    1.000 (Target >=0.800 )
   ✅ [Signal-Quality ] :    1.000 (Target >=0.900 )
-  ✅ [Symbol-Breadth ] :   18.846 (Target >=3.000 )
+  ✅ [Symbol-Breadth ] :   36.804 (Target >=3.000 )
   ✅ [Stable-Folds   ] :    1.000 (Target >=0.500 )
-  ✅ [Min-Profit     ] :   40.185 (Target >0.000  )
+  ✅ [Min-Profit     ] :   56.670 (Target >0.000  )
 ──────────────────────────────────────────────────────────────────────────────
 
-[ENS-FINAL] Arch-Only   | SYM: 49 | EVT: 164,377 | TOTAL: +25.5 bps | [BRK: +28.2✅ MOM: +19.6✅ TRD: +50.6✅ MRV: +53.9✅ UNI: +15.6✅]
+[ENS-FINAL] Arch-Only   | SYM: 56 | EVT: 324,791 | TOTAL: +25.3 bps | [BRK: +33.2✅ MOM: +18.8✅ TRD: +54.1✅ MRV: +49.9✅ UNI: +15.0✅ F:20.7✅]
 
 [L1 FINAL PROMOTION SUMMARY] 🚀
   RANK  SYMBOL       STRATEGY (Family)                EDGE(bps)  SIG(t-stat)     STATUS
   ────  ──────────   ───────────────────────────────  ─────────  ──────────────  ──────────────────
-  #1    UNIUSDT      mtf_breakout_retest (mtf_bor...     +476.2  [5/5] 8.05      [L2-PASS] Q:mid
-  #2    LTCUSDT      funding_zscore_carry (fzs_96)        +65.5  [4/5] 4.10      [L2-PASS] Q:hi
-  #3    LTCUSDT      funding_carry (funding_24)           +52.7  [4/5] 4.10      [L2-PASS] Q:hi
-  #4    LTCUSDT      funding_zscore_carry (fzs_48)        +69.9  [4/5] 4.01      [L2-PASS] Q:mid
-  #5    DOGEUSDT     funding_carry (funding_24)           +84.7  [4/5] 3.64      [L2-PASS] Q:hi
-  #6    XRPUSDT      rsi_reversion (rsi_6)                +45.5  [3/5] 3.06      [L2-PASS] Q:mid
-  #7    BTCUSDT      funding_zscore_carry (fzs_48)        +33.4  [3/5] 3.03      [L2-PASS] Q:lo
-  #8    SOLUSDT      vol_breakout (bb_compress_20)       +123.9  [3/5] 3.03      [L2-PASS] Q:hi
-  #9    LTCUSDT      dual_momentum (dm_12_48)             +62.0  [3/5] 2.89      [L2-PASS] Q:mid
-  #10   BTCUSDT      funding_zscore_carry (fzs_96)        +30.5  [3/5] 2.86      [L2-PASS] Q:mid
-  #11   ATOMUSDT     funding_zscore_carry (fzs_48)        +76.9  [3/5] 2.79      [L2-PASS] Q:mid
-  #12   XLMUSDT      dual_momentum (dm_24_96)            +137.0  [3/5] 2.54      [L2-PASS] Q:lo
-  #13   BNBUSDT      mtf_breakout_retest (mtf_bor...     +345.4  [2/5] 2.41      [L2-PASS] Q:lo
-  #14   LTCUSDT      funding_zscore_carry (fzs_168)       +39.3  [2/5] 2.40      [L2-PASS] Q:mid
-  #15   CRVUSDT      trend_pullback_continuation ...     +255.1  [2/5] 2.37      [L2-PASS] Q:hi
-  #16   TRBUSDT      trend_pullback_continuation ...     +253.6  [2/5] 2.30      [L2-PASS] Q:mid
-  #17   ANKRUSDT     trend_ma (ema_12_72)                 +47.0  [2/5] 2.20      [L2-PASS] Q:mid
-  #18   UNIUSDT      funding_carry (funding_24)           +87.4  [2/5] 2.13      [L2-PASS] Q:mid
-  #19   ADAUSDT      funding_zscore_carry (fzs_168)       +53.7  [2/5] 1.99      [L2-PASS] Q:lo
-  #20   ATOMUSDT     funding_zscore_carry (fzs_96)        +71.1  [2/5] 1.98      [L2-PASS] Q:lo
-  #21   FTMUSDT      trend_pullback_continuation ...     +116.7  [2/5] 1.77      [L2-PASS] Q:lo
-  #22   LINKUSDT     funding_zscore_carry (fzs_168)       +48.0  [2/5] 1.72      [L2-PASS] Q:mid
-  #23   LINKUSDT     funding_zscore_carry (fzs_96)        +51.4  [2/5] 1.63      [L2-PASS] Q:mid
+  #1    ANKRUSDT     residual_reversion (rr_24)          +128.8  [5/5] 5.01      [L2-PASS] Q:hi
+  #2    LPTUSDT      residual_reversion (rr_48)          +198.8  [5/5] 4.82      [L2-PASS] Q:lo
+  #3    ANKRUSDT     residual_reversion (rr_48)          +118.6  [5/5] 4.77      [L2-PASS] Q:mid
+  #4    MTLUSDT      vol_breakout (bb_compress_20)       +115.6  [5/5] 4.75      [L2-PASS] Q:mid
+  #5    CRVUSDT      dual_momentum (dm_24_96)            +292.5  [5/5] 4.58      [L2-PASS] Q:hi
+  #6    STORJUSDT    trend_pullback_continuation ...     +359.0  [4/5] 4.12      [L2-PASS] Q:hi
+  #7    LTCUSDT      funding_carry (funding_24)           +51.0  [4/5] 3.96      [L2-PASS] Q:hi
+  #8    SNXUSDT      trend_pullback_continuation ...     +260.4  [4/5] 3.88      [L2-PASS] Q:hi
+  #9    LTCUSDT      funding_zscore_carry (fzs_48)        +67.1  [4/5] 3.85      [L2-PASS] Q:mid
+  #10   LTCUSDT      funding_zscore_carry (fzs_96)        +59.9  [4/5] 3.75      [L2-PASS] Q:hi
+  #11   DOGEUSDT     funding_carry (funding_24)           +85.9  [4/5] 3.69      [L2-PASS] Q:hi
+  #12   AAVEUSDT     dual_momentum (dm_12_48)            +115.8  [3/5] 3.20      [L2-PASS] Q:mid
+  #13   IOTAUSDT     trend_pullback_continuation ...     +226.6  [3/5] 3.12      [L2-PASS] Q:mid
+  #14   ZILUSDT      trend_pullback_continuation ...     +113.1  [3/5] 3.10      [L2-PASS] Q:mid
+  #15   MTLUSDT      funding_carry (funding_24)          +136.5  [3/5] 3.09      [L2-PASS] Q:hi
+  #16   UNIUSDT      trend_pullback_continuation ...     +181.7  [3/5] 3.09      [L2-PASS] Q:mid
+  #17   SOLUSDT      vol_breakout (bb_compress_20)       +125.5  [3/5] 3.07      [L2-PASS] Q:hi
+  #18   SNXUSDT      vol_breakout (bb_compress_20)       +125.3  [3/5] 2.99      [L2-PASS] Q:mid
+  #19   LTCUSDT      dual_momentum (dm_12_48)             +64.2  [3/5] 2.99      [L2-PASS] Q:mid
+  #20   ZENUSDT      dual_momentum (dm_24_96)            +169.1  [3/5] 2.99      [L2-PASS] Q:lo
+  #21   BLZUSDT      residual_reversion (rr_24)          +132.4  [3/5] 2.99      [L2-PASS] Q:mid
+  #22   XRPUSDT      rsi_reversion (rsi_6)                +43.5  [3/5] 2.93      [L2-PASS] Q:mid
+  #23   RSRUSDT      vol_term_structure_gate (vts...     +155.5  [3/5] 2.93      [L2-PASS] Q:mid
+  #24   BTCUSDT      funding_zscore_carry (fzs_48)        +32.1  [3/5] 2.92      [L2-PASS] Q:mid
+  #25   ZILUSDT      trend_pullback_continuation ...     +164.6  [3/5] 2.89      [L2-PASS] Q:mid
+  #26   ATOMUSDT     vol_breakout (bb_compress_20)        +80.5  [3/5] 2.80      [L2-PASS] Q:mid
+  #27   RUNEUSDT     trend_donchian (donchian_72)        +133.3  [3/5] 2.77      [L2-PASS] Q:mid
+  #28   BTCUSDT      funding_zscore_carry (fzs_96)        +29.1  [3/5] 2.72      [L2-PASS] Q:mid
+  #29   AXSUSDT      residual_reversion (rr_24)           +52.0  [3/5] 2.68      [L2-PASS] Q:mid
+  #30   ICPUSDT      trend_pullback_continuation ...     +210.6  [3/5] 2.66      [L2-PASS] Q:mid
+  #31   KAVAUSDT     trend_pullback_continuation ...     +165.5  [3/5] 2.53      [L2-PASS] Q:hi
+  #32   ZECUSDT      dual_momentum (dm_24_96)            +151.0  [3/5] 2.52      [L2-PASS] Q:mid
+  #33   ZRXUSDT      trend_pullback_continuation ...     +254.6  [2/5] 2.46      [L2-PASS] Q:hi
+  #34   LTCUSDT      funding_zscore_carry (fzs_168)       +39.8  [2/5] 2.43      [L2-PASS] Q:mid
+  #35   TRBUSDT      trend_pullback_continuation ...     +291.3  [2/5] 2.40      [L2-PASS] Q:hi
+  #36   BLZUSDT      dual_momentum (dm_12_48)            +135.4  [2/5] 2.40      [L2-PASS] Q:hi
+  #37   1000XECUSDT  rsi_reversion (rsi_6)                +62.8  [2/5] 2.39      [L2-PASS] Q:hi
+  #38   ATOMUSDT     trend_pullback_continuation ...     +134.6  [2/5] 2.36      [L2-PASS] Q:mid
+  #39   1000SHIBUSDT funding_carry (funding_24)           +49.0  [2/5] 2.35      [L2-PASS] Q:mid
+  #40   1000SHIBUSDT funding_zscore_carry (fzs_48)        +64.6  [2/5] 2.32      [L2-PASS] Q:mid
+  #41   BNBUSDT      mtf_breakout_retest (mtf_bor...     +331.4  [2/5] 2.31      [L2-PASS] Q:lo
+  #42   SANDUSDT     trend_pullback_continuation ...     +258.0  [2/5] 2.18      [L2-PASS] Q:hi
+  #43   ENSUSDT      vol_term_structure_gate (vts...     +180.2  [2/5] 2.18      [L2-PASS] Q:mid
+  #44   MTLUSDT      funding_zscore_carry (fzs_96)        +99.9  [2/5] 2.17      [L2-PASS] Q:lo
+  #45   ZILUSDT      funding_carry (funding_24)           +61.0  [2/5] 2.16      [L2-PASS] Q:hi
+  #46   GALAUSDT     trend_pullback_continuation ...     +217.3  [2/5] 2.10      [L2-PASS] Q:lo
+  #47   RUNEUSDT     trend_donchian (donchian_18)         +67.3  [2/5] 2.10      [L2-PASS] Q:lo
+  #48   CRVUSDT      trend_pullback_continuation ...     +215.0  [2/5] 2.08      [L2-PASS] Q:mid
+  #49   ADAUSDT      funding_zscore_carry (fzs_168)       +55.7  [2/5] 2.06      [L2-PASS] Q:mid
+  #50   LINKUSDT     funding_zscore_carry (fzs_168)       +56.8  [2/5] 2.04      [L2-PASS] Q:mid
+  #51   TRXUSDT      vol_term_structure_gate (vts...      +22.8  [2/5] 1.97      [L2-PASS] Q:hi
+  #52   RUNEUSDT     trend_donchian (donchian_36)         +87.0  [2/5] 1.95      [L2-PASS] Q:lo
+  #53   LINKUSDT     funding_zscore_carry (fzs_96)        +60.7  [2/5] 1.93      [L2-PASS] Q:mid
+  #54   FTMUSDT      trend_pullback_continuation ...     +124.2  [2/5] 1.88      [L2-PASS] Q:lo
+  #55   RUNEUSDT     vol_term_structure_gate (vts...      +87.7  [2/5] 1.72      [L2-PASS] Q:mid
+  #56   VETUSDT      funding_zscore_carry (fzs_96)        +50.3  [2/5] 1.67      [L2-PASS] Q:mid
+  #57   MKRUSDT      btc_regime_pullback (btc_pul...      +41.6  [2/5] 1.58      [L2-PASS] Q:mid
+  #58   THETAUSDT    funding_zscore_carry (fzs_96)        +71.2  [1/5] 1.38      [L2-PASS] Q:mid
+  #59   BANDUSDT     residual_reversion (rr_24)           +69.1  [1/5] 1.32      [L2-PASS] Q:lo
+  #60   THETAUSDT    trend_pullback_continuation ...      +88.2  [1/5] 1.03      [L2-PASS] Q:mid
   ────  ──────────   ───────────────────────────────  ─────────  ──────────────  ──────────────────
+  [NOT PROMOTED] 1537 pairs | top: no_incremental_edgex818, quality_weight_zerox713, negative_gross_edgex388
 
 
 ● [LAYER UNIVERSE AUDIT]
 ──────────────────────────────────────────────────────────────────────────────
   LAYER  WINDOW RANGE                    SYMS   ACTIVE (min/med/max)       ENTRY    KILL  WARNINGS
   ─────  ──────────────────────────────  ────   ────────────────────  ──────────  ──────  ────────
-  L1     2023-04-01 ~ 2024-09-30           54     0 /  21.0 / 30               0      32  —
+  L1     2023-04-01 ~ 2024-09-30           56     0 /  47.0 / 51          16,470      15  —
 ──────────────────────────────────────────────────────────────────────────────
 
-
->> LAYER 1: PASS -> Proceeding to Layer 2.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-● [LAYER 2: PORTFOLIO ALLOCATION & RISK OPTIMIZATION]
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[L2-SIGNAL-PRE] predict_layer1_signals: registry_symbols=15 activation_floor=0.0 start_idx=5484 end_idx=7674
-  ● [HYPERPARAMETER OPTIMIZATION]
-    - Study Name : l2_study_4h_92f620416aa6
-    - Config     : 200 trials
-    - Provenance : events=2184 unique_symbols=ADAUSDT,BNBUSDT,BTCUSDT,CRVUSDT,DOGEUSDT,FTMUSDT,LINKUSDT,LTCUSDT,SOLUSDT,TRBUSDT,UNIUSDT,XLMUSDT,XRPUSDT fp=70b2ea744431
-  ────────────────────────────────────────────────────────────────────────────
-[L2-OPT]: 100%|███████████████████████████████████████████████████████| 200/200 [01:08<00:00,  2.92it/s, Best CAGR: 0.00% | Current: -75.53%]
-[L2-SELECTION] No feasible candidate found within fallback window (reason=cagr)
-[L2-DEPLOY-C4] L*=1.918 (binding=mdd) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-● [LAYER 2: PORTFOLIO ALLOCATION & RISK OPTIMIZATION]
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[L2-SIGNAL-PRE] predict_layer1_signals: registry_symbols=15 activation_floor=0.0 start_idx=5484 end_idx=7674
-[L2-DEPLOY] L*=1.9181 binding=champion | CAGR=-0.0409 MDD=0.1459 CVaR95=0.0080 RiskUtil=0.486
-● [LAYER 2 PORTFOLIO SCORECARD] (2024-12-22 ~ 2025-09-30)
-──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ❌ BLOCKED (cagr)
-
-  ❌ [Growth    ] CAGR: -4.1% (>=30.0%) | PnL: -1.5% | Equity x0.99
-  ❌ [Efficiency] Sharpe: -0.207 (>=1.000) | Sortino: -0.288 (>=1.500) | Calmar: n/a(loss) (>=1.000)
-  ✅ [Risk      ] MDD: 14.6% (<=30.0%) | CVaR95: 0.8% (<=6.0%) | RiskUtil: 48.6%
-  ✅ [Robust    ] Fold: 66.7% (>=60.0%) | Trades: 101 (>=30) | Friction: 100.0%
-  ❌ [Uplift    ] Sharpe Uplift: +0.09 (>=+0.20)
-  ❌ [Integrity ] DSR: 0.348 (>=0.60) | PSR: 0.428 (diag)
-  [Diag     ] RelMDD: 1.88x | Turnover: 0.045
-──────────────────────────────────────────────────────────────────────────────
-
-  [ FOLD DETAIL BREAKDOWN ]
-  ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ✅ Sharpe:  0.774 | CAGR:   +10.9% | MDD:   7.6% | Status: PASS | Period: 2024-12-22 ~ 2025-03-26
-       Symbols: 9 [ADAUSDT, BNBUSDT, BTCUSDT, CRVUSDT, DOGEUSDT, LTCUSDT, TRBUSDT, UNIUSDT, +1 more]
-  ├─ Fold #2 : ❌ Sharpe: -1.967 | CAGR:   -28.4% | MDD:  11.8% | Status: FAIL | Period: 2025-03-26 ~ 2025-06-28
-       Symbols: 10 [BNBUSDT, BTCUSDT, CRVUSDT, DOGEUSDT, LINKUSDT, LTCUSDT, SOLUSDT, UNIUSDT, +2 more]
-  └─ Fold #3 : ✅ Sharpe:  0.847 | CAGR:   +10.9% | MDD:   5.3% | Status: PASS | Period: 2025-06-28 ~ 2025-09-30
-       Symbols: 8 [ADAUSDT, BNBUSDT, BTCUSDT, CRVUSDT, DOGEUSDT, LINKUSDT, LTCUSDT, XRPUSDT]
-
-● [LAYER UNIVERSE AUDIT]
-──────────────────────────────────────────────────────────────────────────────
-  LAYER  WINDOW RANGE                    SYMS   ACTIVE (min/med/max)       ENTRY    KILL  WARNINGS
-  ─────  ──────────────────────────────  ────   ────────────────────  ──────────  ──────  ────────
-  L2     2024-10-01 ~ 2025-09-30           54    18 /  22.0 / 25               0      24  —
-──────────────────────────────────────────────────────────────────────────────
-
->> LAYER 2: BLOCKED -> gate_passed=False
-!! FAIL: exit_code=1 reason=layer2_blocked:cagr
+[TIERED] Phase=l1 — stopping after L1 (not a multilayer phase)
