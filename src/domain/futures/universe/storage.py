@@ -1164,7 +1164,41 @@ def run_historical_sync(
         symbols = list(dict.fromkeys(symbols))  # 중복 제거
         logger.info("Sync mode=%s targeted_symbols=%d", mode, len(symbols))
     elif mode == "elite_fast":
-        symbols = smart_filter_symbols(limit=limit)
+        # elite_fast now uses ingestion_filter (structural exclusion only) instead
+        # of smart_filter_symbols (volume ranking cut — alpha-blind, prohibited per spec C0)
+        from src.domain.futures.universe.ingestion_filter import (
+            IngestionFilterConfig,
+            select_ingestion_symbols,
+        )
+        try:
+            _client_ef = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET)
+            _ei = _client_ef.exchange.fapiPublicGetExchangeInfo()
+            _raw_tickers = _client_ef.exchange.fapiPublicGetTicker24hr()
+            _ticker_df = pd.DataFrame(_raw_tickers)
+            _ef_profiles: dict[str, SymbolSyncProfile] = {}
+            try:
+                _ef_profiles = _load_symbol_sync_profiles()
+            except Exception as _pe:
+                logger.warning("ingestion_filter: profile load failed (%s), continuing without profiles", _pe)
+            _filter_cfg = IngestionFilterConfig()
+            _filtered, _report = select_ingestion_symbols(
+                exchange_info=_ei,
+                ticker_24h=_ticker_df,
+                profiles=_ef_profiles,
+                config=_filter_cfg,
+            )
+            symbols = _filtered[:limit] if limit else _filtered
+            logger.info(
+                "ingestion_filter: %d symbols selected (was smart_filter_symbols ranking cut)",
+                len(symbols),
+            )
+        except Exception as _exc:
+            logger.warning(
+                "ingestion_filter failed (%s), falling back to _list_usdt_futures_symbols", _exc
+            )
+            symbols = _list_usdt_futures_symbols()
+            if limit:
+                symbols = symbols[:limit]
     else:
         symbols = _list_usdt_futures_symbols()
         if limit:
