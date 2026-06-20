@@ -32,10 +32,34 @@ Produces a bar-by-bar PIT-valid `UniverseStateCube [T, N]` for Binance USDT perp
 - $\text{capacity\_usdt}[t, n] = \text{adv\_usdt}_{30d}[t, n] \times \text{max\_participation\_rate}$
 - Order sizing clips to capacity: $w \leftarrow \min(w, \text{capacity\_usdt}[t, n] / \text{nav})$. Min order 5 USDT; below threshold → $w = 0$.
 
-**Capacity-Coverage Cap (quarterly snapshot)**
-- `PITUniverseConfig.k_in > 0` (legacy): select top-k by `capacity_usdt` descending. `k_in = 0` (default) → capacity-coverage mode.
-- **Capacity-coverage mode**: select minimum prefix of `eligible_syms_all` (sorted by `capacity_usdt` desc) such that $\sum_{\text{prefix}} \text{capacity} \ge \text{capacity\_coverage\_target} \times \sum_{\text{all}} \text{capacity}$. Prefix clipped to `k_max`.
-- Fail-open: if total capacity = 0, falls back to `eligible_syms_all[:k_max]`.
+**Symbol Breadth Policy (quarterly snapshot)**
+- Universe is breadth-maximizing: all symbols passing G0–G8 + ADV_FLOOR are admitted.
+- `k_max = 150`: compute backstop only (not a ranking cut). Almost never binding.
+- `eligible_syms[:k_max]` — no capacity-coverage prefix; capacity is an L2 sizing constraint, not a universe gate.
+
+**Execution Eligibility Gates (G0–G8 + ADV_FLOOR, per quarterly snapshot)**
+- G0: LEVERAGED_TOKEN — suffix UP/DOWN/BULL/BEAR excluded.
+- G1: NOT_ONBOARDED — `available_at > as_of`.
+- G2: STATUS_NOT_TRADING — exchange status ≠ TRADING.
+- G3: DATA_CONFIDENCE_LOW — `has_nan | has_inf | has_timestamp_issues | coverage < 0.80`.
+- G4: MISSING_RULES — no execution rules computed.
+- G5: STALE_MARKET_DATA — `staleness_bars > max_staleness_bars (=2 @4h)`.
+- G6: DATA_INTEGRITY_FAIL — `n_bar_gaps > max_gap_count(=3) OR max_gap_bars > max_gap_bars_threshold(=6=24h @4h) OR frozen_bars > max_frozen_bars(=6) OR n_zero_volume_bars_60d > max_zero_vol_bars(=12) OR last_60d_coverage < min_60d_coverage(=0.90) OR has_nan OR has_inf OR has_timestamp_issues`.
+- G7: ORDER_TOO_SMALL — `min_order_usdt > default_intended_notional_usdt`.
+- G8: COST_TOO_HIGH — `round_trip_cost_bps > max_round_trip_cost_bps(=60)`.
+- ADV_FLOOR: ADV_FLOOR_FAIL — `adv_usdt_30d < min_adv_usdt(=2M)`.
+
+**Continuity Metrics (`compute_continuity_metrics`)**
+- Computes `n_bar_gaps`, `max_gap_bars`, `frozen_bars`, `n_zero_volume_bars_60d`, `last_60d_coverage`, `has_nan`, `has_inf`, `has_timestamp_issues` from raw parquet klines.
+- Grid uses `pd.date_range(true_first_date, as_of_date, freq=tf)` where `true_first_date = max(onboard_date, first_data_date)` — prevents pre-data gap inflation.
+- `.as_unit("ns").asi8` on both expected grid and observed timestamps — eliminates pandas 2.x datetime unit mismatch (s vs us vs ns) that falsely maximized `max_gap_bars`.
+- Written to ledger at sync time; G6 reads these fields via `_instrument_df_from_ledger`.
+
+**Backtest Loader Gap Gate (`evaluate_symbol_data_sufficiency`)**
+- After count-based checks (95% IS/OOS coverage), computes `max_gap_bars` from loaded datetime series: `round(max_diff / bar_delta) - 1`.
+- `gap_ok = max_gap_bars <= FUTURES_BACKTEST_MAX_GAP_BARS (=6)` — boundary aligned with G6 (`>` strict).
+- `reason = "gap_too_large"` when gap gate fails; `max_gap_bars` included in return dict.
+- Applied to both `is_historical_stage5` and standard paths.
 
 **PIT Sub-window Admission (tiered pipeline scope)**
 - Replaces full-window END-coverage filter that forced survivorship bias. Applied in `_resolve_tradeable_scope` before tiered pipeline entry.
@@ -79,9 +103,13 @@ graph TD
 |------|----------|-------------|
 | **Input** | `knowledge_date` | PIT barrier: `available_at <= decision_at` enforced |
 | **Input** | `available_at` | Observation release timestamp (distinct from event timestamp) |
-| **Param** | `PITUniverseConfig.k_in` | Legacy top-N cap; `0` (default) = capacity-coverage mode |
-| **Param** | `capacity_coverage_target` | Cumulative capacity fraction to cover (default 0.90) |
-| **Param** | `k_max` | Hard cap on admitted symbols in coverage mode (default 100) |
+| **Param** | `PITUniverseConfig.k_in` | Legacy top-N cap; `0` (default) = breadth-max mode |
+| **Param** | `k_max` | Compute backstop (default 150); almost never binding |
+| **Param** | `min_adv_usdt` | ADV floor for executability (2M USDT); not a ranking cut |
+| **Param** | `max_gap_bars` | G6: max consecutive missing-bar gap allowed (6 = 24h @4h) |
+| **Param** | `max_gap_count` | G6: max distinct gap runs in full history (3) |
+| **Param** | `max_frozen_bars` | G6: max same-close consecutive bars (6 = 24h @4h) |
+| **Param** | `FUTURES_BACKTEST_MAX_GAP_BARS` | Loader: aligns with G6 `max_gap_bars` threshold (6) |
 | **Param** | `_TIERED_MIN_WINDOW_BARS` | Min bars in `[fetch_start, holdout_end]` for tiered admission (1500) |
 | **Param** | `min_holdout_coverage` | Min fraction of OOS span a symbol must cover for tiered admission (0.90) |
 | **Param** | `max_participation_rate` | Fraction of ADV per order for capacity (default 0.01) |
@@ -95,6 +123,8 @@ graph TD
 - **Exchange API Rule Changes (e.g., Tick Size):** Universe caches API exchange info as-of `knowledge_date`; historical structure parameters used for simulation alignment.
 - **Delisted/Dead Coins:** Symbols delisted post-`knowledge_date` remain in snapshot if eligible at `as_of` — enforces inclusion to prevent survivorship bias.
 - **New Listings Guard:** Loader clips request start to `onboard_date`; backfills skipped if gap < 24 hours.
+- **Pre-data Gap Inflation:** `compute_continuity_metrics` clamps `true_first_date = max(onboard_date, first_data_date)` — prevents symbols listed in 2019 (BTC) but with data from 2022 from showing false 3-year gap.
+- **Pandas Datetime Unit Mismatch:** `pd.date_range()` returns `datetime64[s, UTC]`; parquet timestamps are `datetime64[us, UTC]`. `.asi8` gave incompatible int64 values → zero intersection → every symbol showed `max_gap_bars=total_expected_bars`. Fixed: `.as_unit("ns").asi8` on both sides.
 - **Delisted Symbol Sync Prevention:** Symbols with no data update > 180 days past requested end are treated as inactive; sync range clipped accordingly.
 - **Mid-listing Promotion Gate:** `SymbolLifecycleRecord.promotion_available_at > l2_start` → symbol excluded from L2 `oos_stacked`; prevents look-ahead from mid-window listing entry.
 - **Empty Ledger (stage0.empty):** `build_universe()` creates empty `UniverseStateCube` with all arrays shape `(0,0)`. `validate_materializable_pit_store_run` accepts only when `cube` exists, `cube.eligible` is all `False`, and `decisions` has zero selected symbols. `materialize_snapshot_from_store` requires `cube` argument for every cold-build path.
