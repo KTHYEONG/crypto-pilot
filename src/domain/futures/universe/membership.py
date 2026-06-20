@@ -5,8 +5,29 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+import numba
 import numpy as np
 import pandas as pd
+
+
+@numba.njit(cache=True)  # type: ignore[untyped-decorator]
+def _calculate_warm_ready_numba(active: np.ndarray, warmup_bars_required: int) -> np.ndarray:
+    n = len(active)
+    run_lens = np.zeros(n, dtype=np.float64)
+    current_run = 0.0
+    for i in range(n):
+        if active[i] > 0.0:
+            current_run += 1.0
+            run_lens[i] = current_run
+        else:
+            current_run = 0.0
+            run_lens[i] = 0.0
+    
+    warm_ready = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        if run_lens[i] >= warmup_bars_required:
+            warm_ready[i] = 1.0
+    return warm_ready
 
 
 def canonical_symbol(symbol: Any) -> str:
@@ -74,8 +95,7 @@ def build_membership_mask_bundle(
     if norm_timeline is None:
         norm_timeline = _normalize_timeline(timeline)
 
-    active_quarters = {q for q, syms in norm_timeline.items() if sym_norm in syms}
-    q_list = np.asarray(list(active_quarters), dtype=object)
+    active_quarters_ts = {pd.Timestamp(q) for q, syms in norm_timeline.items() if sym_norm in syms}
     dti = pd.DatetimeIndex(dt_ser)
     if dti.tz is not None:
         dti = dti.tz_localize(None)
@@ -83,12 +103,12 @@ def build_membership_mask_bundle(
     has_na = bool(na_mask.any())
     if has_na:
         dti_filled = dti.fillna(pd.Timestamp("1970-01-01"))
-        bar_q_starts = dti_filled.to_period("Q").start_time.date
-        active = np.isin(bar_q_starts, q_list).astype(np.float64)
+        bar_q_starts = dti_filled.to_period("Q").start_time
+        active = bar_q_starts.isin(active_quarters_ts).astype(np.float64)
         active[na_mask] = 0.0
     else:
-        bar_q_starts = dti.to_period("Q").start_time.date
-        active = np.isin(bar_q_starts, q_list).astype(np.float64)
+        bar_q_starts = dti.to_period("Q").start_time
+        active = bar_q_starts.isin(active_quarters_ts).astype(np.float64)
 
     active_prev = np.concatenate(([0.0], active[:-1]))
     membership_kill = np.where((active_prev > 0.0) & (active <= 0.0), 1.0, 0.0)
@@ -96,10 +116,7 @@ def build_membership_mask_bundle(
     if warmup_bars_required <= 1:
         warm_ready = active.copy()
     else:
-        s = pd.Series(active)
-        groups = (s == 0.0).cumsum()
-        run_lens = s.groupby(groups, sort=False).cumsum()
-        warm_ready = (run_lens >= warmup_bars_required).astype(np.float64).to_numpy()
+        warm_ready = _calculate_warm_ready_numba(active, warmup_bars_required)
 
     entry_block_mask = np.where((active > 0.0) & (warm_ready > 0.0), 0.0, 1.0)
     raw_kill = (
@@ -118,20 +135,16 @@ def build_membership_mask_bundle(
         if norm_inf_timeline is None:
             norm_inf_timeline = _normalize_timeline(inference_timeline or {})
 
-        inf_active_quarters = {q for q, syms in norm_inf_timeline.items() if sym_norm in syms}
-        inf_q_list = np.asarray(list(inf_active_quarters), dtype=object)
+        inf_active_quarters_ts = {pd.Timestamp(q) for q, syms in norm_inf_timeline.items() if sym_norm in syms}
 
-        inf_active = np.isin(bar_q_starts, inf_q_list).astype(np.float64)
+        inf_active = bar_q_starts.isin(inf_active_quarters_ts).astype(np.float64)
         if has_na:
             inf_active[na_mask] = 0.0
 
         if warmup_bars_required <= 1:
             inf_warm_ready = inf_active.copy()
         else:
-            s_inf = pd.Series(inf_active)
-            inf_groups = (s_inf == 0.0).cumsum()
-            inf_run_lens = s_inf.groupby(inf_groups, sort=False).cumsum()
-            inf_warm_ready = (inf_run_lens >= warmup_bars_required).astype(np.float64).to_numpy()
+            inf_warm_ready = _calculate_warm_ready_numba(inf_active, warmup_bars_required)
 
     return MembershipMaskBundle(
         universe_active_mask=active,
