@@ -28,17 +28,14 @@ def test_contract_enums_expose_expected_values() -> None:
     assert DataConfidence.RECONSTRUCTED.value == "reconstructed"
     assert DataConfidence.UNKNOWN.value == "unknown"
 
-    assert tuple(code.value for code in EligibilityCode) == (
-        "ELIGIBLE",
-        "NOT_ONBOARDED",
-        "STATUS_NOT_TRADING",
-        "STALE_MARKET_DATA",
-        "MISSING_RULES",
-        "ORDER_TOO_SMALL",
-        "COST_TOO_HIGH",
-        "INSUFFICIENT_OBSERVATIONS",
-        "DATA_CONFIDENCE_LOW",
-    )
+    expected_codes = {
+        "ELIGIBLE", "NOT_ONBOARDED", "STATUS_NOT_TRADING", "STALE_MARKET_DATA",
+        "MISSING_RULES", "ORDER_TOO_SMALL", "COST_TOO_HIGH",
+        "INSUFFICIENT_OBSERVATIONS", "DATA_CONFIDENCE_LOW",
+        # Phase 3 additions
+        "DATA_INTEGRITY_FAIL", "LEVERAGED_TOKEN", "ADV_FLOOR_FAIL",
+    }
+    assert {code.value for code in EligibilityCode} == expected_codes
 
 
 def test_instrument_and_observation_contracts_are_frozen_and_slotted() -> None:
