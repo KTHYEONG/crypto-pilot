@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -80,10 +81,32 @@ def _existing_ledger_columns(*, ledger_path: Path) -> tuple[str, ...]:
 
 
 
+
+
+_MANIFEST_CACHE: dict[Path, tuple[float, pd.DataFrame]] = {}
+
+
 def _compute_manifest_hash(*, as_of: date, tf: str, manifest_path: Path) -> str:
     if not manifest_path.exists():
         return str(hash_manifest_rows(()))
-    manifest = pd.read_parquet(manifest_path)
+    
+    try:
+        mtime = os.path.getmtime(manifest_path)
+    except OSError:
+        mtime = 0.0
+
+    cached = _MANIFEST_CACHE.get(manifest_path)
+    if cached is not None and cached[0] == mtime:
+        manifest = cached[1]
+    else:
+        manifest = pd.read_parquet(manifest_path)
+        if not manifest.empty:
+            if "knowledge_date" in manifest.columns:
+                manifest["_parsed_cutoff"] = pd.to_datetime(manifest["knowledge_date"], errors="coerce").dt.date
+            else:
+                manifest["_parsed_cutoff"] = pd.to_datetime(manifest.get("period"), errors="coerce").dt.date
+        _MANIFEST_CACHE[manifest_path] = (mtime, manifest)
+
     if manifest.empty:
         return str(hash_manifest_rows(()))
 
@@ -93,11 +116,7 @@ def _compute_manifest_hash(*, as_of: date, tf: str, manifest_path: Path) -> str:
     if scoped.empty:
         return str(hash_manifest_rows(()))
 
-    if "knowledge_date" in scoped.columns:
-        cutoff_raw = pd.to_datetime(scoped["knowledge_date"], errors="coerce")
-    else:
-        cutoff_raw = pd.to_datetime(scoped.get("period"), errors="coerce")
-    scoped = scoped.loc[cutoff_raw.dt.date <= as_of]
+    scoped = scoped.loc[scoped["_parsed_cutoff"] <= as_of]
     if scoped.empty:
         return str(hash_manifest_rows(()))
 
