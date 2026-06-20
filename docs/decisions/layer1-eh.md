@@ -82,3 +82,15 @@
   - 또한, N<=200 이하 소표본 환경에서 numpy slicing 오버헤드로 회귀를 일으켰던 `_by_q_values`를 루프 기반으로 롤백하여 정합성 복구 및 가속 효과를 순증으로 돌려놓음.
 - **Status**: Accepted
 
+
+## L1-ADR-013: Ingestion & Alignment Performance Optimization (2026-06-20)
+- **Delta:** 
+  - Changed parallel symbol loading in `opt_data_utils.py` from `ProcessPoolExecutor` to `ThreadPoolExecutor`.
+  - Added pre-conversion of meta columns (`pd.to_numeric`) at the initial ingestion phase in `load_single_symbol_data`.
+  - Bypassed redundant `pd.to_datetime` calls in `_resolve_tradeable_scope` using a fast `datetime64` type check.
+  - Optimized the meta column scanning loop in `align_data_maps` to scan NumPy-backed array views for non-NaN values, avoiding Series creation.
+- **Rationale:** 
+  - Loading 57+ symbols under `ProcessPoolExecutor` suffered from severe Python object serialization (pickling) overhead over IPC. Bypassing it via `ThreadPoolExecutor` yielded massive speedups since PyArrow/Pandas release the GIL during file decompression.
+  - Doing `pd.to_numeric` on 12 meta columns inside the alignment loop caused `S * M` Series allocations. Pre-converting at ingestion and using raw NumPy scanning during alignment optimized critical latency paths while keeping 100% data fidelity and look-ahead safety.
+- **Status**: Accepted
+
