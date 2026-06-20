@@ -115,6 +115,12 @@ class RuntimeBreakdown:
         return max(float(self.total) - self.accounted, 0.0)
 
 
+@dataclass(frozen=True, slots=True)
+class TradeableScopeResult:
+    admitted: tuple[str, ...]
+    dropped_by_reason: Mapping[str, tuple[str, ...]]
+
+
 def _runtime_breakdown(total: float, **steps: float) -> RuntimeBreakdown:
     return RuntimeBreakdown(total=float(total), steps={key: float(value) for key, value in steps.items()})
 
@@ -205,7 +211,7 @@ def _resolve_tradeable_scope(
     holdout_end: pd.Timestamp,
     min_window_bars: int,
     min_holdout_coverage: float,
-) -> list[str]:
+) -> TradeableScopeResult:
     """PIT sub-window admission: admits symbols with sufficient OOS coverage.
 
     Replaces the full-window END-coverage filter that caused survivorship bias.
@@ -230,33 +236,72 @@ def _resolve_tradeable_scope(
     """
     oos_span = (holdout_end - oos_start).total_seconds()
     admitted: list[str] = []
+    dropped: dict[str, list[str]] = {
+        "missing_map": [],
+        "empty_frame": [],
+        "late_start": [],
+        "min_bars": [],
+        "no_holdout": [],
+        "holdout_coverage": [],
+    }
     for sym in valid_symbols:
-        if sym not in strategy_maps:
+        sym_maps = strategy_maps.get(sym)
+        if sym_maps is None:
+            dropped["missing_map"].append(sym)
             continue
-        sym_df = strategy_maps[sym].get(tf)
+        sym_df = sym_maps.get(tf)
         if sym_df is None or sym_df.empty:
+            dropped["empty_frame"].append(sym)
             continue
         datetimes = pd.to_datetime(sym_df["datetime"], utc=True)
-        # Guard 1: symbol data must start at or before fetch_start so the tiered
-        # pipeline intersection preserves the full warm-up window.
-        if datetimes.min() > fetch_start:
-            continue
         # Count bars within the full window [fetch_start, holdout_end]
         mask_window = (datetimes >= fetch_start) & (datetimes <= holdout_end)
         n_bars = int(mask_window.sum())
         if n_bars < min_window_bars:
+            dropped["min_bars"].append(sym)
+            continue
+        if datetimes.min() > fetch_start:
+            dropped["late_start"].append(sym)
             continue
         # OOS holdout coverage: symbol must span >= min_holdout_coverage of [oos_start, holdout_end]
         if oos_span > 0:
             oos_data = datetimes[(datetimes >= oos_start) & (datetimes <= holdout_end)]
             if len(oos_data) == 0:
+                dropped["no_holdout"].append(sym)
                 continue
             covered_span = (oos_data.max() - oos_data.min()).total_seconds()
             coverage = covered_span / oos_span
             if coverage < min_holdout_coverage:
+                dropped["holdout_coverage"].append(sym)
                 continue
         admitted.append(sym)
-    return admitted
+    return TradeableScopeResult(
+        admitted=tuple(admitted),
+        dropped_by_reason={key: tuple(value) for key, value in dropped.items()},
+    )
+
+
+def _resolve_base_symbol_scope(
+    *,
+    valid_symbols: Sequence[str],
+    strategy_maps: Mapping[str, Mapping[str, pd.DataFrame]],
+    tf: str,
+) -> tuple[str, ...]:
+    """Return loaded symbols that have a non-empty timeframe frame.
+
+    This helper is intentionally data-availability only. It does not apply
+    temporal guards such as warm-up, min-bar, or holdout coverage checks.
+    """
+    base_scope: list[str] = []
+    for sym in valid_symbols:
+        sym_maps = strategy_maps.get(sym)
+        if sym_maps is None:
+            continue
+        sym_df = sym_maps.get(tf)
+        if sym_df is None or sym_df.empty:
+            continue
+        base_scope.append(sym)
+    return tuple(base_scope)
 
 
 def _resolve_data_collection_symbols(
@@ -1171,6 +1216,16 @@ def _run_strategy_stage(
     tiered_window = None
     if use_tiered:
         tiered_window = layered_window or _resolve_layered_window(run_config.date)
+        base_scope = _resolve_base_symbol_scope(
+            valid_symbols=data_stage.valid_symbols,
+            strategy_maps=full_strategy_maps,
+            tf=run_config.timeframe,
+        )
+        _logger.info(
+            "[TIERED] Base scope: %d/%d loaded symbols",
+            len(base_scope),
+            len(data_stage.valid_symbols),
+        )
         if tiered_window is not None:
             try:
                 # Robust conversion to UTC Timestamp
@@ -1187,8 +1242,8 @@ def _run_strategy_stage(
                 req_oos_start_ts = pd.to_datetime(tiered_window.holdout_start, utc=True)
             except (TypeError, ValueError):
                 req_oos_start_ts = req_start_ts
-            effective_trade_syms = _resolve_tradeable_scope(
-                valid_symbols=data_stage.valid_symbols,
+            scope_result = _resolve_tradeable_scope(
+                valid_symbols=base_scope,
                 strategy_maps=full_strategy_maps,
                 tf=run_config.timeframe,
                 fetch_start=req_start_ts,
@@ -1197,17 +1252,27 @@ def _run_strategy_stage(
                 min_window_bars=_TIERED_MIN_WINDOW_BARS,
                 min_holdout_coverage=0.90,
             )
+            effective_trade_syms = list(scope_result.admitted)
             _logger.info(
                 "[TIERED] Sub-window admission: %d/%d symbols admitted (min_bars=%d, oos_cov>=90%%)",
                 len(effective_trade_syms),
-                len(data_stage.valid_symbols),
+                len(base_scope),
                 _TIERED_MIN_WINDOW_BARS,
             )
+            if any(scope_result.dropped_by_reason.values()):
+                _logger.info(
+                    "[TIERED] Sub-window drops: %s",
+                    {
+                        key: len(value)
+                        for key, value in scope_result.dropped_by_reason.items()
+                    },
+                )
         if not effective_trade_syms:
-            _logger.warning(
-                "[TIERED] sub-window admission 0개 → 전체 fallback; holdout 절단 위험"
+            from src.domain.futures.strategy.tiered_workflow import TieredPipelineError
+
+            raise TieredPipelineError(
+                "tiered tradeable scope is empty after sub-window admission"
             )
-            effective_trade_syms = list(data_stage.valid_symbols)
     else:
         effective_trade_syms = list(data_stage.valid_symbols)
 
@@ -1240,10 +1305,6 @@ def _run_strategy_stage(
             from src.domain.futures.strategy.tiered_workflow import (
                 TieredPipelineError,
                 run_tiered_pipeline,
-            )
-            _logger.info(
-                "[TIERED] 💠 Scope: %d symbols (Historical Union ∩ Data-Valid)",
-                len(effective_trade_syms),
             )
             _pit_state_cube = _resolve_universe_state_cube(universe_result)
             aligned_tiered = align_data_maps(
