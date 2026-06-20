@@ -63,10 +63,13 @@ Produces a bar-by-bar PIT-valid `UniverseStateCube [T, N]` for Binance USDT perp
 
 **PIT Sub-window Admission (tiered pipeline scope)**
 - Replaces full-window END-coverage filter that forced survivorship bias. Applied in `_resolve_tradeable_scope` before tiered pipeline entry.
-- Three guards (all must pass):
-  1. `datetimes.min() ≤ fetch_start` — warm-up coverage: symbol must predate fetch window start so intersection of all admitted symbols preserves full warm-up.
-  2. `bars_in_window ≥ _TIERED_MIN_WINDOW_BARS` — minimum data density within `[fetch_start, holdout_end]`.
-  3. `covered_oos_span / total_oos_span ≥ min_holdout_coverage` — symbol must span ≥ 90% of `[oos_start, holdout_end]` (protects against holdout-truncated/delisted symbols).
+- `_resolve_base_symbol_scope` first narrows `valid_symbols` to symbols that have a non-empty timeframe frame in `full_strategy_maps`; this is a data-availability scope only.
+- `_resolve_tradeable_scope` then applies strict temporal guards to that base scope:
+  1. `datetimes.min() <= fetch_start` — warm-up coverage.
+  2. `bars_in_window >= _TIERED_MIN_WINDOW_BARS` — minimum density over `[fetch_start, holdout_end]`.
+  3. OOS coverage over `[oos_start, holdout_end]` is at least 90%.
+- Empty strict admission is fail-closed at the tiered entry point; no fallback re-expands the scope.
+- These guards operate on the base scope only; the resulting admitted symbols feed `align_data_maps` and later per-bar `active_mask` filtering.
 
 **Snapshot Quality Score (legacy, retained for audit)**
 - $\text{Score} = \text{fill\_rate} \times \log_{10}\left(\frac{\text{median\_adv\_usdt}}{\text{adv\_scale\_factor}}\right) \times \frac{1}{\text{mAEC\_bps}}$

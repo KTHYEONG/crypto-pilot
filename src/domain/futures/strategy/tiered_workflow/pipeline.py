@@ -8,7 +8,7 @@ import os
 import time
 from concurrent.futures import ProcessPoolExecutor
 from datetime import date
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import pandas as pd
@@ -419,9 +419,11 @@ def run_l1_swf(
                 for fold_idx, wf_fold in missing_folds:
                     try:
                         import src.domain.futures.strategy.tiered_workflow as _tw
-                        fold_out = _tw._fit_and_predict_single_fold(
-                            fold_idx, wf_fold, labeled_events, aligned, cfg, purge_bars
-                        )
+
+                        fold_out = cast(
+                            Any,
+                            _tw._fit_and_predict_single_fold,
+                        )(fold_idx, wf_fold, labeled_events, aligned, cfg, purge_bars)
                         futures.append((fold_idx, wf_fold, fold_out))
                         cache_key = (
                             wf_fold.fit_start, wf_fold.fit_end,
@@ -835,6 +837,8 @@ def run_l1_nested_swf(
             l1_end_bars=evidence_end,
             purge_bars=purge_bars,
             embargo_bars=embargo_bars,
+            boundary_mode=l1_cfg.l1_boundary_mode,
+            allocation_backend=l1_cfg.allocation_backend,
         )
     except ValueError:
         evidence_folds = ()
@@ -1697,7 +1701,6 @@ def run_tiered_pipeline(
             target_ann_vol=0.20,
         )
 
-    purge_bars, embargo_bars = strategy_config.resolve_purge_and_embargo_bars(cfg)
     n_bars = len(aligned.datetimes)
 
     _is_ts = _to_utc_timestamp(window.l1_start)
@@ -1716,7 +1719,7 @@ def run_tiered_pipeline(
             n_bars=n_bars,
             l1_start_idx=l1_start_bars,
             l1_end_idx=l1_end_bars,
-            max_label_horizon_bars=max(int(getattr(cfg, "max_holding_bars", 1)), purge_bars + embargo_bars),
+            max_label_horizon_bars=int(getattr(cfg, "max_holding_bars", 1)),
             cfg=cfg,
         )
         l1 = _tw.run_l1_nested_swf(
@@ -1784,12 +1787,11 @@ def run_tiered_pipeline(
         logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
     t_l2 = time.perf_counter()
     ho_start_idx_l2 = _date_to_idx(aligned.datetimes, window.holdout_start)
-    awf_folds = _tw.build_walk_forward_folds(n_bars=ho_start_idx_l2, cfg=cfg)
-
-    # L2 window 경계 필터링: OOS 구간이 [l2_start, holdout_start) 내로 제한
-    awf_folds = tuple(
-        f for f in awf_folds
-        if f.oos_start >= l1_end_bars and f.oos_end <= ho_start_idx_l2
+    awf_folds = _tw.build_l2_simulation_folds(
+        n_bars=len(aligned.datetimes),
+        l2_start_idx=l1_end_bars,
+        holdout_start_idx=ho_start_idx_l2,
+        cfg=cfg,
     )
     if not awf_folds:
         logger.warning(
