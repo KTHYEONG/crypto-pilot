@@ -13,7 +13,7 @@ def test_pit_universe_config_k_in_defaults_to_0() -> None:
     # Assert
     assert cfg.k_in == 0
     assert cfg.capacity_coverage_target == pytest.approx(0.90)
-    assert cfg.k_max == 100
+    assert cfg.k_max == 150  # Phase 3: breadth-maximizing backstop
 
 
 def test_universe_config_engine_defaults_to_pit() -> None:
@@ -33,7 +33,7 @@ def test_universe_config_k_in_zero_means_capacity_coverage_path() -> None:
     # Assert: k_in=0 triggers capacity-coverage; coverage target and k_max are present
     assert cfg.pit_config.k_in == 0
     assert cfg.pit_config.capacity_coverage_target == pytest.approx(0.90)
-    assert cfg.pit_config.k_max == 100
+    assert cfg.pit_config.k_max == 150  # Phase 3: breadth-maximizing backstop
 
 
 # ---------------------------------------------------------------------------
