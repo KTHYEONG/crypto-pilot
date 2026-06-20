@@ -1,5 +1,10 @@
 # Layer 1 Architectural Decisions
 
+## L1-ADR-013: L1/Universe 파이프라인 루프 불변식 호이스팅 + 벡터화 (2026-06-20)
+- **Delta:** (OPT-1) `align_data_maps` state_cube/readiness_cube 조인 루프에서 `np.searchsorted`/`positions`/`t_valid`/`p_valid` 를 심볼 루프 밖으로 호이스팅. pandas 3.0 bug fix: `calendar.as_unit("ns").asi8` 로 nanosecond epoch 강제. (OPT-2) `inject_membership_masks_into_maps` 진입 시 `_normalize_timeline()` 헬퍼로 timeline 1회 정규화 후 `build_membership_mask_bundle` 에 전달 (104회→1회). (OPT-3) `run_l1_nested_swf` 의 `volatility_2d` 컬럼 루프를 `pd.DataFrame.rolling().std(ddof=1)` 단일 행렬 호출로 대체. (OPT-6) `load_futures_data_maps_for_symbols` 말미 도달불가 중복 `return` 1줄 제거.
+- **Rationale:** PERF 실측(52 syms, 617K events): searchsorted N=52→1, timeline 정규화 104→1. 수치 결과·공개 시그니처 불변. pandas 3.0.2 `.asi8` microsecond 버그는 pre-existing silent production bug였음(unit 미강제 시 1000× 스케일 오류).
+- **Edge Cases:** pandas 3.0 호환: `as_unit("ns")` 없이 `.asi8` 사용 금지. `_normalize_timeline` 은 `norm_timeline=None` fallback으로 하위호환 유지. OPT-4(ablation twin diagnostics 5.66s) 기각 — bridge 3.4%, 게이트 정의 리스크 대비 절감 미미.
+
 ## L1-ADR-012: Promotion Summary 로그 PASS/FAIL 분리 + 우측절단 진단 (2026-06-19)
 - **Delta:** `format_layer1_deployment_registry_table`에 `all_evidence` 파라미터 추가 → admit된 쌍은 `[L2-PASS] Q:hi/mid/lo` 전체 출력, 미admit 쌍은 `[NOT PROMOTED] N pairs | top: <reason>xN` 1줄 요약. `Layer1FoldReadiness`에 `dropped_by_maturity_count` 필드 추가 → Outer Fold 로그에 `[censored: N]` 노출. STATUS 어휘 PROMOTED/WATCH/REJECTED 제거 (오해 유발: "REJECTED"도 L2 전달됨). `pipeline.py` 호출부에 `all_evidence=deployment_evidence` 배선 완료.
 - **Rationale:** PROMOTION SUMMARY의 STATUS는 q_value 버킷 표시 전용이며 실제 L2 전달 게이트(`build_qualified_signal_registry`)와 무관. "REJECTED" 심볼도 전부 L2로 유입 → 과대-전달 오독 방지. Fold #3 Edge 30bps가 실제 약세인지 우측절단 편향인지 분리 불가 문제 해소.
