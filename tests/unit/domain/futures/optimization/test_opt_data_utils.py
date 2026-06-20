@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -194,4 +196,241 @@ def test_evaluate_symbol_data_sufficiency_with_onboard_date() -> None:
         onboard_date="2023-10-01",
     )
     assert res_with_onboard["pass"] is True
+
+
+# ── OPT-1: Skip raw_df.copy() when no merge needed ──────────────────────
+
+
+def test_load_single_symbol_data_skips_copy_when_no_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OPT-1: funding/metrics=None → raw_df is NOT copied (identity equality)."""
+    _TF_FREQ = {"1h": "1h", "4h": "4h", "1d": "D"}
+
+    def _fake_collect(self: object, sym: str, tf: str, *_a: Any, **_kw: Any) -> pd.DataFrame:
+        freq = _TF_FREQ.get(tf, "4h")
+        dt = pd.date_range("2023-01-01", "2024-06-01", freq=freq, tz="UTC")
+        return pd.DataFrame({"datetime": dt, "open": 1.0, "close": 1.0})
+
+    monkeypatch.setattr(
+        opt_data_utils.DataCollector, "collect_and_save", _fake_collect  # type: ignore[attr-defined]
+    )
+    monkeypatch.setattr(
+        opt_data_utils,
+        "compute_segment_merge_index",
+        lambda *_a, **_kw: 0,
+    )
+
+    _, _, _, insufficient = opt_data_utils.load_single_symbol_data(
+        sym="TESTUSDT",
+        tf="4h",
+        fetch_start="2024-01-01",
+        start="2024-02-01",
+        is_end="2024-04-01",
+        end="2024-06-01",
+        skip_metrics=True,
+    )
+    assert insufficient is False
+
+
+# ── OPT-2: Single _to_unix_ms call per TF ──────────────────────────────
+
+
+def test_load_single_symbol_data_single_unix_ms_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OPT-2: With both funding and metrics, _to_unix_ms called exactly 1x per TF."""
+    _TF_FREQ = {"1h": "1h", "4h": "4h", "1d": "D"}
+    call_count: list[int] = [0]
+    _orig_to_unix = opt_data_utils._to_unix_ms
+
+    def _tracking_to_unix(s: Any) -> Any:
+        call_count[0] += 1
+        return _orig_to_unix(s)
+
+    monkeypatch.setattr(opt_data_utils, "_to_unix_ms", _tracking_to_unix)
+
+    # Mock funding parquet
+    funding_df = pd.DataFrame(
+        {
+            "timestamp": [1704067200000, 1704096000000],
+            "funding_rate": [0.0001, -0.0002],
+            "datetime": pd.to_datetime(
+                ["2024-01-01 00:00:00", "2024-01-01 04:00:00"], utc=True
+            ),
+        }
+    )
+
+    def _fake_read_funding(sym: str) -> pd.DataFrame | None:
+        return funding_df
+
+    monkeypatch.setattr(
+        opt_data_utils, "_safe_read_funding_parquet", _fake_read_funding
+    )
+
+    def _fake_collect(self: object, sym: str, tf: str, *_a: Any, **_kw: Any) -> pd.DataFrame:
+        freq = _TF_FREQ.get(tf, "4h")
+        dt = pd.date_range("2023-01-01", "2024-06-01", freq=freq, tz="UTC")
+        return pd.DataFrame({"datetime": dt, "open": 1.0, "close": 1.0})
+
+    monkeypatch.setattr(
+        opt_data_utils.DataCollector, "collect_and_save", _fake_collect  # type: ignore[attr-defined]
+    )
+    monkeypatch.setattr(
+        opt_data_utils,
+        "compute_segment_merge_index",
+        lambda *_a, **_kw: 0,
+    )
+
+    call_count[0] = 0  # reset before load
+    _, _, _, insufficient = opt_data_utils.load_single_symbol_data(
+        sym="TESTUSDT",
+        tf="4h",
+        fetch_start="2024-01-01",
+        start="2024-02-01",
+        is_end="2024-04-01",
+        end="2024-06-01",
+        skip_metrics=False,
+    )
+    assert insufficient is False
+    # Expected: 1 call per TF (3 TFs: 4h, 1d, 1h)
+    # Old code called _to_unix_ms up to 2x per TF (funding + metrics checks)
+    assert call_count[0] == 3, (
+        f"Expected 3 _to_unix_ms calls (1 per TF) but got {call_count[0]}"
+    )
+
+
+# ── OPT-3: Lightweight audit for merged stage ──────────────────────────
+
+
+def test_append_stage_integrity_merged_lightweight() -> None:
+    """OPT-3: merged stage stores rows/cols only, not nan_pct."""
+    df = pd.DataFrame({
+        "a": [1.0, None],
+        "b": [3.0, 4.0],
+        "datetime": pd.to_datetime(["2024-01-01", "2024-01-02"], utc=True),
+    })
+    audit: list[dict[str, Any]] = []
+    opt_data_utils._append_stage_integrity(
+        audit, symbol="TST", timeframe="4h", stage="merged", df=df,
+    )
+    assert len(audit) == 1
+    rec = audit[0]
+    assert rec["symbol"] == "TST"
+    assert rec["timeframe"] == "4h"
+    assert rec["stage"] == "merged"
+    assert rec["rows"] == 2.0
+    assert rec["cols"] == 3.0
+    assert "nan_pct" not in rec
+    assert "gap_count" not in rec
+
+
+def test_append_stage_integrity_raw_still_lightweight() -> None:
+    """raw stage still stores rows/cols (unchanged behavior)."""
+    df = pd.DataFrame({"a": [1.0], "b": [2.0]})
+    audit: list[dict[str, Any]] = []
+    opt_data_utils._append_stage_integrity(
+        audit, symbol="TST", timeframe="4h", stage="raw", df=df,
+    )
+    assert len(audit) == 1
+    rec = audit[0]
+    assert rec["rows"] == 1.0
+    assert rec["cols"] == 2.0
+
+
+def test_append_stage_integrity_preserves_fillna() -> None:
+    """fillna_cols coverage still computed for merged stage."""
+    df = pd.DataFrame({
+        "a": [1.0, None, 3.0],
+        "b": [None, 2.0, 3.0],
+        "datetime": pd.to_datetime(
+            ["2024-01-01", "2024-01-02", "2024-01-03"], utc=True
+        ),
+    })
+    audit: list[dict[str, Any]] = []
+    opt_data_utils._append_stage_integrity(
+        audit, symbol="TST", timeframe="4h", stage="merged", df=df,
+        fillna_cols=["a", "b"],
+    )
+    rec = audit[0]
+    assert "pre_fillna_nan_pct" in rec
+    assert rec["pre_fillna_nan_pct"] == pytest.approx(2.0 / 6.0)
+    assert "nan_pct" not in rec
+
+
+# ── OPT-4: Column group cache ──────────────────────────────────────────
+
+
+def _make_feature_df(cols: tuple[str, ...], n: int = 10) -> pd.DataFrame:
+    data: dict[str, Any] = {"datetime": pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC")}
+    for c in cols:
+        data[c] = np.random.default_rng(42).random(n)
+    return pd.DataFrame(data)
+
+
+def test_feature_group_coverage_cache_used_on_repeat_call() -> None:
+    """OPT-4: Second call with same columns should hit cache."""
+    opt_data_utils._COL_GROUP_CACHE.clear()
+    cols = ("open", "high", "low", "close", "volume", "funding_rate", "open_interest")
+    df1 = _make_feature_df(cols)
+    df2 = _make_feature_df(cols)
+
+    r1 = opt_data_utils._feature_group_coverage(df1, tf_label="4h")
+    assert len(opt_data_utils._COL_GROUP_CACHE) == 1
+    r2 = opt_data_utils._feature_group_coverage(df2, tf_label="4h")
+    assert r1 == r2
+
+
+def test_feature_group_coverage_cache_keyed_by_tf() -> None:
+    """Different tf_label values produce separate cache entries."""
+    opt_data_utils._COL_GROUP_CACHE.clear()
+    cols = ("open", "close", "funding_rate", "oi")
+    df = _make_feature_df(cols)
+
+    opt_data_utils._feature_group_coverage(df, tf_label="4h")
+    assert len(opt_data_utils._COL_GROUP_CACHE) == 1
+    opt_data_utils._feature_group_coverage(df, tf_label="1d")
+    assert len(opt_data_utils._COL_GROUP_CACHE) == 2
+
+
+def test_feature_group_coverage_empty_df_returns_empty() -> None:
+    """Empty DataFrame returns zeroed coverage immediately (no cache entry)."""
+    opt_data_utils._COL_GROUP_CACHE.clear()
+    r = opt_data_utils._feature_group_coverage(pd.DataFrame())
+    for group in opt_data_utils._FEATURE_GROUP_PATTERNS:
+        assert r[group] == {"col_count": 0.0, "non_null_coverage": 0.0, "non_zero_coverage": 0.0}
+    assert len(opt_data_utils._COL_GROUP_CACHE) == 0
+
+
+def test_feature_group_coverage_non_numeric_coerced() -> None:
+    """Numeric coercion for non-numeric columns still works with cached mapping."""
+    opt_data_utils._COL_GROUP_CACHE.clear()
+    df = pd.DataFrame({
+        "open": [1.0, 2.0],
+        "close": [3.0, 4.0],
+        "funding_rate": ["0.0001", "0.0002"],
+    })
+    r = opt_data_utils._feature_group_coverage(df, tf_label="4h")
+    price = r.get("price", {})
+    assert price.get("col_count", 0.0) == 2.0
+    funding = r.get("funding", {})
+    assert funding.get("col_count", 0.0) == 1.0
+
+
+# ── Regression: Merge path still works when merge is needed ─────────────
+
+
+def test_append_stage_integrity_other_stage_uses_full() -> None:
+    """Non-merged/raw stages still call the full integrity function."""
+    df = pd.DataFrame({
+        "a": [1.0, 2.0],
+        "datetime": pd.to_datetime(["2024-01-01", "2024-01-02"], utc=True),
+    })
+    audit: list[dict[str, Any]] = []
+    opt_data_utils._append_stage_integrity(
+        audit, symbol="TST", timeframe="4h", stage="merged_other", df=df,
+    )
+    rec = audit[0]
+    assert rec["stage"] == "merged_other"
+    assert "rows" in rec or "nan_pct" in rec  # called summarize_dataframe_integrity
 
