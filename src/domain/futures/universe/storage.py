@@ -400,7 +400,7 @@ def _load_symbol_sync_profiles() -> dict[str, SymbolSyncProfile]:
                         delivery_date=date.fromisoformat(delivery) if delivery else None,
                         status=item.get("status", ""),
                     )
-                logger.info("Loaded symbol sync profiles from cache: %s", cache_path)
+                logger.debug("Loaded symbol sync profiles from cache: %s", cache_path)
                 _profiles_cache = profiles
                 return profiles
         except Exception as e:
@@ -618,13 +618,15 @@ def compute_continuity_metrics(
     coverage_ratio = min(coverage_ratio, 1.0)  # cap at 100%
 
     # ── Gap analysis: missing bars from expected grid ─────────────────────
-    # Use .asi8 for both Series and DatetimeIndex to guarantee same internal
-    # int unit (pandas 2.x may use us instead of ns — .asi8 is consistent).
+    # CRITICAL: pd.date_range() returns datetime64[s, UTC] (seconds), but parquet
+    # timestamps are datetime64[us, UTC] (microseconds). .asi8 yields different
+    # int magnitudes → zero intersection → false max_gap_bars = expected_count.
+    # Fix: normalise both to nanoseconds before integer comparison.
     n_bar_gaps: int = 0
     max_gap_bars: int = 0
     if expected_count > 0:
-        exp_ints: np.ndarray = expected_grid.asi8
-        obs_ints: set[int] = set(pd.DatetimeIndex(observed_dt).asi8)
+        exp_ints: np.ndarray = expected_grid.as_unit("ns").asi8
+        obs_ints: set[int] = set(pd.DatetimeIndex(observed_dt).as_unit("ns").asi8)
         missing_mask = ~np.isin(exp_ints, list(obs_ints))
         missing_sorted = np.sort(exp_ints[missing_mask])
         if len(missing_sorted) > 0:
@@ -816,8 +818,11 @@ def sync_single_symbol_data(
     klines_4h['date'] = klines_4h['datetime'].dt.date
     klines_4h = klines_4h.sort_values('datetime').reset_index(drop=True)
     first_date = klines_4h['date'].min()
-    # 진짜 상장일: onboardDate 우선, 없으면 첫 kline
-    true_first_date: date = onboard_date if onboard_date is not None else first_date
+    # 상장일은 실제 첫 kline 날짜와 max 취득:
+    # - 신규상장(데이터 윈도우 중간): onboard_date > first_date → onboard_date 사용 (생존편향 방지)
+    # - 구심볼(BTC 등, 데이터 윈도우 이전 상장): onboard_date < first_date → first_date 사용
+    #   (pre-data 구간을 gap으로 오탈락시키지 않기 위해)
+    true_first_date: date = max(onboard_date, first_date) if onboard_date is not None else first_date
 
     # Fix 1: 일별 4h 봉 수 → 누적합 (PIT) — look-ahead 방지
     _bars_per_day = klines_4h.groupby('date').size()
@@ -1145,7 +1150,7 @@ def run_historical_sync(
     if ledger_path.exists() and not force:
         try:
             import sqlite3
-            logger.info(f"[SQL-DB]   💾 Loaded start dates from {ledger_path.name}")
+            logger.debug(f"[SQL-DB]   💾 Loaded start dates from {ledger_path.name}")
             conn = sqlite3.connect(str(ledger_path))
             try:
                 cursor = conn.cursor()
@@ -1162,7 +1167,7 @@ def run_historical_sync(
     mode = str(sync_mode or "full_history_master").strip().lower()
     if symbols is not None:
         symbols = list(dict.fromkeys(symbols))  # 중복 제거
-        logger.info("Sync mode=%s targeted_symbols=%d", mode, len(symbols))
+        logger.debug("Sync mode=%s targeted_symbols=%d", mode, len(symbols))
     elif mode == "elite_fast":
         # elite_fast now uses ingestion_filter (structural exclusion only) instead
         # of smart_filter_symbols (volume ranking cut — alpha-blind, prohibited per spec C0)
@@ -1230,7 +1235,14 @@ def run_historical_sync(
                 fully_updated = False
                 break
         if fully_updated:
-            logger.info("[SQL-DB]   ⚡ [SKIPPED] All symbols are up-to-date. No sync or disk scans required.")
+            logger.info("================================================================================")
+            logger.info("LOCAL DATA STORAGE (LEDGER & CACHE STATUS)")
+            logger.info("================================================================================")
+            logger.info("")
+            logger.info(f"  Sync Mode: {mode.upper()} (Pre-loaded from cache)")
+            logger.info(f"  [SKIPPED] All records in '{ledger_path.name}' are up-to-date. (No sync required)")
+            logger.info("")
+            logger.info("--------------------------------------------------------------------------------")
             return
 
     # Pre-load parquet cache metadata to optimize range checks
