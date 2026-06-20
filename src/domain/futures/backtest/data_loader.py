@@ -440,6 +440,10 @@ class DataCollector:
             if df.empty or ("timestamp" not in df.columns and "datetime" not in df.columns):
                 path.unlink()
                 return pd.DataFrame()
+            # OPT-5: Drop Binance baggage columns (never used downstream)
+            _baggage = [c for c in ("close_time", "no_trades", "ignore") if c in df.columns]
+            if _baggage:
+                df = df.drop(columns=_baggage)
             return self._normalize_df(df)
         except Exception as exc:
             try:
@@ -472,6 +476,12 @@ class DataCollector:
             else:
                 df["datetime"] = pd.to_datetime(df["datetime"]).dt.tz_convert("UTC")
 
+        # OPT-6: Skip string→numeric loop when all non-datetime cols are already numeric
+        # (cache path — parquet write already normalized types; fast-path early exit)
+        non_dt = [c for c in df.columns if c != "datetime"]
+        if non_dt and all(pd.api.types.is_numeric_dtype(df[c]) for c in non_dt):
+            return df
+
         # Automatically normalize any object/string columns (except datetime) to numeric
         # to prevent PyArrow's ArrowInvalid type-mix errors (e.g. for close_time, ignore, etc.)
         for col in df.columns:
@@ -500,7 +510,7 @@ class DataCollector:
             if cache_df.empty:
                 return pd.DataFrame()
             mask = (cache_df["datetime"] >= req_start) & (cache_df["datetime"] <= req_end)
-            return cache_df.loc[mask].copy()
+            return cache_df.loc[mask]  # OPT-7: boolean indexing always returns a copy
 
         meta = self._load_meta().get(self._meta_key(symbol, timeframe), {})
         ea = meta.get("earliest_available")
