@@ -99,3 +99,12 @@
   - Doing `pd.to_numeric` on 12 meta columns inside the alignment loop caused `S * M` Series allocations. Pre-converting at ingestion and using raw NumPy scanning during alignment optimized critical latency paths while keeping 100% data fidelity and look-ahead safety.
 - **Status**: Accepted
 
+## L1-ADR-014: L1 데이터 준비 병목 최적화 — Numba 및 DatetimeIndex.isin 기반 최적화 (2026-06-20)
+- **Delta:** 
+  - `membership.py`에 Numba `@njit` 가속화된 `_calculate_warm_ready_numba`를 도입하여 Pandas groupby-cumsum 루프를 대체하였고, `build_membership_mask_bundle` 내 날짜비교를 `pd.Timestamp`와 `DatetimeIndex.isin` 기반 벡터화로 고속화하여 `datetime.date` 객체 생성 오버헤드를 우회함.
+  - `opt_data_utils.py` 내 `_feature_group_coverage`에서 수치형 컬럼의 to_numeric 강제 변환을 우회하고, 1분 데이터 로딩 시 이미 monotonic/datetime64인 경우 정렬 및 타입 변환을 생략하도록 정돈함.
+- **Rationale:** 
+  - `[SKIPPED]` 로그 출력 후 `SYSTEM CONTEXT` 대시보드 도달 전까지의 극심한 데이터 딜레이를 유발하던 Pandas Object 배열 생성 및 groupby cumsum 병목과 피처 타입 변환 오버헤드를 우회하여 데이터 로딩 파이프라인의 Latency를 획기적으로 낮춤.
+- **Status:** Accepted
+
+
