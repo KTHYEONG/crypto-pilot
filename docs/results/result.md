@@ -1,3 +1,4 @@
+Updated symbol sync profiles cache: /home/kth/my_coin_traider/data/futures/symbol_sync_profiles.json
 ================================================================================
 LOCAL DATA STORAGE (LEDGER & CACHE STATUS)
 ================================================================================
@@ -32,7 +33,7 @@ STRATEGY ENGINE
 [TIERED] Sub-window admission: 52/57 symbols admitted (min_bars=1500, oos_cov>=90%)
 [TIERED] Sub-window drops: {'missing_map': 0, 'empty_frame': 0, 'late_start': 5, 'min_bars': 0, 'no_holdout': 0, 'holdout_coverage': 0}
 [PROMO_FILTER] no variants recommended by diagnostics; blocking all candidates (fail-closed)
-[ALIGN-CUBE] post-join active_mask mean=0.9423 entry_block_mean=0.0577 (was 1.0 / 0.0 before cube injection)
+[ALIGN-CUBE] post-join active_mask mean=0.6818 entry_block_mean=0.2559 (was 1.0 / 0.0 before cube injection)
 [WORKFLOW] Fold 0 skipped Ensemble (fit=0 < 2)
 [WORKFLOW] Fold 1 skipped Ensemble (fit=0 < 2)
 [ENS] Arch-Only   | SYM: 52 | EVT:   4,226 | TOTAL: +16.4 bps | [BRK: +37.1✅ MOM: +13.0✅ TRD: +13.2✅ MRV: +31.7✅ UNI: +59.6✅]
@@ -155,7 +156,7 @@ STRATEGY ENGINE
 ──────────────────────────────────────────────────────────────────────────────
   LAYER  WINDOW RANGE                    SYMS   ACTIVE (min/med/max)       ENTRY    KILL  WARNINGS
   ─────  ──────────────────────────────  ────   ────────────────────  ──────────  ──────  ────────
-  L1     2023-04-01 ~ 2024-09-30           52     0 /  48.0 / 49           9,882       6  —
+  L1     2023-04-01 ~ 2024-09-30           52     0 /  49.0 / 52               0       6  —
 ──────────────────────────────────────────────────────────────────────────────
 
 [TIERED] Phase=l1 — stopping after L1 (not a multilayer phase)
