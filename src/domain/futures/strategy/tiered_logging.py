@@ -58,61 +58,36 @@ def format_system_context_dashboard(
     data_quality: dict[str, Any],
     strategy_info: dict[str, Any],
 ) -> str:
-    """Consolidate initialization metadata into a single box dashboard."""
+    """Consolidate initialization metadata into an open-divider dashboard."""
     w = window
     u = universe_report
     dq = data_quality
     s = strategy_info
 
-    def _box(content: list[str], width: int = 78) -> str:
-        # width는 내부 텍스트가 들어갈 가용 공간 (padding 제외)
-        # 전체 가로 길이는 ┌ + 공백 + width + 공백 + ┐ = width + 4
-        top = "┌" + "─" * (width + 2) + "┐"
-        bottom = "└" + "─" * (width + 2) + "┘"
-        lines = [top]
-        for line in content:
-            if line == "SEP":
-                # 구분선은 박스 내부 너비 전체를 채움
-                lines.append("├" + "─" * (width + 2) + "┤")
-            else:
-                lines.append(f"│ {line:<{width}} │")
-        lines.append(bottom)
-        return "\n".join(lines)
-
-    # Convert window to string
-    window_str = f"Range: {w.fetch_start} ~ {w.end_date} (IS:{w.is_start}, OOS:{w.oos_start})"
-    
-    # Universe string
-    u_str = (
-        f"Discovered: {u.get('discovered', 0)} symbols | "
-        f"Selected: {u.get('selected', 0)} | "
-        f"Live Panel: {u.get('live_panel', 0)}"
-    )
-
-    # Data Quality string
-    dq_str = (
-        f"Loaded: {dq.get('loaded_ratio', '0%')} ({dq.get('loaded_count', 0)}/{dq.get('req_count', 0)}) | "
-        f"Ready: {dq.get('ready_count', 0)} | "
-        f"Dropped: {dq.get('fail_summary', '-')}"
-    )
-
-    # Strategy info
     engine_name = s.get("engine", "Alpha-Ensemble Engine")
-    s_str = (
-        f"Engine: {engine_name} | "
-        f"Inf Panel: {s.get('inf_panel', 0)} | "
-        f"Trade Scope: {s.get('trade_scope', 0)}"
-    )
 
-    content = [
-        "● [SYSTEM CONTEXT: INFRASTRUCTURE & DATA PREPARATION]",
-        "SEP",
-        f"Window:   {window_str}",
-        f"Universe: {u_str}",
-        f"Quality:  {dq_str}",
-        f"Strategy: {s_str}",
+    lines = [
+        "================================================================================",
+        "SYSTEM CONTEXT | DATA PIPELINE PREPARATION",
+        "================================================================================",
+        "",
+        "TIME PROFILE",
+        f"  Test Horizon  : {w.fetch_start} ~ {w.end_date}",
+        f"  IS / OOS Split: {w.oos_start} (In-Sample Cutoff)",
+        "",
+        "UNIVERSE FUNNEL",
+        f"  [1] Market Pool     : {u.get('discovered', 0)} symbols discovered (Binance USDT-M)",
+        f"  [2] Capacity Limit  : {u.get('selected', 0)} symbols selected (Top-N Liquidity)",
+        f"  [3] Integrity Pass  : {dq.get('ready_count', 0)} symbols loaded (Passed Gaps & Frozen checks)",
+        "",
+        "STRATEGY ENGINE",
+        f"  Active Engine : {engine_name}",
+        f"  Target Scope  : {s.get('trade_scope', 0)} symbols ready for Layer 1 execution",
+        "",
+        "--------------------------------------------------------------------------------",
     ]
-    return _box(content)
+    return "\n".join(lines)
+
 
 
 def format_layer_header(layer: int, title: str) -> str:
