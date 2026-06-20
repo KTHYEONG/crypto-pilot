@@ -186,15 +186,17 @@ def _predict_mu_by_event(
     use_archetype_only: bool,
 ) -> NDArray[np.float64]:
     """Project ensemble means onto an event frame for proof/prediction paths."""
-    mu = np.empty(len(events), dtype=np.float64)
-    for idx, row in enumerate(events.itertuples(index=False), start=0):
-        arch = str(getattr(row, "archetype", ""))
-        if use_archetype_only:
-            mu[idx] = arch_mu.get(arch, global_mu)
-            continue
-        key = (arch, int(getattr(row, "entry_regime_code", 0)))
-        mu[idx] = cell_mu.get(key, arch_mu.get(arch, global_mu))
-    return mu
+    if events.empty:
+        return np.empty((0,), dtype=np.float64)
+    arches = events["archetype"].astype(str).to_numpy()
+    if use_archetype_only:
+        return np.array([arch_mu.get(a, global_mu) for a in arches], dtype=np.float64)
+    
+    regimes = events["entry_regime_code"].fillna(0).astype(int).to_numpy()
+    return np.array(
+        [cell_mu.get((a, r), arch_mu.get(a, global_mu)) for a, r in zip(arches, regimes, strict=True)],
+        dtype=np.float64
+    )
 
 
 def _log_ensemble_diagnostics(
@@ -951,63 +953,87 @@ def predict_regime_conditional_ensemble(
     has_variant_prior = bool(model.variant_mu_bps)
     has_score_cal = bool(model.regime_score_slope)
 
-    for idx, row in enumerate(event_frame.itertuples(index=False), start=0):
-        arch = str(getattr(row, "archetype", ""))
-        regime = int(getattr(row, "entry_regime_code", 0))
+    arches = event_frame["archetype"].astype(str).to_numpy()
+    regimes = event_frame["entry_regime_code"].fillna(0).astype(int).to_numpy()
+    families = (
+        event_frame["family"].astype(str).to_numpy()
+        if "family" in event_frame.columns
+        else np.array([""] * len(event_frame))
+    )
+    variants = (
+        event_frame["variant"].astype(str).to_numpy()
+        if "variant" in event_frame.columns
+        else np.array([""] * len(event_frame))
+    )
+    scores_z = (
+        pd.to_numeric(event_frame["score_z"], errors="coerce").to_numpy(dtype=np.float64)
+        if "score_z" in event_frame.columns
+        else np.zeros(len(event_frame), dtype=np.float64)
+    )
+
+    # Pre-extract model attributes to avoid lookup overhead
+    global_mu = model.global_mu_bps
+    archetype_mu = model.archetype_mu_bps
+    cell_mu = model.cell_mu_bps
+    global_q90 = model.global_q90_bps
+    archetype_q90 = model.archetype_q90_bps
+    cell_q90 = model.cell_q90_bps
+    global_q10 = model.global_q10_bps
+    archetype_q10 = model.archetype_q10_bps
+    cell_q10 = model.cell_q10_bps
+    variant_mu = model.variant_mu_bps
+    variant_offset = getattr(model, "variant_offset_bps", {})
+    regime_score_slope = model.regime_score_slope
+    regime_score_intercept = model.regime_score_intercept
+    score_calibration_valid = model.score_calibration_valid
+
+    for idx in range(len(event_frame)):
+        arch = arches[idx]
+        regime = regimes[idx]
         key = (arch, regime)
 
-        if use_archetype_only:
-            cell_val = model.archetype_mu_bps.get(arch, model.global_mu_bps)
-        else:
-            cell_val = model.cell_mu_bps.get(
-                key, model.archetype_mu_bps.get(arch, model.global_mu_bps)
-            )
-
-        # Direction B: q90 실제 lookup
-        q90_val = model.cell_q90_bps.get(
-            key, model.archetype_q90_bps.get(arch, model.global_q90_bps)
+        cell_val = (
+            archetype_mu.get(arch, global_mu)
+            if use_archetype_only
+            else cell_mu.get(key, archetype_mu.get(arch, global_mu))
         )
 
-        # Direction A: score-conditioned mu (calibration_valid=True인 regime만 적용)
-        use_score_cal = (
-            has_score_cal
-            and bool(model.score_calibration_valid.get(regime, False))
-        )
+        q90_val = cell_q90.get(key, archetype_q90.get(arch, global_q90))
+        use_score_cal = has_score_cal and bool(score_calibration_valid.get(regime, False))
 
-        # 3-level fallback: variant → cell → archetype → global
         if has_variant_prior:
-            fam = str(getattr(row, "family", ""))
-            var = str(getattr(row, "variant", ""))
+            fam = families[idx]
+            var = variants[idx]
             vkey = _variant_key(fam, var)
-            if vkey in model.variant_mu_bps:
+            if vkey in variant_mu:
                 try:
-                    offset = model.variant_offset_bps.get(vkey, 0.0)
+                    offset = variant_offset.get(vkey, 0.0)
                 except AttributeError:
                     offset = 0.0
                 if use_score_cal:
-                    z_raw = float(getattr(row, "score_z", 0.0))
-                    beta = model.regime_score_slope.get(regime, 0.0)
-                    alpha = model.regime_score_intercept.get(regime, cell_val)
+                    z_raw = float(scores_z[idx])
+                    beta = regime_score_slope.get(regime, 0.0)
+                    alpha = regime_score_intercept.get(regime, cell_val)
                     mu_net_decision_bps[idx] = alpha + beta * z_raw
                 else:
                     mu_net_decision_bps[idx] = cell_val + offset
-                q10_net_bps[idx] = model.cell_q10_bps.get(
+                q10_net_bps[idx] = cell_q10.get(
                     key,
-                    model.archetype_q10_bps.get(arch, model.global_q10_bps),
+                    archetype_q10.get(arch, global_q10),
                 )
                 q90_net_bps[idx] = q90_val
                 continue
 
         if use_score_cal:
-            z_raw = float(getattr(row, "score_z", 0.0))
-            beta = model.regime_score_slope.get(regime, 0.0)
-            alpha = model.regime_score_intercept.get(regime, cell_val)
+            z_raw = float(scores_z[idx])
+            beta = regime_score_slope.get(regime, 0.0)
+            alpha = regime_score_intercept.get(regime, cell_val)
             mu_net_decision_bps[idx] = alpha + beta * z_raw
         else:
             mu_net_decision_bps[idx] = cell_val
-        q10_net_bps[idx] = model.cell_q10_bps.get(
+        q10_net_bps[idx] = cell_q10.get(
             key,
-            model.archetype_q10_bps.get(arch, model.global_q10_bps),
+            archetype_q10.get(arch, global_q10),
         )
         q90_net_bps[idx] = q90_val
 
