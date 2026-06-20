@@ -72,6 +72,82 @@ def test_evaluate_symbol_data_sufficiency_historical_stage5_union_relaxes_fetch_
     assert relaxed["pass"] is True
 
 
+def test_evaluate_symbol_data_sufficiency_gap_too_large_fails() -> None:
+    """S1: 96% bar coverage but 25h gap → gap_too_large failure."""
+    # Build contiguous 4h bars from 2022-10-01 to 2026-03-31, then insert a 28h gap
+    dt_full = pd.date_range("2022-10-01", "2026-03-31", freq="4h", tz="UTC")
+    gap_start_idx = len(dt_full) // 2
+    # Remove 7 consecutive bars (7 intervals = 6 missing bars = 24h+ gap)
+    dt_gapped = pd.DatetimeIndex(
+        list(dt_full[:gap_start_idx]) + list(dt_full[gap_start_idx + 7 :])
+    )
+    frame = pd.DataFrame(
+        {
+            "datetime": dt_gapped,
+            "open": 1.0,
+            "high": 1.1,
+            "low": 0.9,
+            "close": 1.0,
+            "volume": 1.0,
+        }
+    )
+    symbol_map = {"4h": frame}
+
+    res = opt_data_utils.evaluate_symbol_data_sufficiency(
+        symbol="GAPUSDT",
+        tf="4h",
+        symbol_map=symbol_map,
+        fetch_start="2022-10-01",
+        is_start="2023-10-01",
+        oos_start="2025-10-01",
+        oos_end="2026-03-31",
+        require_exec_1m=False,
+        warmup_bars_required=252,
+        scope_name="stage6_selected",
+    )
+
+    assert res["pass"] is False
+    assert res["reason"] == "gap_too_large"
+    assert res["max_gap_bars"] >= 6
+
+
+def test_evaluate_symbol_data_sufficiency_small_gap_passes() -> None:
+    """Small gap (≤5 bars = 20h) must not trigger gap_too_large."""
+    dt_full = pd.date_range("2022-10-01", "2026-03-31", freq="4h", tz="UTC")
+    gap_start_idx = len(dt_full) // 2
+    # Remove 5 consecutive bars (5 intervals = 4 missing bars < threshold)
+    dt_gapped = pd.DatetimeIndex(
+        list(dt_full[:gap_start_idx]) + list(dt_full[gap_start_idx + 5 :])
+    )
+    frame = pd.DataFrame(
+        {
+            "datetime": dt_gapped,
+            "open": 1.0,
+            "high": 1.1,
+            "low": 0.9,
+            "close": 1.0,
+            "volume": 1.0,
+        }
+    )
+    symbol_map = {"4h": frame}
+
+    res = opt_data_utils.evaluate_symbol_data_sufficiency(
+        symbol="SMALLGAPUSDT",
+        tf="4h",
+        symbol_map=symbol_map,
+        fetch_start="2022-10-01",
+        is_start="2023-10-01",
+        oos_start="2025-10-01",
+        oos_end="2026-03-31",
+        require_exec_1m=False,
+        warmup_bars_required=252,
+        scope_name="stage6_selected",
+    )
+
+    assert res["pass"] is True
+    assert res["max_gap_bars"] < 6
+
+
 def test_evaluate_symbol_data_sufficiency_with_onboard_date() -> None:
     # 2023-10-01 ~ 2026-03-31 데이터 시뮬레이션 (상장일이 2023-10-01인 코인)
     dt = pd.date_range("2023-10-01", "2026-03-31", freq="4h", tz="UTC")
