@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import numpy as np
 import pandas as pd
-from numba import njit
+from numba import njit, prange
 from numpy.typing import NDArray
 
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
@@ -179,7 +179,7 @@ def _numba_rolling_robust_z_1d(
     return out
 
 
-@njit(cache=True)  # type: ignore[untyped-decorator]
+@njit(cache=True, parallel=True)  # type: ignore[untyped-decorator]
 def _numba_rolling_robust_z_2d(
     values: NDArray[np.float64],
     window: int,
@@ -188,14 +188,14 @@ def _numba_rolling_robust_z_2d(
 ) -> NDArray[np.float64]:
     h, w = values.shape
     out = np.zeros((h, w), dtype=np.float64)
-    for col_idx in range(w):
+    for col_idx in prange(w):
         # We need to copy or pass slice
         col_vals = values[:, col_idx]
         out[:, col_idx] = _numba_rolling_robust_z_1d(col_vals, window, eps, clip_val)
     return out
 
 
-@njit(cache=True)  # type: ignore[untyped-decorator]
+@njit(cache=True, parallel=True)  # type: ignore[untyped-decorator]
 def _numba_cross_sectional_robust_z_2d(
     values: NDArray[np.float64],
     eps: float,
@@ -204,12 +204,11 @@ def _numba_cross_sectional_robust_z_2d(
     h, w = values.shape
     out = np.zeros((h, w), dtype=np.float64)
 
-    # Temporary buffers for cross-sectional operations per row
-    row_buf = np.empty(w, dtype=np.float64)
-    indices_buf = np.empty(w, dtype=np.int32)
-    mad_buf = np.empty(w, dtype=np.float64)
-
-    for row_idx in range(h):
+    for row_idx in prange(h):
+        # Thread-local buffers: allocated inside prange so each thread has its own copy
+        row_buf = np.empty(w, dtype=np.float64)
+        indices_buf = np.empty(w, dtype=np.int32)
+        mad_buf = np.empty(w, dtype=np.float64)
         count = 0
         for col_idx in range(w):
             val = values[row_idx, col_idx]

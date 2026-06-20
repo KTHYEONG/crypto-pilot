@@ -18,6 +18,26 @@ def _quarter_start(dt: date) -> date:
     return date(dt.year, q_month, 1)
 
 
+def _normalize_timeline(
+    timeline: Mapping[date, frozenset[str] | set[str]],
+) -> dict[date, frozenset[str]]:
+    """timeline 매핑을 분기 시작일 키 + canonical frozenset 값으로 정규화한다.
+
+    Args:
+        timeline: 임의 날짜 → 심볼 집합 매핑.
+
+    Returns:
+        분기 시작일 → canonical frozenset[str] 정규화 딕셔너리.
+
+    Time: O(Q · S_q), Space: O(Q · S_q) — Q=분기 수, S_q=분기당 심볼 수.
+    """
+    result: dict[date, frozenset[str]] = {}
+    for k, syms in timeline.items():
+        q_start = _quarter_start(k)
+        result[q_start] = frozenset(canonical_symbol(s) for s in syms)
+    return result
+
+
 @dataclass(slots=True, frozen=True)
 class MembershipMaskBundle:
     """Per-bar membership-derived masks and effective kill signal."""
@@ -40,6 +60,8 @@ def build_membership_mask_bundle(
     warmup_bars_required: int,
     raw_kill_signal: np.ndarray | None = None,
     inference_timeline: Mapping[date, frozenset[str] | set[str]] | None = None,
+    norm_timeline: dict[date, frozenset[str]] | None = None,
+    norm_inf_timeline: dict[date, frozenset[str]] | None = None,
 ) -> MembershipMaskBundle:
     if pd.api.types.is_datetime64_any_dtype(datetimes):
         dt_ser = datetimes
@@ -47,12 +69,10 @@ def build_membership_mask_bundle(
         dt_ser = pd.to_datetime(datetimes, utc=True, errors="coerce")
     n = len(dt_ser)
     sym_norm = canonical_symbol(symbol)
-    
-    # Normalize timeline keys to their respective quarter starts
-    norm_timeline: dict[date, frozenset[str]] = {}
-    for k, syms in timeline.items():
-        q_start = _quarter_start(k)
-        norm_timeline[q_start] = frozenset(canonical_symbol(s) for s in syms)
+
+    # Pre-normalized 전달 시 내부 정규화 스킵; None이면 fallback
+    if norm_timeline is None:
+        norm_timeline = _normalize_timeline(timeline)
 
     active_quarters = {q for q, syms in norm_timeline.items() if sym_norm in syms}
     q_list = np.asarray(list(active_quarters), dtype=object)
@@ -90,14 +110,13 @@ def build_membership_mask_bundle(
     effective_kill = np.maximum(raw_kill, membership_kill)
 
     # inference mask 계산 — inference_timeline 미지정 시 trading mask 복사
-    if inference_timeline is None:
+    if inference_timeline is None and norm_inf_timeline is None:
         inf_active = active.copy()
         inf_warm_ready = warm_ready.copy()
     else:
-        norm_inf_timeline: dict[date, frozenset[str]] = {}
-        for k, syms in inference_timeline.items():
-            q_start = _quarter_start(k)
-            norm_inf_timeline[q_start] = frozenset(canonical_symbol(s) for s in syms)
+        # Pre-normalized 전달 시 내부 정규화 스킵; None이면 fallback
+        if norm_inf_timeline is None:
+            norm_inf_timeline = _normalize_timeline(inference_timeline or {})
 
         inf_active_quarters = {q for q, syms in norm_inf_timeline.items() if sym_norm in syms}
         inf_q_list = np.asarray(list(inf_active_quarters), dtype=object)
@@ -138,6 +157,12 @@ def inject_membership_masks_into_maps(
     if not timeline:
         return
 
+    # 심볼 루프 진입 전 1회 정규화 — 반복 정규화 O(N_sym x Q·S_q) → O(Q·S_q)
+    pre_norm_timeline = _normalize_timeline(timeline)
+    pre_norm_inf_timeline: dict[date, frozenset[str]] | None = (
+        _normalize_timeline(inference_timeline) if inference_timeline is not None else None
+    )
+
     for sym in symbols:
         for maps in (data_maps, oos_data_maps):
             sym_map = maps.get(sym, {})
@@ -160,6 +185,8 @@ def inject_membership_masks_into_maps(
                 warmup_bars_required=warmup_bars_required,
                 raw_kill_signal=raw_kill,
                 inference_timeline=inference_timeline,
+                norm_timeline=pre_norm_timeline,
+                norm_inf_timeline=pre_norm_inf_timeline,
             )
             frame.loc[:, "universe_active_mask"] = bundle.universe_active_mask
             frame.loc[:, "universe_entry_warm_mask"] = bundle.universe_entry_warm_mask

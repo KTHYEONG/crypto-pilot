@@ -272,9 +272,7 @@ def align_data_maps(
     # Vectorization of readiness_cube join is deferred (same pattern applies).
     if state_cube is not None:
         aligned_ts_ns = datetimes.astype("datetime64[ns]").view(np.int64)
-        cube_ts_ns = np.asarray(
-            state_cube.calendar.view(np.int64), dtype=np.int64
-        )
+        cube_ts_ns = np.asarray(state_cube.calendar.as_unit("ns").asi8, dtype=np.int64)
         cube_sym_idx: dict[str, int] = {}
         for _cube_n, _cube_iid in enumerate(state_cube.instrument_ids):
             _sym_key = _cube_iid.split(":")[-1] if ":" in _cube_iid else _cube_iid
@@ -290,21 +288,24 @@ def align_data_maps(
             n,
             sum(1 for sym in valid_symbols if sym in cube_sym_idx),
         )
-        for col, sym in enumerate(valid_symbols):
-            if sym not in cube_sym_idx:
-                continue
-            cube_n = cube_sym_idx[sym]
-            # searchsorted over int64 nanosecond epochs — fully vectorized
-            positions = np.searchsorted(cube_ts_ns, aligned_ts_ns, side="right") - 1
-            valid_pos_mask = positions >= 0
-            t_valid = np.where(valid_pos_mask)[0]
-            p_valid = positions[valid_pos_mask]
-            if t_valid.size == 0:
-                continue
-            active_mask[t_valid, col] = state_cube.eligible[p_valid, cube_n]
-            entry_block_mask[t_valid, col] = state_cube.entry_block[p_valid, cube_n]
-            adv_usdt_2d[t_valid, col] = state_cube.capacity_usdt[p_valid, cube_n]
-            execution_cost_bps_2d[t_valid, col] = state_cube.cost_bps[p_valid, cube_n]
+        # OPT-1: hoist loop-invariant searchsorted outside the col/sym loop.
+        # Complexity: O(T·log T_cube + N·V) vs previous O(N·T·log T_cube).
+        # positions: [T]  valid_pos_mask: [T bool]  t_valid/p_valid: [V]
+        positions = np.searchsorted(cube_ts_ns, aligned_ts_ns, side="right") - 1
+        valid_pos_mask = positions >= 0
+        t_valid = np.where(valid_pos_mask)[0]
+        p_valid = positions[valid_pos_mask]
+        if t_valid.size == 0:
+            pass  # all columns keep initial values; loop body becomes no-op
+        else:
+            for col, sym in enumerate(valid_symbols):
+                if sym not in cube_sym_idx:
+                    continue
+                cube_n = cube_sym_idx[sym]
+                active_mask[t_valid, col] = state_cube.eligible[p_valid, cube_n]
+                entry_block_mask[t_valid, col] = state_cube.entry_block[p_valid, cube_n]
+                adv_usdt_2d[t_valid, col] = state_cube.capacity_usdt[p_valid, cube_n]
+                execution_cost_bps_2d[t_valid, col] = state_cube.cost_bps[p_valid, cube_n]
         active_ratio = float(active_mask.mean())
         if active_ratio < 0.99:
             _logger.warning(
@@ -334,19 +335,20 @@ def align_data_maps(
                 aligned_ts_ns_r = datetimes.astype("datetime64[ns]").view(np.int64)
                 if _strategy_readiness is None:
                     _strategy_readiness = np.ones((eff_len, n), dtype=np.bool_)
-                for col, sym in enumerate(valid_symbols):
-                    if sym not in r_sym_idx:
-                        continue
-                    r_n = r_sym_idx[sym]
-                    positions_r = np.searchsorted(r_cal_ns, aligned_ts_ns_r, side="right") - 1
-                    valid_r_mask = positions_r >= 0
-                    t_valid_r = np.where(valid_r_mask)[0]
-                    p_valid_r = positions_r[valid_r_mask]
-                    if t_valid_r.size == 0:
-                        continue
-                    _strategy_readiness[t_valid_r, col] = readiness_cube.ready[
-                        s_idx, p_valid_r, r_n
-                    ]
+                # OPT-1: hoist readiness searchsorted outside col/sym loop.
+                # positions_r: [T]  t_valid_r/p_valid_r: [V_r]
+                positions_r = np.searchsorted(r_cal_ns, aligned_ts_ns_r, side="right") - 1
+                valid_r_mask = positions_r >= 0
+                t_valid_r = np.where(valid_r_mask)[0]
+                p_valid_r = positions_r[valid_r_mask]
+                if t_valid_r.size > 0:
+                    for col, sym in enumerate(valid_symbols):
+                        if sym not in r_sym_idx:
+                            continue
+                        r_n = r_sym_idx[sym]
+                        _strategy_readiness[t_valid_r, col] = readiness_cube.ready[
+                            s_idx, p_valid_r, r_n
+                        ]
     # ── end readiness_cube join ───────────────────────────────────────────────
 
     symbol_meta = {
