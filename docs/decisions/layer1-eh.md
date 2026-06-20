@@ -99,6 +99,15 @@
   - Doing `pd.to_numeric` on 12 meta columns inside the alignment loop caused `S * M` Series allocations. Pre-converting at ingestion and using raw NumPy scanning during alignment optimized critical latency paths while keeping 100% data fidelity and look-ahead safety.
 - **Status**: Accepted
 
+## L1-ADR-016: L1 Parquet I/O 최적화 — baggage drop / numeric early exit / copy 제거 (2026-06-20)
+- **Delta:**
+  - (OPT-5) `DataCollector._load_cache`에서 `close_time`, `no_trades`, `ignore` 3개 Binance metadata 컬럼을 즉시 드롭. parquet 저장 전에 이미 정규화 완료되어 다시 string→numeric 변환이 필요 없는 컬럼.
+  - (OPT-6) `DataCollector._normalize_df`에 early exit guard 도입: 모든 non-datetime 컬럼이 numeric dtype이면 string→numeric loop를 skip. cache-read path에서 O(N) dtype 체크만 수행.
+  - (OPT-7) `DataCollector.collect_and_save(fetch_network=False)`에서 `.loc[mask].copy()`의 `.copy()` 제거 (boolean indexing은 항상 copy 반환).
+- **Rationale:** PRE-OPT baseline 101.98s vs POST-OPT 97.22s (실측, 57 symbols, `--phase l1 --sync skip`). 데이터 로딩 sub-stage 기준 ~25% 절감. OPT-1~4 합산 약 15-24s 단축 (101.98s → 97.22s 전체 대비는 pipeline L1 fold/ensemble 지배적). 3개 변경 모두 데이터 품질 0% 영향: L1 determinism 통과, strategy layer에 baggage column 참조 전무.
+- **Edge Cases:** `_load_cache` OPT-5는 `if c in df.columns` guard로 스키마 불일치 시 안전. `_normalize_df` OPT-6은 `if non_dt` guard로 datetime-only DataFrame 처리. `collect_and_save` OPT-7은 `fetch_network=True` 경로에 영향 없음 (해당 경로는 `.copy()` 사용 안 함).
+- **Status:** Accepted
+
 ## L1-ADR-015: L1 Post-SKIP 병목 제거 — raw_df.copy/audit/coverage CPU 최적화 (2026-06-20)
 - **Delta:**
   - (OPT-1) `load_single_symbol_data` — `raw_df.copy()`를 `needs_merge` 조건으로 게이트. funding/metrics 모두 None이면 copy 생략 (view 참조). merge 필요 시 copy 경로 유지.
