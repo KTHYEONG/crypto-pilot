@@ -85,6 +85,21 @@ def evaluate_symbol_data_sufficiency(
 
     first_dt = dt.iloc[0]
     last_dt = dt.iloc[-1]
+
+    # Continuity gap check: detect largest consecutive missing-bar stretch
+    _sorted_dt = dt.sort_values() if not dt.is_monotonic_increasing else dt
+    if len(_sorted_dt) > 1:
+        _bar_delta = _tf_delta(tf)
+        _diffs = _sorted_dt.diff().dropna()
+        _max_diff = _diffs.max()
+        max_gap_bars = max(0, round(float(_max_diff / _bar_delta)) - 1)
+    else:
+        max_gap_bars = 0
+
+    # Align boundary with universe G6 gate (eligibility.py: `_max_gap > _max_gap_bars`):
+    # max_gap == threshold (24h @4h) is admitted by universe, so it must pass here too.
+    _max_gap_threshold = int(OPT_FUTURES_CONFIG.get("FUTURES_BACKTEST_MAX_GAP_BARS", 6))
+    gap_ok = max_gap_bars <= _max_gap_threshold
     
     effective_fetch_start = pd.Timestamp(fetch_start, tz="UTC")
     if onboard_date is not None:
@@ -150,6 +165,7 @@ def evaluate_symbol_data_sufficiency(
             and actual_is_bars >= min_is_bars
             and exec_1m_ok
             and panel_history_ok
+            and gap_ok
         )
     else:
         pass_flag = bool(
@@ -158,6 +174,7 @@ def evaluate_symbol_data_sufficiency(
             and actual_is_bars >= min_is_bars
             and actual_oos_bars >= min_oos_bars
             and exec_1m_ok
+            and gap_ok
         )
     reason = "ok"
     if not fetch_ok and not is_historical_stage5:
@@ -172,6 +189,8 @@ def evaluate_symbol_data_sufficiency(
         reason = "oos_coverage_short"
     elif not exec_1m_ok:
         reason = "missing_exec_1m"
+    elif not gap_ok:
+        reason = "gap_too_large"
 
     return {
         "symbol": symbol,
@@ -186,6 +205,7 @@ def evaluate_symbol_data_sufficiency(
         "required_oos_bars": required_oos_bars,
         "actual_oos_bars": actual_oos_bars,
         "exec_1m_coverage": exec_1m_cov,
+        "max_gap_bars": max_gap_bars,
         "first_dt": first_dt.isoformat(),
         "last_dt": last_dt.isoformat(),
     }
