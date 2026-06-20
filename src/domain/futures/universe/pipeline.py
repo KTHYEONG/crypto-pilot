@@ -278,6 +278,16 @@ def _instrument_df_from_ledger(latest_df: pd.DataFrame) -> pd.DataFrame:
                 "state_valid_from": kd,
                 "available_at": kd,
                 "confidence": DataConfidence.RECONSTRUCTED.value,
+                # G6 continuity fields (compute_continuity_metrics via ledger)
+                "n_bar_gaps": int(row.get("n_bar_gaps", 0) or 0),
+                "max_gap_bars": int(row.get("max_gap_bars", 0) or 0),
+                "frozen_bars": int(row.get("frozen_bars", 0) or 0),
+                "n_zero_volume_bars_60d": int(row.get("n_zero_volume_bars_60d", 0) or 0),
+                "last_60d_coverage": float(row.get("last_60d_coverage", 1.0) or 1.0),
+                "has_nan": bool(row.get("has_nan", False)),
+                "has_inf": bool(row.get("has_inf", False)),
+                "has_timestamp_issues": bool(row.get("has_timestamp_issues", False)),
+                "staleness_bars": 0,  # placeholder: G5 recency not yet wired
             }
         )
     if not rows:
@@ -286,6 +296,9 @@ def _instrument_df_from_ledger(latest_df: pd.DataFrame) -> pd.DataFrame:
                 "instrument_id", "symbol", "pair", "quote_asset", "margin_asset",
                 "contract_type", "onboard_at", "status", "state_valid_from",
                 "available_at", "confidence",
+                "n_bar_gaps", "max_gap_bars", "frozen_bars", "n_zero_volume_bars_60d",
+                "last_60d_coverage", "has_nan", "has_inf", "has_timestamp_issues",
+                "staleness_bars",
             ]
         )
     return pd.DataFrame(rows)
