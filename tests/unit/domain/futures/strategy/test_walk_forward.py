@@ -9,6 +9,7 @@ from src.domain.futures.strategy.walk_forward import (
     WFFold,
     build_l1_nested_swf_folds,
     build_l1_swf_folds,
+    build_l2_simulation_folds,
     build_walk_forward_folds,
 )
 
@@ -17,7 +18,7 @@ def _cfg(**kwargs: object) -> CandidateStrategyConfig:
     return CandidateStrategyConfig(**kwargs)  # type: ignore[arg-type]
 
 
-def _build_l1_swf_folds(**kwargs: int | float) -> tuple[WFFold, ...]:
+def _build_l1_swf_folds(**kwargs: object) -> tuple[WFFold, ...]:
     params = inspect.signature(build_l1_swf_folds).parameters
     if "l1_start_bars" in params:
         kwargs["l1_start_bars"] = kwargs.pop("warmup_bars")
@@ -129,7 +130,8 @@ def test_build_l1_swf_folds_causal_and_expanding() -> None:
     # Assert
     assert len(folds) == 5
     for fold in folds:
-        assert fold.fit_end < fold.oos_start  # strictly causal
+        assert fold.fit_end == fold.oos_start
+        assert fold.cal_start == fold.cal_end == fold.oos_start
         assert fold.fit_start == 2000         # expanding from L1 start
     assert folds[0].oos_start == 3000        # first block reserved for initial train
     assert folds[-1].oos_end == 8000
@@ -163,6 +165,7 @@ def test_build_l1_swf_folds_purge_gap() -> None:
         l1_end_bars=8000,
         purge_bars=100,
         embargo_bars=0,
+        boundary_mode="fixed_gap",
     )
 
     # Assert
@@ -203,7 +206,13 @@ def test_build_l1_swf_folds_equal_partition() -> None:
 
 
 def test_build_l1_nested_swf_folds_are_causal_and_expanding() -> None:
-    cfg = _cfg(wf_n_folds=4, ml_calibration_fraction=0.2, purge_bars=12, embargo_bars=6)
+    cfg = _cfg(
+        wf_n_folds=4,
+        ml_calibration_fraction=0.2,
+        purge_bars=12,
+        embargo_bars=6,
+        l1_boundary_mode="fixed_gap",
+    )
     folds = build_l1_nested_swf_folds(
         n_bars=400,
         l1_start_idx=40,
@@ -218,6 +227,45 @@ def test_build_l1_nested_swf_folds_are_causal_and_expanding() -> None:
         assert fold.fit_end <= fold.cal_start
         assert fold.cal_end <= fold.oos_start - 10
         assert fold.oos_start < fold.oos_end
+
+
+def test_build_l1_nested_swf_folds_exact_mode_removes_fixed_gap() -> None:
+    cfg = _cfg(
+        wf_n_folds=3,
+        ml_calibration_fraction=0.2,
+        purge_bars=12,
+        embargo_bars=6,
+        allocation_backend="ml_edge",
+        l1_boundary_mode="exact_label_interval",
+    )
+
+    folds = build_l1_nested_swf_folds(
+        n_bars=400,
+        l1_start_idx=40,
+        l1_end_idx=280,
+        max_label_horizon_bars=10,
+        cfg=cfg,
+    )
+
+    assert len(folds) == 3
+    for fold in folds:
+        assert fold.cal_end == fold.oos_start
+        assert fold.fit_end == fold.cal_start
+
+
+def test_build_l2_simulation_folds_do_not_apply_supervised_gap() -> None:
+    cfg = _cfg(wf_scheme="anchored", wf_n_folds=3, purge_bars=24, embargo_bars=24)
+
+    folds = build_l2_simulation_folds(
+        n_bars=600,
+        l2_start_idx=300,
+        holdout_start_idx=500,
+        cfg=cfg,
+    )
+
+    assert len(folds) >= 1
+    assert all(fold.oos_start >= 300 for fold in folds)
+    assert all(fold.oos_end <= 500 for fold in folds)
 
 
 def test_build_l1_nested_swf_folds_invalid_range_raises() -> None:
