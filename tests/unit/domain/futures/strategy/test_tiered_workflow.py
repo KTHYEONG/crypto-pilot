@@ -3570,7 +3570,7 @@ def _run_pipeline_to_l2_and_capture_awf_call(
     *,
     extend_to_holdout_end: bool,
 ) -> tuple[dict[str, object], tuple[WFFold, ...]]:
-    """run_tiered_pipeline을 target_phase='l2'까지 실행하고 build_walk_forward_folds 호출 인자를 캡처."""
+    """run_tiered_pipeline을 target_phase='l2'까지 실행하고 build_l2_simulation_folds 호출 인자를 캡처."""
     import src.domain.futures.strategy.tiered_workflow as _tw
 
     aligned, window = _build_part5_aligned_and_window(extend_to_holdout_end=extend_to_holdout_end)
@@ -3580,16 +3580,18 @@ def _run_pipeline_to_l2_and_capture_awf_call(
 
     def _capture_awf_folds(**kwargs: object) -> tuple[WFFold, ...]:
         awf_calls.append(dict(kwargs))
-        n_bars = cast(int, kwargs["n_bars"])
-        oos_len = max(1, n_bars // 5)
+        holdout_start_idx = cast(int, kwargs["holdout_start_idx"])
+        l2_start_idx = cast(int, kwargs["l2_start_idx"])
+        span = holdout_start_idx - l2_start_idx
+        oos_len = max(1, span // 5)
         return (
             WFFold(
                 fit_start=0,
-                fit_end=max(1, n_bars - 2 * oos_len),
-                cal_start=max(0, n_bars - 2 * oos_len),
-                cal_end=max(1, n_bars - oos_len),
-                oos_start=max(1, n_bars - oos_len),
-                oos_end=n_bars,
+                fit_end=max(1, l2_start_idx - oos_len),
+                cal_start=max(0, l2_start_idx - oos_len),
+                cal_end=l2_start_idx,
+                oos_start=max(l2_start_idx, holdout_start_idx - oos_len),
+                oos_end=holdout_start_idx,
             ),
         )
 
@@ -3609,7 +3611,7 @@ def _run_pipeline_to_l2_and_capture_awf_call(
         )
         return _make_l2result(block_metrics=block_metrics)
 
-    monkeypatch.setattr(_tw, "build_walk_forward_folds", _capture_awf_folds)
+    monkeypatch.setattr(_tw, "build_l2_simulation_folds", _capture_awf_folds)
     monkeypatch.setattr(
         "src.domain.futures.strategy.tiered_workflow.pipeline.predict_layer1_signals",
         lambda **_kwargs: ValidatedSignalBatch(
@@ -3648,7 +3650,7 @@ def _run_pipeline_to_l2_and_capture_awf_call(
 def test_run_tiered_pipeline_l2_awf_folds_anchored_to_holdout_start_not_full_n_bars(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """S16: build_walk_forward_folds는 holdout_start idx를, len(datetimes) 전체를 받지 않아야 한다."""
+    """S16: build_l2_simulation_folds는 holdout_start idx를, len(datetimes) 전체를 받지 않아야 한다."""
 
     aligned, window = _build_part5_aligned_and_window(extend_to_holdout_end=True)
     expected_ho_start_idx = _date_to_idx(aligned.datetimes, window.holdout_start)
@@ -3661,8 +3663,8 @@ def test_run_tiered_pipeline_l2_awf_folds_anchored_to_holdout_start_not_full_n_b
     awf_call, _ = _run_pipeline_to_l2_and_capture_awf_call(monkeypatch, extend_to_holdout_end=True)
 
     # Assert
-    assert awf_call["n_bars"] == expected_ho_start_idx
-    assert awf_call["n_bars"] != len(aligned.datetimes)
+    assert awf_call["holdout_start_idx"] == expected_ho_start_idx
+    assert awf_call["n_bars"] == len(aligned.datetimes)
 
 
 def test_run_tiered_pipeline_l2_awf_fold_count_unaffected_by_holdout_tail_extension(
@@ -3672,8 +3674,8 @@ def test_run_tiered_pipeline_l2_awf_fold_count_unaffected_by_holdout_tail_extens
     awf_call_short, _ = _run_pipeline_to_l2_and_capture_awf_call(monkeypatch, extend_to_holdout_end=False)
     awf_call_extended, _ = _run_pipeline_to_l2_and_capture_awf_call(monkeypatch, extend_to_holdout_end=True)
 
-    # Assert: holdout_start가 두 fixture에서 동일하므로 n_bars(=ho_start_idx_l2)도 동일해야 한다.
-    assert awf_call_short["n_bars"] == awf_call_extended["n_bars"]
+    # Assert: holdout_start가 두 fixture에서 동일하므로 holdout_start_idx도 동일해야 한다.
+    assert awf_call_short["holdout_start_idx"] == awf_call_extended["holdout_start_idx"]
     assert awf_call_short["cfg"] is not None
     assert awf_call_extended["cfg"] is not None
 

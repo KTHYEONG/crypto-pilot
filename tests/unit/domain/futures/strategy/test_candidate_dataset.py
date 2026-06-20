@@ -185,6 +185,46 @@ def test_build_candidate_dataset_uses_configured_gate_label_column() -> None:
     assert ds.y_gate.tolist() == [1, 0]
 
 
+def test_build_candidate_dataset_honors_label_end_exclusive() -> None:
+    aligned = _make_aligned()
+    labeled = pd.DataFrame(
+        {
+            "datetime": [aligned.datetimes[25], aligned.datetimes[26]],
+            "symbol": ["BTCUSDT", "BTCUSDT"],
+            "side": [1, 1],
+            "entry_idx": [26, 27],
+            "exit_idx": [29, 34],
+            "raw_score": [0.5, 0.6],
+            "score_z": [1.0, 1.1],
+            "turnover_proxy": [0.1, 0.1],
+            "triple_barrier_label": [1, 1],
+            "profitable_after_hurdle_label": [1, 1],
+            "edge_after_hurdle_bps": [10.0, 11.0],
+            "mae_bps": [-5.0, -5.0],
+            "mfe_bps": [15.0, 16.0],
+            "ex_ante_cost_bps": [4.0, 4.0],
+        }
+    )
+
+    ds = build_candidate_dataset(
+        labeled_events=labeled,
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(),
+        schema=fit_candidate_feature_schema(
+            labeled_events=labeled,
+            cfg=CandidateStrategyConfig(),
+            split_start=20,
+            split_end=40,
+        ),
+        split_start=20,
+        split_end=40,
+        label_end_exclusive=30,
+    )
+
+    assert ds.X.shape[0] == 1
+    assert ds.event_index["exit_idx"].tolist() == [29]
+
+
 def test_build_candidate_dataset_raises_when_configured_gate_label_is_missing() -> None:
     aligned = _make_aligned()
     labeled = pd.DataFrame(

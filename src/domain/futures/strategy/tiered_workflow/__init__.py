@@ -95,6 +95,7 @@ from src.domain.futures.strategy.tiered_workflow.signal_selection import (
 from src.domain.futures.strategy.walk_forward import (
     build_l1_nested_swf_folds,
     build_l1_swf_folds,
+    build_l2_simulation_folds,
     build_walk_forward_folds,
 )
 
@@ -139,6 +140,7 @@ __all__ = [
     "_stack_oos_signals",
     "build_l1_nested_swf_folds",
     "build_l1_swf_folds",
+    "build_l2_simulation_folds",
     "build_layer2_signal_schedule",
     "build_layer_universe_audit",
     "build_qualified_signal_registry",
@@ -179,7 +181,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> object:
     if name == "_fit_and_predict_single_fold":
         from src.domain.futures.strategy.candidate_workflow import (
             _fit_and_predict_single_fold,

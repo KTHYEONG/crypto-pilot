@@ -131,6 +131,8 @@ class CandidateStrategyConfig:
     purge_bars: int | None = None
     embargo_bars: int | None = None
     purge_safety_mult: float = 1.2
+    l1_boundary_mode: Literal["exact_label_interval", "fixed_gap"] = "exact_label_interval"
+    l1_boundary_buffer_bars: int = 0
     _purge_bars_input: int | None = field(init=False, repr=False, compare=False)
     _embargo_bars_input: int | None = field(init=False, repr=False, compare=False)
     # Deprecated: use ExecutionCostModel fields instead; kept for explicit override only
@@ -522,6 +524,10 @@ class CandidateStrategyConfig:
             raise ValueError("purge and embargo bars must be non-negative")
         if self.purge_safety_mult < 1.0:
             raise ValueError("purge_safety_mult must be >= 1.0")
+        if self.l1_boundary_mode not in {"exact_label_interval", "fixed_gap"}:
+            raise ValueError("l1_boundary_mode must be exact_label_interval or fixed_gap")
+        if self.l1_boundary_buffer_bars < 0:
+            raise ValueError("l1_boundary_buffer_bars must be non-negative")
         object.__setattr__(self, "_purge_bars_input", self.purge_bars)
         object.__setattr__(self, "_embargo_bars_input", self.embargo_bars)
         derived_purge_bars = (

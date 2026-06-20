@@ -20,7 +20,12 @@ from src.domain.futures.strategy.candidate_contracts import (
     FoldFitStatus,
     GateValidationReport,
 )
-from src.domain.futures.strategy.candidate_dataset import build_candidate_dataset, fit_candidate_feature_schema
+from src.domain.futures.strategy.candidate_dataset import (
+    CandidateDataset,
+    CandidateFeatureSchema,
+    build_candidate_dataset,
+    fit_candidate_feature_schema,
+)
 from src.domain.futures.strategy.candidate_ensemble import (
     fit_regime_conditional_ensemble,
     predict_regime_conditional_ensemble,
@@ -69,6 +74,32 @@ def _dataset_timing_total(timing_profile: dict[str, float] | None) -> float:
         + timing_profile.get("dataset_calibration_fit", 0.0)
         + timing_profile.get("dataset_calibration_eval", 0.0)
         + timing_profile.get("dataset_oos", 0.0)
+    )
+
+
+def _empty_candidate_dataset(schema: CandidateFeatureSchema | object) -> CandidateDataset:
+    raw_feature_names = getattr(schema, "feature_names", ())
+    feature_names = tuple(str(name) for name in raw_feature_names)
+    schema_version = str(getattr(schema, "version", "candidate_v6"))
+    return CandidateDataset(
+        X=np.zeros((0, len(feature_names)), dtype=np.float32),
+        y_gate=np.zeros((0,), dtype=np.int8),
+        y_edge_bps=np.zeros((0,), dtype=np.float32),
+        y_q10_bps=np.zeros((0,), dtype=np.float32),
+        y_mfe_bps=np.zeros((0,), dtype=np.float32),
+        gate_weight=np.zeros((0,), dtype=np.float32),
+        edge_weight=np.zeros((0,), dtype=np.float32),
+        groups=np.zeros((0,), dtype=np.int32),
+        event_index=pd.DataFrame(),
+        feature_names=feature_names,
+        effective_sample_size=0.0,
+        feature_schema_version=schema_version,
+        y_return_r=np.zeros((0,), dtype=np.float32),
+        y_return_bps=np.zeros((0,), dtype=np.float32),
+        y_gross_return_bps=np.zeros((0,), dtype=np.float32),
+        y_gross_return_r=np.zeros((0,), dtype=np.float32),
+        y_mae_r=np.zeros((0,), dtype=np.float32),
+        risk_unit_bps=np.zeros((0,), dtype=np.float32),
     )
 
 
@@ -132,10 +163,26 @@ def _fit_and_predict_single_fold_inner(
         "selection": 0.0,
         "total": 0.0,
     }
+    boundary_mode = str(getattr(cfg, "l1_boundary_mode", "exact_label_interval"))
+    boundary_buffer = max(0, int(getattr(cfg, "l1_boundary_buffer_bars", 0)))
+
+    def _label_end(boundary_end: int) -> int | None:
+        if boundary_mode != "exact_label_interval":
+            return None
+        return max(boundary_end - boundary_buffer, 0)
+
     fit_span = max(0, fold.fit_end - fold.fit_start)
     early_stop_len = max(1, int(fit_span * cfg.model_early_stop_fraction))
-    early_stop_start = max(fold.fit_start + 1, fold.fit_end - early_stop_len)
-    train_end = max(fold.fit_start + 1, early_stop_start - purge_bars)
+    if boundary_mode == "exact_label_interval":
+        if cfg.allocation_backend == "ensemble_b0":
+            early_stop_start = fold.fit_end
+            train_end = fold.fit_end
+        else:
+            early_stop_start = max(fold.fit_start + 1, fold.fit_end - early_stop_len)
+            train_end = early_stop_start
+    else:
+        early_stop_start = max(fold.fit_start + 1, fold.fit_end - early_stop_len)
+        train_end = max(fold.fit_start + 1, early_stop_start - purge_bars)
 
     # 1. Feature Schema
     t_step = time.perf_counter()
@@ -149,28 +196,41 @@ def _fit_and_predict_single_fold_inner(
 
     skip_feat = (cfg.allocation_backend == "ensemble_b0")
 
+    def _build_window(
+        *,
+        split_start: int,
+        split_end: int,
+        label_end_exclusive: int | None,
+        is_fit_split: bool = False,
+    ) -> CandidateDataset:
+        if split_end <= split_start:
+            return _empty_candidate_dataset(schema)
+        return build_candidate_dataset(
+            labeled_events=labeled_events,
+            aligned=aligned,
+            cfg=cfg,
+            schema=schema,
+            split_start=split_start,
+            split_end=split_end,
+            label_end_exclusive=label_end_exclusive,
+            is_fit_split=is_fit_split,
+            skip_features=skip_feat,
+        )
+
     # 2. Split Datasets
     t_step = time.perf_counter()
-    fit_set = build_candidate_dataset(
-        labeled_events=labeled_events,
-        aligned=aligned,
-        cfg=cfg,
-        schema=schema,
+    fit_set = _build_window(
         split_start=fold.fit_start,
         split_end=train_end,
+        label_end_exclusive=_label_end(train_end),
         is_fit_split=True,
-        skip_features=skip_feat,
     )
     timing_profile["dataset_fit"] = time.perf_counter() - t_step
     t_step = time.perf_counter()
-    early_stop_set = build_candidate_dataset(
-        labeled_events=labeled_events,
-        aligned=aligned,
-        cfg=cfg,
-        schema=schema,
+    early_stop_set = _build_window(
         split_start=early_stop_start,
         split_end=fold.fit_end,
-        skip_features=skip_feat,
+        label_end_exclusive=_label_end(fold.fit_end),
     )
     timing_profile["dataset_early_stop"] = time.perf_counter() - t_step
     cal_fit_end = max(
@@ -180,36 +240,24 @@ def _fit_and_predict_single_fold_inner(
         ),
     )
     t_step = time.perf_counter()
-    calibration_fit_set = build_candidate_dataset(
-        labeled_events=labeled_events,
-        aligned=aligned,
-        cfg=cfg,
-        schema=schema,
+    calibration_fit_set = _build_window(
         split_start=fold.cal_start,
         split_end=min(cal_fit_end, fold.cal_end),
-        skip_features=skip_feat,
+        label_end_exclusive=_label_end(min(cal_fit_end, fold.cal_end)),
     )
     timing_profile["dataset_calibration_fit"] = time.perf_counter() - t_step
     t_step = time.perf_counter()
-    calibration_eval_set = build_candidate_dataset(
-        labeled_events=labeled_events,
-        aligned=aligned,
-        cfg=cfg,
-        schema=schema,
+    calibration_eval_set = _build_window(
         split_start=min(cal_fit_end, fold.cal_end),
         split_end=fold.cal_end,
-        skip_features=skip_feat,
+        label_end_exclusive=_label_end(fold.cal_end),
     )
     timing_profile["dataset_calibration_eval"] = time.perf_counter() - t_step
     t_step = time.perf_counter()
-    oos_set = build_candidate_dataset(
-        labeled_events=labeled_events,
-        aligned=aligned,
-        cfg=cfg,
-        schema=schema,
+    oos_set = _build_window(
         split_start=fold.oos_start,
         split_end=fold.oos_end,
-        skip_features=skip_feat,
+        label_end_exclusive=_label_end(fold.oos_end),
     )
     timing_profile["dataset_oos"] = time.perf_counter() - t_step
 
