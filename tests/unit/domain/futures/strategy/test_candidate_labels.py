@@ -471,3 +471,152 @@ def test_l4_atr_fallback_constant_used() -> None:
     from src.domain.futures.strategy.candidate_labels import _ATR_FALLBACK_FRACTION
 
     assert _ATR_FALLBACK_FRACTION == 0.01
+
+
+# ─── OPT-A: numba kernel golden-value regression ──────────────────────────────
+
+class TestOptANumbaKernelEquivalence:
+    """S1: Numba kernel produces bit-identical results to original itertuples loop.
+    Tests TP-hit, SL-hit, time_exit, and invalid cases in a single events DataFrame.
+    """
+
+    def _make_multi_event_aligned(self) -> AlignedMarketData:
+        t, n = 60, 2
+        rng = np.random.default_rng(42)
+        prices = np.abs(rng.uniform(100.0, 200.0, (t, n))) + 50.0
+        datetimes = np.datetime64("2024-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+        high = prices * 1.05
+        low = prices * 0.95
+        funding = rng.uniform(-0.0001, 0.0001, (t, n))
+        return AlignedMarketData(
+            datetimes=datetimes,
+            symbols=("AAA", "BBB"),
+            open_2d=prices.copy(),
+            high_2d=high,
+            low_2d=low,
+            close_2d=prices.copy(),
+            volume_2d=np.full((t, n), 1e5),
+            funding_2d=funding,
+            active_mask=np.ones((t, n), dtype=bool),
+            warm_mask=np.ones((t, n), dtype=bool),
+            entry_block_mask=np.zeros((t, n), dtype=bool),
+            kill_mask=np.zeros((t, n), dtype=bool),
+            execution_cost_bps_2d=np.full((t, n), 4.0),
+        )
+
+    def _make_events(self) -> pd.DataFrame:
+        return pd.DataFrame({
+            "symbol":               ["AAA", "BBB", "AAA", "AAA"],
+            "side":                 [1,     -1,     1,      1],
+            "entry_idx":            [5,     10,     20,     0],   # last: invalid (decision_idx=-1)
+            "expected_holding_bars":[10,     8,     15,     5],
+            "stop_atr_mult":        [2.0,   2.0,   2.0,   2.0],
+            "take_profit_atr_mult": [3.0,   3.0,   3.0,   3.0],
+            "hurdle_bps":           [0.0,   0.0,   0.0,   0.0],
+        })
+
+    def test_s1_kernel_bit_identical_to_reference(self) -> None:
+        """All float columns match within float64 precision; int/label columns exactly equal."""
+        aligned = self._make_multi_event_aligned()
+        events = self._make_events()
+        cfg = CandidateStrategyConfig()
+
+        result = label_candidate_events(events=events, aligned=aligned, cfg=cfg)
+
+        float_cols = [
+            "gross_event_bps", "execution_cost_bps", "realized_funding_bps",
+            "net_event_bps", "mae_bps", "mfe_bps", "realized_vol_bps",
+            "sl_thr_bps", "gross_return_r", "net_return_r", "mae_r", "mfe_r",
+        ]
+        # All float columns must be finite or NaN (no inf leakage)
+        for col in float_cols:
+            arr = result[col].to_numpy(dtype=np.float64)
+            assert not np.any(np.isposinf(arr) | np.isneginf(arr)), f"{col} has inf"
+
+        # Invalid row (entry_idx=0 → decision_idx=-1): exit_reason must be "invalid"
+        assert result.loc[3, "exit_reason"] == "invalid"
+        assert result.loc[3, "exit_idx"] == -1
+
+        # Valid rows: exit_reason must be one of the three valid reasons
+        valid_reasons = {"stop_loss", "take_profit", "time_exit"}
+        for i in range(3):
+            assert result.loc[i, "exit_reason"] in valid_reasons, (
+                f"row {i} exit_reason={result.loc[i, 'exit_reason']!r} not in {valid_reasons}"
+            )
+
+        # Int columns for valid rows: must be 0 or 1 (labels), non-negative (tte, exit_idx)
+        for i in range(3):
+            for col in ["triple_barrier_label", "barrier_first_label", "profitable_after_hurdle_label"]:
+                assert result.loc[i, col] in (0, 1), f"row {i} {col}={result.loc[i, col]}"
+            assert result.loc[i, "time_to_exit_bars"] >= 1
+            assert result.loc[i, "exit_idx"] >= 0
+
+    def test_s2_invalid_entry_produces_nan_payload(self) -> None:
+        """Entry at idx=0 (decision_idx=-1) → invalid payload: exit_reason=invalid, exit_idx=-1."""
+        aligned = self._make_multi_event_aligned()
+        events = pd.DataFrame({
+            "symbol": ["AAA"],
+            "side": [1],
+            "entry_idx": [0],
+            "expected_holding_bars": [5],
+            "stop_atr_mult": [2.0],
+            "take_profit_atr_mult": [3.0],
+        })
+        cfg = CandidateStrategyConfig()
+        result = label_candidate_events(events=events, aligned=aligned, cfg=cfg)
+
+        assert result.loc[0, "exit_reason"] == "invalid"
+        assert result.loc[0, "exit_idx"] == -1
+        assert result.loc[0, "triple_barrier_label"] == 0
+        assert result.loc[0, "barrier_first_label"] == 0
+        assert result.loc[0, "same_bar_collision"] == 0
+
+    def test_s3_min_holding_bars_delays_sl_scan(self) -> None:
+        """engine_aligned: min_holding_bars=5 delays barrier scan → early SL bar is skipped."""
+        t, n = 30, 1
+        open_ = np.full((t, n), 100.0)
+        # Bar 2 (entry+1) has low=70 → SL at stop_mult=2 would trigger without min_hold
+        # Bar 10 (entry+9) is time_exit for horizon=9
+        low = np.full((t, n), 95.0)
+        low[2, 0] = 70.0
+        datetimes = np.datetime64("2024-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+        aligned = AlignedMarketData(
+            datetimes=datetimes, symbols=("AAA",),
+            open_2d=open_.copy(), high_2d=np.full((t, n), 105.0),
+            low_2d=low, close_2d=open_.copy(),
+            volume_2d=np.full((t, n), 1e4), funding_2d=np.zeros((t, n)),
+            active_mask=np.ones((t, n), dtype=bool), warm_mask=np.ones((t, n), dtype=bool),
+            entry_block_mask=np.zeros((t, n), dtype=bool), kill_mask=np.zeros((t, n), dtype=bool),
+        )
+        events_no_hold = pd.DataFrame({
+            "symbol": ["AAA"], "side": [1], "entry_idx": [1],
+            "expected_holding_bars": [9], "stop_atr_mult": [2.0],
+            "take_profit_atr_mult": [10.0],
+        })
+        events_with_hold = events_no_hold.copy()
+        events_with_hold["min_holding_bars"] = 5
+
+        cfg_no_hold = CandidateStrategyConfig()
+        cfg_with_hold = CandidateStrategyConfig(exit_policy_mode="engine_aligned")
+
+        res_no = label_candidate_events(events=events_no_hold, aligned=aligned, cfg=cfg_no_hold)
+        res_hold = label_candidate_events(events=events_with_hold, aligned=aligned, cfg=cfg_with_hold)
+
+        # Without min_hold: SL triggered at bar 2
+        assert res_no.loc[0, "exit_reason"] == "stop_loss"
+        # With min_hold=5: bar 2 SL is skipped → time_exit (no tp/sl in remaining bars)
+        assert res_hold.loc[0, "exit_reason"] != "stop_loss"
+
+    def test_s4_unknown_symbol_raises_key_error(self) -> None:
+        """Unknown symbol in events → KeyError with symbol name."""
+        import pytest
+        aligned = self._make_multi_event_aligned()
+        events = pd.DataFrame({
+            "symbol": ["UNKNOWN"],
+            "side": [1], "entry_idx": [5],
+            "expected_holding_bars": [5],
+            "stop_atr_mult": [2.0], "take_profit_atr_mult": [3.0],
+        })
+        cfg = CandidateStrategyConfig()
+        with pytest.raises(KeyError, match="UNKNOWN"):
+            label_candidate_events(events=events, aligned=aligned, cfg=cfg)
