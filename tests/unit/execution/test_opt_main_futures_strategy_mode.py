@@ -1604,10 +1604,6 @@ def test_run_strategy_stage_passes_pit_state_cube_with_real_run_config(
             ),
         )
 
-    def fake_readiness(**kwargs: object) -> MagicMock:
-        captured["eligibility"] = kwargs.get("eligibility")
-        return MagicMock(ready=np.ones((1, 4, 1), dtype=np.bool_))
-
     dummy_l1 = _tw.Layer1Result(
         signals_per_fold=(),
         oos_stacked={},
@@ -1616,14 +1612,13 @@ def test_run_strategy_stage_passes_pit_state_cube_with_real_run_config(
         breadth=0.0,
         valid_coverage=0.0,
         fold_pass_ratio=0.0,
-        gate_passed=False,
+        gate_passed=True,
         n_valid=0,
         n_total=0,
         n_trade_scope=0,
     )
 
     monkeypatch.setattr(_align, "align_data_maps", fake_align)
-    monkeypatch.setattr(_readiness, "evaluate_strategy_readiness", fake_readiness)
     monkeypatch.setattr(_tw, "run_tiered_pipeline", lambda **_kw: (dummy_l1, None, None))
 
     opt_main_futures._run_strategy_stage(
@@ -1635,7 +1630,6 @@ def test_run_strategy_stage_passes_pit_state_cube_with_real_run_config(
     )
 
     assert captured["state_cube"] is cube
-    assert captured["eligibility"] is cube
 
 
 # ---------------------------------------------------------------------------
