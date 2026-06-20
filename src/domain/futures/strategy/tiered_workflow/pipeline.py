@@ -20,7 +20,6 @@ from src.core.utils.utils import PERF
 from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
 from src.domain.futures.portfolio.signal_composer import (
     composer_sigma_lookback_bars,
-    rolling_per_bar_return_std,
 )
 from src.domain.futures.strategy.candidate_contracts import (
     CandidateFoldOutput,
@@ -810,9 +809,21 @@ def run_l1_nested_swf(
     purge_bars, embargo_bars = strategy_config.resolve_purge_and_embargo_bars(cfg)
     _vol_window = composer_sigma_lookback_bars("4h")
     t_vol = time.perf_counter()
-    volatility_2d = np.column_stack(
-        [rolling_per_bar_return_std(aligned.close_2d[:, i], _vol_window) for i in range(aligned.close_2d.shape[1])]
+    # OPT-3: vectorized — same logic as rolling_per_bar_return_std over [T, N] at once
+    _c = np.asarray(aligned.close_2d, dtype=np.float64)  # [T, N]
+    _n_t, _n_sym = _c.shape
+    _r = np.zeros((_n_t, _n_sym), dtype=np.float64)
+    if _n_t >= 2:
+        _r[1:] = (_c[1:] - _c[:-1]) / np.maximum(np.abs(_c[:-1]), 1e-12)
+    _rw = max(2, int(_vol_window))
+    volatility_2d = (
+        pd.DataFrame(_r)
+        .rolling(_rw, min_periods=2)
+        .std(ddof=1)
+        .to_numpy(dtype=np.float64)
     )
+    volatility_2d = np.nan_to_num(volatility_2d, nan=0.0, posinf=0.0, neginf=0.0)
+    volatility_2d = np.maximum(volatility_2d, 1e-12)
     logger.log(
         PERF,
         "[perf-tiered] run_l1_nested_swf volatility_2d calculation took %.4fs",
