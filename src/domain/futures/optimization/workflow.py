@@ -1663,13 +1663,23 @@ def _shape_efficiency_l2_objective(
     worst_fold_threshold: float,
     worst_fold_weight: float,
     downside_dispersion: float,
+    lambda_w: float = 0.0,
+    risk_util_realized: float = 0.0,
+    risk_util_target: float = 0.50,
+    risk_util_weight: float = 0.03,
+    trade_count: int = 0,
+    trade_target: int = 90,
+    trade_weight: float = 0.02,
 ) -> float:
     """Scale-invariant Sortino_HAC_unit 기반 shape 최적화 목적함수.
 
-    J = Sortino_HAC_unit - lambda_w * max(0, tau_wf - worst_fold_sortino) - lambda_d * downside_dispersion
+    J = Sortino_HAC_unit - lambda_w * max(0, tau_wf - worst_fold_sortino)
+        - lambda_d * downside_dispersion
+        - risk_util_weight * max(0, risk_util_target - risk_util_realized)  [RC-2 soft penalty]
+        - trade_weight * max(0, trade_target - trade_count) / trade_target  [RC-2 soft penalty]
 
-    scale-invariant 특성 보장: leverage 사후 부여(D3)와 정합.
-    growth_lcb는 diagnostic으로 강등 — 목적에 포함하지 않음(RC-2 해소).
+    scale-invariant 1차항 유지 + soft 2차항으로 배치 가능성 약한 gradient 부여.
+    weight ≤ 0.03 유지 → 1차 shape 압도 방지 (quant.md §0 Anti-Overfitting).
 
     Args:
         sortino_hac_unit: HAC 조정 unit-vol Sortino (1차 목적, scale-invariant).
@@ -1677,6 +1687,13 @@ def _shape_efficiency_l2_objective(
         worst_fold_threshold: worst-fold 페널티 임계값 (≤ → 패널티).
         worst_fold_weight: worst-fold 페널티 가중치 λ_w.
         downside_dispersion: 하방 분산 λ_d·dispersion 항.
+        lambda_w: 미사용 호환 파라미터 (worst_fold_weight 우선).
+        risk_util_realized: 실현 리스크 활용도 (MDD/MDD_cap). RC-2 dead param 활성화.
+        risk_util_target: 리스크 활용 목표 (기본 0.50). soft 패널티 기준.
+        risk_util_weight: risk_util soft 패널티 가중치 (≤ 0.03 유지).
+        trade_count: 실현 거래 횟수. scale 정합 soft 패널티 입력.
+        trade_target: 목표 거래 횟수 (기본 90). soft 패널티 기준.
+        trade_weight: trade_count soft 패널티 가중치 (≤ 0.02 유지).
 
     Returns:
         float: 목적함수 값. 비정상 입력 시 -1e6 fail-fast 반환.
@@ -1689,7 +1706,19 @@ def _shape_efficiency_l2_objective(
         max(0.0, float(worst_fold_threshold) - float(worst_fold_sortino))
         * float(worst_fold_weight)
     )
-    return float(sortino_hac_unit - worst_fold_penalty - float(downside_dispersion))
+    risk_util_penalty = float(risk_util_weight) * max(
+        0.0, float(risk_util_target) - float(risk_util_realized)
+    )
+    trade_penalty = float(trade_weight) * max(
+        0.0, (float(trade_target) - float(trade_count)) / max(float(trade_target), 1.0)
+    )
+    return float(
+        sortino_hac_unit
+        - worst_fold_penalty
+        - float(downside_dispersion)
+        - risk_util_penalty
+        - trade_penalty
+    )
 
 
 def _deployment_shaped_l2_objective(
@@ -1924,6 +1953,12 @@ def evaluate_l2_trial(
         worst_fold_threshold=_wf_threshold,
         worst_fold_weight=_wf_weight,
         downside_dispersion=downside_dispersion,
+        risk_util_realized=float(risk_utilization),
+        risk_util_target=float(config.l2_objective_risk_util_target),
+        risk_util_weight=float(config.l2_objective_risk_util_weight),
+        trade_count=int(trade_count),
+        trade_target=int(config.l2_objective_trade_target),
+        trade_weight=float(config.l2_objective_trade_weight),
     )
     # growth_lcb는 diagnostic으로 강등 — objective에서 제외 (RC-2 해소)
     deployment_objective_bonus = float(objective_value - finite_score)
