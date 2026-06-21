@@ -49,9 +49,9 @@ STRATEGY ENGINE
 [ENS] Arch-Only   | SYM: 52 | EVT: 182,817 | TOTAL: +44.2 bps | [TRD: +55.7✅ TMO: +32.9✅ MRV: +24.3✅ CRY: +27.5✅ FLO: +27.5✅ UNW: +19.5✅ BTN: +42.6✅]
 [ENS] Arch-Only   | SYM: 52 | EVT: 212,168 | TOTAL: +46.8 bps | [TRD: +58.3✅ TMO: +35.6✅ MRV: +27.2✅ CRY: +26.9✅ FLO: +28.1✅ UNW: +20.5✅ BTN: +41.6✅]
 [ENS] Arch-Only   | SYM: 52 | EVT: 255,079 | TOTAL: +52.3 bps | [TRD: +72.2✅ TMO: +40.5✅ MRV: +28.5✅ CRY:  +5.0✅ FLO: +23.7✅ UNW: +13.1✅ BTN: +49.4✅]
-[ENS] Arch-Only   | SYM: 52 | EVT:  80,760 | TOTAL: +31.0 bps | [TRD: +43.0✅ TMO: +20.5✅ MRV: +18.2✅ CRY:  +3.7✅ FLO: +20.3✅ UNW:  +5.1✅ BTN: +19.0✅]
 [ENS] Arch-Only   | SYM: 52 | EVT: 284,255 | TOTAL: +49.5 bps | [TRD: +66.3✅ TMO: +45.9✅ MRV: +25.5✅ CRY:  +8.3✅ FLO: +19.5✅ UNW: +11.8✅ BTN: +43.1✅]
 [ENS] Arch-Only   | SYM: 52 | EVT: 313,006 | TOTAL: +50.2 bps | [TRD: +65.1✅ TMO: +46.3✅ MRV: +27.9✅ CRY: +13.6✅ FLO: +27.0✅ UNW: +14.0✅ BTN: +44.1✅]
+[ENS] Arch-Only   | SYM: 52 | EVT:  80,760 | TOTAL: +31.0 bps | [TRD: +43.0✅ TMO: +20.5✅ MRV: +18.2✅ CRY:  +3.7✅ FLO: +20.3✅ UNW:  +5.1✅ BTN: +19.0✅]
 [ENS] Arch-Only   | SYM: 52 | EVT: 177,204 | TOTAL: +44.3 bps | [TRD: +57.7✅ TMO: +33.5✅ MRV: +23.5✅ CRY: +20.8✅ FLO: +27.5✅ UNW: +20.1✅ BTN: +37.1✅]
 [ENS] Arch-Only   | SYM: 52 | EVT: 266,303 | TOTAL: +49.7 bps | [TRD: +68.4✅ TMO: +41.2✅ MRV: +25.9✅ CRY:  +3.4✅ FLO: +17.9✅ UNW: +12.5✅ BTN: +48.6✅]
 [ENS] Arch-Only   | SYM: 52 | EVT: 348,245 | TOTAL: +53.9 bps | [TRD: +70.0✅ TMO: +47.2✅ MRV: +28.7✅ CRY: +16.9✅ FLO: +35.7✅ UNW: +16.3✅ BTN: +43.5✅]
@@ -139,39 +139,39 @@ STRATEGY ENGINE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [L2-SIGNAL-PRE] predict_layer1_signals: registry_symbols=15 activation_floor=0.0 start_idx=5484 end_idx=7674
   ● [HYPERPARAMETER OPTIMIZATION]
-    - Study Name : l2_study_4h_11b4da52eed4
+    - Study Name : l2_study_4h_4d406ac7aa9d
     - Config     : 200 trials
-    - Provenance : events=7679 unique_symbols=ANKRUSDT,ARUSDT,GALAUSDT,KAVAUSDT,LTCUSDT,NEARUSDT,RUNEUSDT,SNXUSDT,TRBUSDT,TRXUSDT,ZECUSDT,ZILUSDT,ZRXUSDT fp=3200cd71a8eb
+    - Provenance : events=7679 unique_symbols=ANKRUSDT,ARUSDT,GALAUSDT,KAVAUSDT,LTCUSDT,NEARUSDT,RUNEUSDT,SNXUSDT,TRBUSDT,TRXUSDT,ZECUSDT,ZILUSDT,ZRXUSDT fp=601e53f2e1e8
   ────────────────────────────────────────────────────────────────────────────
-[L2-OPT]: 100%|██████████████████████████████████████████████████████| 200/200 [02:09<00:00,  1.54it/s, Best CAGR: 433.88% | Current: 29.00%]
-[L2-SELECTION] feasible한 trials가 없음 -> fallback
+[L2-OPT]: 100%|█████████████████████████████████████████████████████| 200/200 [01:41<00:00,  1.97it/s, Best CAGR: 516.93% | Current: 435.05%]
+[L2-SELECTION] No feasible candidate found within fallback window (reason=uplift)
+[L2-DEPLOY-C4] L*=1.615 (binding=mdd) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ● [LAYER 2: PORTFOLIO ALLOCATION & RISK OPTIMIZATION]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [L2-SIGNAL-PRE] predict_layer1_signals: registry_symbols=15 activation_floor=0.0 start_idx=5484 end_idx=7674
-[L2-DEPLOY] L*=1.3575 binding=mdd | CAGR=0.7720 MDD=0.3435 CVaR95=0.0207 RiskUtil=1.145
-[L2-DEPLOY] realization gap: risk_util=1.145 expected≈0.700 (결함 #1/#2 재발 의심 — vol-targeting 또는 gross 제약 확인 요망)
-● [LAYER 2 PORTFOLIO SCORECARD] (2024-12-17 ~ 2025-09-30)
+[L2-DEPLOY] L*=1.6146 binding=champion | CAGR=2.0898 MDD=0.1659 CVaR95=0.0216 RiskUtil=0.553
+● [LAYER 2 PORTFOLIO SCORECARD] (2024-12-22 ~ 2025-09-30)
 ──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ❌ BLOCKED (no_deployment)
+  STATUS  : ❌ BLOCKED (uplift)
 
-  ✅ [Growth    ] CAGR: +77.2% (>=30.0%) | PnL: +41.4% | Equity x1.41
-  ✅ [Efficiency] Sharpe: 1.520 (>=1.000) | Sortino: 2.298 (>=1.500) | Calmar: 2.248 (>=1.000)
-  ❌ [Risk      ] MDD: 34.3% (<=30.0%) | CVaR95: 2.1% (<=6.0%) | RiskUtil: 114.5%
-  ❌ [Robust    ] Fold: 66.7% (>=60.0%) | Trades: 118 (>=30) | Friction: 0.0%
-  ❌ [Uplift    ] Sharpe Uplift: -0.00 (>=+0.20)
-  ❌ [Integrity ] DSR: 0.000 (>=0.60) | PSR: 0.913 (diag)
-  [Diag     ] RelMDD: 1.41x | Turnover: 0.078
+  ✅ [Growth    ] CAGR: +209.0% (>=30.0%) | PnL: +75.0% | Equity x1.75
+  ✅ [Efficiency] Sharpe: 2.647 (>=1.000) | Sortino: 4.121 (>=1.500) | Calmar: 12.596 (>=1.000)
+  ✅ [Risk      ] MDD: 16.6% (<=30.0%) | CVaR95: 2.2% (<=6.0%) | RiskUtil: 55.3%
+  ✅ [Robust    ] Fold: 100.0% (>=60.0%) | Trades: 117 (>=30) | Friction: 100.0%
+  ❌ [Uplift    ] Sharpe Uplift: +0.01 (>=+0.20)
+  ✅ [Integrity ] DSR: 0.888 (>=0.60) | PSR: 0.991 (diag)
+  [Diag     ] RelMDD: 1.70x | Turnover: 0.077
 ──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ✅ Sharpe:  3.355 | CAGR:  +501.2% | MDD:  19.8% | Status: PASS | Period: 2024-12-17 ~ 2025-03-22
-       Symbols: 7 [GALAUSDT, LTCUSDT, NEARUSDT, RUNEUSDT, SNXUSDT, TRBUSDT, TRXUSDT]
-  ├─ Fold #2 : ❌ Sharpe: -1.412 | CAGR:   -49.4% | MDD:  28.6% | Status: FAIL | Period: 2025-03-22 ~ 2025-06-26
-       Symbols: 8 [ARUSDT, GALAUSDT, LTCUSDT, NEARUSDT, RUNEUSDT, TRBUSDT, TRXUSDT, ZECUSDT]
-  └─ Fold #3 : ✅ Sharpe:  2.573 | CAGR:   +82.9% | MDD:   7.7% | Status: PASS | Period: 2025-06-26 ~ 2025-09-30
+  ├─ Fold #1 : ✅ Sharpe:  4.107 | CAGR:  +778.6% | MDD:  15.0% | Status: PASS | Period: 2024-12-22 ~ 2025-03-26
+       Symbols: 6 [GALAUSDT, LTCUSDT, NEARUSDT, RUNEUSDT, TRBUSDT, TRXUSDT]
+  ├─ Fold #2 : ✅ Sharpe:  1.634 | CAGR:   +97.7% | MDD:  15.6% | Status: PASS | Period: 2025-03-26 ~ 2025-06-28
+       Symbols: 7 [GALAUSDT, LTCUSDT, NEARUSDT, RUNEUSDT, TRBUSDT, TRXUSDT, ZECUSDT]
+  └─ Fold #3 : ✅ Sharpe:  1.907 | CAGR:   +70.4% | MDD:  11.5% | Status: PASS | Period: 2025-06-28 ~ 2025-09-30
        Symbols: 8 [ARUSDT, GALAUSDT, KAVAUSDT, LTCUSDT, NEARUSDT, RUNEUSDT, TRBUSDT, TRXUSDT]
 
 ● [LAYER UNIVERSE AUDIT]
@@ -182,4 +182,4 @@ STRATEGY ENGINE
 ──────────────────────────────────────────────────────────────────────────────
 
 >> LAYER 2: BLOCKED -> gate_passed=False
-!! FAIL: exit_code=1 reason=layer2_blocked:no_feasible_trials
+!! FAIL: exit_code=1 reason=layer2_blocked:uplift
