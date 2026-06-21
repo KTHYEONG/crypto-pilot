@@ -42,6 +42,19 @@ Generates vectorized rule panels with archetype/regime contexts, filtered throug
 - Empirical-Bayes James-Stein shrinkage applies to both archetype cell means ($\hat{\mu}_a \to \bar{\mu}$) and variant-level priors.
 - `predict_regime_conditional_ensemble` output: `validation_rank_ic` (diagnostic only, 0.0 default) in `validation_diagnostics`. IC is NOT a gate input; `mu_quality_shrinkage` feature is removed (was dead: validation_rank_ic=0.0 → lam=0 → mu collapse).
 
+**Archetype Labels (`[ENS]` log)**
+| Archetype key | Log label | Semantic |
+|---|---|---|
+| `trend` | `TRD` | Cross-sectional trend-following |
+| `ts_mom` | `TMO` | Time-series momentum |
+| `mean_rev` | `MRV` | Mean reversion |
+| `carry_rev` | `CRY` | Carry / basis reversion |
+| `flow_rev` | `FLO` | Order-flow reversion |
+| `unwind` | `UNW` | Unwind / position exit |
+| `beta_neut` | `BTN` | Beta-neutral / market-neutral |
+- `[ENS]` numbers = archetype-pooled EB-shrunken mean edge (bps), NOT per-symbol averages.
+- Unknown archetypes (not in the above 7) fall back to first-letter uppercase.
+
 # 3. Architecture Flow
 
 ```mermaid
