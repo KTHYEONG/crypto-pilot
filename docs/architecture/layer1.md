@@ -40,6 +40,7 @@ Generates vectorized rule panels with archetype/regime contexts, filtered throug
 
 **Ensemble Shrinkage**
 - Empirical-Bayes James-Stein shrinkage applies to both archetype cell means ($\hat{\mu}_a \to \bar{\mu}$) and variant-level priors.
+- A Bayesian prior layer precedes JS: $\hat{x}_a = w_{prior} \cdot \bar{x}_a + (1 - w_{prior}) \cdot \mu_{prior}$ with $w_{prior} = n_{eff} / (n_{eff} + n_{prior})$. When `l1_ens_prior_effective_n > 0`, archetypes with few events are shrunk toward $\mu_{prior}=0$ before JS, preventing small-sample negative edge artifacts. Disabled by default ($n_{prior}=0$).
 - `predict_regime_conditional_ensemble` output: `validation_rank_ic` (diagnostic only, 0.0 default) in `validation_diagnostics`. IC is NOT a gate input; `mu_quality_shrinkage` feature is removed (was dead: validation_rank_ic=0.0 → lam=0 → mu collapse).
 
 **Archetype Labels (`[ENS]` log)**
@@ -53,6 +54,7 @@ Generates vectorized rule panels with archetype/regime contexts, filtered throug
 | `unwind` | `UNW` | Unwind / position exit |
 | `beta_neut` | `BTN` | Beta-neutral / market-neutral |
 - `[ENS]` numbers = archetype-pooled EB-shrunken mean edge (bps), NOT per-symbol averages.
+- Archetypes with event count < `l1_ens_min_display_events` display `insuf` instead of numeric edge, preventing misleading small-sample signs.
 - Unknown archetypes (not in the above 7) fall back to first-letter uppercase.
 
 **Flow-Aware Panels & Conditioning Gates**
@@ -83,6 +85,7 @@ graph TD
 
 **Layer 1 Nested SWF**
 - **Prequential Snapshots**: Evidence grids use decoupled multipliers and outer warm-up blocks to prevent early-fold starvation.
+- **Adaptive Evidence Gates**: During the first `l1_evidence_early_snapshots` snapshots, `l1_pair_min_effective_obs` and `l1_pair_min_folds` thresholds are relaxed to `l1_pair_min_effective_obs_early` / `l1_pair_min_folds_early`, allowing sparse early folds to generate registry entries. Quality weight is the ultimate arbiter: pairs that pass relaxed structural gates but fail `probability_positive ≥ 0.5` still receive `quality_weight = 0`.
 - **OOS Activation**: Enforces pooled Arch-Only mode during L1 to preserve statistical power ($N_{eff}$); regime is delegated to L2 risk overlays.
 - **Readiness Gate**: Strict multi-condition screening:
   - Fold Coverage $\ge 0.80$, Match Ratio $\ge 0.90$, Effective Symbols ($N_{eff}$) $\ge 3.0$, Fold Ratio $\ge 0.50$.
@@ -93,6 +96,7 @@ graph TD
 - **Actual L2 gate**: `build_qualified_signal_registry` — admits evidence where `hard_eligible AND quality_weight > 0`, with `>= l1_min_signals_per_symbol` per symbol.
 - **STATUS labels** (`[L2-PASS] Q:hi/mid/lo`) reflect q-value quality tier only; all admitted rows are L2-bound regardless of tier.
 - **FAIL summary**: `[NOT PROMOTED] N pairs | top: <reason>xN` appears when `all_evidence` is provided, listing structural exclusion reasons for non-admitted pairs.
+- **Promotion Filter**: Diagnostics-level filter (`apply_variant_promotions`) is advisory-only. When no variants are recommended by diagnostics, all events pass through unfiltered; the ultimate filtering authority is `compute_symbol_strategy_evidence` via structural gates and quality weight within the L1 SWF.
 
 **PIT Universe Integration**
 - `state_cube` (`UniverseStateCube [T, N]`) injected into `align_data_maps` → `AlignedMarketData.active_mask [T, N]`.

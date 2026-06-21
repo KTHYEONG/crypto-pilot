@@ -354,6 +354,7 @@ def compute_symbol_strategy_evidence(
     cfg: CandidateStrategyConfig,
     seed: int,
     registry_as_of_idx: int,
+    snapshot_index: int = -1,
 ) -> tuple[SymbolStrategyEvidence, ...]:
     """Compute per-source signal evidence from event-level OOS results."""
     if event_results.empty:
@@ -489,10 +490,15 @@ def compute_symbol_strategy_evidence(
         else:
             mdes_bps = 0.0
 
+        # P3: Adaptive evidence gate — relax effective_obs/folds thresholds for early snapshots
+        early_snapshots = int(getattr(cfg, "l1_evidence_early_snapshots", 0))
+        use_early = snapshot_index >= 0 and snapshot_index < early_snapshots and early_snapshots > 0
+        min_eff_obs = float(cfg.l1_pair_min_effective_obs_early) if use_early else float(cfg.l1_pair_min_effective_obs)
+        min_folds = int(cfg.l1_pair_min_folds_early) if use_early else int(cfg.l1_pair_min_folds)
         structural_reasons: list[str] = []
-        if effective_n < float(cfg.l1_pair_min_effective_obs):
+        if effective_n < min_eff_obs:
             structural_reasons.append("insufficient_effective_obs")
-        if len(fold_means) < int(cfg.l1_pair_min_folds):
+        if len(fold_means) < min_folds:
             structural_reasons.append("insufficient_folds")
         if mean_gross <= float(cfg.l1_pair_min_mean_gross_bps):
             structural_reasons.append("negative_gross_edge")

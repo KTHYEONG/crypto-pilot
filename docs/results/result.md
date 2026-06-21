@@ -31,7 +31,15 @@ STRATEGY ENGINE
 [TIERED] Base scope: 57/57 loaded symbols
 [TIERED] Sub-window admission: 52/57 symbols admitted (min_bars=1500, oos_cov>=90%)
 [TIERED] Sub-window drops: {'missing_map': 0, 'empty_frame': 0, 'late_start': 5, 'min_bars': 0, 'no_holdout': 0, 'holdout_coverage': 0}
-[PROMO_FILTER] no variants recommended by diagnostics; blocking all candidates (fail-closed)
+[PROMO_FILTER] no variants recommended; advisory-only pass-through
+
+● [DATA-INTEGRITY AUDIT]
+──────────────────────────────────────────────────────────────────────────────
+  STATUS  : ✅ ALL 52 SYMBOLS PASSED
+  METRICS : Total Bars: 8,761
+  DETAIL  : [NaN: 0.0%] [Zero/Neg: 0.0%] [Range: PASS]
+──────────────────────────────────────────────────────────────────────────────
+
 [ALIGN-CUBE] post-join active_mask mean=0.6818 entry_block_mean=0.2559 (was 1.0 / 0.0 before cube injection)
 [ENS] Arch-Only   | SYM: 52 | EVT:   3,432 | TOTAL:  +9.3 bps | [TRD: -18.4❌ TMO: +31.1✅ MRV: +43.3✅ CRY:  +9.4✅ UNW: +57.1✅ BTN: +35.6✅]
 [ENS] Arch-Only   | SYM: 52 | EVT:  38,314 | TOTAL: +24.3 bps | [TRD: +39.6✅ TMO: +25.4✅ MRV: +16.2✅ CRY: -33.0❌ FLO: +19.2✅ UNW:  -8.2❌ BTN: +27.1✅]
