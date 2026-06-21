@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import numba
 import numpy as np
@@ -118,7 +119,7 @@ def _ema_2d_jit(arr: np.ndarray, span: int) -> np.ndarray:
 def _ema_2d(arr: NDArray[np.float64], span: int) -> NDArray[np.float64]:
     if span <= 1:
         return arr.copy()
-    return _ema_2d_jit(arr, span)
+    return np.asarray(_ema_2d_jit(arr, span), dtype=np.float64)
 
 
 def _rolling_mean_2d(arr: NDArray[np.float64], window: int) -> NDArray[np.float64]:
@@ -151,6 +152,30 @@ def _zscore_2d(arr: NDArray[np.float64], window: int, eps: float = 1e-12) -> NDA
     mean = _rolling_mean_2d(arr, window=window)
     std = _rolling_std_2d(arr, window=window)
     return (arr - mean) / np.maximum(std, eps)
+
+
+def _safe_taker_imbalance_2d(
+    taker_buy: NDArray[np.float64] | None,
+    volume: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
+    """Return bounded taker imbalance and a validity mask."""
+    if taker_buy is None:
+        return np.zeros_like(volume, dtype=np.float64), np.zeros_like(volume, dtype=np.bool_)
+    if taker_buy.shape != volume.shape:
+        raise ValueError("taker_buy and volume shapes must match")
+
+    valid = (
+        np.isfinite(taker_buy)
+        & np.isfinite(volume)
+        & (volume > 0.0)
+        & (taker_buy >= 0.0)
+        & (taker_buy <= volume * 1.01)
+    )
+    ratio = np.zeros_like(volume, dtype=np.float64)
+    ratio[valid] = taker_buy[valid] / volume[valid]
+    imbalance = np.clip(2.0 * ratio - 1.0, -1.0, 1.0)
+    imbalance[~valid] = 0.0
+    return imbalance, valid
 
 
 def _rolling_max_2d(arr: NDArray[np.float64], window: int) -> NDArray[np.float64]:
@@ -252,10 +277,10 @@ def _resample_to_htf_and_project(
     values_4h: NDArray[np.float64],
     htf: str,
     agg_method: str,
-    compute_feature_fn,
+    compute_feature_fn: Callable[[pd.DataFrame], pd.DataFrame | NDArray[np.float64]],
 ) -> NDArray[np.float64]:
     """Resamples 4h series to HTF, computes feature, and projects back causally."""
-    T_d, N = values_4h.shape
+    _, n_cols = values_4h.shape
     df_4h = pd.DataFrame(values_4h, index=pd.to_datetime(datetimes_4h))
     
     resampler = df_4h.resample(htf, closed="left", label="left")
@@ -282,7 +307,7 @@ def _resample_to_htf_and_project(
     
     feature_higher = df_feature_htf.to_numpy(dtype=np.float64)
     out_4h = np.zeros_like(values_4h)
-    for col in range(N):
+    for col in range(n_cols):
         out_4h[:, col] = project_higher_tf_to_grid(
             feature_higher=feature_higher[:, col],
             dt_higher=dt_higher,
@@ -296,16 +321,26 @@ def _resolve_panel_archetype(panel: CandidateSignalPanel) -> str:
     family = panel.family
     if archetype:
         return archetype
-    if family in {"trend_ma", "trend_donchian", "vol_breakout", "trend_pullback_continuation", "mtf_trend_pullback", "mtf_breakout_retest", "vol_term_structure_gate"}:
+    if family in {
+        "trend_ma",
+        "trend_donchian",
+        "vol_breakout",
+        "trend_pullback_continuation",
+        "mtf_trend_pullback",
+        "mtf_breakout_retest",
+        "vol_term_structure_gate",
+    }:
         return "trend"
     if family in {"dual_momentum", "taker_imbalance_momentum"}:
         return "ts_mom"
-    if family in {"funding_carry", "funding_zscore_carry"}:
+    if family in {"funding_carry", "funding_zscore_carry", "funding_flow_carry"}:
         return "carry_rev"
     if family in {"residual_reversion"}:
         return "beta_neut"
-    if family in {"funding_extreme_reversal"}:
+    if family in {"funding_extreme_reversal", "funding_flow_unwind"}:
         return "unwind"
+    if family in {"flow_exhaustion_reversal"}:
+        return "flow_rev"
     return "mean_rev"
 
 
@@ -453,6 +488,15 @@ def build_rule_signal_panels(
 
     atr = _atr_2d(high, low, close, period=14)
     atr = np.maximum(atr, 1e-12)
+    flow_imbalance, flow_valid = _safe_taker_imbalance_2d(aligned.taker_buy_2d, vol)
+    flow_mean_6 = _rolling_mean_2d(flow_imbalance, window=6)
+    flow_z_24 = _zscore_2d(flow_imbalance, window=24)
+    funding_z_96 = _zscore_2d(funding, window=96, eps=1e-6)
+    funding_z_168 = _zscore_2d(funding, window=168, eps=1e-6)
+    ret_1 = _log_return_2d(close, lag=1)
+    ret_12 = _log_return_2d(close, lag=12)
+    ret_z_48 = _zscore_2d(ret_12, window=48)
+    shared_valid = valid_mask & flow_valid & np.isfinite(funding)
 
     panels: list[CandidateSignalPanel] = []
 
@@ -721,9 +765,12 @@ def build_rule_signal_panels(
 
     # 10. Funding Z-Score Carry (F2)
     for _fz_win, _fz_thr in [(48, 2.0), (96, 2.0), (168, 1.5)]:
-        _f_mean = _rolling_mean_2d(funding, window=_fz_win)
-        _f_std = _rolling_std_2d(funding, window=_fz_win)
-        _f_z = (funding - _f_mean) / np.maximum(_f_std, 1e-6)
+        if _fz_win == 96:
+            _f_z = funding_z_96
+        elif _fz_win == 168:
+            _f_z = funding_z_168
+        else:
+            _f_z = _zscore_2d(funding, window=_fz_win, eps=1e-6)
         _fz_side = np.zeros_like(close, dtype=np.int8)
         _fz_side[_f_z >= _fz_thr] = -1   # extreme positive funding → mean reversion short
         _fz_side[_f_z <= -_fz_thr] = 1   # extreme negative funding → long
@@ -931,8 +978,11 @@ def build_rule_signal_panels(
 
     # G1. mtf_trend_pullback
     for _n_htf in [20, 50]:
-        def _compute_g1_htf(df_htf):
-            ema = df_htf.ewm(span=_n_htf, adjust=False).mean()
+        def _compute_g1_htf(
+            df_htf: pd.DataFrame,
+            span: int = _n_htf,
+        ) -> pd.DataFrame:
+            ema = df_htf.ewm(span=span, adjust=False).mean()
             slope = ema.diff()
             return np.sign(slope).fillna(0.0)
             
@@ -974,23 +1024,41 @@ def build_rule_signal_panels(
                 metadata={
                     "archetype": "trend",
                     "regime": "top_down_trend_pullback",
-                    "edge_hypothesis": "1d trend direction filters 4h rsi oversold/overbought pullback trigger entries"
-                }
+                    "edge_hypothesis": (
+                        "1d trend direction filters 4h rsi oversold/overbought "
+                        "pullback trigger entries"
+                    ),
+                },
             )
         )
 
     # G2. mtf_breakout_retest
     for _n_htf in [20, 40]:
-        def _compute_g2_high_htf(df_htf):
-            return df_htf.rolling(window=_n_htf).max().shift(1)
-        def _compute_g2_low_htf(df_htf):
-            return df_htf.rolling(window=_n_htf).min().shift(1)
+        def _compute_g2_high_htf(
+            df_htf: pd.DataFrame,
+            window: int = _n_htf,
+        ) -> pd.DataFrame:
+            return df_htf.rolling(window=window).max().shift(1)
+
+        def _compute_g2_low_htf(
+            df_htf: pd.DataFrame,
+            window: int = _n_htf,
+        ) -> pd.DataFrame:
+            return df_htf.rolling(window=window).min().shift(1)
             
         _proj_don_high = _resample_to_htf_and_project(
-            datetimes_4h=aligned.datetimes, values_4h=high, htf="1D", agg_method="max", compute_feature_fn=_compute_g2_high_htf
+            datetimes_4h=aligned.datetimes,
+            values_4h=high,
+            htf="1D",
+            agg_method="max",
+            compute_feature_fn=_compute_g2_high_htf,
         )
         _proj_don_low = _resample_to_htf_and_project(
-            datetimes_4h=aligned.datetimes, values_4h=low, htf="1D", agg_method="min", compute_feature_fn=_compute_g2_low_htf
+            datetimes_4h=aligned.datetimes,
+            values_4h=low,
+            htf="1D",
+            agg_method="min",
+            compute_feature_fn=_compute_g2_low_htf,
         )
         
         _prev_close = np.vstack([close[:1], close[:-1]])
@@ -1000,7 +1068,11 @@ def build_rule_signal_panels(
         _g2_side = np.zeros_like(close, dtype=np.int8)
         _g2_side[_long_trig] = 1
         _g2_side[_short_trig] = -1
-        _g2_score = np.where(_g2_side != 0, np.where(_g2_side > 0, (close - _proj_don_high)/atr, (close - _proj_don_low)/atr), 0.0)
+        _g2_score = np.where(
+            _g2_side != 0,
+            np.where(_g2_side > 0, (close - _proj_don_high) / atr, (close - _proj_don_low) / atr),
+            0.0,
+        )
         
         panels.append(
             CandidateSignalPanel(
@@ -1020,17 +1092,17 @@ def build_rule_signal_panels(
                 metadata={
                     "archetype": "trend",
                     "regime": "retest_breakout",
-                    "edge_hypothesis": "1d breakout channel level retested on 4h grid with subsequent continuation bounce"
-                }
+                    "edge_hypothesis": (
+                        "1d breakout channel level retested on 4h grid with "
+                        "subsequent continuation bounce"
+                    ),
+                },
             )
         )
 
     # G7. taker_imbalance_momentum
     for _tim_win in [12, 24]:
-        _taker_buy = aligned.taker_buy_2d if aligned.taker_buy_2d is not None else np.zeros_like(close)
-        _cvd = np.cumsum(2.0 * _taker_buy - vol, axis=0)
-        _cvd_slope = np.diff(_cvd, axis=0, prepend=_cvd[:1])
-        _cvd_z = _zscore_2d(_cvd_slope, window=_tim_win)
+        _cvd_z = flow_z_24 if _tim_win == 24 else _zscore_2d(flow_imbalance, window=_tim_win)
         
         _g7_side = np.zeros_like(close, dtype=np.int8)
         _g7_side[_cvd_z >= 1.5] = 1
@@ -1051,20 +1123,59 @@ def build_rule_signal_panels(
                 stop_atr_mult=1.5,
                 take_profit_atr_mult=3.0,
                 turnover_proxy_2d=np.abs(np.diff(_g7_score, axis=0, prepend=0.0)),
-                valid_mask_2d=valid_mask,
+                valid_mask_2d=valid_mask & flow_valid,
                 metadata={
                     "archetype": "ts_mom",
                     "regime": "orderflow_momentum",
-                    "edge_hypothesis": "order-flow imbalance (CVD slope) persistent trends drive near-term price momentum"
-                }
+                    "edge_hypothesis": "order-flow imbalance persistence drives near-term price momentum",
+                    "causal_inputs": "trailing taker-buy imbalance z-score",
+                },
             )
         )
 
+    # G8. funding_flow_carry
+    _ffc_side_raw = -np.sign(funding_z_96).astype(np.int8)
+    _ffc_condition = (
+        (np.abs(funding_z_96) >= 1.5)
+        & ((_ffc_side_raw.astype(np.float64) * flow_mean_6) >= 0.10)
+        & shared_valid
+    )
+    _ffc_entry = _entry_rising_edge_2d(_ffc_condition)
+    _ffc_side = np.where(_ffc_entry, _ffc_side_raw, 0).astype(np.int8, copy=False)
+    _ffc_score_mag = np.clip((np.abs(funding_z_96) - 1.5) / 1.5 + np.abs(flow_mean_6), 0.0, 1.0)
+    _ffc_score = _ffc_side.astype(np.float64) * _ffc_score_mag
+    _ffc_side[:96] = 0
+    _ffc_score[:96] = 0.0
+    panels.append(
+        CandidateSignalPanel(
+            family="funding_flow_carry",
+            variant="ffc_96",
+            params={"funding_window": 96, "funding_z_threshold": 1.5, "flow_window": 6},
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=_ffc_score,
+            side_hint_2d=_ffc_side,
+            expected_holding_bars=18,
+            min_holding_bars=6,
+            stop_atr_mult=1.75,
+            take_profit_atr_mult=3.0,
+            turnover_proxy_2d=np.abs(np.diff(_ffc_score, axis=0, prepend=0.0)),
+            valid_mask_2d=shared_valid,
+            metadata={
+                "archetype": "carry_rev",
+                "regime": "funding_flow_confirmation",
+                "edge_hypothesis": (
+                    "extreme funding mean-reverts more cleanly when taker flow "
+                    "already confirms the crowded side"
+                ),
+                "causal_inputs": "trailing 96-bar funding z-score and 6-bar taker imbalance mean",
+            },
+        )
+    )
+
     # G9. funding_extreme_reversal
     for _fer_win in [168]:
-        _f_mean = _rolling_mean_2d(funding, window=_fer_win)
-        _f_std = _rolling_std_2d(funding, window=_fer_win)
-        _f_z = (funding - _f_mean) / np.maximum(_f_std, 1e-6)
+        _f_z = funding_z_168 if _fer_win == 168 else _zscore_2d(funding, window=_fer_win, eps=1e-6)
         
         _g9_side = np.zeros_like(close, dtype=np.int8)
         _g9_side[_f_z >= 1.645] = -1
@@ -1089,19 +1200,117 @@ def build_rule_signal_panels(
                 metadata={
                     "archetype": "unwind",
                     "regime": "funding_extreme",
-                    "edge_hypothesis": "extreme funding rates indicate overcrowded positioning and trigger rapid liquidation/unwind reversion"
-                }
+                    "edge_hypothesis": (
+                        "extreme funding rates indicate overcrowded positioning "
+                        "and trigger rapid liquidation/unwind reversion"
+                    ),
+                },
             )
         )
 
+    # G9b. funding_flow_unwind
+    _ffu_crowded_side = np.sign(funding_z_168).astype(np.int8)
+    _ffu_crowded = (np.abs(funding_z_168) >= 1.645) & ((_ffu_crowded_side.astype(np.float64) * ret_z_48) >= 1.0)
+    _ffu_reversal = ((_ffu_crowded_side.astype(np.float64) * flow_z_24) <= -1.0) & (
+        (_ffu_crowded_side.astype(np.float64) * ret_1) < 0.0
+    )
+    _ffu_condition = _ffu_crowded & _ffu_reversal & shared_valid
+    _ffu_entry = _entry_rising_edge_2d(_ffu_condition)
+    _ffu_side = np.where(_ffu_entry, -_ffu_crowded_side, 0).astype(np.int8, copy=False)
+    _ffu_score_mag = np.clip((np.abs(funding_z_168) - 1.645) / 1.645 + np.abs(flow_z_24) / 2.0, 0.0, 1.0)
+    _ffu_score = _ffu_side.astype(np.float64) * _ffu_score_mag
+    _ffu_side[:168] = 0
+    _ffu_score[:168] = 0.0
+    panels.append(
+        CandidateSignalPanel(
+            family="funding_flow_unwind",
+            variant="ffu_168",
+            params={"funding_window": 168, "funding_z_threshold": 1.645, "flow_window": 24, "ret_window": 48},
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=_ffu_score,
+            side_hint_2d=_ffu_side,
+            expected_holding_bars=10,
+            min_holding_bars=3,
+            stop_atr_mult=1.5,
+            take_profit_atr_mult=2.5,
+            turnover_proxy_2d=np.abs(np.diff(_ffu_score, axis=0, prepend=0.0)),
+            valid_mask_2d=shared_valid,
+            metadata={
+                "archetype": "unwind",
+                "regime": "funding_flow_reversal",
+                "edge_hypothesis": (
+                    "crowded funding regimes unwind when order flow and one-bar "
+                    "returns flip together"
+                ),
+                "causal_inputs": (
+                    "trailing 168-bar funding z-score, 24-bar flow z-score, "
+                    "12-bar return z-score, and 1-bar return"
+                ),
+            },
+        )
+    )
+
+    # G9c. flow_exhaustion_reversal
+    _fxr_shock_side = np.sign(ret_z_48).astype(np.int8)
+    _fxr_exhausted = (np.abs(ret_z_48) >= 1.0) & (np.abs(flow_z_24) >= 2.0)
+    _fxr_price_reversal = (_fxr_shock_side.astype(np.float64) * ret_1) < 0.0
+    _fxr_condition = _fxr_exhausted & _fxr_price_reversal & shared_valid
+    _fxr_entry = _entry_rising_edge_2d(_fxr_condition)
+    _fxr_side = np.where(_fxr_entry, -_fxr_shock_side, 0).astype(np.int8, copy=False)
+    _fxr_score_mag = np.clip(
+        (np.abs(ret_z_48) - 1.0) / 1.0 + (np.abs(flow_z_24) / 2.0),
+        0.0,
+        1.0,
+    )
+    _fxr_score = _fxr_side.astype(np.float64) * _fxr_score_mag
+    _fxr_side[:48] = 0
+    _fxr_score[:48] = 0.0
+    panels.append(
+        CandidateSignalPanel(
+            family="flow_exhaustion_reversal",
+            variant="fxr_24",
+            params={"flow_window": 24, "shock_window": 48, "shock_z_threshold": 1.0},
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=_fxr_score,
+            side_hint_2d=_fxr_side,
+            expected_holding_bars=8,
+            min_holding_bars=2,
+            stop_atr_mult=1.25,
+            take_profit_atr_mult=2.0,
+            turnover_proxy_2d=np.abs(np.diff(_fxr_score, axis=0, prepend=0.0)),
+            valid_mask_2d=shared_valid,
+            metadata={
+                "archetype": "flow_rev",
+                "regime": "flow_exhaustion_reversal",
+                "edge_hypothesis": (
+                    "price shocks with simultaneous order-flow extremes tend "
+                    "to snap back on immediate reversal bars"
+                ),
+                "causal_inputs": (
+                    "trailing 12-bar return z-score, 24-bar flow z-score, "
+                    "and 1-bar return"
+                ),
+            },
+        )
+    )
+
     # G10. vol_term_structure_gate
     for _vts_win in [20]:
-        def _compute_g10_htf(df_htf):
+        def _compute_g10_htf(
+            df_htf: pd.DataFrame,
+            window: int = _vts_win,
+        ) -> pd.DataFrame:
             ret = np.log(df_htf / df_htf.shift(1)).fillna(0.0)
-            return ret.rolling(window=_vts_win).std()
+            return ret.rolling(window=window).std()
             
         _proj_htf_vol = _resample_to_htf_and_project(
-            datetimes_4h=aligned.datetimes, values_4h=close, htf="1D", agg_method="last", compute_feature_fn=_compute_g10_htf
+            datetimes_4h=aligned.datetimes,
+            values_4h=close,
+            htf="1D",
+            agg_method="last",
+            compute_feature_fn=_compute_g10_htf,
         )
         
         _ret_4h = np.diff(np.log(np.maximum(close, 1e-12)), axis=0, prepend=0.0)
@@ -1138,8 +1347,11 @@ def build_rule_signal_panels(
                 metadata={
                     "archetype": "trend",
                     "regime": "vol_ratio_gated_trend",
-                    "edge_hypothesis": "breakouts are filtered to execute only during high HTF realized vol vs LTF realized vol (low volatility regimes) to avoid whipsaws"
-                }
+                    "edge_hypothesis": (
+                        "breakouts are filtered to execute only during high HTF "
+                        "realized vol vs LTF realized vol to avoid whipsaws"
+                    ),
+                },
             )
         )
 

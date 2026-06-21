@@ -13,6 +13,7 @@ from src.domain.futures.strategy.rule_signals import (
     _entry_rising_edge_2d,
     _rolling_max_2d,
     _rolling_min_2d,
+    _safe_taker_imbalance_2d,
     build_rule_signal_panels,
     candidate_panels_to_events,
 )
@@ -41,13 +42,43 @@ def _make_aligned(t: int = 150, n: int = 2) -> AlignedMarketData:
     )
 
 
+def _make_flow_aligned(
+    *,
+    close: np.ndarray,
+    funding: np.ndarray,
+    taker_buy: np.ndarray | None,
+    volume: np.ndarray | None = None,
+) -> AlignedMarketData:
+    """Build a deterministic aligned fixture for flow-family tests."""
+    t, n = close.shape
+    if volume is None:
+        volume = np.full((t, n), 1000.0, dtype=np.float64)
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    return AlignedMarketData(
+        datetimes=datetimes,
+        symbols=tuple(f"SYM{i}" for i in range(n)),
+        open_2d=close.copy(),
+        high_2d=close * 1.01,
+        low_2d=close * 0.99,
+        close_2d=close.copy(),
+        volume_2d=volume,
+        funding_2d=funding,
+        taker_buy_2d=taker_buy,
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.full((t, n), 5.0, dtype=np.float64),
+    )
+
+
 def test_build_rule_signal_panels_returns_expected_tuple() -> None:
     aligned = _make_aligned()
     cfg = CandidateStrategyConfig()
     panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
 
     assert isinstance(panels, tuple)
-    assert len(panels) == 28
+    assert len(panels) == 31
 
     expected_families = {
         "trend_ma",
@@ -65,6 +96,9 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
         "mtf_trend_pullback",
         "mtf_breakout_retest",
         "taker_imbalance_momentum",
+        "funding_flow_carry",
+        "funding_flow_unwind",
+        "flow_exhaustion_reversal",
         "funding_extreme_reversal",
         "vol_term_structure_gate",
     }
@@ -197,6 +231,190 @@ def test_candidate_panels_to_events_uses_max_of_policy_floor_and_physical_cost()
     assert float(events["cost_floor_bps"].min()) >= 40.0
 
 
+def test_candidate_strategy_config_defaults_include_new_flow_families() -> None:
+    cfg = CandidateStrategyConfig()
+
+    expected_families = {
+        "funding_flow_carry",
+        "funding_flow_unwind",
+        "flow_exhaustion_reversal",
+    }
+    assert expected_families.issubset(set(cfg.candidate_families))
+    assert expected_families.issubset(set(cfg.ensemble_variant_prior_families))
+
+
+def test_safe_taker_imbalance_2d_handles_valid_and_invalid_inputs() -> None:
+    volume = np.array([[100.0, 100.0]], dtype=np.float64)
+    taker_buy = np.array([[75.0, 25.0]], dtype=np.float64)
+
+    imbalance, valid = _safe_taker_imbalance_2d(taker_buy, volume)
+
+    np.testing.assert_allclose(imbalance, np.array([[0.5, -0.5]], dtype=np.float64))
+    np.testing.assert_array_equal(valid, np.ones((1, 2), dtype=bool))
+
+    invalid_inputs: tuple[tuple[np.ndarray | None, np.ndarray], ...] = (
+        (None, volume),
+        (np.array([[np.nan, np.nan]], dtype=np.float64), volume),
+        (np.array([[10.0, 10.0]], dtype=np.float64), np.array([[0.0, 0.0]], dtype=np.float64)),
+        (np.array([[-1.0, -1.0]], dtype=np.float64), volume),
+        (np.array([[103.0, 103.0]], dtype=np.float64), volume),
+    )
+
+    for taker, vol in invalid_inputs:
+        imbalance_i, valid_i = _safe_taker_imbalance_2d(taker, vol)
+        assert imbalance_i.shape == vol.shape
+        assert valid_i.shape == vol.shape
+        assert imbalance_i.dtype == np.float64
+        assert valid_i.dtype == bool
+        assert not valid_i.any()
+        assert not np.any(imbalance_i)
+
+
+def test_safe_taker_imbalance_2d_rejects_shape_mismatch() -> None:
+    volume = np.ones((2, 2), dtype=np.float64)
+    taker_buy = np.ones((2, 3), dtype=np.float64)
+
+    with pytest.raises(ValueError, match="taker_buy and volume shapes must match"):
+        _safe_taker_imbalance_2d(taker_buy, volume)
+
+
+def test_funding_flow_carry_emits_short_entry_with_shifted_event_offset() -> None:
+    t, n = 220, 1
+    close = np.linspace(100.0, 124.0, t, dtype=np.float64).reshape(t, n)
+    funding = np.zeros((t, n), dtype=np.float64)
+    funding[130:, :] = 4.0
+    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
+    taker_buy[130:170, :] = 400.0
+    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
+
+    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+    carry_panels = [panel for panel in panels if panel.family == "funding_flow_carry"]
+
+    assert len(carry_panels) == 1
+    panel = carry_panels[0]
+    fired = np.flatnonzero(panel.side_hint_2d[:, 0] != 0)
+    assert fired.tolist() == [133]
+    assert panel.side_hint_2d[133, 0] == -1
+    assert panel.side_hint_2d[134:, 0].sum() == 0
+
+    events = candidate_panels_to_events((panel,), min_abs_score=0.0)
+    assert events["entry_idx"].tolist() == [134]
+    assert events["side"].tolist() == [-1]
+
+
+def test_funding_flow_carry_rejects_opposite_flow_confirmation() -> None:
+    t, n = 220, 1
+    close = np.linspace(100.0, 124.0, t, dtype=np.float64).reshape(t, n)
+    funding = np.zeros((t, n), dtype=np.float64)
+    funding[130:, :] = 4.0
+    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
+    taker_buy[130:170, :] = 600.0
+    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
+
+    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+    carry_panels = [panel for panel in panels if panel.family == "funding_flow_carry"]
+
+    assert len(carry_panels) == 1
+    assert not carry_panels[0].side_hint_2d.any()
+    assert candidate_panels_to_events((carry_panels[0],), min_abs_score=0.0).empty
+
+
+def test_funding_flow_unwind_emits_short_entry_only_on_reversal_bar() -> None:
+    t, n = 260, 1
+    close = np.full((t, n), 100.0, dtype=np.float64)
+    close[150:170, :] = np.linspace(100.0, 140.0, 20, dtype=np.float64).reshape(20, 1)
+    close[170, 0] = close[169, 0] - 0.5
+    close[171:, 0] = close[170, 0]
+    funding = np.zeros((t, n), dtype=np.float64)
+    funding[130:, :] = 4.0
+    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
+    taker_buy[150:170, :] = 1000.0
+    taker_buy[170, :] = 0.0
+    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
+
+    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+    unwind_panels = [panel for panel in panels if panel.family == "funding_flow_unwind"]
+
+    assert len(unwind_panels) == 1
+    panel = unwind_panels[0]
+    fired = np.flatnonzero(panel.side_hint_2d[:, 0] != 0)
+    assert fired.tolist() == [170]
+    assert panel.side_hint_2d[170, 0] == -1
+
+    events = candidate_panels_to_events((panel,), min_abs_score=0.0)
+    assert events["entry_idx"].tolist() == [171]
+    assert events["side"].tolist() == [-1]
+
+
+def test_flow_exhaustion_reversal_emits_short_entry_on_same_bar_exhaustion_reversal() -> None:
+    t, n = 240, 1
+    close = np.full((t, n), 100.0, dtype=np.float64)
+    close[150:170, :] = np.linspace(100.0, 140.0, 20, dtype=np.float64).reshape(20, 1)
+    close[170, 0] = close[169, 0] - 0.5
+    close[171:, 0] = close[170, 0]
+    funding = np.zeros((t, n), dtype=np.float64)
+    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
+    taker_buy[150:170, 0] = 1000.0
+    taker_buy[170, 0] = 0.0
+    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
+
+    panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+    exhaustion_panels = [panel for panel in panels if panel.family == "flow_exhaustion_reversal"]
+
+    assert len(exhaustion_panels) == 1
+    panel = exhaustion_panels[0]
+    assert panel.side_hint_2d[0, 0] == 0
+    fired = np.flatnonzero(panel.side_hint_2d[:, 0] != 0)
+    assert fired.tolist() == [170]
+    assert panel.side_hint_2d[170, 0] == -1
+
+    events = candidate_panels_to_events((panel,), min_abs_score=0.0)
+    assert events["entry_idx"].tolist() == [171]
+    assert events["side"].tolist() == [-1]
+
+
+def test_flow_families_become_empty_when_taker_data_is_missing() -> None:
+    t, n = 220, 1
+    close = np.linspace(100.0, 124.0, t, dtype=np.float64).reshape(t, n)
+    funding = np.zeros((t, n), dtype=np.float64)
+    aligned_none = _make_flow_aligned(close=close, funding=funding, taker_buy=None)
+    aligned_nan = _make_flow_aligned(
+        close=close,
+        funding=funding,
+        taker_buy=np.full((t, n), np.nan, dtype=np.float64),
+    )
+
+    for aligned in (aligned_none, aligned_nan):
+        panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
+        flow_panels = [
+            panel
+            for panel in panels
+            if panel.family in {
+                "funding_flow_carry",
+                "funding_flow_unwind",
+                "flow_exhaustion_reversal",
+            }
+        ]
+        assert len(flow_panels) == 3
+        for panel in flow_panels:
+            assert not panel.side_hint_2d.any()
+            assert candidate_panels_to_events((panel,), min_abs_score=0.0).empty
+
+
+def test_build_rule_signal_panels_filters_new_flow_family_by_config() -> None:
+    aligned = _make_flow_aligned(
+        close=np.linspace(100.0, 124.0, 220, dtype=np.float64).reshape(220, 1),
+        funding=np.zeros((220, 1), dtype=np.float64),
+        taker_buy=np.full((220, 1), 500.0, dtype=np.float64),
+    )
+    cfg = CandidateStrategyConfig(candidate_families=("funding_flow_carry",))
+
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+
+    assert {panel.family for panel in panels} == {"funding_flow_carry"}
+    assert {panel.variant for panel in panels} == {"ffc_96"}
+
+
 def test_build_rule_signal_panels_respects_entry_warm_and_block_masks() -> None:
     aligned = _make_aligned()
     t, n = aligned.close_2d.shape
@@ -251,8 +469,8 @@ def test_build_rule_signal_panels_prefers_inference_active_mask_for_l1_scope() -
     panels = build_rule_signal_panels(aligned=aligned, cfg=CandidateStrategyConfig())
 
     assert panels
-    for panel in panels:
-        assert panel.valid_mask_2d.any()
+    trend_panel = next(panel for panel in panels if panel.family == "trend_ma")
+    assert trend_panel.valid_mask_2d.any()
 
 
 def test_build_rule_signal_panels_applies_optional_eligibility_masks() -> None:
@@ -304,9 +522,12 @@ def test_new_signal_families_shapes_and_side_hints() -> None:
     new_families = {
         "funding_zscore_carry",
         "vol_regime_reversion",
+        "funding_flow_carry",
+        "funding_flow_unwind",
+        "flow_exhaustion_reversal",
     }
     new_panels = [p for p in panels if p.family in new_families]
-    assert len(new_panels) == 5  # 3+2
+    assert len(new_panels) == 8  # 3+3+2
 
     for p in new_panels:
         assert p.signed_score_2d.shape == (200, 2), f"{p.family}:{p.variant} score shape mismatch"
@@ -323,6 +544,32 @@ def test_new_signal_families_shapes_and_side_hints() -> None:
             assert float(np.max(np.abs(finite_scores))) <= 1.0 + 1e-6, (
                 f"{p.family}:{p.variant} score out of [-1,1]"
             )
+
+
+def test_new_flow_signal_families_include_metadata_contract() -> None:
+    aligned = _make_aligned(t=220)
+    cfg = CandidateStrategyConfig()
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+
+    flow_panels = [
+        panel
+        for panel in panels
+        if panel.family in {
+            "funding_flow_carry",
+            "funding_flow_unwind",
+            "flow_exhaustion_reversal",
+        }
+    ]
+    assert len(flow_panels) == 3
+
+    for panel in flow_panels:
+        assert panel.metadata["archetype"] in {"carry_rev", "unwind", "flow_rev"}
+        assert panel.metadata["regime"]
+        assert panel.metadata["causal_inputs"]
+        assert panel.metadata["edge_hypothesis"]
+        assert panel.exit_policies
+        assert panel.allowed_regimes
+        assert panel.regime_code_1d is not None
 
 
 

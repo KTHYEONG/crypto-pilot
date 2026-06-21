@@ -5,6 +5,11 @@
 - **Rationale:** `mean_rev↔ts_mom`이 `MOM↔MRV`로 의미 정반대 swap되어 관측성 결함 유발. Fold #0~1 skip WARNING은 evidence fold 정상 동작(warm-up)이므로 노이즈. 수치 불변, 라벨·로그만 수정.
 - **Edge Cases:** 7종 외 신규 archetype은 첫글자 fallback 유지. `is_evidence_fold=False` 기본값으로 outer fold 동작 불변.
 
+## L1-ADR-017: Flow-Aware Layer1 Signal Families 및 Cell-Level Imbalance 도입 (2026-06-21)
+- **Delta:** `_safe_taker_imbalance_2d`를 추가했고, `taker_buy`/`volume` 정합성이 셀 단위로 검증되도록 만들었다. `build_rule_signal_panels`는 `flow_imbalance`, `flow_mean_6`, `flow_z_24`, `funding_z_96`, `funding_z_168`, `ret_1`, `ret_12`, `ret_z_48`를 공유 캐시로 재사용했고, `funding_flow_carry`, `funding_flow_unwind`, `flow_exhaustion_reversal` 패널을 노출했다. `config.py`의 candidate family 목록과 ensemble prior 목록에도 해당 family를 포함했다.
+- **Rationale:** ENS 로그에서 일부 flow 계열 항목이 weak/fail 상태로 남았고, 기존 exhaustion 패턴은 deterministic fixture에서 희귀해서 unit test와 운영 신호가 drift를 일으켰다. same-bar exhaustion/reversal과 funding-flow confirmation을 분리해 신호 coverage를 넓히면서도 causal input과 compute budget을 유지했다.
+- **Edge Cases:** taker data가 없거나 invalid이면 flow-dependent panel이 fail-closed 되었고, mixed-valid row는 전체 row 실패로 오인하지 않았다. `flow_exhaustion_reversal`은 same-bar confirmation으로 단순화되어 event testability가 유지되었다.
+
 ## L1-ADR-013: L1/Universe 파이프라인 루프 불변식 호이스팅 + 벡터화 (2026-06-20)
 - **Delta:** (OPT-1) `align_data_maps` state_cube/readiness_cube 조인 루프에서 `np.searchsorted`/`positions`/`t_valid`/`p_valid` 를 심볼 루프 밖으로 호이스팅. pandas 3.0 bug fix: `calendar.as_unit("ns").asi8` 로 nanosecond epoch 강제. (OPT-2) `inject_membership_masks_into_maps` 진입 시 `_normalize_timeline()` 헬퍼로 timeline 1회 정규화 후 `build_membership_mask_bundle` 에 전달 (104회→1회). (OPT-3) `run_l1_nested_swf` 의 `volatility_2d` 컬럼 루프를 `pd.DataFrame.rolling().std(ddof=1)` 단일 행렬 호출로 대체. (OPT-6) `load_futures_data_maps_for_symbols` 말미 도달불가 중복 `return` 1줄 제거.
 - **Rationale:** PERF 실측(52 syms, 617K events): searchsorted N=52→1, timeline 정규화 104→1. 수치 결과·공개 시그니처 불변. pandas 3.0.2 `.asi8` microsecond 버그는 pre-existing silent production bug였음(unit 미강제 시 1000× 스케일 오류).
@@ -131,5 +136,4 @@
 - **Rationale:** 
   - `[SKIPPED]` 로그 출력 후 `SYSTEM CONTEXT` 대시보드 도달 전까지의 극심한 데이터 딜레이를 유발하던 Pandas Object 배열 생성 및 groupby cumsum 병목과 피처 타입 변환 오버헤드를 우회하여 데이터 로딩 파이프라인의 Latency를 획기적으로 낮춤.
 - **Status:** Accepted
-
 
