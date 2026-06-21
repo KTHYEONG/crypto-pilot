@@ -114,6 +114,7 @@ Optimization runs independently per layer, prioritizing conservative growth metr
 - **Step A (L1 Valid)**: Pipeline targets `l1`. Early exit if blocked.
 - **Step B (L2 Prep)**: Builds causal signal batch from L1 results using historical training windows.
 - **Step C (L2 Study)**: Maximizes `growth_lcb - worst_fold_penalty - λ_down·semidev - λ_turnover - λ_funding` via TPESampler (`V8` 9-param, 200 trials). **Fix B**: MDD/CVaR 소프트 패널티 제거 — 하드게이트만 유지, 탐색이 CAGR·DSR 방향으로 정렬됨. Champion은 frontier 전수에서 `argmax(dsr, cagr)` 선택. `blocker_reason != ""` 챔피언은 Step D 진입 **차단**.
+  - **Deterministic Batch Parallelization**: When `L2_OPTUNA_BATCH_SIZE` is configured greater than 1, trials are evaluated in parallel using a `ProcessPoolExecutor` with a pool size bounded by CPU cores. To preserve seed reproducibility and match single-threaded trajectory outcomes, the optimizer obtains parameters deterministically via `ask()`, schedules evaluation, and registers results sequentially via `tell()` in strict trial number order.
 - **Step C-Post (Phase B)**: Champion 선택 직후 `calibrate_deployment_leverage`로 L* 결정 → kelly/vol 스케일링. 추가 Optuna trial 없음 → DSR deflation 미증가.
 - **Step D (L3 Eval)**: Runs final pipeline simulation applying `l2_params` and evaluates the frozen holdout.
 
