@@ -268,6 +268,9 @@ class CandidateStrategyConfig:
         "rsi_reversion",
         "vol_regime_reversion",
         "funding_zscore_carry",
+        "funding_flow_carry",
+        "funding_flow_unwind",
+        "flow_exhaustion_reversal",
         "taker_imbalance_momentum",
         "btc_regime_pullback",
         "mtf_breakout_retest",
@@ -362,7 +365,10 @@ class CandidateStrategyConfig:
         "mtf_trend_pullback",
         "mtf_breakout_retest",
         "taker_imbalance_momentum",
+        "funding_flow_carry",
         "funding_extreme_reversal",
+        "funding_flow_unwind",
+        "flow_exhaustion_reversal",
         "vol_term_structure_gate",
     )
     # Execution cost model (SSOT; replaces flat 24bps)
