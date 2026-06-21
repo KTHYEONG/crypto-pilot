@@ -1,5 +1,11 @@
 # Layer 1 Architectural Decisions
 
+## L1-ADR-026: signal_batch_convert iterrows 벡터화 (P6) (2026-06-21)
+- **Delta:** `_candidate_output_to_signal_batch` 내 `frame.iterrows()` + per-row `_signal_source_key_from_row`/`pd.to_numeric` 루프(n_raw=80~95K)를 벡터 마스킹으로 교체. key 컬럼 벡터 추출(`astype(str)`) → composite 문자열 `pd.Series.isin(keyset)` registry mask → gross/net/q10/q90 배열 n_raw 패딩(cascade fallback) → gate mask cascade(gross→threshold→decision) → `np.flatnonzero(mask_dec)`으로 n_out 서바이버만 객체화.
+- **Rationale:** P4 로깅이 `loop=2.64s/fold`(pred/keys/sort≈0s), `outer_fold_loop=10.15s` 노출. n_raw 80~95K 전체 Python 루프였으나 n_out은 350~7680. 벡터화 후 `loop=0.04s/fold(-98%)`, `outer_fold_loop=0.53s(-94%)`. `l1_total 53.5s→37.4s(-30%)`, 원본 대비 누적 -50%.
+- **Edge Cases:** column-existence cascade(`strategy_id`→`family:variant`, `activation_context`→`signal_cell`→`entry_regime`→`all`) 컬럼 단위 판별로 per-row `.get()` 등가 보존. relaxed mode(`l1_activation_match_regime=False`) → actx 전부 "all" 벡터화, 2-tuple isin. qw_lookup 1회 flatten으로 registry 선형탐색 제거. 8개 기능 테스트 통과.
+- **Status:** Accepted
+
 ## L1-ADR-025: L1 실행시간 최적화 P1~P5 — prime 제거·벡터화·진단게이팅·타이머분리 (2026-06-21)
 - **Delta:**
   - **P1** `prime_aligned_feature_cache`: `build_candidate_dataset` 호출(814K 이벤트 per-event 조립 후 폐기) 제거 → `_warm_aligned_2d_cache()` 분리 추출. fork COW용 2D rolling 배열만 캐시 워밍.
