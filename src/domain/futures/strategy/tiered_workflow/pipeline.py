@@ -1806,7 +1806,10 @@ def run_tiered_pipeline(
 
     # ─── Layer 2: AWF Portfolio Optimization ─────────────────────────────────
     if verbose:
-        logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
+        if l1_result_override is None:
+            logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization (Final Simulation)"))
+        else:
+            logger.info("  ● [FINAL SIMULATION]")
     t_l2 = time.perf_counter()
     ho_start_idx_l2 = _date_to_idx(aligned.datetimes, window.holdout_start)
     _l2_expand = int(l2_params.get("l2_is_expansion_bars", 0))
