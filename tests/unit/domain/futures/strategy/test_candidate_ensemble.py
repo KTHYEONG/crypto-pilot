@@ -1899,3 +1899,186 @@ def test_signal_symbol_diag_no_symbol_column(
     assert "possym=n/a" in "\n".join(all_lines), "possym must show n/a without symbol column"
     # per-symbol 상세 없음
     assert not any("per-symbol" in l for l in all_lines), "per-symbol must not appear without symbol column"
+
+
+# ---------------------------------------------------------------------------
+# P1: Bayesian Prior for ENS Edge (_fit_cell_means)
+# ---------------------------------------------------------------------------
+
+def test_prior_shrinks_small_sample_edge_to_zero() -> None:
+    """P1.1: prior_effective_n=100 shrinks 5-event raw_mean of +50 toward 0."""
+    frame = pd.DataFrame({
+        "archetype": ["trend"] * 5,
+        "entry_regime_code": [0] * 5,
+        "net_return_bps": [50.0] * 5,
+        "entry_idx": np.arange(5),
+    })
+    _, _, arch_mu, _, _, _, _, _, _ = _fit_cell_means(
+        frame,
+        shrinkage_k=0.0,  # disable JS shrinkage to isolate prior effect
+        axis="archetype_only",
+        adaptive_shrinkage=False,
+        prior_effective_n=100.0,
+        prior_mean_bps=0.0,
+    )
+    expected = 50.0 * 5.0 / (5.0 + 100.0)  # ~2.38
+    assert arch_mu["trend"] == pytest.approx(expected, abs=0.5)
+
+
+def test_prior_large_sample_unaffected() -> None:
+    """P1.2: 10000 events with prior_n=100 → prior effect < 1%."""
+    rng = np.random.default_rng(42)
+    frame = pd.DataFrame({
+        "archetype": ["trend"] * 10000,
+        "entry_regime_code": [0] * 10000,
+        "net_return_bps": rng.normal(50.0, 30.0, 10000),
+        "entry_idx": np.arange(10000),
+    })
+    _, _, arch_mu, _, _, _, _, _, _ = _fit_cell_means(
+        frame,
+        shrinkage_k=0.0,
+        axis="archetype_only",
+        adaptive_shrinkage=False,
+        prior_effective_n=100.0,
+        prior_mean_bps=0.0,
+    )
+    # prior effect: 10000/(10000+100) = 0.99 → raw_mean * 0.99 ≈ 49.5 (with normal noise)
+    assert arch_mu["trend"] == pytest.approx(50.0, abs=2.0)
+
+
+def test_prior_zero_is_backward_compatible() -> None:
+    """P1.3: prior_effective_n=0.0 (default) → same as no prior."""
+    rng = np.random.default_rng(42)
+    vals = rng.normal(30.0, 20.0, 50)
+    frame = pd.DataFrame({
+        "archetype": ["trend"] * 50,
+        "entry_regime_code": [0] * 50,
+        "net_return_bps": vals,
+        "entry_idx": np.arange(50),
+    })
+    # without prior
+    _, _, arch_mu_no_prior, _, _, _, _, _, _ = _fit_cell_means(
+        frame, shrinkage_k=0.0, axis="archetype_only",
+        adaptive_shrinkage=False, prior_effective_n=0.0,
+    )
+    # with prior=0 (should be identical)
+    _, _, arch_mu_prior_zero, _, _, _, _, _, _ = _fit_cell_means(
+        frame, shrinkage_k=0.0, axis="archetype_only",
+        adaptive_shrinkage=False, prior_effective_n=0.0,
+    )
+    assert arch_mu_no_prior["trend"] == pytest.approx(arch_mu_prior_zero["trend"])
+
+
+def test_prior_plus_js_shrinkage_interaction() -> None:
+    """P1.4: Prior + JS: two-step shrinkage applied sequentially."""
+    # 5 events with mean +50, prior_n=100, JS k=10, global_mu=compute([50]*5 + [-50]*5)
+    frame = pd.DataFrame({
+        "archetype": ["trend"] * 5 + ["mean_rev"] * 5,
+        "entry_regime_code": [0] * 10,
+        "net_return_bps": [50.0] * 5 + [-50.0] * 5,
+        "entry_idx": np.arange(10),
+    })
+    _, _, arch_mu, _, global_mu, _, _, _, _ = _fit_cell_means(
+        frame,
+        shrinkage_k=10.0,
+        axis="archetype_only",
+        adaptive_shrinkage=False,
+        prior_effective_n=100.0,
+        prior_mean_bps=0.0,
+    )
+    # global_mu = mean([50]*5 + [-50]*5) = 0.0
+    assert global_mu == pytest.approx(0.0, abs=1e-6)
+    # prior shrunk raw_mean: 50 * 5/(5+100) ≈ 2.38
+    prior_shrunk = 50.0 * 5.0 / (5.0 + 100.0)
+    # JS: w = n/(n+k) = 5/(5+10) ≈ 0.333
+    w = 5.0 / (5.0 + 10.0)
+    expected = w * prior_shrunk + (1.0 - w) * global_mu  # 0.333*2.38 ≈ 0.79
+    assert arch_mu["trend"] == pytest.approx(expected, abs=0.5)
+
+
+# ---------------------------------------------------------------------------
+# P2: ENS Minimum Event Display Threshold
+# ---------------------------------------------------------------------------
+
+def test_log_ensemble_shows_insuf_for_low_event_archetype(caplog: pytest.LogCaptureFixture) -> None:
+    """P2.1: Archetype with < min_display_events shows 'insuf'."""
+    frame = pd.DataFrame({
+        "archetype": ["trend"] * 50 + ["mean_rev"] * 500,
+        "entry_regime_code": [0] * 550,
+        "net_return_bps": [10.0] * 550,
+    })
+    arch_mu = {"trend": 10.0, "mean_rev": 10.0}
+
+    with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
+        _log_ensemble_diagnostics(
+            frame=frame,
+            global_mu=10.0,
+            arch_mu=arch_mu,
+            chosen="archetype_only",
+            adaptive_shrinkage=False,
+            k_used=0.0,
+            tag="ENS",
+            min_display_events=200,
+        )
+
+    log_text = "\n".join(caplog.messages)
+    assert "TRD:   insuf" in log_text, "trend with 50 events should show insuf"
+    assert "MRV:" in log_text, "mean_rev should appear in log"
+    # MRV should show numeric value (not insuf) after it
+    mrv_part = log_text.split("MRV:")[1][:15]
+    assert "insuf" not in mrv_part, "mean_rev with 500 events should show numeric value"
+
+
+def test_log_ensemble_disabled_threshold_shows_all(caplog: pytest.LogCaptureFixture) -> None:
+    """P2.2: min_display_events=0 (default) shows numeric for all."""
+    frame = pd.DataFrame({
+        "archetype": ["trend"] * 5,
+        "entry_regime_code": [0] * 5,
+        "net_return_bps": [10.0] * 5,
+        "symbol": ["BTCUSDT"] * 5,
+    })
+    arch_mu = {"trend": 10.0}
+
+    with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
+        _log_ensemble_diagnostics(
+            frame=frame,
+            global_mu=10.0,
+            arch_mu=arch_mu,
+            chosen="archetype_only",
+            adaptive_shrinkage=False,
+            k_used=0.0,
+            tag="ENS",
+            min_display_events=0,
+        )
+
+    log_text = "\n".join(caplog.messages)
+    assert "TRD:" in log_text
+    assert "insuf" not in log_text
+
+
+def test_log_ensemble_mixed_insuf_and_displayed(caplog: pytest.LogCaptureFixture) -> None:
+    """P2.3: Mix of insuf and displayed archetypes in same log."""
+    frame = pd.DataFrame({
+        "archetype": ["trend"] * 200 + ["mean_rev"] * 800,
+        "entry_regime_code": [0] * 1000,
+        "net_return_bps": [-5.0] * 200 + [15.0] * 800,
+        "symbol": ["BTCUSDT"] * 1000,
+    })
+    arch_mu = {"trend": -5.0, "mean_rev": 15.0}
+
+    with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
+        _log_ensemble_diagnostics(
+            frame=frame,
+            global_mu=11.0,
+            arch_mu=arch_mu,
+            chosen="archetype_only",
+            adaptive_shrinkage=False,
+            k_used=0.0,
+            tag="ENS",
+            min_display_events=500,
+        )
+
+    log_text = "\n".join(caplog.messages)
+    assert "TRD:   insuf" in log_text, "trend with 200 < 500 events → insuf"
+    assert "MRV:" in log_text
+    assert "MRV: +15.0✅" in log_text, "mean_rev with 800 >= 500 events → numeric with checkmark"

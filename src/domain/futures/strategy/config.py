@@ -441,6 +441,11 @@ class CandidateStrategyConfig:
     l1_evidence_max_folds: int = 32
     l1_outer_warmup_blocks: int = 2
     l1_nested_workers: int | None = None  # None=동적(기존), int=고정(재현성 모드)
+    l1_ens_prior_effective_n: float = 0.0  # P1: Bayesian prior sample size; >0 shrinks small-n arch edge toward 0
+    l1_ens_min_display_events: int = 0     # P2: Min events per archetype to show edge sign; 0=disabled
+    l1_evidence_early_snapshots: int = 0   # P3: First N snapshots use relaxed evidence gates; 0=disabled
+    l1_pair_min_effective_obs_early: float = 2.0  # P3: Relaxed effective_obs threshold for early snapshots
+    l1_pair_min_folds_early: int = 1             # P3: Relaxed min_folds threshold for early snapshots
     fold_survival_metric: Literal[
         "predicted_mu_tstat", "realized_selected_edge", "realized_log_growth"
     ] = "realized_selected_edge"
@@ -750,6 +755,16 @@ class CandidateStrategyConfig:
             raise ValueError("l1_outer_warmup_blocks must be >= 1")
         if self.l1_nested_workers is not None and self.l1_nested_workers < 1:
             raise ValueError("l1_nested_workers must be >= 1 when set")
+        if self.l1_ens_prior_effective_n < 0.0:
+            raise ValueError("l1_ens_prior_effective_n must be non-negative")
+        if self.l1_ens_min_display_events < 0:
+            raise ValueError("l1_ens_min_display_events must be >= 0")
+        if self.l1_evidence_early_snapshots < 0:
+            raise ValueError("l1_evidence_early_snapshots must be >= 0")
+        if self.l1_pair_min_effective_obs_early < 1.0:
+            raise ValueError("l1_pair_min_effective_obs_early must be >= 1.0")
+        if self.l1_pair_min_folds_early < 1:
+            raise ValueError("l1_pair_min_folds_early must be >= 1")
         if self.min_gate_brier_skill < -1.0:
             raise ValueError("min_gate_brier_skill must be >= -1.0")
         if self.min_gate_decile_lift < 0.0:
