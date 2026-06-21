@@ -8,7 +8,10 @@ import pytest
 from src.core.exchange.binance_client import BinanceKlinePermanentError
 from src.domain.futures.backtest.data_loader import (
     DataCollector,
+    _coalesce_metrics_frames,
     _normalize_funding_frame,
+    _normalize_metrics_frame,
+    merge_metrics_into_ohlcv,
     summarize_ohlcv_collection_integrity,
 )
 
@@ -252,24 +255,21 @@ def test_ensure_ohlcv_data_clips_to_onboard_date_and_prevents_infinite_backfill_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.domain.futures.universe.storage import SymbolSyncProfile
-    collector = DataCollector()
-
-    # 상장일이 2023-07-24인 심볼 프로필 모킹
     mock_profile = SymbolSyncProfile(
         symbol="NEWCOINUSDT",
         onboard_date=pd.Timestamp("2023-07-24").date(),
         delivery_date=None,
         status="TRADING",
     )
+    collector = DataCollector()
     monkeypatch.setattr(
         "src.domain.futures.universe.storage._load_symbol_sync_profiles",
         lambda: {"NEWCOINUSDT": mock_profile},
     )
 
-    # 캐시의 데이터 시작점이 상장일 당일 08:00 (실제 상장 시각 차이 시뮬레이션)
     mock_cache = pd.DataFrame(
         {
-            "timestamp": [1690185600000],  # 2023-07-24 08:00:00 UTC
+            "timestamp": [1690185600000],
             "datetime": pd.to_datetime(["2023-07-24T08:00:00Z"], utc=True),
             "open": [1.0],
             "high": [1.5],
@@ -278,11 +278,10 @@ def test_ensure_ohlcv_data_clips_to_onboard_date_and_prevents_infinite_backfill_
             "volume": [10.0],
         }
     )
-    saved_dfs: list[pd.DataFrame] = []
-    fetched_ranges = []
+    fetched_ranges: list[tuple[str, str]] = []
 
     monkeypatch.setattr(collector, "_load_cache", lambda *_args, **_kwargs: mock_cache)
-    monkeypatch.setattr(collector, "_save_cache", lambda symbol, tf, df: saved_dfs.append(df))
+    monkeypatch.setattr(collector, "_save_cache", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(collector, "_load_meta", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(collector, "_save_meta", lambda *_args, **_kwargs: None)
 
@@ -292,15 +291,95 @@ def test_ensure_ohlcv_data_clips_to_onboard_date_and_prevents_infinite_backfill_
 
     monkeypatch.setattr(collector.client, "fetch_ohlcv_with_taker", mock_fetch)
 
-    # 요청 시작점을 상장일 이전(2022-10-01)으로 설정하고 수집 요청
     collector.ensure_ohlcv_data("NEWCOINUSDT", "1h", "2022-10-01", "2026-03-31")
 
-    # 상장일 이전 갭(2022-10-01 ~ 2023-07-24)에 대한 API 호출은 없어야 하며,
-    # 오직 캐시 최댓값 이후의 최신 데이터 영역(2023-07-24 08:00:00 ~ )만 요청되어야 함.
-    assert len(fetched_ranges) > 0
+    assert fetched_ranges
     for start_str, _ in fetched_ranges:
         start_dt = pd.to_datetime(start_str, utc=True)
         assert start_dt >= pd.to_datetime("2023-07-24T08:00:00Z", utc=True)
+
+
+def test_coalesce_metrics_frames_preserves_complementary_fields() -> None:
+    oi = pd.DataFrame(
+        {
+            "timestamp": [1711929600000],
+            "sum_open_interest": [100.0],
+        }
+    )
+    lsr = pd.DataFrame(
+        {
+            "timestamp": [1711929600000],
+            "long_short_ratio": [1.2],
+        }
+    )
+
+    out = _coalesce_metrics_frames([oi, lsr], symbol="BTCUSDT")
+
+    assert len(out) == 1
+    assert out.loc[0, "sum_open_interest"] == pytest.approx(100.0)
+    assert out.loc[0, "long_short_ratio"] == pytest.approx(1.2)
+
+
+def test_ensure_metrics_data_when_cache_and_sources_empty_returns_canonical_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collector = DataCollector()
+    monkeypatch.setattr("src.domain.futures.backtest.data_loader.FUTURES_DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        "src.core.exchange.binance_vision.BinanceVisionDownloader.fetch_range_metrics",
+        lambda *_args, **_kwargs: pd.DataFrame(),
+    )
+    monkeypatch.setattr(
+        collector.client,
+        "fetch_open_interest_history",
+        lambda *_args, **_kwargs: pd.DataFrame(),
+    )
+    monkeypatch.setattr(
+        collector.client,
+        "fetch_long_short_ratio_history",
+        lambda *_args, **_kwargs: pd.DataFrame(),
+    )
+
+    out = collector.ensure_metrics_data("BTCUSDT", "2025-01-01", "2025-01-31")
+
+    assert out.empty
+    assert list(out.columns) == list(_normalize_metrics_frame(pd.DataFrame(), symbol="BTCUSDT").columns)
+
+
+def test_merge_metrics_into_ohlcv_uses_available_at_causally(tmp_path: Path) -> None:
+    metrics = pd.DataFrame(
+        {
+            "timestamp": [1711929600000],
+            "datetime": pd.to_datetime(["2024-04-01T00:00:00Z"], utc=True),
+            "available_at": pd.to_datetime(["2024-04-01T00:05:00Z"], utc=True),
+            "symbol": ["BTCUSDT"],
+            "sum_open_interest": [100.0],
+            "sum_open_interest_value": [200.0],
+            "long_short_ratio": [1.1],
+            "top_trader_long_short_ratio": [1.2],
+            "sum_taker_long_short_vol_ratio": [0.9],
+        }
+    )
+    metrics.to_parquet(tmp_path / "BTCUSDT_metrics.parquet", index=False)
+    ohlcv = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(
+                ["2024-04-01T00:00:00Z", "2024-04-01T04:00:00Z"],
+                utc=True,
+            ),
+            "open": [1.0, 1.0],
+            "high": [1.0, 1.0],
+            "low": [1.0, 1.0],
+            "close": [1.0, 1.0],
+            "volume": [1.0, 1.0],
+        }
+    )
+
+    out = merge_metrics_into_ohlcv("BTCUSDT", ohlcv, tmp_path)
+
+    assert pd.isna(out.loc[0, "sum_open_interest"])
+    assert out.loc[1, "sum_open_interest"] == pytest.approx(100.0)
 
 
 # ── OPT-5: Baggage columns dropped in _load_cache ──────────────────────
@@ -415,6 +494,3 @@ def test_collect_and_save_no_redundant_copy(monkeypatch: pytest.MonkeyPatch) -> 
     assert len(result) == 2
     assert result["open"].iloc[0] == 1.0
     assert result["open"].iloc[1] == 2.0
-
-
-

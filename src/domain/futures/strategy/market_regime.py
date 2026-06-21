@@ -365,6 +365,7 @@ def _clone_aligned_with_close(
         kill_mask=aligned.kill_mask,
         basis_2d=aligned.basis_2d,
         oi_2d=aligned.oi_2d,
+        lsr_2d=aligned.lsr_2d,
         adv_usdt_2d=aligned.adv_usdt_2d,
         execution_cost_bps_2d=aligned.execution_cost_bps_2d,
         inference_active_mask=aligned.inference_active_mask,
