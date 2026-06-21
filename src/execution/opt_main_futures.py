@@ -983,19 +983,16 @@ def _run_tiered_l2_study(
         search_space_version="v7",
     )
     signal_batch_fingerprint = _signal_batch_fingerprint(signal_batch)
-    unique_symbols = ",".join(
-        sorted({str(event.symbol) for event in signal_batch.events})
-    ) or "-"
-    _logger.info("  ● [HYPERPARAMETER OPTIMIZATION]")
-    _logger.info("    - Study Name : %s", study_name)
-    _logger.info("    - Config     : %d trials", n_trials)
+    _unique_symbols_list = sorted({str(event.symbol) for event in signal_batch.events})
+    unique_symbols = ",".join(_unique_symbols_list) or "-"
     _logger.info(
-        "    - Provenance : events=%d unique_symbols=%s fp=%s",
-        len(signal_batch.events),
-        unique_symbols,
-        signal_batch_fingerprint[:12],
+        "  ● [STUDY] %s | trials=%d | events=%d | symbols=%d",
+        study_name, n_trials, len(signal_batch.events), len(_unique_symbols_list),
     )
     _logger.info("  ────────────────────────────────────────────────────────────────────────────")
+    _logger.debug(
+        "    symbols=%s fp=%s", unique_symbols, signal_batch_fingerprint[:12],
+    )
 
     try:
         # setup_optuna_storage를 1회만 호출하여 로그 중복 제거
@@ -1006,8 +1003,13 @@ def _run_tiered_l2_study(
                 self.pbar = tqdm(total=total_trials, desc="[L2-OPT]", leave=True)
                 self.best_val = float("-1e6")
 
-            def __call__(self, study: Any, trial: Any) -> None:
-                val = trial.value
+            def __call__(self, study: Any, trial: Any, value: float | None = None) -> None:
+                val = value
+                if val is None:
+                    val = getattr(trial, "value", None)
+                if val is None and hasattr(study, "trials") and len(study.trials) > trial.number:
+                    val = getattr(study.trials[trial.number], "value", None)
+                
                 if val is not None and val > self.best_val:
                     self.best_val = val
                 
@@ -1128,7 +1130,7 @@ def _run_tiered_l2_study(
                                 t_elapsed,
                                 value,
                             )
-                            progress_cb(study, trial)
+                            progress_cb(study, trial, value=value)
                             trial_idx += 1
         finally:
             progress_cb.pbar.close()
@@ -1463,7 +1465,7 @@ def _run_strategy_stage(
             _logger.info("\n>> LAYER 1: PASS -> Proceeding to Layer 2.")
 
             # ── Step B: L2 Optimization Header ──────────────────────────────
-            _logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
+            _logger.info(format_layer_header(2, "OPTUNA TUNING"))
 
             # ── Step C: L2 window 신호 예측 ──────────────────────────────────
             l2_signals = _build_l2_signal_batch(
