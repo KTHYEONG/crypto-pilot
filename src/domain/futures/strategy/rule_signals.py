@@ -516,9 +516,9 @@ def build_rule_signal_panels(
     oi_log_change_6[:6] = np.nan
     oi_build_z_42 = _zscore_2d(oi_log_change_6, window=42)
     lsr_log_z_42 = _zscore_2d(lsr_log, window=42)
-    # UNW warm-up: require 96 bars of continuous valid data for z-score stability
+    # UNW warm-up: require 168 bars of continuous valid data for z-score stability
     positioning_warm = np.ones_like(valid_mask, dtype=np.bool_)
-    positioning_warm[:96] = False
+    positioning_warm[:168] = False
     positioning_valid = (valid_mask & flow_valid & np.isfinite(funding) & oi_valid & lsr_valid
                          & positioning_warm)
     # Shared derived features for new panels
@@ -1439,8 +1439,8 @@ def build_rule_signal_panels(
             turnover_proxy_2d=np.abs(np.diff(_flo_cont_score, axis=0, prepend=0.0)),
             valid_mask_2d=shared_valid,
             metadata={
-                "archetype": "flow_rev",
-                "regime": "flow_trend_continuation",
+                "archetype": "ts_mom",
+                "regime": "flow_momentum_continuation",
                 "edge_hypothesis": (
                     "strong flow supporting ongoing price trend signals "
                     "continuation before exhaustion"
@@ -1472,11 +1472,15 @@ def build_rule_signal_panels(
             datetimes=aligned.datetimes,
             symbols=aligned.symbols,
             signed_score_2d=_loi_score,
-            side_hint_2d=np.zeros_like(close, dtype=np.int8),  # conditioning only, no side
+            side_hint_2d=np.where(
+                _loi_regime_entry,
+                -np.sign(lsr_log_z_42).astype(np.int8),  # fade the crowded side
+                0,
+            ),
             expected_holding_bars=24,
             min_holding_bars=12,
-            stop_atr_mult=0.0,   # never stops: conditioning gate, not trading signal
-            take_profit_atr_mult=0.0,
+            stop_atr_mult=1.5,
+            take_profit_atr_mult=2.0,
             turnover_proxy_2d=np.abs(np.diff(_loi_score, axis=0, prepend=0.0)),
             valid_mask_2d=positioning_valid,
             metadata={
