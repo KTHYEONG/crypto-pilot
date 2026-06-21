@@ -106,6 +106,7 @@ def _empty_candidate_dataset(schema: CandidateFeatureSchema | object) -> Candida
 def _fit_and_predict_single_fold_from_globals(
     fold_idx: int,
     fold: WFFold,
+    is_evidence_fold: bool = False,
 ) -> CandidateFoldOutput:
     """Run a fold using process-global context to avoid large IPC payloads."""
     if (
@@ -122,6 +123,7 @@ def _fit_and_predict_single_fold_from_globals(
         _GLOBAL_ALIGNED,
         _GLOBAL_CFG,
         _GLOBAL_PURGE_BARS,
+        is_evidence_fold=is_evidence_fold,
     )
 
 
@@ -132,11 +134,13 @@ def _fit_and_predict_single_fold(
     aligned: AlignedMarketData,
     cfg: CandidateStrategyConfig,
     purge_bars: int,
+    is_evidence_fold: bool = False,
 ) -> CandidateFoldOutput:
     """Run model fitting and out-of-sample prediction for a single fold."""
     with threadpool_limits(limits=1, user_api="blas"):
         return _fit_and_predict_single_fold_inner(
-            fold_idx, fold, labeled_events, aligned, cfg, purge_bars
+            fold_idx, fold, labeled_events, aligned, cfg, purge_bars,
+            is_evidence_fold=is_evidence_fold,
         )
 
 
@@ -147,6 +151,7 @@ def _fit_and_predict_single_fold_inner(
     aligned: AlignedMarketData,
     cfg: CandidateStrategyConfig,
     purge_bars: int,
+    is_evidence_fold: bool = False,
 ) -> CandidateFoldOutput:
     """Inner fold execution under BLAS single-thread context (called from _fit_and_predict_single_fold)."""
     t_total = time.perf_counter()
@@ -265,10 +270,11 @@ def _fit_and_predict_single_fold_inner(
     n_fit = fit_set.X.shape[0] if fit_set.X is not None else 0
 
     if n_fit < cfg.min_fit_obs or n_fit < 2:
-        _logger.warning(
-            "[WORKFLOW] Fold %d skipped Ensemble (fit=%d < 2)",
-            fold_idx, n_fit
-        )
+        if not is_evidence_fold:
+            _logger.warning(
+                "[WORKFLOW] Fold %d skipped Ensemble (fit=%d < 2)",
+                fold_idx, n_fit,
+            )
         # Prior-only outputs fallback
         n_oos = oos_set.X.shape[0] if oos_set.X is not None else 0
         gate_rep = GateValidationReport(
