@@ -1107,6 +1107,8 @@ def test_flow_trend_continuation_entry_detection() -> None:
     )
     panel = panels[0]
     assert panel.family == "flow_trend_continuation"
+    assert panel.metadata["archetype"] == "ts_mom", \
+        "flow_trend_continuation must route to ts_mom not flow_rev"
     fired = np.flatnonzero(panel.side_hint_2d[:, 0] != 0)
     assert len(fired) >= 1, "expected continuation entries with strong flow + uptrend"
     assert panel.side_hint_2d[fired[0], 0] == 1  # long-only
@@ -1136,17 +1138,25 @@ def test_flow_trend_continuation_rejects_negative_trend() -> None:
 
 
 def test_lsr_oi_regime_filter_activation() -> None:
-    """Scenario 5: lsr_log_z_42 extreme + oi_build_z_42 rising -> regime active."""
-    t, n = 260, 1
+    """Scenario 5: lsr_log_z_42 extreme + oi_build_z_42 rising -> regime active.
+
+    Uses accelerating exponential growth (exp(quadratic)) so that log-change
+    increases over time, keeping z-scores positive after warm-up clears.
+    """
+    t, n = 280, 1
     close = np.full((t, n), 100.0, dtype=np.float64)
     funding = np.full((t, n), 0.0, dtype=np.float64)
     taker_buy = np.full((t, n), 500.0, dtype=np.float64)
     oi = np.full((t, n), 100.0, dtype=np.float64)
-    oi[150:180, 0] = np.linspace(100.0, 5000.0, 30, dtype=np.float64)   # OI building
-    oi[180:, 0] = 5000.0
     lsr = np.full((t, n), 1.0, dtype=np.float64)
-    lsr[150:180, 0] = np.linspace(1.0, 20.0, 30, dtype=np.float64)      # LSR extreme
-    lsr[180:, 0] = 20.0
+    # Accelerating exponential growth from bar 100 to 180
+    ramp = np.arange(80, dtype=np.float64)
+    oi_rise = 100.0 * np.exp(5.0 * (ramp / 80.0) ** 3)
+    lsr_rise = 1.0 * np.exp(4.0 * (ramp / 80.0) ** 3)
+    oi[100:180, 0] = oi_rise
+    lsr[100:180, 0] = lsr_rise
+    oi[180:, 0] = oi_rise[-1]
+    lsr[180:, 0] = lsr_rise[-1]
 
     aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy, oi=oi, lsr=lsr)
     panels = build_rule_signal_panels(
@@ -1157,8 +1167,12 @@ def test_lsr_oi_regime_filter_activation() -> None:
     assert panel.family == "lsr_oi_regime_filter"
     fired = np.flatnonzero(panel.signed_score_2d[:, 0] > 0.0)
     assert len(fired) >= 1, "expected regime activation with extreme LSR + OI building"
-    # Conditioning gate: side_hint should be all zero
-    assert not panel.side_hint_2d[:, 0].any()
+    # Regime filter must produce directional side (fade the crowded LSR side)
+    side_fired = np.flatnonzero(panel.side_hint_2d[:, 0] != 0)
+    assert len(side_fired) >= 1, \
+        "lsr_oi_regime_filter must produce side_hint trades after activation"
+    # LSR is extreme positive (crowded long) -> side = -1 (fade)
+    assert panel.side_hint_2d[fired[0], 0] == -1
 
 
 def test_lsr_oi_regime_filter_below_threshold() -> None:
@@ -1180,12 +1194,36 @@ def test_lsr_oi_regime_filter_below_threshold() -> None:
     assert not panel.signed_score_2d.any(), "below-threshold must produce zero score"
 
 
+def test_lsr_oi_regime_filter_generates_live_events() -> None:
+    """Scenario 5: lsr_oi_regime_filter must produce non-empty events via candidate_panels_to_events."""
+    t, n = 280, 1
+    close = np.full((t, n), 100.0, dtype=np.float64)
+    funding = np.full((t, n), 0.0, dtype=np.float64)
+    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
+    oi = np.full((t, n), 100.0, dtype=np.float64)
+    lsr = np.full((t, n), 1.0, dtype=np.float64)
+    ramp = np.arange(80, dtype=np.float64)
+    oi[100:180, 0] = 100.0 * np.exp(5.0 * (ramp / 80.0) ** 3)
+    lsr[100:180, 0] = 1.0 * np.exp(4.0 * (ramp / 80.0) ** 3)
+    oi[180:, 0] = oi[179, 0]
+    lsr[180:, 0] = lsr[179, 0]
+
+    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy, oi=oi, lsr=lsr)
+    panel = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(candidate_families=("lsr_oi_regime_filter",)),
+    )[0]
+    events = candidate_panels_to_events((panel,), min_abs_score=0.0)
+    assert not events.empty, "lsr_oi_regime_filter must produce events with active side_hint"
+    assert events["family"].str.contains("lsr_oi_regime_filter").any()
+
+
 # ── positioning_unwind warm-up barrier ────────────────────────────────────
 
 
 def test_positioning_unwind_warm_up_barrier() -> None:
-    """Scenario 6: bar_index < 96 blocked even when all features valid."""
-    t, n = 260, 1
+    """Scenario 4: bar_index < 168 blocked even when all features valid."""
+    t, n = 280, 1
     close = np.full((t, n), 100.0, dtype=np.float64)
     close[60:80, :] = np.linspace(100.0, 140.0, 20, dtype=np.float64).reshape(20, 1)
     close[80, 0] = close[79, 0] - 0.5
@@ -1208,10 +1246,10 @@ def test_positioning_unwind_warm_up_barrier() -> None:
         cfg=CandidateStrategyConfig(candidate_families=("positioning_unwind",)),
     )[0]
 
-    # All bars < 96 must have valid_mask_2d=False
-    assert not panel.valid_mask_2d[:96, :].any(), \
-        "bars before warm-up (index < 96) must be masked out"
+    # All bars < 168 must have valid_mask_2d=False
+    assert not panel.valid_mask_2d[:168, :].any(), \
+        "bars before warm-up (index < 168) must be masked out"
 
-    # Bars >= 96 may have valid_mask_2d=True depending on feature availability
-    assert panel.valid_mask_2d[96:, 0].any() or panel.valid_mask_2d[96:, :].any(), \
+    # Bars >= 168 may have valid_mask_2d=True depending on feature availability
+    assert panel.valid_mask_2d[168:, 0].any() or panel.valid_mask_2d[168:, :].any(), \
         "bars after warm-up should be eligible when all features are valid"
