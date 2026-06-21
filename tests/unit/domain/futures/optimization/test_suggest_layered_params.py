@@ -9,6 +9,7 @@ Covers:
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -174,7 +175,7 @@ def test_objective_l1_ic_does_not_call_sharpe() -> None:
     mock_l2.assert_not_called()   # Sharpe 미참조 핵심 검증
 
 
-def test_objective_l2_growth_sets_constraint_attrs() -> None:
+def test_objective_l2_growth_sets_constraint_attrs(caplog: pytest.LogCaptureFixture) -> None:
     gate = SimpleNamespace(
         optuna_constraint_values=(-1.0, -0.1, 0.0, -0.2, -0.3, 0.0, -0.05, -0.01),
         promotion_constraint_values=(-1.0,) * 14,
@@ -205,13 +206,14 @@ def test_objective_l2_growth_sets_constraint_attrs() -> None:
     with (
         patch(
             "src.domain.futures.optimization.workflow._resolve_l2_signal_batch_and_folds",
-            return_value=("signal_batch", (MagicMock(),)),
+            return_value=(MagicMock(events=[]), (MagicMock(),)),
         ),
         patch(
             "src.domain.futures.optimization.workflow.evaluate_l2_trial",
             return_value=evaluation,
-    ),
-):
+        ),
+        caplog.at_level(logging.DEBUG, logger="src.domain.futures.optimization.workflow"),
+    ):
         ctx = TieredContext(
             labeled_events=MagicMock(),
             aligned=MagicMock(),
@@ -233,6 +235,7 @@ def test_objective_l2_growth_sets_constraint_attrs() -> None:
     assert trial.user_attrs["l2_promotion_passed"] is False
     assert trial.user_attrs["l2_promotion_blocker"] == "cagr"
     assert trial.user_attrs["l2_block_log_growth_signature"] == [0.02]
+    assert any("[perf-optuna] Trial" in r.message for r in caplog.records)
 
 
 def test_layer2_constraints_from_trial_reads_saved_values() -> None:
@@ -244,4 +247,5 @@ def test_layer2_constraints_from_trial_reads_saved_values() -> None:
 
     constraints = layer2_constraints_from_trial(trial)
 
-    assert constraints == (0.0, -1.0, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0)
+    assert constraints == (0.0, -1.0, 2.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+

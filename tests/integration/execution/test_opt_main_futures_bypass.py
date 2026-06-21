@@ -93,7 +93,7 @@ def mocked_pipeline_stages(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[An
     def _mock_universe(*a: Any, **kw: Any) -> tuple[Any, ...]:
         calls["universe"].append(a)
         calls["universe"].append(tuple(sorted(kw)))
-        return (["BTCUSDT"], {}, (), (), mock_snapshot, {})
+        return (["BTCUSDT"], {}, (), (), mock_snapshot, {}, {})
 
     def _mock_data(*a: Any, **kw: Any) -> opt_main_futures.DataStageResult:
         calls["data"].append(a)
