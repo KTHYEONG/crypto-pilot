@@ -1231,7 +1231,7 @@ def predict_layer1_signals(
         oos_events=inference_set.event_index,
         cfg=cfg,
     )
-    logger.info(
+    logger.debug(
         "[L2-SIGNAL-PRE] predict_layer1_signals: registry_symbols=%d activation_floor=%.1f start_idx=%d end_idx=%d",
         len(artifact.deployment_registry.by_symbol),
         float(cfg.l1_signal_activation_floor_bps),
