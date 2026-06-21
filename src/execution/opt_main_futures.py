@@ -1063,13 +1063,73 @@ def _run_tiered_l2_study(
 
         progress_cb = L2OptunaProgressCallback(n_trials)
         try:
-            study.optimize(
-                lambda trial: objective_l2_growth(trial, ctx),
-                n_trials=n_trials,
-                n_jobs=1,
-                show_progress_bar=False,
-                callbacks=[progress_cb],
-            )
+            batch_size = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_BATCH_SIZE", 4))
+            if batch_size <= 1:
+                study.optimize(
+                    lambda trial: objective_l2_growth(trial, ctx),
+                    n_trials=n_trials,
+                    n_jobs=1,
+                    show_progress_bar=False,
+                    callbacks=[progress_cb],
+                )
+            else:
+                import multiprocessing
+                from concurrent.futures import ProcessPoolExecutor
+
+                from src.domain.futures.optimization.workflow import (
+                    _evaluate_l2_params,
+                    suggest_layered_params,
+                )
+                
+                max_workers = min(batch_size, multiprocessing.cpu_count())
+                
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    trial_idx = len([t for t in study.trials if t.state.is_finished()])
+                    while trial_idx < n_trials:
+                        current_batch = min(batch_size, n_trials - trial_idx)
+                        batch_trials = []
+                        batch_params = []
+                        
+                        for _ in range(current_batch):
+                            trial = study.ask()
+                            batch_trials.append(trial)
+                            params = suggest_layered_params(trial, "L2", fixed=ctx.fixed_l1_params)
+                            batch_params.append(params)
+                            
+                        # Submit evaluations in parallel
+                        futures = [
+                            executor.submit(_evaluate_l2_params, params, ctx)
+                            for params in batch_params
+                        ]
+                        
+                        # Wait for results and tell in deterministic sorted order
+                        for trial, future in zip(batch_trials, futures, strict=False):
+                            try:
+                                value, attrs, t_elapsed = future.result()
+                            except Exception as exc:
+                                _logger.error(
+                                    "[L2-OPT] Subprocess trial %d failed: %s",
+                                    trial.number,
+                                    exc,
+                                )
+                                value = -1e6
+                                attrs = {}
+                                t_elapsed = 0.0
+                                
+                            for k, v in attrs.items():
+                                trial.set_user_attr(k, v)
+                                
+                            study.tell(trial, value)
+                            
+                            _logger.log(
+                                logging.DEBUG,
+                                "[perf-optuna] Trial %d evaluate_l2_trial took %.4fs | Objective: %.6f",
+                                trial.number,
+                                t_elapsed,
+                                value,
+                            )
+                            progress_cb(study, trial)
+                            trial_idx += 1
         finally:
             progress_cb.pbar.close()
     except Exception as exc:
