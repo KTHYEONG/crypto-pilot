@@ -296,18 +296,16 @@ def _resolve_panel_archetype(panel: CandidateSignalPanel) -> str:
     family = panel.family
     if archetype:
         return archetype
-    if family in {"trend_ma", "trend_donchian", "vol_breakout", "trend_pullback_continuation", "mtf_trend_pullback", "mtf_breakout_retest", "oi_breakout_confirm", "vol_term_structure_gate"}:
+    if family in {"trend_ma", "trend_donchian", "vol_breakout", "trend_pullback_continuation", "mtf_trend_pullback", "mtf_breakout_retest", "vol_term_structure_gate"}:
         return "trend"
     if family in {"dual_momentum", "taker_imbalance_momentum"}:
         return "ts_mom"
-    if family in {"funding_carry", "funding_zscore_carry", "basis_zscore_reversion", "basis_momentum"}:
+    if family in {"funding_carry", "funding_zscore_carry"}:
         return "carry_rev"
     if family in {"residual_reversion"}:
         return "beta_neut"
-    if family in {"oi_price_divergence", "funding_extreme_reversal"}:
+    if family in {"funding_extreme_reversal"}:
         return "unwind"
-    if family in {"taker_exhaustion_reversal"}:
-        return "flow_rev"
     return "mean_rev"
 
 
@@ -415,7 +413,6 @@ def build_rule_signal_panels(
     low = aligned.low_2d
     vol = aligned.volume_2d
     funding = aligned.funding_2d
-    oi = aligned.oi_2d if aligned.oi_2d is not None else np.zeros_like(close)
     signal_active_mask = (
         aligned.inference_active_mask
         if aligned.inference_active_mask is not None
@@ -512,65 +509,7 @@ def build_rule_signal_panels(
         )
     )
 
-    # 2. Trend Donchian
-    donchian_high = _rolling_max_2d(high, window=36)
-    donchian_low = _rolling_min_2d(low, window=36)
-    donchian_score = np.zeros_like(close)
-    donchian_side = np.zeros_like(close, dtype=np.int8)
-    donchian_side[close > donchian_high] = 1
-    donchian_side[close < donchian_low] = -1
-    above = close > donchian_high
-    below = close < donchian_low
-    donchian_score[above] = (close[above] - donchian_high[above]) / atr[above]
-    donchian_score[below] = (close[below] - donchian_low[below]) / atr[below]
-    panels.append(
-        CandidateSignalPanel(
-            family="trend_donchian",
-            variant="donchian_36",
-            params={"lookback": 36},
-            datetimes=aligned.datetimes,
-            symbols=aligned.symbols,
-            signed_score_2d=np.clip(donchian_score, -1.0, 1.0),
-            side_hint_2d=donchian_side,
-            expected_holding_bars=24,
-            min_holding_bars=8,
-            stop_atr_mult=2.0,
-            take_profit_atr_mult=4.0,
-            turnover_proxy_2d=np.abs(np.diff(donchian_score, axis=0, prepend=0.0)),
-            valid_mask_2d=valid_mask,
-        )
-    )
-
-    # 2b. Trend Donchian — donchian_18
-    d18_high = _rolling_max_2d(high, window=18)
-    d18_low = _rolling_min_2d(low, window=18)
-    d18_side = np.zeros_like(close, dtype=np.int8)
-    d18_side[close > d18_high] = 1
-    d18_side[close < d18_low] = -1
-    d18_score = np.zeros_like(close)
-    above_18 = close > d18_high
-    below_18 = close < d18_low
-    d18_score[above_18] = (close[above_18] - d18_high[above_18]) / atr[above_18]
-    d18_score[below_18] = (close[below_18] - d18_low[below_18]) / atr[below_18]
-    panels.append(
-        CandidateSignalPanel(
-            family="trend_donchian",
-            variant="donchian_18",
-            params={"lookback": 18},
-            datetimes=aligned.datetimes,
-            symbols=aligned.symbols,
-            signed_score_2d=np.clip(d18_score, -1.0, 1.0),
-            side_hint_2d=d18_side,
-            expected_holding_bars=12,
-            min_holding_bars=4,
-            stop_atr_mult=1.5,
-            take_profit_atr_mult=3.0,
-            turnover_proxy_2d=np.abs(np.diff(d18_score, axis=0, prepend=0.0)),
-            valid_mask_2d=valid_mask,
-        )
-    )
-
-    # 2c. Trend Donchian — donchian_72
+    # 2. Trend Donchian — donchian_72 only (donchian_18/36 removed: p>0.34, possym<0.50)
     d72_high = _rolling_max_2d(high, window=72)
     d72_low = _rolling_min_2d(low, window=72)
     d72_side = np.zeros_like(close, dtype=np.int8)
@@ -738,34 +677,7 @@ def build_rule_signal_panels(
             take_profit_atr_mult=3.0,
             turnover_proxy_2d=np.abs(np.diff(carry_score, axis=0, prepend=0.0)),
             valid_mask_2d=valid_mask,
-        )
-    )
-
-    # 7. OI Volume Impulse
-    vol_mean = _rolling_mean_2d(vol, window=20)
-    vol_std = _rolling_std_2d(vol, window=20)
-    vol_z = (vol - vol_mean) / np.maximum(vol_std, 1e-12)
-    price_ret = np.diff(close, axis=0, prepend=close[:1]) / np.maximum(close, 1e-12)
-    oi_ret = np.diff(oi, axis=0, prepend=oi[:1]) / np.maximum(oi, 1e-12)
-    impulse_side = np.zeros_like(close, dtype=np.int8)
-    impulse_side[(vol_z > 1.5) & (price_ret > 0.0) & (oi_ret > 0.0)] = 1
-    impulse_side[(vol_z > 1.5) & (price_ret < 0.0) & (oi_ret > 0.0)] = -1
-    impulse_score = vol_z / 3.0 * np.sign(price_ret)
-    panels.append(
-        CandidateSignalPanel(
-            family="oi_volume_impulse",
-            variant="oi_impulse_20",
-            params={"window": 20, "volume_z_entry": 1.5},
-            datetimes=aligned.datetimes,
-            symbols=aligned.symbols,
-            signed_score_2d=np.clip(impulse_score, -1.0, 1.0),
-            side_hint_2d=impulse_side,
-            expected_holding_bars=18,
-            min_holding_bars=6,
-            stop_atr_mult=2.0,
-            take_profit_atr_mult=4.0,
-            turnover_proxy_2d=np.abs(np.diff(impulse_score, axis=0, prepend=0.0)),
-            valid_mask_2d=valid_mask,
+            metadata={"archetype": "carry_rev"},
         )
     )
 
@@ -831,6 +743,7 @@ def build_rule_signal_panels(
                 take_profit_atr_mult=3.0,
                 turnover_proxy_2d=np.abs(np.diff(_fz_score, axis=0, prepend=0.0)),
                 valid_mask_2d=valid_mask,
+                metadata={"archetype": "carry_rev"},
             )
         )
 
@@ -874,52 +787,6 @@ def build_rule_signal_panels(
         )
 
 
-
-    # 15. OI-Volume Confirmed Breakout (F7)
-    # Signal: price range breakout confirmed by concurrent OI impulse + volume z-score.
-    # All three conditions must align: prevents noise-driven breakouts.
-    # Look-ahead guard: donchian channels and volume/OI z-scores are trailing-only.
-    _vol_finite = np.where(np.isfinite(vol), vol, 0.0)
-    _oi_finite = np.where(np.isfinite(oi), oi, 0.0)
-    for _ob_win in [20, 40]:
-        _don_high = _rolling_max_2d(high, window=_ob_win)
-        _don_low = _rolling_min_2d(low, window=_ob_win)
-        _don_mid = (_don_high + _don_low) / 2.0
-        _breakout_up = close >= _don_high * 0.998
-        _breakout_dn = close <= _don_low * 1.002
-        _vol_mean = _rolling_mean_2d(_vol_finite, window=_ob_win)
-        _vol_std = _rolling_std_2d(_vol_finite, window=_ob_win)
-        _vol_z_ob = (_vol_finite - _vol_mean) / np.maximum(_vol_std, 1e-12)
-        _oi_mean = _rolling_mean_2d(_oi_finite, window=_ob_win)
-        _oi_std = _rolling_std_2d(_oi_finite, window=_ob_win)
-        _oi_z_ob = (_oi_finite - _oi_mean) / np.maximum(_oi_std, 1e-12)
-        _confirmed = (_vol_z_ob >= 1.0) & (_oi_z_ob >= 0.5)
-        _ob_mag = _normalize_linear_score(_vol_z_ob, scale=3.0, positive_only=True)
-        _ob_score = np.where(
-            _breakout_up & _confirmed,
-            _ob_mag,
-            np.where(_breakout_dn & _confirmed, -_ob_mag, 0.0),
-        )
-        _ob_side = np.zeros_like(close, dtype=np.int8)
-        _ob_side[_breakout_up & _confirmed] = 1
-        _ob_side[_breakout_dn & _confirmed] = -1
-        panels.append(
-            CandidateSignalPanel(
-                family="oi_volume_confirmed_breakout",
-                variant=f"oib_{_ob_win}",
-                params={"window": _ob_win},
-                datetimes=aligned.datetimes,
-                symbols=aligned.symbols,
-                signed_score_2d=_ob_score.astype(np.float64),
-                side_hint_2d=_ob_side,
-                expected_holding_bars=_ob_win // 4,
-                min_holding_bars=3,
-                stop_atr_mult=1.5,
-                take_profit_atr_mult=3.5,
-                turnover_proxy_2d=np.abs(np.diff(_ob_score.astype(np.float64), axis=0, prepend=0.0)),
-                valid_mask_2d=valid_mask,
-            )
-        )
 
     # 16. Trend Pullback Continuation
     for _fast, _slow, _rsi_lo, _rsi_hi in [(20, 100, 40.0, 65.0), (50, 200, 40.0, 65.0)]:
@@ -1158,160 +1025,6 @@ def build_rule_signal_panels(
             )
         )
 
-    # G3. oi_price_divergence
-    for _opd_win in [40, 80]:
-        _price_ret = np.diff(np.log(np.maximum(close, 1e-12)), axis=0, prepend=0.0)
-        _oi_ret = np.diff(np.log(np.maximum(oi, 1e-12)), axis=0, prepend=0.0)
-        _div_t = np.sign(_price_ret) * -np.sign(_oi_ret)
-        _div_z = _zscore_2d(_div_t, window=_opd_win)
-        
-        _g3_side = np.zeros_like(close, dtype=np.int8)
-        _g3_side[_div_z >= 2.0] = 1
-        _g3_side[_div_z <= -2.0] = -1
-        _g3_score = np.tanh(_div_z / 2.0)
-        
-        panels.append(
-            CandidateSignalPanel(
-                family="oi_price_divergence",
-                variant=f"opd_{_opd_win}",
-                params={"window": _opd_win},
-                datetimes=aligned.datetimes,
-                symbols=aligned.symbols,
-                signed_score_2d=_g3_score,
-                side_hint_2d=_g3_side,
-                expected_holding_bars=8,
-                min_holding_bars=3,
-                stop_atr_mult=1.5,
-                take_profit_atr_mult=2.5,
-                turnover_proxy_2d=np.abs(np.diff(_g3_score, axis=0, prepend=0.0)),
-                valid_mask_2d=valid_mask,
-                metadata={
-                    "archetype": "unwind",
-                    "regime": "price_oi_divergence",
-                    "edge_hypothesis": "price rise on oi drop indicates weak short cover; price fall on oi rise indicates aggressive shorts"
-                }
-            )
-        )
-
-    # G4. oi_breakout_confirm
-    for _ob_win in [20]:
-        def _compute_g4_htf(df_htf):
-            oi_ma = df_htf.rolling(window=10).mean()
-            return np.where(oi_ma.diff() > 0, 1.0, 0.0)
-            
-        _proj_oi_trend = _resample_to_htf_and_project(
-            datetimes_4h=aligned.datetimes, values_4h=oi, htf="12h", agg_method="last", compute_feature_fn=_compute_g4_htf
-        )
-        
-        _don_high_4h = _rolling_max_2d(high, window=_ob_win)
-        _don_low_4h = _rolling_min_2d(low, window=_ob_win)
-        _trig_up = close > _don_high_4h
-        _trig_dn = close < _don_low_4h
-        
-        _g4_side = np.zeros_like(close, dtype=np.int8)
-        _g4_side[(_proj_oi_trend > 0) & _trig_up] = 1
-        _g4_side[(_proj_oi_trend > 0) & _trig_dn] = -1
-        _g4_score = np.where(_trig_up, 1.0, np.where(_trig_dn, -1.0, 0.0))
-        
-        panels.append(
-            CandidateSignalPanel(
-                family="oi_breakout_confirm",
-                variant=f"oib_confirm_{_ob_win}",
-                params={"window": _ob_win},
-                datetimes=aligned.datetimes,
-                symbols=aligned.symbols,
-                signed_score_2d=_g4_score,
-                side_hint_2d=_g4_side,
-                expected_holding_bars=_ob_win // 2,
-                min_holding_bars=4,
-                stop_atr_mult=1.5,
-                take_profit_atr_mult=3.0,
-                turnover_proxy_2d=np.abs(np.diff(_g4_score, axis=0, prepend=0.0)),
-                valid_mask_2d=valid_mask,
-                metadata={
-                    "archetype": "trend",
-                    "regime": "oi_backed_breakout",
-                    "edge_hypothesis": "breakouts confirmed by 12h trend increase in OI ensure institutional positioning backing"
-                }
-            )
-        )
-
-    # G5. basis_zscore_reversion
-    for _bz_win in [48, 96]:
-        _basis = aligned.basis_2d if aligned.basis_2d is not None else np.zeros_like(close)
-        _b_mean = _rolling_mean_2d(_basis, window=_bz_win)
-        _b_std = _rolling_std_2d(_basis, window=_bz_win)
-        _b_z = (_basis - _b_mean) / np.maximum(_b_std, 1e-6)
-        
-        _g5_side = np.zeros_like(close, dtype=np.int8)
-        _g5_side[_b_z >= 2.0] = -1
-        _g5_side[_b_z <= -2.0] = 1
-        _g5_score = np.clip(-_b_z / 2.0, -1.0, 1.0)
-        
-        panels.append(
-            CandidateSignalPanel(
-                family="basis_zscore_reversion",
-                variant=f"bzr_{_bz_win}",
-                params={"window": _bz_win},
-                datetimes=aligned.datetimes,
-                symbols=aligned.symbols,
-                signed_score_2d=_g5_score,
-                side_hint_2d=_g5_side,
-                expected_holding_bars=_bz_win // 4,
-                min_holding_bars=4,
-                stop_atr_mult=1.5,
-                take_profit_atr_mult=2.5,
-                turnover_proxy_2d=np.abs(np.diff(_g5_score, axis=0, prepend=0.0)),
-                valid_mask_2d=valid_mask,
-                metadata={
-                    "archetype": "carry_rev",
-                    "regime": "basis_overextension",
-                    "edge_hypothesis": "extreme futures basis premium/discount reverts to long-term rolling mean"
-                }
-            )
-        )
-
-    # G6. basis_momentum
-    for _bm_win in [10]:
-        _basis = aligned.basis_2d if aligned.basis_2d is not None else np.zeros_like(close)
-        def _compute_g6_htf(df_htf):
-            b_ma = df_htf.rolling(window=_bm_win).mean()
-            return np.sign(b_ma.diff()).fillna(0.0)
-            
-        _proj_basis_slope = _resample_to_htf_and_project(
-            datetimes_4h=aligned.datetimes, values_4h=_basis, htf="1D", agg_method="last", compute_feature_fn=_compute_g6_htf
-        )
-        
-        _price_dir = np.sign(np.diff(close, axis=0, prepend=close[:1]))
-        
-        _g6_side = np.zeros_like(close, dtype=np.int8)
-        _g6_side[(_proj_basis_slope > 0) & (_price_dir > 0)] = 1
-        _g6_side[(_proj_basis_slope < 0) & (_price_dir < 0)] = -1
-        _g6_score = np.tanh(_proj_basis_slope * 2.0)
-        
-        panels.append(
-            CandidateSignalPanel(
-                family="basis_momentum",
-                variant=f"bm_{_bm_win}",
-                params={"window": _bm_win},
-                datetimes=aligned.datetimes,
-                symbols=aligned.symbols,
-                signed_score_2d=_g6_score,
-                side_hint_2d=_g6_side,
-                expected_holding_bars=24,
-                min_holding_bars=6,
-                stop_atr_mult=2.0,
-                take_profit_atr_mult=3.0,
-                turnover_proxy_2d=np.abs(np.diff(_g6_score, axis=0, prepend=0.0)),
-                valid_mask_2d=valid_mask,
-                metadata={
-                    "archetype": "carry_rev",
-                    "regime": "basis_momentum",
-                    "edge_hypothesis": "1d basis momentum bias aligns with 4h price direction for carry momentum follow-through"
-                }
-            )
-        )
-
     # G7. taker_imbalance_momentum
     for _tim_win in [12, 24]:
         _taker_buy = aligned.taker_buy_2d if aligned.taker_buy_2d is not None else np.zeros_like(close)
@@ -1343,53 +1056,6 @@ def build_rule_signal_panels(
                     "archetype": "ts_mom",
                     "regime": "orderflow_momentum",
                     "edge_hypothesis": "order-flow imbalance (CVD slope) persistent trends drive near-term price momentum"
-                }
-            )
-        )
-
-    # G8. taker_exhaustion_reversal
-    for _ter_win in [40]:
-        def _compute_g8_htf(df_htf):
-            ema = df_htf.ewm(span=20, adjust=False).mean()
-            return np.sign(ema.diff()).fillna(0.0)
-            
-        _proj_1d_trend = _resample_to_htf_and_project(
-            datetimes_4h=aligned.datetimes, values_4h=close, htf="1D", agg_method="last", compute_feature_fn=_compute_g8_htf
-        )
-        
-        _taker_buy = aligned.taker_buy_2d if aligned.taker_buy_2d is not None else np.zeros_like(close)
-        _tbr = _taker_buy / np.maximum(vol, 1e-12)
-        
-        _prev_high_3 = _rolling_max_2d(high, window=3)
-        _prev_low_3 = _rolling_min_2d(low, window=3)
-        
-        _long_trig = (_tbr <= 0.35) & (low > _prev_low_3) & (_proj_1d_trend < 0)
-        _short_trig = (_tbr >= 0.65) & (high < _prev_high_3) & (_proj_1d_trend > 0)
-        
-        _g8_side = np.zeros_like(close, dtype=np.int8)
-        _g8_side[_long_trig] = 1
-        _g8_side[_short_trig] = -1
-        _g8_score = np.where(_long_trig, 1.0, np.where(_short_trig, -1.0, 0.0))
-        
-        panels.append(
-            CandidateSignalPanel(
-                family="taker_exhaustion_reversal",
-                variant=f"ter_{_ter_win}",
-                params={"window": _ter_win},
-                datetimes=aligned.datetimes,
-                symbols=aligned.symbols,
-                signed_score_2d=_g8_score,
-                side_hint_2d=_g8_side,
-                expected_holding_bars=8,
-                min_holding_bars=2,
-                stop_atr_mult=1.5,
-                take_profit_atr_mult=2.5,
-                turnover_proxy_2d=np.abs(np.diff(_g8_score, axis=0, prepend=0.0)),
-                valid_mask_2d=valid_mask,
-                metadata={
-                    "archetype": "flow_rev",
-                    "regime": "taker_exhaustion",
-                    "edge_hypothesis": "reversal of aggressive orderflow exhaustion at 1d trend extremities captures swift mean reversion"
                 }
             )
         )

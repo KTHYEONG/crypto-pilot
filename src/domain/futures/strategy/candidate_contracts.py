@@ -64,7 +64,7 @@ class CandidateSignalPanel:
     turnover_proxy_2d: NDArray[np.float64]
     valid_mask_2d: NDArray[np.bool_]
     metadata: dict[str, Any] = field(default_factory=dict)
-    archetype: SignalArchetype | str = "mean_rev"
+    archetype: SignalArchetype | str = ""
     allowed_regimes: tuple[RegimeName | str, ...] = ()
     exit_policies: tuple[SignalExitPolicy, ...] = ()
     regime_code_1d: NDArray[np.int8] | None = None
