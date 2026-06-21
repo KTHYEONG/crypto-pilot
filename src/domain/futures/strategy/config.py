@@ -403,7 +403,10 @@ class CandidateStrategyConfig:
     l1_pair_min_incremental_bps: float = 0.0
     l1_pair_min_incremental_tstat: float = 1.96
     l1_pair_min_positive_fold_ratio: float = 0.60
-    l1_pair_fdr_alpha: float = 1.0
+    l1_pair_fdr_alpha: float = 0.10
+    l1_breakeven_floor_bps: float = _DEFAULT_RT_BPS  # = ExecutionCostModel.round_trip_bps() ≈ 7.5bps
+    l1_fdr_hard_reject: bool = True           # q>alpha → hard reject (binding FDR)
+    l1_conviction_metric: str = "prob_positive"  # "prob_positive" or "lcb_net_bps"
     l1_pair_alpha: float = 0.05
     l1_pair_power: float = 0.80
     l1_pair_mdes_multiplier: float = 0.5
