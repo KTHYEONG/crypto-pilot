@@ -1,0 +1,111 @@
+import logging
+from unittest.mock import MagicMock, patch
+
+import numpy as np
+import pytest
+
+from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
+from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
+from src.domain.futures.strategy.tiered_workflow.pipeline import run_l2_awf, run_tiered_pipeline
+
+
+def test_run_l2_awf_cache_timing_log(caplog: pytest.LogCaptureFixture) -> None:
+    """Verify that build_l2_simulation_cache timing is logged at DEBUG/PERF level."""
+    caplog.set_level(logging.DEBUG)
+
+    signal_batch = MagicMock()
+    aligned = MagicMock()
+    aligned.symbols = ("BTC",)
+    aligned.close_2d = np.ones((10, 1), dtype=float)
+    aligned.datetimes = np.array([f"2024-01-{i:02d}" for i in range(1, 11)], dtype="datetime64[ns]")
+
+    from src.domain.futures.strategy.walk_forward import WFFold
+    awf_folds = (WFFold(fit_start=0, fit_end=5, cal_start=0, cal_end=5, oos_start=5, oos_end=10),)
+    config = Layer2AllocationConfig()
+    caps = PortfolioCaps()
+
+    with patch("src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation") as mock_sim, \
+         patch("src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache") as mock_cache:
+
+        mock_cache.return_value = MagicMock()
+        mock_sim_result = MagicMock()
+        mock_sim_result.rets_hybrid = [0.0] * 10
+        mock_sim_result.rets_baseline_ew = [0.0] * 10
+        mock_sim_result.rets_baseline = [0.0] * 10
+        mock_sim_result.fit_rets_hybrid = [0.0] * 10
+        mock_sim_result.all_turnovers = [0.0] * 10
+        mock_sim_result.all_gross_exposures = [0.0] * 10
+        mock_sim_result.all_net_exposures = [0.0] * 10
+        mock_sim_result.cap_saturation_count = 0
+        mock_sim_result.rebalance_count = 10
+        mock_sim_result.friction_pass_total = 10
+        mock_sim_result.signal_total = 20
+        mock_sim_result.block_rets_hybrid = [[0.0] * 10]
+        mock_sim_result.block_rets_baseline = [[0.0] * 10]
+        mock_sim_result.fold_rets_hybrid = [[0.0] * 10]
+        mock_sim_result.trade_count = 5
+        mock_sim_result.support_leak_count = 0
+        mock_sim.return_value = mock_sim_result
+
+        run_l2_awf(
+            signal_batch=signal_batch,
+            aligned=aligned,
+            awf_folds=awf_folds,
+            config=config,
+            caps=caps,
+            tf="4h",
+            verbose=False,
+        )
+
+    # Validate timing log presence
+    assert any("[perf-tiered] build_l2_simulation_cache took" in rec.message for rec in caplog.records)
+
+
+def test_run_tiered_pipeline_l2_prediction_timing_log(caplog: pytest.LogCaptureFixture) -> None:
+    """Verify that predict_layer1_signals timing is logged during run_tiered_pipeline L2 phase."""
+    caplog.set_level(logging.DEBUG)
+
+    labeled_events = MagicMock()
+    aligned = MagicMock()
+    aligned.datetimes = np.array([f"2024-01-{i:02d}" for i in range(1, 11)], dtype="datetime64[ns]")
+    aligned.symbols = ("BTC",)
+
+    window = MagicMock()
+    window.l2_start = "2024-01-01"
+    window.holdout_start = "2024-01-05"
+    window.end_date_value = "2024-01-10"
+
+    cfg = MagicMock()
+
+    l1_result = MagicMock()
+    l1_result.gate_passed = True
+    l1_result.inference_artifact = MagicMock()
+    l1_result.symbol_lifecycle = None
+
+    l2_params = {"l2_deploy_leverage": 1.0}
+    caps = PortfolioCaps()
+
+    with patch("src.domain.futures.strategy.tiered_workflow.pipeline.predict_layer1_signals") as mock_pred, \
+         patch("src.domain.futures.strategy.tiered_workflow.build_l2_simulation_folds") as mock_folds, \
+         patch("src.domain.futures.strategy.tiered_workflow.run_l2_awf") as mock_l2:
+
+        mock_pred.return_value = MagicMock()
+        mock_folds.return_value = (MagicMock(),)
+        mock_l2.return_value = MagicMock()
+
+        run_tiered_pipeline(
+            labeled_events=labeled_events,
+            aligned=aligned,
+            window=window,
+            cfg=cfg,
+            l1_params={},
+            l2_params=l2_params,
+            caps=caps,
+            tf="4h",
+            verbose=False,
+            l1_result_override=l1_result,
+            target_phase="l2",
+        )
+
+    # Validate timing log presence
+    assert any("[perf-tiered] predict_layer1_signals took" in rec.message for rec in caplog.records)
