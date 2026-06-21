@@ -160,3 +160,18 @@
   - `lsr_oi_regime_filter`는 LSR+OI 극단 국면을 식별하여 conditioning score로 전달, BTN 경로를 통해 TRD/MRV 간접 게이트 역할.
 - **Status:** Accepted
 
+## L1-ADR-022: FLO 회귀 수정 — flow_trend_continuation archetype 재분류 및 lsr_oi_regime_filter 활성화 (2026-06-21)
+- **Delta:**
+  - `flow_trend_continuation` archetype `flow_rev`→`ts_mom`, regime `flow_trend_continuation`→`flow_momentum_continuation`으로 변경.
+  - `lsr_oi_regime_filter` side_hint 기본값 `0`→`np.where(_loi_regime_entry, -np.sign(lsr_log_z_42).astype(np.int8), 0)`, stop_atr_mult `0.0`→`1.5`, take_profit_atr_mult `0.0`→`2.0`으로 변경하여 conditioning gate에서 tradable signal로 전환.
+  - `positioning_warm[:96]`→`[:168]`으로 warm-up barrier 확장.
+  - FLO 결과: `+18.9 → +28.5 bps` (+9.6 bps), TOTAL `+54.5 → +54.3 bps` (noise).
+- **Rationale:**
+  - L1 최종 실행 결과 FLO가 +28.7→+12.1로 -16.6 bps 회귀. 원인은 `flow_trend_continuation`이 `flow_rev`(FLO) archetype에 배정되어 momentum 신호가 reversion archetype을 오염시킨 것. `ts_mom`(TMO)으로 재분류하여 reversion dilution 해소.
+  - `lsr_oi_regime_filter` side_hint=0이면 BTN 신호 조건부 gate(score만 있고 방향 없음)로 이벤트 생성 불가 → -np.sign(lsr_log_z_42) 방향성 부여로 활성화.
+  - `positioning_warm[:168]`: longest z-score window(168)로 정합, z-score pre-warm 완전 보장.
+- **Edge Cases:**
+  - archetype 변경으로 TMO `+52.7→+50.3 bps`(-2.4) 일부 dilution 발생, FLO 복구를 위한 자연스러운 trade-off.
+  - `-np.sign(lsr_log_z_42)`: lsr_log_z_42=0일 때 sign=0 → side_hint=0 유지, 조건부 미활성 보존.
+- **Status:** Accepted
+
