@@ -275,6 +275,9 @@ class CandidateStrategyConfig:
         "btc_regime_pullback",
         "mtf_breakout_retest",
         "bollinger_reversion",
+        "funding_term_structure_carry",
+        "flow_trend_continuation",
+        "lsr_oi_regime_filter",
     )
     # Conditioning axis: "auto" (default) picks archetype_regime vs archetype_only via
     # in-fold purged validation Rank IC gain — data-driven, fold-adaptive.
@@ -370,6 +373,9 @@ class CandidateStrategyConfig:
         "funding_flow_unwind",
         "flow_exhaustion_reversal",
         "vol_term_structure_gate",
+        "funding_term_structure_carry",
+        "flow_trend_continuation",
+        "lsr_oi_regime_filter",
     )
     # Execution cost model (SSOT; replaces flat 24bps)
     maker_fee_bps: float = 2.0
