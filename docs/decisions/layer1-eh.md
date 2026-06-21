@@ -1,5 +1,10 @@
 # Layer 1 Architectural Decisions
 
+## L1-ADR-014: Archetype 라벨 의미 정합화 + Evidence Fold 스킵 로그 억제 (2026-06-21)
+- **Delta:** `_log_ensemble_diagnostics`의 `standard_keys` 5종 → `archetype_labels` 7종으로 교체. `mean_rev→MRV`, `ts_mom→TMO`, `unwind→UNW`, `beta_neut→BTN`, `carry_rev→CRY`, `flow_rev→FLO` 명시(첫글자 fallback 의존 제거). `is_evidence_fold` 파라미터로 evidence fold warm-up skip WARNING 억제.
+- **Rationale:** `mean_rev↔ts_mom`이 `MOM↔MRV`로 의미 정반대 swap되어 관측성 결함 유발. Fold #0~1 skip WARNING은 evidence fold 정상 동작(warm-up)이므로 노이즈. 수치 불변, 라벨·로그만 수정.
+- **Edge Cases:** 7종 외 신규 archetype은 첫글자 fallback 유지. `is_evidence_fold=False` 기본값으로 outer fold 동작 불변.
+
 ## L1-ADR-013: L1/Universe 파이프라인 루프 불변식 호이스팅 + 벡터화 (2026-06-20)
 - **Delta:** (OPT-1) `align_data_maps` state_cube/readiness_cube 조인 루프에서 `np.searchsorted`/`positions`/`t_valid`/`p_valid` 를 심볼 루프 밖으로 호이스팅. pandas 3.0 bug fix: `calendar.as_unit("ns").asi8` 로 nanosecond epoch 강제. (OPT-2) `inject_membership_masks_into_maps` 진입 시 `_normalize_timeline()` 헬퍼로 timeline 1회 정규화 후 `build_membership_mask_bundle` 에 전달 (104회→1회). (OPT-3) `run_l1_nested_swf` 의 `volatility_2d` 컬럼 루프를 `pd.DataFrame.rolling().std(ddof=1)` 단일 행렬 호출로 대체. (OPT-6) `load_futures_data_maps_for_symbols` 말미 도달불가 중복 `return` 1줄 제거.
 - **Rationale:** PERF 실측(52 syms, 617K events): searchsorted N=52→1, timeline 정규화 104→1. 수치 결과·공개 시그니처 불변. pandas 3.0.2 `.asi8` microsecond 버그는 pre-existing silent production bug였음(unit 미강제 시 1000× 스케일 오류).
