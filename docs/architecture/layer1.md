@@ -55,6 +55,12 @@ Generates vectorized rule panels with archetype/regime contexts, filtered throug
 - `[ENS]` numbers = archetype-pooled EB-shrunken mean edge (bps), NOT per-symbol averages.
 - Unknown archetypes (not in the above 7) fall back to first-letter uppercase.
 
+**Flow-Aware Panels**
+- `_safe_taker_imbalance_2d` converts taker buy volume into a cell-level imbalance cache and marks invalid cells as `False` without collapsing mixed-valid rows.
+- `build_rule_signal_panels` reuses shared flow caches across `taker_imbalance_momentum`, `funding_flow_carry`, `funding_flow_unwind`, and `flow_exhaustion_reversal`.
+- `funding_flow_carry` routes to `carry_rev`, `funding_flow_unwind` routes to `unwind`, and `flow_exhaustion_reversal` routes to `flow_rev`.
+- Flow feature cache includes `flow_imbalance`, `flow_mean_6`, `flow_z_24`, `funding_z_96`, `funding_z_168`, `ret_1`, `ret_12`, and `ret_z_48`.
+
 # 3. Architecture Flow
 
 ```mermaid
