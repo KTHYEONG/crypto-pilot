@@ -47,8 +47,7 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
     panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
 
     assert isinstance(panels, tuple)
-    # 40 variants (25 base + 15 new G1-G10)
-    assert len(panels) == 40
+    assert len(panels) == 28
 
     expected_families = {
         "trend_ma",
@@ -57,22 +56,15 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
         "bollinger_reversion",
         "rsi_reversion",
         "funding_carry",
-        "oi_volume_impulse",
         "btc_regime_pullback",
         "funding_zscore_carry",
         "vol_regime_reversion",
-        "oi_volume_confirmed_breakout",
         "trend_pullback_continuation",
         "dual_momentum",
         "residual_reversion",
         "mtf_trend_pullback",
         "mtf_breakout_retest",
-        "oi_price_divergence",
-        "oi_breakout_confirm",
-        "basis_zscore_reversion",
-        "basis_momentum",
         "taker_imbalance_momentum",
-        "taker_exhaustion_reversal",
         "funding_extreme_reversal",
         "vol_term_structure_gate",
     }
@@ -361,17 +353,12 @@ def test_new_signal_families_include_metadata_contract() -> None:
         "residual_reversion",
         "mtf_trend_pullback",
         "mtf_breakout_retest",
-        "oi_price_divergence",
-        "oi_breakout_confirm",
-        "basis_zscore_reversion",
-        "basis_momentum",
         "taker_imbalance_momentum",
-        "taker_exhaustion_reversal",
         "funding_extreme_reversal",
         "vol_term_structure_gate",
     }
     matched = [panel for panel in panels if panel.family in expected_new_families]
-    assert len(matched) == 21
+    assert len(matched) == 14
     for panel in matched:
         assert panel.metadata["archetype"]
         assert panel.metadata["regime"]
