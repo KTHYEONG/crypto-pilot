@@ -13,7 +13,20 @@ from email.utils import parsedate_to_datetime
 from typing import cast
 from xml.etree import ElementTree
 
+import numpy as np
 import pandas as pd
+
+_METRICS_CANONICAL_COLUMNS: tuple[str, ...] = (
+    "timestamp",
+    "datetime",
+    "available_at",
+    "symbol",
+    "sum_open_interest",
+    "sum_open_interest_value",
+    "long_short_ratio",
+    "top_trader_long_short_ratio",
+    "sum_taker_long_short_vol_ratio",
+)
 
 
 class BinanceVisionDownloader:
@@ -217,51 +230,9 @@ class BinanceVisionDownloader:
         try:
             self.logger.info("Downloading Vision metrics: %s @ %s", symbol, date_str)
             df = self._fetch_zip_csv(url)
-
-            if not df.empty and not any(isinstance(col, str) for col in df.columns):
-                expected_cols = [
-                    "create_time",
-                    "symbol",
-                    "sum_open_interest",
-                    "sum_open_interest_value",
-                    "count_toptrader_long_short_ratio",
-                    "sum_toptrader_long_short_ratio",
-                    "count_long_short_ratio",
-                    "sum_taker_long_short_vol_ratio",
-                ]
-                if len(df.columns) >= len(expected_cols):
-                    rename_map = {
-                        src_col: expected_cols[idx]
-                        for idx, src_col in enumerate(df.columns[: len(expected_cols)])
-                    }
-                    df = df.rename(columns=rename_map)
-
-            # 컬럼명 정규화
-            # Binance Vision metrics columns:
-            # create_time, symbol, sum_open_interest, sum_open_interest_value,
-            # count_toptrader_long_short_ratio, sum_toptrader_long_short_ratio,
-            # count_long_short_ratio, sum_taker_long_short_vol_ratio
-
-            if "create_time" in df.columns:
-                df["datetime"] = pd.to_datetime(df["create_time"], utc=True)
-                df["timestamp"] = df["datetime"].astype("int64") // 10**6
-
-            rename_map = {
-                "sum_toptrader_long_short_ratio": "top_trader_long_short_ratio",
-                "count_long_short_ratio": "long_short_ratio",
-            }
-            df.rename(columns=rename_map, inplace=True)
-
-            # Numeric conversion for key columns
-            numeric_cols = [
-                "sum_open_interest", "top_trader_long_short_ratio", "long_short_ratio",
-                "sum_open_interest_value", "sum_taker_long_short_vol_ratio"
-            ]
-            for col in numeric_cols:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-
-            return df
+            if df.empty:
+                return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
+            return self._normalize_metrics_frame(symbol=symbol, frame=df)
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 # 404 is expected for dates before listing or missing data
@@ -269,7 +240,7 @@ class BinanceVisionDownloader:
             else:
                 msg = f"HTTP Error fetching Vision data for {symbol} on {date_str}: {e}"
                 self.logger.warning(msg)
-            return pd.DataFrame()
+            return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
         except Exception as e:
             # [Fix] 에러 로그 출력 시 인코딩 안전성 확보
             try:
@@ -278,7 +249,7 @@ class BinanceVisionDownloader:
                 sym_log = "EncodingError"
             msg = f"Unexpected error fetching Vision data for {sym_log} on {date_str}: {e}"
             self.logger.warning(msg)
-            return pd.DataFrame()
+            return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
 
     def fetch_range_metrics(
         self, symbol: str, start_date: datetime, end_date: datetime
@@ -413,9 +384,75 @@ class BinanceVisionDownloader:
             Binance Vision daily/metrics 경로: SYMBOL-metrics-YYYY-MM-DD.zip
 
         """
-        date_str = date.strftime("%Y-%m-%d")
-        filename = f"{symbol}-metrics-{date_str}.zip"
-        return self._fetch_zip_by_path("daily", "metrics", symbol, filename)
+        return self.fetch_daily_metrics(symbol, date)
+
+    def _normalize_metrics_frame(self, symbol: str, frame: pd.DataFrame) -> pd.DataFrame:
+        """Vision metrics를 canonical schema로 정규화한다."""
+        if frame is None or frame.empty:
+            return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
+
+        df = frame.copy()
+        df = df.loc[:, ~df.columns.duplicated(keep="first")]
+        if not any(isinstance(col, str) for col in df.columns):
+            expected_cols = [
+                "create_time",
+                "symbol",
+                "sum_open_interest",
+                "sum_open_interest_value",
+                "count_toptrader_long_short_ratio",
+                "sum_toptrader_long_short_ratio",
+                "count_long_short_ratio",
+                "sum_taker_long_short_vol_ratio",
+            ]
+            if len(df.columns) >= len(expected_cols):
+                df = df.rename(
+                    columns={
+                        src_col: expected_cols[idx]
+                        for idx, src_col in enumerate(df.columns[: len(expected_cols)])
+                    }
+                )
+
+        rename_map = {
+            "create_time": "timestamp",
+            "count_long_short_ratio": "long_short_ratio",
+            "sum_toptrader_long_short_ratio": "top_trader_long_short_ratio",
+        }
+        df = df.rename(columns=rename_map)
+        if "symbol" not in df.columns:
+            df["symbol"] = symbol
+        else:
+            df["symbol"] = df["symbol"].fillna(symbol).astype(str)
+
+        if "timestamp" not in df.columns:
+            return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
+        df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
+        df = df.dropna(subset=["timestamp"])
+        if df.empty:
+            return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
+        df["timestamp"] = df["timestamp"].astype("int64")
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True, errors="coerce")
+        df = df.dropna(subset=["datetime"])
+        if df.empty:
+            return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
+        df["available_at"] = df["datetime"] + pd.Timedelta(minutes=5)
+
+        for col in (
+            "sum_open_interest",
+            "sum_open_interest_value",
+            "long_short_ratio",
+            "top_trader_long_short_ratio",
+            "sum_taker_long_short_vol_ratio",
+        ):
+            if col not in df.columns:
+                df[col] = np.nan
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        return (
+            df.loc[:, list(_METRICS_CANONICAL_COLUMNS)]
+            .sort_values("timestamp")
+            .drop_duplicates(subset=["timestamp"], keep="last")
+            .reset_index(drop=True)
+        )
 
 
 # ---------------------------------------------------------------------------

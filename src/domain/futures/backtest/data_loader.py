@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import threading
+from collections.abc import Iterable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,119 @@ from src.core.settings import FUTURES_DATA_DIR
 from src.core.utils.utils import setup_logger
 
 _logger = logging.getLogger("DataCollector")
+
+_METRICS_CANONICAL_COLUMNS: tuple[str, ...] = (
+    "timestamp",
+    "datetime",
+    "available_at",
+    "symbol",
+    "sum_open_interest",
+    "sum_open_interest_value",
+    "long_short_ratio",
+    "top_trader_long_short_ratio",
+    "sum_taker_long_short_vol_ratio",
+)
+_METRICS_NUMERIC_COLUMNS: tuple[str, ...] = (
+    "sum_open_interest",
+    "sum_open_interest_value",
+    "long_short_ratio",
+    "top_trader_long_short_ratio",
+    "sum_taker_long_short_vol_ratio",
+)
+_METRICS_RELEASE_LAG = pd.Timedelta(minutes=5)
+_METRICS_MERGE_TOLERANCE = pd.Timedelta(hours=6)
+
+
+def _empty_metrics_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
+
+
+def _normalize_metrics_frame(frame: pd.DataFrame, *, symbol: str) -> pd.DataFrame:
+    """Return the canonical, unique, UTC metrics schema."""
+    if frame is None or frame.empty:
+        return _empty_metrics_frame()
+
+    df = frame.copy()
+    df = df.loc[:, ~df.columns.duplicated(keep="first")]
+    rename_map = {
+        "create_time": "timestamp",
+        "open_interest": "sum_open_interest",
+        "oi": "sum_open_interest",
+        "open_interest_value": "sum_open_interest_value",
+        "global_long_short_ratio": "long_short_ratio",
+        "sum_toptrader_long_short_ratio": "top_trader_long_short_ratio",
+        "count_long_short_ratio": "long_short_ratio",
+    }
+    df = df.rename(columns=rename_map)
+    if "symbol" not in df.columns:
+        df["symbol"] = symbol
+    else:
+        df["symbol"] = df["symbol"].fillna(symbol).astype(str)
+
+    if "timestamp" not in df.columns and "datetime" in df.columns:
+        dt = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+        df["timestamp"] = dt.astype("int64") // 10**6
+    if "timestamp" not in df.columns:
+        return _empty_metrics_frame()
+
+    df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
+    df = df.dropna(subset=["timestamp"])
+    if df.empty:
+        return _empty_metrics_frame()
+    df["timestamp"] = df["timestamp"].astype("int64")
+    df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True, errors="coerce")
+    df = df.dropna(subset=["datetime"])
+    if df.empty:
+        return _empty_metrics_frame()
+    if "available_at" in df.columns:
+        df["available_at"] = pd.to_datetime(df["available_at"], utc=True, errors="coerce")
+    else:
+        df["available_at"] = df["datetime"] + _METRICS_RELEASE_LAG
+    df["available_at"] = df["available_at"].fillna(df["datetime"] + _METRICS_RELEASE_LAG)
+    for col in _METRICS_NUMERIC_COLUMNS:
+        if col not in df.columns:
+            df[col] = np.nan
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return (
+        df.loc[:, list(_METRICS_CANONICAL_COLUMNS)]
+        .sort_values(["timestamp", "available_at"])
+        .drop_duplicates(subset=["timestamp"], keep="last")
+        .reset_index(drop=True)
+    )
+
+
+def _coalesce_metrics_frames(
+    frames: Iterable[pd.DataFrame],
+    *,
+    symbol: str,
+) -> pd.DataFrame:
+    """Coalesce complementary OI/LSR rows by timestamp without dropping fields."""
+    normalized = [
+        _normalize_metrics_frame(frame, symbol=symbol)
+        for frame in frames
+        if frame is not None and not frame.empty
+    ]
+    if not normalized:
+        return _empty_metrics_frame()
+
+    combined = pd.concat(normalized, ignore_index=True, sort=False)
+    if combined.empty:
+        return _empty_metrics_frame()
+    combined = combined.sort_values(["timestamp", "available_at"]).reset_index(drop=True)
+    grouped = (
+        combined.groupby("timestamp", as_index=False)
+        .agg(
+            {
+                "datetime": "last",
+                "available_at": "last",
+                "symbol": "last",
+                **dict.fromkeys(_METRICS_NUMERIC_COLUMNS, "last"),
+            }
+        )
+        .reset_index(drop=True)
+    )
+    return _normalize_metrics_frame(grouped, symbol=symbol)
 
 
 def _normalize_funding_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -1099,50 +1213,76 @@ class DataCollector:
         path = FUTURES_DATA_DIR / f"{safe_symbol}_metrics.parquet"
         req_start = pd.to_datetime(start_date, utc=True)
         req_end = pd.to_datetime(end_date, utc=True)
-
-        cache_df = pd.DataFrame()
+        cache_df = _empty_metrics_frame()
         if path.exists():
-            cache_df = pd.read_parquet(path)
-
-        # simplified logic for Vision/API collection
-        api_cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=28)
-        new_parts = []
-        if cache_df.empty or cache_df["datetime"].min() > req_start:
-            v_start = req_start
-            v_end = min(
-                req_end, api_cutoff, cache_df["datetime"].min() if not cache_df.empty else req_end
-            )
-            if v_start < v_end:
-                v_df = BinanceVisionDownloader().fetch_range_metrics(
-                    symbol.replace("/", ""), v_start, v_end
+            try:
+                cache_df = _normalize_metrics_frame(pd.read_parquet(path), symbol=symbol)
+            except Exception as exc:
+                self.logger.warning(
+                    "metrics cache read failed; fallback to rebuild symbol=%s error=%s",
+                    symbol,
+                    type(exc).__name__,
                 )
-                if not v_df.empty:
-                    v_df = self._normalize_df(v_df)
-                    new_parts.append(v_df)
+                cache_df = _empty_metrics_frame()
+
+        api_cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=28)
+        vision_floor = pd.Timestamp("2020-09-01", tz="UTC")
+        new_parts: list[pd.DataFrame] = []
+        vision = BinanceVisionDownloader()
+
+        if cache_df.empty or cache_df["datetime"].min() > req_start:
+            vision_end = min(
+                req_end,
+                api_cutoff,
+                cache_df["datetime"].min() if not cache_df.empty else req_end,
+            )
+            vision_start = max(req_start, vision_floor)
+            if vision_start < vision_end:
+                vision_df = vision.fetch_range_metrics(symbol.replace("/", ""), vision_start, vision_end)
+                if not vision_df.empty:
+                    new_parts.append(vision_df)
 
         if req_end >= api_cutoff:
-            a_start = max(
+            recent_start = max(
                 req_start,
                 api_cutoff,
                 cache_df["datetime"].max() if not cache_df.empty else api_cutoff,
             )
-            if a_start < req_end:
-                since = int(a_start.timestamp() * 1000)
-                oi = self.client.fetch_open_interest_history(symbol, "1h", since)
-                if not oi.empty:
-                    oi = self._normalize_df(oi)
-                    new_parts.append(oi)
+            if recent_start < req_end:
+                since = int(recent_start.timestamp() * 1000)
+                until = int(req_end.timestamp() * 1000)
+                oi = self.client.fetch_open_interest_history(symbol, "4h", since, until=until)
+                lsr = self.client.fetch_long_short_ratio_history(symbol, "4h", since, until=until)
+                merged_recent = _coalesce_metrics_frames([oi, lsr], symbol=symbol)
+                if not merged_recent.empty:
+                    new_parts.append(merged_recent)
 
-        if new_parts:
-            combined = (
-                pd.concat([cache_df, *new_parts])
-                .drop_duplicates(subset=["timestamp"])
-                .sort_values("timestamp")
+        combined = _coalesce_metrics_frames([cache_df, *new_parts], symbol=symbol)
+        if not combined.empty:
+            temp_path = path.with_suffix(".tmp.parquet")
+            combined.to_parquet(temp_path, index=False)
+            temp_path.replace(path)
+            coverage = {
+                f"{col}_coverage": float(combined[col].notna().mean())
+                for col in _METRICS_NUMERIC_COLUMNS
+            }
+            self._save_meta(
+                {
+                    self._meta_key(symbol, "metrics"): {
+                        "earliest_available": str(combined["available_at"].min()),
+                        "latest_available": str(combined["available_at"].max()),
+                        "earliest_timestamp": str(combined["datetime"].min()),
+                        "latest_timestamp": str(combined["datetime"].max()),
+                        **coverage,
+                    }
+                }
             )
-            combined = self._normalize_df(combined)
-            combined.to_parquet(path, index=False)
             cache_df = combined
+        else:
+            cache_df = _empty_metrics_frame()
 
+        if cache_df.empty:
+            return cache_df
         mask = (cache_df["datetime"] >= req_start) & (cache_df["datetime"] <= req_end)
         return cache_df.loc[mask].copy()
 
@@ -1327,28 +1467,46 @@ def merge_funding_into_ohlcv(symbol: str, df: pd.DataFrame, data_dir: Path) -> p
     return out
 
 
-def merge_metrics_into_ohlcv(symbol: str, df: pd.DataFrame, data_dir: Path) -> pd.DataFrame:
+def merge_metrics_into_ohlcv(
+    symbol: str,
+    df: pd.DataFrame,
+    data_dir: Path,
+    *,
+    tolerance: pd.Timedelta = _METRICS_MERGE_TOLERANCE,
+) -> pd.DataFrame:
     """Merge metrics (OI, LSR) into OHLCV."""
     if df is None or df.empty:
         return df.copy() if df is not None else pd.DataFrame()
     path = Path(data_dir) / f"{symbol.replace('/', '_')}_metrics.parquet"
     if not path.exists():
-        return df
+        return df.copy()
 
-    m_df = pd.read_parquet(path)
-    if m_df.empty:
-        return df
+    metrics_df = _normalize_metrics_frame(pd.read_parquet(path), symbol=symbol)
+    if metrics_df.empty:
+        return df.copy()
 
-    m_df["timestamp"] = pd.to_datetime(m_df["datetime"]).astype("int64") // 10**6
-    df["timestamp"] = pd.to_datetime(df["datetime"]).astype("int64") // 10**6
-    exclude = ["timestamp", "datetime", "create_time", "symbol"]
-    cols = [c for c in m_df.columns if c not in exclude]
-    return pd.merge_asof(
-        df.sort_values("timestamp"),
-        m_df[["timestamp", *cols]].sort_values("timestamp"),
-        on="timestamp",
+    out = df.copy()
+    out["timestamp"] = pd.to_datetime(out["datetime"], utc=True, errors="coerce")
+    out = out.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    out["symbol"] = symbol
+
+    metrics_prepared = metrics_df.copy()
+    metrics_prepared = metrics_prepared.sort_values("available_at").reset_index(drop=True)
+    metrics_prepared["symbol"] = symbol
+    metrics_prepared = metrics_prepared.drop_duplicates(subset=["available_at", "symbol"], keep="last")
+    metrics_prepared = metrics_prepared.rename(columns={"available_at": "metrics_available_at"})
+
+    merged = pd.merge_asof(
+        out,
+        metrics_prepared,
+        left_on="timestamp",
+        right_on="metrics_available_at",
+        by="symbol",
         direction="backward",
+        tolerance=tolerance,
+        allow_exact_matches=True,
     )
+    return merged.drop(columns=["symbol"], errors="ignore")
 
 
 def fetch_premiumindex_bulk(

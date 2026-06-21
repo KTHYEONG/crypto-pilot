@@ -9,6 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +17,16 @@ from typing import Any, cast
 
 import ccxt
 import pandas as pd
+
+_METRICS_API_COLUMNS: tuple[str, ...] = (
+    "timestamp",
+    "datetime",
+    "available_at",
+    "symbol",
+    "sum_open_interest",
+    "sum_open_interest_value",
+    "long_short_ratio",
+)
 
 # Project Root Setup
 try:
@@ -25,7 +36,7 @@ try:
 except IndexError:
     pass
 
-from src.core.settings import API_READ_TIMEOUT
+from src.core.settings import API_READ_TIMEOUT  # noqa: E402
 
 
 @dataclass(slots=True, frozen=True)
@@ -875,32 +886,53 @@ class BinanceClient:
         timeframe: str = "4h",
         since: int | None = None,
         limit: int = 500,
+        *,
+        until: int | None = None,
     ) -> pd.DataFrame:
         """Fetch historical Open Interest from Binance API (Recent 30 days limit)."""
         try:
-            rows = self.exchange.fetch_open_interest_history(symbol, timeframe, since, limit)
+            params: dict[str, Any] = {}
+            if until is not None:
+                params["endTime"] = int(until)
+            rows = self.exchange.fetch_open_interest_history(
+                symbol,
+                timeframe,
+                since,
+                limit,
+                params=params,
+            )
             if not rows:
-                return pd.DataFrame()
+                return pd.DataFrame(columns=list(_METRICS_API_COLUMNS))
             df = pd.DataFrame(rows)
-            # CCXT usually returns 'openInterestAmount' or similar. 
-            # We map the most common Binance field names to our standard 'sum_open_interest'.
-            possible_cols = ["openInterestAmount", "openInterest", "amount"]
-            for col in possible_cols:
-                if col in df.columns:
-                    df["sum_open_interest"] = df[col].astype(float)
-                    break
-            
-            if "sum_open_interest" not in df.columns:
-                self.logger.warning(
-                    f"No OI column found in API response for {symbol}. "
-                    f"Cols: {df.columns.tolist()}"
-                )
-                return pd.DataFrame()
-
-            return df[["timestamp", "sum_open_interest"]]
+            df["timestamp"] = pd.to_numeric(df.get("timestamp"), errors="coerce")
+            df["sum_open_interest"] = pd.to_numeric(
+                df.get("openInterestAmount", df.get("openInterest")),
+                errors="coerce",
+            )
+            df["sum_open_interest_value"] = pd.to_numeric(
+                df.get("openInterestValue"),
+                errors="coerce",
+            )
+            df["symbol"] = symbol
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True, errors="coerce")
+            df["available_at"] = df["datetime"] + pd.Timedelta(minutes=5)
+            df["long_short_ratio"] = pd.NA
+            df = df.dropna(subset=["timestamp", "datetime", "sum_open_interest"])
+            if df.empty:
+                return pd.DataFrame(columns=list(_METRICS_API_COLUMNS))
+            return (
+                df.loc[:, list(_METRICS_API_COLUMNS)]
+                .sort_values("timestamp")
+                .drop_duplicates(subset=["timestamp"], keep="last")
+                .reset_index(drop=True)
+            )
         except Exception as e:
-            self.logger.warning(f"Failed to fetch Open Interest for {symbol}: {e}")
-            return pd.DataFrame()
+            self.logger.warning(
+                "Failed to fetch Open Interest for %s: %s",
+                symbol,
+                type(e).__name__,
+            )
+            return pd.DataFrame(columns=list(_METRICS_API_COLUMNS))
 
     def fetch_long_short_ratio_history(
         self,
@@ -908,31 +940,50 @@ class BinanceClient:
         timeframe: str = "4h",
         since: int | None = None,
         limit: int = 500,
+        *,
+        until: int | None = None,
     ) -> pd.DataFrame:
         """Fetch historical Long/Short Ratio from Binance API (Recent 30 days limit)."""
         try:
-            rows = self.exchange.fetch_long_short_ratio_history(symbol, timeframe, since, limit)
+            params: dict[str, Any] = {"type": "globalAccount"}
+            if until is not None:
+                params["endTime"] = int(until)
+            rows = self.exchange.fetch_long_short_ratio_history(
+                symbol,
+                timeframe,
+                since,
+                limit,
+                params=params,
+            )
             if not rows:
-                return pd.DataFrame()
+                return pd.DataFrame(columns=list(_METRICS_API_COLUMNS))
             df = pd.DataFrame(rows)
-            # Map possible LSR columns to our standard 'top_trader_long_short_ratio'
-            possible_cols = ["longShortRatio", "ratio", "value"]
-            for col in possible_cols:
-                if col in df.columns:
-                    df["top_trader_long_short_ratio"] = df[col].astype(float)
-                    break
-
-            if "top_trader_long_short_ratio" not in df.columns:
-                self.logger.warning(
-                    f"No LSR column found in API response for {symbol}. "
-                    f"Cols: {df.columns.tolist()}"
-                )
-                return pd.DataFrame()
-
-            return df[["timestamp", "top_trader_long_short_ratio"]]
+            df["timestamp"] = pd.to_numeric(df.get("timestamp"), errors="coerce")
+            df["long_short_ratio"] = pd.to_numeric(
+                df.get("longShortRatio", df.get("ratio")),
+                errors="coerce",
+            )
+            df["symbol"] = symbol
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True, errors="coerce")
+            df["available_at"] = df["datetime"] + pd.Timedelta(minutes=5)
+            df["sum_open_interest"] = pd.NA
+            df["sum_open_interest_value"] = pd.NA
+            df = df.dropna(subset=["timestamp", "datetime", "long_short_ratio"])
+            if df.empty:
+                return pd.DataFrame(columns=list(_METRICS_API_COLUMNS))
+            return (
+                df.loc[:, list(_METRICS_API_COLUMNS)]
+                .sort_values("timestamp")
+                .drop_duplicates(subset=["timestamp"], keep="last")
+                .reset_index(drop=True)
+            )
         except Exception as e:
-            self.logger.warning(f"Failed to fetch Long/Short Ratio for {symbol}: {e}")
-            return pd.DataFrame()
+            self.logger.warning(
+                "Failed to fetch Long/Short Ratio for %s: %s",
+                symbol,
+                type(e).__name__,
+            )
+            return pd.DataFrame(columns=list(_METRICS_API_COLUMNS))
 
     def fetch_global_long_short_ratio_history(
         self,
@@ -940,33 +991,17 @@ class BinanceClient:
         timeframe: str = "4h",
         since: int | None = None,
         limit: int = 500,
+        *,
+        until: int | None = None,
     ) -> pd.DataFrame:
         """Fetch historical Global Long/Short Ratio from Binance API."""
-        try:
-            # fapiPrivateGetGlobalLongShortAccountRatio or public equivalent
-            market = self.exchange.market(symbol)
-            params = {
-                "symbol": market["id"],
-                "period": timeframe,
-                "limit": limit
-            }
-            if since:
-                params["startTime"] = since
-            
-            rows = self.exchange.fapiPublicGetGlobalLongShortAccountRatio(params)
-            if not rows:
-                return pd.DataFrame()
-            df = pd.DataFrame(rows)
-            if "longShortRatio" in df.columns:
-                df["long_short_ratio"] = df["longShortRatio"].astype(float)
-            
-            if "long_short_ratio" not in df.columns:
-                return pd.DataFrame()
-                
-            return df[["timestamp", "long_short_ratio"]]
-        except Exception as e:
-            self.logger.warning(f"Failed to fetch Global Long/Short Ratio for {symbol}: {e}")
-            return pd.DataFrame()
+        return self.fetch_long_short_ratio_history(
+            symbol,
+            timeframe,
+            since,
+            limit,
+            until=until,
+        )
 
     def place_order(
         self,
@@ -1279,17 +1314,14 @@ class BinanceClient:
                     price=limit_p, params=build_params({"timeInForce": "IOC"}, order_tag="T2")
                 )
                 filled = register_fill(order_t2, req_amt_t2)
-                if filled > 0:
-                    if remaining_amount <= 0 or (filled / req_amt_t2) >= 0.999:
-                        self.logger.info(f"Tier 2 Filled ({filled}/{req_amt_t2})")
-                        return cast("dict[str, Any] | None", order_t2)
+                if filled > 0 and (remaining_amount <= 0 or (filled / req_amt_t2) >= 0.999):
+                    self.logger.info(f"Tier 2 Filled ({filled}/{req_amt_t2})")
+                    return cast("dict[str, Any] | None", order_t2)
             except Exception as e:
                 self.logger.error(f"❌ Tier 2 Failed: {e}")
                 if "timeout" in str(e).lower():
-                    try:
+                    with suppress(Exception):
                         self.exchange.cancel_all_orders(symbol)
-                    except Exception:
-                        ...
 
         if remaining_amount > 0:
             if deadline_reached():
