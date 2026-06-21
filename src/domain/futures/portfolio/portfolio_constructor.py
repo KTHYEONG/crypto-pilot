@@ -651,6 +651,7 @@ def project_all_caps(
     caps: PortfolioCaps | None = None,
     *,
     support_mask: np.ndarray | None = None,
+    allow_vol_upscale: bool = False,
 ) -> np.ndarray:
     """5-cap 투영: gross, per_symbol, net, beta, vol_target.
 
@@ -662,6 +663,9 @@ def project_all_caps(
         sigma_port: 1-bar realized 포트폴리오 vol.
         bars_per_year: 연율화 factor.
         caps: PortfolioCaps 제약.
+        support_mask: 활성 포지션 마스크 [N]. None이면 |w|>0 기준 자동 결정.
+        allow_vol_upscale: True이면 Cap5에서 vol 양방향 정규화(확대 허용).
+            False(기본)이면 기존 동작(축소만 허용).
 
     Returns:
         투영된 weight vector, shape [N].
@@ -731,7 +735,7 @@ def project_all_caps(
     ann_vol = float(sigma_port) * math.sqrt(max(float(bars_per_year), 1e-9))
     if ann_vol > 1e-12 and caps.target_ann_vol is not None and caps.target_ann_vol > 1e-12:
         vol_scale = caps.target_ann_vol / ann_vol
-        out = out * min(vol_scale, 1.0)  # 축소만 허용 (확대 금지)
+        out = out * vol_scale if allow_vol_upscale else out * min(vol_scale, 1.0)
         out = np.where(support, out, 0.0)
 
     # 최종 per_symbol 재확인
@@ -875,7 +879,9 @@ def diagonal_kelly_weights(
     sigma_port = float(np.sqrt(float(np.dot(w_clipped_est**2, var))))
 
     w_capped: NDArray[np.float64] = project_all_caps(
-        w_raw, beta, sigma_port, bars_per_year, effective_caps, support_mask=support
+        w_raw, beta, sigma_port, bars_per_year, effective_caps,
+        support_mask=support,
+        allow_vol_upscale=True,   # L2 unit-vol 정규화 양방향
     )
 
     # 4. No-trade band: |Δw_i| < no_trade_band → 이전 비중 유지
