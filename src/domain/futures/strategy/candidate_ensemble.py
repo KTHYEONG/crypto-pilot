@@ -21,6 +21,23 @@ _logger = logging.getLogger(__name__)
 _GROSS_TARGET_COLUMNS = ("gross_return_bps", "gross_event_bps", "gross_fwd_bps")
 _LEGACY_TARGET_COLUMNS = ("net_return_bps", "net_event_bps", "edge_after_hurdle_bps")
 
+# Archetype label map (module-level SSOT shared by ENS log + diagnostics)
+ARCHETYPE_LABELS: dict[str, str] = {
+    "trend":     "TRD",
+    "ts_mom":    "TMO",
+    "mean_rev":  "MRV",
+    "carry_rev": "CRY",
+    "flow_rev":  "FLO",
+    "unwind":    "UNW",
+    "beta_neut": "BTN",
+}
+_EXPECTED_ARCHETYPES: frozenset[str] = frozenset(ARCHETYPE_LABELS)
+
+# Diagnostic thresholds (observability only, NOT gates)
+_DIAG_MIN_SYMBOL_N: int = 30       # per-symbol 판정 최소 표본
+_DIAG_HARMFUL_EDGE_BPS: float = 0.0
+_DIAG_MAX_SYMBOL_ROWS: int = 20    # family당 per-symbol 출력 상한
+
 
 @dataclass(frozen=True, slots=True)
 class RegimeConditionalEnsemble:
@@ -221,26 +238,16 @@ def _log_ensemble_diagnostics(
     elif mode_short == "Only":
         mode_short = "Arch-Only"
 
-    # All 7 archetypes with semantically accurate 3-letter codes (insertion order = display order)
-    archetype_labels: dict[str, str] = {
-        "trend":     "TRD",
-        "ts_mom":    "TMO",
-        "mean_rev":  "MRV",
-        "carry_rev": "CRY",
-        "flow_rev":  "FLO",
-        "unwind":    "UNW",
-        "beta_neut": "BTN",
-    }
     arch_parts = []
-    for k, label in archetype_labels.items():
+    for k, label in ARCHETYPE_LABELS.items():
         if k in arch_mu:
             v = arch_mu[k]
             sign = "✅" if v >= 0.0 else "❌"
             arch_parts.append(f"{label}:{v:>+6.1f}{sign}")
 
-    # Fallback: unknown archetypes not in archetype_labels (first-letter)
+    # Fallback: unknown archetypes not in ARCHETYPE_LABELS (first-letter)
     for k, v in arch_mu.items():
-        if k not in archetype_labels:
+        if k not in ARCHETYPE_LABELS:
             label = k[0].upper()
             sign = "✅" if v >= 0.0 else "❌"
             arch_parts.append(f"{label}:{v:.1f}{sign}")
@@ -263,6 +270,90 @@ def _log_ensemble_diagnostics(
         "chosen": chosen,
         "num_valid_regimes": num_valid_regimes,
     }
+
+
+def _log_signal_symbol_diagnostics(
+    *,
+    frame: pd.DataFrame,
+    target_column: str,
+    min_obs: int,
+    tag: str,
+) -> None:
+    """Emit DEBUG-level per-(archetype x family x symbol) edge breakdown.
+
+    Fires on ENS-FINAL only (guard at call-site). DEBUG off -> no-op (O(1)).
+    """
+    if not _logger.isEnabledFor(logging.DEBUG):
+        return
+    if frame.empty or target_column not in frame.columns:
+        return
+
+    has_sym = "symbol" in frame.columns
+
+    # (A) absent archetype WARNING — catches CRY/UNW data-wiring gaps
+    present_archetypes = set(frame["archetype"].dropna().astype(str).unique())
+    missing = _EXPECTED_ARCHETYPES - present_archetypes
+    if missing:
+        _logger.warning("[ENS-DIAG] absent archetypes (0 events): %s", sorted(missing))
+
+    # (B) family rollup worst-first
+    group_cols = ["archetype", "family"] if "family" in frame.columns else ["archetype"]
+    grouped = frame.groupby(group_cols, sort=False, dropna=False)
+
+    rows: list[tuple[str, str, int, float, float, int, float, bool]] = []
+    for keys, grp in grouped:
+        if isinstance(keys, str):
+            arch, fam = keys, ""
+        else:
+            arch, fam = str(keys[0]), str(keys[1]) if len(keys) > 1 else ""
+        vals = grp[target_column].to_numpy(dtype=np.float64)
+        vals = vals[np.isfinite(vals)]
+        n = len(vals)
+        if n == 0:
+            continue
+        mean_edge = float(np.mean(vals))
+        pos_rate = float(np.mean(vals > 0.0))
+        nsym = int(grp["symbol"].nunique()) if has_sym else 0
+        if has_sym:
+            sym_means = grp.groupby("symbol")[target_column].mean()
+            pos_sym = float(np.mean(sym_means.to_numpy(dtype=np.float64) > 0.0))
+        else:
+            pos_sym = float("nan")
+        review = (n >= min_obs) and (
+            mean_edge <= _DIAG_HARMFUL_EDGE_BPS
+            or (has_sym and np.isfinite(pos_sym) and pos_sym < 0.5)
+        )
+        rows.append((arch, fam, n, mean_edge, pos_rate, nsym, pos_sym, review))
+
+    rows.sort(key=lambda r: r[3])  # worst mean_edge first
+
+    _logger.debug("[ENS-DIAG] family rollup (full-sample, worst-first):")
+    for arch, fam, n, mean_edge, pos_rate, nsym, pos_sym, review in rows:
+        label = ARCHETYPE_LABELS.get(arch, arch[:3].upper())
+        pos_sym_str = f"{pos_sym:.2f}" if np.isfinite(pos_sym) else "n/a"
+        flag = " ⚠REVIEW" if review else ""
+        _logger.debug(
+            "  [%s] %-28s n=%6d mean=%+7.1f pos=%.2f nsym=%2d possym=%s%s",
+            label, fam, n, mean_edge, pos_rate, nsym, pos_sym_str, flag,
+        )
+
+    # (C) per-symbol detail for ⚠REVIEW families only
+    if has_sym and "family" in frame.columns:
+        for arch, fam, _n, _mean, _pos, _nsym, _possym, review in rows:
+            if not review:
+                continue
+            sub = frame[(frame["archetype"] == arch) & (frame["family"] == fam)]
+            sm = sub.groupby("symbol")[target_column].agg(["size", "mean"])
+            sm = sm[sm["size"] >= _DIAG_MIN_SYMBOL_N].sort_values("mean")
+            if sm.empty:
+                continue
+            label = ARCHETYPE_LABELS.get(arch, arch[:3].upper())
+            _logger.debug("[ENS-DIAG] %s/%s per-symbol (worst-first):", label, fam)
+            for sym, row_data in sm.head(_DIAG_MAX_SYMBOL_ROWS).iterrows():
+                _logger.debug(
+                    "    %-14s n=%4d mean=%+7.1f",
+                    sym, int(row_data["size"]), float(row_data["mean"]),
+                )
 
 
 def _compute_eb_shrinkage_k(
@@ -804,6 +895,15 @@ def fit_regime_conditional_ensemble(
         tag=tag,
     )
     ensemble_diag["target_contract"] = _target_contract_kind(train_events)
+
+    # Per-(archetype x family x symbol) DEBUG diagnostics -- ENS-FINAL only
+    if tag == "ENS-FINAL":
+        _log_signal_symbol_diagnostics(
+            frame=frame,
+            target_column=target_column,
+            min_obs=max(cfg.min_candidate_obs, 100),
+            tag=tag,
+        )
 
     # P0: Regime Lift Proof Gate
     lift_proof: RegimeLiftProofResult | None = None
