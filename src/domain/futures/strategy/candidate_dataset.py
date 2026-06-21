@@ -791,68 +791,22 @@ def build_candidate_dataset(
 
     # Check bypass flag
     if not skip_features:
-        # Pre-calculate features
+        # Pre-calculate features — warm 2D cache first, then read from it
+        _warm_aligned_2d_cache(aligned, cfg)
+        cache = _ALIGNED_FEATURE_CACHE[id(aligned)]
+
         close = aligned.close_2d
-        volume = aligned.volume_2d
-        funding = aligned.funding_2d
         t_len, _ = close.shape
 
-        aligned_id = id(aligned)
-        if aligned_id not in _ALIGNED_FEATURE_CACHE:
-            _ALIGNED_FEATURE_CACHE[aligned_id] = {"__aligned_ref__": aligned}
-        cache = _ALIGNED_FEATURE_CACHE[aligned_id]
-        if cache.get("__aligned_ref__") is not aligned:
-            cache.clear()
-            cache["__aligned_ref__"] = aligned
-
-        if "sym_ret_1" not in cache:
-            sym_ret_1 = (close[1:] / np.maximum(close[:-1], 1e-12)) - 1.0
-            sym_ret_5 = (close[5:] / np.maximum(close[:-5], 1e-12)) - 1.0
-
-            log_ret_2d = np.zeros_like(close)
-            log_ret_2d[1:] = np.diff(np.log(np.maximum(close, 1e-12)), axis=0)
-            sym_vol_20 = pd.DataFrame(log_ret_2d).rolling(20, min_periods=1).std(ddof=0).values
-
-            sym_volume_z20 = _rolling_robust_z_2d(volume, window=20)
-
-            f_df = pd.DataFrame(funding)
-            funding_z20 = _rolling_robust_z_2d(funding, window=20)
-
-            # 2. Market-wide technicals (T)
-            mkt_ret_1 = np.nanmean(sym_ret_1, axis=1)
-            # pad to T length
-            mkt_ret_1_padded = np.zeros(t_len)
-            mkt_ret_1_padded[1:] = mkt_ret_1
-
-            mkt_vol_20 = np.nanmean(sym_vol_20, axis=1)
-
-            ret20_2d = np.zeros_like(close)
-            ret20_2d[20:] = (close[20:] / np.maximum(close[:-20], 1e-12)) - 1.0
-            mkt_dispersion_20 = np.nanstd(ret20_2d, axis=1)
-            market_breadth_20 = np.nanmean(ret20_2d > 0, axis=1)
-
-            cache["sym_ret_1"] = sym_ret_1
-            cache["sym_ret_5"] = sym_ret_5
-            cache["sym_vol_20"] = sym_vol_20
-            cache["sym_volume_z20"] = sym_volume_z20
-            cache["funding_z20"] = funding_z20
-            cache["mkt_ret_1_padded"] = mkt_ret_1_padded
-            cache["mkt_vol_20"] = mkt_vol_20
-            cache["mkt_dispersion_20"] = mkt_dispersion_20
-            cache["market_breadth_20"] = market_breadth_20
-            cache["ret20_2d"] = ret20_2d
-        else:
-            sym_ret_1 = cache["sym_ret_1"]
-            sym_ret_5 = cache["sym_ret_5"]
-            sym_vol_20 = cache["sym_vol_20"]
-            sym_volume_z20 = cache["sym_volume_z20"]
-            funding_z20 = cache["funding_z20"]
-            mkt_ret_1_padded = cache["mkt_ret_1_padded"]
-            mkt_vol_20 = cache["mkt_vol_20"]
-            mkt_dispersion_20 = cache["mkt_dispersion_20"]
-            market_breadth_20 = cache["market_breadth_20"]
-            ret20_2d = cache["ret20_2d"]
-            f_df = pd.DataFrame(funding)
+        sym_ret_1 = cache["sym_ret_1"]
+        sym_ret_5 = cache["sym_ret_5"]
+        sym_vol_20 = cache["sym_vol_20"]
+        sym_volume_z20 = cache["sym_volume_z20"]
+        funding_z20 = cache["funding_z20"]
+        mkt_ret_1_padded = cache["mkt_ret_1_padded"]
+        mkt_vol_20 = cache["mkt_vol_20"]
+        mkt_dispersion_20 = cache["mkt_dispersion_20"]
+        market_breadth_20 = cache["market_breadth_20"]
 
         # 3. Market state features (if enabled)
         btc_ret_1_ser = np.zeros(t_len)
@@ -865,46 +819,17 @@ def build_candidate_dataset(
         funding_cs_z_2d = np.zeros_like(close)
 
         if cfg.market_state_features_enabled:
-            if "btc_ret_1_ser" not in cache:
-                btc_idx = _btc_symbol_index(aligned.symbols)
-                btc_close = close[:, btc_idx]
-                btc_close = close[:, btc_idx]
-                btc_ret_1_ser[1:] = (btc_close[1:] / np.maximum(btc_close[:-1], 1e-12)) - 1.0
-                btc_ret_5_ser[5:] = (btc_close[5:] / np.maximum(btc_close[:-5], 1e-12)) - 1.0
-                btc_ma20 = pd.Series(btc_close).rolling(20, min_periods=1).mean().values
-                btc_ma100 = pd.Series(btc_close).rolling(100, min_periods=1).mean().values
-                btc_trend_20_100_ser = (btc_ma20 >= btc_ma100).astype(float)
+            btc_ret_1_ser = cache["btc_ret_1_ser"]
+            btc_ret_5_ser = cache["btc_ret_5_ser"]
+            btc_trend_20_100_ser = cache["btc_trend_20_100_ser"]
+            mkt_vol_z120_ser = cache["mkt_vol_z120_ser"]
+            mkt_disp_z120_ser = cache["mkt_disp_z120_ser"]
+            symbol_ret_rank_20_2d = cache["symbol_ret_rank_20_2d"]
+            symbol_vol_z120_2d = cache["symbol_vol_z120_2d"]
+            funding_cs_z_2d = cache["funding_cs_z_2d"]
 
-                mkt_vol_df = pd.Series(mkt_vol_20).fillna(0)
-                mkt_vol_z120_ser = _rolling_robust_z_1d(mkt_vol_df.to_numpy(dtype=np.float64), window=120)
-
-                mkt_disp_df = pd.Series(mkt_dispersion_20).fillna(0)
-                mkt_disp_z120_ser = _rolling_robust_z_1d(mkt_disp_df.to_numpy(dtype=np.float64), window=120)
-
-                symbol_ret_rank_20_2d[20:] = pd.DataFrame(ret20_2d[20:]).rank(axis=1, pct=True).values
-
-                sv_df = pd.DataFrame(sym_vol_20).fillna(0)
-                symbol_vol_z120_2d = _rolling_robust_z_2d(sv_df.to_numpy(dtype=np.float64), window=120)
-
-                funding_cs_z_2d = _cross_sectional_robust_z_2d(f_df.fillna(0).to_numpy(dtype=np.float64))
-
-                cache["btc_ret_1_ser"] = btc_ret_1_ser
-                cache["btc_ret_5_ser"] = btc_ret_5_ser
-                cache["btc_trend_20_100_ser"] = btc_trend_20_100_ser
-                cache["mkt_vol_z120_ser"] = mkt_vol_z120_ser
-                cache["mkt_disp_z120_ser"] = mkt_disp_z120_ser
-                cache["symbol_ret_rank_20_2d"] = symbol_ret_rank_20_2d
-                cache["symbol_vol_z120_2d"] = symbol_vol_z120_2d
-                cache["funding_cs_z_2d"] = funding_cs_z_2d
-            else:
-                btc_ret_1_ser = cache["btc_ret_1_ser"]
-                btc_ret_5_ser = cache["btc_ret_5_ser"]
-                btc_trend_20_100_ser = cache["btc_trend_20_100_ser"]
-                mkt_vol_z120_ser = cache["mkt_vol_z120_ser"]
-                mkt_disp_z120_ser = cache["mkt_disp_z120_ser"]
-                symbol_ret_rank_20_2d = cache["symbol_ret_rank_20_2d"]
-                symbol_vol_z120_2d = cache["symbol_vol_z120_2d"]
-                funding_cs_z_2d = cache["funding_cs_z_2d"]
+        overlay_ctx = cache["overlay_ctx"]
+        regime_ctx = cache["regime_ctx"]
 
         # 4. Identity Features
         id_matrix: NDArray[np.float32] | None = None
@@ -953,14 +878,6 @@ def build_candidate_dataset(
         # 6. Assembly
         event_t = events["entry_idx"].values - 1
         valid_mask = event_t >= 20
-        
-        if "overlay_ctx" not in cache:
-            cache["overlay_ctx"] = compute_risk_overlay(aligned=aligned)
-        overlay_ctx = cache["overlay_ctx"]
-
-        if "regime_ctx" not in cache:
-            cache["regime_ctx"] = compute_market_regime_context(aligned=aligned)
-        regime_ctx = cache["regime_ctx"]
 
         x_mat = np.zeros((len(events), len(feature_names)), dtype=np.float32)
         feat_to_idx = {n: i for i, n in enumerate(feature_names)}
@@ -1349,20 +1266,99 @@ def build_candidate_dataset(
     )
 
 
+def _warm_aligned_2d_cache(aligned: AlignedMarketData, cfg: CandidateStrategyConfig) -> None:
+    """부모 프로세스에서 2D rolling 배열 + overlay/regime ctx만 캐시에 저장.
+
+    per-event x_mat 조립 없이 캐시 워밍만 수행. fork COW 상속 전에 호출.
+    """
+    global _ALIGNED_FEATURE_CACHE
+    if aligned.close_2d.size == 0:
+        return
+    close = aligned.close_2d
+    volume = aligned.volume_2d
+    funding = aligned.funding_2d
+    t_len, _ = close.shape
+
+    aligned_id = id(aligned)
+    if aligned_id not in _ALIGNED_FEATURE_CACHE:
+        _ALIGNED_FEATURE_CACHE[aligned_id] = {"__aligned_ref__": aligned}
+    cache = _ALIGNED_FEATURE_CACHE[aligned_id]
+    if cache.get("__aligned_ref__") is not aligned:
+        cache.clear()
+        cache["__aligned_ref__"] = aligned
+
+    if "sym_ret_1" not in cache:
+        sym_ret_1 = (close[1:] / np.maximum(close[:-1], 1e-12)) - 1.0
+        sym_ret_5 = (close[5:] / np.maximum(close[:-5], 1e-12)) - 1.0
+        log_ret_2d = np.zeros_like(close)
+        log_ret_2d[1:] = np.diff(np.log(np.maximum(close, 1e-12)), axis=0)
+        sym_vol_20 = pd.DataFrame(log_ret_2d).rolling(20, min_periods=1).std(ddof=0).values
+        sym_volume_z20 = _rolling_robust_z_2d(volume, window=20)
+        f_df = pd.DataFrame(funding)
+        funding_z20 = _rolling_robust_z_2d(funding, window=20)
+        mkt_ret_1 = np.nanmean(sym_ret_1, axis=1)
+        mkt_ret_1_padded = np.zeros(t_len)
+        mkt_ret_1_padded[1:] = mkt_ret_1
+        mkt_vol_20 = np.nanmean(sym_vol_20, axis=1)
+        ret20_2d = np.zeros_like(close)
+        ret20_2d[20:] = (close[20:] / np.maximum(close[:-20], 1e-12)) - 1.0
+        mkt_dispersion_20 = np.nanstd(ret20_2d, axis=1)
+        market_breadth_20 = np.nanmean(ret20_2d > 0, axis=1)
+        cache["sym_ret_1"] = sym_ret_1
+        cache["sym_ret_5"] = sym_ret_5
+        cache["sym_vol_20"] = sym_vol_20
+        cache["sym_volume_z20"] = sym_volume_z20
+        cache["funding_z20"] = funding_z20
+        cache["mkt_ret_1_padded"] = mkt_ret_1_padded
+        cache["mkt_vol_20"] = mkt_vol_20
+        cache["mkt_dispersion_20"] = mkt_dispersion_20
+        cache["market_breadth_20"] = market_breadth_20
+        cache["ret20_2d"] = ret20_2d
+    else:
+        sym_vol_20 = cache["sym_vol_20"]
+        mkt_vol_20 = cache["mkt_vol_20"]
+        mkt_dispersion_20 = cache["mkt_dispersion_20"]
+        ret20_2d = cache["ret20_2d"]
+        f_df = pd.DataFrame(funding)
+
+    if cfg.market_state_features_enabled and "btc_ret_1_ser" not in cache:
+        btc_ret_1_ser = np.zeros(t_len)
+        btc_ret_5_ser = np.zeros(t_len)
+        btc_idx = _btc_symbol_index(aligned.symbols)
+        btc_close = close[:, btc_idx]
+        btc_ret_1_ser[1:] = (btc_close[1:] / np.maximum(btc_close[:-1], 1e-12)) - 1.0
+        btc_ret_5_ser[5:] = (btc_close[5:] / np.maximum(btc_close[:-5], 1e-12)) - 1.0
+        btc_ma20 = pd.Series(btc_close).rolling(20, min_periods=1).mean().values
+        btc_ma100 = pd.Series(btc_close).rolling(100, min_periods=1).mean().values
+        btc_trend_20_100_ser = (btc_ma20 >= btc_ma100).astype(float)
+        mkt_vol_df = pd.Series(mkt_vol_20).fillna(0)
+        mkt_vol_z120_ser = _rolling_robust_z_1d(mkt_vol_df.to_numpy(dtype=np.float64), window=120)
+        mkt_disp_df = pd.Series(mkt_dispersion_20).fillna(0)
+        mkt_disp_z120_ser = _rolling_robust_z_1d(mkt_disp_df.to_numpy(dtype=np.float64), window=120)
+        symbol_ret_rank_20_2d = np.zeros_like(close)
+        symbol_ret_rank_20_2d[20:] = pd.DataFrame(ret20_2d[20:]).rank(axis=1, pct=True).values
+        sv_df = pd.DataFrame(sym_vol_20).fillna(0)
+        symbol_vol_z120_2d = _rolling_robust_z_2d(sv_df.to_numpy(dtype=np.float64), window=120)
+        funding_cs_z_2d = _cross_sectional_robust_z_2d(f_df.fillna(0).to_numpy(dtype=np.float64))
+        cache["btc_ret_1_ser"] = btc_ret_1_ser
+        cache["btc_ret_5_ser"] = btc_ret_5_ser
+        cache["btc_trend_20_100_ser"] = btc_trend_20_100_ser
+        cache["mkt_vol_z120_ser"] = mkt_vol_z120_ser
+        cache["mkt_disp_z120_ser"] = mkt_disp_z120_ser
+        cache["symbol_ret_rank_20_2d"] = symbol_ret_rank_20_2d
+        cache["symbol_vol_z120_2d"] = symbol_vol_z120_2d
+        cache["funding_cs_z_2d"] = funding_cs_z_2d
+
+    if "overlay_ctx" not in cache:
+        cache["overlay_ctx"] = compute_risk_overlay(aligned=aligned)
+    if "regime_ctx" not in cache:
+        cache["regime_ctx"] = compute_market_regime_context(aligned=aligned)
+
+
 def prime_aligned_feature_cache(
     labeled_events: pd.DataFrame,
     aligned: AlignedMarketData,
     cfg: CandidateStrategyConfig,
 ) -> None:
-    """부모 프로세스에서 전체 범위에 대한 피처 계산을 1회 수행하여 캐시를 사전 프라이밍합니다."""
-    if aligned.close_2d.size == 0:
-        return
-    build_candidate_dataset(
-        labeled_events=labeled_events,
-        aligned=aligned,
-        cfg=cfg,
-        split_start=0,
-        split_end=aligned.close_2d.shape[0],
-        require_label_within_split=False,
-        skip_features=False,
-    )
+    """부모 프로세스에서 2D 캐시 워밍 전용 — per-event 조립 없이 fork COW 상속용."""
+    _warm_aligned_2d_cache(aligned, cfg)

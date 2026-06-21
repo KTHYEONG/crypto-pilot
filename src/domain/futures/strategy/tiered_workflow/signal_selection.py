@@ -413,6 +413,18 @@ def compute_symbol_strategy_evidence(
     baseline_mode: Literal["peer_exclusive", "absolute"] = getattr(cfg, "l1_baseline_mode", "peer_exclusive")
     frame["incremental_bps"] = _compute_incremental_bps(frame, mode=baseline_mode)
     grouped = frame.groupby(["symbol", "strategy_id", "activation_context"], sort=False)
+    # 사전 일괄 벡터화: per-pair inner groupby 제거 (P2 최적화)
+    _pair_fold_means: dict[tuple[str, str, str], list[float]] = {}
+    _pfm_raw = (
+        frame.groupby(["symbol", "strategy_id", "activation_context", "fold_id"], sort=True)[
+            "incremental_bps"
+        ]
+        .mean()
+        .reset_index()
+    )
+    for row_t in _pfm_raw.itertuples(index=False):
+        key3 = (str(row_t.symbol), str(row_t.strategy_id), str(row_t.activation_context))
+        _pair_fold_means.setdefault(key3, []).append(float(row_t.incremental_bps))
     evidence_list: list[SymbolStrategyEvidence] = []
     raw_p_values: list[float] = []
 
@@ -434,11 +446,9 @@ def compute_symbol_strategy_evidence(
                 effective_n = (weight_sum * weight_sum) / denom
         mean_gross = float(np.average(gross, weights=weights)) if weight_sum > 0.0 else 0.0
         mean_incremental = float(np.average(incremental, weights=weights)) if weight_sum > 0.0 else 0.0
-        fold_means = [
-            float(group_fold["incremental_bps"].mean())
-            for _, group_fold in group.groupby("fold_id", sort=True)
-            if not group_fold.empty
-        ]
+        fold_means = _pair_fold_means.get(
+            (str(symbol), str(strategy_id), str(activation_context)), []
+        )
         positive_fold_ratio = (
             float(sum(1 for value in fold_means if value > 0.0) / len(fold_means))
             if fold_means
@@ -708,6 +718,7 @@ def _candidate_output_to_signal_batch(
     activation_floor_bps: float,
     cfg: CandidateStrategyConfig | None = None,
 ) -> ValidatedSignalBatch:
+    _t_batch_total = time.perf_counter()
     frame = model_output.events.reset_index(drop=True).copy()
     logger.debug("[L2-SIGNAL] raw_events=%d", len(frame))
     if frame.empty:
@@ -720,13 +731,16 @@ def _candidate_output_to_signal_batch(
             registry_version=registry.registry_version,
             model_version=model_version,
         )
+    _t_pred = time.perf_counter()
     gross = _expected_gross_bps(model_output)
     net = _expected_net_bps(model_output)
     q10 = _q10_gross_bps(model_output)
     q10_net = _q10_net_bps(model_output)
     q90 = _q90_gross_bps(model_output)
     q90_net = _q90_net_bps(model_output)
+    _t_pred_took = time.perf_counter() - _t_pred
     activation_match_regime: bool = bool(getattr(cfg, "l1_activation_match_regime", True)) if cfg is not None else True
+    _t_keys = time.perf_counter()
     source_keys: set[tuple[str, str, str]] = set()
     source_keys_relaxed: set[tuple[str, str]] = set()
     if activation_match_regime:
@@ -741,6 +755,7 @@ def _candidate_output_to_signal_batch(
             for items in registry.by_symbol.values()
             for item in items
         }
+    _t_keys_took = time.perf_counter() - _t_keys
     events: list[ValidatedSignalEvent] = []
     start_idx = int(frame["entry_idx"].min()) if "entry_idx" in frame.columns and not frame.empty else 0
     end_idx = int(frame["entry_idx"].max()) + 1 if "entry_idx" in frame.columns and not frame.empty else 0
@@ -750,6 +765,7 @@ def _candidate_output_to_signal_batch(
     n_gross_pass = 0
     n_threshold_pass = 0
     n_decision_pass = 0
+    _t_loop = time.perf_counter()
     for idx, row in frame.iterrows():
         key = _signal_source_key_from_row(row, qualify_by_regime=activation_match_regime)
         if activation_match_regime:
@@ -799,11 +815,20 @@ def _candidate_output_to_signal_batch(
                 model_version=model_version,
             )
         )
+    _t_loop_took = time.perf_counter() - _t_loop
     logger.debug(
         "[L2-SIGNAL] gates: raw=%d registry=%d gross=%d threshold=%d decision=%d final=%d activation_floor=%.1f",
         n_raw, n_registry_pass, n_gross_pass, n_threshold_pass, n_decision_pass, len(events), activation_floor_bps,
     )
+    _t_sort = time.perf_counter()
     events.sort(key=lambda item: (item.decision_idx, item.symbol, item.strategy_id, item.activation_context))
+    _t_sort_took = time.perf_counter() - _t_sort
+    logger.log(
+        PERF,
+        "[PERF] signal_batch_convert n_raw=%d n_out=%d pred=%.4fs keys=%.4fs loop=%.4fs sort=%.4fs total=%.4fs",
+        n_raw, len(events), _t_pred_took, _t_keys_took, _t_loop_took, _t_sort_took,
+        time.perf_counter() - _t_batch_total,
+    )
     return ValidatedSignalBatch(
         events=tuple(events),
         start_idx=start_idx,
