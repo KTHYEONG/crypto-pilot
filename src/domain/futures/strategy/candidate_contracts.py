@@ -334,6 +334,7 @@ class SymbolStrategyEvidence:
     hard_eligible: bool
     structural_reasons: tuple[str, ...]
     diagnostic_flags: tuple[str, ...]
+    lcb_net_bps: float
 
     def __init__(
         self,
@@ -353,6 +354,7 @@ class SymbolStrategyEvidence:
         hard_eligible: bool | None = None,
         structural_reasons: tuple[str, ...] = (),
         diagnostic_flags: tuple[str, ...] = (),
+        lcb_net_bps: float = 0.0,
         bootstrap_tstat_incremental: float | None = None,
         reliability: float | None = None,
         qualified: bool | None = None,
@@ -391,6 +393,7 @@ class SymbolStrategyEvidence:
         object.__setattr__(self, "hard_eligible", bool(compat_hard_eligible))
         object.__setattr__(self, "structural_reasons", tuple(compat_structural))
         object.__setattr__(self, "diagnostic_flags", tuple(diagnostic_flags))
+        object.__setattr__(self, "lcb_net_bps", float(lcb_net_bps))
 
     @property
     def bootstrap_tstat_incremental(self) -> float:
