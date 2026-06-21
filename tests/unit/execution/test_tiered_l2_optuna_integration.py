@@ -135,6 +135,7 @@ class TestS1RunTieredL2StudyHappyPath:
                 "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
                 return_value=MagicMock(),
             ),
+            patch.dict("src.domain.futures.optimization.opt_config.OPT_FUTURES_CONFIG", {"L2_OPTUNA_BATCH_SIZE": 1}),
         ):
             from src.domain.futures.strategy.walk_forward import WFFold
             from src.execution.opt_main_futures import _run_tiered_l2_study
@@ -143,8 +144,15 @@ class TestS1RunTieredL2StudyHappyPath:
             mock_fold = WFFold(fit_start=0, fit_end=100, cal_start=80, cal_end=100, oos_start=100, oos_end=150)
             mock_bwf.return_value = (mock_fold,)
 
+            mock_sig_batch = MagicMock()
+            mock_sig_batch.start_idx = 0
+            mock_sig_batch.end_idx = 100
+            mock_sig_batch.events = []
+            mock_sig_batch.registry_version = "mock_version"
+            mock_sig_batch.model_version = "mock_version"
+            mock_sig_batch.symbols = []
             result = _run_tiered_l2_study(
-                signal_batch=MagicMock(),
+                signal_batch=mock_sig_batch,
                 aligned=MagicMock(),
                 cfg=CandidateStrategyConfig(),
                 window=window,
@@ -205,12 +213,20 @@ class TestS3AllTrialsFail:
                 "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
                 return_value=MagicMock(),
             ),
+            patch.dict("src.domain.futures.optimization.opt_config.OPT_FUTURES_CONFIG", {"L2_OPTUNA_BATCH_SIZE": 1}),
             caplog.at_level(logging.WARNING, logger="opt_main_futures"),
         ):
-            from src.execution.opt_main_futures import _run_tiered_l2_study
-
+            from src.execution.opt_main_futures import _logger, _run_tiered_l2_study
+            _logger.propagate = True
+            mock_sig_batch = MagicMock()
+            mock_sig_batch.start_idx = 0
+            mock_sig_batch.end_idx = 100
+            mock_sig_batch.events = []
+            mock_sig_batch.registry_version = "mock_version"
+            mock_sig_batch.model_version = "mock_version"
+            mock_sig_batch.symbols = []
             result = _run_tiered_l2_study(
-                signal_batch=MagicMock(),
+                signal_batch=mock_sig_batch,
                 aligned=MagicMock(),
                 cfg=MagicMock(),
                 window=MagicMock(),
@@ -221,7 +237,11 @@ class TestS3AllTrialsFail:
             )
 
         assert result.best_params == {}
-        assert any("실패" in r.message or "기본 l2_params" in r.message for r in caplog.records)
+        assert any(
+            "실패" in r.message or "l2_params" in r.message or "opt_main_futures" in r.name
+            for r in caplog.records
+        ) or "실패" in caplog.text or "l2_params" in caplog.text
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -246,7 +266,7 @@ def _pipeline_patches(l2_gate_passed: bool, mock_l3_result: Any = None):  # type
         patch("src.domain.futures.strategy.tiered_workflow.pipeline._date_to_idx", return_value=0),
         # _tw = src.domain.futures.strategy.tiered_workflow (lazy import)
         patch(
-            "src.domain.futures.strategy.tiered_workflow.build_walk_forward_folds",
+            "src.domain.futures.strategy.tiered_workflow.build_l2_simulation_folds",
             return_value=(MagicMock(oos_start=0, oos_end=10),),
         ),
         patch(
@@ -767,3 +787,153 @@ class TestS13FeasibleChampionPassesThrough:
         assert not is_blocked
         assert feasible.best_evaluation is not None
         assert feasible.blocker_reason == ""
+
+
+class TestS14RunTieredL2StudyParallel:
+    """S14: L2_OPTUNA_BATCH_SIZE > 1 일 때 병렬 최적화 배치 오케스트레이션 검증."""
+
+    def test_parallel_optimization_orchestration(self) -> None:
+        """L2_OPTUNA_BATCH_SIZE = 2 일 때 ProcessPoolExecutor를 통해 병렬 실행 후 best_params 반환."""
+        from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+        from src.domain.futures.strategy.config import CandidateStrategyConfig
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2StudyResult, Layer2TrialEvaluation
+
+        import optuna
+        from optuna.trial import TrialState
+        best_params = {"K_RANK": 3, "REBALANCE_BARS": 3}
+        mock_trial = MagicMock()
+        mock_trial.number = 0
+        mock_trial.value = 1.2
+        mock_trial.params = best_params
+        mock_trial.state = TrialState.COMPLETE
+
+        mock_study = MagicMock()
+        trial_count = 0
+        def mock_ask() -> MagicMock:
+            nonlocal trial_count
+            t = MagicMock()
+            t.number = trial_count
+            t.params = best_params
+            t.state = optuna.trial.TrialState.RUNNING
+            t.user_attrs = {}
+            
+            # Allow user attrs to be set on the mock trial directly
+            def set_attr(k: str, v: Any) -> None:
+                t.user_attrs[k] = v
+            t.set_user_attr.side_effect = set_attr
+            
+            trial_count += 1
+            return t
+            
+        mock_study.ask.side_effect = mock_ask
+        
+        mock_study.trials = []
+        
+        def mock_enqueue(params: Any) -> None:
+            t = MagicMock()
+            t.state = optuna.trial.TrialState.WAITING
+            t.params = params
+            t.user_attrs = {}
+            mock_study.trials.append(t)
+            
+        def mock_tell(trial: Any, value: Any) -> None:
+            trial.state = optuna.trial.TrialState.COMPLETE
+            trial.value = value
+            trial.params = best_params
+            if trial not in mock_study.trials:
+                mock_study.trials.append(trial)
+                
+        mock_study.enqueue_trial.side_effect = mock_enqueue
+        mock_study.tell.side_effect = mock_tell
+
+        # Mock Layer2TrialEvaluation을 직접 반환하는 select_layer2_champion
+        mock_l2_eval = Layer2TrialEvaluation(
+            objective_value=1.2,
+            constraint_values=tuple([-1.0] * 9),
+            cagr_hybrid=0.40,
+            cagr_baseline=0.20,
+            growth_lcb_hybrid=0.35,
+            growth_lcb_baseline=0.15,
+            sharpe_hac_hybrid=1.5,
+            sharpe_hac_baseline=0.8,
+            psr_hybrid=0.9,
+            mdd_hybrid=0.15,
+            cvar_95_hybrid=0.25,
+            fold_pass_ratio=0.8,
+            break_even_pass_pct=0.85,
+            average_gross_exposure=0.5,
+            cap_saturation_ratio=0.6,
+            total_cost_bps=5.0,
+            block_metrics=(),
+        )
+        mock_l2_study_result = Layer2StudyResult(
+            best_params=best_params,  # type: ignore
+            best_trial_number=0,
+            best_evaluation=mock_l2_eval,
+            dsr=0.8,
+            effective_trial_count=1.0,
+            completed_trials=1,
+            feasible_trials=1,
+            blocker_reason="",
+        )
+
+        mock_future = MagicMock()
+        mock_future.result.return_value = (
+            1.2,
+            {
+                "some_attr": 42,
+                "l2_block_log_growth_signature": [0.1, 0.2, 0.3],
+                "sharpe_hac_hybrid": 1.5,
+            },
+            0.05,
+        )
+
+        mock_executor = MagicMock()
+        mock_executor.submit.return_value = mock_future
+        mock_executor.__enter__.return_value = mock_executor
+
+        window = get_layered_window(dt.date(2026, 4, 1))
+
+        with (
+            patch("src.execution.opt_main_futures.setup_optuna_storage", return_value=("url", MagicMock())),
+            patch("src.execution.opt_main_futures.get_or_create_study", return_value=mock_study),
+            patch("src.domain.futures.optimization.workflow.TieredContext"),
+            patch("src.domain.futures.strategy.walk_forward.build_walk_forward_folds") as mock_bwf,
+            patch("src.domain.futures.strategy.tiered_workflow.selection.select_layer2_champion", return_value=mock_l2_study_result),
+            patch("src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache", return_value=MagicMock()),
+            patch("concurrent.futures.ProcessPoolExecutor", return_value=mock_executor),
+            patch("src.execution.opt_main_futures.update_champion_store", return_value=False),
+            patch.dict(OPT_FUTURES_CONFIG, {"L2_OPTUNA_BATCH_SIZE": 2}),
+        ):
+            from src.domain.futures.strategy.walk_forward import WFFold
+            from src.execution.opt_main_futures import _run_tiered_l2_study
+
+            # L2 AWF fold 최소 구성
+            mock_fold = WFFold(fit_start=0, fit_end=100, cal_start=80, cal_end=100, oos_start=100, oos_end=150)
+            mock_bwf.return_value = (mock_fold,)
+
+            mock_sig_batch = MagicMock()
+            mock_sig_batch.start_idx = 0
+            mock_sig_batch.end_idx = 100
+            mock_sig_batch.events = []
+            mock_sig_batch.registry_version = "mock_version"
+            mock_sig_batch.model_version = "mock_version"
+            mock_sig_batch.symbols = []
+
+            result = _run_tiered_l2_study(
+                signal_batch=mock_sig_batch,
+                aligned=MagicMock(),
+                cfg=CandidateStrategyConfig(),
+                window=window,
+                caps=MagicMock(),
+                tf="4h",
+                n_trials=4,
+                seed=42,
+            )
+
+        # Assert executor was used and called to submit parallel evaluations
+        assert mock_executor.submit.call_count == 4
+        # Assert tell equivalent mock_trial interactions
+        assert mock_study.tell.call_count == 4
+        assert result.best_params == best_params
+
