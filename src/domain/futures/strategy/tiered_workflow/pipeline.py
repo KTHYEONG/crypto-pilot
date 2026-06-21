@@ -1806,9 +1806,11 @@ def run_tiered_pipeline(
         logger.info(format_layer_header(2, "Portfolio Allocation & Risk Optimization"))
     t_l2 = time.perf_counter()
     ho_start_idx_l2 = _date_to_idx(aligned.datetimes, window.holdout_start)
+    _l2_expand = int(l2_params.get("l2_is_expansion_bars", 0))
+    _l2_start_idx = max(0, l1_end_bars - _l2_expand)
     awf_folds = _tw.build_l2_simulation_folds(
         n_bars=len(aligned.datetimes),
-        l2_start_idx=l1_end_bars,
+        l2_start_idx=_l2_start_idx,
         holdout_start_idx=ho_start_idx_l2,
         cfg=cfg,
     )
@@ -1842,7 +1844,7 @@ def run_tiered_pipeline(
         artifact=l1.inference_artifact,
         candidate_events=labeled_events,
         aligned=aligned,
-        start_idx=l1_end_bars,
+        start_idx=_l2_start_idx,
         end_idx=ho_start_idx_l2,
         cfg=cfg,
     )
