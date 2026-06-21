@@ -761,56 +761,98 @@ def _candidate_output_to_signal_batch(
     end_idx = int(frame["entry_idx"].max()) + 1 if "entry_idx" in frame.columns and not frame.empty else 0
     has_explicit_gross = bool(getattr(model_output, "_has_explicit_expected_gross_bps", True))
     n_raw = len(frame)
-    n_registry_pass = 0
-    n_gross_pass = 0
-    n_threshold_pass = 0
-    n_decision_pass = 0
     _t_loop = time.perf_counter()
-    for idx, row in frame.iterrows():
-        key = _signal_source_key_from_row(row, qualify_by_regime=activation_match_regime)
-        if activation_match_regime:
-            if (key.symbol, key.strategy_id, key.activation_context) not in source_keys:
-                continue
-        else:
-            if (key.symbol, key.strategy_id) not in source_keys_relaxed:
-                continue
-        n_registry_pass += 1
-        if not has_explicit_gross:
-            continue
-        n_gross_pass += 1
-        pred = float(gross[idx]) if idx < gross.size else 0.0
-        if pred < activation_floor_bps:
-            continue
-        n_threshold_pass += 1
-        entry_idx = int(pd.to_numeric(row.get("entry_idx", 0), errors="coerce"))
-        decision_idx = entry_idx - 1
-        if decision_idx < 0 or decision_idx >= datetimes.shape[0]:
-            continue
-        n_decision_pass += 1
-        side_val = int(pd.to_numeric(row.get("side", 1), errors="coerce"))
-        side: int = 1 if side_val >= 0 else -1
-        holding = max(int(pd.to_numeric(row.get("expected_holding_bars", 1), errors="coerce")), 1)
-        quality_weight = 0.0
-        for evidence in registry.by_symbol.get(key.symbol, ()):
-            if evidence.key == key:
-                quality_weight = evidence.quality_weight
-                break
+    # ── key column vectors (column-existence cascade — equiv. to _signal_source_key_from_row) ──
+    sym_v = frame["symbol"].astype(str).to_numpy() if "symbol" in frame.columns else np.full(n_raw, "", dtype=object)
+    if "strategy_id" in frame.columns:
+        strat_v = frame["strategy_id"].astype(str).to_numpy()
+    else:
+        fam_s = frame["family"].astype(str) if "family" in frame.columns else pd.Series([""] * n_raw)
+        var_s = frame["variant"].astype(str) if "variant" in frame.columns else pd.Series([""] * n_raw)
+        strat_v = (fam_s + ":" + var_s).to_numpy()
+    if not activation_match_regime:
+        actx_v: np.ndarray = np.full(n_raw, "all", dtype=object)
+    elif "activation_context" in frame.columns:
+        actx_v = frame["activation_context"].astype(str).to_numpy()
+    elif "signal_cell" in frame.columns:
+        actx_v = frame["signal_cell"].astype(str).to_numpy()
+    elif "entry_regime" in frame.columns:
+        actx_v = frame["entry_regime"].astype(str).to_numpy()
+    else:
+        actx_v = np.full(n_raw, "all", dtype=object)
+    actx_v = np.where(actx_v == "", "all", actx_v)  # mirrors `str(...) or "all"`
+    # ── registry membership mask (composite isin — C-level) ──────────────────
+    if activation_match_regime:
+        _composite = pd.Series(sym_v) + "|" + pd.Series(strat_v) + "|" + pd.Series(actx_v)
+        _keyset: set[str] = {f"{s}|{st}|{a}" for (s, st, a) in source_keys}
+    else:
+        _composite = pd.Series(sym_v) + "|" + pd.Series(strat_v)
+        _keyset = {f"{s}|{st}" for (s, st) in source_keys_relaxed}
+    mask_reg = _composite.isin(_keyset).to_numpy()
+    n_registry_pass = int(mask_reg.sum())
+    # ── prediction arrays padded to n_raw with cascaded fallback ─────────────
+    def _pad(arr: NDArray[np.float64], fb: NDArray[np.float64]) -> NDArray[np.float64]:
+        out = fb.copy()
+        sz = min(arr.size, n_raw)
+        out[:sz] = arr[:sz]
+        return out
+    g = np.zeros(n_raw, dtype=np.float64)
+    g[: min(gross.size, n_raw)] = gross[: min(gross.size, n_raw)]
+    n_net_p = _pad(net, g)
+    q10_p = _pad(q10, g)
+    q10_net_p = _pad(q10_net, q10_p)
+    q90_p = _pad(q90, g)
+    q90_net_p = _pad(q90_net, q90_p)
+    # ── gate masks ────────────────────────────────────────────────────────────
+    mask_gross = mask_reg if has_explicit_gross else np.zeros(n_raw, dtype=bool)
+    n_gross_pass = int(mask_gross.sum())
+    mask_thr = mask_gross & (g >= activation_floor_bps)
+    n_threshold_pass = int(mask_thr.sum())
+    if "entry_idx" in frame.columns:
+        entry_arr = pd.to_numeric(frame["entry_idx"], errors="coerce").fillna(0).astype(int).to_numpy()
+    else:
+        entry_arr = np.zeros(n_raw, dtype=int)
+    dec_arr = entry_arr - 1
+    mask_dec = mask_thr & (dec_arr >= 0) & (dec_arr < datetimes.shape[0])
+    n_decision_pass = int(mask_dec.sum())
+    # ── side / holding ────────────────────────────────────────────────────────
+    side_raw = (
+        pd.to_numeric(frame["side"], errors="coerce").fillna(1.0).to_numpy(dtype=np.float64)
+        if "side" in frame.columns else np.ones(n_raw, dtype=np.float64)
+    )
+    side_arr_v = np.where(side_raw >= 0, 1, -1).astype(np.int64)
+    hold_raw = (
+        pd.to_numeric(frame["expected_holding_bars"], errors="coerce").fillna(1.0).to_numpy(dtype=np.float64)
+        if "expected_holding_bars" in frame.columns else np.ones(n_raw, dtype=np.float64)
+    )
+    hold_arr_v = np.maximum(hold_raw.astype(np.int64), 1)
+    # ── quality_weight lookup (registry flattened once) ───────────────────────
+    qw_lookup: dict[tuple[str, str, str], float] = {}
+    for _evs in registry.by_symbol.values():
+        for _ev in _evs:
+            _k3 = (_ev.key.symbol, _ev.key.strategy_id, _ev.key.activation_context)
+            if _k3 not in qw_lookup:
+                qw_lookup[_k3] = _ev.quality_weight
+    # ── small loop over n_out survivors only ──────────────────────────────────
+    for _i in np.flatnonzero(mask_dec):
+        _s, _st, _a = str(sym_v[_i]), str(strat_v[_i]), str(actx_v[_i])
+        _d = int(dec_arr[_i])
         events.append(
             ValidatedSignalEvent(
-                decision_idx=decision_idx,
-                decision_time=datetimes[decision_idx],
-                symbol=key.symbol,
-                strategy_id=key.strategy_id,
-                activation_context=key.activation_context,
-                side=1 if side >= 0 else -1,
-                expected_net_bps=float(net[idx]) if idx < net.size else pred,
-                expected_gross_bps=pred,
-                q10_net_bps=float(q10_net[idx]) if idx < q10_net.size else float(q10[idx]) if idx < q10.size else pred,
-                q10_gross_bps=float(q10[idx]) if idx < q10.size else pred,
-                q90_net_bps=float(q90_net[idx]) if idx < q90_net.size else float(q90[idx]) if idx < q90.size else pred,
-                q90_gross_bps=float(q90[idx]) if idx < q90.size else pred,
-                expected_holding_bars=holding,
-                quality_weight=quality_weight,
+                decision_idx=_d,
+                decision_time=datetimes[_d],
+                symbol=_s,
+                strategy_id=_st,
+                activation_context=_a,
+                side=int(side_arr_v[_i]),  # type: ignore[arg-type]
+                expected_net_bps=float(n_net_p[_i]),
+                expected_gross_bps=float(g[_i]),
+                q10_net_bps=float(q10_net_p[_i]),
+                q10_gross_bps=float(q10_p[_i]),
+                q90_net_bps=float(q90_net_p[_i]),
+                q90_gross_bps=float(q90_p[_i]),
+                expected_holding_bars=int(hold_arr_v[_i]),
+                quality_weight=qw_lookup.get((_s, _st, _a), 0.0),
                 registry_version=registry.registry_version,
                 model_version=model_version,
             )
