@@ -1625,3 +1625,130 @@ def test_vectorized_rank_ic_edge_cases_unknown_classes() -> None:
     )
     # Fallback to global_mu must apply safely without KeyErrors
     assert isinstance(ic_val, float)
+
+
+# ---------------------------------------------------------------------------
+# Archetype Label Accuracy — Scenario 1~4 (spec: l1-ens-log-diagnosis.md)
+# ---------------------------------------------------------------------------
+
+
+def test_archetype_label_semantic_accuracy(caplog: pytest.LogCaptureFixture) -> None:
+    """Scenario 1: mean_rev→MRV, ts_mom→TMO (swap 수정 검증)."""
+    frame = pd.DataFrame({
+        "symbol": ["BTC"] * 10,
+        "archetype": ["mean_rev"] * 5 + ["ts_mom"] * 5,
+        "entry_regime_code": [0] * 10,
+        "net_return_bps": [10.0] * 10,
+    })
+    arch_mu = {"mean_rev": 13.0, "ts_mom": 31.7}
+
+    with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
+        _log_ensemble_diagnostics(
+            frame=frame,
+            global_mu=20.0,
+            arch_mu=arch_mu,
+            chosen="archetype_only",
+            adaptive_shrinkage=True,
+            k_used=50.0,
+        )
+
+    combined = "\n".join(caplog.messages)
+    # 의미 정합 라벨 확인
+    assert "MRV:" in combined, "mean_rev must map to MRV"
+    assert "TMO:" in combined, "ts_mom must map to TMO"
+    # 구 스왑 라벨 부재 확인
+    assert "MOM:" not in combined, "Old swapped label MOM must not appear"
+    assert "MRV:+13" in combined or "MRV: +13" in combined
+
+
+def test_archetype_label_flow_rev_present_and_absent(caplog: pytest.LogCaptureFixture) -> None:
+    """Scenario 2A/B: flow_rev 이벤트 존재 → FLO 출력, 부재 → FLO 미출력."""
+    base_frame = pd.DataFrame({
+        "symbol": ["ETH"] * 5,
+        "archetype": ["trend"] * 5,
+        "entry_regime_code": [0] * 5,
+        "net_return_bps": [5.0] * 5,
+    })
+
+    # 2A: flow_rev 있음 → FLO 포함
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
+        _log_ensemble_diagnostics(
+            frame=base_frame,
+            global_mu=5.0,
+            arch_mu={"trend": 8.0, "flow_rev": 12.0},
+            chosen="archetype_only",
+            adaptive_shrinkage=False,
+            k_used=50.0,
+        )
+    combined_a = "\n".join(caplog.messages)
+    assert "FLO:" in combined_a, "flow_rev must appear as FLO when present"
+
+    # 2B: flow_rev 없음 → FLO 미포함
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
+        _log_ensemble_diagnostics(
+            frame=base_frame,
+            global_mu=5.0,
+            arch_mu={"trend": 8.0},
+            chosen="archetype_only",
+            adaptive_shrinkage=False,
+            k_used=50.0,
+        )
+    combined_b = "\n".join(caplog.messages)
+    assert "FLO:" not in combined_b, "flow_rev must not appear when absent"
+
+
+def test_archetype_label_negative_sign_unwind(caplog: pytest.LogCaptureFixture) -> None:
+    """Scenario 3: unwind 음수 → UNW:-5.0❌ 검증."""
+    frame = pd.DataFrame({
+        "symbol": ["SOL"] * 5,
+        "archetype": ["unwind"] * 5,
+        "entry_regime_code": [0] * 5,
+        "net_return_bps": [-5.0] * 5,
+    })
+
+    with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
+        _log_ensemble_diagnostics(
+            frame=frame,
+            global_mu=-2.0,
+            arch_mu={"unwind": -5.0},
+            chosen="archetype_only",
+            adaptive_shrinkage=False,
+            k_used=50.0,
+        )
+
+    combined = "\n".join(caplog.messages)
+    assert "UNW:" in combined, "unwind must map to UNW"
+    assert "❌" in combined, "negative edge must show ❌"
+
+
+def test_archetype_label_all_seven_labels(caplog: pytest.LogCaptureFixture) -> None:
+    """Scenario 4 (회귀): 7종 전체 라벨이 의미 정합 코드로 출력."""
+    frame = pd.DataFrame({
+        "symbol": ["BTC"] * 7,
+        "archetype": ["trend", "ts_mom", "mean_rev", "carry_rev", "flow_rev", "unwind", "beta_neut"],
+        "entry_regime_code": [0] * 7,
+        "net_return_bps": [1.0] * 7,
+    })
+    arch_mu = {
+        "trend": 5.0, "ts_mom": 10.0, "mean_rev": 8.0,
+        "carry_rev": 3.0, "flow_rev": 7.0, "unwind": -2.0, "beta_neut": 4.0,
+    }
+
+    with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
+        _log_ensemble_diagnostics(
+            frame=frame,
+            global_mu=5.0,
+            arch_mu=arch_mu,
+            chosen="archetype_only",
+            adaptive_shrinkage=False,
+            k_used=50.0,
+        )
+
+    combined = "\n".join(caplog.messages)
+    for label in ("TRD:", "TMO:", "MRV:", "CRY:", "FLO:", "UNW:", "BTN:"):
+        assert label in combined, f"Expected label {label!r} not found in log"
+    # 구 라벨 부재 확인
+    for old_label in ("MOM:", "BRK:", "UNI:"):
+        assert old_label not in combined, f"Obsolete label {old_label!r} must not appear"

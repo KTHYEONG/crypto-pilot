@@ -221,23 +221,26 @@ def _log_ensemble_diagnostics(
     elif mode_short == "Only":
         mode_short = "Arch-Only"
 
-    # Standard 5 Archetypes (Fixed-width for user alignment)
-    standard_keys = {
-        "beta_neut": "BRK",
-        "mean_rev": "MOM",
-        "trend": "TRD",
-        "ts_mom": "MRV",
-        "unwind": "UNI",
+    # All 7 archetypes with semantically accurate 3-letter codes (insertion order = display order)
+    archetype_labels: dict[str, str] = {
+        "trend":     "TRD",
+        "ts_mom":    "TMO",
+        "mean_rev":  "MRV",
+        "carry_rev": "CRY",
+        "flow_rev":  "FLO",
+        "unwind":    "UNW",
+        "beta_neut": "BTN",
     }
     arch_parts = []
-    for k, label in standard_keys.items():
-        v = arch_mu.get(k, 0.0)
-        sign = "✅" if v >= 0.0 else "❌"
-        arch_parts.append(f"{label}:{v:>+6.1f}{sign}")
+    for k, label in archetype_labels.items():
+        if k in arch_mu:
+            v = arch_mu[k]
+            sign = "✅" if v >= 0.0 else "❌"
+            arch_parts.append(f"{label}:{v:>+6.1f}{sign}")
 
-    # Custom archetypes (Flexible width for test matching)
+    # Fallback: unknown archetypes not in archetype_labels (first-letter)
     for k, v in arch_mu.items():
-        if k not in standard_keys:
+        if k not in archetype_labels:
             label = k[0].upper()
             sign = "✅" if v >= 0.0 else "❌"
             arch_parts.append(f"{label}:{v:.1f}{sign}")
