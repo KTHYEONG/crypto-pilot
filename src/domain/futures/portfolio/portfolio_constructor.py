@@ -5,7 +5,9 @@ Expected return ``mu`` is in **simple return per bar** (same units as bar-to-bar
 
 from __future__ import annotations
 
+import logging
 import math
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,7 +16,10 @@ import numpy as np
 from numpy.typing import NDArray
 from sklearn.covariance import LedoitWolf
 
+from src.core.utils.utils import PERF
 from src.domain.futures.portfolio.portfolio_optimizer import PortfolioPolicyInputs
+
+_logger = logging.getLogger(__name__)
 
 
 def cov_lookback_bars(tf: str, opt_cfg: dict[str, Any]) -> int:
@@ -176,6 +181,7 @@ def solve_constrained_weights(
     bl_shrinkage_omega_mult: float = 0.10,
 ) -> np.ndarray:
     """Return signed portfolio weights (fractions of equity, before leverage)."""
+    _t_scw = time.perf_counter()
     mu_v = np.asarray(mu, dtype=np.float64).ravel()
     n = int(mu_v.size)
     if n == 0:
@@ -217,6 +223,7 @@ def solve_constrained_weights(
     w_c = _project_l1_linf(w_pre, gross_cap=gross_cap, per_symbol_cap=per_symbol_cap)
 
     _ = current_dd
+    _logger.log(PERF, "[PERF] solve_constrained_weights n=%d took=%.4fs", n, time.perf_counter() - _t_scw)
     return w_c
 
 
@@ -228,6 +235,7 @@ def precompute_rolling_covariances(
     Called once during optimization precompute phase to eliminate 1M+ redundant
     calls during trials. Optimized via threading parallel dispatch.
     """
+    _t_cov = time.perf_counter()
     c = np.asarray(close_2d, dtype=np.float64)
     n_bars, n_syms = c.shape
     out = np.zeros((n_bars, n_syms, n_syms), dtype=np.float64)
@@ -257,6 +265,11 @@ def precompute_rolling_covariances(
     for i, cov in results:
         out[i] = cov
 
+    _logger.log(
+        PERF,
+        "[PERF] precompute_rolling_covariances n_bars=%d n_syms=%d lookback=%d took=%.4fs",
+        n_bars, n_syms, lb, time.perf_counter() - _t_cov,
+    )
     return out
 
 
@@ -836,6 +849,7 @@ def diagonal_kelly_weights(
     # 순환 import 방지 — 함수 내부 로컬 import
     from src.domain.futures.strategy.cs_rank import VOL_FLOOR
 
+    _t_dkw = time.perf_counter()
     n = mu_bps.size
     mu = np.asarray(mu_bps, dtype=np.float64).ravel()
     sig = np.asarray(sigma, dtype=np.float64).ravel()
@@ -889,4 +903,5 @@ def diagonal_kelly_weights(
     w_final: NDArray[np.float64] = np.where(delta >= no_trade_band, w_capped, p_w)
     w_final = np.where(support, w_final, 0.0)
 
+    _logger.log(PERF, "[PERF] diagonal_kelly_weights n=%d took=%.4fs", n, time.perf_counter() - _t_dkw)
     return np.asarray(w_final, dtype=np.float64)

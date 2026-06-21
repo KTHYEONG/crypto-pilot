@@ -279,8 +279,8 @@ def build_l1_prequential_evidence_snapshots(
             frame_memory_bytes,
             pinned=getattr(cfg, "l1_nested_workers", None),
         )
-        logger.log(PERF, 
-            "[EVIDENCE-PREQ] Fitting %d evidence folds in parallel with %d workers (WSL OOM Guard, pinned=%s)",
+        logger.debug(
+            "[EVIDENCE-PREQ] Fitting %d evidence folds in parallel with %d workers (pinned=%s)",
             len(evidence_folds),
             workers,
             getattr(cfg, "l1_nested_workers", None),
@@ -300,8 +300,8 @@ def build_l1_prequential_evidence_snapshots(
             cw._GLOBAL_ALIGNED = None
             cw._GLOBAL_CFG = None
             cw._GLOBAL_PURGE_BARS = None
-        logger.log(PERF, 
-            "[perf-tiered] build_l1_prequential_evidence_snapshots parallel execution took %.4fs",
+        logger.log(PERF,
+            "[PERF] evidence_prequential_parallel_exec took=%.4fs",
             time.perf_counter() - t_exec,
         )
 
@@ -379,15 +379,11 @@ def run_l1_swf(
     n_total = len(symbols)
 
     t_start = time.perf_counter()
-    logger.log(PERF, 
-        "[SWF-START] Starting SWF-K L1 signal validation with %d folds (max_workers=%d)",
-        len(folds),
-        max_workers,
-    )
-    logger.log(PERF,
-        "[SWF-CTX] n_symbols=%d n_bars=%d n_folds=%d purge=%d embargo=%d cfg=%s",
+    logger.debug(
+        "[SWF-START] n_symbols=%d n_bars=%d n_folds=%d purge=%d embargo=%d cfg=%s max_workers=%d",
         n_total, len(aligned.datetimes), len(folds), purge_bars, _embargo_bars,
         getattr(cfg, 'candidate_name', cfg.__class__.__name__),
+        max_workers,
     )
 
     signals_per_fold: list[dict[str, SymbolSignal]] = []
@@ -539,10 +535,11 @@ def run_l1_swf(
         for k in avg_profile:
             avg_profile[k] /= total_folds
 
-        logger.log(PERF, 
-            "[SWF-PROFILE] Average sub-fold execution breakdown: "
-            "schema=%.3fs, ds_fit=%.3fs, ds_es=%.3fs, ds_cal_fit=%.3fs, ds_cal_eval=%.3fs, "
-            "ds_oos=%.3fs, edge_fit=%.3fs, inference=%.3fs, selection=%.3fs",
+        logger.log(PERF,
+            "[PERF] swf_fold_avg_profile n=%d "
+            "schema=%.3fs ds_fit=%.3fs ds_es=%.3fs ds_cal_fit=%.3fs ds_cal_eval=%.3fs "
+            "ds_oos=%.3fs edge_fit=%.3fs inference=%.3fs selection=%.3fs",
+            total_folds,
             avg_profile["schema"],
             avg_profile["dataset_fit"],
             avg_profile["dataset_early_stop"],
@@ -554,8 +551,8 @@ def run_l1_swf(
             avg_profile["selection"],
         )
 
-    logger.log(PERF, 
-        "[SWF-END] SWF-K L1 signal validation completed in %.2fs",
+    logger.log(PERF,
+        "[PERF] run_l1_swf took=%.2fs",
         time.perf_counter() - t_start,
     )
 
@@ -642,7 +639,7 @@ def run_l1_swf(
     else:
         _global_ic = 0.0
         _global_tstat = 0.0
-    logger.log(PERF, 
+    logger.debug(
         "[SWF-IC-DIAG] global_pooled_ic=%.4f global_tstat=%.2f (diagnostic, not gate)",
         _global_ic,
         _global_tstat,
@@ -731,7 +728,7 @@ def run_l1_swf(
             for sig in top_panel
         )
         logger.debug("[STRATEGY-PANEL] valid=%d diversity=%.3f | %s", n_valid_strategies, panel_diversity, panel_str)
-    logger.log(PERF, 
+    logger.debug(
         "[SWF-LEGACY-IC] pooled_ic=%.4f pooled_tstat=%.2f breadth=%.3f valid_coverage=%.3f",
         pooled_ic_val,
         pooled_tstat_val,
@@ -739,7 +736,7 @@ def run_l1_swf(
         valid_coverage,
     )
 
-    logger.log(PERF, 
+    logger.debug(
         "[SWF-DIAG] static_share=%.3f dynamic_share=%.3f score_cal_ratio=%.3f decile_lift=%.2fbps",
         _diag.static_variance_share,
         _diag.dynamic_variance_share,
@@ -828,7 +825,7 @@ def run_l1_nested_swf(
     volatility_2d = np.maximum(volatility_2d, 1e-12)
     logger.log(
         PERF,
-        "[perf-tiered] run_l1_nested_swf volatility_2d calculation took %.4fs",
+        "[PERF] l1_nested_volatility_2d took=%.4fs",
         time.perf_counter() - t_vol,
     )
     outer_reports: list[Layer1FoldReadiness] = []
@@ -887,7 +884,7 @@ def run_l1_nested_swf(
         logger.debug("[L1-NESTED] Feature cache priming skipped: insufficient labeled event schema")
     logger.log(
         PERF,
-        "[perf-tiered] run_l1_nested_swf prime_aligned_feature_cache took %.4fs",
+        "[PERF] l1_nested_feature_cache_prime took=%.4fs",
         time.perf_counter() - t_prime,
     )
 
@@ -911,26 +908,19 @@ def run_l1_nested_swf(
         frame_memory_bytes,
         pinned=getattr(cfg, "l1_nested_workers", None),
     )
-    logger.log(PERF, 
-        "[L1-NESTED-COMBINED] Fitting %d folds (evidence=%d, outer=%d) in parallel with %d workers (pinned=%s)",
-        len(combined_folds),
-        num_evidence,
-        len(outer_folds),
-        workers,
-        getattr(cfg, "l1_nested_workers", None),
-    )
-    logger.log(PERF,
-        "[L1-CTX] n_symbols=%d n_events=%d cfg_seed=%d volatility_shape=%s",
+    logger.debug(
+        "[L1-NESTED-COMBINED] Fitting %d folds (evidence=%d, outer=%d) "
+        "workers=%d pinned=%s n_symbols=%d n_events=%d cfg_seed=%d",
+        len(combined_folds), num_evidence, len(outer_folds),
+        workers, getattr(cfg, "l1_nested_workers", None),
         len(aligned.symbols), len(labeled_events), seed,
-        str(volatility_2d.shape),
     )
-
     logger.log(
         PERF,
-        "[perf-tiered] run_l1_nested_swf multiprocessing prep took %.4fs",
+        "[PERF] l1_nested_mp_prep took=%.4fs",
         time.perf_counter() - t_mp_prep,
     )
-    combined_results = []
+    combined_results: list[Any] = []
     t_exec = time.perf_counter()
     try:
         with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as executor:
@@ -949,13 +939,38 @@ def run_l1_nested_swf(
         cw._GLOBAL_ALIGNED = None
         cw._GLOBAL_CFG = None
         cw._GLOBAL_PURGE_BARS = None
-    logger.log(PERF, 
-        "[perf-tiered] run_l1_nested_swf combined parallel execution took %.4fs",
-        time.perf_counter() - t_exec,
+    logger.log(PERF,
+        "[PERF] l1_nested_parallel_exec n_folds=%d took=%.4fs",
+        len(combined_folds), time.perf_counter() - t_exec,
     )
 
     evidence_results = combined_results[:num_evidence]
     outer_results = combined_results[num_evidence:]
+
+    _n_combined = len(combined_results)
+    if _n_combined > 0:
+        _profile_keys = (
+            "schema", "dataset_fit", "dataset_early_stop",
+            "dataset_calibration_fit", "dataset_calibration_eval",
+            "dataset_oos", "edge_fit", "inference", "selection",
+        )
+        _agg: dict[str, float] = dict.fromkeys(_profile_keys, 0.0)
+        for _r in combined_results:
+            _prof = getattr(_r, "timing_profile", {}) or {}
+            for _k in _profile_keys:
+                _agg[_k] += _prof.get(_k, 0.0)
+        for _k in _profile_keys:
+            _agg[_k] /= _n_combined
+        logger.log(
+            PERF,
+            "[PERF] l1_nested_fold_avg_profile n=%d "
+            "schema=%.3fs ds_fit=%.3fs ds_es=%.3fs ds_cal_fit=%.3fs ds_cal_eval=%.3fs "
+            "ds_oos=%.3fs edge_fit=%.3fs inference=%.3fs selection=%.3fs",
+            _n_combined,
+            _agg["schema"], _agg["dataset_fit"], _agg["dataset_early_stop"],
+            _agg["dataset_calibration_fit"], _agg["dataset_calibration_eval"],
+            _agg["dataset_oos"], _agg["edge_fit"], _agg["inference"], _agg["selection"],
+        )
 
     t_ev_snap = time.perf_counter()
     evidence_snapshots = build_l1_prequential_evidence_snapshots(
@@ -968,7 +983,7 @@ def run_l1_nested_swf(
         precomputed_results=evidence_results,
     )
     logger.log(PERF,
-        "[perf-tiered] build_l1_prequential_evidence_snapshots (+registry) took %.4fs",
+        "[PERF] l1_prequential_evidence_snapshots took=%.4fs",
         time.perf_counter() - t_ev_snap,
     )
     snapshots_by_idx = {snapshot.as_of_idx: snapshot for snapshot in evidence_snapshots}
@@ -1004,6 +1019,7 @@ def run_l1_nested_swf(
             fold_out=outer_out,
         )
         outer_event_frames.append(outer_events)
+        _t_batch = time.perf_counter()
         prediction_batch = _candidate_output_to_signal_batch(
             model_output=outer_out.model_output,
             registry=registry,
@@ -1013,12 +1029,16 @@ def run_l1_nested_swf(
             activation_floor_bps=float(cfg.l1_signal_activation_floor_bps),
             cfg=cfg,
         )
+        _t_batch_took = time.perf_counter() - _t_batch
+        _t_sel = time.perf_counter()
         opportunities = select_outer_symbol_opportunities(
             predictions=prediction_batch,
             registry=registry,
         )
+        _t_sel_took = time.perf_counter() - _t_sel
         fold_sigs = _opportunities_to_symbol_signals(opportunities)
         signals_per_fold.append(fold_sigs)
+        _t_eval = time.perf_counter()
         outer_reports.append(
             evaluate_outer_signal_opportunities(
                 opportunities=opportunities,
@@ -1031,15 +1051,15 @@ def run_l1_nested_swf(
                 seed=seed + outer_idx,
             )
         )
+        _t_eval_took = time.perf_counter() - _t_eval
         logger.log(PERF,
-            "[L1-FOLD] outer_fold=%d/%d oos=[%d,%d) train_count=%d events=%d took=%.4fs",
+            "[PERF] l1_outer_fold fold=%d/%d oos=[%d,%d) batch=%.4fs sel=%.4fs eval=%.4fs total=%.4fs",
             outer_idx + 1, len(outer_folds),
             outer_fold.oos_start, outer_fold.oos_end,
-            trained_count,
-            len(outer_events) if not outer_events.empty else 0,
+            _t_batch_took, _t_sel_took, _t_eval_took,
             time.perf_counter() - t_fold,
         )
-    logger.log(PERF, "[perf-tiered] Outer fold loop processing took %.4fs", time.perf_counter() - t_outer)
+    logger.log(PERF, "[PERF] l1_nested_outer_fold_loop took=%.4fs", time.perf_counter() - t_outer)
 
     fold_cov = (
         float(trained_count / len(outer_folds))
@@ -1060,7 +1080,7 @@ def run_l1_nested_swf(
     )
     logger.log(
         PERF,
-        "[perf-tiered] deployment compute_symbol_strategy_evidence took %.4fs",
+        "[PERF] l1_deployment_evidence took=%.4fs",
         time.perf_counter() - t_ev_deploy,
     )
     gate_report = evaluate_layer1_readiness(
@@ -1103,12 +1123,12 @@ def run_l1_nested_swf(
             cfg=cfg,
             seed=seed,
         )
-        logger.log(PERF, "[perf-tiered] fit_layer1_inference_artifact took %.4fs", time.perf_counter() - t_art)
+        logger.log(PERF, "[PERF] l1_fit_inference_artifact took=%.4fs", time.perf_counter() - t_art)
         if verbose:
             logger.info(format_layer1_deployment_registry_table(deployment_registry, all_evidence=deployment_evidence))
     logger.log(
         PERF,
-        "[perf-tiered] run_l1_nested_swf audit tables formatting took %.4fs",
+        "[PERF] l1_nested_audit_tables took=%.4fs",
         time.perf_counter() - t_log,
     )
     _l1_result = Layer1Result(
@@ -1198,7 +1218,7 @@ def run_l2_awf(
     from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
     t_l2_cache = time.perf_counter()
     cache = build_l2_simulation_cache(aligned, signal_batch, tf)
-    logger.log(PERF, "[perf-tiered] build_l2_simulation_cache took %.4fs", time.perf_counter() - t_l2_cache)
+    logger.log(PERF, "[PERF] l2_build_sim_cache took=%.4fs", time.perf_counter() - t_l2_cache)
 
     sim = _run_awf_simulation(
         cache=cache,
@@ -1756,7 +1776,7 @@ def run_tiered_pipeline(
                 else pd.Timestamp(window.l2_start).date()
             ),
         )
-    logger.log(PERF, "[perf-tiered] run_tiered_pipeline Layer 1 total took %.4fs", time.perf_counter() - t_l1)
+    logger.log(PERF, "[PERF] run_tiered_pipeline_l1_total took=%.4fs", time.perf_counter() - t_l1)
 
     if not l1.gate_passed:
         if verbose:
@@ -1835,8 +1855,8 @@ def run_tiered_pipeline(
             oos_start=l1_end_bars,
             oos_end=ho_start_idx_l2,
         ),)
-    logger.log(PERF, 
-        "[L2] AWF window: L2_start_bar=%d, ho_start_bar=%d, n_folds=%d",
+    logger.debug(
+        "[L2] AWF window: L2_start_bar=%d ho_start_bar=%d n_folds=%d",
         l1_end_bars,
         ho_start_idx_l2,
         len(awf_folds),
@@ -1855,7 +1875,7 @@ def run_tiered_pipeline(
         end_idx=ho_start_idx_l2,
         cfg=cfg,
     )
-    logger.log(PERF, "[perf-tiered] predict_layer1_signals took %.4fs", time.perf_counter() - t_l2_pred)
+    logger.log(PERF, "[PERF] predict_layer1_signals took=%.4fs", time.perf_counter() - t_l2_pred)
     # champion L* SSOT 전달: selection이 l2_params에 기록한 값 재사용 → recalibrate drift 0 보장
     _raw_l_star = l2_params.get("l2_deploy_leverage")
     _champion_l_star: float | None = (
@@ -1872,7 +1892,7 @@ def run_tiered_pipeline(
         override_dsr=override_dsr,
         deploy_leverage=_champion_l_star if (_champion_l_star is not None and _champion_l_star > 1.0) else None,
     )
-    logger.log(PERF, "[perf-tiered] run_tiered_pipeline Layer 2 total took %.4fs", time.perf_counter() - t_l2)
+    logger.log(PERF, "[PERF] run_tiered_pipeline_l2_total took=%.4fs", time.perf_counter() - t_l2)
 
     if verbose:
         logger.info(
@@ -1968,7 +1988,7 @@ def run_tiered_pipeline(
         verbose=verbose,
         deploy_leverage=_champion_l_star if (_champion_l_star is not None and _champion_l_star > 1.0) else None,
     )
-    logger.log(PERF, "[perf-tiered] run_tiered_pipeline Layer 3 total took %.4fs", time.perf_counter() - t_l3)
+    logger.log(PERF, "[PERF] run_tiered_pipeline_l3_total took=%.4fs", time.perf_counter() - t_l3)
 
     if verbose:
         logger.info("\n" + "="*80)
