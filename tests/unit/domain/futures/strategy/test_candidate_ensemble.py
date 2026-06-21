@@ -7,12 +7,14 @@ import pandas as pd
 import pytest
 
 from src.domain.futures.strategy.candidate_ensemble import (
+    ARCHETYPE_LABELS,
     RegimeConditionalEnsemble,
     _compute_eb_shrinkage_k,
     _fit_cell_means,
     _fit_variant_means,
     _internal_validation_rank_ic,
     _log_ensemble_diagnostics,
+    _log_signal_symbol_diagnostics,
     fit_regime_conditional_ensemble,
     predict_regime_conditional_ensemble,
 )
@@ -1752,3 +1754,148 @@ def test_archetype_label_all_seven_labels(caplog: pytest.LogCaptureFixture) -> N
     # 구 라벨 부재 확인
     for old_label in ("MOM:", "BRK:", "UNI:"):
         assert old_label not in combined, f"Obsolete label {old_label!r} must not appear"
+
+
+# ---------------------------------------------------------------------------
+# _log_signal_symbol_diagnostics — Scenario 1~5 (spec: l1-signal-symbol-diagnostics.md)
+# ---------------------------------------------------------------------------
+
+def _make_diag_frame(
+    *,
+    arch_fam_vals: list[tuple[str, str, str, float]],  # (archetype, family, symbol, bps)
+) -> pd.DataFrame:
+    """Build a minimal frame for _log_signal_symbol_diagnostics tests."""
+    rows: list[dict[str, object]] = []
+    for arch, fam, sym, bps in arch_fam_vals:
+        rows.append({
+            "archetype": arch,
+            "family": fam,
+            "symbol": sym,
+            "net_return_bps": bps,
+            "entry_regime_code": 0,
+        })
+    return pd.DataFrame(rows)
+
+
+def test_signal_symbol_diag_worst_first_and_review_flag(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Scenario 1: bad_fam worst-first + REVIEW flag + per-symbol detail."""
+    n_good = 60
+    n_bad = 60
+    data: list[tuple[str, str, str, float]] = (
+        [("trend", "bad_fam", f"SYM{i:02d}", -8.0) for i in range(n_bad)] +
+        [("trend", "good_fam", f"SYM{i:02d}", 30.0) for i in range(n_good)]
+    )
+    frame = _make_diag_frame(arch_fam_vals=data)
+
+    with caplog.at_level(logging.DEBUG, logger="src.domain.futures.strategy.candidate_ensemble"):
+        _log_signal_symbol_diagnostics(
+            frame=frame,
+            target_column="net_return_bps",
+            min_obs=30,
+            tag="ENS-FINAL",
+        )
+
+    all_lines = caplog.messages
+    assert any("bad_fam" in l and "REVIEW" in l for l in all_lines), "bad_fam must be flagged REVIEW"
+    fam_lines = [l for l in all_lines if "bad_fam" in l or "good_fam" in l]
+    assert len(fam_lines) >= 2
+    # worst-first: bad_fam 먼저
+    first_fam = next(l for l in all_lines if "bad_fam" in l or "good_fam" in l)
+    assert "bad_fam" in first_fam, "bad_fam (mean=-8.0) must appear before good_fam (worst-first)"
+
+
+def test_signal_symbol_diag_absent_archetype_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Scenario 2: absent archetype (carry_rev) triggers WARNING with name."""
+    all_except_carry = [k for k in ARCHETYPE_LABELS if k != "carry_rev"]
+    data = [
+        (arch, "some_fam", "BTC", 10.0)
+        for arch in all_except_carry
+        for _ in range(5)
+    ]
+    frame = _make_diag_frame(arch_fam_vals=data)
+
+    with caplog.at_level(logging.DEBUG, logger="src.domain.futures.strategy.candidate_ensemble"):
+        _log_signal_symbol_diagnostics(
+            frame=frame,
+            target_column="net_return_bps",
+            min_obs=30,
+            tag="ENS-FINAL",
+        )
+
+    warn_lines = [m for m in caplog.messages if "absent archetype" in m.lower()]
+    assert warn_lines, "Expected WARNING for absent archetype"
+    assert "carry_rev" in warn_lines[0]
+
+
+def test_signal_symbol_diag_fold_tag_guard(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Scenario 3: call-site guard -- tag='ENS' must NOT emit [ENS-DIAG] via fit_regime_conditional_ensemble."""
+    rng = np.random.default_rng(99)
+    n = 60
+    train_events = pd.DataFrame({
+        "archetype": rng.choice(["trend", "mean_rev"], size=n),
+        "entry_regime_code": rng.integers(0, 2, size=n),
+        "net_return_bps": rng.normal(10.0, 5.0, size=n),
+        "family": ["trend_ma"] * n,
+        "variant": ["ema_12_72"] * n,
+        "symbol": rng.choice(["BTC", "ETH"], size=n),
+        "entry_idx": np.arange(n),
+    })
+    cfg = _make_cfg(ensemble_conditioning="archetype_only")
+
+    with caplog.at_level(logging.DEBUG, logger="src.domain.futures.strategy.candidate_ensemble"):
+        _ = fit_regime_conditional_ensemble(train_events=train_events, cfg=cfg, tag="ENS")
+
+    assert not any("[ENS-DIAG]" in m for m in caplog.messages), (
+        "[ENS-DIAG] must not appear when tag='ENS' (fold guard)"
+    )
+
+
+def test_signal_symbol_diag_debug_off_noop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Scenario 4: DEBUG disabled -> no ENS-DIAG output (zero cost path)."""
+    frame = _make_diag_frame(arch_fam_vals=[("trend", "trend_ma", "BTC", 10.0)] * 50)
+
+    with caplog.at_level(logging.INFO, logger="src.domain.futures.strategy.candidate_ensemble"):
+        _log_signal_symbol_diagnostics(
+            frame=frame,
+            target_column="net_return_bps",
+            min_obs=30,
+            tag="ENS-FINAL",
+        )
+
+    assert not any("[ENS-DIAG]" in m for m in caplog.messages), (
+        "[ENS-DIAG] must not appear when DEBUG is disabled"
+    )
+
+
+def test_signal_symbol_diag_no_symbol_column(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Scenario 5: frame without 'symbol' column -> family rollup only, no exception."""
+    frame = pd.DataFrame({
+        "archetype": ["trend"] * 50 + ["mean_rev"] * 50,
+        "family": ["trend_ma"] * 50 + ["rsi_reversion"] * 50,
+        "net_return_bps": [-5.0] * 50 + [2.0] * 50,
+        "entry_regime_code": [0] * 100,
+    })
+
+    with caplog.at_level(logging.DEBUG, logger="src.domain.futures.strategy.candidate_ensemble"):
+        _log_signal_symbol_diagnostics(
+            frame=frame,
+            target_column="net_return_bps",
+            min_obs=30,
+            tag="ENS-FINAL",
+        )
+
+    all_lines = caplog.messages
+    assert any("family rollup" in l for l in all_lines), "family rollup must emit without symbol column"
+    assert "possym=n/a" in "\n".join(all_lines), "possym must show n/a without symbol column"
+    # per-symbol 상세 없음
+    assert not any("per-symbol" in l for l in all_lines), "per-symbol must not appear without symbol column"
