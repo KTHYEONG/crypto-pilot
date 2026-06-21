@@ -227,6 +227,7 @@ def _log_ensemble_diagnostics(
     num_valid_regimes: int = 0,
     score_cal_summary: str | None = None,
     tag: str = "ENS",
+    min_display_events: int = 0,
 ) -> dict[str, Any]:
     """Emit a consolidated diagnostic log for ensemble fitting (Atomic One-Liner)."""
     n_total = len(frame)
@@ -238,12 +239,21 @@ def _log_ensemble_diagnostics(
     elif mode_short == "Only":
         mode_short = "Arch-Only"
 
+    # Compute per-archetype event counts for min_display_events filtering
+    arch_event_counts: dict[str, int] = {}
+    if min_display_events > 0 and "archetype" in frame.columns and not frame.empty:
+        arch_event_counts = dict(frame["archetype"].value_counts())
+
     arch_parts = []
     for k, label in ARCHETYPE_LABELS.items():
         if k in arch_mu:
             v = arch_mu[k]
-            sign = "✅" if v >= 0.0 else "❌"
-            arch_parts.append(f"{label}:{v:>+6.1f}{sign}")
+            n_events = arch_event_counts.get(k, n_total)
+            if min_display_events > 0 and n_events < min_display_events:
+                arch_parts.append(f"{label}:   insuf")
+            else:
+                sign = "✅" if v >= 0.0 else "❌"
+                arch_parts.append(f"{label}:{v:>+6.1f}{sign}")
 
     # Fallback: unknown archetypes not in ARCHETYPE_LABELS (first-letter)
     for k, v in arch_mu.items():
@@ -388,6 +398,8 @@ def _fit_cell_means(
     shrinkage_k_max: float = 50.0,
     freq_n_cap: int = 0,
     min_cell_edge_floor_bps: float = 0.0,
+    prior_effective_n: float = 0.0,
+    prior_mean_bps: float = 0.0,
 ) -> tuple[
     dict[tuple[str, int], float],
     dict[tuple[str, int], float],
@@ -413,6 +425,11 @@ def _fit_cell_means(
             Prevents high-frequency noise cells from dominating global pull.
         min_cell_edge_floor_bps: Cell means below this floor are set to 0.0
             (no-prediction rather than negative allocation).
+        prior_effective_n: Bayesian prior effective sample size. When >0,
+            raw_mean is shrunk toward prior_mean_bps via w_prior=n/(n+prior_n)
+            before the JS shrinkage step. 0 = disabled (backward compatible).
+        prior_mean_bps: Prior mean in bps. Only used when prior_effective_n > 0.
+            Default 0.0 — neutral prior (no edge presumption).
     """
     target_column = _resolve_ensemble_target_column(frame)
     edge = frame[target_column].to_numpy(dtype=np.float64, copy=False)
@@ -450,6 +467,10 @@ def _fit_cell_means(
         n_eff = _effective_n(float(vals.shape[0]))
         w = n_eff / (n_eff + k_arch)
         raw_mean = float(np.mean(vals))
+        # P1: Bayesian prior — shrink raw_mean toward prior_mean_bps when n is small
+        if prior_effective_n > 0.0:
+            w_prior = n_eff / (n_eff + prior_effective_n)
+            raw_mean = w_prior * raw_mean + (1.0 - w_prior) * prior_mean_bps
         mu_val = w * raw_mean + (1.0 - w) * global_mu
         if min_cell_edge_floor_bps > 0.0 and mu_val < min_cell_edge_floor_bps:
             mu_val = 0.0
@@ -482,6 +503,10 @@ def _fit_cell_means(
             n_eff = _effective_n(float(vals.shape[0]))
             w = n_eff / (n_eff + k_cell)
             raw_mean = float(np.mean(vals))
+            # P1: Bayesian prior for cell means (same as archetype prior)
+            if prior_effective_n > 0.0:
+                w_prior = n_eff / (n_eff + prior_effective_n)
+                raw_mean = w_prior * raw_mean + (1.0 - w_prior) * prior_mean_bps
             mu_val = w * raw_mean + (1.0 - w) * global_mu
             if min_cell_edge_floor_bps > 0.0 and mu_val < min_cell_edge_floor_bps:
                 mu_val = 0.0
@@ -742,11 +767,15 @@ def fit_regime_conditional_ensemble(
     score_calibration_min_obs: int = int(getattr(cfg, "ensemble_score_calibration_min_obs", 60))
     score_slope_k: float = float(getattr(cfg, "ensemble_score_slope_k", 100.0))
 
+    prior_effective_n: float = float(getattr(cfg, "l1_ens_prior_effective_n", 0.0))
+    prior_mean_bps: float = 0.0
     eb_fit_kwargs: dict[str, object] = {
         "adaptive_shrinkage": adaptive_shrinkage,
         "shrinkage_k_max": shrinkage_k_max,
         "freq_n_cap": freq_n_cap,
         "min_cell_edge_floor_bps": min_cell_edge_floor_bps,
+        "prior_effective_n": prior_effective_n,
+        "prior_mean_bps": prior_mean_bps,
     }
     # Compute archetype-only (always needed for fallback/auto)
     _, _, arch_mu, arch_q10, global_mu, global_q10, _, arch_q90, global_q90 = _fit_cell_means(
@@ -883,6 +912,7 @@ def fit_regime_conditional_ensemble(
         )
 
     # ── Diagnostic table ──────────────────────────────────────────────────────
+    min_display_events: int = int(getattr(cfg, "l1_ens_min_display_events", 0))
     ensemble_diag = _log_ensemble_diagnostics(
         frame=frame,
         global_mu=global_mu,
@@ -893,6 +923,7 @@ def fit_regime_conditional_ensemble(
         num_valid_regimes=sum(score_calibration_valid.values()),
         score_cal_summary=score_cal_summary,
         tag=tag,
+        min_display_events=min_display_events,
     )
     ensemble_diag["target_contract"] = _target_contract_kind(train_events)
 

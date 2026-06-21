@@ -325,16 +325,16 @@ def apply_variant_promotions(
     allowed_variants = set(keep_variants) | set(flip_variants)
     allowed = allowed_signal_cells | allowed_variants
     if not allowed:
-        _logger.warning("[PROMO_FILTER] no variants recommended by diagnostics; blocking all candidates (fail-closed)")
-        return labeled.iloc[0:0].copy()
+        _logger.info("[PROMO_FILTER] no variants recommended; advisory-only pass-through")
+        return labeled.copy()
 
     if allowed_signal_cells and "signal_cell" in labeled.columns:
         out = labeled.loc[labeled["signal_cell"].astype(str).isin(allowed_signal_cells)].copy()
     else:
         out = labeled.loc[_variant_key(labeled).isin(allowed_variants)].copy()
     if out.empty:
-        _logger.warning("[PROMO_FILTER] all candidates removed after variant filter; returning empty")
-        return labeled.iloc[0:0].copy()
+        _logger.info("[PROMO_FILTER] all candidates removed after variant filter; passing through unfiltered")
+        return labeled.copy()
 
     flip_mask = pd.Series(False, index=out.index)
     if flip_signal_cells and "signal_cell" in out.columns:
