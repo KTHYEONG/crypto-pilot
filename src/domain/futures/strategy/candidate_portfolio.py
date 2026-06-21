@@ -625,8 +625,11 @@ def select_candidate_events_for_portfolio(
     utility_floor = max(float(cfg.selection_min_expected_utility_bps), breakeven_floor)
     utility_eligible_mask = df["expected_utility_bps"] >= utility_floor
     eligible = catastrophic_mask & utility_eligible_mask
-    waterfall = compute_selection_waterfall(events=df, cfg=cfg)
-    shadow_profiles = compute_shadow_selection_profiles(events=df, cfg=cfg)
+    _diag_enabled = bool(getattr(cfg, "l1_selection_diagnostics_enabled", False))
+    waterfall = compute_selection_waterfall(events=df, cfg=cfg) if _diag_enabled else {}
+    shadow_profiles = (
+        compute_shadow_selection_profiles(events=df, cfg=cfg) if _diag_enabled else pd.DataFrame()
+    )
     n_eligible = int(eligible.sum())
     n_keep = 0
     zero_reason = "selected_nonzero"
