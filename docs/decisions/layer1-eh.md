@@ -1,5 +1,16 @@
 # Layer 1 Architectural Decisions
 
+## L1-ADR-025: L1 실행시간 최적화 P1~P5 — prime 제거·벡터화·진단게이팅·타이머분리 (2026-06-21)
+- **Delta:**
+  - **P1** `prime_aligned_feature_cache`: `build_candidate_dataset` 호출(814K 이벤트 per-event 조립 후 폐기) 제거 → `_warm_aligned_2d_cache()` 분리 추출. fork COW용 2D rolling 배열만 캐시 워밍.
+  - **P2** `signal_selection.py` inner `group.groupby("fold_id")` 루프: O(N_pairs × N_folds)→ 1회 `frame.groupby([4keys], sort=True)` pre-compute로 대체.
+  - **P3** `candidate_portfolio.py`: `compute_selection_waterfall`/`compute_shadow_selection_profiles` 호출을 `l1_selection_diagnostics_enabled` 플래그로 게이팅(default=False).
+  - **P4** `_candidate_output_to_signal_batch`: pred/keys/loop/sort 세분화 `[PERF]` 타이머 추가 (로직 변경 없음).
+  - **P5** `pipeline.py` `l1_nested_audit_tables` 타이머: `fit_layer1_inference_artifact`(11.2s) 포함 오계측 → verbose 포맷팅 구간만 측정하도록 타이머 이동.
+- **Rationale:** `prime` 호출이 74.6s 중 ~22s 소비(전체 T×N 타임라인 per-event 조립 후 폐기). P2 inner groupby는 pairs×folds 이중 루프. P3 진단 waterfall은 항상 실행되어 불필요한 연산. P5는 측정 정확도 버그(inference 11.2s가 audit_tables로 계상됨).
+- **Edge Cases:** P1의 2D 배열은 기존에도 `id(aligned)` 캐시로 1회 계산 후 fork 공유 → look-ahead/인과성 특성 불변. P2 fold_means 순서는 sort=True로 동일 보존 → 수치 등가. 176개 회귀 테스트 통과.
+- **Status:** Accepted
+
 ## L1-ADR-022: L1 PERF 로그 구조개편 — [PERF] 접두사 통일 + 타이밍 가시성 3건 추가 (2026-06-21)
 - **Delta:** `[perf-tiered]` 접두사 전량 → `[PERF]`로 통일. 비타이밍 컨텍스트 로그(`[SWF-CTX]`, `[L1-CTX]`, `[L1-NESTED-COMBINED]` 등) → `logger.debug()`로 강등. 신규: ① `[PERF] l1_nested_fold_avg_profile` (combined_results timing_profile 집계, 기존 `run_l1_swf`의 `[SWF-PROFILE]` 상당이나 nested path에 없었음), ② `[PERF] l1_outer_fold` 포맷 확장 → `batch=/ sel=/ eval=/ total=` 세분화, ③ `portfolio_constructor.py` `solve_constrained_weights`/`diagonal_kelly_weights`/`precompute_rolling_covariances` PERF 타이머 3종 추가.
 - **Rationale:** DEBUG 실행 시 `grep '\[PERF\]'`로 타이밍 로그만 즉시 필터 가능해야 함. 기존 혼재된 접두사(`[perf-tiered]`, `[SWF-*]`, `[L1-*]`)로 grep 불가. outer fold 내 `_candidate_output_to_signal_batch`/`select_outer_symbol_opportunities`/`evaluate_outer_signal_opportunities` 3함수와 portfolio_constructor 핵심 함수 시간이 전혀 측정되지 않아 병목 포착 불가.
