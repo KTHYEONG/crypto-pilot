@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from src.domain.futures.strategy.common.alignment import align_data_maps
 from src.domain.futures.universe.contracts import UniverseStateCube
@@ -137,7 +136,6 @@ class TestOpt1StateCubeHoisting:
         symbols = ["AAA", "BBB", "CCC"]  # N_cube=3
         data_maps = _make_data_maps(symbols)
 
-        rng = np.random.default_rng(42)
         eligible_arr = np.ones((_CUBE_T, _CUBE_N), dtype=np.bool_)
         eligible_arr[:, 1] = False  # BBB → ineligible
         entry_block_arr = np.zeros((_CUBE_T, _CUBE_N), dtype=np.bool_)
@@ -305,3 +303,17 @@ class TestOpt1PartialCubeSymbolCoverage:
             assert not aligned.active_mask[t_v, aaa_col].any(), (
                 "AAA bars covered by cube must have active_mask=False"
             )
+
+
+def test_align_data_maps_reads_sum_open_interest_and_long_short_ratio() -> None:
+    data_maps = _make_data_maps(["AAA"], n_bars=220)
+    frame = data_maps["AAA"][_TF]
+    frame["sum_open_interest"] = np.arange(len(frame), dtype=np.float64)
+    frame["long_short_ratio"] = np.linspace(1.0, 2.0, len(frame), dtype=np.float64)
+
+    aligned = align_data_maps(data_maps, ["AAA"], _TF)
+
+    assert aligned.oi_2d is not None
+    assert aligned.lsr_2d is not None
+    np.testing.assert_allclose(aligned.oi_2d[:, 0], frame["sum_open_interest"].to_numpy())
+    np.testing.assert_allclose(aligned.lsr_2d[:, 0], frame["long_short_ratio"].to_numpy())

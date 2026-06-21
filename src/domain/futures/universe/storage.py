@@ -720,6 +720,7 @@ def sync_single_symbol_data(
     sync_1d: bool = True,
     sync_4h: bool = True,
     sync_1m: bool = False,
+    sync_metrics: bool = False,
     sync_profile: SymbolSyncProfile | None = None,
 ) -> tuple[list[LedgerRow], int]:
     """개별 심볼을 동기화하고 ledger row를 생성한다."""
@@ -747,6 +748,8 @@ def sync_single_symbol_data(
         collector.ensure_ohlcv_data(symbol, "4h", str(effective_start), str(effective_end))
     if sync_1m:
         collector.ensure_1m_data(symbol, str(effective_start), str(effective_end))
+    if sync_metrics:
+        collector.ensure_metrics_data(symbol, str(effective_start), str(effective_end))
 
     klines_1h = collector._load_cache(symbol, "1h")
     if klines_1h.empty:
@@ -789,7 +792,7 @@ def sync_single_symbol_data(
 
 
     # 펀딩 데이터 확보
-    collector.ensure_funding_data(symbol, str(start_date), str(end_date))
+    collector.ensure_funding_data(symbol, str(effective_start), str(effective_end))
     funding = pd.DataFrame()
     safe_symbol = symbol.replace("/", "_")
     funding_path = Path(FUTURES_DATA_DIR) / f"{safe_symbol}_funding.parquet"
@@ -994,9 +997,9 @@ def _init_worker() -> None:
 
 
 def _worker(
-    args: tuple[str, date, date, date | None, bool, bool, bool, SymbolSyncProfile | None],
+    args: tuple[str, date, date, date | None, bool, bool, bool, bool, SymbolSyncProfile | None],
 ) -> tuple[list[LedgerRow], int]:
-    symbol, start, end, onboard_date, sync_1d, sync_4h, sync_1m, sync_profile = args
+    symbol, start, end, onboard_date, sync_1d, sync_4h, sync_1m, sync_metrics, sync_profile = args
     global _worker_collector, _worker_downloader
     from src.core.exchange.binance_vision import BinanceVisionDownloader
     from src.domain.futures.backtest.data_loader import DataCollector
@@ -1015,6 +1018,7 @@ def _worker(
         sync_1d=sync_1d,
         sync_4h=sync_4h,
         sync_1m=sync_1m,
+        sync_metrics=sync_metrics,
         sync_profile=sync_profile,
     )
 
@@ -1029,6 +1033,7 @@ def _requested_sync_caches_missing(
     sync_1d: bool,
     sync_4h: bool,
     sync_1m: bool,
+    sync_metrics: bool,
     requested_start: date,
     requested_end: date,
     metadata_cache: dict[str, Any] | None = None,
@@ -1129,8 +1134,38 @@ def _requested_sync_caches_missing(
 
         if dt.min() > slow_start_ts or max_dt < slow_end_ts:
             return True
-            
-    return False
+    if not sync_metrics:
+        return False
+
+    metrics_path = FUTURES_DATA_DIR / f"{symbol.replace('/', '_')}_metrics.parquet"
+    if not metrics_path.exists():
+        return True
+    metrics_meta = (metadata_cache or {}).get(f"{symbol.replace('/', '_')}::metrics", {})
+    mea = metrics_meta.get("earliest_available")
+    mla = metrics_meta.get("latest_available")
+    expected_start_ts = req_start_ts
+    if profile is not None and profile.onboard_date is not None:
+        expected_start_ts = max(expected_start_ts, pd.Timestamp(profile.onboard_date, tz="UTC"))
+    expected_end_ts = effective_end_ts
+    if mea and mla:
+        try:
+            mea_dt = pd.to_datetime(mea, utc=True)
+            mla_dt = pd.to_datetime(mla, utc=True)
+            if mea_dt <= expected_start_ts + pd.Timedelta(hours=6) and mla_dt >= expected_end_ts:
+                return False
+        except Exception as exc:
+            logger.debug("Failed to parse metrics metadata for %s: %s", symbol, exc)
+
+    try:
+        metrics_df = pd.read_parquet(metrics_path, columns=["available_at"])
+    except Exception:
+        return True
+    if metrics_df.empty:
+        return True
+    avail = pd.to_datetime(metrics_df["available_at"], utc=True, errors="coerce").dropna()
+    if avail.empty:
+        return True
+    return bool(avail.min() > expected_start_ts + pd.Timedelta(hours=6) or avail.max() < expected_end_ts)
 
 
 def run_historical_sync(
@@ -1143,6 +1178,7 @@ def run_historical_sync(
     sync_1d: bool = True,
     sync_4h: bool = True,
     sync_1m: bool = False,
+    sync_metrics: bool = False,
 ) -> None:
     """메인 동기화 오케스트레이터."""
     ledger_path = DEFAULT_LEDGER_PATH
@@ -1220,6 +1256,18 @@ def run_historical_sync(
     except Exception as e:
         logger.warning("symbol lifecycle profile load failed: %s", e)
 
+    # Pre-load parquet cache metadata to optimize range checks
+    metadata_cache = {}
+    try:
+        import json
+        meta_path = FUTURES_DATA_DIR / "parquet_cache_meta.json"
+        if meta_path.exists():
+            with open(meta_path, encoding="utf-8") as f:
+                metadata_cache = json.load(f)
+            logger.debug("Loaded parquet cache metadata: %d keys", len(metadata_cache))
+    except Exception as e:
+        logger.warning("Failed to load parquet cache metadata: %s", e)
+
     # Short-circuit Bypass: Skip sync and file checks if SQLite ledger is already fully updated
     if not force and symbols and symbol_start_dates and sync_profiles:
         fully_updated = True
@@ -1234,6 +1282,20 @@ def run_historical_sync(
             if symbol_start_dates[sym] < target_end:
                 fully_updated = False
                 break
+            if sync_metrics:
+                meta = metadata_cache.get(f"{sym.replace('/', '_')}::metrics", {})
+                latest_available = meta.get("latest_available")
+                if latest_available is None:
+                    fully_updated = False
+                    break
+                try:
+                    latest_dt = pd.to_datetime(latest_available, utc=True)
+                    if latest_dt < pd.Timestamp(target_end, tz="UTC"):
+                        fully_updated = False
+                        break
+                except Exception:
+                    fully_updated = False
+                    break
         if fully_updated:
             logger.info("================================================================================")
             logger.info("LOCAL DATA STORAGE (LEDGER & CACHE STATUS)")
@@ -1244,18 +1306,6 @@ def run_historical_sync(
             logger.info("")
             logger.info("--------------------------------------------------------------------------------")
             return
-
-    # Pre-load parquet cache metadata to optimize range checks
-    metadata_cache = {}
-    try:
-        import json
-        meta_path = FUTURES_DATA_DIR / "parquet_cache_meta.json"
-        if meta_path.exists():
-            with open(meta_path, encoding="utf-8") as f:
-                metadata_cache = json.load(f)
-            logger.debug("Loaded parquet cache metadata: %d keys", len(metadata_cache))
-    except Exception as e:
-        logger.warning("Failed to load parquet cache metadata: %s", e)
 
     # Ledger에 있는 데이터 중 가장 최신 날짜를 기준으로 상장 폐지 여부 판단 (180일 이상 지연시 중단)
     global_max = max(symbol_start_dates.values()) if symbol_start_dates else end_date
@@ -1272,6 +1322,7 @@ def run_historical_sync(
                 sync_1d=sync_1d,
                 sync_4h=sync_4h,
                 sync_1m=sync_1m,
+                sync_metrics=sync_metrics,
                 requested_start=start_date,
                 requested_end=end_date,
                 metadata_cache=metadata_cache,
@@ -1309,6 +1360,7 @@ def run_historical_sync(
                 sync_1d,
                 sync_4h,
                 sync_1m,
+                sync_metrics,
                 profile,
             )
         )
@@ -1336,7 +1388,7 @@ def run_historical_sync(
     per_symbol_synced_days: dict[str, int] = {}
     synced_count = 0
     empty_count = 0
-    for (rows, _count), (symbol, _, _, _, _, _, _, _) in zip(results, sync_tasks, strict=False):
+    for (rows, _count), (symbol, _, _, _, _, _, _, _, _) in zip(results, sync_tasks, strict=False):
         per_symbol_synced_days[str(symbol)] = len(rows)
         if rows:
             df = pd.DataFrame([asdict(row) for row in rows])

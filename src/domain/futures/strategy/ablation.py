@@ -1053,6 +1053,7 @@ def _run_backtest_and_evaluate(
             kill_mask=aligned.kill_mask[st:ed],
             basis_2d=None if aligned.basis_2d is None else aligned.basis_2d[st:ed],
             oi_2d=None if aligned.oi_2d is None else aligned.oi_2d[st:ed],
+            lsr_2d=None if aligned.lsr_2d is None else aligned.lsr_2d[st:ed],
             adv_usdt_2d=None if aligned.adv_usdt_2d is None else aligned.adv_usdt_2d[st:ed],
             execution_cost_bps_2d=(
                 None if aligned.execution_cost_bps_2d is None else aligned.execution_cost_bps_2d[st:ed]

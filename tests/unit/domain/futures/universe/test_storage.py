@@ -27,6 +27,9 @@ class _DummyCollector:
     def ensure_ohlcv_data(self, *_args: object, **_kwargs: object) -> None:
         raise AssertionError("must not be called for non-overlapping lifecycle window")
 
+    def ensure_metrics_data(self, *_args: object, **_kwargs: object) -> None:
+        raise AssertionError("must not be called for non-overlapping lifecycle window")
+
 
 def test_resolve_effective_sync_window_clips_to_onboard_and_delivery_dates() -> None:
     profile = SymbolSyncProfile(
@@ -76,6 +79,7 @@ def test_requested_sync_caches_missing_detects_missing_requested_timeframes(
         sync_1d=True,
         sync_4h=True,
         sync_1m=False,
+        sync_metrics=False,
         requested_start=date(2024, 1, 1),
         requested_end=date(2024, 1, 31),
     )
@@ -88,6 +92,7 @@ def test_requested_sync_caches_missing_detects_missing_requested_timeframes(
         sync_1d=True,
         sync_4h=True,
         sync_1m=False,
+        sync_metrics=False,
         requested_start=date(2024, 1, 1),
         requested_end=date(2024, 1, 31),
     )
@@ -108,6 +113,7 @@ def test_requested_sync_caches_missing_when_coverage_is_partial(
         sync_1d=True,
         sync_4h=True,
         sync_1m=False,
+        sync_metrics=False,
         requested_start=date(2022, 10, 1),
         requested_end=date(2026, 3, 31),
     )
@@ -159,9 +165,49 @@ def test_run_historical_sync_when_caches_missing_uses_requested_start_date(
         sync_1d=True,
         sync_4h=True,
         sync_1m=False,
+        sync_metrics=False,
     )
     assert captured
     assert captured[0][1] == date(2022, 10, 1)
+
+
+def test_requested_sync_caches_missing_requires_metrics_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("src.domain.futures.universe.storage.FUTURES_DATA_DIR", tmp_path)
+    symbol = "MUSDT"
+    dt = pd.date_range("2024-01-01", "2024-01-31", freq="4h", tz="UTC")
+    for timeframe in ("1h", "1d", "4h"):
+        pd.DataFrame({"datetime": dt}).to_parquet(tmp_path / f"{symbol}_{timeframe}.parquet")
+
+    assert _requested_sync_caches_missing(
+        symbol,
+        sync_1d=True,
+        sync_4h=True,
+        sync_1m=False,
+        sync_metrics=True,
+        requested_start=date(2024, 1, 1),
+        requested_end=date(2024, 1, 31),
+    )
+
+    pd.DataFrame({"available_at": dt}).to_parquet(tmp_path / f"{symbol}_metrics.parquet")
+    metadata_cache = {
+        f"{symbol}::metrics": {
+            "earliest_available": "2024-01-01T00:00:00Z",
+            "latest_available": "2024-01-31T00:00:00Z",
+        }
+    }
+    assert not _requested_sync_caches_missing(
+        symbol,
+        sync_1d=True,
+        sync_4h=True,
+        sync_1m=False,
+        sync_metrics=True,
+        requested_start=date(2024, 1, 1),
+        requested_end=date(2024, 1, 31),
+        metadata_cache=metadata_cache,
+    )
 
 
 def test_snapshot_payload_roundtrip_preserves_stage5_research_panel() -> None:
@@ -244,6 +290,7 @@ def test_requested_sync_caches_missing_delisted_guard(
         sync_1d=False,
         sync_4h=False,
         sync_1m=False,
+        sync_metrics=False,
         requested_start=date(2024, 1, 1),
         requested_end=date(2026, 6, 14),
         profile=profile,
@@ -263,6 +310,7 @@ def test_requested_sync_caches_missing_delisted_guard(
         sync_1d=False,
         sync_4h=False,
         sync_1m=False,
+        sync_metrics=False,
         requested_start=date(2024, 1, 1),
         requested_end=date(2026, 6, 14),
         metadata_cache=metadata_cache,

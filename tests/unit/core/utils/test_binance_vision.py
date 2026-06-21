@@ -4,6 +4,7 @@ from http.client import HTTPMessage
 from typing import Literal
 from urllib.error import HTTPError
 
+import pandas as pd
 import pytest
 
 from src.core.exchange.binance_vision import BinanceVisionDownloader
@@ -83,3 +84,83 @@ def test_read_url_bytes_does_not_retry_for_404(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(HTTPError):
         downloader._read_url_bytes("https://data.binance.vision/fake")
     assert call_count["n"] == 1
+
+
+def test_fetch_daily_metrics_normalizes_headerless_archive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downloader = BinanceVisionDownloader()
+
+    raw = pd.DataFrame(
+        [
+            [
+                1711929600000,
+                "BTCUSDT",
+                "123.4",
+                "456.7",
+                "0",
+                "1.8",
+                "0.9",
+                "1.2",
+            ]
+        ]
+    )
+
+    monkeypatch.setattr(
+        downloader,
+        "_fetch_zip_csv",
+        lambda _url: raw,
+    )
+
+    out = downloader.fetch_daily_metrics("BTCUSDT", pd.Timestamp("2024-04-01"))
+
+    assert list(out.columns) == [
+        "timestamp",
+        "datetime",
+        "available_at",
+        "symbol",
+        "sum_open_interest",
+        "sum_open_interest_value",
+        "long_short_ratio",
+        "top_trader_long_short_ratio",
+        "sum_taker_long_short_vol_ratio",
+    ]
+    assert out.loc[0, "symbol"] == "BTCUSDT"
+    assert out.loc[0, "long_short_ratio"] == pytest.approx(0.9)
+    assert out.loc[0, "available_at"] == out.loc[0, "datetime"] + pd.Timedelta(minutes=5)
+
+
+def test_fetch_metrics_daily_delegates_to_normalized_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downloader = BinanceVisionDownloader()
+    expected = pd.DataFrame({"timestamp": [1]})
+
+    monkeypatch_value = {"called": 0}
+
+    def _fake_fetch(symbol: str, date: pd.Timestamp) -> pd.DataFrame:
+        monkeypatch_value["called"] += 1
+        assert symbol == "ETHUSDT"
+        return expected
+
+    monkeypatch.setattr(downloader, "fetch_daily_metrics", _fake_fetch)
+
+    out = downloader.fetch_metrics_daily("ETHUSDT", pd.Timestamp("2024-04-01"))
+
+    assert monkeypatch_value["called"] == 1
+    assert out is expected
+
+
+def test_fetch_daily_metrics_returns_empty_canonical_frame_on_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downloader = BinanceVisionDownloader()
+
+    def _raise(_url: str) -> pd.DataFrame:
+        raise _http_error(404)
+
+    monkeypatch.setattr(downloader, "_fetch_zip_csv", _raise)
+    out = downloader.fetch_daily_metrics("BTCUSDT", pd.Timestamp("2024-04-01"))
+
+    assert out.empty
+    assert "available_at" in out.columns

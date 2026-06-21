@@ -36,6 +36,7 @@ class FuturesRunConfig:
     phase: ActivePhase
     sync: SyncMode
     refresh_universe: bool
+    sync_metrics: bool
 
 
 def parse_active_phase(phase: str) -> ActivePhase:
@@ -79,5 +80,6 @@ def build_run_config_from_args(args: Namespace | dict[str, Any]) -> FuturesRunCo
         phase=phase,
         sync=sync,  # type: ignore[arg-type]
         refresh_universe=bool(raw.get("refresh_universe", False)),
+        sync_metrics=bool(raw.get("sync_metrics", False)),
     )
     return validate_run_config(config)
