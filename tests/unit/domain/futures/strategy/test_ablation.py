@@ -14,6 +14,7 @@ from src.domain.futures.strategy.ablation import (
     _build_uncapped_kelly_edge_weights,
     _build_variant_prior_output,
     _compute_realized_edge,
+    apply_variant_promotions,
     run_candidate_ablation,
     validate_candidate_signals,
 )
@@ -590,3 +591,62 @@ def test_validate_candidate_signals_raw_and_promoted_are_distinct() -> None:
     assert promoted.n_events == 2
     assert promoted.net_edge_bps_mean > rule_only.net_edge_bps_mean
     assert promoted.fail_reasons == ()
+
+
+# ---------------------------------------------------------------------------
+# P4: Promotion Filter Advisory Mode (apply_variant_promotions)
+# ---------------------------------------------------------------------------
+
+def _make_promo_labeled(n: int = 10) -> pd.DataFrame:
+    return pd.DataFrame({
+        "family": ["trend_ma"] * (n // 2) + ["rsi_reversion"] * (n - n // 2),
+        "variant": ["ema_12_72"] * (n // 2) + ["rsi_14"] * (n - n // 2),
+        "side": [1] * n,
+        "entry_idx": list(range(n)),
+    })
+
+
+def test_promo_empty_allowed_advisory_pass_through() -> None:
+    """P4.1: Empty allowed → pass-through (not empty)."""
+    labeled = _make_promo_labeled(10)
+    result = apply_variant_promotions(
+        labeled=labeled,
+        keep_variants=(),
+        flip_variants=(),
+    )
+    assert len(result) == 10, "advisory mode should pass through all rows"
+    assert (result["entry_idx"] == labeled["entry_idx"]).all(), "rows should match input"
+
+
+def test_promo_filtering_still_works_when_recommended() -> None:
+    """P4.2: Normal filtering still works when variants are recommended."""
+    labeled = _make_promo_labeled(10)
+    result = apply_variant_promotions(
+        labeled=labeled,
+        keep_variants=("trend_ma:ema_12_72",),
+        flip_variants=(),
+    )
+    assert len(result) == 5, "should keep only ema_12_72 rows"
+    assert (result["variant"] == "ema_12_72").all(), "all rows should be kept variant"
+
+
+def test_promo_empty_labeled_input() -> None:
+    """P4.3: Empty labeled input → returns empty (early return)."""
+    empty = pd.DataFrame()
+    result = apply_variant_promotions(
+        labeled=empty,
+        keep_variants=(),
+        flip_variants=(),
+    )
+    assert result.empty
+
+
+def test_promo_advisory_log_level() -> None:
+    """P4.3b: Advisory log is info (not warning)."""
+    labeled = _make_promo_labeled(10)
+    result = apply_variant_promotions(
+        labeled=labeled,
+        keep_variants=(),
+        flip_variants=(),
+    )
+    assert len(result) == 10, "advisory mode passes through"

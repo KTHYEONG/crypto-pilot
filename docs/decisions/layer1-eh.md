@@ -175,3 +175,23 @@
   - `-np.sign(lsr_log_z_42)`: lsr_log_z_42=0일 때 sign=0 → side_hint=0 유지, 조건부 미활성 보존.
 - **Status:** Accepted
 
+## L1-ADR-023: Small-Sample ENS Stabilization — Bayesian Prior & Min Display Threshold (2026-06-21)
+- **Delta:**
+  - `_fit_cell_means`에 `prior_effective_n`, `prior_mean_bps` 파라미터 추가. 모든 _fit_cell_means 호출에 eb_fit_kwargs를 통해 전파.
+  - archetype/archetype_regime 루프에서 JS shrinkage 전에 Bayesian prior 적용: `raw_mean = w_prior * raw_mean + (1-w_prior) * prior_mean_bps`, where `w_prior = n_eff / (n_eff + prior_effective_n)`.
+  - `_log_ensemble_diagnostics`에 `min_display_events` 파라미터 추가. archetype event count가 threshold 미만이면 `insuf` 표시.
+  - 신규 config: `l1_ens_prior_effective_n: float = 0.0`, `l1_ens_min_display_events: int = 0`.
+- **Rationale:** 초기 `[ENS]` 로그에서 TRD -18.4❌는 단 3,432 events에서 추정된 noise. prior_n=100, prior_mean=0을 적용하면 n이 작을 때 edge가 0으로 수축 → 거짓 음성 기만 방지. n이 충분하면 prior 영향이 소멸되어 수렴 보존. min_display_events는 충분한 데이터가 쌓이기 전까지 archetype edge 자체를 숨겨 사용자 오독 방지.
+- **Edge Cases:** prior_effective_n=0 (default) → 완전 backward compatible. 기존 동작에 영향 없음. prior는 JS 이전에 적용되므로 JS k가 0이어도 prior만 독립 적용됨.
+- **Status:** Accepted
+
+## L1-ADR-024: Adaptive Evidence Gate & Promotion Advisory Mode (2026-06-21)
+- **Delta:**
+  - `compute_symbol_strategy_evidence`에 `snapshot_index: int = -1` 파라미터 추가. early snapshot (index < `l1_evidence_early_snapshots`)에서 `l1_pair_min_effective_obs` / `l1_pair_min_folds` threshold를 relaxed 값으로 대체.
+  - `build_l1_prequential_evidence_snapshots`에서 `snapshot_offset`을 `snapshot_index`로 전달.
+  - `apply_variant_promotions`의 fail-closed(empty 반환)를 advisory pass-through(원본 반환)로 변경. warning → info 로그 레벨 변경.
+  - 신규 config: `l1_evidence_early_snapshots: int = 0`, `l1_pair_min_effective_obs_early: float = 2.0`, `l1_pair_min_folds_early: int = 1`.
+- **Rationale:** fold 0은 심볼 21개, fold당 이벤트 수가 적어 strict gate(eff_obs≥5, folds≥2) 통과가 어려움. early snapshot에서 gate를 완화하면 적은 fold 데이터로도 registry 진입이 가능해지고, 이후 `quality_weight`가 probability_positive 기반으로 자연 필터링하므로 noise가 L2까지 도달하지 않음. Promotion filter는 L1 SWF의 evidence computation과 중복 필터링이므로 advisory로 전환하여 혼선 제거.
+- **Edge Cases:** l1_evidence_early_snapshots=0 (default) → disabled, 항상 strict gate 사용. deployment-level compute_symbol_strategy_evidence 호출 (run_l1_nested_swf L1053)은 snapshot_index 없이 호출 → -1 default → strict gate 적용. promotion filter advisory 모드에서 caller(ablation.py/bridge.py)의 `labeled.empty` guard는 pass-through 시 full data를 받으므로 pipeline 정상 진행.
+- **Status:** Accepted
+

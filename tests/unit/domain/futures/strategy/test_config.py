@@ -50,3 +50,43 @@ def test_candidate_strategy_config_defaults_exact_l1_boundary() -> None:
 def test_candidate_strategy_config_rejects_negative_l1_boundary_buffer() -> None:
     with pytest.raises(ValueError, match="l1_boundary_buffer_bars"):
         CandidateStrategyConfig(l1_boundary_buffer_bars=-1)
+
+
+def test_l1_ens_prior_effective_n_default_zero() -> None:
+    cfg = CandidateStrategyConfig()
+    assert cfg.l1_ens_prior_effective_n == 0.0
+
+
+def test_l1_ens_min_display_events_default_zero() -> None:
+    cfg = CandidateStrategyConfig()
+    assert cfg.l1_ens_min_display_events == 0
+
+
+def test_l1_evidence_early_snapshots_default_zero() -> None:
+    cfg = CandidateStrategyConfig()
+    assert cfg.l1_evidence_early_snapshots == 0
+
+
+def test_l1_evidence_early_snapshots_rejects_negative() -> None:
+    with pytest.raises(ValueError, match="l1_evidence_early_snapshots"):
+        CandidateStrategyConfig(l1_evidence_early_snapshots=-1)
+
+
+def test_l1_ens_prior_effective_n_rejects_negative() -> None:
+    with pytest.raises(ValueError, match="l1_ens_prior_effective_n"):
+        CandidateStrategyConfig(l1_ens_prior_effective_n=-1.0)
+
+
+def test_l1_pair_min_effective_obs_early_default() -> None:
+    cfg = CandidateStrategyConfig()
+    assert cfg.l1_pair_min_effective_obs_early == 2.0
+
+
+def test_l1_pair_min_folds_early_default() -> None:
+    cfg = CandidateStrategyConfig()
+    assert cfg.l1_pair_min_folds_early == 1
+
+
+def test_l1_pair_min_effective_obs_early_rejects_low() -> None:
+    with pytest.raises(ValueError, match="l1_pair_min_effective_obs_early"):
+        CandidateStrategyConfig(l1_pair_min_effective_obs_early=0.5)
