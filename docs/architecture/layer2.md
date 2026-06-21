@@ -77,7 +77,7 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
   - **C3 - gate 자동 정렬**: gate가 `candidate_evaluation.cagr_hybrid`(deployed) 직접 사용 → C2 변경으로 자동 정렬(코드 수정 불필요).
   - **C4 - 배치 실현 경로 정정 (2026-06-18 재정의)**: `max_ann_vol/gross_cap` 천장주입(구조적 no-op)을 **수익률 직접 스케일**로 교체. `run_l2_awf(deploy_leverage=L*)`가 `apply_deployment(sim.rets_hybrid, L*)` 호출 → `cagr/mdd/cvar` 재산출. Sharpe/Sortino/PSR는 unit-vol 유지(레버리지 불변). `exchange_leverage_cap`(기본 10×)으로 거래소 실행가능 상한 제한. `l2_deploy_cvar_margin`(기본 0.20) 노브 추가.
   - fit-leg 미노출 시 OOS proxy fallback + `mdd_margin=0.30` 완충. `binding ∈ {mdd, cvar, hard_cap, exchange_cap, none}`. champion L*는 `l2_params["l2_deploy_leverage"]`로 SSOT 전달(recalibrate drift 0).
-- **Dynamic Scaling**: Volatility targeting ($\sigma_{target} / \sigma_{port}$) combined with regime-specific gross/net caps. Includes double-scaling guards.
+- **Dynamic Scaling**: Volatility targeting ($\sigma_{target} / \sigma_{port}$) combined with regime-specific gross/net caps. Vol scaling supports bidirectional normalization (upscale+downscale) via `allow_vol_upscale=True`, or downscale-only via `allow_vol_upscale=False` (default). Includes double-scaling guards.
 - **L2 Gate Contract (D1/D4)**:
   - `Layer2GateEvaluation.optuna_constraint_values` is the 9-value safety vector (deployment, leak, mdd, cvar, fold_pass_ratio, **recent_fold**, active_blocks, friction, trades) fed to `TPESampler(constraints_func=...)`.
   - `Layer2GateEvaluation.promotion_constraint_values` is the full replay gate vector used for champion promotion.

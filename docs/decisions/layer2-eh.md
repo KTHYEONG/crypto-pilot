@@ -157,6 +157,11 @@ ai_read_policy: when_related
 - **Rationale:** L1·L2 최신 fold 약화 원인을 결과에 끼워 맞추지 않고, 유니버스 활용 계약·데이터 정렬 감사·fold 안정성 평가·진단 로그를 분리해 L3 진입 전 인플레이션 후보를 검증해야 했다. Optuna constraint에 recent-fold 제약을 포함해야 TPE가 최근 fold 품질을 탐색에 반영할 수 있다. fold별 selected symbols 로깅은 디버깅 성능 진단의 핵심.
 - **Edge Cases:** empty fold → `recent_fold_passed=None`, `recent_fold_constraint=-1.0` (non-blocking). `l2_require_recent_fold_pass=False` 시 제약 비활성. universe audit은 진단 전용으로 portfolio weight 미변경. 피팅 시 L3 holdout leak 없음.
 
+## 2026-06-21 L2 scale collapse fixes — _book_edge_score double-deduct 제거 + project_all_caps allow_vol_upscale
+- **Delta:** (Fix 1) `_book_edge_score`에서 `effective_hurdle_bps` 파라미터 제거. mu_bps는 이미 net-of-cost이므로 재차감 금지. 시그니처 `(w, mu_bps)` 2-param. (Fix 2) `project_all_caps`에 `allow_vol_upscale: bool = False` keyword-only 파라미터 추가. True 시 Cap5 vol scaling이 양방향 정규화(`vol_scale = target/current`)로 동작. 기본 False로 하향 전용 기존 동작 보존.
+- **Rationale:** RC-3: `_book_edge_score`가 mu_bps(net)에 eff_hurdle을 재차감하여 edge=0 유도 → throttle m≈0 → book 붕괴. RC-1: `project_all_caps` Cap5가 `min(vol_scale, 1.0)`으로 하향만 허용 → raw Kelly book(연율 vol~20%)이 vol_target=100%에 도달 불가 → unit-vol 정규화 주장과 코드 모순 해소.
+- **Edge Cases:** `allow_vol_upscale` default=False로 기존 모든 호출부 backward-compatible. `_book_edge_score` 시그니처 변경 — 2개 호출부(`awf_sim.py` L812, L994) 모두 2-param으로 정합 완료.
+
 ## 2026-06-19 L2 provenance fingerprint hardening — batch identity now keys study identity
 - **Delta:** `_signal_batch_fingerprint()`가 `ValidatedSignalBatch`의 start/end bounds, symbols, registry/model versions, event count, 그리고 모든 event field를 streaming SHA-256으로 해시하게 됐다. `_layer2_experiment_key()`는 event count만 보지 않고 이 fingerprint를 study identity에 포함하도록 바뀌었다. `_run_tiered_l2_study()`는 event count, unique symbols, fingerprint prefix를 provenance 로그로 남긴다. 관련 회귀 테스트는 real `ValidatedSignalBatch` fixture와 BY permutation/singleton/empty 케이스로 갱신됐다.
 - **Rationale:** event-count-only study names는 같은 크기의 서로 다른 L2 입력을 충돌시킬 수 있었다. 재생성 가능성과 replay 추적성을 batch 내용 수준으로 끌어올려야 결과 SSOT와 실행 계약이 일치한다.

@@ -149,13 +149,15 @@ def test_shape_efficiency_objective_worst_fold_penalty_monotone() -> None:
     weight = 0.005
     sortino_base = 2.0
 
-    # Act — threshold 초과 시 패널티 0
+    # Act — threshold 초과 시 패널티 0 (RC-2 soft 패널티 비활성화: weight=0.0)
     obj_above = _shape_efficiency_l2_objective(
         sortino_hac_unit=sortino_base,
         worst_fold_sortino=threshold,  # 경계: 패널티=0
         worst_fold_threshold=threshold,
         worst_fold_weight=weight,
         downside_dispersion=0.0,
+        risk_util_weight=0.0,
+        trade_weight=0.0,
     )
     obj_below = _shape_efficiency_l2_objective(
         sortino_hac_unit=sortino_base,
@@ -163,6 +165,8 @@ def test_shape_efficiency_objective_worst_fold_penalty_monotone() -> None:
         worst_fold_threshold=threshold,
         worst_fold_weight=weight,
         downside_dispersion=0.0,
+        risk_util_weight=0.0,
+        trade_weight=0.0,
     )
 
     # Assert: threshold 정확히 맞으면 패널티=0, 아래면 패널티>0 -> 목적값 하락
@@ -416,10 +420,10 @@ def test_gate_dsr_diagnostic_field_preserved() -> None:
 
     # Assert: promotion_passed이고 DSR 차단 없음 — DSR은 입력으로만 사용
     assert result.promotion_passed
-    # _PROMOTION_BLOCKERS = 15개 항목 -> promotion_constraint_values = 15개
-    assert len(result.promotion_constraint_values) == 15
-    # optuna_constraint_values = 8개 (별도 구조)
-    assert len(result.optuna_constraint_values) == 8
+    # _PROMOTION_BLOCKERS = 16개 항목 -> promotion_constraint_values = 16개
+    assert len(result.promotion_constraint_values) == 16
+    # optuna_constraint_values = 9개 (별도 구조)
+    assert len(result.optuna_constraint_values) == 9
 
 
 # ---------------------------------------------------------------------------

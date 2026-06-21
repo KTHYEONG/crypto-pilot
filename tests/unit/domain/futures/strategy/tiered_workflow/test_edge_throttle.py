@@ -196,24 +196,22 @@ class TestBookEdgeScore:
         """S7: all weights zero → 0.0."""
         w: NDArray[np.float64] = np.zeros(4, dtype=np.float64)
         mu = np.array([3.0, 5.0, 2.0, 7.0], dtype=np.float64)
-        hurdle: NDArray[np.float64] = np.full(4, 1.0, dtype=np.float64)
-        assert _book_edge_score(w, mu, hurdle) == pytest.approx(0.0)
+        # Fix 1: hurdle 인자 제거 — mu는 이미 net-of-cost (이중차감 방지)
+        assert _book_edge_score(w, mu) == pytest.approx(0.0)
 
     def test_equal_weight_simple(self) -> None:
-        """Gross-weighted avg net-of-cost: |mu| - hurdle, no negatives."""
+        """Gross-weighted avg |mu| (mu already net-of-cost — Fix 1)."""
         w = np.array([0.5, 0.5, 0.0], dtype=np.float64)
-        mu = np.array([6.0, 4.0, 10.0], dtype=np.float64)
-        hurdle = np.array([1.0, 1.0, 1.0], dtype=np.float64)
-        # net_edge: [5.0, 3.0, 0.0]; gross-weighted: (0.5*5 + 0.5*3)/(0.5+0.5) = 4.0
-        assert _book_edge_score(w, mu, hurdle) == pytest.approx(4.0, rel=1e-6)
+        mu = np.array([5.0, 3.0, 0.0], dtype=np.float64)  # 이미 net값
+        # score: (0.5*5 + 0.5*3) / (0.5+0.5) = 4.0
+        assert _book_edge_score(w, mu) == pytest.approx(4.0, rel=1e-6)
 
-    def test_hurdle_clips_negative_to_zero(self) -> None:
-        """mu < hurdle → net_edge=0 for that position."""
+    def test_mu_already_net_no_hurdle_deduction(self) -> None:
+        """Fix 1: mu가 이미 net이므로 추가 차감 없이 그대로 사용."""
         w = np.array([1.0, 1.0], dtype=np.float64)
-        mu = np.array([0.5, 8.0], dtype=np.float64)
-        hurdle = np.array([2.0, 2.0], dtype=np.float64)
-        # net: [0.0, 6.0]; weighted: 3.0
-        assert _book_edge_score(w, mu, hurdle) == pytest.approx(3.0, rel=1e-6)
+        mu = np.array([3.0, 6.0], dtype=np.float64)  # 이미 net
+        # score: (1.0*3 + 1.0*6) / 2.0 = 4.5
+        assert _book_edge_score(w, mu) == pytest.approx(4.5, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------
