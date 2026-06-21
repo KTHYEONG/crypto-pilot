@@ -1147,18 +1147,18 @@ def _run_awf_simulation(
         fold_rets_baseline.append(_fold_b)
         fold_selected_symbols.append(tuple(sorted(_fold_selected)))
         logger.log(PERF,
-            "[AWF-FOLD] fold=%d/%d oos_bars=%d took=%.4fs",
+            "[PERF] awf_fold fold=%d/%d oos_bars=%d took=%.4fs",
             _fold_idx + 1, len(awf_folds),
             fold.oos_end - fold.oos_start,
             time.perf_counter() - t_fold_start,
         )
 
     logger.log(PERF,
-        "[AWF-PERF] total=%.4fs prep=%.4fs rank=%.4fs alloc=%.4fs eval=%.4fs "
-        "n_folds=%d n_rebalances=%d",
-        time.perf_counter() - t_start_total,
-        prof_prep, prof_rank, prof_alloc, prof_eval,
+        "[PERF] awf_total n_folds=%d n_rebalances=%d "
+        "prep=%.4fs rank=%.4fs alloc=%.4fs eval=%.4fs took=%.4fs",
         len(awf_folds), rebalance_count,
+        prof_prep, prof_rank, prof_alloc, prof_eval,
+        time.perf_counter() - t_start_total,
     )
 
     return _AwfSimResult(
