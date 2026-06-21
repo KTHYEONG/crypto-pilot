@@ -42,9 +42,78 @@ from src.core.settings import (
     LOG_MAX_BYTES,
 )
 
-# Performance measurement level (Level 15 is between DEBUG=10 and INFO=20)
-PERF = 15
-logging.addLevelName(PERF, "PERF")
+# Performance measurement level (Level 10 is standard DEBUG)
+PERF = logging.DEBUG
+
+class CategorizedLogger(logging.Logger):
+    """Logger subclass that automatically prefixes debug messages with logical categories."""
+
+    def perf(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        """Log performance-related message at DEBUG level."""
+        if self.isEnabledFor(logging.DEBUG):
+            self._log(logging.DEBUG, msg, args, extra={"category": "PERF"}, **kwargs)
+
+    def data(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        """Log data-related message at DEBUG level."""
+        if self.isEnabledFor(logging.DEBUG):
+            self._log(logging.DEBUG, msg, args, extra={"category": "DATA"}, **kwargs)
+
+    def opt(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        """Log optimization-related message at DEBUG level."""
+        if self.isEnabledFor(logging.DEBUG):
+            self._log(logging.DEBUG, msg, args, extra={"category": "OPT"}, **kwargs)
+
+    def strat(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        """Log strategy-related message at DEBUG level."""
+        if self.isEnabledFor(logging.DEBUG):
+            self._log(logging.DEBUG, msg, args, extra={"category": "STRAT"}, **kwargs)
+
+    def _log(
+        self,
+        level: int,
+        msg: Any,
+        args: Any,
+        exc_info: Any = None,
+        extra: Any = None,
+        stack_info: bool = False,
+        stacklevel: int = 1,
+    ) -> None:
+        if level == logging.DEBUG and isinstance(msg, str):
+            category = None
+            if extra and isinstance(extra, dict) and "category" in extra:
+                category = extra.get("category")
+
+            if not category:
+                msg_upper = msg.upper()
+                if any(x in msg_upper for x in ["[PERF", "[PROFILE", "[PROF", "PERFORMANCE", "TOOK ", "ELAPSED"]):
+                    category = "PERF"
+                elif any(x in msg_upper for x in ["[DATASET", "[DATA", "[AUDIT", "READINESS", "IMPUTED"]):
+                    category = "DATA"
+                elif any(x in msg_upper for x in ["STUDY", "TRIAL", "OPTUNA", "BOTORCH", "SAMPLER", "[OPT"]):
+                    category = "OPT"
+                elif any(x in msg_upper for x in ["[ENSEMBLE", "[META-ALLOCATION", "[GATE", "[SIGNAL-EVIDENCE"]):
+                    category = "STRAT"
+                elif any(x in msg_upper for x in ["[SYS"]):
+                    category = "SYS"
+                else:
+                    category = "SYS"
+
+            if category:
+                prefix = f"[{category}]"
+                if not msg.strip().startswith(prefix):
+                    msg = f"{prefix} {msg}"
+
+        super()._log(
+            level,
+            msg,
+            args,
+            exc_info=exc_info,
+            extra=extra,
+            stack_info=stack_info,
+            stacklevel=stacklevel,
+        )
+
+logging.setLoggerClass(CategorizedLogger)
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -100,6 +169,8 @@ def setup_logger(
     import re
 
     logger = logging.getLogger(name)
+    if not isinstance(logger, CategorizedLogger):
+        logger.__class__ = CategorizedLogger
 
     # 이미 핸들러가 설정되어 있으면 중복 설정 방지 (레벨 초기화 방지)
     if logger.handlers:
