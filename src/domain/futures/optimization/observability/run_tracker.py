@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import optuna
+import optuna.storages.journal
 from optuna.samplers import TPESampler
 from optuna.trial import TrialState
 
@@ -445,11 +446,9 @@ def resolve_futures_parallel_policy(symbol_count: int) -> int:
 def optimize_worker(s_name: str, s_url: str, chunk_size: int) -> None:
     """Worker function for parallel Optuna optimization using global context."""
     import os
-    try:
+    with contextlib.suppress(Exception):
         # Lower CPU priority so that optimization does not lag host gaming or chrome activities
         os.nice(10)
-    except Exception as exc:
-        _logger.debug("os.nice(10) skipped: %r", exc)
 
     global _GLOBAL_BASE_CTX
     if _GLOBAL_BASE_CTX is None:
