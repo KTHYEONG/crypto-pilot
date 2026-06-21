@@ -61,24 +61,24 @@ STRATEGY ENGINE
   STATUS  : ✅ READY (4/4 Folds Ready)
 
   [✅] Fold #0 (FitEnd: 2023-09-30 -> OOS: 2023-10-01 ~ 2023-12-31)
-       ├─ Symbols : 21 symbols loaded [AAVEUSDT, ANKRUSDT, ARPAUSDT, ARUSDT, BANDUSDT, BCHUSDT, DOTUSDT, ENSUSDT, +13 more]
-       ├─ Events  : 2905 unique events
-       └─ Quality : Edge: 126.38 bps
+       ├─ Symbols : 7 symbols loaded [ANKRUSDT, ARPAUSDT, ARUSDT, BANDUSDT, BCHUSDT, MTLUSDT, NEOUSDT]
+       ├─ Events  : 349 unique events
+       └─ Quality : Edge: 46.12 bps
 
   [✅] Fold #1 (FitEnd: 2023-12-31 -> OOS: 2023-12-31 ~ 2024-03-31)
-       ├─ Symbols : 25 symbols loaded [1000XECUSDT, ADAUSDT, ARUSDT, ATOMUSDT, AVAXUSDT, BANDUSDT, BTCUSDT, CRVUSDT, +17 more]
-       ├─ Events  : 8357 unique events
-       └─ Quality : Edge: 77.09 bps
+       ├─ Symbols : 7 symbols loaded [AVAXUSDT, BANDUSDT, DOGEUSDT, DOTUSDT, NEARUSDT, RUNEUSDT, SANDUSDT]
+       ├─ Events  : 2855 unique events
+       └─ Quality : Edge: 60.90 bps
 
   [✅] Fold #2 (FitEnd: 2024-03-31 -> OOS: 2024-04-01 ~ 2024-07-01)
-       ├─ Symbols : 38 symbols loaded [1000SHIBUSDT, 1000XECUSDT, ADAUSDT, ANKRUSDT, ARUSDT, ATOMUSDT, AVAXUSDT, AXSUSDT, +30 more]
-       ├─ Events  : 13420 unique events
-       └─ Quality : Edge: 71.59 bps
+       ├─ Symbols : 18 symbols loaded [ANKRUSDT, ATOMUSDT, BANDUSDT, DOGEUSDT, DOTUSDT, FILUSDT, GALAUSDT, KAVAUSDT, +10 more]
+       ├─ Events  : 6912 unique events
+       └─ Quality : Edge: 149.85 bps
 
   [✅] Fold #3 (FitEnd: 2024-07-01 -> OOS: 2024-07-01 ~ 2024-09-30)
-       ├─ Symbols : 40 symbols loaded [1000SHIBUSDT, 1000XECUSDT, ADAUSDT, ANKRUSDT, ARUSDT, ATOMUSDT, AVAXUSDT, AXSUSDT, +32 more]
-       ├─ Events  : 15150 unique events
-       └─ Quality : Edge: 125.22 bps
+       ├─ Symbols : 19 symbols loaded [ADAUSDT, ANKRUSDT, ARUSDT, ATOMUSDT, DOGEUSDT, DOTUSDT, FILUSDT, GALAUSDT, +11 more]
+       ├─ Events  : 7219 unique events
+       └─ Quality : Edge: 188.07 bps
 
 ──────────────────────────────────────────────────────────────────────────────
 
@@ -88,104 +88,40 @@ STRATEGY ENGINE
 
   ✅ [Time-Coverage  ] :    1.000 (Target >=0.800 )
   ✅ [Signal-Quality ] :    1.000 (Target >=0.900 )
-  ✅ [Symbol-Breadth ] :   41.557 (Target >=3.000 )
+  ✅ [Symbol-Breadth ] :   22.617 (Target >=3.000 )
   ✅ [Stable-Folds   ] :    1.000 (Target >=0.500 )
-  ✅ [Min-Profit     ] :   64.587 (Target >0.000  )
+  ✅ [Min-Profit     ] :   54.089 (Target >0.000  )
 ──────────────────────────────────────────────────────────────────────────────
 
 [ENS-FINAL] Arch-Only   | SYM: 52 | EVT: 432,167 | TOTAL: +54.3 bps | [TRD: +67.5✅ TMO: +50.3✅ MRV: +26.8✅ CRY: +28.4✅ FLO: +28.5✅ UNW: +21.4✅ BTN: +40.9✅]
 
 [L1 FINAL PROMOTION SUMMARY] 🚀
-  RANK  SYMBOL       STRATEGY (Family)                EDGE(bps)  SIG(t-stat)     STATUS
-  ────  ──────────   ───────────────────────────────  ─────────  ──────────────  ──────────────────
-  #1    ANKRUSDT     residual_reversion (rr_24)          +127.2  [5/5] 4.97      [L2-PASS] Q:hi
-  #2    SNXUSDT      trend_pullback_continuation ...     +278.5  [4/5] 4.15      [L2-PASS] Q:hi
-  #3    ANKRUSDT     residual_reversion (rr_48)          +101.1  [4/5] 4.05      [L2-PASS] Q:mid
-  #4    AXSUSDT      residual_reversion (rr_24)           +70.0  [4/5] 3.61      [L2-PASS] Q:hi
-  #5    RUNEUSDT     trend_donchian (donchian_72)        +301.0  [3/5] 3.47      [L2-PASS] Q:hi
-  #6    TRXUSDT      trend_donchian (donchian_72)         +70.3  [3/5] 3.37      [L2-PASS] Q:hi
-  #7    STORJUSDT    trend_pullback_continuation ...     +292.4  [3/5] 3.36      [L2-PASS] Q:hi
-  #8    1000XECUSDT  dual_momentum (dm_12_48)            +121.6  [3/5] 3.29      [L2-PASS] Q:hi
-  #9    GALAUSDT     trend_donchian (donchian_72)        +258.7  [3/5] 3.23      [L2-PASS] Q:mid
-  #10   ZILUSDT      trend_pullback_continuation ...     +179.2  [3/5] 3.14      [L2-PASS] Q:hi
-  #11   LTCUSDT      dual_momentum (dm_12_48)             +67.2  [3/5] 3.13      [L2-PASS] Q:mid
-  #12   VETUSDT      trend_donchian (donchian_72)        +177.1  [3/5] 3.11      [L2-PASS] Q:hi
-  #13   KAVAUSDT     trend_pullback_continuation ...     +200.2  [3/5] 3.06      [L2-PASS] Q:hi
-  #14   XRPUSDT      residual_reversion (rr_24)           +38.5  [3/5] 2.99      [L2-PASS] Q:lo
-  #15   GALAUSDT     residual_reversion (rr_24)           +76.3  [3/5] 2.79      [L2-PASS] Q:lo
-  #16   ATOMUSDT     trend_pullback_continuation ...     +158.9  [3/5] 2.79      [L2-PASS] Q:mid
-  #17   AAVEUSDT     dual_momentum (dm_12_48)            +100.7  [3/5] 2.79      [L2-PASS] Q:mid
-  #18   ETHUSDT      rsi_reversion (rsi_14)               +31.6  [3/5] 2.75      [L2-PASS] Q:hi
-  #19   ETHUSDT      trend_donchian (donchian_72)         +96.7  [3/5] 2.68      [L2-PASS] Q:hi
-  #20   TRBUSDT      trend_ma (ema_18_108)               +101.6  [3/5] 2.68      [L2-PASS] Q:hi
-  #21   TRBUSDT      trend_pullback_continuation ...     +324.8  [3/5] 2.67      [L2-PASS] Q:hi
-  #22   ZRXUSDT      trend_pullback_continuation ...     +269.5  [3/5] 2.61      [L2-PASS] Q:hi
-  #23   FILUSDT      residual_reversion (rr_24)           +55.3  [3/5] 2.55      [L2-PASS] Q:lo
-  #24   ZECUSDT      trend_donchian (donchian_72)        +198.8  [3/5] 2.54      [L2-PASS] Q:hi
-  #25   LTCUSDT      funding_carry (funding_24)           +73.2  [3/5] 2.53      [L2-PASS] Q:hi
-  #26   ARUSDT       trend_donchian (donchian_72)        +216.8  [3/5] 2.52      [L2-PASS] Q:hi
-  #27   ZILUSDT      trend_pullback_continuation ...      +91.5  [3/5] 2.51      [L2-PASS] Q:hi
-  #28   LTCUSDT      funding_zscore_carry (fzs_96)        +82.0  [2/5] 2.48      [L2-PASS] Q:hi
-  #29   AVAXUSDT     funding_extreme_reversal (fe...      +45.8  [2/5] 2.48      [L2-PASS] Q:mid
-  #30   LTCUSDT      funding_zscore_carry (fzs_168)       +75.6  [2/5] 2.46      [L2-PASS] Q:hi
-  #31   IOTAUSDT     trend_pullback_continuation ...     +172.1  [2/5] 2.45      [L2-PASS] Q:hi
-  #32   UNIUSDT      trend_pullback_continuation ...     +143.1  [2/5] 2.43      [L2-PASS] Q:mid
-  #33   NEARUSDT     trend_donchian (donchian_72)        +267.6  [2/5] 2.38      [L2-PASS] Q:hi
-  #34   THETAUSDT    trend_pullback_continuation ...     +204.2  [2/5] 2.37      [L2-PASS] Q:hi
-  #35   SOLUSDT      trend_donchian (donchian_72)        +165.7  [2/5] 2.35      [L2-PASS] Q:hi
-  #36   RVNUSDT      trend_pullback_continuation ...     +178.4  [2/5] 2.34      [L2-PASS] Q:hi
-  #37   THETAUSDT    trend_donchian (donchian_72)        +179.4  [2/5] 2.34      [L2-PASS] Q:hi
-  #38   RSRUSDT      trend_donchian (donchian_72)        +199.5  [2/5] 2.30      [L2-PASS] Q:hi
-  #39   ANKRUSDT     trend_donchian (donchian_72)        +161.7  [2/5] 2.30      [L2-PASS] Q:lo
-  #40   RUNEUSDT     rsi_reversion (rsi_6)                +56.2  [2/5] 2.28      [L2-PASS] Q:hi
-  #41   ZILUSDT      trend_donchian (donchian_72)        +133.3  [2/5] 2.21      [L2-PASS] Q:lo
-  #42   GALAUSDT     trend_ma (ema_18_108)                +69.1  [2/5] 2.19      [L2-PASS] Q:hi
-  #43   SANDUSDT     trend_pullback_continuation ...     +259.1  [2/5] 2.19      [L2-PASS] Q:hi
-  #44   LTCUSDT      funding_zscore_carry (fzs_48)        +82.6  [2/5] 2.18      [L2-PASS] Q:hi
-  #45   LPTUSDT      funding_zscore_carry (fzs_48)       +115.0  [2/5] 2.16      [L2-PASS] Q:mid
-  #46   FILUSDT      trend_pullback_continuation ...     +182.4  [2/5] 2.15      [L2-PASS] Q:lo
-  #47   ZECUSDT      dual_momentum (dm_12_48)             +83.4  [2/5] 2.11      [L2-PASS] Q:lo
-  #48   ZILUSDT      trend_ma (ema_18_108)                +53.3  [2/5] 2.05      [L2-PASS] Q:hi
-  #49   NEOUSDT      funding_zscore_carry (fzs_48)        +92.1  [2/5] 2.03      [L2-PASS] Q:hi
-  #50   GALAUSDT     trend_pullback_continuation ...     +209.9  [2/5] 2.03      [L2-PASS] Q:mid
-  #51   BANDUSDT     trend_ma (ema_18_108)                +52.5  [2/5] 1.92      [L2-PASS] Q:hi
-  #52   1000SHIBUSDT trend_pullback_continuation ...     +132.6  [2/5] 1.89      [L2-PASS] Q:lo
-  #53   ETHUSDT      funding_zscore_carry (fzs_168)       +44.6  [2/5] 1.67      [L2-PASS] Q:mid
-  #54   CRVUSDT      trend_pullback_continuation ...     +168.6  [2/5] 1.63      [L2-PASS] Q:mid
-  #55   KAVAUSDT     trend_ma (ema_18_108)                +33.6  [2/5] 1.63      [L2-PASS] Q:hi
-  #56   ZRXUSDT      trend_donchian (donchian_72)        +200.8  [2/5] 1.63      [L2-PASS] Q:lo
-  #57   BNBUSDT      mtf_breakout_retest (mtf_bor...     +225.5  [2/5] 1.57      [L2-PASS] Q:mid
-  #58   BTCUSDT      trend_donchian (donchian_72)         +60.6  [2/5] 1.56      [L2-PASS] Q:lo
-  #59   AVAXUSDT     trend_ma (ema_12_72)                 +35.5  [1/5] 1.50      [L2-PASS] Q:hi
-  #60   TRBUSDT      trend_ma (ema_12_72)                 +53.9  [1/5] 1.48      [L2-PASS] Q:lo
-  #61   ADAUSDT      trend_ma (ema_18_108)                +28.2  [1/5] 1.44      [L2-PASS] Q:lo
-  #62   ANKRUSDT     trend_ma (ema_18_108)                +38.0  [1/5] 1.44      [L2-PASS] Q:hi
-  #63   CRVUSDT      trend_ma (ema_12_72)                 +35.9  [1/5] 1.43      [L2-PASS] Q:hi
-  #64   RVNUSDT      trend_ma (ema_12_72)                 +35.1  [1/5] 1.40      [L2-PASS] Q:hi
-  #65   DOTUSDT      trend_ma (ema_18_108)                +24.8  [1/5] 1.34      [L2-PASS] Q:hi
-  #66   BNBUSDT      trend_donchian (donchian_72)         +90.6  [1/5] 1.33      [L2-PASS] Q:mid
-  #67   BANDUSDT     residual_reversion (rr_24)           +67.6  [1/5] 1.29      [L2-PASS] Q:lo
-  #68   FILUSDT      trend_ma (ema_12_72)                 +32.3  [1/5] 1.28      [L2-PASS] Q:hi
-  #69   NEARUSDT     trend_ma (ema_18_108)                +36.4  [1/5] 1.26      [L2-PASS] Q:hi
-  #70   IOTAUSDT     trend_ma (ema_18_108)                +39.1  [1/5] 1.25      [L2-PASS] Q:hi
-  #71   ARUSDT       trend_ma (ema_18_108)                +34.4  [1/5] 1.23      [L2-PASS] Q:hi
-  #72   THETAUSDT    trend_ma (ema_18_108)                +29.6  [1/5] 1.17      [L2-PASS] Q:hi
-  #73   AVAXUSDT     trend_ma (ema_18_108)                +32.0  [1/5] 1.17      [L2-PASS] Q:mid
-  #74   SANDUSDT     trend_ma (ema_18_108)                +30.9  [1/5] 1.16      [L2-PASS] Q:hi
-  #75   FILUSDT      trend_ma (ema_18_108)                +27.4  [1/5] 1.15      [L2-PASS] Q:hi
-  #76   SNXUSDT      trend_ma (ema_18_108)                +26.4  [1/5] 1.06      [L2-PASS] Q:lo
-  #77   ATOMUSDT     trend_ma (ema_18_108)                +19.7  [1/5] 1.06      [L2-PASS] Q:hi
-  #78   XRPUSDT      trend_ma (ema_18_108)                +18.0  [1/5] 1.05      [L2-PASS] Q:mid
-  #79   RUNEUSDT     trend_ma (ema_18_108)                +28.9  [1/5] 1.00      [L2-PASS] Q:lo
-  #80   1000SHIBUSDT trend_donchian (donchian_72)        +193.2  [1/5] 0.99      [L2-PASS] Q:lo
-  #81   ZRXUSDT      trend_ma (ema_18_108)                +29.0  [1/5] 0.94      [L2-PASS] Q:hi
-  #82   XLMUSDT      trend_ma (ema_18_108)                +12.9  [1/5] 0.92      [L2-PASS] Q:hi
-  #83   CRVUSDT      trend_ma (ema_18_108)                +22.5  [1/5] 0.92      [L2-PASS] Q:lo
-  #84   AXSUSDT      trend_ma (ema_12_72)                 +16.7  [1/5] 0.79      [L2-PASS] Q:mid
-  #85   DOGEUSDT     trend_ma (ema_18_108)                +17.0  [1/5] 0.68      [L2-PASS] Q:mid
-  #86   1000XECUSDT  trend_ma (ema_12_72)                 +13.3  [1/5] 0.65      [L2-PASS] Q:lo
-  ────  ──────────   ───────────────────────────────  ─────────  ──────────────  ──────────────────
-  [NOT PROMOTED] 1391 pairs | top: no_incremental_edgex777, quality_weight_zerox598, negative_gross_edgex291
+  RANK  SYMBOL       STRATEGY (Family)                EDGE(bps)  LCB(bps)    CONV    FOLDS   t(blk)
+  ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
+  #1    RUNEUSDT     trend_donchian (donchian_72)        +301.0    +207.3    1.00      4/4     3.47
+  #2    STORJUSDT    trend_pullback_continuation ...     +292.4    +190.6    1.00      4/4     3.36
+  #3    SNXUSDT      trend_pullback_continuation ...     +278.5    +153.4    1.00      4/4     4.15
+  #4    NEARUSDT     trend_donchian (donchian_72)        +267.6    +118.5    1.00      4/4     2.38
+  #5    ARUSDT       trend_donchian (donchian_72)        +216.8    +106.6    1.00      4/4     2.52
+  #6    ZRXUSDT      trend_pullback_continuation ...     +269.5    +106.5    1.00      3/4     2.61
+  #7    KAVAUSDT     trend_pullback_continuation ...     +200.2     +95.6    1.00      4/4     3.06
+  #8    ZECUSDT      trend_donchian (donchian_72)        +198.8     +80.8    0.99      3/4     2.54
+  #9    1000XECUSDT  dual_momentum (dm_12_48)            +121.6     +80.6    1.00      4/4     3.29
+  #10   ANKRUSDT     residual_reversion (rr_24)          +127.2     +65.9    1.00      4/4     4.97
+  #11   TRXUSDT      trend_donchian (donchian_72)         +70.3     +39.2    1.00      3/4     3.37
+  #12   LTCUSDT      funding_zscore_carry (fzs_48)        +82.6     +37.5    0.99      3/4     2.18
+  #13   GALAUSDT     trend_ma (ema_18_108)                +69.1     +35.3    0.99      4/4     2.19
+  #14   RUNEUSDT     rsi_reversion (rsi_6)                +56.2     +32.7    1.00      4/4     2.28
+  #15   LTCUSDT      funding_carry (funding_24)           +73.2     +30.7    0.99      4/4     2.53
+  #16   TRBUSDT      trend_ma (ema_18_108)               +101.6     +29.5    0.99      2/4     2.68
+  #17   LTCUSDT      funding_zscore_carry (fzs_168)       +75.6     +22.3    0.99      4/4     2.46
+  #18   LTCUSDT      funding_zscore_carry (fzs_96)        +82.0     +21.1    1.00      4/4     2.48
+  #19   ZILUSDT      trend_ma (ema_18_108)                +53.3     +17.9    0.99      2/4     2.05
+  #20   ANKRUSDT     trend_ma (ema_18_108)                +38.0     +11.5    0.97      3/4     1.44
+  #21   ZRXUSDT      trend_ma (ema_18_108)                +29.0      +9.1    0.95      3/4     0.94
+  #22   NEARUSDT     trend_ma (ema_18_108)                +36.4      +7.6    0.97      3/4     1.26
+  ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
+  [NOT PROMOTED] 1455 pairs | top: no_incremental_edgex777, quality_weight_zerox662, negative_gross_edgex291
 
 
 ● [LAYER UNIVERSE AUDIT]
@@ -195,4 +131,55 @@ STRATEGY ENGINE
   L1     2023-04-01 ~ 2024-09-30           52     0 /  49.0 / 52               0       6  —
 ──────────────────────────────────────────────────────────────────────────────
 
-[TIERED] Phase=l1 — stopping after L1 (not a multilayer phase)
+
+>> LAYER 1: PASS -> Proceeding to Layer 2.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+● [LAYER 2: PORTFOLIO ALLOCATION & RISK OPTIMIZATION]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[L2-SIGNAL-PRE] predict_layer1_signals: registry_symbols=15 activation_floor=0.0 start_idx=5484 end_idx=7674
+  ● [HYPERPARAMETER OPTIMIZATION]
+    - Study Name : l2_study_4h_11b4da52eed4
+    - Config     : 200 trials
+    - Provenance : events=7679 unique_symbols=ANKRUSDT,ARUSDT,GALAUSDT,KAVAUSDT,LTCUSDT,NEARUSDT,RUNEUSDT,SNXUSDT,TRBUSDT,TRXUSDT,ZECUSDT,ZILUSDT,ZRXUSDT fp=3200cd71a8eb
+  ────────────────────────────────────────────────────────────────────────────
+[L2-OPT]: 100%|██████████████████████████████████████████████████████| 200/200 [02:09<00:00,  1.54it/s, Best CAGR: 433.88% | Current: 29.00%]
+[L2-SELECTION] feasible한 trials가 없음 -> fallback
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+● [LAYER 2: PORTFOLIO ALLOCATION & RISK OPTIMIZATION]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[L2-SIGNAL-PRE] predict_layer1_signals: registry_symbols=15 activation_floor=0.0 start_idx=5484 end_idx=7674
+[L2-DEPLOY] L*=1.3575 binding=mdd | CAGR=0.7720 MDD=0.3435 CVaR95=0.0207 RiskUtil=1.145
+[L2-DEPLOY] realization gap: risk_util=1.145 expected≈0.700 (결함 #1/#2 재발 의심 — vol-targeting 또는 gross 제약 확인 요망)
+● [LAYER 2 PORTFOLIO SCORECARD] (2024-12-17 ~ 2025-09-30)
+──────────────────────────────────────────────────────────────────────────────
+  STATUS  : ❌ BLOCKED (no_deployment)
+
+  ✅ [Growth    ] CAGR: +77.2% (>=30.0%) | PnL: +41.4% | Equity x1.41
+  ✅ [Efficiency] Sharpe: 1.520 (>=1.000) | Sortino: 2.298 (>=1.500) | Calmar: 2.248 (>=1.000)
+  ❌ [Risk      ] MDD: 34.3% (<=30.0%) | CVaR95: 2.1% (<=6.0%) | RiskUtil: 114.5%
+  ❌ [Robust    ] Fold: 66.7% (>=60.0%) | Trades: 118 (>=30) | Friction: 0.0%
+  ❌ [Uplift    ] Sharpe Uplift: -0.00 (>=+0.20)
+  ❌ [Integrity ] DSR: 0.000 (>=0.60) | PSR: 0.913 (diag)
+  [Diag     ] RelMDD: 1.41x | Turnover: 0.078
+──────────────────────────────────────────────────────────────────────────────
+
+  [ FOLD DETAIL BREAKDOWN ]
+  ──────────────────────────────────────────────────────────────────────────
+  ├─ Fold #1 : ✅ Sharpe:  3.355 | CAGR:  +501.2% | MDD:  19.8% | Status: PASS | Period: 2024-12-17 ~ 2025-03-22
+       Symbols: 7 [GALAUSDT, LTCUSDT, NEARUSDT, RUNEUSDT, SNXUSDT, TRBUSDT, TRXUSDT]
+  ├─ Fold #2 : ❌ Sharpe: -1.412 | CAGR:   -49.4% | MDD:  28.6% | Status: FAIL | Period: 2025-03-22 ~ 2025-06-26
+       Symbols: 8 [ARUSDT, GALAUSDT, LTCUSDT, NEARUSDT, RUNEUSDT, TRBUSDT, TRXUSDT, ZECUSDT]
+  └─ Fold #3 : ✅ Sharpe:  2.573 | CAGR:   +82.9% | MDD:   7.7% | Status: PASS | Period: 2025-06-26 ~ 2025-09-30
+       Symbols: 8 [ARUSDT, GALAUSDT, KAVAUSDT, LTCUSDT, NEARUSDT, RUNEUSDT, TRBUSDT, TRXUSDT]
+
+● [LAYER UNIVERSE AUDIT]
+──────────────────────────────────────────────────────────────────────────────
+  LAYER  WINDOW RANGE                    SYMS   ACTIVE (min/med/max)       ENTRY    KILL  WARNINGS
+  ─────  ──────────────────────────────  ────   ────────────────────  ──────────  ──────  ────────
+  L2     2024-10-01 ~ 2025-09-30           52    35 /  38.0 / 43             552      19  entry_block_spike
+──────────────────────────────────────────────────────────────────────────────
+
+>> LAYER 2: BLOCKED -> gate_passed=False
+!! FAIL: exit_code=1 reason=layer2_blocked:no_feasible_trials
