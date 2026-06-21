@@ -2030,20 +2030,25 @@ def evaluate_l2_trial(
     )
 
 
-def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
-    """L2 AWF study objective: 보수적 log-growth LCB 최대화."""
+def _evaluate_l2_params(
+    l2_params: dict[str, Any],
+    ctx: TieredContext,
+) -> tuple[float, dict[str, Any], float]:
+    """L2 parameter evaluation logic extracted for parallel optimization.
+
+    Returns:
+        A tuple of (objective_value, user_attributes_dict, elapsed_seconds).
+    """
+    import time
+
     from src.domain.futures.strategy.tiered_workflow import Layer2AllocationConfig
 
-    l2_params = suggest_layered_params(trial, "L2", fixed=ctx.fixed_l1_params or {})
     if not ctx.fixed_l1_params:
-        _logger.warning(
-            "objective_l2_growth called without fixed L1 OOS signals; returning finite penalty"
-        )
-        return -1e6
+        return -1e6, {}, 0.0
 
     signal_batch, awf_folds = _resolve_l2_signal_batch_and_folds(ctx)
     if signal_batch is None or not awf_folds:
-        return -1e6
+        return -1e6, {}, 0.0
 
     # Ensure cache is built if not already present
     if getattr(ctx, "l2_sim_cache", None) is None:
@@ -2052,6 +2057,8 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
 
     cache = ctx.l2_sim_cache
     assert cache is not None
+
+    t_start = time.perf_counter()
     evaluation = evaluate_l2_trial(
         cache=cache,
         signal_batch=signal_batch,
@@ -2061,61 +2068,64 @@ def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
         caps=ctx.caps,
         tf=ctx.tf,
     )
+    t_elapsed = time.perf_counter() - t_start
 
-    _set_float_attr(trial, "l2_objective_value", evaluation.objective_value)
-    _set_float_attr(trial, "cagr_hybrid", evaluation.cagr_hybrid)
-    _set_float_attr(trial, "cagr_baseline", evaluation.cagr_baseline)
-    _set_float_attr(trial, "growth_lcb_hybrid", evaluation.growth_lcb_hybrid)
-    _set_float_attr(trial, "growth_lcb_baseline", evaluation.growth_lcb_baseline)
-    _set_float_attr(trial, "sharpe_hac_hybrid", evaluation.sharpe_hac_hybrid)
-    _set_float_attr(trial, "sharpe_hac_baseline", evaluation.sharpe_hac_baseline)
-    _set_float_attr(trial, "psr_hybrid", evaluation.psr_hybrid)
-    _set_float_attr(trial, "mdd_hybrid", evaluation.mdd_hybrid)
-    _set_float_attr(trial, "cvar_95_hybrid", evaluation.cvar_95_hybrid)
-    _set_float_attr(trial, "fold_pass_ratio", evaluation.fold_pass_ratio)
-    _set_float_attr(trial, "break_even_pass_pct", evaluation.break_even_pass_pct)
-    _set_float_attr(trial, "average_gross_exposure", evaluation.average_gross_exposure)
-    _set_float_attr(trial, "cap_saturation_ratio", evaluation.cap_saturation_ratio)
-    _set_float_attr(trial, "total_cost_bps", evaluation.total_cost_bps)
-    _set_float_attr(trial, "sortino_hybrid", float(getattr(evaluation, "sortino_hybrid", 0.0)))
-    _set_float_attr(trial, "risk_utilization", float(getattr(evaluation, "risk_utilization", 0.0)))
-    _set_float_attr(trial, "recent_fold_sharpe", float(getattr(evaluation, "recent_fold_sharpe", 0.0)))
-    _set_float_attr(trial, "recent_fold_cagr", float(getattr(evaluation, "recent_fold_cagr", 0.0)))
-    _set_float_attr(
-        trial,
-        "latest_to_median_cagr",
-        float(getattr(evaluation, "latest_to_median_cagr", 0.0)),
-    )
-    _set_float_attr(trial, "deploy_leverage", float(getattr(evaluation, "deploy_leverage", 1.0)))
-    _set_float_attr(
-        trial,
-        "deployment_objective_bonus",
-        float(getattr(evaluation, "deployment_objective_bonus", 0.0)),
-    )
-    _set_float_attr(trial, "worst_fold_sharpe", float(getattr(evaluation, "worst_fold_sharpe", 0.0)))
-    trial.set_user_attr("trade_count", getattr(evaluation, "trade_count", 0))
-    trial.set_user_attr(
-        "recent_fold_passed",
-        getattr(evaluation, "recent_fold_passed", None),
-    )
-    trial.set_user_attr("deploy_binding", str(getattr(evaluation, "deploy_binding", "")))
+    user_attrs: dict[str, Any] = {}
+    user_attrs["l2_objective_value"] = float(evaluation.objective_value)
+    user_attrs["cagr_hybrid"] = float(evaluation.cagr_hybrid)
+    user_attrs["cagr_baseline"] = float(evaluation.cagr_baseline)
+    user_attrs["growth_lcb_hybrid"] = float(evaluation.growth_lcb_hybrid)
+    user_attrs["growth_lcb_baseline"] = float(evaluation.growth_lcb_baseline)
+    user_attrs["sharpe_hac_hybrid"] = float(evaluation.sharpe_hac_hybrid)
+    user_attrs["sharpe_hac_baseline"] = float(evaluation.sharpe_hac_baseline)
+    user_attrs["psr_hybrid"] = float(evaluation.psr_hybrid)
+    user_attrs["mdd_hybrid"] = float(evaluation.mdd_hybrid)
+    user_attrs["cvar_95_hybrid"] = float(evaluation.cvar_95_hybrid)
+    user_attrs["fold_pass_ratio"] = float(evaluation.fold_pass_ratio)
+    user_attrs["break_even_pass_pct"] = float(evaluation.break_even_pass_pct)
+    user_attrs["average_gross_exposure"] = float(evaluation.average_gross_exposure)
+    user_attrs["cap_saturation_ratio"] = float(evaluation.cap_saturation_ratio)
+    user_attrs["total_cost_bps"] = float(evaluation.total_cost_bps)
+    user_attrs["sortino_hybrid"] = float(getattr(evaluation, "sortino_hybrid", 0.0))
+    user_attrs["risk_utilization"] = float(getattr(evaluation, "risk_utilization", 0.0))
+    user_attrs["recent_fold_sharpe"] = float(getattr(evaluation, "recent_fold_sharpe", 0.0))
+    user_attrs["recent_fold_cagr"] = float(getattr(evaluation, "recent_fold_cagr", 0.0))
+    user_attrs["latest_to_median_cagr"] = float(getattr(evaluation, "latest_to_median_cagr", 0.0))
+    user_attrs["deploy_leverage"] = float(getattr(evaluation, "deploy_leverage", 1.0))
+    user_attrs["deployment_objective_bonus"] = float(getattr(evaluation, "deployment_objective_bonus", 0.0))
+    user_attrs["worst_fold_sharpe"] = float(getattr(evaluation, "worst_fold_sharpe", 0.0))
+    user_attrs["trade_count"] = int(getattr(evaluation, "trade_count", 0))
+    user_attrs["recent_fold_passed"] = getattr(evaluation, "recent_fold_passed", None)
+    user_attrs["deploy_binding"] = str(getattr(evaluation, "deploy_binding", ""))
+
     gate = getattr(evaluation, "gate", None)
-
-    # DSR-in-the-loop 제거: TPE는 safety constraints만 학습하고 final promotion은 replay 단계에서 검증.
-    trial.set_user_attr("l2_constraint_values", list(evaluation.constraint_values))
-    trial.set_user_attr("l2_optuna_constraint_values", list(evaluation.constraint_values))
+    user_attrs["l2_constraint_values"] = list(evaluation.constraint_values)
+    user_attrs["l2_optuna_constraint_values"] = list(evaluation.constraint_values)
     if gate is not None:
-        trial.set_user_attr(
-            "l2_promotion_constraint_values",
-            list(gate.promotion_constraint_values),
-        )
-        trial.set_user_attr("l2_promotion_passed", bool(gate.promotion_passed))
-        trial.set_user_attr("l2_promotion_blocker", gate.promotion_blocker)
-    trial.set_user_attr(
-        "l2_block_log_growth_signature",
-        [metric.log_growth_hybrid for metric in evaluation.block_metrics],
+        user_attrs["l2_promotion_constraint_values"] = list(gate.promotion_constraint_values)
+        user_attrs["l2_promotion_passed"] = bool(gate.promotion_passed)
+        user_attrs["l2_promotion_blocker"] = gate.promotion_blocker
+    user_attrs["l2_block_log_growth_signature"] = [metric.log_growth_hybrid for metric in evaluation.block_metrics]
+
+    return float(evaluation.objective_value), user_attrs, t_elapsed
+
+
+def objective_l2_growth(trial: Trial, ctx: TieredContext) -> float:
+    """L2 AWF study objective: 보수적 log-growth LCB 최대화."""
+    l2_params = suggest_layered_params(trial, "L2", fixed=ctx.fixed_l1_params or {})
+    value, attrs, t_elapsed = _evaluate_l2_params(l2_params, ctx)
+
+    for k, v in attrs.items():
+        trial.set_user_attr(k, v)
+
+    _logger.log(
+        logging.DEBUG,
+        "[perf-optuna] Trial %d evaluate_l2_trial took %.4fs | Objective: %.6f",
+        trial.number,
+        t_elapsed,
+        value,
     )
-    return float(evaluation.objective_value)
+    return value
 
 
 def layer2_constraints_from_trial(trial: FrozenTrial) -> tuple[float, ...]:
