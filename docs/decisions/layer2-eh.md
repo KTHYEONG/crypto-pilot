@@ -162,6 +162,11 @@ ai_read_policy: when_related
 - **Rationale:** RC-3: `_book_edge_score`가 mu_bps(net)에 eff_hurdle을 재차감하여 edge=0 유도 → throttle m≈0 → book 붕괴. RC-1: `project_all_caps` Cap5가 `min(vol_scale, 1.0)`으로 하향만 허용 → raw Kelly book(연율 vol~20%)이 vol_target=100%에 도달 불가 → unit-vol 정규화 주장과 코드 모순 해소.
 - **Edge Cases:** `allow_vol_upscale` default=False로 기존 모든 호출부 backward-compatible. `_book_edge_score` 시그니처 변경 — 2개 호출부(`awf_sim.py` L812, L994) 모두 2-param으로 정합 완료.
 
+## 2026-06-21 L2 purge WFA activation — fold-boundary label overlap prevention
+- **Delta:** `build_l2_simulation_folds` (`walk_forward.py:436`) no longer overrides `purge_bars=0, embargo_bars=0`. The config's auto-derived purge/embargo (computed from `max_holding_bars * purge_safety_mult`) now applies to L2 folds. `from dataclasses import replace` removed as dead import.
+- **Rationale:** Fold #2 collapse (-49.4%) was caused by a friction dimensional bug (all signals zero → empty book, fixed separately), not insufficient IS length. However, the purge=0 override allowed label overlap at anchored WFA fold boundaries, masking real deterioration. Anchored WFA already provides 2+ years of IS per fold — the issue was structural overlap, not training window size.
+- **Edge Cases:** Default purge/embargo values (auto-derived from `max_holding_bars=36`) are modest (~3-5 bars each). Does NOT affect fold count or OOS range — only the gap between fit/cal and OOS segments. `n_bars` anchoring fix (2026-06-16) remains the primary determinant of fold count stability.
+
 ## 2026-06-19 L2 provenance fingerprint hardening — batch identity now keys study identity
 - **Delta:** `_signal_batch_fingerprint()`가 `ValidatedSignalBatch`의 start/end bounds, symbols, registry/model versions, event count, 그리고 모든 event field를 streaming SHA-256으로 해시하게 됐다. `_layer2_experiment_key()`는 event count만 보지 않고 이 fingerprint를 study identity에 포함하도록 바뀌었다. `_run_tiered_l2_study()`는 event count, unique symbols, fingerprint prefix를 provenance 로그로 남긴다. 관련 회귀 테스트는 real `ValidatedSignalBatch` fixture와 BY permutation/singleton/empty 케이스로 갱신됐다.
 - **Rationale:** event-count-only study names는 같은 크기의 서로 다른 L2 입력을 충돌시킬 수 있었다. 재생성 가능성과 replay 추적성을 batch 내용 수준으로 끌어올려야 결과 SSOT와 실행 계약이 일치한다.

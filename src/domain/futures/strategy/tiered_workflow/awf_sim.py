@@ -907,7 +907,12 @@ def _run_awf_simulation(
                         fixed_cost_safety_mult=fixed_cost_safety_mult,
                     )
                     
-                    gross_edge_by_symbol[symbol] = edge.signed_gross_bps_per_bar
+                    _event_gross: float = (
+                        float(_gross_bps)
+                        if np.isfinite(_gross_bps) and _gross_bps != 0.0
+                        else edge.signed_net_bps_per_bar * float(_holding)
+                    )
+                    gross_edge_by_symbol[symbol] = _event_gross
                     if not np.isfinite(edge.signed_net_bps_per_bar):
                         n_edge_fail += 1
                         n_edge_fail_nan += 1
@@ -1068,8 +1073,8 @@ def _run_awf_simulation(
                     [gross_edge_by_symbol.get(symbols[idx], 0.0) for idx in sel_idx_arr],
                     dtype=np.float64,
                 )
-                expected_cost = hurdle[sel_idx_arr] / max(rebalance_bars, 1)
-                friction_pass = int(np.sum(np.abs(gross_edges) >= expected_cost))
+                total_cost = hurdle[sel_idx_arr] * float(fixed_cost_safety_mult)
+                friction_pass = int(np.sum(np.abs(gross_edges) >= total_cost))
             else:
                 friction_pass = 0
             friction_pass_total += friction_pass
