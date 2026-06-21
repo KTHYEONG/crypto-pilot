@@ -425,15 +425,13 @@ def build_l2_simulation_folds(
     holdout_start_idx: int,
     cfg: CandidateStrategyConfig,
 ) -> tuple[WFFold, ...]:
-    """Build L2 AWF folds without supervised purge/embargo gaps."""
-    from dataclasses import replace
-
+    """Build L2 AWF folds with config-driven purge/embargo gaps."""
     if l2_start_idx < 0 or holdout_start_idx > n_bars or l2_start_idx >= holdout_start_idx:
         raise ValueError(
             "invalid L2 simulation bar range: "
             f"l2_start_idx={l2_start_idx}, holdout_start_idx={holdout_start_idx}, n_bars={n_bars}"
         )
-    sim_cfg = replace(cfg, purge_bars=0, embargo_bars=0)
+    sim_cfg = cfg
     folds = build_walk_forward_folds(n_bars=holdout_start_idx, cfg=sim_cfg)
     filtered = tuple(
         fold for fold in folds if fold.oos_start >= l2_start_idx and fold.oos_end <= holdout_start_idx
