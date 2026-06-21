@@ -10,6 +10,16 @@
 - **Rationale:** ENS 로그에서 일부 flow 계열 항목이 weak/fail 상태로 남았고, 기존 exhaustion 패턴은 deterministic fixture에서 희귀해서 unit test와 운영 신호가 drift를 일으켰다. same-bar exhaustion/reversal과 funding-flow confirmation을 분리해 신호 coverage를 넓히면서도 causal input과 compute budget을 유지했다.
 - **Edge Cases:** taker data가 없거나 invalid이면 flow-dependent panel이 fail-closed 되었고, mixed-valid row는 전체 row 실패로 오인하지 않았다. `flow_exhaustion_reversal`은 same-bar confirmation으로 단순화되어 event testability가 유지되었다.
 
+## L1-ADR-020: 저성과 신호 패밀리 제거 및 per-symbol ENS-DIAG 진단 도입 (2026-06-21)
+- **Delta:** `trend_donchian`(donchian_18/36), `oi_volume_impulse`, `oi_volume_confirmed_breakout`, `oi_price_divergence`, `oi_breakout_confirm`, `basis_zscore_reversion`, `basis_momentum`, `taker_exhaustion_reversal` 8개 family 제거. panel 수 40→31. `_log_signal_symbol_diagnostics` 신규 함수: ENS-FINAL에서 per-(archetype×family×symbol) DEBUG 진단 로그 + absent archetype WARNING 방출. `CandidateSignalPanel.archetype` 기본값 `"mean_rev"`→`""`로 변경하여 family 휴리스틱 우선 동작 보장.
+- **Rationale:** 8개 family 실증 p>0.34, possym<0.50으로 유의성 미달. flow 계열(`funding_flow_carry/unwind`, `flow_exhaustion_reversal`)로 대체하여 coverage 유지. per-symbol 진단으로 데이터와이어링 결함 조기 발견.
+- **Edge Cases:** `_log_signal_symbol_diagnostics`는 DEBUG off 시 O(1) noop. `symbol` 컬럼 부재 시 family rollup만 출력, possym="n/a". 빈 family는 진단에서 skip되어 zero-division 방지.
+
+## L1-ADR-019: MTF 패널 람다 클로저 late-binding 수정 (2026-06-21)
+- **Delta:** `build_rule_signal_panels`의 G1~(mtf_trend_pullback), G2(mtf_breakout_retest), G10(vol_term_structure_gate) 내부 `_compute_*_htf` 함수들에서 루프 변수 `_n_htf`/`_vts_win`을 기본 파라미터(`span=_n_htf` 등)로 캡처하여 Python late-binding closure 버그 수정. `funding_zscore_carry`(F2) 캐시 재사용 경로 통일(`_zscore_2d`→`funding_z_96`/`funding_z_168`). `taker_imbalance_momentum`(G7) CVD slope → `flow_imbalance` z-score로 전환하여 공유 캐시 재사용.
+- **Rationale:** 루프 내 정의 함수가 마지막 루프 값을 공유해 파라미터 오염 가능. flow 캐시 재사용으로 compute budget 절감.
+- **Edge Cases:** 단일 variant family(G4/oi_breakout_confirm)는 제거되어 영향 없음. F2/funding_zscore_carry는 window=48 variant가 `_zscore_2d` 호출 유지(별도 캐시 없음).
+
 ## L1-ADR-013: L1/Universe 파이프라인 루프 불변식 호이스팅 + 벡터화 (2026-06-20)
 - **Delta:** (OPT-1) `align_data_maps` state_cube/readiness_cube 조인 루프에서 `np.searchsorted`/`positions`/`t_valid`/`p_valid` 를 심볼 루프 밖으로 호이스팅. pandas 3.0 bug fix: `calendar.as_unit("ns").asi8` 로 nanosecond epoch 강제. (OPT-2) `inject_membership_masks_into_maps` 진입 시 `_normalize_timeline()` 헬퍼로 timeline 1회 정규화 후 `build_membership_mask_bundle` 에 전달 (104회→1회). (OPT-3) `run_l1_nested_swf` 의 `volatility_2d` 컬럼 루프를 `pd.DataFrame.rolling().std(ddof=1)` 단일 행렬 호출로 대체. (OPT-6) `load_futures_data_maps_for_symbols` 말미 도달불가 중복 `return` 1줄 제거.
 - **Rationale:** PERF 실측(52 syms, 617K events): searchsorted N=52→1, timeline 정규화 104→1. 수치 결과·공개 시그니처 불변. pandas 3.0.2 `.asi8` microsecond 버그는 pre-existing silent production bug였음(unit 미강제 시 1000× 스케일 오류).
