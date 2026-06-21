@@ -82,7 +82,7 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
     panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
 
     assert isinstance(panels, tuple)
-    assert len(panels) == 31
+    assert len(panels) == 34
 
     expected_families = {
         "trend_ma",
@@ -105,6 +105,9 @@ def test_build_rule_signal_panels_returns_expected_tuple() -> None:
         "flow_exhaustion_reversal",
         "funding_extreme_reversal",
         "vol_term_structure_gate",
+        "funding_term_structure_carry",
+        "flow_trend_continuation",
+        "lsr_oi_regime_filter",
     }
 
     for p in panels:
@@ -242,6 +245,9 @@ def test_candidate_strategy_config_defaults_include_new_flow_families() -> None:
         "funding_flow_carry",
         "funding_flow_unwind",
         "flow_exhaustion_reversal",
+        "funding_term_structure_carry",
+        "flow_trend_continuation",
+        "lsr_oi_regime_filter",
     }
     assert expected_families.issubset(set(cfg.candidate_families))
     assert expected_families.issubset(set(cfg.ensemble_variant_prior_families))
@@ -1026,3 +1032,186 @@ def test_mean_rev_gated_out_of_trending_regime() -> None:
     )
 
     assert out[0].side_hint_2d[:, 0].tolist() == [0, 1]
+
+
+# ── G9e. funding_term_structure_carry ─────────────────────────────────────
+
+
+def test_funding_term_structure_carry_entry_detection() -> None:
+    """Scenario 1: funding_z_96 > funding_z_168, same sign, above threshold -> entry.
+
+    Funding drops from 10.0 to 0.0 at bar 168-200, creating:
+    - z_96 (short-term) less negative than z_168 (long-term has higher mean)
+    - slope = z_96 - z_168 > 0 (positive acceleration in bearish direction)
+    """
+    t, n = 400, 1
+    close = np.full((t, n), 100.0, dtype=np.float64)
+    funding = np.full((t, n), 0.0, dtype=np.float64)
+    funding[:168, 0] = 10.0                            # high plateau
+    funding[168:200, 0] = np.linspace(10.0, 0.0, 32)   # sharp decline
+    funding[200:, 0] = 0.0                              # low plateau
+    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
+
+    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
+    panels = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(candidate_families=("funding_term_structure_carry",)),
+    )
+    panel = panels[0]
+    assert panel.family == "funding_term_structure_carry"
+    fired = np.flatnonzero(panel.side_hint_2d[:, 0] != 0)
+    assert len(fired) >= 1, "expected at least one entry under funding acceleration"
+    # After sharp drop, long-term z is negative -> side = -1
+    assert panel.side_hint_2d[fired[0], 0] == -1  # short entry (bearish acceleration)
+    # Score magnitude negative because side=-1 (short); check abs > 0
+    assert np.abs(panel.signed_score_2d[fired[0], 0]) > 0.0
+
+
+def test_funding_term_structure_carry_opposite_direction() -> None:
+    """Scenario 2: funding_z_96 and funding_z_168 have opposite signs -> no entry."""
+    t, n = 260, 1
+    close = np.full((t, n), 100.0, dtype=np.float64)
+    funding = np.full((t, n), 0.0, dtype=np.float64)
+    funding[50:100, 0] = np.linspace(0.0, -0.8, 50, dtype=np.float64)  # long-term negative
+    funding[100:150, 0] = np.linspace(-0.8, 2.0, 50, dtype=np.float64)  # short-term positive flip
+    funding[150:, 0] = 2.0
+    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
+
+    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
+    panels = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(candidate_families=("funding_term_structure_carry",)),
+    )
+    panel = panels[0]
+    assert panel.family == "funding_term_structure_carry"
+    assert not panel.side_hint_2d[:, 0].any(), "opposite signs should block all entries"
+
+
+# ── G9f. flow_trend_continuation ─────────────────────────────────────────
+
+
+def test_flow_trend_continuation_entry_detection() -> None:
+    """Scenario 3: flow_z >= 1.0, ret_12 > 0, ret_1 > 0 -> long-only entry."""
+    t, n = 250, 1
+    close = np.full((t, n), 100.0, dtype=np.float64)
+    close[120:, 0] = np.linspace(100.0, 130.0, t - 120, dtype=np.float64)  # rising
+    funding = np.zeros((t, n), dtype=np.float64)
+    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
+    taker_buy[100:130, 0] = np.linspace(500.0, 950.0, 30, dtype=np.float64)
+    taker_buy[130:150, 0] = 950.0  # sustained high flow
+
+    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
+    panels = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(candidate_families=("flow_trend_continuation",)),
+    )
+    panel = panels[0]
+    assert panel.family == "flow_trend_continuation"
+    fired = np.flatnonzero(panel.side_hint_2d[:, 0] != 0)
+    assert len(fired) >= 1, "expected continuation entries with strong flow + uptrend"
+    assert panel.side_hint_2d[fired[0], 0] == 1  # long-only
+    assert panel.signed_score_2d[fired[0], 0] > 0.0
+
+
+def test_flow_trend_continuation_rejects_negative_trend() -> None:
+    """Scenario 4: ret_12 < 0 (downtrend) -> no entry despite strong flow."""
+    t, n = 250, 1
+    close = np.full((t, n), 100.0, dtype=np.float64)
+    close[120:, 0] = np.linspace(100.0, 70.0, t - 120, dtype=np.float64)  # falling
+    funding = np.zeros((t, n), dtype=np.float64)
+    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
+    taker_buy[100:150, 0] = np.linspace(500.0, 950.0, 50, dtype=np.float64)
+
+    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy)
+    panels = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(candidate_families=("flow_trend_continuation",)),
+    )
+    panel = panels[0]
+    assert panel.family == "flow_trend_continuation"
+    assert not panel.side_hint_2d[:, 0].any(), "downtrend must block all continuations"
+
+
+# ── G9g. lsr_oi_regime_filter ────────────────────────────────────────────
+
+
+def test_lsr_oi_regime_filter_activation() -> None:
+    """Scenario 5: lsr_log_z_42 extreme + oi_build_z_42 rising -> regime active."""
+    t, n = 260, 1
+    close = np.full((t, n), 100.0, dtype=np.float64)
+    funding = np.full((t, n), 0.0, dtype=np.float64)
+    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
+    oi = np.full((t, n), 100.0, dtype=np.float64)
+    oi[150:180, 0] = np.linspace(100.0, 5000.0, 30, dtype=np.float64)   # OI building
+    oi[180:, 0] = 5000.0
+    lsr = np.full((t, n), 1.0, dtype=np.float64)
+    lsr[150:180, 0] = np.linspace(1.0, 20.0, 30, dtype=np.float64)      # LSR extreme
+    lsr[180:, 0] = 20.0
+
+    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy, oi=oi, lsr=lsr)
+    panels = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(candidate_families=("lsr_oi_regime_filter",)),
+    )
+    panel = panels[0]
+    assert panel.family == "lsr_oi_regime_filter"
+    fired = np.flatnonzero(panel.signed_score_2d[:, 0] > 0.0)
+    assert len(fired) >= 1, "expected regime activation with extreme LSR + OI building"
+    # Conditioning gate: side_hint should be all zero
+    assert not panel.side_hint_2d[:, 0].any()
+
+
+def test_lsr_oi_regime_filter_below_threshold() -> None:
+    """Scenario 7: lsr_log_z_42 < 1.0, oi_build_z_42 < 0.5 -> no activation."""
+    t, n = 260, 1
+    close = np.full((t, n), 100.0, dtype=np.float64)
+    funding = np.full((t, n), 0.0, dtype=np.float64)
+    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
+    oi = np.full((t, n), 100.0, dtype=np.float64)
+    lsr = np.full((t, n), 1.0, dtype=np.float64)  # flat LSR, never extreme
+
+    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy, oi=oi, lsr=lsr)
+    panels = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(candidate_families=("lsr_oi_regime_filter",)),
+    )
+    panel = panels[0]
+    assert panel.family == "lsr_oi_regime_filter"
+    assert not panel.signed_score_2d.any(), "below-threshold must produce zero score"
+
+
+# ── positioning_unwind warm-up barrier ────────────────────────────────────
+
+
+def test_positioning_unwind_warm_up_barrier() -> None:
+    """Scenario 6: bar_index < 96 blocked even when all features valid."""
+    t, n = 260, 1
+    close = np.full((t, n), 100.0, dtype=np.float64)
+    close[60:80, :] = np.linspace(100.0, 140.0, 20, dtype=np.float64).reshape(20, 1)
+    close[80, 0] = close[79, 0] - 0.5
+    close[81:, 0] = close[80, 0]
+    funding = np.full((t, n), 0.0, dtype=np.float64)
+    funding[40:, :] = 20.0
+    taker_buy = np.full((t, n), 500.0, dtype=np.float64)
+    taker_buy[60:80, :] = 1000.0
+    taker_buy[80, :] = 0.0
+    oi = np.full((t, n), 100.0, dtype=np.float64)
+    oi[50:80, :] = np.linspace(100.0, 5000.0, 30, dtype=np.float64).reshape(30, 1)
+    oi[80, :] = 40000.0
+    lsr = np.full((t, n), 1.0, dtype=np.float64)
+    lsr[50:80, :] = np.linspace(1.0, 15.0, 30, dtype=np.float64).reshape(30, 1)
+    lsr[80, :] = 20.0
+
+    aligned = _make_flow_aligned(close=close, funding=funding, taker_buy=taker_buy, oi=oi, lsr=lsr)
+    panel = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(candidate_families=("positioning_unwind",)),
+    )[0]
+
+    # All bars < 96 must have valid_mask_2d=False
+    assert not panel.valid_mask_2d[:96, :].any(), \
+        "bars before warm-up (index < 96) must be masked out"
+
+    # Bars >= 96 may have valid_mask_2d=True depending on feature availability
+    assert panel.valid_mask_2d[96:, 0].any() or panel.valid_mask_2d[96:, :].any(), \
+        "bars after warm-up should be eligible when all features are valid"
