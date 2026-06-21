@@ -933,7 +933,12 @@ def run_l1_nested_swf(
     try:
         with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as executor:
             submits = [
-                executor.submit(cw._fit_and_predict_single_fold_from_globals, idx, fold)
+                executor.submit(
+                    cw._fit_and_predict_single_fold_from_globals,
+                    idx,
+                    fold,
+                    idx < num_evidence,
+                )
                 for idx, fold in enumerate(combined_folds)
             ]
             combined_results = [fut.result() for fut in submits]
