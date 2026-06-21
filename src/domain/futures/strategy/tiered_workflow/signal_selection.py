@@ -462,6 +462,11 @@ def compute_symbol_strategy_evidence(
             if boot_means.size > 0
             else (1.0 if mean_incremental > 0.0 else 0.0)
         )
+        lcb_net = (
+            float(np.quantile(boot_means, 0.05))
+            if boot_means.size > 0
+            else mean_incremental
+        )
         block_tstat = (
             float(mean_incremental / (np.std(boot_means, ddof=1) + 1e-12))
             if boot_means.size >= 2 and float(np.std(boot_means, ddof=1)) > 0.0
@@ -548,6 +553,7 @@ def compute_symbol_strategy_evidence(
                 hard_eligible=hard_eligible,
                 structural_reasons=tuple(structural_reasons),
                 diagnostic_flags=tuple(diagnostic_flags),
+                lcb_net_bps=lcb_net,
             )
         )
         raw_p_values.append(p_value)
@@ -558,9 +564,15 @@ def compute_symbol_strategy_evidence(
         q_value = float(q_values[idx])
         diag_flags = list(evidence.diagnostic_flags)
         quality_weight = evidence.quality_weight
+        fdr_hard = bool(getattr(cfg, "l1_fdr_hard_reject", False))
         if q_value > float(cfg.l1_pair_fdr_alpha):
             diag_flags.append("fdr_reject")
-        if evidence.hard_eligible and bool(getattr(cfg, "l1_quality_weight_enabled", True)):
+            if fdr_hard:
+                # Demote to hard ineligible: zero weight and mark as structural rejection
+                quality_weight = 0.0
+            elif evidence.hard_eligible and bool(getattr(cfg, "l1_quality_weight_enabled", True)):
+                quality_weight *= max(0.0, 1.0 - q_value)
+        elif evidence.hard_eligible and bool(getattr(cfg, "l1_quality_weight_enabled", True)):
             quality_weight *= max(0.0, 1.0 - q_value)
         final_evidence.append(
             SymbolStrategyEvidence(
@@ -579,6 +591,7 @@ def compute_symbol_strategy_evidence(
                 hard_eligible=evidence.hard_eligible,
                 structural_reasons=evidence.structural_reasons,
                 diagnostic_flags=tuple(diag_flags),
+                lcb_net_bps=evidence.lcb_net_bps,
             )
         )
     qualified_count = sum(
@@ -619,12 +632,19 @@ def build_qualified_signal_registry(
     symbols: tuple[str, ...],
     min_signals_per_symbol: int,
     registry_version: str,
+    cfg: CandidateStrategyConfig | None = None,
 ) -> QualifiedSignalRegistry:
     grouped: dict[str, list[SymbolStrategyEvidence]] = defaultdict(list)
+    # cfg=None → LCB gate disabled (backward compat for tests / callers without cfg)
+    breakeven: float | None = (
+        float(getattr(cfg, "l1_breakeven_floor_bps", 0.0)) if cfg is not None else None
+    )
     for item in evidence:
         hard_eligible = bool(getattr(item, "hard_eligible", getattr(item, "qualified", False)))
         quality_weight = float(getattr(item, "quality_weight", getattr(item, "reliability", 0.0)))
-        if hard_eligible and quality_weight > 0.0:
+        lcb_net_bps = float(getattr(item, "lcb_net_bps", 0.0))
+        lcb_pass = breakeven is None or lcb_net_bps > breakeven
+        if hard_eligible and quality_weight > 0.0 and lcb_pass:
             grouped[item.key.symbol].append(item)
     by_symbol: dict[str, tuple[SymbolStrategyEvidence, ...]] = {}
     ready_symbols: list[str] = []

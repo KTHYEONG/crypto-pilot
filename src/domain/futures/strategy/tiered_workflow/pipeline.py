@@ -332,6 +332,7 @@ def build_l1_prequential_evidence_snapshots(
             symbols=aligned.symbols,
             min_signals_per_symbol=int(cfg.l1_min_signals_per_symbol),
             registry_version=f"snapshot-{as_of_idx}",
+            cfg=cfg,
         )
         matured_event_count = 0
         if not all_evidence_events.empty and "exit_idx" in all_evidence_events.columns:
@@ -1087,6 +1088,7 @@ def run_l1_nested_swf(
             symbols=aligned.symbols,
             min_signals_per_symbol=int(cfg.l1_min_signals_per_symbol),
             registry_version="deployment",
+            cfg=cfg,
         )
         oos_stacked = _registry_to_symbol_signals(deployment_registry)
         fit_start_idx = min((fold.fit_start for fold in outer_folds), default=0)
