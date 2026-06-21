@@ -601,10 +601,10 @@ def compute_symbol_strategy_evidence(
     t_elapsed = time.perf_counter() - t_core
     logger.log(
         PERF,
-        "[SIGNAL-EVIDENCE] n_pairs=%d n_qualified=%d "
-        "total=%.4fs prep=%.4fs stats=%.4fs qualify=%.4fs",
+        "[PERF] signal_evidence n_pairs=%d n_qualified=%d "
+        "prep=%.4fs stats=%.4fs qualify=%.4fs took=%.4fs",
         len(evidence_list), qualified_count,
-        t_elapsed, t_prep_total, t_stats_total, t_qualify_total,
+        t_prep_total, t_stats_total, t_qualify_total, t_elapsed,
     )
     # 진단: registry 공집합 경고
     if qualified_count == 0 and final_evidence:
