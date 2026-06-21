@@ -35,7 +35,7 @@ Generates vectorized rule panels with archetype/regime contexts, filtered throug
 4. **Profit Floor**: Unconditional cost-based minimum: $\mu_{\text{OOS}} \geq \text{min\_variant\_oos\_profit\_bps}$.
 5. **Regime-Cell Admission (OR-path)**: Rescues signals with strong orthogonal edge in specific regimes via Bayesian posterior: $P(\mu > \delta | \text{data}) \ge p_{\text{admit\_min}}$. Uses Newey-West variance and cross-cell $\tau^2$ shrinkage.
 6. **Multiplicity Controls**:
-   - **BH-FDR**: Limits false discoveries across pool expansion.
+   - **BH-FDR**: Binding false-discovery control across pool expansion (`l1_fdr_hard_reject=True`; `q > l1_pair_fdr_alpha` → `quality_weight = 0`, hard reject). Soft-shrink mode available via `l1_fdr_hard_reject=False`.
    - **SPA**: Hansen's Single Predictive Ability (fail-closed circular bootstrap).
 
 **Ensemble Shrinkage**
@@ -93,10 +93,16 @@ graph TD
 - **Right-Censoring Diagnostic**: `dropped_by_maturity_count` tracks events filtered by `exit_idx >= oos_end` per fold. Exposed in Outer Fold log as `[censored: N]` to distinguish genuine edge weakness from boundary truncation (especially last fold).
 
 **Promotion Summary & L2 Gate**
-- **Actual L2 gate**: `build_qualified_signal_registry` — admits evidence where `hard_eligible AND quality_weight > 0`, with `>= l1_min_signals_per_symbol` per symbol.
-- **STATUS labels** (`[L2-PASS] Q:hi/mid/lo`) reflect q-value quality tier only; all admitted rows are L2-bound regardless of tier.
+- **Actual L2 gate**: `build_qualified_signal_registry` — 4-condition admission:
+  1. `hard_eligible` — structural gates (obs / folds / gross / incremental) all pass
+  2. `lcb_net_bps > l1_breakeven_floor_bps` — economic hard gate: block-bootstrap P5 of incremental gross exceeds round-trip cost (`_DEFAULT_RT_BPS ≈ 7.5 bps` from `ExecutionCostModel`)
+  3. `q_value ≤ l1_pair_fdr_alpha` — binding BH-FDR reject (`l1_fdr_hard_reject=True`; `l1_pair_fdr_alpha=0.10`)
+  4. `quality_weight > 0` — conviction: `max(0, 2P−1) · positive_fold_ratio · sample_scale` where P = P(μ>0) from block-bootstrap
+- **`lcb_net_bps`**: P5 of block-bootstrap means over `incremental_bps` (peer-relative gross edge, cost NOT deducted). Comparison against `breakeven` is a pre-trade cost screen; backtest engine deducts actual costs separately — no double penalty.
+- **`quality_weight`**: Continuous conviction metric passed downstream to L2. No discrete hi/mid/lo tier.
 - **FAIL summary**: `[NOT PROMOTED] N pairs | top: <reason>xN` appears when `all_evidence` is provided, listing structural exclusion reasons for non-admitted pairs.
 - **Promotion Filter**: Diagnostics-level filter (`apply_variant_promotions`) is advisory-only. When no variants are recommended by diagnostics, all events pass through unfiltered; the ultimate filtering authority is `compute_symbol_strategy_evidence` via structural gates and quality weight within the L1 SWF.
+- **Backward compatibility**: `build_qualified_signal_registry(cfg=None)` disables LCB gate (sentinel pattern for tests / callers without cfg).
 
 **PIT Universe Integration**
 - `state_cube` (`UniverseStateCube [T, N]`) injected into `align_data_maps` → `AlignedMarketData.active_mask [T, N]`.
