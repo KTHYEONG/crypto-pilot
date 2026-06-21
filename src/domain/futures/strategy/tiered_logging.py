@@ -447,14 +447,18 @@ def format_layer1_deployment_registry_table(
                 "strategy_id": getattr(key, "strategy_id", ""),
                 "context": getattr(key, "activation_context", "all"),
                 "edge": float(getattr(ev, "mean_incremental_bps", 0.0)),
-                "tstat": float(getattr(ev, "bootstrap_tstat_incremental", 0.0)),
+                "tstat": float(getattr(ev, "block_tstat_incremental", getattr(ev, "bootstrap_tstat_incremental", 0.0))),
+                "lcb": float(getattr(ev, "lcb_net_bps", 0.0)),
+                "prob_pos": float(getattr(ev, "probability_positive", 0.0)),
+                "pos_fold_ratio": float(getattr(ev, "positive_fold_ratio", 0.0)),
+                "n_folds": int(getattr(ev, "n_folds", 0)),
                 "q_value": float(getattr(ev, "q_value", 0.0)),
             })
 
-    all_entries.sort(key=lambda x: x["tstat"], reverse=True)
+    all_entries.sort(key=lambda x: x["lcb"], reverse=True)
 
-    header = f"  {'RANK':<5} {'SYMBOL':<12} {'STRATEGY (Family)':<32} {'EDGE(bps)':>9}  {'SIG(t-stat)':<15} {'STATUS'}"
-    divider = f"  {'─'*4:<5} {'─'*10:<12} {'─'*31:<32} {'─'*9:>9}  {'─'*14:<15} {'─'*18}"
+    header = f"  {'RANK':<5} {'SYMBOL':<12} {'STRATEGY (Family)':<32} {'EDGE(bps)':>9}  {'LCB(bps)':>8}  {'CONV':>6}  {'FOLDS':>7}  {'t(blk)':>7}"  # noqa: E501
+    divider = f"  {'─'*4:<5} {'─'*10:<12} {'─'*31:<32} {'─'*9:>9}  {'─'*8:>8}  {'─'*6:>6}  {'─'*7:>7}  {'─'*7:>7}"
 
     lines: list[str] = ["", "[L1 FINAL PROMOTION SUMMARY] 🚀", header, divider]
 
@@ -468,20 +472,16 @@ def format_layer1_deployment_registry_table(
             strat_display = strat_display[:28] + "..."
 
         t = entry["tstat"]
-        stars_n = min(5, max(1, round(t)))
-        sig_display = f"[{stars_n}/5] {t:.2f}"
-
-        q = entry["q_value"]
-        if q <= 0.30:
-            quality = "Q:hi"
-        elif q <= 0.70:
-            quality = "Q:mid"
-        else:
-            quality = "Q:lo"
-        status = f"[L2-PASS] {quality}"
+        lcb = entry["lcb"]
+        prob = entry["prob_pos"]
+        n_folds = entry["n_folds"]
+        pos_folds = round(entry["pos_fold_ratio"] * n_folds) if n_folds > 0 else 0
+        folds_display = f"{pos_folds}/{n_folds}"
+        conv_display = f"{prob:.2f}"
+        lcb_display = f"{lcb:+.1f}"
 
         lines.append(
-            f"  #{i:<4} {entry['symbol']:<12} {strat_display:<32} {entry['edge']:>+9.1f}  {sig_display:<15} {status}"
+            f"  #{i:<4} {entry['symbol']:<12} {strat_display:<32} {entry['edge']:>+9.1f}  {lcb_display:>8}  {conv_display:>6}  {folds_display:>7}  {t:>7.2f}"  # noqa: E501
         )
 
     if not all_entries:

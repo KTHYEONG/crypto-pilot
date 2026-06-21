@@ -368,9 +368,11 @@ class TestDeploymentRegistryTablePassFail:
         assert "REJECTED" not in result
         assert "WATCH" not in result
         assert "PROMOTED" not in result
-        assert "[L2-PASS] Q:hi" in result
-        assert "[L2-PASS] Q:mid" in result
-        assert "[L2-PASS] Q:lo" in result
+        # New format: Q:hi/mid/lo removed, continuous metrics used instead
+        assert "[L2-PASS]" not in result
+        assert "LCB(bps)" in result
+        assert "CONV" in result
+        assert "FOLDS" in result
 
     def test_s5_empty_registry_with_fail_evidence(self) -> None:
         """S5 (Empty registry): 빈 registry + all_evidence 3 fail → 미전달 메시지 + FAIL 요약."""
