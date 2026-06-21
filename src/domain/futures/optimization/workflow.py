@@ -458,8 +458,7 @@ def _metric(trial: Trial, *keys: str, default: float = 0.0) -> float:
             continue
         try:
             return float(value)
-        except Exception as exc:
-            _logger.debug("trial user attr %s is not numeric: %s", key, exc)
+        except Exception:  # noqa: S112
             continue
     return float(default)
 
@@ -489,8 +488,7 @@ def _metric_vector(trial: Trial, *keys: str) -> list[float]:
         for item in raw:
             try:
                 num = float(item)
-            except Exception as exc:
-                _logger.debug("trial user attr %s item is not numeric: %s", key, exc)
+            except Exception:  # noqa: S112
                 continue
             if math.isfinite(num):
                 vals.append(num)

@@ -65,7 +65,6 @@ class CacheManager:
             for f in to_delete:
                 try:
                     f.unlink()
-                    _logger.debug("LRU Cleanup: Deleted (count limit) %s", f.name)
                 except Exception as e:
                     _logger.warning("Failed to delete cache file %s: %s", f.name, e)
             files = files[len(files) - self.max_files :]
@@ -78,7 +77,6 @@ class CacheManager:
             try:
                 f.unlink()
                 total_size -= f_size
-                _logger.debug("LRU Cleanup: Deleted (size limit) %s", f.name)
             except Exception as e:
                 _logger.warning("Failed to delete cache file %s: %s", f.name, e)
 
