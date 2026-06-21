@@ -1,5 +1,10 @@
 # Layer 1 Architectural Decisions
 
+## L1-ADR-022: L1 PERF 로그 구조개편 — [PERF] 접두사 통일 + 타이밍 가시성 3건 추가 (2026-06-21)
+- **Delta:** `[perf-tiered]` 접두사 전량 → `[PERF]`로 통일. 비타이밍 컨텍스트 로그(`[SWF-CTX]`, `[L1-CTX]`, `[L1-NESTED-COMBINED]` 등) → `logger.debug()`로 강등. 신규: ① `[PERF] l1_nested_fold_avg_profile` (combined_results timing_profile 집계, 기존 `run_l1_swf`의 `[SWF-PROFILE]` 상당이나 nested path에 없었음), ② `[PERF] l1_outer_fold` 포맷 확장 → `batch=/ sel=/ eval=/ total=` 세분화, ③ `portfolio_constructor.py` `solve_constrained_weights`/`diagonal_kelly_weights`/`precompute_rolling_covariances` PERF 타이머 3종 추가.
+- **Rationale:** DEBUG 실행 시 `grep '\[PERF\]'`로 타이밍 로그만 즉시 필터 가능해야 함. 기존 혼재된 접두사(`[perf-tiered]`, `[SWF-*]`, `[L1-*]`)로 grep 불가. outer fold 내 `_candidate_output_to_signal_batch`/`select_outer_symbol_opportunities`/`evaluate_outer_signal_opportunities` 3함수와 portfolio_constructor 핵심 함수 시간이 전혀 측정되지 않아 병목 포착 불가.
+- **Edge Cases:** PERF 레벨(=10=DEBUG)이므로 프로덕션 INFO 핸들러에서는 출력 없음. portfolio_constructor `n==0` 조기 return 경로는 타이머 미삽입(trivial path).
+
 ## L1-ADR-021: L1→L2 게이트 재설계 — LCB 경제성 하드게이트 + 바인딩 FDR + Q:hi/mid/lo 제거 (2026-06-21)
 - **Delta:** `build_qualified_signal_registry` admit 조건을 4-condition 로 재정의. `lcb_net_bps` (block-bootstrap P5 of incremental gross) 필드 추가. `l1_breakeven_floor_bps=_DEFAULT_RT_BPS(≈7.5bps)`, `l1_fdr_hard_reject=True`, `l1_pair_fdr_alpha=0.10` 기본값 적용. `format_layer1_deployment_registry_table`에서 `Q:hi/mid/lo` 티어·stars·`[L2-PASS]` 라벨 제거 → `LCB(bps)|CONV|FOLDS|t(blk)` 컬럼으로 교체.
 - **Rationale:** 기존 게이트는 P(μ>0)>0.5(동전던지기)가 유일 통계 문턱이었고, FDR은 soft-shrink(비binding)였으며, Q:hi/mid/lo는 다른 추정량(`naive IID t` vs `block t`)을 혼용한 표시전용 레이블이었다. 실질적 경제성·다중성 통제가 없어 노이즈 신호 통과. LCB 하드게이트로 "worst-plausible edge > round-trip cost" 보장.

@@ -49,9 +49,9 @@ STRATEGY ENGINE
 [ENS] Arch-Only   | SYM: 52 | EVT: 182,817 | TOTAL: +44.2 bps | [TRD: +55.7✅ TMO: +32.9✅ MRV: +24.3✅ CRY: +27.5✅ FLO: +27.5✅ UNW: +19.5✅ BTN: +42.6✅]
 [ENS] Arch-Only   | SYM: 52 | EVT: 212,168 | TOTAL: +46.8 bps | [TRD: +58.3✅ TMO: +35.6✅ MRV: +27.2✅ CRY: +26.9✅ FLO: +28.1✅ UNW: +20.5✅ BTN: +41.6✅]
 [ENS] Arch-Only   | SYM: 52 | EVT: 255,079 | TOTAL: +52.3 bps | [TRD: +72.2✅ TMO: +40.5✅ MRV: +28.5✅ CRY:  +5.0✅ FLO: +23.7✅ UNW: +13.1✅ BTN: +49.4✅]
+[ENS] Arch-Only   | SYM: 52 | EVT:  80,760 | TOTAL: +31.0 bps | [TRD: +43.0✅ TMO: +20.5✅ MRV: +18.2✅ CRY:  +3.7✅ FLO: +20.3✅ UNW:  +5.1✅ BTN: +19.0✅]
 [ENS] Arch-Only   | SYM: 52 | EVT: 284,255 | TOTAL: +49.5 bps | [TRD: +66.3✅ TMO: +45.9✅ MRV: +25.5✅ CRY:  +8.3✅ FLO: +19.5✅ UNW: +11.8✅ BTN: +43.1✅]
 [ENS] Arch-Only   | SYM: 52 | EVT: 313,006 | TOTAL: +50.2 bps | [TRD: +65.1✅ TMO: +46.3✅ MRV: +27.9✅ CRY: +13.6✅ FLO: +27.0✅ UNW: +14.0✅ BTN: +44.1✅]
-[ENS] Arch-Only   | SYM: 52 | EVT:  80,760 | TOTAL: +31.0 bps | [TRD: +43.0✅ TMO: +20.5✅ MRV: +18.2✅ CRY:  +3.7✅ FLO: +20.3✅ UNW:  +5.1✅ BTN: +19.0✅]
 [ENS] Arch-Only   | SYM: 52 | EVT: 177,204 | TOTAL: +44.3 bps | [TRD: +57.7✅ TMO: +33.5✅ MRV: +23.5✅ CRY: +20.8✅ FLO: +27.5✅ UNW: +20.1✅ BTN: +37.1✅]
 [ENS] Arch-Only   | SYM: 52 | EVT: 266,303 | TOTAL: +49.7 bps | [TRD: +68.4✅ TMO: +41.2✅ MRV: +25.9✅ CRY:  +3.4✅ FLO: +17.9✅ UNW: +12.5✅ BTN: +48.6✅]
 [ENS] Arch-Only   | SYM: 52 | EVT: 348,245 | TOTAL: +53.9 bps | [TRD: +70.0✅ TMO: +47.2✅ MRV: +28.7✅ CRY: +16.9✅ FLO: +35.7✅ UNW: +16.3✅ BTN: +43.5✅]
@@ -135,43 +135,35 @@ STRATEGY ENGINE
 >> LAYER 1: PASS -> Proceeding to Layer 2.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-● [LAYER 2: PORTFOLIO ALLOCATION & RISK OPTIMIZATION]
+● [LAYER 2: OPTUNA TUNING]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[L2-SIGNAL-PRE] predict_layer1_signals: registry_symbols=15 activation_floor=0.0 start_idx=5484 end_idx=7674
-  ● [HYPERPARAMETER OPTIMIZATION]
-    - Study Name : l2_study_4h_4d406ac7aa9d
-    - Config     : 200 trials
-    - Provenance : events=7679 unique_symbols=ANKRUSDT,ARUSDT,GALAUSDT,KAVAUSDT,LTCUSDT,NEARUSDT,RUNEUSDT,SNXUSDT,TRBUSDT,TRXUSDT,ZECUSDT,ZILUSDT,ZRXUSDT fp=601e53f2e1e8
+  ● [STUDY] l2_study_4h_892defb1ef89 | trials=200 | events=7679 | symbols=13
   ────────────────────────────────────────────────────────────────────────────
-[L2-OPT]: 100%|█████████████████████████████████████████████████████| 200/200 [01:41<00:00,  1.97it/s, Best CAGR: 516.93% | Current: 435.05%]
-[L2-SELECTION] No feasible candidate found within fallback window (reason=uplift)
-[L2-DEPLOY-C4] L*=1.615 (binding=mdd) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-● [LAYER 2: PORTFOLIO ALLOCATION & RISK OPTIMIZATION]
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[L2-SIGNAL-PRE] predict_layer1_signals: registry_symbols=15 activation_floor=0.0 start_idx=5484 end_idx=7674
-[L2-DEPLOY] L*=1.6146 binding=champion | CAGR=2.0898 MDD=0.1659 CVaR95=0.0216 RiskUtil=0.553
+[L2-OPT]: 100%|█████████████████████████████████████████████████████| 200/200 [01:06<00:00,  3.02it/s, Best CAGR: 298.20% | Current: 205.71%]
+[L2-SELECTION] No feasible candidate found within fallback window (reason=growth_lcb)
+[L2-DEPLOY-C4] L*=2.537 (binding=mdd) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
+  ● [FINAL SIMULATION]
+[L2-DEPLOY] L*=2.5366 binding=champion | CAGR=0.8298 MDD=0.2064 CVaR95=0.0181 RiskUtil=0.688
 ● [LAYER 2 PORTFOLIO SCORECARD] (2024-12-22 ~ 2025-09-30)
 ──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ❌ BLOCKED (uplift)
+  STATUS  : ❌ BLOCKED (growth_lcb)
 
-  ✅ [Growth    ] CAGR: +209.0% (>=30.0%) | PnL: +75.0% | Equity x1.75
-  ✅ [Efficiency] Sharpe: 2.647 (>=1.000) | Sortino: 4.121 (>=1.500) | Calmar: 12.596 (>=1.000)
-  ✅ [Risk      ] MDD: 16.6% (<=30.0%) | CVaR95: 2.2% (<=6.0%) | RiskUtil: 55.3%
-  ✅ [Robust    ] Fold: 100.0% (>=60.0%) | Trades: 117 (>=30) | Friction: 100.0%
-  ❌ [Uplift    ] Sharpe Uplift: +0.01 (>=+0.20)
-  ✅ [Integrity ] DSR: 0.888 (>=0.60) | PSR: 0.991 (diag)
-  [Diag     ] RelMDD: 1.70x | Turnover: 0.077
+  ✅ [Growth    ] CAGR: +83.0% (>=30.0%) | PnL: +22.0% | Equity x1.22
+  ✅ [Efficiency] Sharpe: 1.698 (>=1.000) | Sortino: 2.772 (>=1.500) | Calmar: 4.020 (>=1.000)
+  ✅ [Risk      ] MDD: 20.6% (<=30.0%) | CVaR95: 1.8% (<=6.0%) | RiskUtil: 68.8%
+  ✅ [Robust    ] Fold: 66.7% (>=60.0%) | Trades: 212 (>=30) | Friction: 100.0%
+  ✅ [Uplift    ] Sharpe Uplift: +0.56 (>=+0.20)
+  ✅ [Integrity ] DSR: 0.841 (>=0.60) | PSR: 0.940 (diag)
+  [Diag     ] RelMDD: 2.79x | Turnover: 0.058
 ──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ✅ Sharpe:  4.107 | CAGR:  +778.6% | MDD:  15.0% | Status: PASS | Period: 2024-12-22 ~ 2025-03-26
-       Symbols: 6 [GALAUSDT, LTCUSDT, NEARUSDT, RUNEUSDT, TRBUSDT, TRXUSDT]
-  ├─ Fold #2 : ✅ Sharpe:  1.634 | CAGR:   +97.7% | MDD:  15.6% | Status: PASS | Period: 2025-03-26 ~ 2025-06-28
-       Symbols: 7 [GALAUSDT, LTCUSDT, NEARUSDT, RUNEUSDT, TRBUSDT, TRXUSDT, ZECUSDT]
-  └─ Fold #3 : ✅ Sharpe:  1.907 | CAGR:   +70.4% | MDD:  11.5% | Status: PASS | Period: 2025-06-28 ~ 2025-09-30
+  ├─ Fold #1 : ✅ Sharpe:  2.897 | CAGR:  +299.8% | MDD:  12.8% | Status: PASS | Period: 2024-12-22 ~ 2025-03-26
+       Symbols: 8 [ARUSDT, GALAUSDT, LTCUSDT, NEARUSDT, RUNEUSDT, TRBUSDT, TRXUSDT, ZILUSDT]
+  ├─ Fold #2 : ❌ Sharpe: -0.293 | CAGR:   -16.8% | MDD:  17.2% | Status: FAIL | Period: 2025-03-26 ~ 2025-06-28
+       Symbols: 8 [ARUSDT, GALAUSDT, LTCUSDT, NEARUSDT, RUNEUSDT, TRBUSDT, TRXUSDT, ZECUSDT]
+  └─ Fold #3 : ✅ Sharpe:  2.465 | CAGR:   +84.1% | MDD:  10.4% | Status: PASS | Period: 2025-06-28 ~ 2025-09-30
        Symbols: 8 [ARUSDT, GALAUSDT, KAVAUSDT, LTCUSDT, NEARUSDT, RUNEUSDT, TRBUSDT, TRXUSDT]
 
 ● [LAYER UNIVERSE AUDIT]
@@ -182,4 +174,4 @@ STRATEGY ENGINE
 ──────────────────────────────────────────────────────────────────────────────
 
 >> LAYER 2: BLOCKED -> gate_passed=False
-!! FAIL: exit_code=1 reason=layer2_blocked:uplift
+!! FAIL: exit_code=1 reason=layer2_blocked:growth_lcb
