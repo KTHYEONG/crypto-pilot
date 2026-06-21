@@ -385,6 +385,7 @@ class Layer2AllocationConfig:
     l2_max_exchange_leverage: float | None = 10.0
     l2_require_recent_fold_pass: bool = True
     l2_min_recent_fold_sharpe: float = 0.0
+    l2_is_expansion_bars: int = 0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -559,6 +560,7 @@ class Layer2AllocationConfig:
                 params.get("l2_min_recent_fold_sharpe", 0.0),
                 0.0,
             ),
+            l2_is_expansion_bars=cls._as_int(params.get("l2_is_expansion_bars", 0), 0),
         )
 
 
