@@ -572,11 +572,14 @@ def load_single_symbol_data(
                     m_df = pd.read_parquet(m_path)
                     if m_df is not None and not m_df.empty:
                         m_df = m_df.loc[:, ~m_df.columns.duplicated(keep="first")]
-                        m_df["timestamp"] = _to_unix_ms(m_df["datetime"])
-                        exclude_m = ["datetime", "create_time", "symbol"]
+                        release_col = "available_at" if "available_at" in m_df.columns else "datetime"
+                        m_df[release_col] = pd.to_datetime(m_df[release_col], utc=True, errors="coerce")
+                        m_df = m_df.dropna(subset=[release_col]).sort_values(release_col)
+                        m_df["metrics_release_ts"] = _to_unix_ms(m_df[release_col])
+                        exclude_m = ["datetime", "create_time", "symbol", "available_at"]
                         cols_m = [c for c in m_df.columns if c not in exclude_m]
                         metrics_df_prepared = (
-                            m_df[cols_m].sort_values("timestamp").reset_index(drop=True)
+                            m_df[cols_m].sort_values("metrics_release_ts").reset_index(drop=True)
                         )
                 except Exception:
                     _logger.warning("Failed to load metrics data for %s", sym)
@@ -623,8 +626,11 @@ def load_single_symbol_data(
                         df = pd.merge_asof(
                             df,
                             metrics_df_prepared,
-                            on="timestamp",
+                            left_on="timestamp",
+                            right_on="metrics_release_ts",
                             direction="backward",
+                            tolerance=6 * 60 * 60 * 1000,
+                            allow_exact_matches=True,
                         )
                 _append_stage_integrity(
                     integrity_audit,
@@ -848,5 +854,3 @@ def load_futures_data_maps_for_symbols(
                      requested_count, loaded_count, float(loaded_count / max(requested_count, 1)))
 
     return data_maps, oos_data_maps, valid_symbols
-
-
