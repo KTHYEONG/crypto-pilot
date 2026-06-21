@@ -1090,7 +1090,7 @@ def run_l1_nested_swf(
         cfg=cfg,
         seed=seed,
     )
-    t_log = time.perf_counter()
+    t_fmt = time.perf_counter()
     if verbose:
         logger.info(
             format_layer1_outer_fold_table(
@@ -1099,6 +1099,7 @@ def run_l1_nested_swf(
             )
         )
         logger.info(format_layer1_gate_table(gate_report))
+    logger.log(PERF, "[PERF] l1_nested_audit_tables took=%.4fs", time.perf_counter() - t_fmt)
     deployment_registry: QualifiedSignalRegistry | None = None
     inference_artifact: Layer1InferenceArtifact | None = None
     oos_stacked: dict[str, SymbolSignal] = {}
@@ -1126,11 +1127,6 @@ def run_l1_nested_swf(
         logger.log(PERF, "[PERF] l1_fit_inference_artifact took=%.4fs", time.perf_counter() - t_art)
         if verbose:
             logger.info(format_layer1_deployment_registry_table(deployment_registry, all_evidence=deployment_evidence))
-    logger.log(
-        PERF,
-        "[PERF] l1_nested_audit_tables took=%.4fs",
-        time.perf_counter() - t_log,
-    )
     _l1_result = Layer1Result(
         signals_per_fold=tuple(signals_per_fold),
         oos_stacked=oos_stacked,
