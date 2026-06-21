@@ -1,5 +1,10 @@
 # Layer 1 Architectural Decisions
 
+## L1-ADR-021: L1→L2 게이트 재설계 — LCB 경제성 하드게이트 + 바인딩 FDR + Q:hi/mid/lo 제거 (2026-06-21)
+- **Delta:** `build_qualified_signal_registry` admit 조건을 4-condition 로 재정의. `lcb_net_bps` (block-bootstrap P5 of incremental gross) 필드 추가. `l1_breakeven_floor_bps=_DEFAULT_RT_BPS(≈7.5bps)`, `l1_fdr_hard_reject=True`, `l1_pair_fdr_alpha=0.10` 기본값 적용. `format_layer1_deployment_registry_table`에서 `Q:hi/mid/lo` 티어·stars·`[L2-PASS]` 라벨 제거 → `LCB(bps)|CONV|FOLDS|t(blk)` 컬럼으로 교체.
+- **Rationale:** 기존 게이트는 P(μ>0)>0.5(동전던지기)가 유일 통계 문턱이었고, FDR은 soft-shrink(비binding)였으며, Q:hi/mid/lo는 다른 추정량(`naive IID t` vs `block t`)을 혼용한 표시전용 레이블이었다. 실질적 경제성·다중성 통제가 없어 노이즈 신호 통과. LCB 하드게이트로 "worst-plausible edge > round-trip cost" 보장.
+- **Edge Cases:** `cfg=None` 시 LCB gate disable(backward compat). `l1_fdr_hard_reject=False`이면 soft-shrink 유지(하위 호환). `lcb_net_bps`는 peer-relative gross — 비용 이중차감 없음(백테스트 엔진이 별도 차감).
+
 ## L1-ADR-014: Archetype 라벨 의미 정합화 + Evidence Fold 스킵 로그 억제 (2026-06-21)
 - **Delta:** `_log_ensemble_diagnostics`의 `standard_keys` 5종 → `archetype_labels` 7종으로 교체. `mean_rev→MRV`, `ts_mom→TMO`, `unwind→UNW`, `beta_neut→BTN`, `carry_rev→CRY`, `flow_rev→FLO` 명시(첫글자 fallback 의존 제거). `is_evidence_fold` 파라미터로 evidence fold warm-up skip WARNING 억제.
 - **Rationale:** `mean_rev↔ts_mom`이 `MOM↔MRV`로 의미 정반대 swap되어 관측성 결함 유발. Fold #0~1 skip WARNING은 evidence fold 정상 동작(warm-up)이므로 노이즈. 수치 불변, 라벨·로그만 수정.
