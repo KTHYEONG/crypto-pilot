@@ -516,7 +516,13 @@ def build_rule_signal_panels(
     oi_log_change_6[:6] = np.nan
     oi_build_z_42 = _zscore_2d(oi_log_change_6, window=42)
     lsr_log_z_42 = _zscore_2d(lsr_log, window=42)
-    positioning_valid = valid_mask & flow_valid & np.isfinite(funding) & oi_valid & lsr_valid
+    # UNW warm-up: require 96 bars of continuous valid data for z-score stability
+    positioning_warm = np.ones_like(valid_mask, dtype=np.bool_)
+    positioning_warm[:96] = False
+    positioning_valid = (valid_mask & flow_valid & np.isfinite(funding) & oi_valid & lsr_valid
+                         & positioning_warm)
+    # Shared derived features for new panels
+    funding_ts_slope = funding_z_96 - funding_z_168  # positive = short-term more extreme
 
     panels: list[CandidateSignalPanel] = []
 
@@ -1359,6 +1365,126 @@ def build_rule_signal_panels(
                 "edge_hypothesis": (
                     "crowded positioning with rising open interest and long-short skew "
                     "unwinds when flow and price reverse together"
+                ),
+            },
+        )
+    )
+
+    # G9e. funding_term_structure_carry
+    # Entry when funding acceleration is same-direction (short-term z more extreme than long-term)
+    _fts_crowded = np.abs(funding_z_168) >= 0.5  # meaningful funding level
+    _fts_accel = np.abs(funding_ts_slope) >= 0.75  # acceleration above noise
+    _fts_same_dir = (funding_z_96 * funding_z_168) > 0.0  # same direction
+    _fts_entry_cond = _fts_crowded & _fts_accel & _fts_same_dir & shared_valid
+    _fts_entry = _entry_rising_edge_2d(_fts_entry_cond)
+    _fts_side = np.where(_fts_entry, np.sign(funding_z_168).astype(np.int8), 0)
+    _fts_score = _fts_side.astype(np.float64) * np.clip(
+        np.abs(funding_ts_slope) - 0.75, 0.0, 1.0
+    )
+
+    panels.append(
+        CandidateSignalPanel(
+            family="funding_term_structure_carry",
+            variant="fts_carry_96168",
+            params={"short_window": 96, "long_window": 168},
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=_fts_score,
+            side_hint_2d=_fts_side,
+            expected_holding_bars=12,
+            min_holding_bars=4,
+            stop_atr_mult=1.5,
+            take_profit_atr_mult=2.0,
+            turnover_proxy_2d=np.abs(np.diff(_fts_score, axis=0, prepend=0.0)),
+            valid_mask_2d=shared_valid,
+            metadata={
+                "archetype": "carry_rev",
+                "regime": "funding_ts_carry",
+                "edge_hypothesis": (
+                    "funding acceleration (short-term z > long-term z) "
+                    "signals inflow continuing before mean-reversion"
+                ),
+            },
+        )
+    )
+
+    # G9f. flow_trend_continuation
+    # Entry when flow supports ongoing trend (not reversal but continuation)
+    _flo_cont_flow_ok = flow_z_24 >= 1.0    # strong flow
+    _flo_cont_ret_trend = ret_12 > 0.0       # positive 12-bar trend
+    _flo_cont_ret_inertia = ret_1 > 0.0      # same-bar continuation
+    _flo_cont_cond = (_flo_cont_flow_ok & _flo_cont_ret_trend & _flo_cont_ret_inertia
+                      & shared_valid)
+    _flo_cont_entry = _entry_rising_edge_2d(_flo_cont_cond)
+    _flo_cont_side = np.where(_flo_cont_entry, 1, 0).astype(np.int8)  # long-only continuation
+    _flo_cont_score = np.where(
+        _flo_cont_entry,
+        np.clip(flow_z_24 / 3.0, 0.0, 1.0) * np.clip(ret_12, 0.0, 0.03) / 0.03,
+        0.0,
+    )
+
+    panels.append(
+        CandidateSignalPanel(
+            family="flow_trend_continuation",
+            variant="flo_cont_24",
+            params={"flow_window": 24, "ret_window": 12},
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=_flo_cont_score,
+            side_hint_2d=_flo_cont_side,
+            expected_holding_bars=8,
+            min_holding_bars=3,
+            stop_atr_mult=1.5,
+            take_profit_atr_mult=2.0,
+            turnover_proxy_2d=np.abs(np.diff(_flo_cont_score, axis=0, prepend=0.0)),
+            valid_mask_2d=shared_valid,
+            metadata={
+                "archetype": "flow_rev",
+                "regime": "flow_trend_continuation",
+                "edge_hypothesis": (
+                    "strong flow supporting ongoing price trend signals "
+                    "continuation before exhaustion"
+                ),
+            },
+        )
+    )
+
+    # G9g. lsr_oi_regime_filter (BTN conditioning gate)
+    # Blocks mean-reversion entries when LSR extreme + OI building (positioning-dominated regime)
+    _loi_regime_oi_rising = oi_build_z_42 >= 0.5
+    _loi_regime_lsr_extreme = np.abs(lsr_log_z_42) >= 1.0
+    _loi_regime_active = _loi_regime_oi_rising & _loi_regime_lsr_extreme & positioning_valid
+    _loi_regime_entry = _entry_rising_edge_2d(_loi_regime_active)
+    _loi_score = np.where(
+        _loi_regime_entry,
+        np.clip(
+            (np.abs(lsr_log_z_42) - 1.0) / 2.0 + (oi_build_z_42 - 0.5) / 2.0,
+            0.0, 1.0,
+        ),
+        0.0,
+    )
+
+    panels.append(
+        CandidateSignalPanel(
+            family="lsr_oi_regime_filter",
+            variant="lsr_oi_gate_42",
+            params={"oi_window": 42, "lsr_window": 42},
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=_loi_score,
+            side_hint_2d=np.zeros_like(close, dtype=np.int8),  # conditioning only, no side
+            expected_holding_bars=24,
+            min_holding_bars=12,
+            stop_atr_mult=0.0,   # never stops: conditioning gate, not trading signal
+            take_profit_atr_mult=0.0,
+            turnover_proxy_2d=np.abs(np.diff(_loi_score, axis=0, prepend=0.0)),
+            valid_mask_2d=positioning_valid,
+            metadata={
+                "archetype": "beta_neut",
+                "regime": "lsr_oi_positioning_regime",
+                "edge_hypothesis": (
+                    "extreme LSR with rising OI identifies positioning-dominated regimes; "
+                    "conditioning score gates trend-following vs mean-reversion allocation"
                 ),
             },
         )
