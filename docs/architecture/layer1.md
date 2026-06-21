@@ -55,11 +55,15 @@ Generates vectorized rule panels with archetype/regime contexts, filtered throug
 - `[ENS]` numbers = archetype-pooled EB-shrunken mean edge (bps), NOT per-symbol averages.
 - Unknown archetypes (not in the above 7) fall back to first-letter uppercase.
 
-**Flow-Aware Panels**
+**Flow-Aware Panels & Conditioning Gates**
 - `_safe_taker_imbalance_2d` converts taker buy volume into a cell-level imbalance cache and marks invalid cells as `False` without collapsing mixed-valid rows.
-- `build_rule_signal_panels` reuses shared flow caches across `taker_imbalance_momentum`, `funding_flow_carry`, `funding_flow_unwind`, and `flow_exhaustion_reversal`.
-- `funding_flow_carry` routes to `carry_rev`, `funding_flow_unwind` routes to `unwind`, and `flow_exhaustion_reversal` routes to `flow_rev`.
-- Flow feature cache includes `flow_imbalance`, `flow_mean_6`, `flow_z_24`, `funding_z_96`, `funding_z_168`, `ret_1`, `ret_12`, and `ret_z_48`.
+- `build_rule_signal_panels` reuses shared flow caches across `taker_imbalance_momentum`, `funding_flow_carry`, `funding_flow_unwind`, `flow_exhaustion_reversal`, `funding_term_structure_carry`, `flow_trend_continuation`, and `lsr_oi_regime_filter`.
+- `funding_flow_carry` and `funding_term_structure_carry` route to `carry_rev`; `funding_flow_unwind` and `positioning_unwind` route to `unwind`; `flow_exhaustion_reversal` and `flow_trend_continuation` route to `flow_rev`; `lsr_oi_regime_filter` routes to `beta_neut`.
+- `funding_term_structure_carry` uses `funding_ts_slope = funding_z_96 - funding_z_168` to capture funding acceleration when short-term z exceeds long-term z in the same direction.
+- `flow_trend_continuation` captures flow-supported trend continuation (flow_z_24 >= 1.0 + positive ret_12 + positive ret_1), long-only.
+- `lsr_oi_regime_filter` emits a conditioning score when LSR z-score >= 1.0σ and OI build z-score >= 0.5σ, identifying positioning-dominated regimes. This conditioning gate carries zero side/stop/tp and routes to `beta_neut`.
+- `positioning_unwind` enforces a 96-bar continuous valid data warm-up barrier before entry eligibility, preventing z-score noise in shallow data windows.
+- Flow feature cache includes `flow_imbalance`, `flow_mean_6`, `flow_z_24`, `funding_z_96`, `funding_z_168`, `funding_ts_slope`, `ret_1`, `ret_12`, and `ret_z_48`.
 
 # 3. Architecture Flow
 

@@ -147,3 +147,16 @@
   - `[SKIPPED]` 로그 출력 후 `SYSTEM CONTEXT` 대시보드 도달 전까지의 극심한 데이터 딜레이를 유발하던 Pandas Object 배열 생성 및 groupby cumsum 병목과 피처 타입 변환 오버헤드를 우회하여 데이터 로딩 파이프라인의 Latency를 획기적으로 낮춤.
 - **Status:** Accepted
 
+## L1-ADR-021: CRY/FLO 안정화 신호 3종 추가 및 positioning_unwind warm-up barrier (2026-06-21)
+- **Delta:**
+  - `build_rule_signal_panels`에 신규 패널 3종(`funding_term_structure_carry`, `flow_trend_continuation`, `lsr_oi_regime_filter`)을 G9e/G9f/G9g로 추가.
+  - `positioning_valid`에 `positioning_warm[:96]=False` barrier 도입.
+  - `funding_ts_slope = funding_z_96 - funding_z_168`를 shared feature cache에 등록.
+  - `CandidateStrategyConfig.candidate_families` 및 `ensemble_variant_prior_families`에 3종 family 등록.
+- **Rationale:**
+  - CRY 패널이 EVT 37K 구간에서 -35.5❌로 붕괴하는 원인이 funding 절대레벨 신호 단일 의존이었음. `funding_term_structure_carry`(가속도 기반)로 다각화하여 변동성 완화.
+  - FLO 패널이 13.9~35.8 bps로 불안정: `flow_exhaustion_reversal`(반전)만 존재 → `flow_trend_continuation`(추세 연속) 추가로 패널 다양화.
+  - UNW 패널이 EVT 37K 구간에서 -8.4❌: z-score window(42/96/168)가 채워지기 전 noise 진입. 96-bar warm-up barrier로 사전 차단.
+  - `lsr_oi_regime_filter`는 LSR+OI 극단 국면을 식별하여 conditioning score로 전달, BTN 경로를 통해 TRD/MRV 간접 게이트 역할.
+- **Status:** Accepted
+
