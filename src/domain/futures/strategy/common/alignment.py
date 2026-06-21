@@ -32,6 +32,7 @@ class AlignedMarketData:
     kill_mask: NDArray[np.bool_]
     basis_2d: NDArray[np.float64] | None = None
     oi_2d: NDArray[np.float64] | None = None
+    lsr_2d: NDArray[np.float64] | None = None
     taker_buy_2d: NDArray[np.float64] | None = None
     trades_2d: NDArray[np.float64] | None = None
     adv_usdt_2d: NDArray[np.float64] | None = None
@@ -129,6 +130,7 @@ def align_data_maps(
     funding_2d: NDArray[np.float64] = np.zeros((eff_len, n), dtype=np.float64)
     basis_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
     oi_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
+    lsr_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
     taker_buy_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
     trades_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
     adv_usdt_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
@@ -182,10 +184,16 @@ def align_data_maps(
             basis_2d[:, col] = frame["basis"].iloc[start:end].to_numpy(dtype=np.float64)
         elif "basis_rate" in frame.columns:
             basis_2d[:, col] = frame["basis_rate"].iloc[start:end].to_numpy(dtype=np.float64)
-        if "open_interest" in frame.columns:
+        if "sum_open_interest" in frame.columns:
+            oi_2d[:, col] = frame["sum_open_interest"].iloc[start:end].to_numpy(dtype=np.float64)
+        elif "open_interest" in frame.columns:
             oi_2d[:, col] = frame["open_interest"].iloc[start:end].to_numpy(dtype=np.float64)
         elif "oi" in frame.columns:
             oi_2d[:, col] = frame["oi"].iloc[start:end].to_numpy(dtype=np.float64)
+        if "long_short_ratio" in frame.columns:
+            lsr_2d[:, col] = frame["long_short_ratio"].iloc[start:end].to_numpy(dtype=np.float64)
+        elif "global_long_short_ratio" in frame.columns:
+            lsr_2d[:, col] = frame["global_long_short_ratio"].iloc[start:end].to_numpy(dtype=np.float64)
         if "taker_buy_base" in frame.columns:
             taker_buy_2d[:, col] = frame["taker_buy_base"].iloc[start:end].to_numpy(dtype=np.float64)
         elif "taker_buy_quote" in frame.columns:
@@ -367,6 +375,7 @@ def align_data_maps(
         funding_2d=funding_2d,
         basis_2d=basis_2d,
         oi_2d=oi_2d,
+        lsr_2d=lsr_2d,
         taker_buy_2d=taker_buy_2d,
         trades_2d=trades_2d,
         adv_usdt_2d=adv_usdt_2d,

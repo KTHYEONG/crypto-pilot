@@ -497,6 +497,26 @@ def build_rule_signal_panels(
     ret_12 = _log_return_2d(close, lag=12)
     ret_z_48 = _zscore_2d(ret_12, window=48)
     shared_valid = valid_mask & flow_valid & np.isfinite(funding)
+    fxr_valid = valid_mask & flow_valid
+    oi = (
+        aligned.oi_2d
+        if aligned.oi_2d is not None
+        else np.full_like(close, np.nan, dtype=np.float64)
+    )
+    lsr = (
+        aligned.lsr_2d
+        if aligned.lsr_2d is not None
+        else np.full_like(close, np.nan, dtype=np.float64)
+    )
+    oi_valid = np.isfinite(oi) & (oi > 0.0)
+    lsr_valid = np.isfinite(lsr) & (lsr > 0.0)
+    oi_log = np.where(oi_valid, np.log(oi), np.nan)
+    lsr_log = np.where(lsr_valid, np.log(lsr), np.nan)
+    oi_log_change_6 = oi_log - np.roll(oi_log, 6, axis=0)
+    oi_log_change_6[:6] = np.nan
+    oi_build_z_42 = _zscore_2d(oi_log_change_6, window=42)
+    lsr_log_z_42 = _zscore_2d(lsr_log, window=42)
+    positioning_valid = valid_mask & flow_valid & np.isfinite(funding) & oi_valid & lsr_valid
 
     panels: list[CandidateSignalPanel] = []
 
@@ -1253,16 +1273,14 @@ def build_rule_signal_panels(
 
     # G9c. flow_exhaustion_reversal
     _fxr_shock_side = np.sign(ret_z_48).astype(np.int8)
-    _fxr_exhausted = (np.abs(ret_z_48) >= 1.0) & (np.abs(flow_z_24) >= 2.0)
+    _fxr_exhausted = (np.abs(ret_z_48) >= 1.0) & ((_fxr_shock_side.astype(np.float64) * flow_z_24) >= 2.0)
     _fxr_price_reversal = (_fxr_shock_side.astype(np.float64) * ret_1) < 0.0
-    _fxr_condition = _fxr_exhausted & _fxr_price_reversal & shared_valid
+    _fxr_condition = _fxr_exhausted & _fxr_price_reversal & fxr_valid
     _fxr_entry = _entry_rising_edge_2d(_fxr_condition)
     _fxr_side = np.where(_fxr_entry, -_fxr_shock_side, 0).astype(np.int8, copy=False)
-    _fxr_score_mag = np.clip(
-        (np.abs(ret_z_48) - 1.0) / 1.0 + (np.abs(flow_z_24) / 2.0),
-        0.0,
-        1.0,
-    )
+    _fxr_ret_excess = np.clip(np.abs(ret_z_48) - 1.0, 0.0, 1.0)
+    _fxr_flow_excess = np.clip((np.abs(flow_z_24) - 2.0) / 2.0, 0.0, 1.0)
+    _fxr_score_mag = 0.5 * _fxr_ret_excess + 0.5 * _fxr_flow_excess
     _fxr_score = _fxr_side.astype(np.float64) * _fxr_score_mag
     _fxr_side[:48] = 0
     _fxr_score[:48] = 0.0
@@ -1280,7 +1298,7 @@ def build_rule_signal_panels(
             stop_atr_mult=1.25,
             take_profit_atr_mult=2.0,
             turnover_proxy_2d=np.abs(np.diff(_fxr_score, axis=0, prepend=0.0)),
-            valid_mask_2d=shared_valid,
+            valid_mask_2d=fxr_valid,
             metadata={
                 "archetype": "flow_rev",
                 "regime": "flow_exhaustion_reversal",
@@ -1291,6 +1309,56 @@ def build_rule_signal_panels(
                 "causal_inputs": (
                     "trailing 12-bar return z-score, 24-bar flow z-score, "
                     "and 1-bar return"
+                ),
+            },
+        )
+    )
+
+    # G9d. positioning_unwind
+    _pu_crowded_side = np.sign(funding_z_168).astype(np.int8)
+    _pu_crowding = (
+        (np.abs(funding_z_168) >= 1.0)
+        & ((_pu_crowded_side.astype(np.float64) * lsr_log_z_42) >= 0.75)
+        & (oi_build_z_42 >= 0.75)
+    )
+    _pu_reversal = (
+        (_pu_crowded_side.astype(np.float64) * flow_z_24 <= -1.0)
+        & (_pu_crowded_side.astype(np.float64) * ret_1 < 0.0)
+    )
+    _pu_condition = _pu_crowding & _pu_reversal & positioning_valid
+    _pu_entry = _entry_rising_edge_2d(_pu_condition)
+    _pu_side = np.where(_pu_entry, -_pu_crowded_side, 0).astype(np.int8, copy=False)
+    _pu_funding_excess = np.clip(np.abs(funding_z_168) - 1.0, 0.0, 1.0)
+    _pu_lsr_excess = np.clip(np.abs(lsr_log_z_42) - 0.75, 0.0, 1.0)
+    _pu_oi_excess = np.clip(oi_build_z_42 - 0.75, 0.0, 1.0)
+    _pu_flow_excess = np.clip((-_pu_crowded_side.astype(np.float64) * flow_z_24) - 1.0, 0.0, 1.0)
+    _pu_score_mag = 0.25 * (
+        _pu_funding_excess + _pu_lsr_excess + _pu_oi_excess + _pu_flow_excess
+    )
+    _pu_score = _pu_side.astype(np.float64) * _pu_score_mag
+    _pu_side[:168] = 0
+    _pu_score[:168] = 0.0
+    panels.append(
+        CandidateSignalPanel(
+            family="positioning_unwind",
+            variant="pu_42",
+            params={"funding_window": 168, "positioning_window": 42, "oi_lag": 6},
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=_pu_score,
+            side_hint_2d=_pu_side,
+            expected_holding_bars=10,
+            min_holding_bars=3,
+            stop_atr_mult=1.5,
+            take_profit_atr_mult=2.5,
+            turnover_proxy_2d=np.abs(np.diff(_pu_score, axis=0, prepend=0.0)),
+            valid_mask_2d=positioning_valid,
+            metadata={
+                "archetype": "unwind",
+                "regime": "positioning_unwind",
+                "edge_hypothesis": (
+                    "crowded positioning with rising open interest and long-short skew "
+                    "unwinds when flow and price reverse together"
                 ),
             },
         )
