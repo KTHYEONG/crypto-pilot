@@ -133,6 +133,7 @@ def calibrate_deployment_leverage(
     cvar_margin: float = 0.20,
     l_hard_cap: float = 20.0,
     exchange_leverage_cap: float | None = None,
+    l_floor: float = 1.0,
 ) -> tuple[float, str]:
     """히스토리컬 수익률에서 배치 레버리지 L*를 결정론적으로 산출.
 
@@ -152,6 +153,8 @@ def calibrate_deployment_leverage(
         l_hard_cap: 레버리지 절대 상한.
         exchange_leverage_cap: 거래소 실행가능 notional 레버리지 상한. None=무제한.
             Binance perp 기본 10x. L* > cap 이면 "exchange_cap" binding으로 차단.
+        l_floor: L* 하한. 기본 1.0(기존 동작 보존). <1.0 허용 시 100%-vol book을
+            MDD 예산까지 de-lever 가능(RC-5 수정 동반 필수).
 
     Returns:
         (L*, binding_constraint) — binding ∈ {"mdd","cvar","hard_cap","exchange_cap","none"}.
@@ -164,8 +167,8 @@ def calibrate_deployment_leverage(
     cvar_target = cvar_cap * (1.0 - cvar_margin)
     l_search_hi = l_hard_cap * 10.0  # 충분히 넓은 탐색 범위
 
-    l_mdd = _bisect_max_leverage(arr, _mdd_at_leverage, mdd_target, 1.0, l_search_hi)
-    l_cvar = _bisect_max_leverage(arr, _cvar_95_at_leverage, cvar_target, 1.0, l_search_hi)
+    l_mdd = _bisect_max_leverage(arr, _mdd_at_leverage, mdd_target, float(l_floor), l_search_hi)
+    l_cvar = _bisect_max_leverage(arr, _cvar_95_at_leverage, cvar_target, float(l_floor), l_search_hi)
 
     # 모든 제약 후보 수집 → argmin으로 binding 결정 (realism: trading_bot.md §4)
     candidates: list[tuple[float, str]] = [
@@ -177,7 +180,7 @@ def calibrate_deployment_leverage(
         candidates.append((exchange_leverage_cap, "exchange_cap"))
 
     l_optimal, binding = min(candidates, key=lambda x: x[0])
-    l_final = max(l_optimal, 1.0)
+    l_final = max(l_optimal, float(l_floor))
     return l_final, binding
 
 

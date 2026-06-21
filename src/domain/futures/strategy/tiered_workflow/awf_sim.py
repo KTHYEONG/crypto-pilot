@@ -84,20 +84,18 @@ class _AwfSimResult:
 
 def _book_edge_score(
     w: NDArray[np.float64],
-    mu_bps: NDArray[np.float64],
-    effective_hurdle_bps: NDArray[np.float64],
+    mu_bps: NDArray[np.float64],  # already net-of-cost (per-bar)
 ) -> float:
-    """사이징된 비중의 gross-weighted 평균 net-of-cost edge (bps/bar).
+    """사이징된 비중의 gross-weighted 평균 net edge (bps/bar). mu_bps는 이미 net.
 
     Returns:
-        0.0 if no active positions or all edges are non-positive.
+        0.0 if no active positions.
     """
     abs_w = np.abs(w)
     den = float(np.sum(abs_w))
     if den < 1e-12:
         return 0.0
-    net_edge = np.maximum(np.abs(mu_bps) - effective_hurdle_bps, 0.0)
-    return float(np.dot(abs_w, net_edge) / den)
+    return float(np.dot(abs_w, np.abs(mu_bps)) / den)
 
 
 def _edge_throttle_multiplier(
@@ -196,6 +194,7 @@ def _apply_risk_budget_floor(
         bars_per_year,
         effective_caps,
         support_mask=support,
+        # allow_vol_upscale 기본값 False 유지: scale로 이미 확대 완료, 이중확대 방지
     )
     return np.asarray(np.where(support, projected, 0.0), dtype=np.float64)
 
@@ -656,7 +655,6 @@ def _run_awf_simulation(
     no_trade_band = float(config.no_trade_band)
     rebalance_bars = int(config.rebalance_bars)
     fixed_cost_safety_mult = float(getattr(config, "fixed_cost_safety_mult", 1.25))
-    deploy_cost_safety_mult = float(getattr(config, "deploy_cost_safety_mult", fixed_cost_safety_mult))
     edge_throttle_enabled = bool(getattr(config, "edge_throttle_enabled", True))
     edge_floor_bps = float(getattr(config, "edge_floor_bps", 0.0))
     edge_ref_bps = float(getattr(config, "edge_ref_bps", 5.0))
@@ -812,8 +810,7 @@ def _run_awf_simulation(
                 support_mask=_fit_support_mask,
             )
             if edge_throttle_enabled:
-                _fit_eff_hurdle = _fit_hurdle * deploy_cost_safety_mult / max(float(rebalance_bars), 1.0)
-                _fit_score = _book_edge_score(_fit_w, _fit_mu_arr, _fit_eff_hurdle)
+                _fit_score = _book_edge_score(_fit_w, _fit_mu_arr)
                 _fit_m = _edge_throttle_multiplier(
                     _fit_score,
                     floor_bps=edge_floor_bps,
@@ -995,8 +992,7 @@ def _run_awf_simulation(
                 support_mask=support_mask,
             )
             if edge_throttle_enabled:
-                eff_hurdle = hurdle * deploy_cost_safety_mult / max(float(rebalance_bars), 1.0)
-                score = _book_edge_score(w, mu_arr, eff_hurdle)
+                score = _book_edge_score(w, mu_arr)
                 m = _edge_throttle_multiplier(
                     score,
                     floor_bps=edge_floor_bps,
