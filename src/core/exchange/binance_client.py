@@ -125,7 +125,6 @@ class OrderBookCache:
             age = time.time() - timestamp
 
             if age < self.ttl:
-                self.logger.debug(f"📦 Cache HIT: {symbol} (age: {age * 1000:.0f}ms)")
                 return data
 
         return None
