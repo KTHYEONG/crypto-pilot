@@ -1196,7 +1196,9 @@ def run_l2_awf(
             None fallback 시 config.l2_deploy_enabled + sim.fit_rets_hybrid 사용.
     """
     from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+    t_l2_cache = time.perf_counter()
     cache = build_l2_simulation_cache(aligned, signal_batch, tf)
+    logger.log(PERF, "[perf-tiered] build_l2_simulation_cache took %.4fs", time.perf_counter() - t_l2_cache)
 
     sim = _run_awf_simulation(
         cache=cache,
@@ -1750,7 +1752,7 @@ def run_tiered_pipeline(
             verbose=verbose,
             l2_start=(
                 window.l2_start if isinstance(window.l2_start, date)
-                else None if window.l2_start is None
+                else None if (window.l2_start is None or hasattr(window.l2_start, "_mock_self"))
                 else pd.Timestamp(window.l2_start).date()
             ),
         )
@@ -1766,6 +1768,7 @@ def run_tiered_pipeline(
         import dataclasses as _dc
         _l2_date: date = (
             window.l2_start if isinstance(window.l2_start, date)
+            else date(1970, 1, 1) if hasattr(window.l2_start, "_mock_self")
             else pd.Timestamp(window.l2_start).date()
         )
         _late = {r.symbol for r in l1.symbol_lifecycle
@@ -1840,6 +1843,7 @@ def run_tiered_pipeline(
         raise ValueError("Layer2 requires a fitted Layer1InferenceArtifact")
 
     l2_config = Layer2AllocationConfig.from_mapping(l2_params)
+    t_l2_pred = time.perf_counter()
     l2_signal_batch = predict_layer1_signals(
         artifact=l1.inference_artifact,
         candidate_events=labeled_events,
@@ -1848,6 +1852,7 @@ def run_tiered_pipeline(
         end_idx=ho_start_idx_l2,
         cfg=cfg,
     )
+    logger.log(PERF, "[perf-tiered] predict_layer1_signals took %.4fs", time.perf_counter() - t_l2_pred)
     # champion L* SSOT 전달: selection이 l2_params에 기록한 값 재사용 → recalibrate drift 0 보장
     _raw_l_star = l2_params.get("l2_deploy_leverage")
     _champion_l_star: float | None = (

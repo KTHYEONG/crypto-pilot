@@ -414,14 +414,34 @@ def discover_universe_timeline(
     min_history_bars: int = 0,
     cfg: UniverseConfig | None = None,
 ) -> UniverseTimelineResult:
-    if l2_start is not None and l2_start < oos_start and l2_start < is_start:
-        _logger.warning(
-            "discover_universe_timeline: l2_start(%s) < is_start(%s), "
-            "extending timeline start to l2_start for L2 boundary coverage",
-            l2_start.isoformat(),
-            is_start.isoformat(),
-        )
-        is_start = l2_start
+    import datetime
+    from typing import Any, cast
+    
+    def _to_date(d: Any) -> date:
+        if isinstance(d, str):
+            return datetime.datetime.strptime(d, "%Y-%m-%d").date()
+        return cast(date, d)
+        
+    is_start = _to_date(is_start)
+    oos_start = _to_date(oos_start)
+    end_date = _to_date(end_date)
+    l2_start = _to_date(l2_start) if l2_start is not None else None
+
+    if l2_start is not None and l2_start < oos_start:
+        # L2 시작 시점부터 시뮬레이션 및 데이터 준비를 보장하기 위해 timeline 시작일을 l2_start까지 확장합니다.
+        if l2_start < is_start:
+            _logger.warning(
+                "discover_universe_timeline: l2_start(%s) < is_start(%s), "
+                "extending timeline start to l2_start for L2 boundary coverage",
+                l2_start.isoformat(),
+                is_start.isoformat(),
+            )
+            is_start = l2_start
+        else:
+            # L2 시작점이 IS 기간 내부에 있는 경우(is_start <= l2_start < oos_start)
+            # 유니버스 타임라인이 이미 L2 시작 시점을 완벽히 커버하므로 안전하게 허용하며, 
+            # 데이터 정합성 보장을 위해 is_start를 l2_start로 조정하거나 그대로 유지합니다.
+            pass
 
     # ── PIT-only path (Stage6 legacy path removed) ──
     if cfg is None:
