@@ -198,6 +198,7 @@ def _ensure_universe_ledger_sync(run_config: FuturesRunConfig, window: Quarterly
                 sync_1d=True,
                 sync_4h=True,
                 sync_1m=False,
+                sync_metrics=run_config.sync_metrics,
             )
 
 
@@ -492,6 +493,7 @@ def _ensure_cached_symbol_data_for_targets(
         sync_1d=True,
         sync_4h=True,
         sync_1m=False,
+        sync_metrics=run_config.sync_metrics,
     )
     _logger.debug("[perf-data] backfill base data took %.4fs", time.perf_counter() - t_sync_main)
     if require_exec_1m:
@@ -504,6 +506,7 @@ def _ensure_cached_symbol_data_for_targets(
             sync_1d=False,
             sync_4h=False,
             sync_1m=True,
+            sync_metrics=False,
         )
         _logger.debug("[perf-data] backfill 1m data took %.4fs", time.perf_counter() - t_sync_1m)
 
@@ -578,6 +581,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["full", "fast", "skip"],
     )
     parser.add_argument("--refresh-universe", action="store_true")
+    parser.add_argument("--sync-metrics", action="store_true")
     return parser
 
 
