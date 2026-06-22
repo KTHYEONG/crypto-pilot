@@ -10,7 +10,7 @@ from numpy.typing import NDArray
 
 from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel, SignalExitPolicy
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
-from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.config import CandidateStrategyConfig, apply_per_family_params
 from src.domain.futures.strategy.exit_policies import build_exit_policies_for_panel
 from src.domain.futures.strategy.market_regime import MarketRegimeContext, compute_market_regime_context
 from src.domain.futures.strategy.timeframe_contracts import scale_bar_count
@@ -437,12 +437,60 @@ def _attach_signal_context(
 
 # --- 8 Vectorized Rule Families ---
 
+
+def _vwap_2d(close: NDArray[np.float64], volume: NDArray[np.float64], window: int = 24) -> NDArray[np.float64]:
+    """Rolling VWAP for 2D arrays [T, N]."""
+    n_sym = close.shape[1]
+    pv = close * volume
+    pv_cumsum = np.cumsum(pv, axis=0)
+    v_cumsum = np.cumsum(volume, axis=0)
+    pv_shifted = np.vstack([np.zeros((window, n_sym)), pv_cumsum[:-window]])
+    v_shifted = np.vstack([np.zeros((window, n_sym)), v_cumsum[:-window]])
+    window_pv = pv_cumsum - pv_shifted
+    window_v = v_cumsum - v_shifted
+    return window_pv / np.maximum(window_v, 1e-12)
+
+
+def _supertrend_2d(
+    high: NDArray[np.float64],
+    low: NDArray[np.float64],
+    close: NDArray[np.float64],
+    period: int = 10,
+    multiplier: float = 2.5,
+) -> NDArray[np.int8]:
+    """Simplified SuperTrend: binary trend direction +1/-1 per bar [T, N]."""
+    n_bar = high.shape[0]
+    n_sym = high.shape[1]
+    atr_st = _atr_2d(high, low, close, period=period)
+    hl_avg = (high + low) / 2.0
+    upper = hl_avg + multiplier * atr_st
+    lower = hl_avg - multiplier * atr_st
+    trend = np.zeros((n_bar, n_sym), dtype=np.int8)
+    for t in range(1, n_bar):
+        prev = trend[t - 1]
+        upper[t] = np.where(
+            (upper[t] < upper[t - 1]) | (close[t - 1] > upper[t - 1]),
+            upper[t], upper[t - 1],
+        )
+        lower[t] = np.where(
+            (lower[t] > lower[t - 1]) | (close[t - 1] < lower[t - 1]),
+            lower[t], lower[t - 1],
+        )
+        trend[t] = np.where(
+            prev <= 0,
+            np.where(close[t] > upper[t], 1, -1),
+            np.where(close[t] < lower[t], -1, 1),
+        )
+    return trend
+
+
 def build_rule_signal_panels(
     *,
     aligned: AlignedMarketData,
     cfg: CandidateStrategyConfig,
     normalize_time_horizon: bool = False,
     horizon_base_tf: str = "4h",
+    family_filter: tuple[str, ...] | None = None,
 ) -> tuple[CandidateSignalPanel, ...]:
     """Build trailing-only rule candidates for all symbols."""
     def scale_window(base_bars: int, minimum: int = 1) -> int:
@@ -454,6 +502,7 @@ def build_rule_signal_panels(
     close = aligned.close_2d
     high = aligned.high_2d
     low = aligned.low_2d
+    open = aligned.open_2d
     vol = aligned.volume_2d
     funding = aligned.funding_2d
     signal_active_mask = (
@@ -1601,6 +1650,226 @@ def build_rule_signal_panels(
                 },
             )
         )
+
+    # ── NEW: 6 signal families ───────────────────────────────────────────────
+
+    # A. gap_fade_1h
+    _open_minus_close = open - np.vstack([close[:1], close[:-1]])
+    _gap = _open_minus_close / np.maximum(atr, 1e-12)
+    _gap_extreme = np.abs(_gap) > 2.0
+    _gap_side = np.zeros_like(close, dtype=np.int8)
+    _gap_side[_gap > 2.0] = -1
+    _gap_side[_gap < -2.0] = 1
+    _gap_score = -np.tanh(_gap / 2.0)
+    panels.append(
+        CandidateSignalPanel(
+            family="gap_fade_1h",
+            variant="gf_1h",
+            params=apply_per_family_params(cfg, "gap_fade_1h", "gf_1h", {
+                "entry_z": 2.0,
+            }),
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=np.clip(_gap_score, -1.0, 1.0),
+            side_hint_2d=_gap_side,
+            expected_holding_bars=scale_window(4),
+            min_holding_bars=scale_window(1),
+            stop_atr_mult=1.0,
+            take_profit_atr_mult=2.0,
+            turnover_proxy_2d=np.abs(np.diff(_gap_score, axis=0, prepend=0.0)),
+            valid_mask_2d=_gap_extreme & valid_mask,
+            metadata={
+                "archetype": "mean_rev",
+                "regime": "gap_reversion",
+                "edge_hypothesis": "extreme open-close gap mean-reverts within 4 bars in 1h timeframe",
+            },
+        )
+    )
+
+    # B. vwap_reversion_1h
+    _vwap = _vwap_2d(close, vol, window=scale_window(24))
+    _vwap_dev = (close - _vwap) / np.maximum(_rolling_std_2d(close, scale_window(24)), 1e-12)
+    _vwap_extreme = np.abs(_vwap_dev) > 2.0
+    _vwap_side = np.zeros_like(close, dtype=np.int8)
+    _vwap_side[_vwap_dev > 2.0] = -1
+    _vwap_side[_vwap_dev < -2.0] = 1
+    _vwap_score = -np.tanh(_vwap_dev / 2.0)
+    panels.append(
+        CandidateSignalPanel(
+            family="vwap_reversion_1h",
+            variant="vwap_24",
+            params=apply_per_family_params(cfg, "vwap_reversion_1h", "vwap_24", {
+                "vwap_window": 24,
+            }),
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=np.clip(_vwap_score, -1.0, 1.0),
+            side_hint_2d=_vwap_side,
+            expected_holding_bars=scale_window(6),
+            min_holding_bars=scale_window(2),
+            stop_atr_mult=1.5,
+            take_profit_atr_mult=2.5,
+            turnover_proxy_2d=np.abs(np.diff(_vwap_score, axis=0, prepend=0.0)),
+            valid_mask_2d=_vwap_extreme & valid_mask,
+            metadata={
+                "archetype": "mean_rev",
+                "regime": "vwap_gap_reversion",
+                "edge_hypothesis": "24h VWAP deviation above 2 sigma mean-reverts in 1h crypto market",
+            },
+        )
+    )
+
+    # C. volume_climax_1h
+    _vol_ma20 = _rolling_mean_2d(vol, window=scale_window(20))
+    _vol_std20 = _rolling_std_2d(vol, window=scale_window(20))
+    _vol_z = (vol - _vol_ma20) / np.maximum(_vol_std20, 1e-12)
+    _ret_abs = np.abs(_log_return_2d(close, lag=scale_window(1)))
+    _atr_rel = atr / np.maximum(close, 1e-12)
+    _climax = (_vol_z > 3.0) & (_ret_abs < 0.5 * _atr_rel)
+    _ma20_close = _rolling_mean_2d(close, window=scale_window(20))
+    _climax_side = np.zeros_like(close, dtype=np.int8)
+    _climax_side[_climax & (close > _ma20_close)] = -1
+    _climax_side[_climax & (close < _ma20_close)] = 1
+    _climax_score = _climax_side.astype(np.float64)
+    panels.append(
+        CandidateSignalPanel(
+            family="volume_climax_1h",
+            variant="vc_1h",
+            params=apply_per_family_params(cfg, "volume_climax_1h", "vc_1h", {
+                "vol_window": 20,
+                "vol_z_threshold": 3.0,
+            }),
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=_climax_score,
+            side_hint_2d=_climax_side,
+            expected_holding_bars=scale_window(6),
+            min_holding_bars=scale_window(2),
+            stop_atr_mult=1.5,
+            take_profit_atr_mult=2.0,
+            turnover_proxy_2d=_climax.astype(np.float64),
+            valid_mask_2d=valid_mask,
+            metadata={
+                "archetype": "mean_rev",
+                "regime": "exhaustion_climax",
+                "edge_hypothesis": "extreme volume with stalled price signals exhaustion (Wyckoff distribution)",
+            },
+        )
+    )
+
+    # D. macd_4h
+    _ema_12_m = _ema_2d(close, span=scale_window(12))
+    _ema_26_m = _ema_2d(close, span=scale_window(26))
+    _macd_line = _ema_12_m - _ema_26_m
+    _macd_signal = _ema_2d(_macd_line, span=scale_window(9))
+    _macd_hist = _macd_line - _macd_signal
+    _macd_hist_prev = np.vstack([_macd_hist[:1], _macd_hist[:-1]])
+    _macd_cross_up = (_macd_hist > 0) & (_macd_hist_prev <= 0)
+    _macd_cross_down = (_macd_hist < 0) & (_macd_hist_prev >= 0)
+    _macd_side = np.zeros_like(close, dtype=np.int8)
+    _macd_side[_macd_cross_up] = 1
+    _macd_side[_macd_cross_down] = -1
+    _macd_score = np.tanh(_macd_hist / atr)
+    panels.append(
+        CandidateSignalPanel(
+            family="macd_4h",
+            variant="macd_12_26_9",
+            params=apply_per_family_params(cfg, "macd_4h", "macd_12_26_9", {
+                "fast": 12, "slow": 26, "signal": 9,
+            }),
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=np.clip(_macd_score, -1.0, 1.0),
+            side_hint_2d=_macd_side,
+            expected_holding_bars=scale_window(12),
+            min_holding_bars=scale_window(4),
+            stop_atr_mult=2.0,
+            take_profit_atr_mult=3.0,
+            turnover_proxy_2d=np.abs(np.diff(_macd_score, axis=0, prepend=0.0)),
+            valid_mask_2d=valid_mask,
+            metadata={
+                "archetype": "trend",
+                "regime": "macd_crossover",
+                "edge_hypothesis": "MACD histogram zero crossover with ATR-normalized signal strength",
+            },
+        )
+    )
+
+    # E. supertrend
+    _st_period = scale_window(10)
+    _st_trend = _supertrend_2d(high, low, close, period=_st_period, multiplier=2.5)
+    _st_score = _st_trend.astype(np.float64)
+    panels.append(
+        CandidateSignalPanel(
+            family="supertrend",
+            variant=f"st_{_st_period}",
+            params=apply_per_family_params(cfg, "supertrend", f"st_{_st_period}", {
+                "period": _st_period, "multiplier": 2.5,
+            }),
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=_st_score,
+            side_hint_2d=_st_trend,
+            expected_holding_bars=scale_window(18),
+            min_holding_bars=scale_window(6),
+            stop_atr_mult=2.5,
+            take_profit_atr_mult=4.0,
+            turnover_proxy_2d=np.abs(np.diff(_st_score, axis=0, prepend=0.0)),
+            valid_mask_2d=valid_mask,
+            metadata={
+                "archetype": "trend",
+                "regime": "supertrend",
+                "edge_hypothesis": "SuperTrend ATR-based trailing stop provides clean trend signals on higher TFs",
+            },
+        )
+    )
+
+    # F. ichimoku_trend
+    _tenkan = (_rolling_max_2d(high, scale_window(9)) + _rolling_min_2d(low, scale_window(9))) / 2
+    _kijun = (_rolling_max_2d(high, scale_window(26)) + _rolling_min_2d(low, scale_window(26))) / 2
+    _cloud_top = (_tenkan + _kijun) / 2
+    _ichi_bull = (_tenkan > _kijun) & (close > _cloud_top)
+    _ichi_bear = (_tenkan < _kijun) & (close < _cloud_top)
+    _ichi_side = np.zeros_like(close, dtype=np.int8)
+    _ichi_side[_ichi_bull] = 1
+    _ichi_side[_ichi_bear] = -1
+    _ichi_score = (_tenkan - _kijun) / np.maximum(atr, 1e-12)
+    panels.append(
+        CandidateSignalPanel(
+            family="ichimoku_trend",
+            variant="ichi_9_26",
+            params=apply_per_family_params(cfg, "ichimoku_trend", "ichi_9_26", {
+                "tenkan": 9, "kijun": 26,
+            }),
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
+            signed_score_2d=np.clip(np.tanh(_ichi_score), -1.0, 1.0),
+            side_hint_2d=_ichi_side,
+            expected_holding_bars=scale_window(24),
+            min_holding_bars=scale_window(8),
+            stop_atr_mult=3.0,
+            take_profit_atr_mult=5.0,
+            turnover_proxy_2d=np.abs(np.diff(np.tanh(_ichi_score), axis=0, prepend=0.0)),
+            valid_mask_2d=_ichi_side.astype(bool) & valid_mask,
+            metadata={
+                "archetype": "trend",
+                "regime": "ichimoku_confirmed",
+                "edge_hypothesis": "Ichimoku 3-confirmation (TK cross + cloud) filters false breakouts on 12h TF",
+            },
+        )
+    )
+
+    # ── family_filter: keep only matching families ──
+    if family_filter is not None:
+        panels = [p for p in panels if p.family in family_filter]
+
+    # ── per_family_params: apply param overrides ──
+    if cfg.per_family_params is not None:
+        from dataclasses import replace
+        panels = [
+            replace(p, params=apply_per_family_params(cfg, p.family, p.variant, p.params))
+            for p in panels
+        ]
 
     panels_with_context = _attach_signal_context(tuple(panels), cfg=cfg, regime_ctx=regime_ctx)
     return filter_rule_signal_panels(panels_with_context, cfg=cfg)
