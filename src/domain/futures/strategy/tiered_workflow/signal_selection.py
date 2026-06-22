@@ -599,6 +599,9 @@ def compute_symbol_strategy_evidence(
                 quality_weight = max(0.0, 2.0 * probability_positive - 1.0)
                 quality_weight *= max(positive_fold_ratio, 0.0)
                 quality_weight *= sample_scale
+                _qw_floor = float(getattr(cfg, "l1_qw_floor", 0.0))
+                if _qw_floor > 0.0 and quality_weight < _qw_floor:
+                    quality_weight = _qw_floor
             else:
                 quality_weight = 1.0
         t_stats_total += time.perf_counter() - t_qs
@@ -718,6 +721,7 @@ def build_qualified_signal_registry(
     min_signals_per_symbol: int,
     registry_version: str,
     cfg: CandidateStrategyConfig | None = None,
+    probe_prior_map: dict[tuple[str, str, str], float] | None = None,
 ) -> QualifiedSignalRegistry:
     grouped: dict[str, list[SymbolStrategyEvidence]] = defaultdict(list)
     # cfg=None → LCB gate disabled (backward compat for tests / callers without cfg)
@@ -729,6 +733,13 @@ def build_qualified_signal_registry(
         quality_weight = float(getattr(item, "quality_weight", getattr(item, "reliability", 0.0)))
         lcb_net_bps = float(getattr(item, "lcb_net_bps", 0.0))
         lcb_pass = breakeven is None or lcb_net_bps > breakeven
+        if probe_prior_map is not None:
+            _family = item.key.strategy_id.split(":")[0] if ":" in item.key.strategy_id else item.key.strategy_id
+            _variant = item.key.strategy_id.split(":")[1] if ":" in item.key.strategy_id else ""
+            _probe_map_key = (_family, _variant, item.key.symbol)
+            _probe_floor = probe_prior_map.get(_probe_map_key, 0.0)
+            if _probe_floor > 0.0 and quality_weight < _probe_floor:
+                quality_weight = _probe_floor
         if hard_eligible and quality_weight > 0.0 and lcb_pass:
             grouped[item.key.symbol].append(item)
     by_symbol: dict[str, tuple[SymbolStrategyEvidence, ...]] = {}
