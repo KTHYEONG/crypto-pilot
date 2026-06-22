@@ -1,5 +1,10 @@
 # Layer 1 Architectural Decisions
 
+## L1-ADR-027: Timeframe Alpha Probe (Stage-1) — (symbol×family×tf) 셀 계측 모듈 신설 (2026-06-22)
+- **Delta:** `timeframe_probe.py` 신설. TF grid {15m,30m,1h,2h,4h,6h,8h,12h} 각각에 대해 `(symbol×family×tf)` 셀 단위로 NW HAC IC, fold 부호일관성, alpha 반감기, 비용조정 net edge, VR/Hurst, BH-FDR(q=0.10)을 병렬 계측. `metrics.py`에 `variance_ratio()`(Lo-MacKinlay), `hurst_dfa()`(DFA) 추가.
+- **Rationale:** 4h 단일 TF 고집이 L2 Fold#2 동시실패 근본원인(trend 편중, tf 다양성 부재). 계측 없이는 1h carry + 4h trend 등 셀별 강점 조합 파악 불가 → 풀 최적화 없이 (symbol×family×tf) 직교성·예측력을 정량화하는 Stage-1 probe 필요.
+- **Edge Cases:** bar-param 정규화(실시간 horizon 고정), entry shift(1) look-ahead 방어, VR/Hurst per-symbol 캐싱(panel 루프 중복 제거). Phase-2(multi-tf → L1/L2 배선)는 별도 spec.
+
 ## L1-ADR-026: signal_batch_convert iterrows 벡터화 (P6) (2026-06-21)
 - **Delta:** `_candidate_output_to_signal_batch` 내 `frame.iterrows()` + per-row `_signal_source_key_from_row`/`pd.to_numeric` 루프(n_raw=80~95K)를 벡터 마스킹으로 교체. key 컬럼 벡터 추출(`astype(str)`) → composite 문자열 `pd.Series.isin(keyset)` registry mask → gross/net/q10/q90 배열 n_raw 패딩(cascade fallback) → gate mask cascade(gross→threshold→decision) → `np.flatnonzero(mask_dec)`으로 n_out 서바이버만 객체화.
 - **Rationale:** P4 로깅이 `loop=2.64s/fold`(pred/keys/sort≈0s), `outer_fold_loop=10.15s` 노출. n_raw 80~95K 전체 Python 루프였으나 n_out은 350~7680. 벡터화 후 `loop=0.04s/fold(-98%)`, `outer_fold_loop=0.53s(-94%)`. `l1_total 53.5s→37.4s(-30%)`, 원본 대비 누적 -50%.
