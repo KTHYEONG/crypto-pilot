@@ -1511,3 +1511,152 @@ class TestTimeframeProbeFixes:
             assert c.passed_fdr is False
 
 
+# -------------------------------------------------------------------------------
+# Resample metadata preservation tests (Fix-2)
+# -------------------------------------------------------------------------------
+
+
+def test_resample_ohlcv_preserves_bool_metadata() -> None:
+    from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
+
+    df = pd.DataFrame({
+        "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
+        "open": [100.0, 101.0, 102.0, 103.0],
+        "high": [101.0, 102.0, 103.0, 104.0],
+        "low": [99.0, 100.0, 101.0, 102.0],
+        "close": [101.0, 102.0, 103.0, 104.0],
+        "volume": [1000.0, 1100.0, 1200.0, 1300.0],
+        "universe_entry_warm_mask": [True, False, True, False],
+    })
+
+    result = _resample_ohlcv(df, "2h")
+
+    assert "universe_entry_warm_mask" in result.columns
+    # Window [00:00, 02:00]: max(True, False) = True
+    # Window [02:00, 04:00]: max(True, False) = True
+    assert result["universe_entry_warm_mask"].tolist() == [True, True]
+
+
+def test_resample_ohlcv_preserves_float_metadata() -> None:
+    from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
+
+    df = pd.DataFrame({
+        "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
+        "open": [100.0, 101.0, 102.0, 103.0],
+        "high": [101.0, 102.0, 103.0, 104.0],
+        "low": [99.0, 100.0, 101.0, 102.0],
+        "close": [101.0, 102.0, 103.0, 104.0],
+        "volume": [1000.0, 1100.0, 1200.0, 1300.0],
+        "cluster_id": [1.0, 2.0, 3.0, 4.0],
+    })
+
+    result = _resample_ohlcv(df, "2h")
+
+    assert "cluster_id" in result.columns
+    # label="right", closed="right", then iloc[:-1] drops last group.
+    # Label 00:00: (22:00, 00:00] → bar 00:00 only → cluster_id=1.0
+    # Label 02:00: (00:00, 02:00] → bars 01:00, 02:00 → cluster_id=2.5
+    assert result["cluster_id"].tolist() == [1.0, 2.5]
+
+
+def test_resample_ohlcv_no_metadata_unchanged() -> None:
+    from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
+
+    df = pd.DataFrame({
+        "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
+        "open": [100.0, 101.0, 102.0, 103.0],
+        "high": [101.0, 102.0, 103.0, 104.0],
+        "low": [99.0, 100.0, 101.0, 102.0],
+        "close": [101.0, 102.0, 103.0, 104.0],
+        "volume": [1000.0, 1100.0, 1200.0, 1300.0],
+    })
+
+    result = _resample_ohlcv(df, "2h")
+
+    assert set(result.columns) == {"datetime", "open", "high", "low", "close", "volume"}
+    assert len(result) == 2
+
+
+def test_resample_probe_source_frame_preserves_metadata() -> None:
+    from src.domain.futures.strategy_runtime.bridge import _resample_probe_source_frame
+
+    df = pd.DataFrame({
+        "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
+        "open": [100.0, 101.0, 102.0, 103.0],
+        "high": [101.0, 102.0, 103.0, 104.0],
+        "low": [99.0, 100.0, 101.0, 102.0],
+        "close": [101.0, 102.0, 103.0, 104.0],
+        "volume": [1000.0, 1100.0, 1200.0, 1300.0],
+        "universe_entry_warm_mask": [True, False, True, False],
+        "cluster_id": [1.0, 2.0, 3.0, 4.0],
+    })
+
+    result = _resample_probe_source_frame(df, target_tf="2h")
+
+    assert "universe_entry_warm_mask" in result.columns
+    assert "cluster_id" in result.columns
+    # First bin label 00:00: bar 00:00 only → mask=True, cluster_id=1.0
+    # Second bin label 02:00: bars 01:00, 02:00 → mask=max(False,True)=True, cluster_id=2.5
+    assert result["universe_entry_warm_mask"].tolist() == [True, True]
+    assert result["cluster_id"].tolist() == [1.0, 2.5]
+
+
+# -------------------------------------------------------------------------------
+# net_edge_bps holding_bars tests (Fix-3)
+# -------------------------------------------------------------------------------
+
+
+def test_net_edge_bps_holding_bars_default_one() -> None:
+    from src.domain.futures.strategy.timeframe_probe import _compute_net_edge_bps
+
+    n = 100
+    signal = np.ones(n, dtype=np.float64)
+    fwd = (np.ones(n) * 0.001).astype(np.float64)  # 10 bps per holding period
+    valid = np.ones(n, dtype=bool)
+    to = np.full(n, 0.05, dtype=np.float64)  # 5% turnover per bar
+    cost = 6.0
+
+    net_bps, _ = _compute_net_edge_bps(
+        signal, fwd, valid, to, cost, "4h", min_obs=10, holding_bars=1,
+    )
+
+    expected_gross = 10.0  # 0.001 * 1e4 = 10 bps
+    expected_net = expected_gross - 0.05 * 1 * cost
+    assert abs(net_bps - expected_net) < 1e-6
+
+
+def test_net_edge_bps_holding_bars_three() -> None:
+    from src.domain.futures.strategy.timeframe_probe import _compute_net_edge_bps
+
+    n = 100
+    signal = np.ones(n, dtype=np.float64)
+    fwd = (np.ones(n) * 0.001).astype(np.float64)
+    valid = np.ones(n, dtype=bool)
+    to = np.full(n, 0.05, dtype=np.float64)
+    cost = 6.0
+
+    net_bps, _ = _compute_net_edge_bps(
+        signal, fwd, valid, to, cost, "4h", min_obs=10, holding_bars=3,
+    )
+
+    expected_gross = 10.0
+    expected_net = expected_gross - 0.05 * 3 * cost  # 10 - 0.9 = 9.1
+    assert abs(net_bps - expected_net) < 1e-6
+
+
+def test_net_edge_bps_below_min_obs() -> None:
+    from src.domain.futures.strategy.timeframe_probe import _compute_net_edge_bps
+
+    signal = np.ones(5, dtype=np.float64)
+    fwd = np.ones(5, dtype=np.float64) * 0.001
+    valid = np.ones(5, dtype=bool)
+    to = np.ones(5, dtype=np.float64) * 0.05
+
+    net_bps, turnover_yr = _compute_net_edge_bps(
+        signal, fwd, valid, to, 6.0, "4h", min_obs=10, holding_bars=3,
+    )
+
+    assert net_bps == 0.0
+    assert turnover_yr == 0.0
+
+

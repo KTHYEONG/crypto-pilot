@@ -21,6 +21,8 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     variance_ratio,
 )
 from src.domain.futures.strategy.timeframe_contracts import (
+    RESAMPLE_METADATA_BOOL_COLS,
+    RESAMPLE_METADATA_FLOAT_COLS,
     hours_per_bar,
     resample_alias,
     scale_bar_count,
@@ -141,6 +143,12 @@ def _resample_ohlcv(df: pd.DataFrame, alias: str) -> pd.DataFrame:
         agg["funding_rate"] = "mean"
     if "funding_rate_sum" in prepared.columns:
         agg["funding_rate_sum"] = "mean"
+    for col in RESAMPLE_METADATA_BOOL_COLS:
+        if col in prepared.columns:
+            agg[col] = "max"
+    for col in RESAMPLE_METADATA_FLOAT_COLS:
+        if col in prepared.columns:
+            agg[col] = "mean"
     resampled = (
         prepared.set_index("datetime").resample(alias, label="right", closed="right")
         .agg(agg)
@@ -336,10 +344,12 @@ def _compute_net_edge_bps(
     round_trip_cost_bps: float,
     tf: str,
     min_obs: int = _MIN_IC_OBS,
+    *,
+    holding_bars: int = 1,
 ) -> tuple[float, float]:
     """Compute net_edge_bps and turnover_per_year.
 
-    net_edge_bps = gross_edge_bps - mean_turnover_per_trade * round_trip_cost_bps
+    net_edge_bps = gross_edge_bps - mean_turnover_per_bar * holding_bars * round_trip_cost_bps
     turnover_per_year = mean_turnover_per_bar * bars_per_year
     """
     valid = valid_mask & np.isfinite(fwd)
@@ -353,8 +363,7 @@ def _compute_net_edge_bps(
     bpy = _bars_per_year(tf)
     turnover_per_year = mean_to_per_bar * bpy
 
-    # net = gross - turnover_per_trade * cost (turnover_per_bar ≈ turnover_per_trade for binary positions)
-    net_bps = gross_bps - mean_to_per_bar * round_trip_cost_bps
+    net_bps = gross_bps - mean_to_per_bar * holding_bars * round_trip_cost_bps
 
     return float(net_bps), float(turnover_per_year)
 
@@ -492,7 +501,8 @@ def _probe_tf_worker(args: tuple[Any, ...]) -> list[dict[str, Any]]:
             )
 
             net_bps, turnover_yr = _compute_net_edge_bps(
-                signal_col, fwd, valid_col, to_col, round_trip_cost_bps, tf, min_obs=min_obs_dynamic
+                signal_col, fwd, valid_col, to_col, round_trip_cost_bps, tf, min_obs=min_obs_dynamic,
+                holding_bars=h_hold,
             )
 
             # VR/Hurst from cache (computed once per symbol x tf, shared across panels)
