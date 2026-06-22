@@ -38,7 +38,7 @@ Generates vectorized rule panels with archetype/regime contexts, filtered throug
 4. **Profit Floor**: Unconditional cost-based minimum: $\mu_{\text{OOS}} \geq \text{min\_variant\_oos\_profit\_bps}$.
 5. **Regime-Cell Admission (OR-path)**: Rescues signals with strong orthogonal edge in specific regimes via Bayesian posterior: $P(\mu > \delta | \text{data}) \ge p_{\text{admit\_min}}$. Uses Newey-West variance and cross-cell $\tau^2$ shrinkage.
 6. **Multiplicity Controls**:
-   - **BH-FDR**: Binding false-discovery control across pool expansion (`l1_fdr_hard_reject=True`; `q > l1_pair_fdr_alpha` → `quality_weight = 0`, hard reject). Soft-shrink mode available via `l1_fdr_hard_reject=False`.
+   - **BH-FDR**: Binding false-discovery control across pool expansion (`l1_fdr_hard_reject=True`; `q > l1_pair_fdr_alpha` → `quality_weight = 0`, hard reject). Soft-shrink mode available via `l1_fdr_hard_reject=False`. Adjusts multiplicity breadth $m$ to effective independent tests $m_{\text{eff}}$ using TF diversity correlations.
    - **SPA**: Hansen's Single Predictive Ability (fail-closed circular bootstrap).
 
 **Ensemble Shrinkage**
@@ -120,7 +120,7 @@ graph TD
 
 **Timeframe Alpha Probe (`timeframe_probe.py`) — Stage-1 계측 및 감사(Audit) 모듈**
 - **Purpose**: 풀 L1/L2 최적화 실행 없이 `(symbol × family × tf)` 셀 단위 신호 예측력과 구조적 강점을 정량화하여 다각화된 최적 TF 조합을 식별하기 위한 매니페스트 생성.
-- **TF Grid**: `{15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h}` 그리드를 지원하며, `hpb` 매핑은 `15m=0.25h … 12h=12h`임.
+- **TF Grid & Master Clock**: `{15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h}` 그리드를 지원함. 1h 마스터 클럭(`PROBE_MASTER_TF`)을 통합 그리드로 채택하여 다운샘플 해상도 유실 및 측정-배포 일관성(fidelity)을 확보하고, TF-Probe는 high-recall 후보 생성기로 기능함.
 - **Bar-param 정규화 (Time Horizon Normalization)**: 서로 다른 시간프레임 간 공정한 비교를 위해 실시간 wall-clock horizon을 고정함. `normalize_time_horizon=True` 시 $\text{bars}_{tf} = \text{round}(\text{hours\_target} / \text{hpb}(tf))$ 공식을 적용하여 moving average span 및 holding window를 4h 기준선 의도에 비례해 스케일링함.
 - **Look-ahead 방어**: 미래 참조를 방지하기 위해 $\text{fwd}[t] = \text{close}[t+1+H] / \text{close}[t+1] - 1$ 형태로 entry shift(1)를 강제하고, 우측라벨(`closed="right"`, `label="right"`) resample 적용 후 마지막 미완성 bar를 drop함.
 - **Virtual TF Source Contract**: `2h/6h/8h/12h` 등 디스크에 직접 저장되지 않는 가상 TF는 캐시된 `1m/5m/15m/30m/1h/4h` source TF 중 호환 및 최소 단위(finest valid)를 선정하여 런타임에서 리샘플링을 거쳐 빌드함. 리샘플링 호환성은 `hours_per_bar(target_tf) / hours_per_bar(source_tf)`가 float 허용오차 내에서 정수 비율일 때 성립함.
@@ -132,13 +132,13 @@ graph TD
   - `net_edge_bps`: $\text{gross} - \bar{t/o} \cdot \text{round\_trip\_cost}$
   - `vr_label`: Lo-MacKinlay VR 다수결 구조 진단
   - `hurst`: DFA Hurst 지수
-  - `passed_fdr`: BH-FDR(q=0.10) 통제 통과 여부
+  - `passed_fdr`: BH-FDR(q=0.10) 통제 통과 여부. 실제 검정을 수행한 셀(`ic_tstat_hac != 0.0`)에 대해서만 적용되며, 미검정 셀(`ic_tstat_hac == 0.0`)은 가설검정 및 FDR 보정 대상 풀에서 제외되고 `passed_fdr=False`를 유지함.
 - **Gate Audit 및 Observability**:
   - `summarize_tf_probe_gate_audit`를 통해 각 시간프레임별로 `tstat`, `fdr`, `net_edge`, `fold_consistency` 게이트의 누적 생존율과 첫 탈락 원인(`Top Fail`)을 요약함.
   - 당선 셀이 없는(zero-winner) 경우에도 각 게이트별 생존 정보 및 실패 사유를 ASCII 표 형식으로 로깅 및 감사함.
   - 가용 소스가 없는 TF는 준비도 평가(`Ready`)에서 제외되어 skipped 상태로 로깅과 실행이 일관되게 제어됨.
 - **병렬**: `ProcessPoolExecutor(max_workers=12)`, tf 단위 8-task. VR/Hurst는 symbol×tf당 1회 캐시 후 panel 루프 공유.
-- **다양성 계측**: 동일 (symbol, family) 내 tf 쌍의 4h-grid Pearson r → `diversity_corr`. Fold#2형 동시실패 완화 근거.
+- **다양성 계측 및 effective-N 보정**: 동일 (symbol, family) 내 tf 쌍의 Pearson r을 `diversity_corr`로 계측하고, 이를 L1 BY-FDR 다중검정 계산에 주입하여 $m_{\text{eff}} = \sum_{\text{clusters}} k / (1 + (k - 1) \cdot \bar{r}_{\text{cluster}})$ 형태로 다중성 통제 과보수 편향을 보정함.
 - **Phase-2 handoff**: `select_tf_family_cells(manifest, min_ic_tstat=2.0, require_fdr=True, min_net_edge_bps=0.0, min_fold_sign_consistency=0.75)` → promotable 셀 `(ic_tstat_hac, net_edge_bps)` desc 정렬.
 
 # 5. Data Integrity & Optimizations
