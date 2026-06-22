@@ -493,6 +493,88 @@ def _newey_west_ic_tstat(
     return float(t_stat)
 
 
+def variance_ratio(rets: NDArray[np.float64], q: int) -> tuple[float, float]:
+    """Lo-MacKinlay VR(q) and heteroskedasticity-robust M2 statistic.
+
+    Returns (VR, M2). Returns (1.0, 0.0) if n < q*4.
+    """
+    n = len(rets)
+    if n < q * 4:
+        return (1.0, 0.0)
+    mu = float(np.mean(rets))
+    demeaned = rets - mu
+    var_1 = float(np.dot(demeaned, demeaned)) / n
+
+    # q-period overlapping returns variance
+    q_rets = np.array([float(np.sum(rets[t : t + q])) for t in range(n - q + 1)])
+    q_demeaned = q_rets - q * mu
+    var_q = float(np.dot(q_demeaned, q_demeaned)) / (n - q + 1)
+
+    vr = var_q / (q * var_1) if var_1 > 1e-20 else 1.0
+
+    # Heteroskedasticity-robust phi(q)
+    delta = np.zeros(q - 1)
+    for j in range(1, q):
+        numer = float(np.dot(demeaned[j:] ** 2, demeaned[:-j] ** 2))
+        denom = (float(np.dot(demeaned, demeaned)) / n) ** 2
+        delta[j - 1] = numer / (denom * n) if denom > 1e-40 else 0.0
+
+    phi = float(np.sum([(2 * (q - j) / q) ** 2 * delta[j - 1] for j in range(1, q)]))
+    m2 = (vr - 1.0) / float(np.sqrt(max(phi, 1e-20)))
+    return (float(vr), float(m2))
+
+
+def hurst_dfa(
+    rets: NDArray[np.float64], *, min_scale: int = 8, max_scale: int | None = None
+) -> float:
+    """Detrended Fluctuation Analysis Hurst exponent.
+
+    Returns 0.5 for n<32, non-finite, or non-convergent fits.
+    """
+    n = len(rets)
+    if n < 32 or not np.all(np.isfinite(rets)):
+        return 0.5
+
+    max_s = max_scale if max_scale is not None else n // 4
+    max_s = min(max_s, n // 4)
+
+    cumsum = np.cumsum(rets - np.mean(rets))
+
+    scales: list[int] = []
+    flucts: list[float] = []
+
+    s = min_scale
+    while s <= max_s:
+        n_segments = n // s
+        if n_segments < 2:
+            break
+        rms_vals: list[float] = []
+        for seg in range(n_segments):
+            seg_data = cumsum[seg * s : (seg + 1) * s]
+            x = np.arange(s, dtype=np.float64)
+            # Detrend by linear fit
+            coeffs = np.polyfit(x, seg_data, 1)
+            trend = np.polyval(coeffs, x)
+            residual = seg_data - trend
+            rms_vals.append(float(np.sqrt(np.mean(residual**2))))
+        scales.append(s)
+        flucts.append(float(np.mean(rms_vals)))
+        s = int(s * 1.5) + 1
+
+    if len(scales) < 4:
+        return 0.5
+
+    log_s = np.log(np.array(scales, dtype=np.float64))
+    log_f = np.log(np.array(flucts, dtype=np.float64))
+
+    if not np.all(np.isfinite(log_f)):
+        return 0.5
+
+    coeffs_fit = np.polyfit(log_s, log_f, 1)
+    h = float(coeffs_fit[0])
+    return float(np.clip(h, 0.0, 1.0))
+
+
 def _series_tstat(values: NDArray[np.float64]) -> float:
     if values.size < 2:
         return 0.0
