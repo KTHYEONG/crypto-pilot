@@ -1,9 +1,7 @@
-# Layer 1 Architectural Decisions
-
-## L1-ADR-027: Timeframe Alpha Probe (Stage-1) — (symbol×family×tf) 셀 계측 모듈 신설 (2026-06-22)
-- **Delta:** `timeframe_probe.py` 신설. TF grid {15m,30m,1h,2h,4h,6h,8h,12h} 각각에 대해 `(symbol×family×tf)` 셀 단위로 NW HAC IC, fold 부호일관성, alpha 반감기, 비용조정 net edge, VR/Hurst, BH-FDR(q=0.10)을 병렬 계측. `metrics.py`에 `variance_ratio()`(Lo-MacKinlay), `hurst_dfa()`(DFA) 추가.
-- **Rationale:** 4h 단일 TF 고집이 L2 Fold#2 동시실패 근본원인(trend 편중, tf 다양성 부재). 계측 없이는 1h carry + 4h trend 등 셀별 강점 조합 파악 불가 → 풀 최적화 없이 (symbol×family×tf) 직교성·예측력을 정량화하는 Stage-1 probe 필요.
-- **Edge Cases:** bar-param 정규화(실시간 horizon 고정), entry shift(1) look-ahead 방어, VR/Hurst per-symbol 캐싱(panel 루프 중복 제거). Phase-2(multi-tf → L1/L2 배선)는 별도 spec.
+## L1-ADR-027: Timeframe Alpha Probe Integration & Gate Audit — 가상 TF 소스 계약 및 결정론적 게이트 감사 도입 (2026-06-22)
+- **Delta:** `timeframe_contracts.py`를 신설하여 시간프레임 간 정수 비율 호환성을 판단하고 최적 소스 TF를 선정하는 공용 로직을 모듈화함. `timeframe_probe.py` 내 `_resample_ohlcv`에서 우측라벨 기준 리샘플링 후 마지막 미완성 bar를 드롭하여 look-ahead를 원천 방지함. `build_rule_signal_panels`에 `normalize_time_horizon` 매개변수를 도입하여 4h 기준선의 wall-clock horizon을 타겟 TF에 맞게 스케일링하였고, `summarize_tf_probe_gate_audit`를 통해 TF별 게이트 누적 생존율과 최다 실패 원인(`Top Fail`)을 요약하도록 함. `opt_main_futures.py`에서 winning cell 유무와 상관없이 최종 게이트 감사를 ASCII 표 형식으로 로깅하도록 배선함.
+- **Rationale:** virtual TF 빌드 시 디스크 파일의 실재 여부와 런타임 리샘플링 대상(source TF)을 구분하지 못해 `data_not_ready` 예외가 발생하거나, 6h/8h 등의 시간프레임 평가 시 wall-clock 기준 4h의 lookback/holding horizon이 스케일링되지 않아 비교 타당성이 훼손됨. 또한 당선 셀이 없는(zero-winner) 경우 분석가가 어떤 게이트(`tstat`, `fdr`, `net_edge`, `fold_consistency`)에서 신호들이 탈락했는지 추적할 수 없는 블랙박스 상태를 해소하기 위해 결정론적 게이트 감사가 요구됨.
+- **Edge Cases:** 리샘플링이 불가하거나 소스가 부재한 경우 skipped 상태로 로깅 및 실행을 일관되게 차단함. normalizer 토글이 꺼진 경우 기존 4h 단일 TF 기준 호환성을 완벽히 유지함.
 
 ## L1-ADR-026: signal_batch_convert iterrows 벡터화 (P6) (2026-06-21)
 - **Delta:** `_candidate_output_to_signal_batch` 내 `frame.iterrows()` + per-row `_signal_source_key_from_row`/`pd.to_numeric` 루프(n_raw=80~95K)를 벡터 마스킹으로 교체. key 컬럼 벡터 추출(`astype(str)`) → composite 문자열 `pd.Series.isin(keyset)` registry mask → gross/net/q10/q90 배열 n_raw 패딩(cascade fallback) → gate mask cascade(gross→threshold→decision) → `np.flatnonzero(mask_dec)`으로 n_out 서바이버만 객체화.
