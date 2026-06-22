@@ -87,6 +87,9 @@ from src.domain.futures.optimization.validation import (
     resolve_adjusted_gates,
 )
 from src.domain.futures.strategy.config import StrategyConfig
+from src.domain.futures.strategy.timeframe_contracts import (
+    select_probe_source_tf as _shared_select_probe_source_tf,
+)
 from src.domain.futures.strategy_runtime.bridge import (
     merge_candidate_output_into_is_and_oos,
 )
@@ -101,20 +104,6 @@ _logger = setup_logger("opt_main_futures", write_file=False)
 # Derived from score_pct_variant_hist_window_bars default (2160) but floored at 1500 to
 # allow shorter-listed symbols that still cover the OOS window.
 _TIERED_MIN_WINDOW_BARS: int = 1500
-_TF_HOURS_PER_BAR: Mapping[str, float] = {
-    "1m": 1.0 / 60.0,
-    "5m": 5.0 / 60.0,
-    "15m": 0.25,
-    "30m": 0.5,
-    "1h": 1.0,
-    "2h": 2.0,
-    "4h": 4.0,
-    "6h": 6.0,
-    "8h": 8.0,
-    "12h": 12.0,
-    "1d": 24.0,
-}
-
 
 @dataclass(frozen=True, slots=True)
 class RuntimeBreakdown:
@@ -147,16 +136,59 @@ class TfProbeStageResult:
 
 def _select_probe_source_tf(sym_maps: Mapping[str, Any], target_tf: str) -> str | None:
     """Return the finest cached TF usable to construct target_tf."""
-    target_hpb = _TF_HOURS_PER_BAR.get(target_tf)
-    if target_hpb is None:
-        return None
-    for candidate_tf in ("1m", "5m", "15m", "30m", "1h", "4h", target_tf):
-        candidate_hpb = _TF_HOURS_PER_BAR.get(candidate_tf)
-        if candidate_hpb is None or candidate_hpb > target_hpb:
-            continue
-        if candidate_tf in sym_maps:
-            return candidate_tf
-    return None
+    return _shared_select_probe_source_tf(sym_maps, target_tf)
+
+
+def _fit_table_cell(value: str, width: int) -> str:
+    """Fit a cell to width without breaking the ASCII table border."""
+    text = value.replace("\n", " ")
+    if len(text) <= width:
+        return text
+    if width <= 3:
+        return text[:width]
+    return f"{text[: width - 3]}..."
+
+
+def _log_ascii_table(
+    title: str,
+    headers: Sequence[str],
+    rows: Sequence[Sequence[str]],
+    widths: Sequence[int],
+) -> None:
+    """Emit a fixed-width ASCII table using the repo's audit-log style."""
+    border = sum(widths) + (3 * len(widths)) + 1
+    _logger.info("\n%s", title)
+    _logger.info("-" * border)
+    _logger.info(
+        "| "
+        + " | ".join(
+            f"{_fit_table_cell(header, width):<{width}}"
+            for header, width in zip(headers, widths, strict=True)
+        )
+        + " |"
+    )
+    _logger.info("-" * border)
+    for row in rows:
+        _logger.info(
+            "| "
+            + " | ".join(
+                f"{_fit_table_cell(cell, width):<{width}}"
+                for cell, width in zip(row, widths, strict=True)
+            )
+            + " |"
+        )
+    _logger.info("-" * border)
+
+
+def _format_counter_items(counter: Counter[str], *, limit: int = 3) -> str:
+    """Format a Counter into a compact audit string."""
+    if not counter:
+        return "-"
+    items = counter.most_common(limit)
+    rendered = ", ".join(f"{name}:{count}" for name, count in items)
+    if len(counter) > limit:
+        rendered += ", ..."
+    return rendered
 
 
 def _log_probe_tf_source_coverage(
@@ -165,6 +197,7 @@ def _log_probe_tf_source_coverage(
     probe_tf_grid: Sequence[str],
 ) -> None:
     """Log probe TF source coverage without requiring virtual-TF parquet files."""
+    rows: list[list[str]] = []
     for probe_tf in probe_tf_grid:
         source_counts: list[int] = []
         source_mix: Counter[str] = Counter()
@@ -179,13 +212,20 @@ def _log_probe_tf_source_coverage(
             source_counts.append(len(frame))
             source_mix[source_tf] += 1
         median_bars = int(np.median(source_counts)) if source_counts else 0
-        _logger.info(
-            "[TF-PROBE] tf=%s source_coverage: %d/%d symbols, median_source_bars=%d, source_mix=%s",
-            probe_tf,
-            len(source_counts),
-            len(symbols),
-            median_bars,
-            dict(sorted(source_mix.items())),
+        rows.append(
+            [
+                probe_tf,
+                f"{len(source_counts)}/{len(symbols)}",
+                str(median_bars),
+                _format_counter_items(source_mix),
+            ]
+        )
+    if rows:
+        _log_ascii_table(
+            "[TF-PROBE AUDIT] SOURCE READINESS",
+            ("TF", "Ready", "Median Bars", "Source Mix"),
+            rows,
+            (8, 14, 12, 42),
         )
 
 
@@ -914,6 +954,7 @@ def _run_tf_probe_stage(
     from src.domain.futures.strategy.timeframe_probe import (
         probe_timeframe_alpha,
         select_tf_family_cells,
+        summarize_tf_probe_gate_audit,
     )
 
     tf_grid: list[str] = list(OPT_FUTURES_CONFIG.get("TF_PROBE_GRID", ["4h"]))
@@ -937,23 +978,64 @@ def _run_tf_probe_stage(
             min_fold_sign_consistency=min_fold_cons,
         )
         selected_tfs: frozenset[str] = frozenset(c.tf for c in winning)
+        winning_by_tf: dict[str, list[TfCellEvidence]] = {}
+        for cell in winning:
+            winning_by_tf.setdefault(cell.tf, []).append(cell)
         _logger.info(
             "[TF-PROBE] %d winning cells across %d tf: %s",
             len(winning),
             len(selected_tfs),
             sorted(selected_tfs),
         )
-        for tf_i in sorted(selected_tfs):
-            top = [c for c in winning if c.tf == tf_i][:3]
-            for c in top:
-                _logger.info(
-                    "[TF-PROBE] tf=%s | %s:%s | tstat=%.2f | net=%.1fbps",
+        rows: list[list[str]] = []
+        for tf_i in manifest.tf_grid:
+            tf_cells = winning_by_tf.get(tf_i, [])
+            top_families = _format_counter_items(Counter(c.family for c in tf_cells), limit=2)
+            top_variants = _format_counter_items(
+                Counter(f"{c.family}:{c.variant}" for c in tf_cells),
+                limit=2,
+            )
+            decision = "SELECT" if tf_cells else "REJECT"
+            rows.append(
+                [
                     tf_i,
-                    c.family,
-                    c.variant,
-                    c.ic_tstat_hac,
-                    c.net_edge_bps,
-                )
+                    str(len(tf_cells)),
+                    top_families,
+                    top_variants,
+                    decision,
+                ]
+            )
+        _log_ascii_table(
+            "[TF-PROBE AUDIT] TIMEFRAME SELECTION",
+            ("TF", "Winning", "Families", "Variants", "Decision"),
+            rows,
+            (8, 10, 24, 34, 10),
+        )
+        gate_rows = summarize_tf_probe_gate_audit(
+            manifest,
+            min_ic_tstat=min_tstat,
+            require_fdr=require_fdr,
+            min_fold_sign_consistency=min_fold_cons,
+        )
+        audit_table_rows: list[list[str]] = [
+            [
+                row.tf,
+                str(row.computed),
+                str(row.pass_tstat),
+                str(row.pass_fdr),
+                str(row.pass_net_edge),
+                str(row.pass_fold_consistency),
+                str(row.winning),
+                row.top_fail_reason,
+            ]
+            for row in gate_rows
+        ]
+        _log_ascii_table(
+            "[TF-PROBE AUDIT] GATE SURVIVORSHIP",
+            ("TF", "Cells", "Pass t", "Pass FDR", "Pass Edge", "Pass Fold", "Winning", "Top Fail"),
+            audit_table_rows,
+            (8, 8, 8, 10, 10, 10, 8, 16),
+        )
         return TfProbeStageResult(
             manifest=manifest,
             winning_cells=winning,

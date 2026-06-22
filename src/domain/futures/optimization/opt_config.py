@@ -37,7 +37,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "seeds": [42],
     "TARGET_TIMEFRAMES": ["4h"],
     # --- TF Probe Integration (Phase-2) ---
-    "ENABLE_TF_PROBE": False,
+    "ENABLE_TF_PROBE": True,
     "TF_PROBE_GRID": ["1h", "2h", "4h", "6h", "8h", "12h"],
     "TF_PROBE_MIN_TSTAT": 2.0,
     "TF_PROBE_REQUIRE_FDR": True,
