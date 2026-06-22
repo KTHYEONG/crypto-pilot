@@ -123,13 +123,13 @@ graph TD
 - **TF Grid & Master Clock**: `{15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h}` 그리드를 지원함. 1h 마스터 클럭(`PROBE_MASTER_TF`)을 통합 그리드로 채택하여 다운샘플 해상도 유실 및 측정-배포 일관성(fidelity)을 확보하고, TF-Probe는 high-recall 후보 생성기로 기능함.
 - **Bar-param 정규화 (Time Horizon Normalization)**: 서로 다른 시간프레임 간 공정한 비교를 위해 실시간 wall-clock horizon을 고정함. `normalize_time_horizon=True` 시 $\text{bars}_{tf} = \text{round}(\text{hours\_target} / \text{hpb}(tf))$ 공식을 적용하여 moving average span 및 holding window를 4h 기준선 의도에 비례해 스케일링함.
 - **Look-ahead 방어**: 미래 참조를 방지하기 위해 $\text{fwd}[t] = \text{close}[t+1+H] / \text{close}[t+1] - 1$ 형태로 entry shift(1)를 강제하고, 우측라벨(`closed="right"`, `label="right"`) resample 적용 후 마지막 미완성 bar를 drop함.
-- **Virtual TF Source Contract**: `2h/6h/8h/12h` 등 디스크에 직접 저장되지 않는 가상 TF는 캐시된 `1m/5m/15m/30m/1h/4h` source TF 중 호환 및 최소 단위(finest valid)를 선정하여 런타임에서 리샘플링을 거쳐 빌드함. 리샘플링 호환성은 `hours_per_bar(target_tf) / hours_per_bar(source_tf)`가 float 허용오차 내에서 정수 비율일 때 성립함.
+- **Virtual TF Source Contract**: `2h/6h/8h/12h` 등 디스크에 직접 저장되지 않는 가상 TF는 캐시된 `1m/5m/15m/30m/1h/4h` source TF 중 호환 및 최소 단위(finest valid)를 선정하여 런타임에서 리샘플링을 거쳐 빌드함. 리샘플링 호환성은 `hours_per_bar(target_tf) / hours_per_bar(source_tf)`가 float 허용오차 내에서 정수 비율일 때 성립함. 리샘플링 시 universe metadata 컬럼(`warm_mask`, `cluster_id`, `activation_regime`, `inactivation_side`, `diversity_corr`, `holding_bars`, `signal_decay_hours`, `min_events`, `holding_cost_bps`)은 bool→max, float→mean 집계로 보존되어 probe 통계 과대평가를 방지함.
 - **계측 지표 및 감사(Audit)**:
   - `ic_mean`: Spearman rank IC
   - `ic_tstat_hac`: Newey-West HAC t-stat (`max_lag=H`)
   - `ic_fold_sign_consistency`: 4-fold IC 부호 동의율
   - `alpha_half_life_h`: 신호 정보 감쇠 속도
-  - `net_edge_bps`: $\text{gross} - \bar{t/o} \cdot \text{round\_trip\_cost}$
+   - `net_edge_bps`: $\text{gross} - \bar{t/o} \cdot \text{holding\_bars} \cdot \text{round\_trip\_cost}$
   - `vr_label`: Lo-MacKinlay VR 다수결 구조 진단
   - `hurst`: DFA Hurst 지수
   - `passed_fdr`: BH-FDR(q=0.10) 통제 통과 여부. 실제 검정을 수행한 셀(`ic_tstat_hac != 0.0`)에 대해서만 적용되며, 미검정 셀(`ic_tstat_hac == 0.0`)은 가설검정 및 FDR 보정 대상 풀에서 제외되고 `passed_fdr=False`를 유지함.
@@ -150,7 +150,7 @@ graph TD
 - **ALIGN-CUBE Loop-Invariant Hoisting**: `np.searchsorted` over `state_cube.calendar` (and `readiness_cube.calendar`) is computed once outside the symbol loop. `positions`/`t_valid`/`p_valid` are symbol-independent; complexity reduced from $O(N \cdot T \log T_{\text{cube}})$ to $O(T \log T_{\text{cube}} + N \cdot V)$ (V = valid bars). Pandas 3.0 nanosecond fix: `calendar.as_unit("ns").asi8` enforces `int64` nanosecond epoch instead of microsecond default.
 - **Membership Timeline Hoisting**: `_normalize_timeline()` normalizes `timeline` / `inference_timeline` once before the symbol loop in `inject_membership_masks_into_maps`, eliminating 104× repeated quarter-start and `canonical_symbol` calls (52 syms × 2 maps).
 - **TF Probe Data Stage**: `_run_data_stage`는 probe grid를 `load_futures_data_maps_for_symbols(..., target_tfs=...)`에 전달하지 않고, base execution data만 준비한다. probe TF 가용성은 source TF coverage 로그로 분리해 기록한다.
-- **TF Probe Bridge Wiring**: `_run_strategy_stage`는 tiered bridge 호출 전에 `_run_tf_probe_stage()`를 실행하고, `winning_cells`를 `run_active_strategy_output_bridge(extra_probe_cells=...)`로 전달한다. `run_active_strategy_output_bridge`는 probe cells를 base TF panel 위에 추가로 투영한다.
+- **TF Probe Bridge Wiring**: `_run_strategy_stage`는 tiered bridge 호출 전에 `_run_tf_probe_stage()`를 실행하고, `winning_cells`를 `run_active_strategy_output_bridge(extra_probe_cells=...)`로 전달한다. `run_active_strategy_output_bridge`는 probe cells를 base TF panel 위에 추가로 투영한다. LTF(1h, 2h) 투영 시 `_project_panel_to_base_grid`는 `ltf_mode` 파라미터(`"last"`/`"mean"`)를 지원한다. `"last"`는 searchsorted로 마지막 bar 선택(하위 호환), `"mean"`은 cumsum 기반 window aggregation으로 window 내 모든 LTF 예측값을 평균 집계하고 side는 bincount mode를 사용한다.
 - **Vectorized Volatility**: `volatility_2d [T, N]` computed via single `pd.DataFrame.rolling().std(ddof=1)` call over the full matrix, replacing a column-wise Python loop of N `pd.Series` allocations.
 - **Conditional raw_df.copy()**: When `funding_df_prepared` and `metrics_df_prepared` are both `None`, the raw DataFrame reference is used directly without copying, eliminating redundant 30K×300 memory duplication. The copy path is preserved when any merge is required (`merge_asof` mutates in-place).
 - **Single _to_unix_ms per TF**: `_to_unix_ms(raw_df["datetime"])` is computed once per timeframe inside `needs_merge` block. The resulting column is reused for both funding and metrics merge_asof calls, removing two unnecessary datetime→unix_ms conversions per TF.
