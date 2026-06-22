@@ -825,15 +825,30 @@ def select_tf_family_cells(
     """
     selected: list[TfCellEvidence] = []
     for cell in manifest.cells:
+        reasons = []
         if cell.ic_tstat_hac < min_ic_tstat:
-            continue
+            reasons.append(f"tstat({cell.ic_tstat_hac:.4f} < {min_ic_tstat})")
         if require_fdr and not cell.passed_fdr:
-            continue
+            reasons.append("fdr(False)")
         if cell.net_edge_bps < min_net_edge_bps:
-            continue
+            reasons.append(f"net_edge({cell.net_edge_bps:.4f} < {min_net_edge_bps})")
         if cell.ic_fold_sign_consistency < min_fold_sign_consistency:
-            continue
-        selected.append(cell)
+            reasons.append(f"fold_consistency({cell.ic_fold_sign_consistency:.4f} < {min_fold_sign_consistency})")
+
+        if reasons:
+            if _logger.isEnabledFor(logging.DEBUG):
+                _logger.debug(
+                    "[TF-PROBE CELL-REJECT] %s:%s:%s:%s -> reasons=%s",
+                    cell.tf, cell.symbol, cell.family, cell.variant, ", ".join(reasons)
+                )
+        else:
+            if _logger.isEnabledFor(logging.DEBUG):
+                _logger.debug(
+                    "[TF-PROBE CELL-ADMIT] %s:%s:%s:%s -> tstat=%.4f net_edge=%.4f fold_cons=%.4f",
+                    cell.tf, cell.symbol, cell.family, cell.variant,
+                    cell.ic_tstat_hac, cell.net_edge_bps, cell.ic_fold_sign_consistency
+                )
+            selected.append(cell)
 
     selected.sort(key=lambda c: (-c.ic_tstat_hac, -c.net_edge_bps))
     return tuple(selected)
