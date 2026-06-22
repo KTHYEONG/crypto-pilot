@@ -8,14 +8,22 @@ import pytest
 from numpy.typing import NDArray
 
 from src.domain.futures.strategy.tiered_workflow.metrics import hurst_dfa, variance_ratio
+from src.domain.futures.strategy.timeframe_contracts import (
+    scale_bar_count,
+    select_probe_source_tf,
+)
 from src.domain.futures.strategy.timeframe_probe import (
     TfCellEvidence,
+    TfProbeGateAuditRow,
     TfProbeManifest,
     _bh_fdr,
     _compute_forward_returns,
     _fold_sign_consistency,
+    _probe_tf_worker,
+    _scale_bar_param,
     _vr_label_majority,
     select_tf_family_cells,
+    summarize_tf_probe_gate_audit,
 )
 
 RNG = np.random.default_rng(42)
@@ -640,6 +648,65 @@ class TestComputeNetEdgeBps:
         assert turnover_yr == pytest.approx(0.0)
 
 
+class TestProbeWorkerNormalization:
+    """Unit tests for _probe_tf_worker normalized panel construction."""
+
+    def test_probe_tf_worker_enables_normalized_time_horizon(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Worker must opt into normalized 4h wall-clock horizons."""
+        captured: dict[str, object] = {}
+        aligned = type(
+            "AlignedStub",
+            (),
+            {
+                "close_2d": np.ones((8, 1), dtype=np.float64),
+                "datetimes": pd.date_range("2024-01-01", periods=8, freq="4h").to_numpy(),
+                "symbols": ("BTCUSDT",),
+            },
+        )()
+
+        def _fake_align_data_maps(*_: object, **__: object) -> object:
+            return aligned
+
+        def _fake_build_rule_signal_panels(
+            *,
+            aligned: object,
+            cfg: object,
+            normalize_time_horizon: bool = False,
+            horizon_base_tf: str = "4h",
+        ) -> tuple[object, ...]:
+            captured["normalize_time_horizon"] = normalize_time_horizon
+            captured["horizon_base_tf"] = horizon_base_tf
+            captured["cfg"] = cfg
+            captured["aligned"] = aligned
+            return ()
+
+        monkeypatch.setattr(
+            "src.domain.futures.strategy.common.alignment.align_data_maps",
+            _fake_align_data_maps,
+        )
+        monkeypatch.setattr(
+            "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
+            _fake_build_rule_signal_panels,
+        )
+
+        result = _probe_tf_worker(
+            (
+                {"BTCUSDT": _make_ohlcv_df(n=16, freq="4h", seed=1)},
+                ("BTCUSDT",),
+                "1h",
+                {"timeframe": "4h"},
+                None,
+                6.0,
+            )
+        )
+
+        assert result == []
+        assert captured["normalize_time_horizon"] is True
+        assert captured["horizon_base_tf"] == "4h"
+
+
 class TestResampleOhlcv:
     """Unit tests for _resample_ohlcv helper."""
 
@@ -692,6 +759,75 @@ class TestResampleOhlcv:
 
         # Assert
         assert "funding_rate" in result.columns
+        assert "datetime" in result.columns
+        assert str(result["datetime"].dt.tz) == "UTC"
+
+
+class TestTimeframeContracts:
+    """Unit tests for shared timeframe contract helpers."""
+
+    def test_select_probe_source_tf_prefers_exact_match(self) -> None:
+        """Exact target tf must win over finer cached sources."""
+        assert select_probe_source_tf({"1h": object(), "4h": object()}, "4h") == "4h"
+
+    def test_select_probe_source_tf_rejects_incompatible_coarse_source(self) -> None:
+        """6h must not select 4h because the ratio is not an integer."""
+        assert select_probe_source_tf({"4h": object()}, "6h") is None
+
+    def test_select_probe_source_tf_allows_exact_integer_resample(self) -> None:
+        """8h can use 4h when no finer compatible source exists."""
+        assert select_probe_source_tf({"4h": object()}, "8h") == "4h"
+
+    def test_scale_bar_count_matches_4h_wall_clock_horizon(self) -> None:
+        """Scaling preserves 4h horizon across finer and coarser timeframes."""
+        assert scale_bar_count(18, "1h", "4h") == 72
+        assert _scale_bar_param(18, "1h", base_tf="4h") == 72
+
+
+class TestTfProbeGateAudit:
+    """Unit tests for summarize_tf_probe_gate_audit."""
+
+    def test_summarize_tf_probe_gate_audit_counts_first_failures(self) -> None:
+        """Rows must be deterministic and include zero-cell timeframes."""
+        cells = (
+            _make_cell(tf="1h", ic_tstat_hac=1.0, passed_fdr=False, net_edge_bps=-1.0, ic_fold_sign_consistency=0.2),
+            _make_cell(tf="1h", ic_tstat_hac=3.0, passed_fdr=False, net_edge_bps=1.0, ic_fold_sign_consistency=0.8),
+            _make_cell(tf="1h", ic_tstat_hac=3.5, passed_fdr=True, net_edge_bps=-0.5, ic_fold_sign_consistency=0.9),
+            _make_cell(tf="1h", ic_tstat_hac=3.2, passed_fdr=True, net_edge_bps=0.5, ic_fold_sign_consistency=0.5),
+            _make_cell(tf="1h", ic_tstat_hac=3.1, passed_fdr=True, net_edge_bps=0.5, ic_fold_sign_consistency=0.9),
+            _make_cell(tf="4h", ic_tstat_hac=0.5, passed_fdr=False),
+        )
+        manifest = TfProbeManifest(
+            cells=cells,
+            tf_grid=("1h", "4h"),
+            coverage_by_tf={"1h": 10, "4h": 10},
+            diversity_corr={},
+        )
+
+        rows = summarize_tf_probe_gate_audit(manifest)
+
+        assert rows == (
+            TfProbeGateAuditRow(
+                tf="1h",
+                computed=5,
+                pass_tstat=4,
+                pass_fdr=3,
+                pass_net_edge=2,
+                pass_fold_consistency=1,
+                winning=1,
+                top_fail_reason="tstat",
+            ),
+            TfProbeGateAuditRow(
+                tf="4h",
+                computed=1,
+                pass_tstat=0,
+                pass_fdr=0,
+                pass_net_edge=0,
+                pass_fold_consistency=0,
+                winning=0,
+                top_fail_reason="tstat",
+            ),
+        )
 
 
 class TestScaleBarParam:
@@ -740,6 +876,12 @@ def _make_ohlcv_df(n: int = 500, freq: str = "4h", seed: int = 42) -> pd.DataFra
         },
         index=pd.date_range("2023-01-01", periods=n, freq=freq),
     )
+
+
+def _make_ohlcv_range_df(n: int = 500, freq: str = "4h", seed: int = 42) -> pd.DataFrame:
+    """Synthetic OHLCV DataFrame with RangeIndex + datetime column."""
+    frame = _make_ohlcv_df(n=n, freq=freq, seed=seed).reset_index()
+    return frame.rename(columns={"index": "datetime"})
 
 
 def _make_synthetic_cell_dict(
@@ -852,6 +994,70 @@ class TestProbeTimeframeAlphaIntegration:
         # All cells should have had passed_fdr set post-hoc (bool, not None)
         for cell in manifest.cells:
             assert isinstance(cell.passed_fdr, bool)
+
+    def test_s1_rangeindex_exact_match_keeps_tf_available(self, base_cfg: object) -> None:
+        """RangeIndex + datetime column must still expose exact-match tf data."""
+        import unittest.mock as _mock
+        from concurrent.futures import ThreadPoolExecutor
+
+        from src.domain.futures.strategy.timeframe_probe import probe_timeframe_alpha
+
+        data_maps = {"BTCUSDT": {"4h": _make_ohlcv_range_df(120, freq="4h", seed=7)}}
+        fake_worker = self._worker_patch(("4h",), self._SYMBOLS[:1])
+
+        with (
+            _mock.patch(
+                "src.domain.futures.strategy.timeframe_probe.ProcessPoolExecutor",
+                new=ThreadPoolExecutor,
+            ),
+            _mock.patch(
+                "src.domain.futures.strategy.timeframe_probe._probe_tf_worker",
+                new=fake_worker,
+            ),
+        ):
+            manifest = probe_timeframe_alpha(
+                data_maps=data_maps,
+                symbols=("BTCUSDT",),
+                base_cfg=base_cfg,
+                tf_grid=("4h",),
+                max_workers=1,
+            )
+
+        assert manifest.coverage_by_tf["4h"] > 0
+        assert len(manifest.cells) > 0
+
+    def test_s1_rangeindex_resample_to_higher_tf_keeps_data_available(
+        self, base_cfg: object
+    ) -> None:
+        """RangeIndex + datetime column must still resample to a higher tf."""
+        import unittest.mock as _mock
+        from concurrent.futures import ThreadPoolExecutor
+
+        from src.domain.futures.strategy.timeframe_probe import probe_timeframe_alpha
+
+        data_maps = {"BTCUSDT": {"1h": _make_ohlcv_range_df(240, freq="1h", seed=11)}}
+        fake_worker = self._worker_patch(("4h",), self._SYMBOLS[:1])
+
+        with (
+            _mock.patch(
+                "src.domain.futures.strategy.timeframe_probe.ProcessPoolExecutor",
+                new=ThreadPoolExecutor,
+            ),
+            _mock.patch(
+                "src.domain.futures.strategy.timeframe_probe._probe_tf_worker",
+                new=fake_worker,
+            ),
+        ):
+            manifest = probe_timeframe_alpha(
+                data_maps=data_maps,
+                symbols=("BTCUSDT",),
+                base_cfg=base_cfg,
+                tf_grid=("4h",),
+                max_workers=1,
+            )
+
+        assert manifest.coverage_by_tf["4h"] > 0
+        assert len(manifest.cells) > 0
 
     def test_s2_look_ahead_guard_fwd_returns_use_shift1(self) -> None:
         """S2: _compute_forward_returns uses entry at t+1 — signal equal to
