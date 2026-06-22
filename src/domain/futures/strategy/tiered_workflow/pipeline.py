@@ -1748,10 +1748,9 @@ def run_per_tf_l1(
     import src.domain.futures.strategy.tiered_workflow as _tw
 
     _tf_cfg = strategy_config.apply_tf_gate_overrides(cfg, tf)
-    _tf_families = strategy_config.resolve_tf_signal_pool(cfg, tf)
     _tf_labeled = (
-        labeled_events[labeled_events["family"].isin(_tf_families)]
-        if "family" in labeled_events.columns and _tf_families
+        labeled_events[labeled_events["native_tf"] == tf]
+        if "native_tf" in labeled_events.columns
         else labeled_events
     )
 
@@ -1815,8 +1814,10 @@ def _aggregate_per_tf_l1(
         )
 
     oos_stacked: dict[str, Any] = {}
-    for r in per_tf_l1.values():
-        oos_stacked.update(r.l1_result.oos_stacked)
+    for tf, r in per_tf_l1.items():
+        for k, v in r.l1_result.oos_stacked.items():
+            new_key = f"{tf}::{k}"
+            oos_stacked[new_key] = v
 
     gate_passed = any(r.l1_result.gate_passed for r in per_tf_l1.values())
 
