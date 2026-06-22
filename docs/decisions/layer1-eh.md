@@ -278,3 +278,15 @@
 - **Rationale:** L1 평가 체계에서 quality_weight_zero 954건의 통계적 과잉 탈락 발생. P(μ>0)이 0.51에 근접해도 sample_scale × fold_ratio 곱으로 인해 quality_weight가 0.001~0.003 수준으로 붕괴하여 등록 게이트 통과 불가. qw_floor는 최소 생존 가중치를 보장. Probe winning cell 정보는 기존에는 L1 게이트에 반영되지 않아 signal injection에도 불구하고 L1에서 이중 탈락하는 문제 해결. TF별 gate threshold는 1h처럼 bar 수가 많은 단기 TF의 noise 과잉 차단을 보정하고, 12h처럼 bar 수가 적은 장기 TF의 통계 안정성을 강화.
 - **Edge Cases:** FDR hard reject는 qw_floor보다 우선 — 통계적 위양성 차단. qw_floor=0.0 (default)는 완전 하위 호환. per_tf_gate_overrides=None 시 identity 반환 (변경 없음). probe_prior_map이 없거나 probe non-winner 신호는 boost 없음 (거짓 양성 없음).
 - **Status:** Accepted
+
+## L1-ADR-034: Per-TF L1 Pipeline — TF Architecture V2 (2026-06-22)
+- **Delta:**
+  - `run_tiered_pipeline` 시그니처 변경: `tf: str = "4h"` 제거, `l1_tfs: tuple[str, ...]` + `per_tf_data_maps: dict[str, AlignedMarketData]` + `probe_manifest: list[dict[str, Any]]` 파라미터 추가.
+  - `CandidateStrategyConfig`에 `l2_master_tf: str | None` 필드 추가.
+  - config.py에 `PerTfL1Result` dataclass + `resolve_tf_signal_pool(cfg, tf)` + `resolve_tf_gate_overrides(cfg, tf)` 헬퍼 추가.
+  - pipeline.py에 `run_per_tf_l1`, `_resolve_l2_master_tf`, `_aggregate_per_tf_l1` 함수 추가. `run_per_tf_l1`은 `resolve_tf_signal_pool`로 TF별 signal pool을 필터링하고 `apply_tf_gate_overrides`로 gate threshold를 적용한 후 `run_l1_nested_swf`를 호출한다. `_resolve_l2_master_tf`는 4-tier priority로 L2 실행 TF를 선정한다 (cfg.l2_master_tf → L1 winning signals → probe winning cells → "8h"). `_aggregate_per_tf_l1`은 per-TF L1의 `oos_stacked`를 병합하고 `gate_passed=any`로 통합 Layer1Result를 생성한다.
+  - bridge.py: `run_candidate_strategy_for_universe`에서 `extra_probe_cells` 파라미터 및 `_build_probe_extra_panels` L1 주입 블록 제거. Probe는 L2 master TF 선정용 `probe_manifest`로만 사용.
+  - Caller 업데이트: `strategy_service.py` (extra_probe_cells 제거), `opt_main_futures.py` (tf→l1_tfs, probe_manifest 전달).
+- **Rationale:** 기존 단일-TF(`tf="4h"`) L1 구조는 1h/12h 등 다양한 TF의 고유 신호 특성을 포착하지 못하고 bridge의 `_build_probe_extra_panels` 우회 주입 경로로만 대응했다. Per-TF native L1은 각 TF에서 독립적으로 signal pool filtering + gate override + L1 validation을 수행하고, 실증적 최적 TF에서 L2를 실행한다. bridge의 probe panel 주입 경로는 중복 위험(probe panel이 L1 gate를 이중 통과)이 있어 제거한다.
+- **Edge Cases:** `per_tf_data_maps=None` (backward compat) 시 첫번째 `l1_tfs` 요소만 실행. `per_tf_candidate_families=None`이면 `candidate_families` global fallback 사용. `per_tf_gate_overrides=None`이면 global gate threshold 유지. `_resolve_l2_master_tf(cfg, {}, {})`는 "8h"로 fallback. `probe_manifest`에 is_winner=True인 셀이 없으면 probe path 건너뜀.
+- **Status:** Accepted

@@ -751,7 +751,6 @@ def run_candidate_strategy_for_universe(
     strategy_cfg: StrategyConfig | None = None,
     preloaded_data_maps: dict[str, dict[str, Any]] | None = None,
     silent: bool = False,
-    extra_probe_cells: tuple[Any, ...] | None = None,
 ) -> CandidatePipelineOutput:
     """Run candidate strategy pipeline and return candidate output."""
     if strategy_cfg is None or preloaded_data_maps is None:
@@ -834,22 +833,6 @@ def run_candidate_strategy_for_universe(
 
     t_step = time.perf_counter()
     panels = build_rule_signal_panels(aligned=aligned, cfg=strategy_cfg.candidate)
-    if extra_probe_cells:
-        from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
-
-        _inject_full = bool(OPT_FUTURES_CONFIG.get("TF_PROBE_INJECT_FULL_GRID", False))
-        _panels_extra = _build_probe_extra_panels(
-            data_maps=preloaded_data_maps,
-            probe_cells=extra_probe_cells,
-            symbols=symbols,
-            aligned_base=aligned,
-            base_cfg=strategy_cfg.candidate,
-            base_tf=tf,
-            inject_full_grid=_inject_full,
-        )
-        if _panels_extra:
-            panels = panels + _panels_extra
-            _logger.info("[TF-PROBE] Injected %d extra panels from probe", len(_panels_extra))
     bridge_prof["rules"] = time.perf_counter() - t_step
     t_step = time.perf_counter()
     raw_events = candidate_panels_to_events(
