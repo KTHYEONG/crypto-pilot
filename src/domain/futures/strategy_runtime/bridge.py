@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import dataclasses
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -9,10 +10,325 @@ import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
+    from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
     from src.domain.futures.strategy.common.alignment import AlignedMarketData
     from src.domain.futures.strategy.config import StrategyConfig
 
 _logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# TF Probe helpers
+# ---------------------------------------------------------------------------
+_HPB_BRIDGE: dict[str, float] = {
+    "1m": 1.0 / 60.0,
+    "5m": 5.0 / 60.0,
+    "15m": 0.25,
+    "30m": 0.5,
+    "1h": 1.0,
+    "2h": 2.0,
+    "4h": 4.0,
+    "6h": 6.0,
+    "8h": 8.0,
+    "12h": 12.0,
+}
+_PROBE_SOURCE_TFS: tuple[str, ...] = ("1m", "5m", "15m", "30m", "1h", "4h")
+
+
+def _project_panel_to_base_grid(
+    panel: CandidateSignalPanel,
+    base_datetimes: NDArray[np.datetime64],
+    tf_i: str,
+    base_tf: str,
+) -> CandidateSignalPanel:
+    """Project a non-base TF panel onto the base TF bar grid. Look-ahead safe.
+
+    Args:
+        panel: Source CandidateSignalPanel on the tf_i grid [T_i, N].
+        base_datetimes: Target base TF datetime array [T_base].
+        tf_i: Timeframe string of the source panel (e.g. "1h", "8h").
+        base_tf: Timeframe string of the base grid (e.g. "4h").
+
+    Returns:
+        New CandidateSignalPanel projected onto base_datetimes [T_base, N].
+
+    Time Complexity: O(T_i * N) for HTF (project_higher_tf_to_grid per symbol);
+                     O(log(T_i) * N) for LTF (searchsorted).
+    Space Complexity: O(T_base * N) per output array.
+    """
+    from src.domain.futures.strategy.candidate_contracts import (  # noqa: N814
+        CandidateSignalPanel as _CSP,
+    )
+    from src.domain.futures.strategy.rule_signals import project_higher_tf_to_grid
+
+    hpb_i = _HPB_BRIDGE.get(tf_i, 4.0)
+    hpb_base = _HPB_BRIDGE.get(base_tf, 4.0)
+    t_base = len(base_datetimes)
+    n_syms = panel.signed_score_2d.shape[1]
+    t_i = panel.signed_score_2d.shape[0]
+
+    proj_score = np.zeros((t_base, n_syms), dtype=np.float64)
+    proj_valid = np.zeros((t_base, n_syms), dtype=bool)
+    proj_side = np.zeros((t_base, n_syms), dtype=np.int8)
+    proj_to = np.zeros((t_base, n_syms), dtype=np.float64)
+
+    # Cast datetimes to canonical datetime64 for project_higher_tf_to_grid signature
+    panel_dt: NDArray[np.datetime64] = np.asarray(panel.datetimes, dtype="datetime64[ns]")
+
+    if hpb_i >= hpb_base:
+        # Slower TF → backward-asof projection (project_higher_tf_to_grid per col)
+        for n in range(n_syms):
+            raw_score = project_higher_tf_to_grid(
+                feature_higher=panel.signed_score_2d[:, n],
+                dt_higher=panel_dt,
+                dt_grid=base_datetimes,
+            )
+            # NaN → 0.0 for score; NaN → False for valid mask
+            valid_n = ~np.isnan(raw_score)
+            proj_score[:, n] = np.where(valid_n, raw_score, 0.0)
+
+            raw_valid = project_higher_tf_to_grid(
+                feature_higher=panel.valid_mask_2d[:, n].astype(np.float64),
+                dt_higher=panel_dt,
+                dt_grid=base_datetimes,
+            )
+            proj_valid[:, n] = np.where(np.isnan(raw_valid), False, raw_valid > 0.5)
+
+            raw_side = project_higher_tf_to_grid(
+                feature_higher=panel.side_hint_2d[:, n].astype(np.float64),
+                dt_higher=panel_dt,
+                dt_grid=base_datetimes,
+            )
+            proj_side[:, n] = np.where(np.isnan(raw_side), 0, raw_side).astype(np.int8)
+
+            raw_to = project_higher_tf_to_grid(
+                feature_higher=panel.turnover_proxy_2d[:, n],
+                dt_higher=panel_dt,
+                dt_grid=base_datetimes,
+            )
+            proj_to[:, n] = np.where(np.isnan(raw_to), 0.0, raw_to)
+    else:
+        # Faster TF → pick last tf_i signal within each base bar window
+        panel_dt_int = np.asarray(panel.datetimes, dtype="datetime64[ns]").view(np.int64)
+        base_dt_int = np.asarray(base_datetimes, dtype="datetime64[ns]").view(np.int64)
+        idx = np.searchsorted(panel_dt_int, base_dt_int, side="right") - 1
+        valid_idx = idx >= 0
+        clipped = np.clip(idx, 0, t_i - 1)
+
+        for n in range(n_syms):
+            proj_score[valid_idx, n] = panel.signed_score_2d[clipped[valid_idx], n]
+            proj_valid[valid_idx, n] = panel.valid_mask_2d[clipped[valid_idx], n]
+            proj_side[valid_idx, n] = panel.side_hint_2d[clipped[valid_idx], n]
+            proj_to[valid_idx, n] = panel.turnover_proxy_2d[clipped[valid_idx], n]
+
+    ratio = hpb_i / hpb_base
+    new_hold = max(1, round(panel.expected_holding_bars * ratio))
+    new_min_hold = max(1, round(panel.min_holding_bars * ratio))
+    new_variant = f"{panel.variant}_{tf_i}"
+
+    return _CSP(
+        family=panel.family,
+        variant=new_variant,
+        params=dict(panel.params),
+        datetimes=base_datetimes,
+        symbols=panel.symbols,
+        signed_score_2d=proj_score,
+        side_hint_2d=proj_side,
+        expected_holding_bars=new_hold,
+        min_holding_bars=new_min_hold,
+        stop_atr_mult=panel.stop_atr_mult,
+        take_profit_atr_mult=panel.take_profit_atr_mult,
+        turnover_proxy_2d=proj_to,
+        valid_mask_2d=proj_valid,
+        metadata=dict(panel.metadata),
+        archetype=panel.archetype,
+        allowed_regimes=panel.allowed_regimes,
+        exit_policies=panel.exit_policies,
+    )
+
+
+def _select_probe_source_tf(sym_maps: Mapping[str, Any], target_tf: str) -> str | None:
+    """Select the finest available source timeframe for a target probe TF."""
+    target_hpb = _HPB_BRIDGE.get(target_tf)
+    if target_hpb is None:
+        return None
+    for candidate_tf in (*_PROBE_SOURCE_TFS, target_tf):
+        candidate_hpb = _HPB_BRIDGE.get(candidate_tf)
+        if candidate_hpb is None or candidate_hpb > target_hpb:
+            continue
+        if candidate_tf in sym_maps:
+            return candidate_tf
+    return None
+
+
+def _resample_probe_source_frame(frame: pd.DataFrame, *, target_tf: str) -> pd.DataFrame:
+    """Resample a cached source frame into a virtual probe timeframe."""
+    prepared = frame.copy()
+    if "datetime" not in prepared.columns:
+        raise ValueError("datetime column missing in probe source frame")
+    prepared["datetime"] = pd.to_datetime(prepared["datetime"], utc=True, errors="coerce")
+    prepared = prepared.dropna(subset=["datetime"]).sort_values("datetime")
+    prepared = prepared.set_index("datetime")
+    agg: dict[str, str] = {
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }
+    if "funding_rate_sum" in prepared.columns:
+        agg["funding_rate_sum"] = "mean"
+    elif "funding_rate" in prepared.columns:
+        agg["funding_rate"] = "mean"
+    resampled = (
+        prepared.resample(target_tf, label="right", closed="right")
+        .agg(agg)
+        .dropna(subset=["close"])
+    )
+    if not resampled.empty:
+        resampled = resampled.iloc[:-1]
+    return resampled.reset_index()
+
+
+def _build_virtual_probe_tf_maps(
+    data_maps: Mapping[str, Mapping[str, Any]],
+    symbols: Sequence[str],
+    target_tf: str,
+) -> dict[str, dict[str, pd.DataFrame]]:
+    """Build wrapper maps {sym: {target_tf: frame}} using direct or resampled sources."""
+    virtual_maps: dict[str, dict[str, pd.DataFrame]] = {}
+    for symbol in symbols:
+        sym_maps = data_maps.get(symbol, {})
+        source_tf = _select_probe_source_tf(sym_maps, target_tf)
+        if source_tf is None:
+            continue
+        source_frame = sym_maps.get(source_tf)
+        if not isinstance(source_frame, pd.DataFrame) or source_frame.empty:
+            continue
+        try:
+            target_frame = (
+                source_frame
+                if source_tf == target_tf
+                else _resample_probe_source_frame(source_frame, target_tf=target_tf)
+            )
+        except Exception as exc:
+            _logger.warning(
+                "[TF-PROBE] source resample failed symbol=%s %s->%s: %s",
+                symbol,
+                source_tf,
+                target_tf,
+                exc,
+            )
+            continue
+        if target_frame.empty:
+            continue
+        virtual_maps[symbol] = {target_tf: target_frame}
+    return virtual_maps
+
+
+def _base_probe_guard_mask(aligned_base: AlignedMarketData) -> NDArray[np.bool_]:
+    """Reuse base-grid eligibility masks for projected probe panels."""
+    execution_eligibility = (
+        aligned_base.execution_eligibility_mask
+        if aligned_base.execution_eligibility_mask is not None
+        else np.ones_like(aligned_base.active_mask, dtype=bool)
+    )
+    strategy_readiness = (
+        aligned_base.strategy_readiness_mask
+        if aligned_base.strategy_readiness_mask is not None
+        else np.ones_like(aligned_base.active_mask, dtype=bool)
+    )
+    promotion_active = (
+        aligned_base.promotion_active_mask
+        if aligned_base.promotion_active_mask is not None
+        else np.ones_like(aligned_base.active_mask, dtype=bool)
+    )
+    guard = (
+        aligned_base.active_mask
+        & aligned_base.warm_mask
+        & execution_eligibility
+        & strategy_readiness
+        & promotion_active
+        & ~aligned_base.entry_block_mask
+        & ~aligned_base.kill_mask
+    )
+    return np.asarray(guard, dtype=bool)
+
+
+def _build_probe_extra_panels(
+    *,
+    data_maps: dict[str, Any],
+    probe_cells: tuple[Any, ...],
+    symbols: list[str],
+    aligned_base: Any,
+    base_cfg: Any,
+    base_tf: str,
+) -> tuple[CandidateSignalPanel, ...]:
+    """Build and project non-base TF panels from probe winning cells.
+
+    Args:
+        data_maps: Symbol-keyed data maps {sym: {tf: DataFrame}}.
+        probe_cells: Tuple of TfCellEvidence winning cells from probe stage.
+        symbols: Universe symbols.
+        aligned_base: AlignedMarketData for base TF (provides datetimes).
+        base_cfg: CandidateStrategyConfig for base TF.
+        base_tf: Base timeframe string (e.g. "4h").
+
+    Returns:
+        Tuple of projected CandidateSignalPanel objects on the base TF grid.
+
+    Time Complexity: O(|non_base_tfs| * T_i * N) for panel construction + projection.
+    Space Complexity: O(|extra_panels| * T_base * N).
+    """
+    from src.domain.futures.strategy.common.alignment import align_data_maps
+    from src.domain.futures.strategy.rule_signals import build_rule_signal_panels
+
+    non_base_tfs = {c.tf for c in probe_cells} - {base_tf}
+    if not non_base_tfs:
+        return ()
+
+    extra: list[CandidateSignalPanel] = []
+    base_datetimes = aligned_base.datetimes
+    base_guard = _base_probe_guard_mask(aligned_base)
+
+    for tf_i in non_base_tfs:
+        winning_keys = {(c.family, c.variant) for c in probe_cells if c.tf == tf_i}
+        tf_maps = _build_virtual_probe_tf_maps(data_maps, symbols, tf_i)
+        if not tf_maps:
+            _logger.warning("[TF-PROBE] no source data available for tf=%s", tf_i)
+            continue
+        try:
+            aligned_i = align_data_maps(tf_maps, symbols, tf_i)
+        except Exception as exc:
+            _logger.warning("[TF-PROBE] align_data_maps failed tf=%s: %s", tf_i, exc)
+            continue
+        try:
+            cfg_i = dataclasses.replace(base_cfg, timeframe=tf_i)
+            panels_i = build_rule_signal_panels(aligned=aligned_i, cfg=cfg_i)
+        except Exception as exc:
+            _logger.warning("[TF-PROBE] build_rule_signal_panels failed tf=%s: %s", tf_i, exc)
+            continue
+        for panel in panels_i:
+            if (panel.family, panel.variant) not in winning_keys:
+                continue
+            try:
+                projected = _project_panel_to_base_grid(panel, base_datetimes, tf_i, base_tf)
+                extra.append(
+                    dataclasses.replace(
+                        projected,
+                        valid_mask_2d=projected.valid_mask_2d & base_guard,
+                    )
+                )
+            except Exception as exc:
+                _logger.warning(
+                    "[TF-PROBE] projection failed %s:%s tf=%s: %s",
+                    panel.family,
+                    panel.variant,
+                    tf_i,
+                    exc,
+                )
+    return tuple(extra)
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +605,7 @@ def run_candidate_strategy_for_universe(
     strategy_cfg: StrategyConfig | None = None,
     preloaded_data_maps: dict[str, dict[str, Any]] | None = None,
     silent: bool = False,
+    extra_probe_cells: tuple[Any, ...] | None = None,
 ) -> CandidatePipelineOutput:
     """Run candidate strategy pipeline and return candidate output."""
     if strategy_cfg is None or preloaded_data_maps is None:
@@ -371,6 +688,18 @@ def run_candidate_strategy_for_universe(
 
     t_step = time.perf_counter()
     panels = build_rule_signal_panels(aligned=aligned, cfg=strategy_cfg.candidate)
+    if extra_probe_cells:
+        _panels_extra = _build_probe_extra_panels(
+            data_maps=preloaded_data_maps,
+            probe_cells=extra_probe_cells,
+            symbols=symbols,
+            aligned_base=aligned,
+            base_cfg=strategy_cfg.candidate,
+            base_tf=tf,
+        )
+        if _panels_extra:
+            panels = panels + _panels_extra
+            _logger.info("[TF-PROBE] Injected %d extra panels from probe", len(_panels_extra))
     bridge_prof["rules"] = time.perf_counter() - t_step
     t_step = time.perf_counter()
     raw_events = candidate_panels_to_events(

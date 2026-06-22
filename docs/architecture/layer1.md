@@ -123,6 +123,7 @@ graph TD
 - **TF Grid**: `{15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h}`. `hpb` 매핑: `15m=0.25h … 12h=12h`.
 - **Bar-param 정규화**: tf 비교 시 lookback bar 고정 금지. 실시간 horizon 고정: $\text{bars}_{tf} = \text{round}(\text{hours\_target} / \text{hpb}(tf))$.
 - **Look-ahead 방어**: $\text{fwd}[t] = \text{close}[t+1+H] / \text{close}[t+1] - 1$ (entry shift(1) 강제). 우측라벨 resample + 마지막 미완성 bar drop.
+- **Virtual TF Source Contract**: `2h/6h/8h/12h` probe TF는 디스크 parquet를 직접 요구하지 않는다. `1m/5m/15m/30m/1h/4h` cached source TF에서 resample하여 virtual frame을 만들고, base-grid projection 후 base eligibility mask를 다시 적용한다.
 - **계측 지표** (`TfCellEvidence`):
 
 | 지표 | 수식/방법 | 의미 |
@@ -151,6 +152,8 @@ graph TD
 - **NumPy-Backed Meta Alignment**: Meta columns are pre-converted to numeric at the ingestion stage. Within the `align_data_maps` loop, valid values are retrieved using fast NumPy masking on sliced views instead of Pandas Series creation, guaranteeing 100% data fidelity with zero look-ahead bias and optimized latency.
 - **ALIGN-CUBE Loop-Invariant Hoisting**: `np.searchsorted` over `state_cube.calendar` (and `readiness_cube.calendar`) is computed once outside the symbol loop. `positions`/`t_valid`/`p_valid` are symbol-independent; complexity reduced from $O(N \cdot T \log T_{\text{cube}})$ to $O(T \log T_{\text{cube}} + N \cdot V)$ (V = valid bars). Pandas 3.0 nanosecond fix: `calendar.as_unit("ns").asi8` enforces `int64` nanosecond epoch instead of microsecond default.
 - **Membership Timeline Hoisting**: `_normalize_timeline()` normalizes `timeline` / `inference_timeline` once before the symbol loop in `inject_membership_masks_into_maps`, eliminating 104× repeated quarter-start and `canonical_symbol` calls (52 syms × 2 maps).
+- **TF Probe Data Stage**: `_run_data_stage`는 probe grid를 `load_futures_data_maps_for_symbols(..., target_tfs=...)`에 전달하지 않고, base execution data만 준비한다. probe TF 가용성은 source TF coverage 로그로 분리해 기록한다.
+- **TF Probe Bridge Wiring**: `_run_strategy_stage`는 tiered bridge 호출 전에 `_run_tf_probe_stage()`를 실행하고, `winning_cells`를 `run_active_strategy_output_bridge(extra_probe_cells=...)`로 전달한다. `run_active_strategy_output_bridge`는 probe cells를 base TF panel 위에 추가로 투영한다.
 - **Vectorized Volatility**: `volatility_2d [T, N]` computed via single `pd.DataFrame.rolling().std(ddof=1)` call over the full matrix, replacing a column-wise Python loop of N `pd.Series` allocations.
 - **Conditional raw_df.copy()**: When `funding_df_prepared` and `metrics_df_prepared` are both `None`, the raw DataFrame reference is used directly without copying, eliminating redundant 30K×300 memory duplication. The copy path is preserved when any merge is required (`merge_asof` mutates in-place).
 - **Single _to_unix_ms per TF**: `_to_unix_ms(raw_df["datetime"])` is computed once per timeframe inside `needs_merge` block. The resulting column is reused for both funding and metrics merge_asof calls, removing two unnecessary datetime→unix_ms conversions per TF.
