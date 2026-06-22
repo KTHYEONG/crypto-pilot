@@ -1660,3 +1660,62 @@ def test_net_edge_bps_below_min_obs() -> None:
     assert turnover_yr == 0.0
 
 
+def test_select_tf_family_cells_debug_logging(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    from src.domain.futures.strategy.timeframe_probe import TfCellEvidence, TfProbeManifest, select_tf_family_cells
+
+    cell_fail = TfCellEvidence(
+        symbol="SYM1", family="fam1", variant="v1", archetype="trend", tf="1h",
+        n_obs=100, n_events=50, ic_mean=0.01, ic_tstat_hac=1.0,
+        ic_fold_sign_consistency=0.5, alpha_half_life_h=4.0, net_edge_bps=-1.0,
+        turnover_per_year=10.0, vr_label="flat", hurst=0.5, passed_fdr=False
+    )
+    cell_pass = TfCellEvidence(
+        symbol="SYM2", family="fam2", variant="v2", archetype="trend", tf="1h",
+        n_obs=1000, n_events=800, ic_mean=0.05, ic_tstat_hac=3.0,
+        ic_fold_sign_consistency=0.8, alpha_half_life_h=4.0, net_edge_bps=5.0,
+        turnover_per_year=10.0, vr_label="trend", hurst=0.6, passed_fdr=True
+    )
+
+    manifest = TfProbeManifest(
+        cells=(cell_fail, cell_pass),
+        tf_grid=("1h",),
+        coverage_by_tf={"1h": 1000},
+        diversity_corr={}
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        selected = select_tf_family_cells(
+            manifest,
+            min_ic_tstat=2.0,
+            require_fdr=True,
+            min_net_edge_bps=0.0,
+            min_fold_sign_consistency=0.75
+        )
+
+    assert len(selected) == 1
+    assert selected[0].symbol == "SYM2"
+
+    # Check that debug logs are generated for both reject and admit
+    reject_logs = [r for r in caplog.records if "[TF-PROBE CELL-REJECT]" in r.message]
+    admit_logs = [r for r in caplog.records if "[TF-PROBE CELL-ADMIT]" in r.message]
+    assert len(reject_logs) >= 1
+    assert len(admit_logs) >= 1
+
+
+def test_apply_tf_gate_overrides_default_fallback() -> None:
+    from src.domain.futures.strategy.config import CandidateStrategyConfig, apply_tf_gate_overrides
+
+    cfg = CandidateStrategyConfig(per_tf_gate_overrides=None)
+    cfg_1h = apply_tf_gate_overrides(cfg, "1h")
+
+    # Check that overrides from _DEFAULT_PER_TF_GATE_OVERRIDES are applied
+    assert cfg_1h.l1_pair_min_effective_obs == 3.0
+    assert cfg_1h.l1_min_sym_count == 4
+    assert cfg_1h.l1_min_fold_ratio == 0.40
+    assert cfg_1h.l1_min_realized_match_ratio == 0.80
+
+
+
+
