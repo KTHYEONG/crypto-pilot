@@ -1629,7 +1629,6 @@ def _run_strategy_stage(
         preloaded_data_maps=full_strategy_maps,
         trading_symbols=bridge_symbol_scope,
         silent=False,
-        extra_probe_cells=_active_probe.winning_cells if _active_probe is not None else None,
     )
     bridge_elapsed = time.perf_counter() - t_bridge_start
     strategy_steps["bridge"] = bridge_elapsed
@@ -1716,11 +1715,16 @@ def _run_strategy_stage(
                 l1_params={},
                 l2_params={},
                 caps=tiered_caps,
-                tf=run_config.timeframe,
+                l1_tfs=(run_config.timeframe,),
                 target_phase="l1",
                 verbose=True,
                 probe_diversity_corr=(
                     _active_probe.manifest.diversity_corr
+                    if _active_probe is not None
+                    else None
+                ),
+                probe_manifest=(
+                    [{"tf": c.tf, "is_winner": True} for c in _active_probe.winning_cells]
                     if _active_probe is not None
                     else None
                 ),
@@ -1770,11 +1774,16 @@ def _run_strategy_stage(
                 l1_params={},
                 l2_params=best_l2_params,
                 caps=tiered_caps,
-                tf=run_config.timeframe,
+                l1_tfs=(run_config.timeframe,),
                 target_phase=run_config.phase,
                 l1_result_override=l1_res,
                 verbose=True,  # 최종 실행시 상세 결과 출력
                 override_dsr=l2_study_result.dsr,
+                probe_manifest=(
+                    [{"tf": c.tf, "is_winner": True} for c in _active_probe.winning_cells]
+                    if _active_probe is not None
+                    else None
+                ),
             )
             
             # Layer 2 BLOCKED 시 즉시 종료 (Step 5 optimization 진입 방지)

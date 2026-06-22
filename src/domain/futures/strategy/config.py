@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
+
+if TYPE_CHECKING:
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result
 
 _DEFAULT_COST_MODEL = ExecutionCostModel()
 _DEFAULT_RT_BPS: float = _DEFAULT_COST_MODEL.round_trip_bps()  # ≈ 7.5
@@ -448,6 +451,7 @@ class CandidateStrategyConfig:
     l1_qw_probe_boost: float = 0.3
     per_tf_gate_overrides: dict[str, dict[str, float]] | None = None
     per_tf_gate_enabled: bool = False
+    l2_master_tf: str | None = None
     l1_evidence_lookback_bars: int | None = None
     l1_evidence_grid_multiplier: int = 3
     l1_evidence_max_folds: int = 32
@@ -919,6 +923,18 @@ def resolve_purge_and_embargo_bars(
     return int(purge_bars), int(embargo_bars)
 
 
+# ── Per-TF L1 Result ──
+
+
+@dataclass
+class PerTfL1Result:
+    """Result of a single-TF L1 validation run."""
+
+    tf: str
+    l1_result: Layer1Result
+    n_winning_signals: int
+
+
 # ── TF-Specific Signal Pool Defaults ──
 
 _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
@@ -1064,3 +1080,29 @@ def apply_tf_gate_overrides(
     if not valid_overrides:
         return cfg
     return dataclasses.replace(cfg, **valid_overrides)  # type: ignore[arg-type]
+
+
+def resolve_tf_signal_pool(
+    cfg: CandidateStrategyConfig, tf: str
+) -> tuple[str, ...]:
+    """Resolve the signal pool for a given TF.
+
+    Returns per_tf_candidate_families[tf] when available, otherwise
+    falls back to cfg.candidate_families (backward compat).
+    """
+    if cfg.per_tf_candidate_families and tf in cfg.per_tf_candidate_families:
+        return cfg.per_tf_candidate_families[tf]
+    return cfg.candidate_families
+
+
+def resolve_tf_gate_overrides(
+    cfg: CandidateStrategyConfig, tf: str
+) -> dict[str, float]:
+    """Resolve gate threshold overrides for a given TF.
+
+    Returns the raw override dict from per_tf_gate_overrides[tf],
+    or an empty dict when no overrides exist.
+    """
+    if cfg.per_tf_gate_overrides and tf in cfg.per_tf_gate_overrides:
+        return cfg.per_tf_gate_overrides[tf]
+    return {}

@@ -30,7 +30,7 @@ from src.domain.futures.strategy.candidate_contracts import (
     ValidatedSignalBatch,
 )
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
-from src.domain.futures.strategy.config import CandidateStrategyConfig
+from src.domain.futures.strategy.config import CandidateStrategyConfig, PerTfL1Result
 from src.domain.futures.strategy.cs_rank import SymbolSignal
 from src.domain.futures.strategy.tiered_logging import (
     format_layer1_deployment_registry_table,
@@ -1714,6 +1714,143 @@ def _to_utc_timestamp(val: Any) -> pd.Timestamp:
     return ts.tz_convert("UTC")
 
 
+def _resolve_aligned_for_tf(
+    tf: str,
+    aligned: AlignedMarketData,
+    per_tf_data_maps: dict[str, AlignedMarketData] | None = None,
+) -> AlignedMarketData:
+    """Resolve aligned market data for a given TF.
+
+    Returns per-TF aligned data from per_tf_data_maps when available,
+    otherwise falls back to the primary aligned (backward compat).
+    """
+    if per_tf_data_maps is not None and tf in per_tf_data_maps:
+        _maybe = per_tf_data_maps[tf]
+        if isinstance(_maybe, AlignedMarketData):
+            return _maybe
+    return aligned
+
+
+def run_per_tf_l1(
+    *,
+    tf: str,
+    labeled_events: pd.DataFrame,
+    aligned: AlignedMarketData,
+    outer_folds: tuple[WFFold, ...],
+    cfg: CandidateStrategyConfig,
+    seed: int,
+    verbose: bool = True,
+    l2_start: date | None = None,
+    probe_diversity_corr: dict[str, float] | None = None,
+    probe_prior_map: dict[tuple[str, str, str], float] | None = None,
+) -> PerTfL1Result:
+    """Run L1 validation for a single TF using its native signal pool."""
+    import src.domain.futures.strategy.tiered_workflow as _tw
+
+    _tf_cfg = strategy_config.apply_tf_gate_overrides(cfg, tf)
+    _tf_families = strategy_config.resolve_tf_signal_pool(cfg, tf)
+    _tf_labeled = (
+        labeled_events[labeled_events["family"].isin(_tf_families)]
+        if "family" in labeled_events.columns
+        else labeled_events
+    )
+
+    l1 = _tw.run_l1_nested_swf(
+        labeled_events=_tf_labeled,
+        aligned=aligned,
+        outer_folds=outer_folds,
+        cfg=_tf_cfg,
+        seed=seed,
+        verbose=verbose,
+        l2_start=l2_start,
+        probe_diversity_corr=probe_diversity_corr,
+        probe_prior_map=probe_prior_map,
+        tf=tf,
+    )
+    return PerTfL1Result(tf=tf, l1_result=l1, n_winning_signals=len(l1.oos_stacked))
+
+
+def _resolve_l2_master_tf(
+    cfg: CandidateStrategyConfig,
+    per_tf_l1: dict[str, PerTfL1Result],
+    probe_manifest: list[dict[str, Any]] | None = None,
+) -> str:
+    """Resolve the master timeframe for Layer 2 execution."""
+    if cfg.l2_master_tf:
+        return cfg.l2_master_tf
+
+    if per_tf_l1:
+        best_tf = max(per_tf_l1, key=lambda t: per_tf_l1[t].n_winning_signals)
+        if per_tf_l1[best_tf].n_winning_signals > 0:
+            return best_tf
+
+    if probe_manifest:
+        from collections import Counter
+        tf_counts: Counter[str] = Counter()
+        for c in probe_manifest:
+            if c.get("is_winner") and isinstance(tf_val := c.get("tf"), str):
+                tf_counts[tf_val] += 1
+        if tf_counts:
+            return tf_counts.most_common(1)[0][0]
+
+    return "8h"
+
+
+def _aggregate_per_tf_l1(
+    per_tf_l1: dict[str, PerTfL1Result],
+) -> Layer1Result:
+    """Merge per-TF L1 results into a unified Layer1Result."""
+    if not per_tf_l1:
+        return Layer1Result(
+            signals_per_fold=(),
+            oos_stacked={},
+            pooled_ic=0.0,
+            pooled_tstat=0.0,
+            breadth=0.0,
+            valid_coverage=0.0,
+            fold_pass_ratio=0.0,
+            gate_passed=False,
+            n_valid=0,
+            n_total=0,
+        )
+
+    oos_stacked: dict[str, Any] = {}
+    for r in per_tf_l1.values():
+        oos_stacked.update(r.l1_result.oos_stacked)
+
+    gate_passed = any(r.l1_result.gate_passed for r in per_tf_l1.values())
+
+    artifacts = [
+        r.l1_result.inference_artifact
+        for r in per_tf_l1.values()
+        if r.l1_result.inference_artifact is not None
+    ]
+    merged_artifact = artifacts[0] if artifacts else None
+
+    lifecycles = [
+        r.l1_result.symbol_lifecycle
+        for r in per_tf_l1.values()
+        if r.l1_result.symbol_lifecycle
+    ]
+    merged_lifecycle = lifecycles[0] if lifecycles else ()
+
+    first = next(iter(per_tf_l1.values())).l1_result
+    return Layer1Result(
+        gate_passed=gate_passed,
+        oos_stacked=oos_stacked,
+        inference_artifact=merged_artifact,
+        symbol_lifecycle=merged_lifecycle,
+        signals_per_fold=first.signals_per_fold,
+        pooled_ic=first.pooled_ic,
+        pooled_tstat=first.pooled_tstat,
+        breadth=first.breadth,
+        valid_coverage=first.valid_coverage,
+        fold_pass_ratio=first.fold_pass_ratio,
+        n_valid=first.n_valid,
+        n_total=first.n_total,
+    )
+
+
 def run_tiered_pipeline(
     *,
     labeled_events: pd.DataFrame,
@@ -1723,19 +1860,26 @@ def run_tiered_pipeline(
     l1_params: dict[str, Any],
     l2_params: dict[str, Any],
     caps: PortfolioCaps | None = None,
-    tf: str = "4h",
     target_phase: str = "l3",
     l1_result_override: Layer1Result | None = None,
     verbose: bool = True,
     override_dsr: float | None = None,
     probe_diversity_corr: dict[str, float] | None = None,
     probe_prior_map: dict[tuple[str, str, str], float] | None = None,
+    l1_tfs: tuple[str, ...] = ("1h", "2h", "4h", "6h", "8h", "12h"),
+    per_tf_data_maps: dict[str, AlignedMarketData] | None = None,
+    probe_manifest: list[dict[str, Any]] | None = None,
 ) -> tuple[Layer1Result, Layer2Result | None, Layer3Result | None]:
     """3-Layer 티어드 파이프라인 실행.
+
+    Per-TF L1 실행 후 best TF에서 L2/L3 수행.
 
     Args:
         l1_result_override: 외부에서 사전 계산된 L1 결과. 제공 시 L1 재실행을 스킵하여
             Optuna L2 탐색 후 최종 실행 시 중복 피팅을 방지한다.
+        l1_tfs: L1을 실행할 timeframe 목록.
+        per_tf_data_maps: TF별 pre-built AlignedMarketData. None이면 단일 aligned 사용.
+        probe_manifest: Probe winning cell 목록 (L2 master TF 선정용).
     """
     if caps is None:
         caps = PortfolioCaps(
@@ -1746,12 +1890,8 @@ def run_tiered_pipeline(
             target_ann_vol=0.20,
         )
 
-    n_bars = len(aligned.datetimes)
-
     _is_ts = _to_utc_timestamp(window.l1_start)
     _oos_ts = _to_utc_timestamp(window.l2_start)
-    l1_start_bars = int(np.searchsorted(aligned.datetimes, np.datetime64(_is_ts.tz_localize(None), "ns")))
-    l1_end_bars = int(np.searchsorted(aligned.datetimes, np.datetime64(_oos_ts.tz_localize(None), "ns")))
 
     import src.domain.futures.strategy.tiered_workflow as _tw
 
@@ -1760,29 +1900,64 @@ def run_tiered_pipeline(
     if l1_result_override is not None:
         l1 = l1_result_override
     else:
-        outer_folds = _tw.build_l1_nested_swf_folds(
-            n_bars=n_bars,
-            l1_start_idx=l1_start_bars,
-            l1_end_idx=l1_end_bars,
-            max_label_horizon_bars=int(getattr(cfg, "max_holding_bars", 1)),
-            cfg=cfg,
-        )
-        l1 = _tw.run_l1_nested_swf(
-            labeled_events=labeled_events,
-            aligned=aligned,
-            outer_folds=outer_folds,
-            cfg=cfg,
-            seed=int(getattr(cfg, "seed", 42)),
-            verbose=verbose,
-            l2_start=(
-                window.l2_start if isinstance(window.l2_start, date)
-                else None if (window.l2_start is None or hasattr(window.l2_start, "_mock_self"))
-                else pd.Timestamp(window.l2_start).date()
-            ),
-            probe_diversity_corr=probe_diversity_corr,
-            probe_prior_map=probe_prior_map,
-            tf=tf,
-        )
+        per_tf_l1: dict[str, PerTfL1Result] = {}
+        for tf_idx, tf in enumerate(l1_tfs):
+            aligned_tf = _resolve_aligned_for_tf(tf, aligned, per_tf_data_maps)
+            if (
+                aligned_tf is aligned
+                and tf_idx > 0
+                and per_tf_data_maps is not None
+                and tf not in per_tf_data_maps
+            ):
+                logger.debug("[PER-TF] skipping tf=%s: no per-TF data available", tf)
+                continue
+
+            n_bars_tf = len(aligned_tf.datetimes)
+            l1_start_bars_tf = int(
+                np.searchsorted(
+                    aligned_tf.datetimes,
+                    np.datetime64(_is_ts.tz_localize(None), "ns"),
+                )
+            )
+            l1_end_bars_tf = int(
+                np.searchsorted(
+                    aligned_tf.datetimes,
+                    np.datetime64(_oos_ts.tz_localize(None), "ns"),
+                )
+            )
+
+            outer_folds_tf = _tw.build_l1_nested_swf_folds(
+                n_bars=n_bars_tf,
+                l1_start_idx=l1_start_bars_tf,
+                l1_end_idx=l1_end_bars_tf,
+                max_label_horizon_bars=int(getattr(cfg, "max_holding_bars", 1)),
+                cfg=cfg,
+            )
+
+            per_tf_l1[tf] = run_per_tf_l1(
+                tf=tf,
+                labeled_events=labeled_events,
+                aligned=aligned_tf,
+                outer_folds=outer_folds_tf,
+                cfg=cfg,
+                seed=int(getattr(cfg, "seed", 42)),
+                verbose=verbose,
+                l2_start=(
+                    window.l2_start
+                    if isinstance(window.l2_start, date)
+                    else (
+                        None
+                        if (window.l2_start is None or hasattr(window.l2_start, "_mock_self"))
+                        else pd.Timestamp(window.l2_start).date()
+                    )
+                ),
+                probe_diversity_corr=probe_diversity_corr,
+                probe_prior_map=probe_prior_map,
+            )
+
+        l1 = _aggregate_per_tf_l1(per_tf_l1)
+
+    l2_tf = _resolve_l2_master_tf(cfg, per_tf_l1 if l1_result_override is None else {}, probe_manifest)
     logger.log(PERF, "[PERF] run_tiered_pipeline_l1_total took=%.4fs", time.perf_counter() - t_l1)
 
     if not l1.gate_passed:
@@ -1811,6 +1986,19 @@ def run_tiered_pipeline(
                 oos_stacked={k: v for k, v in l1.oos_stacked.items() if k not in _late},
             )
 
+    _l1_start_bars = int(
+        np.searchsorted(
+            aligned.datetimes,
+            np.datetime64(_is_ts.tz_localize(None), "ns"),
+        )
+    )
+    _l1_end_bars = int(
+        np.searchsorted(
+            aligned.datetimes,
+            np.datetime64(_oos_ts.tz_localize(None), "ns"),
+        )
+    )
+
     if verbose and l1_result_override is None:
         logger.info(
             format_layer_universe_audit_table(
@@ -1818,8 +2006,8 @@ def run_tiered_pipeline(
                     build_layer_universe_audit(
                         aligned=aligned,
                         layer="L1",
-                        start_idx=l1_start_bars,
-                        end_idx=l1_end_bars,
+                        start_idx=_l1_start_bars,
+                        end_idx=_l1_end_bars,
                     ),
                 )
             )
@@ -1840,7 +2028,7 @@ def run_tiered_pipeline(
     t_l2 = time.perf_counter()
     ho_start_idx_l2 = _date_to_idx(aligned.datetimes, window.holdout_start)
     _l2_expand = int(l2_params.get("l2_is_expansion_bars", 0))
-    _l2_start_idx = max(0, l1_end_bars - _l2_expand)
+    _l2_start_idx = max(0, _l1_end_bars - _l2_expand)
     awf_folds = _tw.build_l2_simulation_folds(
         n_bars=len(aligned.datetimes),
         l2_start_idx=_l2_start_idx,
@@ -1850,21 +2038,21 @@ def run_tiered_pipeline(
     if not awf_folds:
         logger.warning(
             "[L2] build_walk_forward_folds 결과 없음: L2 단일 폴드 fallback [%d, %d)",
-            l1_end_bars,
+            _l1_end_bars,
             ho_start_idx_l2,
         )
-        cal_end = max(l1_end_bars - 1, 1)
+        cal_end = max(_l1_end_bars - 1, 1)
         awf_folds = (WFFold(
             fit_start=0,
             fit_end=cal_end,
             cal_start=max(0, cal_end - max(1, cal_end // 5)),
             cal_end=cal_end,
-            oos_start=l1_end_bars,
+            oos_start=_l1_end_bars,
             oos_end=ho_start_idx_l2,
         ),)
     logger.debug(
         "[L2] AWF window: L2_start_bar=%d ho_start_bar=%d n_folds=%d",
-        l1_end_bars,
+        _l1_end_bars,
         ho_start_idx_l2,
         len(awf_folds),
     )
@@ -1894,7 +2082,7 @@ def run_tiered_pipeline(
         awf_folds=awf_folds,
         config=l2_config,
         caps=caps,
-        tf=tf,
+        tf=l2_tf,
         verbose=verbose,
         override_dsr=override_dsr,
         deploy_leverage=_champion_l_star if (_champion_l_star is not None and _champion_l_star > 1.0) else None,
@@ -1908,7 +2096,7 @@ def run_tiered_pipeline(
                     build_layer_universe_audit(
                         aligned=aligned,
                         layer="L2",
-                        start_idx=l1_end_bars,
+                        start_idx=_l1_end_bars,
                         end_idx=ho_start_idx_l2,
                     ),
                 )
@@ -1990,7 +2178,7 @@ def run_tiered_pipeline(
         holdout_span=(ho_start_idx, ho_end_idx),
         config=l2_config,
         caps=caps,
-        tf=tf,
+        tf=l2_tf,
         holdout_labels=(str(window.holdout_start), str(window.holdout_end)),
         verbose=verbose,
         deploy_leverage=_champion_l_star if (_champion_l_star is not None and _champion_l_star > 1.0) else None,
