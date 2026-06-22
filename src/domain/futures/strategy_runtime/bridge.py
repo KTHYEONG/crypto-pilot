@@ -10,7 +10,13 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 
-from src.domain.futures.strategy.timeframe_contracts import select_probe_source_tf as _shared_select_probe_source_tf
+from src.domain.futures.strategy.timeframe_contracts import (
+    RESAMPLE_METADATA_BOOL_COLS,
+    RESAMPLE_METADATA_FLOAT_COLS,
+)
+from src.domain.futures.strategy.timeframe_contracts import (
+    select_probe_source_tf as _shared_select_probe_source_tf,
+)
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -84,6 +90,8 @@ def _project_panel_to_base_grid(
     base_datetimes: NDArray[np.datetime64],
     tf_i: str,
     base_tf: str,
+    *,
+    ltf_mode: str = "last",
 ) -> CandidateSignalPanel:
     """Project a non-base TF panel onto the base TF bar grid. Look-ahead safe.
 
@@ -92,12 +100,15 @@ def _project_panel_to_base_grid(
         base_datetimes: Target base TF datetime array [T_base].
         tf_i: Timeframe string of the source panel (e.g. "1h", "8h").
         base_tf: Timeframe string of the base grid (e.g. "4h").
+        ltf_mode: LTF projection mode. "last" (default) picks the last signal
+            within each base bar window. "mean" aggregates all signals within
+            each window via mean (score, turnover) / any (valid) / mode (side).
 
     Returns:
         New CandidateSignalPanel projected onto base_datetimes [T_base, N].
 
     Time Complexity: O(T_i * N) for HTF (project_higher_tf_to_grid per symbol);
-                     O(log(T_i) * N) for LTF (searchsorted).
+                     O(T_base * N) for LTF (cumsum-based window aggregation).
     Space Complexity: O(T_base * N) per output array.
     """
     from src.domain.futures.strategy.candidate_contracts import (  # noqa: N814
@@ -151,7 +162,7 @@ def _project_panel_to_base_grid(
                 dt_grid=base_datetimes,
             )
             proj_to[:, n] = np.where(np.isnan(raw_to), 0.0, raw_to)
-    else:
+    elif ltf_mode == "last":
         # Faster TF → pick last tf_i signal within each base bar window
         panel_dt_int = np.asarray(panel.datetimes, dtype="datetime64[ns]").view(np.int64)
         base_dt_int = np.asarray(base_datetimes, dtype="datetime64[ns]").view(np.int64)
@@ -164,6 +175,50 @@ def _project_panel_to_base_grid(
             proj_valid[valid_idx, n] = panel.valid_mask_2d[clipped[valid_idx], n]
             proj_side[valid_idx, n] = panel.side_hint_2d[clipped[valid_idx], n]
             proj_to[valid_idx, n] = panel.turnover_proxy_2d[clipped[valid_idx], n]
+    elif ltf_mode == "mean":
+        # Windowed aggregation: mean(score), any(valid), mode(side), mean(to)
+        panel_dt_int = np.asarray(panel.datetimes, dtype="datetime64[ns]").view(np.int64)
+        base_dt_int = np.asarray(base_datetimes, dtype="datetime64[ns]").view(np.int64)
+
+        n_base = len(base_dt_int)
+        if n_base > 1:
+            diffs = np.diff(base_dt_int)
+            interval_ns = int(np.median(diffs))
+        else:
+            interval_ns = int(hpb_base * 3600.0 * 1_000_000_000.0)
+
+        prev_dt = np.empty_like(base_dt_int)
+        prev_dt[0] = base_dt_int[0] - interval_ns
+        prev_dt[1:] = base_dt_int[:-1]
+
+        starts = np.searchsorted(panel_dt_int, prev_dt, side="right")
+        ends = np.searchsorted(panel_dt_int, base_dt_int, side="right")
+        valid_windows = ends > starts
+        window_cnt = (ends - starts).astype(np.float64)
+
+        for n in range(n_syms):
+            # score: windowed mean via cumsum
+            col = panel.signed_score_2d[:, n]
+            cumsum = np.cumsum(np.insert(col, 0, 0))
+            window_sum = cumsum[ends] - cumsum[starts]
+            mask = valid_windows & (window_cnt > 0)
+            proj_score[mask, n] = window_sum[mask] / window_cnt[mask]
+
+            # valid: any = count > 0
+            proj_valid[valid_windows, n] = True
+
+            # side_hint: mode per window via bincount
+            for i in np.where(valid_windows)[0]:
+                seg = panel.side_hint_2d[starts[i]:ends[i], n]
+                proj_side[i, n] = np.bincount(seg.astype(np.int64) + 1).argmax() - 1
+
+            # turnover: windowed mean via cumsum
+            col_to = panel.turnover_proxy_2d[:, n]
+            cumsum_to = np.cumsum(np.insert(col_to, 0, 0))
+            window_sum_to = cumsum_to[ends] - cumsum_to[starts]
+            proj_to[mask, n] = window_sum_to[mask] / window_cnt[mask]
+    else:
+        raise ValueError(f"Unknown ltf_mode: {ltf_mode!r}")
 
     ratio = hpb_i / hpb_base
     new_hold = max(1, round(panel.expected_holding_bars * ratio))
@@ -219,6 +274,12 @@ def _resample_probe_source_frame(frame: pd.DataFrame, *, target_tf: str) -> pd.D
         agg["funding_rate_sum"] = "mean"
     elif "funding_rate" in prepared.columns:
         agg["funding_rate"] = "mean"
+    for col in RESAMPLE_METADATA_BOOL_COLS:
+        if col in prepared.columns:
+            agg[col] = "max"
+    for col in RESAMPLE_METADATA_FLOAT_COLS:
+        if col in prepared.columns:
+            agg[col] = "mean"
     resampled = (
         prepared.resample(target_tf, label="right", closed="right")
         .agg(agg)
