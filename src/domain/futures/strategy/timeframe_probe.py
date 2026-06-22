@@ -200,6 +200,7 @@ def _alpha_half_life(
     valid_mask: NDArray[np.bool_],
     holding_bars: int,
     hpb_val: float,
+    min_obs: int = _MIN_IC_OBS,
 ) -> float:
     """Compute alpha half-life via log-linear IC decay fit.
 
@@ -219,7 +220,7 @@ def _alpha_half_life(
         fwd = _compute_forward_returns(close, lag)
         valid = valid_mask & np.isfinite(fwd)
         n_valid = int(np.sum(valid))
-        if n_valid < _MIN_IC_OBS:
+        if n_valid < min_obs:
             continue
         ic, _ = spearmanr(signal[valid], fwd[valid])
         if np.isfinite(ic):
@@ -290,6 +291,7 @@ def _fold_ic_values(
     valid_mask: NDArray[np.bool_],
     fold_boundaries: Sequence[pd.Timestamp] | None,
     datetimes: NDArray[np.datetime64],
+    min_obs: int = _MIN_IC_OBS,
 ) -> NDArray[np.float64]:
     """Compute per-fold IC values for sign-consistency estimation."""
     n = len(signal)
@@ -317,7 +319,7 @@ def _fold_ic_values(
             continue
         sl_valid = valid_mask[s:e] & np.isfinite(fwd[s:e]) & np.isfinite(signal[s:e])
         n_valid = int(np.sum(sl_valid))
-        if n_valid < _MIN_IC_OBS:
+        if n_valid < min_obs:
             continue
         ic, _ = spearmanr(signal[s:e][sl_valid], fwd[s:e][sl_valid])
         if np.isfinite(ic):
@@ -333,6 +335,7 @@ def _compute_net_edge_bps(
     turnover_proxy: NDArray[np.float64],
     round_trip_cost_bps: float,
     tf: str,
+    min_obs: int = _MIN_IC_OBS,
 ) -> tuple[float, float]:
     """Compute net_edge_bps and turnover_per_year.
 
@@ -340,7 +343,7 @@ def _compute_net_edge_bps(
     turnover_per_year = mean_turnover_per_bar * bars_per_year
     """
     valid = valid_mask & np.isfinite(fwd)
-    if int(np.sum(valid)) < _MIN_IC_OBS:
+    if int(np.sum(valid)) < min_obs:
         return 0.0, 0.0
 
     pos = np.sign(signal[valid])
@@ -417,6 +420,7 @@ def _probe_tf_worker(args: tuple[Any, ...]) -> list[dict[str, Any]]:
     cell_dicts: list[dict[str, Any]] = []
 
     hpb_val = _hpb(tf)
+    min_obs_dynamic = max(10, round(30 * (4.0 / max(4.0, hpb_val))))
 
     # Pre-compute VR/Hurst per (symbol x tf) — cache to avoid redundant re-computation per panel
     sym_vr_cache: dict[int, tuple[str, float]] = {}
@@ -444,7 +448,7 @@ def _probe_tf_worker(args: tuple[Any, ...]) -> list[dict[str, Any]]:
             valid = valid_col & np.isfinite(fwd) & np.isfinite(signal_col)
             n_events = int(np.sum(valid))
 
-            if n_events < _MIN_IC_OBS:
+            if n_events < min_obs_dynamic:
                 cell_dicts.append(
                     {
                         "symbol": sym,
@@ -479,14 +483,16 @@ def _probe_tf_worker(args: tuple[Any, ...]) -> list[dict[str, Any]]:
             )
 
             fold_ics = _fold_ic_values(
-                signal_col, fwd, valid_col, fold_boundaries_ts, datetimes
+                signal_col, fwd, valid_col, fold_boundaries_ts, datetimes, min_obs=min_obs_dynamic
             )
             fold_consistency = _fold_sign_consistency(fold_ics, ic_mean)
 
-            half_life = _alpha_half_life(signal_col, close_col, valid_col, h_hold, hpb_val)
+            half_life = _alpha_half_life(
+                signal_col, close_col, valid_col, h_hold, hpb_val, min_obs=min_obs_dynamic
+            )
 
             net_bps, turnover_yr = _compute_net_edge_bps(
-                signal_col, fwd, valid_col, to_col, round_trip_cost_bps, tf
+                signal_col, fwd, valid_col, to_col, round_trip_cost_bps, tf, min_obs=min_obs_dynamic
             )
 
             # VR/Hurst from cache (computed once per symbol x tf, shared across panels)
@@ -645,16 +651,28 @@ def probe_timeframe_alpha(
                 _logger.error("tf=%s worker failed: %s", tf_label, exc)
 
     # ---------------------------------------------------------------------------
-    # Post-hoc: BH-FDR across all cells
+    # Post-hoc: BH-FDR per (timeframe, symbol)
     # ---------------------------------------------------------------------------
     if all_cell_dicts:
-        tstats = np.array(
-            [float(c["ic_tstat_hac"]) for c in all_cell_dicts], dtype=np.float64
-        )
-        pvals = 2.0 * norm.sf(np.abs(tstats))
-        discoveries = _bh_fdr(pvals, fdr_q)
-        for i, cell_d in enumerate(all_cell_dicts):
-            cell_d["passed_fdr"] = bool(discoveries[i])
+        dicts_by_group: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for c in all_cell_dicts:
+            dicts_by_group.setdefault((c["tf"], c["symbol"]), []).append(c)
+
+        for group in dicts_by_group.values():
+            # Split: tested cells (IC actually computed) vs untested
+            tested = [c for c in group if c["ic_tstat_hac"] != 0.0]
+            # Untested cells keep passed_fdr = False (already set in worker)
+
+            if not tested:
+                continue
+
+            tstats = np.array(
+                [float(c["ic_tstat_hac"]) for c in tested], dtype=np.float64
+            )
+            pvals = 2.0 * norm.sf(np.abs(tstats))
+            discoveries = _bh_fdr(pvals, fdr_q)
+            for idx, c in enumerate(tested):
+                c["passed_fdr"] = bool(discoveries[idx])
 
     # ---------------------------------------------------------------------------
     # Diversity correlation: same (symbol, family) across tf pairs
