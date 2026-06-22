@@ -662,26 +662,34 @@ def compute_symbol_strategy_evidence(
                 quality_weight *= max(0.0, 1.0 - q_value)
         elif evidence.hard_eligible and bool(getattr(cfg, "l1_quality_weight_enabled", True)):
             quality_weight *= max(0.0, 1.0 - q_value)
-        final_evidence.append(
-            SymbolStrategyEvidence(
-                key=evidence.key,
-                mean_gross_bps=evidence.mean_gross_bps,
-                mean_incremental_bps=evidence.mean_incremental_bps,
-                block_tstat_incremental=evidence.block_tstat_incremental,
-                probability_positive=evidence.probability_positive,
-                p_value=evidence.p_value,
-                q_value=q_value,
-                positive_fold_ratio=evidence.positive_fold_ratio,
-                n_obs=evidence.n_obs,
-                effective_n=evidence.effective_n,
-                n_folds=evidence.n_folds,
-                quality_weight=quality_weight,
-                hard_eligible=evidence.hard_eligible,
-                structural_reasons=evidence.structural_reasons,
-                diagnostic_flags=tuple(diag_flags),
-                lcb_net_bps=evidence.lcb_net_bps,
-            )
+        ev_item = SymbolStrategyEvidence(
+            key=evidence.key,
+            mean_gross_bps=evidence.mean_gross_bps,
+            mean_incremental_bps=evidence.mean_incremental_bps,
+            block_tstat_incremental=evidence.block_tstat_incremental,
+            probability_positive=evidence.probability_positive,
+            p_value=evidence.p_value,
+            q_value=q_value,
+            positive_fold_ratio=evidence.positive_fold_ratio,
+            n_obs=evidence.n_obs,
+            effective_n=evidence.effective_n,
+            n_folds=evidence.n_folds,
+            quality_weight=quality_weight,
+            hard_eligible=evidence.hard_eligible,
+            structural_reasons=evidence.structural_reasons,
+            diagnostic_flags=tuple(diag_flags),
+            lcb_net_bps=evidence.lcb_net_bps,
         )
+        final_evidence.append(ev_item)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[L1-EVIDENCE-PAIR] %s:%s:%s -> hard_eligible=%s structural_reasons=%s diag_flags=%s "
+                "eff_n=%.2f/%s gross=%.2f inc=%.2f t_stat=%.2f folds=%d/%d qw=%.4f lcb=%.4f",
+                ev_item.key.symbol, ev_item.key.strategy_id, ev_item.key.activation_context,
+                ev_item.hard_eligible, ev_item.structural_reasons, ev_item.diagnostic_flags,
+                ev_item.effective_n, min_eff_obs, ev_item.mean_gross_bps, ev_item.mean_incremental_bps,
+                ev_item.block_tstat_incremental, ev_item.n_folds, min_folds, ev_item.quality_weight, ev_item.lcb_net_bps
+            )
     qualified_count = sum(
         1 for ev in final_evidence
         if ev.hard_eligible and ev.quality_weight > 0.0
@@ -742,6 +750,19 @@ def build_qualified_signal_registry(
                 quality_weight = _probe_floor
         if hard_eligible and quality_weight > 0.0 and lcb_pass:
             grouped[item.key.symbol].append(item)
+        else:
+            if logger.isEnabledFor(logging.DEBUG):
+                reject_reasons = []
+                if not hard_eligible:
+                    reject_reasons.append("not_hard_eligible")
+                if quality_weight <= 0.0:
+                    reject_reasons.append("zero_quality_weight")
+                if not lcb_pass:
+                    reject_reasons.append(f"lcb_fail({lcb_net_bps:.4f} <= {breakeven})")
+                logger.debug(
+                    "[L1-REGISTRY-REJECT] %s:%s:%s -> reasons=%s",
+                    item.key.symbol, item.key.strategy_id, item.key.activation_context, ", ".join(reject_reasons)
+                )
     by_symbol: dict[str, tuple[SymbolStrategyEvidence, ...]] = {}
     ready_symbols: list[str] = []
     for symbol in symbols:
