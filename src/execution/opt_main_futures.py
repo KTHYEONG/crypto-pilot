@@ -951,6 +951,7 @@ def _run_tf_probe_stage(
     if not OPT_FUTURES_CONFIG.get("ENABLE_TF_PROBE", False):
         return None
 
+    from src.domain.futures.strategy.execution_cost import ExecutionCostModel
     from src.domain.futures.strategy.timeframe_probe import (
         probe_timeframe_alpha,
         select_tf_family_cells,
@@ -970,6 +971,7 @@ def _run_tf_probe_stage(
             base_cfg=tiered_cfg,
             tf_grid=tf_grid,
             max_workers=max_workers,
+            round_trip_cost_bps=ExecutionCostModel().round_trip_bps(),
         )
         winning: tuple[TfCellEvidence, ...] = select_tf_family_cells(
             manifest,
@@ -1717,6 +1719,11 @@ def _run_strategy_stage(
                 tf=run_config.timeframe,
                 target_phase="l1",
                 verbose=True,
+                probe_diversity_corr=(
+                    _active_probe.manifest.diversity_corr
+                    if _active_probe is not None
+                    else None
+                ),
             )
             if not l1_res.gate_passed:
                 _logger.info("[TIERED] L1 BLOCKED — gate_passed=False")

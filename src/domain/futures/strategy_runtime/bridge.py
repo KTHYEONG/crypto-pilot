@@ -302,6 +302,7 @@ def _build_probe_extra_panels(
     aligned_base: Any,
     base_cfg: Any,
     base_tf: str,
+    inject_full_grid: bool = False,
 ) -> tuple[CandidateSignalPanel, ...]:
     """Build and project non-base TF panels from probe winning cells.
 
@@ -312,6 +313,9 @@ def _build_probe_extra_panels(
         aligned_base: AlignedMarketData for base TF (provides datetimes).
         base_cfg: CandidateStrategyConfig for base TF.
         base_tf: Base timeframe string (e.g. "4h").
+        inject_full_grid: When True, bypass the winning_keys filter and inject all
+            (family, variant) panels for every non-base TF, delegating selection
+            entirely to the downstream L1 nested SWF gate (C1 high-recall mode).
 
     Returns:
         Tuple of projected CandidateSignalPanel objects on the base TF grid.
@@ -333,6 +337,11 @@ def _build_probe_extra_panels(
 
     for tf_i in non_base_tfs:
         winning_keys = {(c.family, c.variant) for c in probe_cells if c.tf == tf_i}
+        # C3: build (family, variant) → cell lookup for probe-origin metadata tagging.
+        # Keys outside winning_keys are possible when inject_full_grid=True.
+        cell_meta: dict[tuple[str, str], Any] = {
+            (c.family, c.variant): c for c in probe_cells if c.tf == tf_i
+        }
         source_mix: Counter[str] = Counter()
         for symbol in symbols:
             source_tf = _select_probe_source_tf(data_maps.get(symbol, {}), tf_i)
@@ -353,20 +362,30 @@ def _build_probe_extra_panels(
                 aligned=aligned_i,
                 cfg=cfg_i,
                 normalize_time_horizon=True,
-                horizon_base_tf="4h",
+                horizon_base_tf=base_tf,
             )
         except Exception as exc:
             _logger.warning("[TF-PROBE] build_rule_signal_panels failed tf=%s: %s", tf_i, exc)
             continue
         for panel in panels_i:
-            if (panel.family, panel.variant) not in winning_keys:
+            # C1: when inject_full_grid=True, bypass winning_keys filter so all
+            # (family, variant) panels reach the L1 nested SWF gate unfiltered.
+            if not inject_full_grid and (panel.family, panel.variant) not in winning_keys:
                 continue
             try:
                 projected = _project_panel_to_base_grid(panel, base_datetimes, tf_i, base_tf)
+                # C3: tag projected panel metadata with probe-origin observability fields.
+                cell = cell_meta.get((panel.family, panel.variant))
+                tagged_metadata: dict[str, Any] = dict(projected.metadata or {})
+                tagged_metadata["probe_origin"] = True
+                tagged_metadata["probe_tf"] = tf_i
+                if cell is not None:
+                    tagged_metadata["probe_ic_tstat"] = cell.ic_tstat_hac
                 extra.append(
                     dataclasses.replace(
                         projected,
                         valid_mask_2d=projected.valid_mask_2d & base_guard,
+                        metadata=tagged_metadata,
                     )
                 )
             except Exception as exc:
@@ -755,6 +774,9 @@ def run_candidate_strategy_for_universe(
     t_step = time.perf_counter()
     panels = build_rule_signal_panels(aligned=aligned, cfg=strategy_cfg.candidate)
     if extra_probe_cells:
+        from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+
+        _inject_full = bool(OPT_FUTURES_CONFIG.get("TF_PROBE_INJECT_FULL_GRID", False))
         _panels_extra = _build_probe_extra_panels(
             data_maps=preloaded_data_maps,
             probe_cells=extra_probe_cells,
@@ -762,6 +784,7 @@ def run_candidate_strategy_for_universe(
             aligned_base=aligned,
             base_cfg=strategy_cfg.candidate,
             base_tf=tf,
+            inject_full_grid=_inject_full,
         )
         if _panels_extra:
             panels = panels + _panels_extra
