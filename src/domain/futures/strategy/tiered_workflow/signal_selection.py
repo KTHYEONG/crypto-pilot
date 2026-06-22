@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections import Counter, defaultdict
 from dataclasses import replace
@@ -269,13 +270,18 @@ def align_outer_opportunities_with_realized(
     return merged, unmatched_count
 
 
-def _by_q_values(p_values: NDArray[np.float64]) -> NDArray[np.float64]:
+def _by_q_values(
+    p_values: NDArray[np.float64],
+    m_eff: float | None = None,
+) -> NDArray[np.float64]:
     if p_values.size == 0:
         return np.zeros((0,), dtype=np.float64)
     order = np.argsort(p_values)
     ordered = p_values[order]
-    m = float(p_values.size)
-    harmonic = float(np.sum(1.0 / np.arange(1, p_values.size + 1, dtype=np.float64)))
+    # m_eff < p_values.size → less conservative (fewer effective tests)
+    m = float(m_eff) if (m_eff is not None and m_eff > 0.0) else float(p_values.size)
+    m_int = max(1, round(m))
+    harmonic = float(np.sum(1.0 / np.arange(1, m_int + 1, dtype=np.float64)))
     n = ordered.size
     adjusted = np.empty_like(ordered)
     running = 1.0
@@ -287,6 +293,61 @@ def _by_q_values(p_values: NDArray[np.float64]) -> NDArray[np.float64]:
     out = np.empty_like(adjusted)
     out[order] = adjusted
     return out
+
+
+_PROBE_TF_PATTERN = re.compile(r"_(\d+[hm])$")  # e.g. _6h, _1h, _30m
+
+
+def _compute_probe_m_eff(
+    groups: list[tuple[str, str, str]],
+    diversity_corr: dict[str, float],
+) -> float:
+    """Effective independent tests correcting for correlated probe TF hypotheses.
+
+    Args:
+        groups: List of (symbol, strategy_id, activation_context) tuples.
+        diversity_corr: Pairwise Pearson r keyed as ``"{sym}:{family}:{tf_a}~{tf_b}"``.
+
+    Returns:
+        Effective number of independent hypotheses (>= 1.0).
+
+    Formula per cluster: ``m_eff_cluster = k / (1 + (k-1) * r̄_cluster)``.
+    Non-probe groups each contribute 1 independent test.
+
+    Time: O(k²) per cluster where k = TFs per (sym, family). Space: O(k²).
+    """
+    # cluster_key = (sym, family); value = list of tf strings
+    probe_clusters: dict[tuple[str, str], list[str]] = {}
+    non_probe_count = 0
+
+    for sym, strat_id, _ in groups:
+        family, _, variant = strat_id.partition(":")
+        m = _PROBE_TF_PATTERN.search(variant)
+        if m is not None:
+            probe_tf = m.group(1)  # e.g. "6h"
+            probe_clusters.setdefault((sym, family), []).append(probe_tf)
+        else:
+            non_probe_count += 1
+
+    m_eff = float(non_probe_count)
+    for (sym, family), tfs in probe_clusters.items():
+        k = len(tfs)
+        if k <= 1:
+            m_eff += float(k)
+            continue
+        # Collect pairwise correlations (try both orderings)
+        r_vals: list[float] = []
+        for i, tf_a in enumerate(tfs):
+            for tf_b in tfs[i + 1 :]:
+                r = diversity_corr.get(
+                    f"{sym}:{family}:{tf_a}~{tf_b}",
+                    diversity_corr.get(f"{sym}:{family}:{tf_b}~{tf_a}", 0.0),
+                )
+                r_vals.append(abs(r))
+        r_bar = float(np.mean(r_vals)) if r_vals else 0.0
+        m_eff += k / (1.0 + (k - 1) * r_bar)
+
+    return max(1.0, m_eff)
 
 
 
@@ -355,6 +416,7 @@ def compute_symbol_strategy_evidence(
     seed: int,
     registry_as_of_idx: int,
     snapshot_index: int = -1,
+    probe_diversity_corr: dict[str, float] | None = None,
 ) -> tuple[SymbolStrategyEvidence, ...]:
     """Compute per-source signal evidence from event-level OOS results."""
     if event_results.empty:
@@ -568,7 +630,20 @@ def compute_symbol_strategy_evidence(
         )
         raw_p_values.append(p_value)
         t_qualify_total += time.perf_counter() - t_qf
-    q_values = _by_q_values(np.asarray(raw_p_values, dtype=np.float64))
+    # C2: effective-N correction for correlated probe TF hypotheses
+    _m_eff: float | None = None
+    if probe_diversity_corr is not None and raw_p_values:
+        _m_eff = _compute_probe_m_eff(
+            groups=[
+                (e.key.symbol, e.key.strategy_id, str(e.key.activation_context))
+                for e in evidence_list
+            ],
+            diversity_corr=probe_diversity_corr,
+        )
+    q_values = _by_q_values(
+        np.asarray(raw_p_values, dtype=np.float64),
+        m_eff=_m_eff,
+    )
     final_evidence: list[SymbolStrategyEvidence] = []
     for idx, evidence in enumerate(evidence_list):
         q_value = float(q_values[idx])
