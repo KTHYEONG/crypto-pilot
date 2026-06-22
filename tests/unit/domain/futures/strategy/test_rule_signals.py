@@ -1253,3 +1253,202 @@ def test_positioning_unwind_warm_up_barrier() -> None:
     # Bars >= 168 may have valid_mask_2d=True depending on feature availability
     assert panel.valid_mask_2d[168:, 0].any() or panel.valid_mask_2d[168:, :].any(), \
         "bars after warm-up should be eligible when all features are valid"
+
+
+# =============================================================================
+# TF-Specific Signal Pool tests (Spec: tf-signal-pools-v2.md)
+# =============================================================================
+
+
+def test_build_rule_signal_panels_family_filter() -> None:
+    aligned = _make_aligned(t=100, n=2)
+    cfg = CandidateStrategyConfig(
+        candidate_families=("trend_ma", "rsi_reversion", "gap_fade_1h", "macd_4h"),
+    )
+    panels = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=cfg,
+        family_filter=("trend_ma", "rsi_reversion"),
+    )
+    families = {p.family for p in panels}
+    assert "trend_ma" in families
+    assert "rsi_reversion" in families
+    assert "gap_fade_1h" not in families
+    assert "macd_4h" not in families
+
+
+def test_build_rule_signal_panels_family_filter_none_backward_compat() -> None:
+    aligned = _make_aligned(t=100, n=2)
+    cfg = CandidateStrategyConfig()
+    panels_without = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=cfg,
+        family_filter=None,
+    )
+    assert len(panels_without) >= 30  # all ~31 families (allow minor variance)
+
+
+def test_build_rule_signal_panels_per_family_params() -> None:
+    aligned = _make_aligned(t=100, n=2)
+    overrides = {
+        "rsi_reversion:rsi_6": {"rsi_period": 4, "oversold": 15.0, "overbought": 85.0},
+    }
+    cfg_with = CandidateStrategyConfig(per_family_params=overrides)
+    cfg_without = CandidateStrategyConfig()
+
+    panels_with = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=cfg_with,
+        family_filter=("rsi_reversion",),
+    )
+    panels_without = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=cfg_without,
+        family_filter=("rsi_reversion",),
+    )
+
+    # Find rsi_6 variant in each
+    p_with = next(p for p in panels_with if p.variant == "rsi_6")
+    p_without = next(p for p in panels_without if p.variant == "rsi_6")
+
+    assert p_with.params["rsi_period"] == 4
+    assert p_with.params["oversold"] == 15.0
+    assert p_with.params["overbought"] == 85.0
+    # default values
+    assert p_without.params["rsi_period"] != 4 or p_without.params["oversold"] != 15.0
+
+    # rsi_14 should not be affected
+    p14_with = next(p for p in panels_with if p.variant == "rsi_14")
+    assert isinstance(p14_with.params["rsi_period"], int) and p14_with.params["rsi_period"] > 4
+
+
+def test_build_rule_signal_panels_gap_fade_1h_logic() -> None:
+    t = 300
+    n = 2
+    np.random.seed(42)
+    base = np.linspace(100.0, 105.0, t * n, dtype=np.float64).reshape(t, n)
+    # Create a large gap at t=50: open far from close[t-1]
+    base[50, :] = base[49, :] + 10.0  # large gap up (need > 2*ATR ≈ 8.0)
+
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    aligned = AlignedMarketData(
+        datetimes=datetimes,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        open_2d=base.copy(),
+        high_2d=base * 1.02,
+        low_2d=base * 0.98,
+        close_2d=base.copy(),
+        volume_2d=np.full((t, n), 1000.0, dtype=np.float64),
+        funding_2d=np.zeros((t, n), dtype=np.float64),
+        basis_2d=np.zeros((t, n), dtype=np.float64),
+        taker_buy_2d=np.full((t, n), 500.0, dtype=np.float64),
+        trades_2d=np.full((t, n), 100.0, dtype=np.float64),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.full((t, n), 5.0, dtype=np.float64),
+    )
+    cfg = CandidateStrategyConfig(
+        candidate_families=("gap_fade_1h",),
+        mean_rev_gating_enabled=False,
+    )
+    panels = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=cfg,
+        family_filter=("gap_fade_1h",),
+    )
+    assert len(panels) >= 1
+    gf = panels[0]
+    assert gf.family == "gap_fade_1h"
+    assert gf.variant == "gf_1h"
+    # At t=50 with gap up, side_hint should be -1 (short)
+    assert gf.side_hint_2d[50, 0] == -1, f"Expected -1 for gap up, got {gf.side_hint_2d[50, 0]}"
+
+
+def test_build_rule_signal_panels_volume_climax_1h_logic() -> None:
+    t = 300
+    n = 2
+    np.random.seed(42)
+    base = np.linspace(100.0, 102.0, t * n, dtype=np.float64).reshape(t, n)
+    vol_normal = np.full((t, n), 1000.0, dtype=np.float64)
+    # spike at t=50: volume 5x, small return (exhaustion)
+    vol_normal[50, :] = 6000.0
+    base[50, :] = base[49, :] + 0.1
+
+    datetimes = np.datetime64("2025-01-01T00", "h") + np.arange(t).astype("timedelta64[h]")
+    aligned = AlignedMarketData(
+        datetimes=datetimes,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        open_2d=base.copy(),
+        high_2d=base * 1.01,
+        low_2d=base * 0.99,
+        close_2d=base.copy(),
+        volume_2d=vol_normal,
+        funding_2d=np.zeros((t, n), dtype=np.float64),
+        basis_2d=np.zeros((t, n), dtype=np.float64),
+        taker_buy_2d=np.full((t, n), 500.0, dtype=np.float64),
+        trades_2d=np.full((t, n), 100.0, dtype=np.float64),
+        active_mask=np.ones((t, n), dtype=bool),
+        warm_mask=np.ones((t, n), dtype=bool),
+        entry_block_mask=np.zeros((t, n), dtype=bool),
+        kill_mask=np.zeros((t, n), dtype=bool),
+        execution_cost_bps_2d=np.full((t, n), 5.0, dtype=np.float64),
+    )
+    cfg = CandidateStrategyConfig(
+        candidate_families=("volume_climax_1h",),
+        mean_rev_gating_enabled=False,
+    )
+    panels = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=cfg,
+        family_filter=("volume_climax_1h",),
+    )
+    vc = panels[0]
+    assert vc.family == "volume_climax_1h"
+    assert vc.valid_mask_2d[50, 0]
+    # At t=50 with volume spike + stalled price, side_hint should be set
+    assert vc.side_hint_2d[50, 0] != 0
+
+
+def test_build_rule_signal_panels_supertrend_direction() -> None:
+    from src.domain.futures.strategy.rule_signals import _supertrend_2d
+
+    t = 60
+    n = 1
+    up = np.linspace(100.0, 120.0, t, dtype=np.float64).reshape(t, n)
+    down = np.linspace(100.0, 80.0, t, dtype=np.float64).reshape(t, n)
+
+    trend = _supertrend_2d(up * 1.01, up * 0.99, up, period=10, multiplier=2.5)
+    # trend[0] = 0 (initial), after sustained uptrend should flip to +1
+    assert trend[-1, 0] == 1, f"Expected +1 for steady uptrend, got {trend[-1, 0]}"
+
+    trend_dn = _supertrend_2d(down * 1.01, down * 0.99, down, period=10, multiplier=2.5)
+    assert trend_dn[-1, 0] == -1  # steady downtrend → -1
+
+
+def test_build_rule_signal_panels_full_per_tf_pool() -> None:
+    from src.domain.futures.strategy.config import _DEFAULT_PER_TF_FAMILIES
+
+    aligned = _make_aligned(t=300, n=2)
+    # Include all pool families so filter_rule_signal_panels doesn't strip them
+    all_pool_families = tuple(sorted(set(
+        f for pool in _DEFAULT_PER_TF_FAMILIES.values() for f in pool
+    )))
+    cfg = CandidateStrategyConfig(candidate_families=all_pool_families)
+    pool_1h = _DEFAULT_PER_TF_FAMILIES["1h"]
+    panels = build_rule_signal_panels(
+        aligned=aligned,
+        cfg=cfg,
+        family_filter=pool_1h,
+    )
+    families = {p.family for p in panels}
+    # 1h pool: only reversion + flow + new 1h-specific strategies
+    assert "rsi_reversion" in families
+    assert "gap_fade_1h" in families
+    assert "vwap_reversion_1h" in families
+    assert "volume_climax_1h" in families
+    # Trend families should NOT be in 1h pool
+    assert "trend_ma" not in families
+    assert "trend_donchian" not in families
+    assert "dual_momentum" not in families
