@@ -332,6 +332,7 @@ def run_active_strategy_output_bridge(
     preloaded_data_maps: dict[str, dict[str, Any]] | None = None,
     trading_symbols: tuple[str, ...] | None = None,
     silent: bool = False,
+    extra_probe_cells: tuple[Any, ...] | None = None,
 ) -> CandidatePipelineOutput:
     del (
         fetch_start,
@@ -361,4 +362,5 @@ def run_active_strategy_output_bridge(
         strategy_cfg=strategy_cfg,
         preloaded_data_maps=preloaded_data_maps,
         silent=silent,
+        extra_probe_cells=extra_probe_cells,
     )
