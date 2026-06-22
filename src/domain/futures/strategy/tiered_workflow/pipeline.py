@@ -790,6 +790,8 @@ def run_l1_nested_swf(
     verbose: bool = True,
     l2_start: date | None = None,
     probe_diversity_corr: dict[str, float] | None = None,
+    probe_prior_map: dict[tuple[str, str, str], float] | None = None,
+    tf: str = "4h",
 ) -> Layer1Result:
     """Run nested Layer1 validation using inner selection and outer evaluation."""
     import dataclasses
@@ -805,6 +807,7 @@ def run_l1_nested_swf(
         l1_cfg = copy(cfg)
         l1_cfg.ensemble_conditioning = "archetype_only"
         l1_cfg.ensemble_score_calibration_enabled = False
+    _cfg_effective = strategy_config.apply_tf_gate_overrides(l1_cfg, tf)
 
     purge_bars, embargo_bars = strategy_config.resolve_purge_and_embargo_bars(cfg)
     _vol_window = composer_sigma_lookback_bars("4h")
@@ -1111,7 +1114,8 @@ def run_l1_nested_swf(
             symbols=aligned.symbols,
             min_signals_per_symbol=int(cfg.l1_min_signals_per_symbol),
             registry_version="deployment",
-            cfg=cfg,
+            cfg=_cfg_effective,
+            probe_prior_map=probe_prior_map,
         )
         oos_stacked = _registry_to_symbol_signals(deployment_registry)
         fit_start_idx = min((fold.fit_start for fold in outer_folds), default=0)
@@ -1725,6 +1729,7 @@ def run_tiered_pipeline(
     verbose: bool = True,
     override_dsr: float | None = None,
     probe_diversity_corr: dict[str, float] | None = None,
+    probe_prior_map: dict[tuple[str, str, str], float] | None = None,
 ) -> tuple[Layer1Result, Layer2Result | None, Layer3Result | None]:
     """3-Layer 티어드 파이프라인 실행.
 
@@ -1775,6 +1780,8 @@ def run_tiered_pipeline(
                 else pd.Timestamp(window.l2_start).date()
             ),
             probe_diversity_corr=probe_diversity_corr,
+            probe_prior_map=probe_prior_map,
+            tf=tf,
         )
     logger.log(PERF, "[PERF] run_tiered_pipeline_l1_total took=%.4fs", time.perf_counter() - t_l1)
 
