@@ -356,9 +356,13 @@ def run_active_strategy_output_bridge(
     if not effective_symbols:
         raise ValueError("candidate ML scope is empty")
 
+    _effective_tf = tf
+    probe_master_tf = str(opt_config.get("PROBE_MASTER_TF", tf))
+    if extra_probe_cells and probe_master_tf != tf:
+        _effective_tf = probe_master_tf
     return run_candidate_strategy_for_universe(
         symbols=effective_symbols,
-        tf=tf,
+        tf=_effective_tf,
         strategy_cfg=strategy_cfg,
         preloaded_data_maps=preloaded_data_maps,
         silent=silent,
