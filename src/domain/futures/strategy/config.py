@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace
-from typing import Literal
+from typing import Any, Literal
 
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 
@@ -377,6 +377,10 @@ class CandidateStrategyConfig:
         "flow_trend_continuation",
         "lsr_oi_regime_filter",
     )
+    # TF-Specific Signal Pools
+    per_tf_candidate_families: dict[str, tuple[str, ...]] | None = None
+    per_family_params: dict[str, dict[str, Any]] | None = None
+    per_tf_signal_pool_enabled: bool = False
     # Execution cost model (SSOT; replaces flat 24bps)
     maker_fee_bps: float = 2.0
     taker_fee_bps: float = 5.0
@@ -439,6 +443,11 @@ class CandidateStrategyConfig:
     l1_min_fold_probe_bps: float = 0.0
     l1_probe_lcb_pooled: bool = True
     l1_quality_weight_enabled: bool = True
+    # ── L1 Gate Fairness ──
+    l1_qw_floor: float = 0.0
+    l1_qw_probe_boost: float = 0.3
+    per_tf_gate_overrides: dict[str, dict[str, float]] | None = None
+    per_tf_gate_enabled: bool = False
     l1_evidence_lookback_bars: int | None = None
     l1_evidence_grid_multiplier: int = 3
     l1_evidence_max_folds: int = 32
@@ -908,3 +917,150 @@ def resolve_purge_and_embargo_bars(
     if purge_bars is None or embargo_bars is None:
         raise ValueError("purge/embargo bars must be materialized before use")
     return int(purge_bars), int(embargo_bars)
+
+
+# ── TF-Specific Signal Pool Defaults ──
+
+_DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
+    "1h": (
+        "rsi_reversion",
+        "bollinger_reversion",
+        "vol_regime_reversion",
+        "residual_reversion",
+        "funding_carry",
+        "flow_exhaustion_reversal",
+        "gap_fade_1h",
+        "vwap_reversion_1h",
+        "volume_climax_1h",
+    ),
+    "2h": (
+        "rsi_reversion",
+        "bollinger_reversion",
+        "vol_regime_reversion",
+        "residual_reversion",
+        "funding_carry",
+        "flow_exhaustion_reversal",
+        "trend_ma",
+        "btc_regime_pullback",
+        "funding_zscore_carry",
+    ),
+    "4h": (
+        "trend_ma",
+        "trend_donchian",
+        "trend_pullback_continuation",
+        "dual_momentum",
+        "btc_regime_pullback",
+        "funding_zscore_carry",
+        "funding_carry",
+        "residual_reversion",
+        "bollinger_reversion",
+        "rsi_reversion",
+        "vol_regime_reversion",
+        "taker_imbalance_momentum",
+        "funding_flow_carry",
+        "funding_flow_unwind",
+        "flow_exhaustion_reversal",
+        "funding_term_structure_carry",
+        "macd_4h",
+    ),
+    "6h": (
+        "trend_ma",
+        "trend_donchian",
+        "trend_pullback_continuation",
+        "dual_momentum",
+        "btc_regime_pullback",
+        "funding_zscore_carry",
+        "funding_carry",
+        "supertrend",
+    ),
+    "8h": (
+        "trend_ma",
+        "trend_donchian",
+        "trend_pullback_continuation",
+        "dual_momentum",
+        "btc_regime_pullback",
+        "funding_zscore_carry",
+        "funding_carry",
+        "supertrend",
+    ),
+    "12h": (
+        "trend_ma",
+        "trend_donchian",
+        "trend_pullback_continuation",
+        "dual_momentum",
+        "btc_regime_pullback",
+        "funding_zscore_carry",
+        "funding_carry",
+        "ichimoku_trend",
+        "supertrend",
+    ),
+}
+
+_DEFAULT_PER_TF_GATE_OVERRIDES: dict[str, dict[str, float]] = {
+    "1h": {
+        "l1_pair_min_effective_obs": 3.0,
+        "l1_min_sym_count": 4,
+        "l1_min_fold_ratio": 0.40,
+        "l1_min_realized_match_ratio": 0.80,
+    },
+    "2h": {
+        "l1_pair_min_effective_obs": 4.0,
+        "l1_min_sym_count": 5,
+        "l1_min_fold_ratio": 0.45,
+        "l1_min_realized_match_ratio": 0.85,
+    },
+    "6h": {
+        "l1_pair_min_effective_obs": 5.0,
+    },
+    "8h": {
+        "l1_pair_min_effective_obs": 5.0,
+    },
+    "12h": {
+        "l1_pair_min_effective_obs": 6.0,
+        "l1_min_fold_ratio": 0.55,
+    },
+}
+
+_DEFAULT_PER_FAMILY_PARAMS: dict[str, dict[str, Any]] = {
+    "rsi_reversion:rsi_6": {"rsi_period": 4, "oversold": 15.0, "overbought": 85.0},
+    "bollinger_reversion:bollinger_20": {"window": 12, "entry_z": 2.5},
+    "vol_regime_reversion:vrr_20": {"vol_window": 10, "vol_z_threshold": 2.5},
+    "residual_reversion:rr_24": {"window": 12},
+    "funding_carry:funding_24": {"window": 12, "entry_z": 1.0},
+    "trend_ma:ema_12_72": {"ema_fast": 6, "ema_slow": 36, "atr_period": 14},
+    "trend_donchian:donchian_72": {"lookback": 36},
+    "dual_momentum:dm_12_48": {"short_lookback": 6, "long_lookback": 24},
+}
+
+
+def apply_per_family_params(
+    cfg: CandidateStrategyConfig,
+    family: str,
+    variant: str,
+    base_params: dict[str, Any],
+) -> dict[str, Any]:
+    """Override base_params with per_family_params for the given family:variant key."""
+    if cfg.per_family_params is None:
+        return base_params
+    key = f"{family}:{variant}"
+    overrides = cfg.per_family_params.get(key, {})
+    return {**base_params, **overrides}
+
+
+def apply_tf_gate_overrides(
+    cfg: CandidateStrategyConfig,
+    tf: str,
+) -> CandidateStrategyConfig:
+    """Return a config copy with per-TF gate thresholds merged in.
+
+    Only keys that exist on CandidateStrategyConfig are applied.
+    If no overrides exist for the given TF, returns the original config.
+    """
+    import dataclasses
+    if cfg.per_tf_gate_overrides is None or tf not in cfg.per_tf_gate_overrides:
+        return cfg
+    overrides = cfg.per_tf_gate_overrides[tf]
+    valid_overrides = {k: v for k, v in overrides.items() if hasattr(cfg, k)}
+    if not valid_overrides:
+        return cfg
+    return dataclasses.replace(cfg, **valid_overrides)  # type: ignore[arg-type]
