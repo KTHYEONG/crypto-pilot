@@ -1,3 +1,8 @@
+## L1-ADR-035: L1 Gate and Signal Pool Optimization & Fallback (2026-06-22)
+- **Delta:** `apply_tf_gate_overrides` 내에 `_DEFAULT_PER_TF_GATE_OVERRIDES` 자동 폴백(Fallback) 로직을 적용함. `CandidateStrategyConfig`의 `per_tf_signal_pool_enabled` 기본값을 `True`로 활성화함. `l1_pair_fdr_alpha` 기본값을 `0.15`로, `l1_qw_floor` 기본값을 `0.05`로 인상함. `_DEFAULT_PER_TF_FAMILIES["2h"]`에서 `"trend_ma"`를 제거함.
+- **Rationale:** 1h/2h 등 단기 TF 실행 시 동적 게이트 완화 오버라이드가 실제로는 비활성화(None/False) 상태로 작동하여 4h의 극도로 가혹한 문턱값이 강제되던 계산상/운영상의 설계 결함을 해소함. FDR 및 QW 바닥선을 완화하고, 노이즈가 많고 통과율이 낮은 단기 TF 추세 추종 전략을 배제하여 연산 효율과 신호 발굴율을 동시 개선함.
+- **Edge Cases:** `per_tf_gate_overrides`가 None인 상태에서도 디폴트 오버라이드가 원활하게 fallback되어 기존 4h 단일 TF 호환성 및 단기 TF 완화 논리가 모두 안전하게 성립함.
+
 ## L1-ADR-030: Unified 1h Master Grid & High-Recall TF-Probe Generator Alignment (2026-06-22)
 - **Delta:** 통합 그리드를 1h 마스터 클럭(`PROBE_MASTER_TF`)으로 변경하였고, 이에 맞춰 `_build_probe_extra_panels` 및 `_project_panel_to_base_grid`가 1h base grid로 정사영을 투영하도록 수정함. TF-Probe를 strict gate에서 high-recall candidate generator 역할로 정의하고 winning cell의 주입 기준을 대폭 관대화함.
 - **Rationale:** 기존 4h base grid로 투영 시 4h보다 짧은 시간프레임(1h, 2h)의 signal edge가 4h 윈도우 내 마지막 1h 값만 잔류하여 유실되는 현상이 발생했고, 이는 측정 시점과 실제 포트폴리오 배포 시점 간의 심각한 fidelity 불일치를 유발하여 비-4h 발굴 가치를 무력화함. 1h 통합 마스터 그리드를 사용하여 모든 신호 해상도를 보존함.
