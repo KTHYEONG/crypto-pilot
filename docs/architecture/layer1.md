@@ -107,6 +107,7 @@ graph TD
 - **Readiness Gate**: Strict multi-condition screening:
   - Fold Coverage $\ge 0.80$, Match Ratio $\ge 0.90$, Effective Symbols ($N_{eff}$) $\ge 3.0$, Fold Ratio $\ge 0.50$.
   - **Pooled LCB**: Global profitability metric ($LCB > 0$) via stationary block bootstrap over all passed folds.
+  - **Per-TF Gate Overrides**: `per_tf_gate_overrides[tf]` can relax thresholds for short TFs (1h: $N_{eff} \ge 3.0$, sym_count $\ge 4$, fold_ratio $\ge 0.40$) or tighten for long TFs (12h: $N_{eff} \ge 6.0$, fold_ratio $\ge 0.55$). Applied via `apply_tf_gate_overrides(cfg, tf)`; `per_tf_gate_enabled=False` (default) preserves global defaults for backward compat.
 - **Right-Censoring Diagnostic**: `dropped_by_maturity_count` tracks events filtered by `exit_idx >= oos_end` per fold. Exposed in Outer Fold log as `[censored: N]` to distinguish genuine edge weakness from boundary truncation (especially last fold).
 
 **Promotion Summary & L2 Gate**
@@ -116,7 +117,7 @@ graph TD
   3. `q_value ≤ l1_pair_fdr_alpha` — binding BH-FDR reject (`l1_fdr_hard_reject=True`; `l1_pair_fdr_alpha=0.10`)
   4. `quality_weight > 0` — conviction: `max(0, 2P−1) · positive_fold_ratio · sample_scale` where P = P(μ>0) from block-bootstrap
 - **`lcb_net_bps`**: P5 of block-bootstrap means over `incremental_bps` (peer-relative gross edge, cost NOT deducted). Comparison against `breakeven` is a pre-trade cost screen; backtest engine deducts actual costs separately — no double penalty.
-- **`quality_weight`**: Continuous conviction metric passed downstream to L2. No discrete hi/mid/lo tier.
+- **`quality_weight`**: Continuous conviction metric: `max(l1_qw_floor, max(0, 2P−1) · positive_fold_ratio · sample_scale)` where P = P(μ>0) from block-bootstrap. `l1_qw_floor` (default 0.0) prevents near-zero qw from eliminating marginally significant signals while preserving backward compat. FDR hard reject (q > `l1_pair_fdr_alpha`) is ABSOLUTE and overrides qw_floor — binding constraint. Probe winning cells inject an additional floor via `probe_prior_map: {(family, variant, symbol) → qw_floor}`, raising qw to `l1_qw_probe_boost` (default 0.3) for cross-confirmed signals. No discrete hi/mid/lo tier.
 - **FAIL summary**: `[NOT PROMOTED] N pairs | top: <reason>xN` appears when `all_evidence` is provided, listing structural exclusion reasons for non-admitted pairs.
 - **Promotion Filter**: Diagnostics-level filter (`apply_variant_promotions`) is advisory-only. When no variants are recommended by diagnostics, all events pass through unfiltered; the ultimate filtering authority is `compute_symbol_strategy_evidence` via structural gates and quality weight within the L1 SWF.
 - **Backward compatibility**: `build_qualified_signal_registry(cfg=None)` disables LCB gate (sentinel pattern for tests / callers without cfg).
