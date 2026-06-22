@@ -161,3 +161,95 @@ def test_run_strategy_stage_injects_probe_cells_before_bridge(
     assert captured["extra_probe_cells"] is not None
     assert len(captured["extra_probe_cells"]) == 1
     assert result is not None
+
+
+def test_run_tf_probe_stage_logs_selection_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps={"BTCUSDT": {"4h": _frame()}},
+        oos_data_maps={"BTCUSDT": {"4h": _frame()}},
+        valid_symbols=["BTCUSDT"],
+    )
+
+    monkeypatch.setitem(
+        cast(dict[str, Any], opt_main_futures.__dict__["OPT_FUTURES_CONFIG"]),
+        "ENABLE_TF_PROBE",
+        True,
+    )
+    monkeypatch.setitem(
+        cast(dict[str, Any], opt_main_futures.__dict__["OPT_FUTURES_CONFIG"]),
+        "TF_PROBE_GRID",
+        ["1h", "2h"],
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.timeframe_probe.probe_timeframe_alpha",
+        lambda **_kwargs: TfProbeManifest(
+            cells=(
+                TfCellEvidence(
+                    symbol="BTCUSDT",
+                    family="carry_rev",
+                    variant="funding_carry",
+                    archetype="carry_rev",
+                    tf="1h",
+                    n_obs=100,
+                    n_events=20,
+                    ic_mean=0.05,
+                    ic_tstat_hac=2.5,
+                    ic_fold_sign_consistency=0.8,
+                    alpha_half_life_h=24.0,
+                    net_edge_bps=5.0,
+                    turnover_per_year=50.0,
+                    vr_label="mean_rev",
+                    hurst=0.4,
+                    passed_fdr=True,
+                ),
+                TfCellEvidence(
+                    symbol="BTCUSDT",
+                    family="trend",
+                    variant="breakout",
+                    archetype="trend",
+                    tf="2h",
+                    n_obs=120,
+                    n_events=25,
+                    ic_mean=0.06,
+                    ic_tstat_hac=2.1,
+                    ic_fold_sign_consistency=0.75,
+                    alpha_half_life_h=30.0,
+                    net_edge_bps=4.0,
+                    turnover_per_year=40.0,
+                    vr_label="trend",
+                    hurst=0.5,
+                    passed_fdr=True,
+                ),
+            ),
+            tf_grid=("1h", "2h"),
+            coverage_by_tf={"1h": 1, "2h": 1},
+            diversity_corr={},
+        ),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.timeframe_probe.select_tf_family_cells",
+        lambda manifest, **_kwargs: tuple(manifest.cells),
+    )
+
+    messages: list[str] = []
+
+    def _fake_info(msg: str, *args: Any, **kwargs: Any) -> None:
+        del kwargs
+        messages.append(msg % args if args else msg)
+
+    monkeypatch.setattr(opt_main_futures._logger, "info", _fake_info)
+
+    result = opt_main_futures._run_tf_probe_stage(
+        cast(FuturesRunConfig, SimpleNamespace(timeframe="4h")),
+        data_stage,
+        object(),
+    )
+    out = "\n".join(messages)
+
+    assert result is not None
+    assert "[TF-PROBE AUDIT] TIMEFRAME SELECTION" in out
+    assert "[TF-PROBE AUDIT] GATE SURVIVORSHIP" in out
+    assert "| 1h" in out
+    assert "| 2h" in out
