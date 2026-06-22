@@ -1899,3 +1899,25 @@ def copy_data_maps_tf_clone(
         if isinstance(frame, pd.DataFrame):
             out[sym][tf] = frame.copy()
     return out
+
+
+def build_probe_prior_map(
+    probe_manifest: list[dict[str, Any]],
+    boost: float = 0.3,
+) -> dict[tuple[str, str, str], float]:
+    """Convert probe winning cells to L1 quality weight floor mapping.
+
+    Args:
+        probe_manifest: List of TfCellEvidence dicts from probe_timeframe_alpha.
+        boost: Quality weight floor for probe-winning signals.
+
+    Returns:
+        {(family, variant, symbol): qw_floor}
+    """
+    prior: dict[tuple[str, str, str], float] = {}
+    for cell in probe_manifest:
+        if not cell.get("is_winner", False):
+            continue
+        key = (cell["family"], cell["variant"], cell["symbol"])
+        prior[key] = boost
+    return prior
