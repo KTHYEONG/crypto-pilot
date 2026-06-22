@@ -240,6 +240,12 @@
 - **Edge Cases:** l1_evidence_early_snapshots=0 (default) → disabled, 항상 strict gate 사용. deployment-level compute_symbol_strategy_evidence 호출 (run_l1_nested_swf L1053)은 snapshot_index 없이 호출 → -1 default → strict gate 적용. promotion filter advisory 모드에서 caller(ablation.py/bridge.py)의 `labeled.empty` guard는 pass-through 시 full data를 받으므로 pipeline 정상 진행.
 - **Status:** Accepted
 
+## L1-ADR-032: TF-Specific Signal Pools & 6 New Signal Families (2026-06-22)
+- **Delta:** Added `family_filter` parameter to `build_rule_signal_panels`. Added 6 new signal families (gap_fade_1h, vwap_reversion_1h, volume_climax_1h, macd_4h, supertrend, ichimoku_trend) with TF-specific assignment. Added `per_tf_candidate_families`, `per_family_params`, `per_tf_signal_pool_enabled` fields to `CandidateStrategyConfig`. Added `_DEFAULT_PER_TF_FAMILIES` and `_DEFAULT_PER_FAMILY_PARAMS` constants. Added `_vwap_2d` (cumsum rolling VWAP) and `_supertrend_2d` (iterative band state machine) helper functions.
+- **Rationale:** 모든 TF에 31개 공통 패널을 주입하던 구조는 1h에서 0/1995 winning을 기록할 정도로 TF별 신호 특성을 무시했다. Mean-rev 전략은 1h에서 유효하지만 trend 전략은 노이즈, 반대로 12h에서는 trend가 유효하다. TF별 optimal signal pool을 분리하고 crypto-native 전략(gap fade, VWAP reversion, volume climax)과 고전적 trend 전략(MACD, SuperTrend, Ichimoku) 6종을 추가하여 coverage를 확장한다.
+- **Edge Cases:** family_filter=None (default)로 모든 기존 caller는 31개 전 패널 생성 — 하위 호환 100% 유지. per_family_params 키 누락 시 기본 params 사용. supertrend/ichimoku는 local trend 방향성(binary score)만 제공, long holding으로 turnover 낮음.
+- **Status:** Accepted
+
 ## L1-ADR-031: TF Probe Detail-Level Fixes — LTF Signal Aggregation, Metadata Preservation, Holding-Bar Cost Correction (2026-06-22)
 - **Delta:**
   - `_project_panel_to_base_grid`에 `ltf_mode` 키워드 파라미터 추가. `"last"`(기존 searchsorted)는 하위 호환 유지, `"mean"` 모드는 cumsum 기반 window aggregation으로 window 내 모든 LTF 예측값을 평균 집계. `side`는 bincount mode 사용.
@@ -258,4 +264,17 @@
   - `ENABLE_TF_PROBE` 기본값을 `False`로 두어 일반 `--phase l1` 경로가 probe 옵트인 상태가 되도록 맞췄다.
 - **Rationale:** virtual TF를 디스크 parquet처럼 취급하면 `2h/6h/8h/12h`가 비어 있는 환경에서 `data_not_ready`가 발생했다. 실제 운영 의도는 source TF만 저장하고 virtual TF는 런타임에서 resample하는 것이므로, data-stage와 bridge-stage의 책임을 분리하고 probe 결과가 실제 signal injection까지 전달되도록 wiring을 복구했다.
 - **Edge Cases:** source TF가 없으면 해당 virtual TF는 조용히 skip한다. base-grid guard는 projected probe panel에 재적용하여 membership/readiness 우회를 막는다. tiered 경로에서만 probe를 주입하며, probe 비활성화 시 기존 base-only 동작을 유지한다.
+- **Status:** Accepted
+
+## L1-ADR-033: L1 Gate Fairness — Quality Weight Floor, Probe Prior Boost, Per-TF Gate Overrides (2026-06-22)
+- **Delta:**
+  - `CandidateStrategyConfig`에 `l1_qw_floor`, `l1_qw_probe_boost`, `per_tf_gate_overrides`, `per_tf_gate_enabled` 4개 필드 추가.
+  - `compute_symbol_strategy_evidence`의 quality_weight 계산에 qw_floor 적용: `qw = max(l1_qw_floor, 계산된_qw)`. FDR hard reject (q > alpha)는 qw_floor보다 우선함 (binding).
+  - `build_qualified_signal_registry`에 `probe_prior_map` 파라미터 추가: Probe winning cell 신호의 quality_weight를 `l1_qw_probe_boost`(default 0.3)까지 상향.
+  - `apply_tf_gate_overrides(cfg, tf)` 헬퍼를 `config.py`에 추가: TF별 gate threshold 동적 오버라이드 (1h 완화, 12h 강화).
+  - `_DEFAULT_PER_TF_GATE_OVERRIDES` 상수 추가: 1h/2h는 `l1_pair_min_effective_obs`, `l1_min_sym_count`, `l1_min_fold_ratio`, `l1_min_realized_match_ratio` 완화; 12h는 `l1_pair_min_effective_obs` 강화.
+  - `bridge.py`에 `build_probe_prior_map` 헬퍼 추가: probe manifest → `{(family, variant, symbol): qw_floor}` 변환.
+  - `run_l1_nested_swf`에 `probe_prior_map` + `tf` 파라미터 추가; 내부에서 `_cfg_effective`를 통해 gate override 적용 후 `build_qualified_signal_registry`에 전달.
+- **Rationale:** L1 평가 체계에서 quality_weight_zero 954건의 통계적 과잉 탈락 발생. P(μ>0)이 0.51에 근접해도 sample_scale × fold_ratio 곱으로 인해 quality_weight가 0.001~0.003 수준으로 붕괴하여 등록 게이트 통과 불가. qw_floor는 최소 생존 가중치를 보장. Probe winning cell 정보는 기존에는 L1 게이트에 반영되지 않아 signal injection에도 불구하고 L1에서 이중 탈락하는 문제 해결. TF별 gate threshold는 1h처럼 bar 수가 많은 단기 TF의 noise 과잉 차단을 보정하고, 12h처럼 bar 수가 적은 장기 TF의 통계 안정성을 강화.
+- **Edge Cases:** FDR hard reject는 qw_floor보다 우선 — 통계적 위양성 차단. qw_floor=0.0 (default)는 완전 하위 호환. per_tf_gate_overrides=None 시 identity 반환 (변경 없음). probe_prior_map이 없거나 probe non-winner 신호는 boost 없음 (거짓 양성 없음).
 - **Status:** Accepted

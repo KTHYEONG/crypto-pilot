@@ -70,6 +70,20 @@ Generates vectorized rule panels with archetype/regime contexts, filtered throug
 - `positioning_unwind` enforces a 168-bar continuous valid data warm-up barrier before entry eligibility, preventing z-score noise in shallow data windows.
 - Flow feature cache includes `flow_imbalance`, `flow_mean_6`, `flow_z_24`, `funding_z_96`, `funding_z_168`, `funding_ts_slope`, `ret_1`, `ret_12`, and `ret_z_48`.
 
+**TF-Specific Signal Pools & 6 New Families**
+- `build_rule_signal_panels` supports `family_filter: tuple[str, ...] | None = None` parameter. When provided, only signal families in the filter are generated (post-processing filter after all panels are built).
+- `CandidateStrategyConfig` exposes `per_tf_candidate_families` (TF→family tuple mapping), `per_family_params` (family:variant→param override dict), and `per_tf_signal_pool_enabled` flag.
+- `_DEFAULT_PER_TF_FAMILIES` assigns per-TF pools: 1h (9 families, mean_rev-dominant), 2h (9 families, mixed), 4h (17 families, balanced), 6h/8h (7 families, trend-dominant), 12h (9 families, trend-dominant).
+- `_DEFAULT_PER_FAMILY_PARAMS` provides TF-specific parameter tuning (1h faster mean-rev params, 12h slower trend params).
+- `apply_per_family_params(cfg, family, variant, base_params)` merges default params with per-family overrides.
+- 6 new signal families:
+  - `gap_fade_1h`: extreme gap (|open−close|/ATR > 2.0) fade. mean_rev, 1h only.
+  - `vwap_reversion_1h`: 24h VWAP 2σ deviation reversion via cumsum-based rolling VWAP. mean_rev, 1h only.
+  - `volume_climax_1h`: Wyckoff distribution (vol_z > 3.0 + stalled price). mean_rev, 1h only.
+  - `macd_4h`: MACD (12/26/9) histogram zero crossover. trend, 4h only.
+  - `supertrend`: ATR×2.5 trailing stop (period=10) with iterative band state machine. trend, 6h+/12h.
+  - `ichimoku_trend`: Tenkan-Kijun cross + cloud confirmation. trend, 12h only.
+
 # 3. Architecture Flow
 
 ```mermaid
