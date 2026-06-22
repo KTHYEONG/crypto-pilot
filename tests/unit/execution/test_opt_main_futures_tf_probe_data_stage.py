@@ -95,3 +95,74 @@ def test_run_data_stage_does_not_require_virtual_probe_tf_parquet(
 
     assert captured["target_tfs"] is None
     assert result.valid_symbols == ["BTCUSDT"]
+
+
+def test_log_probe_tf_source_coverage_emits_audit_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2023-01-01", periods=4, freq="4h", tz="UTC"),
+            "open": [1.0] * 4,
+            "high": [2.0] * 4,
+            "low": [0.5] * 4,
+            "close": [1.5] * 4,
+            "volume": [100.0] * 4,
+        }
+    )
+    data_maps = {"BTCUSDT": {"1h": frame.copy(), "4h": frame.copy()}}
+
+    messages: list[str] = []
+
+    def _fake_info(msg: str, *args: Any, **kwargs: Any) -> None:
+        del kwargs
+        messages.append(msg % args if args else msg)
+
+    monkeypatch.setattr(opt_main_futures._logger, "info", _fake_info)
+
+    opt_main_futures._log_probe_tf_source_coverage(
+        data_maps,
+        ["BTCUSDT"],
+        ["1h", "2h"],
+    )
+    out = "\n".join(messages)
+
+    assert "[TF-PROBE AUDIT] SOURCE READINESS" in out
+    assert "| 1h" in out
+    assert "| 2h" in out
+
+
+def test_log_probe_tf_source_coverage_marks_incompatible_6h_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2023-01-01", periods=4, freq="4h", tz="UTC"),
+            "open": [1.0] * 4,
+            "high": [2.0] * 4,
+            "low": [0.5] * 4,
+            "close": [1.5] * 4,
+            "volume": [100.0] * 4,
+        }
+    )
+    data_maps = {"BTCUSDT": {"4h": frame.copy()}}
+
+    messages: list[str] = []
+
+    def _fake_info(msg: str, *args: Any, **kwargs: Any) -> None:
+        del kwargs
+        messages.append(msg % args if args else msg)
+
+    monkeypatch.setattr(opt_main_futures._logger, "info", _fake_info)
+
+    opt_main_futures._log_probe_tf_source_coverage(
+        data_maps,
+        ["BTCUSDT"],
+        ["6h", "8h"],
+    )
+    out = "\n".join(messages)
+
+    assert "| 6h" in out
+    assert "0/1" in out
+    assert "| 8h" in out
+    assert "4h:1" in out
