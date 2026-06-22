@@ -93,7 +93,7 @@ STRATEGY ENGINE
   ✅ [Min-Profit     ] :   54.089 (Target >0.000  )
 ──────────────────────────────────────────────────────────────────────────────
 
-[ENS-FINAL] Arch-Only   | SYM: 52 | EVT: 432,167 | TOTAL: +54.3 bps | [TRD: +67.5✅ TMO: +50.3✅ MRV: +26.8✅ CRY: +28.4✅ FLO: +28.5✅ UNW: +21.4✅ BTN: +40.9✅]
+[ENS-FINAL] Arch-Only   | SYM: 52 | EVT: 432,167 | TOTAL: +54.3 bps | [TRD: +67.5✅ TMO: +50.3✅ MRV: +26.8✅ CRY: +28.4✅ FLO: +28.5✅ UNW:+21.4✅ BTN: +40.9✅]
 
 [L1 FINAL PROMOTION SUMMARY] 🚀
   RANK  SYMBOL       STRATEGY (Family)                EDGE(bps)  LCB(bps)    CONV    FOLDS   t(blk)
@@ -137,9 +137,9 @@ STRATEGY ENGINE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ● [LAYER 2: OPTUNA TUNING]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ● [STUDY] l2_study_4h_892defb1ef89 | trials=200 | events=7679 | symbols=13
+  ● [STUDY] l2_study_4h_4aca1e42a7e9 | trials=200 | events=7679 | symbols=13
   ────────────────────────────────────────────────────────────────────────────
-[L2-OPT]: 100%|█████████████████████████████████████████████████████| 200/200 [01:06<00:00,  3.02it/s, Best CAGR: 298.20% | Current: 205.71%]
+[L2-OPT]: 100%|█████████████████████████████████████████████████████| 200/200 [01:15<00:00,  2.64it/s, Best CAGR: 298.20% | Current: 205.71%]
 [L2-SELECTION] No feasible candidate found within fallback window (reason=growth_lcb)
 [L2-DEPLOY-C4] L*=2.537 (binding=mdd) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
   ● [FINAL SIMULATION]
