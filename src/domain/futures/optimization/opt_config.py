@@ -36,6 +36,13 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_PHASE_D_DEPLOY_JSON_REL": "results/best_futures_1h.json",
     "seeds": [42],
     "TARGET_TIMEFRAMES": ["4h"],
+    # --- TF Probe Integration (Phase-2) ---
+    "ENABLE_TF_PROBE": False,
+    "TF_PROBE_GRID": ["1h", "2h", "4h", "6h", "8h", "12h"],
+    "TF_PROBE_MIN_TSTAT": 2.0,
+    "TF_PROBE_REQUIRE_FDR": True,
+    "TF_PROBE_MIN_FOLD_CONSISTENCY": 0.75,
+    "TF_PROBE_MAX_WORKERS": 8,
     # Risk & Portfolio (Phase D)
     "FUTURES_EXECUTION_MODE": "intrabar_1m",
     "FUTURES_MAX_CONCURRENT_POSITIONS": 3,

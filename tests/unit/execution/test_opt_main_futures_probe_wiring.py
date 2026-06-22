@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+from datetime import datetime
+from types import SimpleNamespace
+from typing import Any, cast
+
+import pandas as pd
+import pytest
+
+from src.application.futures.optimization.config import FuturesRunConfig
+from src.domain.futures.strategy.timeframe_probe import TfCellEvidence, TfProbeManifest
+from src.execution import opt_main_futures
+
+
+def _window() -> opt_main_futures.QuarterlyWindow:
+    return opt_main_futures.QuarterlyWindow(
+        fetch_start="2023-01-01",
+        is_start="2024-01-01",
+        oos_start="2025-10-01",
+        end_date="2026-03-31",
+        fetch_start_date=datetime.strptime("2023-01-01", "%Y-%m-%d").date(),
+        is_start_date=datetime.strptime("2024-01-01", "%Y-%m-%d").date(),
+        oos_start_date=datetime.strptime("2025-10-01", "%Y-%m-%d").date(),
+        end_date_value=datetime.strptime("2026-03-31", "%Y-%m-%d").date(),
+    )
+
+
+def _frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "datetime": pd.date_range("2023-01-01", periods=8, freq="4h", tz="UTC"),
+            "open": [1.0] * 8,
+            "high": [2.0] * 8,
+            "low": [0.5] * 8,
+            "close": [1.5] * 8,
+            "volume": [100.0] * 8,
+        }
+    )
+
+
+def test_run_strategy_stage_injects_probe_cells_before_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps={"BTCUSDT": {"4h": _frame()}},
+        oos_data_maps={"BTCUSDT": {"4h": _frame()}},
+        valid_symbols=["BTCUSDT"],
+    )
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setitem(
+        cast(dict[str, Any], opt_main_futures.__dict__["OPT_FUTURES_CONFIG"]),
+        "USE_CS_RANK_ENGINE",
+        True,
+    )
+    monkeypatch.setattr(
+        opt_main_futures,
+        "_resolve_layered_window",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            fetch_start=datetime.strptime("2023-01-01", "%Y-%m-%d").date(),
+            holdout_start=datetime.strptime("2025-10-01", "%Y-%m-%d").date(),
+            holdout_end=datetime.strptime("2026-03-31", "%Y-%m-%d").date(),
+        ),
+    )
+    monkeypatch.setattr(
+        opt_main_futures,
+        "_resolve_base_symbol_scope",
+        lambda **_kwargs: ("BTCUSDT",),
+    )
+    monkeypatch.setattr(
+        opt_main_futures,
+        "_resolve_tradeable_scope",
+        lambda **_kwargs: opt_main_futures.TradeableScopeResult(
+            admitted=("BTCUSDT",),
+            dropped_by_reason={
+                "missing_map": (),
+                "empty_frame": (),
+                "late_start": (),
+                "min_bars": (),
+                "no_holdout": (),
+                "holdout_coverage": (),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        opt_main_futures,
+        "pick_strategy_data_maps",
+        lambda **_kwargs: {"BTCUSDT": {"4h": _frame()}},
+    )
+    monkeypatch.setattr(
+        opt_main_futures,
+        "_run_tf_probe_stage",
+        lambda *_args, **_kwargs: opt_main_futures.TfProbeStageResult(
+            manifest=TfProbeManifest(
+                cells=(),
+                tf_grid=("1h",),
+                coverage_by_tf={"1h": 8},
+                diversity_corr={},
+            ),
+            winning_cells=(
+                TfCellEvidence(
+                    symbol="BTCUSDT",
+                    family="carry_rev",
+                    variant="funding_carry",
+                    archetype="carry_rev",
+                    tf="1h",
+                    n_obs=100,
+                    n_events=20,
+                    ic_mean=0.05,
+                    ic_tstat_hac=2.5,
+                    ic_fold_sign_consistency=0.8,
+                    alpha_half_life_h=24.0,
+                    net_edge_bps=5.0,
+                    turnover_per_year=50.0,
+                    vr_label="mean_rev",
+                    hurst=0.4,
+                    passed_fdr=True,
+                ),
+            ),
+            selected_tfs=frozenset({"1h"}),
+        ),
+    )
+    def _fake_bridge(**kwargs: Any) -> SimpleNamespace:
+        captured["extra_probe_cells"] = kwargs["extra_probe_cells"]
+        return SimpleNamespace()
+
+    monkeypatch.setattr(
+        opt_main_futures,
+        "run_active_strategy_output_bridge",
+        _fake_bridge,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.common.alignment.align_data_maps",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            datetimes=pd.date_range("2023-01-01", periods=8, freq="4h").to_numpy()
+        ),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.tiered_workflow.run_tiered_pipeline",
+        lambda **_kwargs: (
+            SimpleNamespace(gate_passed=True),
+            None,
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        opt_main_futures,
+        "_tiered_labeled_events",
+        lambda *_args, **_kwargs: pd.DataFrame(),
+    )
+
+    result = opt_main_futures._run_strategy_stage(
+        cast(FuturesRunConfig, SimpleNamespace(timeframe="4h", phase="l1", date="2026-06-22")),
+        _window(),
+        data_stage,
+        universe_snapshot=None,
+        layered_window=None,
+        universe_result=None,
+    )
+
+    assert captured["extra_probe_cells"] is not None
+    assert len(captured["extra_probe_cells"]) == 1
+    assert result is not None
