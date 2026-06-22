@@ -5,12 +5,13 @@ _run_tf_probe_stage disabled-path (ENABLE_TF_PROBE=False).
 """
 from __future__ import annotations
 
-import dataclasses
+import logging
 from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
 from src.domain.futures.strategy.timeframe_probe import TfCellEvidence
@@ -176,7 +177,9 @@ def test_build_probe_extra_panels_empty_winning_cells() -> None:
 # Scenario 3: Non-base TF winning cell → projected panel with tf suffix
 # ---------------------------------------------------------------------------
 
-def test_build_probe_extra_panels_projects_non_base_tf() -> None:
+def test_build_probe_extra_panels_projects_non_base_tf(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """1h winning cell → _build_probe_extra_panels returns 1 projected panel, variant='funding_carry_1h'."""
     # Arrange
     cell = _make_cell(tf="1h", family="carry_rev", variant="funding_carry")
@@ -195,6 +198,7 @@ def test_build_probe_extra_panels_projects_non_base_tf() -> None:
     mock_aligned_base.strategy_readiness_mask = None
     mock_aligned_base.promotion_active_mask = None
 
+    build_mock = MagicMock(return_value=(panel_1h,))
     with (
         patch(
             "src.domain.futures.strategy.common.alignment.align_data_maps",
@@ -202,8 +206,9 @@ def test_build_probe_extra_panels_projects_non_base_tf() -> None:
         ),
         patch(
             "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
-            return_value=(panel_1h,),
+            new=build_mock,
         ),
+        caplog.at_level(logging.INFO, logger="src.domain.futures.strategy_runtime.bridge"),
     ):
         result = _build_probe_extra_panels(
             data_maps={"SYM0": {"1h": source_1h, "4h": _make_frame(n_bars=40, freq_h=4.0)}},
@@ -219,6 +224,10 @@ def test_build_probe_extra_panels_projects_non_base_tf() -> None:
     assert result[0].variant == "funding_carry_1h"
     assert result[0].family == "carry_rev"
     assert result[0].signed_score_2d.shape[0] == 10  # projected to base grid length
+    assert build_mock.call_args.kwargs["normalize_time_horizon"] is True
+    assert build_mock.call_args.kwargs["horizon_base_tf"] == "4h"
+    assert "[TF-PROBE AUDIT] BRIDGE INJECTION" in caplog.text
+    assert "| 1h" in caplog.text
 
 
 def test_build_virtual_probe_tf_maps_skips_symbols_without_source() -> None:
@@ -421,6 +430,7 @@ def test_build_probe_extra_panels_resamples_virtual_tf_and_applies_base_guard() 
         aligned.datetimes = _make_datetimes(6, freq_h=8.0)
         return aligned
 
+    build_mock = MagicMock(return_value=(panel_8h,))
     with (
         patch(
             "src.domain.futures.strategy.common.alignment.align_data_maps",
@@ -428,7 +438,7 @@ def test_build_probe_extra_panels_resamples_virtual_tf_and_applies_base_guard() 
         ),
         patch(
             "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
-            return_value=(panel_8h,),
+            new=build_mock,
         ),
     ):
         result = _build_probe_extra_panels(
@@ -445,3 +455,5 @@ def test_build_probe_extra_panels_resamples_virtual_tf_and_applies_base_guard() 
     assert len(result) == 1
     assert result[0].variant == "funding_carry_8h"
     assert not result[0].valid_mask_2d[:2, 0].any()
+    assert build_mock.call_args.kwargs["normalize_time_horizon"] is True
+    assert build_mock.call_args.kwargs["horizon_base_tf"] == "4h"
