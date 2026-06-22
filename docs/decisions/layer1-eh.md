@@ -295,3 +295,16 @@
 - **Rationale:** 기존 단일-TF(`tf="4h"`) L1 구조는 1h/12h 등 다양한 TF의 고유 신호 특성을 포착하지 못하고 bridge의 `_build_probe_extra_panels` 우회 주입 경로로만 대응했다. Per-TF native L1은 각 TF에서 독립적으로 signal pool filtering + gate override + L1 validation을 수행하고, 실증적 최적 TF에서 L2를 실행한다. bridge의 probe panel 주입 경로는 중복 위험(probe panel이 L1 gate를 이중 통과)이 있어 제거한다.
 - **Edge Cases:** `per_tf_data_maps=None` (backward compat) 시 첫번째 `l1_tfs` 요소만 실행. `per_tf_candidate_families=None`이면 `candidate_families` global fallback 사용. `per_tf_gate_overrides=None`이면 global gate threshold 유지. `_resolve_l2_master_tf(cfg, {}, {})`는 "8h"로 fallback. `probe_manifest`에 is_winner=True인 셀이 없으면 probe path 건너뜀.
 - **Status:** Accepted
+
+## L1-ADR-036: Multi-TF Layer1 Signal Redesign — TF-PROBE 제거 및 native_tf 기반 직접 분기 (2026-06-22)
+- **Delta:**
+  - `config.py`: `CandidateStrategyConfig`에 `l1_tfs: tuple[str, ...] = ("4h", "6h", "8h", "12h")` 필드 추가.
+  - `bridge.py`:
+    - `_build_probe_extra_panels` → `build_multi_tf_panels`로 재작성. `probe_cells`/`inject_full_grid` 인자 제거, `tfs`/`family_pool`/`htf_only` 인자로 대체. `metadata["native_tf"] = tf_i` 태깅. `base_guard` 마스크 유지.
+    - `run_candidate_strategy_for_universe`: `labeled_all["native_tf"] = tf` 후 `build_multi_tf_panels` 호출 → HTF 이벤트 생성 → `pd.concat`으로 `labeled_all` 통합.
+  - `pipeline.py`:
+    - `run_per_tf_l1`: `family.isin(_tf_families)` → `native_tf == tf` 필터.
+    - `_aggregate_per_tf_l1`: `oos_stacked` key에 `f"{tf}::"` 프리픽스로 TF간 충돌 방지.
+  - `opt_main_futures.py`: `_run_tf_probe_stage` 호출 제거. `l1_tfs=(run_config.timeframe,)` → `l1_tfs=tuple(tiered_cfg.l1_tfs)`. `probe_manifest`/`probe_diversity_corr`/`_active_probe` 참조 제거.
+- **Rationale:** TF-PROBE 게이트(IC 사전필터)가 희소 트리거 전략에서 유효하지 않음. 멀티-TF L1 전량 실행은 i5-13600k 병렬 예산 내에서 충분. HTF(6h/8h/12h) 투영은 forward-fill(`searchsorted`)로 look-ahead-free. `native_tf` 컬럼으로 per-TF L1 정확한 서브셋 검증 보장.
+- **Edge Cases:** `l1_tfs` 기본값 보유로 기존 config와 100% 하위 호환. `native_tf` 컬럼 없는 labeled_events는 fallback 전량 통과. `htf_only=True`로 LTF(1h/2h) 투영 손실 차단 (Phase 2까지 보호).

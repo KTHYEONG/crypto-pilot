@@ -17,8 +17,7 @@ related_paths:
 change_triggers:
   - src/domain/futures/strategy/rule_signals.py
   - src/domain/futures/strategy/rule_diagnostics.py
-  - src/domain/futures/strategy/exit_policies.py
-  - src/domain/futures/strategy/timeframe_probe.py
+  - src/domain/futures/strategy_runtime/bridge.py
 dependencies:
   documents:
     - docs/architecture/regime.md
@@ -90,7 +89,8 @@ Generates vectorized rule panels with archetype/regime contexts, filtered throug
 graph TD
     A[Market Data] --> B[Vectorized Indicators]
     B --> C[CandidateSignalPanel]
-    C --> D[Archetype & Regime Context Injection]
+    C --> C1[Multi-TF Panel Injection]
+    C1 --> D[Archetype & Regime Context Injection]
     D --> E[L1 Breakeven & Profit Floor Gate]
     E --> F[Regime-Cell OR-path Admission]
     F --> G[Multiplicity Gating: FDR & SPA]
@@ -104,7 +104,7 @@ graph TD
 - **Prequential Snapshots**: Evidence grids use decoupled multipliers and outer warm-up blocks to prevent early-fold starvation.
 - **Adaptive Evidence Gates**: During the first `l1_evidence_early_snapshots` snapshots, `l1_pair_min_effective_obs` and `l1_pair_min_folds` thresholds are relaxed to `l1_pair_min_effective_obs_early` / `l1_pair_min_folds_early`, allowing sparse early folds to generate registry entries. Quality weight is the ultimate arbiter: pairs that pass relaxed structural gates but fail `probability_positive ≥ 0.5` still receive `quality_weight = 0`.
 - **OOS Activation**: Enforces pooled Arch-Only mode during L1 to preserve statistical power ($N_{eff}$); regime is delegated to L2 risk overlays.
-- **Per-TF L1 Pipeline**: `run_tiered_pipeline` executes L1 on multiple timeframes (`l1_tfs` parameter, default: `1h/2h/4h/6h/8h/12h`). Each TF uses its native signal pool (`resolve_tf_signal_pool`) and gate overrides (`apply_tf_gate_overrides`). `run_per_tf_l1` wraps a single-TF L1 run with family-filtered events and TF-specific config. Results are aggregated via `_aggregate_per_tf_l1`: `oos_stacked` is merged across TFs, `gate_passed` is True if any TF passed. After L1, `_resolve_l2_master_tf` selects the execution TF in priority order: `cfg.l2_master_tf` (explicit) → TF with most L1 winning signals → TF with most probe winning cells → `"8h"` (hard fallback). L2 and L3 execute on the resolved master TF.
+- **Per-TF L1 Pipeline**: `run_tiered_pipeline` executes L1 on multiple timeframes (`l1_tfs` parameter, default: `4h/6h/8h/12h`). HTF panel generation via `build_multi_tf_panels` injects native-resolution signals for each non-base TF into the base grid: panels are built with `family_filter` from `resolve_tf_signal_pool`, projected to the base grid via `_project_panel_to_base_grid`, and tagged with `native_tf` in metadata. The resulting events are labeled and concatenated into `labeled_unfiltered`, carrying the `native_tf` column (`base_tf` for base events, `tf_i` for HTF events). `run_per_tf_l1` wraps a single-TF L1 run with `native_tf`-filtered events (`native_tf == tf` instead of `family.isin(...)`) and TF-specific config via `apply_tf_gate_overrides`. Results are aggregated via `_aggregate_per_tf_l1`: `oos_stacked` keys are prefixed with `f"{tf}::"` to prevent collision across TFs, `gate_passed` is True if any TF passed. After L1, `_resolve_l2_master_tf` selects the execution TF in priority order: `cfg.l2_master_tf` (explicit) → TF with most L1 winning signals → `"8h"` (hard fallback). L2 and L3 execute on the resolved master TF.
 - **Readiness Gate**: Strict multi-condition screening:
   - Fold Coverage $\ge 0.80$, Match Ratio $\ge 0.90$, Effective Symbols ($N_{eff}$) $\ge 3.0$, Fold Ratio $\ge 0.50$.
   - **Pooled LCB**: Global profitability metric ($LCB > 0$) via stationary block bootstrap over all passed folds.
@@ -134,8 +134,8 @@ graph TD
 - Per-bar capacity from `adv_usdt_2d [T, N]`: `intended_notional < 5 USDT → w = 0`; `> capacity → proportional clip`.
 - Active only when `portfolio_nav` is provided (unit-NAV simulation skips the clip: weights are fractions, not USDT notional).
 
-**Timeframe Alpha Probe (`timeframe_probe.py`) — Stage-1 계측 및 감사(Audit) 모듈**
-- **Purpose**: 풀 L1/L2 최적화 실행 없이 `(symbol × family × tf)` 셀 단위 신호 예측력과 구조적 강점을 정량화하여 다각화된 최적 TF 조합을 식별하기 위한 매니페스트 생성.
+**Timeframe Alpha Probe (`timeframe_probe.py`) — DEPRECATED (Legacy Audit-Only Module)**
+- **Purpose**: 더 이상 활성 게이트가 아님. `ENABLE_TF_PROBE=False` (기본값)으로 dead-path 유지. Phase B 멀티-TF L1이 전량 실행되므로 probe 게이트는 무의미. L2 master TF 선정도 probe manifest 대신 L1 winning signals 기반으로 우회함.
 - **TF Grid & Master Clock**: `{15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h}` 그리드를 지원함. 1h 마스터 클럭(`PROBE_MASTER_TF`)을 통합 그리드로 채택하여 다운샘플 해상도 유실 및 측정-배포 일관성(fidelity)을 확보하고, TF-Probe는 high-recall 후보 생성기로 기능함.
 - **Bar-param 정규화 (Time Horizon Normalization)**: 서로 다른 시간프레임 간 공정한 비교를 위해 실시간 wall-clock horizon을 고정함. `normalize_time_horizon=True` 시 $\text{bars}_{tf} = \text{round}(\text{hours\_target} / \text{hpb}(tf))$ 공식을 적용하여 moving average span 및 holding window를 4h 기준선 의도에 비례해 스케일링함.
 - **Look-ahead 방어**: 미래 참조를 방지하기 위해 $\text{fwd}[t] = \text{close}[t+1+H] / \text{close}[t+1] - 1$ 형태로 entry shift(1)를 강제하고, 우측라벨(`closed="right"`, `label="right"`) resample 적용 후 마지막 미완성 bar를 drop함.
@@ -166,7 +166,7 @@ graph TD
 - **ALIGN-CUBE Loop-Invariant Hoisting**: `np.searchsorted` over `state_cube.calendar` (and `readiness_cube.calendar`) is computed once outside the symbol loop. `positions`/`t_valid`/`p_valid` are symbol-independent; complexity reduced from $O(N \cdot T \log T_{\text{cube}})$ to $O(T \log T_{\text{cube}} + N \cdot V)$ (V = valid bars). Pandas 3.0 nanosecond fix: `calendar.as_unit("ns").asi8` enforces `int64` nanosecond epoch instead of microsecond default.
 - **Membership Timeline Hoisting**: `_normalize_timeline()` normalizes `timeline` / `inference_timeline` once before the symbol loop in `inject_membership_masks_into_maps`, eliminating 104× repeated quarter-start and `canonical_symbol` calls (52 syms × 2 maps).
 - **TF Probe Data Stage**: `_run_data_stage`는 probe grid를 `load_futures_data_maps_for_symbols(..., target_tfs=...)`에 전달하지 않고, base execution data만 준비한다. probe TF 가용성은 source TF coverage 로그로 분리해 기록한다.
-- **TF Probe Bridge Wiring**: `_run_strategy_stage`는 tiered bridge 호출 전에 `_run_tf_probe_stage()`를 실행하고, winning cells를 `run_tiered_pipeline(probe_manifest=...)`로 전달하여 L2 master TF 선정에만 사용한다 (L1에 probe panel을 주입하지 않음). LTF(1h, 2h) 투영 시 `_project_panel_to_base_grid`는 `ltf_mode` 파라미터(`"last"`/`"mean"`)를 지원한다. `"last"`는 searchsorted로 마지막 bar 선택(하위 호환), `"mean"`은 cumsum 기반 window aggregation으로 window 내 모든 LTF 예측값을 평균 집계하고 side는 bincount mode를 사용한다.
+- **Multi-TF Panel Injection (Phase B)**: `run_candidate_strategy_for_universe` calls `build_multi_tf_panels` with `l1_tfs` from config and `family_pool=lambda t: resolve_tf_signal_pool(cfg, t)`. For each non-base TF, native-resolution panels are built, projected to the base grid via `_project_panel_to_base_grid`, converted to events, labeled, and concatenated into `labeled_unfiltered` with the `native_tf` column. LTF(1h, 2h) 투영 시 `_project_panel_to_base_grid`는 `ltf_mode` 파라미터(`"last"`/`"mean"`)를 지원한다. `"last"`는 searchsorted로 마지막 bar 선택(하위 호환), `"mean"`은 cumsum 기반 window aggregation으로 window 내 모든 LTF 예측값을 평균 집계하고 side는 bincount mode를 사용한다.
 - **Vectorized Volatility**: `volatility_2d [T, N]` computed via single `pd.DataFrame.rolling().std(ddof=1)` call over the full matrix, replacing a column-wise Python loop of N `pd.Series` allocations.
 - **Conditional raw_df.copy()**: When `funding_df_prepared` and `metrics_df_prepared` are both `None`, the raw DataFrame reference is used directly without copying, eliminating redundant 30K×300 memory duplication. The copy path is preserved when any merge is required (`merge_asof` mutates in-place).
 - **Single _to_unix_ms per TF**: `_to_unix_ms(raw_df["datetime"])` is computed once per timeframe inside `needs_merge` block. The resulting column is reused for both funding and metrics merge_asof calls, removing two unnecessary datetime→unix_ms conversions per TF.
