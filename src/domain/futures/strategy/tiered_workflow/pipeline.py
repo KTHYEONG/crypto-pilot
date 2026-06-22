@@ -1751,7 +1751,7 @@ def run_per_tf_l1(
     _tf_families = strategy_config.resolve_tf_signal_pool(cfg, tf)
     _tf_labeled = (
         labeled_events[labeled_events["family"].isin(_tf_families)]
-        if "family" in labeled_events.columns
+        if "family" in labeled_events.columns and _tf_families
         else labeled_events
     )
 
