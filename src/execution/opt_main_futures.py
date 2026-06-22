@@ -14,6 +14,7 @@ import logging
 import os
 import time
 import warnings
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 
     from src.domain.futures.strategy.regime_evaluation import RegimeScoreCard
     from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result
+    from src.domain.futures.strategy.timeframe_probe import TfCellEvidence, TfProbeManifest
     from src.domain.futures.strategy_runtime.bridge import CandidatePipelineOutput
 
 import numpy as np
@@ -99,6 +101,19 @@ _logger = setup_logger("opt_main_futures", write_file=False)
 # Derived from score_pct_variant_hist_window_bars default (2160) but floored at 1500 to
 # allow shorter-listed symbols that still cover the OOS window.
 _TIERED_MIN_WINDOW_BARS: int = 1500
+_TF_HOURS_PER_BAR: Mapping[str, float] = {
+    "1m": 1.0 / 60.0,
+    "5m": 5.0 / 60.0,
+    "15m": 0.25,
+    "30m": 0.5,
+    "1h": 1.0,
+    "2h": 2.0,
+    "4h": 4.0,
+    "6h": 6.0,
+    "8h": 8.0,
+    "12h": 12.0,
+    "1d": 24.0,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +128,65 @@ class RuntimeBreakdown:
     @property
     def unaccounted(self) -> float:
         return max(float(self.total) - self.accounted, 0.0)
+
+
+@dataclass(frozen=True, slots=True)
+class TfProbeStageResult:
+    """Result container for the TF Probe stage.
+
+    Attributes:
+        manifest: Full probe diagnostic output (all symbol x family x tf cells).
+        winning_cells: Tuple of cells that passed all gate criteria.
+        selected_tfs: Unique timeframes present in winning cells.
+    """
+
+    manifest: TfProbeManifest
+    winning_cells: tuple[TfCellEvidence, ...]
+    selected_tfs: frozenset[str]
+
+
+def _select_probe_source_tf(sym_maps: Mapping[str, Any], target_tf: str) -> str | None:
+    """Return the finest cached TF usable to construct target_tf."""
+    target_hpb = _TF_HOURS_PER_BAR.get(target_tf)
+    if target_hpb is None:
+        return None
+    for candidate_tf in ("1m", "5m", "15m", "30m", "1h", "4h", target_tf):
+        candidate_hpb = _TF_HOURS_PER_BAR.get(candidate_tf)
+        if candidate_hpb is None or candidate_hpb > target_hpb:
+            continue
+        if candidate_tf in sym_maps:
+            return candidate_tf
+    return None
+
+
+def _log_probe_tf_source_coverage(
+    data_maps: Mapping[str, Mapping[str, Any]],
+    symbols: Sequence[str],
+    probe_tf_grid: Sequence[str],
+) -> None:
+    """Log probe TF source coverage without requiring virtual-TF parquet files."""
+    for probe_tf in probe_tf_grid:
+        source_counts: list[int] = []
+        source_mix: Counter[str] = Counter()
+        for symbol in symbols:
+            sym_maps = data_maps.get(symbol, {})
+            source_tf = _select_probe_source_tf(sym_maps, probe_tf)
+            if source_tf is None:
+                continue
+            frame = sym_maps.get(source_tf)
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                continue
+            source_counts.append(len(frame))
+            source_mix[source_tf] += 1
+        median_bars = int(np.median(source_counts)) if source_counts else 0
+        _logger.info(
+            "[TF-PROBE] tf=%s source_coverage: %d/%d symbols, median_source_bars=%d, source_mix=%s",
+            probe_tf,
+            len(source_counts),
+            len(symbols),
+            median_bars,
+            dict(sorted(source_mix.items())),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -725,6 +799,11 @@ def _run_data_stage(
         live_inference_panel=live_inference_panel,
     )
     require_exec_1m = _requires_exec_1m(run_config)
+    probe_tf_grid_resolved: list[str] | None = (
+        list(OPT_FUTURES_CONFIG.get("TF_PROBE_GRID", []))
+        if OPT_FUTURES_CONFIG.get("ENABLE_TF_PROBE", False)
+        else None
+    )
 
     scope_name = "stage6_selected"
     effective_fetch_start_date = min(
@@ -744,11 +823,14 @@ def _run_data_stage(
         load_exec_1m=require_exec_1m,
         requested_symbols_count=len(load_symbols),
         scope_name=scope_name,
+        target_tfs=None,
     )
-    _logger.log(PERF, 
+    _logger.log(PERF,
         "[perf-data] load_futures_data_maps_for_symbols took %.4fs",
         time.perf_counter() - t_load,
     )
+    if probe_tf_grid_resolved:
+        _log_probe_tf_source_coverage(data_maps, valid_symbols, probe_tf_grid_resolved)
     if require_exec_1m:
         missing_1m = [s for s in valid_symbols if "exec_1m" not in (data_maps.get(s) or {})]
         if missing_1m:
@@ -795,12 +877,91 @@ def _run_data_stage(
 
     valid_symbols = list(readiness.kept_symbols)
     if not valid_symbols:
+        _logger.warning(
+            "[data-readiness] no symbols kept: requested=%d loaded=%d kept=%d probe_enabled=%s",
+            len(load_symbols),
+            len(data_maps),
+            len(valid_symbols),
+            bool(OPT_FUTURES_CONFIG.get("ENABLE_TF_PROBE", False)),
+        )
         raise RuntimeError("data_not_ready")
     return DataStageResult(
         data_maps=readiness.filtered_is_maps,
         oos_data_maps=readiness.filtered_oos_maps,
         valid_symbols=valid_symbols,
     )
+
+
+def _run_tf_probe_stage(
+    run_config: FuturesRunConfig,
+    data_stage: DataStageResult,
+    tiered_cfg: Any,
+) -> TfProbeStageResult | None:
+    """Execute TF Probe stage when ENABLE_TF_PROBE=True, otherwise return None.
+
+    Args:
+        run_config: Active run configuration (unused; reserved for future guard logic).
+        data_stage: Loaded data maps and valid symbols from data stage.
+        tiered_cfg: CandidateStrategyConfig for the base strategy.
+
+    Returns:
+        TfProbeStageResult with winning cells, or None if probe is disabled / fails.
+    """
+    del run_config  # reserved for future guard logic
+    if not OPT_FUTURES_CONFIG.get("ENABLE_TF_PROBE", False):
+        return None
+
+    from src.domain.futures.strategy.timeframe_probe import (
+        probe_timeframe_alpha,
+        select_tf_family_cells,
+    )
+
+    tf_grid: list[str] = list(OPT_FUTURES_CONFIG.get("TF_PROBE_GRID", ["4h"]))
+    max_workers: int = int(OPT_FUTURES_CONFIG.get("TF_PROBE_MAX_WORKERS", 8))
+    min_tstat: float = float(OPT_FUTURES_CONFIG.get("TF_PROBE_MIN_TSTAT", 2.0))
+    require_fdr: bool = bool(OPT_FUTURES_CONFIG.get("TF_PROBE_REQUIRE_FDR", True))
+    min_fold_cons: float = float(OPT_FUTURES_CONFIG.get("TF_PROBE_MIN_FOLD_CONSISTENCY", 0.75))
+
+    try:
+        manifest: TfProbeManifest = probe_timeframe_alpha(
+            data_maps=data_stage.data_maps,
+            symbols=data_stage.valid_symbols,
+            base_cfg=tiered_cfg,
+            tf_grid=tf_grid,
+            max_workers=max_workers,
+        )
+        winning: tuple[TfCellEvidence, ...] = select_tf_family_cells(
+            manifest,
+            min_ic_tstat=min_tstat,
+            require_fdr=require_fdr,
+            min_fold_sign_consistency=min_fold_cons,
+        )
+        selected_tfs: frozenset[str] = frozenset(c.tf for c in winning)
+        _logger.info(
+            "[TF-PROBE] %d winning cells across %d tf: %s",
+            len(winning),
+            len(selected_tfs),
+            sorted(selected_tfs),
+        )
+        for tf_i in sorted(selected_tfs):
+            top = [c for c in winning if c.tf == tf_i][:3]
+            for c in top:
+                _logger.info(
+                    "[TF-PROBE] tf=%s | %s:%s | tstat=%.2f | net=%.1fbps",
+                    tf_i,
+                    c.family,
+                    c.variant,
+                    c.ic_tstat_hac,
+                    c.net_edge_bps,
+                )
+        return TfProbeStageResult(
+            manifest=manifest,
+            winning_cells=winning,
+            selected_tfs=selected_tfs,
+        )
+    except Exception as exc:
+        _logger.warning("[TF-PROBE] probe stage failed (fallback to base-only): %s", exc)
+        return None
 
 
 def _run_regime_evaluation_stage(
@@ -1226,6 +1387,8 @@ def _run_strategy_stage(
     universe_snapshot: UniverseSnapshot | None = None,
     layered_window: Any | None = None,
     universe_result: Any | None = None,
+    *,
+    probe_result: TfProbeStageResult | None = None,
 ) -> CandidatePipelineOutput | RunnerResult | Layer1Result | None:
     # ─── 기존 Phase D 진입 (공통 설정 → bridge → 선택적 Tiered 분기) ──────────
     from src.domain.futures.strategy.tiered_logging import format_data_integrity_summary, format_layer_header
@@ -1257,6 +1420,9 @@ def _run_strategy_stage(
             profile.accounted,
             profile.unaccounted,
         )
+
+    # Initialize probe result — overwritten inside tiered branch if applicable.
+    _probe_result_local: TfProbeStageResult | None = None
 
     t_step = time.perf_counter()
     strategy_maps = pick_strategy_data_maps(
@@ -1350,7 +1516,25 @@ def _run_strategy_stage(
     )
     bridge_trading_symbols = list(bridge_symbol_scope)
 
+    if use_tiered:
+        tiered_cfg = build_candidate_strategy_config(
+            strategy_cfg=StrategyConfig(name="candidate_ml"),
+            opt_config=OPT_FUTURES_CONFIG,
+            timeframe=run_config.timeframe,
+        ).candidate
+        _probe_result_local = (
+            probe_result
+            if probe_result is not None
+            else _run_tf_probe_stage(run_config, data_stage, tiered_cfg)
+        )
+
     t_bridge_start = time.perf_counter()
+    # Resolve probe cells: tiered path sets _probe_result_local; non-tiered uses probe_result arg.
+    _active_probe: TfProbeStageResult | None = (
+        _probe_result_local
+        if use_tiered
+        else probe_result
+    )
     ml_out = run_active_strategy_output_bridge(
         run_config=run_config,
         symbols=bridge_trading_symbols,
@@ -1361,6 +1545,7 @@ def _run_strategy_stage(
         preloaded_data_maps=full_strategy_maps,
         trading_symbols=bridge_symbol_scope,
         silent=False,
+        extra_probe_cells=_active_probe.winning_cells if _active_probe is not None else None,
     )
     bridge_elapsed = time.perf_counter() - t_bridge_start
     strategy_steps["bridge"] = bridge_elapsed
@@ -1426,11 +1611,7 @@ def _run_strategy_stage(
                         "(intersection tail truncated — check delisted symbols in panel)"
                     )
             labeled_tiered = _tiered_labeled_events(ml_out)
-            tiered_cfg = build_candidate_strategy_config(
-                strategy_cfg=StrategyConfig(name="candidate_ml"),
-                opt_config=OPT_FUTURES_CONFIG,
-                timeframe=run_config.timeframe,
-            ).candidate
+            assert tiered_cfg is not None
             _futures_policy_t: dict[str, Any] = dict(OPT_FUTURES_CONFIG.get("FUTURES_PORTFOLIO_POLICY") or {})
             tiered_caps = PortfolioCaps(
                 gross=float(OPT_FUTURES_CONFIG.get("FUTURES_PHASE_A_MAX_GROSS_EXPOSURE", 1.8)),
