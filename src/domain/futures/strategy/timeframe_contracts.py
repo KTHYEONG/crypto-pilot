@@ -37,6 +37,25 @@ PROBE_SOURCE_TFS: tuple[str, ...] = ("1m", "5m", "15m", "30m", "1h", "4h")
 
 _FLOAT_TOL = 1e-9
 
+RESAMPLE_METADATA_BOOL_COLS: tuple[str, ...] = (
+    "universe_active_mask",
+    "universe_entry_warm_mask",
+    "membership_kill_signal",
+    "entry_block_mask",
+)
+
+RESAMPLE_METADATA_FLOAT_COLS: tuple[str, ...] = (
+    "cluster_id",
+    "beta_vs_market",
+    "cluster_size",
+    "anchor_cluster_member",
+    "vol_30d",
+    "friction_score",
+    "alpha_capacity_score",
+    "diversification_score",
+    "tradeable_score",
+)
+
 
 def hours_per_bar(tf: str) -> float:
     """Return the canonical hours per bar for a timeframe."""

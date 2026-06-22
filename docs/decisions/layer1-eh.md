@@ -240,6 +240,16 @@
 - **Edge Cases:** l1_evidence_early_snapshots=0 (default) → disabled, 항상 strict gate 사용. deployment-level compute_symbol_strategy_evidence 호출 (run_l1_nested_swf L1053)은 snapshot_index 없이 호출 → -1 default → strict gate 적용. promotion filter advisory 모드에서 caller(ablation.py/bridge.py)의 `labeled.empty` guard는 pass-through 시 full data를 받으므로 pipeline 정상 진행.
 - **Status:** Accepted
 
+## L1-ADR-031: TF Probe Detail-Level Fixes — LTF Signal Aggregation, Metadata Preservation, Holding-Bar Cost Correction (2026-06-22)
+- **Delta:**
+  - `_project_panel_to_base_grid`에 `ltf_mode` 키워드 파라미터 추가. `"last"`(기존 searchsorted)는 하위 호환 유지, `"mean"` 모드는 cumsum 기반 window aggregation으로 window 내 모든 LTF 예측값을 평균 집계. `side`는 bincount mode 사용.
+  - `_resample_ohlcv` 및 `_resample_probe_source_frame`의 agg dict에 `RESAMPLE_METADATA_BOOL_COLS`(max)와 `RESAMPLE_METADATA_FLOAT_COLS`(mean)을 추가하여 universe metadata(warm_mask, cluster_id 등)가 resample 과정에서 보존되도록 수정.
+  - `_compute_net_edge_bps`에 `holding_bars` 키워드 파라미터 추가. 수식 변경: $\text{net} = \text{gross} - \bar{t/o} \cdot \text{holding\_bars} \cdot \text{cost}$. caller `_probe_tf_worker`에서 `holding_bars=h_hold` 전달.
+  - `timeframe_contracts.py`에 `RESAMPLE_METADATA_BOOL_COLS`, `RESAMPLE_METADATA_FLOAT_COLS` 공유 상수 정의.
+- **Rationale:** LTF(1h, 2h) 신호는 searchsorted로 마지막 bar만 선택되어 50~75% 정보 손실. Resample 시 metadata drop으로 probe 통계 과대평가. net_edge 수식에 holding_bars 누락으로 장기 신호 비용 과소평가.
+- **Edge Cases:** ltf_mode="mean" window 경계는 `closed="right"` semantics (pandas resample 일관성). 단일 base bar window는 `hpb_base` 기반 interval fallback. metadata 컬럼 부재 시 agg dict는 무시되어 기존 동작 보존. holding_bars 기본값 1로 기존 caller 영향 없음.
+- **Status:** Accepted
+
 ## L1-ADR-025: TF Probe Virtual Source Resample & Bridge Wiring Correction (2026-06-22)
 - **Delta:**
   - `_run_data_stage`에서 `TF_PROBE_GRID`를 `load_futures_data_maps_for_symbols(target_tfs=...)`로 전달하지 않도록 변경하고, probe TF coverage는 source TF 기준 로그로 분리했다.
