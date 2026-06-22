@@ -1,3 +1,18 @@
+## L1-ADR-030: Unified 1h Master Grid & High-Recall TF-Probe Generator Alignment (2026-06-22)
+- **Delta:** 통합 그리드를 1h 마스터 클럭(`PROBE_MASTER_TF`)으로 변경하였고, 이에 맞춰 `_build_probe_extra_panels` 및 `_project_panel_to_base_grid`가 1h base grid로 정사영을 투영하도록 수정함. TF-Probe를 strict gate에서 high-recall candidate generator 역할로 정의하고 winning cell의 주입 기준을 대폭 관대화함.
+- **Rationale:** 기존 4h base grid로 투영 시 4h보다 짧은 시간프레임(1h, 2h)의 signal edge가 4h 윈도우 내 마지막 1h 값만 잔류하여 유실되는 현상이 발생했고, 이는 측정 시점과 실제 포트폴리오 배포 시점 간의 심각한 fidelity 불일치를 유발하여 비-4h 발굴 가치를 무력화함. 1h 통합 마스터 그리드를 사용하여 모든 신호 해상도를 보존함.
+- **Edge Cases:** HTF(6h, 8h, 12h) 투영 시 backward-asof logic을 그대로 유지하여 look-ahead bias가 발생하지 않도록 조치함.
+
+## L1-ADR-029: Effective-N Multiple Testing Correction via TF Diversity Correlation (2026-06-22)
+- **Delta:** L1 BY-FDR 다중검정 계산부(`_by_q_values`)에 `m_eff` 보정 매개변수를 신설하고, `signal_selection.py`에서 `_compute_probe_m_eff` 헬퍼 함수를 추가함. 동일 `(symbol, family)` 내의 TF 다중 검정 가설들을 cluster로 묶고 Pearson r 상관계수(`diversity_corr`)의 평균인 $\bar{r}$을 이용하여 $m_{\text{eff}} = \sum_{\text{clusters}} k / (1 + (k - 1) \cdot \bar{r}_{\text{cluster}})$를 산출한 뒤 이를 FDR 보정 분모로 주입함.
+- **Rationale:** 동일한 (symbol, family)의 다중 TF 검정들이 완전 독립이 아님에도 불구하고 naive하게 모든 가설 수를 breadth $m$에 반영함으로써 BY-FDR 다중성 통제가 과도하게 보수적으로 작동하여 유효한 신호들이 대거 억울하게 탈락하는 현상을 방지함.
+- **Edge Cases:** `probe_diversity_corr`가 없거나 빈 사전인 경우 $m_{\text{eff}} = m$으로 자동 fallback되도록 하였으며 0-division 예외를 차단함. 대칭키(`a~b` vs `b~a`) 양방향 조회도 정상적으로 처리함.
+
+## L1-ADR-028: FDR Pool Filtering for Untested Cells (2026-06-22)
+- **Delta:** `timeframe_probe.py` 내 `probe_timeframe_alpha` 함수의 post-hoc per-timeframe BH-FDR 계산부에서 `ic_tstat_hac == 0.0`인 미검정(untested) 셀들을 FDR 보정 대상 풀에서 제외함.
+- **Rationale:** `n_events < min_obs` 조건으로 인해 IC 계산 자체가 생략되어 HAC t-stat이 0.0인 셀들이 FDR 풀의 분모($N$)에 그대로 산입됨으로써 분모 팽창을 일으켰고, 이에 따라 실질적인 검정 대상 후보 셀들이 과잉 기각(over-rejection)되는 통계적 왜곡을 해소함.
+- **Edge Cases:** 제외된 미검정 셀들의 `passed_fdr` 속성은 기존 설계대로 `False` 상태를 유지하도록 제어함.
+
 ## L1-ADR-027: Timeframe Alpha Probe Integration & Gate Audit — 가상 TF 소스 계약 및 결정론적 게이트 감사 도입 (2026-06-22)
 - **Delta:** `timeframe_contracts.py`를 신설하여 시간프레임 간 정수 비율 호환성을 판단하고 최적 소스 TF를 선정하는 공용 로직을 모듈화함. `timeframe_probe.py` 내 `_resample_ohlcv`에서 우측라벨 기준 리샘플링 후 마지막 미완성 bar를 드롭하여 look-ahead를 원천 방지함. `build_rule_signal_panels`에 `normalize_time_horizon` 매개변수를 도입하여 4h 기준선의 wall-clock horizon을 타겟 TF에 맞게 스케일링하였고, `summarize_tf_probe_gate_audit`를 통해 TF별 게이트 누적 생존율과 최다 실패 원인(`Top Fail`)을 요약하도록 함. `opt_main_futures.py`에서 winning cell 유무와 상관없이 최종 게이트 감사를 ASCII 표 형식으로 로깅하도록 배선함.
 - **Rationale:** virtual TF 빌드 시 디스크 파일의 실재 여부와 런타임 리샘플링 대상(source TF)을 구분하지 못해 `data_not_ready` 예외가 발생하거나, 6h/8h 등의 시간프레임 평가 시 wall-clock 기준 4h의 lookback/holding horizon이 스케일링되지 않아 비교 타당성이 훼손됨. 또한 당선 셀이 없는(zero-winner) 경우 분석가가 어떤 게이트(`tstat`, `fdr`, `net_edge`, `fold_consistency`)에서 신호들이 탈락했는지 추적할 수 없는 블랙박스 상태를 해소하기 위해 결정론적 게이트 감사가 요구됨.
