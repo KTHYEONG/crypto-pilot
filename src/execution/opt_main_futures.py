@@ -1606,19 +1606,7 @@ def _run_strategy_stage(
             opt_config=OPT_FUTURES_CONFIG,
             timeframe=run_config.timeframe,
         ).candidate
-        _probe_result_local = (
-            probe_result
-            if probe_result is not None
-            else _run_tf_probe_stage(run_config, data_stage, tiered_cfg)
-        )
-
     t_bridge_start = time.perf_counter()
-    # Resolve probe cells: tiered path sets _probe_result_local; non-tiered uses probe_result arg.
-    _active_probe: TfProbeStageResult | None = (
-        _probe_result_local
-        if use_tiered
-        else probe_result
-    )
     ml_out = run_active_strategy_output_bridge(
         run_config=run_config,
         symbols=bridge_trading_symbols,
@@ -1715,19 +1703,10 @@ def _run_strategy_stage(
                 l1_params={},
                 l2_params={},
                 caps=tiered_caps,
-                l1_tfs=(run_config.timeframe,),
+                l1_tfs=tuple(tiered_cfg.l1_tfs),
                 target_phase="l1",
                 verbose=True,
-                probe_diversity_corr=(
-                    _active_probe.manifest.diversity_corr
-                    if _active_probe is not None
-                    else None
-                ),
-                probe_manifest=(
-                    [{"tf": c.tf, "is_winner": True} for c in _active_probe.winning_cells]
-                    if _active_probe is not None
-                    else None
-                ),
+
             )
             if not l1_res.gate_passed:
                 _logger.info("[TIERED] L1 BLOCKED — gate_passed=False")
@@ -1774,16 +1753,11 @@ def _run_strategy_stage(
                 l1_params={},
                 l2_params=best_l2_params,
                 caps=tiered_caps,
-                l1_tfs=(run_config.timeframe,),
+                l1_tfs=tuple(tiered_cfg.l1_tfs),
                 target_phase=run_config.phase,
                 l1_result_override=l1_res,
                 verbose=True,  # 최종 실행시 상세 결과 출력
                 override_dsr=l2_study_result.dsr,
-                probe_manifest=(
-                    [{"tf": c.tf, "is_winner": True} for c in _active_probe.winning_cells]
-                    if _active_probe is not None
-                    else None
-                ),
             )
             
             # Layer 2 BLOCKED 시 즉시 종료 (Step 5 optimization 진입 방지)
