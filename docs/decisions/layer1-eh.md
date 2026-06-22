@@ -227,3 +227,12 @@
 - **Edge Cases:** l1_evidence_early_snapshots=0 (default) → disabled, 항상 strict gate 사용. deployment-level compute_symbol_strategy_evidence 호출 (run_l1_nested_swf L1053)은 snapshot_index 없이 호출 → -1 default → strict gate 적용. promotion filter advisory 모드에서 caller(ablation.py/bridge.py)의 `labeled.empty` guard는 pass-through 시 full data를 받으므로 pipeline 정상 진행.
 - **Status:** Accepted
 
+## L1-ADR-025: TF Probe Virtual Source Resample & Bridge Wiring Correction (2026-06-22)
+- **Delta:**
+  - `_run_data_stage`에서 `TF_PROBE_GRID`를 `load_futures_data_maps_for_symbols(target_tfs=...)`로 전달하지 않도록 변경하고, probe TF coverage는 source TF 기준 로그로 분리했다.
+  - `bridge.py`에 virtual probe TF resample 경로를 추가했다. `2h/6h/8h/12h`는 cached `1m/5m/15m/30m/1h/4h` source frame에서 생성되고, projected panel에는 base-grid guard mask를 다시 적용했다.
+  - `_run_strategy_stage`에서 tiered bridge 호출 전에 `_run_tf_probe_stage()`를 실행하도록 순서를 조정하고, `winning_cells`를 `run_active_strategy_output_bridge(extra_probe_cells=...)`로 전달했다.
+  - `ENABLE_TF_PROBE` 기본값을 `False`로 두어 일반 `--phase l1` 경로가 probe 옵트인 상태가 되도록 맞췄다.
+- **Rationale:** virtual TF를 디스크 parquet처럼 취급하면 `2h/6h/8h/12h`가 비어 있는 환경에서 `data_not_ready`가 발생했다. 실제 운영 의도는 source TF만 저장하고 virtual TF는 런타임에서 resample하는 것이므로, data-stage와 bridge-stage의 책임을 분리하고 probe 결과가 실제 signal injection까지 전달되도록 wiring을 복구했다.
+- **Edge Cases:** source TF가 없으면 해당 virtual TF는 조용히 skip한다. base-grid guard는 projected probe panel에 재적용하여 membership/readiness 우회를 막는다. tiered 경로에서만 probe를 주입하며, probe 비활성화 시 기존 base-only 동작을 유지한다.
+- **Status:** Accepted

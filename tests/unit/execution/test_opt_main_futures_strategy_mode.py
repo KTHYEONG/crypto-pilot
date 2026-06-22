@@ -11,6 +11,10 @@ import pandas as pd
 import pytest
 
 from src.application.futures.optimization.config import build_run_config_from_args
+from src.application.futures.optimization.data_readiness import (
+    DataReadinessResult,
+    DataWindowContract,
+)
 from src.domain.futures.strategy_runtime.bridge import CandidatePipelineOutput
 from src.domain.futures.universe import SymbolMeta, UniverseSnapshot
 from src.domain.futures.universe.contracts import UniverseStateCube
@@ -442,6 +446,85 @@ def test_strategy_stage_injects_universe_metadata_before_bridge(
         "cluster_size": 6.0,
         "anchor_cluster_member": 1.0,
     }
+
+
+def test_run_data_stage_ignores_virtual_probe_targets_in_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_config = build_run_config_from_args(
+        {
+            "phase": "l1",
+            "timeframe": "4h",
+            "trials": 1,
+            "sync": "skip",
+        }
+    )
+    window = opt_main_futures.QuarterlyWindow(
+        fetch_start="2025-01-01",
+        is_start="2025-04-01",
+        oos_start="2026-01-01",
+        end_date="2026-04-01",
+        fetch_start_date=datetime.strptime("2025-01-01", "%Y-%m-%d").date(),
+        is_start_date=datetime.strptime("2025-04-01", "%Y-%m-%d").date(),
+        oos_start_date=datetime.strptime("2026-01-01", "%Y-%m-%d").date(),
+        end_date_value=datetime.strptime("2026-04-01", "%Y-%m-%d").date(),
+    )
+    frame = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-01-01", periods=8, freq="4h"),
+            "open": np.arange(8, dtype=np.float64) + 100.0,
+            "high": np.arange(8, dtype=np.float64) + 101.0,
+            "low": np.arange(8, dtype=np.float64) + 99.0,
+            "close": np.arange(8, dtype=np.float64) + 100.5,
+            "volume": np.full(8, 1000.0, dtype=np.float64),
+        }
+    )
+    readiness = DataReadinessResult(
+        kept_symbols=("BTCUSDT",),
+        filtered_is_maps={"BTCUSDT": {"4h": frame.copy()}},
+        filtered_oos_maps={"BTCUSDT": {"4h": frame.copy()}},
+        report=pd.DataFrame({"symbol": ["BTCUSDT"], "pass": [True]}),
+        contract=DataWindowContract(
+            fetch_start=window.fetch_start_date,
+            is_start=window.is_start_date,
+            oos_start=window.oos_start_date,
+            end=window.end_date_value,
+            tf="4h",
+            warmup_bars=60,
+            require_exec_1m=False,
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_loader(*args: object, **kwargs: object) -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]], list[str]]:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {"BTCUSDT": {"4h": frame.copy()}}, {"BTCUSDT": {"4h": frame.copy()}}, ["BTCUSDT"]
+
+    monkeypatch.setitem(opt_main_futures.OPT_FUTURES_CONFIG, "ENABLE_TF_PROBE", True)
+    monkeypatch.setitem(
+        opt_main_futures.OPT_FUTURES_CONFIG,
+        "TF_PROBE_GRID",
+        ["1h", "2h", "4h", "6h", "8h", "12h"],
+    )
+    monkeypatch.setattr(opt_main_futures, "load_futures_data_maps_for_symbols", fake_loader)
+    monkeypatch.setattr(opt_main_futures, "evaluate_data_readiness", lambda **_: readiness)
+
+    result = opt_main_futures._run_data_stage(
+        run_config,
+        window,
+        discovered_symbols=["BTCUSDT"],
+        timeline={},
+    )
+
+    assert result.valid_symbols == ["BTCUSDT"]
+    assert captured["kwargs"]["target_tfs"] is None
+    assert bool(opt_main_futures.OPT_FUTURES_CONFIG["ENABLE_TF_PROBE"]) is True
+
+
+def test_tf_probe_default_is_disabled() -> None:
+    """OPT_FUTURES_CONFIG must keep TF probe disabled by default."""
+    assert opt_main_futures.OPT_FUTURES_CONFIG["ENABLE_TF_PROBE"] is False
 
 
 def test_run_from_cli_when_pipeline_returns_nonzero_propagates_exit_code(
