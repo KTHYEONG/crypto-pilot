@@ -452,6 +452,7 @@ class CandidateStrategyConfig:
     per_tf_gate_overrides: dict[str, dict[str, float]] | None = None
     per_tf_gate_enabled: bool = False
     l2_master_tf: str | None = None
+    l1_tfs: tuple[str, ...] = ("4h", "6h", "8h", "12h")
     l1_evidence_lookback_bars: int | None = None
     l1_evidence_grid_multiplier: int = 3
     l1_evidence_max_folds: int = 32
