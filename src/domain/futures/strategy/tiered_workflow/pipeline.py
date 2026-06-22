@@ -789,6 +789,7 @@ def run_l1_nested_swf(
     seed: int,
     verbose: bool = True,
     l2_start: date | None = None,
+    probe_diversity_corr: dict[str, float] | None = None,
 ) -> Layer1Result:
     """Run nested Layer1 validation using inner selection and outer evaluation."""
     import dataclasses
@@ -1077,6 +1078,7 @@ def run_l1_nested_swf(
         cfg=cfg,
         seed=seed,
         registry_as_of_idx=max((fold.oos_end for fold in outer_folds), default=0) + 1,
+        probe_diversity_corr=probe_diversity_corr,
     )
     logger.log(
         PERF,
@@ -1722,6 +1724,7 @@ def run_tiered_pipeline(
     l1_result_override: Layer1Result | None = None,
     verbose: bool = True,
     override_dsr: float | None = None,
+    probe_diversity_corr: dict[str, float] | None = None,
 ) -> tuple[Layer1Result, Layer2Result | None, Layer3Result | None]:
     """3-Layer 티어드 파이프라인 실행.
 
@@ -1771,6 +1774,7 @@ def run_tiered_pipeline(
                 else None if (window.l2_start is None or hasattr(window.l2_start, "_mock_self"))
                 else pd.Timestamp(window.l2_start).date()
             ),
+            probe_diversity_corr=probe_diversity_corr,
         )
     logger.log(PERF, "[PERF] run_tiered_pipeline_l1_total took=%.4fs", time.perf_counter() - t_l1)
 

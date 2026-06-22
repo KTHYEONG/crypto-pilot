@@ -1204,3 +1204,310 @@ class TestProbeTimeframeAlphaIntegration:
         if len(selected) > 1:
             tstats = [c.ic_tstat_hac for c in selected]
             assert tstats == sorted(tstats, reverse=True)
+
+
+class TestTimeframeProbeFixes:
+    """Tests for localized FDR and dynamic min obs calculations."""
+
+    def test_fdr_per_timeframe_localization(self) -> None:
+        """Scenario 1:
+        1h cells (high t-stats) and 12h cells (0.0 t-stats) are corrected independently.
+        High t-stat cells in 1h should pass FDR, and not be diluted by 12h cells.
+        """
+        import unittest.mock as _mock
+        from concurrent.futures import ThreadPoolExecutor
+
+        from src.domain.futures.strategy.config import CandidateStrategyConfig
+        from src.domain.futures.strategy.timeframe_probe import probe_timeframe_alpha
+
+        base_cfg = CandidateStrategyConfig(timeframe="4h")
+
+        # 10 cells in '1h' (high tstat) and 10 cells in '12h' (0 tstat)
+        cells_1h = [
+            _make_synthetic_cell_dict(f"SYM{i}", "1h", ic_mean=0.1, ic_tstat_hac=4.0)
+            for i in range(10)
+        ]
+        cells_12h = [
+            _make_synthetic_cell_dict(f"SYM{i}", "12h", ic_mean=0.0, ic_tstat_hac=0.0)
+            for i in range(10)
+        ]
+
+        def _mock_worker(args: tuple[object, ...]) -> list[dict[str, object]]:
+            tf = str(args[2])
+            if tf == "1h":
+                return cells_1h
+            elif tf == "12h":
+                return cells_12h
+            return []
+
+        # Create dummy data maps
+        data_maps = {
+            f"SYM{i}": {
+                "1h": _make_ohlcv_df(100, freq="1h", seed=i),
+                "12h": _make_ohlcv_df(100, freq="12h", seed=i),
+            }
+            for i in range(10)
+        }
+
+        with (
+            _mock.patch(
+                "src.domain.futures.strategy.timeframe_probe.ProcessPoolExecutor",
+                new=ThreadPoolExecutor,
+            ),
+            _mock.patch(
+                "src.domain.futures.strategy.timeframe_probe._probe_tf_worker",
+                side_effect=_mock_worker,
+            ),
+        ):
+            manifest = probe_timeframe_alpha(
+                data_maps=data_maps,
+                symbols=[f"SYM{i}" for i in range(10)],
+                base_cfg=base_cfg,
+                tf_grid=("1h", "12h"),
+                max_workers=1,
+            )
+
+        cells_1h_result = [c for c in manifest.cells if c.tf == "1h"]
+        cells_12h_result = [c for c in manifest.cells if c.tf == "12h"]
+
+        assert len(cells_1h_result) == 10
+        assert len(cells_12h_result) == 10
+        for c in cells_1h_result:
+            assert c.passed_fdr is True
+        for c in cells_12h_result:
+            assert c.passed_fdr is False
+
+    def test_dynamic_min_obs_coarse_timeframe(self) -> None:
+        """Scenario 2:
+        Worker run with TF "12h" and only 12 events.
+        Dynamic min obs for 12h should be: max(10, round(30 * (4.0 / 12.0))) = 10.
+        Since n_events = 12 >= 10, the cell should not be skipped, and valid metrics calculated.
+        """
+        import unittest.mock as _mock
+
+        from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
+        from src.domain.futures.strategy.timeframe_probe import _probe_tf_worker
+
+        tf = "12h"
+        symbols = ("BTCUSDT",)
+
+        # 50 bars of data
+        n_bars = 50
+        close = np.linspace(100.0, 150.0, n_bars)
+        df = pd.DataFrame({
+            "open": close,
+            "high": close * 1.01,
+            "low": close * 0.99,
+            "close": close,
+            "volume": np.ones(n_bars) * 1000.0,
+            "datetime": pd.date_range("2023-01-01", periods=n_bars, freq="12h", tz="UTC")
+        })
+
+        resampled_maps = {"BTCUSDT": df}
+        base_cfg_kwargs = {"timeframe": "12h"}
+
+        # Construct a mock CandidateSignalPanel
+        # valid_mask_2d has exactly 12 True entries
+        valid_mask_2d = np.zeros((n_bars, 1), dtype=bool)
+        valid_mask_2d[:12, 0] = True
+
+        # Ensure variation in signal to avoid ConstantInputWarning in spearmanr
+        scores = np.ones((n_bars, 1))
+        scores[:12, 0] = np.linspace(-1.0, 1.0, 12)
+
+        panel = CandidateSignalPanel(
+            family="trend",
+            variant="v1",
+            params={},
+            datetimes=df["datetime"].values.astype("datetime64[ns]"),
+            symbols=symbols,
+            signed_score_2d=scores,
+            side_hint_2d=np.ones((n_bars, 1), dtype=np.int8),
+            expected_holding_bars=2,
+            min_holding_bars=1,
+            stop_atr_mult=1.0,
+            take_profit_atr_mult=1.0,
+            turnover_proxy_2d=np.ones((n_bars, 1)) * 0.1,
+            valid_mask_2d=valid_mask_2d,
+            archetype="trend",
+        )
+
+        # Mock align_data_maps to return a stub with correct close_2d and datetimes
+        aligned_stub = type(
+            "AlignedStub",
+            (),
+            {
+                "close_2d": close.reshape(-1, 1),
+                "datetimes": panel.datetimes,
+                "symbols": symbols,
+            },
+        )()
+
+        def _mock_align_data_maps(*_: object, **__: object) -> object:
+            return aligned_stub
+
+        def _mock_build_rule_signal_panels(*_: object, **__: object) -> tuple[object, ...]:
+            return (panel,)
+
+        with (
+            _mock.patch(
+                "src.domain.futures.strategy.common.alignment.align_data_maps",
+                side_effect=_mock_align_data_maps,
+            ),
+            _mock.patch(
+                "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
+                side_effect=_mock_build_rule_signal_panels,
+            ),
+        ):
+            cells = _probe_tf_worker(
+                (
+                    resampled_maps,
+                    symbols,
+                    tf,
+                    base_cfg_kwargs,
+                    None,
+                    6.0,
+                )
+            )
+
+        assert len(cells) == 1
+        cell = cells[0]
+        assert cell["n_events"] == 12
+        assert cell["tf"] == "12h"
+        assert cell["ic_mean"] != 0.0
+        assert cell["ic_tstat_hac"] != 0.0
+
+    def test_fdr_pool_excludes_untested_cells(self) -> None:
+        """Scenario 3:
+        In the FDR pool, untested cells (where ic_tstat_hac == 0.0) should be excluded
+        to prevent inflating the denominator and causing over-rejection.
+        """
+        import unittest.mock as _mock
+        from concurrent.futures import ThreadPoolExecutor
+
+        from src.domain.futures.strategy.config import CandidateStrategyConfig
+        from src.domain.futures.strategy.timeframe_probe import probe_timeframe_alpha
+
+        base_cfg = CandidateStrategyConfig(timeframe="4h")
+
+        # 5 tested cells with strong t-stats and 100 untested cells with 0.0 t-stats
+        cells_1h = [
+            _make_synthetic_cell_dict(f"SYM{i}", "1h", ic_mean=0.1, ic_tstat_hac=3.0)
+            for i in range(5)
+        ] + [
+            _make_synthetic_cell_dict(f"SYM{i+5}", "1h", ic_mean=0.0, ic_tstat_hac=0.0)
+            for i in range(100)
+        ]
+
+        def _mock_worker(args: tuple[object, ...]) -> list[dict[str, object]]:
+            return cells_1h
+
+        data_maps = {
+            f"SYM{i}": {"1h": _make_ohlcv_df(100, freq="1h", seed=i)}
+            for i in range(105)
+        }
+
+        with (
+            _mock.patch(
+                "src.domain.futures.strategy.timeframe_probe.ProcessPoolExecutor",
+                new=ThreadPoolExecutor,
+            ),
+            _mock.patch(
+                "src.domain.futures.strategy.timeframe_probe._probe_tf_worker",
+                side_effect=_mock_worker,
+            ),
+        ):
+            manifest = probe_timeframe_alpha(
+                data_maps=data_maps,
+                symbols=[f"SYM{i}" for i in range(105)],
+                base_cfg=base_cfg,
+                tf_grid=("1h",),
+                max_workers=1,
+            )
+
+        tested_results = [c for c in manifest.cells if c.ic_tstat_hac != 0.0]
+        untested_results = [c for c in manifest.cells if c.ic_tstat_hac == 0.0]
+
+        assert len(tested_results) == 5
+        assert len(untested_results) == 100
+
+        # If untested cells were NOT excluded from the denominator, N = 105.
+        # BH-FDR threshold for the highest t-stat (k=5) would be (5/105)*0.10 = 0.00476.
+        # A t-stat of 3.0 has p-val = 0.0027, which would pass. But smaller ones might fail.
+        # More critically, if t-stat was slightly lower (e.g. 2.0, p-val=0.045),
+        # under N=5, (5/5)*0.10 = 0.10 (passes). Under N=105, (5/105)*0.10 = 0.00476 (fails).
+        # Since we exclude them, N = 5, all 5 tested cells should pass easily.
+        for c in tested_results:
+            assert c.passed_fdr is True
+        for c in untested_results:
+            assert c.passed_fdr is False
+
+    def test_fdr_per_symbol_localization(self) -> None:
+        """Scenario 4:
+        FDR correction is localized per symbol.
+        A weak signal on SYM1 should not dilute or affect a strong signal on SYM0.
+        """
+        import unittest.mock as _mock
+        from concurrent.futures import ThreadPoolExecutor
+
+        from src.domain.futures.strategy.config import CandidateStrategyConfig
+        from src.domain.futures.strategy.timeframe_probe import probe_timeframe_alpha
+
+        base_cfg = CandidateStrategyConfig(timeframe="4h")
+
+        # SYM0: 1 strong cell (tstat=3.0)
+        # SYM1: 100 weak cells (tstat=0.1)
+        cells_SYM0: list[dict[str, object]] = []
+        for i in range(1):
+            d = _make_synthetic_cell_dict("SYM0", "1h", ic_mean=0.1, ic_tstat_hac=3.0)
+            d["family"] = f"fam{i}"
+            cells_SYM0.append(d)
+
+        cells_SYM1: list[dict[str, object]] = []
+        for i in range(100):
+            d = _make_synthetic_cell_dict("SYM1", "1h", ic_mean=0.01, ic_tstat_hac=0.1)
+            d["family"] = f"fam{i}"
+            cells_SYM1.append(d)
+
+        def _mock_worker(args: tuple[object, ...]) -> list[dict[str, object]]:
+            return cells_SYM0 + cells_SYM1
+
+        data_maps = {
+            "SYM0": {"1h": _make_ohlcv_df(100, freq="1h", seed=0)},
+            "SYM1": {"1h": _make_ohlcv_df(100, freq="1h", seed=1)},
+        }
+
+        with (
+            _mock.patch(
+                "src.domain.futures.strategy.timeframe_probe.ProcessPoolExecutor",
+                new=ThreadPoolExecutor,
+            ),
+            _mock.patch(
+                "src.domain.futures.strategy.timeframe_probe._probe_tf_worker",
+                side_effect=_mock_worker,
+            ),
+        ):
+            manifest = probe_timeframe_alpha(
+                data_maps=data_maps,
+                symbols=["SYM0", "SYM1"],
+                base_cfg=base_cfg,
+                tf_grid=("1h",),
+                max_workers=1,
+            )
+
+        results_SYM0 = [c for c in manifest.cells if c.symbol == "SYM0"]
+        results_SYM1 = [c for c in manifest.cells if c.symbol == "SYM1"]
+
+        assert len(results_SYM0) == 1
+        assert len(results_SYM1) == 100
+
+        # Under localized (TF, Symbol) FDR, SYM0 has N=1.
+        # Threshold for SYM0 is 0.10. p-val of tstat=3.0 is 0.0027 <= 0.10.
+        # It should easily pass. (If it were pooled, N=101, Rank 1 threshold = 1/101 * 0.10 = 0.00099, which fails).
+        assert results_SYM0[0].passed_fdr is True
+
+        # SYM1 cells should all fail since their t-stats are 0.1 (p-val=0.92)
+        for c in results_SYM1:
+            assert c.passed_fdr is False
+
+
