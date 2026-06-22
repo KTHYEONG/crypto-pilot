@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
     from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
     from src.domain.futures.strategy.common.alignment import AlignedMarketData
-    from src.domain.futures.strategy.config import StrategyConfig
+    from src.domain.futures.strategy.config import CandidateStrategyConfig, StrategyConfig
 
 _logger = logging.getLogger(__name__)
 
@@ -355,39 +355,21 @@ def _base_probe_guard_mask(aligned_base: AlignedMarketData) -> NDArray[np.bool_]
     return np.asarray(guard, dtype=bool)
 
 
-def _build_probe_extra_panels(
+def build_multi_tf_panels(
     *,
     data_maps: dict[str, Any],
-    probe_cells: tuple[Any, ...],
     symbols: list[str],
-    aligned_base: Any,
-    base_cfg: Any,
+    aligned_base: AlignedMarketData,
+    base_cfg: CandidateStrategyConfig,
     base_tf: str,
-    inject_full_grid: bool = False,
+    tfs: tuple[str, ...],
+    family_pool: Callable[[str], tuple[str, ...]],
+    htf_only: bool = True,
 ) -> tuple[CandidateSignalPanel, ...]:
-    """Build and project non-base TF panels from probe winning cells.
-
-    Args:
-        data_maps: Symbol-keyed data maps {sym: {tf: DataFrame}}.
-        probe_cells: Tuple of TfCellEvidence winning cells from probe stage.
-        symbols: Universe symbols.
-        aligned_base: AlignedMarketData for base TF (provides datetimes).
-        base_cfg: CandidateStrategyConfig for base TF.
-        base_tf: Base timeframe string (e.g. "4h").
-        inject_full_grid: When True, bypass the winning_keys filter and inject all
-            (family, variant) panels for every non-base TF, delegating selection
-            entirely to the downstream L1 nested SWF gate (C1 high-recall mode).
-
-    Returns:
-        Tuple of projected CandidateSignalPanel objects on the base TF grid.
-
-    Time Complexity: O(|non_base_tfs| * T_i * N) for panel construction + projection.
-    Space Complexity: O(|extra_panels| * T_base * N).
-    """
     from src.domain.futures.strategy.common.alignment import align_data_maps
     from src.domain.futures.strategy.rule_signals import build_rule_signal_panels
 
-    non_base_tfs = {c.tf for c in probe_cells} - {base_tf}
+    non_base_tfs = {tf for tf in tfs if tf != base_tf}
     if not non_base_tfs:
         return ()
 
@@ -397,12 +379,11 @@ def _build_probe_extra_panels(
     base_guard = _base_probe_guard_mask(aligned_base)
 
     for tf_i in non_base_tfs:
-        winning_keys = {(c.family, c.variant) for c in probe_cells if c.tf == tf_i}
-        # C3: build (family, variant) → cell lookup for probe-origin metadata tagging.
-        # Keys outside winning_keys are possible when inject_full_grid=True.
-        cell_meta: dict[tuple[str, str], Any] = {
-            (c.family, c.variant): c for c in probe_cells if c.tf == tf_i
-        }
+        hpb_i = _HPB_BRIDGE.get(tf_i, 4.0)
+        hpb_base = _HPB_BRIDGE.get(base_tf, 4.0)
+        if htf_only and hpb_i < hpb_base:
+            continue
+
         source_mix: Counter[str] = Counter()
         for symbol in symbols:
             source_tf = _select_probe_source_tf(data_maps.get(symbol, {}), tf_i)
@@ -410,38 +391,30 @@ def _build_probe_extra_panels(
                 source_mix[source_tf] += 1
         tf_maps = _build_virtual_probe_tf_maps(data_maps, symbols, tf_i)
         if not tf_maps:
-            _logger.warning("[TF-PROBE] no source data available for tf=%s", tf_i)
+            _logger.warning("[MULTI-TF] no source data available for tf=%s", tf_i)
             continue
         try:
             aligned_i = align_data_maps(tf_maps, symbols, tf_i)
         except Exception as exc:
-            _logger.warning("[TF-PROBE] align_data_maps failed tf=%s: %s", tf_i, exc)
+            _logger.warning("[MULTI-TF] align_data_maps failed tf=%s: %s", tf_i, exc)
             continue
         try:
             cfg_i = dataclasses.replace(base_cfg, timeframe=tf_i)
             panels_i = build_rule_signal_panels(
                 aligned=aligned_i,
                 cfg=cfg_i,
+                family_filter=family_pool(tf_i),
                 normalize_time_horizon=True,
                 horizon_base_tf=base_tf,
             )
         except Exception as exc:
-            _logger.warning("[TF-PROBE] build_rule_signal_panels failed tf=%s: %s", tf_i, exc)
+            _logger.warning("[MULTI-TF] build_rule_signal_panels failed tf=%s: %s", tf_i, exc)
             continue
         for panel in panels_i:
-            # C1: when inject_full_grid=True, bypass winning_keys filter so all
-            # (family, variant) panels reach the L1 nested SWF gate unfiltered.
-            if not inject_full_grid and (panel.family, panel.variant) not in winning_keys:
-                continue
             try:
                 projected = _project_panel_to_base_grid(panel, base_datetimes, tf_i, base_tf)
-                # C3: tag projected panel metadata with probe-origin observability fields.
-                cell = cell_meta.get((panel.family, panel.variant))
                 tagged_metadata: dict[str, Any] = dict(projected.metadata or {})
-                tagged_metadata["probe_origin"] = True
-                tagged_metadata["probe_tf"] = tf_i
-                if cell is not None:
-                    tagged_metadata["probe_ic_tstat"] = cell.ic_tstat_hac
+                tagged_metadata["native_tf"] = tf_i
                 extra.append(
                     dataclasses.replace(
                         projected,
@@ -451,7 +424,7 @@ def _build_probe_extra_panels(
                 )
             except Exception as exc:
                 _logger.warning(
-                    "[TF-PROBE] projection failed %s:%s tf=%s: %s",
+                    "[MULTI-TF] projection failed %s:%s tf=%s: %s",
                     panel.family,
                     panel.variant,
                     tf_i,
@@ -462,15 +435,15 @@ def _build_probe_extra_panels(
             [
                 tf_i,
                 str(len(tf_maps)),
-                str(len(winning_keys)),
+                str(source_mix.total()),
                 str(projected_count),
                 ", ".join(f"{name}:{count}" for name, count in source_mix.most_common(2)) or "-",
             ]
         )
     if audit_rows:
         _log_ascii_table(
-            "[TF-PROBE AUDIT] BRIDGE INJECTION",
-            ("TF", "Symbols", "Winning Keys", "Projected", "Source Mix"),
+            "[MULTI-TF] PANEL INJECTION",
+            ("TF", "Symbols", "Total Source", "Projected", "Source Mix"),
             audit_rows,
             (8, 10, 14, 12, 36),
         )
@@ -833,6 +806,10 @@ def run_candidate_strategy_for_universe(
 
     t_step = time.perf_counter()
     panels = build_rule_signal_panels(aligned=aligned, cfg=strategy_cfg.candidate)
+    panels = tuple(
+        dataclasses.replace(p, variant=f"{p.variant}_{tf}")
+        for p in panels
+    )
     bridge_prof["rules"] = time.perf_counter() - t_step
     t_step = time.perf_counter()
     raw_events = candidate_panels_to_events(
@@ -896,6 +873,40 @@ def run_candidate_strategy_for_universe(
     labeled = label_candidate_events(events=raw_events, aligned=aligned, cfg=candidate_cfg)
     bridge_prof["label"] = time.perf_counter() - t_step
     labeled_all = labeled.copy()
+    labeled_all["native_tf"] = tf
+    # ── Multi-TF HTF panel generation (Phase B) ──────────────────────────
+    htf_tfs = tuple(t for t in getattr(candidate_cfg, "l1_tfs", ()) if t != tf)
+    if htf_tfs:
+        try:
+            from src.domain.futures.strategy.config import resolve_tf_signal_pool
+
+            htf_panels = build_multi_tf_panels(
+                data_maps=preloaded_data_maps,
+                symbols=symbols,
+                aligned_base=aligned,
+                base_cfg=candidate_cfg,
+                base_tf=tf,
+                tfs=candidate_cfg.l1_tfs,
+                family_pool=lambda t: resolve_tf_signal_pool(candidate_cfg, t),
+                htf_only=True,
+            )
+            if htf_panels:
+                htf_raw_events = candidate_panels_to_events(
+                    htf_panels,
+                    min_abs_score=candidate_cfg.min_rule_net_bps * 1e-4,
+                    side_flip_variants=candidate_cfg.side_flip_candidate_variants,
+                    cost_floor_bps=candidate_cfg.cost_floor_bps,
+                    execution_cost_bps_2d=aligned.execution_cost_bps_2d,
+                )
+                if not htf_raw_events.empty:
+                    htf_labeled = label_candidate_events(events=htf_raw_events, aligned=aligned, cfg=candidate_cfg)
+                    variant_to_tf: dict[str, str] = {}
+                    for panel in htf_panels:
+                        variant_to_tf[panel.variant] = panel.metadata.get("native_tf", tf)
+                    htf_labeled["native_tf"] = htf_labeled["variant"].map(variant_to_tf)
+                    labeled_all = pd.concat([labeled_all, htf_labeled], ignore_index=True)
+        except Exception as exc:
+            _logger.warning("[MULTI-TF] HTF panel generation failed: %s", exc)
     fit_start, fit_end, calibration_start, calibration_end, oos_start, oos_end = _candidate_ml_split_indices(
         n_bars=n_bars,
         fit_fraction=candidate_cfg.ml_fit_fraction,
