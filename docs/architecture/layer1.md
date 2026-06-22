@@ -12,15 +12,18 @@ related_paths:
   - src/domain/futures/strategy/candidate_contracts.py
   - src/domain/futures/strategy/tiered_workflow/pipeline.py
   - src/domain/futures/strategy/tiered_workflow/signal_selection.py
+  - src/domain/futures/strategy/timeframe_probe.py
+  - src/domain/futures/strategy/tiered_workflow/metrics.py
 change_triggers:
   - src/domain/futures/strategy/rule_signals.py
   - src/domain/futures/strategy/rule_diagnostics.py
   - src/domain/futures/strategy/exit_policies.py
+  - src/domain/futures/strategy/timeframe_probe.py
 dependencies:
   documents:
     - docs/architecture/regime.md
     - docs/architecture/allocation.md
-last_verified: 2026-06-14
+last_verified: 2026-06-22
 ---
 
 # 1. Purpose
@@ -114,6 +117,31 @@ graph TD
 **Capacity Clip (awf_sim)**
 - Per-bar capacity from `adv_usdt_2d [T, N]`: `intended_notional < 5 USDT → w = 0`; `> capacity → proportional clip`.
 - Active only when `portfolio_nav` is provided (unit-NAV simulation skips the clip: weights are fractions, not USDT notional).
+
+**Timeframe Alpha Probe (`timeframe_probe.py`) — Stage-1 계측 모듈**
+- **Purpose**: 풀 L1/L2 최적화 없이 `(symbol × family × tf)` 셀 단위 신호 진단. 4h 단일 고집 해소 — 셀별 강점 tf 조합을 L1/L2로 넘길 근거 매니페스트 생성. (Phase-2 배선은 별도)
+- **TF Grid**: `{15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h}`. `hpb` 매핑: `15m=0.25h … 12h=12h`.
+- **Bar-param 정규화**: tf 비교 시 lookback bar 고정 금지. 실시간 horizon 고정: $\text{bars}_{tf} = \text{round}(\text{hours\_target} / \text{hpb}(tf))$.
+- **Look-ahead 방어**: $\text{fwd}[t] = \text{close}[t+1+H] / \text{close}[t+1] - 1$ (entry shift(1) 강제). 우측라벨 resample + 마지막 미완성 bar drop.
+- **계측 지표** (`TfCellEvidence`):
+
+| 지표 | 수식/방법 | 의미 |
+|---|---|---|
+| `ic_mean` | Spearman rank IC | 풀기간 신호 예측력 |
+| `ic_tstat_hac` | NW HAC t-stat (`max_lag=H`) | overlap-corrected 유의성 |
+| `ic_fold_sign_consistency` | 4-fold IC 부호 동의율 | 비정상성 방어 |
+| `alpha_half_life_h` | $IC(h)=IC_0 \cdot e^{-\lambda h}$ 로그선형 회귀 → $\ln2/\lambda$ | 신호 정보 감쇠 속도 |
+| `net_edge_bps` | $\text{gross} - \bar{t/o} \cdot \text{round\_trip\_cost}$ | 비용조정 엣지 |
+| `vr_label` | Lo-MacKinlay VR(q∈{2,4,8,16}) 다수결 | 시장구조(추세/평균회귀) |
+| `hurst` | DFA Hurst 지수 | 지속성 강도 |
+| `passed_fdr` | BH-FDR(q=0.10) 전셀 풀 | 다중검정 오탐 통제 |
+
+- **통계 추가** (`metrics.py`):
+  - `variance_ratio(rets, q)`: Lo-MacKinlay VR(q) + hetero-robust M2 통계량. $n < 4q$ 시 `(1.0, 0.0)`.
+  - `hurst_dfa(rets)`: DFA 기반 Hurst. scale $s$ 기하급수 진행, log-log 회귀 기울기. $n<32$ 또는 비수렴 시 `0.5`.
+- **병렬**: `ProcessPoolExecutor(max_workers=12)`, tf 단위 8-task. VR/Hurst는 symbol×tf당 1회 캐시 후 panel 루프 공유.
+- **다양성 계측**: 동일 (symbol, family) 내 tf 쌍의 4h-grid Pearson r → `diversity_corr`. Fold#2형 동시실패 완화 근거.
+- **Phase-2 handoff**: `select_tf_family_cells(manifest, min_ic_tstat=2.0, require_fdr=True, min_net_edge_bps=0.0, min_fold_sign_consistency=0.75)` → promotable 셀 `(ic_tstat_hac, net_edge_bps)` desc 정렬.
 
 # 5. Data Integrity & Optimizations
 
