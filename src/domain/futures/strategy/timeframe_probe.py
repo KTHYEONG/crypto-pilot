@@ -20,35 +20,16 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     hurst_dfa,
     variance_ratio,
 )
+from src.domain.futures.strategy.timeframe_contracts import (
+    hours_per_bar,
+    resample_alias,
+    scale_bar_count,
+    select_probe_source_tf,
+)
 
 _logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-_HPB: dict[str, float] = {
-    "15m": 0.25,
-    "30m": 0.5,
-    "1h": 1.0,
-    "2h": 2.0,
-    "4h": 4.0,
-    "6h": 6.0,
-    "8h": 8.0,
-    "12h": 12.0,
-}
 _BASE_TF: str = "4h"
-_BASE_HPB: float = _HPB[_BASE_TF]
-
-_RESAMPLE_ALIAS: dict[str, str] = {
-    "15m": "15min",
-    "30m": "30min",
-    "1h": "1h",
-    "2h": "2h",
-    "4h": "4h",
-    "6h": "6h",
-    "8h": "8h",
-    "12h": "12h",
-}
 
 # VR multi-q majority vote thresholds
 _VR_TREND_THRESH: float = 1.05
@@ -97,16 +78,58 @@ class TfProbeManifest:
     diversity_corr: dict[str, float]
 
 
+@dataclass(slots=True, frozen=True)
+class TfProbeGateAuditRow:
+    """Per-timeframe gate audit summary row."""
+
+    tf: str
+    computed: int
+    pass_tstat: int
+    pass_fdr: int
+    pass_net_edge: int
+    pass_fold_consistency: int
+    winning: int
+    top_fail_reason: str
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 def _hpb(tf: str) -> float:
     """Hours per bar for a given tf string."""
-    return _HPB.get(tf, 4.0)
+    return hours_per_bar(tf)
+
+
+def _prepare_probe_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize a probe input frame to require a usable datetime column.
+
+    The runtime loader commonly stores OHLCV frames as RangeIndex + `datetime`
+    column. Probe resampling needs a DatetimeIndex, while alignment downstream
+    still expects the `datetime` column to be present.
+    """
+    prepared = frame.copy()
+    if "datetime" not in prepared.columns:
+        prepared = prepared.reset_index()
+        if "datetime" not in prepared.columns and len(prepared.columns) > 0:
+            prepared = prepared.rename(columns={str(prepared.columns[0]): "datetime"})
+    if "datetime" not in prepared.columns:
+        raise ValueError("datetime column missing in probe source frame")
+    prepared["datetime"] = pd.to_datetime(prepared["datetime"], utc=True, errors="coerce")
+    prepared = prepared.dropna(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
+    return prepared
 
 
 def _resample_ohlcv(df: pd.DataFrame, alias: str) -> pd.DataFrame:
     """Resample OHLCV to target timeframe. Drop last incomplete bar."""
+    prepared = df.copy()
+    if "datetime" not in prepared.columns:
+        prepared = prepared.reset_index()
+        if "datetime" not in prepared.columns and len(prepared.columns) > 0:
+            prepared = prepared.rename(columns={str(prepared.columns[0]): "datetime"})
+    if "datetime" not in prepared.columns:
+        raise ValueError("datetime column missing in probe source frame")
+    prepared["datetime"] = pd.to_datetime(prepared["datetime"], utc=True, errors="coerce")
+    prepared = prepared.dropna(subset=["datetime"]).sort_values("datetime")
     agg: dict[str, str] = {
         "open": "first",
         "high": "max",
@@ -114,20 +137,23 @@ def _resample_ohlcv(df: pd.DataFrame, alias: str) -> pd.DataFrame:
         "close": "last",
         "volume": "sum",
     }
-    if "funding_rate" in df.columns:
+    if "funding_rate" in prepared.columns:
         agg["funding_rate"] = "mean"
+    if "funding_rate_sum" in prepared.columns:
+        agg["funding_rate_sum"] = "mean"
     resampled = (
-        df.resample(alias, label="right", closed="right")
+        prepared.set_index("datetime").resample(alias, label="right", closed="right")
         .agg(agg)
         .dropna(subset=["close"])
     )
-    return resampled.iloc[:-1]  # drop last potentially incomplete bar
+    if not resampled.empty:
+        resampled = resampled.iloc[:-1]
+    return resampled.reset_index()
 
 
 def _scale_bar_param(bars_base: int, tf: str, base_tf: str = _BASE_TF) -> int:
     """Scale a bar-count parameter to maintain real-time horizon across tf."""
-    hours_target = bars_base * _hpb(base_tf)
-    return max(1, round(hours_target / _hpb(tf)))
+    return scale_bar_count(bars_base, tf, base_tf)
 
 
 def _bars_per_year(tf: str) -> float:
@@ -369,7 +395,12 @@ def _probe_tf_worker(args: tuple[Any, ...]) -> list[dict[str, Any]]:
 
     # Build signal panels
     try:
-        panels = build_rule_signal_panels(aligned=aligned_tf, cfg=cfg)
+        panels = build_rule_signal_panels(
+            aligned=aligned_tf,
+            cfg=cfg,
+            normalize_time_horizon=True,
+            horizon_base_tf=_BASE_TF,
+        )
     except Exception as exc:
         _wlog.warning("build_rule_signal_panels failed for tf=%s: %s", tf, exc)
         return []
@@ -542,30 +573,26 @@ def probe_timeframe_alpha(
     all_cell_dicts: list[dict[str, Any]] = []
 
     def _build_resampled_maps(tf: str) -> dict[str, pd.DataFrame]:
-        alias = _RESAMPLE_ALIAS.get(tf, tf)
-        hpb_tf = _hpb(tf)
+        alias = resample_alias(tf)
         resampled: dict[str, pd.DataFrame] = {}
         for sym in syms_list:
             sym_maps = data_maps.get(sym, {})
-            # Pick finest available base tf (hpb <= target tf) for accurate resample
-            source_df: pd.DataFrame | None = None
-            for candidate_tf in ("1m", "5m", "15m", "30m", "1h", "4h", tf):
-                if candidate_tf in sym_maps:
-                    candidate_hpb = _hpb(candidate_tf)
-                    if candidate_hpb <= hpb_tf:
-                        source_df = sym_maps[candidate_tf]
-                        if candidate_tf == tf:
-                            break  # exact match — no resample needed
-            if source_df is None:
+            source_tf = select_probe_source_tf(sym_maps, tf)
+            if source_tf is None:
+                _logger.debug("No suitable base tf for sym=%s, tf=%s", sym, tf)
+                continue
+            source_df = sym_maps.get(source_tf)
+            if not isinstance(source_df, pd.DataFrame) or source_df.empty:
                 _logger.debug("No suitable base tf for sym=%s, tf=%s", sym, tf)
                 continue
             try:
-                if source_df.index.tz is not None:
-                    source_df = source_df.copy()
-                    source_df.index = source_df.index.tz_localize(None)
-                resampled[sym] = _resample_ohlcv(source_df, alias)
+                prepared = _prepare_probe_frame(source_df)
+                if source_tf == tf:
+                    resampled[sym] = prepared
+                else:
+                    resampled[sym] = _resample_ohlcv(prepared, alias)
             except Exception as exc:
-                _logger.debug("Resample failed sym=%s tf=%s: %s", sym, tf, exc)
+                _logger.warning("Resample failed sym=%s tf=%s: %s", sym, tf, exc)
         return resampled
 
     # Build tf-worker args
@@ -669,7 +696,7 @@ def _compute_diversity_corr(
         sym_family_pairs.add((c["symbol"], c["family"]))
 
     # Build close-return series resampled to 4h grid for comparability
-    base_alias = _RESAMPLE_ALIAS.get(_BASE_TF, _BASE_TF)
+    base_alias = resample_alias(_BASE_TF)
 
     for sym, family in sym_family_pairs:
         sym_maps = data_maps.get(sym, {})
@@ -705,7 +732,7 @@ def _compute_diversity_corr(
             if tf == _BASE_TF:
                 tf_close_at_base[tf] = base_rets
                 continue
-            alias = _RESAMPLE_ALIAS.get(tf, tf)
+            alias = resample_alias(tf)
             src_df = None
             for candidate in (tf, "1h", "4h"):
                 if candidate in sym_maps:
@@ -782,3 +809,69 @@ def select_tf_family_cells(
 
     selected.sort(key=lambda c: (-c.ic_tstat_hac, -c.net_edge_bps))
     return tuple(selected)
+
+
+def summarize_tf_probe_gate_audit(
+    manifest: TfProbeManifest,
+    *,
+    min_ic_tstat: float = 2.0,
+    require_fdr: bool = True,
+    min_net_edge_bps: float = 0.0,
+    min_fold_sign_consistency: float = 0.75,
+) -> tuple[TfProbeGateAuditRow, ...]:
+    """Summarize TF probe gate survivorship and first-failure reasons."""
+
+    rows: list[TfProbeGateAuditRow] = []
+    cells_by_tf: dict[str, list[TfCellEvidence]] = {tf: [] for tf in manifest.tf_grid}
+    for cell in manifest.cells:
+        cells_by_tf.setdefault(cell.tf, []).append(cell)
+
+    for tf in manifest.tf_grid:
+        tf_cells = cells_by_tf.get(tf, [])
+        pass_tstat = 0
+        pass_fdr = 0
+        pass_net_edge = 0
+        pass_fold_consistency = 0
+        winning = 0
+        fail_reasons: Counter[str] = Counter()
+
+        for cell in tf_cells:
+            if cell.ic_tstat_hac < min_ic_tstat:
+                fail_reasons["tstat"] += 1
+                continue
+            pass_tstat += 1
+
+            if require_fdr and not cell.passed_fdr:
+                fail_reasons["fdr"] += 1
+                continue
+            pass_fdr += 1
+
+            if cell.net_edge_bps < min_net_edge_bps:
+                fail_reasons["net_edge"] += 1
+                continue
+            pass_net_edge += 1
+
+            if cell.ic_fold_sign_consistency < min_fold_sign_consistency:
+                fail_reasons["fold_consistency"] += 1
+                continue
+            pass_fold_consistency += 1
+            winning += 1
+
+        top_fail_reason = "-"
+        if fail_reasons:
+            top_fail_reason = fail_reasons.most_common(1)[0][0]
+
+        rows.append(
+            TfProbeGateAuditRow(
+                tf=tf,
+                computed=len(tf_cells),
+                pass_tstat=pass_tstat,
+                pass_fdr=pass_fdr,
+                pass_net_edge=pass_net_edge,
+                pass_fold_consistency=pass_fold_consistency,
+                winning=winning,
+                top_fail_reason=top_fail_reason,
+            )
+        )
+
+    return tuple(rows)

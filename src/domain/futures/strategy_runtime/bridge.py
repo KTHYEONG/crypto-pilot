@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+
+from src.domain.futures.strategy.timeframe_contracts import select_probe_source_tf as _shared_select_probe_source_tf
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -33,7 +36,47 @@ _HPB_BRIDGE: dict[str, float] = {
     "8h": 8.0,
     "12h": 12.0,
 }
-_PROBE_SOURCE_TFS: tuple[str, ...] = ("1m", "5m", "15m", "30m", "1h", "4h")
+
+
+def _fit_table_cell(value: str, width: int) -> str:
+    """Fit a cell to width without breaking the ASCII table border."""
+    text = value.replace("\n", " ")
+    if len(text) <= width:
+        return text
+    if width <= 3:
+        return text[:width]
+    return f"{text[: width - 3]}..."
+
+
+def _log_ascii_table(
+    title: str,
+    headers: Sequence[str],
+    rows: Sequence[Sequence[str]],
+    widths: Sequence[int],
+) -> None:
+    """Emit a fixed-width ASCII table using the repo's audit-log style."""
+    border = sum(widths) + (3 * len(widths)) + 1
+    _logger.info("\n%s", title)
+    _logger.info("-" * border)
+    _logger.info(
+        "| "
+        + " | ".join(
+            f"{_fit_table_cell(header, width):<{width}}"
+            for header, width in zip(headers, widths, strict=True)
+        )
+        + " |"
+    )
+    _logger.info("-" * border)
+    for row in rows:
+        _logger.info(
+            "| "
+            + " | ".join(
+                f"{_fit_table_cell(cell, width):<{width}}"
+                for cell, width in zip(row, widths, strict=True)
+            )
+            + " |"
+        )
+    _logger.info("-" * border)
 
 
 def _project_panel_to_base_grid(
@@ -150,25 +193,20 @@ def _project_panel_to_base_grid(
 
 def _select_probe_source_tf(sym_maps: Mapping[str, Any], target_tf: str) -> str | None:
     """Select the finest available source timeframe for a target probe TF."""
-    target_hpb = _HPB_BRIDGE.get(target_tf)
-    if target_hpb is None:
-        return None
-    for candidate_tf in (*_PROBE_SOURCE_TFS, target_tf):
-        candidate_hpb = _HPB_BRIDGE.get(candidate_tf)
-        if candidate_hpb is None or candidate_hpb > target_hpb:
-            continue
-        if candidate_tf in sym_maps:
-            return candidate_tf
-    return None
+    return _shared_select_probe_source_tf(sym_maps, target_tf)
 
 
 def _resample_probe_source_frame(frame: pd.DataFrame, *, target_tf: str) -> pd.DataFrame:
     """Resample a cached source frame into a virtual probe timeframe."""
     prepared = frame.copy()
     if "datetime" not in prepared.columns:
+        prepared = prepared.reset_index()
+        if "datetime" not in prepared.columns and len(prepared.columns) > 0:
+            prepared = prepared.rename(columns={str(prepared.columns[0]): "datetime"})
+    if "datetime" not in prepared.columns:
         raise ValueError("datetime column missing in probe source frame")
     prepared["datetime"] = pd.to_datetime(prepared["datetime"], utc=True, errors="coerce")
-    prepared = prepared.dropna(subset=["datetime"]).sort_values("datetime")
+    prepared = prepared.dropna(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
     prepared = prepared.set_index("datetime")
     agg: dict[str, str] = {
         "open": "first",
@@ -289,11 +327,17 @@ def _build_probe_extra_panels(
         return ()
 
     extra: list[CandidateSignalPanel] = []
+    audit_rows: list[list[str]] = []
     base_datetimes = aligned_base.datetimes
     base_guard = _base_probe_guard_mask(aligned_base)
 
     for tf_i in non_base_tfs:
         winning_keys = {(c.family, c.variant) for c in probe_cells if c.tf == tf_i}
+        source_mix: Counter[str] = Counter()
+        for symbol in symbols:
+            source_tf = _select_probe_source_tf(data_maps.get(symbol, {}), tf_i)
+            if source_tf is not None:
+                source_mix[source_tf] += 1
         tf_maps = _build_virtual_probe_tf_maps(data_maps, symbols, tf_i)
         if not tf_maps:
             _logger.warning("[TF-PROBE] no source data available for tf=%s", tf_i)
@@ -305,7 +349,12 @@ def _build_probe_extra_panels(
             continue
         try:
             cfg_i = dataclasses.replace(base_cfg, timeframe=tf_i)
-            panels_i = build_rule_signal_panels(aligned=aligned_i, cfg=cfg_i)
+            panels_i = build_rule_signal_panels(
+                aligned=aligned_i,
+                cfg=cfg_i,
+                normalize_time_horizon=True,
+                horizon_base_tf="4h",
+            )
         except Exception as exc:
             _logger.warning("[TF-PROBE] build_rule_signal_panels failed tf=%s: %s", tf_i, exc)
             continue
@@ -328,6 +377,23 @@ def _build_probe_extra_panels(
                     tf_i,
                     exc,
                 )
+        projected_count = sum(1 for panel in extra if panel.variant.endswith(f"_{tf_i}"))
+        audit_rows.append(
+            [
+                tf_i,
+                str(len(tf_maps)),
+                str(len(winning_keys)),
+                str(projected_count),
+                ", ".join(f"{name}:{count}" for name, count in source_mix.most_common(2)) or "-",
+            ]
+        )
+    if audit_rows:
+        _log_ascii_table(
+            "[TF-PROBE AUDIT] BRIDGE INJECTION",
+            ("TF", "Symbols", "Winning Keys", "Projected", "Source Mix"),
+            audit_rows,
+            (8, 10, 14, 12, 36),
+        )
     return tuple(extra)
 
 
