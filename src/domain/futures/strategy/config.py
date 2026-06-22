@@ -383,7 +383,7 @@ class CandidateStrategyConfig:
     # TF-Specific Signal Pools
     per_tf_candidate_families: dict[str, tuple[str, ...]] | None = None
     per_family_params: dict[str, dict[str, Any]] | None = None
-    per_tf_signal_pool_enabled: bool = False
+    per_tf_signal_pool_enabled: bool = True
     # Execution cost model (SSOT; replaces flat 24bps)
     maker_fee_bps: float = 2.0
     taker_fee_bps: float = 5.0
@@ -410,7 +410,7 @@ class CandidateStrategyConfig:
     l1_pair_min_incremental_bps: float = 0.0
     l1_pair_min_incremental_tstat: float = 1.96
     l1_pair_min_positive_fold_ratio: float = 0.60
-    l1_pair_fdr_alpha: float = 0.10
+    l1_pair_fdr_alpha: float = 0.15
     l1_breakeven_floor_bps: float = _DEFAULT_RT_BPS  # = ExecutionCostModel.round_trip_bps() ≈ 7.5bps
     l1_fdr_hard_reject: bool = True           # q>alpha → hard reject (binding FDR)
     l1_conviction_metric: str = "prob_positive"  # "prob_positive" or "lcb_net_bps"
@@ -447,7 +447,7 @@ class CandidateStrategyConfig:
     l1_probe_lcb_pooled: bool = True
     l1_quality_weight_enabled: bool = True
     # ── L1 Gate Fairness ──
-    l1_qw_floor: float = 0.0
+    l1_qw_floor: float = 0.05
     l1_qw_probe_boost: float = 0.3
     per_tf_gate_overrides: dict[str, dict[str, float]] | None = None
     per_tf_gate_enabled: bool = False
@@ -956,7 +956,6 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "residual_reversion",
         "funding_carry",
         "flow_exhaustion_reversal",
-        "trend_ma",
         "btc_regime_pullback",
         "funding_zscore_carry",
     ),
@@ -1073,9 +1072,14 @@ def apply_tf_gate_overrides(
     If no overrides exist for the given TF, returns the original config.
     """
     import dataclasses
-    if cfg.per_tf_gate_overrides is None or tf not in cfg.per_tf_gate_overrides:
+    overrides_map = (
+        cfg.per_tf_gate_overrides
+        if cfg.per_tf_gate_overrides is not None
+        else _DEFAULT_PER_TF_GATE_OVERRIDES
+    )
+    if tf not in overrides_map:
         return cfg
-    overrides = cfg.per_tf_gate_overrides[tf]
+    overrides = overrides_map[tf]
     valid_overrides = {k: v for k, v in overrides.items() if hasattr(cfg, k)}
     if not valid_overrides:
         return cfg
@@ -1092,6 +1096,8 @@ def resolve_tf_signal_pool(
     """
     if cfg.per_tf_candidate_families and tf in cfg.per_tf_candidate_families:
         return cfg.per_tf_candidate_families[tf]
+    if getattr(cfg, "per_tf_signal_pool_enabled", False):
+        return _DEFAULT_PER_TF_FAMILIES.get(tf, cfg.candidate_families)
     return cfg.candidate_families
 
 
