@@ -128,11 +128,11 @@ def align_data_maps(
     close_2d: NDArray[np.float64] = np.zeros((eff_len, n), dtype=np.float64)
     volume_2d: NDArray[np.float64] = np.zeros((eff_len, n), dtype=np.float64)
     funding_2d: NDArray[np.float64] = np.zeros((eff_len, n), dtype=np.float64)
-    basis_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
-    oi_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
-    lsr_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
-    taker_buy_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
-    trades_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
+    basis_2d: NDArray[np.float64] | None = None
+    oi_2d: NDArray[np.float64] | None = None
+    lsr_2d: NDArray[np.float64] | None = None
+    taker_buy_2d: NDArray[np.float64] | None = None
+    trades_2d: NDArray[np.float64] | None = None
     adv_usdt_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
     execution_cost_bps_2d: NDArray[np.float64] = np.full((eff_len, n), np.nan, dtype=np.float64)
     active_mask: NDArray[np.bool_] = np.ones((eff_len, n), dtype=bool)
@@ -180,25 +180,33 @@ def align_data_maps(
             )
         elif "funding_rate" in frame.columns:
             funding_2d[:, col] = frame["funding_rate"].iloc[start:end].to_numpy(dtype=np.float64)
-        if "basis" in frame.columns:
-            basis_2d[:, col] = frame["basis"].iloc[start:end].to_numpy(dtype=np.float64)
-        elif "basis_rate" in frame.columns:
-            basis_2d[:, col] = frame["basis_rate"].iloc[start:end].to_numpy(dtype=np.float64)
-        if "sum_open_interest" in frame.columns:
-            oi_2d[:, col] = frame["sum_open_interest"].iloc[start:end].to_numpy(dtype=np.float64)
-        elif "open_interest" in frame.columns:
-            oi_2d[:, col] = frame["open_interest"].iloc[start:end].to_numpy(dtype=np.float64)
-        elif "oi" in frame.columns:
-            oi_2d[:, col] = frame["oi"].iloc[start:end].to_numpy(dtype=np.float64)
-        if "long_short_ratio" in frame.columns:
-            lsr_2d[:, col] = frame["long_short_ratio"].iloc[start:end].to_numpy(dtype=np.float64)
-        elif "global_long_short_ratio" in frame.columns:
-            lsr_2d[:, col] = frame["global_long_short_ratio"].iloc[start:end].to_numpy(dtype=np.float64)
-        if "taker_buy_base" in frame.columns:
-            taker_buy_2d[:, col] = frame["taker_buy_base"].iloc[start:end].to_numpy(dtype=np.float64)
-        elif "taker_buy_quote" in frame.columns:
-            taker_buy_2d[:, col] = frame["taker_buy_quote"].iloc[start:end].to_numpy(dtype=np.float64)
+        if "basis" in frame.columns or "basis_rate" in frame.columns:
+            if basis_2d is None:
+                basis_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
+            col_name = "basis" if "basis" in frame.columns else "basis_rate"
+            basis_2d[:, col] = frame[col_name].iloc[start:end].to_numpy(dtype=np.float64)
+        if "sum_open_interest" in frame.columns or "open_interest" in frame.columns or "oi" in frame.columns:
+            if oi_2d is None:
+                oi_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
+            col_name = (
+                "sum_open_interest"
+                if "sum_open_interest" in frame.columns
+                else ("open_interest" if "open_interest" in frame.columns else "oi")
+            )
+            oi_2d[:, col] = frame[col_name].iloc[start:end].to_numpy(dtype=np.float64)
+        if "long_short_ratio" in frame.columns or "global_long_short_ratio" in frame.columns:
+            if lsr_2d is None:
+                lsr_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
+            col_name = "long_short_ratio" if "long_short_ratio" in frame.columns else "global_long_short_ratio"
+            lsr_2d[:, col] = frame[col_name].iloc[start:end].to_numpy(dtype=np.float64)
+        if "taker_buy_base" in frame.columns or "taker_buy_quote" in frame.columns:
+            if taker_buy_2d is None:
+                taker_buy_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
+            col_name = "taker_buy_base" if "taker_buy_base" in frame.columns else "taker_buy_quote"
+            taker_buy_2d[:, col] = frame[col_name].iloc[start:end].to_numpy(dtype=np.float64)
         if "trades" in frame.columns:
+            if trades_2d is None:
+                trades_2d = np.full((eff_len, n), np.nan, dtype=np.float64)
             trades_2d[:, col] = frame["trades"].iloc[start:end].to_numpy(dtype=np.float64)
         if "adv_usdt" in frame.columns:
             adv_usdt_2d[:, col] = frame["adv_usdt"].iloc[start:end].to_numpy(dtype=np.float64)

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
+    from src.domain.futures.optimization.workflow import TieredContext
     from src.domain.futures.strategy.regime_evaluation import RegimeScoreCard
     from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result
     from src.domain.futures.strategy.timeframe_probe import TfCellEvidence, TfProbeManifest
@@ -98,6 +99,17 @@ from src.domain.futures.universe import UniverseSnapshot
 from src.domain.futures.universe.contracts import UniverseStateCube
 from src.domain.futures.universe.membership import inject_membership_masks_into_maps
 from src.domain.futures.universe.storage import run_historical_sync
+
+_GLOBAL_L2_CTX: TieredContext | None = None
+
+
+def _evaluate_l2_trial_from_global(params: dict[str, Any]) -> tuple[float, dict[str, Any], float]:
+    """Fork-safe L2 trial evaluator reading context from module global."""
+    if _GLOBAL_L2_CTX is None:
+        raise ValueError("Global L2 context is not initialized")
+    from src.domain.futures.optimization.workflow import _evaluate_l2_params
+    return _evaluate_l2_params(params, _GLOBAL_L2_CTX)
+
 
 _logger = setup_logger("opt_main_futures", write_file=False)
 
@@ -1233,6 +1245,7 @@ def _run_tiered_l2_study(
     tf: str,
     n_trials: int,
     seed: int,
+    l2_sim_cache: Any = None,
 ) -> Any:
     """Optuna objective_l2_growth로 best l2_params 탐색."""
     import warnings
@@ -1262,7 +1275,8 @@ def _run_tiered_l2_study(
     )
     from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
 
-    l2_sim_cache = build_l2_simulation_cache(aligned, signal_batch, tf)
+    if l2_sim_cache is None:
+        l2_sim_cache = build_l2_simulation_cache(aligned, signal_batch, tf)
     _logger.debug("[MEM] stage=l2_sim_cache rss=%.0fMB", _get_rss_mb())
 
     ctx = TieredContext(
@@ -1365,7 +1379,19 @@ def _run_tiered_l2_study(
 
         progress_cb = L2OptunaProgressCallback(n_trials)
         try:
-            batch_size = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_BATCH_SIZE", 4))
+            import psutil
+            batch_size = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_BATCH_SIZE", 2))
+            try:
+                avail_mem_gb = psutil.virtual_memory().available / (1024.0 ** 3)
+                if avail_mem_gb < 3.0 and batch_size > 1:
+                    _logger.warning(
+                        "[L2-OPT] Low system memory (%.2f GB < 3.0 GB). Forcing sequential n_jobs=1 for OOM safety.",
+                        avail_mem_gb,
+                    )
+                    batch_size = 1
+            except Exception as _mem_err:
+                _logger.warning("[L2-OPT] Failed to check system memory: %s", _mem_err)
+
             if batch_size <= 1:
                 study.optimize(
                     lambda trial: objective_l2_growth(trial, ctx),
@@ -1379,64 +1405,70 @@ def _run_tiered_l2_study(
                 from concurrent.futures import ProcessPoolExecutor
 
                 from src.domain.futures.optimization.workflow import (
-                    _evaluate_l2_params,
                     suggest_layered_params,
                 )
                 
                 max_workers = min(batch_size, multiprocessing.cpu_count())
                 
-                with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                    trial_idx = len([t for t in study.trials if t.state.is_finished()])
-                    while trial_idx < n_trials:
-                        current_batch = min(batch_size, n_trials - trial_idx)
-                        batch_trials = []
-                        batch_params = []
-                        
-                        _mem_batch_start = _get_rss_mb()
-                        
-                        for _ in range(current_batch):
-                            trial = study.ask()
-                            batch_trials.append(trial)
-                            params = suggest_layered_params(trial, "L2", fixed=ctx.fixed_l1_params)
-                            batch_params.append(params)
+                global _GLOBAL_L2_CTX
+                _GLOBAL_L2_CTX = ctx
+                
+                try:
+                    mp_ctx = multiprocessing.get_context("fork")
+                    with ProcessPoolExecutor(max_workers=max_workers, mp_context=mp_ctx) as executor:
+                        trial_idx = len([t for t in study.trials if t.state.is_finished()])
+                        while trial_idx < n_trials:
+                            current_batch = min(batch_size, n_trials - trial_idx)
+                            batch_trials = []
+                            batch_params = []
                             
-                        # Submit evaluations in parallel
-                        futures = [
-                            executor.submit(_evaluate_l2_params, params, ctx)
-                            for params in batch_params
-                        ]
-                        
-                        # Wait for results and tell in deterministic sorted order
-                        for trial, future in zip(batch_trials, futures, strict=False):
-                            try:
-                                value, attrs, t_elapsed = future.result()
-                            except Exception as exc:
-                                _logger.error(
-                                    "[L2-OPT] Subprocess trial %d failed: %s",
+                            _mem_batch_start = _get_rss_mb()
+                            
+                            for _ in range(current_batch):
+                                trial = study.ask()
+                                batch_trials.append(trial)
+                                params = suggest_layered_params(trial, "L2", fixed=ctx.fixed_l1_params)
+                                batch_params.append(params)
+                                
+                            # Submit evaluations in parallel
+                            futures = [
+                                executor.submit(_evaluate_l2_trial_from_global, params)
+                                for params in batch_params
+                            ]
+                            
+                            # Wait for results and tell in deterministic sorted order
+                            for trial, future in zip(batch_trials, futures, strict=False):
+                                try:
+                                    value, attrs, t_elapsed = future.result()
+                                except Exception as exc:
+                                    _logger.error(
+                                        "[L2-OPT] Subprocess trial %d failed: %s",
+                                        trial.number,
+                                        exc,
+                                    )
+                                    value = -1e6
+                                    attrs = {}
+                                    t_elapsed = 0.0
+                                    
+                                for k, v in attrs.items():
+                                    trial.set_user_attr(k, v)
+                                    
+                                study.tell(trial, value)
+                                
+                                _logger.log(
+                                    logging.DEBUG,
+                                    "[perf-optuna] Trial %d evaluate_l2_trial took %.4fs | Objective: %.6f",
                                     trial.number,
-                                    exc,
+                                    t_elapsed,
+                                    value,
                                 )
-                                value = -1e6
-                                attrs = {}
-                                t_elapsed = 0.0
-                                
-                            for k, v in attrs.items():
-                                trial.set_user_attr(k, v)
-                                
-                            study.tell(trial, value)
+                                progress_cb(study, trial, value=value)
+                                trial_idx += 1
                             
-                            _logger.log(
-                                logging.DEBUG,
-                                "[perf-optuna] Trial %d evaluate_l2_trial took %.4fs | Objective: %.6f",
-                                trial.number,
-                                t_elapsed,
-                                value,
-                            )
-                            progress_cb(study, trial, value=value)
-                            trial_idx += 1
-                        
-                        gc.collect()
-                        _log_mem("l2_optuna_batch", _mem_batch_start, extra=f"trial_idx={trial_idx}/{n_trials}")
+                            gc.collect()
+                            _log_mem("l2_optuna_batch", _mem_batch_start, extra=f"trial_idx={trial_idx}/{n_trials}")
+                finally:
+                    _GLOBAL_L2_CTX = None
         finally:
             progress_cb.pbar.close()
     except Exception as exc:
@@ -1494,6 +1526,7 @@ def _run_tiered_l2_study(
             oos_end=ho_start_idx_l2,
         ),)
 
+    gc.collect()
     _logger.debug("[MEM] stage=l2_study_complete rss=%.0fMB", _get_rss_mb())
     _min_dsr = float(OPT_FUTURES_CONFIG.get("FUTURES_L2_MIN_DSR", 0.60))
     
@@ -1511,6 +1544,7 @@ def _run_tiered_l2_study(
     )
     
     _log_mem("select_layer2_champion", _mem_champ_before, extra=f"took={time.perf_counter() - _t_champ_start:.4f}s")
+    gc.collect()
 
     if l2_study_result.blocker_reason == "" and l2_study_result.best_evaluation is not None:
         updated = update_champion_store(
@@ -1587,6 +1621,15 @@ def _run_strategy_stage(
     strategy_steps["map_pick"] = time.perf_counter() - t_step
     full_strategy_maps = strategy_maps
     
+    if run_config.phase in ("l1", "l2"):
+        _mem_before = _get_rss_mb()
+        if hasattr(data_stage, "data_maps") and isinstance(data_stage.data_maps, dict):
+            data_stage.data_maps.clear()
+        if hasattr(data_stage, "oos_data_maps") and isinstance(data_stage.oos_data_maps, dict):
+            data_stage.oos_data_maps.clear()
+        gc.collect()
+        _log_mem("data_stage_early_release", _mem_before)
+
     _logger.info(format_layer_header(1, "Signal Robustness & Ensemble Verification"))
 
     if universe_snapshot is not None:
@@ -1816,6 +1859,15 @@ def _run_strategy_stage(
             _log_mem("l2_signal_batch", _mem_l2_start, extra=f"took={time.perf_counter() - _t_l2_pred_start:.4f}s")
 
             # ── Step D: Optuna L2 파라미터 탐색 ──────────────────────────────
+            from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+            _t_cache_start = time.perf_counter()
+            shared_l2_cache = build_l2_simulation_cache(aligned_tiered, l2_signals, run_config.timeframe)
+            _logger.log(
+                PERF,
+                "[PERF] prebuilt l2_sim_cache took=%.4fs",
+                time.perf_counter() - _t_cache_start,
+            )
+            
             _seed = int(run_config.seed) if hasattr(run_config, "seed") else 42
             n_l2_trials = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_TRIALS", 50))
             _mem_l2_study = _get_rss_mb()
@@ -1829,6 +1881,7 @@ def _run_strategy_stage(
                 tf=run_config.timeframe,
                 n_trials=n_l2_trials,
                 seed=_seed,
+                l2_sim_cache=shared_l2_cache,
             )
             _log_mem(
                 "l2_optuna_study",
@@ -1859,6 +1912,7 @@ def _run_strategy_stage(
                 l1_result_override=l1_res,
                 verbose=True,  # 최종 실행시 상세 결과 출력
                 override_dsr=l2_study_result.dsr,
+                l2_sim_cache=shared_l2_cache,
             )
             
             _log_mem("l2_final_pipeline", _mem_l2_final, extra=f"took={time.perf_counter() - _t_l2_final_start:.4f}s")
