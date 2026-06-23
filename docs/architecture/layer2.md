@@ -77,7 +77,7 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
 
 - **Step A (L1 Valid)**: Pipeline targets `l1`. Early exit if blocked.
 - **Step B (L2 Prep)**: Causal signal batch from L1.
-- **Step C (L2 Study)**: TPESampler maximizes Sortino_HAC_unit (200 trials, V9 9-param). Hard gates only (no soft penalty). Deterministic batch parallel via `ProcessPoolExecutor` (ask→eval→tell sequential). Champion blocked if `blocker_reason != ""`.
+- **Step C (L2 Study)**: TPESampler maximizes Sortino_HAC_unit (200 trials, V9 9-param). Hard gates only (no soft penalty). Deterministic batch parallel via `ProcessPoolExecutor` (ask→eval→tell sequential) uses fork-safe global context with `L2_OPTUNA_BATCH_SIZE=2` by default, which dynamically falls back to 1 (sequential) if available memory drops below 3.0 GB to prevent WSL OOM. Champion blocked if `blocker_reason != ""`.
 - **Step C-Post (Phase B)**: `calibrate_deployment_leverage` post-champion — no extra Optuna trials.
 - **Step D (L3 Eval)**: Holdout with deployed leverage.
 
