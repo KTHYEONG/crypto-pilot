@@ -39,7 +39,7 @@ STRATEGY ENGINE
   ├─ Symbols : 52/57 Admitted
   └─ Details : Base 57 | Dropped 5 (late_start: 5)
 🧬 [L1: MULTI-TF PANEL INJECTION]
-  └─ Active : [8h] Proj=13 Syms=52 | [12h] Proj=14 Syms=52 | [6h] Proj=13 Syms=52
+  └─ Active : [6h] Proj=13 Syms=52 | [12h] Proj=14 Syms=52 | [8h] Proj=13 Syms=52
 
 ● [DATA-INTEGRITY AUDIT]
 ──────────────────────────────────────────────────────────────────────────────
@@ -225,4 +225,47 @@ STRATEGY ENGINE
   L1     2023-04-01 ~ 2024-09-30           52     0 /  49.0 / 52               0       6  —
 ──────────────────────────────────────────────────────────────────────────────
 
-[TIERED] Phase=l1 — stopping after L1 (not a multilayer phase)
+
+>> LAYER 1: PASS -> Proceeding to Layer 2.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+● [LAYER 2: OPTUNA TUNING]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ● [STUDY] l2_study_4h_084c261a1672 | trials=200 | events=67063 | symbols=42
+  ────────────────────────────────────────────────────────────────────────────
+[L2-OPT]: 100%|████████████████████████████████████████████████████| 200/200 [04:48<00:00,  1.44s/it, Best CAGR: 21.43% | Current: -4.46%]
+[L2-SELECTION] No feasible candidate found within fallback window (reason=cagr)
+  ● [FINAL SIMULATION]
+[L2-DEPLOY] L*=1.0000 binding=mdd | CAGR=-0.1449 MDD=0.3651 CVaR95=0.0149 RiskUtil=1.217
+[L2-DEPLOY] realization gap: risk_util=1.217 expected≈0.700 (결함 #1/#2 재발 의심 — vol-targeting 또는 gross 제약 확인 요망)
+● [LAYER 2 PORTFOLIO SCORECARD] (2024-12-22 ~ 2025-09-30)
+──────────────────────────────────────────────────────────────────────────────
+  STATUS  : ❌ BLOCKED (cagr)
+
+  ❌ [Growth    ] CAGR: -14.5% (>=30.0%) | PnL: -21.5% | Equity x0.79
+  ❌ [Efficiency] Sharpe: -0.676 (>=1.000) | Sortino: -0.926 (>=1.500) | Calmar: n/a(loss) (>=1.000)
+  ❌ [Risk      ] MDD: 36.5% (<=30.0%) | CVaR95: 1.5% (<=6.0%) | RiskUtil: 121.7%
+  ❌ [Robust    ] Fold: 33.3% (>=60.0%) | Trades: 285 (>=30) | Friction: 96.1%
+  ❌ [Uplift    ] Sharpe Uplift: +0.00 (>=+0.20)
+  ❌ [Integrity ] DSR: 0.404 (>=0.60) | PSR: 0.200 (diag)
+  [Diag     ] RelMDD: 1.02x | Turnover: 0.330
+──────────────────────────────────────────────────────────────────────────────
+
+  [ FOLD DETAIL BREAKDOWN ]
+  ──────────────────────────────────────────────────────────────────────────
+  ├─ Fold #1 : ❌ Sharpe: -1.671 | CAGR:   -27.1% | MDD:  27.8% | Status: FAIL | Period: 2024-12-22 ~ 2025-03-26
+       Symbols: 22 [1000SHIBUSDT, ADAUSDT, AXSUSDT, BCHUSDT, BNBUSDT, BTCUSDT, DOTUSDT, ENSUSDT, +14 more]
+  ├─ Fold #2 : ✅ Sharpe:  0.304 | CAGR:    +2.3% | MDD:  11.8% | Status: PASS | Period: 2025-03-26 ~ 2025-06-28
+       Symbols: 22 [1000SHIBUSDT, ATOMUSDT, AXSUSDT, BCHUSDT, BNBUSDT, BTCUSDT, DOTUSDT, ENSUSDT, +14 more]
+  └─ Fold #3 : ❌ Sharpe: -1.355 | CAGR:   -16.1% | MDD:  14.4% | Status: FAIL | Period: 2025-06-28 ~ 2025-09-30
+       Symbols: 23 [1000SHIBUSDT, AAVEUSDT, AVAXUSDT, AXSUSDT, BCHUSDT, BNBUSDT, BTCUSDT, DOTUSDT, +15 more]
+
+● [LAYER UNIVERSE AUDIT]
+──────────────────────────────────────────────────────────────────────────────
+  LAYER  WINDOW RANGE                    SYMS   ACTIVE (min/med/max)       ENTRY    KILL  WARNINGS
+  ─────  ──────────────────────────────  ────   ────────────────────  ──────────  ──────  ────────
+  L2     2024-10-01 ~ 2025-09-30           52    35 /  38.0 / 43             552      19  entry_block_spike
+──────────────────────────────────────────────────────────────────────────────
+
+>> LAYER 2: BLOCKED -> gate_passed=False
+!! FAIL: exit_code=1 reason=layer2_blocked:cagr
