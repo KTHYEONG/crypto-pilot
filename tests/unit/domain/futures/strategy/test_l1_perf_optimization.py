@@ -357,3 +357,170 @@ def test_audit_tables_timer_excludes_inference(
     else:
         # gate_passed=False 경로: inference 없음, audit_tables는 테이블 포맷 시간만(≈0s)
         assert audit_took < 1.0, f"audit_tables 시간이 너무 큼: {audit_took:.4f}s"
+
+
+# ─── P0: resolve_safe_nested_workers worker 계산 검증 ──────────────────────────
+
+def test_resolve_safe_nested_workers_memory_estimate() -> None:
+    """P0: 500MB frame, 8GB available → workers >= 2 (was 1 with old formula)."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import resolve_safe_nested_workers
+    with patch("psutil.virtual_memory") as mock_mem:
+        mock_mem.return_value.available = 8 * 1024 ** 3  # 8 GB
+        result = resolve_safe_nested_workers(n_tasks=16, frame_memory_bytes=500 * 1024 ** 2)
+    assert result >= 2, f"Expected >=2 workers with 8GB/500MB frame, got {result}"
+    assert result <= 16, "Should not exceed n_tasks"
+
+
+def test_resolve_safe_nested_workers_pinned() -> None:
+    """P0: pinned=2 → 정확히 2 worker 반환."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import resolve_safe_nested_workers
+    result = resolve_safe_nested_workers(n_tasks=16, frame_memory_bytes=1_000_000_000, pinned=2)
+    assert result == 2, f"Expected 2 workers (pinned), got {result}"
+
+
+# ─── P3: defer_artifact=True 경로 검증 ─────────────────────────────────────────
+
+def test_run_l1_nested_swf_defer_artifact_skips_inference(
+    aligned_mock: Any, cfg_mock: Any, caplog: Any
+) -> None:
+    """P3: defer_artifact=True 시 inference_artifact=None."""
+    import concurrent.futures
+
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_l1_nested_swf
+
+    def empty_fold_out_fn(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            fit_status="trained",
+            timing_profile=dict.fromkeys(
+                ("schema", "dataset_fit", "dataset_early_stop", "dataset_calibration_fit",
+                 "dataset_calibration_eval", "dataset_oos", "edge_fit", "inference", "selection"), 0.01
+            ),
+            model_output=SimpleNamespace(
+                events=pd.DataFrame(),
+                expected_gross_bps=np.zeros((0,), dtype=np.float64),
+                expected_net_bps=np.zeros((0,), dtype=np.float64),
+                q10_gross_bps=np.zeros((0,), dtype=np.float64),
+                q90_gross_bps=np.zeros((0,), dtype=np.float64),
+                q10_net_bps=np.zeros((0,), dtype=np.float64),
+                q90_net_bps=np.zeros((0,), dtype=np.float64),
+            ),
+            oos_set=SimpleNamespace(
+                edge_weight=np.zeros((0,), dtype=np.float64),
+                y_return_bps=np.zeros((0,), dtype=np.float64),
+            ),
+        )
+
+    class SafeThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+        def __init__(self, *args: Any, mp_context: Any = None, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+
+    _fit = "src.domain.futures.strategy.candidate_workflow._fit_and_predict_single_fold"
+    _gate = "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_gate_table"
+    _outer_fmt = "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_outer_fold_table"
+    _deploy_fmt = "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_deployment_registry_table"
+    outer_folds = (WFFold(0, 4, 4, 6, 6, 10),)
+    with (
+        patch("src.domain.futures.strategy.config.resolve_purge_and_embargo_bars", return_value=(1, 0)),
+        patch("src.domain.futures.strategy.tiered_workflow.build_l1_swf_folds", return_value=()),
+        patch(_fit, side_effect=empty_fold_out_fn),
+        patch("concurrent.futures.ProcessPoolExecutor", new=SafeThreadPoolExecutor),
+        patch(_gate, return_value="gate"),
+        patch(_outer_fmt, return_value="outer"),
+        patch(_deploy_fmt, return_value="reg"),
+        caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"),
+    ):
+        result = run_l1_nested_swf(
+                labeled_events=pd.DataFrame(),
+                aligned=aligned_mock,
+                outer_folds=outer_folds,
+                cfg=cfg_mock,
+                seed=3,
+                defer_artifact=True,
+            )
+
+    assert result.inference_artifact is None, "defer_artifact=True → inference_artifact must be None"
+    perf_logs = [r.message for r in caplog.records if "l1_fit_inference_artifact" in r.message]
+    assert len(perf_logs) == 0, "defer_artifact=True → no l1_fit_inference_artifact PERF log"
+
+
+# ─── PERF-GAP1: worker_calc PERF 로그 포맷 검증 ──────────────────────────────
+
+def test_resolve_safe_nested_workers_emits_worker_calc_perf_log(caplog: Any) -> None:
+    """PERF-GAP1: resolve_safe_nested_workers → [PERF] worker_calc 로그."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import resolve_safe_nested_workers
+
+    with patch("psutil.virtual_memory") as mock_mem:
+        mock_mem.return_value.available = 16 * 1024 ** 3
+        with caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"):
+            resolve_safe_nested_workers(n_tasks=16, frame_memory_bytes=200 * 1024 ** 2)
+
+    logs = [r.message for r in caplog.records if "worker_calc" in r.message]
+    assert len(logs) >= 1, "worker_calc PERF log must be emitted"
+    assert "[PERF]" in logs[0]
+    assert "workers=" in logs[0]
+    assert "n_tasks=16" in logs[0]
+
+
+# ─── PERF-GAP2: l1_nested_ipc_collect PERF 로그 검증 ──────────────────────────
+
+def test_l1_nested_ipc_collect_log_emitted(
+    aligned_mock: Any, cfg_mock: Any, caplog: Any
+) -> None:
+    """PERF-GAP2: run_l1_nested_swf → [PERF] l1_nested_ipc_collect 로그."""
+    import concurrent.futures
+
+    from src.domain.futures.strategy.tiered_workflow import run_l1_nested_swf
+    from src.domain.futures.strategy.walk_forward import WFFold
+
+    _empty = SimpleNamespace(
+        fit_status="trained",
+        timing_profile=dict.fromkeys(("schema", "dataset_fit", "dataset_early_stop",
+                                      "dataset_calibration_fit", "dataset_calibration_eval",
+                                      "dataset_oos", "edge_fit", "inference", "selection"), 0.01),
+        model_output=SimpleNamespace(
+            events=pd.DataFrame(),
+            expected_gross_bps=np.zeros((0,), dtype=np.float64),
+            expected_net_bps=np.zeros((0,), dtype=np.float64),
+            q10_gross_bps=np.zeros((0,), dtype=np.float64),
+            q90_gross_bps=np.zeros((0,), dtype=np.float64),
+            q10_net_bps=np.zeros((0,), dtype=np.float64),
+            q90_net_bps=np.zeros((0,), dtype=np.float64),
+        ),
+        oos_set=SimpleNamespace(
+            edge_weight=np.zeros((0,), dtype=np.float64),
+            y_return_bps=np.zeros((0,), dtype=np.float64),
+        ),
+    )
+
+    class SafeThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+        def __init__(self, *args: Any, mp_context: Any = None, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+
+    _fit2 = "src.domain.futures.strategy.candidate_workflow._fit_and_predict_single_fold"
+    _gate2 = "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_gate_table"
+    _outer_fmt2 = "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_outer_fold_table"
+    _deploy_fmt2 = "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_deployment_registry_table"
+    outer_folds = (WFFold(0, 4, 4, 6, 6, 10),)
+    with (
+        patch("src.domain.futures.strategy.config.resolve_purge_and_embargo_bars", return_value=(1, 0)),
+        patch("src.domain.futures.strategy.tiered_workflow.build_l1_swf_folds", return_value=()),
+        patch(_fit2, return_value=_empty),
+        patch("concurrent.futures.ProcessPoolExecutor", new=SafeThreadPoolExecutor),
+        patch(_gate2, return_value="gate"),
+        patch(_outer_fmt2, return_value="outer"),
+        patch(_deploy_fmt2, return_value="reg"),
+        caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"),
+    ):
+        run_l1_nested_swf(
+            labeled_events=pd.DataFrame(),
+            aligned=aligned_mock,
+            outer_folds=outer_folds,
+            cfg=cfg_mock,
+            seed=3,
+        )
+
+    logs = [r.message for r in caplog.records if "l1_nested_ipc_collect" in r.message]
+    assert len(logs) >= 1, "l1_nested_ipc_collect PERF log must be emitted"
+    assert "[PERF]" in logs[0]
+    assert "n_results=" in logs[0]
+    assert "took=" in logs[0]

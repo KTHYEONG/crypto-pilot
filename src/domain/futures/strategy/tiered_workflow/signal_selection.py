@@ -731,6 +731,7 @@ def build_qualified_signal_registry(
     cfg: CandidateStrategyConfig | None = None,
     probe_prior_map: dict[tuple[str, str, str], float] | None = None,
 ) -> QualifiedSignalRegistry:
+    t_reg = time.perf_counter()
     grouped: dict[str, list[SymbolStrategyEvidence]] = defaultdict(list)
     # cfg=None → LCB gate disabled (backward compat for tests / callers without cfg)
     breakeven: float | None = (
@@ -786,6 +787,14 @@ def build_qualified_signal_registry(
         if len(items) >= min_signals_per_symbol:
             by_symbol[symbol] = items
             ready_symbols.append(symbol)
+    logger.log(
+        PERF,
+        "[PERF] l1_build_registry n_evidence=%d n_ready=%d n_symbols=%d took=%.4fs",
+        len(evidence),
+        len(ready_symbols),
+        len(symbols),
+        time.perf_counter() - t_reg,
+    )
     return QualifiedSignalRegistry(
         by_symbol=by_symbol,
         ready_symbols=tuple(ready_symbols),
@@ -1254,6 +1263,7 @@ def evaluate_layer1_readiness(
     cfg: CandidateStrategyConfig,
     seed: int = 0,
 ) -> Layer1GateReport:
+    t_gate = time.perf_counter()
     effective_symbol_count = 0.0
     probe_series: list[float] = []
     match_ratios: list[float] = []
@@ -1314,6 +1324,13 @@ def evaluate_layer1_readiness(
                 blocker=blocker,
             )
         )
+    logger.log(
+        PERF,
+        "[PERF] l1_gate_eval n_folds=%d n_passed=%d took=%.4fs",
+        len(fold_reports),
+        ready_fold_count,
+        time.perf_counter() - t_gate,
+    )
     return Layer1GateReport(
         checks=tuple(checks),
         passed=all(check.passed for check in checks),
