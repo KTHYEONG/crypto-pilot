@@ -101,6 +101,29 @@ from src.domain.futures.universe.storage import run_historical_sync
 
 _logger = setup_logger("opt_main_futures", write_file=False)
 
+
+def _get_rss_mb() -> float:
+    """Return current process RSS in MB via /proc/self/status."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return float(line.split()[1]) / 1024.0
+    except Exception:
+        return -1.0
+    return -1.0
+
+
+def _log_mem(stage: str, rss_before: float, /, *, extra: str = "") -> None:
+    """Emit debug-level memory delta log."""
+    rss_after = _get_rss_mb()
+    delta = rss_after - rss_before if rss_before > 0 and rss_after > 0 else -1.0
+    _logger.debug(
+        "[MEM] stage=%s rss=%.0fMB delta=%+.0fMB %s",
+        stage, rss_after, delta, extra,
+    )
+
+
 # Minimum bars a symbol must provide within [fetch_start, holdout_end] for tiered admission.
 # Derived from score_pct_variant_hist_window_bars default (2160) but floored at 1500 to
 # allow shorter-listed symbols that still cover the OOS window.
@@ -1207,6 +1230,7 @@ def _run_tiered_l2_study(
     from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
 
     l2_sim_cache = build_l2_simulation_cache(aligned, signal_batch, tf)
+    _logger.debug("[MEM] stage=l2_sim_cache rss=%.0fMB", _get_rss_mb())
 
     ctx = TieredContext(
         labeled_events=pd.DataFrame(),  # signal_batch에 이미 예측됨, labeles 불필요
@@ -1432,6 +1456,7 @@ def _run_tiered_l2_study(
             oos_end=ho_start_idx_l2,
         ),)
 
+    _logger.debug("[MEM] stage=l2_study_complete rss=%.0fMB", _get_rss_mb())
     _min_dsr = float(OPT_FUTURES_CONFIG.get("FUTURES_L2_MIN_DSR", 0.60))
     l2_study_result = select_layer2_champion(
         study=study,
@@ -1458,6 +1483,8 @@ def _run_tiered_l2_study(
                 l2_study_result.best_evaluation.growth_lcb_hybrid,
             )
 
+    _blocker = l2_study_result.blocker_reason or "none"
+    _logger.debug("[MEM] stage=l2_champion rss=%.0fMB blocked=%s", _get_rss_mb(), _blocker)
     return l2_study_result
 
 
@@ -1608,7 +1635,11 @@ def _run_strategy_stage(
     )
     bridge_elapsed = time.perf_counter() - t_bridge_start
     strategy_steps["bridge"] = bridge_elapsed
+    _rss_pre_gc = _get_rss_mb()
+    _logger.debug("[MEM] stage=pre_gc rss=%.0fMB", _rss_pre_gc)
     gc.collect()
+    _rss_post_gc = _get_rss_mb()
+    _logger.debug("[MEM] stage=post_gc rss=%.0fMB delta=%+.0fMB", _rss_post_gc, _rss_post_gc - _rss_pre_gc)
 
     # ─── Tiered Pipeline 분기 (bridge 완료 후 — labeled + aligned 사용 가능) ──
     if use_tiered:
@@ -1621,6 +1652,7 @@ def _run_strategy_stage(
                 run_tiered_pipeline,
             )
             _pit_state_cube = _resolve_universe_state_cube(universe_result)
+            _mem_align = _get_rss_mb()
             t_align = time.perf_counter()
             aligned_tiered = align_data_maps(
                 full_strategy_maps,
@@ -1635,6 +1667,18 @@ def _run_strategy_stage(
                 run_config.timeframe,
                 time.perf_counter() - t_align,
             )
+            _rss_align = _get_rss_mb()
+            _logger.debug(
+                "[MEM] stage=align rss=%.0fMB n_syms=%d n_bars=%d",
+                _rss_align, len(effective_trade_syms), len(aligned_tiered.datetimes),
+            )
+            _logger.debug(
+                "[MEM] stage=bridge rss=%.0fMB delta=%+.0fMB n_syms=%d",
+                _get_rss_mb(), _rss_align - _mem_align, len(bridge_trading_symbols),
+            )
+            del full_strategy_maps
+            gc.collect()
+            _logger.debug("[MEM] stage=post_align_free rss=%.0fMB", _get_rss_mb())
             if _pit_state_cube is not None:
                 _log_cube_coverage(
                     _pit_state_cube,
@@ -1692,6 +1736,7 @@ def _run_strategy_stage(
 
             # ── Step A: L1 only ──────────────────────────────────────────────
             _recognized_multilayer = {"l2", "l3"}
+            _mem_tiered_before = _get_rss_mb()
             l1_res, _, _ = run_tiered_pipeline(
                 labeled_events=labeled_tiered,
                 aligned=aligned_tiered,
@@ -1705,6 +1750,7 @@ def _run_strategy_stage(
                 verbose=True,
 
             )
+            _log_mem("tiered_pipeline", _mem_tiered_before, extra=f"phase={run_config.phase}")
             if not l1_res.gate_passed:
                 _logger.info("[TIERED] L1 BLOCKED — gate_passed=False")
                 return None
@@ -1718,13 +1764,16 @@ def _run_strategy_stage(
             _logger.info(format_layer_header(2, "OPTUNA TUNING"))
 
             # ── Step C: L2 window 신호 예측 ──────────────────────────────────
+            _mem_l2_start = _get_rss_mb()
             l2_signals = _build_l2_signal_batch(
                 l1_res, labeled_tiered, aligned_tiered, tiered_cfg, tiered_window
             )
+            _log_mem("l2_signal_batch", _mem_l2_start)
 
             # ── Step D: Optuna L2 파라미터 탐색 ──────────────────────────────
             _seed = int(run_config.seed) if hasattr(run_config, "seed") else 42
             n_l2_trials = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_TRIALS", 50))
+            _mem_l2_study = _get_rss_mb()
             l2_study_result = _run_tiered_l2_study(
                 signal_batch=l2_signals,
                 aligned=aligned_tiered,
@@ -1735,6 +1784,7 @@ def _run_strategy_stage(
                 n_trials=n_l2_trials,
                 seed=_seed,
             )
+            _log_mem("l2_optuna_study", _mem_l2_study, extra=f"trials={n_l2_trials}")
             best_l2_params = dict(getattr(l2_study_result, "best_params", {}))
 
             # ── INTEGRITY GUARD: infeasible 챔피언 L3 승격 차단 ─────────────
@@ -1742,6 +1792,7 @@ def _run_strategy_stage(
 
             # ── Step E: 최적 params + L1 override로 최종 실행 ────────────────
             from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
+            _mem_l2_final = _get_rss_mb()
             _, l2_final, _ = run_tiered_pipeline(
                 labeled_events=labeled_tiered,
                 aligned=aligned_tiered,
@@ -1757,6 +1808,7 @@ def _run_strategy_stage(
                 override_dsr=l2_study_result.dsr,
             )
             
+            _log_mem("l2_final_pipeline", _mem_l2_final)
             # Layer 2 BLOCKED 시 즉시 종료 (Step 5 optimization 진입 방지)
             if l2_final is None or not l2_final.gate_passed:
                 final_reason = l2_study_result.blocker_reason or getattr(l2_final, "blocker_reason", "unknown")
@@ -2446,6 +2498,7 @@ def run_pipeline(
 
     # Step 2) universe timeline/quality gate
     t_universe = time.perf_counter()
+    _mem_before = _get_rss_mb()
     (
         discovered_symbols,
         timeline,
@@ -2456,6 +2509,7 @@ def run_pipeline(
         _universe_result,
     ) = _run_universe_stage(run_config, window, layered_window=layered_window)
     _logger.debug("[perf] universe stage: %.4fs", time.perf_counter() - t_universe)
+    _log_mem("universe", _mem_before, extra=f"n_symbols={len(discovered_symbols)}")
 
     resolved_load_symbols = _resolve_data_collection_symbols(
         run_config=run_config,
@@ -2475,6 +2529,7 @@ def run_pipeline(
         require_exec_1m=_requires_exec_1m(run_config),
     )
     # Step 3) data loading + readiness
+    _mem_before = _get_rss_mb()
     t_data_start = time.perf_counter()
     data_stage = _run_data_stage(
         run_config,
@@ -2487,6 +2542,7 @@ def run_pipeline(
         layered_window=layered_window,
     )
     _logger.debug("[perf] data stage: %.4fs", time.perf_counter() - t_data_start)
+    _log_mem("data", _mem_before, extra=f"n_valid={len(data_stage.valid_symbols)} n_loaded={len(data_stage.data_maps)}")
 
     # Consolidate all initialization info into the System Dashboard
     from src.domain.futures.strategy.tiered_logging import format_system_context_dashboard
@@ -2528,6 +2584,7 @@ def run_pipeline(
     regime_stage_result = _run_regime_evaluation_stage(run_config, data_stage)
 
     # Step 4) strategy bridge + alpha contract
+    _mem_before = _get_rss_mb()
     t_strategy = time.perf_counter()
     strategy_out = _run_strategy_stage(
         run_config,
@@ -2539,6 +2596,7 @@ def run_pipeline(
         universe_result=_universe_result,
     )
     _logger.debug("<< STRATEGY: %.2fs", time.perf_counter() - t_strategy)
+    _log_mem("strategy", _mem_before, extra=f"use_tiered={bool(OPT_FUTURES_CONFIG.get('USE_CS_RANK_ENGINE', False))}")
 
     if isinstance(strategy_out, RunnerResult):
         return strategy_out
