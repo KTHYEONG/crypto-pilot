@@ -87,6 +87,7 @@ class Layer1Result:
     deployment_registry: QualifiedSignalRegistry | None = None
     symbol_lifecycle: tuple[SymbolLifecycleRecord, ...] = ()
     inference_artifact: Layer1InferenceArtifact | None = None
+    artifacts_by_tf: dict[str, Layer1InferenceArtifact] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,6 +387,8 @@ class Layer2AllocationConfig:
     l2_require_recent_fold_pass: bool = True
     l2_min_recent_fold_sharpe: float = 0.0
     l2_is_expansion_bars: int = 0
+    l2_sleeve_combine_method: str = "precision_weighted"
+    l2_sleeve_conviction_cap_mult: float = 1.5
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -497,6 +500,18 @@ class Layer2AllocationConfig:
                 1,
             )
         )
+        combine_method = str(params.get("l2_sleeve_combine_method", "precision_weighted"))
+        if combine_method not in {"precision_weighted", "equal", "max_edge"}:
+            raise ValueError(
+                f"l2_sleeve_combine_method must be one of precision_weighted/equal/max_edge, "
+                f"got {combine_method!r}"
+            )
+        conviction_cap_mult = cls._validate_range(
+            "l2_sleeve_conviction_cap_mult",
+            cls._as_float(params.get("l2_sleeve_conviction_cap_mult", 1.5), 1.5),
+            1.0,
+            3.0,
+        )
         return cls(
             k_rank=cls._as_int(params.get("K_RANK", 3), 3),
             rebalance_bars=cls._as_int(params.get("REBALANCE_BARS", 3), 3),
@@ -561,6 +576,8 @@ class Layer2AllocationConfig:
                 0.0,
             ),
             l2_is_expansion_bars=cls._as_int(params.get("l2_is_expansion_bars", 0), 0),
+            l2_sleeve_combine_method=combine_method,
+            l2_sleeve_conviction_cap_mult=conviction_cap_mult,
         )
 
 
@@ -579,7 +596,23 @@ class Layer2SignalSchedule:
 
 @dataclass(frozen=True)
 class L2SimulationCache:
-    """Pre-computed matrices for L2 simulation."""
+    """Pre-computed matrices for L2 simulation.
+
+    Attributes:
+        vol_matrix_2d: 변동성 행렬 [T, N].
+        tradeable_mask_2d: 거래가능 마스크 [T, N].
+        hurdle_2d: hurdle bps [T, N].
+        funding_2d: funding bps [T, N].
+        beta_1d: BTC 베타 [N].
+        expected_gross_bps_2d: sleeve 단위 gross edge [T, S].
+        expected_net_bps_2d: sleeve 단위 net edge [T, S].
+        holding_bars_2d: sleeve 단위 holding bars [T, S].
+        side_2d: sleeve 단위 방향 [T, S].
+        quality_weight_2d: sleeve 단위 quality weight [T, S].
+        signal_mask_2d: sleeve 단위 활성 마스크 [T, S].
+        sleeve_to_sym: sleeve j → symbol column idx 매핑 [S].
+        sleeve_ids: (symbol, strategy_id) 결정적 정렬 튜플 [S].
+    """
 
     vol_matrix_2d: NDArray[np.float64]
     tradeable_mask_2d: NDArray[np.bool_]
@@ -587,13 +620,17 @@ class L2SimulationCache:
     funding_2d: NDArray[np.float64]
     beta_1d: NDArray[np.float64]
 
-    # Vectorized Signal Matrices (Shape: [T, N])
+    # Vectorized Signal Matrices (Shape: [T, S] where S = n_sleeves)
     expected_gross_bps_2d: NDArray[np.float64]
     expected_net_bps_2d: NDArray[np.float64]
     holding_bars_2d: NDArray[np.float64]
     side_2d: NDArray[np.float64]
     quality_weight_2d: NDArray[np.float64]
     signal_mask_2d: NDArray[np.bool_]
+
+    # Sleeve→symbol mapping (신규, multi-TF 핵심)
+    sleeve_to_sym: NDArray[np.int64]  # [S]
+    sleeve_ids: tuple[tuple[str, str], ...]  # [S] (symbol, strategy_id)
 
 
 @dataclass(slots=True, frozen=True)
