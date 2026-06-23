@@ -529,12 +529,36 @@ def _is_cap_saturated(
 def build_l2_simulation_cache(
     aligned: AlignedMarketData,
     signal_batch: ValidatedSignalBatch,
-    tf: str
+    tf: str,
 ) -> L2SimulationCache:
+    """L2 시뮬레이션용 사전 계산 행렬 빌드 (Sleeve 차원 도입).
+
+    신호 행렬은 ``[T, S]`` (S = n_sleeves = unique (symbol, strategy_id) 수)로 구성된다.
+    같은 symbol의 복수 TF 신호가 각각 독립 sleeve에 보존되어 multi-TF edge collapse 방지.
+    심볼 단위 행렬(vol/tradeable/hurdle/funding/beta)은 ``[T, N]``으로 유지.
+
+    ``sleeve_to_sym[j]`` 를 통해 sleeve col j → symbol col 매핑이 제공된다.
+    ``_run_awf_simulation``은 이 매핑으로 ``w_sleeve[T,S] → w_sym[T,N]`` netting을 수행한다.
+
+    Args:
+        aligned: 공통 base grid AlignedMarketData.
+        signal_batch: ValidatedSignalBatch (전 TF 병합 이벤트).
+        tf: Annualization/vol lookback 기준 TF 문자열.
+
+    Returns:
+        L2SimulationCache: sleeve 차원 행렬 포함.
+
+    Time Complexity: O(T·S + E·H) where E=n_events, H=avg_holding_bars, S=n_sleeves.
+    Space Complexity: O(T·(S+N)) where N=n_sym.
+    """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
     lookback = composer_sigma_lookback_bars(tf)
     n_sym = len(aligned.symbols)
     t_max = aligned.close_2d.shape[0]
 
+    # ── Symbol-level matrices [T, N] ──────────────────────────────────────────
     vol_matrix_2d = np.full_like(aligned.close_2d, VOL_FLOOR)
     for i in range(n_sym):
         close_col = aligned.close_2d[:, i]
@@ -560,55 +584,97 @@ def build_l2_simulation_cache(
     else:
         beta_1d = np.zeros(n_sym, dtype=np.float64)
 
-    sym_to_idx = {s: i for i, s in enumerate(aligned.symbols)}
-    
-    expected_gross_bps_2d = np.zeros((t_max, n_sym), dtype=np.float64)
-    expected_net_bps_2d = np.zeros((t_max, n_sym), dtype=np.float64)
-    holding_bars_2d = np.ones((t_max, n_sym), dtype=np.float64)
-    side_2d = np.zeros((t_max, n_sym), dtype=np.float64)
-    quality_weight_2d = np.zeros((t_max, n_sym), dtype=np.float64)
-    event_strength_2d = np.zeros((t_max, n_sym), dtype=np.float64)
-    signal_mask_2d = np.zeros((t_max, n_sym), dtype=np.bool_)
+    sym_to_idx: dict[str, int] = {s: i for i, s in enumerate(aligned.symbols)}
+
+    # ── Sleeve 인덱싱 ─────────────────────────────────────────────────────────
+    # sleeve_ids: 결정적 정렬 — (symbol, strategy_id) unique 집합
+    # Shape track: sleeve_ids: [S], sleeve_to_sym: [S], 신호 행렬: [T, S]
+    sleeve_id_set: set[tuple[str, str]] = set()
+    for event in signal_batch.events:
+        if sym_to_idx.get(event.symbol) is not None:
+            sleeve_id_set.add((event.symbol, event.strategy_id))
+
+    sleeve_ids_sorted: tuple[tuple[str, str], ...] = tuple(sorted(sleeve_id_set))
+    n_sleeve = len(sleeve_ids_sorted)
+    sleeve_to_idx: dict[tuple[str, str], int] = {sid: j for j, sid in enumerate(sleeve_ids_sorted)}
+    # sleeve_to_sym[j] = symbol col idx (underlying symbol의 vol/beta 참조용)
+    sleeve_to_sym_arr: NDArray[np.int64] = np.array(
+        [sym_to_idx[sid[0]] for sid in sleeve_ids_sorted],
+        dtype=np.int64,
+    ) if n_sleeve > 0 else np.empty(0, dtype=np.int64)
+
+    _log.debug(
+        "[BUILD-CACHE] n_sym=%d n_sleeve=%d n_events=%d tf=%s",
+        n_sym, n_sleeve, len(signal_batch.events), tf,
+    )
+
+    if n_sleeve == 0:
+        # 빈 배치: 빈 [T, 0] 신호 행렬 반환, crash 없음
+        empty_t_s = np.zeros((t_max, 0), dtype=np.float64)
+        empty_t_s_bool = np.zeros((t_max, 0), dtype=np.bool_)
+        return L2SimulationCache(
+            vol_matrix_2d=vol_matrix_2d,
+            tradeable_mask_2d=tradeable_mask_2d,
+            hurdle_2d=hurdle_2d,
+            funding_2d=funding_2d,
+            beta_1d=beta_1d,
+            expected_gross_bps_2d=empty_t_s,
+            expected_net_bps_2d=empty_t_s.copy(),
+            holding_bars_2d=empty_t_s.copy(),
+            side_2d=empty_t_s.copy(),
+            quality_weight_2d=empty_t_s.copy(),
+            signal_mask_2d=empty_t_s_bool,
+            sleeve_to_sym=sleeve_to_sym_arr,
+            sleeve_ids=sleeve_ids_sorted,
+        )
+
+    # ── Sleeve 신호 행렬 [T, S] ───────────────────────────────────────────────
+    # sleeve가 unique (symbol, strategy_id) key이므로 같은 bar·sleeve 충돌은
+    # 같은 strategy의 동일 bar 복수 이벤트(rare)만 발생 → strength tie-break.
+    expected_gross_bps_2d = np.zeros((t_max, n_sleeve), dtype=np.float64)
+    expected_net_bps_2d = np.zeros((t_max, n_sleeve), dtype=np.float64)
+    holding_bars_2d = np.ones((t_max, n_sleeve), dtype=np.float64)
+    side_2d = np.zeros((t_max, n_sleeve), dtype=np.float64)
+    quality_weight_2d = np.zeros((t_max, n_sleeve), dtype=np.float64)
+    event_strength_2d = np.zeros((t_max, n_sleeve), dtype=np.float64)
+    signal_mask_2d = np.zeros((t_max, n_sleeve), dtype=np.bool_)
 
     for event in signal_batch.events:
-        sym_idx = sym_to_idx.get(event.symbol)
-        if sym_idx is None:
+        sleeve_key = (event.symbol, event.strategy_id)
+        sleeve_j = sleeve_to_idx.get(sleeve_key)
+        if sleeve_j is None:
             continue
-            
+
         decision_idx = int(event.decision_idx)
         holding_bars = max(int(event.expected_holding_bars), 1)
         active_start = decision_idx + 1
         active_end = min(t_max, active_start + holding_bars)
-        
+
         if active_start >= active_end:
             continue
-            
+
         side_val = float(event.side)
         gross_val = float(event.expected_gross_bps)
         net_val = float(event.expected_net_bps)
         qw_val = float(event.quality_weight)
         strength = _event_strength(event)
-        
+
         for t in range(active_start, active_end):
-            # Deterministic Equivalence: Use _event_strength and decision_idx tie-breakers
-            # decision_idx is same for this loop, so we only need strength.
-            if not signal_mask_2d[t, sym_idx]:
-                signal_mask_2d[t, sym_idx] = True
-                expected_gross_bps_2d[t, sym_idx] = gross_val
-                expected_net_bps_2d[t, sym_idx] = net_val
-                holding_bars_2d[t, sym_idx] = float(holding_bars)
-                side_2d[t, sym_idx] = side_val
-                quality_weight_2d[t, sym_idx] = qw_val
-                event_strength_2d[t, sym_idx] = strength
-            else:
-                # _is_better_event roughly matches this
-                if strength > event_strength_2d[t, sym_idx]:
-                    expected_gross_bps_2d[t, sym_idx] = gross_val
-                    expected_net_bps_2d[t, sym_idx] = net_val
-                    holding_bars_2d[t, sym_idx] = float(holding_bars)
-                    side_2d[t, sym_idx] = side_val
-                    quality_weight_2d[t, sym_idx] = qw_val
-                    event_strength_2d[t, sym_idx] = strength
+            if not signal_mask_2d[t, sleeve_j]:
+                signal_mask_2d[t, sleeve_j] = True
+                expected_gross_bps_2d[t, sleeve_j] = gross_val
+                expected_net_bps_2d[t, sleeve_j] = net_val
+                holding_bars_2d[t, sleeve_j] = float(holding_bars)
+                side_2d[t, sleeve_j] = side_val
+                quality_weight_2d[t, sleeve_j] = qw_val
+                event_strength_2d[t, sleeve_j] = strength
+            elif strength > event_strength_2d[t, sleeve_j]:
+                expected_gross_bps_2d[t, sleeve_j] = gross_val
+                expected_net_bps_2d[t, sleeve_j] = net_val
+                holding_bars_2d[t, sleeve_j] = float(holding_bars)
+                side_2d[t, sleeve_j] = side_val
+                quality_weight_2d[t, sleeve_j] = qw_val
+                event_strength_2d[t, sleeve_j] = strength
 
     return L2SimulationCache(
         vol_matrix_2d=vol_matrix_2d,
@@ -622,7 +688,178 @@ def build_l2_simulation_cache(
         side_2d=side_2d,
         quality_weight_2d=quality_weight_2d,
         signal_mask_2d=signal_mask_2d,
+        sleeve_to_sym=sleeve_to_sym_arr,
+        sleeve_ids=sleeve_ids_sorted,
     )
+
+def _resolve_sleeve_signals_at_bar(
+    *,
+    cache: L2SimulationCache,
+    t: int,
+    tradeable_mask: NDArray[np.bool_],
+    symbols: tuple[str, ...],
+    hurdle_row: NDArray[np.float64],
+    vol_row: NDArray[np.float64],
+    fixed_cost_safety_mult: float,
+) -> tuple[
+    dict[tuple[str, str], SymbolSignal],
+    dict[tuple[str, str], tuple[float, float]],
+]:
+    """Bar t에서 활성 sleeve의 SymbolSignal dict를 반환한다.
+
+    sleeve key = (symbol, strategy_id). 기존 symbol 단위 dict 대신
+    sleeve 단위로 반환하여 같은 symbol의 복수 TF 신호를 독립 유지한다.
+    sizing 시 vol은 underlying symbol의 vol(sleeve_to_sym 참조)을 사용한다.
+
+    Args:
+        cache: L2SimulationCache (sleeve 차원 신호 행렬 포함).
+        t: 현재 bar index.
+        tradeable_mask: [N] bool 배열.
+        symbols: 심볼 tuple [N].
+        hurdle_row: [N] hurdle bps 배열.
+        vol_row: [N] 변동성 배열 (sleeve vol 참조용).
+        fixed_cost_safety_mult: 비용 안전 배수.
+
+    Returns:
+        tuple: (signals, edges). signals: (symbol, strategy_id) → SymbolSignal.
+        edges: (symbol, strategy_id) → (signed_gross_bps_per_bar, expected_cost_bps_per_bar).
+
+    Time Complexity: O(S) where S = n_sleeves.
+    """
+    n_sleeve = cache.signal_mask_2d.shape[1]
+    if n_sleeve == 0:
+        return {}, {}
+
+    sleeve_mask_row = cache.signal_mask_2d[t]  # [S]
+    active_sleeves = np.where(sleeve_mask_row)[0]
+    if len(active_sleeves) == 0:
+        return {}, {}
+
+    result: dict[tuple[str, str], SymbolSignal] = {}
+    edges_out: dict[tuple[str, str], tuple[float, float]] = {}
+    sleeve_ids = cache.sleeve_ids
+    sleeve_to_sym_arr = cache.sleeve_to_sym
+
+    for j in active_sleeves:
+        sym_col = int(sleeve_to_sym_arr[j])
+        if not tradeable_mask[sym_col]:
+            continue
+
+        sleeve_id = sleeve_ids[j]
+
+        gross_bps = float(cache.expected_gross_bps_2d[t, j])
+        net_bps = float(cache.expected_net_bps_2d[t, j])
+        holding = int(cache.holding_bars_2d[t, j])
+        side = int(cache.side_2d[t, j])
+        qw = float(cache.quality_weight_2d[t, j])
+        hurdle = float(hurdle_row[sym_col])
+
+        basis: EdgeBasis = "gross" if np.isfinite(gross_bps) and gross_bps != 0.0 else "net"
+        edge = compute_expected_layer2_edge(
+            side=side,
+            expected_gross_bps=gross_bps,
+            expected_net_bps=net_bps,
+            expected_holding_bars=holding,
+            execution_cost_bps=hurdle,
+            edge_basis=basis,
+            fixed_cost_safety_mult=fixed_cost_safety_mult,
+        )
+
+        if not np.isfinite(edge.signed_net_bps_per_bar) or edge.signed_net_bps_per_bar == 0.0:
+            continue
+
+        result[sleeve_id] = SymbolSignal(
+            raw_mu=edge.signed_net_bps_per_bar,
+            volatility=float(max(vol_row[sym_col], VOL_FLOOR)),
+            n_obs=1,
+            t_stat=0.0,
+            valid=True,
+            beta_btc=None,
+            quality_weight=qw,
+        )
+        edges_out[sleeve_id] = (edge.signed_gross_bps_per_bar, edge.expected_cost_bps_per_bar)
+
+    return result, edges_out
+
+
+def _combine_sleeve_signals_to_symbol(
+    sleeve_signals: dict[tuple[str, str], SymbolSignal],
+    *,
+    method: str = "precision_weighted",
+    conviction_cap_mult: float = 1.5,
+    sleeve_edges: dict[tuple[str, str], tuple[float, float]] | None = None,
+) -> tuple[dict[str, SymbolSignal], dict[str, bool]]:
+    """Sleeve 신호를 심볼당 단일 SymbolSignal로 precision-weighted pooling.
+
+    Args:
+        sleeve_signals: (symbol, strategy_id) → SymbolSignal dict.
+        method: 결합 방식 ('precision_weighted', 'equal', 'max_edge').
+        conviction_cap_mult: κ, conviction 상한 배수 [1.0, 3.0].
+        sleeve_edges: (symbol, strategy_id) → (signed_gross_pb, cost_pb). 제공 시 friction_by_symbol 산출.
+
+    Returns:
+        tuple: (signals_by_symbol, friction_by_symbol). friction_by_symbol은
+        sleeve_edges=None 시 빈 dict.
+
+    Time: O(k) per call.
+    """
+    by_sym: dict[str, list[SymbolSignal]] = {}
+    for (sym, _strat), sig in sleeve_signals.items():
+        by_sym.setdefault(sym, []).append(sig)
+
+    out: dict[str, SymbolSignal] = {}
+    friction_by_sym: dict[str, bool] = {}
+
+    for sym, sigs in by_sym.items():
+        mus = np.array([s.raw_mu for s in sigs], dtype=np.float64)
+        cs = np.array([max(s.quality_weight, 0.0) for s in sigs], dtype=np.float64)
+        vol = sigs[0].volatility
+        denom = cs.sum()
+
+        if method == "max_edge":
+            j = int(np.argmax(np.abs(mus)))
+            mu_s = float(mus[j])
+            c_s = float(cs[j])
+        elif method == "equal" or denom <= 1e-12:
+            mu_s = float(mus.mean())
+            c_s = float(min(denom, conviction_cap_mult * cs.max() if cs.max() > 0.0 else 0.0))
+        else:
+            mu_s = float((cs * mus).sum() / denom)
+            c_s = float(min(denom, conviction_cap_mult * cs.max()))
+
+        out[sym] = SymbolSignal(
+            raw_mu=mu_s,
+            volatility=vol,
+            n_obs=len(sigs),
+            t_stat=0.0,
+            valid=bool(np.isfinite(mu_s)),
+            beta_btc=None,
+            quality_weight=c_s,
+        )
+
+        # friction 판정: sleeve_edges 제공 시 precision-weighted gross vs cost
+        if sleeve_edges is not None:
+            gross_pb_list = []
+            cost_pb_list = []
+            for (_sym, _strat) in sleeve_signals:
+                if _sym == sym:
+                    _e = sleeve_edges.get((_sym, _strat))
+                    if _e is not None:
+                        gross_pb_list.append(_e[0])
+                        cost_pb_list.append(_e[1])
+            if gross_pb_list:
+                gross_arr = np.array(gross_pb_list, dtype=np.float64)
+                cost_arr = np.array(cost_pb_list, dtype=np.float64)
+                if denom <= 1e-12:
+                    g_bar = float(gross_arr.mean())
+                    c_bar = float(cost_arr.mean())
+                else:
+                    g_bar = float((cs * gross_arr).sum() / denom)
+                    c_bar = float((cs * cost_arr).sum() / denom)
+                friction_by_sym[sym] = bool(abs(g_bar) >= c_bar)
+
+    return out, friction_by_sym
+
 
 def _run_awf_simulation(
     *,
@@ -735,43 +972,23 @@ def _run_awf_simulation(
             _fit_beta_arr = cache.beta_1d
             _fit_btc_beta = _fit_beta_arr  # Use directly
             
-            _mask = cache.signal_mask_2d[_ft] & _fit_tradeable
-            _fit_valid_signals: dict[str, SymbolSignal] = {}
-            if np.any(_mask):
-                _idx_list = np.where(_mask)[0]
-                for _idx in _idx_list:
-                    _sym = symbols[_idx]
-                    _gross_bps = cache.expected_gross_bps_2d[_ft, _idx]
-                    _net_bps = cache.expected_net_bps_2d[_ft, _idx]
-                    _holding = int(cache.holding_bars_2d[_ft, _idx])
-                    _side = int(cache.side_2d[_ft, _idx])
-                    _qw = cache.quality_weight_2d[_ft, _idx]
-                    _hurdle = float(_fit_hurdle[_idx])
-                    
-                    _basis: EdgeBasis = "gross" if np.isfinite(_gross_bps) and _gross_bps != 0.0 else "net"
-                    
-                    _edge = compute_expected_layer2_edge(
-                        side=_side,
-                        expected_gross_bps=_gross_bps,
-                        expected_net_bps=_net_bps,
-                        expected_holding_bars=_holding,
-                        execution_cost_bps=_hurdle,
-                        edge_basis=_basis,
-                        fixed_cost_safety_mult=fixed_cost_safety_mult,
-                    )
-                    
-                    if not np.isfinite(_edge.signed_net_bps_per_bar) or _edge.signed_net_bps_per_bar == 0.0:
-                        continue
-                        
-                    _fit_valid_signals[_sym] = SymbolSignal(
-                        raw_mu=_edge.signed_net_bps_per_bar,
-                        volatility=float(max(vol_matrix[_ft, _idx], VOL_FLOOR)),
-                        n_obs=1,
-                        t_stat=0.0,
-                        valid=True,
-                        beta_btc=None,
-                        quality_weight=_qw,
-                    )
+            # Sleeve 기반 signal 읽기 — [S] mask에서 [N] tradeable 참조
+            _sleeve_signals, _ = _resolve_sleeve_signals_at_bar(
+                cache=cache,
+                t=_ft,
+                tradeable_mask=_fit_tradeable,
+                symbols=symbols,
+                hurdle_row=_fit_hurdle,
+                vol_row=vol_matrix[_ft],
+                fixed_cost_safety_mult=fixed_cost_safety_mult,
+            )
+            # sleeve key → symbol key 변환 (rank_and_select는 str key 요구)
+            # 같은 symbol에 복수 sleeve 시: precision-weighted pooling (인플레이션 방지)
+            _fit_valid_signals, _ = _combine_sleeve_signals_to_symbol(
+                _sleeve_signals,
+                method=config.l2_sleeve_combine_method,
+                conviction_cap_mult=config.l2_sleeve_conviction_cap_mult,
+            )
 
             if not _fit_valid_signals:
                 continue
@@ -876,69 +1093,29 @@ def _run_awf_simulation(
             beta_arr = cache.beta_1d
             btc_beta = beta_arr  # Use directly
 
-            _mask = cache.signal_mask_2d[t] & tradeable_mask
-            valid_signals: dict[str, SymbolSignal] = {}
-            gross_edge_by_symbol: dict[str, float] = {}
-            
-            if np.any(_mask):
-                _idx_list = np.where(_mask)[0]
-                n_edge_pass = 0
-                n_edge_fail = 0
-                n_edge_fail_zero = 0
-                n_edge_fail_nan = 0
-                for _idx in _idx_list:
-                    symbol = symbols[_idx]
-                    _gross_bps = cache.expected_gross_bps_2d[t, _idx]
-                    _net_bps = cache.expected_net_bps_2d[t, _idx]
-                    _holding = int(cache.holding_bars_2d[t, _idx])
-                    _side = int(cache.side_2d[t, _idx])
-                    _qw = cache.quality_weight_2d[t, _idx]
-                    _hurdle = float(hurdle[_idx])
-                    
-                    basis: EdgeBasis = "gross" if np.isfinite(_gross_bps) and _gross_bps != 0.0 else "net"
-                    
-                    edge = compute_expected_layer2_edge(
-                        side=_side,
-                        expected_gross_bps=_gross_bps,
-                        expected_net_bps=_net_bps,
-                        expected_holding_bars=_holding,
-                        execution_cost_bps=_hurdle,
-                        edge_basis=basis,
-                        fixed_cost_safety_mult=fixed_cost_safety_mult,
-                    )
-                    
-                    _event_gross: float = (
-                        float(_gross_bps)
-                        if np.isfinite(_gross_bps) and _gross_bps != 0.0
-                        else edge.signed_net_bps_per_bar * float(_holding)
-                    )
-                    gross_edge_by_symbol[symbol] = _event_gross
-                    if not np.isfinite(edge.signed_net_bps_per_bar):
-                        n_edge_fail += 1
-                        n_edge_fail_nan += 1
-                        continue
-                    if edge.signed_net_bps_per_bar == 0.0:
-                        n_edge_fail += 1
-                        n_edge_fail_zero += 1
-                        continue
-                    n_edge_pass += 1
-                        
-                    valid_signals[symbol] = SymbolSignal(
-                        raw_mu=edge.signed_net_bps_per_bar,
-                        volatility=float(max(vol_matrix[t, _idx], VOL_FLOOR)),
-                        n_obs=1,
-                        t_stat=0.0,
-                        valid=True,
-                        beta_btc=None,
-                        quality_weight=_qw,
-                    )
-                if n_edge_pass + n_edge_fail > 0:
-                    logger.debug(
-                        "[AWF-EDGE] t=%d mask_count=%d edge_pass=%d fail=%d (zero=%d nan=%d) hurdle_sample=%.1f",
-                        t, len(_idx_list), n_edge_pass, n_edge_fail,
-                        n_edge_fail_zero, n_edge_fail_nan,
-                        float(hurdle[_idx_list[0]]) if len(_idx_list) > 0 else 0.0,
-                    )
+            # Sleeve 기반 signal 읽기 — [S] mask에서 [N] tradeable 참조
+            _oos_sleeve_sigs, _oos_sleeve_edges = _resolve_sleeve_signals_at_bar(
+                cache=cache,
+                t=t,
+                tradeable_mask=tradeable_mask,
+                symbols=symbols,
+                hurdle_row=hurdle,
+                vol_row=vol_matrix[t],
+                fixed_cost_safety_mult=fixed_cost_safety_mult,
+            )
+            # sleeve key → symbol key 변환: precision-weighted pooling (인플레이션 방지)
+            valid_signals, friction_by_symbol = _combine_sleeve_signals_to_symbol(
+                _oos_sleeve_sigs,
+                method=config.l2_sleeve_combine_method,
+                conviction_cap_mult=config.l2_sleeve_conviction_cap_mult,
+                sleeve_edges=_oos_sleeve_edges,
+            )
+
+            if _oos_sleeve_sigs:
+                logger.debug(
+                    "[AWF-EDGE] t=%d sleeve_count=%d edge_pass=%d",
+                    t, len(_oos_sleeve_sigs), len(valid_signals),
+                )
             prof_prep += time.perf_counter() - t0_prep
 
             t0_rank = time.perf_counter()
@@ -1066,17 +1243,7 @@ def _run_awf_simulation(
             all_gross_exposures.append(float(np.sum(np.abs(w))))
             all_net_exposures.append(float(np.sum(w)))
             support_leak_count += int(np.sum((np.abs(w) > 1e-12) & ~support_mask))
-            selected_idxs = [sym_to_idx[s] for s in selected if s in sym_to_idx]
-            if selected_idxs:
-                sel_idx_arr = np.array(selected_idxs, dtype=np.intp)
-                gross_edges = np.array(
-                    [gross_edge_by_symbol.get(symbols[idx], 0.0) for idx in sel_idx_arr],
-                    dtype=np.float64,
-                )
-                total_cost = hurdle[sel_idx_arr] * float(fixed_cost_safety_mult)
-                friction_pass = int(np.sum(np.abs(gross_edges) >= total_cost))
-            else:
-                friction_pass = 0
+            friction_pass = int(sum(1 for s in selected if friction_by_symbol.get(s, False)))
             friction_pass_total += friction_pass
             signal_total += len(selected)
             cap_saturation_count += int(_is_cap_saturated(weights=w, btc_beta=beta_arr, caps=caps))
