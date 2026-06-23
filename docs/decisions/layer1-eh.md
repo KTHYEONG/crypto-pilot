@@ -3,6 +3,12 @@
 - **Rationale:** 1h/2h 등 단기 TF 실행 시 동적 게이트 완화 오버라이드가 실제로는 비활성화(None/False) 상태로 작동하여 4h의 극도로 가혹한 문턱값이 강제되던 계산상/운영상의 설계 결함을 해소함. FDR 및 QW 바닥선을 완화하고, 노이즈가 많고 통과율이 낮은 단기 TF 추세 추종 전략을 배제하여 연산 효율과 신호 발굴율을 동시 개선함.
 - **Edge Cases:** `per_tf_gate_overrides`가 None인 상태에서도 디폴트 오버라이드가 원활하게 fallback되어 기존 4h 단일 TF 호환성 및 단기 TF 완화 논리가 모두 안전하게 성립함.
 
+## L1-ADR-036: Parallel GC Control & Dynamic Worker Tuning for OOM Prevention (2026-06-22)
+- **Delta:** `pipeline.py`의 `resolve_safe_nested_workers`에서 병렬 워커 최댓값을 4개로 조정하고 가용 메모리 추정 안전 마진을 4.5배로 상향함. 병렬 처리(`ProcessPoolExecutor`) 진입 전에 `gc.collect()`를 호출해 메모리를 정리함. 자식 프로세스 실행 시 `gc.disable()`을 사용해 Copy-on-Write 힙 복제를 방지하고 종료 시 해제함.
+- **Rationale:** WSL 16GB 메모리 상한 환경에서 병렬 연산 도중 Copy-on-Write 동작에 의해 메모리 풋프린트가 급격히 복제되어 WSL 인스턴스 자체가 강제 OOM 종료되는 것을 차단함.
+- **Edge Cases:** 자식 프로세스 실행이 강제 예외로 종료되더라도 `finally` 블록을 통해 가비지 컬렉터(`gc.enable()`)를 안정적으로 재활성화함.
+
+
 ## L1-ADR-030: Unified 1h Master Grid & High-Recall TF-Probe Generator Alignment (2026-06-22)
 - **Delta:** 통합 그리드를 1h 마스터 클럭(`PROBE_MASTER_TF`)으로 변경하였고, 이에 맞춰 `_build_probe_extra_panels` 및 `_project_panel_to_base_grid`가 1h base grid로 정사영을 투영하도록 수정함. TF-Probe를 strict gate에서 high-recall candidate generator 역할로 정의하고 winning cell의 주입 기준을 대폭 관대화함.
 - **Rationale:** 기존 4h base grid로 투영 시 4h보다 짧은 시간프레임(1h, 2h)의 signal edge가 4h 윈도우 내 마지막 1h 값만 잔류하여 유실되는 현상이 발생했고, 이는 측정 시점과 실제 포트폴리오 배포 시점 간의 심각한 fidelity 불일치를 유발하여 비-4h 발굴 가치를 무력화함. 1h 통합 마스터 그리드를 사용하여 모든 신호 해상도를 보존함.
@@ -294,6 +300,15 @@
   - Caller 업데이트: `strategy_service.py` (extra_probe_cells 제거), `opt_main_futures.py` (tf→l1_tfs, probe_manifest 전달).
 - **Rationale:** 기존 단일-TF(`tf="4h"`) L1 구조는 1h/12h 등 다양한 TF의 고유 신호 특성을 포착하지 못하고 bridge의 `_build_probe_extra_panels` 우회 주입 경로로만 대응했다. Per-TF native L1은 각 TF에서 독립적으로 signal pool filtering + gate override + L1 validation을 수행하고, 실증적 최적 TF에서 L2를 실행한다. bridge의 probe panel 주입 경로는 중복 위험(probe panel이 L1 gate를 이중 통과)이 있어 제거한다.
 - **Edge Cases:** `per_tf_data_maps=None` (backward compat) 시 첫번째 `l1_tfs` 요소만 실행. `per_tf_candidate_families=None`이면 `candidate_families` global fallback 사용. `per_tf_gate_overrides=None`이면 global gate threshold 유지. `_resolve_l2_master_tf(cfg, {}, {})`는 "8h"로 fallback. `probe_manifest`에 is_winner=True인 셀이 없으면 probe path 건너뜀.
+- **Status:** Accepted
+
+## L1-ADR-037: L1 성능 최적화 v3 — P5 ThreadPool 롤백 + PERF 로깅 2건 보강 (2026-06-23)
+- **Delta:**
+  - **P5-R**: `l1_prequential_evidence_snapshots`에서 `ThreadPoolExecutor` 제거 → 순차 루프로 복원. CPU-bound numpy/scipy 연산(ewm stats, block bootstrap)이 GIL 경합 + L1 cache thashing으로 인해 4-8x 개별 태스크 지연을 유발하여 오히려 순차보다 느렸던 역효과를 해소. 순차 복원 시 TF당 prequential 11.4s→7.9s로 회복(-31%).
+  - **PERF-GAP1**: `candidate_workflow.py`의 `[WORKER-CALC]` debug 로그를 `[PERF] worker_calc`로 승격. 메모리 추정값(frame_gb, estimated_proc_gb, available_gb)과 worker 결정 로직 노출.
+  - **PERF-GAP2**: `pipeline.py`에 `[PERF] l1_nested_ipc_collect` 타이머 추가. `parallel_exec` 내에서 IPC + fold compute 시간과 pool setup/submit 시간을 분리 측정. v3 실측: `parallel_exec=17.85s`, `ipc_collect=17.55s`, pool_setup=0.30s (비율 1.7%).
+- **Rationale:** v2 실측에서 prequential snapshot 시간이 11.4s로, 이전 baseline(7.9s)보다 44% 증가한 것을 발견. ThreadPoolExecutor(n=6)가 GIL 경합으로 CPU-bound 작업을 직렬보다 느리게 만드는 역효과 확인. 또한 v2 PERF coverage에서 unaccounted 1.0s/119.2s(0.8%)로 low였으나, worker 결정 로직과 IPC overhead가 blind spot으로 남아 있었음. v3 실측 결과 L1 Tiered 119.2s→108.6s(-9%), Grand Total 164.3s→152.8s(-7%), unaccounted <3% 유지.
+- **Edge Cases:** `executor.shutdown(wait=True)` 제거로 TF당 약 0.3s pool teardown overhead도 자연 제거됨. ThreadPoolExecutor가 import-level에 남아 다른 경로(load_futures_data_maps_for_symbols의 I/O thread)에 영향 없음.
 - **Status:** Accepted
 
 ## L1-ADR-036: Multi-TF Layer1 Signal Redesign — TF-PROBE 제거 및 native_tf 기반 직접 분기 (2026-06-22)

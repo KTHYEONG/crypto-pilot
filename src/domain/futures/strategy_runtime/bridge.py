@@ -441,11 +441,17 @@ def build_multi_tf_panels(
             ]
         )
     if audit_rows:
-        _log_ascii_table(
-            "[MULTI-TF] PANEL INJECTION",
-            ("TF", "Symbols", "Total Source", "Projected", "Source Mix"),
-            audit_rows,
-            (8, 10, 14, 12, 36),
+        import logging
+        logger = logging.getLogger(__name__)
+        tf_summaries = [
+            f"[{row[0]}] Proj={row[3]} Syms={row[1]}"
+            for row in audit_rows
+        ]
+        
+        # Format as Minimal Tree Style
+        logger.info(
+            "🧬 [L1: MULTI-TF PANEL INJECTION]\n"
+            f"  └─ Active : {' | '.join(tf_summaries)}"
         )
     return tuple(extra)
 
@@ -877,6 +883,7 @@ def run_candidate_strategy_for_universe(
     # ── Multi-TF HTF panel generation (Phase B) ──────────────────────────
     htf_tfs = tuple(t for t in getattr(candidate_cfg, "l1_tfs", ()) if t != tf)
     if htf_tfs:
+        t_htf = time.perf_counter()
         try:
             from src.domain.futures.strategy.config import resolve_tf_signal_pool
 
@@ -890,7 +897,9 @@ def run_candidate_strategy_for_universe(
                 family_pool=lambda t: resolve_tf_signal_pool(candidate_cfg, t),
                 htf_only=True,
             )
+            bridge_prof["htf_panels"] = time.perf_counter() - t_htf
             if htf_panels:
+                t_htf_events = time.perf_counter()
                 htf_raw_events = candidate_panels_to_events(
                     htf_panels,
                     min_abs_score=candidate_cfg.min_rule_net_bps * 1e-4,
@@ -899,12 +908,15 @@ def run_candidate_strategy_for_universe(
                     execution_cost_bps_2d=aligned.execution_cost_bps_2d,
                 )
                 if not htf_raw_events.empty:
+                    t_htf_label = time.perf_counter()
                     htf_labeled = label_candidate_events(events=htf_raw_events, aligned=aligned, cfg=candidate_cfg)
+                    bridge_prof["htf_label"] = time.perf_counter() - t_htf_label
                     variant_to_tf: dict[str, str] = {}
                     for panel in htf_panels:
                         variant_to_tf[panel.variant] = panel.metadata.get("native_tf", tf)
                     htf_labeled["native_tf"] = htf_labeled["variant"].map(variant_to_tf)
                     labeled_all = pd.concat([labeled_all, htf_labeled], ignore_index=True)
+                bridge_prof["htf_events"] = time.perf_counter() - t_htf_events
         except Exception as exc:
             _logger.warning("[MULTI-TF] HTF panel generation failed: %s", exc)
     fit_start, fit_end, calibration_start, calibration_end, oos_start, oos_end = _candidate_ml_split_indices(

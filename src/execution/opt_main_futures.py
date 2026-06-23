@@ -221,12 +221,9 @@ def _log_probe_tf_source_coverage(
             ]
         )
     if rows:
-        _log_ascii_table(
-            "[TF-PROBE AUDIT] SOURCE READINESS",
-            ("TF", "Ready", "Median Bars", "Source Mix"),
-            rows,
-            (8, 14, 12, 42),
-        )
+        _logger.info("🔍 [TF-PROBE AUDIT] SOURCE READINESS Dashboard")
+        for row in rows:
+            _logger.info(f"  ├── {row[0]:<4} : Ready {row[1]:<7} | Median Bars: {row[2]:<6} | Mix: {row[3]}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1540,11 +1537,6 @@ def _run_strategy_stage(
             strategy_maps=full_strategy_maps,
             tf=run_config.timeframe,
         )
-        _logger.info(
-            "[TIERED] Base scope: %d/%d loaded symbols",
-            len(base_scope),
-            len(data_stage.valid_symbols),
-        )
         if tiered_window is not None:
             try:
                 # Robust conversion to UTC Timestamp
@@ -1572,20 +1564,15 @@ def _run_strategy_stage(
                 min_holdout_coverage=0.90,
             )
             effective_trade_syms = list(scope_result.admitted)
+            
+            # Unified Minimal Tree Style log emission
+            dropped_count = sum(len(value) for value in scope_result.dropped_by_reason.values())
+            l_start_dropped = len(scope_result.dropped_by_reason.get('late_start', []))
             _logger.info(
-                "[TIERED] Sub-window admission: %d/%d symbols admitted (min_bars=%d, oos_cov>=90%%)",
-                len(effective_trade_syms),
-                len(base_scope),
-                _TIERED_MIN_WINDOW_BARS,
+                "📊 [L1: SWF SCOPE & ADMISSION]\n"
+                f"  ├─ Symbols : {len(effective_trade_syms)}/{len(data_stage.valid_symbols)} Admitted\n"
+                f"  └─ Details : Base {len(base_scope)} | Dropped {dropped_count} (late_start: {l_start_dropped})"
             )
-            if any(scope_result.dropped_by_reason.values()):
-                _logger.info(
-                    "[TIERED] Sub-window drops: %s",
-                    {
-                        key: len(value)
-                        for key, value in scope_result.dropped_by_reason.items()
-                    },
-                )
         if not effective_trade_syms:
             from src.domain.futures.strategy.tiered_workflow import TieredPipelineError
 
@@ -1632,11 +1619,19 @@ def _run_strategy_stage(
                 run_tiered_pipeline,
             )
             _pit_state_cube = _resolve_universe_state_cube(universe_result)
+            t_align = time.perf_counter()
             aligned_tiered = align_data_maps(
                 full_strategy_maps,
                 effective_trade_syms,
                 run_config.timeframe,
                 state_cube=_pit_state_cube,
+            )
+            _logger.log(
+                PERF,
+                "[PERF] tiered_align_data_maps n_syms=%d tf=%s took=%.4fs",
+                len(effective_trade_syms),
+                run_config.timeframe,
+                time.perf_counter() - t_align,
             )
             if _pit_state_cube is not None:
                 _log_cube_coverage(

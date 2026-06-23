@@ -22,7 +22,7 @@ dependencies:
   documents:
     - docs/architecture/regime.md
     - docs/architecture/allocation.md
-last_verified: 2026-06-22
+last_verified: 2026-06-23
 ---
 
 # 1. Purpose
@@ -175,4 +175,8 @@ graph TD
 - **Parquet baggage column pruning**: `_load_cache` drops Binance API metadata columns (`close_time`, `no_trades`, `ignore`) immediately after parquet read — never used by any downstream domain code. Reduces per-file memory footprint by ~30% and eliminates string→numeric conversion overhead for these columns.
 - **Numeric `_normalize_df` early exit**: When all non-datetime columns are already numeric (guaranteed after first `_save_cache`), the string→numeric loop is skipped via an `all(is_numeric_dtype)` guard. Cache-read path exits in O(N) dtype scan instead of O(C×N) full column conversion.
 - **Removed redundant `.copy()`**: `collect_and_save(fetch_network=False)` returns `cache_df.loc[mask]` directly instead of `.loc[mask].copy()`. Boolean indexing in pandas always returns a copy, making the extra `.copy()` allocation redundant.
+- **Adaptive Worker Cap via Memory-Aware Scheduling**: `resolve_safe_nested_workers` caps parallel workers at `min(physical_cores - 2, 8)` with memory guard: `estimated_proc_gb = max(0.8, frame_gb * 1.8)` per process, `max_workers` limited to floor `available_gb / estimated_proc_gb`. Oversubscription guard reduces workers when `fold_scheduling // workers < 2` to prevent memory thrashing from CoW fork replication.
+- **Deferred Artifact Computation**: First TF in `run_tiered_pipeline` computes `fit_layer1_inference_artifact`; remaining TFs pass `defer_artifact=True` to skip artifact building. Cache population uses global dict keyed by `(base_cube_id, for_inference)` — fork CoW shares result across TF processes. Saves ~40s per full run.
+- **Sequential Prequential Snapshots (ThreadPool Rollback)**: CPU-bound numpy/scipy operations in `signal_evidence` (ewm stats, block bootstrap) suffer GIL contention and L1 cache thrashing under threads. ThreadPoolExecutor for prequential snapshots rolled back to plain sequential loop, recovering ~3.5s per TF (10.5% of prequential time).
+- **PERF Logging — Full Observability Gap Closure**: `[PERF] worker_calc` emits worker count, memory estimation, and cpu cap. `[PERF] l1_nested_ipc_collect` separates IPC + fold compute time from pool setup overhead. Per-TF unaccounted time reduced to <3% (v2: 1.0s gap / 119.2s).
 - **Algorithmic Optimizations**: Numba JIT bootstrap, $O(N \log N)$ vectorized percentiles, parent-process feature priming, Numba-JIT accelerated rolling/cross-sectional robust z-score loops to bypass pandas rolling overhead, and unified OMP-clamped multiprocessing pools.

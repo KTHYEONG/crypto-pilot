@@ -230,6 +230,9 @@ def _log_ensemble_diagnostics(
     min_display_events: int = 0,
 ) -> dict[str, Any]:
     """Emit a consolidated diagnostic log for ensemble fitting (Atomic One-Liner)."""
+    import logging
+    logger = logging.getLogger(__name__)
+
     n_total = len(frame)
     n_syms = int(frame["symbol"].nunique()) if "symbol" in frame.columns and not frame.empty else 0
 
@@ -247,13 +250,12 @@ def _log_ensemble_diagnostics(
     arch_parts = []
     for k, label in ARCHETYPE_LABELS.items():
         if k in arch_mu:
-            v = arch_mu[k]
             n_events = arch_event_counts.get(k, n_total)
             if min_display_events > 0 and n_events < min_display_events:
-                arch_parts.append(f"{label}:   insuf")
+                arch_parts.append(f"{label}:insuf")
             else:
-                sign = "✅" if v >= 0.0 else "❌"
-                arch_parts.append(f"{label}:{v:>+6.1f}{sign}")
+                sign = "✅" if arch_mu[k] >= 0.0 else "❌"
+                arch_parts.append(f"{label}:{arch_mu[k]:+.1f}{sign}")
 
     # Fallback: unknown archetypes not in ARCHETYPE_LABELS (first-letter)
     for k, v in arch_mu.items():
@@ -262,14 +264,24 @@ def _log_ensemble_diagnostics(
             sign = "✅" if v >= 0.0 else "❌"
             arch_parts.append(f"{label}:{v:.1f}{sign}")
 
-    # Atomic One-Liner Construction (Parallel-Friendly)
-    log_msg = (
-        f"[{tag}] {mode_short:<11} | SYM:{n_syms:>3} | "
-        f"EVT:{n_total:>8,} | "
-        f"TOTAL:{global_mu:>+6.1f} bps | "
-        f"[{' '.join(arch_parts)}]"
-    )
-    _logger.info(log_msg)
+    # DEBUG dump (AI-parsable raw key-values, ensuring L1 marker exists)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "[DEBUG-L1-ENS-RAW] tag=%s mode=%s symbols=%d events=%d total_bps=%f adaptive_shrinkage=%s k_used=%f "
+            "valid_regimes=%d score_cal=%s archetypes=%s",
+            tag, mode_short, n_syms, n_total, global_mu, str(adaptive_shrinkage), k_used,
+            num_valid_regimes, str(score_cal_summary),
+            ",".join(f"{k}:{v:.4f}" for k, v in arch_mu.items())
+        )
+
+    # INFO level print - ONLY print if it is the final aggregate ensemble (tag is ENS-FINAL)
+    # This suppresses the bulk of continuous logs printed from parallel child processes.
+    if tag == "ENS-FINAL":
+        log_msg = (
+            f"📈 [{tag}] {mode_short} | SYM:{n_syms} | EVT:{n_total:,} | TOTAL:{global_mu:>+5.1f} bps "
+            f"| [{' '.join(arch_parts)}]"
+        )
+        _logger.info(log_msg)
 
     return {
         "tag": tag,

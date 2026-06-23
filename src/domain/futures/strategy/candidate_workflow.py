@@ -116,15 +116,23 @@ def _fit_and_predict_single_fold_from_globals(
         or _GLOBAL_PURGE_BARS is None
     ):
         raise RuntimeError("candidate workflow globals are not initialized")
-    return _fit_and_predict_single_fold(
-        fold_idx,
-        fold,
-        _GLOBAL_LABELED_EVENTS,
-        _GLOBAL_ALIGNED,
-        _GLOBAL_CFG,
-        _GLOBAL_PURGE_BARS,
-        is_evidence_fold=is_evidence_fold,
-    )
+
+    import gc
+    gc.disable()
+    try:
+        res = _fit_and_predict_single_fold(
+            fold_idx,
+            fold,
+            _GLOBAL_LABELED_EVENTS,
+            _GLOBAL_ALIGNED,
+            _GLOBAL_CFG,
+            _GLOBAL_PURGE_BARS,
+            is_evidence_fold=is_evidence_fold,
+        )
+        return res
+    finally:
+        gc.enable()
+        gc.collect()
 
 
 def _fit_and_predict_single_fold(
