@@ -1,325 +1,53 @@
-## L1-ADR-035: L1 Gate and Signal Pool Optimization & Fallback (2026-06-22)
-- **Delta:** `apply_tf_gate_overrides` 내에 `_DEFAULT_PER_TF_GATE_OVERRIDES` 자동 폴백(Fallback) 로직을 적용함. `CandidateStrategyConfig`의 `per_tf_signal_pool_enabled` 기본값을 `True`로 활성화함. `l1_pair_fdr_alpha` 기본값을 `0.15`로, `l1_qw_floor` 기본값을 `0.05`로 인상함. `_DEFAULT_PER_TF_FAMILIES["2h"]`에서 `"trend_ma"`를 제거함.
-- **Rationale:** 1h/2h 등 단기 TF 실행 시 동적 게이트 완화 오버라이드가 실제로는 비활성화(None/False) 상태로 작동하여 4h의 극도로 가혹한 문턱값이 강제되던 계산상/운영상의 설계 결함을 해소함. FDR 및 QW 바닥선을 완화하고, 노이즈가 많고 통과율이 낮은 단기 TF 추세 추종 전략을 배제하여 연산 효율과 신호 발굴율을 동시 개선함.
-- **Edge Cases:** `per_tf_gate_overrides`가 None인 상태에서도 디폴트 오버라이드가 원활하게 fallback되어 기존 4h 단일 TF 호환성 및 단기 TF 완화 논리가 모두 안전하게 성립함.
+---
+title: Layer 1 Decision Log (Compressed)
+domain: futures.strategy
+type: adr
+status: active
+priority: high
+ai_read_policy: when_related
+---
 
-## L1-ADR-036: Parallel GC Control & Dynamic Worker Tuning for OOM Prevention (2026-06-22)
-- **Delta:** `pipeline.py`의 `resolve_safe_nested_workers`에서 병렬 워커 최댓값을 4개로 조정하고 가용 메모리 추정 안전 마진을 4.5배로 상향함. 병렬 처리(`ProcessPoolExecutor`) 진입 전에 `gc.collect()`를 호출해 메모리를 정리함. 자식 프로세스 실행 시 `gc.disable()`을 사용해 Copy-on-Write 힙 복제를 방지하고 종료 시 해제함.
-- **Rationale:** WSL 16GB 메모리 상한 환경에서 병렬 연산 도중 Copy-on-Write 동작에 의해 메모리 풋프린트가 급격히 복제되어 WSL 인스턴스 자체가 강제 OOM 종료되는 것을 차단함.
-- **Edge Cases:** 자식 프로세스 실행이 강제 예외로 종료되더라도 `finally` 블록을 통해 가비지 컬렉터(`gc.enable()`)를 안정적으로 재활성화함.
+## Phase 1: SWF 구조 & 초기 게이트 (ADR-001~009, 6/13~19)
+- Nested SWF 도입, prequential evidence grid 분리(outer_n×multiplier≤max), outer warm-up blocks=2로 fold 0 underpower 해소
+- 통계적 MDES gate(t_crit+검정력 80%), 5-Gate로 standardization(fold_cov/match_ratio/sym_count/fold_ratio/probe_lcb_bps)
+- IC 지표 제거(Arch-Only mode에서 noise), mu_quality_shrinkage dead-code 제거(validation_rank_ic=0 → lam=0 붕괴)
+- PIT state_cube 통합(lifecycle gate: promotion_available_at>l2_start 차단), capacity clip(5 USDT min+proportional)
+- L1→L2 게이트 재설계: 4-condition(LCB 하드게이트 worst-plausible edge>RT cost, binding FDR, qw>0), Q:hi/mid/lo 티어 제거
+- Promotion Summary PASS/FAIL 분리, 우측절단 진단(censored count), STATUS PROMOTED/WATCH/REJECTED 제거
+- Archetype 라벨 정합(5→7종, MRV/TMO/UNW/BTN/CRY/FLO), evidence fold warm-up skip WARNING 억제
 
+## Phase 2: 성능 최적화 1~3차 (ADR-009~016, 025~026, 6/18~21)
+- PERF 로깅 도입(레벨 15→10 통일, 계층적 타이밍, [PERF] prefix 일원화)
+- Numba JIT rolling z-score(prime 27.78→7.75s, L1 total 47.64→25.17s)
+- q-value FDR vectorization→loop 롤백(N≤200 소표본 회귀)
+- Python loop 제거+벡터화(_by_q_values, _compute_incremental_bps, .copy() 제거, itertuples→cumcount)
+- Ingestion 병렬: ProcessPool→ThreadPool(I/O bound pickling 제거), meta pre-conversion, datetime64 bypass
+- Parquet I/O: baggage 3col drop, numeric early exit guard(>O(N) 스킵), 불필요 .copy() 제거
+- Post-SKIP: copy() 조건부 게이트, _to_unix_ms TF당 1회, merged audit 경량화, COL_GROUP_CACHE 도입
+- Numba membership(_calculate_warm_ready_numba) + DatetimeIndex.isin 벡터화
+- L1/Universe 루프 불변식 호이스팅(searchsorted N→1, timeline 104→1), vol_2d 행렬화(pd.DataFrame.rolling())
+- signal_batch_convert iterrows 벡터화(iterrows→np.flatnonzero, loop 2.64→0.04s/fold, L1 total 53.5→37.4s)
+- P1~P5: prime→_warm_aligned_2d_cache 분리, inner groupby pre-compute, waterfall 게이팅, PERF 타이머 세분화, audit_tables 타이머 이동
 
-## L1-ADR-030: Unified 1h Master Grid & High-Recall TF-Probe Generator Alignment (2026-06-22)
-- **Delta:** 통합 그리드를 1h 마스터 클럭(`PROBE_MASTER_TF`)으로 변경하였고, 이에 맞춰 `_build_probe_extra_panels` 및 `_project_panel_to_base_grid`가 1h base grid로 정사영을 투영하도록 수정함. TF-Probe를 strict gate에서 high-recall candidate generator 역할로 정의하고 winning cell의 주입 기준을 대폭 관대화함.
-- **Rationale:** 기존 4h base grid로 투영 시 4h보다 짧은 시간프레임(1h, 2h)의 signal edge가 4h 윈도우 내 마지막 1h 값만 잔류하여 유실되는 현상이 발생했고, 이는 측정 시점과 실제 포트폴리오 배포 시점 간의 심각한 fidelity 불일치를 유발하여 비-4h 발굴 가치를 무력화함. 1h 통합 마스터 그리드를 사용하여 모든 신호 해상도를 보존함.
-- **Edge Cases:** HTF(6h, 8h, 12h) 투영 시 backward-asof logic을 그대로 유지하여 look-ahead bias가 발생하지 않도록 조치함.
+## Phase 3: 신호 패밀리 & MTF 확장 (ADR-017~024, 026~034, 6/21~22)
+- Flow family 3종(funding_flow_carry/unwind, flow_exhaustion_reversal) + cell-level taker_imbalance_2d
+- 8 저성과 family 제거(trend_donchian, OI 5종, basis 2종, taker_exhaustion) 40→31, per-symbol ENS-DIAG 진단
+- FLO 회귀 수정: flow_trend_continuation archetype flow_rev→ts_mom, lsr_oi_regime_filter active화(side_hint 방향성)
+- MTF 람다 late-binding 수정(기본 파라미터 캡처), flow 캐시 재사용(funding_z_96/168)
+- CRY/FLO 안정화 3종 추가(funding_term_structure_carry, flow_trend_continuation, lsr_oi_regime_filter), positioning_warm[:168] barrier
+- Bayesian prior ENS(n_prior=100, prior_mean=0로 소표본 수축), min_display_events로 insuf 표시
+- Adaptive evidence gate(early snapshot threshold 완화, snapshot_index 파라미터), promotion advisory 모드
+- TF별 signal pool 6종 추가(gap_fade_1h, vwap_reversion_1h, volume_climax_1h, macd_4h, supertrend, ichimoku_trend)
+- Per-TF L1 pipeline: run_per_tf_l1/_resolve_l2_master_tf/_aggregate_per_tf_l1, native_tf 필터링, oos_stacked tf:: prefix
+- Quality weight floor(l1_qw_floor=0.05)+probe prior boost(l1_qw_probe_boost=0.3), per-TF gate overrides
+- LTF mean aggregation(ltf_mode="mean" cumsum window), resample metadata 보존, holding_bars cost 보정
+- TF Probe virtual source resample(data-stage/bridge-stage 분리), ENABLE_TF_PROBE=False 기본
+- Effective-N FDR 보정(diversity_corr 기반 m_eff), 동일(symbol,family) cluster r_bar
 
-## L1-ADR-029: Effective-N Multiple Testing Correction via TF Diversity Correlation (2026-06-22)
-- **Delta:** L1 BY-FDR 다중검정 계산부(`_by_q_values`)에 `m_eff` 보정 매개변수를 신설하고, `signal_selection.py`에서 `_compute_probe_m_eff` 헬퍼 함수를 추가함. 동일 `(symbol, family)` 내의 TF 다중 검정 가설들을 cluster로 묶고 Pearson r 상관계수(`diversity_corr`)의 평균인 $\bar{r}$을 이용하여 $m_{\text{eff}} = \sum_{\text{clusters}} k / (1 + (k - 1) \cdot \bar{r}_{\text{cluster}})$를 산출한 뒤 이를 FDR 보정 분모로 주입함.
-- **Rationale:** 동일한 (symbol, family)의 다중 TF 검정들이 완전 독립이 아님에도 불구하고 naive하게 모든 가설 수를 breadth $m$에 반영함으로써 BY-FDR 다중성 통제가 과도하게 보수적으로 작동하여 유효한 신호들이 대거 억울하게 탈락하는 현상을 방지함.
-- **Edge Cases:** `probe_diversity_corr`가 없거나 빈 사전인 경우 $m_{\text{eff}} = m$으로 자동 fallback되도록 하였으며 0-division 예외를 차단함. 대칭키(`a~b` vs `b~a`) 양방향 조회도 정상적으로 처리함.
-
-## L1-ADR-028: FDR Pool Filtering for Untested Cells (2026-06-22)
-- **Delta:** `timeframe_probe.py` 내 `probe_timeframe_alpha` 함수의 post-hoc per-timeframe BH-FDR 계산부에서 `ic_tstat_hac == 0.0`인 미검정(untested) 셀들을 FDR 보정 대상 풀에서 제외함.
-- **Rationale:** `n_events < min_obs` 조건으로 인해 IC 계산 자체가 생략되어 HAC t-stat이 0.0인 셀들이 FDR 풀의 분모($N$)에 그대로 산입됨으로써 분모 팽창을 일으켰고, 이에 따라 실질적인 검정 대상 후보 셀들이 과잉 기각(over-rejection)되는 통계적 왜곡을 해소함.
-- **Edge Cases:** 제외된 미검정 셀들의 `passed_fdr` 속성은 기존 설계대로 `False` 상태를 유지하도록 제어함.
-
-## L1-ADR-027: Timeframe Alpha Probe Integration & Gate Audit — 가상 TF 소스 계약 및 결정론적 게이트 감사 도입 (2026-06-22)
-- **Delta:** `timeframe_contracts.py`를 신설하여 시간프레임 간 정수 비율 호환성을 판단하고 최적 소스 TF를 선정하는 공용 로직을 모듈화함. `timeframe_probe.py` 내 `_resample_ohlcv`에서 우측라벨 기준 리샘플링 후 마지막 미완성 bar를 드롭하여 look-ahead를 원천 방지함. `build_rule_signal_panels`에 `normalize_time_horizon` 매개변수를 도입하여 4h 기준선의 wall-clock horizon을 타겟 TF에 맞게 스케일링하였고, `summarize_tf_probe_gate_audit`를 통해 TF별 게이트 누적 생존율과 최다 실패 원인(`Top Fail`)을 요약하도록 함. `opt_main_futures.py`에서 winning cell 유무와 상관없이 최종 게이트 감사를 ASCII 표 형식으로 로깅하도록 배선함.
-- **Rationale:** virtual TF 빌드 시 디스크 파일의 실재 여부와 런타임 리샘플링 대상(source TF)을 구분하지 못해 `data_not_ready` 예외가 발생하거나, 6h/8h 등의 시간프레임 평가 시 wall-clock 기준 4h의 lookback/holding horizon이 스케일링되지 않아 비교 타당성이 훼손됨. 또한 당선 셀이 없는(zero-winner) 경우 분석가가 어떤 게이트(`tstat`, `fdr`, `net_edge`, `fold_consistency`)에서 신호들이 탈락했는지 추적할 수 없는 블랙박스 상태를 해소하기 위해 결정론적 게이트 감사가 요구됨.
-- **Edge Cases:** 리샘플링이 불가하거나 소스가 부재한 경우 skipped 상태로 로깅 및 실행을 일관되게 차단함. normalizer 토글이 꺼진 경우 기존 4h 단일 TF 기준 호환성을 완벽히 유지함.
-
-## L1-ADR-026: signal_batch_convert iterrows 벡터화 (P6) (2026-06-21)
-- **Delta:** `_candidate_output_to_signal_batch` 내 `frame.iterrows()` + per-row `_signal_source_key_from_row`/`pd.to_numeric` 루프(n_raw=80~95K)를 벡터 마스킹으로 교체. key 컬럼 벡터 추출(`astype(str)`) → composite 문자열 `pd.Series.isin(keyset)` registry mask → gross/net/q10/q90 배열 n_raw 패딩(cascade fallback) → gate mask cascade(gross→threshold→decision) → `np.flatnonzero(mask_dec)`으로 n_out 서바이버만 객체화.
-- **Rationale:** P4 로깅이 `loop=2.64s/fold`(pred/keys/sort≈0s), `outer_fold_loop=10.15s` 노출. n_raw 80~95K 전체 Python 루프였으나 n_out은 350~7680. 벡터화 후 `loop=0.04s/fold(-98%)`, `outer_fold_loop=0.53s(-94%)`. `l1_total 53.5s→37.4s(-30%)`, 원본 대비 누적 -50%.
-- **Edge Cases:** column-existence cascade(`strategy_id`→`family:variant`, `activation_context`→`signal_cell`→`entry_regime`→`all`) 컬럼 단위 판별로 per-row `.get()` 등가 보존. relaxed mode(`l1_activation_match_regime=False`) → actx 전부 "all" 벡터화, 2-tuple isin. qw_lookup 1회 flatten으로 registry 선형탐색 제거. 8개 기능 테스트 통과.
-- **Status:** Accepted
-
-## L1-ADR-025: L1 실행시간 최적화 P1~P5 — prime 제거·벡터화·진단게이팅·타이머분리 (2026-06-21)
-- **Delta:**
-  - **P1** `prime_aligned_feature_cache`: `build_candidate_dataset` 호출(814K 이벤트 per-event 조립 후 폐기) 제거 → `_warm_aligned_2d_cache()` 분리 추출. fork COW용 2D rolling 배열만 캐시 워밍.
-  - **P2** `signal_selection.py` inner `group.groupby("fold_id")` 루프: O(N_pairs × N_folds)→ 1회 `frame.groupby([4keys], sort=True)` pre-compute로 대체.
-  - **P3** `candidate_portfolio.py`: `compute_selection_waterfall`/`compute_shadow_selection_profiles` 호출을 `l1_selection_diagnostics_enabled` 플래그로 게이팅(default=False).
-  - **P4** `_candidate_output_to_signal_batch`: pred/keys/loop/sort 세분화 `[PERF]` 타이머 추가 (로직 변경 없음).
-  - **P5** `pipeline.py` `l1_nested_audit_tables` 타이머: `fit_layer1_inference_artifact`(11.2s) 포함 오계측 → verbose 포맷팅 구간만 측정하도록 타이머 이동.
-- **Rationale:** `prime` 호출이 74.6s 중 ~22s 소비(전체 T×N 타임라인 per-event 조립 후 폐기). P2 inner groupby는 pairs×folds 이중 루프. P3 진단 waterfall은 항상 실행되어 불필요한 연산. P5는 측정 정확도 버그(inference 11.2s가 audit_tables로 계상됨).
-- **Edge Cases:** P1의 2D 배열은 기존에도 `id(aligned)` 캐시로 1회 계산 후 fork 공유 → look-ahead/인과성 특성 불변. P2 fold_means 순서는 sort=True로 동일 보존 → 수치 등가. 176개 회귀 테스트 통과.
-- **Status:** Accepted
-
-## L1-ADR-022: L1 PERF 로그 구조개편 — [PERF] 접두사 통일 + 타이밍 가시성 3건 추가 (2026-06-21)
-- **Delta:** `[perf-tiered]` 접두사 전량 → `[PERF]`로 통일. 비타이밍 컨텍스트 로그(`[SWF-CTX]`, `[L1-CTX]`, `[L1-NESTED-COMBINED]` 등) → `logger.debug()`로 강등. 신규: ① `[PERF] l1_nested_fold_avg_profile` (combined_results timing_profile 집계, 기존 `run_l1_swf`의 `[SWF-PROFILE]` 상당이나 nested path에 없었음), ② `[PERF] l1_outer_fold` 포맷 확장 → `batch=/ sel=/ eval=/ total=` 세분화, ③ `portfolio_constructor.py` `solve_constrained_weights`/`diagonal_kelly_weights`/`precompute_rolling_covariances` PERF 타이머 3종 추가.
-- **Rationale:** DEBUG 실행 시 `grep '\[PERF\]'`로 타이밍 로그만 즉시 필터 가능해야 함. 기존 혼재된 접두사(`[perf-tiered]`, `[SWF-*]`, `[L1-*]`)로 grep 불가. outer fold 내 `_candidate_output_to_signal_batch`/`select_outer_symbol_opportunities`/`evaluate_outer_signal_opportunities` 3함수와 portfolio_constructor 핵심 함수 시간이 전혀 측정되지 않아 병목 포착 불가.
-- **Edge Cases:** PERF 레벨(=10=DEBUG)이므로 프로덕션 INFO 핸들러에서는 출력 없음. portfolio_constructor `n==0` 조기 return 경로는 타이머 미삽입(trivial path).
-
-## L1-ADR-021: L1→L2 게이트 재설계 — LCB 경제성 하드게이트 + 바인딩 FDR + Q:hi/mid/lo 제거 (2026-06-21)
-- **Delta:** `build_qualified_signal_registry` admit 조건을 4-condition 로 재정의. `lcb_net_bps` (block-bootstrap P5 of incremental gross) 필드 추가. `l1_breakeven_floor_bps=_DEFAULT_RT_BPS(≈7.5bps)`, `l1_fdr_hard_reject=True`, `l1_pair_fdr_alpha=0.10` 기본값 적용. `format_layer1_deployment_registry_table`에서 `Q:hi/mid/lo` 티어·stars·`[L2-PASS]` 라벨 제거 → `LCB(bps)|CONV|FOLDS|t(blk)` 컬럼으로 교체.
-- **Rationale:** 기존 게이트는 P(μ>0)>0.5(동전던지기)가 유일 통계 문턱이었고, FDR은 soft-shrink(비binding)였으며, Q:hi/mid/lo는 다른 추정량(`naive IID t` vs `block t`)을 혼용한 표시전용 레이블이었다. 실질적 경제성·다중성 통제가 없어 노이즈 신호 통과. LCB 하드게이트로 "worst-plausible edge > round-trip cost" 보장.
-- **Edge Cases:** `cfg=None` 시 LCB gate disable(backward compat). `l1_fdr_hard_reject=False`이면 soft-shrink 유지(하위 호환). `lcb_net_bps`는 peer-relative gross — 비용 이중차감 없음(백테스트 엔진이 별도 차감).
-
-## L1-ADR-014: Archetype 라벨 의미 정합화 + Evidence Fold 스킵 로그 억제 (2026-06-21)
-- **Delta:** `_log_ensemble_diagnostics`의 `standard_keys` 5종 → `archetype_labels` 7종으로 교체. `mean_rev→MRV`, `ts_mom→TMO`, `unwind→UNW`, `beta_neut→BTN`, `carry_rev→CRY`, `flow_rev→FLO` 명시(첫글자 fallback 의존 제거). `is_evidence_fold` 파라미터로 evidence fold warm-up skip WARNING 억제.
-- **Rationale:** `mean_rev↔ts_mom`이 `MOM↔MRV`로 의미 정반대 swap되어 관측성 결함 유발. Fold #0~1 skip WARNING은 evidence fold 정상 동작(warm-up)이므로 노이즈. 수치 불변, 라벨·로그만 수정.
-- **Edge Cases:** 7종 외 신규 archetype은 첫글자 fallback 유지. `is_evidence_fold=False` 기본값으로 outer fold 동작 불변.
-
-## L1-ADR-017: Flow-Aware Layer1 Signal Families 및 Cell-Level Imbalance 도입 (2026-06-21)
-- **Delta:** `_safe_taker_imbalance_2d`를 추가했고, `taker_buy`/`volume` 정합성이 셀 단위로 검증되도록 만들었다. `build_rule_signal_panels`는 `flow_imbalance`, `flow_mean_6`, `flow_z_24`, `funding_z_96`, `funding_z_168`, `ret_1`, `ret_12`, `ret_z_48`를 공유 캐시로 재사용했고, `funding_flow_carry`, `funding_flow_unwind`, `flow_exhaustion_reversal` 패널을 노출했다. `config.py`의 candidate family 목록과 ensemble prior 목록에도 해당 family를 포함했다.
-- **Rationale:** ENS 로그에서 일부 flow 계열 항목이 weak/fail 상태로 남았고, 기존 exhaustion 패턴은 deterministic fixture에서 희귀해서 unit test와 운영 신호가 drift를 일으켰다. same-bar exhaustion/reversal과 funding-flow confirmation을 분리해 신호 coverage를 넓히면서도 causal input과 compute budget을 유지했다.
-- **Edge Cases:** taker data가 없거나 invalid이면 flow-dependent panel이 fail-closed 되었고, mixed-valid row는 전체 row 실패로 오인하지 않았다. `flow_exhaustion_reversal`은 same-bar confirmation으로 단순화되어 event testability가 유지되었다.
-
-## L1-ADR-020: 저성과 신호 패밀리 제거 및 per-symbol ENS-DIAG 진단 도입 (2026-06-21)
-- **Delta:** `trend_donchian`(donchian_18/36), `oi_volume_impulse`, `oi_volume_confirmed_breakout`, `oi_price_divergence`, `oi_breakout_confirm`, `basis_zscore_reversion`, `basis_momentum`, `taker_exhaustion_reversal` 8개 family 제거. panel 수 40→31. `_log_signal_symbol_diagnostics` 신규 함수: ENS-FINAL에서 per-(archetype×family×symbol) DEBUG 진단 로그 + absent archetype WARNING 방출. `CandidateSignalPanel.archetype` 기본값 `"mean_rev"`→`""`로 변경하여 family 휴리스틱 우선 동작 보장.
-- **Rationale:** 8개 family 실증 p>0.34, possym<0.50으로 유의성 미달. flow 계열(`funding_flow_carry/unwind`, `flow_exhaustion_reversal`)로 대체하여 coverage 유지. per-symbol 진단으로 데이터와이어링 결함 조기 발견.
-- **Edge Cases:** `_log_signal_symbol_diagnostics`는 DEBUG off 시 O(1) noop. `symbol` 컬럼 부재 시 family rollup만 출력, possym="n/a". 빈 family는 진단에서 skip되어 zero-division 방지.
-
-## L1-ADR-019: MTF 패널 람다 클로저 late-binding 수정 (2026-06-21)
-- **Delta:** `build_rule_signal_panels`의 G1~(mtf_trend_pullback), G2(mtf_breakout_retest), G10(vol_term_structure_gate) 내부 `_compute_*_htf` 함수들에서 루프 변수 `_n_htf`/`_vts_win`을 기본 파라미터(`span=_n_htf` 등)로 캡처하여 Python late-binding closure 버그 수정. `funding_zscore_carry`(F2) 캐시 재사용 경로 통일(`_zscore_2d`→`funding_z_96`/`funding_z_168`). `taker_imbalance_momentum`(G7) CVD slope → `flow_imbalance` z-score로 전환하여 공유 캐시 재사용.
-- **Rationale:** 루프 내 정의 함수가 마지막 루프 값을 공유해 파라미터 오염 가능. flow 캐시 재사용으로 compute budget 절감.
-- **Edge Cases:** 단일 variant family(G4/oi_breakout_confirm)는 제거되어 영향 없음. F2/funding_zscore_carry는 window=48 variant가 `_zscore_2d` 호출 유지(별도 캐시 없음).
-
-## L1-ADR-013: L1/Universe 파이프라인 루프 불변식 호이스팅 + 벡터화 (2026-06-20)
-- **Delta:** (OPT-1) `align_data_maps` state_cube/readiness_cube 조인 루프에서 `np.searchsorted`/`positions`/`t_valid`/`p_valid` 를 심볼 루프 밖으로 호이스팅. pandas 3.0 bug fix: `calendar.as_unit("ns").asi8` 로 nanosecond epoch 강제. (OPT-2) `inject_membership_masks_into_maps` 진입 시 `_normalize_timeline()` 헬퍼로 timeline 1회 정규화 후 `build_membership_mask_bundle` 에 전달 (104회→1회). (OPT-3) `run_l1_nested_swf` 의 `volatility_2d` 컬럼 루프를 `pd.DataFrame.rolling().std(ddof=1)` 단일 행렬 호출로 대체. (OPT-6) `load_futures_data_maps_for_symbols` 말미 도달불가 중복 `return` 1줄 제거.
-- **Rationale:** PERF 실측(52 syms, 617K events): searchsorted N=52→1, timeline 정규화 104→1. 수치 결과·공개 시그니처 불변. pandas 3.0.2 `.asi8` microsecond 버그는 pre-existing silent production bug였음(unit 미강제 시 1000× 스케일 오류).
-- **Edge Cases:** pandas 3.0 호환: `as_unit("ns")` 없이 `.asi8` 사용 금지. `_normalize_timeline` 은 `norm_timeline=None` fallback으로 하위호환 유지. OPT-4(ablation twin diagnostics 5.66s) 기각 — bridge 3.4%, 게이트 정의 리스크 대비 절감 미미.
-
-## L1-ADR-012: Promotion Summary 로그 PASS/FAIL 분리 + 우측절단 진단 (2026-06-19)
-- **Delta:** `format_layer1_deployment_registry_table`에 `all_evidence` 파라미터 추가 → admit된 쌍은 `[L2-PASS] Q:hi/mid/lo` 전체 출력, 미admit 쌍은 `[NOT PROMOTED] N pairs | top: <reason>xN` 1줄 요약. `Layer1FoldReadiness`에 `dropped_by_maturity_count` 필드 추가 → Outer Fold 로그에 `[censored: N]` 노출. STATUS 어휘 PROMOTED/WATCH/REJECTED 제거 (오해 유발: "REJECTED"도 L2 전달됨). `pipeline.py` 호출부에 `all_evidence=deployment_evidence` 배선 완료.
-- **Rationale:** PROMOTION SUMMARY의 STATUS는 q_value 버킷 표시 전용이며 실제 L2 전달 게이트(`build_qualified_signal_registry`)와 무관. "REJECTED" 심볼도 전부 L2로 유입 → 과대-전달 오독 방지. Fold #3 Edge 30bps가 실제 약세인지 우측절단 편향인지 분리 불가 문제 해소.
-- **Edge Cases:** `all_evidence=()` 생략 시 기존 동작(FAIL 섹션 미출력) 보장. `dropped_by_maturity_count=0` 시 `[censored:]` 미노출.
-
-
-## L1-ADR-010: IC 제거 완성 + mu_quality_shrinkage dead-code 제거 (2026-06-19)
-- **Delta:** `predict_regime_conditional_ensemble`에서 `mu_quality_shrinkage` 블록(4줄) 제거. `mu_shrinkage_lambda` diagnostics 키 제거. `test_mu_quality_shrinkage_*` 테스트 2건 삭제. `test_auto_conditioning_exposes_diagnostics`에서 `mu_shrinkage_lambda` absent 검증으로 전환.
-- **Rationale:** L1-ADR-008(Accepted)에서 IC 계산 제거 후 `validation_rank_ic=0.0`이 항상 기본값 → `lam=clip(0/0.05,0,1)=0.0` → mu가 단면평균으로 붕괴 (신호 차별성 전멸). `mu_quality_shrinkage_enabled=False` 기본값이라 현재 실행에서는 무영향이었으나 silent landmine. 완전 제거.
-- **Edge Cases:** `mu_quality_shrinkage_enabled=True`로 켜던 외부 실험은 설정 무효화됨(기능 자체 삭제). `validation_rank_ic` 필드는 dataclass에 유지(진단용 0.0 기본값).
-
-## L1-ADR-009: PIT state_cube 통합 + lifecycle gate + capacity clip (2026-06-19)
-- **Delta:** `run_l1_nested_swf`에 `l2_start: date | None` 파라미터 추가. `SymbolLifecycleRecord` dataclass 도입(`fold_status`, `promotion_available_at`). `Layer1Result.symbol_lifecycle` 필드 추가. `active_mask`(state_cube 파생)로 per-symbol `promotion_available_at` 결정. `awf_sim` fit/OOS 루프에 `capacity_usdt` clip + 5 USDT min order.
-- **Rationale:** PIT universe state_cube가 L1 fold에 반영되지 않으면 all-True active_mask로 look-ahead 노출. Lifecycle gate는 `promotion_available_at > l2_start` 심볼이 L2 `oos_stacked`에 포함되는 것을 차단. Capacity clip은 micro-position 거래비용 현실화.
-- **Edge Cases:** `active_mask` all-True (stage6 경로 호환) → 모든 심볼 `promo_at = datetimes[l1_start_bars].date() <= l2_start` → 제외 없음(기존 동작 보존).
-
-## L1-ADR-008: IC 지표 제거 및 Probe-Only 검증 (2026-06-14)
-- **Delta**: Removed IC calculation (`spearmanr` calls, `opportunity_ic=None` always). Removed IC from ENS log output. Removed IC column from Outer Fold table. Kept `probe_bps`/`probe_lcb_bps` as sole profitability metrics.
-- **Rationale**: Arch-Only mode produces constant prediction arrays per archetype → Spearman IC = numerical noise. IC unmapped to gate inputs (5-Gate: fold_cov, match_ratio, sym_count, fold_ratio, probe_lcb_bps). Removed diagnostic noise. L1 passes 3/3 runs (Min-Profit 45-94 bps, t-stat 2.5-4.25). Test suite: 436 passed.
-- **Status**: Accepted
-
-## L1-ADR-007: Retention of Time-Series Selection and Rejection of Coupled Pooled IC (2026-06-14)
-- **Delta**: Retained default `l1_opp_ic_mode="time_series"` and reverted `pooled` mode changes. Fixed test suite to globally patch `ProcessPoolExecutor` to `ThreadPoolExecutor` for safe synchronous mocked test execution.
-- **Rationale**: Changing `l1_opp_ic_mode` to `"pooled"` coupled with `probe_series` logic, changing signal selection from high-performance symbol-wise time-series to noisy bar-wise cross-sectional selection, dropping edge from +45.7 bps to -0.45 bps (blocking L1). Reverted code changes to preserve original performance while maintaining unit test fixes.
-- **Status**: Accepted
-
-## L1-ADR-006: Deterministic Bootstrap Seeding for Layer 1 Folds (2026-06-14)
-- **Delta**: Replaced Python's built-in `hash()` with a SHA-256 byte-convert integer offset (`int.from_bytes(sha256(...).digest()[:4]) % 10000`) for L1 bootstrap seed generation.
-- **Rationale**: Built-in `hash()` is subject to process-level startup hash randomization. Replacing it with SHA-256 guarantees fully deterministic bootstrap seeds across runs/processes, ensuring perfect reproducibility of L1 validation.
-- **Status**: Accepted
-
-## L1-ADR-005: Layer 1 Hard Gate Reform (2026-06-14)
-- **Delta**: Relaxed `l1_min_realized_match_ratio` (1.0 $\rightarrow$ 0.9) and `l1_min_fold_ratio` (0.6 $\rightarrow$ 0.5). Added HHI-based `l1_sym_count_mode="effective_n"` ($\ge 3.0$) and `l1_probe_lcb_pooled=True` (pooled OOS bootstrap LCB). Relaxed fold-level gate from bootstrap LCB to gross edge positive check (`probe_bps > 0`).
-- **Rationale**: Solves the double-counting statistical penalty that rejected viable signals due to small-sample volatility in fold-level bootstrap estimations. Standardizes global validity on pooled samples while preserving robustness via HHI diversification.
-- **Status**: Accepted
-
-## L1-ADR-004: Outer Warm-Up Block Reservation (2026-06-14)
-- **Delta**: `build_l1_nested_swf_folds` changed `block_len = available//(n_folds+1)` → `available//(n_folds+warmup)` and `oos_start = l1_start+(fold_idx+warmup)*block_len`. `l1_outer_warmup_blocks=2` added to config. Diagnostic warning (`Counter(structural_reasons)`) added to `compute_symbol_strategy_evidence` when qualified=0.
-- **Rationale**: Anchored nested-SWF reserved only 1 block (~658 bars) before fold 0 OOS. With `l1_pair_min_folds=2` and `score_pct_variant_hist_window_bars=2160`, first snapshot was structurally underpowered (126 pairs, 0 qualified). warmup=2 expands fold 0 evidence window to ≈2×, recovering `ReadySyms:3, Probe:52bps`.
-- **Edge Cases**: OOS coverage shrinks by `n/(n+warmup)` (≈17%); net positive as fold 0 becomes evaluable. Look-ahead preserved: `exit_idx < as_of_idx` filter unchanged. Zero-warmup blocked via `validate()` guard.
-
-## L1-ADR-003: Prequential Evidence Grid Separation (2026-06-14)
-- **Delta**: Evidence fold count decoupled from outer fold count: `ev_n_folds = min(outer_n × l1_evidence_grid_multiplier, l1_evidence_max_folds)` replacing `min(wf_n_folds, 3)`. IC `None → 0.000` render bug fixed to `n/a`.
-- **Rationale**: Prior design produced identical grid spacing → fold 0 had 0 matured evidence pairs (starvation); fold 1 had single-fold evidence (`n_folds=1 < l1_pair_min_folds=2`) causing 100% qualification dropout despite 513 pairs. Multiplier=3 ensures ≥2 matured blocks before first outer OOS.
-- **Edge Cases**: Multiplier enforces effective floor of 3 regardless of config (< config=2 would undercut min_folds+1 invariant). `l1_evidence_max_folds=32` caps compute explosion under large outer_n.
-
-## L1-ADR-001: L1 Nested SWF 통계 유의성 및 MDES 기반 신호 선정 개선 (2026-06-13)
-- **Context**: 4/4 OUTER FOLDS가 `empty_opportunities`로 완전히 차단되던 통계적 소표본 병목 해결 목적.
-- **Decision**: 단순 임계치 강하 대신 표본 크기에 연동되는 Student's t-distribution 임계값($t_{\text{crit}}$)과 검정력 $80\%$ 기준의 MDES 필터링 공식을 도입하여 소표본 노이즈를 제어하고 유효 신호 기회들을 복구함.
-- **Status**: Accepted
-
-# Layer1 Signal Validation Restructure
-- Context: nested SWF repeated fit cost and regime-based sample fragmentation kept Layer1 underpowered even after gate fixes.
-- Decision: reuse causal prequential evidence snapshots keyed by `as_of_idx`, pool regime cells by default, and keep regime as risk overlay only.
-- Decision: preserve `quality_weight` in ranking while keeping compatibility `qualified` tied to `hard_eligible and quality_weight > 0.0`.
-- Consequence: production readiness now depends on `fold_cov`, `match_ratio`, `sym_count`, `fold_ratio`, and `probe_lcb_bps`; CPCV stays out of the production path.
-- Status: Accepted
-
-## L1-ADR-010: L1 Pipeline 성능 최적화 — Python loop 제거 및 vectorization (2026-06-18)
-- **Delta**: 4개 파일 최적화: (1) `_by_q_values` backward loop → `np.minimum.accumulate`, (2) `_compute_incremental_bps` agg+join → transform, (3) `compute_symbol_strategy_evidence` 중복 .copy() 제거 + bool mask 단일화 + sort=False, (4) `select_candidate_events_for_portfolio` per-group sort → pre-sort + itertuples() → cumcount().
-- **Rationale**: L1 PERF 실측 결과 (48.95s) 기반. `selection` 70-90%(1.1~3.7s/fold)와 `prep` 78-84%(0.6~1.6s/snapshot)가 주요 병목. 품질 훼손 없는 내부 알고리즘 최적화로 40~60% 단축 예상. + `--phase l1` 실행 시 `Layer1Result.labeled` 미존재로 인한 `AttributeError` 수정 (isinstance guard).
-- **Files Changed**: `opt_main_futures.py`, `signal_selection.py`, `candidate_portfolio.py`.
-- **Status**: Accepted
-
-## L1-ADR-009: L1 PERF(15) 로그 계층적 타이밍 시스템 도입 (2026-06-18)
-- **Delta**: `src.core.utils.utils.PERF=15` 로그 레벨을 모든 L1 서브페이즈에 적용. 기존 `logger.debug` → `logger.log(PERF)` 이관. 신규 마커 `[L1-CTX]`, `[L1-FOLD]`, `[CANDIDATE-FOLD]`, `[SIGNAL-EVIDENCE]`, `[AWF-PERF]` (`[L2-AWF-PROF]` 대체) 추가. `run_l1_nested_swf` evidence_snapshots 타이밍, outer fold per-fold 타이밍, candidate_workflow 워커 내 timing_profile PERF emit 추가. `signal_selection.py` evidence loop prep/stats/qualify 3단계 분해 타이밍. `awf_sim.py` DEBUG→PERF 마이그레이션 + per-fold 로그. `opt_main_futures.py` `"alo"/"full"` 레거시 phase 제거, L1-only 방어형 가드 `{"l2","l3"}` 도입.
-- **Rationale**: L1 병목탐지가 DEBUG(10) 레벨에 흩어져 있어 운영 중 실시간 모니터링 불가. PERF(15)로 통일하여 `--phase l1` 실행 시 계층적 소요시간 로그만으로 병목지점 식별 가능하게 함. 실제 54심볼 측정 결과 `selection` 70-90%, `SIGNAL-EVIDENCE.prep` 78-84%가 주요 병목으로 확인됨.
-- **Files Changed**: `pipeline.py`, `candidate_workflow.py`, `signal_selection.py`, `awf_sim.py`, `opt_main_futures.py`, `test_l1_determinism.py`.
-- **Status**: Accepted
-
-## L1-ADR-011: L1 성능 최적화 2차 — Numba JIT 도입 및 q-value 롤백 (2026-06-19)
-- **Delta**: 
-  - `candidate_dataset.py` 의 `_rolling_robust_z_1d`, `_rolling_robust_z_2d`, `_cross_sectional_robust_z_2d` 함수들을 Numba JIT (`@njit(cache=True)`)을 사용한 C레벨 고성능 연산 루프로 전면 재구현.
-  - `signal_selection.py` 의 `_by_q_values` FDR 조정을 기존 numpy vectorization 버전에서 루프 기반 백프로파게이션 방식으로 롤백.
-  - `pipeline.py` 의 tiered_workflow 로거에 `LOG_LEVEL=PERF` 동적 환경 변수 활성화 조건 추가.
-- **Rationale**: 
-  - 1차 성능 최적화 후에도 L1 Pipeline Total 소요시간이 47.90초로 큰 진전이 없었음.
-  - 초정밀 타이밍 프로파일링 분석 결과, 전체 실행 시간의 58.3%가 `prime_aligned_feature_cache` (27.78초) 한 곳에서 발생했으며, 이는 Pandas rolling apply(Python lambda) 연산 오버헤드가 원인이었음.
-  - 이를 Numba JIT로 가속하여 캐시 프라이밍 시간을 27.78초에서 **7.75초(72.1% 단축)**로 단축하고, L1 전체 소요시간을 47.64초에서 **25.17초(47.2% 단축)**로 단축시킴.
-  - 또한, N<=200 이하 소표본 환경에서 numpy slicing 오버헤드로 회귀를 일으켰던 `_by_q_values`를 루프 기반으로 롤백하여 정합성 복구 및 가속 효과를 순증으로 돌려놓음.
-- **Status**: Accepted
-
-
-## L1-ADR-013: Ingestion & Alignment Performance Optimization (2026-06-20)
-- **Delta:** 
-  - Changed parallel symbol loading in `opt_data_utils.py` from `ProcessPoolExecutor` to `ThreadPoolExecutor`.
-  - Added pre-conversion of meta columns (`pd.to_numeric`) at the initial ingestion phase in `load_single_symbol_data`.
-  - Bypassed redundant `pd.to_datetime` calls in `_resolve_tradeable_scope` using a fast `datetime64` type check.
-  - Optimized the meta column scanning loop in `align_data_maps` to scan NumPy-backed array views for non-NaN values, avoiding Series creation.
-- **Rationale:** 
-  - Loading 57+ symbols under `ProcessPoolExecutor` suffered from severe Python object serialization (pickling) overhead over IPC. Bypassing it via `ThreadPoolExecutor` yielded massive speedups since PyArrow/Pandas release the GIL during file decompression.
-  - Doing `pd.to_numeric` on 12 meta columns inside the alignment loop caused `S * M` Series allocations. Pre-converting at ingestion and using raw NumPy scanning during alignment optimized critical latency paths while keeping 100% data fidelity and look-ahead safety.
-- **Status**: Accepted
-
-## L1-ADR-016: L1 Parquet I/O 최적화 — baggage drop / numeric early exit / copy 제거 (2026-06-20)
-- **Delta:**
-  - (OPT-5) `DataCollector._load_cache`에서 `close_time`, `no_trades`, `ignore` 3개 Binance metadata 컬럼을 즉시 드롭. parquet 저장 전에 이미 정규화 완료되어 다시 string→numeric 변환이 필요 없는 컬럼.
-  - (OPT-6) `DataCollector._normalize_df`에 early exit guard 도입: 모든 non-datetime 컬럼이 numeric dtype이면 string→numeric loop를 skip. cache-read path에서 O(N) dtype 체크만 수행.
-  - (OPT-7) `DataCollector.collect_and_save(fetch_network=False)`에서 `.loc[mask].copy()`의 `.copy()` 제거 (boolean indexing은 항상 copy 반환).
-- **Rationale:** PRE-OPT baseline 101.98s vs POST-OPT 97.22s (실측, 57 symbols, `--phase l1 --sync skip`). 데이터 로딩 sub-stage 기준 ~25% 절감. OPT-1~4 합산 약 15-24s 단축 (101.98s → 97.22s 전체 대비는 pipeline L1 fold/ensemble 지배적). 3개 변경 모두 데이터 품질 0% 영향: L1 determinism 통과, strategy layer에 baggage column 참조 전무.
-- **Edge Cases:** `_load_cache` OPT-5는 `if c in df.columns` guard로 스키마 불일치 시 안전. `_normalize_df` OPT-6은 `if non_dt` guard로 datetime-only DataFrame 처리. `collect_and_save` OPT-7은 `fetch_network=True` 경로에 영향 없음 (해당 경로는 `.copy()` 사용 안 함).
-- **Status:** Accepted
-
-## L1-ADR-015: L1 Post-SKIP 병목 제거 — raw_df.copy/audit/coverage CPU 최적화 (2026-06-20)
-- **Delta:**
-  - (OPT-1) `load_single_symbol_data` — `raw_df.copy()`를 `needs_merge` 조건으로 게이트. funding/metrics 모두 None이면 copy 생략 (view 참조). merge 필요 시 copy 경로 유지.
-  - (OPT-2) `_to_unix_ms` 호출을 TF당 1회로 축소. `needs_merge` 블록 내에서 1회 계산 후 `df["timestamp"]`로 재사용 (기존: funding/metrics merge 각각 1회씩 2회 중복).
-  - (OPT-3) `_append_stage_integrity("merged")`에서 `summarize_ohlcv_collection_integrity` 대신 `{rows, cols}`만 저장. downstream `load_futures_data_maps_for_symbols`의 `audit_df.groupby`는 존재하는 컬럼만 조건부 선택하여 `KeyError` 방지.
-  - (OPT-4) `_feature_group_coverage`에 `_COL_GROUP_CACHE` 모듈-레벨 캐시 도입. `(tf_label, frozenset(col_lower))` 키로 column→group 매핑을 TF 세션당 1회 pre-compute. 동일 컬럼셋 심볼에 대해 O(C×P)→O(C) 단축.
-  - (Hotfix) `_to_unix_ms` pandas 3.x 호환: tz-aware datetime에 `tz_localize(None)` guard 후 `.astype("datetime64[ns]")` 적용 (`DataCollector._normalize_df`가 tz-aware UTC 반환).
-- **Rationale:** `[SKIPPED]` ledger sync 로그 후 `SYSTEM CONTEXT` 대시보드 도달까지 평균 ~40-50s 소요. 실측 trace 결과 `load_futures_data_maps_for_symbols`가 95% 이상 점유. 4개 OPT로 50심볼 기준 약 10-19s 단축 예상 (~20-30s). 잔여 20-30s는 PyArrow parquet I/O (hard floor).
-- **Edge Cases:** OPT-3 merged audit에서 `audit_df` groupby가 integrity 컬럼(NaN%, gap, duplicate) 부재 시 `KeyError` 발생 — 존재하는 컬럼만 선택하도록 조건부 처리 완료. pandas 3.x `to_unix_ms` tz-aware guard 없으면 `astype("datetime64[ns]")` 실패 — `tz_localize(None)` 도입으로 해결.
-- **Status:** Accepted
-
-## L1-ADR-014: L1 데이터 준비 병목 최적화 — Numba 및 DatetimeIndex.isin 기반 최적화 (2026-06-20)
-- **Delta:** 
-  - `membership.py`에 Numba `@njit` 가속화된 `_calculate_warm_ready_numba`를 도입하여 Pandas groupby-cumsum 루프를 대체하였고, `build_membership_mask_bundle` 내 날짜비교를 `pd.Timestamp`와 `DatetimeIndex.isin` 기반 벡터화로 고속화하여 `datetime.date` 객체 생성 오버헤드를 우회함.
-  - `opt_data_utils.py` 내 `_feature_group_coverage`에서 수치형 컬럼의 to_numeric 강제 변환을 우회하고, 1분 데이터 로딩 시 이미 monotonic/datetime64인 경우 정렬 및 타입 변환을 생략하도록 정돈함.
-- **Rationale:** 
-  - `[SKIPPED]` 로그 출력 후 `SYSTEM CONTEXT` 대시보드 도달 전까지의 극심한 데이터 딜레이를 유발하던 Pandas Object 배열 생성 및 groupby cumsum 병목과 피처 타입 변환 오버헤드를 우회하여 데이터 로딩 파이프라인의 Latency를 획기적으로 낮춤.
-- **Status:** Accepted
-
-## L1-ADR-021: CRY/FLO 안정화 신호 3종 추가 및 positioning_unwind warm-up barrier (2026-06-21)
-- **Delta:**
-  - `build_rule_signal_panels`에 신규 패널 3종(`funding_term_structure_carry`, `flow_trend_continuation`, `lsr_oi_regime_filter`)을 G9e/G9f/G9g로 추가.
-  - `positioning_valid`에 `positioning_warm[:96]=False` barrier 도입.
-  - `funding_ts_slope = funding_z_96 - funding_z_168`를 shared feature cache에 등록.
-  - `CandidateStrategyConfig.candidate_families` 및 `ensemble_variant_prior_families`에 3종 family 등록.
-- **Rationale:**
-  - CRY 패널이 EVT 37K 구간에서 -35.5❌로 붕괴하는 원인이 funding 절대레벨 신호 단일 의존이었음. `funding_term_structure_carry`(가속도 기반)로 다각화하여 변동성 완화.
-  - FLO 패널이 13.9~35.8 bps로 불안정: `flow_exhaustion_reversal`(반전)만 존재 → `flow_trend_continuation`(추세 연속) 추가로 패널 다양화.
-  - UNW 패널이 EVT 37K 구간에서 -8.4❌: z-score window(42/96/168)가 채워지기 전 noise 진입. 96-bar warm-up barrier로 사전 차단.
-  - `lsr_oi_regime_filter`는 LSR+OI 극단 국면을 식별하여 conditioning score로 전달, BTN 경로를 통해 TRD/MRV 간접 게이트 역할.
-- **Status:** Accepted
-
-## L1-ADR-022: FLO 회귀 수정 — flow_trend_continuation archetype 재분류 및 lsr_oi_regime_filter 활성화 (2026-06-21)
-- **Delta:**
-  - `flow_trend_continuation` archetype `flow_rev`→`ts_mom`, regime `flow_trend_continuation`→`flow_momentum_continuation`으로 변경.
-  - `lsr_oi_regime_filter` side_hint 기본값 `0`→`np.where(_loi_regime_entry, -np.sign(lsr_log_z_42).astype(np.int8), 0)`, stop_atr_mult `0.0`→`1.5`, take_profit_atr_mult `0.0`→`2.0`으로 변경하여 conditioning gate에서 tradable signal로 전환.
-  - `positioning_warm[:96]`→`[:168]`으로 warm-up barrier 확장.
-  - FLO 결과: `+18.9 → +28.5 bps` (+9.6 bps), TOTAL `+54.5 → +54.3 bps` (noise).
-- **Rationale:**
-  - L1 최종 실행 결과 FLO가 +28.7→+12.1로 -16.6 bps 회귀. 원인은 `flow_trend_continuation`이 `flow_rev`(FLO) archetype에 배정되어 momentum 신호가 reversion archetype을 오염시킨 것. `ts_mom`(TMO)으로 재분류하여 reversion dilution 해소.
-  - `lsr_oi_regime_filter` side_hint=0이면 BTN 신호 조건부 gate(score만 있고 방향 없음)로 이벤트 생성 불가 → -np.sign(lsr_log_z_42) 방향성 부여로 활성화.
-  - `positioning_warm[:168]`: longest z-score window(168)로 정합, z-score pre-warm 완전 보장.
-- **Edge Cases:**
-  - archetype 변경으로 TMO `+52.7→+50.3 bps`(-2.4) 일부 dilution 발생, FLO 복구를 위한 자연스러운 trade-off.
-  - `-np.sign(lsr_log_z_42)`: lsr_log_z_42=0일 때 sign=0 → side_hint=0 유지, 조건부 미활성 보존.
-- **Status:** Accepted
-
-## L1-ADR-023: Small-Sample ENS Stabilization — Bayesian Prior & Min Display Threshold (2026-06-21)
-- **Delta:**
-  - `_fit_cell_means`에 `prior_effective_n`, `prior_mean_bps` 파라미터 추가. 모든 _fit_cell_means 호출에 eb_fit_kwargs를 통해 전파.
-  - archetype/archetype_regime 루프에서 JS shrinkage 전에 Bayesian prior 적용: `raw_mean = w_prior * raw_mean + (1-w_prior) * prior_mean_bps`, where `w_prior = n_eff / (n_eff + prior_effective_n)`.
-  - `_log_ensemble_diagnostics`에 `min_display_events` 파라미터 추가. archetype event count가 threshold 미만이면 `insuf` 표시.
-  - 신규 config: `l1_ens_prior_effective_n: float = 0.0`, `l1_ens_min_display_events: int = 0`.
-- **Rationale:** 초기 `[ENS]` 로그에서 TRD -18.4❌는 단 3,432 events에서 추정된 noise. prior_n=100, prior_mean=0을 적용하면 n이 작을 때 edge가 0으로 수축 → 거짓 음성 기만 방지. n이 충분하면 prior 영향이 소멸되어 수렴 보존. min_display_events는 충분한 데이터가 쌓이기 전까지 archetype edge 자체를 숨겨 사용자 오독 방지.
-- **Edge Cases:** prior_effective_n=0 (default) → 완전 backward compatible. 기존 동작에 영향 없음. prior는 JS 이전에 적용되므로 JS k가 0이어도 prior만 독립 적용됨.
-- **Status:** Accepted
-
-## L1-ADR-024: Adaptive Evidence Gate & Promotion Advisory Mode (2026-06-21)
-- **Delta:**
-  - `compute_symbol_strategy_evidence`에 `snapshot_index: int = -1` 파라미터 추가. early snapshot (index < `l1_evidence_early_snapshots`)에서 `l1_pair_min_effective_obs` / `l1_pair_min_folds` threshold를 relaxed 값으로 대체.
-  - `build_l1_prequential_evidence_snapshots`에서 `snapshot_offset`을 `snapshot_index`로 전달.
-  - `apply_variant_promotions`의 fail-closed(empty 반환)를 advisory pass-through(원본 반환)로 변경. warning → info 로그 레벨 변경.
-  - 신규 config: `l1_evidence_early_snapshots: int = 0`, `l1_pair_min_effective_obs_early: float = 2.0`, `l1_pair_min_folds_early: int = 1`.
-- **Rationale:** fold 0은 심볼 21개, fold당 이벤트 수가 적어 strict gate(eff_obs≥5, folds≥2) 통과가 어려움. early snapshot에서 gate를 완화하면 적은 fold 데이터로도 registry 진입이 가능해지고, 이후 `quality_weight`가 probability_positive 기반으로 자연 필터링하므로 noise가 L2까지 도달하지 않음. Promotion filter는 L1 SWF의 evidence computation과 중복 필터링이므로 advisory로 전환하여 혼선 제거.
-- **Edge Cases:** l1_evidence_early_snapshots=0 (default) → disabled, 항상 strict gate 사용. deployment-level compute_symbol_strategy_evidence 호출 (run_l1_nested_swf L1053)은 snapshot_index 없이 호출 → -1 default → strict gate 적용. promotion filter advisory 모드에서 caller(ablation.py/bridge.py)의 `labeled.empty` guard는 pass-through 시 full data를 받으므로 pipeline 정상 진행.
-- **Status:** Accepted
-
-## L1-ADR-032: TF-Specific Signal Pools & 6 New Signal Families (2026-06-22)
-- **Delta:** Added `family_filter` parameter to `build_rule_signal_panels`. Added 6 new signal families (gap_fade_1h, vwap_reversion_1h, volume_climax_1h, macd_4h, supertrend, ichimoku_trend) with TF-specific assignment. Added `per_tf_candidate_families`, `per_family_params`, `per_tf_signal_pool_enabled` fields to `CandidateStrategyConfig`. Added `_DEFAULT_PER_TF_FAMILIES` and `_DEFAULT_PER_FAMILY_PARAMS` constants. Added `_vwap_2d` (cumsum rolling VWAP) and `_supertrend_2d` (iterative band state machine) helper functions.
-- **Rationale:** 모든 TF에 31개 공통 패널을 주입하던 구조는 1h에서 0/1995 winning을 기록할 정도로 TF별 신호 특성을 무시했다. Mean-rev 전략은 1h에서 유효하지만 trend 전략은 노이즈, 반대로 12h에서는 trend가 유효하다. TF별 optimal signal pool을 분리하고 crypto-native 전략(gap fade, VWAP reversion, volume climax)과 고전적 trend 전략(MACD, SuperTrend, Ichimoku) 6종을 추가하여 coverage를 확장한다.
-- **Edge Cases:** family_filter=None (default)로 모든 기존 caller는 31개 전 패널 생성 — 하위 호환 100% 유지. per_family_params 키 누락 시 기본 params 사용. supertrend/ichimoku는 local trend 방향성(binary score)만 제공, long holding으로 turnover 낮음.
-- **Status:** Accepted
-
-## L1-ADR-031: TF Probe Detail-Level Fixes — LTF Signal Aggregation, Metadata Preservation, Holding-Bar Cost Correction (2026-06-22)
-- **Delta:**
-  - `_project_panel_to_base_grid`에 `ltf_mode` 키워드 파라미터 추가. `"last"`(기존 searchsorted)는 하위 호환 유지, `"mean"` 모드는 cumsum 기반 window aggregation으로 window 내 모든 LTF 예측값을 평균 집계. `side`는 bincount mode 사용.
-  - `_resample_ohlcv` 및 `_resample_probe_source_frame`의 agg dict에 `RESAMPLE_METADATA_BOOL_COLS`(max)와 `RESAMPLE_METADATA_FLOAT_COLS`(mean)을 추가하여 universe metadata(warm_mask, cluster_id 등)가 resample 과정에서 보존되도록 수정.
-  - `_compute_net_edge_bps`에 `holding_bars` 키워드 파라미터 추가. 수식 변경: $\text{net} = \text{gross} - \bar{t/o} \cdot \text{holding\_bars} \cdot \text{cost}$. caller `_probe_tf_worker`에서 `holding_bars=h_hold` 전달.
-  - `timeframe_contracts.py`에 `RESAMPLE_METADATA_BOOL_COLS`, `RESAMPLE_METADATA_FLOAT_COLS` 공유 상수 정의.
-- **Rationale:** LTF(1h, 2h) 신호는 searchsorted로 마지막 bar만 선택되어 50~75% 정보 손실. Resample 시 metadata drop으로 probe 통계 과대평가. net_edge 수식에 holding_bars 누락으로 장기 신호 비용 과소평가.
-- **Edge Cases:** ltf_mode="mean" window 경계는 `closed="right"` semantics (pandas resample 일관성). 단일 base bar window는 `hpb_base` 기반 interval fallback. metadata 컬럼 부재 시 agg dict는 무시되어 기존 동작 보존. holding_bars 기본값 1로 기존 caller 영향 없음.
-- **Status:** Accepted
-
-## L1-ADR-025: TF Probe Virtual Source Resample & Bridge Wiring Correction (2026-06-22)
-- **Delta:**
-  - `_run_data_stage`에서 `TF_PROBE_GRID`를 `load_futures_data_maps_for_symbols(target_tfs=...)`로 전달하지 않도록 변경하고, probe TF coverage는 source TF 기준 로그로 분리했다.
-  - `bridge.py`에 virtual probe TF resample 경로를 추가했다. `2h/6h/8h/12h`는 cached `1m/5m/15m/30m/1h/4h` source frame에서 생성되고, projected panel에는 base-grid guard mask를 다시 적용했다.
-  - `_run_strategy_stage`에서 tiered bridge 호출 전에 `_run_tf_probe_stage()`를 실행하도록 순서를 조정하고, `winning_cells`를 `run_active_strategy_output_bridge(extra_probe_cells=...)`로 전달했다.
-  - `ENABLE_TF_PROBE` 기본값을 `False`로 두어 일반 `--phase l1` 경로가 probe 옵트인 상태가 되도록 맞췄다.
-- **Rationale:** virtual TF를 디스크 parquet처럼 취급하면 `2h/6h/8h/12h`가 비어 있는 환경에서 `data_not_ready`가 발생했다. 실제 운영 의도는 source TF만 저장하고 virtual TF는 런타임에서 resample하는 것이므로, data-stage와 bridge-stage의 책임을 분리하고 probe 결과가 실제 signal injection까지 전달되도록 wiring을 복구했다.
-- **Edge Cases:** source TF가 없으면 해당 virtual TF는 조용히 skip한다. base-grid guard는 projected probe panel에 재적용하여 membership/readiness 우회를 막는다. tiered 경로에서만 probe를 주입하며, probe 비활성화 시 기존 base-only 동작을 유지한다.
-- **Status:** Accepted
-
-## L1-ADR-033: L1 Gate Fairness — Quality Weight Floor, Probe Prior Boost, Per-TF Gate Overrides (2026-06-22)
-- **Delta:**
-  - `CandidateStrategyConfig`에 `l1_qw_floor`, `l1_qw_probe_boost`, `per_tf_gate_overrides`, `per_tf_gate_enabled` 4개 필드 추가.
-  - `compute_symbol_strategy_evidence`의 quality_weight 계산에 qw_floor 적용: `qw = max(l1_qw_floor, 계산된_qw)`. FDR hard reject (q > alpha)는 qw_floor보다 우선함 (binding).
-  - `build_qualified_signal_registry`에 `probe_prior_map` 파라미터 추가: Probe winning cell 신호의 quality_weight를 `l1_qw_probe_boost`(default 0.3)까지 상향.
-  - `apply_tf_gate_overrides(cfg, tf)` 헬퍼를 `config.py`에 추가: TF별 gate threshold 동적 오버라이드 (1h 완화, 12h 강화).
-  - `_DEFAULT_PER_TF_GATE_OVERRIDES` 상수 추가: 1h/2h는 `l1_pair_min_effective_obs`, `l1_min_sym_count`, `l1_min_fold_ratio`, `l1_min_realized_match_ratio` 완화; 12h는 `l1_pair_min_effective_obs` 강화.
-  - `bridge.py`에 `build_probe_prior_map` 헬퍼 추가: probe manifest → `{(family, variant, symbol): qw_floor}` 변환.
-  - `run_l1_nested_swf`에 `probe_prior_map` + `tf` 파라미터 추가; 내부에서 `_cfg_effective`를 통해 gate override 적용 후 `build_qualified_signal_registry`에 전달.
-- **Rationale:** L1 평가 체계에서 quality_weight_zero 954건의 통계적 과잉 탈락 발생. P(μ>0)이 0.51에 근접해도 sample_scale × fold_ratio 곱으로 인해 quality_weight가 0.001~0.003 수준으로 붕괴하여 등록 게이트 통과 불가. qw_floor는 최소 생존 가중치를 보장. Probe winning cell 정보는 기존에는 L1 게이트에 반영되지 않아 signal injection에도 불구하고 L1에서 이중 탈락하는 문제 해결. TF별 gate threshold는 1h처럼 bar 수가 많은 단기 TF의 noise 과잉 차단을 보정하고, 12h처럼 bar 수가 적은 장기 TF의 통계 안정성을 강화.
-- **Edge Cases:** FDR hard reject는 qw_floor보다 우선 — 통계적 위양성 차단. qw_floor=0.0 (default)는 완전 하위 호환. per_tf_gate_overrides=None 시 identity 반환 (변경 없음). probe_prior_map이 없거나 probe non-winner 신호는 boost 없음 (거짓 양성 없음).
-- **Status:** Accepted
-
-## L1-ADR-034: Per-TF L1 Pipeline — TF Architecture V2 (2026-06-22)
-- **Delta:**
-  - `run_tiered_pipeline` 시그니처 변경: `tf: str = "4h"` 제거, `l1_tfs: tuple[str, ...]` + `per_tf_data_maps: dict[str, AlignedMarketData]` + `probe_manifest: list[dict[str, Any]]` 파라미터 추가.
-  - `CandidateStrategyConfig`에 `l2_master_tf: str | None` 필드 추가.
-  - config.py에 `PerTfL1Result` dataclass + `resolve_tf_signal_pool(cfg, tf)` + `resolve_tf_gate_overrides(cfg, tf)` 헬퍼 추가.
-  - pipeline.py에 `run_per_tf_l1`, `_resolve_l2_master_tf`, `_aggregate_per_tf_l1` 함수 추가. `run_per_tf_l1`은 `resolve_tf_signal_pool`로 TF별 signal pool을 필터링하고 `apply_tf_gate_overrides`로 gate threshold를 적용한 후 `run_l1_nested_swf`를 호출한다. `_resolve_l2_master_tf`는 4-tier priority로 L2 실행 TF를 선정한다 (cfg.l2_master_tf → L1 winning signals → probe winning cells → "8h"). `_aggregate_per_tf_l1`은 per-TF L1의 `oos_stacked`를 병합하고 `gate_passed=any`로 통합 Layer1Result를 생성한다.
-  - bridge.py: `run_candidate_strategy_for_universe`에서 `extra_probe_cells` 파라미터 및 `_build_probe_extra_panels` L1 주입 블록 제거. Probe는 L2 master TF 선정용 `probe_manifest`로만 사용.
-  - Caller 업데이트: `strategy_service.py` (extra_probe_cells 제거), `opt_main_futures.py` (tf→l1_tfs, probe_manifest 전달).
-- **Rationale:** 기존 단일-TF(`tf="4h"`) L1 구조는 1h/12h 등 다양한 TF의 고유 신호 특성을 포착하지 못하고 bridge의 `_build_probe_extra_panels` 우회 주입 경로로만 대응했다. Per-TF native L1은 각 TF에서 독립적으로 signal pool filtering + gate override + L1 validation을 수행하고, 실증적 최적 TF에서 L2를 실행한다. bridge의 probe panel 주입 경로는 중복 위험(probe panel이 L1 gate를 이중 통과)이 있어 제거한다.
-- **Edge Cases:** `per_tf_data_maps=None` (backward compat) 시 첫번째 `l1_tfs` 요소만 실행. `per_tf_candidate_families=None`이면 `candidate_families` global fallback 사용. `per_tf_gate_overrides=None`이면 global gate threshold 유지. `_resolve_l2_master_tf(cfg, {}, {})`는 "8h"로 fallback. `probe_manifest`에 is_winner=True인 셀이 없으면 probe path 건너뜀.
-- **Status:** Accepted
-
-## L1-ADR-037: L1 성능 최적화 v3 — P5 ThreadPool 롤백 + PERF 로깅 2건 보강 (2026-06-23)
-- **Delta:**
-  - **P5-R**: `l1_prequential_evidence_snapshots`에서 `ThreadPoolExecutor` 제거 → 순차 루프로 복원. CPU-bound numpy/scipy 연산(ewm stats, block bootstrap)이 GIL 경합 + L1 cache thashing으로 인해 4-8x 개별 태스크 지연을 유발하여 오히려 순차보다 느렸던 역효과를 해소. 순차 복원 시 TF당 prequential 11.4s→7.9s로 회복(-31%).
-  - **PERF-GAP1**: `candidate_workflow.py`의 `[WORKER-CALC]` debug 로그를 `[PERF] worker_calc`로 승격. 메모리 추정값(frame_gb, estimated_proc_gb, available_gb)과 worker 결정 로직 노출.
-  - **PERF-GAP2**: `pipeline.py`에 `[PERF] l1_nested_ipc_collect` 타이머 추가. `parallel_exec` 내에서 IPC + fold compute 시간과 pool setup/submit 시간을 분리 측정. v3 실측: `parallel_exec=17.85s`, `ipc_collect=17.55s`, pool_setup=0.30s (비율 1.7%).
-- **Rationale:** v2 실측에서 prequential snapshot 시간이 11.4s로, 이전 baseline(7.9s)보다 44% 증가한 것을 발견. ThreadPoolExecutor(n=6)가 GIL 경합으로 CPU-bound 작업을 직렬보다 느리게 만드는 역효과 확인. 또한 v2 PERF coverage에서 unaccounted 1.0s/119.2s(0.8%)로 low였으나, worker 결정 로직과 IPC overhead가 blind spot으로 남아 있었음. v3 실측 결과 L1 Tiered 119.2s→108.6s(-9%), Grand Total 164.3s→152.8s(-7%), unaccounted <3% 유지.
-- **Edge Cases:** `executor.shutdown(wait=True)` 제거로 TF당 약 0.3s pool teardown overhead도 자연 제거됨. ThreadPoolExecutor가 import-level에 남아 다른 경로(load_futures_data_maps_for_symbols의 I/O thread)에 영향 없음.
-- **Status:** Accepted
-
-## L1-ADR-036: Multi-TF Layer1 Signal Redesign — TF-PROBE 제거 및 native_tf 기반 직접 분기 (2026-06-22)
-- **Delta:**
-  - `config.py`: `CandidateStrategyConfig`에 `l1_tfs: tuple[str, ...] = ("4h", "6h", "8h", "12h")` 필드 추가.
-  - `bridge.py`:
-    - `_build_probe_extra_panels` → `build_multi_tf_panels`로 재작성. `probe_cells`/`inject_full_grid` 인자 제거, `tfs`/`family_pool`/`htf_only` 인자로 대체. `metadata["native_tf"] = tf_i` 태깅. `base_guard` 마스크 유지.
-    - `run_candidate_strategy_for_universe`: `labeled_all["native_tf"] = tf` 후 `build_multi_tf_panels` 호출 → HTF 이벤트 생성 → `pd.concat`으로 `labeled_all` 통합.
-  - `pipeline.py`:
-    - `run_per_tf_l1`: `family.isin(_tf_families)` → `native_tf == tf` 필터.
-    - `_aggregate_per_tf_l1`: `oos_stacked` key에 `f"{tf}::"` 프리픽스로 TF간 충돌 방지.
-  - `opt_main_futures.py`: `_run_tf_probe_stage` 호출 제거. `l1_tfs=(run_config.timeframe,)` → `l1_tfs=tuple(tiered_cfg.l1_tfs)`. `probe_manifest`/`probe_diversity_corr`/`_active_probe` 참조 제거.
-- **Rationale:** TF-PROBE 게이트(IC 사전필터)가 희소 트리거 전략에서 유효하지 않음. 멀티-TF L1 전량 실행은 i5-13600k 병렬 예산 내에서 충분. HTF(6h/8h/12h) 투영은 forward-fill(`searchsorted`)로 look-ahead-free. `native_tf` 컬럼으로 per-TF L1 정확한 서브셋 검증 보장.
-- **Edge Cases:** `l1_tfs` 기본값 보유로 기존 config와 100% 하위 호환. `native_tf` 컬럼 없는 labeled_events는 fallback 전량 통과. `htf_only=True`로 LTF(1h/2h) 투영 손실 차단 (Phase 2까지 보호).
+## Phase 4: 후반 최적화 v2~v3 (ADR-035~037, 6/22~23)
+- L1 Gate+Signal Pool Optimization: per_TF_gate_overrides 자동 fallback, fdr_alpha 0.10→0.15, qw_floor 0.05, 2h trend_ma 제거
+- OOM 방지: resolve_safe_nested_workers adaptive cap(max_workers=min(cpu_limit-2,8), oversubscription guard), fork 내 gc.disable()
+- P5-R: prequential ThreadPoolExecutor 제거→순차 복원(GIL+cache thrashing 역효과, 11.4→7.9s/TF, -31%)
+- PERF-GAP1: [WORKER-CALC]→[PERF] worker_calc(memory 추정+worker decision 노출)
+- PERF-GAP2: [PERF] l1_nested_ipc_collect(IPC+fold compute vs pool_setup 분리)
+- v3 실측: L1 108.6s(-52% vs baseline), Grand Total 152.8s(-49%), EXIT_CODE=0
