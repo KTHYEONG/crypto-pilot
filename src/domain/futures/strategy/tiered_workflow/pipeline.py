@@ -55,7 +55,7 @@ def _get_rss_mb() -> float:
     except Exception:
         return -1.0
     return -1.0
-from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+from src.domain.futures.strategy.tiered_workflow.awf_sim import (  # noqa: E402
     _run_awf_simulation,
     _stack_oos_signals,
 )
@@ -112,6 +112,7 @@ from src.domain.futures.strategy.tiered_workflow.signal_selection import (
     evaluate_outer_signal_opportunities,
     fit_layer1_inference_artifact,
     predict_layer1_signals,
+    predict_layer1_signals_multi_tf,
     select_outer_symbol_opportunities,
 )
 from src.domain.futures.strategy.walk_forward import WFFold
@@ -1901,18 +1902,74 @@ def run_per_tf_l1(
     return PerTfL1Result(tf=tf, l1_result=l1, n_winning_signals=len(l1.oos_stacked))
 
 
+def _tf_hours(tf: str) -> float:
+    """TF 문자열 → 시간 단위 숫자 (정렬 기준).
+
+    Args:
+        tf: Timeframe 문자열 (예: ``"4h"``, ``"12h"``).
+
+    Returns:
+        TF의 시간 단위 (float). 파싱 실패 시 999.0 반환.
+    """
+    import re as _re
+    m = _re.match(r"^(\d+)(h|m|d)$", tf.lower())
+    if not m:
+        return 999.0
+    val = float(m.group(1))
+    unit = m.group(2)
+    if unit == "h":
+        return val
+    if unit == "m":
+        return val / 60.0
+    return val * 24.0  # "d"
+
+
+def _tf_edge_quality(r: PerTfL1Result) -> float:
+    """Edge quality score for TF selection: Σ quality_weight×oos_edge_bps over valid strategies.
+
+    Prefers TF with highest weighted edge, not raw signal count (avoids 4h-balanced bias).
+
+    Args:
+        r: PerTfL1Result for a single TF.
+
+    Returns:
+        Weighted edge quality score (higher is better).
+    """
+    panel = r.l1_result.strategy_panel
+    if not panel:
+        # fallback: n_winning_signals (정규화)
+        return float(r.n_winning_signals)
+    total: float = 0.0
+    for s in panel:
+        if s.valid and s.oos_edge_bps > 0.0:
+            total += s.oos_edge_bps
+    return total
+
+
 def _resolve_l2_master_tf(
     cfg: CandidateStrategyConfig,
     per_tf_l1: dict[str, PerTfL1Result],
     probe_manifest: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Resolve the master timeframe for Layer 2 execution."""
+    """Resolve the master timeframe for Layer 2 execution.
+
+    Selection criterion: Σ oos_edge_bps (valid strategies) — edge quality, not signal count.
+    This prevents 4h-balanced TF from winning on count while carrying weak edge.
+
+    Args:
+        cfg: Strategy config (l2_master_tf override takes precedence).
+        per_tf_l1: Per-TF L1 results.
+        probe_manifest: Probe cell manifest (fallback).
+
+    Returns:
+        Master TF string (e.g. ``"8h"``).
+    """
     if cfg.l2_master_tf:
         return cfg.l2_master_tf
 
     if per_tf_l1:
-        best_tf = max(per_tf_l1, key=lambda t: per_tf_l1[t].n_winning_signals)
-        if per_tf_l1[best_tf].n_winning_signals > 0:
+        best_tf = max(per_tf_l1, key=lambda t: _tf_edge_quality(per_tf_l1[t]))
+        if _tf_edge_quality(per_tf_l1[best_tf]) > 0.0:
             return best_tf
 
     if probe_manifest:
@@ -1953,12 +2010,19 @@ def _aggregate_per_tf_l1(
 
     gate_passed = any(r.l1_result.gate_passed for r in per_tf_l1.values())
 
-    artifacts = [
-        r.l1_result.inference_artifact
-        for r in per_tf_l1.values()
+    # artifacts_by_tf: 모든 TF artifact 보존 (multi-TF signal 예측 핵심).
+    # inference_artifact: 가장 fine TF(정렬 기준 첫번째) → annualization 기준 유지.
+    artifacts_by_tf: dict[str, Any] = {
+        tf: r.l1_result.inference_artifact
+        for tf, r in per_tf_l1.items()
         if r.l1_result.inference_artifact is not None
-    ]
-    merged_artifact = artifacts[0] if artifacts else None
+    }
+    # sorted TF 중 가장 fine(숫자 작은 시간 단위)를 base TF artifact로 선택
+    merged_artifact = (
+        artifacts_by_tf[min(artifacts_by_tf, key=lambda t: _tf_hours(t))]
+        if artifacts_by_tf
+        else None
+    )
 
     lifecycles = [
         r.l1_result.symbol_lifecycle
@@ -1972,6 +2036,7 @@ def _aggregate_per_tf_l1(
         gate_passed=gate_passed,
         oos_stacked=oos_stacked,
         inference_artifact=merged_artifact,
+        artifacts_by_tf=artifacts_by_tf,
         symbol_lifecycle=merged_lifecycle,
         signals_per_fold=first.signals_per_fold,
         pooled_ic=first.pooled_ic,
@@ -2099,7 +2164,9 @@ def run_tiered_pipeline(
             )
             t_folds = time.perf_counter()
 
-            defer_artifact_tf = len(per_tf_l1) > 0  # skip artifact on all but first TF
+            # l2_multi_tf_enabled=True(default) → 전 TF artifact 빌드. False → 첫 TF만 빌드(구 동작).
+            _multi_tf_enabled: bool = bool(getattr(cfg, "l2_multi_tf_enabled", True))
+            defer_artifact_tf = (not _multi_tf_enabled) and (len(per_tf_l1) > 0)
             per_tf_l1[tf] = run_per_tf_l1(
                 tf=tf,
                 labeled_events=labeled_events,
@@ -2238,15 +2305,26 @@ def run_tiered_pipeline(
 
     l2_config = Layer2AllocationConfig.from_mapping(l2_params)
     t_l2_pred = time.perf_counter()
-    l2_signal_batch = predict_layer1_signals(
-        artifact=l1.inference_artifact,
-        candidate_events=labeled_events,
-        aligned=aligned,
-        start_idx=_l2_start_idx,
-        end_idx=ho_start_idx_l2,
-        cfg=cfg,
-    )
-    logger.log(PERF, "[PERF] predict_layer1_signals took=%.4fs", time.perf_counter() - t_l2_pred)
+    _l2_multi_tf: bool = bool(getattr(cfg, "l2_multi_tf_enabled", True))
+    if _l2_multi_tf and l1.artifacts_by_tf:
+        l2_signal_batch = predict_layer1_signals_multi_tf(
+            artifacts_by_tf=l1.artifacts_by_tf,
+            candidate_events=labeled_events,
+            aligned=aligned,
+            start_idx=_l2_start_idx,
+            end_idx=ho_start_idx_l2,
+            cfg=cfg,
+        )
+    else:
+        l2_signal_batch = predict_layer1_signals(
+            artifact=l1.inference_artifact,
+            candidate_events=labeled_events,
+            aligned=aligned,
+            start_idx=_l2_start_idx,
+            end_idx=ho_start_idx_l2,
+            cfg=cfg,
+        )
+    logger.log(PERF, "[PERF] predict_layer1_signals(L2) multi_tf=%s took=%.4fs", _l2_multi_tf, time.perf_counter() - t_l2_pred)
     # champion L* SSOT 전달: selection이 l2_params에 기록한 값 재사용 → recalibrate drift 0 보장
     _raw_l_star = l2_params.get("l2_deploy_leverage")
     _champion_l_star: float | None = (
@@ -2338,14 +2416,24 @@ def run_tiered_pipeline(
             )
         )
     try:
-        l3_signal_batch = predict_layer1_signals(
-            artifact=l1.inference_artifact,
-            candidate_events=labeled_events,
-            aligned=aligned,
-            start_idx=ho_start_idx,
-            end_idx=ho_end_idx,
-            cfg=cfg,
-        )
+        if _l2_multi_tf and l1.artifacts_by_tf:
+            l3_signal_batch = predict_layer1_signals_multi_tf(
+                artifacts_by_tf=l1.artifacts_by_tf,
+                candidate_events=labeled_events,
+                aligned=aligned,
+                start_idx=ho_start_idx,
+                end_idx=ho_end_idx,
+                cfg=cfg,
+            )
+        else:
+            l3_signal_batch = predict_layer1_signals(
+                artifact=l1.inference_artifact,
+                candidate_events=labeled_events,
+                aligned=aligned,
+                start_idx=ho_start_idx,
+                end_idx=ho_end_idx,
+                cfg=cfg,
+            )
     except Exception as exc:
         raise Layer3ExecutionError("layer3_signal_prediction_failed") from exc
     l3 = _tw.run_l3_holdout(
