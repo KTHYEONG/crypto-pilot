@@ -1,6 +1,8 @@
 """L1 PERF 로그 구조 검증: [PERF] 접두사 일관성 + 새 타이밍 태그 존재 여부."""
 from __future__ import annotations
 
+import logging
+import os
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -121,13 +123,16 @@ def test_l1_nested_profile_log_emitted(
     with caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"):
         _run_l1_nested(minimal_aligned, minimal_cfg, empty_fold_out)
 
-    profile_lines = [r.message for r in caplog.records if "l1_nested_fold_avg_profile" in r.message]
-    assert len(profile_lines) == 1, f"Expected 1 l1_nested_fold_avg_profile log, got {len(profile_lines)}"
-    log = profile_lines[0]
-    assert "[PERF]" in log
-    assert "edge_fit=" in log
-    assert "inference=" in log
-    assert "n=" in log
+    profile_lines = [r.message for r in caplog.records if "fold_avg_profile" in r.message]
+    assert len(profile_lines) >= 1, "Expected at least 1 fold_avg_profile log"
+    for log in profile_lines:
+        assert "[PERF]" in log
+        assert "edge_fit=" in log
+        assert "inference=" in log
+        assert "n=" in log
+    has_evidence = any("l1_evidence_fold_avg_profile" in m for m in profile_lines)
+    has_outer = any("l1_outer_fold_avg_profile" in m for m in profile_lines)
+    assert has_evidence or has_outer, "Expected evidence or outer profile log"
 
 
 # ─── Scenario 2: L1-FOLD 로그에 batch/sel/eval 세분화 확인 ────────────────────
@@ -138,7 +143,7 @@ def test_l1_outer_fold_log_contains_substep_timing(
     with caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"):
         _run_l1_nested(minimal_aligned, minimal_cfg, empty_fold_out)
 
-    fold_logs = [r.message for r in caplog.records if "l1_outer_fold" in r.message]
+    fold_logs = [r.message for r in caplog.records if "l1_outer_fold fold=" in r.message]
     assert fold_logs, "l1_outer_fold log must be emitted"
     for log in fold_logs:
         assert "[PERF]" in log
@@ -329,6 +334,24 @@ def test_l1_lifecycle_perf_log_emitted(
         assert "took=" in log
 
 
+# ─── Scenario 10: [MEM] 로그 출력 확인 ────────────────────────────────────────
+
+def test_l1_nested_mem_log_emitted(
+    minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any
+) -> None:
+    with caplog.at_level(logging.DEBUG, logger="src.domain.futures.strategy.tiered_workflow"):
+        _run_l1_nested(minimal_aligned, minimal_cfg, empty_fold_out)
+
+    mem_logs = [r.message for r in caplog.records if "[MEM]" in r.message]
+    assert len(mem_logs) >= 1, "At least 1 [MEM] log must be emitted"
+    assert any("stage=volatility_2d" in m for m in mem_logs), "volatility_2d mem log missing"
+    assert any("stage=nested_prime_cache" in m for m in mem_logs), "nested_prime_cache mem log missing"
+    assert any("stage=pre_fork" in m for m in mem_logs), "pre_fork mem log missing"
+    has_evidence = any("stage=evidence_ipc" in m for m in mem_logs)
+    has_outer = any("stage=outer_ipc" in m for m in mem_logs)
+    assert has_evidence or has_outer, "evidence_ipc or outer_ipc mem log missing"
+
+
 def test_no_legacy_perf_tiered_prefix(
     minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any
 ) -> None:
@@ -339,3 +362,54 @@ def test_no_legacy_perf_tiered_prefix(
     assert not legacy_logs, (
         "구 [perf-tiered] 접두사 로그가 아직 남아있음:\n" + "\n".join(legacy_logs)
     )
+
+
+# ─── Scenario 11: Evidence phase runs before outer phase ─────────────────────
+
+def test_two_phase_evidence_before_outer(
+    minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any
+) -> None:
+    with caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"):
+        _run_l1_nested(minimal_aligned, minimal_cfg, empty_fold_out)
+
+    all_perf = [(r.message, r.created) for r in caplog.records if "l1_" in r.message]
+    evidence_logs = [msg for msg, _ in all_perf if "l1_evidence_ipc_collect" in msg]
+    outer_logs = [msg for msg, _ in all_perf if "l1_outer_ipc_collect" in msg]
+    snap_logs = [msg for msg, _ in all_perf if "l1_prequential_evidence_snapshots" in msg]
+
+    assert len(outer_logs) == 1, "Outer IPC log missing"
+    if evidence_logs:
+        assert len(evidence_logs) == 1, "Evidence IPC log should be 1"
+        assert len(snap_logs) == 1, "Evidence snapshots log should be 1"
+        ev_time = min(ev_created for ev_msg, ev_created in all_perf if "l1_evidence_ipc_collect" in ev_msg)
+        snap_time = min(s_created for s_msg, s_created in all_perf if "l1_prequential_evidence_snapshots" in s_msg)
+        out_time = min(o_created for o_msg, o_created in all_perf if "l1_outer_ipc_collect" in o_msg)
+        assert ev_time < snap_time < out_time, (
+            "Expected order: evidence -> snapshots -> outer, "
+            f"got ev={ev_time:.3f} snap={snap_time:.3f} out={out_time:.3f}"
+        )
+    else:
+        # No evidence folds: snapshots log also absent, only outer phase ran
+        assert not snap_logs, "snapshots log should be absent when no evidence"
+        assert len([msg for msg, _ in all_perf if "l1_evidence_phase" in msg]) == 1
+
+
+# ─── Scenario 12: Thread env vars set before fork ────────────────────────────
+
+def test_l1_nested_thread_env_vars_set(
+    minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any
+) -> None:
+    with caplog.at_level(logging.DEBUG, logger="src.domain.futures.strategy.tiered_workflow"):
+        _run_l1_nested(minimal_aligned, minimal_cfg, empty_fold_out)
+
+    envs = {"NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"}
+    for var in envs:
+        assert os.environ.get(var) == "1", f"{var} must be '1' after L1 execution, got {os.environ.get(var)}"
+
+    mem_logs = [r.message for r in caplog.records if "[MEM]" in r.message]
+    pre_fork_idx = next((i for i, m in enumerate(mem_logs) if "stage=pre_fork" in m), -1)
+    assert pre_fork_idx >= 0, "pre_fork log must be present"
+    assert any("stage=evidence_ipc" in m for m in mem_logs[pre_fork_idx:]) or \
+           any("stage=outer_ipc" in m for m in mem_logs[pre_fork_idx:]), \
+           "IPC log must appear after pre_fork log"
