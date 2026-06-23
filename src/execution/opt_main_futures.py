@@ -10,6 +10,7 @@ if str(_project_root) not in sys.path:
 
 # ruff: noqa: E402
 import argparse
+import gc
 import logging
 import os
 import time
@@ -1607,6 +1608,7 @@ def _run_strategy_stage(
     )
     bridge_elapsed = time.perf_counter() - t_bridge_start
     strategy_steps["bridge"] = bridge_elapsed
+    gc.collect()
 
     # ─── Tiered Pipeline 분기 (bridge 완료 후 — labeled + aligned 사용 가능) ──
     if use_tiered:
