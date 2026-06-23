@@ -316,7 +316,7 @@ def align_data_maps(
                 execution_cost_bps_2d[t_valid, col] = state_cube.cost_bps[p_valid, cube_n]
         active_ratio = float(active_mask.mean())
         if active_ratio < 0.99:
-            _logger.warning(
+            _logger.debug(
                 "[ALIGN-CUBE] post-join active_mask mean=%.4f entry_block_mean=%.4f "
                 "(was 1.0 / 0.0 before cube injection)",
                 active_ratio,
