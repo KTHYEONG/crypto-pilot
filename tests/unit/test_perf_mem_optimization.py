@@ -17,23 +17,29 @@ from src.domain.futures.strategy.tiered_workflow.pipeline import (
 
 def test_scenario_5_adaptive_worker_cap() -> None:
     """Scenario 5: Adaptive worker cap stage-dependent scaling verification."""
-    # Mock CPU cores count to 8
+    from unittest.mock import MagicMock, patch
+
+    # Mock CPU cores count to 8, mock available memory to 16GB
     original_cpu_count = os.cpu_count
     os.cpu_count = lambda: 8
-    
+
+    mock_mem = MagicMock()
+    mock_mem.available = 16 * 1024**3
+
     try:
-        # frame_memory_bytes is small, so memory shouldn't restrict
-        frame_bytes = 1024 * 1024  # 1MB
-        
-        workers_ev = resolve_safe_nested_workers(16, frame_bytes, stage="evidence")
-        workers_out = resolve_safe_nested_workers(16, frame_bytes, stage="outer")
-        workers_opt = resolve_safe_nested_workers(16, frame_bytes, stage="l2_optuna")
-        
-        # CPU cap = 8 * 0.75 = 6. 
-        # For evidence, stage_cap = 6 -> max_workers = min(6, 6) = 6. workers = min(16, 6) = 6.
-        # For outer, stage_cap = 3 -> max_workers = min(6, 3) = 3. workers = min(16, 3) = 3.
-        # For l2_optuna, stage_cap = 4 -> max_workers = min(6, 4) = 4. workers = min(16, 4) = 4.
-        assert workers_ev == 6
+        frame_bytes = 1024 * 1024  # 1MB (negligible)
+
+        with patch("psutil.virtual_memory", return_value=mock_mem):
+            workers_ev = resolve_safe_nested_workers(16, frame_bytes, stage="evidence")
+            workers_out = resolve_safe_nested_workers(16, frame_bytes, stage="outer")
+            workers_opt = resolve_safe_nested_workers(16, frame_bytes, stage="l2_optuna")
+
+        # CPU cap = max(1, 8*0.75) = 6.
+        # evidence: compact_result=False -> stage_cap=3. max_workers=min(6,3)=3.
+        # outer:    stage_cap=3. max_workers=min(6,3)=3.
+        # l2_optuna: stage_cap=4. max_workers=min(6,4)=4.
+        # Memory: safe_mem_gb=11.2, estimated_proc_gb=0.9005 -> mem_limit=12 (no restriction)
+        assert workers_ev == 3
         assert workers_out == 3
         assert workers_opt == 4
     finally:

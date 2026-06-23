@@ -209,6 +209,8 @@ def resolve_safe_nested_workers(
     stage: str = "evidence",
     *,
     pinned: int | None = None,
+    compact_result: bool = False,
+    result_soft_cap_mb: int | None = None,
 ) -> int:
     """Compute safe worker count dynamically under WSL constraints.
 
@@ -216,43 +218,54 @@ def resolve_safe_nested_workers(
         n_tasks: Number of tasks to parallelize.
         frame_memory_bytes: Estimated DataFrame size in bytes for OOM guard.
         stage: Current pipeline stage ("evidence", "outer", "l2_optuna").
-        pinned: If set, fix worker count to this value (reproducibility mode).
+        pinned: If set, request an upper bound for worker count.
+        result_soft_cap_mb: Optional aggregate soft cap for nested result payload.
     """
-    if isinstance(pinned, int) and pinned >= 1:
-        return max(1, min(n_tasks, pinned))
-
     import psutil
 
     physical_cores = os.cpu_count() or 4
     cpu_limit = max(1, int(physical_cores * 0.75))
+    requested_workers = min(n_tasks, pinned) if isinstance(pinned, int) and pinned >= 1 else n_tasks
 
     mem = psutil.virtual_memory()
     available_gb = mem.available / (1024 ** 3)
     safe_mem_gb = available_gb * 0.70
 
     frame_gb = frame_memory_bytes / (1024 ** 3)
-    estimated_proc_gb = max(0.8, 0.5 + frame_gb * 0.5)
+    predicted_result_gb = 0.10 if compact_result else 0.40
+    estimated_proc_gb = max(0.8, 0.5 + frame_gb * 0.5 + predicted_result_gb)
 
     mem_limit = max(1, int(safe_mem_gb // estimated_proc_gb))
+    predicted_result_mb = 100 if compact_result else 400
+    result_mem_limit = None
+    if result_soft_cap_mb is not None:
+        result_mem_limit = max(1, int(result_soft_cap_mb // predicted_result_mb))
 
     stage_worker_caps = {
-        "evidence": 6,
+        "evidence": 4 if compact_result and available_gb >= 8.0 else 3,
         "outer": 3,
         "l2_optuna": 4,
     }
     stage_cap = stage_worker_caps.get(stage, 3)
 
     max_workers = min(cpu_limit, stage_cap)
-    workers = max(1, min(n_tasks, max_workers, mem_limit))
+    workers = max(1, min(requested_workers, max_workers, mem_limit))
+    if result_mem_limit is not None:
+        workers = min(workers, result_mem_limit)
     # Over-subscription guard: each worker gets at least ~2 tasks
     if workers > 1 and n_tasks // workers < 2:
         workers = max(1, n_tasks // 2)
+    if available_gb < 5.0:
+        workers = min(workers, 2)
     logger.log(
         PERF,
-        "[PERF] worker_calc stage=%s n_tasks=%d physical_cores=%d cpu_limit=%d max_workers=%d available_gb=%.2f "
-        "frame_gb=%.2f estimated_proc_gb=%.2f mem_limit=%d workers=%d",
-        stage, n_tasks, physical_cores, cpu_limit, max_workers, available_gb,
-        frame_gb, estimated_proc_gb, mem_limit, workers,
+        "[PERF] worker_calc stage=%s n_tasks=%d requested_workers=%d physical_cores=%d cpu_limit=%d "
+        "max_workers=%d available_gb=%.2f frame_gb=%.2f estimated_proc_gb=%.2f compact=%s "
+        "result_soft_cap_mb=%s predicted_result_mb=%d result_mem_limit=%s pinned_applied=%s "
+        "mem_limit=%d workers=%d",
+        stage, n_tasks, requested_workers, physical_cores, cpu_limit, max_workers, available_gb,
+        frame_gb, estimated_proc_gb, compact_result, result_soft_cap_mb, predicted_result_mb,
+        result_mem_limit, isinstance(pinned, int) and pinned >= 1, mem_limit, workers,
     )
     return workers
 
@@ -302,6 +315,42 @@ def _snapshot_matured_count(
     return int(mature_mask.sum())
 
 
+def _build_evidence_store(event_frames: Sequence[pd.DataFrame]) -> pd.DataFrame:
+    """Keep only evidence columns needed for snapshot evidence aggregation."""
+    if not event_frames:
+        return pd.DataFrame()
+    store = pd.concat(event_frames, ignore_index=True)
+    if store.empty:
+        return store
+    keep_cols = [
+        "symbol",
+        "strategy_id",
+        "activation_context",
+        "side",
+        "holding_bucket",
+        "gross_event_bps",
+        "expected_gross_bps",
+        "q10_gross_bps",
+        "q90_gross_bps",
+        "decision_idx",
+        "exit_idx",
+        "uniqueness_weight",
+        "entry_regime",
+        "family",
+        "variant",
+        "fold_id",
+        "signal_cell",
+    ]
+    present = [col for col in keep_cols if col in store.columns]
+    if "exit_idx" in store.columns:
+        store = store.loc[:, present].copy()
+        store["exit_idx"] = pd.to_numeric(store["exit_idx"], errors="coerce").fillna(np.inf)
+        store = store.sort_values("exit_idx", kind="stable").reset_index(drop=True)
+    else:
+        store = store.loc[:, present].copy()
+    return store
+
+
 def build_l1_prequential_evidence_snapshots(
     *,
     labeled_events: pd.DataFrame,
@@ -317,7 +366,7 @@ def build_l1_prequential_evidence_snapshots(
     evidence_frames: list[pd.DataFrame] = []
 
     if not evidence_folds:
-        all_evidence_events = pd.DataFrame()
+        evidence_store = pd.DataFrame()
     elif precomputed_results is not None:
         flat_results = precomputed_results
         for evidence_idx, evidence_out in enumerate(flat_results):
@@ -328,11 +377,7 @@ def build_l1_prequential_evidence_snapshots(
                         fold_out=evidence_out,
                     )
                 )
-        all_evidence_events = (
-            pd.concat(evidence_frames, ignore_index=True)
-            if evidence_frames
-            else pd.DataFrame()
-        )
+        evidence_store = _build_evidence_store(evidence_frames)
     else:
         import multiprocessing
         from concurrent.futures import ProcessPoolExecutor
@@ -340,6 +385,7 @@ def build_l1_prequential_evidence_snapshots(
         import src.domain.futures.strategy.candidate_workflow as cw
 
         assert cw._GLOBAL_LABELED_EVENTS is None, "Global state collision: _GLOBAL_LABELED_EVENTS must be None"
+        assert cw._GLOBAL_PREPARED_EVENTS is None
         assert cw._GLOBAL_ALIGNED is None
         assert cw._GLOBAL_CFG is None
         assert cw._GLOBAL_PURGE_BARS is None
@@ -364,6 +410,7 @@ def build_l1_prequential_evidence_snapshots(
             frame_memory_bytes,
             stage="evidence",
             pinned=getattr(cfg, "l1_nested_workers", None),
+            compact_result=bool(getattr(cfg, "l1_compact_ipc_enabled", True)),
         )
         logger.debug(
             "[EVIDENCE-PREQ] Fitting %d evidence folds in parallel with %d workers (pinned=%s)",
@@ -377,12 +424,19 @@ def build_l1_prequential_evidence_snapshots(
         try:
             with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as executor:
                 submits = [
-                    executor.submit(cw._fit_and_predict_single_fold_from_globals, idx, fold)
+                    executor.submit(
+                        cw._fit_and_predict_single_fold_from_globals,
+                        idx,
+                        fold,
+                        False,
+                        bool(getattr(cfg, "l1_compact_ipc_enabled", True)),
+                    )
                     for idx, fold in enumerate(evidence_folds)
                 ]
                 flat_results = [fut.result() for fut in submits]
         finally:
             cw._GLOBAL_LABELED_EVENTS = None
+            cw._GLOBAL_PREPARED_EVENTS = None
             cw._GLOBAL_ALIGNED = None
             cw._GLOBAL_CFG = None
             cw._GLOBAL_PURGE_BARS = None
@@ -399,15 +453,31 @@ def build_l1_prequential_evidence_snapshots(
                         fold_out=evidence_out,
                     )
                 )
-        all_evidence_events = (
-            pd.concat(evidence_frames, ignore_index=True)
-            if evidence_frames
-            else pd.DataFrame()
-        )
+        evidence_store = _build_evidence_store(evidence_frames)
     snapshots: list[Layer1EvidenceSnapshot] = []
+    streaming_enabled = bool(getattr(cfg, "l1_snapshot_streaming_enabled", True))
+    exit_idx_sorted: NDArray[np.float64] | None = None
+    if streaming_enabled and not evidence_store.empty and "exit_idx" in evidence_store.columns:
+        exit_idx_sorted = evidence_store["exit_idx"].to_numpy(dtype=np.float64, copy=False)
     for snapshot_offset, as_of_idx in enumerate(sorted(set(snapshot_indices))):
+        event_results = evidence_store
+        matured_event_count = _snapshot_matured_count(evidence_store, as_of_idx, cfg)
+        if exit_idx_sorted is not None:
+            right = int(np.searchsorted(exit_idx_sorted, float(as_of_idx), side="left"))
+            left = 0
+            lookback_bars = getattr(cfg, "l1_evidence_lookback_bars", None)
+            if lookback_bars is not None:
+                left = int(
+                    np.searchsorted(
+                        exit_idx_sorted,
+                        float(as_of_idx - int(lookback_bars)),
+                        side="left",
+                    )
+                )
+            event_results = evidence_store.iloc[left:right].copy()
+            matured_event_count = max(0, right - left)
         evidence = compute_symbol_strategy_evidence(
-            event_results=all_evidence_events,
+            event_results=event_results,
             cfg=cfg,
             seed=seed + snapshot_offset,
             registry_as_of_idx=as_of_idx,
@@ -420,7 +490,6 @@ def build_l1_prequential_evidence_snapshots(
             registry_version=f"snapshot-{as_of_idx}",
             cfg=cfg,
         )
-        matured_event_count = _snapshot_matured_count(all_evidence_events, as_of_idx, cfg)
         snapshots.append(
             Layer1EvidenceSnapshot(
                 as_of_idx=int(as_of_idx),
@@ -950,10 +1019,14 @@ def run_l1_nested_swf(
     from concurrent.futures import ProcessPoolExecutor
 
     import src.domain.futures.strategy.candidate_workflow as cw
-    from src.domain.futures.strategy.candidate_dataset import prime_aligned_feature_cache
+    from src.domain.futures.strategy.candidate_dataset import (
+        prepare_labeled_events,
+        prime_aligned_feature_cache,
+    )
 
     # Assert global states to prevent nested collisions
     assert cw._GLOBAL_LABELED_EVENTS is None, "Global state collision: _GLOBAL_LABELED_EVENTS must be None"
+    assert cw._GLOBAL_PREPARED_EVENTS is None
     assert cw._GLOBAL_ALIGNED is None
     assert cw._GLOBAL_CFG is None
     assert cw._GLOBAL_PURGE_BARS is None
@@ -980,11 +1053,28 @@ def run_l1_nested_swf(
     )
     logger.debug("[MEM] stage=nested_prime_cache rss=%.0fMB delta=%+.0fMB", _get_rss_mb(), _get_rss_mb() - _mem_prime2)
 
+    prepared_events = None
+    if bool(getattr(cfg, "l1_prepared_dataset_enabled", True)):
+        t_prepare = time.perf_counter()
+        try:
+            prepared_events = prepare_labeled_events(
+                labeled_events=labeled_events,
+                aligned=aligned,
+                cfg=l1_cfg,
+                fit_start_idx=min((fold.fit_start for fold in outer_folds), default=0),
+                fit_end_idx=max((fold.oos_end for fold in outer_folds), default=0),
+            )
+        except RuntimeError as exc:
+            logger.debug("[L1-NESTED] prepared event cache skipped: %s", exc)
+            prepared_events = None
+        logger.log(PERF, "[PERF] l1_nested_prepare_events took=%.4fs", time.perf_counter() - t_prepare)
+
     t_mp_prep = time.perf_counter()
     # Set process globals to minimize IPC size under fork
     import gc
     gc.collect()
-    cw._GLOBAL_LABELED_EVENTS = labeled_events
+    cw._GLOBAL_LABELED_EVENTS = labeled_events if prepared_events is None else None
+    cw._GLOBAL_PREPARED_EVENTS = prepared_events
     cw._GLOBAL_ALIGNED = aligned
     cw._GLOBAL_CFG = l1_cfg
     cw._GLOBAL_PURGE_BARS = purge_bars
@@ -996,17 +1086,40 @@ def run_l1_nested_swf(
     except Exception:
         frame_memory_bytes = int(labeled_events.memory_usage().sum())
 
+    compact_pref_raw = getattr(cfg, "l1_compact_ipc_enabled", True)
+    compact_pref = compact_pref_raw if isinstance(compact_pref_raw, bool) else True
+    soft_cap_raw = getattr(cfg, "l1_nested_result_soft_cap_mb", 512)
+    soft_cap_mb = (
+        int(soft_cap_raw)
+        if isinstance(soft_cap_raw, (int, float)) and not isinstance(soft_cap_raw, bool)
+        else 512
+    )
+    full_result_mb = 400
+    force_compact = compact_pref
+    if not compact_pref and soft_cap_mb < full_result_mb:
+        force_compact = True
+        logger.log(
+            PERF,
+            "[PERF] l1_nested_compact_override reason=soft_cap_force_compact soft_cap_mb=%d full_result_mb=%d",
+            soft_cap_mb,
+            full_result_mb,
+        )
+
     workers_evidence = resolve_safe_nested_workers(
         len(evidence_folds),
         frame_memory_bytes,
         stage="evidence",
         pinned=getattr(cfg, "l1_nested_workers", None),
+        compact_result=force_compact,
+        result_soft_cap_mb=soft_cap_mb,
     )
     workers_outer = resolve_safe_nested_workers(
         len(outer_folds),
         frame_memory_bytes,
         stage="outer",
         pinned=getattr(cfg, "l1_nested_workers", None),
+        compact_result=force_compact,
+        result_soft_cap_mb=soft_cap_mb,
     )
     max_pool_workers = max(workers_evidence, workers_outer)
 
@@ -1053,6 +1166,7 @@ def run_l1_nested_swf(
                         idx,
                         fold,
                         True,
+                        force_compact,
                     )
                     for idx, fold in enumerate(evidence_folds)
                 ]
@@ -1114,6 +1228,7 @@ def run_l1_nested_swf(
                         idx,
                         fold,
                         False,
+                        force_compact,
                     )
                     active_futures.add(fut)
                     out_submits.append(fut)
@@ -1126,6 +1241,7 @@ def run_l1_nested_swf(
                     _rss_out, _rss_out - _mem_ipc_ref, len(outer_results))
     finally:
         cw._GLOBAL_LABELED_EVENTS = None
+        cw._GLOBAL_PREPARED_EVENTS = None
         cw._GLOBAL_ALIGNED = None
         cw._GLOBAL_CFG = None
         cw._GLOBAL_PURGE_BARS = None

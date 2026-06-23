@@ -71,6 +71,19 @@ _ALIGNED_FEATURE_CACHE: dict[int, dict[str, Any]] = {}
 
 
 @dataclass(slots=True, frozen=True)
+class PreparedLabeledEvents:
+    """Precomputed event indexing metadata for repeated split extraction."""
+
+    frame: pd.DataFrame
+    entry_idx: NDArray[np.int32]
+    exit_idx: NDArray[np.int32] | None
+    event_t: NDArray[np.int32]
+    symbol_idx: NDArray[np.int32]
+    valid_symbol_mask: NDArray[np.bool_]
+    frozen_identity_names: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
 class CandidateDataset:
     """Candidate tabular dataset contract."""
 
@@ -622,6 +635,56 @@ def _ordered_identity_feature_names(
     return tuple(names)
 
 
+def prepare_labeled_events(
+    *,
+    labeled_events: pd.DataFrame,
+    aligned: AlignedMarketData,
+    cfg: CandidateStrategyConfig,
+    fit_start_idx: int,
+    fit_end_idx: int,
+) -> PreparedLabeledEvents:
+    """Precompute split-invariant event metadata for repeated dataset assembly."""
+    frame = labeled_events
+    if "entry_idx" not in frame.columns:
+        raise RuntimeError("prepared_labeled_events_invalid")
+
+    entry_idx = pd.to_numeric(frame["entry_idx"], errors="coerce").fillna(-1).to_numpy(dtype=np.int32)
+    exit_idx: NDArray[np.int32] | None = None
+    if "exit_idx" in frame.columns:
+        exit_idx = pd.to_numeric(frame["exit_idx"], errors="coerce").fillna(-1).to_numpy(dtype=np.int32)
+
+    sym_to_idx = {symbol: idx for idx, symbol in enumerate(aligned.symbols)}
+    symbol_series = frame.get("symbol", pd.Series("", index=frame.index)).astype(str)
+    symbol_idx = symbol_series.map(sym_to_idx).fillna(-1).to_numpy(dtype=np.int32)
+    valid_symbol_mask = symbol_idx >= 0
+
+    schema_mask = (entry_idx >= int(fit_start_idx)) & (entry_idx < int(fit_end_idx))
+    schema_frame = frame.iloc[np.flatnonzero(schema_mask)]
+    frozen_identity_names = _ordered_identity_feature_names(schema_frame, cfg=cfg)
+
+    return PreparedLabeledEvents(
+        frame=frame,
+        entry_idx=entry_idx,
+        exit_idx=exit_idx,
+        event_t=entry_idx - 1,
+        symbol_idx=symbol_idx,
+        valid_symbol_mask=valid_symbol_mask,
+        frozen_identity_names=frozen_identity_names,
+    )
+
+
+def _resolve_prepared_labeled_events(
+    labeled_events: pd.DataFrame | PreparedLabeledEvents,
+) -> tuple[pd.DataFrame, PreparedLabeledEvents | None]:
+    if isinstance(labeled_events, PreparedLabeledEvents):
+        prepared = labeled_events
+        frame = prepared.frame
+        if len(frame) != prepared.entry_idx.shape[0] or len(frame) != prepared.symbol_idx.shape[0]:
+            raise RuntimeError("prepared_labeled_events_invalid")
+        return (frame, prepared)
+    return (labeled_events, None)
+
+
 def _btc_symbol_index(symbols: tuple[str, ...]) -> int:
     for idx, symbol in enumerate(symbols):
         if "BTC" in symbol.upper():
@@ -699,19 +762,25 @@ def _base_feature_names(cfg: CandidateStrategyConfig) -> tuple[str, ...]:
 
 def fit_candidate_feature_schema(
     *,
-    labeled_events: pd.DataFrame,
+    labeled_events: pd.DataFrame | PreparedLabeledEvents,
     cfg: CandidateStrategyConfig,
     split_start: int,
     split_end: int,
+    frozen_identity_names: tuple[str, ...] | None = None,
 ) -> CandidateFeatureSchema:
     """Fit a feature schema from the train split only."""
-    mask = (labeled_events["entry_idx"] >= split_start) & (labeled_events["entry_idx"] < split_end)
-    events = labeled_events.loc[mask].copy()
+    frame, prepared = _resolve_prepared_labeled_events(labeled_events)
+    mask = (frame["entry_idx"] >= split_start) & (frame["entry_idx"] < split_end)
+    events = frame.loc[mask].copy()
     base_feat_names = _base_feature_names(cfg)
     uni_feat_names = _universe_feature_names(cfg)
     mkt_feat_names = _market_state_feature_names(cfg)
     sig_feat_names = _signal_context_feature_names(cfg)
-    id_feat_names = _ordered_identity_feature_names(events, cfg=cfg)
+    id_feat_names = frozen_identity_names
+    if id_feat_names is None and prepared is not None:
+        id_feat_names = prepared.frozen_identity_names
+    if id_feat_names is None:
+        id_feat_names = _ordered_identity_feature_names(events, cfg=cfg)
     return CandidateFeatureSchema(
         feature_names=base_feat_names + uni_feat_names + mkt_feat_names + sig_feat_names + id_feat_names,
         identity_categories=id_feat_names,
@@ -720,7 +789,7 @@ def fit_candidate_feature_schema(
 
 def build_candidate_dataset(
     *,
-    labeled_events: pd.DataFrame,
+    labeled_events: pd.DataFrame | PreparedLabeledEvents,
     aligned: AlignedMarketData,
     cfg: CandidateStrategyConfig,
     schema: CandidateFeatureSchema | None = None,
@@ -741,11 +810,14 @@ def build_candidate_dataset(
     if label_end_exclusive is not None and label_end_exclusive <= split_start:
         raise ValueError("label_end_exclusive must be greater than split_start")
 
+    frame, prepared = _resolve_prepared_labeled_events(labeled_events)
+
     active_schema = schema or fit_candidate_feature_schema(
         labeled_events=labeled_events,
         cfg=cfg,
         split_start=split_start,
         split_end=split_end,
+        frozen_identity_names=prepared.frozen_identity_names if prepared is not None else None,
     )
     base_feat_names = _base_feature_names(cfg)
     uni_feat_names = _universe_feature_names(cfg)
@@ -755,17 +827,29 @@ def build_candidate_dataset(
     exclude_leaky = bool(getattr(cfg, "exclude_immediate_return_features", False))
     effective_label_end = split_end if label_end_exclusive is None else label_end_exclusive
 
-    mask = (labeled_events["entry_idx"] >= split_start) & (labeled_events["entry_idx"] < split_end)
-    if require_label_within_split:
-        if "exit_idx" not in labeled_events.columns:
-            mask &= False
-        else:
-            exit_idx = pd.to_numeric(labeled_events["exit_idx"], errors="coerce")
-            mask &= exit_idx.ge(0) & exit_idx.lt(effective_label_end)
-    events = labeled_events.loc[mask].copy()
-    if not events.empty:
-        sym_set = set(aligned.symbols)
-        events = events[events["symbol"].isin(sym_set)].copy()
+    if prepared is not None:
+        row_mask = (prepared.entry_idx >= int(split_start)) & (prepared.entry_idx < int(split_end))
+        if require_label_within_split:
+            if prepared.exit_idx is None:
+                row_mask &= False
+            else:
+                row_mask &= (prepared.exit_idx >= 0) & (prepared.exit_idx < int(effective_label_end))
+        row_mask &= prepared.valid_symbol_mask
+        row_ids = np.flatnonzero(row_mask)
+        events = frame.iloc[row_ids].copy()
+    else:
+        mask = (frame["entry_idx"] >= split_start) & (frame["entry_idx"] < split_end)
+        if require_label_within_split:
+            if "exit_idx" not in frame.columns:
+                mask &= False
+            else:
+                exit_idx = pd.to_numeric(frame["exit_idx"], errors="coerce")
+                mask &= exit_idx.ge(0) & exit_idx.lt(effective_label_end)
+        events = frame.loc[mask].copy()
+        if not events.empty:
+            sym_set = set(aligned.symbols)
+            events = events[events["symbol"].isin(sym_set)].copy()
+        row_ids = None
 
     if events.empty:
         return CandidateDataset(
@@ -854,8 +938,11 @@ def build_candidate_dataset(
 
         # 5. Universe Features
         uni_matrix = np.zeros((len(events), len(uni_feat_names)), dtype=np.float32)
-        sym_to_idx = {s: i for i, s in enumerate(aligned.symbols)}
-        event_sym_idxs = events["symbol"].map(sym_to_idx).values
+        if prepared is not None and row_ids is not None:
+            event_sym_idxs = prepared.symbol_idx[row_ids]
+        else:
+            sym_to_idx = {s: i for i, s in enumerate(aligned.symbols)}
+            event_sym_idxs = events["symbol"].map(sym_to_idx).values
         if len(uni_feat_names) > 0 and aligned.vol_30d_1d is not None:
             uni_matrix[:, 0] = aligned.vol_30d_1d[event_sym_idxs]
         if len(uni_feat_names) > 1 and aligned.friction_score_1d is not None:
@@ -876,7 +963,10 @@ def build_candidate_dataset(
             uni_matrix[:, 8] = aligned.anchor_cluster_1d[event_sym_idxs]
 
         # 6. Assembly
-        event_t = events["entry_idx"].values - 1
+        if prepared is not None and row_ids is not None:
+            event_t = prepared.event_t[row_ids]
+        else:
+            event_t = events["entry_idx"].values - 1
         valid_mask = event_t >= 20
 
         x_mat = np.zeros((len(events), len(feature_names)), dtype=np.float32)
@@ -1069,7 +1159,10 @@ def build_candidate_dataset(
             _logger.debug("[DATASET] dropped_invalid_events=%d valid_events=%d", dropped_events, int(valid_mask.sum()))
     else:
         # Fast bypass mode: Skip high-cost feature building
-        event_t = events["entry_idx"].values - 1
+        if prepared is not None and row_ids is not None:
+            event_t = prepared.event_t[row_ids]
+        else:
+            event_t = events["entry_idx"].values - 1
         valid_mask = event_t >= 20
 
         aligned_id = id(aligned)
