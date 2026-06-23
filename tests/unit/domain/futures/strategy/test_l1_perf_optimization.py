@@ -48,6 +48,9 @@ def cfg_mock() -> MagicMock:
     cfg.l1_bootstrap_samples = 200
     cfg.l1_pair_alpha = 0.05
     cfg.l1_pair_power = 0.80
+    cfg.l1_compact_ipc_enabled = True
+    cfg.l1_nested_result_soft_cap_mb = 512
+    cfg.l1_nested_workers = None
     return cfg
 
 
@@ -378,6 +381,48 @@ def test_resolve_safe_nested_workers_pinned() -> None:
     assert result == 2, f"Expected 2 workers (pinned), got {result}"
 
 
+def test_resolve_safe_nested_workers_applies_result_soft_cap_and_logs_fields(
+    caplog: Any,
+) -> None:
+    """soft cap은 worker 상한과 PERF 로그 필드에 반영되어야 한다."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import resolve_safe_nested_workers
+
+    with patch("psutil.virtual_memory") as mock_mem:
+        mock_mem.return_value.available = 16 * 1024 ** 3
+
+        with caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"):
+            workers = resolve_safe_nested_workers(
+                n_tasks=16,
+                frame_memory_bytes=200 * 1024 ** 2,
+                compact_result=True,
+                result_soft_cap_mb=256,
+            )
+
+    assert workers == 2
+    logs = [r.message for r in caplog.records if "worker_calc" in r.message]
+    assert logs
+    assert "result_soft_cap_mb=256" in logs[0]
+    assert "predicted_result_mb=100" in logs[0]
+    assert "result_mem_limit=2" in logs[0]
+
+
+def test_resolve_safe_nested_workers_pinned_does_not_bypass_safety_guards() -> None:
+    """pinned는 hard override가 아니라 upper bound여야 한다."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import resolve_safe_nested_workers
+
+    with patch("psutil.virtual_memory") as mock_mem:
+        mock_mem.return_value.available = 4 * 1024 ** 3
+        workers = resolve_safe_nested_workers(
+            n_tasks=16,
+            frame_memory_bytes=200 * 1024 ** 2,
+            pinned=8,
+            compact_result=True,
+            result_soft_cap_mb=128,
+        )
+
+    assert workers == 1
+
+
 # ─── P3: defer_artifact=True 경로 검증 ─────────────────────────────────────────
 
 def test_run_l1_nested_swf_defer_artifact_skips_inference(
@@ -461,6 +506,31 @@ def test_resolve_safe_nested_workers_emits_worker_calc_perf_log(caplog: Any) -> 
     assert "n_tasks=16" in logs[0]
 
 
+def test_resolve_safe_nested_workers_applies_soft_cap_and_pinned_guard(caplog: Any) -> None:
+    """soft cap and pinned must both respect safety clamps."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import resolve_safe_nested_workers
+
+    with patch("psutil.virtual_memory") as mock_mem:
+        mock_mem.return_value.available = 4 * 1024 ** 3
+        with caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"):
+            workers = resolve_safe_nested_workers(
+                n_tasks=16,
+                frame_memory_bytes=200 * 1024 ** 2,
+                compact_result=True,
+                pinned=8,
+                result_soft_cap_mb=128,
+            )
+
+    assert workers == 1
+    logs = [r.message for r in caplog.records if "worker_calc" in r.message]
+    assert logs, "worker_calc PERF log must be emitted"
+    assert "requested_workers=8" in logs[0]
+    assert "result_soft_cap_mb=128" in logs[0]
+    assert "predicted_result_mb=100" in logs[0]
+    assert "result_mem_limit=1" in logs[0]
+    assert "pinned_applied=True" in logs[0]
+
+
 # ─── PERF-GAP2: l1_nested_ipc_collect PERF 로그 검증 ──────────────────────────
 
 def test_l1_nested_ipc_collect_log_emitted(
@@ -526,3 +596,293 @@ def test_l1_nested_ipc_collect_log_emitted(
         assert "[PERF]" in log
         assert "n=" in log
         assert "took=" in log
+
+
+def test_run_l1_nested_swf_soft_cap_forces_compact_submit(
+    aligned_mock: Any, cfg_mock: Any, caplog: Any
+) -> None:
+    """nested soft cap은 compact preference보다 우선하며 submit 인자에도 반영돼야 한다."""
+    import concurrent.futures
+
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_l1_nested_swf
+
+    submitted_compact_flags: list[bool] = []
+
+    def record_fold_submit(*args: Any, **kwargs: Any) -> Any:
+        submitted_compact_flags.append(bool(args[3]))
+        return SimpleNamespace(
+            fit_status="trained",
+            n_fit=10,
+            timing_profile=dict.fromkeys(
+                (
+                    "schema",
+                    "dataset_fit",
+                    "dataset_early_stop",
+                    "dataset_calibration_fit",
+                    "dataset_calibration_eval",
+                    "dataset_oos",
+                    "edge_fit",
+                    "inference",
+                    "selection",
+                ),
+                0.01,
+            ),
+            model_output=SimpleNamespace(
+                events=pd.DataFrame(),
+                expected_gross_bps=np.zeros((0,), dtype=np.float64),
+                expected_net_bps=np.zeros((0,), dtype=np.float64),
+                q10_gross_bps=np.zeros((0,), dtype=np.float64),
+                q90_gross_bps=np.zeros((0,), dtype=np.float64),
+                q10_net_bps=np.zeros((0,), dtype=np.float64),
+                q90_net_bps=np.zeros((0,), dtype=np.float64),
+            ),
+            oos_set=SimpleNamespace(
+                edge_weight=np.zeros((0,), dtype=np.float64),
+                y_return_bps=np.zeros((0,), dtype=np.float64),
+            ),
+            selected_events=pd.DataFrame(),
+            skip_reason=None,
+        )
+
+    class SafeThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+        def __init__(self, *args: Any, mp_context: Any = None, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+
+    cfg_mock.l1_compact_ipc_enabled = False
+    cfg_mock.l1_nested_result_soft_cap_mb = 256
+    outer_folds = (WFFold(0, 4, 4, 6, 6, 10),)
+    evidence_folds = (WFFold(0, 2, 2, 4, 4, 6),)
+
+    with (
+        patch("src.domain.futures.strategy.config.resolve_purge_and_embargo_bars", return_value=(1, 0)),
+        patch("src.domain.futures.strategy.tiered_workflow.build_l1_swf_folds", return_value=evidence_folds),
+        patch(
+            "src.domain.futures.strategy.candidate_workflow._fit_and_predict_single_fold_from_globals",
+            side_effect=record_fold_submit,
+        ),
+        patch("concurrent.futures.ProcessPoolExecutor", new=SafeThreadPoolExecutor),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_gate_table",
+            return_value="gate",
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_outer_fold_table",
+            return_value="outer",
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline"
+            ".format_layer1_deployment_registry_table",
+            return_value="reg",
+        ),
+        caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"),
+    ):
+        run_l1_nested_swf(
+            labeled_events=pd.DataFrame(),
+            aligned=aligned_mock,
+            outer_folds=outer_folds,
+            cfg=cfg_mock,
+            seed=7,
+        )
+
+    assert submitted_compact_flags == [True, True]
+    override_logs = [r.message for r in caplog.records if "soft_cap_force_compact" in r.message]
+    assert override_logs
+    assert "soft_cap_mb=256" in override_logs[0]
+
+
+def test_event_results_from_fold_output_prefers_inline_compact_payload() -> None:
+    """compact inline payload와 legacy fallback은 동일 event evidence를 제공해야 한다."""
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+        _event_results_from_fold_output,
+    )
+
+    base_events = pd.DataFrame(
+        {
+            "entry_idx": [11, 12],
+            "symbol": ["BTCUSDT", "ETHUSDT"],
+            "family": ["trend", "trend"],
+            "variant": ["v1", "v1"],
+            "side": [1, -1],
+            "gross_event_bps": [1.5, -2.0],
+            "uniqueness_weight": [0.4, 0.8],
+        }
+    )
+    legacy_events = base_events.drop(columns=["gross_event_bps", "uniqueness_weight"])
+
+    inline_result = _event_results_from_fold_output(
+        fold_id=3,
+        fold_out=SimpleNamespace(
+            model_output=SimpleNamespace(
+                events=base_events,
+                expected_gross_bps=np.array([5.0, 6.0], dtype=np.float64),
+                q10_gross_bps=np.array([1.0, 2.0], dtype=np.float64),
+                q90_gross_bps=np.array([9.0, 10.0], dtype=np.float64),
+            ),
+            oos_set=None,
+        ),
+    )
+    legacy_result = _event_results_from_fold_output(
+        fold_id=3,
+        fold_out=SimpleNamespace(
+            model_output=SimpleNamespace(
+                events=legacy_events,
+                expected_gross_bps=np.array([5.0, 6.0], dtype=np.float64),
+                q10_gross_bps=np.array([1.0, 2.0], dtype=np.float64),
+                q90_gross_bps=np.array([9.0, 10.0], dtype=np.float64),
+            ),
+            oos_set=SimpleNamespace(
+                y_return_bps=np.array([1.5, -2.0], dtype=np.float64),
+                edge_weight=np.array([0.4, 0.8], dtype=np.float64),
+            ),
+        ),
+    )
+
+    assert inline_result["gross_event_bps"].tolist() == legacy_result["gross_event_bps"].tolist()
+    assert inline_result["uniqueness_weight"].tolist() == legacy_result["uniqueness_weight"].tolist()
+    assert inline_result["decision_idx"].tolist() == legacy_result["decision_idx"].tolist()
+    assert inline_result["fold_id"].tolist() == legacy_result["fold_id"].tolist()
+    assert len(inline_result) == len(legacy_result)
+
+
+def test_l1_nested_soft_cap_forces_compact_submit(
+    aligned_mock: Any, cfg_mock: Any, caplog: Any
+) -> None:
+    """Nested path should force compact IPC when full payload exceeds soft cap."""
+    import concurrent.futures
+
+    submitted_modes: list[tuple[bool, bool]] = []
+
+    class SafeThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+        def __init__(self, *args: Any, mp_context: Any = None, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+
+    def _fake_fold_from_globals(
+        fold_idx: int,
+        fold: WFFold,
+        is_evidence_fold: bool = False,
+        compact_result: bool = False,
+    ) -> SimpleNamespace:
+        del fold
+        submitted_modes.append((is_evidence_fold, compact_result))
+        return SimpleNamespace(
+            fold_id=fold_idx,
+            fit_status="trained",
+            timing_profile=dict.fromkeys(
+                (
+                    "schema",
+                    "dataset_fit",
+                    "dataset_early_stop",
+                    "dataset_calibration_fit",
+                    "dataset_calibration_eval",
+                    "dataset_oos",
+                    "edge_fit",
+                    "inference",
+                    "selection",
+                ),
+                0.01,
+            ),
+            model_output=SimpleNamespace(
+                events=pd.DataFrame(),
+                expected_gross_bps=np.zeros((0,), dtype=np.float64),
+                expected_net_bps=np.zeros((0,), dtype=np.float64),
+                q10_gross_bps=np.zeros((0,), dtype=np.float64),
+                q90_gross_bps=np.zeros((0,), dtype=np.float64),
+                q10_net_bps=np.zeros((0,), dtype=np.float64),
+                q90_net_bps=np.zeros((0,), dtype=np.float64),
+            ),
+            oos_set=SimpleNamespace(
+                edge_weight=np.zeros((0,), dtype=np.float64),
+                y_return_bps=np.zeros((0,), dtype=np.float64),
+            ),
+        )
+
+    cfg_mock.l1_compact_ipc_enabled = False
+    cfg_mock.l1_nested_result_soft_cap_mb = 256
+    outer_folds = (WFFold(0, 4, 4, 6, 6, 10),)
+    evidence_folds = (WFFold(0, 2, 2, 4, 4, 6),)
+    with (
+        patch("src.domain.futures.strategy.config.resolve_purge_and_embargo_bars", return_value=(1, 0)),
+        patch("src.domain.futures.strategy.tiered_workflow.build_l1_swf_folds", return_value=evidence_folds),
+        patch(
+            "src.domain.futures.strategy.candidate_workflow._fit_and_predict_single_fold_from_globals",
+            side_effect=_fake_fold_from_globals,
+        ),
+        patch("concurrent.futures.ProcessPoolExecutor", new=SafeThreadPoolExecutor),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_gate_table",
+            return_value="gate",
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_outer_fold_table",
+            return_value="outer",
+        ),
+        patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_deployment_registry_table",
+            return_value="reg",
+        ),
+        caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"),
+    ):
+        run_l1_nested_swf(
+            labeled_events=pd.DataFrame(),
+            aligned=aligned_mock,
+            outer_folds=outer_folds,
+            cfg=cfg_mock,
+            seed=3,
+        )
+
+    assert submitted_modes == [(True, True), (False, True)]
+    override_logs = [r.message for r in caplog.records if "soft_cap_force_compact" in r.message]
+    assert override_logs, "soft cap compact override log must be emitted"
+
+
+def test_event_results_from_fold_output_compact_payload_matches_legacy() -> None:
+    """Compact inline payload and legacy oos_set fallback must produce equivalent evidence rows."""
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import _event_results_from_fold_output
+
+    base_events = pd.DataFrame(
+        {
+            "entry_idx": [10, 14],
+            "family": ["mom", "rev"],
+            "variant": ["a", "b"],
+            "signal_cell": ["trend", "range"],
+        }
+    )
+    gross = np.array([12.5, -3.0], dtype=np.float64)
+    weights = np.array([0.7, 1.2], dtype=np.float64)
+    expected = np.array([13.0, -2.5], dtype=np.float64)
+    q10 = np.array([2.0, -7.5], dtype=np.float64)
+    q90 = np.array([20.0, 4.5], dtype=np.float64)
+
+    legacy = SimpleNamespace(
+        model_output=SimpleNamespace(
+            events=base_events.copy(),
+            expected_gross_bps=expected,
+            q10_gross_bps=q10,
+            q90_gross_bps=q90,
+        ),
+        oos_set=SimpleNamespace(edge_weight=weights, y_return_bps=gross),
+    )
+    compact = SimpleNamespace(
+        model_output=SimpleNamespace(
+            events=base_events.assign(
+                gross_event_bps=gross,
+                uniqueness_weight=weights,
+            ),
+            expected_gross_bps=expected,
+            q10_gross_bps=q10,
+            q90_gross_bps=q90,
+        ),
+        oos_set=None,
+    )
+
+    legacy_frame = _event_results_from_fold_output(fold_id=3, fold_out=legacy)
+    compact_frame = _event_results_from_fold_output(fold_id=3, fold_out=compact)
+
+    pd.testing.assert_series_equal(legacy_frame["gross_event_bps"], compact_frame["gross_event_bps"])
+    pd.testing.assert_series_equal(
+        legacy_frame["uniqueness_weight"],
+        compact_frame["uniqueness_weight"],
+    )
+    pd.testing.assert_series_equal(legacy_frame["decision_idx"], compact_frame["decision_idx"])
+    pd.testing.assert_series_equal(legacy_frame["fold_id"], compact_frame["fold_id"])
+    assert len(legacy_frame) == len(compact_frame) == 2

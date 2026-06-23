@@ -23,6 +23,7 @@ from src.domain.futures.strategy.candidate_contracts import (
 from src.domain.futures.strategy.candidate_dataset import (
     CandidateDataset,
     CandidateFeatureSchema,
+    PreparedLabeledEvents,
     build_candidate_dataset,
     fit_candidate_feature_schema,
 )
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 _GLOBAL_LABELED_EVENTS: pd.DataFrame | None = None
+_GLOBAL_PREPARED_EVENTS: PreparedLabeledEvents | None = None
 _GLOBAL_ALIGNED: AlignedMarketData | None = None
 _GLOBAL_CFG: CandidateStrategyConfig | None = None
 _GLOBAL_PURGE_BARS: int | None = None
@@ -103,14 +105,83 @@ def _empty_candidate_dataset(schema: CandidateFeatureSchema | object) -> Candida
     )
 
 
+def compact_candidate_fold_output(
+    fold_out: CandidateFoldOutput,
+    *,
+    drop_models: bool = True,
+    drop_datasets: bool = True,
+) -> CandidateFoldOutput:
+    """Return a lightweight fold output for nested L1 IPC handoff."""
+    oos_set = fold_out.oos_set
+    events = fold_out.model_output.events.copy()
+    if not events.empty:
+        size = len(events)
+        if oos_set is not None:
+            y_return = getattr(oos_set, "y_return_bps", None)
+            if y_return is not None:
+                arr = np.asarray(y_return, dtype=np.float64)
+                if arr.size >= 1:
+                    size = min(size, int(arr.size))
+                    events = events.iloc[:size].copy()
+                    events["gross_event_bps"] = arr[:size]
+            edge_weight = getattr(oos_set, "edge_weight", None)
+            if edge_weight is not None:
+                arr = np.asarray(edge_weight, dtype=np.float64)
+                if arr.size >= len(events):
+                    events["uniqueness_weight"] = arr[: len(events)]
+
+    model_output = fold_out.model_output
+    if drop_models:
+        model_output = CandidateModelOutput(
+            events=events,
+            p_pass=np.asarray(fold_out.model_output.p_pass, dtype=np.float64),
+            gate_enabled=bool(fold_out.model_output.gate_enabled),
+            gate_threshold=float(fold_out.model_output.gate_threshold),
+            edge_source=fold_out.model_output.edge_source,
+            expected_return_r=np.asarray(fold_out.model_output.expected_return_r, dtype=np.float64),
+            expected_net_bps=np.asarray(fold_out.model_output.expected_net_bps, dtype=np.float64),
+            expected_gross_bps=np.asarray(fold_out.model_output.expected_gross_bps, dtype=np.float64),
+            q10_return_r=np.asarray(fold_out.model_output.q10_return_r, dtype=np.float64),
+            q10_net_bps=np.asarray(fold_out.model_output.q10_net_bps, dtype=np.float64),
+            q10_gross_bps=np.asarray(fold_out.model_output.q10_gross_bps, dtype=np.float64),
+            q90_return_r=np.asarray(fold_out.model_output.q90_return_r, dtype=np.float64),
+            q90_net_bps=np.asarray(fold_out.model_output.q90_net_bps, dtype=np.float64),
+            q90_gross_bps=np.asarray(fold_out.model_output.q90_gross_bps, dtype=np.float64),
+            selection_score=np.asarray(fold_out.model_output.selection_score, dtype=np.float64),
+            kelly_fraction=np.asarray(fold_out.model_output.kelly_fraction, dtype=np.float64),
+            prediction_scale_bps=np.asarray(fold_out.model_output.prediction_scale_bps, dtype=np.float64),
+            validation_diagnostics=fold_out.model_output.validation_diagnostics,
+        )
+
+    return CandidateFoldOutput(
+        fold_id=fold_out.fold_id,
+        oos_start=fold_out.oos_start,
+        oos_end=fold_out.oos_end,
+        model_output=model_output,
+        selected_events=fold_out.selected_events,
+        gate_report=fold_out.gate_report,
+        edge_report=fold_out.edge_report,
+        fit_status=fold_out.fit_status,
+        n_fit=fold_out.n_fit,
+        skip_reason=fold_out.skip_reason,
+        gate_model=None if drop_models else fold_out.gate_model,
+        edge_models=None if drop_models else fold_out.edge_models,
+        fit_set=None if drop_datasets else fold_out.fit_set,
+        calibration_set=None if drop_datasets else fold_out.calibration_set,
+        oos_set=None if drop_datasets else fold_out.oos_set,
+        timing_profile=fold_out.timing_profile,
+    )
+
+
 def _fit_and_predict_single_fold_from_globals(
     fold_idx: int,
     fold: WFFold,
     is_evidence_fold: bool = False,
+    compact_result: bool = False,
 ) -> CandidateFoldOutput:
     """Run a fold using process-global context to avoid large IPC payloads."""
     if (
-        _GLOBAL_LABELED_EVENTS is None
+        (_GLOBAL_LABELED_EVENTS is None and _GLOBAL_PREPARED_EVENTS is None)
         or _GLOBAL_ALIGNED is None
         or _GLOBAL_CFG is None
         or _GLOBAL_PURGE_BARS is None
@@ -123,11 +194,12 @@ def _fit_and_predict_single_fold_from_globals(
         res = _fit_and_predict_single_fold(
             fold_idx,
             fold,
-            _GLOBAL_LABELED_EVENTS,
+            _GLOBAL_PREPARED_EVENTS if _GLOBAL_PREPARED_EVENTS is not None else _GLOBAL_LABELED_EVENTS,
             _GLOBAL_ALIGNED,
             _GLOBAL_CFG,
             _GLOBAL_PURGE_BARS,
             is_evidence_fold=is_evidence_fold,
+            compact_result=compact_result,
         )
         return res
     finally:
@@ -138,28 +210,31 @@ def _fit_and_predict_single_fold_from_globals(
 def _fit_and_predict_single_fold(
     fold_idx: int,
     fold: WFFold,
-    labeled_events: pd.DataFrame,
+    labeled_events: pd.DataFrame | PreparedLabeledEvents,
     aligned: AlignedMarketData,
     cfg: CandidateStrategyConfig,
     purge_bars: int,
     is_evidence_fold: bool = False,
+    compact_result: bool = False,
 ) -> CandidateFoldOutput:
     """Run model fitting and out-of-sample prediction for a single fold."""
     with threadpool_limits(limits=1, user_api="blas"):
         return _fit_and_predict_single_fold_inner(
             fold_idx, fold, labeled_events, aligned, cfg, purge_bars,
             is_evidence_fold=is_evidence_fold,
+            compact_result=compact_result,
         )
 
 
 def _fit_and_predict_single_fold_inner(
     fold_idx: int,
     fold: WFFold,
-    labeled_events: pd.DataFrame,
+    labeled_events: pd.DataFrame | PreparedLabeledEvents,
     aligned: AlignedMarketData,
     cfg: CandidateStrategyConfig,
     purge_bars: int,
     is_evidence_fold: bool = False,
+    compact_result: bool = False,
 ) -> CandidateFoldOutput:
     """Inner fold execution under BLAS single-thread context (called from _fit_and_predict_single_fold)."""
     t_total = time.perf_counter()
@@ -318,7 +393,7 @@ def _fit_and_predict_single_fold_inner(
         selected_events = select_candidate_events_for_portfolio(model_output=ml_out, cfg=cfg)
         timing_profile["selection"] = time.perf_counter() - t_step
         timing_profile["total"] = time.perf_counter() - t_total
-        return CandidateFoldOutput(
+        fold_out = CandidateFoldOutput(
             fold_id=fold_idx,
             oos_start=fold.oos_start,
             oos_end=fold.oos_end,
@@ -336,6 +411,7 @@ def _fit_and_predict_single_fold_inner(
             oos_set=oos_set,
             timing_profile=timing_profile,
         )
+        return compact_candidate_fold_output(fold_out) if compact_result else fold_out
 
     gate_model = None
     edge_models = None
@@ -525,7 +601,7 @@ def _fit_and_predict_single_fold_inner(
         timing_profile.get("selection", 0),
     )
 
-    return CandidateFoldOutput(
+    fold_out = CandidateFoldOutput(
         fold_id=fold_idx,
         oos_start=fold.oos_start,
         oos_end=fold.oos_end,
@@ -543,6 +619,7 @@ def _fit_and_predict_single_fold_inner(
         oos_set=oos_set,
         timing_profile=timing_profile,
     )
+    return compact_candidate_fold_output(fold_out) if compact_result else fold_out
 
 
 def run_candidate_walk_forward(
