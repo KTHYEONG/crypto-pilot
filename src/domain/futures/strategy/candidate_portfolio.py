@@ -628,7 +628,9 @@ def select_candidate_events_for_portfolio(
     _diag_enabled = bool(getattr(cfg, "l1_selection_diagnostics_enabled", False))
     waterfall = compute_selection_waterfall(events=df, cfg=cfg) if _diag_enabled else {}
     shadow_profiles = (
-        compute_shadow_selection_profiles(events=df, cfg=cfg) if _diag_enabled else pd.DataFrame()
+        compute_shadow_selection_profiles(events=df, cfg=cfg)
+        if cfg.selection_shadow_profiles_enabled
+        else pd.DataFrame()
     )
     n_eligible = int(eligible.sum())
     n_keep = 0
