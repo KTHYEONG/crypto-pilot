@@ -457,7 +457,11 @@ class CandidateStrategyConfig:
     l1_evidence_grid_multiplier: int = 3
     l1_evidence_max_folds: int = 32
     l1_outer_warmup_blocks: int = 2
-    l1_nested_workers: int | None = None  # None=동적(기존), int=고정(재현성 모드)
+    l1_nested_workers: int | None = None  # None=동적, int=희망 상한(safety-clamped upper bound)
+    l1_compact_ipc_enabled: bool = True
+    l1_prepared_dataset_enabled: bool = True
+    l1_snapshot_streaming_enabled: bool = True
+    l1_nested_result_soft_cap_mb: int = 512
     l1_ens_prior_effective_n: float = 0.0  # P1: Bayesian prior sample size; >0 shrinks small-n arch edge toward 0
     l1_ens_min_display_events: int = 0     # P2: Min events per archetype to show edge sign; 0=disabled
     l1_evidence_early_snapshots: int = 0   # P3: First N snapshots use relaxed evidence gates; 0=disabled
@@ -772,6 +776,8 @@ class CandidateStrategyConfig:
             raise ValueError("l1_outer_warmup_blocks must be >= 1")
         if self.l1_nested_workers is not None and self.l1_nested_workers < 1:
             raise ValueError("l1_nested_workers must be >= 1 when set")
+        if self.l1_nested_result_soft_cap_mb < 128:
+            raise ValueError("l1_nested_result_soft_cap_mb must be >= 128")
         if self.l1_ens_prior_effective_n < 0.0:
             raise ValueError("l1_ens_prior_effective_n must be non-negative")
         if self.l1_ens_min_display_events < 0:

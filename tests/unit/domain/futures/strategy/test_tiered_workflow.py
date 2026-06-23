@@ -2588,11 +2588,13 @@ def test_run_tiered_pipeline_routes_layer1_through_nested_executor(
         window=window,
         l1_params={},
         l2_params={},
-        tf="4h",
+        l1_tfs=("4h",),
     )
 
     # Assert
-    assert result == (blocked_l1, None, None)
+    assert result[1:] == (None, None)
+    assert result[0].gate_passed is False
+    assert result[0].n_total == blocked_l1.n_total
     assert len(nested_builder_calls) == 1
     assert nested_builder_calls[0]["n_bars"] == len(aligned.datetimes)
     assert nested_builder_calls[0]["l1_start_idx"] == 1
@@ -3638,7 +3640,7 @@ def _run_pipeline_to_l2_and_capture_awf_call(
         l2_params={},
         l1_result_override=_passing_l1_result(),
         target_phase="l2",
-        tf="4h",
+        l1_tfs=("4h",),
         verbose=False,
     )
 
@@ -3725,12 +3727,14 @@ def test_run_tiered_pipeline_l1_nested_swf_folds_still_receive_full_n_bars(
         window=window,
         l1_params={},
         l2_params={},
-        tf="4h",
+        l1_tfs=("4h",),
         verbose=False,
     )
 
     # Assert
-    assert result == (blocked_l1, None, None)
+    assert result[1:] == (None, None)
+    assert result[0].gate_passed is False
+    assert result[0].n_total == blocked_l1.n_total
     assert len(nested_builder_calls) == 1
     assert nested_builder_calls[0]["n_bars"] == len(aligned.datetimes)
 

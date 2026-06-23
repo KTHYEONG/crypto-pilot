@@ -97,7 +97,7 @@ graph TD
 
 # 5. Performance Optimizations
 
-- **Adaptive Worker Cap**: `max_workers = min(cpu_limit, 3)` with memory guard `estimated_proc_gb = max(0.8, frame_gb × 1.8)`, oversubscription detection ($\text{folds} // \text{workers} < 2$ → reduce). WSL fork 폭주 방지를 위해 최대 3 worker로 제한.
+- **Adaptive Worker Cap**: Stage-specific caps: `evidence (4 if compact+≥8GB else 3)`, `outer (3)`, `l2_optuna (4)`. `pinned` parameter acts as safety-clamped upper bound (not hard override). `l1_nested_result_soft_cap_mb` enforces aggregate result OOM guard (`predicted_result_mb = 100 if compact else 400`). Oversubscription guard: `folds // workers < 2` → reduce. Memory formula: `estimated_proc_gb = max(0.8, 0.5 + frame_gb*0.5 + predicted_result_gb)`.
 - **Deferred Artifact**: First TF computes `fit_layer1_inference_artifact`; remaining TFs skip via `defer_artifact=True`.
 - **Prefork Cache Prime**: `prime_aligned_feature_cache` called once pre-fork → fork CoW shared across child processes.
 - **Sequential Prequential Snapshots**: `ThreadPoolExecutor` rollback (GIL+cache thrashing on CPU-bound numpy/scipy → sequential recovers ~3.5s/TF).

@@ -8,8 +8,29 @@ from typing import Any, ClassVar
 import numpy as np
 import pandas as pd
 
+from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
 from src.domain.futures.strategy.config import StrategyConfig
 from src.domain.futures.strategy_runtime.bridge import run_candidate_strategy_for_universe
+
+
+def _make_panel() -> CandidateSignalPanel:
+    return CandidateSignalPanel(
+        family="trend_ma",
+        variant="ema_12_72",
+        params={},
+        datetimes=np.asarray([np.datetime64("2026-01-01T00:00:00")], dtype="datetime64[ns]"),
+        symbols=("BTCUSDT",),
+        signed_score_2d=np.zeros((1, 1), dtype=np.float64),
+        side_hint_2d=np.ones((1, 1), dtype=np.int8),
+        expected_holding_bars=1,
+        min_holding_bars=1,
+        stop_atr_mult=50.0,
+        take_profit_atr_mult=50.0,
+        turnover_proxy_2d=np.zeros((1, 1), dtype=np.float64),
+        valid_mask_2d=np.ones((1, 1), dtype=bool),
+        metadata={"native_tf": "4h"},
+        archetype="trend",
+    )
 
 
 def test_bridge_passes_no_leak_recommendation_window(monkeypatch: Any) -> None:
@@ -31,6 +52,7 @@ def test_bridge_passes_no_leak_recommendation_window(monkeypatch: Any) -> None:
         entry_block_mask=np.zeros((20, 1), dtype=bool),
         kill_mask=np.zeros((20, 1), dtype=bool),
         execution_cost_bps_2d=np.zeros((20, 1), dtype=np.float64),
+        execution_eligibility_mask=np.ones((20, 1), dtype=bool),
     )
     raw_events = pd.DataFrame(
         {
@@ -59,8 +81,8 @@ def test_bridge_passes_no_leak_recommendation_window(monkeypatch: Any) -> None:
     def fake_align_data_maps(*_: Any, **__: Any) -> Any:
         return aligned
 
-    def fake_build_rule_signal_panels(*_: Any, **__: Any) -> dict[str, Any]:
-        return {"panel": "dummy"}
+    def fake_build_rule_signal_panels(*_: Any, **__: Any) -> tuple[CandidateSignalPanel, ...]:
+        return (_make_panel(),)
 
     def fake_candidate_panels_to_events(*_: Any, **__: Any) -> pd.DataFrame:
         return raw_events.copy()
@@ -179,7 +201,10 @@ def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) 
     })
 
     monkeypatch.setattr("src.domain.futures.strategy.common.alignment.align_data_maps", lambda *_, **__: aligned)
-    monkeypatch.setattr("src.domain.futures.strategy.rule_signals.build_rule_signal_panels", lambda *_, **__: {})
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
+        lambda *_, **__: (_make_panel(),),
+    )
     monkeypatch.setattr(
         "src.domain.futures.strategy.rule_signals.candidate_panels_to_events",
         lambda *_, **__: raw_events.copy(),
@@ -281,7 +306,10 @@ def test_bridge_emits_profile_log_when_raw_events_empty(
     )
 
     monkeypatch.setattr("src.domain.futures.strategy.common.alignment.align_data_maps", lambda *_, **__: aligned)
-    monkeypatch.setattr("src.domain.futures.strategy.rule_signals.build_rule_signal_panels", lambda *_, **__: {})
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
+        lambda *_, **__: (_make_panel(),),
+    )
     monkeypatch.setattr(
         "src.domain.futures.strategy.rule_signals.candidate_panels_to_events",
         lambda *_, **__: pd.DataFrame(),
@@ -350,6 +378,7 @@ def test_bridge_realized_fold_survival_fails_when_selected_realized_edge_is_nega
         entry_block_mask=np.zeros((t, 1), dtype=bool),
         kill_mask=np.zeros((t, 1), dtype=bool),
         execution_cost_bps_2d=np.zeros((t, 1), dtype=np.float64),
+        execution_eligibility_mask=np.ones((t, 1), dtype=bool),
     )
     raw_events = pd.DataFrame(
         {
@@ -692,6 +721,7 @@ def test_bridge_signal_only_silent_diagnostics(monkeypatch: Any) -> None:
         entry_block_mask=np.zeros((20, 1), dtype=bool),
         kill_mask=np.zeros((20, 1), dtype=bool),
         execution_cost_bps_2d=np.zeros((20, 1), dtype=np.float64),
+        execution_eligibility_mask=np.ones((20, 1), dtype=bool),
     )
     raw_events = pd.DataFrame(
         {
@@ -720,8 +750,8 @@ def test_bridge_signal_only_silent_diagnostics(monkeypatch: Any) -> None:
     def fake_align_data_maps(*_: Any, **__: Any) -> Any:
         return aligned
 
-    def fake_build_rule_signal_panels(*_: Any, **__: Any) -> dict[str, Any]:
-        return {"panel": "dummy"}
+    def fake_build_rule_signal_panels(*_: Any, **__: Any) -> tuple[CandidateSignalPanel, ...]:
+        return (_make_panel(),)
 
     def fake_candidate_panels_to_events(*_: Any, **__: Any) -> pd.DataFrame:
         return raw_events.copy()

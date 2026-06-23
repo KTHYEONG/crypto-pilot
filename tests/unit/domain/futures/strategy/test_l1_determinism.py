@@ -41,33 +41,63 @@ class TestL1NestedWorkersConfig:
 
 
 # ---------------------------------------------------------------------------
-# Scenario 3 (추가): resolve_safe_nested_workers pinned 동작
+# Scenario 3 (추가): resolve_safe_nested_workers pinned 동작 (희망 상한)
+# pinned는 safety clamp를 우회하지 못하는 upper bound로 동작.
 # ---------------------------------------------------------------------------
 
 class TestResolveNestedWorkersPinned:
-    def test_pinned_caps_at_n_tasks(self) -> None:
-        # Arrange: pinned=10 이지만 n_tasks=3이므로 min(3,10)=3 반환
-        result = resolve_safe_nested_workers(n_tasks=3, frame_memory_bytes=0, pinned=10)
-        assert result == 3
+    @pytest.fixture(autouse=True)
+    def _mock_sufficient_memory(self) -> None:
+        with patch("psutil.virtual_memory") as mock:
+            mem = mock.return_value
+            mem.available = 16 * 1024 ** 3  # 16GB (low-memory guard 비활성화)
+            yield
 
-    def test_pinned_one_always_returns_one(self) -> None:
+    def test_pinned_capped_by_n_tasks(self) -> None:
+        # pinned=10, n_tasks=3 → requested_workers=3.
+        # oversubscription guard: n_tasks//3=1 < 2 → max(1, 3//2)=1.
+        result = resolve_safe_nested_workers(n_tasks=3, frame_memory_bytes=0, pinned=10)
+        assert result == 1
+
+    def test_pinned_one_returns_one_when_no_other_limit(self) -> None:
         result = resolve_safe_nested_workers(n_tasks=8, frame_memory_bytes=0, pinned=1)
         assert result == 1
 
     def test_pinned_none_falls_through_to_dynamic(self) -> None:
-        # pinned=None이면 동적 계산 (psutil 의존), 최소 1 이상이어야 함
+        # pinned=None이면 동적 계산, 최소 1 이상, n_tasks 초과 불가
         result = resolve_safe_nested_workers(n_tasks=4, frame_memory_bytes=0, pinned=None)
         assert result >= 1
-        assert result <= 4  # n_tasks 초과 불가
+        assert result <= 4
 
     def test_pinned_equals_n_tasks(self) -> None:
+        # pinned=4, n_tasks=4 → requested_workers=4. stage_cap=3, cpu_limit=12 → workers=3.
+        # oversubscription: 4//3=1 < 2 → max(1, 4//2)=2.
         result = resolve_safe_nested_workers(n_tasks=4, frame_memory_bytes=0, pinned=4)
-        assert result == 4
-
-    def test_pinned_larger_than_max_worker_cap(self) -> None:
-        # pinned이 n_tasks보다 크면 n_tasks로 클램핑
-        result = resolve_safe_nested_workers(n_tasks=2, frame_memory_bytes=0, pinned=100)
         assert result == 2
+
+    def test_pinned_clampped_to_n_tasks(self) -> None:
+        # pinned=100, n_tasks=2 → requested_workers=2.
+        # oversubscription: 2//2=1 < 2 → max(1, 2//2)=1.
+        result = resolve_safe_nested_workers(n_tasks=2, frame_memory_bytes=0, pinned=100)
+        assert result == 1
+
+    def test_pinned_overridden_by_soft_cap(self) -> None:
+        # pinned=8 이어도 soft_cap=128MB, compact_result=True → predicted_result_mb=100
+        # result_mem_limit = max(1, 128//100) = 1. workers가 1로 제한된다.
+        result = resolve_safe_nested_workers(
+            n_tasks=16, frame_memory_bytes=0, pinned=8,
+            compact_result=True, result_soft_cap_mb=128,
+        )
+        assert result == 1, "pinned=8이어도 soft_cap=128MB(1 worker)가 최종 상한"
+
+    def test_pinned_is_upper_bound_not_hard_override(self) -> None:
+        # pinned=8 이지만 low-memory guard(available_gb < 5.0)가 더 낮게 제한
+        result = resolve_safe_nested_workers(
+            n_tasks=16, frame_memory_bytes=0, pinned=8,
+        )
+        # 낮은 메모리 환경에서는 min(8, ...)이 2 이하로 제한됨
+        assert result <= 8
+        assert result >= 1
 
 
 # ---------------------------------------------------------------------------

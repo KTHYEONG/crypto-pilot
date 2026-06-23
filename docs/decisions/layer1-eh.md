@@ -66,3 +66,8 @@ ai_read_policy: when_related
 - Incremental outer fold cleanup: `del` per-fold temporaries + `gc.collect()` every 2 folds.
 - L2 memory tracking: stage MEM logs for `l2_signal_batch`, `l2_sim_cache`, `l2_optuna_study`, `l2_study_complete`, `l2_champion`, `l2_final_pipeline`.
 - Peak RSS 감소: 8,845MB(6-worker) → 8,674MB(3-worker, -2%). 48 threads → 12 threads (-75%). L1 4h time 52s → 68s.
+
+## Phase 7: Prequential Soft-Cap & Pinned Contract Audit Gap (ADR-041)
+- `l1_nested_result_soft_cap_mb`를 dead-config에서 실제 OOM guard로 승격: `resolve_safe_nested_workers()`의 `result_soft_cap_mb` 파라미터 연결, `run_l1_nested_swf()`에서 soft_cap 부족 시 compact 강제(force_compact).
+- `l1_nested_workers`(pinned) 의미를 "고정값"에서 "희망 상한(safety-clamped upper bound)"으로 변경: pinned가 low-memory guard, soft-cap guard, oversubscription guard를 우회하지 못함.
+- Audit 후속: config 주석 정합, `test_scenario_5_adaptive_worker_cap` stage cap 기대값 6→3 갱신 + psutil mock 추가, `TestResolveNestedWorkersPinned`에 soft_cap override 검증 추가.
