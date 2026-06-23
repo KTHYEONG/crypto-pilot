@@ -6,7 +6,9 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
+import numba
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
 from src.core.utils.utils import PERF
@@ -18,7 +20,6 @@ from src.domain.futures.portfolio.portfolio_constructor import (
 from src.domain.futures.portfolio.signal_composer import (
     composer_sigma_lookback_bars,
     hours_per_bar_tf,
-    rolling_per_bar_return_std,
 )
 from src.domain.futures.strategy.candidate_contracts import (
     ValidatedSignalBatch,
@@ -525,6 +526,90 @@ def _is_cap_saturated(
     )
 
 
+@numba.njit(cache=True)  # type: ignore[untyped-decorator]
+def _scatter_signals_jit(
+    decision_idxs: NDArray[np.int64],
+    holding_bars_arr: NDArray[np.int64],
+    sleeve_js: NDArray[np.int64],
+    gross_vals: NDArray[np.float64],
+    net_vals: NDArray[np.float64],
+    side_vals: NDArray[np.float64],
+    qw_vals: NDArray[np.float64],
+    strengths: NDArray[np.float64],
+    expected_gross_bps_2d: NDArray[np.float64],
+    expected_net_bps_2d: NDArray[np.float64],
+    holding_bars_2d: NDArray[np.float64],
+    side_2d: NDArray[np.float64],
+    quality_weight_2d: NDArray[np.float64],
+    event_strength_2d: NDArray[np.float64],
+    signal_mask_2d: NDArray[np.bool_],
+    t_max: int,
+) -> None:
+    for e in range(len(decision_idxs)):
+        sleeve_j = sleeve_js[e]
+        start = decision_idxs[e] + 1
+        end = min(t_max, start + holding_bars_arr[e])
+        if start >= end:
+            continue
+        
+        g_val = gross_vals[e]
+        n_val = net_vals[e]
+        h_bars = float(holding_bars_arr[e])
+        s_val = side_vals[e]
+        q_val = qw_vals[e]
+        str_val = strengths[e]
+        
+        for t in range(start, end):
+            if not signal_mask_2d[t, sleeve_j]:
+                signal_mask_2d[t, sleeve_j] = True
+                expected_gross_bps_2d[t, sleeve_j] = g_val
+                expected_net_bps_2d[t, sleeve_j] = n_val
+                holding_bars_2d[t, sleeve_j] = h_bars
+                side_2d[t, sleeve_j] = s_val
+                quality_weight_2d[t, sleeve_j] = q_val
+                event_strength_2d[t, sleeve_j] = str_val
+            elif str_val > event_strength_2d[t, sleeve_j]:
+                expected_gross_bps_2d[t, sleeve_j] = g_val
+                expected_net_bps_2d[t, sleeve_j] = n_val
+                holding_bars_2d[t, sleeve_j] = h_bars
+                side_2d[t, sleeve_j] = s_val
+                quality_weight_2d[t, sleeve_j] = q_val
+                event_strength_2d[t, sleeve_j] = str_val
+
+
+def _build_tradeable_mask_vectorized(
+    aligned: AlignedMarketData,
+    t_max: int,
+    n_sym: int,
+) -> NDArray[np.bool_]:
+    def _mask_2d(name: str, default: bool) -> NDArray[np.bool_]:
+        value = getattr(aligned, name, None)
+        if isinstance(value, np.ndarray) and value.ndim == 2 and value.shape[0] >= t_max and value.shape[1] == n_sym:
+            return np.asarray(value[:t_max], dtype=np.bool_)
+        if isinstance(value, np.ndarray) and value.ndim == 2 and value.shape[1] == n_sym:
+            res = np.full((t_max, n_sym), default, dtype=np.bool_)
+            valid_len = min(t_max, value.shape[0])
+            res[:valid_len] = np.asarray(value[:valid_len], dtype=np.bool_)
+            return res
+        return np.full((t_max, n_sym), default, dtype=np.bool_)
+
+    active_mask = _mask_2d("active_mask", True)
+    warm_mask = _mask_2d("warm_mask", True)
+    execution_eligibility_mask = _mask_2d("execution_eligibility_mask", True)
+    strategy_readiness_mask = _mask_2d("strategy_readiness_mask", True)
+    promotion_active_mask = _mask_2d("promotion_active_mask", True)
+    entry_block_mask = _mask_2d("entry_block_mask", False)
+    kill_mask = _mask_2d("kill_mask", False)
+    return (
+        active_mask
+        & warm_mask
+        & execution_eligibility_mask
+        & strategy_readiness_mask
+        & promotion_active_mask
+        & ~entry_block_mask
+        & ~kill_mask
+    )
+
 
 def build_l2_simulation_cache(
     aligned: AlignedMarketData,
@@ -559,15 +644,17 @@ def build_l2_simulation_cache(
     t_max = aligned.close_2d.shape[0]
 
     # ── Symbol-level matrices [T, N] ──────────────────────────────────────────
-    vol_matrix_2d = np.full_like(aligned.close_2d, VOL_FLOOR)
-    for i in range(n_sym):
-        close_col = aligned.close_2d[:, i]
-        v_std = rolling_per_bar_return_std(close_col, lookback)
-        vol_matrix_2d[:, i] = np.maximum(v_std, VOL_FLOOR)
+    c_close = np.asarray(aligned.close_2d, dtype=np.float64)
+    r_rets = np.zeros((t_max, n_sym), dtype=np.float64)
+    if t_max > 1:
+        r_rets[1:] = (c_close[1:] - c_close[:-1]) / np.maximum(np.abs(c_close[:-1]), 1e-12)
+    rw = max(2, int(lookback))
+    s_rolling = pd.DataFrame(r_rets).rolling(rw, min_periods=2).std(ddof=1)
+    vol_matrix_2d = s_rolling.to_numpy(dtype=np.float64)
+    vol_matrix_2d = np.nan_to_num(vol_matrix_2d, nan=VOL_FLOOR, posinf=VOL_FLOOR, neginf=VOL_FLOOR)
+    vol_matrix_2d = np.maximum(vol_matrix_2d, VOL_FLOOR)
 
-    tradeable_mask_2d = np.zeros((t_max, n_sym), dtype=np.bool_)
-    for t in range(t_max):
-        tradeable_mask_2d[t] = _resolve_tradeable_mask(aligned=aligned, t=t, n_sym=n_sym)
+    tradeable_mask_2d = _build_tradeable_mask_vectorized(aligned=aligned, t_max=t_max, n_sym=n_sym)
 
     if aligned.execution_cost_bps_2d is not None:
         hurdle_2d = np.nan_to_num(aligned.execution_cost_bps_2d, nan=3.8, posinf=100.0, neginf=100.0)
@@ -639,42 +726,48 @@ def build_l2_simulation_cache(
     event_strength_2d = np.zeros((t_max, n_sleeve), dtype=np.float64)
     signal_mask_2d = np.zeros((t_max, n_sleeve), dtype=np.bool_)
 
+    decision_idxs = []
+    holding_bars_arr = []
+    sleeve_js = []
+    gross_vals = []
+    net_vals = []
+    side_vals = []
+    qw_vals = []
+    strengths = []
+    
     for event in signal_batch.events:
         sleeve_key = (event.symbol, event.strategy_id)
         sleeve_j = sleeve_to_idx.get(sleeve_key)
         if sleeve_j is None:
             continue
+        sleeve_js.append(sleeve_j)
+        decision_idxs.append(int(event.decision_idx))
+        holding_bars_arr.append(max(int(event.expected_holding_bars), 1))
+        side_vals.append(float(event.side))
+        gross_vals.append(float(event.expected_gross_bps))
+        net_vals.append(float(event.expected_net_bps))
+        qw_vals.append(float(event.quality_weight))
+        strengths.append(float(_event_strength(event)))
 
-        decision_idx = int(event.decision_idx)
-        holding_bars = max(int(event.expected_holding_bars), 1)
-        active_start = decision_idx + 1
-        active_end = min(t_max, active_start + holding_bars)
-
-        if active_start >= active_end:
-            continue
-
-        side_val = float(event.side)
-        gross_val = float(event.expected_gross_bps)
-        net_val = float(event.expected_net_bps)
-        qw_val = float(event.quality_weight)
-        strength = _event_strength(event)
-
-        for t in range(active_start, active_end):
-            if not signal_mask_2d[t, sleeve_j]:
-                signal_mask_2d[t, sleeve_j] = True
-                expected_gross_bps_2d[t, sleeve_j] = gross_val
-                expected_net_bps_2d[t, sleeve_j] = net_val
-                holding_bars_2d[t, sleeve_j] = float(holding_bars)
-                side_2d[t, sleeve_j] = side_val
-                quality_weight_2d[t, sleeve_j] = qw_val
-                event_strength_2d[t, sleeve_j] = strength
-            elif strength > event_strength_2d[t, sleeve_j]:
-                expected_gross_bps_2d[t, sleeve_j] = gross_val
-                expected_net_bps_2d[t, sleeve_j] = net_val
-                holding_bars_2d[t, sleeve_j] = float(holding_bars)
-                side_2d[t, sleeve_j] = side_val
-                quality_weight_2d[t, sleeve_j] = qw_val
-                event_strength_2d[t, sleeve_j] = strength
+    if len(sleeve_js) > 0:
+        _scatter_signals_jit(
+            np.array(decision_idxs, dtype=np.int64),
+            np.array(holding_bars_arr, dtype=np.int64),
+            np.array(sleeve_js, dtype=np.int64),
+            np.array(gross_vals, dtype=np.float64),
+            np.array(net_vals, dtype=np.float64),
+            np.array(side_vals, dtype=np.float64),
+            np.array(qw_vals, dtype=np.float64),
+            np.array(strengths, dtype=np.float64),
+            expected_gross_bps_2d,
+            expected_net_bps_2d,
+            holding_bars_2d,
+            side_2d,
+            quality_weight_2d,
+            event_strength_2d,
+            signal_mask_2d,
+            t_max,
+        )
 
     return L2SimulationCache(
         vol_matrix_2d=vol_matrix_2d,
@@ -1043,16 +1136,14 @@ def _run_awf_simulation(
             _fit_adv = getattr(aligned, "adv_usdt_2d", None)
             if _capacity_clip_enabled and isinstance(_fit_adv, np.ndarray) and _ft < _fit_adv.shape[0]:
                 _fit_cap_row = np.nan_to_num(_fit_adv[_ft], nan=0.0, posinf=0.0, neginf=0.0)
-                for _cn in range(n_sym):
-                    _intended = abs(_fit_w[_cn]) * _portfolio_nav
-                    if _intended < _min_order_usdt:
-                        _fit_w[_cn] = 0.0
-                        continue
-                    _cap = _fit_cap_row[_cn]
-                    if _cap > 0.0:
-                        _max_w = _cap / max(_portfolio_nav, 1.0)
-                        if abs(_fit_w[_cn]) > _max_w:
-                            _fit_w[_cn] = np.sign(_fit_w[_cn]) * _max_w
+                _intended = np.abs(_fit_w) * _portfolio_nav
+                _fit_w[_intended < _min_order_usdt] = 0.0
+                
+                _cap_positive = _fit_cap_row > 0.0
+                if np.any(_cap_positive):
+                    _max_w = np.where(_cap_positive, _fit_cap_row / max(_portfolio_nav, 1.0), np.inf)
+                    _over = np.abs(_fit_w) > _max_w
+                    _fit_w[_over] = np.sign(_fit_w[_over]) * _max_w[_over]
 
             # 리밸런싱 비용
             _fit_rebal_cost = compute_rebalance_cost(
@@ -1202,16 +1293,14 @@ def _run_awf_simulation(
             _adv = getattr(aligned, "adv_usdt_2d", None)
             if _capacity_clip_enabled and isinstance(_adv, np.ndarray) and t < _adv.shape[0]:
                 _cap_row = np.nan_to_num(_adv[t], nan=0.0, posinf=0.0, neginf=0.0)
-                for _n in range(n_sym):
-                    _intended = abs(w[_n]) * _portfolio_nav
-                    if _intended < _min_order_usdt:
-                        w[_n] = 0.0
-                        continue
-                    _cap = _cap_row[_n]
-                    if _cap > 0.0:
-                        _max_w = _cap / max(_portfolio_nav, 1.0)
-                        if abs(w[_n]) > _max_w:
-                            w[_n] = np.sign(w[_n]) * _max_w
+                _intended = np.abs(w) * _portfolio_nav
+                w[_intended < _min_order_usdt] = 0.0
+                
+                _cap_positive = _cap_row > 0.0
+                if np.any(_cap_positive):
+                    _max_w = np.where(_cap_positive, _cap_row / max(_portfolio_nav, 1.0), np.inf)
+                    _over = np.abs(w) > _max_w
+                    w[_over] = np.sign(w[_over]) * _max_w[_over]
 
             last_w = w
 
