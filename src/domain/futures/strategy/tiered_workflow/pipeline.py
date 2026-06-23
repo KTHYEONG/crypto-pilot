@@ -6,6 +6,7 @@ import logging
 import multiprocessing
 import os
 import time
+from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
 from datetime import date
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -42,6 +43,18 @@ from src.domain.futures.strategy.tiered_logging import (
     format_layer_header,
     format_layer_universe_audit_table,
 )
+
+
+def _get_rss_mb() -> float:
+    """Return current process RSS in MB via /proc/self/status."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return float(line.split()[1]) / 1024.0
+    except Exception:
+        return -1.0
+    return -1.0
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     _run_awf_simulation,
     _stack_oos_signals,
@@ -216,7 +229,7 @@ def resolve_safe_nested_workers(
 
     mem_limit = max(1, int(safe_mem_gb // estimated_proc_gb))
 
-    max_workers = min(cpu_limit, 8)
+    max_workers = min(cpu_limit, 3)
     workers = max(1, min(n_tasks, max_workers, mem_limit))
     # Over-subscription guard: each worker gets at least ~2 tasks
     if workers > 1 and n_tasks // workers < 2:
@@ -230,6 +243,35 @@ def resolve_safe_nested_workers(
     )
     return workers
 
+
+
+def _log_fold_avg_profile(results: Sequence[Any], tag: str) -> None:
+    """Log average timing profile across fold results (evidence or outer)."""
+    n = len(results)
+    if n == 0:
+        return
+    _profile_keys = (
+        "schema", "dataset_fit", "dataset_early_stop",
+        "dataset_calibration_fit", "dataset_calibration_eval",
+        "dataset_oos", "edge_fit", "inference", "selection",
+    )
+    _agg: dict[str, float] = dict.fromkeys(_profile_keys, 0.0)
+    for _r in results:
+        _prof = getattr(_r, "timing_profile", {}) or {}
+        for _k in _profile_keys:
+            _agg[_k] += _prof.get(_k, 0.0)
+    for _k in _profile_keys:
+        _agg[_k] /= n
+    logger.log(
+        PERF,
+        "[PERF] l1_%s_fold_avg_profile n=%d "
+        "schema=%.3fs ds_fit=%.3fs ds_es=%.3fs ds_cal_fit=%.3fs ds_cal_eval=%.3fs "
+        "ds_oos=%.3fs edge_fit=%.3fs inference=%.3fs selection=%.3fs",
+        tag, n,
+        _agg["schema"], _agg["dataset_fit"], _agg["dataset_early_stop"],
+        _agg["dataset_calibration_fit"], _agg["dataset_calibration_eval"],
+        _agg["dataset_oos"], _agg["edge_fit"], _agg["inference"], _agg["selection"],
+    )
 
 
 def _snapshot_matured_count(
@@ -836,6 +878,7 @@ def run_l1_nested_swf(
     purge_bars, embargo_bars = strategy_config.resolve_purge_and_embargo_bars(cfg)
     _vol_window = composer_sigma_lookback_bars("4h")
     t_vol = time.perf_counter()
+    _mem_vol = _get_rss_mb()
     # OPT-3: vectorized — same logic as rolling_per_bar_return_std over [T, N] at once
     _c = np.asarray(aligned.close_2d, dtype=np.float64)  # [T, N]
     _n_t, _n_sym = _c.shape
@@ -855,6 +898,11 @@ def run_l1_nested_swf(
         PERF,
         "[PERF] l1_nested_volatility_2d took=%.4fs",
         time.perf_counter() - t_vol,
+    )
+    _rss_now = _get_rss_mb()
+    logger.debug(
+        "[MEM] stage=volatility_2d rss=%.0fMB delta=%+.0fMB shape=(%d,%d)",
+        _rss_now, _rss_now - _mem_vol, _n_t, _n_sym,
     )
     outer_reports: list[Layer1FoldReadiness] = []
     outer_event_frames: list[pd.DataFrame] = []
@@ -898,6 +946,7 @@ def run_l1_nested_swf(
 
     # Prime the feature cache on the parent process before multiprocessing fork
     t_prime = time.perf_counter()
+    _mem_prime2 = _get_rss_mb()
     if _can_prime_feature_cache(labeled_events):
         logger.debug("[L1-NESTED] Priming aligned feature cache on parent process")
         try:
@@ -915,6 +964,7 @@ def run_l1_nested_swf(
         "[PERF] l1_nested_feature_cache_prime took=%.4fs",
         time.perf_counter() - t_prime,
     )
+    logger.debug("[MEM] stage=nested_prime_cache rss=%.0fMB delta=%+.0fMB", _get_rss_mb(), _get_rss_mb() - _mem_prime2)
 
     t_mp_prep = time.perf_counter()
     # Set process globals to minimize IPC size under fork
@@ -945,89 +995,118 @@ def run_l1_nested_swf(
         workers, getattr(cfg, "l1_nested_workers", None),
         len(aligned.symbols), len(labeled_events), seed,
     )
+    for _env in ("NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                  "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ[_env] = "1"
+    logger.debug("[MEM] stage=pre_fork rss=%.0fMB workers=%d n_folds=%d", _get_rss_mb(), workers, len(combined_folds))
     logger.log(
         PERF,
         "[PERF] l1_nested_mp_prep took=%.4fs",
         time.perf_counter() - t_mp_prep,
     )
-    combined_results: list[Any] = []
+    # ── Phase 1: Evidence folds ─────────────────────────────────────────────
+    evidence_results: list[Any] = []
     t_exec = time.perf_counter()
+    if evidence_folds:
+        try:
+            with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as executor:
+                ev_submits = [
+                    executor.submit(
+                        cw._fit_and_predict_single_fold_from_globals,
+                        idx,
+                        fold,
+                        True,
+                    )
+                    for idx, fold in enumerate(evidence_folds)
+                ]
+                t_ev_ipc = time.perf_counter()
+                _mem_ipc_ref = _get_rss_mb()
+                evidence_results = [fut.result() for fut in ev_submits]
+                logger.log(PERF, "[PERF] l1_evidence_ipc_collect n=%d took=%.4fs",
+                    len(evidence_results), time.perf_counter() - t_ev_ipc)
+                _rss_ev = _get_rss_mb()
+                logger.debug("[MEM] stage=evidence_ipc rss=%.0fMB delta=%+.0fMB n_results=%d",
+                    _rss_ev, _rss_ev - _mem_ipc_ref, len(evidence_results))
+        finally:
+            cw._GLOBAL_LABELED_EVENTS = None
+            cw._GLOBAL_ALIGNED = None
+            cw._GLOBAL_CFG = None
+            cw._GLOBAL_PURGE_BARS = None
+
+        _log_fold_avg_profile(evidence_results, "evidence")
+
+        t_ev_snap = time.perf_counter()
+        evidence_snapshots = build_l1_prequential_evidence_snapshots(
+            labeled_events=labeled_events,
+            aligned=aligned,
+            evidence_folds=evidence_folds,
+            snapshot_indices=tuple(fold.oos_start for fold in outer_folds),
+            cfg=l1_cfg,
+            seed=seed,
+            precomputed_results=evidence_results,
+        )
+        logger.log(PERF, "[PERF] l1_prequential_evidence_snapshots took=%.4fs",
+            time.perf_counter() - t_ev_snap)
+        logger.debug("[MEM] stage=evidence_snapshots rss=%.0fMB n_snapshots=%d",
+            _get_rss_mb(), len(evidence_snapshots))
+
+        del evidence_results
+        gc.collect()
+        logger.debug("[MEM] stage=post_evidence_free rss=%.0fMB", _get_rss_mb())
+    else:
+        cw._GLOBAL_LABELED_EVENTS = None
+        cw._GLOBAL_ALIGNED = None
+        cw._GLOBAL_CFG = None
+        cw._GLOBAL_PURGE_BARS = None
+        evidence_snapshots = ()
+
+    logger.log(PERF, "[PERF] l1_evidence_phase took=%.4fs", time.perf_counter() - t_exec)
+    snapshots_by_idx = {s.as_of_idx: s for s in evidence_snapshots}
+
+    # Re-set globals for Phase 2
+    gc.collect()
+    cw._GLOBAL_LABELED_EVENTS = labeled_events
+    cw._GLOBAL_ALIGNED = aligned
+    cw._GLOBAL_CFG = l1_cfg
+    cw._GLOBAL_PURGE_BARS = purge_bars
+
+    # ── Phase 2: Outer folds ────────────────────────────────────────────────
+    outer_results: list[Any] = []
+    t_outer_exec = time.perf_counter()
     try:
         with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as executor:
-            submits = [
+            out_submits = [
                 executor.submit(
                     cw._fit_and_predict_single_fold_from_globals,
                     idx,
                     fold,
-                    idx < num_evidence,
+                    False,
                 )
-                for idx, fold in enumerate(combined_folds)
+                for idx, fold in enumerate(outer_folds)
             ]
-            t_ipc = time.perf_counter()
-            combined_results = [fut.result() for fut in submits]
-            logger.log(
-                PERF,
-                "[PERF] l1_nested_ipc_collect n_results=%d took=%.4fs",
-                len(combined_results),
-                time.perf_counter() - t_ipc,
-            )
+            t_out_ipc = time.perf_counter()
+            _mem_ipc_ref = _get_rss_mb()
+            outer_results = [fut.result() for fut in out_submits]
+            logger.log(PERF, "[PERF] l1_outer_ipc_collect n=%d took=%.4fs",
+                len(outer_results), time.perf_counter() - t_out_ipc)
+            _rss_out = _get_rss_mb()
+            logger.debug("[MEM] stage=outer_ipc rss=%.0fMB delta=%+.0fMB n_results=%d",
+                _rss_out, _rss_out - _mem_ipc_ref, len(outer_results))
     finally:
         cw._GLOBAL_LABELED_EVENTS = None
         cw._GLOBAL_ALIGNED = None
         cw._GLOBAL_CFG = None
         cw._GLOBAL_PURGE_BARS = None
-    logger.log(PERF,
-        "[PERF] l1_nested_parallel_exec n_folds=%d took=%.4fs",
-        len(combined_folds), time.perf_counter() - t_exec,
-    )
 
-    evidence_results = combined_results[:num_evidence]
-    outer_results = combined_results[num_evidence:]
+    _log_fold_avg_profile(outer_results, "outer")
 
-    _n_combined = len(combined_results)
-    if _n_combined > 0:
-        _profile_keys = (
-            "schema", "dataset_fit", "dataset_early_stop",
-            "dataset_calibration_fit", "dataset_calibration_eval",
-            "dataset_oos", "edge_fit", "inference", "selection",
-        )
-        _agg: dict[str, float] = dict.fromkeys(_profile_keys, 0.0)
-        for _r in combined_results:
-            _prof = getattr(_r, "timing_profile", {}) or {}
-            for _k in _profile_keys:
-                _agg[_k] += _prof.get(_k, 0.0)
-        for _k in _profile_keys:
-            _agg[_k] /= _n_combined
-        logger.log(
-            PERF,
-            "[PERF] l1_nested_fold_avg_profile n=%d "
-            "schema=%.3fs ds_fit=%.3fs ds_es=%.3fs ds_cal_fit=%.3fs ds_cal_eval=%.3fs "
-            "ds_oos=%.3fs edge_fit=%.3fs inference=%.3fs selection=%.3fs",
-            _n_combined,
-            _agg["schema"], _agg["dataset_fit"], _agg["dataset_early_stop"],
-            _agg["dataset_calibration_fit"], _agg["dataset_calibration_eval"],
-            _agg["dataset_oos"], _agg["edge_fit"], _agg["inference"], _agg["selection"],
-        )
-
-    t_ev_snap = time.perf_counter()
-    evidence_snapshots = build_l1_prequential_evidence_snapshots(
-        labeled_events=labeled_events,
-        aligned=aligned,
-        evidence_folds=evidence_folds,
-        snapshot_indices=tuple(fold.oos_start for fold in outer_folds),
-        cfg=l1_cfg,
-        seed=seed,
-        precomputed_results=evidence_results,
-    )
-    logger.log(PERF,
-        "[PERF] l1_prequential_evidence_snapshots took=%.4fs",
-        time.perf_counter() - t_ev_snap,
-    )
-    snapshots_by_idx = {snapshot.as_of_idx: snapshot for snapshot in evidence_snapshots}
+    logger.log(PERF, "[PERF] l1_nested_parallel_exec n_folds=%d took=%.4fs",
+        len(outer_folds), time.perf_counter() - t_outer_exec)
 
     t_outer = time.perf_counter()
     for outer_idx, outer_fold in enumerate(outer_folds):
         t_fold = time.perf_counter()
+        logger.debug("[MEM] stage=outer_fold fold=%d/%d rss=%.0fMB", outer_idx + 1, len(outer_folds), _get_rss_mb())
         snapshot = snapshots_by_idx.get(outer_fold.oos_start)
         evidence = snapshot.evidence if snapshot is not None else ()
         registry = (
@@ -1096,6 +1175,10 @@ def run_l1_nested_swf(
             _t_batch_took, _t_sel_took, _t_eval_took,
             time.perf_counter() - t_fold,
         )
+        del opportunities, fold_sigs, prediction_batch, outer_events
+        if (outer_idx + 1) % 2 == 0:
+            gc.collect()
+            logger.debug("[MEM] stage=outer_fold_gc rss=%.0fMB", _get_rss_mb())
     logger.log(PERF, "[PERF] l1_nested_outer_fold_loop took=%.4fs", time.perf_counter() - t_outer)
 
     fold_cov = (
@@ -1121,6 +1204,7 @@ def run_l1_nested_swf(
         "[PERF] l1_deployment_evidence took=%.4fs",
         time.perf_counter() - t_ev_deploy,
     )
+    logger.debug("[MEM] stage=deployment_evidence rss=%.0fMB", _get_rss_mb())
     gate_report = evaluate_layer1_readiness(
         fold_reports=tuple(outer_reports),
         fold_cov=fold_cov,
@@ -1150,6 +1234,8 @@ def run_l1_nested_swf(
             cfg=_cfg_effective,
             probe_prior_map=probe_prior_map,
         )
+        _n_ready = len(deployment_registry.ready_symbols) if deployment_registry else 0
+        logger.debug("[MEM] stage=deployment_registry rss=%.0fMB n_ready=%d", _get_rss_mb(), _n_ready)
         oos_stacked = _registry_to_symbol_signals(deployment_registry)
         fit_start_idx = min((fold.fit_start for fold in outer_folds), default=0)
         fit_end_idx = max((fold.oos_end for fold in outer_folds), default=0)
@@ -1165,6 +1251,8 @@ def run_l1_nested_swf(
                 seed=seed,
             )
             logger.log(PERF, "[PERF] l1_fit_inference_artifact took=%.4fs", time.perf_counter() - t_art)
+            _art_size = "present" if inference_artifact is not None else "None"
+            logger.debug("[MEM] stage=inference_artifact rss=%.0fMB artifact_size=%s", _get_rss_mb(), _art_size)
         if verbose:
             logger.info(format_layer1_deployment_registry_table(deployment_registry, all_evidence=deployment_evidence))
     _l1_result = Layer1Result(
@@ -1960,8 +2048,14 @@ def run_tiered_pipeline(
             import contextlib
 
             from src.domain.futures.strategy.candidate_dataset import prime_aligned_feature_cache
+            _mem_cache = _get_rss_mb()
             with contextlib.suppress(KeyError, TypeError, ValueError):
                 prime_aligned_feature_cache(labeled_events=labeled_events, aligned=aligned, cfg=cfg)
+            _rss_now = _get_rss_mb()
+            logger.debug(
+                "[MEM] stage=prime_feature_cache rss=%.0fMB delta=%+.0fMB",
+                _rss_now, _rss_now - _mem_cache,
+            )
 
         per_tf_l1: dict[str, PerTfL1Result] = {}
         for tf_idx, tf in enumerate(l1_tfs):
@@ -1976,6 +2070,11 @@ def run_tiered_pipeline(
             ):
                 logger.log(PERF, "[PERF] per_tf_l1 tf=%s aligned=%.4fs skipped", tf, t_aligned - t_tf)
                 continue
+
+            logger.debug(
+                "[MEM] stage=per_tf_l1_enter tf=%s rss=%.0fMB n_syms=%d n_bars=%d",
+                tf, _get_rss_mb(), len(aligned_tf.symbols), len(aligned_tf.datetimes),
+            )
 
             n_bars_tf = len(aligned_tf.datetimes)
             l1_start_bars_tf = int(
@@ -2016,15 +2115,20 @@ def run_tiered_pipeline(
             )
             logger.log(
                 PERF,
-                "[PERF] per_tf_l1 tf=%s aligned=%.4fs folds=%.4fs run_l1=%.4fs total=%.4fs",
+                "[PERF] per_tf_l1 tf=%s aligned=%.4fs folds=%.4fs run_l1=%.4fs total=%.4fs rss=%.0fMB",
                 tf,
                 t_aligned - t_tf,
                 t_folds - t_aligned,
                 time.perf_counter() - t_folds,
                 time.perf_counter() - t_tf,
+                _get_rss_mb(),
             )
+            if tf_idx < len(l1_tfs) - 1:
+                time.sleep(0.5)
 
         l1 = _aggregate_per_tf_l1(per_tf_l1)
+        _rss_after_agg = _get_rss_mb()
+        logger.debug("[MEM] stage=aggregate_l1 rss=%.0fMB per_tf_count=%d", _rss_after_agg, len(per_tf_l1))
         l2_tf = _resolve_l2_master_tf(cfg, per_tf_l1, probe_manifest)
 
     l2_tf = _resolve_l2_master_tf(cfg, per_tf_l1 if l1_result_override is None else {}, probe_manifest)
@@ -2082,6 +2186,8 @@ def run_tiered_pipeline(
                 )
             )
         )
+
+    logger.debug("[MEM] stage=l1_gate_complete rss=%.0fMB gate_passed=%s", _get_rss_mb(), l1.gate_passed)
 
     if target_phase == "l1":
         return (l1, None, None)
