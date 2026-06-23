@@ -51,3 +51,8 @@ ai_read_policy: when_related
 - PERF-GAP1: [WORKER-CALC]→[PERF] worker_calc(memory 추정+worker decision 노출)
 - PERF-GAP2: [PERF] l1_nested_ipc_collect(IPC+fold compute vs pool_setup 분리)
 - v3 실측: L1 108.6s(-52% vs baseline), Grand Total 152.8s(-49%), EXIT_CODE=0
+
+## Phase 5: Bridge Perf Logging + GC 최적화 (ADR-038~039, 6/23)
+- Bridge perf logging Phase 1: `_get_rss_mb()` RSS 측정, stage별 `_sample_rss()` memory delta 추적, `wf_fold_times` per-fold 타이밍, `[PROFILE][MERGE][SUMMARY]` 통계 로깅
+- HTF skip 최적화 시도 → 롤백: `run_per_tf_l1()`이 bridge HTF events에 의존적임 확인 (`_build_per_tf_event_index()` 존재하지 않음). HTF skip 시 6h/8h/12h per-TF L1 비활성화 = 품질 회귀
+- GC 전략 추가: diagnostics 후 `gc.collect()` (+5.3GB 회귀), bridge 반환 후 `gc.collect()` (tiered re-alignment 전 aligned 해제)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import gc
 import logging
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -26,6 +27,19 @@ if TYPE_CHECKING:
     from src.domain.futures.strategy.config import CandidateStrategyConfig, StrategyConfig
 
 _logger = logging.getLogger(__name__)
+
+
+def _get_rss_mb() -> float:
+    """Return current process RSS in MB via /proc/self/status (fast, no psutil dep)."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return float(line.split()[1]) / 1024.0
+    except Exception:
+        return -1.0
+    return -1.0
+
 
 # ---------------------------------------------------------------------------
 # TF Probe helpers
@@ -771,6 +785,15 @@ def run_candidate_strategy_for_universe(
         "weights": 0.0,
         "alpha_panel": 0.0,
     }
+    stage_rss_samples: list[tuple[str, float, float]] = []
+    rss_baseline = _get_rss_mb()
+    wf_fold_times: list[float] = []
+    wf_fold_n_events: list[int] = []
+
+    def _sample_rss(stage_name: str) -> None:
+        rss = _get_rss_mb()
+        delta = rss - rss_baseline if rss >= 0 and rss_baseline >= 0 else -1.0
+        stage_rss_samples.append((stage_name, rss, delta))
 
     def _emit_bridge_profile() -> None:
         total_time = time.perf_counter() - bridge_t0
@@ -801,14 +824,42 @@ def run_candidate_strategy_for_universe(
             
             label = name.replace("_", " ").title()
             lines.append(f"  {label:<15}: {bar:<20} {duration:>6.2f}s ({pct:>5.1f}%){suffix}")
-            
+
+        # Memory section
+        if stage_rss_samples:
+            peak_rss = max(s[1] for s in stage_rss_samples)
+            lines.append("")
+            lines.append(
+                f"  [MEMORY] Peak RSS: {peak_rss:.0f} MB | Baseline: {rss_baseline:.0f} MB"
+            )
+            lines.append("  Stage RSS Delta (top 5 by delta):")
+            sorted_rss = sorted(
+                [(name, delta) for name, rss, delta in stage_rss_samples if delta > 0],
+                key=lambda x: x[1], reverse=True,
+            )[:5]
+            for name, delta in sorted_rss:
+                label = name.replace("_", " ").title()
+                lines.append(f"    {label:<15}: +{delta:>7.1f} MB")
+
+        # WF fold timing section
+        if wf_fold_times:
+            lines.append("")
+            lines.append(f"  [WF FOLDS] n_folds={len(wf_fold_times)}")
+            for i, (t_fold, n_ev) in enumerate(zip(wf_fold_times, wf_fold_n_events, strict=False)):
+                lines.append(f"    Fold {i:<3}: {t_fold:>6.2f}s  events={n_ev}")
+
         lines.append(border)
         _logger.debug("\n".join(lines))
 
     t_step = time.perf_counter()
     aligned = align_data_maps(preloaded_data_maps, symbols, tf)
     bridge_prof["align"] = time.perf_counter() - t_step
+    _sample_rss("align")
     n_bars = aligned.close_2d.shape[0]
+    _logger.debug(
+        "[BRIDGE][INPUT] n_symbols=%d n_bars=%d tf=%s",
+        len(symbols), n_bars, tf,
+    )
 
     t_step = time.perf_counter()
     panels = build_rule_signal_panels(aligned=aligned, cfg=strategy_cfg.candidate)
@@ -817,6 +868,7 @@ def run_candidate_strategy_for_universe(
         for p in panels
     )
     bridge_prof["rules"] = time.perf_counter() - t_step
+    _sample_rss("rules")
     t_step = time.perf_counter()
     raw_events = candidate_panels_to_events(
         panels,
@@ -826,6 +878,7 @@ def run_candidate_strategy_for_universe(
         execution_cost_bps_2d=aligned.execution_cost_bps_2d,
     )
     bridge_prof["events"] = time.perf_counter() - t_step
+    _sample_rss("events")
     max_holding_bars = (
         int(pd.to_numeric(raw_events["expected_holding_bars"], errors="coerce").max())
         if not raw_events.empty and "expected_holding_bars" in raw_events.columns
@@ -847,6 +900,7 @@ def run_candidate_strategy_for_universe(
             cfg=strategy_cfg.candidate,
         )
         bridge_prof["alpha_panel"] = time.perf_counter() - t_step
+        _sample_rss("alpha_panel")
         _emit_bridge_profile()
         return CandidatePipelineOutput(
             alpha_panel=alpha_panel,
@@ -878,6 +932,7 @@ def run_candidate_strategy_for_universe(
     t_step = time.perf_counter()
     labeled = label_candidate_events(events=raw_events, aligned=aligned, cfg=candidate_cfg)
     bridge_prof["label"] = time.perf_counter() - t_step
+    _sample_rss("label")
     labeled_all = labeled.copy()
     labeled_all["native_tf"] = tf
     # ── Multi-TF HTF panel generation (Phase B) ──────────────────────────
@@ -898,6 +953,7 @@ def run_candidate_strategy_for_universe(
                 htf_only=True,
             )
             bridge_prof["htf_panels"] = time.perf_counter() - t_htf
+            _sample_rss("htf_panels")
             if htf_panels:
                 t_htf_events = time.perf_counter()
                 htf_raw_events = candidate_panels_to_events(
@@ -911,12 +967,14 @@ def run_candidate_strategy_for_universe(
                     t_htf_label = time.perf_counter()
                     htf_labeled = label_candidate_events(events=htf_raw_events, aligned=aligned, cfg=candidate_cfg)
                     bridge_prof["htf_label"] = time.perf_counter() - t_htf_label
+                    _sample_rss("htf_label")
                     variant_to_tf: dict[str, str] = {}
                     for panel in htf_panels:
                         variant_to_tf[panel.variant] = panel.metadata.get("native_tf", tf)
                     htf_labeled["native_tf"] = htf_labeled["variant"].map(variant_to_tf)
                     labeled_all = pd.concat([labeled_all, htf_labeled], ignore_index=True)
                 bridge_prof["htf_events"] = time.perf_counter() - t_htf_events
+                _sample_rss("htf_events")
         except Exception as exc:
             _logger.warning("[MULTI-TF] HTF panel generation failed: %s", exc)
     fit_start, fit_end, calibration_start, calibration_end, oos_start, oos_end = _candidate_ml_split_indices(
@@ -952,6 +1010,8 @@ def run_candidate_strategy_for_universe(
         report_end=oos_end,
     )
     bridge_prof["diagnostics"] = time.perf_counter() - t_step
+    _sample_rss("diagnostics")
+    gc.collect()
 
     if strategy_cfg.candidate.promotion_filter_enabled:
         t_step = time.perf_counter()
@@ -963,6 +1023,7 @@ def run_candidate_strategy_for_universe(
             flip_signal_cells=diag.recommended_flip_signal_cells,
         )
         bridge_prof["promotions"] = time.perf_counter() - t_step
+        _sample_rss("promotions")
         if labeled.empty:
             _logger.debug(
                 "[BRIDGE] all candidate variants blocked by promotion filter; producing zero weights"
@@ -976,6 +1037,7 @@ def run_candidate_strategy_for_universe(
                 cfg=strategy_cfg.candidate,
             )
             bridge_prof["alpha_panel"] = time.perf_counter() - t_step
+            _sample_rss("alpha_panel")
             _emit_bridge_profile()
             return CandidatePipelineOutput(
                 alpha_panel=alpha_panel,
@@ -1034,6 +1096,7 @@ def run_candidate_strategy_for_universe(
             cfg=strategy_cfg.candidate,
         )
         bridge_prof["alpha_panel"] = time.perf_counter() - t_step
+        _sample_rss("alpha_panel")
         _emit_bridge_profile()
         return CandidatePipelineOutput(
             alpha_panel=alpha_panel_sv,
@@ -1092,6 +1155,7 @@ def run_candidate_strategy_for_universe(
         folds=wf_folds,
     )
     bridge_prof["walk_forward"] = time.perf_counter() - t_step
+    _sample_rss("walk_forward")
     t_post_wf = time.perf_counter()
 
     fold_p_pass_parts: list[np.ndarray] = []
@@ -1120,6 +1184,7 @@ def run_candidate_strategy_for_universe(
         ml_out = fold_out.model_output
         selected_fold = fold_out.selected_events
         selection_diag_fold = dict(getattr(selected_fold, "attrs", {}).get("candidate_selection_diagnostics", {}))
+        t_fold_start = time.perf_counter()
 
         if "edge_after_hurdle_bps" in selected_fold.columns:
             realized_edge = pd.to_numeric(selected_fold["edge_after_hurdle_bps"], errors="coerce")
@@ -1297,6 +1362,8 @@ def run_candidate_strategy_for_universe(
             fold_q90_return_r_parts.append(_zeros.copy())
             fold_kelly_fraction_parts.append(_zeros.copy())
         fold_event_parts.append(ml_out.events)
+        wf_fold_times.append(time.perf_counter() - t_fold_start)
+        wf_fold_n_events.append(int(ml_out.events.shape[0]) if ml_out.events is not None else -1)
 
     # Note: fallback behavior down below is preserved using oos_set_fallback
     # Reconstruct counts from fold outputs
@@ -1521,6 +1588,7 @@ def run_candidate_strategy_for_universe(
             strategy_cfg.candidate.min_wf_fold_pass_ratio,
         )
         bridge_prof["post_wf"] = time.perf_counter() - t_post_wf
+        _sample_rss("post_wf")
         t_step = time.perf_counter()
         _wf_fail_panel = build_candidate_alpha_panel(
             selected_events=pd.DataFrame(),
@@ -1530,6 +1598,7 @@ def run_candidate_strategy_for_universe(
             cfg=strategy_cfg.candidate,
         )
         bridge_prof["alpha_panel"] = time.perf_counter() - t_step
+        _sample_rss("alpha_panel")
         out = CandidatePipelineOutput(
             alpha_panel=_wf_fail_panel,
             target_weights=np.zeros_like(aligned.close_2d),
@@ -1651,9 +1720,11 @@ def run_candidate_strategy_for_universe(
     )
 
     bridge_prof["post_wf"] = time.perf_counter() - t_post_wf
+    _sample_rss("post_wf")
     t_step = time.perf_counter()
     selected = select_candidate_events_for_portfolio(model_output=ml_out, cfg=strategy_cfg.candidate)
     bridge_prof["selection"] = time.perf_counter() - t_step
+    _sample_rss("selection")
     selection_diag = dict(getattr(selected, "attrs", {}).get("candidate_selection_diagnostics", {}))
     _logger.debug(
         (
@@ -1684,6 +1755,7 @@ def run_candidate_strategy_for_universe(
         cfg=strategy_cfg.candidate,
     )
     bridge_prof["weights"] = time.perf_counter() - t_step
+    _sample_rss("weights")
     t_step = time.perf_counter()
     alpha_panel = build_candidate_alpha_panel(
         selected_events=selected,
@@ -1693,6 +1765,7 @@ def run_candidate_strategy_for_universe(
         cfg=strategy_cfg.candidate,
     )
     bridge_prof["alpha_panel"] = time.perf_counter() - t_step
+    _sample_rss("alpha_panel")
 
     if strategy_cfg.candidate.exit_policy_mode == "label_only":
         # label_only: suppress per-event TP/SL; engine uses global ATR_MULT only
@@ -1823,6 +1896,7 @@ def merge_candidate_output_into_data_maps(
     panel_df = panel.reset_index() if "symbol" not in panel.columns else panel.copy()
     panel_df["_merge_datetime"] = pd.to_datetime(panel_df["datetime"], utc=True).dt.tz_localize(None)
     by_sym = panel_df.groupby("symbol", sort=False)
+    _merge_sym_times: list[float] = []
 
     for sym in symbols:
         t_sym = time.perf_counter()
@@ -1876,9 +1950,18 @@ def merge_candidate_output_into_data_maps(
         df["candidate_take_profit_atr_mult"] = (
             merged["candidate_take_profit_atr_mult"].fillna(0.0).to_numpy(dtype=np.float64)
         )
-        # Log fast sym merge details under debug to prevent verbose log flood
-        _logger.debug("[PROFILE][MERGE] sym %s took %.4fs", sym, time.perf_counter() - t_sym)
-    _logger.debug("[PROFILE][MERGE] Total merge %s took %.4fs", log_tag, time.perf_counter() - t_merge_start_all)
+        sym_time = time.perf_counter() - t_sym
+        _merge_sym_times.append(sym_time)
+    total_merge = time.perf_counter() - t_merge_start_all
+    if _merge_sym_times:
+        arr = np.array(_merge_sym_times)
+        _logger.debug(
+            "[PROFILE][MERGE][SUMMARY] tag=%s n_syms=%d total=%.4fs min=%.4f max=%.4f mean=%.4f median=%.4f",
+            log_tag, len(_merge_sym_times), total_merge,
+            float(arr.min()), float(arr.max()), float(arr.mean()), float(np.median(arr)),
+        )
+    else:
+        _logger.debug("[PROFILE][MERGE] Total merge %s took %.4fs; no symbols processed", log_tag, total_merge)
 
 
 def merge_candidate_output_into_is_and_oos(
