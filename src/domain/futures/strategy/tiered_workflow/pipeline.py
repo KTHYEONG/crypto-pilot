@@ -212,11 +212,39 @@ def resolve_safe_nested_workers(
     safe_mem_gb = available_gb * 0.70
 
     frame_gb = frame_memory_bytes / (1024 ** 3)
-    estimated_proc_gb = 0.3 + max(0.1, frame_gb * 3.0)
+    estimated_proc_gb = max(0.8, 0.5 + frame_gb * 0.5)
 
     mem_limit = max(1, int(safe_mem_gb // estimated_proc_gb))
 
-    return max(1, min(n_tasks, cpu_limit, mem_limit, 6))
+    max_workers = min(cpu_limit, 8)
+    workers = max(1, min(n_tasks, max_workers, mem_limit))
+    # Over-subscription guard: each worker gets at least ~2 tasks
+    if workers > 1 and n_tasks // workers < 2:
+        workers = max(1, n_tasks // 2)
+    logger.log(
+        PERF,
+        "[PERF] worker_calc n_tasks=%d physical_cores=%d cpu_limit=%d max_workers=%d available_gb=%.2f "
+        "frame_gb=%.2f estimated_proc_gb=%.2f mem_limit=%d workers=%d",
+        n_tasks, physical_cores, cpu_limit, max_workers, available_gb,
+        frame_gb, estimated_proc_gb, mem_limit, workers,
+    )
+    return workers
+
+
+
+def _snapshot_matured_count(
+    all_evidence_events: pd.DataFrame,
+    as_of_idx: int,
+    cfg: CandidateStrategyConfig,
+) -> int:
+    if all_evidence_events.empty or "exit_idx" not in all_evidence_events.columns:
+        return 0
+    exit_idx = pd.to_numeric(all_evidence_events["exit_idx"], errors="coerce").fillna(np.inf)
+    mature_mask = exit_idx < float(as_of_idx)
+    lookback_bars = getattr(cfg, "l1_evidence_lookback_bars", None)
+    if lookback_bars is not None:
+        mature_mask &= exit_idx >= float(as_of_idx - int(lookback_bars))
+    return int(mature_mask.sum())
 
 
 def build_l1_prequential_evidence_snapshots(
@@ -262,6 +290,8 @@ def build_l1_prequential_evidence_snapshots(
         assert cw._GLOBAL_PURGE_BARS is None
 
         # Set process globals to minimize IPC size under fork
+        import gc
+        gc.collect()
         cw._GLOBAL_LABELED_EVENTS = labeled_events
         cw._GLOBAL_ALIGNED = aligned
         cw._GLOBAL_CFG = cfg
@@ -334,14 +364,7 @@ def build_l1_prequential_evidence_snapshots(
             registry_version=f"snapshot-{as_of_idx}",
             cfg=cfg,
         )
-        matured_event_count = 0
-        if not all_evidence_events.empty and "exit_idx" in all_evidence_events.columns:
-            exit_idx = pd.to_numeric(all_evidence_events["exit_idx"], errors="coerce").fillna(np.inf)
-            mature_mask = exit_idx < float(as_of_idx)
-            lookback_bars = getattr(cfg, "l1_evidence_lookback_bars", None)
-            if lookback_bars is not None:
-                mature_mask &= exit_idx >= float(as_of_idx - int(lookback_bars))
-            matured_event_count = int(mature_mask.sum())
+        matured_event_count = _snapshot_matured_count(all_evidence_events, as_of_idx, cfg)
         snapshots.append(
             Layer1EvidenceSnapshot(
                 as_of_idx=int(as_of_idx),
@@ -792,6 +815,7 @@ def run_l1_nested_swf(
     probe_diversity_corr: dict[str, float] | None = None,
     probe_prior_map: dict[tuple[str, str, str], float] | None = None,
     tf: str = "4h",
+    defer_artifact: bool = False,
 ) -> Layer1Result:
     """Run nested Layer1 validation using inner selection and outer evaluation."""
     import dataclasses
@@ -894,6 +918,8 @@ def run_l1_nested_swf(
 
     t_mp_prep = time.perf_counter()
     # Set process globals to minimize IPC size under fork
+    import gc
+    gc.collect()
     cw._GLOBAL_LABELED_EVENTS = labeled_events
     cw._GLOBAL_ALIGNED = aligned
     cw._GLOBAL_CFG = l1_cfg
@@ -937,7 +963,14 @@ def run_l1_nested_swf(
                 )
                 for idx, fold in enumerate(combined_folds)
             ]
+            t_ipc = time.perf_counter()
             combined_results = [fut.result() for fut in submits]
+            logger.log(
+                PERF,
+                "[PERF] l1_nested_ipc_collect n_results=%d took=%.4fs",
+                len(combined_results),
+                time.perf_counter() - t_ipc,
+            )
     finally:
         cw._GLOBAL_LABELED_EVENTS = None
         cw._GLOBAL_ALIGNED = None
@@ -1120,17 +1153,18 @@ def run_l1_nested_swf(
         oos_stacked = _registry_to_symbol_signals(deployment_registry)
         fit_start_idx = min((fold.fit_start for fold in outer_folds), default=0)
         fit_end_idx = max((fold.oos_end for fold in outer_folds), default=0)
-        t_art = time.perf_counter()
-        inference_artifact = fit_layer1_inference_artifact(
-            labeled_events=labeled_events,
-            aligned=aligned,
-            deployment_registry=deployment_registry,
-            fit_start_idx=fit_start_idx,
-            fit_end_idx=fit_end_idx,
-            cfg=cfg,
-            seed=seed,
-        )
-        logger.log(PERF, "[PERF] l1_fit_inference_artifact took=%.4fs", time.perf_counter() - t_art)
+        if not defer_artifact:
+            t_art = time.perf_counter()
+            inference_artifact = fit_layer1_inference_artifact(
+                labeled_events=labeled_events,
+                aligned=aligned,
+                deployment_registry=deployment_registry,
+                fit_start_idx=fit_start_idx,
+                fit_end_idx=fit_end_idx,
+                cfg=cfg,
+                seed=seed,
+            )
+            logger.log(PERF, "[PERF] l1_fit_inference_artifact took=%.4fs", time.perf_counter() - t_art)
         if verbose:
             logger.info(format_layer1_deployment_registry_table(deployment_registry, all_evidence=deployment_evidence))
     _l1_result = Layer1Result(
@@ -1154,6 +1188,7 @@ def run_l1_nested_swf(
 
     # ── Lifecycle computation (Phase 3) ─────────────────────────────────────
     # Time: O(N * L1_T), Space: O(N)  where N=n_symbols, L1_T=l1 bar span
+    t_life = time.perf_counter()
     _l1_fit_start = min(fold.fit_start for fold in outer_folds)
     _l1_fit_end = max(fold.oos_end for fold in outer_folds)
     _active = aligned.active_mask  # NDArray[bool_] | None
@@ -1196,6 +1231,13 @@ def run_l1_nested_swf(
             )
         )
 
+    logger.log(
+        PERF,
+        "[PERF] l1_lifecycle n_syms=%d l1_T=%d took=%.4fs",
+        len(aligned.symbols),
+        _l1_fit_end - _l1_fit_start,
+        time.perf_counter() - t_life,
+    )
     return dataclasses.replace(_l1_result, symbol_lifecycle=tuple(_lifecycle_records))
 
 
@@ -1743,6 +1785,7 @@ def run_per_tf_l1(
     l2_start: date | None = None,
     probe_diversity_corr: dict[str, float] | None = None,
     probe_prior_map: dict[tuple[str, str, str], float] | None = None,
+    defer_artifact: bool = False,
 ) -> PerTfL1Result:
     """Run L1 validation for a single TF using its native signal pool."""
     import src.domain.futures.strategy.tiered_workflow as _tw
@@ -1765,6 +1808,7 @@ def run_per_tf_l1(
         probe_diversity_corr=probe_diversity_corr,
         probe_prior_map=probe_prior_map,
         tf=tf,
+        defer_artifact=defer_artifact,
     )
     return PerTfL1Result(tf=tf, l1_result=l1, n_winning_signals=len(l1.oos_stacked))
 
@@ -1900,17 +1944,37 @@ def run_tiered_pipeline(
     t_l1 = time.perf_counter()
     if l1_result_override is not None:
         l1 = l1_result_override
+        l2_tf = _resolve_l2_master_tf(cfg, {}, probe_manifest)
     else:
+        _l2_date_resolved: date | None = (
+            window.l2_start
+            if isinstance(window.l2_start, date)
+            else (
+                None
+                if (window.l2_start is None or hasattr(window.l2_start, "_mock_self"))
+                else pd.Timestamp(window.l2_start).date()
+            )
+        )
+        # P4: Pre-fork cache prime — parent process primes once, children share via CoW
+        if _can_prime_feature_cache(labeled_events):
+            import contextlib
+
+            from src.domain.futures.strategy.candidate_dataset import prime_aligned_feature_cache
+            with contextlib.suppress(KeyError, TypeError, ValueError):
+                prime_aligned_feature_cache(labeled_events=labeled_events, aligned=aligned, cfg=cfg)
+
         per_tf_l1: dict[str, PerTfL1Result] = {}
         for tf_idx, tf in enumerate(l1_tfs):
+            t_tf = time.perf_counter()
             aligned_tf = _resolve_aligned_for_tf(tf, aligned, per_tf_data_maps)
+            t_aligned = time.perf_counter()
             if (
                 aligned_tf is aligned
                 and tf_idx > 0
                 and per_tf_data_maps is not None
                 and tf not in per_tf_data_maps
             ):
-                logger.debug("[PER-TF] skipping tf=%s: no per-TF data available", tf)
+                logger.log(PERF, "[PERF] per_tf_l1 tf=%s aligned=%.4fs skipped", tf, t_aligned - t_tf)
                 continue
 
             n_bars_tf = len(aligned_tf.datetimes)
@@ -1934,7 +1998,9 @@ def run_tiered_pipeline(
                 max_label_horizon_bars=int(getattr(cfg, "max_holding_bars", 1)),
                 cfg=cfg,
             )
+            t_folds = time.perf_counter()
 
+            defer_artifact_tf = len(per_tf_l1) > 0  # skip artifact on all but first TF
             per_tf_l1[tf] = run_per_tf_l1(
                 tf=tf,
                 labeled_events=labeled_events,
@@ -1943,20 +2009,23 @@ def run_tiered_pipeline(
                 cfg=cfg,
                 seed=int(getattr(cfg, "seed", 42)),
                 verbose=verbose,
-                l2_start=(
-                    window.l2_start
-                    if isinstance(window.l2_start, date)
-                    else (
-                        None
-                        if (window.l2_start is None or hasattr(window.l2_start, "_mock_self"))
-                        else pd.Timestamp(window.l2_start).date()
-                    )
-                ),
+                l2_start=_l2_date_resolved,
                 probe_diversity_corr=probe_diversity_corr,
                 probe_prior_map=probe_prior_map,
+                defer_artifact=defer_artifact_tf,
+            )
+            logger.log(
+                PERF,
+                "[PERF] per_tf_l1 tf=%s aligned=%.4fs folds=%.4fs run_l1=%.4fs total=%.4fs",
+                tf,
+                t_aligned - t_tf,
+                t_folds - t_aligned,
+                time.perf_counter() - t_folds,
+                time.perf_counter() - t_tf,
             )
 
         l1 = _aggregate_per_tf_l1(per_tf_l1)
+        l2_tf = _resolve_l2_master_tf(cfg, per_tf_l1, probe_manifest)
 
     l2_tf = _resolve_l2_master_tf(cfg, per_tf_l1 if l1_result_override is None else {}, probe_manifest)
     logger.log(PERF, "[PERF] run_tiered_pipeline_l1_total took=%.4fs", time.perf_counter() - t_l1)
