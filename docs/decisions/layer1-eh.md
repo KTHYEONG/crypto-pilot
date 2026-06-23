@@ -56,3 +56,13 @@ ai_read_policy: when_related
 - Bridge perf logging Phase 1: `_get_rss_mb()` RSS 측정, stage별 `_sample_rss()` memory delta 추적, `wf_fold_times` per-fold 타이밍, `[PROFILE][MERGE][SUMMARY]` 통계 로깅
 - HTF skip 최적화 시도 → 롤백: `run_per_tf_l1()`이 bridge HTF events에 의존적임 확인 (`_build_per_tf_event_index()` 존재하지 않음). HTF skip 시 6h/8h/12h per-TF L1 비활성화 = 품질 회귀
 - GC 전략 추가: diagnostics 후 `gc.collect()` (+5.3GB 회귀), bridge 반환 후 `gc.collect()` (tiered re-alignment 전 aligned 해제)
+
+## Phase 6: WSL Stability Optimization (ADR-040, 6/23)
+- Max worker cap: `min(cpu_limit, 8)` → `min(cpu_limit, 3)`. Fork worker 폭주(6 worker × 8 threads = 48 threads)가 WSL CPU starvation → network dropout → SSH/Tailscale 단절 원인으로 확인.
+- Thread env vars: `NUMBA_NUM_THREADS`, `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`, `NUMEXPR_NUM_THREADS` = `"1"` before each fork. Fork child 내 Numba prange + BLAS thread cascade 제거.
+- TF 간 0.5s pause: fork 폭주 후 OS page cache + network buffer 회복 시간 확보.
+- Two-phase rollback: single `ProcessPoolExecutor` for all folds. Two-phase(evidence/outer 분할)는 fork CoW 페이지 오염으로 역효과 확인(peak 9.5GB 상승).
+- `del full_strategy_maps` after alignment in tiered path (dictionary wrapper reclaimed, ~2GB via allocator).
+- Incremental outer fold cleanup: `del` per-fold temporaries + `gc.collect()` every 2 folds.
+- L2 memory tracking: stage MEM logs for `l2_signal_batch`, `l2_sim_cache`, `l2_optuna_study`, `l2_study_complete`, `l2_champion`, `l2_final_pipeline`.
+- Peak RSS 감소: 8,845MB(6-worker) → 8,674MB(3-worker, -2%). 48 threads → 12 threads (-75%). L1 4h time 52s → 68s.

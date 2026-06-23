@@ -519,8 +519,10 @@ def test_l1_nested_ipc_collect_log_emitted(
             seed=3,
         )
 
-    logs = [r.message for r in caplog.records if "l1_nested_ipc_collect" in r.message]
-    assert len(logs) >= 1, "l1_nested_ipc_collect PERF log must be emitted"
-    assert "[PERF]" in logs[0]
-    assert "n_results=" in logs[0]
-    assert "took=" in logs[0]
+    ev_logs = [r.message for r in caplog.records if "l1_evidence_ipc_collect" in r.message]
+    out_logs = [r.message for r in caplog.records if "l1_outer_ipc_collect" in r.message]
+    assert len(ev_logs) + len(out_logs) >= 1, "l1_*_ipc_collect PERF log must be emitted"
+    for log in ev_logs + out_logs:
+        assert "[PERF]" in log
+        assert "n=" in log
+        assert "took=" in log

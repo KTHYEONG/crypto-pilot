@@ -97,7 +97,7 @@ graph TD
 
 # 5. Performance Optimizations
 
-- **Adaptive Worker Cap**: `max_workers = min(physical_cores - 2, 8)` with memory guard `estimated_proc_gb = max(0.8, frame_gb × 1.8)`, oversubscription detection ($\text{folds} // \text{workers} < 2$ → reduce).
+- **Adaptive Worker Cap**: `max_workers = min(cpu_limit, 3)` with memory guard `estimated_proc_gb = max(0.8, frame_gb × 1.8)`, oversubscription detection ($\text{folds} // \text{workers} < 2$ → reduce). WSL fork 폭주 방지를 위해 최대 3 worker로 제한.
 - **Deferred Artifact**: First TF computes `fit_layer1_inference_artifact`; remaining TFs skip via `defer_artifact=True`.
 - **Prefork Cache Prime**: `prime_aligned_feature_cache` called once pre-fork → fork CoW shared across child processes.
 - **Sequential Prequential Snapshots**: `ThreadPoolExecutor` rollback (GIL+cache thrashing on CPU-bound numpy/scipy → sequential recovers ~3.5s/TF).
@@ -110,5 +110,7 @@ graph TD
 - **Conditional Copy/Merge**: `raw_df.copy()` gated by `needs_merge`. `_to_unix_ms` once per TF. Merged audit lightweight `{rows, cols}`. `_COL_GROUP_CACHE` for column-group mapping.
 - **Ingestion ThreadPool**: `ThreadPoolExecutor` replaces `ProcessPoolExecutor` for DataFrame I/O (pickle overhead elimination).
 - **PERF Coverage**: `[PERF] worker_calc` (memory estimation + worker decision), `[PERF] l1_nested_ipc_collect` (IPC vs pool_setup split). Per-TF unaccounted < 3%. Bridge stage: `_get_rss_mb()` via `/proc/self/status`, `_sample_rss()` per-stage delta, `wf_fold_times` per-fold timing, `[PROFILE][MERGE][SUMMARY]` merge statistics.
-- **GC Control**: `gc.collect()` pre-fork, `gc.disable()` in child processes (CoW replication prevention), `gc.enable()` in `finally`. Additional: `gc.collect()` after `compute_rule_diagnostics()` to free ~5GB intermediate memory, `gc.collect()` after bridge return before tiered re-alignment.
+- **Thread Control**: `NUMBA_NUM_THREADS`, `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`, `NUMEXPR_NUM_THREADS` set to `"1"` before fork. Prevents Numba `prange` + BLAS thread cascade (48→6 threads total).
+- **Fork CoW Isolation**: Two-phase evidence/outer executor rolled back to single combined executor. Evidence sequences freed after snapshot build. Per-period `gc.collect()` with `del` hints. TF 간 `time.sleep(0.5)` for OS page recovery.
+- **GC Control**: `gc.collect()` pre-fork, `gc.disable()` in child processes (CoW replication prevention), `gc.enable()` in `finally`. Additional: `gc.collect()` after `compute_rule_diagnostics()` to free ~5GB intermediate memory, `gc.collect()` after bridge return before tiered re-alignment. `del full_strategy_maps` after alignment in tiered path (dictionary wrapper reclaimed).
 - **pandas 3.0**: `calendar.as_unit("ns").asi8` for nanosecond epoch. `tz_localize(None)` guard for `_to_unix_ms`.
