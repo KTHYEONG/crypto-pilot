@@ -103,25 +103,44 @@ _logger = setup_logger("opt_main_futures", write_file=False)
 
 
 def _get_rss_mb() -> float:
-    """Return current process RSS in MB via /proc/self/status."""
+    """Return current process RSS in MB via psutil with proc/status fallback."""
+    try:
+        import psutil
+        return float(psutil.Process().memory_info().rss) / (1024.0 * 1024.0)
+    except Exception:
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        return float(line.split()[1]) / 1024.0
+        except Exception:
+            return -1.0
+    return -1.0
+
+
+def _get_peak_rss_mb() -> float:
+    """Return peak RSS (VmHWM) in MB via proc status with fallback."""
     try:
         with open("/proc/self/status") as f:
             for line in f:
-                if line.startswith("VmRSS:"):
+                if line.startswith("VmHWM:"):
                     return float(line.split()[1]) / 1024.0
-    except Exception:
+    except (FileNotFoundError, PermissionError, ValueError, IndexError):
         return -1.0
     return -1.0
 
 
 def _log_mem(stage: str, rss_before: float, /, *, extra: str = "") -> None:
-    """Emit debug-level memory delta log."""
+    """Emit debug-level memory delta and peak memory log."""
     rss_after = _get_rss_mb()
+    peak_rss = _get_peak_rss_mb()
     delta = rss_after - rss_before if rss_before > 0 and rss_after > 0 else -1.0
+    peak_str = f" peak={peak_rss:.0f}MB" if peak_rss > 0 else ""
     _logger.debug(
-        "[MEM] stage=%s rss=%.0fMB delta=%+.0fMB %s",
-        stage, rss_after, delta, extra,
+        "[MEM] stage=%s rss=%.0fMB delta=%+.0fMB%s %s",
+        stage, rss_after, delta, peak_str, extra,
     )
+
 
 
 # Minimum bars a symbol must provide within [fetch_start, holdout_end] for tiered admission.
@@ -1169,16 +1188,30 @@ def _build_l2_signal_batch(
         ValueError: l1_res.inference_artifact가 None인 경우.
     """
     from src.domain.futures.strategy.tiered_workflow import predict_layer1_signals
-
-    artifact = getattr(l1_res, "inference_artifact", None)
-    if artifact is None:
-        raise ValueError("L1 artifact 없음 — l1_result.inference_artifact is None (L1 gate_passed=False 상태)")
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import predict_layer1_signals_multi_tf
 
     datetimes = aligned.datetimes
     l2_start_ts = pd.Timestamp(window.l2_start, tz="UTC")
     ho_start_ts = pd.Timestamp(window.holdout_start, tz="UTC")
     l2_start_bar = int(np.searchsorted(datetimes, np.datetime64(l2_start_ts.replace(tzinfo=None), "ns")))
     ho_start_bar = int(np.searchsorted(datetimes, np.datetime64(ho_start_ts.replace(tzinfo=None), "ns")))
+
+    # multi-TF: artifacts_by_tf가 있으면 전 TF 신호를 통합 예측
+    artifacts_by_tf = getattr(l1_res, "artifacts_by_tf", {})
+    if artifacts_by_tf:
+        return predict_layer1_signals_multi_tf(
+            artifacts_by_tf=artifacts_by_tf,
+            candidate_events=labeled_events,
+            aligned=aligned,
+            start_idx=l2_start_bar,
+            end_idx=ho_start_bar,
+            cfg=cfg,
+        )
+
+    # fallback: 단일 artifact (구 동작 호환)
+    artifact = getattr(l1_res, "inference_artifact", None)
+    if artifact is None:
+        raise ValueError("L1 artifact 없음 — l1_result.inference_artifact is None (L1 gate_passed=False 상태)")
 
     return predict_layer1_signals(
         artifact=artifact,
@@ -1359,6 +1392,8 @@ def _run_tiered_l2_study(
                         batch_trials = []
                         batch_params = []
                         
+                        _mem_batch_start = _get_rss_mb()
+                        
                         for _ in range(current_batch):
                             trial = study.ask()
                             batch_trials.append(trial)
@@ -1399,6 +1434,9 @@ def _run_tiered_l2_study(
                             )
                             progress_cb(study, trial, value=value)
                             trial_idx += 1
+                        
+                        gc.collect()
+                        _log_mem("l2_optuna_batch", _mem_batch_start, extra=f"trial_idx={trial_idx}/{n_trials}")
         finally:
             progress_cb.pbar.close()
     except Exception as exc:
@@ -1458,6 +1496,10 @@ def _run_tiered_l2_study(
 
     _logger.debug("[MEM] stage=l2_study_complete rss=%.0fMB", _get_rss_mb())
     _min_dsr = float(OPT_FUTURES_CONFIG.get("FUTURES_L2_MIN_DSR", 0.60))
+    
+    _t_champ_start = time.perf_counter()
+    _mem_champ_before = _get_rss_mb()
+    
     l2_study_result = select_layer2_champion(
         study=study,
         tf=tf,
@@ -1467,6 +1509,8 @@ def _run_tiered_l2_study(
         caps=caps,
         min_dsr=_min_dsr,
     )
+    
+    _log_mem("select_layer2_champion", _mem_champ_before, extra=f"took={time.perf_counter() - _t_champ_start:.4f}s")
 
     if l2_study_result.blocker_reason == "" and l2_study_result.best_evaluation is not None:
         updated = update_champion_store(
@@ -1765,15 +1809,17 @@ def _run_strategy_stage(
 
             # ── Step C: L2 window 신호 예측 ──────────────────────────────────
             _mem_l2_start = _get_rss_mb()
+            _t_l2_pred_start = time.perf_counter()
             l2_signals = _build_l2_signal_batch(
                 l1_res, labeled_tiered, aligned_tiered, tiered_cfg, tiered_window
             )
-            _log_mem("l2_signal_batch", _mem_l2_start)
+            _log_mem("l2_signal_batch", _mem_l2_start, extra=f"took={time.perf_counter() - _t_l2_pred_start:.4f}s")
 
             # ── Step D: Optuna L2 파라미터 탐색 ──────────────────────────────
             _seed = int(run_config.seed) if hasattr(run_config, "seed") else 42
             n_l2_trials = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_TRIALS", 50))
             _mem_l2_study = _get_rss_mb()
+            _t_l2_study_start = time.perf_counter()
             l2_study_result = _run_tiered_l2_study(
                 signal_batch=l2_signals,
                 aligned=aligned_tiered,
@@ -1784,15 +1830,22 @@ def _run_strategy_stage(
                 n_trials=n_l2_trials,
                 seed=_seed,
             )
-            _log_mem("l2_optuna_study", _mem_l2_study, extra=f"trials={n_l2_trials}")
+            _log_mem(
+                "l2_optuna_study",
+                _mem_l2_study,
+                extra=f"trials={n_l2_trials} took={time.perf_counter() - _t_l2_study_start:.4f}s",
+            )
             best_l2_params = dict(getattr(l2_study_result, "best_params", {}))
 
             # ── INTEGRITY GUARD: infeasible 챔피언 L3 승격 차단 ─────────────
             # 차단 로그는 최종 pipeline 내부 또는 종료 시점에 출력되므로 생략
 
             # ── Step E: 최적 params + L1 override로 최종 실행 ────────────────
+            gc.collect()
+
             from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
             _mem_l2_final = _get_rss_mb()
+            _t_l2_final_start = time.perf_counter()
             _, l2_final, _ = run_tiered_pipeline(
                 labeled_events=labeled_tiered,
                 aligned=aligned_tiered,
@@ -1808,7 +1861,7 @@ def _run_strategy_stage(
                 override_dsr=l2_study_result.dsr,
             )
             
-            _log_mem("l2_final_pipeline", _mem_l2_final)
+            _log_mem("l2_final_pipeline", _mem_l2_final, extra=f"took={time.perf_counter() - _t_l2_final_start:.4f}s")
             # Layer 2 BLOCKED 시 즉시 종료 (Step 5 optimization 진입 방지)
             if l2_final is None or not l2_final.gate_passed:
                 final_reason = l2_study_result.blocker_reason or getattr(l2_final, "blocker_reason", "unknown")
