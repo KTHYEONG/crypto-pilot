@@ -1438,3 +1438,145 @@ def predict_layer1_signals(
         activation_floor_bps=float(cfg.l1_signal_activation_floor_bps),
         cfg=cfg,
     )
+
+
+def predict_layer1_signals_multi_tf(
+    *,
+    artifacts_by_tf: dict[str, Layer1InferenceArtifact],
+    candidate_events: pd.DataFrame,
+    aligned: AlignedMarketData,
+    start_idx: int,
+    end_idx: int,
+    cfg: CandidateStrategyConfig,
+) -> ValidatedSignalBatch:
+    """전 TF artifact에서 ValidatedSignalBatch를 통합 생성한다.
+
+    TF별 ``predict_layer1_signals``를 호출하여 events를 병합한다.
+    ``strategy_id``가 TF를 내장(예: ``donchian_72_8h``)하므로
+    ``(symbol, strategy_id)`` 쌍은 TF 간 자연히 구분된다 — 별도 TF 컬럼 불필요.
+
+    Invariant: 동일 ``(symbol, strategy_id, decision_idx)`` 중복 이벤트 0.
+    위반 시 fail-closed 경고 로깅 후 첫 발생만 보존.
+
+    Args:
+        artifacts_by_tf: TF → Layer1InferenceArtifact 매핑.
+        candidate_events: 전 TF 레이블 이벤트 DataFrame (``native_tf`` 컬럼 포함 시 필터 적용).
+        aligned: 공통 base grid AlignedMarketData.
+        start_idx: OOS 시작 bar index (look-ahead 방어: TF 공통 동일 window).
+        end_idx: OOS 종료 bar index.
+        cfg: CandidateStrategyConfig.
+
+    Returns:
+        ValidatedSignalBatch: 전 TF 이벤트 합본.
+        artifacts_by_tf 빈 경우 빈 batch 반환.
+
+    Time Complexity: O(T x predict_cost) where T = n_timeframes.
+    Space Complexity: O(Σ events_per_tf).
+    """
+    if not artifacts_by_tf:
+        logger.warning(
+            "[MULTI-TF] artifacts_by_tf 비어있음 → 빈 ValidatedSignalBatch 반환 start_idx=%d end_idx=%d",
+            start_idx,
+            end_idx,
+        )
+        return ValidatedSignalBatch(
+            events=(),
+            start_idx=start_idx,
+            end_idx=end_idx,
+            symbols=aligned.symbols,
+            registry_version="empty",
+            model_version="empty",
+        )
+
+    batches: list[ValidatedSignalBatch] = []
+    has_native_tf = "native_tf" in candidate_events.columns
+
+    for tf in sorted(artifacts_by_tf):
+        art = artifacts_by_tf[tf]
+        # native_tf 필터: look-ahead 없음 — 이미 L1 단계에서 base grid 투영된 컬럼
+        ev_tf: pd.DataFrame = (
+            candidate_events[candidate_events["native_tf"] == tf]
+            if has_native_tf
+            else candidate_events
+        )
+        if ev_tf.empty:
+            logger.debug("[MULTI-TF] tf=%s candidate_events 비어있음 — skip", tf)
+            continue
+
+        try:
+            batch = predict_layer1_signals(
+                artifact=art,
+                candidate_events=ev_tf,
+                aligned=aligned,
+                start_idx=start_idx,
+                end_idx=end_idx,
+                cfg=cfg,
+            )
+        except Exception:
+            logger.exception("[MULTI-TF] tf=%s predict_layer1_signals 실패 — skip", tf)
+            continue
+
+        batches.append(batch)
+        logger.debug(
+            "[MULTI-TF] tf=%s events=%d registry_symbols=%d",
+            tf,
+            len(batch.events),
+            len(art.deployment_registry.by_symbol),
+        )
+
+    if not batches:
+        logger.warning("[MULTI-TF] 모든 TF 빈 결과 → 빈 batch 반환")
+        return ValidatedSignalBatch(
+            events=(),
+            start_idx=start_idx,
+            end_idx=end_idx,
+            symbols=aligned.symbols,
+            registry_version="empty",
+            model_version="empty",
+        )
+
+    # 이벤트 병합 — (symbol, strategy_id, decision_idx) 중복 체크
+    merged_events: list[ValidatedSignalEvent] = []
+    seen_keys: set[tuple[str, str, int]] = set()
+    dup_count = 0
+    for batch in batches:
+        for ev in batch.events:
+            key = (ev.symbol, ev.strategy_id, int(ev.decision_idx))
+            if key in seen_keys:
+                dup_count += 1
+                continue
+            seen_keys.add(key)
+            merged_events.append(ev)
+
+    if dup_count > 0:
+        logger.warning(
+            "[MULTI-TF] 중복 (symbol, strategy_id, decision_idx) %d건 — fail-closed 제거",
+            dup_count,
+        )
+
+    # registry_version: TF별 registry_version SHA 합성
+    _composite_rv = sha256(
+        "|".join(b.registry_version for b in batches).encode()
+    ).hexdigest()[:16]
+    _composite_mv = sha256(
+        "|".join(b.model_version for b in batches).encode()
+    ).hexdigest()[:16]
+
+    merged_start = min(b.start_idx for b in batches)
+    merged_end = max(b.end_idx for b in batches)
+
+    logger.debug(
+        "[MULTI-TF] 병합 완료: n_tf=%d total_events=%d dup_removed=%d",
+        len(batches),
+        len(merged_events),
+        dup_count,
+    )
+
+    return ValidatedSignalBatch(
+        events=tuple(merged_events),
+        start_idx=merged_start,
+        end_idx=merged_end,
+        symbols=aligned.symbols,
+        registry_version=_composite_rv,
+        model_version=_composite_mv,
+    )
