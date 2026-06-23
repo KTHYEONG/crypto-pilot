@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
@@ -8,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from src.application.futures.optimization.config import FuturesRunConfig
+from src.core.utils.utils import PERF
 from src.domain.futures.strategy import StrategyConfig
 from src.domain.futures.strategy_runtime.bridge import (
     CandidatePipelineOutput,
@@ -355,10 +357,18 @@ def run_active_strategy_output_bridge(
     if not effective_symbols:
         raise ValueError("candidate ML scope is empty")
 
-    return run_candidate_strategy_for_universe(
+    t_bridge_inner = time.perf_counter()
+    result = run_candidate_strategy_for_universe(
         symbols=effective_symbols,
         tf=tf,
         strategy_cfg=strategy_cfg,
         preloaded_data_maps=preloaded_data_maps,
         silent=silent,
     )
+    _logger.log(
+        PERF,
+        "[PERF] bridge_run_candidate_strategy n_syms=%d took=%.4fs",
+        len(effective_symbols),
+        time.perf_counter() - t_bridge_inner,
+    )
+    return result

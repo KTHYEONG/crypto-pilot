@@ -225,6 +225,110 @@ def test_diagonal_kelly_weights_emits_perf_log(caplog: Any) -> None:
 
 # ─── Scenario 6: perf-tiered 구 접두사 완전 제거 확인 ────────────────────────
 
+# ─── Scenario 7: evaluate_layer1_readiness PERF 로그 (Gap 4) ──────────────────
+
+def test_evaluate_layer1_readiness_emits_perf_log(caplog: Any) -> None:
+    from src.domain.futures.strategy.candidate_contracts import Layer1FoldReadiness
+    from src.domain.futures.strategy.config import CandidateStrategyConfig
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import evaluate_layer1_readiness
+
+    cfg = MagicMock(spec=CandidateStrategyConfig)
+    cfg.l1_min_fold_cov = 0.8
+    cfg.l1_min_realized_match_ratio = 0.90
+    cfg.l1_min_fold_ratio = 0.5
+    cfg.l1_min_probe_bps = 0.0
+    cfg.l1_probe_lcb_pooled = True
+    cfg.l1_sym_count_mode = "effective_n"
+    cfg.l1_min_effective_sym_n = 3.0
+    cfg.l1_min_sym_count = 3
+    cfg.l1_min_sym_ratio = 0.0
+    cfg.l1_bootstrap_block_bars = 6
+    cfg.l1_bootstrap_samples = 200
+
+    fold_reports = (
+        Layer1FoldReadiness(
+            fold_id=0, registry_source_end_idx=10,
+            outer_oos_start_idx=10, outer_oos_end_idx=20,
+            ready_symbols=("BTC", "ETH"), matched_event_count=5,
+            unmatched_event_count=1, realized_match_ratio=0.83,
+            unique_decision_count=3, prediction_unique_count=3,
+            opportunity_ic=0.05, opportunity_ic_tstat=1.2,
+            probe_bps=2.0, probe_lcb_bps=1.5,
+            probe_series_bps=(2.0, 1.5, 1.8),
+            effective_symbol_count=2.0, passed=True, blockers=(),
+        ),
+    )
+
+    with caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"):
+        evaluate_layer1_readiness(
+            fold_reports=fold_reports,
+            fold_cov=1.0,
+            trade_scope_count=5,
+            cfg=cfg,
+            seed=0,
+        )
+
+    logs = [r.message for r in caplog.records if "l1_gate_eval" in r.message]
+    assert len(logs) == 1, f"Expected 1 l1_gate_eval log, got {len(logs)}"
+    assert "[PERF]" in logs[0]
+    assert "n_folds=1" in logs[0]
+    assert "n_passed=1" in logs[0]
+    assert "took=" in logs[0]
+
+
+# ─── Scenario 8: build_qualified_signal_registry PERF 로그 (Gap 5) ─────────────
+
+def test_build_qualified_signal_registry_emits_perf_log(caplog: Any) -> None:
+    from src.domain.futures.strategy.candidate_contracts import SignalSourceKey, SymbolStrategyEvidence
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import build_qualified_signal_registry
+
+    evidence = (
+        SymbolStrategyEvidence(
+            key=SignalSourceKey(symbol="BTC", strategy_id="ma", activation_context="all"),
+            mean_gross_bps=10.0, mean_incremental_bps=8.0,
+            block_tstat_incremental=1.5, probability_positive=0.8,
+            p_value=0.05, q_value=0.05, positive_fold_ratio=0.8,
+            n_obs=100, effective_n=80.0, n_folds=5,
+            quality_weight=0.9, hard_eligible=True,
+            structural_reasons=(), diagnostic_flags=(),
+            lcb_net_bps=2.0,
+        ),
+    )
+
+    with caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"):
+        build_qualified_signal_registry(
+            evidence=evidence,
+            symbols=("BTC", "ETH"),
+            min_signals_per_symbol=1,
+            registry_version="test",
+        )
+
+    logs = [r.message for r in caplog.records if "l1_build_registry" in r.message]
+    assert len(logs) == 1, f"Expected 1 l1_build_registry log, got {len(logs)}"
+    assert "[PERF]" in logs[0]
+    assert "n_evidence=1" in logs[0]
+    assert "n_ready=1" in logs[0]
+    assert "n_symbols=2" in logs[0]
+    assert "took=" in logs[0]
+
+
+# ─── Scenario 9: l1_lifecycle PERF 로그 (Gap 6) ─────────────────────────────
+
+def test_l1_lifecycle_perf_log_emitted(
+    minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any
+) -> None:
+    with caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"):
+        _run_l1_nested(minimal_aligned, minimal_cfg, empty_fold_out)
+
+    logs = [r.message for r in caplog.records if "l1_lifecycle" in r.message]
+    assert len(logs) >= 1, "l1_lifecycle PERF log must be emitted"
+    for log in logs:
+        assert "[PERF]" in log
+        assert "n_syms=" in log
+        assert "l1_T=" in log
+        assert "took=" in log
+
+
 def test_no_legacy_perf_tiered_prefix(
     minimal_aligned: Any, minimal_cfg: Any, empty_fold_out: Any, caplog: Any
 ) -> None:
