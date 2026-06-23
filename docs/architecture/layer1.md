@@ -109,6 +109,6 @@ graph TD
 - **Parquet I/O**: Baggage columns dropped (`close_time`, `no_trades`, `ignore`), numeric early-exit guard, redundant `.copy()` removed.
 - **Conditional Copy/Merge**: `raw_df.copy()` gated by `needs_merge`. `_to_unix_ms` once per TF. Merged audit lightweight `{rows, cols}`. `_COL_GROUP_CACHE` for column-group mapping.
 - **Ingestion ThreadPool**: `ThreadPoolExecutor` replaces `ProcessPoolExecutor` for DataFrame I/O (pickle overhead elimination).
-- **PERF Coverage**: `[PERF] worker_calc` (memory estimation + worker decision), `[PERF] l1_nested_ipc_collect` (IPC vs pool_setup split). Per-TF unaccounted < 3%.
-- **GC Control**: `gc.collect()` pre-fork, `gc.disable()` in child processes (CoW replication prevention), `gc.enable()` in `finally`.
+- **PERF Coverage**: `[PERF] worker_calc` (memory estimation + worker decision), `[PERF] l1_nested_ipc_collect` (IPC vs pool_setup split). Per-TF unaccounted < 3%. Bridge stage: `_get_rss_mb()` via `/proc/self/status`, `_sample_rss()` per-stage delta, `wf_fold_times` per-fold timing, `[PROFILE][MERGE][SUMMARY]` merge statistics.
+- **GC Control**: `gc.collect()` pre-fork, `gc.disable()` in child processes (CoW replication prevention), `gc.enable()` in `finally`. Additional: `gc.collect()` after `compute_rule_diagnostics()` to free ~5GB intermediate memory, `gc.collect()` after bridge return before tiered re-alignment.
 - **pandas 3.0**: `calendar.as_unit("ns").asi8` for nanosecond epoch. `tz_localize(None)` guard for `_to_unix_ms`.
