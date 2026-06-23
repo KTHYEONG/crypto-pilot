@@ -46,7 +46,8 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
 **Layer 2: CS Rank & Diagonal Kelly AWF**
 
 - **Signal Processing**: Absolute CS Ranking → BTC-β Neutralization.
-- **Kelly Sizing**: $w_i \propto f_k \cdot \mu_i / \sigma_i^2$ (friction masked). $\sigma_R = (q_{90} - q_{10})/2.563$. `vol_target=1.0` always active (RC-1 cascade prevention).
+- **Multi-TF Signal Pooling**: L1 per-bar net edge $\mu_i$ (sleeve = (symbol, strategy_id)) → symbol-level pooled edge via **precision-weighted combination**: $\mu_s = \frac{\sum_i c_i \mu_i}{\sum_i c_i}$ where $c_i = \text{quality_weight}_i$. Conviction cap: $c_s = \min(\sum c_i, \kappa \cdot \max c_i)$, $\kappa=1.5$. Guarantees $\min_i \mu_i \le \mu_s \le \max_i \mu_i$ → no mu inflation from multi-TF consensus. Direction conflict ($+\mu$ vs $-\mu$) → auto-netting via signed convex combination.
+- **Kelly Sizing**: $w_s \propto f_k \cdot \mu_s / \sigma_s^2$ (friction masked). $\sigma_R = (q_{90} - q_{10})/2.563$. `vol_target=1.0` always active (RC-1 cascade prevention).
 - **Edge-Conditional Throttle**: $m_t = \text{clip}((s - \text{floor}) / (\text{ref} - \text{floor}), 0, 1)^\gamma$ applied post-sizing.
 - **Active Deployment Controls**: `deploy_cost_safety_mult`, `edge_throttle_min_active_mult`, `risk_budget_floor_ratio` + `risk_budget_max_scale`.
 - **Search Space V9 (9 dims)**: `K_RANK`, `REBALANCE_BARS`, `CS_Z_SCORE_THRESHOLD`, `deploy_cost_safety_mult`, `edge_throttle_min_active_mult`, `edge_ref_bps`, `edge_throttle_gamma`, `risk_budget_floor_ratio`, `risk_budget_max_scale`.
@@ -59,6 +60,7 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
 - **Vol Scaling**: Bidirectional via `allow_vol_upscale=True`, downscale-only default.
 - **Gate Contract**:
   - Optuna feasibility (9-vector): deployment, leak, mdd, cvar, fold_pass_ratio, **recent_fold**, active_blocks, friction, trades.
+  - **Friction Gate** (per-bar dimension): $|\bar{g}_s^{pb}| \ge \bar{c}_s^{pb}$ where $\bar{g}_s^{pb} = \text{signed\_gross\_bps\_per\_bar}$ (precision-pooled), $\bar{c}_s^{pb} = \text{expected\_cost\_bps\_per\_bar}$ (including `fixed_cost_safety_mult`). Signals with gross edge less than round-trip cost per bar are unprofitable → excluded from friction pass ratio gate.
   - Promotion (3-stage): Sortino ≥ 1.5 → Sharpe ≥ 0.7 → Calmar ≥ 0.5 + CAGR/MAR/PSR/growth_lcb/uplift.
   - Recent fold gate: latest non-empty deployed fold CAGR > 0 + optional Sharpe floor.
   - `l2_max_exchange_leverage` default 10.0 (`None` = cap disabled).
