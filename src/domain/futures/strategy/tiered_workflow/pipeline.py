@@ -8,7 +8,7 @@ import multiprocessing
 import os
 import time
 from collections.abc import Sequence
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import date
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -95,7 +95,9 @@ from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
 from src.domain.futures.strategy.tiered_workflow.signal_selection import (
     _candidate_output_to_signal_batch,
     _event_results_from_fold_output,
+    _Layer1ModelCore,
     _registry_to_symbol_signals,
+    assemble_layer1_artifact,
     build_qualified_signal_registry,
     compute_symbol_strategy_evidence,
     evaluate_layer1_readiness,
@@ -103,6 +105,7 @@ from src.domain.futures.strategy.tiered_workflow.signal_selection import (
     fit_layer1_inference_artifact,
     predict_layer1_signals,
     predict_layer1_signals_multi_tf,
+    prefit_layer1_model,
     select_outer_symbol_opportunities,
 )
 from src.domain.futures.strategy.walk_forward import WFFold
@@ -380,7 +383,6 @@ def build_l1_prequential_evidence_snapshots(
         evidence_store = _build_evidence_store(evidence_frames)
     else:
         import multiprocessing
-        from concurrent.futures import ProcessPoolExecutor
 
         import src.domain.futures.strategy.candidate_workflow as cw
 
@@ -459,45 +461,58 @@ def build_l1_prequential_evidence_snapshots(
     exit_idx_sorted: NDArray[np.float64] | None = None
     if streaming_enabled and not evidence_store.empty and "exit_idx" in evidence_store.columns:
         exit_idx_sorted = evidence_store["exit_idx"].to_numpy(dtype=np.float64, copy=False)
-    for snapshot_offset, as_of_idx in enumerate(sorted(set(snapshot_indices))):
-        event_results = evidence_store
-        matured_event_count = _snapshot_matured_count(evidence_store, as_of_idx, cfg)
+
+    def _build_snapshot(snapshot_offset: int, as_of_idx: int) -> Layer1EvidenceSnapshot:
+        _event_results = evidence_store
+        _matured_event_count = _snapshot_matured_count(evidence_store, as_of_idx, cfg)
         if exit_idx_sorted is not None:
-            right = int(np.searchsorted(exit_idx_sorted, float(as_of_idx), side="left"))
-            left = 0
-            lookback_bars = getattr(cfg, "l1_evidence_lookback_bars", None)
-            if lookback_bars is not None:
-                left = int(
+            _right = int(np.searchsorted(exit_idx_sorted, float(as_of_idx), side="left"))
+            _left = 0
+            _lookback_bars = getattr(cfg, "l1_evidence_lookback_bars", None)
+            if _lookback_bars is not None:
+                _left = int(
                     np.searchsorted(
                         exit_idx_sorted,
-                        float(as_of_idx - int(lookback_bars)),
+                        float(as_of_idx - int(_lookback_bars)),
                         side="left",
                     )
                 )
-            event_results = evidence_store.iloc[left:right].copy()
-            matured_event_count = max(0, right - left)
-        evidence = compute_symbol_strategy_evidence(
-            event_results=event_results,
+            _event_results = evidence_store.iloc[_left:_right].copy()
+            _matured_event_count = max(0, _right - _left)
+        _evidence = compute_symbol_strategy_evidence(
+            event_results=_event_results,
             cfg=cfg,
             seed=seed + snapshot_offset,
             registry_as_of_idx=as_of_idx,
             snapshot_index=snapshot_offset,
         )
-        registry = build_qualified_signal_registry(
-            evidence=evidence,
+        _registry = build_qualified_signal_registry(
+            evidence=_evidence,
             symbols=aligned.symbols,
             min_signals_per_symbol=int(cfg.l1_min_signals_per_symbol),
             registry_version=f"snapshot-{as_of_idx}",
             cfg=cfg,
         )
-        snapshots.append(
-            Layer1EvidenceSnapshot(
-                as_of_idx=int(as_of_idx),
-                evidence=evidence,
-                registry=registry,
-                matured_event_count=matured_event_count,
-            )
+        return Layer1EvidenceSnapshot(
+            as_of_idx=int(as_of_idx),
+            evidence=_evidence,
+            registry=_registry,
+            matured_event_count=_matured_event_count,
         )
+
+    _snapshot_items = sorted(set(snapshot_indices))
+    if len(_snapshot_items) <= 1:
+        for _offset, _aidx in enumerate(_snapshot_items):
+            snapshots.append(_build_snapshot(_offset, _aidx))
+    else:
+        _n_workers = min(len(_snapshot_items), max(1, (os.cpu_count() or 4) // 2))
+        with ThreadPoolExecutor(max_workers=_n_workers) as _pool:
+            _futs = {
+                _pool.submit(_build_snapshot, _offset, _aidx): _aidx
+                for _offset, _aidx in enumerate(_snapshot_items)
+            }
+            snapshots.extend(fut.result() for fut in as_completed(_futs))
+        snapshots.sort(key=lambda s: s.as_of_idx)
     return tuple(snapshots)
 
 _L1_SWF_FOLD_CACHE: dict[tuple[Any, ...], Any] = {}
@@ -928,6 +943,30 @@ def _opportunities_to_symbol_signals(opportunities: ValidatedSignalBatch) -> dic
     return adapted
 
 
+def _prefit_layer1_from_globals(
+    fit_start_idx: int,
+    fit_end_idx: int,
+) -> _Layer1ModelCore:
+    """Wrapper for ``prefit_layer1_model`` using process-global context (fork IPC bypass)."""
+    import src.domain.futures.strategy.candidate_workflow as _cw
+    if _cw._GLOBAL_LABELED_EVENTS is None and _cw._GLOBAL_PREPARED_EVENTS is None:
+        raise RuntimeError("candidate workflow globals are not initialized for prefit")
+    labeled_events = (
+        _cw._GLOBAL_LABELED_EVENTS
+        if _cw._GLOBAL_LABELED_EVENTS is not None
+        else _cw._GLOBAL_PREPARED_EVENTS
+    )
+    assert _cw._GLOBAL_ALIGNED is not None, "prefit requires GLOBAL_ALIGNED"
+    assert _cw._GLOBAL_CFG is not None, "prefit requires GLOBAL_CFG"
+    return prefit_layer1_model(
+        labeled_events=labeled_events,
+        aligned=_cw._GLOBAL_ALIGNED,
+        fit_start_idx=fit_start_idx,
+        fit_end_idx=fit_end_idx,
+        cfg=_cw._GLOBAL_CFG,
+    )
+
+
 def run_l1_nested_swf(
     *,
     labeled_events: pd.DataFrame,
@@ -1156,25 +1195,37 @@ def run_l1_nested_swf(
         "dataset_calibration_fit", "dataset_calibration_eval",
         "dataset_oos", "edge_fit", "inference", "selection",
     )
+    _prefit_future: Any = None
+    _prefit_core: _Layer1ModelCore | None = None
     
     try:
         with ProcessPoolExecutor(max_workers=max_pool_workers, mp_context=mp_ctx) as executor:
             # ── Phase 1: Evidence folds ─────────────────────────────────────────────
             t_exec = time.perf_counter()
             if evidence_folds:
-                ev_submits = [
+                ev_submits = {
                     executor.submit(
                         cw._fit_and_predict_single_fold_from_globals,
                         idx,
                         fold,
                         True,
                         force_compact,
-                    )
+                    ): idx
                     for idx, fold in enumerate(evidence_folds)
-                ]
+                }
+                # ── OPT-4: speculative pre-fit right after evidence submit ──
+                if not defer_artifact and bool(getattr(cfg, "l1_speculative_prefit_enabled", True)):
+                    _prefit_start = min((f.fit_start for f in outer_folds), default=0)
+                    _prefit_end = max((f.oos_end for f in outer_folds), default=0)
+                    _prefit_future = executor.submit(
+                        _prefit_layer1_from_globals,
+                        _prefit_start,
+                        _prefit_end,
+                    )
                 t_ev_ipc = time.perf_counter()
                 _mem_ipc_ref = _get_rss_mb()
-                evidence_results = [fut.result() for fut in ev_submits]
+                evidence_results = [fut.result() for fut in as_completed(ev_submits)]
+                evidence_results.sort(key=lambda r: r.fold_id)
                 logger.log(PERF, "[PERF] l1_evidence_ipc_collect n=%d took=%.4fs",
                     len(evidence_results), time.perf_counter() - t_ev_ipc)
                 _rss_ev = _get_rss_mb()
@@ -1247,6 +1298,14 @@ def run_l1_nested_swf(
                 _rss_out = _get_rss_mb()
                 logger.debug("[MEM] stage=outer_ipc rss=%.0fMB delta=%+.0fMB n_results=%d",
                     _rss_out, _rss_out - _mem_ipc_ref, len(outer_results))
+
+            # ── Collect speculative pre-fit result ────────────────────────────────
+            if _prefit_future is not None:
+                try:
+                    _prefit_core = _prefit_future.result()
+                except Exception:
+                    logger.exception("[L1] speculative pre-fit failed — falling back to serial fit")
+                    _prefit_core = None
     finally:
         cw._GLOBAL_LABELED_EVENTS = None
         cw._GLOBAL_PREPARED_EVENTS = None
@@ -1420,15 +1479,22 @@ def run_l1_nested_swf(
         fit_end_idx = max((fold.oos_end for fold in outer_folds), default=0)
         if not defer_artifact:
             t_art = time.perf_counter()
-            inference_artifact = fit_layer1_inference_artifact(
-                labeled_events=labeled_events,
-                aligned=aligned,
-                deployment_registry=deployment_registry,
-                fit_start_idx=fit_start_idx,
-                fit_end_idx=fit_end_idx,
-                cfg=cfg,
-                seed=seed,
-            )
+            if _prefit_core is not None:
+                inference_artifact = assemble_layer1_artifact(
+                    core=_prefit_core,
+                    deployment_registry=deployment_registry,
+                    fit_end_idx=fit_end_idx,
+                )
+            else:
+                inference_artifact = fit_layer1_inference_artifact(
+                    labeled_events=labeled_events,
+                    aligned=aligned,
+                    deployment_registry=deployment_registry,
+                    fit_start_idx=fit_start_idx,
+                    fit_end_idx=fit_end_idx,
+                    cfg=cfg,
+                    seed=seed,
+                )
             logger.log(PERF, "[PERF] l1_fit_inference_artifact took=%.4fs", time.perf_counter() - t_art)
             _art_size = "present" if inference_artifact is not None else "None"
             logger.debug("[MEM] stage=inference_artifact rss=%.0fMB artifact_size=%s", _get_rss_mb(), _art_size)
@@ -2246,7 +2312,7 @@ def run_tiered_pipeline(
     override_dsr: float | None = None,
     probe_diversity_corr: dict[str, float] | None = None,
     probe_prior_map: dict[tuple[str, str, str], float] | None = None,
-    l1_tfs: tuple[str, ...] = ("1h", "2h", "4h", "6h", "8h", "12h"),
+    l1_tfs: tuple[str, ...] = ("4h", "6h", "8h", "12h"),
     per_tf_data_maps: dict[str, AlignedMarketData] | None = None,
     probe_manifest: list[dict[str, Any]] | None = None,
     l2_sim_cache: L2SimulationCache | None = None,
