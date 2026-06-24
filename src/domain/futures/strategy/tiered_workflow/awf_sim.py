@@ -74,6 +74,16 @@ class Layer2FoldAttribution:
     netting_events: int
 
 
+def compute_cost_drag_ratio(
+    fold_attributions: tuple[Layer2FoldAttribution, ...],
+    *,
+    eps: float = 1e-9,
+) -> float:
+    total_cost = sum(a.realized_cost for a in fold_attributions)
+    total_price = sum(a.realized_price for a in fold_attributions)
+    return total_cost / max(total_price, eps)
+
+
 def _assemble_fold_attribution(
     *,
     fold_idx: int,
@@ -1068,6 +1078,43 @@ def _count_netting_symbols(
     return count
 
 
+def _compute_mtf_rebalance_stats(
+    sleeve_signals: dict[tuple[str, str], SymbolSignal],
+    pooled_signals: dict[str, SymbolSignal],
+) -> tuple[int, int, int, float, float]:
+    """Multi-TF pooling 효율 진단 통계 (per-rebalance).
+
+    Returns:
+        (n_symbols, n_multi, n_conflict, dilution_sum, edge_surrendered_bps)
+        - n_symbols: pool 후 고유 symbol 수.
+        - n_multi: sleeve >= 2인 symbol 수 (multi-TF 공존).
+        - n_conflict: multi symbol 중 부호 혼재(양·음) 수.
+        - dilution_sum: Σ_multi |μ_s| / max_i|μ_i| (1.0=무손실, 평균은 caller에서 n_multi로 나눔).
+        - edge_surrendered_bps: Σ_multi max(max_i|μ_i| - |μ_s|, 0) — pooling이 버린 per-bar 엣지 bps.
+    """
+    by_sym: dict[str, list[float]] = {}
+    for (sym, _strat), sig in sleeve_signals.items():
+        by_sym.setdefault(sym, []).append(sig.raw_mu)
+
+    n_symbols = len(by_sym)
+    n_multi = 0
+    n_conflict = 0
+    dilution_sum = 0.0
+    edge_surr = 0.0
+    for sym, mus in by_sym.items():
+        if len(mus) < 2:
+            continue
+        n_multi += 1
+        max_abs = max(abs(m) for m in mus)
+        if any(m > 0 for m in mus) and any(m < 0 for m in mus):
+            n_conflict += 1
+        pooled = pooled_signals.get(sym)
+        if pooled is not None and max_abs > 0.0:
+            dilution_sum += abs(pooled.raw_mu) / max_abs
+            edge_surr += max(max_abs - abs(pooled.raw_mu), 0.0)
+    return n_symbols, n_multi, n_conflict, dilution_sum, edge_surr
+
+
 def _run_awf_simulation(
     *,
     cache: L2SimulationCache,
@@ -1166,6 +1213,8 @@ def _run_awf_simulation(
     # 모든 fold fit-leg 연결 → fit_rets_hybrid (closed-form L* 입력).
     all_fit_rets_hybrid: list[float] = []
     fold_attributions: list[Layer2FoldAttribution] = []
+    # persistence 측정용: fold별 fit-leg 수익률 저장 (OOS 루프에서 대응 참조)
+    _per_fold_fit_rets: list[list[float]] = []
 
     prev_selection: frozenset[str] = frozenset()
     prev_w: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
@@ -1183,7 +1232,9 @@ def _run_awf_simulation(
     for _fit_fold in awf_folds:
         _fit_start = int(_fit_fold.fit_start)
         _fit_end = int(_fit_fold.oos_start)  # exclusive — look-ahead 0
+        _this_fold_fit_rets: list[float] = []
         if _fit_start >= _fit_end or _fit_end <= 1:
+            _per_fold_fit_rets.append(_this_fold_fit_rets)
             continue
 
         _prev_w_fit: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
@@ -1300,17 +1351,21 @@ def _run_awf_simulation(
                     funding_rates=_ffunding,
                 )
                 _fcost = _fit_rebal_cost if _ft2 == _ft else 0.0
-                all_fit_rets_hybrid.append(_fgross - _fcost)
+                _r = _fgross - _fcost
+                all_fit_rets_hybrid.append(_r)
+                _this_fold_fit_rets.append(_r)
+        _per_fold_fit_rets.append(_this_fold_fit_rets)
 
     for _fold_idx, fold in enumerate(awf_folds):
         t_fold_start = time.perf_counter()
         _fold_h: list[float] = []
         _fold_b: list[float] = []
         _fold_selected: set[str] = set()
+        _attr_price = 0.0
+        _attr_funding = 0.0
+        _attr_cost = 0.0
+        _fold_rebalance_count = 0
         if _diag:
-            _attr_price = 0.0
-            _attr_funding = 0.0
-            _attr_cost = 0.0
             _attr_expected = 0.0
             _attr_gross_exps: list[float] = []
             _attr_net_exps: list[float] = []
@@ -1320,7 +1375,13 @@ def _run_awf_simulation(
             _attr_signal_total = 0
             _attr_dropped = 0
             _attr_netting = 0
-            _fold_rebalance_count = 0
+            _mtf_n_sym_sum = 0
+            _mtf_multi_sum = 0
+            _mtf_conflict_sum = 0
+            _mtf_dilution_sum = 0.0
+            _mtf_edge_surr_sum = 0.0
+            _mtf_pooled_sum = 0
+            _mtf_selected_sum = 0
         for t in range(fold.oos_start, fold.oos_end - 1, rebalance_bars):
             t_end = min(t + rebalance_bars, fold.oos_end - 1)
 
@@ -1358,6 +1419,15 @@ def _run_awf_simulation(
                 )
             if _diag:
                 _attr_netting += _count_netting_symbols(_oos_sleeve_sigs, valid_signals)
+                _m_nsym, _m_multi, _m_conf, _m_dil, _m_surr = _compute_mtf_rebalance_stats(
+                    _oos_sleeve_sigs, valid_signals
+                )
+                _mtf_n_sym_sum += _m_nsym
+                _mtf_multi_sum += _m_multi
+                _mtf_conflict_sum += _m_conf
+                _mtf_dilution_sum += _m_dil
+                _mtf_edge_surr_sum += _m_surr
+                _mtf_pooled_sum += len(valid_signals)
             prof_prep += time.perf_counter() - t0_prep
 
             t0_rank = time.perf_counter()
@@ -1390,6 +1460,8 @@ def _run_awf_simulation(
             last_selected = selected
             if selected:
                 _fold_selected.update(selected)
+            if _diag:
+                _mtf_selected_sum += len(selected)
             prof_rank += time.perf_counter() - t0_rank
 
             t0_alloc = time.perf_counter()
@@ -1463,7 +1535,7 @@ def _run_awf_simulation(
                     _attr_expected += float(t_end - t) * float(np.dot(w, mu_arr * 1e-4))
                 _attr_gross_exps.append(float(np.sum(np.abs(w))))
                 _attr_net_exps.append(float(np.sum(w)))
-                _fold_rebalance_count += 1
+            _fold_rebalance_count += 1
 
             w_base = build_directional_risk_matched_equal_weight(
                 signed_net_mu_bps=mu_arr,
@@ -1568,10 +1640,9 @@ def _run_awf_simulation(
                 )
                 # 거래비용은 리밸런싱 첫 bar에만 차감
                 cost = rebal_cost if t2 == t else 0.0
-                if _diag:
-                    _attr_price += float(np.dot(w, bar_ret))
-                    _attr_funding += -float(np.dot(w, funding_rates))
-                    _attr_cost += cost
+                _attr_price += float(np.dot(w, bar_ret))
+                _attr_funding += -float(np.dot(w, funding_rates))
+                _attr_cost += cost
                 cost_baseline = rebal_cost_baseline if t2 == t else 0.0
                 cost_baseline_ew = rebal_cost_baseline_ew if t2 == t else 0.0
                 r_h = gross_ret - cost
@@ -1600,38 +1671,101 @@ def _run_awf_simulation(
         fold_rets_hybrid.append(_fold_h)
         fold_rets_baseline.append(_fold_b)
         fold_selected_symbols.append(tuple(sorted(_fold_selected)))
-        if _diag:
-            _attr = _assemble_fold_attribution(
-                fold_idx=_fold_idx,
-                oos_bars=fold.oos_end - fold.oos_start,
-                n_rebal=len(_attr_throttle) or _fold_rebalance_count,
-                realized_price=_attr_price,
-                realized_funding=_attr_funding,
-                realized_cost=_attr_cost,
-                expected_net=_attr_expected,
-                gross_exps=_attr_gross_exps,
-                net_exps=_attr_net_exps,
-                throttle_mults=_attr_throttle,
-                sleeves_active=_attr_sleeves_active,
-                friction_pass_total=_attr_friction_pass,
-                signal_total=_attr_signal_total,
-                dropped_below_cost=_attr_dropped,
-                netting_events=_attr_netting,
+        if not _diag:
+            _attr_expected = 0.0
+            _attr_gross_exps = []
+            _attr_net_exps = []
+            _attr_throttle = []
+            _attr_sleeves_active = []
+            _attr_friction_pass = 0
+            _attr_signal_total = 0
+            _attr_dropped = 0
+            _attr_netting = 0
+        _attr = _assemble_fold_attribution(
+            fold_idx=_fold_idx,
+            oos_bars=fold.oos_end - fold.oos_start,
+            n_rebal=len(_attr_throttle) or _fold_rebalance_count,
+            realized_price=_attr_price,
+            realized_funding=_attr_funding,
+            realized_cost=_attr_cost,
+            expected_net=_attr_expected,
+            gross_exps=_attr_gross_exps,
+            net_exps=_attr_net_exps,
+            throttle_mults=_attr_throttle,
+            sleeves_active=_attr_sleeves_active,
+            friction_pass_total=_attr_friction_pass,
+            signal_total=_attr_signal_total,
+            dropped_below_cost=_attr_dropped,
+            netting_events=_attr_netting,
+        )
+        fold_attributions.append(_attr)
+        if _diag and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[L2-ATTR] fold=%d oos_bars=%d n_rebal=%d realized_total=%.6f "
+                "realized_price=%.6f realized_funding=%.6f realized_cost=%.6f "
+                "expected_net=%.6f alpha_gap=%.6f mean_gross_exp=%.4f mean_net_exp=%.4f "
+                "sleeves_active_mean=%.1f friction_pass_ratio=%.3f throttle_mult_mean=%.3f "
+                "dropped_below_cost=%d netting_events=%d",
+                _attr.fold_idx, _attr.oos_bars, _attr.n_rebal, _attr.realized_total,
+                _attr.realized_price, _attr.realized_funding, _attr.realized_cost,
+                _attr.expected_net, _attr.alpha_gap, _attr.mean_gross_exp, _attr.mean_net_exp,
+                _attr.sleeves_active_mean, _attr.friction_pass_ratio, _attr.throttle_mult_mean,
+                _attr.dropped_below_cost, _attr.netting_events,
             )
-            fold_attributions.append(_attr)
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "[L2-ATTR] fold=%d oos_bars=%d n_rebal=%d realized_total=%.6f "
-                    "realized_price=%.6f realized_funding=%.6f realized_cost=%.6f "
-                    "expected_net=%.6f alpha_gap=%.6f mean_gross_exp=%.4f mean_net_exp=%.4f "
-                    "sleeves_active_mean=%.1f friction_pass_ratio=%.3f throttle_mult_mean=%.3f "
-                    "dropped_below_cost=%d netting_events=%d",
-                    _attr.fold_idx, _attr.oos_bars, _attr.n_rebal, _attr.realized_total,
-                    _attr.realized_price, _attr.realized_funding, _attr.realized_cost,
-                    _attr.expected_net, _attr.alpha_gap, _attr.mean_gross_exp, _attr.mean_net_exp,
-                    _attr.sleeves_active_mean, _attr.friction_pass_ratio, _attr.throttle_mult_mean,
-                    _attr.dropped_below_cost, _attr.netting_events,
-                )
+        if _diag and logger.isEnabledFor(logging.DEBUG):
+            _nr = max(_fold_rebalance_count, 1)
+            _mtf_sym_ratio = _mtf_multi_sum / max(_mtf_n_sym_sum, 1)
+            _mtf_dilution = _mtf_dilution_sum / max(_mtf_multi_sum, 1)
+            _mtf_conflict = _mtf_conflict_sum / max(_mtf_multi_sum, 1)
+            logger.debug(
+                "[L2-MTF] fold=%d n_rebal=%d mtf_symbol_ratio=%.3f "
+                "pooling_dilution=%.3f conflict_ratio=%.3f "
+                "edge_surrendered_bps_per_rebal=%.4f "
+                "breadth_funnel=%.1f->%.1f->%.1f",
+                _fold_idx, _fold_rebalance_count, _mtf_sym_ratio,
+                _mtf_dilution, _mtf_conflict,
+                _mtf_edge_surr_sum / _nr,
+                (sum(_attr_sleeves_active) / _nr if _attr_sleeves_active else 0.0),
+                _mtf_pooled_sum / _nr, _mtf_selected_sum / _nr,
+            )
+        if logger.isEnabledFor(logging.DEBUG) and _fold_idx < len(_per_fold_fit_rets):
+            _ffit = _per_fold_fit_rets[_fold_idx]
+            _foos = _fold_h  # current fold OOS rets (still in scope)
+            _bars_per_year = bars_per_year
+            _bpy = bars_per_year
+            def _fold_cagr(rets: list[float], bpy: float = _bpy) -> float:
+                if not rets:
+                    return float("nan")
+                eq = 1.0
+                for r in rets:
+                    eq *= (1.0 + r)
+                years = len(rets) / max(bpy, 1.0)
+                return float(eq ** (1.0 / max(years, 1e-9)) - 1.0) if years > 0 else float("nan")
+            # sleeve-level L1 예측 일관성(IC): fit-leg vs OOS 기간 평균 expected_net_bps per sleeve
+            _n_sl = cache.signal_mask_2d.shape[1]
+            if _n_sl > 0:
+                _fit_mask = cache.signal_mask_2d[fold.fit_start:fold.oos_start]
+                _oos_mask = cache.signal_mask_2d[fold.oos_start:fold.oos_end]
+                _fit_net = cache.expected_net_bps_2d[fold.fit_start:fold.oos_start]
+                _oos_net = cache.expected_net_bps_2d[fold.oos_start:fold.oos_end]
+                _sl_fit_mu = np.nanmean(np.where(_fit_mask, _fit_net, np.nan), axis=0)
+                _sl_oos_mu = np.nanmean(np.where(_oos_mask, _oos_net, np.nan), axis=0)
+                _valid = np.isfinite(_sl_fit_mu) & np.isfinite(_sl_oos_mu)
+                _n_valid = int(_valid.sum())
+                if _n_valid >= 5:
+                    from scipy.stats import spearmanr as _spearmanr
+                    _ic, _pval = _spearmanr(_sl_fit_mu[_valid], _sl_oos_mu[_valid])
+                else:
+                    _ic, _pval, _n_valid = float("nan"), float("nan"), 0
+            else:
+                _ic, _pval, _n_valid = float("nan"), float("nan"), 0
+            logger.debug(
+                "[L2-PERSIST] fold=%d fit_bars=%d fit_cagr=%.4f oos_bars=%d oos_cagr=%.4f "
+                "sleeve_ic=%.3f sleeve_ic_pval=%.3f n_sleeves=%d",
+                _fold_idx, len(_ffit), _fold_cagr(_ffit),
+                len(_foos), _fold_cagr(_foos),
+                _ic, _pval, _n_valid,
+            )
         logger.log(PERF,
             "[PERF] awf_fold fold=%d/%d oos_bars=%d took=%.4fs",
             _fold_idx + 1, len(awf_folds),
