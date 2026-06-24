@@ -95,7 +95,7 @@ ai_read_policy: when_related
 - **미배선 확인**: `per_tf_l1` evidence/outer fold 경로는 bridge→WF가 아닌 별도 evidence phase 실행 → L2-A(prepare-once) 효과 미발현. 별도 배선 필요.
 - **Test Coverage**: Scenarios 1-6 (8/8 PASS, ~2.5s) — vectorized equivalence(top_quantile 파라미터화), variant cap backfill, single-bar/empty eligible, diagnostics gating spy, prepared 동등성(나중 추가).
 
-## Phase 4: Bridge-Candidate-Perf-V2 및 Enrich Cache Hotfix (ADR-03X, 6/24)
+## Phase 4 (sic): Bridge-Candidate-Perf-V2 및 Enrich Cache Hotfix (ADR-03X, 6/24)
 - **L2-A**: `PreparedLabeledEvents` frozen→mutable dataclass, `enrich_cache: dict[str, Any] | None` 필드 추가.
 - **L2-B**: `_precompute_enrich` lazy init — window-invariant만 precompute (arm/entry_regime/overlay_mult/crisis_active/entry_regime_code). 벡터화 affinity matrix lookup (list-comp→numpy indexing).
 - **L2-C/D**: `build_candidate_dataset` sig_feat_names + skip_features 경로에서 `enrich_cache` read.
@@ -103,3 +103,9 @@ ai_read_policy: when_related
 - **L1-A**: `[PERF] l1_wf_summary` 로그 추가 — avg fold timing + evidence/outer wall time all-TF aggregate.
 - **L1-B**: Bridge profile walk_forward 항상 표시 (`0s` → `"(skipped)"`).
 - **L1 validation**: ruff/mypy pass, 30/30 candidate dataset tests pass.
+
+## Phase 10: Bridge Multi-TF Threading + Datetime Hoisting (6/24)
+- **S1 — Multi-TF Bridge ThreadPool**: `build_multi_tf_panels`에서 sequential per-TF loop → `_process_single_tf` inner function + `ThreadPoolExecutor(max_workers=2)`. Eligible TF ≤1 → sequential; ≥2 → parallel. 각 TF는 독립적인 `list[CandidateSignalPanel]` 할당, shared mutation 없음. Exception 격리: 실패 TF만 skip, 다른 TF 정상 처리. ThreadPool ≠ ProcessPool — fork 없음, NUMBA env var 오염 없음. (commit 포함: `src/domain/futures/strategy_runtime/bridge.py`)
+- **S2 — `_resolve_tradeable_scope` Datetime Hoisting**: 52 symbol loop에서 invariant `pd.api.types.is_datetime64_any_dtype()` 검사를 first-valid-symbol에서 1회만 실행하고 `_native_flag`로 캐시. 이후 symbol은 branch만 평가 (0.2s saving, 52 syms × 8761 bars). MagicMock/string-datetime fallback 경로 유지. (commit 포함: `src/execution/opt_main_futures.py`)
+- **Perf Profile**: `docs/perf_mem_profile_report.md` 최초 생성 (L1 288.10s, bridge 58.24s, peak RSS 7,565MB). 별도 커밋 — 성능 기준선 문서.
+- **L1 validation**: ruff/mypy pass, test 4개 파일 339 insertions/20 deletions.
