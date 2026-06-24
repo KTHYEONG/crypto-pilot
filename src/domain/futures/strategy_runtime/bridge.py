@@ -7,6 +7,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -740,6 +741,24 @@ def _recommendation_window_indices(
     raise ValueError(f"unsupported promotion_decision_split: {basis}")
 
 
+def _empty_rule_diagnostics() -> Any:
+    """signal_only fast-path용 빈 RuleDiagnosticsResult."""
+    empty_df = pd.DataFrame()
+    return SimpleNamespace(
+        by_family=empty_df, by_variant=empty_df,
+        by_family_side=empty_df, side_flip=empty_df,
+        decision={},
+        recommended_keep_variants=(),
+        recommended_flip_variants=(),
+        recommended_keep_signal_cells=(),
+        recommended_flip_signal_cells=(),
+        recommendation_basis="skipped_signal_only",
+        recommendation_split=(0, 0),
+        report_split=(0, 0),
+        recommendation_failure_report=None,
+    )
+
+
 @dataclass(slots=True)
 class CandidatePipelineOutput:
     """Candidate strategy bridge output."""
@@ -786,7 +805,10 @@ def run_candidate_strategy_for_universe(
     )
     from src.domain.futures.strategy.candidate_edge import predict_candidate_edges
     from src.domain.futures.strategy.candidate_gate import predict_candidate_gate
-    from src.domain.futures.strategy.candidate_labels import label_candidate_events
+    from src.domain.futures.strategy.candidate_labels import (
+        _compute_yang_zhang_vol_2d,
+        label_candidate_events,
+    )
     from src.domain.futures.strategy.candidate_portfolio import (
         build_candidate_alpha_panel,
         build_candidate_target_weights,
@@ -966,8 +988,13 @@ def run_candidate_strategy_for_universe(
             },
         )
 
+    atr_2d_cache = _compute_yang_zhang_vol_2d(aligned)
+
     t_step = time.perf_counter()
-    labeled = label_candidate_events(events=raw_events, aligned=aligned, cfg=candidate_cfg)
+    labeled = label_candidate_events(
+        events=raw_events, aligned=aligned, cfg=candidate_cfg,
+        precomputed_atr_2d=atr_2d_cache,
+    )
     bridge_prof["label"] = time.perf_counter() - t_step
     _sample_rss("label")
     labeled_all = labeled.copy()
@@ -1002,7 +1029,10 @@ def run_candidate_strategy_for_universe(
                 )
                 if not htf_raw_events.empty:
                     t_htf_label = time.perf_counter()
-                    htf_labeled = label_candidate_events(events=htf_raw_events, aligned=aligned, cfg=candidate_cfg)
+                    htf_labeled = label_candidate_events(
+                        events=htf_raw_events, aligned=aligned, cfg=candidate_cfg,
+                        precomputed_atr_2d=atr_2d_cache,
+                    )
                     bridge_prof["htf_label"] = time.perf_counter() - t_htf_label
                     _sample_rss("htf_label")
                     variant_to_tf: dict[str, str] = {}
@@ -1034,23 +1064,28 @@ def run_candidate_strategy_for_universe(
     else:
         labeled_for_diag = labeled
 
-    t_step = time.perf_counter()
-    diag = compute_rule_diagnostics(
-        labeled_events=labeled_for_diag,
-        aligned=aligned,
-        cfg=strategy_cfg.candidate,
-        min_obs=max(strategy_cfg.candidate.min_candidate_obs, 100),
-        silent=silent or strategy_cfg.candidate.signal_only,
-        recommendation_start=recommendation_start,
-        recommendation_end=recommendation_end,
-        report_start=oos_start,
-        report_end=oos_end,
-    )
-    bridge_prof["diagnostics"] = time.perf_counter() - t_step
+    if strategy_cfg.candidate.signal_only:
+        diag = _empty_rule_diagnostics()
+        bridge_prof["diagnostics"] = 0.0
+        _logger.debug("[BRIDGE] signal_only=True: skipped compute_rule_diagnostics")
+    else:
+        t_step = time.perf_counter()
+        diag = compute_rule_diagnostics(
+            labeled_events=labeled_for_diag,
+            aligned=aligned,
+            cfg=strategy_cfg.candidate,
+            min_obs=max(strategy_cfg.candidate.min_candidate_obs, 100),
+            silent=silent,
+            recommendation_start=recommendation_start,
+            recommendation_end=recommendation_end,
+            report_start=oos_start,
+            report_end=oos_end,
+        )
+        bridge_prof["diagnostics"] = time.perf_counter() - t_step
     _sample_rss("diagnostics")
     gc.collect()
 
-    if strategy_cfg.candidate.promotion_filter_enabled:
+    if strategy_cfg.candidate.promotion_filter_enabled and not strategy_cfg.candidate.signal_only:
         t_step = time.perf_counter()
         labeled = apply_variant_promotions(
             labeled=labeled,
