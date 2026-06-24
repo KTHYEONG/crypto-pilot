@@ -79,3 +79,18 @@ ai_read_policy: when_related
 - **exec_1m Safeguard**: `intrabar_1m` 모드 시 Arrow fast-path opt-out → ThreadPool fallback, exec_1m + funding_event_mask 키 누락 방지.
 - **Measured Improvement**: Data Load 14.26s → 9.99s (-29.9%). 253 심볼 중 129심볼은 Arrow path (enriched cache-hit), 124심볼은 fallback. Phase L1 전체 data stage 17s → 11.58s.
 - **Test Coverage**: Scenario 1-6 (10/10 PASS, 0.69s) — cache-hit pushdown, lazy skip, empty window, fallback, phase2 equiv, exec_1m opt-out.
+
+## Phase 9: Bridge Candidate Strategy Perf (ADR-043~045, 6/24)
+- **L1-B: Selection Vectorization**: `_vectorized_topk_per_bar` 도입 — per-bar Python loop → sort + drop_duplicates + cumcount rank + ceil(keep) + variant-cap backfill. O(E log E) 벡터화, 0 Python loop. 동등성 보장: sorted cumcount tie-break.
+- **L1-A: Diagnostics Gating**: `enable_diagnostics` 파라미터 추가 → evidence fold(12/16)에서 sensitivity/shadow/waterfall skip. 외부 fold/배포 경로는 `True` 유지(진단 SSOT 보존).
+- **L2-A: Bridge prepare-once**: `bridge.py` WF 루프 직전 `prepare_labeled_events` 1회 호출 → `PreparedLabeledEvents` 전달. `build_candidate_dataset` fast path(numpy boolean mask) 사용.
+- **L2-B: ProcessPool Global Wiring**: `_GLOBAL_LABELED_EVENTS`에 `PreparedLabeledEvents` 배선 → fork CoW 상속, 직렬화 0.
+- **L3: Schema-once**: `frozen_identity_names` prepared events에서 추출 → fold별 재계산 대신 1회 schema. ensemble_b0(identity 미사용)는 최종 fit window 기준 1회.
+- **Config**: `CandidateStrategyConfig.l1_selection_diagnostics_enabled: bool = False` 추가.
+- **L2 validation**: `ruff check` + `mypy` pass 5개 파일. L2 test 31/31 pass.
+- **실측 (4h TF, signal_only bridge + 별도 evidence phase)**:
+  - selection 23.3s → 2.88s (-88%, 목표 달성)
+  - ds_fit 18s → 15.8s (-12%, prepare-once가 evidence phase 경로에 미적용)
+  - bridge total 48.04s (signal_only early return — WF 미포함)
+- **미배선 확인**: `per_tf_l1` evidence/outer fold 경로는 bridge→WF가 아닌 별도 evidence phase 실행 → L2-A(prepare-once) 효과 미발현. 별도 배선 필요.
+- **Test Coverage**: Scenarios 1-6 (8/8 PASS, ~2.5s) — vectorized equivalence(top_quantile 파라미터화), variant cap backfill, single-bar/empty eligible, diagnostics gating spy, prepared 동등성(나중 추가).

@@ -558,10 +558,49 @@ def _log_selection_by_variant(
         )
 
 
+def _vectorized_topk_per_bar(
+    eligible_df: pd.DataFrame,
+    *,
+    top_quantile: float,
+    max_events_per_bar: int | None,
+    max_variant_fraction: float,
+    primary_sort_col: str,
+) -> NDArray[np.intp]:
+    eligible = eligible_df.sort_values(
+        ["_merge_dt", primary_sort_col, "mu_net_decision_bps", "q10_net_bps"],
+        ascending=[True, False, False, False],
+    )
+    deduped = eligible.drop_duplicates(["_merge_dt", "symbol"], keep="first")
+
+    bar_size = deduped.groupby("_merge_dt", sort=False)["_merge_dt"].transform("size")
+    keep = np.ceil(bar_size * top_quantile).clip(lower=1)
+    if max_events_per_bar is not None:
+        keep = np.minimum(keep, float(max_events_per_bar))
+
+    if max_variant_fraction >= 1.0 or not {"family", "variant"}.issubset(deduped.columns):
+        rank = deduped.groupby("_merge_dt", sort=False).cumcount()
+        mask = rank < keep
+        idx_arr = deduped.index.to_numpy(dtype=np.intp)
+        return idx_arr[mask.to_numpy(dtype=bool)]  # type: ignore[no-any-return]
+
+    max_per_variant = np.ceil(keep * max_variant_fraction).clip(lower=1)
+    vr = deduped.groupby(["_merge_dt", "family", "variant"], sort=False).cumcount()
+    variant_ok = vr < max_per_variant
+    survived = deduped[variant_ok]
+    if survived.empty:
+        return np.array([], dtype=np.intp)
+    re_rank = survived.groupby("_merge_dt", sort=False).cumcount()
+    re_keep = keep.loc[survived.index]
+    final_mask = re_rank < re_keep
+    idx_arr = survived.index.to_numpy(dtype=np.intp)
+    return idx_arr[final_mask.to_numpy(dtype=bool)]  # type: ignore[no-any-return]
+
+
 def select_candidate_events_for_portfolio(
     *,
     model_output: CandidateModelOutput,
     cfg: CandidateStrategyConfig,
+    enable_diagnostics: bool = True,
 ) -> pd.DataFrame:
     """Select at most one active candidate per symbol per timestamp.
 
@@ -600,7 +639,7 @@ def select_candidate_events_for_portfolio(
     df["q90_net_bps"] = np.asarray(model_output.q90_net_bps, dtype=np.float64)
     df["utility_score"] = np.asarray(model_output.utility_score, dtype=np.float64)
 
-    if cfg.selection_sensitivity_enabled:
+    if enable_diagnostics and cfg.selection_sensitivity_enabled:
         sensitivity = compute_selection_sensitivity(
             events=df,
             gate_grid=cfg.selection_gate_grid,
@@ -625,11 +664,11 @@ def select_candidate_events_for_portfolio(
     utility_floor = max(float(cfg.selection_min_expected_utility_bps), breakeven_floor)
     utility_eligible_mask = df["expected_utility_bps"] >= utility_floor
     eligible = catastrophic_mask & utility_eligible_mask
-    _diag_enabled = bool(getattr(cfg, "l1_selection_diagnostics_enabled", False))
+    _diag_enabled = enable_diagnostics and cfg.l1_selection_diagnostics_enabled
     waterfall = compute_selection_waterfall(events=df, cfg=cfg) if _diag_enabled else {}
     shadow_profiles = (
         compute_shadow_selection_profiles(events=df, cfg=cfg)
-        if cfg.selection_shadow_profiles_enabled
+        if enable_diagnostics and cfg.selection_shadow_profiles_enabled
         else pd.DataFrame()
     )
     n_eligible = int(eligible.sum())
@@ -654,31 +693,16 @@ def select_candidate_events_for_portfolio(
             )
             eligible_df = df.loc[eligible].copy()
             eligible_df["_merge_dt"] = pd.to_datetime(eligible_df["datetime"], utc=True).dt.tz_localize(None)
-            top_idx: list[int] = []
             max_variant_fraction = float(getattr(cfg, "max_variant_selection_fraction", 1.0))
             max_events_per_bar = getattr(cfg, "selection_max_events_per_bar", None)
-            eligible_df = eligible_df.sort_values(
-                ["_merge_dt", primary_sort_col, "mu_net_decision_bps", "q10_net_bps"],
-                ascending=[True, False, False, False],
+            top_idx = _vectorized_topk_per_bar(
+                eligible_df,
+                top_quantile=cfg.selection_top_quantile,
+                max_events_per_bar=max_events_per_bar,
+                max_variant_fraction=max_variant_fraction,
+                primary_sort_col=primary_sort_col,
             )
-            for _, group in eligible_df.groupby("_merge_dt", sort=False):
-                deduped = (
-                    group.reset_index()
-                    .groupby("symbol", sort=False, as_index=False)
-                    .first()
-                )
-                keep_for_bar = max(1, math.ceil(len(deduped) * cfg.selection_top_quantile))
-                if max_events_per_bar is not None:
-                    keep_for_bar = min(keep_for_bar, int(max_events_per_bar))
-                n_keep += keep_for_bar
-                if max_variant_fraction < 1.0 and keep_for_bar > 1 and {"family", "variant"}.issubset(deduped.columns):
-                    max_per_variant = max(1, math.ceil(keep_for_bar * max_variant_fraction))
-                    deduped["_vr"] = deduped.groupby(["family", "variant"], sort=False).cumcount()
-                    deduped = deduped[deduped["_vr"] < max_per_variant].head(keep_for_bar)
-                    if not deduped.empty:
-                        top_idx.extend(int(i) for i in deduped["index"].tolist())
-                else:
-                    top_idx.extend(int(idx) for idx in deduped.head(keep_for_bar)["index"].tolist())
+            n_keep = len(top_idx)
             mask = pd.Series(False, index=df.index, dtype=bool)
             mask.loc[top_idx] = True
             zero_reason = "selected_nonzero" if int(mask.sum()) > 0 else "topk_selected_zero"

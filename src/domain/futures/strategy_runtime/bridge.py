@@ -753,7 +753,10 @@ def run_candidate_strategy_for_universe(
     from dataclasses import replace
 
     from src.domain.futures.strategy.ablation import apply_variant_promotions
-    from src.domain.futures.strategy.candidate_dataset import build_candidate_dataset
+    from src.domain.futures.strategy.candidate_dataset import (
+        build_candidate_dataset,
+        prepare_labeled_events,
+    )
     from src.domain.futures.strategy.candidate_edge import predict_candidate_edges
     from src.domain.futures.strategy.candidate_gate import predict_candidate_gate
     from src.domain.futures.strategy.candidate_labels import label_candidate_events
@@ -1148,8 +1151,15 @@ def run_candidate_strategy_for_universe(
     # --- WF fold loop: train per fold using shared workflow ---
     from src.domain.futures.strategy.candidate_workflow import run_candidate_walk_forward
     t_step = time.perf_counter()
-    wf_outputs = run_candidate_walk_forward(
+    prepared = prepare_labeled_events(
         labeled_events=labeled,
+        aligned=aligned,
+        cfg=candidate_cfg,
+        fit_start_idx=wf_folds[0].fit_start if wf_folds else 0,
+        fit_end_idx=wf_folds[-1].fit_end if wf_folds else n_bars,
+    )
+    wf_outputs = run_candidate_walk_forward(
+        labeled_events=prepared,
         aligned=aligned,
         cfg=candidate_cfg,
         folds=wf_folds,
