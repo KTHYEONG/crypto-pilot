@@ -94,3 +94,12 @@ ai_read_policy: when_related
   - bridge total 48.04s (signal_only early return — WF 미포함)
 - **미배선 확인**: `per_tf_l1` evidence/outer fold 경로는 bridge→WF가 아닌 별도 evidence phase 실행 → L2-A(prepare-once) 효과 미발현. 별도 배선 필요.
 - **Test Coverage**: Scenarios 1-6 (8/8 PASS, ~2.5s) — vectorized equivalence(top_quantile 파라미터화), variant cap backfill, single-bar/empty eligible, diagnostics gating spy, prepared 동등성(나중 추가).
+
+## Phase 4: Bridge-Candidate-Perf-V2 및 Enrich Cache Hotfix (ADR-03X, 6/24)
+- **L2-A**: `PreparedLabeledEvents` frozen→mutable dataclass, `enrich_cache: dict[str, Any] | None` 필드 추가.
+- **L2-B**: `_precompute_enrich` lazy init — window-invariant만 precompute (arm/entry_regime/overlay_mult/crisis_active/entry_regime_code). 벡터화 affinity matrix lookup (list-comp→numpy indexing).
+- **L2-C/D**: `build_candidate_dataset` sig_feat_names + skip_features 경로에서 `enrich_cache` read.
+- **Regression 발견 및 Hotfix**: `_compute_score_pct_variant_hist`를 full frame에서 실행→30s/fold. `score_pct`/`n_same`은 window-dependent이므로 enrich_cache에서 제외하고 per-window fallback 유지. Hotfix 후 `_precompute_enrich` 4.3ms (10K events, -7000x).
+- **L1-A**: `[PERF] l1_wf_summary` 로그 추가 — avg fold timing + evidence/outer wall time all-TF aggregate.
+- **L1-B**: Bridge profile walk_forward 항상 표시 (`0s` → `"(skipped)"`).
+- **L1 validation**: ruff/mypy pass, 30/30 candidate dataset tests pass.
