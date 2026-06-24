@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -1315,30 +1316,37 @@ def compute_rule_diagnostics(
     else:
         recommendation_basis = str(cfg.promotion_decision_split)
 
-    by_family = _summarize_view(
-        events=labeled_events,
-        view="family",
-        min_obs=min_obs,
-        cfg=cfg,
-        report_start=resolved_report_start,
-        report_end=resolved_report_end,
-    )
-    by_variant = _summarize_view(
-        events=labeled_events,
-        view="variant",
-        min_obs=min_obs,
-        cfg=cfg,
-        report_start=resolved_report_start,
-        report_end=resolved_report_end,
-    )
-    by_family_side = _summarize_view(
-        events=labeled_events,
-        view="family_side",
-        min_obs=min_obs,
-        cfg=cfg,
-        report_start=resolved_report_start,
-        report_end=resolved_report_end,
-    )
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_fam = pool.submit(
+            _summarize_view,
+            events=labeled_events,
+            view="family",
+            min_obs=min_obs,
+            cfg=cfg,
+            report_start=resolved_report_start,
+            report_end=resolved_report_end,
+        )
+        f_var = pool.submit(
+            _summarize_view,
+            events=labeled_events,
+            view="variant",
+            min_obs=min_obs,
+            cfg=cfg,
+            report_start=resolved_report_start,
+            report_end=resolved_report_end,
+        )
+        f_side = pool.submit(
+            _summarize_view,
+            events=labeled_events,
+            view="family_side",
+            min_obs=min_obs,
+            cfg=cfg,
+            report_start=resolved_report_start,
+            report_end=resolved_report_end,
+        )
+        by_family = f_fam.result()
+        by_variant = f_var.result()
+        by_family_side = f_side.result()
 
     import sys
     is_testing = "pytest" in sys.modules
@@ -1376,8 +1384,9 @@ def compute_rule_diagnostics(
                     flipped_labeled["entry_idx"], errors="coerce"
                 ).astype(np.int64)
 
-        side_flip_frames = [
-            _summarize_side_flip(
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            f_sf_fam = pool.submit(
+                _summarize_side_flip,
                 original=labeled_events,
                 flipped=flipped_labeled,
                 view="family",
@@ -1385,8 +1394,9 @@ def compute_rule_diagnostics(
                 cfg=cfg,
                 report_start=resolved_report_start,
                 report_end=resolved_report_end,
-            ),
-            _summarize_side_flip(
+            )
+            f_sf_var = pool.submit(
+                _summarize_side_flip,
                 original=labeled_events,
                 flipped=flipped_labeled,
                 view="variant",
@@ -1394,8 +1404,9 @@ def compute_rule_diagnostics(
                 cfg=cfg,
                 report_start=resolved_report_start,
                 report_end=resolved_report_end,
-            ),
-            _summarize_side_flip(
+            )
+            f_sf_side = pool.submit(
+                _summarize_side_flip,
                 original=labeled_events,
                 flipped=flipped_labeled,
                 view="family_side",
@@ -1403,8 +1414,12 @@ def compute_rule_diagnostics(
                 cfg=cfg,
                 report_start=resolved_report_start,
                 report_end=resolved_report_end,
-            ),
-        ]
+            )
+            side_flip_frames = [
+                f_sf_fam.result(),
+                f_sf_var.result(),
+                f_sf_side.result(),
+            ]
         side_flip = pd.concat(side_flip_frames, axis=0, ignore_index=True) if side_flip_frames else pd.DataFrame()
         side_flip_lookup = {
             str(row.group): row
@@ -1459,26 +1474,33 @@ def compute_rule_diagnostics(
         str(row.group): (float(row.delta_mean_edge_bps), float(row.flip_mean_edge_bps))
         for row in side_flip.itertuples(index=False)
     } if not side_flip.empty else {}
-    recommendation_variant_summary = _summarize_recommendation_variants(
-        events=labeled_events,
-        aligned=aligned,
-        min_obs=min_obs,
-        cfg=cfg,
-        recommendation_start=resolved_recommendation_start,
-        recommendation_end=resolved_recommendation_end,
-        side_flip_lookup=side_flip_rec_lookup,
-    )
-    if not cfg.side_flip_candidate_variants and not is_testing:
-        recommendation_flipped_summary = pd.DataFrame()
-    else:
-        recommendation_flipped_summary = _summarize_recommendation_variants(
-            events=flipped_labeled,
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_rec_var = pool.submit(
+            _summarize_recommendation_variants,
+            events=labeled_events,
             aligned=aligned,
             min_obs=min_obs,
             cfg=cfg,
             recommendation_start=resolved_recommendation_start,
             recommendation_end=resolved_recommendation_end,
+            side_flip_lookup=side_flip_rec_lookup,
         )
+        if not cfg.side_flip_candidate_variants and not is_testing:
+            f_rec_flip = None
+            recommendation_flipped_summary = pd.DataFrame()
+        else:
+            f_rec_flip = pool.submit(
+                _summarize_recommendation_variants,
+                events=flipped_labeled,
+                aligned=aligned,
+                min_obs=min_obs,
+                cfg=cfg,
+                recommendation_start=resolved_recommendation_start,
+                recommendation_end=resolved_recommendation_end,
+            )
+        recommendation_variant_summary = f_rec_var.result()
+        if f_rec_flip is not None:
+            recommendation_flipped_summary = f_rec_flip.result()
     # Replace rec-window IC with OOS-window IC from by_variant (report_start..report_end).
     # Recommendation window = IS+calibration, so its Spearman is in-sample and noisy for
     # pattern signals. by_variant["oos_rank_ic"] is computed on the same OOS window used
