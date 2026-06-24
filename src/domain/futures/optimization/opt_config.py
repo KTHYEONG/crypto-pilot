@@ -520,7 +520,7 @@ L1_ALPHA_SPACE: dict[str, dict[str, Any]] = {
 # Layer 2 Optuna study: 복리자산증식 최적화 (L1 OOS 결과 입력)
 # Tune: K_RANK, REBALANCE_BARS, CS_Z_SCORE_THRESHOLD, kelly_fraction, max_ann_vol
 L2_ALLOC_SPACE_V2: dict[str, dict[str, Any]] = {
-    "K_RANK":               {"type": "int",         "low": 1, "high": 6, "step": 1},
+    "K_RANK":               {"type": "int",         "low": 4, "high": 6, "step": 1},
     "REBALANCE_BARS":       {"type": "categorical",  "choices": (1, 3, 6)},
     "CS_Z_SCORE_THRESHOLD": {"type": "float",        "low": 0.0, "high": 1.5, "step": 0.1},
     "kelly_fraction":       {"type": "float",        "low": 0.10, "high": 1.0, "step": 0.05},
@@ -530,7 +530,7 @@ L2_ALLOC_SPACE_V2: dict[str, dict[str, Any]] = {
 # 0.15-0.55 구간이 실현 복리성장률 최대·분산 절반. vol 0.20-1.20: MDD<=20% 생존제약 내에서
 # optimizer가 배치 천장을 직접 탐색(과거 0.50 천장이 실현 vol 3~5%에서 미접촉 → under-deployment).
 L2_ALLOC_SPACE_V3: dict[str, dict[str, Any]] = {
-    "K_RANK":               {"type": "int",        "low": 1, "high": 6, "step": 1},
+    "K_RANK":               {"type": "int",        "low": 4, "high": 6, "step": 1},
     "REBALANCE_BARS":       {"type": "categorical", "choices": (1, 3, 6)},
     "CS_Z_SCORE_THRESHOLD": {"type": "float",       "low": 0.0, "high": 1.5, "step": 0.1},
     "kelly_fraction":       {"type": "float",       "low": 0.15, "high": 0.55, "step": 0.05},
@@ -539,7 +539,7 @@ L2_ALLOC_SPACE_V3: dict[str, dict[str, Any]] = {
 # V4: active L1 signal deployment. Cost conversion remains conservative, while
 # deployment filters and risk-budget use become explicit Optuna dimensions.
 L2_ALLOC_SPACE_V4: dict[str, dict[str, Any]] = {
-    "K_RANK":                       {"type": "int",         "low": 1, "high": 8, "step": 1},
+    "K_RANK":                       {"type": "int",         "low": 4, "high": 8, "step": 1},
     "REBALANCE_BARS":               {"type": "categorical", "choices": (1, 2, 3, 6)},
     "CS_Z_SCORE_THRESHOLD":         {"type": "float",       "low": 0.0, "high": 1.2, "step": 0.1},
     "kelly_fraction":               {"type": "float",       "low": 0.20, "high": 0.80, "step": 0.05},
@@ -552,7 +552,7 @@ L2_ALLOC_SPACE_V4: dict[str, dict[str, Any]] = {
     "rank_buffer":                  {"type": "int",         "low": 0, "high": 2, "step": 1},
 }
 L2_ALLOC_SPACE_V5: dict[str, dict[str, Any]] = {
-    "K_RANK":                        {"type": "int",         "low": 1, "high": 8, "step": 1},
+    "K_RANK":                        {"type": "int",         "low": 4, "high": 8, "step": 1},
     "REBALANCE_BARS":                {"type": "categorical", "choices": (1, 2, 3, 6)},
     "CS_Z_SCORE_THRESHOLD":          {"type": "float",       "low": 0.0, "high": 1.2, "step": 0.1},
     "kelly_fraction":                {"type": "float",       "low": 0.20, "high": 0.80, "step": 0.05},
@@ -568,7 +568,7 @@ L2_ALLOC_SPACE_V5: dict[str, dict[str, Any]] = {
     "adaptive_expand_below_vol_ratio": {"type": "float",     "low": 0.0, "high": 0.80, "step": 0.05},
 }
 L2_ALLOC_SPACE_V6: dict[str, dict[str, Any]] = {
-    "K_RANK":                        {"type": "int",         "low": 1, "high": 8, "step": 1},
+    "K_RANK":                        {"type": "int",         "low": 4, "high": 8, "step": 1},
     "REBALANCE_BARS":                {"type": "categorical", "choices": (1, 2, 3, 6)},
     "CS_Z_SCORE_THRESHOLD":          {"type": "float",       "low": 0.0, "high": 1.2, "step": 0.1},
     "kelly_fraction":                {"type": "float",       "low": 0.20, "high": 0.80, "step": 0.05},
@@ -578,7 +578,7 @@ L2_ALLOC_SPACE_V6: dict[str, dict[str, Any]] = {
     "risk_budget_max_scale":         {"type": "float",       "low": 1.00, "high": 6.00, "step": 0.25},
 }
 L2_ALLOC_SPACE_V7: dict[str, dict[str, Any]] = {
-    "K_RANK":                        {"type": "int",         "low": 1, "high": 8, "step": 1},
+    "K_RANK":                        {"type": "int",         "low": 4, "high": 8, "step": 1},
     "REBALANCE_BARS":                {"type": "categorical", "choices": (1, 2, 3, 6)},
     "CS_Z_SCORE_THRESHOLD":          {"type": "float",       "low": 0.0, "high": 1.2, "step": 0.1},
     "kelly_fraction":                {"type": "float",       "low": 0.20, "high": 0.80, "step": 0.05},

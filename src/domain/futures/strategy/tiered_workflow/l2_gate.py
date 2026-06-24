@@ -4,6 +4,10 @@ from typing import cast
 
 import numpy as np
 
+from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+    Layer2FoldAttribution,
+    compute_cost_drag_ratio,
+)
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     Layer2AllocationConfig,
     Layer2GateEvaluation,
@@ -28,6 +32,7 @@ _PROMOTION_BLOCKERS: tuple[str, ...] = (
     "growth_lcb",
     "uplift",
     "psr_floor",
+    "cost_drag",
 )
 
 
@@ -57,6 +62,7 @@ def evaluate_layer2_gate(
     psr_hybrid: float | None = None,
     recent_fold_passed: bool | None = None,
     recent_fold_sharpe: float | None = None,
+    fold_attributions: tuple[Layer2FoldAttribution, ...] = (),
     config: Layer2AllocationConfig = _DEFAULT_L2_CONFIG,
 ) -> Layer2GateEvaluation:
     """Build Optuna safety constraints and final L2 promotion gate diagnostics.
@@ -87,6 +93,7 @@ def evaluate_layer2_gate(
     """
     # calmar = CAGR / MDD; mar_hybrid 이미 동일 계산이나 명시적 calmar 분리
     calmar_hybrid = float(cagr_hybrid) / (float(mdd_hybrid) + 1e-9)
+    cost_drag = compute_cost_drag_ratio(fold_attributions) if fold_attributions else 0.0
 
     # psr_floor: PSR < threshold → BLOCKER (None 입력 시 -1.0 통과)
     psr_constraint = (
@@ -136,6 +143,7 @@ def evaluate_layer2_gate(
             sharpe_hac_baseline + float(config.l2_min_sharpe_uplift) - sharpe_hac_hybrid
         ),
         psr_constraint,
+        _finite_or_fail(cost_drag - float(config.l2_max_cost_drag_ratio)),
     )
 
     promotion_passed = True
