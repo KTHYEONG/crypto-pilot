@@ -814,6 +814,7 @@ def run_candidate_strategy_for_universe(
         sorted_steps = sorted(bridge_prof.items(), key=lambda x: x[1], reverse=True)
         max_step_time = max(bridge_prof.values()) if bridge_prof else 1.0
         
+        shown_names: set[str] = set()
         for name, duration in sorted_steps:
             if duration < 0.01 and name != sorted_steps[0][0]:
                 continue
@@ -824,9 +825,15 @@ def run_candidate_strategy_for_universe(
             
             # Add fire emoji for the top bottleneck if it's significant
             suffix = " 🔥" if name == sorted_steps[0][0] and pct > 30 else ""
+            skip_label = " (skipped)" if name == "walk_forward" and duration < 0.01 else ""
             
             label = name.replace("_", " ").title()
-            lines.append(f"  {label:<15}: {bar:<20} {duration:>6.2f}s ({pct:>5.1f}%){suffix}")
+            lines.append(f"  {label:<15}: {bar:<20} {duration:>6.2f}s ({pct:>5.1f}%){suffix}{skip_label}")
+            shown_names.add(name)
+        
+        if "walk_forward" not in shown_names:
+            wf_dur = bridge_prof.get("walk_forward", 0.0)
+            lines.append(f"  {'Walk Forward':<15}: {'                    '} {wf_dur:>6.2f}s (  0.0%) (skipped)")
 
         # Memory section
         if stage_rss_samples:
