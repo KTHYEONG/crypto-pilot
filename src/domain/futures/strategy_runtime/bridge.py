@@ -5,6 +5,7 @@ import gc
 import logging
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -392,12 +393,18 @@ def build_multi_tf_panels(
     base_datetimes = aligned_base.datetimes
     base_guard = _base_probe_guard_mask(aligned_base)
 
+    # Phase 1: collect eligible TFs (HTF filter)
+    eligible_tfs: list[str] = []
     for tf_i in non_base_tfs:
         hpb_i = _HPB_BRIDGE.get(tf_i, 4.0)
         hpb_base = _HPB_BRIDGE.get(base_tf, 4.0)
         if htf_only and hpb_i < hpb_base:
             continue
+        eligible_tfs.append(tf_i)
 
+    def _process_single_tf(
+        tf_i: str,
+    ) -> tuple[str, list[CandidateSignalPanel], list[str] | None]:
         source_mix: Counter[str] = Counter()
         for symbol in symbols:
             source_tf = _select_probe_source_tf(data_maps.get(symbol, {}), tf_i)
@@ -405,13 +412,12 @@ def build_multi_tf_panels(
                 source_mix[source_tf] += 1
         tf_maps = _build_virtual_probe_tf_maps(data_maps, symbols, tf_i)
         if not tf_maps:
-            _logger.warning("[MULTI-TF] no source data available for tf=%s", tf_i)
-            continue
+            return (tf_i, [], None)
         try:
             aligned_i = align_data_maps(tf_maps, symbols, tf_i)
         except Exception as exc:
             _logger.warning("[MULTI-TF] align_data_maps failed tf=%s: %s", tf_i, exc)
-            continue
+            return (tf_i, [], None)
         try:
             cfg_i = dataclasses.replace(base_cfg, timeframe=tf_i)
             panels_i = build_rule_signal_panels(
@@ -423,13 +429,14 @@ def build_multi_tf_panels(
             )
         except Exception as exc:
             _logger.warning("[MULTI-TF] build_rule_signal_panels failed tf=%s: %s", tf_i, exc)
-            continue
+            return (tf_i, [], None)
+        tf_panels: list[CandidateSignalPanel] = []
         for panel in panels_i:
             try:
                 projected = _project_panel_to_base_grid(panel, base_datetimes, tf_i, base_tf)
                 tagged_metadata: dict[str, Any] = dict(projected.metadata or {})
                 tagged_metadata["native_tf"] = tf_i
-                extra.append(
+                tf_panels.append(
                     dataclasses.replace(
                         projected,
                         valid_mask_2d=projected.valid_mask_2d & base_guard,
@@ -444,16 +451,36 @@ def build_multi_tf_panels(
                     tf_i,
                     exc,
                 )
-        projected_count = sum(1 for panel in extra if panel.variant.endswith(f"_{tf_i}"))
-        audit_rows.append(
-            [
-                tf_i,
-                str(len(tf_maps)),
-                str(source_mix.total()),
-                str(projected_count),
-                ", ".join(f"{name}:{count}" for name, count in source_mix.most_common(2)) or "-",
-            ]
-        )
+        projected_count = len(tf_panels)
+        audit_row = [
+            tf_i,
+            str(len(tf_maps)),
+            str(source_mix.total()),
+            str(projected_count),
+            ", ".join(f"{name}:{count}" for name, count in source_mix.most_common(2)) or "-",
+        ]
+        return (tf_i, tf_panels, audit_row)
+
+    # Phase 2: process eligible TFs (parallel for 2+, sequential for 0-1)
+    if len(eligible_tfs) <= 1:
+        for tf_i in eligible_tfs:
+            _, tf_panels, audit_row = _process_single_tf(tf_i)
+            if audit_row is not None:
+                extra.extend(tf_panels)
+                audit_rows.append(audit_row)
+    else:
+        n_workers = min(len(eligible_tfs), 2)
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_process_single_tf, tf_i): tf_i for tf_i in eligible_tfs}
+            for future in as_completed(futures):
+                try:
+                    _, tf_panels, audit_row = future.result()
+                    if audit_row is not None:
+                        extra.extend(tf_panels)
+                        audit_rows.append(audit_row)
+                except Exception as exc:
+                    _logger.warning("[MULTI-TF] tf=%s unhandled: %s", futures[future], exc)
+
     if audit_rows:
         import logging
         logger = logging.getLogger(__name__)
