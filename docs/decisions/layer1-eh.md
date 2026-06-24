@@ -132,3 +132,11 @@ ai_read_policy: when_related
 - **OPT-4: Prefit Overlap**: `prefit_layer1_model(deployment_registry 제외)` / `assemble_layer1_artifact`로 분할. evidence submit 직후 같은 executor에 `_prefit_layer1_from_globals` fork. background 실행 중 evidence IPC+snapshot+outer fold(34.7s)와 오버랩. 게이트 통과 시 `assemble_layer1_artifact(1ms)`로 registry 첨부. `cfg.l1_speculative_prefit_enabled`(기본=True). 실패 시 serial `fit_layer1_inference_artifact` fallback. **모든 TF에서 0.0000s 달성**(기존 20.49s 완전 제거).
 - **실측 (2025-06-24, 52 symbols, 4 TF)**: L1 Total 163.6s → ~123.1s(-25%). `l1_fit_inference_artifact` 20.49s→0.00s(100%↓). Peak RSS 8,782MB→~8,773MB(유지). Spec 목표(~70s 단축) 대비 ~58% 달성.
 - **Test Coverage**: 4 tests (OPT-0 S3, OPT-1 S2/S3, OPT-3 S1, OPT-4 S1) all PASS. L1: ruff/mypy clean. 1 pre-existing test unstable(`test_l1_nested_thread_env_vars_set` env var).
+
+## Phase 14: L1 HTF Bottleneck — candidate_panels_to_events Optimization (ADR-049, 6/24)
+- **A: Regime×Policy Pre-extraction**: `_convert_single_panel` regime 루프에서 array indexing을 policy당 21회에서 regime당 1회로 감소. regime_mask를 regime 루프 밖에서 1회 pre-extract 후 policy 루프에서 재사용. O(R×P) → O(R) indexing reduction.
+- **B: sort_values 제거**: `candidate_panels_to_events` 최종 `sort_values("datetime")` 제거. downstream(label_candidate_events, portfolio selection 등)이 entry_idx 기반 접근으로 정렬 불필요. O(N log N) full-table sort 제거.
+- **C: Numba _robust_zscore_numba**: `_cross_sectional_robust_zscore` 위임 함수로 `_robust_zscore_numba @njit` 도입. unique group별 argsort 단일 패스 walk, Python O(U×E) loop → Numba O(E log E). 각 group 내 median/MAD 계산을 numba-compiled 단일 패스로 통합.
+- **추가 변경**: `candidate_labels.py` `label_candidate_events` `precomputed_atr_2d` 파라미터 추가 + shape 검증. `bridge.py` ATR 캐시 1회 계산 후 HTF/BASE 재사용. signal_only fast-path → compute_rule_diagnostics skip + promotion 게이팅.
+- **실측 (synthetic benchmark, Numba warm 이후)**: candidate_panels_to_events throughput 409K rows/s (400×20). zscore 0.0003s/call (50×200). 실전 52 syms × 2000 bars 예상 events <0.5s (기존 28.27s 대비).
+- **Test Coverage**: 6 tests (Scn 1~6 ATR cache 3 + signal_only 3) + zscore equivalence/edge tests + schema/no-sort/regime-count validation. 56+28 regression PASS. L1: ruff/mypy clean.
