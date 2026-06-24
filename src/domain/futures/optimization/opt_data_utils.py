@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow.compute as pc
+import pyarrow.dataset as ds
 
 from src.core.optimization.opt_utils import compute_segment_merge_index
 from src.core.settings import FUTURES_DATA_DIR, LOG_DIR
@@ -530,6 +532,111 @@ def _append_stage_integrity(
     audit.append(rec)
 
 
+def _scan_enriched_dataset(
+    valid_paths: list[Path],
+    start_ms: int,
+    end_ms: int,
+    columns: list[str] | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Scan multiple enriched parquet files via Arrow Dataset (Pass-1, P2).
+
+    Uses pyarrow.dataset per-file to leverage C++ multithreaded row-group
+    predicate pushdown on the ``timestamp`` (int64 unix-ms) column.
+    GIL is released during Arrow I/O + decode → superior to pandas full-read.
+
+    Args:
+        valid_paths: Enriched parquet files that passed mtime cache validation.
+            Filename convention: ``{safe_sym}_{tf_l}_enriched.parquet``.
+        start_ms: Window start (unix-ms, int64).
+        end_ms: Window end (unix-ms, int64).
+        columns: Optional projection. None means all columns.
+
+    Returns:
+        Dict mapping ``"{safe_sym}_{tf_l}"`` key to a window-filtered DataFrame.
+        Files that lack a ``timestamp`` column or fail to scan are silently
+        skipped (per-file fallback handled by caller).
+
+    Time Complexity: O(W) where W = rows in window (Arrow skips non-overlapping
+        row-groups entirely via statistics). Space: O(W x C).
+    """
+    filt = (pc.field("timestamp") >= start_ms) & (pc.field("timestamp") <= end_ms)  # type: ignore[no-untyped-call]
+    result: dict[str, pd.DataFrame] = {}
+
+    for path in valid_paths:
+        # Key: strip "_enriched.parquet" suffix → "{safe_sym}_{tf_l}"
+        key = path.stem.removesuffix("_enriched")
+        try:
+            dataset = ds.dataset(str(path), format="parquet")  # type: ignore[no-untyped-call]
+            # Validate timestamp column present in schema
+            schema_names = dataset.schema.names
+            if "timestamp" not in schema_names:
+                _logger.debug("[scan] %s missing timestamp col — skipping pushdown", path.name)
+                continue
+            proj = columns if columns is not None else schema_names
+            # Intersect requested columns with available columns
+            proj = [c for c in proj if c in schema_names]
+            table = dataset.to_table(filter=filt, columns=proj, use_threads=True)
+            df = table.to_pandas()
+            # Ensure datetime column is tz-aware UTC (Arrow may return tz-naive)
+            if "datetime" in df.columns:
+                if not pd.api.types.is_datetime64_any_dtype(df["datetime"]):
+                    df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+                elif df["datetime"].dt.tz is None:
+                    df["datetime"] = df["datetime"].dt.tz_localize("UTC")
+            result[key] = df
+        except Exception as _e:
+            _logger.debug("[scan] %s Arrow scan failed (%s) — caller will fallback", path.name, _e)
+
+    return result
+
+
+def _prepare_funding_metrics(
+    sym: str,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None]:
+    """Load and prepare funding and metrics data for a symbol (P1-A lazy helper).
+
+    Extracted so that cache-hit paths with no exec_1m requirement can skip
+    expensive I/O entirely — caller uses ``_ensure_fm_loaded`` guard.
+
+    Args:
+        sym: Instrument symbol (e.g. "BTCUSDT").
+
+    Returns:
+        Tuple of (funding_df, funding_df_prepared, metrics_df_prepared).
+        Any element may be None if the corresponding data is absent.
+    """
+    funding_df = _safe_read_funding_parquet(sym)
+    funding_df_prepared: pd.DataFrame | None = None
+    metrics_df_prepared: pd.DataFrame | None = None
+
+    if funding_df is not None and not funding_df.empty:
+        exclude_fr = ["datetime", "symbol"]
+        cols_fr = [c for c in funding_df.columns if c not in exclude_fr]
+        funding_df_prepared = (
+            funding_df[cols_fr].sort_values("timestamp").reset_index(drop=True)
+        )
+
+    m_path = Path(FUTURES_DATA_DIR) / f"{sym.replace('/', '_')}_metrics.parquet"
+    if m_path.exists():
+        try:
+            m_df = pd.read_parquet(m_path)
+            if m_df is not None and not m_df.empty:
+                m_df = m_df.loc[:, ~m_df.columns.duplicated(keep="first")]
+                release_col = "available_at" if "available_at" in m_df.columns else "datetime"
+                m_df[release_col] = pd.to_datetime(m_df[release_col], utc=True, errors="coerce")
+                m_df = m_df.dropna(subset=[release_col]).sort_values(release_col)
+                m_df["metrics_release_ts"] = _to_unix_ms(m_df[release_col])
+                exclude_m = ["datetime", "create_time", "symbol", "available_at"]
+                cols_m = [c for c in m_df.columns if c not in exclude_m]
+                metrics_df_prepared = (
+                    m_df[cols_m].sort_values("metrics_release_ts").reset_index(drop=True)
+                )
+        except Exception:
+            _logger.warning("Failed to load metrics data for %s", sym)
+
+    return funding_df, funding_df_prepared, metrics_df_prepared
+
+
 def load_single_symbol_data(
     sym: str,
     tf: str,
@@ -552,114 +659,156 @@ def load_single_symbol_data(
         tfs_to_load = set(target_tfs) if target_tfs else {tf, "1d", "1h", "4h"}
         use_exec_1m = _should_load_exec_1m(load_exec_1m)
 
-        # [Optimization] Pre-load and prepare funding and metrics data once
-        # to avoid redundant I/O and processing per TF.
-        funding_df = None
-        funding_df_prepared = None
-        metrics_df_prepared = None
-        if not skip_metrics:
-            funding_df = _safe_read_funding_parquet(sym)
-            if funding_df is not None and not funding_df.empty:
-                exclude_fr = ["datetime", "symbol"]
-                cols_fr = [c for c in funding_df.columns if c not in exclude_fr]
-                funding_df_prepared = (
-                    funding_df[cols_fr].sort_values("timestamp").reset_index(drop=True)
-                )
+        # [P1-A] Lazy funding/metrics: initialize as None; load only on first
+        # cache-miss merge entry OR when exec_1m funding arrays are needed.
+        # cache-hit + no exec_1m → funding/metrics I/O skipped entirely.
+        funding_df: pd.DataFrame | None = None
+        funding_df_prepared: pd.DataFrame | None = None
+        metrics_df_prepared: pd.DataFrame | None = None
+        _fm_loaded = False  # guard: ensure _prepare_funding_metrics called at most once
 
-            m_path = Path(FUTURES_DATA_DIR) / f"{sym.replace('/', '_')}_metrics.parquet"
-            if m_path.exists():
-                try:
-                    m_df = pd.read_parquet(m_path)
-                    if m_df is not None and not m_df.empty:
-                        m_df = m_df.loc[:, ~m_df.columns.duplicated(keep="first")]
-                        release_col = "available_at" if "available_at" in m_df.columns else "datetime"
-                        m_df[release_col] = pd.to_datetime(m_df[release_col], utc=True, errors="coerce")
-                        m_df = m_df.dropna(subset=[release_col]).sort_values(release_col)
-                        m_df["metrics_release_ts"] = _to_unix_ms(m_df[release_col])
-                        exclude_m = ["datetime", "create_time", "symbol", "available_at"]
-                        cols_m = [c for c in m_df.columns if c not in exclude_m]
-                        metrics_df_prepared = (
-                            m_df[cols_m].sort_values("metrics_release_ts").reset_index(drop=True)
-                        )
-                except Exception:
-                    _logger.warning("Failed to load metrics data for %s", sym)
+        def _ensure_fm_loaded() -> None:
+            nonlocal funding_df, funding_df_prepared, metrics_df_prepared, _fm_loaded
+            if _fm_loaded or skip_metrics:
+                return
+            funding_df, funding_df_prepared, metrics_df_prepared = _prepare_funding_metrics(sym)
+            _fm_loaded = True
 
         for tf_l in tfs_to_load:
-            raw_df = collector.collect_and_save(
-                sym, tf_l, fetch_start, end, fetch_network=False
-            )
-            if raw_df is None or raw_df.empty:
-                insufficient = True
-                break
-            _append_stage_integrity(
-                integrity_audit,
-                symbol=sym,
-                timeframe=tf_l,
-                stage="raw",
-                df=raw_df,
-            )
-
-            if "datetime" not in raw_df.columns:
-                raw_df = raw_df.reset_index()
-                if "datetime" not in raw_df.columns and len(raw_df.columns) > 0:
-                    raw_df = raw_df.rename(columns={str(raw_df.columns[0]): "datetime"})
-
-            try:
-                # OPT-1/OPT-2: Skip copy when no merge needed; compute _to_unix_ms once
-                needs_funding = funding_df_prepared is not None and not funding_df_prepared.empty
-                needs_metrics = metrics_df_prepared is not None and not metrics_df_prepared.empty
-                needs_merge = needs_funding or needs_metrics
-
-                df = raw_df.copy() if needs_merge else raw_df
-                if needs_merge:
-                    df["timestamp"] = _to_unix_ms(df["datetime"])
-                    if not df["timestamp"].is_monotonic_increasing:
-                        df = df.sort_values("timestamp")
-                    if needs_funding:
-                        df = pd.merge_asof(
-                            df,
-                            funding_df_prepared,
-                            on="timestamp",
-                            direction="backward",
+            safe_sym = sym.replace("/", "_")
+            req_start_dt = pd.Timestamp(fetch_start, tz="UTC")
+            req_end_dt = pd.Timestamp(end, tz="UTC")
+            from_cache = False
+            enriched_path = FUTURES_DATA_DIR / f"{safe_sym}_{tf_l}_enriched.parquet"
+            if enriched_path.exists():
+                deps = [
+                    FUTURES_DATA_DIR / f"{safe_sym}_{tf_l}.parquet",
+                    FUTURES_DATA_DIR / f"{safe_sym}_funding.parquet",
+                    FUTURES_DATA_DIR / f"{safe_sym}_metrics.parquet",
+                ]
+                enriched_mtime = enriched_path.stat().st_mtime
+                if all(not dep.exists() or dep.stat().st_mtime <= enriched_mtime for dep in deps):
+                    # [P1-B] predicate pushdown via row-group statistics.
+                    # timestamp column is int64 unix-ms, sorted at write time (wide_df.to_parquet).
+                    # filters skip row-groups outside [start_ms, end_ms] → reduced decode.
+                    # Fallback: full-read + mask when filters raises (e.g. legacy pyarrow engine).
+                    start_ms = int(req_start_dt.value // 1_000_000)
+                    end_ms = int(req_end_dt.value // 1_000_000)
+                    try:
+                        df = pd.read_parquet(
+                            enriched_path,
+                            filters=[
+                                ("timestamp", ">=", start_ms),
+                                ("timestamp", "<=", end_ms),
+                            ],
                         )
-                    if needs_metrics:
-                        df = pd.merge_asof(
-                            df,
-                            metrics_df_prepared,
-                            left_on="timestamp",
-                            right_on="metrics_release_ts",
-                            direction="backward",
-                            tolerance=6 * 60 * 60 * 1000,
-                            allow_exact_matches=True,
+                        # Row-group boundary precision: trim any residual rows outside window.
+                        boundary_mask = (df["datetime"] >= req_start_dt) & (
+                            df["datetime"] <= req_end_dt
                         )
+                        df = df.loc[boundary_mask]
+                    except Exception as _e:
+                        _logger.debug(
+                            "[%s] %s pushdown failed (%s), falling back to full-read",
+                            sym,
+                            tf_l,
+                            _e,
+                        )
+                        df_full = pd.read_parquet(enriched_path)
+                        fallback_mask = (df_full["datetime"] >= req_start_dt) & (
+                            df_full["datetime"] <= req_end_dt
+                        )
+                        df = df_full.loc[fallback_mask].copy()
+                    if df.empty:
+                        insufficient = True
+                        break
+                    _append_stage_integrity(integrity_audit, symbol=sym, timeframe=tf_l, stage="raw", df=df)
+                    _append_stage_integrity(integrity_audit, symbol=sym, timeframe=tf_l, stage="merged", df=df)
+                    from_cache = True
+
+            if not from_cache:
+                # cache-miss: funding/metrics needed for merge → load now (lazy)
+                _ensure_fm_loaded()
+                raw_df = collector.collect_and_save(
+                    sym, tf_l, fetch_start, end, fetch_network=False
+                )
+                if raw_df is None or raw_df.empty:
+                    insufficient = True
+                    break
                 _append_stage_integrity(
                     integrity_audit,
                     symbol=sym,
                     timeframe=tf_l,
-                    stage="merged",
-                    df=df,
+                    stage="raw",
+                    df=raw_df,
                 )
 
-            except Exception as e:
-                _logger.error("[%s] Merge/Enrich failed: %s", sym, e)
-                insufficient = True
-                break
+                if "datetime" not in raw_df.columns:
+                    raw_df = raw_df.reset_index()
+                    if "datetime" not in raw_df.columns and len(raw_df.columns) > 0:
+                        raw_df = raw_df.rename(columns={str(raw_df.columns[0]): "datetime"})
 
-            if df is None or df.empty or "datetime" not in df.columns:
-                insufficient = True
-                break
+                try:
+                    needs_funding = funding_df_prepared is not None and not funding_df_prepared.empty
+                    needs_metrics = metrics_df_prepared is not None and not metrics_df_prepared.empty
+                    needs_merge = needs_funding or needs_metrics
 
-            df.reset_index(drop=True, inplace=True)
-            # [Optimization] Avoid redundant to_datetime if already normalized by collector
-            if not pd.api.types.is_datetime64_any_dtype(df["datetime"]):
-                df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+                    df = raw_df.copy() if needs_merge else raw_df
+                    if needs_merge:
+                        df["timestamp"] = _to_unix_ms(df["datetime"])
+                        if not df["timestamp"].is_monotonic_increasing:
+                            df = df.sort_values("timestamp")
+                        if needs_funding:
+                            df = pd.merge_asof(df, funding_df_prepared, on="timestamp", direction="backward")
+                        if needs_metrics:
+                            df = pd.merge_asof(df, metrics_df_prepared, left_on="timestamp",
+                                              right_on="metrics_release_ts", direction="backward",
+                                              tolerance=6 * 60 * 60 * 1000, allow_exact_matches=True)
+                    _append_stage_integrity(integrity_audit, symbol=sym, timeframe=tf_l, stage="merged", df=df)
+                except Exception as e:
+                    _logger.error("[%s] Merge/Enrich failed: %s", sym, e)
+                    insufficient = True
+                    break
 
-            # Pre-convert meta columns to numeric to avoid alignment runtime overhead
-            for _mc in ("coverage_60d", "last_60d_coverage", "vol_30d", "friction_score", 
-                        "alpha_capacity_score", "diversification_score", "tradeable_score", 
-                        "cluster_id", "beta_vs_market", "cluster_size", "anchor_cluster_member"):
-                if _mc in df.columns:
-                    df[_mc] = pd.to_numeric(df[_mc], errors="coerce")
+                if df is None or df.empty or "datetime" not in df.columns:
+                    insufficient = True
+                    break
+
+                if not pd.api.types.is_datetime64_any_dtype(df["datetime"]):
+                    df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+
+                for _mc in ("coverage_60d", "last_60d_coverage", "vol_30d", "friction_score",
+                            "alpha_capacity_score", "diversification_score", "tradeable_score",
+                            "cluster_id", "beta_vs_market", "cluster_size", "anchor_cluster_member"):
+                    if _mc in df.columns:
+                        df[_mc] = pd.to_numeric(df[_mc], errors="coerce")
+
+                # Save enriched cache (full date range) for future runs
+                if not enriched_path.exists():
+                    try:
+                        wide_df = collector.collect_and_save(sym, tf_l, "1970-01-01", "2099-12-31", fetch_network=False)
+                        if wide_df is not None and not wide_df.empty:
+                            if "datetime" not in wide_df.columns:
+                                wide_df = wide_df.reset_index()
+                            if not pd.api.types.is_datetime64_any_dtype(wide_df["datetime"]):
+                                wide_df["datetime"] = pd.to_datetime(wide_df["datetime"], utc=True)
+                            wide_df["timestamp"] = _to_unix_ms(wide_df["datetime"])
+                            if needs_funding:
+                                wide_df = pd.merge_asof(wide_df.sort_values("timestamp"), funding_df_prepared,
+                                                        on="timestamp", direction="backward")
+                            if needs_metrics:
+                                wide_df = pd.merge_asof(wide_df.sort_values("timestamp"), metrics_df_prepared,
+                                                        left_on="timestamp", right_on="metrics_release_ts",
+                                                        direction="backward", tolerance=6*60*60*1000,
+                                                        allow_exact_matches=True)
+                            for _mc in ("coverage_60d", "last_60d_coverage", "vol_30d", "friction_score",
+                                        "alpha_capacity_score", "diversification_score", "tradeable_score",
+                                        "cluster_id", "beta_vs_market", "cluster_size", "anchor_cluster_member"):
+                                if _mc in wide_df.columns:
+                                    wide_df[_mc] = pd.to_numeric(wide_df[_mc], errors="coerce")
+                            wide_df.to_parquet(enriched_path, index=False)
+                    except Exception as _ec:
+                        _logger.debug("[%s] Failed to save enriched cache: %s", sym, _ec)
 
             is_start_dt = pd.Timestamp(start, tz="UTC")
             is_end_dt = pd.Timestamp(is_end, tz="UTC")
@@ -727,8 +876,8 @@ def load_single_symbol_data(
                         else len(exec_1m)
                     )
 
-                    if funding_df is None and not skip_metrics:
-                        funding_df = _safe_read_funding_parquet(sym)
+                    # exec_1m funding arrays need funding_df → lazy load if not yet loaded
+                    _ensure_fm_loaded()
                     mask_1m, rate_1m = _build_funding_event_arrays_1m(exec_1m, funding_df)
                     if mask_1m is not None and rate_1m is not None:
                         is_exec_len = len(temp_is["exec_1m"])
@@ -766,7 +915,16 @@ def load_futures_data_maps_for_symbols(
     requested_symbols_count: int | None = None,
     scope_name: str = "unknown",
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], list[str]]:
-    """Load data for multiple symbols in parallel and inject momentum ranks."""
+    """Load data for multiple symbols with 2-pass Arrow scan (P2).
+
+    Pass-1 (C++ parallel I/O, GIL-free):
+        Collect mtime-valid enriched paths → ``_scan_enriched_dataset`` →
+        Arrow row-group predicate pushdown on ``timestamp`` column.
+
+    Pass-2 (per-symbol Python post-processing):
+        Arrow DataFrame → IS/OOS split → merge_idx → coverage.
+        cache-miss symbols fall back to ``load_single_symbol_data`` via ThreadPool.
+    """
     data_maps: dict[str, dict[str, Any]] = {}
     oos_data_maps: dict[str, dict[str, Any]] = {}
     valid_symbols: list[str] = []
@@ -774,31 +932,173 @@ def load_futures_data_maps_for_symbols(
     # [Fix] Filter out non-ASCII symbols before processing
     symbols = [s for s in symbols if all(ord(c) < 128 for c in s)]
 
-    # [Optimization] Use ThreadPoolExecutor instead of ProcessPoolExecutor.
-    # ProcessPoolExecutor introduces massive serialization (pickle) overhead when passing large DataFrame maps.
-    # Since I/O-bound parquet reading and pandas underlying C extension functions release the GIL,
-    # ThreadPool is superior.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 4) * 2)) as executor:
-        futures = [
-            executor.submit(
-                load_single_symbol_data,
-                sym,
-                tf,
-                fetch_start,
-                start,
-                is_end,
-                end,
-                skip_metrics,
-                target_tfs,
-                load_exec_1m,
-            )
-            for sym in symbols
+    tfs_to_load: set[str] = set(target_tfs) if target_tfs else {tf, "1d", "1h", "4h"}
+    req_start_dt = pd.Timestamp(fetch_start, tz="UTC")
+    req_end_dt = pd.Timestamp(end, tz="UTC")
+    start_ms = int(req_start_dt.value // 1_000_000)
+    end_ms = int(req_end_dt.value // 1_000_000)
+    use_exec_1m = _should_load_exec_1m(load_exec_1m)
+
+    # ── Pass-1: classify cache-valid vs. cache-miss ──────────────────────────
+    # valid_enriched: (sym, tf_l) → enriched_path (all TFs must be valid for sym)
+    valid_enriched: dict[str, dict[str, Path]] = {}   # sym → {tf_l: path}
+    cache_miss_syms: list[str] = []
+
+    for sym in symbols:
+        safe_sym = sym.replace("/", "_")
+        sym_paths: dict[str, Path] = {}
+        all_cache_hit = True
+        for tf_l in tfs_to_load:
+            enriched_path = FUTURES_DATA_DIR / f"{safe_sym}_{tf_l}_enriched.parquet"
+            if enriched_path.exists():
+                deps = [
+                    FUTURES_DATA_DIR / f"{safe_sym}_{tf_l}.parquet",
+                    FUTURES_DATA_DIR / f"{safe_sym}_funding.parquet",
+                    FUTURES_DATA_DIR / f"{safe_sym}_metrics.parquet",
+                ]
+                enriched_mtime = enriched_path.stat().st_mtime
+                if all(not d.exists() or d.stat().st_mtime <= enriched_mtime for d in deps):
+                    sym_paths[tf_l] = enriched_path
+                    continue
+            all_cache_hit = False
+            break
+        if all_cache_hit and len(sym_paths) == len(tfs_to_load):
+            valid_enriched[sym] = sym_paths
+        else:
+            cache_miss_syms.append(sym)
+
+    # exec_1m opt-out: Arrow fast-path does not handle exec_1m / funding arrays.
+    # Route all valid_enriched symbols to ThreadPool fallback when exec_1m is required.
+    if use_exec_1m and valid_enriched:
+        _logger.debug(
+            "exec_1m required — routing all %d symbols to ThreadPool fallback",
+            len(valid_enriched),
+        )
+        cache_miss_syms.extend(list(valid_enriched.keys()))
+        valid_enriched.clear()
+
+    # Pass-1: Arrow scan per (sym, tf_l) — C++ multithreaded row-group decode
+    # dict key: "{safe_sym}_{tf_l}" (matches _scan_enriched_dataset convention)
+    arrow_frames: dict[str, pd.DataFrame] = {}
+    if valid_enriched:
+        all_paths = [
+            path
+            for sym_paths in valid_enriched.values()
+            for path in sym_paths.values()
         ]
-        for f in concurrent.futures.as_completed(futures):
-            sym, t_is, t_oos, insufficient = f.result()
-            if not insufficient and t_is and t_oos:
-                data_maps[sym], oos_data_maps[sym] = t_is, t_oos
-                valid_symbols.append(sym)
+        arrow_frames = _scan_enriched_dataset(all_paths, start_ms, end_ms)
+
+    # ── Pass-2: per-symbol post-processing (Python-bound) ────────────────────
+    is_start_dt = pd.Timestamp(start, tz="UTC")
+    is_end_dt = pd.Timestamp(is_end, tz="UTC")
+    min_bars_map = {"1h": 2000, "4h": 500, "1d": 300}
+
+    for sym, sym_paths in valid_enriched.items():
+        try:
+            temp_is: dict[str, Any] = {}
+            temp_oos: dict[str, Any] = {}
+            integrity_audit: list[dict[str, Any]] = []
+            insufficient = False
+            safe_sym = sym.replace("/", "_")
+
+            for tf_l in sym_paths:
+                key = f"{safe_sym}_{tf_l}"
+                raw_df = arrow_frames.get(key)
+                if raw_df is None or raw_df.empty:
+                    # Arrow scan skipped (missing timestamp col or error) → fallback
+                    _logger.debug("[%s] %s not in arrow_frames — routing to fallback", sym, tf_l)
+                    insufficient = True
+                    break
+
+                df = raw_df
+                # Ensure datetime is UTC-aware after Arrow→pandas conversion
+                if "datetime" not in df.columns:
+                    insufficient = True
+                    break
+                if not pd.api.types.is_datetime64_any_dtype(df["datetime"]):
+                    df = df.copy()
+                    df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+                elif df["datetime"].dt.tz is None:
+                    df = df.copy()
+                    df["datetime"] = df["datetime"].dt.tz_localize("UTC")
+
+                _append_stage_integrity(integrity_audit, symbol=sym, timeframe=tf_l, stage="raw", df=df)
+                _append_stage_integrity(integrity_audit, symbol=sym, timeframe=tf_l, stage="merged", df=df)
+
+                is_mask = df["datetime"] < is_end_dt
+                is_end_idx = int(is_mask.to_numpy().sum())
+                min_bars_threshold = min_bars_map.get(tf_l, 300)
+                if is_end_idx < min_bars_threshold:
+                    _logger.debug(
+                        "[%s] %s history too short (%d < %d)", sym, tf_l, is_end_idx, min_bars_threshold
+                    )
+                    insufficient = True
+                    break
+
+                temp_is[tf_l] = df.iloc[:is_end_idx].copy()
+                mask_is_start = temp_is[tf_l]["datetime"] >= is_start_dt
+                temp_is[f"is_start_idx_{tf_l}"] = (
+                    int(mask_is_start.to_numpy().argmax()) if mask_is_start.any() else 0
+                )
+                temp_oos[tf_l] = df
+                mask_oos = df["datetime"] >= is_end_dt
+                temp_oos[f"oos_start_idx_{tf_l}"] = (
+                    int(mask_oos.to_numpy().argmax()) if mask_oos.any() else len(df)
+                )
+
+            if insufficient:
+                # Arrow pass failed for this sym → route to load_single_symbol_data
+                cache_miss_syms.append(sym)
+                continue
+
+            # merge_idx requires both tf and "1d" frames
+            if tf not in temp_oos or "1d" not in temp_oos:
+                cache_miss_syms.append(sym)
+                continue
+
+            temp_is[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_is[tf], temp_is["1d"])
+            temp_oos[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_oos[tf], temp_oos["1d"])
+            temp_is["integrity_audit"] = integrity_audit
+            temp_oos["integrity_audit"] = integrity_audit
+            tf_df = temp_oos.get(tf)
+            if isinstance(tf_df, pd.DataFrame) and not tf_df.empty:
+                temp_oos["feature_group_coverage"] = _feature_group_coverage(tf_df, tf_label=tf)
+
+            data_maps[sym] = temp_is
+            oos_data_maps[sym] = temp_oos
+            valid_symbols.append(sym)
+
+        except Exception as _exc:
+            _logger.debug("[%s] Pass-2 failure (%s) — routing to fallback", sym, _exc)
+            cache_miss_syms.append(sym)
+
+    # ── cache-miss fallback: original ThreadPool path ─────────────────────────
+    if cache_miss_syms:
+        _logger.debug("cache-miss fallback: %d symbols", len(cache_miss_syms))
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(32, (os.cpu_count() or 4) * 2)
+        ) as executor:
+            futures_map = [
+                executor.submit(
+                    load_single_symbol_data,
+                    sym,
+                    tf,
+                    fetch_start,
+                    start,
+                    is_end,
+                    end,
+                    skip_metrics,
+                    target_tfs,
+                    load_exec_1m,
+                )
+                for sym in cache_miss_syms
+            ]
+            for f in concurrent.futures.as_completed(futures_map):
+                sym, t_is, t_oos, insufficient = f.result()
+                if not insufficient and t_is and t_oos:
+                    data_maps[sym] = t_is
+                    oos_data_maps[sym] = t_oos
+                    valid_symbols.append(sym)
 
     if len(valid_symbols) > 1:
         inject_cs_momentum_ranks(data_maps, valid_symbols, tf)
