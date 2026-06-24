@@ -1025,8 +1025,9 @@ def load_futures_data_maps_for_symbols(
                 _append_stage_integrity(integrity_audit, symbol=sym, timeframe=tf_l, stage="raw", df=df)
                 _append_stage_integrity(integrity_audit, symbol=sym, timeframe=tf_l, stage="merged", df=df)
 
-                is_mask = df["datetime"] < is_end_dt
-                is_end_idx = int(is_mask.to_numpy().sum())
+                dt_ns = df["datetime"].values.view("i8")
+                is_end_dt_ns = is_end_dt.value
+                is_end_idx = int(np.searchsorted(dt_ns, is_end_dt_ns, side="left"))
                 min_bars_threshold = min_bars_map.get(tf_l, 300)
                 if is_end_idx < min_bars_threshold:
                     _logger.debug(
@@ -1036,15 +1037,12 @@ def load_futures_data_maps_for_symbols(
                     break
 
                 temp_is[tf_l] = df.iloc[:is_end_idx].copy()
-                mask_is_start = temp_is[tf_l]["datetime"] >= is_start_dt
-                temp_is[f"is_start_idx_{tf_l}"] = (
-                    int(mask_is_start.to_numpy().argmax()) if mask_is_start.any() else 0
-                )
+                is_start_dt_ns = is_start_dt.value
+                is_start_idx = int(np.searchsorted(dt_ns[:is_end_idx], is_start_dt_ns, side="left"))
+                temp_is[f"is_start_idx_{tf_l}"] = is_start_idx
                 temp_oos[tf_l] = df
-                mask_oos = df["datetime"] >= is_end_dt
-                temp_oos[f"oos_start_idx_{tf_l}"] = (
-                    int(mask_oos.to_numpy().argmax()) if mask_oos.any() else len(df)
-                )
+                oos_start_idx = is_end_idx
+                temp_oos[f"oos_start_idx_{tf_l}"] = oos_start_idx
 
             if insufficient:
                 # Arrow pass failed for this sym → route to load_single_symbol_data
