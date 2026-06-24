@@ -89,7 +89,7 @@ graph TD
 | Module | Role |
 |--------|------|
 | `tiered_workflow/pipeline.py` | Implements `run_l3_holdout`, defining the dummy fold and calling the AWF sim. |
-| `tiered_workflow/awf_sim.py` | Shared simulation loop (`_run_awf_simulation`) executed with frozen L2 params. |
+| `tiered_workflow/awf_sim.py` | Shared simulation loop (`_run_awf_simulation`) executed with frozen L2 params. Outputs `fold_attributions` (`Layer2FoldAttribution` tuple) per-fold diagnostics (realized price/funding/cost, expected net, alpha gap, throttle/exposure stats, below-cost drops, netting events) when `l2_diag_attribution_enabled=True`. |
 | `tiered_workflow/dataclasses.py`| Defines `Layer3Result` (CAGR, MDD, Sharpe, Sortino, MAR, total_return, equity_multiple, n_trades, cvar95, avg_gross_exposure, deploy_leverage, gate_passed, blocker_reason). |
 | `optimization/candidate_selector.py` | Implements `check_stability_layer3` for multi-seed validation. |
 | `optimization/final_evaluator.py` | Orchestrates the final champion evaluation, invoking Layer 3 stability checks. |
