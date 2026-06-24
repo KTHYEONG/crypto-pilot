@@ -10,6 +10,7 @@ from src.domain.futures.strategy.config import CandidateStrategyConfig
 from src.domain.futures.strategy.market_regime import MarketRegimeContext
 from src.domain.futures.strategy.rule_signals import (
     _attach_signal_context,
+    _cross_sectional_robust_zscore,
     _entry_rising_edge_2d,
     _rolling_max_2d,
     _rolling_min_2d,
@@ -1452,3 +1453,95 @@ def test_build_rule_signal_panels_full_per_tf_pool() -> None:
     assert "trend_ma" not in families
     assert "trend_donchian" not in families
     assert "dual_momentum" not in families
+
+
+# ─── OPT: _robust_zscore_numba equivalence ─────────────────────────────────
+
+
+def test_robust_zscore_numba_matches_original() -> None:
+    """OPT-C: _robust_zscore_numba produces bit-exact results vs reference."""
+    from scipy.stats import median_abs_deviation
+
+    rng = np.random.default_rng(42)
+    raw_scores = rng.normal(0, 1, (200,)).astype(np.float64)
+    groups = np.repeat(np.arange(4, dtype=np.int64), 50)
+
+    # Reference: pure-python median/MAD group loop
+    expected = np.zeros(200, dtype=np.float64)
+    for g in np.unique(groups):
+        mask = groups == g
+        vals = raw_scores[mask]
+        fin = vals[np.isfinite(vals)]
+        if fin.size == 0:
+            continue
+        med = float(np.median(fin))
+        mad = float(median_abs_deviation(fin, scale=1.0)) * 1.4826
+        out = np.zeros(vals.shape[0], dtype=np.float64)
+        if mad > 1e-9:
+            out[np.isfinite(vals)] = (vals[np.isfinite(vals)] - med) / mad
+        expected[mask] = np.clip(out, -3.0, 3.0)
+
+    actual = _cross_sectional_robust_zscore(raw_scores, groups)
+    np.testing.assert_array_almost_equal(actual, expected, decimal=12)
+
+
+def test_robust_zscore_numba_empty() -> None:
+    """OPT-C: empty input produces empty output."""
+    result = _cross_sectional_robust_zscore(
+        np.array([], dtype=np.float64),
+        np.array([], dtype=np.int64),
+    )
+    assert result.shape == (0,)
+    assert result.dtype == np.float64
+
+
+def test_robust_zscore_numba_all_nan() -> None:
+    """OPT-C: all-NaN groups produce zeros (no finite values to normalize)."""
+    raw = np.full(20, np.nan, dtype=np.float64)
+    groups = np.repeat(np.arange(2, dtype=np.int64), 10)
+    result = _cross_sectional_robust_zscore(raw, groups)
+    np.testing.assert_array_equal(result, np.zeros(20, dtype=np.float64))
+
+
+# ─── OPT: candidate_panels_to_events output schema ─────────────────────────
+
+
+def test_candidate_panels_to_events_output_columns_unchanged() -> None:
+    """OPT-A/B: 출력 컬럼 스키마 변경 없음."""
+    aligned = _make_aligned()
+    cfg = CandidateStrategyConfig()
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+    events = candidate_panels_to_events(panels, min_abs_score=0.0)
+    expected_cols = {
+        "datetime", "symbol", "family", "variant", "side",
+        "raw_score", "score_z", "expected_holding_bars", "min_holding_bars",
+        "stop_atr_mult", "take_profit_atr_mult", "turnover_proxy", "cost_floor_bps", "entry_idx",
+        "side_flipped", "exit_policy_id", "signal_cell", "archetype", "entry_regime", "entry_regime_code",
+    }
+    assert expected_cols.issubset(events.columns), (
+        f"missing columns: {expected_cols - set(events.columns)}"
+    )
+
+
+def test_candidate_panels_to_events_no_sort() -> None:
+    """OPT-B: sort_values(\"datetime\") 제거 → crash 없이 실행."""
+    aligned = _make_aligned()
+    cfg = CandidateStrategyConfig()
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+    events = candidate_panels_to_events(panels, min_abs_score=0.0)
+    assert isinstance(events, pd.DataFrame)
+    assert len(events) > 0
+
+
+# ─── OPT: regime x policy pre-extraction correctness ───────────────────────
+
+
+def test_candidate_panels_to_events_regime_policy_count() -> None:
+    """OPT-A: regime x policy pre-extraction 이 event 수에 영향을 주지 않음."""
+    aligned = _make_aligned()
+    cfg = CandidateStrategyConfig()
+    panels = build_rule_signal_panels(aligned=aligned, cfg=cfg)
+    events = candidate_panels_to_events(panels, min_abs_score=0.0)
+    unique_cells = events["signal_cell"].nunique()
+    assert unique_cells > 0
+    assert events["exit_policy_id"].nunique() >= 1

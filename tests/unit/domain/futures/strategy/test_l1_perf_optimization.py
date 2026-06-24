@@ -1,6 +1,7 @@
 """L1 PERF 최적화 검증: P1 캐시워밍·P3 진단게이팅·P4 로깅·P5 타이머분리."""
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -25,6 +26,9 @@ def aligned_mock() -> MagicMock:
     rng = np.random.default_rng(42)
     aligned = MagicMock()
     aligned.close_2d = rng.uniform(100, 200, (30, 2)).astype(np.float64)
+    aligned.open_2d = rng.uniform(99, 201, (30, 2)).astype(np.float64)
+    aligned.high_2d = np.maximum(aligned.close_2d, rng.uniform(100, 210, (30, 2))).astype(np.float64)
+    aligned.low_2d = np.minimum(aligned.close_2d, rng.uniform(90, 100, (30, 2))).astype(np.float64)
     aligned.volume_2d = rng.uniform(1e6, 1e8, (30, 2)).astype(np.float64)
     aligned.funding_2d = rng.uniform(-0.001, 0.001, (30, 2)).astype(np.float64)
     aligned.symbols = ("BTCUSDT", "ETHUSDT")
@@ -34,6 +38,7 @@ def aligned_mock() -> MagicMock:
     )
     aligned.beta_vs_market_1d = None
     aligned.active_mask = None
+    aligned.execution_cost_bps_2d = np.zeros((30, 2), dtype=np.float64)
     return aligned
 
 
@@ -1001,3 +1006,335 @@ def test_prefit_artifact_equivalence(
     assert assembled.l1_fit_end_idx == full.l1_fit_end_idx
     # Registry is present in both
     assert assembled.deployment_registry is full.deployment_registry is registry
+
+
+# ─── HTF 병목 Fix 1: ATR 캐시 재사용 ─────────────────────────────────────────
+
+
+def _make_label_events(n: int = 5) -> pd.DataFrame:
+    return pd.DataFrame({
+        "symbol": ["BTCUSDT"] * n,
+        "side": [1] * n,
+        "entry_idx": list(range(10, 10 + n)),
+        "expected_holding_bars": [12] * n,
+        "stop_atr_mult": [1.0] * n,
+        "take_profit_atr_mult": [2.0] * n,
+    })
+
+
+def _make_label_cfg() -> MagicMock:
+    cfg = MagicMock()
+    cfg.maker_fee_bps = 2.0
+    cfg.taker_fee_bps = 5.0
+    cfg.maker_ratio = 0.75
+    cfg.slippage_bps = 1.0
+    cfg.impact_coeff_bps = 0.0
+    cfg.cost_stress_multiplier = 1.5
+    return cfg
+
+
+def test_label_candidate_events_atr_cache_skips_computation(aligned_mock: Any) -> None:
+    """Scenario 1: precomputed_atr_2d 제공 시 _compute_yang_zhang_vol_2d 호출 없음."""
+    from src.domain.futures.strategy.candidate_labels import (
+        _compute_yang_zhang_vol_2d,
+        label_candidate_events,
+    )
+
+    events = _make_label_events()
+    cfg = _make_label_cfg()
+    precomputed = _compute_yang_zhang_vol_2d(aligned_mock)
+
+    with patch(
+        "src.domain.futures.strategy.candidate_labels._compute_yang_zhang_vol_2d",
+        wraps=_compute_yang_zhang_vol_2d,
+    ) as mock_atr:
+        result = label_candidate_events(
+            events=events, aligned=aligned_mock, cfg=cfg,
+            precomputed_atr_2d=precomputed,
+        )
+
+    mock_atr.assert_not_called()
+    assert isinstance(result, pd.DataFrame)
+    assert not result.empty
+    expected_cols = {"symbol", "side", "entry_idx", "expected_holding_bars",
+                     "stop_atr_mult", "take_profit_atr_mult"}
+    assert expected_cols.issubset(result.columns)
+
+
+def test_label_candidate_events_atr_default_computes_once(aligned_mock: Any) -> None:
+    """Scenario 2: precomputed_atr_2d=None → _compute_yang_zhang_vol_2d 1회 호출."""
+    from src.domain.futures.strategy.candidate_labels import (
+        _compute_yang_zhang_vol_2d,
+        label_candidate_events,
+    )
+
+    events = _make_label_events()
+    cfg = _make_label_cfg()
+
+    with patch(
+        "src.domain.futures.strategy.candidate_labels._compute_yang_zhang_vol_2d",
+        wraps=_compute_yang_zhang_vol_2d,
+    ) as mock_atr:
+        result = label_candidate_events(
+            events=events, aligned=aligned_mock, cfg=cfg,
+        )
+
+    mock_atr.assert_called_once()
+    assert isinstance(result, pd.DataFrame)
+
+
+def test_label_candidate_events_atr_shape_mismatch_raises(aligned_mock: Any) -> None:
+    """Scenario 3: precomputed_atr_2d 형상 불일치 → ValueError."""
+    from src.domain.futures.strategy.candidate_labels import label_candidate_events
+
+    events = _make_label_events()
+    cfg = _make_label_cfg()
+    wrong_shape = np.ones((100, 5), dtype=np.float64)
+
+    with pytest.raises(ValueError, match="precomputed_atr_2d shape"):
+        label_candidate_events(
+            events=events, aligned=aligned_mock, cfg=cfg,
+            precomputed_atr_2d=wrong_shape,
+        )
+
+
+# ─── HTF 병목 Fix 2: signal_only fast-path ──────────────────────────────────
+
+
+@pytest.fixture
+def signal_only_cfg() -> Any:
+    from src.domain.futures.strategy.config import CandidateStrategyConfig
+    return CandidateStrategyConfig(
+        signal_only=True,
+        promotion_filter_enabled=True,
+        wf_enabled=False,
+        wf_scheme="single",
+        min_candidate_obs=3,
+        ml_fit_fraction=0.5,
+        ml_calibration_fraction=0.2,
+        max_holding_bars=5,
+        purge_bars=0,
+        embargo_bars=0,
+        side_flip_candidate_variants=(),
+    )
+
+
+@pytest.fixture
+def non_signal_only_cfg() -> Any:
+    from src.domain.futures.strategy.config import CandidateStrategyConfig
+    return CandidateStrategyConfig(
+        signal_only=False,
+        promotion_filter_enabled=True,
+        wf_enabled=False,
+        wf_scheme="single",
+        min_candidate_obs=3,
+        ml_fit_fraction=0.5,
+        ml_calibration_fraction=0.2,
+        max_holding_bars=5,
+        purge_bars=0,
+        embargo_bars=0,
+        side_flip_candidate_variants=(),
+    )
+
+
+def _make_strategy_cfg(candidate_cfg: Any) -> Any:
+    from src.domain.futures.strategy.config import StrategyConfig
+    return StrategyConfig(candidate=candidate_cfg)
+
+
+def test_run_candidate_signal_only_skips_diagnostics(
+    aligned_mock: Any, signal_only_cfg: MagicMock, caplog: Any
+) -> None:
+    """Scenario 4: signal_only=True → compute_rule_diagnostics 호출 0회, 빈 diag."""
+    from src.domain.futures.strategy_runtime.bridge import (
+        run_candidate_strategy_for_universe,
+    )
+
+    strategy_cfg = _make_strategy_cfg(signal_only_cfg)
+
+    non_empty_events = pd.DataFrame({
+        "symbol": ["BTCUSDT"],
+        "side": [1],
+        "entry_idx": [10],
+        "expected_holding_bars": [12],
+        "stop_atr_mult": [1.0],
+        "take_profit_atr_mult": [2.0],
+    })
+    with (
+        patch(
+            "src.domain.futures.strategy.rule_diagnostics.compute_rule_diagnostics",
+            autospec=True,
+        ) as mock_diag,
+        patch(
+            "src.domain.futures.strategy_runtime.bridge.verify_data_integrity",
+            return_value={},
+        ),
+        patch(
+            "src.domain.futures.strategy.candidate_portfolio.build_candidate_alpha_panel",
+        ),
+        patch(
+            "src.domain.futures.strategy.common.alignment.align_data_maps",
+            return_value=aligned_mock,
+        ),
+        patch(
+            "src.domain.futures.strategy.rule_signals.candidate_panels_to_events",
+            return_value=non_empty_events,
+        ),
+        patch(
+            "src.domain.futures.strategy_runtime.bridge.build_multi_tf_panels",
+            return_value=(),
+        ),
+        patch(
+            "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
+            return_value=(),
+        ),
+        caplog.at_level(logging.DEBUG),
+    ):
+        result = run_candidate_strategy_for_universe(
+            symbols=["BTCUSDT"],
+            tf="4h",
+            strategy_cfg=strategy_cfg,
+            preloaded_data_maps={},
+        )
+
+    mock_diag.assert_not_called()
+    assert result.rule_report is not None
+    assert result.rule_report["recommended_keep_variants"] == ()
+    assert result.rule_report["recommended_flip_variants"] == ()
+
+
+def test_run_candidate_non_signal_only_calls_diagnostics(
+    aligned_mock: Any, non_signal_only_cfg: MagicMock
+) -> None:
+    """Scenario 5: signal_only=False → compute_rule_diagnostics 1회 호출."""
+    from src.domain.futures.strategy.rule_diagnostics import RuleDiagnosticsResult
+    from src.domain.futures.strategy_runtime.bridge import (
+        run_candidate_strategy_for_universe,
+    )
+
+    strategy_cfg = _make_strategy_cfg(non_signal_only_cfg)
+    fake_diag = RuleDiagnosticsResult(
+        by_family=pd.DataFrame(), by_variant=pd.DataFrame(),
+        by_family_side=pd.DataFrame(), side_flip=pd.DataFrame(),
+        decision={},
+        recommended_keep_variants=("v1",),
+        recommended_flip_variants=(),
+        recommended_keep_signal_cells=(),
+        recommended_flip_signal_cells=(),
+        recommendation_basis="test",
+        recommendation_split=(0, 10),
+        report_split=(0, 10),
+    )
+
+    non_empty_events = pd.DataFrame({
+        "symbol": ["BTCUSDT"],
+        "side": [1],
+        "entry_idx": [10],
+        "expected_holding_bars": [5],
+        "stop_atr_mult": [1.0],
+        "take_profit_atr_mult": [2.0],
+    })
+    with (
+        patch(
+            "src.domain.futures.strategy.rule_diagnostics.compute_rule_diagnostics",
+            return_value=fake_diag,
+            autospec=True,
+        ) as mock_diag,
+        patch(
+            "src.domain.futures.strategy.ablation.apply_variant_promotions",
+            return_value=non_empty_events,
+        ),
+        patch(
+            "src.domain.futures.strategy_runtime.bridge.verify_data_integrity",
+            return_value={},
+        ),
+        patch(
+            "src.domain.futures.strategy.candidate_portfolio.build_candidate_alpha_panel",
+        ),
+        patch(
+            "src.domain.futures.strategy.common.alignment.align_data_maps",
+            return_value=aligned_mock,
+        ),
+        patch(
+            "src.domain.futures.strategy.rule_signals.candidate_panels_to_events",
+            return_value=non_empty_events,
+        ),
+        patch(
+            "src.domain.futures.strategy_runtime.bridge.build_multi_tf_panels",
+            return_value=(),
+        ),
+        patch(
+            "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
+            return_value=(),
+        ),
+    ):
+        _ = run_candidate_strategy_for_universe(
+            symbols=["BTCUSDT"],
+            tf="4h",
+            strategy_cfg=strategy_cfg,
+            preloaded_data_maps={},
+        )
+
+    mock_diag.assert_called_once()
+
+
+def test_run_candidate_signal_only_skips_promotion(
+    aligned_mock: Any, signal_only_cfg: MagicMock
+) -> None:
+    """Scenario 6: signal_only=True + promotion_filter_enabled → apply_variant_promotions 호출 0회."""
+    from src.domain.futures.strategy_runtime.bridge import (
+        run_candidate_strategy_for_universe,
+    )
+
+    strategy_cfg = _make_strategy_cfg(signal_only_cfg)
+    non_empty_events = pd.DataFrame({
+        "symbol": ["BTCUSDT"],
+        "side": [1],
+        "entry_idx": [10],
+        "expected_holding_bars": [5],
+        "stop_atr_mult": [1.0],
+        "take_profit_atr_mult": [2.0],
+    })
+
+    with (
+        patch(
+            "src.domain.futures.strategy.rule_diagnostics.compute_rule_diagnostics",
+            autospec=True,
+        ) as mock_diag,
+        patch(
+            "src.domain.futures.strategy.ablation.apply_variant_promotions",
+            autospec=True,
+        ) as mock_promo,
+        patch(
+            "src.domain.futures.strategy_runtime.bridge.verify_data_integrity",
+            return_value={},
+        ),
+        patch(
+            "src.domain.futures.strategy.candidate_portfolio.build_candidate_alpha_panel",
+        ),
+        patch(
+            "src.domain.futures.strategy.common.alignment.align_data_maps",
+            return_value=aligned_mock,
+        ),
+        patch(
+            "src.domain.futures.strategy.rule_signals.candidate_panels_to_events",
+            return_value=non_empty_events,
+        ),
+        patch(
+            "src.domain.futures.strategy_runtime.bridge.build_multi_tf_panels",
+            return_value=(),
+        ),
+        patch(
+            "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
+            return_value=(),
+        ),
+    ):
+        run_candidate_strategy_for_universe(
+            symbols=["BTCUSDT"],
+            tf="4h",
+            strategy_cfg=strategy_cfg,
+            preloaded_data_maps={},
+        )
+
+    mock_diag.assert_not_called()
+    mock_promo.assert_not_called()
