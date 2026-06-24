@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import date
 from typing import TYPE_CHECKING, Literal
@@ -392,6 +393,8 @@ class Layer2AllocationConfig:
     l2_diag_attribution_enabled: bool = False
     l2_diag_sleeve_top_k: int = 15
     l2_diag_sleeve_sample_every: int = 0
+    l2_max_cost_drag_ratio: float = 0.60
+    l2_turnover_penalty_weight: float = 0.0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -503,7 +506,10 @@ class Layer2AllocationConfig:
                 1,
             )
         )
-        combine_method = str(params.get("l2_sleeve_combine_method", "precision_weighted"))
+        combine_method = str(
+            os.environ.get("L2_SLEEVE_COMBINE")
+            or params.get("l2_sleeve_combine_method", "precision_weighted")
+        )
         if combine_method not in {"precision_weighted", "equal", "max_edge"}:
             raise ValueError(
                 f"l2_sleeve_combine_method must be one of precision_weighted/equal/max_edge, "
@@ -581,9 +587,20 @@ class Layer2AllocationConfig:
             l2_is_expansion_bars=cls._as_int(params.get("l2_is_expansion_bars", 0), 0),
             l2_sleeve_combine_method=combine_method,
             l2_sleeve_conviction_cap_mult=conviction_cap_mult,
-            l2_diag_attribution_enabled=bool(params.get("l2_diag_attribution_enabled", False)),
+            l2_diag_attribution_enabled=bool(params.get("l2_diag_attribution_enabled", False))
+            or os.environ.get("L2_DIAG_ATTR", "") not in ("", "0", "false", "False"),
             l2_diag_sleeve_top_k=cls._as_int(params.get("l2_diag_sleeve_top_k", 15), 15),
             l2_diag_sleeve_sample_every=cls._as_int(params.get("l2_diag_sleeve_sample_every", 0), 0),
+            l2_max_cost_drag_ratio=cls._validate_range(
+                "l2_max_cost_drag_ratio",
+                cls._as_float(params.get("l2_max_cost_drag_ratio", 0.60), 0.60),
+                0.0,
+            ),
+            l2_turnover_penalty_weight=cls._validate_range(
+                "l2_turnover_penalty_weight",
+                cls._as_float(params.get("l2_turnover_penalty_weight", 0.0), 0.0),
+                0.0,
+            ),
         )
 
 
