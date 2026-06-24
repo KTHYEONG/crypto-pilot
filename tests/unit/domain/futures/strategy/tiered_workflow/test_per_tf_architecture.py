@@ -560,7 +560,234 @@ def test_build_multi_tf_panels_htf_only_blocks_ltf() -> None:
     assert "12h" in native_tfs
 
 
-# ── S3: Key namespacing — 충돌 방지 ────────────────────────────────────────
+# ── S4: Multi-TF Threading — 병렬 처리 검증 ──────────────────────────────────
+
+
+def test_build_multi_tf_panels_threaded_3tfs() -> None:
+    """S4: 3 eligible TFs → ThreadPoolExecutor path — panels identical to sequential."""
+    from src.domain.futures.strategy_runtime.bridge import (
+        _HPB_BRIDGE,
+        build_multi_tf_panels,
+    )
+
+    n_bars, n_syms = 100, 10
+    base_tf = "4h"
+    aligned_base = _make_aligned_base(n_bars=n_bars, n_syms=n_syms, base_tf=base_tf)
+    symbols = list(aligned_base.symbols)
+    base_cfg = CandidateStrategyConfig()
+    tfs = ("4h", "6h", "8h", "12h")
+    non_base_tfs = [tf for tf in tfs if tf != base_tf]
+
+    hpb_base = _HPB_BRIDGE[base_tf]
+    panels_by_tf: dict[str, CandidateSignalPanel] = {}
+    for tf_i in non_base_tfs:
+        hpb_i = _HPB_BRIDGE[tf_i]
+        n_bars_i = max(1, int(np.ceil(n_bars * hpb_base / hpb_i)))
+        panels_by_tf[tf_i] = _make_synthetic_panel(
+            family="trend_donchian",
+            variant="donchian_72",
+            n_bars=n_bars_i,
+            n_syms=n_syms,
+            freq_h=hpb_i,
+        )
+
+    def _fake_virtual_maps(
+        data_maps: object,
+        symbols_: list[str],
+        target_tf: str,
+    ) -> dict[str, dict[str, pd.DataFrame]]:
+        return {sym: {target_tf: pd.DataFrame()} for sym in symbols_[:3]}
+
+    def _fake_align(
+        data_maps: object,
+        symbols_: list[str],
+        tf: str,
+    ) -> MagicMock:
+        panel = panels_by_tf[tf]
+        aligned = MagicMock()
+        aligned.datetimes = panel.datetimes
+        return aligned
+
+    def _fake_build_panels(
+        aligned: object,
+        cfg: object,
+        family_filter: tuple[str, ...] | None = None,
+        **kwargs: object,
+    ) -> tuple[CandidateSignalPanel, ...]:
+        for panel in panels_by_tf.values():
+            aligned_dt = getattr(aligned, "datetimes", None)
+            if aligned_dt is not None and np.array_equal(aligned_dt, panel.datetimes):
+                return (panel,)
+        return ()
+
+    with (
+        patch(
+            "src.domain.futures.strategy_runtime.bridge._build_virtual_probe_tf_maps",
+            side_effect=_fake_virtual_maps,
+        ),
+        patch(
+            "src.domain.futures.strategy.common.alignment.align_data_maps",
+            side_effect=_fake_align,
+        ),
+        patch(
+            "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
+            side_effect=_fake_build_panels,
+        ),
+    ):
+        panels = build_multi_tf_panels(
+            data_maps={},
+            symbols=symbols,
+            aligned_base=aligned_base,
+            base_cfg=base_cfg,
+            base_tf=base_tf,
+            tfs=tfs,
+            family_pool=lambda tf: ("trend_donchian",),
+            htf_only=True,
+        )
+
+    # All 3 non-base TFs should be represented
+    native_tfs = [p.metadata.get("native_tf") for p in panels]
+    for expected_tf in ("6h", "8h", "12h"):
+        assert expected_tf in native_tfs, f"missing native_tf={expected_tf}"
+
+    # All panels projected to base grid
+    for p in panels:
+        assert p.valid_mask_2d.shape == aligned_base.close_2d.shape
+        assert p.metadata.get("probe_origin") is None
+
+
+def test_build_multi_tf_panels_single_tf_skips_threading() -> None:
+    """S4: Only 1 eligible TF → ThreadPoolExecutor NOT instantiated."""
+    from src.domain.futures.strategy_runtime.bridge import (
+        build_multi_tf_panels,
+    )
+
+    n_bars, n_syms = 100, 5
+    base_tf = "8h"
+    aligned_base = _make_aligned_base(n_bars=n_bars, n_syms=n_syms, base_tf=base_tf)
+    symbols = list(aligned_base.symbols)
+    base_cfg = CandidateStrategyConfig()
+    tfs = ("8h", "12h")  # only 1 non-base TF: 12h
+
+    with patch("src.domain.futures.strategy_runtime.bridge.ThreadPoolExecutor") as mock_executor:
+        panels = build_multi_tf_panels(
+            data_maps={},
+            symbols=symbols,
+            aligned_base=aligned_base,
+            base_cfg=base_cfg,
+            base_tf=base_tf,
+            tfs=tfs,
+            family_pool=lambda tf: (),
+            htf_only=True,
+        )
+    mock_executor.assert_not_called()
+    # Panels may be empty (no families configured) — that is expected
+    assert isinstance(panels, tuple)
+
+
+def test_build_multi_tf_panels_one_tf_fails_others_succeed() -> None:
+    """S4: build_rule_signal_panels raises for 12h, but 6h/8h panels returned."""
+    from src.domain.futures.strategy_runtime.bridge import (
+        build_multi_tf_panels,
+    )
+
+    n_bars, n_syms = 100, 10
+    base_tf = "4h"
+    aligned_base = _make_aligned_base(n_bars=n_bars, n_syms=n_syms, base_tf=base_tf)
+    symbols = list(aligned_base.symbols)
+    base_cfg = CandidateStrategyConfig()
+    tfs = ("4h", "6h", "8h", "12h")
+    non_base_tfs = [tf for tf in tfs if tf != base_tf]
+
+    from src.domain.futures.strategy_runtime.bridge import _HPB_BRIDGE
+    hpb_base = _HPB_BRIDGE[base_tf]
+    panels_by_tf: dict[str, CandidateSignalPanel] = {}
+    for tf_i in non_base_tfs:
+        hpb_i = _HPB_BRIDGE[tf_i]
+        n_bars_i = max(1, int(np.ceil(n_bars * hpb_base / hpb_i)))
+        panels_by_tf[tf_i] = _make_synthetic_panel(
+            family="trend_donchian",
+            variant="donchian_72",
+            n_bars=n_bars_i,
+            n_syms=n_syms,
+            freq_h=hpb_i,
+        )
+
+    def _fake_virtual_maps(
+        data_maps: object,
+        symbols_: list[str],
+        target_tf: str,
+    ) -> dict[str, dict[str, pd.DataFrame]]:
+        return {sym: {target_tf: pd.DataFrame()} for sym in symbols_[:3]}
+
+    def _fake_align(
+        data_maps: object,
+        symbols_: list[str],
+        tf: str,
+    ) -> MagicMock:
+        panel = panels_by_tf[tf]
+        aligned = MagicMock()
+        aligned.datetimes = panel.datetimes
+        return aligned
+
+    call_count: dict[str, int] = {}
+
+    def _fake_build_panels(
+        aligned: object,
+        cfg: object,
+        family_filter: tuple[str, ...] | None = None,
+        **kwargs: object,
+    ) -> tuple[CandidateSignalPanel, ...]:
+        tf_i = getattr(cfg, "timeframe", "unknown")
+        call_count[tf_i] = call_count.get(tf_i, 0) + 1
+        if tf_i == "12h":
+            raise ValueError("simulated 12h failure")
+        for panel in panels_by_tf.values():
+            aligned_dt = getattr(aligned, "datetimes", None)
+            if aligned_dt is not None and np.array_equal(aligned_dt, panel.datetimes):
+                return (panel,)
+        return ()
+
+    with (
+        patch(
+            "src.domain.futures.strategy_runtime.bridge._build_virtual_probe_tf_maps",
+            side_effect=_fake_virtual_maps,
+        ),
+        patch(
+            "src.domain.futures.strategy.common.alignment.align_data_maps",
+            side_effect=_fake_align,
+        ),
+        patch(
+            "src.domain.futures.strategy.rule_signals.build_rule_signal_panels",
+            side_effect=_fake_build_panels,
+        ),
+    ):
+        panels = build_multi_tf_panels(
+            data_maps={},
+            symbols=symbols,
+            aligned_base=aligned_base,
+            base_cfg=base_cfg,
+            base_tf=base_tf,
+            tfs=tfs,
+            family_pool=lambda tf: ("trend_donchian",),
+            htf_only=True,
+        )
+
+    # 12h failure should NOT block 6h and 8h panels
+    native_tfs = [p.metadata.get("native_tf") for p in panels]
+    assert "6h" in native_tfs
+    assert "8h" in native_tfs
+    # 12h should NOT be in native_tfs because its panels failed
+    assert "12h" not in native_tfs
+
+    # Each successful TF's build_rule_signal_panels was called
+    assert call_count.get("6h", 0) == 1
+    assert call_count.get("8h", 0) == 1
+    # 12h was called once and raised
+    assert call_count.get("12h", 0) == 1
+
+
+# ── S5: Key namespacing — 충돌 방지 ────────────────────────────────────────
 
 
 def test_aggregate_per_tf_l1_key_namespacing() -> None:
