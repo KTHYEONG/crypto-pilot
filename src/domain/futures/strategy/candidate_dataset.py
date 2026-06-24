@@ -70,7 +70,7 @@ _ARCHETYPE_REGIME_AFFINITY: dict[tuple[str, str], float] = {
 _ALIGNED_FEATURE_CACHE: dict[int, dict[str, Any]] = {}
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass
 class PreparedLabeledEvents:
     """Precomputed event indexing metadata for repeated split extraction."""
 
@@ -81,6 +81,7 @@ class PreparedLabeledEvents:
     symbol_idx: NDArray[np.int32]
     valid_symbol_mask: NDArray[np.bool_]
     frozen_identity_names: tuple[str, ...]
+    enrich_cache: dict[str, Any] | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -270,6 +271,68 @@ def _rolling_robust_z_2d(values: NDArray[np.float64], window: int) -> NDArray[np
 def _cross_sectional_robust_z_2d(values: NDArray[np.float64]) -> NDArray[np.float64]:
     res = _numba_cross_sectional_robust_z_2d(values, _ROBUST_Z_EPS, _ROBUST_Z_CLIP)
     return cast(NDArray[np.float64], res)
+
+
+def _precompute_enrich(
+    frame: pd.DataFrame,
+    prepared: PreparedLabeledEvents,
+    regime_ctx: Any,
+    overlay_ctx: Any,
+) -> dict[str, NDArray[Any]]:
+    """Precompute window-invariant enrich columns for the full prepared frame.
+
+    Returns dict with:
+      - entry_regime: NDArray[object] — precomputed regime name per event_t
+      - arm: NDArray[np.float32] — archetype-regime match affinity
+      - overlay_mult: NDArray[np.float32] — overlay multiplier per event_t
+      - crisis_active: NDArray[np.float32] — crisis flag per event_t
+      - entry_regime_code: NDArray[np.int32] — regime code per event_t
+    """
+    event_t = prepared.event_t
+
+    # entry_regime & regime code — precomputed numpy array, no list-comp
+    regime_names_arr = np.asarray(regime_ctx.name_by_code, dtype=object)
+    regime_codes = regime_ctx.code_1d[event_t]
+    entry_regime = regime_names_arr[regime_codes].copy()
+
+    # overlay / crisis
+    overlay_mult = overlay_ctx.overlay_mult_1d[event_t].astype(np.float32)
+    crisis_active = overlay_ctx.crisis_active_1d[event_t].astype(np.float32)
+
+    # arm: archetype-regime match affinity
+    archetype_arr = (
+        frame.get("archetype", pd.Series("", index=frame.index))
+        .fillna("")
+        .astype(str)
+        .values
+    )
+    _archetypes = [
+        "trend", "ts_mom", "mean_rev",
+        "carry_rev", "flow_rev", "unwind",
+        "beta_neut",
+    ]
+    _regimes = [
+        "bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile",
+        "transition", "crash",
+    ]
+    _arch_to_idx = {a: idx for idx, a in enumerate(_archetypes)}
+    _reg_to_idx = {r: idx for idx, r in enumerate(_regimes)}
+    _affinity_matrix = np.zeros((len(_archetypes) + 1, len(_regimes) + 1), dtype=np.float32)
+    for (arch, reg), val in _ARCHETYPE_REGIME_AFFINITY.items():
+        if arch in _arch_to_idx and reg in _reg_to_idx:
+            _affinity_matrix[_arch_to_idx[arch], _reg_to_idx[reg]] = val
+
+    arch_idxs = np.array([_arch_to_idx.get(a, len(_archetypes)) for a in archetype_arr], dtype=np.int32)
+    reg_idxs = np.array([_reg_to_idx.get(r, len(_regimes)) for r in regime_names_arr[regime_codes]], dtype=np.int32)
+    arm = _affinity_matrix[arch_idxs, reg_idxs]
+
+    return {
+        "entry_regime": entry_regime,
+        "arm": arm,
+        "overlay_mult": overlay_mult,
+        "crisis_active": crisis_active,
+        "entry_regime_code": regime_codes.astype(np.int32),
+    }
 
 
 def _compute_score_pct_variant_hist(
@@ -1070,8 +1133,54 @@ def build_candidate_dataset(
             curr += 10
 
         if sig_feat_names:
+            # Lazy init enrich cache (once per process first time through)
+            if prepared is not None and prepared.enrich_cache is None:
+                _warm_aligned_2d_cache(aligned, cfg)
+                _cache = _ALIGNED_FEATURE_CACHE[id(aligned)]
+                prepared.enrich_cache = _precompute_enrich(
+                    frame=frame,
+                    prepared=prepared,
+                    regime_ctx=_cache["regime_ctx"],
+                    overlay_ctx=_cache["overlay_ctx"],
+                )
+
             win = int(getattr(cfg, "score_pct_variant_hist_window_bars", 2160))
             score_pct = _compute_score_pct_variant_hist(events, window_bars=win)
+            if "entry_idx" in events.columns and "symbol" in events.columns and "side" in events.columns:
+                side_sign = pd.Series(np.sign(events["side"].fillna(0)).astype(np.int32), index=events.index)
+                counts = events.groupby(["entry_idx", "symbol", side_sign]).transform("size")
+                n_same = np.log1p(np.maximum(counts.values - 1, 0)).astype(np.float32)
+            else:
+                n_same = np.zeros(len(events), dtype=np.float32)
+
+            if prepared is not None and prepared.enrich_cache is not None and row_ids is not None:
+                arm = prepared.enrich_cache["arm"][row_ids]
+            else:
+                regime_names_arr = np.asarray(regime_ctx.name_by_code, dtype=object)[regime_ctx.code_1d[event_t]]
+                archetype_arr = (
+                    events.get("archetype", pd.Series("", index=events.index))
+                    .fillna("")
+                    .astype(str)
+                    .values
+                )
+                _archetypes = [
+                    "trend", "ts_mom", "mean_rev",
+                    "carry_rev", "flow_rev", "unwind",
+                    "beta_neut",
+                ]
+                _regimes = [
+                    "bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile",
+                    "transition", "crash",
+                ]
+                _arch_to_idx = {a: idx for idx, a in enumerate(_archetypes)}
+                _reg_to_idx = {r: idx for idx, r in enumerate(_regimes)}
+                _affinity_matrix = np.zeros((len(_archetypes) + 1, len(_regimes) + 1), dtype=np.float32)
+                for (arch, reg), val in _ARCHETYPE_REGIME_AFFINITY.items():
+                    if arch in _arch_to_idx and reg in _reg_to_idx:
+                        _affinity_matrix[_arch_to_idx[arch], _reg_to_idx[reg]] = val
+                arch_idxs = np.array([_arch_to_idx.get(a, len(_archetypes)) for a in archetype_arr], dtype=np.int32)
+                reg_idxs = np.array([_reg_to_idx.get(r, len(_regimes)) for r in regime_names_arr], dtype=np.int32)
+                arm = _affinity_matrix[arch_idxs, reg_idxs]
 
             side_idx = feat_to_idx.get("side")
             funding_z20_idx = feat_to_idx.get("funding_z20")
@@ -1081,42 +1190,6 @@ def build_candidate_dataset(
                 fsa = np.tanh(funding_z20_arr * side_arr).astype(np.float32)
             else:
                 fsa = np.zeros(len(events), dtype=np.float32)
-
-            regime_names_arr = np.asarray(regime_ctx.name_by_code, dtype=object)[regime_ctx.code_1d[event_t]]
-            archetype_arr = (
-                events.get("archetype", pd.Series("", index=events.index))
-                .fillna("")
-                .astype(str)
-                .values
-            )
-            
-            _archetypes = [
-                "trend", "ts_mom", "mean_rev",
-                "carry_rev", "flow_rev", "unwind",
-                "beta_neut"
-            ]
-            _regimes = [
-                "bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile",
-                "transition", "crash"
-            ]
-            _arch_to_idx = {a: idx for idx, a in enumerate(_archetypes)}
-            _reg_to_idx = {r: idx for idx, r in enumerate(_regimes)}
-            
-            _affinity_matrix = np.zeros((len(_archetypes) + 1, len(_regimes) + 1), dtype=np.float32)
-            for (arch, reg), val in _ARCHETYPE_REGIME_AFFINITY.items():
-                if arch in _arch_to_idx and reg in _reg_to_idx:
-                    _affinity_matrix[_arch_to_idx[arch], _reg_to_idx[reg]] = val
-                    
-            arch_idxs = np.array([_arch_to_idx.get(a, len(_archetypes)) for a in archetype_arr], dtype=np.int32)
-            reg_idxs = np.array([_reg_to_idx.get(r, len(_regimes)) for r in regime_names_arr], dtype=np.int32)
-            arm = _affinity_matrix[arch_idxs, reg_idxs]
-
-            if "entry_idx" in events.columns and "symbol" in events.columns and "side" in events.columns:
-                side_sign = pd.Series(np.sign(events["side"].fillna(0)).astype(np.int32), index=events.index)
-                counts = events.groupby(["entry_idx", "symbol", side_sign]).transform("size")
-                n_same = np.log1p(np.maximum(counts.values - 1, 0)).astype(np.float32)
-            else:
-                n_same = np.zeros(len(events), dtype=np.float32)
 
             def _set_sig(name: str, values: NDArray[np.float32]) -> None:
                 idx = feat_to_idx.get(name)
@@ -1148,10 +1221,13 @@ def build_candidate_dataset(
             kept_events["overlay_mult"] = overlay_ctx.overlay_mult_1d[event_t_kept]
             kept_events["crisis_active"] = overlay_ctx.crisis_active_1d[event_t_kept]
             kept_events["entry_regime_code"] = regime_ctx.code_1d[event_t_kept]
-            kept_events["entry_regime"] = np.asarray(
-                [regime_ctx.name_by_code[int(code)] for code in regime_ctx.code_1d[event_t_kept]],
-                dtype=object,
-            )
+            if prepared is not None and prepared.enrich_cache is not None and row_ids is not None:
+                kept_events["entry_regime"] = prepared.enrich_cache["entry_regime"][row_ids[finite_mask]]
+            else:
+                kept_events["entry_regime"] = np.asarray(
+                    [regime_ctx.name_by_code[int(code)] for code in regime_ctx.code_1d[event_t_kept]],
+                    dtype=object,
+                )
         if n_imputed > 0:
             _logger.debug("[DATASET] imputed_missing_values=%d valid_events=%d", n_imputed, int(valid_mask.sum()))
         dropped_events = int(valid_mask.sum()) - int(finite_mask.sum())
@@ -1181,6 +1257,14 @@ def build_candidate_dataset(
             cache["regime_ctx"] = compute_market_regime_context(aligned=aligned)
         regime_ctx = cache["regime_ctx"]
 
+        if prepared is not None and prepared.enrich_cache is None:
+            prepared.enrich_cache = _precompute_enrich(
+                frame=frame,
+                prepared=prepared,
+                regime_ctx=regime_ctx,
+                overlay_ctx=overlay_ctx,
+            )
+
         kept_events = events[valid_mask].copy()
         groups_final = event_t[valid_mask].astype(np.int32)
         event_t_kept = event_t[valid_mask].astype(np.int32, copy=False)
@@ -1188,10 +1272,13 @@ def build_candidate_dataset(
             kept_events["overlay_mult"] = overlay_ctx.overlay_mult_1d[event_t_kept]
             kept_events["crisis_active"] = overlay_ctx.crisis_active_1d[event_t_kept]
             kept_events["entry_regime_code"] = regime_ctx.code_1d[event_t_kept]
-            kept_events["entry_regime"] = np.asarray(
-                [regime_ctx.name_by_code[int(code)] for code in regime_ctx.code_1d[event_t_kept]],
-                dtype=object,
-            )
+            if prepared is not None and prepared.enrich_cache is not None and row_ids is not None:
+                kept_events["entry_regime"] = prepared.enrich_cache["entry_regime"][row_ids[valid_mask]]
+            else:
+                kept_events["entry_regime"] = np.asarray(
+                    [regime_ctx.name_by_code[int(code)] for code in regime_ctx.code_1d[event_t_kept]],
+                    dtype=object,
+                )
         x_final = np.zeros((len(kept_events), 0), dtype=np.float32)
         feature_names = ()
 
