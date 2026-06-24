@@ -1930,6 +1930,71 @@ def test_resolve_tradeable_scope_reason_counts_sum_to_base_scope() -> None:
     assert len(result.admitted) + dropped_total == len(base_scope)
 
 
+# C2 — _resolve_tradeable_scope datetime optimization
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_tradeable_scope_datetime64_native_fastpath() -> None:
+    """C2-S4: All datetime64 columns → pd.to_datetime NOT called."""
+    from unittest.mock import patch as _patch
+
+    fetch_start = pd.Timestamp("2022-10-01", tz="UTC")
+    oos_start = pd.Timestamp("2025-10-01", tz="UTC")
+    holdout_end = pd.Timestamp("2026-04-01", tz="UTC")
+    strategy_maps: dict[str, dict[str, pd.DataFrame]] = {
+        "symA": _make_sym_df("2022-10-01", "2026-04-01"),
+        "symB": _make_sym_df("2022-10-01", "2026-03-15"),
+    }
+
+    with _patch("pandas.to_datetime") as mock_to_dt:
+        result = opt_main_futures._resolve_tradeable_scope(
+            valid_symbols=["symA", "symB"],
+            strategy_maps=strategy_maps,
+            tf="4h",
+            fetch_start=fetch_start,
+            oos_start=oos_start,
+            holdout_end=holdout_end,
+            min_window_bars=1,
+            min_holdout_coverage=0.90,
+        )
+    mock_to_dt.assert_not_called()
+    assert "symA" in result.admitted
+    assert "symB" in result.admitted
+
+
+def test_resolve_tradeable_scope_string_datetime_fallback() -> None:
+    """C2-S5: String datetime columns → pd.to_datetime called; result correct."""
+    from unittest.mock import patch as _patch
+
+    fetch_start = pd.Timestamp("2022-10-01", tz="UTC")
+    oos_start = pd.Timestamp("2025-10-01", tz="UTC")
+    holdout_end = pd.Timestamp("2026-04-01", tz="UTC")
+
+    dts = pd.date_range("2022-10-01", "2026-04-01", freq="4h", tz="UTC")
+    df_str = pd.DataFrame({"datetime": dts.strftime("%Y-%m-%d %H:%M:%S%z")})
+    df_dt64 = pd.DataFrame({"datetime": dts})
+    strategy_maps: dict[str, dict[str, pd.DataFrame]] = {
+        "symA": {"4h": df_str},      # string datetime
+        "symB": {"4h": df_dt64},     # datetime64 (but _native_flag may be set by symA)
+    }
+
+    with _patch("pandas.to_datetime", wraps=pd.to_datetime) as mock_to_dt:
+        result = opt_main_futures._resolve_tradeable_scope(
+            valid_symbols=["symA", "symB"],
+            strategy_maps=strategy_maps,
+            tf="4h",
+            fetch_start=fetch_start,
+            oos_start=oos_start,
+            holdout_end=holdout_end,
+            min_window_bars=1,
+            min_holdout_coverage=0.90,
+        )
+    # SymA uses string → pd.to_datetime called at least once
+    assert mock_to_dt.call_count >= 1
+    assert "symA" in result.admitted
+    assert "symB" in result.admitted
+
+
 def test_tiered_empty_admission_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
