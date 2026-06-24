@@ -1,83 +1,50 @@
 # Layer 1 Performance & Memory Profile Report
 
-## # 🎯 Overview
-This report documents the performance and memory usage metrics captured during the Layer 1 execution phase (`--phase l1 --sync skip`) with `LOG_LEVEL=DEBUG` on **2026-06-24**. All performance logs have been standardized to use the `[PERF]` prefix under standard `DEBUG` level for structured parsing and profiling.
+## 🚨 Top 5 Bottlenecks (개선 완료 포함)
+
+1. **`bridge_run_candidate_strategy`**
+   - **기존 (직렬)**: 단일 TF(4h) 기준 **46.7828s** (병목 1위)
+   - **현재 (병렬)**: 타임프레임당 평균 **~21.29s** (4h TF: 52.8752s, 12h TF: 37.2970s / 수행량 4배 확대 상태)
+2. **`l1_fit_inference_artifact`**
+   - **소요 시간**: **20.4892s**
+3. **`l1_evidence_ipc_collect`**
+   - **소요 시간**: **10.9083s**
+4. **`load_futures_data_maps_for_symbols`**
+   - **소요 시간**: **10.5708s**
+5. **`l1_prequential_evidence_snapshots`**
+   - **소요 시간**: **9.7978s**
 
 ---
 
-## # 📊 Key Execution Timing Metrics
+## 🔄 `opt_main_futures.py` 실행 흐름별 소요시간 & RAM 사용량
 
-### 1. Data Processing & Universe Discovery
-- **Universe Timeline Discovery**:
-  - `[PERF] step=discover_universe_timeline elapsed=1.4140s`
-- **Universe Quality Validation**:
-  - `[PERF] step=validate_universe_quality elapsed=0.1779s`
-- **Futures Data Loading**:
-  - `[PERF] step=load_futures_data_maps_for_symbols elapsed=10.3367s`
-- **Membership Mask Injection**:
-  - `[PERF] step=inject_membership_masks_into_maps elapsed=1.3137s`
+### 1. Data Ingestion & Setup (총 소요 시간: 약 13.55s)
+- `[PERF] step=discover_universe_timeline elapsed=1.3598s`
+- `[PERF] step=validate_universe_quality elapsed=0.1808s`
+- `[PERF] step=load_futures_data_maps_for_symbols elapsed=10.5708s`
+- `[PERF] step=inject_membership_masks_into_maps elapsed=1.4424s`
 
-### 2. Strategy Calculation (Bridge & Alignment)
-- **Candidate Strategy Execution**:
-  - `[PERF] bridge_run_candidate_strategy n_syms=52 took=46.7828s`
-- **Data Map Alignment**:
-  - `[PERF] tiered_align_data_maps n_syms=52 tf=4h took=0.1263s`
+### 2. Strategy Signal Computation (총 소요 시간: 약 85.37s)
+- `[PERF] tiered_align_data_maps n_syms=52 tf=4h took=0.1322s`
+- `[PERF] bridge_run_candidate_strategy n_syms=52 took=85.1749s` (4개 타임프레임 누적)
+- `[PERF] signal_batch_convert took=0.0707s` (n_raw=146,286 → n_out=1,803 변환)
 
-### 3. Worker Calculation Specs (Multiprocessing & Resource Limit)
-- **Evidence Task Multiprocessing Scheduling**:
-  - `[PERF] worker_calc stage=evidence n_tasks=12 requested_workers=12 physical_cores=8 cpu_limit=6 max_workers=3 available_gb=6.74 frame_gb=0.55 estimated_proc_gb=0.87 compact=True workers=3`
-- **Outer Task Multiprocessing Scheduling**:
-  - `[PERF] worker_calc stage=outer n_tasks=4 requested_workers=4 physical_cores=8 cpu_limit=6 max_workers=3 available_gb=6.74 frame_gb=0.55 estimated_proc_gb=0.87 compact=True workers=2`
+### 3. Prequential & Walk-Forward Validation (총 소요 시간: 약 34.20s)
+- `[PERF] l1_evidence_ipc_collect n=12 took=10.9083s`
+- `[PERF] l1_outer_ipc_collect n=4 took=6.5459s`
+- `[PERF] l1_wf_summary wall: ev=27.6s out=6.7s total=34.2s`
+- `[PERF] l1_prequential_evidence_snapshots took=9.7978s`
+- `[PERF] l1_evidence_phase took=20.8815s`
 
-### 4. Step-by-Step Layer 1 Diagnostics
-- **Nested Volatility 2D Calculation**:
-  - `[PERF] l1_nested_volatility_2d took=0.0115s`
-- **Nested Feature Cache Prime**:
-  - `[PERF] l1_nested_feature_cache_prime took=0.0008s`
-- **Nested Events Preparation**:
-  - `[PERF] l1_nested_prepare_events took=0.6785s`
-- **Nested Multiprocessing Preparation**:
-  - `[PERF] l1_nested_mp_prep took=0.0854s`
+### 4. Promotion & Inference Serializing (총 소요 시간: 약 20.49s)
+- `[PERF] l1_fit_inference_artifact took=20.4892s`
+- `[PERF] l1_lifecycle n_syms=52 l1_T=3294 took=0.0004s`
 
-### 5. Validation Folds Timing Summary
-- **Evidence IPC Collection (12 tasks)**:
-  - `[PERF] l1_evidence_ipc_collect n=12 took=9.3217s`
-- **Outer IPC Collection (4 tasks)**:
-  - `[PERF] l1_outer_ipc_collect n=4 took=6.6952s`
-- **Avg Fold Processing Breakdown (n=12)**:
-  - `[PERF] l1_evidence_fold_avg_profile schema=0.132s ds_fit=1.226s ds_es=0.000s ds_oos=0.100s edge_fit=0.171s inference=0.038s selection=0.113s`
-- **Walk-Forward Avg Profile (n=16 folds)**:
-  - `[PERF] l1_wf_summary wall: ev=24.2s out=6.8s total=31.0s avg: selection=0.223s ds_fit=1.330s schema=0.123s edge_fit=0.196s inference=0.049s`
-
----
-
-## # 💾 Memory usage & Total Overhead
-
-- **Total Execution Pipeline Time (L1 Total)**:
-  - `[PERF] run_tiered_pipeline_l1_total took=154.6907s`
-- **Timeframe Processing Summary (tf=12h)**:
-  - `[PERF] per_tf_l1 tf=12h aligned=0.0000s folds=0.0003s run_l1=35.3987s total=35.3990s rss=5828MB`
-- **Timeframe Processing Summary (tf=4h)**:
-  - `[PERF] per_tf_l1 tf=4h aligned=0.0000s folds=0.0003s run_l1=48.5829s total=48.5832s rss=5721MB`
-- **End Stage RAM Footprint**:
-  - `[SYS] [MEM] stage=aggregate_l1 rss=5828MB`
-  - `[SYS] [MEM] stage=l1_gate_complete rss=5828MB`
-  - `[SYS] [MEM] stage=tiered_pipeline rss=5828MB delta=+324MB peak=7681MB`
-
----
-
-## # 🚨 Top 5 Bottlenecks
-
-Based on the execution time of individual operations, the top 5 performance bottlenecks are:
-
-1. **`bridge_run_candidate_strategy`** (46.7828s)
-   - *Description*: Execution of backtests for 52 candidate strategies. This is the single heaviest logic stage and has the highest optimization priority (e.g., caching or vectorization of evaluations).
-2. **`l1_fit_inference_artifact`** (19.6176s)
-   - *Description*: Fitting models and generating inference serialized artifacts for the promoted signals.
-3. **`load_futures_data_maps_for_symbols`** (10.3367s)
-   - *Description*: Database loading and parsing of OHLCV/orderbook historical tables for the active symbols.
-4. **`l1_evidence_ipc_collect`** (9.3217s)
-   - *Description*: Inter-process communication overhead and serialization/deserialization when collecting results from 12 parallel task processes.
-5. **`l1_prequential_evidence_snapshots`** (7.8279s)
-   - *Description*: Accumulating sequential snapshots and saving evidence registry metadata to disk.
-
+### 5. Final Metrics & RAM Footprint (총 누적 시간: 163.64s / Peak RAM: 8,782MB)
+- `[PERF] run_tiered_pipeline_l1_total took=163.6427s`
+- `[PERF] per_tf_l1 tf=4h aligned=0.0000s folds=0.0002s run_l1=52.8752s total=52.8754s rss=5744MB`
+- `[PERF] per_tf_l1 tf=12h aligned=0.0000s folds=0.0003s run_l1=37.2970s total=37.2973s rss=5756MB`
+- `[SYS] [MEM] stage=aggregate_l1 rss=5756MB`
+- `[SYS] [MEM] stage=l1_gate_complete rss=5756MB`
+- `[SYS] [MEM] stage=tiered_pipeline rss=5756MB delta=+396MB peak=8782MB`
+- `[SYS] [MEM] stage=strategy rss=4954MB delta=+2535MB peak=8782MB`
