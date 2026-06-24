@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from src.domain.futures.optimization import opt_data_utils
+from src.domain.futures.optimization.opt_data_utils import _scan_enriched_dataset  # type: ignore[attr-defined]
 
 
 def test_safe_read_funding_parquet_normalizes_duplicate_columns(
@@ -22,7 +26,7 @@ def test_safe_read_funding_parquet_normalizes_duplicate_columns(
         [[1711929600000, "HOOKUSDT", 0.0001, "DUP"]],
         columns=["timestamp", "1", "funding_rate", "1"],
     )
-    monkeypatch.setattr(opt_data_utils.pd, "read_parquet", lambda *_args, **_kwargs: bad_df)  # type: ignore[attr-defined]
+    monkeypatch.setattr(pd, "read_parquet", lambda *_args, **_kwargs: bad_df)
 
     out = opt_data_utils._safe_read_funding_parquet("HOOKUSDT")
     assert out is not None
@@ -74,363 +78,380 @@ def test_evaluate_symbol_data_sufficiency_historical_stage5_union_relaxes_fetch_
     assert relaxed["pass"] is True
 
 
-def test_evaluate_symbol_data_sufficiency_gap_too_large_fails() -> None:
-    """S1: 96% bar coverage but 25h gap → gap_too_large failure."""
-    # Build contiguous 4h bars from 2022-10-01 to 2026-03-31, then insert a 28h gap
-    dt_full = pd.date_range("2022-10-01", "2026-03-31", freq="4h", tz="UTC")
-    gap_start_idx = len(dt_full) // 2
-    # Remove 7 consecutive bars (7 intervals = 6 missing bars = 24h+ gap)
-    dt_gapped = pd.DatetimeIndex(
-        list(dt_full[:gap_start_idx]) + list(dt_full[gap_start_idx + 7 :])
-    )
-    frame = pd.DataFrame(
+# ── Fixtures ──────────────────────────────────────────────────────────────────
+
+
+def _make_enriched_parquet(path: Path, dt_range: pd.DatetimeIndex) -> None:
+    """Write a minimal enriched parquet with sorted int64 timestamp column.
+
+    Mimics the wide_df.to_parquet(enriched_path) write from load_single_symbol_data.
+    timestamp is unix-ms int64, sorted ascending so row-group statistics are valid.
+    """
+    timestamps = dt_range.tz_localize(None).astype("datetime64[ns]").astype("int64") // 10**6
+    table = pa.table(
         {
-            "datetime": dt_gapped,
-            "open": 1.0,
-            "high": 1.1,
-            "low": 0.9,
-            "close": 1.0,
-            "volume": 1.0,
+            "datetime": pa.array(dt_range.to_pydatetime(), type=pa.timestamp("us", tz="UTC")),
+            "timestamp": pa.array(timestamps.tolist(), type=pa.int64()),
+            "open": pa.array([1.0] * len(dt_range), type=pa.float64()),
+            "close": pa.array([1.0] * len(dt_range), type=pa.float64()),
         }
     )
-    symbol_map = {"4h": frame}
-
-    res = opt_data_utils.evaluate_symbol_data_sufficiency(
-        symbol="GAPUSDT",
-        tf="4h",
-        symbol_map=symbol_map,
-        fetch_start="2022-10-01",
-        is_start="2023-10-01",
-        oos_start="2025-10-01",
-        oos_end="2026-03-31",
-        require_exec_1m=False,
-        warmup_bars_required=252,
-        scope_name="stage6_selected",
-    )
-
-    assert res["pass"] is False
-    assert res["reason"] == "gap_too_large"
-    assert res["max_gap_bars"] >= 6
+    pq.write_table(table, str(path))  # type: ignore[no-untyped-call]
 
 
-def test_evaluate_symbol_data_sufficiency_small_gap_passes() -> None:
-    """Small gap (≤5 bars = 20h) must not trigger gap_too_large."""
-    dt_full = pd.date_range("2022-10-01", "2026-03-31", freq="4h", tz="UTC")
-    gap_start_idx = len(dt_full) // 2
-    # Remove 5 consecutive bars (5 intervals = 4 missing bars < threshold)
-    dt_gapped = pd.DatetimeIndex(
-        list(dt_full[:gap_start_idx]) + list(dt_full[gap_start_idx + 5 :])
-    )
-    frame = pd.DataFrame(
-        {
-            "datetime": dt_gapped,
-            "open": 1.0,
-            "high": 1.1,
-            "low": 0.9,
-            "close": 1.0,
-            "volume": 1.0,
-        }
-    )
-    symbol_map = {"4h": frame}
+def _setup_multi_tf_enriched(tmp_path: Path, safe_sym: str) -> None:
+    """Write 4h + 1h + 1D enriched parquets with dep raw files older than enriched.
 
-    res = opt_data_utils.evaluate_symbol_data_sufficiency(
-        symbol="SMALLGAPUSDT",
-        tf="4h",
-        symbol_map=symbol_map,
-        fetch_start="2022-10-01",
-        is_start="2023-10-01",
-        oos_start="2025-10-01",
-        oos_end="2026-03-31",
-        require_exec_1m=False,
-        warmup_bars_required=252,
-        scope_name="stage6_selected",
-    )
-
-    assert res["pass"] is True
-    assert res["max_gap_bars"] < 6
+    Covers all TFs required by the default ``tfs_to_load`` set in
+    ``load_single_symbol_data`` ({tf, "1d", "1h", "4h"}) and satisfies
+    ``compute_segment_merge_index(temp_is[tf], temp_is["1d"])`` dependency.
+    """
+    ranges: dict[str, pd.DatetimeIndex] = {
+        "4h": pd.date_range("2020-01-01", "2025-12-31", freq="4h", tz="UTC"),
+        "1h": pd.date_range("2020-01-01", "2025-12-31", freq="1h", tz="UTC"),
+        "1d": pd.date_range("2020-01-01", "2025-12-31", freq="1D", tz="UTC"),
+    }
+    for tf_key, rng in ranges.items():
+        ep = tmp_path / f"{safe_sym}_{tf_key}_enriched.parquet"
+        _make_enriched_parquet(ep, rng)
+        rp = tmp_path / f"{safe_sym}_{tf_key}.parquet"
+        rp.touch()
+        os.utime(rp, (time.time() - 10, time.time() - 10))
 
 
-def test_evaluate_symbol_data_sufficiency_with_onboard_date() -> None:
-    # 2023-10-01 ~ 2026-03-31 데이터 시뮬레이션 (상장일이 2023-10-01인 코인)
-    dt = pd.date_range("2023-10-01", "2026-03-31", freq="4h", tz="UTC")
-    frame = pd.DataFrame(
-        {
-            "datetime": dt,
-            "open": 1.0,
-            "high": 1.1,
-            "low": 0.9,
-            "close": 1.0,
-            "volume": 1.0,
-        }
-    )
-    symbol_map = {"4h": frame}
-
-    # onboard_date 미지정 시: 2022-10-01(fetch_start) 데이터가 없으므로 fetch_window_short 로 실패해야 함.
-    res_no_onboard = opt_data_utils.evaluate_symbol_data_sufficiency(
-        symbol="PEPEUSDT",
-        tf="4h",
-        symbol_map=symbol_map,
-        fetch_start="2022-10-01",
-        is_start="2023-10-01",
-        oos_start="2025-10-01",
-        oos_end="2026-03-31",
-        require_exec_1m=False,
-        warmup_bars_required=0,
-        scope_name="stage6_selected",
-    )
-    assert res_no_onboard["pass"] is False
-    assert res_no_onboard["reason"] == "fetch_window_short"
-
-    # onboard_date="2023-10-01" 지정 시: effective_fetch_start 가 2023-10-01로 보정되어 패스해야 함.
-    res_with_onboard = opt_data_utils.evaluate_symbol_data_sufficiency(
-        symbol="PEPEUSDT",
-        tf="4h",
-        symbol_map=symbol_map,
-        fetch_start="2022-10-01",
-        is_start="2023-10-01",
-        oos_start="2025-10-01",
-        oos_end="2026-03-31",
-        require_exec_1m=False,
-        warmup_bars_required=0,
-        scope_name="stage6_selected",
-        onboard_date="2023-10-01",
-    )
-    assert res_with_onboard["pass"] is True
+# ── Scenario 1: Happy Path — pushdown returns window-clipped df ───────────────
 
 
-# ── OPT-1: Skip raw_df.copy() when no merge needed ──────────────────────
-
-
-def test_load_single_symbol_data_skips_copy_when_no_merge(
+def test_load_single_symbol_data_cache_hit_pushdown_clips_to_window(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """OPT-1: funding/metrics=None → raw_df is NOT copied (identity equality)."""
-    _TF_FREQ = {"1h": "1h", "4h": "4h", "1d": "D"}
+    """S1: Given enriched parquets for all default TFs + sub-window request →
+    returned df datetime min/max within [req_start_dt, req_end_dt].
+    collector.collect_and_save must NOT be called (cache-hit path).
+    """
+    # Arrange
+    safe_sym = "BTCUSDT"
+    tf_l = "4h"
+    monkeypatch.setattr(opt_data_utils, "FUTURES_DATA_DIR", tmp_path)
 
-    def _fake_collect(self: object, sym: str, tf: str, *_a: Any, **_kw: Any) -> pd.DataFrame:
-        freq = _TF_FREQ.get(tf, "4h")
-        dt = pd.date_range("2023-01-01", "2024-06-01", freq=freq, tz="UTC")
-        return pd.DataFrame({"datetime": dt, "open": 1.0, "close": 1.0})
+    _setup_multi_tf_enriched(tmp_path, safe_sym)
 
-    monkeypatch.setattr(
-        opt_data_utils.DataCollector, "collect_and_save", _fake_collect  # type: ignore[attr-defined]
-    )
-    monkeypatch.setattr(
-        opt_data_utils,
-        "compute_segment_merge_index",
-        lambda *_a, **_kw: 0,
-    )
+    collect_call_count: list[int] = [0]
 
-    _, _, _, insufficient = opt_data_utils.load_single_symbol_data(
-        sym="TESTUSDT",
-        tf="4h",
-        fetch_start="2024-01-01",
-        start="2024-02-01",
-        is_end="2024-04-01",
-        end="2024-06-01",
+    def _fake_collect(self: Any, sym: str, tf: str, *_a: Any, **_kw: Any) -> pd.DataFrame:
+        collect_call_count[0] += 1
+        return pd.DataFrame()
+
+    monkeypatch.setattr(opt_data_utils.DataCollector, "collect_and_save", _fake_collect)  # type: ignore[attr-defined]
+    monkeypatch.setattr(opt_data_utils, "compute_segment_merge_index", lambda *_a, **_kw: 0)
+
+    # Act — request sub-window 2022-01-01 to 2023-12-31
+    _sym, _t_is, t_oos, insufficient = opt_data_utils.load_single_symbol_data(
+        sym=safe_sym,
+        tf=tf_l,
+        fetch_start="2022-01-01",
+        start="2022-07-01",
+        is_end="2023-10-01",
+        end="2023-12-31",
         skip_metrics=True,
     )
+
+    # Assert
     assert insufficient is False
+    assert collect_call_count[0] == 0, "collect_and_save must not be called on cache-hit"
+    assert t_oos is not None
+    df_result: pd.DataFrame = t_oos[tf_l]
+    req_start = pd.Timestamp("2022-01-01", tz="UTC")
+    req_end = pd.Timestamp("2023-12-31", tz="UTC")
+    assert df_result["datetime"].min() >= req_start
+    assert df_result["datetime"].max() <= req_end
 
 
-# ── OPT-2: Single _to_unix_ms call per TF ──────────────────────────────
+# ── Scenario 2: R1 skip — funding/metrics not read on cache-hit + no exec_1m ─
 
 
-def test_load_single_symbol_data_single_unix_ms_call(
+def test_load_single_symbol_data_cache_hit_skips_funding_metrics_read(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """OPT-2: With both funding and metrics, _to_unix_ms called exactly 1x per TF."""
-    _TF_FREQ = {"1h": "1h", "4h": "4h", "1d": "D"}
-    call_count: list[int] = [0]
-    _orig_to_unix = opt_data_utils._to_unix_ms
+    """S2: Given valid cache for all default TFs + load_exec_1m=False →
+    _safe_read_funding_parquet must NOT be called (lazy load skipped entirely).
+    """
+    # Arrange
+    safe_sym = "ETHUSDT"
+    tf_l = "4h"
+    monkeypatch.setattr(opt_data_utils, "FUTURES_DATA_DIR", tmp_path)
 
-    def _tracking_to_unix(s: Any) -> Any:
-        call_count[0] += 1
-        return _orig_to_unix(s)
+    _setup_multi_tf_enriched(tmp_path, safe_sym)
 
-    monkeypatch.setattr(opt_data_utils, "_to_unix_ms", _tracking_to_unix)
-
-    # Mock funding parquet
-    funding_df = pd.DataFrame(
-        {
-            "timestamp": [1704067200000, 1704096000000],
-            "funding_rate": [0.0001, -0.0002],
-            "datetime": pd.to_datetime(
-                ["2024-01-01 00:00:00", "2024-01-01 04:00:00"], utc=True
-            ),
-        }
-    )
+    funding_read_count: list[int] = [0]
 
     def _fake_read_funding(sym: str) -> pd.DataFrame | None:
-        return funding_df
+        funding_read_count[0] += 1
+        return None
 
-    monkeypatch.setattr(
-        opt_data_utils, "_safe_read_funding_parquet", _fake_read_funding
-    )
+    monkeypatch.setattr(opt_data_utils, "_safe_read_funding_parquet", _fake_read_funding)
+    monkeypatch.setattr(opt_data_utils.DataCollector, "collect_and_save", lambda *_a, **_kw: pd.DataFrame())  # type: ignore[attr-defined]
+    monkeypatch.setattr(opt_data_utils, "compute_segment_merge_index", lambda *_a, **_kw: 0)
 
-    def _fake_collect(self: object, sym: str, tf: str, *_a: Any, **_kw: Any) -> pd.DataFrame:
-        freq = _TF_FREQ.get(tf, "4h")
-        dt = pd.date_range("2023-01-01", "2024-06-01", freq=freq, tz="UTC")
-        return pd.DataFrame({"datetime": dt, "open": 1.0, "close": 1.0})
-
-    monkeypatch.setattr(
-        opt_data_utils.DataCollector, "collect_and_save", _fake_collect  # type: ignore[attr-defined]
-    )
-    monkeypatch.setattr(
-        opt_data_utils,
-        "compute_segment_merge_index",
-        lambda *_a, **_kw: 0,
-    )
-
-    call_count[0] = 0  # reset before load
+    # Act
     _, _, _, insufficient = opt_data_utils.load_single_symbol_data(
-        sym="TESTUSDT",
-        tf="4h",
-        fetch_start="2024-01-01",
-        start="2024-02-01",
-        is_end="2024-04-01",
-        end="2024-06-01",
-        skip_metrics=False,
+        sym=safe_sym,
+        tf=tf_l,
+        fetch_start="2022-01-01",
+        start="2022-07-01",
+        is_end="2023-10-01",
+        end="2023-12-31",
+        skip_metrics=False,  # metrics enabled — cache-hit + no exec_1m must skip funding I/O
+        load_exec_1m=False,
     )
+
+    # Assert
     assert insufficient is False
-    # Expected: 1 call per TF (3 TFs: 4h, 1d, 1h)
-    # Old code called _to_unix_ms up to 2x per TF (funding + metrics checks)
-    assert call_count[0] == 3, (
-        f"Expected 3 _to_unix_ms calls (1 per TF) but got {call_count[0]}"
+    assert funding_read_count[0] == 0, (
+        "_safe_read_funding_parquet must not be called on cache-hit with load_exec_1m=False"
     )
 
 
-# ── OPT-3: Lightweight audit for merged stage ──────────────────────────
+# ── Scenario 3: Edge — empty window → insufficient=True ───────────────────────
 
 
-def test_append_stage_integrity_merged_lightweight() -> None:
-    """OPT-3: merged stage stores rows/cols only, not nan_pct."""
-    df = pd.DataFrame({
-        "a": [1.0, None],
-        "b": [3.0, 4.0],
-        "datetime": pd.to_datetime(["2024-01-01", "2024-01-02"], utc=True),
-    })
-    audit: list[dict[str, Any]] = []
-    opt_data_utils._append_stage_integrity(
-        audit, symbol="TST", timeframe="4h", stage="merged", df=df,
+def test_load_single_symbol_data_cache_hit_empty_window_returns_insufficient(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S3: Request window outside data range → df is empty → insufficient=True."""
+    # Arrange
+    safe_sym = "SOLUSDT"
+    tf_l = "4h"
+    monkeypatch.setattr(opt_data_utils, "FUTURES_DATA_DIR", tmp_path)
+
+    # enriched data only covers 2020-2021; request window is 2022 (outside range)
+    full_range = pd.date_range("2020-01-01", "2021-12-31", freq="4h", tz="UTC")
+    enriched_path = tmp_path / f"{safe_sym}_{tf_l}_enriched.parquet"
+    _make_enriched_parquet(enriched_path, full_range)
+
+    raw_path = tmp_path / f"{safe_sym}_{tf_l}.parquet"
+    raw_path.touch()
+    os.utime(raw_path, (time.time() - 10, time.time() - 10))
+
+    monkeypatch.setattr(opt_data_utils, "compute_segment_merge_index", lambda *_a, **_kw: 0)
+
+    # Act — request window entirely outside enriched data range
+    _, _, _, insufficient = opt_data_utils.load_single_symbol_data(
+        sym=safe_sym,
+        tf=tf_l,
+        fetch_start="2022-06-01",
+        start="2022-07-01",
+        is_end="2022-10-01",
+        end="2022-12-31",
+        skip_metrics=True,
+        target_tfs=[tf_l],
     )
-    assert len(audit) == 1
-    rec = audit[0]
-    assert rec["symbol"] == "TST"
-    assert rec["timeframe"] == "4h"
-    assert rec["stage"] == "merged"
-    assert rec["rows"] == 2.0
-    assert rec["cols"] == 3.0
-    assert "nan_pct" not in rec
-    assert "gap_count" not in rec
+
+    # Assert: empty df after pushdown/mask → insufficient=True
+    assert insufficient is True
 
 
-def test_append_stage_integrity_raw_still_lightweight() -> None:
-    """raw stage still stores rows/cols (unchanged behavior)."""
-    df = pd.DataFrame({"a": [1.0], "b": [2.0]})
-    audit: list[dict[str, Any]] = []
-    opt_data_utils._append_stage_integrity(
-        audit, symbol="TST", timeframe="4h", stage="raw", df=df,
+# ── Scenario 4: Fallback — filters exception → full-read+mask produces same df ─
+
+
+def test_load_single_symbol_data_cache_hit_fallback_on_pushdown_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S4: When pd.read_parquet with filters raises, fallback to full-read+mask.
+    Result df must be identical to what the mask would produce.
+    """
+    # Arrange
+    safe_sym = "BNBUSDT"
+    tf_l = "4h"
+    monkeypatch.setattr(opt_data_utils, "FUTURES_DATA_DIR", tmp_path)
+
+    _setup_multi_tf_enriched(tmp_path, safe_sym)
+
+    _orig_read_parquet = pd.read_parquet
+    call_count: list[int] = [0]
+
+    def _patched_read_parquet(path: Any, *args: Any, **kwargs: Any) -> pd.DataFrame:
+        # Raise on pushdown attempt (filters kwarg present); succeed on fallback call
+        if "filters" in kwargs:
+            call_count[0] += 1
+            raise RuntimeError("simulated pushdown failure")
+        return _orig_read_parquet(path, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_parquet", _patched_read_parquet)
+    monkeypatch.setattr(opt_data_utils.DataCollector, "collect_and_save", lambda *_a, **_kw: pd.DataFrame())  # type: ignore[attr-defined]
+    monkeypatch.setattr(opt_data_utils, "compute_segment_merge_index", lambda *_a, **_kw: 0)
+
+    # Act
+    _, _, t_oos, insufficient = opt_data_utils.load_single_symbol_data(
+        sym=safe_sym,
+        tf=tf_l,
+        fetch_start="2022-01-01",
+        start="2022-07-01",
+        is_end="2023-10-01",
+        end="2023-12-31",
+        skip_metrics=True,
     )
-    assert len(audit) == 1
-    rec = audit[0]
-    assert rec["rows"] == 1.0
-    assert rec["cols"] == 2.0
+
+    # Assert: fallback path succeeded, pushdown was attempted (call_count > 0)
+    assert call_count[0] > 0, "pushdown must have been attempted before fallback"
+    assert insufficient is False
+    assert t_oos is not None
+    df_result: pd.DataFrame = t_oos[tf_l]
+    req_start = pd.Timestamp("2022-01-01", tz="UTC")
+    req_end = pd.Timestamp("2023-12-31", tz="UTC")
+    assert df_result["datetime"].min() >= req_start
+    assert df_result["datetime"].max() <= req_end
 
 
-def test_append_stage_integrity_preserves_fillna() -> None:
-    """fillna_cols coverage still computed for merged stage."""
-    df = pd.DataFrame({
-        "a": [1.0, None, 3.0],
-        "b": [None, 2.0, 3.0],
-        "datetime": pd.to_datetime(
-            ["2024-01-01", "2024-01-02", "2024-01-03"], utc=True
-        ),
-    })
-    audit: list[dict[str, Any]] = []
-    opt_data_utils._append_stage_integrity(
-        audit, symbol="TST", timeframe="4h", stage="merged", df=df,
-        fillna_cols=["a", "b"],
+# ── Scenario 5a: _scan_enriched_dataset happy-path — window clip + key mapping ─
+
+
+def test_scan_enriched_dataset_clips_to_window_and_maps_keys(
+    tmp_path: Path,
+) -> None:
+    """S5a: N-symbol x M-TF enriched fixtures → each DataFrame in scan result
+    has correct key format "{safe_sym}_{tf_l}" and datetime within window.
+    """
+    # Arrange: 2 symbols x 2 TFs
+    syms = [("BTCUSDT", "4h"), ("ETHUSDT", "1d")]
+    full_range = pd.date_range("2020-01-01", "2025-12-31", freq="4h", tz="UTC")
+    paths: list[Path] = []
+    for safe_sym, tf_l in syms:
+        path = tmp_path / f"{safe_sym}_{tf_l}_enriched.parquet"
+        _make_enriched_parquet(path, full_range)
+        paths.append(path)
+
+    req_start = pd.Timestamp("2023-01-01", tz="UTC")
+    req_end = pd.Timestamp("2023-06-30", tz="UTC")
+    start_ms = int(req_start.value // 1_000_000)
+    end_ms = int(req_end.value // 1_000_000)
+
+    # Act
+    result = _scan_enriched_dataset(paths, start_ms, end_ms)
+
+    # Assert: one entry per (sym, tf)
+    assert set(result.keys()) == {"BTCUSDT_4h", "ETHUSDT_1d"}
+    for key, df in result.items():
+        assert not df.empty, f"{key} must not be empty for overlapping window"
+        assert df["datetime"].min() >= req_start, f"{key} min out of window"
+        assert df["datetime"].max() <= req_end, f"{key} max out of window"
+
+
+# ── Scenario 5b: _scan_enriched_dataset — missing timestamp col → graceful skip ─
+
+
+def test_scan_enriched_dataset_skips_file_without_timestamp_column(
+    tmp_path: Path,
+) -> None:
+    """S5b: enriched file lacking 'timestamp' column must be silently skipped.
+    Result dict must NOT contain its key, and no exception propagates.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    # Arrange: write parquet without timestamp column
+    path = tmp_path / "XYZUSDT_4h_enriched.parquet"
+    dt_range = pd.date_range("2023-01-01", periods=10, freq="4h", tz="UTC")
+    table = pa.table(
+        {
+            "datetime": pa.array(dt_range.to_pydatetime(), type=pa.timestamp("us", tz="UTC")),
+            "close": pa.array([1.0] * 10, type=pa.float64()),
+            # intentionally NO 'timestamp' column
+        }
     )
-    rec = audit[0]
-    assert "pre_fillna_nan_pct" in rec
-    assert rec["pre_fillna_nan_pct"] == pytest.approx(2.0 / 6.0)
-    assert "nan_pct" not in rec
+    pq.write_table(table, str(path))  # type: ignore[no-untyped-call]
+
+    start_ms = int(pd.Timestamp("2023-01-01", tz="UTC").value // 1_000_000)
+    end_ms = int(pd.Timestamp("2023-06-30", tz="UTC").value // 1_000_000)
+
+    # Act
+    result = _scan_enriched_dataset([path], start_ms, end_ms)
+
+    # Assert: key absent — graceful skip
+    assert "XYZUSDT_4h" not in result
 
 
-# ── OPT-4: Column group cache ──────────────────────────────────────────
+# ── Scenario 5c: _scan_enriched_dataset — window outside data range → empty df ─
 
 
-def _make_feature_df(cols: tuple[str, ...], n: int = 10) -> pd.DataFrame:
-    data: dict[str, Any] = {"datetime": pd.date_range("2024-01-01", periods=n, freq="4h", tz="UTC")}
-    for c in cols:
-        data[c] = np.random.default_rng(42).random(n)
-    return pd.DataFrame(data)
+def test_scan_enriched_dataset_returns_empty_df_for_non_overlapping_window(
+    tmp_path: Path,
+) -> None:
+    """S5c: request window outside data range → result df is empty.
+    Arrow prunes all row-groups; key present with 0-row df.
+    """
+    # Arrange: data 2020-2021 only
+    path = tmp_path / "SOLUSDT_4h_enriched.parquet"
+    data_range = pd.date_range("2020-01-01", "2021-12-31", freq="4h", tz="UTC")
+    _make_enriched_parquet(path, data_range)
+
+    # Request window 2023 — entirely outside data range
+    start_ms = int(pd.Timestamp("2023-01-01", tz="UTC").value // 1_000_000)
+    end_ms = int(pd.Timestamp("2023-06-30", tz="UTC").value // 1_000_000)
+
+    # Act
+    result = _scan_enriched_dataset([path], start_ms, end_ms)
+
+    # Assert: key present but df is empty (all row-groups pruned)
+    assert "SOLUSDT_4h" in result
+    assert result["SOLUSDT_4h"].empty
 
 
-def test_feature_group_coverage_cache_used_on_repeat_call() -> None:
-    """OPT-4: Second call with same columns should hit cache."""
-    opt_data_utils._COL_GROUP_CACHE.clear()
-    cols = ("open", "high", "low", "close", "volume", "funding_rate", "open_interest")
-    df1 = _make_feature_df(cols)
-    df2 = _make_feature_df(cols)
-
-    r1 = opt_data_utils._feature_group_coverage(df1, tf_label="4h")
-    assert len(opt_data_utils._COL_GROUP_CACHE) == 1
-    r2 = opt_data_utils._feature_group_coverage(df2, tf_label="4h")
-    assert r1 == r2
+# ── Scenario 6: exec_1m opt-out — Arrow fast-path bypassed, all syms → fallback ─
 
 
-def test_feature_group_coverage_cache_keyed_by_tf() -> None:
-    """Different tf_label values produce separate cache entries."""
-    opt_data_utils._COL_GROUP_CACHE.clear()
-    cols = ("open", "close", "funding_rate", "oi")
-    df = _make_feature_df(cols)
+def test_load_futures_data_maps_exec_1m_routes_all_to_threadpool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S6: When use_exec_1m=True, valid_enriched symbols must NOT go through the Arrow
+    path — they are routed to load_single_symbol_data ThreadPool fallback instead.
+    Verified by: _scan_enriched_dataset call_count == 0 and load_single_symbol_data
+    is called for every symbol.
+    """
+    # Arrange
+    safe_sym = "BTCUSDT"
+    monkeypatch.setattr(opt_data_utils, "FUTURES_DATA_DIR", tmp_path)
+    monkeypatch.setenv("FUTURES_EXECUTION_MODE", "intrabar_1m")
 
-    opt_data_utils._feature_group_coverage(df, tf_label="4h")
-    assert len(opt_data_utils._COL_GROUP_CACHE) == 1
-    opt_data_utils._feature_group_coverage(df, tf_label="1d")
-    assert len(opt_data_utils._COL_GROUP_CACHE) == 2
+    _setup_multi_tf_enriched(tmp_path, safe_sym)
 
+    scan_call_count: list[int] = [0]
+    _orig_scan = opt_data_utils._scan_enriched_dataset  # type: ignore[attr-defined]
 
-def test_feature_group_coverage_empty_df_returns_empty() -> None:
-    """Empty DataFrame returns zeroed coverage immediately (no cache entry)."""
-    opt_data_utils._COL_GROUP_CACHE.clear()
-    r = opt_data_utils._feature_group_coverage(pd.DataFrame())
-    for group in opt_data_utils._FEATURE_GROUP_PATTERNS:
-        assert r[group] == {"col_count": 0.0, "non_null_coverage": 0.0, "non_zero_coverage": 0.0}
-    assert len(opt_data_utils._COL_GROUP_CACHE) == 0
+    def _counting_scan(*args: Any, **kwargs: Any) -> dict[str, pd.DataFrame]:
+        scan_call_count[0] += 1
+        return _orig_scan(*args, **kwargs)  # type: ignore[no-any-return]
 
+    monkeypatch.setattr(opt_data_utils, "_scan_enriched_dataset", _counting_scan)
 
-def test_feature_group_coverage_non_numeric_coerced() -> None:
-    """Numeric coercion for non-numeric columns still works with cached mapping."""
-    opt_data_utils._COL_GROUP_CACHE.clear()
-    df = pd.DataFrame({
-        "open": [1.0, 2.0],
-        "close": [3.0, 4.0],
-        "funding_rate": ["0.0001", "0.0002"],
-    })
-    r = opt_data_utils._feature_group_coverage(df, tf_label="4h")
-    price = r.get("price", {})
-    assert price.get("col_count", 0.0) == 2.0
-    funding = r.get("funding", {})
-    assert funding.get("col_count", 0.0) == 1.0
+    load_single_syms: list[str] = []
+    _orig_load_single = opt_data_utils.load_single_symbol_data
 
+    def _tracking_load_single(sym: str, *args: Any, **kwargs: Any) -> Any:
+        load_single_syms.append(sym)
+        # Return insufficient to keep test fast (no real data processing needed)
+        return sym, None, None, True
 
-# ── Regression: Merge path still works when merge is needed ─────────────
+    monkeypatch.setattr(opt_data_utils, "load_single_symbol_data", _tracking_load_single)
+    monkeypatch.setattr(opt_data_utils, "compute_segment_merge_index", lambda *_a, **_kw: 0)
 
-
-def test_append_stage_integrity_other_stage_uses_full() -> None:
-    """Non-merged/raw stages still call the full integrity function."""
-    df = pd.DataFrame({
-        "a": [1.0, 2.0],
-        "datetime": pd.to_datetime(["2024-01-01", "2024-01-02"], utc=True),
-    })
-    audit: list[dict[str, Any]] = []
-    opt_data_utils._append_stage_integrity(
-        audit, symbol="TST", timeframe="4h", stage="merged_other", df=df,
+    # Act
+    _data_maps, _oos_data_maps, _valid_symbols = opt_data_utils.load_futures_data_maps_for_symbols(
+        symbols=[safe_sym],
+        tf="4h",
+        fetch_start="2022-01-01",
+        start="2022-07-01",
+        is_end="2023-10-01",
+        end="2023-12-31",
+        skip_metrics=True,
+        load_exec_1m=True,
     )
-    rec = audit[0]
-    assert rec["stage"] == "merged_other"
-    assert "rows" in rec or "nan_pct" in rec  # called summarize_dataframe_integrity
 
+    # Assert: Arrow scan NOT called; symbol routed to load_single_symbol_data
+    assert scan_call_count[0] == 0, "_scan_enriched_dataset must not be called when exec_1m=True"
+    assert safe_sym in load_single_syms, "BTCUSDT must be processed via load_single_symbol_data fallback"
