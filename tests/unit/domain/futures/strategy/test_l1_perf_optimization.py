@@ -611,6 +611,7 @@ def test_run_l1_nested_swf_soft_cap_forces_compact_submit(
     def record_fold_submit(*args: Any, **kwargs: Any) -> Any:
         submitted_compact_flags.append(bool(args[3]))
         return SimpleNamespace(
+            fold_id=args[0],
             fit_status="trained",
             n_fit=10,
             timing_profile=dict.fromkeys(
@@ -886,3 +887,117 @@ def test_event_results_from_fold_output_compact_payload_matches_legacy() -> None
     pd.testing.assert_series_equal(legacy_frame["decision_idx"], compact_frame["decision_idx"])
     pd.testing.assert_series_equal(legacy_frame["fold_id"], compact_frame["fold_id"])
     assert len(legacy_frame) == len(compact_frame) == 2
+
+
+# ─── OPT-0: pipeline.py l1_tfs default alignment ────────────────────────────
+
+
+def test_run_tiered_pipeline_default_l1_tfs_matches_config() -> None:
+    """S3: run_tiered_pipeline default l1_tfs must match CandidateStrategyConfig.l1_tfs."""
+    import inspect
+
+    from src.domain.futures.strategy.config import CandidateStrategyConfig
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
+    sig = inspect.signature(run_tiered_pipeline)
+    default_l1_tfs = sig.parameters["l1_tfs"].default
+    ref_cfg = CandidateStrategyConfig()
+    assert default_l1_tfs == ref_cfg.l1_tfs, (
+        f"Default l1_tfs={default_l1_tfs} != config l1_tfs={ref_cfg.l1_tfs}"
+    )
+
+
+# ─── OPT-3: _t_ppf_cached equivalence ──────────────────────────────────────
+
+
+def test_t_ppf_cached_equivalence() -> None:
+    """S1: _t_ppf_cached must produce bit-identical results vs direct stats.t.ppf."""
+    import scipy.stats as stats
+
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import _t_ppf_cached
+
+    alpha = 0.05
+    power = 0.80
+    df_test_values = [2.0, 5.0, 10.0, 30.0, 100.0, 500.0]
+
+    for df in df_test_values:
+        expected_t_crit = float(stats.t.ppf(1.0 - alpha, float(df)))
+        expected_t_power = float(stats.t.ppf(power, float(df)))
+
+        actual_t_crit = _t_ppf_cached(round((1.0 - alpha) * 1000), round(df))
+        actual_t_power = _t_ppf_cached(round(power * 1000), round(df))
+
+        assert actual_t_crit == pytest.approx(expected_t_crit, abs=1e-12), f"t_crit mismatch df={df}"
+        assert actual_t_power == pytest.approx(expected_t_power, abs=1e-12), f"t_power mismatch df={df}"
+
+
+# ─── OPT-4: prefit_layer1_model + assemble_layer1_artifact equivalence ────
+
+
+@patch("src.domain.futures.strategy.tiered_workflow.signal_selection.fit_regime_conditional_ensemble")
+@patch("src.domain.futures.strategy.tiered_workflow.signal_selection.build_candidate_dataset")
+@patch("src.domain.futures.strategy.tiered_workflow.signal_selection.fit_candidate_feature_schema")
+def test_prefit_artifact_equivalence(
+    mock_schema: MagicMock,
+    mock_dataset: MagicMock,
+    mock_ensemble: MagicMock,
+) -> None:
+    """S1: prefit_layer1_model + assemble_layer1_artifact === fit_layer1_inference_artifact."""
+    from src.domain.futures.strategy.candidate_contracts import QualifiedSignalRegistry
+    from src.domain.futures.strategy.config import CandidateStrategyConfig
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+        assemble_layer1_artifact,
+        fit_layer1_inference_artifact,
+        prefit_layer1_model,
+    )
+
+    mock_schema.return_value = SimpleNamespace(version="test_v1", feature_names=("f1", "f2"))
+    mock_dataset.return_value = SimpleNamespace(
+        event_index=pd.DataFrame({"symbol": ["BTCUSDT"], "side": [1], "expected_holding_bars": [12]}),
+        y_return_bps=np.array([10.0], dtype=np.float64),
+        y_gross_return_bps=np.array([12.0], dtype=np.float64),
+    )
+    mock_ensemble.return_value = SimpleNamespace(predict=lambda x: x)
+
+    aligned = MagicMock()
+    aligned.symbols = ("BTCUSDT",)
+    aligned.datetimes = np.array([np.datetime64("2024-01-01", "ns")])
+
+    registry = QualifiedSignalRegistry(
+        by_symbol={},
+        ready_symbols=(),
+        trade_scope_count=1,
+        registry_version="test",
+    )
+    labeled_events = pd.DataFrame({"entry_idx": [0], "family": ["mom"], "variant": ["a"], "signal_cell": ["trend"]})
+    cfg = CandidateStrategyConfig()
+
+    # Act: prefit + assemble
+    core = prefit_layer1_model(
+        labeled_events=labeled_events,
+        aligned=aligned,
+        fit_start_idx=0,
+        fit_end_idx=10,
+        cfg=cfg,
+    )
+    assembled = assemble_layer1_artifact(core=core, deployment_registry=registry, fit_end_idx=10)
+
+    # Act: full fit
+    full = fit_layer1_inference_artifact(
+        labeled_events=labeled_events,
+        aligned=aligned,
+        deployment_registry=registry,
+        fit_start_idx=0,
+        fit_end_idx=10,
+        cfg=cfg,
+        seed=42,
+    )
+
+    # Assert: all registry-independent fields equal
+    assert assembled.feature_schema is full.feature_schema
+    assert assembled.model is full.model
+    assert assembled.baseline_by_key == full.baseline_by_key
+    assert assembled.config_hash == full.config_hash
+    assert assembled.model_version == full.model_version
+    assert assembled.l1_fit_end_idx == full.l1_fit_end_idx
+    # Registry is present in both
+    assert assembled.deployment_registry is full.deployment_registry is registry
