@@ -1151,6 +1151,11 @@ def run_l1_nested_swf(
     
     evidence_results: list[Any] = []
     outer_results: list[Any] = []
+    _wf_profile_keys = (
+        "schema", "dataset_fit", "dataset_early_stop",
+        "dataset_calibration_fit", "dataset_calibration_eval",
+        "dataset_oos", "edge_fit", "inference", "selection",
+    )
     
     try:
         with ProcessPoolExecutor(max_workers=max_pool_workers, mp_context=mp_ctx) as executor:
@@ -1193,11 +1198,17 @@ def run_l1_nested_swf(
                 logger.debug("[MEM] stage=evidence_snapshots rss=%.0fMB n_snapshots=%d",
                     _get_rss_mb(), len(evidence_snapshots))
 
+                _wf_agg_timings = dict.fromkeys(_wf_profile_keys, 0.0)
+                for _r in evidence_results:
+                    _prof = getattr(_r, "timing_profile", {}) or {}
+                    for _k in _wf_profile_keys:
+                        _wf_agg_timings[_k] += _prof.get(_k, 0.0)
                 del evidence_results
                 gc.collect()
                 logger.debug("[MEM] stage=post_evidence_free rss=%.0fMB", _get_rss_mb())
             else:
                 evidence_snapshots = ()
+                _wf_agg_timings = dict.fromkeys(_wf_profile_keys, 0.0)
 
             logger.log(PERF, "[PERF] l1_evidence_phase took=%.4fs", time.perf_counter() - t_exec)
             snapshots_by_idx = {s.as_of_idx: s for s in evidence_snapshots}
@@ -1246,8 +1257,28 @@ def run_l1_nested_swf(
 
     _log_fold_avg_profile(outer_results, "outer")
 
-    logger.log(PERF, "[PERF] l1_nested_parallel_exec n_folds=%d took=%.4fs",
-        len(outer_folds), time.perf_counter() - t_outer_exec)
+    # ── WF wall-time summary ────────────────────────────────────────────
+    t_wf_now = time.perf_counter()
+    ev_wall = t_wf_now - t_exec
+    out_wall = t_wf_now - t_outer_exec
+    for _r in outer_results:
+        _prof = getattr(_r, "timing_profile", {}) or {}
+        for _k in _wf_profile_keys:
+            _wf_agg_timings[_k] += _prof.get(_k, 0.0)
+    n_total = len(evidence_folds) + len(outer_folds)
+    if n_total > 0:
+        for _k in _wf_profile_keys:
+            _wf_agg_timings[_k] /= n_total
+    logger.log(
+        PERF,
+        "[PERF] l1_wf_summary n_folds=%d evidence=%d outer=%d workers=%d "
+        "wall: ev=%.1fs out=%.1fs total=%.1fs "
+        "avg: selection=%.3fs ds_fit=%.3fs schema=%.3fs edge_fit=%.3fs inference=%.3fs",
+        n_total, len(evidence_folds), len(outer_folds), max_pool_workers,
+        ev_wall, out_wall, ev_wall + out_wall,
+        _wf_agg_timings["selection"], _wf_agg_timings["dataset_fit"],
+        _wf_agg_timings["schema"], _wf_agg_timings["edge_fit"], _wf_agg_timings["inference"],
+    )
 
     t_outer = time.perf_counter()
     for outer_idx, outer_fold in enumerate(outer_folds):
