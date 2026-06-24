@@ -71,3 +71,11 @@ ai_read_policy: when_related
 - `l1_nested_result_soft_cap_mb`를 dead-config에서 실제 OOM guard로 승격: `resolve_safe_nested_workers()`의 `result_soft_cap_mb` 파라미터 연결, `run_l1_nested_swf()`에서 soft_cap 부족 시 compact 강제(force_compact).
 - `l1_nested_workers`(pinned) 의미를 "고정값"에서 "희망 상한(safety-clamped upper bound)"으로 변경: pinned가 low-memory guard, soft-cap guard, oversubscription guard를 우회하지 못함.
 - Audit 후속: config 주석 정합, `test_scenario_5_adaptive_worker_cap` stage cap 기대값 6→3 갱신 + psutil mock 추가, `TestResolveNestedWorkersPinned`에 soft_cap override 검증 추가.
+
+## Phase 8: Data Load Arrow Optimization (ADR-042, 6/24)
+- **P1-A: Lazy Funding/Metrics Load**: `_prepare_funding_metrics()` 추출, cache-hit + no exec_1m 경로에서 funding/metrics I/O 완전 skip (57 심볼 × GIL-bound parse 낭비 제거).
+- **P1-B: Parquet Predicate Pushdown**: `pd.read_parquet(filters=[("timestamp",">=",ms),("<=",ms)])` 도입, enriched 캐시의 row-group statistics 기반 디코드 최적화 → full-read + mask 제거.
+- **P2: Arrow Dataset C++ 병렬 스캔**: `_scan_enriched_dataset()`으로 `pyarrow.dataset` + row-group 멀티스레드 디코드(GIL 해제) → 2-pass 분리(I/O parallel + Python-bound 후처리 순차) → cache-hit 경로 CPU 병렬화.
+- **exec_1m Safeguard**: `intrabar_1m` 모드 시 Arrow fast-path opt-out → ThreadPool fallback, exec_1m + funding_event_mask 키 누락 방지.
+- **Measured Improvement**: Data Load 14.26s → 9.99s (-29.9%). 253 심볼 중 129심볼은 Arrow path (enriched cache-hit), 124심볼은 fallback. Phase L1 전체 data stage 17s → 11.58s.
+- **Test Coverage**: Scenario 1-6 (10/10 PASS, 0.69s) — cache-hit pushdown, lazy skip, empty window, fallback, phase2 equiv, exec_1m opt-out.
