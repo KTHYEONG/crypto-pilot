@@ -909,7 +909,6 @@ def _resolve_sleeve_signals_at_bar(
     for j in active_sleeves:
         sym_col = int(sleeve_to_sym_arr[j])
         if not tradeable_mask[sym_col]:
-            n_dropped += 1
             continue
 
         sleeve_id = sleeve_ids[j]
@@ -1321,6 +1320,7 @@ def _run_awf_simulation(
             _attr_signal_total = 0
             _attr_dropped = 0
             _attr_netting = 0
+            _fold_rebalance_count = 0
         for t in range(fold.oos_start, fold.oos_end - 1, rebalance_bars):
             t_end = min(t + rebalance_bars, fold.oos_end - 1)
 
@@ -1429,10 +1429,6 @@ def _run_awf_simulation(
                 m = 1.0
             if _diag:
                 _attr_throttle.append(float(m))
-                if np.any(np.abs(w) > 1e-12):
-                    _attr_expected += float(t_end - t) * float(np.dot(w, mu_arr * 1e-4))
-                _attr_gross_exps.append(float(np.sum(np.abs(w))))
-                _attr_net_exps.append(float(np.sum(w)))
             if risk_budget_floor_ratio > 0.0 and vol_target is not None:
                 w = _apply_risk_budget_floor(
                     weights=w,
@@ -1462,6 +1458,12 @@ def _run_awf_simulation(
                     w[_over] = np.sign(w[_over]) * _max_w[_over]
 
             last_w = w
+            if _diag:
+                if np.any(np.abs(w) > 1e-12):
+                    _attr_expected += float(t_end - t) * float(np.dot(w, mu_arr * 1e-4))
+                _attr_gross_exps.append(float(np.sum(np.abs(w))))
+                _attr_net_exps.append(float(np.sum(w)))
+                _fold_rebalance_count += 1
 
             w_base = build_directional_risk_matched_equal_weight(
                 signed_net_mu_bps=mu_arr,
@@ -1602,7 +1604,7 @@ def _run_awf_simulation(
             _attr = _assemble_fold_attribution(
                 fold_idx=_fold_idx,
                 oos_bars=fold.oos_end - fold.oos_start,
-                n_rebal=len(_attr_throttle) or rebalance_count,
+                n_rebal=len(_attr_throttle) or _fold_rebalance_count,
                 realized_price=_attr_price,
                 realized_funding=_attr_funding,
                 realized_cost=_attr_cost,
