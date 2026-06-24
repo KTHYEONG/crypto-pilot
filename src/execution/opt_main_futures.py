@@ -833,8 +833,8 @@ def _run_universe_stage(
         force_rebuild=run_config.refresh_universe,
         l2_start=layered_window.l2_start if layered_window is not None else None,
     )
-    _logger.log(PERF, 
-        "[perf-universe] discover_universe_timeline took %.4fs",
+    _logger.debug(
+        "[PERF] step=discover_universe_timeline elapsed=%.4fs",
         time.perf_counter() - t_discover,
     )
 
@@ -846,9 +846,8 @@ def _run_universe_stage(
         tf=run_config.timeframe,
     ):
         raise RuntimeError("universe_quality_rejected")
-    _logger.log(
-        PERF,
-        "[perf-universe] validate_universe_quality took %.4fs",
+    _logger.debug(
+        "[PERF] step=validate_universe_quality elapsed=%.4fs",
         time.perf_counter() - t_quality,
     )
 
@@ -922,8 +921,8 @@ def _run_data_stage(
         scope_name=scope_name,
         target_tfs=None,
     )
-    _logger.log(PERF,
-        "[perf-data] load_futures_data_maps_for_symbols took %.4fs",
+    _logger.debug(
+        "[PERF] step=load_futures_data_maps_for_symbols elapsed=%.4fs",
         time.perf_counter() - t_load,
     )
     if probe_tf_grid_resolved:
@@ -947,8 +946,8 @@ def _run_data_stage(
             warmup_bars_required=warmup_bars_required,
             inference_timeline=inference_timeline or None,
         )
-        _logger.log(PERF, 
-            "[perf-data] inject_membership_masks_into_maps took %.4fs",
+        _logger.debug(
+            "[PERF] step=inject_membership_masks_into_maps elapsed=%.4fs",
             time.perf_counter() - t_inject,
         )
 
