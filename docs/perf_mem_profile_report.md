@@ -1,92 +1,83 @@
-# L1 Pipeline Performance Profile (2026-06-24)
+# Layer 1 Performance & Memory Profile Report
 
-## Environment
-- **Host RAM**: 32 GB / **WSL2 RAM**: 18 GB / **WSL2 Swap**: 20 GB
-- **CPU**: 8 physical cores
-- **Pipeline**: `--phase l1` / 52 symbols / 8,761 bars (4h base)
-- **Command**: `uv run python src/execution/opt_main_futures.py --phase l1 --timeframe 4h --sync skip --date 2026-06-24`
+## # 🎯 Overview
+This report documents the performance and memory usage metrics captured during the Layer 1 execution phase (`--phase l1 --sync skip`) with `LOG_LEVEL=DEBUG` on **2026-06-24**. All performance logs have been standardized to use the `[PERF]` prefix under standard `DEBUG` level for structured parsing and profiling.
 
 ---
 
-## 1. Time Breakdown
+## # 📊 Key Execution Timing Metrics
 
-### 1.1 Overall Pipeline (L1)
+### 1. Data Processing & Universe Discovery
+- **Universe Timeline Discovery**:
+  - `[PERF] step=discover_universe_timeline elapsed=1.4140s`
+- **Universe Quality Validation**:
+  - `[PERF] step=validate_universe_quality elapsed=0.1779s`
+- **Futures Data Loading**:
+  - `[PERF] step=load_futures_data_maps_for_symbols elapsed=10.3367s`
+- **Membership Mask Injection**:
+  - `[PERF] step=inject_membership_masks_into_maps elapsed=1.3137s`
 
-| Phase | Duration | Share |
-|---|---|---|
-| Universe Discovery | 1.92s | 0.7% |
-| Data Load (57 → 52 syms) | **16.90s** | 5.9% |
-| Bridge Candidate Strategy | **58.24s** | 20.2% |
-| Tiered Pipeline (L1 Nested SWF) | **~211s** | 73.2% |
-| **Total** | **288.10s** | 100% |
+### 2. Strategy Calculation (Bridge & Alignment)
+- **Candidate Strategy Execution**:
+  - `[PERF] bridge_run_candidate_strategy n_syms=52 took=46.7828s`
+- **Data Map Alignment**:
+  - `[PERF] tiered_align_data_maps n_syms=52 tf=4h took=0.1263s`
 
-### 1.2 Data Load Detail (16.90s)
+### 3. Worker Calculation Specs (Multiprocessing & Resource Limit)
+- **Evidence Task Multiprocessing Scheduling**:
+  - `[PERF] worker_calc stage=evidence n_tasks=12 requested_workers=12 physical_cores=8 cpu_limit=6 max_workers=3 available_gb=6.74 frame_gb=0.55 estimated_proc_gb=0.87 compact=True workers=3`
+- **Outer Task Multiprocessing Scheduling**:
+  - `[PERF] worker_calc stage=outer n_tasks=4 requested_workers=4 physical_cores=8 cpu_limit=6 max_workers=3 available_gb=6.74 frame_gb=0.55 estimated_proc_gb=0.87 compact=True workers=2`
 
-| Sub-operation | Duration |
-|---|---|
-| `load_futures_data_maps_for_symbols` (57 symbols) | 14.94s |
-| `inject_membership_masks_into_maps` | 1.66s |
-| `evaluate_data_readiness` | 0.27s |
+### 4. Step-by-Step Layer 1 Diagnostics
+- **Nested Volatility 2D Calculation**:
+  - `[PERF] l1_nested_volatility_2d took=0.0115s`
+- **Nested Feature Cache Prime**:
+  - `[PERF] l1_nested_feature_cache_prime took=0.0008s`
+- **Nested Events Preparation**:
+  - `[PERF] l1_nested_prepare_events took=0.6785s`
+- **Nested Multiprocessing Preparation**:
+  - `[PERF] l1_nested_mp_prep took=0.0854s`
 
-### 1.3 Bridge Detail (58.24s)
-
-| Phase | Duration | % of Bridge |
-|---|---|---|
-| **Align** (base TF 4h) | 0.14s | 0.2% |
-| **Rules** (base TF rule signal panels) | 3.83s | 6.6% |
-| **Events** (base TF candidate_panels_to_events) | 9.39s | 16.1% |
-| **Label** (base TF event labeling) | 1.66s | 2.9% |
-| **Htf Panels** (build_multi_tf_panels: 3 TFs, THREADED) | **9.94s** | 17.1% |
-| **Htf Label** (HTF event labeling) | 4.17s | 7.2% |
-| **Htf Events** (HTF candidate_panels_to_events + concat) | 22.74s | 39.0% |
-| **Diagnostics** (rule diagnostics) | **8.79s** | 15.1% |
-| **Promotions** (variant promotion filter) | 0.34s | 0.6% |
-| **Alpha Panel** (zero-weight for signal_only) | 0.12s | 0.2% |
-| **Walk Forward** (skipped — signal_only mode) | 0.00s | — |
-
-Total Bridge HTF block (Panels + Label + Events): **22.74s** (39.0%)
-
-### 1.4 Tiered Pipeline Detail (~211s)
-
-| Sub-stage | Duration |
-|---|---|
-| Tiered data alignment | 0.18s |
-| L1 Nested SWF (4 TFs × 4 folds) | ~211s |
-| └─ Inner per-TF processing (3 non-base TFs) | Included above |
+### 5. Validation Folds Timing Summary
+- **Evidence IPC Collection (12 tasks)**:
+  - `[PERF] l1_evidence_ipc_collect n=12 took=9.3217s`
+- **Outer IPC Collection (4 tasks)**:
+  - `[PERF] l1_outer_ipc_collect n=4 took=6.6952s`
+- **Avg Fold Processing Breakdown (n=12)**:
+  - `[PERF] l1_evidence_fold_avg_profile schema=0.132s ds_fit=1.226s ds_es=0.000s ds_oos=0.100s edge_fit=0.171s inference=0.038s selection=0.113s`
+- **Walk-Forward Avg Profile (n=16 folds)**:
+  - `[PERF] l1_wf_summary wall: ev=24.2s out=6.8s total=31.0s avg: selection=0.223s ds_fit=1.330s schema=0.123s edge_fit=0.196s inference=0.049s`
 
 ---
 
-## 2. Memory Profile
+## # 💾 Memory usage & Total Overhead
 
-### 2.1 Stage-by-Stage RSS (L1)
-
-| Stage | RSS | Delta | Peak | Description |
-|---|---|---|---|---|
-| Universe | 403MB | +84MB | 405MB | Discovery + quality |
-| Data (Parquet load) | 2,403MB | +1,999MB | 2,410MB | Raw OHLCV DataFrames (57 syms) |
-| Data Early Release | 2,404MB | +0MB | — | data_maps released (kept filtered) |
-| **Bridge** | 5,863MB→**7,282MB** | +3,949MB | **7,282MB** | Aligned + panels + HTF block |
-| Tiered Pipeline | 5,783MB→**7,565MB** | +1,782MB | **7,565MB** | Peak: nested SWF + aligned |
-| **Strategy End** | **4,834MB** | -2,731MB | — | Post-GC |
-
-### 2.2 Bridge Stage RSS Deltas (top 5)
-
-| Stage | Delta |
-|---|---|
-| Diagnostics | +4,880 MB |
-| Promotions | +4,795 MB |
-| Alpha Panel | +4,794 MB |
-| Htf Events | +3,941 MB |
+- **Total Execution Pipeline Time (L1 Total)**:
+  - `[PERF] run_tiered_pipeline_l1_total took=154.6907s`
+- **Timeframe Processing Summary (tf=12h)**:
+  - `[PERF] per_tf_l1 tf=12h aligned=0.0000s folds=0.0003s run_l1=35.3987s total=35.3990s rss=5828MB`
+- **Timeframe Processing Summary (tf=4h)**:
+  - `[PERF] per_tf_l1 tf=4h aligned=0.0000s folds=0.0003s run_l1=48.5829s total=48.5832s rss=5721MB`
+- **End Stage RAM Footprint**:
+  - `[SYS] [MEM] stage=aggregate_l1 rss=5828MB`
+  - `[SYS] [MEM] stage=l1_gate_complete rss=5828MB`
+  - `[SYS] [MEM] stage=tiered_pipeline rss=5828MB delta=+324MB peak=7681MB`
 
 ---
 
-## 3. Bottleneck Analysis
+## # 🚨 Top 5 Bottlenecks
 
-| Rank | Bottleneck | Time | RSS Impact | Notes |
-|---|---|---|---|---|
-| #1 | **Tiered Pipeline (L1 Nested SWF)** | ~211s (73%) | Peak 7,565MB | 4 TFs × 4 folds × per-symbol SWF |
-| #2 | **Bridge HTF Events** | 22.74s (7.9%) | +3,941MB | Multi-TF panel projection + concat |
-| #3 | **Bridge Diagnostics** | 8.79s (3.1%) | +4,880MB | `compute_rule_diagnostics` on 52 syms |
-| #4 | **Data Load (Parquet I/O)** | 14.94s (5.2%) | +1,999MB | 57 syms × 6 timeframes × enriched parquet |
+Based on the execution time of individual operations, the top 5 performance bottlenecks are:
 
-HTF Panels (`build_multi_tf_panels`) 9.94s: now **ThreadPoolExecutor(max_workers=2)** applied (3 TFs → ~1.5 TF-equiv). Expected saving vs sequential: ~4-5s.
+1. **`bridge_run_candidate_strategy`** (46.7828s)
+   - *Description*: Execution of backtests for 52 candidate strategies. This is the single heaviest logic stage and has the highest optimization priority (e.g., caching or vectorization of evaluations).
+2. **`l1_fit_inference_artifact`** (19.6176s)
+   - *Description*: Fitting models and generating inference serialized artifacts for the promoted signals.
+3. **`load_futures_data_maps_for_symbols`** (10.3367s)
+   - *Description*: Database loading and parsing of OHLCV/orderbook historical tables for the active symbols.
+4. **`l1_evidence_ipc_collect`** (9.3217s)
+   - *Description*: Inter-process communication overhead and serialization/deserialization when collecting results from 12 parallel task processes.
+5. **`l1_prequential_evidence_snapshots`** (7.8279s)
+   - *Description*: Accumulating sequential snapshots and saving evidence registry metadata to disk.
+
