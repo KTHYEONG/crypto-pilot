@@ -28,6 +28,7 @@ dependencies = [
     "joblib>=1.4.0",
     "redis>=7.4.0",
     "threadpoolctl>=3.6.0",
+    "duckdb>=1.5.4",
 ]
 
 [project.optional-dependencies]

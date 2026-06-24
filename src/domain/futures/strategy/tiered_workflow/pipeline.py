@@ -1137,9 +1137,6 @@ def run_l1_nested_swf(
         len(labeled_events),
         seed,
     )
-    for _env in ("NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
-                  "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
-        os.environ[_env] = "1"
     logger.debug(
         "[MEM] stage=pre_fork rss=%.0fMB max_pool_workers=%d n_folds=%d",
         _get_rss_mb(),
