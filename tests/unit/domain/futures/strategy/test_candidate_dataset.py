@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -1191,3 +1193,171 @@ def test_build_candidate_dataset_skip_features() -> None:
     assert len(ds.y_gate) == 1
     assert ds.y_gate[0] == 1
     assert ds.y_edge_bps[0] == pytest.approx(12.0)
+
+
+def _make_basic_frame(t: int = 60) -> pd.DataFrame:
+    rng = np.random.default_rng(42)
+    rows: list[dict[str, Any]] = []
+    for entry_idx in range(25, t - 1):
+        for sym_idx, sym in enumerate(["BTCUSDT", "ETHUSDT"]):
+            for v in ("ema_12", "rsi_14"):
+                rows.append({
+                    "entry_idx": entry_idx,
+                    "exit_idx": entry_idx + 2,
+                    "symbol": sym,
+                    "side": 1 if (entry_idx + sym_idx) % 2 == 0 else -1,
+                    "family": "trend_ma" if "ema" in v else "rsi",
+                    "variant": v,
+                    "archetype": "trend" if "ema" in v else "mean_rev",
+                    "raw_score": float(rng.normal(0.0, 0.5)),
+                    "score": float(rng.normal(0.0, 0.5)),
+                    "score_z": float(rng.normal(0.0, 1.0)),
+                    "turnover_proxy": 0.1,
+                    "triple_barrier_label": 1,
+                    "profitable_after_hurdle_label": 1,
+                    "edge_after_hurdle_bps": 10.0,
+                    "sl_thr_bps": 25.0,
+                    "mae_bps": -6.0,
+                    "mfe_bps": 18.0,
+                    "ex_ante_cost_bps": 4.0,
+                })
+    return pd.DataFrame(rows)
+
+
+def test_precompute_enrich_shapes_and_types() -> None:
+    """Scenario 1: _precompute_enrich returns correct keys, shapes, types."""
+    aligned = _make_aligned()
+    t = aligned.close_2d.shape[0]
+    frame = _make_basic_frame(t)
+    from src.domain.futures.strategy.candidate_dataset import (
+        _precompute_enrich,
+        prepare_labeled_events,
+    )
+    prepared = prepare_labeled_events(
+        labeled_events=frame,
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(),
+        fit_start_idx=20,
+        fit_end_idx=t - 1,
+    )
+    from src.domain.futures.strategy.market_regime import (
+        compute_market_regime_context,
+        compute_risk_overlay,
+    )
+    overlay_ctx = compute_risk_overlay(aligned=aligned)
+    regime_ctx = compute_market_regime_context(aligned=aligned)
+
+    result = _precompute_enrich(frame, prepared, regime_ctx, overlay_ctx)
+    expected_keys = {
+        "entry_regime", "arm",
+        "overlay_mult", "crisis_active", "entry_regime_code",
+    }
+    assert set(result.keys()) == expected_keys, f"missing: {expected_keys - set(result.keys())}"
+
+    n = len(frame)
+    assert result["entry_regime"].shape == (n,)
+    assert result["entry_regime"].dtype == object
+    assert result["arm"].shape == (n,)
+    assert result["arm"].dtype == np.float32
+    assert result["overlay_mult"].shape == (n,)
+    assert result["overlay_mult"].dtype == np.float32
+    assert result["crisis_active"].shape == (n,)
+    assert result["crisis_active"].dtype == np.float32
+    assert result["entry_regime_code"].shape == (n,)
+    assert result["entry_regime_code"].dtype == np.int32
+
+def test_enrich_cache_populated_on_first_build_call() -> None:
+    """Scenario 2: enrich_cache None at init, populated after first build_candidate_dataset call."""
+    aligned = _make_aligned()
+    t = aligned.close_2d.shape[0]
+    frame = _make_basic_frame(t)
+    from src.domain.futures.strategy.candidate_dataset import (
+        build_candidate_dataset,
+        fit_candidate_feature_schema,
+        prepare_labeled_events,
+    )
+    prepared = prepare_labeled_events(
+        labeled_events=frame,
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(),
+        fit_start_idx=20,
+        fit_end_idx=t - 1,
+    )
+    assert prepared.enrich_cache is None
+
+    schema = fit_candidate_feature_schema(
+        labeled_events=prepared,
+        cfg=CandidateStrategyConfig(),
+        split_start=20,
+        split_end=40,
+    )
+    _ = build_candidate_dataset(
+        labeled_events=prepared,
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(),
+        schema=schema,
+        split_start=20,
+        split_end=40,
+        skip_features=True,
+    )
+    assert prepared.enrich_cache is not None
+    assert "entry_regime" in prepared.enrich_cache
+    assert "arm" in prepared.enrich_cache
+    assert "arm" in prepared.enrich_cache
+
+    ds2 = build_candidate_dataset(
+        labeled_events=prepared,
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(),
+        schema=schema,
+        split_start=25,
+        split_end=45,
+        skip_features=True,
+    )
+    assert ds2.X.shape[0] > 0
+
+
+def test_enrich_cache_entry_regime_listcomp_equivalence() -> None:
+    """Scenario 3: enrich_cache entry_regime slice == per-window list-comp result."""
+    aligned = _make_aligned()
+    t = aligned.close_2d.shape[0]
+    frame = _make_basic_frame(t)
+    from src.domain.futures.strategy.candidate_dataset import (
+        build_candidate_dataset,
+        fit_candidate_feature_schema,
+        prepare_labeled_events,
+    )
+    from src.domain.futures.strategy.market_regime import compute_market_regime_context
+    regime_ctx = compute_market_regime_context(aligned=aligned)
+    prepared = prepare_labeled_events(
+        labeled_events=frame,
+        aligned=aligned,
+        cfg=CandidateStrategyConfig(),
+        fit_start_idx=20,
+        fit_end_idx=t - 1,
+    )
+
+    schema = fit_candidate_feature_schema(
+        labeled_events=prepared,
+        cfg=CandidateStrategyConfig(),
+        split_start=20,
+        split_end=t - 1,
+    )
+
+    for split_start, split_end in [(20, 40), (30, 50), (25, 45)]:
+        ds = build_candidate_dataset(
+            labeled_events=prepared,
+            aligned=aligned,
+            cfg=CandidateStrategyConfig(),
+            schema=schema,
+            split_start=split_start,
+            split_end=split_end,
+            skip_features=True,
+        )
+        event_idx_col = ds.event_index["entry_regime"]
+        assert event_idx_col.isna().sum() == 0, f"NaN entry_regime for window ({split_start},{split_end})"
+
+        # Verify regime names are valid
+        name_by_code = [str(v) for v in regime_ctx.name_by_code]
+        for regime_name in event_idx_col.unique():
+            assert regime_name in name_by_code, f"Unknown regime: {regime_name}"
