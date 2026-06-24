@@ -50,8 +50,8 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
 - **Kelly Sizing**: $w_s \propto f_k \cdot \mu_s / \sigma_s^2$ (friction masked). $\sigma_R = (q_{90} - q_{10})/2.563$. `vol_target=1.0` always active (RC-1 cascade prevention).
 - **Edge-Conditional Throttle**: $m_t = \text{clip}((s - \text{floor}) / (\text{ref} - \text{floor}), 0, 1)^\gamma$ applied post-sizing.
 - **Active Deployment Controls**: `deploy_cost_safety_mult`, `edge_throttle_min_active_mult`, `risk_budget_floor_ratio` + `risk_budget_max_scale`.
-- **Search Space V9 (9 dims)**: `K_RANK`, `REBALANCE_BARS`, `CS_Z_SCORE_THRESHOLD`, `deploy_cost_safety_mult`, `edge_throttle_min_active_mult`, `edge_ref_bps`, `edge_throttle_gamma`, `risk_budget_floor_ratio`, `risk_budget_max_scale`.
-- **Objective — Sortino_HAC_unit (Scale-Invariant)**: $J = \text{Sortino\_HAC\_unit} - \lambda_w \cdot \max(0, \tau_{wf} - \text{worst\_fold\_Sortino})$. `growth_lcb` demoted to diagnostic.
+- **Search Space V9 (9 dims)**: `K_RANK` (low=4, churn 방지), `REBALANCE_BARS`, `CS_Z_SCORE_THRESHOLD`, `deploy_cost_safety_mult`, `edge_throttle_min_active_mult`, `edge_ref_bps`, `edge_throttle_gamma`, `risk_budget_floor_ratio`, `risk_budget_max_scale`.
+- **Objective — Sortino_HAC_unit (Scale-Invariant)**: $J = \text{Sortino\_HAC\_unit} - \lambda_w \cdot \max(0, \tau_{wf} - \text{worst\_fold\_Sortino}) - \lambda_t \cdot \text{mean\_turnover}$. `growth_lcb` demoted to diagnostic. Turnover penalty $\lambda_t = 0$ default (off) — backtest-safe, enable via `l2_turnover_penalty_weight`.
 - **Phase B — fit-leg Deployment Calibration** (`risk_deployment.py`):
   - C1: fit-leg uses same OOS chain (rank→kelly→throttle→cost→funding), not equal-weight market avg.
   - C2: `calibrate_deployment_leverage(fit_rets_hybrid, l_hard_cap=20.0)` → $L^* = \text{clip}(\min(L_{mdd}, L_{cvar}), 1.0, 20.0)$. `cagr/mdd/cvar` deployed; Sortino/Sharpe/PSR unit-vol.
@@ -61,13 +61,15 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
 - **Gate Contract**:
   - Optuna feasibility (9-vector): deployment, leak, mdd, cvar, fold_pass_ratio, **recent_fold**, active_blocks, friction, trades.
   - **Friction Gate** (per-bar dimension): $|\bar{g}_s^{pb}| \ge \bar{c}_s^{pb}$ where $\bar{g}_s^{pb} = \text{signed\_gross\_bps\_per\_bar}$ (precision-pooled), $\bar{c}_s^{pb} = \text{expected\_cost\_bps\_per\_bar}$ (including `fixed_cost_safety_mult`). Signals with gross edge less than round-trip cost per bar are unprofitable → excluded from friction pass ratio gate.
-  - Promotion (3-stage): Sortino ≥ 1.5 → Sharpe ≥ 0.7 → Calmar ≥ 0.5 + CAGR/MAR/PSR/growth_lcb/uplift.
+  - **Cost Drag Gate** (promotion 17th blocker): $\text{cost\_drag} = \frac{\sum \text{realized\_cost}}{\max(\sum \text{realized\_price}, \varepsilon)} > \text{l2\_max\_cost\_drag\_ratio}$ → BLOCK. Cumulative cost > gross price PnL blocker. `l2_max_cost_drag_ratio` default 0.60.
+  - Promotion (3-stage): Sortino ≥ 1.5 → Sharpe ≥ 0.7 → Calmar ≥ 0.5 + CAGR/MAR/PSR/growth_lcb/uplift + cost_drag.
   - Recent fold gate: latest non-empty deployed fold CAGR > 0 + optional Sharpe floor.
   - `l2_max_exchange_leverage` default 10.0 (`None` = cap disabled).
 - **DSR → PSR**: DSR blocker removed. PSR≥0.90 gate (N=1). DSR diagnostic only (L1 FDR + L3 multi-seed handle real multiplicity).
 - **OOS Fraction**: `ml_fit_fraction=0.55` + `ml_calibration_fraction=0.15` → OOS 30%.
 - **Replay Championing**: `select_layer2_champion` replays all frontier candidates → `argmax(sortino_hybrid, cagr)`.
 - **Fold Diagnostics**: `compute_layer2_fold_diagnostics()` → per-fold deployed CAGR/MDD, unit Sharpe, compound pass, selected symbols. `Layer2TrialEvaluation` stores recent_fold metrics + `fold_deployed_cagrs` as Optuna attrs.
+- **Attribution (Always-On)**: `fold_attributions: tuple[Layer2FoldAttribution, ...]` returned by every `_run_awf_simulation` call regardless of `l2_diag_attribution_enabled` flag. Per-fold `realized_price`/`realized_funding`/`realized_cost` are accumulated unconditionally (O(N) per-bar dot). Alpha gap, sleeve samples, netting stats are diag-gated (`_diag`). Cost drag gate consumes attribution output.
 
 **Layer 3: Deployment Parity**
 - `run_l3_holdout(deploy_leverage=L^*)` uses same `apply_deployment(rets, L^*)` as L2 scorecard. $L^* \leq 1.0$ → unit path fallback.

@@ -1668,6 +1668,8 @@ def _shape_efficiency_l2_objective(
     trade_count: int = 0,
     trade_target: int = 90,
     trade_weight: float = 0.02,
+    mean_turnover: float = 0.0,
+    turnover_penalty_weight: float = 0.0,
 ) -> float:
     """Scale-invariant Sortino_HAC_unit 기반 shape 최적화 목적함수.
 
@@ -1675,6 +1677,7 @@ def _shape_efficiency_l2_objective(
         - lambda_d * downside_dispersion
         - risk_util_weight * max(0, risk_util_target - risk_util_realized)  [RC-2 soft penalty]
         - trade_weight * max(0, trade_target - trade_count) / trade_target  [RC-2 soft penalty]
+        - turnover_penalty_weight * mean_turnover                        [C4: cost-aware]
 
     scale-invariant 1차항 유지 + soft 2차항으로 배치 가능성 약한 gradient 부여.
     weight ≤ 0.03 유지 → 1차 shape 압도 방지 (quant.md §0 Anti-Overfitting).
@@ -1692,6 +1695,8 @@ def _shape_efficiency_l2_objective(
         trade_count: 실현 거래 횟수. scale 정합 soft 패널티 입력.
         trade_target: 목표 거래 횟수 (기본 90). soft 패널티 기준.
         trade_weight: trade_count soft 패널티 가중치 (≤ 0.02 유지).
+        mean_turnover: 평균 리밸런싱 turnover 비율 (C4 turnover penalty 입력).
+        turnover_penalty_weight: turnover 페널티 가중치 λ_t (0=off, 기본 0.0).
 
     Returns:
         float: 목적함수 값. 비정상 입력 시 -1e6 fail-fast 반환.
@@ -1710,12 +1715,14 @@ def _shape_efficiency_l2_objective(
     trade_penalty = float(trade_weight) * max(
         0.0, (float(trade_target) - float(trade_count)) / max(float(trade_target), 1.0)
     )
+    turnover_penalty = float(turnover_penalty_weight) * float(mean_turnover)
     return float(
         sortino_hac_unit
         - worst_fold_penalty
         - float(downside_dispersion)
         - risk_util_penalty
         - trade_penalty
+        - turnover_penalty
     )
 
 
@@ -1957,6 +1964,8 @@ def evaluate_l2_trial(
         trade_count=int(trade_count),
         trade_target=int(config.l2_objective_trade_target),
         trade_weight=float(config.l2_objective_trade_weight),
+        mean_turnover=float(np.mean(sim.all_turnovers)) if sim.all_turnovers else 0.0,
+        turnover_penalty_weight=float(config.l2_turnover_penalty_weight),
     )
     # growth_lcb는 diagnostic으로 강등 — objective에서 제외 (RC-2 해소)
     deployment_objective_bonus = float(objective_value - finite_score)
@@ -1987,6 +1996,7 @@ def evaluate_l2_trial(
         psr_hybrid=float(psr_hybrid),
         recent_fold_passed=fold_diag.recent_fold_passed,
         recent_fold_sharpe=fold_diag.recent_fold_sharpe,
+        fold_attributions=sim.fold_attributions,
         config=config,
     )
     return Layer2TrialEvaluation(
