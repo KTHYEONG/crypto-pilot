@@ -389,6 +389,9 @@ class Layer2AllocationConfig:
     l2_is_expansion_bars: int = 0
     l2_sleeve_combine_method: str = "precision_weighted"
     l2_sleeve_conviction_cap_mult: float = 1.5
+    l2_diag_attribution_enabled: bool = False
+    l2_diag_sleeve_top_k: int = 15
+    l2_diag_sleeve_sample_every: int = 0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -578,6 +581,9 @@ class Layer2AllocationConfig:
             l2_is_expansion_bars=cls._as_int(params.get("l2_is_expansion_bars", 0), 0),
             l2_sleeve_combine_method=combine_method,
             l2_sleeve_conviction_cap_mult=conviction_cap_mult,
+            l2_diag_attribution_enabled=bool(params.get("l2_diag_attribution_enabled", False)),
+            l2_diag_sleeve_top_k=cls._as_int(params.get("l2_diag_sleeve_top_k", 15), 15),
+            l2_diag_sleeve_sample_every=cls._as_int(params.get("l2_diag_sleeve_sample_every", 0), 0),
         )
 
 
