@@ -324,6 +324,7 @@ def label_candidate_events(
     events: pd.DataFrame,
     aligned: AlignedMarketData,
     cfg: CandidateStrategyConfig,
+    precomputed_atr_2d: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Attach leak-free forward outcomes to candidate events.
 
@@ -338,7 +339,15 @@ def label_candidate_events(
     if missing:
         raise ValueError(f"missing required event columns: {sorted(missing)}")
 
-    atr_2d = _compute_yang_zhang_vol_2d(aligned)
+    if precomputed_atr_2d is not None:
+        if precomputed_atr_2d.shape != aligned.close_2d.shape:
+            raise ValueError(
+                f"precomputed_atr_2d shape {precomputed_atr_2d.shape} != "
+                f"aligned.close_2d shape {aligned.close_2d.shape}"
+            )
+        atr_2d = precomputed_atr_2d
+    else:
+        atr_2d = _compute_yang_zhang_vol_2d(aligned)
     out = events.copy()
     # O(1) symbol lookup: build once before the per-event pre-extraction
     _sym_to_idx: dict[str, int] = {sym: idx for idx, sym in enumerate(aligned.symbols)}
