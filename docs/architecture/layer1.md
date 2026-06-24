@@ -21,7 +21,7 @@ dependencies:
   documents:
     - docs/architecture/regime.md
     - docs/architecture/allocation.md
-last_verified: 2026-06-23
+last_verified: 2026-06-24
 ---
 
 # 1. Purpose
@@ -106,6 +106,8 @@ graph TD
 - **Vectorized Volatility**: `pd.DataFrame.rolling().std(ddof=1)` over full matrix replaces column loop.
 - **signal_batch_convert**: `iterrows` → `np.flatnonzero` vectorization (loop 2.64s→0.04s/fold, -98%).
 - **Aligned Cache**: Numba JIT accelerated rolling/cross-sectional robust z-scores; pandas rolling apply replaced.
+- **Multi-TF Bridge ThreadPool**: `build_multi_tf_panels` wraps each non-base TF (6h/8h/12h) processing into `_process_single_tf` inner function. `len(eligible_tfs) <= 1` → sequential; `>= 2` → `ThreadPoolExecutor(max_workers=2)`. Each TF allocates independent `list[CandidateSignalPanel]` — no shared mutation, GIL-released NUMBA works effectively. Per-TF exception isolated: caught inside `_process_single_tf`, returns `([] , None)`; other TFs unaffected.
+
 - **Vectorized Top-k Selection**: `_vectorized_topk_per_bar` replaces per-bar Python loop in `select_candidate_events_for_portfolio`. Sort → `drop_duplicates` per-(bar,symbol) → `cumcount` rank → `ceil(bar_size×quantile)` keep → variant-cap backfill (per-(bar,family,variant) filter + re-rank). O(E log E) vectorized, 0 Python loops. Per-bar result identical via sorted cumcount tie-break.
 - **Diagnostics Gating**: `enable_diagnostics` param on `select_candidate_events_for_portfolio`. Evidence folds (12/16 per TF) gate `selection_sensitivity`, `shadow_profiles`, `waterfall` to False. Deployed/outer fold path retains `enable_diagnostics=True` for diagnostic SSOT.
 - **Prepare-Once Event Table**: `bridge.py` calls `prepare_labeled_events` once before WF loop → `PreparedLabeledEvents` passed through `run_candidate_walk_forward` and wired via `_GLOBAL_LABELED_EVENTS` (ProcessPool fork CoW). `build_candidate_dataset` fast path (numpy boolean mask + `frame.iloc`) eliminates per-window pandas to_numeric/isin/mask/copy.
