@@ -455,3 +455,53 @@ def test_load_futures_data_maps_exec_1m_routes_all_to_threadpool(
     # Assert: Arrow scan NOT called; symbol routed to load_single_symbol_data
     assert scan_call_count[0] == 0, "_scan_enriched_dataset must not be called when exec_1m=True"
     assert safe_sym in load_single_syms, "BTCUSDT must be processed via load_single_symbol_data fallback"
+
+
+# ─── OPT-1: searchsorted equivalence ────────────────────────────────────────
+
+
+def test_searchsorted_mask_equivalence(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """S2/S3: searchsorted must produce valid indices for boundary cases."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from src.domain.futures.optimization import opt_data_utils
+
+    monkeypatch.setattr(opt_data_utils, "FUTURES_DATA_DIR", tmp_path)
+
+    sym_raw = "BTC/USDT"
+    safe_sym = sym_raw.replace("/", "_")
+    tfs = ["4h", "1d", "1h"]
+    base = pd.Timestamp("2021-01-01", tz="UTC")
+    n = 6000
+    datetimes = [base + pd.Timedelta(hours=i * 4) for i in range(n)]
+    for tf_l in tfs:
+        df = pd.DataFrame({
+            "timestamp": [int(t.value // 1_000_000) for t in datetimes],
+            "datetime": datetimes,
+            "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+            "volume": 1000.0,
+        })
+        pq.write_table(pa.Table.from_pandas(df), tmp_path / f"{safe_sym}_{tf_l}_enriched.parquet")
+
+    monkeypatch.setattr(opt_data_utils, "compute_segment_merge_index", lambda *a, **kw: 0)
+    monkeypatch.setattr(opt_data_utils, "_append_stage_integrity", lambda *a, **kw: None)
+    monkeypatch.setattr(opt_data_utils, "_feature_group_coverage", lambda *a, **kw: {})
+
+    data_maps, _oos_maps, valid = opt_data_utils.load_futures_data_maps_for_symbols(
+        symbols=[sym_raw],
+        tf="4h",
+        fetch_start="2022-01-01",
+        start="2023-03-01",
+        is_end="2023-06-01",
+        end="2023-10-01",
+        skip_metrics=True,
+        load_exec_1m=False,
+    )
+
+    assert sym_raw in valid, f"{sym_raw} should be valid"
+    is_map = data_maps[sym_raw]
+    for tf_l in tfs:
+        skey = f"is_start_idx_{tf_l}"
+        assert skey in is_map, f"Missing is_start_idx_{tf_l}"
+        assert 0 <= is_map[skey] <= len(is_map.get(tf_l, []))
