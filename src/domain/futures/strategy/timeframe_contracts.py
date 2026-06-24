@@ -33,7 +33,7 @@ RESAMPLE_ALIAS: dict[str, str] = {
     "1d": "1D",
 }
 
-PROBE_SOURCE_TFS: tuple[str, ...] = ("1m", "5m", "15m", "30m", "1h", "4h")
+PROBE_SOURCE_TFS: tuple[str, ...] = ("1h", "4h")
 
 _FLOAT_TOL = 1e-9
 

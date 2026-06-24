@@ -7,6 +7,7 @@ import re
 import time
 from collections import Counter, defaultdict
 from dataclasses import replace
+from functools import lru_cache
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -50,6 +51,12 @@ if TYPE_CHECKING:
     from src.domain.futures.strategy.walk_forward import WFFold
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=512)
+def _t_ppf_cached(q_thousandths: int, df_int: int) -> float:
+    """Cached t-distribution PPF to avoid repeated scipy calls."""
+    return float(stats.t.ppf(q_thousandths / 1000.0, float(df_int)))
 
 
 def _holding_bucket(holding_bars: int) -> int:
@@ -553,8 +560,8 @@ def compute_symbol_strategy_evidence(
         if df >= 2.0:
             alpha = float(getattr(cfg, "l1_pair_alpha", 0.05))
             power = float(getattr(cfg, "l1_pair_power", 0.80))
-            t_crit = float(np.asarray(stats.t.ppf(1.0 - alpha, float(df)), dtype=np.float64))
-            t_power = float(np.asarray(stats.t.ppf(power, float(df)), dtype=np.float64))
+            t_crit = _t_ppf_cached(round((1.0 - alpha) * 1000), round(df))
+            t_power = _t_ppf_cached(round(power * 1000), round(df))
         else:
             t_crit = np.inf
             t_power = 0.0
@@ -1338,17 +1345,41 @@ def evaluate_layer1_readiness(
     )
 
 
-def fit_layer1_inference_artifact(
+class _Layer1ModelCore:
+    """Lightweight container for pre-fit model output (registry excluded)."""
+
+    __slots__ = ("baseline_by_key", "config_hash", "feature_schema", "l1_fit_end_idx", "model", "model_version")
+
+    def __init__(
+        self,
+        feature_schema: Any,
+        model: Any,
+        baseline_by_key: dict[MatchedBaselineKey, float],
+        l1_fit_end_idx: int,
+        model_version: str,
+        config_hash: str,
+    ) -> None:
+        self.feature_schema = feature_schema
+        self.model = model
+        self.baseline_by_key = baseline_by_key
+        self.l1_fit_end_idx = l1_fit_end_idx
+        self.model_version = model_version
+        self.config_hash = config_hash
+
+
+def prefit_layer1_model(
     *,
     labeled_events: pd.DataFrame,
     aligned: AlignedMarketData,
-    deployment_registry: QualifiedSignalRegistry,
     fit_start_idx: int,
     fit_end_idx: int,
     cfg: CandidateStrategyConfig,
-    seed: int,
-) -> Layer1InferenceArtifact:
-    del seed
+) -> _Layer1ModelCore:
+    """Fit the L1 model core (schema + ensemble + baseline) — registry-independent.
+
+    This function contains the expensive work (~20s) and is safe to run
+    in a background process while evidence IPC is still in flight.
+    """
     schema = fit_candidate_feature_schema(
         labeled_events=labeled_events,
         cfg=cfg,
@@ -1369,7 +1400,6 @@ def fit_layer1_inference_artifact(
     if gross_targets is None:
         gross_targets = fit_set.y_return_bps
     train_events["gross_return_bps"] = np.asarray(gross_targets, dtype=np.float64)
-    # D2: Layer1은 regime μ 조건화 배제 — archetype_only 고정 (regime → Layer2 risk overlay 전용)
     l1_cfg = replace(cfg, ensemble_conditioning="archetype_only", ensemble_score_calibration_enabled=False)
     model = fit_regime_conditional_ensemble(train_events=train_events, cfg=l1_cfg, tag="ENS-FINAL")
     baseline_by_key: dict[MatchedBaselineKey, float] = {}
@@ -1388,14 +1418,56 @@ def fit_layer1_inference_artifact(
                 pd.to_numeric(group["gross_event_bps"], errors="coerce").fillna(0.0).mean()
             )
     config_hash = sha256(str(cfg).encode("utf-8")).hexdigest()[:12]
-    return Layer1InferenceArtifact(
+    return _Layer1ModelCore(
         feature_schema=schema,
         model=model,
-        deployment_registry=deployment_registry,
         baseline_by_key=baseline_by_key,
         l1_fit_end_idx=fit_end_idx,
         model_version=schema.version,
         config_hash=config_hash,
+    )
+
+
+def assemble_layer1_artifact(
+    core: _Layer1ModelCore,
+    deployment_registry: QualifiedSignalRegistry,
+    fit_end_idx: int,
+) -> Layer1InferenceArtifact:
+    """Lightweight assembly of pre-fit core + deployment registry into a full artifact."""
+    return Layer1InferenceArtifact(
+        feature_schema=core.feature_schema,
+        model=core.model,
+        deployment_registry=deployment_registry,
+        baseline_by_key=core.baseline_by_key,
+        l1_fit_end_idx=fit_end_idx,
+        model_version=core.model_version,
+        config_hash=core.config_hash,
+    )
+
+
+def fit_layer1_inference_artifact(
+    *,
+    labeled_events: pd.DataFrame,
+    aligned: AlignedMarketData,
+    deployment_registry: QualifiedSignalRegistry,
+    fit_start_idx: int,
+    fit_end_idx: int,
+    cfg: CandidateStrategyConfig,
+    seed: int,
+) -> Layer1InferenceArtifact:
+    """Full L1 artifact fit (pre-fit core + registry assembly)."""
+    del seed
+    core = prefit_layer1_model(
+        labeled_events=labeled_events,
+        aligned=aligned,
+        fit_start_idx=fit_start_idx,
+        fit_end_idx=fit_end_idx,
+        cfg=cfg,
+    )
+    return assemble_layer1_artifact(
+        core=core,
+        deployment_registry=deployment_registry,
+        fit_end_idx=fit_end_idx,
     )
 
 
