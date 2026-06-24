@@ -237,6 +237,7 @@ def _fit_and_predict_single_fold_inner(
     compact_result: bool = False,
 ) -> CandidateFoldOutput:
     """Inner fold execution under BLAS single-thread context (called from _fit_and_predict_single_fold)."""
+    _enable_diagnostics = not is_evidence_fold
     t_total = time.perf_counter()
     timing_profile: dict[str, float] = {
         "schema": 0.0,
@@ -274,11 +275,17 @@ def _fit_and_predict_single_fold_inner(
 
     # 1. Feature Schema
     t_step = time.perf_counter()
+    _prepared_identity = (
+        labeled_events.frozen_identity_names
+        if isinstance(labeled_events, PreparedLabeledEvents)
+        else None
+    )
     schema = fit_candidate_feature_schema(
         labeled_events=labeled_events,
         cfg=cfg,
         split_start=fold.fit_start,
         split_end=train_end,
+        frozen_identity_names=_prepared_identity,
     )
     timing_profile["schema"] = time.perf_counter() - t_step
 
@@ -390,7 +397,10 @@ def _fit_and_predict_single_fold_inner(
             validation_diagnostics={}
         )
         t_step = time.perf_counter()
-        selected_events = select_candidate_events_for_portfolio(model_output=ml_out, cfg=cfg)
+        selected_events = select_candidate_events_for_portfolio(
+            model_output=ml_out, cfg=cfg,
+            enable_diagnostics=_enable_diagnostics,
+        )
         timing_profile["selection"] = time.perf_counter() - t_step
         timing_profile["total"] = time.perf_counter() - t_total
         fold_out = CandidateFoldOutput(
@@ -574,7 +584,10 @@ def _fit_and_predict_single_fold_inner(
         timing_profile["inference"] = time.perf_counter() - t_step
 
     t_step = time.perf_counter()
-    selected_events = select_candidate_events_for_portfolio(model_output=ml_out, cfg=cfg)
+    selected_events = select_candidate_events_for_portfolio(
+        model_output=ml_out, cfg=cfg,
+        enable_diagnostics=_enable_diagnostics,
+    )
     timing_profile["selection"] = time.perf_counter() - t_step
     timing_profile["total"] = time.perf_counter() - t_total
 
@@ -624,7 +637,7 @@ def _fit_and_predict_single_fold_inner(
 
 def run_candidate_walk_forward(
     *,
-    labeled_events: pd.DataFrame,
+    labeled_events: pd.DataFrame | PreparedLabeledEvents,
     aligned: AlignedMarketData,
     cfg: CandidateStrategyConfig,
     folds: tuple[WFFold, ...],
@@ -635,9 +648,10 @@ def run_candidate_walk_forward(
     """
     from concurrent.futures import ProcessPoolExecutor
 
+    labeled_frame = labeled_events if isinstance(labeled_events, pd.DataFrame) else labeled_events.frame
     max_holding_bars = (
-        int(pd.to_numeric(labeled_events["expected_holding_bars"], errors="coerce").max())
-        if not labeled_events.empty and "expected_holding_bars" in labeled_events.columns
+        int(pd.to_numeric(labeled_frame["expected_holding_bars"], errors="coerce").max())
+        if not labeled_frame.empty and "expected_holding_bars" in labeled_frame.columns
         else None
     )
     resolved_cfg = with_max_holding_bars(cfg, max_holding_bars=max_holding_bars)
@@ -656,8 +670,13 @@ def run_candidate_walk_forward(
             )
     else:
         mode = "process_pool"
-        global _GLOBAL_LABELED_EVENTS, _GLOBAL_ALIGNED, _GLOBAL_CFG, _GLOBAL_PURGE_BARS
-        _GLOBAL_LABELED_EVENTS = labeled_events
+        global _GLOBAL_LABELED_EVENTS, _GLOBAL_PREPARED_EVENTS, _GLOBAL_ALIGNED, _GLOBAL_CFG, _GLOBAL_PURGE_BARS
+        if isinstance(labeled_events, PreparedLabeledEvents):
+            _GLOBAL_PREPARED_EVENTS = labeled_events
+            _GLOBAL_LABELED_EVENTS = None
+        else:
+            _GLOBAL_LABELED_EVENTS = labeled_events
+            _GLOBAL_PREPARED_EVENTS = None
         _GLOBAL_ALIGNED = aligned
         _GLOBAL_CFG = cfg
         _GLOBAL_PURGE_BARS = purge_bars
@@ -675,6 +694,7 @@ def run_candidate_walk_forward(
                 outputs = [f.result() for f in futures]
         finally:
             _GLOBAL_LABELED_EVENTS = None
+            _GLOBAL_PREPARED_EVENTS = None
             _GLOBAL_ALIGNED = None
             _GLOBAL_CFG = None
             _GLOBAL_PURGE_BARS = None

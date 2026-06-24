@@ -193,6 +193,7 @@ class CandidateStrategyConfig:
     selection_edge_grid_bps: tuple[float, ...] = (0.0, 1.0, 5.0)
     selection_q10_grid_bps: tuple[float, ...] = (80.0, 150.0, 250.0, 400.0)
     selection_waterfall_diagnostics_enabled: bool = True
+    l1_selection_diagnostics_enabled: bool = False
     selection_shadow_profiles_enabled: bool = True
     selection_shadow_utility_floors_bps: tuple[float, ...] = (-50.0, -25.0, 0.0)
     selection_shadow_breakeven_floor_fractions: tuple[float, ...] = (0.0, 0.25, 0.50)

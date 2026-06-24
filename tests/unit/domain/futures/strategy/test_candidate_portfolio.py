@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import math
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from src.domain.futures.strategy.candidate_contracts import CandidateModelOutput
 from src.domain.futures.strategy.candidate_portfolio import (
+    _vectorized_topk_per_bar,
     build_candidate_alpha_panel,
     build_candidate_target_weights,
     compute_selection_sensitivity,
@@ -651,3 +655,309 @@ def test_build_candidate_alpha_panel_when_selected_events_empty_returns_zero_pan
     assert panel.shape[0] == 4
     assert panel.index.names == ["datetime", "symbol"]
     assert float(panel["target_weight"].abs().sum()) == 0.0
+
+
+# --- Vectorized top-k tests (Scenarios 1-3) ---
+
+
+def _legacy_topk_per_bar(
+    eligible_df: pd.DataFrame,
+    *,
+    top_quantile: float,
+    max_events_per_bar: int | None,
+    max_variant_fraction: float,
+    primary_sort_col: str,
+) -> list[int]:
+    sorted_df = eligible_df.sort_values(
+        ["_merge_dt", primary_sort_col, "mu_net_decision_bps", "q10_net_bps"],
+        ascending=[True, False, False, False],
+    )
+    top_idx: list[int] = []
+    for _, group in sorted_df.groupby("_merge_dt", sort=False):
+        deduped = (
+            group.reset_index()
+            .groupby("symbol", sort=False, as_index=False)
+            .first()
+        )
+        keep_for_bar = max(1, math.ceil(len(deduped) * top_quantile))
+        if max_events_per_bar is not None:
+            keep_for_bar = min(keep_for_bar, int(max_events_per_bar))
+        if max_variant_fraction < 1.0 and keep_for_bar > 1 and {"family", "variant"}.issubset(deduped.columns):
+            max_per_variant = max(1, math.ceil(keep_for_bar * max_variant_fraction))
+            deduped["_vr"] = deduped.groupby(["family", "variant"], sort=False).cumcount()
+            deduped = deduped[deduped["_vr"] < max_per_variant].head(keep_for_bar)
+            if not deduped.empty:
+                top_idx.extend(int(i) for i in deduped["index"].tolist())
+        else:
+            top_idx.extend(int(idx) for idx in deduped.head(keep_for_bar)["index"].tolist())
+    return top_idx
+
+
+def _make_topk_eligible_df() -> pd.DataFrame:
+    np.random.seed(42)
+    n = 20
+    return pd.DataFrame({
+        "_merge_dt": pd.to_datetime(["2025-01-01"] * 10 + ["2025-01-02"] * 10),
+        "symbol": [f"SYM_{i}" for i in range(n)],
+        "family": ["trend_ma"] * 12 + ["rsi_rev"] * 8,
+        "variant": ["ema"] * 12 + ["rsi"] * 8,
+        "mu_net_decision_bps": np.random.uniform(-10, 50, n),
+        "q10_net_bps": np.random.uniform(-30, -5, n),
+        "utility_score": np.random.uniform(0, 20, n),
+        "expected_utility_bps": np.random.uniform(-5, 15, n),
+    })
+
+
+@pytest.mark.parametrize("top_quantile", [0.1, 0.5, 1.0])
+def test_vectorized_topk_equivalence(top_quantile: float) -> None:
+    eligible = _make_topk_eligible_df()
+    legacy = _legacy_topk_per_bar(
+        eligible,
+        top_quantile=top_quantile,
+        max_events_per_bar=None,
+        max_variant_fraction=1.0,
+        primary_sort_col="expected_utility_bps",
+    )
+    vec = _vectorized_topk_per_bar(
+        eligible,
+        top_quantile=top_quantile,
+        max_events_per_bar=None,
+        max_variant_fraction=1.0,
+        primary_sort_col="expected_utility_bps",
+    )
+    assert set(legacy) == set(vec.tolist()), (
+        f"top_quantile={top_quantile}: legacy={sorted(legacy)} vec={sorted(vec.tolist())}"
+    )
+
+
+def test_vectorized_topk_variant_cap() -> None:
+    eligible = pd.DataFrame({
+        "_merge_dt": pd.to_datetime(["2025-01-01"] * 5 + ["2025-01-02"] * 3),
+        "symbol": [f"SYM_{i}" for i in range(8)],
+        "family": ["trend_ma"] * 5 + ["rsi_rev"] * 3,
+        "variant": ["ema"] * 5 + ["rsi"] * 3,
+        "mu_net_decision_bps": [50, 45, 40, 35, 30, 20, 15, 10],
+        "q10_net_bps": [-5] * 8,
+        "utility_score": [50, 45, 40, 35, 30, 20, 15, 10],
+        "expected_utility_bps": [50, 45, 40, 35, 30, 20, 15, 10],
+    })
+    legacy = sorted(_legacy_topk_per_bar(
+        eligible,
+        top_quantile=1.0,
+        max_events_per_bar=4,
+        max_variant_fraction=0.5,
+        primary_sort_col="expected_utility_bps",
+    ))
+    vec = sorted(_vectorized_topk_per_bar(
+        eligible,
+        top_quantile=1.0,
+        max_events_per_bar=4,
+        max_variant_fraction=0.5,
+        primary_sort_col="expected_utility_bps",
+    ).tolist())
+    assert legacy == vec
+
+
+def test_vectorized_topk_variant_cap_backfill() -> None:
+    eligible = pd.DataFrame({
+        "_merge_dt": pd.to_datetime(["2025-01-01"] * 5),
+        "symbol": ["S0", "S1", "S2", "S3", "S4"],
+        "family": ["fa"] * 3 + ["fb", "fc"],
+        "variant": ["va"] * 3 + ["vb", "vc"],
+        "mu_net_decision_bps": [50, 45, 40, 30, 20],
+        "q10_net_bps": [-5] * 5,
+        "utility_score": [50, 45, 40, 30, 20],
+        "expected_utility_bps": [50, 45, 40, 30, 20],
+    })
+    legacy = sorted(_legacy_topk_per_bar(
+        eligible,
+        top_quantile=0.6,
+        max_events_per_bar=None,
+        max_variant_fraction=0.5,
+        primary_sort_col="expected_utility_bps",
+    ))
+    vec = sorted(_vectorized_topk_per_bar(
+        eligible,
+        top_quantile=0.6,
+        max_events_per_bar=None,
+        max_variant_fraction=0.5,
+        primary_sort_col="expected_utility_bps",
+    ).tolist())
+    assert legacy == vec
+
+
+def test_vectorized_topk_single_bar() -> None:
+    eligible = pd.DataFrame({
+        "_merge_dt": pd.to_datetime(["2025-01-01"] * 3),
+        "symbol": ["A", "B", "C"],
+        "family": ["f"] * 3,
+        "variant": ["v"] * 3,
+        "mu_net_decision_bps": [30, 20, 10],
+        "q10_net_bps": [-5, -5, -5],
+        "utility_score": [30, 20, 10],
+        "expected_utility_bps": [30, 20, 10],
+    })
+    legacy = sorted(_legacy_topk_per_bar(
+        eligible,
+        top_quantile=0.5,
+        max_events_per_bar=None,
+        max_variant_fraction=1.0,
+        primary_sort_col="expected_utility_bps",
+    ))
+    vec = sorted(_vectorized_topk_per_bar(
+        eligible,
+        top_quantile=0.5,
+        max_events_per_bar=None,
+        max_variant_fraction=1.0,
+        primary_sort_col="expected_utility_bps",
+    ).tolist())
+    assert legacy == vec
+
+
+def test_vectorized_topk_empty_eligible() -> None:
+    eligible = pd.DataFrame(columns=[
+        "_merge_dt", "symbol", "family", "variant",
+        "mu_net_decision_bps", "q10_net_bps",
+        "utility_score", "expected_utility_bps",
+    ])
+    vec = _vectorized_topk_per_bar(
+        eligible,
+        top_quantile=0.5,
+        max_events_per_bar=None,
+        max_variant_fraction=1.0,
+        primary_sort_col="expected_utility_bps",
+    )
+    assert len(vec) == 0
+
+
+# --- Diagnostics gating tests (Scenario 4) ---
+
+
+def test_select_candidate_diagnostics_disabled_skips_sensitivity_and_shadow(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = pd.DataFrame({
+        "datetime": ["2025-01-01T00:00:00"] * 3,
+        "symbol": ["BTCUSDT", "BTCUSDT", "ETHUSDT"],
+        "family": ["trend_ma", "rsi_reversion", "trend_donchian"],
+        "variant": ["ema_12_72", "rsi_14", "donchian_36"],
+        "side": [1, -1, 1],
+        "raw_score": [0.6, -0.7, 0.5],
+        "score_z": [0.6, -0.7, 0.5],
+        "expected_holding_bars": [18, 12, 24],
+        "min_holding_bars": [6, 4, 8],
+        "stop_atr_mult": [2.0, 2.0, 2.0],
+        "take_profit_atr_mult": [4.0, 3.0, 4.0],
+        "turnover_proxy": [0.05, 0.08, 0.04],
+        "cost_floor_bps": [24.0, 24.0, 24.0],
+        "entry_idx": [10, 10, 10],
+    })
+    model_output = CandidateModelOutput(
+        events=events,
+        p_pass=np.array([0.8, 0.9, 0.85], dtype=np.float64),
+        mu_gross_bps=np.array([50.0, 60.0, 40.0], dtype=np.float64),
+        mu_net_decision_bps=np.array([26.0, 36.0, 16.0], dtype=np.float64),
+        q10_net_bps=np.array([-5.0, -5.0, -10.0], dtype=np.float64),
+        q90_net_bps=np.array([40.0, 45.0, 30.0], dtype=np.float64),
+        utility_score=np.array([10.0, 12.0, 8.0], dtype=np.float64),
+        selection_thresholds={},
+    )
+    cfg = CandidateStrategyConfig(
+        min_expected_net_bps=10.0,
+        max_expected_shortfall_bps=50.0,
+        selection_sensitivity_enabled=True,
+        selection_shadow_profiles_enabled=True,
+        selection_policy="hard",
+        l1_selection_diagnostics_enabled=True,
+    )
+
+    sensitivity_spy: list[bool] = []
+    shadow_spy: list[bool] = []
+
+    def _sens_spy(**kw: Any) -> pd.DataFrame:
+        sensitivity_spy.append(True)
+        return compute_selection_sensitivity(**kw)
+
+    def _shadow_spy(**kw: Any) -> pd.DataFrame:
+        shadow_spy.append(True)
+        return compute_shadow_selection_profiles(**kw)
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_portfolio.compute_selection_sensitivity",
+        _sens_spy,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_portfolio.compute_shadow_selection_profiles",
+        _shadow_spy,
+    )
+
+    selected = select_candidate_events_for_portfolio(
+        model_output=model_output, cfg=cfg,
+        enable_diagnostics=False,
+    )
+    assert len(sensitivity_spy) == 0
+    assert len(shadow_spy) == 0
+    assert not selected.empty
+
+
+def test_select_candidate_diagnostics_enabled_calls_sensitivity_and_shadow(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = pd.DataFrame({
+        "datetime": ["2025-01-01T00:00:00"] * 3,
+        "symbol": ["BTCUSDT", "BTCUSDT", "ETHUSDT"],
+        "family": ["trend_ma", "rsi_reversion", "trend_donchian"],
+        "variant": ["ema_12_72", "rsi_14", "donchian_36"],
+        "side": [1, -1, 1],
+        "raw_score": [0.6, -0.7, 0.5],
+        "score_z": [0.6, -0.7, 0.5],
+        "expected_holding_bars": [18, 12, 24],
+        "min_holding_bars": [6, 4, 8],
+        "stop_atr_mult": [2.0, 2.0, 2.0],
+        "take_profit_atr_mult": [4.0, 3.0, 4.0],
+        "turnover_proxy": [0.05, 0.08, 0.04],
+        "cost_floor_bps": [24.0, 24.0, 24.0],
+        "entry_idx": [10, 10, 10],
+    })
+    model_output = CandidateModelOutput(
+        events=events,
+        p_pass=np.array([0.8, 0.9, 0.85], dtype=np.float64),
+        mu_gross_bps=np.array([50.0, 60.0, 40.0], dtype=np.float64),
+        mu_net_decision_bps=np.array([26.0, 36.0, 16.0], dtype=np.float64),
+        q10_net_bps=np.array([-5.0, -5.0, -10.0], dtype=np.float64),
+        q90_net_bps=np.array([40.0, 45.0, 30.0], dtype=np.float64),
+        utility_score=np.array([10.0, 12.0, 8.0], dtype=np.float64),
+        selection_thresholds={},
+    )
+    cfg = CandidateStrategyConfig(
+        min_expected_net_bps=10.0,
+        max_expected_shortfall_bps=50.0,
+        selection_sensitivity_enabled=True,
+        selection_shadow_profiles_enabled=True,
+        selection_policy="hard",
+        l1_selection_diagnostics_enabled=True,
+    )
+
+    sensitivity_spy: list[bool] = []
+    shadow_spy: list[bool] = []
+
+    def _sens_spy(**kw: Any) -> pd.DataFrame:
+        sensitivity_spy.append(True)
+        return compute_selection_sensitivity(**kw)
+
+    def _shadow_spy(**kw: Any) -> pd.DataFrame:
+        shadow_spy.append(True)
+        return compute_shadow_selection_profiles(**kw)
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_portfolio.compute_selection_sensitivity",
+        _sens_spy,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.candidate_portfolio.compute_shadow_selection_profiles",
+        _shadow_spy,
+    )
+
+    selected = select_candidate_events_for_portfolio(
+        model_output=model_output, cfg=cfg,
+        enable_diagnostics=True,
+    )
+    assert len(sensitivity_spy) >= 1
+    assert len(shadow_spy) >= 1
+    assert not selected.empty
