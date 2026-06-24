@@ -17,7 +17,7 @@ Produce high-precision technical specifications, strict interface contracts, and
   - **Imports**: Exact import statements required.
   - **Data Shapes & Types**: Strict types, Models (Pydantic, etc.), TypedDicts, or NDArray shape definitions.
 - **# ✍️ Contract Changes**: EXACT class and function signatures (with full Python 3.11 type hints) and return types.
-- **# 🧪 TDD Test Scenario Matrix (CRITICAL for Test-First)**:
+- **# 🧪 TDD Test Scenario Matrix (CRITICAL for Test-First - MUST BE WRITTEN BEFORE IMPLEMENTATION LOGIC)**:
   - **Test Environment & Fixtures**: Existing fixtures to use, mock paths, and decorators (e.g., `@patch('src.core.exchange.Client')`).
   - **Mock Boilerplate Snippet (CRITICAL for Low-Reasoning executor)**: If the test requires complex mocks (e.g., patching asynchronous calls, mocking database session, or pandas DataFrames), provide a direct Python code snippet of the setup. Do not just describe it in text.
   - **Scenario 1 (Happy Path - Test Setup)**:
