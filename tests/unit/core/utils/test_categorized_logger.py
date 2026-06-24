@@ -34,13 +34,14 @@ def test_categorized_logger_methods(caplog: pytest.LogCaptureFixture) -> None:
     assert any("[STRAT] gate checks passed" in rec.message for rec in records)
     assert any("[SYS] generic debug log message" in rec.message for rec in records)
 
-def test_categorized_logger_legacy_auto_tagging(caplog: pytest.LogCaptureFixture) -> None:
-    """Verify legacy log calls with keywords are automatically tagged with correct categories."""
-    logger = setup_logger("TestLogger_Legacy", write_file=False)
+def test_categorized_logger_fallback_to_sys(caplog: pytest.LogCaptureFixture) -> None:
+    """Verify that any debug logs without a valid tag automatically fall back to [SYS]."""
+    logger = setup_logger("TestLogger_Fallback", write_file=False)
     logger.setLevel(logging.DEBUG)
     logger.propagate = True
     caplog.set_level(logging.DEBUG)
 
+    # These do not start with a valid tag
     logger.debug("[PROFILE] database operation completed in 0.5s")
     logger.debug("[DATASET] loaded 100 entries")
     logger.debug("study run started")
@@ -48,9 +49,10 @@ def test_categorized_logger_legacy_auto_tagging(caplog: pytest.LogCaptureFixture
     records = caplog.records
     assert len(records) >= 3
 
-    assert any("[PERF] [PROFILE] database operation completed in 0.5s" in rec.message for rec in records)
-    assert any("[DATA] [DATASET] loaded 100 entries" in rec.message for rec in records)
-    assert any("[OPT] study run started" in rec.message for rec in records)
+    # All should fall back to [SYS]
+    assert any("[SYS] [PROFILE] database operation completed in 0.5s" in rec.message for rec in records)
+    assert any("[SYS] [DATASET] loaded 100 entries" in rec.message for rec in records)
+    assert any("[SYS] study run started" in rec.message for rec in records)
 
 def test_categorized_logger_no_double_prefixing(caplog: pytest.LogCaptureFixture) -> None:
     """Verify logger does not prepend category prefix if it already starts with it."""
@@ -59,7 +61,7 @@ def test_categorized_logger_no_double_prefixing(caplog: pytest.LogCaptureFixture
     logger.propagate = True
     caplog.set_level(logging.DEBUG)
 
-    logger.perf("[PERF] already prefixed performance")
+    logger.perf("already prefixed performance")
     logger.debug("[OPT] already prefixed optimization")
 
     records = caplog.records
