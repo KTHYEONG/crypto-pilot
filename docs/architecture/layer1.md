@@ -106,6 +106,10 @@ graph TD
 - **Vectorized Volatility**: `pd.DataFrame.rolling().std(ddof=1)` over full matrix replaces column loop.
 - **signal_batch_convert**: `iterrows` → `np.flatnonzero` vectorization (loop 2.64s→0.04s/fold, -98%).
 - **Aligned Cache**: Numba JIT accelerated rolling/cross-sectional robust z-scores; pandas rolling apply replaced.
+- **Vectorized Top-k Selection**: `_vectorized_topk_per_bar` replaces per-bar Python loop in `select_candidate_events_for_portfolio`. Sort → `drop_duplicates` per-(bar,symbol) → `cumcount` rank → `ceil(bar_size×quantile)` keep → variant-cap backfill (per-(bar,family,variant) filter + re-rank). O(E log E) vectorized, 0 Python loops. Per-bar result identical via sorted cumcount tie-break.
+- **Diagnostics Gating**: `enable_diagnostics` param on `select_candidate_events_for_portfolio`. Evidence folds (12/16 per TF) gate `selection_sensitivity`, `shadow_profiles`, `waterfall` to False. Deployed/outer fold path retains `enable_diagnostics=True` for diagnostic SSOT.
+- **Prepare-Once Event Table**: `bridge.py` calls `prepare_labeled_events` once before WF loop → `PreparedLabeledEvents` passed through `run_candidate_walk_forward` and wired via `_GLOBAL_LABELED_EVENTS` (ProcessPool fork CoW). `build_candidate_dataset` fast path (numpy boolean mask + `frame.iloc`) eliminates per-window pandas to_numeric/isin/mask/copy.
+- **Schema-Once**: `frozen_identity_names` extracted from prepared events once; reused across all folds in `fit_candidate_feature_schema`. Identity feature schema computed only for the final anchored fit window.
 - **Parquet I/O**: Baggage columns dropped (`close_time`, `no_trades`, `ignore`), numeric early-exit guard, redundant `.copy()` removed.
 - **Conditional Copy/Merge**: `raw_df.copy()` gated by `needs_merge`. `_to_unix_ms` once per TF. Merged audit lightweight `{rows, cols}`. `_COL_GROUP_CACHE` for column-group mapping.
 - **Ingestion ThreadPool**: `ThreadPoolExecutor` replaces `ProcessPoolExecutor` for DataFrame I/O (pickle overhead elimination).
