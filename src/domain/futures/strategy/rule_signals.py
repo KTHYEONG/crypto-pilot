@@ -26,25 +26,62 @@ def candidate_variant_key(family: str, variant: str) -> str:
     return f"{family}:{variant}"
 
 
+@numba.njit  # type: ignore[untyped-decorator]
+def _robust_zscore_numba(
+    raw_scores: np.ndarray,
+    groups: np.ndarray,
+    clip: float,
+    eps: float,
+) -> np.ndarray:
+    """Numba-accelerated per-group robust z-score using median/MAD normalization."""
+    n = raw_scores.shape[0]
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+    order = np.argsort(groups)
+    sorted_scores = raw_scores[order]
+    sorted_groups = groups[order]
+    sorted_result = np.zeros(n, dtype=np.float64)
+
+    i = 0
+    while i < n:
+        j = i + 1
+        while j < n and sorted_groups[j] == sorted_groups[i]:
+            j += 1
+        vals = sorted_scores[i:j]
+        finite_count = 0
+        for k in range(vals.shape[0]):
+            if np.isfinite(vals[k]):
+                finite_count += 1
+        if finite_count == 0:
+            i = j
+            continue
+        finite_vals = np.empty(finite_count, dtype=np.float64)
+        idx = 0
+        for k in range(vals.shape[0]):
+            if np.isfinite(vals[k]):
+                finite_vals[idx] = vals[k]
+                idx += 1
+        m = np.median(finite_vals)
+        mad = np.median(np.abs(finite_vals - m)) * 1.4826
+        for k in range(i, j):
+            if mad > eps and np.isfinite(sorted_scores[k]):
+                sorted_result[k] = (sorted_scores[k] - m) / mad
+        i = j
+
+    for k in range(n):
+        sorted_result[k] = max(-clip, min(clip, sorted_result[k]))
+
+    result = np.zeros(n, dtype=np.float64)
+    for k in range(n):
+        result[order[k]] = sorted_result[k]
+    return result
+
+
 def _cross_sectional_robust_zscore(raw_scores: NDArray[np.float64], groups: NDArray[np.int64]) -> NDArray[np.float64]:
     """Return per-group robust z-scores using median/MAD normalization."""
-    score_z = np.zeros(raw_scores.shape[0], dtype=np.float64)
-    if raw_scores.size == 0:
-        return score_z
-    for group in np.unique(groups):
-        group_mask = groups == group
-        values = raw_scores[group_mask]
-        finite_mask = np.isfinite(values)
-        if not bool(finite_mask.any()):
-            continue
-        finite_values = values[finite_mask]
-        median = float(np.median(finite_values))
-        mad = float(np.median(np.abs(finite_values - median)) * 1.4826)
-        normalized = np.zeros(values.shape[0], dtype=np.float64)
-        if mad > _ROBUST_Z_EPS:
-            normalized[finite_mask] = (finite_values - median) / mad
-        score_z[group_mask] = np.clip(normalized, -_ROBUST_Z_CLIP, _ROBUST_Z_CLIP)
-    return score_z
+    result = _robust_zscore_numba(raw_scores, groups, _ROBUST_Z_CLIP, _ROBUST_Z_EPS)
+    assert isinstance(result, np.ndarray)
+    return result
 
 
 def _normalize_linear_score(
@@ -2046,6 +2083,18 @@ def candidate_panels_to_events(
             regime_mask = entry_regimes == regime_name
             if not bool(np.any(regime_mask)):
                 continue
+            # ── Pre-extract base arrays ONCE per regime ──
+            r_datetimes = event_datetimes[regime_mask]
+            r_symbols = event_symbols[regime_mask]
+            r_sides = event_sides[regime_mask]
+            r_raw_scores = raw_scores[regime_mask]
+            r_score_z = score_z[regime_mask]
+            r_turnover = turnover_proxy[regime_mask]
+            r_cost = event_cost[regime_mask]
+            r_entry_idx = t_idx[regime_mask] + 1
+            r_entry_regime = entry_regimes[regime_mask]
+            r_entry_code = entry_regime_codes[regime_mask]
+
             regime_policies = build_exit_policies_for_panel(
                 archetype=str(panel.archetype),
                 regime_name=regime_name,
@@ -2058,34 +2107,34 @@ def candidate_panels_to_events(
             for policy in regime_policies:
                 signal_cells = np.asarray(
                     [
-                        f"{panel.family}:{panel.variant}:{policy.policy_id}:{entry_regime}"
-                        for entry_regime in entry_regimes[regime_mask]
+                        f"{panel.family}:{panel.variant}:{policy.policy_id}:{name}"
+                        for name in r_entry_regime
                     ],
                     dtype=object,
                 )
                 if side_flipped:
                     signal_cells = np.asarray([f"{cell}:flip" for cell in signal_cells], dtype=object)
                 df = pd.DataFrame({
-                    "datetime": event_datetimes[regime_mask],
-                    "symbol": event_symbols[regime_mask],
+                    "datetime": r_datetimes,
+                    "symbol": r_symbols,
                     "family": panel.family,
                     "variant": panel.variant,
-                    "side": event_sides[regime_mask],
-                    "raw_score": raw_scores[regime_mask],
-                    "score_z": score_z[regime_mask],
+                    "side": r_sides,
+                    "raw_score": r_raw_scores,
+                    "score_z": r_score_z,
                     "expected_holding_bars": int(policy.expected_holding_bars),
                     "min_holding_bars": int(policy.min_holding_bars),
                     "stop_atr_mult": float(policy.stop_atr_mult),
                     "take_profit_atr_mult": float(policy.take_profit_atr_mult),
-                    "turnover_proxy": turnover_proxy[regime_mask],
-                    "cost_floor_bps": event_cost[regime_mask],
-                    "entry_idx": t_idx[regime_mask] + 1,
+                    "turnover_proxy": r_turnover,
+                    "cost_floor_bps": r_cost,
+                    "entry_idx": r_entry_idx,
                     "side_flipped": side_flipped,
                     "exit_policy_id": policy.policy_id,
                     "signal_cell": signal_cells,
                     "archetype": panel.archetype,
-                    "entry_regime": entry_regimes[regime_mask],
-                    "entry_regime_code": entry_regime_codes[regime_mask],
+                    "entry_regime": r_entry_regime,
+                    "entry_regime_code": r_entry_code,
                 })
                 panel_events.append(df)
         return panel_events
@@ -2104,4 +2153,4 @@ def candidate_panels_to_events(
             "side_flipped", "exit_policy_id", "signal_cell", "archetype", "entry_regime", "entry_regime_code",
         ])
 
-    return pd.concat(all_events, axis=0, ignore_index=True).sort_values("datetime").reset_index(drop=True)
+    return pd.concat(all_events, axis=0, ignore_index=True)
