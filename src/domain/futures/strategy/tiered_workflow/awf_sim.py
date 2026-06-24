@@ -54,6 +54,75 @@ class Layer2ExpectedEdge:
     basis: EdgeBasis
 
 
+@dataclass(slots=True, frozen=True)
+class Layer2FoldAttribution:
+    fold_idx: int
+    oos_bars: int
+    n_rebal: int
+    realized_total: float
+    realized_price: float
+    realized_funding: float
+    realized_cost: float
+    expected_net: float
+    alpha_gap: float
+    mean_gross_exp: float
+    mean_net_exp: float
+    sleeves_active_mean: float
+    friction_pass_ratio: float
+    throttle_mult_mean: float
+    dropped_below_cost: int
+    netting_events: int
+
+
+def _assemble_fold_attribution(
+    *,
+    fold_idx: int,
+    oos_bars: int,
+    n_rebal: int,
+    realized_price: float,
+    realized_funding: float,
+    realized_cost: float,
+    expected_net: float,
+    gross_exps: list[float],
+    net_exps: list[float],
+    throttle_mults: list[float],
+    sleeves_active: list[int],
+    friction_pass_total: int,
+    signal_total: int,
+    dropped_below_cost: int,
+    netting_events: int,
+) -> Layer2FoldAttribution:
+    realized_total = realized_price + realized_funding - realized_cost
+    alpha_gap = realized_total - expected_net
+    friction_pass_ratio = friction_pass_total / signal_total if signal_total > 0 else 0.0
+    throttle_mult_mean = float(np.mean(throttle_mults)) if throttle_mults else 1.0
+    mean_gross_exp = float(np.mean(gross_exps)) if gross_exps else 0.0
+    mean_net_exp = float(np.mean(net_exps)) if net_exps else 0.0
+    sleeves_active_mean = float(np.mean(sleeves_active)) if sleeves_active else 0.0
+
+    def _safe(v: float) -> float:
+        return v if np.isfinite(v) else 0.0
+
+    return Layer2FoldAttribution(
+        fold_idx=fold_idx,
+        oos_bars=oos_bars,
+        n_rebal=n_rebal,
+        realized_total=_safe(realized_total),
+        realized_price=_safe(realized_price),
+        realized_funding=_safe(realized_funding),
+        realized_cost=_safe(realized_cost),
+        expected_net=_safe(expected_net),
+        alpha_gap=_safe(alpha_gap),
+        mean_gross_exp=_safe(mean_gross_exp),
+        mean_net_exp=_safe(mean_net_exp),
+        sleeves_active_mean=_safe(sleeves_active_mean),
+        friction_pass_ratio=_safe(friction_pass_ratio),
+        throttle_mult_mean=_safe(throttle_mult_mean),
+        dropped_below_cost=dropped_below_cost,
+        netting_events=netting_events,
+    )
+
+
 @dataclass(slots=True)
 class _AwfSimResult:
     """run_awf 내부 시뮬레이션 결과 (private)."""
@@ -81,6 +150,7 @@ class _AwfSimResult:
     block_rets_baseline: tuple[tuple[float, ...], ...]
     rets_baseline_ew: list[float]          # 순수 1/N EW baseline (uplift 측정 전용)
     fit_rets_hybrid: tuple[float, ...] = ()  # D3: fit-leg 수익률 (look-ahead-free L* calibration용)
+    fold_attributions: tuple[Layer2FoldAttribution, ...] = ()
 
 
 def _book_edge_score(
@@ -797,6 +867,7 @@ def _resolve_sleeve_signals_at_bar(
 ) -> tuple[
     dict[tuple[str, str], SymbolSignal],
     dict[tuple[str, str], tuple[float, float]],
+    int,
 ]:
     """Bar t에서 활성 sleeve의 SymbolSignal dict를 반환한다.
 
@@ -814,28 +885,31 @@ def _resolve_sleeve_signals_at_bar(
         fixed_cost_safety_mult: 비용 안전 배수.
 
     Returns:
-        tuple: (signals, edges). signals: (symbol, strategy_id) → SymbolSignal.
+        tuple: (signals, edges, n_dropped). signals: (symbol, strategy_id) → SymbolSignal.
         edges: (symbol, strategy_id) → (signed_gross_bps_per_bar, expected_cost_bps_per_bar).
+        n_dropped: signed_net==0 또는 non-finite로 탈락한 active sleeve 수.
 
     Time Complexity: O(S) where S = n_sleeves.
     """
     n_sleeve = cache.signal_mask_2d.shape[1]
     if n_sleeve == 0:
-        return {}, {}
+        return {}, {}, 0
 
     sleeve_mask_row = cache.signal_mask_2d[t]  # [S]
     active_sleeves = np.where(sleeve_mask_row)[0]
     if len(active_sleeves) == 0:
-        return {}, {}
+        return {}, {}, 0
 
     result: dict[tuple[str, str], SymbolSignal] = {}
     edges_out: dict[tuple[str, str], tuple[float, float]] = {}
     sleeve_ids = cache.sleeve_ids
     sleeve_to_sym_arr = cache.sleeve_to_sym
+    n_dropped = 0
 
     for j in active_sleeves:
         sym_col = int(sleeve_to_sym_arr[j])
         if not tradeable_mask[sym_col]:
+            n_dropped += 1
             continue
 
         sleeve_id = sleeve_ids[j]
@@ -859,6 +933,7 @@ def _resolve_sleeve_signals_at_bar(
         )
 
         if not np.isfinite(edge.signed_net_bps_per_bar) or edge.signed_net_bps_per_bar == 0.0:
+            n_dropped += 1
             continue
 
         result[sleeve_id] = SymbolSignal(
@@ -872,7 +947,7 @@ def _resolve_sleeve_signals_at_bar(
         )
         edges_out[sleeve_id] = (edge.signed_gross_bps_per_bar, edge.expected_cost_bps_per_bar)
 
-    return result, edges_out
+    return result, edges_out, n_dropped
 
 
 def _combine_sleeve_signals_to_symbol(
@@ -954,6 +1029,46 @@ def _combine_sleeve_signals_to_symbol(
     return out, friction_by_sym
 
 
+def _count_netting_symbols(
+    sleeve_signals: dict[tuple[str, str], SymbolSignal],
+    pooled_signals: dict[str, SymbolSignal],
+    *,
+    cancel_ratio: float = 0.5,
+) -> int:
+    """sleeve 신호 부호 상쇄(netting)가 발생한 symbol 수를 반환.
+
+    부호 혼재(양·음 sleeve 공존) & abs(pooled_mu) < cancel_ratio * max(abs(raw_mu_i))
+    인 symbol을 netting으로 판정.
+
+    Args:
+        sleeve_signals: (symbol, strategy_id) → SymbolSignal (sleeve raw edge).
+        pooled_signals: symbol → SymbolSignal (pooled result).
+        cancel_ratio: pooled_mu가 raw_mu 최대 대비 얼마나 작으면 netting으로 볼지.
+
+    Returns:
+        netting symbol 개수.
+    """
+    by_sym: dict[str, list[float]] = {}
+    for (sym, _strat), sig in sleeve_signals.items():
+        by_sym.setdefault(sym, []).append(sig.raw_mu)
+
+    count = 0
+    for sym, raw_mus in by_sym.items():
+        pos = any(m > 0 for m in raw_mus)
+        neg = any(m < 0 for m in raw_mus)
+        if not (pos and neg):
+            continue
+        pooled = pooled_signals.get(sym)
+        if pooled is None:
+            continue
+        max_abs_raw = max(abs(m) for m in raw_mus)
+        if max_abs_raw <= 0.0:
+            continue
+        if abs(pooled.raw_mu) < cancel_ratio * max_abs_raw:
+            count += 1
+    return count
+
+
 def _run_awf_simulation(
     *,
     cache: L2SimulationCache,
@@ -976,6 +1091,9 @@ def _run_awf_simulation(
     prof_eval = 0.0
 
     k_rank = int(config.k_rank)
+    _diag = bool(getattr(config, "l2_diag_attribution_enabled", False))
+    _diag_top_k = int(getattr(config, "l2_diag_sleeve_top_k", 15))
+    _diag_sample_every = int(getattr(config, "l2_diag_sleeve_sample_every", 0))
     rank_buffer = int(config.rank_buffer)
     kelly_fraction = float(config.kelly_fraction)
     # D2: vol_target=None → unit vol-target(1.0) 강제 — RC-1 cascade 해제.
@@ -997,6 +1115,20 @@ def _run_awf_simulation(
     adaptive_expand_below_vol_ratio = float(
         getattr(config, "adaptive_expand_below_vol_ratio", 0.0)
     )
+
+    if _diag and logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "[L2-ATTR-CFG] k_rank=%d rebalance_bars=%d kelly_fraction=%.3f "
+            "fixed_cost_safety_mult=%.3f deploy_cost_safety_mult=%.3f "
+            "edge_throttle_enabled=%s edge_floor_bps=%.2f edge_ref_bps=%.2f "
+            "edge_throttle_gamma=%.3f risk_budget_floor_ratio=%.3f "
+            "risk_budget_max_scale=%.3f l2_sleeve_combine_method=%s",
+            config.k_rank, config.rebalance_bars, config.kelly_fraction,
+            config.fixed_cost_safety_mult, config.deploy_cost_safety_mult,
+            config.edge_throttle_enabled, config.edge_floor_bps, config.edge_ref_bps,
+            config.edge_throttle_gamma, config.risk_budget_floor_ratio,
+            config.risk_budget_max_scale, config.l2_sleeve_combine_method,
+        )
 
     symbols = aligned.symbols
     n_sym = len(symbols)
@@ -1034,6 +1166,7 @@ def _run_awf_simulation(
     # fit-leg = fold.fit_start → fold.oos_start (OOS 이전). 독립 상태로 수집.
     # 모든 fold fit-leg 연결 → fit_rets_hybrid (closed-form L* 입력).
     all_fit_rets_hybrid: list[float] = []
+    fold_attributions: list[Layer2FoldAttribution] = []
 
     prev_selection: frozenset[str] = frozenset()
     prev_w: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
@@ -1066,7 +1199,7 @@ def _run_awf_simulation(
             _fit_btc_beta = _fit_beta_arr  # Use directly
             
             # Sleeve 기반 signal 읽기 — [S] mask에서 [N] tradeable 참조
-            _sleeve_signals, _ = _resolve_sleeve_signals_at_bar(
+            _sleeve_signals, _, _ = _resolve_sleeve_signals_at_bar(
                 cache=cache,
                 t=_ft,
                 tradeable_mask=_fit_tradeable,
@@ -1175,6 +1308,19 @@ def _run_awf_simulation(
         _fold_h: list[float] = []
         _fold_b: list[float] = []
         _fold_selected: set[str] = set()
+        if _diag:
+            _attr_price = 0.0
+            _attr_funding = 0.0
+            _attr_cost = 0.0
+            _attr_expected = 0.0
+            _attr_gross_exps: list[float] = []
+            _attr_net_exps: list[float] = []
+            _attr_throttle: list[float] = []
+            _attr_sleeves_active: list[int] = []
+            _attr_friction_pass = 0
+            _attr_signal_total = 0
+            _attr_dropped = 0
+            _attr_netting = 0
         for t in range(fold.oos_start, fold.oos_end - 1, rebalance_bars):
             t_end = min(t + rebalance_bars, fold.oos_end - 1)
 
@@ -1185,7 +1331,7 @@ def _run_awf_simulation(
             btc_beta = beta_arr  # Use directly
 
             # Sleeve 기반 signal 읽기 — [S] mask에서 [N] tradeable 참조
-            _oos_sleeve_sigs, _oos_sleeve_edges = _resolve_sleeve_signals_at_bar(
+            _oos_sleeve_sigs, _oos_sleeve_edges, _oos_dropped = _resolve_sleeve_signals_at_bar(
                 cache=cache,
                 t=t,
                 tradeable_mask=tradeable_mask,
@@ -1194,6 +1340,9 @@ def _run_awf_simulation(
                 vol_row=vol_matrix[t],
                 fixed_cost_safety_mult=fixed_cost_safety_mult,
             )
+            if _diag:
+                _attr_dropped += _oos_dropped
+                _attr_sleeves_active.append(len(_oos_sleeve_sigs))
             # sleeve key → symbol key 변환: precision-weighted pooling (인플레이션 방지)
             valid_signals, friction_by_symbol = _combine_sleeve_signals_to_symbol(
                 _oos_sleeve_sigs,
@@ -1207,6 +1356,8 @@ def _run_awf_simulation(
                     "[AWF-EDGE] t=%d sleeve_count=%d edge_pass=%d",
                     t, len(_oos_sleeve_sigs), len(valid_signals),
                 )
+            if _diag:
+                _attr_netting += _count_netting_symbols(_oos_sleeve_sigs, valid_signals)
             prof_prep += time.perf_counter() - t0_prep
 
             t0_rank = time.perf_counter()
@@ -1274,6 +1425,14 @@ def _run_awf_simulation(
                     min_active_mult=edge_throttle_min_active_mult,
                 )
                 w = w * m
+            else:
+                m = 1.0
+            if _diag:
+                _attr_throttle.append(float(m))
+                if np.any(np.abs(w) > 1e-12):
+                    _attr_expected += float(t_end - t) * float(np.dot(w, mu_arr * 1e-4))
+                _attr_gross_exps.append(float(np.sum(np.abs(w))))
+                _attr_net_exps.append(float(np.sum(w)))
             if risk_budget_floor_ratio > 0.0 and vol_target is not None:
                 w = _apply_risk_budget_floor(
                     weights=w,
@@ -1335,6 +1494,39 @@ def _run_awf_simulation(
             friction_pass = int(sum(1 for s in selected if friction_by_symbol.get(s, False)))
             friction_pass_total += friction_pass
             signal_total += len(selected)
+            if _diag:
+                _attr_friction_pass += friction_pass
+                _attr_signal_total += len(selected)
+            if _diag and logger.isEnabledFor(logging.DEBUG):
+                _sample_cond = (t == fold.oos_start) or (
+                    _diag_sample_every > 0 and rebalance_count > 0
+                    and rebalance_count % _diag_sample_every == 0
+                )
+                if _sample_cond and len(_oos_sleeve_sigs) > 0:
+                    _sym_w_pairs: list[tuple[str, float]] = []
+                    for _sym_key in _oos_sleeve_sigs:
+                        _sym = _sym_key[0]
+                        _sym_idx = sym_to_idx.get(_sym)
+                        if _sym_idx is not None and abs(w[_sym_idx]) > 1e-12:
+                            _sym_w_pairs.append((_sym, float(abs(w[_sym_idx]))))
+                    _sym_w_pairs.sort(key=lambda x: -x[1])
+                    for _sym, _aw in _sym_w_pairs[:_diag_top_k]:
+                        _sym_idx = sym_to_idx.get(_sym, -1)
+                        _sleeve_sig = next(
+                            (v for k, v in _oos_sleeve_sigs.items() if k[0] == _sym), None
+                        )
+                        if _sleeve_sig is None:
+                            continue
+                        _side = 1 if _sleeve_sig.raw_mu > 0 else -1
+                        _fpass = friction_by_symbol.get(_sym, False)
+                        logger.debug(
+                            "[L2-ATTR-SLEEVE] fold=%d t=%d sym=%s side=%d raw_mu_pb=%.4f "
+                            "qw=%.3f w=%.4f friction_pass=%s",
+                            _fold_idx, t, _sym, _side,
+                            _sleeve_sig.raw_mu, _sleeve_sig.quality_weight,
+                            float(w[_sym_idx]) if _sym_idx >= 0 else 0.0,
+                            _fpass,
+                        )
             cap_saturation_count += int(_is_cap_saturated(weights=w, btc_beta=beta_arr, caps=caps))
             rebalance_count += 1
             new_support = set(np.flatnonzero(np.abs(w) > 1e-12).tolist())
@@ -1374,6 +1566,10 @@ def _run_awf_simulation(
                 )
                 # 거래비용은 리밸런싱 첫 bar에만 차감
                 cost = rebal_cost if t2 == t else 0.0
+                if _diag:
+                    _attr_price += float(np.dot(w, bar_ret))
+                    _attr_funding += -float(np.dot(w, funding_rates))
+                    _attr_cost += cost
                 cost_baseline = rebal_cost_baseline if t2 == t else 0.0
                 cost_baseline_ew = rebal_cost_baseline_ew if t2 == t else 0.0
                 r_h = gross_ret - cost
@@ -1402,6 +1598,38 @@ def _run_awf_simulation(
         fold_rets_hybrid.append(_fold_h)
         fold_rets_baseline.append(_fold_b)
         fold_selected_symbols.append(tuple(sorted(_fold_selected)))
+        if _diag:
+            _attr = _assemble_fold_attribution(
+                fold_idx=_fold_idx,
+                oos_bars=fold.oos_end - fold.oos_start,
+                n_rebal=len(_attr_throttle) or rebalance_count,
+                realized_price=_attr_price,
+                realized_funding=_attr_funding,
+                realized_cost=_attr_cost,
+                expected_net=_attr_expected,
+                gross_exps=_attr_gross_exps,
+                net_exps=_attr_net_exps,
+                throttle_mults=_attr_throttle,
+                sleeves_active=_attr_sleeves_active,
+                friction_pass_total=_attr_friction_pass,
+                signal_total=_attr_signal_total,
+                dropped_below_cost=_attr_dropped,
+                netting_events=_attr_netting,
+            )
+            fold_attributions.append(_attr)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[L2-ATTR] fold=%d oos_bars=%d n_rebal=%d realized_total=%.6f "
+                    "realized_price=%.6f realized_funding=%.6f realized_cost=%.6f "
+                    "expected_net=%.6f alpha_gap=%.6f mean_gross_exp=%.4f mean_net_exp=%.4f "
+                    "sleeves_active_mean=%.1f friction_pass_ratio=%.3f throttle_mult_mean=%.3f "
+                    "dropped_below_cost=%d netting_events=%d",
+                    _attr.fold_idx, _attr.oos_bars, _attr.n_rebal, _attr.realized_total,
+                    _attr.realized_price, _attr.realized_funding, _attr.realized_cost,
+                    _attr.expected_net, _attr.alpha_gap, _attr.mean_gross_exp, _attr.mean_net_exp,
+                    _attr.sleeves_active_mean, _attr.friction_pass_ratio, _attr.throttle_mult_mean,
+                    _attr.dropped_below_cost, _attr.netting_events,
+                )
         logger.log(PERF,
             "[PERF] awf_fold fold=%d/%d oos_bars=%d took=%.4fs",
             _fold_idx + 1, len(awf_folds),
@@ -1441,6 +1669,7 @@ def _run_awf_simulation(
         block_rets_baseline=tuple(tuple(block) for block in fold_rets_baseline),
         rets_baseline_ew=all_rets_baseline_ew,
         fit_rets_hybrid=tuple(all_fit_rets_hybrid),
+        fold_attributions=tuple(fold_attributions),
     )
 
 
