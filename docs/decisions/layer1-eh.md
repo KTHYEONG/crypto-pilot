@@ -123,3 +123,12 @@ ai_read_policy: when_related
 - **Batch Event Conversion**: Parallelized `candidate_panels_to_events` using `ThreadPoolExecutor` (max_workers=4) over active panels, significantly shortening the time required for dense-to-sparse event table conversions.
 - **Diagnostics Parallelization**: Parallelized independent pandas groupby calculations (`by_family`, `by_variant`, `by_family_side`, and `_summarize_side_flip` frames) in `compute_rule_diagnostics` via `ThreadPoolExecutor` (max_workers=3).
 - **WSL Performance Outcome**: Average L1 strategy computation time per timeframe reduced by 54% (~46.78s sequential to ~21.29s parallel equivalent). Complete execution timing and RAM profiles updated in `docs/perf_mem_profile_report.md`.
+
+## Phase 13: L1 PERF Radical Optimization — OPT-0~4 (ADR-048, 6/24)
+- **OPT-0: Dead Code + TF 정합성**: `TF_PROBE_GRID` 6→4 TF(`1h/2h` 제거), `PROBE_SOURCE_TFS` dead-code 제거(`1m/5m/15m/30m`), `run_tiered_pipeline` `l1_tfs` default `cfg.l1_tfs`와 정합.
+- **OPT-1: searchsorted O(log T)**: `load_futures_data_maps_for_symbols` Pass-2의 datetime mask+sum → `np.searchsorted(dt_ns, value, "left")`. `is_end_idx`/`is_start_idx`/`oos_start_idx` 모두 O(T) full scan에서 O(log T) binary search로 단축.
+- **OPT-2: Evidence IPC as_completed**: `run_l1_nested_swf` evidence 수집을 `as_completed`로 변경. 완료 순 IPC + fold_id 재정렬.
+- **OPT-3: t.ppf LRU Cache + Snapshot ThreadPool**: `_t_ppf_cached(q_milli, df_int)` with `@lru_cache(maxsize=512)`. 스냅샷 루프를 `ThreadPoolExecutor`로 병렬화 (n≤1 순차, n≥2 병렬, `as_of_idx` 정렬). U-형태 TF별 편차: 4h 11.01s, 6h 5.52s, 8h 4.95s, 12h 5.56s.
+- **OPT-4: Prefit Overlap**: `prefit_layer1_model(deployment_registry 제외)` / `assemble_layer1_artifact`로 분할. evidence submit 직후 같은 executor에 `_prefit_layer1_from_globals` fork. background 실행 중 evidence IPC+snapshot+outer fold(34.7s)와 오버랩. 게이트 통과 시 `assemble_layer1_artifact(1ms)`로 registry 첨부. `cfg.l1_speculative_prefit_enabled`(기본=True). 실패 시 serial `fit_layer1_inference_artifact` fallback. **모든 TF에서 0.0000s 달성**(기존 20.49s 완전 제거).
+- **실측 (2025-06-24, 52 symbols, 4 TF)**: L1 Total 163.6s → ~123.1s(-25%). `l1_fit_inference_artifact` 20.49s→0.00s(100%↓). Peak RSS 8,782MB→~8,773MB(유지). Spec 목표(~70s 단축) 대비 ~58% 달성.
+- **Test Coverage**: 4 tests (OPT-0 S3, OPT-1 S2/S3, OPT-3 S1, OPT-4 S1) all PASS. L1: ruff/mypy clean. 1 pre-existing test unstable(`test_l1_nested_thread_env_vars_set` env var).

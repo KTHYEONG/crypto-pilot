@@ -98,10 +98,13 @@ graph TD
 # 5. Performance Optimizations
 
 - **Adaptive Worker Cap**: Stage-specific caps: `evidence (4 if compact+≥8GB else 3)`, `outer (3)`, `l2_optuna (4)`. `pinned` parameter acts as safety-clamped upper bound (not hard override). `l1_nested_result_soft_cap_mb` enforces aggregate result OOM guard (`predicted_result_mb = 100 if compact else 400`). Oversubscription guard: `folds // workers < 2` → reduce. Memory formula: `estimated_proc_gb = max(0.8, 0.5 + frame_gb*0.5 + predicted_result_gb)`.
-- **Deferred Artifact**: First TF computes `fit_layer1_inference_artifact`; remaining TFs skip via `defer_artifact=True`.
+- **Prefit Overlap (OPT-4)**: `prefit_layer1_model` submitted to executor right after evidence fold submit. Runs in background during evidence IPC + snapshot + outer folds. On gate pass: `assemble_layer1_artifact` (1ms) attaches registry. `l1_fit_inference_artifact` 20.49s→0.00s (100% eliminated). Falls back to serial fit on prefit failure.
 - **Prefork Cache Prime**: `prime_aligned_feature_cache` called once pre-fork → fork CoW shared across child processes.
-- **Sequential Prequential Snapshots**: `ThreadPoolExecutor` rollback (GIL+cache thrashing on CPU-bound numpy/scipy → sequential recovers ~3.5s/TF).
+- **Prequential Snapshot ThreadPool (OPT-3)**: `build_l1_prequential_evidence_snapshots` wraps per-snapshot work in `_build_snapshot` inner function. `n≤1` sequential, `n≥2` → `ThreadPoolExecutor(max_workers=n//2)`. Results sorted by `as_of_idx` for determinism. Numba bootstrap+GIL release makes threads effective.
 - **Numba JIT**: `_rolling_robust_z_1d/2d`, `_cross_sectional_robust_z_2d` via `@njit(cache=True)`. Membership warm/ready via `_calculate_warm_ready_numba`.
+- **searchsorted Indexing (OPT-1)**: `load_futures_data_maps_for_symbols` Pass-2 replaces O(T) datetime mask + sum + argmax with O(log T) `np.searchsorted`. Applied to `is_end_idx`, `is_start_idx`, `oos_start_idx`.
+- **t.ppf LRU Cache (OPT-3)**: `_t_ppf_cached(q_thousandths, df_int)` with `@lru_cache(maxsize=512)`. Each pair's `stats.t.ppf(1-alpha, df)` + `stats.t.ppf(power, df)` reduced to dict lookup. q=2 values (950, 800), df≈10-30 → ~100% hit rate.
+- **Evidence IPC as_completed (OPT-2)**: `run_l1_nested_swf` collects evidence futures via `as_completed` instead of submit-order. Results sorted by `fold_id` post-collection for snapshot consistency.
 - **Loop Invariant Hoisting**: `np.searchsorted` on state/readiness cube outside symbol loop ($O(N T \log T) \to O(T \log T + N V)$). Membership timeline normalized once (104→1).
 - **Vectorized Volatility**: `pd.DataFrame.rolling().std(ddof=1)` over full matrix replaces column loop.
 - **signal_batch_convert**: `iterrows` → `np.flatnonzero` vectorization (loop 2.64s→0.04s/fold, -98%).
