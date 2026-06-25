@@ -218,3 +218,97 @@ class TestAdditionalEdgeCases:
         )
 
         np.testing.assert_allclose(w_none, w_zero, atol=1e-12)
+
+
+class TestCSAmplification:
+    """CS Z-Score → Mu Amplification (anti-Kelly=EW-convergence)."""
+
+    def test_happy_path_top_z_gets_higher_weight(self) -> None:
+        n = 3
+        mu_bps = np.full(n, 0.5, dtype=np.float64)
+        sigma = np.full(n, 0.005, dtype=np.float64)
+        prev_w = np.zeros(n, dtype=np.float64)
+        caps = PortfolioCaps(gross=5.0, per_symbol=2.0, net=3.0, beta=2.0, target_ann_vol=0.20)
+        z_scores = np.array([2.0, 0.5, 0.0], dtype=np.float64)
+
+        w = diagonal_kelly_weights(
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            caps=caps,
+            prev_w=prev_w,
+            no_trade_band=0.0,
+            z_scores=z_scores,
+            cs_amp_alpha=2.0,
+        )
+
+        assert w[0] > w[1] > 0.0, f"expected w[0] > w[1] > 0, got w={w}"
+        np.testing.assert_allclose(w[1], w[2], atol=1e-12, err_msg="z=0.5 and z=0.0 equal weight (both below median)")
+
+    def test_all_negative_z_no_amplification(self) -> None:
+        n = 3
+        mu_bps = np.full(n, 30.0, dtype=np.float64)
+        sigma = np.full(n, 0.002, dtype=np.float64)
+        prev_w = np.zeros(n, dtype=np.float64)
+        z_scores = np.array([-1.0, -0.5, -0.2], dtype=np.float64)
+
+        w_null = diagonal_kelly_weights(
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            caps=_DEFAULT_CAPS,
+            prev_w=prev_w,
+            no_trade_band=0.0,
+        )
+        w_amp = diagonal_kelly_weights(
+            mu_bps=mu_bps,
+            sigma=sigma,
+            kelly_fraction=0.25,
+            vol_target=None,
+            caps=_DEFAULT_CAPS,
+            prev_w=prev_w,
+            no_trade_band=0.0,
+            z_scores=z_scores,
+            cs_amp_alpha=2.0,
+        )
+
+        np.testing.assert_allclose(w_amp, w_null, atol=1e-12)
+
+    def test_single_symbol_amplification_identity(self) -> None:
+        n = 1
+        mu_bps = np.full(n, 30.0, dtype=np.float64)
+        sigma = np.full(n, 0.002, dtype=np.float64)
+        prev_w = np.zeros(n, dtype=np.float64)
+        z_scores = np.array([3.0], dtype=np.float64)
+
+        w_null = diagonal_kelly_weights(
+            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
+            vol_target=None, caps=_DEFAULT_CAPS, prev_w=prev_w, no_trade_band=0.0,
+        )
+        w_amp = diagonal_kelly_weights(
+            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
+            vol_target=None, caps=_DEFAULT_CAPS, prev_w=prev_w, no_trade_band=0.0,
+            z_scores=z_scores, cs_amp_alpha=2.0,
+        )
+
+        np.testing.assert_allclose(w_amp, w_null, atol=1e-12)
+
+    def test_z_scores_none_backward_compat(self) -> None:
+        n = 4
+        mu_bps = np.full(n, 10.0, dtype=np.float64)
+        sigma = np.full(n, 0.002, dtype=np.float64)
+        prev_w = np.zeros(n, dtype=np.float64)
+
+        w_base = diagonal_kelly_weights(
+            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
+            vol_target=None, caps=_DEFAULT_CAPS, prev_w=prev_w, no_trade_band=0.0,
+        )
+        w_compat = diagonal_kelly_weights(
+            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
+            vol_target=None, caps=_DEFAULT_CAPS, prev_w=prev_w, no_trade_band=0.0,
+            z_scores=None, cs_amp_alpha=2.0,
+        )
+
+        np.testing.assert_allclose(w_compat, w_base, atol=1e-12)

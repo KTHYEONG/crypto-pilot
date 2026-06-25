@@ -815,6 +815,8 @@ def diagonal_kelly_weights(
     btc_beta: NDArray[np.float64] | None = None,
     bars_per_year: float = 2190.0,
     support_mask: NDArray[np.bool_] | None = None,
+    z_scores: NDArray[np.float64] | None = None,
+    cs_amp_alpha: float = 2.0,
 ) -> NDArray[np.float64]:
     """신규 아키텍처용 Diagonal Kelly 사이징.
 
@@ -866,6 +868,16 @@ def diagonal_kelly_weights(
     )
     if support.size != n:
         support = np.abs(mu) > 1e-12
+
+    # CS Score Amplification (anti-Kelly=EW-convergence)
+    if z_scores is not None:
+        z_arr = np.asarray(z_scores, dtype=np.float64).ravel()
+        if z_arr.size == n:
+            z_clipped = np.maximum(z_arr, 0.0)
+            z_pos = z_clipped[z_clipped > 0.0]
+            z_med = float(np.median(z_pos)) if z_pos.size > 0 else 0.5
+            amp_factor = 1.0 + float(cs_amp_alpha) * np.maximum(z_clipped - z_med, 0.0)
+            mu = mu * amp_factor
 
     # Step 1 (friction filter) removed: mu_bps is already net-of-cost per caller contract.
     # See awf_sim.py caller — signed_net_bps_per_bar already subtracts hurdle*safety_mult.
