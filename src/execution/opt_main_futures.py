@@ -1871,9 +1871,104 @@ def _run_strategy_stage(
                 "[PERF] prebuilt l2_sim_cache took=%.4fs",
                 time.perf_counter() - _t_cache_start,
             )
-            
+
+            # ── Stage A: 메타 유효성 측정 (env-gated, param 무관 1회) ──────────
+            if os.environ.get("L2_META_FEAS", "") not in ("", "0", "false", "False"):
+                try:
+                    from src.domain.futures.strategy.market_regime import (
+                        compute_market_regime_context,
+                    )
+                    from src.domain.futures.strategy.tiered_workflow.l2_meta import (
+                        build_sleeve_meta_dataset,
+                        evaluate_meta_feasibility,
+                    )
+                    _mf_regime = compute_market_regime_context(aligned=aligned_tiered).code_1d
+                    _mf_start = int(getattr(l2_signals, "start_idx", 0))
+                    _mf_end = int(getattr(l2_signals, "end_idx", aligned_tiered.close_2d.shape[0]))
+                    _mf_cost = float(OPT_FUTURES_CONFIG.get("L2_ROUND_TRIP_COST_BPS", 6.0))
+                    _mf_samples = build_sleeve_meta_dataset(
+                        shared_l2_cache, aligned_tiered, _mf_regime,
+                        _mf_start, _mf_end, cost_bps=_mf_cost,
+                    )
+                    _mf_embargo = int(OPT_FUTURES_CONFIG.get("EMBARGO_BARS_BY_TF", {}).get(run_config.timeframe, 42))
+                    _mf_report = evaluate_meta_feasibility(
+                        _mf_samples, n_splits=5, embargo_bars=_mf_embargo, threshold_quantile=0.70,
+                    )
+                    _logger.info(
+                        "[L2-META-FEAS-SUMMARY] meta_ic=%.4f tstat=%.2f net_lift_bps=%.3f "
+                        "auc=%.3f n_oos=%d n_events=%d feats=%s",
+                        _mf_report.oos_meta_ic, _mf_report.oos_meta_ic_tstat,
+                        _mf_report.net_edge_lift_bps, _mf_report.auc_sign,
+                        _mf_report.n_oos, len(_mf_samples.y),
+                        ",".join(_mf_samples.feature_names),
+                    )
+                    for _bk, _bv in sorted(
+                        _mf_report.bucket_table.items(), key=lambda kv: kv[1], reverse=True
+                    )[:12]:
+                        _logger.info("[L2-META-BUCKET] %s oos_edge_bps=%.3f", _bk, _bv)
+
+                    # Decisive conditional feasibility: causal fit->oos bucket-edge
+                    # correlation (the conditional analog of P2a). Splits samples by
+                    # event_t median; per (regime,family,TF) bucket with >=min_n events
+                    # in BOTH halves, correlates fit-edge vs oos-edge across buckets.
+                    if len(_mf_samples.y) >= 50:
+                        from scipy.stats import spearmanr as _spr
+                        _et = _mf_samples.event_t
+                        _med = float(np.median(_et))
+                        _fitm = _et < _med
+                        _oosm = ~_fitm
+                        _reg = _mf_samples.X[:, 0].astype(np.int64)
+                        _keys = [
+                            f"r{int(_reg[i])}/{_mf_samples.sleeve_family[i]}/{_mf_samples.sleeve_tf[i]}"
+                            for i in range(len(_mf_samples.y))
+                        ]
+                        _bfit: dict[str, list[float]] = {}
+                        _boos: dict[str, list[float]] = {}
+                        for _i, _k in enumerate(_keys):
+                            (_bfit if _fitm[_i] else _boos).setdefault(_k, []).append(
+                                float(_mf_samples.y[_i])
+                            )
+                        # Robustness: multiple forward split fractions x min_n,
+                        # report the distribution of causal corr (stability check).
+                        _et_sorted = np.sort(_et)
+                        for _frac in (0.40, 0.50, 0.60, 0.70):
+                            _cut = float(_et_sorted[int(len(_et_sorted) * _frac)])
+                            _fm = _et < _cut
+                            for _min_n in (20, 50):
+                                _bf: dict[str, list[float]] = {}
+                                _bo: dict[str, list[float]] = {}
+                                for _i, _k in enumerate(_keys):
+                                    (_bf if _fm[_i] else _bo).setdefault(_k, []).append(
+                                        float(_mf_samples.y[_i])
+                                    )
+                                _pf = []
+                                _po = []
+                                for _k in _bf:
+                                    if _k in _bo and len(_bf[_k]) >= _min_n and len(_bo[_k]) >= _min_n:
+                                        _pf.append(float(np.mean(_bf[_k])))
+                                        _po.append(float(np.mean(_bo[_k])))
+                                if len(_pf) >= 5:
+                                    _bc, _bp = _spr(_pf, _po)
+                                    _logger.info(
+                                        "[L2-BUCKET-PERSIST] split=%.2f min_n=%d "
+                                        "causal_corr=%.4f pval=%.4f n_buckets=%d",
+                                        _frac, _min_n, float(_bc), float(_bp), len(_pf),
+                                    )
+                                else:
+                                    _logger.info(
+                                        "[L2-BUCKET-PERSIST] split=%.2f min_n=%d insufficient n=%d",
+                                        _frac, _min_n, len(_pf),
+                                    )
+                except Exception as _mf_exc:
+                    _logger.warning("[L2-META-FEAS] measurement failed: %s", _mf_exc, exc_info=True)
+
             _seed = int(run_config.seed) if hasattr(run_config, "seed") else 42
             n_l2_trials = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_TRIALS", 50))
+            # Experiment knob (parity with L2_MULTI_TF / L2_SLEEVE_COMBINE toggles):
+            # allow fast equal-budget A/B runs without editing static config.
+            _trials_override = os.environ.get("L2_OPTUNA_TRIALS", "")
+            if _trials_override.isdigit() and int(_trials_override) > 0:
+                n_l2_trials = int(_trials_override)
             _mem_l2_study = _get_rss_mb()
             _t_l2_study_start = time.perf_counter()
             l2_study_result = _run_tiered_l2_study(
