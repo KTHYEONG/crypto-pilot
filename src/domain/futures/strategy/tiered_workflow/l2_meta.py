@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re as _re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,7 @@ from sklearn.preprocessing import StandardScaler
 
 if TYPE_CHECKING:
     from src.domain.futures.strategy.common.alignment import AlignedMarketData
+    from src.domain.futures.strategy.cs_rank import SymbolSignal
     from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
 
 from src.domain.futures.strategy.tiered_workflow.metrics import _newey_west_ic_tstat
@@ -437,3 +439,140 @@ def evaluate_meta_feasibility(
         n_oos=oos_n,
         bucket_table=bucket_table,
     )
+
+
+def compute_bucket_realized_edges(
+    cache: L2SimulationCache,
+    aligned: AlignedMarketData,
+    fit_start: int,
+    fit_end: int,
+    regime_code_1d: NDArray[np.int8],
+    *,
+    cost_bps: float = 6.0,
+    min_n: int = 30,
+    shrinkage: float = 0.3,
+) -> dict[tuple[int, str, str], float]:
+    """fit-leg [fit_start, fit_end) 구간에서 버킷별 실현 순엣지 계산.
+
+    버킷 = (regime_code, family, TF) triplet.
+    실현엣지 = side_j * fwd_ret(sym_j) * 10000 - cost_bps, bar 단위 평균.
+    min_n 미달 버킷은 family prior로 shrinkage 보정.
+
+    Args:
+        cache: L2SimulationCache (sleeve 행렬 포함).
+        aligned: AlignedMarketData (close_2d 필요).
+        fit_start: fit-leg 시작 bar index (inclusive).
+        fit_end: fit-leg 종료 bar index (exclusive).
+        regime_code_1d: [T] bar별 regime code.
+        cost_bps: 거래비용 (bps).
+        min_n: 최소 event 수. 미달 시 shrinkage.
+        shrinkage: raw_edge -> family prior 축소율.
+
+    Returns:
+        {(regime, family, TF): edge_bps}. 미관측 버킷은 포함 안 됨.
+    """
+    n_sleeve = cache.signal_mask_2d.shape[1]
+    if n_sleeve == 0 or fit_start >= fit_end:
+        return {}
+
+    t_max, _ = cache.signal_mask_2d.shape
+    if fit_end > t_max:
+        fit_end = t_max
+
+    close_2d = np.asarray(aligned.close_2d, dtype=np.float64)
+    n_sym = close_2d.shape[1]
+
+    fwd_bps = np.zeros((t_max, n_sym), dtype=np.float64)
+    if t_max > 1:
+        c = close_2d
+        denom = np.maximum(np.abs(c[:-1]), 1e-12)
+        fwd_bps[:-1] = ((c[1:] - c[:-1]) / denom) * 10000.0
+
+    sleeve_ids = cache.sleeve_ids
+    sleeve_to_sym_arr = cache.sleeve_to_sym
+
+    bucket_sum: dict[tuple[int, str, str], float] = {}
+    bucket_cnt: dict[tuple[int, str, str], int] = {}
+
+    for t in range(fit_start, fit_end):
+        if t + 1 >= t_max:
+            break
+        mask = cache.signal_mask_2d[t]
+        active_js = np.where(mask)[0]
+        if len(active_js) == 0:
+            continue
+
+        regime = int(regime_code_1d[t]) if t < len(regime_code_1d) else 0
+
+        for j in active_js:
+            sj = int(j)
+            strat_id = sleeve_ids[sj][1]
+            family, tf = _parse_meta_group_ids(strat_id)
+            sym_col = int(sleeve_to_sym_arr[sj])
+
+            edge = float(cache.side_2d[t, sj]) * float(fwd_bps[t, sym_col]) - cost_bps
+
+            key = (regime, family, tf)
+            bucket_sum[key] = bucket_sum.get(key, 0.0) + edge
+            bucket_cnt[key] = bucket_cnt.get(key, 0) + 1
+
+    if not bucket_sum:
+        return {}
+
+    family_raw_edges: dict[str, list[float]] = {}
+    for (regime, family, tf), s in bucket_sum.items():
+        cnt = bucket_cnt[(regime, family, tf)]
+        raw = s / cnt
+        family_raw_edges.setdefault(family, []).append(raw)
+
+    family_prior: dict[str, float] = {}
+    for family, edges in family_raw_edges.items():
+        family_prior[family] = float(np.mean(edges))
+
+    result: dict[tuple[int, str, str], float] = {}
+    for (regime, family, tf), s in bucket_sum.items():
+        cnt = bucket_cnt[(regime, family, tf)]
+        raw = s / cnt
+        if cnt < min_n and family in family_prior:
+            edge_val = (1.0 - shrinkage) * raw + shrinkage * family_prior[family]
+        else:
+            edge_val = raw
+        result[(regime, family, tf)] = edge_val
+
+    return result
+
+
+def filter_sleeves_by_bucket(
+    sleeve_sigs: Mapping[tuple[str, str], SymbolSignal],
+    bucket_edges: Mapping[tuple[int, str, str], float],
+    regime_now: int,
+    *,
+    edge_floor_bps: float = 100.0,
+) -> dict[tuple[str, str], SymbolSignal]:
+    """현재 regime의 버킷 엣지로 sleeve 필터링.
+
+    (sym, strat_id) -> 해당 버킷 edge > edge_floor_bps 인 sleeve만 통과.
+    버킷 미관측(KeyError) sleeve는 edge=0 처리 -> 통상 제거됨.
+
+    Args:
+        sleeve_sigs: sleeve -> SymbolSignal dict.
+        bucket_edges: {(regime, family, TF): edge_bps}.
+        regime_now: 현재 bar의 regime code.
+        edge_floor_bps: 필터 임계값 (bps). 이하 버킷은 배치 안 함.
+
+    Returns:
+        통과한 sleeve만 담긴 dict (순서 보존).
+    """
+    if not sleeve_sigs:
+        return {}
+
+    result: dict[tuple[str, str], SymbolSignal] = {}
+    for key, sig in sleeve_sigs.items():
+        _, strat_id = key
+        family, tf = _parse_meta_group_ids(strat_id)
+        bucket_key = (regime_now, family, tf)
+        edge = bucket_edges.get(bucket_key, 0.0)
+        if edge > edge_floor_bps:
+            result[key] = sig
+
+    return result

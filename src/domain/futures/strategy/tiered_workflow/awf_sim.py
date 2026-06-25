@@ -1526,7 +1526,7 @@ def _run_awf_simulation(
             )
             _included = {tf for tf, e in _per_tf_edge.items() if e > _tf_min_edge}
             if not _included:
-                logger.warning(
+                logger.debug(
                     "[L2-TFGATE] fold=%d included_tfs=∅ edges=%s → fallback: ALL TFs",
                     _f_idx, _per_tf_edge,
                 )
@@ -1538,6 +1538,34 @@ def _run_awf_simulation(
             )
         else:
             included_tfs_by_fold.append(set(cache.sleeve_to_tf) - {"unk"})
+
+    # L2 bucket routing: regime code + fit-leg 버킷 실현엣지 (1회)
+    _l2_routing_mode = str(getattr(config, "l2_routing_mode", "bucket"))
+    _regime_code_1d: NDArray[np.int8] = np.zeros(aligned.close_2d.shape[0], dtype=np.int8)
+    bucket_edges_by_fold: list[dict[tuple[int, str, str], float]] = []
+    if _l2_routing_mode == "bucket":
+        from src.domain.futures.strategy.market_regime import compute_market_regime_context
+        from src.domain.futures.strategy.tiered_workflow.l2_meta import (
+            compute_bucket_realized_edges,
+        )
+        _regime_code_1d = compute_market_regime_context(aligned=aligned).code_1d
+        for _f_idx, _f_fold in enumerate(awf_folds):
+            if int(_f_fold.fit_start) < int(_f_fold.oos_start):
+                _be = compute_bucket_realized_edges(
+                    cache=cache,
+                    aligned=aligned,
+                    fit_start=int(_f_fold.fit_start),
+                    fit_end=int(_f_fold.oos_start),
+                    regime_code_1d=_regime_code_1d,
+                    cost_bps=float(getattr(config, "l2_bucket_cost_bps", 6.0)),
+                    min_n=int(getattr(config, "l2_bucket_min_n", 30)),
+                    shrinkage=float(getattr(config, "l2_bucket_shrinkage", 0.3)),
+                )
+                bucket_edges_by_fold.append(_be)
+            else:
+                bucket_edges_by_fold.append({})
+    else:
+        bucket_edges_by_fold = [{} for _ in awf_folds]
 
     for _fold_idx, fold in enumerate(awf_folds):
         t_fold_start = time.perf_counter()
@@ -1595,6 +1623,25 @@ def _run_awf_simulation(
                     k: v for k, v in _oos_sleeve_edges.items()
                     if _parse_tf_from_strategy_id(k[1]) in _current_included
                 }
+            # L2 bucket routing: OOS bar t의 regime 기반 sleeve 필터링
+            if _l2_routing_mode == "bucket" and _fold_idx < len(bucket_edges_by_fold):
+                _current_bucket_edges = bucket_edges_by_fold[_fold_idx]
+                if _current_bucket_edges:
+                    from src.domain.futures.strategy.tiered_workflow.l2_meta import (
+                        filter_sleeves_by_bucket,
+                    )
+                    _regime_now = int(_regime_code_1d[t]) if t < len(_regime_code_1d) else 0
+                    _oos_sleeve_sigs = filter_sleeves_by_bucket(
+                        _oos_sleeve_sigs,
+                        _current_bucket_edges,
+                        _regime_now,
+                        edge_floor_bps=float(
+                            getattr(config, "l2_bucket_edge_floor_bps", 100.0)
+                        ),
+                    )
+                    _oos_sleeve_edges = {
+                        k: v for k, v in _oos_sleeve_edges.items() if k in _oos_sleeve_sigs
+                    }
             if _diag:
                 _attr_dropped += _oos_dropped
                 _attr_sleeves_active.append(len(_oos_sleeve_sigs))

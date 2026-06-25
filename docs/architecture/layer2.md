@@ -47,6 +47,7 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
 
 - **Signal Processing**: Absolute CS Ranking → BTC-β Neutralization.
 - **Multi-TF Signal Pooling**: L1 per-bar net edge $\mu_i$ (sleeve = (symbol, strategy_id)) → symbol-level pooled edge via **precision-weighted combination**: $\mu_s = \frac{\sum_i c_i \mu_i}{\sum_i c_i}$ where $c_i = \text{quality_weight}_i$. Conviction cap: $c_s = \min(\sum c_i, \kappa \cdot \max c_i)$, $\kappa=1.5$. Guarantees $\min_i \mu_i \le \mu_s \le \max_i \mu_i$ → no mu inflation from multi-TF consensus. Direction conflict ($+\mu$ vs $-\mu$) → auto-netting via signed convex combination.
+- **Bucket Routing (regime×family×TF dynamic gating)**: `l2_routing_mode="bucket"` (default) 활성화 시 pooling 전 sleeve 필터링 단계 추가. fit-leg에서 `compute_market_regime_context(code_1d: 6-state int8, BTC price regime)` 기반 per-fold bucket edge 계산 → $(regime\_code, family, TF)$ triplet의 realized edge $= \overline{side_j \cdot fwd\_ret(sym_j) \cdot 10000 - cost\_bps}$. OOS bar $t$에서 regime_now = `code_1d[t]` → 각 sleeve의 bucket edge lookup → `edge > l2_bucket_edge_floor_bps` (default 100bps)인 sleeve만 pooling으로 통과. 미관측 bucket은 `edge=0` 처리 → 자동 제외. min_n 미달 bucket은 family prior로 shrinkage: $e = (1-\lambda) e_{raw} + \lambda e_{family}$, $\lambda=0.3$.
 - **Kelly Sizing**: $w_s \propto f_k \cdot \mu_s / \sigma_s^2$ (friction masked). $\sigma_R = (q_{90} - q_{10})/2.563$. `vol_target=1.0` always active (RC-1 cascade prevention).
 - **Edge-Conditional Throttle**: $m_t = \text{clip}((s - \text{floor}) / (\text{ref} - \text{floor}), 0, 1)^\gamma$ applied post-sizing.
 - **Active Deployment Controls**: `deploy_cost_safety_mult`, `edge_throttle_min_active_mult`, `risk_budget_floor_ratio` + `risk_budget_max_scale`.
@@ -109,11 +110,20 @@ graph TD
 | `l2_deploy_cvar_margin` | CVaR safety margin for calibration | 0.20 |
 | `exchange_leverage_cap` | Exchange max leverage | 10.0 |
 | `vol_target` | Unit-vol normalization | 1.0 (always on) |
+| `l2_routing_mode` | Sleeve routing mode: pool (legacy) or bucket (regime×family×TF) | "bucket" |
+| `l2_bucket_cost_bps` | Bucket edge cost deduction | 6.0 |
+| `l2_bucket_min_n` | Min bucket events before shrinkage | 30 |
+| `l2_bucket_shrinkage` | Raw→family prior shrinkage rate | 0.3 |
+| `l2_bucket_edge_floor_bps` | Bucket edge pass threshold | 100.0 |
 | `l2_min_sortino` | Promotion Sortino gate | 1.5 |
 | `l2_min_sharpe_abs` | Promotion Sharpe sanity floor | 0.7 |
 | `l2_min_calmar` | Promotion Calmar anchor | 0.5 |
 
 # 5. Edge Cases
+- **Bucket Routing Look-ahead**: `compute_bucket_realized_edges` uses `fit_end=oos_start`, forward return at `t=fit_end-1` reads `close[oos_start]` — allowed (fit-leg only, OOS close price available in full dataset).
+- **Bucket min_n shrinkage**: Bucket with count < min_n → family prior shrinkage prevents degenerate edge from single-event bucket.
+- **Bucket unknown key**: `bucket_edges.get(key, 0.0)` → edge=0 < floor → auto excluded.
+- **Regime stale**: regime_code_1d covers entire bar range; OOS bar with no regime uses `regime=0` fallback.
 - **Survival Censoring**: Negative OOS fold predictions zeroed.
 - **Fail-SAFE**: Replay falls back to best diagnostic candidate, preserves blocker reason.
 - **NaN Protection**: Tradeable masks sever allocations on corrupt data without crash.
