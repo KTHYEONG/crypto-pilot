@@ -52,6 +52,12 @@ from src.domain.futures.strategy.tiered_workflow.diagnostics import (
 from src.domain.futures.strategy.tiered_workflow.l2_gate import (
     evaluate_layer2_gate,
 )
+from src.domain.futures.strategy.tiered_workflow.l2_meta import (
+    MetaFeasibilityReport,
+    SleeveMetaSamples,
+    build_sleeve_meta_dataset,
+    evaluate_meta_feasibility,
+)
 from src.domain.futures.strategy.tiered_workflow.metrics import (
     _cagr,
     _mdd,
@@ -119,7 +125,9 @@ __all__ = [
     "Layer3Result",
     "Layer3WindowError",
     "LayerUniverseAudit",
+    "MetaFeasibilityReport",
     "PredictionDecompositionDiag",
+    "SleeveMetaSamples",
     "StrategySignal",
     "SymbolLifecycleRecord",
     "SymbolRealizedStat",
@@ -144,6 +152,7 @@ __all__ = [
     "build_layer2_signal_schedule",
     "build_layer_universe_audit",
     "build_qualified_signal_registry",
+    "build_sleeve_meta_dataset",
     "build_walk_forward_folds",
     "compose_symbol_signals",
     "compute_breadth_weighted_ic",
@@ -158,6 +167,7 @@ __all__ = [
     "compute_symbol_strategy_evidence",
     "evaluate_layer1_readiness",
     "evaluate_layer2_gate",
+    "evaluate_meta_feasibility",
     "evaluate_outer_signal_opportunities",
     "fit_layer1_inference_artifact",
     "format_layer1_deployment_registry_table",
