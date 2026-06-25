@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re as _re
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
@@ -793,6 +794,7 @@ def build_l2_simulation_cache(
             signal_mask_2d=empty_t_s_bool,
             sleeve_to_sym=sleeve_to_sym_arr,
             sleeve_ids=sleeve_ids_sorted,
+            sleeve_to_tf=(),
         )
 
     # ── Sleeve 신호 행렬 [T, S] ───────────────────────────────────────────────
@@ -849,6 +851,31 @@ def build_l2_simulation_cache(
             t_max,
         )
 
+    # [L2-TFDIAG] TF별 holding/edge/decision_idx 단위 정합성 진단 (multi-TF 불협화음 검출)
+    if _log.isEnabledFor(_logging.DEBUG) and len(sleeve_js) > 0:
+        _tf_agg: dict[str, dict[str, list[float]]] = {}
+        for _ei in range(len(sleeve_js)):
+            _sid = sleeve_ids_sorted[sleeve_js[_ei]][1]
+            _m = _re.search(r"_(\d+h)\b", _sid) or _re.search(r"(\d+h)$", _sid)
+            _tfk = _m.group(1) if _m else "unk"
+            _b = _tf_agg.setdefault(_tfk, {"hold": [], "gross": [], "net": [], "didx": []})
+            _b["hold"].append(float(holding_bars_arr[_ei]))
+            _b["gross"].append(float(gross_vals[_ei]))
+            _b["net"].append(float(net_vals[_ei]))
+            _b["didx"].append(float(decision_idxs[_ei]))
+        for _tfk in sorted(_tf_agg):
+            _b = _tf_agg[_tfk]
+            _n = len(_b["hold"])
+            def _mean(xs: list[float]) -> float:
+                return float(sum(xs) / len(xs)) if xs else 0.0
+            _log.debug(
+                "[L2-TFDIAG] tf=%s n_events=%d mean_hold_bars=%.2f mean_gross_bps=%.1f "
+                "mean_net_bps=%.1f mean_per_bar_net=%.2f didx_min=%.0f didx_max=%.0f",
+                _tfk, _n, _mean(_b["hold"]), _mean(_b["gross"]), _mean(_b["net"]),
+                _mean(_b["net"]) / max(_mean(_b["hold"]), 1.0),
+                min(_b["didx"]), max(_b["didx"]),
+            )
+
     return L2SimulationCache(
         vol_matrix_2d=vol_matrix_2d,
         tradeable_mask_2d=tradeable_mask_2d,
@@ -863,7 +890,136 @@ def build_l2_simulation_cache(
         signal_mask_2d=signal_mask_2d,
         sleeve_to_sym=sleeve_to_sym_arr,
         sleeve_ids=sleeve_ids_sorted,
+        sleeve_to_tf=tuple(_parse_tf_from_strategy_id(sid[1]) for sid in sleeve_ids_sorted),
     )
+
+def _parse_tf_from_strategy_id(strategy_id: str) -> str:
+    """strategy_id 접미사에서 TF 문자열을 추출한다.
+
+    Args:
+        strategy_id: 전략 식별자 (예: ``donchian_72_8h``).
+
+    Returns:
+        TF 문자열 (예: ``"8h"``), 미매치 시 ``"unk"``.
+    """
+    _m = _re.search(r"_(\d+h)\b", strategy_id) or _re.search(r"(\d+h)$", strategy_id)
+    return _m.group(1) if _m else "unk"
+
+
+def compute_per_tf_fit_edge(
+    cache: L2SimulationCache,
+    aligned: AlignedMarketData,
+    fit_start: int,
+    fit_end: int,
+) -> dict[str, float]:
+    """fit-leg 구간 각 TF의 방향 hit 엣지(look-ahead-free).
+
+    ``per_tf_edge[tf] = mean over (active sleeve j of TF, bar t in [fit_start, fit_end))
+    of side_j(t) * forward_return(symbol_of_j, t)``
+
+    ``forward_return = (close[t+1]-close[t])/close[t]``. t+1>=T면 skip.
+
+    Args:
+        cache: L2SimulationCache (sleeve 행렬 포함).
+        aligned: AlignedMarketData (close_2d 필요).
+        fit_start: fit-leg 시작 bar index (inclusive).
+        fit_end: fit-leg 종료 bar index (exclusive).
+
+    Returns:
+        TF → 평균 방향 엣지 dict. 빈 TF는 0.0.
+    """
+    n_sleeve = cache.signal_mask_2d.shape[1]
+    if n_sleeve == 0 or fit_start >= fit_end:
+        return {}
+
+    t_max, _ = cache.signal_mask_2d.shape
+    if fit_end > t_max:
+        fit_end = t_max
+
+    close_2d = np.asarray(aligned.close_2d, dtype=np.float64)
+    n_sym = close_2d.shape[1]
+    forward_ret_2d = np.zeros((t_max, n_sym), dtype=np.float64)
+    if t_max > 1:
+        c = close_2d
+        forward_ret_2d[1:] = np.where(
+            c[:-1] > 0,
+            (c[1:] - c[:-1]) / np.maximum(np.abs(c[:-1]), 1e-12),
+            0.0,
+        )
+
+    sleeve_to_tf_arr: tuple[str, ...] = cache.sleeve_to_tf
+    if len(sleeve_to_tf_arr) != n_sleeve:
+        return {}
+
+    tf_edges: dict[str, list[float]] = {}
+    for t in range(fit_start, fit_end):
+        if t + 1 >= t_max:
+            break
+        mask_row = cache.signal_mask_2d[t]
+        active_js = np.where(mask_row)[0]
+        if len(active_js) == 0:
+            continue
+        side_row = cache.side_2d[t]
+        for j in active_js:
+            tf_key = sleeve_to_tf_arr[int(j)]
+            sym_col = int(cache.sleeve_to_sym[int(j)])
+            fwd = float(forward_ret_2d[t, sym_col])
+            hit = float(side_row[int(j)]) * fwd
+            tf_edges.setdefault(tf_key, []).append(hit)
+
+    return {tf: float(np.mean(vals)) if vals else 0.0 for tf, vals in tf_edges.items()}
+
+
+def compute_per_sleeve_realized_edge(
+    cache: L2SimulationCache,
+    aligned: AlignedMarketData,
+    start: int,
+    end: int,
+) -> NDArray[np.float64]:
+    n_sleeve = cache.signal_mask_2d.shape[1]
+    if n_sleeve == 0 or start >= end:
+        return np.full(n_sleeve, np.nan, dtype=np.float64)
+
+    t_max, _ = cache.signal_mask_2d.shape
+    if end > t_max:
+        end = t_max
+
+    close_2d = np.asarray(aligned.close_2d, dtype=np.float64)
+    n_sym = close_2d.shape[1]
+    forward_ret_2d = np.zeros((t_max, n_sym), dtype=np.float64)
+    if t_max > 1:
+        c = close_2d
+        forward_ret_2d[1:] = np.where(
+            c[:-1] > 0,
+            (c[1:] - c[:-1]) / np.maximum(np.abs(c[:-1]), 1e-12),
+            0.0,
+        )
+
+    sleeve_to_sym = cache.sleeve_to_sym
+    edges_sum = np.zeros(n_sleeve, dtype=np.float64)
+    edges_count = np.zeros(n_sleeve, dtype=np.int64)
+
+    for t in range(start, end):
+        if t + 1 >= t_max:
+            break
+        mask_row = cache.signal_mask_2d[t]
+        active_js = np.where(mask_row)[0]
+        if len(active_js) == 0:
+            continue
+        side_row = cache.side_2d[t]
+        for j in active_js:
+            sym_col = int(sleeve_to_sym[int(j)])
+            fwd = float(forward_ret_2d[t, sym_col])
+            hit = float(side_row[int(j)]) * fwd
+            edges_sum[j] += hit
+            edges_count[j] += 1
+
+    result = np.full(n_sleeve, np.nan, dtype=np.float64)
+    for j in range(n_sleeve):
+        if edges_count[j] > 0:
+            result[j] = edges_sum[j] / float(edges_count[j])
+    return result
+
 
 def _resolve_sleeve_signals_at_bar(
     *,
@@ -1356,6 +1512,33 @@ def _run_awf_simulation(
                 _this_fold_fit_rets.append(_r)
         _per_fold_fit_rets.append(_this_fold_fit_rets)
 
+    # C4: per-TF fit-leg edge → included_tfs (TF 게이트)
+    _tf_inclusion_enabled = bool(getattr(config, "l2_tf_inclusion_enabled", True))
+    _tf_min_edge = float(getattr(config, "l2_tf_inclusion_min_edge", 0.0))
+    included_tfs_by_fold: list[set[str]] = []
+    for _f_idx, _f_fold in enumerate(awf_folds):
+        if _tf_inclusion_enabled and int(_f_fold.fit_start) < int(_f_fold.oos_start):
+            _per_tf_edge = compute_per_tf_fit_edge(
+                cache=cache,
+                aligned=aligned,
+                fit_start=int(_f_fold.fit_start),
+                fit_end=int(_f_fold.oos_start),
+            )
+            _included = {tf for tf, e in _per_tf_edge.items() if e > _tf_min_edge}
+            if not _included:
+                logger.warning(
+                    "[L2-TFGATE] fold=%d included_tfs=∅ edges=%s → fallback: ALL TFs",
+                    _f_idx, _per_tf_edge,
+                )
+                _included = set(cache.sleeve_to_tf) - {"unk"}
+            included_tfs_by_fold.append(_included)
+            logger.debug(
+                "[L2-TFGATE] fold=%d included=%s edges=%s",
+                _f_idx, sorted(_included), _per_tf_edge,
+            )
+        else:
+            included_tfs_by_fold.append(set(cache.sleeve_to_tf) - {"unk"})
+
     for _fold_idx, fold in enumerate(awf_folds):
         t_fold_start = time.perf_counter()
         _fold_h: list[float] = []
@@ -1401,6 +1584,17 @@ def _run_awf_simulation(
                 vol_row=vol_matrix[t],
                 fixed_cost_safety_mult=fixed_cost_safety_mult,
             )
+            # C4: TF 게이트 필터 — fit-leg에서 edge>min_edge인 TF sleeve만 유지
+            if _tf_inclusion_enabled:
+                _current_included = included_tfs_by_fold[_fold_idx]
+                _oos_sleeve_sigs = {
+                    k: v for k, v in _oos_sleeve_sigs.items()
+                    if _parse_tf_from_strategy_id(k[1]) in _current_included
+                }
+                _oos_sleeve_edges = {
+                    k: v for k, v in _oos_sleeve_edges.items()
+                    if _parse_tf_from_strategy_id(k[1]) in _current_included
+                }
             if _diag:
                 _attr_dropped += _oos_dropped
                 _attr_sleeves_active.append(len(_oos_sleeve_sigs))
@@ -1761,10 +1955,28 @@ def _run_awf_simulation(
                 _ic, _pval, _n_valid = float("nan"), float("nan"), 0
             logger.debug(
                 "[L2-PERSIST] fold=%d fit_bars=%d fit_cagr=%.4f oos_bars=%d oos_cagr=%.4f "
-                "sleeve_ic=%.3f sleeve_ic_pval=%.3f n_sleeves=%d",
+                "pred_autocorr=%.3f pred_autocorr_pval=%.3f n_sleeves=%d",
                 _fold_idx, len(_ffit), _fold_cagr(_ffit),
                 len(_foos), _fold_cagr(_foos),
                 _ic, _pval, _n_valid,
+            )
+            # sleeve-level 실현엣지 rank-IC (P2a 게이트)
+            _n_sl2 = cache.signal_mask_2d.shape[1]
+            if _n_sl2 > 0:
+                _e_fit = compute_per_sleeve_realized_edge(cache, aligned, fold.fit_start, fold.oos_start)
+                _e_oos = compute_per_sleeve_realized_edge(cache, aligned, fold.oos_start, fold.oos_end)
+                _valid2 = np.isfinite(_e_fit) & np.isfinite(_e_oos)
+                _n_valid2 = int(_valid2.sum())
+                if _n_valid2 >= 5:
+                    from scipy.stats import spearmanr as _spearmanr2
+                    _ric, _rpval = _spearmanr2(_e_fit[_valid2], _e_oos[_valid2])
+                else:
+                    _ric, _rpval, _n_valid2 = float("nan"), float("nan"), 0
+            else:
+                _ric, _rpval, _n_valid2 = float("nan"), float("nan"), 0
+            logger.debug(
+                "[L2-SLEEVE-IC] fold=%d realized_ic=%.3f pval=%.3f n=%d",
+                _fold_idx, _ric, _rpval, _n_valid2,
             )
         logger.log(PERF,
             "[PERF] awf_fold fold=%d/%d oos_bars=%d took=%.4fs",

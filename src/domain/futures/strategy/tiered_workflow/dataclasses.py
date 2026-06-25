@@ -395,6 +395,8 @@ class Layer2AllocationConfig:
     l2_diag_sleeve_sample_every: int = 0
     l2_max_cost_drag_ratio: float = 0.60
     l2_turnover_penalty_weight: float = 0.0
+    l2_tf_inclusion_enabled: bool = True
+    l2_tf_inclusion_min_edge: float = 0.0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -601,6 +603,10 @@ class Layer2AllocationConfig:
                 cls._as_float(params.get("l2_turnover_penalty_weight", 0.0), 0.0),
                 0.0,
             ),
+            l2_tf_inclusion_enabled=bool(params.get("l2_tf_inclusion_enabled", True)),
+            l2_tf_inclusion_min_edge=cls._as_float(
+                params.get("l2_tf_inclusion_min_edge", 0.0), 0.0
+            ),
         )
 
 
@@ -654,6 +660,7 @@ class L2SimulationCache:
     # Sleeve→symbol mapping (신규, multi-TF 핵심)
     sleeve_to_sym: NDArray[np.int64]  # [S]
     sleeve_ids: tuple[tuple[str, str], ...]  # [S] (symbol, strategy_id)
+    sleeve_to_tf: tuple[str, ...]  # [S] each sleeve's native TF (from strategy_id suffix)
 
 
 @dataclass(slots=True, frozen=True)
