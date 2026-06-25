@@ -539,6 +539,27 @@ def compute_bucket_realized_edges(
             edge_val = raw
         result[(regime, family, tf)] = edge_val
 
+    # Step E: aggregate DEBUG stats
+    if logger.isEnabledFor(logging.DEBUG):
+        _n_regimes = len({k[0] for k in bucket_sum})
+        _n_families = len({k[1] for k in bucket_sum})
+        _n_tfs = len({k[2] for k in bucket_sum})
+        _n_total_buckets = len(bucket_sum)
+        _n_shrunk = sum(1 for k, v in bucket_cnt.items() if v < min_n)
+        logger.debug(
+            "[L2-BUCKET-STATS] fit=[%d,%d) n_buckets=%d n_regimes=%d n_fams=%d n_tfs=%d n_shrunk=%d/%d",
+            fit_start, fit_end, _n_total_buckets, _n_regimes, _n_families, _n_tfs, _n_shrunk, _n_total_buckets,
+        )
+        for (_br, _bfam, _btf), _s in sorted(bucket_sum.items(), key=lambda x: -x[1]):
+            _cnt = bucket_cnt[(_br, _bfam, _btf)]
+            _raw = _s / _cnt
+            _final = result.get((_br, _bfam, _btf), 0.0)
+            _shrunk = _cnt < min_n
+            logger.debug(
+                "[L2-BUCKET-EDGE-FIT] regime=%d family=%s tf=%s cnt=%d raw=%.2f final=%.2f shrunk=%s",
+                _br, _bfam, _btf, _cnt, _raw, _final, _shrunk,
+            )
+
     return result
 
 
