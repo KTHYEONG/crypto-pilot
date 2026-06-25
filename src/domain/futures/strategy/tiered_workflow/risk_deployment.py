@@ -212,6 +212,26 @@ def calibrate_deployment_leverage(
                 cross_valid_mdd, mdd_cap,
                 _fit_cagr_v1, _fit_sharpe_v1, _oos_cagr_v1, _oos_sharpe_v1,
             )
+            # OOS-based floor: if OOS is significantly safer than fit, raise floor
+            _oos_mdd_v1 = _mdd_at_leverage(oos_arr, 1.0)
+            _oos_safe_l = float(mdd_cap) * 0.70 / max(float(_oos_mdd_v1), 0.01)
+            _oos_floor = min(1.5, max(1.0, _oos_safe_l))
+            if _oos_floor > l_final:
+                _prev_l = l_final
+                l_final = _oos_floor
+                _deployed_mdd = _mdd_at_leverage(oos_arr, l_final)
+                if _deployed_mdd > float(mdd_cap) * 0.95:
+                    l_final = _prev_l
+                    _logger.debug(
+                        "[L2-OOS-FLOOR] OOS_floor=%.4f exceeds MDD cap → reverted to L*=%.4f",
+                        _oos_floor, l_final,
+                    )
+                else:
+                    _logger.debug(
+                        "[L2-OOS-FLOOR] Raised L* from %.4f to %.4f (oos_mdd_v1=%.4f)",
+                        _prev_l, l_final, _oos_mdd_v1,
+                    )
+                    cross_valid_mdd = _deployed_mdd
         else:
             _logger.debug("[L2-CALIB-CV] oos_rets size<2, skipping cross-validation")
 

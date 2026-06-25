@@ -254,3 +254,31 @@ class TestCalibrateWithOosCrossValidation:
             l_hard_cap=20.0,
         )
         assert cv_mdd == pytest.approx(0.0)
+
+
+class TestOosFloor:
+    """OOS-based L* floor (anti-L*=1.0-hard-landing)."""
+
+    def test_oos_safe_floor_raises_leverage(self) -> None:
+        """OOS MDD fit 대비 낮음 → L* floor 상향 가능."""
+        rng = np.random.default_rng(42)
+        fit_rets = rng.normal(-1e-4, 0.02, 2190).astype(np.float64)
+        oos_rets = rng.normal(2e-4, 0.01, 1095).astype(np.float64)
+        lev, _, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_rets=oos_rets,
+            mdd_cap=0.30,
+            l_hard_cap=20.0,
+        )
+        assert lev >= 1.0
+
+    def test_no_oos_rets_backward_compat(self) -> None:
+        """oos_rets=None → 기존 로직 동일."""
+        rets = _make_rets(2190, seed=42)
+        lev, bind, _ = calibrate_deployment_leverage(
+            fit_rets=rets,
+            mdd_cap=0.30,
+            l_hard_cap=4.0,
+        )
+        assert bind in ("mdd", "hard_cap", "cvar", "none")
+        assert lev >= 1.0

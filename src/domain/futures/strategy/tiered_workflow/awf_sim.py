@@ -1857,6 +1857,14 @@ def _run_awf_simulation(
                     sig_arr[i] = ss.volatility
 
             support_mask = mu_arr != 0.0
+            # CS Score Amplification: _z_scores dict → array
+            _z_score_arr: NDArray[np.float64] | None = None
+            if config.l2_cs_amp_enabled and _z_scores:
+                _z_score_arr = np.zeros(n_sym, dtype=np.float64)
+                for sym, z in _z_scores.items():
+                    _i = sym_to_idx.get(sym)
+                    if _i is not None:
+                        _z_score_arr[_i] = z
             w = diagonal_kelly_weights(
                 mu_bps=mu_arr,
                 sigma=sig_arr,
@@ -1868,6 +1876,8 @@ def _run_awf_simulation(
                 btc_beta=btc_beta,
                 bars_per_year=bars_per_year,
                 support_mask=support_mask,
+                z_scores=_z_score_arr,
+                cs_amp_alpha=float(config.l2_cs_amp_alpha),
             )
             if edge_throttle_enabled:
                 score = _book_edge_score(w, mu_arr)
