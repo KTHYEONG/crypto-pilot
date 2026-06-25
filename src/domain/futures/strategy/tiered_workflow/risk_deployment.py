@@ -127,6 +127,7 @@ def _bisect_max_leverage(
 def calibrate_deployment_leverage(
     *,
     fit_rets: NDArray[np.float64],
+    oos_rets: NDArray[np.float64] | None = None,
     mdd_cap: float = 0.30,
     cvar_cap: float = 0.06,
     mdd_margin: float = 0.30,
@@ -134,7 +135,7 @@ def calibrate_deployment_leverage(
     l_hard_cap: float = 20.0,
     exchange_leverage_cap: float | None = None,
     l_floor: float = 1.0,
-) -> tuple[float, str]:
+) -> tuple[float, str, float]:
     """히스토리컬 수익률에서 배치 레버리지 L*를 결정론적으로 산출.
 
     Spec 설계: fit-leg 수익률로 L*를 산출하고 OOS leg에 적용(look-ahead 방지).
@@ -146,6 +147,8 @@ def calibrate_deployment_leverage(
     Args:
         fit_rets: 캘리브레이션용 per-bar simple return 배열 [T].
             이상적으로는 fit-leg 수익률; 현재는 champion OOS 경로 대리.
+        oos_rets: OOS per-bar simple return 배열 [T] (선택). 제공 시 L*의 OOS
+            크로스 검증 MDD를 계산하여 세 번째 반환값으로 전달.
         mdd_cap: MDD 하드상한 (예: 0.30).
         cvar_cap: CVaR95 하드상한 (예: 0.06).
         mdd_margin: MDD 목표 = mdd_cap*(1-margin). 기본 30% 안전여유.
@@ -157,11 +160,14 @@ def calibrate_deployment_leverage(
             MDD 예산까지 de-lever 가능(RC-5 수정 동반 필수).
 
     Returns:
-        (L*, binding_constraint) — binding ∈ {"mdd","cvar","hard_cap","exchange_cap","none"}.
+        (L*, binding_constraint, cross_valid_MDD_at_L) — cross_valid_MDD_at_L는
+        oos_rets가 제공된 경우에만 실제 계산값. 미제공 시 0.0 반환.
+        binding ∈ {"mdd","cvar","hard_cap","exchange_cap","none"}.
     """
     arr = np.asarray(fit_rets, dtype=np.float64)
     if arr.size < 2:
-        return 1.0, "none"
+        _logger.debug("[L2-CALIB] fit_rets size<2, returning L*=1.0 (none)")
+        return 1.0, "none", 0.0
 
     mdd_target = mdd_cap * (1.0 - mdd_margin)
     cvar_target = cvar_cap * (1.0 - cvar_margin)
@@ -181,7 +187,29 @@ def calibrate_deployment_leverage(
 
     l_optimal, binding = min(candidates, key=lambda x: x[0])
     l_final = max(l_optimal, float(l_floor))
-    return l_final, binding
+
+    # OOS 크로스 검증 — 제공된 oos_rets로 L*의 OOS MDD 계산
+    cross_valid_mdd: float = 0.0
+    if oos_rets is not None:
+        oos_arr = np.asarray(oos_rets, dtype=np.float64)
+        if oos_arr.size >= 2:
+            cross_valid_mdd = _mdd_at_leverage(oos_arr, l_final)
+            _oos_mdd_vol1 = _mdd_at_leverage(oos_arr, 1.0)
+            _fit_mdd_vol1 = _mdd_at_leverage(arr, 1.0)
+            _inflation_ratio = (
+                _oos_mdd_vol1 / _fit_mdd_vol1 if _fit_mdd_vol1 > 1e-12 else float("inf")
+            )
+            _logger.debug(
+                "[L2-CALIB-CV] L*=%.4f(%s) | fit_MDD_vol1=%.6f OOS_MDD_vol1=%.6f "
+                "MDD_ratio=%.2f | OOS_deployed_MDD=%.6f (cap=%.4f)",
+                l_final, binding,
+                _fit_mdd_vol1, _oos_mdd_vol1, _inflation_ratio,
+                cross_valid_mdd, mdd_cap,
+            )
+        else:
+            _logger.debug("[L2-CALIB-CV] oos_rets size<2, skipping cross-validation")
+
+    return l_final, binding, cross_valid_mdd
 
 
 def apply_deployment(
