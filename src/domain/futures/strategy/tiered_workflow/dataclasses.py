@@ -613,7 +613,7 @@ class Layer2AllocationConfig:
                 params.get("l2_tf_inclusion_min_edge", 0.0), 0.0
             ),
             l2_routing_mode=(
-                "bucket" if str(params.get("l2_routing_mode", params.get("L2_ROUTING_MODE", "bucket"))) == "bucket"
+                "bucket" if str(os.environ.get("L2_ROUTING_MODE", params.get("l2_routing_mode", params.get("L2_ROUTING_MODE", "bucket")))) == "bucket"
                 else "pool"
             ),
             l2_bucket_cost_bps=cls._as_float(params.get("l2_bucket_cost_bps", 6.0), 6.0),
@@ -625,7 +625,7 @@ class Layer2AllocationConfig:
                 1.0,
             ),
             l2_bucket_edge_floor_bps=cls._as_float(
-                params.get("l2_bucket_edge_floor_bps", 100.0), 100.0
+                os.environ.get("L2_BUCKET_EDGE_FLOOR_BPS", params.get("l2_bucket_edge_floor_bps", 100.0)), 100.0
             ),
         )
 

@@ -77,3 +77,7 @@ ai_read_policy: when_related
 - **Delta:** DEBUG 로깅 6개소(Steps A~F) 추가 — [REGIME-DIST], [L2-REGIME-OCC], [L2-BUCKET-MAP/EDGE], [L2-BUCKET-STATS/EDGE-FIT], [L2-BUCKET-FILTER], [L2-BUCKET-DROP]. 실제 L2 DEBUG 실행으로 진단: `l2_bucket_edge_floor_bps=100.0`이 per-bar edge 대비 99.5%ile 수준의 극단값으로, 모든 regime×family×TF 버킷이 OOS에서 100% 제거됨을 확인. `[L2-BUCKET-FILTER]` 로그에서 모든 이벤트가 `sleeves_before=N after=0`.
 - **Root Cause:** `edge_floor_bps` 단위를 per-trade로 오해하고 100bps 설정. 실제는 per-bar(=4h) edge로 연율 환산 시 2190%에 달하는 불가능한 임계값. Regime 분포는 transition 26.5%로 정상 (가설 A 기각), min_n=30 기반 shrinkage도 20.4%만 영향 (가설 C 기각).
 - **Recommended Fix:** `l2_bucket_edge_floor_bps`를 quantile 기반(2~5bps) 또는 zero-floor(0.0)로 조정. Pool mode 전환하여 baseline 확보 후 bucket floor 탐색 필요.
+
+## [2026-06-25] Regime-L2 Quality Gate + Bucket Health Diagnostics (Steps G~J)
+- **Delta:** L1→L2 전환 직후 Regime 품질 INFO 로그(Step I): `● [REGIME]` one-liner + C2~C5 4종 검사 + DEBUG `[REGIME-DETAIL]`. L2 AWF 내 3개 추가 진단: Step G — `[L2-BUCKET-HIT]` fold별 OOS bucket hit-ratio (INFO, <30% WARNING); Step H — `[L2-REGIME-SHIFT]` fold별 fit↔OOS regime 분포 JS-divergence (INFO, >0.15 WARNING); Step J — `[L2-BUCKET-OOS/DETAIL/UNDERFIT/OVERFIT]` fold별 fit vs OOS bucket edge RMSE/MAE/bias/corr 비교 (DEBUG). L2_BUCKET_EDGE_FLOOR_BPS env var 지원 dataclasses.py 추가.
+- **Rationale:** Regime 품질이 L2 실행을 gate하지 않는 blind spot 해소. fit-leg bucket edge의 OOS 예측력을 검증하는 지표 부재 해소. 실험(`docs/results/tmp.md`)에서 bucket+zero-floor(0.0) ≫ pool ≫ bucket+100bps 확인.
