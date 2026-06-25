@@ -1873,7 +1873,7 @@ def _run_strategy_stage(
                     f"{_REGIME_NAMES_SHORT.get(int(r), f'unk{r}'):s}={float(c)/_n_total*100:.1f}%"
                     for r, c in sorted(zip(_unique_codes.tolist(), _counts_codes.tolist(), strict=True))
                 )
-                _edge_floor = getattr(tiered_cfg, "l2_bucket_edge_floor_bps", 100.0)
+                _edge_floor = getattr(tiered_cfg, "l2_bucket_edge_floor_bps", 0.0)
 
                 _btc_idx = _btc_index_if_present(aligned_tiered.symbols)
                 _btc_log_ret = np.zeros(_n_total, dtype=np.float64)

@@ -568,7 +568,7 @@ def filter_sleeves_by_bucket(
     bucket_edges: Mapping[tuple[int, str, str], float],
     regime_now: int,
     *,
-    edge_floor_bps: float = 100.0,
+    edge_floor_bps: float = 0.0,
 ) -> dict[tuple[str, str], SymbolSignal]:
     """현재 regime의 버킷 엣지로 sleeve 필터링.
 

@@ -1631,8 +1631,9 @@ def run_l2_awf(
     if deploy_leverage is not None and deploy_leverage > 1.0:
         _l_star, _binding = deploy_leverage, "champion"
     elif config.l2_deploy_enabled and fit_rets_arr.size >= 2:
-        _l_star, _binding = calibrate_deployment_leverage(
+        _l_star, _binding, _l_cross_mdd = calibrate_deployment_leverage(
             fit_rets=fit_rets_arr,
+            oos_rets=np.asarray(sim.rets_hybrid, dtype=np.float64),
             mdd_cap=config.l2_max_mdd_abs,
             cvar_cap=config.l2_max_cvar_95,
             mdd_margin=config.l2_deploy_mdd_margin,
@@ -1640,6 +1641,17 @@ def run_l2_awf(
             l_hard_cap=config.l2_deploy_l_hard_cap,
             exchange_leverage_cap=config.l2_max_exchange_leverage,
         )
+        if _l_cross_mdd > 0.0:
+            _oos_risk = _l_cross_mdd / max(config.l2_max_mdd_abs, 1e-9)
+            logger.debug(
+                "[L2-OOS-CAP] OOS_RiskUtil=%.3f cap=%.2f (L*=%.3f)",
+                _oos_risk, config.l2_max_mdd_abs, _l_star,
+            )
+            if _oos_risk > 1.0:
+                logger.debug(
+                    "[L2-OOS-CAP] L* over-deployed: OOS_RiskUtil=%.3f > 1.0 (L*=%.3f)",
+                    _oos_risk, _l_star,
+                )
     else:
         _l_star, _binding = 1.0, "none"
 
@@ -1668,6 +1680,23 @@ def run_l2_awf(
             " (결함 #1/#2 재발 의심 — vol-targeting 또는 gross 제약 확인 요망)",
             _risk_util_check,
             1.0 - config.l2_deploy_mdd_margin,
+        )
+
+    # 진단: fit-rets vs OOS-rets 분포 이격 (L* inflation 감지)
+    if fit_rets_arr.size >= 2 and _rets_hybrid_arr.size >= 2:
+        _diag_fit_list = list(fit_rets_arr)
+        _diag_oos_list = list(_rets_hybrid_arr)
+        _diag_fit_cagr = _cagr(_diag_fit_list, bars_per_year=bars_per_year)
+        _diag_fit_mdd = _mdd(_diag_fit_list)
+        _diag_oos_cagr = _cagr(_diag_oos_list, bars_per_year=bars_per_year)
+        _diag_oos_mdd = _mdd(_diag_oos_list)
+        logger.debug(
+            "[L2-FINAL-DIAG] fit_CAGR_vol1=%.4f fit_MDD_vol1=%.4f | "
+            "OOS_CAGR_vol1=%.4f OOS_MDD_vol1=%.4f | "
+            "L*=%.4f(%s) | deployed_CAGR=%.4f deployed_MDD=%.4f",
+            _diag_fit_cagr, _diag_fit_mdd,
+            _diag_oos_cagr, _diag_oos_mdd,
+            _l_star, _binding, cagr_hybrid, mdd_hybrid,
         )
     avg_turnover = float(np.mean(sim.all_turnovers)) if sim.all_turnovers else 0.0
     avg_gross_exposure = float(np.mean(sim.all_gross_exposures)) if sim.all_gross_exposures else 0.0
