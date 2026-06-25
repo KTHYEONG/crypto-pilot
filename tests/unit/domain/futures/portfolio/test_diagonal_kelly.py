@@ -312,3 +312,64 @@ class TestCSAmplification:
         )
 
         np.testing.assert_allclose(w_compat, w_base, atol=1e-12)
+
+
+class TestPowerAmplificationMode:
+    """Power amplification mode (stronger tail differentiation)."""
+
+    def test_power_mode_stronger_than_median_excess(self) -> None:
+        n = 3
+        mu_bps = np.full(n, 0.5, dtype=np.float64)
+        sigma = np.full(n, 0.005, dtype=np.float64)
+        prev_w = np.zeros(n, dtype=np.float64)
+        caps = PortfolioCaps(gross=5.0, per_symbol=2.0, net=3.0, beta=2.0, target_ann_vol=0.20)
+        z_scores = np.array([2.0, 1.0, 0.5], dtype=np.float64)
+
+        w_med = diagonal_kelly_weights(
+            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
+            vol_target=None, caps=caps, prev_w=prev_w, no_trade_band=0.0,
+            z_scores=z_scores, cs_amp_alpha=2.0, cs_amp_mode="median_excess",
+        )
+        w_pow = diagonal_kelly_weights(
+            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
+            vol_target=None, caps=caps, prev_w=prev_w, no_trade_band=0.0,
+            z_scores=z_scores, cs_amp_alpha=2.0, cs_amp_mode="power",
+        )
+
+        assert w_pow[0] > w_med[0], f"power {w_pow[0]:.4f} should exceed median_excess {w_med[0]:.4f}"
+
+    def test_power_mode_zero_z_no_amplification(self) -> None:
+        n = 3
+        mu_bps = np.full(n, 0.5, dtype=np.float64)
+        sigma = np.full(n, 0.005, dtype=np.float64)
+        prev_w = np.zeros(n, dtype=np.float64)
+        caps = PortfolioCaps(gross=5.0, per_symbol=2.0, net=3.0, beta=2.0, target_ann_vol=0.20)
+        z_scores = np.array([-1.0, 0.0, -0.5], dtype=np.float64)
+
+        w_null = diagonal_kelly_weights(
+            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
+            vol_target=None, caps=caps, prev_w=prev_w, no_trade_band=0.0,
+        )
+        w_amp = diagonal_kelly_weights(
+            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
+            vol_target=None, caps=caps, prev_w=prev_w, no_trade_band=0.0,
+            z_scores=z_scores, cs_amp_alpha=2.0, cs_amp_mode="power",
+        )
+
+        np.testing.assert_allclose(w_amp, w_null, atol=1e-12)
+
+    def test_tanh_mode_no_crash(self) -> None:
+        n = 3
+        mu_bps = np.full(n, 0.5, dtype=np.float64)
+        sigma = np.full(n, 0.005, dtype=np.float64)
+        prev_w = np.zeros(n, dtype=np.float64)
+        caps = PortfolioCaps(gross=5.0, per_symbol=2.0, net=3.0, beta=2.0, target_ann_vol=0.20)
+        z_scores = np.array([2.0, 1.0, 0.5], dtype=np.float64)
+
+        w = diagonal_kelly_weights(
+            mu_bps=mu_bps, sigma=sigma, kelly_fraction=0.25,
+            vol_target=None, caps=caps, prev_w=prev_w, no_trade_band=0.0,
+            z_scores=z_scores, cs_amp_alpha=2.0, cs_amp_mode="tanh",
+        )
+
+        assert np.all(np.isfinite(w)), "tanh mode should produce finite weights"

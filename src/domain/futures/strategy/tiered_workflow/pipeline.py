@@ -2635,6 +2635,14 @@ def run_tiered_pipeline(
         raise ValueError("Layer2 requires a fitted Layer1InferenceArtifact")
 
     l2_config = Layer2AllocationConfig.from_mapping(l2_params)
+    logger.debug(
+        "[L2-CONFIG] l2_min_sharpe_uplift=%.2f l2_cs_amp_enabled=%s "
+        "l2_cs_amp_alpha=%.1f l2_cs_amp_mode=%s",
+        l2_config.l2_min_sharpe_uplift,
+        l2_config.l2_cs_amp_enabled,
+        l2_config.l2_cs_amp_alpha,
+        l2_config.l2_cs_amp_mode,
+    )
     t_l2_pred = time.perf_counter()
     _l2_multi_tf: bool = bool(getattr(cfg, "l2_multi_tf_enabled", True))
     if os.environ.get("L2_MULTI_TF", "") in ("0", "false", "False"):
