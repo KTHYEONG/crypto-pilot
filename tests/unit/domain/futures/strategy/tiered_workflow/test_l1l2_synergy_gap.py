@@ -16,7 +16,7 @@ def _simulate_book_rets(n_bars: int, ann_cagr: float, bars_per_year: float = 219
 def test_calibrate_leverage_l_floor_default_is_one():
     """Fix 3 기존 동작 보존: l_floor=1.0 기본값 시 L* ≥ 1."""
     rets = _simulate_book_rets(2190, ann_cagr=0.20)
-    l_star, _binding = calibrate_deployment_leverage(fit_rets=rets)
+    l_star, _binding, _ = calibrate_deployment_leverage(fit_rets=rets)
     assert l_star >= 1.0, f"L* must be >= 1.0 (default l_floor), got {l_star}"
 
 
@@ -25,8 +25,8 @@ def test_calibrate_leverage_l_floor_allows_delever():
     # 고변동 book: 높은 CAGR이지만 MDD 예산 초과
     rng = np.random.default_rng(99)
     rets = rng.normal(0.001, 0.05, 2190)  # high vol
-    l_star_default, _ = calibrate_deployment_leverage(fit_rets=rets, l_floor=1.0)
-    l_star_floor, _ = calibrate_deployment_leverage(fit_rets=rets, l_floor=0.1)
+    l_star_default, _, _ = calibrate_deployment_leverage(fit_rets=rets, l_floor=1.0)
+    l_star_floor, _, _ = calibrate_deployment_leverage(fit_rets=rets, l_floor=0.1)
     # floor=0.1 시 더 작은 L* 가능
     assert l_star_floor <= l_star_default + 1e-6  # 같거나 작아야 함
 
@@ -43,7 +43,7 @@ def test_synergy_hybrid_preserves_alpha_vs_ew():
     # Fix 2 적용 후 hybrid book vol ≈ 100% → L*로 MDD까지 de-lever
     hybrid_unit_rets = _simulate_book_rets(n_bars, ann_cagr=0.30, bars_per_year=bars_per_year)
 
-    l_star, _binding = calibrate_deployment_leverage(
+    l_star, _binding, _ = calibrate_deployment_leverage(
         fit_rets=hybrid_unit_rets,
         mdd_cap=0.30,
         exchange_leverage_cap=10.0,

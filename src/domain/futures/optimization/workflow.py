@@ -1828,8 +1828,9 @@ def evaluate_l2_trial(
             _calib_rets = np.asarray(rets_hybrid, dtype=np.float64)
             _calib_src = "oos_proxy"
         if _calib_rets.size >= 2:
-            _l_star, _l_binding = calibrate_deployment_leverage(
+            _l_star, _l_binding, _l_cross_mdd = calibrate_deployment_leverage(
                 fit_rets=_calib_rets,
+                oos_rets=np.asarray(rets_hybrid, dtype=np.float64) if _calib_src == "fit_leg" else None,
                 mdd_cap=float(config.l2_max_mdd_abs),
                 cvar_cap=float(config.l2_max_cvar_95),
                 mdd_margin=float(config.l2_deploy_mdd_margin),
@@ -1841,6 +1842,17 @@ def evaluate_l2_trial(
                 "[L2-EVAL] L*=%.3f (binding=%s, src=%s)",
                 _l_star, _l_binding, _calib_src,
             )
+            if _l_cross_mdd > 0.0:
+                _oos_risk = _l_cross_mdd / max(float(config.l2_max_mdd_abs), 1e-9)
+                _logger.debug(
+                    "[L2-OOS-CAP] OOS_RiskUtil=%.3f cap=%.2f (L*=%.3f)",
+                    _oos_risk, config.l2_max_mdd_abs, _l_star,
+                )
+                if _oos_risk > 1.0:
+                    _logger.debug(
+                        "[L2-OOS-CAP] L* over-deployed: OOS_RiskUtil=%.3f > 1.0 (L*=%.3f)",
+                        _oos_risk, _l_star,
+                    )
 
     _dep = apply_deployment(
         rets=np.asarray(rets_hybrid, dtype=np.float64),
@@ -1851,6 +1863,24 @@ def evaluate_l2_trial(
     mdd_hybrid = _dep.mdd
     cvar_95_hybrid = _dep.cvar_95
     mar_hybrid = cagr_hybrid / (mdd_hybrid + 1e-9)
+
+    # 진단: fit-rets vs OOS-rets 분포 이격 (L* inflation 감지)
+    if _deploy_enabled and _fit_rets_raw and rets_hybrid:
+        _diag_fit_list = list(_fit_rets_raw)
+        _diag_oos_list = list(rets_hybrid)
+        if len(_diag_fit_list) >= 2 and len(_diag_oos_list) >= 2:
+            _diag_fit_cagr = _cagr(_diag_fit_list, bars_per_year=bars_per_year)
+            _diag_fit_mdd = _mdd(_diag_fit_list)
+            _diag_oos_cagr = _cagr(_diag_oos_list, bars_per_year=bars_per_year)
+            _diag_oos_mdd = _mdd(_diag_oos_list)
+            _logger.debug(
+                "[L2-TRIAL-DIAG] fit_CAGR_vol1=%.4f fit_MDD_vol1=%.4f | "
+                "OOS_CAGR_vol1=%.4f OOS_MDD_vol1=%.4f | "
+                "L*=%.3f(%s) | deployed_CAGR=%.4f deployed_MDD=%.4f",
+                _diag_fit_cagr, _diag_fit_mdd,
+                _diag_oos_cagr, _diag_oos_mdd,
+                _l_star, _l_binding, cagr_hybrid, mdd_hybrid,
+            )
 
     block_growth_hybrid = _contiguous_block_log_growth(
         rets_hybrid,

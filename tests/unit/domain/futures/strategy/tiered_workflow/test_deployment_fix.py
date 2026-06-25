@@ -11,16 +11,12 @@ Scenarios:
 """
 from __future__ import annotations
 
-from dataclasses import replace
-from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
-    Layer2AllocationConfig,
     Layer2TrialEvaluation,
 )
 from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
@@ -97,7 +93,7 @@ class TestS1FitLegBookMddGivesHardCap:
         strategy_rets = _low_vol_rets(n=2190, sigma_bps=2.0)  # MDD≈1%
 
         # Act: 전략 book으로 calibrate
-        lev, binding = calibrate_deployment_leverage(
+        lev, binding, _ = calibrate_deployment_leverage(
             fit_rets=strategy_rets,
             mdd_cap=0.30,
             cvar_cap=0.06,
@@ -115,7 +111,7 @@ class TestS1FitLegBookMddGivesHardCap:
         market_rets = _market_rets(n=2190, sigma_bps=90.0)
 
         # Act
-        lev, _ = calibrate_deployment_leverage(
+        lev, _, _ = calibrate_deployment_leverage(
             fit_rets=market_rets,
             mdd_cap=0.30,
             cvar_cap=0.06,
@@ -228,7 +224,7 @@ class TestS4FitLegEmptyFallback:
         oos_rets = np.asarray(_low_vol_rets(n=2190), dtype=np.float64)
 
         # Act
-        lev, binding = calibrate_deployment_leverage(
+        lev, binding, _ = calibrate_deployment_leverage(
             fit_rets=oos_rets,
             mdd_cap=0.30,
             cvar_cap=0.06,
@@ -243,7 +239,7 @@ class TestS4FitLegEmptyFallback:
     def test_tiny_fit_rets_returns_no_leverage(self) -> None:
         """fit_rets 크기 < 2이면 L*=1.0, binding='none'."""
         # Act
-        lev, binding = calibrate_deployment_leverage(
+        lev, binding, _ = calibrate_deployment_leverage(
             fit_rets=np.array([0.001], dtype=np.float64),
             mdd_cap=0.30,
             cvar_cap=0.06,
