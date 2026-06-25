@@ -1839,6 +1839,17 @@ def _run_awf_simulation(
                 min_abs_z=float(config.min_abs_rank_z),
                 selection_mode="absolute",
             )
+            # DEBUG: Z-score distribution diagnostics
+            if _z_scores and logger.isEnabledFor(logging.DEBUG):
+                _z_vals = [z for z in _z_scores.values() if z > 0.0]
+                if _z_vals:
+                    _z_arr = np.asarray(_z_vals, dtype=np.float64)
+                    logger.debug(
+                        "[L2-Z-DIST] t=%d n_pos=%d z_min=%.3f z_max=%.3f z_med=%.3f z_std=%.3f",
+                        t, len(_z_vals),
+                        float(np.min(_z_arr)), float(np.max(_z_arr)),
+                        float(np.median(_z_arr)), float(np.std(_z_arr, ddof=1)),
+                    )
             last_selected = selected
             if selected:
                 _fold_selected.update(selected)
@@ -1878,6 +1889,7 @@ def _run_awf_simulation(
                 support_mask=support_mask,
                 z_scores=_z_score_arr,
                 cs_amp_alpha=float(config.l2_cs_amp_alpha),
+                cs_amp_mode=str(config.l2_cs_amp_mode),
             )
             if edge_throttle_enabled:
                 score = _book_edge_score(w, mu_arr)
