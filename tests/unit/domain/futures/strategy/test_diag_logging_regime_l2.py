@@ -145,7 +145,130 @@ def test_filter_sleeves_by_bucket_empty_sleeves_nonempty_edges_returns_empty() -
 # Bucket Unobserved Key — test edge=0 fallback
 # ---------------------------------------------------------------------------
 
-def test_filter_sleeves_by_bucket_unobserved_regime_returns_empty() -> None:
+# ---------------------------------------------------------------------------
+# Step G: Bucket hit ratio tracking
+# ---------------------------------------------------------------------------
+
+def test_bucket_hit_ratio_active_same_as_hit() -> None:
+    """n_active=10, n_hit=10 → hit_pct=100%"""
+    _active, _hit = 10, 10
+    _pct = _hit / max(_active, 1) * 100.0
+    assert _pct == 100.0
+
+
+def test_bucket_hit_ratio_no_hits() -> None:
+    """n_active=5, n_hit=0 → hit_pct=0%"""
+    _active, _hit = 5, 0
+    _pct = _hit / max(_active, 1) * 100.0
+    assert _pct == 0.0
+
+
+def test_bucket_hit_ratio_zero_active() -> None:
+    """n_active=0 → skip (division by zero guard)"""
+    _active, _hit = 0, 0
+    _pct = _hit / max(_active, 1) * 100.0
+    assert _pct == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Step H: Regime shift JS divergence
+# ---------------------------------------------------------------------------
+
+def test_js_divergence_identical_distributions() -> None:
+    """동일 분포 → JS divergence ≈ 0.0"""
+    _freq = np.array([0.25, 0.25, 0.25, 0.25, 0.0, 0.0], dtype=np.float64)
+    _m = (_freq + _freq) / 2.0
+    _js = 0.0
+    for _p, _q in zip(_freq, _m, strict=True):
+        if _p > 0:
+            _js += _p * np.log2(_p / _q) if _q > 0 else 0.0
+    for _p, _q in zip(_freq, _m, strict=True):
+        if _p > 0:
+            _js += _p * np.log2(_p / _q) if _q > 0 else 0.0
+    _js /= 2.0
+    assert abs(_js) < 1e-10
+
+
+def test_js_divergence_shifted_distribution() -> None:
+    """fit=90% transition vs OOS=90% bull_quiet → JS divergence > 0.15"""
+    _fit_freq = np.array([0.0, 0.0, 0.0, 0.0, 0.9, 0.1], dtype=np.float64)
+    _oos_freq = np.array([0.9, 0.0, 0.0, 0.0, 0.0, 0.1], dtype=np.float64)
+    _m = (_fit_freq + _oos_freq) / 2.0
+    _js = 0.0
+    for _p, _q in zip(_fit_freq, _m, strict=True):
+        if _p > 0:
+            _js += _p * np.log2(_p / _q) if _q > 0 else 0.0
+    for _p, _q in zip(_oos_freq, _m, strict=True):
+        if _p > 0:
+            _js += _p * np.log2(_p / _q) if _q > 0 else 0.0
+    _js /= 2.0
+    assert _js > 0.15, f"JS divergence too low: {_js:.4f}"
+
+
+# ---------------------------------------------------------------------------
+# Step J: OOS vs Fit bucket edge comparison
+# ---------------------------------------------------------------------------
+
+def test_bucket_oos_compute_rmse_mae_bias() -> None:
+    """fit=(50,20,-10) oos=(55,5,-8) → RMSE/MAE/bias/corr"""
+    _fit_vals = np.array([50.0, 20.0, -10.0], dtype=np.float64)
+    _oos_vals = np.array([55.0, 5.0, -8.0], dtype=np.float64)
+    _errors = _oos_vals - _fit_vals
+    _rmse = float(np.sqrt(np.mean(_errors ** 2)))
+    _mae = float(np.mean(np.abs(_errors)))
+    _bias = float(np.mean(_errors))
+    _corr = float(np.corrcoef(_fit_vals, _oos_vals)[0, 1])
+
+    assert abs(_rmse - 9.20) < 0.1, f"RMSE={_rmse:.2f}"
+    assert abs(_mae - 7.33) < 0.1, f"MAE={_mae:.2f}"
+    assert abs(_bias + 2.667) < 0.1, f"Bias={_bias:.2f}"
+    assert _corr > 0.90, f"Corr={_corr:.4f}"
+
+
+def test_bucket_oos_no_common_buckets() -> None:
+    """fit_regime=0 only vs OOS_regime=4 only → n_common=0, skip"""
+    _fit_edges = {(0, "famA", "4h"): 50.0}
+    _oos_edges: dict[tuple[int, str, str], float] = {(4, "famA", "4h"): 30.0}
+    _common = set(_fit_edges) & set(_oos_edges)
+    assert len(_common) == 0
+
+
+def test_bucket_oos_fewer_than_3_common_returns_zero_corr() -> None:
+    """n_common < 3 → correlation = 0.0"""
+    _fit_vals = np.array([50.0, 20.0], dtype=np.float64)
+    _oos_vals = np.array([55.0, 5.0], dtype=np.float64)
+    _corr = float(np.corrcoef(_fit_vals, _oos_vals)[0, 1]) if len(_fit_vals) >= 3 else 0.0
+    assert _corr == 0.0
+
+
+def test_bucket_oos_identifies_underover_fit() -> None:
+    """sort by (oos-fit): top = underfit, bottom = overfit"""
+    _common = {(0, "famA", "4h"), (0, "famB", "4h"), (0, "famC", "4h")}
+    _fit_edges = {(0, "famA", "4h"): 50.0, (0, "famB", "4h"): 20.0, (0, "famC", "4h"): -10.0}
+    _oos_edges = {(0, "famA", "4h"): 55.0, (0, "famB", "4h"): 5.0, (0, "famC", "4h"): -8.0}
+
+    _underfit = sorted(_common, key=lambda _bk: _oos_edges[_bk] - _fit_edges[_bk], reverse=True)[:5]
+    _overfit = sorted(_common, key=lambda _bk: _oos_edges[_bk] - _fit_edges[_bk])[:5]
+
+    # underfit = oos >> fit (positive surplus)
+    assert _underfit[0] == (0, "famA", "4h")  # surplus = +5
+    # overfit = fit >> oos (negative surplus)
+    assert _overfit[0] == (0, "famB", "4h")   # deficit = -15
+
+
+def test_bucket_oos_edge_case_under3() -> None:
+    """n=2 → corr=0.0, 하지만 rmse/mae/bias는 정상 계산"""
+    _fit_vals = np.array([50.0, 20.0], dtype=np.float64)
+    _oos_vals = np.array([55.0, 5.0], dtype=np.float64)
+    _errors = _oos_vals - _fit_vals
+    _rmse = float(np.sqrt(np.mean(_errors ** 2)))
+    _mae = float(np.mean(np.abs(_errors)))
+    _bias = float(np.mean(_errors))
+    _corr = 0.0  # < 3 buckets
+    assert abs(_rmse - 11.18) < 0.1
+    assert abs(_mae - 10.0) < 0.1
+    assert _bias == -5.0
+    assert _corr == 0.0
     """현재 regime이 bucket_edges에 없으면 edge=0 → 모든 sleeve 제거."""
     sigs = _dummy_sleeve_sigs()
     bucket_edges = {

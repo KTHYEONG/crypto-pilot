@@ -94,6 +94,7 @@ from src.domain.futures.optimization.validation import (
     resolve_adjusted_gates,
 )
 from src.domain.futures.strategy.config import StrategyConfig
+from src.domain.futures.strategy.regime_evaluation import _compute_c2_macro, evaluate_regime_classifier_proxy
 from src.domain.futures.strategy.timeframe_contracts import (
     select_probe_source_tf as _shared_select_probe_source_tf,
 )
@@ -106,6 +107,14 @@ from src.domain.futures.universe.membership import inject_membership_masks_into_
 from src.domain.futures.universe.storage import run_historical_sync
 
 _GLOBAL_L2_CTX: TieredContext | None = None
+_REGIME_NAMES_SHORT: dict[int, str] = {0: "bull_q", 1: "bull_v", 2: "bear_q", 3: "bear_v", 4: "trans", 5: "crash"}
+
+
+def _btc_index_if_present(symbols: tuple[str, ...]) -> int:
+    for i, s in enumerate(symbols):
+        if "BTC" in s.upper():
+            return i
+    return -1
 
 
 def _evaluate_l2_trial_from_global(params: dict[str, Any]) -> tuple[float, dict[str, Any], float]:
@@ -1850,6 +1859,70 @@ def _run_strategy_stage(
                 return l1_res
 
             _logger.info("\n>> LAYER 1: PASS -> Proceeding to Layer 2.")
+
+            # ── Step I: Regime Quality Gate ──────────────────────────────────
+            if getattr(tiered_cfg, "l2_routing_mode", "bucket") == "bucket":
+                from src.domain.futures.strategy.market_regime import (
+                    compute_market_regime_context as _compute_regime_ctx,
+                )
+                _regime_ctx = _compute_regime_ctx(aligned=aligned_tiered)
+                _regime_code = _regime_ctx.code_1d
+                _unique_codes, _counts_codes = np.unique(_regime_code, return_counts=True)
+                _n_total = _regime_code.shape[0]
+                _occ_str = "; ".join(
+                    f"{_REGIME_NAMES_SHORT.get(int(r), f'unk{r}'):s}={float(c)/_n_total*100:.1f}%"
+                    for r, c in sorted(zip(_unique_codes.tolist(), _counts_codes.tolist(), strict=True))
+                )
+                _edge_floor = getattr(tiered_cfg, "l2_bucket_edge_floor_bps", 100.0)
+
+                _btc_idx = _btc_index_if_present(aligned_tiered.symbols)
+                _btc_log_ret = np.zeros(_n_total, dtype=np.float64)
+                if _btc_idx >= 0:
+                    _raw_close = np.maximum(aligned_tiered.close_2d[:, _btc_idx], 1e-12)
+                    _btc_log_ret[1:] = np.diff(np.log(_raw_close))
+                _split = _n_total // 2
+                _is_mask_bar = np.zeros(_n_total, dtype=bool)
+                _is_mask_bar[:_split] = True
+                _oos_mask_bar = np.zeros(_n_total, dtype=bool)
+                _oos_mask_bar[_split:] = True
+                _c3p_pval, _c3p_flip, _c4p_rho, _ = evaluate_regime_classifier_proxy(
+                    all_codes_1d=_regime_code,
+                    market_returns_1d=_btc_log_ret * 1e4,
+                    is_bar_mask=_is_mask_bar,
+                    oos_bar_mask=_oos_mask_bar,
+                )
+
+                _c2_macro_dwell, _c2_macro_trans = _compute_c2_macro(_regime_code)
+                _c2_ok = _c2_macro_dwell >= 12.0
+                _c3_ok = not _c3p_flip and (np.isnan(_c3p_pval) or _c3p_pval <= 0.10)
+                _c4_ok = not np.isnan(_c4p_rho) and abs(_c4p_rho) >= 0.10
+                _c5_trans_occ = float(_counts_codes[_unique_codes == 4][0]) / _n_total if 4 in _unique_codes else 0.0
+                _c5_ok = _c5_trans_occ <= 0.40
+                _all_ok = _c2_ok and _c3_ok and _c4_ok and _c5_ok
+
+                _logger.info(
+                    "\n● [REGIME] mode=%s floor=%.1fbps | %s | "
+                    "C2:dwell=%.1f%s C3:pval=%.3f%s C4:rho=%.2f%s C5:trans=%.1f%%%s",
+                    "bucket",
+                    _edge_floor,
+                    _occ_str,
+                    _c2_macro_dwell, "✅" if _c2_ok else "❌",
+                    _c3p_pval if not np.isnan(_c3p_pval) else -1.0, "✅" if _c3_ok else "❌",
+                    _c4p_rho if not np.isnan(_c4p_rho) else -99.0, "✅" if _c4_ok else "❌",
+                    _c5_trans_occ * 100.0, "✅" if _c5_ok else "❌",
+                )
+
+                if _logger.isEnabledFor(logging.DEBUG):
+                    _logger.debug("[REGIME-DETAIL] C2 macro_dwell=%.1f macro_trans=%.3f", _c2_macro_dwell, _c2_macro_trans)  # noqa: E501
+                    _logger.debug("[REGIME-DETAIL] C3 proxy_pval=%.4f sign_flip=%s", _c3p_pval, _c3p_flip)
+                    _logger.debug("[REGIME-DETAIL] C4 proxy_rho=%.4f", _c4p_rho)
+                    _logger.debug("[REGIME-DETAIL] C5 transition_occupancy=%.1f%% all_regimes=%s", _c5_trans_occ * 100, _occ_str)  # noqa: E501
+
+                if not _all_ok:
+                    _logger.warning(
+                        "[REGIME] 품질 검사 일부 실패 — edge_floor=%.1fbps로 bucket routing에 noise 포함 가능",
+                        _edge_floor,
+                    )
 
             # ── Step B: L2 Optimization Header ──────────────────────────────
             _logger.info(format_layer_header(2, "OPTUNA TUNING"))
