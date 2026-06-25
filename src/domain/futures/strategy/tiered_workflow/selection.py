@@ -447,11 +447,34 @@ def select_layer2_champion(
 
         if replay_mismatch:
             _logger.debug(
-                "[L2-SELECTION] Replay mismatch on trial #%d: stored_cagr=%.6f replayed_cagr=%.6f",
+                "[L2-REPLAY] Trial #%d | stored_CAGR=%.4f replay_CAGR=%.4f | "
+                "stored_MDD=%.4f replay_MDD=%.4f | stored_LCB=%.4f replay_LCB=%.4f",
                 candidate.number,
                 stored_cagr,
                 candidate_evaluation.cagr_hybrid,
+                stored_mdd,
+                candidate_evaluation.mdd_hybrid,
+                stored_growth_lcb,
+                candidate_evaluation.growth_lcb_hybrid,
             )
+
+        # gate 진단 로그 — final gate 결과 및 constraint 상세
+        _logger.debug(
+            "[L2-REPLAY-GATE] Trial #%d | gate=%s blocker=%s | "
+            "cagr=%.4f sortino=%.4f sharpe=%.4f calmar=%.4f | "
+            "mdd=%.4f folds=%.2f trades=%d dsr=%.4f",
+            candidate.number,
+            final_gate.promotion_passed,
+            final_gate.promotion_blocker,
+            float(candidate_evaluation.cagr_hybrid),
+            float(candidate_evaluation.sortino_hybrid),
+            float(candidate_evaluation.sharpe_hybrid),
+            float(candidate_evaluation.cagr_hybrid / (candidate_evaluation.mdd_hybrid + 1e-9)),
+            float(candidate_evaluation.mdd_hybrid),
+            float(candidate_evaluation.fold_pass_ratio),
+            int(candidate_evaluation.trade_count),
+            float(dsr),
+        )
 
         if (
             best_diagnostic_trial is None
