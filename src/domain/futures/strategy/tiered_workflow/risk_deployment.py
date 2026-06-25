@@ -199,12 +199,18 @@ def calibrate_deployment_leverage(
             _inflation_ratio = (
                 _oos_mdd_vol1 / _fit_mdd_vol1 if _fit_mdd_vol1 > 1e-12 else float("inf")
             )
+            _fit_cagr_v1 = _annualized_cagr_from_returns(arr, bars_per_year=2190)
+            _oos_cagr_v1 = _annualized_cagr_from_returns(oos_arr, bars_per_year=2190)
+            _fit_sharpe_v1 = _sharpe_from_returns(arr, bars_per_year=2190)
+            _oos_sharpe_v1 = _sharpe_from_returns(oos_arr, bars_per_year=2190)
             _logger.debug(
                 "[L2-CALIB-CV] L*=%.4f(%s) | fit_MDD_vol1=%.6f OOS_MDD_vol1=%.6f "
-                "MDD_ratio=%.2f | OOS_deployed_MDD=%.6f (cap=%.4f)",
+                "MDD_ratio=%.2f | OOS_deployed_MDD=%.6f (cap=%.4f) | "
+                "fit_CAGR_v1=%.4f fit_sharpe_v1=%.4f OOS_CAGR_v1=%.4f OOS_sharpe_v1=%.4f",
                 l_final, binding,
                 _fit_mdd_vol1, _oos_mdd_vol1, _inflation_ratio,
                 cross_valid_mdd, mdd_cap,
+                _fit_cagr_v1, _fit_sharpe_v1, _oos_cagr_v1, _oos_sharpe_v1,
             )
         else:
             _logger.debug("[L2-CALIB-CV] oos_rets size<2, skipping cross-validation")
