@@ -24,7 +24,7 @@ dependencies:
   documents:
     - docs/architecture/signal.md
     - docs/architecture/layer1.md
-last_verified: 2026-06-23
+last_verified: 2026-06-25
 ---
 
 # 1. Purpose
@@ -55,14 +55,14 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
 - **Objective — Sortino_HAC_unit (Scale-Invariant)**: $J = \text{Sortino\_HAC\_unit} - \lambda_w \cdot \max(0, \tau_{wf} - \text{worst\_fold\_Sortino}) - \lambda_t \cdot \text{mean\_turnover}$. `growth_lcb` demoted to diagnostic. Turnover penalty $\lambda_t = 0$ default (off) — backtest-safe, enable via `l2_turnover_penalty_weight`.
 - **Phase B — fit-leg Deployment Calibration** (`risk_deployment.py`):
   - C1: fit-leg uses same OOS chain (rank→kelly→throttle→cost→funding), not equal-weight market avg.
-  - C2: `calibrate_deployment_leverage(fit_rets_hybrid, l_hard_cap=20.0)` → $L^* = \text{clip}(\min(L_{mdd}, L_{cvar}), 1.0, 20.0)$. `cagr/mdd/cvar` deployed; Sortino/Sharpe/PSR unit-vol.
+  - C2: `calibrate_deployment_leverage(fit_rets_hybrid, oos_rets, l_hard_cap=20.0)` → $(L^*, \text{binding}, \text{cross\_valid\_MDD})$. $L^* = \text{clip}(\min(L_{mdd}, L_{cvar}), 1.0, 20.0)$. `oos_rets` 옵션 제공 시 OOS MDD 크로스 검증을 세 번째 반환값으로 전달. `cagr/mdd/cvar` deployed; Sortino/Sharpe/PSR unit-vol.
   - C4: `run_l2_awf(deploy_leverage=L^*)` → `apply_deployment(rets, L^*)`. `exchange_leverage_cap` (default 10×) limits exchange feasibility. `l2_deploy_cvar_margin` knob.
   - Binding ∈ {mdd, cvar, hard_cap, exchange_cap, none}. $L^*$ flows as `l2_params["l2_deploy_leverage"]` SSOT.
 - **Vol Scaling**: Bidirectional via `allow_vol_upscale=True`, downscale-only default.
 - **Gate Contract**:
   - Optuna feasibility (9-vector): deployment, leak, mdd, cvar, fold_pass_ratio, **recent_fold**, active_blocks, friction, trades.
   - **Friction Gate** (per-bar dimension): $|\bar{g}_s^{pb}| \ge \bar{c}_s^{pb}$ where $\bar{g}_s^{pb} = \text{signed\_gross\_bps\_per\_bar}$ (precision-pooled), $\bar{c}_s^{pb} = \text{expected\_cost\_bps\_per\_bar}$ (including `fixed_cost_safety_mult`). Signals with gross edge less than round-trip cost per bar are unprofitable → excluded from friction pass ratio gate.
-  - **Cost Drag Gate** (promotion 17th blocker): $\text{cost\_drag} = \frac{\sum \text{realized\_cost}}{\max(\sum \text{realized\_price}, \varepsilon)} > \text{l2\_max\_cost\_drag\_ratio}$ → BLOCK. Cumulative cost > gross price PnL blocker. `l2_max_cost_drag_ratio` default 0.60.
+  - **Cost Drag Gate** (promotion 17th blocker): $\text{cost\_drag} = \min(\frac{\sum \text{realized\_cost}}{\max(\sum |\text{realized\_price}|, \varepsilon)}, 100.0) > \text{l2\_max\_cost\_drag\_ratio}$ → BLOCK. Denominator uses `abs(realized_price)` to prevent long/short cancellation that drives cost_drag to infinity. Upper cap at 100.0 prevents degenerate degenerate books from blocking all trials. `l2_max_cost_drag_ratio` default 0.60.
   - Promotion (3-stage): Sortino ≥ 1.5 → Sharpe ≥ 0.7 → Calmar ≥ 0.5 + CAGR/MAR/PSR/growth_lcb/uplift + cost_drag.
   - Recent fold gate: latest non-empty deployed fold CAGR > 0 + optional Sharpe floor.
   - `l2_max_exchange_leverage` default 10.0 (`None` = cap disabled).
@@ -71,6 +71,7 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
 - **Replay Championing**: `select_layer2_champion` replays all frontier candidates → `argmax(sortino_hybrid, cagr)`.
 - **Fold Diagnostics**: `compute_layer2_fold_diagnostics()` → per-fold deployed CAGR/MDD, unit Sharpe, compound pass, selected symbols. `Layer2TrialEvaluation` stores recent_fold metrics + `fold_deployed_cagrs` as Optuna attrs.
 - **Attribution (Always-On)**: `fold_attributions: tuple[Layer2FoldAttribution, ...]` returned by every `_run_awf_simulation` call regardless of `l2_diag_attribution_enabled` flag. Per-fold `realized_price`/`realized_funding`/`realized_cost` are accumulated unconditionally (O(N) per-bar dot). Alpha gap, sleeve samples, netting stats are diag-gated (`_diag`). Cost drag gate consumes attribution output.
+- **L* Inflation Diagnostics (Always-On, DEBUG)**: `[L2-CALIB-CV]` 로그는 `calibrate_deployment_leverage` 내에서 fit-leg과 OOS 간 MDD_vol1 비율(MDD_ratio)을 계산하여 L* inflation을 정량화. `[L2-TRIAL-DIAG]` / `[L2-FINAL-DIAG]` 로그는 각각 trial 평가 및 최종 scorecard 경로에서 fit_CAGR_vol1/OOS_CAGR_vol1/fit_MDD_vol1/OOS_MDD_vol1을 분리 출력하여 alpha decay 여부 진단. `[L2-FIT-DIAG]` 로그는 `_run_awf_simulation`의 per-fold fit-leg 수익률에서 fit_CAGR, fit_MDD, fit_ann_vol, fit_sharpe를 계산하여 vol-targeting(실현 연율 변동성) 무결성 확인. `[L2-OOS-CAP]` 로그는 `calibrate_deployment_leverage`가 반환한 `cross_valid_MDD`로 OOS RiskUtil을 계산하여 L*의 OOS 과배치 여부 진단. `[L2-REPLAY]` 및 `[L2-REPLAY-GATE]`는 champion selection replay 시점의 stored vs replay metric 차이를 기록. `[L2-GATE]` 로그는 promotion gate의 모든 constraint별 actual vs threshold 비교를 한 줄에 출력.
 
 **Layer 3: Deployment Parity**
 - `run_l3_holdout(deploy_leverage=L^*)` uses same `apply_deployment(rets, L^*)` as L2 scorecard. $L^* \leq 1.0$ → unit path fallback.
