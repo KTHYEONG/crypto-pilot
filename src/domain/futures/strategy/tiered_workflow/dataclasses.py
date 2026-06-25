@@ -405,7 +405,8 @@ class Layer2AllocationConfig:
     # CS Score Amplification (anti-Kelly=EW-convergence)
     l2_cs_amp_enabled: bool = True
     l2_cs_amp_alpha: float = 2.0
-    l2_cs_amp_mode: str = "median_excess"
+    l2_cs_amp_mode: str = "power"
+    l2_cs_amp_power: float = 2.0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
