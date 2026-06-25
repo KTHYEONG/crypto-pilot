@@ -32,7 +32,7 @@ class TestHappyPathHardCap:
         rets = _make_rets(2190, sigma_bps=16.0)
 
         # Act
-        lev, binding = calibrate_deployment_leverage(
+        lev, binding, _ = calibrate_deployment_leverage(
             fit_rets=rets,
             mdd_cap=0.30,
             cvar_cap=0.06,
@@ -73,7 +73,7 @@ class TestMddBinding:
         mdd_target = mdd_cap * (1 - mdd_margin)  # 0.06
 
         # Act
-        lev, binding = calibrate_deployment_leverage(
+        lev, binding, _ = calibrate_deployment_leverage(
             fit_rets=rets,
             mdd_cap=mdd_cap,
             cvar_cap=0.10,   # 느슨한 CVaR 제약
@@ -132,19 +132,19 @@ class TestScaleInvariance:
 # ---------------------------------------------------------------------------
 class TestEdgeCases:
     def test_empty_rets(self) -> None:
-        lev, binding = calibrate_deployment_leverage(fit_rets=np.array([], dtype=np.float64))
+        lev, binding, _ = calibrate_deployment_leverage(fit_rets=np.array([], dtype=np.float64))
         assert lev == pytest.approx(1.0)
         assert binding == "none"
 
     def test_single_element(self) -> None:
-        lev, binding = calibrate_deployment_leverage(fit_rets=np.array([0.01], dtype=np.float64))
+        lev, binding, _ = calibrate_deployment_leverage(fit_rets=np.array([0.01], dtype=np.float64))
         assert lev == pytest.approx(1.0)
         assert binding == "none"
 
     def test_zero_rets_safe(self) -> None:
         """전부 0 → MDD=0, CVaR=0 → hard_cap 반환."""
         rets = np.zeros(500, dtype=np.float64)
-        lev, _ = calibrate_deployment_leverage(fit_rets=rets, l_hard_cap=4.0)
+        lev, _, _ = calibrate_deployment_leverage(fit_rets=rets, l_hard_cap=4.0)
         assert 1.0 <= lev <= 4.0 + 1e-6
 
     def test_apply_deployment_result_type(self) -> None:
@@ -173,7 +173,7 @@ class TestCvarBinding:
         cvar_margin = 0.0
 
         # Act
-        lev, binding = calibrate_deployment_leverage(
+        lev, binding, _ = calibrate_deployment_leverage(
             fit_rets=rets,
             mdd_cap=mdd_cap,
             cvar_cap=cvar_cap,
@@ -189,3 +189,68 @@ class TestCvarBinding:
         # Assert
         assert binding == "cvar"
         assert actual_cvar == pytest.approx(cvar_target, rel=0.08)
+
+
+# ---------------------------------------------------------------------------
+# S6: oos_rets 크로스 검증 — L* inflation 감지
+# ---------------------------------------------------------------------------
+class TestCalibrateWithOosCrossValidation:
+    def test_oos_rets_not_provided_returns_zero_cross_valid_mdd(self) -> None:
+        """oos_rets 미제공 시 cross_valid_mdd=0.0 반환."""
+        rets = _make_rets(2190, sigma_bps=16.0, seed=42)
+        l_star, binding, cv_mdd = calibrate_deployment_leverage(
+            fit_rets=rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=20.0,
+        )
+        assert cv_mdd == pytest.approx(0.0)
+        assert l_star >= 1.0
+        assert binding in ("mdd", "hard_cap", "cvar")
+
+    def test_oos_mdd_greater_than_fit_mdd_detected(self) -> None:
+        """fit 보다 OOS MDD가 클 때 inflation 감지 시나리오.
+
+        fit: 저변동(6bps sigma) → fit_MDD_at_L1 작음 → L* 큼.
+        OOS: 고변동(40bps sigma) → oos_deployed_MDD가 cap 초과 예상.
+        """
+        rng_fit = np.random.default_rng(100)
+        fit_rets = rng_fit.normal(6.4e-4, 6e-4, 2190).astype(np.float64)
+        rng_oos = np.random.default_rng(101)
+        oos_rets = rng_oos.normal(6.4e-4, 40e-4, 2190).astype(np.float64)
+
+        _l_star, _binding, cv_mdd = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_rets=oos_rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=20.0,
+        )
+        assert cv_mdd > 0.0
+        # fit-MDD가 매우 낮아 L*는 hard_cap에 걸림
+        assert _binding in ("hard_cap", "mdd")
+
+    def test_oos_and_fit_similar_produces_reasonable_cv_mdd(self) -> None:
+        """fit과 OOS 분포 유사 → cv_mdd ≈ mdd_target."""
+        rets = _make_rets(2190, sigma_bps=16.0, seed=42)
+        _, _, cv_mdd = calibrate_deployment_leverage(
+            fit_rets=rets,
+            oos_rets=rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=20.0,
+        )
+        mdd_target = 0.30 * (1.0 - 0.30)
+        assert cv_mdd == pytest.approx(mdd_target, rel=0.15)
+
+    def test_empty_oos_rets_does_not_crash(self) -> None:
+        """빈 oos_rets도 안전하게 처리."""
+        rets = _make_rets(2190, seed=42)
+        _, _, cv_mdd = calibrate_deployment_leverage(
+            fit_rets=rets,
+            oos_rets=np.array([], dtype=np.float64),
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=20.0,
+        )
+        assert cv_mdd == pytest.approx(0.0)

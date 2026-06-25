@@ -399,9 +399,9 @@ class Layer2AllocationConfig:
     l2_tf_inclusion_min_edge: float = 0.0
     l2_routing_mode: Literal["pool", "bucket"] = "bucket"
     l2_bucket_cost_bps: float = 6.0
-    l2_bucket_min_n: int = 30
+    l2_bucket_min_n: int = 15
     l2_bucket_shrinkage: float = 0.3
-    l2_bucket_edge_floor_bps: float = 100.0
+    l2_bucket_edge_floor_bps: float = 0.0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -617,7 +617,7 @@ class Layer2AllocationConfig:
                 else "pool"
             ),
             l2_bucket_cost_bps=cls._as_float(params.get("l2_bucket_cost_bps", 6.0), 6.0),
-            l2_bucket_min_n=cls._as_int(params.get("l2_bucket_min_n", 30), 30),
+            l2_bucket_min_n=cls._as_int(params.get("l2_bucket_min_n", 15), 15),
             l2_bucket_shrinkage=cls._validate_range(
                 "l2_bucket_shrinkage",
                 cls._as_float(params.get("l2_bucket_shrinkage", 0.3), 0.3),
@@ -625,7 +625,7 @@ class Layer2AllocationConfig:
                 1.0,
             ),
             l2_bucket_edge_floor_bps=cls._as_float(
-                os.environ.get("L2_BUCKET_EDGE_FLOOR_BPS", params.get("l2_bucket_edge_floor_bps", 100.0)), 100.0
+                os.environ.get("L2_BUCKET_EDGE_FLOOR_BPS", params.get("l2_bucket_edge_floor_bps", 0.0)), 0.0
             ),
         )
 

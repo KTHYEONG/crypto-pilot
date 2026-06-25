@@ -81,8 +81,9 @@ def compute_cost_drag_ratio(
     eps: float = 1e-9,
 ) -> float:
     total_cost = sum(a.realized_cost for a in fold_attributions)
-    total_price = sum(a.realized_price for a in fold_attributions)
-    return total_cost / max(total_price, eps)
+    total_price_abs = sum(abs(a.realized_price) for a in fold_attributions)
+    ratio = total_cost / max(total_price_abs, eps)
+    return min(float(ratio), 100.0)
 
 
 def _assemble_fold_attribution(
@@ -1512,6 +1513,23 @@ def _run_awf_simulation(
                 _this_fold_fit_rets.append(_r)
         _per_fold_fit_rets.append(_this_fold_fit_rets)
 
+    # per-fold fit-leg diagnostics (vol-targeting 무결성 확인)
+    from src.domain.futures.strategy.tiered_workflow.metrics import _cagr, _mdd
+    for _f_idx, _ffit in enumerate(_per_fold_fit_rets):
+        if len(_ffit) < 2:
+            continue
+        _fcagr = _cagr(_ffit, bars_per_year=bars_per_year)
+        _fmdd = _mdd(_ffit)
+        _farr = np.asarray(_ffit, dtype=np.float64)
+        _fann_vol = float(np.std(_farr, ddof=1)) * float(np.sqrt(max(bars_per_year, 1e-12)))
+        _fstd = max(float(np.std(_farr, ddof=1)), 1e-12)
+        _fsharpe = float(np.mean(_farr) / _fstd) * float(np.sqrt(max(bars_per_year, 1e-12)))
+        logger.debug(
+            "[L2-FIT-DIAG] fold=%d fit_bars=%d fit_CAGR=%.4f fit_MDD=%.4f "
+            "fit_ann_vol=%.4f fit_sharpe=%.4f",
+            _f_idx, len(_ffit), _fcagr, _fmdd, _fann_vol, _fsharpe,
+        )
+
     # C4: per-TF fit-leg edge → included_tfs (TF 게이트)
     _tf_inclusion_enabled = bool(getattr(config, "l2_tf_inclusion_enabled", True))
     _tf_min_edge = float(getattr(config, "l2_tf_inclusion_min_edge", 0.0))
@@ -1568,7 +1586,7 @@ def _run_awf_simulation(
                     fit_end=int(_f_fold.oos_start),
                     regime_code_1d=_regime_code_1d,
                     cost_bps=float(getattr(config, "l2_bucket_cost_bps", 6.0)),
-                    min_n=int(getattr(config, "l2_bucket_min_n", 30)),
+                    min_n=int(getattr(config, "l2_bucket_min_n", 15)),
                     shrinkage=float(getattr(config, "l2_bucket_shrinkage", 0.3)),
                 )
                 bucket_edges_by_fold.append(_be)
@@ -1615,15 +1633,16 @@ def _run_awf_simulation(
             _js /= 2.0
             _fit_occ = "|".join(f"{p*100:.0f}" for p in _fit_freq)
             _oos_occ = "|".join(f"{p*100:.0f}" for p in _oos_freq)
-            logger.info(
-                "[L2-REGIME-SHIFT] fold=%d js_div=%.4f fit=%s oos=%s",
-                _fi, _js, _fit_occ, _oos_occ,
-            )
-            if _js > 0.15:
-                logger.warning(
-                    "[L2-REGIME-SHIFT] fold=%d regime shift detected (fit↔OOS JS=%.4f)",
-                    _fi, _js,
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[L2-REGIME-SHIFT] fold=%d js_div=%.4f fit=%s oos=%s",
+                    _fi, _js, _fit_occ, _oos_occ,
                 )
+                if _js > 0.15:
+                    logger.debug(
+                        "[L2-REGIME-SHIFT] fold=%d regime shift detected (fit↔OOS JS=%.4f)",
+                        _fi, _js,
+                    )
 
     # Steps G+J: init per-fold bucket hit ratio + OOS realized edge accumulators
     _fold_bucket_hit: list[tuple[int, int]] = [(0, 0) for _ in awf_folds]
@@ -1707,7 +1726,7 @@ def _run_awf_simulation(
                         _current_bucket_edges,
                         _regime_now,
                         edge_floor_bps=float(
-                            getattr(config, "l2_bucket_edge_floor_bps", 100.0)
+                            getattr(config, "l2_bucket_edge_floor_bps", 0.0)
                         ),
                     )
                     _oos_sleeve_edges = {
@@ -1736,7 +1755,7 @@ def _run_awf_simulation(
                                     "[L2-BUCKET-DROP] t=%d sym=%s family=%s tf=%s "
                                     "regime=%d edge=%.2f floor=%.2f",
                                     t, _dk[0], _fam, _tf, _regime_now, _bedge,
-                                    float(getattr(config, "l2_bucket_edge_floor_bps", 100.0)),
+                                    float(getattr(config, "l2_bucket_edge_floor_bps", 0.0)),
                                 )
                     # Step G: bucket hit ratio update
                     if _before_filter_count > 0:
@@ -2168,15 +2187,16 @@ def _run_awf_simulation(
             if _active == 0:
                 continue
             _hit_pct = _hit / max(_active, 1) * 100.0
-            logger.info(
-                "[L2-BUCKET-HIT] fold=%d active_bars=%d bars_with_hit=%d hit_pct=%.1f%%",
-                _fi, _active, _hit, _hit_pct,
-            )
-            if _hit_pct < 30.0:
-                logger.warning(
-                    "[L2-BUCKET-HIT] fold=%d low bucket coverage (%.1f%%)",
-                    _fi, _hit_pct,
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[L2-BUCKET-HIT] fold=%d active_bars=%d bars_with_hit=%d hit_pct=%.1f%%",
+                    _fi, _active, _hit, _hit_pct,
                 )
+                if _hit_pct < 30.0:
+                    logger.debug(
+                        "[L2-BUCKET-HIT] fold=%d low bucket coverage (%.1f%%)",
+                        _fi, _hit_pct,
+                    )
     if _l2_routing_mode == "bucket" and logger.isEnabledFor(logging.DEBUG):
         _regime_names_local = ("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash")
         for _fi in range(len(awf_folds)):
