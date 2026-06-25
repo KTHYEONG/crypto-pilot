@@ -2415,7 +2415,10 @@ def run_tiered_pipeline(
             t_folds = time.perf_counter()
 
             # l2_multi_tf_enabled=True(default) → 전 TF artifact 빌드. False → 첫 TF만 빌드(구 동작).
+            import os as _os_mtf
             _multi_tf_enabled: bool = bool(getattr(cfg, "l2_multi_tf_enabled", True))
+            if _os_mtf.environ.get("L2_MULTI_TF", "") in ("0", "false", "False"):
+                _multi_tf_enabled = False
             defer_artifact_tf = (not _multi_tf_enabled) and (len(per_tf_l1) > 0)
             per_tf_l1[tf] = run_per_tf_l1(
                 tf=tf,
@@ -2558,6 +2561,8 @@ def run_tiered_pipeline(
     l2_config = Layer2AllocationConfig.from_mapping(l2_params)
     t_l2_pred = time.perf_counter()
     _l2_multi_tf: bool = bool(getattr(cfg, "l2_multi_tf_enabled", True))
+    if os.environ.get("L2_MULTI_TF", "") in ("0", "false", "False"):
+        _l2_multi_tf = False
     if _l2_multi_tf and l1.artifacts_by_tf:
         l2_signal_batch = predict_layer1_signals_multi_tf(
             artifacts_by_tf=l1.artifacts_by_tf,
