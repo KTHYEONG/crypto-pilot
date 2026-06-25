@@ -1624,6 +1624,25 @@ def run_l2_awf(
     mar_baseline = cagr_baseline / (mdd_baseline + 1e-9)
     psr_hybrid = _psr(sim.rets_hybrid)
 
+    # DEBUG: Sharpe 성분 분해 (hybrid vs baseline_ew)
+    _arr_h = np.asarray(sim.rets_hybrid, dtype=np.float64)
+    _arr_b = np.asarray(sim.rets_baseline_ew, dtype=np.float64)
+    if _arr_h.size >= 2 and _arr_b.size >= 2:
+        _mean_h = float(np.mean(_arr_h)) * bars_per_year
+        _mean_b = float(np.mean(_arr_b)) * bars_per_year
+        _std_h = float(np.std(_arr_h, ddof=1)) * np.sqrt(bars_per_year)
+        _std_b = float(np.std(_arr_b, ddof=1)) * np.sqrt(bars_per_year)
+        logger.debug(
+            "[L2-SHARPE-CMP] hybrid: ann_mean=%.6f ann_std=%.4f sharpe_hac=%.4f | "
+            "baseline_ew: ann_mean=%.6f ann_std=%.4f sharpe_hac=%.4f | "
+            "delta_sharpe=%.4f mean_ratio=%.2f std_ratio=%.2f",
+            _mean_h, _std_h, sharpe_hac_hybrid,
+            _mean_b, _std_b, sharpe_hac_baseline,
+            sharpe_hac_hybrid - sharpe_hac_baseline,
+            _mean_h / max(_mean_b, 1e-9),
+            _std_h / max(_std_b, 1e-9),
+        )
+
     # ── L* 결정 (SSOT 우선: deploy_leverage 파라미터 → 내부 calibrate → 1.0) ──
     fit_rets_arr = np.asarray(sim.fit_rets_hybrid, dtype=np.float64)
     _l_star: float
@@ -1717,6 +1736,25 @@ def run_l2_awf(
         block_bars=max(int(config.rebalance_bars), 1),
     )
     blocks_per_year = bars_per_year / max(int(config.rebalance_bars), 1)
+
+    # DEBUG: Block-level hybrid vs baseline 성장 비교
+    _n_blocks = hybrid_blocks.size
+    if _n_blocks > 0 and baseline_blocks.size == _n_blocks:
+        _delta = hybrid_blocks - baseline_blocks
+        _win_count = int(np.sum(_delta > 0))
+        logger.debug(
+            "[L2-BLOCK-SUM] n_blocks=%d blocks_per_year=%.1f | "
+            "hybrid: mean=%.4f std=%.4f min=%.4f max=%.4f | "
+            "baseline: mean=%.4f std=%.4f min=%.4f max=%.4f | "
+            "win_rate: hybrid>baseline = %d/%d (%.1f%%)",
+            _n_blocks, blocks_per_year,
+            float(np.mean(hybrid_blocks)), float(np.std(hybrid_blocks, ddof=1)),
+            float(np.min(hybrid_blocks)), float(np.max(hybrid_blocks)),
+            float(np.mean(baseline_blocks)), float(np.std(baseline_blocks, ddof=1)),
+            float(np.min(baseline_blocks)), float(np.max(baseline_blocks)),
+            _win_count, _n_blocks, 100.0 * float(_win_count) / float(_n_blocks),
+        )
+
     growth_lcb_hybrid = _growth_lower_confidence_bound(
         hybrid_blocks,
         blocks_per_year=blocks_per_year,
@@ -1736,20 +1774,29 @@ def run_l2_awf(
     friction_pass_pct = (
         sim.friction_pass_total / sim.signal_total if sim.signal_total > 0 else 0.0
     )
-    block_metrics = tuple(
-        Layer2BlockMetric(
+    _block_metrics_list: list[Layer2BlockMetric] = []
+    for idx, (fold, block_h, block_b) in enumerate(
+        zip(awf_folds, sim.block_rets_hybrid, sim.block_rets_baseline, strict=False)
+    ):
+        _lg_h = float(np.sum(np.log1p(np.asarray(block_h, dtype=np.float64)))) if block_h else 0.0
+        _lg_b = float(np.sum(np.log1p(np.asarray(block_b, dtype=np.float64)))) if block_b else 0.0
+        # DEBUG: per-block hybrid vs baseline 성장 비교
+        if block_h and block_b:
+            logger.debug(
+                "[L2-BLOCK-CMP] fold=%d log_growth_h=%.4f log_growth_b=%.4f "
+                "delta=%.4f n_bars=%d",
+                idx, _lg_h, _lg_b, _lg_h - _lg_b, len(block_h),
+            )
+        _block_metrics_list.append(Layer2BlockMetric(
             start_idx=fold.oos_start,
             end_idx=fold.oos_end,
-            log_growth_hybrid=float(np.sum(np.log1p(np.asarray(block_h, dtype=np.float64)))) if block_h else 0.0,
-            log_growth_baseline=float(np.sum(np.log1p(np.asarray(block_b, dtype=np.float64)))) if block_b else 0.0,
+            log_growth_hybrid=_lg_h,
+            log_growth_baseline=_lg_b,
             mdd_hybrid=_mdd(list(block_h)),
             turnover_hybrid=float(sim.all_turnovers[idx]) if idx < len(sim.all_turnovers) else 0.0,
             active_rebalances=1 if block_h else 0,
-        )
-        for idx, (fold, block_h, block_b) in enumerate(
-            zip(awf_folds, sim.block_rets_hybrid, sim.block_rets_baseline, strict=False)
-        )
-    )
+        ))
+    block_metrics = tuple(_block_metrics_list)
 
     fold_sharpes_h = [_sharpe(fr) for fr in sim.fold_rets_hybrid]
     # deployed 기준 fold 지표: apply_deployment(fold_rets, L*)로 정확한 compounding 반영.
