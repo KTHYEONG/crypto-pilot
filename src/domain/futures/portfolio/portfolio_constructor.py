@@ -817,6 +817,7 @@ def diagonal_kelly_weights(
     support_mask: NDArray[np.bool_] | None = None,
     z_scores: NDArray[np.float64] | None = None,
     cs_amp_alpha: float = 2.0,
+    cs_amp_mode: str = "power",
 ) -> NDArray[np.float64]:
     """신규 아키텍처용 Diagonal Kelly 사이징.
 
@@ -876,8 +877,21 @@ def diagonal_kelly_weights(
             z_clipped = np.maximum(z_arr, 0.0)
             z_pos = z_clipped[z_clipped > 0.0]
             z_med = float(np.median(z_pos)) if z_pos.size > 0 else 0.5
-            amp_factor = 1.0 + float(cs_amp_alpha) * np.maximum(z_clipped - z_med, 0.0)
+            if cs_amp_mode == "power":
+                amp_factor = np.maximum(1.0, (z_clipped / max(z_med, 1e-9)) ** float(cs_amp_alpha))
+            elif cs_amp_mode == "tanh":
+                amp_factor = 1.0 + float(cs_amp_alpha) * np.maximum(np.tanh(z_arr - 1.0), 0.0)
+            else:  # "median_excess"
+                amp_factor = 1.0 + float(cs_amp_alpha) * np.maximum(z_clipped - z_med, 0.0)
             mu = mu * amp_factor
+            # DEBUG: amplification effect diagnostics
+            _amp_arr = amp_factor[amp_factor > 1.01]
+            _n_amp = int(_amp_arr.size)
+            _amp_max = float(np.max(amp_factor)) if n > 0 else 1.0
+            _logger.debug(
+                "[L2-AMP] n=%d n_amplified=%d amp_max=%.2f z_med=%.2f mode=%s",
+                n, _n_amp, _amp_max, z_med, cs_amp_mode,
+            )
 
     # Step 1 (friction filter) removed: mu_bps is already net-of-cost per caller contract.
     # See awf_sim.py caller — signed_net_bps_per_bar already subtracts hurdle*safety_mult.

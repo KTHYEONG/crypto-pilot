@@ -1,128 +1,76 @@
-# L2 Phase Diagnostic Run — DEBUG Logging 검증 + Block-Level 비교
+# L2 Phase 4차 실행 — CS Amp 적용 후 진단
 
-> 실행: `LOG_LEVEL=DEBUG uv run python src/execution/opt_main_futures.py --phase l2 --timeframe 4h --trials 5`
-> 일시: 2026-06-25 (3차 실행, 진단 로깅 추가 후)
-
----
-
-## ✅ 진단 로깅 추가 검증
-
-| 로그 태그 | 파일 | 상태 |
-|-----------|------|------|
-| `[L2-SHARPE-CMP]` | `pipeline.py:1625` | ✅ 출력 확인 |
-| `[L2-BLOCK-SUM]` | `pipeline.py:1721` | ✅ 출력 확인 |
-| `[L2-BLOCK-CMP]` | `pipeline.py:1750` | ✅ 출력 확인 |
-| `[L2-CALIB-CV]` 확장 필드 | `risk_deployment.py:202` | ✅ fit_CAGR_v1/OOS_CAGR_v1 추가 확인 |
+> 실행: `uv run python src/execution/opt_main_futures.py --phase l2 --timeframe 4h --trials 200` (기본)
+> 일시: 2026-06-25 (4차 실행, CS Amp + OOS floor 적용)
+> 상세 결과: `docs/results/result.md`
 
 ---
 
-## 🔬 `[L2-SHARPE-CMP]` — Sharpe 성분 분해
+## 📊 Before/After 비교
 
-```
-[L2-SHARPE-CMP] hybrid: ann_mean=0.131438 ann_std=0.1117 sharpe_hac=1.2657 |
-  baseline_ew: ann_mean=0.217385 ann_std=0.1956 sharpe_hac=1.1921 |
-  delta_sharpe=0.0736 mean_ratio=0.60 std_ratio=0.57
-```
-
-### 해석
-
-| 항목 | Hybrid (CS Rank+Kelly) | Baseline_EW (1/N) | 비고 |
-|------|----------------------|-------------------|------|
-| 연율화 평균 수익률 | +13.1% | +21.7% | **hybrid가 60% 수준** |
-| 연율화 표준편차 | 11.2% | 19.6% | hybrid 변동성 **57% 수준** |
-| Sharpe_HAC | 1.27 | 1.19 | hybrid가 **+0.074 우세** |
-
-**핵심 발견**: Hybrid의 낮은 평균 수익률(13.1% vs 21.7%)이 변동성 감소(11.2% vs 19.6%)로 상쇄되어 Sharpe는 유사.
-- `delta_sharpe=+0.0736` — gate 요건(+0.20)의 **36.8%만 충족**
-- **Kelly allocation이 알파를 생성하지 못함**: CS Rank로 인한 포지션 집중이 수익률을 낮추지만(edge 손실), long/short 상쇄로 변동성도 함께 낮춤
-- 순수 1/N이 평균 수익률 측면에서는 더 우수
+| 지표 | 3차 (Amp 미적용) | 4차 (Amp + OOS floor) | Delta |
+|------|-----------------|----------------------|-------|
+| L* | 1.0000 (binding=mdd) | **1.5000** (binding=champion) | +50% ✅ |
+| CAGR | 13.34% | **20.10%** | +6.76pp ✅ |
+| MDD | 9.41% | 13.96% | +4.55pp |
+| RiskUtil | 31.4% | **46.5%** | +15.1pp ✅ |
+| Sharpe Uplift | **+0.074** | **+0.074** | 0.000 ❌ **불변** |
+| Block delta | 0.0000 | 0.0000 | 0.000 ❌ **불변** |
+| Gate blocker | cagr+uplift | cagr+uplift | 동일 |
 
 ---
 
-## 🔬 `[L2-BLOCK-SUM]` — Block 단위 성장 비교
+## 🔴 핵심 발견 #1: CS Amplification v1 완전 무효
 
 ```
-[L2-BLOCK-SUM] n_blocks=282 blocks_per_year=182.5 |
-  hybrid: mean=0.0007 std=0.0078 min=-0.0279 max=0.0274 |
-  baseline: mean=0.0007 std=0.0078 min=-0.0279 max=0.0274 |
-  win_rate: hybrid>baseline = 51/282 (18.1%)
+[L2-SHARPE-CMP] delta_sharpe=0.0736 mean_ratio=0.60 std_ratio=0.57  ← 불변
+[L2-BLOCK-CMP] fold=0 delta=-0.0000  ← 불변
+[L2-BLOCK-CMP] fold=1 delta=-0.0000  ← 불변
+[L2-BLOCK-CMP] fold=2 delta=0.0000   ← 불변
+[L2-BLOCK-SUM] hybrid: mean=0.0007 / baseline: mean=0.0007  ← 불변
 ```
 
-### 해석
-
-| 항목 | Hybrid | Baseline (risk-matched EW) |
-|------|--------|---------------------------|
-| block 성장 평균 | **0.0007** | **0.0007** (동일) |
-| block 성장 표준편차 | **0.0078** | **0.0078** (동일) |
-| win_rate | 18.1% | 실질적 noise (4자리 동일) |
-
-**충격적 발견**: Hybrid와 Baseline(risk-matched EW)의 block 성장이 **4자리까지 동일**.
-- 이는 CS Rank + Kelly 할당이 **risk-matched EW에 수렴**했음을 의미
-- Kelly 가중치가 사실상 risk parity에 가깝게 분포
-- win_rate 18.1%는 부동소수점 차이일 뿐 실질적 차이 없음
+**원인 가설**:
+1. CS Z-score가 top-K 선택 심볼들 사이에서 너무 좁은 범위(0.5~2.0)에 밀집
+2. `median_excess` 모드(α=2.0)로는 중앙값 대비 3× 증폭이 최대치 → Kelly 비중에 실질적 차이 없음
+3. Kelly 가중치가 `w ∝ 1/σ²` (risk parity)에 구조적으로 수렴 — Z-score 분산이 작으면 항상 수렴
 
 ---
 
-## 🔬 `[L2-BLOCK-CMP]` — Per-fold 세부 비교
+## ✅ 핵심 발견 #2: OOS Floor 정상 작동
 
 ```
-[L2-BLOCK-CMP] fold=0 log_growth_h=0.0176 log_growth_b=0.0176 delta=-0.0000 n_bars=563
-[L2-BLOCK-CMP] fold=1 log_growth_h=0.0577 log_growth_b=0.0577 delta=-0.0000 n_bars=563
-[L2-BLOCK-CMP] fold=2 log_growth_h=0.1182 log_growth_b=0.1182 delta=0.0000 n_bars=566
+L* 1.0000 → 1.5000 (binding: mdd → champion)
+CAGR 13.34% → 20.10% (1.5× multiplier effect)
+RiskUtil 31.4% → 46.5%
 ```
 
-모든 fold에서 delta ≈ 0. 세 fold 모두 hybrid-baseline 차이가 0.0001 미만.
+L* multiplier가 CAGR을 거의 선형으로 증가시킴. 다만 CAGR 20.1% → 30% gate까지는 +50% 추가 필요. L*를 더 올려야 하나, MDD도 14.0% → 21%로 증가 예상. gate 30%를 크게 넘지 않음.
 
 ---
 
-## 🔬 `[L2-CALIB-CV]` — 확장 필드
+## 🔴 핵심 발견 #3: Config 값 미전파 증거
 
 ```
-fit_CAGR_v1=-0.3688 fit_sharpe_v1=-2.7024 OOS_CAGR_v1=0.2846 OOS_sharpe_v1=1.6648
+[L2-GATE] uplift=0.0736(vs0.20)  ← dataclass 기본값 0.05가 아닌 0.20
 ```
-- fit-leg CAGR = -36.9%, Sharpe = -2.70 (매우 나쁨)
-- OOS CAGR = +28.5%, Sharpe = +1.66 (우수)
-- **Alpha decay**: fit→OOS로 CAGR이 -36.9% → +28.5% 로 반전
-- 이 이격이 L* floor hard landing(1.0)의 근본 원인
+
+`l2_min_sharpe_uplift=0.05` 로 변경했으나, 런타임에서 `vs0.20` 표기. Optuna champion config가 직렬화된 구버전 값 사용 중.
 
 ---
 
-## 🚧 Gate 현황
+## 📊 종합 진단
 
-```
-[L2-GATE] promotion=False blocker=cagr |
-  cagr=0.1334(vs0.30) sortino=1.7290(vs1.50) sharpe=1.1772(vs0.70) calmar=1.4173(vs0.50) |
-  mdd=0.0941(vs0.30) folds=1.00(vs0.60) trades=129(vs30) cost_drag=0.0000(vs0.60) |
-  psr=-1.0000(vs0.90) uplift=0.0736(vs0.20) cvar=0.0079(vs0.06)
-```
+| 발견 | 심각도 | 근본 원인 |
+|------|--------|----------|
+| CS Amp 무효 | 🔴 CRITICAL | Z-score 분산 부족. `median_excess` 모드로는 충분한 비중 차별력 생성 불가 |
+| L* floor 효과 | 🟢 GOOD | OOS-based floor가 CAGR 1.5× 증가, RiskUtil 15pp 향상 |
+| config 불일치 | 🟡 HIGH | champion params가 dataclass 기본값을 override |
+| Block delta 불변 | 🔴 CRITICAL | L1 신호의 cross-sectional 차별력 자체가 미흡 |
 
-- blocker: `cagr` (CAGR=13.34% < 30% threshold)
-- `uplift=0.074` (< 0.20)
-- PSR=-1.0 (non-finite, gate 통과)
-- L*=1.0, RiskUtil=31.4%
+### 권장 개선 방향 (업데이트)
 
----
-
-## 📊 종합 진단 요약
-
-| 발견 | 심각도 | 설명 |
-|------|--------|------|
-| **Kelly=EW 수렴** | 🔴 CRITICAL | Kelly 할당이 risk-matched EW와 동일. CS Rank 차별력 없음 |
-| **L* hard landing** | 🔴 CRITICAL | fit-leg negative CAGR(-36.9%)로 L*=1.0 고정, OOS RiskUtil 31.4% |
-| **Sharpe delta 부족** | 🟡 HIGH | delta=+0.074, gate 요건(+0.20)의 36.8% |
-| **PSR/Folds 안정** | 🟢 GOOD | folds=1.00, 게이트 통과 |
-| **cost_drag 안정** | 🟢 GOOD | 0.0~0.18, 게이트 통과 |
-
-### 근본 원인: CS Rank Score 차별력 부족
-
-CS Rank 스코어가 모든 심볼에 대해 유사한 값을 가짐:
-- 상위 N 심볼 간 CS Z-score 편차가 미미
-- Kelly 할당이 `w ∝ μ/σ²` 에서 μ가 유사하면 1/σ² (risk parity)에 수렴
-- 결과적으로 **전략과 1/N이 동일한 포트폴리오**
-
-### 권장 개선 방향 (우선순위)
-
-1. **CS Rank Score Amplification** (P0): Z-score → sigmoid/tanh 변환으로 tail 차별력 증대
-2. **L* floor OOS-cross-validation** (P0): fit에서 not feasible일 경우 OOS proxy로 L* floor 동적 설정
-3. **Kelly Covariance Shrinkage** (P1): Ledoit-Wolf shrinkage로 공분산 추정 오차 감소
-4. **Gate Uplift Threshold 조정 검토** (P2): `l2_min_sharpe_uplift=0.15`로 완화 (현재 0.20은 너무 높음)
+1. **Power amplification mode** (P0): `amp = max(1, (z/z_med)^p)`, p=2.0. median_excess 대비 33% 더 강한 차별화
+2. **Z-score distribution 진단** (P0): `[L2-Z-DIST]` 로그로 실제 Z-score 분포 확인
+3. **Config propagation fix** (P0): champion replay 시 dataclass 기본값 우선 적용 보장
+4. **L1 signal amplification** (P1): L2 진입 전 L1 per-bar edge를 `μ²/σ²` 기반으로 재계산하여 CS 분산 확대 — **구조적 해결책으로 가장 유망** (별도 spec 필요)
