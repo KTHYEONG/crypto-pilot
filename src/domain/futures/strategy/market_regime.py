@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -12,6 +13,8 @@ from src.domain.futures.strategy.common.alignment import AlignedMarketData
 
 if TYPE_CHECKING:
     from src.domain.futures.strategy.config import RegimeConfig
+
+_logger = logging.getLogger(__name__)
 
 _REGIME_NAMES = (
     "bull_quiet",
@@ -538,6 +541,16 @@ def compute_market_regime_context(
         vol_threshold=vol_threshold,
         schmitt_state=schmitt_state,
     )
+
+    # Step F: regime distribution DEBUG log
+    if _logger.isEnabledFor(logging.DEBUG):
+        _unique_r, _counts_r = np.unique(code, return_counts=True)
+        _n_total_r = int(code.shape[0])
+        _summary = "; ".join(
+            f"{_REGIME_NAMES[int(r)]}({int(r)}):{float(c)/float(_n_total_r)*100:.1f}%"
+            for r, c in sorted(zip(_unique_r.tolist(), _counts_r.tolist(), strict=True))
+        )
+        _logger.debug("[REGIME-DIST] total_bars=%d %s", _n_total_r, _summary)
 
     return MarketRegimeContext(
         code_1d=code,

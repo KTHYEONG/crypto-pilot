@@ -1549,6 +1549,16 @@ def _run_awf_simulation(
             compute_bucket_realized_edges,
         )
         _regime_code_1d = compute_market_regime_context(aligned=aligned).code_1d
+        # Step B: per-regime occupancy DEBUG logging
+        if logger.isEnabledFor(logging.DEBUG):
+            _unique_regimes, _counts_regimes = np.unique(_regime_code_1d, return_counts=True)
+            _n_total_regime = int(_regime_code_1d.shape[0])
+            for _r, _c in sorted(zip(_unique_regimes.tolist(), _counts_regimes.tolist(), strict=True)):
+                _pct = float(_c) / float(_n_total_regime) * 100.0
+                logger.debug(
+                    "[L2-REGIME-OCC] regime=%d count=%d pct=%.1f%% total=%d",
+                    _r, _c, _pct, _n_total_regime,
+                )
         for _f_idx, _f_fold in enumerate(awf_folds):
             if int(_f_fold.fit_start) < int(_f_fold.oos_start):
                 _be = compute_bucket_realized_edges(
@@ -1566,6 +1576,18 @@ def _run_awf_simulation(
                 bucket_edges_by_fold.append({})
     else:
         bucket_edges_by_fold = [{} for _ in awf_folds]
+
+    # Step A: per-fold bucket edge DEBUG logging
+    if _l2_routing_mode == "bucket" and logger.isEnabledFor(logging.DEBUG):
+        _regime_names_local = ("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash")
+        for _bf_idx, _bf_edges in enumerate(bucket_edges_by_fold):
+            logger.debug("[L2-BUCKET-MAP] fold=%d n_buckets=%d", _bf_idx, len(_bf_edges))
+            for (_br, _bfam, _btf), _bval in sorted(_bf_edges.items(), key=lambda x: -x[1]):
+                _rl = _regime_names_local[_br] if 0 <= _br < 6 else f"unknown({_br})"
+                logger.debug(
+                    "[L2-BUCKET-EDGE] fold=%d regime=%s(%d) family=%s tf=%s edge=%.2f_bps",
+                    _bf_idx, _rl, _br, _bfam, _btf, _bval,
+                )
 
     for _fold_idx, fold in enumerate(awf_folds):
         t_fold_start = time.perf_counter()
@@ -1628,8 +1650,11 @@ def _run_awf_simulation(
                 _current_bucket_edges = bucket_edges_by_fold[_fold_idx]
                 if _current_bucket_edges:
                     from src.domain.futures.strategy.tiered_workflow.l2_meta import (
+                        _parse_meta_group_ids,
                         filter_sleeves_by_bucket,
                     )
+                    _before_filter_count = len(_oos_sleeve_sigs)
+                    _before_sleeve_keys = set(_oos_sleeve_sigs.keys())
                     _regime_now = int(_regime_code_1d[t]) if t < len(_regime_code_1d) else 0
                     _oos_sleeve_sigs = filter_sleeves_by_bucket(
                         _oos_sleeve_sigs,
@@ -1642,6 +1667,31 @@ def _run_awf_simulation(
                     _oos_sleeve_edges = {
                         k: v for k, v in _oos_sleeve_edges.items() if k in _oos_sleeve_sigs
                     }
+                    # Step C: per-bar bucket filter stats (every 100 bars)
+                    _after_filter_count = len(_oos_sleeve_sigs)
+                    _dropped_by_bucket = _before_filter_count - _after_filter_count
+                    if _dropped_by_bucket > 0 and logger.isEnabledFor(logging.DEBUG) and t % 100 == 0:
+                        _regime_names_local = ("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash")  # noqa: E501
+                        _rl = _regime_names_local[_regime_now] if 0 <= _regime_now < 6 else f"unknown({_regime_now})"
+                        logger.debug(
+                            "[L2-BUCKET-FILTER] t=%d fold=%d regime=%s(%d) "
+                            "sleeves_before=%d after=%d dropped=%d",
+                            t, _fold_idx, _rl, _regime_now,
+                            _before_filter_count, _after_filter_count, _dropped_by_bucket,
+                        )
+                        # Step D: per-sleeve drop detail (diag only)
+                        if _diag and logger.isEnabledFor(logging.DEBUG):
+                            _drop_keys = _before_sleeve_keys - set(_oos_sleeve_sigs.keys())
+                            for _dk in sorted(_drop_keys):
+                                _fam, _tf = _parse_meta_group_ids(_dk[1])
+                                _bk = (_regime_now, _fam, _tf)
+                                _bedge = _current_bucket_edges.get(_bk, 0.0)
+                                logger.debug(
+                                    "[L2-BUCKET-DROP] t=%d sym=%s family=%s tf=%s "
+                                    "regime=%d edge=%.2f floor=%.2f",
+                                    t, _dk[0], _fam, _tf, _regime_now, _bedge,
+                                    float(getattr(config, "l2_bucket_edge_floor_bps", 100.0)),
+                                )
             if _diag:
                 _attr_dropped += _oos_dropped
                 _attr_sleeves_active.append(len(_oos_sleeve_sigs))
