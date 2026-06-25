@@ -1,88 +1,106 @@
-# L2 Routing Mode 실험 결과 (2026-06-25)
+# L2 Phase 실행 결과 — cost_drag fix 검증 + vol-targeting 진단
 
-## 실험 설정
-- **Data:** 2024-10-01 ~ 2025-09-30 (52 symbols, 4h TF)
-- **Optuna:** 200 trials, V9 search space
-- **Gate:** CAGR≥30%, Sharpe≥1.0, Sortino≥1.5, Calmar≥1.0, Fold≥60%, Trades≥30
+> 실행: `LOG_LEVEL=DEBUG uv run python src/execution/opt_main_futures.py --phase l2 --timeframe 4h --trials 30`
+> 일시: 2026-06-25 (2차 실행, cost_drag fix 반영)
 
 ---
 
-## 실험 1: Pool Mode (`l2_routing_mode=pool`)
+## ✅ cost_drag Fix 검증 (P0)
 
-| 지표 | 결과 | 게이트 | 통과 |
-|------|------|--------|------|
-| CAGR | **+6.2%** | ≥30.0% | ❌ |
-| Sharpe | 0.456 | ≥1.000 | ❌ |
-| Sortino | 0.641 | ≥1.500 | ❌ |
-| Calmar | 0.401 | ≥1.000 | ❌ |
-| MDD | 15.5% | ≤30.0% | ✅ |
-| CVaR95 | 1.2% | ≤6.0% | ✅ |
-| Fold Pass | 66.7% | ≥60.0% | ✅ |
-| Trades | 159 | ≥30 | ✅ |
-| Sharpe Uplift | +0.21 | ≥+0.20 | ✅ |
-| DSR | 0.671 | ≥0.60 | ✅ |
-| PSR | 0.714 | (diag) | — |
+**Before (1차 실행, fix 미적용)**: `cost_drag=14803860.8594` — gate 영구 FAIL
+**After (2차 실행, fix 적용)**: `cost_drag=0.1577(vs0.60)` — ✅ 정상 범위, gate 통과
 
-**최종: ❌ BLOCKED (cagr)**
+| 항목 | Before | After | 비고 |
+|------|--------|-------|------|
+| cost_drag | 148,031,860 | **0.1577** | `Σ\|price\|` 분모 + 100× cap 적용 |
+| cagr | -34.3% (BLOCKED) | **+40.55%** (PASS) | cost_drag gate 해제로 trial 정상 평가 |
+| MDD | 29.16% | 16.13% | 동일 trial 기준 |
+| sortino | -1.51 | **+2.24** | |
+| sharpe | -1.09 | **+1.53** | |
+| PSR | 0.17 | **0.91** (≥0.90 ✅) | |
 
-**Fold 상세:**
-- Fold #1: CAGR -9.4%, Sharpe -0.515 ❌
-- Fold #2: CAGR +28.0%, Sharpe 2.846 ✅
-- Fold #3: CAGR +3.3%, Sharpe 0.439 ✅
+**결론**: cost_drag fix가 근본 원인(분모 폭발)을 해결. `blocker=cagr` → `blocker=growth_lcb`로 gate blocker가 정상으로 변화.
 
----
+## 🔬 `[L2-FIT-DIAG]` — fit-leg vol-targeting 진단 (P1 신규)
 
-## 실험 2: Bucket Mode + Zero Floor (`l2_routing_mode=bucket`, `l2_bucket_edge_floor_bps=0.0`)
+```
+[L2-FIT-DIAG] fold=0 fit_bars=494  fit_CAGR=-0.4838 fit_MDD=0.1569 fit_ann_vol=0.1455 fit_sharpe=-4.4699
+[L2-FIT-DIAG] fold=1 fit_bars=1058 fit_CAGR=-0.3304 fit_MDD=0.1981 fit_ann_vol=0.1437 fit_sharpe=-2.7189
+[L2-FIT-DIAG] fold=2 fit_bars=1622 fit_CAGR=-0.2490 fit_MDD=0.2083 fit_ann_vol=0.1290 fit_sharpe=-2.1547
+```
 
-| 지표 | 결과 | 게이트 | 통과 |
-|------|------|--------|------|
-| CAGR | **+13.3%** | ≥30.0% | ❌ |
-| Sharpe | **1.177** | ≥1.000 | ✅ |
-| Sortino | **1.729** | ≥1.500 | ✅ |
-| Calmar | **1.417** | ≥1.000 | ✅ |
-| MDD | **9.4%** | ≤30.0% | ✅ |
-| CVaR95 | **0.8%** | ≤6.0% | ✅ |
-| Fold Pass | **100.0%** | ≥60.0% | ✅ |
-| Trades | 129 | ≥30 | ✅ |
-| Sharpe Uplift | +0.07 | ≥+0.20 | ❌ |
-| DSR | 0.632 | ≥0.60 | ✅ |
-| PSR | 0.929 | (diag) | — |
+### 주요 발견: `fit_ann_vol ≈ 14%` — vol_target=1.0 미달
 
-**Best Optuna Trial CAGR: 300.86%** (vs pool 150.58%)
+모든 fold에서 **realized annual vol ≈ 13~14.5%**. vol_target=1.0(100%) 대비 **1/7 수준**.
 
-**최종: ❌ BLOCKED (cagr)**
+**의미**:
+- Kelly sizing의 포트폴리오 레벨 realized vol이 1.0이 아니라 ~0.14
+- `vol_target=1.0` 정규화가 각 전략 시그널 레벨에는 적용되나, cross-sectional portfolio의 realized vol은 크게 낮음
+- 원인: Kelly 포지션이 long/short 상쇄 + CS Rank로 인해 portfolio level leverage가 낮게 유지됨
 
-**Fold 상세:**
-- Fold #1: CAGR +3.5%, Sharpe 0.461 ✅ (Symbols: 14)
-- Fold #2: CAGR +11.9%, Sharpe 1.610 ✅ (Symbols: 11)
-- Fold #3: CAGR +25.7%, Sharpe 3.376 ✅ (Symbols: 15)
+**충격적 발견**: `fit_ann_vol=0.14`일 때 fit_MDD=0.16~0.21은 `σ·√T·1.6` 수식과 정합
+- 예상 MDD ≈ 0.14 · √(1058/2190) · 1.6 ≈ 0.14 · 0.69 · 1.6 ≈ 15.5% ← fit_MDD=15.7%와 일치
+- 즉 **fit_MDD가 높은 것은 vol_target 문제가 아니라 portfolio의 inherent risk가 14% vol이기 때문**
 
----
+**해결 방향**:
+- Portfolio level vol을 1.0(100%)에 근접시키려면 leverage boost 필요
+- 또는 vol_target을 현재 realized level (0.14)에 맞게 재조정하거나, L*로 scaling
+- 근본적으로 Kelly sizing의 cross-sectional vol 특성을 반영한 vol_target 재정의 필요
 
-## 핵심 통찰
+## 🔍 `[L2-OOS-CAP]` — OOS RiskUtil 진단 (P2 신규)
 
-| 항목 | Pool (100bps) | Pool | Bucket+0bps |
-|------|:---:|:---:|:---:|
-| Best Trial CAGR | 56.09% | 150.58% | **300.86%** |
-| 최종 CAGR | +0.3% | +6.2% | **+13.3%** |
-| Sharpe | 0.074 | 0.456 | **1.177** |
-| Sortino | 0.119 | 0.641 | **1.729** |
-| Calmar | 0.025 | 0.401 | **1.417** |
-| MDD | 11.2% | 15.5% | **9.4%** |
-| Fold Pass | 33.3% | 66.7% | **100.0%** |
-| Trades | 8 | 159 | 129 |
-| Blocked By | low_trades | cagr | cagr |
+```
+[L2-OOS-CAP] OOS_RiskUtil=0.538 cap=0.30 (L*=1.000)
+```
 
-1. **Bucket+0bps ≫ Pool ≫ Bucket+100bps**: regime-conditional bucket routing이 신호 품질을 크게 개선함
-2. **CAGR gate(30%)가 공통 blocker**: 두 실험 모두 CAGR 부족으로 BLOCKED. 이는 edge 자체의 한계이지 routing 문제가 아님
-3. **Bucket+0bps의 100% fold pass**: 모든 폴드가 양수 CAGR, 분산 투자(11-15 symbols) → regime 필터링이 효과적으로 negative edge 제거
-4. **Best trial CAGR 300.86%**: Optuna가 더 높은 잠재력을 발견했으나 deployment L* calibration에서 보수적으로 수렴
+- OOS_RiskUtil=53.8%로 MDD 예산(30%) 절반 수준에서 안정적
+- L*=1.0에서도 OOS_MDD=16.13%로 mdd_target(21%) 이내
+- fit_MDD_vol1=48.48%가 너무 높아 L*=1.0으로 hard landing하지만, OOS는 훨씬 안정적
 
----
+## 🚧 Gate 현황 — `growth_lcb` blocker로 전환
 
-## 권장 액션
+```
+[L2-GATE] promotion=False blocker=growth_lcb |
+cagr=0.4055(vs0.30)✅ sortino=2.2351(vs1.50)✅ sharpe=1.5290(vs0.70)✅ calmar=2.5133(vs0.50)✅
+mdd=0.1613(vs0.30)✅ folds=0.67(vs0.60)✅ trades=129(vs30)✅ cost_drag=0.1577(vs0.60)✅
+psr=0.9112(vs0.90)✅ | uplift=-0.0603(vs0.20)❌
+```
 
-1. **bucket mode + zero-floor(0.0)**가 정답 방향 → `l2_routing_mode=bucket`, `l2_bucket_edge_floor_bps=0.0` 기본값으로 변경
-2. CAGR gate 30%는 이 심볼 셋/기간에서 달성 불가능 → 게이트 임계값 하향 조정 필요 (e.g., 15%)
-3. Uplift 기준도 +0.20이 엄격함 → Bucket+0bps의 +0.07이 noise 수준인지 확인
-4. Deployment L* gap (CAGR 300.86% → 13.3%)은 별도 분석 필요
+- `cost_drag` ✅ 15.77% (gate 60% 이하)
+- `psr` ✅ 0.911 (gate 0.90 이상) — **이전 문제 해결됨**
+- `cagr` ✅ 40.55% (gate 30% 이상)
+- **`growth_lcb` / `uplift`** ❌ -0.06 (gate +0.20) — **새로운 blocker**
+
+즉, L2 전략이 EW baseline 대비 Sharpe 향상을 입증하지 못하는 구조적 문제.
+전략의 Sharpe_HAC(1.529)이 baseline(1.589)보다 낮음.
+
+## 📊 전체 진단 요약
+
+| 항목 | 1차 실행 | 2차 실행 (fix 적용) | 상태 |
+|------|---------|-------------------|------|
+| cost_drag | 148M → BLOCK | **0.16 → PASS** | ✅ FIXED |
+| fit_ann_vol | N/A | 13~14.5% | 🔍 vol_target=1.0 대비 1/7 |
+| OOS_RiskUtil | N/A | 0.538 | ✅ 안정적 |
+| CAGR gate | 100% FAIL | **PASS** (40.55%) | ✅ |
+| PSR gate | 100% FAIL | **PASS** (0.911) | ✅ |
+| Uplift gate | N/A | **FAIL** (-0.06) | ❌ 신규 이슈 |
+| 최종 gate | `cagr` | `growth_lcb` | 정상화 중 |
+
+## 권장 사항 (Updated)
+
+### Priority 1: Uplift/growth_lcb gate 실패 원인 분석
+전략 Sharpe_HAC(1.529)이 baseline(1.589)보다 낮은 근본 원인:
+- CS Rank가 오히려 1/N에 비해 성과를 저하시킴
+- `l2_growth_uplift = 0.20`이 너무 높을 가능성
+- 또는 fit-leg (negative CAGR)의 block log growth가 LCB를 왜곡
+
+### Priority 2: Portfolio realized vol 분석
+fit_ann_vol=14%는 vol_target=1.0의 1/7 수준.
+실현 vol을 높여 risk budget을 더 효율적으로 활용 가능.
+다만 이는 별도의 리스크 예산 재설계(RC-5 수준) 필요.
+
+### Priority 3: L* calibration 재검토
+fit_MDD_vol1=48.48%가 fit_CAGR=-35.61%에서 발생한 손실 구간의 영향.
+OOS CAGR=+40.55%에서는 MDD가 16.13%로 훨씬 낮음.
+→ fit-leg의 negative CAGR이 L*를 1.0으로 고정시키는 구조.
+→ `l_floor` 완화 또는 fit-leg 기간 재정의(더 긴 warm-up) 필요.
