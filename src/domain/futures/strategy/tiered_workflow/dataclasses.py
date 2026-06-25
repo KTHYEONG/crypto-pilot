@@ -347,7 +347,7 @@ class Layer2AllocationConfig:
     l2_mdd_material_floor: float = 0.05
     l2_mdd_rel_tol: float = 0.25
     l2_min_fold_pass_ratio: float = 0.60
-    l2_min_sharpe_uplift: float = 0.20
+    l2_min_sharpe_uplift: float = 0.05
     l2_min_growth_uplift: float = 0.0
     l2_min_psr: float = 0.90
     l2_min_friction_pass: float = 0.50
@@ -402,6 +402,10 @@ class Layer2AllocationConfig:
     l2_bucket_min_n: int = 15
     l2_bucket_shrinkage: float = 0.3
     l2_bucket_edge_floor_bps: float = 0.0
+    # CS Score Amplification (anti-Kelly=EW-convergence)
+    l2_cs_amp_enabled: bool = True
+    l2_cs_amp_alpha: float = 2.0
+    l2_cs_amp_mode: str = "median_excess"
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
