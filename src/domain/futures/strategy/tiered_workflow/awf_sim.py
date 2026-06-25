@@ -1589,6 +1589,47 @@ def _run_awf_simulation(
                     _bf_idx, _rl, _br, _bfam, _btf, _bval,
                 )
 
+    # Step H: per-fold regime distribution stability (fit vs OOS)
+    if _l2_routing_mode == "bucket":
+        for _fi, _fold in enumerate(awf_folds):
+            _fit_slice = _regime_code_1d[int(_fold.fit_start):int(_fold.oos_start)]
+            _oos_slice = _regime_code_1d[int(_fold.oos_start):int(_fold.oos_end)]
+            if len(_fit_slice) == 0 or len(_oos_slice) == 0:
+                continue
+            _fit_uniq, _fit_counts = np.unique(_fit_slice, return_counts=True)
+            _oos_uniq, _oos_counts = np.unique(_oos_slice, return_counts=True)
+            _fit_freq = np.zeros(6, dtype=np.float64)
+            _oos_freq = np.zeros(6, dtype=np.float64)
+            for _r, _c in zip(_fit_uniq.tolist(), _fit_counts.tolist(), strict=True):
+                _fit_freq[int(_r)] = _c / len(_fit_slice)
+            for _r, _c in zip(_oos_uniq.tolist(), _oos_counts.tolist(), strict=True):
+                _oos_freq[int(_r)] = _c / len(_oos_slice)
+            _m = (_fit_freq + _oos_freq) / 2.0
+            _js = 0.0
+            for _p, _q in zip(_fit_freq, _m, strict=True):
+                if _p > 0:
+                    _js += _p * np.log2(_p / _q) if _q > 0 else 0.0
+            for _p, _q in zip(_oos_freq, _m, strict=True):
+                if _p > 0:
+                    _js += _p * np.log2(_p / _q) if _q > 0 else 0.0
+            _js /= 2.0
+            _fit_occ = "|".join(f"{p*100:.0f}" for p in _fit_freq)
+            _oos_occ = "|".join(f"{p*100:.0f}" for p in _oos_freq)
+            logger.info(
+                "[L2-REGIME-SHIFT] fold=%d js_div=%.4f fit=%s oos=%s",
+                _fi, _js, _fit_occ, _oos_occ,
+            )
+            if _js > 0.15:
+                logger.warning(
+                    "[L2-REGIME-SHIFT] fold=%d regime shift detected (fit↔OOS JS=%.4f)",
+                    _fi, _js,
+                )
+
+    # Steps G+J: init per-fold bucket hit ratio + OOS realized edge accumulators
+    _fold_bucket_hit: list[tuple[int, int]] = [(0, 0) for _ in awf_folds]
+    _fold_oos_bucket_sum: list[dict[tuple[int, str, str], float]] = [{} for _ in awf_folds]
+    _fold_oos_bucket_cnt: list[dict[tuple[int, str, str], int]] = [{} for _ in awf_folds]
+
     for _fold_idx, fold in enumerate(awf_folds):
         t_fold_start = time.perf_counter()
         _fold_h: list[float] = []
@@ -1656,6 +1697,11 @@ def _run_awf_simulation(
                     _before_filter_count = len(_oos_sleeve_sigs)
                     _before_sleeve_keys = set(_oos_sleeve_sigs.keys())
                     _regime_now = int(_regime_code_1d[t]) if t < len(_regime_code_1d) else 0
+                    # Step J: pre-compute sleeve key → index mapping for OOS edge tracking
+                    _sleeve_to_j = {
+                        cache.sleeve_ids[_j]: _j for _j in range(cache.signal_mask_2d.shape[1])
+                        if cache.signal_mask_2d[t, _j] and cache.sleeve_ids[_j] in _before_sleeve_keys
+                    }
                     _oos_sleeve_sigs = filter_sleeves_by_bucket(
                         _oos_sleeve_sigs,
                         _current_bucket_edges,
@@ -1692,6 +1738,32 @@ def _run_awf_simulation(
                                     t, _dk[0], _fam, _tf, _regime_now, _bedge,
                                     float(getattr(config, "l2_bucket_edge_floor_bps", 100.0)),
                                 )
+                    # Step G: bucket hit ratio update
+                    if _before_filter_count > 0:
+                        _old_hit = _fold_bucket_hit[_fold_idx]
+                        _fold_bucket_hit[_fold_idx] = (
+                            _old_hit[0] + 1,
+                            _old_hit[1] + (1 if _after_filter_count > 0 else 0),
+                        )
+                    # Step J: OOS realized edge per bucket
+                    _oos_cost_bps = float(getattr(config, "l2_bucket_cost_bps", 6.0))
+                    _c_row = aligned.close_2d[t]
+                    _c_nxt = aligned.close_2d[t + 1] if t + 1 < aligned.close_2d.shape[0] else _c_row
+                    for _sk in _oos_sleeve_sigs:
+                        _j_idx = _sleeve_to_j.get(_sk)
+                        if _j_idx is None:
+                            continue
+                        _fam_j, _tf_j = _parse_meta_group_ids(_sk[1])
+                        _bk_j = (_regime_now, _fam_j, _tf_j)
+                        _side_j = float(cache.side_2d[t, _j_idx])
+                        _sym_col_j = int(cache.sleeve_to_sym[_j_idx])
+                        _denom_j = max(float(abs(_c_row[_sym_col_j])), 1e-12)
+                        _fwd_bps_j = (float(_c_nxt[_sym_col_j]) - float(_c_row[_sym_col_j])) / _denom_j * 10000.0
+                        _realized_j = _side_j * _fwd_bps_j - _oos_cost_bps
+                        _prev_sum = _fold_oos_bucket_sum[_fold_idx].get(_bk_j, 0.0)
+                        _fold_oos_bucket_sum[_fold_idx][_bk_j] = _prev_sum + _realized_j
+                        _prev_cnt = _fold_oos_bucket_cnt[_fold_idx].get(_bk_j, 0)
+                        _fold_oos_bucket_cnt[_fold_idx][_bk_j] = _prev_cnt + 1
             if _diag:
                 _attr_dropped += _oos_dropped
                 _attr_sleeves_active.append(len(_oos_sleeve_sigs))
@@ -2089,6 +2161,82 @@ def _run_awf_simulation(
         prof_prep, prof_rank, prof_alloc, prof_eval,
         time.perf_counter() - t_start_total,
     )
+
+    # Steps G+J: per-fold bucket hit ratio + OOS vs fit edge comparison
+    if _l2_routing_mode == "bucket":
+        for _fi, (_active, _hit) in enumerate(_fold_bucket_hit):
+            if _active == 0:
+                continue
+            _hit_pct = _hit / max(_active, 1) * 100.0
+            logger.info(
+                "[L2-BUCKET-HIT] fold=%d active_bars=%d bars_with_hit=%d hit_pct=%.1f%%",
+                _fi, _active, _hit, _hit_pct,
+            )
+            if _hit_pct < 30.0:
+                logger.warning(
+                    "[L2-BUCKET-HIT] fold=%d low bucket coverage (%.1f%%)",
+                    _fi, _hit_pct,
+                )
+    if _l2_routing_mode == "bucket" and logger.isEnabledFor(logging.DEBUG):
+        _regime_names_local = ("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash")
+        for _fi in range(len(awf_folds)):
+            _fit_edges = bucket_edges_by_fold[_fi]
+            _oos_sum = _fold_oos_bucket_sum[_fi]
+            _oos_cnt = _fold_oos_bucket_cnt[_fi]
+            if not _oos_sum:
+                continue
+            _oos_edges: dict[tuple[int, str, str], float] = {}
+            for _bk, _s in _oos_sum.items():
+                _oos_edges[_bk] = _s / _oos_cnt[_bk]
+            _common = set(_fit_edges) & set(_oos_edges)
+            if not _common:
+                continue
+            _fit_vals = np.array([_fit_edges[_bk] for _bk in _common], dtype=np.float64)
+            _oos_vals = np.array([_oos_edges[_bk] for _bk in _common], dtype=np.float64)
+            _errors = _oos_vals - _fit_vals
+            _rmse = float(np.sqrt(np.mean(_errors ** 2)))
+            _mae = float(np.mean(np.abs(_errors)))
+            _bias = float(np.mean(_errors))
+            _corr = float(np.corrcoef(_fit_vals, _oos_vals)[0, 1]) if len(_common) >= 3 else 0.0
+            logger.debug(
+                "[L2-BUCKET-OOS] fold=%d n_common=%d rmse=%.2f mae=%.2f bias=%.2f corr=%.3f",
+                _fi, len(_common), _rmse, _mae, _bias, _corr,
+            )
+            _sorted_by_err = sorted(
+                _common, key=lambda _bk: abs(_oos_edges[_bk] - _fit_edges[_bk]), reverse=True
+            )
+            for _bk in _sorted_by_err[:15]:
+                _rl = _regime_names_local[_bk[0]] if 0 <= _bk[0] < 6 else f"unknown({_bk[0]})"
+                _err = _oos_edges[_bk] - _fit_edges[_bk]
+                _n_bucket = _oos_cnt[_bk]
+                logger.debug(
+                    "[L2-BUCKET-OOS-DETAIL] fold=%d regime=%s(%d) family=%s tf=%s "
+                    "fit=%.1fbps oos=%.1fbps err=%.1fbps n=%d",
+                    _fi, _rl, _bk[0], _bk[1], _bk[2],
+                    _fit_edges[_bk], _oos_edges[_bk], _err, _n_bucket,
+                )
+            _underfit = sorted(_common, key=lambda _bk: _oos_edges[_bk] - _fit_edges[_bk], reverse=True)[:5]
+            _overfit = sorted(_common, key=lambda _bk: _oos_edges[_bk] - _fit_edges[_bk])[:5]
+            for _bk in _underfit:
+                _rl = _regime_names_local[_bk[0]] if 0 <= _bk[0] < 6 else f"unknown({_bk[0]})"
+                _err = _oos_edges[_bk] - _fit_edges[_bk]
+                _n_bucket = _oos_cnt[_bk]
+                logger.debug(
+                    "[L2-BUCKET-UNDERFIT] fold=%d regime=%s(%d) family=%s tf=%s "
+                    "fit=%.1fbps oos=%.1fbps surplus=%.1fbps n=%d",
+                    _fi, _rl, _bk[0], _bk[1], _bk[2],
+                    _fit_edges[_bk], _oos_edges[_bk], _err, _n_bucket,
+                )
+            for _bk in _overfit:
+                _rl = _regime_names_local[_bk[0]] if 0 <= _bk[0] < 6 else f"unknown({_bk[0]})"
+                _err = _oos_edges[_bk] - _fit_edges[_bk]
+                _n_bucket = _oos_cnt[_bk]
+                logger.debug(
+                    "[L2-BUCKET-OVERFIT] fold=%d regime=%s(%d) family=%s tf=%s "
+                    "fit=%.1fbps oos=%.1fbps deficit=%.1fbps n=%d",
+                    _fi, _rl, _bk[0], _bk[1], _bk[2],
+                    _fit_edges[_bk], _oos_edges[_bk], _err, _n_bucket,
+                )
 
     return _AwfSimResult(
         rets_hybrid=all_rets_hybrid,
