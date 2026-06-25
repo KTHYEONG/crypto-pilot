@@ -231,31 +231,33 @@ STRATEGY ENGINE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ● [STUDY] l2_study_4h_95de9c21278a | trials=200 | events=67063 | symbols=42
   ────────────────────────────────────────────────────────────────────────────
-[L2-OPT]: 100%|████████████████████████████████████████████████████| 200/200 [01:59<00:00,  1.68it/s, Best CAGR: 21.43% | Current: -4.46%]
-[L2-SELECTION] No feasible candidate found within fallback window (reason=cagr)
+ [OPT] Deleted existing study 'l2_study_4h_95de9c21278a' for a fresh start.
+[L2-OPT]: 100%|████████████████████████████████████████████████| 200/200 [02:01<00:00,  1.65it/s, Best CAGR: -152.64% | Current: -201.11%]
+[L2-SELECTION] feasible한 trials가 없음 -> fallback
   ● [FINAL SIMULATION]
-[L2-DEPLOY] L*=1.0000 binding=mdd | CAGR=-0.0364 MDD=0.2440 CVaR95=0.0156 RiskUtil=0.813
+[L2-DEPLOY] L*=1.0000 binding=mdd | CAGR=-0.1649 MDD=0.2863 CVaR95=0.0130 RiskUtil=0.954
+[L2-DEPLOY] realization gap: risk_util=0.954 expected≈0.700 (결함 #1/#2 재발 의심 — vol-targeting 또는 gross 제약 확인 요망)
 ● [LAYER 2 PORTFOLIO SCORECARD] (2024-12-22 ~ 2025-09-30)
 ──────────────────────────────────────────────────────────────────────────────
   STATUS  : ❌ BLOCKED (cagr)
 
-  ❌ [Growth    ] CAGR: -3.6% (>=30.0%) | PnL: -5.6% | Equity x0.94
-  ❌ [Efficiency] Sharpe: -0.076 (>=1.000) | Sortino: -0.105 (>=1.500) | Calmar: n/a(loss) (>=1.000)
-  ✅ [Risk      ] MDD: 24.4% (<=30.0%) | CVaR95: 1.6% (<=6.0%) | RiskUtil: 81.3%
-  ✅ [Robust    ] Fold: 66.7% (>=60.0%) | Trades: 273 (>=30) | Friction: 96.3%
-  ❌ [Uplift    ] Sharpe Uplift: +0.06 (>=+0.20)
-  ❌ [Integrity ] DSR: 0.404 (>=0.60) | PSR: 0.462 (diag)
-  [Diag     ] RelMDD: 1.04x | Turnover: 0.316
+  ❌ [Growth    ] CAGR: -16.5% (>=30.0%) | PnL: -24.3% | Equity x0.76
+  ❌ [Efficiency] Sharpe: -1.004 (>=1.000) | Sortino: -1.352 (>=1.500) | Calmar: n/a(loss) (>=1.000)
+  ✅ [Risk      ] MDD: 28.6% (<=30.0%) | CVaR95: 1.3% (<=6.0%) | RiskUtil: 95.4%
+  ❌ [Robust    ] Fold: 33.3% (>=60.0%) | Trades: 1138 (>=30) | Friction: 89.8%
+  ❌ [Uplift    ] Sharpe Uplift: +0.11 (>=+0.20)
+  ❌ [Integrity ] DSR: 0.000 (>=0.60) | PSR: 0.105 (diag)
+  [Diag     ] RelMDD: 0.93x | Turnover: 0.395
 ──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ✅ Sharpe:  0.716 | CAGR:   +10.1% | MDD:  14.7% | Status: PASS | Period: 2024-12-22 ~ 2025-03-26
-       Symbols: 24 [1000SHIBUSDT, AAVEUSDT, ADAUSDT, AXSUSDT, BCHUSDT, BNBUSDT, BTCUSDT, DOTUSDT, +16 more]
-  ├─ Fold #2 : ❌ Sharpe: -1.557 | CAGR:   -20.1% | MDD:  19.9% | Status: FAIL | Period: 2025-03-26 ~ 2025-06-28
-       Symbols: 20 [1000SHIBUSDT, ATOMUSDT, AXSUSDT, BCHUSDT, BNBUSDT, BTCUSDT, DOTUSDT, ENSUSDT, +12 more]
-  └─ Fold #3 : ✅ Sharpe:  0.265 | CAGR:    +1.8% | MDD:   7.9% | Status: PASS | Period: 2025-06-28 ~ 2025-09-30
-       Symbols: 20 [1000SHIBUSDT, AAVEUSDT, AXSUSDT, BCHUSDT, BNBUSDT, BTCUSDT, DOTUSDT, ETCUSDT, +12 more]
+  ├─ Fold #1 : ❌ Sharpe: -2.171 | CAGR:   -28.3% | MDD:  20.0% | Status: FAIL | Period: 2024-12-22 ~ 2025-03-26
+       Symbols: 37 [1000SHIBUSDT, AAVEUSDT, ADAUSDT, ARPAUSDT, ARUSDT, ATOMUSDT, AVAXUSDT, AXSUSDT, +29 more]
+  ├─ Fold #2 : ❌ Sharpe: -2.206 | CAGR:   -23.4% | MDD:  18.1% | Status: FAIL | Period: 2025-03-26 ~ 2025-06-28
+       Symbols: 34 [1000SHIBUSDT, AAVEUSDT, ADAUSDT, ARUSDT, ATOMUSDT, AVAXUSDT, AXSUSDT, BCHUSDT, +26 more]
+  └─ Fold #3 : ✅ Sharpe:  0.741 | CAGR:    +5.8% | MDD:   6.0% | Status: PASS | Period: 2025-06-28 ~ 2025-09-30
+       Symbols: 36 [1000SHIBUSDT, AAVEUSDT, ADAUSDT, API3USDT, ARUSDT, ATOMUSDT, AVAXUSDT, AXSUSDT, +28 more]
 
 ● [LAYER UNIVERSE AUDIT]
 ──────────────────────────────────────────────────────────────────────────────
@@ -265,4 +267,4 @@ STRATEGY ENGINE
 ──────────────────────────────────────────────────────────────────────────────
 
 >> LAYER 2: BLOCKED -> gate_passed=False
-!! FAIL: exit_code=1 reason=layer2_blocked:cagr
+!! FAIL: exit_code=1 reason=layer2_blocked:no_feasible_trials
