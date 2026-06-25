@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import cast
 
 import numpy as np
@@ -12,6 +13,8 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     Layer2AllocationConfig,
     Layer2GateEvaluation,
 )
+
+_logger = logging.getLogger(__name__)
 
 _DEFAULT_L2_CONFIG: Layer2AllocationConfig = Layer2AllocationConfig()
 
@@ -157,6 +160,26 @@ def evaluate_layer2_gate(
             promotion_passed = False
             promotion_blocker = blocker
             break
+
+    _logger.debug(
+        "[L2-GATE] promotion=%s blocker=%s | "
+        "cagr=%.4f(vs%.2f) sortino=%.4f(vs%.2f) sharpe=%.4f(vs%.2f) calmar=%.4f(vs%.2f) | "
+        "mdd=%.4f(vs%.2f) folds=%.2f(vs%.2f) trades=%d(vs%d) cost_drag=%.4f(vs%.2f) | "
+        "psr=%.4f(vs%.2f) uplift=%.4f(vs%.2f) cvar=%.4f(vs%.2f)",
+        promotion_passed,
+        promotion_blocker,
+        cagr_hybrid, config.l2_min_cagr,
+        sortino_hybrid, config.l2_min_sortino,
+        sharpe_hybrid, config.l2_min_sharpe_abs,
+        cagr_hybrid / (mdd_hybrid + 1e-9), config.l2_min_calmar,
+        mdd_hybrid, config.l2_max_mdd_abs,
+        fold_pass_ratio, config.l2_min_fold_pass_ratio,
+        trade_count, config.l2_min_trades,
+        cost_drag, config.l2_max_cost_drag_ratio,
+        psr_hybrid if psr_hybrid is not None else -1.0, config.l2_min_psr,
+        sharpe_hac_hybrid - sharpe_hac_baseline, config.l2_min_sharpe_uplift,
+        cvar_95_hybrid, config.l2_max_cvar_95,
+    )
 
     return Layer2GateEvaluation(
         optuna_constraint_values=cast(tuple[float, ...], optuna_constraint_values),

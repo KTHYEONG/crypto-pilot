@@ -154,7 +154,7 @@ class TestScenario3ExchangeCapBinding:
         fit_rets = rng.normal(2e-4, 5e-5, 3000).astype(np.float64)
 
         # Act
-        l_star, binding = calibrate_deployment_leverage(
+        l_star, binding, _ = calibrate_deployment_leverage(
             fit_rets=fit_rets,
             mdd_cap=0.30,
             cvar_cap=0.06,
@@ -180,7 +180,7 @@ class TestScenario3ExchangeCapBinding:
         fit_rets = rng.normal(2e-4, 5e-5, 3000).astype(np.float64)
 
         # Act
-        l_star, binding = calibrate_deployment_leverage(
+        l_star, binding, _ = calibrate_deployment_leverage(
             fit_rets=fit_rets,
             mdd_cap=0.30,
             cvar_cap=0.06,
@@ -234,11 +234,11 @@ class TestScenario4RiskUtilGate:
         mdd_margin = 0.30
 
         # Act
-        l_star, binding = calibrate_deployment_leverage(
+        l_star, binding, _ = calibrate_deployment_leverage(
             fit_rets=fit_rets,
-            mdd_cap=mdd_cap,
+            mdd_cap=0.30,
             cvar_cap=0.06,
-            mdd_margin=mdd_margin,
+            mdd_margin=0.30,
             cvar_margin=0.20,
             l_hard_cap=20.0,
             exchange_leverage_cap=None,
@@ -271,7 +271,7 @@ class TestScenario5EdgeCases:
         fit_rets = np.array([], dtype=np.float64)
 
         # Act
-        l_star, binding = calibrate_deployment_leverage(
+        l_star, binding, _ = calibrate_deployment_leverage(
             fit_rets=fit_rets,
             mdd_cap=0.30,
             cvar_cap=0.06,
@@ -292,7 +292,7 @@ class TestScenario5EdgeCases:
         fit_rets = np.array([0.001], dtype=np.float64)
 
         # Act
-        l_star, binding = calibrate_deployment_leverage(
+        l_star, binding, _ = calibrate_deployment_leverage(
             fit_rets=fit_rets,
             mdd_cap=0.30,
             cvar_cap=0.06,
@@ -381,7 +381,7 @@ class TestCalibrateLeverageBindingLogic:
         fit_rets = rng.normal(1e-4, 100e-4, 2190).astype(np.float64)
 
         # Act
-        l_star, binding = calibrate_deployment_leverage(
+        l_star, binding, _ = calibrate_deployment_leverage(
             fit_rets=fit_rets,
             mdd_cap=0.30,
             cvar_cap=0.06,
@@ -398,16 +398,16 @@ class TestCalibrateLeverageBindingLogic:
     def test_leverage_floor_at_one(self) -> None:
         """반환 L* ≥ 1.0 항상 보장.
 
-        Given: 어떤 입력이든.
+        Given: 음수 mu 수익률 (MDD 높음 → L*이 1.0으로 clip).
         When: calibrate_deployment_leverage.
-        Then: L* >= 1.0.
+        Then: L* ≥ 1.0 (l_floor 기본값).
         """
         # Arrange
         rng = np.random.default_rng(5)
         fit_rets = rng.normal(-1e-3, 50e-4, 500).astype(np.float64)  # 음수 mu
 
         # Act
-        l_star, _binding = calibrate_deployment_leverage(
+        l_star, _binding, _ = calibrate_deployment_leverage(
             fit_rets=fit_rets,
             mdd_cap=0.30,
             cvar_cap=0.06,
