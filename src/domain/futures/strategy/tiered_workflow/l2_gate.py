@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import cast
 
 import numpy as np
@@ -94,6 +95,7 @@ def evaluate_layer2_gate(
     Returns:
         Layer2GateEvaluation.
     """
+    _t_gate = time.perf_counter()
     # calmar = CAGR / MDD; mar_hybrid 이미 동일 계산이나 명시적 calmar 분리
     calmar_hybrid = float(cagr_hybrid) / (float(mdd_hybrid) + 1e-9)
     cost_drag = compute_cost_drag_ratio(fold_attributions) if fold_attributions else 0.0
@@ -179,6 +181,13 @@ def evaluate_layer2_gate(
         psr_hybrid if psr_hybrid is not None else -1.0, config.l2_min_psr,
         sharpe_hac_hybrid - sharpe_hac_baseline, config.l2_min_sharpe_uplift,
         cvar_95_hybrid, config.l2_max_cvar_95,
+    )
+
+    _logger.debug(
+        "[L2-GATE] evaluate took=%.4fs passed=%s reason=%s",
+        time.perf_counter() - _t_gate,
+        promotion_passed,
+        promotion_blocker or "OK",
     )
 
     return Layer2GateEvaluation(
