@@ -24,7 +24,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -109,9 +109,6 @@ if TYPE_CHECKING:
     from src.domain.futures.optimization.workflow import TieredContext
 
 _GLOBAL_L2_CTX: TieredContext | None = None
-_REGIME_NAMES_SHORT: dict[int, str] = {0: "bull_q", 1: "bull_v", 2: "bear_q", 3: "bear_v", 4: "trans", 5: "crash"}
-
-
 def _btc_index_if_present(symbols: tuple[str, ...]) -> int:
     for i, s in enumerate(symbols):
         if "BTC" in s.upper():
@@ -1147,7 +1144,6 @@ def _run_regime_evaluation_stage(
     # compute proxy C3/C4 from BTC bar-level returns (pre-signal)
     import dataclasses as _dc
 
-    from src.domain.futures.strategy.regime_evaluation import evaluate_regime_classifier_proxy
 
     btc_log_ret = np.zeros(aligned.datetimes.shape[0], dtype=np.float64)
     btc_close = aligned.close_2d
@@ -1317,28 +1313,56 @@ def _run_tiered_l2_study(
     # Precompute bucket realized edges (trial-param independent → 1회만 계산)
     from dataclasses import replace
 
-    from src.domain.futures.strategy.market_regime import compress_regime_codes, compute_market_regime_context
+    from src.domain.futures.strategy.market_regime import compute_market_regime_context
     from src.domain.futures.strategy.tiered_workflow.l2_meta import (
-        compute_bucket_realized_edges,
+        build_regime_routing_plan,
     )
-    _regime_code = compress_regime_codes(compute_market_regime_context(aligned=aligned).code_1d)
-    _bucket_edges_list: list[dict[tuple[int, str, str], float]] = []
-    for _fold in _awf_folds_l2:
-        if _fold.fit_start < _fold.oos_start:
-            _be = compute_bucket_realized_edges(
-                cache=l2_sim_cache, aligned=aligned,
-                fit_start=int(_fold.fit_start),
-                fit_end=int(_fold.oos_start),
-                regime_code_1d=_regime_code,
-                cost_bps=6.0, min_n=15, shrinkage=0.3,
-            )
-        else:
-            _be = {}
-        _bucket_edges_list.append(_be)
+    _fallback_mode = str(getattr(cfg, "l2_regime_fallback_mode", "pooled"))
+    if _fallback_mode not in {"pooled", "empty"}:
+        raise ValueError("l2_regime_fallback_mode must be one of pooled/empty")
+    _routing_plan = build_regime_routing_plan(
+        cache=l2_sim_cache,
+        aligned=aligned,
+        awf_folds=_awf_folds_l2,
+        raw_regime_code_1d=compute_market_regime_context(aligned=aligned).code_1d,
+        compression_enabled=bool(getattr(cfg, "l2_regime_compression_enabled", True)),
+        cost_bps=float(getattr(cfg, "l2_bucket_cost_bps", 6.0)),
+        min_n=int(getattr(cfg, "l2_bucket_min_n", 15)),
+        shrinkage=float(getattr(cfg, "l2_bucket_shrinkage", 0.3)),
+        proof_enabled=bool(getattr(cfg, "l2_regime_proof_enabled", True)),
+        proof_nw_tstat_threshold=float(getattr(cfg, "l2_regime_proof_nw_tstat", 1.5)),
+        proof_fold_pass_ratio_threshold=float(getattr(cfg, "l2_regime_proof_fold_pass_ratio", 0.60)),
+        fallback_mode=cast(Literal["pooled", "empty"], _fallback_mode),
+    )
     l2_sim_cache = replace(l2_sim_cache,
-        bucket_edges_by_fold=tuple(_bucket_edges_list),
-        regime_code_1d=_regime_code,
+        bucket_edges_by_fold=_routing_plan.effective_bucket_edges_by_fold,
+        pooled_edges_by_fold=_routing_plan.pooled_edges_by_fold,
+        regime_code_1d=_routing_plan.effective_regime_code_1d,
+        regime_routing_diagnostics=_routing_plan.diagnostics,
     )
+    # Source contract for diagnostics tests:
+    # [REGIME-L2] active_states=3 compression=True path=pooled_fallback proof=False ...
+    _logger.info(
+        "[REGIME-L2] active_states=%d compression=%s path=%s proof=%s lift=%.2f t=%.2f fold_pass=%.2f",
+        _routing_plan.diagnostics.active_state_count,
+        _routing_plan.diagnostics.compression_enabled,
+        _routing_plan.diagnostics.conditioning_path,
+        _routing_plan.diagnostics.proof_passed,
+        _routing_plan.diagnostics.mean_lift_bps,
+        _routing_plan.diagnostics.nw_tstat,
+        _routing_plan.diagnostics.fold_pass_ratio,
+    )
+    if _logger.isEnabledFor(logging.DEBUG) and not _routing_plan.diagnostics.proof_passed:
+        _logger.debug(
+            "[REGIME-L2-DETAIL] pooled_fallback reason=proof_failed effective_states=%d",
+            _routing_plan.diagnostics.active_state_count,
+        )
+    if not _routing_plan.diagnostics.proof_passed:
+        _logger.warning(
+            "[REGIME-L2] proof_failed path=%s effective_states=%d",
+            _routing_plan.diagnostics.conditioning_path,
+            _routing_plan.diagnostics.active_state_count,
+        )
 
     ctx = TieredContext(
         labeled_events=pd.DataFrame(),
@@ -1939,62 +1963,38 @@ def _run_strategy_stage(
                 )
                 _regime_ctx = _compute_regime_ctx(aligned=aligned_tiered)
                 _regime_code = _regime_ctx.code_1d
-                _unique_codes, _counts_codes = np.unique(_regime_code, return_counts=True)
-                _n_total = _regime_code.shape[0]
-                _occ_str = "; ".join(
-                    f"{_REGIME_NAMES_SHORT.get(int(r), f'unk{r}'):s}={float(c)/_n_total*100:.1f}%"
-                    for r, c in sorted(zip(_unique_codes.tolist(), _counts_codes.tolist(), strict=True))
-                )
-                _edge_floor = getattr(tiered_cfg, "l2_bucket_edge_floor_bps", 0.0)
+                from src.domain.futures.strategy.market_regime import compress_regime_codes
 
-                _btc_idx = _btc_index_if_present(aligned_tiered.symbols)
-                _btc_log_ret = np.zeros(_n_total, dtype=np.float64)
-                if _btc_idx >= 0:
-                    _raw_close = np.maximum(aligned_tiered.close_2d[:, _btc_idx], 1e-12)
-                    _btc_log_ret[1:] = np.diff(np.log(_raw_close))
-                _split = _n_total // 2
-                _is_mask_bar = np.zeros(_n_total, dtype=bool)
-                _is_mask_bar[:_split] = True
-                _oos_mask_bar = np.zeros(_n_total, dtype=bool)
-                _oos_mask_bar[_split:] = True
-                _c3p_pval, _c3p_flip, _c4p_rho, _ = evaluate_regime_classifier_proxy(
-                    all_codes_1d=_regime_code,
-                    market_returns_1d=_btc_log_ret * 1e4,
-                    is_bar_mask=_is_mask_bar,
-                    oos_bar_mask=_oos_mask_bar,
+                _effective_regime_code = (
+                    compress_regime_codes(_regime_code)
+                    if bool(getattr(tiered_cfg, "l2_regime_compression_enabled", True))
+                    else _regime_code.copy()
                 )
-
-                _c2_macro_dwell, _c2_macro_trans = _compute_c2_macro(_regime_code)
-                _c2_ok = _c2_macro_dwell >= 12.0
-                _c3_ok = not _c3p_flip and (np.isnan(_c3p_pval) or _c3p_pval <= 0.10)
-                _c4_ok = not np.isnan(_c4p_rho) and abs(_c4p_rho) >= 0.10
-                _c5_trans_occ = float(_counts_codes[_unique_codes == 4][0]) / _n_total if 4 in _unique_codes else 0.0
-                _c5_ok = _c5_trans_occ <= 0.40
-                _all_ok = _c2_ok and _c3_ok and _c4_ok and _c5_ok
+                _unique_codes, _counts_codes = np.unique(_effective_regime_code, return_counts=True)
+                _n_total = _effective_regime_code.shape[0]
+                _state_pct = {
+                    int(r): float(c) / _n_total * 100.0
+                    for r, c in zip(_unique_codes.tolist(), _counts_codes.tolist(), strict=True)
+                }
+                _state_dist = (
+                    f"bull={_state_pct.get(0, 0.0):.1f}% "
+                    f"bear={_state_pct.get(1, 0.0):.1f}% "
+                    f"crisis={_state_pct.get(2, 0.0):.1f}%"
+                )
+                _state_status = "🟢 stable" if _compute_c2_macro(_effective_regime_code)[0] >= 12.0 else "🟠 unstable"
 
                 _logger.info(
-                    "\n● [REGIME] mode=%s floor=%.1fbps | %s | "
-                    "C2:dwell=%.1f%s C3:pval=%.3f%s C4:rho=%.2f%s C5:trans=%.1f%%%s",
-                    "bucket",
-                    _edge_floor,
-                    _occ_str,
-                    _c2_macro_dwell, "✅" if _c2_ok else "❌",
-                    _c3p_pval if not np.isnan(_c3p_pval) else -1.0, "✅" if _c3_ok else "❌",
-                    _c4p_rho if not np.isnan(_c4p_rho) else -99.0, "✅" if _c4_ok else "❌",
-                    _c5_trans_occ * 100.0, "✅" if _c5_ok else "❌",
+                    "[REGIME]\n"
+                    "metric        | value\n"
+                    "compression   | %s\n"
+                    "states        | 3\n"
+                    "status        | %s\n"
+                    "distribution  | %s\n"
+                    "note          | L2 verdict is reported separately in [REGIME-L2]",
+                    "on" if bool(getattr(tiered_cfg, "l2_regime_compression_enabled", True)) else "off",
+                    _state_status,
+                    _state_dist,
                 )
-
-                if _logger.isEnabledFor(logging.DEBUG):
-                    _logger.debug("[REGIME-DETAIL] C2 macro_dwell=%.1f macro_trans=%.3f", _c2_macro_dwell, _c2_macro_trans)  # noqa: E501
-                    _logger.debug("[REGIME-DETAIL] C3 proxy_pval=%.4f sign_flip=%s", _c3p_pval, _c3p_flip)
-                    _logger.debug("[REGIME-DETAIL] C4 proxy_rho=%.4f", _c4p_rho)
-                    _logger.debug("[REGIME-DETAIL] C5 transition_occupancy=%.1f%% all_regimes=%s", _c5_trans_occ * 100, _occ_str)  # noqa: E501
-
-                if not _all_ok:
-                    _logger.warning(
-                        "[REGIME] 품질 검사 일부 실패 — edge_floor=%.1fbps로 bucket routing에 noise 포함 가능",
-                        _edge_floor,
-                    )
 
             # ── Step B: L2 Optimization Header ──────────────────────────────
             _logger.info(format_layer_header(2, "OPTUNA TUNING"))

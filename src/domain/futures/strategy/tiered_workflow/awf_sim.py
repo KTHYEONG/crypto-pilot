@@ -1572,6 +1572,7 @@ def _run_awf_simulation(
     _l2_routing_mode = str(getattr(config, "l2_routing_mode", "bucket"))
     _regime_code_1d: NDArray[np.int8] = np.zeros(aligned.close_2d.shape[0], dtype=np.int8)
     bucket_edges_by_fold: list[dict[tuple[int, str, str], float]] = []
+    _routing_diag = cache.regime_routing_diagnostics
     if _l2_routing_mode == "bucket":
         from src.domain.futures.strategy.market_regime import compute_market_regime_context
         if cache.regime_code_1d is not None:
@@ -1617,6 +1618,15 @@ def _run_awf_simulation(
                     "[L2-REGIME-OCC] regime=%d count=%d pct=%.1f%% total=%d",
                     _r, _c, _pct, _n_total_regime,
                 )
+            if _routing_diag is not None:
+                logger.debug(
+                    "[L2-REGIME-DIAG] active_states=%d path=%s proof=%s hit_pct=%s js=%s",
+                    _routing_diag.active_state_count,
+                    _routing_diag.conditioning_path,
+                    _routing_diag.proof_passed,
+                    ",".join(f"{v:.1f}" for v in _routing_diag.bucket_hit_pct_by_fold),
+                    ",".join(f"{v:.4f}" for v in _routing_diag.js_divergence_by_fold),
+                )
     else:
         bucket_edges_by_fold = [{} for _ in awf_folds]
 
@@ -1624,11 +1634,15 @@ def _run_awf_simulation(
 
     # Step A: per-fold bucket edge DEBUG logging
     if _l2_routing_mode == "bucket" and logger.isEnabledFor(logging.DEBUG):
-        _regime_names_local = ("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash")
+        _regime_names_local = (
+            _routing_diag.active_state_names
+            if _routing_diag is not None
+            else ("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash")
+        )
         for _bf_idx, _bf_edges in enumerate(bucket_edges_by_fold):
             logger.debug("[L2-BUCKET-MAP] fold=%d n_buckets=%d", _bf_idx, len(_bf_edges))
             for (_br, _bfam, _btf), _bval in sorted(_bf_edges.items(), key=lambda x: -x[1]):
-                _rl = _regime_names_local[_br] if 0 <= _br < 6 else f"unknown({_br})"
+                _rl = _regime_names_local[_br] if 0 <= _br < len(_regime_names_local) else f"unknown({_br})"
                 logger.debug(
                     "[L2-BUCKET-EDGE] fold=%d regime=%s(%d) family=%s tf=%s edge=%.2f_bps",
                     _bf_idx, _rl, _br, _bfam, _btf, _bval,
@@ -1636,6 +1650,11 @@ def _run_awf_simulation(
 
     # Step H: per-fold regime distribution stability (fit vs OOS)
     if _l2_routing_mode == "bucket":
+        _state_count = (
+            _routing_diag.active_state_count
+            if _routing_diag is not None
+            else 6
+        )
         for _fi, _fold in enumerate(awf_folds):
             _fit_slice = _regime_code_1d[int(_fold.fit_start):int(_fold.oos_start)]
             _oos_slice = _regime_code_1d[int(_fold.oos_start):int(_fold.oos_end)]
@@ -1643,12 +1662,14 @@ def _run_awf_simulation(
                 continue
             _fit_uniq, _fit_counts = np.unique(_fit_slice, return_counts=True)
             _oos_uniq, _oos_counts = np.unique(_oos_slice, return_counts=True)
-            _fit_freq = np.zeros(6, dtype=np.float64)
-            _oos_freq = np.zeros(6, dtype=np.float64)
+            _fit_freq = np.zeros(_state_count, dtype=np.float64)
+            _oos_freq = np.zeros(_state_count, dtype=np.float64)
             for _r, _c in zip(_fit_uniq.tolist(), _fit_counts.tolist(), strict=True):
-                _fit_freq[int(_r)] = _c / len(_fit_slice)
+                if 0 <= int(_r) < _state_count:
+                    _fit_freq[int(_r)] = _c / len(_fit_slice)
             for _r, _c in zip(_oos_uniq.tolist(), _oos_counts.tolist(), strict=True):
-                _oos_freq[int(_r)] = _c / len(_oos_slice)
+                if 0 <= int(_r) < _state_count:
+                    _oos_freq[int(_r)] = _c / len(_oos_slice)
             _m = (_fit_freq + _oos_freq) / 2.0
             _js = 0.0
             for _p, _q in zip(_fit_freq, _m, strict=True):
@@ -1765,8 +1786,16 @@ def _run_awf_simulation(
                     _after_filter_count = len(_oos_sleeve_sigs)
                     _dropped_by_bucket = _before_filter_count - _after_filter_count
                     if _dropped_by_bucket > 0 and logger.isEnabledFor(logging.DEBUG) and t % 100 == 0:
-                        _regime_names_local = ("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash")  # noqa: E501
-                        _rl = _regime_names_local[_regime_now] if 0 <= _regime_now < 6 else f"unknown({_regime_now})"
+                        _regime_names_local = (
+                            _routing_diag.active_state_names
+                            if _routing_diag is not None
+                            else ("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash")
+                        )
+                        _rl = (
+                            _regime_names_local[_regime_now]
+                            if 0 <= _regime_now < len(_regime_names_local)
+                            else f"unknown({_regime_now})"
+                        )
                         logger.debug(
                             "[L2-BUCKET-FILTER] t=%d fold=%d regime=%s(%d) "
                             "sleeves_before=%d after=%d dropped=%d",
@@ -2252,7 +2281,11 @@ def _run_awf_simulation(
                         _fi, _hit_pct,
                     )
     if _l2_routing_mode == "bucket" and logger.isEnabledFor(logging.DEBUG):
-        _regime_names_local = ("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash")
+        _regime_names_local = (
+            _routing_diag.active_state_names
+            if _routing_diag is not None
+            else ("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash")
+        )
         for _fi in range(len(awf_folds)):
             _fit_edges = bucket_edges_by_fold[_fi]
             _oos_sum = _fold_oos_bucket_sum[_fi]
