@@ -58,11 +58,12 @@ def test_run_l2_awf_cache_timing_log(caplog: pytest.LogCaptureFixture) -> None:
         )
 
     # Validate timing log presence
-    assert any("[perf-tiered] build_l2_simulation_cache took" in rec.message for rec in caplog.records)
+    assert any("[PERF] l2_build_sim_cache took" in rec.message for rec in caplog.records)
+    assert any("[MEM]" in rec.message and "rss=" in rec.message for rec in caplog.records)
 
 
-def test_run_tiered_pipeline_l2_prediction_timing_log(caplog: pytest.LogCaptureFixture) -> None:
-    """Verify that predict_layer1_signals timing is logged during run_tiered_pipeline L2 phase."""
+def test_run_tiered_pipeline_l2_timing_and_mem_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """Verify that predict_layer1_signals timing and RSS are logged during run_tiered_pipeline L2 phase."""
     caplog.set_level(logging.DEBUG)
 
     labeled_events = MagicMock()
@@ -101,11 +102,98 @@ def test_run_tiered_pipeline_l2_prediction_timing_log(caplog: pytest.LogCaptureF
             l1_params={},
             l2_params=l2_params,
             caps=caps,
-            tf="4h",
-            verbose=False,
-            l1_result_override=l1_result,
             target_phase="l2",
+            l1_result_override=l1_result,
+            verbose=False,
         )
 
-    # Validate timing log presence
-    assert any("[perf-tiered] predict_layer1_signals took" in rec.message for rec in caplog.records)
+    # Validate timing log presence and format
+    messages = [rec.message for rec in caplog.records]
+    assert any("[PERF] predict_layer1_signals(L2)" in m for m in messages)
+    assert any("[PERF] run_tiered_pipeline_l2_total took" in m for m in messages)
+    assert any("[MEM] stage=l2_entry rss=" in m for m in messages)
+    assert any("[MEM] stage=l2_awf_complete rss=" in m for m in messages)
+
+
+def test_l2_awf_fold_build_logged_on_empty_fallback(caplog: pytest.LogCaptureFixture) -> None:
+    """Verify that awf_fold_build log is present even when build_l2_simulation_folds returns empty fallback."""
+    caplog.set_level(logging.DEBUG)
+
+    labeled_events = MagicMock()
+    aligned = MagicMock()
+    aligned.datetimes = np.array([f"2024-01-{i:02d}" for i in range(1, 11)], dtype="datetime64[ns]")
+    aligned.symbols = ("BTC",)
+
+    window = MagicMock()
+    window.l2_start = "2024-01-01"
+    window.holdout_start = "2024-01-05"
+    window.end_date_value = "2024-01-10"
+
+    cfg = MagicMock()
+
+    l1_result = MagicMock()
+    l1_result.gate_passed = True
+    l1_result.inference_artifact = MagicMock()
+    l1_result.symbol_lifecycle = None
+
+    l2_params = {"l2_deploy_leverage": 1.0}
+    caps = PortfolioCaps()
+
+    with patch("src.domain.futures.strategy.tiered_workflow.pipeline.predict_layer1_signals") as mock_pred, \
+         patch("src.domain.futures.strategy.tiered_workflow.build_l2_simulation_folds") as mock_folds, \
+         patch("src.domain.futures.strategy.tiered_workflow.run_l2_awf") as mock_l2:
+
+        mock_pred.return_value = MagicMock()
+        mock_folds.return_value = ()  # Force fallback
+        mock_l2.return_value = MagicMock()
+
+        run_tiered_pipeline(
+            labeled_events=labeled_events,
+            aligned=aligned,
+            window=window,
+            cfg=cfg,
+            l1_params={},
+            l2_params=l2_params,
+            caps=caps,
+            target_phase="l2",
+            l1_result_override=l1_result,
+            verbose=False,
+        )
+
+    messages = [rec.message for rec in caplog.records]
+    assert any("[L2] awf_fold_build took=" in m for m in messages)
+    assert any("[L2] AWF window: L2_start_bar=" in m for m in messages)
+
+
+def test_l2_gate_evaluate_timing_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """Verify evaluate_layer2_gate logs timing and evaluation result."""
+    caplog.set_level(logging.DEBUG)
+
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
+    from src.domain.futures.strategy.tiered_workflow.l2_gate import evaluate_layer2_gate
+
+    evaluate_layer2_gate(
+        deployment_failed=False,
+        support_leak_count=0,
+        cagr_hybrid=0.35,
+        sharpe_hybrid=1.8,
+        sharpe_hac_hybrid=1.7,
+        sharpe_hac_baseline=1.2,
+        sortino_hybrid=2.0,
+        mar_hybrid=1.2,
+        mdd_hybrid=0.15,
+        cvar_95_hybrid=0.04,
+        fold_pass_ratio=0.7,
+        active_block_count=10,
+        friction_pass_pct=0.8,
+        trade_count=100,
+        growth_lcb_hybrid=0.1,
+        growth_lcb_baseline=0.05,
+        dsr_hybrid=0.85,
+        config=Layer2AllocationConfig(),
+    )
+
+    messages = [rec.message for rec in caplog.records]
+    assert any("[L2-GATE] evaluate took=" in m for m in messages)
+    assert any("passed=" in m for m in messages)
+

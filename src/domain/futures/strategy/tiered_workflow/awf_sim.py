@@ -1138,8 +1138,10 @@ def _combine_sleeve_signals_to_symbol(
     Time: O(k) per call.
     """
     by_sym: dict[str, list[SymbolSignal]] = {}
-    for (sym, _strat), sig in sleeve_signals.items():
+    sleeve_keys_by_sym: dict[str, list[tuple[str, str]]] = {}
+    for (sym, strat), sig in sleeve_signals.items():
         by_sym.setdefault(sym, []).append(sig)
+        sleeve_keys_by_sym.setdefault(sym, []).append((sym, strat))
 
     out: dict[str, SymbolSignal] = {}
     friction_by_sym: dict[str, bool] = {}
@@ -1175,12 +1177,11 @@ def _combine_sleeve_signals_to_symbol(
         if sleeve_edges is not None:
             gross_pb_list = []
             cost_pb_list = []
-            for (_sym, _strat) in sleeve_signals:
-                if _sym == sym:
-                    _e = sleeve_edges.get((_sym, _strat))
-                    if _e is not None:
-                        gross_pb_list.append(_e[0])
-                        cost_pb_list.append(_e[1])
+            for key in sleeve_keys_by_sym.get(sym, []):
+                _e = sleeve_edges.get(key)
+                if _e is not None:
+                    gross_pb_list.append(_e[0])
+                    cost_pb_list.append(_e[1])
             if gross_pb_list:
                 gross_arr = np.array(gross_pb_list, dtype=np.float64)
                 cost_arr = np.array(cost_pb_list, dtype=np.float64)

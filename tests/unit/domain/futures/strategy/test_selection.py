@@ -34,6 +34,8 @@ class TestLayer2Selection(unittest.TestCase):
         self.signal_batch = self._make_signal_batch()
         self.aligned = MagicMock()
         self.aligned.datetimes = np.array(["2026-06-15T00:00:00"], dtype="datetime64[ns]")
+        self.aligned.close_2d = np.ones((100, 1))
+        self.aligned.symbols = ["BTCUSDT"]
         self.awf_folds = (MagicMock(),)
         self.caps = MagicMock()
 
@@ -645,7 +647,7 @@ class TestLayer2Selection(unittest.TestCase):
                 block_metrics=(MagicMock(), MagicMock(), MagicMock()),
                 returns_hybrid=(0.01, 0.02),
                 returns_baseline=(0.005, 0.01),
-                sharpe_hybrid=2.0,
+                sharpe_hybrid=2.1,
                 sharpe_hac_baseline_ew=1.0,
                 recent_fold_passed=True,
                 recent_fold_sharpe=0.5,
@@ -662,3 +664,153 @@ class TestLayer2Selection(unittest.TestCase):
         )
 
         assert res.best_trial_number == 22
+
+    @patch("src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache")
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
+    def test_select_layer2_champion_with_prebuilt_cache(
+        self, mock_eval: MagicMock, mock_build_cache: MagicMock
+    ) -> None:
+        """prebuilt_cache가 제공되면 build_l2_simulation_cache를 호출하지 않고 전달된 캐시를 사용한다."""
+        study = MagicMock()
+        trial = MagicMock()
+        trial.number = 22
+        trial.state = optuna.trial.TrialState.COMPLETE
+        trial.value = 0.5
+        trial.user_attrs = {
+            "l2_block_log_growth_signature": [0.02] * 8,
+            "sharpe_hac_hybrid": 1.5,
+            "cagr_hybrid": 0.40,
+            "growth_lcb_hybrid": 0.20,
+            "mdd_hybrid": 0.08,
+            "l2_constraint_values": (-1.0,) * 9,
+        }
+        trial.params = {"param1": 123}
+        study.trials = [trial]
+
+        mock_eval.return_value = Layer2TrialEvaluation(
+            objective_value=0.20,
+            constraint_values=(-1.0,) * 9,
+            cagr_hybrid=0.40,
+            cagr_baseline=0.10,
+            growth_lcb_hybrid=0.20,
+            growth_lcb_baseline=0.08,
+            sharpe_hac_hybrid=2.0,
+            sharpe_hac_baseline=1.0,
+            psr_hybrid=0.95,
+            mdd_hybrid=0.08,
+            cvar_95_hybrid=0.02,
+            fold_pass_ratio=0.8,
+            break_even_pass_pct=1.0,
+            sortino_hybrid=1.9,
+            trade_count=120,
+            average_gross_exposure=1.0,
+            cap_saturation_ratio=0.1,
+            total_cost_bps=20.0,
+            block_metrics=(MagicMock(), MagicMock(), MagicMock()),
+            returns_hybrid=(0.01, 0.02),
+            returns_baseline=(0.005, 0.01),
+            sharpe_hybrid=2.1,
+            sharpe_hac_baseline_ew=1.0,
+            recent_fold_passed=True,
+            recent_fold_sharpe=0.5,
+        )
+
+        dummy_cache = MagicMock()
+        res = select_layer2_champion(
+            study=study,
+            tf=self.tf,
+            signal_batch=self.signal_batch,
+            aligned=self.aligned,
+            awf_folds=self.awf_folds,
+            caps=self.caps,
+            prebuilt_cache=dummy_cache,
+        )
+
+        # build_l2_simulation_cache가 호출되지 않았어야 함
+        mock_build_cache.assert_not_called()
+        # evaluate_l2_trial에 dummy_cache가 전달되었어야 함
+        mock_eval.assert_called_once()
+        assert mock_eval.call_args[1]["cache"] == dummy_cache
+        assert res.best_trial_number == trial.number
+        assert res.sim_cache == dummy_cache
+
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
+    def test_select_layer2_champion_parallel_determinism(self, mock_eval: MagicMock) -> None:
+        """ThreadPoolExecutor 병렬 실행 중에도 순서가 유지되고 올바른 챔피언이 선택된다."""
+        study = MagicMock()
+        
+        # 3개의 완성된 trial 생성
+        trials = []
+        for idx, obj in [(1, 0.3), (2, 0.5), (3, 0.4)]:
+            t = MagicMock()
+            t.number = idx
+            t.state = optuna.trial.TrialState.COMPLETE
+            t.value = obj
+            t.user_attrs = {
+                "l2_block_log_growth_signature": [0.02 * idx] * 8,
+                "sharpe_hac_hybrid": 1.5,
+                "cagr_hybrid": obj,
+                "growth_lcb_hybrid": obj * 0.5,
+                "mdd_hybrid": 0.08,
+                "l2_constraint_values": (-1.0,) * 9,
+            }
+            # k_rank를 각각 2, 3, 4로 다르게 매핑하여 식별
+            t.params = {"k_rank": idx + 1}
+            trials.append(t)
+            
+        study.trials = trials
+
+        # k_rank에 매핑되는 평가 결과 생성
+        eval_dict = {}
+        for idx, obj in [(1, 0.3), (2, 0.5), (3, 0.4)]:
+            eval_dict[idx + 1] = Layer2TrialEvaluation(
+                objective_value=obj * 0.5,
+                constraint_values=(-1.0,) * 9,
+                cagr_hybrid=obj,
+                cagr_baseline=0.10,
+                growth_lcb_hybrid=obj * 0.5,
+                growth_lcb_baseline=0.08,
+                sharpe_hac_hybrid=2.0,
+                sharpe_hac_baseline=1.0,
+                psr_hybrid=0.95,
+                mdd_hybrid=0.08,
+                cvar_95_hybrid=0.02,
+                fold_pass_ratio=0.8,
+                break_even_pass_pct=1.0,
+                sortino_hybrid=1.9,
+                trade_count=120,
+                average_gross_exposure=1.0,
+                cap_saturation_ratio=0.1,
+                total_cost_bps=20.0,
+                block_metrics=(MagicMock(), MagicMock(), MagicMock()),
+                returns_hybrid=(0.01, 0.02),
+                returns_baseline=(0.005, 0.01),
+                sharpe_hybrid=2.1,
+                sharpe_hac_baseline_ew=1.0,
+                recent_fold_passed=True,
+                recent_fold_sharpe=0.5,
+            )
+
+        # thread-safe하게 k_rank를 통해 평가 결과를 리턴하는 side_effect 함수 정의
+        def _thread_safe_eval(*args: object, **kwargs: object) -> object:
+            cfg = kwargs.get("config")
+            assert cfg is not None
+            k_rank_val = getattr(cfg, "k_rank")
+            return eval_dict[k_rank_val]
+
+        mock_eval.side_effect = _thread_safe_eval
+
+        dummy_cache = MagicMock()
+        res = select_layer2_champion(
+            study=study,
+            tf=self.tf,
+            signal_batch=self.signal_batch,
+            aligned=self.aligned,
+            awf_folds=self.awf_folds,
+            caps=self.caps,
+            prebuilt_cache=dummy_cache,
+        )
+
+        # value가 0.5로 가장 높은 Trial #2가 챔피언이어야 함
+        assert res.best_trial_number == 2
+        assert res.sim_cache == dummy_cache

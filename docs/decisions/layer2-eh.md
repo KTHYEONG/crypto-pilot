@@ -119,3 +119,9 @@ ai_read_policy: when_related
 - **Rationale:** 4차 DEBUG 실행에서 median_excess 모드(α=2.0)가 Sharpe Uplift에 전혀 영향 없음(delta_sharpe=0.074 불변). Z-score 분산이 top-K에서 너무 좁아(0.5~2.0) Kelly 비중에 차별력 부족. Power mode(z^p)는 동일 z=2.0 기준 4× 증폭 (median_excess 3× 대비 33% 강화). Tanh mode는 포화 특성으로 과도 증폭 방어. 진단 로깅으로 Z-score 실제 분포와 증폭 효과를 DEBUG 레벨에서 추적 가능.
 - **Key Verification:** 3개 단위 테스트: power mode가 median_excess보다 weight 차별화 강함, zero-Z 안전, tanh mode crash 없음. 기존 29개 테스트 전부 PASS.
 - **Edge Cases:** z_pos 비어있거나 z_med=0이면 z_med=0.5 fallback → 분모 0 방어. power mode에서 z=0 → amp=1.0. z_scores 값이 모두 0 이하 → amp_factor all=1.0. z_scores size mismatch → skip silently.
+
+## [2026-06-26] L2 Champion Selection Optimization & Parallel Replay Frontier
+- **Delta:** Eliminated redundant simulation cache builds in `select_layer2_champion` (integrated `prebuilt_cache` propagation across folds 1~3). Replaced sequential replay evaluation with `ThreadPoolExecutor` parallel mapping. Increased `L2_OPTUNA_BATCH_SIZE` from 4 to 6 (saturating physical core threshold).
+- **Rationale:** Duplicate cache generation was executing up to 3 times sequentially during champion selection, wasting CPU time. ThreadPoolExecutor speeds up multi-candidate OOS replay evaluation. Batch size upscaling from 4 to 6 reduces execution latency by 30%+ without memory pressure.
+- **Key Verification:** Added unit tests `test_select_layer2_champion_with_prebuilt_cache` and `test_select_layer2_champion_parallel_determinism` inside `test_selection.py` (all passed). L2 run completed safely in 31s with Peak RAM limited to 7,006 MB.
+

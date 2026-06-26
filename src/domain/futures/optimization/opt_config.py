@@ -70,7 +70,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Tiered L2 AWF Optuna 탐색 trial 수 (Phase D와 별도)
     "L2_OPTUNA_TRIALS": 200,
     # L2 Optuna 병렬 최적화 배치 사이즈 (1 이하는 순차 실행)
-    "L2_OPTUNA_BATCH_SIZE": 4,
+    "L2_OPTUNA_BATCH_SIZE": 6,
     # Universal Cross-Sectional Alpha Miner Settings
     "FUTURES_ML_ALPHA_POPULATION": 1500,
     "FUTURES_ALPHA_LONG_BIAS": 2.0,
