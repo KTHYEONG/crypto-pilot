@@ -37,7 +37,7 @@ STRATEGY ENGINE
   ├─ Symbols : 52/57 Admitted
   └─ Details : Base 57 | Dropped 5 (late_start: 5)
 🧬 [L1: MULTI-TF PANEL INJECTION]
-  └─ Active : [12h] Proj=14 Syms=52 | [6h] Proj=13 Syms=52 | [8h] Proj=13 Syms=52
+  └─ Active : [12h] Proj=14 Syms=52 | [8h] Proj=13 Syms=52 | [6h] Proj=13 Syms=52
 
 ● [DATA-INTEGRITY AUDIT]
 ──────────────────────────────────────────────────────────────────────────────
@@ -235,32 +235,33 @@ STRATEGY ENGINE
   ● [STUDY] l2_study_4h_95de9c21278a | trials=200 | events=67063 | symbols=42
   ────────────────────────────────────────────────────────────────────────────
  [OPT] Deleted existing study 'l2_study_4h_95de9c21278a' for a fresh start.
-[L2-OPT]: 100%|██████████████████████████████████████████████████| 200/200 [04:16<00:00,  1.28s/it, Best CAGR: 301.22% | Current: 285.54%]
-[L2-SELECTION] No feasible candidate found within fallback window (reason=uplift)
-[L2-DEPLOY-C4] L*=1.500 (binding=mdd) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
+[L2-OPT]: 100%|██████████████████████████████████████████████████| 200/200 [03:57<00:00,  1.19s/it, Best CAGR: 267.12% | Current: -71.64%]
+[L2-SELECTION] 5 gate-pass 후보 수집 → champion Trial #51 Sortino=2.3495 CAGR=0.6660
+[L2-SELECTION] Champion selected. Trial #51, Objective=2.5090, DSR=0.7500 (n_eff=5.05)
+[L2-DEPLOY-C4] L*=1.058 (binding=mdd) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
   ● [FINAL SIMULATION]
-[L2-DEPLOY] L*=1.5000 binding=champion | CAGR=0.2010 MDD=0.1396 CVaR95=0.0118 RiskUtil=0.465
+[L2-DEPLOY] L*=1.0577 binding=champion | CAGR=0.2953 MDD=0.2291 CVaR95=0.0193 RiskUtil=0.764
 ● [LAYER 2 PORTFOLIO SCORECARD] (2024-12-22 ~ 2025-09-30)
 ──────────────────────────────────────────────────────────────────────────────
   STATUS  : ❌ BLOCKED (cagr)
 
-  ❌ [Growth    ] CAGR: +20.1% (>=30.0%) | PnL: +21.3% | Equity x1.21
-  ✅ [Efficiency] Sharpe: 1.177 (>=1.000) | Sortino: 1.729 (>=1.500) | Calmar: 1.440 (>=1.000)
-  ✅ [Risk      ] MDD: 14.0% (<=30.0%) | CVaR95: 1.2% (<=6.0%) | RiskUtil: 46.5%
-  ✅ [Robust    ] Fold: 100.0% (>=60.0%) | Trades: 129 (>=30) | Friction: 98.9%
-  ❌ [Uplift    ] Sharpe Uplift: +0.07 (>=+0.20)
-  ✅ [Integrity ] DSR: 0.676 (>=0.60) | PSR: 0.929 (diag)
-  [Diag     ] RelMDD: 1.48x | Turnover: 0.098
+  ❌ [Growth    ] CAGR: +29.5% (>=30.0%) | PnL: +46.4% | Equity x1.46
+  ✅ [Efficiency] Sharpe: 1.074 (>=1.000) | Sortino: 1.607 (>=1.500) | Calmar: 1.289 (>=1.000)
+  ✅ [Risk      ] MDD: 22.9% (<=30.0%) | CVaR95: 1.9% (<=6.0%) | RiskUtil: 76.4%
+  ✅ [Robust    ] Fold: 100.0% (>=60.0%) | Trades: 864 (>=30) | Friction: 97.2%
+  ❌ [Uplift    ] Sharpe Uplift: +0.14 (>=+0.20)
+  ✅ [Integrity ] DSR: 0.750 (>=0.60) | PSR: 0.911 (diag)
+  [Diag     ] RelMDD: 1.15x | Turnover: 0.081
 ──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ✅ Sharpe:  0.461 | CAGR:    +4.6% | MDD:  12.7% | Status: PASS | Period: 2024-12-22 ~ 2025-03-26
-       Symbols: 14 [1000SHIBUSDT, AAVEUSDT, BCHUSDT, BNBUSDT, BTCUSDT, ETCUSDT, ETHUSDT, GALAUSDT, +6 more]
-  ├─ Fold #2 : ✅ Sharpe:  1.610 | CAGR:   +17.9% | MDD:   8.6% | Status: PASS | Period: 2025-03-26 ~ 2025-06-28
-       Symbols: 11 [AAVEUSDT, AXSUSDT, BCHUSDT, ETCUSDT, GALAUSDT, SANDUSDT, SOLUSDT, THETAUSDT, +3 more]
-  └─ Fold #3 : ✅ Sharpe:  3.376 | CAGR:   +40.4% | MDD:   6.6% | Status: PASS | Period: 2025-06-28 ~ 2025-09-30
-       Symbols: 15 [AAVEUSDT, BCHUSDT, BNBUSDT, BTCUSDT, ETCUSDT, GALAUSDT, KAVAUSDT, LTCUSDT, +7 more]
+  ├─ Fold #1 : ✅ Sharpe:  2.339 | CAGR:   +68.1% | MDD:  16.4% | Status: PASS | Period: 2024-12-22 ~ 2025-03-26
+       Symbols: 21 [AAVEUSDT, ARUSDT, AXSUSDT, BCHUSDT, ETCUSDT, ETHUSDT, FILUSDT, GALAUSDT, +13 more]
+  ├─ Fold #2 : ✅ Sharpe:  0.474 | CAGR:    +5.5% | MDD:  22.9% | Status: PASS | Period: 2025-03-26 ~ 2025-06-28
+       Symbols: 19 [AAVEUSDT, ARUSDT, AXSUSDT, BCHUSDT, ETCUSDT, FILUSDT, GALAUSDT, LTCUSDT, +11 more]
+  └─ Fold #3 : ✅ Sharpe:  1.667 | CAGR:   +22.5% | MDD:   8.5% | Status: PASS | Period: 2025-06-28 ~ 2025-09-30
+       Symbols: 21 [1000SHIBUSDT, AAVEUSDT, API3USDT, AXSUSDT, BCHUSDT, BNBUSDT, BTCUSDT, ETCUSDT, +13 more]
 
 ● [LAYER UNIVERSE AUDIT]
 ──────────────────────────────────────────────────────────────────────────────
@@ -270,4 +271,4 @@ STRATEGY ENGINE
 ──────────────────────────────────────────────────────────────────────────────
 
 >> LAYER 2: BLOCKED -> gate_passed=False
-!! FAIL: exit_code=1 reason=layer2_blocked:uplift
+!! FAIL: exit_code=1 reason=layer2_blocked:cagr

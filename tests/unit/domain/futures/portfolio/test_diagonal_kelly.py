@@ -373,3 +373,34 @@ class TestPowerAmplificationMode:
         )
 
         assert np.all(np.isfinite(w)), "tanh mode should produce finite weights"
+
+
+class TestConfigSSOT:
+    """Layer2AllocationConfig SSOT - from_mapping fallback = dataclass default."""
+
+    def test_from_mapping_uses_dataclass_defaults(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+            Layer2AllocationConfig,
+        )
+        cfg = Layer2AllocationConfig.from_mapping({})
+        defaults = Layer2AllocationConfig()
+        assert cfg.l2_min_sharpe_uplift == defaults.l2_min_sharpe_uplift
+        assert cfg.l2_min_cagr == defaults.l2_min_cagr
+        assert cfg.l2_min_sortino == defaults.l2_min_sortino
+        assert cfg.l2_min_mar == defaults.l2_min_mar
+        assert cfg.l2_min_fold_pass_ratio == defaults.l2_min_fold_pass_ratio
+
+    def test_from_mapping_override_works(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+            Layer2AllocationConfig,
+        )
+        cfg = Layer2AllocationConfig.from_mapping({"l2_min_sharpe_uplift": 0.15})
+        assert cfg.l2_min_sharpe_uplift == 0.15
+
+    def test_default_instance_consistency(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+            Layer2AllocationConfig,
+        )
+        defaults = Layer2AllocationConfig()
+        assert defaults.l2_cs_amp_enabled is False
+        assert defaults.l2_regime_compression_enabled is True
