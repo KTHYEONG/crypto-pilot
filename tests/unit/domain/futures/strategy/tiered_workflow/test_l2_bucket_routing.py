@@ -284,5 +284,6 @@ class TestBuildRegimeRoutingPlan:
 
         assert plan.diagnostics.proof_passed is True
         assert plan.diagnostics.conditioning_path == "regime_conditioned"
-        assert plan.effective_bucket_edges_by_fold == plan.raw_bucket_edges_by_fold
         assert plan.diagnostics.mean_lift_bps > 0.0
+        assert max(state for fold_map in plan.effective_bucket_edges_by_fold for state, _, _ in fold_map) <= 2
+        assert max(state for fold_map in plan.raw_bucket_edges_by_fold for state, _, _ in fold_map) >= 2
