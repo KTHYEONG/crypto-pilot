@@ -1313,6 +1313,33 @@ def _run_tiered_l2_study(
             oos_start=_l1_end,
             oos_end=_ho_start_idx,
         ),)
+
+    # Precompute bucket realized edges (trial-param independent → 1회만 계산)
+    from dataclasses import replace
+
+    from src.domain.futures.strategy.market_regime import compress_regime_codes, compute_market_regime_context
+    from src.domain.futures.strategy.tiered_workflow.l2_meta import (
+        compute_bucket_realized_edges,
+    )
+    _regime_code = compress_regime_codes(compute_market_regime_context(aligned=aligned).code_1d)
+    _bucket_edges_list: list[dict[tuple[int, str, str], float]] = []
+    for _fold in _awf_folds_l2:
+        if _fold.fit_start < _fold.oos_start:
+            _be = compute_bucket_realized_edges(
+                cache=l2_sim_cache, aligned=aligned,
+                fit_start=int(_fold.fit_start),
+                fit_end=int(_fold.oos_start),
+                regime_code_1d=_regime_code,
+                cost_bps=6.0, min_n=15, shrinkage=0.3,
+            )
+        else:
+            _be = {}
+        _bucket_edges_list.append(_be)
+    l2_sim_cache = replace(l2_sim_cache,
+        bucket_edges_by_fold=tuple(_bucket_edges_list),
+        regime_code_1d=_regime_code,
+    )
+
     ctx = TieredContext(
         labeled_events=pd.DataFrame(),
         aligned=aligned,
@@ -1440,8 +1467,9 @@ def _run_tiered_l2_study(
                 from concurrent.futures import ProcessPoolExecutor
 
                 avail_gb = psutil.virtual_memory().available / (1024.0 ** 3)
-                mem_safe = max(1, int(avail_gb / 1.2))
                 cpu_cores = os.cpu_count() or 4
+                # Fork CoW: child shares parent numpy arrays. Unique allocation ≈ 0.7GB per worker.
+                mem_safe = max(1, int(avail_gb / 0.7))
                 max_workers = max(1, min(batch_size, cpu_cores, mem_safe))
                 _logger.info(
                     "[L2-OPT] ProcessPool workers=%d (mem=%.1fGB, mem_safe=%d, cpu=%d, batch=%d)",
@@ -1455,24 +1483,35 @@ def _run_tiered_l2_study(
                     mp_ctx = multiprocessing.get_context("fork")
                     with ProcessPoolExecutor(max_workers=max_workers, mp_context=mp_ctx) as executor:
                         trial_idx = len([t for t in study.trials if t.state.is_finished()])
+                        _batch_num = 0
                         while trial_idx < n_trials:
+                            _batch_num += 1
+                            _t_batch = time.perf_counter()
                             current_batch = min(batch_size, n_trials - trial_idx)
                             batch_trials = []
                             batch_params = []
 
                             _mem_batch_start = _get_rss_mb()
+                            _t_ask = 0.0
 
                             for _ in range(current_batch):
+                                _t0 = time.perf_counter()
                                 trial = study.ask()
                                 batch_trials.append(trial)
                                 params = suggest_layered_params(trial, "L2", fixed=ctx.fixed_l1_params)
                                 batch_params.append(params)
+                                _t_ask += time.perf_counter() - _t0
 
+                            _t_submit = time.perf_counter()
                             futures = [
                                 executor.submit(_evaluate_l2_trial_from_global, params)
                                 for params in batch_params
                             ]
+                            _t_submit = time.perf_counter() - _t_submit
 
+                            _t_tell = 0.0
+                            _t_attrs = 0.0
+                            _sum_eval = 0.0
                             for trial, future in zip(batch_trials, futures, strict=False):
                                 try:
                                     value, attrs, t_elapsed = future.result()
@@ -1485,15 +1524,20 @@ def _run_tiered_l2_study(
                                     value = -1e6
                                     attrs = {}
                                     t_elapsed = 0.0
+                                _sum_eval += t_elapsed
 
+                                _t0 = time.perf_counter()
                                 for k, v in attrs.items():
                                     trial.set_user_attr(k, v)
+                                _t_attrs += time.perf_counter() - _t0
 
+                                _t0 = time.perf_counter()
                                 study.tell(trial, value)
+                                _t_tell += time.perf_counter() - _t0
 
                                 _logger.log(
                                     logging.DEBUG,
-                                    "[perf-optuna] Trial %d evaluate_l2_trial took %.4fs | Objective: %.6f",
+                                    "[perf-optuna] Trial %d eval=%.3fs obj=%.6f",
                                     trial.number,
                                     t_elapsed,
                                     value,
@@ -1501,7 +1545,32 @@ def _run_tiered_l2_study(
                                 progress_cb(study, trial, value=value)
                                 trial_idx += 1
 
+                            _t_gc = time.perf_counter()
                             gc.collect()
+                            _t_gc = time.perf_counter() - _t_gc
+                            _t_batch = time.perf_counter() - _t_batch
+                            _t_result = _t_batch - _t_ask - _t_submit - _t_attrs - _t_tell - _t_gc
+
+                            _logger.debug(
+                                "[L2-PERF] batch=%d/%d trials=%d t_total=%.2fs "
+                                "t_eval=%.1fs/%.1fs/trial eff=%.0f%% "
+                                "| ask=%.2fs submit=%.3fs attrs=%.3fs tell=%.2fs gc=%.2fs "
+                                "| workers=%d mem=%.0fMB",
+                                _batch_num,
+                                int(np.ceil(n_trials / batch_size)),
+                                current_batch,
+                                _t_batch,
+                                _sum_eval,
+                                _sum_eval / max(current_batch, 1),
+                                (_sum_eval / max(_t_batch * max_workers, 0.001)) * 100,
+                                _t_ask,
+                                _t_submit,
+                                _t_attrs,
+                                _t_tell,
+                                _t_gc,
+                                max_workers,
+                                _mem_batch_start,
+                            )
                             _log_mem("l2_optuna_batch", _mem_batch_start, extra=f"trial_idx={trial_idx}/{n_trials}")
                 finally:
                     _GLOBAL_L2_CTX = None
