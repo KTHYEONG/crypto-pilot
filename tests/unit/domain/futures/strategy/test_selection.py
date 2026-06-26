@@ -754,8 +754,8 @@ class TestLayer2Selection(unittest.TestCase):
                 "mdd_hybrid": 0.08,
                 "l2_constraint_values": (-1.0,) * 9,
             }
-            # k_rank를 각각 2, 3, 4로 다르게 매핑하여 식별
-            t.params = {"k_rank": idx + 1}
+            # K_RANK를 각각 2, 3, 4로 다르게 매핑하여 식별 (uppercase: Layer2AllocationConfig.from_mapping 규약)
+            t.params = {"K_RANK": idx + 1}
             trials.append(t)
             
         study.trials = trials
@@ -793,9 +793,10 @@ class TestLayer2Selection(unittest.TestCase):
 
         # thread-safe하게 k_rank를 통해 평가 결과를 리턴하는 side_effect 함수 정의
         def _thread_safe_eval(*args: object, **kwargs: object) -> object:
+            from src.domain.futures.strategy.tiered_workflow import Layer2AllocationConfig
             cfg = kwargs.get("config")
-            assert cfg is not None
-            k_rank_val = getattr(cfg, "k_rank")
+            assert isinstance(cfg, Layer2AllocationConfig)
+            k_rank_val = cfg.k_rank
             return eval_dict[k_rank_val]
 
         mock_eval.side_effect = _thread_safe_eval
@@ -814,3 +815,292 @@ class TestLayer2Selection(unittest.TestCase):
         # value가 0.5로 가장 높은 Trial #2가 챔피언이어야 함
         assert res.best_trial_number == 2
         assert res.sim_cache == dummy_cache
+
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.layer2_constraints_from_trial")
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
+    def test_select_layer2_champion_with_passed_trials_only(
+        self, mock_eval: MagicMock, mock_constraints: MagicMock
+    ) -> None:
+        """l2_promotion_passed가 True인 trial들만 replay에 타겟팅됨."""
+        mock_constraints.return_value = (0.0,) * 9
+        study = MagicMock()
+        trials = []
+        for i in range(12):
+            t = MagicMock(spec=optuna.trial.FrozenTrial)
+            t.number = i
+            t.value = 1.0 - i * 0.05
+            t.params = {"k_rank": 3, "kelly_fraction": 0.25}
+            t.user_attrs = {
+                "l2_block_log_growth_signature": [0.01, 0.02],
+                "sharpe_hac_hybrid": 1.5 - i * 0.1,
+                "cagr_hybrid": 0.5 - i * 0.05,
+                "growth_lcb_hybrid": 0.4 - i * 0.05,
+                "mdd_hybrid": 0.1,
+                "l2_promotion_passed": i < 2,
+                "l2_optuna_constraint_values": [0.0],
+            }
+            t.state = optuna.trial.TrialState.COMPLETE
+            trials.append(t)
+        study.trials = trials
+
+        # mock_eval 반환 설정
+        eval_val = Layer2TrialEvaluation(
+            objective_value=0.5,
+            constraint_values=(-1.0,) * 9,
+            cagr_hybrid=0.5,
+            cagr_baseline=0.10,
+            growth_lcb_hybrid=0.4,
+            growth_lcb_baseline=0.08,
+            sharpe_hac_hybrid=1.5,
+            sharpe_hac_baseline=1.0,
+            psr_hybrid=0.95,
+            mdd_hybrid=0.1,
+            cvar_95_hybrid=0.02,
+            fold_pass_ratio=0.8,
+            break_even_pass_pct=1.0,
+            sortino_hybrid=1.9,
+            trade_count=120,
+            average_gross_exposure=1.0,
+            cap_saturation_ratio=0.1,
+            total_cost_bps=20.0,
+            block_metrics=(MagicMock(), MagicMock()),
+            returns_hybrid=(0.01, 0.02),
+            returns_baseline=(0.005, 0.01),
+            sharpe_hybrid=1.6,
+            sharpe_hac_baseline_ew=1.0,
+            recent_fold_passed=True,
+            recent_fold_sharpe=0.5,
+        )
+        mock_eval.return_value = eval_val
+
+        dummy_cache = MagicMock()
+        select_layer2_champion(
+            study=study,
+            tf=self.tf,
+            signal_batch=self.signal_batch,
+            aligned=self.aligned,
+            awf_folds=self.awf_folds,
+            caps=self.caps,
+            prebuilt_cache=dummy_cache,
+        )
+
+        # l2_promotion_passed가 True인 2개의 trial(0, 1)만 평가해야 함
+        assert mock_eval.call_count == 2
+
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.layer2_constraints_from_trial")
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
+    def test_select_layer2_champion_no_passed_trials_fallback(
+        self, mock_eval: MagicMock, mock_constraints: MagicMock
+    ) -> None:
+        """l2_promotion_passed가 모두 False일 때, 상위 3개만 Diagnostic fallback 대상으로 삼아 연산을 수행함."""
+        mock_constraints.return_value = (0.0,) * 9
+        study = MagicMock()
+        trials = []
+        for i in range(12):
+            t = MagicMock(spec=optuna.trial.FrozenTrial)
+            t.number = i
+            t.value = 1.0 - i * 0.05
+            t.params = {"k_rank": 3, "kelly_fraction": 0.25}
+            t.user_attrs = {
+                "l2_block_log_growth_signature": [0.01, 0.02],
+                "sharpe_hac_hybrid": 1.5 - i * 0.1,
+                "cagr_hybrid": 0.5 - i * 0.05,
+                "growth_lcb_hybrid": 0.4 - i * 0.05,
+                "mdd_hybrid": 0.1,
+                "l2_promotion_passed": False,
+                "l2_optuna_constraint_values": [0.0],
+            }
+            t.state = optuna.trial.TrialState.COMPLETE
+            trials.append(t)
+        study.trials = trials
+
+        eval_val = Layer2TrialEvaluation(
+            objective_value=0.5,
+            constraint_values=(-1.0,) * 9,
+            cagr_hybrid=0.5,
+            cagr_baseline=0.10,
+            growth_lcb_hybrid=0.4,
+            growth_lcb_baseline=0.08,
+            sharpe_hac_hybrid=1.5,
+            sharpe_hac_baseline=1.0,
+            psr_hybrid=0.95,
+            mdd_hybrid=0.1,
+            cvar_95_hybrid=0.02,
+            fold_pass_ratio=0.8,
+            break_even_pass_pct=1.0,
+            sortino_hybrid=1.9,
+            trade_count=120,
+            average_gross_exposure=1.0,
+            cap_saturation_ratio=0.1,
+            total_cost_bps=20.0,
+            block_metrics=(MagicMock(), MagicMock()),
+            returns_hybrid=(0.01, 0.02),
+            returns_baseline=(0.005, 0.01),
+            sharpe_hybrid=1.6,
+            sharpe_hac_baseline_ew=1.0,
+            recent_fold_passed=True,
+            recent_fold_sharpe=0.5,
+        )
+        mock_eval.return_value = eval_val
+
+        dummy_cache = MagicMock()
+        select_layer2_champion(
+            study=study,
+            tf=self.tf,
+            signal_batch=self.signal_batch,
+            aligned=self.aligned,
+            awf_folds=self.awf_folds,
+            caps=self.caps,
+            prebuilt_cache=dummy_cache,
+        )
+
+        # gate 통과가 하나도 없으므로 상위 3개만 Replay가 수행되어야 함
+        assert mock_eval.call_count == 3
+
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.layer2_constraints_from_trial")
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
+    def test_select_layer2_champion_max_limit_slice(
+        self, mock_eval: MagicMock, mock_constraints: MagicMock
+    ) -> None:
+        """통과 후보가 8개보다 많을 때 최대 8개로 엄격하게 대상을 잘라내어 연산하는지 검증."""
+        mock_constraints.return_value = (0.0,) * 9
+        study = MagicMock()
+        trials = []
+        for i in range(15):
+            t = MagicMock(spec=optuna.trial.FrozenTrial)
+            t.number = i
+            t.value = 1.0 - i * 0.05
+            t.params = {"k_rank": 3, "kelly_fraction": 0.25}
+            t.user_attrs = {
+                "l2_block_log_growth_signature": [0.01, 0.02],
+                "sharpe_hac_hybrid": 1.5 - i * 0.1,
+                "cagr_hybrid": 0.5 - i * 0.05,
+                "growth_lcb_hybrid": 0.4 - i * 0.05,
+                "mdd_hybrid": 0.1,
+                "l2_promotion_passed": True,
+                "l2_optuna_constraint_values": [0.0],
+            }
+            t.state = optuna.trial.TrialState.COMPLETE
+            trials.append(t)
+        study.trials = trials
+
+        eval_val = Layer2TrialEvaluation(
+            objective_value=0.5,
+            constraint_values=(-1.0,) * 9,
+            cagr_hybrid=0.5,
+            cagr_baseline=0.10,
+            growth_lcb_hybrid=0.4,
+            growth_lcb_baseline=0.08,
+            sharpe_hac_hybrid=1.5,
+            sharpe_hac_baseline=1.0,
+            psr_hybrid=0.95,
+            mdd_hybrid=0.1,
+            cvar_95_hybrid=0.02,
+            fold_pass_ratio=0.8,
+            break_even_pass_pct=1.0,
+            sortino_hybrid=1.9,
+            trade_count=120,
+            average_gross_exposure=1.0,
+            cap_saturation_ratio=0.1,
+            total_cost_bps=20.0,
+            block_metrics=(MagicMock(), MagicMock()),
+            returns_hybrid=(0.01, 0.02),
+            returns_baseline=(0.005, 0.01),
+            sharpe_hybrid=1.6,
+            sharpe_hac_baseline_ew=1.0,
+            recent_fold_passed=True,
+            recent_fold_sharpe=0.5,
+        )
+        mock_eval.return_value = eval_val
+
+        dummy_cache = MagicMock()
+        select_layer2_champion(
+            study=study,
+            tf=self.tf,
+            signal_batch=self.signal_batch,
+            aligned=self.aligned,
+            awf_folds=self.awf_folds,
+            caps=self.caps,
+            prebuilt_cache=dummy_cache,
+        )
+
+        # 최대 한도 8개로 엄격히 잘라야 함
+        assert mock_eval.call_count == 8
+
+
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.layer2_constraints_from_trial")
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_layer2_gate")
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
+    def test_select_layer2_champion_single_gate_evaluation(
+        self, mock_eval: MagicMock, mock_gate: MagicMock, mock_constraints: MagicMock
+    ) -> None:
+        """evaluate_layer2_gate가 candidate당 정확히 1회만 호출되는지 검증 (pre-gate 제거)."""
+        mock_constraints.return_value = (0.0,) * 9
+        mock_gate.return_value = MagicMock(
+            promotion_passed=True,
+            promotion_blocker="",
+            optuna_constraint_values=(-1.0,) * 9,
+            promotion_constraint_values=(-1.0,) * 9,
+        )
+
+        study = MagicMock()
+        trials = []
+        for i in range(3):
+            t = MagicMock(spec=optuna.trial.FrozenTrial)
+            t.number = i
+            t.value = 0.5 - i * 0.1
+            t.params = {"k_rank": 3, "kelly_fraction": 0.25}
+            t.user_attrs = {
+                "l2_block_log_growth_signature": [0.01, 0.02],
+                "sharpe_hac_hybrid": 1.5,
+                "cagr_hybrid": 0.4,
+                "growth_lcb_hybrid": 0.3,
+                "mdd_hybrid": 0.1,
+                "l2_promotion_passed": True,
+                "l2_optuna_constraint_values": [0.0],
+            }
+            t.state = optuna.trial.TrialState.COMPLETE
+            trials.append(t)
+        study.trials = trials
+
+        eval_val = Layer2TrialEvaluation(
+            objective_value=0.5,
+            constraint_values=(-1.0,) * 9,
+            cagr_hybrid=0.4,
+            cagr_baseline=0.10,
+            growth_lcb_hybrid=0.3,
+            growth_lcb_baseline=0.08,
+            sharpe_hac_hybrid=2.0,
+            sharpe_hac_baseline=1.0,
+            psr_hybrid=0.95,
+            mdd_hybrid=0.08,
+            cvar_95_hybrid=0.05,
+            fold_pass_ratio=0.8,
+            break_even_pass_pct=1.0,
+            sortino_hybrid=1.9,
+            trade_count=120,
+            average_gross_exposure=1.0,
+            cap_saturation_ratio=0.1,
+            total_cost_bps=20.0,
+            block_metrics=(MagicMock(), MagicMock()),
+            returns_hybrid=(0.01, 0.02),
+            returns_baseline=(0.005, 0.01),
+            sharpe_hybrid=2.1,
+            sharpe_hac_baseline_ew=1.0,
+            recent_fold_passed=True,
+            recent_fold_sharpe=0.5,
+        )
+        mock_eval.return_value = eval_val
+
+        select_layer2_champion(
+            study=study,
+            tf=self.tf,
+            signal_batch=self.signal_batch,
+            aligned=self.aligned,
+            awf_folds=self.awf_folds,
+            caps=self.caps,
+            prebuilt_cache=MagicMock(),
+        )
+
+        # candidate당 evaluate_layer2_gate가 정확히 1회 호출되어야 함
+        assert mock_gate.call_count == 3

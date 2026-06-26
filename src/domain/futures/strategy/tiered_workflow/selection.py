@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import numpy as np
@@ -341,8 +342,6 @@ def select_layer2_champion(
         from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
         cache = build_l2_simulation_cache(aligned, signal_batch, tf)
 
-    from concurrent.futures import ThreadPoolExecutor
-
     def _eval_candidate(trial: optuna.trial.FrozenTrial) -> tuple[optuna.trial.FrozenTrial, Any]:
         cfg_mapping = Layer2AllocationConfig.from_mapping(dict(trial.params))
         eval_val = evaluate_l2_trial(
@@ -356,13 +355,40 @@ def select_layer2_champion(
         )
         return trial, eval_val
 
-    max_workers = min(len(replay_candidates), 8)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        evaluated_pairs = list(executor.map(_eval_candidate, replay_candidates))
+    # 1차 필터링: 이미 사전 게이트 통과(l2_promotion_passed) 이력이 있는 trial들 선별
+    gate_passed_candidates = [
+        t for t in replay_candidates
+        if t.user_attrs.get("l2_promotion_passed", False)
+        or t.user_attrs.get("promotion_passed", False)
+    ]
+
+    if gate_passed_candidates:
+        eval_candidates = gate_passed_candidates[:8]
+        _logger.info(
+            "[L2-SELECTION] Found %d gate-passed trials in frontier. Reducing replay size to %d.",
+            len(gate_passed_candidates),
+            len(eval_candidates),
+        )
+    else:
+        eval_candidates = replay_candidates[:3]
+        _logger.info(
+            "[L2-SELECTION] No gate-passed trials found. Reducing diagnostic replay size to %d.",
+            len(eval_candidates),
+        )
+
+    # ThreadPool 평가: numba GIL 해제 활용 → ProcessPool 대비 fork/serialize 오버헤드 제거
+    if len(eval_candidates) <= 1:
+        evaluated_pairs = [_eval_candidate(trial) for trial in eval_candidates]
+    else:
+        max_workers = min(len(eval_candidates), 4)
+        evaluated_pairs = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {executor.submit(_eval_candidate, t): t for t in eval_candidates}
+            for future in as_completed(future_map):
+                evaluated_pairs.append(future.result())
 
     for candidate, candidate_evaluation in evaluated_pairs:
         candidate_config = Layer2AllocationConfig.from_mapping(dict(candidate.params))
-        # Calculate DSR for this candidate
         dsr = _deflated_sharpe_probability(
             selected_rets=candidate_evaluation.returns_hybrid,
             completed_trial_sharpes=completed_trial_sharpes,
@@ -383,45 +409,8 @@ def select_layer2_champion(
             or abs(candidate_evaluation.growth_lcb_hybrid - stored_growth_lcb) > eps
             or abs(candidate_evaluation.mdd_hybrid - stored_mdd) > eps
         )
-        
-        pre_dsr_gate = getattr(candidate_evaluation, "gate", None)
-        if pre_dsr_gate is None:
-            raw_sharpe = _trial_metric(
-                candidate_evaluation,
-                "sharpe_hybrid",
-                "sharpe_hac_hybrid",
-            )
-            sharpe_hac_baseline_ew = _trial_metric(
-                candidate_evaluation,
-                "sharpe_hac_baseline_ew",
-                "sharpe_hac_baseline",
-            )
-            pre_dsr_gate = evaluate_layer2_gate(
-                deployment_failed=bool(candidate_evaluation.constraint_values[0] > 0.0),
-                support_leak_count=0,
-                cagr_hybrid=float(candidate_evaluation.cagr_hybrid),
-                sharpe_hybrid=raw_sharpe,
-                sharpe_hac_hybrid=float(candidate_evaluation.sharpe_hac_hybrid),
-                sharpe_hac_baseline=sharpe_hac_baseline_ew,
-                sortino_hybrid=float(candidate_evaluation.sortino_hybrid),
-                mar_hybrid=float(
-                    candidate_evaluation.cagr_hybrid / (candidate_evaluation.mdd_hybrid + 1e-9)
-                ),
-                mdd_hybrid=float(candidate_evaluation.mdd_hybrid),
-                cvar_95_hybrid=float(candidate_evaluation.cvar_95_hybrid),
-                fold_pass_ratio=float(candidate_evaluation.fold_pass_ratio),
-                active_block_count=len(candidate_evaluation.block_metrics),
-                friction_pass_pct=float(candidate_evaluation.break_even_pass_pct),
-                trade_count=int(candidate_evaluation.trade_count),
-                growth_lcb_hybrid=float(candidate_evaluation.growth_lcb_hybrid),
-                growth_lcb_baseline=float(candidate_evaluation.growth_lcb_baseline),
-                dsr_hybrid=None,
-                psr_hybrid=float(candidate_evaluation.psr_hybrid),
-                recent_fold_passed=getattr(candidate_evaluation, "recent_fold_passed", None),
-                recent_fold_sharpe=getattr(candidate_evaluation, "recent_fold_sharpe", None),
-                config=candidate_config,
-            )
-        constraints_ok = all(value <= 0.0 for value in pre_dsr_gate.optuna_constraint_values)
+
+        # 단일 gate 평가: pre-gate + final-gate 중복 제거
         raw_sharpe = _trial_metric(
             candidate_evaluation,
             "sharpe_hybrid",
@@ -432,8 +421,8 @@ def select_layer2_champion(
             "sharpe_hac_baseline_ew",
             "sharpe_hac_baseline",
         )
-        final_gate = evaluate_layer2_gate(
-            deployment_failed=bool(pre_dsr_gate.optuna_constraint_values[0] > 0.0),
+        gate = evaluate_layer2_gate(
+            deployment_failed=bool(candidate_evaluation.constraint_values[0] > 0.0),
             support_leak_count=0,
             cagr_hybrid=float(candidate_evaluation.cagr_hybrid),
             sharpe_hybrid=raw_sharpe,
@@ -471,14 +460,14 @@ def select_layer2_champion(
                 candidate_evaluation.growth_lcb_hybrid,
             )
 
-        # gate 진단 로그 — final gate 결과 및 constraint 상세
+        # gate 진단 로그
         _logger.debug(
             "[L2-REPLAY-GATE] Trial #%d | gate=%s blocker=%s | "
             "cagr=%.4f sortino=%.4f sharpe=%.4f calmar=%.4f | "
             "mdd=%.4f folds=%.2f trades=%d dsr=%.4f",
             candidate.number,
-            final_gate.promotion_passed,
-            final_gate.promotion_blocker,
+            gate.promotion_passed,
+            gate.promotion_blocker,
             float(candidate_evaluation.cagr_hybrid),
             float(candidate_evaluation.sortino_hybrid),
             float(candidate_evaluation.sharpe_hybrid),
@@ -492,7 +481,7 @@ def select_layer2_champion(
         if (
             best_diagnostic_trial is None
             or (
-                int(final_gate.promotion_passed),
+                int(gate.promotion_passed),
                 float(dsr),
                 float(candidate_evaluation.objective_value),
                 float(candidate_evaluation.growth_lcb_hybrid),
@@ -510,10 +499,11 @@ def select_layer2_champion(
         ):
             best_diagnostic_trial = candidate
             best_diagnostic_evaluation = candidate_evaluation
-            best_diagnostic_gate = final_gate
+            best_diagnostic_gate = gate
             best_diagnostic_dsr = float(dsr)
 
-        if constraints_ok and final_gate.promotion_passed:
+        constraints_ok = all(v <= 0.0 for v in gate.optuna_constraint_values)
+        if constraints_ok and gate.promotion_passed:
             # D4: argmax(dsr, cagr) → argmax(sortino, cagr) 교체.
             # DSR은 자기참조(동일 신호셋 파라미터 섭동) → 독립성 불성립.
             # Sortino가 하방위험 조정 shape를 직접 반영 (shape 최적화 D1과 정합).
@@ -527,7 +517,7 @@ def select_layer2_champion(
 
     # D4: gate-pass 후보 중 argmax(sortino_hybrid, cagr_hybrid) 선택
     if passed_candidates:
-        best_entry = max(passed_candidates, key=lambda x: (x[0], x[1]))
+        best_entry = max(passed_candidates, key=lambda x: (x[0], x[1], -x[2].number))
         champion_trial = best_entry[2]
         champion_evaluation = best_entry[3]
         champion_dsr = best_entry[4]
