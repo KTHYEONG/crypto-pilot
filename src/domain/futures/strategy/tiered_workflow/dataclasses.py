@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from datetime import date
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -411,6 +411,10 @@ class Layer2AllocationConfig:
     l2_cs_amp_power: float = 2.0
     # Regime State Compression (6→3) for quality improvement
     l2_regime_compression_enabled: bool = True
+    l2_regime_proof_enabled: bool = True
+    l2_regime_proof_nw_tstat: float = 1.5
+    l2_regime_proof_fold_pass_ratio: float = 0.60
+    l2_regime_fallback_mode: Literal["pooled", "empty"] = "pooled"
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -538,6 +542,10 @@ class Layer2AllocationConfig:
             1.0,
             3.0,
         )
+        raw_fallback_mode = str(params.get("l2_regime_fallback_mode", "pooled"))
+        if raw_fallback_mode not in {"pooled", "empty"}:
+            raise ValueError("l2_regime_fallback_mode must be one of pooled/empty")
+        fallback_mode = cast(Literal["pooled", "empty"], raw_fallback_mode)
         return cls(
             k_rank=cls._as_int(params.get("K_RANK", 3), 3),
             rebalance_bars=cls._as_int(params.get("REBALANCE_BARS", 3), 3),
@@ -661,6 +669,19 @@ class Layer2AllocationConfig:
                 os.environ.get("L2_BUCKET_EDGE_FLOOR_BPS", params.get("l2_bucket_edge_floor_bps", 0.0)), 0.0
             ),
             l2_regime_compression_enabled=bool(params.get("l2_regime_compression_enabled", True)),
+            l2_regime_proof_enabled=bool(params.get("l2_regime_proof_enabled", True)),
+            l2_regime_proof_nw_tstat=cls._validate_range(
+                "l2_regime_proof_nw_tstat",
+                cls._as_float(params.get("l2_regime_proof_nw_tstat", 1.5), 1.5),
+                0.0,
+            ),
+            l2_regime_proof_fold_pass_ratio=cls._validate_range(
+                "l2_regime_proof_fold_pass_ratio",
+                cls._as_float(params.get("l2_regime_proof_fold_pass_ratio", 0.60), 0.60),
+                0.0,
+                1.0,
+            ),
+            l2_regime_fallback_mode=fallback_mode,
         )
 
 
@@ -722,8 +743,36 @@ class L2SimulationCache:
 
     # Pre-computed bucket realized edges (trial-param independent → cached once)
     bucket_edges_by_fold: tuple[dict[tuple[int, str, str], float], ...] = ()
+    pooled_edges_by_fold: tuple[dict[tuple[str, str], float], ...] = ()
     # Pre-computed regime code 1d (trial-param independent → cached once)
     regime_code_1d: NDArray[np.int8] | None = None
+    regime_routing_diagnostics: RegimeRoutingDiagnostics | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RegimeRoutingDiagnostics:
+    active_state_count: int
+    active_state_names: tuple[str, ...]
+    compression_enabled: bool
+    proof_passed: bool
+    conditioning_path: Literal["regime_conditioned", "pooled_fallback"]
+    mean_lift_bps: float
+    n_eff: float
+    nw_tstat: float
+    deflated_sharpe: float
+    fold_pass_ratio: float
+    n_folds_evaluated: int
+    bucket_hit_pct_by_fold: tuple[float, ...]
+    js_divergence_by_fold: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RegimeRoutingPlan:
+    effective_bucket_edges_by_fold: tuple[dict[tuple[int, str, str], float], ...]
+    raw_bucket_edges_by_fold: tuple[dict[tuple[int, str, str], float], ...]
+    pooled_edges_by_fold: tuple[dict[tuple[str, str], float], ...]
+    effective_regime_code_1d: NDArray[np.int8]
+    diagnostics: RegimeRoutingDiagnostics
 
 
 @dataclass(slots=True, frozen=True)
