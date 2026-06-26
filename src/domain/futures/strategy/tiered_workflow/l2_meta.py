@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re as _re
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -297,6 +298,7 @@ def evaluate_meta_feasibility(
     embargo_bars: int,
     threshold_quantile: float,
 ) -> MetaFeasibilityReport:
+    _t_meta_start = time.perf_counter()
     n = len(samples.y)
     if n == 0 or samples.X.shape[1] == 0:
         return MetaFeasibilityReport(
@@ -430,6 +432,13 @@ def evaluate_meta_feasibility(
         for k, v in bt.items():
             merged_bucket.setdefault(k, []).append(v)
     bucket_table = {k: float(np.mean(vs)) for k, vs in merged_bucket.items()}
+
+    logger.debug(
+        "[L2-META] evaluate_meta_feasibility took=%.4fs n_splits=%d n_samples=%d",
+        time.perf_counter() - _t_meta_start,
+        n_splits,
+        n,
+    )
 
     return MetaFeasibilityReport(
         oos_meta_ic=oos_ic,
