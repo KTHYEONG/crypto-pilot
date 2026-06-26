@@ -36,7 +36,6 @@ _PROMOTION_BLOCKERS: tuple[str, ...] = (
     "growth_lcb",
     "uplift",
     "psr_floor",
-    "cost_drag",
 )
 
 
@@ -148,7 +147,6 @@ def evaluate_layer2_gate(
             sharpe_hac_baseline + float(config.l2_min_sharpe_uplift) - sharpe_hac_hybrid
         ),
         psr_constraint,
-        _finite_or_fail(cost_drag - float(config.l2_max_cost_drag_ratio)),
     )
 
     promotion_passed = True
@@ -162,6 +160,9 @@ def evaluate_layer2_gate(
             promotion_passed = False
             promotion_blocker = blocker
             break
+    if promotion_passed and cost_drag > float(config.l2_max_cost_drag_ratio):
+        promotion_passed = False
+        promotion_blocker = "cost_drag"
 
     _logger.debug(
         "[L2-GATE] promotion=%s blocker=%s | "

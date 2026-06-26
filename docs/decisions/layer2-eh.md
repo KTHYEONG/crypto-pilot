@@ -82,6 +82,11 @@ ai_read_policy: when_related
 - **Delta:** L1→L2 전환 직후 Regime 품질 INFO 로그(Step I): `● [REGIME]` one-liner + C2~C5 4종 검사 + DEBUG `[REGIME-DETAIL]`. L2 AWF 내 3개 추가 진단: Step G — `[L2-BUCKET-HIT]` fold별 OOS bucket hit-ratio (INFO, <30% WARNING); Step H — `[L2-REGIME-SHIFT]` fold별 fit↔OOS regime 분포 JS-divergence (INFO, >0.15 WARNING); Step J — `[L2-BUCKET-OOS/DETAIL/UNDERFIT/OVERFIT]` fold별 fit vs OOS bucket edge RMSE/MAE/bias/corr 비교 (DEBUG). L2_BUCKET_EDGE_FLOOR_BPS env var 지원 dataclasses.py 추가.
 - **Rationale:** Regime 품질이 L2 실행을 gate하지 않는 blind spot 해소. fit-leg bucket edge의 OOS 예측력을 검증하는 지표 부재 해소. 실험(`docs/results/tmp.md`)에서 bucket+zero-floor(0.0) ≫ pool ≫ bucket+100bps 확인.
 
+## [2026-06-26] L2 Regime Routing Table Log + 3-State Verdict
+- **Delta:** `[REGIME]` 운영 로그를 3-state 표형식 요약으로 전환하고 raw 6-state 진단 문구를 제거했다. `L2RoutingPlan`은 `effective_regime_code_1d`, `pooled_edges_by_fold`, `regime_routing_diagnostics`를 보유하며, `"[REGIME-L2]"`는 proof verdict만 보고한다. `awf_sim.py`는 cache diagnostics를 DEBUG로 소비한다.
+- **Rationale:** L2 운영자는 raw 6-state 점검값이 아니라 compressed 3-state 라우팅 유효성만 보면 된다. 표형식은 상태 분포/안정성/proof 결과를 한 번에 읽게 하고, raw diagnostic은 detail/debug로 내려 L2 verdict와 혼동되지 않게 한다.
+- **Edge Cases:** proof fail 시 pooled fallback은 3-state 복제로 유지. `"[REGIME]"`는 상태 분포와 안정성만 노출하고 `"[REGIME-L2]"`는 regime-conditioned vs pooled fallback verdict를 분리한다.
+
 ## [2026-06-25] L2 Realization Gap Diagnostics — L* Inflation Detection
 - **Delta:** `calibrate_deployment_leverage`에 `oos_rets` 파라미터 추가, 반환타입 `(L*, binding, cross_valid_MDD)`로 확장. 5개 진단 DEBUG 로그 신규: `[L2-CALIB-CV]` (OOS MDD 크로스 검증 + MDD_ratio inflation 정량화), `[L2-TRIAL-DIAG]` (trial별 fit vs OOS CAGR/MDD 분리), `[L2-REPLAY]/[L2-REPLAY-GATE]` (champion replay mismatch + gate 상세), `[L2-FINAL-DIAG]` (final scorecard fit vs OOS 진단), `[L2-GATE]` (promotion constraint별 actual vs threshold 비교). 모든 진단 로그는 DEBUG 수준.
 - **Rationale:** Optuna trial 300% CAGR → final scorecard 13.3% CAGR gap의 원인이 fit-leg L* calibration이 OOS 위험을 반영하지 못하는 구조적 문제에서 발생. 기존 `calibrate_deployment_leverage`는 fit_rets로만 L*를 산출하여 fit/OOS MDD 분포 이격 시 deployed CAGR이 극단적으로 inflation됨. 새 `oos_rets` 파라미터는 OOS MDD를 크로스 검증하여 inflation 정량화. 진단 로그는 3개 층위(L* calibration, trial evaluation, final scorecard)에서 fit vs OOS 분포 이격을 각각 측정하여 alpha decay 위치 식별 가능.
