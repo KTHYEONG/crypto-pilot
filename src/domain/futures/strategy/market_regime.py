@@ -24,6 +24,26 @@ _REGIME_NAMES = (
     "transition",
     "crash",
 )
+# Compressed regime: 3-state mapping
+_REGIME_COMPRESSED_NAMES = ("bull", "bear", "crisis")
+# 6-state → 3-state: bull(0+1) / bear(2+3) / crisis(4+5)
+_REGIME_COMPRESSION_MAP: dict[int, int] = {0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 2}
+
+
+def compress_regime_codes(code_1d: NDArray[np.int8]) -> NDArray[np.int8]:
+    """6-state regime codes → 3-state compressed codes (bull/bear/crisis).
+
+    Args:
+        code_1d: 6-state regime codes [T], dtype=np.int8, range [0..5].
+
+    Returns:
+        Compressed 3-state codes [T], dtype=np.int8, range [0..2].
+        0=bull, 1=bear, 2=crisis.
+    """
+    compressed = np.full_like(code_1d, 2, dtype=np.int8)  # default crisis
+    for src, dst in _REGIME_COMPRESSION_MAP.items():
+        compressed[code_1d == src] = dst
+    return compressed
 _DEFAULT_BARS_PER_YEAR = 365.0 * 6.0
 _EPS = 1e-12
 

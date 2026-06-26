@@ -350,7 +350,7 @@ def run_active_strategy_output_bridge(
         strategy_cfg=StrategyConfig(name=strategy_name),
         opt_config=opt_config,
         timeframe=run_config.timeframe,
-        signal_only=(run_config.phase == "l1") or use_tiered,
+        signal_only=(run_config.phase == "l3") or use_tiered,
     )
     candidate_scope = list(trading_symbols or tuple(symbols))
     effective_symbols = [sym for sym in dict.fromkeys(candidate_scope) if sym in preloaded_data_maps]

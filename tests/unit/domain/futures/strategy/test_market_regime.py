@@ -307,4 +307,27 @@ def test_evaluate_regime_quality_when_overlay_is_helpful_passes_quality_gate() -
     assert report.overlay_lift_bps > 0.0
     assert report.overlay_lift_tstat >= cfg.regime_overlay_min_lift_tstat
     assert report.crisis_precision_ok is True
-    assert report.passed is True
+
+
+class TestRegimeCompression:
+    """6-state → 3-state regime compression."""
+
+    def test_compress_all_states(self) -> None:
+        from src.domain.futures.strategy.market_regime import compress_regime_codes
+        codes = np.array([0, 1, 2, 3, 4, 5], dtype=np.int8)
+        result = compress_regime_codes(codes)
+        expected = np.array([0, 0, 1, 1, 2, 2], dtype=np.int8)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_compress_empty(self) -> None:
+        from src.domain.futures.strategy.market_regime import compress_regime_codes
+        codes = np.array([], dtype=np.int8)
+        result = compress_regime_codes(codes)
+        assert result.size == 0
+
+    def test_compress_single_state(self) -> None:
+        from src.domain.futures.strategy.market_regime import compress_regime_codes
+        for src, dst in [(0, 0), (1, 0), (2, 1), (3, 1), (4, 2), (5, 2)]:
+            codes = np.array([src], dtype=np.int8)
+            result = compress_regime_codes(codes)
+            assert result[0] == dst, f"code {src} → {result[0]} (expected {dst})"

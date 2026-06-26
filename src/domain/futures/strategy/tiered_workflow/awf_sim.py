@@ -1568,6 +1568,10 @@ def _run_awf_simulation(
             compute_bucket_realized_edges,
         )
         _regime_code_1d = compute_market_regime_context(aligned=aligned).code_1d
+        # Regime state compression (6→3) for bucket routing quality
+        if getattr(config, "l2_regime_compression_enabled", True):
+            from src.domain.futures.strategy.market_regime import compress_regime_codes
+            _regime_code_1d = compress_regime_codes(_regime_code_1d)
         # Step B: per-regime occupancy DEBUG logging
         if logger.isEnabledFor(logging.DEBUG):
             _unique_regimes, _counts_regimes = np.unique(_regime_code_1d, return_counts=True)
