@@ -1293,6 +1293,11 @@ def _run_awf_simulation(
     prof_rank = 0.0
     prof_alloc = 0.0
     prof_eval = 0.0
+    # ── pre-fold gap profiling ──────────────────────────────────────────
+    prof_fit_leg = 0.0
+    prof_mid = 0.0
+    prof_regime = 0.0
+    prof_bucket_routing = 0.0
 
     k_rank = int(config.k_rank)
     _diag = bool(getattr(config, "l2_diag_attribution_enabled", False))
@@ -1514,6 +1519,10 @@ def _run_awf_simulation(
                 _this_fold_fit_rets.append(_r)
         _per_fold_fit_rets.append(_this_fold_fit_rets)
 
+    prof_fit_leg = time.perf_counter() - t_start_total
+    # ── C4 + bucket routing + sleeve pool ──────────────────────────────────
+    _t_pre_loop = time.perf_counter()
+
     # per-fold fit-leg diagnostics (vol-targeting 무결성 확인)
     from src.domain.futures.strategy.tiered_workflow.metrics import _cagr, _mdd
     for _f_idx, _ffit in enumerate(_per_fold_fit_rets):
@@ -1558,20 +1567,46 @@ def _run_awf_simulation(
         else:
             included_tfs_by_fold.append(set(cache.sleeve_to_tf) - {"unk"})
 
-    # L2 bucket routing: regime code + fit-leg 버킷 실현엣지 (1회)
+    prof_mid = time.perf_counter() - _t_pre_loop
+    # ── bucket routing + step H + init ─────────────────────────────────────
     _l2_routing_mode = str(getattr(config, "l2_routing_mode", "bucket"))
     _regime_code_1d: NDArray[np.int8] = np.zeros(aligned.close_2d.shape[0], dtype=np.int8)
     bucket_edges_by_fold: list[dict[tuple[int, str, str], float]] = []
     if _l2_routing_mode == "bucket":
         from src.domain.futures.strategy.market_regime import compute_market_regime_context
-        from src.domain.futures.strategy.tiered_workflow.l2_meta import (
-            compute_bucket_realized_edges,
-        )
-        _regime_code_1d = compute_market_regime_context(aligned=aligned).code_1d
-        # Regime state compression (6→3) for bucket routing quality
-        if getattr(config, "l2_regime_compression_enabled", True):
-            from src.domain.futures.strategy.market_regime import compress_regime_codes
-            _regime_code_1d = compress_regime_codes(_regime_code_1d)
+        if cache.regime_code_1d is not None:
+            _regime_code_1d = cache.regime_code_1d
+        else:
+            _regime_code_1d = compute_market_regime_context(aligned=aligned).code_1d
+            if getattr(config, "l2_regime_compression_enabled", True):
+                from src.domain.futures.strategy.market_regime import compress_regime_codes
+                _regime_code_1d = compress_regime_codes(_regime_code_1d)
+
+        if cache.bucket_edges_by_fold:
+            bucket_edges_by_fold = list(cache.bucket_edges_by_fold)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("[L2-BUCKET-CACHE] HIT n_folds=%d", len(bucket_edges_by_fold))
+        else:
+            # fallback: 기존 로직 (pre-computation 없는 환경 대응)
+            from src.domain.futures.strategy.tiered_workflow.l2_meta import (
+                compute_bucket_realized_edges,
+            )
+            for _f_idx, _f_fold in enumerate(awf_folds):
+                if int(_f_fold.fit_start) < int(_f_fold.oos_start):
+                    _be = compute_bucket_realized_edges(
+                        cache=cache,
+                        aligned=aligned,
+                        fit_start=int(_f_fold.fit_start),
+                        fit_end=int(_f_fold.oos_start),
+                        regime_code_1d=_regime_code_1d,
+                        cost_bps=float(getattr(config, "l2_bucket_cost_bps", 6.0)),
+                        min_n=int(getattr(config, "l2_bucket_min_n", 15)),
+                        shrinkage=float(getattr(config, "l2_bucket_shrinkage", 0.3)),
+                    )
+                    bucket_edges_by_fold.append(_be)
+                else:
+                    bucket_edges_by_fold.append({})
+
         # Step B: per-regime occupancy DEBUG logging
         if logger.isEnabledFor(logging.DEBUG):
             _unique_regimes, _counts_regimes = np.unique(_regime_code_1d, return_counts=True)
@@ -1582,23 +1617,10 @@ def _run_awf_simulation(
                     "[L2-REGIME-OCC] regime=%d count=%d pct=%.1f%% total=%d",
                     _r, _c, _pct, _n_total_regime,
                 )
-        for _f_idx, _f_fold in enumerate(awf_folds):
-            if int(_f_fold.fit_start) < int(_f_fold.oos_start):
-                _be = compute_bucket_realized_edges(
-                    cache=cache,
-                    aligned=aligned,
-                    fit_start=int(_f_fold.fit_start),
-                    fit_end=int(_f_fold.oos_start),
-                    regime_code_1d=_regime_code_1d,
-                    cost_bps=float(getattr(config, "l2_bucket_cost_bps", 6.0)),
-                    min_n=int(getattr(config, "l2_bucket_min_n", 15)),
-                    shrinkage=float(getattr(config, "l2_bucket_shrinkage", 0.3)),
-                )
-                bucket_edges_by_fold.append(_be)
-            else:
-                bucket_edges_by_fold.append({})
     else:
         bucket_edges_by_fold = [{} for _ in awf_folds]
+
+    prof_regime = time.perf_counter() - _t_pre_loop
 
     # Step A: per-fold bucket edge DEBUG logging
     if _l2_routing_mode == "bucket" and logger.isEnabledFor(logging.DEBUG):
@@ -1653,6 +1675,8 @@ def _run_awf_simulation(
     _fold_bucket_hit: list[tuple[int, int]] = [(0, 0) for _ in awf_folds]
     _fold_oos_bucket_sum: list[dict[tuple[int, str, str], float]] = [{} for _ in awf_folds]
     _fold_oos_bucket_cnt: list[dict[tuple[int, str, str], int]] = [{} for _ in awf_folds]
+
+    prof_bucket_routing = time.perf_counter() - _t_pre_loop
 
     for _fold_idx, fold in enumerate(awf_folds):
         t_fold_start = time.perf_counter()
@@ -2202,8 +2226,11 @@ def _run_awf_simulation(
 
     logger.log(PERF,
         "[PERF] awf_total n_folds=%d n_rebalances=%d "
-        "prep=%.4fs rank=%.4fs alloc=%.4fs eval=%.4fs took=%.4fs",
+        "fit_leg=%.3fs mid=%.3fs regime=%.3fs post=%.3fs "
+        "prep=%.3fs rank=%.3fs alloc=%.3fs eval=%.3fs took=%.4fs",
         len(awf_folds), rebalance_count,
+        prof_fit_leg, prof_mid, prof_regime,
+        prof_bucket_routing - prof_regime,
         prof_prep, prof_rank, prof_alloc, prof_eval,
         time.perf_counter() - t_start_total,
     )
