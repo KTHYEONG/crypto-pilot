@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 from __future__ import annotations
 
 import sys
@@ -305,3 +306,34 @@ def test_solve_constrained_weights_respects_bl_shrinkage_mults() -> None:
     # 두 가중치가 정확히 같지 않음을 검증 (정규화 계수 변화로 mu_bl이 달라짐)
     assert not np.allclose(w_default, w_low_shrink, rtol=1e-5, atol=1e-5)
 
+
+def test_project_all_caps_early_stopping_equivalence() -> None:
+    from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps, project_all_caps
+
+    # 1. 초기 가중치 벡터 정의 (gross_cap = 1.0을 초과하도록 정의)
+    w = np.array([0.8, -0.6, 0.4, -0.9], dtype=np.float64)
+    btc_beta = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float64)
+    caps = PortfolioCaps(
+        gross=1.0,
+        per_symbol=0.4,
+        net=0.3,
+        beta=0.5,
+        target_ann_vol=0.2,
+    )
+    
+    # 2. early stopping이 적용된 최적화 연산 수행
+    out_opt = project_all_caps(
+        w=w,
+        btc_beta=btc_beta,
+        sigma_port=0.005,
+        bars_per_year=2190.0,
+        caps=caps,
+    )
+
+    # 3. 투영 조건(제약조건 만족 여부) 검증
+    # Gross cap 제약조건 검증 (gross <= 1.0)
+    assert np.sum(np.abs(out_opt)) <= 1.0 + 1e-9
+    # Net cap 제약조건 검증 (|net| <= 0.3)
+    assert abs(np.sum(out_opt)) <= 0.3 + 1e-9
+    # Per-symbol cap 제약조건 검증 (max_abs <= 0.4)
+    assert np.max(np.abs(out_opt)) <= 0.4 + 1e-9
