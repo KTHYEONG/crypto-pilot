@@ -36,6 +36,9 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     Layer2AllocationConfig,
     Layer2SignalSchedule,
 )
+from src.domain.futures.strategy.tiered_workflow.regime_debug import (
+    replace_selected_regime_debug_diagnostics,
+)
 
 if TYPE_CHECKING:
     from src.domain.futures.strategy.common.alignment import AlignedMarketData
@@ -1696,6 +1699,14 @@ def _run_awf_simulation(
     _fold_bucket_hit: list[tuple[int, int]] = [(0, 0) for _ in awf_folds]
     _fold_oos_bucket_sum: list[dict[tuple[int, str, str], float]] = [{} for _ in awf_folds]
     _fold_oos_bucket_cnt: list[dict[tuple[int, str, str], int]] = [{} for _ in awf_folds]
+    _selected_regime_return_sum_bps = np.zeros(
+        len(_routing_diag.active_state_names) if _routing_diag is not None else 0,
+        dtype=np.float64,
+    )
+    _selected_regime_bar_count = np.zeros(
+        len(_routing_diag.active_state_names) if _routing_diag is not None else 0,
+        dtype=np.int64,
+    )
 
     prof_bucket_routing = time.perf_counter() - _t_pre_loop
 
@@ -2118,6 +2129,14 @@ def _run_awf_simulation(
                     price_returns=bar_ret,
                     funding_rates=funding_rates,
                 ) - cost_baseline_ew
+                if (
+                    _selected_regime_return_sum_bps.size > 0
+                    and (selected or np.any(np.abs(w) > 1e-12))
+                ):
+                    _selected_state = int(_regime_code_1d[t]) if t < len(_regime_code_1d) else 0
+                    if 0 <= _selected_state < _selected_regime_return_sum_bps.size:
+                        _selected_regime_return_sum_bps[_selected_state] += float(r_h) * 10000.0
+                        _selected_regime_bar_count[_selected_state] += 1
                 all_rets_hybrid.append(r_h)
                 all_rets_baseline.append(r_b)
                 all_rets_baseline_ew.append(r_b_ew)
@@ -2344,6 +2363,26 @@ def _run_awf_simulation(
                     _fi, _rl, _bk[0], _bk[1], _bk[2],
                     _fit_edges[_bk], _oos_edges[_bk], _err, _n_bucket,
                 )
+
+    if _routing_diag is not None and _routing_diag.debug_diagnostics is not None:
+        _routing_diag = replace_selected_regime_debug_diagnostics(
+            routing_diag=_routing_diag,
+            selected_return_sum_bps=_selected_regime_return_sum_bps,
+            selected_bar_count=_selected_regime_bar_count,
+        )
+
+    if logger.isEnabledFor(logging.DEBUG) and _routing_diag is not None and _routing_diag.debug_diagnostics is not None:
+        _debug_diag = _routing_diag.debug_diagnostics
+        logger.debug("[REGIME-DEBUG-SELECTED]")
+        logger.debug("state  | bars | realized_return_bps")
+        logger.debug("-------------------------------")
+        for _state_name, _bars, _ret in zip(
+            _routing_diag.active_state_names,
+            _debug_diag.selected_regime_bar_count,
+            _debug_diag.selected_regime_return_bps,
+            strict=True,
+        ):
+            logger.debug("%-6s | %4d | %+18.1f", _state_name, _bars, _ret)
 
     return _AwfSimResult(
         rets_hybrid=all_rets_hybrid,

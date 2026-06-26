@@ -764,6 +764,51 @@ class RegimeRoutingDiagnostics:
     n_folds_evaluated: int
     bucket_hit_pct_by_fold: tuple[float, ...]
     js_divergence_by_fold: tuple[float, ...]
+    debug_diagnostics: RegimeDebugDiagnostics | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RegimeCellDebugStat:
+    fold_idx: int
+    state: int
+    state_name: str
+    family: str
+    tf: str
+    n_fit: int
+    n_oos: int
+    fit_edge_bps: float
+    pooled_fit_edge_bps: float
+    oos_realized_edge_bps: float
+    edge_gap_bps: float
+    sign_hit_rate: float
+    selected_hit_pct: float
+
+
+@dataclass(frozen=True, slots=True)
+class RegimeGranularityDebugStat:
+    label: Literal["pooled", "effective_3", "raw_6"]
+    state_count: int
+    proof_passed: bool
+    conditioning_path: Literal["regime_conditioned", "pooled_fallback"]
+    mean_lift_bps: float
+    nw_tstat: float
+    fold_pass_ratio: float
+    n_folds_evaluated: int
+    bucket_hit_pct_mean: float
+    oos_cell_ic: float
+    oos_cell_rmse_bps: float
+    oos_cell_bias_bps: float
+
+
+@dataclass(frozen=True, slots=True)
+class RegimeDebugDiagnostics:
+    granularity_stats: tuple[RegimeGranularityDebugStat, ...]
+    top_positive_cells: tuple[RegimeCellDebugStat, ...]
+    top_negative_cells: tuple[RegimeCellDebugStat, ...]
+    worst_error_cells: tuple[RegimeCellDebugStat, ...]
+    compression_loss_bps: float
+    selected_regime_return_bps: tuple[float, ...]
+    selected_regime_bar_count: tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)

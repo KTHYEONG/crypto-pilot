@@ -1333,6 +1333,9 @@ def _run_tiered_l2_study(
         proof_nw_tstat_threshold=float(getattr(cfg, "l2_regime_proof_nw_tstat", 1.5)),
         proof_fold_pass_ratio_threshold=float(getattr(cfg, "l2_regime_proof_fold_pass_ratio", 0.60)),
         fallback_mode=cast(Literal["pooled", "empty"], _fallback_mode),
+        debug_diagnostics_enabled=_logger.isEnabledFor(logging.DEBUG),
+        edge_floor_bps=float(getattr(cfg, "l2_bucket_edge_floor_bps", 0.0)),
+        debug_top_k=int(getattr(cfg, "l2_regime_debug_top_k", 10)),
     )
     l2_sim_cache = replace(l2_sim_cache,
         bucket_edges_by_fold=_routing_plan.effective_bucket_edges_by_fold,
@@ -1362,6 +1365,56 @@ def _run_tiered_l2_study(
             "[REGIME-L2] proof_failed path=%s effective_states=%d",
             _routing_plan.diagnostics.conditioning_path,
             _routing_plan.diagnostics.active_state_count,
+        )
+    if _logger.isEnabledFor(logging.DEBUG) and _routing_plan.diagnostics.debug_diagnostics is not None:
+        _debug_diag = _routing_plan.diagnostics.debug_diagnostics
+        _debug_top_k = max(int(getattr(cfg, "l2_regime_debug_top_k", 10)), 1)
+        _granularity_rows = [
+            (
+                stat.label,
+                str(stat.state_count),
+                ("✅" if stat.proof_passed else "❌"),
+                f"{stat.mean_lift_bps:.2f}",
+                f"{stat.nw_tstat:.2f}",
+                f"{stat.fold_pass_ratio:.2f}",
+                f"{stat.bucket_hit_pct_mean:.1f}",
+                f"{stat.oos_cell_ic:.3f}",
+                f"{stat.oos_cell_rmse_bps:.2f}",
+                f"{stat.oos_cell_bias_bps:.2f}",
+            )
+            for stat in _debug_diag.granularity_stats
+        ]
+        _log_ascii_table(
+            "[REGIME-DEBUG-GRANULARITY]",
+            ("label", "states", "proof", "lift_bps", "tstat", "fold_pass", "hit_pct", "cell_ic", "rmse", "bias"),
+            _granularity_rows,
+            (12, 6, 5, 8, 6, 9, 7, 7, 6, 6),
+        )
+        _cell_rows = [
+            (
+                str(rank),
+                f"{stat.state_name}/{stat.family}/{stat.tf}",
+                str(stat.fold_idx),
+                str(stat.n_fit),
+                str(stat.n_oos),
+                f"{stat.fit_edge_bps:+.1f}",
+                f"{stat.pooled_fit_edge_bps:+.1f}",
+                f"{stat.oos_realized_edge_bps:+.1f}",
+                f"{stat.edge_gap_bps:+.1f}",
+                f"{stat.sign_hit_rate:.2f}",
+                f"{stat.selected_hit_pct:.2f}",
+            )
+            for rank, stat in enumerate(_debug_diag.worst_error_cells[:_debug_top_k], start=1)
+        ]
+        _log_ascii_table(
+            "[REGIME-DEBUG-CELLS]",
+            ("rank", "bucket", "fold", "n_fit", "n_oos", "fit", "pooled", "oos", "gap", "sign_hit", "selected_hit"),
+            _cell_rows,
+            (4, 18, 4, 5, 5, 7, 7, 7, 7, 8, 12),
+        )
+        _logger.debug(
+            "[REGIME-DEBUG-GRANULARITY] compression_loss_bps=%.2f",
+            _debug_diag.compression_loss_bps,
         )
 
     ctx = TieredContext(
