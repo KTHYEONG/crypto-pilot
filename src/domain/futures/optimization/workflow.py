@@ -1810,7 +1810,6 @@ def evaluate_l2_trial(
     sharpe_hac_hybrid = _sharpe_hac(rets_hybrid, bars_per_year=bars_per_year)
     sharpe_hac_baseline = _sharpe_hac(rets_baseline, bars_per_year=bars_per_year)
     psr_hybrid = _psr(rets_hybrid, bars_per_year=bars_per_year)
-    # scale-invariant 지표: unit-vol(L=1) 기준 유지 (sharpe/sortino/calmar/psr 모두)
     sortino_hybrid = _sortino(rets_hybrid, bars_per_year=bars_per_year)
     trade_count = int(sim.trade_count)
 
