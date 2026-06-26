@@ -5,7 +5,7 @@ import re as _re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -25,6 +25,13 @@ if TYPE_CHECKING:
 
 from src.domain.futures.strategy.market_regime import compress_regime_codes
 from src.domain.futures.strategy.regime_evaluation import evaluate_regime_lift_proof
+from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+    RegimeCellDebugStat,
+    RegimeDebugDiagnostics,
+    RegimeGranularityDebugStat,
+    RegimeRoutingDiagnostics,
+    RegimeRoutingPlan,
+)
 from src.domain.futures.strategy.tiered_workflow.metrics import _newey_west_ic_tstat
 
 logger = logging.getLogger(__name__)
@@ -697,6 +704,526 @@ def _compute_js_divergence(
     return float(js / 2.0)
 
 
+@dataclass(slots=True)
+class _RegimeCellAccumulator:
+    fold_idx: int
+    state: int
+    state_name: str
+    family: str
+    tf: str
+    n_fit: int = 0
+    n_oos: int = 0
+    oos_realized_sum_bps: float = 0.0
+    sign_hit_count: int = 0
+    selected_hit_count: int = 0
+
+
+def _state_name_for_index(state_names: Sequence[str], state: int) -> str:
+    if 0 <= state < len(state_names):
+        return state_names[state]
+    return f"unknown({state})"
+
+
+def _collect_regime_cell_accumulators(
+    *,
+    cache: L2SimulationCache,
+    aligned: AlignedMarketData,
+    awf_folds: Sequence[WFFold],
+    regime_code_1d: NDArray[np.int8],
+    state_names: tuple[str, ...],
+    bucket_edges_by_fold: Sequence[Mapping[tuple[int, str, str], float]],
+    pooled_edges_by_fold: Sequence[Mapping[tuple[str, str], float]],
+    cost_bps: float,
+    edge_floor_bps: float,
+) -> dict[tuple[int, int, str, str], _RegimeCellAccumulator]:
+    t_max = int(cache.signal_mask_2d.shape[0])
+    close_2d = np.asarray(aligned.close_2d, dtype=np.float64)
+    accumulators: dict[tuple[int, int, str, str], _RegimeCellAccumulator] = {}
+
+    for fold_idx, fold in enumerate(awf_folds):
+        fit_start = int(fold.fit_start)
+        fit_end = int(fold.oos_start)
+        oos_start = int(fold.oos_start)
+        oos_end = min(int(fold.oos_end), t_max)
+        fit_edges = bucket_edges_by_fold[fold_idx] if fold_idx < len(bucket_edges_by_fold) else {}
+
+        for t in range(fit_start, fit_end):
+            if t + 1 >= t_max:
+                break
+            active_js = np.where(cache.signal_mask_2d[t])[0]
+            if len(active_js) == 0:
+                continue
+            state = int(regime_code_1d[t]) if t < regime_code_1d.shape[0] else 0
+            state_name = _state_name_for_index(state_names, state)
+            for j in active_js:
+                family, tf = _parse_meta_group_ids(cache.sleeve_ids[int(j)][1])
+                key = (fold_idx, state, family, tf)
+                acc = accumulators.get(key)
+                if acc is None:
+                    acc = _RegimeCellAccumulator(
+                        fold_idx=fold_idx,
+                        state=state,
+                        state_name=state_name,
+                        family=family,
+                        tf=tf,
+                    )
+                    accumulators[key] = acc
+                acc.n_fit += 1
+
+        for t in range(oos_start, oos_end):
+            if t + 1 >= t_max:
+                break
+            active_js = np.where(cache.signal_mask_2d[t])[0]
+            if len(active_js) == 0:
+                continue
+            state = int(regime_code_1d[t]) if t < regime_code_1d.shape[0] else 0
+            state_name = _state_name_for_index(state_names, state)
+            for j in active_js:
+                family, tf = _parse_meta_group_ids(cache.sleeve_ids[int(j)][1])
+                key = (fold_idx, state, family, tf)
+                acc = accumulators.get(key)
+                if acc is None:
+                    acc = _RegimeCellAccumulator(
+                        fold_idx=fold_idx,
+                        state=state,
+                        state_name=state_name,
+                        family=family,
+                        tf=tf,
+                    )
+                    accumulators[key] = acc
+                realized_edge = _compute_sleeve_realized_edge_bps(
+                    cache=cache,
+                    close_2d=close_2d,
+                    t=t,
+                    sleeve_idx=int(j),
+                        window_end=oos_end,
+                        cost_bps=cost_bps,
+                    )
+                fit_edge = float(fit_edges.get((state, family, tf), 0.0))
+                acc.n_oos += 1
+                acc.oos_realized_sum_bps += realized_edge
+                if fit_edge > edge_floor_bps:
+                    acc.selected_hit_count += 1
+                if fit_edge != 0.0 and realized_edge != 0.0 and np.sign(fit_edge) == np.sign(realized_edge):
+                    acc.sign_hit_count += 1
+
+    return accumulators
+
+
+def _finalize_cell_stats(
+    accumulators: Mapping[tuple[int, int, str, str], _RegimeCellAccumulator],
+    *,
+    bucket_edges_by_fold: Sequence[Mapping[tuple[int, str, str], float]],
+    pooled_edges_by_fold: Sequence[Mapping[tuple[str, str], float]],
+) -> tuple[RegimeCellDebugStat, ...]:
+    stats: list[RegimeCellDebugStat] = []
+    for key in sorted(accumulators):
+        acc = accumulators[key]
+        fit_edges = bucket_edges_by_fold[acc.fold_idx] if acc.fold_idx < len(bucket_edges_by_fold) else {}
+        pooled_edges = pooled_edges_by_fold[acc.fold_idx] if acc.fold_idx < len(pooled_edges_by_fold) else {}
+        fit_edge_bps = float(fit_edges.get((acc.state, acc.family, acc.tf), 0.0))
+        pooled_fit_edge_bps = float(pooled_edges.get((acc.family, acc.tf), 0.0))
+        oos_realized_edge_bps = acc.oos_realized_sum_bps / max(acc.n_oos, 1)
+        stats.append(
+            RegimeCellDebugStat(
+                fold_idx=acc.fold_idx,
+                state=acc.state,
+                state_name=acc.state_name,
+                family=acc.family,
+                tf=acc.tf,
+                n_fit=acc.n_fit,
+                n_oos=acc.n_oos,
+                fit_edge_bps=fit_edge_bps,
+                pooled_fit_edge_bps=pooled_fit_edge_bps,
+                oos_realized_edge_bps=oos_realized_edge_bps,
+                edge_gap_bps=oos_realized_edge_bps - fit_edge_bps,
+                sign_hit_rate=acc.sign_hit_count / max(acc.n_oos, 1),
+                selected_hit_pct=acc.selected_hit_count / max(acc.n_oos, 1),
+            )
+    )
+    return tuple(stats)
+
+
+def _build_regime_proof_inputs(
+    *,
+    cache: L2SimulationCache,
+    aligned: AlignedMarketData,
+    awf_folds: Sequence[WFFold],
+    regime_code_1d: NDArray[np.int8],
+    bucket_edges_by_fold: Sequence[Mapping[tuple[int, str, str], float]],
+    pooled_edges_by_fold: Sequence[Mapping[tuple[str, str], float]],
+    cost_bps: float,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.int32]]:
+    t_max = int(cache.signal_mask_2d.shape[0])
+    close_2d = np.asarray(aligned.close_2d, dtype=np.float64)
+    regime_cond_edges: list[float] = []
+    pooled_edges: list[float] = []
+    realized_edges: list[float] = []
+    fold_ids: list[int] = []
+
+    for fold_idx, fold in enumerate(awf_folds):
+        oos_start = int(fold.oos_start)
+        oos_end = min(int(fold.oos_end), t_max)
+        fit_edges = bucket_edges_by_fold[fold_idx] if fold_idx < len(bucket_edges_by_fold) else {}
+        pooled_fit_edges = pooled_edges_by_fold[fold_idx] if fold_idx < len(pooled_edges_by_fold) else {}
+        for t in range(oos_start, oos_end):
+            if t + 1 >= t_max:
+                break
+            active_js = np.where(cache.signal_mask_2d[t])[0]
+            if len(active_js) == 0:
+                continue
+            state = int(regime_code_1d[t]) if t < regime_code_1d.shape[0] else 0
+            for j in active_js:
+                family, tf = _parse_meta_group_ids(cache.sleeve_ids[int(j)][1])
+                regime_cond_edges.append(float(fit_edges.get((state, family, tf), 0.0)))
+                pooled_edges.append(float(pooled_fit_edges.get((family, tf), 0.0)))
+                realized_edges.append(
+                    _compute_sleeve_realized_edge_bps(
+                        cache=cache,
+                        close_2d=close_2d,
+                        t=t,
+                        sleeve_idx=int(j),
+                        window_end=oos_end,
+                        cost_bps=cost_bps,
+                    )
+                )
+                fold_ids.append(fold_idx)
+
+    return (
+        np.asarray(regime_cond_edges, dtype=np.float64),
+        np.asarray(pooled_edges, dtype=np.float64),
+        np.asarray(realized_edges, dtype=np.float64),
+        np.asarray(fold_ids, dtype=np.int32),
+    )
+
+
+def compute_regime_cell_debug_stats(
+    *,
+    cache: L2SimulationCache,
+    aligned: AlignedMarketData,
+    awf_folds: Sequence[WFFold],
+    regime_code_1d: NDArray[np.int8],
+    state_names: tuple[str, ...],
+    bucket_edges_by_fold: Sequence[Mapping[tuple[int, str, str], float]],
+    pooled_edges_by_fold: Sequence[Mapping[tuple[str, str], float]],
+    cost_bps: float = 6.0,
+    edge_floor_bps: float = 0.0,
+) -> tuple[RegimeCellDebugStat, ...]:
+    """Compute fold/state/family/TF regime debug statistics."""
+    accumulators = _collect_regime_cell_accumulators(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=awf_folds,
+        regime_code_1d=regime_code_1d,
+        state_names=state_names,
+        bucket_edges_by_fold=bucket_edges_by_fold,
+        pooled_edges_by_fold=pooled_edges_by_fold,
+        cost_bps=cost_bps,
+        edge_floor_bps=edge_floor_bps,
+    )
+    return _finalize_cell_stats(
+        accumulators,
+        bucket_edges_by_fold=bucket_edges_by_fold,
+        pooled_edges_by_fold=pooled_edges_by_fold,
+    )
+
+
+def _granularity_row(
+    *,
+    label: Literal["pooled", "effective_3", "raw_6"],
+    state_count: int,
+    proof_result: object,
+    bucket_hit_pct_by_fold: Sequence[float],
+    cell_stats: Sequence[RegimeCellDebugStat],
+) -> RegimeGranularityDebugStat:
+    fit_vals = np.array([stat.fit_edge_bps for stat in cell_stats], dtype=np.float64)
+    oos_vals = np.array([stat.oos_realized_edge_bps for stat in cell_stats], dtype=np.float64)
+    if fit_vals.size >= 3 and oos_vals.size >= 3:
+        from scipy.stats import spearmanr
+
+        ic = float(spearmanr(fit_vals, oos_vals).correlation)
+        if not np.isfinite(ic):
+            ic = 0.0
+    else:
+        ic = 0.0
+    if fit_vals.size > 0:
+        errors = oos_vals - fit_vals
+        rmse = float(np.sqrt(np.mean(errors ** 2)))
+        bias = float(np.mean(errors))
+    else:
+        rmse = 0.0
+        bias = 0.0
+    mean_hit = float(np.mean(bucket_hit_pct_by_fold)) if bucket_hit_pct_by_fold else 0.0
+    proof_passed = bool(getattr(proof_result, "proof_passed", False))
+    conditioning_path = cast(
+        Literal["regime_conditioned", "pooled_fallback"],
+        getattr(proof_result, "conditioning_path", "pooled_fallback"),
+    )
+    mean_lift_bps = float(getattr(proof_result, "mean_lift_bps", 0.0))
+    nw_tstat = float(getattr(proof_result, "nw_tstat", 0.0))
+    fold_pass_ratio = float(getattr(proof_result, "fold_pass_ratio", 0.0))
+    n_folds_evaluated = int(getattr(proof_result, "n_folds_evaluated", 0))
+    return RegimeGranularityDebugStat(
+        label=label,
+        state_count=state_count,
+        proof_passed=proof_passed,
+        conditioning_path=conditioning_path,
+        mean_lift_bps=mean_lift_bps,
+        nw_tstat=nw_tstat,
+        fold_pass_ratio=fold_pass_ratio,
+        n_folds_evaluated=n_folds_evaluated,
+        bucket_hit_pct_mean=mean_hit,
+        oos_cell_ic=ic,
+        oos_cell_rmse_bps=rmse,
+        oos_cell_bias_bps=bias,
+    )
+
+
+def evaluate_regime_granularity_debug(
+    *,
+    cache: L2SimulationCache,
+    aligned: AlignedMarketData,
+    awf_folds: Sequence[WFFold],
+    raw_regime_code_1d: NDArray[np.int8],
+    effective_regime_code_1d: NDArray[np.int8],
+    effective_bucket_edges_by_fold: Sequence[Mapping[tuple[int, str, str], float]],
+    raw_bucket_edges_by_fold: Sequence[Mapping[tuple[int, str, str], float]],
+    pooled_edges_by_fold: Sequence[Mapping[tuple[str, str], float]],
+    cost_bps: float = 6.0,
+    edge_floor_bps: float = 0.0,
+    proof_nw_tstat_threshold: float = 1.5,
+    proof_fold_pass_ratio_threshold: float = 0.60,
+    max_holding_bars: int = 6,
+    top_k: int = 10,
+) -> RegimeDebugDiagnostics:
+    """Build DEBUG observability payload for pooled / compressed / raw regime layers."""
+    pool_regime_code = np.zeros_like(effective_regime_code_1d, dtype=np.int8)
+    pooled_bucket_edges_by_fold = tuple(
+        replicate_pooled_edges_by_regime(pooled_edges, state_count=1) for pooled_edges in pooled_edges_by_fold
+    )
+    pooled_stats = compute_regime_cell_debug_stats(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=awf_folds,
+        regime_code_1d=pool_regime_code,
+        state_names=("pooled",),
+        bucket_edges_by_fold=pooled_bucket_edges_by_fold,
+        pooled_edges_by_fold=pooled_edges_by_fold,
+        cost_bps=cost_bps,
+        edge_floor_bps=edge_floor_bps,
+    )
+
+    pooled_regime_cond, pooled_pooled_edges, pooled_realized_edges, pooled_fold_ids = _build_regime_proof_inputs(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=awf_folds,
+        regime_code_1d=pool_regime_code,
+        bucket_edges_by_fold=pooled_bucket_edges_by_fold,
+        pooled_edges_by_fold=pooled_edges_by_fold,
+        cost_bps=cost_bps,
+    )
+    pooled_proof = evaluate_regime_lift_proof(
+        regime_cond_edges=pooled_regime_cond,
+        pooled_edges=pooled_pooled_edges,
+        realized_edges=pooled_realized_edges,
+        fold_ids=pooled_fold_ids,
+        n_regime_cells=max(len(pooled_bucket_edges_by_fold[0]) if pooled_bucket_edges_by_fold else 0, 1),
+        nw_tstat_threshold=proof_nw_tstat_threshold,
+        fold_pass_ratio_threshold=proof_fold_pass_ratio_threshold,
+        max_holding_bars=max_holding_bars,
+        proof_enabled=True,
+    )
+    effective_stats = compute_regime_cell_debug_stats(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=awf_folds,
+        regime_code_1d=effective_regime_code_1d,
+        state_names=("bull", "bear", "crisis"),
+        bucket_edges_by_fold=effective_bucket_edges_by_fold,
+        pooled_edges_by_fold=pooled_edges_by_fold,
+        cost_bps=cost_bps,
+        edge_floor_bps=edge_floor_bps,
+    )
+    effective_regime_cond, effective_pooled_edges, effective_realized_edges, effective_fold_ids = (
+        _build_regime_proof_inputs(
+            cache=cache,
+            aligned=aligned,
+            awf_folds=awf_folds,
+            regime_code_1d=effective_regime_code_1d,
+            bucket_edges_by_fold=effective_bucket_edges_by_fold,
+            pooled_edges_by_fold=pooled_edges_by_fold,
+            cost_bps=cost_bps,
+        )
+    )
+    effective_proof = evaluate_regime_lift_proof(
+        regime_cond_edges=effective_regime_cond,
+        pooled_edges=effective_pooled_edges,
+        realized_edges=effective_realized_edges,
+        fold_ids=effective_fold_ids,
+        n_regime_cells=max(len(effective_bucket_edges_by_fold[0]) if effective_bucket_edges_by_fold else 0, 1),
+        nw_tstat_threshold=proof_nw_tstat_threshold,
+        fold_pass_ratio_threshold=proof_fold_pass_ratio_threshold,
+        max_holding_bars=max_holding_bars,
+        proof_enabled=True,
+    )
+    raw_stats = compute_regime_cell_debug_stats(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=awf_folds,
+        regime_code_1d=raw_regime_code_1d,
+        state_names=("bull_q", "bull_v", "bear_q", "bear_v", "trans", "crash"),
+        bucket_edges_by_fold=raw_bucket_edges_by_fold,
+        pooled_edges_by_fold=pooled_edges_by_fold,
+        cost_bps=cost_bps,
+        edge_floor_bps=edge_floor_bps,
+    )
+    raw_regime_cond, raw_pooled_edges, raw_realized_edges, raw_fold_ids = _build_regime_proof_inputs(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=awf_folds,
+        regime_code_1d=raw_regime_code_1d,
+        bucket_edges_by_fold=raw_bucket_edges_by_fold,
+        pooled_edges_by_fold=pooled_edges_by_fold,
+        cost_bps=cost_bps,
+    )
+    raw_proof = evaluate_regime_lift_proof(
+        regime_cond_edges=raw_regime_cond,
+        pooled_edges=raw_pooled_edges,
+        realized_edges=raw_realized_edges,
+        fold_ids=raw_fold_ids,
+        n_regime_cells=max(len(raw_bucket_edges_by_fold[0]) if raw_bucket_edges_by_fold else 0, 1),
+        nw_tstat_threshold=proof_nw_tstat_threshold,
+        fold_pass_ratio_threshold=proof_fold_pass_ratio_threshold,
+        max_holding_bars=max_holding_bars,
+        proof_enabled=True,
+    )
+
+    granularity_stats = (
+        _granularity_row(
+            label="pooled",
+            state_count=1,
+            proof_result=pooled_proof,
+            bucket_hit_pct_by_fold=[0.0 for _ in awf_folds],
+            cell_stats=pooled_stats,
+        ),
+        _granularity_row(
+            label="effective_3",
+            state_count=3,
+            proof_result=effective_proof,
+            bucket_hit_pct_by_fold=[
+                float(x)
+                for x in _bucket_hit_pct_by_fold_for(
+                    cache=cache,
+                    aligned=aligned,
+                    awf_folds=awf_folds,
+                    regime_code_1d=effective_regime_code_1d,
+                    bucket_edges_by_fold=effective_bucket_edges_by_fold,
+                    edge_floor_bps=edge_floor_bps,
+                )
+            ],
+            cell_stats=effective_stats,
+        ),
+        _granularity_row(
+            label="raw_6",
+            state_count=6,
+            proof_result=raw_proof,
+            bucket_hit_pct_by_fold=[
+                float(x)
+                for x in _bucket_hit_pct_by_fold_for(
+                    cache=cache,
+                    aligned=aligned,
+                    awf_folds=awf_folds,
+                    regime_code_1d=raw_regime_code_1d,
+                    bucket_edges_by_fold=raw_bucket_edges_by_fold,
+                    edge_floor_bps=edge_floor_bps,
+                )
+            ],
+            cell_stats=raw_stats,
+        ),
+    )
+
+    effective_state_count = max(
+        (state for fold_map in effective_bucket_edges_by_fold for state, _, _ in fold_map),
+        default=-1,
+    ) + 1
+    if effective_state_count <= 0 and effective_regime_code_1d.size > 0:
+        effective_state_count = int(np.max(effective_regime_code_1d)) + 1
+
+    if effective_stats and effective_state_count > 0:
+        state_return_sum = np.zeros(effective_state_count, dtype=np.float64)
+        state_return_count = np.zeros(effective_state_count, dtype=np.int64)
+        for stat in effective_stats:
+            if 0 <= stat.state < effective_state_count:
+                state_return_sum[stat.state] += stat.oos_realized_edge_bps * stat.n_oos
+                state_return_count[stat.state] += stat.n_oos
+        selected_regime_return_bps = tuple(
+            float(state_return_sum[idx] / max(state_return_count[idx], 1)) for idx in range(effective_state_count)
+        )
+        selected_regime_bar_count = tuple(int(state_return_count[idx]) for idx in range(effective_state_count))
+    else:
+        selected_regime_return_bps = tuple(0.0 for _ in range(max(effective_state_count, 0)))
+        selected_regime_bar_count = tuple(0 for _ in range(max(effective_state_count, 0)))
+
+    def _mean_lift_for(label: str) -> float:
+        for stat in granularity_stats:
+            if stat.label == label:
+                return float(stat.mean_lift_bps)
+        return 0.0
+
+    top_positive_cells = tuple(sorted(effective_stats, key=lambda s: s.oos_realized_edge_bps, reverse=True)[:top_k])
+    top_negative_cells = tuple(sorted(effective_stats, key=lambda s: s.oos_realized_edge_bps)[:top_k])
+    worst_error_cells = tuple(sorted(effective_stats, key=lambda s: abs(s.edge_gap_bps), reverse=True)[:top_k])
+
+    return RegimeDebugDiagnostics(
+        granularity_stats=granularity_stats,
+        top_positive_cells=top_positive_cells,
+        top_negative_cells=top_negative_cells,
+        worst_error_cells=worst_error_cells,
+        compression_loss_bps=_mean_lift_for("raw_6") - _mean_lift_for("effective_3"),
+        selected_regime_return_bps=selected_regime_return_bps,
+        selected_regime_bar_count=selected_regime_bar_count,
+    )
+
+
+def _bucket_hit_pct_by_fold_for(
+    *,
+    cache: L2SimulationCache,
+    aligned: AlignedMarketData,
+    awf_folds: Sequence[WFFold],
+    regime_code_1d: NDArray[np.int8],
+    bucket_edges_by_fold: Sequence[Mapping[tuple[int, str, str], float]],
+    edge_floor_bps: float,
+) -> tuple[float, ...]:
+    t_max = int(cache.signal_mask_2d.shape[0])
+    hit_pcts: list[float] = []
+    for fold_idx, fold in enumerate(awf_folds):
+        oos_start = int(fold.oos_start)
+        oos_end = min(int(fold.oos_end), t_max)
+        if oos_start >= oos_end:
+            hit_pcts.append(0.0)
+            continue
+        active_bars = 0
+        bars_with_hit = 0
+        for t in range(oos_start, oos_end):
+            if t + 1 >= t_max:
+                break
+            active_js = np.where(cache.signal_mask_2d[t])[0]
+            if len(active_js) == 0:
+                continue
+            active_bars += 1
+            state = int(regime_code_1d[t]) if t < regime_code_1d.shape[0] else 0
+            has_hit = False
+            for j in active_js:
+                family, tf = _parse_meta_group_ids(cache.sleeve_ids[int(j)][1])
+                if float(bucket_edges_by_fold[fold_idx].get((state, family, tf), 0.0)) > edge_floor_bps:
+                    has_hit = True
+                    break
+            if has_hit:
+                bars_with_hit += 1
+        hit_pcts.append((float(bars_with_hit) / float(active_bars) * 100.0) if active_bars else 0.0)
+    return tuple(hit_pcts)
+
+
 def build_regime_routing_plan(
     *,
     cache: L2SimulationCache,
@@ -712,13 +1239,11 @@ def build_regime_routing_plan(
     proof_fold_pass_ratio_threshold: float = 0.60,
     max_holding_bars: int = 6,
     fallback_mode: Literal["pooled", "empty"] = "pooled",
+    debug_diagnostics_enabled: bool = False,
+    edge_floor_bps: float = 0.0,
+    debug_top_k: int = 10,
 ) -> RegimeRoutingPlan:
     """Build the fold-local routing plan used by L2 bucket selection."""
-    from src.domain.futures.strategy.tiered_workflow.dataclasses import (
-        RegimeRoutingDiagnostics,
-        RegimeRoutingPlan,
-    )
-
     n_bars = int(np.asarray(aligned.close_2d).shape[0])
     regime_code_arr = np.asarray(raw_regime_code_1d, dtype=np.int8)
     if regime_code_arr.shape[0] != n_bars:
@@ -732,6 +1257,7 @@ def build_regime_routing_plan(
     )
     state_count = len(state_names)
 
+    effective_bucket_edges_fit_by_fold: list[dict[tuple[int, str, str], float]] = []
     raw_bucket_edges_by_fold: list[dict[tuple[int, str, str], float]] = []
     pooled_edges_by_fold: list[dict[tuple[str, str], float]] = []
     proof_regime_cond: list[float] = []
@@ -750,7 +1276,7 @@ def build_regime_routing_plan(
         oos_start = int(fold.oos_start)
         oos_end = min(int(fold.oos_end), t_max)
 
-        raw_bucket_edges = (
+        effective_bucket_edges = (
             compute_bucket_realized_edges(
                 cache,
                 aligned,
@@ -764,6 +1290,20 @@ def build_regime_routing_plan(
             if fit_start < fit_end
             else {}
         )
+        raw_bucket_edges = (
+            compute_bucket_realized_edges(
+                cache,
+                aligned,
+                fit_start,
+                fit_end,
+                regime_code_arr,
+                cost_bps=cost_bps,
+                min_n=min_n,
+                shrinkage=shrinkage,
+            )
+            if compression_enabled and fit_start < fit_end
+            else dict(effective_bucket_edges)
+        )
         pooled_edges = (
             compute_pooled_realized_edges(
                 cache,
@@ -776,6 +1316,7 @@ def build_regime_routing_plan(
             if fit_start < fit_end
             else {}
         )
+        effective_bucket_edges_fit_by_fold.append(effective_bucket_edges)
         raw_bucket_edges_by_fold.append(raw_bucket_edges)
         pooled_edges_by_fold.append(pooled_edges)
         js_divergence_by_fold.append(
@@ -809,13 +1350,13 @@ def build_regime_routing_plan(
                     window_end=oos_end,
                     cost_bps=cost_bps,
                 )
-                regime_edge = float(raw_bucket_edges.get((regime_now, family, tf), 0.0))
+                regime_edge = float(effective_bucket_edges.get((regime_now, family, tf), 0.0))
                 pooled_edge = float(pooled_edges.get((family, tf), 0.0))
                 proof_regime_cond.append(regime_edge)
                 proof_pooled.append(pooled_edge)
                 proof_realized.append(realized_edge)
                 proof_fold_ids.append(fold_idx)
-                if (regime_now, family, tf) in raw_bucket_edges:
+                if (regime_now, family, tf) in effective_bucket_edges:
                     has_hit = True
             if has_hit:
                 bars_with_hit += 1
@@ -846,7 +1387,7 @@ def build_regime_routing_plan(
     )
 
     if proof_passed:
-        effective_bucket_edges_by_fold = tuple(raw_bucket_edges_by_fold)
+        effective_bucket_edges_by_fold = tuple(effective_bucket_edges_fit_by_fold)
     elif fallback_mode == "pooled":
         effective_bucket_edges_by_fold = tuple(
             replicate_pooled_edges_by_regime(pooled_edges, state_count=state_count)
@@ -854,6 +1395,25 @@ def build_regime_routing_plan(
         )
     else:
         effective_bucket_edges_by_fold = tuple({} for _ in awf_folds)
+
+    debug_diagnostics: RegimeDebugDiagnostics | None = None
+    if debug_diagnostics_enabled:
+        debug_diagnostics = evaluate_regime_granularity_debug(
+            cache=cache,
+            aligned=aligned,
+            awf_folds=awf_folds,
+            raw_regime_code_1d=regime_code_arr,
+            effective_regime_code_1d=effective_codes,
+            effective_bucket_edges_by_fold=effective_bucket_edges_by_fold,
+            raw_bucket_edges_by_fold=raw_bucket_edges_by_fold,
+            pooled_edges_by_fold=pooled_edges_by_fold,
+            cost_bps=cost_bps,
+            edge_floor_bps=edge_floor_bps,
+            proof_nw_tstat_threshold=proof_nw_tstat_threshold,
+            proof_fold_pass_ratio_threshold=proof_fold_pass_ratio_threshold,
+            max_holding_bars=max_holding_bars,
+            top_k=debug_top_k,
+        )
 
     diagnostics = RegimeRoutingDiagnostics(
         active_state_count=state_count,
@@ -869,6 +1429,7 @@ def build_regime_routing_plan(
         n_folds_evaluated=proof_result.n_folds_evaluated,
         bucket_hit_pct_by_fold=tuple(bucket_hit_pct_by_fold),
         js_divergence_by_fold=tuple(js_divergence_by_fold),
+        debug_diagnostics=debug_diagnostics,
     )
     return RegimeRoutingPlan(
         effective_bucket_edges_by_fold=effective_bucket_edges_by_fold,

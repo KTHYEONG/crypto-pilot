@@ -144,3 +144,8 @@ ai_read_policy: when_related
 - **Delta:** `L2SimulationCache`에 `bucket_edges_by_fold` 및 `regime_code_1d` 필드 추가. `_run_tiered_l2_study`에서 folds + regime code precompute 후 `replace()`로 cache에 주입. `_run_awf_simulation`에서 캐시 hit 시 `compute_bucket_realized_edges`/`compute_market_regime_context` 재계산 skip. Fallback path 유지(하위호환).
 - **Rationale:** Bucket routing은 trial-param 독립(align, folds, regime_code만 의존). Regime code도 aligned만으로 계산되며 `l2_routing_mode` trial param과 무관. 프로파일링 결과 `regime_code_1d` 재계산이 per-trial 2.51s(69%) 차지. 캐시로 0.12s로 단축(20x). 전체 per-trial 3.6s → 1.2s(3x). 200 trials × 6 workers ≈ 40초.
 - **Key Verification:** `[L2-BUCKET-CACHE] HIT` DEBUG 로그 확인. `awf_total regime=0.12s` 안정화. 59개 테스트 전부 PASS.
+
+## [2026-06-26] Regime DEBUG Observability — 3-state summary + raw 6-state shadow
+- **Delta:** `build_regime_routing_plan()`에 `debug_diagnostics`를 연결하고, `opt_main_futures.py` / `awf_sim.py`가 `"[REGIME-DEBUG-GRANULARITY]"`, `"[REGIME-DEBUG-CELLS]"`, `"[REGIME-DEBUG-SELECTED]"`를 DEBUG로 출력하도록 정리했다. `awf_sim.py`는 selected-book realized return을 regime state별로 재집계한다. `"[REGIME]"`는 상태 분포 요약만 유지하고 raw 6-state 1-line 로그는 제거했다.
+- **Rationale:** `stable` 분류는 regime 분포 안정성만 보여주고 L2 자산증식 유효성은 증명하지 못한다. DEBUG 결과에서 effective_3는 proof 실패, raw_6는 정보는 있으나 OOS cell error가 커서, production routing은 유지하되 diagnostics로만 원인 분해가 가능해야 했다. selected-regime replay는 realized 손익 기준으로 회귀해야 하므로 sleeve 평균이 아니라 state별 실제 누적 수익으로 교체했다.
+- **Key Verification:** DEBUG 실행에서 `pooled_fallback`, `effective_3` proof 실패, `raw_6` compression_loss_bps=48.38을 확인했다. selected-regime table은 bull/bear/crisis realized return을 직접 반영한다. 최종 L2 scorecard는 `growth_lcb`/`cagr` 차단을 유지했다.

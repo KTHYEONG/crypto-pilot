@@ -21,7 +21,15 @@ import pytest
 
 from src.domain.futures.strategy.cs_rank import SymbolSignal
 from src.domain.futures.strategy.market_regime import compute_market_regime_context
+from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+    RegimeDebugDiagnostics,
+    RegimeGranularityDebugStat,
+    RegimeRoutingDiagnostics,
+)
 from src.domain.futures.strategy.tiered_workflow.l2_meta import filter_sleeves_by_bucket
+from src.domain.futures.strategy.tiered_workflow.regime_debug import (
+    replace_selected_regime_debug_diagnostics,
+)
 
 # Reuse the existing test helper from test_market_regime.py
 from tests.unit.domain.futures.strategy.test_market_regime import _make_aligned
@@ -293,6 +301,70 @@ def test_awf_sim_consumes_regime_routing_diagnostics_for_debug() -> None:
     assert "cache.regime_routing_diagnostics" in source
     assert "[L2-REGIME-DIAG]" in source
     assert "active_state_names" in source
+
+
+def test_regime_debug_log_tables_are_declared_in_source() -> None:
+    """DEBUG 표형식 출력 계약이 source 상에 노출되는지 검증."""
+    opt_source = Path("src/execution/opt_main_futures.py").read_text(encoding="utf-8")
+    awf_source = Path("src/domain/futures/strategy/tiered_workflow/awf_sim.py").read_text(encoding="utf-8")
+
+    assert "[REGIME-DEBUG-GRANULARITY]" in opt_source
+    assert "[REGIME-DEBUG-CELLS]" in opt_source
+    assert "compression_loss_bps" in opt_source
+    assert "[REGIME-DEBUG-SELECTED]" in awf_source
+    assert "state  | bars | realized_return_bps" in awf_source
+
+
+def test_replace_selected_regime_debug_diagnostics_uses_realized_bar_returns() -> None:
+    routing_diag = RegimeRoutingDiagnostics(
+        active_state_count=3,
+        active_state_names=("bull", "bear", "crisis"),
+        compression_enabled=True,
+        proof_passed=False,
+        conditioning_path="pooled_fallback",
+        mean_lift_bps=0.0,
+        n_eff=0.0,
+        nw_tstat=0.0,
+        deflated_sharpe=0.0,
+        fold_pass_ratio=0.0,
+        n_folds_evaluated=0,
+        bucket_hit_pct_by_fold=(),
+        js_divergence_by_fold=(),
+        debug_diagnostics=RegimeDebugDiagnostics(
+            granularity_stats=(
+                RegimeGranularityDebugStat(
+                    label="effective_3",
+                    state_count=3,
+                    proof_passed=False,
+                    conditioning_path="pooled_fallback",
+                    mean_lift_bps=0.0,
+                    nw_tstat=0.0,
+                    fold_pass_ratio=0.0,
+                    n_folds_evaluated=0,
+                    bucket_hit_pct_mean=0.0,
+                    oos_cell_ic=0.0,
+                    oos_cell_rmse_bps=0.0,
+                    oos_cell_bias_bps=0.0,
+                ),
+            ),
+            top_positive_cells=(),
+            top_negative_cells=(),
+            worst_error_cells=(),
+            compression_loss_bps=0.0,
+            selected_regime_return_bps=(999.0, 999.0, 999.0),
+            selected_regime_bar_count=(9, 9, 9),
+        ),
+    )
+
+    updated = replace_selected_regime_debug_diagnostics(
+        routing_diag=routing_diag,
+        selected_return_sum_bps=np.array([30.0, -20.0, 0.0], dtype=np.float64),
+        selected_bar_count=np.array([2, 4, 0], dtype=np.int64),
+    )
+
+    assert updated.debug_diagnostics is not None
+    assert updated.debug_diagnostics.selected_regime_return_bps == pytest.approx((15.0, -5.0, 0.0))
+    assert updated.debug_diagnostics.selected_regime_bar_count == (2, 4, 0)
 
 
 def test_filter_sleeves_by_bucket_when_current_regime_bucket_missing_returns_empty() -> None:
