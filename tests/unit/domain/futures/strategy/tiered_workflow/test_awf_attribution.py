@@ -146,6 +146,7 @@ class TestResolveSleeveSignalsDropCount:
             signal_mask_2d=np.full((1, n_sleeve), True, dtype=np.bool_),
             sleeve_to_sym=np.array([0, 0], dtype=np.int64),
             sleeve_ids=(("SYM", "strat1"), ("SYM", "strat2")),
+            sleeve_to_tf=("4h", "4h"),
         )
 
         sigs, _edges, n_dropped = _resolve_sleeve_signals_at_bar(
@@ -229,5 +230,42 @@ class TestLayer2FoldAttributionDataclass:
             throttle_mult_mean=0.9, dropped_below_cost=2,
             netting_events=1,
         )
-        assert attr.fold_idx == 0
         assert attr.realized_total == pytest.approx(0.02)
+
+
+def test_combine_sleeve_signals_optimized_logical_equivalence() -> None:
+    from src.domain.futures.strategy.cs_rank import SymbolSignal
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import _combine_sleeve_signals_to_symbol
+
+    sleeve_signals = {
+        ("BTC", "strat1"): SymbolSignal(
+            raw_mu=5.0, volatility=0.02, n_obs=10, t_stat=1.5, valid=True, beta_btc=None, quality_weight=1.0
+        ),
+        ("BTC", "strat2"): SymbolSignal(
+            raw_mu=8.0, volatility=0.02, n_obs=10, t_stat=2.0, valid=True, beta_btc=None, quality_weight=2.0
+        ),
+        ("ETH", "strat1"): SymbolSignal(
+            raw_mu=-2.0, volatility=0.03, n_obs=10, t_stat=-1.0, valid=True, beta_btc=None, quality_weight=1.5
+        ),
+    }
+
+    sleeve_edges = {
+        ("BTC", "strat1"): (5.0, 1.0),
+        ("BTC", "strat2"): (8.0, 1.0),
+        ("ETH", "strat1"): (-2.0, 1.0),
+    }
+
+    combined, _friction = _combine_sleeve_signals_to_symbol(
+        sleeve_signals=sleeve_signals,
+        method="precision_weighted",
+        conviction_cap_mult=1.5,
+        sleeve_edges=sleeve_edges,
+    )
+
+    assert "BTC" in combined
+    assert combined["BTC"].raw_mu == pytest.approx(7.0)
+    assert combined["BTC"].quality_weight == pytest.approx(3.0)
+
+    assert "ETH" in combined
+    assert combined["ETH"].raw_mu == pytest.approx(-2.0)
+

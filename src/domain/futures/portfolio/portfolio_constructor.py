@@ -707,6 +707,7 @@ def project_all_caps(
     out = np.clip(out, -caps.per_symbol, caps.per_symbol)
 
     # Cap 2: gross cap (L1 norm)
+    prev_out = out.copy()
     for _ in range(20):
         gross = float(np.sum(np.abs(out)))
         if gross <= caps.gross + 1e-9:
@@ -714,6 +715,9 @@ def project_all_caps(
         out = out * (caps.gross / gross)
         # per_symbol 재적용
         out = np.clip(out, -caps.per_symbol, caps.per_symbol)
+        if np.allclose(out, prev_out, atol=1e-7):
+            break
+        prev_out = out.copy()
 
     # Cap 3: net cap (signed sum) — 기존 support와 부호를 보존한 채 축소
     net = float(np.sum(out))

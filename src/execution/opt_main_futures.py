@@ -1554,6 +1554,7 @@ def _run_tiered_l2_study(
         awf_folds=awf_folds_l2,
         caps=caps,
         min_dsr=_min_dsr,
+        prebuilt_cache=l2_sim_cache,
     )
     
     _log_mem("select_layer2_champion", _mem_champ_before, extra=f"took={time.perf_counter() - _t_champ_start:.4f}s")
@@ -1957,7 +1958,7 @@ def _run_strategy_stage(
                     )
                     _mf_regime = compute_market_regime_context(aligned=aligned_tiered).code_1d
                     _mf_start = int(getattr(l2_signals, "start_idx", 0))
-                    _mf_end = int(getattr(l2_signals, "end_idx", aligned_tiered.close_2d.shape[0]))
+                    _mf_end = int(getattr(l2_signals, "end_idx", aligned_tiered.close_2d.shape[0]))  # type: ignore[arg-type]
                     _mf_cost = float(OPT_FUTURES_CONFIG.get("L2_ROUND_TRIP_COST_BPS", 6.0))
                     _mf_samples = build_sleeve_meta_dataset(
                         shared_l2_cache, aligned_tiered, _mf_regime,

@@ -1600,6 +1600,7 @@ def run_l2_awf(
         t_l2_cache = time.perf_counter()
         cache = build_l2_simulation_cache(aligned, signal_batch, tf)
         logger.log(PERF, "[PERF] l2_build_sim_cache took=%.4fs", time.perf_counter() - t_l2_cache)
+        logger.debug("[MEM] stage=l2_build_sim_cache rss=%.0fMB", _get_rss_mb())
 
     sim = _run_awf_simulation(
         cache=cache,
@@ -2600,14 +2601,22 @@ def run_tiered_pipeline(
         else:
             logger.info("  ● [FINAL SIMULATION]")
     t_l2 = time.perf_counter()
+    _rss_l2_entry = _get_rss_mb()
+    logger.debug("[MEM] stage=l2_entry rss=%.0fMB", _rss_l2_entry)
     ho_start_idx_l2 = _date_to_idx(aligned.datetimes, window.holdout_start)
     _l2_expand = int(l2_params.get("l2_is_expansion_bars", 0))
     _l2_start_idx = max(0, _l1_end_bars - _l2_expand)
+    _t_fold_build = time.perf_counter()
     awf_folds = _tw.build_l2_simulation_folds(
         n_bars=len(aligned.datetimes),
         l2_start_idx=_l2_start_idx,
         holdout_start_idx=ho_start_idx_l2,
         cfg=cfg,
+    )
+    logger.debug(
+        "[L2] awf_fold_build took=%.4fs n_folds=%d",
+        time.perf_counter() - _t_fold_build,
+        len(awf_folds),
     )
     if not awf_folds:
         logger.warning(
@@ -2689,6 +2698,12 @@ def run_tiered_pipeline(
         prebuilt_cache=l2_sim_cache,
     )
     logger.log(PERF, "[PERF] run_tiered_pipeline_l2_total took=%.4fs", time.perf_counter() - t_l2)
+    _rss_l2_after = _get_rss_mb()
+    logger.debug(
+        "[MEM] stage=l2_awf_complete rss=%.0fMB delta=%+.0fMB",
+        _rss_l2_after,
+        _rss_l2_after - _rss_l2_entry,
+    )
 
     if verbose:
         logger.info(
