@@ -14,6 +14,7 @@ Scenarios:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -269,6 +270,32 @@ def test_bucket_oos_edge_case_under3() -> None:
     assert abs(_mae - 10.0) < 0.1
     assert _bias == -5.0
     assert _corr == 0.0
+
+
+def test_l2_regime_log_reports_effective_state_count() -> None:
+    """[REGIME] 로그 계약이 3-state 표형식 요약을 노출하는지 검증."""
+    source = Path("src/execution/opt_main_futures.py").read_text(encoding="utf-8")
+
+    assert "[REGIME]" in source
+    assert "metric        | value" in source
+    assert "compression   | %s" in source
+    assert "states        | 3" in source
+    assert "distribution  | %s" in source
+    assert "🟢 stable" in source or "🟠 unstable" in source
+    assert "raw_states=6" not in source
+    assert "proof_failed path=%s effective_states=%d" in source
+
+
+def test_awf_sim_consumes_regime_routing_diagnostics_for_debug() -> None:
+    """AWF debug path가 cache.regime_routing_diagnostics를 직접 소비하는지 검증."""
+    source = Path("src/domain/futures/strategy/tiered_workflow/awf_sim.py").read_text(encoding="utf-8")
+
+    assert "cache.regime_routing_diagnostics" in source
+    assert "[L2-REGIME-DIAG]" in source
+    assert "active_state_names" in source
+
+
+def test_filter_sleeves_by_bucket_when_current_regime_bucket_missing_returns_empty() -> None:
     """현재 regime이 bucket_edges에 없으면 edge=0 → 모든 sleeve 제거."""
     sigs = _dummy_sleeve_sigs()
     bucket_edges = {

@@ -113,6 +113,16 @@ from src.domain.futures.strategy.walk_forward import WFFold
 if TYPE_CHECKING:
     from src.domain.futures.optimization.opt_config import LayeredWindow
 
+for _env in (
+    "NUMBA_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ[_env] = "1"
+
 
 def _get_rss_mb() -> float:
     """Return current process RSS in MB via /proc/self/status."""
