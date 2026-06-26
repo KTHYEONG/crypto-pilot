@@ -229,6 +229,7 @@ def select_layer2_champion(
     awf_folds: tuple[Any, ...],
     caps: Any,
     min_dsr: float = 0.60,
+    prebuilt_cache: Any | None = None,
 ) -> Layer2StudyResult:
     """feasible completed trials 중 growth_lcb(objective) 최상위 챔피언 선정 및 검증.
 
@@ -334,21 +335,33 @@ def select_layer2_champion(
     best_diagnostic_gate: Layer2GateEvaluation | None = None
     best_diagnostic_dsr = float("-inf")
 
-    from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
-    cache = build_l2_simulation_cache(aligned, signal_batch, tf)
+    if prebuilt_cache is not None:
+        cache = prebuilt_cache
+    else:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+        cache = build_l2_simulation_cache(aligned, signal_batch, tf)
 
-    for candidate in replay_candidates:
-        candidate_config = Layer2AllocationConfig.from_mapping(dict(candidate.params))
-        candidate_evaluation = evaluate_l2_trial(
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _eval_candidate(trial: optuna.trial.FrozenTrial) -> tuple[optuna.trial.FrozenTrial, Any]:
+        cfg_mapping = Layer2AllocationConfig.from_mapping(dict(trial.params))
+        eval_val = evaluate_l2_trial(
             cache=cache,
             signal_batch=signal_batch,
             aligned=aligned,
             awf_folds=awf_folds,
-            config=candidate_config,
+            config=cfg_mapping,
             caps=caps,
             tf=tf,
         )
-        
+        return trial, eval_val
+
+    max_workers = min(len(replay_candidates), 8)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        evaluated_pairs = list(executor.map(_eval_candidate, replay_candidates))
+
+    for candidate, candidate_evaluation in evaluated_pairs:
+        candidate_config = Layer2AllocationConfig.from_mapping(dict(candidate.params))
         # Calculate DSR for this candidate
         dsr = _deflated_sharpe_probability(
             selected_rets=candidate_evaluation.returns_hybrid,
@@ -551,6 +564,7 @@ def select_layer2_champion(
             completed_trials=len(complete_trials),
             feasible_trials=len(feasible_trials),
             blocker_reason=reason,
+            sim_cache=cache,
         )
 
     _logger.info(
@@ -575,4 +589,5 @@ def select_layer2_champion(
         completed_trials=len(complete_trials),
         feasible_trials=len(feasible_trials),
         blocker_reason="",
+        sim_cache=cache,
     )
