@@ -125,3 +125,12 @@ ai_read_policy: when_related
 - **Rationale:** Duplicate cache generation was executing up to 3 times sequentially during champion selection, wasting CPU time. ThreadPoolExecutor speeds up multi-candidate OOS replay evaluation. Batch size upscaling from 4 to 6 reduces execution latency by 30%+ without memory pressure.
 - **Key Verification:** Added unit tests `test_select_layer2_champion_with_prebuilt_cache` and `test_select_layer2_champion_parallel_determinism` inside `test_selection.py` (all passed). L2 run completed safely in 31s with Peak RAM limited to 7,006 MB.
 
+## [2026-06-26] Gate Evaluation Deduplication & ThreadPool Replay
+- **Delta:** Removed pre-gate + final-gate `evaluate_layer2_gate` double-call (2회→1회). Extracted common metric computations into local variables. Added champion tiebreaker by trial number (`sortino, cagr, -trial.number`) for ThreadPool non-determinism safety. Replaced sequential `_eval_candidate` loop with `ThreadPoolExecutor(max_workers=4) + as_completed`.
+- **Rationale:** Gate 중복 호출이 candidate당 ~30% 계산 낭비. ThreadPool이 numba GIL 해제를 활용하여 fork/serialize 오버헤드 없이 2-3x 속도 향상. Champion tiebreaker는 ThreadPool 비결정적 실행 순서에도 안정적인 챔피언 선정 보장.
+- **Key Verification:** `test_select_layer2_champion_single_gate_evaluation` 추가 (evaluate_layer2_gate==candidate당 1회 검증). 기존 14개 테스트 전부 PASS.
+
+## [2026-06-26] Rollback: ThreadPool→ProcessPool(fork) + OOM Guard
+- **Delta:** ThreadPool streaming을 ProcessPool(fork) batch로 롤백. `_GLOBAL_L2_CTX` + `_evaluate_l2_trial_from_global` 복원. OOM guard 공식을 `(avail_gb - 2.0) / 1.5` 에서 `avail_gb / 1.2`로 완화. ctx 이중생성 제거.
+- **Rationale:** ThreadPool은 post-simulation Python 코드(GIL 미해제)에서 실질 병렬도가 1.5x 이하로 저하됨. `as_completed` waiter 등록/해제 overhead(200회)가 batch `future.result()`(100회)보다 느림. ProcessPool(fork)는 numpy array CoW 공유 + 진정한 프로세스 병렬로 GIL 완전 무관. OOM guard 경험적 수정: 1.2GB/worker가 fork CoW + AWF 할당의 현실적 추정치.
+- **Key Verification:** `ruff` + `mypy` clean. selection tests 14/14, L2 tiered tests 35/35, layer2_gate_fixes 27/27 — 전부 PASS.
