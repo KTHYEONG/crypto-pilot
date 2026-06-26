@@ -127,6 +127,11 @@ class CandidateStrategyConfig:
     name: Literal["candidate_ml", "rule_baseline"] = "candidate_ml"
     timeframe: str = "4h"
     seed: int = 42
+    n_jobs: int = -1  # -1 resolves dynamically to optimal CPU count
+    parallel_folds: bool = True  # Enable fold-level joblib parallelization
+    parallel_fold_workers: int = -1  # -1 uses max(1, os.cpu_count() - 2)
+    min_group_size: int = 8
+    label_horizon_bars: int = 12
     train_months: int = 24
     valid_months: int = 3
     test_months: int = 6

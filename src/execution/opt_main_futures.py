@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
-    from src.domain.futures.optimization.workflow import TieredContext
     from src.domain.futures.strategy.regime_evaluation import RegimeScoreCard
     from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result
     from src.domain.futures.strategy.timeframe_probe import TfCellEvidence, TfProbeManifest
@@ -105,6 +104,9 @@ from src.domain.futures.universe import UniverseSnapshot
 from src.domain.futures.universe.contracts import UniverseStateCube
 from src.domain.futures.universe.membership import inject_membership_masks_into_maps
 from src.domain.futures.universe.storage import run_historical_sync
+
+if TYPE_CHECKING:
+    from src.domain.futures.optimization.workflow import TieredContext
 
 _GLOBAL_L2_CTX: TieredContext | None = None
 _REGIME_NAMES_SHORT: dict[int, str] = {0: "bull_q", 1: "bull_v", 2: "bear_q", 3: "bear_v", 4: "trans", 5: "crash"}
@@ -1278,6 +1280,7 @@ def _run_tiered_l2_study(
         TieredContext,
         layer2_constraints_from_trial,
         objective_l2_growth,
+        suggest_layered_params,
     )
     from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
     from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2StudyResult
@@ -1292,8 +1295,26 @@ def _run_tiered_l2_study(
         l2_sim_cache = build_l2_simulation_cache(aligned, signal_batch, tf)
     _logger.debug("[MEM] stage=l2_sim_cache rss=%.0fMB", _get_rss_mb())
 
+    # AWF folds pre-computation: ctx에 저장하여 _resolve_l2_signal_batch_and_folds 재사용
+    _ho_ts = pd.Timestamp(window.holdout_start).tz_localize(None)
+    _ho_start_idx = int(np.searchsorted(aligned.datetimes, np.datetime64(_ho_ts, "ns")))
+    _awf_all = build_walk_forward_folds(n_bars=_ho_start_idx, cfg=cfg)
+    _l2_ts = pd.Timestamp(window.l2_start).tz_localize(None)
+    _l1_end = int(np.searchsorted(aligned.datetimes, np.datetime64(_l2_ts, "ns")))
+    _awf_folds_l2 = tuple(f for f in _awf_all if f.oos_start >= _l1_end and f.oos_end <= _ho_start_idx)
+    if not _awf_folds_l2:
+        _cal_end = max(_l1_end - 1, 1)
+        from src.domain.futures.strategy.walk_forward import WFFold
+        _awf_folds_l2 = (WFFold(
+            fit_start=0,
+            fit_end=_cal_end,
+            cal_start=max(0, _cal_end - max(1, _cal_end // 5)),
+            cal_end=_cal_end,
+            oos_start=_l1_end,
+            oos_end=_ho_start_idx,
+        ),)
     ctx = TieredContext(
-        labeled_events=pd.DataFrame(),  # signal_batch에 이미 예측됨, labeles 불필요
+        labeled_events=pd.DataFrame(),
         aligned=aligned,
         cfg=cfg,
         window=window,
@@ -1301,6 +1322,7 @@ def _run_tiered_l2_study(
         tf=tf,
         fixed_l1_params={"signal_batch": signal_batch},
         l2_sim_cache=l2_sim_cache,
+        awf_folds=_awf_folds_l2,
     )
 
     study_name = _layer2_experiment_key(
@@ -1417,15 +1439,18 @@ def _run_tiered_l2_study(
                 import multiprocessing
                 from concurrent.futures import ProcessPoolExecutor
 
-                from src.domain.futures.optimization.workflow import (
-                    suggest_layered_params,
+                avail_gb = psutil.virtual_memory().available / (1024.0 ** 3)
+                mem_safe = max(1, int(avail_gb / 1.2))
+                cpu_cores = os.cpu_count() or 4
+                max_workers = max(1, min(batch_size, cpu_cores, mem_safe))
+                _logger.info(
+                    "[L2-OPT] ProcessPool workers=%d (mem=%.1fGB, mem_safe=%d, cpu=%d, batch=%d)",
+                    max_workers, avail_gb, mem_safe, cpu_cores, batch_size,
                 )
-                
-                max_workers = min(batch_size, multiprocessing.cpu_count())
-                
+
                 global _GLOBAL_L2_CTX
                 _GLOBAL_L2_CTX = ctx
-                
+
                 try:
                     mp_ctx = multiprocessing.get_context("fork")
                     with ProcessPoolExecutor(max_workers=max_workers, mp_context=mp_ctx) as executor:
@@ -1434,22 +1459,20 @@ def _run_tiered_l2_study(
                             current_batch = min(batch_size, n_trials - trial_idx)
                             batch_trials = []
                             batch_params = []
-                            
+
                             _mem_batch_start = _get_rss_mb()
-                            
+
                             for _ in range(current_batch):
                                 trial = study.ask()
                                 batch_trials.append(trial)
                                 params = suggest_layered_params(trial, "L2", fixed=ctx.fixed_l1_params)
                                 batch_params.append(params)
-                                
-                            # Submit evaluations in parallel
+
                             futures = [
                                 executor.submit(_evaluate_l2_trial_from_global, params)
                                 for params in batch_params
                             ]
-                            
-                            # Wait for results and tell in deterministic sorted order
+
                             for trial, future in zip(batch_trials, futures, strict=False):
                                 try:
                                     value, attrs, t_elapsed = future.result()
@@ -1462,12 +1485,12 @@ def _run_tiered_l2_study(
                                     value = -1e6
                                     attrs = {}
                                     t_elapsed = 0.0
-                                    
+
                                 for k, v in attrs.items():
                                     trial.set_user_attr(k, v)
-                                    
+
                                 study.tell(trial, value)
-                                
+
                                 _logger.log(
                                     logging.DEBUG,
                                     "[perf-optuna] Trial %d evaluate_l2_trial took %.4fs | Objective: %.6f",
@@ -1477,7 +1500,7 @@ def _run_tiered_l2_study(
                                 )
                                 progress_cb(study, trial, value=value)
                                 trial_idx += 1
-                            
+
                             gc.collect()
                             _log_mem("l2_optuna_batch", _mem_batch_start, extra=f"trial_idx={trial_idx}/{n_trials}")
                 finally:
@@ -1516,28 +1539,7 @@ def _run_tiered_l2_study(
             blocker_reason="no_complete_trials",
         )
 
-    ho_ts = pd.Timestamp(window.holdout_start).tz_localize(None)
-    ho_start_idx_l2 = int(np.searchsorted(aligned.datetimes, np.datetime64(ho_ts, "ns")))
-    # walk forward folds 구성 및 필터링하여 select_layer2_champion에 전달
-    awf_folds = build_walk_forward_folds(n_bars=ho_start_idx_l2, cfg=cfg)
-    l2_ts = pd.Timestamp(window.l2_start).tz_localize(None)
-    l1_end_bars = int(np.searchsorted(aligned.datetimes, np.datetime64(l2_ts, "ns")))
-
-    awf_folds_l2 = tuple(
-        f for f in awf_folds
-        if f.oos_start >= l1_end_bars and f.oos_end <= ho_start_idx_l2
-    )
-    if not awf_folds_l2:
-        cal_end = max(l1_end_bars - 1, 1)
-        from src.domain.futures.strategy.walk_forward import WFFold
-        awf_folds_l2 = (WFFold(
-            fit_start=0,
-            fit_end=cal_end,
-            cal_start=max(0, cal_end - max(1, cal_end // 5)),
-            cal_end=cal_end,
-            oos_start=l1_end_bars,
-            oos_end=ho_start_idx_l2,
-        ),)
+    # (fold pre-computation moved before study — stored in ctx.awf_folds)
 
     gc.collect()
     _logger.debug("[MEM] stage=l2_study_complete rss=%.0fMB", _get_rss_mb())
@@ -1551,7 +1553,7 @@ def _run_tiered_l2_study(
         tf=tf,
         signal_batch=signal_batch,
         aligned=aligned,
-        awf_folds=awf_folds_l2,
+        awf_folds=_awf_folds_l2,
         caps=caps,
         min_dsr=_min_dsr,
         prebuilt_cache=l2_sim_cache,
