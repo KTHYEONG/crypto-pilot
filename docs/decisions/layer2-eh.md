@@ -134,3 +134,8 @@ ai_read_policy: when_related
 - **Delta:** ThreadPool streaming을 ProcessPool(fork) batch로 롤백. `_GLOBAL_L2_CTX` + `_evaluate_l2_trial_from_global` 복원. OOM guard 공식을 `(avail_gb - 2.0) / 1.5` 에서 `avail_gb / 1.2`로 완화. ctx 이중생성 제거.
 - **Rationale:** ThreadPool은 post-simulation Python 코드(GIL 미해제)에서 실질 병렬도가 1.5x 이하로 저하됨. `as_completed` waiter 등록/해제 overhead(200회)가 batch `future.result()`(100회)보다 느림. ProcessPool(fork)는 numpy array CoW 공유 + 진정한 프로세스 병렬로 GIL 완전 무관. OOM guard 경험적 수정: 1.2GB/worker가 fork CoW + AWF 할당의 현실적 추정치.
 - **Key Verification:** `ruff` + `mypy` clean. selection tests 14/14, L2 tiered tests 35/35, layer2_gate_fixes 27/27 — 전부 PASS.
+
+## [2026-06-26] Bucket Edge + Regime Code Cache (per-trial 3.6s→1.2s)
+- **Delta:** `L2SimulationCache`에 `bucket_edges_by_fold` 및 `regime_code_1d` 필드 추가. `_run_tiered_l2_study`에서 folds + regime code precompute 후 `replace()`로 cache에 주입. `_run_awf_simulation`에서 캐시 hit 시 `compute_bucket_realized_edges`/`compute_market_regime_context` 재계산 skip. Fallback path 유지(하위호환).
+- **Rationale:** Bucket routing은 trial-param 독립(align, folds, regime_code만 의존). Regime code도 aligned만으로 계산되며 `l2_routing_mode` trial param과 무관. 프로파일링 결과 `regime_code_1d` 재계산이 per-trial 2.51s(69%) 차지. 캐시로 0.12s로 단축(20x). 전체 per-trial 3.6s → 1.2s(3x). 200 trials × 6 workers ≈ 40초.
+- **Key Verification:** `[L2-BUCKET-CACHE] HIT` DEBUG 로그 확인. `awf_total regime=0.12s` 안정화. 59개 테스트 전부 PASS.

@@ -720,6 +720,11 @@ class L2SimulationCache:
     sleeve_ids: tuple[tuple[str, str], ...]  # [S] (symbol, strategy_id)
     sleeve_to_tf: tuple[str, ...]  # [S] each sleeve's native TF (from strategy_id suffix)
 
+    # Pre-computed bucket realized edges (trial-param independent → cached once)
+    bucket_edges_by_fold: tuple[dict[tuple[int, str, str], float], ...] = ()
+    # Pre-computed regime code 1d (trial-param independent → cached once)
+    regime_code_1d: NDArray[np.int8] | None = None
+
 
 @dataclass(slots=True, frozen=True)
 class Layer2SimulationDiagnostics:
