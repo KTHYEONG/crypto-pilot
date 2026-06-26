@@ -55,17 +55,17 @@ class TestComputeCostDragRatio:
             _make_attribution(fold_idx=2, realized_price=0.0465, realized_cost=0.0330),
         )
         result = compute_cost_drag_ratio(attrs)
-        expected = (0.0395 + 0.0376 + 0.0330) / (0.1046 + (-0.0655) + 0.0465)
+        expected = (0.0395 + 0.0376 + 0.0330) / (abs(0.1046) + abs(-0.0655) + abs(0.0465))
         assert result == pytest.approx(expected, rel=1e-3)
 
     def test_cost_drag_ratio_negative_gross_returns_large_finite(self) -> None:
-        """S2: gross 음수 시 분모 eps → 큰 양수, 유한."""
+        """S2: gross 음수 시 abs(gross) 기준으로 유한."""
         attrs = (
             _make_attribution(realized_price=-0.05, realized_cost=0.04),
         )
         result = compute_cost_drag_ratio(attrs)
         assert np.isfinite(result)
-        assert result >= 0.04 / 1e-9
+        assert result == pytest.approx(0.8, rel=1e-3)
 
     def test_cost_drag_ratio_empty_returns_zero(self) -> None:
         """S3: 빈 attribution → 0.0 (non-blocking)."""
