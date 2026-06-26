@@ -10,6 +10,7 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2Alloca
 from src.domain.futures.strategy.tiered_workflow.l2_meta import (
     build_regime_routing_plan,
     compute_pooled_realized_edges,
+    compute_regime_cell_debug_stats,
     replicate_pooled_edges_by_regime,
 )
 from src.domain.futures.strategy.walk_forward import WFFold
@@ -31,6 +32,13 @@ def _make_aligned(close_1d: list[float]) -> MagicMock:
     aligned.close_2d = np.asarray(close_1d, dtype=np.float64).reshape(-1, 1)
     aligned.symbols = ("BTCUSDT",)
     return aligned
+
+
+def _make_folds() -> tuple[WFFold, ...]:
+    return (
+        WFFold(fit_start=0, fit_end=3, cal_start=3, cal_end=4, oos_start=4, oos_end=8),
+        WFFold(fit_start=0, fit_end=7, cal_start=7, cal_end=8, oos_start=8, oos_end=12),
+    )
 
 
 def test_build_regime_routing_plan_when_compression_enabled_uses_three_states() -> None:
@@ -121,8 +129,134 @@ def test_build_regime_routing_plan_when_lift_is_consistent_uses_conditioned_edge
 
     assert plan.diagnostics.proof_passed is True
     assert plan.diagnostics.conditioning_path == "regime_conditioned"
-    assert plan.effective_bucket_edges_by_fold == plan.raw_bucket_edges_by_fold
     assert plan.diagnostics.mean_lift_bps > 0.0
+    assert max(state for fold_map in plan.effective_bucket_edges_by_fold for state, _, _ in fold_map) <= 2
+    assert max(state for fold_map in plan.raw_bucket_edges_by_fold for state, _, _ in fold_map) >= 2
+
+
+def test_build_regime_routing_plan_debug_disabled_has_no_debug_payload() -> None:
+    raw_codes = np.array([0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5], dtype=np.int8)
+    cache = _make_cache(len(raw_codes))
+    aligned = _make_aligned([100.0, 101.0, 102.0, 103.0, 102.0, 101.0, 100.0, 99.0, 100.0, 101.0, 102.0, 103.0])
+
+    plan = build_regime_routing_plan(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=_make_folds(),
+        raw_regime_code_1d=raw_codes,
+        compression_enabled=True,
+        proof_enabled=False,
+        debug_diagnostics_enabled=False,
+    )
+
+    assert plan.diagnostics.debug_diagnostics is None
+
+
+def test_build_regime_routing_plan_debug_enabled_compares_effective_and_raw_granularity() -> None:
+    raw_codes = np.array([0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5], dtype=np.int8)
+    cache = _make_cache(len(raw_codes))
+    cache.holding_bars_2d[:, :] = 1.0
+    aligned = _make_aligned([100.0, 101.5, 100.5, 102.0, 101.0, 102.5, 103.0, 102.0, 104.0, 103.0, 104.5, 105.0])
+
+    plan = build_regime_routing_plan(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=_make_folds(),
+        raw_regime_code_1d=raw_codes,
+        compression_enabled=True,
+        proof_enabled=True,
+        debug_diagnostics_enabled=True,
+        debug_top_k=3,
+    )
+
+    debug = plan.diagnostics.debug_diagnostics
+    assert debug is not None
+    labels = [stat.label for stat in debug.granularity_stats]
+    assert labels == ["pooled", "effective_3", "raw_6"]
+    assert debug.granularity_stats[1].state_count == 3
+    assert debug.granularity_stats[2].state_count == 6
+    assert np.isfinite(debug.compression_loss_bps)
+
+
+def test_build_regime_routing_plan_keeps_raw_6_shadow_edges_separate_when_compressed() -> None:
+    raw_codes = np.array([0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5], dtype=np.int8)
+    cache = _make_cache(len(raw_codes))
+    aligned = _make_aligned([100.0, 101.0, 102.0, 101.0, 100.0, 99.0, 98.0, 99.0, 100.0, 101.0, 102.0, 103.0])
+
+    plan = build_regime_routing_plan(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=_make_folds(),
+        raw_regime_code_1d=raw_codes,
+        compression_enabled=True,
+        proof_enabled=False,
+        min_n=1,
+        debug_diagnostics_enabled=True,
+    )
+
+    raw_keys = {state for fold_map in plan.raw_bucket_edges_by_fold for state, _, _ in fold_map}
+    effective_keys = {state for fold_map in plan.effective_bucket_edges_by_fold for state, _, _ in fold_map}
+
+    assert max(raw_keys) >= 3
+    assert max(effective_keys) <= 2
+
+
+def test_compute_regime_cell_debug_stats_ranks_negative_oos_gap() -> None:
+    raw_codes = np.array([0, 0, 0, 0, 2, 2, 2, 2], dtype=np.int8)
+    cache = _make_cache(len(raw_codes))
+    cache.holding_bars_2d[:, :] = 1.0
+    aligned = _make_aligned([100.0, 101.0, 102.0, 103.0, 100.0, 99.0, 98.0, 97.0])
+    folds = (
+        WFFold(fit_start=0, fit_end=3, cal_start=3, cal_end=4, oos_start=4, oos_end=8),
+    )
+    plan = build_regime_routing_plan(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=folds,
+        raw_regime_code_1d=raw_codes,
+        compression_enabled=True,
+        proof_enabled=False,
+        debug_diagnostics_enabled=True,
+    )
+
+    stats = compute_regime_cell_debug_stats(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=folds,
+        regime_code_1d=plan.effective_regime_code_1d,
+        state_names=plan.diagnostics.active_state_names,
+        bucket_edges_by_fold=plan.raw_bucket_edges_by_fold,
+        pooled_edges_by_fold=plan.pooled_edges_by_fold,
+        cost_bps=0.0,
+    )
+
+    harmful = [stat for stat in stats if stat.n_oos > 0 and stat.edge_gap_bps < 0.0]
+    assert harmful
+    assert any(stat.selected_hit_pct >= 0.0 for stat in harmful)
+    assert plan.diagnostics.debug_diagnostics is not None
+    assert plan.diagnostics.debug_diagnostics.worst_error_cells
+
+
+def test_evaluate_regime_granularity_debug_tracks_all_effective_states_when_uncompressed() -> None:
+    raw_codes = np.array([0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5], dtype=np.int8)
+    cache = _make_cache(len(raw_codes))
+    aligned = _make_aligned([100.0, 101.0, 102.0, 101.0, 100.0, 99.0, 98.0, 99.0, 100.0, 101.0, 102.0, 103.0])
+
+    plan = build_regime_routing_plan(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=_make_folds(),
+        raw_regime_code_1d=raw_codes,
+        compression_enabled=False,
+        proof_enabled=False,
+        min_n=1,
+        debug_diagnostics_enabled=True,
+    )
+
+    debug = plan.diagnostics.debug_diagnostics
+    assert debug is not None
+    assert len(debug.selected_regime_return_bps) == 6
+    assert len(debug.selected_regime_bar_count) == 6
 
 
 def test_compute_pooled_realized_edges_respects_holding_bars() -> None:
