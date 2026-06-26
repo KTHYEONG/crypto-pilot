@@ -4,10 +4,10 @@ from argparse import Namespace
 from dataclasses import dataclass
 from typing import Any, Literal
 
-ActivePhase = Literal["l3", "l2", "l1"]
+ActivePhase = Literal["l1", "l2", "l3"]
 SyncMode = Literal["full", "fast", "skip"]
 
-_ACTIVE_PHASES: frozenset[str] = frozenset({"l3", "l2", "l1"})
+_ACTIVE_PHASES: frozenset[str] = frozenset({"l1", "l2", "l3"})
 _LEGACY_PHASES: frozenset[str] = frozenset({"strategy-smoke", "quick-backtest"})
 _LEGACY_FLAGS: tuple[str, ...] = (
     "alpha_only",
@@ -66,7 +66,7 @@ def build_run_config_from_args(args: Namespace | dict[str, Any]) -> FuturesRunCo
         if legacy_key in raw:
             raise ValueError(f"legacy argument key is not allowed in active runner: {legacy_key}")
 
-    phase_raw = str(raw.get("phase", "l3"))
+    phase_raw = str(raw.get("phase", "l1"))
     phase = parse_active_phase(phase_raw)
     
     sync = str(raw.get("sync", "full"))

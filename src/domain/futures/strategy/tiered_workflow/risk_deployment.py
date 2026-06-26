@@ -215,7 +215,7 @@ def calibrate_deployment_leverage(
             # OOS-based floor: if OOS is significantly safer than fit, raise floor
             _oos_mdd_v1 = _mdd_at_leverage(oos_arr, 1.0)
             _oos_safe_l = float(mdd_cap) * 0.70 / max(float(_oos_mdd_v1), 0.01)
-            _oos_floor = min(1.5, max(1.0, _oos_safe_l))
+            _oos_floor = min(2.0, max(1.0, _oos_safe_l))
             if _oos_floor > l_final:
                 _prev_l = l_final
                 l_final = _oos_floor

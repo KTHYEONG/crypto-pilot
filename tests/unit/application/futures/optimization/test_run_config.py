@@ -7,7 +7,7 @@ from src.application.futures.optimization.config import build_run_config_from_ar
 
 def test_build_run_config_defaults_to_trials_100() -> None:
     cfg = build_run_config_from_args({"timeframe": "4h"})
-    assert cfg.phase == "l3"
+    assert cfg.phase == "l1"
     assert cfg.trials == 100
 
 
