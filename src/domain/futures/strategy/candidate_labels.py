@@ -6,6 +6,7 @@ import math
 import numpy as np
 import pandas as pd
 from numba import njit
+from numpy.typing import NDArray
 
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import CandidateStrategyConfig
@@ -22,6 +23,18 @@ _BARRIER_EXIT_REASON_MAP: dict[int, str] = {
     3: "time_exit",
 }
 _logger = logging.getLogger(__name__)
+
+
+def _aligned_field_or_close(aligned: AlignedMarketData, field_name: str) -> NDArray[np.float64]:
+    arr = getattr(aligned, field_name, None)
+    if isinstance(arr, np.ndarray) and arr.ndim == 2 and arr.size > 0:
+        return np.asarray(arr, dtype=np.float64)
+
+    close = getattr(aligned, "close_2d", None)
+    if isinstance(close, np.ndarray) and close.ndim == 2 and close.size > 0:
+        return np.asarray(close, dtype=np.float64)
+
+    return np.empty((0, 0), dtype=np.float64)
 
 
 def _rolling_mean_2d(values: np.ndarray, window: int) -> np.ndarray:
@@ -42,11 +55,18 @@ def _rolling_var_2d(values: np.ndarray, window: int) -> np.ndarray:
     )
 
 
-def _compute_yang_zhang_vol_2d(aligned: AlignedMarketData, period: int = _ATR_PERIOD) -> np.ndarray:
-    open_ = np.maximum(aligned.open_2d, 1e-12)
-    high = np.maximum(aligned.high_2d, 1e-12)
-    low = np.maximum(aligned.low_2d, 1e-12)
-    close = np.maximum(aligned.close_2d, 1e-12)
+def _compute_yang_zhang_vol_2d(
+    aligned: AlignedMarketData,
+    period: int = _ATR_PERIOD,
+) -> NDArray[np.float64]:
+    close_raw = _aligned_field_or_close(aligned, "close_2d")
+    if close_raw.size == 0:
+        return close_raw
+
+    open_ = np.maximum(_aligned_field_or_close(aligned, "open_2d"), 1e-12)
+    high = np.maximum(_aligned_field_or_close(aligned, "high_2d"), 1e-12)
+    low = np.maximum(_aligned_field_or_close(aligned, "low_2d"), 1e-12)
+    close = np.maximum(close_raw, 1e-12)
     prev_close = np.vstack([close[:1], close[:-1]])
 
     log_oo = np.log(open_ / prev_close)
