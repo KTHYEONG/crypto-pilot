@@ -1490,6 +1490,7 @@ class TieredContext:
     tf: str
     fixed_l1_params: dict[str, Any] | None = None   # L2 study 시 L1 best params 고정
     l2_sim_cache: L2SimulationCache | None = None
+    awf_folds: tuple[Any, ...] | None = None
 
 
 def suggest_layered_params(
@@ -1608,7 +1609,7 @@ def _resolve_l2_signal_batch_and_folds(ctx: TieredContext) -> tuple[Any, tuple[A
         artifact = (ctx.fixed_l1_params or {}).get("inference_artifact")
         if artifact is None:
             return None, ()
-        awf_folds = build_walk_forward_folds(n_bars=ho_start_idx_l2, cfg=ctx.cfg)
+        awf_folds = ctx.awf_folds or build_walk_forward_folds(n_bars=ho_start_idx_l2, cfg=ctx.cfg)
         if not awf_folds:
             return None, ()
         start_idx = min(fold.oos_start for fold in awf_folds)
@@ -1624,7 +1625,7 @@ def _resolve_l2_signal_batch_and_folds(ctx: TieredContext) -> tuple[Any, tuple[A
     if signal_batch is None:
         return None, ()
 
-    awf_folds = build_walk_forward_folds(n_bars=ho_start_idx_l2, cfg=ctx.cfg)
+    awf_folds = ctx.awf_folds or build_walk_forward_folds(n_bars=ho_start_idx_l2, cfg=ctx.cfg)
 
     l2_start_ts = _to_utc_timestamp(ctx.window.l2_start)
     l1_end_bars = int(
@@ -2101,6 +2102,75 @@ def _evaluate_l2_params(
     t_start = time.perf_counter()
     evaluation = evaluate_l2_trial(
         cache=cache,
+        signal_batch=signal_batch,
+        aligned=ctx.aligned,
+        awf_folds=awf_folds,
+        config=Layer2AllocationConfig.from_mapping(l2_params),
+        caps=ctx.caps,
+        tf=ctx.tf,
+    )
+    t_elapsed = time.perf_counter() - t_start
+
+    user_attrs: dict[str, Any] = {}
+    user_attrs["l2_objective_value"] = float(evaluation.objective_value)
+    user_attrs["cagr_hybrid"] = float(evaluation.cagr_hybrid)
+    user_attrs["cagr_baseline"] = float(evaluation.cagr_baseline)
+    user_attrs["growth_lcb_hybrid"] = float(evaluation.growth_lcb_hybrid)
+    user_attrs["growth_lcb_baseline"] = float(evaluation.growth_lcb_baseline)
+    user_attrs["sharpe_hac_hybrid"] = float(evaluation.sharpe_hac_hybrid)
+    user_attrs["sharpe_hac_baseline"] = float(evaluation.sharpe_hac_baseline)
+    user_attrs["psr_hybrid"] = float(evaluation.psr_hybrid)
+    user_attrs["mdd_hybrid"] = float(evaluation.mdd_hybrid)
+    user_attrs["cvar_95_hybrid"] = float(evaluation.cvar_95_hybrid)
+    user_attrs["fold_pass_ratio"] = float(evaluation.fold_pass_ratio)
+    user_attrs["break_even_pass_pct"] = float(evaluation.break_even_pass_pct)
+    user_attrs["average_gross_exposure"] = float(evaluation.average_gross_exposure)
+    user_attrs["cap_saturation_ratio"] = float(evaluation.cap_saturation_ratio)
+    user_attrs["total_cost_bps"] = float(evaluation.total_cost_bps)
+    user_attrs["sortino_hybrid"] = float(getattr(evaluation, "sortino_hybrid", 0.0))
+    user_attrs["risk_utilization"] = float(getattr(evaluation, "risk_utilization", 0.0))
+    user_attrs["recent_fold_sharpe"] = float(getattr(evaluation, "recent_fold_sharpe", 0.0))
+    user_attrs["recent_fold_cagr"] = float(getattr(evaluation, "recent_fold_cagr", 0.0))
+    user_attrs["latest_to_median_cagr"] = float(getattr(evaluation, "latest_to_median_cagr", 0.0))
+    user_attrs["deploy_leverage"] = float(getattr(evaluation, "deploy_leverage", 1.0))
+    user_attrs["deployment_objective_bonus"] = float(getattr(evaluation, "deployment_objective_bonus", 0.0))
+    user_attrs["worst_fold_sharpe"] = float(getattr(evaluation, "worst_fold_sharpe", 0.0))
+    user_attrs["trade_count"] = int(getattr(evaluation, "trade_count", 0))
+    user_attrs["recent_fold_passed"] = getattr(evaluation, "recent_fold_passed", None)
+    user_attrs["deploy_binding"] = str(getattr(evaluation, "deploy_binding", ""))
+
+    gate = getattr(evaluation, "gate", None)
+    user_attrs["l2_constraint_values"] = list(evaluation.constraint_values)
+    user_attrs["l2_optuna_constraint_values"] = list(evaluation.constraint_values)
+    if gate is not None:
+        user_attrs["l2_promotion_constraint_values"] = list(gate.promotion_constraint_values)
+        user_attrs["l2_promotion_passed"] = bool(gate.promotion_passed)
+        user_attrs["l2_promotion_blocker"] = gate.promotion_blocker
+    user_attrs["l2_block_log_growth_signature"] = [metric.log_growth_hybrid for metric in evaluation.block_metrics]
+
+    return float(evaluation.objective_value), user_attrs, t_elapsed
+
+
+def _evaluate_l2_params_threadsafe(
+    l2_params: dict[str, Any],
+    ctx: TieredContext,
+) -> tuple[float, dict[str, Any], float]:
+    """Thread-safe variant: ctx.l2_sim_cache is assumed pre-built (no __setattr__ mutation)."""
+    import time
+
+    from src.domain.futures.strategy.tiered_workflow import Layer2AllocationConfig
+
+    if not ctx.fixed_l1_params:
+        return -1e6, {}, 0.0
+    assert ctx.l2_sim_cache is not None, "l2_sim_cache must be pre-built for thread-safe evaluation"
+
+    signal_batch, awf_folds = _resolve_l2_signal_batch_and_folds(ctx)
+    if signal_batch is None or not awf_folds:
+        return -1e6, {}, 0.0
+
+    t_start = time.perf_counter()
+    evaluation = evaluate_l2_trial(
+        cache=ctx.l2_sim_cache,
         signal_batch=signal_batch,
         aligned=ctx.aligned,
         awf_folds=awf_folds,
