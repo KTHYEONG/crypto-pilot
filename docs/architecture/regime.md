@@ -50,7 +50,10 @@ Establishes a causal market state from BTC price action for two consumers: a con
 - L2 production logs and routing decisions consume the compressed 3-state summary (`bull`, `bear`, `crisis`).
 - `l2_regime_policy_mode` controls causal sleeve policy on top of bucket routing: `filter`, `observe`, `soft`, `hybrid`.
 - `soft` keeps the route available and only downweights low-confidence cells, while `hybrid` can hard-block only when sign consistency and confidence criteria are met.
+- Regime policy acts on `signal x symbol x tf` sleeves before symbol pooling, so `raw_mu` and `quality_weight` share the same state-aware scaling path as `sleeve_edges`.
+- `l2_regime_scale_signal_mu` and `l2_regime_scale_quality_weight` control whether regime confidence reaches the allocation inputs or remains edge-only.
 - State-level gross caps limit deployment exposure by regime class after portfolio weights are composed.
+- Policy observability tracks pre/post edge, mu, and quality-weight totals so routing impact reaches the final sizing path and not only the diagnostics path.
 
 # 3. Architecture Flow
 

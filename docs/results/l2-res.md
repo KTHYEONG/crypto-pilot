@@ -1,117 +1,156 @@
-# L2 Phase 5차 DEBUG 실행 — Power Amplification Mode 진단
+# L2 Regime DEBUG 실행 결과
 
-> 실행: `LOG_LEVEL=DEBUG uv run python src/execution/opt_main_futures.py --phase l2 --timeframe 4h --trials 200`
-> 일시: 2026-06-25 (5차 실행, Power mode + 진단 로깅 v2 적용)
-
----
-
-## 📊 Amplification Mode 비교
-
-| 지표 | Median_excess (4차) | Power mode (5차) | Delta |
-|------|-------------------|-----------------|-------|
-| Sharpe Uplift | **+0.074** | **-0.028** | ❌ **악화** |
-| CAGR | 20.10% | 19.53% | -0.57pp |
-| MDD | 13.96% | 15.22% | +1.26pp |
-| RiskUtil | 46.5% | 50.7% | +4.2pp |
-| Block delta | 0.0000 | 0.0000 | 동일 |
+> 실행: `LOG_LEVEL=DEBUG uv run python src/execution/opt_main_futures.py --phase l2 --sync skip --timeframe 4h --trials 200`  
+> 로그: `/tmp/regime_debug_run_latest_escalated.log`  
+> 기준: 권한 상승 실행 결과. sandbox 실행은 Redis preflight 권한 문제로 Optuna fallback이 발생해 분석 기준에서 제외.
 
 ---
 
-## 🔬 `[L2-CONFIG]` — Config Propagation 확인
+## 1. 최종 판정
 
-```
-[SYS] [L2-CONFIG] l2_min_sharpe_uplift=0.20 l2_cs_amp_enabled=True l2_cs_amp_alpha=2.0 l2_cs_amp_mode=power
-```
+| 항목 | 결과 |
+|---|---:|
+| L2 status | ❌ BLOCKED |
+| blocker | `cagr` |
+| 기간 | 2024-12-22 ~ 2025-09-30 |
+| deployed CAGR | +3.9% |
+| PnL | +3.3% |
+| MDD | 9.0% |
+| CVaR95 | 0.9% |
+| RiskUtil | 30.1% |
+| Sharpe | 0.364 |
+| Sortino | 0.506 |
+| Calmar | 0.427 |
+| Fold pass | 66.7% |
+| Trades | 121 |
+| Sharpe uplift | +0.11 |
+| DSR | 0.675 |
+| PSR | 0.674 |
+| L* | 2.0000 |
 
-- `l2_cs_amp_mode=power` ✅ power mode 정상 적용
-- `l2_min_sharpe_uplift=0.20` ❌ **여전히 0.05가 아닌 0.20** — JSON/params override로 0.20 유지
-- `l2_cs_amp_enabled=True` ✅
-
----
-
-## 🔬 `[L2-Z-DIST]` — Z-score Distribution
-
-| 통계 | Typical Range | 해석 |
-|------|-------------|------|
-| n_pos (양수 Z 개수) | **1~8 out of 52** | 대부분 심볼이 CS 평균 이하 |
-| z_min | 0.01~0.63 | 양수 Z의 최소값 거의 0 |
-| z_max | 0.57~3.76 | 일부 심볼은 높은 Z-score |
-| z_med | **0.2~1.0** | 양수 Z들의 중앙값도 낮음 |
-| z_std | 0.18~1.31 | 분산은 존재하나 적용 대상이 적음 |
-
-**핵심 발견**: Rebalance bar t=5979~7671 구간에서, 52개 심볼 중 **평균 4~8개**만 양수 Z-score 보유. 나머지 44~48개는 음수 Z (CS 평균 이하) → `rank_and_select(selection_mode="absolute")`는 절대값 기준으로 선택하므로 음수 Z도 선택 가능하나 **amplification은 양수 Z에만 적용**됨.
-
----
-
-## 🔬 `[L2-AMP]` — Amplification Effect
-
-| Per-Bar 통계 | Typical | Extreme |
-|-------------|---------|---------|
-| n_amplified (증폭된 심볼 수) | **2~6 / 52** | 0~10 |
-| amp_max (최대 증폭 계수) | **2~10×** | 81.81× (극단) |
-| z_med | **0.3~0.9** | 0.09~1.47 |
-
-**문제점**: Power mode가 극단적 증폭 생성 (amp_max up to 81×) 하지만, 증폭 대상이 2~6개에 불과. 나머지 46~50개 심볼은 Kelly risk-parity 할당 유지 → **포트폴리오의 90%+가 여전히 EW와 동일**.
+핵심은 risk는 안정화됐지만 growth와 efficiency가 부족하다는 점이다. MDD, CVaR, fold ratio, trades, DSR은 통과권이지만 CAGR 30%, Sharpe, Sortino, Sharpe uplift 기준에는 도달하지 못했다.
 
 ---
 
-## 🔬 `[L2-SHARPE-CMP]` — Sharpe Uplift 악화
+## 2. Regime 정책 동작 확인
 
-```
-[SYS] [L2-SHARPE-CMP] hybrid: ann_mean=0.128186 ann_std=0.1111 sharpe_hac=1.1645 |
-  baseline_ew: ann_mean=0.217385 ann_std=0.1956 sharpe_hac=1.1921 |
-  delta_sharpe=-0.0276 mean_ratio=0.59 std_ratio=0.57
-```
+| 지표 | 값 | 해석 |
+|---|---:|---|
+| regime states | 3 | production routing은 `bull/bear/crisis` 사용 |
+| distribution | bull 34.7%, bear 28.1%, crisis 37.3% | 세 state 모두 충분히 활성 |
+| routing proof | true | regime-conditioned path 사용 |
+| mean lift | +54.42 bps | regime 조건부 lift 자체는 존재 |
+| t-stat | 15.24 | 통계 신호는 강함 |
+| fold pass | 1.00 | 3개 fold 기준 proof는 통과 |
+| policy mode | `soft` | hard block 없이 downweight 중심 |
+| allow / downweight / block / pooled | 5 / 10 / 0 / 243 | block은 실제로 제거됨 |
+| unstable cells | 15 | fit/cal 방향 불일치 셀이 많음 |
+| hard block eligible | 0 | 현재 hard block 후보 없음 |
+| sign consistency | 0.50 | 방향 일관성은 낮음 |
+| mean cal lift | -23.04 bps | calibration lift는 음수 |
 
-| 항목 | Median_excess | Power mode | 변화 |
-|------|-------------|-----------|------|
-| ann_mean (hybrid) | 0.1314 | **0.1282** | -0.0032 |
-| ann_std (hybrid) | 0.1117 | **0.1111** | -0.0006 |
-| sharpe_hac (hybrid) | 1.2657 | **1.1645** | -0.1012 |
-| delta_sharpe | **+0.074** | **-0.028** | -0.102 |
-| mean_ratio | 0.60 | 0.59 | -0.01 |
-| std_ratio | 0.57 | 0.57 | 동일 |
+적용한 regime 정책은 의도대로 작동한다. `soft` 모드는 hard block을 하지 않고, 불안정 cell을 downweight로만 처리한다. 이 덕분에 이전 hard filtering 계열보다 tail risk는 줄었고, 최종 MDD 9.0%, CVaR95 0.9%로 risk profile은 양호하다.
 
-**원인 진단**: Power mode 증폭으로 소수 심볼에 과도한 비중 할당 → 이들 심볼이 OOS에서 성과 부진 → 평균 수익률 감소(0.131→0.128). 변동성은 거의 변화 없음(0.112→0.111) → 증폭이 알파를 생성하지 못하고 concentrated risk만 추가.
-
----
-
-## 🔬 `[L2-BLOCK-SUM/CMP]` — 여전히 delta=0.0000
-
-```
-[SYS] [L2-BLOCK-SUM] hybrid: mean=0.0007 std=0.0081 | baseline: mean=0.0007 std=0.0081
-[SYS] [L2-BLOCK-CMP] fold=0 delta=-0.0000, fold=1 delta=-0.0000, fold=2 delta=0.0000
-```
-
-3 fold 모두 delta 불변. Power mode로도 block 단위 hybrid-baseline 비교에서 차이 없음.
-
-Block 수준에서 측정 가능한 차이가 없는 이유:
-- 증폭은 **rebalance 샘플링 시점**(6분 간격)에만 적용
-- **2,382개 per-bar 수익률 중 60~80개만 rebalance** (약 3%)
-- 나머지 97%의 bar는 이전 비중 유지 (= risk-parity = baseline과 동일)
-- 따라서 97%의 bar는 동일 → block 단위 통계가 동일한 게 구조적 원인
+문제는 regime proof가 성과로 충분히 전환되지 않는다는 점이다. `effective_3`는 lift와 t-stat이 강하지만, DEBUG cell에서는 fit/OOS gap이 매우 크고 sign consistency가 낮다. 즉, regime은 “구분력”은 있지만 “배팅 가능한 방향 안정성”은 아직 부족하다.
 
 ---
 
-## 📊 종합 진단
+## 3. 성과 분해
 
-| 발견 | 심각도 | 근본 원인 |
-|------|--------|----------|
-| **Power mode가 Sharpe 악화** | 🔴 CRITICAL | 소수 심볼 극단 증폭(amp_max=81×)이 concentrated risk 추가, 알파 없음 |
-| **Block delta 구조적 불변** | 🔴 CRITICAL | 97% bar는 rebalance 없음 → baseline과 동일. Block 단위 비교로는 측정 불가 |
-| **Config 미전파 확인** | 🟡 HIGH | `l2_min_sharpe_uplift=0.20` still (0.05 아님) |
-| **Z-score 분산 부족** | 🔴 CRITICAL | 52 심볼 중 평균 4~8개만 양수 Z. 대부분 음수 |
-| **L* floor 유효** | 🟢 GOOD | L*=1.5, CAGR=19.5%, RiskUtil=50.7% |
+| 항목 | 값 | 의미 |
+|---|---:|---|
+| hybrid annual mean | 0.0228 |
+| hybrid annual std | 0.0627 |
+| hybrid Sharpe HAC | 0.3885 |
+| baseline EW Sharpe HAC | 0.2806 |
+| delta Sharpe | +0.1079 |
+| mean ratio | 0.54 |
+| std ratio | 0.38 |
 
-### 근본 원인: Rebalance 밀도 문제
+Regime + soft policy는 baseline 대비 변동성을 크게 줄였고 Sharpe도 개선했다. 그러나 수익 평균도 같이 줄었다. 그래서 Sharpe uplift는 +0.11로 개선됐지만, 기준 +0.20에는 못 미쳤다.
 
-L2 AWF 시뮬레이션에서 rebalance는 약 60~80 bar마다 발생(4h TF 기준 약 6개월). 전체 평가 기간(~8761 bars)에서 **rebalance bar는 약 60~80회 (전체의 3%)**. 나머지 97%의 bar는 `no_trade_band`로 인해 이전 비중 유지. CS amp는 rebalance 시점에만 영향을 줄 수 있고, rebalance 이후 60개 bar 동안 비중은 고정 → 60개 bar 중 1개만 CS amp 영향.
+Fold별 결과:
 
-**이 구조 하에서는 어떤 amplification도 포트폴리오 레벨 성과를 실질적으로 바꿀 수 없음.**
+| Fold | Sharpe | CAGR | MDD | 판정 |
+|---|---:|---:|---:|---|
+| #1 | -0.376 | -4.9% | 8.4% | ❌ FAIL |
+| #2 | 1.268 | +9.9% | 3.9% | ✅ PASS |
+| #3 | 0.929 | +7.1% | 8.8% | ✅ PASS |
 
-### 개선 방향 (Pivot 필요)
+Fold #1의 손실이 전체 CAGR을 크게 낮춘다. Fold #2/#3은 통과 가능성이 있으나, 절대 CAGR과 Sharpe 기준으로는 아직 약하다.
 
-1. **Stop Mu Amplification 접근** — 구조적 한계(3% rebalance bars)로 인해 효과 없음
-2. **L1 CS Rank Score 자체 개선 필요** — L1 Alpha Ensemble에서 더 넓은 cross-sectional edge 분산을 갖도록 계산
-3. **Sharpe Uplift Gate 검토** — `l2_min_sharpe_uplift=0.20`이 지나치게 높음. EW 대비 0.05~0.10 이상의 uplift은 현실적으로 달성 불가
-4. **L* floor는 유효** — CAGR 19.5%를 더 올릴 방법: L* floor 1.5→2.0, RiskUtil 50.7%→67.6% (MDD 22.8% 예상, cap 30% 이내)
+---
+
+## 4. Regime이 실패한 지점
+
+### 4.1 fit/cal policy는 보수적으로 잘 작동
+
+- `block=0`, `hard_block_eligible=0`은 의도한 결과다.
+- `sign_consistency=0.50`이므로 hard block을 켜면 오히려 잘못된 배제 위험이 크다.
+- 현재 구조에서는 `soft`가 맞다. `hybrid hard block`은 아직 켜면 안 된다.
+
+### 4.2 regime cell의 OOS 안정성이 약함
+
+DEBUG에서 worst cells는 fit과 OOS gap이 매우 크다.
+
+| 예시 | fit | OOS | gap | selected_hit |
+|---|---:|---:|---:|---:|
+| bull / funding zscore | -503.0 bps | +882.0 bps | +1385.0 bps | 0.00 |
+| crisis / trend pullback | +354.6 bps | -508.9 bps | -863.5 bps | 1.00 |
+| bull / trend MA | +318.8 bps | -402.6 bps | -721.3 bps | 1.00 |
+
+이 패턴은 regime 자체보다 `regime x family x TF` cell edge 추정이 OOS에서 흔들린다는 뜻이다. 특히 selected_hit=1.00인 cell에서도 OOS gap이 크게 음수인 경우가 있어, 현재 policy가 선택된 sleeve의 손실 cell을 충분히 피하지 못한다.
+
+### 4.3 block comparison은 거의 0
+
+| fold | hybrid log growth | baseline log growth | delta |
+|---|---:|---:|---:|
+| 0 | -0.0114 | -0.0114 | -0.0000 |
+| 1 | +0.0252 | +0.0252 | +0.0000 |
+| 2 | +0.0185 | +0.0185 | -0.0000 |
+
+Regime policy가 최종 portfolio block return을 거의 바꾸지 못한다. 이는 regime이 routing layer에서는 작동하지만, 최종 weight 또는 rebalance 구조에서 성과 차이로 충분히 전달되지 않는다는 뜻이다.
+
+---
+
+## 5. 아키텍처 피드백
+
+### 결론
+
+현재 regime 모듈은 “risk reducer”로는 유효하지만 “growth selector”로는 부족하다. L2에서 regime의 역할은 hard filter가 아니라 다음 3개로 한정하는 편이 맞다.
+
+1. **Exposure governor**: state별 gross cap으로 crisis/bear 구간 노출을 줄인다.
+2. **Confidence modifier**: cell edge를 직접 차단하지 말고 downweight/conviction 조정에 사용한다.
+3. **Diagnostics provider**: raw 6-state와 cell OOS gap은 production routing이 아니라 성능 진단에 사용한다.
+
+### 유지할 것
+
+- `policy_mode=soft` 기본값 유지.
+- `hard_block_enabled=False` 유지.
+- `sign_consistency` gate 유지.
+- `risk_cap` 유지.
+- 3-state production routing 유지.
+
+### 수정 검토 대상
+
+| 대상 | 이유 | 제안 |
+|---|---|---|
+| `mean_cal_lift_bps < 0`인 정책 | calibration에서 이미 음수 | downweight 강도를 더 키우거나 pooled fallback으로 전환 |
+| `selected_hit=1` + OOS gap 음수 cell | 실제 선택된 손실 cell | per-cell `selected_oos_gap` 진단을 policy confidence에 반영 |
+| block delta 0 | routing 효과가 portfolio return에 미전달 | regime policy 적용 전후 weight delta/gross delta 로그 추가 |
+| Fold #1 손실 | 전체 blocker의 핵심 | fold-local policy fallback 또는 fold #1 regime state별 PnL 분해 필요 |
+
+---
+
+## 6. 다음 설계 방향
+
+가장 우선순위가 높은 개선은 hard block 강화가 아니다. 현재 sign consistency가 0.50이고 hard-block 후보가 0이므로 hard block을 켜도 자산증식 개선 근거가 없다.
+
+우선 적용할 구조:
+
+1. `soft downweight`를 calibration lift 기반으로 연속화한다.
+2. `mean_cal_lift_bps < 0`이고 `sign_consistency=False`인 cell은 pooled fallback으로 보낸다.
+3. regime risk cap은 `crisis=0.55`, `bear=0.75`, `bull=1.0`을 유지하되, cap 적용 빈도와 cap 전후 PnL을 별도 로그로 추적한다.
+4. policy 효과를 `sleeve_count`, `edge_pass`, `gross_before/after`, `return_before/after`로 분해해 block delta 0 원인을 제거한다.
+
+현재 결과 기준으로 regime 모듈은 L2에서 손실 제한에는 기여하지만, 수익 창출을 직접 담당하기에는 edge 안정성이 부족하다. 자산증식 관점에서는 regime을 alpha selector로 쓰기보다, L1/L2 신호가 만든 alpha에 대해 state-aware exposure와 confidence만 조정하는 보조 계층으로 두는 것이 더 합리적이다.

@@ -7,7 +7,7 @@ Test scenarios: A.S1-S7, B.S1-S2, C.S1.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -27,7 +27,9 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     L2SimulationCache,
     Layer1Result,
     Layer2AllocationConfig,
+    RegimeCellPolicy,
 )
+from src.domain.futures.strategy.tiered_workflow.l2_meta import apply_regime_cell_policy
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fixtures
@@ -39,7 +41,7 @@ def _make_signal_event(
     symbol: str,
     strategy_id: str,
     decision_idx: int,
-    side: int = 1,
+    side: Literal[-1, 1] = 1,
     gross_bps: float = 50.0,
     net_bps: float = 40.0,
     holding_bars: int = 4,
@@ -817,6 +819,48 @@ class TestCombineFriction:
         signals = {("SYMA", "a"): self._make_ss(5.0, 1.0)}
         _, friction = _combine_sleeve_signals_to_symbol(signals)
         assert friction == {}
+
+    def test_combine_sleeves_uses_regime_scaled_raw_mu_and_quality_weight(self) -> None:
+        key_a = ("SYMA", "donchian_72_4h")
+        key_b = ("SYMA", "trend_pullback_4h")
+        signals = {
+            key_a: self._make_ss(20.0, 2.0),
+            key_b: self._make_ss(4.0, 1.0),
+        }
+        policy = RegimeCellPolicy(
+            state=0,
+            state_name="bull",
+            family="donchian_72",
+            tf="4h",
+            action="downweight",
+            reason="negative_cal_lift",
+            edge_multiplier=0.5,
+            confidence=1.0,
+            fit_edge_bps=10.0,
+            pooled_fit_edge_bps=5.0,
+            cal_edge_bps=-5.0,
+            pooled_cal_edge_bps=2.0,
+            fit_lift_bps=-20.0,
+            cal_lift_bps=-20.0,
+            sign_consistent=True,
+            hard_block_eligible=False,
+            n_fit=5,
+            n_cal=5,
+        )
+        applied = apply_regime_cell_policy(
+            signals,
+            {key_a: 20.0, key_b: 4.0},
+            {(0, "donchian_72", "4h"): policy},
+            0,
+            mode="soft",
+        )
+
+        combined, _ = _combine_sleeve_signals_to_symbol(applied.sleeve_sigs)
+
+        assert applied.sleeve_sigs[key_a].raw_mu == pytest.approx(10.0)
+        assert applied.sleeve_sigs[key_a].quality_weight == pytest.approx(1.0)
+        assert combined["SYMA"].raw_mu == pytest.approx(7.0)
+        assert combined["SYMA"].quality_weight == pytest.approx(1.5)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
