@@ -99,6 +99,8 @@ def test_layer2_allocation_config_defaults_regime_soft_risk_caps() -> None:
     assert cfg.l2_regime_bull_gross_cap == pytest.approx(1.0)
     assert cfg.l2_regime_bear_gross_cap == pytest.approx(0.75)
     assert cfg.l2_regime_crisis_gross_cap == pytest.approx(0.55)
+    assert cfg.l2_regime_scale_signal_mu is True
+    assert cfg.l2_regime_scale_quality_weight is True
 
 
 def test_layer2_allocation_config_validates_regime_risk_caps() -> None:
@@ -219,21 +221,36 @@ def test_build_regime_policy_by_fold_sign_unstable_returns_pooled(monkeypatch: p
 
 
 def test_apply_regime_cell_policy_soft_mode_downweights_negative_cell() -> None:
-    sig = _make_symbol_signal()
+    sig = SymbolSignal(
+        raw_mu=20.0,
+        volatility=0.2,
+        n_obs=10,
+        t_stat=2.0,
+        valid=True,
+        beta_btc=None,
+        quality_weight=2.0,
+    )
     policy = _policy(edge_multiplier=0.5, cal_lift_bps=-7.0)
+    key = ("BTCUSDT", "donchian_72_4h")
 
     result = apply_regime_cell_policy(
-        {("BTCUSDT", "donchian_72_4h"): sig},
-        {("BTCUSDT", "donchian_72_4h"): 20.0},
+        {key: sig},
+        {key: 20.0},
         {(0, "donchian_72", "4h"): policy},
         0,
         mode="soft",
     )
 
-    assert ("BTCUSDT", "donchian_72_4h") in result.sleeve_sigs
-    assert result.sleeve_edges[("BTCUSDT", "donchian_72_4h")] == pytest.approx(10.0)
+    assert key in result.sleeve_sigs
+    assert result.sleeve_edges[key] == pytest.approx(10.0)
+    assert result.sleeve_sigs[key].raw_mu == pytest.approx(10.0)
+    assert result.sleeve_sigs[key].quality_weight == pytest.approx(1.0)
     assert result.n_downweight == 1
     assert result.n_block == 0
+    assert result.abs_mu_before_bps == pytest.approx(20.0)
+    assert result.abs_mu_after_bps == pytest.approx(10.0)
+    assert result.quality_weight_before == pytest.approx(2.0)
+    assert result.quality_weight_after == pytest.approx(1.0)
 
 
 def test_apply_regime_cell_policy_soft_never_blocks_even_when_policy_action_block() -> None:
@@ -338,8 +355,16 @@ def test_build_regime_policy_by_fold_hybrid_requires_hard_block_enabled(monkeypa
 
 
 def test_apply_regime_cell_policy_observe_mode_never_changes_sleeves_or_edges() -> None:
-    sig = _make_symbol_signal()
-    policy = _policy(action="block", reason="observe_only", edge_multiplier=0.0, cal_lift_bps=-22.0)
+    sig = SymbolSignal(
+        raw_mu=20.0,
+        volatility=0.2,
+        n_obs=10,
+        t_stat=2.0,
+        valid=True,
+        beta_btc=None,
+        quality_weight=2.0,
+    )
+    policy = _policy(action="downweight", reason="observe_only", edge_multiplier=0.25, cal_lift_bps=-22.0)
     sleeve_sigs = {("BTCUSDT", "donchian_72_4h"): sig}
     sleeve_edges = {("BTCUSDT", "donchian_72_4h"): 20.0}
 
@@ -353,7 +378,52 @@ def test_apply_regime_cell_policy_observe_mode_never_changes_sleeves_or_edges() 
 
     assert result.sleeve_sigs == sleeve_sigs
     assert result.sleeve_edges == sleeve_edges
-    assert result.n_block == 1
+    assert result.n_downweight == 1
+    assert result.n_block == 0
+    assert result.abs_mu_before_bps == pytest.approx(20.0)
+    assert result.abs_mu_after_bps == pytest.approx(20.0)
+    assert result.quality_weight_before == pytest.approx(2.0)
+    assert result.quality_weight_after == pytest.approx(2.0)
+
+
+def test_apply_regime_cell_policy_can_disable_signal_mu_scaling() -> None:
+    sig = SymbolSignal(
+        raw_mu=20.0,
+        volatility=0.2,
+        n_obs=10,
+        t_stat=2.0,
+        valid=True,
+        beta_btc=None,
+        quality_weight=2.0,
+    )
+    key = ("BTCUSDT", "donchian_72_4h")
+    policy = _policy(edge_multiplier=0.5, cal_lift_bps=-7.0)
+
+    result = apply_regime_cell_policy(
+        {key: sig},
+        {key: 20.0},
+        {(0, "donchian_72", "4h"): policy},
+        0,
+        mode="soft",
+        scale_signal_mu=False,
+        scale_quality_weight=False,
+    )
+
+    assert result.sleeve_edges[key] == pytest.approx(10.0)
+    assert result.sleeve_sigs[key].raw_mu == pytest.approx(20.0)
+    assert result.sleeve_sigs[key].quality_weight == pytest.approx(2.0)
+
+
+def test_layer2_allocation_config_can_disable_regime_signal_scaling() -> None:
+    cfg = Layer2AllocationConfig.from_mapping(
+        {
+            "l2_regime_scale_signal_mu": False,
+            "l2_regime_scale_quality_weight": False,
+        }
+    )
+
+    assert cfg.l2_regime_scale_signal_mu is False
+    assert cfg.l2_regime_scale_quality_weight is False
 
 
 def test_layer2_allocation_config_validates_regime_policy_params() -> None:
