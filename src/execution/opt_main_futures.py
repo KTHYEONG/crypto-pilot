@@ -1342,14 +1342,17 @@ def _run_tiered_l2_study(
         debug_top_k=int(getattr(cfg, "l2_regime_debug_top_k", 10)),
         policy_mode=cast(
             Literal["filter", "observe", "soft", "hybrid"],
-            str(getattr(cfg, "l2_regime_policy_mode", "hybrid")),
+            str(getattr(cfg, "l2_regime_policy_mode", "soft")),
         ),
         policy_cal_min_n=int(getattr(cfg, "l2_regime_cal_min_n", 20)),
         policy_min_cal_lift_bps=float(getattr(cfg, "l2_regime_min_cal_lift_bps", 8.0)),
         policy_block_lift_bps=float(getattr(cfg, "l2_regime_block_lift_bps", -12.0)),
-        policy_downweight_min=float(getattr(cfg, "l2_regime_soft_downweight_min", 0.35)),
+        policy_downweight_min=float(getattr(cfg, "l2_regime_soft_downweight_min", 0.50)),
         policy_downweight_max=float(getattr(cfg, "l2_regime_soft_downweight_max", 1.0)),
         policy_min_confidence=float(getattr(cfg, "l2_regime_min_policy_confidence", 0.55)),
+        policy_hard_block_enabled=bool(getattr(cfg, "l2_regime_hard_block_enabled", False)),
+        policy_block_min_confidence=float(getattr(cfg, "l2_regime_block_min_confidence", 0.80)),
+        policy_require_sign_consistency=bool(getattr(cfg, "l2_regime_require_sign_consistency", True)),
     )
     l2_sim_cache = replace(l2_sim_cache,
         bucket_edges_by_fold=_routing_plan.effective_bucket_edges_by_fold,
@@ -1374,7 +1377,8 @@ def _run_tiered_l2_study(
     if _policy_diag is not None:
         _logger.info(
             "[REGIME-L2] policy_mode=%s policy_source=fit/cal "
-            "global_reliable=%s allow=%d downweight=%d block=%d pooled=%d "
+            "global_reliable=%s allow=%d downweight=%d block=%d pooled=%d unstable=%d "
+            "hard_block_eligible=%d sign_consistency=%.2f hard_block_enabled=%s "
             "mean_cal_lift=%.2f mean_conf=%.2f",
             _policy_diag.mode,
             _policy_diag.global_reliable,
@@ -1382,6 +1386,10 @@ def _run_tiered_l2_study(
             _policy_diag.n_downweight,
             _policy_diag.n_block,
             _policy_diag.n_pooled,
+            _policy_diag.n_unstable,
+            _policy_diag.n_hard_block_eligible,
+            _policy_diag.sign_consistency_ratio,
+            _policy_diag.hard_block_enabled,
             _policy_diag.mean_cal_lift_bps,
             _policy_diag.mean_confidence,
         )
@@ -1393,7 +1401,8 @@ def _run_tiered_l2_study(
     if _logger.isEnabledFor(logging.DEBUG) and _policy_diag is not None:
         _logger.debug(
             "[REGIME-L2-POLICY] policy_mode=%s global_reliable=%s "
-            "n_allow=%d n_downweight=%d n_block=%d n_pooled=%d "
+            "n_allow=%d n_downweight=%d n_block=%d n_pooled=%d n_unstable=%d "
+            "n_hard_block_eligible=%d sign_consistency_ratio=%.2f hard_block_enabled=%s "
             "mean_cal_lift_bps=%.2f mean_confidence=%.2f",
             _policy_diag.mode,
             _policy_diag.global_reliable,
@@ -1401,6 +1410,10 @@ def _run_tiered_l2_study(
             _policy_diag.n_downweight,
             _policy_diag.n_block,
             _policy_diag.n_pooled,
+            _policy_diag.n_unstable,
+            _policy_diag.n_hard_block_eligible,
+            _policy_diag.sign_consistency_ratio,
+            _policy_diag.hard_block_enabled,
             _policy_diag.mean_cal_lift_bps,
             _policy_diag.mean_confidence,
         )
@@ -1414,6 +1427,10 @@ def _run_tiered_l2_study(
                 ["n_downweight", str(_policy_diag.n_downweight)],
                 ["n_block", str(_policy_diag.n_block)],
                 ["n_pooled", str(_policy_diag.n_pooled)],
+                ["n_unstable", str(_policy_diag.n_unstable)],
+                ["n_hard_block_eligible", str(_policy_diag.n_hard_block_eligible)],
+                ["sign_consistency_ratio", f"{_policy_diag.sign_consistency_ratio:.2f}"],
+                ["hard_block_enabled", "yes" if _policy_diag.hard_block_enabled else "no"],
                 ["mean_cal_lift_bps", f"{_policy_diag.mean_cal_lift_bps:.2f}"],
                 ["mean_confidence", f"{_policy_diag.mean_confidence:.2f}"],
             ],
@@ -2097,7 +2114,9 @@ def _run_strategy_stage(
                     f"crisis={_state_pct.get(2, 0.0):.1f}%"
                 )
                 _state_status = "🟢 stable" if _compute_c2_macro(_effective_regime_code)[0] >= 12.0 else "🟠 unstable"
-                _policy_mode = str(getattr(tiered_cfg, "l2_regime_policy_mode", "hybrid"))
+                _policy_mode = str(getattr(tiered_cfg, "l2_regime_policy_mode", "soft"))
+                _hard_block = "on" if bool(getattr(tiered_cfg, "l2_regime_hard_block_enabled", False)) else "off"
+                _risk_cap = "on" if bool(getattr(tiered_cfg, "l2_regime_risk_cap_enabled", True)) else "off"
 
                 _logger.info(
                     "[REGIME]\n"
@@ -2107,6 +2126,8 @@ def _run_strategy_stage(
                     "status        | %s\n"
                     "distribution  | %s\n"
                     "policy_mode   | %s\n"
+                    "hard_block    | %s\n"
+                    "risk_cap      | %s\n"
                     "policy_source | fit/cal\n"
                     "oos_debug     | evaluation only\n"
                     "note          | L2 verdict is reported separately in [REGIME-L2]",
@@ -2114,6 +2135,8 @@ def _run_strategy_stage(
                     _state_status,
                     _state_dist,
                     _policy_mode,
+                    _hard_block,
+                    _risk_cap,
                 )
 
             # ── Step B: L2 Optimization Header ──────────────────────────────

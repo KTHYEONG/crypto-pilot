@@ -296,6 +296,9 @@ def test_l2_regime_log_reports_effective_state_count() -> None:
     assert "[REGIME] DEBUG" in source
     assert "global_reliable" in source
     assert "n_downweight" in source
+    assert "n_hard_block_eligible" in source
+    assert "sign_consistency_ratio" in source
+    assert "hard_block_enabled" in source
     assert "mean_cal_lift_bps" in source
     assert "raw_states=6" not in source
     assert "proof_failed path=%s effective_states=%d" in source
@@ -311,6 +314,9 @@ def test_awf_sim_consumes_regime_routing_diagnostics_for_debug() -> None:
     assert "source=fit/cal" in source
     assert "OOS DEBUG = evaluation only" in source
     assert "active_state_names" in source
+    assert "n_hard_block_eligible" in source
+    assert "sign_consistency_ratio" in source
+    assert "hard_block_enabled" in source
 
 
 def test_regime_debug_log_tables_are_declared_in_source() -> None:
@@ -323,6 +329,9 @@ def test_regime_debug_log_tables_are_declared_in_source() -> None:
     assert "compression_loss_bps" in opt_source
     assert "[REGIME] DEBUG" in opt_source
     assert "mean_confidence" in opt_source
+    assert "n_hard_block_eligible" in opt_source
+    assert "sign_consistency_ratio" in opt_source
+    assert "hard_block_enabled" in opt_source
     assert "[REGIME-DEBUG-SELECTED]" in awf_source
     assert "state  | bars | realized_return_bps" in awf_source
 
