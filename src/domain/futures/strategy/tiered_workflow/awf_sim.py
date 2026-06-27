@@ -1837,6 +1837,12 @@ def _run_awf_simulation(
                                 Literal["filter", "observe", "soft", "hybrid"],
                                 _regime_policy_mode,
                             ),
+                            scale_signal_mu=bool(
+                                getattr(config, "l2_regime_scale_signal_mu", True)
+                            ),
+                            scale_quality_weight=bool(
+                                getattr(config, "l2_regime_scale_quality_weight", True)
+                            ),
                         )
                         _oos_sleeve_sigs = _policy_applied.sleeve_sigs
                         _oos_sleeve_edges = {
@@ -1844,6 +1850,31 @@ def _run_awf_simulation(
                             for k in _oos_sleeve_sigs
                             if k in _policy_applied.sleeve_edges
                         }
+                        if logger.isEnabledFor(logging.DEBUG) and (
+                            _policy_applied.n_downweight > 0 or _policy_applied.n_block > 0
+                        ):
+                            logger.debug(
+                                "[L2-REGIME-POLICY-EFFECT] t=%d fold=%d regime=%d mode=%s "
+                                "sleeves=%d allow=%d downweight=%d block=%d pooled=%d "
+                                "edge_abs_before=%.2f edge_abs_after=%.2f "
+                                "mu_abs_before=%.2f mu_abs_after=%.2f "
+                                "qw_before=%.2f qw_after=%.2f",
+                                t,
+                                _fold_idx,
+                                _regime_now,
+                                _regime_policy_mode,
+                                _policy_applied.n_input,
+                                _policy_applied.n_allow,
+                                _policy_applied.n_downweight,
+                                _policy_applied.n_block,
+                                _policy_applied.n_pooled,
+                                _policy_applied.gross_edge_before_bps,
+                                _policy_applied.gross_edge_after_bps,
+                                _policy_applied.abs_mu_before_bps,
+                                _policy_applied.abs_mu_after_bps,
+                                _policy_applied.quality_weight_before,
+                                _policy_applied.quality_weight_after,
+                            )
                     # Step C: per-bar bucket filter stats (every 100 bars)
                     _after_filter_count = len(_oos_sleeve_sigs)
                     _dropped_by_bucket = _before_filter_count - _after_filter_count
