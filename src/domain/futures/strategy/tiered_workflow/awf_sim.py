@@ -1573,11 +1573,13 @@ def _run_awf_simulation(
     prof_mid = time.perf_counter() - _t_pre_loop
     # ── bucket routing + step H + init ─────────────────────────────────────
     _l2_routing_mode = str(getattr(config, "l2_routing_mode", "bucket"))
-    _regime_policy_mode = str(getattr(config, "l2_regime_policy_mode", "hybrid"))
+    _regime_policy_mode = str(getattr(config, "l2_regime_policy_mode", "soft"))
     _regime_code_1d: NDArray[np.int8] = np.zeros(aligned.close_2d.shape[0], dtype=np.int8)
     bucket_edges_by_fold: list[dict[tuple[int, str, str], float]] = []
     policy_by_fold = list(cache.regime_policy_by_fold)
     _routing_diag = cache.regime_routing_diagnostics
+    from src.domain.futures.strategy.tiered_workflow.l2_meta import apply_regime_risk_cap
+
     if _l2_routing_mode == "bucket":
         from src.domain.futures.strategy.market_regime import compute_market_regime_context
         if cache.regime_code_1d is not None:
@@ -1636,7 +1638,8 @@ def _run_awf_simulation(
                     _policy_diag = _routing_diag.policy_diagnostics
                     logger.debug(
                         "[L2-REGIME-POLICY] mode=%s source=fit/cal "
-                        "global_reliable=%s allow=%d downweight=%d block=%d pooled=%d "
+                        "global_reliable=%s allow=%d downweight=%d block=%d pooled=%d unstable=%d "
+                        "n_hard_block_eligible=%d sign_consistency_ratio=%.2f hard_block_enabled=%s "
                         "mean_cal_lift=%.2f mean_conf=%.2f",
                         _policy_diag.mode,
                         _policy_diag.global_reliable,
@@ -1644,6 +1647,10 @@ def _run_awf_simulation(
                         _policy_diag.n_downweight,
                         _policy_diag.n_block,
                         _policy_diag.n_pooled,
+                        _policy_diag.n_unstable,
+                        _policy_diag.n_hard_block_eligible,
+                        _policy_diag.sign_consistency_ratio,
+                        _policy_diag.hard_block_enabled,
                         _policy_diag.mean_cal_lift_bps,
                         _policy_diag.mean_confidence,
                     )
@@ -2038,6 +2045,37 @@ def _run_awf_simulation(
                     support_mask=support_mask,
                 )
             w = np.where(tradeable_mask, w, 0.0)
+            _regime_now_for_cap = int(_regime_code_1d[t]) if t < len(_regime_code_1d) else 2
+            _state_names_for_cap = (
+                _routing_diag.active_state_names
+                if _routing_diag is not None
+                else ("bull", "bear", "crisis")
+            )
+            _gross_before_cap = float(np.sum(np.abs(w)))
+            w, _regime_risk_mult = apply_regime_risk_cap(
+                w,
+                _regime_now_for_cap,
+                _state_names_for_cap,
+                enabled=bool(getattr(config, "l2_regime_risk_cap_enabled", True)),
+                bull_gross_cap=float(getattr(config, "l2_regime_bull_gross_cap", 1.0)),
+                bear_gross_cap=float(getattr(config, "l2_regime_bear_gross_cap", 0.75)),
+                crisis_gross_cap=float(getattr(config, "l2_regime_crisis_gross_cap", 0.55)),
+            )
+            if logger.isEnabledFor(logging.DEBUG) and _regime_risk_mult < 1.0:
+                _regime_label_for_cap = (
+                    _state_names_for_cap[_regime_now_for_cap]
+                    if 0 <= _regime_now_for_cap < len(_state_names_for_cap)
+                    else f"unknown({_regime_now_for_cap})"
+                )
+                logger.debug(
+                    "[L2-REGIME-RISK-CAP] t=%d fold=%d regime=%s(%d) gross_before=%.4f mult=%.4f",
+                    t,
+                    _fold_idx,
+                    _regime_label_for_cap,
+                    _regime_now_for_cap,
+                    _gross_before_cap,
+                    _regime_risk_mult,
+                )
 
             # Phase 3-5: capacity_usdt clip (OOS)
             # portfolio_nav=None 시 unit-NAV → skip
