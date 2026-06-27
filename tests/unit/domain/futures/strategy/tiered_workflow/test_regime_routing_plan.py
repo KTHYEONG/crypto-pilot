@@ -335,8 +335,10 @@ def test_layer2_allocation_config_regime_proof_defaults() -> None:
     assert cfg.l2_regime_compression_enabled is True
     assert cfg.l2_regime_proof_enabled is True
     assert cfg.l2_regime_fallback_mode == "pooled"
-    assert cfg.l2_regime_policy_mode == "hybrid"
+    assert cfg.l2_regime_policy_mode == "soft"
     assert cfg.l2_regime_cal_min_n == 20
+    assert cfg.l2_regime_hard_block_enabled is False
+    assert cfg.l2_regime_risk_cap_enabled is True
     assert cfg.l2_regime_proof_nw_tstat == pytest.approx(1.5)
     assert cfg.l2_regime_proof_fold_pass_ratio == pytest.approx(0.60)
 

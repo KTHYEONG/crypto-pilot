@@ -733,6 +733,14 @@ def _default_policy_reason(*, mode: RegimePolicyMode, enabled: bool) -> str:
     return "observe_only" if mode == "observe" else "policy_ready"
 
 
+def _lift_sign(lift_bps: float, *, allow_threshold: float, block_threshold: float) -> int:
+    if lift_bps >= allow_threshold:
+        return 1
+    if lift_bps <= block_threshold:
+        return -1
+    return 0
+
+
 def build_regime_policy_by_fold(
     *,
     cache: L2SimulationCache,
@@ -740,16 +748,19 @@ def build_regime_policy_by_fold(
     awf_folds: Sequence[WFFold],
     regime_code_1d: NDArray[np.int8],
     state_names: tuple[str, ...],
-    mode: RegimePolicyMode = "hybrid",
+    mode: RegimePolicyMode = "soft",
     cost_bps: float = 6.0,
     min_n: int = 15,
     shrinkage: float = 0.3,
     cal_min_n: int = 20,
     min_cal_lift_bps: float = 8.0,
     block_lift_bps: float = -12.0,
-    downweight_min: float = 0.35,
+    downweight_min: float = 0.50,
     downweight_max: float = 1.0,
     min_confidence: float = 0.55,
+    hard_block_enabled: bool = False,
+    block_min_confidence: float = 0.80,
+    require_sign_consistency: bool = True,
 ) -> tuple[tuple[dict[tuple[int, str, str], RegimeCellPolicy], ...], RegimePolicyDiagnostics]:
     """Build fold-local regime policy using fit/cal windows only."""
     if mode == "filter":
@@ -763,19 +774,29 @@ def build_regime_policy_by_fold(
             n_downweight=0,
             n_block=0,
             n_pooled=0,
+            n_unstable=0,
+            n_hard_block_eligible=0,
+            mean_fit_lift_bps=0.0,
             mean_cal_lift_bps=0.0,
             min_cal_lift_bps=0.0,
             max_cal_lift_bps=0.0,
             mean_confidence=0.0,
+            sign_consistency_ratio=0.0,
+            hard_block_enabled=hard_block_enabled,
         )
 
     policy_by_fold: list[dict[tuple[int, str, str], RegimeCellPolicy]] = []
+    fit_lifts_all: list[float] = []
     cal_lifts_all: list[float] = []
     confidences_all: list[float] = []
     n_allow = 0
     n_downweight = 0
     n_block = 0
     n_pooled = 0
+    n_unstable = 0
+    n_hard_block_eligible = 0
+    sign_consistent_total = 0
+    sign_comparable_total = 0
 
     for fold in awf_folds:
         fit_stats = compute_bucket_realized_edge_stats(
@@ -826,28 +847,57 @@ def build_regime_policy_by_fold(
             cal_edge_bps = float(cal_stat.edge_bps) if cal_stat is not None else 0.0
             n_fit = fit_stat.n_obs if fit_stat is not None else 0
             n_cal = cal_stat.n_obs if cal_stat is not None else 0
+            fit_lift_bps = fit_edge_bps - float(pooled_fit.edge_bps)
             cal_lift_bps = cal_edge_bps - float(pooled_cal.edge_bps)
             confidence = min(1.0, float(n_cal) / max(float(cal_min_n), 1.0))
+            fit_lifts_all.append(fit_lift_bps)
             cal_lifts_all.append(cal_lift_bps)
             confidences_all.append(confidence)
+            fit_sign = _lift_sign(
+                fit_lift_bps,
+                allow_threshold=min_cal_lift_bps,
+                block_threshold=block_lift_bps,
+            )
+            cal_sign = _lift_sign(
+                cal_lift_bps,
+                allow_threshold=min_cal_lift_bps,
+                block_threshold=block_lift_bps,
+            )
+            sign_consistent = fit_sign == 0 or cal_sign == 0 or fit_sign == cal_sign
+            if fit_sign != 0 and cal_sign != 0:
+                sign_comparable_total += 1
+                if sign_consistent:
+                    sign_consistent_total += 1
 
             action: Literal["pooled", "allow", "downweight", "block"] = "pooled"
             reason: str = "neutral"
             edge_multiplier = 1.0
+            hard_block_eligible = False
             if n_fit < min_n:
                 reason = "insufficient_fit"
             elif n_cal < cal_min_n:
                 reason = "insufficient_cal"
             elif confidence < min_confidence:
                 reason = "global_unreliable"
+            elif require_sign_consistency and not sign_consistent and fit_sign != 0 and cal_sign != 0:
+                reason = "cal_sign_unstable"
+                n_unstable += 1
             elif cal_lift_bps <= block_lift_bps:
-                if mode == "hybrid":
+                hard_block_eligible = (
+                    mode == "hybrid"
+                    and hard_block_enabled
+                    and confidence >= block_min_confidence
+                    and fit_lift_bps <= block_lift_bps
+                    and sign_consistent
+                )
+                if hard_block_eligible:
                     action = "block"
                     edge_multiplier = 0.0
                 else:
                     action = "downweight"
                     severity = min(1.0, abs(cal_lift_bps) / max(abs(block_lift_bps), 1e-12))
                     edge_multiplier = downweight_max - severity * (downweight_max - downweight_min)
+                    edge_multiplier = float(np.clip(edge_multiplier, downweight_min, downweight_max))
                 reason = "negative_cal_lift"
             elif cal_lift_bps < min_cal_lift_bps:
                 action = "downweight"
@@ -862,6 +912,8 @@ def build_regime_policy_by_fold(
 
             if mode == "observe":
                 reason = "observe_only"
+            if hard_block_eligible:
+                n_hard_block_eligible += 1
 
             fold_policy[(state, family, tf)] = RegimeCellPolicy(
                 state=state,
@@ -889,7 +941,10 @@ def build_regime_policy_by_fold(
                 pooled_fit_edge_bps=float(pooled_fit.edge_bps),
                 cal_edge_bps=cal_edge_bps,
                 pooled_cal_edge_bps=float(pooled_cal.edge_bps),
+                fit_lift_bps=fit_lift_bps,
                 cal_lift_bps=cal_lift_bps,
+                sign_consistent=sign_consistent,
+                hard_block_eligible=hard_block_eligible,
                 n_fit=n_fit,
                 n_cal=n_cal,
             )
@@ -905,14 +960,19 @@ def build_regime_policy_by_fold(
         policy_by_fold.append(fold_policy)
 
     enabled = True
-    global_reliable = (n_allow + n_downweight + n_block) > 0
+    sign_consistency_ratio = (
+        float(sign_consistent_total) / float(sign_comparable_total) if sign_comparable_total > 0 else 0.0
+    )
+    global_reliable = (n_allow + n_downweight + n_block) > 0 and sign_consistency_ratio > 0.0
     if not cal_lifts_all:
         reason = _default_policy_reason(mode=mode, enabled=enabled)
+        mean_fit_lift = 0.0
         min_lift = 0.0
         max_lift = 0.0
         mean_lift = 0.0
         mean_conf = 0.0
     else:
+        mean_fit_lift = float(np.mean(fit_lifts_all))
         mean_lift = float(np.mean(cal_lifts_all))
         min_lift = float(np.min(cal_lifts_all))
         max_lift = float(np.max(cal_lifts_all))
@@ -928,10 +988,15 @@ def build_regime_policy_by_fold(
         n_downweight=n_downweight,
         n_block=n_block,
         n_pooled=n_pooled,
+        n_unstable=n_unstable,
+        n_hard_block_eligible=n_hard_block_eligible,
+        mean_fit_lift_bps=mean_fit_lift,
         mean_cal_lift_bps=mean_lift,
         min_cal_lift_bps=min_lift,
         max_cal_lift_bps=max_lift,
         mean_confidence=mean_conf,
+        sign_consistency_ratio=sign_consistency_ratio,
+        hard_block_enabled=hard_block_enabled,
     )
     return tuple(policy_by_fold), diagnostics
 
@@ -976,9 +1041,12 @@ def apply_regime_cell_policy(
         if mode == "observe":
             next_sigs[key] = sig
             next_edges[key] = gross_bps
-        elif intended_action == "block" and mode == "hybrid":
-            n_block += 1
-            continue
+        elif intended_action == "block":
+            if mode == "hybrid" and policy.hard_block_eligible:
+                n_block += 1
+                continue
+            next_sigs[key] = sig
+            next_edges[key] = gross_bps if policy.edge_multiplier <= 0.0 else gross_bps * policy.edge_multiplier
         elif intended_action == "downweight" and mode in {"soft", "hybrid"}:
             next_sigs[key] = sig
             next_edges[key] = gross_bps * policy.edge_multiplier
@@ -993,6 +1061,10 @@ def apply_regime_cell_policy(
         elif intended_action == "block":
             if mode == "observe":
                 n_block += 1
+            elif mode == "hybrid" and policy.hard_block_eligible:
+                pass
+            else:
+                n_downweight += 1
         else:
             n_pooled += 1
 
@@ -1005,6 +1077,42 @@ def apply_regime_cell_policy(
         n_block=n_block,
         n_pooled=n_pooled,
     )
+
+
+def apply_regime_risk_cap(
+    weights: NDArray[np.float64],
+    regime_now: int,
+    state_names: tuple[str, ...],
+    *,
+    enabled: bool = True,
+    bull_gross_cap: float = 1.0,
+    bear_gross_cap: float = 0.75,
+    crisis_gross_cap: float = 0.55,
+) -> tuple[NDArray[np.float64], float]:
+    """Scale portfolio weights so state-specific gross exposure does not exceed the configured cap."""
+    if bull_gross_cap <= 0.0 or bull_gross_cap > 1.0:
+        raise ValueError("bull_gross_cap must be in range (0.0, 1.0]")
+    if bear_gross_cap <= 0.0 or bear_gross_cap > 1.0:
+        raise ValueError("bear_gross_cap must be in range (0.0, 1.0]")
+    if crisis_gross_cap <= 0.0 or crisis_gross_cap > 1.0:
+        raise ValueError("crisis_gross_cap must be in range (0.0, 1.0]")
+    if not enabled:
+        return np.asarray(weights, dtype=np.float64).copy(), 1.0
+    arr = np.asarray(weights, dtype=np.float64)
+    gross = float(np.sum(np.abs(arr)))
+    if gross <= 0.0:
+        return arr.copy(), 1.0
+    state_name = state_names[regime_now] if 0 <= regime_now < len(state_names) else "crisis"
+    if state_name.startswith("bull"):
+        cap = bull_gross_cap
+    elif state_name.startswith("bear"):
+        cap = bear_gross_cap
+    else:
+        cap = crisis_gross_cap
+    if gross <= cap:
+        return arr.copy(), 1.0
+    multiplier = float(cap / gross)
+    return arr * multiplier, multiplier
 
 
 def _compute_js_divergence(
@@ -1583,9 +1691,12 @@ def build_regime_routing_plan(
     policy_cal_min_n: int = 20,
     policy_min_cal_lift_bps: float = 8.0,
     policy_block_lift_bps: float = -12.0,
-    policy_downweight_min: float = 0.35,
+    policy_downweight_min: float = 0.50,
     policy_downweight_max: float = 1.0,
     policy_min_confidence: float = 0.55,
+    policy_hard_block_enabled: bool = False,
+    policy_block_min_confidence: float = 0.80,
+    policy_require_sign_consistency: bool = True,
 ) -> RegimeRoutingPlan:
     """Build the fold-local routing plan used by L2 bucket selection."""
     n_bars = int(np.asarray(aligned.close_2d).shape[0])
@@ -1756,6 +1867,9 @@ def build_regime_routing_plan(
         downweight_min=policy_downweight_min,
         downweight_max=policy_downweight_max,
         min_confidence=policy_min_confidence,
+        hard_block_enabled=policy_hard_block_enabled,
+        block_min_confidence=policy_block_min_confidence,
+        require_sign_consistency=policy_require_sign_consistency,
     )
 
     debug_diagnostics: RegimeDebugDiagnostics | None = None
