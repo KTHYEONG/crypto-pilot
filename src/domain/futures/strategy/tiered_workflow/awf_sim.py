@@ -5,7 +5,7 @@ from __future__ import annotations
 import re as _re
 from collections import defaultdict
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 import numba
 import numpy as np
@@ -1573,8 +1573,10 @@ def _run_awf_simulation(
     prof_mid = time.perf_counter() - _t_pre_loop
     # ── bucket routing + step H + init ─────────────────────────────────────
     _l2_routing_mode = str(getattr(config, "l2_routing_mode", "bucket"))
+    _regime_policy_mode = str(getattr(config, "l2_regime_policy_mode", "hybrid"))
     _regime_code_1d: NDArray[np.int8] = np.zeros(aligned.close_2d.shape[0], dtype=np.int8)
     bucket_edges_by_fold: list[dict[tuple[int, str, str], float]] = []
+    policy_by_fold = list(cache.regime_policy_by_fold)
     _routing_diag = cache.regime_routing_diagnostics
     if _l2_routing_mode == "bucket":
         from src.domain.futures.strategy.market_regime import compute_market_regime_context
@@ -1630,6 +1632,22 @@ def _run_awf_simulation(
                     ",".join(f"{v:.1f}" for v in _routing_diag.bucket_hit_pct_by_fold),
                     ",".join(f"{v:.4f}" for v in _routing_diag.js_divergence_by_fold),
                 )
+                if _routing_diag.policy_diagnostics is not None:
+                    _policy_diag = _routing_diag.policy_diagnostics
+                    logger.debug(
+                        "[L2-REGIME-POLICY] mode=%s source=fit/cal "
+                        "global_reliable=%s allow=%d downweight=%d block=%d pooled=%d "
+                        "mean_cal_lift=%.2f mean_conf=%.2f",
+                        _policy_diag.mode,
+                        _policy_diag.global_reliable,
+                        _policy_diag.n_allow,
+                        _policy_diag.n_downweight,
+                        _policy_diag.n_block,
+                        _policy_diag.n_pooled,
+                        _policy_diag.mean_cal_lift_bps,
+                        _policy_diag.mean_confidence,
+                    )
+                    logger.debug("[L2-REGIME-POLICY] OOS DEBUG = evaluation only")
     else:
         bucket_edges_by_fold = [{} for _ in awf_folds]
 
@@ -1767,11 +1785,17 @@ def _run_awf_simulation(
                     if _parse_tf_from_strategy_id(k[1]) in _current_included
                 }
             # L2 bucket routing: OOS bar t의 regime 기반 sleeve 필터링
-            if _l2_routing_mode == "bucket" and _fold_idx < len(bucket_edges_by_fold):
-                _current_bucket_edges = bucket_edges_by_fold[_fold_idx]
-                if _current_bucket_edges:
+            if _l2_routing_mode == "bucket" and (
+                _fold_idx < len(bucket_edges_by_fold) or _fold_idx < len(policy_by_fold)
+            ):
+                _current_bucket_edges = (
+                    bucket_edges_by_fold[_fold_idx] if _fold_idx < len(bucket_edges_by_fold) else {}
+                )
+                _current_policy_map = policy_by_fold[_fold_idx] if _fold_idx < len(policy_by_fold) else {}
+                if _current_bucket_edges or _current_policy_map:
                     from src.domain.futures.strategy.tiered_workflow.l2_meta import (
                         _parse_meta_group_ids,
+                        apply_regime_cell_policy,
                         filter_sleeves_by_bucket,
                     )
                     _before_filter_count = len(_oos_sleeve_sigs)
@@ -1782,17 +1806,37 @@ def _run_awf_simulation(
                         cache.sleeve_ids[_j]: _j for _j in range(cache.signal_mask_2d.shape[1])
                         if cache.signal_mask_2d[t, _j] and cache.sleeve_ids[_j] in _before_sleeve_keys
                     }
-                    _oos_sleeve_sigs = filter_sleeves_by_bucket(
-                        _oos_sleeve_sigs,
-                        _current_bucket_edges,
-                        _regime_now,
-                        edge_floor_bps=float(
-                            getattr(config, "l2_bucket_edge_floor_bps", 0.0)
-                        ),
-                    )
-                    _oos_sleeve_edges = {
-                        k: v for k, v in _oos_sleeve_edges.items() if k in _oos_sleeve_sigs
-                    }
+                    if _regime_policy_mode == "filter":
+                        _oos_sleeve_sigs = filter_sleeves_by_bucket(
+                            _oos_sleeve_sigs,
+                            _current_bucket_edges,
+                            _regime_now,
+                            edge_floor_bps=float(
+                                getattr(config, "l2_bucket_edge_floor_bps", 0.0)
+                            ),
+                        )
+                        _oos_sleeve_edges = {
+                            k: v for k, v in _oos_sleeve_edges.items() if k in _oos_sleeve_sigs
+                        }
+                    else:
+                        _pre_policy_sleeve_edges = _oos_sleeve_edges
+                        _policy_input_edges = {k: float(v[0]) for k, v in _pre_policy_sleeve_edges.items()}
+                        _policy_applied = apply_regime_cell_policy(
+                            _oos_sleeve_sigs,
+                            _policy_input_edges,
+                            _current_policy_map,
+                            _regime_now,
+                            mode=cast(
+                                Literal["filter", "observe", "soft", "hybrid"],
+                                _regime_policy_mode,
+                            ),
+                        )
+                        _oos_sleeve_sigs = _policy_applied.sleeve_sigs
+                        _oos_sleeve_edges = {
+                            k: (_policy_applied.sleeve_edges[k], _pre_policy_sleeve_edges.get(k, (0.0, 0.0))[1])
+                            for k in _oos_sleeve_sigs
+                            if k in _policy_applied.sleeve_edges
+                        }
                     # Step C: per-bar bucket filter stats (every 100 bars)
                     _after_filter_count = len(_oos_sleeve_sigs)
                     _dropped_by_bucket = _before_filter_count - _after_filter_count
@@ -1809,9 +1853,13 @@ def _run_awf_simulation(
                         )
                         logger.debug(
                             "[L2-BUCKET-FILTER] t=%d fold=%d regime=%s(%d) "
-                            "sleeves_before=%d after=%d dropped=%d",
+                            "mode=%s source=%s sleeves_before=%d after=%d dropped=%d",
                             t, _fold_idx, _rl, _regime_now,
-                            _before_filter_count, _after_filter_count, _dropped_by_bucket,
+                            _regime_policy_mode,
+                            ("fit/cal policy" if _regime_policy_mode != "filter" else "bucket edge"),
+                            _before_filter_count,
+                            _after_filter_count,
+                            _dropped_by_bucket,
                         )
                         # Step D: per-sleeve drop detail (diag only)
                         if _diag and logger.isEnabledFor(logging.DEBUG):
@@ -1822,8 +1870,11 @@ def _run_awf_simulation(
                                 _bedge = _current_bucket_edges.get(_bk, 0.0)
                                 logger.debug(
                                     "[L2-BUCKET-DROP] t=%d sym=%s family=%s tf=%s "
-                                    "regime=%d edge=%.2f floor=%.2f",
-                                    t, _dk[0], _fam, _tf, _regime_now, _bedge,
+                                    "regime=%d mode=%s source=%s edge=%.2f floor=%.2f",
+                                    t, _dk[0], _fam, _tf, _regime_now,
+                                    _regime_policy_mode,
+                                    ("fit/cal policy" if _regime_policy_mode != "filter" else "bucket edge"),
+                                    _bedge,
                                     float(getattr(config, "l2_bucket_edge_floor_bps", 0.0)),
                                 )
                     # Step G: bucket hit ratio update
@@ -2325,7 +2376,8 @@ def _run_awf_simulation(
             _bias = float(np.mean(_errors))
             _corr = float(np.corrcoef(_fit_vals, _oos_vals)[0, 1]) if len(_common) >= 3 else 0.0
             logger.debug(
-                "[L2-BUCKET-OOS] fold=%d n_common=%d rmse=%.2f mae=%.2f bias=%.2f corr=%.3f",
+                "[L2-BUCKET-OOS] fold=%d n_common=%d rmse=%.2f mae=%.2f "
+                "bias=%.2f corr=%.3f evaluation_only=1 source=fit_vs_oos_debug",
                 _fi, len(_common), _rmse, _mae, _bias, _corr,
             )
             _sorted_by_err = sorted(
