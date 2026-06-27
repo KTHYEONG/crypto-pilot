@@ -4,7 +4,7 @@ import logging
 import re as _re
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
@@ -1008,6 +1008,8 @@ def apply_regime_cell_policy(
     regime_now: int,
     *,
     mode: RegimePolicyMode,
+    scale_signal_mu: bool = True,
+    scale_quality_weight: bool = True,
 ) -> RegimePolicyApplication:
     """Apply regime policy to current sleeve signals and edge scores."""
     if not sleeve_sigs:
@@ -1021,12 +1023,33 @@ def apply_regime_cell_policy(
             n_pooled=0,
         )
 
+    def _scale_symbol_signal(
+        sig: SymbolSignal,
+        *,
+        multiplier: float,
+        scale_quality_weight_inner: bool,
+    ) -> SymbolSignal:
+        clipped = float(np.clip(multiplier, 0.0, 1.0))
+        quality_weight = (
+            max(float(sig.quality_weight), 0.0) * clipped
+            if scale_quality_weight_inner
+            else sig.quality_weight
+        )
+        return replace(
+            sig,
+            raw_mu=float(sig.raw_mu) * clipped,
+            quality_weight=quality_weight,
+        )
+
     next_sigs: dict[tuple[str, str], SymbolSignal] = {}
     next_edges: dict[tuple[str, str], float] = {}
     n_allow = 0
     n_downweight = 0
     n_block = 0
     n_pooled = 0
+    gross_edge_before_bps = float(sum(abs(float(edge)) for edge in sleeve_edges.values()))
+    abs_mu_before_bps = float(sum(abs(float(sig.raw_mu)) for sig in sleeve_sigs.values()))
+    quality_weight_before = float(sum(max(float(sig.quality_weight), 0.0) for sig in sleeve_sigs.values()))
     for key, sig in sleeve_sigs.items():
         family, tf = _parse_meta_group_ids(key[1])
         policy = policy_map.get((regime_now, family, tf))
@@ -1038,21 +1061,35 @@ def apply_regime_cell_policy(
             continue
 
         intended_action = policy.action
+        multiplier = 1.0
         if mode == "observe":
-            next_sigs[key] = sig
-            next_edges[key] = gross_bps
+            pass
         elif intended_action == "block":
             if mode == "hybrid" and policy.hard_block_eligible:
                 n_block += 1
                 continue
-            next_sigs[key] = sig
-            next_edges[key] = gross_bps if policy.edge_multiplier <= 0.0 else gross_bps * policy.edge_multiplier
+            if policy.edge_multiplier > 0.0:
+                multiplier = policy.edge_multiplier
         elif intended_action == "downweight" and mode in {"soft", "hybrid"}:
-            next_sigs[key] = sig
-            next_edges[key] = gross_bps * policy.edge_multiplier
-        else:
-            next_sigs[key] = sig
-            next_edges[key] = gross_bps
+            multiplier = policy.edge_multiplier
+
+        next_edges[key] = gross_bps * multiplier
+        next_sigs[key] = (
+            _scale_symbol_signal(
+                sig,
+                multiplier=multiplier,
+                scale_quality_weight_inner=scale_quality_weight,
+            )
+            if scale_signal_mu
+            else (
+                replace(
+                    sig,
+                    quality_weight=max(float(sig.quality_weight), 0.0) * float(np.clip(multiplier, 0.0, 1.0)),
+                )
+                if scale_quality_weight and multiplier != 1.0
+                else sig
+            )
+        )
 
         if intended_action == "allow":
             n_allow += 1
@@ -1068,6 +1105,9 @@ def apply_regime_cell_policy(
         else:
             n_pooled += 1
 
+    gross_edge_after_bps = float(sum(abs(float(edge)) for edge in next_edges.values()))
+    abs_mu_after_bps = float(sum(abs(float(sig.raw_mu)) for sig in next_sigs.values()))
+    quality_weight_after = float(sum(max(float(sig.quality_weight), 0.0) for sig in next_sigs.values()))
     return RegimePolicyApplication(
         sleeve_sigs=next_sigs,
         sleeve_edges=next_edges,
@@ -1076,6 +1116,12 @@ def apply_regime_cell_policy(
         n_downweight=n_downweight,
         n_block=n_block,
         n_pooled=n_pooled,
+        gross_edge_before_bps=gross_edge_before_bps,
+        gross_edge_after_bps=gross_edge_after_bps,
+        abs_mu_before_bps=abs_mu_before_bps,
+        abs_mu_after_bps=abs_mu_after_bps,
+        quality_weight_before=quality_weight_before,
+        quality_weight_after=quality_weight_after,
     )
 
 
