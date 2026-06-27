@@ -155,6 +155,25 @@ class TestFilterSleevesByBucket:
         )
         assert result == {}
 
+    def test_filter_sleeves_by_bucket_legacy_mode_keeps_existing_contract(self) -> None:
+        bucket_edges = {
+            (1, "donchian_72", "4h"): 100.0,
+        }
+        sleeve_sigs = {
+            ("BTC", "donchian_72_4h"): MagicMock(),
+            ("BTC", "trend_pullback_4h"): MagicMock(),
+        }
+
+        result = filter_sleeves_by_bucket(
+            sleeve_sigs,
+            bucket_edges,
+            regime_now=1,
+            edge_floor_bps=100.0,
+        )
+
+        assert ("BTC", "donchian_72_4h") not in result
+        assert ("BTC", "trend_pullback_4h") not in result
+
 
 class TestBuildRegimeRoutingPlan:
     """Spec scenarios 1-3 for the new L2 regime routing contract."""
