@@ -222,12 +222,15 @@ def _log_ascii_table(
     headers: Sequence[str],
     rows: Sequence[Sequence[str]],
     widths: Sequence[int],
+    *,
+    level: int = logging.INFO,
 ) -> None:
     """Emit a fixed-width ASCII table using the repo's audit-log style."""
     border = sum(widths) + (3 * len(widths)) + 1
-    _logger.info("\n%s", title)
-    _logger.info("-" * border)
-    _logger.info(
+    _logger.log(level, "\n%s", title)
+    _logger.log(level, "-" * border)
+    _logger.log(
+        level,
         "| "
         + " | ".join(
             f"{_fit_table_cell(header, width):<{width}}"
@@ -235,9 +238,10 @@ def _log_ascii_table(
         )
         + " |"
     )
-    _logger.info("-" * border)
+    _logger.log(level, "-" * border)
     for row in rows:
-        _logger.info(
+        _logger.log(
+            level,
             "| "
             + " | ".join(
                 f"{_fit_table_cell(cell, width):<{width}}"
@@ -245,7 +249,7 @@ def _log_ascii_table(
             )
             + " |"
         )
-    _logger.info("-" * border)
+    _logger.log(level, "-" * border)
 
 
 def _format_counter_items(counter: Counter[str], *, limit: int = 3) -> str:
@@ -1336,13 +1340,25 @@ def _run_tiered_l2_study(
         debug_diagnostics_enabled=_logger.isEnabledFor(logging.DEBUG),
         edge_floor_bps=float(getattr(cfg, "l2_bucket_edge_floor_bps", 0.0)),
         debug_top_k=int(getattr(cfg, "l2_regime_debug_top_k", 10)),
+        policy_mode=cast(
+            Literal["filter", "observe", "soft", "hybrid"],
+            str(getattr(cfg, "l2_regime_policy_mode", "hybrid")),
+        ),
+        policy_cal_min_n=int(getattr(cfg, "l2_regime_cal_min_n", 20)),
+        policy_min_cal_lift_bps=float(getattr(cfg, "l2_regime_min_cal_lift_bps", 8.0)),
+        policy_block_lift_bps=float(getattr(cfg, "l2_regime_block_lift_bps", -12.0)),
+        policy_downweight_min=float(getattr(cfg, "l2_regime_soft_downweight_min", 0.35)),
+        policy_downweight_max=float(getattr(cfg, "l2_regime_soft_downweight_max", 1.0)),
+        policy_min_confidence=float(getattr(cfg, "l2_regime_min_policy_confidence", 0.55)),
     )
     l2_sim_cache = replace(l2_sim_cache,
         bucket_edges_by_fold=_routing_plan.effective_bucket_edges_by_fold,
         pooled_edges_by_fold=_routing_plan.pooled_edges_by_fold,
         regime_code_1d=_routing_plan.effective_regime_code_1d,
         regime_routing_diagnostics=_routing_plan.diagnostics,
+        regime_policy_by_fold=_routing_plan.policy_by_fold,
     )
+    _policy_diag = _routing_plan.diagnostics.policy_diagnostics
     # Source contract for diagnostics tests:
     # [REGIME-L2] active_states=3 compression=True path=pooled_fallback proof=False ...
     _logger.info(
@@ -1355,11 +1371,57 @@ def _run_tiered_l2_study(
         _routing_plan.diagnostics.nw_tstat,
         _routing_plan.diagnostics.fold_pass_ratio,
     )
+    if _policy_diag is not None:
+        _logger.info(
+            "[REGIME-L2] policy_mode=%s policy_source=fit/cal "
+            "global_reliable=%s allow=%d downweight=%d block=%d pooled=%d "
+            "mean_cal_lift=%.2f mean_conf=%.2f",
+            _policy_diag.mode,
+            _policy_diag.global_reliable,
+            _policy_diag.n_allow,
+            _policy_diag.n_downweight,
+            _policy_diag.n_block,
+            _policy_diag.n_pooled,
+            _policy_diag.mean_cal_lift_bps,
+            _policy_diag.mean_confidence,
+        )
     if _logger.isEnabledFor(logging.DEBUG) and not _routing_plan.diagnostics.proof_passed:
         _logger.debug(
             "[REGIME-L2-DETAIL] pooled_fallback reason=proof_failed effective_states=%d",
             _routing_plan.diagnostics.active_state_count,
         )
+    if _logger.isEnabledFor(logging.DEBUG) and _policy_diag is not None:
+        _logger.debug(
+            "[REGIME-L2-POLICY] policy_mode=%s global_reliable=%s "
+            "n_allow=%d n_downweight=%d n_block=%d n_pooled=%d "
+            "mean_cal_lift_bps=%.2f mean_confidence=%.2f",
+            _policy_diag.mode,
+            _policy_diag.global_reliable,
+            _policy_diag.n_allow,
+            _policy_diag.n_downweight,
+            _policy_diag.n_block,
+            _policy_diag.n_pooled,
+            _policy_diag.mean_cal_lift_bps,
+            _policy_diag.mean_confidence,
+        )
+        _log_ascii_table(
+            "[REGIME] DEBUG",
+            ("metric", "value"),
+            [
+                ["policy_mode", str(_policy_diag.mode)],
+                ["global_reliable", "yes" if _policy_diag.global_reliable else "no"],
+                ["n_allow", str(_policy_diag.n_allow)],
+                ["n_downweight", str(_policy_diag.n_downweight)],
+                ["n_block", str(_policy_diag.n_block)],
+                ["n_pooled", str(_policy_diag.n_pooled)],
+                ["mean_cal_lift_bps", f"{_policy_diag.mean_cal_lift_bps:.2f}"],
+                ["mean_confidence", f"{_policy_diag.mean_confidence:.2f}"],
+            ],
+            (24, 18),
+            level=logging.DEBUG,
+        )
+        _logger.debug("[REGIME-L2-POLICY] OOS DEBUG = evaluation only")
+        _logger.debug("[REGIME-L2-POLICY] policy source = fit/cal")
     if not _routing_plan.diagnostics.proof_passed:
         _logger.warning(
             "[REGIME-L2] proof_failed path=%s effective_states=%d",
@@ -2035,6 +2097,7 @@ def _run_strategy_stage(
                     f"crisis={_state_pct.get(2, 0.0):.1f}%"
                 )
                 _state_status = "🟢 stable" if _compute_c2_macro(_effective_regime_code)[0] >= 12.0 else "🟠 unstable"
+                _policy_mode = str(getattr(tiered_cfg, "l2_regime_policy_mode", "hybrid"))
 
                 _logger.info(
                     "[REGIME]\n"
@@ -2043,10 +2106,14 @@ def _run_strategy_stage(
                     "states        | 3\n"
                     "status        | %s\n"
                     "distribution  | %s\n"
+                    "policy_mode   | %s\n"
+                    "policy_source | fit/cal\n"
+                    "oos_debug     | evaluation only\n"
                     "note          | L2 verdict is reported separately in [REGIME-L2]",
                     "on" if bool(getattr(tiered_cfg, "l2_regime_compression_enabled", True)) else "off",
                     _state_status,
                     _state_dist,
+                    _policy_mode,
                 )
 
             # ── Step B: L2 Optimization Header ──────────────────────────────
