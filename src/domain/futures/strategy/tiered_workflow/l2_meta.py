@@ -27,8 +27,12 @@ from src.domain.futures.strategy.market_regime import compress_regime_codes
 from src.domain.futures.strategy.regime_evaluation import evaluate_regime_lift_proof
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     RegimeCellDebugStat,
+    RegimeCellPolicy,
     RegimeDebugDiagnostics,
     RegimeGranularityDebugStat,
+    RegimePolicyApplication,
+    RegimePolicyDiagnostics,
+    RegimePolicyMode,
     RegimeRoutingDiagnostics,
     RegimeRoutingPlan,
 )
@@ -56,6 +60,12 @@ class MetaFeasibilityReport:
     auc_sign: float
     n_oos: int
     bucket_table: dict[str, float]
+
+
+@dataclass(frozen=True, slots=True)
+class _RegimeEdgeStat:
+    edge_bps: float
+    n_obs: int
 
 
 def _parse_meta_group_ids(strategy_id: str) -> tuple[str, str]:
@@ -463,6 +473,111 @@ def evaluate_meta_feasibility(
     )
 
 
+def compute_bucket_realized_edge_stats(
+    cache: L2SimulationCache,
+    aligned: AlignedMarketData,
+    start: int,
+    end: int,
+    regime_code_1d: NDArray[np.int8],
+    *,
+    cost_bps: float = 6.0,
+    min_n: int = 30,
+    shrinkage: float = 0.3,
+) -> dict[tuple[int, str, str], _RegimeEdgeStat]:
+    """Compute realized edge statistics by `(regime, family, tf)` on a closed window."""
+    n_sleeve = cache.signal_mask_2d.shape[1]
+    if n_sleeve == 0 or start >= end:
+        return {}
+
+    t_max, _ = cache.signal_mask_2d.shape
+    end = min(end, t_max)
+
+    close_2d = np.asarray(aligned.close_2d, dtype=np.float64)
+
+    sleeve_ids = cache.sleeve_ids
+
+    bucket_sum: dict[tuple[int, str, str], float] = {}
+    bucket_cnt: dict[tuple[int, str, str], int] = {}
+
+    for t in range(start, end):
+        if t + 1 >= t_max:
+            break
+        active_js = np.where(cache.signal_mask_2d[t])[0]
+        if len(active_js) == 0:
+            continue
+        regime = int(regime_code_1d[t]) if t < len(regime_code_1d) else 0
+        for j in active_js:
+            sj = int(j)
+            family, tf = _parse_meta_group_ids(sleeve_ids[sj][1])
+            edge = _compute_sleeve_realized_edge_bps(
+                cache=cache,
+                close_2d=close_2d,
+                t=t,
+                sleeve_idx=sj,
+                window_end=end,
+                cost_bps=cost_bps,
+            )
+            key = (regime, family, tf)
+            bucket_sum[key] = bucket_sum.get(key, 0.0) + edge
+            bucket_cnt[key] = bucket_cnt.get(key, 0) + 1
+
+    if not bucket_sum:
+        return {}
+
+    family_raw_edges: dict[str, list[float]] = {}
+    for (regime, family, tf), total in bucket_sum.items():
+        count = bucket_cnt[(regime, family, tf)]
+        family_raw_edges.setdefault(family, []).append(total / count)
+
+    family_prior = {
+        family: float(np.mean(edges)) for family, edges in family_raw_edges.items()
+    }
+    result: dict[tuple[int, str, str], _RegimeEdgeStat] = {}
+    for key, total in bucket_sum.items():
+        count = bucket_cnt[key]
+        raw_edge = total / count
+        family = key[1]
+        if count < min_n and family in family_prior:
+            edge_val = (1.0 - shrinkage) * raw_edge + shrinkage * family_prior[family]
+        else:
+            edge_val = raw_edge
+        result[key] = _RegimeEdgeStat(edge_bps=float(edge_val), n_obs=count)
+
+    if logger.isEnabledFor(logging.DEBUG):
+        _n_regimes = len({k[0] for k in bucket_sum})
+        _n_families = len({k[1] for k in bucket_sum})
+        _n_tfs = len({k[2] for k in bucket_sum})
+        _n_total_buckets = len(bucket_sum)
+        _n_shrunk = sum(1 for count in bucket_cnt.values() if count < min_n)
+        logger.debug(
+            "[L2-BUCKET-STATS] fit=[%d,%d) n_buckets=%d n_regimes=%d n_fams=%d n_tfs=%d n_shrunk=%d/%d",
+            start,
+            end,
+            _n_total_buckets,
+            _n_regimes,
+            _n_families,
+            _n_tfs,
+            _n_shrunk,
+            _n_total_buckets,
+        )
+        for key, total in sorted(bucket_sum.items(), key=lambda item: -item[1]):
+            count = bucket_cnt[key]
+            raw_edge = total / count
+            final_edge = result[key].edge_bps
+            logger.debug(
+                "[L2-BUCKET-EDGE-FIT] regime=%d family=%s tf=%s cnt=%d raw=%.2f final=%.2f shrunk=%s",
+                key[0],
+                key[1],
+                key[2],
+                count,
+                raw_edge,
+                final_edge,
+                count < min_n,
+            )
+
+    return result
+
+
 def compute_bucket_realized_edges(
     cache: L2SimulationCache,
     aligned: AlignedMarketData,
@@ -493,96 +608,17 @@ def compute_bucket_realized_edges(
     Returns:
         {(regime, family, TF): edge_bps}. 미관측 버킷은 포함 안 됨.
     """
-    n_sleeve = cache.signal_mask_2d.shape[1]
-    if n_sleeve == 0 or fit_start >= fit_end:
-        return {}
-
-    t_max, _ = cache.signal_mask_2d.shape
-    if fit_end > t_max:
-        fit_end = t_max
-
-    close_2d = np.asarray(aligned.close_2d, dtype=np.float64)
-    n_sym = close_2d.shape[1]
-
-    fwd_bps = np.zeros((t_max, n_sym), dtype=np.float64)
-    if t_max > 1:
-        c = close_2d
-        denom = np.maximum(np.abs(c[:-1]), 1e-12)
-        fwd_bps[:-1] = ((c[1:] - c[:-1]) / denom) * 10000.0
-
-    sleeve_ids = cache.sleeve_ids
-    sleeve_to_sym_arr = cache.sleeve_to_sym
-
-    bucket_sum: dict[tuple[int, str, str], float] = {}
-    bucket_cnt: dict[tuple[int, str, str], int] = {}
-
-    for t in range(fit_start, fit_end):
-        if t + 1 >= t_max:
-            break
-        mask = cache.signal_mask_2d[t]
-        active_js = np.where(mask)[0]
-        if len(active_js) == 0:
-            continue
-
-        regime = int(regime_code_1d[t]) if t < len(regime_code_1d) else 0
-
-        for j in active_js:
-            sj = int(j)
-            strat_id = sleeve_ids[sj][1]
-            family, tf = _parse_meta_group_ids(strat_id)
-            sym_col = int(sleeve_to_sym_arr[sj])
-
-            edge = float(cache.side_2d[t, sj]) * float(fwd_bps[t, sym_col]) - cost_bps
-
-            key = (regime, family, tf)
-            bucket_sum[key] = bucket_sum.get(key, 0.0) + edge
-            bucket_cnt[key] = bucket_cnt.get(key, 0) + 1
-
-    if not bucket_sum:
-        return {}
-
-    family_raw_edges: dict[str, list[float]] = {}
-    for (regime, family, tf), s in bucket_sum.items():
-        cnt = bucket_cnt[(regime, family, tf)]
-        raw = s / cnt
-        family_raw_edges.setdefault(family, []).append(raw)
-
-    family_prior: dict[str, float] = {}
-    for family, edges in family_raw_edges.items():
-        family_prior[family] = float(np.mean(edges))
-
-    result: dict[tuple[int, str, str], float] = {}
-    for (regime, family, tf), s in bucket_sum.items():
-        cnt = bucket_cnt[(regime, family, tf)]
-        raw = s / cnt
-        if cnt < min_n and family in family_prior:
-            edge_val = (1.0 - shrinkage) * raw + shrinkage * family_prior[family]
-        else:
-            edge_val = raw
-        result[(regime, family, tf)] = edge_val
-
-    # Step E: aggregate DEBUG stats
-    if logger.isEnabledFor(logging.DEBUG):
-        _n_regimes = len({k[0] for k in bucket_sum})
-        _n_families = len({k[1] for k in bucket_sum})
-        _n_tfs = len({k[2] for k in bucket_sum})
-        _n_total_buckets = len(bucket_sum)
-        _n_shrunk = sum(1 for k, v in bucket_cnt.items() if v < min_n)
-        logger.debug(
-            "[L2-BUCKET-STATS] fit=[%d,%d) n_buckets=%d n_regimes=%d n_fams=%d n_tfs=%d n_shrunk=%d/%d",
-            fit_start, fit_end, _n_total_buckets, _n_regimes, _n_families, _n_tfs, _n_shrunk, _n_total_buckets,
-        )
-        for (_br, _bfam, _btf), _s in sorted(bucket_sum.items(), key=lambda x: -x[1]):
-            _cnt = bucket_cnt[(_br, _bfam, _btf)]
-            _raw = _s / _cnt
-            _final = result.get((_br, _bfam, _btf), 0.0)
-            _shrunk = _cnt < min_n
-            logger.debug(
-                "[L2-BUCKET-EDGE-FIT] regime=%d family=%s tf=%s cnt=%d raw=%.2f final=%.2f shrunk=%s",
-                _br, _bfam, _btf, _cnt, _raw, _final, _shrunk,
-            )
-
-    return result
+    stats = compute_bucket_realized_edge_stats(
+        cache=cache,
+        aligned=aligned,
+        start=fit_start,
+        end=fit_end,
+        regime_code_1d=regime_code_1d,
+        cost_bps=cost_bps,
+        min_n=min_n,
+        shrinkage=shrinkage,
+    )
+    return {key: stat.edge_bps for key, stat in stats.items()}
 
 
 def _compute_sleeve_realized_edge_bps(
@@ -609,27 +645,27 @@ def _compute_sleeve_realized_edge_bps(
     return float(cache.side_2d[t, sleeve_idx]) * realized_bps - cost_bps
 
 
-def compute_pooled_realized_edges(
+def compute_pooled_realized_edge_stats(
     cache: L2SimulationCache,
     aligned: AlignedMarketData,
-    fit_start: int,
-    fit_end: int,
+    start: int,
+    end: int,
     *,
     cost_bps: float = 6.0,
     min_n: int = 30,
-) -> dict[tuple[str, str], float]:
-    """Compute realized sleeve edges pooled by (family, tf) over a fit leg."""
+) -> dict[tuple[str, str], _RegimeEdgeStat]:
+    """Compute realized sleeve edge statistics pooled by `(family, tf)`."""
     n_sleeve = cache.signal_mask_2d.shape[1]
-    if n_sleeve == 0 or fit_start >= fit_end:
+    if n_sleeve == 0 or start >= end:
         return {}
 
     t_max, _ = cache.signal_mask_2d.shape
-    fit_end = min(fit_end, t_max)
+    end = min(end, t_max)
     close_2d = np.asarray(aligned.close_2d, dtype=np.float64)
 
     bucket_sum: dict[tuple[str, str], float] = {}
     bucket_cnt: dict[tuple[str, str], int] = {}
-    for t in range(fit_start, fit_end):
+    for t in range(start, end):
         if t + 1 >= t_max:
             break
         active_js = np.where(cache.signal_mask_2d[t])[0]
@@ -642,19 +678,40 @@ def compute_pooled_realized_edges(
                 close_2d=close_2d,
                 t=t,
                 sleeve_idx=int(j),
-                window_end=fit_end,
+                window_end=end,
                 cost_bps=cost_bps,
             )
             key = (family, tf)
             bucket_sum[key] = bucket_sum.get(key, 0.0) + edge
             bucket_cnt[key] = bucket_cnt.get(key, 0) + 1
 
-    result: dict[tuple[str, str], float] = {}
+    result: dict[tuple[str, str], _RegimeEdgeStat] = {}
     for key, total in bucket_sum.items():
         count = bucket_cnt[key]
         if count >= min_n:
-            result[key] = total / count
+            result[key] = _RegimeEdgeStat(edge_bps=float(total / count), n_obs=count)
     return result
+
+
+def compute_pooled_realized_edges(
+    cache: L2SimulationCache,
+    aligned: AlignedMarketData,
+    fit_start: int,
+    fit_end: int,
+    *,
+    cost_bps: float = 6.0,
+    min_n: int = 30,
+) -> dict[tuple[str, str], float]:
+    """Compute realized sleeve edges pooled by (family, tf) over a fit leg."""
+    stats = compute_pooled_realized_edge_stats(
+        cache=cache,
+        aligned=aligned,
+        start=fit_start,
+        end=fit_end,
+        cost_bps=cost_bps,
+        min_n=min_n,
+    )
+    return {key: stat.edge_bps for key, stat in stats.items()}
 
 
 def replicate_pooled_edges_by_regime(
@@ -668,6 +725,286 @@ def replicate_pooled_edges_by_regime(
         for state in range(state_count):
             replicated[(state, family, tf)] = float(edge)
     return replicated
+
+
+def _default_policy_reason(*, mode: RegimePolicyMode, enabled: bool) -> str:
+    if not enabled:
+        return "policy_disabled"
+    return "observe_only" if mode == "observe" else "policy_ready"
+
+
+def build_regime_policy_by_fold(
+    *,
+    cache: L2SimulationCache,
+    aligned: AlignedMarketData,
+    awf_folds: Sequence[WFFold],
+    regime_code_1d: NDArray[np.int8],
+    state_names: tuple[str, ...],
+    mode: RegimePolicyMode = "hybrid",
+    cost_bps: float = 6.0,
+    min_n: int = 15,
+    shrinkage: float = 0.3,
+    cal_min_n: int = 20,
+    min_cal_lift_bps: float = 8.0,
+    block_lift_bps: float = -12.0,
+    downweight_min: float = 0.35,
+    downweight_max: float = 1.0,
+    min_confidence: float = 0.55,
+) -> tuple[tuple[dict[tuple[int, str, str], RegimeCellPolicy], ...], RegimePolicyDiagnostics]:
+    """Build fold-local regime policy using fit/cal windows only."""
+    if mode == "filter":
+        return tuple({} for _ in awf_folds), RegimePolicyDiagnostics(
+            mode=mode,
+            enabled=False,
+            global_reliable=False,
+            reason="legacy_filter",
+            n_cells_total=0,
+            n_allow=0,
+            n_downweight=0,
+            n_block=0,
+            n_pooled=0,
+            mean_cal_lift_bps=0.0,
+            min_cal_lift_bps=0.0,
+            max_cal_lift_bps=0.0,
+            mean_confidence=0.0,
+        )
+
+    policy_by_fold: list[dict[tuple[int, str, str], RegimeCellPolicy]] = []
+    cal_lifts_all: list[float] = []
+    confidences_all: list[float] = []
+    n_allow = 0
+    n_downweight = 0
+    n_block = 0
+    n_pooled = 0
+
+    for fold in awf_folds:
+        fit_stats = compute_bucket_realized_edge_stats(
+            cache=cache,
+            aligned=aligned,
+            start=int(fold.fit_start),
+            end=int(fold.fit_end),
+            regime_code_1d=regime_code_1d,
+            cost_bps=cost_bps,
+            min_n=min_n,
+            shrinkage=shrinkage,
+        )
+        cal_stats = compute_bucket_realized_edge_stats(
+            cache=cache,
+            aligned=aligned,
+            start=int(fold.cal_start),
+            end=int(fold.cal_end),
+            regime_code_1d=regime_code_1d,
+            cost_bps=cost_bps,
+            min_n=min_n,
+            shrinkage=shrinkage,
+        )
+        pooled_fit_stats = compute_pooled_realized_edge_stats(
+            cache=cache,
+            aligned=aligned,
+            start=int(fold.fit_start),
+            end=int(fold.fit_end),
+            cost_bps=cost_bps,
+            min_n=min_n,
+        )
+        pooled_cal_stats = compute_pooled_realized_edge_stats(
+            cache=cache,
+            aligned=aligned,
+            start=int(fold.cal_start),
+            end=int(fold.cal_end),
+            cost_bps=cost_bps,
+            min_n=min_n,
+        )
+
+        keys = sorted(set(fit_stats) | set(cal_stats))
+        fold_policy: dict[tuple[int, str, str], RegimeCellPolicy] = {}
+        for state, family, tf in keys:
+            fit_stat = fit_stats.get((state, family, tf))
+            cal_stat = cal_stats.get((state, family, tf))
+            pooled_fit = pooled_fit_stats.get((family, tf), _RegimeEdgeStat(0.0, 0))
+            pooled_cal = pooled_cal_stats.get((family, tf), _RegimeEdgeStat(0.0, 0))
+            fit_edge_bps = float(fit_stat.edge_bps) if fit_stat is not None else 0.0
+            cal_edge_bps = float(cal_stat.edge_bps) if cal_stat is not None else 0.0
+            n_fit = fit_stat.n_obs if fit_stat is not None else 0
+            n_cal = cal_stat.n_obs if cal_stat is not None else 0
+            cal_lift_bps = cal_edge_bps - float(pooled_cal.edge_bps)
+            confidence = min(1.0, float(n_cal) / max(float(cal_min_n), 1.0))
+            cal_lifts_all.append(cal_lift_bps)
+            confidences_all.append(confidence)
+
+            action: Literal["pooled", "allow", "downweight", "block"] = "pooled"
+            reason: str = "neutral"
+            edge_multiplier = 1.0
+            if n_fit < min_n:
+                reason = "insufficient_fit"
+            elif n_cal < cal_min_n:
+                reason = "insufficient_cal"
+            elif confidence < min_confidence:
+                reason = "global_unreliable"
+            elif cal_lift_bps <= block_lift_bps:
+                if mode == "hybrid":
+                    action = "block"
+                    edge_multiplier = 0.0
+                else:
+                    action = "downweight"
+                    severity = min(1.0, abs(cal_lift_bps) / max(abs(block_lift_bps), 1e-12))
+                    edge_multiplier = downweight_max - severity * (downweight_max - downweight_min)
+                reason = "negative_cal_lift"
+            elif cal_lift_bps < min_cal_lift_bps:
+                action = "downweight"
+                severity = min(1.0, abs(min(cal_lift_bps, 0.0)) / max(abs(block_lift_bps), 1e-12))
+                edge_multiplier = downweight_max - severity * (downweight_max - downweight_min)
+                edge_multiplier = float(np.clip(edge_multiplier, downweight_min, downweight_max))
+                reason = "neutral" if cal_lift_bps >= 0.0 else "negative_cal_lift"
+            else:
+                action = "allow"
+                edge_multiplier = 1.0
+                reason = "positive_cal_lift"
+
+            if mode == "observe":
+                reason = "observe_only"
+
+            fold_policy[(state, family, tf)] = RegimeCellPolicy(
+                state=state,
+                state_name=_state_name_for_index(state_names, state),
+                family=family,
+                tf=tf,
+                action=action,
+                reason=cast(
+                    Literal[
+                        "legacy_filter",
+                        "observe_only",
+                        "global_unreliable",
+                        "insufficient_fit",
+                        "insufficient_cal",
+                        "cal_sign_unstable",
+                        "negative_cal_lift",
+                        "positive_cal_lift",
+                        "neutral",
+                    ],
+                    reason,
+                ),
+                edge_multiplier=float(np.clip(edge_multiplier, 0.0, 1.0)),
+                confidence=confidence,
+                fit_edge_bps=fit_edge_bps,
+                pooled_fit_edge_bps=float(pooled_fit.edge_bps),
+                cal_edge_bps=cal_edge_bps,
+                pooled_cal_edge_bps=float(pooled_cal.edge_bps),
+                cal_lift_bps=cal_lift_bps,
+                n_fit=n_fit,
+                n_cal=n_cal,
+            )
+            if action == "allow":
+                n_allow += 1
+            elif action == "downweight":
+                n_downweight += 1
+            elif action == "block":
+                n_block += 1
+            else:
+                n_pooled += 1
+
+        policy_by_fold.append(fold_policy)
+
+    enabled = True
+    global_reliable = (n_allow + n_downweight + n_block) > 0
+    if not cal_lifts_all:
+        reason = _default_policy_reason(mode=mode, enabled=enabled)
+        min_lift = 0.0
+        max_lift = 0.0
+        mean_lift = 0.0
+        mean_conf = 0.0
+    else:
+        mean_lift = float(np.mean(cal_lifts_all))
+        min_lift = float(np.min(cal_lifts_all))
+        max_lift = float(np.max(cal_lifts_all))
+        mean_conf = float(np.mean(confidences_all))
+        reason = "global_unreliable" if not global_reliable else _default_policy_reason(mode=mode, enabled=enabled)
+    diagnostics = RegimePolicyDiagnostics(
+        mode=mode,
+        enabled=enabled,
+        global_reliable=global_reliable,
+        reason=reason,
+        n_cells_total=sum(len(policy_map) for policy_map in policy_by_fold),
+        n_allow=n_allow,
+        n_downweight=n_downweight,
+        n_block=n_block,
+        n_pooled=n_pooled,
+        mean_cal_lift_bps=mean_lift,
+        min_cal_lift_bps=min_lift,
+        max_cal_lift_bps=max_lift,
+        mean_confidence=mean_conf,
+    )
+    return tuple(policy_by_fold), diagnostics
+
+
+def apply_regime_cell_policy(
+    sleeve_sigs: Mapping[tuple[str, str], SymbolSignal],
+    sleeve_edges: Mapping[tuple[str, str], float],
+    policy_map: Mapping[tuple[int, str, str], RegimeCellPolicy],
+    regime_now: int,
+    *,
+    mode: RegimePolicyMode,
+) -> RegimePolicyApplication:
+    """Apply regime policy to current sleeve signals and edge scores."""
+    if not sleeve_sigs:
+        return RegimePolicyApplication(
+            sleeve_sigs={},
+            sleeve_edges={},
+            n_input=0,
+            n_allow=0,
+            n_downweight=0,
+            n_block=0,
+            n_pooled=0,
+        )
+
+    next_sigs: dict[tuple[str, str], SymbolSignal] = {}
+    next_edges: dict[tuple[str, str], float] = {}
+    n_allow = 0
+    n_downweight = 0
+    n_block = 0
+    n_pooled = 0
+    for key, sig in sleeve_sigs.items():
+        family, tf = _parse_meta_group_ids(key[1])
+        policy = policy_map.get((regime_now, family, tf))
+        gross_bps = float(sleeve_edges.get(key, 0.0))
+        if policy is None:
+            next_sigs[key] = sig
+            next_edges[key] = gross_bps
+            n_pooled += 1
+            continue
+
+        intended_action = policy.action
+        if mode == "observe":
+            next_sigs[key] = sig
+            next_edges[key] = gross_bps
+        elif intended_action == "block" and mode == "hybrid":
+            n_block += 1
+            continue
+        elif intended_action == "downweight" and mode in {"soft", "hybrid"}:
+            next_sigs[key] = sig
+            next_edges[key] = gross_bps * policy.edge_multiplier
+        else:
+            next_sigs[key] = sig
+            next_edges[key] = gross_bps
+
+        if intended_action == "allow":
+            n_allow += 1
+        elif intended_action == "downweight":
+            n_downweight += 1
+        elif intended_action == "block":
+            if mode == "observe":
+                n_block += 1
+        else:
+            n_pooled += 1
+
+    return RegimePolicyApplication(
+        sleeve_sigs=next_sigs,
+        sleeve_edges=next_edges,
+        n_input=len(sleeve_sigs),
+        n_allow=n_allow,
+        n_downweight=n_downweight,
+        n_block=n_block,
+        n_pooled=n_pooled,
+    )
 
 
 def _compute_js_divergence(
@@ -1242,6 +1579,13 @@ def build_regime_routing_plan(
     debug_diagnostics_enabled: bool = False,
     edge_floor_bps: float = 0.0,
     debug_top_k: int = 10,
+    policy_mode: RegimePolicyMode = "hybrid",
+    policy_cal_min_n: int = 20,
+    policy_min_cal_lift_bps: float = 8.0,
+    policy_block_lift_bps: float = -12.0,
+    policy_downweight_min: float = 0.35,
+    policy_downweight_max: float = 1.0,
+    policy_min_confidence: float = 0.55,
 ) -> RegimeRoutingPlan:
     """Build the fold-local routing plan used by L2 bucket selection."""
     n_bars = int(np.asarray(aligned.close_2d).shape[0])
@@ -1396,6 +1740,24 @@ def build_regime_routing_plan(
     else:
         effective_bucket_edges_by_fold = tuple({} for _ in awf_folds)
 
+    policy_by_fold, policy_diagnostics = build_regime_policy_by_fold(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=awf_folds,
+        regime_code_1d=effective_codes,
+        state_names=state_names,
+        mode=policy_mode,
+        cost_bps=cost_bps,
+        min_n=min_n,
+        shrinkage=shrinkage,
+        cal_min_n=policy_cal_min_n,
+        min_cal_lift_bps=policy_min_cal_lift_bps,
+        block_lift_bps=policy_block_lift_bps,
+        downweight_min=policy_downweight_min,
+        downweight_max=policy_downweight_max,
+        min_confidence=policy_min_confidence,
+    )
+
     debug_diagnostics: RegimeDebugDiagnostics | None = None
     if debug_diagnostics_enabled:
         debug_diagnostics = evaluate_regime_granularity_debug(
@@ -1429,6 +1791,7 @@ def build_regime_routing_plan(
         n_folds_evaluated=proof_result.n_folds_evaluated,
         bucket_hit_pct_by_fold=tuple(bucket_hit_pct_by_fold),
         js_divergence_by_fold=tuple(js_divergence_by_fold),
+        policy_diagnostics=policy_diagnostics,
         debug_diagnostics=debug_diagnostics,
     )
     return RegimeRoutingPlan(
@@ -1437,6 +1800,7 @@ def build_regime_routing_plan(
         pooled_edges_by_fold=tuple(pooled_edges_by_fold),
         effective_regime_code_1d=effective_codes,
         diagnostics=diagnostics,
+        policy_by_fold=policy_by_fold,
     )
 
 
