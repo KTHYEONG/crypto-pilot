@@ -438,6 +438,8 @@ class Layer2AllocationConfig:
     l2_regime_hard_block_enabled: bool = False
     l2_regime_block_min_confidence: float = 0.80
     l2_regime_require_sign_consistency: bool = True
+    l2_regime_scale_signal_mu: bool = True
+    l2_regime_scale_quality_weight: bool = True
     l2_regime_risk_cap_enabled: bool = True
     l2_regime_bull_gross_cap: float = 1.0
     l2_regime_bear_gross_cap: float = 0.75
@@ -807,6 +809,12 @@ class Layer2AllocationConfig:
             l2_regime_require_sign_consistency=bool(
                 params.get("l2_regime_require_sign_consistency", _dc.l2_regime_require_sign_consistency)
             ),
+            l2_regime_scale_signal_mu=bool(
+                params.get("l2_regime_scale_signal_mu", _dc.l2_regime_scale_signal_mu)
+            ),
+            l2_regime_scale_quality_weight=bool(
+                params.get("l2_regime_scale_quality_weight", _dc.l2_regime_scale_quality_weight)
+            ),
             l2_regime_risk_cap_enabled=bool(
                 params.get("l2_regime_risk_cap_enabled", _dc.l2_regime_risk_cap_enabled)
             ),
@@ -934,6 +942,12 @@ class RegimePolicyApplication:
     n_downweight: int
     n_block: int
     n_pooled: int
+    gross_edge_before_bps: float = 0.0
+    gross_edge_after_bps: float = 0.0
+    abs_mu_before_bps: float = 0.0
+    abs_mu_after_bps: float = 0.0
+    quality_weight_before: float = 0.0
+    quality_weight_after: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
