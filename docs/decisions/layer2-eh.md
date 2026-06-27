@@ -154,3 +154,8 @@ ai_read_policy: when_related
 - **Delta:** `RegimeRoutingDiagnostics`에 `policy_diagnostics`를 연결하고 `RegimeRoutingPlan.policy_by_fold`를 실사용 경로로 노출했다. `l2_regime_policy_mode`를 `filter/observe/soft/hybrid`로 분기해 legacy bucket filter와 causal policy application을 분리했다. `apply_regime_cell_policy()`는 fold-local 정책을 `allow/downweight/block/pool`로 반영했고, `[REGIME]`은 summary만 유지한 채 DEBUG 표에서 policy mode와 action counts를 출력했다.
 - **Rationale:** bucket edge는 fit-leg causal routing에 유효하지만, OOS sleeve 제어는 edge floor만으로 충분하지 않았다. regime-conditioned causal policy를 별도 레이어로 두어 fit/cal 정보만으로 block/downweight 판단을 하게 만들면, regime summary와 routing verdict를 혼동하지 않으면서 자산증식 지향의 runtime 제어가 가능하다.
 - **Key Verification:** `observe` 모드가 무변경, `soft` 모드가 downweight, `hybrid` 모드가 block을 수행하는 unit tests를 추가했다. `RegimePolicyApplication.sleeve_edges`는 float contract로 복귀했고, AWF는 orphan edge를 남기지 않도록 재조합 경로를 갖췄다.
+
+## [2026-06-27] Regime Diagnostics Hardening — sign consistency + state caps
+- **Delta:** `RegimePolicyDiagnostics`에 `n_unstable`, `n_hard_block_eligible`, `sign_consistency_ratio`, `hard_block_enabled`를 추가했고, `build_regime_policy_by_fold()`는 hard block을 `hybrid` + confidence + sign-consistency 조건으로만 허용하도록 정리했다. `soft`는 route continuity를 유지하는 downweight 전용 경로로 고정했다. `apply_regime_risk_cap()`를 통해 regime state별 gross cap을 weight composition 이후에 적용했다.
+- **Rationale:** raw confidence만으로 block을 허용하면 fit/cal 방향 불일치 셀을 과도하게 차단하거나, 반대로 낮은 품질 셀을 route에 남겨 자산증식 효율이 흔들릴 수 있었다. sign consistency와 state cap을 분리하면 routing 판단과 노출 제어를 분리할 수 있어 L2 실행 안정성이 높아진다.
+- **Key Verification:** DEBUG 로그에 policy counts와 risk-cap 적용 여부가 남고, `soft`/`hybrid`/risk-cap 경로를 각각 검증하는 단위 테스트가 통과했다.

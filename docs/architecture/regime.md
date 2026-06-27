@@ -14,11 +14,11 @@ change_triggers:
   - src/domain/futures/strategy/market_regime.py
   - src/domain/futures/strategy/regime_evaluation.py
   - src/execution/opt_main_futures.py
-last_verified: 2026-06-10
+last_verified: 2026-06-27
 ---
 
 # 1. Purpose
-Establishes a 2-layer causal market state from BTC price action: a continuous risk overlay for position sizing and a discrete 6-state shadow code for diagnostics, while L2 routing consumes the compressed 3-state summary.
+Establishes a causal market state from BTC price action for two consumers: a continuous risk overlay for position sizing and a diagnostics-only discrete regime code. L2 routing consumes the compressed 3-state summary (`bull`, `bear`, `crisis`), while the raw 6-state code remains a shadow diagnostic.
 
 # 2. Core Logic & Math
 
@@ -44,10 +44,13 @@ Establishes a 2-layer causal market state from BTC price action: a continuous ri
 **Discrete Quantizer (6-State)**
 - Base: 2x2 grid (`bull/bear` by $\text{trend\_snr} \geq 0$, `quiet/volatile` by $\text{vol\_scale} \geq 1.0$)
 - Override: If crisis active $\rightarrow$ `crash` (5). Transition $\rightarrow$ (4).
+- Use: raw 6-state output is diagnostics-only; routing uses the compressed 3-state summary.
 
 **Routing Summary**
 - L2 production logs and routing decisions consume the compressed 3-state summary (`bull`, `bear`, `crisis`).
-- Raw 6-state output remains diagnostics-only.
+- `l2_regime_policy_mode` controls causal sleeve policy on top of bucket routing: `filter`, `observe`, `soft`, `hybrid`.
+- `soft` keeps the route available and only downweights low-confidence cells, while `hybrid` can hard-block only when sign consistency and confidence criteria are met.
+- State-level gross caps limit deployment exposure by regime class after portfolio weights are composed.
 
 # 3. Architecture Flow
 
