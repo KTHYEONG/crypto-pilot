@@ -24,6 +24,19 @@ if TYPE_CHECKING:
 
 
 AllocationPolicy = Literal["diagonal_kelly", "directional_equal_weight"]
+RegimePolicyMode = Literal["filter", "observe", "soft", "hybrid"]
+RegimePolicyAction = Literal["pooled", "allow", "downweight", "block"]
+RegimePolicyReason = Literal[
+    "legacy_filter",
+    "observe_only",
+    "global_unreliable",
+    "insufficient_fit",
+    "insufficient_cal",
+    "cal_sign_unstable",
+    "negative_cal_lift",
+    "positive_cal_lift",
+    "neutral",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,6 +428,13 @@ class Layer2AllocationConfig:
     l2_regime_proof_nw_tstat: float = 1.5
     l2_regime_proof_fold_pass_ratio: float = 0.60
     l2_regime_fallback_mode: Literal["pooled", "empty"] = "pooled"
+    l2_regime_policy_mode: RegimePolicyMode = "hybrid"
+    l2_regime_cal_min_n: int = 20
+    l2_regime_min_cal_lift_bps: float = 8.0
+    l2_regime_block_lift_bps: float = -12.0
+    l2_regime_soft_downweight_min: float = 0.35
+    l2_regime_soft_downweight_max: float = 1.0
+    l2_regime_min_policy_confidence: float = 0.55
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -546,6 +566,33 @@ class Layer2AllocationConfig:
         if raw_fallback_mode not in {"pooled", "empty"}:
             raise ValueError("l2_regime_fallback_mode must be one of pooled/empty")
         fallback_mode = cast(Literal["pooled", "empty"], raw_fallback_mode)
+        raw_policy_mode = str(params.get("l2_regime_policy_mode", "hybrid"))
+        if raw_policy_mode not in {"filter", "observe", "soft", "hybrid"}:
+            raise ValueError("l2_regime_policy_mode must be one of filter/observe/soft/hybrid")
+        policy_mode = cast(RegimePolicyMode, raw_policy_mode)
+        l2_regime_cal_min_n = int(
+            cls._validate_range(
+                "l2_regime_cal_min_n",
+                cls._as_int(params.get("l2_regime_cal_min_n", 20), 20),
+                1,
+            )
+        )
+        l2_regime_soft_downweight_min = cls._validate_range(
+            "l2_regime_soft_downweight_min",
+            cls._as_float(params.get("l2_regime_soft_downweight_min", 0.35), 0.35),
+            0.0,
+            1.0,
+        )
+        l2_regime_soft_downweight_max = cls._validate_range(
+            "l2_regime_soft_downweight_max",
+            cls._as_float(params.get("l2_regime_soft_downweight_max", 1.0), 1.0),
+            0.0,
+            1.0,
+        )
+        if l2_regime_soft_downweight_min > l2_regime_soft_downweight_max:
+            raise ValueError(
+                "l2_regime_soft_downweight_min must be <= l2_regime_soft_downweight_max"
+            )
         return cls(
             k_rank=cls._as_int(params.get("K_RANK", 3), 3),
             rebalance_bars=cls._as_int(params.get("REBALANCE_BARS", 3), 3),
@@ -682,6 +729,22 @@ class Layer2AllocationConfig:
                 1.0,
             ),
             l2_regime_fallback_mode=fallback_mode,
+            l2_regime_policy_mode=policy_mode,
+            l2_regime_cal_min_n=l2_regime_cal_min_n,
+            l2_regime_min_cal_lift_bps=cls._as_float(
+                params.get("l2_regime_min_cal_lift_bps", 8.0), 8.0,
+            ),
+            l2_regime_block_lift_bps=cls._as_float(
+                params.get("l2_regime_block_lift_bps", -12.0), -12.0,
+            ),
+            l2_regime_soft_downweight_min=l2_regime_soft_downweight_min,
+            l2_regime_soft_downweight_max=l2_regime_soft_downweight_max,
+            l2_regime_min_policy_confidence=cls._validate_range(
+                "l2_regime_min_policy_confidence",
+                cls._as_float(params.get("l2_regime_min_policy_confidence", 0.55), 0.55),
+                0.0,
+                1.0,
+            ),
         )
 
 
@@ -747,6 +810,54 @@ class L2SimulationCache:
     # Pre-computed regime code 1d (trial-param independent → cached once)
     regime_code_1d: NDArray[np.int8] | None = None
     regime_routing_diagnostics: RegimeRoutingDiagnostics | None = None
+    regime_policy_by_fold: tuple[dict[tuple[int, str, str], RegimeCellPolicy], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RegimeCellPolicy:
+    state: int
+    state_name: str
+    family: str
+    tf: str
+    action: RegimePolicyAction
+    reason: RegimePolicyReason
+    edge_multiplier: float
+    confidence: float
+    fit_edge_bps: float
+    pooled_fit_edge_bps: float
+    cal_edge_bps: float
+    pooled_cal_edge_bps: float
+    cal_lift_bps: float
+    n_fit: int
+    n_cal: int
+
+
+@dataclass(frozen=True, slots=True)
+class RegimePolicyDiagnostics:
+    mode: RegimePolicyMode
+    enabled: bool
+    global_reliable: bool
+    reason: str
+    n_cells_total: int
+    n_allow: int
+    n_downweight: int
+    n_block: int
+    n_pooled: int
+    mean_cal_lift_bps: float
+    min_cal_lift_bps: float
+    max_cal_lift_bps: float
+    mean_confidence: float
+
+
+@dataclass(frozen=True, slots=True)
+class RegimePolicyApplication:
+    sleeve_sigs: dict[tuple[str, str], SymbolSignal]
+    sleeve_edges: dict[tuple[str, str], float]
+    n_input: int
+    n_allow: int
+    n_downweight: int
+    n_block: int
+    n_pooled: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -764,6 +875,7 @@ class RegimeRoutingDiagnostics:
     n_folds_evaluated: int
     bucket_hit_pct_by_fold: tuple[float, ...]
     js_divergence_by_fold: tuple[float, ...]
+    policy_diagnostics: RegimePolicyDiagnostics | None = None
     debug_diagnostics: RegimeDebugDiagnostics | None = None
 
 
@@ -818,6 +930,7 @@ class RegimeRoutingPlan:
     pooled_edges_by_fold: tuple[dict[tuple[str, str], float], ...]
     effective_regime_code_1d: NDArray[np.int8]
     diagnostics: RegimeRoutingDiagnostics
+    policy_by_fold: tuple[dict[tuple[int, str, str], RegimeCellPolicy], ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
