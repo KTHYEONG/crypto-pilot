@@ -18,7 +18,7 @@ last_verified: 2026-06-10
 ---
 
 # 1. Purpose
-Establishes a 2-layer causal market state from BTC price action: a continuous risk overlay for position sizing and a discrete 6-state code for evaluation and ensemble conditioning.
+Establishes a 2-layer causal market state from BTC price action: a continuous risk overlay for position sizing and a discrete 6-state shadow code for diagnostics, while L2 routing consumes the compressed 3-state summary.
 
 # 2. Core Logic & Math
 
@@ -44,6 +44,10 @@ Establishes a 2-layer causal market state from BTC price action: a continuous ri
 **Discrete Quantizer (6-State)**
 - Base: 2x2 grid (`bull/bear` by $\text{trend\_snr} \geq 0$, `quiet/volatile` by $\text{vol\_scale} \geq 1.0$)
 - Override: If crisis active $\rightarrow$ `crash` (5). Transition $\rightarrow$ (4).
+
+**Routing Summary**
+- L2 production logs and routing decisions consume the compressed 3-state summary (`bull`, `bear`, `crisis`).
+- Raw 6-state output remains diagnostics-only.
 
 # 3. Architecture Flow
 
