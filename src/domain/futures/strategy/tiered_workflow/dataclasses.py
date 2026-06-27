@@ -428,13 +428,20 @@ class Layer2AllocationConfig:
     l2_regime_proof_nw_tstat: float = 1.5
     l2_regime_proof_fold_pass_ratio: float = 0.60
     l2_regime_fallback_mode: Literal["pooled", "empty"] = "pooled"
-    l2_regime_policy_mode: RegimePolicyMode = "hybrid"
+    l2_regime_policy_mode: RegimePolicyMode = "soft"
     l2_regime_cal_min_n: int = 20
     l2_regime_min_cal_lift_bps: float = 8.0
     l2_regime_block_lift_bps: float = -12.0
-    l2_regime_soft_downweight_min: float = 0.35
+    l2_regime_soft_downweight_min: float = 0.50
     l2_regime_soft_downweight_max: float = 1.0
     l2_regime_min_policy_confidence: float = 0.55
+    l2_regime_hard_block_enabled: bool = False
+    l2_regime_block_min_confidence: float = 0.80
+    l2_regime_require_sign_consistency: bool = True
+    l2_regime_risk_cap_enabled: bool = True
+    l2_regime_bull_gross_cap: float = 1.0
+    l2_regime_bear_gross_cap: float = 0.75
+    l2_regime_crisis_gross_cap: float = 0.55
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -566,7 +573,7 @@ class Layer2AllocationConfig:
         if raw_fallback_mode not in {"pooled", "empty"}:
             raise ValueError("l2_regime_fallback_mode must be one of pooled/empty")
         fallback_mode = cast(Literal["pooled", "empty"], raw_fallback_mode)
-        raw_policy_mode = str(params.get("l2_regime_policy_mode", "hybrid"))
+        raw_policy_mode = str(params.get("l2_regime_policy_mode", _dc.l2_regime_policy_mode))
         if raw_policy_mode not in {"filter", "observe", "soft", "hybrid"}:
             raise ValueError("l2_regime_policy_mode must be one of filter/observe/soft/hybrid")
         policy_mode = cast(RegimePolicyMode, raw_policy_mode)
@@ -579,13 +586,19 @@ class Layer2AllocationConfig:
         )
         l2_regime_soft_downweight_min = cls._validate_range(
             "l2_regime_soft_downweight_min",
-            cls._as_float(params.get("l2_regime_soft_downweight_min", 0.35), 0.35),
+            cls._as_float(
+                params.get("l2_regime_soft_downweight_min", _dc.l2_regime_soft_downweight_min),
+                _dc.l2_regime_soft_downweight_min,
+            ),
             0.0,
             1.0,
         )
         l2_regime_soft_downweight_max = cls._validate_range(
             "l2_regime_soft_downweight_max",
-            cls._as_float(params.get("l2_regime_soft_downweight_max", 1.0), 1.0),
+            cls._as_float(
+                params.get("l2_regime_soft_downweight_max", _dc.l2_regime_soft_downweight_max),
+                _dc.l2_regime_soft_downweight_max,
+            ),
             0.0,
             1.0,
         )
@@ -593,6 +606,48 @@ class Layer2AllocationConfig:
             raise ValueError(
                 "l2_regime_soft_downweight_min must be <= l2_regime_soft_downweight_max"
             )
+        l2_regime_block_min_confidence = cls._validate_range(
+            "l2_regime_block_min_confidence",
+            cls._as_float(
+                params.get("l2_regime_block_min_confidence", _dc.l2_regime_block_min_confidence),
+                _dc.l2_regime_block_min_confidence,
+            ),
+            0.0,
+            1.0,
+        )
+        l2_regime_bull_gross_cap = cls._validate_range(
+            "l2_regime_bull_gross_cap",
+            cls._as_float(
+                params.get("l2_regime_bull_gross_cap", _dc.l2_regime_bull_gross_cap),
+                _dc.l2_regime_bull_gross_cap,
+            ),
+            0.0,
+            1.0,
+        )
+        l2_regime_bear_gross_cap = cls._validate_range(
+            "l2_regime_bear_gross_cap",
+            cls._as_float(
+                params.get("l2_regime_bear_gross_cap", _dc.l2_regime_bear_gross_cap),
+                _dc.l2_regime_bear_gross_cap,
+            ),
+            0.0,
+            1.0,
+        )
+        l2_regime_crisis_gross_cap = cls._validate_range(
+            "l2_regime_crisis_gross_cap",
+            cls._as_float(
+                params.get("l2_regime_crisis_gross_cap", _dc.l2_regime_crisis_gross_cap),
+                _dc.l2_regime_crisis_gross_cap,
+            ),
+            0.0,
+            1.0,
+        )
+        if l2_regime_bull_gross_cap <= 0.0:
+            raise ValueError("l2_regime_bull_gross_cap must be in range (0.0, 1.0]")
+        if l2_regime_bear_gross_cap <= 0.0:
+            raise ValueError("l2_regime_bear_gross_cap must be in range (0.0, 1.0]")
+        if l2_regime_crisis_gross_cap <= 0.0:
+            raise ValueError("l2_regime_crisis_gross_cap must be in range (0.0, 1.0]")
         return cls(
             k_rank=cls._as_int(params.get("K_RANK", 3), 3),
             rebalance_bars=cls._as_int(params.get("REBALANCE_BARS", 3), 3),
@@ -745,6 +800,19 @@ class Layer2AllocationConfig:
                 0.0,
                 1.0,
             ),
+            l2_regime_hard_block_enabled=bool(
+                params.get("l2_regime_hard_block_enabled", _dc.l2_regime_hard_block_enabled)
+            ),
+            l2_regime_block_min_confidence=l2_regime_block_min_confidence,
+            l2_regime_require_sign_consistency=bool(
+                params.get("l2_regime_require_sign_consistency", _dc.l2_regime_require_sign_consistency)
+            ),
+            l2_regime_risk_cap_enabled=bool(
+                params.get("l2_regime_risk_cap_enabled", _dc.l2_regime_risk_cap_enabled)
+            ),
+            l2_regime_bull_gross_cap=l2_regime_bull_gross_cap,
+            l2_regime_bear_gross_cap=l2_regime_bear_gross_cap,
+            l2_regime_crisis_gross_cap=l2_regime_crisis_gross_cap,
         )
 
 
@@ -827,7 +895,10 @@ class RegimeCellPolicy:
     pooled_fit_edge_bps: float
     cal_edge_bps: float
     pooled_cal_edge_bps: float
+    fit_lift_bps: float
     cal_lift_bps: float
+    sign_consistent: bool
+    hard_block_eligible: bool
     n_fit: int
     n_cal: int
 
@@ -843,10 +914,15 @@ class RegimePolicyDiagnostics:
     n_downweight: int
     n_block: int
     n_pooled: int
+    n_unstable: int
+    n_hard_block_eligible: int
+    mean_fit_lift_bps: float
     mean_cal_lift_bps: float
     min_cal_lift_bps: float
     max_cal_lift_bps: float
     mean_confidence: float
+    sign_consistency_ratio: float
+    hard_block_enabled: bool
 
 
 @dataclass(frozen=True, slots=True)
