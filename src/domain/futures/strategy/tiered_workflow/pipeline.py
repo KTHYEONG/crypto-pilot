@@ -1902,6 +1902,12 @@ def run_l2_awf(
         and sim.support_leak_count == 0
     )
 
+    # RC-4: vol-matched growth_lcb baseline용 std
+    _rets_h_arr = np.asarray(sim.rets_hybrid, dtype=np.float64)
+    _rets_b_arr = np.asarray(sim.rets_baseline_ew, dtype=np.float64)
+    _std_hybrid = float(np.std(_rets_h_arr, ddof=1)) if _rets_h_arr.size >= 2 else None
+    _std_baseline = float(np.std(_rets_b_arr, ddof=1)) if _rets_b_arr.size >= 2 else None
+
     gate = evaluate_layer2_gate(
         deployment_failed=not _deployment_ok,
         support_leak_count=int(sim.support_leak_count),
@@ -1925,6 +1931,8 @@ def run_l2_awf(
         worst_fold_cagr=float(worst_fold_cagr),
         positive_block_delta_ratio=float(positive_block_delta_ratio),
         config=config,
+        std_hybrid=_std_hybrid,
+        std_baseline=_std_baseline,
     )
     blocker_reason = gate.promotion_blocker
     gate_passed = gate.promotion_passed
@@ -1949,6 +1957,7 @@ def run_l2_awf(
         gate_passed=gate_passed,
         blocker_reason=blocker_reason,
         allocation_policy="diagonal_kelly",
+        deploy_leverage=_l_star,
         psr_hybrid=psr_hybrid,
         growth_lcb_hybrid=growth_lcb_hybrid,
         growth_lcb_baseline=growth_lcb_baseline,

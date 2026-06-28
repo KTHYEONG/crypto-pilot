@@ -215,8 +215,9 @@ def test_build_regime_policy_by_fold_sign_unstable_returns_pooled(monkeypatch: p
     )
 
     key = (0, "donchian_72", "4h")
-    assert policy_by_fold[0][key].action == "pooled"
-    assert policy_by_fold[0][key].reason == "cal_sign_unstable"
+    # RC-3: mean_cal_lift<0 & sign_consistency<0.6 → pooled passthrough 강제
+    assert policy_by_fold[0][key].action == "allow"
+    assert policy_by_fold[0][key].reason == "pooled_passthrough"
     assert policy_by_fold[0][key].sign_consistent is False
     assert diagnostics.n_unstable >= 1
     assert diagnostics.global_reliable is False

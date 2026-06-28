@@ -350,6 +350,7 @@ class Layer2Result:
         gate_passed: L2 통과 여부.
         blocker_reason: 실패 원인 키. "" = 통과. 값: no_deployment/low_trades/cagr/sharpe_abs/
             sortino/mar/mdd_abs/cvar_95/fold/active_blocks/friction/growth_lcb/uplift.
+        deploy_leverage: champion L* applied to hybrid holdout returns.
         recent_fold_passed: 최신 non-empty fold deployed CAGR 양수 여부.
         recent_fold_sharpe: 최신 non-empty fold Sharpe.
         recent_fold_cagr: 최신 non-empty fold deployed CAGR.
@@ -372,6 +373,7 @@ class Layer2Result:
     gate_passed: bool
     blocker_reason: str
     allocation_policy: AllocationPolicy = "diagonal_kelly"
+    deploy_leverage: float = 1.0
     psr_hybrid: float = 0.0
     growth_lcb_hybrid: float = 0.0
     growth_lcb_baseline: float = 0.0
