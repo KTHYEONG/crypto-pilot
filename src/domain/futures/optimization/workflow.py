@@ -20,6 +20,12 @@ from src.domain.futures.optimization.ml_context import MLPhaseDContext
 from src.domain.futures.optimization.objectives import objective_ml_phase_d
 from src.domain.futures.optimization.observability.trial_observability import set_trial_event_attrs
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.strategy.tiered_workflow.deployable_score import (
+    build_layer2_deployable_score,
+)
+from src.domain.futures.strategy.tiered_workflow.diagnostics import (
+    build_layer_universe_audit,
+)
 
 if TYPE_CHECKING:
     from src.domain.futures.strategy.tiered_workflow.dataclasses import L2SimulationCache
@@ -1557,7 +1563,7 @@ def objective_l1_ic(trial: Trial, ctx: TieredContext) -> float:
     import pandas as pd
 
     from src.domain.futures.strategy.config import resolve_purge_and_embargo_bars
-    from src.domain.futures.strategy.tiered_workflow import run_l1_swf
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_l1_swf
     from src.domain.futures.strategy.walk_forward import build_l1_swf_folds
 
     l1_params = suggest_layered_params(trial, "L1")
@@ -1596,8 +1602,8 @@ def objective_l1_ic(trial: Trial, ctx: TieredContext) -> float:
 def _resolve_l2_signal_batch_and_folds(ctx: TieredContext) -> tuple[Any, tuple[Any, ...]]:
     import numpy as np
 
-    from src.domain.futures.strategy.tiered_workflow import predict_layer1_signals
     from src.domain.futures.strategy.tiered_workflow.pipeline import _date_to_idx, _to_utc_timestamp
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import predict_layer1_signals
     from src.domain.futures.strategy.walk_forward import WFFold, build_walk_forward_folds
 
     ho_start_idx_l2 = _date_to_idx(ctx.aligned.datetimes, ctx.window.holdout_start)
@@ -1935,6 +1941,12 @@ def evaluate_l2_trial(
         bars_per_year=bars_per_year,
     )
     fold_pass_ratio = float(fold_diag.fold_pass_ratio)
+    finite_fold_cagrs = [
+        float(value)
+        for value in fold_diag.fold_deployed_cagrs
+        if value is not None and np.isfinite(float(value))
+    ]
+    worst_fold_cagr = min(finite_fold_cagrs) if finite_fold_cagrs else 0.0
     break_even_pass_pct = (
         float(sim.friction_pass_total) / float(sim.signal_total)
         if sim.signal_total > 0
@@ -1952,6 +1964,36 @@ def evaluate_l2_trial(
     cap_saturation_ratio = (
         float(sim.cap_saturation_count) / float(sim.rebalance_count)
         if sim.rebalance_count > 0
+        else 0.0
+    )
+    positive_block_delta_ratio = (
+        float(
+            sum(
+                1
+                for metric in block_metrics
+                if float(metric.log_growth_hybrid) > float(metric.log_growth_baseline)
+            )
+        )
+        / float(len(block_metrics))
+        if block_metrics
+        else 0.0
+    )
+    reliability_values = [
+        float(getattr(policy, "reliability", policy.confidence))
+        for fold_policy in getattr(cache, "regime_policy_by_fold", ())
+        for policy in fold_policy.values()
+        if np.isfinite(float(getattr(policy, "reliability", policy.confidence)))
+    ]
+    bucket_reliability_mean = float(np.mean(reliability_values)) if reliability_values else 0.0
+    entry_audit = build_layer_universe_audit(
+        aligned=aligned,
+        layer="L2",
+        start_idx=int(signal_batch.start_idx),
+        end_idx=int(signal_batch.end_idx),
+    )
+    entry_spike_penalty = (
+        float(config.l2_entry_spike_penalty_weight)
+        if "entry_block_spike" in entry_audit.warnings
         else 0.0
     )
 
@@ -2026,7 +2068,22 @@ def evaluate_l2_trial(
         psr_hybrid=float(psr_hybrid),
         recent_fold_passed=fold_diag.recent_fold_passed,
         recent_fold_sharpe=fold_diag.recent_fold_sharpe,
+        worst_fold_cagr=float(worst_fold_cagr),
+        positive_block_delta_ratio=float(positive_block_delta_ratio),
         fold_attributions=sim.fold_attributions,
+        config=config,
+    )
+    deployable_score = build_layer2_deployable_score(
+        cagr=float(cagr_hybrid),
+        sortino=float(sortino_hybrid),
+        sharpe=float(sharpe_hybrid),
+        mdd=float(mdd_hybrid),
+        fold_pass_ratio=float(fold_pass_ratio),
+        worst_fold_cagr=float(worst_fold_cagr),
+        positive_block_delta_ratio=float(positive_block_delta_ratio),
+        total_cost_bps=float(total_cost_bps),
+        bucket_reliability_mean=float(bucket_reliability_mean),
+        entry_spike_penalty=float(entry_spike_penalty),
         config=config,
     )
     return Layer2TrialEvaluation(
@@ -2067,6 +2124,11 @@ def evaluate_l2_trial(
         latest_to_median_cagr=float(fold_diag.latest_to_median_cagr),
         fold_deployed_cagrs=tuple(fold_diag.fold_deployed_cagrs),
         fold_selected_symbols=tuple(fold_diag.fold_selected_symbols),
+        worst_fold_cagr=float(worst_fold_cagr),
+        positive_block_delta_ratio=float(positive_block_delta_ratio),
+        bucket_reliability_mean=float(bucket_reliability_mean),
+        entry_spike_penalty=float(entry_spike_penalty),
+        deployable_score=deployable_score,
     )
 
 
@@ -2081,7 +2143,7 @@ def _evaluate_l2_params(
     """
     import time
 
-    from src.domain.futures.strategy.tiered_workflow import Layer2AllocationConfig
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
 
     if not ctx.fixed_l1_params:
         return -1e6, {}, 0.0
@@ -2157,7 +2219,7 @@ def _evaluate_l2_params_threadsafe(
     """Thread-safe variant: ctx.l2_sim_cache is assumed pre-built (no __setattr__ mutation)."""
     import time
 
-    from src.domain.futures.strategy.tiered_workflow import Layer2AllocationConfig
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
 
     if not ctx.fixed_l1_params:
         return -1e6, {}, 0.0
