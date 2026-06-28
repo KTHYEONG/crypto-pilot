@@ -1634,6 +1634,7 @@ def run_l2_awf(
         config=config,
         caps=caps,
         tf=tf,
+        sim_origin="final_deploy",
     )
     symbols = aligned.symbols
     sym_to_idx = {s: i for i, s in enumerate(symbols)}

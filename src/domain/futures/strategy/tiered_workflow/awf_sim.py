@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import re as _re
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Literal, cast
 
 import numba
@@ -1342,6 +1343,7 @@ def _run_awf_simulation(
     caps: PortfolioCaps,
     tf: str = "4h",
     portfolio_nav: float | None = None,
+    sim_origin: str = "unknown",
 ) -> _AwfSimResult:
     """AWF 시뮬레이션 핵심 루프 (L2/L3 공용)."""
     import logging
@@ -2583,6 +2585,24 @@ def _run_awf_simulation(
             summary.mu_abs_ratio,
             summary.quality_weight_ratio,
             summary.edge_abs_ratio,
+        )
+
+    if logger.isEnabledFor(logging.DEBUG):
+        rets_arr = np.asarray(all_rets_hybrid, dtype=np.float64)
+        rets_fp = hashlib.md5(rets_arr.tobytes(), usedforsecurity=False).hexdigest()[:12]
+        oos_bars = [int(f.oos_end - f.oos_start) for f in awf_folds]
+        fold_lens = [len(fr) for fr in fold_rets_hybrid]
+        cfg_items = sorted((f.name, getattr(config, f.name)) for f in fields(config))
+        cfg_fp = hashlib.md5(repr(cfg_items).encode(), usedforsecurity=False).hexdigest()[:8]
+        logger.debug(
+            "[AWF-SIM-FP] origin=%s n_folds=%d oos_bars=%s fold_ret_lens=%s "
+            "total_bars=%d trades=%d rets_fp=%s sum_logret=%.6f cfg_fp=%s "
+            "cache_id=%x signal_id=%x aligned_bars=%d",
+            sim_origin, len(awf_folds), oos_bars, fold_lens,
+            rets_arr.size, trade_count, rets_fp,
+            float(np.sum(np.log1p(np.clip(rets_arr, -0.999, None)))),
+            cfg_fp, id(cache) & 0xffffff, id(signal_batch) & 0xffffff,
+            int(aligned.close_2d.shape[0]),
         )
 
     return _AwfSimResult(
