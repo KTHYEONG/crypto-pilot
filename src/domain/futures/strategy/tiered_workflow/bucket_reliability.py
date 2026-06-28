@@ -20,6 +20,7 @@ def build_bucket_reliability(
     min_cal_n: int,
     min_cal_lift_bps: float,
     min_reliability: float,
+    relaxed_reliability_threshold: float = 0.35,
 ) -> RegimeBucketReliability:
     sign_consistent = (
         fit_edge_bps == 0.0
@@ -42,6 +43,9 @@ def build_bucket_reliability(
         action = "pool"
     else:
         action = "downweight"
+    # C: relaxed threshold: downweight → allow if sign-consistent and >= relaxed threshold
+    if action == "downweight" and reliability >= relaxed_reliability_threshold and sign_consistent:
+        action = "allow"
     return RegimeBucketReliability(
         regime=regime,
         family=family,
