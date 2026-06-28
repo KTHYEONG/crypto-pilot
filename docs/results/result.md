@@ -224,8 +224,6 @@ STRATEGY ENGINE
 ──────────────────────────────────────────────────────────────────────────────
 
 
->> LAYER 1: PASS -> Proceeding to Layer 2.
-
 ● [LAYER UNIVERSE AUDIT]
 ──────────────────────────────────────────────────────────────────────────────
   LAYER  WINDOW RANGE                    SYMS   ACTIVE (min/med/max)       ENTRY    KILL  WARNINGS
@@ -241,44 +239,49 @@ compression   | on
 states        | 3
 status        | 🟢 stable
 distribution  | bull=34.7% bear=28.1% crisis=37.3%
+policy_mode   | soft
+hard_block    | off
+risk_cap      | on
+policy_source | fit/cal
+oos_debug     | evaluation only
 note          | L2 verdict is reported separately in [REGIME-L2]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ● [LAYER 2: OPTUNA TUNING]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[REGIME-L2] active_states=3 compression=True path=pooled_fallback proof=False lift=3.61 t=0.48 fold_pass=0.67
-[REGIME-L2] proof_failed path=pooled_fallback effective_states=3
+[REGIME-L2] active_states=3 compression=True path=regime_conditioned proof=True lift=54.42 t=15.24 fold_pass=1.00
+[REGIME-L2] policy_mode=soft policy_source=fit/cal global_reliable=True allow=5 downweight=10 block=0 pooled=243 unstable=15 hard_block_eligible=0 sign_consistency=0.50 hard_block_enabled=False mean_cal_lift=-23.04 mean_conf=1.00
   ● [STUDY] l2_study_4h_95de9c21278a | trials=200 | events=67063 | symbols=42
   ────────────────────────────────────────────────────────────────────────────
  [OPT] Deleted existing study 'l2_study_4h_95de9c21278a' for a fresh start.
-[L2-OPT]:   0%|                                                                                                   | 0/200 [00:00<?, ?it/s][L2-OPT] ProcessPool workers=6 (mem=4.3GB, mem_safe=6, cpu=8, batch=6)
-[L2-OPT]: 100%|███████████████████████████████████████████████████| 200/200 [01:47<00:00,  1.86it/s, Best CAGR: 180.93% | Current: 74.45%]
+[L2-OPT]:   0%|                                                                                                   | 0/200 [00:00<?, ?it/s][L2-OPT] ProcessPool workers=5 (mem=4.1GB, mem_safe=5, cpu=8, batch=6)
+[L2-OPT]: 100%|█████████████████████████████████████████████████| 200/200 [02:54<00:00,  1.15it/s, Best CAGR: 144.81% | Current: -181.53%]
 [L2-SELECTION] No gate-passed trials found. Reducing diagnostic replay size to 3.
-[L2-SELECTION] No feasible candidate found within fallback window (reason=growth_lcb)
-[L2-DEPLOY-C4] L*=1.578 (binding=mdd) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
+[L2-SELECTION] No feasible candidate found within fallback window (reason=cagr)
+[L2-DEPLOY-C4] L*=1.431 (binding=mdd) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
   ● [FINAL SIMULATION]
-[L2-DEPLOY] L*=1.5781 binding=champion | CAGR=-0.1650 MDD=0.3858 CVaR95=0.0227 RiskUtil=1.286
+[L2-DEPLOY] L*=1.4315 binding=champion | CAGR=0.0375 MDD=0.2053 CVaR95=0.0174 RiskUtil=0.684
 ● [LAYER 2 PORTFOLIO SCORECARD] (2024-12-22 ~ 2025-09-30)
 ──────────────────────────────────────────────────────────────────────────────
   STATUS  : ❌ BLOCKED (cagr)
 
-  ❌ [Growth    ] CAGR: -16.5% (>=30.0%) | PnL: -14.8% | Equity x0.85
-  ❌ [Efficiency] Sharpe: -0.435 (>=1.000) | Sortino: -0.615 (>=1.500) | Calmar: n/a(loss) (>=1.000)
-  ❌ [Risk      ] MDD: 38.6% (<=30.0%) | CVaR95: 2.3% (<=6.0%) | RiskUtil: 128.6%
-  ❌ [Robust    ] Fold: 33.3% (>=60.0%) | Trades: 204 (>=30) | Friction: 97.1%
-  ✅ [Uplift    ] Sharpe Uplift: +0.34 (>=+0.20)
-  ✅ [Integrity ] DSR: 0.665 (>=0.60) | PSR: 0.295 (diag)
-  [Diag     ] RelMDD: 1.34x | Turnover: 0.240
+  ❌ [Growth    ] CAGR: +3.8% (>=30.0%) | PnL: +5.0% | Equity x1.05
+  ❌ [Efficiency] Sharpe: 0.275 (>=1.000) | Sortino: 0.382 (>=1.500) | Calmar: 0.183 (>=1.000)
+  ✅ [Risk      ] MDD: 20.5% (<=30.0%) | CVaR95: 1.7% (<=6.0%) | RiskUtil: 68.4%
+  ✅ [Robust    ] Fold: 66.7% (>=60.0%) | Trades: 177 (>=30) | Friction: 95.3%
+  ❌ [Uplift    ] Sharpe Uplift: +0.20 (>=+0.20)
+  ✅ [Integrity ] DSR: 0.692 (>=0.60) | PSR: 0.634 (diag)
+  [Diag     ] RelMDD: 1.40x | Turnover: 0.065
 ──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ❌ Sharpe: -0.193 | CAGR:   -10.0% | MDD:  22.3% | Status: FAIL | Period: 2024-12-22 ~ 2025-03-26
-       Symbols: 18 [AAVEUSDT, AXSUSDT, BCHUSDT, ETCUSDT, ETHUSDT, FILUSDT, GALAUSDT, LPTUSDT, +10 more]
-  ├─ Fold #2 : ✅ Sharpe:  0.775 | CAGR:   +12.9% | MDD:  19.6% | Status: PASS | Period: 2025-03-26 ~ 2025-06-28
-       Symbols: 14 [AXSUSDT, BCHUSDT, ETCUSDT, GALAUSDT, MANAUSDT, NEARUSDT, PEOPLEUSDT, RUNEUSDT, +6 more]
-  └─ Fold #3 : ❌ Sharpe: -2.791 | CAGR:   -42.6% | MDD:  28.6% | Status: FAIL | Period: 2025-06-28 ~ 2025-09-30
-       Symbols: 17 [1000SHIBUSDT, AAVEUSDT, API3USDT, BCHUSDT, BNBUSDT, ETCUSDT, GALAUSDT, KAVAUSDT, +9 more]
+  ├─ Fold #1 : ❌ Sharpe: -0.442 | CAGR:   -13.3% | MDD:  20.5% | Status: FAIL | Period: 2024-12-22 ~ 2025-03-26
+       Symbols: 20 [1000SHIBUSDT, AAVEUSDT, ARPAUSDT, AXSUSDT, BCHUSDT, BNBUSDT, BTCUSDT, ETCUSDT, +12 more]
+  ├─ Fold #2 : ✅ Sharpe:  1.857 | CAGR:   +24.8% | MDD:   6.9% | Status: PASS | Period: 2025-03-26 ~ 2025-06-28
+       Symbols: 14 [AXSUSDT, BCHUSDT, BNBUSDT, ETCUSDT, ETHUSDT, LINKUSDT, LTCUSDT, NEARUSDT, +6 more]
+  └─ Fold #3 : ✅ Sharpe:  0.379 | CAGR:    +3.3% | MDD:  11.8% | Status: PASS | Period: 2025-06-28 ~ 2025-09-30
+       Symbols: 15 [1000SHIBUSDT, AAVEUSDT, BCHUSDT, BNBUSDT, BTCUSDT, DOTUSDT, ETCUSDT, KAVAUSDT, +7 more]
 
 ● [LAYER UNIVERSE AUDIT]
 ──────────────────────────────────────────────────────────────────────────────
@@ -288,4 +291,4 @@ note          | L2 verdict is reported separately in [REGIME-L2]
 ──────────────────────────────────────────────────────────────────────────────
 
 >> LAYER 2: BLOCKED -> gate_passed=False
-!! FAIL: exit_code=1 reason=layer2_blocked:growth_lcb
+!! FAIL: exit_code=1 reason=layer2_blocked:cagr

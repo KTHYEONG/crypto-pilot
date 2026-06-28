@@ -1214,8 +1214,10 @@ def _build_l2_signal_batch(
     Raises:
         ValueError: l1_res.inference_artifact가 None인 경우.
     """
-    from src.domain.futures.strategy.tiered_workflow import predict_layer1_signals
-    from src.domain.futures.strategy.tiered_workflow.signal_selection import predict_layer1_signals_multi_tf
+    from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+        predict_layer1_signals,
+        predict_layer1_signals_multi_tf,
+    )
 
     datetimes = aligned.datetimes
     l2_start_ts = pd.Timestamp(window.l2_start, tz="UTC")
@@ -1930,7 +1932,9 @@ def _run_strategy_stage(
                 f"  └─ Details : Base {len(base_scope)} | Dropped {dropped_count} (late_start: {l_start_dropped})"
             )
         if not effective_trade_syms:
-            from src.domain.futures.strategy.tiered_workflow import TieredPipelineError
+            from src.domain.futures.strategy.tiered_workflow.pipeline import (
+                TieredPipelineError,
+            )
 
             raise TieredPipelineError(
                 "tiered tradeable scope is empty after sub-window admission"
@@ -1971,14 +1975,15 @@ def _run_strategy_stage(
 
     # ─── Tiered Pipeline 분기 (bridge 완료 후 — labeled + aligned 사용 가능) ──
     if use_tiered:
+        from src.domain.futures.strategy.tiered_workflow.pipeline import (
+            TieredPipelineError,
+            run_tiered_pipeline,
+        )
+
         try:
 
             from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
             from src.domain.futures.strategy.common.alignment import align_data_maps
-            from src.domain.futures.strategy.tiered_workflow import (
-                TieredPipelineError,
-                run_tiered_pipeline,
-            )
             _pit_state_cube = _resolve_universe_state_cube(universe_result)
             _mem_align = _get_rss_mb()
             t_align = time.perf_counter()
@@ -2301,6 +2306,15 @@ def _run_strategy_stage(
                 override_dsr=l2_study_result.dsr,
                 l2_sim_cache=shared_l2_cache,
             )
+            if l2_final is not None and l2_study_result.best_evaluation is not None:
+                from src.domain.futures.strategy.tiered_workflow.replay_parity import (
+                    assert_selection_replay_parity,
+                )
+
+                assert_selection_replay_parity(
+                    replay_evaluation=l2_study_result.best_evaluation,
+                    final_evaluation=l2_final,
+                )
             
             _log_mem("l2_final_pipeline", _mem_l2_final, extra=f"took={time.perf_counter() - _t_l2_final_start:.4f}s")
             # Layer 2 BLOCKED 시 즉시 종료 (Step 5 optimization 진입 방지)
