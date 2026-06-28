@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 AllocationPolicy = Literal["diagonal_kelly", "directional_equal_weight"]
 RegimePolicyMode = Literal["filter", "observe", "soft", "hybrid"]
 RegimePolicyAction = Literal["pooled", "allow", "downweight", "block"]
+RegimeBucketAction = Literal["allow", "downweight", "pool"]
 RegimePolicyReason = Literal[
     "legacy_filter",
     "observe_only",
@@ -247,6 +248,55 @@ class Layer2TrialEvaluation:
     latest_to_median_cagr: float = 0.0
     fold_deployed_cagrs: tuple[float | None, ...] = ()
     fold_selected_symbols: tuple[tuple[str, ...], ...] = ()
+    worst_fold_cagr: float = float("nan")
+    positive_block_delta_ratio: float = float("nan")
+    bucket_reliability_mean: float = 0.0
+    entry_spike_penalty: float = 0.0
+    deployable_score: Layer2DeployableScore | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class Layer2DeployableScore:
+    """Blocked fallback candidate deployability diagnostic."""
+
+    cagr: float
+    sortino: float
+    sharpe: float
+    calmar: float
+    mdd: float
+    fold_pass_ratio: float
+    score: float
+    worst_fold_cagr: float
+    positive_block_delta_ratio: float
+    cost_drag: float
+    bucket_reliability_mean: float
+    entry_spike_penalty: float
+
+
+@dataclass(slots=True, frozen=True)
+class RegimeBucketReliability:
+    regime: int
+    family: str
+    tf: str
+    fit_edge_bps: float
+    cal_edge_bps: float
+    n_fit: int
+    n_cal: int
+    sign_consistent: bool
+    reliability: float
+    action: RegimeBucketAction
+
+
+@dataclass(slots=True, frozen=True)
+class RegimePolicyEffectSummary:
+    n_bars: int
+    n_sleeves: int
+    action_ratio: float
+    pooled_ratio: float
+    block_ratio: float
+    mu_abs_ratio: float
+    quality_weight_ratio: float
+    edge_abs_ratio: float
 
 
 @dataclass(slots=True, frozen=True)
@@ -391,6 +441,10 @@ class Layer2AllocationConfig:
     l2_replay_max_fallbacks: int = 24
     l2_worst_fold_penalty_threshold: float = -0.30
     l2_worst_fold_penalty_weight: float = 0.005
+    l2_min_worst_fold_cagr: float = -0.05
+    l2_min_positive_block_delta_ratio: float = 0.45
+    l2_worst_fold_cagr_penalty_weight: float = 0.50
+    l2_block_delta_penalty_weight: float = 0.25
     # D3: 결정론적 리스크 배치 파라미터 (fit-leg 기반, look-ahead-free)
     l2_deploy_enabled: bool = True
     l2_deploy_mdd_margin: float = 0.30
@@ -417,6 +471,7 @@ class Layer2AllocationConfig:
     l2_bucket_min_n: int = 15
     l2_bucket_shrinkage: float = 0.3
     l2_bucket_edge_floor_bps: float = 0.0
+    l2_bucket_min_reliability: float = 0.55
     # CS Score Amplification (anti-Kelly=EW-convergence) — 중단 (효과 없음 입증됨)
     l2_cs_amp_enabled: bool = False
     l2_cs_amp_alpha: float = 2.0
@@ -440,10 +495,16 @@ class Layer2AllocationConfig:
     l2_regime_require_sign_consistency: bool = True
     l2_regime_scale_signal_mu: bool = True
     l2_regime_scale_quality_weight: bool = True
+    l2_regime_max_pooled_ratio_for_effective: float = 0.80
+    l2_regime_min_action_ratio_for_effective: float = 0.10
+    l2_regime_min_mu_abs_change: float = 0.03
     l2_regime_risk_cap_enabled: bool = True
     l2_regime_bull_gross_cap: float = 1.0
     l2_regime_bear_gross_cap: float = 0.75
     l2_regime_crisis_gross_cap: float = 0.55
+    l2_entry_cooldown_bars: int = 12
+    l2_entry_spike_penalty_weight: float = 0.05
+    l2_entry_spike_warn_threshold: float = 0.20
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -555,6 +616,44 @@ class Layer2AllocationConfig:
                 cls._as_int(params.get("l2_replay_max_fallbacks", 24), 24),
                 1,
             )
+        )
+        l2_min_worst_fold_cagr = cls._as_float(
+            params.get("l2_min_worst_fold_cagr", _dc.l2_min_worst_fold_cagr),
+            _dc.l2_min_worst_fold_cagr,
+        )
+        l2_min_positive_block_delta_ratio = cls._validate_range(
+            "l2_min_positive_block_delta_ratio",
+            cls._as_float(
+                params.get(
+                    "l2_min_positive_block_delta_ratio",
+                    _dc.l2_min_positive_block_delta_ratio,
+                ),
+                _dc.l2_min_positive_block_delta_ratio,
+            ),
+            0.0,
+            1.0,
+        )
+        l2_worst_fold_cagr_penalty_weight = cls._validate_range(
+            "l2_worst_fold_cagr_penalty_weight",
+            cls._as_float(
+                params.get(
+                    "l2_worst_fold_cagr_penalty_weight",
+                    _dc.l2_worst_fold_cagr_penalty_weight,
+                ),
+                _dc.l2_worst_fold_cagr_penalty_weight,
+            ),
+            0.0,
+        )
+        l2_block_delta_penalty_weight = cls._validate_range(
+            "l2_block_delta_penalty_weight",
+            cls._as_float(
+                params.get(
+                    "l2_block_delta_penalty_weight",
+                    _dc.l2_block_delta_penalty_weight,
+                ),
+                _dc.l2_block_delta_penalty_weight,
+            ),
+            0.0,
         )
         combine_method = str(
             os.environ.get("L2_SLEEVE_COMBINE")
@@ -713,6 +812,10 @@ class Layer2AllocationConfig:
             l2_objective_trade_target=l2_objective_trade_target,
             l2_objective_trade_weight=l2_objective_trade_weight,
             l2_replay_max_fallbacks=l2_replay_max_fallbacks,
+            l2_min_worst_fold_cagr=l2_min_worst_fold_cagr,
+            l2_min_positive_block_delta_ratio=l2_min_positive_block_delta_ratio,
+            l2_worst_fold_cagr_penalty_weight=l2_worst_fold_cagr_penalty_weight,
+            l2_block_delta_penalty_weight=l2_block_delta_penalty_weight,
             l2_worst_fold_penalty_threshold=cls._as_float(
                 params.get("l2_worst_fold_penalty_threshold", -0.30), -0.30
             ),
@@ -772,6 +875,12 @@ class Layer2AllocationConfig:
             l2_bucket_edge_floor_bps=cls._as_float(
                 os.environ.get("L2_BUCKET_EDGE_FLOOR_BPS", params.get("l2_bucket_edge_floor_bps", 0.0)), 0.0
             ),
+            l2_bucket_min_reliability=cls._validate_range(
+                "l2_bucket_min_reliability",
+                cls._as_float(params.get("l2_bucket_min_reliability", 0.55), 0.55),
+                0.0,
+                1.0,
+            ),
             l2_regime_compression_enabled=bool(params.get("l2_regime_compression_enabled", True)),
             l2_regime_proof_enabled=bool(params.get("l2_regime_proof_enabled", True)),
             l2_regime_proof_nw_tstat=cls._validate_range(
@@ -815,12 +924,41 @@ class Layer2AllocationConfig:
             l2_regime_scale_quality_weight=bool(
                 params.get("l2_regime_scale_quality_weight", _dc.l2_regime_scale_quality_weight)
             ),
+            l2_regime_max_pooled_ratio_for_effective=cls._validate_range(
+                "l2_regime_max_pooled_ratio_for_effective",
+                cls._as_float(params.get("l2_regime_max_pooled_ratio_for_effective", 0.80), 0.80),
+                0.0,
+                1.0,
+            ),
+            l2_regime_min_action_ratio_for_effective=cls._validate_range(
+                "l2_regime_min_action_ratio_for_effective",
+                cls._as_float(params.get("l2_regime_min_action_ratio_for_effective", 0.10), 0.10),
+                0.0,
+                1.0,
+            ),
+            l2_regime_min_mu_abs_change=cls._validate_range(
+                "l2_regime_min_mu_abs_change",
+                cls._as_float(params.get("l2_regime_min_mu_abs_change", 0.03), 0.03),
+                0.0,
+            ),
             l2_regime_risk_cap_enabled=bool(
                 params.get("l2_regime_risk_cap_enabled", _dc.l2_regime_risk_cap_enabled)
             ),
             l2_regime_bull_gross_cap=l2_regime_bull_gross_cap,
             l2_regime_bear_gross_cap=l2_regime_bear_gross_cap,
             l2_regime_crisis_gross_cap=l2_regime_crisis_gross_cap,
+            l2_entry_cooldown_bars=cls._as_int(params.get("l2_entry_cooldown_bars", 12), 12),
+            l2_entry_spike_penalty_weight=cls._validate_range(
+                "l2_entry_spike_penalty_weight",
+                cls._as_float(params.get("l2_entry_spike_penalty_weight", 0.05), 0.05),
+                0.0,
+            ),
+            l2_entry_spike_warn_threshold=cls._validate_range(
+                "l2_entry_spike_warn_threshold",
+                cls._as_float(params.get("l2_entry_spike_warn_threshold", 0.20), 0.20),
+                0.0,
+                1.0,
+            ),
         )
 
 
@@ -909,6 +1047,7 @@ class RegimeCellPolicy:
     hard_block_eligible: bool
     n_fit: int
     n_cal: int
+    reliability: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

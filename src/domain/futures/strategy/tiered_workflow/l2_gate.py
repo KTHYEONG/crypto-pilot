@@ -65,6 +65,8 @@ def evaluate_layer2_gate(
     psr_hybrid: float | None = None,
     recent_fold_passed: bool | None = None,
     recent_fold_sharpe: float | None = None,
+    worst_fold_cagr: float | None = None,
+    positive_block_delta_ratio: float | None = None,
     fold_attributions: tuple[Layer2FoldAttribution, ...] = (),
     config: Layer2AllocationConfig = _DEFAULT_L2_CONFIG,
 ) -> Layer2GateEvaluation:
@@ -114,6 +116,18 @@ def evaluate_layer2_gate(
                 recent_fold_constraint,
                 _finite_or_fail(float(config.l2_min_recent_fold_sharpe) - float(recent_fold_sharpe)),
             )
+    worst_fold_cagr_constraint = (
+        -1.0
+        if worst_fold_cagr is None or not np.isfinite(float(worst_fold_cagr))
+        else _finite_or_fail(float(config.l2_min_worst_fold_cagr) - float(worst_fold_cagr))
+    )
+    block_delta_constraint = (
+        -1.0
+        if positive_block_delta_ratio is None or not np.isfinite(float(positive_block_delta_ratio))
+        else _finite_or_fail(
+            float(config.l2_min_positive_block_delta_ratio) - float(positive_block_delta_ratio)
+        )
+    )
     optuna_constraint_values = (
         1.0 if deployment_failed else -1.0,
         float(max(support_leak_count, 0)),
@@ -163,6 +177,12 @@ def evaluate_layer2_gate(
     if promotion_passed and cost_drag > float(config.l2_max_cost_drag_ratio):
         promotion_passed = False
         promotion_blocker = "cost_drag"
+    if promotion_passed and worst_fold_cagr_constraint > 0.0:
+        promotion_passed = False
+        promotion_blocker = "worst_fold_cagr"
+    if promotion_passed and block_delta_constraint > 0.0:
+        promotion_passed = False
+        promotion_blocker = "block_delta"
 
     _logger.debug(
         "[L2-GATE] promotion=%s blocker=%s | "

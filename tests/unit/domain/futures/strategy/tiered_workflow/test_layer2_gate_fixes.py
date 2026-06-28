@@ -11,11 +11,13 @@ Scenarios:
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pytest
 
 from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
+from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     build_directional_equal_weight_baseline,
     build_directional_risk_matched_equal_weight,
@@ -258,6 +260,64 @@ def test_uplift_constraint_is_negative_when_hybrid_sharpe_above_threshold() -> N
     )
 
 
+def test_l2_gate_blocks_worst_fold_cagr() -> None:
+    gate = evaluate_layer2_gate(
+        deployment_failed=False,
+        support_leak_count=0,
+        cagr_hybrid=0.35,
+        sharpe_hybrid=1.2,
+        sharpe_hac_hybrid=1.1,
+        sharpe_hac_baseline=0.9,
+        sortino_hybrid=1.8,
+        mar_hybrid=1.4,
+        mdd_hybrid=0.12,
+        cvar_95_hybrid=0.03,
+        fold_pass_ratio=0.80,
+        active_block_count=4,
+        friction_pass_pct=0.80,
+        trade_count=80,
+        growth_lcb_hybrid=0.10,
+        growth_lcb_baseline=0.05,
+        dsr_hybrid=0.8,
+        psr_hybrid=0.95,
+        worst_fold_cagr=-0.10,
+        positive_block_delta_ratio=0.70,
+        config=Layer2AllocationConfig(),
+    )
+
+    assert not gate.promotion_passed
+    assert gate.promotion_blocker == "worst_fold_cagr"
+
+
+def test_l2_gate_blocks_low_block_delta_ratio() -> None:
+    gate = evaluate_layer2_gate(
+        deployment_failed=False,
+        support_leak_count=0,
+        cagr_hybrid=0.35,
+        sharpe_hybrid=1.2,
+        sharpe_hac_hybrid=1.1,
+        sharpe_hac_baseline=0.9,
+        sortino_hybrid=1.8,
+        mar_hybrid=1.4,
+        mdd_hybrid=0.12,
+        cvar_95_hybrid=0.03,
+        fold_pass_ratio=0.80,
+        active_block_count=4,
+        friction_pass_pct=0.80,
+        trade_count=80,
+        growth_lcb_hybrid=0.10,
+        growth_lcb_baseline=0.05,
+        dsr_hybrid=0.8,
+        psr_hybrid=0.95,
+        worst_fold_cagr=-0.01,
+        positive_block_delta_ratio=0.30,
+        config=Layer2AllocationConfig(),
+    )
+
+    assert not gate.promotion_passed
+    assert gate.promotion_blocker == "block_delta"
+
+
 def test_layer2_constraints_tuple_length_is_eight() -> None:
     """Optuna safety constraints fallback 크기가 9인지 확인."""
     # Arrange (Given): l2_constraint_values 미존재 trial 시뮬레이션
@@ -459,7 +519,7 @@ def test_build_layer_universe_audit_detects_low_active_tail() -> None:
     )
 
     audit = build_layer_universe_audit(
-        aligned=aligned,
+        aligned=cast(AlignedMarketData, aligned),
         layer="L2",
         start_idx=0,
         end_idx=10,

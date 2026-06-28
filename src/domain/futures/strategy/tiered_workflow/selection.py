@@ -16,10 +16,13 @@ from src.domain.futures.optimization.workflow import (
     layer2_constraints_from_trial,
 )
 from src.domain.futures.strategy.candidate_contracts import ValidatedSignalBatch
-from src.domain.futures.strategy.tiered_workflow import Layer2AllocationConfig
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+    Layer2AllocationConfig,
     Layer2GateEvaluation,
     Layer2StudyResult,
+)
+from src.domain.futures.strategy.tiered_workflow.deployable_score import (
+    score_layer2_deployable_fallback as _score_layer2_deployable_fallback,
 )
 from src.domain.futures.strategy.tiered_workflow.l2_gate import (
     evaluate_layer2_gate,
@@ -28,8 +31,24 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     _bars_per_year_for_tf,
     _deflated_sharpe_probability,
 )
+from src.domain.futures.strategy.tiered_workflow.replay_parity import (
+    assert_selection_replay_parity,
+)
 
 _logger = logging.getLogger(__name__)
+
+
+def _assert_selection_replay_parity(
+    *,
+    replay_evaluation: Any,
+    final_evaluation: Any,
+    tolerance: float = 1e-8,
+) -> None:
+    assert_selection_replay_parity(
+        replay_evaluation=replay_evaluation,
+        final_evaluation=final_evaluation,
+        tolerance=tolerance,
+    )
 
 
 def _update_hashed_value(
@@ -370,7 +389,7 @@ def select_layer2_champion(
             len(eval_candidates),
         )
     else:
-        eval_candidates = replay_candidates[:3]
+        eval_candidates = replay_candidates[:fallback_limit]
         _logger.info(
             "[L2-SELECTION] No gate-passed trials found. Reducing diagnostic replay size to %d.",
             len(eval_candidates),
@@ -444,6 +463,16 @@ def select_layer2_champion(
             psr_hybrid=float(candidate_evaluation.psr_hybrid),
             recent_fold_passed=getattr(candidate_evaluation, "recent_fold_passed", None),
             recent_fold_sharpe=getattr(candidate_evaluation, "recent_fold_sharpe", None),
+            worst_fold_cagr=getattr(candidate_evaluation, "worst_fold_cagr", None),
+            positive_block_delta_ratio=getattr(
+                candidate_evaluation,
+                "positive_block_delta_ratio",
+                None,
+            ),
+            config=candidate_config,
+        )
+        deployable_score = _score_layer2_deployable_fallback(
+            candidate_evaluation,
             config=candidate_config,
         )
 
@@ -482,6 +511,7 @@ def select_layer2_champion(
             best_diagnostic_trial is None
             or (
                 int(gate.promotion_passed),
+                float(deployable_score.score),
                 float(dsr),
                 float(candidate_evaluation.objective_value),
                 float(candidate_evaluation.growth_lcb_hybrid),
@@ -490,6 +520,14 @@ def select_layer2_champion(
             )
             > (
                 int(best_diagnostic_gate.promotion_passed) if best_diagnostic_gate is not None else 0,
+                float(
+                    _score_layer2_deployable_fallback(
+                        best_diagnostic_evaluation,
+                        config=Layer2AllocationConfig.from_mapping(dict(best_diagnostic_trial.params)),
+                    ).score
+                )
+                if best_diagnostic_trial is not None and best_diagnostic_evaluation is not None
+                else -1e6,
                 float(best_diagnostic_dsr),
                 float(best_diagnostic_evaluation.objective_value) if best_diagnostic_evaluation is not None else -1e6,
                 float(best_diagnostic_evaluation.growth_lcb_hybrid) if best_diagnostic_evaluation is not None else -1e6,
