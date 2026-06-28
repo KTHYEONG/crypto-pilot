@@ -1804,6 +1804,7 @@ def evaluate_l2_trial(
         config=config,
         caps=caps,
         tf=tf,
+        sim_origin="champion_eval",
     )
     hours_per_bar = max(float(hours_per_bar_tf(tf)), 1e-9)
     bars_per_year = _bars_per_year_for_tf(tf)
