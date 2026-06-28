@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from datetime import date
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -37,6 +37,9 @@ RegimePolicyReason = Literal[
     "negative_cal_lift",
     "positive_cal_lift",
     "neutral",
+    "pooled_passthrough",
+    "insufficient_fit_but_good_cal",
+    "insufficient_cal_partial",
 ]
 
 
@@ -322,6 +325,7 @@ class Layer2StudyResult:
     feasible_trials: int
     blocker_reason: str
     sim_cache: object | None = None
+    awf_folds: Any = None
 
 
 
@@ -470,7 +474,7 @@ class Layer2AllocationConfig:
     l2_bucket_cost_bps: float = 6.0
     l2_bucket_min_n: int = 15
     l2_bucket_shrinkage: float = 0.3
-    l2_bucket_edge_floor_bps: float = 0.0
+    l2_bucket_edge_floor_bps: float = 50.0
     l2_bucket_min_reliability: float = 0.55
     # CS Score Amplification (anti-Kelly=EW-convergence) — 중단 (효과 없음 입증됨)
     l2_cs_amp_enabled: bool = False
@@ -505,6 +509,10 @@ class Layer2AllocationConfig:
     l2_entry_cooldown_bars: int = 12
     l2_entry_spike_penalty_weight: float = 0.05
     l2_entry_spike_warn_threshold: float = 0.20
+    # Regime policy conservatism relaxation
+    l2_regime_pooled_is_passthrough: bool = False
+    l2_regime_min_fit_n_floor: int = 5
+    l2_regime_require_fit_n_for_downweight: bool = True
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -958,6 +966,22 @@ class Layer2AllocationConfig:
                 cls._as_float(params.get("l2_entry_spike_warn_threshold", 0.20), 0.20),
                 0.0,
                 1.0,
+            ),
+            l2_regime_pooled_is_passthrough=bool(
+                params.get("l2_regime_pooled_is_passthrough", _dc.l2_regime_pooled_is_passthrough)
+            ),
+            l2_regime_min_fit_n_floor=int(
+                cls._validate_range(
+                    "l2_regime_min_fit_n_floor",
+                    cls._as_int(
+                        params.get("l2_regime_min_fit_n_floor", _dc.l2_regime_min_fit_n_floor),
+                        _dc.l2_regime_min_fit_n_floor,
+                    ),
+                    0,
+                )
+            ),
+            l2_regime_require_fit_n_for_downweight=bool(
+                params.get("l2_regime_require_fit_n_for_downweight", _dc.l2_regime_require_fit_n_for_downweight)
             ),
         )
 

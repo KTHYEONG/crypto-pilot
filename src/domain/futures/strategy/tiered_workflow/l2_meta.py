@@ -794,6 +794,9 @@ def build_regime_policy_by_fold(
     hard_block_enabled: bool = False,
     block_min_confidence: float = 0.80,
     require_sign_consistency: bool = True,
+    pooled_is_passthrough: bool = False,
+    min_fit_n_floor: int = 5,
+    require_fit_n_for_downweight: bool = True,
 ) -> tuple[tuple[dict[tuple[int, str, str], RegimeCellPolicy], ...], RegimePolicyDiagnostics]:
     """Build fold-local regime policy using fit/cal windows only."""
     if mode == "filter":
@@ -920,9 +923,21 @@ def build_regime_policy_by_fold(
             edge_multiplier = 1.0
             hard_block_eligible = False
             if n_fit < min_n:
-                reason = "insufficient_fit"
+                # B-2: insufficient_fit but good cal → allow
+                if n_fit >= min_fit_n_floor and n_cal >= cal_min_n and cal_lift_bps >= min_cal_lift_bps:
+                    action = "allow"
+                    edge_multiplier = 1.0
+                    reason = "insufficient_fit_but_good_cal"
+                else:
+                    reason = "insufficient_fit"
             elif n_cal < cal_min_n:
-                reason = "insufficient_cal"
+                # B-3: insufficient_cal but good fit → partial downweight
+                if n_fit >= min_n and fit_lift_bps >= min_cal_lift_bps and not require_fit_n_for_downweight:
+                    action = "downweight"
+                    edge_multiplier = downweight_max * 0.8
+                    reason = "insufficient_cal_partial"
+                else:
+                    reason = "insufficient_cal"
             elif require_sign_consistency and not sign_consistent and fit_sign != 0 and cal_sign != 0:
                 reason = "cal_sign_unstable"
                 n_unstable += 1
@@ -959,6 +974,12 @@ def build_regime_policy_by_fold(
             else:
                 reason = "global_unreliable"
 
+            # B-1: pooled passthrough — optional override
+            if pooled_is_passthrough and action == "pooled":
+                action = "allow"
+                edge_multiplier = 1.0
+                reason = "pooled_passthrough"
+
             if mode == "observe":
                 reason = "observe_only"
             if hard_block_eligible:
@@ -981,6 +1002,9 @@ def build_regime_policy_by_fold(
                         "negative_cal_lift",
                         "positive_cal_lift",
                         "neutral",
+                        "pooled_passthrough",
+                        "insufficient_fit_but_good_cal",
+                        "insufficient_cal_partial",
                     ],
                     reason,
                 ),
@@ -1793,6 +1817,9 @@ def build_regime_routing_plan(
     policy_hard_block_enabled: bool = False,
     policy_block_min_confidence: float = 0.80,
     policy_require_sign_consistency: bool = True,
+    policy_pooled_is_passthrough: bool = False,
+    policy_min_fit_n_floor: int = 5,
+    policy_require_fit_n_for_downweight: bool = True,
 ) -> RegimeRoutingPlan:
     """Build the fold-local routing plan used by L2 bucket selection."""
     n_bars = int(np.asarray(aligned.close_2d).shape[0])
@@ -1966,6 +1993,9 @@ def build_regime_routing_plan(
         hard_block_enabled=policy_hard_block_enabled,
         block_min_confidence=policy_block_min_confidence,
         require_sign_consistency=policy_require_sign_consistency,
+        pooled_is_passthrough=policy_pooled_is_passthrough,
+        min_fit_n_floor=policy_min_fit_n_floor,
+        require_fit_n_for_downweight=policy_require_fit_n_for_downweight,
     )
 
     debug_diagnostics: RegimeDebugDiagnostics | None = None
