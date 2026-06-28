@@ -2438,6 +2438,8 @@ def run_tiered_pipeline(
     per_tf_data_maps: dict[str, AlignedMarketData] | None = None,
     probe_manifest: list[dict[str, Any]] | None = None,
     l2_sim_cache: L2SimulationCache | None = None,
+    l2_signal_batch: ValidatedSignalBatch | None = None,
+    l2_awf_folds: tuple[WFFold, ...] | None = None,
 ) -> tuple[Layer1Result, Layer2Result | None, Layer3Result | None]:
     """3-Layer 티어드 파이프라인 실행.
 
@@ -2651,12 +2653,15 @@ def run_tiered_pipeline(
     _l2_expand = int(l2_params.get("l2_is_expansion_bars", 0))
     _l2_start_idx = max(0, _l1_end_bars - _l2_expand)
     _t_fold_build = time.perf_counter()
-    awf_folds = build_l2_simulation_folds(
-        n_bars=len(aligned.datetimes),
-        l2_start_idx=_l2_start_idx,
-        holdout_start_idx=ho_start_idx_l2,
-        cfg=cfg,
-    )
+    if l2_awf_folds is not None:
+        awf_folds = l2_awf_folds
+    else:
+        awf_folds = build_l2_simulation_folds(
+            n_bars=len(aligned.datetimes),
+            l2_start_idx=_l2_start_idx,
+            holdout_start_idx=ho_start_idx_l2,
+            cfg=cfg,
+        )
     logger.debug(
         "[L2] awf_fold_build took=%.4fs n_folds=%d",
         time.perf_counter() - _t_fold_build,
@@ -2700,24 +2705,25 @@ def run_tiered_pipeline(
     _l2_multi_tf: bool = bool(getattr(cfg, "l2_multi_tf_enabled", True))
     if os.environ.get("L2_MULTI_TF", "") in ("0", "false", "False"):
         _l2_multi_tf = False
-    if _l2_multi_tf and l1.artifacts_by_tf:
-        l2_signal_batch = predict_layer1_signals_multi_tf(
-            artifacts_by_tf=l1.artifacts_by_tf,
-            candidate_events=labeled_events,
-            aligned=aligned,
-            start_idx=_l2_start_idx,
-            end_idx=ho_start_idx_l2,
-            cfg=cfg,
-        )
-    else:
-        l2_signal_batch = predict_layer1_signals(
-            artifact=l1.inference_artifact,
-            candidate_events=labeled_events,
-            aligned=aligned,
-            start_idx=_l2_start_idx,
-            end_idx=ho_start_idx_l2,
-            cfg=cfg,
-        )
+    if l2_signal_batch is None:
+        if _l2_multi_tf and l1.artifacts_by_tf:
+            l2_signal_batch = predict_layer1_signals_multi_tf(
+                artifacts_by_tf=l1.artifacts_by_tf,
+                candidate_events=labeled_events,
+                aligned=aligned,
+                start_idx=_l2_start_idx,
+                end_idx=ho_start_idx_l2,
+                cfg=cfg,
+            )
+        else:
+            l2_signal_batch = predict_layer1_signals(
+                artifact=l1.inference_artifact,
+                candidate_events=labeled_events,
+                aligned=aligned,
+                start_idx=_l2_start_idx,
+                end_idx=ho_start_idx_l2,
+                cfg=cfg,
+            )
     logger.log(
         PERF,
         "[PERF] predict_layer1_signals(L2) multi_tf=%s took=%.4fs",

@@ -1160,16 +1160,16 @@ class TestLayer2Selection(unittest.TestCase):
         assert score.entry_spike_penalty == pytest.approx(0.15)
         assert score.score == pytest.approx(expected)
 
-    def test_assert_selection_replay_parity_raises_on_metric_mismatch(self) -> None:
+    def test_assert_selection_replay_parity_returns_false_on_mismatch(self) -> None:
         replay = SimpleNamespace(cagr_hybrid=0.22, mdd_hybrid=0.09, fold_pass_ratio=0.67, trade_count=80)
         final = SimpleNamespace(cagr_hybrid=0.08, mdd_hybrid=0.15, fold_pass_ratio=0.34, trade_count=120)
 
-        with pytest.raises(ValueError, match="replay/final parity"):
-            _assert_selection_replay_parity(
-                replay_evaluation=replay,
-                final_evaluation=final,
-                tolerance=1e-6,
-            )
+        result = _assert_selection_replay_parity(
+            replay_evaluation=replay,
+            final_evaluation=final,
+            tolerance=1e-6,
+        )
+        assert result is False
 
     @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
     @patch("src.domain.futures.strategy.tiered_workflow.selection.layer2_constraints_from_trial")
