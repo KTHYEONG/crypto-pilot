@@ -184,3 +184,8 @@ ai_read_policy: when_related
 - **Delta:** `_run_awf_simulation`에 `sim_origin` 선택적 파라미터 추가. 반환 직전 DEBUG 레벨 `[AWF-SIM-FP]` 로그 블록 삽입: rets MD5 fingerprint(12 hex), fold별 OOS bars, fold_ret_lens, config fingerprint(8 hex), sum_logret, cache/signal/aligned 객체 ID. `evaluate_l2_trial` → `sim_origin="champion_eval"`, `run_l2_awf` → `sim_origin="final_deploy"` 전달.
 - **Rationale:** champion-eval과 final-deploy 경로가 동일 입력(동일 trades, fold_pass)에도 CAGR 0.1847 vs 0.0612로 상이한 원인을 격리하기 위해, `_run_awf_simulation` 내부 fold 분할/누적 처리의 차이를 1-line DEBUG 로그로 계측. rets_fp 동일 여부에 따라 fold 윈도우 분할 차이/객체 분기/config 분기 등 근본 원인을 확정 가능.
 - **Key Verification:** 5개 단위 테스트(S1~S5) 통과. L1: ruff + mypy clean. 기존 호출부(sim_origin 기본값="unknown") backward compat 유지.
+
+## [2026-06-28] L2 AWF Content Fingerprint Instrumentation (Parity Deep Dive)
+- **Delta:** `_run_awf_simulation`에 `_content_hash_array`/`_content_hash_dataclass`/`_content_hash_cache` 3종 순수 헬퍼 추가. 기존 `[AWF-SIM-FP]` 직후 `[AWF-SIM-FP2]` 로그 추가: cache 내용해시(cache_ch, 배열 tobytes md5[:12]), config 해시(cfg_ch, dataclass field 순회 md5[:10]), caps 해시(caps_ch), per-fold rets fingerprint(각 fold md5[:8]), deploy_lev.
+- **Rationale:** 1차 `[AWF-SIM-FP]` 로그에서 `cfg_fp`, `cache_id`, `signal_id`, `aligned_bars`가 모두 동일했으나 `rets_fp`가 다른 현상이 관측됨. 사각지대 3종: ① `cache_id`는 객체 identity만 검증(내용/in-place 변형 미검출) ② `cfg_fp`가 repr truncate(`...`) 충돌 가능 ③ `caps` 전혀 미계측. 내용 기반 해시로 1회 재실행에 4갈래(cache/config/caps/sim 내부 hidden-state) 중 원인 확정 가능.
+- **Key Verification:** 11개 단위 테스트(S1~S6) 통과. L1: ruff + mypy clean. 기존 계측 및 로직 무변경.

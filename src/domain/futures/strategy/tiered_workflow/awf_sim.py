@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re as _re
 from collections import defaultdict
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import TYPE_CHECKING, Literal, cast
 
 import numba
@@ -1333,6 +1333,56 @@ def _compute_mtf_rebalance_stats(
     return n_symbols, n_multi, n_conflict, dilution_sum, edge_surr
 
 
+def _content_hash_array(arr: object) -> str:
+    """배열 내용 기반 md5 해시. np.ndarray는 tobytes, 그 외는 repr."""
+    data = np.ascontiguousarray(arr).tobytes() if isinstance(arr, np.ndarray) else repr(arr).encode()
+    return hashlib.md5(data, usedforsecurity=False).hexdigest()[:10]
+
+
+def _content_hash_dataclass(
+    obj: object,
+    *,
+    array_fields: frozenset[str] = frozenset(),
+) -> str:
+    """dataclass 내용 기반 md5 해시. 배열 필드는 tobytes, 스칼라는 repr."""
+    if obj is None or not is_dataclass(obj):
+        return "na"
+    parts: list[bytes] = []
+    for f in fields(obj):
+        val = getattr(obj, f.name)
+        if f.name in array_fields and isinstance(val, np.ndarray):
+            part = np.ascontiguousarray(val).tobytes()
+        else:
+            part = repr(val).encode()
+        parts.append(part)
+    combined = b"|".join(parts)
+    return hashlib.md5(combined, usedforsecurity=False).hexdigest()[:10]
+
+
+_CACHE_ARRAY_FIELDS: frozenset[str] = frozenset({
+    "vol_matrix_2d", "tradeable_mask_2d", "hurdle_2d", "funding_2d",
+    "beta_1d", "expected_gross_bps_2d", "expected_net_bps_2d",
+    "holding_bars_2d", "side_2d", "quality_weight_2d", "signal_mask_2d",
+    "regime_code_1d",
+})
+
+
+def _content_hash_cache(cache: object) -> str:
+    """L2SimulationCache 내용 기반 md5 해시."""
+    if not is_dataclass(cache):
+        return "na"
+    parts: list[bytes] = []
+    for f in fields(cache):
+        val = getattr(cache, f.name)
+        if f.name in _CACHE_ARRAY_FIELDS and isinstance(val, np.ndarray):
+            part = np.ascontiguousarray(val).tobytes()
+        else:
+            part = repr(val).encode()
+        parts.append(part)
+    combined = b"|".join(parts)
+    return hashlib.md5(combined, usedforsecurity=False).hexdigest()[:12]
+
+
 def _run_awf_simulation(
     *,
     cache: L2SimulationCache,
@@ -2603,6 +2653,21 @@ def _run_awf_simulation(
             float(np.sum(np.log1p(np.clip(rets_arr, -0.999, None)))),
             cfg_fp, id(cache) & 0xffffff, id(signal_batch) & 0xffffff,
             int(aligned.close_2d.shape[0]),
+        )
+
+        cache_ch = _content_hash_cache(cache)
+        cfg_ch = _content_hash_dataclass(config)
+        caps_ch = _content_hash_dataclass(caps)
+        per_fold_fp = [
+            hashlib.md5(np.asarray(fr, dtype=np.float64).tobytes(), usedforsecurity=False).hexdigest()[:8]
+            for fr in fold_rets_hybrid
+        ]
+        deploy_lev = float(getattr(config, "l2_deploy_leverage", 1.0))
+        logger.debug(
+            "[AWF-SIM-FP2] origin=%s cache_ch=%s cfg_ch=%s caps_ch=%s "
+            "per_fold_fp=%s deploy_lev=%.4f portfolio_nav=%s",
+            sim_origin, cache_ch, cfg_ch, caps_ch, per_fold_fp,
+            deploy_lev, portfolio_nav,
         )
 
     return _AwfSimResult(
