@@ -11,11 +11,15 @@ def assert_selection_replay_parity(
     replay_evaluation: Any,
     final_evaluation: Any,
     tolerance: float = 1e-8,
+    gate: bool = False,
 ) -> bool:
     """replay/final parity diagnostic. Returns True if within tolerance.
 
     No longer raises ValueError — logs warning on mismatch and returns False.
     Caller decides whether to gate on parity.
+
+    When gate=True, mismatch causes the caller to block the champion
+    via ``blocker_reason="parity_divergence"``.
     """
     metric_names = (
         ("cagr_hybrid", "cagr"),

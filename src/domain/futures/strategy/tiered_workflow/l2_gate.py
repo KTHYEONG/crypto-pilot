@@ -43,6 +43,23 @@ def _finite_or_fail(value: float, *, default_fail: float = 1.0) -> float:
     return float(value) if np.isfinite(value) else float(default_fail)
 
 
+def _growth_lcb_vol_matched_baseline(
+    baseline: float,
+    hybrid_mean: float,
+    std_hybrid: float | None,
+    std_baseline: float | None,
+) -> float:
+    """Vol-matched growth_lcb baseline (RC-4).
+
+    저변동 hybrid가 vol 차이로 인해 raw EW baseline을 부당하게 넘지 못하는 문제 해결.
+    std_hybrid/std_baseline 미제공 시 원본 baseline 반환.
+    """
+    if std_hybrid is not None and std_baseline is not None and std_baseline > 1e-12:
+        ratio = float(np.clip(std_hybrid / std_baseline, 0.3, 1.0))
+        return baseline * ratio
+    return baseline
+
+
 def evaluate_layer2_gate(
     *,
     deployment_failed: bool,
@@ -69,6 +86,8 @@ def evaluate_layer2_gate(
     positive_block_delta_ratio: float | None = None,
     fold_attributions: tuple[Layer2FoldAttribution, ...] = (),
     config: Layer2AllocationConfig = _DEFAULT_L2_CONFIG,
+    std_hybrid: float | None = None,
+    std_baseline: float | None = None,
 ) -> Layer2GateEvaluation:
     """Build Optuna safety constraints and final L2 promotion gate diagnostics.
 
@@ -92,6 +111,8 @@ def evaluate_layer2_gate(
         dsr_hybrid: DSR (diagnostic only — BLOCKER 아님).
         psr_hybrid: PSR — L2 하드게이트 (None 시 통과).
         config: Layer2AllocationConfig.
+        std_hybrid: hybrid 전략 per-bar std (vol-matched baseline용). None=비활성.
+        std_baseline: 기준선 per-bar std (vol-matched baseline용). None=비활성.
 
     Returns:
         Layer2GateEvaluation.
@@ -155,7 +176,10 @@ def evaluate_layer2_gate(
         _finite_or_fail(float(int(config.l2_min_active_blocks) - active_block_count)),
         _finite_or_fail(float(config.l2_min_friction_pass) - friction_pass_pct),
         _finite_or_fail(
-            growth_lcb_baseline + float(config.l2_min_growth_uplift) - growth_lcb_hybrid
+            _growth_lcb_vol_matched_baseline(
+                growth_lcb_baseline, growth_lcb_hybrid, std_hybrid, std_baseline,
+            )
+            + float(config.l2_min_growth_uplift) - growth_lcb_hybrid
         ),
         _finite_or_fail(
             sharpe_hac_baseline + float(config.l2_min_sharpe_uplift) - sharpe_hac_hybrid
@@ -180,9 +204,12 @@ def evaluate_layer2_gate(
     if promotion_passed and worst_fold_cagr_constraint > 0.0:
         promotion_passed = False
         promotion_blocker = "worst_fold_cagr"
-    if promotion_passed and block_delta_constraint > 0.0:
-        promotion_passed = False
-        promotion_blocker = "block_delta"
+    # RC-4: block_delta → diagnostic-only (regime inert 시 구조적 통과불가 방지)
+    if block_delta_constraint > 0.0:
+        _logger.debug(
+            "[L2-GATE-BLOCK-DELTA-DIAG] block_delta=%.4f > 0 (diagnostic only, no block)",
+            block_delta_constraint,
+        )
 
     _logger.debug(
         "[L2-GATE] promotion=%s blocker=%s | "

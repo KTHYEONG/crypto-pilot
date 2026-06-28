@@ -135,6 +135,8 @@ def calibrate_deployment_leverage(
     l_hard_cap: float = 20.0,
     exchange_leverage_cap: float | None = None,
     l_floor: float = 1.0,
+    oos_budget_blend: float = 0.5,
+    oos_floor_cap: float = 4.0,
 ) -> tuple[float, str, float]:
     """히스토리컬 수익률에서 배치 레버리지 L*를 결정론적으로 산출.
 
@@ -143,6 +145,10 @@ def calibrate_deployment_leverage(
     실제 binding이 된다 → l_hard_cap=20.0으로 완화해도 budget이 진짜 제약.
     `mdd_margin=0.30` / `cvar_margin=0.20` 안전여유가 OOS-fit 분포 이격 완충.
     `exchange_leverage_cap`으로 거래소 실행가능 notional 상한 제한(trading_bot.md §4).
+
+    RC-2: fit/OOS 역전 시 OOS 실현 리스크 예산을 직접 사용하도록 blended budget L*
+    도입. `oos_budget_blend`로 fit-OOS 혼합비 조절, `oos_floor_cap`으로 OOS-floor
+    상한 파라미터화(기존 하드코딩 2.0 대체).
 
     Args:
         fit_rets: 캘리브레이션용 per-bar simple return 배열 [T].
@@ -158,11 +164,14 @@ def calibrate_deployment_leverage(
             Binance perp 기본 10x. L* > cap 이면 "exchange_cap" binding으로 차단.
         l_floor: L* 하한. 기본 1.0(기존 동작 보존). <1.0 허용 시 100%-vol book을
             MDD 예산까지 de-lever 가능(RC-5 수정 동반 필수).
+        oos_budget_blend: fit-OOS blended budget ratio. 0=pure fit, 1=pure OOS.
+            기본 0.5. RC-2 look-ahead 완충.
+        oos_floor_cap: OOS-floor L* 상한. 기본 4.0 (기존 하드코딩 2.0 대체).
 
     Returns:
         (L*, binding_constraint, cross_valid_MDD_at_L) — cross_valid_MDD_at_L는
         oos_rets가 제공된 경우에만 실제 계산값. 미제공 시 0.0 반환.
-        binding ∈ {"mdd","cvar","hard_cap","exchange_cap","none"}.
+        binding ∈ {"mdd","cvar","hard_cap","exchange_cap","oos_blend","none"}.
     """
     arr = np.asarray(fit_rets, dtype=np.float64)
     if arr.size < 2:
@@ -188,17 +197,15 @@ def calibrate_deployment_leverage(
     l_optimal, binding = min(candidates, key=lambda x: x[0])
     l_final = max(l_optimal, float(l_floor))
 
-    # OOS 크로스 검증 — 제공된 oos_rets로 L*의 OOS MDD 계산
+    # OOS 크로스 검증 + RC-2 blended budget (fit/OOS 역전 시 OOS 예산 직접 사용)
     cross_valid_mdd: float = 0.0
     if oos_rets is not None:
         oos_arr = np.asarray(oos_rets, dtype=np.float64)
         if oos_arr.size >= 2:
             cross_valid_mdd = _mdd_at_leverage(oos_arr, l_final)
-            _oos_mdd_vol1 = _mdd_at_leverage(oos_arr, 1.0)
-            _fit_mdd_vol1 = _mdd_at_leverage(arr, 1.0)
-            _inflation_ratio = (
-                _oos_mdd_vol1 / _fit_mdd_vol1 if _fit_mdd_vol1 > 1e-12 else float("inf")
-            )
+            _oos_mdd_v1 = _mdd_at_leverage(oos_arr, 1.0)
+            _fit_mdd_v1 = _mdd_at_leverage(arr, 1.0)
+            _mdd_ratio = _oos_mdd_v1 / _fit_mdd_v1 if _fit_mdd_v1 > 1e-12 else 1.0
             _fit_cagr_v1 = _annualized_cagr_from_returns(arr, bars_per_year=2190)
             _oos_cagr_v1 = _annualized_cagr_from_returns(oos_arr, bars_per_year=2190)
             _fit_sharpe_v1 = _sharpe_from_returns(arr, bars_per_year=2190)
@@ -208,32 +215,49 @@ def calibrate_deployment_leverage(
                 "MDD_ratio=%.2f | OOS_deployed_MDD=%.6f (cap=%.4f) | "
                 "fit_CAGR_v1=%.4f fit_sharpe_v1=%.4f OOS_CAGR_v1=%.4f OOS_sharpe_v1=%.4f",
                 l_final, binding,
-                _fit_mdd_vol1, _oos_mdd_vol1, _inflation_ratio,
+                _fit_mdd_v1, _oos_mdd_v1, _mdd_ratio,
                 cross_valid_mdd, mdd_cap,
                 _fit_cagr_v1, _fit_sharpe_v1, _oos_cagr_v1, _oos_sharpe_v1,
             )
-            # OOS-based floor: if OOS is significantly safer than fit, raise floor
-            _oos_mdd_v1 = _mdd_at_leverage(oos_arr, 1.0)
-            _oos_safe_l = float(mdd_cap) * 0.70 / max(float(_oos_mdd_v1), 0.01)
-            _oos_floor = min(2.0, max(1.0, _oos_safe_l))
-            if _oos_floor > l_final:
-                _prev_l = l_final
-                l_final = _oos_floor
-                _deployed_mdd = _mdd_at_leverage(oos_arr, l_final)
-                if _deployed_mdd > float(mdd_cap) * 0.95:
-                    l_final = _prev_l
-                    _logger.debug(
-                        "[L2-OOS-FLOOR] OOS_floor=%.4f exceeds MDD cap → reverted to L*=%.4f",
-                        _oos_floor, l_final,
-                    )
-                else:
-                    _logger.debug(
-                        "[L2-OOS-FLOOR] Raised L* from %.4f to %.4f (oos_mdd_v1=%.4f)",
-                        _prev_l, l_final, _oos_mdd_v1,
-                    )
-                    cross_valid_mdd = _deployed_mdd
+            # RC-2: fit/OOS 역전 시 blended budget (기존 매직캡 min(2.0, ...) 대체)
+            if _mdd_ratio < 1.0:
+                _mdd_target_oos = mdd_cap * (1.0 - mdd_margin * 0.5)
+                l_oos = _bisect_max_leverage(oos_arr, _mdd_at_leverage, _mdd_target_oos, float(l_floor), l_search_hi)
+                l_blend = l_final * (1.0 - oos_budget_blend) + l_oos * oos_budget_blend
+                _l_candidate = min(l_blend, oos_floor_cap)
+                if _l_candidate > l_final:
+                    _prev_final = l_final
+                    l_final = _l_candidate
+                    binding = "oos_blend"
+                    # 불변식: OOS deployed MDD ≤ mdd_cap*(1-mdd_margin*0.5)
+                    _deployed_mdd = _mdd_at_leverage(oos_arr, l_final)
+                    _oos_invariant = mdd_cap * (1.0 - mdd_margin * 0.5)
+                    if _deployed_mdd > _oos_invariant:
+                        l_final = _prev_final
+                        binding = "oos_blend"
+                        _logger.debug(
+                            "[L2-OOS-BLEND] L_candidate=%.4f exceeds OOS invariant %.4f "
+                            "→ reverted to L*=%.4f",
+                            _l_candidate, _oos_invariant, l_final,
+                        )
+                    else:
+                        cross_valid_mdd = _deployed_mdd
+                        _logger.debug(
+                            "[L2-OOS-BLEND] Raised L* from %.4f to %.4f (blend=%.2f, "
+                            "oos_mdd_v1=%.4f, L_oos=%.4f, OOS_deployed_MDD=%.4f ≤ %.4f)",
+                            _prev_final, l_final, oos_budget_blend,
+                            _oos_mdd_v1, l_oos, cross_valid_mdd, _oos_invariant,
+                        )
         else:
             _logger.debug("[L2-CALIB-CV] oos_rets size<2, skipping cross-validation")
+
+    # 최종: clip(L*, l_floor, min(l_hard_cap, exchange_cap)) — spec Algorithm §6
+    if exchange_leverage_cap is not None and exchange_leverage_cap > 0.0 and l_final > exchange_leverage_cap:
+        l_final = exchange_leverage_cap
+        binding = "exchange_cap"
+    elif l_final > l_hard_cap:
+        l_final = l_hard_cap
+        binding = "hard_cap"
 
     return l_final, binding, cross_valid_mdd
 
