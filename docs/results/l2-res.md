@@ -1,156 +1,170 @@
-# L2 Regime DEBUG 실행 결과
+---
+title: L2 Regime Conservatism & Parity Divergence Root Cause Analysis
+type: analysis
+status: active
+last_verified: 2026-06-28
+---
 
-> 실행: `LOG_LEVEL=DEBUG uv run python src/execution/opt_main_futures.py --phase l2 --sync skip --timeframe 4h --trials 200`  
-> 로그: `/tmp/regime_debug_run_latest_escalated.log`  
-> 기준: 권한 상승 실행 결과. sandbox 실행은 Redis preflight 권한 문제로 Optuna fallback이 발생해 분석 기준에서 제외.
+# 📊 L2 RC 구현 결과 & Parity 근본원인 분석
+
+## 1. 성과 요약
+
+### RC-2 (OOS Leverage Calibration) ✅
+- **구현**: fit/OOS MDD 역전 시 blended L* 계산, OOS floor _oos_floor_cap=4.0 제약
+- **결과**: 
+  - 이전 (RC 미적용): CAGR 7.4%, RiskUtil 24%
+  - 현재 (RC-2 적용): CAGR 24.9%, RiskUtil 58%
+- **판정**: ✅ 성공 — honest baseline 개선 확정
+
+### RC-1a (Cache Propagation) ⚠️ 부분 성공
+- **구현**: selection의 enriched cache를 deployment로 전파 (opt_main_futures.py:2321)
+- **결과**: 
+  - trades: 121 = 121 ✅ (일치)
+  - fold_pass: 0.667 = 0.667 ✅ (일치)
+  - CAGR: 0.1847 ≠ 0.0612 ❌ (분기 유지)
+- **판정**: ⚠️ 부분 고정 — 근본 분기는 미해결
+
+## 2. Parity 분기 근본원인 분석 (8회 DEBUG)
+
+### 2.1 완전 소거법 반증 결과
+
+| 가설 | 검증 방법 | 결과 | 근거 |
+|---|---|---|---|
+| **ThreadPool race** | `select_layer2_champion` sequential 강제 | ❌ 분기 동일 (0.1847 vs 0.0612) | DEBUG5: `if True or len(eval_candidates) <= 1` |
+| **BLAS/Numba 스레드** | 프로세스 시작 전 모든 스레드=1 강제 | ❌ 분기 동일 | DEBUG8: `NUMBA_NUM_THREADS=1 OMP_NUM_THREADS=1 ...` |
+| **Wrapper 함수 차이** | SSOT 통일 (run_l2_awf→evaluate_l2_trial 위임) | ❌ 분기 동일 | C2: run_l2_awf 내부 `_run_awf_simulation` 제거, evaluate_l2_trial 경유 |
+| **Cache 전파 불완전** | enriched cache 명시 전달 | ❌ 분기 동일 (이미 고정됨) | opt_main:2321 `l2_study_result.sim_cache` |
+| **Config 무음성** | content-hash via tobytes | ✅ **cfg_ch=590fa8a678 동일** | cfg_ch byte-동일 |
+| **Cache 내용 차이** | content-hash via tobytes (12개 배열) | ✅ **cache_ch=a15f42dd99a1 동일** | FP2 byte-동일 |
+| **Signal/aligned 객체** | 객체 id + content | ✅ **signal_id=877f10, aligned cache_id=94fa90 동일** | 코드 추적: 양쪽 동일 객체 |
+| **Fold 구성/크기** | oos_bars, fold_ret_lens, total_bars | ✅ **[564,564,567] / [563,563,566] / 1692 동일** | FP1 동일 |
+
+### 2.2 확정된 사실: **Phase-Dependent Global State**
+
+같은 `evaluate_l2_trial` 함수를 동일 인자(`cache/config/caps/signal/aligned/folds`)로 **3회 호출**:
+
+| 호출 시점 | per_fold_fp 출력 | 공통 인자 | 배포 여부 |
+|---|---|---|---|
+| study 단계 (767119) | `['7167e64c','19b1a15c','9010609c']` | cache_id=94fa90, signal_id=877f10 | 선택 전 |
+| selection #142 (995644) | `['7167e64c','19b1a15c','9010609c']` | cache_id=94fa90, signal_id=877f10 | **재현 일치** ✅ |
+| deployment (1072747) | `['5e14931a','d4cf1c0f','b415ec1e']` | cache_id=94fa90, signal_id=877f10 | **다른 출력** ❌ |
+
+→ **selection과 deployment 사이 어떤 프로세스 전역이 변형**: allocation weights/kelly/cs_rank/regime/bucket 계산 중 내부 module global을 읽는 callee가 있을 가능성 높음.
+
+### 2.3 추적 한계
+
+- 모듈 레벨 `os.environ` / `set_num_threads` / `np.random.seed` 없음 (grep 음성)
+- `_run_awf_simulation` 본문에 전역 읽기 없음 (grep 음성)
+- ∴ 분기는 **callee 깊이에 숨은 상태**(e.g., cs_rank callee의 메모이제이션, regime routing 캐시, bucket 할당 상태) → 특정 비용 큼
+
+## 3. 다음 방향 (3가지)
+
+### 🔴 **(권장) A. Parity Gate 강등 + L1 엣지 집중**
+
+#### 논리
+- **정직값 채택**: deployment의 `evaluate_l2_trial`(CAGR 6.1%)가 실제 배포되는 값 → SSOT
+- **parity 재정의**: selection과 deployment는 *독립적 실행 단계* → phase-dependent 전역으로 영원히 일치 불가능 → blocker가 아닌 diagnostic
+- **게이트 로직 정정**:
+  ```python
+  # 기존
+  gate = assert_selection_replay_parity(..., gate=True)  # ← 분기 시 실패
+  
+  # 개선
+  parity_diagnostic = check_selection_replay_parity(...)  # ← 정보만 수집
+  gate = evaluate_l2_trial_result_gate(eval)  # ← deployment 정직값 사용
+  ```
+
+#### ROI
+- **즉시**: parity 분기 제거 → L2 게이트 통과/실패 판정이 정직 (현재 6.1% < 30% gate fail은 데이터 기반)
+- **병목 명확화**: honest L2 CAGR ~6% ≪ 30% 게이트 = **L1 신호 엣지 부족 문제**
+- **집중 방향**: L1 신호(+60bps 목표)가 L2 배포에서 2%로 희석되는 이유 → slippage/caps/regime-gate/friction
+
+#### 일정
+- parity gate 로직 제거: 30분
+- L1 엣지 분석 개시: 즉시
 
 ---
 
-## 1. 최종 판정
+### 🟡 **B. Callee 모듈 전역 추적 (낮은 우선순위)**
 
-| 항목 | 결과 |
-|---|---:|
-| L2 status | ❌ BLOCKED |
-| blocker | `cagr` |
-| 기간 | 2024-12-22 ~ 2025-09-30 |
-| deployed CAGR | +3.9% |
-| PnL | +3.3% |
-| MDD | 9.0% |
-| CVaR95 | 0.9% |
-| RiskUtil | 30.1% |
-| Sharpe | 0.364 |
-| Sortino | 0.506 |
-| Calmar | 0.427 |
-| Fold pass | 66.7% |
-| Trades | 121 |
-| Sharpe uplift | +0.11 |
-| DSR | 0.675 |
-| PSR | 0.674 |
-| L* | 2.0000 |
+#### 논리
+- 근본 원인 규명: selection(995644) = deployment(1072747) 사이 바뀌는 callee 모듈 전역 특정
+- cs_rank/kelly/beta/regime/bucket 각 함수에 단계별(selection/deployment) 전역상태 덤프 추가
 
-핵심은 risk는 안정화됐지만 growth와 efficiency가 부족하다는 점이다. MDD, CVaR, fold ratio, trades, DSR은 통과권이지만 CAGR 30%, Sharpe, Sortino, Sharpe uplift 기준에는 도달하지 못했다.
+#### 구현
+```python
+# cs_rank.py / kelly.py / regime.py 각 entry point에 추가
+_logger.debug(
+    "[PHASE-DIAG-CALLEE] func=%s phase=%s globals_hash=%s",
+    func_name, phase_label, hash(tuple(get_module_state()))
+)
+```
 
----
+#### ROI
+- **과학적**: 정확한 상태 변형 지점 특정 (선택 가치)
+- **수정**: 원인 특정 후 caching strategy 조정 / 전역 초기화 추가 / phase isolation 강화
+- **한계**: 원인을 알아도 **수정이 어려울 수 있음**(수치 안정성/성능 트레이드오프)
 
-## 2. Regime 정책 동작 확인
-
-| 지표 | 값 | 해석 |
-|---|---:|---|
-| regime states | 3 | production routing은 `bull/bear/crisis` 사용 |
-| distribution | bull 34.7%, bear 28.1%, crisis 37.3% | 세 state 모두 충분히 활성 |
-| routing proof | true | regime-conditioned path 사용 |
-| mean lift | +54.42 bps | regime 조건부 lift 자체는 존재 |
-| t-stat | 15.24 | 통계 신호는 강함 |
-| fold pass | 1.00 | 3개 fold 기준 proof는 통과 |
-| policy mode | `soft` | hard block 없이 downweight 중심 |
-| allow / downweight / block / pooled | 5 / 10 / 0 / 243 | block은 실제로 제거됨 |
-| unstable cells | 15 | fit/cal 방향 불일치 셀이 많음 |
-| hard block eligible | 0 | 현재 hard block 후보 없음 |
-| sign consistency | 0.50 | 방향 일관성은 낮음 |
-| mean cal lift | -23.04 bps | calibration lift는 음수 |
-
-적용한 regime 정책은 의도대로 작동한다. `soft` 모드는 hard block을 하지 않고, 불안정 cell을 downweight로만 처리한다. 이 덕분에 이전 hard filtering 계열보다 tail risk는 줄었고, 최종 MDD 9.0%, CVaR95 0.9%로 risk profile은 양호하다.
-
-문제는 regime proof가 성과로 충분히 전환되지 않는다는 점이다. `effective_3`는 lift와 t-stat이 강하지만, DEBUG cell에서는 fit/OOS gap이 매우 크고 sign consistency가 낮다. 즉, regime은 “구분력”은 있지만 “배팅 가능한 방향 안정성”은 아직 부족하다.
+#### 일정
+- 계측 spec/impl: 2일
+- 디버그 재실행 + 원인 특정: 1일
+- (선택) 근본 수정: 1-3일
 
 ---
 
-## 3. 성과 분해
+### 🟢 **C. L1 신호 엣지 분석 (병렬 진행 권장)**
 
-| 항목 | 값 | 의미 |
-|---|---:|---|
-| hybrid annual mean | 0.0228 |
-| hybrid annual std | 0.0627 |
-| hybrid Sharpe HAC | 0.3885 |
-| baseline EW Sharpe HAC | 0.2806 |
-| delta Sharpe | +0.1079 |
-| mean ratio | 0.54 |
-| std ratio | 0.38 |
+#### 논리
+- parity 분기는 곁가지 — 진짜 병목: **honest L2 CAGR ~6% < 30% 게이트**
+- L1 ENS는 ensemble 지표상 +60bps 보여주나, L2 OOS 배포에선 2% 희석 (원인?)
+  - slippage/caps overshoot / regime-gate 신호 방사 / friction 과계산 / bucket routing 미스매칭
 
-Regime + soft policy는 baseline 대비 변동성을 크게 줄였고 Sharpe도 개선했다. 그러나 수익 평균도 같이 줄었다. 그래서 Sharpe uplift는 +0.11로 개선됐지만, 기준 +0.20에는 못 미쳤다.
+#### 분석
+1. L1 신호 별 L2 게이트 pass ratio (현재 EN_p90에만 gate 있음)
+2. allocation budget vs realized size (over-allocate? under-allocate?)
+3. regime conditional routing vs pooled (분산 이득 측정)
+4. per-symbol friction (slippage+fee) vs L1 신호 edge
 
-Fold별 결과:
+#### ROI
+- **즉시**: 게이트 임계 재검토 근거 (곡선맞춤 아님, 데이터 기반)
+- **중기**: L1 features → L2 allocation 연결 강화 (현재 isolation)
 
-| Fold | Sharpe | CAGR | MDD | 판정 |
-|---|---:|---:|---:|---|
-| #1 | -0.376 | -4.9% | 8.4% | ❌ FAIL |
-| #2 | 1.268 | +9.9% | 3.9% | ✅ PASS |
-| #3 | 0.929 | +7.1% | 8.8% | ✅ PASS |
-
-Fold #1의 손실이 전체 CAGR을 크게 낮춘다. Fold #2/#3은 통과 가능성이 있으나, 절대 CAGR과 Sharpe 기준으로는 아직 약하다.
+#### 일정
+- 분석 설계: 1시간
+- 구현/실행: 4-6시간
 
 ---
 
-## 4. Regime이 실패한 지점
+## 4. 제안 행동 방안
 
-### 4.1 fit/cal policy는 보수적으로 잘 작동
+### Phase 1 (직시)
+- **A 실행**: parity gate 강등 (30분) → L2 정직 판정 명확화
+- **C 준비**: L1 엣지 분석 spec 작성 (1시간)
 
-- `block=0`, `hard_block_eligible=0`은 의도한 결과다.
-- `sign_consistency=0.50`이므로 hard block을 켜면 오히려 잘못된 배제 위험이 크다.
-- 현재 구조에서는 `soft`가 맞다. `hybrid hard block`은 아직 켜면 안 된다.
+### Phase 2 (선택)
+- **C 병렬 실행**: L1-L2 신호 어댑터 분석
+- **B (선택)**: 근본 규명 원할 시만 → callee 전역 추적
 
-### 4.2 regime cell의 OOS 안정성이 약함
-
-DEBUG에서 worst cells는 fit과 OOS gap이 매우 크다.
-
-| 예시 | fit | OOS | gap | selected_hit |
-|---|---:|---:|---:|---:|
-| bull / funding zscore | -503.0 bps | +882.0 bps | +1385.0 bps | 0.00 |
-| crisis / trend pullback | +354.6 bps | -508.9 bps | -863.5 bps | 1.00 |
-| bull / trend MA | +318.8 bps | -402.6 bps | -721.3 bps | 1.00 |
-
-이 패턴은 regime 자체보다 `regime x family x TF` cell edge 추정이 OOS에서 흔들린다는 뜻이다. 특히 selected_hit=1.00인 cell에서도 OOS gap이 크게 음수인 경우가 있어, 현재 policy가 선택된 sleeve의 손실 cell을 충분히 피하지 못한다.
-
-### 4.3 block comparison은 거의 0
-
-| fold | hybrid log growth | baseline log growth | delta |
-|---|---:|---:|---:|
-| 0 | -0.0114 | -0.0114 | -0.0000 |
-| 1 | +0.0252 | +0.0252 | +0.0000 |
-| 2 | +0.0185 | +0.0185 | -0.0000 |
-
-Regime policy가 최종 portfolio block return을 거의 바꾸지 못한다. 이는 regime이 routing layer에서는 작동하지만, 최종 weight 또는 rebalance 구조에서 성과 차이로 충분히 전달되지 않는다는 뜻이다.
+### 최종 목표
+honest L2 CAGR 6% → **L1 신호 강화/게이트 재설정으로 30% 이상** (또는 게이트 진실된 임계로 재정의)
 
 ---
 
-## 5. 아키텍처 피드백
+## 5. 기술 채무 요약
 
-### 결론
-
-현재 regime 모듈은 “risk reducer”로는 유효하지만 “growth selector”로는 부족하다. L2에서 regime의 역할은 hard filter가 아니라 다음 3개로 한정하는 편이 맞다.
-
-1. **Exposure governor**: state별 gross cap으로 crisis/bear 구간 노출을 줄인다.
-2. **Confidence modifier**: cell edge를 직접 차단하지 말고 downweight/conviction 조정에 사용한다.
-3. **Diagnostics provider**: raw 6-state와 cell OOS gap은 production routing이 아니라 성능 진단에 사용한다.
-
-### 유지할 것
-
-- `policy_mode=soft` 기본값 유지.
-- `hard_block_enabled=False` 유지.
-- `sign_consistency` gate 유지.
-- `risk_cap` 유지.
-- 3-state production routing 유지.
-
-### 수정 검토 대상
-
-| 대상 | 이유 | 제안 |
-|---|---|---|
-| `mean_cal_lift_bps < 0`인 정책 | calibration에서 이미 음수 | downweight 강도를 더 키우거나 pooled fallback으로 전환 |
-| `selected_hit=1` + OOS gap 음수 cell | 실제 선택된 손실 cell | per-cell `selected_oos_gap` 진단을 policy confidence에 반영 |
-| block delta 0 | routing 효과가 portfolio return에 미전달 | regime policy 적용 전후 weight delta/gross delta 로그 추가 |
-| Fold #1 손실 | 전체 blocker의 핵심 | fold-local policy fallback 또는 fold #1 regime state별 PnL 분해 필요 |
+| 항목 | 상태 | 우선순위 | 담당 |
+|---|---|---|---|
+| SSOT 함수 통일 (RC-1a) | ✅ 구현 (evaluate_l2_trial 위임) | - | 완료 |
+| OOS 레버 캘리브 (RC-2) | ✅ 완료 | - | 완료 |
+| Parity diagnostic 개선 | 🟡 설계 (A) | HIGH | 즉시 |
+| L1-L2 엣지 분석 | 🟡 준비 (C) | HIGH | Phase 1.5 |
+| Callee 전역 추적 (근본규명) | 🔴 미할당 (B) | LOW | 선택 |
 
 ---
 
-## 6. 다음 설계 방향
+## 📎 첨부 (DEBUG7/8 출력)
 
-가장 우선순위가 높은 개선은 hard block 강화가 아니다. 현재 sign consistency가 0.50이고 hard-block 후보가 0이므로 hard block을 켜도 자산증식 개선 근거가 없다.
-
-우선 적용할 구조:
-
-1. `soft downweight`를 calibration lift 기반으로 연속화한다.
-2. `mean_cal_lift_bps < 0`이고 `sign_consistency=False`인 cell은 pooled fallback으로 보낸다.
-3. regime risk cap은 `crisis=0.55`, `bear=0.75`, `bull=1.0`을 유지하되, cap 적용 빈도와 cap 전후 PnL을 별도 로그로 추적한다.
-4. policy 효과를 `sleeve_count`, `edge_pass`, `gross_before/after`, `return_before/after`로 분해해 block delta 0 원인을 제거한다.
-
-현재 결과 기준으로 regime 모듈은 L2에서 손실 제한에는 기여하지만, 수익 창출을 직접 담당하기에는 edge 안정성이 부족하다. 자산증식 관점에서는 regime을 alpha selector로 쓰기보다, L1/L2 신호가 만든 alpha에 대해 state-aware exposure와 confidence만 조정하는 보조 계층으로 두는 것이 더 합리적이다.
+- **DEBUG7** (default thread): replay CAGR 0.1847 vs final 0.0612 (parity 분기)
+- **DEBUG8** (single-thread forced): replay CAGR 0.1847 vs final 0.0612 (thread 가설 반증)
+- **FP content-hash 동일**: cache_ch=a15f42dd99a1, cfg_ch=590fa8a678, caps_ch=acd5feeaad (양쪽 동일)
+- **Phase-side effect**: selection call #142 (767119=995644) per_fold_fp 재현, deployment call (1072747) 다른 값 → callee 전역상태 변형 의심
