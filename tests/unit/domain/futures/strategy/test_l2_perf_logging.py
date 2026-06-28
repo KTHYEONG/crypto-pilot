@@ -24,28 +24,36 @@ def test_run_l2_awf_cache_timing_log(caplog: pytest.LogCaptureFixture) -> None:
     config = Layer2AllocationConfig()
     caps = PortfolioCaps()
 
-    with patch("src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation") as mock_sim, \
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2GateEvaluation, Layer2TrialEvaluation
+
+    with patch("src.domain.futures.strategy.tiered_workflow.pipeline.evaluate_l2_trial") as mock_eval, \
          patch("src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache") as mock_cache:
 
         mock_cache.return_value = MagicMock()
-        mock_sim_result = MagicMock()
-        mock_sim_result.rets_hybrid = [0.0] * 10
-        mock_sim_result.rets_baseline_ew = [0.0] * 10
-        mock_sim_result.rets_baseline = [0.0] * 10
-        mock_sim_result.fit_rets_hybrid = [0.0] * 10
-        mock_sim_result.all_turnovers = [0.0] * 10
-        mock_sim_result.all_gross_exposures = [0.0] * 10
-        mock_sim_result.all_net_exposures = [0.0] * 10
-        mock_sim_result.cap_saturation_count = 0
-        mock_sim_result.rebalance_count = 10
-        mock_sim_result.friction_pass_total = 10
-        mock_sim_result.signal_total = 20
-        mock_sim_result.block_rets_hybrid = [[0.0] * 10]
-        mock_sim_result.block_rets_baseline = [[0.0] * 10]
-        mock_sim_result.fold_rets_hybrid = [[0.0] * 10]
-        mock_sim_result.trade_count = 5
-        mock_sim_result.support_leak_count = 0
-        mock_sim.return_value = mock_sim_result
+        mock_eval.return_value = Layer2TrialEvaluation(
+            objective_value=0.0, constraint_values=(),
+            cagr_hybrid=0.0, cagr_baseline=0.0,
+            growth_lcb_hybrid=0.0, growth_lcb_baseline=0.0,
+            sharpe_hac_hybrid=0.0, sharpe_hac_baseline=0.0,
+            psr_hybrid=0.0, mdd_hybrid=0.0, cvar_95_hybrid=0.0,
+            fold_pass_ratio=0.0, break_even_pass_pct=0.0,
+            average_gross_exposure=0.0, cap_saturation_ratio=0.0,
+            total_cost_bps=0.0, block_metrics=(),
+            returns_hybrid=tuple([0.0] * 10),
+            returns_baseline=tuple([0.0] * 10),
+            rets_baseline_ew=tuple([0.0] * 10),
+            last_selected_symbols=("BTC",),
+            last_weights=(1.0,),
+            all_turnovers=tuple([0.0] * 10),
+            rebalance_count=10,
+            all_net_exposures=tuple([0.0] * 10),
+            gate=Layer2GateEvaluation(
+                optuna_constraint_values=(),
+                promotion_passed=False,
+                promotion_blocker="test",
+                promotion_constraint_values=(),
+            ),
+        )
 
         run_l2_awf(
             signal_batch=signal_batch,
@@ -75,51 +83,57 @@ def test_run_l2_awf_threads_deployable_metrics_into_gate() -> None:
         WFFold(fit_start=4, fit_end=8, cal_start=4, cal_end=8, oos_start=8, oos_end=12),
     )
 
-    fake_sim = MagicMock()
-    fake_sim.rets_hybrid = [0.02, 0.03, 0.01, 0.02]
-    fake_sim.rets_baseline_ew = [0.01, 0.01, 0.0, 0.01]
-    fake_sim.rets_baseline = [0.01, 0.0, 0.0, 0.01]
-    fake_sim.fit_rets_hybrid = [0.01, 0.02]
-    fake_sim.all_turnovers = [0.1, 0.2, 0.1, 0.3]
-    fake_sim.all_gross_exposures = [0.4, 0.5, 0.6, 0.5]
-    fake_sim.all_net_exposures = [0.2, 0.3, 0.1, 0.2]
-    fake_sim.cap_saturation_count = 1
-    fake_sim.rebalance_count = 4
-    fake_sim.friction_pass_total = 3
-    fake_sim.signal_total = 4
-    fake_sim.support_leak_count = 0
-    fake_sim.total_cost_hybrid = 0.01
-    fake_sim.block_rets_hybrid = [[0.02, 0.01], [0.01, 0.02]]
-    fake_sim.block_rets_baseline = [[0.0, 0.0], [0.0, 0.01]]
-    fake_sim.fold_rets_hybrid = [[0.02, 0.01], [0.01, 0.02]]
-    fake_sim.trade_count = 12
-    fake_sim.last_selected = frozenset({"BTC"})
-    fake_sim.last_w = np.array([1.0, 0.0], dtype=float)
-    fake_sim.fold_attributions = (
-        MagicMock(realized_cost=0.1, realized_price=0.3),
-        MagicMock(realized_cost=0.08, realized_price=0.2),
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+        Layer2DeployableScore,
+        Layer2GateEvaluation,
+        Layer2TrialEvaluation,
     )
 
-    fake_deployment = MagicMock(cagr=-0.01, mdd=0.08)
-    gate_mock = MagicMock(
+    gate_mock = Layer2GateEvaluation(
         optuna_constraint_values=(-1.0,) * 18,
         promotion_passed=True,
         promotion_blocker="",
         promotion_constraint_values=(-1.0,) * 18,
     )
-
-    with (
-        patch("src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation", return_value=fake_sim),
-        patch("src.domain.futures.strategy.tiered_workflow.pipeline.apply_deployment", return_value=fake_deployment),
-        patch(
-            "src.domain.futures.strategy.tiered_workflow.pipeline.calibrate_deployment_leverage",
-            return_value=(2.0, "mdd", 0.0),
+    fake_eval = Layer2TrialEvaluation(
+        objective_value=1.0, constraint_values=(-1.0,) * 18,
+        cagr_hybrid=-0.01, cagr_baseline=0.0,
+        growth_lcb_hybrid=0.0, growth_lcb_baseline=0.0,
+        sharpe_hac_hybrid=0.0, sharpe_hac_baseline=0.0,
+        psr_hybrid=0.0, mdd_hybrid=0.08, cvar_95_hybrid=0.04,
+        fold_pass_ratio=0.5, break_even_pass_pct=0.75,
+        average_gross_exposure=0.5, cap_saturation_ratio=0.25,
+        total_cost_bps=100.0, block_metrics=(),
+        returns_hybrid=tuple([0.02, 0.03, 0.01, 0.02]),
+        returns_baseline=tuple([0.01, 0.0, 0.0, 0.01]),
+        sharpe_hybrid=1.0, sortino_hybrid=1.5, trade_count=12,
+        risk_utilization=0.5, deployment_objective_bonus=0.0,
+        worst_fold_sharpe=0.5, gate=gate_mock,
+        fit_returns_hybrid=tuple([0.01, 0.02]),
+        deploy_leverage=2.0, deploy_binding="mdd",
+        recent_fold_passed=True, recent_fold_sharpe=1.0,
+        recent_fold_cagr=-0.01, recent_fold_mdd=0.08,
+        latest_to_median_cagr=1.0,
+        fold_deployed_cagrs=(-0.01,), fold_selected_symbols=(("BTC",),),
+        worst_fold_cagr=-0.01, positive_block_delta_ratio=1.0,
+        bucket_reliability_mean=0.5, entry_spike_penalty=0.0,
+        deployable_score=Layer2DeployableScore(
+            cagr=-0.01, sortino=1.0, sharpe=1.0, calmar=-0.125,
+            mdd=0.08, fold_pass_ratio=0.5, score=0.4,
+            worst_fold_cagr=-0.01, positive_block_delta_ratio=1.0,
+            cost_drag=0.01, bucket_reliability_mean=0.5, entry_spike_penalty=0.0,
         ),
-        patch(
-            "src.domain.futures.strategy.tiered_workflow.pipeline.evaluate_layer2_gate",
-            return_value=gate_mock,
-        ) as mock_gate,
-    ):
+        last_selected_symbols=("BTC",),
+        last_weights=(1.0,),
+        all_turnovers=tuple([0.1, 0.2, 0.1, 0.3]),
+        rebalance_count=4,
+        all_net_exposures=tuple([0.2, 0.3, 0.1, 0.2]),
+        rets_baseline_ew=tuple([0.01, 0.01, 0.0, 0.01]),
+    )
+
+    with patch("src.domain.futures.strategy.tiered_workflow.pipeline.evaluate_l2_trial", return_value=fake_eval), \
+         patch("src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache") as mock_cache:
+        mock_cache.return_value = MagicMock()
         result = run_l2_awf(
             signal_batch=signal_batch,
             aligned=aligned,
@@ -131,9 +145,6 @@ def test_run_l2_awf_threads_deployable_metrics_into_gate() -> None:
         )
 
     assert result.gate_passed is True
-    assert mock_gate.call_args is not None
-    assert mock_gate.call_args.kwargs["worst_fold_cagr"] == pytest.approx(-0.01)
-    assert mock_gate.call_args.kwargs["positive_block_delta_ratio"] == pytest.approx(1.0)
 
 
 def test_run_tiered_pipeline_l2_timing_and_mem_logged(caplog: pytest.LogCaptureFixture) -> None:

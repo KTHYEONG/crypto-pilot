@@ -255,6 +255,13 @@ class Layer2TrialEvaluation:
     positive_block_delta_ratio: float = float("nan")
     bucket_reliability_mean: float = 0.0
     entry_spike_penalty: float = 0.0
+    # deployment extras (SSOT: run_l2_awf가 evaluate_l2_trial에 위임하기 위한 raw data)
+    last_selected_symbols: tuple[str, ...] = ()
+    last_weights: tuple[float, ...] = ()
+    all_turnovers: tuple[float, ...] = ()
+    rebalance_count: int = 0
+    all_net_exposures: tuple[float, ...] = ()
+    rets_baseline_ew: tuple[float, ...] = ()
     deployable_score: Layer2DeployableScore | None = None
 
 

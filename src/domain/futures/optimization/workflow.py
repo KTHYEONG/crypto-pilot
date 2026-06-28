@@ -1770,6 +1770,7 @@ def evaluate_l2_trial(
     config: Any,
     caps: Any,
     tf: str,
+    deploy_leverage_override: float | None = None,
 ) -> Any:
     from src.domain.futures.portfolio.signal_composer import hours_per_bar_tf
     from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
@@ -1826,7 +1827,11 @@ def evaluate_l2_trial(
     _fit_rets_raw = sim.fit_rets_hybrid
     _l_star: float = 1.0
     _l_binding: str = "none"
-    if _deploy_enabled:
+    if deploy_leverage_override is not None and deploy_leverage_override > 1.0:
+        _l_star = float(deploy_leverage_override)
+        _l_binding = "champion"
+        _logger.debug("[L2-EVAL] L*=%.3f (binding=%s, override=champion)", _l_star, _l_binding)
+    elif _deploy_enabled:
         if _fit_rets_raw:
             _calib_rets = np.asarray(_fit_rets_raw, dtype=np.float64)
             _calib_src = "fit_leg"
@@ -2087,6 +2092,16 @@ def evaluate_l2_trial(
         entry_spike_penalty=float(entry_spike_penalty),
         config=config,
     )
+    # deployment extras raw data (SSOT 위임용)
+    _last_selected: frozenset[str] = getattr(sim, 'last_selected', frozenset())
+    _symbols = getattr(aligned, 'symbols', ())
+    _sym_to_idx = {s: i for i, s in enumerate(_symbols)}
+    _last_weights = tuple(
+        float(getattr(sim, 'last_w', np.array([]))[_sym_to_idx[s]])
+        for s in _last_selected if s in _sym_to_idx
+    )
+    _last_selected_tuple = tuple(sorted(_last_selected))
+
     return Layer2TrialEvaluation(
         objective_value=float(objective_value),
         constraint_values=gate.optuna_constraint_values,
@@ -2129,6 +2144,13 @@ def evaluate_l2_trial(
         positive_block_delta_ratio=float(positive_block_delta_ratio),
         bucket_reliability_mean=float(bucket_reliability_mean),
         entry_spike_penalty=float(entry_spike_penalty),
+        # deployment extras raw data
+        last_selected_symbols=_last_selected_tuple,
+        last_weights=_last_weights,
+        all_turnovers=tuple(sim.all_turnovers),
+        rebalance_count=int(sim.rebalance_count),
+        all_net_exposures=tuple(sim.all_net_exposures),
+        rets_baseline_ew=tuple(sim.rets_baseline_ew),
         deployable_score=deployable_score,
     )
 
