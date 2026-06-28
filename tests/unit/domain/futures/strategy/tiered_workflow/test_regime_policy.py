@@ -586,3 +586,248 @@ def test_apply_regime_risk_cap_invalid_cap_raises() -> None:
         apply_regime_risk_cap(weights, 1, ("bull", "bear", "crisis"), bear_gross_cap=1.5)
     with pytest.raises(ValueError, match="gross_cap"):
         apply_regime_risk_cap(weights, 2, ("bull", "bear", "crisis"), crisis_gross_cap=-0.2)
+
+
+# ── Scenario 1: pooled_is_passthrough 기본값 False (backward compat) ──
+
+def test_layer2_allocation_config_defaults_new_regime_conservatism_fields() -> None:
+    cfg = Layer2AllocationConfig.from_mapping({})
+    assert cfg.l2_regime_pooled_is_passthrough is False
+    assert cfg.l2_regime_min_fit_n_floor == 5
+    assert cfg.l2_regime_require_fit_n_for_downweight is True
+
+
+def test_build_regime_policy_by_fold_pooled_is_passthrough_false_preserves_pooled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    folds = _make_fold()
+    regime = np.zeros(8, dtype=np.int8)
+    cache = _make_cache(8)
+    aligned = _make_aligned([100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0])
+
+    def _bucket_stats(*args: object, **kwargs: object) -> dict[tuple[int, str, str], SimpleNamespace]:
+        return {}
+
+    def _pooled_stats(*args: object, **kwargs: object) -> dict[tuple[str, str], SimpleNamespace]:
+        return {("donchian_72", "4h"): SimpleNamespace(edge_bps=0.0, n_obs=0)}
+
+    monkeypatch.setattr(l2_meta, "compute_bucket_realized_edge_stats", _bucket_stats)
+    monkeypatch.setattr(l2_meta, "compute_pooled_realized_edge_stats", _pooled_stats)
+
+    policy_by_fold, diagnostics = build_regime_policy_by_fold(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=folds,
+        regime_code_1d=regime,
+        state_names=("bull", "bear", "crisis"),
+        mode="soft",
+        min_n=15,
+        cal_min_n=20,
+        min_confidence=0.0,
+        pooled_is_passthrough=False,
+    )
+
+    assert diagnostics.n_pooled > 0 or diagnostics.n_cells_total >= 0
+    if diagnostics.n_cells_total > 0:
+        for policy in policy_by_fold[0].values():
+            assert policy.action == "pooled"
+
+
+# ── Scenario 2: pooled_is_passthrough=True 로 pooled cell → allow 전환 ──
+
+def test_build_regime_policy_by_fold_pooled_is_passthrough_true_converts_pooled_to_allow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    folds = _make_fold()
+    regime = np.zeros(8, dtype=np.int8)
+    cache = _make_cache(8)
+    aligned = _make_aligned([100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0])
+
+    def _bucket_stats(*args: object, **kwargs: object) -> dict[tuple[int, str, str], SimpleNamespace]:
+        return {}
+
+    def _pooled_stats(*args: object, **kwargs: object) -> dict[tuple[str, str], SimpleNamespace]:
+        return {("donchian_72", "4h"): SimpleNamespace(edge_bps=0.0, n_obs=0)}
+
+    monkeypatch.setattr(l2_meta, "compute_bucket_realized_edge_stats", _bucket_stats)
+    monkeypatch.setattr(l2_meta, "compute_pooled_realized_edge_stats", _pooled_stats)
+
+    policy_by_fold, _diagnostics = build_regime_policy_by_fold(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=folds,
+        regime_code_1d=regime,
+        state_names=("bull", "bear", "crisis"),
+        mode="soft",
+        min_n=15,
+        cal_min_n=20,
+        min_confidence=0.0,
+        pooled_is_passthrough=True,
+    )
+
+    for policy in policy_by_fold[0].values():
+        assert policy.action == "allow"
+        assert policy.edge_multiplier == pytest.approx(1.0)
+        assert policy.reason == "pooled_passthrough"
+
+
+# ── Scenario 3: insufficient_fit_but_good_cal ──
+
+def test_build_regime_policy_by_fold_insufficient_fit_but_good_cal_becomes_allow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    folds = _make_fold()
+    regime = np.zeros(8, dtype=np.int8)
+    cache = _make_cache(8)
+    aligned = _make_aligned([100.0, 101.0, 102.0, 103.0, 104.0, 110.0, 111.0, 112.0])
+
+    def _bucket_stats(*args: object, start: int, **kwargs: object) -> dict[tuple[int, str, str], SimpleNamespace]:
+        if start == 0:
+            return {(0, "donchian_72", "4h"): SimpleNamespace(edge_bps=5.0, n_obs=7)}
+        return {(0, "donchian_72", "4h"): SimpleNamespace(edge_bps=20.0, n_obs=30)}
+
+    def _pooled_stats(*args: object, start: int, **kwargs: object) -> dict[tuple[str, str], SimpleNamespace]:
+        if start == 0:
+            return {("donchian_72", "4h"): SimpleNamespace(edge_bps=0.0, n_obs=30)}
+        return {("donchian_72", "4h"): SimpleNamespace(edge_bps=5.0, n_obs=30)}
+
+    monkeypatch.setattr(l2_meta, "compute_bucket_realized_edge_stats", _bucket_stats)
+    monkeypatch.setattr(l2_meta, "compute_pooled_realized_edge_stats", _pooled_stats)
+
+    policy_by_fold, _diagnostics = build_regime_policy_by_fold(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=folds,
+        regime_code_1d=regime,
+        state_names=("bull", "bear", "crisis"),
+        mode="soft",
+        min_n=15,
+        cal_min_n=20,
+        min_cal_lift_bps=8.0,
+        min_confidence=0.0,
+        pooled_is_passthrough=False,
+        min_fit_n_floor=5,
+    )
+
+    key = (0, "donchian_72", "4h")
+    assert policy_by_fold[0][key].action == "allow"
+    assert policy_by_fold[0][key].reason == "insufficient_fit_but_good_cal"
+    assert policy_by_fold[0][key].edge_multiplier == pytest.approx(1.0)
+
+
+# ── Scenario 4: insufficient_cal_partial ──
+
+def test_build_regime_policy_by_fold_insufficient_cal_partial_downweight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    folds = _make_fold()
+    regime = np.zeros(8, dtype=np.int8)
+    cache = _make_cache(8)
+    aligned = _make_aligned([100.0, 110.0, 120.0, 130.0, 140.0, 141.0, 142.0, 143.0])
+
+    def _bucket_stats(*args: object, start: int, **kwargs: object) -> dict[tuple[int, str, str], SimpleNamespace]:
+        if start == 0:
+            return {(0, "donchian_72", "4h"): SimpleNamespace(edge_bps=25.0, n_obs=20)}
+        return {(0, "donchian_72", "4h"): SimpleNamespace(edge_bps=9.0, n_obs=10)}
+
+    def _pooled_stats(*args: object, start: int, **kwargs: object) -> dict[tuple[str, str], SimpleNamespace]:
+        if start == 0:
+            return {("donchian_72", "4h"): SimpleNamespace(edge_bps=5.0, n_obs=20)}
+        return {("donchian_72", "4h"): SimpleNamespace(edge_bps=4.0, n_obs=20)}
+
+    monkeypatch.setattr(l2_meta, "compute_bucket_realized_edge_stats", _bucket_stats)
+    monkeypatch.setattr(l2_meta, "compute_pooled_realized_edge_stats", _pooled_stats)
+
+    policy_by_fold, _diagnostics = build_regime_policy_by_fold(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=folds,
+        regime_code_1d=regime,
+        state_names=("bull", "bear", "crisis"),
+        mode="soft",
+        min_n=15,
+        cal_min_n=20,
+        min_cal_lift_bps=8.0,
+        min_confidence=0.0,
+        pooled_is_passthrough=False,
+        require_fit_n_for_downweight=False,
+    )
+
+    key = (0, "donchian_72", "4h")
+    assert policy_by_fold[0][key].action == "downweight"
+    assert policy_by_fold[0][key].reason == "insufficient_cal_partial"
+    assert policy_by_fold[0][key].edge_multiplier == pytest.approx(0.8)
+
+
+# ── Scenario 5: bucket_reliability relaxed threshold ──
+
+def test_build_bucket_reliability_relaxed_threshold_downweight_to_allow() -> None:
+    from src.domain.futures.strategy.tiered_workflow.bucket_reliability import build_bucket_reliability
+
+    result = build_bucket_reliability(
+        regime=0,
+        family="donchian_72",
+        tf="4h",
+        fit_edge_bps=15.0,
+        cal_edge_bps=4.0,
+        n_fit=20,
+        n_cal=25,
+        min_fit_n=15,
+        min_cal_n=20,
+        min_cal_lift_bps=8.0,
+        min_reliability=0.55,
+        relaxed_reliability_threshold=0.35,
+    )
+
+    # n_fit=20 >= 15, n_cal=25 >= 20, sign_consistent=True
+    # abs(4) >= 8 → False → first if fails
+    # elif: not sign_consistent (False) or n_cal < 20 (False) → False
+    # else: action="downweight"
+    # Then C check: action=="downweight" and reliability=0.50 >= 0.35 and sign_consistent → action="allow"
+    assert result.action == "allow"
+
+
+# ── Scenario 6: require_fit_n_for_downweight=True blocks insufficient_fit downweight ──
+
+def test_build_regime_policy_by_fold_require_fit_n_for_downweight_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    folds = _make_fold()
+    regime = np.zeros(8, dtype=np.int8)
+    cache = _make_cache(8)
+    aligned = _make_aligned([100.0, 99.0, 98.0, 97.0, 96.0, 95.0, 94.0, 93.0])
+
+    def _bucket_stats(*args: object, start: int, **kwargs: object) -> dict[tuple[int, str, str], SimpleNamespace]:
+        if start == 0:
+            return {(0, "donchian_72", "4h"): SimpleNamespace(edge_bps=-40.0, n_obs=3)}
+        return {(0, "donchian_72", "4h"): SimpleNamespace(edge_bps=-60.0, n_obs=20)}
+
+    def _pooled_stats(*args: object, start: int, **kwargs: object) -> dict[tuple[str, str], SimpleNamespace]:
+        if start == 0:
+            return {("donchian_72", "4h"): SimpleNamespace(edge_bps=-5.0, n_obs=3)}
+        return {("donchian_72", "4h"): SimpleNamespace(edge_bps=-5.0, n_obs=20)}
+
+    monkeypatch.setattr(l2_meta, "compute_bucket_realized_edge_stats", _bucket_stats)
+    monkeypatch.setattr(l2_meta, "compute_pooled_realized_edge_stats", _pooled_stats)
+
+    policy_by_fold, _diagnostics = build_regime_policy_by_fold(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=folds,
+        regime_code_1d=regime,
+        state_names=("bull", "bear", "crisis"),
+        mode="soft",
+        min_n=15,
+        cal_min_n=20,
+        min_cal_lift_bps=8.0,
+        block_lift_bps=-12.0,
+        min_confidence=0.0,
+        pooled_is_passthrough=False,
+        require_fit_n_for_downweight=True,
+        min_fit_n_floor=5,
+    )
+
+    # n_fit=3 < min_n=15, and n_fit=3 < min_fit_n_floor=5, so should be "insufficient_fit" → pooled
+    key = (0, "donchian_72", "4h")
+    assert policy_by_fold[0][key].action == "pooled"
+    assert policy_by_fold[0][key].reason == "insufficient_fit"

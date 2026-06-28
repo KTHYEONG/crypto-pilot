@@ -1355,6 +1355,9 @@ def _run_tiered_l2_study(
         policy_hard_block_enabled=bool(getattr(cfg, "l2_regime_hard_block_enabled", False)),
         policy_block_min_confidence=float(getattr(cfg, "l2_regime_block_min_confidence", 0.80)),
         policy_require_sign_consistency=bool(getattr(cfg, "l2_regime_require_sign_consistency", True)),
+        policy_pooled_is_passthrough=bool(getattr(cfg, "l2_regime_pooled_is_passthrough", False)),
+        policy_min_fit_n_floor=int(getattr(cfg, "l2_regime_min_fit_n_floor", 5)),
+        policy_require_fit_n_for_downweight=bool(getattr(cfg, "l2_regime_require_fit_n_for_downweight", True)),
     )
     l2_sim_cache = replace(l2_sim_cache,
         bucket_edges_by_fold=_routing_plan.effective_bucket_edges_by_fold,
@@ -2305,16 +2308,30 @@ def _run_strategy_stage(
                 verbose=True,  # 최종 실행시 상세 결과 출력
                 override_dsr=l2_study_result.dsr,
                 l2_sim_cache=shared_l2_cache,
+                l2_signal_batch=l2_signals,
+                l2_awf_folds=l2_study_result.awf_folds,
             )
             if l2_final is not None and l2_study_result.best_evaluation is not None:
                 from src.domain.futures.strategy.tiered_workflow.replay_parity import (
                     assert_selection_replay_parity,
                 )
 
-                assert_selection_replay_parity(
+                if not assert_selection_replay_parity(
                     replay_evaluation=l2_study_result.best_evaluation,
                     final_evaluation=l2_final,
-                )
+                ):
+                    _logger.error(
+                        "[L2-PARITY] replay/final mismatch. "
+                        "replay_L*=%.4f final_L*=%.4f "
+                        "replay_CAGR=%.4f final_CAGR=%.4f "
+                        "replay_trades=%s final_trades=%s",
+                        getattr(l2_study_result.best_evaluation, "deploy_leverage", float("nan")),
+                        getattr(l2_final, "deploy_leverage", float("nan")),
+                        getattr(l2_study_result.best_evaluation, "cagr_hybrid", float("nan")),
+                        getattr(l2_final, "cagr_hybrid", float("nan")),
+                        getattr(l2_study_result.best_evaluation, "trade_count", "?"),
+                        getattr(l2_final, "trade_count", "?"),
+                    )
             
             _log_mem("l2_final_pipeline", _mem_l2_final, extra=f"took={time.perf_counter() - _t_l2_final_start:.4f}s")
             # Layer 2 BLOCKED 시 즉시 종료 (Step 5 optimization 진입 방지)
