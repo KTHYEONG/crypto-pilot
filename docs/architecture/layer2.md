@@ -119,13 +119,16 @@ graph TD
 | `l2_bucket_cost_bps` | Bucket edge cost deduction | 6.0 |
 | `l2_bucket_min_n` | Min bucket events before shrinkage | 30 |
 | `l2_bucket_shrinkage` | Raw→family prior shrinkage rate | 0.3 |
-| `l2_bucket_edge_floor_bps` | Bucket edge pass threshold | 100.0 |
+| `l2_bucket_edge_floor_bps` | Bucket edge pass threshold | 50.0 |
 | `l2_regime_policy_mode` | Regime policy mode: filter / observe / soft / hybrid | "hybrid" |
 | `l2_regime_min_policy_confidence` | Minimum confidence for actionable policy | 0.55 |
 | `l2_regime_hard_block_enabled` | Allow hard block only in hybrid mode with sign-consistency gate | False |
 | `l2_regime_block_min_confidence` | Minimum confidence for hard block eligibility | 0.80 |
 | `l2_regime_require_sign_consistency` | Require fit/cal sign consistency for hard block | True |
 | `l2_regime_risk_cap_enabled` | Apply regime-state gross caps after weight composition | True |
+| `l2_regime_pooled_is_passthrough` | Treat pooled action as allow (passthrough) | False |
+| `l2_regime_min_fit_n_floor` | Min n_fit floor for B-2 insufficient_fit_but_good_cal | 5 |
+| `l2_regime_require_fit_n_for_downweight` | Require n_fit >= min_fit_n_floor for B-3 downweight preserve | True |
 | `l2_min_sortino` | Promotion Sortino gate | 1.5 |
 | `l2_min_sharpe_abs` | Promotion Sharpe sanity floor | 0.7 |
 | `l2_min_calmar` | Promotion Calmar anchor | 0.5 |

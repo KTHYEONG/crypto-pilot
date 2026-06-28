@@ -43,8 +43,8 @@ def _assert_selection_replay_parity(
     replay_evaluation: Any,
     final_evaluation: Any,
     tolerance: float = 1e-8,
-) -> None:
-    assert_selection_replay_parity(
+) -> bool:
+    return assert_selection_replay_parity(
         replay_evaluation=replay_evaluation,
         final_evaluation=final_evaluation,
         tolerance=tolerance,
@@ -276,6 +276,7 @@ def select_layer2_champion(
             completed_trials=0,
             feasible_trials=0,
             blocker_reason="no_complete_trials",
+            awf_folds=awf_folds,
         )
 
     # 1. feasible completed trials 분류 (Optuna constraints) — Fix C: 먼저 분류하여 n_trials_eff에 사용
@@ -321,6 +322,7 @@ def select_layer2_champion(
             completed_trials=len(complete_trials),
             feasible_trials=0,
             blocker_reason="no_feasible_trials",
+            awf_folds=awf_folds,
         )
 
     bars_per_year = _bars_per_year_for_tf(tf)
@@ -593,6 +595,7 @@ def select_layer2_champion(
             feasible_trials=len(feasible_trials),
             blocker_reason=reason,
             sim_cache=cache,
+            awf_folds=awf_folds,
         )
 
     _logger.info(
@@ -618,4 +621,5 @@ def select_layer2_champion(
         feasible_trials=len(feasible_trials),
         blocker_reason="",
         sim_cache=cache,
+        awf_folds=awf_folds,
     )
