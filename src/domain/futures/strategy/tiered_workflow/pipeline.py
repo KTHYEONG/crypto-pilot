@@ -19,6 +19,7 @@ from scipy.stats import spearmanr
 
 import src.domain.futures.strategy.config as strategy_config
 from src.core.utils.utils import PERF
+from src.domain.futures.optimization.workflow import evaluate_l2_trial
 from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
 from src.domain.futures.portfolio.signal_composer import (
     compose_symbol_signals,
@@ -56,8 +57,8 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     L2SimulationCache,
     Layer1Result,
     Layer2AllocationConfig,
-    Layer2BlockMetric,
     Layer2Result,
+    Layer2TrialEvaluation,
     Layer3Result,
     SymbolLifecycleRecord,
 )
@@ -73,19 +74,13 @@ from src.domain.futures.strategy.tiered_workflow.diagnostics import (
     compute_per_symbol_realized_stats,
     compute_prediction_decomposition_diag,
 )
-from src.domain.futures.strategy.tiered_workflow.l2_gate import (
-    evaluate_layer2_gate,
-)
 from src.domain.futures.strategy.tiered_workflow.metrics import (
     _bars_per_year_for_tf,
     _cagr,
-    _contiguous_block_log_growth,
-    _growth_lower_confidence_bound,
     _mdd,
     _newey_west_ic_tstat,
     _psr,
     _sharpe,
-    _sharpe_hac,
     _sortino,
     _terminal_multiple,
     compute_breadth_weighted_ic,
@@ -93,7 +88,6 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
 )
 from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
     apply_deployment,
-    calibrate_deployment_leverage,
 )
 from src.domain.futures.strategy.tiered_workflow.signal_selection import (
     _candidate_output_to_signal_batch,
@@ -1598,6 +1592,59 @@ def run_l1_nested_swf(
     return dataclasses.replace(_l1_result, symbol_lifecycle=tuple(_lifecycle_records))
 
 
+def _layer2_result_from_trial_eval(
+    eval: Layer2TrialEvaluation,
+    *,
+    gate_passed: bool,
+    blocker_reason: str,
+    extras: dict[str, Any],
+) -> Layer2Result:
+    """Layer2TrialEvaluation → Layer2Result 어댑터.
+
+    공통 16+ 지표는 eval에서 1:1 복사, 배포 전용은 extras에서 주입.
+    """
+    return Layer2Result(
+        selected_last=frozenset(eval.last_selected_symbols),
+        weights_last=dict(zip(eval.last_selected_symbols, eval.last_weights, strict=False)),
+        sharpe_hybrid=eval.sharpe_hybrid,
+        sharpe_baseline=extras["sharpe_baseline"],
+        mdd_hybrid=eval.mdd_hybrid,
+        mdd_baseline=extras["mdd_baseline"],
+        cagr_hybrid=eval.cagr_hybrid,
+        cagr_baseline=extras["cagr_baseline"],
+        mar_hybrid=eval.cagr_hybrid / (eval.mdd_hybrid + 1e-9),
+        mar_baseline=extras["cagr_baseline"] / (extras["mdd_baseline"] + 1e-9),
+        fold_pass_ratio=eval.fold_pass_ratio,
+        turnover=extras["turnover"],
+        friction_pass_pct=eval.break_even_pass_pct,
+        gate_passed=gate_passed,
+        blocker_reason=blocker_reason,
+        allocation_policy="diagonal_kelly",
+        deploy_leverage=eval.deploy_leverage,
+        psr_hybrid=eval.psr_hybrid,
+        growth_lcb_hybrid=eval.growth_lcb_hybrid,
+        growth_lcb_baseline=eval.growth_lcb_baseline,
+        sharpe_hac_hybrid=eval.sharpe_hac_hybrid,
+        sharpe_hac_baseline=eval.sharpe_hac_baseline,
+        dsr_hybrid=extras["dsr_hybrid"],
+        cvar_95_hybrid=eval.cvar_95_hybrid,
+        average_gross_exposure=eval.average_gross_exposure,
+        average_net_exposure=extras["average_net_exposure"],
+        cap_saturation_ratio=eval.cap_saturation_ratio,
+        total_cost_bps=eval.total_cost_bps,
+        n_rebalances=extras["n_rebalances"],
+        block_metrics=eval.block_metrics,
+        sortino_hybrid=eval.sortino_hybrid,
+        terminal_multiple=extras["terminal_multiple"],
+        total_pnl_pct=extras["terminal_multiple"] - 1.0,
+        trade_count=eval.trade_count,
+        risk_utilization=eval.risk_utilization,
+        recent_fold_passed=eval.recent_fold_passed,
+        recent_fold_sharpe=eval.recent_fold_sharpe,
+        recent_fold_cagr=eval.recent_fold_cagr,
+        recent_fold_mdd=eval.recent_fold_mdd,
+    )
+
 def run_l2_awf(
     *,
     signal_batch: ValidatedSignalBatch,
@@ -1611,7 +1658,7 @@ def run_l2_awf(
     deploy_leverage: float | None = None,
     prebuilt_cache: L2SimulationCache | None = None,
 ) -> Layer2Result:
-    """Layer2 AWF 포트폴리오 시뮬레이션.
+    """Layer2 AWF 포트폴리오 시뮬레이션 (delegate to evaluate_l2_trial SSOT).
 
     Args:
         deploy_leverage: champion L* (trial-path SSOT). None → 내부 calibrate.
@@ -1621,12 +1668,15 @@ def run_l2_awf(
         cache = prebuilt_cache
     else:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+
         t_l2_cache = time.perf_counter()
         cache = build_l2_simulation_cache(aligned, signal_batch, tf)
         logger.log(PERF, "[PERF] l2_build_sim_cache took=%.4fs", time.perf_counter() - t_l2_cache)
         logger.debug("[MEM] stage=l2_build_sim_cache rss=%.0fMB", _get_rss_mb())
 
-    sim = _run_awf_simulation(
+    # SSOT: evaluate_l2_trial 단일 호출경로
+    t_eval = time.perf_counter()
+    eval = evaluate_l2_trial(
         cache=cache,
         signal_batch=signal_batch,
         aligned=aligned,
@@ -1634,92 +1684,70 @@ def run_l2_awf(
         config=config,
         caps=caps,
         tf=tf,
-        sim_origin="final_deploy",
+        deploy_leverage_override=deploy_leverage,
     )
-    symbols = aligned.symbols
-    sym_to_idx = {s: i for i, s in enumerate(symbols)}
+    logger.log(PERF, "[PERF] l2_evaluate_trial took=%.4fs", time.perf_counter() - t_eval)
 
     bars_per_year = _bars_per_year_for_tf(tf)
-    sharpe_hybrid = _sharpe(sim.rets_hybrid, bars_per_year=bars_per_year)
-    # uplift 표시·게이트: 순수 1/N EW 대비 (FIX-2). MDD 상대 게이트는 risk-matched 유지.
-    sharpe_baseline = _sharpe(sim.rets_baseline_ew, bars_per_year=bars_per_year)
-    sharpe_hac_hybrid = _sharpe_hac(sim.rets_hybrid, bars_per_year=bars_per_year)
-    sharpe_hac_baseline = _sharpe_hac(sim.rets_baseline_ew, bars_per_year=bars_per_year)
-    mdd_baseline = _mdd(sim.rets_baseline)  # MDD 상대 게이트는 risk-matched 기준 유지
-    cagr_baseline = _cagr(sim.rets_baseline, bars_per_year=bars_per_year)
-    mar_baseline = cagr_baseline / (mdd_baseline + 1e-9)
-    psr_hybrid = _psr(sim.rets_hybrid)
 
-    # DEBUG: Sharpe 성분 분해 (hybrid vs baseline_ew)
-    _arr_h = np.asarray(sim.rets_hybrid, dtype=np.float64)
-    _arr_b = np.asarray(sim.rets_baseline_ew, dtype=np.float64)
-    if _arr_h.size >= 2 and _arr_b.size >= 2:
-        _mean_h = float(np.mean(_arr_h)) * bars_per_year
-        _mean_b = float(np.mean(_arr_b)) * bars_per_year
-        _std_h = float(np.std(_arr_h, ddof=1)) * np.sqrt(bars_per_year)
-        _std_b = float(np.std(_arr_b, ddof=1)) * np.sqrt(bars_per_year)
-        logger.debug(
-            "[L2-SHARPE-CMP] hybrid: ann_mean=%.6f ann_std=%.4f sharpe_hac=%.4f | "
-            "baseline_ew: ann_mean=%.6f ann_std=%.4f sharpe_hac=%.4f | "
-            "delta_sharpe=%.4f mean_ratio=%.2f std_ratio=%.2f",
-            _mean_h, _std_h, sharpe_hac_hybrid,
-            _mean_b, _std_b, sharpe_hac_baseline,
-            sharpe_hac_hybrid - sharpe_hac_baseline,
-            _mean_h / max(_mean_b, 1e-9),
-            _std_h / max(_std_b, 1e-9),
-        )
+    # ── deployment extras (eval raw data 기반, 재계산 금지 — SSOT) ──
+    _rets_h_arr = np.asarray(eval.returns_hybrid, dtype=np.float64)
+    _rets_be_arr = np.asarray(eval.rets_baseline_ew, dtype=np.float64)
+    _rets_b_arr = np.asarray(eval.returns_baseline, dtype=np.float64)
 
-    # ── L* 결정 (SSOT 우선: deploy_leverage 파라미터 → 내부 calibrate → 1.0) ──
-    fit_rets_arr = np.asarray(sim.fit_rets_hybrid, dtype=np.float64)
-    _l_star: float
-    _binding: str
-    if deploy_leverage is not None and deploy_leverage > 1.0:
-        _l_star, _binding = deploy_leverage, "champion"
-    elif config.l2_deploy_enabled and fit_rets_arr.size >= 2:
-        _l_star, _binding, _l_cross_mdd = calibrate_deployment_leverage(
-            fit_rets=fit_rets_arr,
-            oos_rets=np.asarray(sim.rets_hybrid, dtype=np.float64),
-            mdd_cap=config.l2_max_mdd_abs,
-            cvar_cap=config.l2_max_cvar_95,
-            mdd_margin=config.l2_deploy_mdd_margin,
-            cvar_margin=config.l2_deploy_cvar_margin,
-            l_hard_cap=config.l2_deploy_l_hard_cap,
-            exchange_leverage_cap=config.l2_max_exchange_leverage,
-        )
-        if _l_cross_mdd > 0.0:
-            _oos_risk = _l_cross_mdd / max(config.l2_max_mdd_abs, 1e-9)
-            logger.debug(
-                "[L2-OOS-CAP] OOS_RiskUtil=%.3f cap=%.2f (L*=%.3f)",
-                _oos_risk, config.l2_max_mdd_abs, _l_star,
-            )
-            if _oos_risk > 1.0:
-                logger.debug(
-                    "[L2-OOS-CAP] L* over-deployed: OOS_RiskUtil=%.3f > 1.0 (L*=%.3f)",
-                    _oos_risk, _l_star,
-                )
+    sharpe_baseline = _sharpe(list(_rets_be_arr), bars_per_year=bars_per_year)
+    mdd_baseline = _mdd(list(_rets_b_arr))
+    cagr_baseline = _cagr(list(_rets_b_arr), bars_per_year=bars_per_year)
+
+    turnover = float(np.mean(eval.all_turnovers)) if eval.all_turnovers else 0.0
+    avg_net_exposure = float(np.mean(np.abs(eval.all_net_exposures))) if eval.all_net_exposures else 0.0
+    n_rebalances = eval.rebalance_count
+    dsr_hybrid = (
+        float(override_dsr)
+        if override_dsr is not None
+        else _psr(list(_rets_h_arr), bars_per_year=bars_per_year)
+    )
+    terminal_multiple = _terminal_multiple(list(_rets_h_arr))
+
+    extras: dict[str, Any] = {
+        "sharpe_baseline": sharpe_baseline,
+        "mdd_baseline": mdd_baseline,
+        "cagr_baseline": cagr_baseline,
+        "turnover": turnover,
+        "average_net_exposure": avg_net_exposure,
+        "n_rebalances": n_rebalances,
+        "dsr_hybrid": dsr_hybrid,
+        "terminal_multiple": terminal_multiple,
+    }
+
+    # gate는 eval에서 가져옴
+    gate = eval.gate
+    if gate is None:
+        gate_passed = False
+        blocker_reason = "gate_missing"
     else:
-        _l_star, _binding = 1.0, "none"
+        gate_passed = gate.promotion_passed
+        blocker_reason = gate.promotion_blocker
 
-    # deployed 지표 재계산 — trial-path(apply_deployment)와 동일 경로 (결함 #3 해소)
-    _rets_hybrid_arr = np.asarray(sim.rets_hybrid, dtype=np.float64)
-    _dep = apply_deployment(rets=_rets_hybrid_arr, leverage=_l_star, bars_per_year=bars_per_year)
-    cagr_hybrid: float = _dep.cagr
-    mdd_hybrid: float = _dep.mdd
-    cvar_95_hybrid: float = _dep.cvar_95
-    mar_hybrid: float = cagr_hybrid / (mdd_hybrid + 1e-9)
+    result = _layer2_result_from_trial_eval(
+        eval,
+        gate_passed=gate_passed,
+        blocker_reason=blocker_reason,
+        extras=extras,
+    )
 
-    # RiskUtil 정합 검증 — binding=mdd 시 risk_util ≈ (1 - mdd_margin), 이탈 시 결함 #1/#2 재발.
-    _risk_util_check = mdd_hybrid / max(config.l2_max_mdd_abs, 1e-9)
+    # ── deploy diagnostics (eval.deploy_leverage 사용, 재계산 금지) ──
+    _risk_util_check = eval.mdd_hybrid / max(float(config.l2_max_mdd_abs), 1e-9)
     logger.info(
         "[L2-DEPLOY] L*=%.4f binding=%s | CAGR=%.4f MDD=%.4f CVaR95=%.4f RiskUtil=%.3f",
-        _l_star,
-        _binding,
-        cagr_hybrid,
-        mdd_hybrid,
-        cvar_95_hybrid,
+        eval.deploy_leverage,
+        eval.deploy_binding,
+        eval.cagr_hybrid,
+        eval.mdd_hybrid,
+        eval.cvar_95_hybrid,
         _risk_util_check,
     )
-    if _binding == "mdd" and abs(_risk_util_check - (1.0 - config.l2_deploy_mdd_margin)) > 0.15:
+    if eval.deploy_binding == "mdd" and abs(_risk_util_check - (1.0 - config.l2_deploy_mdd_margin)) > 0.15:
         logger.warning(
             "[L2-DEPLOY] realization gap: risk_util=%.3f expected≈%.3f"
             " (결함 #1/#2 재발 의심 — vol-targeting 또는 gross 제약 확인 요망)",
@@ -1727,261 +1755,25 @@ def run_l2_awf(
             1.0 - config.l2_deploy_mdd_margin,
         )
 
-    # 진단: fit-rets vs OOS-rets 분포 이격 (L* inflation 감지)
-    if fit_rets_arr.size >= 2 and _rets_hybrid_arr.size >= 2:
-        _diag_fit_list = list(fit_rets_arr)
-        _diag_oos_list = list(_rets_hybrid_arr)
-        _diag_fit_cagr = _cagr(_diag_fit_list, bars_per_year=bars_per_year)
-        _diag_fit_mdd = _mdd(_diag_fit_list)
-        _diag_oos_cagr = _cagr(_diag_oos_list, bars_per_year=bars_per_year)
-        _diag_oos_mdd = _mdd(_diag_oos_list)
+    # 진단: fit-rets vs OOS-rets 분포 이격
+    _fit_arr = np.asarray(eval.fit_returns_hybrid, dtype=np.float64)
+    if _fit_arr.size >= 2 and _rets_h_arr.size >= 2:
+        _diag_fit_cagr = _cagr(list(_fit_arr), bars_per_year=bars_per_year)
+        _diag_fit_mdd = _mdd(list(_fit_arr))
+        _diag_oos_cagr = _cagr(list(_rets_h_arr), bars_per_year=bars_per_year)
+        _diag_oos_mdd = _mdd(list(_rets_h_arr))
         logger.debug(
             "[L2-FINAL-DIAG] fit_CAGR_vol1=%.4f fit_MDD_vol1=%.4f | "
             "OOS_CAGR_vol1=%.4f OOS_MDD_vol1=%.4f | "
             "L*=%.4f(%s) | deployed_CAGR=%.4f deployed_MDD=%.4f",
             _diag_fit_cagr, _diag_fit_mdd,
             _diag_oos_cagr, _diag_oos_mdd,
-            _l_star, _binding, cagr_hybrid, mdd_hybrid,
-        )
-    avg_turnover = float(np.mean(sim.all_turnovers)) if sim.all_turnovers else 0.0
-    avg_gross_exposure = float(np.mean(sim.all_gross_exposures)) if sim.all_gross_exposures else 0.0
-    avg_net_exposure = float(np.mean(np.abs(sim.all_net_exposures))) if sim.all_net_exposures else 0.0
-    cap_saturation_ratio = (
-        float(sim.cap_saturation_count) / float(sim.rebalance_count)
-        if sim.rebalance_count > 0
-        else 0.0
-    )
-    total_cost_bps = float(sim.total_cost_hybrid * 1e4)
-    # cvar_95_hybrid: apply_deployment에서 이미 산출 (unit-vol 중복 산출 제거)
-    hybrid_blocks = _contiguous_block_log_growth(
-        sim.rets_hybrid,
-        block_bars=max(int(config.rebalance_bars), 1),
-    )
-    baseline_blocks = _contiguous_block_log_growth(
-        sim.rets_baseline,
-        block_bars=max(int(config.rebalance_bars), 1),
-    )
-    blocks_per_year = bars_per_year / max(int(config.rebalance_bars), 1)
-
-    # DEBUG: Block-level hybrid vs baseline 성장 비교
-    _n_blocks = hybrid_blocks.size
-    if _n_blocks > 0 and baseline_blocks.size == _n_blocks:
-        _delta = hybrid_blocks - baseline_blocks
-        _win_count = int(np.sum(_delta > 0))
-        logger.debug(
-            "[L2-BLOCK-SUM] n_blocks=%d blocks_per_year=%.1f | "
-            "hybrid: mean=%.4f std=%.4f min=%.4f max=%.4f | "
-            "baseline: mean=%.4f std=%.4f min=%.4f max=%.4f | "
-            "win_rate: hybrid>baseline = %d/%d (%.1f%%)",
-            _n_blocks, blocks_per_year,
-            float(np.mean(hybrid_blocks)), float(np.std(hybrid_blocks, ddof=1)),
-            float(np.min(hybrid_blocks)), float(np.max(hybrid_blocks)),
-            float(np.mean(baseline_blocks)), float(np.std(baseline_blocks, ddof=1)),
-            float(np.min(baseline_blocks)), float(np.max(baseline_blocks)),
-            _win_count, _n_blocks, 100.0 * float(_win_count) / float(_n_blocks),
+            eval.deploy_leverage, eval.deploy_binding,
+            eval.cagr_hybrid, eval.mdd_hybrid,
         )
 
-    growth_lcb_hybrid = _growth_lower_confidence_bound(
-        hybrid_blocks,
-        blocks_per_year=blocks_per_year,
-        z_value=float(config.l2_growth_lcb_z),
-    )
-    growth_lcb_baseline = _growth_lower_confidence_bound(
-        baseline_blocks,
-        blocks_per_year=blocks_per_year,
-        z_value=float(config.l2_growth_lcb_z),
-    )
-    if override_dsr is not None:
-        dsr_hybrid = float(override_dsr)
-    else:
-        # override 없을 때: 단일-원소 degenerate DSR(≡0.5 상수) 방지.
-        # PSR은 trial-pool 독립 계산 가능한 정직한 하한으로 사용.
-        dsr_hybrid = _psr(list(sim.rets_hybrid), bars_per_year=bars_per_year)
-    friction_pass_pct = (
-        sim.friction_pass_total / sim.signal_total if sim.signal_total > 0 else 0.0
-    )
-    _block_metrics_list: list[Layer2BlockMetric] = []
-    for idx, (fold, block_h, block_b) in enumerate(
-        zip(awf_folds, sim.block_rets_hybrid, sim.block_rets_baseline, strict=False)
-    ):
-        _lg_h = float(np.sum(np.log1p(np.asarray(block_h, dtype=np.float64)))) if block_h else 0.0
-        _lg_b = float(np.sum(np.log1p(np.asarray(block_b, dtype=np.float64)))) if block_b else 0.0
-        # DEBUG: per-block hybrid vs baseline 성장 비교
-        if block_h and block_b:
-            logger.debug(
-                "[L2-BLOCK-CMP] fold=%d log_growth_h=%.4f log_growth_b=%.4f "
-                "delta=%.4f n_bars=%d",
-                idx, _lg_h, _lg_b, _lg_h - _lg_b, len(block_h),
-            )
-        _block_metrics_list.append(Layer2BlockMetric(
-            start_idx=fold.oos_start,
-            end_idx=fold.oos_end,
-            log_growth_hybrid=_lg_h,
-            log_growth_baseline=_lg_b,
-            mdd_hybrid=_mdd(list(block_h)),
-            turnover_hybrid=float(sim.all_turnovers[idx]) if idx < len(sim.all_turnovers) else 0.0,
-            active_rebalances=1 if block_h else 0,
-        ))
-    block_metrics = tuple(_block_metrics_list)
-
-    fold_sharpes_h = [_sharpe(fr) for fr in sim.fold_rets_hybrid]
-    # deployed 기준 fold 지표: apply_deployment(fold_rets, L*)로 정확한 compounding 반영.
-    # unit-vol MDD(~1%)와 달리 실제 리스크 수준(~15-31%)과 구간별 실현 CAGR을 표시.
-    _fold_deployed = [
-        apply_deployment(
-            rets=np.asarray(fr, dtype=np.float64),
-            leverage=_l_star,
-            bars_per_year=bars_per_year,
-        )
-        if fr
-        else None
-        for fr in sim.fold_rets_hybrid
-    ]
-
-    # fold별 통과 여부는 deployed CAGR 양수 기준으로 판정한다.
-    fold_compound_pass = [
-        (_fd.cagr > 0.0) if _fd is not None else None for _fd in _fold_deployed
-    ]
-    _nonempty_fold_pass = [v for v in fold_compound_pass if v is not None]
-    fold_pass_ratio = (
-        sum(1 for v in _nonempty_fold_pass if v) / len(_nonempty_fold_pass)
-        if _nonempty_fold_pass
-        else 0.0
-    )
-    recent_fold_diag = next(
-        (
-            (passed, sharp, deployed)
-            for passed, sharp, deployed in zip(
-                reversed(fold_compound_pass),
-                reversed(fold_sharpes_h),
-                reversed(_fold_deployed),
-                strict=True,
-            )
-            if deployed is not None
-        ),
-        None,
-    )
-    recent_fold_passed = recent_fold_diag[0] if recent_fold_diag is not None else None
-    recent_fold_sharpe = recent_fold_diag[1] if recent_fold_diag is not None else None
-    recent_fold_cagr = recent_fold_diag[2].cagr if recent_fold_diag is not None else 0.0
-    recent_fold_mdd = recent_fold_diag[2].mdd if recent_fold_diag is not None else 0.0
-    finite_fold_cagrs = [
-        float(metric.cagr)
-        for metric in _fold_deployed
-        if metric is not None and np.isfinite(float(metric.cagr))
-    ]
-    worst_fold_cagr = min(finite_fold_cagrs) if finite_fold_cagrs else 0.0
-
-    # gate config 키 (l2_params 우선, default=원칙값)
-    _max_mdd_abs = float(config.l2_max_mdd_abs)
-
-    # 신규 표시 metric (2026-06-16 평가체계 재편: 복리성장+위험효율+배치건전성)
-    sortino_hybrid = _sortino(sim.rets_hybrid, bars_per_year=bars_per_year)
-    terminal_multiple = _terminal_multiple(sim.rets_hybrid)
-    total_pnl_pct = terminal_multiple - 1.0
-    trade_count = int(sim.trade_count)
-    risk_utilization = mdd_hybrid / max(_max_mdd_abs, 1e-9)
-    positive_block_delta_ratio = (
-        float(
-            sum(
-                1
-                for metric in block_metrics
-                if float(metric.log_growth_hybrid) > float(metric.log_growth_baseline)
-            )
-        )
-        / float(len(block_metrics))
-        if block_metrics
-        else 0.0
-    )
-
-    # Stage 0: deployment sanity — NaN/무거래/저표본 명시 차단
-    _deployment_ok = (
-        sim.signal_total > 0
-        and friction_pass_pct > 0.0
-        and np.isfinite(sharpe_hybrid)
-        and np.isfinite(cagr_hybrid)
-        and sim.support_leak_count == 0
-    )
-
-    # RC-4: vol-matched growth_lcb baseline용 std
-    _rets_h_arr = np.asarray(sim.rets_hybrid, dtype=np.float64)
-    _rets_b_arr = np.asarray(sim.rets_baseline_ew, dtype=np.float64)
-    _std_hybrid = float(np.std(_rets_h_arr, ddof=1)) if _rets_h_arr.size >= 2 else None
-    _std_baseline = float(np.std(_rets_b_arr, ddof=1)) if _rets_b_arr.size >= 2 else None
-
-    gate = evaluate_layer2_gate(
-        deployment_failed=not _deployment_ok,
-        support_leak_count=int(sim.support_leak_count),
-        cagr_hybrid=float(cagr_hybrid),
-        sharpe_hybrid=float(sharpe_hybrid),
-        sharpe_hac_hybrid=float(sharpe_hac_hybrid),
-        sharpe_hac_baseline=float(sharpe_hac_baseline),
-        sortino_hybrid=float(sortino_hybrid),
-        mar_hybrid=float(mar_hybrid),
-        mdd_hybrid=float(mdd_hybrid),
-        cvar_95_hybrid=float(cvar_95_hybrid),
-        fold_pass_ratio=float(fold_pass_ratio),
-        active_block_count=len(block_metrics),
-        friction_pass_pct=float(friction_pass_pct),
-        trade_count=int(trade_count),
-        growth_lcb_hybrid=float(growth_lcb_hybrid),
-        growth_lcb_baseline=float(growth_lcb_baseline),
-        dsr_hybrid=float(dsr_hybrid),
-        recent_fold_passed=recent_fold_passed,
-        recent_fold_sharpe=recent_fold_sharpe,
-        worst_fold_cagr=float(worst_fold_cagr),
-        positive_block_delta_ratio=float(positive_block_delta_ratio),
-        config=config,
-        std_hybrid=_std_hybrid,
-        std_baseline=_std_baseline,
-    )
-    blocker_reason = gate.promotion_blocker
-    gate_passed = gate.promotion_passed
-    result = Layer2Result(
-        selected_last=sim.last_selected,
-        weights_last={
-            s: float(sim.last_w[sym_to_idx[s]])
-            for s in sim.last_selected
-            if s in sym_to_idx
-        },
-        sharpe_hybrid=sharpe_hybrid,
-        sharpe_baseline=sharpe_baseline,
-        mdd_hybrid=mdd_hybrid,
-        mdd_baseline=mdd_baseline,
-        cagr_hybrid=cagr_hybrid,
-        cagr_baseline=cagr_baseline,
-        mar_hybrid=mar_hybrid,
-        mar_baseline=mar_baseline,
-        fold_pass_ratio=fold_pass_ratio,
-        turnover=avg_turnover,
-        friction_pass_pct=friction_pass_pct,
-        gate_passed=gate_passed,
-        blocker_reason=blocker_reason,
-        allocation_policy="diagonal_kelly",
-        deploy_leverage=_l_star,
-        psr_hybrid=psr_hybrid,
-        growth_lcb_hybrid=growth_lcb_hybrid,
-        growth_lcb_baseline=growth_lcb_baseline,
-        sharpe_hac_hybrid=sharpe_hac_hybrid,
-        sharpe_hac_baseline=sharpe_hac_baseline,
-        dsr_hybrid=dsr_hybrid,
-        cvar_95_hybrid=cvar_95_hybrid,
-        average_gross_exposure=avg_gross_exposure,
-        average_net_exposure=avg_net_exposure,
-        cap_saturation_ratio=cap_saturation_ratio,
-        total_cost_bps=total_cost_bps,
-        n_rebalances=sim.rebalance_count,
-        block_metrics=block_metrics,
-        sortino_hybrid=sortino_hybrid,
-        terminal_multiple=terminal_multiple,
-        total_pnl_pct=total_pnl_pct,
-        trade_count=trade_count,
-        risk_utilization=risk_utilization,
-        recent_fold_passed=recent_fold_passed,
-        recent_fold_sharpe=float(recent_fold_sharpe) if recent_fold_sharpe is not None else 0.0,
-        recent_fold_cagr=float(recent_fold_cagr),
-        recent_fold_mdd=float(recent_fold_mdd),
-    )
+    # ── verbose fold diagnostics (eval.fold_deployed_cagrs 기반) ──
+    # (참고: eval에 fold_rets_hybrid가 없으므로 fold diag는 eval.fold_deployed_cagrs 기준)
 
     def _idx_to_date_label(idx: int) -> str:
         if not hasattr(aligned, "datetimes") or len(aligned.datetimes) == 0:
@@ -1998,20 +1790,22 @@ def run_l2_awf(
     awf_fold_diags = [
         {
             "fold": i + 1,
-            "sharpe": s,
-            "mdd": _fd.mdd if _fd is not None else 0.0,
-            "cagr": _fd.cagr if _fd is not None else 0.0,
-            "pass": fold_compound_pass[i] is True,
-            "symbols": tuple(sim.fold_selected_symbols[i]) if i < len(sim.fold_selected_symbols) else (),
-            "symbol_count": len(sim.fold_selected_symbols[i]) if i < len(sim.fold_selected_symbols) else 0,
+            "sharpe": 0.0,
+            "mdd": 0.0,
+            "cagr": (float(eval.fold_deployed_cagrs[i])
+                     if i < len(eval.fold_deployed_cagrs)
+                     and eval.fold_deployed_cagrs[i] is not None
+                     else 0.0),
+            "pass": bool(eval.fold_deployed_cagrs[i] is not None
+                         and eval.fold_deployed_cagrs[i] > 0.0) if i < len(eval.fold_deployed_cagrs) else False,
+            "symbols": eval.fold_selected_symbols[i] if i < len(eval.fold_selected_symbols) else (),
+            "symbol_count": len(eval.fold_selected_symbols[i]) if i < len(eval.fold_selected_symbols) else 0,
             "period": (
                 f"{_idx_to_date_label(fold.oos_start)} ~ "
                 f"{_idx_to_date_label(max(fold.oos_end - 1, fold.oos_start))}"
             ),
         }
-        for i, (fold, s, _fd) in enumerate(
-            zip(awf_folds, fold_sharpes_h, _fold_deployed, strict=True)
-        )
+        for i, fold in enumerate(awf_folds)
     ]
     if verbose:
         logger.info(
