@@ -246,8 +246,8 @@ note          | L2 verdict is reported separately in [REGIME-L2]
   ● [STUDY] l2_study_4h_95de9c21278a | trials=200 | events=67063 | symbols=42
   ────────────────────────────────────────────────────────────────────────────
  [OPT] Deleted existing study 'l2_study_4h_95de9c21278a' for a fresh start.
-[L2-OPT]:   0%|                                                                                                   | 0/200 [00:00<?, ?it/s][L2-OPT] ProcessPool workers=6 (mem=5.5GB, mem_safe=7, cpu=8, batch=6)
-[L2-OPT]: 100%|███████████████████████████████████████████████████| 200/200 [02:32<00:00,  1.31it/s, Best CAGR: 156.14% | Current: 85.38%]
+[L2-OPT]:   0%|                                                                                                   | 0/200 [00:00<?, ?it/s][L2-OPT] ProcessPool workers=5 (mem=3.9GB, mem_safe=5, cpu=8, batch=6)
+[L2-OPT]: 100%|███████████████████████████████████████████████████| 200/200 [02:37<00:00,  1.27it/s, Best CAGR: 156.14% | Current: 85.38%]
 [L2-SELECTION] No gate-passed trials found. Reducing diagnostic replay size to 24.
 [L2-SELECTION] No feasible candidate found within fallback window (reason=cagr)
 [L2-DEPLOY-C4] L*=3.934 (binding=oos_blend) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
@@ -268,11 +268,11 @@ note          | L2 verdict is reported separately in [REGIME-L2]
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ❌ Sharpe: -0.376 | CAGR:   -11.2% | MDD:  16.2% | Status: FAIL | Period: 2024-12-22 ~ 2025-03-26
+  ├─ Fold #1 : ❌ Sharpe:  0.000 | CAGR:   -11.2% | MDD:   0.0% | Status: FAIL | Period: 2024-12-22 ~ 2025-03-26
        Symbols: 14 [1000SHIBUSDT, AAVEUSDT, AXSUSDT, BCHUSDT, BNBUSDT, BTCUSDT, ETCUSDT, ETHUSDT, +6 more]
-  ├─ Fold #2 : ✅ Sharpe:  1.268 | CAGR:   +19.0% | MDD:   7.6% | Status: PASS | Period: 2025-03-26 ~ 2025-06-28
+  ├─ Fold #2 : ✅ Sharpe:  0.000 | CAGR:   +19.0% | MDD:   0.0% | Status: PASS | Period: 2025-03-26 ~ 2025-06-28
        Symbols: 9 [AXSUSDT, BCHUSDT, BNBUSDT, ETCUSDT, LINKUSDT, LTCUSDT, SANDUSDT, SOLUSDT, +1 more]
-  └─ Fold #3 : ✅ Sharpe:  0.929 | CAGR:   +13.0% | MDD:  16.6% | Status: PASS | Period: 2025-06-28 ~ 2025-09-30
+  └─ Fold #3 : ✅ Sharpe:  0.000 | CAGR:   +13.0% | MDD:   0.0% | Status: PASS | Period: 2025-06-28 ~ 2025-09-30
        Symbols: 15 [1000SHIBUSDT, AAVEUSDT, BCHUSDT, BNBUSDT, BTCUSDT, DOTUSDT, ETCUSDT, KAVAUSDT, +7 more]
 
 ● [LAYER UNIVERSE AUDIT]
