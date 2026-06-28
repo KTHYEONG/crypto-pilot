@@ -3613,7 +3613,10 @@ def _run_pipeline_to_l2_and_capture_awf_call(
         )
         return _make_l2result(block_metrics=block_metrics)
 
-    monkeypatch.setattr(_tw, "build_l2_simulation_folds", _capture_awf_folds)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.tiered_workflow.pipeline.build_l2_simulation_folds",
+        _capture_awf_folds,
+    )
     monkeypatch.setattr(
         "src.domain.futures.strategy.tiered_workflow.pipeline.predict_layer1_signals",
         lambda **_kwargs: ValidatedSignalBatch(
@@ -3625,7 +3628,9 @@ def _run_pipeline_to_l2_and_capture_awf_call(
             model_version="test",
         ),
     )
-    monkeypatch.setattr(_tw, "run_l2_awf", _stub_run_l2_awf)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.tiered_workflow.pipeline.run_l2_awf", _stub_run_l2_awf
+    )
     monkeypatch.setattr(
         "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer_header",
         lambda *_a, **_k: "",
