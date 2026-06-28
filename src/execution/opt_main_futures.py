@@ -1355,9 +1355,20 @@ def _run_tiered_l2_study(
         policy_hard_block_enabled=bool(getattr(cfg, "l2_regime_hard_block_enabled", False)),
         policy_block_min_confidence=float(getattr(cfg, "l2_regime_block_min_confidence", 0.80)),
         policy_require_sign_consistency=bool(getattr(cfg, "l2_regime_require_sign_consistency", True)),
-        policy_pooled_is_passthrough=bool(getattr(cfg, "l2_regime_pooled_is_passthrough", False)),
-        policy_min_fit_n_floor=int(getattr(cfg, "l2_regime_min_fit_n_floor", 5)),
-        policy_require_fit_n_for_downweight=bool(getattr(cfg, "l2_regime_require_fit_n_for_downweight", True)),
+        policy_pooled_is_passthrough=os.environ.get(
+            "L2_REGIME_POOLED_IS_PASSTHROUGH",
+            str(getattr(cfg, "l2_regime_pooled_is_passthrough", True)),
+        ).lower() in ("1", "true", "yes"),
+        policy_min_fit_n_floor=int(
+            os.environ.get(
+                "L2_REGIME_MIN_FIT_N_FLOOR",
+                str(getattr(cfg, "l2_regime_min_fit_n_floor", 5)),
+            )
+        ),
+        policy_require_fit_n_for_downweight=os.environ.get(
+            "L2_REGIME_REQUIRE_FIT_N_FOR_DOWNWEIGHT",
+            str(getattr(cfg, "l2_regime_require_fit_n_for_downweight", False)),
+        ).lower() in ("1", "true", "yes"),
     )
     l2_sim_cache = replace(l2_sim_cache,
         bucket_edges_by_fold=_routing_plan.effective_bucket_edges_by_fold,
