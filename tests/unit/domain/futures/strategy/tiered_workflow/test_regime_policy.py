@@ -168,6 +168,7 @@ def test_build_regime_policy_by_fold_when_cal_sample_too_small_returns_pooled_po
         min_n=1,
         cal_min_n=10,
         min_confidence=0.8,
+        pooled_is_passthrough=False,
     )
 
     assert diagnostics.global_reliable is False
@@ -210,6 +211,7 @@ def test_build_regime_policy_by_fold_sign_unstable_returns_pooled(monkeypatch: p
         block_lift_bps=-12.0,
         min_confidence=0.0,
         require_sign_consistency=True,
+        pooled_is_passthrough=False,
     )
 
     key = (0, "donchian_72", "4h")
@@ -588,13 +590,13 @@ def test_apply_regime_risk_cap_invalid_cap_raises() -> None:
         apply_regime_risk_cap(weights, 2, ("bull", "bear", "crisis"), crisis_gross_cap=-0.2)
 
 
-# ── Scenario 1: pooled_is_passthrough 기본값 False (backward compat) ──
+# ── Scenario 1: 기본값 검증 (pooled_passthrough=True, require_fit_n_for_downweight=False) ──
 
 def test_layer2_allocation_config_defaults_new_regime_conservatism_fields() -> None:
     cfg = Layer2AllocationConfig.from_mapping({})
-    assert cfg.l2_regime_pooled_is_passthrough is False
+    assert cfg.l2_regime_pooled_is_passthrough is True
     assert cfg.l2_regime_min_fit_n_floor == 5
-    assert cfg.l2_regime_require_fit_n_for_downweight is True
+    assert cfg.l2_regime_require_fit_n_for_downweight is False
 
 
 def test_build_regime_policy_by_fold_pooled_is_passthrough_false_preserves_pooled(
@@ -827,7 +829,8 @@ def test_build_regime_policy_by_fold_require_fit_n_for_downweight_blocks(
         min_fit_n_floor=5,
     )
 
-    # n_fit=3 < min_n=15, and n_fit=3 < min_fit_n_floor=5, so should be "insufficient_fit" → pooled
+    # n_fit=3 < min_n=15, n_fit=3 < min_fit_n_floor=5 → "insufficient_fit" pooled
+    # (require_fit_n_for_downweight=True 명시적 전달)
     key = (0, "donchian_72", "4h")
     assert policy_by_fold[0][key].action == "pooled"
     assert policy_by_fold[0][key].reason == "insufficient_fit"

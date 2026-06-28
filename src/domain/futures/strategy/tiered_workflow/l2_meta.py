@@ -794,9 +794,9 @@ def build_regime_policy_by_fold(
     hard_block_enabled: bool = False,
     block_min_confidence: float = 0.80,
     require_sign_consistency: bool = True,
-    pooled_is_passthrough: bool = False,
+    pooled_is_passthrough: bool = True,
     min_fit_n_floor: int = 5,
-    require_fit_n_for_downweight: bool = True,
+    require_fit_n_for_downweight: bool = False,
 ) -> tuple[tuple[dict[tuple[int, str, str], RegimeCellPolicy], ...], RegimePolicyDiagnostics]:
     """Build fold-local regime policy using fit/cal windows only."""
     if mode == "filter":
@@ -1817,9 +1817,9 @@ def build_regime_routing_plan(
     policy_hard_block_enabled: bool = False,
     policy_block_min_confidence: float = 0.80,
     policy_require_sign_consistency: bool = True,
-    policy_pooled_is_passthrough: bool = False,
+    policy_pooled_is_passthrough: bool = True,
     policy_min_fit_n_floor: int = 5,
-    policy_require_fit_n_for_downweight: bool = True,
+    policy_require_fit_n_for_downweight: bool = False,
 ) -> RegimeRoutingPlan:
     """Build the fold-local routing plan used by L2 bucket selection."""
     n_bars = int(np.asarray(aligned.close_2d).shape[0])

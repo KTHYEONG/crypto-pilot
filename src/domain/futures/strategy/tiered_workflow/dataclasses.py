@@ -510,9 +510,9 @@ class Layer2AllocationConfig:
     l2_entry_spike_penalty_weight: float = 0.05
     l2_entry_spike_warn_threshold: float = 0.20
     # Regime policy conservatism relaxation
-    l2_regime_pooled_is_passthrough: bool = False
+    l2_regime_pooled_is_passthrough: bool = True
     l2_regime_min_fit_n_floor: int = 5
-    l2_regime_require_fit_n_for_downweight: bool = True
+    l2_regime_require_fit_n_for_downweight: bool = False
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
