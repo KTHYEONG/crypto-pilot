@@ -289,7 +289,8 @@ def test_l2_gate_blocks_worst_fold_cagr() -> None:
     assert gate.promotion_blocker == "worst_fold_cagr"
 
 
-def test_l2_gate_blocks_low_block_delta_ratio() -> None:
+def test_l2_gate_block_delta_is_diagnostic() -> None:
+    """RC-4: block_delta ratio 낮아도 promotion 차단 안 함 (diagnostic-only)."""
     gate = evaluate_layer2_gate(
         deployment_failed=False,
         support_leak_count=0,
@@ -314,8 +315,70 @@ def test_l2_gate_blocks_low_block_delta_ratio() -> None:
         config=Layer2AllocationConfig(),
     )
 
+    assert gate.promotion_passed
+    assert gate.promotion_blocker != "block_delta"
+
+
+# ── RC-4: growth_lcb vol-matched + regression ──
+
+def test_gate_growth_lcb_uses_vol_matched_baseline() -> None:
+    """RC-4: 저변동 hybrid가 vol-scaled baseline을 넘으면 growth_lcb 미차단."""
+    gate = evaluate_layer2_gate(
+        deployment_failed=False,
+        support_leak_count=0,
+        cagr_hybrid=0.35,
+        sharpe_hybrid=1.2,
+        sharpe_hac_hybrid=1.1,
+        sharpe_hac_baseline=0.9,
+        sortino_hybrid=1.8,
+        mar_hybrid=1.4,
+        mdd_hybrid=0.12,
+        cvar_95_hybrid=0.03,
+        fold_pass_ratio=0.80,
+        active_block_count=4,
+        friction_pass_pct=0.80,
+        trade_count=80,
+        growth_lcb_hybrid=0.08,
+        growth_lcb_baseline=0.10,
+        dsr_hybrid=0.8,
+        psr_hybrid=0.95,
+        worst_fold_cagr=-0.01,
+        positive_block_delta_ratio=0.50,
+        config=Layer2AllocationConfig(l2_min_growth_uplift=0.0),
+        std_hybrid=0.015,
+        std_baseline=0.10,
+    )
+    assert gate.promotion_passed
+    assert gate.promotion_blocker != "growth_lcb"
+
+
+def test_gate_still_blocks_low_cagr() -> None:
+    """RC-4 regression: cagr=0.05(<0.30) → cagr 차단 유지."""
+    gate = evaluate_layer2_gate(
+        deployment_failed=False,
+        support_leak_count=0,
+        cagr_hybrid=0.05,
+        sharpe_hybrid=1.2,
+        sharpe_hac_hybrid=1.1,
+        sharpe_hac_baseline=0.9,
+        sortino_hybrid=1.8,
+        mar_hybrid=0.2,
+        mdd_hybrid=0.25,
+        cvar_95_hybrid=0.05,
+        fold_pass_ratio=0.80,
+        active_block_count=4,
+        friction_pass_pct=0.80,
+        trade_count=80,
+        growth_lcb_hybrid=0.10,
+        growth_lcb_baseline=0.05,
+        dsr_hybrid=0.8,
+        psr_hybrid=0.95,
+        worst_fold_cagr=-0.01,
+        positive_block_delta_ratio=0.50,
+        config=Layer2AllocationConfig(),
+    )
     assert not gate.promotion_passed
-    assert gate.promotion_blocker == "block_delta"
+    assert gate.promotion_blocker == "cagr"
 
 
 def test_layer2_constraints_tuple_length_is_eight() -> None:

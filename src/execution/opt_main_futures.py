@@ -2318,7 +2318,7 @@ def _run_strategy_stage(
                 l1_result_override=l1_res,
                 verbose=True,  # 최종 실행시 상세 결과 출력
                 override_dsr=l2_study_result.dsr,
-                l2_sim_cache=shared_l2_cache,
+                l2_sim_cache=l2_study_result.sim_cache,
                 l2_signal_batch=l2_signals,
                 l2_awf_folds=l2_study_result.awf_folds,
             )
@@ -2327,10 +2327,13 @@ def _run_strategy_stage(
                     assert_selection_replay_parity,
                 )
 
-                if not assert_selection_replay_parity(
+                _parity_gate = True
+                _parity_ok = assert_selection_replay_parity(
                     replay_evaluation=l2_study_result.best_evaluation,
                     final_evaluation=l2_final,
-                ):
+                    gate=_parity_gate,
+                )
+                if not _parity_ok:
                     _logger.error(
                         "[L2-PARITY] replay/final mismatch. "
                         "replay_L*=%.4f final_L*=%.4f "
@@ -2343,6 +2346,9 @@ def _run_strategy_stage(
                         getattr(l2_study_result.best_evaluation, "trade_count", "?"),
                         getattr(l2_final, "trade_count", "?"),
                     )
+                    if _parity_gate and hasattr(l2_final, "blocker_reason"):
+                        import dataclasses
+                        l2_final = dataclasses.replace(l2_final, gate_passed=False, blocker_reason="parity_divergence")
             
             _log_mem("l2_final_pipeline", _mem_l2_final, extra=f"took={time.perf_counter() - _t_l2_final_start:.4f}s")
             # Layer 2 BLOCKED 시 즉시 종료 (Step 5 optimization 진입 방지)
