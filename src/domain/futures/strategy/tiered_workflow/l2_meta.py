@@ -25,7 +25,11 @@ if TYPE_CHECKING:
 
 from src.domain.futures.strategy.market_regime import compress_regime_codes
 from src.domain.futures.strategy.regime_evaluation import evaluate_regime_lift_proof
+from src.domain.futures.strategy.tiered_workflow.bucket_reliability import (
+    build_bucket_reliability,
+)
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+    RegimeBucketReliability,
     RegimeCellDebugStat,
     RegimeCellPolicy,
     RegimeDebugDiagnostics,
@@ -39,6 +43,35 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
 from src.domain.futures.strategy.tiered_workflow.metrics import _newey_west_ic_tstat
 
 logger = logging.getLogger(__name__)
+
+
+def _build_bucket_reliability(
+    *,
+    regime: int,
+    family: str,
+    tf: str,
+    fit_edge_bps: float,
+    cal_edge_bps: float,
+    n_fit: int,
+    n_cal: int,
+    min_fit_n: int,
+    min_cal_n: int,
+    min_cal_lift_bps: float,
+    min_reliability: float,
+) -> RegimeBucketReliability:
+    return build_bucket_reliability(
+        regime=regime,
+        family=family,
+        tf=tf,
+        fit_edge_bps=fit_edge_bps,
+        cal_edge_bps=cal_edge_bps,
+        n_fit=n_fit,
+        n_cal=n_cal,
+        min_fit_n=min_fit_n,
+        min_cal_n=min_cal_n,
+        min_cal_lift_bps=min_cal_lift_bps,
+        min_reliability=min_reliability,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -850,6 +883,19 @@ def build_regime_policy_by_fold(
             fit_lift_bps = fit_edge_bps - float(pooled_fit.edge_bps)
             cal_lift_bps = cal_edge_bps - float(pooled_cal.edge_bps)
             confidence = min(1.0, float(n_cal) / max(float(cal_min_n), 1.0))
+            reliability = _build_bucket_reliability(
+                regime=state,
+                family=family,
+                tf=tf,
+                fit_edge_bps=fit_lift_bps,
+                cal_edge_bps=cal_lift_bps,
+                n_fit=n_fit,
+                n_cal=n_cal,
+                min_fit_n=min_n,
+                min_cal_n=cal_min_n,
+                min_cal_lift_bps=min_cal_lift_bps,
+                min_reliability=min_confidence,
+            )
             fit_lifts_all.append(fit_lift_bps)
             cal_lifts_all.append(cal_lift_bps)
             confidences_all.append(confidence)
@@ -877,8 +923,6 @@ def build_regime_policy_by_fold(
                 reason = "insufficient_fit"
             elif n_cal < cal_min_n:
                 reason = "insufficient_cal"
-            elif confidence < min_confidence:
-                reason = "global_unreliable"
             elif require_sign_consistency and not sign_consistent and fit_sign != 0 and cal_sign != 0:
                 reason = "cal_sign_unstable"
                 n_unstable += 1
@@ -899,16 +943,21 @@ def build_regime_policy_by_fold(
                     edge_multiplier = downweight_max - severity * (downweight_max - downweight_min)
                     edge_multiplier = float(np.clip(edge_multiplier, downweight_min, downweight_max))
                 reason = "negative_cal_lift"
-            elif cal_lift_bps < min_cal_lift_bps:
+            elif reliability.action == "allow" and cal_lift_bps >= min_cal_lift_bps:
+                action = "allow"
+                edge_multiplier = 1.0
+                reason = "positive_cal_lift"
+            elif reliability.action == "downweight" or cal_lift_bps < min_cal_lift_bps:
                 action = "downweight"
-                severity = min(1.0, abs(min(cal_lift_bps, 0.0)) / max(abs(block_lift_bps), 1e-12))
+                severity = max(
+                    1.0 - float(reliability.reliability),
+                    min(1.0, abs(min(cal_lift_bps, 0.0)) / max(abs(block_lift_bps), 1e-12)),
+                )
                 edge_multiplier = downweight_max - severity * (downweight_max - downweight_min)
                 edge_multiplier = float(np.clip(edge_multiplier, downweight_min, downweight_max))
                 reason = "neutral" if cal_lift_bps >= 0.0 else "negative_cal_lift"
             else:
-                action = "allow"
-                edge_multiplier = 1.0
-                reason = "positive_cal_lift"
+                reason = "global_unreliable"
 
             if mode == "observe":
                 reason = "observe_only"
@@ -947,6 +996,7 @@ def build_regime_policy_by_fold(
                 hard_block_eligible=hard_block_eligible,
                 n_fit=n_fit,
                 n_cal=n_cal,
+                reliability=float(reliability.reliability),
             )
             if action == "allow":
                 n_allow += 1

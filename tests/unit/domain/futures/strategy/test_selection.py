@@ -17,10 +17,13 @@ from src.domain.futures.strategy.candidate_contracts import (
     ValidatedSignalEvent,
 )
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+    Layer2AllocationConfig,
     Layer2TrialEvaluation,
 )
 from src.domain.futures.strategy.tiered_workflow.selection import (
+    _assert_selection_replay_parity,
     _layer2_experiment_key,
+    _score_layer2_deployable_fallback,
     _signal_batch_fingerprint,
     select_layer2_champion,
 )
@@ -793,7 +796,6 @@ class TestLayer2Selection(unittest.TestCase):
 
         # thread-safe하게 k_rank를 통해 평가 결과를 리턴하는 side_effect 함수 정의
         def _thread_safe_eval(*args: object, **kwargs: object) -> object:
-            from src.domain.futures.strategy.tiered_workflow import Layer2AllocationConfig
             cfg = kwargs.get("config")
             assert isinstance(cfg, Layer2AllocationConfig)
             k_rank_val = cfg.k_rank
@@ -954,8 +956,8 @@ class TestLayer2Selection(unittest.TestCase):
             prebuilt_cache=dummy_cache,
         )
 
-        # gate 통과가 하나도 없으므로 상위 3개만 Replay가 수행되어야 함
-        assert mock_eval.call_count == 3
+        # gate 통과가 하나도 없으면 fallback 한도 내 frontier 전체를 replay해야 함
+        assert mock_eval.call_count == 12
 
     @patch("src.domain.futures.strategy.tiered_workflow.selection.layer2_constraints_from_trial")
     @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
@@ -1104,3 +1106,223 @@ class TestLayer2Selection(unittest.TestCase):
 
         # candidate당 evaluate_layer2_gate가 정확히 1회 호출되어야 함
         assert mock_gate.call_count == 3
+
+    def test_score_layer2_deployable_fallback_penalizes_collapse(self) -> None:
+        evaluation = Layer2TrialEvaluation(
+            objective_value=0.18,
+            constraint_values=(-1.0,) * 9,
+            cagr_hybrid=0.20,
+            cagr_baseline=0.05,
+            growth_lcb_hybrid=0.08,
+            growth_lcb_baseline=0.01,
+            sharpe_hac_hybrid=1.1,
+            sharpe_hac_baseline=0.8,
+            psr_hybrid=0.92,
+            mdd_hybrid=0.10,
+            cvar_95_hybrid=0.03,
+            fold_pass_ratio=0.67,
+            break_even_pass_pct=0.8,
+            sortino_hybrid=1.2,
+            trade_count=80,
+            average_gross_exposure=0.8,
+            cap_saturation_ratio=0.1,
+            total_cost_bps=30.0,
+            block_metrics=(MagicMock(), MagicMock(), MagicMock(), MagicMock()),
+            worst_fold_cagr=-0.20,
+            positive_block_delta_ratio=0.25,
+            sharpe_hybrid=1.5,
+            bucket_reliability_mean=0.7,
+            entry_spike_penalty=0.15,
+            deployable_score=None,
+        )
+
+        score = _score_layer2_deployable_fallback(
+            evaluation,
+            config=Layer2AllocationConfig(),
+        )
+
+        expected = (
+            0.20
+            + 0.10 * 1.2
+            + 0.05 * min(0.20 / 0.10, 3.0)
+            - 0.50 * 0.20
+            - 0.25 * (0.45 - 0.25)
+            - 0.20 * 0.30
+            - 0.15
+        )
+        assert score.worst_fold_cagr == pytest.approx(-0.20)
+        assert score.positive_block_delta_ratio == pytest.approx(0.25)
+        assert score.cagr == pytest.approx(0.20)
+        assert score.sortino == pytest.approx(1.2)
+        assert score.calmar == pytest.approx(2.0)
+        assert score.cost_drag == pytest.approx(0.30)
+        assert score.bucket_reliability_mean == pytest.approx(0.7)
+        assert score.entry_spike_penalty == pytest.approx(0.15)
+        assert score.score == pytest.approx(expected)
+
+    def test_assert_selection_replay_parity_raises_on_metric_mismatch(self) -> None:
+        replay = SimpleNamespace(cagr_hybrid=0.22, mdd_hybrid=0.09, fold_pass_ratio=0.67, trade_count=80)
+        final = SimpleNamespace(cagr_hybrid=0.08, mdd_hybrid=0.15, fold_pass_ratio=0.34, trade_count=120)
+
+        with pytest.raises(ValueError, match="replay/final parity"):
+            _assert_selection_replay_parity(
+                replay_evaluation=replay,
+                final_evaluation=final,
+                tolerance=1e-6,
+            )
+
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.layer2_constraints_from_trial")
+    def test_select_champion_replays_up_to_fallback_limit_without_gate_passed(
+        self,
+        mock_constraints: MagicMock,
+        mock_evaluate: MagicMock,
+    ) -> None:
+        study = MagicMock(spec=optuna.Study)
+        trials = []
+        for idx in range(4):
+            trial = MagicMock(spec=optuna.trial.FrozenTrial)
+            trial.state = optuna.trial.TrialState.COMPLETE
+            trial.value = 0.30 - (idx * 0.01)
+            trial.number = idx + 30
+            trial.user_attrs = {
+                "l2_block_log_growth_signature": [0.02] * 8,
+                "sharpe_hac_hybrid": 1.2,
+                "cagr_hybrid": 0.20,
+                "growth_lcb_hybrid": 0.08,
+                "mdd_hybrid": 0.08,
+            }
+            trial.params = {"K_RANK": 3, "l2_replay_max_fallbacks": 4}
+            trials.append(trial)
+        study.trials = trials
+        mock_constraints.return_value = (-1.0,) * 9
+        mock_evaluate.return_value = Layer2TrialEvaluation(
+            objective_value=0.10,
+            constraint_values=(1.0,) + (-1.0,) * 8,
+            cagr_hybrid=0.18,
+            cagr_baseline=0.05,
+            growth_lcb_hybrid=0.06,
+            growth_lcb_baseline=0.02,
+            sharpe_hac_hybrid=0.8,
+            sharpe_hac_baseline=0.7,
+            psr_hybrid=0.85,
+            mdd_hybrid=0.09,
+            cvar_95_hybrid=0.04,
+            fold_pass_ratio=0.50,
+            break_even_pass_pct=0.60,
+            sortino_hybrid=0.9,
+            trade_count=40,
+            average_gross_exposure=0.7,
+            cap_saturation_ratio=0.1,
+            total_cost_bps=40.0,
+            block_metrics=(MagicMock(), MagicMock(), MagicMock()),
+            worst_fold_cagr=-0.10,
+            positive_block_delta_ratio=0.50,
+        )
+
+        select_layer2_champion(
+            study=study,
+            tf=self.tf,
+            signal_batch=self.signal_batch,
+            aligned=self.aligned,
+            awf_folds=self.awf_folds,
+            caps=self.caps,
+        )
+
+        assert mock_evaluate.call_count == 4
+
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.evaluate_l2_trial")
+    @patch("src.domain.futures.strategy.tiered_workflow.selection.layer2_constraints_from_trial")
+    def test_select_champion_uses_deployable_score_for_blocked_fallback(
+        self,
+        mock_constraints: MagicMock,
+        mock_evaluate: MagicMock,
+    ) -> None:
+        study = MagicMock(spec=optuna.Study)
+        trial_a = MagicMock(spec=optuna.trial.FrozenTrial)
+        trial_a.state = optuna.trial.TrialState.COMPLETE
+        trial_a.value = 0.30
+        trial_a.number = 41
+        trial_a.user_attrs = {
+            "l2_block_log_growth_signature": [0.02] * 8,
+            "sharpe_hac_hybrid": 1.4,
+            "cagr_hybrid": 0.24,
+            "growth_lcb_hybrid": 0.12,
+            "mdd_hybrid": 0.09,
+        }
+        trial_a.params = {"K_RANK": 3, "l2_replay_max_fallbacks": 4}
+
+        trial_b = MagicMock(spec=optuna.trial.FrozenTrial)
+        trial_b.state = optuna.trial.TrialState.COMPLETE
+        trial_b.value = 0.28
+        trial_b.number = 42
+        trial_b.user_attrs = {
+            "l2_block_log_growth_signature": [0.02] * 8,
+            "sharpe_hac_hybrid": 1.1,
+            "cagr_hybrid": 0.22,
+            "growth_lcb_hybrid": 0.10,
+            "mdd_hybrid": 0.08,
+        }
+        trial_b.params = {"K_RANK": 3, "l2_replay_max_fallbacks": 4}
+        study.trials = [trial_a, trial_b]
+        mock_constraints.return_value = (-1.0,) * 9
+        mock_evaluate.side_effect = [
+            Layer2TrialEvaluation(
+                objective_value=0.16,
+                constraint_values=(-1.0,) * 9,
+                cagr_hybrid=0.24,
+                cagr_baseline=0.05,
+                growth_lcb_hybrid=0.08,
+                growth_lcb_baseline=0.02,
+                sharpe_hac_hybrid=1.2,
+                sharpe_hac_baseline=0.7,
+                psr_hybrid=0.90,
+                mdd_hybrid=0.10,
+                cvar_95_hybrid=0.04,
+                fold_pass_ratio=0.60,
+                break_even_pass_pct=0.70,
+                sortino_hybrid=1.0,
+                trade_count=60,
+                average_gross_exposure=0.8,
+                cap_saturation_ratio=0.1,
+                total_cost_bps=35.0,
+                block_metrics=(MagicMock(), MagicMock(), MagicMock(), MagicMock()),
+                worst_fold_cagr=-0.30,
+                positive_block_delta_ratio=0.20,
+            ),
+            Layer2TrialEvaluation(
+                objective_value=0.12,
+                constraint_values=(-1.0,) * 9,
+                cagr_hybrid=0.20,
+                cagr_baseline=0.05,
+                growth_lcb_hybrid=0.07,
+                growth_lcb_baseline=0.02,
+                sharpe_hac_hybrid=1.0,
+                sharpe_hac_baseline=0.7,
+                psr_hybrid=0.88,
+                mdd_hybrid=0.08,
+                cvar_95_hybrid=0.04,
+                fold_pass_ratio=0.60,
+                break_even_pass_pct=0.70,
+                sortino_hybrid=0.9,
+                trade_count=55,
+                average_gross_exposure=0.7,
+                cap_saturation_ratio=0.1,
+                total_cost_bps=32.0,
+                block_metrics=(MagicMock(), MagicMock(), MagicMock(), MagicMock()),
+                worst_fold_cagr=-0.02,
+                positive_block_delta_ratio=0.75,
+            ),
+        ]
+
+        result = select_layer2_champion(
+            study=study,
+            tf=self.tf,
+            signal_batch=self.signal_batch,
+            aligned=self.aligned,
+            awf_folds=self.awf_folds,
+            caps=self.caps,
+        )
+
+        assert result.blocker_reason == "cagr"
+        assert result.best_trial_number == 42
