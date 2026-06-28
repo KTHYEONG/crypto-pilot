@@ -1031,6 +1031,24 @@ def build_regime_policy_by_fold(
             else:
                 n_pooled += 1
 
+        # RC-3: fold-level regime confidence override. If mean_cal_lift < 0 AND
+        # sign_consistency_ratio < 0.6, force ALL cells to pooled passthrough.
+        # regime is demoted to exposure governor (no alpha selection).
+        _fold_mean_cal = float(np.mean(
+            [cell.cal_lift_bps for cell in fold_policy.values()]
+        )) if fold_policy else 0.0
+        _fold_sign_cons = (
+            float(sign_consistent_total) / float(sign_comparable_total)
+            if sign_comparable_total > 0 else 0.0
+        )
+        if _fold_mean_cal < 0.0 and _fold_sign_cons < 0.6:
+            fold_policy = {
+                key: replace(policy, action="allow",
+                             edge_multiplier=1.0,
+                             reason="pooled_passthrough")
+                for key, policy in fold_policy.items()
+            }
+
         policy_by_fold.append(fold_policy)
 
     enabled = True
