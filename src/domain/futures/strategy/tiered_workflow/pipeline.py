@@ -21,6 +21,7 @@ import src.domain.futures.strategy.config as strategy_config
 from src.core.utils.utils import PERF
 from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
 from src.domain.futures.portfolio.signal_composer import (
+    compose_symbol_signals,
     composer_sigma_lookback_bars,
 )
 from src.domain.futures.strategy.candidate_contracts import (
@@ -67,6 +68,7 @@ from src.domain.futures.strategy.tiered_workflow.diagnostics import (
     _is_trained_fold_output,
     _log_fold_regime_analysis,
     build_layer_universe_audit,
+    compute_per_strategy_oos_validation,
     compute_per_symbol_ic,
     compute_per_symbol_realized_stats,
     compute_prediction_decomposition_diag,
@@ -87,6 +89,7 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     _sortino,
     _terminal_multiple,
     compute_breadth_weighted_ic,
+    compute_panel_diversity,
 )
 from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
     apply_deployment,
@@ -108,7 +111,12 @@ from src.domain.futures.strategy.tiered_workflow.signal_selection import (
     prefit_layer1_model,
     select_outer_symbol_opportunities,
 )
-from src.domain.futures.strategy.walk_forward import WFFold
+from src.domain.futures.strategy.walk_forward import (
+    WFFold,
+    build_l1_nested_swf_folds,
+    build_l1_swf_folds,
+    build_l2_simulation_folds,
+)
 
 if TYPE_CHECKING:
     from src.domain.futures.optimization.opt_config import LayeredWindow
@@ -648,8 +656,7 @@ def run_l1_swf(
         )
         fold_sigs: dict[str, SymbolSignal] = {}
         if _is_trained_fold_output(fold_out):
-            import src.domain.futures.strategy.tiered_workflow as _tw
-            fold_sigs = _tw.compose_symbol_signals(
+            fold_sigs = compose_symbol_signals(
                 model_output=fold_out.model_output,
                 close_2d=aligned.close_2d,
                 symbols=symbols,
@@ -740,10 +747,9 @@ def run_l1_swf(
 
     sigs_tuple = tuple(signals_per_fold)
     oos_stacked = _stack_oos_signals(sigs_tuple, realized_stats=per_sym_realized)
-    import src.domain.futures.strategy.tiered_workflow as _tw
-    strategy_panel = _tw.compute_per_strategy_oos_validation(fold_tuples=futures)
+    strategy_panel = compute_per_strategy_oos_validation(fold_tuples=futures)
     n_valid_strategies = sum(1 for sig in strategy_panel if sig.valid)
-    panel_diversity = _tw.compute_panel_diversity(strategy_panel)
+    panel_diversity = compute_panel_diversity(strategy_panel)
 
     fold_perf_details: list[dict[str, Any]] = [
         {
@@ -1040,7 +1046,6 @@ def run_l1_nested_swf(
     outer_event_frames: list[pd.DataFrame] = []
     signals_per_fold: list[dict[str, SymbolSignal]] = []
     trained_count = 0
-    import src.domain.futures.strategy.tiered_workflow as _tw
 
     evidence_start = min((fold.fit_start for fold in outer_folds), default=0)
     evidence_end = max((fold.oos_start for fold in outer_folds), default=0)
@@ -1048,7 +1053,7 @@ def run_l1_nested_swf(
         _outer_n = len(outer_folds)
         _mult = max(3, int(getattr(cfg, "l1_evidence_grid_multiplier", 3)))
         _ev_n_folds = min(_outer_n * _mult, int(getattr(cfg, "l1_evidence_max_folds", 32)))
-        evidence_folds = _tw.build_l1_swf_folds(
+        evidence_folds = build_l1_swf_folds(
             n_bars=evidence_end,
             n_folds=_ev_n_folds,
             l1_start_bars=evidence_start,
@@ -1235,7 +1240,9 @@ def run_l1_nested_swf(
                 t_ev_ipc = time.perf_counter()
                 _mem_ipc_ref = _get_rss_mb()
                 evidence_results = [fut.result() for fut in as_completed(ev_submits)]
-                evidence_results.sort(key=lambda r: r.fold_id)
+                evidence_results.sort(
+                    key=lambda r: int(getattr(r, "fold_id", getattr(r, "fold_idx", 0)))
+                )
                 logger.log(PERF, "[PERF] l1_evidence_ipc_collect n=%d took=%.4fs",
                     len(evidence_results), time.perf_counter() - t_ev_ipc)
                 _rss_ev = _get_rss_mb()
@@ -1303,6 +1310,12 @@ def run_l1_nested_swf(
                     out_submits.append(fut)
                 
                 outer_results = [fut.result() for fut in out_submits]
+                for _fold_idx, _result in enumerate(outer_results):
+                    if not hasattr(_result, "fold_id"):
+                        import contextlib
+
+                        with contextlib.suppress(Exception):
+                            _result.fold_id = int(_fold_idx)
                 logger.log(PERF, "[PERF] l1_outer_ipc_collect n=%d took=%.4fs",
                     len(outer_results), time.perf_counter() - t_out_ipc)
                 _rss_out = _get_rss_mb()
@@ -1532,53 +1545,54 @@ def run_l1_nested_swf(
     # ── Lifecycle computation (Phase 3) ─────────────────────────────────────
     # Time: O(N * L1_T), Space: O(N)  where N=n_symbols, L1_T=l1 bar span
     t_life = time.perf_counter()
-    _l1_fit_start = min(fold.fit_start for fold in outer_folds)
-    _l1_fit_end = max(fold.oos_end for fold in outer_folds)
-    _active = aligned.active_mask  # NDArray[bool_] | None
-    if _active is None:
-        # stage6 path — no PIT mask; treat all bars as eligible
-        _active = np.ones((len(aligned.datetimes), len(aligned.symbols)), dtype=np.bool_)
-
-    _ready_syms: set[str] = (
-        set(deployment_registry.ready_symbols) if deployment_registry is not None else set()
-    )
     _lifecycle_records: list[SymbolLifecycleRecord] = []
-    for _col, _sym in enumerate(aligned.symbols):
-        _mask_slice = _active[_l1_fit_start:_l1_fit_end, _col]  # shape: [L1_T]
-        if not _mask_slice.any():
+    if outer_folds:
+        _l1_fit_start = min(fold.fit_start for fold in outer_folds)
+        _l1_fit_end = max(fold.oos_end for fold in outer_folds)
+        _active = aligned.active_mask  # NDArray[bool_] | None
+        if _active is None:
+            # stage6 path — no PIT mask; treat all bars as eligible
+            _active = np.ones((len(aligned.datetimes), len(aligned.symbols)), dtype=np.bool_)
+
+        _ready_syms: set[str] = (
+            set(deployment_registry.ready_symbols) if deployment_registry is not None else set()
+        )
+        for _col, _sym in enumerate(aligned.symbols):
+            _mask_slice = _active[_l1_fit_start:_l1_fit_end, _col]  # shape: [L1_T]
+            if not _mask_slice.any():
+                _lifecycle_records.append(
+                    SymbolLifecycleRecord(
+                        symbol=_sym,
+                        fold_status="not_evaluated",
+                        promotion_available_at=None,
+                    )
+                )
+                continue
+
+            _first_offset = int(np.argmax(_mask_slice))
+            _first_abs = _l1_fit_start + _first_offset
+            _promo_at: date = pd.Timestamp(aligned.datetimes[_first_abs]).date()
+
+            if _sym in _ready_syms:
+                _status: Literal["promoted", "evaluated", "failed", "not_ready", "not_evaluated"] = "promoted"
+            elif _sym in oos_stacked:
+                _status = "evaluated"
+            else:
+                _status = "failed"
+
             _lifecycle_records.append(
                 SymbolLifecycleRecord(
                     symbol=_sym,
-                    fold_status="not_evaluated",
-                    promotion_available_at=None,
+                    fold_status=_status,
+                    promotion_available_at=_promo_at,
                 )
             )
-            continue
-
-        _first_offset = int(np.argmax(_mask_slice))
-        _first_abs = _l1_fit_start + _first_offset
-        _promo_at: date = pd.Timestamp(aligned.datetimes[_first_abs]).date()
-
-        if _sym in _ready_syms:
-            _status: Literal["promoted", "evaluated", "failed", "not_ready", "not_evaluated"] = "promoted"
-        elif _sym in oos_stacked:
-            _status = "evaluated"
-        else:
-            _status = "failed"
-
-        _lifecycle_records.append(
-            SymbolLifecycleRecord(
-                symbol=_sym,
-                fold_status=_status,
-                promotion_available_at=_promo_at,
-            )
-        )
 
     logger.log(
         PERF,
         "[PERF] l1_lifecycle n_syms=%d l1_T=%d took=%.4fs",
         len(aligned.symbols),
-        _l1_fit_end - _l1_fit_start,
+        (_l1_fit_end - _l1_fit_start) if outer_folds else 0,
         time.perf_counter() - t_life,
     )
     return dataclasses.replace(_l1_result, symbol_lifecycle=tuple(_lifecycle_records))
@@ -1850,6 +1864,12 @@ def run_l2_awf(
     recent_fold_sharpe = recent_fold_diag[1] if recent_fold_diag is not None else None
     recent_fold_cagr = recent_fold_diag[2].cagr if recent_fold_diag is not None else 0.0
     recent_fold_mdd = recent_fold_diag[2].mdd if recent_fold_diag is not None else 0.0
+    finite_fold_cagrs = [
+        float(metric.cagr)
+        for metric in _fold_deployed
+        if metric is not None and np.isfinite(float(metric.cagr))
+    ]
+    worst_fold_cagr = min(finite_fold_cagrs) if finite_fold_cagrs else 0.0
 
     # gate config 키 (l2_params 우선, default=원칙값)
     _max_mdd_abs = float(config.l2_max_mdd_abs)
@@ -1860,6 +1880,18 @@ def run_l2_awf(
     total_pnl_pct = terminal_multiple - 1.0
     trade_count = int(sim.trade_count)
     risk_utilization = mdd_hybrid / max(_max_mdd_abs, 1e-9)
+    positive_block_delta_ratio = (
+        float(
+            sum(
+                1
+                for metric in block_metrics
+                if float(metric.log_growth_hybrid) > float(metric.log_growth_baseline)
+            )
+        )
+        / float(len(block_metrics))
+        if block_metrics
+        else 0.0
+    )
 
     # Stage 0: deployment sanity — NaN/무거래/저표본 명시 차단
     _deployment_ok = (
@@ -1890,6 +1922,8 @@ def run_l2_awf(
         dsr_hybrid=float(dsr_hybrid),
         recent_fold_passed=recent_fold_passed,
         recent_fold_sharpe=recent_fold_sharpe,
+        worst_fold_cagr=float(worst_fold_cagr),
+        positive_block_delta_ratio=float(positive_block_delta_ratio),
         config=config,
     )
     blocker_reason = gate.promotion_blocker
@@ -2212,7 +2246,6 @@ def run_per_tf_l1(
     defer_artifact: bool = False,
 ) -> PerTfL1Result:
     """Run L1 validation for a single TF using its native signal pool."""
-    import src.domain.futures.strategy.tiered_workflow as _tw
 
     _tf_cfg = strategy_config.apply_tf_gate_overrides(cfg, tf)
     _tf_labeled = (
@@ -2220,8 +2253,10 @@ def run_per_tf_l1(
         if "native_tf" in labeled_events.columns
         else labeled_events
     )
+    from src.domain.futures.strategy import tiered_workflow as _tiered_workflow
 
-    l1 = _tw.run_l1_nested_swf(
+    run_l1_nested = cast(Any, _tiered_workflow.run_l1_nested_swf)
+    l1 = run_l1_nested(
         labeled_events=_tf_labeled,
         aligned=aligned,
         outer_folds=outer_folds,
@@ -2428,7 +2463,6 @@ def run_tiered_pipeline(
     _is_ts = _to_utc_timestamp(window.l1_start)
     _oos_ts = _to_utc_timestamp(window.l2_start)
 
-    import src.domain.futures.strategy.tiered_workflow as _tw
 
     # ─── Layer 1 ─────────────────────────────────────────────────────────────
     t_l1 = time.perf_counter()
@@ -2492,7 +2526,7 @@ def run_tiered_pipeline(
                 )
             )
 
-            outer_folds_tf = _tw.build_l1_nested_swf_folds(
+            outer_folds_tf = build_l1_nested_swf_folds(
                 n_bars=n_bars_tf,
                 l1_start_idx=l1_start_bars_tf,
                 l1_end_idx=l1_end_bars_tf,
@@ -2617,7 +2651,7 @@ def run_tiered_pipeline(
     _l2_expand = int(l2_params.get("l2_is_expansion_bars", 0))
     _l2_start_idx = max(0, _l1_end_bars - _l2_expand)
     _t_fold_build = time.perf_counter()
-    awf_folds = _tw.build_l2_simulation_folds(
+    awf_folds = build_l2_simulation_folds(
         n_bars=len(aligned.datetimes),
         l2_start_idx=_l2_start_idx,
         holdout_start_idx=ho_start_idx_l2,
@@ -2695,7 +2729,7 @@ def run_tiered_pipeline(
     _champion_l_star: float | None = (
         float(_raw_l_star) if isinstance(_raw_l_star, (int, float)) else None
     )
-    l2 = _tw.run_l2_awf(
+    l2 = run_l2_awf(
         signal_batch=l2_signal_batch,
         aligned=aligned,
         awf_folds=awf_folds,
@@ -2808,7 +2842,7 @@ def run_tiered_pipeline(
             )
     except Exception as exc:
         raise Layer3ExecutionError("layer3_signal_prediction_failed") from exc
-    l3 = _tw.run_l3_holdout(
+    l3 = run_l3_holdout(
         signal_batch=l3_signal_batch,
         aligned=aligned,
         holdout_span=(ho_start_idx, ho_end_idx),

@@ -220,6 +220,46 @@ def test_build_regime_policy_by_fold_sign_unstable_returns_pooled(monkeypatch: p
     assert diagnostics.global_reliable is False
 
 
+def test_build_regime_policy_by_fold_uses_bucket_reliability_for_weak_positive_cell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    folds = _make_fold()
+    regime = np.zeros(8, dtype=np.int8)
+    cache = _make_cache(8)
+    aligned = _make_aligned([100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0])
+
+    def _bucket_stats(*args: object, start: int, **kwargs: object) -> dict[tuple[int, str, str], SimpleNamespace]:
+        if start == 0:
+            return {(0, "donchian_72", "4h"): SimpleNamespace(edge_bps=20.0, n_obs=5)}
+        return {(0, "donchian_72", "4h"): SimpleNamespace(edge_bps=4.0, n_obs=5)}
+
+    def _pooled_stats(*args: object, **kwargs: object) -> dict[tuple[str, str], SimpleNamespace]:
+        return {("donchian_72", "4h"): SimpleNamespace(edge_bps=0.0, n_obs=5)}
+
+    monkeypatch.setattr(l2_meta, "compute_bucket_realized_edge_stats", _bucket_stats)
+    monkeypatch.setattr(l2_meta, "compute_pooled_realized_edge_stats", _pooled_stats)
+
+    policy_by_fold, diagnostics = build_regime_policy_by_fold(
+        cache=cache,
+        aligned=aligned,
+        awf_folds=folds,
+        regime_code_1d=regime,
+        state_names=("bull", "bear", "crisis"),
+        mode="soft",
+        min_n=1,
+        cal_min_n=1,
+        min_cal_lift_bps=8.0,
+        min_confidence=0.55,
+        require_sign_consistency=True,
+    )
+
+    key = (0, "donchian_72", "4h")
+    assert policy_by_fold[0][key].action == "downweight"
+    assert policy_by_fold[0][key].reason == "neutral"
+    assert policy_by_fold[0][key].reliability == pytest.approx(0.5)
+    assert diagnostics.n_downweight >= 1
+
+
 def test_apply_regime_cell_policy_soft_mode_downweights_negative_cell() -> None:
     sig = SymbolSignal(
         raw_mu=20.0,

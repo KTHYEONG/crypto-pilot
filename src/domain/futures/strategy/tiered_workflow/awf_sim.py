@@ -35,7 +35,10 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     L2SimulationCache,
     Layer2AllocationConfig,
     Layer2SignalSchedule,
+    RegimePolicyApplication,
+    RegimePolicyEffectSummary,
 )
+from src.domain.futures.strategy.tiered_workflow.entry_cooldown import apply_entry_cooldown
 from src.domain.futures.strategy.tiered_workflow.regime_debug import (
     replace_selected_regime_debug_diagnostics,
 )
@@ -166,6 +169,50 @@ class _AwfSimResult:
     rets_baseline_ew: list[float]          # 순수 1/N EW baseline (uplift 측정 전용)
     fit_rets_hybrid: tuple[float, ...] = ()  # D3: fit-leg 수익률 (look-ahead-free L* calibration용)
     fold_attributions: tuple[Layer2FoldAttribution, ...] = ()
+    policy_effect_by_fold: tuple[RegimePolicyEffectSummary, ...] = ()
+
+
+def _summarize_regime_policy_effects(
+    applications: tuple[RegimePolicyApplication, ...],
+) -> RegimePolicyEffectSummary:
+    n_bars = len(applications)
+    n_sleeves = sum(max(int(app.n_input), 0) for app in applications)
+    total_action = sum(max(int(app.n_allow + app.n_downweight + app.n_block), 0) for app in applications)
+    total_pooled = sum(max(int(app.n_pooled), 0) for app in applications)
+    total_block = sum(max(int(app.n_block), 0) for app in applications)
+    total_mu_before = float(sum(max(float(app.abs_mu_before_bps), 0.0) for app in applications))
+    total_mu_after = float(sum(max(float(app.abs_mu_after_bps), 0.0) for app in applications))
+    total_qw_before = float(sum(max(float(app.quality_weight_before), 0.0) for app in applications))
+    total_qw_after = float(sum(max(float(app.quality_weight_after), 0.0) for app in applications))
+    total_edge_before = float(sum(max(float(app.gross_edge_before_bps), 0.0) for app in applications))
+    total_edge_after = float(sum(max(float(app.gross_edge_after_bps), 0.0) for app in applications))
+    denom = max(float(n_sleeves), 1.0)
+    return RegimePolicyEffectSummary(
+        n_bars=n_bars,
+        n_sleeves=n_sleeves,
+        action_ratio=float(total_action / denom),
+        pooled_ratio=float(total_pooled / denom),
+        block_ratio=float(total_block / denom),
+        mu_abs_ratio=float(total_mu_after / max(total_mu_before, 1e-9)),
+        quality_weight_ratio=float(total_qw_after / max(total_qw_before, 1e-9)),
+        edge_abs_ratio=float(total_edge_after / max(total_edge_before, 1e-9)),
+    )
+
+
+def _policy_effect_is_visible(
+    summary: RegimePolicyEffectSummary,
+    *,
+    mode: str,
+    config: Layer2AllocationConfig,
+) -> bool:
+    if mode == "observe" or summary.n_sleeves <= 0:
+        return True
+    mu_change = abs(1.0 - float(summary.mu_abs_ratio))
+    return bool(
+        float(summary.pooled_ratio) <= float(config.l2_regime_max_pooled_ratio_for_effective)
+        and float(summary.action_ratio) >= float(config.l2_regime_min_action_ratio_for_effective)
+        and mu_change >= float(config.l2_regime_min_mu_abs_change)
+    )
 
 
 def _book_edge_score(
@@ -555,6 +602,7 @@ def _resolve_tradeable_mask(
     aligned: AlignedMarketData,
     t: int,
     n_sym: int,
+    config: Layer2AllocationConfig | None = None,
 ) -> NDArray[np.bool_]:
     def _mask_row(name: str, default: bool) -> NDArray[np.bool_]:
         value = getattr(aligned, name, None)
@@ -569,7 +617,7 @@ def _resolve_tradeable_mask(
     promotion_active_mask = _mask_row("promotion_active_mask", True)
     entry_block_mask = _mask_row("entry_block_mask", False)
     kill_mask = _mask_row("kill_mask", False)
-    return (
+    tradeable = (
         active_mask
         & warm_mask
         & execution_eligibility_mask
@@ -577,6 +625,14 @@ def _resolve_tradeable_mask(
         & promotion_active_mask
         & ~entry_block_mask
         & ~kill_mask
+    )
+    cooldown_bars = max(int(getattr(config, "l2_entry_cooldown_bars", 0) if config is not None else 0), 0)
+    active_2d = getattr(aligned, "active_mask", None)
+    return apply_entry_cooldown(
+        tradeable=tradeable,
+        active_mask_2d=active_2d if isinstance(active_2d, np.ndarray) else None,
+        t=t,
+        cooldown_bars=cooldown_bars,
     )
 
 
@@ -1379,6 +1435,7 @@ def _run_awf_simulation(
     # 모든 fold fit-leg 연결 → fit_rets_hybrid (closed-form L* 입력).
     all_fit_rets_hybrid: list[float] = []
     fold_attributions: list[Layer2FoldAttribution] = []
+    policy_effect_logs_by_fold: list[list[RegimePolicyApplication]] = [[] for _ in awf_folds]
     # persistence 측정용: fold별 fit-leg 수익률 저장 (OOS 루프에서 대응 참조)
     _per_fold_fit_rets: list[list[float]] = []
 
@@ -1844,6 +1901,8 @@ def _run_awf_simulation(
                                 getattr(config, "l2_regime_scale_quality_weight", True)
                             ),
                         )
+                        if _fold_idx < len(policy_effect_logs_by_fold) and _policy_applied.n_input > 0:
+                            policy_effect_logs_by_fold[_fold_idx].append(_policy_applied)
                         _oos_sleeve_sigs = _policy_applied.sleeve_sigs
                         _oos_sleeve_edges = {
                             k: (_policy_applied.sleeve_edges[k], _pre_policy_sleeve_edges.get(k, (0.0, 0.0))[1])
@@ -2505,6 +2564,27 @@ def _run_awf_simulation(
         ):
             logger.debug("%-6s | %4d | %+18.1f", _state_name, _bars, _ret)
 
+    policy_effect_by_fold = tuple(
+        _summarize_regime_policy_effects(tuple(applications))
+        for applications in policy_effect_logs_by_fold
+    )
+    for fold_idx, summary in enumerate(policy_effect_by_fold):
+        logger.debug(
+            "[L2-REGIME-POLICY-SUMMARY] fold=%d mode=%s effective=%s bars=%d sleeves=%d "
+            "action=%.2f pooled=%.2f block=%.2f mu_ratio=%.2f qw_ratio=%.2f edge_ratio=%.2f",
+            fold_idx,
+            _regime_policy_mode,
+            _policy_effect_is_visible(summary, mode=_regime_policy_mode, config=config),
+            summary.n_bars,
+            summary.n_sleeves,
+            summary.action_ratio,
+            summary.pooled_ratio,
+            summary.block_ratio,
+            summary.mu_abs_ratio,
+            summary.quality_weight_ratio,
+            summary.edge_abs_ratio,
+        )
+
     return _AwfSimResult(
         rets_hybrid=all_rets_hybrid,
         rets_baseline=all_rets_baseline,
@@ -2530,6 +2610,7 @@ def _run_awf_simulation(
         rets_baseline_ew=all_rets_baseline_ew,
         fit_rets_hybrid=tuple(all_fit_rets_hybrid),
         fold_attributions=tuple(fold_attributions),
+        policy_effect_by_fold=policy_effect_by_fold,
     )
 
 
