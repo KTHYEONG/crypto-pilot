@@ -242,12 +242,12 @@ note          | L2 verdict is reported separately in [REGIME-L2]
 ● [LAYER 2: OPTUNA TUNING]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [REGIME-L2] active_states=3 compression=True path=regime_conditioned proof=True lift=54.42 t=15.24 fold_pass=1.00
-[REGIME-L2] policy_mode=soft policy_source=fit/cal global_reliable=True allow=5 downweight=10 block=0 pooled=243 unstable=15 hard_block_eligible=0 sign_consistency=0.50 hard_block_enabled=False mean_cal_lift=-23.04 mean_conf=1.00
+[REGIME-L2] policy_mode=soft policy_source=fit/cal global_reliable=True allow=248 downweight=10 block=0 pooled=0 unstable=15 hard_block_eligible=0 sign_consistency=0.50 hard_block_enabled=False mean_cal_lift=-23.04 mean_conf=1.00
   ● [STUDY] l2_study_4h_95de9c21278a | trials=200 | events=67063 | symbols=42
   ────────────────────────────────────────────────────────────────────────────
  [OPT] Deleted existing study 'l2_study_4h_95de9c21278a' for a fresh start.
-[L2-OPT]:   0%|                                                                                                   | 0/200 [00:00<?, ?it/s][L2-OPT] ProcessPool workers=6 (mem=5.2GB, mem_safe=7, cpu=8, batch=6)
-[L2-OPT]: 100%|██████████████████████████████████████████████████| 200/200 [02:14<00:00,  1.49it/s, Best CAGR: 199.88% | Current: -22.55%]
+[L2-OPT]:   0%|                                                                                                   | 0/200 [00:00<?, ?it/s][L2-OPT] ProcessPool workers=6 (mem=5.0GB, mem_safe=7, cpu=8, batch=6)
+[L2-OPT]: 100%|██████████████████████████████████████████████████| 200/200 [02:16<00:00,  1.47it/s, Best CAGR: 199.88% | Current: -22.55%]
 [L2-SELECTION] No gate-passed trials found. Reducing diagnostic replay size to 24.
 [L2-SELECTION] No feasible candidate found within fallback window (reason=cagr)
 [L2-DEPLOY-C4] L*=3.667 (binding=mdd) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
@@ -283,6 +283,6 @@ note          | L2 verdict is reported separately in [REGIME-L2]
 ──────────────────────────────────────────────────────────────────────────────
 
 >> LAYER 2: BLOCKED -> gate_passed=False
-[L2-PARITY-DIAG] replay/final parity mismatch (tolerance=1e-08): cagr replay=0.18050922 final=0.07368172; trade_count replay=119.00000000 final=122.00000000 | cagr replay=0.18050922 final=0.07368172 delta=0.10682750 | mdd replay=0.07274211 final=0.07274211 delta=0.00000000 | fold_pass replay=1.00000000 final=1.00000000 delta=0.00000000 | trade_count replay=119.00000000 final=122.00000000 delta=3.00000000 | sharpe_hac replay=1.4475896872748253 final=0.9305089690262053 | sortino replay=1.9209956232226495 final=1.2044038363352887
+[L2-PARITY-DIAG] replay/final parity mismatch (tolerance=1e-08): cagr replay=0.18050922 final=0.07368172; trade_count replay=119.00000000final=122.00000000 | cagr replay=0.18050922 final=0.07368172 delta=0.10682750 | mdd replay=0.07274211 final=0.07274211 delta=0.00000000 |fold_pass replay=1.00000000 final=1.00000000 delta=0.00000000 | trade_count replay=119.00000000 final=122.00000000 delta=3.00000000 | sharpe_hac replay=1.4475896872748253 final=0.9305089690262053 | sortino replay=1.9209956232226495 final=1.2044038363352887
 [L2-PARITY] replay/final mismatch. replay_L*=3.6668 final_L*=nan replay_CAGR=0.1805 final_CAGR=0.0737 replay_trades=119 final_trades=122
 !! FAIL: exit_code=1 reason=layer2_blocked:cagr
