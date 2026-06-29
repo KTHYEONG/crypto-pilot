@@ -92,6 +92,7 @@ from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
 from src.domain.futures.strategy.tiered_workflow.signal_selection import (
     _candidate_output_to_signal_batch,
     _event_results_from_fold_output,
+    _l1_probe_diag_enabled,
     _Layer1ModelCore,
     _registry_to_symbol_signals,
     assemble_layer1_artifact,
@@ -1356,6 +1357,20 @@ def run_l1_nested_swf(
         _wf_agg_timings["schema"], _wf_agg_timings["edge_fit"], _wf_agg_timings["inference"],
     )
 
+    # L1_PROBE_DIAG: 시장 regime code_1d(3-state)을 1회 계산해 fold 진단에 주입.
+    _diag_regime_code: NDArray[np.int8] | None = None
+    if _l1_probe_diag_enabled():
+        try:
+            from src.domain.futures.strategy.market_regime import (
+                compress_regime_codes,
+                compute_market_regime_context,
+            )
+            _diag_regime_code = compress_regime_codes(
+                compute_market_regime_context(aligned=aligned).code_1d
+            )
+        except Exception as exc:
+            logger.debug("[L1-PROBE-DIAG] regime code compute failed: %s", exc)
+            _diag_regime_code = None
     t_outer = time.perf_counter()
     for outer_idx, outer_fold in enumerate(outer_folds):
         t_fold = time.perf_counter()
@@ -1418,6 +1433,7 @@ def run_l1_nested_swf(
                 fold_id=outer_idx,
                 cfg=cfg,
                 seed=seed + outer_idx,
+                regime_code_1d=_diag_regime_code,
             )
         )
         _t_eval_took = time.perf_counter() - _t_eval
