@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from collections import Counter, defaultdict
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -1048,6 +1049,145 @@ def select_outer_symbol_opportunities(
     )
 
 
+@dataclass(frozen=True)
+class ProbeBreadthDiagnostics:
+    fold_id: int
+    n_events: int
+    n_decisions: int
+    avg_breadth_per_decision: float
+    probe_gross_by_k: dict[int, float]
+    probe_net_by_k: dict[int, float]
+    rank_ic_all: float
+    rank_ic_tstat: float
+    realized_mean_all: float
+    realized_median_all: float
+    realized_pos_fraction_all: float
+    rt_cost_bps: float
+
+
+def compute_probe_breadth_diagnostics(
+    *,
+    merged: pd.DataFrame,
+    volatility_2d: NDArray[np.float64],
+    symbol_to_idx: dict[str, int],
+    cfg: CandidateStrategyConfig,
+    fold_id: int,
+    seed: int = 0,
+) -> ProbeBreadthDiagnostics | None:
+    if merged.empty:
+        return None
+    rt_cost = float(getattr(cfg, "expected_cost_bps", 0.0))
+    exp = merged["expected_gross_bps"].to_numpy(dtype=np.float64)
+    real = merged["realized_side_adjusted_gross_bps"].fillna(0.0).to_numpy(dtype=np.float64)
+    n = len(exp)
+
+    di = merged["decision_idx"].to_numpy(dtype=np.int64)
+    symbols = merged["symbol"].to_numpy(dtype=str)
+    if "quality_weight" in merged.columns:
+        qw = merged["quality_weight"].to_numpy(dtype=np.float64)
+    else:
+        qw = np.ones(n, dtype=np.float64)
+
+    n_decisions = int(merged["decision_idx"].nunique()) if "decision_idx" in merged.columns else 0
+
+    min_obs = 3
+    if n >= min_obs:
+        with np.errstate(invalid="ignore"):
+            rho = float(stats.spearmanr(exp, real)[0])
+        if np.isnan(rho):
+            rho = 0.0
+        fisher_z = rho * np.sqrt((n - 2) / (1.0 - rho * rho)) if abs(rho) < 1.0 and n > 2 else 0.0
+    else:
+        rho = 0.0
+        fisher_z = 0.0
+
+    realized_mean = float(np.mean(real))
+    realized_median = float(np.median(real))
+    realized_pos_frac = float(np.mean(real > 0.0))
+
+    k_values = (3, 10, 20, -1)
+    probe_gross: dict[int, float] = {}
+    probe_net: dict[int, float] = {}
+
+    for k in k_values:
+        selected_real_list: list[float] = []
+        for d_idx_val in sorted(merged["decision_idx"].unique()):
+            mask = di == d_idx_val
+            sub_exp = exp[mask]
+            sub_real = real[mask]
+            sub_qw = qw[mask]
+            sub_symbols = symbols[mask]
+            sub_len = len(sub_exp)
+            if sub_len == 0:
+                continue
+            risk_scores: list[tuple[float, int]] = []
+            for ri in range(sub_len):
+                sidx = symbol_to_idx.get(str(sub_symbols[ri]))
+                if sidx is None:
+                    continue
+                decision_idx_i = int(d_idx_val)
+                if decision_idx_i < 0 or decision_idx_i >= volatility_2d.shape[0]:
+                    continue
+                vol = float(volatility_2d[int(decision_idx_i), int(sidx)])
+                denom = max(vol, float(VOL_FLOOR))
+                risk_scores.append(
+                    (abs(float(sub_exp[ri])) * max(float(sub_qw[ri]), 0.0) / denom, ri)
+                )
+            if not risk_scores:
+                continue
+            risk_scores.sort(reverse=True)
+            n_take = k if k != -1 else sub_len
+            take_idx = [ri for _, ri in risk_scores[:n_take]]
+            selected = sub_real[np.asarray(take_idx, dtype=np.int64)]
+            if selected.size > 0:
+                selected_real_list.append(float(np.mean(selected)))
+        if selected_real_list:
+            probe_gross[k] = float(np.mean(selected_real_list))
+            probe_net[k] = probe_gross[k] - rt_cost
+        else:
+            probe_gross[k] = 0.0
+            probe_net[k] = 0.0 - rt_cost
+
+    avg_breadth = float(n / max(n_decisions, 1))
+
+    return ProbeBreadthDiagnostics(
+        fold_id=fold_id,
+        n_events=n,
+        n_decisions=n_decisions,
+        avg_breadth_per_decision=avg_breadth,
+        probe_gross_by_k=probe_gross,
+        probe_net_by_k=probe_net,
+        rank_ic_all=rho,
+        rank_ic_tstat=fisher_z,
+        realized_mean_all=realized_mean,
+        realized_median_all=realized_median,
+        realized_pos_fraction_all=realized_pos_frac,
+        rt_cost_bps=rt_cost,
+    )
+
+
+def _l1_probe_diag_enabled() -> bool:
+    return os.environ.get("L1_PROBE_DIAG", "") not in ("", "0", "false", "False")
+
+
+def _format_probe_diag(diag: ProbeBreadthDiagnostics) -> str:
+    parts = [
+        f"fold={diag.fold_id}",
+        f"n_events={diag.n_events}",
+        f"n_decisions={diag.n_decisions}",
+        f"breadth={diag.avg_breadth_per_decision:.1f}",
+        f"gross_k3={diag.probe_gross_by_k.get(3,0):.2f}",
+        f"net_k3={diag.probe_net_by_k.get(3,0):.2f}",
+        f"gross_all={diag.probe_gross_by_k.get(-1,0):.2f}",
+        f"rank_ic={diag.rank_ic_all:.4f}",
+        f"ic_t={diag.rank_ic_tstat:.2f}",
+        f"real_mean={diag.realized_mean_all:.2f}",
+        f"pos_frac={diag.realized_pos_fraction_all:.2%}",
+        f"rt_cost={diag.rt_cost_bps:.1f}",
+    ]
+    return " | ".join(parts)
+
+
 def evaluate_outer_signal_opportunities(
     *,
     opportunities: ValidatedSignalBatch,
@@ -1191,6 +1331,13 @@ def evaluate_outer_signal_opportunities(
     l1_min_fold_probe = float(getattr(cfg, "l1_min_fold_probe_bps", 0.0))
     if probe_gross_edge <= l1_min_fold_probe:
         blockers.append("non_positive_gross_edge")
+    if _l1_probe_diag_enabled() and logger.isEnabledFor(logging.DEBUG):
+        diag = compute_probe_breadth_diagnostics(
+            merged=merged, volatility_2d=volatility_2d,
+            symbol_to_idx=symbol_to_idx, cfg=cfg, fold_id=fold_id, seed=seed,
+        )
+        if diag is not None:
+            logger.debug("[L1-PROBE-DIAG] %s", _format_probe_diag(diag))
     return Layer1FoldReadiness(
         fold_id=fold_id,
         registry_source_end_idx=fold.fit_end,

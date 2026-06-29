@@ -140,3 +140,11 @@ ai_read_policy: when_related
 - **추가 변경**: `candidate_labels.py` `label_candidate_events` `precomputed_atr_2d` 파라미터 추가 + shape 검증. `bridge.py` ATR 캐시 1회 계산 후 HTF/BASE 재사용. signal_only fast-path → compute_rule_diagnostics skip + promotion 게이팅.
 - **실측 (synthetic benchmark, Numba warm 이후)**: candidate_panels_to_events throughput 409K rows/s (400×20). zscore 0.0003s/call (50×200). 실전 52 syms × 2000 bars 예상 events <0.5s (기존 28.27s 대비).
 - **Test Coverage**: 6 tests (Scn 1~6 ATR cache 3 + signal_only 3) + zscore equivalence/edge tests + schema/no-sort/regime-count validation. 56+28 regression PASS. L1: ruff/mypy clean.
+
+## Phase 15: L1 Probe Breadth Diagnostics (ADR-050, 6/29)
+- L1 게이트 전부 PASS이나 L2 realized gross가 음수인 모순 해소를 위해 env-gated DEBUG 계측 추가
+- `ProbeBreadthDiagnostics` frozen dataclass + `compute_probe_breadth_diagnostics()`: (a) breadth-decay (k=3/10/20/-1)로 selection inflation 정량화; (b) gross − rt_cost로 cost drag 분리; (c) Spearman rank-IC + Fisher-z tstat로 신호력 부재 진단; (d) 전체 realized 분포 통계
+- `L1_PROBE_DIAG` env gate 패턴: 기존 `L2_DIAG_ATTR`/`L2_MULTI_TF`와 동일 규약 (`""`/`"0"`/`"false"`/`"False"` → disabled)
+- `evaluate_outer_signal_opportunities` 내 `return Layer1FoldReadiness` 직전에 hook — 게이트/리턴 영향 0, 순수 DEBUG 로그
+- Net 정의: per-event 1-라운드트립 가정 (`net = gross − expected_cost_bps`), turnover 재부과 금지
+- **Test Coverage**: 12 tests across 6 scenarios (selection-inflation, gross→net, rank-IC absence/positive, edge cases, env gate). All PASS. L1: ruff/mypy clean.
