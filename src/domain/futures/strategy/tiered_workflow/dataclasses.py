@@ -333,6 +333,7 @@ class Layer2StudyResult:
     blocker_reason: str
     sim_cache: object | None = None
     awf_folds: Any = None
+    eval_memo: dict[Any, Any] | None = None
 
 
 

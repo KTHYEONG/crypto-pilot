@@ -12,7 +12,7 @@ import optuna
 
 from src.domain.futures.optimization.evaluator import calc_n_trials_eff_entropy
 from src.domain.futures.optimization.workflow import (
-    evaluate_l2_trial,
+    evaluate_l2_trial_cached,
     layer2_constraints_from_trial,
 )
 from src.domain.futures.strategy.candidate_contracts import ValidatedSignalBatch
@@ -363,9 +363,13 @@ def select_layer2_champion(
         from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
         cache = build_l2_simulation_cache(aligned, signal_batch, tf)
 
-    def _eval_candidate(trial: optuna.trial.FrozenTrial) -> tuple[optuna.trial.FrozenTrial, Any]:
+    _eval_memo: dict[tuple[Any, ...], Any] = {}
+
+    def _eval_candidate(
+        trial: optuna.trial.FrozenTrial,
+    ) -> tuple[optuna.trial.FrozenTrial, Any, Layer2AllocationConfig]:
         cfg_mapping = Layer2AllocationConfig.from_mapping(dict(trial.params))
-        eval_val = evaluate_l2_trial(
+        eval_val = evaluate_l2_trial_cached(
             cache=cache,
             signal_batch=signal_batch,
             aligned=aligned,
@@ -373,8 +377,9 @@ def select_layer2_champion(
             config=cfg_mapping,
             caps=caps,
             tf=tf,
+            _memo=_eval_memo,
         )
-        return trial, eval_val
+        return trial, eval_val, cfg_mapping
 
     # 1차 필터링: 이미 사전 게이트 통과(l2_promotion_passed) 이력이 있는 trial들 선별
     gate_passed_candidates = [
@@ -399,17 +404,16 @@ def select_layer2_champion(
 
     # ThreadPool 평가: numba GIL 해제 활용 → ProcessPool 대비 fork/serialize 오버헤드 제거
     if len(eval_candidates) <= 1:
-        evaluated_pairs = [_eval_candidate(trial) for trial in eval_candidates]
+        evaluated_triples = [_eval_candidate(trial) for trial in eval_candidates]
     else:
         max_workers = min(len(eval_candidates), 4)
-        evaluated_pairs = []
+        evaluated_triples = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {executor.submit(_eval_candidate, t): t for t in eval_candidates}
             for future in as_completed(future_map):
-                evaluated_pairs.append(future.result())
+                evaluated_triples.append(future.result())
 
-    for candidate, candidate_evaluation in evaluated_pairs:
-        candidate_config = Layer2AllocationConfig.from_mapping(dict(candidate.params))
+    for candidate, candidate_evaluation, candidate_config in evaluated_triples:
         dsr = _deflated_sharpe_probability(
             selected_rets=candidate_evaluation.returns_hybrid,
             completed_trial_sharpes=completed_trial_sharpes,
@@ -596,6 +600,7 @@ def select_layer2_champion(
             blocker_reason=reason,
             sim_cache=cache,
             awf_folds=awf_folds,
+            eval_memo=_eval_memo,
         )
 
     _logger.info(
@@ -622,4 +627,5 @@ def select_layer2_champion(
         blocker_reason="",
         sim_cache=cache,
         awf_folds=awf_folds,
+        eval_memo=_eval_memo,
     )
