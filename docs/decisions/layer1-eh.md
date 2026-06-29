@@ -157,3 +157,11 @@ ai_read_policy: when_related
 - **Selection Downgrade to Breadth Filter (Track B-2, spec line 127)**: `l2_selection_breadth_mode=True` (default) in `Layer2AllocationConfig`. `awf_sim.py` L2 OOS/fit sim loops bypass `rank_and_select` and use all valid symbols as selected set. Removes noise sorting from residual-IC≈0 regime.
 - **Bull-Primary Structural Prior (spec line 129, Layer-1 defence)**: `l2_regime_bear_gross_cap` tightened from 0.75→0.35, `l2_regime_crisis_gross_cap` tightened from 0.55→0.25 in `Layer2AllocationConfig` defaults and `awf_sim.py` fallbacks. Reflects `bear` regime's measured −1.43 bps/bar (2025 OOS, 75% negative) and `crisis` IC− zero edge.
 - **L1 validation**: ruff/mypy clean across 6 source files + 1 test file. 96 targeted tests pass, 0 new regression.
+
+## Phase 17: L1 Bear-Regime Side Directionality — regime_side_split (ADR-052, 6/29)
+- **계기**: 2025 OOS bear regime에서 L1 신호의 net-long 편향 가설 검증 필요. bear price/bar −1.13의 주범이 `cap↓`만으론 설명 불가.
+- **regime_side_split 필드 추가**: `ProbeBreadthDiagnostics`에 `regime_side_split: dict[str, tuple[float, float, float, int, int]]` 추가. regime별 `(long_fraction, long_real_mean_bps, short_real_mean_bps, n_long, n_short)` 보유.
+- **계측 로직**: `compute_probe_breadth_diagnostics` 기존 regime 루프 내 side_norm(+1/-1) 마스킹으로 O(n) 추가. side 컬럼 부재 시 전부 long(+1) default. NaN/zero-div는 n>0 가드로 방어.
+- **포맷 토큰**: `_format_probe_diag`에 `SIDE[{rname}]=long{lf:.0%}/lr{lr:+.1f}/sr{sr:+.1f}/nl{nl}/ns{ns}` 출력.
+- **Phase 2 게이트**(보류): bear long_fraction ≥ 0.65 & long_mean < 0 ≤ short_mean 조건 다수 fold 일관 시 `l1_bear_side_policy` (as_is/flat/flip_short) A/B 개시.
+- **Test Coverage**: 5 scenarios (bear net-long bias, side-missing default all-long, all-short zero-div, no-regime empty dict, format token). All PASS. L1: ruff/mypy clean.
