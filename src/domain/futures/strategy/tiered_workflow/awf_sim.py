@@ -82,6 +82,20 @@ class Layer2FoldAttribution:
     netting_events: int
 
 
+@dataclass(slots=True, frozen=True)
+class Layer2EdgeWaterfall:
+    fold_idx: int
+    admitted_contrib: float
+    weighted_contrib: float
+    capped_contrib: float
+    realized_contrib: float
+    loss_weighting: float
+    loss_capping: float
+    loss_friction: float
+    n_sleeves_admitted_mean: float
+    cap_binding_ratio: float
+
+
 def compute_cost_drag_ratio(
     fold_attributions: tuple[Layer2FoldAttribution, ...],
     *,
@@ -139,6 +153,40 @@ def _assemble_fold_attribution(
         throttle_mult_mean=_safe(throttle_mult_mean),
         dropped_below_cost=dropped_below_cost,
         netting_events=netting_events,
+    )
+
+
+def _assemble_edge_waterfall(
+    *,
+    fold_idx: int,
+    admitted_contrib: float,
+    weighted_contrib: float,
+    capped_contrib: float,
+    realized_total_bps: float,
+    cap_binding_bars: int,
+    n_rebal: int,
+    sleeves_admitted_sum: int,
+) -> Layer2EdgeWaterfall:
+    if n_rebal > 0:
+        n_sleeves_admitted_mean = sleeves_admitted_sum / n_rebal
+        cap_binding_ratio = cap_binding_bars / n_rebal
+    else:
+        n_sleeves_admitted_mean = 0.0
+        cap_binding_ratio = 0.0
+    loss_weighting = admitted_contrib - weighted_contrib
+    loss_capping = weighted_contrib - capped_contrib
+    loss_friction = capped_contrib - realized_total_bps
+    return Layer2EdgeWaterfall(
+        fold_idx=fold_idx,
+        admitted_contrib=admitted_contrib,
+        weighted_contrib=weighted_contrib,
+        capped_contrib=capped_contrib,
+        realized_contrib=realized_total_bps,
+        loss_weighting=loss_weighting,
+        loss_capping=loss_capping,
+        loss_friction=loss_friction,
+        n_sleeves_admitted_mean=n_sleeves_admitted_mean,
+        cap_binding_ratio=cap_binding_ratio,
     )
 
 
@@ -1855,6 +1903,8 @@ def _run_awf_simulation(
         _fold_rebalance_count = 0
         if _diag:
             _attr_expected = 0.0
+            _attr_weighted = 0.0
+            _attr_admitted = 0.0
             _attr_gross_exps: list[float] = []
             _attr_net_exps: list[float] = []
             _attr_throttle: list[float] = []
@@ -1863,6 +1913,8 @@ def _run_awf_simulation(
             _attr_signal_total = 0
             _attr_dropped = 0
             _attr_netting = 0
+            _cap_binding_bars = 0
+            _sleeves_admitted_sum = 0
             _mtf_n_sym_sum = 0
             _mtf_multi_sum = 0
             _mtf_conflict_sum = 0
@@ -2137,6 +2189,12 @@ def _run_awf_simulation(
                     sig_arr[i] = ss.volatility
 
             support_mask = mu_arr != 0.0
+            if _diag:
+                n_sel = len(selected)
+                w_eq_sel = (
+                    np.where(support_mask, np.sign(mu_arr) / n_sel, 0.0)
+                    if n_sel > 0 else np.zeros_like(mu_arr)
+                )
             # CS Score Amplification: _z_scores dict → array
             _z_score_arr: NDArray[np.float64] | None = None
             if config.l2_cs_amp_enabled and _z_scores:
@@ -2194,6 +2252,7 @@ def _run_awf_simulation(
                 else ("bull", "bear", "crisis")
             )
             _gross_before_cap = float(np.sum(np.abs(w)))
+            w_precap = w.copy()
             w, _regime_risk_mult = apply_regime_risk_cap(
                 w,
                 _regime_now_for_cap,
@@ -2235,8 +2294,13 @@ def _run_awf_simulation(
 
             last_w = w
             if _diag:
+                _holding = float(t_end - t)
                 if np.any(np.abs(w) > 1e-12):
-                    _attr_expected += float(t_end - t) * float(np.dot(w, mu_arr * 1e-4))
+                    _attr_expected += _holding * float(np.dot(w, mu_arr * 1e-4))
+                _attr_weighted += _holding * float(np.dot(w_precap, mu_arr * 1e-4))
+                _attr_admitted += _holding * float(np.dot(w_eq_sel, mu_arr * 1e-4))
+                _sleeves_admitted_sum += len(selected)
+                _cap_binding_bars += int(_regime_risk_mult < 1.0)
                 _attr_gross_exps.append(float(np.sum(np.abs(w))))
                 _attr_net_exps.append(float(np.sum(w)))
             _fold_rebalance_count += 1
@@ -2385,6 +2449,8 @@ def _run_awf_simulation(
         fold_selected_symbols.append(tuple(sorted(_fold_selected)))
         if not _diag:
             _attr_expected = 0.0
+            _attr_weighted = 0.0
+            _attr_admitted = 0.0
             _attr_gross_exps = []
             _attr_net_exps = []
             _attr_throttle = []
@@ -2393,6 +2459,8 @@ def _run_awf_simulation(
             _attr_signal_total = 0
             _attr_dropped = 0
             _attr_netting = 0
+            _cap_binding_bars = 0
+            _sleeves_admitted_sum = 0
         _attr = _assemble_fold_attribution(
             fold_idx=_fold_idx,
             oos_bars=fold.oos_end - fold.oos_start,
@@ -2423,6 +2491,28 @@ def _run_awf_simulation(
                 _attr.expected_net, _attr.alpha_gap, _attr.mean_gross_exp, _attr.mean_net_exp,
                 _attr.sleeves_active_mean, _attr.friction_pass_ratio, _attr.throttle_mult_mean,
                 _attr.dropped_below_cost, _attr.netting_events,
+            )
+        if _diag and logger.isEnabledFor(logging.DEBUG):
+            _waterfall = _assemble_edge_waterfall(
+                fold_idx=_fold_idx,
+                admitted_contrib=_attr_admitted * 1e4,
+                weighted_contrib=_attr_weighted * 1e4,
+                capped_contrib=_attr_expected * 1e4,
+                realized_total_bps=(_attr_price + _attr_funding - _attr_cost) * 1e4,
+                cap_binding_bars=_cap_binding_bars,
+                n_rebal=_fold_rebalance_count,
+                sleeves_admitted_sum=_sleeves_admitted_sum,
+            )
+            logger.debug(
+                "[L2-EDGE-WATERFALL] fold=%d admitted=%.1f weighted=%.1f "
+                "capped=%.1f realized=%.1f | loss_wgt=%.1f loss_cap=%.1f "
+                "loss_fric=%.1f n_adm_mean=%.1f cap_bind=%.2f",
+                _waterfall.fold_idx,
+                _waterfall.admitted_contrib, _waterfall.weighted_contrib,
+                _waterfall.capped_contrib, _waterfall.realized_contrib,
+                _waterfall.loss_weighting, _waterfall.loss_capping,
+                _waterfall.loss_friction,
+                _waterfall.n_sleeves_admitted_mean, _waterfall.cap_binding_ratio,
             )
         if _diag and logger.isEnabledFor(logging.DEBUG):
             _nr = max(_fold_rebalance_count, 1)
