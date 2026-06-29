@@ -2321,6 +2321,7 @@ def _run_strategy_stage(
                 l2_sim_cache=l2_study_result.sim_cache,
                 l2_signal_batch=l2_signals,
                 l2_awf_folds=l2_study_result.awf_folds,
+                l2_eval_memo=l2_study_result.eval_memo,
             )
             if l2_final is not None and l2_study_result.best_evaluation is not None:
                 from src.domain.futures.strategy.tiered_workflow.replay_parity import (
