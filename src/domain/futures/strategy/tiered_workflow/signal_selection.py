@@ -7,7 +7,7 @@ import os
 import re
 import time
 from collections import Counter, defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -1063,6 +1063,19 @@ class ProbeBreadthDiagnostics:
     realized_median_all: float
     realized_pos_fraction_all: float
     rt_cost_bps: float
+    # regime -> (n_events, gross_mean_bps, net_mean_bps, pos_fraction, rank_ic)
+    regime_breakdown: dict[str, tuple[int, float, float, float, float]] = field(default_factory=dict)
+    # --- Residual-alpha decomposition (multi-event bars only) ---
+    # beta_edge: per-bar 횡단면 평균의 평균 (바스켓 보유=시계열 추세 premium)
+    # selection_alpha: top-k 선택 - per-bar 평균 (횡단면 선택 부가가치)
+    # residual_ic: IC(expected, real - per-bar 평균) (신호의 횡단면 판별력)
+    beta_edge_bps: float = 0.0
+    selection_alpha_bps: float = 0.0
+    residual_ic: float = 0.0
+    residual_ic_tstat: float = 0.0
+    n_residual_events: int = 0
+    # regime -> (beta_edge_bps, selection_alpha_bps, residual_ic)
+    regime_residual: dict[str, tuple[float, float, float]] = field(default_factory=dict)
 
 
 def compute_probe_breadth_diagnostics(
@@ -1073,6 +1086,8 @@ def compute_probe_breadth_diagnostics(
     cfg: CandidateStrategyConfig,
     fold_id: int,
     seed: int = 0,
+    regime_code_1d: NDArray[np.int8] | None = None,
+    regime_names: tuple[str, ...] = ("bull", "bear", "crisis"),
 ) -> ProbeBreadthDiagnostics | None:
     if merged.empty:
         return None
@@ -1104,6 +1119,71 @@ def compute_probe_breadth_diagnostics(
     realized_mean = float(np.mean(real))
     realized_median = float(np.median(real))
     realized_pos_frac = float(np.mean(real > 0.0))
+
+    def _risk_topk_idx(rows: NDArray[np.int64], k: int) -> list[int]:
+        """rows(전역 인덱스) 중 risk=|exp|*qw/vol 상위 k의 전역 인덱스."""
+        scored: list[tuple[float, int]] = []
+        for gi in rows.tolist():
+            sidx = symbol_to_idx.get(str(symbols[gi]))
+            d_i = int(di[gi])
+            if sidx is None or d_i < 0 or d_i >= volatility_2d.shape[0]:
+                continue
+            denom = max(float(volatility_2d[d_i, int(sidx)]), float(VOL_FLOOR))
+            scored.append((abs(float(exp[gi])) * max(float(qw[gi]), 0.0) / denom, gi))
+        scored.sort(reverse=True)
+        return [gi for _, gi in scored[:k]]
+
+    def _residual_decompose(
+        sel_mask: NDArray[np.bool_], topk: int = 3
+    ) -> tuple[float, float, float, int]:
+        """multi-event bar만 사용해 beta/selection_alpha/residual_ic 분해."""
+        all_idx = np.flatnonzero(sel_mask)
+        if all_idx.size == 0:
+            return 0.0, 0.0, 0.0, 0
+        order = np.argsort(di[all_idx], kind="stable")
+        all_idx = all_idx[order]
+        bar_vals = di[all_idx]
+        beta_list: list[float] = []
+        alpha_list: list[float] = []
+        res_vals: list[float] = []
+        res_exp: list[float] = []
+        start = 0
+        ntot = all_idx.size
+        for end in range(1, ntot + 1):
+            if end < ntot and bar_vals[end] == bar_vals[start]:
+                continue
+            bar_rows = all_idx[start:end]
+            start = end
+            if bar_rows.size < 2:  # 횡단면 없음 → residual 정의 불가
+                continue
+            bar_mean = float(np.mean(real[bar_rows]))
+            beta_list.append(bar_mean)
+            top_idx = _risk_topk_idx(bar_rows, topk)
+            if top_idx:
+                alpha_list.append(float(np.mean(real[np.asarray(top_idx)])) - bar_mean)
+            for gi in bar_rows.tolist():
+                res_vals.append(float(real[gi]) - bar_mean)
+                res_exp.append(float(exp[gi]))
+        beta_edge = float(np.mean(beta_list)) if beta_list else 0.0
+        sel_alpha = float(np.mean(alpha_list)) if alpha_list else 0.0
+        nres = len(res_vals)
+        if nres >= min_obs:
+            with np.errstate(invalid="ignore"):
+                r_ic = float(stats.spearmanr(np.asarray(res_exp), np.asarray(res_vals))[0])
+            if np.isnan(r_ic):
+                r_ic = 0.0
+        else:
+            r_ic = 0.0
+        return beta_edge, sel_alpha, r_ic, nres
+
+    beta_edge_bps, selection_alpha_bps, residual_ic, n_residual = _residual_decompose(
+        np.ones(n, dtype=bool)
+    )
+    residual_ic_tstat = (
+        residual_ic * np.sqrt((n_residual - 2) / (1.0 - residual_ic * residual_ic))
+        if abs(residual_ic) < 1.0 and n_residual > 2
+        else 0.0
+    )
 
     k_values = (3, 10, 20, -1)
     probe_gross: dict[int, float] = {}
@@ -1150,6 +1230,46 @@ def compute_probe_breadth_diagnostics(
 
     avg_breadth = float(n / max(n_decisions, 1))
 
+    # --- Regime decomposition ---
+    # 우선순위: 시장 regime code_1d(decision_idx 매핑) > entry_regime 컬럼.
+    regime_breakdown: dict[str, tuple[int, float, float, float, float]] = {}
+    regime_residual: dict[str, tuple[float, float, float]] = {}
+    regimes: NDArray[Any] | None = None
+    if regime_code_1d is not None and len(regime_code_1d) > 0:
+        t_max = len(regime_code_1d)
+        codes = np.clip(di, 0, t_max - 1)
+        name_arr = np.asarray(regime_names, dtype=object)
+        mapped = np.asarray(regime_code_1d, dtype=np.int64)[codes]
+        regimes = name_arr[np.clip(mapped, 0, len(name_arr) - 1)]
+    else:
+        regime_col = None
+        for cand in ("entry_regime", "activation_context"):
+            if cand in merged.columns:
+                regime_col = cand
+                break
+        if regime_col is not None:
+            regimes = merged[regime_col].astype(str).to_numpy()
+    if regimes is not None:
+        for rname in sorted(set(regimes.tolist())):
+            rmask = regimes == rname
+            r_real = real[rmask]
+            r_exp = exp[rmask]
+            rn = int(r_real.size)
+            if rn == 0:
+                continue
+            r_gross = float(np.mean(r_real))
+            r_pos = float(np.mean(r_real > 0.0))
+            if rn >= min_obs:
+                with np.errstate(invalid="ignore"):
+                    r_ic = float(stats.spearmanr(r_exp, r_real)[0])
+                if np.isnan(r_ic):
+                    r_ic = 0.0
+            else:
+                r_ic = 0.0
+            regime_breakdown[rname] = (rn, r_gross, r_gross - rt_cost, r_pos, r_ic)
+            r_beta, r_alpha, r_res_ic, _ = _residual_decompose(rmask)
+            regime_residual[rname] = (r_beta, r_alpha, r_res_ic)
+
     return ProbeBreadthDiagnostics(
         fold_id=fold_id,
         n_events=n,
@@ -1163,6 +1283,13 @@ def compute_probe_breadth_diagnostics(
         realized_median_all=realized_median,
         realized_pos_fraction_all=realized_pos_frac,
         rt_cost_bps=rt_cost,
+        regime_breakdown=regime_breakdown,
+        beta_edge_bps=beta_edge_bps,
+        selection_alpha_bps=selection_alpha_bps,
+        residual_ic=residual_ic,
+        residual_ic_tstat=float(residual_ic_tstat),
+        n_residual_events=n_residual,
+        regime_residual=regime_residual,
     )
 
 
@@ -1184,7 +1311,19 @@ def _format_probe_diag(diag: ProbeBreadthDiagnostics) -> str:
         f"real_mean={diag.realized_mean_all:.2f}",
         f"pos_frac={diag.realized_pos_fraction_all:.2%}",
         f"rt_cost={diag.rt_cost_bps:.1f}",
+        f"beta_edge={diag.beta_edge_bps:.1f}",
+        f"sel_alpha={diag.selection_alpha_bps:+.1f}",
+        f"res_ic={diag.residual_ic:+.4f}",
+        f"res_ic_t={diag.residual_ic_tstat:+.2f}",
     ]
+    for rname, (rn, _rg, rnet, rpos, ric) in diag.regime_breakdown.items():
+        rr = diag.regime_residual.get(rname)
+        rr_str = (
+            f"/beta{rr[0]:.1f}/alpha{rr[1]:+.1f}/resic{rr[2]:+.3f}" if rr is not None else ""
+        )
+        parts.append(
+            f"REG[{rname}]=n{rn}/net{rnet:.1f}/pos{rpos:.0%}/ic{ric:+.3f}{rr_str}"
+        )
     return " | ".join(parts)
 
 
@@ -1198,6 +1337,7 @@ def evaluate_outer_signal_opportunities(
     fold_id: int,
     cfg: CandidateStrategyConfig,
     seed: int,
+    regime_code_1d: NDArray[np.int8] | None = None,
 ) -> Layer1FoldReadiness:
     opp_frame = _batch_to_frame(opportunities)
     if opp_frame.empty:
@@ -1258,6 +1398,7 @@ def evaluate_outer_signal_opportunities(
     symbol_to_idx = {symbol: idx for idx, symbol in enumerate(aligned_symbols)}
     probe_series: list[float] = []
     probe_mode: str = str(getattr(cfg, "l1_opp_ic_mode", "cross_section"))
+    probe_metric: str = str(getattr(cfg, "l1_probe_metric", "breadth"))
 
     if probe_mode == "time_series":
         for _symbol, sym_group in merged.groupby("symbol", sort=True):
@@ -1279,9 +1420,12 @@ def evaluate_outer_signal_opportunities(
                     (abs(float(row.expected_gross_bps)) * max(float(row.quality_weight), 0.0) / denom, row_i)
                 )
             if risk_scores_ts:
-                risk_scores_ts.sort(reverse=True)
-                selected_idx_arr = [ri for _, ri in risk_scores_ts[: int(cfg.l1_probe_top_k)]]
-                selected_real = real_ts[np.asarray(selected_idx_arr, dtype=np.int64)]
+                if probe_metric == "breadth":
+                    selected_real = real_ts
+                else:
+                    risk_scores_ts.sort(reverse=True)
+                    selected_idx_arr = [ri for _, ri in risk_scores_ts[: int(cfg.l1_probe_top_k)]]
+                    selected_real = real_ts[np.asarray(selected_idx_arr, dtype=np.int64)]
                 if selected_real.size > 0:
                     probe_series.append(float(np.mean(selected_real)))
     else:
@@ -1290,6 +1434,10 @@ def evaluate_outer_signal_opportunities(
             if group.shape[0] < int(cfg.l1_min_cross_section):
                 continue
             real = group["realized_side_adjusted_gross_bps"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
+            if probe_metric == "breadth":
+                if real.size > 0:
+                    probe_series.append(float(np.mean(real)))
+                continue
             risk_scores: list[tuple[float, int]] = []
             for row_idx, row in enumerate(group.itertuples(index=False)):
                 symbol_idx = symbol_to_idx.get(str(row.symbol))
@@ -1331,13 +1479,18 @@ def evaluate_outer_signal_opportunities(
     l1_min_fold_probe = float(getattr(cfg, "l1_min_fold_probe_bps", 0.0))
     if probe_gross_edge <= l1_min_fold_probe:
         blockers.append("non_positive_gross_edge")
+    rank_ic_all_val = 0.0
+    rank_ic_tstat_val = 0.0
     if _l1_probe_diag_enabled() and logger.isEnabledFor(logging.DEBUG):
         diag = compute_probe_breadth_diagnostics(
             merged=merged, volatility_2d=volatility_2d,
             symbol_to_idx=symbol_to_idx, cfg=cfg, fold_id=fold_id, seed=seed,
+            regime_code_1d=regime_code_1d,
         )
         if diag is not None:
             logger.debug("[L1-PROBE-DIAG] %s", _format_probe_diag(diag))
+            rank_ic_all_val = diag.rank_ic_all
+            rank_ic_tstat_val = diag.rank_ic_tstat
     return Layer1FoldReadiness(
         fold_id=fold_id,
         registry_source_end_idx=fold.fit_end,
@@ -1358,6 +1511,8 @@ def evaluate_outer_signal_opportunities(
         passed=not blockers,
         blockers=tuple(blockers),
         dropped_by_maturity_count=dropped_by_maturity,
+        rank_ic_all=rank_ic_all_val,
+        rank_ic_tstat=rank_ic_tstat_val,
     )
 
 
@@ -1446,6 +1601,22 @@ def evaluate_layer1_readiness(
     else:
         effective_sym_metric = effective_symbol_count
         sym_threshold = max(float(cfg.l1_min_sym_count), float(cfg.l1_min_sym_ratio) * max(1, trade_scope_count))
+
+    # IC pooled diagnostics — DEBUG 모니터링 전용 (하드 게이트 보류, spec §Track A)
+    if logger.isEnabledFor(logging.DEBUG):
+        ic_vals: list[float] = []
+        ic_tstats: list[float] = []
+        for report in fold_reports:
+            ic_vals.append(report.rank_ic_all)
+            ic_tstats.append(report.rank_ic_tstat)
+        valid_tstats = [t for t in ic_tstats if np.isfinite(t) and t != 0.0]
+        pooled_ic_tstat = float(np.sum(valid_tstats) / np.sqrt(max(len(valid_tstats), 1))) if valid_tstats else 0.0
+        valid_ics = [v for v in ic_vals if np.isfinite(v)]
+        ic_sign_ratio = float(np.mean([1.0 if v > 0.0 else 0.0 for v in valid_ics])) if valid_ics else 0.0
+        logger.debug(
+            "[L1-IC-DIAG] pooled_ic_tstat=%.3f ic_sign_ratio=%.3f n_folds=%d",
+            pooled_ic_tstat, ic_sign_ratio, len(fold_reports),
+        )
 
     check_specs = (
         (
