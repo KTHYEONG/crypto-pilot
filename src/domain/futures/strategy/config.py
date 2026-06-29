@@ -444,6 +444,9 @@ class CandidateStrategyConfig:
     l1_probe_top_k: int = 3
     l1_min_probe_bps: float = 0.0
     l1_min_probe_tstat: float = 1.96
+    l1_min_ic_tstat: float = 2.0
+    l1_min_ic_sign_consistency: float = 0.6
+    l1_probe_metric: Literal["topk", "breadth"] = "breadth"
     l1_min_realized_match_ratio: float = 0.90
     l1_min_matched_events_per_fold: int = 20
     l1_min_prediction_unique_values: int = 3

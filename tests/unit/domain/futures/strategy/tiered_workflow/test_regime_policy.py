@@ -97,8 +97,8 @@ def test_layer2_allocation_config_defaults_regime_soft_risk_caps() -> None:
     assert cfg.l2_regime_hard_block_enabled is False
     assert cfg.l2_regime_risk_cap_enabled is True
     assert cfg.l2_regime_bull_gross_cap == pytest.approx(1.0)
-    assert cfg.l2_regime_bear_gross_cap == pytest.approx(0.75)
-    assert cfg.l2_regime_crisis_gross_cap == pytest.approx(0.55)
+    assert cfg.l2_regime_bear_gross_cap == pytest.approx(0.35)
+    assert cfg.l2_regime_crisis_gross_cap == pytest.approx(0.25)
     assert cfg.l2_regime_scale_signal_mu is True
     assert cfg.l2_regime_scale_quality_weight is True
 

@@ -79,10 +79,11 @@ graph TD
 **Prequential Evidence**
 - Decoupled grid multiplier (outer_n×multiplier ≤ max_folds). Adaptive evidence gates: early snapshots relax `min_effective_obs`/`min_folds`.
 
-**Readiness Gate**
+**Readiness Gate (5-condition)**
 - Fold Coverage ≥ 0.80, Match Ratio ≥ 0.90, $N_{eff}$ ≥ 3.0, Fold Ratio ≥ 0.50, Pooled LCB > 0.
 - Per-TF overrides: 1h relaxed ($N_{eff}$ ≥ 3, sym ≥ 4, fold_ratio ≥ 0.40), 12h tightened ($N_{eff}$ ≥ 6, fold_ratio ≥ 0.55).
-- **Probe Breadth Diagnostics (env-gated DEBUG)**: `L1_PROBE_DIAG` env var activates per-fold decomposition of the probe signal. Measurements: (a) **Breadth-decay** — `probe_gross_by_k` for k=3/10/20/-1 quantifies selection inflation (top-k only vs full breadth); (b) **Net decomposition** — `gross − rt_cost` per k separates cost drag from gross edge; (c) **Rank-IC** — Spearman ρ + Fisher-z tstat over all predicted↔realized pairs measures honest signal power; (d) **Realized distribution** — mean/median/positive-fraction of all events. Zero side-effect on gate logic or return value.
+- **Probe Metric**: Defaults to `"breadth"` — per-decision probe uses the cross-sectional mean of all symbols' realized returns instead of top-k selection. Configurable via `l1_probe_metric`.
+- **Probe Breadth Diagnostics (env-gated DEBUG, zero side-effect on gate)**: `L1_PROBE_DIAG` env var activates per-fold decomposition. Measurements: (a) **Breadth-decay** — `probe_gross_by_k` for k=3/10/20/-1 quantifies selection inflation; (b) **Net decomposition** — `gross − rt_cost` per k; (c) **Rank-IC** — Spearman ρ + Fisher-z tstat over predicted↔realized pairs; (d) **IC Monitor** — pooled IC tstat and sign-consistency ratio computed at gate evaluation time and logged at DEBUG level only (not a hard gate, spec §Track A). (e) **Realized distribution** — mean/median/positive-fraction.
 
 **Promotion Gate (4-condition)**
 1. `hard_eligible`: structural gates all pass

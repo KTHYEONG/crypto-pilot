@@ -1592,15 +1592,19 @@ def _run_awf_simulation(
             if not _fit_valid_signals:
                 continue
 
-            _fit_selected, _ = rank_and_select(
-                _fit_valid_signals,
-                k_rank=k_rank,
-                sector_cap=n_sym,
-                prev_selection=_prev_selection_fit,
-                rank_buffer=rank_buffer,
-                min_abs_z=float(config.min_abs_rank_z),
-                selection_mode="absolute",
-            )
+            _fit_selection_breadth = bool(getattr(config, "l2_selection_breadth_mode", True))
+            if _fit_selection_breadth:
+                _fit_selected = frozenset(_fit_valid_signals.keys())
+            else:
+                _fit_selected, _ = rank_and_select(
+                    _fit_valid_signals,
+                    k_rank=k_rank,
+                    sector_cap=n_sym,
+                    prev_selection=_prev_selection_fit,
+                    rank_buffer=rank_buffer,
+                    min_abs_z=float(config.min_abs_rank_z),
+                    selection_mode="absolute",
+                )
             _prev_selection_fit = _fit_selected
 
             _fit_mu_arr: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
@@ -1892,12 +1896,29 @@ def _run_awf_simulation(
 
     prof_bucket_routing = time.perf_counter() - _t_pre_loop
 
+    # L2_DIAG_ATTR: per-regime realized_price 분해용 3-state code (routing mode 무관 독립 계산)
+    _diag_regime_full: NDArray[np.int8] | None = None
+    if _diag:
+        try:
+            from src.domain.futures.strategy.market_regime import (
+                compress_regime_codes,
+                compute_market_regime_context,
+            )
+            _diag_regime_full = compress_regime_codes(
+                compute_market_regime_context(aligned=aligned).code_1d
+            )
+        except Exception:
+            _diag_regime_full = None
+    _diag_regime_names = ("bull", "bear", "crisis")
+
     for _fold_idx, fold in enumerate(awf_folds):
         t_fold_start = time.perf_counter()
         _fold_h: list[float] = []
         _fold_b: list[float] = []
         _fold_selected: set[str] = set()
         _attr_price = 0.0
+        _attr_price_by_regime = {0: 0.0, 1: 0.0, 2: 0.0}
+        _attr_bars_by_regime = {0: 0, 1: 0, 2: 0}
         _attr_funding = 0.0
         _attr_cost = 0.0
         _fold_rebalance_count = 0
@@ -2151,15 +2172,20 @@ def _run_awf_simulation(
                     expand_below_vol_ratio=adaptive_expand_below_vol_ratio,
                     max_extra=adaptive_k_extra,
                 )
-            selected, _z_scores = rank_and_select(
-                valid_signals,
-                k_rank=effective_k_rank,
-                sector_cap=n_sym,
-                prev_selection=prev_selection,
-                rank_buffer=rank_buffer,
-                min_abs_z=float(config.min_abs_rank_z),
-                selection_mode="absolute",
-            )
+            selection_breadth = bool(getattr(config, "l2_selection_breadth_mode", True))
+            if selection_breadth:
+                selected = frozenset(valid_signals.keys())
+                _z_scores: dict[str, float] = {}
+            else:
+                selected, _z_scores = rank_and_select(
+                    valid_signals,
+                    k_rank=effective_k_rank,
+                    sector_cap=n_sym,
+                    prev_selection=prev_selection,
+                    rank_buffer=rank_buffer,
+                    min_abs_z=float(config.min_abs_rank_z),
+                    selection_mode="absolute",
+                )
             # DEBUG: Z-score distribution diagnostics
             if _z_scores and logger.isEnabledFor(logging.DEBUG):
                 _z_vals = [z for z in _z_scores.values() if z > 0.0]
@@ -2259,8 +2285,8 @@ def _run_awf_simulation(
                 _state_names_for_cap,
                 enabled=bool(getattr(config, "l2_regime_risk_cap_enabled", True)),
                 bull_gross_cap=float(getattr(config, "l2_regime_bull_gross_cap", 1.0)),
-                bear_gross_cap=float(getattr(config, "l2_regime_bear_gross_cap", 0.75)),
-                crisis_gross_cap=float(getattr(config, "l2_regime_crisis_gross_cap", 0.55)),
+                bear_gross_cap=float(getattr(config, "l2_regime_bear_gross_cap", 0.35)),
+                crisis_gross_cap=float(getattr(config, "l2_regime_crisis_gross_cap", 0.25)),
             )
             if logger.isEnabledFor(logging.DEBUG) and _regime_risk_mult < 1.0:
                 _regime_label_for_cap = (
@@ -2408,7 +2434,13 @@ def _run_awf_simulation(
                 )
                 # 거래비용은 리밸런싱 첫 bar에만 차감
                 cost = rebal_cost if t2 == t else 0.0
-                _attr_price += float(np.dot(w, bar_ret))
+                _bar_price = float(np.dot(w, bar_ret))
+                _attr_price += _bar_price
+                if _diag_regime_full is not None and t2 < len(_diag_regime_full):
+                    _rc = int(_diag_regime_full[t2])
+                    if _rc in _attr_price_by_regime:
+                        _attr_price_by_regime[_rc] += _bar_price
+                        _attr_bars_by_regime[_rc] += 1
                 _attr_funding += -float(np.dot(w, funding_rates))
                 _attr_cost += cost
                 cost_baseline = rebal_cost_baseline if t2 == t else 0.0
@@ -2492,6 +2524,12 @@ def _run_awf_simulation(
                 _attr.sleeves_active_mean, _attr.friction_pass_ratio, _attr.throttle_mult_mean,
                 _attr.dropped_below_cost, _attr.netting_events,
             )
+            if _diag_regime_full is not None:
+                _reg_parts = " ".join(
+                    f"{_diag_regime_names[_rc]}=price{_attr_price_by_regime[_rc]:+.4f}/bars{_attr_bars_by_regime[_rc]}"
+                    for _rc in (0, 1, 2)
+                )
+                logger.debug("[L2-ATTR-REGIME] fold=%d %s", _attr.fold_idx, _reg_parts)
         if _diag and logger.isEnabledFor(logging.DEBUG):
             _waterfall = _assemble_edge_waterfall(
                 fold_idx=_fold_idx,

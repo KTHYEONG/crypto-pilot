@@ -89,6 +89,9 @@ graph TD
 | **Output**| `overlay_mult_1d` | Continuous risk multiplier applied to final portfolio weights. Bounds: `[0.0, max_vol_scale]` |
 | **Output**| `code_1d` | Discrete regime integer (0-5) used for signal gating and B0 ensemble |
 | **Eval**  | `RegimeScoreCard` | Metrics C2(Persistence), C3(Distinctness), C4(Stability), C5(Coverage) |
+| **L2 Param** | `l2_regime_bull_gross_cap` | Bull regime gross exposure cap (default `1.0`, full deployment). Bounds: `(0.0, 1.0]` |
+| **L2 Param** | `l2_regime_bear_gross_cap` | Bear regime gross exposure cap (default `0.35`, bull-primary prior). Bounds: `(0.0, 1.0]` |
+| **L2 Param** | `l2_regime_crisis_gross_cap` | Crisis regime gross exposure cap (default `0.25`, bull-primary prior). Bounds: `(0.0, 1.0]` |
 
 # 5. Edge Cases & Handling
 - **Flash Crash / Liquidity Vacuum:** Rapid extreme price drops trigger the CUSUM crisis condition, immediately snapping the `overlay_mult_1d` to `crisis_gross_floor` and ignoring naive volatility targeting bounds until the cooldown period expires.
