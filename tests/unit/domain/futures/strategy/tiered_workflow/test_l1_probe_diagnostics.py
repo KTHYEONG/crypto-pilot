@@ -215,3 +215,85 @@ def test_format_probe_diag_output() -> None:
     assert "gross_k3=90.00" in formatted
     assert "net_k3=84.00" in formatted
     assert "rt_cost=6.0" in formatted
+
+
+# ─── Regime decomposition (market regime code_1d) ─────────────────────────
+
+def test_compute_probe_diag_regime_breakdown_by_code() -> None:
+    # decision_idx 0,1 -> bull(0); 2,3 -> crisis(2)
+    exp = [10.0, 12.0, 8.0, 9.0]
+    real = [100.0, 80.0, -50.0, -30.0]
+    decision_idx = [0, 1, 2, 3]
+    symbols = ["s0", "s1", "s2", "s3"]
+    merged = _merged(exp, real, decision_idx, symbols)
+    cfg = _make_cfg(expected_cost_bps=5.0)
+    regime_code = np.array([0, 0, 2, 2], dtype=np.int8)  # bull,bull,crisis,crisis
+
+    diag = compute_probe_breadth_diagnostics(
+        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg, fold_id=0, seed=0, regime_code_1d=regime_code,
+    )
+
+    assert diag is not None
+    assert set(diag.regime_breakdown.keys()) == {"bull", "crisis"}
+    bull_n, _bull_gross, bull_net, bull_pos, _bull_ic = diag.regime_breakdown["bull"]
+    crisis_n, _c_gross, crisis_net, crisis_pos, _c_ic = diag.regime_breakdown["crisis"]
+    assert bull_n == 2 and crisis_n == 2
+    assert bull_net == pytest.approx(90.0 - 5.0)   # mean(100,80)-rt
+    assert crisis_net == pytest.approx(-40.0 - 5.0)  # mean(-50,-30)-rt
+    assert bull_pos == pytest.approx(1.0)
+    assert crisis_pos == pytest.approx(0.0)
+
+
+def test_compute_probe_diag_no_regime_when_code_none() -> None:
+    merged = _merged([10.0, 8.0], [50.0, -20.0], [0, 1], ["s0", "s1"])
+    cfg = _make_cfg()
+
+    diag = compute_probe_breadth_diagnostics(
+        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg, fold_id=0, seed=0, regime_code_1d=None,
+    )
+
+    assert diag is not None
+    assert diag.regime_breakdown == {}
+
+
+# ─── Residual-alpha decomposition ─────────────────────────────────────────
+
+def test_compute_probe_diag_residual_separates_beta_and_alpha() -> None:
+    # 단일 bar, 4 이벤트. exp가 real과 동조 → residual_ic 양(+), selection_alpha 양(+).
+    exp = [40.0, 30.0, 20.0, 10.0]
+    real = [100.0, 80.0, 20.0, 0.0]   # per_bar_mean=50
+    decision_idx = [0, 0, 0, 0]
+    symbols = ["s0", "s1", "s2", "s3"]
+    merged = _merged(exp, real, decision_idx, symbols)
+    cfg = _make_cfg()
+
+    diag = compute_probe_breadth_diagnostics(
+        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg, fold_id=0, seed=0,
+    )
+
+    assert diag is not None
+    assert diag.beta_edge_bps == pytest.approx(50.0)          # 횡단면 평균
+    # top-3 by exp=[40,30,20] -> real[100,80,20] mean=66.67 - 50
+    assert diag.selection_alpha_bps == pytest.approx(66.6667 - 50.0, abs=1e-2)
+    assert diag.residual_ic > 0.9                              # exp가 잔차 순위 예측
+    assert diag.n_residual_events == 4
+
+
+def test_compute_probe_diag_residual_zero_when_single_event_bars() -> None:
+    # 모든 bar가 단일 이벤트 → 횡단면 없음 → residual 정의 불가(0).
+    merged = _merged([10.0, 20.0, 30.0], [50.0, -20.0, 40.0], [0, 1, 2], ["s0", "s1", "s2"])
+    cfg = _make_cfg()
+
+    diag = compute_probe_breadth_diagnostics(
+        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg, fold_id=0, seed=0,
+    )
+
+    assert diag is not None
+    assert diag.n_residual_events == 0
+    assert diag.beta_edge_bps == pytest.approx(0.0)
+    assert diag.selection_alpha_bps == pytest.approx(0.0)
+    assert diag.residual_ic == pytest.approx(0.0)
