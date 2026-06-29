@@ -488,6 +488,8 @@ class Layer2AllocationConfig:
     l2_bucket_min_reliability: float = 0.55
     # CS Score Amplification (anti-Kelly=EW-convergence) — 중단 (효과 없음 입증됨)
     l2_cs_amp_enabled: bool = False
+    # Breadth-selection mode: True=use all valid symbols (no rank_and_select alpha sorting)
+    l2_selection_breadth_mode: bool = False
     l2_cs_amp_alpha: float = 2.0
     l2_cs_amp_mode: str = "power"
     l2_cs_amp_power: float = 2.0
@@ -514,8 +516,8 @@ class Layer2AllocationConfig:
     l2_regime_min_mu_abs_change: float = 0.03
     l2_regime_risk_cap_enabled: bool = True
     l2_regime_bull_gross_cap: float = 1.0
-    l2_regime_bear_gross_cap: float = 0.75
-    l2_regime_crisis_gross_cap: float = 0.55
+    l2_regime_bear_gross_cap: float = 0.35
+    l2_regime_crisis_gross_cap: float = 0.25
     l2_entry_cooldown_bars: int = 12
     l2_entry_spike_penalty_weight: float = 0.05
     l2_entry_spike_warn_threshold: float = 0.20

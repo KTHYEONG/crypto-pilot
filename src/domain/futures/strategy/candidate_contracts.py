@@ -538,6 +538,8 @@ class Layer1FoldReadiness:
     blockers: tuple[str, ...]
     dropped_by_maturity_count: int
     _compat_ic_series: tuple[float, ...]
+    rank_ic_all: float = 0.0
+    rank_ic_tstat: float = 0.0
 
     def __init__(
         self,
@@ -564,6 +566,8 @@ class Layer1FoldReadiness:
         valid_opportunity_timestamp_count: int | None = None,
         opportunity_ic_series: tuple[float, ...] | None = None,
         probe_gross_edge_series_bps: tuple[float, ...] | None = None,
+        rank_ic_all: float = 0.0,
+        rank_ic_tstat: float = 0.0,
     ) -> None:
         compat_ic_series = tuple(opportunity_ic_series or ())
         compat_probe_series = tuple(probe_series_bps or probe_gross_edge_series_bps or ())
@@ -611,6 +615,8 @@ class Layer1FoldReadiness:
         object.__setattr__(self, "passed", bool(passed))
         object.__setattr__(self, "blockers", tuple(blockers))
         object.__setattr__(self, "dropped_by_maturity_count", int(dropped_by_maturity_count))
+        object.__setattr__(self, "rank_ic_all", float(rank_ic_all))
+        object.__setattr__(self, "rank_ic_tstat", float(rank_ic_tstat))
         object.__setattr__(self, "_compat_ic_series", compat_ic_series)
 
     @property
