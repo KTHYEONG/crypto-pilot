@@ -32,9 +32,10 @@ def _merged(
     decision_idx: list[int],
     symbols: list[str],
     qw: list[float] | None = None,
+    side: list[int] | None = None,
 ) -> pd.DataFrame:
     n = len(exp)
-    return pd.DataFrame({
+    df = pd.DataFrame({
         "decision_idx": decision_idx,
         "symbol": symbols,
         "strategy_id": ["s"] * n,
@@ -42,6 +43,9 @@ def _merged(
         "realized_side_adjusted_gross_bps": np.asarray(real, dtype=float),
         "quality_weight": np.ones(n, dtype=float) if qw is None else np.asarray(qw, dtype=float),
     })
+    if side is not None:
+        df["side"] = np.asarray(side, dtype=int)
+    return df
 
 
 # ─── Scenario 1: Selection-inflation detection ────────────────────────────
@@ -238,7 +242,8 @@ def test_compute_probe_diag_regime_breakdown_by_code() -> None:
     assert set(diag.regime_breakdown.keys()) == {"bull", "crisis"}
     bull_n, _bull_gross, bull_net, bull_pos, _bull_ic = diag.regime_breakdown["bull"]
     crisis_n, _c_gross, crisis_net, crisis_pos, _c_ic = diag.regime_breakdown["crisis"]
-    assert bull_n == 2 and crisis_n == 2
+    assert bull_n == 2
+    assert crisis_n == 2
     assert bull_net == pytest.approx(90.0 - 5.0)   # mean(100,80)-rt
     assert crisis_net == pytest.approx(-40.0 - 5.0)  # mean(-50,-30)-rt
     assert bull_pos == pytest.approx(1.0)
@@ -297,3 +302,113 @@ def test_compute_probe_diag_residual_zero_when_single_event_bars() -> None:
     assert diag.beta_edge_bps == pytest.approx(0.0)
     assert diag.selection_alpha_bps == pytest.approx(0.0)
     assert diag.residual_ic == pytest.approx(0.0)
+
+
+# ─── Phase-1: Bear-side directionality — regime_side_split ────────────────
+
+def test_compute_probe_diag_bear_net_long_bias_detected() -> None:
+    exp = [10.0, 8.0, 6.0, 5.0]
+    real = [-10.0, -8.0, -6.0, 12.0]
+    decision_idx = [0, 1, 2, 3]
+    symbols = ["s0", "s1", "s2", "s3"]
+    side = [1, 1, 1, -1]
+    merged = _merged(exp, real, decision_idx, symbols, side=side)
+    cfg = _make_cfg()
+    regime_code = np.array([1, 1, 1, 1], dtype=np.int8)
+
+    diag = compute_probe_breadth_diagnostics(
+        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg, fold_id=0, seed=0, regime_code_1d=regime_code,
+    )
+
+    assert diag is not None
+    bear = diag.regime_side_split["bear"]
+    long_frac, long_mean, short_mean, n_long, n_short = bear
+    assert long_frac == pytest.approx(0.75)
+    assert long_mean == pytest.approx(-8.0)
+    assert short_mean == pytest.approx(12.0)
+    assert n_long == 3
+    assert n_short == 1
+    assert long_frac >= 0.65
+    assert long_mean < 0.0 <= short_mean
+
+
+def test_compute_probe_diag_side_split_defaults_long_when_missing() -> None:
+    exp = [10.0, 8.0, 6.0]
+    real = [-5.0, -3.0, 12.0]
+    decision_idx = [0, 1, 2]
+    symbols = ["s0", "s1", "s2"]
+    merged = _merged(exp, real, decision_idx, symbols)
+    cfg = _make_cfg()
+    regime_code = np.array([1, 1, 1], dtype=np.int8)
+
+    diag = compute_probe_breadth_diagnostics(
+        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg, fold_id=0, seed=0, regime_code_1d=regime_code,
+    )
+
+    assert diag is not None
+    bear = diag.regime_side_split["bear"]
+    long_frac, _long_mean, short_mean, _n_long, n_short = bear
+    assert long_frac == pytest.approx(1.0)
+    assert n_short == 0
+    assert short_mean == pytest.approx(0.0)
+
+
+def test_compute_probe_diag_side_split_all_short_no_zero_div() -> None:
+    exp = [5.0, 3.0]
+    real = [5.0, 3.0]
+    decision_idx = [0, 1]
+    symbols = ["s0", "s1"]
+    side = [-1, -1]
+    merged = _merged(exp, real, decision_idx, symbols, side=side)
+    cfg = _make_cfg()
+    regime_code = np.array([1, 1], dtype=np.int8)
+
+    diag = compute_probe_breadth_diagnostics(
+        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg, fold_id=0, seed=0, regime_code_1d=regime_code,
+    )
+
+    assert diag is not None
+    bear = diag.regime_side_split["bear"]
+    long_frac, long_mean, short_mean, n_long, n_short = bear
+    assert long_frac == pytest.approx(0.0)
+    assert long_mean == pytest.approx(0.0)
+    assert short_mean == pytest.approx(4.0)
+    assert n_long == 0
+    assert n_short == 2
+
+
+def test_compute_probe_diag_side_split_empty_when_no_regime() -> None:
+    merged = _merged([10.0, 8.0], [5.0, -3.0], [0, 1], ["s0", "s1"], side=[1, -1])
+    cfg = _make_cfg()
+
+    diag = compute_probe_breadth_diagnostics(
+        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg, fold_id=0, seed=0, regime_code_1d=None,
+    )
+
+    assert diag is not None
+    assert diag.regime_side_split == {}
+
+
+def test_format_probe_diag_renders_side_split() -> None:
+    diag = ProbeBreadthDiagnostics(
+        fold_id=0,
+        n_events=58,
+        n_decisions=5,
+        avg_breadth_per_decision=11.6,
+        probe_gross_by_k={3: 30.0, -1: 5.0},
+        probe_net_by_k={3: 24.0, -1: -1.0},
+        rank_ic_all=0.15,
+        rank_ic_tstat=1.15,
+        realized_mean_all=5.0,
+        realized_median_all=2.0,
+        realized_pos_fraction_all=0.55,
+        rt_cost_bps=6.0,
+        regime_breakdown={"bear": (58, 5.0, -1.0, 0.55, 0.15)},
+        regime_side_split={"bear": (0.78, -1.1, 0.3, 45, 13)},
+    )
+    formatted = _format_probe_diag(diag)
+    assert "SIDE[bear]=long78%/lr-1.1/sr+0.3/nl45/ns13" in formatted

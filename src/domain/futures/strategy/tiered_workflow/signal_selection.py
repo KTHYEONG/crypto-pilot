@@ -1076,6 +1076,8 @@ class ProbeBreadthDiagnostics:
     n_residual_events: int = 0
     # regime -> (beta_edge_bps, selection_alpha_bps, residual_ic)
     regime_residual: dict[str, tuple[float, float, float]] = field(default_factory=dict)
+    # regime -> (long_fraction, long_real_mean_bps, short_real_mean_bps, n_long, n_short)
+    regime_side_split: dict[str, tuple[float, float, float, int, int]] = field(default_factory=dict)
 
 
 def compute_probe_breadth_diagnostics(
@@ -1098,6 +1100,8 @@ def compute_probe_breadth_diagnostics(
 
     di = merged["decision_idx"].to_numpy(dtype=np.int64)
     symbols = merged["symbol"].to_numpy(dtype=str)
+    side_raw = merged["side"].to_numpy(dtype=np.int64) if "side" in merged.columns else np.ones(n, dtype=np.int64)
+    side_norm = np.where(side_raw >= 0, np.int64(1), np.int64(-1))
     if "quality_weight" in merged.columns:
         qw = merged["quality_weight"].to_numpy(dtype=np.float64)
     else:
@@ -1234,6 +1238,7 @@ def compute_probe_breadth_diagnostics(
     # 우선순위: 시장 regime code_1d(decision_idx 매핑) > entry_regime 컬럼.
     regime_breakdown: dict[str, tuple[int, float, float, float, float]] = {}
     regime_residual: dict[str, tuple[float, float, float]] = {}
+    regime_side_split: dict[str, tuple[float, float, float, int, int]] = {}
     regimes: NDArray[Any] | None = None
     if regime_code_1d is not None and len(regime_code_1d) > 0:
         t_max = len(regime_code_1d)
@@ -1270,6 +1275,19 @@ def compute_probe_breadth_diagnostics(
             r_beta, r_alpha, r_res_ic, _ = _residual_decompose(rmask)
             regime_residual[rname] = (r_beta, r_alpha, r_res_ic)
 
+            r_side_s = side_norm[rmask]
+            r_real_s = real[rmask]
+            long_mask_s = r_side_s > 0
+            short_mask_s = ~long_mask_s
+            n_long_s = int(long_mask_s.sum())
+            n_short_s = int(short_mask_s.sum())
+            total_side = n_long_s + n_short_s
+            if total_side > 0:
+                long_frac = n_long_s / total_side
+                long_mean = float(r_real_s[long_mask_s].mean()) if n_long_s > 0 else 0.0
+                short_mean = float(r_real_s[short_mask_s].mean()) if n_short_s > 0 else 0.0
+                regime_side_split[rname] = (long_frac, long_mean, short_mean, n_long_s, n_short_s)
+
     return ProbeBreadthDiagnostics(
         fold_id=fold_id,
         n_events=n,
@@ -1290,6 +1308,7 @@ def compute_probe_breadth_diagnostics(
         residual_ic_tstat=float(residual_ic_tstat),
         n_residual_events=n_residual,
         regime_residual=regime_residual,
+        regime_side_split=regime_side_split,
     )
 
 
@@ -1324,6 +1343,10 @@ def _format_probe_diag(diag: ProbeBreadthDiagnostics) -> str:
         parts.append(
             f"REG[{rname}]=n{rn}/net{rnet:.1f}/pos{rpos:.0%}/ic{ric:+.3f}{rr_str}"
         )
+        ss = diag.regime_side_split.get(rname)
+        if ss is not None:
+            lf, lr, sr, nl, ns = ss
+            parts.append(f"SIDE[{rname}]=long{lf:.0%}/lr{lr:+.1f}/sr{sr:+.1f}/nl{nl}/ns{ns}")
     return " | ".join(parts)
 
 
