@@ -148,3 +148,12 @@ ai_read_policy: when_related
 - `evaluate_outer_signal_opportunities` 내 `return Layer1FoldReadiness` 직전에 hook — 게이트/리턴 영향 0, 순수 DEBUG 로그
 - Net 정의: per-event 1-라운드트립 가정 (`net = gross − expected_cost_bps`), turnover 재부과 금지
 - **Test Coverage**: 12 tests across 6 scenarios (selection-inflation, gross→net, rank-IC absence/positive, edge cases, env gate). All PASS. L1: ruff/mypy clean.
+
+## Phase 16: Track A IC Gate Spec Compliance + Selection Downgrade + Bull-Primary Prior (ADR-051, 6/29)
+- **IC Hard Gate → DEBUG Monitoring (spec §Track A, lines 106-107)**: Spec explicitly defers IC hard gate ("IC 하드 게이트 보류") until Track B produces cross-sectional alpha. Removed `("ic_tstat", ...)` and `("ic_sign_consistency", ...)` from `evaluate_layer1_readiness` check_specs. Moved IC pooling to `logger.debug` conditional. Prevents production always-BLOCK where `rank_ic_all=0.0` (default when `L1_PROBE_DIAG` env not set).
+- **Config Params Reserved (l1_min_ic_tstat, l1_min_ic_sign_consistency)**: Kept in `CandidateStrategyConfig` for future Track B activation. Not wired into check_specs.
+- **Probe Metric Default = "breadth"**: `l1_probe_metric` default changed from implicit top-k to `"breadth"`. `evaluate_outer_signal_opportunities` uses per-decision cross-sectional mean of all symbols instead of risk-score-ranked top-k when probe_metric="breadth". S4 test validates gross-all path.
+- **Rank-IC/layer1FoldReadiness 승격**: `Layer1FoldReadiness` gains `rank_ic_all` / `rank_ic_tstat` fields from `ProbeBreadthDiagnostics`. Passed through `evaluate_outer_signal_opportunities` when `L1_PROBE_DIAG` diag available. Enables future IC gate without re-plumbing.
+- **Selection Downgrade to Breadth Filter (Track B-2, spec line 127)**: `l2_selection_breadth_mode=True` (default) in `Layer2AllocationConfig`. `awf_sim.py` L2 OOS/fit sim loops bypass `rank_and_select` and use all valid symbols as selected set. Removes noise sorting from residual-IC≈0 regime.
+- **Bull-Primary Structural Prior (spec line 129, Layer-1 defence)**: `l2_regime_bear_gross_cap` tightened from 0.75→0.35, `l2_regime_crisis_gross_cap` tightened from 0.55→0.25 in `Layer2AllocationConfig` defaults and `awf_sim.py` fallbacks. Reflects `bear` regime's measured −1.43 bps/bar (2025 OOS, 75% negative) and `crisis` IC− zero edge.
+- **L1 validation**: ruff/mypy clean across 6 source files + 1 test file. 96 targeted tests pass, 0 new regression.

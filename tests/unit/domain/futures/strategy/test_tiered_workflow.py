@@ -3573,7 +3573,6 @@ def _run_pipeline_to_l2_and_capture_awf_call(
     extend_to_holdout_end: bool,
 ) -> tuple[dict[str, object], tuple[WFFold, ...]]:
     """run_tiered_pipeline을 target_phase='l2'까지 실행하고 build_l2_simulation_folds 호출 인자를 캡처."""
-    import src.domain.futures.strategy.tiered_workflow as _tw
 
     aligned, window = _build_part5_aligned_and_window(extend_to_holdout_end=extend_to_holdout_end)
     cfg = replace(CandidateStrategyConfig(), wf_n_folds=2)
