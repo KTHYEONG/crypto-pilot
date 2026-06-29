@@ -19,7 +19,7 @@ from scipy.stats import spearmanr
 
 import src.domain.futures.strategy.config as strategy_config
 from src.core.utils.utils import PERF
-from src.domain.futures.optimization.workflow import evaluate_l2_trial
+from src.domain.futures.optimization.workflow import evaluate_l2_trial_cached
 from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
 from src.domain.futures.portfolio.signal_composer import (
     compose_symbol_signals,
@@ -1657,12 +1657,14 @@ def run_l2_awf(
     override_dsr: float | None = None,
     deploy_leverage: float | None = None,
     prebuilt_cache: L2SimulationCache | None = None,
+    eval_memo: dict[Any, Any] | None = None,
 ) -> Layer2Result:
     """Layer2 AWF 포트폴리오 시뮬레이션 (delegate to evaluate_l2_trial SSOT).
 
     Args:
         deploy_leverage: champion L* (trial-path SSOT). None → 내부 calibrate.
             None fallback 시 config.l2_deploy_enabled + sim.fit_rets_hybrid 사용.
+        eval_memo: selection 단계 _memo dict. 제공 시 evaluate_l2_trial_cached 사용.
     """
     if prebuilt_cache is not None:
         cache = prebuilt_cache
@@ -1674,34 +1676,62 @@ def run_l2_awf(
         logger.log(PERF, "[PERF] l2_build_sim_cache took=%.4fs", time.perf_counter() - t_l2_cache)
         logger.debug("[MEM] stage=l2_build_sim_cache rss=%.0fMB", _get_rss_mb())
 
-    # SSOT: evaluate_l2_trial 단일 호출경로
+    # SSOT: evaluate_l2_trial 단일 호출경로 (memo 제공 시 cached wrapper 사용)
     t_eval = time.perf_counter()
-    eval = evaluate_l2_trial(
-        cache=cache,
-        signal_batch=signal_batch,
-        aligned=aligned,
-        awf_folds=awf_folds,
-        config=config,
-        caps=caps,
-        tf=tf,
-        deploy_leverage_override=deploy_leverage,
-    )
+    if eval_memo is not None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            _content_hash_dataclass,
+        )
+
+        cfg_ch = _content_hash_dataclass(config)
+        if eval_memo:
+            _sample_key = next(iter(eval_memo))
+            _sample_cfg_ch, _sample_cache_id = _sample_key[1], _sample_key[0]
+            logger.debug(
+                "[L2-MEMO-PARITY] deploy cfg_ch=%s memo_cfg_ch=%s "
+                "deploy_cache_id=%x memo_cache_id=%x",
+                cfg_ch, _sample_cfg_ch, id(cache) & 0xffffff, _sample_cache_id & 0xffffff,
+            )
+        eval_result = evaluate_l2_trial_cached(
+            cache=cache,
+            signal_batch=signal_batch,
+            aligned=aligned,
+            awf_folds=awf_folds,
+            config=config,
+            caps=caps,
+            tf=tf,
+            deploy_leverage_override=deploy_leverage,
+            _memo=eval_memo,
+        )
+    else:
+        from src.domain.futures.optimization.workflow import evaluate_l2_trial as _eval_trial
+
+        eval_result = _eval_trial(
+            cache=cache,
+            signal_batch=signal_batch,
+            aligned=aligned,
+            awf_folds=awf_folds,
+            config=config,
+            caps=caps,
+            tf=tf,
+            deploy_leverage_override=deploy_leverage,
+        )
     logger.log(PERF, "[PERF] l2_evaluate_trial took=%.4fs", time.perf_counter() - t_eval)
 
     bars_per_year = _bars_per_year_for_tf(tf)
 
     # ── deployment extras (eval raw data 기반, 재계산 금지 — SSOT) ──
-    _rets_h_arr = np.asarray(eval.returns_hybrid, dtype=np.float64)
-    _rets_be_arr = np.asarray(eval.rets_baseline_ew, dtype=np.float64)
-    _rets_b_arr = np.asarray(eval.returns_baseline, dtype=np.float64)
+    _rets_h_arr = np.asarray(eval_result.returns_hybrid, dtype=np.float64)
+    _rets_be_arr = np.asarray(eval_result.rets_baseline_ew, dtype=np.float64)
+    _rets_b_arr = np.asarray(eval_result.returns_baseline, dtype=np.float64)
 
     sharpe_baseline = _sharpe(list(_rets_be_arr), bars_per_year=bars_per_year)
     mdd_baseline = _mdd(list(_rets_b_arr))
     cagr_baseline = _cagr(list(_rets_b_arr), bars_per_year=bars_per_year)
 
-    turnover = float(np.mean(eval.all_turnovers)) if eval.all_turnovers else 0.0
-    avg_net_exposure = float(np.mean(np.abs(eval.all_net_exposures))) if eval.all_net_exposures else 0.0
-    n_rebalances = eval.rebalance_count
+    turnover = float(np.mean(eval_result.all_turnovers)) if eval_result.all_turnovers else 0.0
+    avg_net_exposure = float(np.mean(np.abs(eval_result.all_net_exposures))) if eval_result.all_net_exposures else 0.0
+    n_rebalances = eval_result.rebalance_count
     dsr_hybrid = (
         float(override_dsr)
         if override_dsr is not None
@@ -1721,7 +1751,7 @@ def run_l2_awf(
     }
 
     # gate는 eval에서 가져옴
-    gate = eval.gate
+    gate = eval_result.gate
     if gate is None:
         gate_passed = False
         blocker_reason = "gate_missing"
@@ -1730,24 +1760,24 @@ def run_l2_awf(
         blocker_reason = gate.promotion_blocker
 
     result = _layer2_result_from_trial_eval(
-        eval,
+        eval_result,
         gate_passed=gate_passed,
         blocker_reason=blocker_reason,
         extras=extras,
     )
 
     # ── deploy diagnostics (eval.deploy_leverage 사용, 재계산 금지) ──
-    _risk_util_check = eval.mdd_hybrid / max(float(config.l2_max_mdd_abs), 1e-9)
+    _risk_util_check = eval_result.mdd_hybrid / max(float(config.l2_max_mdd_abs), 1e-9)
     logger.info(
         "[L2-DEPLOY] L*=%.4f binding=%s | CAGR=%.4f MDD=%.4f CVaR95=%.4f RiskUtil=%.3f",
-        eval.deploy_leverage,
-        eval.deploy_binding,
-        eval.cagr_hybrid,
-        eval.mdd_hybrid,
-        eval.cvar_95_hybrid,
+        eval_result.deploy_leverage,
+        eval_result.deploy_binding,
+        eval_result.cagr_hybrid,
+        eval_result.mdd_hybrid,
+        eval_result.cvar_95_hybrid,
         _risk_util_check,
     )
-    if eval.deploy_binding == "mdd" and abs(_risk_util_check - (1.0 - config.l2_deploy_mdd_margin)) > 0.15:
+    if eval_result.deploy_binding == "mdd" and abs(_risk_util_check - (1.0 - config.l2_deploy_mdd_margin)) > 0.15:
         logger.warning(
             "[L2-DEPLOY] realization gap: risk_util=%.3f expected≈%.3f"
             " (결함 #1/#2 재발 의심 — vol-targeting 또는 gross 제약 확인 요망)",
@@ -1756,7 +1786,7 @@ def run_l2_awf(
         )
 
     # 진단: fit-rets vs OOS-rets 분포 이격
-    _fit_arr = np.asarray(eval.fit_returns_hybrid, dtype=np.float64)
+    _fit_arr = np.asarray(eval_result.fit_returns_hybrid, dtype=np.float64)
     if _fit_arr.size >= 2 and _rets_h_arr.size >= 2:
         _diag_fit_cagr = _cagr(list(_fit_arr), bars_per_year=bars_per_year)
         _diag_fit_mdd = _mdd(list(_fit_arr))
@@ -1768,8 +1798,8 @@ def run_l2_awf(
             "L*=%.4f(%s) | deployed_CAGR=%.4f deployed_MDD=%.4f",
             _diag_fit_cagr, _diag_fit_mdd,
             _diag_oos_cagr, _diag_oos_mdd,
-            eval.deploy_leverage, eval.deploy_binding,
-            eval.cagr_hybrid, eval.mdd_hybrid,
+            eval_result.deploy_leverage, eval_result.deploy_binding,
+            eval_result.cagr_hybrid, eval_result.mdd_hybrid,
         )
 
     # ── verbose fold diagnostics (eval.fold_deployed_cagrs 기반) ──
@@ -1792,14 +1822,23 @@ def run_l2_awf(
             "fold": i + 1,
             "sharpe": 0.0,
             "mdd": 0.0,
-            "cagr": (float(eval.fold_deployed_cagrs[i])
-                     if i < len(eval.fold_deployed_cagrs)
-                     and eval.fold_deployed_cagrs[i] is not None
+            "cagr": (float(eval_result.fold_deployed_cagrs[i])
+                     if i < len(eval_result.fold_deployed_cagrs)
+                     and eval_result.fold_deployed_cagrs[i] is not None
                      else 0.0),
-            "pass": bool(eval.fold_deployed_cagrs[i] is not None
-                         and eval.fold_deployed_cagrs[i] > 0.0) if i < len(eval.fold_deployed_cagrs) else False,
-            "symbols": eval.fold_selected_symbols[i] if i < len(eval.fold_selected_symbols) else (),
-            "symbol_count": len(eval.fold_selected_symbols[i]) if i < len(eval.fold_selected_symbols) else 0,
+            "pass": (
+                bool(eval_result.fold_deployed_cagrs[i] is not None
+                     and eval_result.fold_deployed_cagrs[i] > 0.0)
+                if i < len(eval_result.fold_deployed_cagrs) else False
+            ),
+            "symbols": (
+                eval_result.fold_selected_symbols[i]
+                if i < len(eval_result.fold_selected_symbols) else ()
+            ),
+            "symbol_count": (
+                len(eval_result.fold_selected_symbols[i])
+                if i < len(eval_result.fold_selected_symbols) else 0
+            ),
             "period": (
                 f"{_idx_to_date_label(fold.oos_start)} ~ "
                 f"{_idx_to_date_label(max(fold.oos_end - 1, fold.oos_start))}"
@@ -2244,6 +2283,7 @@ def run_tiered_pipeline(
     l2_sim_cache: L2SimulationCache | None = None,
     l2_signal_batch: ValidatedSignalBatch | None = None,
     l2_awf_folds: tuple[WFFold, ...] | None = None,
+    l2_eval_memo: dict[Any, Any] | None = None,
 ) -> tuple[Layer1Result, Layer2Result | None, Layer3Result | None]:
     """3-Layer 티어드 파이프라인 실행.
 
@@ -2550,6 +2590,7 @@ def run_tiered_pipeline(
         override_dsr=override_dsr,
         deploy_leverage=_champion_l_star if (_champion_l_star is not None and _champion_l_star > 1.0) else None,
         prebuilt_cache=l2_sim_cache,
+        eval_memo=l2_eval_memo,
     )
     logger.log(PERF, "[PERF] run_tiered_pipeline_l2_total took=%.4fs", time.perf_counter() - t_l2)
     _rss_l2_after = _get_rss_mb()
