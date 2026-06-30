@@ -37,6 +37,15 @@ Establishes a causal market state from BTC price action for two consumers: a con
 - NaN for $t < \text{window}$; zero-path divisor $\rightarrow 0.0$
 - Consumed by L2 whipsaw attribution (`Layer2FoldAttribution`) and trend-efficiency exposure gate (`trend_efficiency_gross_mult`)
 
+**Reversal Risk-Off Detector**
+- $HW_{t} = \max(P_{t-\text{window}+1 : t})$ (trailing window high)
+- $DD_{t} = 1 - P_{t} / HW_{t}$ (trailing drawdown)
+- $Mom_{t} = \text{EMA}(P, \text{fast})_{t} - \text{EMA}(P, \text{slow})_{t}$ (momentum)
+- $risk\_off\_raw_{t} = (DD_{t} \ge \text{dd\_threshold}) \land (Mom_{t} < 0)$
+- $risk\_off\_1d_{t} = shift(risk\_off\_raw, 1)$ — bar $t$ uses information up to $t-1$ only (causal, look-ahead 0)
+- $risk\_off_{bar} = True$ → L2 override of all sleeve raw_mu to `reversal_risk_off_floor` (overrides soft cap/crisis_floor)
+- Env-gated (`L2_REVERSAL_KILL`, default off), computed once from BTC close per simulation run
+
 **Page-CUSUM Crisis Detector**
 - $z_{t} = \frac{r_{t} - \text{median}_{\leq t}}{1.4826 \cdot \text{MAD}_{\leq t}}$
 - $S^{+}_{t} = \max(0, S^{+}_{t-1} + z_{t} - k)$
@@ -82,6 +91,13 @@ graph TD
     K --> L[6-State Regime Code]
     J --> M[Portfolio Sizing]
     L --> N[Evaluation / ML Target]
+    A --> O[Rolling Max + DD]
+    A --> P[EMA Fast / Slow]
+    O --> Q[risk_off_raw]
+    P --> Q
+    Q --> R[shift(1) → risk_off_1d]
+    R -->|L2_REVERSAL_KILL| S[Selective Hard De-Gross]
+    S --> M
 ```
 
 # 4. Core Variables & I/O
@@ -95,6 +111,12 @@ graph TD
 | **Output**| `overlay_mult_1d` | Continuous risk multiplier applied to final portfolio weights. Bounds: `[0.0, max_vol_scale]` |
 | **Output**| `code_1d` | Discrete regime integer (0-5) used for signal gating and B0 ensemble |
 | **Output**| `trend_efficiency_1d` | Per-bar Kaufman Efficiency Ratio. Bounds: `[0, 1]`, NaN for warm-up |
+| **Param** | `reversal_dd_window` | Trailing high lookback for drawdown (bars, default 90). Bounds: `>= 2` |
+| **Param** | `reversal_dd_threshold` | Drawdown threshold to flag risk-off (default 0.06). Bounds: `(0, 1)` |
+| **Param** | `reversal_mom_fast` | Fast EMA span for momentum (default 20). Must be `< reversal_mom_slow` |
+| **Param** | `reversal_mom_slow` | Slow EMA span for momentum (default 120). Must be `> reversal_mom_fast` |
+| **Param** | `reversal_risk_off_floor` | Hard gross floor during risk-off bars (default 0.05). Bounds: `[0, crisis_gross_floor)` |
+| **Output**| `risk_off_1d` | Boolean mask [T], `True` = risk-off active. Causal: shift(1), row 0 = `False` |
 | **Eval**  | `RegimeScoreCard` | Metrics C2(Persistence), C3(Distinctness), C4(Stability), C5(Coverage) |
 | **L2 Param** | `l2_regime_bull_gross_cap` | Bull regime gross exposure cap (default `1.0`, full deployment). Bounds: `(0.0, 1.0]` |
 | **L2 Param** | `l2_regime_bear_gross_cap` | Bear regime gross exposure cap (default `0.35`, bull-primary prior). Bounds: `(0.0, 1.0]` |
