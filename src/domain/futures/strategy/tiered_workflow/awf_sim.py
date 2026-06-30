@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re as _re
 from collections import defaultdict
 from dataclasses import dataclass, fields, is_dataclass, replace
@@ -43,6 +44,7 @@ from src.domain.futures.strategy.tiered_workflow.entry_cooldown import apply_ent
 from src.domain.futures.strategy.tiered_workflow.regime_debug import (
     replace_selected_regime_debug_diagnostics,
 )
+from src.domain.futures.strategy.tiered_workflow.risk_deployment import trend_efficiency_gross_mult
 
 if TYPE_CHECKING:
     from src.domain.futures.strategy.common.alignment import AlignedMarketData
@@ -80,6 +82,9 @@ class Layer2FoldAttribution:
     throttle_mult_mean: float
     dropped_below_cost: int
     netting_events: int
+    realized_price_low_er: float = 0.0
+    trend_efficiency_corr: float = 0.0
+    mean_trend_efficiency: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -124,6 +129,8 @@ def _assemble_fold_attribution(
     signal_total: int,
     dropped_below_cost: int,
     netting_events: int,
+    er_return_pairs: list[tuple[float, float]] | None = None,
+    target: float = 0.35,
 ) -> Layer2FoldAttribution:
     realized_total = realized_price + realized_funding - realized_cost
     alpha_gap = realized_total - expected_net
@@ -135,6 +142,26 @@ def _assemble_fold_attribution(
 
     def _safe(v: float) -> float:
         return v if np.isfinite(v) else 0.0
+
+    # trend-efficiency gate attribution (C3/C4)
+    if er_return_pairs:
+        ers = np.array([e for e, _ in er_return_pairs])
+        rps = np.array([r for _, r in er_return_pairs])
+        low_er_mask = ers < target
+        realized_price_low_er = float(rps[low_er_mask].sum()) if low_er_mask.any() else 0.0
+        if (
+            ers.size > 1
+            and float(np.std(ers, ddof=0)) > 1e-12
+            and float(np.std(rps, ddof=0)) > 1e-12
+        ):
+            trend_efficiency_corr = float(np.corrcoef(ers, rps)[0, 1])
+        else:
+            trend_efficiency_corr = 0.0
+        mean_trend_efficiency = float(ers.mean())
+    else:
+        realized_price_low_er = 0.0
+        trend_efficiency_corr = 0.0
+        mean_trend_efficiency = 0.0
 
     return Layer2FoldAttribution(
         fold_idx=fold_idx,
@@ -153,6 +180,9 @@ def _assemble_fold_attribution(
         throttle_mult_mean=_safe(throttle_mult_mean),
         dropped_below_cost=dropped_below_cost,
         netting_events=netting_events,
+        realized_price_low_er=_safe(realized_price_low_er),
+        trend_efficiency_corr=_safe(trend_efficiency_corr),
+        mean_trend_efficiency=_safe(mean_trend_efficiency),
     )
 
 
@@ -1926,6 +1956,23 @@ def _run_awf_simulation(
     )
     _is_bear_code = {ci for ci, nm in enumerate(_state_names_for_cap_global) if nm.startswith("bear")}
 
+    # L2_TREND_EFFICIENCY_GATE: Kaufman ER 기반 trend sleeve exposure gate
+    _trend_gate_enabled = os.environ.get("L2_TREND_EFFICIENCY_GATE", "") not in ("", "0", "false", "False")
+    _trend_efficiency_1d: NDArray[np.float64] | None = None
+    if _trend_gate_enabled:
+        try:
+            from src.domain.futures.strategy.market_regime import compute_market_regime_context
+            _trend_efficiency_1d = compute_market_regime_context(aligned=aligned).trend_efficiency_1d
+        except Exception:
+            _trend_efficiency_1d = None
+    _trend_arch_families = frozenset({
+        "trend_ma", "trend_donchian", "vol_breakout", "trend_pullback_continuation",
+        "mtf_trend_pullback", "mtf_breakout_retest", "vol_term_structure_gate",
+        "macd_4h", "supertrend", "ichimoku_trend",
+        "dual_momentum", "taker_imbalance_momentum", "flow_trend_continuation",
+    })
+    _er_return_pairs_by_fold: list[list[tuple[float, float]]] = [[] for _ in awf_folds]
+
     for _fold_idx, fold in enumerate(awf_folds):
         t_fold_start = time.perf_counter()
         if _reliability_enabled and _bear_edge_by_fold:
@@ -1941,6 +1988,7 @@ def _run_awf_simulation(
         _fold_b: list[float] = []
         _fold_selected: set[str] = set()
         _attr_price = 0.0
+        _prev_rebal_price = 0.0
         _attr_price_by_regime = {0: 0.0, 1: 0.0, 2: 0.0}
         _attr_bars_by_regime = {0: 0, 1: 0, 2: 0}
         _attr_funding = 0.0
@@ -2152,6 +2200,25 @@ def _run_awf_simulation(
             if _diag:
                 _attr_dropped += _oos_dropped
                 _attr_sleeves_active.append(len(_oos_sleeve_sigs))
+            # L2_TREND_EFFICIENCY_GATE: trend/ts_mom sleeve gross-down by trailing ER
+            if _trend_gate_enabled and _trend_efficiency_1d is not None:
+                _td_shape = _trend_efficiency_1d.shape[0]
+                _er_decision = float(_trend_efficiency_1d[t - 1]) if t > 0 and t - 1 < _td_shape else float("nan")
+                _trend_mult = 1.0
+                if np.isfinite(_er_decision):
+                    _trend_mult = trend_efficiency_gross_mult(
+                        _er_decision,
+                        target=0.35,
+                        floor_mult=0.30,
+                    )
+                _modified: dict[tuple[str, str], SymbolSignal] = {}
+                for _sk, _ss in _oos_sleeve_sigs.items():
+                    _fam, _tf = _parse_meta_group_ids(_sk[1])
+                    if                     _fam in _trend_arch_families:
+                        _modified[_sk] = replace(_ss, raw_mu=_ss.raw_mu * _trend_mult)
+                    else:
+                        _modified[_sk] = _ss
+                _oos_sleeve_sigs = _modified
             # sleeve key → symbol key 변환: precision-weighted pooling (인플레이션 방지)
             valid_signals, friction_by_symbol = _combine_sleeve_signals_to_symbol(
                 _oos_sleeve_sigs,
@@ -2499,6 +2566,14 @@ def _run_awf_simulation(
                 _fold_h.append(r_h)
                 _fold_b.append(r_b)
 
+            if _trend_gate_enabled and _trend_efficiency_1d is not None:
+                _rebal_price_delta = _attr_price - _prev_rebal_price
+                _prev_rebal_price = _attr_price
+                _td_arr: NDArray[np.float64] = _trend_efficiency_1d
+                _er_here = float(_td_arr[t - 1]) if t > 0 and t - 1 < _td_arr.shape[0] else 0.0
+                if np.isfinite(_er_here):
+                    _er_return_pairs_by_fold[_fold_idx].append((_er_here, _rebal_price_delta))
+
             prev_selection = selected
             prev_w = w
             prev_w_baseline = w_base
@@ -2544,6 +2619,7 @@ def _run_awf_simulation(
             signal_total=_attr_signal_total,
             dropped_below_cost=_attr_dropped,
             netting_events=_attr_netting,
+            er_return_pairs=_er_return_pairs_by_fold[_fold_idx],
         )
         fold_attributions.append(_attr)
         if _diag and logger.isEnabledFor(logging.DEBUG):
@@ -2552,12 +2628,14 @@ def _run_awf_simulation(
                 "realized_price=%.6f realized_funding=%.6f realized_cost=%.6f "
                 "expected_net=%.6f alpha_gap=%.6f mean_gross_exp=%.4f mean_net_exp=%.4f "
                 "sleeves_active_mean=%.1f friction_pass_ratio=%.3f throttle_mult_mean=%.3f "
-                "dropped_below_cost=%d netting_events=%d",
+                "dropped_below_cost=%d netting_events=%d "
+                "low_er_price=%.6f er_corr=%.3f mean_er=%.3f",
                 _attr.fold_idx, _attr.oos_bars, _attr.n_rebal, _attr.realized_total,
                 _attr.realized_price, _attr.realized_funding, _attr.realized_cost,
                 _attr.expected_net, _attr.alpha_gap, _attr.mean_gross_exp, _attr.mean_net_exp,
                 _attr.sleeves_active_mean, _attr.friction_pass_ratio, _attr.throttle_mult_mean,
                 _attr.dropped_below_cost, _attr.netting_events,
+                _attr.realized_price_low_er, _attr.trend_efficiency_corr, _attr.mean_trend_efficiency,
             )
             if _diag_regime_full is not None:
                 _reg_parts = " ".join(

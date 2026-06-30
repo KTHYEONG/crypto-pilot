@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -414,6 +414,28 @@ class RiskOverlayContext:
     overlay_mult_1d: NDArray[np.float64]
 
 
+def compute_trend_efficiency_1d(
+    close_1d: NDArray[np.float64],
+    window: int,
+) -> NDArray[np.float64]:
+    t = close_1d.shape[0]
+    er = np.full(t, np.nan, dtype=np.float64)
+    if t < window + 1:
+        return er
+    diff = np.abs(np.diff(close_1d, prepend=close_1d[:1]))
+    cumsum = np.cumsum(diff)
+    path = np.empty(t, dtype=np.float64)
+    path[:window] = np.nan
+    for i in range(window, t):
+        path[i] = cumsum[i] - cumsum[i - window]
+    net = np.abs(close_1d - np.roll(close_1d, window))
+    net[:window] = np.nan
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ratio = np.where(np.abs(path) > _EPS, net / path, 0.0)
+    er[window:] = ratio[window:]
+    return np.clip(er, 0.0, 1.0)
+
+
 @dataclass(slots=True, frozen=True)
 class MarketRegimeContext:
     code_1d: NDArray[np.int8]
@@ -421,6 +443,7 @@ class MarketRegimeContext:
     trend_score_1d: NDArray[np.float64]
     vol_z_1d: NDArray[np.float64]
     dispersion_z_1d: NDArray[np.float64]
+    trend_efficiency_1d: NDArray[np.float64] = field(default_factory=lambda: np.empty(0, dtype=np.float64))
 
     def names(self) -> NDArray[np.object_]:
         return np.asarray([self.name_by_code[int(code)] for code in self.code_1d], dtype=object)
@@ -572,12 +595,17 @@ def compute_market_regime_context(
         )
         _logger.debug("[REGIME-DIST] total_bars=%d %s", _n_total_r, _summary)
 
+    trend_efficiency_1d = compute_trend_efficiency_1d(
+        btc_close, regime_cfg.trend_efficiency_window,
+    )
+
     return MarketRegimeContext(
         code_1d=code,
         name_by_code=_REGIME_NAMES,
         trend_score_1d=trend_snr.astype(np.float64, copy=False),
         vol_z_1d=vol_z.astype(np.float64, copy=False),
         dispersion_z_1d=dispersion_z.astype(np.float64, copy=False),
+        trend_efficiency_1d=trend_efficiency_1d,
     )
 
 def evaluate_regime_quality(
