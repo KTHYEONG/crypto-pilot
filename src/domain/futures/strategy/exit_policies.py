@@ -114,6 +114,18 @@ def build_exit_policies_for_panel(
                 description="Carry normalization exit.",
             )
         )
+    elif archetype == "xs_alpha":
+        policies.append(
+            _policy(
+                policy_id="xs_neutral",
+                archetype=archetype,
+                stop_atr_mult=1.25,
+                take_profit_atr_mult=2.25,
+                expected_holding_bars=base_hold,
+                min_holding_bars=base_min,
+                description="Cross-sectional market-neutral hold.",
+            )
+        )
 
     if not policies:
         policies.append(
