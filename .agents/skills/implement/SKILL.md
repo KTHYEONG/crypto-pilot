@@ -39,7 +39,7 @@ Translate the logical Blueprint (`docs/specs/*.md`) into working Python code usi
 - Maximize compiler/linter compliance before concluding.
 
 ### 4. Single Responsibility (DO NOT OVERSTEP)
-- Stop immediately after L1 validation and test-first passing. Do not perform regression analysis across the entire project (that is `check`).
+- Stop immediately after L1 validation and test-first passing. Do not perform regression analysis across the entire project. Submit results to the `audit` phase for intent and signature verification.
 
 ## Output Format
 ```md
@@ -50,4 +50,6 @@ Translate the logical Blueprint (`docs/specs/*.md`) into working Python code usi
   - [ ] Wrote failing tests based on scenarios (Red)
   - [ ] Implemented minimal code & passed tests (Green)
 - **L1 Validation (Ruff & Mypy):** [Pass/Fail]
+- **Next Phase:** Proceed to `audit` (Intent & Signature Review)
 ```
+
