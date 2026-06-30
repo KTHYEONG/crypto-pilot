@@ -21,6 +21,7 @@ SignalArchetype = Literal[
     "unwind",
     "carry_rev",
     "beta_neut",
+    "xs_alpha",
 ]
 
 RegimeName = Literal[
