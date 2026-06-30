@@ -1739,7 +1739,11 @@ def _run_awf_simulation(
     bucket_edges_by_fold: list[dict[tuple[int, str, str], float]] = []
     policy_by_fold = list(cache.regime_policy_by_fold)
     _routing_diag = cache.regime_routing_diagnostics
-    from src.domain.futures.strategy.tiered_workflow.l2_meta import apply_regime_risk_cap
+    from src.domain.futures.strategy.tiered_workflow.l2_meta import (
+        apply_regime_risk_cap,
+        bear_edge_per_bar_bps,
+        compute_regime_reliability_multiplier,
+    )
 
     if _l2_routing_mode == "bucket":
         from src.domain.futures.strategy.market_regime import compute_market_regime_context
@@ -1910,9 +1914,29 @@ def _run_awf_simulation(
         except Exception:
             _diag_regime_full = None
     _diag_regime_names = ("bull", "bear", "crisis")
+    # L3: Adaptive Regime-Reliability init
+    _reliability_enabled = bool(getattr(config, "l2_regime_reliability_enabled", False))
+    _reliability_window = max(1, int(getattr(config, "l2_regime_reliability_window", 2)))
+    _reliability_floor = float(getattr(config, "l2_regime_reliability_floor", 0.2))
+    _bear_edge_by_fold: list[float] = []
+    _state_names_for_cap_global = (
+        _routing_diag.active_state_names
+        if _routing_diag is not None
+        else ("bull", "bear", "crisis")
+    )
+    _is_bear_code = {ci for ci, nm in enumerate(_state_names_for_cap_global) if nm.startswith("bear")}
 
     for _fold_idx, fold in enumerate(awf_folds):
         t_fold_start = time.perf_counter()
+        if _reliability_enabled and _bear_edge_by_fold:
+            _trail = _bear_edge_by_fold[max(0, _fold_idx - _reliability_window):_fold_idx]
+            _bear_reliability_mult = compute_regime_reliability_multiplier(
+                _trail, floor=_reliability_floor,
+            )
+        else:
+            _bear_reliability_mult = 1.0
+        _fold_bear_price_sum = 0.0
+        _fold_bear_bars = 0
         _fold_h: list[float] = []
         _fold_b: list[float] = []
         _fold_selected: set[str] = set()
@@ -2285,7 +2309,7 @@ def _run_awf_simulation(
                 _state_names_for_cap,
                 enabled=bool(getattr(config, "l2_regime_risk_cap_enabled", True)),
                 bull_gross_cap=float(getattr(config, "l2_regime_bull_gross_cap", 1.0)),
-                bear_gross_cap=float(getattr(config, "l2_regime_bear_gross_cap", 0.35)),
+                bear_gross_cap=float(getattr(config, "l2_regime_bear_gross_cap", 0.35)) * _bear_reliability_mult,
                 crisis_gross_cap=float(getattr(config, "l2_regime_crisis_gross_cap", 0.25)),
             )
             if logger.isEnabledFor(logging.DEBUG) and _regime_risk_mult < 1.0:
@@ -2435,6 +2459,11 @@ def _run_awf_simulation(
                 # 거래비용은 리밸런싱 첫 bar에만 차감
                 cost = rebal_cost if t2 == t else 0.0
                 _bar_price = float(np.dot(w, bar_ret))
+                if _reliability_enabled:
+                    _rc_fold = int(_regime_code_1d[t2]) if t2 < len(_regime_code_1d) else 2
+                    if _rc_fold in _is_bear_code:
+                        _fold_bear_price_sum += _bar_price
+                        _fold_bear_bars += 1
                 _attr_price += _bar_price
                 if _diag_regime_full is not None and t2 < len(_diag_regime_full):
                     _rc = int(_diag_regime_full[t2])
@@ -2476,6 +2505,12 @@ def _run_awf_simulation(
             prev_w_baseline_ew = w_base_ew
             prof_eval += time.perf_counter() - t0_eval
 
+        _bear_edge_by_fold.append(bear_edge_per_bar_bps(_fold_bear_price_sum, _fold_bear_bars))
+        if _reliability_enabled and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[L2-REGIME-RELIABILITY] fold=%d bear_edge_pb_bps=%.2f next_mult=%.3f window=%d",
+                _fold_idx, _bear_edge_by_fold[-1], _bear_reliability_mult, _reliability_window,
+            )
         fold_rets_hybrid.append(_fold_h)
         fold_rets_baseline.append(_fold_b)
         fold_selected_symbols.append(tuple(sorted(_fold_selected)))
