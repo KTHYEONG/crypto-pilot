@@ -384,6 +384,8 @@ def _resolve_panel_archetype(panel: CandidateSignalPanel) -> str:
 
 
 def _allowed_regimes_for_archetype(archetype: str) -> tuple[str, ...]:
+    if archetype == "xs_alpha":
+        return ()
     if archetype in {"trend", "ts_mom"}:
         return ("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile")
     if archetype in {"flow_rev", "unwind"}:
@@ -476,17 +478,49 @@ def _attach_signal_context(
 # --- 8 Vectorized Rule Families ---
 
 
-def _vwap_2d(close: NDArray[np.float64], volume: NDArray[np.float64], window: int = 24) -> NDArray[np.float64]:
-    """Rolling VWAP for 2D arrays [T, N]."""
-    n_sym = close.shape[1]
-    pv = close * volume
-    pv_cumsum = np.cumsum(pv, axis=0)
-    v_cumsum = np.cumsum(volume, axis=0)
-    pv_shifted = np.vstack([np.zeros((window, n_sym)), pv_cumsum[:-window]])
-    v_shifted = np.vstack([np.zeros((window, n_sym)), v_cumsum[:-window]])
-    window_pv = pv_cumsum - pv_shifted
-    window_v = v_cumsum - v_shifted
-    return window_pv / np.maximum(window_v, 1e-12)
+
+
+
+def _cross_sectional_rank_signed_2d(
+    raw_2d: NDArray[np.float64],
+    valid_2d: NDArray[np.bool_],
+    *,
+    min_cross_section: int,
+    top_q: float = 0.70,
+    bot_q: float = 0.30,
+) -> tuple[NDArray[np.float64], NDArray[np.int8]]:
+    masked = np.where(valid_2d, raw_2d, np.nan)
+    count = valid_2d.sum(axis=1)
+    pct = np.asarray(pd.DataFrame(masked).rank(axis=1, pct=True).to_numpy().copy(), dtype=np.float64)
+    signed = np.nan_to_num(2.0 * pct - 1.0, nan=0.0)
+    side = np.zeros_like(raw_2d, dtype=np.int8)
+    side[pct >= top_q] = 1
+    side[pct <= bot_q] = -1
+    row_block = count < min_cross_section
+    signed[row_block, :] = 0.0
+    side[row_block, :] = 0
+    return signed.astype(np.float64), side
+
+
+def _beta_residual_return_2d(
+    close: NDArray[np.float64],
+    btc_idx: int,
+    lookback: int,
+) -> NDArray[np.float64]:
+    r = np.diff(np.log(np.maximum(close, 1e-12)), axis=0, prepend=0.0)
+    rb = r[:, btc_idx:btc_idx + 1]
+    beta = _rolling_mean_2d(r * rb, lookback) / np.maximum(
+        _rolling_mean_2d(rb * rb, lookback), 1e-12
+    )
+    resid = r - beta * rb
+    warm = np.ones_like(r, dtype=np.bool_)
+    warm[:lookback] = False
+    _out = pd.DataFrame(np.where(warm, resid, 0.0)).rolling(
+        lookback, min_periods=1
+    ).sum().to_numpy(np.float64).copy()
+    out = np.asarray(_out, dtype=np.float64)
+    out[:lookback] = 0.0
+    return out
 
 
 def _supertrend_2d(
@@ -545,7 +579,6 @@ def build_rule_signal_panels(
             break
     high = aligned.high_2d
     low = aligned.low_2d
-    open = aligned.open_2d
     vol = aligned.volume_2d
     funding = aligned.funding_2d
     signal_active_mask = (
@@ -598,7 +631,6 @@ def build_rule_signal_panels(
     lsr_log_z_42_window = scale_window(42)
     positioning_warm_bars = scale_window(168)
     rsi_14_window = scale_window(14)
-    rsi_6_window = scale_window(6)
     funding_mean_window = scale_window(24)
     btc_fast_window = scale_window(20)
     btc_slow_window = scale_window(100)
@@ -763,96 +795,6 @@ def build_rule_signal_panels(
             )
             
 
-        elif fam == "bollinger_reversion":
-            # 4. Bollinger Reversion
-            bb_mean_rev = _rolling_mean_2d(close, window=scale_window(20))
-            bb_std_rev = _rolling_std_2d(close, window=scale_window(20))
-            bb_z_rev = (close - bb_mean_rev) / np.maximum(bb_std_rev, 1e-12)
-            rev_side = np.zeros_like(close, dtype=np.int8)
-            rev_side[_entry_rising_edge_2d(bb_z_rev < -2.0)] = 1
-            rev_side[_entry_rising_edge_2d(bb_z_rev > 2.0)] = -1
-            rev_score = -bb_z_rev / 3.0
-            fam_panels.append(
-                CandidateSignalPanel(
-                    family="bollinger_reversion",
-                    variant="bollinger_20",
-                    params={"window": scale_window(20), "entry_z": 2.0},
-                    datetimes=aligned.datetimes,
-                    symbols=aligned.symbols,
-                    signed_score_2d=np.clip(rev_score, -1.0, 1.0),
-                    side_hint_2d=rev_side,
-                    expected_holding_bars=scale_window(12),
-                    min_holding_bars=scale_window(4),
-                    stop_atr_mult=2.5,
-                    take_profit_atr_mult=3.0,
-                    turnover_proxy_2d=np.abs(np.diff(rev_score, axis=0, prepend=0.0)),
-                    valid_mask_2d=valid_mask,
-                    metadata={
-                        "edge_hypothesis": (
-                            "first breach of extreme z-score produces mean-reversion entry"
-                            " with higher expected edge than subsequent persistent-state bars"
-                        ),
-                        "causal_inputs": "trailing 20-bar rolling mean and std of close price",
-                        "expected_failure_mode": (
-                            "trending markets where z-score remains extreme without reverting"
-                        ),
-                    },
-                )
-            )
-            
-
-        elif fam == "rsi_reversion":
-            # 5. RSI Reversion
-            rsi = _rsi_2d(close, period=rsi_14_window)
-            rsi_prev = np.vstack([rsi[:1], rsi[:-1]])
-            rsi_side = np.zeros_like(close, dtype=np.int8)
-            rsi_side[(rsi_prev < 30) & (rsi > rsi_prev)] = 1
-            rsi_side[(rsi_prev > 70) & (rsi < rsi_prev)] = -1
-            rsi_score = (50.0 - rsi) / 20.0
-            fam_panels.append(
-                CandidateSignalPanel(
-                    family="rsi_reversion",
-                    variant="rsi_14",
-                    params={"rsi_period": rsi_14_window, "oversold": 30.0, "overbought": 70.0},
-                    datetimes=aligned.datetimes,
-                    symbols=aligned.symbols,
-                    signed_score_2d=np.clip(rsi_score, -1.0, 1.0),
-                    side_hint_2d=rsi_side,
-                    expected_holding_bars=scale_window(12),
-                    min_holding_bars=scale_window(4),
-                    stop_atr_mult=2.0,
-                    take_profit_atr_mult=3.0,
-                    turnover_proxy_2d=np.abs(np.diff(rsi_score, axis=0, prepend=0.0)),
-                    valid_mask_2d=valid_mask,
-                )
-            )
-            
-            # 5b. RSI Reversion — rsi_6
-            rsi6 = _rsi_2d(close, period=rsi_6_window)
-            rsi6_prev = np.vstack([rsi6[:1], rsi6[:-1]])
-            rsi6_side = np.zeros_like(close, dtype=np.int8)
-            rsi6_side[(rsi6_prev < 20) & (rsi6 > rsi6_prev)] = 1
-            rsi6_side[(rsi6_prev > 80) & (rsi6 < rsi6_prev)] = -1
-            rsi6_score = (50.0 - rsi6) / 20.0
-            fam_panels.append(
-                CandidateSignalPanel(
-                    family="rsi_reversion",
-                    variant="rsi_6",
-                    params={"rsi_period": rsi_6_window, "oversold": 20.0, "overbought": 80.0},
-                    datetimes=aligned.datetimes,
-                    symbols=aligned.symbols,
-                    signed_score_2d=np.clip(rsi6_score, -1.0, 1.0),
-                    side_hint_2d=rsi6_side,
-                    expected_holding_bars=scale_window(8),
-                    min_holding_bars=scale_window(2),
-                    stop_atr_mult=1.5,
-                    take_profit_atr_mult=2.5,
-                    turnover_proxy_2d=np.abs(np.diff(rsi6_score, axis=0, prepend=0.0)),
-                    valid_mask_2d=valid_mask,
-                )
-            )
-            
-
         elif fam == "funding_carry":
             # 6. Funding Carry
             funding_mean = _rolling_mean_2d(funding, window=funding_mean_window)
@@ -914,86 +856,6 @@ def build_rule_signal_panels(
                     valid_mask_2d=valid_mask,
                 )
             )
-            
-            
-
-        elif fam == "funding_zscore_carry":
-            # 10. Funding Z-Score Carry (F2)
-            for _fz_win, _fz_thr in [
-                (scale_window(48), 2.0),
-                (scale_window(96), 2.0),
-                (scale_window(168), 1.5),
-            ]:
-                if _fz_win == funding_z_96_window:
-                    _f_z = funding_z_96
-                elif _fz_win == funding_z_168_window:
-                    _f_z = funding_z_168
-                else:
-                    _f_z = _zscore_2d(funding, window=_fz_win, eps=1e-6)
-                _fz_side = np.zeros_like(close, dtype=np.int8)
-                _fz_side[_f_z >= _fz_thr] = -1   # extreme positive funding → mean reversion short
-                _fz_side[_f_z <= -_fz_thr] = 1   # extreme negative funding → long
-                _fz_score = np.clip(-_f_z / _fz_thr, -1.0, 1.0)
-                fam_panels.append(
-                    CandidateSignalPanel(
-                        family="funding_zscore_carry",
-                        variant=f"fzs_{_fz_win}",
-                        params={"z_window": _fz_win, "z_threshold": _fz_thr},
-                        datetimes=aligned.datetimes,
-                        symbols=aligned.symbols,
-                        signed_score_2d=_fz_score,
-                        side_hint_2d=_fz_side,
-                        expected_holding_bars=max(1, _fz_win // 2),
-                        min_holding_bars=scale_window(8),
-                        stop_atr_mult=2.0,
-                        take_profit_atr_mult=3.0,
-                        turnover_proxy_2d=np.abs(np.diff(_fz_score, axis=0, prepend=0.0)),
-                        valid_mask_2d=valid_mask,
-                        metadata={"archetype": "carry_rev"},
-                    )
-                )
-            
-
-        elif fam == "vol_regime_reversion":
-            # 11. Vol Regime Reversion (F3)
-            _price_dir = np.sign(np.diff(close, axis=0, prepend=close[:1]))
-            for _vr_win, _vr_thr in [(scale_window(20), 2.0), (scale_window(40), 1.5)]:
-                _atr_mean = _rolling_mean_2d(atr, window=_vr_win)
-                _atr_std = _rolling_std_2d(atr, window=_vr_win)
-                _vol_z = (atr - _atr_mean) / np.maximum(_atr_std, 1e-12)
-                _high_vol = _vol_z >= _vr_thr
-                _vr_side = np.zeros_like(close, dtype=np.int8)
-                _vr_side[_entry_rising_edge_2d(_high_vol & (_price_dir > 0))] = -1  # high vol + up move → fade (short)
-                _vr_side[_entry_rising_edge_2d(_high_vol & (_price_dir < 0))] = 1   # high vol + down move → fade (long)
-                _vr_score = np.clip(-_vol_z / _vr_thr * _price_dir, -1.0, 1.0)
-                fam_panels.append(
-                    CandidateSignalPanel(
-                        family="vol_regime_reversion",
-                        variant=f"vrr_{_vr_win}",
-                        params={"vol_window": _vr_win, "vol_z_threshold": _vr_thr},
-                        datetimes=aligned.datetimes,
-                        symbols=aligned.symbols,
-                        signed_score_2d=_vr_score,
-                        side_hint_2d=_vr_side,
-                        expected_holding_bars=_vr_win,
-                        min_holding_bars=scale_window(4),
-                        stop_atr_mult=2.0,
-                        take_profit_atr_mult=3.0,
-                        turnover_proxy_2d=np.abs(np.diff(_vr_score, axis=0, prepend=0.0)),
-                        valid_mask_2d=valid_mask,
-                        metadata={
-                            "edge_hypothesis": (
-                                "first appearance of high-vol spike with directional move produces"
-                                " mean-reversion entry; subsequent bars carry diminishing edge"
-                            ),
-                            "causal_inputs": "trailing ATR z-score and single-bar price direction",
-                            "expected_failure_mode": (
-                                "sustained volatility regimes where initial spike does not revert"
-                            ),
-                        },
-                    )
-                )
-            
             
             
 
@@ -1147,6 +1009,129 @@ def build_rule_signal_panels(
                     )
                 )
             
+            # =========================================================================
+            # XS ALPHA FAMILIES (cross-sectional, beta-neutral)
+            # =========================================================================
+
+        elif fam == "xs_momentum":
+            _min_xs = cfg.l1_min_cross_section
+            for _lb in [scale_window(12), scale_window(48)]:
+                _raw = _beta_residual_return_2d(close, btc_idx, _lb)
+                _sc, _sd = _cross_sectional_rank_signed_2d(
+                    _raw, valid_mask, min_cross_section=_min_xs,
+                )
+                fam_panels.append(
+                    CandidateSignalPanel(
+                        family="xs_momentum",
+                        variant=f"xs_mom_{_lb}",
+                        params={"lookback": _lb},
+                        datetimes=aligned.datetimes,
+                        symbols=aligned.symbols,
+                        signed_score_2d=_sc,
+                        side_hint_2d=_sd,
+                        expected_holding_bars=scale_window(18) if _lb <= 12 else scale_window(24),
+                        min_holding_bars=scale_window(6) if _lb <= 12 else scale_window(8),
+                        stop_atr_mult=1.5,
+                        take_profit_atr_mult=2.5,
+                        turnover_proxy_2d=np.abs(np.diff(_sc, axis=0, prepend=0.0)),
+                        valid_mask_2d=valid_mask,
+                        metadata={
+                            "archetype": "xs_alpha",
+                            "edge_hypothesis": (
+                                "cross-sectional relative momentum, beta-neutral by construction"
+                            ),
+                        },
+                    )
+                )
+
+        elif fam == "xs_carry":
+            _min_xs = cfg.l1_min_cross_section
+            for _fz, _label in [(funding_z_96, "96"), (funding_z_168, "168")]:
+                _raw = -_fz
+                _sc, _sd = _cross_sectional_rank_signed_2d(
+                    _raw, shared_valid, min_cross_section=_min_xs,
+                )
+                fam_panels.append(
+                    CandidateSignalPanel(
+                        family="xs_carry",
+                        variant=f"xs_carry_{_label}",
+                        params={"funding_z_window": int(_label)},
+                        datetimes=aligned.datetimes,
+                        symbols=aligned.symbols,
+                        signed_score_2d=_sc,
+                        side_hint_2d=_sd,
+                        expected_holding_bars=scale_window(24),
+                        min_holding_bars=scale_window(8),
+                        stop_atr_mult=1.5,
+                        take_profit_atr_mult=2.5,
+                        turnover_proxy_2d=np.abs(np.diff(_sc, axis=0, prepend=0.0)),
+                        valid_mask_2d=shared_valid,
+                        metadata={
+                            "archetype": "xs_alpha",
+                            "edge_hypothesis": "cross-sectional funding carry: short richest funding, long cheapest",
+                        },
+                    )
+                )
+
+        elif fam == "xs_flow":
+            _min_xs = cfg.l1_min_cross_section
+            _sc, _sd = _cross_sectional_rank_signed_2d(
+                flow_z_24, fxr_valid, min_cross_section=_min_xs,
+            )
+            fam_panels.append(
+                CandidateSignalPanel(
+                    family="xs_flow",
+                    variant="xs_flow_24",
+                    params={"flow_z_window": 24},
+                    datetimes=aligned.datetimes,
+                    symbols=aligned.symbols,
+                    signed_score_2d=_sc,
+                    side_hint_2d=_sd,
+                    expected_holding_bars=scale_window(12),
+                    min_holding_bars=scale_window(4),
+                    stop_atr_mult=1.5,
+                    take_profit_atr_mult=2.5,
+                    turnover_proxy_2d=np.abs(np.diff(_sc, axis=0, prepend=0.0)),
+                    valid_mask_2d=fxr_valid,
+                    metadata={
+                        "archetype": "xs_alpha",
+                        "edge_hypothesis": (
+                            "cross-sectional taker flow: long relative buying, short selling"
+                        ),
+                    },
+                )
+            )
+
+        elif fam == "xs_oi_skew":
+            _min_xs = cfg.l1_min_cross_section
+            _raw = -(oi_build_z_42 * np.sign(lsr_log_z_42))
+            _sc, _sd = _cross_sectional_rank_signed_2d(
+                _raw, positioning_valid, min_cross_section=_min_xs,
+            )
+            fam_panels.append(
+                CandidateSignalPanel(
+                    family="xs_oi_skew",
+                    variant="xs_oi_42",
+                    params={"oi_build_window": 42, "lsr_window": 42},
+                    datetimes=aligned.datetimes,
+                    symbols=aligned.symbols,
+                    signed_score_2d=_sc,
+                    side_hint_2d=_sd,
+                    expected_holding_bars=scale_window(18),
+                    min_holding_bars=scale_window(6),
+                    stop_atr_mult=1.5,
+                    take_profit_atr_mult=2.5,
+                    turnover_proxy_2d=np.abs(np.diff(_sc, axis=0, prepend=0.0)),
+                    valid_mask_2d=positioning_valid,
+                    metadata={
+                        "archetype": "xs_alpha",
+                        "edge_hypothesis": (
+                            "cross-sectional OI build with LSR skew: short crowded longs"
+                        ),
+                    },
+                )
+            )
+
             # =========================================================================
             # NEW G1 ~ G10 FAMILIES
             # =========================================================================
@@ -1742,118 +1727,6 @@ def build_rule_signal_panels(
             # ── NEW: 6 signal families ───────────────────────────────────────────────
             
 
-        elif fam == "gap_fade_1h":
-            # A. gap_fade_1h
-            _open_minus_close = open - np.vstack([close[:1], close[:-1]])
-            _gap = _open_minus_close / np.maximum(atr, 1e-12)
-            _gap_extreme = np.abs(_gap) > 2.0
-            _gap_side = np.zeros_like(close, dtype=np.int8)
-            _gap_side[_gap > 2.0] = -1
-            _gap_side[_gap < -2.0] = 1
-            _gap_score = -np.tanh(_gap / 2.0)
-            fam_panels.append(
-                CandidateSignalPanel(
-                    family="gap_fade_1h",
-                    variant="gf_1h",
-                    params=apply_per_family_params(cfg, "gap_fade_1h", "gf_1h", {
-                        "entry_z": 2.0,
-                    }),
-                    datetimes=aligned.datetimes,
-                    symbols=aligned.symbols,
-                    signed_score_2d=np.clip(_gap_score, -1.0, 1.0),
-                    side_hint_2d=_gap_side,
-                    expected_holding_bars=scale_window(4),
-                    min_holding_bars=scale_window(1),
-                    stop_atr_mult=1.0,
-                    take_profit_atr_mult=2.0,
-                    turnover_proxy_2d=np.abs(np.diff(_gap_score, axis=0, prepend=0.0)),
-                    valid_mask_2d=_gap_extreme & valid_mask,
-                    metadata={
-                        "archetype": "mean_rev",
-                        "regime": "gap_reversion",
-                        "edge_hypothesis": "extreme open-close gap mean-reverts within 4 bars in 1h timeframe",
-                    },
-                )
-            )
-            
-
-        elif fam == "vwap_reversion_1h":
-            # B. vwap_reversion_1h
-            _vwap = _vwap_2d(close, vol, window=scale_window(24))
-            _vwap_dev = (close - _vwap) / np.maximum(_rolling_std_2d(close, scale_window(24)), 1e-12)
-            _vwap_extreme = np.abs(_vwap_dev) > 2.0
-            _vwap_side = np.zeros_like(close, dtype=np.int8)
-            _vwap_side[_vwap_dev > 2.0] = -1
-            _vwap_side[_vwap_dev < -2.0] = 1
-            _vwap_score = -np.tanh(_vwap_dev / 2.0)
-            fam_panels.append(
-                CandidateSignalPanel(
-                    family="vwap_reversion_1h",
-                    variant="vwap_24",
-                    params=apply_per_family_params(cfg, "vwap_reversion_1h", "vwap_24", {
-                        "vwap_window": 24,
-                    }),
-                    datetimes=aligned.datetimes,
-                    symbols=aligned.symbols,
-                    signed_score_2d=np.clip(_vwap_score, -1.0, 1.0),
-                    side_hint_2d=_vwap_side,
-                    expected_holding_bars=scale_window(6),
-                    min_holding_bars=scale_window(2),
-                    stop_atr_mult=1.5,
-                    take_profit_atr_mult=2.5,
-                    turnover_proxy_2d=np.abs(np.diff(_vwap_score, axis=0, prepend=0.0)),
-                    valid_mask_2d=_vwap_extreme & valid_mask,
-                    metadata={
-                        "archetype": "mean_rev",
-                        "regime": "vwap_gap_reversion",
-                        "edge_hypothesis": "24h VWAP deviation above 2 sigma mean-reverts in 1h crypto market",
-                    },
-                )
-            )
-            
-
-        elif fam == "volume_climax_1h":
-            # C. volume_climax_1h
-            _vol_ma20 = _rolling_mean_2d(vol, window=scale_window(20))
-            _vol_std20 = _rolling_std_2d(vol, window=scale_window(20))
-            _vol_z = (vol - _vol_ma20) / np.maximum(_vol_std20, 1e-12)
-            _ret_abs = np.abs(_log_return_2d(close, lag=scale_window(1)))
-            _atr_rel = atr / np.maximum(close, 1e-12)
-            _climax = (_vol_z > 3.0) & (_ret_abs < 0.5 * _atr_rel)
-            _ma20_close = _rolling_mean_2d(close, window=scale_window(20))
-            _climax_side = np.zeros_like(close, dtype=np.int8)
-            _climax_side[_climax & (close > _ma20_close)] = -1
-            _climax_side[_climax & (close < _ma20_close)] = 1
-            _climax_score = _climax_side.astype(np.float64)
-            fam_panels.append(
-                CandidateSignalPanel(
-                    family="volume_climax_1h",
-                    variant="vc_1h",
-                    params=apply_per_family_params(cfg, "volume_climax_1h", "vc_1h", {
-                        "vol_window": 20,
-                        "vol_z_threshold": 3.0,
-                    }),
-                    datetimes=aligned.datetimes,
-                    symbols=aligned.symbols,
-                    signed_score_2d=_climax_score,
-                    side_hint_2d=_climax_side,
-                    expected_holding_bars=scale_window(6),
-                    min_holding_bars=scale_window(2),
-                    stop_atr_mult=1.5,
-                    take_profit_atr_mult=2.0,
-                    turnover_proxy_2d=_climax.astype(np.float64),
-                    valid_mask_2d=valid_mask,
-                    metadata={
-                        "archetype": "mean_rev",
-                        "regime": "exhaustion_climax",
-                        "edge_hypothesis": (
-                            "extreme volume with stalled price signals exhaustion (Wyckoff distribution)"
-                        ),
-                    },
-                )
-            )
-            
-
         elif fam == "macd_4h":
             # D. macd_4h
             _ema_12_m = _ema_2d(close, span=scale_window(12))
@@ -1972,15 +1845,15 @@ def build_rule_signal_panels(
         "trend_ma",
         "trend_donchian",
         "vol_breakout",
-        "bollinger_reversion",
-        "rsi_reversion",
         "funding_carry",
         "btc_regime_pullback",
-        "funding_zscore_carry",
-        "vol_regime_reversion",
         "trend_pullback_continuation",
         "dual_momentum",
         "residual_reversion",
+        "xs_momentum",
+        "xs_carry",
+        "xs_flow",
+        "xs_oi_skew",
         "mtf_trend_pullback",
         "mtf_breakout_retest",
         "taker_imbalance_momentum",
@@ -1993,9 +1866,6 @@ def build_rule_signal_panels(
         "flow_trend_continuation",
         "lsr_oi_regime_filter",
         "vol_term_structure_gate",
-        "gap_fade_1h",
-        "vwap_reversion_1h",
-        "volume_climax_1h",
         "macd_4h",
         "supertrend",
         "ichimoku_trend",
