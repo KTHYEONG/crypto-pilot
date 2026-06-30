@@ -518,6 +518,10 @@ class Layer2AllocationConfig:
     l2_regime_bull_gross_cap: float = 1.0
     l2_regime_bear_gross_cap: float = 0.35
     l2_regime_crisis_gross_cap: float = 0.25
+    # L3: Walk-forward 적응형 Regime-Reliability (A/B baseline=off)
+    l2_regime_reliability_enabled: bool = False
+    l2_regime_reliability_window: int = 2
+    l2_regime_reliability_floor: float = 0.2
     l2_entry_cooldown_bars: int = 12
     l2_entry_spike_penalty_weight: float = 0.05
     l2_entry_spike_warn_threshold: float = 0.20
@@ -769,6 +773,28 @@ class Layer2AllocationConfig:
             raise ValueError("l2_regime_bear_gross_cap must be in range (0.0, 1.0]")
         if l2_regime_crisis_gross_cap <= 0.0:
             raise ValueError("l2_regime_crisis_gross_cap must be in range (0.0, 1.0]")
+        _reliability_env = os.environ.get("L2_REGIME_RELIABILITY", "")
+        l2_regime_reliability_enabled = (
+            _reliability_env not in ("", "0", "false", "False")
+            if _reliability_env != ""
+            else bool(
+                params.get("l2_regime_reliability_enabled", _dc.l2_regime_reliability_enabled)
+            )
+        )
+        l2_regime_reliability_window = max(
+            1,
+            int(
+                cls._as_int(
+                    params.get("l2_regime_reliability_window", _dc.l2_regime_reliability_window),
+                    _dc.l2_regime_reliability_window,
+                )
+            ),
+        )
+        l2_regime_reliability_floor = cls._as_float(
+            params.get("l2_regime_reliability_floor", _dc.l2_regime_reliability_floor), _dc.l2_regime_reliability_floor,
+        )
+        if l2_regime_reliability_floor <= 0.0 or l2_regime_reliability_floor > 1.0:
+            raise ValueError("l2_regime_reliability_floor must be in range (0.0, 1.0]")
         return cls(
             k_rank=cls._as_int(params.get("K_RANK", 3), 3),
             rebalance_bars=cls._as_int(params.get("REBALANCE_BARS", 3), 3),
@@ -967,6 +993,9 @@ class Layer2AllocationConfig:
             l2_regime_bull_gross_cap=l2_regime_bull_gross_cap,
             l2_regime_bear_gross_cap=l2_regime_bear_gross_cap,
             l2_regime_crisis_gross_cap=l2_regime_crisis_gross_cap,
+            l2_regime_reliability_enabled=l2_regime_reliability_enabled,
+            l2_regime_reliability_window=l2_regime_reliability_window,
+            l2_regime_reliability_floor=l2_regime_reliability_floor,
             l2_entry_cooldown_bars=cls._as_int(params.get("l2_entry_cooldown_bars", 12), 12),
             l2_entry_spike_penalty_weight=cls._validate_range(
                 "l2_entry_spike_penalty_weight",
