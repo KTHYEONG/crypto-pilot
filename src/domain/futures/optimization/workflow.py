@@ -1771,6 +1771,7 @@ def evaluate_l2_trial(
     caps: Any,
     tf: str,
     deploy_leverage_override: float | None = None,
+    eval_tag: str = "unspecified",
 ) -> Any:
     from src.domain.futures.portfolio.signal_composer import hours_per_bar_tf
     from src.domain.futures.strategy.tiered_workflow.awf_sim import _run_awf_simulation
@@ -1875,6 +1876,37 @@ def evaluate_l2_trial(
     mdd_hybrid = _dep.mdd
     cvar_95_hybrid = _dep.cvar_95
     mar_hybrid = cagr_hybrid / (mdd_hybrid + 1e-9)
+
+    # Phase A 진단: tag별 parity 지문 (구조 원자값 → divergence 귀속용, DEBUG-only).
+    if _logger.isEnabledFor(logging.DEBUG):
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            _content_hash_dataclass as _fp_content_hash,
+        )
+
+        _fp_rets = np.asarray(rets_hybrid, dtype=np.float64)
+        _fp_oos_cagr_unit = (
+            _cagr(list(rets_hybrid), bars_per_year=bars_per_year) if _fp_rets.size >= 2 else 0.0
+        )
+        _fp_sum_log1p = (
+            float(np.sum(np.log1p(np.clip(_l_star * _fp_rets, -1.0 + 1e-9, None))))
+            if _fp_rets.size >= 1
+            else 0.0
+        )
+        _fp_cfg_ch = _fp_content_hash(config)
+        _logger.debug(
+            "[L2-PARITY-FP] tag=%s cfg_ch=%s n_rets=%d l_star=%.6f binding=%s "
+            "oos_cagr_unit=%.6f sum_log1p_scaled=%.8f cagr_dep=%.6f mdd_dep=%.6f override=%s",
+            eval_tag,
+            _fp_cfg_ch,
+            int(_fp_rets.size),
+            float(_l_star),
+            _l_binding,
+            float(_fp_oos_cagr_unit),
+            _fp_sum_log1p,
+            float(cagr_hybrid),
+            float(mdd_hybrid),
+            "none" if deploy_leverage_override is None else f"{deploy_leverage_override:.6f}",
+        )
 
     # 진단: fit-rets vs OOS-rets 분포 이격 (L* inflation 감지)
     if _deploy_enabled and _fit_rets_raw and rets_hybrid:
@@ -2206,11 +2238,13 @@ def evaluate_l2_trial_cached(
     caps: Any,
     tf: str,
     deploy_leverage_override: float | None = None,
+    eval_tag: str = "unspecified",
     _memo: dict[tuple[Any, ...], Any],
 ) -> Any:
     from src.domain.futures.strategy.tiered_workflow.awf_sim import _content_hash_dataclass
 
     cfg_ch = _content_hash_dataclass(config)
+    # memo 키는 eval_tag 제외 (tag는 진단용 라벨, 결과 불변 → 캐시 무력화 방지).
     key = (id(cache), cfg_ch, id(signal_batch), id(caps), tf, deploy_leverage_override)
     cached = _memo.get(key)
     if cached is not None:
@@ -2224,6 +2258,7 @@ def evaluate_l2_trial_cached(
         caps=caps,
         tf=tf,
         deploy_leverage_override=deploy_leverage_override,
+        eval_tag=eval_tag,
     )
     _memo[key] = result
     return result

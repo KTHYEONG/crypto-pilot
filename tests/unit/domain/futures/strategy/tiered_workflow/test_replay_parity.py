@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
+
 from src.domain.futures.strategy.tiered_workflow.replay_parity import (
     assert_selection_replay_parity,
 )
@@ -59,6 +61,37 @@ def test_parity_gate_still_passes_when_match() -> None:
         final_evaluation=final,
         tolerance=1e-6,
         gate=True,
+    )
+    assert result is True
+
+
+def test_self_check_uses_master_tf_for_bars_per_year() -> None:
+    """self-check가 eval object의 master_tf를 반영한 bars_per_year로 재계산."""
+    rets_array = np.asarray([0.001] * 100 + [-0.001] * 100, dtype=np.float64)
+    l_star = 2.0
+    bpy_8h = 1095.0
+
+    from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
+        apply_deployment,
+    )
+    dep = apply_deployment(rets=rets_array, leverage=l_star, bars_per_year=bpy_8h)
+
+    eval_8h = SimpleNamespace(
+        returns_hybrid=tuple(rets_array.tolist()),
+        cagr_hybrid=dep.cagr,
+        mdd_hybrid=dep.mdd,
+        fold_pass_ratio=0.67,
+        trade_count=184,
+        deploy_leverage=l_star,
+        master_tf="8h",
+    )
+    final = SimpleNamespace(cagr_hybrid=dep.cagr, mdd_hybrid=dep.mdd, fold_pass_ratio=0.67, trade_count=184)
+
+    result = assert_selection_replay_parity(
+        replay_evaluation=eval_8h,
+        final_evaluation=final,
+        tolerance=1e-6,
+        gate=False,
     )
     assert result is True
 

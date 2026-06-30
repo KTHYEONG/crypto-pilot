@@ -7,6 +7,11 @@ priority: high
 ai_read_policy: when_related
 ---
 
+## [2026-06-30] Annualization TF SSOT Fix (B1/B2)
+- **Delta:** L2 study pipeline hardcoded `tf=4h` while deploy used `tf=8h` → champion selection evaluated CAGR/Sharpe at ×2/×√2 inflated bars_per_year(2190 vs 1095). Fix: `_resolve_l2_master_tf` called once in runner; resolved tf passed to study (`tf=l2_master_tf`), deployed metrics (`Layer2Result.master_tf`), and reversal replay. Static `_SELFCHECK_BARS_PER_YEAR=2190.0` replaced by `_resolve_bars_per_year(obj)` dynamic lookup. SSOT assert on master_tf mismatch → `gate_passed=False`.
+- **Rationale:** 4h annualization in selection inflated CAGR (×2) vs actual 8h deploy — best_evaluation CAGR 8-12% divergent from l2_final CAGR, triggering false parity divergence. Fix makes selection stricter (honest 8h metrics), reducing false admissions.
+- **Edge Cases:** probe_manifest None identity must match between B1 resolution and pipeline call; absent master_tf falls back to 2190.0 for backward compat.
+
 ## [2026-06-23] L2 Optuna Memory Optimization and WSL2 OOM Safe Fallback
 - **Delta:** Lowered default `L2_OPTUNA_BATCH_SIZE` to 2. Implemented dynamic sequential fallback (`n_jobs=1`) if system available memory drops below 3.0 GB. Added explicit garbage collection (`gc.collect()`) prior to and after heavy stages.
 - **Rationale:** High-memory fork executions in 16GB WSL2 host environments caused memory exhaustion and process eviction (OOM Killer). Lowering concurrency and falling back to sequential execution when under memory pressure ensures absolute execution integrity.

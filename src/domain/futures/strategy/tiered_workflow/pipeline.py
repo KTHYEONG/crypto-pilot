@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import gc
 import logging
 import multiprocessing
@@ -1717,6 +1718,7 @@ def run_l2_awf(
             caps=caps,
             tf=tf,
             deploy_leverage_override=deploy_leverage,
+            eval_tag="final",
             _memo=eval_memo,
         )
     else:
@@ -1731,6 +1733,7 @@ def run_l2_awf(
             caps=caps,
             tf=tf,
             deploy_leverage_override=deploy_leverage,
+            eval_tag="final",
         )
     logger.log(PERF, "[PERF] l2_evaluate_trial took=%.4fs", time.perf_counter() - t_eval)
 
@@ -1872,7 +1875,7 @@ def run_l2_awf(
                 min_dsr=float(config.l2_min_dsr),
             )
         )
-    return result
+    return dataclasses.replace(result, master_tf=tf)
 
 
 def run_l3_holdout(

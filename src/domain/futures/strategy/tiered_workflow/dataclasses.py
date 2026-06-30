@@ -367,6 +367,7 @@ class Layer2Result:
         recent_fold_sharpe: 최신 non-empty fold Sharpe.
         recent_fold_cagr: 최신 non-empty fold deployed CAGR.
         recent_fold_mdd: 최신 non-empty fold deployed MDD.
+        master_tf: Annualization timeframe used for deployment metrics (SSOT).
     """
 
     selected_last: frozenset[str]
@@ -408,6 +409,7 @@ class Layer2Result:
     recent_fold_sharpe: float = 0.0
     recent_fold_cagr: float = 0.0
     recent_fold_mdd: float = 0.0
+    master_tf: str = "4h"
 
 
 @dataclass(slots=True, frozen=True)
