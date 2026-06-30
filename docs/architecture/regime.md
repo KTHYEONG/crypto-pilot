@@ -14,7 +14,7 @@ change_triggers:
   - src/domain/futures/strategy/market_regime.py
   - src/domain/futures/strategy/regime_evaluation.py
   - src/execution/opt_main_futures.py
-last_verified: 2026-06-27
+last_verified: 2026-06-30
 ---
 
 # 1. Purpose
@@ -30,6 +30,12 @@ Establishes a causal market state from BTC price action for two consumers: a con
 - $s_{t} = \ln(P_{t}) - \text{EMA}(\ln P)_{t}$
 - $\text{snr}_{t} = \frac{s_{t}}{\text{std}(s)_{t}}$
 - $\text{trend\_scale}_{t} = \frac{1}{2} (1 + \tanh(\text{snr}_{t}))$
+
+**Trend Efficiency (Kaufman ER)**
+- $ER_{t} = |P_{t} - P_{t-\text{window}}| / \Sigma_{i=t-\text{window}+1}^{t} |P_{i} - P_{i-1}|$
+- $1$ = perfect trend, $\approx 0$ = chop/whipsaw
+- NaN for $t < \text{window}$; zero-path divisor $\rightarrow 0.0$
+- Consumed by L2 whipsaw attribution (`Layer2FoldAttribution`) and trend-efficiency exposure gate (`trend_efficiency_gross_mult`)
 
 **Page-CUSUM Crisis Detector**
 - $z_{t} = \frac{r_{t} - \text{median}_{\leq t}}{1.4826 \cdot \text{MAD}_{\leq t}}$
@@ -88,6 +94,7 @@ graph TD
 | **Param** | $k, h$ | CUSUM drift and threshold, derived from target ARL. Bounds: `ARL > 0` |
 | **Output**| `overlay_mult_1d` | Continuous risk multiplier applied to final portfolio weights. Bounds: `[0.0, max_vol_scale]` |
 | **Output**| `code_1d` | Discrete regime integer (0-5) used for signal gating and B0 ensemble |
+| **Output**| `trend_efficiency_1d` | Per-bar Kaufman Efficiency Ratio. Bounds: `[0, 1]`, NaN for warm-up |
 | **Eval**  | `RegimeScoreCard` | Metrics C2(Persistence), C3(Distinctness), C4(Stability), C5(Coverage) |
 | **L2 Param** | `l2_regime_bull_gross_cap` | Bull regime gross exposure cap (default `1.0`, full deployment). Bounds: `(0.0, 1.0]` |
 | **L2 Param** | `l2_regime_bear_gross_cap` | Bear regime gross exposure cap (default `0.35`, bull-primary prior). Bounds: `(0.0, 1.0]` |
