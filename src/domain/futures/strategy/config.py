@@ -74,6 +74,13 @@ class RegimeConfig:
     trend_efficiency_target: float = 0.35
     trend_efficiency_floor_mult: float = 0.30
 
+    # Reversal kill-switch (C2)
+    reversal_dd_window: int = 90
+    reversal_dd_threshold: float = 0.06
+    reversal_mom_fast: int = 20
+    reversal_mom_slow: int = 120
+    reversal_risk_off_floor: float = 0.05
+
     def __post_init__(self) -> None:
         """Validate regime parameters."""
         if self.overlay_target_vol_ann <= 0.0:
@@ -111,6 +118,14 @@ class RegimeConfig:
             raise ValueError("trend_efficiency_target must be in (0, 1)")
         if not (0.0 < self.trend_efficiency_floor_mult <= 1.0):
             raise ValueError("trend_efficiency_floor_mult must be in (0, 1]")
+        if self.reversal_dd_window < 2:
+            raise ValueError("reversal_dd_window must be >= 2")
+        if not (0.0 < self.reversal_dd_threshold < 1.0):
+            raise ValueError("reversal_dd_threshold must satisfy 0 < value < 1")
+        if self.reversal_mom_fast >= self.reversal_mom_slow:
+            raise ValueError("reversal_mom_fast must be < reversal_mom_slow")
+        if not (0.0 <= self.reversal_risk_off_floor < self.crisis_gross_floor):
+            raise ValueError("reversal_risk_off_floor must be in [0, crisis_gross_floor)")
 
 
 @dataclass(slots=True, frozen=True)
