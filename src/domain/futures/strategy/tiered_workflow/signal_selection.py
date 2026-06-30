@@ -1080,6 +1080,89 @@ class ProbeBreadthDiagnostics:
     regime_side_split: dict[str, tuple[float, float, float, int, int]] = field(default_factory=dict)
 
 
+@dataclass(slots=True, frozen=True)
+class XsFactorSpreadDiagnostics:
+    fold_id: int
+    by_factor: dict[str, tuple[int, int, float, float, float, float, float, float, float]]
+
+
+def _xs_rank_ic(
+    g: pd.DataFrame,
+) -> tuple[float, float]:
+    score_col = "score_z"
+    real_col = "realized_side_adjusted_gross_bps"
+    if score_col not in g.columns or real_col not in g.columns:
+        return 0.0, 0.0
+    ic_list: list[float] = []
+    n_total = 0
+    for _d, bar in g.groupby("decision_idx", sort=True):
+        scores = bar[score_col].to_numpy(dtype=np.float64)
+        realized = bar[real_col].to_numpy(dtype=np.float64)
+        n_bar = scores.size
+        if n_bar < 3:
+            continue
+        with np.errstate(invalid="ignore"):
+            rho = float(stats.spearmanr(scores, realized)[0])
+        if np.isnan(rho):
+            continue
+        ic_list.append(rho)
+        n_total += n_bar
+    if not ic_list:
+        return 0.0, 0.0
+    ic = float(np.nanmean(ic_list))
+    if abs(ic) >= 1.0 or n_total <= 2:
+        return ic, 0.0
+    ict = ic * np.sqrt((n_total - 2) / (1.0 - ic * ic))
+    return ic, float(ict)
+
+
+def compute_xs_factor_spread_diagnostics(
+    *,
+    realized_event_results: pd.DataFrame,
+    cfg: CandidateStrategyConfig,
+    fold_id: int,
+    seed: int = 0,
+    xs_archetype: str = "xs_alpha",
+    xs_family_fallback: tuple[str, ...] = (
+        "xs_momentum", "xs_carry", "xs_flow", "xs_oi_skew",
+    ),
+    min_bars: int = 8,
+) -> XsFactorSpreadDiagnostics | None:
+    if realized_event_results.empty:
+        return None
+    df = realized_event_results
+    if "archetype" in df.columns:
+        xs = df[df["archetype"].astype(str) == xs_archetype]
+    else:
+        xs = df[df["family"].astype(str).isin(xs_family_fallback)]
+    if xs.empty:
+        return None
+    by_factor: dict[str, tuple[int, int, float, float, float, float, float, float, float]] = {}
+    for sid, g in xs.groupby("strategy_id", sort=True):
+        bar_means = g.groupby("decision_idx")["realized_side_adjusted_gross_bps"].mean()
+        spread = bar_means.to_numpy(dtype=np.float64)
+        n_bars = spread.size
+        if n_bars < min_bars:
+            continue
+        mean = float(spread.mean())
+        std = float(spread.std(ddof=1)) if n_bars > 1 else 0.0
+        sharpe = mean / max(std, 1e-9)
+        boot = moving_block_bootstrap_mean(
+            spread,
+            np.arange(n_bars, dtype=np.int64),
+            block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 6)),
+            n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
+            seed=seed + fold_id,
+        )
+        lcb = float(np.quantile(boot, 0.05)) if boot.size > 0 else mean
+        ic, ict = _xs_rank_ic(g)
+        long_frac = float((g["side"].to_numpy() > 0).mean())
+        by_factor[sid] = (n_bars, len(g), mean, std, sharpe, lcb, ic, ict, long_frac)
+    if not by_factor:
+        return None
+    return XsFactorSpreadDiagnostics(fold_id=fold_id, by_factor=by_factor)
+
+
 def compute_probe_breadth_diagnostics(
     *,
     merged: pd.DataFrame,
@@ -1316,6 +1399,10 @@ def _l1_probe_diag_enabled() -> bool:
     return os.environ.get("L1_PROBE_DIAG", "") not in ("", "0", "false", "False")
 
 
+def _l1_xs_spread_diag_enabled() -> bool:
+    return os.environ.get("L1_XS_SPREAD_DIAG", "") not in ("", "0", "false", "False")
+
+
 def _format_probe_diag(diag: ProbeBreadthDiagnostics) -> str:
     parts = [
         f"fold={diag.fold_id}",
@@ -1348,6 +1435,15 @@ def _format_probe_diag(diag: ProbeBreadthDiagnostics) -> str:
             lf, lr, sr, nl, ns = ss
             parts.append(f"SIDE[{rname}]=long{lf:.0%}/lr{lr:+.1f}/sr{sr:+.1f}/nl{nl}/ns{ns}")
     return " | ".join(parts)
+
+
+def _format_xs_spread_diag(diag: XsFactorSpreadDiagnostics) -> str:
+    parts: list[str] = []
+    for sid, (nbars, _nevents, _mean, _std, sharpe, lcb, ic, ict, lf) in diag.by_factor.items():
+        parts.append(
+            f"XS[{sid}]=sh{sharpe:+.2f}/lcb{lcb:+.1f}/ic{ic:+.3f}/t{ict:+.2f}/n{nbars}/lf{lf:.0%}"
+        )
+    return " | ".join(parts) if parts else ""
 
 
 def evaluate_outer_signal_opportunities(
@@ -1514,6 +1610,12 @@ def evaluate_outer_signal_opportunities(
             logger.debug("[L1-PROBE-DIAG] %s", _format_probe_diag(diag))
             rank_ic_all_val = diag.rank_ic_all
             rank_ic_tstat_val = diag.rank_ic_tstat
+    if _l1_xs_spread_diag_enabled() and logger.isEnabledFor(logging.DEBUG):
+        xs_diag = compute_xs_factor_spread_diagnostics(
+            realized_event_results=realized_event_results, cfg=cfg, fold_id=fold_id, seed=seed,
+        )
+        if xs_diag is not None:
+            logger.debug("[L1-XS-SPREAD-DIAG] %s", _format_xs_spread_diag(xs_diag))
     return Layer1FoldReadiness(
         fold_id=fold_id,
         registry_source_end_idx=fold.fit_end,
