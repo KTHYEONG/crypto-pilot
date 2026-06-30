@@ -15,6 +15,8 @@ import logging
 import os
 import time
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 # 반드시 numba/numpy import 전에 설정 — fork child OOM 방지
 for _env in ("NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
@@ -1823,6 +1825,265 @@ def _run_tiered_l2_study(
     return l2_study_result
 
 
+@dataclass(slots=True, frozen=True)
+class L2ReversalReplayVariant:
+    name: str
+    enabled: bool
+    dd_threshold: float
+    persistence_bars: int
+
+
+@dataclass(slots=True, frozen=True)
+class L2ReversalReplayFoldMetric:
+    variant: str
+    fold_idx: int
+    cagr: float | None
+    mdd: float | None
+    risk_off_bars: int
+    risk_off_realized_price: float
+    risk_on_realized_price: float
+
+
+@dataclass(slots=True, frozen=True)
+class L2ReversalReplayResult:
+    variant: str
+    cagr: float
+    mdd: float
+    trade_count: int
+    deploy_leverage: float
+    selection_parity: bool
+    metric_parity: bool
+    fold_metrics: tuple[L2ReversalReplayFoldMetric, ...]
+    adoption_passed: bool
+    blocker_reason: str
+
+
+def _l2_reversal_replay_variants() -> tuple[L2ReversalReplayVariant, ...]:
+    return (
+        L2ReversalReplayVariant(name="baseline_off", enabled=False, dd_threshold=0.0, persistence_bars=1),
+        L2ReversalReplayVariant(name="legacy_006_p1", enabled=True, dd_threshold=0.06, persistence_bars=1),
+        L2ReversalReplayVariant(name="balanced_010_p2", enabled=True, dd_threshold=0.10, persistence_bars=2),
+        L2ReversalReplayVariant(name="balanced_010_p3", enabled=True, dd_threshold=0.10, persistence_bars=3),
+        L2ReversalReplayVariant(name="current_012_p3", enabled=True, dd_threshold=0.12, persistence_bars=3),
+    )
+
+
+@contextmanager
+def _temporary_reversal_env(variant: L2ReversalReplayVariant) -> Iterator[None]:
+    _saved: dict[str, str | None] = {}
+    for _key in ("L2_REVERSAL_KILL", "L2_REVERSAL_DD_THRESHOLD", "L2_REVERSAL_PERSISTENCE_BARS"):
+        _saved[_key] = os.environ.get(_key)
+    try:
+        if not variant.enabled:
+            os.environ.pop("L2_REVERSAL_KILL", None)
+        else:
+            os.environ["L2_REVERSAL_KILL"] = "1"
+            os.environ["L2_REVERSAL_DD_THRESHOLD"] = str(variant.dd_threshold)
+            os.environ["L2_REVERSAL_PERSISTENCE_BARS"] = str(variant.persistence_bars)
+        yield
+    finally:
+        for _key, _val in _saved.items():
+            if _val is None:
+                os.environ.pop(_key, None)
+            else:
+                os.environ[_key] = _val
+
+
+def _fold_metrics_from_l2_evaluation(
+    *,
+    variant_name: str,
+    evaluation: Any,
+) -> tuple[L2ReversalReplayFoldMetric, ...]:
+    fold_cagrs = getattr(evaluation, "fold_deployed_cagrs", ())
+    fold_mdds = getattr(evaluation, "fold_deployed_mdds", ())
+    fold_attribs = getattr(evaluation, "fold_attributions", ())
+    n_folds = max(len(fold_cagrs), len(fold_mdds), len(fold_attribs))
+    metrics: list[L2ReversalReplayFoldMetric] = []
+    for i in range(n_folds):
+        cagr = fold_cagrs[i] if i < len(fold_cagrs) else None
+        mdd = fold_mdds[i] if i < len(fold_mdds) else None
+        attr = fold_attribs[i] if i < len(fold_attribs) else None
+        risk_off_bars = attr.risk_off_bars if attr is not None else 0
+        risk_off_price = attr.risk_off_realized_price if attr is not None else 0.0
+        risk_on_price = attr.risk_on_realized_price if attr is not None else 0.0
+        metrics.append(
+            L2ReversalReplayFoldMetric(
+                variant=variant_name,
+                fold_idx=i,
+                cagr=cagr,
+                mdd=mdd,
+                risk_off_bars=risk_off_bars,
+                risk_off_realized_price=risk_off_price,
+                risk_on_realized_price=risk_on_price,
+            )
+        )
+    return tuple(metrics)
+
+
+def _reversal_replay_adoption_verdict(
+    *,
+    baseline: L2ReversalReplayResult,
+    legacy: L2ReversalReplayResult,
+    candidate: L2ReversalReplayResult,
+) -> tuple[bool, str]:
+    baseline_fold0_cagr = baseline.fold_metrics[0].cagr if baseline.fold_metrics else None
+    legacy_fold0_cagr = legacy.fold_metrics[0].cagr if legacy.fold_metrics else None
+    candidate_fold0_cagr = candidate.fold_metrics[0].cagr if candidate.fold_metrics else None
+    if baseline_fold0_cagr is None or legacy_fold0_cagr is None or candidate_fold0_cagr is None:
+        return (False, "missing_fold0")
+    legacy_improvement = legacy_fold0_cagr - baseline_fold0_cagr
+    candidate_improvement = candidate_fold0_cagr - baseline_fold0_cagr
+    if legacy_improvement <= 0.0:
+        return (False, "legacy_no_improvement")
+    if candidate_improvement < legacy_improvement * 0.70:
+        return (False, "fold0_defense_below_70pct")
+    for fold_idx in range(1, len(candidate.fold_metrics)):
+        base = baseline.fold_metrics
+        cand = candidate.fold_metrics
+        if fold_idx < len(base) and fold_idx < len(cand):
+            base_cagr = base[fold_idx].cagr
+            cand_cagr = cand[fold_idx].cagr
+            if base_cagr is not None and cand_cagr is not None and cand_cagr - base_cagr < -0.01:
+                return (False, "non_bottleneck_damage")
+    if candidate.cagr <= baseline.cagr:
+        return (False, "below_baseline_cagr")
+    if candidate.cagr < legacy.cagr:
+        return (False, "below_legacy_cagr")
+    if not candidate.fold_metrics or candidate.fold_metrics[0].risk_off_bars <= 0:
+        return (False, "no_fold0_risk_off")
+    if not candidate.selection_parity:
+        return (False, "selection_divergence")
+    return (True, "")
+
+
+def _run_l2_reversal_economic_replay(
+    *,
+    signal_batch: Any,
+    aligned: Any,
+    awf_folds: tuple[Any, ...],
+    base_l2_params: dict[str, object],
+    caps: Any,
+    tf: str,
+    deploy_leverage: float | None,
+    prebuilt_cache: Any,
+    reference_evaluation: Any,
+    output_path: Path | None = None,
+) -> tuple[L2ReversalReplayResult, ...]:
+    from src.domain.futures.optimization.workflow import evaluate_l2_trial
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
+    from src.domain.futures.strategy.tiered_workflow.replay_parity import assert_selection_replay_parity
+
+    _config = Layer2AllocationConfig.from_mapping(base_l2_params)
+    variants = _l2_reversal_replay_variants()
+    results: list[L2ReversalReplayResult] = []
+    for variant in variants:
+        with _temporary_reversal_env(variant):
+            _dl_override: float | None = (
+                deploy_leverage if deploy_leverage is not None and deploy_leverage > 1.0 else None
+            )
+            evaluation = evaluate_l2_trial(
+                cache=prebuilt_cache,
+                signal_batch=signal_batch,
+                aligned=aligned,
+                awf_folds=awf_folds,
+                config=_config,
+                caps=caps,
+                tf=tf,
+                deploy_leverage_override=_dl_override,
+            )
+        fold_metrics = _fold_metrics_from_l2_evaluation(variant_name=variant.name, evaluation=evaluation)
+        _selection_parity = sorted(getattr(evaluation, "last_selected_symbols", ())) == sorted(
+            getattr(reference_evaluation, "last_selected_symbols", ())
+        )
+        _metric_parity: bool = False
+        if variant.name == "baseline_off":
+            try:
+                _metric_parity = assert_selection_replay_parity(
+                    replay_evaluation=evaluation,
+                    final_evaluation=reference_evaluation,
+                )
+            except Exception:
+                _metric_parity = False
+        _blocker_reason = "baseline" if variant.name == "baseline_off" else ""
+        result = L2ReversalReplayResult(
+            variant=variant.name,
+            cagr=float(getattr(evaluation, "cagr_hybrid", 0.0)),
+            mdd=float(getattr(evaluation, "mdd_hybrid", 0.0)),
+            trade_count=int(getattr(evaluation, "trade_count", 0)),
+            deploy_leverage=float(getattr(evaluation, "deploy_leverage", 1.0)),
+            selection_parity=_selection_parity,
+            metric_parity=_metric_parity,
+            fold_metrics=fold_metrics,
+            adoption_passed=False,
+            blocker_reason=_blocker_reason,
+        )
+        results.append(result)
+    # adoption verdict
+    baseline_result = next((r for r in results if r.variant == "baseline_off"), None)
+    legacy_result = next((r for r in results if r.variant == "legacy_006_p1"), None)
+    for result in results:
+        if result.variant == "baseline_off":
+            continue
+        if baseline_result is not None and legacy_result is not None and result.adoption_passed is False:
+            passed, reason = _reversal_replay_adoption_verdict(
+                baseline=baseline_result,
+                legacy=legacy_result,
+                candidate=result,
+            )
+            results[results.index(result)] = L2ReversalReplayResult(
+                variant=result.variant,
+                cagr=result.cagr,
+                mdd=result.mdd,
+                trade_count=result.trade_count,
+                deploy_leverage=result.deploy_leverage,
+                selection_parity=result.selection_parity,
+                metric_parity=result.metric_parity,
+                fold_metrics=result.fold_metrics,
+                adoption_passed=passed,
+                blocker_reason=reason,
+            )
+    # log summary
+    for res in results:
+        _logger.info(
+            "[L2-REVERSAL-REPLAY] variant=%s CAGR=%.4f MDD=%.4f trades=%d L*=%.2f "
+            "selection_parity=%s metric_parity=%s adoption_passed=%s blocker=%s",
+            res.variant, res.cagr, res.mdd, res.trade_count, res.deploy_leverage,
+            res.selection_parity, res.metric_parity, res.adoption_passed, res.blocker_reason,
+        )
+    if output_path is not None:
+        _write_replay_csv(results=tuple(results), output_path=output_path)
+    return tuple(results)
+
+
+def _write_replay_csv(
+    *,
+    results: tuple[L2ReversalReplayResult, ...],
+    output_path: Path,
+) -> None:
+    rows: list[dict[str, object]] = []
+    for res in results:
+        for fm in res.fold_metrics:
+            rows.append({
+                "variant": res.variant,
+                "fold_idx": fm.fold_idx,
+                "cagr": fm.cagr,
+                "mdd": fm.mdd,
+                "risk_off_bars": fm.risk_off_bars,
+                "risk_off_realized_price": fm.risk_off_realized_price,
+                "risk_on_realized_price": fm.risk_on_realized_price,
+                "variant_cagr": res.cagr,
+                "variant_mdd": res.mdd,
+                "trade_count": res.trade_count,
+                "deploy_leverage": res.deploy_leverage,
+                "selection_parity": res.selection_parity,
+                "metric_parity": res.metric_parity,
+                "adoption_passed": res.adoption_passed,
+                "blocker_reason": res.blocker_reason,
+            })
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(output_path, index=False)
+
+
 def _run_strategy_stage(
     run_config: FuturesRunConfig,
     window: QuarterlyWindow,
@@ -2350,7 +2611,28 @@ def _run_strategy_stage(
                     if _parity_gate and hasattr(l2_final, "blocker_reason"):
                         import dataclasses
                         l2_final = dataclasses.replace(l2_final, gate_passed=False, blocker_reason="parity_divergence")
-            
+
+            _reversal_replay_env = os.environ.get("L2_REVERSAL_REPLAY", "")
+            if _reversal_replay_env not in ("", "0", "false", "False") and l2_study_result.best_evaluation is not None:
+                _replay_results = _run_l2_reversal_economic_replay(
+                    signal_batch=l2_signals,
+                    aligned=aligned_tiered,
+                    awf_folds=l2_study_result.awf_folds or (),
+                    base_l2_params=best_l2_params,
+                    caps=tiered_caps,
+                    tf=run_config.timeframe,
+                    deploy_leverage=l2_study_result.best_evaluation.deploy_leverage,
+                    prebuilt_cache=l2_study_result.sim_cache,
+                    reference_evaluation=l2_study_result.best_evaluation,
+                    output_path=Path("docs/results/l2_reversal_replay.csv"),
+                )
+                for _rr in _replay_results:
+                    if _rr.adoption_passed and _rr.variant != "baseline_off":
+                        _logger.info(
+                            "[L2-REVERSAL-REPLAY] PASS candidate=%s CAGR=%.4f blocker=%s",
+                            _rr.variant, _rr.cagr, _rr.blocker_reason,
+                        )
+
             _log_mem("l2_final_pipeline", _mem_l2_final, extra=f"took={time.perf_counter() - _t_l2_final_start:.4f}s")
             # Layer 2 BLOCKED 시 즉시 종료 (Step 5 optimization 진입 방지)
             if l2_final is None or not l2_final.gate_passed:

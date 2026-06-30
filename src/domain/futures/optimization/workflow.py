@@ -2139,6 +2139,7 @@ def evaluate_l2_trial(
         recent_fold_mdd=float(fold_diag.recent_fold_mdd),
         latest_to_median_cagr=float(fold_diag.latest_to_median_cagr),
         fold_deployed_cagrs=tuple(fold_diag.fold_deployed_cagrs),
+        fold_deployed_mdds=tuple(getattr(fold_diag, 'fold_deployed_mdds', ())),
         fold_selected_symbols=tuple(fold_diag.fold_selected_symbols),
         worst_fold_cagr=float(worst_fold_cagr),
         positive_block_delta_ratio=float(positive_block_delta_ratio),
@@ -2151,6 +2152,7 @@ def evaluate_l2_trial(
         rebalance_count=int(sim.rebalance_count),
         all_net_exposures=tuple(sim.all_net_exposures),
         rets_baseline_ew=tuple(sim.rets_baseline_ew),
+        fold_attributions=tuple(getattr(sim, 'fold_attributions', ())),
         deployable_score=deployable_score,
     )
 
