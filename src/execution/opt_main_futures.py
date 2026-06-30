@@ -1990,6 +1990,7 @@ def _run_l2_reversal_economic_replay(
                 caps=caps,
                 tf=tf,
                 deploy_leverage_override=_dl_override,
+                eval_tag=f"replay:{variant.name}",
             )
         fold_metrics = _fold_metrics_from_l2_evaluation(variant_name=variant.name, evaluation=evaluation)
         _selection_parity = sorted(getattr(evaluation, "last_selected_symbols", ())) == sorted(
@@ -2539,13 +2540,18 @@ def _run_strategy_stage(
                 n_l2_trials = int(_trials_override)
             _mem_l2_study = _get_rss_mb()
             _t_l2_study_start = time.perf_counter()
+            from src.domain.futures.strategy.tiered_workflow.pipeline import (
+                _resolve_l2_master_tf,
+            )
+            _l2_probe_manifest: list[dict[str, Any]] | None = None
+            l2_master_tf = _resolve_l2_master_tf(tiered_cfg, {}, _l2_probe_manifest)
             l2_study_result = _run_tiered_l2_study(
                 signal_batch=l2_signals,
                 aligned=aligned_tiered,
                 cfg=tiered_cfg,
                 window=tiered_window,
                 caps=tiered_caps,
-                tf=run_config.timeframe,
+                tf=l2_master_tf,
                 n_trials=n_l2_trials,
                 seed=_seed,
                 l2_sim_cache=shared_l2_cache,
@@ -2583,7 +2589,17 @@ def _run_strategy_stage(
                 l2_signal_batch=l2_signals,
                 l2_awf_folds=l2_study_result.awf_folds,
                 l2_eval_memo=l2_study_result.eval_memo,
+                probe_manifest=_l2_probe_manifest,
             )
+            # B2: SSOT assert — study tf must match final deployment tf
+            if l2_final is not None and hasattr(l2_final, "master_tf") and l2_master_tf != l2_final.master_tf:
+                    _logger.error(
+                        "[L2-TF-SSOT] study_tf=%s final_tf=%s "
+                        "→ blocking: annualization_tf_mismatch",
+                        l2_master_tf, l2_final.master_tf,
+                    )
+                    import dataclasses as _dc
+                    l2_final = _dc.replace(l2_final, gate_passed=False, blocker_reason="annualization_tf_mismatch")
             if l2_final is not None and l2_study_result.best_evaluation is not None:
                 from src.domain.futures.strategy.tiered_workflow.replay_parity import (
                     assert_selection_replay_parity,
@@ -2620,7 +2636,7 @@ def _run_strategy_stage(
                     awf_folds=l2_study_result.awf_folds or (),
                     base_l2_params=best_l2_params,
                     caps=tiered_caps,
-                    tf=run_config.timeframe,
+                    tf=l2_master_tf,
                     deploy_leverage=l2_study_result.best_evaluation.deploy_leverage,
                     prebuilt_cache=l2_study_result.sim_cache,
                     reference_evaluation=l2_study_result.best_evaluation,
