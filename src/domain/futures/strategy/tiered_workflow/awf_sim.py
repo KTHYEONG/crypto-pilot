@@ -85,6 +85,9 @@ class Layer2FoldAttribution:
     realized_price_low_er: float = 0.0
     trend_efficiency_corr: float = 0.0
     mean_trend_efficiency: float = 0.0
+    risk_off_bars: int = 0
+    risk_off_realized_price: float = 0.0
+    risk_on_realized_price: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -131,6 +134,9 @@ def _assemble_fold_attribution(
     netting_events: int,
     er_return_pairs: list[tuple[float, float]] | None = None,
     target: float = 0.35,
+    risk_off_bars: int = 0,
+    risk_off_realized_price: float = 0.0,
+    risk_on_realized_price: float = 0.0,
 ) -> Layer2FoldAttribution:
     realized_total = realized_price + realized_funding - realized_cost
     alpha_gap = realized_total - expected_net
@@ -183,6 +189,9 @@ def _assemble_fold_attribution(
         realized_price_low_er=_safe(realized_price_low_er),
         trend_efficiency_corr=_safe(trend_efficiency_corr),
         mean_trend_efficiency=_safe(mean_trend_efficiency),
+        risk_off_bars=risk_off_bars,
+        risk_off_realized_price=_safe(risk_off_realized_price),
+        risk_on_realized_price=_safe(risk_on_realized_price),
     )
 
 
@@ -1973,6 +1982,32 @@ def _run_awf_simulation(
     })
     _er_return_pairs_by_fold: list[list[tuple[float, float]]] = [[] for _ in awf_folds]
 
+    # L2_REVERSAL_KILL: market reversal kill-switch
+    _reversal_kill_enabled = os.environ.get("L2_REVERSAL_KILL", "") not in ("", "0", "false", "False")
+    _risk_off_1d: NDArray[np.bool_] | None = None
+    if _reversal_kill_enabled:
+        try:
+            from src.domain.futures.strategy.config import RegimeConfig as _RevRegimeConfig
+            from src.domain.futures.strategy.market_regime import (
+                compute_reversal_risk_off_1d,
+            )
+            _rev_cfg = _RevRegimeConfig()
+            _btc_sym_idx = next((i for i, s in enumerate(aligned.symbols) if "BTC" in s.upper()), 0)
+            _btc_close_1d: NDArray[np.float64] = np.maximum(
+                aligned.close_2d[:, _btc_sym_idx],
+                1e-12,
+            )
+            _risk_off_1d = compute_reversal_risk_off_1d(
+                _btc_close_1d,
+                dd_window=_rev_cfg.reversal_dd_window,
+                dd_threshold=_rev_cfg.reversal_dd_threshold,
+                mom_fast=_rev_cfg.reversal_mom_fast,
+                mom_slow=_rev_cfg.reversal_mom_slow,
+            )
+        except Exception:
+            _risk_off_1d = None
+    _risk_off_price_pairs_by_fold: list[list[tuple[bool, float]]] = [[] for _ in awf_folds]
+
     for _fold_idx, fold in enumerate(awf_folds):
         t_fold_start = time.perf_counter()
         if _reliability_enabled and _bear_edge_by_fold:
@@ -1993,6 +2028,9 @@ def _run_awf_simulation(
         _attr_bars_by_regime = {0: 0, 1: 0, 2: 0}
         _attr_funding = 0.0
         _attr_cost = 0.0
+        _fold_risk_off_bars = 0
+        _fold_risk_off_price = 0.0
+        _fold_risk_on_price = 0.0
         _fold_rebalance_count = 0
         if _diag:
             _attr_expected = 0.0
@@ -2219,6 +2257,13 @@ def _run_awf_simulation(
                     else:
                         _modified[_sk] = _ss
                 _oos_sleeve_sigs = _modified
+            # L2_REVERSAL_KILL: selective hard de-gross on reversal bars
+            if _reversal_kill_enabled and _risk_off_1d is not None and t > 0 and bool(_risk_off_1d[t - 1]):
+                _roff_floor = 0.05
+                _reversal_kill_sigs: dict[tuple[str, str], SymbolSignal] = {}
+                for _sk, _ss in _oos_sleeve_sigs.items():
+                    _reversal_kill_sigs[_sk] = replace(_ss, raw_mu=_ss.raw_mu * _roff_floor)
+                _oos_sleeve_sigs = _reversal_kill_sigs
             # sleeve key → symbol key 변환: precision-weighted pooling (인플레이션 방지)
             valid_signals, friction_by_symbol = _combine_sleeve_signals_to_symbol(
                 _oos_sleeve_sigs,
@@ -2539,6 +2584,12 @@ def _run_awf_simulation(
                         _attr_bars_by_regime[_rc] += 1
                 _attr_funding += -float(np.dot(w, funding_rates))
                 _attr_cost += cost
+                if _reversal_kill_enabled and _risk_off_1d is not None and t2 < _risk_off_1d.shape[0]:
+                    if bool(_risk_off_1d[t2]):
+                        _fold_risk_off_bars += 1
+                        _fold_risk_off_price += _bar_price
+                    else:
+                        _fold_risk_on_price += _bar_price
                 cost_baseline = rebal_cost_baseline if t2 == t else 0.0
                 cost_baseline_ew = rebal_cost_baseline_ew if t2 == t else 0.0
                 r_h = gross_ret - cost
@@ -2620,6 +2671,9 @@ def _run_awf_simulation(
             dropped_below_cost=_attr_dropped,
             netting_events=_attr_netting,
             er_return_pairs=_er_return_pairs_by_fold[_fold_idx],
+            risk_off_bars=_fold_risk_off_bars,
+            risk_off_realized_price=_fold_risk_off_price,
+            risk_on_realized_price=_fold_risk_on_price,
         )
         fold_attributions.append(_attr)
         if _diag and logger.isEnabledFor(logging.DEBUG):
@@ -2629,13 +2683,15 @@ def _run_awf_simulation(
                 "expected_net=%.6f alpha_gap=%.6f mean_gross_exp=%.4f mean_net_exp=%.4f "
                 "sleeves_active_mean=%.1f friction_pass_ratio=%.3f throttle_mult_mean=%.3f "
                 "dropped_below_cost=%d netting_events=%d "
-                "low_er_price=%.6f er_corr=%.3f mean_er=%.3f",
+                "low_er_price=%.6f er_corr=%.3f mean_er=%.3f "
+                "roff_bars=%d roff_price=%.6f ron_price=%.6f",
                 _attr.fold_idx, _attr.oos_bars, _attr.n_rebal, _attr.realized_total,
                 _attr.realized_price, _attr.realized_funding, _attr.realized_cost,
                 _attr.expected_net, _attr.alpha_gap, _attr.mean_gross_exp, _attr.mean_net_exp,
                 _attr.sleeves_active_mean, _attr.friction_pass_ratio, _attr.throttle_mult_mean,
                 _attr.dropped_below_cost, _attr.netting_events,
                 _attr.realized_price_low_er, _attr.trend_efficiency_corr, _attr.mean_trend_efficiency,
+                _attr.risk_off_bars, _attr.risk_off_realized_price, _attr.risk_on_realized_price,
             )
             if _diag_regime_full is not None:
                 _reg_parts = " ".join(

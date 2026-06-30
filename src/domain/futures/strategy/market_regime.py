@@ -608,6 +608,36 @@ def compute_market_regime_context(
         trend_efficiency_1d=trend_efficiency_1d,
     )
 
+def _rolling_max_1d(values: NDArray[np.float64], window: int) -> NDArray[np.float64]:
+    out = np.empty(values.shape[0], dtype=np.float64)
+    for i in range(values.shape[0]):
+        start = max(0, i - window + 1)
+        out[i] = float(np.max(values[start : i + 1]))
+    return out
+
+
+def compute_reversal_risk_off_1d(
+    btc_close_1d: NDArray[np.float64],
+    *,
+    dd_window: int,
+    dd_threshold: float,
+    mom_fast: int,
+    mom_slow: int,
+) -> NDArray[np.bool_]:
+    """Trailing drawdown + momentum 기반 시장반전 risk-off 마스크 [T]."""
+    t = btc_close_1d.shape[0]
+    if t == 0:
+        return np.empty(0, dtype=np.bool_)
+    high_water = _rolling_max_1d(btc_close_1d, dd_window)
+    dd = 1.0 - btc_close_1d / np.maximum(high_water, _EPS)
+    mom_fast_ema = _ema_1d(btc_close_1d, mom_fast)
+    mom_slow_ema = _ema_1d(btc_close_1d, mom_slow)
+    mom = mom_fast_ema - mom_slow_ema
+    raw = (dd >= dd_threshold) & (mom < 0.0)
+    out = np.concatenate([[False], raw[:-1]]).astype(np.bool_)
+    return out
+
+
 def evaluate_regime_quality(
     *,
     aligned: AlignedMarketData,
