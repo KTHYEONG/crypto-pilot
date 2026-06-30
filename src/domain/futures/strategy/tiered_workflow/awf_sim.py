@@ -2003,6 +2003,7 @@ def _run_awf_simulation(
                 dd_threshold=_rev_cfg.reversal_dd_threshold,
                 mom_fast=_rev_cfg.reversal_mom_fast,
                 mom_slow=_rev_cfg.reversal_mom_slow,
+                persistence_bars=_rev_cfg.reversal_persistence_bars,
             )
         except Exception:
             _risk_off_1d = None
@@ -2259,7 +2260,7 @@ def _run_awf_simulation(
                 _oos_sleeve_sigs = _modified
             # L2_REVERSAL_KILL: selective hard de-gross on reversal bars
             if _reversal_kill_enabled and _risk_off_1d is not None and t > 0 and bool(_risk_off_1d[t - 1]):
-                _roff_floor = 0.05
+                _roff_floor = _rev_cfg.reversal_risk_off_floor
                 _reversal_kill_sigs: dict[tuple[str, str], SymbolSignal] = {}
                 for _sk, _ss in _oos_sleeve_sigs.items():
                     _reversal_kill_sigs[_sk] = replace(_ss, raw_mu=_ss.raw_mu * _roff_floor)
