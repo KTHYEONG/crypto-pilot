@@ -35,6 +35,19 @@ class DeploymentResult:
     binding_constraint: str  # "mdd" | "cvar" | "hard_cap" | "none"
 
 
+def trend_efficiency_gross_mult(
+    trailing_er: float,
+    *,
+    target: float,
+    floor_mult: float,
+) -> float:
+    if not np.isfinite(trailing_er):
+        return floor_mult
+    if trailing_er >= target:
+        return 1.0
+    return float(floor_mult + (1.0 - floor_mult) * (trailing_er / max(target, 1e-12)))
+
+
 def _annualized_cagr_from_returns(
     returns: NDArray[np.float64],
     *,
