@@ -42,7 +42,9 @@ Establishes a causal market state from BTC price action for two consumers: a con
 - $DD_{t} = 1 - P_{t} / HW_{t}$ (trailing drawdown)
 - $Mom_{t} = \text{EMA}(P, \text{fast})_{t} - \text{EMA}(P, \text{slow})_{t}$ (momentum)
 - $risk\_off\_raw_{t} = (DD_{t} \ge \text{dd\_threshold}) \land (Mom_{t} < 0)$
-- $risk\_off\_1d_{t} = shift(risk\_off\_raw, 1)$ — bar $t$ uses information up to $t-1$ only (causal, look-ahead 0)
+- $persisted\_run_{t} = persisted\_run_{t-1} + 1 \text{ if } risk\_off\_raw_{t} \text{ else } 0$
+- $risk\_off\_persisted_{t} = 1_{\{persisted\_run_{t} \ge \text{persistence\_bars}\}}$ (N-bar consecutive raw condition)
+- $risk\_off\_1d_{t} = shift(risk\_off\_persisted, 1)$ — bar $t$ uses information up to $t-1$ only (causal, look-ahead 0)
 - $risk\_off_{bar} = True$ → L2 override of all sleeve raw_mu to `reversal_risk_off_floor` (overrides soft cap/crisis_floor)
 - Env-gated (`L2_REVERSAL_KILL`, default off), computed once from BTC close per simulation run
 
@@ -112,11 +114,12 @@ graph TD
 | **Output**| `code_1d` | Discrete regime integer (0-5) used for signal gating and B0 ensemble |
 | **Output**| `trend_efficiency_1d` | Per-bar Kaufman Efficiency Ratio. Bounds: `[0, 1]`, NaN for warm-up |
 | **Param** | `reversal_dd_window` | Trailing high lookback for drawdown (bars, default 90). Bounds: `>= 2` |
-| **Param** | `reversal_dd_threshold` | Drawdown threshold to flag risk-off (default 0.06). Bounds: `(0, 1)` |
+| **Param** | `reversal_dd_threshold` | Drawdown threshold to flag risk-off (default 0.12). Bounds: `(0, 1)` |
 | **Param** | `reversal_mom_fast` | Fast EMA span for momentum (default 20). Must be `< reversal_mom_slow` |
 | **Param** | `reversal_mom_slow` | Slow EMA span for momentum (default 120). Must be `> reversal_mom_fast` |
 | **Param** | `reversal_risk_off_floor` | Hard gross floor during risk-off bars (default 0.05). Bounds: `[0, crisis_gross_floor)` |
-| **Output**| `risk_off_1d` | Boolean mask [T], `True` = risk-off active. Causal: shift(1), row 0 = `False` |
+| **Param** | `reversal_persistence_bars` | Consecutive raw risk-off bars required before shifted activation (default 3). Bounds: `>= 1` |
+| **Output**| `risk_off_1d` | Boolean mask [T], `True` = risk-off active. Causal: shift(1) after persistence gate, row 0 = `False` |
 | **Eval**  | `RegimeScoreCard` | Metrics C2(Persistence), C3(Distinctness), C4(Stability), C5(Coverage) |
 | **L2 Param** | `l2_regime_bull_gross_cap` | Bull regime gross exposure cap (default `1.0`, full deployment). Bounds: `(0.0, 1.0]` |
 | **L2 Param** | `l2_regime_bear_gross_cap` | Bear regime gross exposure cap (default `0.35`, bull-primary prior). Bounds: `(0.0, 1.0]` |

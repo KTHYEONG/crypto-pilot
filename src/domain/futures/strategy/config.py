@@ -76,10 +76,11 @@ class RegimeConfig:
 
     # Reversal kill-switch (C2)
     reversal_dd_window: int = 90
-    reversal_dd_threshold: float = 0.06
+    reversal_dd_threshold: float = 0.12
     reversal_mom_fast: int = 20
     reversal_mom_slow: int = 120
     reversal_risk_off_floor: float = 0.05
+    reversal_persistence_bars: int = 3
 
     def __post_init__(self) -> None:
         """Validate regime parameters."""
@@ -126,6 +127,8 @@ class RegimeConfig:
             raise ValueError("reversal_mom_fast must be < reversal_mom_slow")
         if not (0.0 <= self.reversal_risk_off_floor < self.crisis_gross_floor):
             raise ValueError("reversal_risk_off_floor must be in [0, crisis_gross_floor)")
+        if self.reversal_persistence_bars < 1:
+            raise ValueError("reversal_persistence_bars must be >= 1")
 
 
 @dataclass(slots=True, frozen=True)
