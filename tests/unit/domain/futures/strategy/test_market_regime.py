@@ -9,6 +9,7 @@ from src.domain.futures.strategy.market_regime import (
     _schmitt_directional_state,
     compute_market_regime_context,
     compute_risk_overlay,
+    compute_trend_efficiency_1d,
     evaluate_regime_quality,
 )
 
@@ -331,3 +332,16 @@ class TestRegimeCompression:
             codes = np.array([src], dtype=np.int8)
             result = compress_regime_codes(codes)
             assert result[0] == dst, f"code {src} → {result[0]} (expected {dst})"
+
+    def test_trend_efficiency_1d_is_in_regime_context(self) -> None:
+        from tests.unit.domain.futures.strategy.test_market_regime import _make_aligned
+        aligned = _make_aligned()
+        regime = compute_market_regime_context(aligned=aligned)
+        assert hasattr(regime, "trend_efficiency_1d")
+        assert regime.trend_efficiency_1d.shape == (aligned.close_2d.shape[0],)
+
+    def test_trend_efficiency_1d_causal_no_lookahead(self) -> None:
+        close = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 1.0, 2.0, 3.0], dtype=np.float64)
+        er = compute_trend_efficiency_1d(close, window=4)
+        assert np.isnan(er[:4]).all()
+        assert np.isfinite(er[4:]).all()
