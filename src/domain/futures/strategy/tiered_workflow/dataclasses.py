@@ -21,7 +21,9 @@ if TYPE_CHECKING:
         ValidatedSignalEvent,
     )
     from src.domain.futures.strategy.cs_rank import SymbolSignal
-
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+        Layer2FoldAttribution,
+    )
 
 AllocationPolicy = Literal["diagonal_kelly", "directional_equal_weight"]
 RegimePolicyMode = Literal["filter", "observe", "soft", "hybrid"]
@@ -250,6 +252,7 @@ class Layer2TrialEvaluation:
     recent_fold_mdd: float = 0.0
     latest_to_median_cagr: float = 0.0
     fold_deployed_cagrs: tuple[float | None, ...] = ()
+    fold_deployed_mdds: tuple[float | None, ...] = ()
     fold_selected_symbols: tuple[tuple[str, ...], ...] = ()
     worst_fold_cagr: float = float("nan")
     positive_block_delta_ratio: float = float("nan")
@@ -262,6 +265,7 @@ class Layer2TrialEvaluation:
     rebalance_count: int = 0
     all_net_exposures: tuple[float, ...] = ()
     rets_baseline_ew: tuple[float, ...] = ()
+    fold_attributions: tuple[Layer2FoldAttribution, ...] = ()
     deployable_score: Layer2DeployableScore | None = None
 
 
