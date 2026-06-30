@@ -1253,6 +1253,37 @@ def apply_regime_risk_cap(
     return arr * multiplier, multiplier
 
 
+def compute_regime_reliability_multiplier(
+    trailing_edges_per_bar_bps: Sequence[float],
+    *,
+    floor: float = 0.2,
+    neg_edge_at_floor_bps: float = -10.0,
+    pos_edge_at_full_bps: float = 0.0,
+) -> float:
+    """직전 fold들의 실현 per-bar bear edge(bps) → bear cap multiplier ∈ [floor, 1.0]."""
+    if not (0.0 < floor <= 1.0):
+        raise ValueError("floor must be in (0.0, 1.0]")
+    if pos_edge_at_full_bps <= neg_edge_at_floor_bps:
+        raise ValueError("pos_edge_at_full_bps must exceed neg_edge_at_floor_bps")
+    edges = [float(e) for e in trailing_edges_per_bar_bps]
+    if not edges:
+        return 1.0
+    mean_edge = float(np.mean(edges))
+    if mean_edge >= pos_edge_at_full_bps:
+        return 1.0
+    if mean_edge <= neg_edge_at_floor_bps:
+        return floor
+    frac = (mean_edge - neg_edge_at_floor_bps) / (pos_edge_at_full_bps - neg_edge_at_floor_bps)
+    return float(floor + (1.0 - floor) * frac)
+
+
+def bear_edge_per_bar_bps(price_sum: float, bar_count: int) -> float:
+    """fold 실현 bear price 합 → per-bar bps. bar_count<=0 → 0.0(중립)."""
+    if bar_count <= 0:
+        return 0.0
+    return float(price_sum / bar_count * 1e4)
+
+
 def _compute_js_divergence(
     codes: NDArray[np.int8],
     *,
