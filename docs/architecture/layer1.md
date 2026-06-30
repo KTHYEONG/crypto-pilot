@@ -44,11 +44,16 @@ Generates vectorized rule panels with archetype/regime contexts, filtered throug
 - Bayesian prior precedes JS: $\hat{x}_a = w_{prior} \cdot \bar{x}_a + (1 - w_{prior}) \cdot \mu_{prior}$, $w_{prior} = n_{eff} / (n_{eff} + n_{prior})$. Disabled by default ($n_{prior}=0$).
 - Archetypes with events < `l1_ens_min_display_events` → `insuf`.
 
-**Archetype Labels** (`TRD`/`TMO`/`MRV`/`CRY`/`FLO`/`UNW`/`BTN`)
+**Archetype Labels** (`TRD`/`TMO`/`MRV`/`CRY`/`FLO`/`UNW`/`BTN`/`XS`)
 
-**TF-Specific Signal Pools (31 Families)**
-- `build_rule_signal_panels(family_filter)` post-filters panels. `CandidateStrategyConfig.per_tf_candidate_families` assigns per-TF pools: 1h (9, mean_rev), 2h (8, mixed), 4h (17, balanced), 6h/8h (7, trend), 12h (9, trend).
-- 6 crypto-native additions: `gap_fade_1h`, `vwap_reversion_1h`, `volume_climax_1h`, `macd_4h`, `supertrend`, `ichimoku_trend`.
+**TF-Specific Signal Pools (28 Families)**
+- `build_rule_signal_panels(family_filter)` post-filters panels. `CandidateStrategyConfig.per_tf_candidate_families` assigns per-TF pools: 4h (17, balanced), 6h/8h (9, trend+mixed), 12h (11, trend+carry).
+- 3 crypto-native additions: `macd_4h`, `supertrend`, `ichimoku_trend`. 7 low-outcome families removed (`rsi_reversion`, `bollinger_reversion`, `vol_regime_reversion`, `funding_zscore_carry`, `gap_fade_1h`, `vwap_reversion_1h`, `volume_climax_1h`).
+
+**Cross-Sectional Alpha Families (xs_alpha archetype)**
+- 4 families: `xs_momentum`, `xs_carry`, `xs_flow`, `xs_oi_skew` — per-bar rank across symbols, beta-neutral by construction. Regime-agnostic (market-neutral, exempt from mean-reversion gating).
+- Helpers: `_cross_sectional_rank_signed_2d` (per-timestamp rank → signed score + tercile side), `_beta_residual_return_2d` (rolling beta residual sum).
+- Raw factors: `xs_momentum` = beta-residual return (L=12/48); `xs_carry` = `-funding_z_96/168` (short expensive funding); `xs_flow` = `flow_z_24`; `xs_oi_skew` = `-(oi_build_z_42 * sign(lsr_log_z_42))` (short crowded longs).
 
 **Flow-Aware Panels**
 - Shared cache: `flow_imbalance`, `flow_mean_6`, `flow_z_24`, `funding_z_96/168`, `funding_ts_slope`, `ret_1/12`, `ret_z_48`.
@@ -60,7 +65,7 @@ Generates vectorized rule panels with archetype/regime contexts, filtered throug
 ```mermaid
 graph TD
     A[Market Data] --> B[Vectorized Indicators]
-    B --> C[CandidateSignalPanel 31 Families]
+    B -->     C[CandidateSignalPanel 28 Families]
     C --> C1[Multi-TF Panel Injection]
     C1 --> D[Archetype & Regime Context]
     D --> E[L1 Breakeven & Profit Floor Gate]

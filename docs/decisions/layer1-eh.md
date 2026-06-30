@@ -165,3 +165,13 @@ ai_read_policy: when_related
 - **포맷 토큰**: `_format_probe_diag`에 `SIDE[{rname}]=long{lf:.0%}/lr{lr:+.1f}/sr{sr:+.1f}/nl{nl}/ns{ns}` 출력.
 - **Phase 2 게이트**(보류): bear long_fraction ≥ 0.65 & long_mean < 0 ≤ short_mean 조건 다수 fold 일관 시 `l1_bear_side_policy` (as_is/flat/flip_short) A/B 개시.
 - **Test Coverage**: 5 scenarios (bear net-long bias, side-missing default all-long, all-short zero-div, no-regime empty dict, format token). All PASS. L1: ruff/mypy clean.
+
+## Phase 18: L1 Cross-Sectional Alpha — 4 XS Families (2026-06-30)
+- **계기**: result.md fold#1 −17.1%·CAGR 6.1%≪30%의 근본 원인이 L1 횡단면 alpha 부재로 진단됨(next.md §4). 30개 family 전부 per-symbol 시계열 변환 → rank IC≈0. "발화 자체가 횡단면"인 진정한 XS alpha 필요.
+- **신규 helper 2종**: `_cross_sectional_rank_signed_2d` (per-timestamp rank → signed score [-1,1] + tercile side {-1,0,1}, min_cross_section guard), `_beta_residual_return_2d` (BTC-beta rolling residual, rolling_sum over lookback). 기존 Numba/import 변경 0.
+- **신규 family 4종**: `xs_momentum`(beta-residual ret L12/48), `xs_carry`(-funding_z 96/168), `xs_flow`(flow_z_24), `xs_oi_skew`(-oi_build_z_42*sign(lsr_log_z_42)). 전부 `_cross_sectional_rank_signed_2d` 변환, `metadata={"archetype": "xs_alpha"}`.
+- **Archetype `xs_alpha`**: `SignalArchetype` Literal에 추가. `_allowed_regimes_for_archetype` → `()` (regime-agnostic, market-neutral → gating 면제). `build_exit_policies_for_panel` → `xs_neutral` policy(stop=1.25, tp=2.25).
+- **제거 7 family**: `rsi_reversion`, `bollinger_reversion`, `vol_regime_reversion`, `funding_zscore_carry`, `gap_fade_1h`, `vwap_reversion_1h`, `volume_climax_1h` — OOS near-breakeven 노이즈. `_vwap_2d` 전용 helper 삭제. `all_families` 31→28. `candidate_families`/`_DEFAULT_PER_TF_FAMILIES`/`_DEFAULT_PER_FAMILY_PARAMS`/`ensemble_variant_prior_families` 정합.
+- **Per-TF 배정**: 4h=전체4, 6h/8h=`xs_momentum`+`xs_carry`, 12h=`xs_momentum`+`xs_carry`+`xs_oi_skew`. (`1h`/`2h`는 `l1_tfs` inert이나 정합 위해 유지·7종 제거만 반영.)
+- **Risk 방어**: `min_cross_section=cfg.l1_min_cross_section`(기본 2)으로 소표본 fold guard. funding/oi/lsr None → valid_2d 자동 False → row block. `candidate_panels_to_events`의 `_cross_sectional_robust_zscore` 재적용은 rank의 단조변환(idempotent)이라 무해. `median_gate_skew_exempt_archetypes`에 xs_alpha 미포함 (ATR-stop skew가 작아 의도적).
+- **Test Coverage**: 8 scenarios (S1 rank monotonic+tercile, S2 min_cross_section BVA, S3 beta-neutrality core, S4 family emit+archetype, S5 carry direction domain, S6 removal regression, S7 exit policy, S8 co-modification test deletion). 81 PASS, 1 skip (integration guard). Target coverage 88% (전체 module), 신규 code 100%. L1: ruff/mypy clean.
