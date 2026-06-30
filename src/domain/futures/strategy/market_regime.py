@@ -623,8 +623,11 @@ def compute_reversal_risk_off_1d(
     dd_threshold: float,
     mom_fast: int,
     mom_slow: int,
+    persistence_bars: int = 1,
 ) -> NDArray[np.bool_]:
     """Trailing drawdown + momentum 기반 시장반전 risk-off 마스크 [T]."""
+    if persistence_bars < 1:
+        raise ValueError("persistence_bars must be >= 1")
     t = btc_close_1d.shape[0]
     if t == 0:
         return np.empty(0, dtype=np.bool_)
@@ -634,7 +637,15 @@ def compute_reversal_risk_off_1d(
     mom_slow_ema = _ema_1d(btc_close_1d, mom_slow)
     mom = mom_fast_ema - mom_slow_ema
     raw = (dd >= dd_threshold) & (mom < 0.0)
-    out = np.concatenate([[False], raw[:-1]]).astype(np.bool_)
+    if persistence_bars > 1:
+        run_count = 0
+        persistent = np.zeros_like(raw)
+        for i in range(raw.shape[0]):
+            run_count = run_count + 1 if bool(raw[i]) else 0
+            persistent[i] = run_count >= persistence_bars
+    else:
+        persistent = raw
+    out = np.concatenate([[False], persistent[:-1]]).astype(np.bool_)
     return out
 
 
