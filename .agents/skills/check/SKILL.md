@@ -3,37 +3,37 @@ name: check
 description: Perform Regression Testing, Coverage Auditing, and Error Triage.
 ---
 
-# Skill: Check (Regression & Coverage Auditor)
+# Skill: Check (Final Regression & Coverage Gatekeeper)
 
 ## Purpose
-Empirically verify the integrity of the codebase after TDD implementation. Run regression test suites, audit coverage metrics, and triage unresolved failures.
+Empirically verify the code's execution integrity after passing static `audit`. Run dynamic regression test suites, measure test coverage, and perform final compliance checks.
 
 ## Execution Rules
-1. **Regression Testing**:
-   - TDD unit tests are verified during the `implement` phase. In the `check` phase, verify the surrounding module or package to ensure no existing logic is broken.
-   - Run `uv run pytest [module_test_file]` or `uv run pytest` on the affected test path.
-2. **Coverage Audit (Target >= 90%)**:
-   - Run coverage analysis for the modified code: `uv run pytest --cov=[module_path] --cov-report=term-missing`.
-   - Identify any paths or exception blocks that were missed by the TDD test cases.
-3. **Circuit Breaker & Triage**:
-   - **3-Strike Rule**: If a regression bug persists for **3 consecutive cycles**, STOP and request human intervention.
-   - **Error Triage (Routing Loop)**:
-     - **Scenario A (Interface Broken / Logic Gap)**: Route back to `spec`.
-     - **Scenario B (Minor Bug / Syntax Mistake)**: Route back to `implement`.
-4. **Single Responsibility (DO NOT OVERSTEP)**:
-   - You are ONLY the Regression Tester/Triager. Stop immediately after regression check and coverage calculation.
+1. **Trigger**: Run ONLY after the code successfully passes the `audit` phase.
+2. **Regression Testing**:
+   - Run the surrounding module's tests to guarantee existing functionality remains unbroken: `uv run pytest [regression_target]`.
+3. **Coverage Audit (Target >= 90%)**:
+   - Execute coverage metric checks on modified paths: `uv run pytest --cov=[module_path] --cov-report=term-missing`.
+4. **Triage & Routing Loop**:
+   - **3-Strike Rule**: If regression tests fail for **3 consecutive cycles**, STOP and request human intervention.
+   - **Triage Decision**:
+     - Spec Logic / Design Error $\rightarrow$ Route back to `spec`.
+     - Minor Syntax / Bug in Implementation $\rightarrow$ Route back to `implement` (skipping `audit` to re-implement and re-verify).
+5. **Pass Transition**: If all checks pass, proceed to `sync` (Documentation Synchronization & Clean Up).
 
 ## Output Format
 ```md
 ### ✅ Regression Testing & Coverage: [PASS / FAIL]
 
 #### 📊 Regression Results
-- **Command:** `uv run pytest [regression_target] ...`
+- **Command:** `uv run pytest [regression_target]`
 - **Status:** [Total Passed / Total Failed]
-- **Unbroken Status:** [Yes/No] (Confirmed existing features still work)
+- **No Refactoring Side-effects:** [Yes/No]
 
 #### 📉 Coverage Report
 - **Target Module:** `[module_path]`
 - **Coverage %:** [e.g., 94%]
-- **Missing Lines:** [e.g., L45-48 (Exception Handler)]
+- **Missing Lines:** [e.g., L45-48]
+- **Next Phase:** [Proceed to `sync` | Return to `implement` | Human Intervention Required]
 ```
+

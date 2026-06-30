@@ -3,49 +3,41 @@ name: audit
 description: Intent Alignment & Core Logic Verification.
 ---
 
-# Skill: Audit (Lightweight Intent Gatekeeper)
+# Skill: Audit (Lightweight Intent & Contract Gatekeeper)
 
 ## Purpose
-Verify that the implementation accurately reflects the business logic requirements defined in the Spec. Exclude style or syntax checks to minimize token consumption.
+Verify that the implementation strictly adheres to the public interfaces (signatures) and business formulas defined in the Spec blueprint BEFORE running regression tests. Prevent token waste by enforcing static comparison and restricting natural language explanations.
 
 ## Execution Rules
 
-### 1. Targeted Diff Review (Token Efficiency)
-- **Focus**: Do not re-analyze the entire existing codebase. Concentrate on comparing the `git diff` or changed code snippets directly against the `Algorithmic Flow` in the Spec.
-- **Serena Support (Architecture & Dependency Safety)**:
-  - **Structure Check**: Use Serena MCP `get_symbols_overview` on modified files to verify that public API signatures match Spec definitions and do not break architecture constraints.
-  - **Impact Analysis**: Use `find_referencing_symbols` to detect external usages of modified components and ensure no downstream modules are broken.
-- **Efficiency**: Minimize internal thinking steps and judge only whether the core logic changes align with the Spec's goals. Use standard file reads strictly as a fallback.
+### 1. Positioning & Workflow Transition
+- **Trigger**: Run immediately after `implement` completes.
+- **Pass Transition**: If audit passes, proceed directly to `check` (Regression & Coverage Audit).
+- **Fail Transition**: Return to `implement` (or `spec`) with a highly compressed Gap Analysis.
 
-### 2. Circuit Breaker (Anti-Loop)
-- **3-Strike Rule**: If the code fails to align with the Spec intent for **3 consecutive audit attempts**, STOP.
-- **Action**: Report the "Persistent Mismatch" and request **Human Intervention** to clarify the Spec or override the implementation.
+### 2. Static Interface & Logic Inspection (Strict Fact-Checking)
+- **Zero Explanation Rule**: Do not write paragraphs explaining why the code was written this way. Compare code against Spec purely by facts.
+- **Interface Contract**: Compare public API names, parameters, and type hints in the code directly against the Spec. They must match 100%. Use Serena MCP `get_symbols_overview` for rapid signature checks.
+- **Formulas & Intent**: Verify mathematical operations or Pandas/NumPy logic matches the Spec logic exactly.
 
-### 3. Intent & Logic Alignment
-- **Quant/Financial Core**: Verify that formulas, vectorization (NumPy/Pandas), and trading logic intent match the Spec.
-- **Critical Failure Points**: Briefly check for performance bottlenecks (e.g., unnecessary loops) or fatal logical flaws.
+### 3. Circuit Breaker (Anti-Loop)
+- **3-Strike Rule**: If the code fails to align with the Spec intent for **3 consecutive audit attempts**, STOP execution immediately.
+- **Action**: Do not try to rewrite code. Explicitly request **Human Intervention** to clarify the Spec or override.
 
-### 3. Skip Mechanical Checks
-- **Delegate to Linter**: Pass off mechanical conventions like Pydantic settings, Logging vs Print, and type hinting to the `check` phase (ruff/mypy).
-- **No Documentation**: Do not perform architecture document updates or ADR logging here. (Delegate to the `sync` skill).
-
-### 4. Single Responsibility (DO NOT OVERSTEP)
-- You are ONLY the Intent Reviewer. Do not write code (`implement`), do not run tests (`check`), and do not update documents (`sync`). Your only job is to compare the code against the Spec logic.
+### 4. Skip Execution/Mechanical Verification
+- Do not run tests (`check` phase) or update documentation (`sync` phase) in this step. Keep checks strictly static.
 
 ## Verdicts
-- **PASS**: Core logic is accurately implemented according to the Spec's intent.
-- **FAIL**: Missing logic, incorrect algorithm usage, or severe performance degradation found. -> **Return to `implement`** (or `spec`) with clear feedback.
+- **PASS**: Signatures and business logic formulas match the Spec perfectly. -> **Transition to `check`**
+- **FAIL**: Discrepancies in signatures, missing formulas, or wrong types. -> **Return to `implement`** (or `spec`) with the compact Gap Analysis.
 
-## Output Format
+## Output Format (Strict Limit: Max 10 lines overall)
 ```md
 ### 🏁 Audit Result: [PASS / FAIL]
 
-#### 🚀 Executive Summary
-- [1-2 sentences summarizing the alignment between Spec intent and Code implementation.]
-
 #### 🔍 Gap Analysis (Required ONLY if FAIL)
-*Focus on specific mismatches. Use line numbers or function names instead of long code blocks to save tokens.*
-- **Spec Requirement:** [Which part of the spec logic is missing or wrong?]
-- **Implementation Issue:** [Briefly explain the flaw or performance bottleneck.]
-- **Location:** [File Path and Line/Function reference]
+*Strictly max 3 bullet points, max 1 sentence per point. No raw code blocks.*
+- **Signature Mismatch:** Spec `[expected_sig]` vs Code `[actual_sig]` in `[file:line]`
+- **Logic Gap:** Spec Formula `[expected_formula]` missing/incorrect in `[file:line]`
+- **Next Action:** [Return to implement | Return to spec | Human Intervention Required]
 ```
