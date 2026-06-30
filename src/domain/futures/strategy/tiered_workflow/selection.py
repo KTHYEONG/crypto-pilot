@@ -377,6 +377,7 @@ def select_layer2_champion(
             config=cfg_mapping,
             caps=caps,
             tf=tf,
+            eval_tag="selection",
             _memo=_eval_memo,
         )
         return trial, eval_val, cfg_mapping
@@ -616,6 +617,22 @@ def select_layer2_champion(
         champion_evaluation,
         tf,
     )
+    # Phase A 진단: champion 저장 시점 지문 (stored metric vs deploy param L* 결합 추적).
+    if _logger.isEnabledFor(logging.DEBUG):
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import _content_hash_dataclass
+
+        _champ_rets = getattr(champion_evaluation, "returns_hybrid", ())
+        _logger.debug(
+            "[L2-CHAMPION-FP] trial=%d cfg_ch=%s stored_cagr=%.6f stored_mdd=%.6f "
+            "stored_L*=%.6f deployed_param_L*=%.6f n_rets=%d",
+            int(champion_trial.number),
+            _content_hash_dataclass(Layer2AllocationConfig.from_mapping(dict(champion_trial.params))),
+            float(getattr(champion_evaluation, "cagr_hybrid", 0.0)),
+            float(getattr(champion_evaluation, "mdd_hybrid", 0.0)),
+            float(getattr(champion_evaluation, "deploy_leverage", 1.0)),
+            float(deployed_champion_params.get("l2_deploy_leverage", 1.0)),
+            len(_champ_rets),
+        )
     return Layer2StudyResult(
         best_params=deployed_champion_params,
         best_trial_number=int(champion_trial.number),
