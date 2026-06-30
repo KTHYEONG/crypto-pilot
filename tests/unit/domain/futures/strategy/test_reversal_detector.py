@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from numpy.typing import NDArray
 
 from src.domain.futures.strategy.market_regime import compute_reversal_risk_off_1d
@@ -10,6 +11,19 @@ def _close_rise_then_fall() -> NDArray[np.float64]:
     rise = np.linspace(100.0, 110.0, 20, dtype=np.float64)
     fall = np.linspace(110.0, 85.0, 30, dtype=np.float64)
     return np.concatenate([rise, fall]).astype(np.float64)
+
+
+def _flat_then_decline(
+    *,
+    flat_n: int = 30,
+    decline: tuple[float, ...] = (100.0, 98.0, 95.0, 88.0, 86.0),
+) -> NDArray[np.float64]:
+    return np.concatenate(
+        [
+            np.full(flat_n, 100.0, dtype=np.float64),
+            np.asarray(decline, dtype=np.float64),
+        ],
+    ).astype(np.float64)
 
 
 def test_reversal_detector_flags_decline_early() -> None:
@@ -80,3 +94,64 @@ def test_reversal_detector_requires_negative_momentum() -> None:
     assert risk_off.shape == close.shape
     recovery_region = risk_off[-9:]
     assert not recovery_region.any(), "no risk-off during late recovery (positive momentum despite deep dd)"
+
+
+def test_reversal_detector_requires_persistent_raw_condition() -> None:
+    close = _flat_then_decline(decline=(100.0, 87.0, 99.0, 100.0))
+    risk_off = compute_reversal_risk_off_1d(
+        close,
+        dd_window=20,
+        dd_threshold=0.10,
+        mom_fast=2,
+        mom_slow=8,
+        persistence_bars=2,
+    )
+    assert not risk_off.any(), "single-bar drawdown spike must not trigger with persistence_bars=2"
+
+
+def test_reversal_detector_flags_sustained_reversal_after_shift() -> None:
+    close = _flat_then_decline(decline=(100.0, 96.0, 91.0, 88.0, 86.0, 84.0, 82.0))
+    risk_off_legacy = compute_reversal_risk_off_1d(
+        close,
+        dd_window=20,
+        dd_threshold=0.10,
+        mom_fast=2,
+        mom_slow=8,
+        persistence_bars=1,
+    )
+    legacy_first = int(np.where(risk_off_legacy)[0][0])
+    risk_off = compute_reversal_risk_off_1d(
+        close,
+        dd_window=20,
+        dd_threshold=0.10,
+        mom_fast=2,
+        mom_slow=8,
+        persistence_bars=3,
+    )
+    assert not risk_off[0], "row0 is always False"
+    true_idxs = np.where(risk_off)[0]
+    assert len(true_idxs) > 0, "must have at least one risk-off bar"
+    expected_first = legacy_first + 2
+    assert int(true_idxs[0]) == expected_first, (
+        f"first risk-off at {true_idxs[0]}, expected {expected_first} "
+        f"(legacy first at {legacy_first})"
+    )
+
+
+def test_reversal_detector_persistence_one_matches_legacy_behavior() -> None:
+    close = _close_rise_then_fall()
+    default_out = compute_reversal_risk_off_1d(
+        close, dd_window=20, dd_threshold=0.06, mom_fast=5, mom_slow=20,
+    )
+    explicit_one_out = compute_reversal_risk_off_1d(
+        close, dd_window=20, dd_threshold=0.06, mom_fast=5, mom_slow=20, persistence_bars=1,
+    )
+    assert np.array_equal(default_out, explicit_one_out)
+
+
+def test_reversal_detector_rejects_invalid_persistence() -> None:
+    close = np.full(20, 100.0, dtype=np.float64)
+    with pytest.raises(ValueError, match="persistence_bars must be >= 1"):
+        compute_reversal_risk_off_1d(
+            close, dd_window=5, dd_threshold=0.10, mom_fast=2, mom_slow=8, persistence_bars=0,
+        )
