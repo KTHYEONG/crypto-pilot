@@ -95,3 +95,12 @@ def test_reversal_config_validation() -> None:
         RegimeConfig(reversal_dd_threshold=1.5)
     with pytest.raises(ValueError, match="reversal_risk_off_floor must be in \\[0, crisis_gross_floor\\)"):
         RegimeConfig(reversal_risk_off_floor=0.20, crisis_gross_floor=0.15)
+
+
+def test_reversal_config_validates_persistence_bars() -> None:
+    with pytest.raises(ValueError, match="reversal_persistence_bars must be >= 1"):
+        RegimeConfig(reversal_persistence_bars=0)
+    with pytest.raises(ValueError, match="reversal_persistence_bars must be >= 1"):
+        RegimeConfig(reversal_persistence_bars=-1)
+    assert RegimeConfig().reversal_dd_threshold == pytest.approx(0.12)
+    assert RegimeConfig().reversal_persistence_bars == 3
