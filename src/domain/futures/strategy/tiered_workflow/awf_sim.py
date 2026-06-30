@@ -28,6 +28,7 @@ from src.domain.futures.strategy.candidate_contracts import (
     ValidatedSignalBatch,
     ValidatedSignalEvent,
 )
+from src.domain.futures.strategy.config import RegimeConfig
 from src.domain.futures.strategy.cs_rank import (
     VOL_FLOOR,
     SymbolSignal,
@@ -1470,6 +1471,54 @@ def _content_hash_cache(cache: object) -> str:
     return hashlib.md5(combined, usedforsecurity=False).hexdigest()[:12]
 
 
+def _reversal_config_from_env() -> RegimeConfig:
+    _env_int_keys = {
+        "L2_REVERSAL_DD_WINDOW": "reversal_dd_window",
+        "L2_REVERSAL_MOM_FAST": "reversal_mom_fast",
+        "L2_REVERSAL_MOM_SLOW": "reversal_mom_slow",
+        "L2_REVERSAL_PERSISTENCE_BARS": "reversal_persistence_bars",
+    }
+    _env_float_keys = {
+        "L2_REVERSAL_DD_THRESHOLD": "reversal_dd_threshold",
+        "L2_REVERSAL_RISK_OFF_FLOOR": "reversal_risk_off_floor",
+    }
+    defaults = RegimeConfig()
+    dd_window: int = defaults.reversal_dd_window
+    dd_threshold: float = defaults.reversal_dd_threshold
+    mom_fast: int = defaults.reversal_mom_fast
+    mom_slow: int = defaults.reversal_mom_slow
+    risk_off_floor: float = defaults.reversal_risk_off_floor
+    persistence_bars: int = defaults.reversal_persistence_bars
+    for env_key, attr in _env_int_keys.items():
+        val = os.environ.get(env_key)
+        if val is not None:
+            ival = int(val)
+            if attr == "reversal_dd_window":
+                dd_window = ival
+            elif attr == "reversal_mom_fast":
+                mom_fast = ival
+            elif attr == "reversal_mom_slow":
+                mom_slow = ival
+            elif attr == "reversal_persistence_bars":
+                persistence_bars = ival
+    for env_key, attr in _env_float_keys.items():
+        val = os.environ.get(env_key)
+        if val is not None:
+            fval = float(val)
+            if attr == "reversal_dd_threshold":
+                dd_threshold = fval
+            elif attr == "reversal_risk_off_floor":
+                risk_off_floor = fval
+    return RegimeConfig(
+        reversal_dd_window=dd_window,
+        reversal_dd_threshold=dd_threshold,
+        reversal_mom_fast=mom_fast,
+        reversal_mom_slow=mom_slow,
+        reversal_risk_off_floor=risk_off_floor,
+        reversal_persistence_bars=persistence_bars,
+    )
+
+
 def _run_awf_simulation(
     *,
     cache: L2SimulationCache,
@@ -1987,11 +2036,10 @@ def _run_awf_simulation(
     _risk_off_1d: NDArray[np.bool_] | None = None
     if _reversal_kill_enabled:
         try:
-            from src.domain.futures.strategy.config import RegimeConfig as _RevRegimeConfig
             from src.domain.futures.strategy.market_regime import (
                 compute_reversal_risk_off_1d,
             )
-            _rev_cfg = _RevRegimeConfig()
+            _rev_cfg = _reversal_config_from_env()
             _btc_sym_idx = next((i for i, s in enumerate(aligned.symbols) if "BTC" in s.upper()), 0)
             _btc_close_1d: NDArray[np.float64] = np.maximum(
                 aligned.close_2d[:, _btc_sym_idx],
