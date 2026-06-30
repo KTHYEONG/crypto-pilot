@@ -69,6 +69,11 @@ class RegimeConfig:
     trend_hysteresis_exit: float = 0.15
     persistence_target_dwell: float = 6.0
 
+    # Trend-efficiency gate (Kaufman ER)
+    trend_efficiency_window: int = 24
+    trend_efficiency_target: float = 0.35
+    trend_efficiency_floor_mult: float = 0.30
+
     def __post_init__(self) -> None:
         """Validate regime parameters."""
         if self.overlay_target_vol_ann <= 0.0:
@@ -100,6 +105,12 @@ class RegimeConfig:
             raise ValueError("trend_hysteresis_enter must be > 0")
         if self.persistence_target_dwell < 2.0:
             raise ValueError("persistence_target_dwell must be >= 2")
+        if self.trend_efficiency_window < 2:
+            raise ValueError("trend_efficiency_window must be >= 2")
+        if not (0.0 < self.trend_efficiency_target < 1.0):
+            raise ValueError("trend_efficiency_target must be in (0, 1)")
+        if not (0.0 < self.trend_efficiency_floor_mult <= 1.0):
+            raise ValueError("trend_efficiency_floor_mult must be in (0, 1]")
 
 
 @dataclass(slots=True, frozen=True)

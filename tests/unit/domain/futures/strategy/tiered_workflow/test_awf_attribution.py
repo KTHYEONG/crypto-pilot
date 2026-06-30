@@ -232,6 +232,31 @@ class TestLayer2FoldAttributionDataclass:
         )
         assert attr.realized_total == pytest.approx(0.02)
 
+    def test_fold_attribution_whipsaw_decomposition(self) -> None:
+        """S6: 저ER=손실, 고ER=수익 → low_er_price 합산, corr>0."""
+        attr = _assemble_fold_attribution(
+            fold_idx=0,
+            oos_bars=100,
+            n_rebal=4,
+            realized_price=0.0,
+            realized_funding=0.0,
+            realized_cost=0.0,
+            expected_net=0.0,
+            gross_exps=[1.0],
+            net_exps=[0.0],
+            throttle_mults=[1.0],
+            sleeves_active=[1],
+            friction_pass_total=1,
+            signal_total=1,
+            dropped_below_cost=0,
+            netting_events=0,
+            er_return_pairs=[(0.1, -50.0), (0.2, -40.0), (0.8, 30.0), (0.9, 25.0)],
+            target=0.35,
+        )
+        assert attr.realized_price_low_er == pytest.approx(-90.0, abs=1e-6)
+        assert attr.trend_efficiency_corr > 0.0
+        assert attr.mean_trend_efficiency == pytest.approx(0.5, abs=1e-6)
+
 
 def test_combine_sleeve_signals_optimized_logical_equivalence() -> None:
     from src.domain.futures.strategy.cs_rank import SymbolSignal
