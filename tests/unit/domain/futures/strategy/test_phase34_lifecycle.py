@@ -19,14 +19,12 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from src.domain.futures.strategy.tiered_workflow.dataclasses import (
     Layer1Result,
     SymbolLifecycleRecord,
 )
 from src.domain.futures.strategy.walk_forward import WFFold
-
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 

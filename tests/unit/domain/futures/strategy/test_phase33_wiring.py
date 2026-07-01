@@ -15,16 +15,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.universe.contracts import (
-    StrategyReadinessCube,
-    StrategyRequirement,
     UniverseStateCube,
 )
 
@@ -79,11 +76,8 @@ def _run_wiring_block(
 
     Returns the final aligned object and the kwargs used in the align_data_maps call.
     """
-    import dataclasses
 
     from src.domain.futures.strategy.common.alignment import align_data_maps
-    from src.domain.futures.universe.contracts import StrategyRequirement
-    from src.domain.futures.universe.readiness import evaluate_strategy_readiness
 
     run_config = SimpleNamespace(
         timeframe="4h",

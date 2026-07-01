@@ -4,9 +4,10 @@ from __future__ import annotations
 
 def test_l1_alpha_space_keys_disjoint_from_l2_alloc_space() -> None:
     """L1/L2 study 파라미터 공간 완전 분리 확인."""
-    from src.domain.futures.optimization.opt_config import L1_ALPHA_SPACE, L2_ALLOC_SPACE
+    from src.domain.futures.allocation.search_space import L2_SEARCH_SPACE
+    from src.domain.futures.optimization.opt_config import L1_ALPHA_SPACE
 
-    overlap = set(L1_ALPHA_SPACE.keys()) & set(L2_ALLOC_SPACE.keys())
+    overlap = set(L1_ALPHA_SPACE.keys()) & set(L2_SEARCH_SPACE.keys())
     assert overlap == set(), f"L1/L2 param overlap: {overlap}"
 
 
@@ -19,9 +20,9 @@ def test_l1_alpha_space_not_empty() -> None:
 
 def test_l2_alloc_space_contains_k_rank() -> None:
     """K_RANK는 반드시 L2 study에 있어야 함 (allocation 결정)."""
-    from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE
+    from src.domain.futures.allocation.search_space import L2_SEARCH_SPACE
 
-    assert "K_RANK" in L2_ALLOC_SPACE
+    assert "K_RANK" in L2_SEARCH_SPACE
 
 
 def test_engine_param_space_still_exists_for_backward_compat() -> None:
