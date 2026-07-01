@@ -4,7 +4,10 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
-from src.domain.futures.strategy.market_regime import compute_reversal_risk_off_1d
+from src.domain.futures.strategy.market_regime import (
+    compute_reversal_risk_off_1d,
+    synthetic_crash_defense_verdict,
+)
 
 
 def _close_rise_then_fall() -> NDArray[np.float64]:
@@ -347,3 +350,24 @@ def test_reversal_detector_defends_synthetic_crash_shape() -> None:
     )
     assert legacy_out.any(), "legacy params must fire on crash shape"
     assert champion_out.any(), "champion params must fire on crash shape"
+
+
+class TestSyntheticCrashDefenseVerdict:
+    """Gate B: synthetic_crash_defense_verdict 시나리오 테스트."""
+
+    def test_fires_on_crash_shape(self) -> None:
+        fires, bars = synthetic_crash_defense_verdict(
+            dd_window=20, dd_threshold=0.06, mom_fast=5, mom_slow=20,
+            persistence_bars=1, recovery_cooldown_bars=8,
+        )
+        assert fires is True
+        assert bars > 0
+
+    def test_does_not_fire_with_unreachable_threshold(self) -> None:
+        fires, bars = synthetic_crash_defense_verdict(dd_threshold=0.99)
+        assert fires is False
+        assert bars == 0
+
+    def test_propagates_invalid_persistence_bars(self) -> None:
+        with pytest.raises(ValueError, match="persistence_bars must be >= 1"):
+            synthetic_crash_defense_verdict(persistence_bars=0)
