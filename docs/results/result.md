@@ -1,10 +1,3 @@
-================================================================================
-LOCAL DATA STORAGE (LEDGER & CACHE STATUS)
-================================================================================
-
-  Sync Mode: SKIP (Reused cache from prior --sync fast on 2026-07-01)
-
---------------------------------------------------------------------------------
 🔍 [TF-PROBE AUDIT] SOURCE READINESS Dashboard
   ├── 4h   : Ready 296/296 | Median Bars: 5260   | Mix: 4h:296
   ├── 6h   : Ready 296/296 | Median Bars: 21040  | Mix: 1h:296
@@ -37,15 +30,6 @@ STRATEGY ENGINE
   └─ Details : Base 65 | Dropped 11 (late_start: 11)
 🧬 [L1: MULTI-TF PANEL INJECTION]
   └─ Active : [12h] Proj=16 Syms=54 | [6h] Proj=14 Syms=54 | [8h] Proj=14 Syms=54
-
-● [DATA-INTEGRITY AUDIT]
-──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ✅ ALL 54 SYMBOLS PASSED
-  METRICS : Total Bars: 8,767
-  DETAIL  : [NaN: 0.0%] [Zero/Neg: 0.0%] [Range: PASS]
-──────────────────────────────────────────────────────────────────────────────
-
-📈 [ENS-FINAL] Arch-Only | SYM:54 | EVT:1,052,034 | TOTAL:+65.6 bps | [TRD:+76.4✅ TMO:+57.1✅ MRV:+39.2✅ CRY:+33.3✅ FLO:+19.2✅ UNW:+27.3✅ BTN:+44.9✅ X:52.3✅]
 
 ● [LAYER 1 OUTER FOLD READINESS]
 ──────────────────────────────────────────────────────────────────────────────
@@ -87,7 +71,6 @@ STRATEGY ENGINE
   ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
   [NOT PROMOTED] 1406 pairs | top: no_incremental_edgex702, quality_weight_zerox690, negative_gross_edgex186
 
-📈 [ENS-FINAL] Arch-Only | SYM:54 | EVT:712,288 | TOTAL:+64.3 bps | [TRD:+73.2✅ TMO:+66.1✅ MRV:+34.3✅ CRY:+29.8✅ X:49.0✅]
 
 ● [LAYER 1 OUTER FOLD READINESS]
 ──────────────────────────────────────────────────────────────────────────────
@@ -129,7 +112,6 @@ STRATEGY ENGINE
   ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
   [NOT PROMOTED] 617 pairs | top: quality_weight_zerox342, no_incremental_edgex275, negative_gross_edgex65
 
-📈 [ENS-FINAL] Arch-Only | SYM:54 | EVT:707,944 | TOTAL:+63.2 bps | [TRD:+71.5✅ TMO:+71.7✅ MRV:+13.1✅ CRY:+31.7✅ X:49.0✅]
 
 ● [LAYER 1 OUTER FOLD READINESS]
 ──────────────────────────────────────────────────────────────────────────────
@@ -171,7 +153,6 @@ STRATEGY ENGINE
   ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
   [NOT PROMOTED] 614 pairs | top: quality_weight_zerox311, no_incremental_edgex303, negative_gross_edgex78
 
-📈 [ENS-FINAL] Arch-Only | SYM:54 | EVT:812,001 | TOTAL:+68.7 bps | [TRD:+76.8✅ TMO:+72.8✅ MRV:+24.4✅ CRY:+38.9✅ X:51.4✅]
 
 ● [LAYER 1 OUTER FOLD READINESS]
 ──────────────────────────────────────────────────────────────────────────────
@@ -223,32 +204,25 @@ STRATEGY ENGINE
 
 
 >> LAYER 1: PASS -> Proceeding to Layer 2.
-[REGIME]
-metric        | value
-compression   | on
-states        | 3
-status        | 🟢 stable
-distribution  | bull=36.1% bear=25.9% crisis=38.0%
-policy_mode   | soft
-hard_block    | off
-risk_cap      | on
-policy_source | fit/cal
-oos_debug     | evaluation only
-note          | L2 verdict is reported separately in [REGIME-L2]
+● [MARKET REGIME STATUS]
+──────────────────────────────────────────────────────────────────────────────
+  Compression  : on                 | Policy Mode : soft
+  States       : 3                  | Status      : 🟢 stable
+  Hard Block   : off                | Risk Cap    : on
+  Source       : fit/cal            | OOS Debug   : evaluation only
+  Distribution : bull=36.1% bear=25.9% crisis=38.0%
+  Note         : L2 verdict is reported separately in [REGIME-L2]
+──────────────────────────────────────────────────────────────────────────────
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ● [LAYER 2: OPTUNA TUNING]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [REGIME-L2] active_states=3 compression=True path=regime_conditioned proof=True lift=11.07 t=3.22 fold_pass=0.67
 [REGIME-L2] policy_mode=soft policy_source=fit/cal global_reliable=True allow=248 downweight=16 block=0 pooled=0 unstable=4 hard_block_eligible=0 sign_consistency=0.71 hard_block_enabled=False mean_cal_lift=-24.31 mean_conf=0.98
-  ● [STUDY] l2_study_8h_2521e715ee23 | trials=200 | events=80347 | symbols=40
+  ● [STUDY] l2_study_8h_4a914eb87e78 | trials=200 | events=80347 | symbols=40
   ────────────────────────────────────────────────────────────────────────────
-[L2-OPT]: 100%|██████████| 200/200 [02:58<00:00, Best CAGR: 232.31%]
-[L2-SELECTION] Found 26 gate-passed trials in frontier. Reducing replay size to 8.
-[L2-SELECTION] 8 gate-pass 후보 수집 → champion Trial #81 Sortino=2.8150 CAGR=0.4995
-[L2-SELECTION] Champion selected. Trial #81, Objective=2.3231, DSR=0.6243 (n_eff=10.50)
-[L2-DEPLOY-C4] L*=2.055 (binding=oos_blend) | realized_mode=return_scaling | kelly=0.250(불변) | tf=8h
-  ● [CHAMPION STORE] 신규 챔피언 갱신 (tf=8h, growth_lcb=0.1526)
+[L2-OPT]:   0%|                                                                                                   | 0/200 [00:00<?, ?it/s][L2-OPT] ProcessPool workers=6 (mem=8.0GB, mem_safe=11, cpu=8, batch=6)
+[L2-OPT]: 100%|██████████████████████████████████████████████████| 200/200 [02:19<00:00,  1.43it/s, Best CAGR: 232.31% | Current: 192.90%]
   ● [FINAL SIMULATION]
 [L2-DEPLOY] L*=2.0550 binding=champion | CAGR=0.4995 MDD=0.1748 CVaR95=0.0172 RiskUtil=0.583
 ● [LAYER 2 PORTFOLIO SCORECARD] (2025-03-23 ~ 2025-12-30)
@@ -260,7 +234,7 @@ note          | L2 verdict is reported separately in [REGIME-L2]
   ✅ [Risk      ] MDD: 17.5% (<=30.0%) | CVaR95: 1.7% (<=6.0%) | RiskUtil: 58.3%
   ✅ [Robust    ] Fold: 100.0% (>=60.0%) | Trades: 830 (>=30) | Friction: 97.7%
   ✅ [Uplift    ] Sharpe Uplift: +1.13 (>=+0.20)
-  ✅ [Integrity ] DSR: 0.624 (>=0.60) | PSR: 0.983 (diag)
+  ✅ [Integrity ] DSR: 0.684 (>=0.60) | PSR: 0.983 (diag)
   [Diag     ] RelMDD: 1.74x | Turnover: 0.125
 ──────────────────────────────────────────────────────────────────────────────
 
@@ -285,19 +259,3 @@ note          | L2 verdict is reported separately in [REGIME-L2]
 >> LAYER 2: PASS -> Proceeding to Final Holdout.
 >> TARGET PHASE l2 REACHED -> Stopping pipeline.
 [L2-PARITY-SELFCHECK] side=replay stored=0.499472 recomputed=1.248416 (n_rets=1692 L*=2.054970 bpy=2190.0) -> field/metric DECOUPLED
-[PHASE] phase=l2 completed strategy/candidate evaluation only; optimization/training skipped
-
-================================================================================
-실행 조건: `uv run python -m src.execution.opt_main_futures --phase l2 --sync skip` (2026-07-01, `L2_REVERSAL_KILL` 등 진단 플래그 전부 비활성 — 순수 프로덕션 기본값)
-
-[P0 가드레일 적용 후 재실행 (2026-07-01)] docs/specs/l2-promotion-crisis-guardrail.md 구현 반영:
-  - Fix 1: Fold MDD 리포팅 버그 수정 — 이전 실행은 전 fold MDD 0.0%로 하드코딩되어 있었음(버그).
-    본 실행부터 실측값(Fold#1 11.6% / Fold#2 17.5% / Fold#3 13.3%) 정상 표시.
-  - Gate A: NO-CRISIS-WINDOW 배너 신규 노출 — 평가 윈도우(2024-12-31~2025-12-30)에 병목-caliber
-    fold(MDD>=15% & CAGR<=0)가 없음을 자동 판별해 스코어카드에 경고 표시. Fold#2(MDD 17.5%)는
-    CAGR +35.2%(양수, 강세장 조정)라서 위기 오인 없이 정확히 미포함 판정됨.
-  - Gate B + Change 4: 챔피언 스토어 갱신 전 synthetic crash defense(Scenario 8) 발화 검증 통과
-    (crash_fires=True) → 정상 승격. 메커니즘 자체는 건강하나 이번 윈도우엔 진짜 위기가 없었다는
-    사실이 배너로 투명하게 남음 — "위기 부재 PASS"가 조용히 승격 근거로 오인되는 것을 구조적으로 차단.
-  - 전체 PASS 판정 자체는 유지(회귀 없음), CAGR/Sharpe 등은 Optuna trial 재현성 범위 내 정상 변동.
-================================================================================
