@@ -1,28 +1,35 @@
 ---
 title: Futures Allocation Architecture
-domain: futures.strategy
+domain: futures.allocation
 type: architecture
 status: active
 priority: critical
 ai_read_policy: always
 related_paths:
-  - src/domain/futures/strategy/tiered_workflow/pipeline.py
-  - src/domain/futures/strategy/tiered_workflow/selection.py
-  - src/domain/futures/strategy/tiered_workflow/l2_gate.py
-  - src/domain/futures/portfolio/covariance.py
-  - src/domain/futures/portfolio/portfolio_constructor.py
-  - src/domain/futures/strategy/walk_forward.py
-  - src/domain/futures/portfolio/signal_composer.py
-  - src/domain/futures/strategy/cs_rank.py
-  - src/domain/futures/strategy/risk_deployment.py
+  - src/domain/futures/allocation/pipeline.py
+  - src/domain/futures/allocation/selection.py
+  - src/domain/futures/allocation/gates.py
+  - src/domain/futures/allocation/metrics.py
+  - src/domain/futures/allocation/simulation.py
+  - src/domain/futures/allocation/search_space.py
+  - src/domain/futures/allocation/replay.py
+  - src/domain/futures/allocation/regime_policy.py
+  - src/domain/futures/allocation/deployment.py
+  - src/domain/futures/allocation/diagnostics.py
+  - src/domain/futures/allocation/signal_batch.py
+  - src/domain/futures/allocation/parity.py
+  - src/domain/futures/allocation/scoring.py
+  - src/application/futures/runner/pipeline.py
+  - src/application/futures/runner/config.py
+  - src/execution/opt_main_futures.py
 change_triggers:
-  - src/domain/futures/strategy/tiered_workflow/pipeline.py
-  - src/domain/futures/strategy/tiered_workflow/selection.py
-  - src/domain/futures/strategy/tiered_workflow/l2_gate.py
-  - src/domain/futures/strategy/risk_deployment.py
+  - src/domain/futures/allocation/pipeline.py
+  - src/domain/futures/allocation/selection.py
+  - src/domain/futures/allocation/gates.py
+  - src/domain/futures/allocation/deployment.py
+  - src/application/futures/runner/pipeline.py
 dependencies:
   documents:
-    - docs/architecture/signal.md
     - docs/architecture/layer1.md
 last_verified: 2026-06-30
 ---
@@ -53,7 +60,7 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
 - **Trend-Efficiency Exposure Gate** (env A/B, default off): Multiplies trend/ts_mom sleeve `raw_mu` by `trend_efficiency_gross_mult(ER[t], target=0.35, floor_mult=0.30)` when `L2_TREND_EFFICIENCY_GATE` env is set. ER = Kaufman Efficiency Ratio from `compute_trend_efficiency_1d`. Non-trend sleeves (carry, XS, etc.) unaffected. Per-rebalance `(ER, realized_price)` pairs collected for fold attribution decomposition.
 - **Reversal Kill-Switch** (env A/B, default off): `L2_REVERSAL_KILL` env activates pre-loop computation of `compute_reversal_risk_off_1d` (BTC trailing drawdown + negative momentum). Raw risk-off condition requires `persistence_bars` consecutive bars of drawdown+negative-momentum before the causal shift(1) produces the active mask. **Recovery hysteresis** (btc mode, shared state machine with panel mode): after persistent fires, the state stays True until `reversal_recovery_cooldown_bars` consecutive raw-off bars — exit counting uses raw signal (not persistent). At `recovery_cooldown_bars=0` (default), state tracks persistent byte-identically. At each rebalance bar $t$, if $risk\_off\_1d[t-1]$ is `True`, all sleeve `raw_mu` values are multiplied by `reversal_risk_off_floor` (selective hard de-gross, overrides soft cap and crisis_floor). Applied to all archetypes equally (market-wide reversal). Per-bar `(risk_off_flag, realized_price)` pairs collected for fold attribution decomposition via `risk_off_bars`, `risk_off_realized_price`, `risk_on_realized_price` in `Layer2FoldAttribution`. Config defaults are sourced from `RegimeConfig()`; env overrides `L2_REVERSAL_DD_WINDOW`, `L2_REVERSAL_DD_THRESHOLD`, `L2_REVERSAL_MOM_FAST`, `L2_REVERSAL_MOM_SLOW`, `L2_REVERSAL_RISK_OFF_FLOOR`, `L2_REVERSAL_PERSISTENCE_BARS`, `L2_REVERSAL_RECOVERY_COOLDOWN` via `_reversal_config_from_env()`.
 - **Active Deployment Controls**: `deploy_cost_safety_mult`, `edge_throttle_min_active_mult`, `risk_budget_floor_ratio` + `risk_budget_max_scale`.
-- **Search Space V9 (9 dims)**: `K_RANK` (low=4, churn 방지), `REBALANCE_BARS`, `CS_Z_SCORE_THRESHOLD`, `deploy_cost_safety_mult`, `edge_throttle_min_active_mult`, `edge_ref_bps`, `edge_throttle_gamma`, `risk_budget_floor_ratio`, `risk_budget_max_scale`.
+- **Search Space (9 dims, versionless)**: `L2_SEARCH_SPACE` in `allocation/search_space.py`. Parameters: `K_RANK` (low=4, churn 방지), `REBALANCE_BARS`, `CS_Z_SCORE_THRESHOLD`, `deploy_cost_safety_mult`, `edge_throttle_min_active_mult`, `edge_ref_bps`, `edge_throttle_gamma`, `risk_budget_floor_ratio`, `risk_budget_max_scale`.
 - **Objective — Sortino_HAC_unit (Scale-Invariant)**: $J = \text{Sortino\_HAC\_unit} - \lambda_w \cdot \max(0, \tau_{wf} - \text{worst\_fold\_Sortino}) - \lambda_t \cdot \text{mean\_turnover}$. `growth_lcb` demoted to diagnostic. Turnover penalty $\lambda_t = 0$ default (off) — backtest-safe, enable via `l2_turnover_penalty_weight`.
 - **Phase B — fit-leg Deployment Calibration** (`risk_deployment.py`):
   - C1: fit-leg uses same OOS chain (rank→kelly→throttle→cost→funding), not equal-weight market avg.
@@ -112,7 +119,7 @@ graph TD
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `L2_ALLOC_SPACE` | Search space version | V9 (9 dims) |
+| `L2_SEARCH_SPACE` | Search space (versionless) | 9 dims in `allocation/search_space.py` |
 | `L2_OPTUNA_TRIALS` | Optimization budget | 200 |
 | `deploy_cost_safety_mult` | Deployment friction multiplier | config |
 | `edge_throttle_min_active_mult` | Min active mult for positive edge | config |
