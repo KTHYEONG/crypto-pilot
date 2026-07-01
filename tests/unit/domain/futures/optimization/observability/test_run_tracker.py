@@ -7,6 +7,8 @@ Covers:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import optuna
 import pytest
 from optuna.samplers import TPESampler
@@ -202,3 +204,52 @@ def test_update_champion_store_is_isolated_per_tag(
 
     # Assert
     assert load_champion_params(tag="1h", storage=storage) is None
+
+
+# ---------------------------------------------------------------------------
+# setup_optuna_storage (SQLite WAL & Redis Removal)
+# ---------------------------------------------------------------------------
+
+
+def test_setup_optuna_storage_creates_sqlite_with_wal(tmp_path: Path) -> None:
+    """setup_optuna_storage가 sqlite WAL RDBStorage를 올바르게 초기화하는지 테스트."""
+    import sqlite3
+
+    from src.domain.futures.optimization.observability.run_tracker import setup_optuna_storage
+
+    url, storage = setup_optuna_storage(tmp_path)
+
+    assert url.startswith("sqlite:///")
+    assert "optuna.db" in url
+    assert isinstance(storage, optuna.storages.RDBStorage)
+
+    db_path = Path(url.replace("sqlite:///", ""))
+    assert db_path.exists()
+
+    with sqlite3.connect(str(db_path)) as conn:
+        row = conn.execute("PRAGMA journal_mode").fetchone()
+        assert row[0].lower() == "wal"
+
+
+def test_setup_optuna_storage_is_idempotent(tmp_path: Path) -> None:
+    """setup_optuna_storage를 여러 번 호출해도 예외가 없고 idempotent한지 테스트."""
+    from src.domain.futures.optimization.observability.run_tracker import setup_optuna_storage
+
+    url1, _ = setup_optuna_storage(tmp_path)
+    url2, _ = setup_optuna_storage(tmp_path)
+
+    assert url1 == url2
+    assert Path(url1.replace("sqlite:///", "")).exists()
+
+
+def test_resolve_redis_storage_url_is_removed() -> None:
+    """_resolve_redis_storage_url 함수가 모듈에서 제거되었는지 테스트."""
+    import src.domain.futures.optimization.observability.run_tracker as mod
+    assert not hasattr(mod, "_resolve_redis_storage_url")
+
+
+def test_preflight_redis_endpoint_is_removed() -> None:
+    """_preflight_redis_endpoint 함수가 모듈에서 제거되었는지 테스트."""
+    import src.domain.futures.optimization.observability.run_tracker as mod
+    assert not hasattr(mod, "_preflight_redis_endpoint")
+

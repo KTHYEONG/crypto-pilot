@@ -6,7 +6,6 @@ status: active
 priority: critical
 ai_read_policy: when_related
 ---
-
 ## 2026-06-18 L3 scorecard threshold alignment — Calmar removal + absolute gate thresholds
 - **Delta:** L3 scorecard now renders `min_trades`, `max_mdd_abs`, `min_sharpe`, `min_sortino`, and `max_cvar95` from `Layer3Result` and drops Calmar from the display. The holdout gate order is now `negative_return` → `mdd_abs` → `cvar_95` → `sharpe_abs` → `sortino_abs`.
 - **Rationale:** Calmar was only producing `n/a(loss)` after negative CAGR while the direct gate was already `negative_return`. Absolute thresholds make the replay contract explicit and keep the scorecard aligned with the actual blocker chain.
@@ -31,3 +30,4 @@ ai_read_policy: when_related
 - **Delta:** (1) `src/domain/futures/optimization/final_evaluator.py` underwent rename conflict resolution: existing `ChampionMetrics` (JSON/guard metrics) renamed to `BaselineChampionMetrics`; V3-renamed `ChampionMetrics` takes the unqualified name. `should_promote_candidate` deprecated; `legacy_should_promote_candidate` retains old logic. (2) `validation/champion_registry.py` created containing both `ChampionMetrics` and `BaselineChampionMetrics`, along with `Layer3Result`, promotion gate, and synthetic crash defense. (3) `validation/gates.py` wraps `ChampionGateConfig`/`evaluate_champion_gates`. (4) `validation/walk_forward.py` wraps layer-3 walk-forward orchestration. (5) `optimization/final_evaluator.py` updated to import `BaselineChampionMetrics` from `validation/champion_registry.py`.
 - **Rationale:** The futures-refactor-redesign renamed `ChampionMetricsV3`→`ChampionMetrics` (versionless), creating a duplicate-class conflict with the existing JSON-guard `ChampionMetrics`. Rather than keeping both under the same module, the conflict was resolved by splitting: the guard class becomes `BaselineChampionMetrics` and lives alongside the V3 metrics in a shared `validation/champion_registry.py`. This makes the promotion + guard + baseline relationship explicit in one module.
 - **Key Verification:** 191/191 regression tests pass. `final_evaluator.py` imports `BaselineChampionMetrics` from correct `validation/` location. MyPy strict passes. All V3-related test files (`test_champion_promotion_v3.py`, `test_hard_gates_v3.py`, `test_score_v3.py`, `test_v3_score_integration.py`) updated with renamed import paths.
+

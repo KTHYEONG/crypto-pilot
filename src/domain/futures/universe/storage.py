@@ -1297,18 +1297,13 @@ def run_historical_sync(
                     fully_updated = False
                     break
         if fully_updated:
-            from src.domain.futures.optimization.observability.run_tracker import _resolve_redis_storage_url
+            from src.domain.futures.optimization.observability.run_tracker import setup_optuna_storage
             try:
-                s_url = _resolve_redis_storage_url()
-                if s_url.startswith(("redis://", "rediss://")):
-                    from urllib.parse import urlparse
-                    parsed = urlparse(s_url)
-                    host_port = parsed.netloc.split("@")[-1] if "@" in parsed.netloc else parsed.netloc
-                    storage_type = f"Redis (JournalRedisBackend, Host: {host_port}, DB: {parsed.path.lstrip('/')})"
-                else:
-                    storage_type = "InMemory"
+                s_url, _ = setup_optuna_storage(Path(FUTURES_DATA_DIR).parent)
+                db_path_display = s_url.replace("sqlite:///", "")
+                storage_type = f"SQLite ({db_path_display})"
             except Exception:
-                storage_type = "InMemory (Fallback)"
+                storage_type = "SQLite (Fallback)"
 
             logger.info("================================================================================")
             logger.info("LOCAL DATA STORAGE (LEDGER & CACHE STATUS)")

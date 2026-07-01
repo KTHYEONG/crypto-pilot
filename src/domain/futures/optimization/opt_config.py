@@ -126,7 +126,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_PRUNER_WARMUP_STEPS": 2,
     "FUTURES_PRUNER_TYPE": "wilcoxon",  # "wilcoxon", "successive_halving", "median"
     "FUTURES_PRUNER_WILCOXON_P": 0.10,
-    "FUTURES_REDIS_URL": "redis://127.0.0.1:6379/0",
+    "FUTURES_OPTUNA_DB_PATH": "",
 
 
     # S2: Auxiliary volatility-based CRISIS gate.

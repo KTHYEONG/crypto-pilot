@@ -1265,15 +1265,13 @@ def _run_tiered_l2_study(
     l2_sim_cache: Any = None,
 ) -> Any:
     """Optuna objective_l2_growth로 best l2_params 탐색."""
-    import warnings
 
     import optuna as _optuna
     from optuna.samplers import TPESampler
 
     from src.domain.futures.allocation.search_space import L2_SEARCH_SPACE as L2_ALLOC_SPACE
 
-    # JournalRedisStorage 감쇠 경고 억제
-    warnings.filterwarnings("ignore", category=FutureWarning, module="optuna")
+
 
     # Optuna 스터디 정보 로그 억제
     _optuna.logging.set_verbosity(_optuna.logging.WARNING)
@@ -1543,18 +1541,8 @@ def _run_tiered_l2_study(
 
     storage_type = "InMemory"
     if storage_url:
-        if storage_url.startswith(("redis://", "rediss://")):
-            from urllib.parse import urlparse
-            try:
-                parsed = urlparse(storage_url)
-                host_port = parsed.netloc.split("@")[-1] if "@" in parsed.netloc else parsed.netloc
-                storage_type = f"Redis (JournalRedisBackend, Host: {host_port}, DB: {parsed.path.lstrip('/')})"
-            except Exception:
-                storage_type = "Redis (JournalRedisBackend)"
-        elif storage_url.startswith("sqlite://"):
-            storage_type = f"SQLite ({storage_url})"
-        else:
-            storage_type = f"RDB ({storage_url})"
+        db_path_display = storage_url.replace("sqlite:///", "")
+        storage_type = f"SQLite ({db_path_display})"
 
     _logger.info(
         "  ● [STUDY] %s\n"
@@ -3326,7 +3314,7 @@ def _run_optimization_stage(
                         (mean_mp / total_mean) * 100.0,
                     )
                     _logger.info(
-                        "     - Redis DB I/O   : %6.2f ms (%5.1f%%)",
+                        "     - Storage I/O    : %6.2f ms (%5.1f%%)",
                         mean_md * 1000.0,
                         (mean_md / total_mean) * 100.0,
                     )
