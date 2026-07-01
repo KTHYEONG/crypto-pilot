@@ -1,4 +1,4 @@
-"""Integration and comparison tests for compute_v3_score in optimization."""
+"""Integration and comparison tests for compute_robust_score in optimization."""
 
 from __future__ import annotations
 
@@ -6,12 +6,12 @@ import numpy as np
 
 from src.domain.futures.optimization.evaluator import (
     compute_awf_robust_objective_score,
-    compute_v3_score,
+    compute_robust_score,
 )
 
 
 def test_v3_score_vs_legacy_cpcv_score() -> None:
-    """Test that compute_v3_score is more conservative than the legacy score."""
+    """Test that compute_robust_score is more conservative than the legacy score."""
     leg_log_tw = np.array([0.05, 0.04, -0.01, 0.06, 0.03, 0.02, 0.05, 0.04])
     worst_mdd = 0.12
     cvar_5 = 0.08
@@ -28,7 +28,7 @@ def test_v3_score_vs_legacy_cpcv_score() -> None:
     )
 
     # v3 score introduces 5 extra penalty terms: MDD, CVaR, Turnover, Funding, Capacity
-    v3 = compute_v3_score(
+    v3 = compute_robust_score(
         leg_log_tw=leg_log_tw,
         worst_mdd=worst_mdd,
         cvar_5=cvar_5,
@@ -42,10 +42,10 @@ def test_v3_score_vs_legacy_cpcv_score() -> None:
 
 
 def test_v3_score_parameters_rigidity() -> None:
-    """Verify that compute_v3_score does not allow dynamic injection of lambda."""
+    """Verify that compute_robust_score does not allow dynamic injection of lambda."""
     import inspect
 
-    sig = inspect.signature(compute_v3_score)
+    sig = inspect.signature(compute_robust_score)
     parameters = list(sig.parameters.keys())
 
     # We must not have lambda_down, lambda_mdd etc as dynamic parameters.
@@ -56,7 +56,7 @@ def test_v3_score_parameters_rigidity() -> None:
 
 
 def test_v3_score_evaluation_math() -> None:
-    """Test mathematical accuracy of compute_v3_score for a known test vector."""
+    """Test mathematical accuracy of compute_robust_score for a known test vector."""
     # Mean of leg_log_tw = 0.05
     leg_log_tw = np.array([0.05] * 8)
     worst_mdd = 0.10
@@ -66,7 +66,7 @@ def test_v3_score_evaluation_math() -> None:
     aum_impact_penalty = 0.05
 
     # Downside semideviation should be 0.0 because there are no negative logs
-    score = compute_v3_score(
+    score = compute_robust_score(
         leg_log_tw=leg_log_tw,
         worst_mdd=worst_mdd,
         cvar_5=cvar_5,

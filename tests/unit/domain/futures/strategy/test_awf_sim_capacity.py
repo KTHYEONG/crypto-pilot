@@ -10,7 +10,6 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
-
 # ---------------------------------------------------------------------------
 # Helpers — isolated capacity clip logic extracted for direct unit-testing
 # ---------------------------------------------------------------------------

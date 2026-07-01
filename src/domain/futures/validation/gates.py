@@ -263,7 +263,7 @@ class PurgeBarsRegistry:
 # --- Research Gates ---
 
 @dataclass(frozen=True)
-class V3HardGates:
+class ChampionGateConfig:
     """v3.0 확정 상수 — 8-gate 평가 기준."""
 
     MIN_POSITIVE_LEG_RATIO: float = 0.55
@@ -285,7 +285,7 @@ class GateResult:
     metrics: dict[str, float] = field(default_factory=dict)
 
 
-def evaluate_v3_hard_gates(
+def evaluate_champion_gates(
     leg_log_tw: np.ndarray,
     worst_mdd: float,
     dsr: float,
@@ -293,7 +293,7 @@ def evaluate_v3_hard_gates(
     funding_drag_ratio: float,
     ergodicity_dev_pct: float,
     capacity_results: dict[int, bool],
-    gates: V3HardGates = V3HardGates(),
+    gates: ChampionGateConfig = ChampionGateConfig(),
 ) -> GateResult:
     """8-gate v3.0 평가.
 
@@ -305,7 +305,7 @@ def evaluate_v3_hard_gates(
         funding_drag_ratio: funding_drag / gross_return (0~1).
         ergodicity_dev_pct: ergodicity deviation (%).
         capacity_results: {aum: pass/fail} — CAPACITY_REQUIRED_TIERS 전부 필요.
-        gates: V3HardGates 상수 컨테이너.
+        gates: ChampionGateConfig 상수 컨테이너.
 
     Returns:
         GateResult(passed, failures, metrics).

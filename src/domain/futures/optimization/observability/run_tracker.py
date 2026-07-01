@@ -171,6 +171,14 @@ def log_optuna_contract(
 def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages.BaseStorage]:
     """Set up Optuna storage via Redis JournalStorage."""
     del project_root
+    local_storage_url = os.getenv("FUTURES_OPTUNA_STORAGE_URL", "").strip()
+    if local_storage_url:
+        local_storage = optuna.storages.RDBStorage(
+            local_storage_url,
+            engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}},
+        )
+        return local_storage_url, local_storage
+
     storage_url = _resolve_redis_storage_url()
     # _logger.info("   [OPTUNA] Storage: %s", storage_url)
     _preflight_redis_endpoint(storage_url)
