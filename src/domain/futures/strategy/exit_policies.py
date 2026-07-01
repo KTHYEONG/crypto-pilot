@@ -130,7 +130,7 @@ def build_exit_policies_for_panel(
     if not policies:
         policies.append(
             _policy(
-                policy_id="legacy",
+                policy_id="default",
                 archetype="mean_rev",
                 stop_atr_mult=(
                     float(fallback_stop_atr_mult)
