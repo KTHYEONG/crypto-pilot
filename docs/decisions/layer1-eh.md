@@ -124,3 +124,11 @@ ai_read_policy: when_related
 - **계측 항목**: per-XS-factor `(n_bars, n_events, spread_mean_bps, spread_std_bps, spread_sharpe, spread_lcb_bps, rank_ic, rank_ic_tstat, long_frac)`. Bootstrap LCB via `moving_block_bootstrap_mean`. rank-IC는 per-bar Spearman ρ + Fisher-z tstat (≥3 cross-section).
 - (Compressed...)
 
+## Phase 20: residual_reversion(beta_neut) Regime Gate Hard Masking (ADR-054, 2026-07-01)
+- **계기**: Phase 0 measure-first residual_reversion@R0(bull_quiet)만 breakeven 상회(4/4 fold LCB>0), R2/R3/R4는 명확히 음수임을 확인. 기존 `_allowed_regimes_for_archetype`의 beta_neut fallback(`("bull_quiet","bear_quiet","transition")`)은 `_attach_signal_context`의 게이트 조건이 `mean_rev_gating_enabled=True and archetype=="mean_rev"`만 검사하여 **도달 불가능한 죽은 코드**였음. spec의 sizing-multiplier 대안(discrete 증거 불일치 + 전역 blast radius) 기각 후 하드 마스킹 채택.
+- **변경점** (3 source files):
+  - `config.py`: `beta_neut_gating_enabled: bool = False` 필드 추가 (opt-in, 기본 무회귀 보장).
+  - `rules.py` / `rule_signals.py` (mirror): `_allowed_regimes_for_archetype`에 `beta_neut → ("bull_quiet",)` 명시적 분기 추가. `_attach_signal_context` 게이트 조건에 `or (cfg.beta_neut_gating_enabled and archetype == "beta_neut")` 추가.
+- **회귀 방지**: 기본값 `False` → 기존 champion 동작 무변경. 4개 신규 테스트(`test_beta_neut_gated_*`)로 gate 활성화/차단/기본값/전역오버라이드 검증 완료. L1 validation: ruff 0 error, mypy 0 new error, regression tests 58/58 pass.
+- (Compressed...)
+

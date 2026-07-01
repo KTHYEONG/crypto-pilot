@@ -32,7 +32,7 @@ Generates vectorized rule panels with archetype/regime contexts, filtered throug
 
 **Signal Generation & Gating Sequence**
 1. **Vectorization**: $S_{t} = f(\text{Data}_{1..t})$. Sparse triggers: $E_{t} = 1 \text{ if } (S_{t} \neq 0 \land S_{t-1} == 0) \text{ else } 0$. Strictly causal.
-2. **Regime Gating**: Reversion signals blocked in specified high-risk regimes.
+2. **Regime Gating**: Hard side_hint masking by archetype. `mean_rev` signals allowed in `("bull_quiet","bear_quiet","transition")`, blocked elsewhere when `mean_rev_gating_enabled=True` (default). `beta_neut` (residual_reversion) allowed in `("bull_quiet",)` only, blocked in all other regimes when `beta_neut_gating_enabled=True` (opt-in, default False). Gate condition: `cfg.regime_signal_gating_enabled OR (archetype-specific flag AND archetype match)`.
 3. **L1 Breakeven Hard Gate**: $\frac{1}{N} \sum (\text{Edge}_{i}) > 0 \land t_{\text{stat}} \geq \text{min\_rule\_ir\_t}$.
 4. **Profit Floor**: $\mu_{\text{OOS}} \geq \text{min\_variant\_oos\_profit\_bps}$.
 5. **Regime-Cell Admission (OR-path)**: Bayesian posterior $P(\mu > \delta | \text{data}) \ge p_{\text{admit\_min}}$. Newey-West variance + cross-cell $\tau^2$ shrinkage.
