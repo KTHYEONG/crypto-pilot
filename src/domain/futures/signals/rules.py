@@ -392,6 +392,8 @@ def _allowed_regimes_for_archetype(archetype: str) -> tuple[str, ...]:
         return ("bull_volatile", "bear_volatile", "crash")
     if archetype == "carry_rev":
         return ("bull_quiet", "bear_quiet", "transition")
+    if archetype == "beta_neut":
+        return ("bull_quiet",)
     return ("bull_quiet", "bear_quiet", "transition")
 
 
@@ -437,6 +439,8 @@ def _attach_signal_context(
         side_hint_2d = np.asarray(panel.side_hint_2d, dtype=np.int8).copy()
         if cfg.regime_signal_gating_enabled or (
             cfg.mean_rev_gating_enabled and archetype == "mean_rev"
+        ) or (
+            cfg.beta_neut_gating_enabled and archetype == "beta_neut"
         ):
             allowed_mask = np.isin(regime_names[regime_ctx.code_1d], np.asarray(allowed_regimes, dtype=object))
             side_hint_2d[~allowed_mask, :] = 0
