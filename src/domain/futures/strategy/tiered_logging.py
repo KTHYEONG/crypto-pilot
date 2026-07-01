@@ -524,6 +524,28 @@ def format_layer1_deployment_registry_table(
 
 
 # ---------------------------------------------------------------------------
+# Gate A: Evaluation window bottleneck-coverability verdict
+# ---------------------------------------------------------------------------
+
+
+def evaluation_window_bottleneck_verdict(
+    awf_fold_diags: list[dict[str, Any]],
+    *,
+    stress_mdd_threshold: float = 0.15,
+) -> tuple[bool, str]:
+    covered = False
+    detail = "no_bottleneck_caliber_fold_in_window"
+    for f in awf_fold_diags:
+        mdd = f.get("mdd", float("nan"))
+        cagr = f.get("cagr", float("nan"))
+        if math.isfinite(mdd) and math.isfinite(cagr) and mdd >= stress_mdd_threshold and cagr <= 0.0:
+            covered = True
+            detail = f"fold={awf_fold_diags.index(f)} mdd={mdd:.3f} cagr={cagr:+.3f}"
+            break
+    return (covered, detail)
+
+
+# ---------------------------------------------------------------------------
 # §9.3 Layer 2 table
 # ---------------------------------------------------------------------------
 
@@ -705,6 +727,15 @@ def format_layer2_table(
             sel_str: str = "Y" if ts.get("selected") else "N"
             lines.append(
                 f"  {ts['rank']:<5} {ts['symbol']!s:<12} {ts['score']:>7.3f} {sel_str:>4}"
+            )
+
+    if awf_folds:
+        _covered, _detail = evaluation_window_bottleneck_verdict(awf_folds)
+        if not _covered:
+            lines.append("")
+            lines.append(
+                "  ⚠️  [WINDOW] NO-CRISIS-WINDOW — 이 평가 윈도우는 병목-caliber fold"
+                "(MDD>=15% & CAGR<=0)를 포함하지 않음. 승격 근거로 인용 금지 (docs/results/next.md P0)."
             )
 
     return "\n".join(lines)
