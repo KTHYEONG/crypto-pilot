@@ -37,7 +37,7 @@ Establishes a causal market state from BTC price action for two consumers: a con
 - NaN for $t < \text{window}$; zero-path divisor $\rightarrow 0.0$
 - Consumed by L2 whipsaw attribution (`Layer2FoldAttribution`) and trend-efficiency exposure gate (`trend_efficiency_gross_mult`)
 
-**Reversal Risk-Off Detector**
+**Reversal Risk-Off Detector (BTC-only legacy)**
 - $HW_{t} = \max(P_{t-\text{window}+1 : t})$ (trailing window high)
 - $DD_{t} = 1 - P_{t} / HW_{t}$ (trailing drawdown)
 - $Mom_{t} = \text{EMA}(P, \text{fast})_{t} - \text{EMA}(P, \text{slow})_{t}$ (momentum)
@@ -47,6 +47,30 @@ Establishes a causal market state from BTC price action for two consumers: a con
 - $risk\_off\_1d_{t} = shift(risk\_off\_persisted, 1)$ — bar $t$ uses information up to $t-1$ only (causal, look-ahead 0)
 - $risk\_off_{bar} = True$ → L2 override of all sleeve raw_mu to `reversal_risk_off_floor` (overrides soft cap/crisis_floor)
 - Env-gated (`L2_REVERSAL_KILL`, default off), computed once from BTC close per simulation run
+
+**Market State Panel (Breadth-Augmented Risk-Off)**
+- Mode-gated by `reversal_mode`: `"btc"` (legacy BTC-only) or `"panel"` (breadth-augmented).
+- **Cross-sectional Downside Breadth:**
+  - $r_{t,i} = \ln(P_{t,i} / P_{t-\text{breadth\_window},i})$ per symbol $i$
+  - $valid_{t,i} = \text{isfinite}(P_{t,i}) \land (P_{t,i} > \epsilon) \land \text{isfinite}(P_{t-\text{breadth\_window},i}) \land (P_{t-\text{breadth\_window},i} > \epsilon)$
+  - $neg_{t,i} = valid_{t,i} \land (r_{t,i} < 0)$
+  - $\text{breadth}_{t} = \frac{\sum_i neg_{t,i}}{\max(\sum_i valid_{t,i}, 1)}$ — fraction of symbols with negative momentum, $[0, 1]$, NaN-safe
+  - $\text{breadth}_{t} = 0$ when $t < \text{breadth\_window}$ or $\sum valid = 0$
+- **Breadth Hysteresis (stateful Schmitt trigger):**
+  - `b_on = False` initially
+  - $enter \le \text{breadth}_{t} \land \lnot b\_on \rightarrow b\_on = True$
+  - $\text{breadth}_{t} < exit \land b\_on \rightarrow b\_on = False$
+  - $enter > exit$ enforced by config validation (asymmetric hysteresis)
+- **AND Gate:**
+  - $raw\_on_t = btc\_off_t \land breadth\_on_t$ — both BTC and breadth axes must confirm
+- **Persistence:** $N$ consecutive $raw\_on$ bars before activation (same as BTC-only persistence)
+- **Recovery Hysteresis (asymmetric exit):**
+  - $\text{state}_t = True$ when $persist\_on_t$ fires or $\text{state}_{t-1}$ remains True
+  - $\text{state}_t = False$ only after $recovery\_cooldown\_bars$ consecutive $raw\_off$ bars
+  - Config parameter `reversal_recovery_cooldown_bars` (default 0 = immediate release after raw-off)
+- $risk\_off\_1d_t = shift(\text{state}, 1)$ — 1-bar shift for causal consumption
+- Config: `breadth_mom_window`, `breadth_neg_frac_enter`, `breadth_neg_frac_exit`, `reversal_recovery_cooldown_bars`
+- All new `RegimeConfig` fields validated in `__post_init__`
 
 **Page-CUSUM Crisis Detector**
 - $z_{t} = \frac{r_{t} - \text{median}_{\leq t}}{1.4826 \cdot \text{MAD}_{\leq t}}$
@@ -98,8 +122,21 @@ graph TD
     O --> Q[risk_off_raw]
     P --> Q
     Q --> R[shift(1) → risk_off_1d]
-    R -->|L2_REVERSAL_KILL| S[Selective Hard De-Gross]
+    R -->|BTC-only legacy| S[Selective Hard De-Gross]
     S --> M
+    subgraph Panel [Market State Panel - breadth_off]
+        U[Universe Close 2D] --> V[Log Returns per sym]
+        V --> W[Fraction negative by sym]
+        W --> X[Breadth Hysteresis]
+        X --> Y[breadth_on]
+    end
+    Q -->|panel mode| Z[AND Gate]
+    Y --> Z
+    Z --> AA[Persistence]
+    AA --> AB[Recovery Hysteresis]
+    AB --> AC[shift(1) → risk_off_1d]
+    AC --> AD[Selective Hard De-Gross]
+    AD --> M
 ```
 
 # 4. Core Variables & I/O
@@ -124,6 +161,12 @@ graph TD
 | **L2 Param** | `l2_regime_bull_gross_cap` | Bull regime gross exposure cap (default `1.0`, full deployment). Bounds: `(0.0, 1.0]` |
 | **L2 Param** | `l2_regime_bear_gross_cap` | Bear regime gross exposure cap (default `0.35`, bull-primary prior). Bounds: `(0.0, 1.0]` |
 | **L2 Param** | `l2_regime_crisis_gross_cap` | Crisis regime gross exposure cap (default `0.25`, bull-primary prior). Bounds: `(0.0, 1.0]` |
+| **Input** | `P_2d` | Universe close prices (T x N matrix) for cross-sectional breadth |
+| **Param** | `breadth_mom_window` | Log-return window for downstream breadth (default 21 bars). Bounds: `>= 2` |
+| **Param** | `breadth_neg_frac_enter` | Fraction of negative-momentum symbols to enter breadth-on (default 0.50). Bounds: `(0, 1]` |
+| **Param** | `breadth_neg_frac_exit` | Fraction to exit breadth-off (default 0.30). Bounds: `[0, 1)`, must be `< enter` |
+| **Param** | `reversal_recovery_cooldown` | Consecutive raw-off bars before state resets to False in panel mode (default 0). Bounds: `>= 0` |
+| **Param** | `reversal_mode` | Risk-off detector mode: `"btc"` (legacy BTC-only) or `"panel"` (breadth-augmented). Default: `"btc"` |
 
 # 5. Edge Cases & Handling
 - **Flash Crash / Liquidity Vacuum:** Rapid extreme price drops trigger the CUSUM crisis condition, immediately snapping the `overlay_mult_1d` to `crisis_gross_floor` and ignoring naive volatility targeting bounds until the cooldown period expires.
