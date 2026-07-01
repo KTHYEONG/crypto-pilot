@@ -153,3 +153,7 @@ graph TD
 - **Storage-only path:** `load_or_build_universe_snapshot` checks store hit first. Miss falls back to `build_universe` which writes a complete store run.
 - **Cube round-trip:** `pit_state_cube` is persisted via `cube.parquet` and restored on store hit. No transient data loss.
 - **GC:** `gc_stale_store_runs(tf, as_of, keep_latest=1)` removes stale run directories by mtime, keeping latest N per as_of.
+
+## Data Synchronization & Enriched Cache Invalidation
+- **Automated Sync Dispatch:** `auto` mode is the system default. The universe ledger database (`universe_ledger.db`) synchronizes incrementally when the target date shifts beyond the maximum date present in the ledger. Explicit opt-out is supported via the `skip` sync mode.
+- **Enriched Cache Invalidation:** Enriched feature datasets (`*_enriched.parquet`) are automatically invalidated and regenerated dynamically when their source raw parquet files have a newer modification time (`mtime`) on disk.

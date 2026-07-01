@@ -19,7 +19,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeframe", type=str, default="4h", help="Trading timeframe")
     parser.add_argument("--date", type=str, default=None, help="Reference date (YYYY-MM-DD)")
     parser.add_argument("--phase", type=str, default="l3", help="Active phase (l1, l2, l3)")
-    parser.add_argument("--sync", type=str, default="skip", help="Sync mode (full, fast, skip)")
+    parser.add_argument("--sync", type=str, default="auto", help="Sync mode (auto, skip)")
     parser.add_argument("--refresh-universe", action="store_true", help="Force universe refresh")
     parser.add_argument("--sync-metrics", action="store_true", help="Sync champion metrics")
     from src.application.futures.runner.config import _REMOVED_ARG_KEYS
