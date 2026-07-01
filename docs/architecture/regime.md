@@ -44,8 +44,11 @@ Establishes a causal market state from BTC price action for two consumers: a con
 - $risk\_off\_raw_{t} = (DD_{t} \ge \text{dd\_threshold}) \land (Mom_{t} < 0)$
 - $persisted\_run_{t} = persisted\_run_{t-1} + 1 \text{ if } risk\_off\_raw_{t} \text{ else } 0$
 - $risk\_off\_persisted_{t} = 1_{\{persisted\_run_{t} \ge \text{persistence\_bars}\}}$ (N-bar consecutive raw condition)
-- $risk\_off\_1d_{t} = shift(risk\_off\_persisted, 1)$ — bar $t$ uses information up to $t-1$ only (causal, look-ahead 0)
+- $risk\_off\_state_{t} = \text{recovery\_hysteresis}(risk\_off\_persisted, risk\_off\_raw, \text{cooldown})$ — after persistent fires, state stays True until $\text{cooldown}$ consecutive raw-off bars. Exit counting uses raw signal (not persistent). At $\text{cooldown}=0$ (default), state tracks persistent byte-identically.
+- $risk\_off\_1d_{t} = shift(risk\_off\_state, 1)$ — bar $t$ uses information up to $t-1$ only (causal, look-ahead 0)
 - $risk\_off_{bar} = True$ → L2 override of all sleeve raw_mu to `reversal_risk_off_floor` (overrides soft cap/crisis_floor)
+- Config param: `reversal_recovery_cooldown_bars` (default 0) — exit hysteresis cooldown, shared with panel mode
+- Env override: `L2_REVERSAL_RECOVERY_COOLDOWN`, parsed by `_reversal_config_from_env()` for btc mode
 - Env-gated (`L2_REVERSAL_KILL`, default off), computed once from BTC close per simulation run
 
 **Market State Panel (Breadth-Augmented Risk-Off)**
