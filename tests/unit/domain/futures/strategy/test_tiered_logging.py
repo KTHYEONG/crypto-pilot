@@ -23,6 +23,7 @@ from src.domain.futures.strategy.candidate_contracts import (
     SymbolStrategyEvidence,
 )
 from src.domain.futures.strategy.tiered_logging import (
+    evaluation_window_bottleneck_verdict,
     format_layer1_deployment_registry_table,
     format_layer1_gate_table,
     format_layer1_outer_fold_table,
@@ -759,6 +760,54 @@ class TestFormatLayer2Table:
         assert "DSR" in result
         assert "❌" in result  # dsr_hybrid=0.50 < 0.60
 
+
+
+class TestEvaluationWindowBottleneckVerdict:
+    """Gate A: evaluation_window_bottleneck_verdict 시나리오 테스트."""
+
+    def test_covered_when_stress_fold_present(self) -> None:
+        folds = [
+            {"mdd": 0.20, "cagr": -0.05},
+            {"mdd": 0.05, "cagr": 0.30},
+        ]
+        covered, detail = evaluation_window_bottleneck_verdict(folds)
+        assert covered is True
+        assert "fold=0" in detail
+        assert "mdd=0.200" in detail
+
+    def test_not_covered_when_only_bull_drawdown_fold(self) -> None:
+        folds = [
+            {"mdd": 0.1747, "cagr": 0.3395},
+        ]
+        covered, detail = evaluation_window_bottleneck_verdict(folds)
+        assert covered is False
+        assert detail == "no_bottleneck_caliber_fold_in_window"
+
+    def test_skips_nan_folds(self) -> None:
+        folds = [
+            {"mdd": float("nan"), "cagr": -0.05},
+            {"mdd": 0.25, "cagr": float("nan")},
+            {"mdd": 0.30, "cagr": -0.10},
+        ]
+        covered, _ = evaluation_window_bottleneck_verdict(folds)
+        assert covered is True
+
+    def test_empty_folds_returns_not_covered(self) -> None:
+        covered, detail = evaluation_window_bottleneck_verdict([])
+        assert covered is False
+        assert detail == "no_bottleneck_caliber_fold_in_window"
+
+    def test_banner_appended_when_not_covered(self) -> None:
+        r2 = _make_l2_ns()
+        folds = [{"fold": 1, "mdd": 0.05, "cagr": 0.10, "sharpe": 1.0, "pass": True}]
+        result = format_layer2_table(r2, awf_folds=folds)
+        assert "NO-CRISIS-WINDOW" in result
+
+    def test_no_banner_when_covered(self) -> None:
+        r2 = _make_l2_ns()
+        folds = [{"fold": 1, "mdd": 0.20, "cagr": -0.05, "sharpe": 1.0, "pass": True}]
+        result = format_layer2_table(r2, awf_folds=folds)
+        assert "NO-CRISIS-WINDOW" not in result
 
 
 class TestFormatLayer3Table:

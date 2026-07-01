@@ -1806,19 +1806,44 @@ def _run_tiered_l2_study(
     gc.collect()
 
     if l2_study_result.blocker_reason == "" and l2_study_result.best_evaluation is not None:
-        updated = update_champion_store(
-            tag=tf,
-            storage=storage,
-            params=l2_study_result.best_params,
-            value=l2_study_result.best_evaluation.growth_lcb_hybrid,
-            space=L2_ALLOC_SPACE,
+        from src.domain.futures.strategy.market_regime import synthetic_crash_defense_verdict
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import _reversal_config_from_env
+
+        _rc = _reversal_config_from_env()
+        _crash_fires, _crash_bars = synthetic_crash_defense_verdict(
+            dd_window=_rc.reversal_dd_window,
+            dd_threshold=_rc.reversal_dd_threshold,
+            mom_fast=_rc.reversal_mom_fast,
+            mom_slow=_rc.reversal_mom_slow,
+            persistence_bars=_rc.reversal_persistence_bars,
+            recovery_cooldown_bars=_rc.reversal_recovery_cooldown_bars,
         )
-        if updated:
-            _logger.info(
-                "  ● [CHAMPION STORE] 신규 챔피언 갱신 (tf=%s, growth_lcb=%.4f)",
-                tf,
-                l2_study_result.best_evaluation.growth_lcb_hybrid,
+        _promotion_allowed, _promotion_reason = _champion_promotion_allowed(
+            blocker_reason=l2_study_result.blocker_reason,
+            has_evaluation=l2_study_result.best_evaluation is not None,
+            crash_fires=_crash_fires,
+        )
+        if not _promotion_allowed:
+            if _promotion_reason == "crash_defense_not_firing":
+                _logger.warning(
+                    "  ● [CHAMPION STORE] 승격 차단 — synthetic crash defense(Scenario 8) 미발화. "
+                    "reversal-kill 회귀 의심 (bars=%d). docs/results/next.md P0 참조.",
+                    _crash_bars,
+                )
+        else:
+            updated = update_champion_store(
+                tag=tf,
+                storage=storage,
+                params=l2_study_result.best_params,
+                value=l2_study_result.best_evaluation.growth_lcb_hybrid,
+                space=L2_ALLOC_SPACE,
             )
+            if updated:
+                _logger.info(
+                    "  ● [CHAMPION STORE] 신규 챔피언 갱신 (tf=%s, growth_lcb=%.4f)",
+                    tf,
+                    l2_study_result.best_evaluation.growth_lcb_hybrid,
+                )
 
     _blocker = l2_study_result.blocker_reason or "none"
     _logger.debug("[MEM] stage=l2_champion rss=%.0fMB blocked=%s", _get_rss_mb(), _blocker)
@@ -3551,6 +3576,19 @@ def run_from_cli(argv: list[str] | None = None) -> int:
     if result.exit_code != 0:
         _logger.error("!! FAIL: exit_code=%d reason=%s", result.exit_code, result.reason)
     return result.exit_code
+
+
+def _champion_promotion_allowed(
+    *,
+    blocker_reason: str,
+    has_evaluation: bool,
+    crash_fires: bool,
+) -> tuple[bool, str]:
+    if blocker_reason != "" or not has_evaluation:
+        return (False, "study_blocked")
+    if not crash_fires:
+        return (False, "crash_defense_not_firing")
+    return (True, "")
 
 
 def main() -> int:
