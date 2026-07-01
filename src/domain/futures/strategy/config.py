@@ -81,6 +81,11 @@ class RegimeConfig:
     reversal_mom_slow: int = 120
     reversal_risk_off_floor: float = 0.05
     reversal_persistence_bars: int = 3
+    reversal_mode: str = "btc"
+    breadth_mom_window: int = 24
+    breadth_neg_frac_enter: float = 0.60
+    breadth_neg_frac_exit: float = 0.45
+    reversal_recovery_cooldown_bars: int = 0
 
     def __post_init__(self) -> None:
         """Validate regime parameters."""
@@ -129,6 +134,16 @@ class RegimeConfig:
             raise ValueError("reversal_risk_off_floor must be in [0, crisis_gross_floor)")
         if self.reversal_persistence_bars < 1:
             raise ValueError("reversal_persistence_bars must be >= 1")
+        if self.reversal_mode not in {"btc", "panel"}:
+            raise ValueError("reversal_mode must be 'btc' or 'panel'")
+        if self.breadth_mom_window < 2:
+            raise ValueError("breadth_mom_window must be >= 2")
+        if not (0.0 < self.breadth_neg_frac_exit < self.breadth_neg_frac_enter <= 1.0):
+            raise ValueError(
+                "breadth thresholds must satisfy 0 < exit < enter <= 1.0 (hysteresis asymmetry)"
+            )
+        if self.reversal_recovery_cooldown_bars < 0:
+            raise ValueError("reversal_recovery_cooldown_bars must be >= 0")
 
 
 @dataclass(slots=True, frozen=True)
