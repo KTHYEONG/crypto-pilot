@@ -2099,6 +2099,7 @@ def _run_awf_simulation(
                     mom_fast=_rev_cfg.reversal_mom_fast,
                     mom_slow=_rev_cfg.reversal_mom_slow,
                     persistence_bars=_rev_cfg.reversal_persistence_bars,
+                    recovery_cooldown_bars=_rev_cfg.reversal_recovery_cooldown_bars,
                 )
             if _diag:
                 _breadth_diag_1d = compute_xs_downside_breadth_1d(

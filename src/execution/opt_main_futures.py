@@ -1831,6 +1831,7 @@ class L2ReversalReplayVariant:
     enabled: bool
     dd_threshold: float
     persistence_bars: int
+    recovery_cooldown_bars: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -1847,6 +1848,9 @@ class L2ReversalReplayFoldMetric:
 @dataclass(slots=True, frozen=True)
 class L2ReversalReplayResult:
     variant: str
+    dd_threshold: float
+    persistence_bars: int
+    recovery_cooldown_bars: int
     cagr: float
     mdd: float
     trade_count: int
@@ -1865,13 +1869,27 @@ def _l2_reversal_replay_variants() -> tuple[L2ReversalReplayVariant, ...]:
         L2ReversalReplayVariant(name="balanced_010_p2", enabled=True, dd_threshold=0.10, persistence_bars=2),
         L2ReversalReplayVariant(name="balanced_010_p3", enabled=True, dd_threshold=0.10, persistence_bars=3),
         L2ReversalReplayVariant(name="current_012_p3", enabled=True, dd_threshold=0.12, persistence_bars=3),
+        L2ReversalReplayVariant(
+            name="legacy_006_p1_cd4", enabled=True, dd_threshold=0.06,
+            persistence_bars=1, recovery_cooldown_bars=4,
+        ),
+        L2ReversalReplayVariant(
+            name="legacy_006_p1_cd8", enabled=True, dd_threshold=0.06,
+            persistence_bars=1, recovery_cooldown_bars=8,
+        ),
+        L2ReversalReplayVariant(
+            name="current_012_p3_cd8", enabled=True, dd_threshold=0.12,
+            persistence_bars=3, recovery_cooldown_bars=8,
+        ),
     )
 
 
 @contextmanager
 def _temporary_reversal_env(variant: L2ReversalReplayVariant) -> Iterator[None]:
     _saved: dict[str, str | None] = {}
-    for _key in ("L2_REVERSAL_KILL", "L2_REVERSAL_DD_THRESHOLD", "L2_REVERSAL_PERSISTENCE_BARS"):
+    _env_keys = ("L2_REVERSAL_KILL", "L2_REVERSAL_DD_THRESHOLD",
+                 "L2_REVERSAL_PERSISTENCE_BARS", "L2_REVERSAL_RECOVERY_COOLDOWN")
+    for _key in _env_keys:
         _saved[_key] = os.environ.get(_key)
     try:
         if not variant.enabled:
@@ -1880,6 +1898,7 @@ def _temporary_reversal_env(variant: L2ReversalReplayVariant) -> Iterator[None]:
             os.environ["L2_REVERSAL_KILL"] = "1"
             os.environ["L2_REVERSAL_DD_THRESHOLD"] = str(variant.dd_threshold)
             os.environ["L2_REVERSAL_PERSISTENCE_BARS"] = str(variant.persistence_bars)
+            os.environ["L2_REVERSAL_RECOVERY_COOLDOWN"] = str(variant.recovery_cooldown_bars)
         yield
     finally:
         for _key, _val in _saved.items():
@@ -1925,35 +1944,49 @@ def _reversal_replay_adoption_verdict(
     baseline: L2ReversalReplayResult,
     legacy: L2ReversalReplayResult,
     candidate: L2ReversalReplayResult,
+    stress_mdd_threshold: float = 0.15,
 ) -> tuple[bool, str]:
-    baseline_fold0_cagr = baseline.fold_metrics[0].cagr if baseline.fold_metrics else None
-    legacy_fold0_cagr = legacy.fold_metrics[0].cagr if legacy.fold_metrics else None
-    candidate_fold0_cagr = candidate.fold_metrics[0].cagr if candidate.fold_metrics else None
-    if baseline_fold0_cagr is None or legacy_fold0_cagr is None or candidate_fold0_cagr is None:
-        return (False, "missing_fold0")
-    legacy_improvement = legacy_fold0_cagr - baseline_fold0_cagr
-    candidate_improvement = candidate_fold0_cagr - baseline_fold0_cagr
-    if legacy_improvement <= 0.0:
-        return (False, "legacy_no_improvement")
-    if candidate_improvement < legacy_improvement * 0.70:
-        return (False, "fold0_defense_below_70pct")
-    for fold_idx in range(1, len(candidate.fold_metrics)):
-        base = baseline.fold_metrics
-        cand = candidate.fold_metrics
-        if fold_idx < len(base) and fold_idx < len(cand):
-            base_cagr = base[fold_idx].cagr
-            cand_cagr = cand[fold_idx].cagr
-            if base_cagr is not None and cand_cagr is not None and cand_cagr - base_cagr < -0.01:
-                return (False, "non_bottleneck_damage")
+    n_folds = len(baseline.fold_metrics)
+    if n_folds == 0:
+        return (False, "missing_fold_data")
+    stress_idx: int | None = None
+    stress_mdd_val = -1.0
+    for i, f in enumerate(baseline.fold_metrics):
+        if f.mdd is not None and f.mdd > stress_mdd_val:
+            stress_mdd_val = f.mdd
+            stress_idx = i
+    if stress_idx is None:
+        return (False, "missing_baseline_mdd")
+    stress_present = stress_mdd_val >= stress_mdd_threshold
+    if stress_present:
+        legacy_stress = legacy.fold_metrics[stress_idx] if stress_idx < len(legacy.fold_metrics) else None
+        candidate_stress = candidate.fold_metrics[stress_idx] if stress_idx < len(candidate.fold_metrics) else None
+        if legacy_stress is None or candidate_stress is None:
+            return (False, "missing_stress_fold_data")
+        if legacy_stress.cagr is None or candidate_stress.cagr is None:
+            return (False, "missing_stress_fold_cagr")
+        baseline_stress = baseline.fold_metrics[stress_idx]
+        baseline_stress_cagr = baseline_stress.cagr if baseline_stress.cagr is not None else 0.0
+        legacy_improvement = legacy_stress.cagr - baseline_stress_cagr
+        candidate_improvement = candidate_stress.cagr - baseline_stress_cagr
+        if legacy_improvement <= 0.0:
+            return (False, "legacy_no_improvement")
+        if candidate_improvement < legacy_improvement * 0.70:
+            return (False, "stress_defense_below_70pct")
+        if candidate_stress.risk_off_bars <= 0:
+            return (False, "no_stress_fold_risk_off")
+    for i, (b, c) in enumerate(zip(baseline.fold_metrics, candidate.fold_metrics, strict=True)):
+        if stress_present and i == stress_idx:
+            continue
+        if b.cagr is not None and c.cagr is not None and c.cagr - b.cagr < -0.01:
+            return (False, "non_stress_damage")
     if candidate.cagr <= baseline.cagr:
         return (False, "below_baseline_cagr")
     if candidate.cagr < legacy.cagr:
         return (False, "below_legacy_cagr")
-    if not candidate.fold_metrics or candidate.fold_metrics[0].risk_off_bars <= 0:
-        return (False, "no_fold0_risk_off")
     if not candidate.selection_parity:
         return (False, "selection_divergence")
-    return (True, "")
+    return (True, "adopted" if stress_present else "adopted_no_stress_in_window")
 
 
 def _run_l2_reversal_economic_replay(
@@ -2008,6 +2041,9 @@ def _run_l2_reversal_economic_replay(
         _blocker_reason = "baseline" if variant.name == "baseline_off" else ""
         result = L2ReversalReplayResult(
             variant=variant.name,
+            dd_threshold=variant.dd_threshold,
+            persistence_bars=variant.persistence_bars,
+            recovery_cooldown_bars=variant.recovery_cooldown_bars,
             cagr=float(getattr(evaluation, "cagr_hybrid", 0.0)),
             mdd=float(getattr(evaluation, "mdd_hybrid", 0.0)),
             trade_count=int(getattr(evaluation, "trade_count", 0)),
@@ -2033,6 +2069,9 @@ def _run_l2_reversal_economic_replay(
             )
             results[results.index(result)] = L2ReversalReplayResult(
                 variant=result.variant,
+                dd_threshold=result.dd_threshold,
+                persistence_bars=result.persistence_bars,
+                recovery_cooldown_bars=result.recovery_cooldown_bars,
                 cagr=result.cagr,
                 mdd=result.mdd,
                 trade_count=result.trade_count,
@@ -2063,9 +2102,12 @@ def _write_replay_csv(
 ) -> None:
     rows: list[dict[str, object]] = []
     for res in results:
-        for fm in res.fold_metrics:
-            rows.append({
+        rows.extend(
+            {
                 "variant": res.variant,
+                "dd_threshold": res.dd_threshold,
+                "persistence_bars": res.persistence_bars,
+                "recovery_cooldown_bars": res.recovery_cooldown_bars,
                 "fold_idx": fm.fold_idx,
                 "cagr": fm.cagr,
                 "mdd": fm.mdd,
@@ -2080,7 +2122,9 @@ def _write_replay_csv(
                 "metric_parity": res.metric_parity,
                 "adoption_passed": res.adoption_passed,
                 "blocker_reason": res.blocker_reason,
-            })
+            }
+            for fm in res.fold_metrics
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(output_path, index=False)
 
