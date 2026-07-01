@@ -29,7 +29,7 @@ def test_strategy_mode_pipeline_orchestration_order(
             "phase": "l3",
             "timeframe": "4h",
             "trials": 1,
-            "sync": "full",
+            "sync": "auto",
         }
     )
     called: list[str] = []
@@ -262,7 +262,7 @@ def test_l2_mode_skips_optimization_stage(
             "phase": "l2",
             "timeframe": "4h",
             "trials": 1,
-            "sync": "full",
+            "sync": "auto",
         }
     )
     window = opt_main_futures.QuarterlyWindow(
@@ -344,7 +344,7 @@ def test_strategy_stage_injects_universe_metadata_before_bridge(
             "phase": "l2",
             "timeframe": "4h",
             "trials": 1,
-            "sync": "full",
+            "sync": "auto",
         }
     )
     window = opt_main_futures.QuarterlyWindow(
@@ -569,7 +569,7 @@ def test_requires_exec_1m_returns_false_for_l2_mode() -> None:
             "phase": "l2",
             "timeframe": "4h",
             "trials": 1,
-            "sync": "full",
+            "sync": "auto",
         }
     )
     assert opt_main_futures._requires_exec_1m(run_config) is False
@@ -581,7 +581,7 @@ def test_requires_exec_1m_returns_false_for_l1_mode() -> None:
             "phase": "l1",
             "timeframe": "4h",
             "trials": 1,
-            "sync": "full",
+            "sync": "auto",
         }
     )
     assert opt_main_futures._requires_exec_1m(run_config) is False
@@ -593,7 +593,7 @@ def test_resolve_data_collection_symbols_uses_inference_panel() -> None:
             "phase": "l3",
             "timeframe": "4h",
             "trials": 1,
-            "sync": "full",
+            "sync": "auto",
         }
     )
     out = opt_main_futures._resolve_data_collection_symbols(
@@ -612,7 +612,7 @@ def test_resolve_data_collection_symbols_uses_live_panel_when_inference_panel_is
             "phase": "l3",
             "timeframe": "4h",
             "trials": 1,
-            "sync": "full",
+            "sync": "auto",
         }
     )
     out = opt_main_futures._resolve_data_collection_symbols(
@@ -636,7 +636,7 @@ def test_ensure_universe_ledger_sync_always_passes_none_symbols(
             "phase": "l3",
             "timeframe": "4h",
             "trials": 1,
-            "sync": "full",
+            "sync": "auto",
         }
     )
     window = opt_main_futures.QuarterlyWindow(
@@ -673,7 +673,7 @@ def test_ensure_cached_symbol_data_uses_fetch_start_for_backfill(
             "phase": "l3",
             "timeframe": "4h",
             "trials": 1,
-            "sync": "full",
+            "sync": "auto",
         }
     )
     window = opt_main_futures.QuarterlyWindow(
@@ -941,7 +941,7 @@ def test_tiered_aligned_scope_s1_happy_path(
 
     # Act
     run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
     )
     opt_main_futures._run_strategy_stage(
         run_config,
@@ -977,7 +977,7 @@ def test_tiered_aligned_scope_s2_fallback_when_no_overlap(
 
     # Act
     run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
     )
     opt_main_futures._run_strategy_stage(
         run_config,
@@ -1013,7 +1013,7 @@ def test_tiered_aligned_scope_s3_regression_breadth_denominator(
     _patch_tiered_deps(monkeypatch, captured, stub_admission_to_base_scope=True)
 
     run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
     )
     opt_main_futures._run_strategy_stage(
         run_config, _make_window(), data_stage, universe_snapshot=snapshot
@@ -1063,7 +1063,7 @@ def test_tiered_aligned_scope_s4_partial_overlap(
     _patch_tiered_deps(monkeypatch, captured, stub_admission_to_base_scope=True)
 
     run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
     )
     opt_main_futures._run_strategy_stage(
         run_config, _make_window(), data_stage, universe_snapshot=snapshot
@@ -1153,7 +1153,7 @@ def test_tiered_window_uses_run_config_date_reference(
     _stub_tradeable_scope(monkeypatch)
 
     run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full", "date": "2026-05-01"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto", "date": "2026-05-01"}
     )
     opt_main_futures._run_strategy_stage(
         run_config,
@@ -1247,7 +1247,7 @@ def test_tiered_pipeline_uses_unfiltered_labeled_events(
     _stub_tradeable_scope(monkeypatch)
 
     run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full", "date": "2026-05-01"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto", "date": "2026-05-01"}
     )
     opt_main_futures._run_strategy_stage(
         run_config,
@@ -1329,7 +1329,7 @@ def test_tiered_layer3_terminal_failure_does_not_fallback_to_phase_d(
     caplog.set_level(logging.INFO)
 
     run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full", "date": "2026-05-01"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto", "date": "2026-05-01"}
     )
     result = opt_main_futures._run_strategy_stage(
         run_config,
@@ -1402,7 +1402,7 @@ def test_effective_trade_syms_s1_excludes_symbol_delisted_before_holdout_end(
     monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kw: layered_window)
 
     run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
     )
 
     # Act
@@ -1517,7 +1517,7 @@ def test_tiered_pipeline_s2_raises_when_aligned_end_before_holdout_start(
     _stub_tradeable_scope(monkeypatch)
 
     run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
     )
     caplog.set_level(logging.INFO)
 
@@ -1590,7 +1590,7 @@ def test_effective_trade_syms_s14_uses_merged_full_strategy_maps(
     monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kw: layered_window)
 
     run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
     )
 
     # Act
@@ -1643,7 +1643,7 @@ def test_align_data_maps_s15_receives_merged_full_strategy_maps(
     monkeypatch.setattr(_align, "align_data_maps", _capturing_align)
 
     run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
     )
 
     # Act
@@ -1665,7 +1665,7 @@ def test_run_strategy_stage_passes_pit_state_cube_with_real_run_config(
     from unittest.mock import MagicMock
 
     run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
     )
     data_times = pd.date_range("2025-01-01", "2026-04-07", freq="7D", tz="UTC")
     data_stage = opt_main_futures.DataStageResult(
@@ -2026,7 +2026,7 @@ def test_tiered_empty_admission_fail_closed(
     monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kw: layered_window)
 
     run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "full"}
+        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
     )
 
     with pytest.raises(TieredPipelineError, match="tiered tradeable scope is empty"):

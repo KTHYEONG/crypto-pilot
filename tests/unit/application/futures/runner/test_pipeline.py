@@ -111,3 +111,37 @@ class TestRunPipeline:
 
         assert result == expected
         mock_optimize.assert_not_called()
+
+    def test_ledger_sync_skipped_when_sync_is_skip(self, mocker: MockerFixture) -> None:
+        from src.application.futures.runner.active_pipeline import _ensure_universe_ledger_sync
+        
+        mock_path = mocker.MagicMock()
+        mock_path.exists.return_value = False
+        mocker.patch("src.domain.futures.universe.models.DEFAULT_LEDGER_PATH", mock_path)
+        mock_sync = mocker.patch("src.application.futures.runner.active_pipeline.run_historical_sync")
+        
+        run_config = FuturesRunConfig(
+            timeframe="4h", date=None, trials=1,
+            phase="l3", sync="skip", refresh_universe=False, sync_metrics=False
+        )
+        window = make_window()
+        
+        _ensure_universe_ledger_sync(run_config, window)  # type: ignore[arg-type]
+        mock_sync.assert_not_called()
+
+    def test_ledger_sync_called_when_sync_is_auto(self, mocker: MockerFixture) -> None:
+        from src.application.futures.runner.active_pipeline import _ensure_universe_ledger_sync
+        
+        mock_path = mocker.MagicMock()
+        mock_path.exists.return_value = False
+        mocker.patch("src.domain.futures.universe.models.DEFAULT_LEDGER_PATH", mock_path)
+        mock_sync = mocker.patch("src.application.futures.runner.active_pipeline.run_historical_sync")
+        
+        run_config = FuturesRunConfig(
+            timeframe="4h", date=None, trials=1,
+            phase="l3", sync="auto", refresh_universe=False, sync_metrics=False
+        )
+        window = make_window()
+        
+        _ensure_universe_ledger_sync(run_config, window)  # type: ignore[arg-type]
+        mock_sync.assert_called_once()
