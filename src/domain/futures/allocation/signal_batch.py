@@ -1086,6 +1086,17 @@ class XsFactorSpreadDiagnostics:
     by_factor: dict[str, tuple[int, int, float, float, float, float, float, float, float]]
 
 
+@dataclass(slots=True, frozen=True)
+class FamilyRegimeDiagnostics:
+    """Phase 0 measure-first: family x entry_regime_code gross 엣지 진단.
+
+    docs/specs/l1-regime-diversification-tf-expansion.md 참조. 모든 값은 gross
+    (비용 미차감) — Phase 2 go/no-go 판정 시 l1_breakeven_floor_bps와 비교해야 함.
+    """
+    fold_id: int
+    by_family_regime: dict[tuple[str, int], tuple[int, int, float, float, float, float, float]]
+
+
 def _xs_rank_ic(
     g: pd.DataFrame,
 ) -> tuple[float, float]:
@@ -1161,6 +1172,51 @@ def compute_xs_factor_spread_diagnostics(
     if not by_factor:
         return None
     return XsFactorSpreadDiagnostics(fold_id=fold_id, by_factor=by_factor)
+
+
+def compute_family_regime_edge_diagnostics(
+    *,
+    realized_event_results: pd.DataFrame,
+    cfg: CandidateStrategyConfig,
+    fold_id: int,
+    seed: int = 0,
+    min_bars: int = 8,
+) -> FamilyRegimeDiagnostics | None:
+    """Family x entry_regime_code 셀별 gross 엣지 진단 (Phase 0, measure-first).
+
+    비추세 패밀리(dual_momentum/residual_reversion 등)가 특정 regime에서 trend 계열과
+    차등 엣지를 갖는지 측정. 게이트 무영향, DEBUG 로그 전용. 산출값은 전부 gross —
+    Phase 2 진행 여부는 lcb_gross_bps > cfg.l1_breakeven_floor_bps 기준으로 판단할 것
+    (gross > 0만으로는 불충분, docs/specs/l1-regime-diversification-tf-expansion.md 참조).
+    """
+    if realized_event_results.empty:
+        return None
+    df = realized_event_results
+    if "family" not in df.columns or "entry_regime_code" not in df.columns:
+        return None
+    by_family_regime: dict[tuple[str, int], tuple[int, int, float, float, float, float, float]] = {}
+    for (family, regime_code), g in df.groupby(["family", "entry_regime_code"], sort=True):
+        bar_means = g.groupby("decision_idx")["realized_side_adjusted_gross_bps"].mean()
+        spread = bar_means.to_numpy(dtype=np.float64)
+        n_bars = spread.size
+        if n_bars < min_bars:
+            continue
+        mean = float(spread.mean())
+        std = float(spread.std(ddof=1)) if n_bars > 1 else 0.0
+        sharpe = mean / max(std, 1e-9)
+        boot = moving_block_bootstrap_mean(
+            spread,
+            np.arange(n_bars, dtype=np.int64),
+            block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 6)),
+            n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
+            seed=seed + fold_id,
+        )
+        lcb = float(np.quantile(boot, 0.05)) if boot.size > 0 else mean
+        ic, _ict = _xs_rank_ic(g)
+        by_family_regime[(str(family), int(regime_code))] = (n_bars, len(g), mean, std, sharpe, lcb, ic)
+    if not by_family_regime:
+        return None
+    return FamilyRegimeDiagnostics(fold_id=fold_id, by_family_regime=by_family_regime)
 
 
 def compute_probe_breadth_diagnostics(
@@ -1403,6 +1459,10 @@ def _l1_xs_spread_diag_enabled() -> bool:
     return os.environ.get("L1_XS_SPREAD_DIAG", "") not in ("", "0", "false", "False")
 
 
+def _l1_family_regime_diag_enabled() -> bool:
+    return os.environ.get("L1_FAMILY_REGIME_DIAG", "") not in ("", "0", "false", "False")
+
+
 def _format_probe_diag(diag: ProbeBreadthDiagnostics) -> str:
     parts = [
         f"fold={diag.fold_id}",
@@ -1442,6 +1502,15 @@ def _format_xs_spread_diag(diag: XsFactorSpreadDiagnostics) -> str:
     for sid, (nbars, _nevents, _mean, _std, sharpe, lcb, ic, ict, lf) in diag.by_factor.items():
         parts.append(
             f"XS[{sid}]=sh{sharpe:+.2f}/lcb{lcb:+.1f}/ic{ic:+.3f}/t{ict:+.2f}/n{nbars}/lf{lf:.0%}"
+        )
+    return " | ".join(parts) if parts else ""
+
+
+def _format_family_regime_diag(diag: FamilyRegimeDiagnostics) -> str:
+    parts: list[str] = []
+    for (family, regime_code), (nbars, _nevents, mean, _std, sharpe, lcb, ic) in diag.by_family_regime.items():
+        parts.append(
+            f"{family}@R{regime_code}=gross{mean:+.1f}/sh{sharpe:+.2f}/lcb{lcb:+.1f}/ic{ic:+.3f}/n{nbars}"
         )
     return " | ".join(parts) if parts else ""
 
@@ -1616,6 +1685,12 @@ def evaluate_outer_signal_opportunities(
         )
         if xs_diag is not None:
             logger.debug("[L1-XS-SPREAD-DIAG] %s", _format_xs_spread_diag(xs_diag))
+    if _l1_family_regime_diag_enabled() and logger.isEnabledFor(logging.DEBUG):
+        family_regime_diag = compute_family_regime_edge_diagnostics(
+            realized_event_results=realized_event_results, cfg=cfg, fold_id=fold_id, seed=seed,
+        )
+        if family_regime_diag is not None:
+            logger.debug("[L1-FAMILY-REGIME-DIAG] %s", _format_family_regime_diag(family_regime_diag))
     return Layer1FoldReadiness(
         fold_id=fold_id,
         registry_source_end_idx=fold.fit_end,
