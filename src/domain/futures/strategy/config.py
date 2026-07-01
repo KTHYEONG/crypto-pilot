@@ -348,6 +348,7 @@ class CandidateStrategyConfig:
     # sizing multiplier layer (see regime_as_size_multiplier).
     regime_signal_gating_enabled: bool = False
     mean_rev_gating_enabled: bool = True
+    beta_neut_gating_enabled: bool = False
     standalone_breakeven_hard_gate_enabled: bool = True
     # When True, apply per-regime continuous weight multipliers at sizing stage.
     regime_as_size_multiplier: bool = False
