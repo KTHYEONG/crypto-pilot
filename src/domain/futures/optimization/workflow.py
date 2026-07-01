@@ -2153,6 +2153,7 @@ def evaluate_l2_trial(
         cap_saturation_ratio=float(cap_saturation_ratio),
         total_cost_bps=float(total_cost_bps),
         block_metrics=tuple(block_metrics),
+        master_tf=str(tf),
         returns_hybrid=tuple(rets_hybrid),
         returns_baseline=tuple(rets_baseline),
         sharpe_hybrid=float(sharpe_hybrid),
