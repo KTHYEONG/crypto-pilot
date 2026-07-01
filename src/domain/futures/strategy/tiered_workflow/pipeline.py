@@ -140,7 +140,7 @@ def _get_rss_mb() -> float:
     return -1.0
 
 
-logger = logging.getLogger("src.domain.futures.strategy.tiered_workflow")
+logger = logging.getLogger("opt_main_futures")
 if os.environ.get("LOG_LEVEL") == "PERF":
     logger.setLevel(15)
 
