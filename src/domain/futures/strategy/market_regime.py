@@ -624,6 +624,7 @@ def compute_reversal_risk_off_1d(
     mom_fast: int,
     mom_slow: int,
     persistence_bars: int = 1,
+    recovery_cooldown_bars: int = 0,
 ) -> NDArray[np.bool_]:
     """Trailing drawdown + momentum 기반 시장반전 risk-off 마스크 [T]."""
     if persistence_bars < 1:
@@ -645,7 +646,22 @@ def compute_reversal_risk_off_1d(
             persistent[i] = run_count >= persistence_bars
     else:
         persistent = raw
-    out = np.concatenate([[False], persistent[:-1]]).astype(np.bool_)
+    if recovery_cooldown_bars == 0:
+        out = np.concatenate([[False], persistent[:-1]]).astype(np.bool_)
+        return out
+    s_on = False
+    off_run = 0
+    state: NDArray[np.bool_] = np.zeros(t, dtype=np.bool_)
+    for i in range(t):
+        if bool(persistent[i]):
+            s_on = True
+            off_run = 0
+        elif s_on:
+            off_run = off_run + 1 if not bool(raw[i]) else 0
+            if off_run >= max(recovery_cooldown_bars, 1) and not bool(raw[i]):
+                s_on = False
+        state[i] = s_on
+    out = np.concatenate([[False], state[:-1]]).astype(np.bool_)
     return out
 
 
