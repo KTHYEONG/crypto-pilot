@@ -484,7 +484,7 @@ def build_multi_tf_panels(
 
     if audit_rows:
         import logging
-        logger = logging.getLogger(__name__)
+        logger = logging.getLogger("opt_main_futures")
         tf_summaries = [
             f"[{row[0]}] Proj={row[3]} Syms={row[1]}"
             for row in audit_rows

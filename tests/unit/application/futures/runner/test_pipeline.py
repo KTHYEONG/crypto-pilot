@@ -94,13 +94,15 @@ class TestRunPipeline:
             return_value=make_data_bundle(),
         )
         mocker.patch("src.application.futures.runner.stages.regime.run_regime_stage")
-        mocker.patch("src.application.futures.runner.stages.strategy.run_strategy_stage")
+        mock_strategy = mocker.patch("src.application.futures.runner.stages.strategy.run_strategy_stage")
+        if phase == "l2":
+            mock_strategy.return_value = RunnerResult(0, "tiered_pipeline_l2_completed")
 
         mock_optimize = mocker.patch("src.application.futures.runner.stages.optimize.run_optimization_stage")
 
         expected = (
             RunnerResult(0, "l1_mode_done") if phase == "l1"
-            else RunnerResult(0, "candidate_evaluation_done")
+            else RunnerResult(0, "tiered_pipeline_l2_completed")
         )
         result = run_pipeline(make_run_config(phase))
 
