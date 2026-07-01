@@ -1380,7 +1380,7 @@ def _run_tiered_l2_study(
     _policy_diag = _routing_plan.diagnostics.policy_diagnostics
     # Source contract for diagnostics tests:
     # [REGIME-L2] active_states=3 compression=True path=pooled_fallback proof=False ...
-    _logger.info(
+    _logger.debug(
         "[REGIME-L2] active_states=%d compression=%s path=%s proof=%s lift=%.2f t=%.2f fold_pass=%.2f",
         _routing_plan.diagnostics.active_state_count,
         _routing_plan.diagnostics.compression_enabled,
@@ -1391,7 +1391,7 @@ def _run_tiered_l2_study(
         _routing_plan.diagnostics.fold_pass_ratio,
     )
     if _policy_diag is not None:
-        _logger.info(
+        _logger.debug(
             "[REGIME-L2] policy_mode=%s policy_source=fit/cal "
             "global_reliable=%s allow=%d downweight=%d block=%d pooled=%d unstable=%d "
             "hard_block_eligible=%d sign_consistency=%.2f hard_block_enabled=%s "
@@ -1533,18 +1533,42 @@ def _run_tiered_l2_study(
     signal_batch_fingerprint = _signal_batch_fingerprint(signal_batch)
     _unique_symbols_list = sorted({str(event.symbol) for event in signal_batch.events})
     unique_symbols = ",".join(_unique_symbols_list) or "-"
+    storage_url = ""
+    try:
+        storage_url, storage = setup_optuna_storage(str(BASE_DIR))
+    except Exception as _storage_exc:
+        _logger.warning("[L2-OPT] Optuna storage 셋업 실패: %s", _storage_exc)
+        import optuna.storages
+        storage = optuna.storages.InMemoryStorage()
+
+    storage_type = "InMemory"
+    if storage_url:
+        if storage_url.startswith(("redis://", "rediss://")):
+            from urllib.parse import urlparse
+            try:
+                parsed = urlparse(storage_url)
+                host_port = parsed.netloc.split("@")[-1] if "@" in parsed.netloc else parsed.netloc
+                storage_type = f"Redis (JournalRedisBackend, Host: {host_port}, DB: {parsed.path.lstrip('/')})"
+            except Exception:
+                storage_type = "Redis (JournalRedisBackend)"
+        elif storage_url.startswith("sqlite://"):
+            storage_type = f"SQLite ({storage_url})"
+        else:
+            storage_type = f"RDB ({storage_url})"
+
     _logger.info(
-        "  ● [STUDY] %s | trials=%d | events=%d | symbols=%d",
-        study_name, n_trials, len(signal_batch.events), len(_unique_symbols_list),
+        "  ● [STUDY] %s\n"
+        "  ────────────────────────────────────────────────────────────────────────────\n"
+        f"    Optuna DB : {storage_type}\n"
+        f"    Trials    : {n_trials:<15} | Events  : {len(signal_batch.events):<15}\n"
+        f"    Symbols   : {len(_unique_symbols_list):<15}\n"
+        "  ────────────────────────────────────────────────────────────────────────────",
+        study_name,
     )
-    _logger.info("  ────────────────────────────────────────────────────────────────────────────")
     _logger.debug(
         "    symbols=%s fp=%s", unique_symbols, signal_batch_fingerprint[:12],
     )
-
     try:
-        # setup_optuna_storage를 1회만 호출하여 로그 중복 제거
-        _, storage = setup_optuna_storage(str(BASE_DIR))
         from tqdm import tqdm
         class L2OptunaProgressCallback:
             def __init__(self, total_trials: int):
@@ -1643,7 +1667,7 @@ def _run_tiered_l2_study(
                 # Fork CoW: child shares parent numpy arrays. Unique allocation ≈ 0.7GB per worker.
                 mem_safe = max(1, int(avail_gb / 0.7))
                 max_workers = max(1, min(batch_size, cpu_cores, mem_safe))
-                _logger.info(
+                _logger.debug(
                     "[L2-OPT] ProcessPool workers=%d (mem=%.1fGB, mem_safe=%d, cpu=%d, batch=%d)",
                     max_workers, avail_gb, mem_safe, cpu_cores, batch_size,
                 )
