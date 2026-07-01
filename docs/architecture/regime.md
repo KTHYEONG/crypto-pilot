@@ -8,8 +8,9 @@ ai_read_policy: when_related
 related_paths:
   - src/domain/futures/strategy/market_regime.py
   - src/domain/futures/strategy/regime_evaluation.py
-  - src/domain/futures/strategy/config.py
+  - src/domain/futures/allocation/replay.py
   - src/execution/opt_main_futures.py
+  - src/application/futures/runner/pipeline.py
 change_triggers:
   - src/domain/futures/strategy/market_regime.py
   - src/domain/futures/strategy/regime_evaluation.py

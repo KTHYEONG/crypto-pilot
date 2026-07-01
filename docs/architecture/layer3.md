@@ -1,18 +1,21 @@
 ---
 title: Futures Holdout & Validation Architecture (Layer 3)
-domain: futures.strategy
+domain: futures.validation
 type: architecture
 status: active
 priority: critical
 ai_read_policy: always
 related_paths:
-  - src/domain/futures/strategy/tiered_workflow/pipeline.py
-  - src/domain/futures/strategy/tiered_workflow/awf_sim.py
-  - src/domain/futures/strategy/tiered_workflow/dataclasses.py
+  - src/domain/futures/allocation/pipeline.py
+  - src/domain/futures/validation/champion_registry.py
+  - src/domain/futures/validation/gates.py
+  - src/domain/futures/validation/walk_forward.py
   - src/domain/futures/optimization/candidate_selector.py
   - src/domain/futures/optimization/final_evaluator.py
 change_triggers:
-  - src/domain/futures/strategy/tiered_workflow/pipeline.py
+  - src/domain/futures/allocation/pipeline.py
+  - src/domain/futures/validation/champion_registry.py
+  - src/domain/futures/validation/gates.py
   - src/domain/futures/optimization/final_evaluator.py
 dependencies:
   documents:
@@ -88,13 +91,14 @@ graph TD
 
 | Module | Role |
 |--------|------|
-| `tiered_workflow/pipeline.py` | Implements `run_l3_holdout`, defining the dummy fold and calling the AWF sim. |
-| `tiered_workflow/awf_sim.py` | Shared simulation loop (`_run_awf_simulation`) executed with frozen L2 params. Outputs `fold_attributions` (`Layer2FoldAttribution` tuple) per-fold diagnostics (realized price/funding/cost, expected net, alpha gap, throttle/exposure stats, below-cost drops, netting events) when `l2_diag_attribution_enabled=True`. |
-| `tiered_workflow/dataclasses.py`| Defines `Layer3Result` (CAGR, MDD, Sharpe, Sortino, MAR, total_return, equity_multiple, n_trades, cvar95, avg_gross_exposure, deploy_leverage, gate_passed, blocker_reason). |
+| `allocation/pipeline.py` | Implements `run_l3_holdout`, defining the dummy fold and calling the AWF sim. |
+| `validation/walk_forward.py` | Shared simulation loop (`_run_awf_simulation`) executed with frozen L2 params. Outputs `fold_attributions` (`Layer2FoldAttribution` tuple) per-fold diagnostics. |
+| `validation/champion_registry.py` | Defines `ChampionMetrics`, `BaselineChampionMetrics`, `Layer3Result`, promotion gate logic. |
 | `optimization/candidate_selector.py` | Implements `check_stability_layer3` for multi-seed validation. |
 | `optimization/final_evaluator.py` | Orchestrates the final champion evaluation, invoking Layer 3 stability checks. |
 
-# 5. Integration with opt_main_futures.py
+# 5. Integration with Runner
 
-- In `--phase alo`, `opt_main_futures.py` executes Layer 1, Layer 2, and Layer 3 via `run_tiered_pipeline`. `run_l3_holdout` performs the evaluation over the `ho_start` to `end_date` window, logging diagnostics.
-- In `--phase full`, the pipeline proceeds to `_run_optimization_stage` after strategy evaluation. The selected champion candidate undergoes the `check_stability_layer3` validation to confirm robustness against seed variance before proceeding to the final Champion Swap logic.
+- `src/execution/opt_main_futures.py` (thin entrypoint) delegates to `src/application/futures/runner/cli.py`.
+- `runner/pipeline.py` orchestrates Layer 1, Layer 2, and Layer 3 via `run_tiered_pipeline`. `run_l3_holdout` performs the evaluation over the `ho_start` to `end_date` window, logging diagnostics.
+- During full optimization, the pipeline proceeds to `_run_optimization_stage` after strategy evaluation. The selected champion candidate undergoes `check_stability_layer3` validation before proceeding to the final Champion Swap logic.
