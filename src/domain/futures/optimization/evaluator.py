@@ -686,15 +686,15 @@ def perform_online_capital_allocation(
 # Phase 2: v3.0 Score 공식 및 DSR Entropy Effective Rank
 # ---------------------------------------------------------------------------
 
-_V3_LAMBDA_DOWN: float = 0.50
-_V3_LAMBDA_MDD: float = 1.00
-_V3_LAMBDA_CVAR: float = 0.30
-_V3_LAMBDA_TURNOVER: float = 0.20
-_V3_LAMBDA_FUNDING: float = 0.50
-_V3_LAMBDA_CAPACITY: float = 0.40
+_ROBUST_SCORE_LAMBDA_DOWN: float = 0.50
+_ROBUST_SCORE_LAMBDA_MDD: float = 1.00
+_ROBUST_SCORE_LAMBDA_CVAR: float = 0.30
+_ROBUST_SCORE_LAMBDA_TURNOVER: float = 0.20
+_ROBUST_SCORE_LAMBDA_FUNDING: float = 0.50
+_ROBUST_SCORE_LAMBDA_CAPACITY: float = 0.40
 
 
-def compute_v3_score(
+def compute_robust_score(
     leg_log_tw: np.ndarray,
     worst_mdd: float,
     cvar_5: float,
@@ -734,17 +734,17 @@ def compute_v3_score(
     downside = arr[arr < 0.0]
     semidev = float(np.std(downside, ddof=0)) if downside.size > 1 else 0.0
 
-    mdd_term = 0.0 if disable_risk_penalty else _V3_LAMBDA_MDD * float(worst_mdd)
-    cvar_term = 0.0 if disable_risk_penalty else _V3_LAMBDA_CVAR * float(cvar_5)
+    mdd_term = 0.0 if disable_risk_penalty else _ROBUST_SCORE_LAMBDA_MDD * float(worst_mdd)
+    cvar_term = 0.0 if disable_risk_penalty else _ROBUST_SCORE_LAMBDA_CVAR * float(cvar_5)
 
     return float(
         mu
-        - _V3_LAMBDA_DOWN * semidev
+        - _ROBUST_SCORE_LAMBDA_DOWN * semidev
         - mdd_term
         - cvar_term
-        - _V3_LAMBDA_TURNOVER * float(excess_turnover)
-        - _V3_LAMBDA_FUNDING * float(funding_drag)
-        - _V3_LAMBDA_CAPACITY * float(aum_impact_penalty)
+        - _ROBUST_SCORE_LAMBDA_TURNOVER * float(excess_turnover)
+        - _ROBUST_SCORE_LAMBDA_FUNDING * float(funding_drag)
+        - _ROBUST_SCORE_LAMBDA_CAPACITY * float(aum_impact_penalty)
     )
 
 

@@ -1,4 +1,4 @@
-"""Phase 2: compute_v3_score 함수 검증.
+"""Phase 2: compute_robust_score 함수 검증.
 
 사양서 §4.3 — 고정 λ 기반 6항 score 공식.
 """
@@ -9,7 +9,7 @@ import inspect
 
 import numpy as np
 
-from src.domain.futures.optimization.evaluator import compute_v3_score
+from src.domain.futures.optimization.evaluator import compute_robust_score
 
 # 고정 λ 상수 (사양서 §4.1)
 V3_LAMBDA = {
@@ -23,7 +23,7 @@ V3_LAMBDA = {
 
 
 class TestScoreV3:
-    """compute_v3_score 함수 검증."""
+    """compute_robust_score 함수 검증."""
 
     def test_known_input_score_value(self) -> None:
         """알려진 입력에 대한 score 검증 (수동 계산값과 비교, tolerance 1e-9)."""
@@ -59,7 +59,7 @@ class TestScoreV3:
             - V3_LAMBDA["capacity"] * aum_impact
         )
 
-        actual = compute_v3_score(
+        actual = compute_robust_score(
             leg_log_tw=leg_log_tw,
             worst_mdd=mdd,
             cvar_5=cvar,
@@ -72,7 +72,7 @@ class TestScoreV3:
 
     def test_lambda_is_fixed_not_injectable(self) -> None:
         """λ 파라미터가 외부 주입 불가 (함수 시그니처에 없어야 함)."""
-        sig = inspect.signature(compute_v3_score)
+        sig = inspect.signature(compute_robust_score)
         forbidden_params = [
             "lambda_down",
             "lambda_mdd",
@@ -91,7 +91,7 @@ class TestScoreV3:
         """음의 score 전략 vs 양의 score 전략 순위."""
         # 손실 전략: 모든 leg 음수
         leg_loss = np.log(np.array([0.90] * 8, dtype=np.float64))
-        score_loss = compute_v3_score(
+        score_loss = compute_robust_score(
             leg_log_tw=leg_loss,
             worst_mdd=0.40,
             cvar_5=0.20,
@@ -102,7 +102,7 @@ class TestScoreV3:
 
         # 수익 전략: 모든 leg 양수
         leg_profit = np.log(np.array([1.05] * 8, dtype=np.float64))
-        score_profit = compute_v3_score(
+        score_profit = compute_robust_score(
             leg_log_tw=leg_profit,
             worst_mdd=0.05,
             cvar_5=0.02,
@@ -120,7 +120,7 @@ class TestScoreV3:
         leg_log_tw = np.array([0.02, 0.03, 0.04, 0.05, 0.03, 0.04, 0.02, 0.03])
         expected = float(np.mean(leg_log_tw))
 
-        actual = compute_v3_score(
+        actual = compute_robust_score(
             leg_log_tw=leg_log_tw,
             worst_mdd=0.0,
             cvar_5=0.0,
