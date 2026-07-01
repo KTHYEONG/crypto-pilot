@@ -665,6 +665,36 @@ def compute_reversal_risk_off_1d(
     return out
 
 
+def _synthetic_ath_decline_path() -> NDArray[np.float64]:
+    rise = np.linspace(100.0, 110.0, 20, dtype=np.float64)
+    fall = np.linspace(110.0, 85.0, 30, dtype=np.float64)
+    return np.concatenate([rise, fall])
+
+
+def synthetic_crash_defense_verdict(
+    *,
+    dd_window: int = 90,
+    dd_threshold: float = 0.12,
+    mom_fast: int = 20,
+    mom_slow: int = 120,
+    persistence_bars: int = 3,
+    recovery_cooldown_bars: int = 0,
+) -> tuple[bool, int]:
+    close = _synthetic_ath_decline_path()
+    risk_off = compute_reversal_risk_off_1d(
+        close,
+        dd_window=dd_window,
+        dd_threshold=dd_threshold,
+        mom_fast=mom_fast,
+        mom_slow=mom_slow,
+        persistence_bars=persistence_bars,
+        recovery_cooldown_bars=recovery_cooldown_bars,
+    )
+    fires = bool(risk_off[20:].any())
+    risk_off_bar_count = int(risk_off.sum())
+    return (fires, risk_off_bar_count)
+
+
 def compute_xs_downside_breadth_1d(
     universe_close_2d: NDArray[np.float64],
     *,
