@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 ActivePhase = Literal["l1", "l2", "l3"]
-SyncMode = Literal["full", "fast", "skip"]
+SyncMode = Literal["auto", "skip"]
 
 _ACTIVE_PHASES: frozenset[str] = frozenset({"l1", "l2", "l3"})
 _LEGACY_PHASES: frozenset[str] = frozenset({"strategy-smoke", "quick-backtest"})
@@ -68,10 +68,9 @@ def build_run_config_from_args(args: Namespace | dict[str, Any]) -> FuturesRunCo
 
     phase_raw = str(raw.get("phase", "l1"))
     phase = parse_active_phase(phase_raw)
-    
-    sync = str(raw.get("sync", "full"))
-    if sync not in {"full", "fast", "skip"}:
-        raise ValueError(f"invalid sync mode: {sync}")
+    sync = str(raw.get("sync", "auto"))
+    if sync not in {"auto", "skip"}:
+        raise ValueError(f"invalid sync mode: {sync!r}, expected 'auto' or 'skip'")
 
     config = FuturesRunConfig(
         timeframe=str(raw.get("timeframe", "4h")),

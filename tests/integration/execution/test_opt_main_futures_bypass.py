@@ -36,7 +36,7 @@ def minimal_run_config() -> FuturesRunConfig:
             "phase": "l3",
             "timeframe": "4h",
             "trials": 1,
-            "sync": "full",
+            "sync": "auto",
         }
     )
 

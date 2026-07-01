@@ -87,3 +87,8 @@ ai_read_policy: when_related
 - **Rationale:** 3중 JSON/Parquet 중복 및 file proliferation(203→29개) 해소. `pit_state_cube` transient 손실 버그 수정(캐시 적중 시 eligible all-False). `snapshots/` 레거시 호환성 유지 불필요(store가 단일 SSOT). Store run 누적(69→29) 방지 위해 GC 추가.
 - **Edge Cases:** 구버전 store run(`cube.parquet` 없음) → `cube=None` fallback(기존 동작 유지). Empty decisions→schema-only DataFrame write로 store 일관성 유지. `load_universe_snapshot` 함수는 dropout computation에서 사용 중이므로 repurpose(store에서 최신 run 로드).
 
+## 2026-07-01 AUTO-SYNC-INTEGRATION: fast/full sync mode consolidation & automatic cache invalidation
+- **Delta:** Consolidated `fast` and `full` sync modes into a single `auto` mode, making `auto` the default CLI sync argument. Implemented modification-time (`mtime`) comparison between raw parquet files and enriched cache files (`*_enriched.parquet`) to trigger automatic cache rebuilding when new data is fetched.
+- **Rationale:** The `fast` and `full` modes behaved identically under the hood, causing user confusion. By defaulting to `auto`, the system dynamically detects reference date changes and performs incremental sync without manual intervention. Comparing raw and enriched file modification times ensures that cache files stay up to date with newly fetched raw data.
+- **Edge Cases:** Specifying `skip` mode bypasses the ledger sync step entirely but still fills missing individual symbol caches if needed. When raw data is updated, the enriched cache rebuild is safely skipped if the cache on disk is already fresher than the raw data.
+

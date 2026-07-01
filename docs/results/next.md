@@ -12,12 +12,16 @@
   3. **Gate B(blocking, calendar-independent)**: synthetic crash shape("Scenario 8": ATH→지속하락)에 reversal-kill 탐지 로직이 실제로 발화하는지 챔피언 승격 직전 매번 재검증. 미발화 시 챔피언 스토어 갱신 자체를 차단.
   - **라이브 파이프라인 재실행(2026-07-01)으로 3종 전부 실증**: NO-CRISIS-WINDOW 배너가 실제로 스코어카드에 노출됐고, synthetic crash defense는 발화(정상)해 챔피언은 정상 갱신됨. "위기 부재 PASS"가 이제 시스템 화면에 항상 명시적으로 드러나며, 더 이상 사람이 기억에 의존해 조심할 필요가 없음.
 - **단, Gate B가 검증하는 것은 "탐지 로직이 죽지 않았다"이지 "실제 크래시를 경제적으로 방어한다"가 아니다.** economic replay로 실제 크래시 방어력을 입증한 적은 여전히 없음 — 관련 평가 윈도우(2024-12-31~2025-12-30)가 기존 병목 구간(24Q4-25Q1)을 벗어나 있어 검증 자체가 불가능한 상태는 그대로다. **P0는 "오인 방지" 문제를 해결한 것이지 "크래시 방어력 실증"(P1) 문제를 해결한 게 아님 — 혼동 금지.**
+- **✅ NEW(2026-07-01, DEBUG 실행 실측): "위기 부재 → 과레버리지" 인과 메커니즘을 코드 레벨에서 특정.** `calibrate_deployment_leverage`(risk_deployment.py) RC-2 "fit/OOS 역전" 블렌드 분기가 실제 원인. 챔피언 fit-leg(진짜 위기 포함 과거 구간) unit-vol 실측: CAGR -53.5%, MDD 91.8%(거의 전멸급) — 이 신호대로면 L*는 1.0 근처로 눌려야 함. 그러나 `mdd_ratio=OOS_MDD/fit_MDD=0.095<1.0`이 "fit/OOS 역전"으로 판정되어 `binding="oos_blend"`로 전환, 위기 없는 OOS(2025) 구간의 낮은 MDD(8.76%)를 근거로 L*를 오히려 2.06x까지 끌어올림 — **fit-leg의 보수적 경고를 알고리즘이 명시적으로 무시하는 설계**. "NO-CRISIS-WINDOW" 배너가 텍스트 경고 수준이 아니라 레버리지 산출 공식 안에 정량적으로 새겨져 있음을 실증. SSOT: `docs/specs/l1-l2-l3-overfit-root-cause.md`.
+- **NEW(2026-07-01): L2 버킷 라우팅(regime×family×TF)도 레버리지와 독립적으로 과적합.** `[L2-BUCKET-OOS]` fit-edge vs oos-edge 상관계수가 3-fold 중 2-fold(#0, #2)에서 여러 trial에 걸쳐 일관되게 음수(-0.10~-0.54) — fit 구간에서 좋아 보인 버킷이 OOS에서 반전. 레버리지 캘리브레이션 결함과 별개로 존재하는 라우팅 자체의 일반화 실패.
+- **✅ 수정 완료(2026-07-01): parity self-check 상시 오탐 코드 결함.** `Layer2TrialEvaluation`에 `master_tf` 필드 부재로 `assert_selection_replay_parity`의 self-check이 tf≠4h 챔피언마다 매번 `DECOUPLED` 오탐(WARNING)을 냈던 결함(진짜 하드게이트인 `mismatches` 비교는 무관해 챔피언 승격 자체는 오염되지 않았음). 필드 추가 + 폴백 제거로 수정, 실제 풀 파이프라인 재실행(DEBUG 레벨)에서 오탐 0건 확인.
 
 ## 2. 다음 스텝 (우선순위 순)
 
 ### P1 — 크래시 방어력 실증 경로 확보 (최우선으로 승격, 양자택일 또는 병행)
 P0 가드레일 덕분에 이제부터는 "위기 없는 PASS"가 자동으로 투명하게 드러나므로, 다음 목표는 **실제로 크래시를 방어하는 로직을 만들고 이를 검증할 데이터/경로를 확보하는 것**이다.
 - **① 마이크로구조 데이터 확장**: bookDepth / half-spread / liquidation proxy / funding-OI stress 등, BTC 가격 단일 축을 넘어서는 causal 조기탐지 입력 확보. reversal-kill의 entry 조건을 가격 후행 지표가 아닌 포지셔닝 선행 지표로 보강하는 방향.
+- **② (신규, 최우선 후보) `calibrate_deployment_leverage` RC-2 oos_blend 분기 하드닝**: fit-leg이 fit-MDD 91.8%급 재앙 신호를 보내는데도 OOS가 안전해 보인다는 이유만으로 L*를 끌어올리는 현재 로직(`mdd_ratio<1.0` → 무조건 blend-up)을 재검토. 후보: fit-leg 절대 MDD가 일정 임계(예: 50%) 이상이면 oos_blend 자체를 비활성화하거나 blend 상한을 더 보수적으로. 다른 P1 항목(마이크로구조/horizon)보다 구현 비용이 낮고 이미 원인이 코드로 특정된 상태 — measure-first로 우선 검토 권장.
 - **③ horizon 확장**: 일/주 단위 regime·macro state를 조건화해, 4h~12h 단일 스케일 detector가 놓치는 구조적 위기 신호(유동성 위축, 매크로 리스크오프) 포착.
 - **판단 기준**: 어느 쪽이든 "선택적·시간집중 de-gross" 원칙(L\* 흡수 회피)을 유지해야 하며, 새 입력을 추가하기 전 반드시 measure-first(H1 가설 → 계측 → 반증/채택) 절차를 거칠 것 — breadth 레벨 반증 사례처럼 그럴듯한 가설도 실측 전엔 신뢰하지 말 것.
 - **Gate B를 이 작업의 회귀 방지망으로 재사용**: 새 크래시 방어 로직을 추가할 때마다 `synthetic_crash_defense_verdict` 패턴을 확장(다양한 synthetic 위기 형태 — flash crash, 완만한 약세장, 유동성 위축 시뮬레이션 등)해 "여전히 발화하는가"를 계속 자동 검증할 것.
