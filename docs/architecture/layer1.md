@@ -1,26 +1,27 @@
 ---
 title: Futures Signal Architecture
-domain: futures.strategy
+domain: futures.signals
 type: architecture
 status: active
 priority: critical
 ai_read_policy: when_related
 related_paths:
-  - src/domain/futures/strategy/rule_signals.py
-  - src/domain/futures/strategy/rule_diagnostics.py
-  - src/domain/futures/strategy/exit_policies.py
-  - src/domain/futures/strategy/candidate_contracts.py
-  - src/domain/futures/strategy/tiered_workflow/pipeline.py
-  - src/domain/futures/strategy/tiered_workflow/signal_selection.py
-  - src/domain/futures/strategy/tiered_workflow/metrics.py
+  - src/domain/futures/signals/rules.py
+  - src/domain/futures/signals/diagnostics.py
+  - src/domain/futures/signals/contracts.py
+  - src/domain/futures/signals/workflow.py
+  - src/domain/futures/signals/timeframes.py
+  - src/domain/futures/signals/ensemble.py
+  - src/domain/futures/allocation/pipeline.py
+  - src/domain/futures/allocation/metrics.py
+  - src/domain/futures/strategy_runtime/bridge.py
 change_triggers:
-  - src/domain/futures/strategy/rule_signals.py
-  - src/domain/futures/strategy/rule_diagnostics.py
+  - src/domain/futures/signals/rules.py
+  - src/domain/futures/signals/diagnostics.py
   - src/domain/futures/strategy_runtime/bridge.py
 dependencies:
   documents:
     - docs/architecture/regime.md
-    - docs/architecture/allocation.md
 last_verified: 2026-06-24
 ---
 
