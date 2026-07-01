@@ -2173,6 +2173,7 @@ def evaluate_l2_trial(
         latest_to_median_cagr=float(fold_diag.latest_to_median_cagr),
         fold_deployed_cagrs=tuple(fold_diag.fold_deployed_cagrs),
         fold_deployed_mdds=tuple(getattr(fold_diag, 'fold_deployed_mdds', ())),
+        fold_deployed_sharpes=tuple(fold_diag.fold_unit_sharpes),
         fold_selected_symbols=tuple(fold_diag.fold_selected_symbols),
         worst_fold_cagr=float(worst_fold_cagr),
         positive_block_delta_ratio=float(positive_block_delta_ratio),
