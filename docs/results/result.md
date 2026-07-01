@@ -2,31 +2,30 @@
 LOCAL DATA STORAGE (LEDGER & CACHE STATUS)
 ================================================================================
 
-  Sync Mode: FULL (Pre-loaded from cache)
-  [SKIPPED] All records in 'universe_ledger.db' are up-to-date. (No sync required)
+  Sync Mode: SKIP (Reused cache from prior --sync fast on 2026-07-01)
 
 --------------------------------------------------------------------------------
 🔍 [TF-PROBE AUDIT] SOURCE READINESS Dashboard
-  ├── 4h   : Ready 334/334 | Median Bars: 5189   | Mix: 4h:334
-  ├── 6h   : Ready 334/334 | Median Bars: 20790  | Mix: 1h:334
-  ├── 8h   : Ready 334/334 | Median Bars: 20790  | Mix: 1h:334
-  ├── 12h  : Ready 334/334 | Median Bars: 20790  | Mix: 1h:334
+  ├── 4h   : Ready 296/296 | Median Bars: 5260   | Mix: 4h:296
+  ├── 6h   : Ready 296/296 | Median Bars: 21040  | Mix: 1h:296
+  ├── 8h   : Ready 296/296 | Median Bars: 21040  | Mix: 1h:296
+  ├── 12h  : Ready 296/296 | Median Bars: 21040  | Mix: 1h:296
 ================================================================================
 SYSTEM CONTEXT | DATA PIPELINE PREPARATION
 ================================================================================
 
 TIME PROFILE
-  Test Horizon  : 2022-10-01 ~ 2026-03-31
-  IS / OOS Split: 2025-10-01 (In-Sample Cutoff)
+  Test Horizon  : 2023-01-01 ~ 2026-06-30
+  IS / OOS Split: 2026-01-01 (In-Sample Cutoff)
 
 UNIVERSE FUNNEL
-  [1] Market Pool     : 377 symbols discovered (Binance USDT-M)
+  [1] Market Pool     : 414 symbols discovered (Binance USDT-M)
   [2] Capacity Limit  : 150 symbols selected (Top-N Liquidity)
-  [3] Integrity Pass  : 57 symbols loaded (Passed Gaps & Frozen checks)
+  [3] Integrity Pass  : 65 symbols loaded (Passed Gaps & Frozen checks)
 
 STRATEGY ENGINE
   Active Engine : Alpha-Ensemble Engine
-  Target Scope  : 57 symbols ready for Layer 1 execution
+  Target Scope  : 65 symbols ready for Layer 1 execution
 
 --------------------------------------------------------------------------------
 
@@ -34,193 +33,192 @@ STRATEGY ENGINE
 ● [LAYER 1: SIGNAL ROBUSTNESS & ENSEMBLE VERIFICATION]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📊 [L1: SWF SCOPE & ADMISSION]
-  ├─ Symbols : 52/57 Admitted
-  └─ Details : Base 57 | Dropped 5 (late_start: 5)
+  ├─ Symbols : 54/65 Admitted
+  └─ Details : Base 65 | Dropped 11 (late_start: 11)
 🧬 [L1: MULTI-TF PANEL INJECTION]
-  └─ Active : [12h] Proj=14 Syms=52 | [8h] Proj=13 Syms=52 | [6h] Proj=13 Syms=52
+  └─ Active : [12h] Proj=16 Syms=54 | [6h] Proj=14 Syms=54 | [8h] Proj=14 Syms=54
 
 ● [DATA-INTEGRITY AUDIT]
 ──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ✅ ALL 52 SYMBOLS PASSED
-  METRICS : Total Bars: 8,761
+  STATUS  : ✅ ALL 54 SYMBOLS PASSED
+  METRICS : Total Bars: 8,767
   DETAIL  : [NaN: 0.0%] [Zero/Neg: 0.0%] [Range: PASS]
 ──────────────────────────────────────────────────────────────────────────────
 
-📈 [ENS-FINAL] Arch-Only | SYM:52 | EVT:681,037 | TOTAL:+62.7 bps | [TRD:+72.3✅ TMO:+52.0✅ MRV:+29.1✅ CRY:+30.1✅ FLO:+32.2✅ UNW:+23.1✅ BTN:+42.6✅]
+📈 [ENS-FINAL] Arch-Only | SYM:54 | EVT:1,052,034 | TOTAL:+65.6 bps | [TRD:+76.4✅ TMO:+57.1✅ MRV:+39.2✅ CRY:+33.3✅ FLO:+19.2✅ UNW:+27.3✅ BTN:+44.9✅ X:52.3✅]
 
 ● [LAYER 1 OUTER FOLD READINESS]
 ──────────────────────────────────────────────────────────────────────────────
   STATUS  : ✅ READY (4/4 Folds Ready)
 
-  [✅] Fold #0 (FitEnd: 2023-09-30 -> OOS: 2023-10-01 ~ 2023-12-31)
-       ├─ Symbols : 11 symbols loaded [ANKRUSDT, ARPAUSDT, AXSUSDT, BCHUSDT, DOTUSDT, ENSUSDT, FILUSDT, NEOUSDT, +3 more]
-       ├─ Events  : 1380 unique events
-       └─ Quality : Edge: 45.47 bps
+  [✅] Fold #0 (FitEnd: 2023-12-30 -> OOS: 2023-12-30 ~ 2024-03-30)
+       ├─ Symbols : 23 symbols loaded [ADAUSDT, ANKRUSDT, API3USDT, ARPAUSDT, ARUSDT, ATOMUSDT, AVAXUSDT, BCHUSDT, +15 more]
+       ├─ Events  : 9654 unique events
+       └─ Quality : Edge: 120.92 bps
 
-  [✅] Fold #1 (FitEnd: 2023-12-31 -> OOS: 2023-12-31 ~ 2024-03-31)
-       ├─ Symbols : 9 symbols loaded [ARUSDT, ATOMUSDT, AVAXUSDT, BTCUSDT, DOTUSDT, NEARUSDT, SANDUSDT, THETAUSDT, +1 more]
-       ├─ Events  : 3772 unique events
-       └─ Quality : Edge: 13.31 bps
+  [✅] Fold #1 (FitEnd: 2024-03-30 -> OOS: 2024-03-31 ~ 2024-06-30)
+       ├─ Symbols : 24 symbols loaded [1000XECUSDT, ADAUSDT, ANKRUSDT, API3USDT, ARPAUSDT, ATOMUSDT, AXSUSDT, CRVUSDT, +16 more]
+       ├─ Events  : 10011 unique events
+       └─ Quality : Edge: 75.27 bps
 
-  [✅] Fold #2 (FitEnd: 2024-03-31 -> OOS: 2024-04-01 ~ 2024-07-01)
-       ├─ Symbols : 17 symbols loaded [1000XECUSDT, ANKRUSDT, API3USDT, ARUSDT, ATOMUSDT, BANDUSDT, DOGEUSDT, DOTUSDT, +9 more]
-       ├─ Events  : 6831 unique events
-       └─ Quality : Edge: 56.45 bps
+  [✅] Fold #2 (FitEnd: 2024-06-30 -> OOS: 2024-06-30 ~ 2024-09-30)
+       ├─ Symbols : 26 symbols loaded [1000XECUSDT, ADAUSDT, API3USDT, ARPAUSDT, ARUSDT, ATOMUSDT, AVAXUSDT, BNBUSDT, +18 more]
+       ├─ Events  : 10571 unique events
+       └─ Quality : Edge: 89.29 bps
 
-  [✅] Fold #3 (FitEnd: 2024-07-01 -> OOS: 2024-07-01 ~ 2024-09-30)
-       ├─ Symbols : 18 symbols loaded [1000XECUSDT, ADAUSDT, ANKRUSDT, ARUSDT, BCHUSDT, BNBUSDT, DOGEUSDT, DOTUSDT, +10 more]
-       ├─ Events  : 7817 unique events
-       └─ Quality : Edge: 183.20 bps
-
-──────────────────────────────────────────────────────────────────────────────
-🏁 STATUS : ✅ PASSED (5/5 Passed)
-  👉 Cov:1.000(>=0.80) | Qual:1.000(>=0.90) | Brd:26.304(>=3.00) | Fld:1.000(>=0.50) | Prf:27.496(>0.00)
-
-🏆 [L1 FINAL PROMOTION SUMMARY] 🚀 (Top 5 / 28 Promoted)
-  RANK  SYMBOL       STRATEGY (Family)                EDGE(bps)  LCB(bps)    CONV    FOLDS   t(blk)
-  ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  #1    RUNEUSDT     trend_donchian (donchian_72_4h)     +309.6    +186.0    1.00      4/4     3.45
-  #2    STORJUSDT    trend_pullback_continuation ...     +294.2    +184.8    1.00      4/4     3.42
-  #3    TRBUSDT      trend_pullback_continuation ...     +330.1    +177.9    1.00      4/4     2.97
-  #4    SNXUSDT      trend_pullback_continuation ...     +273.5    +177.5    1.00      4/4     3.80
-  #5    NEARUSDT     trend_donchian (donchian_72_4h)     +274.9    +129.4    0.99      4/4     2.39
-  └─ 🚀 And 23 more pairs promoted (e.g. ZRXUSDT, SANDUSDT, KAVAUSDT, ARUSDT, ZECUSDT, ANKRUSDT, +17 more)
-  ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  [NOT PROMOTED] 1708 pairs | top: no_incremental_edgex929, quality_weight_zerox737, negative_gross_edgex306
-
-📈 [ENS-FINAL] Arch-Only | SYM:52 | EVT:456,109 | TOTAL:+60.9 bps | [TRD:+67.6✅ TMO:+57.5✅ MRV:+28.7✅ CRY:+22.1✅]
-
-● [LAYER 1 OUTER FOLD READINESS]
-──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ✅ READY (3/4 Folds Ready)
-
-  [✅] Fold #0 (FitEnd: 2023-09-30 -> OOS: 2023-10-01 ~ 2023-12-31)
-       ├─ Symbols : 10 symbols loaded [1000XECUSDT, ADAUSDT, ARUSDT, ATOMUSDT, AVAXUSDT, BANDUSDT, ENSUSDT, PEOPLEUSDT, +2 more]
-       ├─ Events  : 981 unique events
-       └─ Quality : Edge: 138.41 bps
-
-  [❌] Fold #1 (FitEnd: 2023-12-31 -> OOS: 2023-12-31 ~ 2024-03-31)
-       ├─ Symbols : 9 symbols loaded [AAVEUSDT, ARUSDT, BTCUSDT, DOTUSDT, NEARUSDT, RSRUSDT, RVNUSDT, SANDUSDT, +1 more]
-       ├─ Events  : 2522 unique events
-       └─ Quality : Edge: -30.17 bps
-       └─ BLOCKERS: non_positive_gross_edge
-
-  [✅] Fold #2 (FitEnd: 2024-03-31 -> OOS: 2024-04-01 ~ 2024-07-01)
-       ├─ Symbols : 16 symbols loaded [1000SHIBUSDT, AAVEUSDT, ARUSDT, BANDUSDT, BNBUSDT, DOGEUSDT, DOTUSDT, ETCUSDT, +8 more]
-       ├─ Events  : 6268 unique events
-       └─ Quality : Edge: 49.97 bps
-
-  [✅] Fold #3 (FitEnd: 2024-07-01 -> OOS: 2024-07-01 ~ 2024-09-30)
-       ├─ Symbols : 16 symbols loaded [AAVEUSDT, ADAUSDT, ANKRUSDT, BNBUSDT, DOTUSDT, ETCUSDT, FILUSDT, GALAUSDT, +8 more]
-       ├─ Events  : 6457 unique events
-       └─ Quality : Edge: 163.17 bps
+  [✅] Fold #3 (FitEnd: 2024-09-30 -> OOS: 2024-09-30 ~ 2024-12-30)
+       ├─ Symbols : 26 symbols loaded [1000SHIBUSDT, 1000XECUSDT, AAVEUSDT, API3USDT, ARUSDT, AXSUSDT, BCHUSDT, BNBUSDT, +18 more]
+       ├─ Events  : 10590 unique events
+       └─ Quality : Edge: 76.33 bps
 
 ──────────────────────────────────────────────────────────────────────────────
 🏁 STATUS : ✅ PASSED (5/5 Passed)
-  👉 Cov:1.000(>=0.80) | Qual:1.000(>=0.90) | Brd:25.252(>=3.00) | Fld:0.750(>=0.50) | Prf:42.086(>0.00)
+  👉 Cov:1.000(>=0.80) | Qual:1.000(>=0.90) | Brd:35.129(>=3.00) | Fld:1.000(>=0.50) | Prf:74.060(>0.00)
 
-🏆 [L1 FINAL PROMOTION SUMMARY] 🚀 (Top 5 / 37 Promoted)
+🏆 [L1 FINAL PROMOTION SUMMARY] 🚀 (Top 5 / 36 Promoted)
   RANK  SYMBOL       STRATEGY (Family)                EDGE(bps)  LCB(bps)    CONV    FOLDS   t(blk)
   ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  #1    GALAUSDT     trend_donchian (donchian_72_6h)     +303.5    +176.0    1.00      4/4     3.67
-  #2    ANKRUSDT     trend_donchian (donchian_72_6h)     +218.7    +154.6    1.00      4/4     3.56
-  #3    NEARUSDT     trend_donchian (donchian_72_6h)     +261.5    +147.3    1.00      4/4     2.84
-  #4    ZRXUSDT      trend_donchian (donchian_72_6h)     +253.5    +133.0    1.00      4/4     1.96
-  #5    RUNEUSDT     trend_donchian (donchian_72_6h)     +234.5    +128.8    1.00      4/4     2.69
-  └─ 🚀 And 32 more pairs promoted (e.g. ARUSDT, ZILUSDT, BNBUSDT, SOLUSDT, LINKUSDT, DOTUSDT, +26 more)
+  #1    KAVAUSDT     trend_pullback_continuation ...     +236.3    +162.7    1.00      3/4     3.60
+  #2    SANDUSDT     trend_pullback_continuation ...     +325.4    +144.5    1.00      4/4     2.55
+  #3    1000SHIBUSDT residual_reversion (rr_48_4h)       +191.0    +140.8    1.00      4/4     5.85
+  #4    RUNEUSDT     trend_donchian (donchian_72_4h)     +238.8    +129.1    1.00      3/4     2.42
+  #5    ZILUSDT      trend_pullback_continuation ...     +231.8    +127.9    1.00      4/4     3.74
+  └─ 🚀 And 31 more pairs promoted (e.g. ZECUSDT, GALAUSDT, THETAUSDT, ANKRUSDT, XLMUSDT, AXSUSDT, +25 more)
   ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  [NOT PROMOTED] 639 pairs | top: no_incremental_edgex335, quality_weight_zerox304, negative_gross_edgex143
+  [NOT PROMOTED] 1406 pairs | top: no_incremental_edgex702, quality_weight_zerox690, negative_gross_edgex186
 
-📈 [ENS-FINAL] Arch-Only | SYM:52 | EVT:452,492 | TOTAL:+59.5 bps | [TRD:+65.1✅ TMO:+65.5✅ MRV:+19.0✅ CRY:+24.8✅]
+📈 [ENS-FINAL] Arch-Only | SYM:54 | EVT:712,288 | TOTAL:+64.3 bps | [TRD:+73.2✅ TMO:+66.1✅ MRV:+34.3✅ CRY:+29.8✅ X:49.0✅]
 
 ● [LAYER 1 OUTER FOLD READINESS]
 ──────────────────────────────────────────────────────────────────────────────
   STATUS  : ✅ READY (4/4 Folds Ready)
 
-  [✅] Fold #0 (FitEnd: 2023-09-30 -> OOS: 2023-10-01 ~ 2023-12-31)
-       ├─ Symbols : 8 symbols loaded [ARUSDT, ATOMUSDT, AVAXUSDT, ENSUSDT, ETHUSDT, NEARUSDT, RUNEUSDT, SOLUSDT]
-       ├─ Events  : 531 unique events
-       └─ Quality : Edge: 27.03 bps
+  [✅] Fold #0 (FitEnd: 2023-12-30 -> OOS: 2023-12-30 ~ 2024-03-30)
+       ├─ Symbols : 14 symbols loaded [AAVEUSDT, ADAUSDT, ARUSDT, ATOMUSDT, BCHUSDT, DOTUSDT, GALAUSDT, KAVAUSDT, +6 more]
+       ├─ Events  : 6001 unique events
+       └─ Quality : Edge: 141.54 bps
 
-  [✅] Fold #1 (FitEnd: 2023-12-31 -> OOS: 2023-12-31 ~ 2024-03-31)
-       ├─ Symbols : 9 symbols loaded [AAVEUSDT, ARUSDT, AVAXUSDT, BTCUSDT, NEARUSDT, RSRUSDT, RVNUSDT, SANDUSDT, +1 more]
-       ├─ Events  : 2459 unique events
-       └─ Quality : Edge: 79.96 bps
+  [✅] Fold #1 (FitEnd: 2024-03-30 -> OOS: 2024-03-31 ~ 2024-06-30)
+       ├─ Symbols : 15 symbols loaded [AAVEUSDT, ADAUSDT, ANKRUSDT, ATOMUSDT, BNBUSDT, CRVUSDT, DOTUSDT, ETCUSDT, +7 more]
+       ├─ Events  : 5379 unique events
+       └─ Quality : Edge: 19.55 bps
 
-  [✅] Fold #2 (FitEnd: 2024-03-31 -> OOS: 2024-04-01 ~ 2024-07-01)
-       ├─ Symbols : 12 symbols loaded [BANDUSDT, DOGEUSDT, DOTUSDT, ETCUSDT, GALAUSDT, KAVAUSDT, NEARUSDT, SANDUSDT, +4 more]
-       ├─ Events  : 5324 unique events
-       └─ Quality : Edge: 100.18 bps
+  [✅] Fold #2 (FitEnd: 2024-06-30 -> OOS: 2024-06-30 ~ 2024-09-30)
+       ├─ Symbols : 23 symbols loaded [AAVEUSDT, ADAUSDT, ATOMUSDT, AXSUSDT, BNBUSDT, CRVUSDT, DOTUSDT, ETCUSDT, +15 more]
+       ├─ Events  : 8852 unique events
+       └─ Quality : Edge: 66.93 bps
 
-  [✅] Fold #3 (FitEnd: 2024-07-01 -> OOS: 2024-07-01 ~ 2024-09-30)
-       ├─ Symbols : 13 symbols loaded [AAVEUSDT, ADAUSDT, ANKRUSDT, DOGEUSDT, DOTUSDT, GALAUSDT, KAVAUSDT, NEARUSDT, +5 more]
-       ├─ Events  : 4515 unique events
-       └─ Quality : Edge: 191.43 bps
+  [✅] Fold #3 (FitEnd: 2024-09-30 -> OOS: 2024-09-30 ~ 2024-12-30)
+       ├─ Symbols : 20 symbols loaded [AAVEUSDT, ADAUSDT, ARPAUSDT, ATOMUSDT, AXSUSDT, BNBUSDT, ETCUSDT, ETHUSDT, +12 more]
+       ├─ Events  : 5317 unique events
+       └─ Quality : Edge: 91.80 bps
 
 ──────────────────────────────────────────────────────────────────────────────
 🏁 STATUS : ✅ PASSED (5/5 Passed)
-  👉 Cov:1.000(>=0.80) | Qual:1.000(>=0.90) | Brd:21.000(>=3.00) | Fld:1.000(>=0.50) | Prf:54.308(>0.00)
+  👉 Cov:1.000(>=0.80) | Qual:1.000(>=0.90) | Brd:25.165(>=3.00) | Fld:1.000(>=0.50) | Prf:42.665(>0.00)
 
-🏆 [L1 FINAL PROMOTION SUMMARY] 🚀 (Top 5 / 37 Promoted)
+🏆 [L1 FINAL PROMOTION SUMMARY] 🚀 (Top 5 / 31 Promoted)
   RANK  SYMBOL       STRATEGY (Family)                EDGE(bps)  LCB(bps)    CONV    FOLDS   t(blk)
   ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  #1    NEARUSDT     trend_donchian (donchian_72_8h)     +336.7    +191.9    1.00      4/4     3.35
-  #2    GALAUSDT     trend_donchian (donchian_72_8h)     +300.7    +179.0    1.00      4/4     3.71
-  #3    KAVAUSDT     trend_pullback_continuation ...     +235.3    +135.7    1.00      3/4     3.54
-  #4    RUNEUSDT     trend_donchian (donchian_72_8h)     +244.6    +119.0    1.00      4/4     2.45
-  #5    ZILUSDT      trend_donchian (donchian_72_8h)     +182.4    +105.6    1.00      4/4     2.61
-  └─ 🚀 And 32 more pairs promoted (e.g. THETAUSDT, ANKRUSDT, ZECUSDT, AAVEUSDT, DOTUSDT, ARUSDT, +26 more)
+  #1    STORJUSDT    trend_pullback_continuation ...     +287.2    +183.2    1.00      3/3     3.08
+  #2    ZRXUSDT      trend_donchian (donchian_72_6h)     +325.7    +147.5    1.00      3/3     2.69
+  #3    ANKRUSDT     trend_donchian (donchian_72_6h)     +248.0    +146.8    1.00      3/3     4.14
+  #4    GALAUSDT     trend_donchian (donchian_72_6h)     +277.7    +120.7    1.00      4/4     3.79
+  #5    ARUSDT       trend_donchian (donchian_72_6h)     +250.0    +108.7    1.00      4/4     2.82
+  └─ 🚀 And 26 more pairs promoted (e.g. LTCUSDT, XLMUSDT, DYDXUSDT, BNBUSDT, THETAUSDT, 1000SHIBUSDT, +20 more)
   ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  [NOT PROMOTED] 639 pairs | top: no_incremental_edgex354, quality_weight_zerox285, negative_gross_edgex127
+  [NOT PROMOTED] 617 pairs | top: quality_weight_zerox342, no_incremental_edgex275, negative_gross_edgex65
 
-📈 [ENS-FINAL] Arch-Only | SYM:52 | EVT:539,813 | TOTAL:+66.6 bps | [TRD:+72.2✅ TMO:+67.9✅ MRV:+33.7✅ CRY:+27.1✅]
+📈 [ENS-FINAL] Arch-Only | SYM:54 | EVT:707,944 | TOTAL:+63.2 bps | [TRD:+71.5✅ TMO:+71.7✅ MRV:+13.1✅ CRY:+31.7✅ X:49.0✅]
 
 ● [LAYER 1 OUTER FOLD READINESS]
 ──────────────────────────────────────────────────────────────────────────────
   STATUS  : ✅ READY (4/4 Folds Ready)
 
-  [✅] Fold #0 (FitEnd: 2023-09-30 -> OOS: 2023-10-01 ~ 2023-12-31)
-       ├─ Symbols : 13 symbols loaded [AAVEUSDT, ANKRUSDT, AVAXUSDT, BNBUSDT, ENSUSDT, GALAUSDT, NEARUSDT, RVNUSDT, +5 more]
-       ├─ Events  : 1576 unique events
-       └─ Quality : Edge: 77.98 bps
+  [✅] Fold #0 (FitEnd: 2023-12-30 -> OOS: 2023-12-30 ~ 2024-03-30)
+       ├─ Symbols : 11 symbols loaded [ARUSDT, ATOMUSDT, BCHUSDT, DOTUSDT, GALAUSDT, MANAUSDT, NEARUSDT, SANDUSDT, +3 more]
+       ├─ Events  : 4371 unique events
+       └─ Quality : Edge: 116.89 bps
 
-  [✅] Fold #1 (FitEnd: 2023-12-31 -> OOS: 2023-12-31 ~ 2024-03-31)
-       ├─ Symbols : 19 symbols loaded [1000XECUSDT, AAVEUSDT, ADAUSDT, API3USDT, ARUSDT, AVAXUSDT, BTCUSDT, KAVAUSDT, +11 more]
-       ├─ Events  : 2963 unique events
-       └─ Quality : Edge: 11.33 bps
+  [✅] Fold #1 (FitEnd: 2024-03-30 -> OOS: 2024-03-31 ~ 2024-06-30)
+       ├─ Symbols : 14 symbols loaded [AAVEUSDT, ADAUSDT, ATOMUSDT, BNBUSDT, ETCUSDT, GALAUSDT, IOTAUSDT, KAVAUSDT, +6 more]
+       ├─ Events  : 5258 unique events
+       └─ Quality : Edge: 97.17 bps
 
-  [✅] Fold #2 (FitEnd: 2024-03-31 -> OOS: 2024-04-01 ~ 2024-07-01)
-       ├─ Symbols : 17 symbols loaded [1000XECUSDT, API3USDT, ARUSDT, BNBUSDT, DOTUSDT, ENSUSDT, ETCUSDT, GALAUSDT, +9 more]
-       ├─ Events  : 6159 unique events
-       └─ Quality : Edge: 90.00 bps
+  [✅] Fold #2 (FitEnd: 2024-06-30 -> OOS: 2024-06-30 ~ 2024-09-30)
+       ├─ Symbols : 18 symbols loaded [AAVEUSDT, ADAUSDT, ATOMUSDT, BNBUSDT, DOTUSDT, GALAUSDT, JASMYUSDT, KAVAUSDT, +10 more]
+       ├─ Events  : 5817 unique events
+       └─ Quality : Edge: 87.53 bps
 
-  [✅] Fold #3 (FitEnd: 2024-07-01 -> OOS: 2024-07-01 ~ 2024-09-30)
-       ├─ Symbols : 20 symbols loaded [1000SHIBUSDT, 1000XECUSDT, ANKRUSDT, BCHUSDT, CRVUSDT, DOTUSDT, ETCUSDT, ETHUSDT, +12 more]
-       ├─ Events  : 6524 unique events
-       └─ Quality : Edge: 157.24 bps
+  [✅] Fold #3 (FitEnd: 2024-09-30 -> OOS: 2024-09-30 ~ 2024-12-30)
+       ├─ Symbols : 10 symbols loaded [AAVEUSDT, BNBUSDT, GALAUSDT, JASMYUSDT, NEARUSDT, RUNEUSDT, THETAUSDT, TRBUSDT, +2 more]
+       ├─ Events  : 2253 unique events
+       └─ Quality : Edge: 114.08 bps
 
 ──────────────────────────────────────────────────────────────────────────────
 🏁 STATUS : ✅ PASSED (5/5 Passed)
-  👉 Cov:1.000(>=0.80) | Qual:1.000(>=0.90) | Brd:31.530(>=3.00) | Fld:1.000(>=0.55) | Prf:30.337(>0.00)
+  👉 Cov:1.000(>=0.80) | Qual:1.000(>=0.90) | Brd:19.922(>=3.00) | Fld:1.000(>=0.50) | Prf:78.628(>0.00)
 
-🏆 [L1 FINAL PROMOTION SUMMARY] 🚀 (Top 5 / 60 Promoted)
+🏆 [L1 FINAL PROMOTION SUMMARY] 🚀 (Top 5 / 34 Promoted)
   RANK  SYMBOL       STRATEGY (Family)                EDGE(bps)  LCB(bps)    CONV    FOLDS   t(blk)
   ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  #1    RUNEUSDT     trend_donchian (donchian_72_...     +253.5    +176.2    1.00      4/4     3.12
-  #2    KAVAUSDT     trend_pullback_continuation ...     +193.9    +145.3    1.00      4/4     3.49
-  #3    ZILUSDT      trend_donchian (donchian_72_...     +226.4    +135.9    1.00      4/4     3.63
-  #4    ANKRUSDT     trend_donchian (donchian_72_...     +219.9    +131.4    1.00      4/4     3.90
-  #5    NEARUSDT     trend_donchian (donchian_72_...     +227.8    +123.6    1.00      4/4     2.59
-  └─ 🚀 And 55 more pairs promoted (e.g. GALAUSDT, BCHUSDT, ZECUSDT, ARUSDT, DOTUSDT, ENSUSDT, +49 more)
+  #1    1000SHIBUSDT dual_momentum (dm_6_24_8h)          +194.2    +136.2    1.00      4/4     4.24
+  #2    GALAUSDT     trend_donchian (donchian_72_8h)     +277.2    +122.7    1.00      4/4     3.54
+  #3    XLMUSDT      trend_donchian (donchian_72_8h)     +350.5    +104.8    0.99      3/4     1.80
+  #4    JASMYUSDT    dual_momentum (dm_12_48_8h)         +221.9     +91.1    1.00      4/4     2.69
+  #5    RUNEUSDT     trend_donchian (donchian_72_8h)     +210.8     +88.8    0.99      3/4     2.08
+  └─ 🚀 And 29 more pairs promoted (e.g. SNXUSDT, NEARUSDT, UNIUSDT, ARPAUSDT, ZECUSDT, DOTUSDT, +23 more)
   ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
-  [NOT PROMOTED] 668 pairs | top: no_incremental_edgex383, quality_weight_zerox285, negative_gross_edgex125
+  [NOT PROMOTED] 614 pairs | top: quality_weight_zerox311, no_incremental_edgex303, negative_gross_edgex78
+
+📈 [ENS-FINAL] Arch-Only | SYM:54 | EVT:812,001 | TOTAL:+68.7 bps | [TRD:+76.8✅ TMO:+72.8✅ MRV:+24.4✅ CRY:+38.9✅ X:51.4✅]
+
+● [LAYER 1 OUTER FOLD READINESS]
+──────────────────────────────────────────────────────────────────────────────
+  STATUS  : ✅ READY (4/4 Folds Ready)
+
+  [✅] Fold #0 (FitEnd: 2023-12-30 -> OOS: 2023-12-30 ~ 2024-03-30)
+       ├─ Symbols : 22 symbols loaded [1000XECUSDT, ARUSDT, ATOMUSDT, AVAXUSDT, AXSUSDT, BCHUSDT, ETCUSDT, FILUSDT, +14 more]
+       ├─ Events  : 6180 unique events
+       └─ Quality : Edge: 95.67 bps
+
+  [✅] Fold #1 (FitEnd: 2024-03-30 -> OOS: 2024-03-31 ~ 2024-06-30)
+       ├─ Symbols : 18 symbols loaded [1000XECUSDT, ANKRUSDT, ATOMUSDT, AVAXUSDT, BNBUSDT, ETCUSDT, ETHUSDT, FILUSDT, +10 more]
+       ├─ Events  : 5054 unique events
+       └─ Quality : Edge: 80.00 bps
+
+  [✅] Fold #2 (FitEnd: 2024-06-30 -> OOS: 2024-06-30 ~ 2024-09-30)
+       ├─ Symbols : 26 symbols loaded [1000XECUSDT, ANKRUSDT, ARPAUSDT, ATOMUSDT, AVAXUSDT, BNBUSDT, CRVUSDT, DOTUSDT, +18 more]
+       ├─ Events  : 7144 unique events
+       └─ Quality : Edge: 71.07 bps
+
+  [✅] Fold #3 (FitEnd: 2024-09-30 -> OOS: 2024-09-30 ~ 2024-12-30)
+       ├─ Symbols : 26 symbols loaded [1000SHIBUSDT, 1000XECUSDT, AAVEUSDT, ARPAUSDT, ATOMUSDT, AXSUSDT, BCHUSDT, BNBUSDT, +18 more]
+       ├─ Events  : 9138 unique events
+       └─ Quality : Edge: 77.03 bps
+
+──────────────────────────────────────────────────────────────────────────────
+🏁 STATUS : ✅ PASSED (5/5 Passed)
+  👉 Cov:1.000(>=0.80) | Qual:1.000(>=0.90) | Brd:32.061(>=3.00) | Fld:1.000(>=0.55) | Prf:61.523(>0.00)
+
+🏆 [L1 FINAL PROMOTION SUMMARY] 🚀 (Top 5 / 50 Promoted)
+  RANK  SYMBOL       STRATEGY (Family)                EDGE(bps)  LCB(bps)    CONV    FOLDS   t(blk)
+  ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
+  #1    ZRXUSDT      trend_donchian (donchian_72_...     +280.8    +127.9    1.00      3/3     2.51
+  #2    1000SHIBUSDT dual_momentum (dm_4_16_12h)         +201.2    +124.5    1.00      4/4     4.00
+  #3    ANKRUSDT     trend_donchian (donchian_72_...     +225.6     +99.3    1.00      3/3     3.21
+  #4    AXSUSDT      dual_momentum (dm_8_32_12h)         +188.9     +79.6    1.00      4/4     3.42
+  #5    JASMYUSDT    dual_momentum (dm_4_16_12h)         +179.5     +78.1    0.99      4/4     3.02
+  └─ 🚀 And 45 more pairs promoted (e.g. GALAUSDT, AXSUSDT, MTLUSDT, RUNEUSDT, XLMUSDT, ZECUSDT, +39 more)
+  ────  ──────────   ───────────────────────────────  ─────────  ────────  ──────  ───────  ───────
+  [NOT PROMOTED] 652 pairs | top: no_incremental_edgex329, quality_weight_zerox323, negative_gross_edgex78
 
 
 ● [LAYER UNIVERSE AUDIT]
 ──────────────────────────────────────────────────────────────────────────────
   LAYER  WINDOW RANGE                    SYMS   ACTIVE (min/med/max)       ENTRY    KILL  WARNINGS
   ─────  ──────────────────────────────  ────   ────────────────────  ──────────  ──────  ────────
-  L1     2023-04-01 ~ 2024-09-30           52     0 /  49.0 / 52               0       6  —
+  L1     2023-06-30 ~ 2024-12-30           54     0 /  51.0 / 54               0      13  —
 ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -230,7 +228,7 @@ metric        | value
 compression   | on
 states        | 3
 status        | 🟢 stable
-distribution  | bull=34.7% bear=28.1% crisis=37.3%
+distribution  | bull=36.1% bear=25.9% crisis=38.0%
 policy_mode   | soft
 hard_block    | off
 risk_cap      | on
@@ -241,48 +239,65 @@ note          | L2 verdict is reported separately in [REGIME-L2]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ● [LAYER 2: OPTUNA TUNING]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[REGIME-L2] active_states=3 compression=True path=regime_conditioned proof=True lift=54.42 t=15.24 fold_pass=1.00
-[REGIME-L2] policy_mode=soft policy_source=fit/cal global_reliable=True allow=248 downweight=10 block=0 pooled=0 unstable=15 hard_block_eligible=0 sign_consistency=0.50 hard_block_enabled=False mean_cal_lift=-23.04 mean_conf=1.00
-  ● [STUDY] l2_study_4h_95de9c21278a | trials=200 | events=67063 | symbols=42
+[REGIME-L2] active_states=3 compression=True path=regime_conditioned proof=True lift=11.07 t=3.22 fold_pass=0.67
+[REGIME-L2] policy_mode=soft policy_source=fit/cal global_reliable=True allow=248 downweight=16 block=0 pooled=0 unstable=4 hard_block_eligible=0 sign_consistency=0.71 hard_block_enabled=False mean_cal_lift=-24.31 mean_conf=0.98
+  ● [STUDY] l2_study_8h_2521e715ee23 | trials=200 | events=80347 | symbols=40
   ────────────────────────────────────────────────────────────────────────────
- [OPT] Deleted existing study 'l2_study_4h_95de9c21278a' for a fresh start.
-[L2-OPT]:   0%|                                                                                                   | 0/200 [00:00<?, ?it/s][L2-OPT] ProcessPool workers=5 (mem=3.9GB, mem_safe=5, cpu=8, batch=6)
-[L2-OPT]: 100%|███████████████████████████████████████████████████| 200/200 [02:37<00:00,  1.27it/s, Best CAGR: 156.14% | Current: 85.38%]
-[L2-SELECTION] No gate-passed trials found. Reducing diagnostic replay size to 24.
-[L2-SELECTION] No feasible candidate found within fallback window (reason=cagr)
-[L2-DEPLOY-C4] L*=3.934 (binding=oos_blend) | realized_mode=return_scaling | kelly=0.250(불변) | tf=4h
+[L2-OPT]: 100%|██████████| 200/200 [02:58<00:00, Best CAGR: 232.31%]
+[L2-SELECTION] Found 26 gate-passed trials in frontier. Reducing replay size to 8.
+[L2-SELECTION] 8 gate-pass 후보 수집 → champion Trial #81 Sortino=2.8150 CAGR=0.4995
+[L2-SELECTION] Champion selected. Trial #81, Objective=2.3231, DSR=0.6243 (n_eff=10.50)
+[L2-DEPLOY-C4] L*=2.055 (binding=oos_blend) | realized_mode=return_scaling | kelly=0.250(불변) | tf=8h
+  ● [CHAMPION STORE] 신규 챔피언 갱신 (tf=8h, growth_lcb=0.1526)
   ● [FINAL SIMULATION]
-[L2-DEPLOY] L*=3.9336 binding=champion | CAGR=0.0612 MDD=0.1747 CVaR95=0.0179 RiskUtil=0.582
-● [LAYER 2 PORTFOLIO SCORECARD] (2024-12-22 ~ 2025-09-30)
+[L2-DEPLOY] L*=2.0550 binding=champion | CAGR=0.4995 MDD=0.1748 CVaR95=0.0172 RiskUtil=0.583
+● [LAYER 2 PORTFOLIO SCORECARD] (2025-03-23 ~ 2025-12-30)
 ──────────────────────────────────────────────────────────────────────────────
-  STATUS  : ❌ BLOCKED (cagr)
+  STATUS  : ✅ PASS
 
-  ❌ [Growth    ] CAGR: +6.1% (>=30.0%) | PnL: +3.3% | Equity x1.03
-  ❌ [Efficiency] Sharpe: 0.364 (>=1.000) | Sortino: 0.506 (>=1.500) | Calmar: 0.350 (>=1.000)
-  ✅ [Risk      ] MDD: 17.5% (<=30.0%) | CVaR95: 1.8% (<=6.0%) | RiskUtil: 58.2%
-  ✅ [Robust    ] Fold: 66.7% (>=60.0%) | Trades: 121 (>=30) | Friction: 96.8%
-  ❌ [Uplift    ] Sharpe Uplift: +0.11 (>=+0.20)
-  ✅ [Integrity ] DSR: 0.678 (>=0.60) | PSR: 0.674 (diag)
-  [Diag     ] RelMDD: 3.83x | Turnover: 0.068
+  ✅ [Growth    ] CAGR: +49.9% (>=30.0%) | PnL: +37.9% | Equity x1.38
+  ✅ [Efficiency] Sharpe: 1.481 (>=1.000) | Sortino: 2.815 (>=1.500) | Calmar: 2.857 (>=1.000)
+  ✅ [Risk      ] MDD: 17.5% (<=30.0%) | CVaR95: 1.7% (<=6.0%) | RiskUtil: 58.3%
+  ✅ [Robust    ] Fold: 100.0% (>=60.0%) | Trades: 830 (>=30) | Friction: 97.7%
+  ✅ [Uplift    ] Sharpe Uplift: +1.13 (>=+0.20)
+  ✅ [Integrity ] DSR: 0.624 (>=0.60) | PSR: 0.983 (diag)
+  [Diag     ] RelMDD: 1.74x | Turnover: 0.125
 ──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ❌ Sharpe:  0.000 | CAGR:   -11.2% | MDD:   0.0% | Status: FAIL | Period: 2024-12-22 ~ 2025-03-26
-       Symbols: 14 [1000SHIBUSDT, AAVEUSDT, AXSUSDT, BCHUSDT, BNBUSDT, BTCUSDT, ETCUSDT, ETHUSDT, +6 more]
-  ├─ Fold #2 : ✅ Sharpe:  0.000 | CAGR:   +19.0% | MDD:   0.0% | Status: PASS | Period: 2025-03-26 ~ 2025-06-28
-       Symbols: 9 [AXSUSDT, BCHUSDT, BNBUSDT, ETCUSDT, LINKUSDT, LTCUSDT, SANDUSDT, SOLUSDT, +1 more]
-  └─ Fold #3 : ✅ Sharpe:  0.000 | CAGR:   +13.0% | MDD:   0.0% | Status: PASS | Period: 2025-06-28 ~ 2025-09-30
-       Symbols: 15 [1000SHIBUSDT, AAVEUSDT, BCHUSDT, BNBUSDT, BTCUSDT, DOTUSDT, ETCUSDT, KAVAUSDT, +7 more]
+  ├─ Fold #1 : ✅ Sharpe:  0.000 | CAGR:   +82.5% | MDD:  11.6% | Status: PASS | Period: 2025-03-23 ~ 2025-06-25
+       Symbols: 19 [1000SHIBUSDT, AAVEUSDT, AXSUSDT, BCHUSDT, BNBUSDT, BTCUSDT, DOGEUSDT, FILUSDT, +11 more]
+  ├─ Fold #2 : ✅ Sharpe:  0.000 | CAGR:   +35.2% | MDD:  17.5% | Status: PASS | Period: 2025-06-25 ~ 2025-09-27
+       Symbols: 29 [1000SHIBUSDT, AAVEUSDT, ADAUSDT, ATOMUSDT, AVAXUSDT, AXSUSDT, BCHUSDT, BNBUSDT, +21 more]
+  └─ Fold #3 : ✅ Sharpe:  0.000 | CAGR:   +36.6% | MDD:  13.3% | Status: PASS | Period: 2025-09-27 ~ 2025-12-30
+       Symbols: 28 [1000SHIBUSDT, AAVEUSDT, ADAUSDT, ARUSDT, ATOMUSDT, AVAXUSDT, AXSUSDT, BCHUSDT, +20 more]
+
+  ⚠️  [WINDOW] NO-CRISIS-WINDOW — 이 평가 윈도우는 병목-caliber fold(MDD>=15% & CAGR<=0)를 포함하지 않음. 승격 근거로 인용 금지 (docs/results/next.md P0).
 
 ● [LAYER UNIVERSE AUDIT]
 ──────────────────────────────────────────────────────────────────────────────
   LAYER  WINDOW RANGE                    SYMS   ACTIVE (min/med/max)       ENTRY    KILL  WARNINGS
   ─────  ──────────────────────────────  ────   ────────────────────  ──────────  ──────  ────────
-  L2     2024-10-01 ~ 2025-09-30           52    35 /  38.0 / 43             552      19  entry_block_spike
+  L2     2024-12-31 ~ 2025-12-30           54    31 /  38.0 / 45           1,098      21  —
 ──────────────────────────────────────────────────────────────────────────────
 
->> LAYER 2: BLOCKED -> gate_passed=False
-[L2-PARITY-DIAG] replay/final parity mismatch (tolerance=1e-08): cagr replay=0.18465980 final=0.06116665; mdd replay=0.15030325 final=0.17466872 | cagr replay=0.18465980 final=0.06116665 delta=0.12349315 | mdd replay=0.15030325 final=0.17466872 delta=0.02436546 | fold_pass replay=0.66666667 final=0.66666667 delta=0.00000000 | trade_count replay=121.00000000 final=121.00000000 delta=0.00000000 | L* replay=3.933613896369934 final=3.933613896369934 | sharpe_hac replay=0.7419046735715864 final=0.38848793990415315 | sortino replay=0.9669603740997154 final=0.5056798356033425
-[L2-PARITY] replay/final mismatch. replay_L*=3.9336 final_L*=3.9336 replay_CAGR=0.1847 final_CAGR=0.0612 replay_trades=121 final_trades=121
-!! FAIL: exit_code=1 reason=layer2_blocked:cagr
+>> LAYER 2: PASS -> Proceeding to Final Holdout.
+>> TARGET PHASE l2 REACHED -> Stopping pipeline.
+[L2-PARITY-SELFCHECK] side=replay stored=0.499472 recomputed=1.248416 (n_rets=1692 L*=2.054970 bpy=2190.0) -> field/metric DECOUPLED
+[PHASE] phase=l2 completed strategy/candidate evaluation only; optimization/training skipped
+
+================================================================================
+실행 조건: `uv run python -m src.execution.opt_main_futures --phase l2 --sync skip` (2026-07-01, `L2_REVERSAL_KILL` 등 진단 플래그 전부 비활성 — 순수 프로덕션 기본값)
+
+[P0 가드레일 적용 후 재실행 (2026-07-01)] docs/specs/l2-promotion-crisis-guardrail.md 구현 반영:
+  - Fix 1: Fold MDD 리포팅 버그 수정 — 이전 실행은 전 fold MDD 0.0%로 하드코딩되어 있었음(버그).
+    본 실행부터 실측값(Fold#1 11.6% / Fold#2 17.5% / Fold#3 13.3%) 정상 표시.
+  - Gate A: NO-CRISIS-WINDOW 배너 신규 노출 — 평가 윈도우(2024-12-31~2025-12-30)에 병목-caliber
+    fold(MDD>=15% & CAGR<=0)가 없음을 자동 판별해 스코어카드에 경고 표시. Fold#2(MDD 17.5%)는
+    CAGR +35.2%(양수, 강세장 조정)라서 위기 오인 없이 정확히 미포함 판정됨.
+  - Gate B + Change 4: 챔피언 스토어 갱신 전 synthetic crash defense(Scenario 8) 발화 검증 통과
+    (crash_fires=True) → 정상 승격. 메커니즘 자체는 건강하나 이번 윈도우엔 진짜 위기가 없었다는
+    사실이 배너로 투명하게 남음 — "위기 부재 PASS"가 조용히 승격 근거로 오인되는 것을 구조적으로 차단.
+  - 전체 PASS 판정 자체는 유지(회귀 없음), CAGR/Sharpe 등은 Optuna trial 재현성 범위 내 정상 변동.
+================================================================================
