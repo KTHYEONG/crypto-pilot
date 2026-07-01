@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.domain.futures.universe.filters import Stage3Config
-from src.domain.futures.universe.filters import apply_liquidity_stage
+from src.domain.futures.universe.filters import Stage3Config, apply_liquidity_stage
 
 
 def _base_frame() -> pd.DataFrame:

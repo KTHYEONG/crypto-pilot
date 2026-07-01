@@ -44,7 +44,7 @@ from src.domain.futures.portfolio.portfolio_optimizer import (
     load_portfolio_policy_config,
 )
 from src.domain.futures.validation.champion_registry import (
-    ChampionMetrics,
+    BaselineChampionMetrics,
     resolve_champion_record_path,
     run_champion_promotion_guard,
 )
@@ -972,7 +972,7 @@ def run_final_oos_evaluation(
         gate_failures.extend(swap_failures)
 
     if gate_ok:
-        cand_metrics = ChampionMetrics(
+        cand_metrics = BaselineChampionMetrics(
             cagr=float(new_m.get("cagr", 0.0)),
             mdd=abs(float(new_m.get("mdd", 100.0))),
             net_alpha=float(new_m.get("net_alpha", 0.0)),

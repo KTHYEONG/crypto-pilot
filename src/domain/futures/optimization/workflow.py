@@ -1515,9 +1515,10 @@ def suggest_layered_params(
     Returns:
         파라미터 딕셔너리 (layer의 전체 키 포함).
     """
-    from src.domain.futures.optimization.opt_config import L1_ALPHA_SPACE, L2_ALLOC_SPACE
+    from src.domain.futures.allocation.search_space import L2_SEARCH_SPACE
+    from src.domain.futures.optimization.opt_config import L1_ALPHA_SPACE
 
-    space = L1_ALPHA_SPACE if layer == "L1" else L2_ALLOC_SPACE
+    space = L1_ALPHA_SPACE if layer == "L1" else L2_SEARCH_SPACE
     result: dict[str, Any] = {}
     fixed = fixed or {}
 

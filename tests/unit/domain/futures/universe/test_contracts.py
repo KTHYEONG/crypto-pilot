@@ -66,8 +66,8 @@ def test_instrument_and_observation_contracts_are_frozen_and_slotted() -> None:
 
     assert instrument.contract_type == "PERPETUAL"
     assert observation.metric == "tick_size"
-    assert getattr(InstrumentRecord, "__dataclass_params__").frozen is True
-    assert getattr(MarketObservation, "__dataclass_params__").frozen is True
+    assert InstrumentRecord.__dataclass_params__.frozen is True
+    assert MarketObservation.__dataclass_params__.frozen is True
     assert hasattr(InstrumentRecord, "__slots__")
     assert hasattr(MarketObservation, "__slots__")
     assert [field.name for field in fields(InstrumentRecord)] == [

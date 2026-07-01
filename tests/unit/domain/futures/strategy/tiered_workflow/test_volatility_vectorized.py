@@ -12,7 +12,6 @@ import pytest
 
 from src.domain.futures.portfolio.signal_composer import rolling_per_bar_return_std
 
-
 # ---------------------------------------------------------------------------
 # 벡터화 구현 (pipeline.py OPT-3 블록과 동일 로직)
 # ---------------------------------------------------------------------------

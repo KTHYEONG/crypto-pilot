@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from src.domain.futures.validation.champion_registry import (
-    ChampionMetricsV3,
+    ChampionMetrics,
     evaluate_sequential_promotion_gate,
-    should_promote_candidate_v3,
+    should_promote_candidate,
 )
 
 
@@ -28,7 +28,7 @@ class MockDualDecayResult:
 
 def test_sequential_promotion_gate_awf_failure() -> None:
     """Test gate fails when Inner AWF fails."""
-    candidate = ChampionMetricsV3(
+    candidate = ChampionMetrics(
         atomic_oos_pass_ratio=0.80,
         capacity_ceiling_usdt=300000.0,
         median_log_growth=0.04,
@@ -59,7 +59,7 @@ def test_sequential_promotion_gate_awf_failure() -> None:
 
 def test_sequential_promotion_gate_atomic_failure() -> None:
     """Test gate fails when atomic block pass ratio < 0.70."""
-    candidate = ChampionMetricsV3(
+    candidate = ChampionMetrics(
         atomic_oos_pass_ratio=0.60,
         capacity_ceiling_usdt=300000.0,
         median_log_growth=0.04,
@@ -89,7 +89,7 @@ def test_sequential_promotion_gate_atomic_failure() -> None:
 
 def test_sequential_promotion_gate_intrabar_mdd_failure() -> None:
     """Test gate fails when intrabar MDD >= limit."""
-    candidate = ChampionMetricsV3(
+    candidate = ChampionMetrics(
         atomic_oos_pass_ratio=0.80,
         capacity_ceiling_usdt=300000.0,
         median_log_growth=0.04,
@@ -119,7 +119,7 @@ def test_sequential_promotion_gate_intrabar_mdd_failure() -> None:
 
 def test_sequential_promotion_gate_dual_decay_failure() -> None:
     """Test gate fails when dual decay fails."""
-    candidate = ChampionMetricsV3(
+    candidate = ChampionMetrics(
         atomic_oos_pass_ratio=0.80,
         capacity_ceiling_usdt=300000.0,
         median_log_growth=0.04,
@@ -149,7 +149,7 @@ def test_sequential_promotion_gate_dual_decay_failure() -> None:
 
 def test_sequential_promotion_gate_capacity_ladder_failure() -> None:
     """Test gate fails when AUM capacity ladder fails."""
-    candidate = ChampionMetricsV3(
+    candidate = ChampionMetrics(
         atomic_oos_pass_ratio=0.80,
         capacity_ceiling_usdt=300000.0,
         median_log_growth=0.04,
@@ -180,7 +180,7 @@ def test_sequential_promotion_gate_capacity_ladder_failure() -> None:
 
 def test_sequential_promotion_gate_success_no_champion() -> None:
     """Test automatic promotion if all gates pass and there is no champion."""
-    candidate = ChampionMetricsV3(
+    candidate = ChampionMetrics(
         atomic_oos_pass_ratio=0.80,
         capacity_ceiling_usdt=300000.0,
         median_log_growth=0.04,
@@ -209,9 +209,9 @@ def test_sequential_promotion_gate_success_no_champion() -> None:
     assert res.promoted_to_champion is True
 
 
-def test_should_promote_candidate_v3_priority() -> None:
+def test_should_promote_candidate_priority() -> None:
     """Test hierarchical v3 decision priority logic."""
-    champion = ChampionMetricsV3(
+    champion = ChampionMetrics(
         atomic_oos_pass_ratio=0.70,
         capacity_ceiling_usdt=100000.0,
         median_log_growth=0.02,
@@ -221,7 +221,7 @@ def test_should_promote_candidate_v3_priority() -> None:
     )
 
     # 1. Candidate superior in atomic_oos_pass_ratio (>= 5%p higher)
-    cand_1 = ChampionMetricsV3(
+    cand_1 = ChampionMetrics(
         atomic_oos_pass_ratio=0.76,
         capacity_ceiling_usdt=100000.0,
         median_log_growth=0.02,
@@ -229,10 +229,10 @@ def test_should_promote_candidate_v3_priority() -> None:
         absolute_decay_bps_yr=-200.0,
         dsr=0.65,
     )
-    assert should_promote_candidate_v3(cand_1, champion) is True
+    assert should_promote_candidate(cand_1, champion) is True
 
     # 2. Candidate has lower atomic ratio but superior capacity ceiling (>= 10% higher)
-    cand_2 = ChampionMetricsV3(
+    cand_2 = ChampionMetrics(
         atomic_oos_pass_ratio=0.70,
         capacity_ceiling_usdt=120000.0,
         median_log_growth=0.02,
@@ -240,10 +240,10 @@ def test_should_promote_candidate_v3_priority() -> None:
         absolute_decay_bps_yr=-200.0,
         dsr=0.65,
     )
-    assert should_promote_candidate_v3(cand_2, champion) is True
+    assert should_promote_candidate(cand_2, champion) is True
 
     # 3. Equal except Candidate has superior DSR (tie-break)
-    cand_3 = ChampionMetricsV3(
+    cand_3 = ChampionMetrics(
         atomic_oos_pass_ratio=0.70,
         capacity_ceiling_usdt=100000.0,
         median_log_growth=0.02,
@@ -251,4 +251,4 @@ def test_should_promote_candidate_v3_priority() -> None:
         absolute_decay_bps_yr=-200.0,
         dsr=0.75,
     )
-    assert should_promote_candidate_v3(cand_3, champion) is True
+    assert should_promote_candidate(cand_3, champion) is True
