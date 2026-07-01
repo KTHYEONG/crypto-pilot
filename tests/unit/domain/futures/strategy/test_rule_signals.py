@@ -901,6 +901,75 @@ def test_mean_rev_gated_out_of_trending_regime() -> None:
     assert out[0].side_hint_2d[:, 0].tolist() == [0, 1]
 
 
+def _beta_neut_panel() -> CandidateSignalPanel:
+    return CandidateSignalPanel(
+        family="residual_reversion", variant="unit", params={},
+        datetimes=np.array([np.datetime64("2025-01-01T00"), np.datetime64("2025-01-01T04")]),
+        symbols=("BTCUSDT",),
+        signed_score_2d=np.ones((2, 1), dtype=np.float64),
+        side_hint_2d=np.ones((2, 1), dtype=np.int8),
+        expected_holding_bars=4, min_holding_bars=1,
+        stop_atr_mult=1.0, take_profit_atr_mult=1.0,
+        turnover_proxy_2d=np.zeros((2, 1), dtype=np.float64),
+        valid_mask_2d=np.ones((2, 1), dtype=bool),
+        metadata={"archetype": "beta_neut"},
+    )
+
+
+def _regime_ctx(codes: list[int]) -> MarketRegimeContext:
+    return MarketRegimeContext(
+        code_1d=np.array(codes, dtype=np.int8),
+        name_by_code=("bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile", "transition", "crash"),
+        trend_score_1d=np.zeros(len(codes), dtype=np.float64),
+        vol_z_1d=np.zeros(len(codes), dtype=np.float64),
+        dispersion_z_1d=np.zeros(len(codes), dtype=np.float64),
+    )
+
+
+def test_beta_neut_gated_allowed_in_bull_quiet() -> None:
+    panel = _beta_neut_panel()
+    regime_ctx = _regime_ctx([0, 0])
+    out = _attach_signal_context(
+        (panel,),
+        cfg=CandidateStrategyConfig(beta_neut_gating_enabled=True),
+        regime_ctx=regime_ctx,
+    )
+    assert out[0].side_hint_2d[:, 0].tolist() == [1, 1]
+
+
+def test_beta_neut_gated_blocked_in_bear_quiet() -> None:
+    panel = _beta_neut_panel()
+    regime_ctx = _regime_ctx([2, 2])
+    out = _attach_signal_context(
+        (panel,),
+        cfg=CandidateStrategyConfig(beta_neut_gating_enabled=True),
+        regime_ctx=regime_ctx,
+    )
+    assert out[0].side_hint_2d[:, 0].tolist() == [0, 0]
+
+
+def test_beta_neut_gating_disabled_by_default_no_regression() -> None:
+    panel = _beta_neut_panel()
+    regime_ctx = _regime_ctx([2, 2])
+    out = _attach_signal_context(
+        (panel,),
+        cfg=CandidateStrategyConfig(),
+        regime_ctx=regime_ctx,
+    )
+    assert out[0].side_hint_2d[:, 0].tolist() == [1, 1]
+
+
+def test_beta_neut_masked_by_global_regime_signal_gating_override() -> None:
+    panel = _beta_neut_panel()
+    regime_ctx = _regime_ctx([2, 2])
+    out = _attach_signal_context(
+        (panel,),
+        cfg=CandidateStrategyConfig(regime_signal_gating_enabled=True, beta_neut_gating_enabled=False),
+        regime_ctx=regime_ctx,
+    )
+    assert out[0].side_hint_2d[:, 0].tolist() == [0, 0]
+
+
 # ── G9e. funding_term_structure_carry ─────────────────────────────────────
 
 
