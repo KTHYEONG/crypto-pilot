@@ -217,14 +217,13 @@ STRATEGY ENGINE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ● [LAYER 2: OPTUNA TUNING]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ● [STUDY] l2_study_8h_a81f989457e9
+  ● [STUDY] l2_study_8h_8fd9d58f88b8
   ────────────────────────────────────────────────────────────────────────────
     Optuna DB : SQLite (/home/kth/my_coin_traider/logs/futures/optimization/optuna.db)
     Trials    : 200             | Events  : 80347          
     Symbols   : 40             
   ────────────────────────────────────────────────────────────────────────────
-[L2-OPT]: 100%|██████████████████████████████████████████████████| 200/200 [02:12<00:00,  1.51it/s, Best CAGR: 231.23% | Current: 187.90%]
-  ● [CHAMPION STORE] 신규 챔피언 갱신 (tf=8h, growth_lcb=0.1544)
+[L2-OPT]: 100%|██████████████████████████████████████████████████| 200/200 [02:09<00:00,  1.55it/s, Best CAGR: 231.23% | Current: 214.74%]
   ● [FINAL SIMULATION]
   ● [FINAL SIMULATION RESULT]
   ────────────────────────────────────────────────────────────────────────────
@@ -241,7 +240,7 @@ STRATEGY ENGINE
   ✅ [Risk      ] MDD: 17.4% (<=30.0%) | CVaR95: 1.7% (<=6.0%) | RiskUtil: 58.1%
   ✅ [Robust    ] Fold: 100.0% (>=60.0%) | Trades: 830 (>=30) | Friction: 97.7%
   ✅ [Uplift    ] Sharpe Uplift: +1.13 (>=+0.20)
-  ✅ [Integrity ] DSR: 0.679 (>=0.60) | PSR: 0.983 (diag)
+  ✅ [Integrity ] DSR: 0.720 (>=0.60) | PSR: 0.983 (diag)
   [Diag     ] RelMDD: 1.74x | Turnover: 0.125
 ──────────────────────────────────────────────────────────────────────────────
 
@@ -289,4 +288,3 @@ STRATEGY ENGINE
   >> FINAL RESULT : ❌ BLOCKED (Reason: negative_return)
 
 ================================================================================
-[L2-PARITY-SELFCHECK] side=replay stored=0.506374 recomputed=1.269162 (n_rets=1692 L*=2.064649 bpy=2190.0) -> field/metric DECOUPLED
