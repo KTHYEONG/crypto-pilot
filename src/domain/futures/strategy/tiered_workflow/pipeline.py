@@ -1840,7 +1840,12 @@ def run_l2_awf(
         {
             "fold": i + 1,
             "sharpe": 0.0,
-            "mdd": 0.0,
+            "mdd": (
+                float(eval_result.fold_deployed_mdds[i])
+                if i < len(eval_result.fold_deployed_mdds)
+                and eval_result.fold_deployed_mdds[i] is not None
+                else float("nan")
+            ),
             "cagr": (float(eval_result.fold_deployed_cagrs[i])
                      if i < len(eval_result.fold_deployed_cagrs)
                      and eval_result.fold_deployed_cagrs[i] is not None

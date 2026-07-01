@@ -351,3 +351,28 @@ class TestReversalCooldownScenarios:
         assert reason != "legacy_no_improvement", (
             "no-stress window must not spuriously block with legacy_no_improvement"
         )
+
+
+class TestChampionPromotionGate:
+    """Change 4 결선: _champion_promotion_allowed 게이트 검증."""
+
+    def test_allow_when_all_gates_pass(self) -> None:
+        allowed, reason = opt_main_futures._champion_promotion_allowed(
+            blocker_reason="", has_evaluation=True, crash_fires=True,
+        )
+        assert allowed is True
+        assert reason == ""
+
+    def test_blocked_when_synthetic_crash_gate_fails(self) -> None:
+        allowed, reason = opt_main_futures._champion_promotion_allowed(
+            blocker_reason="", has_evaluation=True, crash_fires=False,
+        )
+        assert allowed is False
+        assert reason == "crash_defense_not_firing"
+
+    def test_study_blocked_regardless_of_crash_gates(self) -> None:
+        allowed, reason = opt_main_futures._champion_promotion_allowed(
+            blocker_reason="no_complete_trials", has_evaluation=False, crash_fires=True,
+        )
+        assert allowed is False
+        assert reason == "study_blocked"
