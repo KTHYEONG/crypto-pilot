@@ -659,9 +659,7 @@ def _ensure_cached_symbol_data_for_targets(
     """Ensure cached parquet data exists for the resolved data-load target symbols."""
     if not symbols:
         return
-    if run_config.sync == "skip":
-        _logger.info("[CACHE] Skip backfill as requested")
-        return
+    # Removed early return on skip to allow ledger and cache diagnostics to be logged
     sync_start_date = window.fetch_start_date
     _logger.debug(
         "[UNIVERSE] 🌐 %s ~ %s | Target: %d symbols",
@@ -2468,25 +2466,17 @@ def _run_strategy_stage(
                 _hard_block = "on" if bool(getattr(tiered_cfg, "l2_regime_hard_block_enabled", False)) else "off"
                 _risk_cap = "on" if bool(getattr(tiered_cfg, "l2_regime_risk_cap_enabled", True)) else "off"
 
+                _comp = "on" if bool(getattr(tiered_cfg, "l2_regime_compression_enabled", True)) else "off"
                 _logger.info(
-                    "[REGIME]\n"
-                    "metric        | value\n"
-                    "compression   | %s\n"
-                    "states        | 3\n"
-                    "status        | %s\n"
-                    "distribution  | %s\n"
-                    "policy_mode   | %s\n"
-                    "hard_block    | %s\n"
-                    "risk_cap      | %s\n"
-                    "policy_source | fit/cal\n"
-                    "oos_debug     | evaluation only\n"
-                    "note          | L2 verdict is reported separately in [REGIME-L2]",
-                    "on" if bool(getattr(tiered_cfg, "l2_regime_compression_enabled", True)) else "off",
-                    _state_status,
-                    _state_dist,
-                    _policy_mode,
-                    _hard_block,
-                    _risk_cap,
+                    "● [MARKET REGIME STATUS]\n"
+                    "──────────────────────────────────────────────────────────────────────────────\n"
+                    f"  Compression  : {_comp:<18} | Policy Mode : {_policy_mode}\n"
+                    f"  States       : 3                  | Status      : {_state_status}\n"
+                    f"  Hard Block   : {_hard_block:<18} | Risk Cap    : {_risk_cap}\n"
+                    f"  Source       : fit/cal            | OOS Debug   : evaluation only\n"
+                    f"  Distribution : {_state_dist}\n"
+                    f"  Note         : L2 verdict is reported separately in [REGIME-L2]\n"
+                    "──────────────────────────────────────────────────────────────────────────────"
                 )
 
             # ── Step B: L2 Optimization Header ──────────────────────────────
@@ -2727,6 +2717,8 @@ def _run_strategy_stage(
             # Tiered Pipeline이 L3까지 수행했으므로 여기서 종료
             if run_config.phase == "l3":
                 return RunnerResult(exit_code=0, reason="tiered_pipeline_completed")
+            if run_config.phase == "l2":
+                return RunnerResult(exit_code=0, reason="tiered_pipeline_l2_completed")
 
             return None  # Phase D allocation 스킵 (Tiered가 대체)
         except TieredPipelineError as _tiered_exc:
@@ -3523,11 +3515,7 @@ def run_pipeline(
         _refresh_regime_c34_gold_standard(*regime_stage_result, strategy_out)
     if run_config.phase == "l1":
         return RunnerResult(exit_code=0, reason="l1_mode_done")
-    if run_config.phase == "l2":
-        _logger.info(
-            "[PHASE] phase=l2 completed strategy/candidate evaluation only; optimization/training skipped"
-        )
-        return RunnerResult(exit_code=0, reason="candidate_evaluation_done")
+    # Optimization stage will be bypassed if strategy_out (RunnerResult) is returned earlier
     # Step 5) optimization + final OOS evaluation
     _logger.info(
         "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"

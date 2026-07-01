@@ -1297,12 +1297,29 @@ def run_historical_sync(
                     fully_updated = False
                     break
         if fully_updated:
+            from src.domain.futures.optimization.observability.run_tracker import _resolve_redis_storage_url
+            try:
+                s_url = _resolve_redis_storage_url()
+                if s_url.startswith(("redis://", "rediss://")):
+                    from urllib.parse import urlparse
+                    parsed = urlparse(s_url)
+                    host_port = parsed.netloc.split("@")[-1] if "@" in parsed.netloc else parsed.netloc
+                    storage_type = f"Redis (JournalRedisBackend, Host: {host_port}, DB: {parsed.path.lstrip('/')})"
+                else:
+                    storage_type = "InMemory"
+            except Exception:
+                storage_type = "InMemory (Fallback)"
+
             logger.info("================================================================================")
             logger.info("LOCAL DATA STORAGE (LEDGER & CACHE STATUS)")
             logger.info("================================================================================")
             logger.info("")
-            logger.info(f"  Sync Mode: {mode.upper()} (Pre-loaded from cache)")
-            logger.info(f"  [SKIPPED] All records in '{ledger_path.name}' are up-to-date. (No sync required)")
+            if mode == "skip":
+                today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
+                logger.info(f"  Sync Mode: SKIP (Reused cache from prior --sync fast on {today_str})")
+            else:
+                logger.info(f"  Sync Mode: {mode.upper()} (Pre-loaded from cache)")
+            logger.info(f"  Optuna DB: {storage_type}")
             logger.info("")
             logger.info("--------------------------------------------------------------------------------")
             return
