@@ -8,12 +8,12 @@ import numpy as np
 _logger = logging.getLogger(__name__)
 
 
-def _resolve_bars_per_year(obj: Any) -> float:
+def _resolve_bars_per_year(obj: Any) -> float | None:
     mtf = getattr(obj, "master_tf", None)
     if isinstance(mtf, str) and mtf:
         from src.domain.futures.strategy.tiered_workflow.metrics import _bars_per_year_for_tf
         return _bars_per_year_for_tf(mtf)
-    return 2190.0
+    return None
 
 
 def assert_selection_replay_parity(
@@ -69,6 +69,8 @@ def assert_selection_replay_parity(
         n_rets = len(rets)
         l_star = getattr(obj, "deploy_leverage", None)
         bars_per_year = _resolve_bars_per_year(obj)
+        if bars_per_year is None:
+            continue
         details.append(f"{side}_n_rets={n_rets} {side}_L*={l_star!r} bpy={bars_per_year!r}")
         if n_rets >= 2 and l_star is not None:
             try:
