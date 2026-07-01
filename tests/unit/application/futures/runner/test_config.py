@@ -46,3 +46,16 @@ class TestBuildRunConfig:
     ) -> None:
         with pytest.raises(ValueError, match=expected_match):
             build_run_config_from_args(args_dict)
+
+    def test_default_sync_mode_is_auto(self) -> None:
+        config = build_run_config_from_args({"phase": "l3", "timeframe": "4h", "trials": 1})
+        assert config.sync == "auto"
+
+    @pytest.mark.parametrize("bad_sync", ["fast", "full", "elite_fast", "force", ""])
+    def test_sync_legacy_or_invalid_values_rejected(self, bad_sync: str) -> None:
+        with pytest.raises(ValueError, match="invalid sync mode"):
+            build_run_config_from_args({"phase": "l3", "trials": 1, "sync": bad_sync})
+
+    def test_sync_skip_is_accepted(self) -> None:
+        config = build_run_config_from_args({"phase": "l3", "trials": 1, "sync": "skip"})
+        assert config.sync == "skip"

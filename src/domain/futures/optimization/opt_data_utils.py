@@ -784,7 +784,15 @@ def load_single_symbol_data(
                         df[_mc] = pd.to_numeric(df[_mc], errors="coerce")
 
                 # Save enriched cache (full date range) for future runs
-                if not enriched_path.exists():
+                raw_parquet_path = FUTURES_DATA_DIR / f"{safe_sym}_{tf_l}.parquet"
+                enriched_stale = (
+                    not enriched_path.exists()
+                    or (
+                        raw_parquet_path.exists()
+                        and enriched_path.stat().st_mtime < raw_parquet_path.stat().st_mtime
+                    )
+                )
+                if enriched_stale:
                     try:
                         wide_df = collector.collect_and_save(sym, tf_l, "1970-01-01", "2099-12-31", fetch_network=False)
                         if wide_df is not None and not wide_df.empty:

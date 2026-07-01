@@ -29,7 +29,7 @@ STRATEGY ENGINE
   ├─ Symbols : 54/65 Admitted
   └─ Details : Base 65 | Dropped 11 (late_start: 11)
 🧬 [L1: MULTI-TF PANEL INJECTION]
-  └─ Active : [12h] Proj=16 Syms=54 | [6h] Proj=14 Syms=54 | [8h] Proj=14 Syms=54
+  └─ Active : [12h] Proj=16 Syms=54 | [8h] Proj=14 Syms=54 | [6h] Proj=14 Syms=54
 
 ● [LAYER 1 OUTER FOLD READINESS]
 ──────────────────────────────────────────────────────────────────────────────
@@ -217,34 +217,41 @@ STRATEGY ENGINE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ● [LAYER 2: OPTUNA TUNING]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[REGIME-L2] active_states=3 compression=True path=regime_conditioned proof=True lift=11.07 t=3.22 fold_pass=0.67
-[REGIME-L2] policy_mode=soft policy_source=fit/cal global_reliable=True allow=248 downweight=16 block=0 pooled=0 unstable=4 hard_block_eligible=0 sign_consistency=0.71 hard_block_enabled=False mean_cal_lift=-24.31 mean_conf=0.98
-  ● [STUDY] l2_study_8h_4a914eb87e78 | trials=200 | events=80347 | symbols=40
+  ● [STUDY] l2_study_8h_a81f989457e9
   ────────────────────────────────────────────────────────────────────────────
-[L2-OPT]:   0%|                                                                                                   | 0/200 [00:00<?, ?it/s][L2-OPT] ProcessPool workers=6 (mem=8.0GB, mem_safe=11, cpu=8, batch=6)
-[L2-OPT]: 100%|██████████████████████████████████████████████████| 200/200 [02:19<00:00,  1.43it/s, Best CAGR: 232.31% | Current: 192.90%]
+    Optuna DB : SQLite (/home/kth/my_coin_traider/logs/futures/optimization/optuna.db)
+    Trials    : 200             | Events  : 80347          
+    Symbols   : 40             
+  ────────────────────────────────────────────────────────────────────────────
+[L2-OPT]: 100%|██████████████████████████████████████████████████| 200/200 [02:12<00:00,  1.51it/s, Best CAGR: 231.23% | Current: 187.90%]
+  ● [CHAMPION STORE] 신규 챔피언 갱신 (tf=8h, growth_lcb=0.1544)
   ● [FINAL SIMULATION]
-[L2-DEPLOY] L*=2.0550 binding=champion | CAGR=0.4995 MDD=0.1748 CVaR95=0.0172 RiskUtil=0.583
+  ● [FINAL SIMULATION RESULT]
+  ────────────────────────────────────────────────────────────────────────────
+    Leverage (L*) : 2.0646 (binding: champion)
+    CAGR / MDD    : +50.6% / 17.4%
+    CVaR95 / Util : 1.7% / 58.1%
+  ────────────────────────────────────────────────────────────────────────────
 ● [LAYER 2 PORTFOLIO SCORECARD] (2025-03-23 ~ 2025-12-30)
 ──────────────────────────────────────────────────────────────────────────────
   STATUS  : ✅ PASS
 
-  ✅ [Growth    ] CAGR: +49.9% (>=30.0%) | PnL: +37.9% | Equity x1.38
-  ✅ [Efficiency] Sharpe: 1.481 (>=1.000) | Sortino: 2.815 (>=1.500) | Calmar: 2.857 (>=1.000)
-  ✅ [Risk      ] MDD: 17.5% (<=30.0%) | CVaR95: 1.7% (<=6.0%) | RiskUtil: 58.3%
+  ✅ [Growth    ] CAGR: +50.6% (>=30.0%) | PnL: +38.2% | Equity x1.38
+  ✅ [Efficiency] Sharpe: 1.483 (>=1.000) | Sortino: 2.822 (>=1.500) | Calmar: 2.903 (>=1.000)
+  ✅ [Risk      ] MDD: 17.4% (<=30.0%) | CVaR95: 1.7% (<=6.0%) | RiskUtil: 58.1%
   ✅ [Robust    ] Fold: 100.0% (>=60.0%) | Trades: 830 (>=30) | Friction: 97.7%
   ✅ [Uplift    ] Sharpe Uplift: +1.13 (>=+0.20)
-  ✅ [Integrity ] DSR: 0.684 (>=0.60) | PSR: 0.983 (diag)
+  ✅ [Integrity ] DSR: 0.679 (>=0.60) | PSR: 0.983 (diag)
   [Diag     ] RelMDD: 1.74x | Turnover: 0.125
 ──────────────────────────────────────────────────────────────────────────────
 
   [ FOLD DETAIL BREAKDOWN ]
   ──────────────────────────────────────────────────────────────────────────
-  ├─ Fold #1 : ✅ Sharpe:  0.000 | CAGR:   +82.5% | MDD:  11.6% | Status: PASS | Period: 2025-03-23 ~ 2025-06-25
+  ├─ Fold #1 : ✅ Sharpe:  2.019 | CAGR:   +81.5% | MDD:  11.7% | Status: PASS | Period: 2025-03-23 ~ 2025-06-25
        Symbols: 19 [1000SHIBUSDT, AAVEUSDT, AXSUSDT, BCHUSDT, BNBUSDT, BTCUSDT, DOGEUSDT, FILUSDT, +11 more]
-  ├─ Fold #2 : ✅ Sharpe:  0.000 | CAGR:   +35.2% | MDD:  17.5% | Status: PASS | Period: 2025-06-25 ~ 2025-09-27
+  ├─ Fold #2 : ✅ Sharpe:  1.277 | CAGR:   +36.9% | MDD:  17.4% | Status: PASS | Period: 2025-06-25 ~ 2025-09-27
        Symbols: 29 [1000SHIBUSDT, AAVEUSDT, ADAUSDT, ATOMUSDT, AVAXUSDT, AXSUSDT, BCHUSDT, BNBUSDT, +21 more]
-  └─ Fold #3 : ✅ Sharpe:  0.000 | CAGR:   +36.6% | MDD:  13.3% | Status: PASS | Period: 2025-09-27 ~ 2025-12-30
+  └─ Fold #3 : ✅ Sharpe:  1.137 | CAGR:   +37.6% | MDD:  13.2% | Status: PASS | Period: 2025-09-27 ~ 2025-12-30
        Symbols: 28 [1000SHIBUSDT, AAVEUSDT, ADAUSDT, ARUSDT, ATOMUSDT, AVAXUSDT, AXSUSDT, BCHUSDT, +20 more]
 
   ⚠️  [WINDOW] NO-CRISIS-WINDOW — 이 평가 윈도우는 병목-caliber fold(MDD>=15% & CAGR<=0)를 포함하지 않음. 승격 근거로 인용 금지 (docs/results/next.md P0).
@@ -257,5 +264,29 @@ STRATEGY ENGINE
 ──────────────────────────────────────────────────────────────────────────────
 
 >> LAYER 2: PASS -> Proceeding to Final Holdout.
->> TARGET PHASE l2 REACHED -> Stopping pipeline.
-[L2-PARITY-SELFCHECK] side=replay stored=0.499472 recomputed=1.248416 (n_rets=1692 L*=2.054970 bpy=2190.0) -> field/metric DECOUPLED
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+● [LAYER 3: FINAL HOLDOUT & DEPLOYMENT READINESS]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+● [LAYER UNIVERSE AUDIT]
+──────────────────────────────────────────────────────────────────────────────
+  LAYER  WINDOW RANGE                    SYMS   ACTIVE (min/med/max)       ENTRY    KILL  WARNINGS
+  ─────  ──────────────────────────────  ────   ────────────────────  ──────────  ──────  ────────
+  L3     2025-12-31 ~ 2026-06-30           54    27 /  31.0 / 34           4,331      10  —
+──────────────────────────────────────────────────────────────────────────────
+
+● [LAYER 3: HOLDOUT VALIDATION SCORECARD] (2025-12-31 ~ 2026-06-30)
+──────────────────────────────────────────────────────────────────────────────
+  STATUS  : ❌ BLOCKED (Reason: negative_return)
+
+  ❌ [GROWTH    ] CAGR: -13.3% | Total Return: -13.2% (> 0.0%) | Equity x0.87
+  ❌ [EFFICIENCY] Sharpe: -0.933 (>=0.000) | Sortino: -1.242 (>=0.000) | Baseline Sharpe: -0.768
+  ✅ [RISK      ] MDD: 24.7% (<= 35.0%) | CVaR95: 1.1% (<= 6.0%) | Exposure: 1.0x
+  ✅ [DEPLOY-READY] Trades: 241 (>= 10)
+──────────────────────────────────────────────────────────────────────────────
+
+  >> FINAL RESULT : ❌ BLOCKED (Reason: negative_return)
+
+================================================================================
+[L2-PARITY-SELFCHECK] side=replay stored=0.506374 recomputed=1.269162 (n_rets=1692 L*=2.064649 bpy=2190.0) -> field/metric DECOUPLED
