@@ -31,7 +31,7 @@ from src.domain.futures.optimization.evaluator import (
     calc_gate1_dsr_from_path_log_tw,
     calc_max_underwater_days_from_equity,
     calc_mdd_from_equity,
-    compute_v3_score,
+    compute_robust_score,
 )
 from src.domain.futures.optimization.ml_context import (
     merge_membership_constraints_into_aligned,
@@ -891,7 +891,7 @@ def _evaluate_awf_phase_d_aggregate(
     cvar_pct = float(max(leg_cvar_pct, default=0.0))
     turnover_cost_ratio = float(np.clip(1.0 / max(ev_cost_ratio, 1e-9), 0.0, 1e6))
 
-    robust_val = compute_v3_score(
+    robust_val = compute_robust_score(
         leg_log_tw=leg_arr,
         worst_mdd=worst_mdd_legs / 100.0,
         cvar_5=cvar_pct / 100.0,
@@ -1075,7 +1075,7 @@ def _evaluate_is_phase_d(
 
     leg_arr = np.asarray(leg_log_tw, dtype=np.float64)
     is_cvar = float(calc_cvar5_loss_pct_from_equity(b_equity)) if b_equity.size > 0 else 0.0
-    robust_val = compute_v3_score(
+    robust_val = compute_robust_score(
         leg_log_tw=leg_arr,
         worst_mdd=is_mdd / 100.0,
         cvar_5=is_cvar / 100.0,

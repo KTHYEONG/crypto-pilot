@@ -160,33 +160,33 @@ def test_get_layered_window_frozen() -> None:
 
 
 # ---------------------------------------------------------------------------
-# S6 — L2_ALLOC_SPACE 재배선 (spec: layer2-signal-utilization.md §2.3)
+# S6 — L2_SEARCH_SPACE 재배선 (spec: layer2-signal-utilization.md §2.3)
 # ---------------------------------------------------------------------------
 
-from src.domain.futures.optimization.opt_config import L2_ALLOC_SPACE
+from src.domain.futures.allocation.search_space import L2_SEARCH_SPACE
 
 
 def test_l2_alloc_space_contains_new_params() -> None:
-    """S6: L2_ALLOC_SPACE_V8 — kelly_fraction/max_ann_vol은 Phase B 결정론 전환으로 제거됨."""
+    """S6: L2_SEARCH_SPACE_V8 — kelly_fraction/max_ann_vol은 Phase B 결정론 전환으로 제거됨."""
     # Fix C: leverage 차원은 탐색 공간에서 제거 → signal 차원만 최적화
-    assert "kelly_fraction" not in L2_ALLOC_SPACE
-    assert "max_ann_vol" not in L2_ALLOC_SPACE
-    assert "K_RANK" in L2_ALLOC_SPACE
-    assert "CS_Z_SCORE_THRESHOLD" in L2_ALLOC_SPACE
+    assert "kelly_fraction" not in L2_SEARCH_SPACE
+    assert "max_ann_vol" not in L2_SEARCH_SPACE
+    assert "K_RANK" in L2_SEARCH_SPACE
+    assert "CS_Z_SCORE_THRESHOLD" in L2_SEARCH_SPACE
 
 
 def test_l2_alloc_space_excludes_dead_params() -> None:
     """S6: RISK_PER_TRADE, MAX_EXPOSURE_PER_COIN, NORM_VAR_CONSTANT 제거됨."""
-    assert "RISK_PER_TRADE" not in L2_ALLOC_SPACE
-    assert "MAX_EXPOSURE_PER_COIN" not in L2_ALLOC_SPACE
-    assert "NORM_VAR_CONSTANT" not in L2_ALLOC_SPACE
+    assert "RISK_PER_TRADE" not in L2_SEARCH_SPACE
+    assert "MAX_EXPOSURE_PER_COIN" not in L2_SEARCH_SPACE
+    assert "NORM_VAR_CONSTANT" not in L2_SEARCH_SPACE
 
 
 def test_l2_alloc_space_max_ann_vol_range() -> None:
     """Fix C: max_ann_vol은 V8에서 탐색 공간 제외 (결정론적 Phase B 배치로 대체)."""
-    assert "max_ann_vol" not in L2_ALLOC_SPACE
+    assert "max_ann_vol" not in L2_SEARCH_SPACE
 
 
 def test_l2_alloc_space_kelly_fraction_range() -> None:
     """Fix C: kelly_fraction은 V8에서 탐색 공간 제외 (결정론적 Phase B 배치로 대체)."""
-    assert "kelly_fraction" not in L2_ALLOC_SPACE
+    assert "kelly_fraction" not in L2_SEARCH_SPACE
