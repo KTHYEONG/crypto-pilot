@@ -649,6 +649,128 @@ def compute_reversal_risk_off_1d(
     return out
 
 
+def compute_xs_downside_breadth_1d(
+    universe_close_2d: NDArray[np.float64],
+    *,
+    mom_window: int,
+) -> NDArray[np.float64]:
+    """각 t에서 mom_window-bar 로그수익 < 0 인 심볼 비율(유효심볼 기준).
+
+    r[t,i] = log(close[t,i] / close[t-mom_window,i]); 유효 = finite & 양수가격.
+    neg_frac[t] = (#유효∧r<0) / max(#유효, 1); t<mom_window 또는 #유효=0 → 0.0.
+    look-ahead 없음(close[t]까지만 사용). 소비측에서 1-bar shift 책임.
+
+    Args:
+        universe_close_2d: [T, N] 종가 배열.
+        mom_window: 모멘텀 산술 기간(bar).
+
+    Returns:
+        [T] float64, 값 ∈ [0,1]. NaN-safe, zero-division safe.
+    """
+    prev = np.full_like(universe_close_2d, np.nan, dtype=np.float64)
+    prev[mom_window:] = universe_close_2d[:-mom_window]
+    valid = (
+        np.isfinite(universe_close_2d)
+        & (universe_close_2d > _EPS)
+        & np.isfinite(prev)
+        & (prev > _EPS)
+    )
+    r = np.where(valid, np.log(universe_close_2d / np.maximum(prev, _EPS)), np.nan)
+    neg = valid & (r < 0.0)
+    denom = valid.sum(axis=1)
+    neg_frac = np.where(denom > 0, neg.sum(axis=1) / np.maximum(denom, 1), 0.0)
+    return neg_frac
+
+
+def compute_market_state_risk_off_1d(
+    btc_close_1d: NDArray[np.float64],
+    universe_close_2d: NDArray[np.float64],
+    *,
+    dd_window: int,
+    dd_threshold: float,
+    mom_fast: int,
+    mom_slow: int,
+    breadth_mom_window: int,
+    breadth_neg_frac_enter: float,
+    breadth_neg_frac_exit: float,
+    persistence_bars: int = 1,
+    recovery_cooldown_bars: int = 0,
+) -> NDArray[np.bool_]:
+    """BTC-axis ∧ breadth-axis AND-게이트 + 비대칭 hysteresis de-gross 마스크.
+
+    btc_off = (trailing_dd >= dd_threshold) & (ema_fast - ema_slow < 0)
+    breadth = compute_xs_downside_breadth_1d(universe_close_2d, mom_window=breadth_mom_window)
+    breadth_on[t] = hysteresis(breadth, enter=breadth_neg_frac_enter, exit=breadth_neg_frac_exit)
+    raw_on[t]  = btc_off[t] & breadth_on[t]
+    persist_on = persistence(raw_on, persistence_bars)
+    state_on   = recovery_hysteresis(persist_on, raw_on, recovery_cooldown_bars)
+    return shift1(state_on)
+
+    Args:
+        btc_close_1d: BTC 종가 [T].
+        universe_close_2d: 유니버스 종가 [T, N].
+        dd_window: trailing drawdown window.
+        dd_threshold: drawdown 임계.
+        mom_fast: fast EMA span.
+        mom_slow: slow EMA span (must be > mom_fast).
+        breadth_mom_window: breadth 모멘텀 window.
+        breadth_neg_frac_enter: breadth 진입 임계.
+        breadth_neg_frac_exit: breadth 해제 임계 (hysteresis).
+        persistence_bars: 연속 발화 요구 bar 수.
+        recovery_cooldown_bars: raw-off 해제 대기 bar 수.
+
+    Returns:
+        [T] bool, 1-bar shift 적용 (t에서 t-1 결정).
+    """
+    t = btc_close_1d.shape[0]
+    if t == 0:
+        return np.empty(0, dtype=np.bool_)
+
+    high_water = _rolling_max_1d(btc_close_1d, dd_window)
+    dd = 1.0 - btc_close_1d / np.maximum(high_water, _EPS)
+    mom_fast_ema = _ema_1d(btc_close_1d, mom_fast)
+    mom_slow_ema = _ema_1d(btc_close_1d, mom_slow)
+    mom = mom_fast_ema - mom_slow_ema
+    btc_off = (dd >= dd_threshold) & (mom < 0.0)
+
+    breadth = compute_xs_downside_breadth_1d(universe_close_2d, mom_window=breadth_mom_window)
+
+    b_on = False
+    breadth_on: NDArray[np.bool_] = np.zeros(t, dtype=np.bool_)
+    for i in range(t):
+        if not b_on and breadth[i] >= breadth_neg_frac_enter:
+            b_on = True
+        elif b_on and breadth[i] < breadth_neg_frac_exit:
+            b_on = False
+        breadth_on[i] = b_on
+
+    raw_on = btc_off & breadth_on
+
+    if persistence_bars > 1:
+        run_count = 0
+        persist_on: NDArray[np.bool_] = np.zeros_like(raw_on)
+        for i in range(raw_on.shape[0]):
+            run_count = run_count + 1 if bool(raw_on[i]) else 0
+            persist_on[i] = run_count >= persistence_bars
+    else:
+        persist_on = raw_on
+
+    s_on = False
+    off_run = 0
+    state: NDArray[np.bool_] = np.zeros(t, dtype=np.bool_)
+    for i in range(t):
+        if bool(persist_on[i]):
+            s_on = True
+            off_run = 0
+        elif s_on:
+            off_run = off_run + 1 if not bool(raw_on[i]) else 0
+            if off_run >= max(recovery_cooldown_bars, 1) and not bool(raw_on[i]):
+                s_on = False
+        state[i] = s_on
+
+    return np.concatenate([[False], state[:-1]]).astype(np.bool_)
+
+
 def evaluate_regime_quality(
     *,
     aligned: AlignedMarketData,
