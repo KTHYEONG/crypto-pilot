@@ -7,14 +7,12 @@ import logging
 import math
 import os
 import signal
-import socket
 import subprocess
 import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import optuna
 import optuna.storages.journal
@@ -35,57 +33,7 @@ from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 _logger: logging.Logger = logging.getLogger("run_tracker")
 
 
-def _resolve_redis_storage_url() -> str:
-    """Resolve Redis storage URL with explicit environment precedence.
-
-    Priority:
-    1) FUTURES_REDIS_URL
-    2) FUTURES_REDIS_HOST (+ PORT/DB/PASSWORD/TLS flags)
-    3) OPT_FUTURES_CONFIG["FUTURES_REDIS_URL"]
-    """
-    env_url = os.getenv("FUTURES_REDIS_URL")
-    if env_url:
-        return env_url
-    env_host = os.getenv("FUTURES_REDIS_HOST")
-    if env_host:
-        scheme = "rediss" if os.getenv("FUTURES_REDIS_TLS", "0") == "1" else "redis"
-        port = int(os.getenv("FUTURES_REDIS_PORT", "6379"))
-        db = int(os.getenv("FUTURES_REDIS_DB", "0"))
-        password = os.getenv("FUTURES_REDIS_PASSWORD", "").strip()
-        auth = f":{password}@" if password else ""
-        return f"{scheme}://{auth}{env_host}:{port}/{db}"
-    return str(OPT_FUTURES_CONFIG.get("FUTURES_REDIS_URL", "redis://127.0.0.1:6379/0"))
-
-
-def _preflight_redis_endpoint(storage_url: str) -> None:
-    """Fast connectivity preflight before Optuna JournalRedisStorage init."""
-    parsed = urlparse(storage_url)
-    if parsed.scheme not in {"redis", "rediss"}:
-        raise RuntimeError(
-            "FUTURES_REDIS_URL must use redis:// or rediss:// "
-            f"(got: {storage_url!r})"
-        )
-    host = parsed.hostname or "127.0.0.1"
-    port = int(parsed.port or 6379)
-    timeout_s = float(os.getenv("FUTURES_REDIS_CONNECT_TIMEOUT_SEC", "1.5"))
-    retries = int(os.getenv("FUTURES_REDIS_CONNECT_RETRIES", "2"))
-    retries = max(1, retries)
-
-    last_err: Exception | None = None
-    for attempt in range(1, retries + 1):
-        try:
-            with socket.create_connection((host, port), timeout=timeout_s):
-                return
-        except OSError as exc:
-            last_err = exc
-            if attempt < retries:
-                time.sleep(0.2)
-
-    raise RuntimeError(
-        "Redis preflight failed for Optuna storage. "
-        f"url={storage_url} endpoint={host}:{port} timeout={timeout_s}s retries={retries} "
-        f"cause={last_err!r}"
-    ) from last_err
+# Removed Redis connection helper functions
 
 
 def _normalize_phase_workers(phase_workers: dict[str, int]) -> dict[str, int]:
@@ -169,25 +117,30 @@ def log_optuna_contract(
 
 
 def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages.BaseStorage]:
-    """Set up Optuna storage via Redis JournalStorage."""
-    del project_root
-    local_storage_url = os.getenv("FUTURES_OPTUNA_STORAGE_URL", "").strip()
-    if local_storage_url:
-        local_storage = optuna.storages.RDBStorage(
-            local_storage_url,
-            engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}},
-        )
-        return local_storage_url, local_storage
+    """SQLite WAL 기반 RDBStorage를 생성하고 반환한다.
 
-    storage_url = _resolve_redis_storage_url()
-    # _logger.info("   [OPTUNA] Storage: %s", storage_url)
-    _preflight_redis_endpoint(storage_url)
-    import warnings
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=FutureWarning, module="optuna.storages")
-        storage: optuna.storages.BaseStorage = optuna.storages.JournalStorage(
-            optuna.storages.journal.JournalRedisBackend(storage_url)
-        )
+    Returns:
+        (storage_url, storage) 튜플.
+        storage_url: "sqlite:///absolute/path/to/optuna.db" 형식.
+    """
+    import sqlite3
+
+    db_dir = Path(project_root) / "logs" / "futures" / "optimization"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    db_path = db_dir / "optuna.db"
+    
+    # Enable SQLite WAL mode before initializing optuna RDBStorage to prevent DB lock contention
+    with contextlib.suppress(Exception):
+        with sqlite3.connect(str(db_path), timeout=10.0) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+
+    storage_url = f"sqlite:///{db_path.resolve()}"
+    storage = optuna.storages.RDBStorage(
+        storage_url,
+        engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}},
+    )
+
     return storage_url, storage
 
 
@@ -464,18 +417,9 @@ def optimize_worker(s_name: str, s_url: str, chunk_size: int) -> None:
     objective_fn = _GLOBAL_OBJECTIVE_FN
 
     # Each process loads the study and runs its portion of trials
-    inner_storage: optuna.storages.BaseStorage
-    if s_url.startswith("redis://"):
-        import warnings
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=FutureWarning, module="optuna.storages")
-            inner_storage = optuna.storages.JournalStorage(
-                optuna.storages.journal.JournalRedisBackend(s_url)
-            )
-    else:
-        inner_storage = optuna.storages.RDBStorage(
-            s_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}}
-        )
+    inner_storage = optuna.storages.RDBStorage(
+        s_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}}
+    )
     study = optuna.load_study(study_name=s_name, storage=inner_storage)
     trial_timeout_sec = int(OPT_FUTURES_CONFIG.get("FUTURES_OPT_TRIAL_TIMEOUT_SEC", 180))
 
@@ -865,7 +809,6 @@ def run_optimization_loop(
     import multiprocessing
     import os
     import threading
-    import time
     from concurrent.futures import ProcessPoolExecutor, TimeoutError
 
     import optuna
@@ -930,18 +873,9 @@ def run_optimization_loop(
     stop_event = threading.Event()
 
     def progress_poller(s_name: str, s_url: str, target: int, r_id: str | None) -> None:
-        poller_storage: optuna.storages.BaseStorage
-        if s_url.startswith("redis://"):
-            import warnings
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=FutureWarning, module="optuna.storages")
-                poller_storage = optuna.storages.JournalStorage(
-                    optuna.storages.journal.JournalRedisBackend(s_url)
-                )
-        else:
-            poller_storage = optuna.storages.RDBStorage(
-                s_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}}
-            )
+        poller_storage = optuna.storages.RDBStorage(
+            s_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}}
+        )
         try:
             study = optuna.load_study(study_name=s_name, storage=poller_storage)
             with tqdm(total=target, desc=f"  {phase_label:<32}", unit="trial", leave=True) as pbar:

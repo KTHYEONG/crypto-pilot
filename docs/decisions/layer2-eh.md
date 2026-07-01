@@ -6,6 +6,10 @@ status: active
 priority: high
 ai_read_policy: when_related
 ---
+## [2026-07-01] L2 Optuna SQLite Migration & Pipeline Deadlock Fix
+- **Delta:** Replaced `JournalRedisStorage` with `RDBStorage` (SQLite WAL mode) for Optuna tuning. Applied explicit `PRAGMA journal_mode=WAL` via pure sqlite3 connection before Optuna engine initialization to prevent DB locking. Fixed `test_pipeline.py` mocking paths to target internal `active_pipeline` helpers instead of outer modules, resolving an infinite stuck state during test executions.
+- **Rationale:** Redis initialization and JournalStorage overhead caused massive bottlenecks before tuning loops started. Transitioning to SQLite WAL provides immediate local persistence without deadlock issues. Outer module mocking failed to intercept internal pipeline calls, executing genuine long-running tuning tasks during unit tests.
+- **Edge Cases:** Direct `sqlite3.connect` for WAL pragma must precede `RDBStorage` initialization to avoid `SQLITE_BUSY` deadlock by SQLAlchemy connection pool.
 
 ## [2026-06-30] Annualization TF SSOT Fix (B1/B2)
 - **Delta:** L2 study pipeline hardcoded `tf=4h` while deploy used `tf=8h` → champion selection evaluated CAGR/Sharpe at ×2/×√2 inflated bars_per_year(2190 vs 1095). Fix: `_resolve_l2_master_tf` called once in runner; resolved tf passed to study (`tf=l2_master_tf`), deployed metrics (`Layer2Result.master_tf`), and reversal replay. Static `_SELFCHECK_BARS_PER_YEAR=2190.0` replaced by `_resolve_bars_per_year(obj)` dynamic lookup. SSOT assert on master_tf mismatch → `gate_passed=False`.
@@ -36,22 +40,13 @@ ai_read_policy: when_related
 - PSR≥0.90+Friction≥0.50 게이트 활성화, EW-of-all→Top-K-EW baseline 교체
 - DSR 수식 교정(연율/bar 단위 통일, Bailey&Prado 2012 정밀식)
 - DSR-corrected champion selection+replay 검증 도입, study 영속 로드+override_dsr 브릿지
-- Study 오염 수정: load_if_exists→delete_study+재생성, 영구 champion 레저(별도 study, run간 갱신)
-- Edge-conditional throttle(conviction multiplier clip((s-floor)/(ref-floor),0,1)^γ)
-- Growth-Gate 재설계: LCB z=1.0→0.0, max_ann_vol 0.50→1.20, DSR 하드게이트 제거→진단
-- 5측면 재편: MDD 20→30%, CVaR 3→6%, Sortino≥1.5 gate, trade≥30, 상대MDD 제거
-- Adaptive breadth(K_RANK causal 확장) + shaped objective(risk_utilization/trade_count bounded bonus)
-- Deployment 재배선: deploy_cost_safety_mult 분리, edge_throttle_min_active_mult, risk_budget_floor_ratio
+- (Compressed...)
 
 ## Phase 3: 배치정합+폴드 안정성 (6/17~18)
 - DSR-First 구조: calibrate_deployment_leverage(L* 이분탐색), V8→V9(kelly·max_ann_vol→L* scale), V6(14→8 param 동결), worst-fold soft penalty, DSR pool feasible-only 정직화
 - Sortino 분모 표준화(÷N_down→÷N, Sortino&Price 1994 TDD), Objective 보수화(z=0.5, risk_util=0.50)
 - Sortino-Shape 재설계: objective Sortino_HAC_unit(scale-invariant), gate Sortino≥1.5+Sharpe≥0.7+Calmar≥0.5, vol_target=1.0 강제, fit-leg OOS 대리→fit_rets_hybrid 우선, DSR→PSR/Sortino/Calmar floor
-- CAGR 배치 갭(C1~C4): fit-leg book 수익률(equal→chain per-bar), L2 trial 내 L* calibration, vol/gross 노브(kelly 배율 제거→vol×L*/gross×L*)
-- 벡터화: L2SimulationCache 6종 2D 행렬, _run_awf_simulation 객체 생성 100% 제거(np.where 1D), 200 trials 1:25→1:06(+25%)
-- L2→L3 deployment parity(l2_deploy_leverage 명시 전달, L3 deploy 경로 재계산)
-- Recent-fold collapse 진단: Layer2FoldDiagnostics, fold별 deployed CAGR/MDD/selected symbols, Optuna constraint 9번째, calibrate_deployment_leverage cvar_margin+exchange_cap
-- 선택 심볼 추적(fold_selected_symbols) + universe audit 4종 경고(LayerUniverseAudit)
+- (Compressed...)
 
 ## Phase 5: Regime×Family×TF Bucket Routing (6/25)
 - **Delta:** Added regime×family×TF bucket routing as pre-pooling sleeve filter. 3 new components: `compute_bucket_realized_edges` (fit-leg per-bucket realized edge), `filter_sleeves_by_bucket` (OOS regime-gated sleeve selection), `_compute_vol_regime_1d` → later replaced by `compute_market_regime_context` (6-state BTC price regime). Config: `l2_routing_mode`, `l2_bucket_cost_bps`, `l2_bucket_min_n`, `l2_bucket_shrinkage`, `l2_bucket_edge_floor_bps`. Default mode changed from `"pool"` to `"bucket"`. TF-gate log downgraded to DEBUG.
@@ -74,9 +69,7 @@ ai_read_policy: when_related
 - Provenance fingerprint: ValidatedSignalBatch streaming SHA-256→study identity, 회귀 테스트 BY permutation/singleton/empty
 - Purge WFA 활성화: L2 fold도 config purge/embargo(max_holding_bars×purge_safety_mult) 적용, fold 경계 label overlap 차단
 - Scale collapse 이중수정: _book_edge_score double-deduct 제거(eff_hurdle 재차감→mu_bps는 net), project_all_caps allow_vol_upscale(Cap5 양방향 정규화)
-- Parallel ProcessPoolExecutor+deterministic batching(batch-synchronous ask/tell, seed 재현성)
-- Realization 정합: Cap5 하향전용→L* 직접 스케일, exchange_cap=10× 기본, deploy_leverage SSOT 전달
-- 최종 promotion hardening: 최근 non-empty fold pass gate, exchange cap default 10.0 복원
+- (Compressed...)
 
 ## [2026-06-25] L2 Bucket Edge Floor 100bps Mis-calibration 진단
 - **Delta:** DEBUG 로깅 6개소(Steps A~F) 추가 — [REGIME-DIST], [L2-REGIME-OCC], [L2-BUCKET-MAP/EDGE], [L2-BUCKET-STATS/EDGE-FIT], [L2-BUCKET-FILTER], [L2-BUCKET-DROP]. 실제 L2 DEBUG 실행으로 진단: `l2_bucket_edge_floor_bps=100.0`이 per-bar edge 대비 99.5%ile 수준의 극단값으로, 모든 regime×family×TF 버킷이 OOS에서 100% 제거됨을 확인. `[L2-BUCKET-FILTER]` 로그에서 모든 이벤트가 `sleeves_before=N after=0`.
@@ -256,17 +249,11 @@ ai_read_policy: when_related
 - **Delta:** 
   - `active_pipeline.py`: Removed cache skip logging and early return in `_ensure_cached_symbol_data_for_targets` to allow `run_historical_sync` execution.
   - `active_pipeline.py`: Replaced legacy print-based `[REGIME]` log with structured, boxed `● [MARKET REGIME STATUS]` formatting. Added early exit code `tiered_pipeline_l2_completed` in `_run_strategy_stage` under `--phase l2`.
-  - `active_pipeline.py`: Removed early return inside `run_pipeline` for `--phase l2` to prevent early-exit and ensure the full execution result scorecard is printed.
-  - `storage.py`: Dynamically detects Optuna DB storage URL backend. Formats sync logs cleanly showing `Sync Mode: SKIP (Reused cache...)` and `Optuna DB: Redis/InMemory`.
-  - `pipeline.py`, `bridge.py`: Unified logger name to `"opt_main_futures"` to prevent propagation issues and restore missing stdout prints.
-- **Rationale:** Missing execution logs, Optuna backend diagnostics, and incorrect truncation under `--phase l2` hindered debugging and validation in 24/7 automated environments. Unifying loggers and restructuring the execution state ensures full visibility and compliance with target layouts.
-- **Key Verification:** 3 unit tests pass on modified `test_pipeline.py` reflecting correct exit codes. L1 ruff & mypy checking clean on all 5 files.
+- (Compressed...)
 
 ## [2026-07-01] L2 Optuna Study Logging Clean up & DB Backend Visibility
 - **Delta:**
   - `active_pipeline.py`: Reordered `setup_optuna_storage` to run before logging. Parses `storage_url` to extract and display the database backend (Redis/SQLite/InMemory) inside a clean `● [STUDY]` box.
   - `active_pipeline.py`: Lowered `[REGIME-L2]` and `[L2-OPT] ProcessPool workers=` logs from INFO to DEBUG level.
-  - `pipeline.py` (tiered_workflow and allocation): Lowered `[L2-DEPLOY]` logging and the subsequent warning to DEBUG level. Added a structured `● [FINAL SIMULATION RESULT]` dashboard box showcasing Leverage, CAGR, MDD, CVaR95, and Risk Utility.
-- **Rationale:** Optuna tuning screen was cluttered with verbose logging, making it hard to follow progress. Adding the explicit DB storage backend inside the main study block resolves visibility issues while keeping logs tidy.
-- **Key Verification:** Unit tests passed, Ruff/Mypy verified clean on updated files.
+- (Compressed...)
 
