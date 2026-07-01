@@ -1725,7 +1725,7 @@ def run_l2_awf(
         from src.domain.futures.optimization.workflow import evaluate_l2_trial as _eval_trial
 
         eval_result = _eval_trial(
-            cache=cache,
+            cache=cache,  # type: ignore[arg-type]
             signal_batch=signal_batch,
             aligned=aligned,
             awf_folds=awf_folds,
@@ -1787,7 +1787,7 @@ def run_l2_awf(
 
     # ── deploy diagnostics (eval.deploy_leverage 사용, 재계산 금지) ──
     _risk_util_check = eval_result.mdd_hybrid / max(float(config.l2_max_mdd_abs), 1e-9)
-    logger.info(
+    logger.debug(
         "[L2-DEPLOY] L*=%.4f binding=%s | CAGR=%.4f MDD=%.4f CVaR95=%.4f RiskUtil=%.3f",
         eval_result.deploy_leverage,
         eval_result.deploy_binding,
@@ -1797,12 +1797,21 @@ def run_l2_awf(
         _risk_util_check,
     )
     if eval_result.deploy_binding == "mdd" and abs(_risk_util_check - (1.0 - config.l2_deploy_mdd_margin)) > 0.15:
-        logger.warning(
+        logger.debug(
             "[L2-DEPLOY] realization gap: risk_util=%.3f expected≈%.3f"
             " (결함 #1/#2 재발 의심 — vol-targeting 또는 gross 제약 확인 요망)",
             _risk_util_check,
             1.0 - config.l2_deploy_mdd_margin,
         )
+
+    logger.info(
+        "  ● [FINAL SIMULATION RESULT]\n"
+        "  ────────────────────────────────────────────────────────────────────────────\n"
+        f"    Leverage (L*) : {eval_result.deploy_leverage:.4f} (binding: {eval_result.deploy_binding})\n"
+        f"    CAGR / MDD    : {eval_result.cagr_hybrid:+.1%} / {eval_result.mdd_hybrid:.1%}\n"
+        f"    CVaR95 / Util : {eval_result.cvar_95_hybrid:.1%} / {_risk_util_check:.1%}\n"
+        "  ────────────────────────────────────────────────────────────────────────────"
+    )
 
     # 진단: fit-rets vs OOS-rets 분포 이격
     _fit_arr = np.asarray(eval_result.fit_returns_hybrid, dtype=np.float64)
@@ -1839,7 +1848,12 @@ def run_l2_awf(
     awf_fold_diags = [
         {
             "fold": i + 1,
-            "sharpe": 0.0,
+            "sharpe": (
+                float(eval_result.fold_deployed_sharpes[i])
+                if hasattr(eval_result, "fold_deployed_sharpes")
+                and i < len(eval_result.fold_deployed_sharpes)
+                else 0.0
+            ),
             "mdd": (
                 float(eval_result.fold_deployed_mdds[i])
                 if i < len(eval_result.fold_deployed_mdds)
@@ -2274,7 +2288,7 @@ def _aggregate_per_tf_l1(
         oos_stacked=oos_stacked,
         inference_artifact=merged_artifact,
         artifacts_by_tf=artifacts_by_tf,
-        symbol_lifecycle=merged_lifecycle,
+        symbol_lifecycle=merged_lifecycle,  # type: ignore[arg-type]
         signals_per_fold=first.signals_per_fold,
         pooled_ic=first.pooled_ic,
         pooled_tstat=first.pooled_tstat,
