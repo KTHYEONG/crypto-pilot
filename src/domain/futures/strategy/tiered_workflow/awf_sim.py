@@ -1477,10 +1477,17 @@ def _reversal_config_from_env() -> RegimeConfig:
         "L2_REVERSAL_MOM_FAST": "reversal_mom_fast",
         "L2_REVERSAL_MOM_SLOW": "reversal_mom_slow",
         "L2_REVERSAL_PERSISTENCE_BARS": "reversal_persistence_bars",
+        "L2_REVERSAL_BREADTH_WINDOW": "breadth_mom_window",
+        "L2_REVERSAL_RECOVERY_COOLDOWN": "reversal_recovery_cooldown_bars",
     }
     _env_float_keys = {
         "L2_REVERSAL_DD_THRESHOLD": "reversal_dd_threshold",
         "L2_REVERSAL_RISK_OFF_FLOOR": "reversal_risk_off_floor",
+        "L2_REVERSAL_BREADTH_ENTER": "breadth_neg_frac_enter",
+        "L2_REVERSAL_BREADTH_EXIT": "breadth_neg_frac_exit",
+    }
+    _env_str_keys = {
+        "L2_REVERSAL_MODE": "reversal_mode",
     }
     defaults = RegimeConfig()
     dd_window: int = defaults.reversal_dd_window
@@ -1489,6 +1496,11 @@ def _reversal_config_from_env() -> RegimeConfig:
     mom_slow: int = defaults.reversal_mom_slow
     risk_off_floor: float = defaults.reversal_risk_off_floor
     persistence_bars: int = defaults.reversal_persistence_bars
+    breadth_mom_window: int = defaults.breadth_mom_window
+    reversal_recovery_cooldown_bars: int = defaults.reversal_recovery_cooldown_bars
+    breadth_neg_frac_enter: float = defaults.breadth_neg_frac_enter
+    breadth_neg_frac_exit: float = defaults.breadth_neg_frac_exit
+    reversal_mode: str = defaults.reversal_mode
     for env_key, attr in _env_int_keys.items():
         val = os.environ.get(env_key)
         if val is not None:
@@ -1501,6 +1513,10 @@ def _reversal_config_from_env() -> RegimeConfig:
                 mom_slow = ival
             elif attr == "reversal_persistence_bars":
                 persistence_bars = ival
+            elif attr == "breadth_mom_window":
+                breadth_mom_window = ival
+            elif attr == "reversal_recovery_cooldown_bars":
+                reversal_recovery_cooldown_bars = ival
     for env_key, attr in _env_float_keys.items():
         val = os.environ.get(env_key)
         if val is not None:
@@ -1509,6 +1525,14 @@ def _reversal_config_from_env() -> RegimeConfig:
                 dd_threshold = fval
             elif attr == "reversal_risk_off_floor":
                 risk_off_floor = fval
+            elif attr == "breadth_neg_frac_enter":
+                breadth_neg_frac_enter = fval
+            elif attr == "breadth_neg_frac_exit":
+                breadth_neg_frac_exit = fval
+    for env_key, attr in _env_str_keys.items():
+        val = os.environ.get(env_key)
+        if val is not None and attr == "reversal_mode":
+            reversal_mode = val
     return RegimeConfig(
         reversal_dd_window=dd_window,
         reversal_dd_threshold=dd_threshold,
@@ -1516,6 +1540,11 @@ def _reversal_config_from_env() -> RegimeConfig:
         reversal_mom_slow=mom_slow,
         reversal_risk_off_floor=risk_off_floor,
         reversal_persistence_bars=persistence_bars,
+        breadth_mom_window=breadth_mom_window,
+        reversal_recovery_cooldown_bars=reversal_recovery_cooldown_bars,
+        breadth_neg_frac_enter=breadth_neg_frac_enter,
+        breadth_neg_frac_exit=breadth_neg_frac_exit,
+        reversal_mode=reversal_mode,
     )
 
 
@@ -2017,7 +2046,7 @@ def _run_awf_simulation(
     # L2_TREND_EFFICIENCY_GATE: Kaufman ER 기반 trend sleeve exposure gate
     _trend_gate_enabled = os.environ.get("L2_TREND_EFFICIENCY_GATE", "") not in ("", "0", "false", "False")
     _trend_efficiency_1d: NDArray[np.float64] | None = None
-    if _trend_gate_enabled:
+    if _trend_gate_enabled or _diag:
         try:
             from src.domain.futures.strategy.market_regime import compute_market_regime_context
             _trend_efficiency_1d = compute_market_regime_context(aligned=aligned).trend_efficiency_1d
@@ -2034,10 +2063,13 @@ def _run_awf_simulation(
     # L2_REVERSAL_KILL: market reversal kill-switch
     _reversal_kill_enabled = os.environ.get("L2_REVERSAL_KILL", "") not in ("", "0", "false", "False")
     _risk_off_1d: NDArray[np.bool_] | None = None
+    _breadth_diag_1d: NDArray[np.float64] | None = None
     if _reversal_kill_enabled:
         try:
             from src.domain.futures.strategy.market_regime import (
+                compute_market_state_risk_off_1d,
                 compute_reversal_risk_off_1d,
+                compute_xs_downside_breadth_1d,
             )
             _rev_cfg = _reversal_config_from_env()
             _btc_sym_idx = next((i for i, s in enumerate(aligned.symbols) if "BTC" in s.upper()), 0)
@@ -2045,14 +2077,34 @@ def _run_awf_simulation(
                 aligned.close_2d[:, _btc_sym_idx],
                 1e-12,
             )
-            _risk_off_1d = compute_reversal_risk_off_1d(
-                _btc_close_1d,
-                dd_window=_rev_cfg.reversal_dd_window,
-                dd_threshold=_rev_cfg.reversal_dd_threshold,
-                mom_fast=_rev_cfg.reversal_mom_fast,
-                mom_slow=_rev_cfg.reversal_mom_slow,
-                persistence_bars=_rev_cfg.reversal_persistence_bars,
-            )
+            if _rev_cfg.reversal_mode == "panel":
+                _risk_off_1d = compute_market_state_risk_off_1d(
+                    _btc_close_1d,
+                    np.asarray(aligned.close_2d, dtype=np.float64),
+                    dd_window=_rev_cfg.reversal_dd_window,
+                    dd_threshold=_rev_cfg.reversal_dd_threshold,
+                    mom_fast=_rev_cfg.reversal_mom_fast,
+                    mom_slow=_rev_cfg.reversal_mom_slow,
+                    breadth_mom_window=_rev_cfg.breadth_mom_window,
+                    breadth_neg_frac_enter=_rev_cfg.breadth_neg_frac_enter,
+                    breadth_neg_frac_exit=_rev_cfg.breadth_neg_frac_exit,
+                    persistence_bars=_rev_cfg.reversal_persistence_bars,
+                    recovery_cooldown_bars=_rev_cfg.reversal_recovery_cooldown_bars,
+                )
+            else:
+                _risk_off_1d = compute_reversal_risk_off_1d(
+                    _btc_close_1d,
+                    dd_window=_rev_cfg.reversal_dd_window,
+                    dd_threshold=_rev_cfg.reversal_dd_threshold,
+                    mom_fast=_rev_cfg.reversal_mom_fast,
+                    mom_slow=_rev_cfg.reversal_mom_slow,
+                    persistence_bars=_rev_cfg.reversal_persistence_bars,
+                )
+            if _diag:
+                _breadth_diag_1d = compute_xs_downside_breadth_1d(
+                    np.asarray(aligned.close_2d, dtype=np.float64),
+                    mom_window=_rev_cfg.breadth_mom_window,
+                )
         except Exception:
             _risk_off_1d = None
     _risk_off_price_pairs_by_fold: list[list[tuple[bool, float]]] = [[] for _ in awf_folds]
@@ -2666,7 +2718,7 @@ def _run_awf_simulation(
                 _fold_h.append(r_h)
                 _fold_b.append(r_b)
 
-            if _trend_gate_enabled and _trend_efficiency_1d is not None:
+            if (_trend_gate_enabled or _diag) and _trend_efficiency_1d is not None:
                 _rebal_price_delta = _attr_price - _prev_rebal_price
                 _prev_rebal_price = _attr_price
                 _td_arr: NDArray[np.float64] = _trend_efficiency_1d
@@ -2748,6 +2800,18 @@ def _run_awf_simulation(
                     for _rc in (0, 1, 2)
                 )
                 logger.debug("[L2-ATTR-REGIME] fold=%d %s", _attr.fold_idx, _reg_parts)
+            if _breadth_diag_1d is not None:
+                _bd_slice = _breadth_diag_1d[fold.oos_start:fold.oos_end]
+                _bd_valid = _bd_slice[np.isfinite(_bd_slice)]
+                if _bd_valid.size > 0:
+                    _bd_mean = float(np.mean(_bd_valid))
+                    _bd_p90 = float(np.percentile(_bd_valid, 90))
+                    logger.debug(
+                        "[L2-PANEL-DIAG] fold=%d breadth_mean=%.4f breadth_p90=%.4f "
+                        "btc_off_bars=%d roff_price=%.6f",
+                        _attr.fold_idx, _bd_mean, _bd_p90,
+                        _attr.risk_off_bars, _attr.risk_off_realized_price,
+                    )
         if _diag and logger.isEnabledFor(logging.DEBUG):
             _waterfall = _assemble_edge_waterfall(
                 fold_idx=_fold_idx,
