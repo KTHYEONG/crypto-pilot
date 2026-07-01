@@ -261,3 +261,12 @@ ai_read_policy: when_related
   - `pipeline.py`, `bridge.py`: Unified logger name to `"opt_main_futures"` to prevent propagation issues and restore missing stdout prints.
 - **Rationale:** Missing execution logs, Optuna backend diagnostics, and incorrect truncation under `--phase l2` hindered debugging and validation in 24/7 automated environments. Unifying loggers and restructuring the execution state ensures full visibility and compliance with target layouts.
 - **Key Verification:** 3 unit tests pass on modified `test_pipeline.py` reflecting correct exit codes. L1 ruff & mypy checking clean on all 5 files.
+
+## [2026-07-01] L2 Optuna Study Logging Clean up & DB Backend Visibility
+- **Delta:**
+  - `active_pipeline.py`: Reordered `setup_optuna_storage` to run before logging. Parses `storage_url` to extract and display the database backend (Redis/SQLite/InMemory) inside a clean `● [STUDY]` box.
+  - `active_pipeline.py`: Lowered `[REGIME-L2]` and `[L2-OPT] ProcessPool workers=` logs from INFO to DEBUG level.
+  - `pipeline.py` (tiered_workflow and allocation): Lowered `[L2-DEPLOY]` logging and the subsequent warning to DEBUG level. Added a structured `● [FINAL SIMULATION RESULT]` dashboard box showcasing Leverage, CAGR, MDD, CVaR95, and Risk Utility.
+- **Rationale:** Optuna tuning screen was cluttered with verbose logging, making it hard to follow progress. Adding the explicit DB storage backend inside the main study block resolves visibility issues while keeping logs tidy.
+- **Key Verification:** Unit tests passed, Ruff/Mypy verified clean on updated files.
+

@@ -253,6 +253,7 @@ class Layer2TrialEvaluation:
     latest_to_median_cagr: float = 0.0
     fold_deployed_cagrs: tuple[float | None, ...] = ()
     fold_deployed_mdds: tuple[float | None, ...] = ()
+    fold_deployed_sharpes: tuple[float, ...] = ()
     fold_selected_symbols: tuple[tuple[str, ...], ...] = ()
     worst_fold_cagr: float = float("nan")
     positive_block_delta_ratio: float = float("nan")
