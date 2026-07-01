@@ -233,6 +233,7 @@ class Layer2TrialEvaluation:
     cap_saturation_ratio: float
     total_cost_bps: float
     block_metrics: tuple[Layer2BlockMetric, ...]
+    master_tf: str = "4h"  # annualization tf SSOT — bars_per_year 재구성용
     returns_hybrid: tuple[float, ...] = ()
     returns_baseline: tuple[float, ...] = ()
     sharpe_hybrid: float = 0.0
