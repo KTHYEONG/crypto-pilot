@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 ActivePhase = Literal["l1", "l2", "l3"]
-SyncMode = Literal["full", "fast", "skip"]
+SyncMode = Literal["auto", "skip"]
 
 _ACTIVE_PHASES: frozenset[str] = frozenset({"l1", "l2", "l3"})
 _REMOVED_PHASES: frozenset[str] = frozenset({"strategy-smoke", "quick-backtest"})
@@ -56,12 +56,15 @@ def build_run_config_from_args(args: Namespace | Mapping[str, Any]) -> FuturesRu
         value = args.get(key)
         if value is not None and value is not False:
             raise ValueError(f"removed argument: --{key.replace('_', '-')}")
+    sync = str(args.get("sync", "auto"))
+    if sync not in {"auto", "skip"}:
+        raise ValueError(f"invalid sync mode: {sync!r}, expected 'auto' or 'skip'")
     config = FuturesRunConfig(
         timeframe=str(args.get("timeframe", "4h")),
         date=args.get("date"),
         trials=int(args.get("trials", 42)),
         phase=phase,
-        sync=args.get("sync", "skip"),
+        sync=sync,  # type: ignore[arg-type]
         refresh_universe=bool(args.get("refresh_universe", False)),
         sync_metrics=bool(args.get("sync_metrics", False)),
     )

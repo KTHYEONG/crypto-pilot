@@ -1173,7 +1173,7 @@ def run_historical_sync(
     end_date: date,
     limit: int | None = None,
     force: bool = False,
-    sync_mode: str = "full_history_master",
+    sync_mode: str = "auto",
     symbols: list[str] | None = None,
     sync_1d: bool = True,
     sync_4h: bool = True,
@@ -1200,7 +1200,7 @@ def run_historical_sync(
         except Exception as e:
             logger.warning(f"Ledger load failed: {e}")
 
-    mode = str(sync_mode or "full_history_master").strip().lower()
+    mode = str(sync_mode or "auto").strip().lower()
     if symbols is not None:
         symbols = list(dict.fromkeys(symbols))  # 중복 제거
         logger.debug("Sync mode=%s targeted_symbols=%d", mode, len(symbols))
@@ -1244,7 +1244,7 @@ def run_historical_sync(
         symbols = _list_usdt_futures_symbols()
         if limit:
             symbols = symbols[:limit]
-        logger.info("Sync mode=full_history_master symbols=%d", len(symbols))
+        logger.info("Sync mode=%s symbols=%d", mode, len(symbols))
 
     sync_tasks = []
 
@@ -1311,7 +1311,7 @@ def run_historical_sync(
             logger.info("")
             if mode == "skip":
                 today_str = pd.Timestamp.now().strftime("%Y-%m-%d")
-                logger.info(f"  Sync Mode: SKIP (Reused cache from prior --sync fast on {today_str})")
+                logger.info(f"  Sync Mode: SKIP (Reused cache from prior --sync auto on {today_str})")
             else:
                 logger.info(f"  Sync Mode: {mode.upper()} (Pre-loaded from cache)")
             logger.info(f"  Optuna DB: {storage_type}")
