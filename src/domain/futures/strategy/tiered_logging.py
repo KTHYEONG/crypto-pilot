@@ -886,7 +886,18 @@ def format_layer3_table(
         lines.append(
             f"  {_status(True)} [INTEGRITY ] Cost Drag: {val_h/100:>+8.1%}"
         )
-    
+
+    if hasattr(r, "reversal_kill_active"):
+        has_opt = True
+        _kill_active = bool(getattr(r, "reversal_kill_active", False))
+        _roff_bars = int(getattr(r, "risk_off_bars", 0))
+        _roff_px = float(getattr(r, "risk_off_realized_price", 0.0))
+        _ron_px = float(getattr(r, "risk_on_realized_price", 0.0))
+        lines.append(
+            f"  {_status(True)} [L3-REVERSAL] kill_switch_active={_kill_active} | "
+            f"risk_off_bars={_roff_bars} | risk_off_price={_roff_px:+.4f} risk_on_price={_ron_px:+.4f}"
+        )
+
     if has_opt:
         lines.append("")
 
