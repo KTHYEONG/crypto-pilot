@@ -6,6 +6,11 @@ status: active
 priority: critical
 ai_read_policy: when_related
 ---
+## 2026-07-02 Reversal-Kill Episode 계측 인프라 — Liquidity-Stress 판별력 측정 (measure-first)
+- **Delta:** `awf_sim.py`에 `ReversalEpisode`(start_idx/end_idx/realized_price) dataclass + risk_off 연속구간 추출 로직 추가, `Layer2FoldAttribution`/`Layer3Result`/`L3ReversalReplayResult`에 `risk_off_episodes` 필드 배선. 신규 `liquidity_stress_diag.py`의 `compute_liquidity_stress_discriminative_power`가 half-spread z-score로 true-positive(진짜 방어)/false-positive(whipsaw) episode를 구분하는 `stress_gap`을 산출 — baseline window는 `risk_off_mask`로 사전 필터링해 오염 방지, contaminated episode는 그룹 통계에서 제외.
+- **Rationale:** reversal-kill이 실제 위기에서 손실을 악화시킨 원인(whipsaw, `layer3-eh.md` 2026-07-01 항목 반증)이 가격-지연 단일축 탐지의 한계인지 계측하려면 episode 단위 타임스탬프가 필요했으나, 기존 fold attribution은 `risk_off_bars`(count)·`risk_off_realized_price`(scalar)로 즉시 집계돼 episode 경계가 소실되고 있었음.
+- **Edge Cases:** 판별력 판정은 p<0.05 이진 게이트를 쓰지 않음 — `stress_gap`(방향성)과 `welch_p_value`(참고용)를 함께 반환해 표본부족 시에도 방향성 정보를 보존(L1 admission의 Bayesian 기준 전환 전례, OI/LSR p=0.285 판단보류 전례와 일관). Attribution(`_risk_off_1d[t2]`)과 실제 de-gross 결정(`_risk_off_1d[t-1]`, `rebalance_bars=3` 간격) 사이 최대 3-bar 시차는 알려진 한계로 남김(수정 안 함). **실 half-spread 데이터 기반 측정은 미실행** — 인프라만 구축, 채택 여부는 별도 measure-first 사이클 필요.
+
 ## 2026-06-18 L3 scorecard threshold alignment — Calmar removal + absolute gate thresholds
 - **Delta:** L3 scorecard now renders `min_trades`, `max_mdd_abs`, `min_sharpe`, `min_sortino`, and `max_cvar95` from `Layer3Result` and drops Calmar from the display. The holdout gate order is now `negative_return` → `mdd_abs` → `cvar_95` → `sharpe_abs` → `sortino_abs`.
 - **Rationale:** Calmar was only producing `n/a(loss)` after negative CAGR while the direct gate was already `negative_return`. Absolute thresholds make the replay contract explicit and keep the scorecard aligned with the actual blocker chain.
