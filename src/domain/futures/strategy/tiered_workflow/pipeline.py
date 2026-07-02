@@ -8,9 +8,12 @@ import logging
 import multiprocessing
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
@@ -2050,6 +2053,7 @@ def run_l3_holdout(
     else:
         gate_passed = True
 
+    _attr = sim.fold_attributions[0] if sim.fold_attributions else None
     result = Layer3Result(
         cagr=cagr,
         mdd=mdd,
@@ -2074,6 +2078,10 @@ def run_l3_holdout(
         min_sharpe=min_sharpe,
         min_sortino=min_sortino,
         max_cvar95=max_cvar95,
+        risk_off_bars=_attr.risk_off_bars if _attr is not None else 0,
+        risk_off_realized_price=_attr.risk_off_realized_price if _attr is not None else 0.0,
+        risk_on_realized_price=_attr.risk_on_realized_price if _attr is not None else 0.0,
+        reversal_kill_active=os.environ.get("L2_REVERSAL_KILL", "") not in ("", "0", "false", "False"),
     )
     if verbose:
         logger.info(
@@ -2084,6 +2092,170 @@ def run_l3_holdout(
             )
         )
     return result
+
+
+# ── L2 Reversal Helpers (moved from active_pipeline.py, unchanged) ──
+
+
+@dataclass(slots=True, frozen=True)
+class L2ReversalReplayVariant:
+    name: str
+    enabled: bool
+    dd_threshold: float
+    persistence_bars: int
+    recovery_cooldown_bars: int = 0
+
+
+def _l2_reversal_replay_variants() -> tuple[L2ReversalReplayVariant, ...]:
+    return (
+        L2ReversalReplayVariant(name="baseline_off", enabled=False, dd_threshold=0.0, persistence_bars=1),
+        L2ReversalReplayVariant(name="legacy_006_p1", enabled=True, dd_threshold=0.06, persistence_bars=1),
+        L2ReversalReplayVariant(name="balanced_010_p2", enabled=True, dd_threshold=0.10, persistence_bars=2),
+        L2ReversalReplayVariant(name="balanced_010_p3", enabled=True, dd_threshold=0.10, persistence_bars=3),
+        L2ReversalReplayVariant(name="current_012_p3", enabled=True, dd_threshold=0.12, persistence_bars=3),
+        L2ReversalReplayVariant(
+            name="legacy_006_p1_cd4", enabled=True, dd_threshold=0.06,
+            persistence_bars=1, recovery_cooldown_bars=4,
+        ),
+        L2ReversalReplayVariant(
+            name="legacy_006_p1_cd8", enabled=True, dd_threshold=0.06,
+            persistence_bars=1, recovery_cooldown_bars=8,
+        ),
+        L2ReversalReplayVariant(
+            name="current_012_p3_cd8", enabled=True, dd_threshold=0.12,
+            persistence_bars=3, recovery_cooldown_bars=8,
+        ),
+    )
+
+
+@contextmanager
+def _temporary_reversal_env(variant: L2ReversalReplayVariant) -> Iterator[None]:
+    _saved: dict[str, str | None] = {}
+    _env_keys = ("L2_REVERSAL_KILL", "L2_REVERSAL_DD_THRESHOLD",
+                 "L2_REVERSAL_PERSISTENCE_BARS", "L2_REVERSAL_RECOVERY_COOLDOWN")
+    for _key in _env_keys:
+        _saved[_key] = os.environ.get(_key)
+    try:
+        if not variant.enabled:
+            os.environ.pop("L2_REVERSAL_KILL", None)
+        else:
+            os.environ["L2_REVERSAL_KILL"] = "1"
+            os.environ["L2_REVERSAL_DD_THRESHOLD"] = str(variant.dd_threshold)
+            os.environ["L2_REVERSAL_PERSISTENCE_BARS"] = str(variant.persistence_bars)
+            os.environ["L2_REVERSAL_RECOVERY_COOLDOWN"] = str(variant.recovery_cooldown_bars)
+        yield
+    finally:
+        for _key, _val in _saved.items():
+            if _val is None:
+                os.environ.pop(_key, None)
+            else:
+                os.environ[_key] = _val
+
+
+# ── L3 Reversal Economic Replay ──
+
+
+@dataclass(slots=True, frozen=True)
+class L3ReversalReplayResult:
+    variant: str
+    dd_threshold: float
+    persistence_bars: int
+    recovery_cooldown_bars: int
+    cagr: float
+    mdd: float
+    sharpe: float
+    gate_passed: bool
+    blocker_reason: str
+    risk_off_bars: int
+    risk_off_realized_price: float
+    risk_on_realized_price: float
+
+
+def run_l3_reversal_economic_replay(
+    *,
+    signal_batch: ValidatedSignalBatch,
+    aligned: AlignedMarketData,
+    holdout_span: tuple[int, int],
+    config: Layer2AllocationConfig,
+    caps: PortfolioCaps,
+    tf: str,
+    deploy_leverage: float | None,
+    holdout_labels: tuple[str, str] | None = None,
+) -> tuple[L3ReversalReplayResult, ...]:
+    results: list[L3ReversalReplayResult] = []
+    for variant in _l2_reversal_replay_variants():
+        with _temporary_reversal_env(variant):
+            l3 = run_l3_holdout(
+                signal_batch=signal_batch,
+                aligned=aligned,
+                holdout_span=holdout_span,
+                config=config,
+                caps=caps,
+                tf=tf,
+                holdout_labels=holdout_labels,
+                verbose=False,
+                deploy_leverage=deploy_leverage,
+            )
+        results.append(L3ReversalReplayResult(
+            variant=variant.name,
+            dd_threshold=variant.dd_threshold,
+            persistence_bars=variant.persistence_bars,
+            recovery_cooldown_bars=variant.recovery_cooldown_bars,
+            cagr=l3.cagr,
+            mdd=l3.mdd,
+            sharpe=l3.sharpe,
+            gate_passed=l3.gate_passed,
+            blocker_reason=l3.blocker_reason,
+            risk_off_bars=l3.risk_off_bars,
+            risk_off_realized_price=l3.risk_off_realized_price,
+            risk_on_realized_price=l3.risk_on_realized_price,
+        ))
+    return tuple(results)
+
+
+def _write_l3_reversal_replay_csv(
+    results: tuple[L3ReversalReplayResult, ...],
+    path: Path,
+) -> None:
+    import csv
+    rows = [
+        {
+            "variant": r.variant,
+            "dd_threshold": r.dd_threshold,
+            "persistence_bars": r.persistence_bars,
+            "recovery_cooldown_bars": r.recovery_cooldown_bars,
+            "cagr": r.cagr,
+            "mdd": r.mdd,
+            "sharpe": r.sharpe,
+            "gate_passed": r.gate_passed,
+            "blocker_reason": r.blocker_reason,
+            "risk_off_bars": r.risk_off_bars,
+            "risk_off_realized_price": r.risk_off_realized_price,
+            "risk_on_realized_price": r.risk_on_realized_price,
+        }
+        for r in results
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else [])
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def format_l3_reversal_replay_table(results: tuple[L3ReversalReplayResult, ...]) -> str:
+    lines = ["[L3-REVERSAL-REPLAY] Results:"]
+    header = (
+        f"  {'Variant':<25} {'CAGR':>8} {'MDD':>8} {'Sharpe':>8} "
+        f"{'Gate':>6} {'Blocker':<20} {'RoffBars':>8} {'RoffPx':>8} {'RonPx':>8}"
+    )
+    lines.append(header)
+    lines.extend(
+        f"  {r.variant:<25} {r.cagr:>8.4f} {r.mdd:>8.4f} {r.sharpe:>8.4f} "
+        f"{'PASS' if r.gate_passed else 'BLOCK':>6} {r.blocker_reason:<20} "
+        f"{r.risk_off_bars:>8d} {r.risk_off_realized_price:>8.4f} {r.risk_on_realized_price:>8.4f}"
+        for r in results
+    )
+    return "\n".join(lines)
 
 
 def _to_utc_timestamp(val: Any) -> pd.Timestamp:
@@ -2743,6 +2915,22 @@ def run_tiered_pipeline(
         deploy_leverage=_champion_l_star if (_champion_l_star is not None and _champion_l_star > 1.0) else None,
     )
     logger.log(PERF, "[PERF] run_tiered_pipeline_l3_total took=%.4fs", time.perf_counter() - t_l3)
+
+    _l3_replay_env = os.environ.get("L3_REVERSAL_REPLAY", "")
+    if _l3_replay_env not in ("", "0", "false", "False"):
+        _l3_replay_results = run_l3_reversal_economic_replay(
+            signal_batch=l3_signal_batch,
+            aligned=aligned,
+            holdout_span=(ho_start_idx, ho_end_idx),
+            config=l2_config,
+            caps=caps,
+            tf=l2_tf,
+            deploy_leverage=_champion_l_star if (_champion_l_star is not None and _champion_l_star > 1.0) else None,
+            holdout_labels=(str(window.holdout_start), str(window.holdout_end)),
+        )
+        _write_l3_reversal_replay_csv(_l3_replay_results, path=Path("docs/results/l3_reversal_replay.csv"))
+        if verbose:
+            logger.info(format_l3_reversal_replay_table(_l3_replay_results))
 
     if verbose:
         logger.info("\n" + "="*80)
