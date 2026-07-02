@@ -1,9 +1,9 @@
-# L1/L2 다음 방향성 (2026-07-01 갱신 — P0 가드레일 구현 완료 반영)
+# L1/L2 다음 방향성 (2026-07-02 갱신 — reversal-kill 최초 economic replay 반증 반영)
 
 ## 1. 확정된 전제 (재검증 불필요, 압축)
 
 - **L1 edge는 100% 시계열 trend-beta, 횡단면 alpha 없음** — XS factor(momentum/carry/flow/oi_skew) 2회 독립 측정으로 승격 0 확정. 재시도 금지.
-- **L\* 레버리지 옵티마이저가 균일/비례 크기 레버를 전부 흡수** — regime cap, trend-efficiency gate, XS 계열은 byte-identical. 오직 **시간분포를 바꾸는 선택적 de-gross**(reversal kill-switch)만 L\* 탈출 가능. 매그니튜드 레버 추가 탐색 금지.
+- **L\* 레버리지 옵티마이저가 균일/비례 크기 레버를 전부 흡수** — regime cap, trend-efficiency gate, XS 계열은 byte-identical. **시간분포를 바꾸는 선택적 de-gross(reversal kill-switch)만 구조적으로 L\* 흡수를 피한다는 명제는 여전히 유효**하나(실측 confirmed: variant별 `risk_off_bars` 0→589로 실제 거동이 달라짐), **"그래서 방어에 유효하다"는 함의는 2026-07-02 최초 economic replay에서 반증됨(아래 참조) — L\* 탈출 자체와 경제적 방어력은 별개 문제로 분리해서 취급할 것.** 매그니튜드 레버 추가 탐색 금지(불변).
 - **breadth 레벨(cross-sectional downside breadth) 기반 시장상태 판별은 반증됨** — 병목 구간과 평상 구간이 breadth 레벨만으로 구분 안 됨(암호화폐 유니버스 상시 고-breadth baseline). `reversal_mode="panel"`은 opt-in 코드로만 남기고 재시도 금지.
 - **reversal kill-switch + recovery cooldown(exit hysteresis) 구현·유닛테스트 완료** — 코드 레벨 동작은 검증됨(entry/exit 신호 분리, 단조 확장, look-ahead 없음, 동적 병목-fold 식별).
 - **✅ P0 완료(2026-07-01): "위기 부재 PASS" measure-first 가드레일 구현·감사·라이브 검증 완료.** `docs/specs/l2-promotion-crisis-guardrail.md` 3종 게이트 실装:
@@ -15,23 +15,26 @@
 - **✅ NEW(2026-07-01, DEBUG 실행 실측): "위기 부재 → 과레버리지" 인과 메커니즘을 코드 레벨에서 특정.** `calibrate_deployment_leverage`(risk_deployment.py) RC-2 "fit/OOS 역전" 블렌드 분기가 실제 원인. 챔피언 fit-leg(진짜 위기 포함 과거 구간) unit-vol 실측: CAGR -53.5%, MDD 91.8%(거의 전멸급) — 이 신호대로면 L*는 1.0 근처로 눌려야 함. 그러나 `mdd_ratio=OOS_MDD/fit_MDD=0.095<1.0`이 "fit/OOS 역전"으로 판정되어 `binding="oos_blend"`로 전환, 위기 없는 OOS(2025) 구간의 낮은 MDD(8.76%)를 근거로 L*를 오히려 2.06x까지 끌어올림 — **fit-leg의 보수적 경고를 알고리즘이 명시적으로 무시하는 설계**. "NO-CRISIS-WINDOW" 배너가 텍스트 경고 수준이 아니라 레버리지 산출 공식 안에 정량적으로 새겨져 있음을 실증. SSOT: `docs/specs/l1-l2-l3-overfit-root-cause.md`.
 - **NEW(2026-07-01): L2 버킷 라우팅(regime×family×TF)도 레버리지와 독립적으로 과적합.** `[L2-BUCKET-OOS]` fit-edge vs oos-edge 상관계수가 3-fold 중 2-fold(#0, #2)에서 여러 trial에 걸쳐 일관되게 음수(-0.10~-0.54) — fit 구간에서 좋아 보인 버킷이 OOS에서 반전. 레버리지 캘리브레이션 결함과 별개로 존재하는 라우팅 자체의 일반화 실패.
 - **✅ 수정 완료(2026-07-01): parity self-check 상시 오탐 코드 결함.** `Layer2TrialEvaluation`에 `master_tf` 필드 부재로 `assert_selection_replay_parity`의 self-check이 tf≠4h 챔피언마다 매번 `DECOUPLED` 오탐(WARNING)을 냈던 결함(진짜 하드게이트인 `mismatches` 비교는 무관해 챔피언 승격 자체는 오염되지 않았음). 필드 추가 + 폴백 제거로 수정, 실제 풀 파이프라인 재실행(DEBUG 레벨)에서 오탐 0건 확인.
+- **❌ 반증(2026-07-01): `residual_reversion`(beta_neut archetype) regime 게이트 활성화 — pooled 진단→개별 promotion 결과로 전이 안 됨.** L1 신호 다양화 탐색 중 `residual_reversion`의 regime 게이트가 코드상 한 번도 작동한 적 없음을 발견(`_allowed_regimes_for_archetype`가 `beta_neut`을 분기 없이 fallback 처리, `regime_signal_gating_enabled`는 전체 코드베이스에서 True로 설정된 적 없음). Pooled (family, regime_code) 진단 결과 bull_quiet(R0)에서만 breakeven 상회(LCB+24.4bps, 4개 독립 캘린더 fold 중 3개 확실)해 `beta_neut_gating_enabled` opt-in 플래그(기본 `False`)로 bull_quiet 전용 하드마스킹 구현·감사·유닛테스트 통과. **그러나 실제 `--phase l1` promotion 파이프라인으로 A/B 실행한 결과, 활성화 시 시스템 전체에서 유일했던 residual_reversion 승격 인스턴스(`1000SHIBUSDT rr_48_4h`, LCB+140.8bps)가 완전히 소멸.** 원인: pooled cross-symbol 집계의 "평균적으로 유리한 regime"이 개별 symbol-variant의 실제 이벤트 regime 분포와 다를 수 있음 — 이 심볼의 엣지가 bull_quiet 외 구간에 상당 부분 걸쳐 있어 좁히는 순간 유효표본 붕괴/엣지 손상. **코드는 안전한 opt-in(기본 False)으로 유지, 프로덕션 활성화는 보류.** 방법론적 교훈: pooled family×regime 진단은 개별 promotion 결과의 대리지표가 아님 — 재시도 시 symbol-variant 단위 regime 분해가 선행돼야 함. SSOT: `docs/specs/l1-regime-diversification-tf-expansion.md`.
+- **✅ 완료(2026-07-02): `calibrate_deployment_leverage` RC-2 fit-MDD crisis gate 구현.** `fit_mdd_crisis_gate: float | None = None`(opt-in, 기본 비활성) 파라미터 추가 — fit-leg unit-vol MDD가 임계값 이상이면 oos_blend 블렌드-업 분기를 건너뛰고 fit-only calibration을 유지. 실측 기반 설계(next.md L15의 91.8% anecdote와 기존 회귀 테스트 S1의 86.2%를 분리하는 88~92% 구간을 잠정 후보로 설정, 0.50 같은 임의값 채택 안 함). `Layer2AllocationConfig.l2_deploy_fit_mdd_crisis_gate`로 배선. SSOT: `docs/decisions/layer2-eh.md`(2026-07-02 항목). **주의: 이 게이트는 "L\*가 과도하게 올라가는 것"만 막는다 — 아래 reversal-kill 반증과는 별개 문제(레버리지 계산 결함 vs 방어 로직 자체의 경제적 효과 부재)이므로 혼동 금지.**
+- **❌ 반증(2026-07-02, 최초 economic replay): reversal kill-switch가 실제 위기 구간에서 경제적으로 방어하지 못함 — 오히려 손실 악화.** `docs/results/next.md` P2가 예고한 "NO-CRISIS-WINDOW 배너가 사라지는 순간"이 L3 홀드아웃(2025-12-31~2026-06-30)에서 실제로 도래(BTC 실측 -32.8%, peak-trough -39.5%, 2/1~2/5 닷새 -20% 포함). 이 실제 위기 구간에 대해 `run_l3_reversal_economic_replay`(신규, `L3_REVERSAL_REPLAY=1`)로 8개 variant(`baseline_off` + 7종 dd_threshold/persistence_bars/cooldown 조합)를 실제 파이프라인으로 재실행: **`baseline_off`(reversal-kill 비활성) CAGR -4.96%/MDD 23.78%가 활성 variant 7종 전부(CAGR -5.04%~-5.89%, MDD 24.18%~24.64%)보다 우수** — 즉 reversal-kill을 켜니 손실과 MDD가 동시에 더 나빠짐. 원인: `risk_off_realized_price`(kill-switch 발동 구간의 실현 가격)가 전 variant에서 양수(+5.89%~+10.50%) — kill-switch가 de-gross한 바로 그 구간에서 원 신호가 실제로는 수익 중이었음(whipsaw성 자기잠식). **"Gate B(synthetic 발화 테스트)는 메커니즘 생존만 증명하며 경제적 효과의 대체재가 아니다"(위 P0 항목)는 경고가 정확히 이 지점에서 실증됨.** 관측 인프라(`Layer3Result.risk_off_bars` 등)는 이번에 신규 배선(`docs/decisions/layer3-eh.md` 2026-07-02 항목 참조) — 이전엔 이 검증 자체가 불가능했음. **재현 주의: 이번 실행의 챔피언은 Optuna 탐색 확률성상 과거 -13.3% 사례(다른 seed/trial)와 다른 챔피언 — 그러나 8개 variant 전부가 일관되게 baseline보다 나쁘다는 결과는 특정 챔피언에 국한된 우연으로 보기 어려움.** SSOT: `docs/decisions/layer3-eh.md`, `docs/results/l3_reversal_replay.csv`.
 
 ## 2. 다음 스텝 (우선순위 순)
 
-### P1 — 크래시 방어력 실증 경로 확보 (최우선으로 승격, 양자택일 또는 병행)
-P0 가드레일 덕분에 이제부터는 "위기 없는 PASS"가 자동으로 투명하게 드러나므로, 다음 목표는 **실제로 크래시를 방어하는 로직을 만들고 이를 검증할 데이터/경로를 확보하는 것**이다.
-- **① 마이크로구조 데이터 확장**: bookDepth / half-spread / liquidation proxy / funding-OI stress 등, BTC 가격 단일 축을 넘어서는 causal 조기탐지 입력 확보. reversal-kill의 entry 조건을 가격 후행 지표가 아닌 포지셔닝 선행 지표로 보강하는 방향.
-- **② (신규, 최우선 후보) `calibrate_deployment_leverage` RC-2 oos_blend 분기 하드닝**: fit-leg이 fit-MDD 91.8%급 재앙 신호를 보내는데도 OOS가 안전해 보인다는 이유만으로 L*를 끌어올리는 현재 로직(`mdd_ratio<1.0` → 무조건 blend-up)을 재검토. 후보: fit-leg 절대 MDD가 일정 임계(예: 50%) 이상이면 oos_blend 자체를 비활성화하거나 blend 상한을 더 보수적으로. 다른 P1 항목(마이크로구조/horizon)보다 구현 비용이 낮고 이미 원인이 코드로 특정된 상태 — measure-first로 우선 검토 권장.
-- **③ horizon 확장**: 일/주 단위 regime·macro state를 조건화해, 4h~12h 단일 스케일 detector가 놓치는 구조적 위기 신호(유동성 위축, 매크로 리스크오프) 포착.
-- **판단 기준**: 어느 쪽이든 "선택적·시간집중 de-gross" 원칙(L\* 흡수 회피)을 유지해야 하며, 새 입력을 추가하기 전 반드시 measure-first(H1 가설 → 계측 → 반증/채택) 절차를 거칠 것 — breadth 레벨 반증 사례처럼 그럴듯한 가설도 실측 전엔 신뢰하지 말 것.
-- **Gate B를 이 작업의 회귀 방지망으로 재사용**: 새 크래시 방어 로직을 추가할 때마다 `synthetic_crash_defense_verdict` 패턴을 확장(다양한 synthetic 위기 형태 — flash crash, 완만한 약세장, 유동성 위축 시뮬레이션 등)해 "여전히 발화하는가"를 계속 자동 검증할 것.
+### P1 — 크래시 방어력 실증 경로 확보 (reversal-kill 반증으로 후보군 재편)
+P0 가드레일과 P2 최초 replay 덕분에 "위기 없는 PASS 오인" 문제와 "reversal-kill이 실제로 방어하는가" 질문 둘 다 이제 명시적으로 답변 가능한 상태다. **reversal-kill(entry/exit 튜닝만으로는)은 1차 시도에서 반증됐으므로, 다음은 detection 입력 자체를 바꾸는 방향이 우선순위가 높아졌다.**
+- **① (최우선으로 재승격) 마이크로구조 데이터 확장**: bookDepth / half-spread / liquidation proxy / funding-OI stress 등, BTC 가격 단일 축을 넘어서는 causal 조기탐지 입력 확보. reversal-kill이 가격 후행 지표(trailing DD+momentum)만으로는 whipsaw와 진짜 크래시를 구분 못한다는 것이 2026-07-02 replay로 실증됐으므로, entry 조건을 포지셔닝 선행 지표로 보강하는 방향이 이제 가장 직접적인 다음 후보.
+- **② RC-2 fit-MDD crisis gate**: ✅ 구현 완료(위 §1 참조, 기본 비활성). **레버리지 계산 결함은 고쳤지만 이번 replay는 그 결함과 무관하게 reversal-kill 메커니즘 자체가 이 위기에서 무력했음을 보였다** — 이 항목은 "완료됐지만 P1의 핵심 문제를 해결한 게 아님"으로 재분류. `fit_mdd_crisis_gate` 자체의 economic replay 스윕(0.88/0.90/0.92 후보)은 여전히 별도 미완료 작업(`docs/decisions/layer2-eh.md` 참조).
+- **③ horizon 확장**: 일/주 단위 regime·macro state를 조건화해, 4h~12h 단일 스케일 detector가 놓치는 구조적 위기 신호(유동성 위축, 매크로 리스크오프) 포착. reversal-kill의 whipsaw 문제(짧은 스케일 detector가 회복 랠리를 위기로 오인)를 완화할 수 있는 후보로 ①과 함께 재검토.
+- **④ (신규) dd_threshold/persistence_bars/cooldown 파라미터 재튜닝은 중단선으로 이동(§3 참조)** — 이번 replay가 커버한 8종이 전부 실패했으므로 같은 파라미터 공간 재탐색은 금지, 입력 자체(①③)를 바꾸는 게 우선.
+- **판단 기준**: 새 입력을 추가하기 전 반드시 measure-first(H1 가설 → 계측 → 반증/채택) 절차를 거칠 것 — breadth 레벨 반증, reversal-kill 반증 사례처럼 그럴듯한 가설도 실측 전엔 신뢰하지 말 것.
+- **Gate B를 이 작업의 회귀 방지망으로 재사용**: 새 크래시 방어 로직을 추가할 때마다 `synthetic_crash_defense_verdict` 패턴을 확장(다양한 synthetic 위기 형태 — flash crash, 완만한 약세장, 유동성 위축 시뮬레이션 등)해 "여전히 발화하는가"를 계속 자동 검증할 것. **단, 이번 반증이 보여주듯 Gate B 통과는 경제적 효과의 증거가 아니므로, 새 detection 입력도 반드시 `run_l3_reversal_economic_replay`류의 실제 holdout replay로 검증할 것.**
 
-### P2 — 실제 위기 구간 재유입 시점의 economic replay 확보 (기회 포착형, 저강도 모니터링)
-- 평가 윈도우가 롤링되며 24Q4-25Q1급 병목이 다시 윈도우에 들어오는 시점(또는 신규 크래시 발생 시점)을 Gate A의 NO-CRISIS-WINDOW 배너로 자동 감지 가능 — 배너가 사라지는(covered=True) 순간이 곧 "이번엔 진짜 economic replay로 크래시 방어력을 검증할 수 있는 기회"임.
-- 별도 능동 작업 불필요 — 정기 파이프라인 실행 시 배너 상태만 확인하면 됨. 배너가 사라지는 시점 발생 시 즉시 P1에서 만든 방어 로직의 실제 fold 성과(defense ratio, non-stress fold 손상 여부)를 분석할 것.
+### P2 — 실제 위기 구간 재유입 시점의 economic replay 확보
+**✅ 완료(2026-07-02): 최초 실행 및 반증.** 평가 윈도우가 롤링되며 실제 위기 구간(2025-12-31~2026-06-30, BTC -32.8%)이 L3 홀드아웃에 진입했고, Gate A NO-CRISIS-WINDOW 배너가 예고한 그 "기회"를 `run_l3_reversal_economic_replay`(신규 인프라)로 실제 실행 — 결과는 reversal-kill 반증(§1 참조). 이 절차(배너 소멸 감지 → replay 실행 → variant별 defense 성과 비교) 자체는 이제 재사용 가능한 표준 경로로 확립됨 — P1에서 새 방어 로직(①③)이 나오면 동일 절차로 재검증할 것. 평가 윈도우가 다시 롤링되어 새로운/추가 위기 구간이 들어올 때마다 반복 실행 권장(저강도 모니터링 성격 유지).
 
 ### P3 — 목표 재검토 (P1 반복 실패 시)
-- trend-beta가 유일한 edge이고 reversal-kill은 신규 alpha가 아니라 방어 레버일 뿐이라는 점을 감안, P1이 반복 실패하면 **현재 strategy class의 구조적 CAGR 상한을 재평가**할 것 — 목표(예: 30%)가 현재 아키텍처로 달성 불가능한 수준인지 정직하게 재검토.
+- trend-beta가 유일한 edge이고 reversal-kill은 신규 alpha가 아니라 방어 레버일 뿐이라는 점을 감안, P1이 반복 실패하면 **현재 strategy class의 구조적 CAGR 상한을 재평가**할 것 — 목표(예: 30%)가 현재 아키텍처로 달성 불가능한 수준인지 정직하게 재검토. **reversal-kill 1차 반증(2026-07-02)으로 이 트리거에 한 걸음 가까워짐 — ①③(마이크로구조/horizon) 시도까지 반복 실패할 경우 P3 재평가를 실제로 진행할 것.**
 
 ## 3. 명시적 중단선
 
@@ -39,3 +42,5 @@ P0 가드레일 덕분에 이제부터는 "위기 없는 PASS"가 자동으로 �
 - **"위기 없는 윈도우에서의 PASS"를 프로덕션 승격 근거로 인용하는 것 — P0 가드레일(Gate A 배너 + Gate B 하드 게이트)로 구조적으로 방지됨. 더 이상 별도 수동 체크 불필요.**
 - 새 레버는 반드시 **economic replay 기반 measure-first**로 검증할 것 — 코드 구현 완료가 곧 채택을 의미하지 않는다. Gate B의 synthetic 검증은 "메커니즘 생존"만 증명하며 "경제적 효과"의 대체재가 아님 — 이 둘을 절대 혼동하지 말 것.
 - `reversal_kill_live`(이번 run에 크래시 방어가 켜져 있었는가) 같은 env-상태 기반 승격 조건은 **폐기 확정(2026-07-01 자체 리뷰)** — 프로덕션 기본값에서 챔피언 스토어를 영구 동결시키는 결함이 있었음. 재도입 금지, 대신 Gate B(메커니즘 헬스체크)만 유지.
+- **`residual_reversion` beta_neut regime 게이트 pooled 진단 기반 활성화 — 반증 완료(2026-07-01), 현재 형태 재시도 금지.** Pooled family×regime 집계로 규명한 "좋은 regime"을 곧바로 하드마스킹에 적용하는 접근은 개별 symbol-variant promotion 결과를 무너뜨림(위 항목 참조). symbol-variant 단위 regime 분해 진단 없이 동일 패턴 재시도 금지.
+- **reversal kill-switch(BTC 가격 후행 trailing DD+momentum detector)의 dd_threshold/persistence_bars/recovery_cooldown 파라미터 재튜닝 — 반증 완료(2026-07-02), 동일 입력 공간 재탐색 금지.** 실제 위기 구간(2025-12-31~2026-06-30) economic replay에서 8개 variant(기존 파라미터 공간 전체) 전부가 `baseline_off`보다 CAGR·MDD 동시 악화. 파라미터를 더 튜닝해도 detection 입력(BTC 가격 단일 축, 후행 지표)이 whipsaw와 진짜 크래시를 구분 못하는 근본 한계는 해결되지 않음 — 재시도하려면 P1-①(마이크로구조)/③(horizon)처럼 입력 자체를 바꿔야 함.
