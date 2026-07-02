@@ -9,7 +9,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numba
 import numpy as np
@@ -822,6 +822,9 @@ def diagonal_kelly_weights(
     z_scores: NDArray[np.float64] | None = None,
     cs_amp_alpha: float = 2.0,
     cs_amp_mode: str = "power",
+    returns_hist: NDArray[np.float64] | None = None,
+    cov_mode: Literal["diagonal", "correlated"] = "diagonal",
+    cov_min_obs: int = 20,
 ) -> NDArray[np.float64]:
     """신규 아키텍처용 Diagonal Kelly 사이징.
 
@@ -848,6 +851,9 @@ def diagonal_kelly_weights(
         no_trade_band: Δw < band이면 rebalance 생략 (절대값, 예: 0.01=1%).
         btc_beta: 심볼별 BTC beta [N] (project_all_caps에 전달, None이면 0 벡터).
         bars_per_year: 연율화 factor (4h=2190, 1h=8760).
+        returns_hist: (T, N) bar-to-bar simple return matrix. cov_mode='correlated' 시 필수.
+        cov_mode: 'diagonal'(기본, 기존 동작) 또는 'correlated'(Ledoit-Wolf covariance 사용).
+        cov_min_obs: rolling_ledoit_wolf_cov의 min_obs 전달값.
 
     Returns:
         최종 비중 벡터 [N], float64.
@@ -920,7 +926,15 @@ def diagonal_kelly_weights(
     # 포트폴리오 실현 vol 추정: per_symbol 클립 후 계산
     # (pre-cap w_raw는 극단값이므로 vol_target scaling을 왜곡함)
     w_clipped_est = np.clip(w_raw, -caps.per_symbol, caps.per_symbol)
-    sigma_port = float(np.sqrt(float(np.dot(w_clipped_est**2, var))))
+    if cov_mode == "correlated":
+        if returns_hist is None:
+            raise ValueError("returns_hist required when cov_mode='correlated'")
+        if returns_hist.shape[1] != n:
+            raise ValueError("returns_hist symbol dimension mismatch")
+        sigma_mat = rolling_ledoit_wolf_cov(returns_hist, min_obs=cov_min_obs)
+        sigma_port = float(np.sqrt(float(max(w_clipped_est @ sigma_mat @ w_clipped_est, 0.0))))
+    else:
+        sigma_port = float(np.sqrt(float(np.dot(w_clipped_est**2, var))))
 
     w_capped: NDArray[np.float64] = project_all_caps(
         w_raw, beta, sigma_port, bars_per_year, effective_caps,
