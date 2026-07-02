@@ -119,6 +119,7 @@ from src.domain.futures.strategy.walk_forward import (
 
 if TYPE_CHECKING:
     from src.domain.futures.optimization.opt_config import LayeredWindow
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import ReversalEpisode
 
 for _env in (
     "NUMBA_NUM_THREADS",
@@ -2082,6 +2083,7 @@ def run_l3_holdout(
         risk_off_realized_price=_attr.risk_off_realized_price if _attr is not None else 0.0,
         risk_on_realized_price=_attr.risk_on_realized_price if _attr is not None else 0.0,
         reversal_kill_active=os.environ.get("L2_REVERSAL_KILL", "") not in ("", "0", "false", "False"),
+        risk_off_episodes=_attr.risk_off_episodes if _attr is not None else (),
     )
     if verbose:
         logger.info(
@@ -2169,6 +2171,7 @@ class L3ReversalReplayResult:
     risk_off_bars: int
     risk_off_realized_price: float
     risk_on_realized_price: float
+    risk_off_episodes: tuple[ReversalEpisode, ...] = ()
 
 
 def run_l3_reversal_economic_replay(
@@ -2209,6 +2212,7 @@ def run_l3_reversal_economic_replay(
             risk_off_bars=l3.risk_off_bars,
             risk_off_realized_price=l3.risk_off_realized_price,
             risk_on_realized_price=l3.risk_on_realized_price,
+            risk_off_episodes=l3.risk_off_episodes,
         ))
     return tuple(results)
 

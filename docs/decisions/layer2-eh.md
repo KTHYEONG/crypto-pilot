@@ -6,6 +6,11 @@ status: active
 priority: high
 ai_read_policy: when_related
 ---
+## [2026-07-02] Correlated Covariance Mode 재검증 — universe ledger 회귀 수정 후 full-trial 재현
+- **Delta:** `universe-eh.md`의 ledger PIT 회귀(broadcast bug) + quote_vol API 결함 수정 후, 동일 diagonal/correlated A/B를 **reduced trial(50) 대신 full 200-trial**로 재실행. `L2_PORTFOLIO_COV_MODE` unset(diagonal) vs `="correlated"`, 동일 `--timeframe 4h --phase l3`.
+- **Rationale:** 기존 反證(아래 항목)이 "n=1·reduced trial이라 완전 반증 아님" 단서를 달고 있었음 — universe 크래시로 막혀 있던 재현을 인프라 수정 후 처음으로 완전한 조건에서 재시도.
+- **재현 결과**: L3 CAGR diagonal -5.0% vs correlated -5.6%, Sharpe -0.176 vs -0.214, Sortino -0.248 vs -0.300 — **방향 일치(correlated 악화), 反證 신뢰도 상향.** L* 역시 거의 동일(2.0646 vs 2.0477) — L* 흡수 메커니즘 재확인. 결론 변경 없음: 기본값 `"diagonal"` 유지.
+
 ## [2026-07-02] Correlation-Aware Portfolio Sizing — 구현·검증 완료, Economic Replay 反證
 - **Delta:** `diagonal_kelly_weights`(`portfolio_constructor.py`)에 opt-in `cov_mode="correlated"` 추가 — 기존 `sigma_port=sqrt(Σwᵢ²σᵢ²)`(전 포지션 쌍 상관계수 0 가정) 대신 `rolling_ledoit_wolf_cov`+`w^T Σ w`로 실제 상관관계를 반영. `Layer2AllocationConfig`에 `l2_portfolio_cov_mode`/`l2_portfolio_cov_lookback_bars`/`l2_portfolio_cov_min_obs` 3필드 + `L2_PORTFOLIO_COV_MODE` env override 추가, `awf_sim.py` fit-leg·OOS 양쪽 rebalance 루프에 배선.
 - **Rationale:** L3 실제 위기 홀드아웃(-13.3%~-5% CAGR대) 원인 진단 결과, 레버리지를 걷어낸 naive Top-K-EW baseline조차 이미 음수 Sharpe — L1 signal 부족이 아니라 **포트폴리오 리스크 모델이 30~50개 심볼의 단일 trend-beta factor 집중을 diversification처럼 과소평가**하는 것이 근본원인으로 특정됨. 코드베이스에 이미 존재하던 Ledoit-Wolf covariance 도구(`solve_constrained_weights`의 legacy 경로)를 라이브 배치 경로(`diagonal_kelly_weights`)에 재연결.
