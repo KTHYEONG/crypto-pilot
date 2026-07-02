@@ -150,6 +150,7 @@ def calibrate_deployment_leverage(
     l_floor: float = 1.0,
     oos_budget_blend: float = 0.5,
     oos_floor_cap: float = 4.0,
+    fit_mdd_crisis_gate: float | None = None,
 ) -> tuple[float, str, float]:
     """히스토리컬 수익률에서 배치 레버리지 L*를 결정론적으로 산출.
 
@@ -180,6 +181,9 @@ def calibrate_deployment_leverage(
         oos_budget_blend: fit-OOS blended budget ratio. 0=pure fit, 1=pure OOS.
             기본 0.5. RC-2 look-ahead 완충.
         oos_floor_cap: OOS-floor L* 상한. 기본 4.0 (기존 하드코딩 2.0 대체).
+        fit_mdd_crisis_gate: fit-leg unit-vol MDD 임계값(0~1). None(기본)=비활성(기존 동작).
+            지정 시 fit_MDD_vol1 >= 임계값이면 RC-2 oos_blend 분기 자체를 건너뛰고
+            fit-only calibration 결과(binding∈{mdd,cvar,hard_cap,exchange_cap})를 유지.
 
     Returns:
         (L*, binding_constraint, cross_valid_MDD_at_L) — cross_valid_MDD_at_L는
@@ -232,8 +236,16 @@ def calibrate_deployment_leverage(
                 cross_valid_mdd, mdd_cap,
                 _fit_cagr_v1, _fit_sharpe_v1, _oos_cagr_v1, _oos_sharpe_v1,
             )
+            # Crisis gate: fit-leg 자체가 재앙적 MDD(>=threshold)면 OOS가 "안전해 보인다"는
+            # 이유만으로 레버리지를 올리지 않음 — fit-leg의 보수적 경고를 무시하지 않도록 조기 차단.
+            if fit_mdd_crisis_gate is not None and _fit_mdd_v1 >= fit_mdd_crisis_gate:
+                _logger.debug(
+                    "[L2-OOS-BLEND-SUPPRESSED] fit_MDD_vol1=%.4f >= crisis_gate=%.4f "
+                    "-> oos_blend skipped, L* stays %.4f (%s)",
+                    _fit_mdd_v1, fit_mdd_crisis_gate, l_final, binding,
+                )
             # RC-2: fit/OOS 역전 시 blended budget (기존 매직캡 min(2.0, ...) 대체)
-            if _mdd_ratio < 1.0:
+            elif _mdd_ratio < 1.0:
                 _mdd_target_oos = mdd_cap * (1.0 - mdd_margin * 0.5)
                 l_oos = _bisect_max_leverage(oos_arr, _mdd_at_leverage, _mdd_target_oos, float(l_floor), l_search_hi)
                 l_blend = l_final * (1.0 - oos_budget_blend) + l_oos * oos_budget_blend
