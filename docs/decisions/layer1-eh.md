@@ -132,3 +132,9 @@ ai_read_policy: when_related
 - **회귀 방지**: 기본값 `False` → 기존 champion 동작 무변경. 4개 신규 테스트(`test_beta_neut_gated_*`)로 gate 활성화/차단/기본값/전역오버라이드 검증 완료. L1 validation: ruff 0 error, mypy 0 new error, regression tests 58/58 pass.
 - (Compressed...)
 
+## Phase 21: beta_neut Gate Outer-Fold 검증 — 활성화 반증 (2026-07-01)
+- **검증**: `--phase l1` 실제 promotion 파이프라인으로 `beta_neut_gating_enabled=True` A/B 실행. 결과: 시스템 전체에서 유일했던 residual_reversion 승격 인스턴스(`1000SHIBUSDT rr_48_4h`, LCB+140.8bps)가 완전 소멸(0건). 4h `negative_gross_edge` 탈락 +7건.
+- **원인**: pooled cross-symbol (family, regime) 집계의 "평균적으로 유리한 regime"이 개별 symbol-variant 이벤트의 실제 regime 분포와 불일치 — bull_quiet 전용으로 좁히자 이 심볼의 유효표본/엣지가 붕괴.
+- **결론**: 코드는 opt-in(기본 `False`)으로 유지, **프로덕션 활성화는 보류**. Pooled family×regime 진단은 개별 promotion 결과의 대리지표가 아님 — 재시도 시 symbol-variant 단위 regime 분해 선행 필요. SSOT 이관: `docs/results/next.md`.
+- (Compressed...)
+
