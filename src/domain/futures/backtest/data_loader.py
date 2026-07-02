@@ -895,9 +895,12 @@ class DataCollector:
         if new_parts:
             if not cache_df.empty and "timestamp" in cache_df.columns:
                 cache_df["timestamp"] = pd.to_numeric(cache_df["timestamp"], errors="coerce")
+            # keep="last": 새로 fetch한 데이터(new_parts, concat 뒤쪽)가 기존 캐시(cache_df, 앞쪽)의
+            # 동일 timestamp row보다 우선 — 과거 결함으로 캐시된 값(예: quote_vol NaN)이 있어도
+            # 재수집 시 자가치유되도록 보장.
             combined = (
                 pd.concat([cache_df, *new_parts])
-                .drop_duplicates(subset=["timestamp"])
+                .drop_duplicates(subset=["timestamp"], keep="last")
                 .sort_values("timestamp")
             )
             self._save_cache(symbol, timeframe, combined)
@@ -1181,9 +1184,12 @@ class DataCollector:
         if new_parts:
             if not cache_df.empty and "timestamp" in cache_df.columns:
                 cache_df["timestamp"] = pd.to_numeric(cache_df["timestamp"], errors="coerce")
+            # keep="last": 새로 fetch한 데이터(new_parts, concat 뒤쪽)가 기존 캐시(cache_df, 앞쪽)의
+            # 동일 timestamp row보다 우선 — 과거 결함으로 캐시된 값(예: quote_vol NaN)이 있어도
+            # 재수집 시 자가치유되도록 보장.
             combined = (
                 pd.concat([cache_df, *new_parts])
-                .drop_duplicates(subset=["timestamp"])
+                .drop_duplicates(subset=["timestamp"], keep="last")
                 .sort_values("timestamp")
             )
             self._save_cache(symbol, timeframe, combined)
