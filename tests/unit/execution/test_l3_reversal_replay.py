@@ -6,6 +6,13 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+
+from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+    ReversalEpisode,
+    _extract_risk_off_episodes,
+)
+
 
 def test_run_l3_reversal_economic_replay_scopes_env_per_variant() -> None:
     """P2-S5: replay 하네스가 8개 variant 각각에 올바른 env를 스코핑한다."""
@@ -48,6 +55,7 @@ def test_run_l3_reversal_economic_replay_scopes_env_per_variant() -> None:
             risk_off_realized_price=0.0,
             risk_on_realized_price=0.0,
             reversal_kill_active=False,
+            risk_off_episodes=(),
         )
 
     with patch(
@@ -101,7 +109,7 @@ def test_run_l3_reversal_economic_replay_restores_env_after_completion() -> None
             n_trades=20, cvar95=0.03, avg_gross_exposure=0.5, deploy_leverage=1.0,
             min_trades=10, max_mdd_abs=0.35, min_sharpe=0.0, min_sortino=0.0, max_cvar95=0.06,
             risk_off_bars=0, risk_off_realized_price=0.0, risk_on_realized_price=0.0,
-            reversal_kill_active=False,
+            reversal_kill_active=False, risk_off_episodes=(),
         ),
     ):
         run_l3_reversal_economic_replay(
@@ -116,3 +124,26 @@ def test_run_l3_reversal_economic_replay_restores_env_after_completion() -> None
 
     post_env = os.environ.get("L2_REVERSAL_KILL")
     assert post_env == pre_env
+
+
+def test_fold_attribution_extracts_risk_off_episodes_from_contiguous_runs() -> None:
+    """[F,F,T,T,T,F,F,T,F] should yield episodes at (2,5) and (7,8)."""
+    mask = np.array([False, False, True, True, True, False, False, True, False], dtype=bool)
+    prices = np.array([0.0, 0.0, 0.01, 0.02, 0.03, 0.0, 0.0, 0.04, 0.0], dtype=np.float64)
+
+    episodes = _extract_risk_off_episodes(mask, prices)
+
+    assert len(episodes) == 2
+    assert episodes[0] == ReversalEpisode(start_idx=2, end_idx=5, realized_price=0.06)
+    assert episodes[1] == ReversalEpisode(start_idx=7, end_idx=8, realized_price=0.04)
+
+
+def test_fold_attribution_closes_open_episode_at_fold_end() -> None:
+    """[F,T,T,T] should close open episode at end with end_idx == len(mask)."""
+    mask = np.array([False, True, True, True], dtype=bool)
+    prices = np.array([0.0, 0.01, 0.02, 0.03], dtype=np.float64)
+
+    episodes = _extract_risk_off_episodes(mask, prices)
+
+    assert len(episodes) == 1
+    assert episodes[0] == ReversalEpisode(start_idx=1, end_idx=4, realized_price=0.06)
