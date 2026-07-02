@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from src.domain.futures.strategy.cs_rank import SymbolSignal
     from src.domain.futures.strategy.tiered_workflow.awf_sim import (
         Layer2FoldAttribution,
+        ReversalEpisode,
     )
 
 AllocationPolicy = Literal["diagonal_kelly", "directional_equal_weight"]
@@ -1341,6 +1342,7 @@ class Layer3Result:
     risk_off_realized_price: float = 0.0
     risk_on_realized_price: float = 0.0
     reversal_kill_active: bool = False
+    risk_off_episodes: tuple[ReversalEpisode, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)

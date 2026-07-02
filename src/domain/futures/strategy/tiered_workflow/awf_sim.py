@@ -66,6 +66,49 @@ class Layer2ExpectedEdge:
 
 
 @dataclass(slots=True, frozen=True)
+class ReversalEpisode:
+    """risk_off 연속 구간 하나(entry~exit)의 실현 요약."""
+
+    start_idx: int
+    end_idx: int  # exclusive
+    realized_price: float  # 이 구간 sum(_bar_price), whipsaw 판별용 (>=0 이면 false positive)
+
+
+def _extract_risk_off_episodes(
+    risk_off_mask: NDArray[np.bool_],
+    bar_prices: NDArray[np.float64],
+) -> list[ReversalEpisode]:
+    """Extract contiguous risk-off episodes from a boolean mask.
+
+    Args:
+        risk_off_mask: Per-bar risk-off boolean array.
+        bar_prices: Per-bar realized price array (same length as mask).
+
+    Returns:
+        List of ReversalEpisode with start_idx, end_idx (exclusive), realized_price.
+    """
+    episodes: list[ReversalEpisode] = []
+    current_start: int | None = None
+    current_price: float = 0.0
+
+    for t in range(risk_off_mask.shape[0]):
+        if risk_off_mask[t]:
+            if current_start is None:
+                current_start = t
+            current_price += bar_prices[t]
+        else:
+            if current_start is not None:
+                episodes.append(ReversalEpisode(current_start, t, current_price))
+                current_start = None
+                current_price = 0.0
+
+    if current_start is not None:
+        episodes.append(ReversalEpisode(current_start, risk_off_mask.shape[0], current_price))
+
+    return episodes
+
+
+@dataclass(slots=True, frozen=True)
 class Layer2FoldAttribution:
     fold_idx: int
     oos_bars: int
@@ -89,6 +132,7 @@ class Layer2FoldAttribution:
     risk_off_bars: int = 0
     risk_off_realized_price: float = 0.0
     risk_on_realized_price: float = 0.0
+    risk_off_episodes: tuple[ReversalEpisode, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -138,6 +182,7 @@ def _assemble_fold_attribution(
     risk_off_bars: int = 0,
     risk_off_realized_price: float = 0.0,
     risk_on_realized_price: float = 0.0,
+    risk_off_episodes: tuple[ReversalEpisode, ...] = (),
 ) -> Layer2FoldAttribution:
     realized_total = realized_price + realized_funding - realized_cost
     alpha_gap = realized_total - expected_net
@@ -193,6 +238,7 @@ def _assemble_fold_attribution(
         risk_off_bars=risk_off_bars,
         risk_off_realized_price=_safe(risk_off_realized_price),
         risk_on_realized_price=_safe(risk_on_realized_price),
+        risk_off_episodes=risk_off_episodes,
     )
 
 
@@ -2142,6 +2188,9 @@ def _run_awf_simulation(
         _fold_risk_off_bars = 0
         _fold_risk_off_price = 0.0
         _fold_risk_on_price = 0.0
+        _current_episode_start: int | None = None
+        _current_episode_price: float = 0.0
+        _fold_episodes: list[ReversalEpisode] = []
         _fold_rebalance_count = 0
         if _diag:
             _attr_expected = 0.0
@@ -2708,8 +2757,15 @@ def _run_awf_simulation(
                     if bool(_risk_off_1d[t2]):
                         _fold_risk_off_bars += 1
                         _fold_risk_off_price += _bar_price
+                        if _current_episode_start is None:
+                            _current_episode_start = t2
+                        _current_episode_price += _bar_price
                     else:
                         _fold_risk_on_price += _bar_price
+                        if _current_episode_start is not None:
+                            _fold_episodes.append(ReversalEpisode(_current_episode_start, t2, _current_episode_price))
+                            _current_episode_start = None
+                            _current_episode_price = 0.0
                 cost_baseline = rebal_cost_baseline if t2 == t else 0.0
                 cost_baseline_ew = rebal_cost_baseline_ew if t2 == t else 0.0
                 r_h = gross_ret - cost
@@ -2750,6 +2806,9 @@ def _run_awf_simulation(
             prev_w_baseline = w_base
             prev_w_baseline_ew = w_base_ew
             prof_eval += time.perf_counter() - t0_eval
+
+        if _current_episode_start is not None:
+            _fold_episodes.append(ReversalEpisode(_current_episode_start, t2 + 1, _current_episode_price))
 
         _bear_edge_by_fold.append(bear_edge_per_bar_bps(_fold_bear_price_sum, _fold_bear_bars))
         if _reliability_enabled and logger.isEnabledFor(logging.DEBUG):
@@ -2794,6 +2853,7 @@ def _run_awf_simulation(
             risk_off_bars=_fold_risk_off_bars,
             risk_off_realized_price=_fold_risk_off_price,
             risk_on_realized_price=_fold_risk_on_price,
+            risk_off_episodes=tuple(_fold_episodes),
         )
         fold_attributions.append(_attr)
         if _diag and logger.isEnabledFor(logging.DEBUG):
