@@ -190,6 +190,63 @@ def test_ensure_funding_data_when_cache_read_fails_does_not_raise(
     collector.ensure_funding_data("HOOKUSDT", "2025-01-01", "2025-01-31")
 
 
+def test_ensure_ohlcv_data_refetch_overwrites_stale_cached_row_with_fresh_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a cached row with a defect (e.g. quote_vol NaN from a prior bug)
+
+    must be overwritten by a freshly-fetched row sharing the same timestamp, not
+    silently kept. Prior behavior used drop_duplicates(keep="first"), which meant
+    stale cache always won over corrected re-fetches -> no self-healing possible.
+    """
+    collector = DataCollector()
+
+    stale_ts = 1782950400000  # 2026-07-01T20:00:00Z
+    mock_cache = pd.DataFrame(
+        {
+            "timestamp": [stale_ts],
+            "datetime": pd.to_datetime(["2026-07-01T20:00:00Z"], utc=True),
+            "open": [1.0],
+            "high": [1.5],
+            "low": [0.9],
+            "close": [1.1],
+            "volume": [10.0],
+            "quote_vol": [float("nan")],
+        }
+    )
+
+    saved_dfs: list[pd.DataFrame] = []
+
+    monkeypatch.setattr(collector, "_load_cache", lambda *_args, **_kwargs: mock_cache)
+    monkeypatch.setattr(collector, "_save_cache", lambda symbol, tf, df: saved_dfs.append(df))
+    monkeypatch.setattr(collector, "_load_meta", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(collector, "_save_meta", lambda *_args, **_kwargs: None)
+
+    def mock_fetch(symbol: str, timeframe: str, start: str, end: str) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "timestamp": [stale_ts],
+                "datetime": pd.to_datetime(["2026-07-01T20:00:00Z"], utc=True),
+                "open": [1.0],
+                "high": [1.5],
+                "low": [0.9],
+                "close": [1.1],
+                "volume": [10.0],
+                "quote_vol": [11.0],
+            }
+        )
+
+    monkeypatch.setattr(collector.client, "fetch_ohlcv_with_taker", mock_fetch)
+
+    collector.ensure_ohlcv_data("BTCUSDT", "4h", "2026-07-01", "2026-07-02")
+
+    assert len(saved_dfs) == 1
+    combined_df = saved_dfs[0]
+    row = combined_df.loc[combined_df["timestamp"] == stale_ts]
+    assert len(row) == 1
+    assert row["quote_vol"].iloc[0] == pytest.approx(11.0)
+
+
 def test_ensure_ohlcv_data_backfills_past_gaps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

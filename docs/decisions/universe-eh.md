@@ -6,6 +6,17 @@ status: active
 priority: high
 ai_read_policy: when_related
 ---
+## 2026-07-02 KLINE-QUOTEVOL: `fetch_ohlcv_with_taker` quote_vol 추출 누락 + 캐시 자가치유 불가 결함 수정
+- **Delta:** `binance_client.py:fetch_ohlcv_with_taker`가 Binance klines row의 index 7(`quote_asset_volume`)을 파싱하지 않고 버리던 것을 추출해 `quote_vol` 컬럼으로 정식 포함(Vision 월간 아카이브가 아직 커버하지 못하는 최근 ~32일은 이 라이브 API 경로를 탐). `data_loader.py:ensure_ohlcv_data`의 캐시 병합 `drop_duplicates(subset=["timestamp"])`을 기본 `keep="first"`에서 `keep="last"`로 변경 — 재수집한 신선한 데이터가 기존(결함 있는) 캐시보다 우선하도록 자가치유 가능하게 함.
+- **Rationale:** live API 경로로 수집된 최근 구간 klines의 `quote_vol`이 항상 NaN이었고, 이게 `n_zero_volume_bars_60d` 게이트를 통해 유니버스 전체를 `universe_quality_rejected`로 크래시시키는 근본원인 중 하나였음(KLINE-QUOTEVOL이 원인, LEDGER-PIT-BROADCAST 항목의 broadcast 버그와는 별개 결함). `keep="first"` 상태에서는 코드를 고쳐도 이미 캐시된 NaN row가 재수집 후에도 계속 우선돼 절대 복구 불가능한 구조였음.
+- **실측 복구(같은 날, 실 API 호출·프로덕션 캐시/ledger 대상)**: 529개 심볼의 1h/4h 캐시(`ensure_ohlcv_data`가 실제로 사용하는 건 1h→4h 리샘플이므로 1h가 진짜 원본) 및 `universe_ledger.db`를 2026-06-01~06-30 구간 재수집·재복구. `n_zero_volume_bars_60d` 평균 172.68(2026-06-30, 전 심볼 오염)→0.0(전 심볼 정상). `build_universe(as_of="2026-06-30")` SELECTED 0→150 확인 — L3 홀드아웃(2025-12-31~2026-06-30) 전 구간에서 파이프라인 크래시 해소.
+- **Edge Cases:** row-level `quote_vol` NaN(컬럼은 있으나 값 미제공)은 `compute_rolling_zero_volume_bars`/`compute_continuity_metrics`에서 `volume`으로 폴백(아래 LEDGER-PIT-BROADCAST 항목과 동일 방어). `keep="last"` 변경은 `collect_1m_ohlcv` 등 동일 병합 패턴을 쓰는 다른 경로에도 일괄 적용(`replace_all`).
+
+## 2026-07-02 LEDGER-PIT-BROADCAST: `n_zero_volume_bars_60d` 심볼당 1회 계산 → 전체 날짜 브로드캐스트 PIT 위반 수정
+- **Delta:** `sync_single_symbol_data`가 `compute_continuity_metrics(..., as_of_date=end_date)`를 심볼당 단 1회만 호출해 그 결과(`n_zero_volume_bars_60d`)를 동기화 구간의 모든 날짜 row에 동일하게 재사용하던 것을, 신규 `compute_rolling_zero_volume_bars(klines_tf, dates, window_days=60)`(날짜별 trailing rolling, 벡터화 O(T))로 교체 — 각 ledger row가 자신의 `date` 시점 기준 trailing 60일 값을 갖도록 수정. `compute_continuity_metrics` 자체의 `n_zero_volume_bars_60d` 계산에도 quote_vol row-level NaN→volume 폴백 추가(컬럼 전체 부재 시의 기존 elif 분기와 별개 방어). 신규 `detect_continuity_metric_regression`을 `run_historical_sync`가 `update_ledger` 호출 직전 심볼별로 실행해 직전 저장값 대비 20배 초과 점프를 `[LEDGER-REGRESSION]` WARNING으로 로깅(쓰기는 차단하지 않음, 진단 전용).
+- **Rationale:** `compute_continuity_metrics`의 `as_of_date` docstring 계약("PIT-safe upper bound")을 캐싱 최적화 주석("O(T log T) once per symbol")이 위반하고 있었음 — 2026-07-01 09:23 배치의 `end_date` 시점 zero-volume 스냅샷이 2026-03-01~06-30 전 구간에 소급 전파돼 `universe_quality_rejected` 크래시 유발(covmode_replay `baseline_diagonal` 실행 조사 중 발견).
+- **Edge Cases:** episode 강제 종료(마지막 open episode)는 fold 경계에서 처리 — 이 항목과 직접 관련 없음(`layer3-eh.md` 참조). 표본 부족(baseline window < window_days//2) 시 z-score 대신 raw mean만 기록.
+
 ## 2026-07-02 VISION-METRICS-TS: `_normalize_metrics_frame` create_time 파싱 결함 수정
 - **Delta:** `BinanceVisionDownloader._normalize_metrics_frame`이 `create_time`을 `pd.to_numeric`(epoch-ms 가정)으로 파싱하던 것을, `timestamp` 컬럼 dtype 분기(`is_numeric_dtype` → `unit="ms"`, 그 외 → datetime 문자열 파싱)로 교체. int64 ms 역산출은 tz 제거 후 `datetime64[ns]` 고정 캐스팅(pandas 3.x 해상도 드리프트 방어, `opt_data_utils._to_unix_ms`와 동일 패턴 inline 복제).
 - **Rationale:** 실측(2020-09~2026-06 샘플)상 Vision metrics 아카이브의 `create_time`은 처음부터 `"YYYY-MM-DD HH:MM:SS"` 문자열이었고 epoch-ms였던 적이 없음 — 기존 코드는 전체 row를 NaN coerce 후 dropna로 폐기해 6년 전체 역사에서 OI/LSR 데이터가 100% 무음 실패해 왔음. `xs_oi_skew` signal family와 `next.md` P1①(funding-OI stress 마이크로구조 입력)의 전제 데이터 소스가 이 결함으로 구조적으로 비어 있었음.
