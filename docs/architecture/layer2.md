@@ -64,7 +64,8 @@ Transforms L1 candidate events into optimal portfolio weights via cross-sectiona
 - **Objective — Sortino_HAC_unit (Scale-Invariant)**: $J = \text{Sortino\_HAC\_unit} - \lambda_w \cdot \max(0, \tau_{wf} - \text{worst\_fold\_Sortino}) - \lambda_t \cdot \text{mean\_turnover}$. `growth_lcb` demoted to diagnostic. Turnover penalty $\lambda_t = 0$ default (off) — backtest-safe, enable via `l2_turnover_penalty_weight`.
 - **Phase B — fit-leg Deployment Calibration** (`risk_deployment.py`):
   - C1: fit-leg uses same OOS chain (rank→kelly→throttle→cost→funding), not equal-weight market avg.
-  - C2: `calibrate_deployment_leverage(fit_rets_hybrid, oos_rets, l_hard_cap=20.0, oos_budget_blend=0.5, oos_floor_cap=4.0)` → $(L^*, \text{binding}, \text{cross\_valid\_MDD})$. $L^* = \text{clip}(\min(L_{mdd}, L_{cvar}), 1.0, 20.0)$ (binding≠oos_blend). `oos_budget_blend` blends OOS-based floor into L* via convex combination, capped at `oos_floor_cap`. Binding `"oos_blend"` replaces hardcoded `min(2.0,…)`. `oos_rets` 옵션 제공 시 OOS MDD 크로스 검증을 세 번째 반환값으로 전달. `cagr/mdd/cvar` deployed; Sortino/Sharpe/PSR unit-vol.
+   - C2: `calibrate_deployment_leverage(fit_rets_hybrid, oos_rets, l_hard_cap=20.0, oos_budget_blend=0.5, oos_floor_cap=4.0, fit_mdd_crisis_gate=None)` → $(L^*, \text{binding}, \text{cross\_valid\_MDD})$. $L^* = \text{clip}(\min(L_{mdd}, L_{cvar}), 1.0, 20.0)$ (binding≠oos_blend). `oos_budget_blend` blends OOS-based floor into L* via convex combination, capped at `oos_floor_cap`. Binding `"oos_blend"` replaces hardcoded `min(2.0,…)`. `oos_rets` 옵션 제공 시 OOS MDD 크로스 검증을 세 번째 반환값으로 전달. `cagr/mdd/cvar` deployed; Sortino/Sharpe/PSR unit-vol.
+   - C5: `fit_mdd_crisis_gate` (float\|None, 기본 None=비활성): fit-leg unit-vol MDD가 임계값 이상이면 RC-2 oos_blend 분기를 건너뛰고 fit-only calibration 결과(binding∈{mdd,cvar,hard_cap,exchange_cap}) 유지. 재앙적 fit MDD(≥0.88~0.92)가 OOS 안전성 미끼로 L* 인플레이션되는 것을 차단. `if gate is not None and _fit_mdd_v1 >= gate: skip oos_blend elif _mdd_ratio < 1.0: ...` 구조. `Layer2AllocationConfig.l2_deploy_fit_mdd_crisis_gate` config 필드로 제어.
    - C4: `run_l2_awf(deploy_leverage=L^*)` → `evaluate_l2_trial(deploy_leverage_override=L^*)` — 단일 평가 SSOT. `apply_deployment(rets, L^*)` 지표는 `Layer2TrialEvaluation`에서 직접 사용, `Layer2Result`는 어댑터(`_layer2_result_from_trial_eval`)를 통해 1:1 복사. `run_l2_awf`는 배포 전용 필드(turnover/weights/gate)만 추가 계산. `exchange_leverage_cap` (default 10×) limits exchange feasibility. `l2_deploy_cvar_margin` knob.
   - Binding ∈ {mdd, cvar, oos_blend, hard_cap, exchange_cap, none}. $L^*$ flows as `l2_params["l2_deploy_leverage"]` SSOT and stored in `Layer2Result.deploy_leverage` for parity tracking.
 - **Vol Scaling**: Bidirectional via `allow_vol_upscale=True`, downscale-only default.
@@ -127,6 +128,7 @@ graph TD
 | `risk_budget_max_scale` | Upper bound for floor scaling | config |
 | `l2_deploy_cvar_margin` | CVaR safety margin for calibration | 0.20 |
 | `exchange_leverage_cap` | Exchange max leverage | 10.0 |
+| `l2_deploy_fit_mdd_crisis_gate` | Fit-leg MDD crisis gate threshold (None=비활성) | None |
 | `vol_target` | Unit-vol normalization | 1.0 (always on) |
 | `l2_routing_mode` | Sleeve routing mode: pool (legacy) or bucket (regime×family×TF) | "bucket" |
 | `l2_bucket_cost_bps` | Bucket edge cost deduction | 6.0 |
