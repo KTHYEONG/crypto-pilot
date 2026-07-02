@@ -111,3 +111,121 @@ class TestFallbackWithoutOos:
         assert cv_mdd == pytest.approx(0.0)
         assert binding != "oos_blend"
         assert lev >= 1.0
+
+
+# ---------------------------------------------------------------------------
+# S5 (Happy — 기본값 None → 기존 동작 완전 보존, 회귀 방지)
+# ---------------------------------------------------------------------------
+class TestFitMddCrisisGate:
+    def test_calibrate_leverage_gate_none_preserves_oos_blend(self) -> None:
+        """fit_mdd_crisis_gate=None(기본) → oos_blend 정상 발화, S5."""
+        rng = np.random.default_rng(42)
+        fit_rets = rng.normal(-0.002, 0.03, 600).astype(np.float64)
+        oos_rets = rng.normal(+0.0006, 0.006, 560).astype(np.float64)
+
+        lev, binding, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_rets=oos_rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=20.0,
+            oos_floor_cap=4.0,
+        )
+
+        assert binding == "oos_blend", f"binding={binding}"
+        assert lev > 2.0, f"lev={lev:.4f} should exceed 2.0"
+
+    def test_calibrate_leverage_gate_below_threshold_allows_oos_blend(self) -> None:
+        """fit_mdd_crisis_gate > fit_mdd_v1 → 게이트 미도달, oos_blend 정상 발화, S6."""
+        rng = np.random.default_rng(42)
+        fit_rets = rng.normal(-0.002, 0.03, 600).astype(np.float64)
+        oos_rets = rng.normal(+0.0006, 0.006, 560).astype(np.float64)
+
+        # 게이트보다 fit MDD가 낮음을 사전 확인
+        _fit_mdd_v1 = _mdd_at_leverage(fit_rets, 1.0)
+        assert _fit_mdd_v1 < 0.95, f"_fit_mdd_v1={_fit_mdd_v1:.4f} >= 0.95"
+
+        lev, binding, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_rets=oos_rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=20.0,
+            oos_floor_cap=4.0,
+            fit_mdd_crisis_gate=0.95,
+        )
+
+        assert binding == "oos_blend", f"binding={binding}"
+        assert lev > 2.0, f"lev={lev:.4f} should exceed 2.0"
+
+    def test_calibrate_leverage_gate_above_threshold_suppresses_oos_blend(self) -> None:
+        """fit_mdd_crisis_gate 초과 → oos_blend 억제, binding=mdd, L*=1.0, S7."""
+        rng = np.random.default_rng(42)
+        # 재앙적 fit 생성
+        fit_rets = rng.normal(-0.01, 0.05, 600).astype(np.float64)
+        oos_rets = rng.normal(+0.0006, 0.006, 560).astype(np.float64)
+
+        # 게이트 없으면 oos_blend로 올라가는 것을 확인 (회귀 재현)
+        _lev_no_gate, _bind_no_gate, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_rets=oos_rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=20.0,
+            oos_floor_cap=4.0,
+        )
+        assert _bind_no_gate == "oos_blend", (
+            f"pre-check: without gate binding={_bind_no_gate} (expected oos_blend)"
+        )
+
+        # 게이트 적용
+        lev, binding, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_rets=oos_rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=20.0,
+            oos_floor_cap=4.0,
+            fit_mdd_crisis_gate=0.75,
+        )
+
+        assert binding == "mdd", f"binding={binding} (expected mdd)"
+        assert lev == pytest.approx(1.0, abs=1e-6), f"lev={lev:.4f}"
+
+    def test_calibrate_leverage_gate_boundary_equal_suppresses(self) -> None:
+        """fit_mdd_crisis_gate == _fit_mdd_v1 → >= 비교로 억제, S8."""
+        rng = np.random.default_rng(42)
+        fit_rets = rng.normal(-0.01, 0.05, 600).astype(np.float64)
+        oos_rets = rng.normal(+0.0006, 0.006, 560).astype(np.float64)
+
+        _gate = _mdd_at_leverage(fit_rets, 1.0)
+
+        _, binding, _ = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_rets=oos_rets,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=20.0,
+            oos_floor_cap=4.0,
+            fit_mdd_crisis_gate=_gate,
+        )
+
+        assert binding != "oos_blend", f"binding={binding} (expected suppressed)"
+
+    def test_calibrate_leverage_gate_noop_without_oos_rets(self) -> None:
+        """oos_rets=None → 게이트 활성 조건이어도 no-op, 크래시 없음, S9."""
+        rng = np.random.default_rng(42)
+        fit_rets = rng.normal(-0.002, 0.03, 600).astype(np.float64)
+
+        lev, binding, cv_mdd = calibrate_deployment_leverage(
+            fit_rets=fit_rets,
+            oos_rets=None,
+            mdd_cap=0.30,
+            mdd_margin=0.30,
+            l_hard_cap=20.0,
+            fit_mdd_crisis_gate=0.10,
+        )
+
+        assert cv_mdd == pytest.approx(0.0)
+        assert binding != "oos_blend"
+        assert lev >= 1.0

@@ -1851,6 +1851,7 @@ def evaluate_l2_trial(
                 cvar_margin=float(config.l2_deploy_cvar_margin),
                 l_hard_cap=float(config.l2_deploy_l_hard_cap),
                 exchange_leverage_cap=getattr(config, "l2_max_exchange_leverage", None),
+                fit_mdd_crisis_gate=getattr(config, "l2_deploy_fit_mdd_crisis_gate", None),
             )
             _logger.debug(
                 "[L2-EVAL] L*=%.3f (binding=%s, src=%s)",

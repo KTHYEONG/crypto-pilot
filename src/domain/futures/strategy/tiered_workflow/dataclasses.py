@@ -474,6 +474,8 @@ class Layer2AllocationConfig:
     # fit-leg 사용 시 MDD/CVaR 예산이 실제 binding → hard_cap 완화해도 안전.
     # OOS 대리(fallback) 시에도 mdd_margin=0.30이 완충.
     l2_deploy_l_hard_cap: float = 20.0
+    # RC-2 crisis gate: fit-leg unit-vol MDD 이 값 이상이면 oos_blend 억제. None=비활성.
+    l2_deploy_fit_mdd_crisis_gate: float | None = None
     # 거래소 실행가능 notional 레버리지 상한 (None=무제한). Binance perp 기본 10x.
     l2_max_exchange_leverage: float | None = 10.0
     l2_require_recent_fold_pass: bool = True
@@ -617,6 +619,17 @@ class Layer2AllocationConfig:
                 cls._as_float(raw_exchange_cap, 10.0),
                 0.0,
             )
+        _raw_fit_mdd_crisis_gate = params.get("l2_deploy_fit_mdd_crisis_gate")
+        l2_deploy_fit_mdd_crisis_gate: float | None = (
+            cls._validate_range(
+                "l2_deploy_fit_mdd_crisis_gate",
+                cls._as_float(_raw_fit_mdd_crisis_gate, 0.0),
+                0.0,
+                1.0,
+            )
+            if _raw_fit_mdd_crisis_gate is not None
+            else None
+        )
         l2_objective_risk_util_target = cls._validate_range(
             "l2_objective_risk_util_target",
             cls._as_float(params.get("l2_objective_risk_util_target", 0.50), 0.50),
@@ -880,6 +893,7 @@ class Layer2AllocationConfig:
             l2_deploy_mdd_margin=cls._as_float(params.get("l2_deploy_mdd_margin", 0.30), 0.30),
             l2_deploy_cvar_margin=cls._as_float(params.get("l2_deploy_cvar_margin", 0.20), 0.20),
             l2_deploy_l_hard_cap=cls._as_float(params.get("l2_deploy_l_hard_cap", 20.0), 20.0),
+            l2_deploy_fit_mdd_crisis_gate=l2_deploy_fit_mdd_crisis_gate,
             l2_max_exchange_leverage=l2_max_exchange_leverage,
             l2_require_recent_fold_pass=bool(params.get("l2_require_recent_fold_pass", True)),
             l2_min_recent_fold_sharpe=cls._as_float(
