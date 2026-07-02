@@ -1289,6 +1289,10 @@ class Layer3Result:
         cvar95: per-bar 95% CVaR loss (꼬리위험, 양수, 진단용).
         avg_gross_exposure: 평균 총노출 (실제 배치 여부 진단용).
         deploy_leverage: L2 champion deployment scalar applied to hybrid holdout returns.
+        risk_off_bars: Reversal-kill risk-off bar count from fold attribution.
+        risk_off_realized_price: Realized price impact during risk-off bars.
+        risk_on_realized_price: Realized price impact during risk-on bars.
+        reversal_kill_active: Whether L2_REVERSAL_KILL env was active for this run.
     """
 
     cagr: float
@@ -1315,6 +1319,10 @@ class Layer3Result:
     min_sharpe: float = 0.0
     min_sortino: float = 0.0
     max_cvar95: float = 0.06
+    risk_off_bars: int = 0
+    risk_off_realized_price: float = 0.0
+    risk_on_realized_price: float = 0.0
+    reversal_kill_active: bool = False
 
 
 @dataclass(slots=True, frozen=True)
