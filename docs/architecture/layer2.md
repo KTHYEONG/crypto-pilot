@@ -157,10 +157,14 @@ graph TD
 | `l2_cs_amp_mode` | Amplification mode: median_excess / power / tanh | "power" |
 | `l2_cs_amp_alpha` | Amplification strength | 2.0 |
 | `l2_cs_amp_power` | Power mode exponent | 2.0 |
+| `l2_portfolio_cov_mode` | Portfolio sigma estimator for `diagonal_kelly_weights`: diagonal (Σwᵢ²σᵢ², zero-correlation assumption) or correlated (Ledoit-Wolf `w^T Σ w`) | "diagonal" |
+| `l2_portfolio_cov_lookback_bars` | Rolling returns window for correlated mode covariance estimation | 180 |
+| `l2_portfolio_cov_min_obs` | Min observations before Ledoit-Wolf fit; below this, falls back to per-symbol sample variance | 20 |
 
 # 5. Edge Cases
 - **Bucket Routing Look-ahead**: `compute_bucket_realized_edges` uses `fit_end=oos_start`, forward return at `t=fit_end-1` reads `close[oos_start]` — allowed (fit-leg only, OOS close price available in full dataset).
 - **Bucket min_n shrinkage**: Bucket with count < min_n → family prior shrinkage prevents degenerate edge from single-event bucket.
+- **Portfolio sizing lever absorption**: Any sizing mechanism that uniformly scales weights per-rebalance (e.g. `l2_portfolio_cov_mode="correlated"`) is renormalized by `calibrate_deployment_leverage`'s MDD/CVaR-targeted L* search — the calibrator re-scales leverage to hit the same fit-leg risk budget regardless of the underlying sizing formula's conservatism. Only levers that change the *time distribution* of exposure (not just its magnitude) structurally escape this absorption.
 - **Bucket unknown key**: `bucket_edges.get(key, 0.0)` → edge=0 < floor → auto excluded.
 - **Regime stale**: regime_code_1d covers entire bar range; OOS bar with no regime uses `regime=0` fallback.
 - **Low-confidence policy**: `soft` mode preserves routing continuity via downweighting instead of hard exclusion.

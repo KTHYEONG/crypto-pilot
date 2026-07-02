@@ -1734,6 +1734,12 @@ def _run_awf_simulation(
                     _fit_sig_arr[_fi] = _fss.volatility
 
             _fit_support_mask = _fit_mu_arr != 0.0
+            if config.l2_portfolio_cov_mode == "correlated":
+                _fit_lb = config.l2_portfolio_cov_lookback_bars
+                _fit_price_window = aligned.close_2d[max(0, _ft - _fit_lb): _ft + 1]
+                _fit_returns_hist = np.diff(np.log(np.maximum(_fit_price_window, 1e-12)), axis=0)
+            else:
+                _fit_returns_hist = None
             _fit_w = diagonal_kelly_weights(
                 mu_bps=_fit_mu_arr,
                 sigma=_fit_sig_arr,
@@ -1745,6 +1751,9 @@ def _run_awf_simulation(
                 btc_beta=_fit_btc_beta,
                 bars_per_year=bars_per_year,
                 support_mask=_fit_support_mask,
+                returns_hist=_fit_returns_hist,
+                cov_mode=config.l2_portfolio_cov_mode,
+                cov_min_obs=config.l2_portfolio_cov_min_obs,
             )
             if edge_throttle_enabled:
                 _fit_score = _book_edge_score(_fit_w, _fit_mu_arr)
@@ -2467,6 +2476,12 @@ def _run_awf_simulation(
                     _i = sym_to_idx.get(sym)
                     if _i is not None:
                         _z_score_arr[_i] = z
+            if config.l2_portfolio_cov_mode == "correlated":
+                _lb = config.l2_portfolio_cov_lookback_bars
+                _price_window = aligned.close_2d[max(0, t - _lb): t + 1]
+                _returns_hist = np.diff(np.log(np.maximum(_price_window, 1e-12)), axis=0)
+            else:
+                _returns_hist = None
             w = diagonal_kelly_weights(
                 mu_bps=mu_arr,
                 sigma=sig_arr,
@@ -2481,6 +2496,9 @@ def _run_awf_simulation(
                 z_scores=_z_score_arr,
                 cs_amp_alpha=float(config.l2_cs_amp_alpha),
                 cs_amp_mode=str(config.l2_cs_amp_mode),
+                returns_hist=_returns_hist,
+                cov_mode=config.l2_portfolio_cov_mode,
+                cov_min_obs=config.l2_portfolio_cov_min_obs,
             )
             if edge_throttle_enabled:
                 score = _book_edge_score(w, mu_arr)
