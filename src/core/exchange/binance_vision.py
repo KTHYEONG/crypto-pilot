@@ -425,15 +425,24 @@ class BinanceVisionDownloader:
 
         if "timestamp" not in df.columns:
             return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
-        df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
-        df = df.dropna(subset=["timestamp"])
-        if df.empty:
-            return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
-        df["timestamp"] = df["timestamp"].astype("int64")
-        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True, errors="coerce")
+
+        # dtype으로 분기: count 휴리스틱 금지 (함정 A — 정수 컬럼 to_datetime이 NaN 없이 garbage)
+        if pd.api.types.is_numeric_dtype(df["timestamp"]):
+            ts_numeric = pd.to_numeric(df["timestamp"], errors="coerce")
+            df["datetime"] = pd.to_datetime(ts_numeric, unit="ms", utc=True, errors="coerce")
+        else:
+            # 실측 Binance Vision metrics 포맷: create_time = "YYYY-MM-DD HH:MM:SS" 문자열
+            df["datetime"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+
         df = df.dropna(subset=["datetime"])
         if df.empty:
             return pd.DataFrame(columns=list(_METRICS_CANONICAL_COLUMNS))
+
+        # int64 ms epoch 역산출 — 함정 B 대응: to_datetime 결과 해상도(ns/us/ms)가 입력에 따라
+        # 달라지므로 하드코드 나눗셈 금지. tz 제거 후 datetime64[ns]로 해상도 명시 고정.
+        _dt_naive = df["datetime"].dt.tz_localize(None)
+        df["timestamp"] = _dt_naive.astype("datetime64[ns]").astype("int64") // 10**6
+
         df["available_at"] = df["datetime"] + pd.Timedelta(minutes=5)
 
         for col in (

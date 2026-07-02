@@ -6,6 +6,12 @@ status: active
 priority: high
 ai_read_policy: when_related
 ---
+## 2026-07-02 VISION-METRICS-TS: `_normalize_metrics_frame` create_time 파싱 결함 수정
+- **Delta:** `BinanceVisionDownloader._normalize_metrics_frame`이 `create_time`을 `pd.to_numeric`(epoch-ms 가정)으로 파싱하던 것을, `timestamp` 컬럼 dtype 분기(`is_numeric_dtype` → `unit="ms"`, 그 외 → datetime 문자열 파싱)로 교체. int64 ms 역산출은 tz 제거 후 `datetime64[ns]` 고정 캐스팅(pandas 3.x 해상도 드리프트 방어, `opt_data_utils._to_unix_ms`와 동일 패턴 inline 복제).
+- **Rationale:** 실측(2020-09~2026-06 샘플)상 Vision metrics 아카이브의 `create_time`은 처음부터 `"YYYY-MM-DD HH:MM:SS"` 문자열이었고 epoch-ms였던 적이 없음 — 기존 코드는 전체 row를 NaN coerce 후 dropna로 폐기해 6년 전체 역사에서 OI/LSR 데이터가 100% 무음 실패해 왔음. `xs_oi_skew` signal family와 `next.md` P1①(funding-OI stress 마이크로구조 입력)의 전제 데이터 소스가 이 결함으로 구조적으로 비어 있었음.
+- **Edge Cases:** 숫자형 timestamp 하위호환 경로 유지(관측된 적 없으나 방어적, `unit="ms"` 명시로 함정 A(unit 미지정 시 ns 오해석) 회피). 부분 파싱 실패 row는 row-wise dropna로만 제외. 전체 파싱 실패 시 canonical empty frame(예외 없음) 계약 유지.
+- **후속 실측(같은 날, 코드 실행 기반 탐색)**: 수정된 파이프라인으로 BTCUSDT 위기 구간(2025-12-31~2026-06-30)과 대조 평온 구간(2025-06-30~2025-12-30)의 실 OI/LSR을 수집·비교 — LSR z-score(20d)>2.0 발생빈도(위기 5.3% vs 평온 6.5%), OI 1일 급락corr(당일수익률)(위기 0.041 vs 평온 0.312) 모두 위기 구간이 평온 구간보다 판별력이 높지 않음. 단순 OI/LSR 레벨·1일 변화율 피처의 crash-detection 유효성은 **1차 탐색에서 disconfirm**(완전 반증 아님, 단일 윈도우·단순 변환만 테스트) — `docs/results/next.md` §1 참조.
+
 ## 2026-06-20 TIERED-BASE-SCOPE: loaded symbol scope와 temporal admission 분리
 - **Delta:** `opt_main_futures._run_strategy_stage`가 tiered entry 전에 `base_scope`를 먼저 계산하도록 바뀌었고, `_resolve_tradeable_scope`는 그 `base_scope`에만 warm-up / min-bars / OOS coverage를 적용하도록 좁혀졌다. empty strict admission은 fallback 없이 `TieredPipelineError`로 종료하도록 변경됐다. 관련 tests는 provenance scope와 strict admission을 분리했다.
 - **Rationale:** historical-union provenance와 temporal feasibility를 한 단계에서 같이 판정하면 tiny fixture가 전부 탈락하거나, 반대로 fallback으로 fail-open이 섞인다. base scope와 admission을 분리해 loaded-symbol 검증은 보존하고, holdout contract 위반은 fail-closed로 차단해야 했다.
