@@ -496,6 +496,10 @@ class Layer2AllocationConfig:
     l2_bucket_shrinkage: float = 0.3
     l2_bucket_edge_floor_bps: float = 50.0
     l2_bucket_min_reliability: float = 0.55
+    # Portfolio covariance mode for diagonal_kelly_weights
+    l2_portfolio_cov_mode: Literal["diagonal", "correlated"] = "diagonal"
+    l2_portfolio_cov_lookback_bars: int = 180
+    l2_portfolio_cov_min_obs: int = 20
     # CS Score Amplification (anti-Kelly=EW-convergence) — 중단 (효과 없음 입증됨)
     l2_cs_amp_enabled: bool = False
     # Breadth-selection mode: True=use all valid symbols (no rank_and_select alpha sorting)
@@ -948,6 +952,20 @@ class Layer2AllocationConfig:
                 cls._as_float(params.get("l2_bucket_min_reliability", 0.55), 0.55),
                 0.0,
                 1.0,
+            ),
+            l2_portfolio_cov_mode=(
+                "correlated"
+                if str(
+                    os.environ.get("L2_PORTFOLIO_COV_MODE")
+                    or params.get("l2_portfolio_cov_mode", "diagonal"),
+                ).strip().lower() == "correlated"
+                else "diagonal"
+            ),
+            l2_portfolio_cov_lookback_bars=cls._as_int(
+                params.get("l2_portfolio_cov_lookback_bars", 180), 180,
+            ),
+            l2_portfolio_cov_min_obs=cls._as_int(
+                params.get("l2_portfolio_cov_min_obs", 20), 20,
             ),
             l2_regime_compression_enabled=bool(params.get("l2_regime_compression_enabled", True)),
             l2_regime_proof_enabled=bool(params.get("l2_regime_proof_enabled", True)),
