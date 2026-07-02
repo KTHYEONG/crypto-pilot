@@ -404,3 +404,145 @@ class TestConfigSSOT:
         defaults = Layer2AllocationConfig()
         assert defaults.l2_cs_amp_enabled is False
         assert defaults.l2_regime_compression_enabled is True
+
+    def test_cov_mode_fields_default(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+            Layer2AllocationConfig,
+        )
+        cfg = Layer2AllocationConfig()
+        assert cfg.l2_portfolio_cov_mode == "diagonal"
+        assert cfg.l2_portfolio_cov_lookback_bars == 180
+        assert cfg.l2_portfolio_cov_min_obs == 20
+
+    def test_cov_mode_fields_from_mapping(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.dataclasses import (
+            Layer2AllocationConfig,
+        )
+        cfg = Layer2AllocationConfig.from_mapping({
+            "l2_portfolio_cov_mode": "correlated",
+            "l2_portfolio_cov_lookback_bars": 90,
+            "l2_portfolio_cov_min_obs": 10,
+        })
+        assert cfg.l2_portfolio_cov_mode == "correlated"
+        assert cfg.l2_portfolio_cov_lookback_bars == 90
+        assert cfg.l2_portfolio_cov_min_obs == 10
+
+
+class TestCorrelatedCovMode:
+    """diagonal_kelly_weights cov_mode='correlated' 테스트."""
+
+    N = 10
+    rng = np.random.default_rng(0)
+    T = 200
+
+    @staticmethod
+    def _make_highly_correlated_returns() -> np.ndarray:
+        rng = np.random.default_rng(0)
+        base = rng.normal(0, 0.02, TestCorrelatedCovMode.T)
+        cols = [base + rng.normal(0, 0.001, TestCorrelatedCovMode.T) for _ in range(TestCorrelatedCovMode.N)]
+        return np.column_stack(cols)
+
+    @staticmethod
+    def _default_caps() -> PortfolioCaps:
+        return PortfolioCaps(gross=3.0, per_symbol=0.10, net=0.30, beta=0.50, target_ann_vol=0.20)
+
+    def test_correlated_mode_reduces_gross_for_correlated_symbols(self) -> None:
+        n = self.N
+        mu_bps = np.full(n, 5.0, dtype=np.float64)
+        sigma = np.full(n, 0.02, dtype=np.float64)
+        returns_hist = self._make_highly_correlated_returns()
+        caps = self._default_caps()
+        prev_w = np.zeros(n, dtype=np.float64)
+
+        w_diag = diagonal_kelly_weights(
+            mu_bps=mu_bps, sigma=sigma,
+            kelly_fraction=0.25, vol_target=0.20, caps=caps,
+            prev_w=prev_w, no_trade_band=0.0,
+            cov_mode="diagonal",
+        )
+        w_corr = diagonal_kelly_weights(
+            mu_bps=mu_bps, sigma=sigma,
+            kelly_fraction=0.25, vol_target=0.20, caps=caps,
+            prev_w=prev_w, no_trade_band=0.0,
+            returns_hist=returns_hist,
+            cov_mode="correlated",
+        )
+
+        gross_diag = float(np.sum(np.abs(w_diag)))
+        gross_corr = float(np.sum(np.abs(w_corr)))
+        assert gross_corr < gross_diag * 0.9, (
+            f"correlated gross {gross_corr:.4f} should be < 0.9 * diagonal gross {gross_diag:.4f}"
+        )
+
+    def test_default_cov_mode_matches_legacy_diagonal_behavior(self) -> None:
+        n = 5
+        mu_bps = np.full(n, 5.0, dtype=np.float64)
+        sigma = np.full(n, 0.002, dtype=np.float64)
+        caps = self._default_caps()
+        prev_w = np.zeros(n, dtype=np.float64)
+
+        w_default = diagonal_kelly_weights(
+            mu_bps=mu_bps, sigma=sigma,
+            kelly_fraction=0.25, vol_target=None, caps=caps,
+            prev_w=prev_w, no_trade_band=0.0,
+        )
+        w_explicit_diag = diagonal_kelly_weights(
+            mu_bps=mu_bps, sigma=sigma,
+            kelly_fraction=0.25, vol_target=None, caps=caps,
+            prev_w=prev_w, no_trade_band=0.0,
+            cov_mode="diagonal",
+        )
+        np.testing.assert_array_equal(w_default, w_explicit_diag)
+
+    def test_correlated_mode_rejects_missing_returns_hist(self) -> None:
+        n = 5
+        mu_bps = np.full(n, 5.0, dtype=np.float64)
+        sigma = np.full(n, 0.02, dtype=np.float64)
+        caps = self._default_caps()
+        prev_w = np.zeros(n, dtype=np.float64)
+
+        import pytest
+        with pytest.raises(ValueError, match="returns_hist required"):
+            diagonal_kelly_weights(
+                mu_bps=mu_bps, sigma=sigma,
+                kelly_fraction=0.25, vol_target=0.20, caps=caps,
+                prev_w=prev_w, no_trade_band=0.0,
+                cov_mode="correlated",
+                returns_hist=None,
+            )
+
+    def test_correlated_mode_rejects_dimension_mismatch(self) -> None:
+        n = 5
+        mu_bps = np.full(n, 5.0, dtype=np.float64)
+        sigma = np.full(n, 0.02, dtype=np.float64)
+        caps = self._default_caps()
+        prev_w = np.zeros(n, dtype=np.float64)
+        returns_hist = np.random.default_rng(42).normal(0, 0.02, (60, 3))
+
+        import pytest
+        with pytest.raises(ValueError, match="dimension mismatch"):
+            diagonal_kelly_weights(
+                mu_bps=mu_bps, sigma=sigma,
+                kelly_fraction=0.25, vol_target=0.20, caps=caps,
+                prev_w=prev_w, no_trade_band=0.0,
+                returns_hist=returns_hist,
+                cov_mode="correlated",
+            )
+
+    def test_correlated_mode_handles_insufficient_history_without_crash(self) -> None:
+        n = 8
+        mu_bps = np.full(n, 5.0, dtype=np.float64)
+        sigma = np.full(n, 0.02, dtype=np.float64)
+        caps = self._default_caps()
+        prev_w = np.zeros(n, dtype=np.float64)
+        returns_hist = np.random.default_rng(99).normal(0, 0.02, (5, 8))
+
+        w = diagonal_kelly_weights(
+            mu_bps=mu_bps, sigma=sigma,
+            kelly_fraction=0.25, vol_target=0.20, caps=caps,
+            prev_w=prev_w, no_trade_band=0.0,
+            returns_hist=returns_hist,
+            cov_mode="correlated",
+            cov_min_obs=20,
+        )
+        assert np.all(np.isfinite(w)), "insufficient history should not crash"
