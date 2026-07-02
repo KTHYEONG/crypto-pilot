@@ -15,8 +15,6 @@ import logging
 import os
 import time
 import warnings
-from collections.abc import Iterator
-from contextlib import contextmanager
 
 # 반드시 numba/numpy import 전에 설정 — fork child OOM 방지
 for _env in ("NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
@@ -1860,13 +1858,10 @@ def _run_tiered_l2_study(
     return l2_study_result
 
 
-@dataclass(slots=True, frozen=True)
-class L2ReversalReplayVariant:
-    name: str
-    enabled: bool
-    dd_threshold: float
-    persistence_bars: int
-    recovery_cooldown_bars: int = 0
+from src.domain.futures.strategy.tiered_workflow.pipeline import (
+    _l2_reversal_replay_variants,
+    _temporary_reversal_env,
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -1896,51 +1891,6 @@ class L2ReversalReplayResult:
     adoption_passed: bool
     blocker_reason: str
 
-
-def _l2_reversal_replay_variants() -> tuple[L2ReversalReplayVariant, ...]:
-    return (
-        L2ReversalReplayVariant(name="baseline_off", enabled=False, dd_threshold=0.0, persistence_bars=1),
-        L2ReversalReplayVariant(name="legacy_006_p1", enabled=True, dd_threshold=0.06, persistence_bars=1),
-        L2ReversalReplayVariant(name="balanced_010_p2", enabled=True, dd_threshold=0.10, persistence_bars=2),
-        L2ReversalReplayVariant(name="balanced_010_p3", enabled=True, dd_threshold=0.10, persistence_bars=3),
-        L2ReversalReplayVariant(name="current_012_p3", enabled=True, dd_threshold=0.12, persistence_bars=3),
-        L2ReversalReplayVariant(
-            name="legacy_006_p1_cd4", enabled=True, dd_threshold=0.06,
-            persistence_bars=1, recovery_cooldown_bars=4,
-        ),
-        L2ReversalReplayVariant(
-            name="legacy_006_p1_cd8", enabled=True, dd_threshold=0.06,
-            persistence_bars=1, recovery_cooldown_bars=8,
-        ),
-        L2ReversalReplayVariant(
-            name="current_012_p3_cd8", enabled=True, dd_threshold=0.12,
-            persistence_bars=3, recovery_cooldown_bars=8,
-        ),
-    )
-
-
-@contextmanager
-def _temporary_reversal_env(variant: L2ReversalReplayVariant) -> Iterator[None]:
-    _saved: dict[str, str | None] = {}
-    _env_keys = ("L2_REVERSAL_KILL", "L2_REVERSAL_DD_THRESHOLD",
-                 "L2_REVERSAL_PERSISTENCE_BARS", "L2_REVERSAL_RECOVERY_COOLDOWN")
-    for _key in _env_keys:
-        _saved[_key] = os.environ.get(_key)
-    try:
-        if not variant.enabled:
-            os.environ.pop("L2_REVERSAL_KILL", None)
-        else:
-            os.environ["L2_REVERSAL_KILL"] = "1"
-            os.environ["L2_REVERSAL_DD_THRESHOLD"] = str(variant.dd_threshold)
-            os.environ["L2_REVERSAL_PERSISTENCE_BARS"] = str(variant.persistence_bars)
-            os.environ["L2_REVERSAL_RECOVERY_COOLDOWN"] = str(variant.recovery_cooldown_bars)
-        yield
-    finally:
-        for _key, _val in _saved.items():
-            if _val is None:
-                os.environ.pop(_key, None)
-            else:
-                os.environ[_key] = _val
 
 
 def _fold_metrics_from_l2_evaluation(
