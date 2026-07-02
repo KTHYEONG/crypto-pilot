@@ -247,3 +247,23 @@ def test_compute_continuity_metrics_zero_volume_bars_60d_counted() -> None:
 
     # Assert
     assert result["n_zero_volume_bars_60d"] == 3
+
+
+def test_compute_continuity_metrics_zero_volume_bars_60d_falls_back_to_volume_when_quote_vol_nan() -> None:
+    """Regression: quote_vol column present but NaN for recent rows (live-API gap) must
+    fall back to the volume column instead of being misread as zero trading volume.
+    """
+    # Arrange: 70-day grid; last 30 days have quote_vol=NaN but volume is populated
+    start = date(2024, 1, 1)
+    end = date(2024, 3, 10)  # ~70 days
+    grid = _make_grid(start, end)
+    klines = _grid_to_df(grid, volume_val=1000.0)
+
+    klines = klines.copy()
+    klines.loc[len(klines) - 180 :, "quote_vol"] = np.nan
+
+    # Act
+    result = compute_continuity_metrics(klines, onboard_date=start, as_of_date=end, tf="4h")
+
+    # Assert: volume fallback keeps these bars counted as non-zero
+    assert result["n_zero_volume_bars_60d"] == 0

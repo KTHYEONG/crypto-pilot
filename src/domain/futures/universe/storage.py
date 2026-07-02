@@ -7,6 +7,7 @@ import json
 import logging
 import multiprocessing
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -669,7 +670,15 @@ def compute_continuity_metrics(
     if "quote_vol" in klines_tf.columns:
         qvol = pd.to_numeric(
             klines_tf.loc[recent_mask.values, "quote_vol"], errors="coerce"
-        ).fillna(0.0)
+        )
+        # row 단위 NaN(컬럼은 존재하나 값 미제공, 예: live API 소스)은 확정 제로가 아니므로
+        # volume으로 폴백 — 컬럼 전체 부재 시의 elif volume 분기와 별개의 방어.
+        if "volume" in klines_tf.columns:
+            vol_fallback = pd.to_numeric(
+                klines_tf.loc[recent_mask.values, "volume"], errors="coerce"
+            )
+            qvol = qvol.where(qvol.notna(), vol_fallback)
+        qvol = qvol.fillna(0.0)
         n_zero_volume_bars_60d = int((qvol <= 1e-8).sum())
     elif "volume" in klines_tf.columns:
         vol = pd.to_numeric(
@@ -687,6 +696,61 @@ def compute_continuity_metrics(
         "has_inf": has_inf,
         "has_timestamp_issues": has_timestamp_issues,
     }
+
+
+def compute_rolling_zero_volume_bars(
+    klines_tf: pd.DataFrame,
+    *,
+    dates: Sequence[date],
+    window_days: int = 60,
+) -> dict[date, int]:
+    """각 date 시점 trailing window 내 zero-volume bar 수를 벡터화 계산."""
+    if klines_tf.empty or not dates:
+        return dict.fromkeys(dates, 0)
+
+    # quote_vol이 컬럼 자체는 있으나 row 단위로 NaN인 경우(예: 최근 구간이 live API 소스라
+    # quote_vol 미제공) 이를 "확정 제로 거래량"으로 오인하지 않도록 volume으로 row-level 폴백.
+    quote_vol_numeric = pd.to_numeric(klines_tf.get("quote_vol", klines_tf["volume"]), errors="coerce")
+    volume_numeric = pd.to_numeric(klines_tf["volume"], errors="coerce")
+    effective_vol = quote_vol_numeric.where(quote_vol_numeric.notna(), volume_numeric)
+    zero_vol_bool = effective_vol.fillna(0.0) <= 1e-8
+    idx = pd.to_datetime(klines_tf["datetime"], utc=True)
+    s = pd.Series(zero_vol_bool.values, index=idx).sort_index()
+    rolling_count = s.rolling(f"{window_days}D").sum()
+
+    result: dict[date, int] = {}
+    for d in dates:
+        cutoff = pd.Timestamp(d, tz="UTC") + pd.Timedelta(days=1)
+        idx_pos = rolling_count.index.searchsorted(cutoff, side="left") - 1
+        result[d] = int(rolling_count.iloc[idx_pos]) if idx_pos >= 0 else 0
+    return result
+
+
+def detect_continuity_metric_regression(
+    *,
+    symbol: str,
+    new_rows: list[LedgerRow],
+    previous_ledger_frame: pd.DataFrame | None,
+    jump_multiplier: float = 20.0,
+) -> list[str]:
+    """직전 저장값 대비 n_zero_volume_bars_60d 비정상 점프를 경고 메시지로 반환."""
+    if previous_ledger_frame is None or previous_ledger_frame.empty:
+        return []
+    prev = previous_ledger_frame
+    mask = prev["symbol"] == symbol
+    if not mask.any():
+        return []
+    prev_val = int(prev.loc[mask, "n_zero_volume_bars_60d"].iloc[-1])
+    warnings: list[str] = []
+    for row in new_rows:
+        new_val = row.n_zero_volume_bars_60d
+        if prev_val > 0 and new_val > prev_val * jump_multiplier:
+            warnings.append(
+                f"{symbol}: n_zero_volume_bars_60d jumped {prev_val}->{new_val} "
+                f"on {row.date}"
+            )
+        prev_val = new_val
+    return warnings
 
 
 def smart_filter_symbols(limit: int | None = None) -> list[str]:
@@ -932,10 +996,16 @@ def sync_single_symbol_data(
     _max_gap_bars: int = int(_continuity["max_gap_bars"])
     _coverage_ratio: float = float(_continuity["coverage_ratio"])
     _frozen_bars: int = int(_continuity["frozen_bars"])
-    _n_zero_vol_60d: int = int(_continuity["n_zero_volume_bars_60d"])
     _has_nan: bool = bool(_continuity["has_nan"])
     _has_inf: bool = bool(_continuity["has_inf"])
     _has_timestamp_issues: bool = bool(_continuity["has_timestamp_issues"])
+
+    # ── PIT-safe rolling zero-volume bars per date ──
+    _rolling_zero_vol: dict[date, int] = compute_rolling_zero_volume_bars(
+        klines_4h,
+        dates=[r["date"] for r in records],
+        window_days=60,
+    )
 
     # expected_is_bars: bars from onboard_date to end_date on 4h grid
     try:
@@ -970,7 +1040,7 @@ def sync_single_symbol_data(
             has_kline=True, has_funding=not funding.empty,
             n_bar_gaps=_n_bar_gaps, max_gap_bars=_max_gap_bars,
             frozen_bars=_frozen_bars, last_60d_coverage=_coverage_ratio,
-            n_zero_volume_bars_60d=_n_zero_vol_60d,
+            n_zero_volume_bars_60d=_rolling_zero_vol.get(day, 0),
             has_nan=_has_nan, has_inf=_has_inf,
             has_timestamp_issues=_has_timestamp_issues,
             funding_rate_8h=fr, listing_age_days=listing_age,
@@ -1428,5 +1498,30 @@ def run_historical_sync(
     _write_sync_coverage_report(report_rows)
 
     if all_new:
+        if ledger_path.exists():
+            try:
+                import sqlite3
+                conn = sqlite3.connect(str(ledger_path))
+                try:
+                    prev_ledger_frame = pd.read_sql_query("SELECT * FROM ledger", conn)
+                except Exception:
+                    prev_ledger_frame = None
+                finally:
+                    conn.close()
+            except Exception:
+                prev_ledger_frame = None
+        else:
+            prev_ledger_frame = None
+
+        for (rows, _count), (symbol, _, _, _, _, _, _, _, _) in zip(results, sync_tasks, strict=False):
+            if rows:
+                _warnings = detect_continuity_metric_regression(
+                    symbol=str(symbol),
+                    new_rows=rows,
+                    previous_ledger_frame=prev_ledger_frame,
+                )
+                for _w in _warnings:
+                    logger.warning("[LEDGER-REGRESSION] %s", _w)
+
         update_ledger(pd.concat(all_new, ignore_index=True), ledger_path=ledger_path)
         logger.info("Ledger update complete.")

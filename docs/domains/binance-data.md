@@ -12,7 +12,7 @@ related_paths:
 change_triggers:
   - src/core/exchange/binance_*.py
   - src/core/utils/binance_vision.py
-last_verified: 2026-05-25
+last_verified: 2026-07-02
 ---
 
 # Binance Futures Data Architecture
@@ -49,7 +49,8 @@ Binance API 및 Vision 아카이브로부터 고해상도(1m) 및 의사결정�
 
 ### Must Follow
 - **PIT Integrity:** 모든 데이터는 타임스탬프 기준으로 정렬되어야 하며 미래 데이터 참조 금지.
-- **Hybrid Source Selection:** 2020년 이전은 CCXT, 이후는 Vision 아카이브를 우선 사용.
+- **Hybrid Source Selection:** 2020년 이전은 CCXT, 이후는 Vision 아카이브를 우선 사용. Vision 월간 아카이브가 아직 커버하지 못하는 최근 구간(현재 시점 기준 약 32일 이내)은 `fetch_ohlcv_with_taker`(live FAPI `/fapi/v1/klines`) 경로로 수집한다.
+- **Full Field Extraction:** Binance klines row(`[open_time, open, high, low, close, volume, close_time, quote_asset_volume, n_trades, taker_buy_base, taker_buy_quote, ignore]`)에서 `quote_asset_volume`(index 7)을 포함한 모든 다운스트림 소비 필드를 추출해야 한다 — 일부 필드 누락은 즉시 발견되지 않고 이후 파생 지표(예: universe 유동성 게이트의 `n_zero_volume_bars_60d`)에서 NaN으로 조용히 전파된다.
 - **Checksum Verification:** Vision 다운로드 시마다 `.CHECKSUM` 파일의 SHA256 검증 필수.
 - **Imputation Audit:** 누락 데이터 보간 시 `warm_mask=False` 등으로 보간 여부를 명시.
 
@@ -60,6 +61,7 @@ Binance API 및 Vision 아카이브로부터 고해상도(1m) 및 의사결정�
 ### Invariants
 - **Timestamp Uniqueness:** 동일 심볼/타임프레임 내 중복 타임스탬프 금지.
 - **Deterministic Manifest:** `data_manifest_hash`를 통해 데이터 셋의 재현성 지문 유지.
+- **Cache Merge Precedence:** `ensure_ohlcv_data`가 기존 캐시와 신규 fetch 결과를 병합할 때(`drop_duplicates(subset=["timestamp"], keep="last")`), 동일 timestamp에 대해 신규 fetch가 항상 기존 캐시 값을 덮어쓴다 — 과거 결함으로 캐시된 잘못된 값(예: quote_vol NaN)이 있어도 재수집만으로 자가치유되도록 보장하는 불변식.
 
 ---
 

@@ -509,6 +509,7 @@ class BinanceClient:
                     all_rows.append([
                         ts, float(row[1]), float(row[2]), float(row[3]), float(row[4]),
                         float(row[5]),
+                        float(row[7]) if row[7] not in (None, "") else 0.0,
                         float(row[9]) if row[9] not in (None, "") else 0.0,
                         float(row[10]) if row[10] not in (None, "") else 0.0,
                     ])
@@ -538,12 +539,12 @@ class BinanceClient:
 
         if not all_rows:
             return pd.DataFrame(columns=[
-                "timestamp", "open", "high", "low", "close", "volume",
+                "timestamp", "open", "high", "low", "close", "volume", "quote_vol",
                 "taker_buy_base_volume", "taker_buy_quote_volume", "datetime"
             ])
 
         df = pd.DataFrame(all_rows, columns=[
-            "timestamp", "open", "high", "low", "close", "volume",
+            "timestamp", "open", "high", "low", "close", "volume", "quote_vol",
             "taker_buy_base_volume", "taker_buy_quote_volume",
         ])
         df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
