@@ -88,8 +88,10 @@ def test_fetch_ohlcv_with_taker_when_http_429_retries_then_succeeds(
             )
         payload = json.dumps(
             [
-                [1500, "1", "2", "0.5", "1.2", "10", 0, 0, 0, "4", "5", "0"],
-                [2000, "1.1", "2.1", "0.6", "1.3", "11", 0, 0, 0, "4.1", "5.1", "0"],
+                # [open_time, open, high, low, close, volume, close_time,
+                #  quote_asset_volume, n_trades, taker_buy_base, taker_buy_quote, ignore]
+                [1500, "1", "2", "0.5", "1.2", "10", 0, "123.45", 0, "4", "5", "0"],
+                [2000, "1.1", "2.1", "0.6", "1.3", "11", 0, "234.56", 0, "4.1", "5.1", "0"],
             ]
         )
         return _FakeResp(payload)
@@ -104,6 +106,58 @@ def test_fetch_ohlcv_with_taker_when_http_429_retries_then_succeeds(
     assert calls["n"] >= 2
     assert not df.empty
     assert "timestamp" in df.columns
+
+
+def test_fetch_ohlcv_with_taker_extracts_quote_asset_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test: row[7] (quote_asset_volume) must populate the quote_vol column.
+
+    Prior bug: quote_asset_volume (Binance klines row index 7) was dropped entirely,
+    leaving quote_vol missing -> NaN after merge with Vision-archived history, which
+    universe eligibility gates then misread as zero trading volume.
+    """
+    client = _build_client()
+
+    def _fake_resp(*_args: object, **_kwargs: object) -> _FakeResp:
+        payload = json.dumps(
+            [
+                [1500, "1", "2", "0.5", "1.2", "10", 0, "999.5", 0, "4", "5", "0"],
+                # second row's open_time (2000) >= end_timestamp terminates the fetch loop
+                [2000, "1.1", "2.1", "0.6", "1.3", "11", 0, "888.5", 0, "4.1", "5.1", "0"],
+            ]
+        )
+        return _FakeResp(payload)
+
+    monkeypatch.setattr("src.core.exchange.binance_client.urllib.request.urlopen", _fake_resp)
+
+    df = client.fetch_ohlcv_with_taker("BTCUSDT", "1h", "2026-01-01", "2026-01-02")
+    assert "quote_vol" in df.columns
+    assert not df["quote_vol"].isna().any()
+    assert df["quote_vol"].iloc[0] == pytest.approx(999.5)
+    assert df["quote_vol"].iloc[1] == pytest.approx(888.5)
+
+
+def test_fetch_ohlcv_with_taker_defaults_quote_vol_to_zero_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Edge case: null/empty quote_asset_volume in the API payload must not crash."""
+    client = _build_client()
+
+    def _fake_resp(*_args: object, **_kwargs: object) -> _FakeResp:
+        payload = json.dumps(
+            [
+                [1500, "1", "2", "0.5", "1.2", "10", 0, None, 0, "4", "5", "0"],
+                # second row's open_time (2000) >= end_timestamp terminates the fetch loop
+                [2000, "1.1", "2.1", "0.6", "1.3", "11", 0, "1.0", 0, "4.1", "5.1", "0"],
+            ]
+        )
+        return _FakeResp(payload)
+
+    monkeypatch.setattr("src.core.exchange.binance_client.urllib.request.urlopen", _fake_resp)
+
+    df = client.fetch_ohlcv_with_taker("BTCUSDT", "1h", "2026-01-01", "2026-01-02")
+    assert df["quote_vol"].iloc[0] == pytest.approx(0.0)
 
 
 def test_fetch_open_interest_history_normalizes_amount_and_value() -> None:

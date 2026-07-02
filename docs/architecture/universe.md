@@ -10,7 +10,7 @@ related_paths:
   - src/application/futures/optimization/universe_service.py
 change_triggers:
   - src/domain/futures/universe/**
-last_verified: 2026-06-19
+last_verified: 2026-07-02
 ---
 
 # 1. Purpose
@@ -49,11 +49,13 @@ Produces a bar-by-bar PIT-valid `UniverseStateCube [T, N]` for Binance USDT perp
 - G8: COST_TOO_HIGH — `round_trip_cost_bps > max_round_trip_cost_bps(=60)`.
 - ADV_FLOOR: ADV_FLOOR_FAIL — `adv_usdt_30d < min_adv_usdt(=2M)`.
 
-**Continuity Metrics (`compute_continuity_metrics`)**
-- Computes `n_bar_gaps`, `max_gap_bars`, `frozen_bars`, `n_zero_volume_bars_60d`, `last_60d_coverage`, `has_nan`, `has_inf`, `has_timestamp_issues` from raw parquet klines.
+**Continuity Metrics (`compute_continuity_metrics`, `compute_rolling_zero_volume_bars`)**
+- Computes `n_bar_gaps`, `max_gap_bars`, `frozen_bars`, `last_60d_coverage`, `has_nan`, `has_inf`, `has_timestamp_issues` from raw parquet klines, once per symbol per sync batch.
+- `n_zero_volume_bars_60d` is PIT-sensitive and computed **per ledger row date**, not once per sync batch: `compute_rolling_zero_volume_bars` vectorizes a trailing-60-day rolling zero-volume-bar count across the whole klines frame, so each row reflects its own `date`'s trailing window rather than the sync batch's `end_date` snapshot.
+- Row-level `quote_vol` NaN (column present but unpopulated, e.g. live-API-sourced recent bars — see `docs/domains/binance-data.md`) falls back to `volume` before the zero-volume determination in both `compute_continuity_metrics` and `compute_rolling_zero_volume_bars` — a NaN never counts as confirmed zero trading volume when `volume` shows activity.
 - Grid uses `pd.date_range(true_first_date, as_of_date, freq=tf)` where `true_first_date = max(onboard_date, first_data_date)` — prevents pre-data gap inflation.
 - `.as_unit("ns").asi8` on both expected grid and observed timestamps — eliminates pandas 2.x datetime unit mismatch (s vs us vs ns) that falsely maximized `max_gap_bars`.
-- Written to ledger at sync time; G6 reads these fields via `_instrument_df_from_ledger`.
+- Written to ledger at sync time; G6 reads these fields via `_instrument_df_from_ledger`. `detect_continuity_metric_regression` runs immediately before `update_ledger` persists each symbol's new rows, comparing `n_zero_volume_bars_60d` against the symbol's most recently stored ledger value — a >20x jump emits a `[LEDGER-REGRESSION]` warning without blocking the write (diagnostic only, not a hard gate).
 
 **Backtest Loader Gap Gate (`evaluate_symbol_data_sufficiency`)**
 - After count-based checks (95% IS/OOS coverage), computes `max_gap_bars` from loaded datetime series: `round(max_diff / bar_delta) - 1`.
