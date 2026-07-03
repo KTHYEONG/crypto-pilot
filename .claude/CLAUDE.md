@@ -31,8 +31,8 @@
 - **Check Loop:** 
     - **Trigger:** Execute when a `.py` file is created or modified.
     - **Action:** 
-        - **Implementation Phase (L1):** Run `uv run ruff check --fix [file]` and `uv run mypy [file]` on the modified file immediately.
-        - **Check Phase (L2):** Use `uv run pytest` to run tests and measure coverage, strictly following the directives in [.agents/rules/testing.md](file:///.agents/rules/testing.md). Avoid redundant L1 checks.
+        - **Implementation Phase (L1):** Run stub signature checks first.
+        - **Check Phase (L2):** Execute unified regression test and coverage under the `check` skill batch plan.
     - **Test Scope:** Use `uv run pytest` to run tests and measure coverage, strictly following the directives in [.agents/rules/testing.md](file:///.agents/rules/testing.md). Use `uv run pytest -k "keyword"` with the `--tb=short` option for fast feedback during iterations.
 
 ## 5. Tech Stack & Standards (Python 3.11)
@@ -68,6 +68,7 @@ This protocol applies only inside code-writing phases such as `implement`.
 - **Magic Numbers:** Always separate into constants.
 - **Unverified Refactoring:** Prohibit large-scale structural changes without test code or guaranteed behavior.
 - **Ignoring Return Values:** Prohibit neglecting return values or error handling.
+- **No Unsolicited Task Expansion**: Do not perform additional tasks that were not requested. Specifically, overstepping the currently assigned phase in the skill workflow (e.g., executing `check` automatically after `implement` finishes) is considered a waste of tokens and a violation of user control.
 
 ## 9. Rule Isolation & Priority: Commit Skill
 
@@ -85,14 +86,14 @@ This protocol applies only inside code-writing phases such as `implement`.
 
 ## 11. Skill Orchestration Boundary
 
-Skills define phase-specific workflows only. **Automatic transition between skills is strictly prohibited.**
+Skills define phase-specific workflows only. **스킬 간 자동 전환은 엄격히 금지됩니다.**
 
-- **Single Skill Scope**: Once the objective of the active skill is achieved, you must STOP immediately and wait for user feedback.
-- **No Auto-Chaining**: Unless the user explicitly requests a multi-step execution from the start, do not automatically call or proceed to the next skill after completing the current one.
-- **Roadmap vs Pipeline**: The workflow below is a 'Roadmap' for user reference, not an 'Automatic Execution Pipeline' for the AI.
+- **Single Skill Scope**: 활성화된 스킬의 목적이 달성되면 즉시 정지(STOP)하고 사용자 피드백을 기다려야 합니다.
+- **No Auto-Chaining**: 사용자가 처음부터 다단계 실행을 명시적으로 요청하지 않은 경우, 현재 스킬 완료 후 다음 스킬을 자동으로 호출하거나 진행하지 마십시오.
+- **Roadmap vs Pipeline**: 아래 워크플로우는 사용자가 참조할 '로드맵'일 뿐, AI의 '자동 실행 파이프라인'이 아닙니다.
 
 [Manual Development Roadmap (User-led)]
-1. `scan` -> 2. `spec` -> 3. `implement` -> 4. `check` -> 5. `audit` -> 6. `sync`
+1. `spec` -> 2. `implement` -> 3. `check` -> 4. `sync`
 
 Commit tasks:
 - Do not route through the default skill workflow.
@@ -109,6 +110,7 @@ To maintain a clean and navigable codebase, documentation must follow a strict s
 - **Architecture (`docs/architecture/`):** "High-Density, Comprehensive Readability".
   - Contents: Complete system logic, Mermaid diagrams, mathematical formulas, and I/O tables.
   - Constraint: NO history, NO conversational prose. Must be immediately understandable as the structural SSOT.
-- **Decisions (`docs/decisions/`):** "Ultra-Compressed Logic History" (ADR).
-  - Contents: Strict maximum of 5-7 lines per task. Focus solely on the *Delta* (what changed) and *Rationale* (why).
-  - Workflow: The `sync` skill MUST condense implementation details into this ultra-short format to prevent file bloat over time.
+- **Decisions (`docs/decisions/`):** "Two-File Decisions Log Architecture" (ADR).
+  - decisions.md (Active Window): Cumulative log, strictly maximum of 5 lines per task (Max 5 Lines Rule) appended to the top. Max 15 active entries.
+  - decisions_archive.md (Permanent Archive): Relocate pruned entries from decisions.md to this single archive file.
+  - Workflow: The `sync` skill MUST condense implementation decisions into decisions.md and handle the sliding window pruning to decisions_archive.md.
