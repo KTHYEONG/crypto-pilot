@@ -22,5 +22,25 @@
   "src/domain/futures/strategy/tiered_workflow/dataclasses.py": {
     "architecture": "docs/architecture/layer2.md",
     "testing": "tests/unit/domain/futures/strategy/test_positioning_crowding.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/signal_selection.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_xs_alpha_admission.py"
+  },
+  "src/domain/futures/allocation/signal_batch.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_xs_alpha_admission_batch.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/pipeline.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_xs_alpha_admission.py"
+  },
+  "src/domain/futures/allocation/pipeline.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_xs_alpha_admission_batch.py"
+  },
+  "src/domain/futures/strategy/config.py": {
+    "architecture": "docs/architecture/layer1.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_l1_xs_alpha_admission.py"
   }
 }
