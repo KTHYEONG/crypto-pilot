@@ -46,6 +46,21 @@ def rolling_ledoit_wolf_cov(returns_hist: np.ndarray, *, min_obs: int = 20) -> n
     return np.asarray(lw.covariance_, dtype=np.float64)
 
 
+def compute_diversification_ratio(
+    w: NDArray[np.float64],
+    sigma_diag: NDArray[np.float64],
+    sigma_mat: NDArray[np.float64],
+) -> float:
+    """Choueifaty-Coignard 분산비율: DR(w) = (Σ|wᵢ|σᵢ) / sqrt(wᵀ Σ w)."""
+    w_arr = np.ravel(w)
+    sig_arr = np.ravel(sigma_diag)
+    weighted_vol_sum = float(np.sum(np.abs(w_arr) * sig_arr))
+    sigma_port_sq = float(np.maximum(w_arr @ sigma_mat @ w_arr, 0.0))
+    if sigma_port_sq <= 1e-18:
+        return 1.0
+    return weighted_vol_sum / math.sqrt(sigma_port_sq)
+
+
 def mu_from_cross_section_signals(
     xs_long_prev: np.ndarray, xs_short_prev: np.ndarray
 ) -> np.ndarray:
