@@ -138,3 +138,9 @@ ai_read_policy: when_related
 - **결론**: 코드는 opt-in(기본 `False`)으로 유지, **프로덕션 활성화는 보류**. Pooled family×regime 진단은 개별 promotion 결과의 대리지표가 아님 — 재시도 시 symbol-variant 단위 regime 분해 선행 필요. SSOT 이관: `docs/results/next.md`.
 - (Compressed...)
 
+## Phase 22: L1 비추세 signal 다양화 measure-first — Admission 통과, Economic Replay 최종 기각 (2026-07-03)
+- **계기**: L1 승격의 trend-beta 편중(top 20 중 19/20) 검증. Phase 1a/1b(pool 확장+OI/LSR metrics 물질화) 실측으로 `residual_reversion`/`funding_extreme_reversal` 2종이 각 12/5심볼 LCB>0 승격 확인, OI/LSR 3종(`xs_oi_skew` 등)은 데이터 물질화 후에도 `no_incremental_edge`로 기각.
+- **Phase 2 (admission gate)**: `family_admission.py`(`evaluate_family_admission`/`compute_trend_sleeve_corr`) 구현. 65심볼 A/B 실행 결과 두 후보 모두 admitted=True(trend corr -0.10/-0.24, 17/9심볼 LCB>0). **Regression 1건 발견**(`XRPUSDT btc_regime_pullback:btc_pullback_50_12h` 소멸) — 원인 규명: `_compute_incremental_bps`(peer_exclusive)가 동일 (symbol,side,holding_bucket) 내 leave-self-out peer 평균 대비 초과분으로 incremental edge를 계산하는 설계라, 신규 family 추가가 기존 pair의 peer 기준선을 이동시켜 부호 반전 — **버그 아님, 의도된 경쟁 게이트 부작용**.
+- **❌ Phase 3 (economic replay) 반증**: seed-matched 3쌍(42/123/7) L1→L2→L3 full run. **3쌍 전부 일관되게 treatment가 baseline보다 악화** — CAGR -11.3~-11.4%→-17.0%, Sharpe -0.86~-0.87→-1.016, MDD 18.8~18.9%→28.0%, Trades 189→57(붕괴). L1 admission(LCB>0, 낮은 trend corr) 통과가 L2 champion 선택에는 net-negative로 작용 — "L1 LCB 개선만으로 채택 금지" 원칙이 실증됨.
+- **결론**: 두 후보 모두 **프로덕션 채택 최종 기각**. `per_tf_candidate_families` 변경 없음(코드는 실험적으로만 사용, 프로덕션 미반영). SSOT 이관: `docs/results/next.md`.
+
