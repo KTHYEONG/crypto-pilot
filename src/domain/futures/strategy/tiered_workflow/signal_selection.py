@@ -1095,6 +1095,9 @@ class FamilyRegimeDiagnostics:
     """
     fold_id: int
     by_family_regime: dict[tuple[str, int], tuple[int, int, float, float, float, float, float]]
+    by_family_regime_side: (
+        dict[tuple[str, int, str], tuple[int, int, float, float, float, float, float]] | None
+    ) = None
 
 
 def _xs_rank_ic(
@@ -1174,6 +1177,34 @@ def compute_xs_factor_spread_diagnostics(
     return XsFactorSpreadDiagnostics(fold_id=fold_id, by_factor=by_factor)
 
 
+def _family_regime_cell_stats(
+    g: pd.DataFrame,
+    *,
+    cfg: CandidateStrategyConfig,
+    fold_id: int,
+    seed: int,
+    min_bars: int,
+) -> tuple[int, int, float, float, float, float, float] | None:
+    bar_means = g.groupby("decision_idx")["realized_side_adjusted_gross_bps"].mean()
+    spread = bar_means.to_numpy(dtype=np.float64)
+    n_bars = spread.size
+    if n_bars < min_bars:
+        return None
+    mean = float(spread.mean())
+    std = float(spread.std(ddof=1)) if n_bars > 1 else 0.0
+    sharpe = mean / max(std, 1e-9)
+    boot = moving_block_bootstrap_mean(
+        spread,
+        np.arange(n_bars, dtype=np.int64),
+        block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 6)),
+        n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
+        seed=seed + fold_id,
+    )
+    lcb = float(np.quantile(boot, 0.05)) if boot.size > 0 else mean
+    ic, _ict = _xs_rank_ic(g)
+    return (n_bars, len(g), mean, std, sharpe, lcb, ic)
+
+
 def compute_family_regime_edge_diagnostics(
     *,
     realized_event_results: pd.DataFrame,
@@ -1181,6 +1212,7 @@ def compute_family_regime_edge_diagnostics(
     fold_id: int,
     seed: int = 0,
     min_bars: int = 8,
+    split_side: bool = False,
 ) -> FamilyRegimeDiagnostics | None:
     """Family x entry_regime_code 셀별 gross 엣지 진단 (Phase 0, measure-first).
 
@@ -1188,6 +1220,10 @@ def compute_family_regime_edge_diagnostics(
     차등 엣지를 갖는지 측정. 게이트 무영향, DEBUG 로그 전용. 산출값은 전부 gross —
     Phase 2 진행 여부는 lcb_gross_bps > cfg.l1_breakeven_floor_bps 기준으로 판단할 것
     (gross > 0만으로는 불충분, docs/specs/l1-regime-diversification-tf-expansion.md 참조).
+
+    split_side=True이면 trend family의 bear-regime short 엣지 부재 여부를 판별하기
+    위해 side(+1/-1)별로 추가 분해한 by_family_regime_side를 함께 산출한다
+    (docs/specs/l1-nontrend-diversification-measure-first.md C3).
     """
     if realized_event_results.empty:
         return None
@@ -1196,27 +1232,41 @@ def compute_family_regime_edge_diagnostics(
         return None
     by_family_regime: dict[tuple[str, int], tuple[int, int, float, float, float, float, float]] = {}
     for (family, regime_code), g in df.groupby(["family", "entry_regime_code"], sort=True):
-        bar_means = g.groupby("decision_idx")["realized_side_adjusted_gross_bps"].mean()
-        spread = bar_means.to_numpy(dtype=np.float64)
-        n_bars = spread.size
-        if n_bars < min_bars:
-            continue
-        mean = float(spread.mean())
-        std = float(spread.std(ddof=1)) if n_bars > 1 else 0.0
-        sharpe = mean / max(std, 1e-9)
-        boot = moving_block_bootstrap_mean(
-            spread,
-            np.arange(n_bars, dtype=np.int64),
-            block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 6)),
-            n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
-            seed=seed + fold_id,
+        stats_tuple = _family_regime_cell_stats(
+            g, cfg=cfg, fold_id=fold_id, seed=seed, min_bars=min_bars,
         )
-        lcb = float(np.quantile(boot, 0.05)) if boot.size > 0 else mean
-        ic, _ict = _xs_rank_ic(g)
-        by_family_regime[(str(family), int(regime_code))] = (n_bars, len(g), mean, std, sharpe, lcb, ic)
+        if stats_tuple is None:
+            continue
+        by_family_regime[(str(family), int(regime_code))] = stats_tuple
     if not by_family_regime:
         return None
-    return FamilyRegimeDiagnostics(fold_id=fold_id, by_family_regime=by_family_regime)
+
+    by_family_regime_side: (
+        dict[tuple[str, int, str], tuple[int, int, float, float, float, float, float]] | None
+    ) = None
+    if split_side and "side" in df.columns:
+        by_family_regime_side = {}
+        side_numeric = pd.to_numeric(df["side"], errors="coerce")
+        df_side = df.assign(_side_numeric=side_numeric)
+        df_side = df_side[df_side["_side_numeric"] != 0]
+        for (family, regime_code, side_val), g in df_side.groupby(
+            ["family", "entry_regime_code", "_side_numeric"], sort=True
+        ):
+            stats_tuple = _family_regime_cell_stats(
+                g, cfg=cfg, fold_id=fold_id, seed=seed, min_bars=min_bars,
+            )
+            if stats_tuple is None:
+                continue
+            side_label = "long" if side_val > 0 else "short"
+            by_family_regime_side[(str(family), int(regime_code), side_label)] = stats_tuple
+        if not by_family_regime_side:
+            by_family_regime_side = None
+
+    return FamilyRegimeDiagnostics(
+        fold_id=fold_id,
+        by_family_regime=by_family_regime,
+        by_family_regime_side=by_family_regime_side,
+    )
 
 
 def compute_probe_breadth_diagnostics(
@@ -1515,6 +1565,19 @@ def _format_family_regime_diag(diag: FamilyRegimeDiagnostics) -> str:
     return " | ".join(parts) if parts else ""
 
 
+def _format_family_regime_side_diag(diag: FamilyRegimeDiagnostics) -> str:
+    if diag.by_family_regime_side is None:
+        return ""
+    parts: list[str] = []
+    for (family, regime_code, side_label), (nbars, _nevents, mean, _std, sharpe, lcb, ic) in (
+        diag.by_family_regime_side.items()
+    ):
+        parts.append(
+            f"{family}@R{regime_code}/{side_label}=gross{mean:+.1f}/sh{sharpe:+.2f}/lcb{lcb:+.1f}/ic{ic:+.3f}/n{nbars}"
+        )
+    return " | ".join(parts) if parts else ""
+
+
 def evaluate_outer_signal_opportunities(
     *,
     opportunities: ValidatedSignalBatch,
@@ -1688,9 +1751,13 @@ def evaluate_outer_signal_opportunities(
     if _l1_family_regime_diag_enabled() and logger.isEnabledFor(logging.DEBUG):
         family_regime_diag = compute_family_regime_edge_diagnostics(
             realized_event_results=realized_event_results, cfg=cfg, fold_id=fold_id, seed=seed,
+            split_side=True,
         )
         if family_regime_diag is not None:
             logger.debug("[L1-FAMILY-REGIME-DIAG] %s", _format_family_regime_diag(family_regime_diag))
+            side_diag_str = _format_family_regime_side_diag(family_regime_diag)
+            if side_diag_str:
+                logger.debug("[L1-FAMILY-SIDE-DIAG] %s", side_diag_str)
     return Layer1FoldReadiness(
         fold_id=fold_id,
         registry_source_end_idx=fold.fit_end,

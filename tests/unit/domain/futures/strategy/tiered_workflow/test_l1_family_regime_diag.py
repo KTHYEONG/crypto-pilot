@@ -168,3 +168,85 @@ class TestFormatFamilyRegimeDiag:
         assert "sh" in out
         assert "lcb" in out
         assert "ic" in out
+
+
+def _family_regime_rows_with_side(
+    n_bars: int,
+    family: str,
+    regime_code: int,
+    gross_bps: float,
+    side: int,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for b in range(n_bars):
+        rows.append({
+            "decision_idx": b,
+            "symbol": "A",
+            "family": family,
+            "entry_regime_code": regime_code,
+            "side": side,
+            "score_z": 1.0,
+            "realized_side_adjusted_gross_bps": gross_bps,
+        })
+    return rows
+
+
+class TestFamilyRegimeDiagSplitSide:
+    def test_split_side_adds_side_keyed_dict(self) -> None:
+        rows = _family_regime_rows_with_side(30, "trend_ma", 0, 50.0, 1)
+        rows += _family_regime_rows_with_side(30, "trend_ma", 0, -20.0, -1)
+        frame = _family_regime_frame(rows)
+        cfg = _make_cfg()
+
+        result = compute_family_regime_edge_diagnostics(
+            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0, split_side=True,
+        )
+
+        assert result is not None
+        assert result.by_family_regime_side is not None
+        long_cell = result.by_family_regime_side[("trend_ma", 0, "long")]
+        short_cell = result.by_family_regime_side[("trend_ma", 0, "short")]
+        assert long_cell[2] == pytest.approx(50.0)
+        assert short_cell[2] == pytest.approx(-20.0)
+        # Backward-compat: unsplit dict unaffected
+        assert result.by_family_regime[("trend_ma", 0)][2] == pytest.approx(15.0)
+
+    def test_default_split_side_none(self) -> None:
+        rows = _family_regime_rows(30, "residual_reversion", 0, 50.0)
+        frame = _family_regime_frame(rows)
+        cfg = _make_cfg()
+
+        result = compute_family_regime_edge_diagnostics(
+            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0,
+        )
+
+        assert result is not None
+        assert result.by_family_regime_side is None
+
+    def test_split_side_missing_column_graceful(self) -> None:
+        rows = _family_regime_rows(30, "residual_reversion", 0, 50.0)
+        frame = _family_regime_frame(rows).drop(columns=["side"])
+        cfg = _make_cfg()
+
+        result = compute_family_regime_edge_diagnostics(
+            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0, split_side=True,
+        )
+
+        assert result is not None
+        assert result.by_family_regime_side is None
+
+    def test_split_side_zero_side_excluded(self) -> None:
+        rows = _family_regime_rows_with_side(30, "trend_ma", 0, 50.0, 1)
+        rows += _family_regime_rows_with_side(30, "trend_ma", 0, 0.0, 0)
+        frame = _family_regime_frame(rows)
+        cfg = _make_cfg()
+
+        result = compute_family_regime_edge_diagnostics(
+            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0, split_side=True,
+        )
+
+        assert result is not None
+        assert result.by_family_regime_side is not None
+        assert ("trend_ma", 0, "long") in result.by_family_regime_side
+        assert ("trend_ma", 0, "short") not in result.by_family_regime_side
+        assert result.by_family_regime_side[("trend_ma", 0, "long")][0] == 30
