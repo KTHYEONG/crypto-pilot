@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 from scipy.stats import norm
 
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
+from src.domain.futures.strategy.timeframe_contracts import scale_bar_count
 
 if TYPE_CHECKING:
     from src.domain.futures.strategy.config import RegimeConfig
@@ -436,6 +437,124 @@ def compute_trend_efficiency_1d(
     return np.clip(er, 0.0, 1.0)
 
 
+def compute_positioning_crowding_z_2d(
+    aligned: AlignedMarketData,
+    *,
+    tf: str,
+    oi_change_window_base: int = 6,
+    z_window_base: int = 42,
+    base_tf: str = "4h",
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """심볼별 OI 빌드업/LSR 쏠림 z-score 시계열 (TF-aware).
+
+    aligned.oi_2d/lsr_2d가 None이면 해당 배열은 전량 NaN으로 반환.
+
+    Args:
+        aligned: 정렬 시장 데이터.
+        tf: 대상 timeframe (예: "4h", "8h").
+        oi_change_window_base: OI 변화량 window (base_tf 기준).
+        z_window_base: z-score window (base_tf 기준).
+        base_tf: 기준 timeframe.
+
+    Returns:
+        (oi_build_z_2d, lsr_log_z_2d) 각각 [T, N] float64.
+    """
+    from src.domain.futures.signals.rules import _zscore_2d
+
+    close = aligned.close_2d
+    oi = aligned.oi_2d
+    lsr = aligned.lsr_2d
+    oi_change_window = scale_bar_count(oi_change_window_base, tf, base_tf)
+    z_window = scale_bar_count(z_window_base, tf, base_tf)
+
+    if oi is None:
+        oi_build_z_2d = np.full_like(close, np.nan, dtype=np.float64)
+    else:
+        oi_valid = np.isfinite(oi) & (oi > 0)
+        with np.errstate(divide="ignore"):
+            oi_log = np.where(oi_valid, np.log(oi), np.nan)
+        oi_log_change = oi_log - np.roll(oi_log, oi_change_window, axis=0)
+        oi_log_change[:oi_change_window] = np.nan
+        oi_build_z_2d = _zscore_2d(oi_log_change, window=z_window)
+
+    if lsr is None:
+        lsr_log_z_2d = np.full_like(close, np.nan, dtype=np.float64)
+    else:
+        lsr_valid = np.isfinite(lsr) & (lsr > 0)
+        with np.errstate(divide="ignore"):
+            lsr_log = np.where(lsr_valid, np.log(lsr), np.nan)
+        lsr_log_z_2d = _zscore_2d(lsr_log, window=z_window)
+
+    return oi_build_z_2d, lsr_log_z_2d
+
+
+def compute_crowding_persistent_mask_2d(
+    oi_build_z_2d: NDArray[np.float64],
+    lsr_log_z_2d: NDArray[np.float64],
+    trend_sign_2d: NDArray[np.float64],
+    *,
+    oi_threshold: float = 0.5,
+    lsr_threshold: float = 1.0,
+    persistence_bars: int = 3,
+    recovery_cooldown_bars: int = 3,
+) -> NDArray[np.bool_]:
+    """심볼별 positioning-crowding 지속성 마스크 [T, N].
+
+    NaN 입력은 raw condition에서 False로 간주 (nan_to_num).
+    각 컬럼(심볼)별 독립 상태기계 적용.
+
+    Args:
+        oi_build_z_2d: OI build z-score [T, N].
+        lsr_log_z_2d: LSR log z-score [T, N].
+        trend_sign_2d: 트렌드 베팅 부호 (+1/-1/0) [T, N].
+        oi_threshold: OI build z-score 임계값.
+        lsr_threshold: LSR log z-score 절대값 임계값.
+        persistence_bars: 연속 발화 필요 bar 수.
+        recovery_cooldown_bars: raw-off 후 상태 유지 bar 수.
+
+    Returns:
+        [T, N] bool, 1-bar 시차 포함.
+
+    Raises:
+        ValueError: persistence_bars < 1.
+    """
+    if persistence_bars < 1:
+        raise ValueError("persistence_bars must be >= 1")
+
+    raw_long = (trend_sign_2d > 0) & (oi_build_z_2d >= oi_threshold) & (lsr_log_z_2d >= lsr_threshold)
+    raw_short = (trend_sign_2d < 0) & (oi_build_z_2d >= oi_threshold) & (lsr_log_z_2d <= -lsr_threshold)
+    raw_2d = np.nan_to_num(raw_long | raw_short, nan=False)
+
+    n_cols = raw_2d.shape[1]
+    mask_2d = np.empty_like(raw_2d)
+    for j in range(n_cols):
+        mask_2d[:, j] = _apply_persistence_and_cooldown_1d(
+            raw_2d[:, j],
+            persistence_bars,
+            recovery_cooldown_bars,
+        )
+    return mask_2d
+
+
+def compute_crowding_dampener_mult(
+    is_crowded: bool,
+    *,
+    floor_mult: float,
+) -> float:
+    """persistence-gated crowding 상태에 따른 raw_mu 감쇠 승수.
+
+    floor_mult는 기본값 없음(필수 키워드 인자) — 매직넘버 방지.
+
+    Args:
+        is_crowded: persistence-gated crowding 활성 상태.
+        floor_mult: crowded 시 곱할 승수 (0 < floor_mult <= 1.0).
+
+    Returns:
+        floor_mult if is_crowded else 1.0.
+    """
+    return floor_mult if is_crowded else 1.0
+
+
 @dataclass(slots=True, frozen=True)
 class MarketRegimeContext:
     code_1d: NDArray[np.int8]
@@ -616,6 +735,52 @@ def _rolling_max_1d(values: NDArray[np.float64], window: int) -> NDArray[np.floa
     return out
 
 
+def _apply_persistence_and_cooldown_1d(
+    raw: NDArray[np.bool_],
+    persistence_bars: int,
+    recovery_cooldown_bars: int,
+) -> NDArray[np.bool_]:
+    """Persistence + recovery cooldown 상태기계 + 1-bar 시차 (심볼 독립 1-D).
+
+    compute_reversal_risk_off_1d L641-664에서 추출한 공용 헬퍼.
+    NaN 입력은 False로 간주.
+
+    Args:
+        raw: 원시 조건 [T], bool.
+        persistence_bars: 연속 발화 필요 bar 수 (>=1).
+        recovery_cooldown_bars: raw-off 후 상태 유지 bar 수.
+
+    Returns:
+        [T] bool, 1-bar 시차 포함 (out[0] == False).
+    """
+    t = raw.shape[0]
+    if t == 0:
+        return np.empty(0, dtype=np.bool_)
+    if persistence_bars > 1:
+        run_count = 0
+        persistent = np.zeros_like(raw)
+        for i in range(t):
+            run_count = run_count + 1 if bool(raw[i]) else 0
+            persistent[i] = run_count >= persistence_bars
+    else:
+        persistent = raw
+    if recovery_cooldown_bars == 0:
+        return np.concatenate([[False], persistent[:-1]]).astype(np.bool_)
+    s_on = False
+    off_run = 0
+    state: NDArray[np.bool_] = np.zeros(t, dtype=np.bool_)
+    for i in range(t):
+        if bool(persistent[i]):
+            s_on = True
+            off_run = 0
+        elif s_on:
+            off_run = off_run + 1 if not bool(raw[i]) else 0
+            if off_run >= max(recovery_cooldown_bars, 1) and not bool(raw[i]):
+                s_on = False
+        state[i] = s_on
+    return np.concatenate([[False], state[:-1]]).astype(np.bool_)
+
+
 def compute_reversal_risk_off_1d(
     btc_close_1d: NDArray[np.float64],
     *,
@@ -638,31 +803,7 @@ def compute_reversal_risk_off_1d(
     mom_slow_ema = _ema_1d(btc_close_1d, mom_slow)
     mom = mom_fast_ema - mom_slow_ema
     raw = (dd >= dd_threshold) & (mom < 0.0)
-    if persistence_bars > 1:
-        run_count = 0
-        persistent = np.zeros_like(raw)
-        for i in range(raw.shape[0]):
-            run_count = run_count + 1 if bool(raw[i]) else 0
-            persistent[i] = run_count >= persistence_bars
-    else:
-        persistent = raw
-    if recovery_cooldown_bars == 0:
-        out = np.concatenate([[False], persistent[:-1]]).astype(np.bool_)
-        return out
-    s_on = False
-    off_run = 0
-    state: NDArray[np.bool_] = np.zeros(t, dtype=np.bool_)
-    for i in range(t):
-        if bool(persistent[i]):
-            s_on = True
-            off_run = 0
-        elif s_on:
-            off_run = off_run + 1 if not bool(raw[i]) else 0
-            if off_run >= max(recovery_cooldown_bars, 1) and not bool(raw[i]):
-                s_on = False
-        state[i] = s_on
-    out = np.concatenate([[False], state[:-1]]).astype(np.bool_)
-    return out
+    return _apply_persistence_and_cooldown_1d(raw, persistence_bars, recovery_cooldown_bars)
 
 
 def _synthetic_ath_decline_path() -> NDArray[np.float64]:
