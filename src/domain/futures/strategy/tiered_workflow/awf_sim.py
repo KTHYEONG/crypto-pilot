@@ -1710,14 +1710,25 @@ def _run_awf_simulation(
                 compute_crowding_persistent_mask_2d,
                 compute_positioning_crowding_z_2d,
             )
+            from src.domain.futures.strategy.timeframe_contracts import scale_bar_count
             _oi_z_2d, _lsr_z_2d = compute_positioning_crowding_z_2d(aligned, tf=tf)
-            _trend_sign_2d = np.sign(cache.side_2d)
+            # NOTE: trend_sign must share aligned.close_2d's SYMBOL dimension (N), not
+            # cache.side_2d's SLEEVE dimension (symbol x strategy_id, generally > N) —
+            # a prior version used cache.side_2d directly and silently no-opped on every
+            # call via the except-block below (shape mismatch). Derive symbol-level trend
+            # direction from price momentum instead, matching the Phase 0 validation
+            # methodology (donchian_72-equivalent lookback, TF-scaled).
+            _mom_lookback = scale_bar_count(72, tf, "4h")
+            _mom_ref = np.roll(aligned.close_2d, _mom_lookback, axis=0)
+            _trend_sign_2d = np.sign(aligned.close_2d / np.maximum(_mom_ref, 1e-12) - 1.0)
+            _trend_sign_2d[:_mom_lookback] = 0.0
             _crowding_mask_2d = compute_crowding_persistent_mask_2d(
                 _oi_z_2d, _lsr_z_2d, _trend_sign_2d,
                 persistence_bars=getattr(config, "l2_crowding_persistence_bars", 3),
                 recovery_cooldown_bars=getattr(config, "l2_crowding_recovery_cooldown_bars", 3),
             )
         except Exception:
+            logger.debug("[L2-CROWDING] mask precompute failed, gate disabled for this run", exc_info=True)
             _crowding_mask_2d = None
 
     # D3: fit-leg 수익률 수집 (look-ahead-free L* calibration용)
