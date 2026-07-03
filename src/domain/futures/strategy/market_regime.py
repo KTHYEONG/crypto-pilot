@@ -445,7 +445,7 @@ def compute_positioning_crowding_z_2d(
     z_window_base: int = 42,
     base_tf: str = "4h",
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """심볼별 OI 빌드업/LSR 쏠림 z-score 시계열 (TF-aware).
+    """[ADR_20260703_L1_CROWD] 심볼별 OI 빌드업/LSR 쏠림 z-score 시계열 (TF-aware).
 
     aligned.oi_2d/lsr_2d가 None이면 해당 배열은 전량 NaN으로 반환.
 
@@ -498,7 +498,7 @@ def compute_crowding_persistent_mask_2d(
     persistence_bars: int = 3,
     recovery_cooldown_bars: int = 3,
 ) -> NDArray[np.bool_]:
-    """심볼별 positioning-crowding 지속성 마스크 [T, N].
+    """[ADR_20260703_L1_CROWD] 심볼별 positioning-crowding 지속성 마스크 [T, N].
 
     NaN 입력은 raw condition에서 False로 간주 (nan_to_num).
     각 컬럼(심볼)별 독립 상태기계 적용.
@@ -541,7 +541,7 @@ def compute_crowding_dampener_mult(
     *,
     floor_mult: float,
 ) -> float:
-    """persistence-gated crowding 상태에 따른 raw_mu 감쇠 승수.
+    """[ADR_20260703_L1_CROWD] persistence-gated crowding 상태에 따른 raw_mu 감쇠 승수.
 
     floor_mult는 기본값 없음(필수 키워드 인자) — 매직넘버 방지.
 
