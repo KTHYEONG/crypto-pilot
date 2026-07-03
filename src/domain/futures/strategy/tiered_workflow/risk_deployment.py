@@ -151,6 +151,10 @@ def calibrate_deployment_leverage(
     oos_budget_blend: float = 0.5,
     oos_floor_cap: float = 4.0,
     fit_mdd_crisis_gate: float | None = None,
+    diversification_ratio_fit: NDArray[np.float64] | None = None,
+    diversification_gate_enabled: bool = False,
+    concentration_recent_window_bars: int = 60,
+    concentration_floor: float | None = None,
 ) -> tuple[float, str, float]:
     """히스토리컬 수익률에서 배치 레버리지 L*를 결정론적으로 산출.
 
@@ -185,10 +189,16 @@ def calibrate_deployment_leverage(
             지정 시 fit_MDD_vol1 >= 임계값이면 RC-2 oos_blend 분기 자체를 건너뛰고
             fit-only calibration 결과(binding∈{mdd,cvar,hard_cap,exchange_cap})를 유지.
 
+        diversification_ratio_fit: fit-leg per-bar DR 시계열 [T_fit].
+            diversification_gate_enabled=True 시 사용. None이면 게이트 no-op.
+        diversification_gate_enabled: True면 concentration gate 활성.
+        concentration_recent_window_bars: 최근 DR median 계산 구간 (bars).
+        concentration_floor: concentration_ratio 하한 클립 값. 활성 시 명시 필수.
+
     Returns:
         (L*, binding_constraint, cross_valid_MDD_at_L) — cross_valid_MDD_at_L는
         oos_rets가 제공된 경우에만 실제 계산값. 미제공 시 0.0 반환.
-        binding ∈ {"mdd","cvar","hard_cap","exchange_cap","oos_blend","none"}.
+        binding ∈ {"mdd","cvar","hard_cap","exchange_cap","oos_blend","concentration_gate","none"}.
     """
     arr = np.asarray(fit_rets, dtype=np.float64)
     if arr.size < 2:
@@ -275,6 +285,26 @@ def calibrate_deployment_leverage(
                         )
         else:
             _logger.debug("[L2-CALIB-CV] oos_rets size<2, skipping cross-validation")
+
+    # Concentration gate: 독립적인 DR 기반 제약 (OOS 결과와 무관)
+    if diversification_gate_enabled:
+        if concentration_floor is None:
+            raise ValueError(
+                "concentration_floor must be explicitly set "
+                "when diversification_gate_enabled=True"
+            )
+        if diversification_ratio_fit is not None:
+            dr_arr = np.asarray(diversification_ratio_fit, dtype=np.float64)
+            if dr_arr.size >= concentration_recent_window_bars:
+                dr_fit_median = float(np.median(dr_arr))
+                dr_recent = float(np.median(dr_arr[-concentration_recent_window_bars:]))
+                if dr_fit_median > 1e-9:
+                    concentration_ratio = float(
+                        np.clip(dr_recent / dr_fit_median, concentration_floor, 1.0)
+                    )
+                    if concentration_ratio < 1.0:
+                        l_final = l_final * concentration_ratio
+                        binding = "concentration_gate"
 
     # 최종: clip(L*, l_floor, min(l_hard_cap, exchange_cap)) — spec Algorithm §6
     if exchange_leverage_cap is not None and exchange_leverage_cap > 0.0 and l_final > exchange_leverage_cap:
