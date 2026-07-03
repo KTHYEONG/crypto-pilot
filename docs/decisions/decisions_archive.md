@@ -1,3 +1,132 @@
+# Permanent Decisions Archive
+
+This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
+
+## Layer 1 (Signal & Core SWF) Historical Log
+
+---
+title: Layer 1 Decision Log (Compressed)
+domain: futures.strategy
+type: adr
+status: active
+priority: high
+ai_read_policy: when_related
+---
+## Phase 1: SWF 구조 & 초기 게이트 (ADR-001~009, 6/13~19)
+- Nested SWF 도입, prequential evidence grid 분리(outer_n×multiplier≤max), outer warm-up blocks=2로 fold 0 underpower 해소
+- 통계적 MDES gate(t_crit+검정력 80%), 5-Gate로 standardization(fold_cov/match_ratio/sym_count/fold_ratio/probe_lcb_bps)
+- IC 지표 제거(Arch-Only mode에서 noise), mu_quality_shrinkage dead-code 제거(validation_rank_ic=0 → lam=0 붕괴)
+- (Compressed...)
+
+## Phase 2: 성능 최적화 1~3차 (ADR-009~016, 025~026, 6/18~21)
+- PERF 로깅 도입(레벨 15→10 통일, 계층적 타이밍, [PERF] prefix 일원화)
+- Numba JIT rolling z-score(prime 27.78→7.75s, L1 total 47.64→25.17s)
+- q-value FDR vectorization→loop 롤백(N≤200 소표본 회귀)
+- (Compressed...)
+
+## Phase 3: 신호 패밀리 & MTF 확장 (ADR-017~024, 026~034, 6/21~22)
+- Flow family 3종(funding_flow_carry/unwind, flow_exhaustion_reversal) + cell-level taker_imbalance_2d
+- 8 저성과 family 제거(trend_donchian, OI 5종, basis 2종, taker_exhaustion) 40→31, per-symbol ENS-DIAG 진단
+- FLO 회귀 수정: flow_trend_continuation archetype flow_rev→ts_mom, lsr_oi_regime_filter active화(side_hint 방향성)
+- (Compressed...)
+
+## Phase 4: 후반 최적화 v2~v3 (ADR-035~037, 6/22~23)
+- L1 Gate+Signal Pool Optimization: per_TF_gate_overrides 자동 fallback, fdr_alpha 0.10→0.15, qw_floor 0.05, 2h trend_ma 제거
+- OOM 방지: resolve_safe_nested_workers adaptive cap(max_workers=min(cpu_limit-2,8), oversubscription guard), fork 내 gc.disable()
+- P5-R: prequential ThreadPoolExecutor 제거→순차 복원(GIL+cache thrashing 역효과, 11.4→7.9s/TF, -31%)
+- (Compressed...)
+
+## Phase 5: Bridge Perf Logging + GC 최적화 (ADR-038~039, 6/23)
+- Bridge perf logging Phase 1: `_get_rss_mb()` RSS 측정, stage별 `_sample_rss()` memory delta 추적, `wf_fold_times` per-fold 타이밍, `[PROFILE][MERGE][SUMMARY]` 통계 로깅
+- HTF skip 최적화 시도 → 롤백: `run_per_tf_l1()`이 bridge HTF events에 의존적임 확인 (`_build_per_tf_event_index()` 존재하지 않음). HTF skip 시 6h/8h/12h per-TF L1 비활성화 = 품질 회귀
+- GC 전략 추가: diagnostics 후 `gc.collect()` (+5.3GB 회귀), bridge 반환 후 `gc.collect()` (tiered re-alignment 전 aligned 해제)
+
+## Phase 6: WSL Stability Optimization (ADR-040, 6/23)
+- Max worker cap: `min(cpu_limit, 8)` → `min(cpu_limit, 3)`. Fork worker 폭주(6 worker × 8 threads = 48 threads)가 WSL CPU starvation → network dropout → SSH/Tailscale 단절 원인으로 확인.
+- Thread env vars: `NUMBA_NUM_THREADS`, `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`, `NUMEXPR_NUM_THREADS` = `"1"` before each fork. Fork child 내 Numba prange + BLAS thread cascade 제거.
+- TF 간 0.5s pause: fork 폭주 후 OS page cache + network buffer 회복 시간 확보.
+- (Compressed...)
+
+## Phase 8: Data Load Arrow Optimization (ADR-042, 6/24)
+- **P1-A: Lazy Funding/Metrics Load**: `_prepare_funding_metrics()` 추출, cache-hit + no exec_1m 경로에서 funding/metrics I/O 완전 skip (57 심볼 × GIL-bound parse 낭비 제거).
+- **P1-B: Parquet Predicate Pushdown**: `pd.read_parquet(filters=[("timestamp",">=",ms),("<=",ms)])` 도입, enriched 캐시의 row-group statistics 기반 디코드 최적화 → full-read + mask 제거.
+- **P2: Arrow Dataset C++ 병렬 스캔**: `_scan_enriched_dataset()`으로 `pyarrow.dataset` + row-group 멀티스레드 디코드(GIL 해제) → 2-pass 분리(I/O parallel + Python-bound 후처리 순차) → cache-hit 경로 CPU 병렬화.
+- (Compressed...)
+
+## Phase 9: Bridge Candidate Strategy Perf (ADR-043~045, 6/24)
+- **L1-B: Selection Vectorization**: `_vectorized_topk_per_bar` 도입 — per-bar Python loop → sort + drop_duplicates + cumcount rank + ceil(keep) + variant-cap backfill. O(E log E) 벡터화, 0 Python loop. 동등성 보장: sorted cumcount tie-break.
+- **L1-A: Diagnostics Gating**: `enable_diagnostics` 파라미터 추가 → evidence fold(12/16)에서 sensitivity/shadow/waterfall skip. 외부 fold/배포 경로는 `True` 유지(진단 SSOT 보존).
+- **L2-A: Bridge prepare-once**: `bridge.py` WF 루프 직전 `prepare_labeled_events` 1회 호출 → `PreparedLabeledEvents` 전달. `build_candidate_dataset` fast path(numpy boolean mask) 사용.
+- (Compressed...)
+
+## Phase 4 (sic): Bridge-Candidate-Perf-V2 및 Enrich Cache Hotfix (ADR-03X, 6/24)
+- **L2-A**: `PreparedLabeledEvents` frozen→mutable dataclass, `enrich_cache: dict[str, Any] | None` 필드 추가.
+- **L2-B**: `_precompute_enrich` lazy init — window-invariant만 precompute (arm/entry_regime/overlay_mult/crisis_active/entry_regime_code). 벡터화 affinity matrix lookup (list-comp→numpy indexing).
+- **L2-C/D**: `build_candidate_dataset` sig_feat_names + skip_features 경로에서 `enrich_cache` read.
+- (Compressed...)
+
+## Phase 10: Bridge Multi-TF Threading + Datetime Hoisting (6/24)
+- **S1 — Multi-TF Bridge ThreadPool**: `build_multi_tf_panels`에서 sequential per-TF loop → `_process_single_tf` inner function + `ThreadPoolExecutor(max_workers=2)`. Eligible TF ≤1 → sequential; ≥2 → parallel. 각 TF는 독립적인 `list[CandidateSignalPanel]` 할당, shared mutation 없음. Exception 격리: 실패 TF만 skip, 다른 TF 정상 처리. ThreadPool ≠ ProcessPool — fork 없음, NUMBA env var 오염 없음. (commit 포함: `src/domain/futures/strategy_runtime/bridge.py`)
+- **S2 — `_resolve_tradeable_scope` Datetime Hoisting**: 52 symbol loop에서 invariant `pd.api.types.is_datetime64_any_dtype()` 검사를 first-valid-symbol에서 1회만 실행하고 `_native_flag`로 캐시. 이후 symbol은 branch만 평가 (0.2s saving, 52 syms × 8761 bars). MagicMock/string-datetime fallback 경로 유지. (commit 포함: `src/execution/opt_main_futures.py`)
+- **Perf Profile**: `docs/perf_mem_profile_report.md` 최초 생성 (L1 288.10s, bridge 58.24s, peak RSS 7,565MB). 별도 커밋 — 성능 기준선 문서.
+- **L1 validation**: ruff/mypy pass, test 4개 파일 339 insertions/20 deletions.
+
+## Phase 11: Logging Consolidation & Tagging Standardization (ADR-046, 6/24)
+- **Log Level Consolidation**: Custom `PERF` logging level was removed, consolidating performance metrics and standard debug logs under standard `logging.DEBUG` level.
+- **Bracketed Tag Enforcement**: Modified `CategorizedLogger` to enforce prefixing of all debug logs with bracketed tags `[PERF]`, `[DATA]`, `[OPT]`, `[STRAT]`, or `[SYS]`. Any untagged log automatically defaults to the `[SYS]` prefix.
+- **Key-Value Message Structuring**: Converted performance metrics logging (durations, memory sizes) to standard key-value messages (e.g. `[PERF] step=... elapsed=...s`) in `opt_main_futures.py` and `CategorizedLogger` helpers, allowing efficient automated parsing.
+- **Verification**: All logger unit tests and L1 memory profiling tests pass, validating successful fallback tagging and standard formatting.
+
+## Phase 12: Bridge candidate strategy parallelization (ADR-047, 6/24)
+- **Signal Calculation Parallelization**: Replaced sequential loops in `build_rule_signal_panels` with a local closure function `_build_single_family(family)` mapped over active families using a `ThreadPoolExecutor` (max_workers=4). Leveraged GIL-free numpy operations to utilize CPU cores without multiprocessing serialization overhead.
+- **Batch Event Conversion**: Parallelized `candidate_panels_to_events` using `ThreadPoolExecutor` (max_workers=4) over active panels, significantly shortening the time required for dense-to-sparse event table conversions.
+- **Diagnostics Parallelization**: Parallelized independent pandas groupby calculations (`by_family`, `by_variant`, `by_family_side`, and `_summarize_side_flip` frames) in `compute_rule_diagnostics` via `ThreadPoolExecutor` (max_workers=3).
+- **WSL Performance Outcome**: Average L1 strategy computation time per timeframe reduced by 54% (~46.78s sequential to ~21.29s parallel equivalent). Complete execution timing and RAM profiles updated in `docs/perf_mem_profile_report.md`.
+
+## Phase 13: L1 PERF Radical Optimization — OPT-0~4 (ADR-048, 6/24)
+- **OPT-0: Dead Code + TF 정합성**: `TF_PROBE_GRID` 6→4 TF(`1h/2h` 제거), `PROBE_SOURCE_TFS` dead-code 제거(`1m/5m/15m/30m`), `run_tiered_pipeline` `l1_tfs` default `cfg.l1_tfs`와 정합.
+- **OPT-1: searchsorted O(log T)**: `load_futures_data_maps_for_symbols` Pass-2의 datetime mask+sum → `np.searchsorted(dt_ns, value, "left")`. `is_end_idx`/`is_start_idx`/`oos_start_idx` 모두 O(T) full scan에서 O(log T) binary search로 단축.
+- **OPT-2: Evidence IPC as_completed**: `run_l1_nested_swf` evidence 수집을 `as_completed`로 변경. 완료 순 IPC + fold_id 재정렬.
+- (Compressed...)
+
+## Phase 14: L1 HTF Bottleneck — candidate_panels_to_events Optimization (ADR-049, 6/24)
+- **A: Regime×Policy Pre-extraction**: `_convert_single_panel` regime 루프에서 array indexing을 policy당 21회에서 regime당 1회로 감소. regime_mask를 regime 루프 밖에서 1회 pre-extract 후 policy 루프에서 재사용. O(R×P) → O(R) indexing reduction.
+- **B: sort_values 제거**: `candidate_panels_to_events` 최종 `sort_values("datetime")` 제거. downstream(label_candidate_events, portfolio selection 등)이 entry_idx 기반 접근으로 정렬 불필요. O(N log N) full-table sort 제거.
+- **C: Numba _robust_zscore_numba**: `_cross_sectional_robust_zscore` 위임 함수로 `_robust_zscore_numba @njit` 도입. unique group별 argsort 단일 패스 walk, Python O(U×E) loop → Numba O(E log E). 각 group 내 median/MAD 계산을 numba-compiled 단일 패스로 통합.
+- (Compressed...)
+
+## Phase 15: L1 Probe Breadth Diagnostics (ADR-050, 6/29)
+- L1 게이트 전부 PASS이나 L2 realized gross가 음수인 모순 해소를 위해 env-gated DEBUG 계측 추가
+- `ProbeBreadthDiagnostics` frozen dataclass + `compute_probe_breadth_diagnostics()`: (a) breadth-decay (k=3/10/20/-1)로 selection inflation 정량화; (b) gross − rt_cost로 cost drag 분리; (c) Spearman rank-IC + Fisher-z tstat로 신호력 부재 진단; (d) 전체 realized 분포 통계
+- `L1_PROBE_DIAG` env gate 패턴: 기존 `L2_DIAG_ATTR`/`L2_MULTI_TF`와 동일 규약 (`""`/`"0"`/`"false"`/`"False"` → disabled)
+- (Compressed...)
+
+## Phase 16: Track A IC Gate Spec Compliance + Selection Downgrade + Bull-Primary Prior (ADR-051, 6/29)
+- **IC Hard Gate → DEBUG Monitoring (spec §Track A, lines 106-107)**: Spec explicitly defers IC hard gate ("IC 하드 게이트 보류") until Track B produces cross-sectional alpha. Removed `("ic_tstat", ...)` and `("ic_sign_consistency", ...)` from `evaluate_layer1_readiness` check_specs. Moved IC pooling to `logger.debug` conditional. Prevents production always-BLOCK where `rank_ic_all=0.0` (default when `L1_PROBE_DIAG` env not set).
+- **Config Params Reserved (l1_min_ic_tstat, l1_min_ic_sign_consistency)**: Kept in `CandidateStrategyConfig` for future Track B activation. Not wired into check_specs.
+- **Probe Metric Default = "breadth"**: `l1_probe_metric` default changed from implicit top-k to `"breadth"`. `evaluate_outer_signal_opportunities` uses per-decision cross-sectional mean of all symbols instead of risk-score-ranked top-k when probe_metric="breadth". S4 test validates gross-all path.
+- (Compressed...)
+
+## Phase 17: L1 Bear-Regime Side Directionality — regime_side_split (ADR-052, 6/29)
+- **계기**: 2025 OOS bear regime에서 L1 신호의 net-long 편향 가설 검증 필요. bear price/bar −1.13의 주범이 `cap↓`만으론 설명 불가.
+- **regime_side_split 필드 추가**: `ProbeBreadthDiagnostics`에 `regime_side_split: dict[str, tuple[float, float, float, int, int]]` 추가. regime별 `(long_fraction, long_real_mean_bps, short_real_mean_bps, n_long, n_short)` 보유.
+- **계측 로직**: `compute_probe_breadth_diagnostics` 기존 regime 루프 내 side_norm(+1/-1) 마스킹으로 O(n) 추가. side 컬럼 부재 시 전부 long(+1) default. NaN/zero-div는 n>0 가드로 방어.
+- (Compressed...)
+
+## Phase 18: L1 Cross-Sectional Alpha — 4 XS Families (2026-06-30)
+- **계기**: result.md fold#1 −17.1%·CAGR 6.1%≪30%의 근본 원인이 L1 횡단면 alpha 부재로 진단됨(next.md §4). 30개 family 전부 per-symbol 시계열 변환 → rank IC≈0. "발화 자체가 횡단면"인 진정한 XS alpha 필요.
+- **신규 helper 2종**: `_cross_sectional_rank_signed_2d` (per-timestamp rank → signed score [-1,1] + tercile side {-1,0,1}, min_cross_section guard), `_beta_residual_return_2d` (BTC-beta rolling residual, rolling_sum over lookback). 기존 Numba/import 변경 0.
+- **신규 family 4종**: `xs_momentum`(beta-residual ret L12/48), `xs_carry`(-funding_z 96/168), `xs_flow`(flow_z_24), `xs_oi_skew`(-oi_build_z_42*sign(lsr_log_z_42)). 전부 `_cross_sectional_rank_signed_2d` 변환, `metadata={"archetype": "xs_alpha"}`.
+- (Compressed...)
+
+## Phase 19: L1 XS Factor Spread Diagnostics — env-gated pre-promotion 계측 (ADR-053, 2026-06-30)
+- **계기**: XS factor(`xs_alpha` families)는 승격 게이트(per-pair incremental 검정)에서 배제됨. 기존 `compute_probe_breadth_diagnostics`는 `merged`(승격된 registry 신호)만 사용 → XS 부재. `rank_ic −0.108~+0.112`는 trend pair만의 잔차 IC로 XS factor 자체의 스프레드 엣지는 미계측. per-pair 게이트가 실제 portfolio-level XS alpha를 가리는지 판정 불가.
+- **신규 dataclass + 함수 3종 + rank-IC helper**: `XsFactorSpreadDiagnostics` frozen dataclass + `compute_xs_factor_spread_diagnostics()` + `_l1_xs_spread_diag_enabled()` + `_format_xs_spread_diag()` + `_xs_rank_ic()` helper. 소스는 `realized_event_results`(pre-promotion 전체 candidate, XS 포함). side-adjusted 실현값으로 per-bar tercile long-short 스프레드 직접 산출.
+- **계측 항목**: per-XS-factor `(n_bars, n_events, spread_mean_bps, spread_std_bps, spread_sharpe, spread_lcb_bps, rank_ic, rank_ic_tstat, long_frac)`. Bootstrap LCB via `moving_block_bootstrap_mean`. rank-IC는 per-bar Spearman ρ + Fisher-z tstat (≥3 cross-section).
+- (Compressed...)
+
+## Layer 2 (Portfolio & Allocation) Historical Log
+
 ---
 title: Layer 2 AWF Engineering History (Compressed)
 domain: futures.strategy.tiered_workflow
@@ -6,28 +135,6 @@ status: active
 priority: high
 ai_read_policy: when_related
 ---
-## [2026-07-03] L* Concentration Gate (Diversification-Ratio) — 구현·Phase 0 반증
-- **Delta:** `compute_diversification_ratio`(Choueifaty-Coignard DR, `portfolio_constructor.py`) 신규 순수함수 + `calibrate_deployment_leverage`에 opt-in concentration gate(`diversification_gate_enabled`, `concentration_floor` 활성화 시 명시 필수) 추가. fit-leg 최근구간 DR median이 전체 median 대비 붕괴하면 `l_final *= concentration_ratio`(선형 헤어컷) 적용.
-- **Rationale:** correlation-aware sizing(`cov_mode="correlated"`, 위 항목)이 L*에 흡수되는 문제를 우회하기 위해, sizing이 아닌 L* 계산 자체에 realized MDD/CVaR와 무관한 orthogonal 제약을 추가하려는 시도 — `exchange_leverage_cap`/`l_hard_cap`과 동일한 후보군.
-- **Phase 0 오프라인 사전선별 반증**: 캐시된 4h OHLCV(25종목, 트렌드추종 proxy 북)로 실제 2026-01~02 위기 구간 DR을 측정한 결과 평온 구간보다 오히려 **6~12% 높음**(반대 방향), BTC drawdown과의 lag cross-correlation 전 구간 `|corr|<0.1`(판별력 없음) — momentum lookback 2종×calm window 2종 견고성 확인. 원인: raw pairwise return correlation 자체가 평온기(0.70)보다 위기(0.63)에 낮음 — "위기=상관관계 수렴" 전제가 이 알트코인 급락 구간에서 불성립(OI/funding breadth 反證과 동일 실패 패턴).
-- **Edge Cases:** 코드는 정상(단위테스트 9종 PASS, audit/check 통과), 결함이 아니라 가설 자체의 반증. 기본값 `diversification_gate_enabled=False` 유지, `awf_sim.py`/`workflow.py` 프로덕션 배선 미착수(중단). 재시도 시 새 입력(실제 episode 기반 재검증 등) 필요 — 동일 DR/proxy 조합 재탐색 비권장. SSOT: `docs/results/next.md`.
-
-## [2026-07-02] Correlated Covariance Mode 재검증 — universe ledger 회귀 수정 후 full-trial 재현
-- **Delta:** `universe-eh.md`의 ledger PIT 회귀(broadcast bug) + quote_vol API 결함 수정 후, 동일 diagonal/correlated A/B를 **reduced trial(50) 대신 full 200-trial**로 재실행. `L2_PORTFOLIO_COV_MODE` unset(diagonal) vs `="correlated"`, 동일 `--timeframe 4h --phase l3`.
-- **Rationale:** 기존 反證(아래 항목)이 "n=1·reduced trial이라 완전 반증 아님" 단서를 달고 있었음 — universe 크래시로 막혀 있던 재현을 인프라 수정 후 처음으로 완전한 조건에서 재시도.
-- **재현 결과**: L3 CAGR diagonal -5.0% vs correlated -5.6%, Sharpe -0.176 vs -0.214, Sortino -0.248 vs -0.300 — **방향 일치(correlated 악화), 反證 신뢰도 상향.** L* 역시 거의 동일(2.0646 vs 2.0477) — L* 흡수 메커니즘 재확인. 결론 변경 없음: 기본값 `"diagonal"` 유지.
-
-## [2026-07-02] Correlation-Aware Portfolio Sizing — 구현·검증 완료, Economic Replay 反證
-- **Delta:** `diagonal_kelly_weights`(`portfolio_constructor.py`)에 opt-in `cov_mode="correlated"` 추가 — 기존 `sigma_port=sqrt(Σwᵢ²σᵢ²)`(전 포지션 쌍 상관계수 0 가정) 대신 `rolling_ledoit_wolf_cov`+`w^T Σ w`로 실제 상관관계를 반영. `Layer2AllocationConfig`에 `l2_portfolio_cov_mode`/`l2_portfolio_cov_lookback_bars`/`l2_portfolio_cov_min_obs` 3필드 + `L2_PORTFOLIO_COV_MODE` env override 추가, `awf_sim.py` fit-leg·OOS 양쪽 rebalance 루프에 배선.
-- **Rationale:** L3 실제 위기 홀드아웃(-13.3%~-5% CAGR대) 원인 진단 결과, 레버리지를 걷어낸 naive Top-K-EW baseline조차 이미 음수 Sharpe — L1 signal 부족이 아니라 **포트폴리오 리스크 모델이 30~50개 심볼의 단일 trend-beta factor 집중을 diversification처럼 과소평가**하는 것이 근본원인으로 특정됨. 코드베이스에 이미 존재하던 Ledoit-Wolf covariance 도구(`solve_constrained_weights`의 legacy 경로)를 라이브 배치 경로(`diagonal_kelly_weights`)에 재연결.
-- **Economic Replay 실측(같은 날, 4h tf, 동일 config, 실 BTC 위기 홀드아웃 2025-12-31~2026-06-30, diagonal vs correlated A/B)**: **개선 없음, 오히려 소폭 악화.** L3 CAGR diagonal -5.0% vs correlated -5.5%, Sharpe -0.176 vs -0.207, Sortino -0.248 vs -0.292. **원인**: L2 champion Leverage L*가 거의 동일(2.0646 vs 2.0481, -0.8%) — `calibrate_deployment_leverage`가 fit-leg MDD/CVaR 목표치에 도달할 때까지 레버리지를 재조정하도록 설계되어, correlated 모드의 rebalance당 보수적 sizing을 단일 스칼라 L*로 되돌려 놓음(`next.md`의 기존 확정 사실 "L* 옵티마이저가 균일/비례 크기 레버를 전부 흡수"와 동일 메커니즘 재확인).
-- **Edge Cases**: 코드 자체는 정상(단위테스트 5종 PASS, `implement`/`audit`/`check` 전부 통과) — 결함이 아니라 **아키텍처 차원의 근본 한계**(uniform/proportional 레버는 L*에 흡수됨, time-distribution을 바꾸는 레버만 구조적으로 회피 가능, reversal-kill과 동일 계열 결론). 기본값 `"diagonal"` 유지, 프로덕션 전환 보류. n=1 비교(reduced trial=50)라 완전 반증은 아니며, 더 짧은 `l2_portfolio_cov_lookback_bars`(빠른 상관관계 스파이크 추적) 또는 L* 계산 자체를 correlation-aware하게 만드는 방향이 미검증 후속 후보. SSOT: `docs/results/next.md` §1.
-
-## [2026-07-01] L2 Optuna SQLite Migration & Pipeline Deadlock Fix
-- **Delta:** Replaced `JournalRedisStorage` with `RDBStorage` (SQLite WAL mode) for Optuna tuning. Applied explicit `PRAGMA journal_mode=WAL` via pure sqlite3 connection before Optuna engine initialization to prevent DB locking. Fixed `test_pipeline.py` mocking paths to target internal `active_pipeline` helpers instead of outer modules, resolving an infinite stuck state during test executions.
-- **Rationale:** Redis initialization and JournalStorage overhead caused massive bottlenecks before tuning loops started. Transitioning to SQLite WAL provides immediate local persistence without deadlock issues. Outer module mocking failed to intercept internal pipeline calls, executing genuine long-running tuning tasks during unit tests.
-- **Edge Cases:** Direct `sqlite3.connect` for WAL pragma must precede `RDBStorage` initialization to avoid `SQLITE_BUSY` deadlock by SQLAlchemy connection pool.
-
 ## [2026-06-30] Annualization TF SSOT Fix (B1/B2)
 - **Delta:** L2 study pipeline hardcoded `tf=4h` while deploy used `tf=8h` → champion selection evaluated CAGR/Sharpe at ×2/×√2 inflated bars_per_year(2190 vs 1095). Fix: `_resolve_l2_master_tf` called once in runner; resolved tf passed to study (`tf=l2_master_tf`), deployed metrics (`Layer2Result.master_tf`), and reversal replay. Static `_SELFCHECK_BARS_PER_YEAR=2190.0` replaced by `_resolve_bars_per_year(obj)` dynamic lookup. SSOT assert on master_tf mismatch → `gate_passed=False`.
 - **Rationale:** 4h annualization in selection inflated CAGR (×2) vs actual 8h deploy — best_evaluation CAGR 8-12% divergent from l2_final CAGR, triggering false parity divergence. Fix makes selection stricter (honest 8h metrics), reducing false admissions.
@@ -242,45 +349,126 @@ ai_read_policy: when_related
 - **Audit Fixes:** (1) 초기 구현에서 `np.convolve(mode="same")`가 centered look-ahead 사용 — `cumsum[i] - cumsum[i-window]` trailing rolling sum으로 교정. (2) 게이트 도우미 함수만 구현되고 `_run_awf_simulation`에 배선 누락 — env check → pre-compute → per-rebalance 적용 → ER pair 수집 → attribution 전달까지 전 경로 배선 완료.
 - **Key Verification:** L1: ruff + mypy clean on 5 modified files. 33/33 unit tests PASS (4 files: 2 new + 2 augmented). Target (Scenarios 1~8): ER trend vs chop, flat zero, mult bounds, config validation, whipsaw decomposition, causal-only, ER-in-context integration. L2 regression: 1,690+ tests, 0 regressions (37 pre-existing failures unrelated: `evaluate_l2_trial` removed in prior refactor, emoji log formats). Coverage: `market_regime.py` 93% (new lines fully covered), `risk_deployment.py` 66% (trend_efficiency_gross_mult L38~48 covered), `config.py` 51% (new validations covered, pre-existing file), `awf_sim.py` 16% (gate wiring requires full AWF integration test).
 
-## [2026-07-01] L2 Market State Panel — Breadth-Augmented Risk-Off Detector
-- **Delta:** Added `compute_xs_downside_breadth_1d` (cross-sectional fraction of symbols with negative log-return over `breadth_mom_window`, NaN/zero-division safe, `O(T·N)`) and `compute_market_state_risk_off_1d` (breadth hysteresis → AND gate with BTC axis → persistence → recovery cooldown → 1-bar shift). New `RegimeConfig` fields: `breadth_mom_window`, `breadth_neg_frac_enter`, `breadth_neg_frac_exit`, `reversal_recovery_cooldown_bars`, `reversal_mode` (Litearl["btc","panel"]) with `__post_init__` validation (enter > exit, enter ≤ 1, exit ≥ 0). P4-2 bugfix: `_trend_efficiency_1d` computation separate from `_trend_gate_enabled` guard so diag path sees ER even when gate off. AWF wiring (C3-C5): env key mapping, `reversal_mode=="panel"` branching in `_run_awf_simulation` → breadth computation (skips if idx < breadth_mom_window), AND gate (BTC raw + breadth_on), persistence, recovery cooldown, shift(1), `[L2-PANEL-DIAG]` per-rebalance log. 16 tests in `test_market_state_panel.py` (S1 breadth, S2 panel, S3 config), all pass.
-- **Rationale:** BTC-only risk-off (trailing DD+momentum) misses alt-coin divergence — BTC drawdown ~0.05 vs alts ~0.18. Cross-sectional breadth adds a market-wide dimension: if >50% of symbols have negative momentum, breadth confirms risk-off even if BTC drawdown is below threshold. Hysteresis (Schmitt trigger, enter>exit) prevents noisy breadths from toggling. AND gate requires both BTC and breadth axes to fire. Recovery cooldown prevents flickering at the end of risk-off episodes. P4-2 bugfix: without it, `l2_diag_attribution_enabled` relies on stale ER data when efficiency gate is off, producing non-deterministic attribution due to data shift, breaking track-attribution consistency.
-- **Key Verification:** L1: ruff + mypy clean on 4 modified files (`market_regime.py`, `config.py`, `awf_sim.py`, `test_market_state_panel.py`). 16/16 tests pass. Regression: 57/57 AWF tiered tests pass. Coverage: `market_regime.py` 94% (new breadth/panel lines 100%), `config.py` 55%.
+## Layer 3 (Holdout & Replay) Historical Log
 
-## [2026-07-01] L2 BTC-Mode Recovery Cooldown — Decoupled from Breadth Panel
-- **Delta:** (C1) `compute_reversal_risk_off_1d` in `market_regime.py` — added `recovery_cooldown_bars: int = 0` param with recovery hysteresis state machine (exit counting uses raw signal, not persistent; clamped via `max(cooldown, 1)`; byte-identical at 0). Spec v2 correction: raw-based exit counting ensures persistence_bars>1 and cooldown>0 interact correctly. (C2) `awf_sim.py` — wired `recovery_cooldown_bars=_rev_cfg.reversal_recovery_cooldown_bars` into the btc-mode `compute_reversal_risk_off_1d` call (was only passed in panel mode). (C3) `opt_main_futures.py` — `L2ReversalReplayVariant.recovery_cooldown_bars` field; 3 new cooldown variants (`legacy_006_p1_cd4`, `legacy_006_p1_cd8`, `current_012_p3_cd8`); `L2ReversalReplayResult` fields `dd_threshold`, `persistence_bars`, `recovery_cooldown_bars` for CSV traceability; `_temporary_reversal_env()` sets `L2_REVERSAL_RECOVERY_COOLDOWN`. (C4) `_reversal_replay_adoption_verdict` rewritten: dynamic stress fold identification via `argmax(baseline fold MDDs)` instead of hardcoded fold 0; `stress_mdd_threshold=0.15` gate skips stress checks when no fold exceeds the threshold (prevents spurious `legacy_no_improvement` on non-crash windows). Blocker reason strings renamed (`fold0_defense_below_70pct`→`stress_defense_below_70pct`, `non_bottleneck_damage`→`non_stress_damage`).
-- **Rationale:** BTC-mode risk-off (default `reversal_mode="btc"`) silently ignored `L2_REVERSAL_RECOVERY_COOLDOWN` env — cooldown was wired only in the panel-mode branch. The reversal kill-switch uses the same trailing DD+momentum detector regardless of mode, so the same exit-hysteresis state machine applies. Decoupling from breadth axis allows `dd_threshold` to stay sensitive (entry axis unchanged) while cooldown controls exit-related whipsaw over-trading. Adoption verdict rewrite repairs v3 design flaw: hardcoded fold-0-is-bottleneck assumption fails when rolling window shifts (2026-07-01 Q2→Q3 boundary moved crash fold out of window, causing spurious `legacy_no_improvement`).
-- **Key Verification:** L1: ruff + mypy clean on 6 files. 30/30 unit tests PASS (all new scenarios 1-9: backward compat, whipsaw extension, causal shift, raw-flicker refresh, raw-vs-persistent exit divergence, synthetic crash defense, env→config→compute chain, variant defaults, no-stress verdict skip). No regressions (0 pre-existing failures introduced). Coverage: modified lines in `market_regime.py` covered (empty-input edge case unchecked), verdict core flow covered (error-path branches unexercised).
+---
+title: Layer 3 Holdout Engineering History
+domain: futures.strategy.tiered_workflow
+type: adr
+status: active
+priority: critical
+ai_read_policy: when_related
+---
+## 2026-06-18 L3 scorecard threshold alignment — Calmar removal + absolute gate thresholds
+- **Delta:** L3 scorecard now renders `min_trades`, `max_mdd_abs`, `min_sharpe`, `min_sortino`, and `max_cvar95` from `Layer3Result` and drops Calmar from the display. The holdout gate order is now `negative_return` → `mdd_abs` → `cvar_95` → `sharpe_abs` → `sortino_abs`.
+- **Rationale:** Calmar was only producing `n/a(loss)` after negative CAGR while the direct gate was already `negative_return`. Absolute thresholds make the replay contract explicit and keep the scorecard aligned with the actual blocker chain.
+- **Edge Cases:** `negative_return` remains the first compound-loss blocker. Risk and efficiency thresholds are persisted on the result object so the formatter cannot drift from the gate contract.
 
-## [2026-07-01] L2 Crisis-Guardrail — Champion Promotion Synthetic Crash Gate + Fold MDD Fix
-- **Delta:** (Fix 1) `awf_fold_diags` in `run_l2_awf` (pipeline.py) — replaced hardcoded `"mdd": 0.0` with bounds-checked `eval_result.fold_deployed_mdds[i]` (precision: same `float(...)` pattern as the existing CAGR field). NaN fallback for out-of-range or None entries. (Gate A) `evaluation_window_bottleneck_verdict()` in `tiered_logging.py` — pure function scanning fold diags for any fold with MDD ≥ threshold (default 15%) and CAGR ≤ 0. Integrated into `format_layer2_table()` as a non-blocking `[WINDOW] NO-CRISIS-WINDOW` banner when verdict returns uncovered. (Gate B) `_synthetic_ath_decline_path()` + `synthetic_crash_defense_verdict()` in `market_regime.py` — deterministic synthetic 50-bar price path (rise 20 → fall 30) replayed through `compute_reversal_risk_off_1d` with caller-supplied config params. Returns `(fires, risk_off_bar_count)`. Calendar-independent, idempotent. (Change 4) `_champion_promotion_allowed()` in `opt_main_futures.py` — helper function encapsulating study-validity + crash-fire AND gate. Wired into `_run_tiered_l2_study` champion store block via lazy imports of `synthetic_crash_defense_verdict` and `_reversal_config_from_env`. Gate B is the only hard block; Gate A remains diagnostic-only.
-- **Rationale:** (Fix 1) `mdd=0.0` was a data wiring bug — `fold_deployed_mdds` was correctly computed in `risk_deployment.py` but never propagated to the scorecard fold diags (pre-existing since Phase 4). (Gate A) `docs/results/next.md` P0 identified that "위기 부재 PASS" could be mistaken for champion promotion evidence — the banner warns operators when the evaluation window lacks a crisis-caliber fold. (Gate B) The champion store is a monotonic ratchet (`update_champion_store` returns False on lower value) — once a bad param enters, better params are permanently blocked. Synthetic crash defense prevents this by requiring the reversal-kill detector to fire on a known crash shape before any store update. The gate uses `_reversal_config_from_env()` (this run's actual config) so it tests the deployed detector, not a hardcoded config. No `L2_REVERSAL_KILL` env dependency — this tests code regression, not runtime flag status. (Change 4 v1→v2) v1 erroneously added `_reversal_kill_live` as an additional AND condition, which is always False in production default (env unset) → permanently freezes champion store. v2 removed this: reversal_kill activation is orthogonal to the champion store (stores k_rank/kelly params, not reversal config). Self-review during spec implementation caught this critical design flaw.
-- **Key Verification:** 13/13 unit tests (Fix 1: MDD propagation spy; Gate A: 4 verdict scenarios + 2 banner integration; Gate B: 3 scenarios including unreachable threshold and invalid persistence; Change 4: 3 gate combinatorics, all pure function — no mock required for Gate B or 결선). L1: ruff + mypy clean on 8 files (4 source + 4 test). 0 regressions — all pre-existing failures confirmed unchanged via `git stash` cross-check.
+## 2026-06-16 L3 빈 holdout 구조적 수정 — IS+OOS 데이터 병합 (PART4)
+- **Delta:** `pick_strategy_data_maps`가 `oos_data_maps`를 버리고 IS-only를 반환하던 동작을 IS+OOS `concat+sort+dedup` 병합으로 교체. `full_strategy_maps`를 쓰는 모든 호출부(bridge, END-coverage 필터, `align_data_maps`)가 자동으로 holdout_end까지 데이터를 보게 됨.
+- **Rationale:** `aligned.datetimes`가 구조적으로 `holdout_start`에서 끝나, `_resolve_holdout_span`이 항상 `empty_holdout_window`를 raise — "intersection tail truncation(상장폐지 심볼)"이라는 기존 진단은 오진이었고, 실제 원인은 데이터 소스 자체가 IS-only였던 것.
+- **Edge Cases:** `keep="first"`로 IS 우선 — 경계 timestamp 중복 시 미래(OOS) 행이 과거를 덮어쓰지 않음. 부작용은 `layer2-eh.md`의 "L2 AWF fold anchoring 복원" 항목 참조(같은 작업에서 발견된 L2 fold 붕괴 regression).
 
-## [2026-07-02] L2 Fit-MDD Crisis Gate — oos_blend 억제 (RC-2 하위 분기)
-- **Delta:** `calibrate_deployment_leverage`에 `fit_mdd_crisis_gate: float | None = None` 파라미터 추가. RC-2 `if _mdd_ratio < 1.0:` 분기 진입 전에 위기 게이트 배치: `if gate is not None and _fit_mdd_v1 >= gate:` → oos_blend 분기 건너뛰고 fit-only calibration 결과 유지. `elif _mdd_ratio < 1.0:`로 원본 블록은 if→elif 전환 외 1바이트 무변경. `Layer2AllocationConfig.l2_deploy_fit_mdd_crisis_gate` 필드 추가, `from_mapping`에서 `_validate_range(0.0, 1.0)` 파싱. `workflow.py` 호출부 인자 전달.
-- **Rationale:** `oos_blend`는 탐색공간 89% 지배 주경로(실측)로, 집계 수준 CAGR/MDD가 오히려 우수. 50% 같은 낮은 임계값은 정상 oos_blend trial(예: S1 픽스처 fit_MDD=86.2%)을 대량 억제. 0.88~0.92 잠정 스윕 범위는 2개 실측 앵커(S1 정상 0.862 / champion 재앙 0.918) 사이에 위치. `None` 기본값 = zero regression.
-- **Key Verification:** 9/9 TDD 시나리오(S5~S9) PASS. L1: ruff + mypy clean on 4 files. 기존 regression 25/25 risk_deployment tests PASS (S1~S4 보존). Pre-existing 17 failures unrelated.
+## 2026-06-16 L3 평가체계 lean 보강 (PART2) — Phase D silent fallback 제거 (PART3)
+- **Delta:** L3 게이트를 `cagr<0` 단일조건에서 5단계 순차 게이트(`insufficient_trades`→`negative_return`→`sharpe_rel`→`mdd_rel`→`mdd_abs`)로 교체. `total_return`, `equity_multiple`, `sortino`, `n_trades`, `cvar95`, `avg_gross_exposure`를 `Layer3Result`에 추가(L2 헬퍼 재사용, 신규 수학 없음). `except Exception` 발생 시 legacy Phase D fallback으로 조용히 넘어가던 동작을 제거 — 즉시 `RunnerResult(exit_code=1, reason="tiered_pipeline_error:...")`로 실패.
+- **Rationale:** L3는 "1회 백테스팅으로 실제 복리자산증식 성과 판단"이 목적이므로 L2(Optuna 검증)와 동일한 수준의 풍부한 진단 지표는 불필요하나, CAGR/MDD/Sharpe/MAR만으론 빈약 — 단일패스 복리(`equity_multiple`)와 거래량 하한이 누락되어 있었음. Phase D fallback은 legacy 경로로, holdout 실패를 가려 "조용한 오류"를 만드는 위험이 있어 제거.
+- **Edge Cases:** `max_mdd_abs`(기본 0.35)는 baseline 자체가 붕괴한 경우를 방어하는 절대 캡. `min_trades`(기본 10)는 L3 자체 기준으로 L2의 30보다 완화(단일 holdout 윈도우 특성 고려).
 
-## [2026-07-01] Futures Refactor-Redesign — Runner Package, Domain Separation, Version Pruning
-- **Delta:** (A) `opt_main_futures.py` thinned from 3602 lines to 5-line entrypoint delegating to `src/application/futures/runner/`. Runner package (13 files) provides cli.py, config.py, models.py, pipeline.py, stages/, window.py, sync.py. (B) `src/domain/futures/signals/` extracted from `strategy/` (11 files: rules, contracts, dataset, diagnostics, ensemble, evaluation, labels, portfolio_projection, timeframes, workflow). (C) `src/domain/futures/allocation/` extracted from `strategy/tiered_workflow/` and `strategy/portfolio/` (16 files: pipeline, selection, gates, deployment, metrics, simulation, signal_batch, diagnostics, parity, regime_policy, regime_debug, replay, search_space, scoring, entry, contracts). (D) V2-V9 versioned constants deleted (`L2_ALLOC_SPACE_V2`–`V9`); `L2_SEARCH_SPACE` moved to `allocation/search_space.py`. (E) Version renames applied: `V3HardGates`→`ChampionGateConfig`, `evaluate_v3_hard_gates`→`evaluate_champion_gates`, `ChampionMetricsV3`→`ChampionMetrics`, `compute_v3_score`→`compute_robust_score`. (F) `src/domain/futures/validation/` package created (champion_registry.py, gates.py, walk_forward.py). (G) Legacy imports/functions removed (`_LEGACY_TARGET_COLUMNS`, legacy target fallback, `legacy_oos`→`oos_window` rename in diagnostics.py).
-- **Rationale:** Single `opt_main_futures.py` (3602 lines) caused high cognitive load, slow editor performance, and import cycles. Separation into domain (`signals/`, `allocation/`) vs application (`runner/`) layers enforces dependency direction. Versioned search spaces (`L2_ALLOC_SPACE_V9`) were misleading — only one version is live at any time. Renaming V3-prefixed symbols to versionless aligns with the clean active-version philosophy. Runner package parallel (stages/) enables incremental migration away from 3602-line monolithic function chains.
-- **Key Verification:** 191/191 tests pass across 7 test directories. Targeted coverage 90% (228 stmts, 23 missed). Core runner files (cli.py, config.py, models.py, pipeline.py) at 97-100%. Ruff + mypy clean on all new/modified source files. Audit: no backward-compat aliases created for renamed symbols; V2-V9 constants completely deleted; `optimization/runner.py` cleansed of removed import references; `opt_config.py`/`workflow.py` importing `L2_SEARCH_SPACE` from new location.
+## 2026-06-18 L3 deployment parity 정합화
+- **Delta:** `run_l3_holdout`가 선택적으로 `deploy_leverage`를 받아 L2 champion 배치와 동일한 `apply_deployment` 경로로 hybrid holdout의 CAGR/MDD/CVaR/terminal compounding을 계산하도록 변경. `run_tiered_pipeline`는 `l2_params["l2_deploy_leverage"]`를 L3까지 전달한다.
+- **Rationale:** L2 승격 파라미터를 L3가 재사용하지 않으면 frozen holdout이 아니라 unit-path replay가 되어, L2/L3 결과 해석이 분리된다. 배치 계약을 L3에 주입해야 holdout 실패가 strategy failure인지 deployment mismatch인지 분리 가능하다.
+- **Edge Cases:** `deploy_leverage`가 1.0 이하이거나 비유한값이면 unit path 유지. baseline은 비교용으로만 남기고 동일 배치하지 않는다.
 
-## [2026-07-01] L1/L2 Log Restoration & Storage Backend Diagnostics
-- **Delta:** 
-  - `active_pipeline.py`: Removed cache skip logging and early return in `_ensure_cached_symbol_data_for_targets` to allow `run_historical_sync` execution.
-  - `active_pipeline.py`: Replaced legacy print-based `[REGIME]` log with structured, boxed `● [MARKET REGIME STATUS]` formatting. Added early exit code `tiered_pipeline_l2_completed` in `_run_strategy_stage` under `--phase l2`.
+- **Empirical Finding (실제 파이프라인 재실행, 2026-07-02, `L2_REVERSAL_KILL=1 L3_REVERSAL_REPLAY=1`, 8h tf, 실 BTC 데이터 2025-12-31~2026-06-30, BTC -32.8%/peak-trough -39.5% 실측 위기 구간):** `baseline_off`(reversal-kill 비활성)의 CAGR -4.96%/MDD 23.78%가 나머지 7개 활성 variant 전부보다 우수했다(활성 variant CAGR -5.04%~-5.89%, MDD 24.18%~24.64% — 전부 baseline보다 나쁨). `risk_off_realized_price`(kill-switch 발동 구간의 실현 가격 성과)가 전 variant에서 양수(+5.89%~+10.50%) — kill-switch가 de-gross한 바로 그 구간에서 원 신호가 실제로는 수익 중이었다는 뜻. **`next.md`가 "L\* 흡수를 피하는 유일하게 검증된 방어 레버"로 지목했던 reversal kill-switch가 이 실제 위기 구간의 economic replay에서 방어는커녕 손실을 악화시켰다 — 최초의 실제 crisis-window economic replay 결과가 반증.** SSOT/후속 조치: `docs/results/next.md` §1, §2 P1/P2, §3.
+- **Key Verification:** 회귀 스위트 전체 PASS(check 단계 완료). Test scenarios: fold_attribution 배관(P1-S1~S4), env-독립 `reversal_kill_active`(P1-S2), 빈 `fold_attributions` fallback(P1-S3), 8-variant env 스코핑 + 종료 후 env 복원(P2-S5~S6) — 확립된 mocking 경계(`_run_awf_simulation`/`run_l3_holdout` boundary patch, synthetic price path 대신 canned dataclass) 준수.
+
+## Universe (Market & Ledger) Historical Log
+
+---
+title: Futures Universe Ledger Backend Compatibility
+domain: futures.universe
+type: adr
+status: active
+priority: high
+ai_read_policy: when_related
+---
+## 2026-06-20 TIERED-BASE-SCOPE: loaded symbol scope와 temporal admission 분리
+- **Delta:** `opt_main_futures._run_strategy_stage`가 tiered entry 전에 `base_scope`를 먼저 계산하도록 바뀌었고, `_resolve_tradeable_scope`는 그 `base_scope`에만 warm-up / min-bars / OOS coverage를 적용하도록 좁혀졌다. empty strict admission은 fallback 없이 `TieredPipelineError`로 종료하도록 변경됐다. 관련 tests는 provenance scope와 strict admission을 분리했다.
+- **Rationale:** historical-union provenance와 temporal feasibility를 한 단계에서 같이 판정하면 tiny fixture가 전부 탈락하거나, 반대로 fallback으로 fail-open이 섞인다. base scope와 admission을 분리해 loaded-symbol 검증은 보존하고, holdout contract 위반은 fail-closed로 차단해야 했다.
+- **Edge Cases:** base scope가 비어 있으면 loaded map 자체가 없다는 뜻이므로 admission 단계로 가지 않는다. strict admission이 0개면 recover하지 않고 terminal error를 반환한다. aligned scope regression tests는 admission을 stub 처리해 provenance만 검증한다.
+
+## 2026-06-20 PHASE4-LOADER-GAP: 백테스트 로더 연속성 gap 게이트 추가
+- **Delta:** `opt_data_utils.evaluate_symbol_data_sufficiency`에 `max_gap_bars` 검사 추가. `sorted_dt.diff().max() / bar_delta - 1` = 최장 missing-bar 수. `gap_ok = max_gap_bars <= FUTURES_BACKTEST_MAX_GAP_BARS(=6)`. 양 pass_flag 경로(`stage5`/non-`stage5`) 포함. `reason="gap_too_large"`, 반환 dict에 `max_gap_bars` 노출. 경계값 `<=` — G6 gate(`> max_gap_bars`) 와 일치(24h gap 허용).
+- **Rationale:** count 기반 95% 검사는 `reindex/ffill`로 은폐된 24h+ 연속 공백을 통과시킴. frozen 가격이 모멘텀/추세 신호를 오염시키는 것을 차단.
+- **Edge Cases:** G6 gate(`>`)와 경계 정합 필수 — `<=` 사용으로 universe 통과 심볼이 loader에서 부당 탈락 방지.
+
+## 2026-06-20 PHASE3-REDESIGN: Universe 재설계 — capacity prefix 폐기 + G6 배선 + continuity 실측
+- **Delta:** (P0) `capacity_coverage_target=0.90` prefix 블록 제거 → `eligible_syms[:k_max(=150)]` compute backstop. (P1) `compute_continuity_metrics` 구현: `max(onboard_date, first_data_date)` clamp + `.as_unit("ns").asi8` pandas 2.x unit 정합. ledger stub(0/1.0) → 실측 교체, full rebuild. (P2) `_instrument_df_from_ledger`에 9개 continuity 필드 주입 → G6(DATA_INTEGRITY_FAIL) 배선 활성화. (P3) G0(LEVERAGED_TOKEN), ADV_FLOOR(2M) 게이트 추가; k_max=150, min_adv_usdt=2M 파라미터 확정.
+- **Rationale:** 기존 capacity prefix가 BTC+ETH(ADV 64%) 탓에 33개 심볼만 선택 → universe 폭 붕괴의 근본 원인. G6는 배선 누락으로 ledger stub을 읽어 항상 0 반환 → 무결성 게이트 무력화. compute_continuity_metrics unit mismatch로 633/633 심볼 max_gap_bars=14371(전수 G6 탈락).
+- **Edge Cases:** onboard_date 이전 데이터 없는 구 심볼(BTC 2019 상장, 데이터 2022~) → clamp 전 max_gap_bars=14371, 후 max_gap_bars=0.
+
+## 2026-06-19 PIT-BREADTH: 풀-윈도우 생존편향 필터 교체 + 용량커버리지 Cap + warm-up 가드
+- **Delta:** (C1) `opt_main_futures._resolve_tradeable_scope` 추가 — 3-guard PIT 어드미션(warm-up: `datetimes.min()≤fetch_start`, `min_bars≥1500`, OOS-cov≥0.90). 풀-윈도우 END-coverage(`first≤fetch_start AND last≥holdout_end`) 폐지. `_TIERED_MIN_WINDOW_BARS=1500` 모듈 상수화. (C2) `PITUniverseConfig.k_in=0` 기본값; `capacity_coverage_target=0.90`, `k_max=100` 추가 — 누적 용량 90% prefix 알고리즘. (warm-up guard fix) `datetimes.min()>fetch_start` 심볼 reject: 교집합 start가 밀려 `ValueError: tiered warm-up coverage missing` 유발 차단.
+- **Rationale:** END-coverage 필터가 633 온디스크 심볼을 54 "올드가드"로 붕괴 → PIT 설계가 막으려던 생존편향 재주입. 2023-10~2024-09 상장 110종 통째 배제. k_in=50은 교집합(231)·active_mask에 비구속(inert)이었으나 magic number 정당화 불가 → Pareto 용량 커버리지로 대체.
+- **Edge Cases:** total capacity=0 → fail-open(`eligible[:k_max]`). fetch_start 이후 상장된 심볼은 warm-up guard로 자동 제외(교집합 보전). OOS 절단 심볼은 90% coverage guard로 제외.
+
+## 2026-06-19 L2-ZERO: PIT cube bypass 해소 + store build/hit mismatch 수정
+- **Delta:** `opt_main_futures.py`에 `_resolve_universe_state_cube()` 신규 함수 추가 → `_run_strategy_stage`에서 `universe_result`에서 cube 추출하여 `align_data_maps(state_cube=)` 주입. `pipeline.py` `_is_incomplete_pit_store_run()` 추가 → `load_or_build_universe_snapshot`에서 store hit 시 cube null 체크 후 rebuild. `discover_universe_timeline`에 `l2_start` timeline 경계 강제 로직 추가.
+- **Rationale:** P0 - production 경로에서 `state_cube=None` 전달로 인해 L1/L2가 동일 PIT 필터를 소비하지 못함. P0 - store hit 시 decisions empty로 저장/복원되어 selection 정보 소실. P1 - L1/L2가 다른 시작 경계를 가져야 할 때 timeline이 2-way 계산만 함.
+- **Edge Cases:** `universe_result is None` → cube=None 유지(기존 fallback 호환). Store hit + cube.parquet 없음 → cube=None fallback → incomplete 감지 → rebuild.
+
+## 2026-06-19 EXACT-FIELDS: execution_pool_score 제거, exact-field only store contract
+- **Delta:** `UNIVERSE_DECISION_COLUMNS`에서 `execution_pool_score` 제거. `_selected_frame_columns()`에서 제거. `build_decision_frame()`에서 `execution_pool_score` 쓰기 제거. `materialize_snapshot_from_store()`에서 alias 역매핑 제거. `_symbol_meta_from_decision_row()`에서 `alpha_capacity_score` 단독 사용. 구 cache hit 시 alias-only decisions → `is_exact_selected_feature_schema` False → rebuild. `_universe_metadata_by_symbol()`는 snapshot.selected exact field만 읽음.
+- **Rationale:** Store/cache 계층에 `alpha_capacity_score`와 `execution_pool_score`가 동시 존재 → 동일 개념의 2개 truth source. Exact-field only로 단일화하여 cache-hit/fresh-build 간 metadata 불일치 원천 차단.
+- **Edge Cases:** 구버전 store run(alias-only) → `build_decision_frame`가 `execution_pool_score` 컬럼을 남겨도 `validate_materializable_pit_store_run`가 detect → rebuild. `pipeline.py:649`에서 `alpha_capacity_score` 우선, 없으면 `execution_pool_score` fallback 유지.
+
+## 2026-06-19 CAPACITY-CLIP: unit-NAV 시뮬레이션에서 portfolio_nav=1.0 → capacity clip 전멸
+- **Delta:** `awf_sim.py:_run_awf_simulation`에 `_capacity_clip_enabled` 플래그 추가 (`portfolio_nav is not None`). fit-leg(829) 및 OOS(1025) capacity clip을 `_capacity_clip_enabled` 조건으로 가드.
+- **Cause:** `portfolio_nav=None` → `_portfolio_nav=1.0` (unit-NAV). `_min_order_usdt=5.0` → `abs(w)*1.0 < 5.0` → per_symbol cap 10%를 통과한 모든 weight가 zero-out. commit `5f0254f`에서 state_cube와 동시에 추가됨.
+- **Rationale:** Unit-NAV 시뮬레이션에서 w는 분수(fraction)이지 USDT 금액이 아님. 최소주문($5)을 weight에 직접 비교하는 것은 차원 오류. 실제 portfolio_nav가 주입될 때만 capacity clip을 활성화.
+
+## 2026-06-19 KELLY-FRICTION: diagonal_kelly_weights 이중 friction filter 제거
+- **Delta:** `portfolio_constructor.py:diagonal_kelly_weights`에서 Step 1 friction filter(`mu_bps < effective_hurdle = hurdle * safety_mult / holding_bars`) 제거. `friction_hurdle_bps`, `holding_bars`, `friction_safety_mult` 파라미터와 `hurdle` 변수 삭제. `awf_sim.py` 두 호출부에서 해당 인자 제거.
+- **Cause:** `mu_bps` (`signed_net_bps_per_bar`)는 이미 edge computation에서 cost가 차감된 NET 값. `diagonal_kelly_weights`가 이를 다시 `hurdle * safety_mult / holding_bars`와 비교하면 이중과세 발생.
+  - state_cube 도입 전(3.8 bps): `hurdle*2.5=9.5` → `gross(20)>9.5` → 통과
 - (Compressed...)
 
-## [2026-07-01] L2 Optuna Study Logging Clean up & DB Backend Visibility
-- **Delta:**
-  - `active_pipeline.py`: Reordered `setup_optuna_storage` to run before logging. Parses `storage_url` to extract and display the database backend (Redis/SQLite/InMemory) inside a clean `● [STUDY]` box.
-  - `active_pipeline.py`: Lowered `[REGIME-L2]` and `[L2-OPT] ProcessPool workers=` logs from INFO to DEBUG level.
-- (Compressed...)
+## 2026-06-19 META-PARITY: UNIVERSE_DECISION_COLUMNS에 metadata 필드 추가 + full materialization
+- **Delta:** `UNIVERSE_DECISION_COLUMNS`에 `vol_30d`, `friction_score`, `alpha_capacity_score`, `diversification_score` 4개 필드 추가. `_symbol_meta_from_decision_row()`에서 해당 필드 복원. `materialize_snapshot_from_store()`가 `decisions.parquet`에서 `SymbolMeta` 전체 필드 재구성. `_selected_meta_to_frame()` 추가 → `build_universe()` output을 decision columns와 일치. `_save_snapshot`에 `decisions=` 파라미터 추가.
+- **Rationale:** cold build 시 `SymbolMeta`에 채워진 확장 필드가 cache-hit 시 `0.0` default로 떨어져 L1/L2가 다른 feature vector를 소비. Store schema에 exact field를 포함시켜 build/hit 간 metadata parity 보장.
+- **Edge Cases:** 구버전 decisions(필드 누락) → `is_exact_selected_feature_schema` False → `validate_materializable_pit_store_run` False → rebuild 유도.
 
-## [2026-07-01] Parity Self-Check `master_tf` Missing Field — Silent Skip Fix
-- **Delta:** Added `master_tf: str = "4h"` field to `Layer2TrialEvaluation` (both `contracts.py` and `dataclasses.py` duplicate definitions). Changed `_resolve_bars_per_year(obj)` return type from `float` to `float | None` in both `parity.py` and `replay_parity.py` — absent or empty `master_tf` returns `None` instead of hardcoded `2190.0`. Self-check loop skips the side when `bars_per_year is None` via `continue`. Propagated `master_tf=str(tf)` at the `Layer2TrialEvaluation(...)` construction site in `workflow.py:2156`.
-- **Rationale:** `Layer2TrialEvaluation` lacked `master_tf` field while `Layer2Result` had it. When `assert_selection_replay_parity` was called with `replay_evaluation=Layer2TrialEvaluation` (every non-4h champion), `_resolve_bars_per_year` silently fell back to `2190.0` (4h), causing CAGR recomputation to use wrong bars_per_year. This produced constant false-positive `[L2-PARITY-SELFCHECK] DECOUPLED` WARNING on all non-4h champions. The self-check's signal-to-noise ratio dropped to zero, rendering it useless as a regression detector. Fix restores detection integrity by using the correct `master_tf` from the evaluation object and cleanly skipping when unavailable (legacy objects).
-- **Edge Cases:** Legacy `Layer2TrialEvaluation` objects without `master_tf` → `_resolve_bars_per_year` returns `None` → self-check skip → no warning, no false positive. `master_tf=""` (empty string) treated same as missing. `master_tf` default `"4h"` ensures backward compat for any code path that constructs `Layer2TrialEvaluation` without explicit `master_tf` (only `workflow.py` is the canonical construction site).
+## 2026-06-19 Phase 4-B/C/E: Stage2-6 Config 및 legacy selection 제거
+- **Delta:** `Stage2-6Config` 5종 class config.py에서 제거; `UniverseConfig`에서 `stage2-6/strategy_pool_mode/stage6_is_alpha_rank` 필드 제거. `Stage2Config` → `data_quality._DataQualityConfig` 인라인, `Stage3-5Config` → `filters.py` 로컬 이동. `selection.py` 전체 삭제(`apply_selection_stage` 포함). `pipeline.py` basket_ref/weights → `()`. 레거시 테스트 2종(`test_selection`, `test_strategy_pool_selection`) 삭제.
+- **Rationale:** Phase 4-A에서 Stage6 else-branch 제거 완료 후 dead code 정리. `universe_engine` default = `"pit"` (4-A 적용). Stage2-5 config은 필터 유틸리티 함수 로컬 타입으로 유지(test_oi_adv_filter 호환).
+- **Edge Cases:** 구버전 `Stage6Config` import하는 외부 테스트 → `@pytest.mark.skip` 처리(4-E); `k_in=50` cap으로 PIT 범위 제한.
 
+## 2026-06-19 Phase 4-A: PIT 단독 경로 확정 + k_in=50 cap
+- **Delta:** `build_universe`에서 Stage6 else-branch 완전 제거. `universe_engine` default `"stage6"` → `"pit"`. `PITUniverseConfig.k_in=50` 추가(capacity_usdt 내림차순 top-50). `store.py` empty decisions early return 추가.
+- **Rationale:** PIT 경로 shadow validation PASS 후 Stage6 code path 불필요. k_in cap은 411 → 50 symbols로 제한(임시, Phase 4-D 이후 완전 제거 검토).
+- **Edge Cases:** ledger `date` vs `datetime` 비교 TypeError 픽스(pipeline.py `_instrument_df_from_ledger`).
+
+## 2026-06-19 Phase 3-3/3-4/3-5: PIT state_cube L1 wiring + lifecycle + capacity
+- **Delta:** Phase 3-3: `_run_universe_stage` 7-tuple 반환(`universe_result` 추가). `align_data_maps` 호출에 `state_cube=` 주입 → `active_mask` PIT 반영. Phase 3-4: `SymbolLifecycleRecord` 추가, `promotion_available_at > l2_start` gate로 late-listing 심볼 L2 제외. Phase 3-5: `awf_sim` fit/OOS 양쪽에 `capacity_usdt` clip + 5 USDT min order threshold.
+- **Rationale:** PIT state_cube 없이 L1이 stage6 all-True mask 사용 → look-ahead 노출. Lifecycle gate는 mid-window 상장 심볼이 OOS 신호에 참여하는 것을 방지. Capacity clip은 소량 포지션 거래비용 현실화.
+- **Edge Cases:** `AlignedMarketData` frozen=True → `dataclasses.replace`; `adv_usdt_2d` shape 동적 체크(`isinstance(np.ndarray)`).
+
+## 2026-06-15 Ledger backend compatibility recovery
+- **Delta:** `load_ledger_slice(...)` now dispatches by backend suffix and supports both SQLite and parquet fixtures through the same PIT filter path.
+- **Rationale:** universe tests and offline snapshots depend on parquet inputs; the loader must not collapse existing files into silent empty stage0 results.
+- **Edge Cases:** missing files may still return empty frames, but readable files that fail backend-specific loading now raise with explicit backend context.
+
+## 2026-06-19 Phase 4-D: UniverseSnapshot legacy panel 6필드 제거 + Stage6 경로 완전 삭제
+- **Delta:** `UniverseSnapshot`에서 `training_panel`/`inference_panel`/`live_inference_panel`/`historical_trading_panel`/`inference_panel_quarter_membership`/`stage5_research_panel` 6개 필드 정의 제거. `discover_universe_timeline`의 Stage6 else-branch(230줄) 전체 삭제, dispatch는 PIT 무조건 호출로 단순화, `cfg=None` → `ValueError("universe_engine=pit required; stage6 path removed")` raise. Dead 헬퍼 `_resolve_trading_membership`, `_resolve_inference_membership` 삭제(`_snapshot_quality_symbols`는 `validate_universe_quality`에서 사용 중이므로 리팩터하여 유지). `snapshot_to_payload`/`snapshot_from_payload`에서 panel 직렬화 제거(구버전 payload key는 자동 무시). `store.py` `UniverseSnapshot(...)` panel 대입 제거. `pipeline.py` panel read + `replace(snapshot, ...)` 블록 제거. `strategy_service.py` `run_active_strategy_output_bridge`에서 panel 4개 파라미터 및 `training_panel` filter 제거. `opt_main_futures.py` 호출부 정리 및 `_run_universe_stage` extraction → `universe_result.inference_symbols`.
+- **Rationale:** Stage6 panel 필드는 PIT state_cube가 유일 SSOT인 체계에서 불필요한 이중경로. Phase 4-A/4-B/4-C/E에서 Stage6 제거 후 최종 잔여 legacy 필드/경로 정리. `payload.get`-based deserialization은 구버전 스냅샷과의 하위호환 유지.
+- **Edge Cases:** `cfg=None` → 명시적 raise, silent fallback 금지. `validate_universe_quality`가 `_snapshot_quality_symbols`에 의존하므로 함수 유지. `n_stageN` int 카운터는 별도 4-F 후보로 제거 대상 아님.
+
+## 2026-06-19 Stage0.empty empty-universe contract: cube 강제 주입
+- **Delta:** `build_universe()` stage0.empty 분기에서 `materialize_snapshot_from_store` 호출 시 `cube=None` 대신 empty `UniverseStateCube`(모든 array shape `(0,0)`, `eligible` all `False`)를 명시적으로 생성하여 전달. `validate_materializable_pit_store_run`가 empty-universe를 spec 계약(cube 존재 + eligible all False + zero selected) 하에서 통과시킴.
+- **Rationale:** stage0.empty 경로에서 `cube=None` 전달 시 validator가 `cube is None` → `False` 반환 → `ValueError` 발생. 이는 cold build empty-universe 경로가 validated PIT snapshot만 소비한다는 계약을 위반. empty cube 생성으로 일관된 validator 통과 보장.
+- **Edge Cases:** `np.empty((0,0), dtype=bool).any()` → `False` (empty array), `selected.empty` → True (zero rows), spec 계약 충족.
+
+## 2026-06-19 Store Consolidation: 단일 Parquet Store 통합 + cube.parquet 영속화
+- **Delta:** `snapshots/` flat+nested JSON/Parquet (분기당 7개 파일, 203개) 완전 제거 → `store/v1/runs/` 유일 저장소. `_save_snapshot` flat/nested write 제거. `load_or_build_universe_snapshot` snapshot JSON cache 경로(170줄) 제거 → 40줄 2-tier(store hit→materialize, store miss→build). `write_universe_store_run`에 `snapshot=` 파라미터 추가 → `pit_state_cube`를 `cube.parquet`로 직렬화(numpy tobytes). `load_universe_store_run` 반환값 3→4 튜플 확장(cube 포함). `materialize_snapshot_from_store(cube=)` → snapshot에 `pit_state_cube` 복원. `gc_stale_store_runs()` 신규 함수. `discover_universe_timeline` `cfg=None` → `UniverseConfig()` default (기존 ValueError 대체). `write_universe_store_run` empty-decision short-circuit 제거 → 항상 3파일(manifest+decisions+report) 쓰도록 수정.
+- **Rationale:** 3중 JSON/Parquet 중복 및 file proliferation(203→29개) 해소. `pit_state_cube` transient 손실 버그 수정(캐시 적중 시 eligible all-False). `snapshots/` 레거시 호환성 유지 불필요(store가 단일 SSOT). Store run 누적(69→29) 방지 위해 GC 추가.
+- **Edge Cases:** 구버전 store run(`cube.parquet` 없음) → `cube=None` fallback(기존 동작 유지). Empty decisions→schema-only DataFrame write로 store 일관성 유지. `load_universe_snapshot` 함수는 dropout computation에서 사용 중이므로 repurpose(store에서 최신 run 로드).
