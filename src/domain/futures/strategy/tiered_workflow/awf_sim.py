@@ -1693,6 +1693,33 @@ def _run_awf_simulation(
     fold_rets_baseline: list[list[float]] = []
     fold_selected_symbols: list[tuple[str, ...]] = []
 
+    _trend_arch_families = frozenset({
+        "trend_ma", "trend_donchian", "vol_breakout", "trend_pullback_continuation",
+        "mtf_trend_pullback", "mtf_breakout_retest", "vol_term_structure_gate",
+        "macd_4h", "supertrend", "ichimoku_trend",
+        "dual_momentum", "taker_imbalance_momentum", "flow_trend_continuation",
+    })
+
+    # L2_POSITIONING_CROWDING_GATE: per-symbol crowding dampener (pre-compute for OOS+fit-leg)
+    _crowding_gate_enabled = os.environ.get("L2_POSITIONING_CROWDING_GATE", "") not in ("", "0", "false", "False")
+    _crowding_mask_2d: NDArray[np.bool_] | None = None
+    if _crowding_gate_enabled:
+        try:
+            from src.domain.futures.strategy.market_regime import (
+                compute_crowding_dampener_mult,
+                compute_crowding_persistent_mask_2d,
+                compute_positioning_crowding_z_2d,
+            )
+            _oi_z_2d, _lsr_z_2d = compute_positioning_crowding_z_2d(aligned, tf=tf)
+            _trend_sign_2d = np.sign(cache.side_2d)
+            _crowding_mask_2d = compute_crowding_persistent_mask_2d(
+                _oi_z_2d, _lsr_z_2d, _trend_sign_2d,
+                persistence_bars=getattr(config, "l2_crowding_persistence_bars", 3),
+                recovery_cooldown_bars=getattr(config, "l2_crowding_recovery_cooldown_bars", 3),
+            )
+        except Exception:
+            _crowding_mask_2d = None
+
     # D3: fit-leg 수익률 수집 (look-ahead-free L* calibration용)
     # fit-leg = fold.fit_start → fold.oos_start (OOS 이전). 독립 상태로 수집.
     # 모든 fold fit-leg 연결 → fit_rets_hybrid (closed-form L* 입력).
@@ -1744,6 +1771,26 @@ def _run_awf_simulation(
                 vol_row=vol_matrix[_ft],
                 fixed_cost_safety_mult=fixed_cost_safety_mult,
             )
+            # L2_POSITIONING_CROWDING_GATE: fit-leg dampening
+            if _crowding_gate_enabled and _crowding_mask_2d is not None and _ft > 0:
+                from src.domain.futures.strategy.tiered_workflow.l2_meta import _parse_meta_group_ids as _parse_fit
+                _fit_modified: dict[tuple[str, str], SymbolSignal] = {}
+                for _fit_sk, _fit_ss in _sleeve_signals.items():
+                    _fit_fam, _fit_tf = _parse_fit(_fit_sk[1])
+                    _fit_col = sym_to_idx.get(_fit_sk[0])
+                    if _fit_fam in _trend_arch_families and _fit_col is not None:
+                        _fit_is_crowded = bool(_crowding_mask_2d[_ft - 1, _fit_col])
+                        _fit_floor_val = getattr(config, "l2_crowding_floor_mult", None)
+                        if _fit_floor_val is None:
+                            raise ValueError(
+                                "l2_crowding_floor_mult must be explicitly set "
+                                "when L2_POSITIONING_CROWDING_GATE is enabled"
+                            )
+                        _fit_mult = compute_crowding_dampener_mult(_fit_is_crowded, floor_mult=float(_fit_floor_val))
+                        _fit_modified[_fit_sk] = replace(_fit_ss, raw_mu=_fit_ss.raw_mu * _fit_mult)
+                    else:
+                        _fit_modified[_fit_sk] = _fit_ss
+                _sleeve_signals = _fit_modified
             # sleeve key → symbol key 변환 (rank_and_select는 str key 요구)
             # 같은 symbol에 복수 sleeve 시: precision-weighted pooling (인플레이션 방지)
             _fit_valid_signals, _ = _combine_sleeve_signals_to_symbol(
@@ -2107,12 +2154,6 @@ def _run_awf_simulation(
             _trend_efficiency_1d = compute_market_regime_context(aligned=aligned).trend_efficiency_1d
         except Exception:
             _trend_efficiency_1d = None
-    _trend_arch_families = frozenset({
-        "trend_ma", "trend_donchian", "vol_breakout", "trend_pullback_continuation",
-        "mtf_trend_pullback", "mtf_breakout_retest", "vol_term_structure_gate",
-        "macd_4h", "supertrend", "ichimoku_trend",
-        "dual_momentum", "taker_imbalance_momentum", "flow_trend_continuation",
-    })
     _er_return_pairs_by_fold: list[list[tuple[float, float]]] = [[] for _ in awf_folds]
 
     # L2_REVERSAL_KILL: market reversal kill-switch
@@ -2417,6 +2458,26 @@ def _run_awf_simulation(
                     else:
                         _modified[_sk] = _ss
                 _oos_sleeve_sigs = _modified
+            # L2_POSITIONING_CROWDING_GATE: per-symbol crowding dampener
+            if _crowding_gate_enabled and _crowding_mask_2d is not None and t > 0:
+                from src.domain.futures.strategy.tiered_workflow.l2_meta import _parse_meta_group_ids
+                _modified2: dict[tuple[str, str], SymbolSignal] = {}
+                for _sk, _ss in _oos_sleeve_sigs.items():
+                    _fam, _tf = _parse_meta_group_ids(_sk[1])
+                    _sym_col = sym_to_idx.get(_sk[0])
+                    if _fam in _trend_arch_families and _sym_col is not None:
+                        _is_crowded = bool(_crowding_mask_2d[t - 1, _sym_col])
+                        _crowd_floor_val = getattr(config, "l2_crowding_floor_mult", None)
+                        if _crowd_floor_val is None:
+                            raise ValueError(
+                                "l2_crowding_floor_mult must be explicitly set "
+                                "when L2_POSITIONING_CROWDING_GATE is enabled"
+                            )
+                        _mult = compute_crowding_dampener_mult(_is_crowded, floor_mult=float(_crowd_floor_val))
+                        _modified2[_sk] = replace(_ss, raw_mu=_ss.raw_mu * _mult)
+                    else:
+                        _modified2[_sk] = _ss
+                _oos_sleeve_sigs = _modified2
             # L2_REVERSAL_KILL: selective hard de-gross on reversal bars
             if _reversal_kill_enabled and _risk_off_1d is not None and t > 0 and bool(_risk_off_1d[t - 1]):
                 _roff_floor = _rev_cfg.reversal_risk_off_floor
