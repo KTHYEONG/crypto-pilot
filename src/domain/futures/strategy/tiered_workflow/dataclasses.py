@@ -548,6 +548,10 @@ class Layer2AllocationConfig:
     l2_regime_pooled_is_passthrough: bool = True
     l2_regime_min_fit_n_floor: int = 5
     l2_regime_require_fit_n_for_downweight: bool = False
+    # L2 positioning-crowding dampener (l1-positioning-crowding-dampener.md)
+    l2_crowding_persistence_bars: int = 3
+    l2_crowding_recovery_cooldown_bars: int = 3
+    l2_crowding_floor_mult: float | None = None
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -1069,6 +1073,18 @@ class Layer2AllocationConfig:
             l2_regime_require_fit_n_for_downweight=bool(
                 params.get("l2_regime_require_fit_n_for_downweight", _dc.l2_regime_require_fit_n_for_downweight)
             ),
+            l2_crowding_persistence_bars=cls._as_int(
+                params.get("l2_crowding_persistence_bars", _dc.l2_crowding_persistence_bars),
+                _dc.l2_crowding_persistence_bars,
+            ),
+            l2_crowding_recovery_cooldown_bars=cls._as_int(
+                params.get("l2_crowding_recovery_cooldown_bars", _dc.l2_crowding_recovery_cooldown_bars),
+                _dc.l2_crowding_recovery_cooldown_bars,
+            ),
+            l2_crowding_floor_mult=cls._as_float(
+                params.get("l2_crowding_floor_mult", _dc.l2_crowding_floor_mult),
+                _dc.l2_crowding_floor_mult if _dc.l2_crowding_floor_mult is not None else 0.0,
+            ) or None,
         )
 
 
