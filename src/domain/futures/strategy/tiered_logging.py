@@ -518,9 +518,46 @@ def format_layer1_deployment_registry_table(
                 for reason, cnt in reason_counter.most_common(max_fail_reasons)
             )
             lines.append(f"  [NOT PROMOTED] {len(failed)} pairs | top: {top_reasons}")
+            if logger.isEnabledFor(logging.DEBUG):
+                lines.extend(render_family_rejection_funnel(failed))
 
     lines.append("")
     return "\n".join(lines)
+
+
+def render_family_rejection_funnel(
+    failed: list[Any],
+    *,
+    max_reasons_per_family: int = 3,
+) -> list[str]:
+    """Family별 [NOT PROMOTED] 탈락 사유 분해 (DEBUG 전용, §9 부록).
+
+    비추세 family의 탈락이 데이터性(quality_weight_zero)인지 엣지性
+    (negative_gross_edge/no_incremental_edge)인지 구분하기 위한 진단.
+    docs/specs/l1-nontrend-diversification-measure-first.md C2 참조.
+    """
+    if not failed:
+        return []
+    by_family: dict[str, Counter[str]] = {}
+    family_order: list[str] = []
+    for ev in failed:
+        strategy_id = str(getattr(getattr(ev, "key", None), "strategy_id", ""))
+        family = strategy_id.partition(":")[0]
+        reasons = tuple(getattr(ev, "structural_reasons", None) or ()) or ("quality_weight_zero",)
+        if family not in by_family:
+            by_family[family] = Counter()
+            family_order.append(family)
+        by_family[family].update(reasons)
+
+    lines: list[str] = []
+    for family in family_order:
+        counter = by_family[family]
+        total = sum(counter.values())
+        top = ", ".join(
+            f"{reason}x{cnt}" for reason, cnt in counter.most_common(max_reasons_per_family)
+        )
+        lines.append(f"  [L1-FAMILY-FUNNEL] {family}: total={total} | {top}")
+    return lines
 
 
 # ---------------------------------------------------------------------------
