@@ -6,6 +6,12 @@ status: active
 priority: high
 ai_read_policy: when_related
 ---
+## [2026-07-03] L* Concentration Gate (Diversification-Ratio) — 구현·Phase 0 반증
+- **Delta:** `compute_diversification_ratio`(Choueifaty-Coignard DR, `portfolio_constructor.py`) 신규 순수함수 + `calibrate_deployment_leverage`에 opt-in concentration gate(`diversification_gate_enabled`, `concentration_floor` 활성화 시 명시 필수) 추가. fit-leg 최근구간 DR median이 전체 median 대비 붕괴하면 `l_final *= concentration_ratio`(선형 헤어컷) 적용.
+- **Rationale:** correlation-aware sizing(`cov_mode="correlated"`, 위 항목)이 L*에 흡수되는 문제를 우회하기 위해, sizing이 아닌 L* 계산 자체에 realized MDD/CVaR와 무관한 orthogonal 제약을 추가하려는 시도 — `exchange_leverage_cap`/`l_hard_cap`과 동일한 후보군.
+- **Phase 0 오프라인 사전선별 반증**: 캐시된 4h OHLCV(25종목, 트렌드추종 proxy 북)로 실제 2026-01~02 위기 구간 DR을 측정한 결과 평온 구간보다 오히려 **6~12% 높음**(반대 방향), BTC drawdown과의 lag cross-correlation 전 구간 `|corr|<0.1`(판별력 없음) — momentum lookback 2종×calm window 2종 견고성 확인. 원인: raw pairwise return correlation 자체가 평온기(0.70)보다 위기(0.63)에 낮음 — "위기=상관관계 수렴" 전제가 이 알트코인 급락 구간에서 불성립(OI/funding breadth 反證과 동일 실패 패턴).
+- **Edge Cases:** 코드는 정상(단위테스트 9종 PASS, audit/check 통과), 결함이 아니라 가설 자체의 반증. 기본값 `diversification_gate_enabled=False` 유지, `awf_sim.py`/`workflow.py` 프로덕션 배선 미착수(중단). 재시도 시 새 입력(실제 episode 기반 재검증 등) 필요 — 동일 DR/proxy 조합 재탐색 비권장. SSOT: `docs/results/next.md`.
+
 ## [2026-07-02] Correlated Covariance Mode 재검증 — universe ledger 회귀 수정 후 full-trial 재현
 - **Delta:** `universe-eh.md`의 ledger PIT 회귀(broadcast bug) + quote_vol API 결함 수정 후, 동일 diagonal/correlated A/B를 **reduced trial(50) 대신 full 200-trial**로 재실행. `L2_PORTFOLIO_COV_MODE` unset(diagonal) vs `="correlated"`, 동일 `--timeframe 4h --phase l3`.
 - **Rationale:** 기존 反證(아래 항목)이 "n=1·reduced trial이라 완전 반증 아님" 단서를 달고 있었음 — universe 크래시로 막혀 있던 재현을 인프라 수정 후 처음으로 완전한 조건에서 재시도.
