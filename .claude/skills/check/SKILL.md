@@ -3,37 +3,46 @@ name: check
 description: Perform Regression Testing, Coverage Auditing, and Error Triage.
 ---
 
-# Skill: Check (Final Regression & Coverage Gatekeeper)
+# Skill: Check (Integrated Validation & Triage Gatekeeper)
 
 ## Purpose
-Empirically verify the code's execution integrity after passing static `audit`. Run dynamic regression test suites, measure test coverage, and perform final compliance checks.
+Unify static contract compliance, dynamic regression test execution, and structural test coverage auditing. Perform high-reasoning triage and error diagnosis strictly upon failure.
 
 ## Execution Rules
-1. **Trigger**: Run ONLY after the code successfully passes the `audit` phase.
-2. **Regression Testing**:
-   - Run the surrounding module's tests to guarantee existing functionality remains unbroken: `uv run pytest [regression_target]`.
-3. **Coverage Audit (Target >= 90%)**:
-   - Execute coverage metric checks on modified paths: `uv run pytest --cov=[module_path] --cov-report=term-missing`.
-4. **Triage & Routing Loop**:
-   - **3-Strike Rule**: If regression tests fail for **3 consecutive cycles**, STOP and request human intervention.
-   - **Triage Decision**:
-     - Spec Logic / Design Error $\rightarrow$ Route back to `spec`.
-     - Minor Syntax / Bug in Implementation $\rightarrow$ Route back to `implement` (skipping `audit` to re-implement and re-verify).
-5. **Pass Transition**: If all checks pass, proceed to `sync` (Documentation Synchronization & Clean Up).
+
+### 1. Unified Validation Pipeline
+Perform the following validation steps sequentially:
+1. **Static Spec Matching**: Verify that the designed scenarios (Happy Path, Edge Cases, Error Handling) from `docs/specs/[feature].md` are structurally present in the test files (`tests/...`).
+2. **Decoupled Execution (Plan Submission)**: 
+   - Prohibit running multiple interactive commands step-by-step.
+   - Package all verification commands (e.g., `uv run ruff check`, `uv run mypy`, regression pytest, coverage target) into a single batch execution request to the system runner.
+   - Terminate the turn (sleep) immediately after submitting the execution plan.
+3. **Dynamic Verification (Happy Path)**:
+   - Regression: Ensure surrounding modules are intact (`uv run pytest [regression_target]`).
+   - Coverage: Enforce a coverage metric $\ge$ 90% (`uv run pytest --cov=[module_path] --cov-report=term-missing`).
+
+### 2. Failure Triage & Loop Circuit Breaker
+If any step in the validation pipeline fails:
+- **Triage (High-Reasoning Swapping)**: Read only the compiled error logs and failure lines retrieved from the execution runner.
+- **Diagnostics**: Analyze whether the failure is a design error (requires `spec` rollback) or code bug (requires `implement` rollback).
+- **Circuit Breaker**: If regression fails for **3 consecutive cycles**, STOP and request human intervention.
+
+## Verdicts & Routing
+- **PASS**: Meets all static/dynamic criteria and coverage $\ge$ 90%. ➔ **Transition to `sync`**
+- **FAIL**: Discrepancies found or tests failed. ➔ **Transition to `implement` (or `spec`)** with a clear Gap Analysis.
 
 ## Output Format
 ```md
-### ✅ Regression Testing & Coverage: [PASS / FAIL]
+### 🏁 Verification Result: [PASS / FAIL]
 
-#### 📊 Regression Results
-- **Command:** `uv run pytest [regression_target]`
-- **Status:** [Total Passed / Total Failed]
-- **No Refactoring Side-effects:** [Yes/No]
+#### 📊 Regression & Coverage Summary
+- **Regression Status:** [Passed / Failed count]
+- **Target Coverage %:** [e.g., 92%]
 
-#### 📉 Coverage Report
-- **Target Module:** `[module_path]`
-- **Coverage %:** [e.g., 94%]
-- **Missing Lines:** [e.g., L45-48]
-- **Next Phase:** [Proceed to `sync` | Return to `implement` | Human Intervention Required]
+#### 🔍 Gap Analysis & Diagnosis (Required ONLY if FAIL)
+*High-reasoning analysis of error logs. Max 3 bullet points.*
+- **Error Line:** `[file:line]`
+- **Diagnosis:** [Design discrepancy | Implementation Bug]
+- **Action Plan:** [Return to implement | Return to spec | Human Intervention]
 ```
 
