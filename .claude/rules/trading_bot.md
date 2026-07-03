@@ -1,4 +1,8 @@
 ---
+trigger: glob
+---
+
+---
 trigger:
   # 1. Path-based automatic activation (Glob)
   - "src/**/execution/**/*.py"
@@ -55,7 +59,7 @@ These rules prioritize system integrity and asset protection. They are applied w
         3. Exchange maintenance or API permission errors (401, 403).
 - **Sanity Checks:**
     - Set hard limits such as `MaxOrderValue` and `MaxOrderQty` to fundamentally block 'Fat Finger' errors.
-    - For Binance Futures, explicitly set or check Leverage and Margin Mode (Cross/Isolated) before ordering.
+    - For Binance Futures, explicitly set or verify Leverage and Margin Mode (Cross/Isolated) before ordering.
 - **Secrets Management:** Load API Key/Secret from environment variables (`.env`) and filter them to ensure they are not leaked in logs.
 
 ## 5. Logging & Traceability
