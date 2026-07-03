@@ -9,6 +9,12 @@ description: Actionable implementation blueprint. Logic, Contracts, and Test Sce
 Produce high-precision technical specifications, strict interface contracts, and exhaustive test scenario designs.
 **CRITICAL:** You are the "High-Reasoning Architect". You solve the logic, define boundaries, and **design the test suite**. DO NOT write full Python code blocks. Provide exact function signatures and mock requirements. You build the blueprint; a lower-reasoning model (Executor) will implement it following TDD.
 
+## Execution Rules
+
+### 1. Pre-process (Scan & Context Alignment)
+- **Decisions Context**: Start by loading `docs/decisions/decisions.md` (the cumulative sliding window decisions log) to align with recent architectural decisions and prevent drift.
+- **In-Memory Batch Scan**: Do not run multiple turn-by-turn search commands. Generate a batch search plan containing patterns and directories, then invoke a single tool call (e.g., `grep_search` with multi-patterns or `Serena MCP` dependency query) to retrieve all target file candidates in one turn.
+
 ## Output 1: Blueprint File (Save to `docs/specs/*.md`)
 **[AI-Optimized Format]** Create a deterministic, machine-readable blueprint. It MUST be perfectly structured so the `implement` skill can execute it mechanically in a TDD fashion without needing deep reasoning or asking questions.
 
@@ -17,9 +23,9 @@ Produce high-precision technical specifications, strict interface contracts, and
   - **Imports**: Exact import statements required.
   - **Data Shapes & Types**: Strict types, Models (Pydantic, etc.), TypedDicts, or NDArray shape definitions.
 - **# ✍️ Contract Changes**: EXACT class and function signatures (with full Python 3.11 type hints) and return types.
-- **# 🧪 TDD Test Scenario Matrix (CRITICAL for Test-First - MUST BE WRITTEN BEFORE IMPLEMENTATION LOGIC)**:
-  - **Test Environment & Fixtures**: Existing fixtures to use, mock paths, and decorators (e.g., `@patch('src.core.exchange.Client')`).
-  - **Mock Boilerplate Snippet (CRITICAL for Low-Reasoning executor)**: If the test requires complex mocks (e.g., patching asynchronous calls, mocking database session, or pandas DataFrames), provide a direct Python code snippet of the setup. Do not just describe it in text.
+- **# 🧪 TDD Test Scenario Matrix (CRITICAL for Test-First)**:
+  - **Test Environment & Fixtures**: Existing fixtures to use, mock paths, and decorators.
+  - **Mock Boilerplate Snippet (CRITICAL)**: If the test requires complex mocks, provide a direct **Raw Python Code** snippet of the setup. Do not just describe it. This ensures the implementer can copy-paste and verify immediately.
   - **Scenario 1 (Happy Path - Test Setup)**:
     - Input: [Exact python expression/data structure]
     - Expected Output: [Expected return or state change]
@@ -46,6 +52,4 @@ Provide a clean summary with:
 1. **Test Ownership**: You must design the test scenarios. If you do not define the test matrix, the implementer cannot write the tests first.
 2. **No Blind Coding**: Delegate Python syntax to `implement`. Focus on the "What" and "How".
 3. **Contextual Awareness**: Check `docs/decisions/` and `docs/architecture/` as SSOT.
-4. **Token Optimization & Contract Inspections**:
-    - **Primary**: Utilize Serena MCP (`get_symbols_overview`, `find_declaration`/`find_referencing_symbols`) to inspect interface layouts, class boundaries, and inheritance lines without fetching file bodies.
-    - **Secondary**: Use `view_file` or `read_file` with precise line ranges only to study actual implementation details if pseudo-code design requires it. Avoid reading whole files.
+4. **Token Optimization**: Utilize the single-turn batch scan results. Avoid reading whole files; use precise line ranges in `view_file` only if required.

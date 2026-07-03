@@ -56,7 +56,7 @@ Test functions must be named descriptively using the **`test_[target]_[condition
 ### 2.4 Co-modification Mapping
 Source files and test files must maintain a strict 1:1 mapping in folder structure and file naming to simplify discovery and maintainability.
 - **Convention:** A source module located at `src/[path]/[module_name].py` must map directly to `tests/[category]/[path]/test_[module_name].py` (where `category` is `unit`, `integration`, or `e2e`).
-- **Co-modification Rule:** When creating or modifying a source file under `src/`, the AI assistant MUST immediately locate, audit, and update/create the corresponding test file to ensure they are synchronized.
+- **Co-modification Rule:** When creating or modifying a source file under `src/`, the AI assistant MUST immediately locate, review, and update/create the corresponding test file to ensure they are synchronized.
 - **Exception for Trivial Changes:** This rule is waived for changes that do not alter logical behavior, such as typos in comments, adding type hints, or documentation-only updates. It is also waived if the user explicitly instructs to skip tests for a specific task.
 
 ---
@@ -75,7 +75,7 @@ Source files and test files must maintain a strict 1:1 mapping in folder structu
   ```
 
 ### 3.3 Explicit Exception & Warning Verification
-When testing expected failures, use `pytest.raises` and leverage the `match` parameter to check the exception type and the exception message in a single, robust assertion.
+When testing expected failures, use `pytest.raises` and leverage the `match` parameter to verify the exception type and the exception message in a single, robust assertion.
 ```python
 # Good: Verifies both the exception type and the exact error message
 with pytest.raises(InsufficientBalanceError, match="Cannot withdraw more than balance"):
@@ -136,6 +136,6 @@ graph TD
 4. **[CRITICAL LIMIT] AI Loop Termination:**
    The AI MUST NOT execute the coverage self-correction loop more than **3 times**. If targets are not achieved within 3 iterations, the AI MUST stop, commit the current progress, and report the specific bottleneck to the user.
 5. **No Empty Assertions:**
-   Tests written solely to execute lines without performing meaningful assertions are strictly prohibited. The AI must always validate the final return value or check expected state side effects.
+   Tests written solely to execute lines without performing meaningful assertions are strictly prohibited. The AI must always validate the final return value or verify expected state side effects.
 6. **No Abuse of `# pragma: no cover`:**
    Abusing `# pragma: no cover` to artificially inflate coverage percentages is strictly prohibited. It should only be used for genuinely untestable code paths (e.g., `if __name__ == "__main__":`).
