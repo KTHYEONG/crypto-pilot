@@ -94,6 +94,7 @@ from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
     apply_deployment,
 )
 from src.domain.futures.strategy.tiered_workflow.signal_selection import (
+    XsAdmissionBasis,
     _candidate_output_to_signal_batch,
     _event_results_from_fold_output,
     _l1_probe_diag_enabled,
@@ -102,12 +103,14 @@ from src.domain.futures.strategy.tiered_workflow.signal_selection import (
     assemble_layer1_artifact,
     build_qualified_signal_registry,
     compute_symbol_strategy_evidence,
+    compute_xs_factor_spread_diagnostics,
     evaluate_layer1_readiness,
     evaluate_outer_signal_opportunities,
     fit_layer1_inference_artifact,
     predict_layer1_signals,
     predict_layer1_signals_multi_tf,
     prefit_layer1_model,
+    resolve_xs_alpha_admission,
     select_outer_symbol_opportunities,
 )
 from src.domain.futures.strategy.walk_forward import (
@@ -497,6 +500,9 @@ def build_l1_prequential_evidence_snapshots(
                 )
             _event_results = evidence_store.iloc[_left:_right].copy()
             _matured_event_count = max(0, _right - _left)
+        # NOTE: xs_admission intentionally not wired here — this snapshot's event
+        # frame (_event_results_from_fold_output) lacks realized_side_adjusted_gross_bps,
+        # a different schema than outer_events used at the deployment_evidence site below.
         _evidence = compute_symbol_strategy_evidence(
             event_results=_event_results,
             cfg=cfg,
@@ -1468,12 +1474,19 @@ def run_l1_nested_swf(
         else pd.DataFrame()
     )
     t_ev_deploy = time.perf_counter()
+    _deploy_xs_admission: dict[str, XsAdmissionBasis] | None = None
+    if bool(getattr(cfg, "l1_xs_alpha_admission_enabled", False)):
+        _deploy_xs_diag = compute_xs_factor_spread_diagnostics(
+            realized_event_results=deployment_event_results, cfg=cfg, fold_id=-1, seed=seed,
+        )
+        _deploy_xs_admission = resolve_xs_alpha_admission(_deploy_xs_diag, cfg)
     deployment_evidence = compute_symbol_strategy_evidence(
         event_results=deployment_event_results,
         cfg=cfg,
         seed=seed,
         registry_as_of_idx=max((fold.oos_end for fold in outer_folds), default=0) + 1,
         probe_diversity_corr=probe_diversity_corr,
+        xs_admission=_deploy_xs_admission,
     )
     logger.log(
         PERF,

@@ -463,6 +463,8 @@ class CandidateStrategyConfig:
     l1_pair_min_positive_fold_ratio: float = 0.60
     l1_pair_fdr_alpha: float = 0.15
     l1_breakeven_floor_bps: float = _DEFAULT_RT_BPS  # = ExecutionCostModel.round_trip_bps() ≈ 7.5bps
+    l1_xs_alpha_admission_enabled: bool = False  # factor-level XS alpha admission gate
+    l1_xs_admission_min_sharpe: float = 0.15    # min spread_sharpe for XS admission
     l1_fdr_hard_reject: bool = True           # q>alpha → hard reject (binding FDR)
     l1_conviction_metric: str = "prob_positive"  # "prob_positive" or "lcb_net_bps"
     l1_pair_alpha: float = 0.05
