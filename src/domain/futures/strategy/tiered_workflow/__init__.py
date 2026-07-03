@@ -19,8 +19,10 @@ _WALK_FORWARD = "src.domain.futures.strategy.walk_forward"
 _TIERED_LOGGING = "src.domain.futures.strategy.tiered_logging"
 _CANDIDATE_WORKFLOW = "src.domain.futures.strategy.candidate_workflow"
 _RISK_DEPLOYMENT = "src.domain.futures.strategy.tiered_workflow.risk_deployment"
+_FAMILY_ADMISSION = "src.domain.futures.strategy.tiered_workflow.family_admission"
 
 _MODULE_ATTRS: dict[str, tuple[str, str]] = {
+    "FamilyAdmissionVerdict": (_FAMILY_ADMISSION, "FamilyAdmissionVerdict"),
     "FoldDiagnostic": (_DATACLASSES, "FoldDiagnostic"),
     "Layer1Result": (_DATACLASSES, "Layer1Result"),
     "Layer2AllocationConfig": (_DATACLASSES, "Layer2AllocationConfig"),
@@ -80,7 +82,9 @@ _MODULE_ATTRS: dict[str, tuple[str, str]] = {
     "compute_prediction_decomposition_diag": (_DIAGNOSTICS, "compute_prediction_decomposition_diag"),
     "compute_rebalance_cost": (_AWF_SIM, "compute_rebalance_cost"),
     "compute_symbol_strategy_evidence": (_SIGNAL_SELECTION, "compute_symbol_strategy_evidence"),
+    "compute_trend_sleeve_corr": (_FAMILY_ADMISSION, "compute_trend_sleeve_corr"),
     "evaluate_layer1_readiness": (_SIGNAL_SELECTION, "evaluate_layer1_readiness"),
+    "evaluate_family_admission": (_FAMILY_ADMISSION, "evaluate_family_admission"),
     "evaluate_layer2_gate": (_L2_GATE, "evaluate_layer2_gate"),
     "evaluate_meta_feasibility": (_L2_META, "evaluate_meta_feasibility"),
     "evaluate_outer_signal_opportunities": (_SIGNAL_SELECTION, "evaluate_outer_signal_opportunities"),
