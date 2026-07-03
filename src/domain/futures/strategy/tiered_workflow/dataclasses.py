@@ -501,6 +501,10 @@ class Layer2AllocationConfig:
     l2_portfolio_cov_mode: Literal["diagonal", "correlated"] = "diagonal"
     l2_portfolio_cov_lookback_bars: int = 180
     l2_portfolio_cov_min_obs: int = 20
+    # L* concentration gate (correlation-clustering 기반, cov_mode와 독립)
+    l2_leverage_diversification_gate_enabled: bool = False
+    l2_leverage_concentration_recent_window_bars: int = 60
+    l2_leverage_concentration_floor: float | None = None
     # CS Score Amplification (anti-Kelly=EW-convergence) — 중단 (효과 없음 입증됨)
     l2_cs_amp_enabled: bool = False
     # Breadth-selection mode: True=use all valid symbols (no rank_and_select alpha sorting)
