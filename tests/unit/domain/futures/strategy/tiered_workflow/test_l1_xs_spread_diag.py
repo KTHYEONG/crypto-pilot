@@ -128,13 +128,13 @@ class TestXsSpreadDiagCompute:
         assert result is not None
         pos = result.by_factor.get("xs_carry:xs_carry_96")
         assert pos is not None
-        _, _, pos_mean, _, pos_sharpe, pos_lcb, _, _, _ = pos
+        _, _, pos_mean, _, pos_sharpe, pos_lcb, _, _, _, _ = pos
         assert pos_mean > 0
         assert pos_sharpe > 1.0
         assert pos_lcb > 0
         null = result.by_factor.get("xs_flow:xs_flow_24")
         assert null is not None
-        _, _, null_mean, _, null_sharpe, _, _, _, _ = null
+        _, _, null_mean, _, null_sharpe, _, _, _, _, _ = null
         assert null_mean == pytest.approx(0, abs=5)
         assert null_sharpe == pytest.approx(0, abs=0.5)
 
@@ -210,7 +210,7 @@ class TestXsSpreadDiagCompute:
             realized_event_results=frame, cfg=cfg, fold_id=0, seed=0,
         )
         assert result is not None
-        _, _, _, _, _, _, ic, ict, _ = result.by_factor["xs_carry:xs_carry_96"]
+        _, _, _, _, _, _, ic, ict, _, _ = result.by_factor["xs_carry:xs_carry_96"]
         assert ic > 0
         assert ict > 0
 
@@ -235,7 +235,7 @@ class TestXsSpreadDiagCompute:
             realized_event_results=frame, cfg=cfg, fold_id=0, seed=0,
         )
         assert result is not None
-        _, _, _, std, sharpe, _, _, _, _ = result.by_factor["xs_carry:xs_carry_96"]
+        _, _, _, std, sharpe, _, _, _, _, _ = result.by_factor["xs_carry:xs_carry_96"]
         assert std == 0.0
         assert np.isfinite(sharpe)
 
@@ -261,7 +261,7 @@ class TestFormatXsSpreadDiag:
         diag = XsFactorSpreadDiagnostics(
             fold_id=0,
             by_factor={
-                "xs_carry:xs_carry_96": (12, 24, 37.5, 2.0, 18.75, 35.0, 0.5, 2.1, 0.5),
+                "xs_carry:xs_carry_96": (12, 24, 37.5, 2.0, 18.75, 35.0, 0.5, 2.1, 0.5, 0.95),
             },
         )
         out = _format_xs_spread_diag(diag)

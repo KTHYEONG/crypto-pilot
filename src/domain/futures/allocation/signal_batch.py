@@ -425,6 +425,7 @@ def compute_symbol_strategy_evidence(
     registry_as_of_idx: int,
     snapshot_index: int = -1,
     probe_diversity_corr: dict[str, float] | None = None,
+    xs_admission: dict[str, XsAdmissionBasis] | None = None,
 ) -> tuple[SymbolStrategyEvidence, ...]:
     """Compute per-source signal evidence from event-level OOS results."""
     if event_results.empty:
@@ -552,6 +553,17 @@ def compute_symbol_strategy_evidence(
             if boot_means.size >= 2 and float(np.std(boot_means, ddof=1)) > 0.0
             else t_stat
         )
+        # XS alpha admission: substitute factor-level inputs for all 3 gates
+        if xs_admission is not None:
+            _xs = xs_admission.get(str(strategy_id))
+            if _xs is not None:
+                mean_gross = _xs.mean_bps
+                mean_incremental = _xs.mean_bps
+                probability_positive = _xs.probability_positive
+                lcb_net = _xs.lcb_bps
+                t_stat = _xs.sharpe * float(np.sqrt(max(_xs.n_bars, 1)))
+                p_value = _one_sided_p_value(t_stat)
+                block_tstat = t_stat
         t_prep_total += time.perf_counter() - t_step
 
         t_qs = time.perf_counter()
@@ -1083,7 +1095,17 @@ class ProbeBreadthDiagnostics:
 @dataclass(slots=True, frozen=True)
 class XsFactorSpreadDiagnostics:
     fold_id: int
-    by_factor: dict[str, tuple[int, int, float, float, float, float, float, float, float]]
+    by_factor: dict[str, tuple[int, int, float, float, float, float, float, float, float, float]]
+
+
+@dataclass(slots=True, frozen=True)
+class XsAdmissionBasis:
+    """Factor-level admission basis for XS alpha portfolio-level gate substitution. [ADR_20260703_L1_XS]"""
+    mean_bps: float
+    lcb_bps: float
+    sharpe: float
+    probability_positive: float
+    n_bars: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -1148,7 +1170,7 @@ def compute_xs_factor_spread_diagnostics(
         xs = df[df["family"].astype(str).isin(xs_family_fallback)]
     if xs.empty:
         return None
-    by_factor: dict[str, tuple[int, int, float, float, float, float, float, float, float]] = {}
+    by_factor: dict[str, tuple[int, int, float, float, float, float, float, float, float, float]] = {}
     for sid, g in xs.groupby("strategy_id", sort=True):
         bar_means = g.groupby("decision_idx")["realized_side_adjusted_gross_bps"].mean()
         spread = bar_means.to_numpy(dtype=np.float64)
@@ -1168,10 +1190,39 @@ def compute_xs_factor_spread_diagnostics(
         lcb = float(np.quantile(boot, 0.05)) if boot.size > 0 else mean
         ic, ict = _xs_rank_ic(g)
         long_frac = float((g["side"].to_numpy() > 0).mean())
-        by_factor[sid] = (n_bars, len(g), mean, std, sharpe, lcb, ic, ict, long_frac)
+        prob_positive = float(np.mean(boot > 0.0)) if boot.size > 0 else (1.0 if mean > 0.0 else 0.0)
+        by_factor[sid] = (n_bars, len(g), mean, std, sharpe, lcb, ic, ict, long_frac, prob_positive)
     if not by_factor:
         return None
     return XsFactorSpreadDiagnostics(fold_id=fold_id, by_factor=by_factor)
+
+
+def resolve_xs_alpha_admission(
+    diag: XsFactorSpreadDiagnostics | None,
+    cfg: CandidateStrategyConfig,
+) -> dict[str, XsAdmissionBasis]:
+    """xs_alpha 팩터의 admission 여부를 factor-level spread 진단으로 판정. [ADR_20260703_L1_XS]
+
+    Returns:
+        strategy_id -> XsAdmissionBasis. 통과한 항목만 key 존재.
+    """
+    if not bool(getattr(cfg, "l1_xs_alpha_admission_enabled", False)):
+        return {}
+    if diag is None or not diag.by_factor:
+        return {}
+    breakeven = float(getattr(cfg, "l1_breakeven_floor_bps", 0.0))
+    min_sharpe = float(getattr(cfg, "l1_xs_admission_min_sharpe", 0.15))
+    result: dict[str, XsAdmissionBasis] = {}
+    for sid, (n_bars, _n_events, mean, _std, sharpe, lcb, _ic, _ict, _lf, prob_positive) in diag.by_factor.items():
+        if lcb > breakeven and sharpe >= min_sharpe:
+            result[sid] = XsAdmissionBasis(
+                mean_bps=mean,
+                lcb_bps=lcb,
+                sharpe=sharpe,
+                probability_positive=prob_positive,
+                n_bars=n_bars,
+            )
+    return result
 
 
 def compute_family_regime_edge_diagnostics(
@@ -1499,9 +1550,9 @@ def _format_probe_diag(diag: ProbeBreadthDiagnostics) -> str:
 
 def _format_xs_spread_diag(diag: XsFactorSpreadDiagnostics) -> str:
     parts: list[str] = []
-    for sid, (nbars, _nevents, _mean, _std, sharpe, lcb, ic, ict, lf) in diag.by_factor.items():
+    for sid, (nbars, _nevents, _mean, _std, sharpe, lcb, ic, ict, lf, pp) in diag.by_factor.items():
         parts.append(
-            f"XS[{sid}]=sh{sharpe:+.2f}/lcb{lcb:+.1f}/ic{ic:+.3f}/t{ict:+.2f}/n{nbars}/lf{lf:.0%}"
+            f"XS[{sid}]=sh{sharpe:+.2f}/lcb{lcb:+.1f}/ic{ic:+.3f}/t{ict:+.2f}/n{nbars}/lf{lf:.0%}/pp{pp:.2f}"
         )
     return " | ".join(parts) if parts else ""
 
