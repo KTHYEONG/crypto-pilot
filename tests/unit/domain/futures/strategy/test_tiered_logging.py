@@ -33,6 +33,7 @@ from src.domain.futures.strategy.tiered_logging import (
     format_layer_universe_audit_table,
     format_system_status,
     format_window_table,
+    render_family_rejection_funnel,
 )
 
 # ---------------------------------------------------------------------------
@@ -989,3 +990,51 @@ class TestFormatLayer1TableSwfStrings:
         # Assert
         assert "Fold Pass Ratio" not in main_section
         assert "CS Fold Pass%" in result
+
+
+# ---------------------------------------------------------------------------
+# render_family_rejection_funnel (docs/specs/l1-nontrend-diversification-measure-first.md C2)
+# ---------------------------------------------------------------------------
+
+def _fake_ev(symbol: str, strategy_id: str, reasons: tuple[str, ...]) -> SimpleNamespace:
+    return SimpleNamespace(
+        key=SignalSourceKey(
+            symbol=symbol, strategy_id=strategy_id, activation_context="all",
+        ),
+        structural_reasons=reasons,
+    )
+
+
+class TestRenderFamilyRejectionFunnel:
+    def test_groups_by_family(self) -> None:
+        failed = [
+            _fake_ev("AUSDT", "xs_oi_skew:v1", ("quality_weight_zero",)),
+            _fake_ev("BUSDT", "xs_oi_skew:v1", ("quality_weight_zero",)),
+            _fake_ev("CUSDT", "trend_ma:ma1", ("no_incremental_edge",)),
+        ]
+
+        lines = render_family_rejection_funnel(failed)
+
+        joined = "\n".join(lines)
+        assert "xs_oi_skew" in joined
+        assert "total=2" in joined
+        assert "quality_weight_zerox2" in joined
+        assert "trend_ma" in joined
+        assert "no_incremental_edgex1" in joined
+
+    def test_empty_returns_empty(self) -> None:
+        assert render_family_rejection_funnel([]) == []
+
+    def test_handles_missing_colon(self) -> None:
+        failed = [_fake_ev("AUSDT", "orphan", ("quality_weight_zero",))]
+
+        lines = render_family_rejection_funnel(failed)
+
+        assert any("orphan" in line for line in lines)
+
+    def test_empty_reasons_fallback(self) -> None:
+        failed = [_fake_ev("AUSDT", "trend_ma:ma1", ())]
+
+        lines = render_family_rejection_funnel(failed)
+
+        assert any("quality_weight_zerox1" in line for line in lines)
