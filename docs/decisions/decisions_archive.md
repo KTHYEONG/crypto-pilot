@@ -2,6 +2,16 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-02] [TASK_UNI_VISION] [ADR_20260702_UNI_VISION]
+- **Context/Why:** Datetime string parsing errors in Vision metrics downloader caused all open interest and long-short ratio data to be lost.
+- **Resolution/What:** Fixed metrics dtype normalization branch and conducted 5-round real data correlation sweep.
+- **Impact:** LSR/OI correlation tests fell below significance threshold, deferring raw OI/LSR features from active alpha.
+
+## [2026-07-02] [TASK_L2_SZ] [ADR_20260702_L2_SZ]
+- **Context/Why:** Kelly portfolio sizing model assumed zero correlation between active symbols, underestimating concentration risk.
+- **Resolution/What:** Added Ledoit-Wolf covariance sizing options and connected portfolio optimizer to active rebalance loops.
+- **Impact:** L* leverage scaling absorbed local portfolio sizing offsets, showing no performance improvement.
+
 ## [2026-07-01] [TASK_L1_REGIME] [ADR_20260701_L1_REGIME]
 - **Context/Why:** Mean reversion strategy (beta_neut) was failing in transition regimes but code had no active regime masking.
 - **Resolution/What:** Implemented beta_neut_gating_enabled masking for bull_quiet regime and tested on historical folds.
