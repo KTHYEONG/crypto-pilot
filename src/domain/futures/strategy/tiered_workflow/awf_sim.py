@@ -137,6 +137,8 @@ class Layer2FoldAttribution:
     realized_price_short: float = 0.0
     bars_long: int = 0
     bars_short: int = 0
+    realized_price_long_by_symbol: tuple[tuple[str, float], ...] = ()
+    realized_price_short_by_symbol: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -196,6 +198,22 @@ def compute_long_short_realized_price(
     return total_long, total_short
 
 
+def compute_long_short_price_by_symbol(
+    fold_attributions: tuple[Layer2FoldAttribution, ...],
+) -> tuple[tuple[tuple[str, float], ...], tuple[tuple[str, float], ...]]:
+    """[ADR_20260704_L2L3_PERSYMBOL] Merge per-symbol long/short realized price
+    across AWF folds (sum, no gate — different folds may have different active
+    symbol sets)."""
+    long_totals: dict[str, float] = {}
+    short_totals: dict[str, float] = {}
+    for a in fold_attributions:
+        for sym, val in a.realized_price_long_by_symbol:
+            long_totals[sym] = long_totals.get(sym, 0.0) + val
+        for sym, val in a.realized_price_short_by_symbol:
+            short_totals[sym] = short_totals.get(sym, 0.0) + val
+    return (tuple(long_totals.items()), tuple(short_totals.items()))
+
+
 def _assemble_fold_attribution(
     *,
     fold_idx: int,
@@ -223,6 +241,9 @@ def _assemble_fold_attribution(
     realized_price_short: float = 0.0,
     bars_long: int = 0,
     bars_short: int = 0,
+    symbols: tuple[str, ...] = (),
+    price_long_by_sym: NDArray[np.float64] | None = None,
+    price_short_by_sym: NDArray[np.float64] | None = None,
 ) -> Layer2FoldAttribution:
     realized_total = realized_price + realized_funding - realized_cost
     alpha_gap = realized_total - expected_net
@@ -255,6 +276,23 @@ def _assemble_fold_attribution(
         trend_efficiency_corr = 0.0
         mean_trend_efficiency = 0.0
 
+    if price_long_by_sym is not None and symbols:
+        realized_price_long_by_symbol = tuple(
+            (sym, float(v))
+            for sym, v in zip(symbols, price_long_by_sym, strict=True)
+            if abs(float(v)) > 1e-12
+        )
+    else:
+        realized_price_long_by_symbol = ()
+    if price_short_by_sym is not None and symbols:
+        realized_price_short_by_symbol = tuple(
+            (sym, float(v))
+            for sym, v in zip(symbols, price_short_by_sym, strict=True)
+            if abs(float(v)) > 1e-12
+        )
+    else:
+        realized_price_short_by_symbol = ()
+
     return Layer2FoldAttribution(
         fold_idx=fold_idx,
         oos_bars=oos_bars,
@@ -283,6 +321,8 @@ def _assemble_fold_attribution(
         realized_price_short=_safe(realized_price_short),
         bars_long=bars_long,
         bars_short=bars_short,
+        realized_price_long_by_symbol=realized_price_long_by_symbol,
+        realized_price_short_by_symbol=realized_price_short_by_symbol,
     )
 
 
@@ -2286,6 +2326,8 @@ def _run_awf_simulation(
         _fold_risk_on_price = 0.0
         _attr_price_long = 0.0
         _attr_price_short = 0.0
+        _attr_price_long_by_sym = np.zeros(n_sym, dtype=np.float64)
+        _attr_price_short_by_sym = np.zeros(n_sym, dtype=np.float64)
         _attr_bars_long = 0
         _attr_bars_short = 0
         _current_episode_start: int | None = None
@@ -2872,6 +2914,8 @@ def _run_awf_simulation(
                 _bar_price_short = float(np.dot(w_short, bar_ret))
                 _attr_price_long += _bar_price_long
                 _attr_price_short += _bar_price_short
+                _attr_price_long_by_sym += w_long * bar_ret
+                _attr_price_short_by_sym += w_short * bar_ret
                 if np.any(w_long > 1e-12):
                     _attr_bars_long += 1
                 if np.any(w_short < -1e-12):
@@ -2988,6 +3032,9 @@ def _run_awf_simulation(
             realized_price_short=_attr_price_short,
             bars_long=_attr_bars_long,
             bars_short=_attr_bars_short,
+            symbols=symbols,
+            price_long_by_sym=_attr_price_long_by_sym,
+            price_short_by_sym=_attr_price_short_by_sym,
         )
         fold_attributions.append(_attr)
         if _diag and logger.isEnabledFor(logging.DEBUG):

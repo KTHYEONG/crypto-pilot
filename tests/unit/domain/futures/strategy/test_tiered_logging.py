@@ -23,6 +23,7 @@ from src.domain.futures.strategy.candidate_contracts import (
     SymbolStrategyEvidence,
 )
 from src.domain.futures.strategy.tiered_logging import (
+    _format_top_symbol_contributions,
     evaluation_window_bottleneck_verdict,
     format_layer1_deployment_registry_table,
     format_layer1_gate_table,
@@ -800,6 +801,18 @@ class TestFormatLayer2Table:
         assert "long=-0.0200" in result
         assert "short=+0.0450" in result
 
+    def test_format_layer2_table_renders_per_symbol_long_short_top_lines(self) -> None:
+        """Scenario 11: [L2-LONGSHORT-TOP] 라인에 top symbol contributions 렌더링."""
+        r2 = _make_l2_ns(
+            realized_price_long_by_symbol=(("ARUSDT", -0.021),),
+            realized_price_short_by_symbol=(("BTCUSDT", 0.012),),
+        )
+
+        result = format_layer2_table(r2)
+
+        assert "[L2-LONGSHORT-TOP]" in result
+        assert "ARUSDT(-0.0210)" in result
+        assert "BTCUSDT(+0.0120)" in result
 
 
 class TestEvaluationWindowBottleneckVerdict:
@@ -1122,3 +1135,42 @@ class TestFormatLayer3TableRegimeDiagnostics:
         assert "long=-0.0850" in result
         assert "short=+0.0120" in result
         assert "long=38 short=9" in result
+
+    def test_format_layer3_table_renders_per_symbol_long_short_top_lines(self) -> None:
+        """Scenario 10: [L3-LONGSHORT-TOP] 라인에 top symbol contributions 렌더링."""
+        from types import SimpleNamespace
+
+        r3 = SimpleNamespace(
+            gate_passed=True,
+            mean_trend_efficiency=0.0,
+            realized_price_long_by_symbol=(("ARUSDT", -0.021), ("ZRXUSDT", -0.018)),
+            realized_price_short_by_symbol=(("BTCUSDT", 0.012),),
+        )
+
+        result = format_layer3_table(r3, holdout_start="2025-07-01", holdout_end="2026-01-01")
+
+        assert "[L3-LONGSHORT-TOP]" in result
+        assert "ARUSDT(-0.0210)" in result
+        assert "ZRXUSDT(-0.0180)" in result
+        assert "BTCUSDT(+0.0120)" in result
+
+
+class TestFormatTopSymbolContributions:
+    """_format_top_symbol_contributions 정렬 및 truncation."""
+
+    def test_format_top_symbol_contributions_sorts_ascending_for_losers(self) -> None:
+        """Scenario 7: ascending=True → 가장 큰 손실(가장 작은 값) 순."""
+        pairs = (("A", -0.01), ("B", -0.05), ("C", 0.02), ("D", -0.03))
+        result = _format_top_symbol_contributions(pairs, top_n=2, ascending=True)
+        assert result == "B(-0.0500) D(-0.0300)"
+
+    def test_format_top_symbol_contributions_sorts_descending_for_winners(self) -> None:
+        """Scenario 8: ascending=False → 가장 큰 이익(가장 큰 값) 순."""
+        pairs = (("A", -0.01), ("B", -0.05), ("C", 0.02), ("D", -0.03))
+        result = _format_top_symbol_contributions(pairs, top_n=2, ascending=False)
+        assert result == "C(+0.0200) A(-0.0100)"
+
+    def test_format_top_symbol_contributions_empty_returns_na(self) -> None:
+        """Scenario 9: empty pairs → 'n/a'."""
+        result = _format_top_symbol_contributions((), ascending=True)
+        assert result == "n/a"
