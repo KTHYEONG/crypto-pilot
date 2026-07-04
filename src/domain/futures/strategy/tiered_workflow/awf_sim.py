@@ -54,6 +54,8 @@ if TYPE_CHECKING:
 
 EdgeBasis = Literal["gross", "net"]
 
+MAJOR_DIAG_SYMBOLS: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "BNBUSDT")
+
 
 @dataclass(slots=True, frozen=True)
 class Layer2ExpectedEdge:
@@ -109,6 +111,27 @@ def _extract_risk_off_episodes(
 
 
 @dataclass(slots=True, frozen=True)
+class MajorSymbolRebalanceSnapshot:
+    t: int
+    symbol: str
+    raw_mu: float
+    weight: float
+    regime_code: int
+    regime_risk_mult: float
+
+
+@dataclass(slots=True, frozen=True)
+class MajorSymbolSignalSizingSummary:
+    symbol: str
+    n_obs: int
+    mu_bullish_pct: float
+    weight_long_pct: float
+    stale_long_pct: float
+    regime_cap_engaged_pct: float
+    mean_regime_risk_mult_when_long: float
+
+
+@dataclass(slots=True, frozen=True)
 class Layer2FoldAttribution:
     fold_idx: int
     oos_bars: int
@@ -139,6 +162,7 @@ class Layer2FoldAttribution:
     bars_short: int = 0
     realized_price_long_by_symbol: tuple[tuple[str, float], ...] = ()
     realized_price_short_by_symbol: tuple[tuple[str, float], ...] = ()
+    major_symbol_snapshots: tuple[MajorSymbolRebalanceSnapshot, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -213,6 +237,48 @@ def compute_long_short_price_by_symbol(
             short_totals[sym] = short_totals.get(sym, 0.0) + val
     return (tuple(long_totals.items()), tuple(short_totals.items()))
 
+def summarize_major_symbol_signal_sizing(
+    fold_attributions: tuple[Layer2FoldAttribution, ...],
+) -> tuple[MajorSymbolSignalSizingSummary, ...]:
+    """[ADR_20260704_L3_MAJORDIAG] Compute per-symbol signal/sizing mismatch ratios
+    across AWF folds.
+
+    Measures three mutually-exclusive diagnostic axes:
+    1. stale_long_pct — raw_mu turned non-positive but weight > 0 (no-trade-band stuck)
+    2. mu_bullish_pct — fraction of bars where raw_mu > 0 (signal direction accuracy)
+    3. regime_cap_engaged_pct — fraction of long bars where regime_risk_mult < 1.0
+    """
+    by_symbol: dict[str, list[MajorSymbolRebalanceSnapshot]] = {}
+    for fa in fold_attributions:
+        for snap in fa.major_symbol_snapshots:
+            by_symbol.setdefault(snap.symbol, []).append(snap)
+
+    results: list[MajorSymbolSignalSizingSummary] = []
+    for symbol, snaps in by_symbol.items():
+        n_obs = len(snaps)
+        mu_arr = np.array([s.raw_mu for s in snaps], dtype=np.float64)
+        w_arr = np.array([s.weight for s in snaps], dtype=np.float64)
+        mult_arr = np.array([s.regime_risk_mult for s in snaps], dtype=np.float64)
+        long_mask = w_arr > 0.0
+        n_long = int(long_mask.sum())
+
+        mu_bullish_pct = float(np.mean(mu_arr > 0.0))
+        weight_long_pct = float(np.mean(long_mask))
+        stale_long_pct = float(np.mean(long_mask & (mu_arr <= 0.0)))
+        regime_cap_engaged_pct = float(np.mean(long_mask & (mult_arr < 1.0)))
+        mean_mult_when_long = float(mult_arr[long_mask].mean()) if n_long > 0 else 0.0
+
+        results.append(MajorSymbolSignalSizingSummary(
+            symbol=symbol, n_obs=n_obs,
+            mu_bullish_pct=mu_bullish_pct, weight_long_pct=weight_long_pct,
+            stale_long_pct=stale_long_pct, regime_cap_engaged_pct=regime_cap_engaged_pct,
+            mean_regime_risk_mult_when_long=mean_mult_when_long,
+        ))
+
+    order = {s: i for i, s in enumerate(MAJOR_DIAG_SYMBOLS)}
+    results.sort(key=lambda r: order.get(r.symbol, len(order)))
+    return tuple(results)
+
 
 def _assemble_fold_attribution(
     *,
@@ -244,6 +310,7 @@ def _assemble_fold_attribution(
     symbols: tuple[str, ...] = (),
     price_long_by_sym: NDArray[np.float64] | None = None,
     price_short_by_sym: NDArray[np.float64] | None = None,
+    major_symbol_snapshots: tuple[MajorSymbolRebalanceSnapshot, ...] = (),
 ) -> Layer2FoldAttribution:
     realized_total = realized_price + realized_funding - realized_cost
     alpha_gap = realized_total - expected_net
@@ -323,6 +390,7 @@ def _assemble_fold_attribution(
         bars_short=bars_short,
         realized_price_long_by_symbol=realized_price_long_by_symbol,
         realized_price_short_by_symbol=realized_price_short_by_symbol,
+        major_symbol_snapshots=major_symbol_snapshots,
     )
 
 
@@ -2330,6 +2398,7 @@ def _run_awf_simulation(
         _attr_price_short_by_sym = np.zeros(n_sym, dtype=np.float64)
         _attr_bars_long = 0
         _attr_bars_short = 0
+        _attr_major_diag: list[MajorSymbolRebalanceSnapshot] = []
         _current_episode_start: int | None = None
         _current_episode_price: float = 0.0
         _fold_episodes: list[ReversalEpisode] = []
@@ -2786,6 +2855,19 @@ def _run_awf_simulation(
                     w[_over] = np.sign(w[_over]) * _max_w[_over]
 
             last_w = w
+            for _md_sym in MAJOR_DIAG_SYMBOLS:
+                _md_idx = sym_to_idx.get(_md_sym)
+                if _md_idx is not None:
+                    _attr_major_diag.append(
+                        MajorSymbolRebalanceSnapshot(
+                            t=t,
+                            symbol=_md_sym,
+                            raw_mu=float(mu_arr[_md_idx]),
+                            weight=float(w[_md_idx]),
+                            regime_code=_regime_now_for_cap,
+                            regime_risk_mult=float(_regime_risk_mult),
+                        )
+                    )
             if _diag:
                 _holding = float(t_end - t)
                 if np.any(np.abs(w) > 1e-12):
@@ -3035,6 +3117,7 @@ def _run_awf_simulation(
             symbols=symbols,
             price_long_by_sym=_attr_price_long_by_sym,
             price_short_by_sym=_attr_price_short_by_sym,
+            major_symbol_snapshots=tuple(_attr_major_diag),
         )
         fold_attributions.append(_attr)
         if _diag and logger.isEnabledFor(logging.DEBUG):

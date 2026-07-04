@@ -53,6 +53,21 @@ def _format_top_symbol_contributions(
     return " ".join(f"{sym}({val:+.4f})" for sym, val in sorted_pairs)
 
 
+def _format_major_symbol_diag_line(summary: Any) -> str:
+    """Format a MajorSymbolSignalSizingSummary as a single log line.
+
+    Output format:
+      "BTCUSDT: mu_bull=50.0% w_long=75.0% stale_long=25.0% cap_engaged=25.0% avg_mult=0.933"
+    """
+    return (
+        f"{summary.symbol}: mu_bull={summary.mu_bullish_pct*100:.1f}% "
+        f"w_long={summary.weight_long_pct*100:.1f}% "
+        f"stale_long={summary.stale_long_pct*100:.1f}% "
+        f"cap_engaged={summary.regime_cap_engaged_pct*100:.1f}% "
+        f"avg_mult={summary.mean_regime_risk_mult_when_long:.3f}"
+    )
+
+
 def _format_symbol_preview(symbols: Sequence[Any], *, max_symbols: int = 8) -> str:
     preview = [str(sym) for sym in symbols[: max(max_symbols, 0)]]
     if not preview:
@@ -758,6 +773,11 @@ def format_layer2_table(
             f"  [L2-LONGSHORT-TOP] Short Winners: {_format_top_symbol_contributions(short_by_sym, ascending=False)}",
         ]
     )
+    _major_diag_line = getattr(r, "major_symbol_diag", ())
+    lines.extend(
+        f"  [L2-MAJOR-DIAG] {_format_major_symbol_diag_line(_summary)}"
+        for _summary in _major_diag_line
+    )
     lines.append(sep)
 
 
@@ -1001,6 +1021,11 @@ def format_layer3_table(
         lines.append(
             f"  {_status(True)} [L3-LONGSHORT-TOP] Short Winners: "
             f"{_format_top_symbol_contributions(_l3_short_by_sym, ascending=False)}"
+        )
+        _major_diag_line = getattr(r, "major_symbol_diag", ())
+        lines.extend(
+            f"  {_status(True)} [L3-MAJOR-DIAG] {_format_major_symbol_diag_line(_summary)}"
+            for _summary in _major_diag_line
         )
 
     if has_opt:
