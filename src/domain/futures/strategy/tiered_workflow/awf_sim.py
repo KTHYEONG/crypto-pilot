@@ -68,6 +68,41 @@ class Layer2ExpectedEdge:
 
 
 @dataclass(slots=True, frozen=True)
+class DirectionalVetoSnapshot:
+    """[ADR_20260704_L2_DIRECTIONAL_VETO] Per-bar causal veto snapshot."""
+
+    fold_idx: int
+    t: int
+    symbol: str
+    regime_code: int
+    raw_mu_before: float
+    raw_mu_after: float
+    counterfactual_weight: float
+    weight_after: float
+    fired: bool
+    was_missing: bool
+    bar_price_return_after: float
+    counterfactual_long_return: float
+
+
+@dataclass(slots=True, frozen=True)
+class DirectionalVetoSummary:
+    """[ADR_20260704_L2_DIRECTIONAL_VETO] Fold-pooled veto effectiveness summary."""
+
+    symbol: str
+    n_obs: int
+    n_missing: int
+    n_adverse: int
+    n_fired: int
+    fire_rate: float
+    adverse_fire_rate: float
+    false_positive_rate: float
+    opportunity_cost: float
+    avoided_loss: float
+    net_veto_value: float
+
+
+@dataclass(slots=True, frozen=True)
 class ReversalEpisode:
     """risk_off 연속 구간 하나(entry~exit)의 실현 요약."""
 
@@ -184,6 +219,7 @@ class Layer2FoldAttribution:
     realized_price_long_by_symbol: tuple[tuple[str, float], ...] = ()
     realized_price_short_by_symbol: tuple[tuple[str, float], ...] = ()
     major_symbol_snapshots: tuple[MajorSymbolRebalanceSnapshot, ...] = ()
+    directional_veto_snapshots: tuple[DirectionalVetoSnapshot, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -392,6 +428,54 @@ def summarize_major_symbol_regime_incoherence(
     return tuple(results)
 
 
+def summarize_directional_veto(
+    fold_attributions: tuple[Layer2FoldAttribution, ...],
+    *,
+    symbols: tuple[str, ...],
+) -> tuple[DirectionalVetoSummary, ...]:
+    """[ADR_20260704_L2_DIRECTIONAL_VETO] Aggregate directional veto snapshots by symbol."""
+
+    by_symbol: dict[str, list[DirectionalVetoSnapshot]] = {}
+    for fa in fold_attributions:
+        for snap in fa.directional_veto_snapshots:
+            by_symbol.setdefault(snap.symbol, []).append(snap)
+
+    results: list[DirectionalVetoSummary] = []
+    for symbol in symbols:
+        snaps = by_symbol.get(symbol, [])
+        n_obs = len(snaps)
+        n_missing = sum(1 for s in snaps if s.was_missing)
+        n_adverse = sum(1 for s in snaps if s.regime_code in (1, 2) and not s.was_missing)
+        n_fired = sum(1 for s in snaps if s.fired)
+        fire_rate = n_fired / max(n_obs, 1)
+        adverse_fire_rate = n_fired / max(n_adverse, 1)
+        false_positive_count = sum(
+            1 for s in snaps if s.fired and s.counterfactual_long_return >= 0.0
+        )
+        false_positive_rate = false_positive_count / max(n_fired, 1)
+        opportunity_cost = sum(
+            max(s.counterfactual_long_return, 0.0) for s in snaps if s.fired
+        )
+        avoided_loss = sum(
+            max(-s.counterfactual_long_return, 0.0) for s in snaps if s.fired
+        )
+        net_veto_value = avoided_loss - opportunity_cost
+        results.append(DirectionalVetoSummary(
+            symbol=symbol,
+            n_obs=n_obs,
+            n_missing=n_missing,
+            n_adverse=n_adverse,
+            n_fired=n_fired,
+            fire_rate=fire_rate,
+            adverse_fire_rate=adverse_fire_rate,
+            false_positive_rate=false_positive_rate,
+            opportunity_cost=opportunity_cost,
+            avoided_loss=avoided_loss,
+            net_veto_value=net_veto_value,
+        ))
+    return tuple(results)
+
+
 def _assemble_fold_attribution(
     *,
     fold_idx: int,
@@ -423,6 +507,7 @@ def _assemble_fold_attribution(
     price_long_by_sym: NDArray[np.float64] | None = None,
     price_short_by_sym: NDArray[np.float64] | None = None,
     major_symbol_snapshots: tuple[MajorSymbolRebalanceSnapshot, ...] = (),
+    directional_veto_snapshots: tuple[DirectionalVetoSnapshot, ...] = (),
 ) -> Layer2FoldAttribution:
     realized_total = realized_price + realized_funding - realized_cost
     alpha_gap = realized_total - expected_net
@@ -503,6 +588,7 @@ def _assemble_fold_attribution(
         realized_price_long_by_symbol=realized_price_long_by_symbol,
         realized_price_short_by_symbol=realized_price_short_by_symbol,
         major_symbol_snapshots=major_symbol_snapshots,
+        directional_veto_snapshots=directional_veto_snapshots,
     )
 
 
@@ -2775,6 +2861,50 @@ def _run_awf_simulation(
                 sleeve_edges=_oos_sleeve_edges,
             )
 
+            # [L2 Directional Veto]: adverse regime long veto
+            _veto_enabled = bool(getattr(config, "l2_regime_directional_veto_enabled", False))
+            _directional_veto_snaps: list[DirectionalVetoSnapshot] = []
+            _counterfactual_candidates: dict[str, float] = {}
+            if _veto_enabled:
+                _pre_veto_signals = dict(valid_signals)
+                _veto_symbols: tuple[str, ...] = getattr(config, "l2_regime_directional_veto_symbols", ())
+                _veto_adverse: tuple[int, ...] = getattr(config, "l2_regime_directional_veto_adverse_codes", (1, 2))
+                _veto_eps = float(getattr(config, "l2_regime_directional_veto_long_eps_bps", 0.0))
+                _veto_action = str(getattr(config, "l2_regime_directional_veto_action", "drop_long"))
+                _regime_now = int(_regime_code_1d[t]) if t < len(_regime_code_1d) else 0
+                for _vsym in _veto_symbols:
+                    _vsig = valid_signals.get(_vsym)
+                    if _vsig is None:
+                        _directional_veto_snaps.append(DirectionalVetoSnapshot(
+                            fold_idx=_fold_idx, t=t, symbol=_vsym,
+                            regime_code=_regime_now,
+                            raw_mu_before=0.0, raw_mu_after=0.0,
+                            counterfactual_weight=0.0, weight_after=0.0,
+                            fired=False, was_missing=True,
+                            bar_price_return_after=0.0, counterfactual_long_return=0.0,
+                        ))
+                        continue
+                    _raw_mu = float(_vsig.raw_mu)
+                    _is_adverse = _regime_now in _veto_adverse
+                    _is_long = _raw_mu > _veto_eps * 1e-4
+                    _fired = bool(_is_adverse and _is_long)
+                    _raw_mu_after = 0.0 if _fired else _raw_mu
+                    if _fired and _veto_action == "drop_long":
+                        del valid_signals[_vsym]
+                    elif _fired and _veto_action == "zero_mu":
+                        valid_signals[_vsym] = replace(_vsig, raw_mu=0.0)
+                    _counterfactual_weight = float(_pre_veto_signals.get(_vsym, _vsig).raw_mu) if _fired else 0.0
+                    if _fired:
+                        _counterfactual_candidates[_vsym] = _counterfactual_weight
+                    _directional_veto_snaps.append(DirectionalVetoSnapshot(
+                        fold_idx=_fold_idx, t=t, symbol=_vsym,
+                        regime_code=_regime_now,
+                        raw_mu_before=_raw_mu, raw_mu_after=_raw_mu_after,
+                        counterfactual_weight=_counterfactual_weight, weight_after=0.0,
+                        fired=_fired, was_missing=False,
+                        bar_price_return_after=0.0, counterfactual_long_return=0.0,
+                    ))
+
             if _oos_sleeve_sigs:
                 logger.debug(
                     "[AWF-EDGE] t=%d sleeve_count=%d edge_pass=%d",
@@ -2967,6 +3097,18 @@ def _run_awf_simulation(
                     w[_over] = np.sign(w[_over]) * _max_w[_over]
 
             last_w = w
+            # [L2 Directional Veto]: update weight_after for fired snapshots
+            if _veto_enabled and _directional_veto_snaps:
+                _final_snaps: list[DirectionalVetoSnapshot] = []
+                for _vs in _directional_veto_snaps:
+                    if _vs.fired:
+                        _sym_col = sym_to_idx.get(_vs.symbol)
+                        _actual_w = float(w[_sym_col]) if _sym_col is not None else 0.0
+                        _final_snaps.append(replace(_vs, weight_after=_actual_w))
+                    else:
+                        _final_snaps.append(_vs)
+                _directional_veto_snaps = _final_snaps
+
             for _md_sym in MAJOR_DIAG_SYMBOLS:
                 _md_idx = sym_to_idx.get(_md_sym)
                 if _md_idx is not None:
@@ -3098,6 +3240,29 @@ def _run_awf_simulation(
                 # 거래비용은 리밸런싱 첫 bar에만 차감
                 cost = rebal_cost if t2 == t else 0.0
                 _bar_price = float(np.dot(w, bar_ret))
+                # [L2 Directional Veto]: accumulate bar returns for fired snapshots
+                if _veto_enabled and _directional_veto_snaps:
+                    _updated_snaps: list[DirectionalVetoSnapshot] = []
+                    for _vs in _directional_veto_snaps:
+                        if _vs.fired and _vs.t == t:
+                            _sym_col = sym_to_idx.get(_vs.symbol)
+                            if _sym_col is not None:
+                                _sym_bar_ret = float(bar_ret[_sym_col])
+                                _sym_funding = float(funding_rates[_sym_col])
+                                _cf_weight = _vs.counterfactual_weight
+                                _cf_long_bar_ret = _cf_weight * (_sym_bar_ret - _sym_funding)
+                                _rebal_cost_bar = rebal_cost / float(max(t_end - t, 1))
+                                _cf_long_bar_ret_net = _cf_long_bar_ret - (_rebal_cost_bar if t2 == t else 0.0)
+                                _updated_snaps.append(replace(
+                                    _vs,
+                                    bar_price_return_after=_vs.bar_price_return_after + _sym_bar_ret,
+                                    counterfactual_long_return=_vs.counterfactual_long_return + _cf_long_bar_ret_net,
+                                ))
+                            else:
+                                _updated_snaps.append(_vs)
+                        else:
+                            _updated_snaps.append(_vs)
+                    _directional_veto_snaps = _updated_snaps
                 if _reliability_enabled:
                     _rc_fold = int(_regime_code_1d[t2]) if t2 < len(_regime_code_1d) else 2
                     if _rc_fold in _is_bear_code:
@@ -3230,6 +3395,7 @@ def _run_awf_simulation(
             price_long_by_sym=_attr_price_long_by_sym,
             price_short_by_sym=_attr_price_short_by_sym,
             major_symbol_snapshots=tuple(_attr_major_diag),
+            directional_veto_snapshots=tuple(_directional_veto_snaps),
         )
         fold_attributions.append(_attr)
         if _diag and logger.isEnabledFor(logging.DEBUG):
