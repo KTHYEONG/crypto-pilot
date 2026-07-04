@@ -622,6 +622,8 @@ def format_layer2_table(
     friction_pct: float = getattr(r, "friction_pass_pct", 0.0)
     psr_val: float = getattr(r, "psr_hybrid", float("nan"))
     dsr_val: float = getattr(r, "dsr_hybrid", float("nan"))
+    mean_er: float = getattr(r, "mean_trend_efficiency", 0.0)
+    er_corr: float = getattr(r, "trend_efficiency_corr", 0.0)
     cvar_h: float = getattr(r, "cvar_95_hybrid", float("nan"))
     sortino_h: float = getattr(r, "sortino_hybrid", 0.0)
     terminal_mult: float = getattr(r, "terminal_multiple", 1.0)
@@ -722,6 +724,10 @@ def format_layer2_table(
             f"RelMDD: {_f(mdd_rel_display, '.2f')}x | "
             f"Turnover: {turnover:.3f}"
         ),
+        (
+            f"  [L2-REGIME] "
+            f"Trend Efficiency(ER): mean={_f(mean_er, '.3f')} corr={_f(er_corr, '+.3f')}"
+        ),
         sep,
     ]
 
@@ -741,10 +747,13 @@ def format_layer2_table(
             cagr_v = af.get("cagr", float("nan"))
             cagr_str = "nan%" if not math.isfinite(cagr_v) else f"{cagr_v:+.1%}"
             period_str = af.get("period")
+            er_v = af.get("trend_efficiency", float("nan"))
+            er_str = "nan" if not math.isfinite(er_v) else f"{er_v:.3f}"
 
             line = (
                 f"  {prefix} Fold #{af['fold']} : {pass_icon} Sharpe: {sharpe_str:>6} | "
-                f"CAGR: {cagr_str:>8} | MDD: {mdd_str:>6} | Status: {'PASS' if af.get('pass') else 'FAIL'}"
+                f"CAGR: {cagr_str:>8} | MDD: {mdd_str:>6} | ER: {er_str:>5} | "
+                f"Status: {'PASS' if af.get('pass') else 'FAIL'}"
             )
             if period_str:
                 line = f"{line} | Period: {period_str}"
@@ -933,6 +942,18 @@ def format_layer3_table(
         lines.append(
             f"  {_status(True)} [L3-REVERSAL] kill_switch_active={_kill_active} | "
             f"risk_off_bars={_roff_bars} | risk_off_price={_roff_px:+.4f} risk_on_price={_ron_px:+.4f}"
+        )
+
+    if hasattr(r, "mean_trend_efficiency"):
+        has_opt = True
+        _bull = float(getattr(r, "regime_bull_pct", 0.0))
+        _bear = float(getattr(r, "regime_bear_pct", 0.0))
+        _crisis = float(getattr(r, "regime_crisis_pct", 0.0))
+        _er = float(getattr(r, "mean_trend_efficiency", 0.0))
+        _er_corr = float(getattr(r, "trend_efficiency_corr", 0.0))
+        lines.append(
+            f"  {_status(True)} [L3-REGIME ] bull={_bull:.1f}% bear={_bear:.1f}% "
+            f"crisis={_crisis:.1f}% | Trend Efficiency(ER): mean={_er:.3f} corr={_er_corr:+.3f}"
         )
 
     if has_opt:
