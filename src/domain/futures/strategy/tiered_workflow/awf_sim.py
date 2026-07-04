@@ -133,6 +133,10 @@ class Layer2FoldAttribution:
     risk_off_realized_price: float = 0.0
     risk_on_realized_price: float = 0.0
     risk_off_episodes: tuple[ReversalEpisode, ...] = ()
+    realized_price_long: float = 0.0
+    realized_price_short: float = 0.0
+    bars_long: int = 0
+    bars_short: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -182,6 +186,16 @@ def compute_mean_trend_efficiency(
     return float(mean_er), float(mean_corr)
 
 
+def compute_long_short_realized_price(
+    fold_attributions: tuple[Layer2FoldAttribution, ...],
+) -> tuple[float, float]:
+    """[ADR_20260704_L2L3_LONGSHORT] Sum realized_price_long/short across AWF folds
+    (always-on, no diag gate)."""
+    total_long = sum(a.realized_price_long for a in fold_attributions)
+    total_short = sum(a.realized_price_short for a in fold_attributions)
+    return total_long, total_short
+
+
 def _assemble_fold_attribution(
     *,
     fold_idx: int,
@@ -205,6 +219,10 @@ def _assemble_fold_attribution(
     risk_off_realized_price: float = 0.0,
     risk_on_realized_price: float = 0.0,
     risk_off_episodes: tuple[ReversalEpisode, ...] = (),
+    realized_price_long: float = 0.0,
+    realized_price_short: float = 0.0,
+    bars_long: int = 0,
+    bars_short: int = 0,
 ) -> Layer2FoldAttribution:
     realized_total = realized_price + realized_funding - realized_cost
     alpha_gap = realized_total - expected_net
@@ -261,6 +279,10 @@ def _assemble_fold_attribution(
         risk_off_realized_price=_safe(risk_off_realized_price),
         risk_on_realized_price=_safe(risk_on_realized_price),
         risk_off_episodes=risk_off_episodes,
+        realized_price_long=_safe(realized_price_long),
+        realized_price_short=_safe(realized_price_short),
+        bars_long=bars_long,
+        bars_short=bars_short,
     )
 
 
@@ -2262,6 +2284,10 @@ def _run_awf_simulation(
         _fold_risk_off_bars = 0
         _fold_risk_off_price = 0.0
         _fold_risk_on_price = 0.0
+        _attr_price_long = 0.0
+        _attr_price_short = 0.0
+        _attr_bars_long = 0
+        _attr_bars_short = 0
         _current_episode_start: int | None = None
         _current_episode_price: float = 0.0
         _fold_episodes: list[ReversalEpisode] = []
@@ -2818,6 +2844,8 @@ def _run_awf_simulation(
             total_cost_hybrid += rebal_cost
             total_cost_baseline += rebal_cost_baseline
 
+            w_long = np.where(w > 0.0, w, 0.0)
+            w_short = np.where(w < 0.0, w, 0.0)
             for t2 in range(t, t_end):
                 if t2 + 1 >= aligned.close_2d.shape[0]:
                     break
@@ -2840,6 +2868,14 @@ def _run_awf_simulation(
                         _fold_bear_price_sum += _bar_price
                         _fold_bear_bars += 1
                 _attr_price += _bar_price
+                _bar_price_long = float(np.dot(w_long, bar_ret))
+                _bar_price_short = float(np.dot(w_short, bar_ret))
+                _attr_price_long += _bar_price_long
+                _attr_price_short += _bar_price_short
+                if np.any(w_long > 1e-12):
+                    _attr_bars_long += 1
+                if np.any(w_short < -1e-12):
+                    _attr_bars_short += 1
                 if _diag_regime_full is not None and t2 < len(_diag_regime_full):
                     _rc = int(_diag_regime_full[t2])
                     if _rc in _attr_price_by_regime:
@@ -2948,6 +2984,10 @@ def _run_awf_simulation(
             risk_off_realized_price=_fold_risk_off_price,
             risk_on_realized_price=_fold_risk_on_price,
             risk_off_episodes=tuple(_fold_episodes),
+            realized_price_long=_attr_price_long,
+            realized_price_short=_attr_price_short,
+            bars_long=_attr_bars_long,
+            bars_short=_attr_bars_short,
         )
         fold_attributions.append(_attr)
         if _diag and logger.isEnabledFor(logging.DEBUG):
