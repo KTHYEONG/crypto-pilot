@@ -6,7 +6,7 @@ description: Perform Regression Testing, Coverage Auditing, and Error Triage.
 # Skill: Check (Integrated Validation & Triage Gatekeeper)
 
 ## Purpose
-Unify static contract compliance, dynamic regression test execution, and structural test coverage auditing. Perform high-reasoning triage and error diagnosis strictly upon failure.
+Unify static contract compliance, dynamic regression test execution, and structural test coverage auditing. Perform systematic triage and error diagnosis strictly upon failure.
 
 ## Execution Rules
 
@@ -23,7 +23,7 @@ Perform the following validation steps sequentially:
 
 ### 2. Failure Triage & Loop Circuit Breaker
 If any step in the validation pipeline fails:
-- **Triage (High-Reasoning Swapping)**: Read only the compiled error logs and failure lines retrieved from the execution runner.
+- **Triage (Error Diagnostics)**: Read only the compiled error logs and failure lines retrieved from the execution runner.
 - **Diagnostics**: Analyze whether the failure is a design error (requires `spec` rollback) or code bug (requires `implement` rollback).
 - **Circuit Breaker**: If regression fails for **3 consecutive cycles**, STOP and request human intervention.
 
@@ -40,7 +40,7 @@ If any step in the validation pipeline fails:
 - **Target Coverage %:** [e.g., 92%]
 
 #### 🔍 Gap Analysis & Diagnosis (Required ONLY if FAIL)
-*High-reasoning analysis of error logs. Max 3 bullet points.*
+*Systematic analysis of error logs. Max 3 bullet points.*
 - **Error Line:** `[file:line]`
 - **Diagnosis:** [Design discrepancy | Implementation Bug]
 - **Action Plan:** [Return to implement | Return to spec | Human Intervention]
