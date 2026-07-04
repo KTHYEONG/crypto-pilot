@@ -86,14 +86,14 @@ This protocol applies only inside code-writing phases such as `implement`.
 
 ## 11. Skill Orchestration Boundary
 
-Skills define phase-specific workflows only. **스킬 간 자동 전환은 엄격히 금지됩니다.**
+Skills define phase-specific workflows only. **Auto-transition between skills is strictly prohibited.**
 
-- **Single Skill Scope**: 활성화된 스킬의 목적이 달성되면 즉시 정지(STOP)하고 사용자 피드백을 기다려야 합니다.
-- **No Auto-Chaining**: 사용자가 처음부터 다단계 실행을 명시적으로 요청하지 않은 경우, 현재 스킬 완료 후 다음 스킬을 자동으로 호출하거나 진행하지 마십시오.
-- **Roadmap vs Pipeline**: 아래 워크플로우는 사용자가 참조할 '로드맵'일 뿐, AI의 '자동 실행 파이프라인'이 아닙니다.
+- **Single Skill Scope**: Stop immediately (STOP) and wait for user feedback once the active skill's objective is met.
+- **No Auto-Chaining**: Do not automatically invoke or proceed to the next skill after completing the current one unless the user explicitly requested multi-step execution.
+- **Roadmap vs Pipeline**: The workflow below is a "roadmap" for user reference, NOT an AI automatic execution pipeline.
 
 [Manual Development Roadmap (User-led)]
-1. `spec` -> 2. `implement` -> 3. `check` -> 4. `sync`
+1. `arc` -> 2. `spec` -> 3. `implement` -> 4. `check` -> 5. `sync`
 
 Commit tasks:
 - Do not route through the default skill workflow.
