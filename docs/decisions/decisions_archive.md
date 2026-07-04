@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-01] [TASK_L1_REGIME] [ADR_20260701_L1_REGIME]
+- **Context/Why:** Mean reversion strategy (beta_neut) was failing in transition regimes but code had no active regime masking.
+- **Resolution/What:** Implemented beta_neut_gating_enabled masking for bull_quiet regime and tested on historical folds.
+- **Impact:** Hard masking collapsed symbol-variant sample counts, so regime masking remains off by default.
+
 ## [2026-07-01] [TASK_L2_DB] [ADR_20260701_L2_DB]
 - **Context/Why:** Redis JournalStorage overhead caused severe bottlenecks during high-concurrency Optuna study pipeline initialization.
 - **Resolution/What:** Migrated Optuna database backend to SQLite WAL mode and fixed mock interception paths in tests.
