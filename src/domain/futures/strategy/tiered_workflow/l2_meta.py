@@ -102,12 +102,21 @@ class _RegimeEdgeStat:
 
 
 def _parse_meta_group_ids(strategy_id: str) -> tuple[str, str]:
-    m = _re.search(r"_(\d+h)$", strategy_id)
-    if m:
-        tf = m.group(1)
-        family = strategy_id[: m.start()]
-        return family, tf
-    return "unknown", "unknown"
+    """Split a canonical ``{family}:{variant}`` strategy_id into ``(family, tf)``.
+
+    ``variant`` conventionally carries a trailing ``_{N}{unit}`` timeframe suffix
+    (e.g. ``ema_12_72_4h``) appended by ``strategy_runtime/bridge.py`` —
+    this is parsed out of variant, never out of family.
+    """
+    family, sep, variant = strategy_id.partition(":")
+    target = variant if sep else family
+    m = _re.search(r"_(\d+h)$", target)
+    if m is None:
+        return (family, "unknown") if sep else ("unknown", "unknown")
+    tf = m.group(1)
+    if not sep:
+        family = family[: m.start()]
+    return (family, tf)
 
 
 def _available_micro_feature(
