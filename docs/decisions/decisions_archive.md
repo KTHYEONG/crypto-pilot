@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-01] [TASK_L3_REG] [ADR_20260701_L3_REG]
+- **Context/Why:** Versionless final-evaluator ChampionMetrics naming conflict blocked L3 holdout validations.
+- **Resolution/What:** Refactored baseline metrics to BaselineChampionMetrics and grouped L3 gates into validation package.
+- **Impact:** Restored strict typing and cleared imports for all walk-forward test suits.
+
 ## [2026-07-01] [TASK_L3_GUARD] [ADR_20260701_L3_GUARD]
 - **Context/Why:** Strategy promotions suffered from unverified crash protection due to silent fold MDD reporting bugs.
 - **Resolution/What:** Fixed fold MDD calculator and implemented Gate A (Scoring Banner) and Gate B (Synthetic crash defense blocker).
