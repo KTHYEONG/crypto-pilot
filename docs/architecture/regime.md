@@ -19,86 +19,49 @@ last_verified: 2026-06-30
 ---
 
 # 1. Purpose
-Establishes a causal market state from BTC price action for two consumers: a continuous risk overlay for position sizing and a diagnostics-only discrete regime code. L2 routing consumes the compressed 3-state summary (`bull`, `bear`, `crisis`), while the raw 6-state code remains a shadow diagnostic.
+BTC의 가격 흐름을 기반으로 포트폴리오의 익스포저를 실시간으로 제어하기 위한 연속 리스크 조절값(Continuous Overlay)과 L2 라우팅용 압축 3-state regime(`bull`, `bear`, `crisis`)을 도출한다. 기존 6-state는 내부 진단 데이터로만 활용된다.
 
 # 2. Core Logic & Math
 
-**Volatility Targeting**
-- $\hat{\sigma}_{t} = \sqrt{\text{EWMA}[ (r - \bar{r})^2 ]_{t} \cdot \text{bars\_per\_year}}$
-- $\text{vol\_scale}_{t} = \text{clip}\left(\frac{\sigma_{\text{target}}}{\hat{\sigma}_{t}}, \text{min\_vol\_scale}, \text{max\_vol\_scale}\right)$
+### Volatility Targeting
+- **실현 변동성 측정**: $\hat{\sigma}_{t} = \sqrt{\text{EWMA}[ (r - \bar{r})^2 ]_{t} \cdot \text{bars\_per\_year}}$
+- **변동성 조절 비율**: $\text{vol\_scale}_{t} = \text{clip}\left(\frac{\sigma_{\text{target}}}{\hat{\sigma}_{t}}, \text{min\_vol\_scale}, \text{max\_vol\_scale}\right)$
 
-**Trend SNR Gate**
-- $s_{t} = \ln(P_{t}) - \text{EMA}(\ln P)_{t}$
-- $\text{snr}_{t} = \frac{s_{t}}{\text{std}(s)_{t}}$
-- $\text{trend\_scale}_{t} = \frac{1}{2} (1 + \tanh(\text{snr}_{t}))$
+### Trend SNR Gate
+- **Trend 신호대잡음비**: $s_{t} = \ln(P_{t}) - \text{EMA}(\ln P)_{t} \quad \implies \quad \text{snr}_{t} = \frac{s_{t}}{\text{std}(s)_{t}}$
+- **추세 익스포저 비율**: $\text{trend\_scale}_{t} = \frac{1}{2} (1 + \tanh(\text{snr}_{t}))$
 
-**Trend Efficiency (Kaufman ER)**
-- $ER_{t} = |P_{t} - P_{t-\text{window}}| / \Sigma_{i=t-\text{window}+1}^{t} |P_{i} - P_{i-1}|$
-- $1$ = perfect trend, $\approx 0$ = chop/whipsaw
-- NaN for $t < \text{window}$; zero-path divisor $\rightarrow 0.0$
-- Consumed by L2 whipsaw attribution (`Layer2FoldAttribution`) and trend-efficiency exposure gate (`trend_efficiency_gross_mult`)
+### Trend Efficiency (Kaufman ER)
+- **추세 효율성 지표**: $ER_{t} = \frac{|P_{t} - P_{t-\text{window}}|}{\Sigma_{i=t-\text{window}+1}^{t} |P_{i} - P_{i-1}|}$
+- L2 단계의 whipsaw 진단 및 추세 신호 필터링으로 유입.
 
-**Reversal Risk-Off Detector (BTC-only legacy)**
-- $HW_{t} = \max(P_{t-\text{window}+1 : t})$ (trailing window high)
-- $DD_{t} = 1 - P_{t} / HW_{t}$ (trailing drawdown)
-- $Mom_{t} = \text{EMA}(P, \text{fast})_{t} - \text{EMA}(P, \text{slow})_{t}$ (momentum)
-- $risk\_off\_raw_{t} = (DD_{t} \ge \text{dd\_threshold}) \land (Mom_{t} < 0)$
-- $persisted\_run_{t} = persisted\_run_{t-1} + 1 \text{ if } risk\_off\_raw_{t} \text{ else } 0$
-- $risk\_off\_persisted_{t} = 1_{\{persisted\_run_{t} \ge \text{persistence\_bars}\}}$ (N-bar consecutive raw condition)
-- $risk\_off\_state_{t} = \text{recovery\_hysteresis}(risk\_off\_persisted, risk\_off\_raw, \text{cooldown})$ — after persistent fires, state stays True until $\text{cooldown}$ consecutive raw-off bars. Exit counting uses raw signal (not persistent). At $\text{cooldown}=0$ (default), state tracks persistent byte-identically.
-- $risk\_off\_1d_{t} = shift(risk\_off\_state, 1)$ — bar $t$ uses information up to $t-1$ only (causal, look-ahead 0)
-- $risk\_off_{bar} = True$ → L2 override of all sleeve raw_mu to `reversal_risk_off_floor` (overrides soft cap/crisis_floor)
-- Config param: `reversal_recovery_cooldown_bars` (default 0) — exit hysteresis cooldown, shared with panel mode
-- Env override: `L2_REVERSAL_RECOVERY_COOLDOWN`, parsed by `_reversal_config_from_env()` for btc mode
-- Env-gated (`L2_REVERSAL_KILL`, default off), computed once from BTC close per simulation run
+### Reversal Risk-Off Detector
+- **Drawdown 및 Momentum 측정**:
+  - $DD_{t} = 1 - \frac{P_{t}}{\max(P_{t-\text{window}+1 : t})}$
+  - $Mom_{t} = \text{EMA}(P, \text{fast})_{t} - \text{EMA}(P, \text{slow})_{t}$
+- **동적 상태 전이**:
+  - $risk\_off\_raw_{t} = (DD_{t} \ge \text{dd\_threshold}) \land (Mom_{t} < 0)$
+  - $persistence\_bars$ 만큼 연속 충족 시 Active 전이.
+  - $recovery\_cooldown\_bars$ 만큼 연속 해제 시 Release 전이 (Exit Hysteresis).
+  - $risk\_off\_1d_{t} = shift(\text{state}, 1)$로 1시점 밀어 인과성을 확보하여 비중 조절에 인입.
 
-**Market State Panel (Breadth-Augmented Risk-Off)**
-- Mode-gated by `reversal_mode`: `"btc"` (legacy BTC-only) or `"panel"` (breadth-augmented).
-- **Cross-sectional Downside Breadth:**
-  - $r_{t,i} = \ln(P_{t,i} / P_{t-\text{breadth\_window},i})$ per symbol $i$
-  - $valid_{t,i} = \text{isfinite}(P_{t,i}) \land (P_{t,i} > \epsilon) \land \text{isfinite}(P_{t-\text{breadth\_window},i}) \land (P_{t-\text{breadth\_window},i} > \epsilon)$
-  - $neg_{t,i} = valid_{t,i} \land (r_{t,i} < 0)$
-  - $\text{breadth}_{t} = \frac{\sum_i neg_{t,i}}{\max(\sum_i valid_{t,i}, 1)}$ — fraction of symbols with negative momentum, $[0, 1]$, NaN-safe
-  - $\text{breadth}_{t} = 0$ when $t < \text{breadth\_window}$ or $\sum valid = 0$
-- **Breadth Hysteresis (stateful Schmitt trigger):**
-  - `b_on = False` initially
-  - $enter \le \text{breadth}_{t} \land \lnot b\_on \rightarrow b\_on = True$
-  - $\text{breadth}_{t} < exit \land b\_on \rightarrow b\_on = False$
-  - $enter > exit$ enforced by config validation (asymmetric hysteresis)
-- **AND Gate:**
-  - $raw\_on_t = btc\_off_t \land breadth\_on_t$ — both BTC and breadth axes must confirm
-- **Persistence:** $N$ consecutive $raw\_on$ bars before activation (same as BTC-only persistence)
-- **Recovery Hysteresis (asymmetric exit):**
-  - $\text{state}_t = True$ when $persist\_on_t$ fires or $\text{state}_{t-1}$ remains True
-  - $\text{state}_t = False$ only after $recovery\_cooldown\_bars$ consecutive $raw\_off$ bars
-  - Config parameter `reversal_recovery_cooldown_bars` (default 0 = immediate release after raw-off)
-- $risk\_off\_1d_t = shift(\text{state}, 1)$ — 1-bar shift for causal consumption
-- Config: `breadth_mom_window`, `breadth_neg_frac_enter`, `breadth_neg_frac_exit`, `reversal_recovery_cooldown_bars`
-- All new `RegimeConfig` fields validated in `__post_init__`
+### Market State Panel (Breadth-Augmented)
+- **교차 섹션 하락 확산세**:
+  - $\text{breadth}_{t} = \frac{\sum_i (r_{t,i} < 0)}{\sum_i valid_{t,i}}$
+- **Schmitt Trigger 적용**:
+  - $\text{breadth}_{t} \ge enter \quad \implies \quad b\_on = True$
+  - $\text{breadth}_{t} < exit \quad \implies \quad b\_on = False$
+- **결합 로직**: $raw\_on_{t} = btc\_off_{t} \land breadth\_on_{t}$ (BTC 하락세와 심볼 하락 확산세의 논리곱 교차 검증)
 
-**Page-CUSUM Crisis Detector**
-- $z_{t} = \frac{r_{t} - \text{median}_{\leq t}}{1.4826 \cdot \text{MAD}_{\leq t}}$
-- $S^{+}_{t} = \max(0, S^{+}_{t-1} + z_{t} - k)$
-- $S^{-}_{t} = \max(0, S^{-}_{t-1} - z_{t} - k)$
-- Crisis triggers if $S^{+}_{t} > h$ or $S^{-}_{t} > h$.
+### Page-CUSUM Crisis Detector
+- **이상치 감지 알고리즘**:
+  - $z_{t} = \frac{r_{t} - \text{median}_{\leq t}}{1.4826 \cdot \text{MAD}_{\leq t}}$
+  - $S^{+}_{t} = \max(0, S^{+}_{t-1} + z_{t} - k), \quad S^{-}_{t} = \max(0, S^{-}_{t-1} - z_{t} - k)$
+  - $S^{+}_{t} > h$ 혹은 $S^{-}_{t} > h$ 발생 시 위기(`crisis_active`) 돌입.
 
-**Overlay Compositor**
-- $\text{overlay\_mult}_{t} = \text{vol\_scale}_{t} \cdot \text{trend\_scale}_{t}$
-- If crisis active: $\text{overlay\_mult}_{t} = \text{crisis\_gross\_floor}$
-
-**Discrete Quantizer (6-State)**
-- Base: 2x2 grid (`bull/bear` by $\text{trend\_snr} \geq 0$, `quiet/volatile` by $\text{vol\_scale} \geq 1.0$)
-- Override: If crisis active $\rightarrow$ `crash` (5). Transition $\rightarrow$ (4).
-- Use: raw 6-state output is diagnostics-only; routing uses the compressed 3-state summary.
-
-**Routing Summary**
-- L2 production logs and routing decisions consume the compressed 3-state summary (`bull`, `bear`, `crisis`).
-- `l2_regime_policy_mode` controls causal sleeve policy on top of bucket routing: `filter`, `observe`, `soft`, `hybrid`.
-- `soft` keeps the route available and only downweights low-confidence cells, while `hybrid` can hard-block only when sign consistency and confidence criteria are met.
-- Regime policy acts on `signal x symbol x tf` sleeves before symbol pooling, so `raw_mu` and `quality_weight` share the same state-aware scaling path as `sleeve_edges`.
-- `l2_regime_scale_signal_mu` and `l2_regime_scale_quality_weight` control whether regime confidence reaches the allocation inputs or remains edge-only.
-- State-level gross caps limit deployment exposure by regime class after portfolio weights are composed.
-- Policy observability tracks pre/post edge, mu, and quality-weight totals so routing impact reaches the final sizing path and not only the diagnostics path.
+### Overlay Compositor
+- **최종 익스포저 배수**: $\text{overlay\_mult}_{t} = \text{vol\_scale}_{t} \cdot \text{trend\_scale}_{t}$
+- 위기 상태 돌입 시 $\text{overlay\_mult}_{t} = \text{crisis\_gross\_floor}$ 로 상한 강제 차단.
 
 # 3. Architecture Flow
 
@@ -146,32 +109,18 @@ graph TD
 # 4. Core Variables & I/O
 
 | Type | Variable | Description |
-|------|----------|-------------|
-| **Input** | `P_t` | BTC Close Price at time $t$ |
-| **Param** | $\sigma_{\text{target}}$ | Target annualized volatility. Bounds: `(0.0, 1.0]` |
-| **Param** | `crisis_gross_floor` | Risk override multiplier during crisis. Bounds: `[0.0, 1.0]` |
-| **Param** | $k, h$ | CUSUM drift and threshold, derived from target ARL. Bounds: `ARL > 0` |
-| **Output**| `overlay_mult_1d` | Continuous risk multiplier applied to final portfolio weights. Bounds: `[0.0, max_vol_scale]` |
-| **Output**| `code_1d` | Discrete regime integer (0-5) used for signal gating and B0 ensemble |
-| **Output**| `trend_efficiency_1d` | Per-bar Kaufman Efficiency Ratio. Bounds: `[0, 1]`, NaN for warm-up |
-| **Param** | `reversal_dd_window` | Trailing high lookback for drawdown (bars, default 90). Bounds: `>= 2` |
-| **Param** | `reversal_dd_threshold` | Drawdown threshold to flag risk-off (default 0.12). Bounds: `(0, 1)` |
-| **Param** | `reversal_mom_fast` | Fast EMA span for momentum (default 20). Must be `< reversal_mom_slow` |
-| **Param** | `reversal_mom_slow` | Slow EMA span for momentum (default 120). Must be `> reversal_mom_fast` |
-| **Param** | `reversal_risk_off_floor` | Hard gross floor during risk-off bars (default 0.05). Bounds: `[0, crisis_gross_floor)` |
-| **Param** | `reversal_persistence_bars` | Consecutive raw risk-off bars required before shifted activation (default 3). Bounds: `>= 1` |
-| **Output**| `risk_off_1d` | Boolean mask [T], `True` = risk-off active. Causal: shift(1) after persistence gate, row 0 = `False` |
-| **Eval**  | `RegimeScoreCard` | Metrics C2(Persistence), C3(Distinctness), C4(Stability), C5(Coverage) |
-| **L2 Param** | `l2_regime_bull_gross_cap` | Bull regime gross exposure cap (default `1.0`, full deployment). Bounds: `(0.0, 1.0]` |
-| **L2 Param** | `l2_regime_bear_gross_cap` | Bear regime gross exposure cap (default `0.35`, bull-primary prior). Bounds: `(0.0, 1.0]` |
-| **L2 Param** | `l2_regime_crisis_gross_cap` | Crisis regime gross exposure cap (default `0.25`, bull-primary prior). Bounds: `(0.0, 1.0]` |
-| **Input** | `P_2d` | Universe close prices (T x N matrix) for cross-sectional breadth |
-| **Param** | `breadth_mom_window` | Log-return window for downstream breadth (default 21 bars). Bounds: `>= 2` |
-| **Param** | `breadth_neg_frac_enter` | Fraction of negative-momentum symbols to enter breadth-on (default 0.50). Bounds: `(0, 1]` |
-| **Param** | `breadth_neg_frac_exit` | Fraction to exit breadth-off (default 0.30). Bounds: `[0, 1)`, must be `< enter` |
-| **Param** | `reversal_recovery_cooldown` | Consecutive raw-off bars before state resets to False in panel mode (default 0). Bounds: `>= 0` |
-| **Param** | `reversal_mode` | Risk-off detector mode: `"btc"` (legacy BTC-only) or `"panel"` (breadth-augmented). Default: `"btc"` |
+|---|---|---|
+| **Input** | `P_t` | BTC 종가 시계열 |
+| **Param** | $\sigma_{\text{target}}$ | 연간 목표 변동성 |
+| **Param** | `crisis_gross_floor` | 위기 상황 발생 시 포트폴리오 허용 최소 익스포저 배수 |
+| **Param** | $k, h$ | CUSUM 이상치 감지용 drift 및 threshold 파라미터 |
+| **Output**| `overlay_mult_1d` | 최종 비중 조절용 연속 익스포저 배수 시계열 |
+| **Output**| `code_1d` | 신호 필터링 및 B0 앙상블용 6-state 코드 (0~5) |
+| **Output**| `risk_off_1d` | Reversal Kill-Switch 동작 유무 마스크 |
+| **L2 Param**| `l2_regime_bull_gross_cap`| Bull 상태의 포트폴리오 최대 총 익스포저 상한 (기본 1.0) |
+| **L2 Param**| `l2_regime_bear_gross_cap`| Bear 상태의 포트폴리오 최대 총 익스포저 상한 (기본 0.35) |
+| **L2 Param**| `l2_regime_crisis_gross_cap`| Crisis 상태의 포트폴리오 최대 총 익스포저 상한 (기본 0.25) |
 
 # 5. Edge Cases & Handling
-- **Flash Crash / Liquidity Vacuum:** Rapid extreme price drops trigger the CUSUM crisis condition, immediately snapping the `overlay_mult_1d` to `crisis_gross_floor` and ignoring naive volatility targeting bounds until the cooldown period expires.
-- **Zero Volatility (Stale Data):** If exchange feeds freeze (resulting in zero returns and zero MAD), statistical safeguards (small epsilon additions to MAD) prevent division-by-zero during robust Z-score calculation.
+- **유동성 고갈 및 플래시 크래시**: 급격한 가격 이탈 시 CUSUM 알고리즘이 순간적으로 반응하여 `vol_scale` 연산을 우회하고 즉시 `crisis_gross_floor` 수준으로 포트폴리오 비중을 차단함.
+- **장기 보합에 따른 변동성 붕괴**: 자산 시세가 장기간 정체되어 MAD가 0에 가깝게 하락하는 경우, 분모에 미소값 $\epsilon$을 더하여 분모 영(0) 분기를 방지하고 연산 무결성을 유지함.

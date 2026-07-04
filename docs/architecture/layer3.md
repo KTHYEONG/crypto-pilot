@@ -25,56 +25,31 @@ last_verified: 2026-07-04
 ---
 
 # 1. Purpose
-Executes the final out-of-sample (OOS) validation (Layer 3) to ensure strategy robustness. It encompasses both the "Frozen Holdout" evaluation within the Tiered Hybrid Architecture and the multi-seed "Layer 3 Stability Check" during final Optuna optimization.
+최종 OOS(Out-of-Sample) 구간에 대한 검증을 담당한다. Tiered Hybrid Architecture 내의 완전 격리된 "Frozen Holdout" 평가와 최종 Optuna 최적화 과정에서 다중 시드를 이용해 모사 성능의 오버피팅 여부를 판별하는 "Layer 3 Stability Check"로 구성된다.
 
 # 2. Core Logic & Math
 
-## 2.1 Layer 3 — Frozen Holdout (Tiered Pipeline)
-Operates as the final verification seam for the CS Rank + Diagonal Kelly (Layer 2) portfolio, using a completely unseen holdout window `[ho_start, ho_end)`.
+### Layer 3 — Frozen Holdout (Tiered Pipeline)
+L2 AWF 시뮬레이션에서 결정된 최적 하이퍼파라미터(`l2_params`)와 배포 레버리지($L^*$)를 완전 동결(Frozen)하고, 미관측 홀드아웃 윈도우 `[ho_start, ho_end)`에서 단일 패스 시뮬레이션을 수행한다.
 
-**Frozen Parameters:**
-- Uses the optimal `l2_params` identified during the Layer 2 AWF simulation.
-- Hyperparameters are **frozen**; no refitting or parameter adjustment occurs in Layer 3.
-- `l2_deploy_leverage`가 존재하면 L3 holdout도 동일 배치 레버리지로 평가한다.
+- **Deployment Parity**:
+  - $L^* > 1.0$ 인 경우 `apply_deployment(rets, L*)` 수식을 적용해 평가.
+  - $L^* \le 1.0$ 인 경우 unit path (leverage = 1.0) 성과를 그대로 적용.
+- **Performance Formulas**:
+  - CAGR, Sharpe, Sortino: Base TF의 연간 바 개수(`bars_per_year(tf)`)를 사용해 계산.
+  - MAR Ratio: $\text{MAR} = \frac{\text{CAGR}}{\text{MDD} + 10^{-9}}$
+  - Terminal Compounding: `equity_multiple - 1` (단일 패스 복리 종가 기준 산출)
 
-**Performance Metrics (Lean 5-Gate, single-pass compounding focus):**
-- **CAGR / Sharpe / Sortino:** Computed on actual hybrid and baseline (1/N) returns using `bars_per_year(tf)` annualization (no vol-proxy approximation).
-- **MDD / CVaR95:** Maximum peak-to-trough drawdown and 95% tail loss of the hybrid portfolio.
-- **Deployment Parity:** L3 hybrid metrics are computed on `apply_deployment(rets, L*)` output when `deploy_leverage > 1.0`; otherwise L3 stays on the unit path.
-- **MAR:** $\text{MAR} = \frac{\text{CAGR}}{\text{MDD} + 10^{-9}}$
-- **`total_return` / `equity_multiple`:** Single-pass terminal compounding result (`equity_multiple - 1`), reusing the L2 terminal-multiple helper — no new math, lean reuse per design decision (L3 favors realized compounding over Optuna-grade diagnostics).
-- **`n_trades`:** Realized trade count over the holdout window — feeds the `insufficient_trades` gate.
-- **`avg_gross_exposure`:** Mean gross exposure across the holdout AWF simulation, diagnostic only.
-- **`min_trades` / `max_mdd_abs` / `min_sharpe` / `min_sortino` / `max_cvar95`:** Gate thresholds are persisted on `Layer3Result` and rendered in the scorecard for exact replay alignment.
-- **Reversal-Kill Attribution (diagnostic, always propagated):** `risk_off_bars` / `risk_off_realized_price` / `risk_on_realized_price` are taken from `sim.fold_attributions[0]` (the single dummy-fold `Layer2FoldAttribution` produced by `_run_awf_simulation`, same struct L2 already populates) — pure plumbing, no new computation. `reversal_kill_active` reads `os.environ["L2_REVERSAL_KILL"]` directly and independently of the simulation boundary, so it reflects the actual runtime env for this holdout regardless of what the (mockable) simulation returns. The scorecard renders these under an optional `[L3-REVERSAL]` line following the existing `hasattr(r, ...)` diagnostic-field convention (same pattern as `growth_lcb`/`total_cost_bps`).
-- **Regime Mix & Trend-Efficiency Diagnostic (diagnostic, opt-in ER via `L2_DIAG_ATTR`)**: `run_l3_holdout` accepts an optional `regime_code_1d: NDArray[np.int8] | None` (compressed 3-state code, same index space as `aligned`) computed independently by the caller (`active_pipeline.py`, unconditionally — not reused from the gated Step I `_regime_ctx` local, which is only bound when `l2_routing_mode == "bucket"`). Slicing `regime_code_1d[ho_start:ho_end]` (clipped to array bounds) yields `regime_bull_pct`/`regime_bear_pct`/`regime_crisis_pct` on `Layer3Result`. `mean_trend_efficiency`/`trend_efficiency_corr` are read from `sim.fold_attributions[0]` (same struct as the Reversal-Kill attribution below) — like the L2 fold-level equivalent, these require `L2_DIAG_ATTR=1` or they default to 0.0 (uncollected, not a real zero-ER measurement). Rendered as a `[L3-REGIME]` line in the scorecard. Purpose: directly compare the OOS holdout window's regime mix and trend character against the L2 fit/cal window's (`docs/architecture/layer2.md` §2 `[L2-REGIME]`) to test whether underperformance stems from a market-character mismatch rather than assuming it.
-- **Long/Short Realized-Price Split (diagnostic, always-on)**: `realized_price_long`/`realized_price_short`/`bars_long`/`bars_short` are read from the same `sim.fold_attributions[0]` struct (`docs/architecture/layer2.md` §2 Long/Short Realized-Price Split) — no `L2_DIAG_ATTR` needed, unlike the ER fields above. Rendered as a `[L3-LONGSHORT]` line. Purpose: isolate whether OOS underperformance concentrates in the long leg, the short leg, or both, independent of net exposure-time balance (`bars_long` vs `bars_short`).
-- **Per-Symbol Long/Short Attribution (diagnostic, always-on)**: `realized_price_long_by_symbol`/`realized_price_short_by_symbol` are read from the same `sim.fold_attributions[0]` struct (`docs/architecture/layer2.md` §2 Per-Symbol Long/Short Attribution) — no `L2_DIAG_ATTR` needed. Rendered as `[L3-LONGSHORT-TOP]` Long Losers / Short Winners lines (top-5 by value). Purpose: identify whether OOS long-side loss is concentrated in specific symbols (actionable per-symbol remediation) or diffuse across the traded universe (systemic long-side signal issue) — see `docs/decisions/decisions.md` for the empirical finding this enabled.
-- **Per-Symbol Signal-vs-Sizing Decomposition (diagnostic, always-on)**: `major_symbol_diag` is read from the same `sim.fold_attributions[0]` struct (`docs/architecture/layer2.md` §2 Per-Symbol Signal-vs-Sizing Decomposition) — no `L2_DIAG_ATTR` needed. Rendered as `[L3-MAJOR-DIAG]` lines (one per `MAJOR_DIAG_SYMBOLS` watch-list entry). Purpose: for a symbol already identified as a concentrated long-side loss contributor (via Per-Symbol Long/Short Attribution above), determine whether the loss stems from signal-direction lag, sizing/no-trade-band stuckness, or regime-cap non-engagement — see `docs/decisions/decisions.md` for the empirical finding this enabled.
-- **Regime-Mu Incoherence & Reversal-Lag Diagnostic (diagnostic, always-on)**: `major_symbol_incoherence` is read from the same `sim.fold_attributions[0]` struct (`docs/architecture/layer2.md` §2 Regime-Mu Incoherence & Reversal-Lag Diagnostic) — no `L2_DIAG_ATTR` needed. Rendered as `[L3-MAJOR-INCOHERENCE]` lines (one per `MAJOR_DIAG_SYMBOLS` watch-list entry). Purpose: measure whether the signal-direction lag identified by `major_symbol_diag` is regime-conditional — i.e., whether the trend ensemble is slow everywhere (`adverse_mu_bullish_pct` stays high for all symbols) or only for specific symbols/regimes — and quantify the actual flip speed (`mean_reversal_lag_bars` in bars vs days) to distinguish structural ensemble lag from holdout-specific market character drift.
-- **Reversal-Kill Economic Replay (`run_l3_reversal_economic_replay`, opt-in via `L3_REVERSAL_REPLAY` env):** Re-runs `run_l3_holdout` once per variant in `_l2_reversal_replay_variants()` (8 variants: `baseline_off` + 7 `dd_threshold`/`persistence_bars`/`recovery_cooldown_bars` combinations), scoping `L2_REVERSAL_KILL*` env per call via `_temporary_reversal_env` (env restored after each call). Results are written to `docs/results/l3_reversal_replay.csv` and logged via `format_l3_reversal_replay_table`. `L2ReversalReplayVariant` / `_l2_reversal_replay_variants()` / `_temporary_reversal_env()` are shared with the L2 harness (`active_pipeline.py::_run_l2_reversal_economic_replay`) and live in `pipeline.py` (domain layer) — `active_pipeline.py` imports rather than duplicates them, keeping the application→domain dependency direction intact.
+### Diagnostic Attribution Metrics
+- **Reversal-Kill & Regime Mix**: OOS 구간의 Regime 분포(`regime_bull_pct`, `regime_bear_pct`, `regime_crisis_pct`)와 Reversal-Kill 동작 여부를 결합하여 분석.
+- **Long/Short P&L Decomposition**: 롱 비중과 숏 비중을 분리하여 각 다리의 실현 수익 및 참여율 산출.
+  - $w_{long} = \max(w, 0), \quad w_{short} = \min(w, 0)$
+- **Per-Symbol Long/Short Attribution**: 심볼별 P&L 기여도를 분해하여 특정 자산군의 쏠림 현상을 모니터링.
+- **Regime-Mu Incoherence**: 역 regime(bear, crisis) 환경에서 매수(bullish) 시그널이 유지되는 비율 및 반전 지연 시간(Reversal Lag) 측정.
 
-**Holdout Gate (L3 Gate, ordered short-circuit):**
-1. `no_holdout_returns` — holdout span produced zero returns.
-2. `non_finite` — any of CAGR/MDD/Sharpe/Sortino/total_return/equity_multiple is non-finite.
-3. `insufficient_trades` — $n_{\text{trades}} < \text{min\_trades}$ (default 10).
-4. `negative_return` — $\text{total\_return} \leq 0$.
-5. `mdd_abs` — $\text{MDD}_{\text{hybrid}} > \text{max\_mdd\_abs}$ (default 0.35), absolute capital-protection cap independent of baseline.
-6. `cvar_95` — $\text{CVaR95}_{\text{hybrid}} > \text{max\_cvar95}$ (default 0.06).
-7. `sharpe_abs` — $\text{Sharpe}_{\text{hybrid}} < \text{min\_sharpe}$ (default 0.0).
-8. `sortino_abs` — $\text{Sortino}_{\text{hybrid}} < \text{min\_sortino}$ (default 0.0).
-- Replaces the legacy single `cagr < 0.0` check — `negative_return`(on `total_return`) is the direct single-pass compounding check; absolute MDD cap defends against a baseline that itself crashed.
-
-**Holdout Data Scope (Data Integrity Fix, 2026-06-16):**
-- `aligned.datetimes` passed into `run_l3_holdout` MUST span `[fetch_start, holdout_end]` — i.e. the IS and OOS per-symbol frames merged via `pick_strategy_data_maps` (see `docs/architecture/layer2.md` §2 Data Scope). Previously `aligned` was IS-only (ending at `holdout_start`), making `_resolve_holdout_span` always raise `empty_holdout_window` — a structural bug, not a strategy/data quality finding.
-- `_resolve_holdout_span` now logs `start_idx/end_idx/n_bars/last_dt` on the empty-window error path for fast diagnosis if the merge ever regresses.
-
-## 2.2 Layer 3 — Multi-Seed Stability Check (Optimization Stage)
-When full Optuna optimization is executed, `check_stability_layer3` enforces that the selected champion strategy demonstrates parameter stability across different random seeds.
-
-**Stability Gate (`FUTURES_TMP_LAYER3_HARD_GATE`):**
-- If enabled, every stability-seed AWF replay must independently pass Layer-1 validation checks.
-- Prevents overfitting to a specific noise realization within the AWF grid, blocking promotion if the parameter set is fragile.
+### Layer 3 — Multi-Seed Stability Check
+Optuna 최적화로 최종 선별된 챔피언 전략에 대해 $N$개의 서로 다른 랜덤 시드로 AWF 시뮬레이션을 재실행하여 파라미터 안정성을 검증한다.
+- **Stability Gate**: `FUTURES_TMP_LAYER3_HARD_GATE` 활성화 시, 모든 시드에서 L1 Hard Gate 조건들을 통과해야 최종 승인된다.
 
 # 3. Architecture Flow
 
@@ -91,21 +66,27 @@ graph TD
     I --> J[Re-run AWF across N target seeds]
     J --> K{Pass L1 Hard Gates?}
     K -->|Pass| L[Champion Promotion Evaluation]
-    K -->|Fail| M[Block Promotion: TMP_LAYER3_STABILITY_LAYER1]
+    K -->|Fail| M[Block Promotion]
 ```
 
-# 4. Key Components
+# 4. Holdout Gates (L3 Validation Seam)
+L3 Holdout 검증 완료를 위해 포트폴리오는 아래 순차적 조건문(Short-circuit)을 모두 통과해야 한다.
+
+1. **No Holdout Returns**: OOS 구간 내 거래가 전혀 없거나 수익률 배열이 비어있지 않아야 함.
+2. **Non-Finite Check**: CAGR, MDD, Sharpe, Sortino 등 지표가 Finite 값이어야 함.
+3. **Minimum Trades**: 총 거래 횟수 $n_{trades} \ge \text{min\_trades} \quad (10)$
+4. **Positive Return**: 누적 복리 수익률 $\text{total\_return} > 0$
+5. **Absolute MDD Limit**: 최대 낙폭 $\text{MDD}_{hybrid} \le \text{max\_mdd\_abs} \quad (0.35)$
+6. **CVaR95 Limit**: 95% CVaR 테일 리스크 $\text{CVaR95}_{hybrid} \le \text{max\_cvar95} \quad (0.06)$
+7. **Absolute Sharpe**: $\text{Sharpe}_{hybrid} \ge 0.0$
+8. **Absolute Sortino**: $\text{Sortino}_{hybrid} \ge 0.0$
+
+# 5. Core Components
 
 | Module | Role |
-|--------|------|
-| `allocation/pipeline.py` | Implements `run_l3_holdout`, defining the dummy fold and calling the AWF sim. |
-| `validation/walk_forward.py` | Shared simulation loop (`_run_awf_simulation`) executed with frozen L2 params. Outputs `fold_attributions` (`Layer2FoldAttribution` tuple) per-fold diagnostics. |
-| `validation/champion_registry.py` | Defines `ChampionMetrics`, `BaselineChampionMetrics`, `Layer3Result`, promotion gate logic. |
-| `optimization/candidate_selector.py` | Implements `check_stability_layer3` for multi-seed validation. |
-| `optimization/final_evaluator.py` | Orchestrates the final champion evaluation, invoking Layer 3 stability checks. |
-
-# 5. Integration with Runner
-
-- `src/execution/opt_main_futures.py` (thin entrypoint) delegates to `src/application/futures/runner/cli.py`.
-- `runner/pipeline.py` orchestrates Layer 1, Layer 2, and Layer 3 via `run_tiered_pipeline`. `run_l3_holdout` performs the evaluation over the `ho_start` to `end_date` window, logging diagnostics.
-- During full optimization, the pipeline proceeds to `_run_optimization_stage` after strategy evaluation. The selected champion candidate undergoes `check_stability_layer3` validation before proceeding to the final Champion Swap logic.
+|---|---|
+| `allocation/pipeline.py` | `run_l3_holdout` 진입점 제공, dummy fold 생성 및 시뮬레이션 호출 |
+| `validation/walk_forward.py` | frozen 파라미터를 사용한 시뮬레이션 실행 루프 및 fold diagnostics 생성 |
+| `validation/champion_registry.py` | `Layer3Result` 정의 및 L3 Holdout Gate 논리 평가 |
+| `optimization/candidate_selector.py`| 다중 시드 검증용 `check_stability_layer3` 구현 |
+| `optimization/final_evaluator.py` | 챔피언 선출 및 최종 L3 안정성 검증 오케스트레이션 |
