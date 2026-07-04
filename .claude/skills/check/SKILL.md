@@ -18,8 +18,11 @@ Perform the following validation steps sequentially:
    - Package all verification commands (e.g., `uv run ruff check`, `uv run mypy`, regression pytest, coverage target) into a single batch execution request to the system runner.
    - Terminate the turn (sleep) immediately after submitting the execution plan.
 3. **Dynamic Verification (Happy Path)**:
+   - **[CRITICAL] Scope Isolation**: `[regression_target]` MUST be the explicit test file paths mapped 1:1 from the current spec blueprint (e.g., `tests/unit/domain/futures/signals/test_my_feature.py`). NEVER use bare `tests/` or `tests/unit/` without a precise path.
+   - **[CRITICAL] Out-of-scope Error Ban**: If collection errors occur from files OUTSIDE `[regression_target]`, do NOT fix them. Report as a separate issue and proceed with the targeted scope only (use `--ignore=<path>` if needed).
    - Regression: Ensure surrounding modules are intact (`uv run pytest [regression_target]`).
-   - Coverage: Enforce a coverage metric $\ge$ 90% (`uv run pytest --cov=[module_path] --cov-report=term-missing`).
+   - Coverage: Enforce a coverage metric $\ge$ 90% for core logic, $\ge$ 70% for adapters/boilerplate (`uv run pytest --cov=[module_path] --cov-report=term-missing [regression_target]`).
+
 
 ### 2. Failure Triage & Loop Circuit Breaker
 If any step in the validation pipeline fails:
