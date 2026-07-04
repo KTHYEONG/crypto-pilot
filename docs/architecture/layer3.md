@@ -40,7 +40,7 @@ L2 AWF 시뮬레이션에서 결정된 최적 하이퍼파라미터(`l2_params`)
   - MAR Ratio: $\text{MAR} = \frac{\text{CAGR}}{\text{MDD} + 10^{-9}}$
   - Terminal Compounding: `equity_multiple - 1` (단일 패스 복리 종가 기준 산출)
 
-### Diagnostic Attribution Metrics
+### Diagnostic Attribution Metrics `[ADR_20260704_L3_MAJORDIAG]` `[ADR_20260704_L3_INCOHERENCE]`
 - **Reversal-Kill & Regime Mix**: OOS 구간의 Regime 분포(`regime_bull_pct`, `regime_bear_pct`, `regime_crisis_pct`)와 Reversal-Kill 동작 여부를 결합하여 분석.
 - **Long/Short P&L Decomposition**: 롱 비중과 숏 비중을 분리하여 각 다리의 실현 수익 및 참여율 산출.
   - $w_{long} = \max(w, 0), \quad w_{short} = \min(w, 0)$
