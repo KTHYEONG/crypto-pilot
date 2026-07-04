@@ -53,6 +53,7 @@ from src.domain.futures.strategy.tiered_logging import (
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     _run_awf_simulation,
     _stack_oos_signals,
+    compute_mean_trend_efficiency,
 )
 
 # 내부 모듈 임포트
@@ -1637,6 +1638,7 @@ def _layer2_result_from_trial_eval(
 
     공통 16+ 지표는 eval에서 1:1 복사, 배포 전용은 extras에서 주입.
     """
+    _mean_er, _er_corr = compute_mean_trend_efficiency(eval.fold_attributions)
     return Layer2Result(
         selected_last=frozenset(eval.last_selected_symbols),
         weights_last=dict(zip(eval.last_selected_symbols, eval.last_weights, strict=False)),
@@ -1677,6 +1679,8 @@ def _layer2_result_from_trial_eval(
         recent_fold_sharpe=eval.recent_fold_sharpe,
         recent_fold_cagr=eval.recent_fold_cagr,
         recent_fold_mdd=eval.recent_fold_mdd,
+        mean_trend_efficiency=_mean_er,
+        trend_efficiency_corr=_er_corr,
     )
 
 def run_l2_awf(
@@ -1898,6 +1902,11 @@ def run_l2_awf(
                 f"{_idx_to_date_label(fold.oos_start)} ~ "
                 f"{_idx_to_date_label(max(fold.oos_end - 1, fold.oos_start))}"
             ),
+            "trend_efficiency": (
+                float(eval_result.fold_attributions[i].mean_trend_efficiency)
+                if i < len(eval_result.fold_attributions)
+                else 0.0
+            ),
         }
         for i, fold in enumerate(awf_folds)
     ]
@@ -1930,6 +1939,7 @@ def run_l3_holdout(
     max_cvar95: float = 0.06,
     verbose: bool = True,
     deploy_leverage: float | None = None,
+    regime_code_1d: NDArray[np.int8] | None = None,
 ) -> Layer3Result:
     """Layer3 Holdout 최종 검증."""
     ho_start, ho_end = holdout_span
@@ -2068,6 +2078,21 @@ def run_l3_holdout(
         gate_passed = True
 
     _attr = sim.fold_attributions[0] if sim.fold_attributions else None
+
+    mean_trend_efficiency = _attr.mean_trend_efficiency if _attr is not None else 0.0
+    trend_efficiency_corr = _attr.trend_efficiency_corr if _attr is not None else 0.0
+
+    regime_bull_pct = regime_bear_pct = regime_crisis_pct = 0.0
+    if regime_code_1d is not None:
+        _arr = np.asarray(regime_code_1d, dtype=np.int8)
+        _lo, _hi = ho_start, min(ho_end, _arr.shape[0])
+        if _hi > _lo:
+            _sl = _arr[_lo:_hi]
+            _n = _sl.shape[0]
+            regime_bull_pct = float(np.sum(_sl == 0)) / _n * 100.0
+            regime_bear_pct = float(np.sum(_sl == 1)) / _n * 100.0
+            regime_crisis_pct = float(np.sum(_sl == 2)) / _n * 100.0
+
     result = Layer3Result(
         cagr=cagr,
         mdd=mdd,
@@ -2097,6 +2122,11 @@ def run_l3_holdout(
         risk_on_realized_price=_attr.risk_on_realized_price if _attr is not None else 0.0,
         reversal_kill_active=os.environ.get("L2_REVERSAL_KILL", "") not in ("", "0", "false", "False"),
         risk_off_episodes=_attr.risk_off_episodes if _attr is not None else (),
+        regime_bull_pct=regime_bull_pct,
+        regime_bear_pct=regime_bear_pct,
+        regime_crisis_pct=regime_crisis_pct,
+        mean_trend_efficiency=mean_trend_efficiency,
+        trend_efficiency_corr=trend_efficiency_corr,
     )
     if verbose:
         logger.info(
@@ -2511,6 +2541,7 @@ def run_tiered_pipeline(
     l2_signal_batch: ValidatedSignalBatch | None = None,
     l2_awf_folds: tuple[WFFold, ...] | None = None,
     l2_eval_memo: dict[Any, Any] | None = None,
+    regime_code_1d: NDArray[np.int8] | None = None,
 ) -> tuple[Layer1Result, Layer2Result | None, Layer3Result | None]:
     """3-Layer 티어드 파이프라인 실행.
 
@@ -2930,6 +2961,7 @@ def run_tiered_pipeline(
         holdout_labels=(str(window.holdout_start), str(window.holdout_end)),
         verbose=verbose,
         deploy_leverage=_champion_l_star if (_champion_l_star is not None and _champion_l_star > 1.0) else None,
+        regime_code_1d=regime_code_1d,
     )
     logger.log(PERF, "[PERF] run_tiered_pipeline_l3_total took=%.4fs", time.perf_counter() - t_l3)
 
