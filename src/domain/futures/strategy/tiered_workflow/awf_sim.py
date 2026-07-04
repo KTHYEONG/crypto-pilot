@@ -160,6 +160,28 @@ def compute_cost_drag_ratio(
     return min(float(ratio), 100.0)
 
 
+def compute_mean_trend_efficiency(
+    fold_attributions: tuple[Layer2FoldAttribution, ...],
+) -> tuple[float, float]:
+    """[ADR_20260704_L3_REGIME] OOS-bar-weighted mean Kaufman ER and ER-return corr
+    across AWF fit/cal folds.
+
+    Requires L2_DIAG_ATTR=1 (or l2_diag_attribution_enabled) — otherwise every
+    fold's mean_trend_efficiency/trend_efficiency_corr defaults to 0.0 (uncollected,
+    not a real zero-trend measurement).
+    """
+    total_bars = sum(max(a.oos_bars, 0) for a in fold_attributions)
+    if total_bars <= 0:
+        return 0.0, 0.0
+    mean_er = sum(
+        a.mean_trend_efficiency * max(a.oos_bars, 0) for a in fold_attributions
+    ) / total_bars
+    mean_corr = sum(
+        a.trend_efficiency_corr * max(a.oos_bars, 0) for a in fold_attributions
+    ) / total_bars
+    return float(mean_er), float(mean_corr)
+
+
 def _assemble_fold_attribution(
     *,
     fold_idx: int,

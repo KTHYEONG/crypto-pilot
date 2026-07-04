@@ -2590,6 +2590,16 @@ def _run_strategy_stage(
             # ── Step E: 최적 params + L1 override로 최종 실행 ────────────────
             gc.collect()
 
+            from src.domain.futures.strategy.market_regime import (
+                compress_regime_codes as _compress_l3_regime_codes,
+            )
+            from src.domain.futures.strategy.market_regime import (
+                compute_market_regime_context as _compute_l3_regime_ctx,
+            )
+            _l3_regime_code_1d = _compress_l3_regime_codes(
+                _compute_l3_regime_ctx(aligned=aligned_tiered).code_1d
+            )
+
             from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
             _mem_l2_final = _get_rss_mb()
             _t_l2_final_start = time.perf_counter()
@@ -2611,6 +2621,7 @@ def _run_strategy_stage(
                 l2_awf_folds=l2_study_result.awf_folds,
                 l2_eval_memo=l2_study_result.eval_memo,
                 probe_manifest=_l2_probe_manifest,
+                regime_code_1d=_l3_regime_code_1d,
             )
             # B2: SSOT assert — study tf must match final deployment tf
             if l2_final is not None and hasattr(l2_final, "master_tf") and l2_master_tf != l2_final.master_tf:
