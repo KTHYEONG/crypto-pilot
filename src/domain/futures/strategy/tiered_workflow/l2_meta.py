@@ -102,7 +102,8 @@ class _RegimeEdgeStat:
 
 
 def _parse_meta_group_ids(strategy_id: str) -> tuple[str, str]:
-    """Split a canonical ``{family}:{variant}`` strategy_id into ``(family, tf)``.
+    """[ADR_20260704_L2_META_PARSER] Split a canonical ``{family}:{variant}``
+    strategy_id into ``(family, tf)``.
 
     ``variant`` conventionally carries a trailing ``_{N}{unit}`` timeframe suffix
     (e.g. ``ema_12_72_4h``) appended by ``strategy_runtime/bridge.py`` —
