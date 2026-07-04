@@ -83,6 +83,11 @@ class DirectionalVetoSnapshot:
     was_missing: bool
     bar_price_return_after: float
     counterfactual_long_return: float
+    state_before: Literal["idle", "watch", "armed", "veto", "cooldown"] = "idle"
+    state_after: Literal["idle", "watch", "armed", "veto", "cooldown"] = "idle"
+    rolling_symbol_return: float = 0.0
+    release_reason: str = ""
+    actual_symbol_return: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -100,6 +105,20 @@ class DirectionalVetoSummary:
     opportunity_cost: float
     avoided_loss: float
     net_veto_value: float
+    n_watch: int = 0
+    mean_trigger_loss: float = 0.0
+    mean_episode_bars: float = 0.0
+
+
+@dataclass(slots=True)
+class ContextualDirectionalVetoState:
+    symbol: str
+    state: Literal["idle", "watch", "armed", "veto", "cooldown"] = "idle"
+    adverse_long_streak: int = 0
+    bull_release_streak: int = 0
+    cooldown_left: int = 0
+    entry_t: int | None = None
+    last_action: Literal["none", "cap_mu", "zero_mu", "drop_long"] = "none"
 
 
 @dataclass(slots=True, frozen=True)
@@ -109,6 +128,177 @@ class ReversalEpisode:
     start_idx: int
     end_idx: int  # exclusive
     realized_price: float  # 이 구간 sum(_bar_price), whipsaw 판별용 (>=0 이면 false positive)
+
+
+def _compute_contextual_directional_veto_signal(
+    *,
+    symbol: str,
+    raw_mu: float,
+    regime_code: int,
+    rolling_symbol_return: float,
+    state: ContextualDirectionalVetoState,
+    config: Layer2AllocationConfig,
+) -> tuple[
+    ContextualDirectionalVetoState,
+    bool,
+    float,
+    str,
+    Literal["idle", "watch", "armed", "veto", "cooldown"],
+    Literal["idle", "watch", "armed", "veto", "cooldown"],
+]:
+    state_before = state.state
+    persistence_bars = int(config.l2_regime_directional_veto_persistence_bars)
+    loss_trigger_bps = float(config.l2_regime_directional_veto_loss_trigger_bps)
+    cooldown_bars = int(config.l2_regime_directional_veto_cooldown_bars)
+    release_nonpos = bool(config.l2_regime_directional_veto_release_raw_mu_nonpos)
+    release_bull_bars = int(config.l2_regime_directional_veto_release_regime_bull_bars)
+    adverse_codes: tuple[int, ...] = getattr(config, "l2_regime_directional_veto_adverse_codes", (1, 2))
+    is_adverse = regime_code in adverse_codes
+    is_long = raw_mu > 0.0
+
+    new_state = ContextualDirectionalVetoState(
+        symbol=symbol,
+        state="idle",
+        adverse_long_streak=0,
+        bull_release_streak=0,
+        cooldown_left=0,
+        entry_t=None,
+        last_action="none",
+    )
+
+    fired = False
+    release_reason = ""
+    raw_mu_after = raw_mu
+
+    if state.state == "veto":
+        should_release = False
+        if release_nonpos and raw_mu <= 0.0:
+            should_release = True
+            release_reason = "raw_mu_nonpos"
+        if not should_release and regime_code == 0:
+            new_bull = state.bull_release_streak + 1
+            new_state = ContextualDirectionalVetoState(
+                symbol=symbol, state="veto",
+                adverse_long_streak=state.adverse_long_streak,
+                bull_release_streak=new_bull,
+                cooldown_left=state.cooldown_left,
+                entry_t=state.entry_t,
+                last_action=state.last_action,
+            )
+            if new_bull >= release_bull_bars:
+                should_release = True
+                release_reason = "bull_regime_streak"
+        elif not should_release:
+            new_state = ContextualDirectionalVetoState(
+                symbol=symbol, state="veto",
+                adverse_long_streak=state.adverse_long_streak,
+                bull_release_streak=state.bull_release_streak,
+                cooldown_left=state.cooldown_left,
+                entry_t=state.entry_t,
+                last_action=state.last_action,
+            )
+        if should_release:
+            new_state = ContextualDirectionalVetoState(
+                symbol=symbol, state="cooldown",
+                adverse_long_streak=0, bull_release_streak=0,
+                cooldown_left=cooldown_bars, entry_t=None,
+                last_action="none",
+            )
+            raw_mu_after = raw_mu
+        else:
+            fired = state.adverse_long_streak > 0
+            raw_mu_after = 0.0 if fired else raw_mu
+        state_after = new_state.state
+        return (new_state, fired, raw_mu_after, release_reason, state_before, state_after)
+
+    if state.state == "cooldown":
+        if state.cooldown_left > 0:
+            new_state = ContextualDirectionalVetoState(
+                symbol=symbol,
+                state="cooldown",
+                adverse_long_streak=0,
+                bull_release_streak=0,
+                cooldown_left=state.cooldown_left - 1,
+                entry_t=None,
+                last_action="none",
+            )
+        else:
+            new_state = ContextualDirectionalVetoState(
+                symbol=symbol,
+                state="idle",
+                adverse_long_streak=0,
+                bull_release_streak=0,
+                cooldown_left=0,
+                entry_t=None,
+                last_action="none",
+            )
+        state_after = new_state.state
+        return (new_state, False, raw_mu, "", state_before, state_after)
+
+    if not is_adverse or not is_long:
+        new_state = ContextualDirectionalVetoState(
+            symbol=symbol,
+            state="idle",
+            adverse_long_streak=0,
+            bull_release_streak=0,
+            cooldown_left=0,
+            entry_t=None,
+            last_action="none",
+        )
+        state_after = new_state.state
+        return (new_state, False, raw_mu, "", state_before, state_after)
+
+    new_streak = state.adverse_long_streak + 1
+    loss_triggered = rolling_symbol_return <= -loss_trigger_bps * 1e-4
+
+    _entry_t = state.entry_t if state.entry_t is not None else config.l2_regime_directional_veto_loss_lookback_bars
+    if new_streak >= persistence_bars and loss_triggered:
+        new_state = ContextualDirectionalVetoState(
+            symbol=symbol, state="veto", adverse_long_streak=new_streak,
+            bull_release_streak=0, cooldown_left=0,
+            entry_t=_entry_t, last_action="drop_long",
+        )
+        fired = True
+        raw_mu_after = 0.0
+    elif new_streak >= persistence_bars:
+        new_state = ContextualDirectionalVetoState(
+            symbol=symbol, state="armed", adverse_long_streak=new_streak,
+            bull_release_streak=0, cooldown_left=0,
+            entry_t=_entry_t, last_action="none",
+        )
+    elif new_streak > 1:
+        new_state = ContextualDirectionalVetoState(
+            symbol=symbol, state="watch", adverse_long_streak=new_streak,
+            bull_release_streak=0, cooldown_left=0,
+            entry_t=_entry_t, last_action="none",
+        )
+    else:
+        new_state = ContextualDirectionalVetoState(
+            symbol=symbol, state="watch", adverse_long_streak=1,
+            bull_release_streak=0, cooldown_left=0,
+            entry_t=_entry_t, last_action="none",
+        )
+
+    state_after = new_state.state
+    return (new_state, fired, raw_mu_after, release_reason, state_before, state_after)
+
+
+def _compute_symbol_rolling_return(
+    *,
+    close_2d: NDArray[np.float64],
+    t: int,
+    symbol_idx: int,
+    lookback_bars: int,
+) -> float:
+    if t <= 0 or lookback_bars <= 0:
+        return 0.0
+    start = max(0, t - lookback_bars)
+    prices = close_2d[start:t, symbol_idx]
+    if prices.size < 2:
+        return 0.0
+    returns = (prices[1:] - prices[:-1]) / np.maximum(np.abs(prices[:-1]), 1e-12)
+    returns = np.nan_to_num(returns, nan=0.0, posinf=0.0, neginf=0.0)
+    return float(np.sum(returns))
 
 
 def _extract_risk_off_episodes(
@@ -460,6 +650,14 @@ def summarize_directional_veto(
             max(-s.counterfactual_long_return, 0.0) for s in snaps if s.fired
         )
         net_veto_value = avoided_loss - opportunity_cost
+        n_watch = sum(
+            1 for s in snaps if s.state_after in {"watch", "armed", "veto"}
+        )
+        trigger_losses = [
+            s.rolling_symbol_return for s in snaps if s.fired
+        ]
+        mean_trigger_loss = float(np.mean(trigger_losses)) if trigger_losses else 0.0
+        mean_episode_bars = _compute_mean_episode_bars(snaps)
         results.append(DirectionalVetoSummary(
             symbol=symbol,
             n_obs=n_obs,
@@ -472,8 +670,34 @@ def summarize_directional_veto(
             opportunity_cost=opportunity_cost,
             avoided_loss=avoided_loss,
             net_veto_value=net_veto_value,
+            n_watch=n_watch,
+            mean_trigger_loss=mean_trigger_loss,
+            mean_episode_bars=mean_episode_bars,
         ))
     return tuple(results)
+
+
+def _compute_mean_episode_bars(snaps: list[DirectionalVetoSnapshot]) -> float:
+    if not snaps:
+        return 0.0
+    in_veto = False
+    episode_lengths: list[int] = []
+    current_len = 0
+    for s in sorted(snaps, key=lambda x: x.t):
+        if s.state_after == "veto":
+            if not in_veto:
+                in_veto = True
+                current_len = 1
+            else:
+                current_len += 1
+        else:
+            if in_veto:
+                episode_lengths.append(current_len)
+                in_veto = False
+                current_len = 0
+    if in_veto:
+        episode_lengths.append(current_len)
+    return float(np.mean(episode_lengths)) if episode_lengths else 0.0
 
 
 def _assemble_fold_attribution(
@@ -2622,6 +2846,7 @@ def _run_awf_simulation(
             _mtf_edge_surr_sum = 0.0
             _mtf_pooled_sum = 0
             _mtf_selected_sum = 0
+        _contextual_veto_states: dict[str, ContextualDirectionalVetoState] = {}
         for t in range(fold.oos_start, fold.oos_end - 1, rebalance_bars):
             t_end = min(t + rebalance_bars, fold.oos_end - 1)
 
@@ -2865,6 +3090,7 @@ def _run_awf_simulation(
             _veto_enabled = bool(getattr(config, "l2_regime_directional_veto_enabled", False))
             _directional_veto_snaps: list[DirectionalVetoSnapshot] = []
             _counterfactual_candidates: dict[str, float] = {}
+            _veto_mode = str(getattr(config, "l2_regime_directional_veto_mode", "adverse_only"))
             if _veto_enabled:
                 _pre_veto_signals = dict(valid_signals)
                 _veto_symbols: tuple[str, ...] = getattr(config, "l2_regime_directional_veto_symbols", ())
@@ -2872,38 +3098,108 @@ def _run_awf_simulation(
                 _veto_eps = float(getattr(config, "l2_regime_directional_veto_long_eps_bps", 0.0))
                 _veto_action = str(getattr(config, "l2_regime_directional_veto_action", "drop_long"))
                 _regime_now = int(_regime_code_1d[t]) if t < len(_regime_code_1d) else 0
-                for _vsym in _veto_symbols:
-                    _vsig = valid_signals.get(_vsym)
-                    if _vsig is None:
+                if _veto_mode == "contextual":
+                    for _vsym in _veto_symbols:
+                        _vsig = valid_signals.get(_vsym)
+                        if _vsig is None:
+                            _directional_veto_snaps.append(DirectionalVetoSnapshot(
+                                fold_idx=_fold_idx, t=t, symbol=_vsym,
+                                regime_code=_regime_now,
+                                raw_mu_before=0.0, raw_mu_after=0.0,
+                                counterfactual_weight=0.0, weight_after=0.0,
+                                fired=False, was_missing=True,
+                                bar_price_return_after=0.0, counterfactual_long_return=0.0,
+                                state_before="idle", state_after="idle",
+                            ))
+                            continue
+                        _raw_mu = float(_vsig.raw_mu)
+                        _is_adverse = _regime_now in _veto_adverse
+                        if _raw_mu > _veto_eps * 1e-4:
+                            _sym_idx = sym_to_idx.get(_vsym)
+                            if _sym_idx is not None:
+                                _lookback = int(
+                                    getattr(config, "l2_regime_directional_veto_loss_lookback_bars", 18)
+                                )
+                                _rolling_ret = _compute_symbol_rolling_return(
+                                    close_2d=aligned.close_2d,
+                                    t=t,
+                                    symbol_idx=_sym_idx,
+                                    lookback_bars=_lookback,
+                                )
+                            else:
+                                _rolling_ret = 0.0
+                        else:
+                            _rolling_ret = 0.0
+                        _vs_state = _contextual_veto_states.get(_vsym, ContextualDirectionalVetoState(symbol=_vsym))
+                        _new_state, _fired, _mu_after, _release_reason, _state_before, _state_after = \
+                            _compute_contextual_directional_veto_signal(
+                                symbol=_vsym,
+                                raw_mu=_raw_mu,
+                                regime_code=_regime_now,
+                                rolling_symbol_return=_rolling_ret,
+                                state=_vs_state,
+                                config=config,
+                            )
+                        _contextual_veto_states[_vsym] = _new_state
+                        if _fired:
+                            _cap_mu_bps = float(getattr(config, "l2_regime_directional_veto_cap_mu_bps", 0.0))
+                            if _veto_action == "drop_long":
+                                del valid_signals[_vsym]
+                            elif _veto_action == "zero_mu":
+                                valid_signals[_vsym] = replace(_vsig, raw_mu=0.0)
+                            elif _veto_action == "cap_mu":
+                                _cap_val = _cap_mu_bps * 1e-4
+                                valid_signals[_vsym] = replace(_vsig, raw_mu=min(_raw_mu, _cap_val))
+                        _counterfactual_weight = float(_pre_veto_signals.get(_vsym, _vsig).raw_mu) if _fired else 0.0
+                        if _fired:
+                            _counterfactual_candidates[_vsym] = _counterfactual_weight
                         _directional_veto_snaps.append(DirectionalVetoSnapshot(
                             fold_idx=_fold_idx, t=t, symbol=_vsym,
                             regime_code=_regime_now,
-                            raw_mu_before=0.0, raw_mu_after=0.0,
-                            counterfactual_weight=0.0, weight_after=0.0,
-                            fired=False, was_missing=True,
+                            raw_mu_before=_raw_mu, raw_mu_after=_mu_after,
+                            counterfactual_weight=_counterfactual_weight, weight_after=0.0,
+                            fired=_fired, was_missing=False,
+                            bar_price_return_after=0.0, counterfactual_long_return=0.0,
+                            state_before=_state_before, state_after=_state_after,
+                            rolling_symbol_return=_rolling_ret, release_reason=_release_reason,
+                        ))
+                else:
+                    for _vsym in _veto_symbols:
+                        _vsig = valid_signals.get(_vsym)
+                        if _vsig is None:
+                            _directional_veto_snaps.append(DirectionalVetoSnapshot(
+                                fold_idx=_fold_idx, t=t, symbol=_vsym,
+                                regime_code=_regime_now,
+                                raw_mu_before=0.0, raw_mu_after=0.0,
+                                counterfactual_weight=0.0, weight_after=0.0,
+                                fired=False, was_missing=True,
+                                bar_price_return_after=0.0, counterfactual_long_return=0.0,
+                            ))
+                            continue
+                        _raw_mu = float(_vsig.raw_mu)
+                        _is_adverse = _regime_now in _veto_adverse
+                        _is_long = _raw_mu > _veto_eps * 1e-4
+                        _fired = bool(_is_adverse and _is_long)
+                        _raw_mu_after = 0.0 if _fired else _raw_mu
+                        if _fired and _veto_action == "drop_long":
+                            del valid_signals[_vsym]
+                        elif _fired and _veto_action == "zero_mu":
+                            valid_signals[_vsym] = replace(_vsig, raw_mu=0.0)
+                        elif _fired and _veto_action == "cap_mu":
+                            _cap_mu_bps = float(getattr(config, "l2_regime_directional_veto_cap_mu_bps", 0.0))
+                            _cap_val = _cap_mu_bps * 1e-4
+                            valid_signals[_vsym] = replace(_vsig, raw_mu=min(_raw_mu, _cap_val))
+                        _counterfactual_weight = float(_pre_veto_signals.get(_vsym, _vsig).raw_mu) if _fired else 0.0
+                        if _fired:
+                            _counterfactual_candidates[_vsym] = _counterfactual_weight
+                        _directional_veto_snaps.append(DirectionalVetoSnapshot(
+                            fold_idx=_fold_idx, t=t, symbol=_vsym,
+                            regime_code=_regime_now,
+                            raw_mu_before=_raw_mu, raw_mu_after=_raw_mu_after,
+                            counterfactual_weight=_counterfactual_weight, weight_after=0.0,
+                            fired=_fired, was_missing=False,
                             bar_price_return_after=0.0, counterfactual_long_return=0.0,
                         ))
-                        continue
-                    _raw_mu = float(_vsig.raw_mu)
-                    _is_adverse = _regime_now in _veto_adverse
-                    _is_long = _raw_mu > _veto_eps * 1e-4
-                    _fired = bool(_is_adverse and _is_long)
-                    _raw_mu_after = 0.0 if _fired else _raw_mu
-                    if _fired and _veto_action == "drop_long":
-                        del valid_signals[_vsym]
-                    elif _fired and _veto_action == "zero_mu":
-                        valid_signals[_vsym] = replace(_vsig, raw_mu=0.0)
-                    _counterfactual_weight = float(_pre_veto_signals.get(_vsym, _vsig).raw_mu) if _fired else 0.0
-                    if _fired:
-                        _counterfactual_candidates[_vsym] = _counterfactual_weight
-                    _directional_veto_snaps.append(DirectionalVetoSnapshot(
-                        fold_idx=_fold_idx, t=t, symbol=_vsym,
-                        regime_code=_regime_now,
-                        raw_mu_before=_raw_mu, raw_mu_after=_raw_mu_after,
-                        counterfactual_weight=_counterfactual_weight, weight_after=0.0,
-                        fired=_fired, was_missing=False,
-                        bar_price_return_after=0.0, counterfactual_long_return=0.0,
-                    ))
 
             if _oos_sleeve_sigs:
                 logger.debug(

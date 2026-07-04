@@ -78,9 +78,13 @@ def _format_directional_veto_line(summary: Any) -> str:
     avoided = float(getattr(summary, "avoided_loss", 0.0))
     net = float(getattr(summary, "net_veto_value", 0.0))
     sym = str(getattr(summary, "symbol", "?"))
+    _watch = getattr(summary, "n_watch", 0)
+    _trig = getattr(summary, "mean_trigger_loss", 0.0)
+    _ep = getattr(summary, "mean_episode_bars", 0.0)
     return (
         f"{sym}: fire={fire_pct:.1f}% adverse_fire={adverse_fire_pct:.1f}% "
-        f"fp={fp_pct:.1f}% opp_cost={opp_cost:+.4f} avoided={avoided:+.4f} net={net:+.4f}"
+        f"fp={fp_pct:.1f}% opp_cost={opp_cost:+.4f} avoided={avoided:+.4f} net={net:+.4f} "
+        f"watch={_watch} trig_loss={_trig:+.4f} ep_bars={_ep:.1f}"
     )
 
 
