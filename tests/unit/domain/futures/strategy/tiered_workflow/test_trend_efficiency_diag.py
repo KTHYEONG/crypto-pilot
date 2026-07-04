@@ -1,10 +1,13 @@
 """Unit tests for compute_mean_trend_efficiency (L2 fit/cal ER aggregation)."""
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     Layer2FoldAttribution,
+    _assemble_fold_attribution,
+    compute_long_short_price_by_symbol,
     compute_long_short_realized_price,
     compute_mean_trend_efficiency,
 )
@@ -118,3 +121,84 @@ class TestComputeLongShortRealizedPrice:
         total_long, total_short = compute_long_short_realized_price(())
         assert total_long == pytest.approx(0.0)
         assert total_short == pytest.approx(0.0)
+
+
+class TestComputeLongShortPriceBySymbol:
+    """compute_long_short_price_by_symbol merges per-symbol tuples across folds."""
+
+    def test_compute_long_short_price_by_symbol_merges_across_folds(self) -> None:
+        """Scenario 1: overlapping symbols are summed, non-overlapping preserved."""
+        attrs = (
+            Layer2FoldAttribution(
+                fold_idx=0, oos_bars=100, n_rebal=10,
+                realized_total=0.0, realized_price=0.0,
+                realized_funding=0.0, realized_cost=0.0,
+                expected_net=0.0, alpha_gap=0.0,
+                mean_gross_exp=0.5, mean_net_exp=0.1,
+                sleeves_active_mean=10.0, friction_pass_ratio=0.8,
+                throttle_mult_mean=1.0, dropped_below_cost=0,
+                netting_events=0,
+                realized_price_long_by_symbol=(("BTCUSDT", -0.02), ("ETHUSDT", -0.01)),
+                realized_price_short_by_symbol=(),
+            ),
+            Layer2FoldAttribution(
+                fold_idx=1, oos_bars=100, n_rebal=10,
+                realized_total=0.0, realized_price=0.0,
+                realized_funding=0.0, realized_cost=0.0,
+                expected_net=0.0, alpha_gap=0.0,
+                mean_gross_exp=0.5, mean_net_exp=0.1,
+                sleeves_active_mean=10.0, friction_pass_ratio=0.8,
+                throttle_mult_mean=1.0, dropped_below_cost=0,
+                netting_events=0,
+                realized_price_long_by_symbol=(("BTCUSDT", -0.01), ("SOLUSDT", 0.005)),
+                realized_price_short_by_symbol=(),
+            ),
+        )
+        long_totals, short_totals = compute_long_short_price_by_symbol(attrs)
+        long_dict = dict(long_totals)
+        assert long_dict == pytest.approx({"BTCUSDT": -0.03, "ETHUSDT": -0.01, "SOLUSDT": 0.005})
+        assert short_totals == ()
+
+    def test_compute_long_short_price_by_symbol_empty_returns_empty_tuples(self) -> None:
+        """Scenario 2: empty fold_attributions → ((), ())."""
+        long_totals, short_totals = compute_long_short_price_by_symbol(())
+        assert long_totals == ()
+        assert short_totals == ()
+
+
+class TestAssembleFoldAttributionPerSymbol:
+    """_assemble_fold_attribution builds per-symbol long/short tuples."""
+
+    def test_assemble_fold_attribution_builds_per_symbol_long_short_tuples(self) -> None:
+        """Scenario 3: near-zero contributors filtered, correct pairing."""
+        symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+        price_long_by_sym = np.array([-0.02, 0.0, 1e-13])
+        price_short_by_sym = np.array([0.0, 0.015, 0.0])
+        result = _assemble_fold_attribution(
+            fold_idx=0, oos_bars=100, n_rebal=10,
+            realized_price=0.0, realized_funding=0.0,
+            realized_cost=0.0, expected_net=0.0,
+            gross_exps=[], net_exps=[], throttle_mults=[],
+            sleeves_active=[], friction_pass_total=0,
+            signal_total=0, dropped_below_cost=0,
+            netting_events=0,
+            symbols=symbols,
+            price_long_by_sym=price_long_by_sym,
+            price_short_by_sym=price_short_by_sym,
+        )
+        assert result.realized_price_long_by_symbol == (("BTCUSDT", pytest.approx(-0.02)),)
+        assert result.realized_price_short_by_symbol == (("ETHUSDT", pytest.approx(0.015)),)
+
+    def test_assemble_fold_attribution_defaults_per_symbol_to_empty_when_arrays_omitted(self) -> None:
+        """Scenario 4: no symbols/price_long_by_sym → empty tuples."""
+        result = _assemble_fold_attribution(
+            fold_idx=0, oos_bars=100, n_rebal=10,
+            realized_price=0.0, realized_funding=0.0,
+            realized_cost=0.0, expected_net=0.0,
+            gross_exps=[], net_exps=[], throttle_mults=[],
+            sleeves_active=[], friction_pass_total=0,
+            signal_total=0, dropped_below_cost=0,
+            netting_events=0,
+        )
+        assert result.realized_price_long_by_symbol == ()
+        assert result.realized_price_short_by_symbol == ()
