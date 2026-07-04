@@ -37,6 +37,22 @@ def _fmt_date(d: Any) -> str:
     return str(d)
 
 
+def _format_top_symbol_contributions(
+    pairs: tuple[tuple[str, float], ...],
+    *,
+    top_n: int = 5,
+    ascending: bool,
+) -> str:
+    """Format top symbol contributions sorted by value.
+    
+    Empty input returns "n/a".
+    """
+    if not pairs:
+        return "n/a"
+    sorted_pairs = sorted(pairs, key=lambda p: p[1], reverse=not ascending)[:top_n]
+    return " ".join(f"{sym}({val:+.4f})" for sym, val in sorted_pairs)
+
+
 def _format_symbol_preview(symbols: Sequence[Any], *, max_symbols: int = 8) -> str:
     preview = [str(sym) for sym in symbols[: max(max_symbols, 0)]]
     if not preview:
@@ -733,8 +749,16 @@ def format_layer2_table(
         (
             f"  [L2-LONGSHORT] Realized Price: long={_f(price_long, '+.4f')} short={_f(price_short, '+.4f')}"
         ),
-        sep,
     ]
+    long_by_sym: tuple[tuple[str, float], ...] = getattr(r, "realized_price_long_by_symbol", ())
+    short_by_sym: tuple[tuple[str, float], ...] = getattr(r, "realized_price_short_by_symbol", ())
+    lines.extend(
+        [
+            f"  [L2-LONGSHORT-TOP] Long Losers: {_format_top_symbol_contributions(long_by_sym, ascending=True)}",
+            f"  [L2-LONGSHORT-TOP] Short Winners: {_format_top_symbol_contributions(short_by_sym, ascending=False)}",
+        ]
+    )
+    lines.append(sep)
 
 
     if awf_folds:
@@ -967,6 +991,16 @@ def format_layer3_table(
         lines.append(
             f"  {_status(True)} [L3-LONGSHORT] Realized Price: long={_price_long:+.4f} "
             f"short={_price_short:+.4f} | Active Bars: long={_bars_long} short={_bars_short}"
+        )
+        _l3_long_by_sym = getattr(r, "realized_price_long_by_symbol", ())
+        _l3_short_by_sym = getattr(r, "realized_price_short_by_symbol", ())
+        lines.append(
+            f"  {_status(True)} [L3-LONGSHORT-TOP] Long Losers: "
+            f"{_format_top_symbol_contributions(_l3_long_by_sym, ascending=True)}"
+        )
+        lines.append(
+            f"  {_status(True)} [L3-LONGSHORT-TOP] Short Winners: "
+            f"{_format_top_symbol_contributions(_l3_short_by_sym, ascending=False)}"
         )
 
     if has_opt:
