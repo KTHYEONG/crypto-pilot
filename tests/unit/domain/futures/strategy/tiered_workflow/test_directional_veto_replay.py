@@ -18,38 +18,50 @@ from src.domain.futures.strategy.tiered_workflow.pipeline import (
 
 
 class TestDirectionalVetoReplayVariants:
-    """S1-5: two-arm replay."""
+    """S4: replay variants include new contextual candidates."""
 
-    def test_variants_return_baseline_and_treatment(self) -> None:
+    def test_variants_return_five_arms(self) -> None:
         variants = _directional_veto_replay_variants()
         names = [v.name for v in variants]
+        assert len(variants) == 5
         assert "baseline" in names
-        assert "veto_majors_long_neutral" in names
+        assert "veto_adverse_only" in names
+        assert "contextual_cap_mu" in names
+        assert "contextual_zero_mu" in names
+        assert "contextual_crisis_only" in names
 
-    def test_baseline_disabled_treatment_enabled(self) -> None:
+    def test_baseline_disabled(self) -> None:
         variants = _directional_veto_replay_variants()
         by_name = {v.name: v for v in variants}
         assert not by_name["baseline"].directional_veto_enabled
-        assert by_name["veto_majors_long_neutral"].directional_veto_enabled
 
-    def test_treatment_action_drop_long(self) -> None:
+    def test_contextual_mode_set(self) -> None:
         variants = _directional_veto_replay_variants()
-        treatment = next(v for v in variants if v.directional_veto_enabled)
-        assert treatment.directional_veto_action == "drop_long"
+        by_name = {v.name: v for v in variants}
+        assert by_name["contextual_cap_mu"].directional_veto_mode == "contextual"
+        assert by_name["contextual_zero_mu"].directional_veto_mode == "contextual"
+        assert by_name["contextual_crisis_only"].directional_veto_mode == "contextual"
+        assert by_name["veto_adverse_only"].directional_veto_mode == "adverse_only"
+
+    def test_contextual_crisis_only_adverse_codes(self) -> None:
+        variants = _directional_veto_replay_variants()
+        crisis = next(v for v in variants if v.name == "contextual_crisis_only")
+        assert crisis.directional_veto_adverse_codes == (2,)
 
 
 class TestDirectionalVetoReplayAdoptionVerdict:
-    """Adoption verdict tests."""
+    """S5 + X5/X6: adoption gate tests with new rules."""
 
     def _make_result(
         self,
         *,
-        variant: str = "veto_majors_long_neutral",
+        variant: str = "contextual_cap_mu",
         baseline_parity: bool = True,
         l2_fp: float = 0.0,
         l2_net_veto: float = 0.01,
         l2_gross_exp: float = 0.95,
         l2_turnover: float = 0.5,
+        l2_cagr: float = 0.15,
         l3_total_return: float = 0.05,
         l3_mdd: float = 0.10,
         l3_sharpe: float = 1.2,
@@ -66,7 +78,7 @@ class TestDirectionalVetoReplayAdoptionVerdict:
         return DirectionalVetoReplayResult(
             variant=variant,
             baseline_parity=baseline_parity,
-            l2_cagr=0.15, l2_mdd=0.08, l2_turnover=l2_turnover,
+            l2_cagr=l2_cagr, l2_mdd=0.08, l2_turnover=l2_turnover,
             l2_average_gross_exposure=l2_gross_exp,
             l2_gate_passed=True, l2_blocker_reason="",
             l2_directional_veto_summary=l2_veto_summary,
@@ -79,27 +91,41 @@ class TestDirectionalVetoReplayAdoptionVerdict:
         )
 
     def _make_baseline(
-        self, l3_total_return: float = 0.04, l3_mdd: float = 0.12, l3_sharpe: float = 1.0,
+        self,
+        l3_total_return: float = 0.04,
+        l3_mdd: float = 0.12,
+        l3_sharpe: float = 1.0,
+        l2_cagr: float = 0.14,
+        l3_long_loss: tuple[tuple[str, float], ...] | None = None,
     ) -> DirectionalVetoReplayResult:
+        if l3_long_loss is None:
+            l3_long_loss = (("BTCUSDT", -0.04), ("ETHUSDT", -0.02))
         return self._make_result(
             variant="baseline", l3_total_return=l3_total_return,
             l3_mdd=l3_mdd, l3_sharpe=l3_sharpe,
-            l3_long_loss=(("BTCUSDT", 0.03), ("ETHUSDT", 0.01)),
+            l2_cagr=l2_cagr,
+            l3_long_loss=l3_long_loss,
         )
 
     def test_adoption_passed(self) -> None:
-        baseline = self._make_baseline()
-        candidate = self._make_result()
+        baseline = self._make_baseline(
+            l3_total_return=0.02, l3_long_loss=(("BTCUSDT", -0.04), ("ETHUSDT", -0.02)),
+        )
+        candidate = self._make_result(
+            l3_total_return=0.05, l3_long_loss=(("BTCUSDT", -0.02), ("ETHUSDT", -0.01)),
+        )
         verdict, reason = _directional_veto_replay_adoption_verdict(
             baseline=baseline, candidate=candidate,
             max_fit_false_positive_rate=0.50,
             min_gross_ratio=0.90,
             max_turnover_delta=0.05,
+            max_fit_net_value_loss=0.0,
+            min_l3_total_return_delta=0.02,
+            max_l2_cagr_delta_loss=0.005,
         )
         assert verdict, reason
 
     def test_fp_budget_breach_blocks_adoption(self) -> None:
-        """S2-3: fit/cal false-positive mandatory."""
         baseline = self._make_baseline()
         candidate = self._make_result(l2_fp=0.75)
         verdict, reason = _directional_veto_replay_adoption_verdict(
@@ -107,6 +133,9 @@ class TestDirectionalVetoReplayAdoptionVerdict:
             max_fit_false_positive_rate=0.50,
             min_gross_ratio=0.90,
             max_turnover_delta=0.05,
+            max_fit_net_value_loss=0.0,
+            min_l3_total_return_delta=0.02,
+            max_l2_cagr_delta_loss=0.005,
         )
         assert not verdict
         assert "false_positive" in reason
@@ -119,46 +148,50 @@ class TestDirectionalVetoReplayAdoptionVerdict:
             max_fit_false_positive_rate=0.50,
             min_gross_ratio=0.90,
             max_turnover_delta=0.05,
+            max_fit_net_value_loss=0.0,
+            min_l3_total_return_delta=0.02,
+            max_l2_cagr_delta_loss=0.005,
         )
         assert not verdict
         assert "baseline_parity" in reason
 
-    def test_below_baseline_total_return(self) -> None:
-        """S2-13: economics override diagnostics."""
-        baseline = self._make_baseline(l3_total_return=0.06)
-        candidate = self._make_result(l3_total_return=0.04)
+    def test_below_min_total_return_delta(self) -> None:
+        baseline = self._make_baseline(
+            l3_total_return=0.06, l3_long_loss=(("BTCUSDT", -0.04), ("ETHUSDT", -0.02)),
+        )
+        candidate = self._make_result(
+            l3_total_return=0.04, l3_long_loss=(("BTCUSDT", -0.02), ("ETHUSDT", -0.01)),
+        )
         verdict, reason = _directional_veto_replay_adoption_verdict(
             baseline=baseline, candidate=candidate,
             max_fit_false_positive_rate=0.50,
             min_gross_ratio=0.90,
             max_turnover_delta=0.05,
+            max_fit_net_value_loss=0.0,
+            min_l3_total_return_delta=0.02,
+            max_l2_cagr_delta_loss=0.005,
         )
         assert not verdict
-        assert "below_baseline_total_return" in reason
+        assert "below_min_total_return_delta" in reason
 
-    def test_worse_mdd_blocks_adoption(self) -> None:
-        baseline = self._make_baseline(l3_mdd=0.08)
-        candidate = self._make_result(l3_mdd=0.15)
+    def test_fit_cagr_degradation_blocks(self) -> None:
+        baseline = self._make_baseline(
+            l2_cagr=0.20, l3_long_loss=(("BTCUSDT", -0.04), ("ETHUSDT", -0.02)),
+        )
+        candidate = self._make_result(
+            l2_cagr=0.10, l3_long_loss=(("BTCUSDT", -0.02), ("ETHUSDT", -0.01)),
+        )
         verdict, reason = _directional_veto_replay_adoption_verdict(
             baseline=baseline, candidate=candidate,
             max_fit_false_positive_rate=0.50,
             min_gross_ratio=0.90,
             max_turnover_delta=0.05,
+            max_fit_net_value_loss=0.0,
+            min_l3_total_return_delta=0.02,
+            max_l2_cagr_delta_loss=0.005,
         )
         assert not verdict
-        assert "worse_mdd" in reason
-
-    def test_below_baseline_sharpe_blocks_adoption(self) -> None:
-        baseline = self._make_baseline(l3_sharpe=1.5)
-        candidate = self._make_result(l3_sharpe=0.8)
-        verdict, reason = _directional_veto_replay_adoption_verdict(
-            baseline=baseline, candidate=candidate,
-            max_fit_false_positive_rate=0.50,
-            min_gross_ratio=0.90,
-            max_turnover_delta=0.05,
-        )
-        assert not verdict
-        assert "below_baseline_sharpe" in reason
+        assert "fit_cagr_degradation" in reason
 
     def test_net_value_negative_blocks_adoption(self) -> None:
         baseline = self._make_baseline()
@@ -168,9 +201,12 @@ class TestDirectionalVetoReplayAdoptionVerdict:
             max_fit_false_positive_rate=0.50,
             min_gross_ratio=0.90,
             max_turnover_delta=0.05,
+            max_fit_net_value_loss=0.005,
+            min_l3_total_return_delta=0.02,
+            max_l2_cagr_delta_loss=0.005,
         )
         assert not verdict
-        assert "net_value_negative" in reason
+        assert "fit_net_value_negative" in reason
 
     def test_gross_preservation_fail(self) -> None:
         baseline = self._make_baseline()
@@ -180,6 +216,9 @@ class TestDirectionalVetoReplayAdoptionVerdict:
             max_fit_false_positive_rate=0.50,
             min_gross_ratio=0.90,
             max_turnover_delta=0.05,
+            max_fit_net_value_loss=0.0,
+            min_l3_total_return_delta=0.02,
+            max_l2_cagr_delta_loss=0.005,
         )
         assert not verdict
         assert "gross_preservation" in reason
@@ -192,27 +231,52 @@ class TestDirectionalVetoReplayAdoptionVerdict:
             max_fit_false_positive_rate=0.50,
             min_gross_ratio=0.90,
             max_turnover_delta=0.05,
+            max_fit_net_value_loss=0.0,
+            min_l3_total_return_delta=0.02,
+            max_l2_cagr_delta_loss=0.005,
         )
         assert not verdict
         assert "turnover_budget" in reason
 
     def test_major_long_loss_not_improved(self) -> None:
-        baseline = self._make_result(
-            variant="baseline", l3_total_return=0.04,
-            l3_mdd=0.12, l3_sharpe=1.0,
-            l3_long_loss=(("BTCUSDT", 0.03), ("ETHUSDT", 0.01)),
+        baseline = self._make_baseline(
+            l3_long_loss=(("BTCUSDT", -0.03), ("ETHUSDT", -0.01)),
         )
         candidate = self._make_result(
-            l3_long_loss=(("BTCUSDT", 0.05), ("ETHUSDT", 0.02)),
+            l3_total_return=0.06,
+            l3_long_loss=(("BTCUSDT", -0.05), ("ETHUSDT", -0.02)),
         )
         verdict, reason = _directional_veto_replay_adoption_verdict(
             baseline=baseline, candidate=candidate,
             max_fit_false_positive_rate=0.50,
             min_gross_ratio=0.90,
             max_turnover_delta=0.05,
+            max_fit_net_value_loss=0.0,
+            min_l3_total_return_delta=0.02,
+            max_l2_cagr_delta_loss=0.005,
         )
         assert not verdict
         assert "major_long_loss" in reason
+
+    def test_improved_long_loss_helps_adoption(self) -> None:
+        baseline = self._make_baseline(
+            l3_total_return=0.02,
+            l3_long_loss=(("BTCUSDT", -0.04), ("ETHUSDT", -0.02)),
+        )
+        candidate = self._make_result(
+            l3_total_return=0.05,
+            l3_long_loss=(("BTCUSDT", -0.02), ("ETHUSDT", -0.01)),
+        )
+        verdict, reason = _directional_veto_replay_adoption_verdict(
+            baseline=baseline, candidate=candidate,
+            max_fit_false_positive_rate=0.50,
+            min_gross_ratio=0.90,
+            max_turnover_delta=0.05,
+            max_fit_net_value_loss=0.0,
+            min_l3_total_return_delta=0.02,
+            max_l2_cagr_delta_loss=0.005,
+        )
+        assert verdict, reason
 
 
 class TestDirectionalVetoReplayRun:
@@ -220,7 +284,7 @@ class TestDirectionalVetoReplayRun:
 
     @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l2_awf")
     @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l3_holdout")
-    def test_returns_two_variants(
+    def test_returns_five_variants(
         self,
         mock_l3: MagicMock,
         mock_l2: MagicMock,
@@ -254,9 +318,12 @@ class TestDirectionalVetoReplayRun:
             tf="4h",
             deploy_leverage=None,
         )
-        assert len(results) == 2
+        assert len(results) == 5
         assert results[0].variant == "baseline"
-        assert results[1].variant == "veto_majors_long_neutral"
+        assert results[1].variant == "veto_adverse_only"
+        assert results[2].variant == "contextual_cap_mu"
+        assert results[3].variant == "contextual_zero_mu"
+        assert results[4].variant == "contextual_crisis_only"
 
 
 class TestDirectionalVetoReplayCoverage:
@@ -264,10 +331,10 @@ class TestDirectionalVetoReplayCoverage:
 
     def test_replay_variants_structure(self) -> None:
         variants = _directional_veto_replay_variants()
-        assert len(variants) == 2
+        assert len(variants) == 5
         assert variants[0].name == "baseline"
         assert not variants[0].directional_veto_enabled
-        assert variants[1].name == "veto_majors_long_neutral"
+        assert variants[1].name == "veto_adverse_only"
         assert variants[1].directional_veto_enabled
         assert variants[1].directional_veto_action == "drop_long"
         assert variants[1].directional_veto_symbols == ("BTCUSDT", "ETHUSDT")
@@ -283,7 +350,7 @@ class TestDirectionalVetoReplayCoverage:
             avoided_loss=0.03, net_veto_value=0.02,
         )
         result = DirectionalVetoReplayResult(
-            variant="veto_majors_long_neutral",
+            variant="contextual_cap_mu",
             baseline_parity=True, l2_cagr=0.15, l2_mdd=0.08,
             l2_turnover=0.5, l2_average_gross_exposure=0.95,
             l2_gate_passed=True, l2_blocker_reason="",
@@ -299,8 +366,40 @@ class TestDirectionalVetoReplayCoverage:
         _write_directional_veto_replay_csv((result,), path=path)
         assert path.exists()
         content = path.read_text()
-        assert "veto_majors_long_neutral" in content
+        assert "contextual_cap_mu" in content
         assert "0.15" in content
+
+    def test_write_replay_detail_csv(self, tmp_path: Any) -> None:
+        from src.domain.futures.strategy.tiered_workflow.pipeline import (
+            _write_directional_veto_replay_detail_csv,
+        )
+        summary = DirectionalVetoSummary(
+            symbol="BTCUSDT", n_obs=10, n_missing=0, n_adverse=5, n_fired=4,
+            fire_rate=0.4, adverse_fire_rate=0.8,
+            false_positive_rate=0.25, opportunity_cost=0.01,
+            avoided_loss=0.03, net_veto_value=0.02,
+            n_watch=3, mean_trigger_loss=-0.025, mean_episode_bars=2.0,
+        )
+        result = DirectionalVetoReplayResult(
+            variant="contextual_cap_mu",
+            baseline_parity=True, l2_cagr=0.15, l2_mdd=0.08,
+            l2_turnover=0.5, l2_average_gross_exposure=0.95,
+            l2_gate_passed=True, l2_blocker_reason="",
+            l2_directional_veto_summary=(summary,),
+            l3_cagr=0.12, l3_mdd=0.10, l3_sharpe=1.2,
+            l3_total_return=0.05, l3_gate_passed=True,
+            l3_blocker_reason="",
+            l3_realized_price_long_by_symbol=(("BTCUSDT", -0.01),),
+            l3_directional_veto_summary=(summary,),
+            adoption_passed=True, blocker_reason="",
+        )
+        path = tmp_path / "veto_replay_detail.csv"
+        _write_directional_veto_replay_detail_csv((result,), path=path)
+        assert path.exists()
+        content = path.read_text()
+        assert "contextual_cap_mu" in content
+        assert "n_watch" in content
+        assert "mean_episode_bars" in content
 
     def test_format_replay_table(self) -> None:
         from src.domain.futures.strategy.tiered_workflow.pipeline import (
@@ -313,7 +412,7 @@ class TestDirectionalVetoReplayCoverage:
             avoided_loss=0.03, net_veto_value=0.02,
         )
         result = DirectionalVetoReplayResult(
-            variant="veto_majors_long_neutral",
+            variant="contextual_cap_mu",
             baseline_parity=True, l2_cagr=0.15, l2_mdd=0.08,
             l2_turnover=0.5, l2_average_gross_exposure=0.95,
             l2_gate_passed=True, l2_blocker_reason="",
@@ -326,7 +425,7 @@ class TestDirectionalVetoReplayCoverage:
             adoption_passed=True, blocker_reason="",
         )
         table = format_directional_veto_replay_table((result,))
-        assert "veto_majors_long_neutral" in table
+        assert "contextual_cap_mu" in table
         assert "CAGR" in table
         assert "PASS" in table
 
@@ -369,4 +468,5 @@ class TestDirectionalVetoReplayCoverage:
                 tf="4h", deploy_leverage=None,
                 baseline_l2=l2_res, baseline_l3=l3_res,
             )
-            assert len(results) == 2
+            assert len(results) == 5
+            assert results[0].variant == "baseline"
