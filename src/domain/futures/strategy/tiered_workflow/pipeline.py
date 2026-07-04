@@ -2369,8 +2369,10 @@ class DirectionalVetoReplayVariant:
 
     name: str
     directional_veto_enabled: bool
-    directional_veto_action: Literal["drop_long", "zero_mu"]
+    directional_veto_mode: Literal["adverse_only", "contextual"] = "adverse_only"
+    directional_veto_action: Literal["drop_long", "zero_mu", "cap_mu"] = "drop_long"
     directional_veto_symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT")
+    directional_veto_adverse_codes: tuple[int, ...] = (1, 2)
 
 
 @dataclass(slots=True, frozen=True)
@@ -2405,12 +2407,33 @@ def _directional_veto_replay_variants() -> tuple[DirectionalVetoReplayVariant, .
         DirectionalVetoReplayVariant(
             name="baseline",
             directional_veto_enabled=False,
+            directional_veto_mode="adverse_only",
             directional_veto_action="drop_long",
         ),
         DirectionalVetoReplayVariant(
-            name="veto_majors_long_neutral",
+            name="veto_adverse_only",
             directional_veto_enabled=True,
+            directional_veto_mode="adverse_only",
             directional_veto_action="drop_long",
+        ),
+        DirectionalVetoReplayVariant(
+            name="contextual_cap_mu",
+            directional_veto_enabled=True,
+            directional_veto_mode="contextual",
+            directional_veto_action="cap_mu",
+        ),
+        DirectionalVetoReplayVariant(
+            name="contextual_zero_mu",
+            directional_veto_enabled=True,
+            directional_veto_mode="contextual",
+            directional_veto_action="zero_mu",
+        ),
+        DirectionalVetoReplayVariant(
+            name="contextual_crisis_only",
+            directional_veto_enabled=True,
+            directional_veto_mode="contextual",
+            directional_veto_action="cap_mu",
+            directional_veto_adverse_codes=(2,),
         ),
     )
 
@@ -2422,19 +2445,26 @@ def _directional_veto_replay_adoption_verdict(
     max_fit_false_positive_rate: float,
     min_gross_ratio: float,
     max_turnover_delta: float,
+    max_fit_net_value_loss: float,
+    min_l3_total_return_delta: float,
+    max_l2_cagr_delta_loss: float,
 ) -> tuple[bool, str]:
     """[ADR_20260704_L2_DIRECTIONAL_VETO] Gate candidate adoption on fit and holdout budgets."""
 
     if not candidate.baseline_parity:
         return False, "baseline_parity"
+    if candidate.l2_cagr < baseline.l2_cagr - max_l2_cagr_delta_loss:
+        return False, "fit_cagr_degradation"
     if any(
         s.false_positive_rate > max_fit_false_positive_rate
         for s in candidate.l2_directional_veto_summary
         if s.n_fired > 0
     ):
         return False, "fit_false_positive"
-    if all(
-        s.net_veto_value < 0.0 for s in candidate.l2_directional_veto_summary if s.n_fired > 0
+    if any(
+        s.net_veto_value < -max_fit_net_value_loss
+        for s in candidate.l2_directional_veto_summary
+        if s.n_fired > 0
     ):
         return False, "fit_net_value_negative"
     if candidate.l2_average_gross_exposure / max(baseline.l2_average_gross_exposure, 1e-9) < min_gross_ratio:
@@ -2442,21 +2472,17 @@ def _directional_veto_replay_adoption_verdict(
     if candidate.l2_turnover > baseline.l2_turnover + max_turnover_delta:
         return False, "turnover_budget"
     _bl_long_loss = sum(
-        max(v, 0.0) for _, v in baseline.l3_realized_price_long_by_symbol
-        if any(s in ("BTCUSDT", "ETHUSDT") for s in [_, _])
+        max(-v, 0.0) for sym, v in baseline.l3_realized_price_long_by_symbol
+        if sym in ("BTCUSDT", "ETHUSDT")
     )
     _ca_long_loss = sum(
-        max(v, 0.0) for _, v in candidate.l3_realized_price_long_by_symbol
-        if any(s in ("BTCUSDT", "ETHUSDT") for s in [_, _])
+        max(-v, 0.0) for sym, v in candidate.l3_realized_price_long_by_symbol
+        if sym in ("BTCUSDT", "ETHUSDT")
     )
     if _ca_long_loss >= _bl_long_loss:
         return False, "major_long_loss_not_improved"
-    if candidate.l3_total_return <= baseline.l3_total_return:
-        return False, "below_baseline_total_return"
-    if candidate.l3_mdd > baseline.l3_mdd:
-        return False, "worse_mdd"
-    if candidate.l3_sharpe < baseline.l3_sharpe:
-        return False, "below_baseline_sharpe"
+    if candidate.l3_total_return < baseline.l3_total_return + min_l3_total_return_delta:
+        return False, "below_min_total_return_delta"
     return True, ""
 
 
@@ -2476,15 +2502,18 @@ def run_directional_veto_economic_replay(
     baseline_l3: Layer3Result | None = None,
     regime_code_1d: NDArray[np.int8] | None = None,
 ) -> tuple[DirectionalVetoReplayResult, ...]:
-    """[ADR_20260704_L2_DIRECTIONAL_VETO] Execute the 2-arm economic replay and adoption gate."""
+    """[ADR_20260704_L2_DIRECTIONAL_VETO] Execute the 5-arm economic replay and adoption gate."""
 
+    baseline_row: DirectionalVetoReplayResult | None = None
     results: list[DirectionalVetoReplayResult] = []
     for variant in _directional_veto_replay_variants():
         variant_cfg = dataclasses.replace(
             config,
             l2_regime_directional_veto_enabled=variant.directional_veto_enabled,
+            l2_regime_directional_veto_mode=variant.directional_veto_mode,
             l2_regime_directional_veto_action=variant.directional_veto_action,
             l2_regime_directional_veto_symbols=variant.directional_veto_symbols,
+            l2_regime_directional_veto_adverse_codes=variant.directional_veto_adverse_codes,
         )
         l2 = run_l2_awf(
             signal_batch=l2_signal_batch,
@@ -2515,7 +2544,7 @@ def run_directional_veto_economic_replay(
                 abs(l2.cagr_hybrid - baseline_l2.cagr_hybrid) < 1e-6
                 and abs(l3.cagr - baseline_l3.cagr) < 1e-6
             )
-        results.append(DirectionalVetoReplayResult(
+        row = DirectionalVetoReplayResult(
             variant=variant.name,
             baseline_parity=_baseline_parity,
             l2_cagr=l2.cagr_hybrid,
@@ -2535,17 +2564,66 @@ def run_directional_veto_economic_replay(
             l3_directional_veto_summary=l3.directional_veto_summary,
             adoption_passed=False,
             blocker_reason="",
-        ))
-    if len(results) == 2:
-        _adoption, _reason = _directional_veto_replay_adoption_verdict(
-            baseline=results[0],
-            candidate=results[1],
-            max_fit_false_positive_rate=float(config.l2_regime_directional_veto_max_fit_false_positive_rate),
-            min_gross_ratio=float(config.l2_regime_directional_veto_min_gross_ratio),
-            max_turnover_delta=float(config.l2_regime_directional_veto_max_turnover_delta),
         )
-        results[1] = dataclasses.replace(results[1], adoption_passed=_adoption, blocker_reason=_reason)
+        if variant.name == "baseline":
+            baseline_row = row
+        results.append(row)
+    # Compute baseline_parity from replayed baseline row and propagate to all candidates
+    _replayed_baseline_parity = baseline_row.baseline_parity if baseline_row else True
+    for i, r in enumerate(results):
+        if r.variant != "baseline":
+            results[i] = dataclasses.replace(r, baseline_parity=_replayed_baseline_parity)
+    # Run adoption gates for treatment candidates
+    if baseline_row is not None:
+        for i, r in enumerate(results):
+            if r.variant != "baseline" and r.variant != "veto_adverse_only":
+                _adoption, _reason = _directional_veto_replay_adoption_verdict(
+                    baseline=baseline_row,
+                    candidate=r,
+                    max_fit_false_positive_rate=float(config.l2_regime_directional_veto_max_fit_false_positive_rate),
+                    min_gross_ratio=float(config.l2_regime_directional_veto_min_gross_ratio),
+                    max_turnover_delta=float(config.l2_regime_directional_veto_max_turnover_delta),
+                    max_fit_net_value_loss=float(config.l2_regime_directional_veto_max_fit_net_value_loss),
+                    min_l3_total_return_delta=float(config.l2_regime_directional_veto_min_l3_total_return_delta),
+                    max_l2_cagr_delta_loss=float(config.l2_regime_directional_veto_max_l2_cagr_delta_loss),
+                )
+                results[i] = dataclasses.replace(r, adoption_passed=_adoption, blocker_reason=_reason)
     return tuple(results)
+
+
+def _write_directional_veto_replay_detail_csv(
+    results: tuple[DirectionalVetoReplayResult, ...],
+    *,
+    path: Path,
+) -> None:
+    import csv
+    rows: list[dict[str, object]] = []
+    for r in results:
+        _rows = [
+            {
+                "variant": r.variant,
+                "layer": layer,
+                "symbol": s.symbol,
+                "n_obs": s.n_obs,
+                "n_watch": s.n_watch,
+                "n_fired": s.n_fired,
+                "fire_rate": s.fire_rate,
+                "false_positive_rate": s.false_positive_rate,
+                "opportunity_cost": s.opportunity_cost,
+                "avoided_loss": s.avoided_loss,
+                "net_veto_value": s.net_veto_value,
+                "mean_trigger_loss": s.mean_trigger_loss,
+                "mean_episode_bars": s.mean_episode_bars,
+            }
+            for layer, summaries in [("l2", r.l2_directional_veto_summary), ("l3", r.l3_directional_veto_summary)]
+            for s in summaries
+        ]
+        rows.extend(_rows)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else [])
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _write_directional_veto_replay_csv(

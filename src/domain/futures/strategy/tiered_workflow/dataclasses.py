@@ -29,10 +29,18 @@ if TYPE_CHECKING:
         ReversalEpisode,
     )
 
-def _validate_directional_veto_action(value: str) -> Literal["drop_long", "zero_mu"]:
-    if value not in {"drop_long", "zero_mu"}:
+def _validate_directional_veto_action(value: str) -> Literal["drop_long", "zero_mu", "cap_mu"]:
+    if value not in {"drop_long", "zero_mu", "cap_mu"}:
         raise ValueError(
-            f"l2_regime_directional_veto_action must be one of drop_long/zero_mu, got {value!r}"
+            f"l2_regime_directional_veto_action must be one of drop_long/zero_mu/cap_mu, got {value!r}"
+        )
+    return value  # type: ignore[return-value]
+
+
+def _validate_directional_veto_mode(value: str) -> Literal["adverse_only", "contextual"]:
+    if value not in {"adverse_only", "contextual"}:
+        raise ValueError(
+            f"l2_regime_directional_veto_mode must be one of adverse_only/contextual, got {value!r}"
         )
     return value  # type: ignore[return-value]
 
@@ -625,7 +633,18 @@ class Layer2AllocationConfig:
     l2_regime_directional_veto_symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT")
     l2_regime_directional_veto_adverse_codes: tuple[int, ...] = (1, 2)
     l2_regime_directional_veto_long_eps_bps: float = 0.0
-    l2_regime_directional_veto_action: Literal["drop_long", "zero_mu"] = "drop_long"
+    l2_regime_directional_veto_action: Literal["drop_long", "zero_mu", "cap_mu"] = "drop_long"
+    l2_regime_directional_veto_mode: Literal["adverse_only", "contextual"] = "adverse_only"
+    l2_regime_directional_veto_persistence_bars: int = 3
+    l2_regime_directional_veto_loss_lookback_bars: int = 18
+    l2_regime_directional_veto_loss_trigger_bps: float = 150.0
+    l2_regime_directional_veto_cap_mu_bps: float = 0.0
+    l2_regime_directional_veto_release_raw_mu_nonpos: bool = True
+    l2_regime_directional_veto_release_regime_bull_bars: int = 2
+    l2_regime_directional_veto_cooldown_bars: int = 3
+    l2_regime_directional_veto_max_fit_net_value_loss: float = 0.0
+    l2_regime_directional_veto_min_l3_total_return_delta: float = 0.02
+    l2_regime_directional_veto_max_l2_cagr_delta_loss: float = 0.005
     l2_regime_directional_veto_max_fit_false_positive_rate: float = 0.50
     l2_regime_directional_veto_max_turnover_delta: float = 0.05
     l2_regime_directional_veto_min_gross_ratio: float = 0.90
@@ -1165,6 +1184,84 @@ class Layer2AllocationConfig:
             # L2 regime directional veto
             l2_regime_directional_veto_enabled=bool(
                 params.get("l2_regime_directional_veto_enabled", _dc.l2_regime_directional_veto_enabled)
+            ),
+            l2_regime_directional_veto_mode=_validate_directional_veto_mode(
+                str(params.get("l2_regime_directional_veto_mode", _dc.l2_regime_directional_veto_mode))
+            ),
+            l2_regime_directional_veto_persistence_bars=int(
+                cls._validate_range(
+                    "l2_regime_directional_veto_persistence_bars",
+                    cls._as_int(params.get("l2_regime_directional_veto_persistence_bars",
+                                           _dc.l2_regime_directional_veto_persistence_bars),
+                                _dc.l2_regime_directional_veto_persistence_bars),
+                    1,
+                )
+            ),
+            l2_regime_directional_veto_loss_lookback_bars=int(
+                cls._validate_range(
+                    "l2_regime_directional_veto_loss_lookback_bars",
+                    cls._as_int(params.get("l2_regime_directional_veto_loss_lookback_bars",
+                                           _dc.l2_regime_directional_veto_loss_lookback_bars),
+                                _dc.l2_regime_directional_veto_loss_lookback_bars),
+                    1,
+                )
+            ),
+            l2_regime_directional_veto_loss_trigger_bps=cls._validate_range(
+                "l2_regime_directional_veto_loss_trigger_bps",
+                cls._as_float(params.get("l2_regime_directional_veto_loss_trigger_bps",
+                                         _dc.l2_regime_directional_veto_loss_trigger_bps),
+                              _dc.l2_regime_directional_veto_loss_trigger_bps),
+                0.0,
+            ),
+            l2_regime_directional_veto_cap_mu_bps=cls._validate_range(
+                "l2_regime_directional_veto_cap_mu_bps",
+                cls._as_float(params.get("l2_regime_directional_veto_cap_mu_bps",
+                                         _dc.l2_regime_directional_veto_cap_mu_bps),
+                              _dc.l2_regime_directional_veto_cap_mu_bps),
+                0.0,
+            ),
+            l2_regime_directional_veto_release_raw_mu_nonpos=bool(
+                params.get("l2_regime_directional_veto_release_raw_mu_nonpos",
+                           _dc.l2_regime_directional_veto_release_raw_mu_nonpos)
+            ),
+            l2_regime_directional_veto_release_regime_bull_bars=int(
+                cls._validate_range(
+                    "l2_regime_directional_veto_release_regime_bull_bars",
+                    cls._as_int(params.get("l2_regime_directional_veto_release_regime_bull_bars",
+                                           _dc.l2_regime_directional_veto_release_regime_bull_bars),
+                                _dc.l2_regime_directional_veto_release_regime_bull_bars),
+                    1,
+                )
+            ),
+            l2_regime_directional_veto_cooldown_bars=int(
+                cls._validate_range(
+                    "l2_regime_directional_veto_cooldown_bars",
+                    cls._as_int(params.get("l2_regime_directional_veto_cooldown_bars",
+                                           _dc.l2_regime_directional_veto_cooldown_bars),
+                                _dc.l2_regime_directional_veto_cooldown_bars),
+                    0,
+                )
+            ),
+            l2_regime_directional_veto_max_fit_net_value_loss=cls._validate_range(
+                "l2_regime_directional_veto_max_fit_net_value_loss",
+                cls._as_float(params.get("l2_regime_directional_veto_max_fit_net_value_loss",
+                                         _dc.l2_regime_directional_veto_max_fit_net_value_loss),
+                              _dc.l2_regime_directional_veto_max_fit_net_value_loss),
+                0.0,
+            ),
+            l2_regime_directional_veto_min_l3_total_return_delta=cls._validate_range(
+                "l2_regime_directional_veto_min_l3_total_return_delta",
+                cls._as_float(params.get("l2_regime_directional_veto_min_l3_total_return_delta",
+                                         _dc.l2_regime_directional_veto_min_l3_total_return_delta),
+                              _dc.l2_regime_directional_veto_min_l3_total_return_delta),
+                0.0,
+            ),
+            l2_regime_directional_veto_max_l2_cagr_delta_loss=cls._validate_range(
+                "l2_regime_directional_veto_max_l2_cagr_delta_loss",
+                cls._as_float(params.get("l2_regime_directional_veto_max_l2_cagr_delta_loss",
+                                         _dc.l2_regime_directional_veto_max_l2_cagr_delta_loss),
+                              _dc.l2_regime_directional_veto_max_l2_cagr_delta_loss),
+                0.0,
             ),
             l2_regime_directional_veto_symbols=_validate_directional_veto_symbols(
                 params.get("l2_regime_directional_veto_symbols", _dc.l2_regime_directional_veto_symbols)
