@@ -4581,3 +4581,233 @@ def test_run_awf_simulation_major_symbol_snapshots_empty_when_no_watched_symbol_
 
     snapshots = sim.fold_attributions[0].major_symbol_snapshots
     assert snapshots == (), f"워치리스트 외 심볼만 있으면 ()여야 함, got {snapshots}"
+
+
+# ---------------------------------------------------------------------------
+# TestSummarizeMajorSymbolRegimeIncoherence — Phase 1 무료 진단 (regime-mu 불일치/reversal-lag)
+# ---------------------------------------------------------------------------
+
+
+def _snap(t: int, symbol: str, raw_mu: float, regime_code: int) -> Any:
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+        MajorSymbolRebalanceSnapshot,
+    )
+
+    return MajorSymbolRebalanceSnapshot(
+        t=t, symbol=symbol, raw_mu=raw_mu, weight=0.1 if raw_mu > 0 else -0.1,
+        regime_code=regime_code, regime_risk_mult=1.0,
+    )
+
+
+def _attr_with_snapshots(
+    snaps: tuple[Any, ...],
+) -> Any:
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+        Layer2FoldAttribution,
+    )
+
+    return Layer2FoldAttribution(
+        fold_idx=0, oos_bars=len(snaps), n_rebal=len(snaps),
+        realized_total=0.0, realized_price=0.0, realized_funding=0.0, realized_cost=0.0,
+        expected_net=0.0, alpha_gap=0.0, mean_gross_exp=0.0, mean_net_exp=0.0,
+        sleeves_active_mean=0.0, friction_pass_ratio=0.0, throttle_mult_mean=1.0,
+        dropped_below_cost=0, netting_events=0,
+        major_symbol_snapshots=snaps,
+    )
+
+
+class TestSummarizeMajorSymbolRegimeIncoherence:
+    """Scenario 1 (Happy Path) — regime-mu 불일치 및 reversal-lag 정상 집계."""
+
+    def test_no_regime_transition_returns_zero_transitions_and_nan_lag(self) -> None:
+        import math
+
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            summarize_major_symbol_regime_incoherence,
+        )
+
+        snaps = tuple(
+            _snap(t=i, symbol="BTCUSDT", raw_mu=1.0, regime_code=0)
+            for i in range(5)
+        )
+        result = summarize_major_symbol_regime_incoherence((_attr_with_snapshots(snaps),))
+        assert len(result) == 1
+        s = result[0]
+        assert s.n_transitions == 0
+        assert s.censored_pct == 0.0
+        assert math.isnan(s.mean_reversal_lag_bars)
+        assert s.regime_adverse_mu_bullish_pct == 0.0
+
+    def test_single_transition_with_prompt_flip_computes_exact_lag(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            summarize_major_symbol_regime_incoherence,
+        )
+
+        snaps = (
+            _snap(t=0, symbol="BTCUSDT", raw_mu=1.0, regime_code=0),
+            _snap(t=1, symbol="BTCUSDT", raw_mu=1.0, regime_code=0),
+            _snap(t=2, symbol="BTCUSDT", raw_mu=1.0, regime_code=0),
+            _snap(t=3, symbol="BTCUSDT", raw_mu=1.0, regime_code=1),  # t0=3 (transition)
+            _snap(t=4, symbol="BTCUSDT", raw_mu=-1.0, regime_code=1),  # t1=4 (flip)
+        )
+        result = summarize_major_symbol_regime_incoherence((_attr_with_snapshots(snaps),))
+        assert len(result) == 1
+        s = result[0]
+        assert s.n_transitions == 1
+        assert s.mean_reversal_lag_bars == pytest.approx(1.0)
+        assert s.censored_pct == 0.0
+
+    def test_regime_adverse_mu_bullish_pct_matches_manual_fraction(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            summarize_major_symbol_regime_incoherence,
+        )
+
+        snaps = (
+            # bull regime (regime_code=0) — 분모 제외
+            _snap(t=0, symbol="BTCUSDT", raw_mu=1.0, regime_code=0),
+            _snap(t=1, symbol="BTCUSDT", raw_mu=-1.0, regime_code=0),
+            # adverse regime (bear/crisis) — 4 bars, 3 bullish
+            _snap(t=2, symbol="BTCUSDT", raw_mu=1.0, regime_code=1),
+            _snap(t=3, symbol="BTCUSDT", raw_mu=1.0, regime_code=1),
+            _snap(t=4, symbol="BTCUSDT", raw_mu=1.0, regime_code=2),
+            _snap(t=5, symbol="BTCUSDT", raw_mu=-1.0, regime_code=2),
+        )
+        result = summarize_major_symbol_regime_incoherence((_attr_with_snapshots(snaps),))
+        assert len(result) == 1
+        s = result[0]
+        assert s.regime_adverse_mu_bullish_pct == pytest.approx(0.75)
+
+    """Scenario 2 (Edge Cases)."""
+
+    def test_transition_never_recovers_by_fold_end_is_censored(self) -> None:
+        import math
+
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            summarize_major_symbol_regime_incoherence,
+        )
+
+        snaps = (
+            _snap(t=0, symbol="BTCUSDT", raw_mu=1.0, regime_code=0),
+            _snap(t=1, symbol="BTCUSDT", raw_mu=1.0, regime_code=1),  # t0=1
+            _snap(t=2, symbol="BTCUSDT", raw_mu=1.0, regime_code=1),  # still positive
+            _snap(t=3, symbol="BTCUSDT", raw_mu=1.0, regime_code=1),  # never flipped
+        )
+        result = summarize_major_symbol_regime_incoherence((_attr_with_snapshots(snaps),))
+        assert len(result) == 1
+        s = result[0]
+        assert s.n_transitions == 1
+        assert s.censored_pct == pytest.approx(1.0)
+        assert math.isnan(s.mean_reversal_lag_bars)
+
+    def test_multiple_folds_do_not_cross_fold_boundary_for_lag_scan(self) -> None:
+        import math
+
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            summarize_major_symbol_regime_incoherence,
+        )
+
+        # Fold A: has transition but never recovers (censored)
+        snaps_a = (
+            _snap(t=0, symbol="BTCUSDT", raw_mu=1.0, regime_code=0),
+            _snap(t=1, symbol="BTCUSDT", raw_mu=1.0, regime_code=1),  # transition, never flips
+        )
+        # Fold B: no transition at all (all bear, mu <= 0)
+        snaps_b = (
+            _snap(t=0, symbol="BTCUSDT", raw_mu=-1.0, regime_code=1),
+            _snap(t=1, symbol="BTCUSDT", raw_mu=-1.0, regime_code=1),
+        )
+        result = summarize_major_symbol_regime_incoherence((
+            _attr_with_snapshots(snaps_a),
+            _attr_with_snapshots(snaps_b),
+        ))
+        assert len(result) == 1
+        s = result[0]
+        # Fold B has no transition, so total n_transitions == 1 (fold A only)
+        assert s.n_transitions == 1, "cross-fold boundary leak would inflate transitions"
+        assert s.censored_pct == pytest.approx(1.0)
+        assert math.isnan(s.mean_reversal_lag_bars)
+
+    def test_multiple_symbols_aggregated_independently(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            MAJOR_DIAG_SYMBOLS,
+            summarize_major_symbol_regime_incoherence,
+        )
+
+        snaps = (
+            _snap(t=0, symbol="BTCUSDT", raw_mu=1.0, regime_code=0),
+            _snap(t=1, symbol="BTCUSDT", raw_mu=1.0, regime_code=1),
+            _snap(t=2, symbol="BTCUSDT", raw_mu=-1.0, regime_code=1),
+            _snap(t=0, symbol="ETHUSDT", raw_mu=1.0, regime_code=0),
+            _snap(t=1, symbol="ETHUSDT", raw_mu=1.0, regime_code=1),
+            _snap(t=2, symbol="ETHUSDT", raw_mu=1.0, regime_code=1),  # censored
+        )
+        result = summarize_major_symbol_regime_incoherence((_attr_with_snapshots(snaps),))
+        assert len(result) == 2
+        order = {s: i for i, s in enumerate(MAJOR_DIAG_SYMBOLS)}
+        assert order[result[0].symbol] < order[result[1].symbol], "should be in MAJOR_DIAG_SYMBOLS order"
+        btc = next(r for r in result if r.symbol == "BTCUSDT")
+        eth = next(r for r in result if r.symbol == "ETHUSDT")
+        assert btc.n_transitions == 1
+        assert btc.censored_pct == 0.0
+        assert eth.n_transitions == 1
+        assert eth.censored_pct == pytest.approx(1.0)
+
+    def test_bear_to_crisis_transition_is_not_double_counted_as_new_transition(self) -> None:
+
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            summarize_major_symbol_regime_incoherence,
+        )
+
+        snaps = (
+            _snap(t=0, symbol="BTCUSDT", raw_mu=1.0, regime_code=0),
+            _snap(t=1, symbol="BTCUSDT", raw_mu=1.0, regime_code=1),  # bull→bear (1 transition)
+            _snap(t=2, symbol="BTCUSDT", raw_mu=1.0, regime_code=2),  # bear→crisis (NOT a transition)
+            _snap(t=3, symbol="BTCUSDT", raw_mu=-1.0, regime_code=2),  # flips after bear→crisis
+        )
+        result = summarize_major_symbol_regime_incoherence((_attr_with_snapshots(snaps),))
+        assert len(result) == 1
+        s = result[0]
+        assert s.n_transitions == 1, "bear→crisis should not be double-counted"
+        assert s.mean_reversal_lag_bars == pytest.approx(2.0)  # t1=1 → flip at t=3, lag=2
+        assert s.censored_pct == 0.0
+
+    """Scenario 3 (Error Handling)."""
+
+    def test_adverse_bar_count_includes_first_snap_when_fold_starts_adverse(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            summarize_major_symbol_regime_incoherence,
+        )
+
+        snaps = (
+            _snap(t=0, symbol="BTCUSDT", raw_mu=5.0, regime_code=1),
+            _snap(t=1, symbol="BTCUSDT", raw_mu=1.0, regime_code=1),
+            _snap(t=2, symbol="BTCUSDT", raw_mu=-1.0, regime_code=1),
+        )
+        result = summarize_major_symbol_regime_incoherence((_attr_with_snapshots(snaps),))
+        assert len(result) == 1
+        s = result[0]
+        assert s.n_obs == 3
+        assert s.regime_adverse_mu_bullish_pct == pytest.approx(2 / 3)
+
+    def test_empty_fold_attributions_returns_empty_tuple(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            summarize_major_symbol_regime_incoherence,
+        )
+
+        assert summarize_major_symbol_regime_incoherence(()) == ()
+
+    def test_single_snapshot_symbol_no_transition_possible(self) -> None:
+        import math
+
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            summarize_major_symbol_regime_incoherence,
+        )
+
+        snaps = (_snap(t=0, symbol="BTCUSDT", raw_mu=1.0, regime_code=0),)
+        result = summarize_major_symbol_regime_incoherence((_attr_with_snapshots(snaps),))
+        assert len(result) == 1
+        s = result[0]
+        assert s.n_transitions == 0
+        assert s.censored_pct == 0.0
+        assert math.isnan(s.mean_reversal_lag_bars)
+        assert s.n_obs == 1
