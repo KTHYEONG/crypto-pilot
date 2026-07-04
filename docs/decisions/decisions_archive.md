@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-01] [TASK_L2_DB] [ADR_20260701_L2_DB]
+- **Context/Why:** Redis JournalStorage overhead caused severe bottlenecks during high-concurrency Optuna study pipeline initialization.
+- **Resolution/What:** Migrated Optuna database backend to SQLite WAL mode and fixed mock interception paths in tests.
+- **Impact:** Eliminated process deadlocks and reduced tuning loop initiation latency to near-zero.
+
 ## [2026-07-01] [TASK_L3_REG] [ADR_20260701_L3_REG]
 - **Context/Why:** Versionless final-evaluator ChampionMetrics naming conflict blocked L3 holdout validations.
 - **Resolution/What:** Refactored baseline metrics to BaselineChampionMetrics and grouped L3 gates into validation package.
