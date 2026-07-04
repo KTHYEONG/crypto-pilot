@@ -49,9 +49,9 @@ class CategorizedLogger(logging.Logger):
     """Logger subclass that automatically ensures debug messages start with logical tags."""
 
     def perf(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        """Log performance-related message at DEBUG level with [PERF] tag."""
+        """Log performance-related message at DEBUG level with [SYS] tag."""
         if self.isEnabledFor(logging.DEBUG):
-            self.debug(f"[PERF] {msg}", *args, **kwargs)
+            self.debug(f"[SYS] {msg}", *args, **kwargs)
 
     def data(self, msg: str, *args: Any, **kwargs: Any) -> None:
         """Log data-related message at DEBUG level with [DATA] tag."""
@@ -59,14 +59,14 @@ class CategorizedLogger(logging.Logger):
             self.debug(f"[DATA] {msg}", *args, **kwargs)
 
     def opt(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        """Log optimization-related message at DEBUG level with [OPT] tag."""
+        """Log optimization-related message at DEBUG level with [EVAL] tag."""
         if self.isEnabledFor(logging.DEBUG):
-            self.debug(f"[OPT] {msg}", *args, **kwargs)
+            self.debug(f"[EVAL] {msg}", *args, **kwargs)
 
     def strat(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        """Log strategy-related message at DEBUG level with [STRAT] tag."""
+        """Log strategy-related message at DEBUG level with [ALGO] tag."""
         if self.isEnabledFor(logging.DEBUG):
-            self.debug(f"[STRAT] {msg}", *args, **kwargs)
+            self.debug(f"[ALGO] {msg}", *args, **kwargs)
 
     def _log(
         self,
@@ -79,11 +79,29 @@ class CategorizedLogger(logging.Logger):
         stacklevel: int = 1,
     ) -> None:
         if level == logging.DEBUG and isinstance(msg, str):
-            allowed_tags = ["[PERF]", "[DATA]", "[OPT]", "[STRAT]", "[SYS]"]
             msg_str = msg.strip()
-            has_tag = any(msg_str.startswith(tag) for tag in allowed_tags)
+            import re
+            # Extract leading bracketed tag e.g. "[MEM]"
+            tag_match = re.match(r"^\[([^\]]+)\]", msg_str)
 
-            if not has_tag:
+            if tag_match:
+                original_tag = tag_match.group(1).upper()
+                if original_tag not in ("SYS", "DATA", "ALGO", "EVAL"):
+                    # Runtime mapping to 4 standard tags
+                    if original_tag in ("MEM", "PERF", "TIME", "RUNNER", "PROFILE", "SYS"):
+                        new_tag = "SYS"
+                    elif original_tag in ("DATA-INTEGRITY", "DATA-READINESS", "KLINE", "DATA"):
+                        new_tag = "DATA"
+                    elif original_tag in ("BRIDGE", "REGIME-L2-POLICY", "L1", "L2-LONGSHORT", "L3-LONGSHORT", "STRAT", "REGIME_C34_GOLD", "L2-CALIB", "ALGO"):
+                        new_tag = "ALGO"
+                    elif original_tag in ("OPTIMIZE", "OPTUNA", "L2-REGIME", "L3-REGIME", "BRIDGE SUMMARY", "OPT", "EVAL"):
+                        new_tag = "EVAL"
+                    else:
+                        new_tag = "SYS"  # Fallback for unrecognized tags
+
+                    msg = f"[{new_tag}] {msg_str[tag_match.end():].lstrip()}"
+            else:
+                # Prepend default [SYS] tag if none present
                 msg = f"[SYS] {msg_str}"
 
         super()._log(
@@ -132,6 +150,17 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(log_obj, ensure_ascii=False)
 
 
+class TagFilter(logging.Filter):
+    """특정 대괄호 태그로 시작하는 로그만 필터링하는 필터 (AI-Harvesting 최적화)."""
+
+    def __init__(self, tag: str):
+        super().__init__()
+        self.tag = f"[{tag}]"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.getMessage().strip().startswith(self.tag)
+
+
 def setup_logger(
     name: str,
     log_prefix: str | None = None,
@@ -178,6 +207,22 @@ def setup_logger(
     stream_handler = FlushingStreamHandler(sys.stdout)
     stream_handler.setFormatter(logging.Formatter("%(message)s"))
     logger.addHandler(stream_handler)
+
+    # DEBUG 레벨이 활성화된 경우, 4대 표준 태그별로 전용 로그 파일에 격리 분할 저장
+    if log_level <= logging.DEBUG:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        for tag in ("SYS", "DATA", "ALGO", "EVAL"):
+            tag_log_file = LOG_DIR / f"{tag.lower()}.log"
+            tag_handler = RotatingFileHandler(
+                str(tag_log_file),
+                maxBytes=LOG_MAX_BYTES,
+                backupCount=LOG_BACKUP_COUNT,
+                encoding="utf-8",
+            )
+            tag_handler.setLevel(logging.DEBUG)
+            tag_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
+            tag_handler.addFilter(TagFilter(tag))
+            logger.addHandler(tag_handler)
 
     if not write_file:
         return logger

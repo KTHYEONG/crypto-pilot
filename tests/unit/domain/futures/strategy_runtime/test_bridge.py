@@ -816,7 +816,12 @@ def test_bridge_signal_only_silent_diagnostics(monkeypatch: Any) -> None:
         silent=False,
     )
 
-    assert captured_kwargs.get("silent") is True
+    # signal_only=True 시 compute_rule_diagnostics 전체가 스킵되므로
+    # captured_kwargs는 비어있어야 한다 (함수 자체가 호출 안 됨)
+    assert captured_kwargs == {}, (
+        f"signal_only=True일 때 compute_rule_diagnostics가 호출되면 안 됨: {captured_kwargs}"
+    )
+
 
 
 def test_verify_data_integrity_happy_path() -> None:
