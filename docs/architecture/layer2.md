@@ -59,6 +59,7 @@ L1에서 검증된 Candidate Events를 입력받아 Cross-sectional Ranking, Reg
 - **Vol Targeting**: 실현 연율 변동성을 `vol_target = 1.0`으로 고정하여 급격한 익스포저 변화 방지.
 
 ### Directional Veto (Major-Symbol Long Protection)
+<!-- ADR_20260704_L2_CONTEXTUAL_DIRECTIONAL_VETO -->
 - **Adverse-Only Mode**: binary `drop_long`/`zero_mu` on regime-adverse + raw_mu>0. No state.
 - **Contextual Mode**: 5-state machine (`idle→watch→armed→veto→cooldown`) per symbol per fold.
   - **Persistence**: `n` consecutive adverse+long bars before escalation (`l2_regime_directional_veto_persistence_bars`).
