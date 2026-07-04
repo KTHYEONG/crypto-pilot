@@ -5,6 +5,7 @@ import pytest
 
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     Layer2FoldAttribution,
+    compute_long_short_realized_price,
     compute_mean_trend_efficiency,
 )
 
@@ -14,6 +15,8 @@ def _make_attr(
     oos_bars: int = 100,
     mean_trend_efficiency: float = 0.0,
     trend_efficiency_corr: float = 0.0,
+    realized_price_long: float = 0.0,
+    realized_price_short: float = 0.0,
 ) -> Layer2FoldAttribution:
     return Layer2FoldAttribution(
         fold_idx=0,
@@ -34,6 +37,8 @@ def _make_attr(
         netting_events=0,
         mean_trend_efficiency=mean_trend_efficiency,
         trend_efficiency_corr=trend_efficiency_corr,
+        realized_price_long=realized_price_long,
+        realized_price_short=realized_price_short,
     )
 
 
@@ -93,3 +98,23 @@ class TestComputeMeanTrendEfficiency:
         )
         mean_er, _ = compute_mean_trend_efficiency(attrs)
         assert mean_er == pytest.approx(0.20)
+
+
+class TestComputeLongShortRealizedPrice:
+    """compute_long_short_realized_price sum across folds."""
+
+    def test_compute_long_short_realized_price_sums_across_folds(self) -> None:
+        """Scenario 1: 두 fold의 long/short realized_price를 단순 합산."""
+        attrs = (
+            _make_attr(realized_price_long=-0.05, realized_price_short=0.01),
+            _make_attr(realized_price_long=-0.03, realized_price_short=0.02),
+        )
+        total_long, total_short = compute_long_short_realized_price(attrs)
+        assert total_long == pytest.approx(-0.08)
+        assert total_short == pytest.approx(0.03)
+
+    def test_compute_long_short_realized_price_empty_returns_zero(self) -> None:
+        """Scenario 2: 빈 fold_attributions → (0.0, 0.0)."""
+        total_long, total_short = compute_long_short_realized_price(())
+        assert total_long == pytest.approx(0.0)
+        assert total_short == pytest.approx(0.0)

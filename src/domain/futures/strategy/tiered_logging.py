@@ -624,6 +624,8 @@ def format_layer2_table(
     dsr_val: float = getattr(r, "dsr_hybrid", float("nan"))
     mean_er: float = getattr(r, "mean_trend_efficiency", 0.0)
     er_corr: float = getattr(r, "trend_efficiency_corr", 0.0)
+    price_long: float = getattr(r, "realized_price_long", 0.0)
+    price_short: float = getattr(r, "realized_price_short", 0.0)
     cvar_h: float = getattr(r, "cvar_95_hybrid", float("nan"))
     sortino_h: float = getattr(r, "sortino_hybrid", 0.0)
     terminal_mult: float = getattr(r, "terminal_multiple", 1.0)
@@ -727,6 +729,9 @@ def format_layer2_table(
         (
             f"  [L2-REGIME] "
             f"Trend Efficiency(ER): mean={_f(mean_er, '.3f')} corr={_f(er_corr, '+.3f')}"
+        ),
+        (
+            f"  [L2-LONGSHORT] Realized Price: long={_f(price_long, '+.4f')} short={_f(price_short, '+.4f')}"
         ),
         sep,
     ]
@@ -954,6 +959,14 @@ def format_layer3_table(
         lines.append(
             f"  {_status(True)} [L3-REGIME ] bull={_bull:.1f}% bear={_bear:.1f}% "
             f"crisis={_crisis:.1f}% | Trend Efficiency(ER): mean={_er:.3f} corr={_er_corr:+.3f}"
+        )
+        _price_long = float(getattr(r, "realized_price_long", 0.0))
+        _price_short = float(getattr(r, "realized_price_short", 0.0))
+        _bars_long = int(getattr(r, "bars_long", 0))
+        _bars_short = int(getattr(r, "bars_short", 0))
+        lines.append(
+            f"  {_status(True)} [L3-LONGSHORT] Realized Price: long={_price_long:+.4f} "
+            f"short={_price_short:+.4f} | Active Bars: long={_bars_long} short={_bars_short}"
         )
 
     if has_opt:
