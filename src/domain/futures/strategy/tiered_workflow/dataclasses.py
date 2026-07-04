@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from src.domain.futures.strategy.cs_rank import SymbolSignal
     from src.domain.futures.strategy.tiered_workflow.awf_sim import (
         Layer2FoldAttribution,
+        MajorSymbolIncoherenceSummary,
         MajorSymbolSignalSizingSummary,
         ReversalEpisode,
     )
@@ -440,6 +441,7 @@ class Layer2Result:
     realized_price_long_by_symbol: tuple[tuple[str, float], ...] = ()
     realized_price_short_by_symbol: tuple[tuple[str, float], ...] = ()
     major_symbol_diag: tuple[MajorSymbolSignalSizingSummary, ...] = ()
+    major_symbol_incoherence: tuple[MajorSymbolIncoherenceSummary, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -1420,6 +1422,7 @@ class Layer3Result:
     bars_long: int = 0
     bars_short: int = 0
     major_symbol_diag: tuple[MajorSymbolSignalSizingSummary, ...] = ()
+    major_symbol_incoherence: tuple[MajorSymbolIncoherenceSummary, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
