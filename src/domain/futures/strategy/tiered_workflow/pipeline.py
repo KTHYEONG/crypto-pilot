@@ -53,6 +53,7 @@ from src.domain.futures.strategy.tiered_logging import (
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     _run_awf_simulation,
     _stack_oos_signals,
+    compute_long_short_realized_price,
     compute_mean_trend_efficiency,
 )
 
@@ -1639,6 +1640,7 @@ def _layer2_result_from_trial_eval(
     공통 16+ 지표는 eval에서 1:1 복사, 배포 전용은 extras에서 주입.
     """
     _mean_er, _er_corr = compute_mean_trend_efficiency(eval.fold_attributions)
+    _price_long, _price_short = compute_long_short_realized_price(eval.fold_attributions)
     return Layer2Result(
         selected_last=frozenset(eval.last_selected_symbols),
         weights_last=dict(zip(eval.last_selected_symbols, eval.last_weights, strict=False)),
@@ -1681,6 +1683,8 @@ def _layer2_result_from_trial_eval(
         recent_fold_mdd=eval.recent_fold_mdd,
         mean_trend_efficiency=_mean_er,
         trend_efficiency_corr=_er_corr,
+        realized_price_long=_price_long,
+        realized_price_short=_price_short,
     )
 
 def run_l2_awf(
@@ -2081,6 +2085,10 @@ def run_l3_holdout(
 
     mean_trend_efficiency = _attr.mean_trend_efficiency if _attr is not None else 0.0
     trend_efficiency_corr = _attr.trend_efficiency_corr if _attr is not None else 0.0
+    realized_price_long = _attr.realized_price_long if _attr is not None else 0.0
+    realized_price_short = _attr.realized_price_short if _attr is not None else 0.0
+    bars_long = _attr.bars_long if _attr is not None else 0
+    bars_short = _attr.bars_short if _attr is not None else 0
 
     regime_bull_pct = regime_bear_pct = regime_crisis_pct = 0.0
     if regime_code_1d is not None:
@@ -2127,6 +2135,10 @@ def run_l3_holdout(
         regime_crisis_pct=regime_crisis_pct,
         mean_trend_efficiency=mean_trend_efficiency,
         trend_efficiency_corr=trend_efficiency_corr,
+        realized_price_long=realized_price_long,
+        realized_price_short=realized_price_short,
+        bars_long=bars_long,
+        bars_short=bars_short,
     )
     if verbose:
         logger.info(
