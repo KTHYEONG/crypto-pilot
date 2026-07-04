@@ -22,11 +22,49 @@ if TYPE_CHECKING:
     )
     from src.domain.futures.strategy.cs_rank import SymbolSignal
     from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+        DirectionalVetoSummary,
         Layer2FoldAttribution,
         MajorSymbolIncoherenceSummary,
         MajorSymbolSignalSizingSummary,
         ReversalEpisode,
     )
+
+def _validate_directional_veto_action(value: str) -> Literal["drop_long", "zero_mu"]:
+    if value not in {"drop_long", "zero_mu"}:
+        raise ValueError(
+            f"l2_regime_directional_veto_action must be one of drop_long/zero_mu, got {value!r}"
+        )
+    return value  # type: ignore[return-value]
+
+
+def _validate_directional_veto_symbols(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("l2_regime_directional_veto_symbols must be a sequence")
+    seen: set[str] = set()
+    result: list[str] = []
+    for s in value:
+        sym = str(s).strip().upper()
+        if not sym:
+            raise ValueError("l2_regime_directional_veto_symbols contains empty symbol")
+        if sym not in seen:
+            seen.add(sym)
+            result.append(sym)
+    return tuple(result)
+
+
+def _validate_directional_veto_adverse_codes(value: object) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("l2_regime_directional_veto_adverse_codes must be a sequence")
+    result: list[int] = []
+    for c in value:
+        code = int(c)
+        if code not in {1, 2}:
+            raise ValueError(
+                f"l2_regime_directional_veto_adverse_codes must contain only 1 or 2, got {code}"
+            )
+        result.append(code)
+    return tuple(sorted(set(result)))
+
 
 AllocationPolicy = Literal["diagonal_kelly", "directional_equal_weight"]
 RegimePolicyMode = Literal["filter", "observe", "soft", "hybrid"]
@@ -348,7 +386,7 @@ class Layer2StudyResult:
 
 @dataclass(slots=True, frozen=True)
 class Layer2Result:
-    """Layer2 AWF 포트폴리오 검증 결과.
+    """Layer2 AWF 포트폴리오 검증 결과. [ADR_20260704_L2_DIRECTIONAL_VETO]
 
     Attributes:
         selected_last: 마지막 리밸런스 선택 심볼 집합.
@@ -442,11 +480,12 @@ class Layer2Result:
     realized_price_short_by_symbol: tuple[tuple[str, float], ...] = ()
     major_symbol_diag: tuple[MajorSymbolSignalSizingSummary, ...] = ()
     major_symbol_incoherence: tuple[MajorSymbolIncoherenceSummary, ...] = ()
+    directional_veto_summary: tuple[DirectionalVetoSummary, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
 class Layer2AllocationConfig:
-    """Typed Layer2 allocation and gate configuration."""
+    """Typed Layer2 allocation and gate configuration. [ADR_20260704_L2_DIRECTIONAL_VETO]"""
 
     k_rank: int = 3
     rebalance_bars: int = 3
@@ -581,6 +620,15 @@ class Layer2AllocationConfig:
     l2_crowding_persistence_bars: int = 3
     l2_crowding_recovery_cooldown_bars: int = 3
     l2_crowding_floor_mult: float | None = None
+    # L2 regime directional veto
+    l2_regime_directional_veto_enabled: bool = False
+    l2_regime_directional_veto_symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT")
+    l2_regime_directional_veto_adverse_codes: tuple[int, ...] = (1, 2)
+    l2_regime_directional_veto_long_eps_bps: float = 0.0
+    l2_regime_directional_veto_action: Literal["drop_long", "zero_mu"] = "drop_long"
+    l2_regime_directional_veto_max_fit_false_positive_rate: float = 0.50
+    l2_regime_directional_veto_max_turnover_delta: float = 0.05
+    l2_regime_directional_veto_min_gross_ratio: float = 0.90
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -1114,6 +1162,62 @@ class Layer2AllocationConfig:
                 params.get("l2_crowding_floor_mult", _dc.l2_crowding_floor_mult),
                 _dc.l2_crowding_floor_mult if _dc.l2_crowding_floor_mult is not None else 0.0,
             ) or None,
+            # L2 regime directional veto
+            l2_regime_directional_veto_enabled=bool(
+                params.get("l2_regime_directional_veto_enabled", _dc.l2_regime_directional_veto_enabled)
+            ),
+            l2_regime_directional_veto_symbols=_validate_directional_veto_symbols(
+                params.get("l2_regime_directional_veto_symbols", _dc.l2_regime_directional_veto_symbols)
+            ),
+            l2_regime_directional_veto_adverse_codes=_validate_directional_veto_adverse_codes(
+                params.get("l2_regime_directional_veto_adverse_codes", _dc.l2_regime_directional_veto_adverse_codes)
+            ),
+            l2_regime_directional_veto_long_eps_bps=cls._validate_range(
+                "l2_regime_directional_veto_long_eps_bps",
+                cls._as_float(
+                    params.get("l2_regime_directional_veto_long_eps_bps", _dc.l2_regime_directional_veto_long_eps_bps),
+                    _dc.l2_regime_directional_veto_long_eps_bps,
+                ),
+                0.0,
+            ),
+            l2_regime_directional_veto_action=_validate_directional_veto_action(
+                str(params.get("l2_regime_directional_veto_action", _dc.l2_regime_directional_veto_action))
+            ),
+            l2_regime_directional_veto_max_fit_false_positive_rate=cls._validate_range(
+                "l2_regime_directional_veto_max_fit_false_positive_rate",
+                cls._as_float(
+                    params.get(
+                        "l2_regime_directional_veto_max_fit_false_positive_rate",
+                        _dc.l2_regime_directional_veto_max_fit_false_positive_rate,
+                    ),
+                    _dc.l2_regime_directional_veto_max_fit_false_positive_rate,
+                ),
+                0.0,
+                1.0,
+            ),
+            l2_regime_directional_veto_max_turnover_delta=cls._validate_range(
+                "l2_regime_directional_veto_max_turnover_delta",
+                cls._as_float(
+                    params.get(
+                        "l2_regime_directional_veto_max_turnover_delta",
+                        _dc.l2_regime_directional_veto_max_turnover_delta,
+                    ),
+                    _dc.l2_regime_directional_veto_max_turnover_delta,
+                ),
+                0.0,
+            ),
+            l2_regime_directional_veto_min_gross_ratio=cls._validate_range(
+                "l2_regime_directional_veto_min_gross_ratio",
+                cls._as_float(
+                    params.get(
+                        "l2_regime_directional_veto_min_gross_ratio",
+                        _dc.l2_regime_directional_veto_min_gross_ratio,
+                    ),
+                    _dc.l2_regime_directional_veto_min_gross_ratio,
+                ),
+                0.0,
+                1.0,
+            ),
         )
 
 
@@ -1336,7 +1440,7 @@ class Layer2SimulationDiagnostics:
 
 @dataclass(slots=True, frozen=True)
 class Layer3Result:
-    """Layer3 Holdout 최종 검증 결과.
+    """Layer3 Holdout 최종 검증 결과. [ADR_20260704_L2_DIRECTIONAL_VETO]
 
     Attributes:
         cagr: 전략 연평균 복리 수익률.
@@ -1423,6 +1527,7 @@ class Layer3Result:
     bars_short: int = 0
     major_symbol_diag: tuple[MajorSymbolSignalSizingSummary, ...] = ()
     major_symbol_incoherence: tuple[MajorSymbolIncoherenceSummary, ...] = ()
+    directional_veto_summary: tuple[DirectionalVetoSummary, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
