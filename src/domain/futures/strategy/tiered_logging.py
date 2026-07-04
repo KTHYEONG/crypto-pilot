@@ -68,6 +68,22 @@ def _format_major_symbol_diag_line(summary: Any) -> str:
     )
 
 
+def _format_directional_veto_line(summary: Any) -> str:
+    """[ADR_20260704_L2_DIRECTIONAL_VETO] Render a one-line directional veto summary."""
+
+    fire_pct = float(getattr(summary, "fire_rate", 0.0)) * 100.0
+    adverse_fire_pct = float(getattr(summary, "adverse_fire_rate", 0.0)) * 100.0
+    fp_pct = float(getattr(summary, "false_positive_rate", 0.0)) * 100.0
+    opp_cost = float(getattr(summary, "opportunity_cost", 0.0))
+    avoided = float(getattr(summary, "avoided_loss", 0.0))
+    net = float(getattr(summary, "net_veto_value", 0.0))
+    sym = str(getattr(summary, "symbol", "?"))
+    return (
+        f"{sym}: fire={fire_pct:.1f}% adverse_fire={adverse_fire_pct:.1f}% "
+        f"fp={fp_pct:.1f}% opp_cost={opp_cost:+.4f} avoided={avoided:+.4f} net={net:+.4f}"
+    )
+
+
 def _format_major_symbol_incoherence_line(summary: Any) -> str:
     lag_str = f"{summary.mean_reversal_lag_bars:.1f}bars" if (
         summary.mean_reversal_lag_bars == summary.mean_reversal_lag_bars
@@ -303,9 +319,9 @@ def format_layer1_gate_table(report: Any) -> str:
     display_gate_map = {
         "fold_cov": "Cov",
         "match_ratio": "Qual",
-        "sym_count": "Brd",
+        "sym_count": "Symbol-Breadth",
         "fold_ratio": "Fld",
-        "probe_lcb_bps": "Prf",
+        "probe_bps": "Prf",
     }
     
     n_checks = len(checks)
@@ -323,10 +339,13 @@ def format_layer1_gate_table(report: Any) -> str:
         threshold = getattr(check, "threshold", 0.0)
         parts.append(f"{display_key}:{value:.3f}({comparator}{threshold:.2f})")
         
+    blockers = tuple(getattr(report, "blockers", ()) or ())
     log_msg = (
         f"🏁 STATUS : {status_icon} {status_text} ({n_passed}/{n_checks} Passed)\n"
         f"  👉 {' | '.join(parts)}"
     )
+    if blockers:
+        log_msg += f"\n  🔒 BLOCKER: {', '.join(str(b) for b in blockers)}"
     return log_msg
 
 
@@ -795,6 +814,12 @@ def format_layer2_table(
         f"  [L2-MAJOR-INCOHERENCE] {_format_major_symbol_incoherence_line(_summary)}"
         for _summary in _major_incoherence_line
     )
+    _veto_summary = getattr(r, "directional_veto_summary", ())
+    if _veto_summary:
+        lines.extend(
+            f"  [L2-DIRECTIONAL-VETO] {_format_directional_veto_line(s)}"
+            for s in _veto_summary
+        )
     lines.append(sep)
 
 
@@ -1049,6 +1074,12 @@ def format_layer3_table(
             f"  {_status(True)} [L3-MAJOR-INCOHERENCE] {_format_major_symbol_incoherence_line(_summary)}"
             for _summary in _major_incoherence_line
         )
+        _veto_summary = getattr(r, "directional_veto_summary", ())
+        if _veto_summary:
+            lines.extend(
+                f"  {_status(True)} [L3-DIRECTIONAL-VETO] {_format_directional_veto_line(s)}"
+                for s in _veto_summary
+            )
 
     if has_opt:
         lines.append("")

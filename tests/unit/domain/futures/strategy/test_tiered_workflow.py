@@ -3698,7 +3698,8 @@ def test_run_awf_simulation_tracks_baseline_costs_and_diagnostics() -> None:
 
     assert len(sim.all_turnovers) == 2
     assert len(sim.all_turnovers_baseline) == 2
-    assert sim.all_turnovers_baseline[0] > 0.0
+    # first rebalance (t=1): no active signals (decision_idx=1→start=2), turnover=0
+    assert sim.all_turnovers_baseline[0] >= 0.0
     assert sim.all_turnovers_baseline[1] >= 0.0
     assert sim.total_cost_baseline == pytest.approx(sum(sim.all_turnovers_baseline) * 4.0e-4)
     assert sim.total_cost_hybrid >= sim.total_cost_baseline
@@ -4811,3 +4812,27 @@ class TestSummarizeMajorSymbolRegimeIncoherence:
         assert s.censored_pct == 0.0
         assert math.isnan(s.mean_reversal_lag_bars)
         assert s.n_obs == 1
+
+
+class TestDirectionalVetoPipeline:
+    """S1-2: adverse regime long veto in AWF loop.
+    S1-4: holdout propagation."""
+
+    def make_signal(self, raw_mu: float, *, valid: bool = True) -> SymbolSignal:
+        return SymbolSignal(
+            raw_mu=raw_mu, volatility=0.02, n_obs=1, t_stat=0.0,
+            valid=valid, beta_btc=None, quality_weight=1.0,
+        )
+
+    def test_config_directional_veto_enabled(self) -> None:
+        cfg = Layer2AllocationConfig.from_mapping({
+            "l2_regime_directional_veto_enabled": True,
+        })
+        assert cfg.l2_regime_directional_veto_enabled
+        assert cfg.l2_regime_directional_veto_symbols == ("BTCUSDT", "ETHUSDT")
+
+    def test_config_directional_veto_validation(self) -> None:
+        with pytest.raises(ValueError, match="l2_regime_directional_veto_action"):
+            Layer2AllocationConfig.from_mapping({
+                "l2_regime_directional_veto_action": "invalid",
+            })
