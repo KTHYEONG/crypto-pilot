@@ -4441,3 +4441,143 @@ def test_run_l3_holdout_per_symbol_long_short_defaults_to_empty_when_no_fold_att
 
     assert result.realized_price_long_by_symbol == ()
     assert result.realized_price_short_by_symbol == ()
+
+
+# ---------------------------------------------------------------------------
+# PART 6 (l3-major-symbol-signal-sizing-diagnostic.md): _run_awf_simulation
+# MAJOR_DIAG_SYMBOLS 캡처 검증
+# ---------------------------------------------------------------------------
+
+
+def test_run_awf_simulation_collects_major_symbol_snapshots_for_watched_symbols() -> None:
+    """Scenario 1: 워치리스트 심볼 포함 유니버스 → major_symbol_snapshots 존재."""
+    from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+        _run_awf_simulation,
+    )
+
+    n_bars = 5
+    n_syms = 2
+    symbols = ("BTCUSDT", "ETHUSDT")  # 둘 다 MAJOR_DIAG_SYMBOLS
+    datetimes = np.array(
+        [np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(n_bars)],
+        dtype="datetime64[ns]",
+    )
+    close = np.ones((n_bars, n_syms), dtype=np.float64) * 100.0
+
+    aligned = MagicMock()
+    aligned.close_2d = close
+    aligned.symbols = symbols
+    aligned.datetimes = datetimes
+    aligned.funding_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+    aligned.active_mask = np.ones((n_bars, n_syms), dtype=bool)
+    aligned.warm_mask = np.ones((n_bars, n_syms), dtype=bool)
+    aligned.entry_block_mask = np.zeros((n_bars, n_syms), dtype=bool)
+    aligned.kill_mask = np.zeros((n_bars, n_syms), dtype=bool)
+    aligned.execution_cost_bps_2d = np.full((n_bars, n_syms), 4.0, dtype=np.float64)
+    aligned.beta_vs_market_1d = np.zeros(n_syms, dtype=np.float64)
+
+    signal_batch = ValidatedSignalBatch(
+        events=(
+            ValidatedSignalEvent(
+                decision_idx=0, decision_time=datetimes[0], symbol="BTCUSDT",
+                strategy_id="trend:fast", activation_context="all", side=1,
+                expected_net_bps=5.0, expected_gross_bps=10.0,
+                q10_net_bps=0.0, q10_gross_bps=5.0,
+                q90_net_bps=10.0, q90_gross_bps=15.0,
+                expected_holding_bars=1, reliability=0.9,
+                registry_version="test", model_version="test",
+            ),
+            ValidatedSignalEvent(
+                decision_idx=0, decision_time=datetimes[0], symbol="ETHUSDT",
+                strategy_id="trend:fast", activation_context="all", side=1,
+                expected_net_bps=5.0, expected_gross_bps=10.0,
+                q10_net_bps=0.0, q10_gross_bps=5.0,
+                q90_net_bps=10.0, q90_gross_bps=15.0,
+                expected_holding_bars=1, reliability=0.9,
+                registry_version="test", model_version="test",
+            ),
+        ),
+        start_idx=1, end_idx=3,
+        symbols=symbols, registry_version="test", model_version="test",
+    )
+    awf_folds = (WFFold(fit_start=0, fit_end=1, cal_start=1, cal_end=1, oos_start=1, oos_end=4),)
+    config = Layer2AllocationConfig(k_rank=2, rebalance_bars=1, no_trade_band=0.0)
+    caps = PortfolioCaps(gross=2.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=10.0)
+
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+    sim = _run_awf_simulation(
+        cache=build_l2_simulation_cache(aligned, signal_batch, "4h"),
+        signal_batch=signal_batch, aligned=aligned,
+        awf_folds=awf_folds, config=config, caps=caps,
+    )
+
+    snapshots = sim.fold_attributions[0].major_symbol_snapshots
+    assert len(snapshots) > 0, "워치리스트 심볼이 유니버스에 있으면 snapshots가 비어 있으면 안 됨"
+    btc_snaps = [s for s in snapshots if s.symbol == "BTCUSDT"]
+    eth_snaps = [s for s in snapshots if s.symbol == "ETHUSDT"]
+    assert len(btc_snaps) > 0, "BTCUSDT 스냅샷이 최소 1개 존재해야 함"
+    assert len(eth_snaps) > 0, "ETHUSDT 스냅샷이 최소 1개 존재해야 함"
+    for s in btc_snaps:
+        assert s.symbol == "BTCUSDT"
+        assert isinstance(s.raw_mu, float)
+        assert isinstance(s.weight, float)
+        assert s.regime_code in (0, 1, 2)
+
+
+def test_run_awf_simulation_major_symbol_snapshots_empty_when_no_watched_symbol_present() -> None:
+    """Scenario 2: 워치리스트 없는 심볼만 유니버스에 존재 → major_symbol_snapshots == ()."""
+    from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+        _run_awf_simulation,
+    )
+
+    n_bars = 5
+    n_syms = 1
+    symbols = ("SOLUSDT",)  # MAJOR_DIAG_SYMBOLS에 없음
+    datetimes = np.array(
+        [np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(n_bars)],
+        dtype="datetime64[ns]",
+    )
+    close = np.ones((n_bars, n_syms), dtype=np.float64) * 100.0
+
+    aligned = MagicMock()
+    aligned.close_2d = close
+    aligned.symbols = symbols
+    aligned.datetimes = datetimes
+    aligned.funding_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+    aligned.active_mask = np.ones((n_bars, n_syms), dtype=bool)
+    aligned.warm_mask = np.ones((n_bars, n_syms), dtype=bool)
+    aligned.entry_block_mask = np.zeros((n_bars, n_syms), dtype=bool)
+    aligned.kill_mask = np.zeros((n_bars, n_syms), dtype=bool)
+    aligned.execution_cost_bps_2d = np.full((n_bars, n_syms), 4.0, dtype=np.float64)
+    aligned.beta_vs_market_1d = np.zeros(n_syms, dtype=np.float64)
+
+    signal_batch = ValidatedSignalBatch(
+        events=(
+            ValidatedSignalEvent(
+                decision_idx=0, decision_time=datetimes[0], symbol="SOLUSDT",
+                strategy_id="trend:fast", activation_context="all", side=1,
+                expected_net_bps=5.0, expected_gross_bps=10.0,
+                q10_net_bps=0.0, q10_gross_bps=5.0,
+                q90_net_bps=10.0, q90_gross_bps=15.0,
+                expected_holding_bars=1, reliability=0.9,
+                registry_version="test", model_version="test",
+            ),
+        ),
+        start_idx=1, end_idx=3,
+        symbols=symbols, registry_version="test", model_version="test",
+    )
+    awf_folds = (WFFold(fit_start=0, fit_end=1, cal_start=1, cal_end=1, oos_start=1, oos_end=4),)
+    config = Layer2AllocationConfig(k_rank=1, rebalance_bars=1, no_trade_band=0.0)
+    caps = PortfolioCaps(gross=2.0, per_symbol=1.0, net=1.0, beta=2.0, target_ann_vol=10.0)
+
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+    sim = _run_awf_simulation(
+        cache=build_l2_simulation_cache(aligned, signal_batch, "4h"),
+        signal_batch=signal_batch, aligned=aligned,
+        awf_folds=awf_folds, config=config, caps=caps,
+    )
+
+    snapshots = sim.fold_attributions[0].major_symbol_snapshots
+    assert snapshots == (), f"워치리스트 외 심볼만 있으면 ()여야 함, got {snapshots}"

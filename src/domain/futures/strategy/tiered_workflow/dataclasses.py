@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from src.domain.futures.strategy.cs_rank import SymbolSignal
     from src.domain.futures.strategy.tiered_workflow.awf_sim import (
         Layer2FoldAttribution,
+        MajorSymbolSignalSizingSummary,
         ReversalEpisode,
     )
 
@@ -385,6 +386,11 @@ class Layer2Result:
             (diagnostics-only, always-on).
         realized_price_short_by_symbol: Per-symbol short-leg realized price P&L,
             merged across fit/cal AWF folds (diagnostics-only, always-on).
+        major_symbol_diag: [ADR_20260704_L3_MAJORDIAG] Per-symbol signal-vs-sizing
+            mismatch ratios (mu_bullish_pct, weight_long_pct, stale_long_pct,
+            regime_cap_engaged_pct, mean_regime_risk_mult_when_long) for
+            MAJOR_DIAG_SYMBOLS, merged across fit/cal AWF folds (diagnostics-only,
+            always-on).
     """
 
     selected_last: frozenset[str]
@@ -433,6 +439,7 @@ class Layer2Result:
     realized_price_short: float = 0.0
     realized_price_long_by_symbol: tuple[tuple[str, float], ...] = ()
     realized_price_short_by_symbol: tuple[tuple[str, float], ...] = ()
+    major_symbol_diag: tuple[MajorSymbolSignalSizingSummary, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -1367,6 +1374,9 @@ class Layer3Result:
             long-leg realized price P&L over the OOS holdout (diagnostics-only).
         realized_price_short_by_symbol: Per-symbol short-leg realized price P&L
             over the OOS holdout (diagnostics-only).
+        major_symbol_diag: [ADR_20260704_L3_MAJORDIAG] Per-symbol signal-vs-sizing
+            mismatch ratios for MAJOR_DIAG_SYMBOLS over the OOS holdout
+            (diagnostics-only, always-on).
     """
 
     cagr: float
@@ -1409,6 +1419,7 @@ class Layer3Result:
     realized_price_short_by_symbol: tuple[tuple[str, float], ...] = ()
     bars_long: int = 0
     bars_short: int = 0
+    major_symbol_diag: tuple[MajorSymbolSignalSizingSummary, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
