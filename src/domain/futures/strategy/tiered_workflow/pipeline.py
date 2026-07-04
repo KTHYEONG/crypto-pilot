@@ -56,6 +56,7 @@ from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     compute_long_short_price_by_symbol,
     compute_long_short_realized_price,
     compute_mean_trend_efficiency,
+    summarize_major_symbol_signal_sizing,
 )
 
 # 내부 모듈 임포트
@@ -1643,6 +1644,7 @@ def _layer2_result_from_trial_eval(
     _mean_er, _er_corr = compute_mean_trend_efficiency(eval.fold_attributions)
     _price_long, _price_short = compute_long_short_realized_price(eval.fold_attributions)
     _long_by_sym, _short_by_sym = compute_long_short_price_by_symbol(eval.fold_attributions)
+    _major_diag = summarize_major_symbol_signal_sizing(eval.fold_attributions)
     return Layer2Result(
         selected_last=frozenset(eval.last_selected_symbols),
         weights_last=dict(zip(eval.last_selected_symbols, eval.last_weights, strict=False)),
@@ -1689,6 +1691,7 @@ def _layer2_result_from_trial_eval(
         realized_price_short=_price_short,
         realized_price_long_by_symbol=_long_by_sym,
         realized_price_short_by_symbol=_short_by_sym,
+        major_symbol_diag=_major_diag,
     )
 
 def run_l2_awf(
@@ -2086,6 +2089,9 @@ def run_l3_holdout(
         gate_passed = True
 
     _attr = sim.fold_attributions[0] if sim.fold_attributions else None
+    _major_diag = (
+        summarize_major_symbol_signal_sizing((_attr,)) if _attr is not None else ()
+    )
 
     mean_trend_efficiency = _attr.mean_trend_efficiency if _attr is not None else 0.0
     trend_efficiency_corr = _attr.trend_efficiency_corr if _attr is not None else 0.0
@@ -2147,6 +2153,7 @@ def run_l3_holdout(
         realized_price_short_by_symbol=realized_price_short_by_symbol,
         bars_long=bars_long,
         bars_short=bars_short,
+        major_symbol_diag=_major_diag,
     )
     if verbose:
         logger.info(
