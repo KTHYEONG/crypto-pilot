@@ -376,6 +376,10 @@ class Layer2Result:
             else 0.0 (uncollected).
         trend_efficiency_corr: OOS-bar-weighted mean ER-return correlation across
             fit/cal AWF folds (diagnostics-only). Requires L2_DIAG_ATTR=1.
+        realized_price_long: [ADR_20260704_L2L3_LONGSHORT] Summed long-leg realized
+            price P&L across fit/cal AWF folds (diagnostics-only, always-on).
+        realized_price_short: Summed short-leg realized price P&L across fit/cal
+            AWF folds (diagnostics-only, always-on).
     """
 
     selected_last: frozenset[str]
@@ -420,6 +424,8 @@ class Layer2Result:
     master_tf: str = "4h"
     mean_trend_efficiency: float = 0.0
     trend_efficiency_corr: float = 0.0
+    realized_price_long: float = 0.0
+    realized_price_short: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -1344,6 +1350,12 @@ class Layer3Result:
         regime_crisis_pct: OOS holdout window crisis regime % (diagnostics-only).
         mean_trend_efficiency: Mean Kaufman Efficiency Ratio over OOS (diagnostics-only).
         trend_efficiency_corr: Trend efficiency correlation with returns over OOS (diagnostics-only).
+        realized_price_long: [ADR_20260704_L2L3_LONGSHORT] Long-leg realized price
+            P&L over the OOS holdout (diagnostics-only, always-on).
+        realized_price_short: Short-leg realized price P&L over the OOS holdout
+            (diagnostics-only, always-on).
+        bars_long: Count of OOS bars with any nonzero long exposure.
+        bars_short: Count of OOS bars with any nonzero short exposure.
     """
 
     cagr: float
@@ -1380,6 +1392,10 @@ class Layer3Result:
     regime_crisis_pct: float = 0.0
     mean_trend_efficiency: float = 0.0
     trend_efficiency_corr: float = 0.0
+    realized_price_long: float = 0.0
+    realized_price_short: float = 0.0
+    bars_long: int = 0
+    bars_short: int = 0
 
 
 @dataclass(slots=True, frozen=True)

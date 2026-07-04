@@ -790,6 +790,16 @@ class TestFormatLayer2Table:
         assert "DSR" in result
         assert "❌" in result  # dsr_hybrid=0.50 < 0.60
 
+    def test_format_layer2_table_renders_long_short_pnl_split(self) -> None:
+        """Scenario 6: [L2-LONGSHORT] 라인에 long/short realized price가 정확히 렌더링."""
+        r2 = _make_l2_ns(realized_price_long=-0.020, realized_price_short=0.045)
+
+        result = format_layer2_table(r2)
+
+        assert "[L2-LONGSHORT]" in result
+        assert "long=-0.0200" in result
+        assert "short=+0.0450" in result
+
 
 
 class TestEvaluationWindowBottleneckVerdict:
@@ -1092,3 +1102,23 @@ class TestFormatLayer3TableRegimeDiagnostics:
         assert "crisis=65.0%" in result
         assert "mean=0.180" in result
         assert "corr=-0.310" in result
+
+    def test_format_layer3_table_renders_long_short_pnl_split(self) -> None:
+        """Scenario 5: [L3-LONGSHORT] 라인에 long/short price 및 bar 수가 정확히 렌더링."""
+        from types import SimpleNamespace
+
+        r3 = SimpleNamespace(
+            gate_passed=True,
+            mean_trend_efficiency=0.0,
+            realized_price_long=-0.085,
+            realized_price_short=0.012,
+            bars_long=38,
+            bars_short=9,
+        )
+
+        result = format_layer3_table(r3, holdout_start="2025-07-01", holdout_end="2026-01-01")
+
+        assert "[L3-LONGSHORT]" in result
+        assert "long=-0.0850" in result
+        assert "short=+0.0120" in result
+        assert "long=38 short=9" in result
