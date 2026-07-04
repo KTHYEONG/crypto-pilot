@@ -52,6 +52,7 @@ Test functions must be named descriptively using the **`test_[target]_[condition
 - **Immutability of Higher-Scoped Fixtures:** `session` or `module` scoped fixtures must be treated as read-only. Modifying their internal state inside a test function is strictly prohibited.
 - **Asynchronous Testing Standards:** Every asynchronous fixture must be decorated with `@pytest_asyncio.fixture`. Every asynchronous test function (`async def`) must be explicitly marked with `@pytest.mark.asyncio`. 
 - **Async Fixture Scope Trap:** Be highly cautious of Event Loop scope mismatches. Do not mix `scope="session"` standard fixtures with `scope="function"` async tests without explicit loop management.
+- **`caplog` Best Practice:** Always use pytest's built-in `caplog` fixture for log capture. Do NOT manually manipulate handler levels or `logger.propagate` flags across test bodies — this is a token-heavy anti-pattern that risks state leakage. Use `caplog.set_level(logging.DEBUG)` at the test level instead.
 
 ### 2.4 Co-modification Mapping
 Source files and test files must maintain a strict 1:1 mapping in folder structure and file naming to simplify discovery and maintainability.
@@ -96,10 +97,12 @@ The AI MUST design test cases based on rigorous testing theory BEFORE looking at
 - **Mock Only Boundaries:** Restrict mocking strictly to system boundaries: external Web APIs (e.g., Upbit, Binance), database queries, sockets, filesystems, and clock times.
 - **No Hallucinated API Schemas:** When mocking external exchange APIs (Binance, Upbit), the AI MUST NOT guess or hallucinate JSON response structures. The AI MUST use pre-recorded JSON responses located in the `tests/fixtures/` directory, or ask the user to provide the exact API response payload if missing.
 - **Do Not Mock Pure Logic:** Never mock internal domain models, utility functions, or pure mathematical modules. Doing so results in fragile tests that pass even when the actual implementation is broken.
-- **Enforce `autospec=True`:** When mocking classes or modules using `unittest.mock` or `pytest-mock`, always specify `autospec=True` (or `spec=True`). This prevents the AI from calling non-existent mock methods—a common hallucination.
+- **Use `autospec=True` (RECOMMENDED, not mandatory):** When mocking classes or modules, specifying `autospec=True` prevents hallucinated mock calls. However, skip it for private functions (e.g., `_build_*`, `_get_*`) whose signatures may change or be deleted; use simple `MagicMock` instead to avoid collection failures.
   ```python
-  # Good
+  # Boundary class mock: use autospec
   mock_client = mocker.patch("src.services.order.BinanceClient", autospec=True)
+  # Internal helper mock: skip autospec
+  mocker.patch("src.domain.module._helper_fn", return_value=None)
   ```
 - **Where to Patch Rule:** Always patch the target where it is *imported and used*, not where it is *defined*.
   - **Bad:** `mocker.patch("src.clients.BinanceClient")` (ineffective if `src.services.order` has already imported it).
@@ -130,9 +133,10 @@ graph TD
    ```
 2. **Missing Line Tracking:**
    If the coverage output identifies missing/unexecuted lines (indicated under the `Missing` column), the AI must immediately write targeted edge cases (e.g., negative parameters, exceptions, fallback branches) to cover those lines.
-3. **Risk-Adjusted Coverage Targets:**
-   - **Core Logic (Domain, Signal, Sizing, Portfolio):** Aim for **>= 90%**.
-   - **Boilerplate/Adapters/DTOs:** Aim for **>= 70%** or cover only the primary happy paths to avoid token waste.
+3. **Risk-Adjusted Coverage Targets (TIERED — apply strictly by layer):**
+   - **Core Logic (Domain, Signal, Sizing, Portfolio):** Aim for **>= 90%**. Run the self-correction loop here.
+   - **Adapters/Runners/DTOs/Boilerplate:** Aim for **>= 70%**. Do NOT run self-correction loop beyond 1 iteration for these layers. Running 3 full coverage iterations on adapter files is a token waste anti-pattern.
+   - **Entrypoints / CLI / `__init__.py`:** Skip coverage requirement entirely. Use `# pragma: no cover` where applicable.
 4. **[CRITICAL LIMIT] AI Loop Termination:**
    The AI MUST NOT execute the coverage self-correction loop more than **3 times**. If targets are not achieved within 3 iterations, the AI MUST stop, commit the current progress, and report the specific bottleneck to the user.
 5. **No Empty Assertions:**
