@@ -4324,3 +4324,120 @@ def test_run_l3_holdout_long_short_defaults_to_zero_when_no_fold_attributions() 
     assert result.realized_price_short == 0.0
     assert result.bars_long == 0
     assert result.bars_short == 0
+
+
+def test_run_l3_holdout_propagates_per_symbol_long_short_split() -> None:
+    """Scenario 5: fold_attributions[0]의 per-symbol tuples가 Layer3Result로 전파."""
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import Layer2FoldAttribution
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_l3_holdout
+
+    n_bars = 40
+    per_bar_ret = 1.10 ** (1.0 / n_bars) - 1.0
+    rets_hybrid = [per_bar_ret] * n_bars
+    rets_baseline = [per_bar_ret * 0.5] * n_bars
+    attr = Layer2FoldAttribution(
+        fold_idx=0, oos_bars=40, n_rebal=5,
+        realized_total=0.0, realized_price=0.0,
+        realized_funding=0.0, realized_cost=0.0,
+        expected_net=0.0, alpha_gap=0.0,
+        mean_gross_exp=0.5, mean_net_exp=0.3,
+        sleeves_active_mean=1.0, friction_pass_ratio=1.0,
+        throttle_mult_mean=1.0, dropped_below_cost=0,
+        netting_events=0,
+        realized_price_long=-0.085, realized_price_short=0.012,
+        bars_long=38, bars_short=9,
+        realized_price_long_by_symbol=(("ARUSDT", -0.021), ("ZRXUSDT", -0.018)),
+        realized_price_short_by_symbol=(("BTCUSDT", 0.012),),
+    )
+    sim_result = _make_awf_sim_result(
+        rets_hybrid=rets_hybrid,
+        rets_baseline=rets_baseline,
+        trade_count=42,
+        fold_attributions=(attr,),
+    )
+
+    def _make_mock_cache(n_bars: int = 100, n_syms: int = 1) -> MagicMock:
+        cache = MagicMock()
+        cache.vol_matrix_2d = np.full((n_bars, n_syms), 0.0001, dtype=np.float64)
+        cache.tradeable_mask_2d = np.ones((n_bars, n_syms), dtype=bool)
+        cache.hurdle_2d = np.full((n_bars, n_syms), 3.8, dtype=np.float64)
+        cache.funding_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.beta_1d = np.zeros(n_syms, dtype=np.float64)
+        cache.expected_gross_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.expected_net_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.holding_bars_2d = np.ones((n_bars, n_syms), dtype=np.float64)
+        cache.side_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.quality_weight_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
+        return cache
+
+    with patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+        return_value=sim_result,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    ):
+        result = run_l3_holdout(
+            signal_batch=_make_l3_signal_batch(),
+            aligned=MagicMock(symbols=("BTC",)),
+            holdout_span=(0, n_bars),
+            config=Layer2AllocationConfig(),
+            caps=_l3_caps(),
+            verbose=False,
+        )
+
+    long_expected = (("ARUSDT", pytest.approx(-0.021)), ("ZRXUSDT", pytest.approx(-0.018)))
+    assert result.realized_price_long_by_symbol == long_expected
+    short_expected = (("BTCUSDT", pytest.approx(0.012)),)
+    assert result.realized_price_short_by_symbol == short_expected
+
+
+def test_run_l3_holdout_per_symbol_long_short_defaults_to_empty_when_no_fold_attributions() -> None:
+    """Scenario 6: fold_attributions=() → per-symbol tuples가 빈 tuple."""
+    from src.domain.futures.strategy.tiered_workflow.pipeline import run_l3_holdout
+
+    n_bars = 40
+    per_bar_ret = 1.10 ** (1.0 / n_bars) - 1.0
+    rets_hybrid = [per_bar_ret] * n_bars
+    rets_baseline = [per_bar_ret * 0.5] * n_bars
+    sim_result = _make_awf_sim_result(
+        rets_hybrid=rets_hybrid,
+        rets_baseline=rets_baseline,
+        trade_count=42,
+        fold_attributions=(),
+    )
+
+    def _make_mock_cache(n_bars: int = 100, n_syms: int = 1) -> MagicMock:
+        cache = MagicMock()
+        cache.vol_matrix_2d = np.full((n_bars, n_syms), 0.0001, dtype=np.float64)
+        cache.tradeable_mask_2d = np.ones((n_bars, n_syms), dtype=bool)
+        cache.hurdle_2d = np.full((n_bars, n_syms), 3.8, dtype=np.float64)
+        cache.funding_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.beta_1d = np.zeros(n_syms, dtype=np.float64)
+        cache.expected_gross_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.expected_net_bps_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.holding_bars_2d = np.ones((n_bars, n_syms), dtype=np.float64)
+        cache.side_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.quality_weight_2d = np.zeros((n_bars, n_syms), dtype=np.float64)
+        cache.signal_mask_2d = np.zeros((n_bars, n_syms), dtype=bool)
+        return cache
+
+    with patch(
+        "src.domain.futures.strategy.tiered_workflow.pipeline._run_awf_simulation",
+        return_value=sim_result,
+    ), patch(
+        "src.domain.futures.strategy.tiered_workflow.awf_sim.build_l2_simulation_cache",
+        return_value=_make_mock_cache(n_bars=n_bars, n_syms=1),
+    ):
+        result = run_l3_holdout(
+            signal_batch=_make_l3_signal_batch(),
+            aligned=MagicMock(symbols=("BTC",)),
+            holdout_span=(0, n_bars),
+            config=Layer2AllocationConfig(),
+            caps=_l3_caps(),
+            verbose=False,
+        )
+
+    assert result.realized_price_long_by_symbol == ()
+    assert result.realized_price_short_by_symbol == ()

@@ -53,6 +53,7 @@ from src.domain.futures.strategy.tiered_logging import (
 from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     _run_awf_simulation,
     _stack_oos_signals,
+    compute_long_short_price_by_symbol,
     compute_long_short_realized_price,
     compute_mean_trend_efficiency,
 )
@@ -1641,6 +1642,7 @@ def _layer2_result_from_trial_eval(
     """
     _mean_er, _er_corr = compute_mean_trend_efficiency(eval.fold_attributions)
     _price_long, _price_short = compute_long_short_realized_price(eval.fold_attributions)
+    _long_by_sym, _short_by_sym = compute_long_short_price_by_symbol(eval.fold_attributions)
     return Layer2Result(
         selected_last=frozenset(eval.last_selected_symbols),
         weights_last=dict(zip(eval.last_selected_symbols, eval.last_weights, strict=False)),
@@ -1685,6 +1687,8 @@ def _layer2_result_from_trial_eval(
         trend_efficiency_corr=_er_corr,
         realized_price_long=_price_long,
         realized_price_short=_price_short,
+        realized_price_long_by_symbol=_long_by_sym,
+        realized_price_short_by_symbol=_short_by_sym,
     )
 
 def run_l2_awf(
@@ -2087,6 +2091,8 @@ def run_l3_holdout(
     trend_efficiency_corr = _attr.trend_efficiency_corr if _attr is not None else 0.0
     realized_price_long = _attr.realized_price_long if _attr is not None else 0.0
     realized_price_short = _attr.realized_price_short if _attr is not None else 0.0
+    realized_price_long_by_symbol = _attr.realized_price_long_by_symbol if _attr is not None else ()
+    realized_price_short_by_symbol = _attr.realized_price_short_by_symbol if _attr is not None else ()
     bars_long = _attr.bars_long if _attr is not None else 0
     bars_short = _attr.bars_short if _attr is not None else 0
 
@@ -2137,6 +2143,8 @@ def run_l3_holdout(
         trend_efficiency_corr=trend_efficiency_corr,
         realized_price_long=realized_price_long,
         realized_price_short=realized_price_short,
+        realized_price_long_by_symbol=realized_price_long_by_symbol,
+        realized_price_short_by_symbol=realized_price_short_by_symbol,
         bars_long=bars_long,
         bars_short=bars_short,
     )
