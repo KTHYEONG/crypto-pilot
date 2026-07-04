@@ -6,7 +6,7 @@ description: Translate logic and test blueprints into working Python code follow
 # Skill: Implement (TDD Executor)
 
 ## Purpose
-Translate the logical Blueprint (`docs/specs/*.md`) into working Python code using a **TDD (Test-Driven Development)** cycle. You are the "Execution Builder" (designed to run efficiently under a lower-reasoning model). Adhere strictly to the defined contract and test matrix in the spec.
+Translate the logical Blueprint (`docs/specs/*.md`) into working Python code using a **TDD (Test-Driven Development)** cycle. You are the "Execution Builder". Adhere strictly to the defined contract and test matrix in the spec.
 
 ## Execution Rules
 
@@ -30,7 +30,8 @@ Translate the logical Blueprint (`docs/specs/*.md`) into working Python code usi
   - Run `uv run pytest -k "test_name"` until they all **PASS**.
   - **Loop Limit:** Limit this trial-and-error cycle to **max 3 iterations**. If pytest continues to fail after 3 attempts, **STOP** and return to the `spec` phase to refine the design.
 - **Step 4: Refactor (Refactor Phase)**
-  - Clean up code duplication, optimize types, and ensure docstrings match standards, while maintaining a green test suite.
+  - Clean up code duplication, optimize local variables, and ensure docstrings match standards while maintaining a green test suite.
+  - **Refactor Limits (CRITICAL)**: Do NOT modify any public signatures, interfaces, or module dependencies during this phase. Focus strictly on internal clean-up and resolving Ruff/Mypy compliance.
 
 ### 3. Local L1 Validation
 - For modified files (both src and test), run:
