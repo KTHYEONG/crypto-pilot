@@ -132,6 +132,27 @@ class MajorSymbolSignalSizingSummary:
 
 
 @dataclass(slots=True, frozen=True)
+class MajorSymbolIncoherenceSummary:
+    """[ADR_20260704_L3_INCOHERENCE] regime-mu 방향 불일치 및 reversal-lag 진단.
+
+    Attributes:
+        symbol: 워치리스트 심볼.
+        n_obs: 집계에 사용된 스냅샷 개수.
+        regime_adverse_mu_bullish_pct: P(raw_mu>0 | regime_code∈{bear,crisis}).
+        n_transitions: fold 내 관측된 bull(0)→bear/crisis(1,2) 전이 횟수.
+        mean_reversal_lag_bars: 전이 후 raw_mu<=0까지 평균 bar 수 (NaN if no uncensored).
+        censored_pct: fold 종료까지 미전환 전이 비율.
+    """
+
+    symbol: str
+    n_obs: int
+    regime_adverse_mu_bullish_pct: float
+    n_transitions: int
+    mean_reversal_lag_bars: float
+    censored_pct: float
+
+
+@dataclass(slots=True, frozen=True)
 class Layer2FoldAttribution:
     fold_idx: int
     oos_bars: int
@@ -273,6 +294,97 @@ def summarize_major_symbol_signal_sizing(
             mu_bullish_pct=mu_bullish_pct, weight_long_pct=weight_long_pct,
             stale_long_pct=stale_long_pct, regime_cap_engaged_pct=regime_cap_engaged_pct,
             mean_regime_risk_mult_when_long=mean_mult_when_long,
+        ))
+
+    order = {s: i for i, s in enumerate(MAJOR_DIAG_SYMBOLS)}
+    results.sort(key=lambda r: order.get(r.symbol, len(order)))
+    return tuple(results)
+
+
+def summarize_major_symbol_regime_incoherence(
+    fold_attributions: tuple[Layer2FoldAttribution, ...],
+) -> tuple[MajorSymbolIncoherenceSummary, ...]:
+    """[ADR_20260704_L3_INCOHERENCE] Fold별 major_symbol_snapshots에서 regime-mu 불일치/reversal-lag 집계.
+
+    Fold 경계를 넘어 스캔하지 않음(fold=독립 OOS 구간, look-ahead/leak 방지).
+    각 fold 내부에서 t 오름차순 스캔 후 심볼 단위로 결과만 병합.
+
+    Time Complexity: O(sum of snapshots per fold).
+    Space Complexity: O(unique watched symbols).
+    """
+    accum: dict[str, dict[str, int | float]] = {}
+
+    for fa in fold_attributions:
+        by_symbol: dict[str, list[MajorSymbolRebalanceSnapshot]] = {}
+        for snap in fa.major_symbol_snapshots:
+            by_symbol.setdefault(snap.symbol, []).append(snap)
+
+        for symbol, snaps in by_symbol.items():
+            snaps.sort(key=lambda s: s.t)
+            if symbol not in accum:
+                accum[symbol] = {
+                    "n_obs": 0,
+                    "adverse_bar_count": 0,
+                    "adverse_bull_count": 0,
+                    "n_censored": 0,
+                    "lag_sum": 0.0,
+                    "n_lag_obs": 0,
+                }
+
+            c = accum[symbol]
+            c["n_obs"] += len(snaps)
+
+            for snap in snaps:
+                if snap.regime_code in (1, 2):
+                    c["adverse_bar_count"] += 1
+                    if snap.raw_mu > 0:
+                        c["adverse_bull_count"] += 1
+
+            transition_starts: list[int] = []
+            for i in range(1, len(snaps)):
+                prev = snaps[i - 1]
+                cur = snaps[i]
+                if prev.regime_code == 0 and cur.regime_code in (1, 2):
+                    transition_starts.append(cur.t)
+
+            for t0 in transition_starts:
+                t0_idx = next(j for j in range(len(snaps)) if snaps[j].t >= t0)
+                resolved = False
+                for j in range(t0_idx, len(snaps)):
+                    if snaps[j].raw_mu <= 0.0:
+                        c["lag_sum"] += snaps[j].t - t0
+                        c["n_lag_obs"] += 1
+                        resolved = True
+                        break
+                if not resolved:
+                    c["n_censored"] += 1
+
+    results: list[MajorSymbolIncoherenceSummary] = []
+    for symbol, c in accum.items():
+        n_transitions = int(c["n_censored"]) + int(c["n_lag_obs"])
+        regime_adverse_mu_bullish_pct = (
+            int(c["adverse_bull_count"]) / int(c["adverse_bar_count"])
+            if int(c["adverse_bar_count"]) > 0
+            else 0.0
+        )
+        mean_reversal_lag_bars = (
+            float(c["lag_sum"]) / int(c["n_lag_obs"])
+            if int(c["n_lag_obs"]) > 0
+            else float("nan")
+        )
+        censored_pct = (
+            int(c["n_censored"]) / n_transitions
+            if n_transitions > 0
+            else 0.0
+        )
+
+        results.append(MajorSymbolIncoherenceSummary(
+            symbol=symbol,
+            n_obs=int(c["n_obs"]),
+            regime_adverse_mu_bullish_pct=regime_adverse_mu_bullish_pct,
+            n_transitions=n_transitions,
+            mean_reversal_lag_bars=mean_reversal_lag_bars,
+            censored_pct=censored_pct,
         ))
 
     order = {s: i for i, s in enumerate(MAJOR_DIAG_SYMBOLS)}

@@ -68,6 +68,18 @@ def _format_major_symbol_diag_line(summary: Any) -> str:
     )
 
 
+def _format_major_symbol_incoherence_line(summary: Any) -> str:
+    lag_str = f"{summary.mean_reversal_lag_bars:.1f}bars" if (
+        summary.mean_reversal_lag_bars == summary.mean_reversal_lag_bars
+    ) else "n/a"
+    return (
+        f"{summary.symbol}: adverse_mu_bull={summary.regime_adverse_mu_bullish_pct*100:.1f}% "
+        f"transitions={summary.n_transitions} "
+        f"lag={lag_str} "
+        f"censored={summary.censored_pct*100:.1f}%"
+    )
+
+
 def _format_symbol_preview(symbols: Sequence[Any], *, max_symbols: int = 8) -> str:
     preview = [str(sym) for sym in symbols[: max(max_symbols, 0)]]
     if not preview:
@@ -778,6 +790,11 @@ def format_layer2_table(
         f"  [L2-MAJOR-DIAG] {_format_major_symbol_diag_line(_summary)}"
         for _summary in _major_diag_line
     )
+    _major_incoherence_line = getattr(r, "major_symbol_incoherence", ())
+    lines.extend(
+        f"  [L2-MAJOR-INCOHERENCE] {_format_major_symbol_incoherence_line(_summary)}"
+        for _summary in _major_incoherence_line
+    )
     lines.append(sep)
 
 
@@ -1026,6 +1043,11 @@ def format_layer3_table(
         lines.extend(
             f"  {_status(True)} [L3-MAJOR-DIAG] {_format_major_symbol_diag_line(_summary)}"
             for _summary in _major_diag_line
+        )
+        _major_incoherence_line = getattr(r, "major_symbol_incoherence", ())
+        lines.extend(
+            f"  {_status(True)} [L3-MAJOR-INCOHERENCE] {_format_major_symbol_incoherence_line(_summary)}"
+            for _summary in _major_incoherence_line
         )
 
     if has_opt:
