@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from src.domain.futures.strategy.tiered_workflow.l2_meta import _build_bucket_reliability
+from src.domain.futures.strategy.tiered_workflow.l2_meta import (
+    _build_bucket_reliability,
+    _parse_meta_group_ids,
+)
 
 
 def test_regime_bucket_reliability_allows_consistent_fit_cal() -> None:
@@ -120,3 +123,45 @@ class TestBearEdgePerBarBps:
         assert bear_edge_per_bar_bps(0.015, 100) == pytest.approx(1.5)
         assert bear_edge_per_bar_bps(-0.30, 200) == pytest.approx(-15.0)
         assert bear_edge_per_bar_bps(5.0, 0) == 0.0
+
+
+# ── _parse_meta_group_ids ────────────────────────────────────────────
+
+
+class TestParseMetaGroupIds:
+    """All error paths are covered by defensive fallback (no pytest.raises needed)."""
+
+    # Scenario 1: Happy Path
+    def test_parse_meta_group_ids_splits_family_and_tf_from_canonical_format(
+        self,
+    ) -> None:
+        result = _parse_meta_group_ids("trend_ma:ema_12_72_4h")
+        assert result == ("trend_ma", "4h")
+
+    # Scenario 1b: Family literal containing hour pattern
+    def test_parse_meta_group_ids_preserves_family_literal_containing_hour_pattern(
+        self,
+    ) -> None:
+        result = _parse_meta_group_ids("macd_4h:base_variant_1h")
+        assert result == ("macd_4h", "1h")
+
+    # Scenario 2a: Variant without tf suffix
+    def test_parse_meta_group_ids_defaults_tf_unknown_when_variant_has_no_suffix(
+        self,
+    ) -> None:
+        result = _parse_meta_group_ids("trend_ma:ema_12_72")
+        assert result == ("trend_ma", "unknown")
+
+    # Scenario 2b: Legacy no-colon format (regression guard)
+    def test_parse_meta_group_ids_preserves_legacy_no_colon_format_correctly(
+        self,
+    ) -> None:
+        result = _parse_meta_group_ids("trend_ma_4h")
+        assert result == ("trend_ma", "4h")
+
+    # Scenario 2c: Empty string
+    def test_parse_meta_group_ids_returns_unknown_pair_for_empty_string(
+        self,
+    ) -> None:
+        result = _parse_meta_group_ids("")
+        assert result == ("unknown", "unknown")
