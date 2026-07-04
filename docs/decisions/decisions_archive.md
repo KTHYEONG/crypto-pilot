@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-01] [TASK_UNI_SYNC] [ADR_20260701_UNI_SYNC]
+- **Context/Why:** Separation of fast/full historical database sync modes caused operational errors and stale caches.
+- **Resolution/What:** Consolidated CLI arguments to auto mode and added file modification time invalidation checks.
+- **Impact:** Incremental sync runs automatically, rebuilding enriched cache only when raw parquets update.
+
 ## Layer 1 (Signal & Core SWF) Historical Log
 
 ---
