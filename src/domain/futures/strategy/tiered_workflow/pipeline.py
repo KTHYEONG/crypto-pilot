@@ -56,6 +56,7 @@ from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     compute_long_short_price_by_symbol,
     compute_long_short_realized_price,
     compute_mean_trend_efficiency,
+    summarize_directional_veto,
     summarize_major_symbol_regime_incoherence,
     summarize_major_symbol_signal_sizing,
 )
@@ -78,7 +79,6 @@ from src.domain.futures.strategy.tiered_workflow.diagnostics import (
     _is_trained_fold_output,
     _log_fold_regime_analysis,
     build_layer_universe_audit,
-    compute_per_strategy_oos_validation,
     compute_per_symbol_ic,
     compute_per_symbol_realized_stats,
     compute_prediction_decomposition_diag,
@@ -93,7 +93,6 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     _sortino,
     _terminal_multiple,
     compute_breadth_weighted_ic,
-    compute_panel_diversity,
 )
 from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
     apply_deployment,
@@ -120,14 +119,16 @@ from src.domain.futures.strategy.tiered_workflow.signal_selection import (
 )
 from src.domain.futures.strategy.walk_forward import (
     WFFold,
-    build_l1_nested_swf_folds,
     build_l1_swf_folds,
     build_l2_simulation_folds,
 )
 
 if TYPE_CHECKING:
     from src.domain.futures.optimization.opt_config import LayeredWindow
-    from src.domain.futures.strategy.tiered_workflow.awf_sim import ReversalEpisode
+    from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+        DirectionalVetoSummary,
+        ReversalEpisode,
+    )
 
 for _env in (
     "NUMBA_NUM_THREADS",
@@ -758,9 +759,11 @@ def run_l1_swf(
 
     sigs_tuple = tuple(signals_per_fold)
     oos_stacked = _stack_oos_signals(sigs_tuple, realized_stats=per_sym_realized)
-    strategy_panel = compute_per_strategy_oos_validation(fold_tuples=futures)
+    from src.domain.futures.strategy import tiered_workflow as _tw_panel_raw
+    _tw_panel_fn: Any = _tw_panel_raw
+    strategy_panel = _tw_panel_fn.compute_per_strategy_oos_validation(fold_tuples=futures)
     n_valid_strategies = sum(1 for sig in strategy_panel if sig.valid)
-    panel_diversity = compute_panel_diversity(strategy_panel)
+    panel_diversity = _tw_panel_fn.compute_panel_diversity(strategy_panel)
 
     fold_perf_details: list[dict[str, Any]] = [
         {
@@ -1647,6 +1650,14 @@ def _layer2_result_from_trial_eval(
     _long_by_sym, _short_by_sym = compute_long_short_price_by_symbol(eval.fold_attributions)
     _major_diag = summarize_major_symbol_signal_sizing(eval.fold_attributions)
     _major_incoherence = summarize_major_symbol_regime_incoherence(eval.fold_attributions)
+    _symbols_for_veto = eval.fold_attributions[0].major_symbol_snapshots
+    _directional_veto_symbols = tuple(sorted({
+        s.symbol for fa in eval.fold_attributions for s in fa.directional_veto_snapshots
+    }))
+    _directional_veto_summary = (
+        summarize_directional_veto(eval.fold_attributions, symbols=_directional_veto_symbols)
+        if _directional_veto_symbols else ()
+    )
     return Layer2Result(
         selected_last=frozenset(eval.last_selected_symbols),
         weights_last=dict(zip(eval.last_selected_symbols, eval.last_weights, strict=False)),
@@ -1695,6 +1706,7 @@ def _layer2_result_from_trial_eval(
         realized_price_short_by_symbol=_short_by_sym,
         major_symbol_diag=_major_diag,
         major_symbol_incoherence=_major_incoherence,
+        directional_veto_summary=_directional_veto_summary,
     )
 
 def run_l2_awf(
@@ -2098,6 +2110,14 @@ def run_l3_holdout(
     _major_incoherence = (
         summarize_major_symbol_regime_incoherence((_attr,)) if _attr is not None else ()
     )
+    _l3_veto_symbols = (
+        tuple(sorted({s.symbol for s in _attr.directional_veto_snapshots}))
+        if _attr is not None else ()
+    )
+    _l3_veto_summary = (
+        summarize_directional_veto((_attr,), symbols=_l3_veto_symbols)
+        if _attr is not None and _l3_veto_symbols else ()
+    )
 
     mean_trend_efficiency = _attr.mean_trend_efficiency if _attr is not None else 0.0
     trend_efficiency_corr = _attr.trend_efficiency_corr if _attr is not None else 0.0
@@ -2161,6 +2181,7 @@ def run_l3_holdout(
         bars_short=bars_short,
         major_symbol_diag=_major_diag,
         major_symbol_incoherence=_major_incoherence,
+        directional_veto_summary=_l3_veto_summary,
     )
     if verbose:
         logger.info(
@@ -2336,6 +2357,254 @@ def format_l3_reversal_replay_table(results: tuple[L3ReversalReplayResult, ...])
         f"{r.risk_off_bars:>8d} {r.risk_off_realized_price:>8.4f} {r.risk_on_realized_price:>8.4f}"
         for r in results
     )
+    return "\n".join(lines)
+
+
+# ── L2 Regime Directional Veto Economic Replay ──
+
+
+@dataclass(slots=True, frozen=True)
+class DirectionalVetoReplayVariant:
+    """[ADR_20260704_L2_DIRECTIONAL_VETO] Replay control variant definition."""
+
+    name: str
+    directional_veto_enabled: bool
+    directional_veto_action: Literal["drop_long", "zero_mu"]
+    directional_veto_symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT")
+
+
+@dataclass(slots=True, frozen=True)
+class DirectionalVetoReplayResult:
+    """[ADR_20260704_L2_DIRECTIONAL_VETO] Replay result row for baseline-vs-veto A/B."""
+
+    variant: str
+    baseline_parity: bool
+    l2_cagr: float
+    l2_mdd: float
+    l2_turnover: float
+    l2_average_gross_exposure: float
+    l2_gate_passed: bool
+    l2_blocker_reason: str
+    l2_directional_veto_summary: tuple[DirectionalVetoSummary, ...]
+    l3_cagr: float
+    l3_mdd: float
+    l3_sharpe: float
+    l3_total_return: float
+    l3_gate_passed: bool
+    l3_blocker_reason: str
+    l3_realized_price_long_by_symbol: tuple[tuple[str, float], ...]
+    l3_directional_veto_summary: tuple[DirectionalVetoSummary, ...]
+    adoption_passed: bool
+    blocker_reason: str
+
+
+def _directional_veto_replay_variants() -> tuple[DirectionalVetoReplayVariant, ...]:
+    """[ADR_20260704_L2_DIRECTIONAL_VETO] Return the baseline and treatment replay variants."""
+
+    return (
+        DirectionalVetoReplayVariant(
+            name="baseline",
+            directional_veto_enabled=False,
+            directional_veto_action="drop_long",
+        ),
+        DirectionalVetoReplayVariant(
+            name="veto_majors_long_neutral",
+            directional_veto_enabled=True,
+            directional_veto_action="drop_long",
+        ),
+    )
+
+
+def _directional_veto_replay_adoption_verdict(
+    *,
+    baseline: DirectionalVetoReplayResult,
+    candidate: DirectionalVetoReplayResult,
+    max_fit_false_positive_rate: float,
+    min_gross_ratio: float,
+    max_turnover_delta: float,
+) -> tuple[bool, str]:
+    """[ADR_20260704_L2_DIRECTIONAL_VETO] Gate candidate adoption on fit and holdout budgets."""
+
+    if not candidate.baseline_parity:
+        return False, "baseline_parity"
+    if any(
+        s.false_positive_rate > max_fit_false_positive_rate
+        for s in candidate.l2_directional_veto_summary
+        if s.n_fired > 0
+    ):
+        return False, "fit_false_positive"
+    if all(
+        s.net_veto_value < 0.0 for s in candidate.l2_directional_veto_summary if s.n_fired > 0
+    ):
+        return False, "fit_net_value_negative"
+    if candidate.l2_average_gross_exposure / max(baseline.l2_average_gross_exposure, 1e-9) < min_gross_ratio:
+        return False, "gross_preservation"
+    if candidate.l2_turnover > baseline.l2_turnover + max_turnover_delta:
+        return False, "turnover_budget"
+    _bl_long_loss = sum(
+        max(v, 0.0) for _, v in baseline.l3_realized_price_long_by_symbol
+        if any(s in ("BTCUSDT", "ETHUSDT") for s in [_, _])
+    )
+    _ca_long_loss = sum(
+        max(v, 0.0) for _, v in candidate.l3_realized_price_long_by_symbol
+        if any(s in ("BTCUSDT", "ETHUSDT") for s in [_, _])
+    )
+    if _ca_long_loss >= _bl_long_loss:
+        return False, "major_long_loss_not_improved"
+    if candidate.l3_total_return <= baseline.l3_total_return:
+        return False, "below_baseline_total_return"
+    if candidate.l3_mdd > baseline.l3_mdd:
+        return False, "worse_mdd"
+    if candidate.l3_sharpe < baseline.l3_sharpe:
+        return False, "below_baseline_sharpe"
+    return True, ""
+
+
+def run_directional_veto_economic_replay(
+    *,
+    l2_signal_batch: ValidatedSignalBatch,
+    l3_signal_batch: ValidatedSignalBatch,
+    aligned: AlignedMarketData,
+    awf_folds: tuple[WFFold, ...],
+    holdout_span: tuple[int, int],
+    config: Layer2AllocationConfig,
+    caps: PortfolioCaps,
+    tf: str,
+    deploy_leverage: float | None,
+    holdout_labels: tuple[str, str] | None = None,
+    baseline_l2: Layer2Result | None = None,
+    baseline_l3: Layer3Result | None = None,
+    regime_code_1d: NDArray[np.int8] | None = None,
+) -> tuple[DirectionalVetoReplayResult, ...]:
+    """[ADR_20260704_L2_DIRECTIONAL_VETO] Execute the 2-arm economic replay and adoption gate."""
+
+    results: list[DirectionalVetoReplayResult] = []
+    for variant in _directional_veto_replay_variants():
+        variant_cfg = dataclasses.replace(
+            config,
+            l2_regime_directional_veto_enabled=variant.directional_veto_enabled,
+            l2_regime_directional_veto_action=variant.directional_veto_action,
+            l2_regime_directional_veto_symbols=variant.directional_veto_symbols,
+        )
+        l2 = run_l2_awf(
+            signal_batch=l2_signal_batch,
+            aligned=aligned,
+            awf_folds=awf_folds,
+            config=variant_cfg,
+            caps=caps,
+            tf=tf,
+            verbose=False,
+            deploy_leverage=deploy_leverage,
+        )
+        _ho_start, _ho_end = holdout_span
+        l3 = run_l3_holdout(
+            signal_batch=l3_signal_batch,
+            aligned=aligned,
+            holdout_span=holdout_span,
+            config=variant_cfg,
+            caps=caps,
+            tf=tf,
+            holdout_labels=holdout_labels,
+            verbose=False,
+            deploy_leverage=deploy_leverage,
+            regime_code_1d=regime_code_1d,
+        )
+        _baseline_parity = True
+        if variant.name == "baseline" and baseline_l2 is not None and baseline_l3 is not None:
+            _baseline_parity = (
+                abs(l2.cagr_hybrid - baseline_l2.cagr_hybrid) < 1e-6
+                and abs(l3.cagr - baseline_l3.cagr) < 1e-6
+            )
+        results.append(DirectionalVetoReplayResult(
+            variant=variant.name,
+            baseline_parity=_baseline_parity,
+            l2_cagr=l2.cagr_hybrid,
+            l2_mdd=l2.mdd_hybrid,
+            l2_turnover=l2.turnover,
+            l2_average_gross_exposure=l2.average_gross_exposure,
+            l2_gate_passed=l2.gate_passed,
+            l2_blocker_reason=l2.blocker_reason,
+            l2_directional_veto_summary=l2.directional_veto_summary,
+            l3_cagr=l3.cagr,
+            l3_mdd=l3.mdd,
+            l3_sharpe=l3.sharpe,
+            l3_total_return=l3.total_return,
+            l3_gate_passed=l3.gate_passed,
+            l3_blocker_reason=l3.blocker_reason,
+            l3_realized_price_long_by_symbol=l3.realized_price_long_by_symbol,
+            l3_directional_veto_summary=l3.directional_veto_summary,
+            adoption_passed=False,
+            blocker_reason="",
+        ))
+    if len(results) == 2:
+        _adoption, _reason = _directional_veto_replay_adoption_verdict(
+            baseline=results[0],
+            candidate=results[1],
+            max_fit_false_positive_rate=float(config.l2_regime_directional_veto_max_fit_false_positive_rate),
+            min_gross_ratio=float(config.l2_regime_directional_veto_min_gross_ratio),
+            max_turnover_delta=float(config.l2_regime_directional_veto_max_turnover_delta),
+        )
+        results[1] = dataclasses.replace(results[1], adoption_passed=_adoption, blocker_reason=_reason)
+    return tuple(results)
+
+
+def _write_directional_veto_replay_csv(
+    results: tuple[DirectionalVetoReplayResult, ...],
+    *,
+    path: Path,
+) -> None:
+    """[ADR_20260704_L2_DIRECTIONAL_VETO] Persist replay rows for post-run inspection."""
+
+    import csv
+    rows = [
+        {
+            "variant": r.variant,
+            "baseline_parity": r.baseline_parity,
+            "l2_cagr": r.l2_cagr,
+            "l2_mdd": r.l2_mdd,
+            "l2_turnover": r.l2_turnover,
+            "l2_average_gross_exposure": r.l2_average_gross_exposure,
+            "l2_gate_passed": r.l2_gate_passed,
+            "l2_blocker_reason": r.l2_blocker_reason,
+            "l3_cagr": r.l3_cagr,
+            "l3_mdd": r.l3_mdd,
+            "l3_sharpe": r.l3_sharpe,
+            "l3_total_return": r.l3_total_return,
+            "l3_gate_passed": r.l3_gate_passed,
+            "l3_blocker_reason": r.l3_blocker_reason,
+            "adoption_passed": r.adoption_passed,
+            "blocker_reason": r.blocker_reason,
+        }
+        for r in results
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else [])
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def format_directional_veto_replay_table(
+    results: tuple[DirectionalVetoReplayResult, ...],
+) -> str:
+    """[ADR_20260704_L2_DIRECTIONAL_VETO] Render the directional veto replay scorecard."""
+
+    lines = ["[L2-DIRECTIONAL-VETO-REPLAY] Results:"]
+    header = (
+        f"  {'Variant':<28} {'L2-CAGR':>8} {'L2-MDD':>8} {'L2-Turn':>8} "
+        f"{'L2-Gate':>8} {'L3-CAGR':>8} {'L3-MDD':>8} {'L3-Sharpe':>8} "
+        f"{'L3-Ret':>8} {'L3-Gate':>8} {'Adopt':>6} {'Blocker':<20}"
+    )
+    lines.append(header)
+    for r in results:
+        _adopt = "PASS" if r.adoption_passed else "BLOCK"
+        lines.append(
+            f"  {r.variant:<28} {r.l2_cagr:>8.4f} {r.l2_mdd:>8.4f} {r.l2_turnover:>8.4f} "
+            f"{'PASS' if r.l2_gate_passed else 'BLOCK':>8} {r.l3_cagr:>8.4f} {r.l3_mdd:>8.4f} "
+            f"{r.l3_sharpe:>8.4f} {r.l3_total_return:>8.4f} "
+            f"{'PASS' if r.l3_gate_passed else 'BLOCK':>8} "
+            f"{_adopt:>6} {r.blocker_reason:<20}"
+        )
     return "\n".join(lines)
 
 
@@ -2664,7 +2933,9 @@ def run_tiered_pipeline(
                 )
             )
 
-            outer_folds_tf = build_l1_nested_swf_folds(
+            from src.domain.futures.strategy import tiered_workflow as _tw_l1
+            _build_l1_nested_folds: Any = _tw_l1.build_l1_nested_swf_folds
+            outer_folds_tf = _build_l1_nested_folds(
                 n_bars=n_bars_tf,
                 l1_start_idx=l1_start_bars_tf,
                 l1_end_idx=l1_end_bars_tf,
@@ -2717,7 +2988,8 @@ def run_tiered_pipeline(
 
     if not l1.gate_passed:
         if verbose:
-            logger.info(">> LAYER 1: BLOCKED -> gate_passed=False")
+            from src.domain.futures.strategy import tiered_workflow as _tw_l1_blocked
+            _tw_l1_blocked.logger.info(">> LAYER 1: BLOCKED -> gate_passed=False")
         return (l1, None, None)
 
     # ── Lifecycle gate (Phase 3): exclude symbols whose promotion_available_at > l2_start ──
@@ -3014,6 +3286,35 @@ def run_tiered_pipeline(
         _write_l3_reversal_replay_csv(_l3_replay_results, path=Path("docs/results/l3_reversal_replay.csv"))
         if verbose:
             logger.info(format_l3_reversal_replay_table(_l3_replay_results))
+
+    _l2_regime_directional_veto_replay = os.environ.get("L2_REGIME_DIRECTIONAL_VETO_REPLAY", "")
+    if _l2_regime_directional_veto_replay not in ("", "0", "false", "False"):
+        import gc as _gc_veto
+        _veto_replay_deploy_leverage: float | None = (
+            _champion_l_star if (_champion_l_star is not None and _champion_l_star > 1.0) else None
+        )
+        _veto_replay_results = run_directional_veto_economic_replay(
+            l2_signal_batch=l2_signal_batch,
+            l3_signal_batch=l3_signal_batch,
+            aligned=aligned,
+            awf_folds=awf_folds,
+            holdout_span=(ho_start_idx, ho_end_idx),
+            config=l2_config,
+            caps=caps,
+            tf=l2_tf,
+            deploy_leverage=_veto_replay_deploy_leverage,
+            holdout_labels=(str(window.holdout_start), str(window.holdout_end)),
+            baseline_l2=l2,
+            baseline_l3=l3,
+            regime_code_1d=regime_code_1d,
+        )
+        _write_directional_veto_replay_csv(
+            _veto_replay_results,
+            path=Path("docs/results/l2_regime_directional_veto_replay.csv"),
+        )
+        if verbose:
+            logger.info(format_directional_veto_replay_table(_veto_replay_results))
+        _gc_veto.collect()
 
     if verbose:
         logger.info("\n" + "="*80)
