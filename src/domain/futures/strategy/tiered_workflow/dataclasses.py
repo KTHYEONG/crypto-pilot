@@ -371,6 +371,11 @@ class Layer2Result:
         recent_fold_cagr: 최신 non-empty fold deployed CAGR.
         recent_fold_mdd: 최신 non-empty fold deployed MDD.
         master_tf: Annualization timeframe used for deployment metrics (SSOT).
+        mean_trend_efficiency: [ADR_20260704_L3_REGIME] OOS-bar-weighted mean Kaufman
+            ER across fit/cal AWF folds (diagnostics-only). Requires L2_DIAG_ATTR=1,
+            else 0.0 (uncollected).
+        trend_efficiency_corr: OOS-bar-weighted mean ER-return correlation across
+            fit/cal AWF folds (diagnostics-only). Requires L2_DIAG_ATTR=1.
     """
 
     selected_last: frozenset[str]
@@ -413,6 +418,8 @@ class Layer2Result:
     recent_fold_cagr: float = 0.0
     recent_fold_mdd: float = 0.0
     master_tf: str = "4h"
+    mean_trend_efficiency: float = 0.0
+    trend_efficiency_corr: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -1332,6 +1339,11 @@ class Layer3Result:
         risk_off_realized_price: Realized price impact during risk-off bars.
         risk_on_realized_price: Realized price impact during risk-on bars.
         reversal_kill_active: Whether L2_REVERSAL_KILL env was active for this run.
+        regime_bull_pct: [ADR_20260704_L3_REGIME] OOS holdout window bull regime % (diagnostics-only).
+        regime_bear_pct: OOS holdout window bear regime % (diagnostics-only).
+        regime_crisis_pct: OOS holdout window crisis regime % (diagnostics-only).
+        mean_trend_efficiency: Mean Kaufman Efficiency Ratio over OOS (diagnostics-only).
+        trend_efficiency_corr: Trend efficiency correlation with returns over OOS (diagnostics-only).
     """
 
     cagr: float
@@ -1363,6 +1375,11 @@ class Layer3Result:
     risk_on_realized_price: float = 0.0
     reversal_kill_active: bool = False
     risk_off_episodes: tuple[ReversalEpisode, ...] = ()
+    regime_bull_pct: float = 0.0
+    regime_bear_pct: float = 0.0
+    regime_crisis_pct: float = 0.0
+    mean_trend_efficiency: float = 0.0
+    trend_efficiency_corr: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)

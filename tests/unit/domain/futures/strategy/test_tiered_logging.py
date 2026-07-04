@@ -683,6 +683,35 @@ class TestFormatLayer2Table:
         assert "PASS" in result
         assert "Period: 2025-01-01 ~ 2025-03-31" in result
 
+    def test_renders_l2_regime_trend_efficiency_diagnostic(self) -> None:
+        """[L2-REGIME] 라인에 fit/cal ER mean/corr 정확한 substring 렌더링."""
+        r2 = _make_l2_ns(mean_trend_efficiency=0.218, trend_efficiency_corr=-0.016)
+
+        result = format_layer2_table(r2)
+
+        assert "[L2-REGIME]" in result
+        assert "mean=0.218" in result
+        assert "corr=-0.016" in result
+
+    def test_awf_folds_render_trend_efficiency_column(self) -> None:
+        """Fold detail 라인에 per-fold ER 컬럼이 렌더링된다."""
+        r2 = _make_l2_ns()
+        folds = [
+            {
+                "fold": 1,
+                "sharpe": 1.4,
+                "mdd": 0.11,
+                "cagr": 0.32,
+                "pass": True,
+                "period": "2025-01-01 ~ 2025-03-31",
+                "trend_efficiency": 0.305,
+            }
+        ]
+
+        result = format_layer2_table(r2, awf_folds=folds)
+
+        assert "ER: 0.305" in result
+
     def test_awf_folds_render_selected_symbols(self) -> None:
         r2 = _make_l2_ns()
         folds = [
@@ -1038,3 +1067,28 @@ class TestRenderFamilyRejectionFunnel:
         lines = render_family_rejection_funnel(failed)
 
         assert any("quality_weight_zerox1" in line for line in lines)
+
+
+class TestFormatLayer3TableRegimeDiagnostics:
+    """Scenario 4: format_layer3_table renders regime and trend efficiency diagnostic."""
+
+    def test_renders_regime_and_trend_efficiency_diagnostic(self) -> None:
+        """New diagnostic block for regime mix and Kaufman ER renders exact substrings."""
+        from types import SimpleNamespace
+
+        r3 = SimpleNamespace(
+            gate_passed=True,
+            regime_bull_pct=10.0,
+            regime_bear_pct=25.0,
+            regime_crisis_pct=65.0,
+            mean_trend_efficiency=0.18,
+            trend_efficiency_corr=-0.31,
+        )
+
+        result = format_layer3_table(r3, holdout_start="2025-07-01", holdout_end="2026-01-01")
+
+        assert "bull=10.0%" in result
+        assert "bear=25.0%" in result
+        assert "crisis=65.0%" in result
+        assert "mean=0.180" in result
+        assert "corr=-0.310" in result
