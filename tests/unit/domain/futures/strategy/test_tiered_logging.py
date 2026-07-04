@@ -1174,3 +1174,75 @@ class TestFormatTopSymbolContributions:
         """Scenario 9: empty pairs → 'n/a'."""
         result = _format_top_symbol_contributions((), ascending=True)
         assert result == "n/a"
+
+
+class TestFormatMajorSymbolDiagLine:
+    """_format_major_symbol_diag_line 포맷 및 예외 처리."""
+
+    def test_format_major_symbol_diag_line_success(self) -> None:
+        """Scenario 1: 정상 입력 → 포맷 일치."""
+        from src.domain.futures.strategy.tiered_logging import (
+            _format_major_symbol_diag_line,
+        )
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            MajorSymbolSignalSizingSummary,
+        )
+        summary = MajorSymbolSignalSizingSummary(
+            symbol="BTCUSDT", n_obs=4, mu_bullish_pct=0.5, weight_long_pct=0.75,
+            stale_long_pct=0.25, regime_cap_engaged_pct=0.25,
+            mean_regime_risk_mult_when_long=0.93333,
+        )
+        result = _format_major_symbol_diag_line(summary)
+        assert result == (
+            "BTCUSDT: mu_bull=50.0% w_long=75.0% stale_long=25.0% "
+            "cap_engaged=25.0% avg_mult=0.933"
+        )
+
+    def test_format_major_symbol_diag_line_zero_obs_no_crash(self) -> None:
+        """Scenario 2: n_obs=0 → 크래시 없음."""
+        from src.domain.futures.strategy.tiered_logging import (
+            _format_major_symbol_diag_line,
+        )
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            MajorSymbolSignalSizingSummary,
+        )
+        summary = MajorSymbolSignalSizingSummary(
+            symbol="ETHUSDT", n_obs=0, mu_bullish_pct=0.0, weight_long_pct=0.0,
+            stale_long_pct=0.0, regime_cap_engaged_pct=0.0,
+            mean_regime_risk_mult_when_long=0.0,
+        )
+        result = _format_major_symbol_diag_line(summary)
+        assert result == (
+            "ETHUSDT: mu_bull=0.0% w_long=0.0% stale_long=0.0% "
+            "cap_engaged=0.0% avg_mult=0.000"
+        )
+
+
+class TestLayerTableOmitsMajorDiag:
+    """format_layer2_table / format_layer3_table — major_diag 속성 없을 때 생략."""
+
+    def test_format_layer2_table_omits_major_diag_lines_when_attribute_absent(self) -> None:
+        """Scenario 3a: major_symbol_diag 속성 없는 최소 result → [L2-MAJOR-DIAG] 라인 없음."""
+        r = SimpleNamespace(
+            sharpe_hybrid=1.5, sharpe_baseline=1.0, mdd_hybrid=0.20, mdd_baseline=0.25,
+            cagr_hybrid=0.40, mar_hybrid=2.0, fold_pass_ratio=0.8, turnover=5.0,
+            friction_pass_pct=0.75, gate_passed=True, blocker_reason="",
+            psr_hybrid=0.9, dsr_hybrid=0.8, mean_trend_efficiency=0.3,
+            trend_efficiency_corr=0.1, realized_price_long=0.0, realized_price_short=0.0,
+            cvar_95_hybrid=0.04, sortino_hybrid=2.0, terminal_multiple=1.5,
+            total_pnl_pct=0.5, trade_count=50, risk_utilization=0.8,
+        )
+        result = format_layer2_table(r)
+        assert "[L2-MAJOR-DIAG]" not in result
+
+    def test_format_layer3_table_omits_major_diag_lines_when_attribute_absent(self) -> None:
+        """Scenario 3b: major_symbol_diag 속성 없는 최소 L3 result → [L3-MAJOR-DIAG] 라인 없음."""
+        r = SimpleNamespace(
+            cagr=0.40, mdd=0.20, sharpe=1.5, mar=2.0,
+            cagr_baseline=0.30, mdd_baseline=0.25, sharpe_baseline=1.0, mar_baseline=1.2,
+            gate_passed=True, blocker_reason="", total_return=0.5, equity_multiple=1.5,
+            sortino=2.0, sortino_baseline=1.5, n_trades=50, cvar95=0.04,
+            avg_gross_exposure=1.2, mean_trend_efficiency=0.3, trend_efficiency_corr=0.1,
+        )
+        result = format_layer3_table(r)
+        assert "[L3-MAJOR-DIAG]" not in result

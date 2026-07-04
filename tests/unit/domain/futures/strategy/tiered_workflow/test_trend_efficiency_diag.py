@@ -202,3 +202,90 @@ class TestAssembleFoldAttributionPerSymbol:
         )
         assert result.realized_price_long_by_symbol == ()
         assert result.realized_price_short_by_symbol == ()
+
+
+class TestSummarizeMajorSymbolSignalSizing:
+    """summarize_major_symbol_signal_sizing computes signal/sizing mismatch ratios."""
+
+    def test_summarize_major_symbol_signal_sizing_computes_signal_sizing_mismatch_ratios(self) -> None:
+        """Scenario 1: 단일 fold BTCUSDT 4개 스냅샷 → 정확한 비율."""
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            MajorSymbolRebalanceSnapshot,
+            MajorSymbolSignalSizingSummary,
+            summarize_major_symbol_signal_sizing,
+        )
+        S = MajorSymbolRebalanceSnapshot
+        snapshots = (
+            S(t=0, symbol="BTCUSDT", raw_mu=5.0, weight=0.10, regime_code=0, regime_risk_mult=1.0),
+            S(t=1, symbol="BTCUSDT", raw_mu=3.0, weight=0.10, regime_code=0, regime_risk_mult=1.0),
+            S(t=2, symbol="BTCUSDT", raw_mu=-2.0, weight=0.10, regime_code=1, regime_risk_mult=0.8),
+            S(t=3, symbol="BTCUSDT", raw_mu=-1.0, weight=0.0, regime_code=1, regime_risk_mult=0.8),
+        )
+        fold_attributions = (
+            Layer2FoldAttribution(
+                fold_idx=0, oos_bars=4, n_rebal=4, realized_total=0.0, realized_price=0.0,
+                realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
+                mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
+                friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
+                netting_events=0, major_symbol_snapshots=snapshots,
+            ),
+        )
+        result = summarize_major_symbol_signal_sizing(fold_attributions)
+        assert result == (
+            MajorSymbolSignalSizingSummary(
+                symbol="BTCUSDT", n_obs=4,
+                mu_bullish_pct=pytest.approx(0.5),
+                weight_long_pct=pytest.approx(0.75),
+                stale_long_pct=pytest.approx(0.25),
+                regime_cap_engaged_pct=pytest.approx(0.25),
+                mean_regime_risk_mult_when_long=pytest.approx(0.93333, rel=1e-4),
+            ),
+        )
+
+    def test_summarize_major_symbol_signal_sizing_merges_folds_and_guards_zero_long_bars(self) -> None:
+        """Scenario 2a: 여러 fold 병합 + 0-division guard."""
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            MajorSymbolRebalanceSnapshot,
+            summarize_major_symbol_signal_sizing,
+        )
+        S = MajorSymbolRebalanceSnapshot
+        fold_a = Layer2FoldAttribution(
+            fold_idx=0, oos_bars=2, n_rebal=2, realized_total=0.0, realized_price=0.0,
+            realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
+            mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
+            friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
+            netting_events=0,
+            major_symbol_snapshots=(
+                S(t=0, symbol="BTCUSDT", raw_mu=1.0, weight=0.0, regime_code=0, regime_risk_mult=1.0),
+                S(t=1, symbol="BTCUSDT", raw_mu=2.0, weight=0.0, regime_code=0, regime_risk_mult=1.0),
+            ),
+        )
+        fold_b = Layer2FoldAttribution(
+            fold_idx=1, oos_bars=2, n_rebal=2, realized_total=0.0, realized_price=0.0,
+            realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
+            mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
+            friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
+            netting_events=0,
+            major_symbol_snapshots=(
+                S(t=0, symbol="BTCUSDT", raw_mu=3.0, weight=0.10, regime_code=0, regime_risk_mult=1.0),
+                S(t=1, symbol="BTCUSDT", raw_mu=4.0, weight=0.10, regime_code=0, regime_risk_mult=1.0),
+                S(t=0, symbol="ETHUSDT", raw_mu=0.0, weight=0.0, regime_code=0, regime_risk_mult=1.0),
+                S(t=1, symbol="ETHUSDT", raw_mu=0.0, weight=0.0, regime_code=0, regime_risk_mult=1.0),
+            ),
+        )
+        result = summarize_major_symbol_signal_sizing((fold_a, fold_b))
+        result_dict = {r.symbol: r for r in result}
+        assert result_dict["BTCUSDT"].n_obs == 4
+        assert result_dict["BTCUSDT"].weight_long_pct == pytest.approx(0.5)
+        assert result_dict["ETHUSDT"].n_obs == 2
+        assert result_dict["ETHUSDT"].weight_long_pct == 0.0
+        assert result_dict["ETHUSDT"].regime_cap_engaged_pct == 0.0
+        assert result_dict["ETHUSDT"].mean_regime_risk_mult_when_long == 0.0
+
+    def test_summarize_major_symbol_signal_sizing_returns_empty_tuple_for_no_folds(self) -> None:
+        """Scenario 2b: 빈 fold_attributions → () ."""
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            summarize_major_symbol_signal_sizing,
+        )
+        result = summarize_major_symbol_signal_sizing(())
+        assert result == ()
