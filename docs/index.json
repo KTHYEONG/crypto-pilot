@@ -21,7 +21,7 @@
   },
   "src/domain/futures/strategy/tiered_workflow/dataclasses.py": {
     "architecture": "docs/architecture/layer2.md",
-    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_trend_efficiency_diag.py"
+    "testing": "tests/unit/domain/futures/strategy/test_tiered_workflow.py"
   },
   "src/domain/futures/strategy/tiered_logging.py": {
     "architecture": "docs/architecture/layer3.md",
@@ -34,6 +34,10 @@
   "src/application/futures/runner/tf_probe_scoped.py": {
     "architecture": "docs/architecture/layer3.md",
     "testing": "tests/unit/application/futures/runner/test_tf_probe_scoped.py"
+  },
+  "src/domain/futures/strategy/tiered_workflow/tf_validation_repair.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/domain/futures/strategy/tiered_workflow/test_tf_validation_repair.py"
   },
   "src/application/futures/runner/cli.py": {
     "architecture": "docs/architecture/layer3.md",
