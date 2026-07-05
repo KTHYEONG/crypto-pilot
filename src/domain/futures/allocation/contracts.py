@@ -530,6 +530,10 @@ class Layer2AllocationConfig:
     l2_regime_reliability_enabled: bool = False
     l2_regime_reliability_window: int = 2
     l2_regime_reliability_floor: float = 0.2
+    # L2 Regime-Conditional Weight (Rule 2 — 상호 배타: l2_intra_symbol_divergence_enabled와 동시 True 불가)
+    l2_regime_conditional_weight_enabled: bool = False
+    # L1 Intra-Symbol Divergence Dampener (Track 1 — BTC)
+    l2_intra_symbol_divergence_enabled: bool = False
     l2_entry_cooldown_bars: int = 12
     l2_entry_spike_penalty_weight: float = 0.05
     l2_entry_spike_warn_threshold: float = 0.20
@@ -1018,6 +1022,12 @@ class Layer2AllocationConfig:
             ),
             l2_regime_pooled_is_passthrough=bool(
                 params.get("l2_regime_pooled_is_passthrough", _dc.l2_regime_pooled_is_passthrough)
+            ),
+            l2_regime_conditional_weight_enabled=bool(
+                params.get("l2_regime_conditional_weight_enabled", _dc.l2_regime_conditional_weight_enabled)
+            ),
+            l2_intra_symbol_divergence_enabled=bool(
+                params.get("l2_intra_symbol_divergence_enabled", _dc.l2_intra_symbol_divergence_enabled)
             ),
             l2_regime_min_fit_n_floor=int(
                 cls._validate_range(
