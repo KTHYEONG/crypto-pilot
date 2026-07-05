@@ -14,7 +14,7 @@ from src.domain.futures.strategy.tiered_workflow.awf_sim import (
 )
 from src.domain.futures.strategy.timeframe_probe import TfProbeManifest
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("opt_main_futures")
 
 TfProbeDecision = Literal["diagnostic_only"]
 TfCandidateDecision = Literal["keep_existing", "reject_candidate", "review_candidate"]
@@ -72,11 +72,35 @@ class MajorSymbolGapEvidence:
 
 @dataclass(frozen=True, slots=True)
 class ValidationParityReport:
+    """Final TF validation parity report with probe, main, and major-gap evidence.
+
+    [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
+    """
+
     probe: tuple[TfProbeDiagnosticVerdict, ...]
     main_tf: tuple[MainCompatibleTfEvidence, ...]
     major_gaps: tuple[MajorSymbolGapEvidence, ...]
     decision: Literal["diagnostic_only", "candidate_review_required"]
     blockers: tuple[str, ...]
+
+
+ValidationPhase = Literal["l1", "l2", "l3"]
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationParityCapture:
+    """Pre-clear TF validation parity capture used to finalize parity reports.
+
+    [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
+    """
+
+    probe: tuple[TfProbeDiagnosticVerdict, ...]
+    main_tf: tuple[MainCompatibleTfEvidence, ...]
+    registry_census: tuple[tuple[str, MajorSymbolRegistryCensusEntry], ...]
+    blockers: tuple[str, ...]
+    decision: Literal["diagnostic_only", "candidate_review_required"]
+    candidate_tfs: tuple[str, ...]
+    symbols: tuple[str, ...] = MAJOR_DIAG_SYMBOLS
 
 
 def _edge_quality_bps(r: PerTfL1Result) -> float:
@@ -533,16 +557,28 @@ def build_validation_parity_report(
     )
 
 
-def log_validation_parity_report(report: ValidationParityReport) -> None:
+def log_validation_parity_report(
+    report: ValidationParityReport,
+    *,
+    phase: ValidationPhase = "l1",
+    log_level: int = logging.INFO,
+) -> None:
+    """Emit the parity report as structured logger lines.
+
+    [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
+    """
+
     for v in report.probe:
-        logger.info(
+        logger.log(
+            log_level,
             "[TF-VALIDATION-PARITY] tf=%s probe_winning=%d decision=%s",
             v.tf,
             v.n_winning,
             v.decision,
         )
     for ev in report.main_tf:
-        logger.info(
+        logger.log(
+            log_level,
             "[TF-VALIDATION-PARITY] tf=%s main_edge=%.2f n_ready=%d decision=%s",
             ev.tf,
             ev.edge_quality_bps,
@@ -550,7 +586,8 @@ def log_validation_parity_report(report: ValidationParityReport) -> None:
             ev.candidate_decision,
         )
     for g in report.major_gaps:
-        logger.info(
+        logger.log(
+            log_level,
             "[L1-MAJOR-GAP] symbol=%s tf=%s family=%s gap=%s action=%s",
             g.symbol,
             g.tf,
@@ -560,4 +597,122 @@ def log_validation_parity_report(report: ValidationParityReport) -> None:
         )
     if report.blockers:
         for b in report.blockers:
-            logger.info("[TF-VALIDATION-PARITY] blocker=%s", b)
+            logger.log(log_level, "[TF-VALIDATION-PARITY] blocker=%s", b)
+
+
+def build_validation_parity_capture(
+    *,
+    probe_manifest: TfProbeManifest | None,
+    per_tf_l1: Mapping[str, PerTfL1Result],
+    candidate_tfs: Sequence[str] = ("1h", "2h"),
+    symbols: tuple[str, ...] = MAJOR_DIAG_SYMBOLS,
+) -> ValidationParityCapture:
+    """Capture pre-clear probe/main/census evidence without retaining per_tf_l1 objects.
+
+    [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
+    """
+    probe = summarize_tf_probe_diagnostics(probe_manifest)
+    main_tf = summarize_main_compatible_tf_evidence(per_tf_l1, candidate_tfs=candidate_tfs)
+    registry_census = build_multi_tf_major_registry_census(
+        per_tf_l1, (), symbols=symbols,
+    )
+    blockers: list[str] = []
+    if not per_tf_l1:
+        blockers.append("missing_per_tf_l1")
+    if not main_tf:
+        blockers.append("missing_main_tf_evidence")
+    blockers.extend(
+        f"candidate_tf_missing_main_l1:{ctf}"
+        for ctf in candidate_tfs
+        if ctf not in per_tf_l1
+    )
+    needs_review = any(ev.candidate_decision == "review_candidate" for ev in main_tf)
+    decision: Literal["diagnostic_only", "candidate_review_required"] = (
+        "candidate_review_required" if needs_review else "diagnostic_only"
+    )
+    return ValidationParityCapture(
+        probe=probe,
+        main_tf=main_tf,
+        registry_census=registry_census,
+        blockers=tuple(blockers),
+        decision=decision,
+        candidate_tfs=tuple(candidate_tfs),
+        symbols=symbols,
+    )
+
+
+def build_major_symbol_gap_evidence_from_census(
+    *,
+    registry_census: Sequence[tuple[str, MajorSymbolRegistryCensusEntry]],
+    observed_sleeve_summaries: Sequence[MajorSymbolSleeveContributionSummary],
+    symbols: tuple[str, ...] = MAJOR_DIAG_SYMBOLS,
+    families: tuple[str, ...] | None = None,
+    adverse_sign_mismatch_threshold: float = 0.50,
+) -> tuple[MajorSymbolGapEvidence, ...]:
+    """Build gap evidence from pre-clear census plus later observed sleeve summaries."""
+    observed_pairs: set[tuple[str, str]] = _extract_target_pairs_from_summaries(
+        observed_sleeve_summaries
+    )
+    evidence: list[MajorSymbolGapEvidence] = []
+    seen_pairs: set[tuple[str, str, str]] = set()
+    for tf, entry in registry_census:
+        if families is not None and entry.family not in families:
+            continue
+        key = (entry.symbol, tf, entry.family)
+        if key in seen_pairs:
+            continue
+        seen_pairs.add(key)
+        is_observed = (entry.symbol, entry.family) in observed_pairs
+        if not entry.observed_active_in_holdout and is_observed:
+            entry = MajorSymbolRegistryCensusEntry(
+                symbol=entry.symbol,
+                family=entry.family,
+                registry_mean_incremental_bps=entry.registry_mean_incremental_bps,
+                hard_eligible=entry.hard_eligible,
+                observed_active_in_holdout=True,
+            )
+        gap = classify_major_symbol_gap_evidence(
+            tf=tf,
+            entry=entry,
+            symbol=entry.symbol,
+            family=entry.family,
+            observed_sleeve_summaries=observed_sleeve_summaries,
+            adverse_sign_mismatch_threshold=adverse_sign_mismatch_threshold,
+        )
+        evidence.append(gap)
+    return tuple(evidence)
+
+
+def finalize_validation_parity_capture(
+    capture: ValidationParityCapture,
+    *,
+    observed_sleeve_summaries: Sequence[MajorSymbolSleeveContributionSummary] = (),
+    adverse_sign_mismatch_threshold: float = 0.50,
+) -> ValidationParityReport:
+    """Convert pre-clear capture into final report using later L2/L3 observed sleeve evidence.
+
+    [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
+    """
+    major_gaps = build_major_symbol_gap_evidence_from_census(
+        registry_census=capture.registry_census,
+        observed_sleeve_summaries=observed_sleeve_summaries,
+        symbols=capture.symbols,
+        adverse_sign_mismatch_threshold=adverse_sign_mismatch_threshold,
+    )
+    return ValidationParityReport(
+        probe=capture.probe,
+        main_tf=capture.main_tf,
+        major_gaps=major_gaps,
+        decision=capture.decision,
+        blockers=capture.blockers,
+    )
+
+
+def _should_emit_validation_parity_report(
+    *,
+    verbose: bool,
+    phase: ValidationPhase,
+    report: ValidationParityReport | None,
+) -> bool:
+    """Return True when the report should be visible in real runs."""
+    return bool(verbose and report is not None)

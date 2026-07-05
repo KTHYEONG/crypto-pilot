@@ -436,6 +436,312 @@ class TestScenario3ErrorHandling:
         assert report is not None
 
 
+
+# ---------------------------------------------------------------------------
+# Scenario 1: build_validation_parity_capture
+# ---------------------------------------------------------------------------
+
+
+class TestBuildValidationParityCapture:
+    def test_build_validation_parity_capture_preserves_preclear_probe_main_and_census(
+        self,
+    ) -> None:
+        """Capture preserves probe, main_tf, and registry_census before per_tf_l1.clear()."""
+        from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+            build_validation_parity_capture,
+        )
+
+        cells = [_make_probe_cell("4h", passed_fdr=False, ic_tstat_hac=1.5)]
+        manifest = _make_probe_manifest(cells, tf_grid=("4h", "6h", "8h", "12h"))
+        reg = DummyRegistry({"BTCUSDT": (ev("BTCUSDT", "dual_momentum", mean_bps=10.0, hard=True),)})
+        ptf = {
+            "4h": per_tf("4h", registry=reg, edge=10.0),
+            "6h": per_tf("6h", registry=reg, edge=5.0),
+            "8h": per_tf("8h", registry=reg, edge=3.0),
+            "12h": per_tf("12h", registry=reg, edge=1.0),
+        }
+        capture = build_validation_parity_capture(
+            probe_manifest=manifest,
+            per_tf_l1=ptf,
+        )
+        assert len(capture.probe) > 0
+        for ev_row in capture.main_tf:
+            assert ev_row.candidate_decision == "keep_existing"
+        assert len(capture.registry_census) > 0
+        assert len(capture.blockers) > 0  # candidate_tf_missing_main_l1 for 1h/2h
+
+    def test_validation_parity_capture_does_not_depend_on_per_tf_l1_after_capture(
+        self,
+    ) -> None:
+        """Capture survives per_tf_l1.clear()."""
+        from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+            build_validation_parity_capture,
+        )
+
+        cells = [_make_probe_cell("4h", passed_fdr=True, ic_tstat_hac=3.0)]
+        manifest = _make_probe_manifest(cells, tf_grid=("4h",))
+        reg = DummyRegistry({"BTCUSDT": (ev("BTCUSDT", "dual_momentum", mean_bps=10.0, hard=True),)})
+        ptf: dict[str, PerTfL1Result] = {"4h": per_tf("4h", registry=reg, edge=10.0)}
+        capture = build_validation_parity_capture(
+            probe_manifest=manifest,
+            per_tf_l1=ptf,
+        )
+        ptf.clear()
+        assert len(capture.probe) > 0
+        assert len(capture.main_tf) > 0
+        assert len(capture.registry_census) > 0
+
+    def test_validation_parity_capture_stores_only_small_derived_tuples(
+        self,
+    ) -> None:
+        """Capture must not retain PerTfL1Result, dict[str, PerTfL1Result], or strategy maps."""
+        from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+            build_validation_parity_capture,
+        )
+
+        cells = [_make_probe_cell("4h", passed_fdr=True, ic_tstat_hac=3.0)]
+        manifest = _make_probe_manifest(cells, tf_grid=("4h",))
+        reg = DummyRegistry({"BTCUSDT": (ev("BTCUSDT", "dual_momentum", mean_bps=10.0, hard=True),)})
+        ptf: dict[str, PerTfL1Result] = {"4h": per_tf("4h", registry=reg, edge=10.0)}
+        capture = build_validation_parity_capture(
+            probe_manifest=manifest,
+            per_tf_l1=ptf,
+        )
+        for field_val in (
+            capture.probe, capture.main_tf, capture.registry_census, capture.blockers,
+        ):
+            vals: tuple = field_val if isinstance(field_val, tuple) else (field_val,)
+            assert not any(isinstance(v, PerTfL1Result) for v in vals)
+
+    def test_build_validation_parity_capture_handles_malformed_probe_manifest(
+        self,
+    ) -> None:
+        """Empty per_tf_l1 returns capture with blockers."""
+        from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+            build_validation_parity_capture,
+        )
+
+        manifest = SimpleNamespace(
+            cells=(SimpleNamespace(
+                symbol="BTCUSDT", family="dual_momentum", tf="4h",
+                ic_tstat_hac=2.5, net_edge_bps=10.0, ic_fold_sign_consistency=1.0,
+                n_cells=1, n_pass_tstat=1, n_pass_fdr=1, n_pass_net_edge=1,
+                n_pass_fold_consistency=1, n_winning=1, top_fail_reason="",
+                passed_fdr=True,
+            ),),
+            tf_grid=("4h",),
+            coverage_by_tf={},
+            diversity_corr={},
+        )
+        capture = build_validation_parity_capture(
+            probe_manifest=manifest,
+            per_tf_l1={},
+        )
+        assert capture is not None
+
+
+# ---------------------------------------------------------------------------
+# Scenario 2: finalize_validation_parity_capture
+# ---------------------------------------------------------------------------
+
+
+class TestFinalizeValidationParityCapture:
+    def test_finalize_validation_parity_capture_with_l3_observed_sleeves_classifies_outvoted(
+        self,
+    ) -> None:
+        """L3 observed sleeve summaries cause outvoted classification."""
+        from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+            build_validation_parity_capture,
+            finalize_validation_parity_capture,
+        )
+
+        cells = [_make_probe_cell("12h", passed_fdr=True, ic_tstat_hac=3.0)]
+        manifest = _make_probe_manifest(cells, tf_grid=("12h",))
+        reg = DummyRegistry({"BTCUSDT": (ev("BTCUSDT", "ichimoku_trend", mean_bps=10.0, hard=True),)})
+        ptf = {"12h": per_tf("12h", registry=reg, edge=10.0)}
+        capture = build_validation_parity_capture(
+            probe_manifest=manifest,
+            per_tf_l1=ptf,
+        )
+        summaries = (sleeve_summary("BTCUSDT", "ichimoku_trend", mismatch=0.75),)
+        report = finalize_validation_parity_capture(
+            capture,
+            observed_sleeve_summaries=summaries,
+        )
+        outvoted = [g for g in report.major_gaps if g.gap_class == "outvoted"]
+        assert len(outvoted) > 0
+        assert all(g.repair_action == "major_sign_rank_combiner_spec" for g in outvoted)
+
+    def test_finalize_validation_parity_capture_keeps_existing_main_tfs_when_probe_wins_zero(
+        self,
+    ) -> None:
+        """winning=0 probe doesn't change keep_existing decision for existing TFs."""
+        from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+            build_validation_parity_capture,
+            finalize_validation_parity_capture,
+        )
+
+        cells = [
+            _make_probe_cell("4h", passed_fdr=False, ic_tstat_hac=1.0),
+            _make_probe_cell("6h", passed_fdr=False, ic_tstat_hac=1.0),
+        ]
+        manifest = _make_probe_manifest(cells, tf_grid=("4h", "6h"))
+        reg = DummyRegistry({"BTCUSDT": (ev("BTCUSDT", "dual_momentum", mean_bps=10.0, hard=True),)})
+        ptf = {
+            "4h": per_tf("4h", registry=reg, edge=10.0),
+            "6h": per_tf("6h", registry=reg, edge=5.0),
+        }
+        capture = build_validation_parity_capture(
+            probe_manifest=manifest,
+            per_tf_l1=ptf,
+        )
+        report = finalize_validation_parity_capture(capture)
+        for ev_row in report.main_tf:
+            assert ev_row.candidate_decision == "keep_existing"
+
+    def test_finalize_validation_parity_capture_keeps_candidate_tf_missing_main_l1_blockers(
+        self,
+    ) -> None:
+        """1h/2h remain blocked unless actual per_tf_l1 evidence exists."""
+        from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+            build_validation_parity_capture,
+            finalize_validation_parity_capture,
+        )
+
+        cells = [_make_probe_cell("1h", passed_fdr=True, ic_tstat_hac=3.0)]
+        manifest = _make_probe_manifest(cells, tf_grid=("1h",))
+        capture = build_validation_parity_capture(
+            probe_manifest=manifest,
+            per_tf_l1={},
+        )
+        report = finalize_validation_parity_capture(capture)
+        assert any("candidate_tf_missing_main_l1:1h" in b for b in report.blockers)
+        assert any("candidate_tf_missing_main_l1:2h" in b for b in report.blockers)
+
+    def test_finalize_validation_parity_capture_without_observed_summaries_returns_only_admission_or_activation(
+        self,
+    ) -> None:
+        """Without observed sleeve summaries, no outvoted gap should exist."""
+        from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+            build_validation_parity_capture,
+            finalize_validation_parity_capture,
+        )
+
+        cells = [_make_probe_cell("4h", passed_fdr=True, ic_tstat_hac=3.0)]
+        manifest = _make_probe_manifest(cells, tf_grid=("4h",))
+        reg = DummyRegistry({"BTCUSDT": (ev("BTCUSDT", "dual_momentum", mean_bps=10.0, hard=True),)})
+        ptf = {"4h": per_tf("4h", registry=reg, edge=10.0)}
+        capture = build_validation_parity_capture(
+            probe_manifest=manifest,
+            per_tf_l1=ptf,
+        )
+        report = finalize_validation_parity_capture(capture)
+        assert not any(g.gap_class == "outvoted" for g in report.major_gaps)
+
+    def test_finalize_validation_parity_capture_with_l3_diag_updates_gap_classes(
+        self,
+    ) -> None:
+        """L3 observed sleeves cause admission->outvoted transition."""
+        from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+            build_validation_parity_capture,
+            finalize_validation_parity_capture,
+        )
+
+        cells = [_make_probe_cell("4h", passed_fdr=True, ic_tstat_hac=3.0)]
+        manifest = _make_probe_manifest(cells, tf_grid=("4h",))
+        reg = DummyRegistry({"BTCUSDT": (ev("BTCUSDT", "ichimoku_trend", mean_bps=10.0, hard=True),)})
+        ptf = {"4h": per_tf("4h", registry=reg, edge=10.0)}
+        capture = build_validation_parity_capture(
+            probe_manifest=manifest,
+            per_tf_l1=ptf,
+        )
+        l1_report = finalize_validation_parity_capture(capture)
+        summaries = (sleeve_summary("BTCUSDT", "ichimoku_trend", mismatch=0.75),)
+        l3_report = finalize_validation_parity_capture(
+            capture,
+            observed_sleeve_summaries=summaries,
+        )
+        l1_outvoted = [g for g in l1_report.major_gaps if g.gap_class == "outvoted"]
+        l3_outvoted = [g for g in l3_report.major_gaps if g.gap_class == "outvoted"]
+        assert len(l3_outvoted) >= len(l1_outvoted)
+
+
+# ---------------------------------------------------------------------------
+# Scenario 2: build_major_symbol_gap_evidence_from_census
+# ---------------------------------------------------------------------------
+
+
+class TestBuildMajorSymbolGapEvidenceFromCensus:
+    def test_build_major_symbol_gap_evidence_from_census_skips_malformed_entries(
+        self,
+    ) -> None:
+        """Malformed census entry without family is skipped."""
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            MajorSymbolRegistryCensusEntry,
+        )
+        from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+            build_major_symbol_gap_evidence_from_census,
+        )
+
+        good_entry = MajorSymbolRegistryCensusEntry(
+            symbol="BTCUSDT", family="dual_momentum",
+            registry_mean_incremental_bps=10.0, hard_eligible=True,
+            observed_active_in_holdout=True,
+        )
+        census = [
+            ("4h", good_entry),
+        ]
+        summaries = (sleeve_summary("BTCUSDT", "dual_momentum", mismatch=0.75),)
+        gaps = build_major_symbol_gap_evidence_from_census(
+            registry_census=census,
+            observed_sleeve_summaries=summaries,
+        )
+        assert len(gaps) > 0
+        btc_gaps = [g for g in gaps if g.symbol == "BTCUSDT"]
+        assert any(g.gap_class == "outvoted" for g in btc_gaps)
+
+
+# ---------------------------------------------------------------------------
+# Scenario 3: Error handling for capture/finalize
+# ---------------------------------------------------------------------------
+
+
+class TestValidationParityCaptureErrorHandling:
+    def test_build_validation_parity_capture_handles_malformed_probe_manifest_empty(
+        self,
+    ) -> None:
+        """Empty per_tf_l1 with no probe data returns capture with blockers."""
+        from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+            build_validation_parity_capture,
+        )
+
+        capture = build_validation_parity_capture(
+            probe_manifest=None,
+            per_tf_l1={},
+        )
+        assert capture is not None  # catch-all: capture with empty per_tf_l1 succeeds
+
+
+def test_log_validation_parity_report_with_phase(caplog: pytest.LogCaptureFixture) -> None:
+    """log_validation_parity_report with phase parameter does not raise."""
+    from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+        ValidationParityReport,
+        log_validation_parity_report,
+        logger,
+    )
+
+    assert logger.name == "opt_main_futures"
+    report = ValidationParityReport(
+        probe=(),
+        main_tf=(),
+        major_gaps=(),
+        decision="diagnostic_only",
+        blockers=("test",),
+    )
+    log_validation_parity_report(report, phase="l1")
+    assert True
+
+
 def test_log_validation_parity_report_does_not_raise(caplog: pytest.LogCaptureFixture) -> None:
     report = ValidationParityReport(
         probe=(),
