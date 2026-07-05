@@ -584,7 +584,7 @@ class TestComputeMajorSymbolRegistryCensus:
         by_symbol: dict[str, list[tuple[str, float, bool]]],
     ) -> object:
         """Helper to create a mock QualifiedSignalRegistry with minimal fields."""
-        from src.domain.futures.signals.contracts import (
+        from src.domain.futures.strategy.candidate_contracts import (
             QualifiedSignalRegistry,
             SignalSourceKey,
             SymbolStrategyEvidence,
@@ -668,7 +668,7 @@ class TestComputeMajorSymbolRegistryCensus:
         assert result[0].registry_mean_incremental_bps >= 0.0
 
     def test_registry_census_empty_registry_returns_empty_tuple(self) -> None:
-        from src.domain.futures.signals.contracts import QualifiedSignalRegistry
+        from src.domain.futures.strategy.candidate_contracts import QualifiedSignalRegistry
         from src.domain.futures.strategy.tiered_workflow.awf_sim import (
             compute_major_symbol_registry_census,
         )
