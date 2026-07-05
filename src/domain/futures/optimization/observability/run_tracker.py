@@ -324,7 +324,7 @@ def compute_adr_level_deflated_sharpe(
     """기존 _deflated_sharpe_probability를 ADR-레벨 pool로 호출하는 얇은 래퍼.
     신규 통계 공식 없음 — allocation.metrics._deflated_sharpe_probability 재사용.
     """
-    from src.domain.futures.allocation.metrics import (
+    from src.domain.futures.optimization.metrics import (
         _bars_per_year_for_tf,
         _deflated_sharpe_probability,
     )

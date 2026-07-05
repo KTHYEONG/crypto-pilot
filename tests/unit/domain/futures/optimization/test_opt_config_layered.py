@@ -163,7 +163,7 @@ def test_get_layered_window_frozen() -> None:
 # S6 — L2_SEARCH_SPACE 재배선 (spec: layer2-signal-utilization.md §2.3)
 # ---------------------------------------------------------------------------
 
-from src.domain.futures.allocation.search_space import L2_SEARCH_SPACE
+from src.domain.futures.optimization.l2_search_space import L2_SEARCH_SPACE
 
 
 def test_l2_alloc_space_contains_new_params() -> None:
