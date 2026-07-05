@@ -59,6 +59,7 @@ from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     summarize_directional_veto,
     summarize_major_symbol_regime_incoherence,
     summarize_major_symbol_signal_sizing,
+    summarize_major_symbol_sleeve_contribution,
 )
 
 # 내부 모듈 임포트
@@ -1653,6 +1654,7 @@ def _layer2_result_from_trial_eval(
     _long_by_sym, _short_by_sym = compute_long_short_price_by_symbol(eval.fold_attributions)
     _major_diag = summarize_major_symbol_signal_sizing(eval.fold_attributions)
     _major_incoherence = summarize_major_symbol_regime_incoherence(eval.fold_attributions)
+    _major_sleeve_diag = summarize_major_symbol_sleeve_contribution(eval.fold_attributions)
     _symbols_for_veto = eval.fold_attributions[0].major_symbol_snapshots
     _directional_veto_symbols = tuple(sorted({
         s.symbol for fa in eval.fold_attributions for s in fa.directional_veto_snapshots
@@ -1708,6 +1710,7 @@ def _layer2_result_from_trial_eval(
         realized_price_long_by_symbol=_long_by_sym,
         realized_price_short_by_symbol=_short_by_sym,
         major_symbol_diag=_major_diag,
+        major_symbol_sleeve_diag=_major_sleeve_diag,
         major_symbol_incoherence=_major_incoherence,
         directional_veto_summary=_directional_veto_summary,
     )
@@ -2110,6 +2113,9 @@ def run_l3_holdout(
     _major_diag = (
         summarize_major_symbol_signal_sizing((_attr,)) if _attr is not None else ()
     )
+    _major_sleeve_diag = (
+        summarize_major_symbol_sleeve_contribution((_attr,)) if _attr is not None else ()
+    )
     _major_incoherence = (
         summarize_major_symbol_regime_incoherence((_attr,)) if _attr is not None else ()
     )
@@ -2183,6 +2189,7 @@ def run_l3_holdout(
         bars_long=bars_long,
         bars_short=bars_short,
         major_symbol_diag=_major_diag,
+        major_symbol_sleeve_diag=_major_sleeve_diag,
         major_symbol_incoherence=_major_incoherence,
         directional_veto_summary=_l3_veto_summary,
     )
@@ -2521,7 +2528,10 @@ def run_directional_veto_economic_replay(
     prebuilt_cache: L2SimulationCache | None = None,
     eval_memo: dict[Any, Any] | None = None,
 ) -> tuple[DirectionalVetoReplayResult, ...]:
-    """[ADR_20260704_L2_DIRECTIONAL_VETO][ADR_20260705_L2_VETO_REPLAY_PARITY] Execute the 5-arm economic replay and adoption gate."""
+    """[ADR_20260704_L2_DIRECTIONAL_VETO][ADR_20260705_L2_VETO_REPLAY_PARITY]
+
+    Execute the 5-arm economic replay and adoption gate.
+    """
 
     baseline_row: DirectionalVetoReplayResult | None = None
     results: list[DirectionalVetoReplayResult] = []
