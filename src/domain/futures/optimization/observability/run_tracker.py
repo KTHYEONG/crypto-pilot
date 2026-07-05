@@ -15,8 +15,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import optuna
 import optuna.storages.journal
+from numpy.typing import NDArray
 from optuna.samplers import TPESampler
 from optuna.trial import TrialState
 
@@ -258,6 +260,82 @@ def update_champion_store(
     )
     study.add_trial(trial)
     return True
+
+
+
+def adr_sharpe_pool_study_name(tag: str) -> str:
+    """ADR-레벨 전량 기록(승패 무관) study 이름. champion_store_study_name과 별개 study.
+    [ADR_20260705_L3_ROLLING_HOLDOUT_PANEL]
+    """
+    return f"adr_sharpe_pool_{tag}"
+
+
+def record_adr_evaluation(
+    tag: str,
+    storage: optuna.storages.BaseStorage,
+    *,
+    sharpe: float,
+    adr_id: str,
+) -> None:
+    """ADR 시도의 realized Sharpe를 승패 무관 전량 기록(update_champion_store와 달리
+    조건부 return 없음). params/distributions는 빈 dict — 이 study는 튜닝용이 아니라
+    순수 이력 기록용이므로 dynamic-search-space 경고와 무관(champion_store와 동일 근거).
+    """
+    study_name = adr_sharpe_pool_study_name(tag)
+    try:
+        study = optuna.load_study(study_name=study_name, storage=storage)
+    except KeyError:
+        study = optuna.create_study(
+            study_name=study_name, storage=storage, direction="maximize"
+        )
+
+    trial = optuna.trial.create_trial(
+        params={},
+        distributions={},
+        value=sharpe,
+        state=optuna.trial.TrialState.COMPLETE,
+        user_attrs={"adr_id": adr_id},
+    )
+    study.add_trial(trial)
+
+
+def get_adr_sharpe_pool(
+    tag: str,
+    storage: optuna.storages.BaseStorage,
+) -> NDArray[np.float64]:
+    """해당 tag의 과거 ADR Sharpe 이력 전체를 배열로 반환. study 없으면 빈 배열."""
+    study_name = adr_sharpe_pool_study_name(tag)
+    try:
+        study = optuna.load_study(study_name=study_name, storage=storage)
+    except KeyError:
+        return np.array([], dtype=np.float64)
+
+    values = [t.value for t in study.trials if t.value is not None]
+    return np.array(values, dtype=np.float64)
+
+
+def compute_adr_level_deflated_sharpe(
+    candidate_returns: NDArray[np.float64],
+    *,
+    tag: str,
+    storage: optuna.storages.BaseStorage,
+    tf: str,
+) -> float:
+    """기존 _deflated_sharpe_probability를 ADR-레벨 pool로 호출하는 얇은 래퍼.
+    신규 통계 공식 없음 — allocation.metrics._deflated_sharpe_probability 재사용.
+    """
+    from src.domain.futures.allocation.metrics import (
+        _bars_per_year_for_tf,
+        _deflated_sharpe_probability,
+    )
+
+    pool = get_adr_sharpe_pool(tag, storage)
+    return _deflated_sharpe_probability(
+        selected_rets=candidate_returns,
+        completed_trial_sharpes=pool,
+        effective_trial_count=float(len(pool)),
+        bars_per_year=_bars_per_year_for_tf(tf),
+    )
 
 
 def _nsga2_constraints(trial: optuna.trial.FrozenTrial) -> list[float]:

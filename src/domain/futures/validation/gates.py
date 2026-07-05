@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -603,3 +604,64 @@ def apply_fdr_promotion_gate(
         return set()
 
     return {vk for vk, p in sorted_pvals[:max_k + 1]}
+
+
+
+@dataclass(frozen=True)
+class EpisodeOutcome:
+    """[ADR_20260705_L3_ROLLING_HOLDOUT_PANEL]"""
+
+    episode_id: str
+    role: Literal["promotion", "stress_only"]
+    candidate_total_return: float
+    baseline_total_return: float
+
+
+@dataclass(frozen=True)
+class RollingConsistencyVerdict:
+    consistent_improvement: bool
+    stress_generalization_pass: bool | None
+    n_promotion_episodes: int
+    failing_episode_ids: tuple[str, ...]
+
+
+def evaluate_rolling_holdout_consistency(
+    outcomes: Sequence[EpisodeOutcome],
+) -> RollingConsistencyVerdict:
+    """모든 promotion episode에서 candidate >= baseline이어야 consistent_improvement=True.
+
+    stress_only episode는 참고 정보만 산출(stress_generalization_pass), 게이트에 미반영.
+    promotion episode가 0개면 consistent_improvement=False, failing_episode_ids=("no_promotion_episodes",).
+    """
+    promotion_outcomes = [o for o in outcomes if o.role == "promotion"]
+    stress_outcomes = [o for o in outcomes if o.role == "stress_only"]
+
+    if not promotion_outcomes:
+        return RollingConsistencyVerdict(
+            consistent_improvement=False,
+            stress_generalization_pass=_compute_stress_pass(stress_outcomes),
+            n_promotion_episodes=0,
+            failing_episode_ids=("no_promotion_episodes",),
+        )
+
+    failing = [
+        o.episode_id
+        for o in promotion_outcomes
+        if o.candidate_total_return < o.baseline_total_return
+    ]
+    consistent = len(failing) == 0
+
+    return RollingConsistencyVerdict(
+        consistent_improvement=consistent,
+        stress_generalization_pass=_compute_stress_pass(stress_outcomes),
+        n_promotion_episodes=len(promotion_outcomes),
+        failing_episode_ids=tuple(failing),
+    )
+
+
+def _compute_stress_pass(
+    stress_outcomes: Sequence[EpisodeOutcome],
+) -> bool | None:
+    if not stress_outcomes:
+        return None
+    return all(o.candidate_total_return >= o.baseline_total_return for o in stress_outcomes)
