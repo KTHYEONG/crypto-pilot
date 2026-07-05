@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-02] [TASK_UNI_KLINE] [ADR_20260702_UNI_KLINE]
+- **Context/Why:** Missing quote_vol index in live kline API and ledger PIT-safe violations caused daily build_universe pipeline deadlocks.
+- **Resolution/What:** Fixed binance client to extract quote_asset_volume and replaced static end-date ledger broadcasts with rolling continuity.
+- **Impact:** continuity metrics zero-volume count dropped to 0.0, resolving L3 holdout runtime crashes.
+
 ## [2026-07-02] [TASK_UNI_VISION] [ADR_20260702_UNI_VISION]
 - **Context/Why:** Datetime string parsing errors in Vision metrics downloader caused all open interest and long-short ratio data to be lost.
 - **Resolution/What:** Fixed metrics dtype normalization branch and conducted 5-round real data correlation sweep.

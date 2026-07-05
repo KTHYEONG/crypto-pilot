@@ -67,6 +67,8 @@ L1에서 검증된 Candidate Events를 입력받아 Cross-sectional Ranking, Reg
   - **Release**: raw_mu≤0 or bull regime streak ≥ `release_regime_bull_bars` → cooldown → idle.
   - **Actions**: `drop_long`(remove), `zero_mu`(neutralize), `cap_mu`(cap at `cap_mu_bps`).
 - **Causal Rolling Return**: `sum(returns[t-lookback, t))` — look-ahead-free.
+- **5-Arm Economic Replay (`run_directional_veto_economic_replay`)**: baseline/veto_adverse_only/contextual_cap_mu/contextual_zero_mu/contextual_crisis_only A/B, `prebuilt_cache`+`eval_memo` 재사용으로 메인 L2 평가와 동일 캐시 공유. `baseline_parity`는 L2 leg을 `assert_selection_replay_parity`로 검증(L3 leg은 `cagr` 직접 비교) — `False`면 전체 candidate adoption 판단 무효.
+  <!-- ADR_20260705_L2_VETO_REPLAY_PARITY -->
 
 ### Throttle & Risk Controls
 - **Edge-Conditional Throttle**: pooled edge 크기에 비례하여 Kelly 비중을 선형 혹은 거듭제곱 형태로 스케일링.
