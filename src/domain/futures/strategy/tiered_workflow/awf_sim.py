@@ -2431,6 +2431,13 @@ def _run_awf_simulation(
     import logging
     import time
     logger = logging.getLogger("src.domain.futures.strategy.tiered_workflow")
+    # L2 mutual exclusion guard: regime-conditional weight vs intra-symbol divergence
+    _l2_regime_weight = bool(getattr(config, "l2_regime_conditional_weight_enabled", False))
+    _l2_intra_divergence = bool(getattr(config, "l2_intra_symbol_divergence_enabled", False))
+    assert not (_l2_regime_weight and _l2_intra_divergence), (
+        "l2_regime_conditional_weight_enabled and l2_intra_symbol_divergence_enabled "
+        "are mutually exclusive"
+    )
     t_start_total = time.perf_counter()
     prof_prep = 0.0
     prof_rank = 0.0
@@ -3138,6 +3145,7 @@ def _run_awf_simulation(
                 if _current_bucket_edges or _current_policy_map:
                     from src.domain.futures.strategy.tiered_workflow.l2_meta import (
                         _parse_meta_group_ids,
+                        apply_bucket_conditional_weight,
                         apply_regime_cell_policy,
                         filter_sleeves_by_bucket,
                     )
@@ -3150,14 +3158,24 @@ def _run_awf_simulation(
                         if cache.signal_mask_2d[t, _j] and cache.sleeve_ids[_j] in _before_sleeve_keys
                     }
                     if _regime_policy_mode == "filter":
-                        _oos_sleeve_sigs = filter_sleeves_by_bucket(
-                            _oos_sleeve_sigs,
-                            _current_bucket_edges,
-                            _regime_now,
-                            edge_floor_bps=float(
-                                getattr(config, "l2_bucket_edge_floor_bps", 0.0)
-                            ),
-                        )
+                        if bool(getattr(config, "l2_regime_conditional_weight_enabled", False)):
+                            _oos_sleeve_sigs = apply_bucket_conditional_weight(
+                                _oos_sleeve_sigs,
+                                _current_bucket_edges,
+                                _regime_now,
+                                edge_floor_bps=float(
+                                    getattr(config, "l2_bucket_edge_floor_bps", 0.0)
+                                ),
+                            )
+                        else:
+                            _oos_sleeve_sigs = filter_sleeves_by_bucket(
+                                _oos_sleeve_sigs,
+                                _current_bucket_edges,
+                                _regime_now,
+                                edge_floor_bps=float(
+                                    getattr(config, "l2_bucket_edge_floor_bps", 0.0)
+                                ),
+                            )
                         _oos_sleeve_edges = {
                             k: v for k, v in _oos_sleeve_edges.items() if k in _oos_sleeve_sigs
                         }

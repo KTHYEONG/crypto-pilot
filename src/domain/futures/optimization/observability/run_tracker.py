@@ -9,7 +9,8 @@ import os
 import signal
 import subprocess
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -130,10 +131,9 @@ def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages
     db_path = db_dir / "optuna.db"
     
     # Enable SQLite WAL mode before initializing optuna RDBStorage to prevent DB lock contention
-    with contextlib.suppress(Exception):
-        with sqlite3.connect(str(db_path), timeout=10.0) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
+    with contextlib.suppress(Exception), sqlite3.connect(str(db_path), timeout=10.0) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
 
     storage_url = f"sqlite:///{db_path.resolve()}"
     storage = optuna.storages.RDBStorage(
@@ -181,6 +181,16 @@ def get_or_create_study(
 def champion_store_study_name(tag: str) -> str:
     """전역 챔피언 레저(영구 보존, 매 실행 초기화 대상에서 제외) study 이름."""
     return f"l2_champion_store_{tag}"
+
+
+@contextmanager
+def isolated_optuna_storage() -> Iterator[optuna.storages.BaseStorage]:
+    """champion_store 리저와 격리된 storage. [ADR_20260705_L1L2_REGIME_CONDITIONAL_WEIGHT]
+
+    호출부 배선(economic replay harness 교체)은 범위 밖 — 유틸리티만 제공.
+    """
+    storage = optuna.storages.InMemoryStorage()
+    yield storage
 
 
 def _distribution_for_spec(spec: Mapping[str, Any]) -> optuna.distributions.BaseDistribution:

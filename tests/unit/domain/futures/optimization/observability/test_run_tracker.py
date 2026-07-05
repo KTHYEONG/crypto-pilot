@@ -16,6 +16,7 @@ from optuna.samplers import TPESampler
 from src.domain.futures.optimization.observability.run_tracker import (
     champion_store_study_name,
     get_or_create_study,
+    isolated_optuna_storage,
     load_champion_params,
     update_champion_store,
 )
@@ -252,4 +253,23 @@ def test_preflight_redis_endpoint_is_removed() -> None:
     """_preflight_redis_endpoint 함수가 모듈에서 제거되었는지 테스트."""
     import src.domain.futures.optimization.observability.run_tracker as mod
     assert not hasattr(mod, "_preflight_redis_endpoint")
+
+
+# ─── isolated_optuna_storage ──────────────────────────────────────────
+
+def test_isolated_optuna_storage_returns_in_memory_storage() -> None:
+    """3.3 isolated_optuna_storage가 반환하는 storage의 url이 ':memory:'임을 assert."""
+    with isolated_optuna_storage() as storage:
+        assert isinstance(storage, optuna.storages.InMemoryStorage)
+
+
+def test_isolated_optuna_storage_isolated_from_champion_store() -> None:
+    """격리 storage에서 create_study한 이름이 champion_store_study_name과 충돌 없음."""
+    with isolated_optuna_storage() as storage:
+        study = optuna.create_study(
+            study_name=champion_store_study_name("4h"),
+            storage=storage,
+            direction="maximize",
+        )
+        assert study.study_name == champion_store_study_name("4h")
 
