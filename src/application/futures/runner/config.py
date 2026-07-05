@@ -25,6 +25,8 @@ _REMOVED_ARG_KEYS: tuple[str, ...] = (
 
 @dataclass(slots=True, frozen=True)
 class FuturesRunConfig:
+    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Runtime config for futures runner orchestration."""
+
     timeframe: str
     date: str | None
     trials: int
@@ -32,6 +34,7 @@ class FuturesRunConfig:
     sync: SyncMode
     refresh_universe: bool
     sync_metrics: bool
+    seed: int = 42
 
 
 def parse_active_phase(phase: str) -> ActivePhase:
@@ -49,6 +52,7 @@ def validate_run_config(config: FuturesRunConfig) -> FuturesRunConfig:
 
 
 def build_run_config_from_args(args: Namespace | Mapping[str, Any]) -> FuturesRunConfig:
+    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Build runner config from CLI args or mapping."""
     if isinstance(args, Namespace):
         args = vars(args)
     phase = parse_active_phase(args.get("phase", "l3"))
@@ -67,5 +71,6 @@ def build_run_config_from_args(args: Namespace | Mapping[str, Any]) -> FuturesRu
         sync=sync,  # type: ignore[arg-type]
         refresh_universe=bool(args.get("refresh_universe", False)),
         sync_metrics=bool(args.get("sync_metrics", False)),
+        seed=int(args.get("seed", 42)),
     )
     return validate_run_config(config)
