@@ -14,6 +14,7 @@ related_paths:
   - src/domain/futures/optimization/final_evaluator.py
   - src/domain/futures/strategy/tiered_workflow/major_symbol_registry_replay.py
   - src/application/futures/runner/active_pipeline.py
+  - src/application/futures/runner/tf_probe_scoped.py
   - src/application/futures/runner/cli.py
   - src/application/futures/runner/config.py
 change_triggers:
@@ -23,13 +24,14 @@ change_triggers:
   - src/domain/futures/optimization/final_evaluator.py
   - src/domain/futures/strategy/tiered_workflow/major_symbol_registry_replay.py
   - src/application/futures/runner/active_pipeline.py
+  - src/application/futures/runner/tf_probe_scoped.py
   - src/application/futures/runner/cli.py
   - src/application/futures/runner/config.py
 dependencies:
   documents:
     - docs/architecture/layer1.md
     - docs/architecture/layer2.md
-last_verified: 2026-07-04
+last_verified: 2026-07-05
 ---
 
 # 1. Purpose
@@ -64,6 +66,12 @@ Optuna 최적화로 최종 선별된 챔피언 전략에 대해 $N$개의 서로
 - replay seed는 `FuturesRunConfig.seed` SSOT를 사용하며, 기본 경로는 `docs/results/major_symbol_registry_replay_seed_<seed>.csv`다.
 - replay rows는 `baseline_parity`, `l2_cagr`, `l3_total_return`, `l3_cagr`, `l3_mdd`, `l3_sharpe`, `l3_sortino`, `l3_trade_count`, `registry_census`를 포함한다.
 
+### Scoped TF Probe Reconnect `[ADR_20260705_TF_PROBE_SCOPED_SYNC]`
+- `src/application/futures/runner/tf_probe_scoped.py`는 `full_strategy_maps`를 입력으로 받아 `probe_timeframe_alpha()`를 majors-only 기본 스코프로 실행하는 전용 wrapper다.
+- `_run_strategy_stage()`는 `full_strategy_maps` 확보 직후, `data_stage.data_maps.clear()` 이전에 `_run_tf_probe_stage_scoped()`를 호출한다.
+- 기본 스코프는 `("BTCUSDT", "ETHUSDT", "BNBUSDT")`, OOM 상한은 `20` symbols다.
+- 반환은 `TfProbeStageResult | None`이며, 내부 gate 로직은 기존 `select_tf_family_cells()`와 `summarize_tf_probe_gate_audit()`를 그대로 사용한다.
+
 # 3. Architecture Flow
 
 ```mermaid
@@ -80,6 +88,11 @@ graph TD
     J --> K{Pass L1 Hard Gates?}
     K -->|Pass| L[Champion Promotion Evaluation]
     K -->|Fail| M[Block Promotion]
+    N[full_strategy_maps ready] --> O[_run_tf_probe_stage_scoped]
+    O --> P[TF Probe Manifest]
+    P --> Q[Scoped gate audit]
+    N --> R[data_stage.data_maps.clear()]
+    O -.before clear.-> R
 ```
 
 # 4. Holdout Gates (L3 Validation Seam)
@@ -104,5 +117,6 @@ L3 Holdout 검증 완료를 위해 포트폴리오는 아래 순차적 조건문
 | `optimization/candidate_selector.py`| 다중 시드 검증용 `check_stability_layer3` 구현 |
 | `optimization/final_evaluator.py` | 챔피언 선출 및 최종 L3 안정성 검증 오케스트레이션 |
 | `strategy/tiered_workflow/major_symbol_registry_replay.py` | major-symbol registry replay, adoption gate, CSV artifact |
+| `runner/tf_probe_scoped.py` | majors-only TF probe wrapper, scoped gate audit, pre-clear execution |
 | `application/futures/runner/cli.py` | CLI seed 전달 및 replay entrypoint |
 | `application/futures/runner/config.py` | `FuturesRunConfig.seed` SSOT |
