@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
+import pandas as pd
 import pytest
 from pytest_mock import MockerFixture
 
-from src.application.futures.runner.active_pipeline import RunnerResult as ActiveRunnerResult
+from src.application.futures.runner.active_pipeline import (
+    RunnerResult as ActiveRunnerResult,
+)
+from src.application.futures.runner.active_pipeline import (
+    _build_data_not_ready_reasons,
+)
 from src.application.futures.runner.config import FuturesRunConfig
 from src.application.futures.runner.models import MarketDataBundle, RunnerResult, RunWindow
 from src.application.futures.runner.pipeline import run_pipeline
@@ -145,3 +151,32 @@ class TestRunPipeline:
         
         _ensure_universe_ledger_sync(run_config, window)  # type: ignore[arg-type]
         mock_sync.assert_called_once()
+
+
+class TestBuildDataNotReadyReasons:
+    """Scenario 1.3: reason_counts extraction from readiness report."""
+
+    def test_returns_counts_when_reason_column_exists(self) -> None:
+        report_df = pd.DataFrame(
+            {
+                "symbol": ["A", "B", "C"],
+                "reason": ["missing_tf_frame", "missing_tf_frame", "insufficient_bars"],
+                "pass": [False, False, False],
+            }
+        )
+        result = _build_data_not_ready_reasons(report_df)
+        assert result == {"missing_tf_frame": 2, "insufficient_bars": 1}
+
+    def test_returns_empty_dict_for_empty_dataframe(self) -> None:
+        report_df = pd.DataFrame(columns=["symbol", "reason", "pass"])
+        result = _build_data_not_ready_reasons(report_df)
+        assert result == {}
+
+    def test_returns_empty_dict_when_no_reason_column(self) -> None:
+        report_df = pd.DataFrame({"symbol": ["A", "B"], "pass": [False, False]})
+        result = _build_data_not_ready_reasons(report_df)
+        assert result == {}
+
+    def test_returns_empty_dict_for_non_dataframe(self) -> None:
+        result = _build_data_not_ready_reasons(None)  # type: ignore[arg-type]
+        assert result == {}
