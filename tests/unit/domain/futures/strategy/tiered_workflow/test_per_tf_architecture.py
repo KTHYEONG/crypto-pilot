@@ -1,13 +1,14 @@
 """Tests for per-TF L1 architecture (TF-Architecture V2)."""
 from __future__ import annotations
 
+import dataclasses
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
+from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel, QualifiedSignalRegistry
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import (
     CandidateStrategyConfig,
@@ -311,6 +312,81 @@ def test_aggregate_per_tf_l1_all_blocked() -> None:
     }
     result = _aggregate_per_tf_l1(per_tf_l1)
     assert result.gate_passed is False
+
+
+# ── S1: Representative registry selection ─────────────────────────────────────
+
+
+def test_aggregate_per_tf_l1_preserves_preferred_tf_registry() -> None:
+    """S1: preferred_tf='4h' → result.deployment_registry is per_tf_l1['4h'].l1_result.deployment_registry."""
+    from types import SimpleNamespace
+
+    ev = SimpleNamespace(
+        key=SimpleNamespace(strategy_id="dual_momentum:42"),
+        mean_incremental_bps=3.5, hard_eligible=True,
+    )
+    reg_4h = QualifiedSignalRegistry(
+        by_symbol={"BTCUSDT": (ev,)}, ready_symbols=("BTCUSDT",),
+        trade_scope_count=1, registry_version="test",
+    )
+    reg_8h = QualifiedSignalRegistry(
+        by_symbol={"ETHUSDT": (ev,)}, ready_symbols=("ETHUSDT",),
+        trade_scope_count=1, registry_version="test",
+    )
+    l1_4h = dataclasses.replace(_make_l1_result(prefix="4h_"), deployment_registry=reg_4h)
+    l1_8h = dataclasses.replace(_make_l1_result(prefix="8h_"), deployment_registry=reg_8h)
+    per_tf_l1 = {
+        "4h": PerTfL1Result(tf="4h", l1_result=l1_4h, n_winning_signals=len(l1_4h.oos_stacked)),
+        "8h": PerTfL1Result(tf="8h", l1_result=l1_8h, n_winning_signals=len(l1_8h.oos_stacked)),
+    }
+    result = _aggregate_per_tf_l1(per_tf_l1, preferred_tf="4h")
+    assert result.deployment_registry is reg_4h
+
+
+def test_aggregate_per_tf_l1_falls_back_to_artifact_registry() -> None:
+    """S2: top-level deployment_registry=None, artifact registry exists → use artifact registry."""
+    from types import SimpleNamespace
+
+    ev = SimpleNamespace(
+        key=SimpleNamespace(strategy_id="dual_momentum:42"),
+        mean_incremental_bps=3.5, hard_eligible=True,
+    )
+    reg_art = QualifiedSignalRegistry(
+        by_symbol={"BTCUSDT": (ev,)}, ready_symbols=("BTCUSDT",),
+        trade_scope_count=1, registry_version="test",
+    )
+    l1 = dataclasses.replace(
+        _make_l1_result(prefix="4h_"),
+        deployment_registry=None,
+        inference_artifact=SimpleNamespace(deployment_registry=reg_art),
+    )
+    per_tf_l1 = {
+        "4h": PerTfL1Result(tf="4h", l1_result=l1, n_winning_signals=len(l1.oos_stacked)),
+    }
+    result = _aggregate_per_tf_l1(per_tf_l1, preferred_tf="4h")
+    assert result.deployment_registry is reg_art
+
+
+def test_aggregate_per_tf_l1_does_not_concat_multiple_registries() -> None:
+    """X1: 2 TF with different registry rows → single registry identity preserved."""
+    from types import SimpleNamespace
+
+    ev = SimpleNamespace(
+        key=SimpleNamespace(strategy_id="dual_momentum:42"),
+        mean_incremental_bps=3.5, hard_eligible=True,
+    )
+    reg = QualifiedSignalRegistry(
+        by_symbol={"BTCUSDT": (ev,)}, ready_symbols=("BTCUSDT",),
+        trade_scope_count=1, registry_version="test",
+    )
+    l1_a = dataclasses.replace(_make_l1_result(prefix="4h_"), deployment_registry=reg)
+    l1_b = dataclasses.replace(_make_l1_result(prefix="8h_"), deployment_registry=reg)
+    per_tf_l1 = {
+        "4h": PerTfL1Result(tf="4h", l1_result=l1_a, n_winning_signals=len(l1_a.oos_stacked)),
+        "8h": PerTfL1Result(tf="8h", l1_result=l1_b, n_winning_signals=len(l1_b.oos_stacked)),
+    }
+    result = _aggregate_per_tf_l1(per_tf_l1, preferred_tf="4h")
+    assert result.deployment_registry is reg
 
 
 # ── Multi-TF helpers ──────────────────────────────────────────────────────
