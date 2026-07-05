@@ -889,6 +889,25 @@ def _run_universe_stage(
     )
 
 
+def _build_data_not_ready_reasons(report: pd.DataFrame) -> dict[str, int]:
+    """Extract reason counts from a data readiness report DataFrame.
+
+    Args:
+        report: DataReadinessResult.report DataFrame containing 'reason' column.
+
+    Returns:
+        Dictionary mapping reason strings to their counts. Empty dict if report
+        is not a DataFrame, is empty, or lacks 'reason' column.
+    """
+    return (
+        report["reason"].value_counts().to_dict()
+        if isinstance(report, pd.DataFrame)
+        and not report.empty
+        and "reason" in report.columns
+        else {}
+    )
+
+
 def _run_data_stage(
     run_config: FuturesRunConfig,
     window: QuarterlyWindow,
@@ -985,14 +1004,17 @@ def _run_data_stage(
 
     valid_symbols = list(readiness.kept_symbols)
     if not valid_symbols:
+        reason_counts = _build_data_not_ready_reasons(readiness.report)
         _logger.warning(
-            "[data-readiness] no symbols kept: requested=%d loaded=%d kept=%d probe_enabled=%s",
+            "[data-readiness] no symbols kept: requested=%d loaded=%d kept=%d "
+            "probe_enabled=%s reasons=%s",
             len(load_symbols),
             len(data_maps),
             len(valid_symbols),
             bool(OPT_FUTURES_CONFIG.get("ENABLE_TF_PROBE", False)),
+            reason_counts,
         )
-        raise RuntimeError("data_not_ready")
+        raise RuntimeError(f"data_not_ready: reasons={reason_counts}")
     return DataStageResult(
         data_maps=readiness.filtered_is_maps,
         oos_data_maps=readiness.filtered_oos_maps,
@@ -1269,7 +1291,7 @@ def _run_tiered_l2_study(
     import optuna as _optuna
     from optuna.samplers import TPESampler
 
-    from src.domain.futures.allocation.search_space import L2_SEARCH_SPACE as L2_ALLOC_SPACE
+    from src.domain.futures.optimization.l2_search_space import L2_SEARCH_SPACE as L2_ALLOC_SPACE
 
 
 
