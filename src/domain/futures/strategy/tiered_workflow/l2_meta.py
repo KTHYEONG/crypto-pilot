@@ -2137,3 +2137,35 @@ def filter_sleeves_by_bucket(
             result[key] = sig
 
     return result
+
+
+def apply_bucket_conditional_weight(
+    sleeve_sigs: Mapping[tuple[str, str], SymbolSignal],
+    bucket_edges: Mapping[tuple[int, str, str], float],
+    regime_now: int,
+    *,
+    edge_floor_bps: float = 0.0,
+    edge_ref_bps: float = 50.0,
+    g_min: float = 0.5,
+    g_max: float = 1.5,
+) -> dict[tuple[str, str], SymbolSignal]:
+    """Bucket 실현엣지 기반 quality_weight 재가중. [ADR_20260705_L1L2_REGIME_CONDITIONAL_WEIGHT]
+
+    주의: `l2_regime_policy_mode="filter"` 분기에서만 호출됨(기본값 "soft"에서는 미발화,
+    실측 확인 완료 — docs/decisions/decisions.md 참조). quality_weight=0인 sleeve는
+    재가중으로 복구되지 않음(곱셈 방식의 알려진 한계).
+    """
+    if not sleeve_sigs:
+        return {}
+
+    result: dict[tuple[str, str], SymbolSignal] = {}
+    for key, sig in sleeve_sigs.items():
+        _, strat_id = key
+        family, tf = _parse_meta_group_ids(strat_id)
+        bucket_key = (regime_now, family, tf)
+        edge = bucket_edges.get(bucket_key, 0.0)
+        if edge > edge_floor_bps:
+            g = max(g_min, min(g_max, (edge - edge_floor_bps) / edge_ref_bps))
+            result[key] = replace(sig, quality_weight=sig.quality_weight * g)
+
+    return result

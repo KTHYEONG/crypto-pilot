@@ -661,6 +661,8 @@ class Layer2AllocationConfig:
     l2_regime_directional_veto_max_fit_false_positive_rate: float = 0.50
     l2_regime_directional_veto_max_turnover_delta: float = 0.05
     l2_regime_directional_veto_min_gross_ratio: float = 0.90
+    # L2 Regime-Conditional Weight (Rule 2 — 상호 배타: l2_intra_symbol_divergence_enabled와 동시 True 불가)
+    l2_regime_conditional_weight_enabled: bool = False
     # L1 Intra-Symbol Divergence Dampener (Track 1 — BTC)
     l2_intra_symbol_divergence_enabled: bool = False
     l2_intra_symbol_divergence_symbols: tuple[str, ...] = ("BTCUSDT",)

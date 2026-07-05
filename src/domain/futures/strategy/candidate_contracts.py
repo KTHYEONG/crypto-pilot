@@ -309,6 +309,10 @@ class MatchedBaselineKey:
 
 @dataclass(slots=True, frozen=True, init=False)
 class SymbolStrategyEvidence:
+    """adverse_regime_* 필드는 진단 전용(quality_weight 산식에 미반영).
+    [ADR_20260705_L1L2_REGIME_CONDITIONAL_WEIGHT]
+    """
+
     key: SignalSourceKey
     mean_gross_bps: float
     mean_incremental_bps: float
@@ -325,6 +329,9 @@ class SymbolStrategyEvidence:
     structural_reasons: tuple[str, ...]
     diagnostic_flags: tuple[str, ...]
     lcb_net_bps: float
+    adverse_regime_lcb_bps: float | None = None
+    adverse_regime_n_obs: int = 0
+    adverse_regime_defended: bool = True
 
     def __init__(
         self,
@@ -345,6 +352,9 @@ class SymbolStrategyEvidence:
         structural_reasons: tuple[str, ...] = (),
         diagnostic_flags: tuple[str, ...] = (),
         lcb_net_bps: float = 0.0,
+        adverse_regime_lcb_bps: float | None = None,
+        adverse_regime_n_obs: int = 0,
+        adverse_regime_defended: bool = True,
         bootstrap_tstat_incremental: float | None = None,
         reliability: float | None = None,
         qualified: bool | None = None,
@@ -384,6 +394,12 @@ class SymbolStrategyEvidence:
         object.__setattr__(self, "structural_reasons", tuple(compat_structural))
         object.__setattr__(self, "diagnostic_flags", tuple(diagnostic_flags))
         object.__setattr__(self, "lcb_net_bps", float(lcb_net_bps))
+        if adverse_regime_lcb_bps is not None:
+            object.__setattr__(self, "adverse_regime_lcb_bps", float(adverse_regime_lcb_bps))
+        else:
+            object.__setattr__(self, "adverse_regime_lcb_bps", None)
+        object.__setattr__(self, "adverse_regime_n_obs", int(adverse_regime_n_obs))
+        object.__setattr__(self, "adverse_regime_defended", bool(adverse_regime_defended))
 
     @property
     def bootstrap_tstat_incremental(self) -> float:

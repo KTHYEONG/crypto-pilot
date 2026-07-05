@@ -627,6 +627,11 @@ def compute_symbol_strategy_evidence(
         t_stats_total += time.perf_counter() - t_qs
 
         t_qf = time.perf_counter()
+        adverse_lcb, adverse_n, adverse_defended = compute_adverse_regime_evidence(
+            group, cfg=cfg,
+            fold_id=int(group["fold_id"].iloc[0]) if len(group) else 0,
+            seed=seed,
+        )
         evidence_list.append(
             SymbolStrategyEvidence(
                 key=SignalSourceKey(
@@ -649,6 +654,9 @@ def compute_symbol_strategy_evidence(
                 structural_reasons=tuple(structural_reasons),
                 diagnostic_flags=tuple(diagnostic_flags),
                 lcb_net_bps=lcb_net,
+                adverse_regime_lcb_bps=adverse_lcb,
+                adverse_regime_n_obs=adverse_n,
+                adverse_regime_defended=adverse_defended,
             )
         )
         raw_p_values.append(p_value)
@@ -699,6 +707,9 @@ def compute_symbol_strategy_evidence(
             structural_reasons=evidence.structural_reasons,
             diagnostic_flags=tuple(diag_flags),
             lcb_net_bps=evidence.lcb_net_bps,
+            adverse_regime_lcb_bps=evidence.adverse_regime_lcb_bps,
+            adverse_regime_n_obs=evidence.adverse_regime_n_obs,
+            adverse_regime_defended=evidence.adverse_regime_defended,
         )
         final_evidence.append(ev_item)
         if logger.isEnabledFor(logging.DEBUG):
@@ -1254,6 +1265,33 @@ def _family_regime_cell_stats(
     lcb = float(np.quantile(boot, 0.05)) if boot.size > 0 else mean
     ic, _ict = _xs_rank_ic(g)
     return (n_bars, len(g), mean, std, sharpe, lcb, ic)
+
+
+def compute_adverse_regime_evidence(
+    g: pd.DataFrame,
+    *,
+    cfg: CandidateStrategyConfig,
+    fold_id: int,
+    seed: int,
+    adverse_regime_codes: frozenset[int] = frozenset({1, 2}),
+    min_bars: int = 8,
+    undefended_lcb_floor_bps: float = 0.0,
+) -> tuple[float | None, int, bool]:
+    """Adverse-regime(bear/crisis) LCB 진단. [ADR_20260705_L1L2_REGIME_CONDITIONAL_WEIGHT]"""
+    if "entry_regime_code" not in g.columns:
+        return (None, 0, True)
+    adverse_g = g[g["entry_regime_code"].isin(adverse_regime_codes)]
+    n_adverse = len(adverse_g)
+    if n_adverse < min_bars:
+        return (None, n_adverse, True)
+    stats = _family_regime_cell_stats(
+        adverse_g, cfg=cfg, fold_id=fold_id, seed=seed, min_bars=min_bars,
+    )
+    if stats is None:
+        return (None, n_adverse, True)
+    lcb = stats[5]
+    defended = (lcb is None) or (lcb > undefended_lcb_floor_bps)
+    return (lcb, n_adverse, defended)
 
 
 def compute_family_regime_edge_diagnostics(
