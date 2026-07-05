@@ -13,6 +13,8 @@ if TYPE_CHECKING:
     from src.domain.futures.strategy.candidate_dataset import CandidateFeatureSchema
     from src.domain.futures.strategy.candidate_ensemble import RegimeConditionalEnsemble
 
+from src.domain.futures.signals.contracts import SignalExitPolicy as SignalExitPolicy
+
 SignalArchetype = Literal[
     "trend",
     "ts_mom",
@@ -32,19 +34,6 @@ RegimeName = Literal[
     "transition",
     "crash",
 ]
-
-
-@dataclass(slots=True, frozen=True)
-class SignalExitPolicy:
-    """Deterministic exit geometry attached to a candidate signal."""
-
-    policy_id: str
-    archetype: SignalArchetype
-    stop_atr_mult: float
-    take_profit_atr_mult: float
-    expected_holding_bars: int
-    min_holding_bars: int
-    description: str = ""
 
 
 @dataclass(slots=True, frozen=True)
