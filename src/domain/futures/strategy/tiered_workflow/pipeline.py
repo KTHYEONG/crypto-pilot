@@ -2868,10 +2868,57 @@ def _resolve_l2_master_tf(
     return "8h"
 
 
+def _select_representative_l1_registry(
+    *,
+    per_tf_l1: dict[str, PerTfL1Result],
+    preferred_tf: str | None = None,
+) -> QualifiedSignalRegistry | None:
+    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Select a single representative L1 deployment registry from per-TF results.
+
+    Args:
+        per_tf_l1: Per-TF L1 results.
+        preferred_tf: Preferred TF to use if available.
+
+    Returns:
+        A single QualifiedSignalRegistry or None.
+    """
+    if not per_tf_l1:
+        return None
+
+    if preferred_tf is not None and preferred_tf in per_tf_l1:
+        chosen = preferred_tf
+    else:
+        chosen = min(per_tf_l1.keys(), key=_tf_hours)
+
+    # Priority 1: top-level deployment_registry
+    reg = per_tf_l1[chosen].l1_result.deployment_registry
+    if reg is not None:
+        return reg
+
+    # Priority 2: inference_artifact.deployment_registry
+    artifact = per_tf_l1[chosen].l1_result.inference_artifact
+    if artifact is not None:
+        artifact_reg: QualifiedSignalRegistry | None = getattr(artifact, "deployment_registry", None)
+        if artifact_reg is not None:
+            return artifact_reg
+
+    return None
+
+
 def _aggregate_per_tf_l1(
     per_tf_l1: dict[str, PerTfL1Result],
+    *,
+    preferred_tf: str | None = None,
 ) -> Layer1Result:
-    """Merge per-TF L1 results into a unified Layer1Result."""
+    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Merge per-TF L1 results into a unified Layer1Result.
+
+    Args:
+        per_tf_l1: Per-TF L1 results.
+        preferred_tf: Preferred TF for representative registry selection.
+
+    Returns:
+        Aggregated Layer1Result.
+    """
     if not per_tf_l1:
         return Layer1Result(
             signals_per_fold=(),
@@ -2915,6 +2962,11 @@ def _aggregate_per_tf_l1(
     ]
     merged_lifecycle = lifecycles[0] if lifecycles else ()
 
+    deployment_registry = _select_representative_l1_registry(
+        per_tf_l1=per_tf_l1,
+        preferred_tf=preferred_tf,
+    )
+
     first = next(iter(per_tf_l1.values())).l1_result
     return Layer1Result(
         gate_passed=gate_passed,
@@ -2930,6 +2982,7 @@ def _aggregate_per_tf_l1(
         fold_pass_ratio=first.fold_pass_ratio,
         n_valid=first.n_valid,
         n_total=first.n_total,
+        deployment_registry=deployment_registry,
     )
 
 
@@ -2957,7 +3010,7 @@ def run_tiered_pipeline(
     l2_eval_memo: dict[Any, Any] | None = None,
     regime_code_1d: NDArray[np.int8] | None = None,
 ) -> tuple[Layer1Result, Layer2Result | None, Layer3Result | None]:
-    """3-Layer 티어드 파이프라인 실행.
+    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] 3-Layer 티어드 파이프라인 실행.
 
     Per-TF L1 실행 후 best TF에서 L2/L3 수행.
 
@@ -3293,6 +3346,68 @@ def run_tiered_pipeline(
                 )
             )
         )
+
+    _major_registry_replay_env = os.environ.get("MAJOR_SYMBOL_REGISTRY_REPLAY", "")
+    if _major_registry_replay_env not in ("", "0", "false", "False"):
+        try:
+            ho_start_idx, ho_end_idx = _resolve_holdout_span(
+                aligned.datetimes,
+                window.holdout_start,
+                window.holdout_end,
+            )
+            if _l2_multi_tf and l1.artifacts_by_tf:
+                _major_replay_l3_batch = predict_layer1_signals_multi_tf(
+                    artifacts_by_tf=l1.artifacts_by_tf,
+                    candidate_events=labeled_events,
+                    aligned=aligned,
+                    start_idx=ho_start_idx,
+                    end_idx=ho_end_idx,
+                    cfg=cfg,
+                )
+            else:
+                _major_replay_l3_batch = predict_layer1_signals(
+                    artifact=l1.inference_artifact,
+                    candidate_events=labeled_events,
+                    aligned=aligned,
+                    start_idx=ho_start_idx,
+                    end_idx=ho_end_idx,
+                    cfg=cfg,
+                )
+            from src.domain.futures.strategy.tiered_workflow.major_symbol_registry_replay import (
+                format_major_symbol_registry_replay_table,
+                run_major_symbol_registry_replay,
+                write_major_symbol_registry_replay_csv,
+            )
+            _major_replay_seed = int(getattr(cfg, "seed", 42))
+            _major_replay_results = run_major_symbol_registry_replay(
+                seed=_major_replay_seed,
+                registry=l1.deployment_registry,
+                l2_signal_batch=l2_signal_batch,
+                l3_signal_batch=_major_replay_l3_batch,
+                aligned=aligned,
+                awf_folds=awf_folds,
+                holdout_span=(ho_start_idx, ho_end_idx),
+                config=l2_config,
+                caps=caps,
+                tf=l2_tf,
+                deploy_leverage=_champion_l_star if (_champion_l_star is not None and _champion_l_star > 1.0) else None,
+                holdout_labels=(str(window.holdout_start), str(window.holdout_end)),
+                baseline_l2=l2,
+                regime_code_1d=regime_code_1d,
+                prebuilt_cache=l2_sim_cache,
+                eval_memo=l2_eval_memo,
+            )
+            _major_replay_path_raw = os.environ.get("MAJOR_SYMBOL_REGISTRY_REPLAY_PATH", "")
+            _major_replay_path = (
+                Path(_major_replay_path_raw)
+                if _major_replay_path_raw
+                else Path(f"docs/results/major_symbol_registry_replay_seed_{_major_replay_seed}.csv")
+            )
+            write_major_symbol_registry_replay_csv(_major_replay_results, path=_major_replay_path)
+            if verbose:
+                logger.info(format_major_symbol_registry_replay_table(_major_replay_results))
+        except Exception as _major_replay_exc:
+            logger.error("[MAJOR-SYMBOL-REGISTRY-REPLAY] failed: %s", _major_replay_exc, exc_info=True)
 
     if not l2.gate_passed:
         if verbose:
