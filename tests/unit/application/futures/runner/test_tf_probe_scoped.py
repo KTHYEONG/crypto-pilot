@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -61,6 +63,48 @@ def _disable_tiered(monkeypatch: pytest.MonkeyPatch) -> None:
     from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 
     monkeypatch.setitem(OPT_FUTURES_CONFIG, "USE_CS_RANK_ENGINE", False)
+
+
+def probe_cell(tf: str, *, passed_fdr: bool = True, tstat: float = 3.0):
+    return SimpleNamespace(
+        symbol="BTCUSDT",
+        family="dual_momentum",
+        variant="trend",
+        archetype="trend",
+        tf=tf,
+        n_obs=100,
+        n_events=50,
+        ic_mean=0.05,
+        ic_tstat_hac=tstat,
+        ic_fold_sign_consistency=1.0,
+        alpha_half_life_h=48.0,
+        net_edge_bps=10.0,
+        turnover_per_year=12.0,
+        vr_label="stationary",
+        hurst=0.45,
+        passed_fdr=passed_fdr,
+    )
+
+
+def probe_result(*cells):
+    tfs: list[str] = []
+    seen: set[str] = set()
+    for c in cells:
+        tf = getattr(c, "tf", None)
+        if tf and tf not in seen:
+            seen.add(tf)
+            tfs.append(tf)
+    manifest = SimpleNamespace(
+        cells=tuple(cells),
+        tf_grid=tuple(tfs),
+        coverage_by_tf={},
+        diversity_corr={},
+    )
+    return TfProbeStageResult(
+        manifest=manifest,
+        winning_cells=(),
+        selected_tfs=frozenset(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -450,3 +494,250 @@ class TestTfProbeScopedErrorHandling:
         assert isinstance(result, TfProbeStageResult)
         assert len(result.winning_cells) > 0, "at least one cell should survive"
         assert result.winning_cells[0] is surviving_cell
+
+# ---------------------------------------------------------------------------
+# Scenario 1: probe_stage_result_to_raw_manifest
+# ---------------------------------------------------------------------------
+
+
+class TestProbeStageResultToRawManifest:
+    def test_probe_stage_result_to_raw_manifest_converts_scoped_manifest_for_pipeline(
+        self,
+    ) -> None:
+        """Convert TfProbeStageResult with 4h/6h cells into raw manifest rows."""
+        from src.application.futures.runner.tf_probe_scoped import (
+            probe_stage_result_to_raw_manifest,
+        )
+
+        cells_4h = [probe_cell("4h", passed_fdr=True, tstat=3.0)]
+        cells_6h = [probe_cell("6h", passed_fdr=True, tstat=2.5)]
+        result = probe_result(*cells_4h, *cells_6h)
+        raw = probe_stage_result_to_raw_manifest(result)
+        assert raw is not None
+        assert len(raw) == 2
+        for row in raw:
+            assert "tf" in row
+            assert row["tf"] in ("4h", "6h")
+            assert row["family"] == "dual_momentum"
+            assert row["variant"] == "trend"
+            assert row["net_edge_bps"] == 10.0
+            assert row["passed_fdr"] is True
+
+    def test_probe_stage_result_to_raw_manifest_none_returns_none(
+        self,
+    ) -> None:
+        """Input None returns None."""
+        from src.application.futures.runner.tf_probe_scoped import (
+            probe_stage_result_to_raw_manifest,
+        )
+
+        assert probe_stage_result_to_raw_manifest(None) is None
+
+    def test_probe_stage_result_to_raw_manifest_skips_cells_missing_tf(
+        self,
+    ) -> None:
+        """Malformed cell without tf is skipped non-fatally."""
+        from src.application.futures.runner.tf_probe_scoped import (
+            probe_stage_result_to_raw_manifest,
+        )
+
+        good = probe_cell("4h")
+        bad = SimpleNamespace(
+            symbol="BTCUSDT", family="dual_momentum", variant="trend",
+            net_edge_bps=10.0, passed_fdr=True,
+        )
+        result = probe_result(good, bad)
+        raw = probe_stage_result_to_raw_manifest(result)
+        assert raw is not None
+        assert len(raw) >= 1
+        for row in raw:
+            assert "tf" in row
+
+
+# ---------------------------------------------------------------------------
+# Scenario 2: Integration - probe manifest into run_tiered_pipeline
+# ---------------------------------------------------------------------------
+
+
+class TestTfProbeManifestPipelineIntegration:
+    def test_run_strategy_stage_passes_scoped_probe_manifest_into_run_tiered_pipeline(
+        self, mocker: MockerFixture
+    ) -> None:
+        """Integration: scoped probe manifest reaches run_tiered_pipeline kwargs."""
+        from src.application.futures.runner.active_pipeline import _run_strategy_stage
+
+        cells = [probe_cell("4h", passed_fdr=True)]
+        pr = probe_result(*cells)
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._run_tf_probe_stage_scoped",
+            return_value=pr,
+        )
+        captured_kwargs: dict[str, object] = {}
+
+        def _capture_run_tiered(*a: Any, **kw: Any) -> tuple[Any, Any, Any]:
+            captured_kwargs.update(kw)
+            return (MagicMock(gate_passed=True), None, None)
+
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline.run_tiered_pipeline",
+            side_effect=_capture_run_tiered,
+        )
+        from src.domain.futures.strategy.config import CandidateStrategyConfig
+
+        mock_tiered_cfg = CandidateStrategyConfig(seed=42)
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline.build_candidate_strategy_config",
+            return_value=MagicMock(candidate=mock_tiered_cfg),
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._resolve_tradeable_scope",
+            return_value=MagicMock(admitted=["BTCUSDT"], dropped_by_reason={}),
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._resolve_base_symbol_scope",
+            return_value=["BTCUSDT"],
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._resolve_layered_window",
+            return_value=MagicMock(),
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline.run_active_strategy_output_bridge",
+            return_value=MagicMock(),
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._inject_universe_metadata_into_maps",
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._resolve_universe_state_cube",
+            return_value=None,
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.common.alignment.align_data_maps",
+            return_value=MagicMock(datetimes=[pd.Timestamp("2024-01-01")]),
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._tiered_labeled_events",
+            return_value=pd.DataFrame(),
+        )
+
+        cfg = make_run_config("l1")
+        ds = make_data_stage_with_maps(("BTCUSDT",))
+        _run_strategy_stage(
+            run_config=cfg,
+            window=MagicMock(),
+            data_stage=ds,
+            trading_symbols=("BTCUSDT",),
+        )
+        assert "probe_manifest" in captured_kwargs
+        assert captured_kwargs["probe_manifest"] is not None
+
+    def test_run_strategy_stage_uses_probe_result_argument_or_local_scoped_result(
+        self, mocker: MockerFixture
+    ) -> None:
+        """Explicit probe_result reaches run_tiered_pipeline even when scoped returns None."""
+        from src.application.futures.runner.active_pipeline import _run_strategy_stage
+
+        cells = [probe_cell("4h", passed_fdr=True)]
+        pr = probe_result(*cells)
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._run_tf_probe_stage_scoped",
+            return_value=None,
+        )
+        from src.domain.futures.strategy.config import CandidateStrategyConfig
+
+        captured_kwargs: dict[str, object] = {}
+
+        def _capture_run_tiered(*a: Any, **kw: Any) -> tuple[Any, Any, Any]:
+            captured_kwargs.update(kw)
+            return (MagicMock(gate_passed=True), None, None)
+
+        mocker.patch(
+            "src.domain.futures.strategy.tiered_workflow.pipeline.run_tiered_pipeline",
+            side_effect=_capture_run_tiered,
+        )
+        mock_tiered_cfg = CandidateStrategyConfig(seed=42)
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline.build_candidate_strategy_config",
+            return_value=MagicMock(candidate=mock_tiered_cfg),
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._resolve_tradeable_scope",
+            return_value=MagicMock(admitted=["BTCUSDT"], dropped_by_reason={}),
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._resolve_base_symbol_scope",
+            return_value=["BTCUSDT"],
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._resolve_layered_window",
+            return_value=MagicMock(),
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline.run_active_strategy_output_bridge",
+            return_value=MagicMock(),
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._inject_universe_metadata_into_maps",
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._resolve_universe_state_cube",
+            return_value=None,
+        )
+        mocker.patch(
+            "src.domain.futures.strategy.common.alignment.align_data_maps",
+            return_value=MagicMock(datetimes=[pd.Timestamp("2024-01-01")]),
+        )
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._tiered_labeled_events",
+            return_value=pd.DataFrame(),
+        )
+
+        cfg = make_run_config("l1")
+        ds = make_data_stage_with_maps(("BTCUSDT",))
+        _run_strategy_stage(
+            run_config=cfg,
+            window=MagicMock(),
+            data_stage=ds,
+            trading_symbols=("BTCUSDT",),
+            probe_result=pr,
+        )
+        assert "probe_manifest" in captured_kwargs
+        assert captured_kwargs["probe_manifest"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Scenario 1/2: log_validation_parity_report with phase
+# ---------------------------------------------------------------------------
+
+
+class TestValidationParityLogging:
+    def test_l1_phase_logs_probe_and_main_parity_without_debug_gate(
+        self,
+    ) -> None:
+        """log_validation_parity_report emits [TF-VALIDATION-PARITY] at INFO without DEBUG gate."""
+        import io
+
+        from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+            ValidationParityReport,
+            logger as vp_logger,
+            log_validation_parity_report,
+        )
+
+        report = ValidationParityReport(
+            probe=(),
+            main_tf=(),
+            major_gaps=(),
+            decision="diagnostic_only",
+            blockers=("test_blocker",),
+        )
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setLevel(logging.INFO)
+        vp_logger.addHandler(handler)
+        vp_logger.setLevel(logging.INFO)
+        try:
+            log_validation_parity_report(report, phase="l1")
+        finally:
+            vp_logger.removeHandler(handler)
+        assert "[TF-VALIDATION-PARITY]" in stream.getvalue()

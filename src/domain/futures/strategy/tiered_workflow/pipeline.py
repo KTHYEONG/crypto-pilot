@@ -124,7 +124,8 @@ from src.domain.futures.strategy.tiered_workflow.signal_selection import (
 )
 from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
     _raw_probe_to_manifest,
-    build_validation_parity_report,
+    build_validation_parity_capture,
+    finalize_validation_parity_capture,
     log_validation_parity_report,
 )
 from src.domain.futures.strategy.walk_forward import (
@@ -3162,14 +3163,19 @@ def run_tiered_pipeline(
                     _tf_edge_quality(_r_diag),
                     _l2_tf_resolved,
                 )
-        _validation_report = build_validation_parity_report(
+        _capture = build_validation_parity_capture(
             probe_manifest=_raw_probe_to_manifest(probe_manifest),
             per_tf_l1=per_tf_l1,
-            observed_sleeve_summaries=(),
         )
-        if logger.isEnabledFor(logging.DEBUG):
-            log_validation_parity_report(_validation_report)
+        _l1_report = finalize_validation_parity_capture(_capture)
+        if verbose:
+            log_validation_parity_report(_l1_report, phase="l1")
         l1 = _aggregate_per_tf_l1(per_tf_l1, preferred_tf=_l2_tf_resolved)
+        l1 = dataclasses.replace(
+            l1,
+            validation_parity_capture=_capture,
+            validation_parity_report=_l1_report,
+        )
         per_tf_l1.clear()
         gc.collect()
         _rss_after_agg = _get_rss_mb()
@@ -3353,6 +3359,15 @@ def run_tiered_pipeline(
         prebuilt_cache=l2_sim_cache,
         eval_memo=l2_eval_memo,
     )
+    if l1.validation_parity_capture is not None:
+        _l2_report = finalize_validation_parity_capture(
+            l1.validation_parity_capture,
+            observed_sleeve_summaries=l2.major_symbol_sleeve_diag,
+        )
+        l2 = dataclasses.replace(l2, validation_parity_report=_l2_report)
+        if verbose:
+            log_validation_parity_report(_l2_report, phase="l2")
+
     logger.log(PERF, "[PERF] run_tiered_pipeline_l2_total took=%.4fs", time.perf_counter() - t_l2)
     _rss_l2_after = _get_rss_mb()
     logger.debug(
@@ -3529,6 +3544,15 @@ def run_tiered_pipeline(
         regime_code_1d=regime_code_1d,
     )
     logger.log(PERF, "[PERF] run_tiered_pipeline_l3_total took=%.4fs", time.perf_counter() - t_l3)
+
+    if l1.validation_parity_capture is not None:
+        _l3_report = finalize_validation_parity_capture(
+            l1.validation_parity_capture,
+            observed_sleeve_summaries=l3.major_symbol_sleeve_diag,
+        )
+        l3 = dataclasses.replace(l3, validation_parity_report=_l3_report)
+        if verbose:
+            log_validation_parity_report(_l3_report, phase="l3")
 
     # [ADR_20260705_L1_DIVERGENCE_DAMPENER] Track 2 registry census (ETH admission/activation-gap).
     # NOTE: l1.deployment_registry는 _aggregate_per_tf_l1 병합 경로에서 항상 None —

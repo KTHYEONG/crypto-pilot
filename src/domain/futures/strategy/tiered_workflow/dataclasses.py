@@ -22,12 +22,16 @@ if TYPE_CHECKING:
     )
     from src.domain.futures.strategy.cs_rank import SymbolSignal
     from src.domain.futures.strategy.tiered_workflow.awf_sim import (
-        DirectionalVetoSummary,
-        Layer2FoldAttribution,
-        MajorSymbolIncoherenceSummary,
-        MajorSymbolSignalSizingSummary,
-        MajorSymbolSleeveContributionSummary,
-        ReversalEpisode,
+    DirectionalVetoSummary,
+    Layer2FoldAttribution,
+    MajorSymbolIncoherenceSummary,
+    MajorSymbolSignalSizingSummary,
+    MajorSymbolSleeveContributionSummary,
+    ReversalEpisode,
+)
+    from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+        ValidationParityCapture,
+        ValidationParityReport,
     )
 
 def _validate_directional_veto_action(value: str) -> Literal["drop_long", "zero_mu", "cap_mu"]:
@@ -119,6 +123,8 @@ class SymbolLifecycleRecord:
 class Layer1Result:
     """Layer1 SWF-K 검증 결과.
 
+    [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
+
     Attributes:
         signals_per_fold: fold별 symbol→SymbolSignal 매핑 튜플.
         oos_stacked: fold 횡단 합본 (L2 입력용, look-ahead 없음).
@@ -158,6 +164,8 @@ class Layer1Result:
     symbol_lifecycle: tuple[SymbolLifecycleRecord, ...] = ()
     inference_artifact: Layer1InferenceArtifact | None = None
     artifacts_by_tf: dict[str, Layer1InferenceArtifact] = field(default_factory=dict)
+    validation_parity_capture: ValidationParityCapture | None = None
+    validation_parity_report: ValidationParityReport | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,6 +405,8 @@ class Layer2StudyResult:
 class Layer2Result:
     """Layer2 AWF 포트폴리오 검증 결과. [ADR_20260704_L2_DIRECTIONAL_VETO]
 
+    [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
+
     Attributes:
         selected_last: 마지막 리밸런스 선택 심볼 집합.
         weights_last: 마지막 리밸런스 비중 (symbol→weight).
@@ -491,6 +501,7 @@ class Layer2Result:
     major_symbol_sleeve_diag: tuple[MajorSymbolSleeveContributionSummary, ...] = ()
     major_symbol_incoherence: tuple[MajorSymbolIncoherenceSummary, ...] = ()
     directional_veto_summary: tuple[DirectionalVetoSummary, ...] = ()
+    validation_parity_report: ValidationParityReport | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -1613,6 +1624,8 @@ class Layer2SimulationDiagnostics:
 class Layer3Result:
     """Layer3 Holdout 최종 검증 결과. [ADR_20260704_L2_DIRECTIONAL_VETO]
 
+    [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
+
     Attributes:
         cagr: 전략 연평균 복리 수익률.
         mdd: 전략 최대 낙폭 (양수).
@@ -1700,6 +1713,7 @@ class Layer3Result:
     major_symbol_sleeve_diag: tuple[MajorSymbolSleeveContributionSummary, ...] = ()
     major_symbol_incoherence: tuple[MajorSymbolIncoherenceSummary, ...] = ()
     directional_veto_summary: tuple[DirectionalVetoSummary, ...] = ()
+    validation_parity_report: ValidationParityReport | None = None
 
 
 @dataclass(slots=True, frozen=True)
