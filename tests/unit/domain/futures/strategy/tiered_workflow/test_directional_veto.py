@@ -1010,3 +1010,237 @@ class TestComputeMeanEpisodeBars:
             ),
         ]
         assert _compute_mean_episode_bars(snaps) == 1.0
+
+
+class TestIntraSymbolDivergenceStateMachine:
+    """Track 1 — BTC Intra-Symbol Divergence Dampener 상태기계."""
+
+    def make_cfg(self, **overrides: object) -> Layer2AllocationConfig:
+        base = {
+            "l2_intra_symbol_divergence_enabled": True,
+            "l2_intra_symbol_divergence_symbols": ("BTCUSDT",),
+            "l2_intra_symbol_divergence_dominant_families": ("dual_momentum", "supertrend"),
+            "l2_intra_symbol_divergence_persistence_bars": 3,
+            "l2_intra_symbol_divergence_release_bars": 2,
+            "l2_intra_symbol_divergence_cooldown_bars": 3,
+            "l2_intra_symbol_divergence_dominant_damp_mult": 0.5,
+            "l2_intra_symbol_divergence_dissent_boost_mult": 2.0,
+        }
+        base.update(overrides)
+        return Layer2AllocationConfig.from_mapping(base)
+
+    def test_idle_watch_armed_path_on_persistent_divergence(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            IntraSymbolDivergenceState,
+            _compute_intra_symbol_divergence_signal,
+        )
+        cfg = self.make_cfg()
+        state = IntraSymbolDivergenceState(symbol="BTCUSDT")
+
+        # bar 1: idle → watch
+        state, armed, before, after = _compute_intra_symbol_divergence_signal(
+            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
+            regime_code=1, state=state, config=cfg,
+        )
+        assert before == "idle"
+        assert after == "watch"
+        assert not armed
+
+        # bar 2: watch → watch
+        state, armed, before, after = _compute_intra_symbol_divergence_signal(
+            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
+            regime_code=1, state=state, config=cfg,
+        )
+        assert before == "watch"
+        assert after == "watch"
+        assert not armed
+
+        # bar 3: watch → armed
+        state, armed, before, after = _compute_intra_symbol_divergence_signal(
+            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
+            regime_code=1, state=state, config=cfg,
+        )
+        assert before == "watch"
+        assert after == "armed"
+        assert armed
+
+    def test_divergence_requires_both_adverse_and_sign_mismatch(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            IntraSymbolDivergenceState,
+            _compute_intra_symbol_divergence_signal,
+        )
+        cfg = self.make_cfg()
+        state = IntraSymbolDivergenceState(symbol="BTCUSDT")
+
+        # regime_code=0 (non-adverse) even with divergence → stays idle
+        state, armed, before, after = _compute_intra_symbol_divergence_signal(
+            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
+            regime_code=0, state=state, config=cfg,
+        )
+        assert before == "idle"
+        assert after == "idle"
+        assert not armed
+
+        # adverse but no divergence → stays idle
+        state, armed, before, after = _compute_intra_symbol_divergence_signal(
+            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=False,
+            regime_code=1, state=state, config=cfg,
+        )
+        assert before == "idle"
+        assert after == "idle"
+        assert not armed
+
+    def test_release_after_release_bars_enters_cooldown_then_idle(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            IntraSymbolDivergenceState,
+            _compute_intra_symbol_divergence_signal,
+        )
+        cfg = self.make_cfg()
+        state = IntraSymbolDivergenceState(symbol="BTCUSDT")
+        # Advance to armed (3 persistent bars)
+        for _ in range(3):
+            state, armed, _, _ = _compute_intra_symbol_divergence_signal(
+                symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
+                regime_code=1, state=state, config=cfg,
+            )
+        assert armed
+
+        # Release bar 1: armed release_streak=1 (still armed)
+        state, armed, before, after = _compute_intra_symbol_divergence_signal(
+            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=False,
+            regime_code=1, state=state, config=cfg,
+        )
+        assert before == "armed"
+        assert after == "armed"
+        assert armed
+
+        # Release bar 2: armed → cooldown
+        state, armed, before, after = _compute_intra_symbol_divergence_signal(
+            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=False,
+            regime_code=1, state=state, config=cfg,
+        )
+        assert before == "armed"
+        assert after == "cooldown"
+        assert not armed
+
+        # cooldown bar 1: cooldown_left=2
+        state, armed, before, after = _compute_intra_symbol_divergence_signal(
+            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
+            regime_code=1, state=state, config=cfg,
+        )
+        assert before == "cooldown"
+        assert after == "cooldown"
+        assert not armed
+
+        # cooldown bar 2: cooldown_left=1
+        state, armed, before, after = _compute_intra_symbol_divergence_signal(
+            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
+            regime_code=1, state=state, config=cfg,
+        )
+        assert before == "cooldown"
+        assert after == "cooldown"
+
+        # cooldown bar 3: cooldown_left=0 → still cooldown (next call transitions to idle)
+        state, armed, before, after = _compute_intra_symbol_divergence_signal(
+            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
+            regime_code=1, state=state, config=cfg,
+        )
+        assert before == "cooldown"
+        assert after == "cooldown"
+
+        # cooldown expired → idle
+        state, armed, before, after = _compute_intra_symbol_divergence_signal(
+            symbol="BTCUSDT", dominant_sign=1, dissent_diverges=True,
+            regime_code=1, state=state, config=cfg,
+        )
+        assert before == "cooldown"
+        assert after == "idle"
+        assert not armed
+
+
+class TestApplyIntraSymbolDivergenceAdjustment:
+    """Track 1 — Sleeve 조정 적용 테스트."""
+
+    def make_sig(self, raw_mu: float, qw: float = 1.0) -> SymbolSignal:
+        return SymbolSignal(
+            raw_mu=raw_mu, volatility=0.01, n_obs=10, t_stat=0.0,
+            valid=True, beta_btc=None, quality_weight=qw,
+        )
+
+    def test_apply_adjustment_damps_dominant_boosts_dissent(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            _apply_intra_symbol_divergence_adjustment,
+        )
+        sleeves = {
+            ("BTCUSDT", "dual_momentum:v1_4h"): self.make_sig(raw_mu=3.678, qw=1.000),
+            ("BTCUSDT", "ichimoku_trend:v1_4h"): self.make_sig(raw_mu=-0.222, qw=0.734),
+            ("ETHUSDT", "dual_momentum:v1_4h"): self.make_sig(raw_mu=3.192, qw=0.869),
+        }
+        adjusted = _apply_intra_symbol_divergence_adjustment(
+            sleeves, symbol="BTCUSDT",
+            dominant_families=frozenset({"dual_momentum", "supertrend"}),
+            dominant_damp_mult=0.5, dissent_boost_mult=2.0, dissent_boost_cap_mult=3.0,
+        )
+        # dominant damp: 3.678 * 0.5 = 1.839
+        assert adjusted[("BTCUSDT", "dual_momentum:v1_4h")].raw_mu == pytest.approx(1.839)
+        # dissent boost: 0.734 * 2.0 = 1.468
+        assert adjusted[("BTCUSDT", "ichimoku_trend:v1_4h")].quality_weight == pytest.approx(1.468)
+        # non-target symbol unchanged
+        assert adjusted[("ETHUSDT", "dual_momentum:v1_4h")].raw_mu == pytest.approx(3.192)
+
+    def test_boost_mult_clipped_at_safety_cap(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            _apply_intra_symbol_divergence_adjustment,
+        )
+        sleeves = {
+            ("BTCUSDT", "ichimoku_trend:v1_4h"): self.make_sig(raw_mu=1.0, qw=1.0),
+        }
+        # dissent_boost_mult=10.0 but cap at 3.0 → qw should be min(1.0*10, 1.0*3.0) = 3.0
+        adjusted = _apply_intra_symbol_divergence_adjustment(
+            sleeves, symbol="BTCUSDT",
+            dominant_families=frozenset({"dual_momentum"}),
+            dominant_damp_mult=0.5, dissent_boost_mult=10.0, dissent_boost_cap_mult=3.0,
+        )
+        assert adjusted[("BTCUSDT", "ichimoku_trend:v1_4h")].quality_weight == pytest.approx(3.0)
+
+    def test_non_target_symbol_sleeves_never_modified(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            _apply_intra_symbol_divergence_adjustment,
+        )
+        sleeves = {
+            ("ETHUSDT", "dual_momentum:v1_4h"): self.make_sig(raw_mu=3.192, qw=0.869),
+            ("BNBUSDT", "supertrend:v1_4h"): self.make_sig(raw_mu=1.5, qw=0.5),
+        }
+        adjusted = _apply_intra_symbol_divergence_adjustment(
+            sleeves, symbol="BTCUSDT",
+            dominant_families=frozenset({"dual_momentum"}),
+            dominant_damp_mult=0.5, dissent_boost_mult=2.0,
+        )
+        assert adjusted[("ETHUSDT", "dual_momentum:v1_4h")].raw_mu == pytest.approx(3.192)
+        assert adjusted[("BNBUSDT", "supertrend:v1_4h")].quality_weight == pytest.approx(0.5)
+
+    def test_dominant_or_dissent_family_absent_skips_symbol(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            _apply_intra_symbol_divergence_adjustment,
+        )
+        # target symbol present but only dominant (dissent absent) → no crash
+        sleeves = {
+            ("BTCUSDT", "dual_momentum:v1_4h"): self.make_sig(raw_mu=3.678, qw=1.0),
+        }
+        adjusted = _apply_intra_symbol_divergence_adjustment(
+            sleeves, symbol="BTCUSDT",
+            dominant_families=frozenset({"dual_momentum", "supertrend"}),
+            dominant_damp_mult=0.5, dissent_boost_mult=2.0,
+        )
+        assert ("BTCUSDT", "dual_momentum:v1_4h") in adjusted
+        assert adjusted[("BTCUSDT", "dual_momentum:v1_4h")].raw_mu == pytest.approx(1.839)
+
+        # target symbol not in sleeve keys → dict returned unchanged
+        adjusted2 = _apply_intra_symbol_divergence_adjustment(
+            {("ETHUSDT", "test:v1_4h"): self.make_sig(raw_mu=1.0, qw=1.0)},
+            symbol="BTCUSDT",
+            dominant_families=frozenset({"dual_momentum"}),
+            dominant_damp_mult=0.5, dissent_boost_mult=2.0,
+        )
+        assert ("ETHUSDT", "test:v1_4h") in adjusted2
+        assert adjusted2[("ETHUSDT", "test:v1_4h")].raw_mu == pytest.approx(1.0)

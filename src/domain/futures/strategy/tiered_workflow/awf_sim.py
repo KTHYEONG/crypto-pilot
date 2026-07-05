@@ -121,6 +121,16 @@ class ContextualDirectionalVetoState:
     last_action: Literal["none", "cap_mu", "zero_mu", "drop_long"] = "none"
 
 
+@dataclass(slots=True)
+class IntraSymbolDivergenceState:
+    """[ADR_20260705_L1_DIVERGENCE_DAMPENER] dominant/dissent sleeve 부호 분기 상태."""
+    symbol: str
+    state: Literal["idle", "watch", "armed", "cooldown"] = "idle"
+    divergence_streak: int = 0
+    release_streak: int = 0
+    cooldown_left: int = 0
+
+
 @dataclass(slots=True, frozen=True)
 class ReversalEpisode:
     """risk_off 연속 구간 하나(entry~exit)의 실현 요약."""
@@ -281,6 +291,109 @@ def _compute_contextual_directional_veto_signal(
 
     state_after = new_state.state
     return (new_state, fired, raw_mu_after, release_reason, state_before, state_after)
+
+
+def _compute_intra_symbol_divergence_signal(
+    *,
+    symbol: str,
+    dominant_sign: int,
+    dissent_diverges: bool,
+    regime_code: int,
+    state: IntraSymbolDivergenceState,
+    config: Layer2AllocationConfig,
+) -> tuple[
+    IntraSymbolDivergenceState,
+    bool,
+    Literal["idle", "watch", "armed", "cooldown"],
+    Literal["idle", "watch", "armed", "cooldown"],
+]:
+    _persist = int(config.l2_intra_symbol_divergence_persistence_bars)
+    _release = int(config.l2_intra_symbol_divergence_release_bars)
+    _cooldown = int(config.l2_intra_symbol_divergence_cooldown_bars)
+    _adverse_codes: tuple[int, ...] = getattr(config, "l2_regime_directional_veto_adverse_codes", (1, 2))
+    _is_adverse = regime_code in _adverse_codes
+    _divergent = dominant_sign != 0 and dissent_diverges
+
+    state_before = state.state
+
+    if state.state == "cooldown":
+        if state.cooldown_left > 0:
+            new = IntraSymbolDivergenceState(
+                symbol=symbol, state="cooldown",
+                cooldown_left=state.cooldown_left - 1,
+            )
+        else:
+            new = IntraSymbolDivergenceState(symbol=symbol, state="idle")
+        return (new, False, state_before, new.state)
+
+    if state.state == "armed":
+        if not _divergent or not _is_adverse:
+            new_release = state.release_streak + 1
+            if new_release >= _release:
+                new = IntraSymbolDivergenceState(
+                    symbol=symbol, state="cooldown",
+                    cooldown_left=_cooldown,
+                )
+                return (new, False, state_before, new.state)
+            new = IntraSymbolDivergenceState(
+                symbol=symbol, state="armed",
+                divergence_streak=state.divergence_streak,
+                release_streak=new_release,
+            )
+            return (new, True, state_before, new.state)
+        new = IntraSymbolDivergenceState(
+            symbol=symbol, state="armed",
+            divergence_streak=state.divergence_streak + 1,
+        )
+        return (new, True, state_before, new.state)
+
+    if not _is_adverse or not _divergent:
+        new = IntraSymbolDivergenceState(symbol=symbol, state="idle")
+        return (new, False, state_before, new.state)
+
+    new_streak = state.divergence_streak + 1
+    if new_streak >= _persist:
+        new = IntraSymbolDivergenceState(
+            symbol=symbol, state="armed",
+            divergence_streak=new_streak,
+        )
+        return (new, True, state_before, new.state)
+
+    if new_streak > 1:
+        new = IntraSymbolDivergenceState(
+            symbol=symbol, state="watch",
+            divergence_streak=new_streak,
+        )
+    else:
+        new = IntraSymbolDivergenceState(
+            symbol=symbol, state="watch",
+            divergence_streak=1,
+        )
+    return (new, False, state_before, new.state)
+
+
+def _apply_intra_symbol_divergence_adjustment(
+    sleeve_signals: dict[tuple[str, str], SymbolSignal],
+    *,
+    symbol: str,
+    dominant_families: frozenset[str],
+    dominant_damp_mult: float,
+    dissent_boost_mult: float,
+    dissent_boost_cap_mult: float = 3.0,
+) -> dict[tuple[str, str], SymbolSignal]:
+    result: dict[tuple[str, str], SymbolSignal] = {}
+    for sk, sig in sleeve_signals.items():
+        sym, strat = sk
+        if sym != symbol:
+            result[sk] = sig
+            continue
+        fam = strat.partition(":")[0]
+        if fam in dominant_families:
+            result[sk] = replace(sig, raw_mu=sig.raw_mu * dominant_damp_mult)
+        else:
+            capped = min(sig.quality_weight * dissent_boost_mult, sig.quality_weight * dissent_boost_cap_mult)
+            result[sk] = replace(sig, quality_weight=capped)
+    return result
 
 
 def _compute_symbol_rolling_return(
@@ -602,6 +715,60 @@ def summarize_major_symbol_sleeve_contribution(
             regime_adverse_sign_mismatch_pct=regime_adverse_sign_mismatch_pct,
         ))
 
+    return tuple(results)
+
+
+@dataclass(slots=True, frozen=True)
+class MajorSymbolRegistryCensusEntry:
+    """[ADR_20260705_L1_DIVERGENCE_DAMPENER] L1 registry 전체 census vs holdout 관측 대조."""
+    symbol: str
+    family: str
+    registry_mean_incremental_bps: float
+    hard_eligible: bool
+    observed_active_in_holdout: bool
+
+
+def compute_major_symbol_registry_census(
+    *,
+    registry: object,
+    observed_sleeve_summaries: tuple[object, ...],
+    symbols: tuple[str, ...] = MAJOR_DIAG_SYMBOLS,
+) -> tuple[MajorSymbolRegistryCensusEntry, ...]:
+    """[ADR_20260705_L1_DIVERGENCE_DAMPENER] registry.by_symbol[symbol]의 family 전체를
+    observed_sleeve_summaries(Phase 0 holdout 관측)와 대조.
+    """
+    from src.domain.futures.signals.contracts import QualifiedSignalRegistry
+    if not isinstance(registry, QualifiedSignalRegistry):
+        return ()
+    by_symbol = registry.by_symbol
+    if not by_symbol:
+        return ()
+
+    observed: set[tuple[str, str]] = set()
+    for s in observed_sleeve_summaries:
+        sym = str(getattr(s, "symbol", ""))
+        fam = str(getattr(s, "family", ""))
+        if sym and fam:
+            observed.add((sym, fam))
+
+    results: list[MajorSymbolRegistryCensusEntry] = []
+    for sym in symbols:
+        evs = by_symbol.get(sym)
+        if not evs:
+            continue
+        for ev in evs:
+            key = getattr(ev, "key", None)
+            strat = str(getattr(key, "strategy_id", ""))
+            fam = strat.partition(":")[0]
+            mean_bps = float(getattr(ev, "mean_incremental_bps", 0.0))
+            hard_eligible = bool(getattr(ev, "hard_eligible", False))
+            is_observed = (sym, fam) in observed
+            results.append(MajorSymbolRegistryCensusEntry(
+                symbol=sym, family=fam,
+                registry_mean_incremental_bps=mean_bps,
+                hard_eligible=hard_eligible,
+                observed_active_in_holdout=is_observed,
+            ))
     return tuple(results)
 
 
@@ -2928,6 +3095,7 @@ def _run_awf_simulation(
             _mtf_pooled_sum = 0
             _mtf_selected_sum = 0
         _contextual_veto_states: dict[str, ContextualDirectionalVetoState] = {}
+        _intra_divergence_states: dict[str, IntraSymbolDivergenceState] = {}
         for t in range(fold.oos_start, fold.oos_end - 1, rebalance_bars):
             t_end = min(t + rebalance_bars, fold.oos_end - 1)
 
@@ -3159,6 +3327,55 @@ def _run_awf_simulation(
                 for _sk, _ss in _oos_sleeve_sigs.items():
                     _reversal_kill_sigs[_sk] = replace(_ss, raw_mu=_ss.raw_mu * _roff_floor)
                 _oos_sleeve_sigs = _reversal_kill_sigs
+            # [L2 Intra-Symbol Divergence Dampener]: dominant sleeve damp + dissent sleeve boost
+            _divergence_enabled = bool(getattr(config, "l2_intra_symbol_divergence_enabled", False))
+            if _divergence_enabled:
+                try:
+                    _div_regime_code = int(_regime_code_1d[t]) if t < len(_regime_code_1d) else 0
+                except NameError:
+                    _div_regime_code = 0
+                _div_symbols: tuple[str, ...] = getattr(config, "l2_intra_symbol_divergence_symbols", ())
+                _dominant_fams: frozenset[str] = frozenset(
+                    getattr(config, "l2_intra_symbol_divergence_dominant_families", ())
+                )
+                for _dsym in _div_symbols:
+                    _dom_mus: list[float] = []
+                    _dissent_mus: list[float] = []
+                    _dissent_any_nonzero = False
+                    for (_sk_sym, _sk_strat), _ss in _oos_sleeve_sigs.items():
+                        if _sk_sym != _dsym:
+                            continue
+                        _fam = _sk_strat.partition(":")[0]
+                        if _fam in _dominant_fams:
+                            _dom_mus.append(float(_ss.raw_mu))
+                        else:
+                            if abs(float(_ss.raw_mu)) > 1e-12:
+                                _dissent_any_nonzero = True
+                            _dissent_mus.append(float(_ss.raw_mu))
+                    if not _dom_mus:
+                        continue
+                    _dominant_sign = int(np.sign(float(np.mean(_dom_mus))))
+                    _dissent_diverges = _dissent_any_nonzero and any(
+                        (m > 0) != (_dominant_sign > 0) for m in _dissent_mus if abs(m) > 1e-12
+                    )
+                    _ds_state = _intra_divergence_states.get(_dsym, IntraSymbolDivergenceState(symbol=_dsym))
+                    _ds_state, _armed, _, _ = _compute_intra_symbol_divergence_signal(
+                        symbol=_dsym,
+                        dominant_sign=_dominant_sign,
+                        dissent_diverges=_dissent_diverges,
+                        regime_code=_div_regime_code,
+                        state=_ds_state,
+                        config=config,
+                    )
+                    _intra_divergence_states[_dsym] = _ds_state
+                    if _armed:
+                        _oos_sleeve_sigs = _apply_intra_symbol_divergence_adjustment(
+                            _oos_sleeve_sigs,
+                            symbol=_dsym,
+                            dominant_families=_dominant_fams,
+                            dominant_damp_mult=float(config.l2_intra_symbol_divergence_dominant_damp_mult),
+                            dissent_boost_mult=float(config.l2_intra_symbol_divergence_dissent_boost_mult),
+                        )
             # sleeve key → symbol key 변환: precision-weighted pooling (인플레이션 방지)
             valid_signals, friction_by_symbol = _combine_sleeve_signals_to_symbol(
                 _oos_sleeve_sigs,
