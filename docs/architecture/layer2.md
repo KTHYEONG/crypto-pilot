@@ -33,7 +33,7 @@ change_triggers:
 dependencies:
   documents:
     - docs/architecture/layer1.md
-last_verified: 2026-07-04
+last_verified: 2026-07-05
 ---
 
 # 1. Purpose
@@ -62,6 +62,8 @@ L1에서 검증된 Candidate Events를 입력받아 Cross-sectional Ranking, Reg
   - $e_{raw} = \overline{side_j \cdot fwd\_ret(sym_j) \cdot 10000 - cost\_bps}$
 - **Family Prior Shrinkage**: 관측 데이터가 부족할 경우($N < \text{l2\_bucket\_min\_n}$) family prior로 수축 처리.
   - $e = (1-\lambda) e_{raw} + \lambda e_{family} \quad (\lambda = 0.3)$
+- **Bucket-Conditional Weight** (`apply_bucket_conditional_weight`, `l2_regime_conditional_weight_enabled`): `filter_sleeves_by_bucket`의 binary 통과 대신 $g(e)=\text{clip}((e-\text{floor})/\text{ref}, 0.5, 1.5)$로 `quality_weight`를 재가중.
+  - **알려진 한계** [ADR_20260705_L1L2_REGIME_CONDITIONAL_WEIGHT]: (1) `l2_regime_policy_mode="filter"` 분기 전용 — 기본값 `"soft"`에서는 호출되지 않음(실측: BTCUSDT/ETHUSDT/BNBUSDT 4h A/B 결과 baseline과 완전 동일). (2) 곱셈 재가중이라 L1 `quality_weight=0`(전체-구간 평균 음수)인 sleeve는 복구 불가.
 
 ### Kelly Sizing & Vol Target
 - **Diagonal Kelly Weights**:
@@ -140,3 +142,4 @@ L2 최적화 스터디 완료 후 챔피언 포트폴리오는 아래의 관문�
 | `l2_deploy_fit_mdd_crisis_gate`| `None` | Fit-leg MDD 위기 상황 진입 차단 임계값 |
 | `l2_leverage_diversification_gate_enabled` | `False` | DR 기반 레버리지 헤어컷 적용 여부 |
 | `MAJOR_SYMBOL_REGISTRY_REPLAY` | `False` | Major-symbol registry replay harness 실행 여부 |
+| `l2_regime_conditional_weight_enabled` | `False` | Bucket-conditional weight 재가중 활성화(`"filter"` 모드 전용, 기본 `"soft"`에서 미발화) |
