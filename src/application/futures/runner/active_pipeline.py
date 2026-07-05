@@ -105,6 +105,8 @@ from src.domain.futures.universe.contracts import UniverseStateCube
 from src.domain.futures.universe.membership import inject_membership_masks_into_maps
 from src.domain.futures.universe.storage import run_historical_sync
 
+from .tf_probe_scoped import _TF_PROBE_FALLBACK_SYMBOLS, _run_tf_probe_stage_scoped
+
 if TYPE_CHECKING:
     from src.domain.futures.optimization.workflow import TieredContext
 
@@ -2125,6 +2127,9 @@ def _run_strategy_stage(
     *,
     probe_result: TfProbeStageResult | None = None,
 ) -> CandidatePipelineOutput | RunnerResult | Layer1Result | None:
+    """[ADR_20260705_TF_PROBE_SCOPED_SYNC] Build the strategy maps, run scoped TF probe
+    before early data release, then continue the existing tiered pipeline flow.
+    """
     # ─── 기존 Phase D 진입 (공통 설정 → bridge → 선택적 Tiered 분기) ──────────
     from src.domain.futures.strategy.tiered_logging import format_data_integrity_summary, format_layer_header
 
@@ -2168,7 +2173,20 @@ def _run_strategy_stage(
     )
     strategy_steps["map_pick"] = time.perf_counter() - t_step
     full_strategy_maps = strategy_maps
-    
+
+    # TF Probe: 안전 재연결 — data_stage.data_maps.clear() 이전, 독립 cfg 사용
+    _probe_cfg = build_candidate_strategy_config(
+        strategy_cfg=StrategyConfig(name="candidate_ml"),
+        opt_config=OPT_FUTURES_CONFIG,
+        timeframe=run_config.timeframe,
+    ).candidate
+    _probe_result_local = _run_tf_probe_stage_scoped(
+        run_config=run_config,
+        full_strategy_maps=full_strategy_maps,
+        probe_cfg=_probe_cfg,
+        scope_symbols=OPT_FUTURES_CONFIG.get("TF_PROBE_SCOPE_SYMBOLS", _TF_PROBE_FALLBACK_SYMBOLS),
+    )
+
     if run_config.phase in ("l1", "l2"):
         _mem_before = _get_rss_mb()
         if hasattr(data_stage, "data_maps") and isinstance(data_stage.data_maps, dict):
