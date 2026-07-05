@@ -46,6 +46,8 @@ L1에서 검증된 Candidate Events를 입력받아 Cross-sectional Ranking, Reg
   - $c_s = \min\left(\sum c_i, \kappa \cdot \max c_i\right) \quad (\kappa = 1.5)$
 - **Major-Symbol Sleeve Contribution Diagnostic**: `_combine_sleeve_signals_to_symbol` 직후, major 심볼(`MAJOR_DIAG_SYMBOLS`)의 family별 sleeve `raw_mu`/`quality_weight`와 풀링후 부호를 비교(`sign_mismatch_pct`, `regime_adverse_sign_mismatch_pct`) — outvoting(가설 A) vs 반대신호 부재(가설 B) 실측 분해용, 로그 전용(`[L2/L3-MAJOR-SLEEVE-DIAG]`).
   <!-- ADR_20260705_L1_MAJOR_REVERSAL_ALPHA -->
+- **Representative Registry Preservation**: `_aggregate_per_tf_l1`은 downstream replay/census용 `deployment_registry`를 대표 TF 기준으로 보존한다.
+  <!-- ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC -->
 
 ### Bucket Routing (Regime $\times$ Family $\times$ TF)
 - **Regime Compression**: 6개의 raw regime 코드를 3-state (`bull`, `bear`, `crisis`) effective regime 코드로 축약하여 맵핑.
@@ -130,3 +132,4 @@ L2 최적화 스터디 완료 후 챔피언 포트폴리오는 아래의 관문�
 | `l2_max_cost_drag_ratio` | $0.60$ | 포트폴리오가 감당할 수 있는 최대 비용 드래그 비율 |
 | `l2_deploy_fit_mdd_crisis_gate`| `None` | Fit-leg MDD 위기 상황 진입 차단 임계값 |
 | `l2_leverage_diversification_gate_enabled` | `False` | DR 기반 레버리지 헤어컷 적용 여부 |
+| `MAJOR_SYMBOL_REGISTRY_REPLAY` | `False` | Major-symbol registry replay harness 실행 여부 |

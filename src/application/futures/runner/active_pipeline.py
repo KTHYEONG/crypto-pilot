@@ -22,7 +22,7 @@ for _env in ("NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
     os.environ[_env] = "1"
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -2258,6 +2258,7 @@ def _run_strategy_stage(
             opt_config=OPT_FUTURES_CONFIG,
             timeframe=run_config.timeframe,
         ).candidate
+        tiered_cfg = replace(tiered_cfg, seed=int(getattr(run_config, "seed", 42)))
     t_bridge_start = time.perf_counter()
     ml_out = run_active_strategy_output_bridge(
         run_config=run_config,
@@ -3354,7 +3355,7 @@ def run_pipeline(
     seed: int = 42,
     resume: bool = False,
 ) -> RunnerResult:
-    """Run active futures pipeline in explicit orchestration order."""
+    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Run active futures pipeline in explicit orchestration order."""
     pipeline_t0 = time.perf_counter()
     # Step 1) parse run window
     t_window = time.perf_counter()

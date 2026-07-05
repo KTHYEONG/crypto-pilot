@@ -2,6 +2,16 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-02] [TASK_L3_REPLAY] [ADR_20260702_L3_REPLAY]
+- **Context/Why:** Hard verification of crash defense logic was lacking actual historical economic replay in holdout windows.
+- **Resolution/What:** Wired risk_off fold attributions to L3 and created run_l3_reversal_economic_replay harness for 8 variants.
+- **Impact:** Replay showed baseline outperforming all variants (reversal-kill de-grossed profitable trades), disconfirming entry/exit tuning.
+
+## [2026-07-03] [TASK_L2_DR] [ADR_20260703_L2_DR]
+- **Context/Why:** Correlation-aware sizing was absorbed by the L* optimizer, failing to limit leverage during correlation spikes.
+- **Resolution/What:** Built Choueifaty-Coignard diversification ratio (DR) haircut gate in leverage calibration step.
+- **Impact:** Phase 0 test disconfirmed DR correlation during market crashes, so default was set to False.
+
 ## [2026-07-02] [TASK_L3_EP] [ADR_20260702_L3_EP]
 - **Context/Why:** Whipsaws in post-crash trailing drawdown detection required episode-level timestamps to diagnose.
 - **Resolution/What:** Implemented ReversalEpisode extraction logic and stress_gap diagnostics based on half-spread z-score.
