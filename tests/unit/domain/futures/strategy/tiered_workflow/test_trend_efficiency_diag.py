@@ -574,3 +574,108 @@ class TestSummarizeMajorSymbolSleeveContribution:
             ),
         )
         assert result == ()
+
+
+class TestComputeMajorSymbolRegistryCensus:
+    """Track 2 — ETH Registry Census 진단."""
+
+    def _make_registry(
+        self,
+        by_symbol: dict[str, list[tuple[str, float, bool]]],
+    ) -> object:
+        """Helper to create a mock QualifiedSignalRegistry with minimal fields."""
+        from src.domain.futures.signals.contracts import (
+            QualifiedSignalRegistry,
+            SignalSourceKey,
+            SymbolStrategyEvidence,
+        )
+        registry_data: dict[str, tuple[SymbolStrategyEvidence, ...]] = {}
+        for sym, entries in by_symbol.items():
+            evs: list[SymbolStrategyEvidence] = []
+            for strat, mean_bps, hard_eligible in entries:
+                evs.append(SymbolStrategyEvidence(
+                    key=SignalSourceKey(symbol=sym, strategy_id=strat, activation_context="all"),
+                    mean_gross_bps=0.0,
+                    mean_incremental_bps=mean_bps,
+                    block_tstat_incremental=0.0,
+                    probability_positive=0.0,
+                    p_value=1.0,
+                    q_value=1.0,
+                    positive_fold_ratio=0.0,
+                    n_obs=0,
+                    effective_n=0.0,
+                    n_folds=0,
+                    quality_weight=1.0,
+                    hard_eligible=hard_eligible,
+                ))
+            registry_data[sym] = tuple(evs)
+        return QualifiedSignalRegistry(
+            by_symbol=registry_data,
+            ready_symbols=tuple(registry_data.keys()),
+            trade_scope_count=len(registry_data),
+            registry_version="test",
+        )
+
+    def _make_summary(self, symbol: str, family: str, active: bool) -> object:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            MajorSymbolSleeveContributionSummary,
+        )
+        return MajorSymbolSleeveContributionSummary(
+            symbol=symbol, family=family,
+            n_obs=10, mean_raw_mu_sleeve=0.5, mean_quality_weight_sleeve=1.0,
+            sign_mismatch_pct=0.0, regime_adverse_sign_mismatch_pct=0.0,
+        )
+
+    def test_registry_census_flags_activation_gap_for_eth(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            compute_major_symbol_registry_census,
+        )
+        registry = self._make_registry({
+            "ETHUSDT": [("dual_momentum", -2.0, True), ("trend_ma", 3.0, True)],
+        })
+        # dual_momentum has negative mean_incremental_bps but IS observed in holdout
+        # trend_ma has positive mean_incremental_bps but NOT observed
+        summaries = (
+            self._make_summary("ETHUSDT", "dual_momentum", active=True),
+        )
+        result = compute_major_symbol_registry_census(
+            registry=registry,
+            observed_sleeve_summaries=summaries,
+            symbols=("ETHUSDT", "BTCUSDT"),
+        )
+        entries = {e.family: e for e in result if e.symbol == "ETHUSDT"}
+        # dual_momentum is observed → observed_active_in_holdout=True
+        assert entries["dual_momentum"].observed_active_in_holdout
+        assert entries["dual_momentum"].registry_mean_incremental_bps == pytest.approx(-2.0)
+        assert entries["dual_momentum"].hard_eligible
+        # trend_ma NOT observed → observed_active_in_holdout=False
+        assert not entries["trend_ma"].observed_active_in_holdout
+
+    def test_registry_census_admission_gap_when_no_bearish_family_in_registry(self) -> None:
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            compute_major_symbol_registry_census,
+        )
+        registry = self._make_registry({
+            "ETHUSDT": [("trend_ma", 3.0, True)],
+        })
+        result = compute_major_symbol_registry_census(
+            registry=registry,
+            observed_sleeve_summaries=(),
+            symbols=("ETHUSDT",),
+        )
+        assert len(result) == 1
+        assert result[0].family == "trend_ma"
+        assert result[0].registry_mean_incremental_bps >= 0.0
+
+    def test_registry_census_empty_registry_returns_empty_tuple(self) -> None:
+        from src.domain.futures.signals.contracts import QualifiedSignalRegistry
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            compute_major_symbol_registry_census,
+        )
+        registry = QualifiedSignalRegistry(by_symbol={}, ready_symbols=(), trade_scope_count=0, registry_version="test")
+        result = compute_major_symbol_registry_census(
+            registry=registry,
+            observed_sleeve_summaries=(),
+            symbols=("ETHUSDT",),
+        )
+        assert result == ()
