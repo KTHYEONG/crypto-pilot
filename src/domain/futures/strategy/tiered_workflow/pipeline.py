@@ -94,6 +94,9 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
     _terminal_multiple,
     compute_breadth_weighted_ic,
 )
+from src.domain.futures.strategy.tiered_workflow.replay_parity import (
+    assert_selection_replay_parity,
+)
 from src.domain.futures.strategy.tiered_workflow.risk_deployment import (
     apply_deployment,
 )
@@ -2486,6 +2489,20 @@ def _directional_veto_replay_adoption_verdict(
     return True, ""
 
 
+def _assert_directional_veto_l2_parity(
+    *,
+    replay_l2: Layer2Result,
+    final_l2: Layer2Result,
+    tolerance: float = 1e-6,
+) -> bool:
+    """[ADR_20260705_L2_VETO_REPLAY_PARITY] baseline_parity의 L2 leg 판정 (L3은 별도)."""
+    return assert_selection_replay_parity(
+        replay_evaluation=replay_l2,
+        final_evaluation=final_l2,
+        tolerance=tolerance,
+    )
+
+
 def run_directional_veto_economic_replay(
     *,
     l2_signal_batch: ValidatedSignalBatch,
@@ -2501,8 +2518,10 @@ def run_directional_veto_economic_replay(
     baseline_l2: Layer2Result | None = None,
     baseline_l3: Layer3Result | None = None,
     regime_code_1d: NDArray[np.int8] | None = None,
+    prebuilt_cache: L2SimulationCache | None = None,
+    eval_memo: dict[Any, Any] | None = None,
 ) -> tuple[DirectionalVetoReplayResult, ...]:
-    """[ADR_20260704_L2_DIRECTIONAL_VETO] Execute the 5-arm economic replay and adoption gate."""
+    """[ADR_20260704_L2_DIRECTIONAL_VETO][ADR_20260705_L2_VETO_REPLAY_PARITY] Execute the 5-arm economic replay and adoption gate."""
 
     baseline_row: DirectionalVetoReplayResult | None = None
     results: list[DirectionalVetoReplayResult] = []
@@ -2524,6 +2543,8 @@ def run_directional_veto_economic_replay(
             tf=tf,
             verbose=False,
             deploy_leverage=deploy_leverage,
+            prebuilt_cache=prebuilt_cache,
+            eval_memo=eval_memo,
         )
         _ho_start, _ho_end = holdout_span
         l3 = run_l3_holdout(
@@ -2540,10 +2561,11 @@ def run_directional_veto_economic_replay(
         )
         _baseline_parity = True
         if variant.name == "baseline" and baseline_l2 is not None and baseline_l3 is not None:
-            _baseline_parity = (
-                abs(l2.cagr_hybrid - baseline_l2.cagr_hybrid) < 1e-6
-                and abs(l3.cagr - baseline_l3.cagr) < 1e-6
+            _l2_parity_ok = _assert_directional_veto_l2_parity(
+                replay_l2=l2, final_l2=baseline_l2,
             )
+            _l3_parity_ok = abs(l3.cagr - baseline_l3.cagr) < 1e-6
+            _baseline_parity = _l2_parity_ok and _l3_parity_ok
         row = DirectionalVetoReplayResult(
             variant=variant.name,
             baseline_parity=_baseline_parity,
@@ -3385,6 +3407,8 @@ def run_tiered_pipeline(
             baseline_l2=l2,
             baseline_l3=l3,
             regime_code_1d=regime_code_1d,
+            prebuilt_cache=l2_sim_cache,
+            eval_memo=l2_eval_memo,
         )
         _write_directional_veto_replay_csv(
             _veto_replay_results,

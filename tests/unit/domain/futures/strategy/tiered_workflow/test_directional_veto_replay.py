@@ -470,3 +470,293 @@ class TestDirectionalVetoReplayCoverage:
             )
             assert len(results) == 5
             assert results[0].variant == "baseline"
+
+
+class TestL2CrisisDeriskStack:
+    """Phase 0 Parity Fix — Scenario 1~3 TDD tests for prebuilt_cache/eval_memo forwarding & L2 parity."""
+
+    @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l2_awf")
+    @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l3_holdout")
+    def test_prebuilt_cache_and_eval_memo_forwarded_to_every_variant(
+        self,
+        mock_l3: MagicMock,
+        mock_l2: MagicMock,
+    ) -> None:
+        mock_l2.return_value = MagicMock(
+            spec=Layer2Result, cagr_hybrid=0.582, mdd_hybrid=0.176,
+            turnover=0.5, average_gross_exposure=0.95, gate_passed=True,
+            blocker_reason="", directional_veto_summary=(),
+            fold_pass_ratio=1.0, trade_count=214, deploy_leverage=2.0341,
+            sharpe_hac_hybrid=1.5, sortino_hybrid=1.8,
+        )
+        mock_l3.return_value = MagicMock(
+            spec=Layer3Result, cagr=-0.171, mdd=0.268, sharpe=-1.21,
+            total_return=-0.169, gate_passed=False, blocker_reason="negative_return",
+            realized_price_long_by_symbol=(), directional_veto_summary=(),
+        )
+        from types import SimpleNamespace
+        sentinel_cache = SimpleNamespace(tag="prebuilt")
+        sentinel_memo: dict = {}
+        aligned = SimpleNamespace(symbols=("BTCUSDT", "ETHUSDT", "BNBUSDT"))
+        config = Layer2AllocationConfig.from_mapping({})
+        caps = SimpleNamespace(gross=3.0, per_symbol=0.15, net=0.5, beta=1.0, target_ann_vol=0.20)
+        folds = (SimpleNamespace(oos_start=0, oos_end=100),)
+
+        run_directional_veto_economic_replay(
+            l2_signal_batch=MagicMock(), l3_signal_batch=MagicMock(),
+            aligned=aligned, awf_folds=folds, holdout_span=(0, 100),
+            config=config, caps=caps, tf="4h", deploy_leverage=2.0341,
+            baseline_l2=mock_l2.return_value, baseline_l3=mock_l3.return_value,
+            prebuilt_cache=sentinel_cache, eval_memo=sentinel_memo,
+        )
+
+        for call in mock_l2.call_args_list:
+            assert call.kwargs["prebuilt_cache"] is sentinel_cache
+            assert call.kwargs["eval_memo"] is sentinel_memo
+
+    @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l2_awf")
+    @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l3_holdout")
+    def test_baseline_parity_true_when_l2_and_l3_metrics_match(
+        self,
+        mock_l3: MagicMock,
+        mock_l2: MagicMock,
+    ) -> None:
+        l2_res = MagicMock(
+            spec=Layer2Result, cagr_hybrid=0.582, mdd_hybrid=0.176,
+            turnover=0.5, average_gross_exposure=0.95, gate_passed=True,
+            blocker_reason="", directional_veto_summary=(),
+            fold_pass_ratio=1.0, trade_count=214, deploy_leverage=2.0341,
+            sharpe_hac_hybrid=1.5, sortino_hybrid=1.8,
+        )
+        l3_res = MagicMock(
+            spec=Layer3Result, cagr=-0.171, mdd=0.268, sharpe=-1.21,
+            total_return=-0.169, gate_passed=False, blocker_reason="negative_return",
+            realized_price_long_by_symbol=(), directional_veto_summary=(),
+        )
+        mock_l2.return_value = l2_res
+        mock_l3.return_value = l3_res
+        from types import SimpleNamespace
+        aligned = SimpleNamespace(symbols=("BTCUSDT", "ETHUSDT", "BNBUSDT"))
+        config = Layer2AllocationConfig.from_mapping({})
+        caps = SimpleNamespace(gross=3.0, per_symbol=0.15, net=0.5, beta=1.0, target_ann_vol=0.20)
+        folds = (SimpleNamespace(oos_start=0, oos_end=100),)
+
+        results = run_directional_veto_economic_replay(
+            l2_signal_batch=MagicMock(), l3_signal_batch=MagicMock(),
+            aligned=aligned, awf_folds=folds, holdout_span=(0, 100),
+            config=config, caps=caps, tf="4h", deploy_leverage=2.0341,
+            baseline_l2=l2_res, baseline_l3=l3_res,
+        )
+        assert results[0].baseline_parity is True
+        for r in results[1:]:
+            assert r.baseline_parity is True
+
+    def test_prebuilt_cache_none_preserves_legacy_behavior(self) -> None:
+        """기존 test_returns_five_variants가 수정 없이 통과해야 함 — regression guard."""
+        from tests.unit.domain.futures.strategy.tiered_workflow.test_directional_veto_replay import (
+            TestDirectionalVetoReplayRun,
+        )
+        tester = TestDirectionalVetoReplayRun()
+        tester.test_returns_five_variants()
+
+    @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l2_awf")
+    @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l3_holdout")
+    def test_baseline_parity_false_propagates_to_all_variants_on_l2_mismatch(
+        self,
+        mock_l3: MagicMock,
+        mock_l2: MagicMock,
+    ) -> None:
+        l2_replay = MagicMock(
+            spec=Layer2Result, cagr_hybrid=0.582, mdd_hybrid=0.176,
+            turnover=0.5, average_gross_exposure=0.95, gate_passed=True,
+            blocker_reason="", directional_veto_summary=(),
+            fold_pass_ratio=1.0, trade_count=214, deploy_leverage=2.0341,
+            sharpe_hac_hybrid=1.5, sortino_hybrid=1.8,
+        )
+        l2_baseline = MagicMock(
+            spec=Layer2Result, cagr_hybrid=0.583, mdd_hybrid=0.176,
+            turnover=0.5, average_gross_exposure=0.95, gate_passed=True,
+            blocker_reason="", directional_veto_summary=(),
+            fold_pass_ratio=1.0, trade_count=214, deploy_leverage=2.0341,
+            sharpe_hac_hybrid=1.5, sortino_hybrid=1.8,
+        )
+        l3_res = MagicMock(
+            spec=Layer3Result, cagr=-0.171, mdd=0.268, sharpe=-1.21,
+            total_return=-0.169, gate_passed=False, blocker_reason="negative_return",
+            realized_price_long_by_symbol=(), directional_veto_summary=(),
+        )
+        mock_l2.return_value = l2_replay
+        mock_l3.return_value = l3_res
+        from types import SimpleNamespace
+        aligned = SimpleNamespace(symbols=("BTCUSDT", "ETHUSDT", "BNBUSDT"))
+        config = Layer2AllocationConfig.from_mapping({})
+        caps = SimpleNamespace(gross=3.0, per_symbol=0.15, net=0.5, beta=1.0, target_ann_vol=0.20)
+        folds = (SimpleNamespace(oos_start=0, oos_end=100),)
+
+        results = run_directional_veto_economic_replay(
+            l2_signal_batch=MagicMock(), l3_signal_batch=MagicMock(),
+            aligned=aligned, awf_folds=folds, holdout_span=(0, 100),
+            config=config, caps=caps, tf="4h", deploy_leverage=2.0341,
+            baseline_l2=l2_baseline, baseline_l3=l3_res,
+        )
+        assert results[0].baseline_parity is False
+        for r in results[1:]:
+            assert r.baseline_parity is False
+
+    @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l2_awf")
+    @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l3_holdout")
+    def test_baseline_parity_false_when_only_l3_mismatches(
+        self,
+        mock_l3: MagicMock,
+        mock_l2: MagicMock,
+    ) -> None:
+        l2_res = MagicMock(
+            spec=Layer2Result, cagr_hybrid=0.582, mdd_hybrid=0.176,
+            turnover=0.5, average_gross_exposure=0.95, gate_passed=True,
+            blocker_reason="", directional_veto_summary=(),
+            fold_pass_ratio=1.0, trade_count=214, deploy_leverage=2.0341,
+            sharpe_hac_hybrid=1.5, sortino_hybrid=1.8,
+        )
+        l3_replay = MagicMock(
+            spec=Layer3Result, cagr=-0.171, mdd=0.268, sharpe=-1.21,
+            total_return=-0.169, gate_passed=False, blocker_reason="negative_return",
+            realized_price_long_by_symbol=(), directional_veto_summary=(),
+        )
+        l3_baseline = MagicMock(
+            spec=Layer3Result, cagr=-0.172, mdd=0.268, sharpe=-1.21,
+            total_return=-0.169, gate_passed=False, blocker_reason="negative_return",
+            realized_price_long_by_symbol=(), directional_veto_summary=(),
+        )
+        mock_l2.return_value = l2_res
+        mock_l3.return_value = l3_replay
+        from types import SimpleNamespace
+        aligned = SimpleNamespace(symbols=("BTCUSDT", "ETHUSDT", "BNBUSDT"))
+        config = Layer2AllocationConfig.from_mapping({})
+        caps = SimpleNamespace(gross=3.0, per_symbol=0.15, net=0.5, beta=1.0, target_ann_vol=0.20)
+        folds = (SimpleNamespace(oos_start=0, oos_end=100),)
+
+        results = run_directional_veto_economic_replay(
+            l2_signal_batch=MagicMock(), l3_signal_batch=MagicMock(),
+            aligned=aligned, awf_folds=folds, holdout_span=(0, 100),
+            config=config, caps=caps, tf="4h", deploy_leverage=2.0341,
+            baseline_l2=l2_res, baseline_l3=l3_baseline,
+        )
+        assert results[0].baseline_parity is False
+
+    @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l2_awf")
+    @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l3_holdout")
+    def test_baseline_parity_defaults_true_without_baseline_refs(
+        self,
+        mock_l3: MagicMock,
+        mock_l2: MagicMock,
+    ) -> None:
+        mock_l2.return_value = MagicMock(
+            spec=Layer2Result, cagr_hybrid=0.582, mdd_hybrid=0.176,
+            turnover=0.5, average_gross_exposure=0.95, gate_passed=True,
+            blocker_reason="", directional_veto_summary=(),
+            fold_pass_ratio=1.0, trade_count=214, deploy_leverage=2.0341,
+            sharpe_hac_hybrid=1.5, sortino_hybrid=1.8,
+        )
+        mock_l3.return_value = MagicMock(
+            spec=Layer3Result, cagr=-0.171, mdd=0.268, sharpe=-1.21,
+            total_return=-0.169, gate_passed=False, blocker_reason="negative_return",
+            realized_price_long_by_symbol=(), directional_veto_summary=(),
+        )
+        from types import SimpleNamespace
+        aligned = SimpleNamespace(symbols=("BTCUSDT", "ETHUSDT", "BNBUSDT"))
+        config = Layer2AllocationConfig.from_mapping({})
+        caps = SimpleNamespace(gross=3.0, per_symbol=0.15, net=0.5, beta=1.0, target_ann_vol=0.20)
+        folds = (SimpleNamespace(oos_start=0, oos_end=100),)
+
+        results = run_directional_veto_economic_replay(
+            l2_signal_batch=MagicMock(), l3_signal_batch=MagicMock(),
+            aligned=aligned, awf_folds=folds, holdout_span=(0, 100),
+            config=config, caps=caps, tf="4h", deploy_leverage=None,
+        )
+        assert len(results) == 5
+        for r in results:
+            assert r.baseline_parity is True
+
+    @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l2_awf")
+    @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l3_holdout")
+    def test_l2_parity_mismatch_does_not_raise_only_warns(
+        self,
+        mock_l3: MagicMock,
+        mock_l2: MagicMock,
+        caplog: Any,
+    ) -> None:
+        import logging
+        caplog.set_level(logging.WARNING)
+        l2_replay = MagicMock(
+            spec=Layer2Result, cagr_hybrid=0.582, mdd_hybrid=0.176,
+            turnover=0.5, average_gross_exposure=0.95, gate_passed=True,
+            blocker_reason="", directional_veto_summary=(),
+            fold_pass_ratio=1.0, trade_count=214, deploy_leverage=2.0341,
+            sharpe_hac_hybrid=1.5, sortino_hybrid=1.8,
+        )
+        l2_baseline = MagicMock(
+            spec=Layer2Result, cagr_hybrid=0.999, mdd_hybrid=0.999,
+            turnover=0.5, average_gross_exposure=0.95, gate_passed=True,
+            blocker_reason="", directional_veto_summary=(),
+            fold_pass_ratio=1.0, trade_count=214, deploy_leverage=2.0341,
+            sharpe_hac_hybrid=1.5, sortino_hybrid=1.8,
+        )
+        l3_res = MagicMock(
+            spec=Layer3Result, cagr=-0.171, mdd=0.268, sharpe=-1.21,
+            total_return=-0.169, gate_passed=False, blocker_reason="negative_return",
+            realized_price_long_by_symbol=(), directional_veto_summary=(),
+        )
+        mock_l2.return_value = l2_replay
+        mock_l3.return_value = l3_res
+        from types import SimpleNamespace
+        aligned = SimpleNamespace(symbols=("BTCUSDT", "ETHUSDT", "BNBUSDT"))
+        config = Layer2AllocationConfig.from_mapping({})
+        caps = SimpleNamespace(gross=3.0, per_symbol=0.15, net=0.5, beta=1.0, target_ann_vol=0.20)
+        folds = (SimpleNamespace(oos_start=0, oos_end=100),)
+
+        results = run_directional_veto_economic_replay(
+            l2_signal_batch=MagicMock(), l3_signal_batch=MagicMock(),
+            aligned=aligned, awf_folds=folds, holdout_span=(0, 100),
+            config=config, caps=caps, tf="4h", deploy_leverage=2.0341,
+            baseline_l2=l2_baseline, baseline_l3=l3_res,
+        )
+        assert results[0].baseline_parity is False
+        assert "[L2-PARITY-DIAG]" in caplog.text
+
+    @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l2_awf")
+    @patch("src.domain.futures.strategy.tiered_workflow.pipeline.run_l3_holdout")
+    def test_l2_parity_with_missing_optional_attrs_does_not_crash(
+        self,
+        mock_l3: MagicMock,
+        mock_l2: MagicMock,
+    ) -> None:
+        from types import SimpleNamespace
+        l2_replay = SimpleNamespace(
+            cagr_hybrid=0.582, mdd_hybrid=0.176,
+            turnover=0.5, average_gross_exposure=0.95, gate_passed=True,
+            blocker_reason="", directional_veto_summary=(),
+        )
+        l2_baseline = SimpleNamespace(
+            cagr_hybrid=0.582, mdd_hybrid=0.176,
+            turnover=0.5, average_gross_exposure=0.95, gate_passed=True,
+            blocker_reason="", directional_veto_summary=(),
+        )
+        l3_res = MagicMock(
+            spec=Layer3Result, cagr=-0.171, mdd=0.268, sharpe=-1.21,
+            total_return=-0.169, gate_passed=False, blocker_reason="negative_return",
+            realized_price_long_by_symbol=(), directional_veto_summary=(),
+        )
+        mock_l2.return_value = l2_replay
+        mock_l3.return_value = l3_res
+        aligned = SimpleNamespace(symbols=("BTCUSDT", "ETHUSDT", "BNBUSDT"))
+        config = Layer2AllocationConfig.from_mapping({})
+        caps = SimpleNamespace(gross=3.0, per_symbol=0.15, net=0.5, beta=1.0, target_ann_vol=0.20)
+        folds = (SimpleNamespace(oos_start=0, oos_end=100),)
+
+        results = run_directional_veto_economic_replay(
+            l2_signal_batch=MagicMock(), l3_signal_batch=MagicMock(),
+            aligned=aligned, awf_folds=folds, holdout_span=(0, 100),
+            config=config, caps=caps, tf="4h", deploy_leverage=2.0341,
+            baseline_l2=l2_baseline, baseline_l3=l3_res,
+        )
+        assert isinstance(results[0].baseline_parity, bool)
