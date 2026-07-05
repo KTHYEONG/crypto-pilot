@@ -18,11 +18,15 @@ related_paths:
   - src/application/futures/runner/tf_probe_scoped.py
   - src/application/futures/runner/cli.py
   - src/application/futures/runner/config.py
+  - src/domain/futures/optimization/opt_config.py
+  - src/domain/futures/optimization/observability/run_tracker.py
 change_triggers:
   - src/domain/futures/allocation/pipeline.py
   - src/domain/futures/validation/champion_registry.py
   - src/domain/futures/validation/gates.py
   - src/domain/futures/optimization/final_evaluator.py
+  - src/domain/futures/optimization/opt_config.py
+  - src/domain/futures/optimization/observability/run_tracker.py
   - src/domain/futures/strategy/tiered_workflow/major_symbol_registry_replay.py
   - src/domain/futures/strategy/tiered_workflow/tf_validation_repair.py
   - src/application/futures/runner/active_pipeline.py
@@ -74,6 +78,13 @@ Optuna 최적화로 최종 선별된 챔피언 전략에 대해 $N$개의 서로
 - 기본 스코프는 `("BTCUSDT", "ETHUSDT", "BNBUSDT")`, OOM 상한은 `20` symbols다.
 - 반환은 `TfProbeStageResult | None`이며, 내부 gate 로직은 기존 `select_tf_family_cells()`와 `summarize_tf_probe_gate_audit()`를 그대로 사용한다.
 - `probe_stage_result_to_raw_manifest()`는 scoped probe 결과를 raw rows로 변환해 clear 이후에도 `run_tiered_pipeline`이 parity capture를 복원할 수 있게 한다.
+
+### Rolling Holdout Panel (Multi-Episode Validation) [ADR_20260705_L3_ROLLING_HOLDOUT_PANEL]
+- **Windowing Duality**: 홀드아웃 실행(`LayeredWindow`, `get_layered_window`, REGIME_FLOOR 클램프 적용)과 심볼 readiness 필터링(`QuarterlyWindow`, `get_quarterly_window`, 클램프 없음)은 `opt_config.py`에 **별도 함수로 독립 계산**된다 — `run_config.date` 하나에서 두 창을 각각 파생.
+- `ValidationEpisode(episode_id, reference_date, role: "promotion"|"stress_only", window: LayeredWindow)`: `build_validation_episode_panel(promotion_reference_dates, stress_reference_dates, l1_months, l2_months, holdout_months, warmup_days)`가 `get_layered_window()`를 반복 호출해 생성. `role="stress_only"`는 `regime_floor=date.min`으로 클램프를 우회.
+- `EpisodeOutcome(episode_id, role, candidate_total_return, baseline_total_return)` → `evaluate_rolling_holdout_consistency()`가 `RollingConsistencyVerdict(consistent_improvement, stress_generalization_pass, n_promotion_episodes, failing_episode_ids)`를 산출 — 전 promotion episode에서 candidate≥baseline이어야 `consistent_improvement=True`.
+- **ADR-레벨 Sharpe Pool**: `adr_sharpe_pool_study_name(tag)` Optuna study(승패 무관 전량 기록, `champion_store_study_name`과 별개)에 `record_adr_evaluation()`으로 적재, `compute_adr_level_deflated_sharpe()`가 기존 `allocation.metrics._deflated_sharpe_probability`(Bailey & López de Prado 2014, 신규 공식 아님)를 이 pool로 재호출.
+- **오케스트레이션 미배선**: 위 3세트를 실제 여러 episode에 대해 `run_tiered_pipeline`을 반복 실행하는 통합 루프는 아직 구현되지 않음(순수 함수만 존재).
 
 ### Validation Parity Report Flow [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
 - `build_validation_parity_capture()`는 pre-clear probe/main/census evidence를 묶고, `finalize_validation_parity_capture()`는 이후 L2/L3 sleeve evidence로 major-gap 클래스를 확정한다.
