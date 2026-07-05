@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import datetime as _dt
+from collections.abc import Sequence
 from dataclasses import dataclass as _dataclass
-from typing import Any
+from typing import Any, Literal
 
 from dateutil.relativedelta import relativedelta as _relativedelta
 
@@ -617,3 +618,72 @@ def get_layered_window(
         holdout_end=holdout_end,
         regime_floor=regime_floor,
     )
+
+
+
+@_dataclass(slots=True, frozen=True)
+class ValidationEpisode:
+    """[ADR_20260705_L3_ROLLING_HOLDOUT_PANEL]"""
+
+    episode_id: str
+    reference_date: _dt.date
+    role: Literal["promotion", "stress_only"]
+    window: LayeredWindow
+
+
+def build_validation_episode_panel(
+    *,
+    promotion_reference_dates: Sequence[str],
+    stress_reference_dates: Sequence[str] = (),
+    l1_months: int = 9,
+    l2_months: int = 6,
+    holdout_months: int = 3,
+    warmup_days: int = 365,
+) -> tuple[ValidationEpisode, ...]:
+    """promotion(REGIME_FLOOR 준수) + stress_only(REGIME_FLOOR 예외) episode 패널 구성.
+
+    stress episode는 regime_floor=date.min으로 get_layered_window를 호출해
+    REGIME_FLOOR 클램프를 우회한다(fit에는 여전히 미사용 — 오케스트레이션 레벨에서
+    stress episode 결과를 승격 게이트 입력에서 제외하는 책임은 호출자에게 있음).
+    """
+    episodes: list[ValidationEpisode] = []
+
+    for d_str in promotion_reference_dates:
+        ref = _dt.date.fromisoformat(d_str)
+        window = get_layered_window(
+            reference_date=ref,
+            l1_months=l1_months,
+            l2_months=l2_months,
+            holdout_months=holdout_months,
+            regime_floor=REGIME_FLOOR,
+            warmup_days=warmup_days,
+        )
+        episodes.append(
+            ValidationEpisode(
+                episode_id=f"promotion_{d_str}",
+                reference_date=ref,
+                role="promotion",
+                window=window,
+            )
+        )
+
+    for d_str in stress_reference_dates:
+        ref = _dt.date.fromisoformat(d_str)
+        window = get_layered_window(
+            reference_date=ref,
+            l1_months=l1_months,
+            l2_months=l2_months,
+            holdout_months=holdout_months,
+            regime_floor=_dt.date.min,
+            warmup_days=warmup_days,
+        )
+        episodes.append(
+            ValidationEpisode(
+                episode_id=f"stress_only_{d_str}",
+                reference_date=ref,
+                role="stress_only",
+                window=window,
+            )
+        )
+
+    return tuple(episodes)
