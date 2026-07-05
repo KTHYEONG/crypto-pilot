@@ -44,6 +44,8 @@ L1에서 검증된 Candidate Events를 입력받아 Cross-sectional Ranking, Reg
   - $\mu_s = \frac{\sum_i c_i \mu_i}{\sum_i c_i}$
 - **Conviction Cap**: 특정 TF의 과도한 가중치 쏠림 방지.
   - $c_s = \min\left(\sum c_i, \kappa \cdot \max c_i\right) \quad (\kappa = 1.5)$
+- **Major-Symbol Sleeve Contribution Diagnostic**: `_combine_sleeve_signals_to_symbol` 직후, major 심볼(`MAJOR_DIAG_SYMBOLS`)의 family별 sleeve `raw_mu`/`quality_weight`와 풀링후 부호를 비교(`sign_mismatch_pct`, `regime_adverse_sign_mismatch_pct`) — outvoting(가설 A) vs 반대신호 부재(가설 B) 실측 분해용, 로그 전용(`[L2/L3-MAJOR-SLEEVE-DIAG]`).
+  <!-- ADR_20260705_L1_MAJOR_REVERSAL_ALPHA -->
 
 ### Bucket Routing (Regime $\times$ Family $\times$ TF)
 - **Regime Compression**: 6개의 raw regime 코드를 3-state (`bull`, `bear`, `crisis`) effective regime 코드로 축약하여 맵핑.
