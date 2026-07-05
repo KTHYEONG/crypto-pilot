@@ -53,6 +53,15 @@ def _format_top_symbol_contributions(
     return " ".join(f"{sym}({val:+.4f})" for sym, val in sorted_pairs)
 
 
+def _format_major_symbol_registry_census_line(entry: Any) -> str:
+    return (
+        f"{entry.symbol}/{entry.family}: "
+        f"registry_mu={entry.registry_mean_incremental_bps:+.3f} "
+        f"hard_eligible={entry.hard_eligible} "
+        f"observed_in_holdout={entry.observed_active_in_holdout}"
+    )
+
+
 def _format_major_symbol_sleeve_diag_line(summary: Any) -> str:
     return (
         f"{summary.symbol}/{summary.family}: "
