@@ -72,6 +72,13 @@ L1에서 검증된 Candidate Events를 입력받아 Cross-sectional Ranking, Reg
 - **5-Arm Economic Replay (`run_directional_veto_economic_replay`)**: baseline/veto_adverse_only/contextual_cap_mu/contextual_zero_mu/contextual_crisis_only A/B, `prebuilt_cache`+`eval_memo` 재사용으로 메인 L2 평가와 동일 캐시 공유. `baseline_parity`는 L2 leg을 `assert_selection_replay_parity`로 검증(L3 leg은 `cagr` 직접 비교) — `False`면 전체 candidate adoption 판단 무효.
   <!-- ADR_20260705_L2_VETO_REPLAY_PARITY -->
 
+### Intra-Symbol Divergence Dampener (Major-Symbol Sleeve Rebalancing)
+<!-- ADR_20260705_L1_DIVERGENCE_DAMPENER -->
+- **적용 지점**: `_combine_sleeve_signals_to_symbol` 풀링 직전. Dominant family(예: `dual_momentum`) sleeve `raw_mu`를 감쇠(`dominant_damp_mult`), dissent family(예: `ichimoku_trend`) sleeve `quality_weight`를 부스트(`dissent_boost_mult`, 안전 상한 `dissent_boost_cap_mult` clip).
+- **상태기계**: `idle→watch→armed→cooldown`(persistence/release/cooldown bars), 트리거 조건은 (intra-symbol 부호 분기 ∧ regime adverse) AND-게이트.
+- **실측 확인(2026-07-05)**: `L2_INTRA_SYMBOL_DIVERGENCE=1` env A/B — BTC mu_bull 98.3%→61.1%, L3 CAGR -17.1%→-12.2%, MDD 26.8%→22.4%, trade 붕괴 없음(214→273). Breakeven(total_return≥0)은 미달.
+- **Registry Census 진단(`compute_major_symbol_registry_census`)**: L1 `QualifiedSignalRegistry` census vs holdout 관측 대조(admission-gap vs activation-gap). **알려진 한계**: `_aggregate_per_tf_l1`이 멀티-TF 병합 시 `deployment_registry`를 보존하지 않아 표준 런에서 미발화(별도 이슈).
+
 ### Throttle & Risk Controls
 - **Edge-Conditional Throttle**: pooled edge 크기에 비례하여 Kelly 비중을 선형 혹은 거듭제곱 형태로 스케일링.
   - $m_t = \text{clip}\left(\frac{s - \text{floor}}{\text{ref} - \text{floor}}, 0, 1\right)^\gamma$
