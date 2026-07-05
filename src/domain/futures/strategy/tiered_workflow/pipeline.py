@@ -122,6 +122,11 @@ from src.domain.futures.strategy.tiered_workflow.signal_selection import (
     resolve_xs_alpha_admission,
     select_outer_symbol_opportunities,
 )
+from src.domain.futures.strategy.tiered_workflow.tf_validation_repair import (
+    _raw_probe_to_manifest,
+    build_validation_parity_report,
+    log_validation_parity_report,
+)
 from src.domain.futures.strategy.walk_forward import (
     WFFold,
     build_l1_swf_folds,
@@ -2873,7 +2878,8 @@ def _select_representative_l1_registry(
     per_tf_l1: dict[str, PerTfL1Result],
     preferred_tf: str | None = None,
 ) -> QualifiedSignalRegistry | None:
-    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Select a single representative L1 deployment registry from per-TF results.
+    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC]
+    Select a single representative L1 deployment registry from per-TF results.
 
     Args:
         per_tf_l1: Per-TF L1 results.
@@ -3156,6 +3162,13 @@ def run_tiered_pipeline(
                     _tf_edge_quality(_r_diag),
                     _l2_tf_resolved,
                 )
+        _validation_report = build_validation_parity_report(
+            probe_manifest=_raw_probe_to_manifest(probe_manifest),
+            per_tf_l1=per_tf_l1,
+            observed_sleeve_summaries=(),
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            log_validation_parity_report(_validation_report)
         l1 = _aggregate_per_tf_l1(per_tf_l1, preferred_tf=_l2_tf_resolved)
         per_tf_l1.clear()
         gc.collect()
