@@ -132,3 +132,37 @@ def _run_tf_probe_stage_scoped(
     except Exception as exc:
         _logger.warning("[TF-PROBE-SCOPED] probe stage failed (fallback to None): %s", exc)
         return None
+
+
+def probe_stage_result_to_raw_manifest(
+    probe_result: TfProbeStageResult | None,
+) -> list[dict[str, Any]] | None:
+    """Convert scoped TfProbeStageResult into raw probe_manifest rows for run_tiered_pipeline.
+
+    [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
+    """
+    if probe_result is None:
+        return None
+    rows: list[dict[str, Any]] = []
+    for cell in probe_result.manifest.cells:
+        tf = getattr(cell, "tf", None)
+        if not tf:
+            continue
+        try:
+            from dataclasses import asdict
+
+            row = asdict(cell)
+        except (TypeError, ValueError):
+            row = {
+                k: getattr(cell, k)
+                for k in (
+                    "symbol", "family", "variant", "archetype", "tf",
+                    "n_obs", "n_events", "ic_mean", "ic_tstat_hac",
+                    "ic_fold_sign_consistency", "alpha_half_life_h",
+                    "net_edge_bps", "turnover_per_year", "vr_label", "hurst",
+                    "passed_fdr",
+                )
+                if hasattr(cell, k)
+            }
+        rows.append(row)
+    return rows
