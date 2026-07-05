@@ -295,7 +295,7 @@ def _simulate_guard(config: object) -> None:
 
 def test_mutual_exclusion_guard_raises_on_dual_enable() -> None:
     """2.3 l2_regime_conditional_weight_enabled + l2_intra_symbol_divergence_enabled 동시 True → AssertionError."""
-    from src.domain.futures.allocation.contracts import Layer2AllocationConfig
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
     cfg = Layer2AllocationConfig(
         l2_regime_conditional_weight_enabled=True,
         l2_intra_symbol_divergence_enabled=True,
@@ -306,7 +306,7 @@ def test_mutual_exclusion_guard_raises_on_dual_enable() -> None:
 
 def test_mutual_exclusion_guard_passes_single_enable() -> None:
     """단일 flag만 True면 guard 통과."""
-    from src.domain.futures.allocation.contracts import Layer2AllocationConfig
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
     cfg = Layer2AllocationConfig(
         l2_regime_conditional_weight_enabled=True,
         l2_intra_symbol_divergence_enabled=False,

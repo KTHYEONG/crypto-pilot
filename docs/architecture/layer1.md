@@ -12,8 +12,8 @@ related_paths:
   - src/domain/futures/signals/workflow.py
   - src/domain/futures/signals/timeframes.py
   - src/domain/futures/signals/ensemble.py
-  - src/domain/futures/allocation/pipeline.py
-  - src/domain/futures/allocation/metrics.py
+  - src/domain/futures/strategy/tiered_workflow/pipeline.py
+  - src/domain/futures/optimization/metrics.py
   - src/domain/futures/strategy_runtime/bridge.py
 change_triggers:
   - src/domain/futures/signals/rules.py
@@ -22,7 +22,7 @@ change_triggers:
 dependencies:
   documents:
     - docs/architecture/regime.md
-last_verified: 2026-07-05
+last_verified: 2026-07-06
 ---
 
 # 1. Purpose

@@ -6,34 +6,31 @@ status: active
 priority: critical
 ai_read_policy: always
 related_paths:
-  - src/domain/futures/allocation/pipeline.py
-  - src/domain/futures/allocation/selection.py
-  - src/domain/futures/allocation/gates.py
-  - src/domain/futures/allocation/metrics.py
-  - src/domain/futures/allocation/simulation.py
-  - src/domain/futures/allocation/search_space.py
-  - src/domain/futures/allocation/replay.py
-  - src/domain/futures/allocation/regime_policy.py
-  - src/domain/futures/allocation/deployment.py
-  - src/domain/futures/allocation/diagnostics.py
-  - src/domain/futures/allocation/signal_batch.py
-  - src/domain/futures/allocation/parity.py
-  - src/domain/futures/allocation/scoring.py
+  - src/domain/futures/strategy/tiered_workflow/pipeline.py
+  - src/domain/futures/strategy/tiered_workflow/selection.py
+  - src/domain/futures/strategy/tiered_workflow/metrics.py
+  - src/domain/futures/strategy/tiered_workflow/awf_sim.py
+  - src/domain/futures/strategy/tiered_workflow/l2_meta.py
+  - src/domain/futures/strategy/tiered_workflow/risk_deployment.py
+  - src/domain/futures/strategy/tiered_workflow/diagnostics.py
+  - src/domain/futures/strategy/tiered_workflow/signal_selection.py
+  - src/domain/futures/strategy/tiered_workflow/replay_parity.py
+  - src/domain/futures/strategy/tiered_workflow/deployable_score.py
   - src/domain/futures/strategy/tiered_workflow/dataclasses.py
+  - src/domain/futures/optimization/metrics.py
+  - src/domain/futures/optimization/l2_search_space.py
   - src/application/futures/runner/pipeline.py
   - src/application/futures/runner/config.py
   - src/execution/opt_main_futures.py
 change_triggers:
-  - src/domain/futures/allocation/pipeline.py
-  - src/domain/futures/allocation/selection.py
-  - src/domain/futures/allocation/gates.py
-  - src/domain/futures/allocation/deployment.py
+  - src/domain/futures/strategy/tiered_workflow/pipeline.py
+  - src/domain/futures/strategy/tiered_workflow/selection.py
   - src/domain/futures/strategy/tiered_workflow/dataclasses.py
   - src/application/futures/runner/pipeline.py
 dependencies:
   documents:
     - docs/architecture/layer1.md
-last_verified: 2026-07-05
+last_verified: 2026-07-06
 ---
 
 # 1. Purpose
