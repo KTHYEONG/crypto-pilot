@@ -650,6 +650,15 @@ class Layer2AllocationConfig:
     l2_regime_directional_veto_max_fit_false_positive_rate: float = 0.50
     l2_regime_directional_veto_max_turnover_delta: float = 0.05
     l2_regime_directional_veto_min_gross_ratio: float = 0.90
+    # L1 Intra-Symbol Divergence Dampener (Track 1 — BTC)
+    l2_intra_symbol_divergence_enabled: bool = False
+    l2_intra_symbol_divergence_symbols: tuple[str, ...] = ("BTCUSDT",)
+    l2_intra_symbol_divergence_dominant_families: tuple[str, ...] = ("dual_momentum", "supertrend")
+    l2_intra_symbol_divergence_persistence_bars: int = 3
+    l2_intra_symbol_divergence_release_bars: int = 2
+    l2_intra_symbol_divergence_cooldown_bars: int = 3
+    l2_intra_symbol_divergence_dominant_damp_mult: float = 0.5
+    l2_intra_symbol_divergence_dissent_boost_mult: float = 2.0
 
     @staticmethod
     def _as_int(value: object, default: int) -> int:
@@ -1316,6 +1325,69 @@ class Layer2AllocationConfig:
                 ),
                 0.0,
                 1.0,
+            ),
+            # L1 Intra-Symbol Divergence Dampener
+            l2_intra_symbol_divergence_enabled=bool(
+                params.get("l2_intra_symbol_divergence_enabled", _dc.l2_intra_symbol_divergence_enabled)
+            ),
+            l2_intra_symbol_divergence_symbols=tuple(
+                str(s) for s in cast(
+                    "tuple[str, ...]",
+                    params.get(
+                        "l2_intra_symbol_divergence_symbols",
+                        _dc.l2_intra_symbol_divergence_symbols,
+                    ),
+                )
+            ),
+            l2_intra_symbol_divergence_dominant_families=tuple(
+                str(f) for f in cast(
+                    "tuple[str, ...]",
+                    params.get(
+                        "l2_intra_symbol_divergence_dominant_families",
+                        _dc.l2_intra_symbol_divergence_dominant_families,
+                    ),
+                )
+            ),
+            l2_intra_symbol_divergence_persistence_bars=int(
+                cls._validate_range(
+                    "l2_intra_symbol_divergence_persistence_bars",
+                    cls._as_int(params.get("l2_intra_symbol_divergence_persistence_bars",
+                                           _dc.l2_intra_symbol_divergence_persistence_bars),
+                               _dc.l2_intra_symbol_divergence_persistence_bars),
+                    1,
+                )
+            ),
+            l2_intra_symbol_divergence_release_bars=int(
+                cls._validate_range(
+                    "l2_intra_symbol_divergence_release_bars",
+                    cls._as_int(params.get("l2_intra_symbol_divergence_release_bars",
+                                           _dc.l2_intra_symbol_divergence_release_bars),
+                               _dc.l2_intra_symbol_divergence_release_bars),
+                    1,
+                )
+            ),
+            l2_intra_symbol_divergence_cooldown_bars=int(
+                cls._validate_range(
+                    "l2_intra_symbol_divergence_cooldown_bars",
+                    cls._as_int(params.get("l2_intra_symbol_divergence_cooldown_bars",
+                                           _dc.l2_intra_symbol_divergence_cooldown_bars),
+                               _dc.l2_intra_symbol_divergence_cooldown_bars),
+                    0,
+                )
+            ),
+            l2_intra_symbol_divergence_dominant_damp_mult=cls._validate_range(
+                "l2_intra_symbol_divergence_dominant_damp_mult",
+                cls._as_float(params.get("l2_intra_symbol_divergence_dominant_damp_mult",
+                                         _dc.l2_intra_symbol_divergence_dominant_damp_mult),
+                             _dc.l2_intra_symbol_divergence_dominant_damp_mult),
+                0.0,
+            ),
+            l2_intra_symbol_divergence_dissent_boost_mult=cls._validate_range(
+                "l2_intra_symbol_divergence_dissent_boost_mult",
+                cls._as_float(params.get("l2_intra_symbol_divergence_dissent_boost_mult",
+                                         _dc.l2_intra_symbol_divergence_dissent_boost_mult),
+                             _dc.l2_intra_symbol_divergence_dissent_boost_mult),
+                0.0,
             ),
         )
 
