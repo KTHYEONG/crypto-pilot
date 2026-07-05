@@ -22,7 +22,7 @@ change_triggers:
 dependencies:
   documents:
     - docs/architecture/regime.md
-last_verified: 2026-07-03
+last_verified: 2026-07-05
 ---
 
 # 1. Purpose
@@ -81,6 +81,9 @@ last_verified: 2026-07-03
   - `quality_weight`: float
   - `hard_eligible`: bool
   - `lcb_net_bps`: float
+  - `adverse_regime_lcb_bps`: float | None — bear/crisis 구간 LCB(진단 전용, `quality_weight` 산식 미반영)
+  - `adverse_regime_n_obs`: int
+  - `adverse_regime_defended`: bool — `compute_adverse_regime_evidence()` 산출 [ADR_20260705_L1L2_REGIME_CONDITIONAL_WEIGHT]
 - `QualifiedSignalRegistry`:
   - `by_symbol`: dict[str, tuple[SymbolStrategyEvidence, ...]]
   - `ready_symbols`: tuple[str, ...]
