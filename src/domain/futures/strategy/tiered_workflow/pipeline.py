@@ -3010,7 +3010,8 @@ def run_tiered_pipeline(
     l2_eval_memo: dict[Any, Any] | None = None,
     regime_code_1d: NDArray[np.int8] | None = None,
 ) -> tuple[Layer1Result, Layer2Result | None, Layer3Result | None]:
-    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] 3-Layer 티어드 파이프라인 실행.
+    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC][ADR_20260705_CHAMPION_REPRODUCIBILITY_AND_REGISTRY_CENSUS]
+    3-Layer 티어드 파이프라인 실행.
 
     Per-TF L1 실행 후 best TF에서 L2/L3 수행.
 
@@ -3037,6 +3038,7 @@ def run_tiered_pipeline(
 
     # ─── Layer 1 ─────────────────────────────────────────────────────────────
     t_l1 = time.perf_counter()
+    _l2_tf_resolved: str = ""
     if l1_result_override is not None:
         l1 = l1_result_override
         l2_tf = _resolve_l2_master_tf(cfg, {}, probe_manifest)
@@ -3140,14 +3142,27 @@ def run_tiered_pipeline(
             if tf_idx < len(l1_tfs) - 1:
                 time.sleep(0.5)
 
-        l1 = _aggregate_per_tf_l1(per_tf_l1)
+        _l2_tf_resolved = _resolve_l2_master_tf(cfg, per_tf_l1, probe_manifest)
+        if logger.isEnabledFor(logging.DEBUG):
+            for _tf_diag, _r_diag in per_tf_l1.items():
+                _reg_diag = _r_diag.l1_result.deployment_registry
+                logger.debug(
+                    "[L1-PERTF-REGISTRY-DIAG] tf=%s gate_passed=%s registry_present=%s "
+                    "n_ready=%d edge_quality=%.2f would_resolve_master_tf=%s",
+                    _tf_diag,
+                    _r_diag.l1_result.gate_passed,
+                    _reg_diag is not None,
+                    len(_reg_diag.ready_symbols) if _reg_diag is not None else 0,
+                    _tf_edge_quality(_r_diag),
+                    _l2_tf_resolved,
+                )
+        l1 = _aggregate_per_tf_l1(per_tf_l1, preferred_tf=_l2_tf_resolved)
         per_tf_l1.clear()
         gc.collect()
         _rss_after_agg = _get_rss_mb()
         logger.debug("[MEM] stage=aggregate_l1 rss=%.0fMB", _rss_after_agg)
-        l2_tf = _resolve_l2_master_tf(cfg, {}, probe_manifest)
 
-    l2_tf = _resolve_l2_master_tf(cfg, per_tf_l1 if l1_result_override is None else {}, probe_manifest)
+    l2_tf = _l2_tf_resolved if l1_result_override is None else _resolve_l2_master_tf(cfg, {}, probe_manifest)
     logger.log(PERF, "[PERF] run_tiered_pipeline_l1_total took=%.4fs", time.perf_counter() - t_l1)
 
     if not l1.gate_passed:
