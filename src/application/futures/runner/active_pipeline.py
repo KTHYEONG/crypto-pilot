@@ -2187,6 +2187,14 @@ def _run_strategy_stage(
         scope_symbols=OPT_FUTURES_CONFIG.get("TF_PROBE_SCOPE_SYMBOLS", _TF_PROBE_FALLBACK_SYMBOLS),
     )
 
+    _effective_probe_result = probe_result or _probe_result_local
+    from src.application.futures.runner.tf_probe_scoped import (
+        probe_stage_result_to_raw_manifest,
+    )
+    _probe_manifest_raw: list[dict[str, Any]] | None = (
+        probe_stage_result_to_raw_manifest(_effective_probe_result)
+    )
+
     if run_config.phase in ("l1", "l2"):
         _mem_before = _get_rss_mb()
         if hasattr(data_stage, "data_maps") and isinstance(data_stage.data_maps, dict):
@@ -2405,7 +2413,7 @@ def _run_strategy_stage(
                 l1_tfs=tuple(tiered_cfg.l1_tfs),
                 target_phase="l1",
                 verbose=True,
-
+                probe_manifest=_probe_manifest_raw,
             )
             _log_mem("tiered_pipeline", _mem_tiered_before, extra=f"phase={run_config.phase}")
             if not l1_res.gate_passed:
@@ -2583,8 +2591,7 @@ def _run_strategy_stage(
             from src.domain.futures.strategy.tiered_workflow.pipeline import (
                 _resolve_l2_master_tf,
             )
-            _l2_probe_manifest: list[dict[str, Any]] | None = None
-            l2_master_tf = _resolve_l2_master_tf(tiered_cfg, {}, _l2_probe_manifest)
+            l2_master_tf = _resolve_l2_master_tf(tiered_cfg, {}, _probe_manifest_raw)
             l2_study_result = _run_tiered_l2_study(
                 signal_batch=l2_signals,
                 aligned=aligned_tiered,
@@ -2639,7 +2646,7 @@ def _run_strategy_stage(
                 l2_signal_batch=l2_signals,
                 l2_awf_folds=l2_study_result.awf_folds,
                 l2_eval_memo=l2_study_result.eval_memo,
-                probe_manifest=_l2_probe_manifest,
+                probe_manifest=_probe_manifest_raw,
                 regime_code_1d=_l3_regime_code_1d,
             )
             # B2: SSOT assert — study tf must match final deployment tf
