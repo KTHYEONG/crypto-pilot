@@ -55,6 +55,7 @@ from src.domain.futures.strategy.tiered_workflow.awf_sim import (
     _stack_oos_signals,
     compute_long_short_price_by_symbol,
     compute_long_short_realized_price,
+    compute_major_symbol_registry_census,
     compute_mean_trend_efficiency,
     summarize_directional_veto,
     summarize_major_symbol_regime_incoherence,
@@ -3211,6 +3212,11 @@ def run_tiered_pipeline(
         raise ValueError("Layer2 requires a fitted Layer1InferenceArtifact")
 
     l2_config = Layer2AllocationConfig.from_mapping(l2_params)
+    # [ADR_20260705_L1_DIVERGENCE_DAMPENER] ad-hoc A/B override (champion 확정 후 적용,
+    # Optuna study 대비 parity_divergence 발생은 의도된 동작).
+    _l2_intra_symbol_divergence_env = os.environ.get("L2_INTRA_SYMBOL_DIVERGENCE", "")
+    if _l2_intra_symbol_divergence_env not in ("", "0", "false", "False"):
+        l2_config = dataclasses.replace(l2_config, l2_intra_symbol_divergence_enabled=True)
     logger.debug(
         "[L2-CONFIG] l2_min_sharpe_uplift=%.2f l2_cs_amp_enabled=%s "
         "l2_cs_amp_alpha=%.1f l2_cs_amp_mode=%s",
@@ -3380,6 +3386,25 @@ def run_tiered_pipeline(
         regime_code_1d=regime_code_1d,
     )
     logger.log(PERF, "[PERF] run_tiered_pipeline_l3_total took=%.4fs", time.perf_counter() - t_l3)
+
+    # [ADR_20260705_L1_DIVERGENCE_DAMPENER] Track 2 registry census (ETH admission/activation-gap).
+    # NOTE: l1.deployment_registry는 _aggregate_per_tf_l1 병합 경로에서 항상 None —
+    # 표준 멀티-TF 런에서는 이 블록이 발화하지 않음(2026-07-05 실측 확인, 별도 이슈).
+    if verbose and l1.deployment_registry is not None:
+        _registry_census = compute_major_symbol_registry_census(
+            registry=l1.deployment_registry,
+            observed_sleeve_summaries=l3.major_symbol_sleeve_diag,
+        )
+        for _census_entry in _registry_census:
+            logger.info(
+                "[L1-MAJOR-REGISTRY-CENSUS] %s/%s: registry_mean_incremental_bps=%.3f "
+                "hard_eligible=%s observed_active_in_holdout=%s",
+                _census_entry.symbol,
+                _census_entry.family,
+                _census_entry.registry_mean_incremental_bps,
+                _census_entry.hard_eligible,
+                _census_entry.observed_active_in_holdout,
+            )
 
     _l3_replay_env = os.environ.get("L3_REVERSAL_REPLAY", "")
     if _l3_replay_env not in ("", "0", "false", "False"):
