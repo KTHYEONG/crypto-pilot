@@ -53,6 +53,15 @@ def _format_top_symbol_contributions(
     return " ".join(f"{sym}({val:+.4f})" for sym, val in sorted_pairs)
 
 
+def _format_major_symbol_sleeve_diag_line(summary: Any) -> str:
+    return (
+        f"{summary.symbol}/{summary.family}: "
+        f"mu={summary.mean_raw_mu_sleeve:.3f} qw={summary.mean_quality_weight_sleeve:.3f} "
+        f"mismatch={summary.sign_mismatch_pct*100:.1f}% "
+        f"adverse_mismatch={summary.regime_adverse_sign_mismatch_pct*100:.1f}%"
+    )
+
+
 def _format_major_symbol_diag_line(summary: Any) -> str:
     """Format a MajorSymbolSignalSizingSummary as a single log line.
 
@@ -813,6 +822,11 @@ def format_layer2_table(
         f"  [L2-MAJOR-DIAG] {_format_major_symbol_diag_line(_summary)}"
         for _summary in _major_diag_line
     )
+    _major_sleeve_diag_line = getattr(r, "major_symbol_sleeve_diag", ())
+    lines.extend(
+        f"  [L2-MAJOR-SLEEVE-DIAG] {_format_major_symbol_sleeve_diag_line(_summary)}"
+        for _summary in _major_sleeve_diag_line
+    )
     _major_incoherence_line = getattr(r, "major_symbol_incoherence", ())
     lines.extend(
         f"  [L2-MAJOR-INCOHERENCE] {_format_major_symbol_incoherence_line(_summary)}"
@@ -1072,6 +1086,11 @@ def format_layer3_table(
         lines.extend(
             f"  {_status(True)} [L3-MAJOR-DIAG] {_format_major_symbol_diag_line(_summary)}"
             for _summary in _major_diag_line
+        )
+        _major_sleeve_diag_line = getattr(r, "major_symbol_sleeve_diag", ())
+        lines.extend(
+            f"  {_status(True)} [L3-MAJOR-SLEEVE-DIAG] {_format_major_symbol_sleeve_diag_line(_summary)}"
+            for _summary in _major_sleeve_diag_line
         )
         _major_incoherence_line = getattr(r, "major_symbol_incoherence", ())
         lines.extend(

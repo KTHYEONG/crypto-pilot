@@ -26,6 +26,7 @@ if TYPE_CHECKING:
         Layer2FoldAttribution,
         MajorSymbolIncoherenceSummary,
         MajorSymbolSignalSizingSummary,
+        MajorSymbolSleeveContributionSummary,
         ReversalEpisode,
     )
 
@@ -487,6 +488,7 @@ class Layer2Result:
     realized_price_long_by_symbol: tuple[tuple[str, float], ...] = ()
     realized_price_short_by_symbol: tuple[tuple[str, float], ...] = ()
     major_symbol_diag: tuple[MajorSymbolSignalSizingSummary, ...] = ()
+    major_symbol_sleeve_diag: tuple[MajorSymbolSleeveContributionSummary, ...] = ()
     major_symbol_incoherence: tuple[MajorSymbolIncoherenceSummary, ...] = ()
     directional_veto_summary: tuple[DirectionalVetoSummary, ...] = ()
 
@@ -1623,6 +1625,7 @@ class Layer3Result:
     bars_long: int = 0
     bars_short: int = 0
     major_symbol_diag: tuple[MajorSymbolSignalSizingSummary, ...] = ()
+    major_symbol_sleeve_diag: tuple[MajorSymbolSleeveContributionSummary, ...] = ()
     major_symbol_incoherence: tuple[MajorSymbolIncoherenceSummary, ...] = ()
     directional_veto_summary: tuple[DirectionalVetoSummary, ...] = ()
 

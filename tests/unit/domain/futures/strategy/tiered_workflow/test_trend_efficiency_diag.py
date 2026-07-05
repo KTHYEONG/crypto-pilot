@@ -289,3 +289,288 @@ class TestSummarizeMajorSymbolSignalSizing:
         )
         result = summarize_major_symbol_signal_sizing(())
         assert result == ()
+
+
+class TestSummarizeMajorSymbolSleeveContribution:
+    """summarize_major_symbol_sleeve_contribution computes sleeve-level sign-mismatch ratios."""
+
+    def test_computes_sign_mismatch_and_adverse_conditional_ratio(self) -> None:
+        """Scenario 1: BTCUSDT 4개 스냅샷(2x trend_ma 반대부호 vs pooled, regime adverse 2건) -> 정확한 비율."""
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            MajorSymbolSleeveContributionSnapshot,
+            summarize_major_symbol_sleeve_contribution,
+        )
+        SS = MajorSymbolSleeveContributionSnapshot
+        snapshots = (
+            SS(t=0, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
+               raw_mu_sleeve=5.0, quality_weight_sleeve=0.4, pooled_mu_symbol=3.0, regime_code=0),
+            SS(t=1, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
+               raw_mu_sleeve=-2.0, quality_weight_sleeve=0.3, pooled_mu_symbol=1.0, regime_code=1),
+            SS(t=2, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
+               raw_mu_sleeve=-1.0, quality_weight_sleeve=0.5, pooled_mu_symbol=0.5, regime_code=1),
+            SS(t=3, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
+               raw_mu_sleeve=4.0, quality_weight_sleeve=0.2, pooled_mu_symbol=-1.0, regime_code=2),
+        )
+        fold_attributions = (
+            Layer2FoldAttribution(
+                fold_idx=0, oos_bars=4, n_rebal=4, realized_total=0.0, realized_price=0.0,
+                realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
+                mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
+                friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
+                netting_events=0, major_symbol_sleeve_snapshots=snapshots,
+            ),
+        )
+        result = summarize_major_symbol_sleeve_contribution(fold_attributions)
+        assert len(result) == 1
+        r = result[0]
+        assert r.symbol == "BTCUSDT"
+        assert r.family == "trend_ma"
+        assert r.n_obs == 4
+        assert r.mean_raw_mu_sleeve == pytest.approx(1.5)
+        assert r.mean_quality_weight_sleeve == pytest.approx(0.35)
+
+        # Mismatch: raw_mu_sleeve와 pooled_mu_symbol이 엄격히 반대 부호
+        # t=0: +5 vs +3 → same
+        # t=1: -2 vs +1 → opposite → mismatch
+        # t=2: -1 vs +0.5 → opposite → mismatch
+        # t=3: +4 vs -1 → opposite → mismatch
+        # n_valid = 4 (all non-zero), mismatches = 3
+        # sign_mismatch_pct = 3/4 = 0.75
+        assert r.sign_mismatch_pct == pytest.approx(0.75)
+
+        # Adverse conditions (regime_code in {1,2}): t=1,2,3
+        # Adverse + valid: t=1(mismatch), t=2(mismatch), t=3(mismatch) → 3/3 = 1.0
+        assert r.regime_adverse_sign_mismatch_pct == pytest.approx(1.0)
+
+    def test_awf_simulation_collects_sleeve_snapshots_for_major_symbol(self) -> None:
+        """Scenario 1(통합): _run_awf_simulation에서 major 심볼만 스냅샷 수집."""
+        from unittest.mock import MagicMock, patch
+
+        import numpy as np
+
+        with (
+            patch("src.domain.futures.strategy.market_regime.compress_regime_codes") as mock_compress,
+            patch("src.domain.futures.strategy.market_regime.compute_market_regime_context") as mock_regime,
+        ):
+            mock_regime.return_value = MagicMock(code_1d=np.zeros(50, dtype=np.int8))
+            mock_compress.side_effect = lambda x: x
+
+            aligned = MagicMock()
+            aligned.symbols = ("BTCUSDT", "ETHUSDT", "XRPUSDT")
+            aligned.close_2d = np.ones((50, 3), dtype=np.float64) * 100.0
+            aligned.datetimes = np.array(
+                [np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(50)]
+            )
+            aligned.beta_vs_market_1d = np.zeros(3, dtype=np.float64)
+            aligned.execution_cost_bps_2d = np.full((50, 3), 3.8, dtype=np.float64)
+            aligned.funding_2d = np.zeros((50, 3), dtype=np.float64)
+            aligned.active_mask = np.ones((50, 3), dtype=np.bool_)
+            aligned.warm_mask = np.ones((50, 3), dtype=np.bool_)
+            aligned.execution_eligibility_mask = np.ones((50, 3), dtype=np.bool_)
+            aligned.strategy_readiness_mask = np.ones((50, 3), dtype=np.bool_)
+            aligned.promotion_active_mask = np.ones((50, 3), dtype=np.bool_)
+            aligned.entry_block_mask = np.zeros((50, 3), dtype=np.bool_)
+            aligned.kill_mask = np.zeros((50, 3), dtype=np.bool_)
+
+            from src.domain.futures.strategy.candidate_contracts import (
+                ValidatedSignalBatch,
+                ValidatedSignalEvent,
+            )
+            events = [
+                ValidatedSignalEvent(
+                    decision_idx=5, decision_time=aligned.datetimes[5],
+                    symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
+                    activation_context="all", side=1,
+                    expected_net_bps=10.0, expected_gross_bps=15.0,
+                    q10_net_bps=5.0, q10_gross_bps=8.0,
+                    q90_net_bps=0.0, q90_gross_bps=20.0,
+                    expected_holding_bars=3, reliability=0.9,
+                    registry_version="test", model_version="test",
+                ),
+                ValidatedSignalEvent(
+                    decision_idx=5, decision_time=aligned.datetimes[5],
+                    symbol="BTCUSDT", strategy_id="mtf_breakout_retest:mtf_bor_20_4h",
+                    activation_context="all", side=1,
+                    expected_net_bps=8.0, expected_gross_bps=12.0,
+                    q10_net_bps=4.0, q10_gross_bps=6.0,
+                    q90_net_bps=0.0, q90_gross_bps=16.0,
+                    expected_holding_bars=3, reliability=0.9,
+                    registry_version="test", model_version="test",
+                ),
+                ValidatedSignalEvent(
+                    decision_idx=5, decision_time=aligned.datetimes[5],
+                    symbol="XRPUSDT", strategy_id="trend_ma:ema_12_72_4h",
+                    activation_context="all", side=1,
+                    expected_net_bps=8.0, expected_gross_bps=12.0,
+                    q10_net_bps=4.0, q10_gross_bps=6.0,
+                    q90_net_bps=0.0, q90_gross_bps=16.0,
+                    expected_holding_bars=3, reliability=0.9,
+                    registry_version="test", model_version="test",
+                ),
+            ]
+            signal_batch = ValidatedSignalBatch(
+                events=tuple(events), start_idx=0, end_idx=50,
+                symbols=aligned.symbols, registry_version="test", model_version="test",
+            )
+            from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
+            from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+                _run_awf_simulation,
+                build_l2_simulation_cache,
+            )
+            from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
+            from src.domain.futures.strategy.walk_forward import WFFold
+
+            cache = build_l2_simulation_cache(aligned, signal_batch, "4h")
+            awf_folds = (WFFold(fit_start=0, fit_end=5, cal_start=5, cal_end=8, oos_start=8, oos_end=30),)
+            config = Layer2AllocationConfig(k_rank=3, rebalance_bars=3)
+            caps = PortfolioCaps(gross=3.0, per_symbol=0.15, net=0.5, beta=1.0, target_ann_vol=0.20)
+
+            sim = _run_awf_simulation(
+                cache=cache, signal_batch=signal_batch, aligned=aligned,
+                awf_folds=awf_folds, config=config, caps=caps, sim_origin="test_sleeve_diag",
+            )
+            snaps = sim.fold_attributions[0].major_symbol_sleeve_snapshots
+            assert len(snaps) > 0
+            assert all(s.symbol == "BTCUSDT" for s in snaps)
+
+    def test_neutral_raw_mu_sleeve_excluded_from_mismatch_ratio(self) -> None:
+        """Scenario 2: raw_mu_sleeve≈0(1e-12 dead-zone) 스냅샷은 mismatch 분모/분자에서 제외."""
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            MajorSymbolSleeveContributionSnapshot,
+            summarize_major_symbol_sleeve_contribution,
+        )
+        SS = MajorSymbolSleeveContributionSnapshot
+        snapshots = (
+            SS(t=0, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
+               raw_mu_sleeve=1e-13, quality_weight_sleeve=0.5, pooled_mu_symbol=3.0, regime_code=0),
+            SS(t=1, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
+               raw_mu_sleeve=2.0, quality_weight_sleeve=0.3, pooled_mu_symbol=-1.0, regime_code=0),
+        )
+        fold_attributions = (
+            Layer2FoldAttribution(
+                fold_idx=0, oos_bars=2, n_rebal=2, realized_total=0.0, realized_price=0.0,
+                realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
+                mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
+                friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
+                netting_events=0, major_symbol_sleeve_snapshots=snapshots,
+            ),
+        )
+        result = summarize_major_symbol_sleeve_contribution(fold_attributions)
+        assert len(result) == 1
+        r = result[0]
+        assert r.n_obs == 2
+        # Only t=1 is non-zero for both sleeve and pooled → 1 valid observation
+        # t=1: +2 vs -1 → opposite → mismatch, n_valid=1
+        # sign_mismatch_pct = 1/1 = 1.0
+        assert r.sign_mismatch_pct == pytest.approx(1.0)
+
+    def test_merges_multiple_folds_per_symbol_family(self) -> None:
+        """Scenario 2: 2개 fold에 걸친 동일 (symbol,family) 스냅샷 병합 후 n_obs 합산."""
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            MajorSymbolSleeveContributionSnapshot,
+            summarize_major_symbol_sleeve_contribution,
+        )
+        SS = MajorSymbolSleeveContributionSnapshot
+        fold_a = Layer2FoldAttribution(
+            fold_idx=0, oos_bars=2, n_rebal=2, realized_total=0.0, realized_price=0.0,
+            realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
+            mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
+            friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
+            netting_events=0,
+            major_symbol_sleeve_snapshots=(
+                SS(t=0, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
+                   raw_mu_sleeve=1.0, quality_weight_sleeve=0.5, pooled_mu_symbol=0.5, regime_code=0),
+            ),
+        )
+        fold_b = Layer2FoldAttribution(
+            fold_idx=1, oos_bars=2, n_rebal=2, realized_total=0.0, realized_price=0.0,
+            realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
+            mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
+            friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
+            netting_events=0,
+            major_symbol_sleeve_snapshots=(
+                SS(t=0, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
+                   raw_mu_sleeve=2.0, quality_weight_sleeve=0.3, pooled_mu_symbol=-1.0, regime_code=1),
+            ),
+        )
+        result = summarize_major_symbol_sleeve_contribution((fold_a, fold_b))
+        assert len(result) == 1
+        assert result[0].n_obs == 2
+        assert result[0].mean_raw_mu_sleeve == pytest.approx(1.5)
+
+    def test_returns_empty_tuple_for_no_folds(self) -> None:
+        """Scenario 2: 빈 fold_attributions → ()."""
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            summarize_major_symbol_sleeve_contribution,
+        )
+        result = summarize_major_symbol_sleeve_contribution(())
+        assert result == ()
+
+    def test_non_major_symbol_never_collected(self) -> None:
+        """Scenario 2: 비-major 심볼 스냅샷은 수집되지 않음."""
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            MajorSymbolSleeveContributionSnapshot,
+            summarize_major_symbol_sleeve_contribution,
+        )
+        SS = MajorSymbolSleeveContributionSnapshot
+        snapshots = (
+            SS(t=0, symbol="XRPUSDT", strategy_id="trend_ma:ema_12_72_4h",
+               raw_mu_sleeve=1.0, quality_weight_sleeve=0.5, pooled_mu_symbol=0.5, regime_code=0),
+        )
+        fold_attributions = (
+            Layer2FoldAttribution(
+                fold_idx=0, oos_bars=1, n_rebal=1, realized_total=0.0, realized_price=0.0,
+                realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
+                mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
+                friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
+                netting_events=0, major_symbol_sleeve_snapshots=snapshots,
+            ),
+        )
+        result = summarize_major_symbol_sleeve_contribution(fold_attributions)
+        assert result == ()
+
+    def test_sleeve_missing_from_pooled_symbol_result_skips_gracefully(self) -> None:
+        """Scenario 3: pooling 후 valid_signals에서 빠진 심볼은 예외 없이 스킵."""
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            MajorSymbolSleeveContributionSnapshot,
+            summarize_major_symbol_sleeve_contribution,
+        )
+        SS = MajorSymbolSleeveContributionSnapshot
+        snapshots = (
+            SS(t=0, symbol="BTCUSDT", strategy_id="trend_ma:ema_12_72_4h",
+               raw_mu_sleeve=1.0, quality_weight_sleeve=0.5, pooled_mu_symbol=0.0, regime_code=0),
+        )
+        fold_attributions = (
+            Layer2FoldAttribution(
+                fold_idx=0, oos_bars=1, n_rebal=1, realized_total=0.0, realized_price=0.0,
+                realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
+                mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
+                friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
+                netting_events=0, major_symbol_sleeve_snapshots=snapshots,
+            ),
+        )
+        result = summarize_major_symbol_sleeve_contribution(fold_attributions)
+        assert len(result) == 1
+        assert result[0].n_obs == 1
+        # pooled_mu=0.0 is inside dead-zone → not counted as mismatch
+        assert result[0].sign_mismatch_pct == 0.0
+
+    def test_zero_n_obs_family_bucket_returns_no_entry_not_zero_division(self) -> None:
+        """Scenario 3: 특정 (symbol,family) 관측치 0이면 결과 튜플에 해당 항목 없음."""
+        from src.domain.futures.strategy.tiered_workflow.awf_sim import (
+            summarize_major_symbol_sleeve_contribution,
+        )
+        result = summarize_major_symbol_sleeve_contribution(
+            (
+                Layer2FoldAttribution(
+                    fold_idx=0, oos_bars=1, n_rebal=1, realized_total=0.0, realized_price=0.0,
+                    realized_funding=0.0, realized_cost=0.0, expected_net=0.0, alpha_gap=0.0,
+                    mean_gross_exp=0.0, mean_net_exp=0.0, sleeves_active_mean=0.0,
+                    friction_pass_ratio=0.0, throttle_mult_mean=1.0, dropped_below_cost=0,
+                    netting_events=0,
+                    major_symbol_sleeve_snapshots=(),
+                    major_symbol_snapshots=(),
+                ),
+            ),
+        )
+        assert result == ()

@@ -346,6 +346,20 @@ class MajorSymbolRebalanceSnapshot:
 
 
 @dataclass(slots=True, frozen=True)
+class MajorSymbolSleeveContributionSnapshot:
+    """[ADR_20260705_L1_MAJOR_REVERSAL_ALPHA] Phase 0 진단: sleeve→symbol 풀링 시점의
+    family별 raw_mu/quality_weight 기여와 풀링후 부호 스냅샷 (major 심볼 한정)."""
+
+    t: int
+    symbol: str
+    strategy_id: str
+    raw_mu_sleeve: float
+    quality_weight_sleeve: float
+    pooled_mu_symbol: float
+    regime_code: int
+
+
+@dataclass(slots=True, frozen=True)
 class MajorSymbolSignalSizingSummary:
     symbol: str
     n_obs: int
@@ -410,6 +424,7 @@ class Layer2FoldAttribution:
     realized_price_short_by_symbol: tuple[tuple[str, float], ...] = ()
     major_symbol_snapshots: tuple[MajorSymbolRebalanceSnapshot, ...] = ()
     directional_veto_snapshots: tuple[DirectionalVetoSnapshot, ...] = ()
+    major_symbol_sleeve_snapshots: tuple[MajorSymbolSleeveContributionSnapshot, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -524,6 +539,69 @@ def summarize_major_symbol_signal_sizing(
 
     order = {s: i for i, s in enumerate(MAJOR_DIAG_SYMBOLS)}
     results.sort(key=lambda r: order.get(r.symbol, len(order)))
+    return tuple(results)
+
+
+@dataclass(slots=True, frozen=True)
+class MajorSymbolSleeveContributionSummary:
+    symbol: str
+    family: str
+    n_obs: int
+    mean_raw_mu_sleeve: float
+    mean_quality_weight_sleeve: float
+    sign_mismatch_pct: float
+    regime_adverse_sign_mismatch_pct: float
+
+
+def summarize_major_symbol_sleeve_contribution(
+    fold_attributions: tuple[Layer2FoldAttribution, ...],
+) -> tuple[MajorSymbolSleeveContributionSummary, ...]:
+    """[ADR_20260705_L1_MAJOR_REVERSAL_ALPHA] Fold 병합 후 (symbol, family)별
+    sign-mismatch 비율 집계 — outvoting(가설 A) vs 신호 부재(가설 B) 분해용."""
+    from src.domain.futures.strategy.tiered_workflow.l2_meta import _parse_meta_group_ids
+
+    by_key: dict[tuple[str, str], list[MajorSymbolSleeveContributionSnapshot]] = {}
+    for fa in fold_attributions:
+        for snap in fa.major_symbol_sleeve_snapshots:
+            if snap.symbol not in MAJOR_DIAG_SYMBOLS:
+                continue
+            family, _ = _parse_meta_group_ids(snap.strategy_id)
+            by_key.setdefault((snap.symbol, family), []).append(snap)
+
+    results: list[MajorSymbolSleeveContributionSummary] = []
+    for (symbol, family), snaps in by_key.items():
+        n_obs = len(snaps)
+        mu_arr = np.array([s.raw_mu_sleeve for s in snaps], dtype=np.float64)
+        qw_arr = np.array([s.quality_weight_sleeve for s in snaps], dtype=np.float64)
+        pooled_arr = np.array([s.pooled_mu_symbol for s in snaps], dtype=np.float64)
+
+        mean_raw_mu_sleeve = float(mu_arr.mean())
+        mean_quality_weight_sleeve = float(qw_arr.mean())
+
+        dead_zone = 1e-12
+        both_non_zero = (np.abs(mu_arr) > dead_zone) & (np.abs(pooled_arr) > dead_zone)
+        sign_mismatch = both_non_zero & ((mu_arr > 0.0) != (pooled_arr > 0.0))
+        n_valid = int(both_non_zero.sum())
+        sign_mismatch_pct = float(sign_mismatch.sum() / n_valid) if n_valid > 0 else 0.0
+
+        adverse_mask = np.array([s.regime_code in (1, 2) for s in snaps], dtype=np.bool_)
+        adverse_both_non_zero = adverse_mask & both_non_zero
+        n_adverse_valid = int(adverse_both_non_zero.sum())
+        adverse_sign_mismatch = adverse_both_non_zero & sign_mismatch
+        regime_adverse_sign_mismatch_pct = (
+            float(adverse_sign_mismatch.sum() / n_adverse_valid) if n_adverse_valid > 0 else 0.0
+        )
+
+        results.append(MajorSymbolSleeveContributionSummary(
+            symbol=symbol,
+            family=family,
+            n_obs=n_obs,
+            mean_raw_mu_sleeve=mean_raw_mu_sleeve,
+            mean_quality_weight_sleeve=mean_quality_weight_sleeve,
+            sign_mismatch_pct=sign_mismatch_pct,
+            regime_adverse_sign_mismatch_pct=regime_adverse_sign_mismatch_pct,
+        ))
+
     return tuple(results)
 
 
@@ -732,6 +810,7 @@ def _assemble_fold_attribution(
     price_short_by_sym: NDArray[np.float64] | None = None,
     major_symbol_snapshots: tuple[MajorSymbolRebalanceSnapshot, ...] = (),
     directional_veto_snapshots: tuple[DirectionalVetoSnapshot, ...] = (),
+    major_symbol_sleeve_snapshots: tuple[MajorSymbolSleeveContributionSnapshot, ...] = (),
 ) -> Layer2FoldAttribution:
     realized_total = realized_price + realized_funding - realized_cost
     alpha_gap = realized_total - expected_net
@@ -813,6 +892,7 @@ def _assemble_fold_attribution(
         realized_price_short_by_symbol=realized_price_short_by_symbol,
         major_symbol_snapshots=major_symbol_snapshots,
         directional_veto_snapshots=directional_veto_snapshots,
+        major_symbol_sleeve_snapshots=major_symbol_sleeve_snapshots,
     )
 
 
@@ -2821,6 +2901,7 @@ def _run_awf_simulation(
         _attr_bars_long = 0
         _attr_bars_short = 0
         _attr_major_diag: list[MajorSymbolRebalanceSnapshot] = []
+        _attr_major_sleeve_diag: list[MajorSymbolSleeveContributionSnapshot] = []
         _current_episode_start: int | None = None
         _current_episode_price: float = 0.0
         _fold_episodes: list[ReversalEpisode] = []
@@ -3085,6 +3166,24 @@ def _run_awf_simulation(
                 conviction_cap_mult=config.l2_sleeve_conviction_cap_mult,
                 sleeve_edges=_oos_sleeve_edges,
             )
+
+            # [L2 Major Symbol Sleeve Contribution]: Phase 0 진단 스냅샷 수집
+            _regime_now = int(_regime_code_1d[t]) if t < len(_regime_code_1d) else 0
+            for (_sk_sym, _sk_strat), _ss in _oos_sleeve_sigs.items():
+                if _sk_sym in MAJOR_DIAG_SYMBOLS:
+                    _pooled = valid_signals.get(_sk_sym)
+                    if _pooled is not None:
+                        _attr_major_sleeve_diag.append(
+                            MajorSymbolSleeveContributionSnapshot(
+                                t=t,
+                                symbol=_sk_sym,
+                                strategy_id=_sk_strat,
+                                raw_mu_sleeve=float(_ss.raw_mu),
+                                quality_weight_sleeve=float(_ss.quality_weight),
+                                pooled_mu_symbol=float(_pooled.raw_mu),
+                                regime_code=_regime_now,
+                            )
+                        )
 
             # [L2 Directional Veto]: adverse regime long veto
             _veto_enabled = bool(getattr(config, "l2_regime_directional_veto_enabled", False))
@@ -3692,6 +3791,7 @@ def _run_awf_simulation(
             price_short_by_sym=_attr_price_short_by_sym,
             major_symbol_snapshots=tuple(_attr_major_diag),
             directional_veto_snapshots=tuple(_directional_veto_snaps),
+            major_symbol_sleeve_snapshots=tuple(_attr_major_sleeve_diag),
         )
         fold_attributions.append(_attr)
         if _diag and logger.isEnabledFor(logging.DEBUG):
