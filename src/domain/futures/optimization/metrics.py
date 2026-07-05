@@ -10,7 +10,7 @@ from numpy.typing import NDArray
 from scipy.stats import norm
 
 if TYPE_CHECKING:
-    from src.domain.futures.allocation.contracts import StrategySignal
+    from src.domain.futures.strategy.tiered_workflow.dataclasses import StrategySignal
 
 _BARS_PER_YEAR: float = 2190.0  # 4h 기준
 

@@ -15,7 +15,7 @@ import pandas as pd
 from numpy.typing import NDArray
 from scipy.stats import norm, spearmanr
 
-from src.domain.futures.allocation.metrics import (
+from src.domain.futures.optimization.metrics import (
     _newey_west_ic_tstat,
     hurst_dfa,
     variance_ratio,
