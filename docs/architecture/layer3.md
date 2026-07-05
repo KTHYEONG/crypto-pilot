@@ -12,11 +12,19 @@ related_paths:
   - src/domain/futures/validation/walk_forward.py
   - src/domain/futures/optimization/candidate_selector.py
   - src/domain/futures/optimization/final_evaluator.py
+  - src/domain/futures/strategy/tiered_workflow/major_symbol_registry_replay.py
+  - src/application/futures/runner/active_pipeline.py
+  - src/application/futures/runner/cli.py
+  - src/application/futures/runner/config.py
 change_triggers:
   - src/domain/futures/allocation/pipeline.py
   - src/domain/futures/validation/champion_registry.py
   - src/domain/futures/validation/gates.py
   - src/domain/futures/optimization/final_evaluator.py
+  - src/domain/futures/strategy/tiered_workflow/major_symbol_registry_replay.py
+  - src/application/futures/runner/active_pipeline.py
+  - src/application/futures/runner/cli.py
+  - src/application/futures/runner/config.py
 dependencies:
   documents:
     - docs/architecture/layer1.md
@@ -50,6 +58,11 @@ L2 AWF 시뮬레이션에서 결정된 최적 하이퍼파라미터(`l2_params`)
 ### Layer 3 — Multi-Seed Stability Check
 Optuna 최적화로 최종 선별된 챔피언 전략에 대해 $N$개의 서로 다른 랜덤 시드로 AWF 시뮬레이션을 재실행하여 파라미터 안정성을 검증한다.
 - **Stability Gate**: `FUTURES_TMP_LAYER3_HARD_GATE` 활성화 시, 모든 시드에서 L1 Hard Gate 조건들을 통과해야 최종 승인된다.
+
+### Major-Symbol Registry Replay
+- `MAJOR_SYMBOL_REGISTRY_REPLAY=1`이면 `run_tiered_pipeline`이 L2 결과 직후 baseline/treatment replay를 내부 실행하고 CSV를 쓴다.
+- replay seed는 `FuturesRunConfig.seed` SSOT를 사용하며, 기본 경로는 `docs/results/major_symbol_registry_replay_seed_<seed>.csv`다.
+- replay rows는 `baseline_parity`, `l2_cagr`, `l3_total_return`, `l3_cagr`, `l3_mdd`, `l3_sharpe`, `l3_sortino`, `l3_trade_count`, `registry_census`를 포함한다.
 
 # 3. Architecture Flow
 
@@ -90,3 +103,6 @@ L3 Holdout 검증 완료를 위해 포트폴리오는 아래 순차적 조건문
 | `validation/champion_registry.py` | `Layer3Result` 정의 및 L3 Holdout Gate 논리 평가 |
 | `optimization/candidate_selector.py`| 다중 시드 검증용 `check_stability_layer3` 구현 |
 | `optimization/final_evaluator.py` | 챔피언 선출 및 최종 L3 안정성 검증 오케스트레이션 |
+| `strategy/tiered_workflow/major_symbol_registry_replay.py` | major-symbol registry replay, adoption gate, CSV artifact |
+| `application/futures/runner/cli.py` | CLI seed 전달 및 replay entrypoint |
+| `application/futures/runner/config.py` | `FuturesRunConfig.seed` SSOT |

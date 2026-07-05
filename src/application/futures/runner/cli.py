@@ -14,6 +14,7 @@ _logger = logging.getLogger(__name__)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
+    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Build the futures runner CLI parser."""
     parser = argparse.ArgumentParser(description="Futures Optimization Runner")
     parser.add_argument("--trials", type=int, default=42, help="Number of optimization trials")
     parser.add_argument("--timeframe", type=str, default="4h", help="Trading timeframe")
@@ -22,6 +23,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sync", type=str, default="auto", help="Sync mode (auto, skip)")
     parser.add_argument("--refresh-universe", action="store_true", help="Force universe refresh")
     parser.add_argument("--sync-metrics", action="store_true", help="Sync champion metrics")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
     from src.application.futures.runner.config import _REMOVED_ARG_KEYS
     for key in _REMOVED_ARG_KEYS:
         parser.add_argument(f"--{key.replace('_', '-')}", action="store_true", help=argparse.SUPPRESS)
@@ -29,6 +31,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def run_from_cli(argv: Sequence[str] | None = None) -> int:
+    """[ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC] Parse CLI args and execute the runner."""
     parser = build_arg_parser()
     args, _ = parser.parse_known_args(argv)
     try:
@@ -36,7 +39,7 @@ def run_from_cli(argv: Sequence[str] | None = None) -> int:
     except (ValueError, SystemExit) as exc:
         _logger.error("Config error: %s", exc)
         return 2
-    result = run_pipeline(run_config)
+    result = run_pipeline(run_config, seed=run_config.seed)
     return result.exit_code
 
 
