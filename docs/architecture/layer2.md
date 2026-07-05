@@ -19,6 +19,7 @@ related_paths:
   - src/domain/futures/allocation/signal_batch.py
   - src/domain/futures/allocation/parity.py
   - src/domain/futures/allocation/scoring.py
+  - src/domain/futures/strategy/tiered_workflow/dataclasses.py
   - src/application/futures/runner/pipeline.py
   - src/application/futures/runner/config.py
   - src/execution/opt_main_futures.py
@@ -27,6 +28,7 @@ change_triggers:
   - src/domain/futures/allocation/selection.py
   - src/domain/futures/allocation/gates.py
   - src/domain/futures/allocation/deployment.py
+  - src/domain/futures/strategy/tiered_workflow/dataclasses.py
   - src/application/futures/runner/pipeline.py
 dependencies:
   documents:
@@ -48,6 +50,11 @@ L1에서 검증된 Candidate Events를 입력받아 Cross-sectional Ranking, Reg
   <!-- ADR_20260705_L1_MAJOR_REVERSAL_ALPHA -->
 - **Representative Registry Preservation**: `_aggregate_per_tf_l1`은 downstream replay/census용 `deployment_registry`를 대표 TF 기준으로 보존한다.
   <!-- ADR_20260705_MAJOR_SYMBOL_REGISTRY_REPLAY_SYNC -->
+
+### Validation Parity Capture Fields [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
+- `Layer1Result.validation_parity_capture`는 pre-clear probe/main/census evidence를 보존하고, `validation_parity_report`는 gap classification이 끝난 정본 보고서를 담는다.
+- `Layer2Result.validation_parity_report`와 `Layer3Result.validation_parity_report`는 같은 보고서를 downstream으로 전달하는 read-only 계약이다.
+- `tf_validation_repair.py`는 capture/finalize/log 경로를 분리해 재사용하고, major-gap 클래스는 registry census와 later sleeve evidence를 함께 사용해 산출한다.
 
 ### Bucket Routing (Regime $\times$ Family $\times$ TF)
 - **Regime Compression**: 6개의 raw regime 코드를 3-state (`bull`, `bear`, `crisis`) effective regime 코드로 축약하여 맵핑.

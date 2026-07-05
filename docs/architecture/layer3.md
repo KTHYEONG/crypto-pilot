@@ -13,6 +13,7 @@ related_paths:
   - src/domain/futures/optimization/candidate_selector.py
   - src/domain/futures/optimization/final_evaluator.py
   - src/domain/futures/strategy/tiered_workflow/major_symbol_registry_replay.py
+  - src/domain/futures/strategy/tiered_workflow/tf_validation_repair.py
   - src/application/futures/runner/active_pipeline.py
   - src/application/futures/runner/tf_probe_scoped.py
   - src/application/futures/runner/cli.py
@@ -23,6 +24,7 @@ change_triggers:
   - src/domain/futures/validation/gates.py
   - src/domain/futures/optimization/final_evaluator.py
   - src/domain/futures/strategy/tiered_workflow/major_symbol_registry_replay.py
+  - src/domain/futures/strategy/tiered_workflow/tf_validation_repair.py
   - src/application/futures/runner/active_pipeline.py
   - src/application/futures/runner/tf_probe_scoped.py
   - src/application/futures/runner/cli.py
@@ -71,6 +73,11 @@ Optuna 최적화로 최종 선별된 챔피언 전략에 대해 $N$개의 서로
 - `_run_strategy_stage()`는 `full_strategy_maps` 확보 직후, `data_stage.data_maps.clear()` 이전에 `_run_tf_probe_stage_scoped()`를 호출한다.
 - 기본 스코프는 `("BTCUSDT", "ETHUSDT", "BNBUSDT")`, OOM 상한은 `20` symbols다.
 - 반환은 `TfProbeStageResult | None`이며, 내부 gate 로직은 기존 `select_tf_family_cells()`와 `summarize_tf_probe_gate_audit()`를 그대로 사용한다.
+- `probe_stage_result_to_raw_manifest()`는 scoped probe 결과를 raw rows로 변환해 clear 이후에도 `run_tiered_pipeline`이 parity capture를 복원할 수 있게 한다.
+
+### Validation Parity Report Flow [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
+- `build_validation_parity_capture()`는 pre-clear probe/main/census evidence를 묶고, `finalize_validation_parity_capture()`는 이후 L2/L3 sleeve evidence로 major-gap 클래스를 확정한다.
+- `validation_parity_report`는 `Layer1Result`, `Layer2Result`, `Layer3Result`를 통해 downstream으로 유지된다.
 
 # 3. Architecture Flow
 
@@ -117,6 +124,7 @@ L3 Holdout 검증 완료를 위해 포트폴리오는 아래 순차적 조건문
 | `optimization/candidate_selector.py`| 다중 시드 검증용 `check_stability_layer3` 구현 |
 | `optimization/final_evaluator.py` | 챔피언 선출 및 최종 L3 안정성 검증 오케스트레이션 |
 | `strategy/tiered_workflow/major_symbol_registry_replay.py` | major-symbol registry replay, adoption gate, CSV artifact |
+| `strategy/tiered_workflow/tf_validation_repair.py` | pre-clear TF parity capture, major-gap classification, report logging |
 | `runner/tf_probe_scoped.py` | majors-only TF probe wrapper, scoped gate audit, pre-clear execution |
 | `application/futures/runner/cli.py` | CLI seed 전달 및 replay entrypoint |
 | `application/futures/runner/config.py` | `FuturesRunConfig.seed` SSOT |
