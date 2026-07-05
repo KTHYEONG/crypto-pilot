@@ -38,7 +38,7 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import (
 
 def test_suggest_layered_params_l1_keys_only_l1_space() -> None:
     """L1 suggest 결과 키 == L1_ALPHA_SPACE 키집합, L2 키 미포함."""
-    from src.domain.futures.allocation.search_space import L2_SEARCH_SPACE
+    from src.domain.futures.optimization.l2_search_space import L2_SEARCH_SPACE
     from src.domain.futures.optimization.opt_config import L1_ALPHA_SPACE
 
     study = optuna.create_study(direction="maximize")
@@ -57,7 +57,7 @@ def test_suggest_layered_params_l1_keys_only_l1_space() -> None:
 
 def test_suggest_layered_params_l2_keys_only_l2_space() -> None:
     """L2 suggest 결과 키 == L2_SEARCH_SPACE 키집합, L1 키 미포함."""
-    from src.domain.futures.allocation.search_space import L2_SEARCH_SPACE
+    from src.domain.futures.optimization.l2_search_space import L2_SEARCH_SPACE
     from src.domain.futures.optimization.opt_config import L1_ALPHA_SPACE
 
     study = optuna.create_study(direction="maximize")
