@@ -2,6 +2,11 @@
 
 This file holds historical architecture decision records (ADRs) that have been pruned from the active window.
 
+## [2026-07-02] [TASK_L3_EP] [ADR_20260702_L3_EP]
+- **Context/Why:** Whipsaws in post-crash trailing drawdown detection required episode-level timestamps to diagnose.
+- **Resolution/What:** Implemented ReversalEpisode extraction logic and stress_gap diagnostics based on half-spread z-score.
+- **Impact:** Enables empirical validation of liquidity stress discriminative power for new crash indicators.
+
 ## [2026-07-02] [TASK_L2_COV_RE] [ADR_20260702_L2_COV]
 - **Context/Why:** Previous correlated covariance mode test was limited to a single reduced trial (n=1, trial=50) due to ledger crashes.
 - **Resolution/What:** Re-run diagonal vs correlated covariance A/B testing on full 200-trial after repairing data pipeline bugs.
