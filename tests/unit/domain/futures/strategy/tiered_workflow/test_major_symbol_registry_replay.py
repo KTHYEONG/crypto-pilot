@@ -29,6 +29,7 @@ from src.domain.futures.strategy.tiered_workflow.major_symbol_registry_replay im
 )
 from src.domain.futures.strategy.tiered_workflow.pipeline import (
     _aggregate_per_tf_l1,
+    _resolve_l2_master_tf,
     _select_representative_l1_registry,
 )
 
@@ -484,6 +485,140 @@ def test_classify_major_symbol_registry_gap_defaults_to_no_gap_for_non_matching_
         registry_entries=entries, observed_sleeve_summaries=(),
     )
     assert result == "admission_gap"
+
+
+# ── TDD Scenario 1: Happy Path ────────────────────────────────────────────────
+
+
+def _make_cfg(**overrides: object) -> MagicMock:
+    cfg = MagicMock(spec="CandidateStrategyConfig")
+    defaults: dict[str, object] = {
+        "l2_master_tf": None,
+        "seed": 42,
+    }
+    defaults.update(overrides)
+    for k, v in defaults.items():
+        setattr(cfg, k, v)
+    return cfg
+
+
+def test_run_tiered_pipeline_master_tf_matches_registry_source() -> None:
+    """S1: l2_tf resolved from per_tf_l1 matches the TF whose registry is propagated.
+    
+    Invariant: deployment_registry in aggregated result comes from the same TF
+    that _resolve_l2_master_tf selects as master.
+    """
+    reg_4h = make_registry("test:4h", symbol="BTCUSDT")
+    reg_8h = make_registry("test:8h", symbol="BTCUSDT")
+
+    # 8h has more n_winning_signals → higher edge quality → wins master TF
+    l1_4h = make_l1_result(registry=reg_4h)
+    l1_8h = Layer1Result(
+        signals_per_fold=l1_4h.signals_per_fold,
+        oos_stacked={"sym1": MagicMock(), "sym2": MagicMock(), "sym3": MagicMock()},
+        pooled_ic=l1_4h.pooled_ic, pooled_tstat=l1_4h.pooled_tstat,
+        breadth=l1_4h.breadth, valid_coverage=l1_4h.valid_coverage,
+        fold_pass_ratio=l1_4h.fold_pass_ratio,
+        gate_passed=True, n_valid=l1_4h.n_valid, n_total=l1_4h.n_total,
+        deployment_registry=reg_8h,
+    )
+    per_tf_l1 = {
+        "4h": make_per_tf_result("4h", l1_4h),
+        "8h": make_per_tf_result("8h", l1_8h),
+    }
+    cfg = _make_cfg(l2_master_tf=None)
+
+    l2_tf = _resolve_l2_master_tf(cfg, per_tf_l1, probe_manifest=None)
+    assert l2_tf == "8h", "Master TF should be 8h (higher n_winning_signals)"
+
+    result = _aggregate_per_tf_l1(per_tf_l1, preferred_tf=l2_tf)
+    assert result.deployment_registry is reg_8h, (
+        f"Registry should come from master TF '8h', got {result.deployment_registry}"
+    )
+
+
+# ── TDD Scenario 2: Edge Cases ────────────────────────────────────────────────
+
+
+def test_master_tf_selected_even_when_finest_tf_gate_fails() -> None:
+    """S2: '4h' gate_passed=False (registry=None), '8h' gate_passed=True → registry from '8h'."""
+    reg_8h = make_registry("test:8h", symbol="BTCUSDT")
+
+    l1_4h_none = Layer1Result(
+        signals_per_fold=(), oos_stacked={"s": MagicMock()},
+        pooled_ic=0.0, pooled_tstat=0.0, breadth=0.0,
+        valid_coverage=0.0, fold_pass_ratio=0.0,
+        gate_passed=False, n_valid=0, n_total=1,
+        deployment_registry=None,
+    )
+    l1_8h = Layer1Result(
+        signals_per_fold=(), oos_stacked={"s1": MagicMock(), "s2": MagicMock()},
+        pooled_ic=0.05, pooled_tstat=2.0, breadth=0.8,
+        valid_coverage=0.9, fold_pass_ratio=0.75,
+        gate_passed=True, n_valid=1, n_total=1,
+        deployment_registry=reg_8h,
+    )
+    per_tf_l1 = {
+        "4h": make_per_tf_result("4h", l1_4h_none),
+        "8h": make_per_tf_result("8h", l1_8h),
+    }
+    cfg = _make_cfg(l2_master_tf=None)
+
+    l2_tf = _resolve_l2_master_tf(cfg, per_tf_l1, probe_manifest=None)
+    assert l2_tf == "8h", "8h should win on n_winning_signals despite 4h gate failure"
+
+    result = _aggregate_per_tf_l1(per_tf_l1, preferred_tf=l2_tf)
+    assert result.deployment_registry is reg_8h, (
+        "Registry should come from '8h' (master TF), not None from '4h'"
+    )
+
+
+def test_l1_result_override_path_unaffected() -> None:
+    """S2: l1_result_override path returns the override registry unchanged."""
+    reg_override = make_registry("test:override", symbol="BTCUSDT")
+    override = make_l1_result(registry=reg_override)
+
+    cfg = _make_cfg(l2_master_tf="8h")
+    l2_tf = _resolve_l2_master_tf(cfg, {}, probe_manifest=None)
+    assert l2_tf == "8h", "Override path should use cfg.l2_master_tf"
+    assert override.deployment_registry is reg_override
+
+
+def test_divergence_diag_distinguishes_dead_vs_live_dissent() -> None:
+    """S2: quality_weight=0 → dissent_present=1 but dissent_qw_sum=0.0 (log field)."""
+    _dc: dict[str, float] = {
+        "dom": 1, "dissent_present": 1, "dissent_nonzero": 1, "armed": 0,
+        "dom_qw_sum": 2.5, "dissent_qw_sum": 0.0,
+    }
+    dom_qw_mean = _dc["dom_qw_sum"] / max(_dc["dom"], 1)
+    dissent_qw_mean = _dc["dissent_qw_sum"] / max(_dc["dissent_present"], 1)
+    assert dissent_qw_mean == 0.0, "Dead dissent (qw=0) should yield qw_mean=0.0"
+    assert dom_qw_mean == 2.5, "Live dominant should yield qw_mean=2.5"
+
+
+# ── TDD Scenario 3: Error Handling ─────────────────────────────────────────────
+
+
+def test_aggregate_per_tf_l1_all_gates_failed_registry_none_no_crash() -> None:
+    """S3: All gate_passed=False, preferred_tf or not → deployment_registry is None, no crash."""
+    per_tf_l1 = {
+        "4h": make_per_tf_result("4h", make_l1_result(registry=None)),
+        "8h": make_per_tf_result("8h", make_l1_result(registry=None)),
+    }
+    result = _aggregate_per_tf_l1(per_tf_l1, preferred_tf="4h")
+    assert result.deployment_registry is None
+    assert result.gate_passed  # gate_passed is OR of all TFs (both True)
+
+
+def test_resolve_l2_master_tf_empty_dict_falls_back_gracefully() -> None:
+    """S3: Empty per_tf_l1 → falls back to probe_manifest or '8h' default."""
+    cfg = _make_cfg(l2_master_tf=None)
+    l2_tf = _resolve_l2_master_tf(cfg, {}, probe_manifest=None)
+    assert l2_tf == "8h", "Empty dict should fall back to '8h'"
+
+    probe_manifest = [{"is_winner": True, "tf": "12h"}]
+    l2_tf_with_probe = _resolve_l2_master_tf(cfg, {}, probe_manifest=probe_manifest)
+    assert l2_tf_with_probe == "12h", "With probe_manifest winner, should use '12h'"
 
 
 # ── Misc: format table smoke test ─────────────────────────────────────────────

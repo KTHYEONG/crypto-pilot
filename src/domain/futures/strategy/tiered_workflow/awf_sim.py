@@ -734,10 +734,10 @@ def compute_major_symbol_registry_census(
     observed_sleeve_summaries: tuple[object, ...],
     symbols: tuple[str, ...] = MAJOR_DIAG_SYMBOLS,
 ) -> tuple[MajorSymbolRegistryCensusEntry, ...]:
-    """[ADR_20260705_L1_DIVERGENCE_DAMPENER] registry.by_symbol[symbol]의 family 전체를
-    observed_sleeve_summaries(Phase 0 holdout 관측)와 대조.
+    """[ADR_20260705_L1_DIVERGENCE_DAMPENER][ADR_20260705_CHAMPION_REPRODUCIBILITY_AND_REGISTRY_CENSUS]
+    registry.by_symbol[symbol]의 family 전체를 observed_sleeve_summaries(Phase 0 holdout 관측)와 대조.
     """
-    from src.domain.futures.signals.contracts import QualifiedSignalRegistry
+    from src.domain.futures.strategy.candidate_contracts import QualifiedSignalRegistry
     if not isinstance(registry, QualifiedSignalRegistry):
         return ()
     by_symbol = registry.by_symbol
@@ -3096,6 +3096,7 @@ def _run_awf_simulation(
             _mtf_selected_sum = 0
         _contextual_veto_states: dict[str, ContextualDirectionalVetoState] = {}
         _intra_divergence_states: dict[str, IntraSymbolDivergenceState] = {}
+        _div_diag_counts: dict[str, dict[str, float]] = {}
         for t in range(fold.oos_start, fold.oos_end - 1, rebalance_bars):
             t_end = min(t + rebalance_bars, fold.oos_end - 1)
 
@@ -3341,6 +3342,8 @@ def _run_awf_simulation(
                 for _dsym in _div_symbols:
                     _dom_mus: list[float] = []
                     _dissent_mus: list[float] = []
+                    _dom_qw_accum: float = 0.0
+                    _dissent_qw_accum: float = 0.0
                     _dissent_any_nonzero = False
                     for (_sk_sym, _sk_strat), _ss in _oos_sleeve_sigs.items():
                         if _sk_sym != _dsym:
@@ -3348,12 +3351,25 @@ def _run_awf_simulation(
                         _fam = _sk_strat.partition(":")[0]
                         if _fam in _dominant_fams:
                             _dom_mus.append(float(_ss.raw_mu))
+                            _dom_qw_accum += float(_ss.quality_weight)
                         else:
                             if abs(float(_ss.raw_mu)) > 1e-12:
                                 _dissent_any_nonzero = True
                             _dissent_mus.append(float(_ss.raw_mu))
+                            _dissent_qw_accum += float(_ss.quality_weight)
+                    _dc = _div_diag_counts.setdefault(
+                        _dsym, {"dom": 0, "dissent_present": 0, "dissent_nonzero": 0, "armed": 0,
+                                "dom_qw_sum": 0.0, "dissent_qw_sum": 0.0}
+                    )
                     if not _dom_mus:
                         continue
+                    _dc["dom"] += 1
+                    _dc["dom_qw_sum"] += _dom_qw_accum
+                    if _dissent_mus:
+                        _dc["dissent_present"] += 1
+                        _dc["dissent_qw_sum"] += _dissent_qw_accum
+                    if _dissent_any_nonzero:
+                        _dc["dissent_nonzero"] += 1
                     _dominant_sign = int(np.sign(float(np.mean(_dom_mus))))
                     _dissent_diverges = _dissent_any_nonzero and any(
                         (m > 0) != (_dominant_sign > 0) for m in _dissent_mus if abs(m) > 1e-12
@@ -3369,6 +3385,7 @@ def _run_awf_simulation(
                     )
                     _intra_divergence_states[_dsym] = _ds_state
                     if _armed:
+                        _dc["armed"] += 1
                         _oos_sleeve_sigs = _apply_intra_symbol_divergence_adjustment(
                             _oos_sleeve_sigs,
                             symbol=_dsym,
@@ -4011,6 +4028,17 @@ def _run_awf_simulation(
             major_symbol_sleeve_snapshots=tuple(_attr_major_sleeve_diag),
         )
         fold_attributions.append(_attr)
+        if _div_diag_counts and logger.isEnabledFor(logging.DEBUG):
+            for _dsym, _dc in _div_diag_counts.items():
+                logger.debug(
+                    "[L2-DIVERGENCE-DIAG] fold=%d symbol=%s bars_dom=%d "
+                    "bars_dissent_present=%d bars_dissent_nonzero=%d bars_armed=%d "
+                    "dom_qw_mean=%.3f dissent_qw_mean=%.3f",
+                    _fold_idx, _dsym, _dc["dom"],
+                    _dc["dissent_present"], _dc["dissent_nonzero"], _dc["armed"],
+                    _dc["dom_qw_sum"] / max(_dc["dom"], 1),
+                    _dc["dissent_qw_sum"] / max(_dc["dissent_present"], 1),
+                )
         if _diag and logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "[L2-ATTR] fold=%d oos_bars=%d n_rebal=%d realized_total=%.6f "
