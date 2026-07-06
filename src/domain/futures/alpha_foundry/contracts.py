@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal, TypeAlias
 
 AlphaArchetype: TypeAlias = Literal[
@@ -194,3 +195,75 @@ class StagedSearchBudget:
             raise ValueError("n_trials must be >= 1")
         if self.patience < 0:
             raise ValueError("patience must be non-negative")
+
+
+AlphaFoundryMode: TypeAlias = Literal["off", "audit", "gate"]
+
+
+@dataclass(slots=True, frozen=True)
+class AlphaFoundryRuntimeConfig:
+    mode: AlphaFoundryMode = "off"
+    report_dir: Path = Path("logs/futures/alpha_foundry")
+    max_recipes_per_family: int = 64
+    include_families: tuple[str, ...] = ()
+    exclude_families: tuple[str, ...] = ()
+    top_k_per_family_tf: int = 5
+    initial_fold_budget: int = 3
+    cheap_gate: CheapGateConfig = field(default_factory=CheapGateConfig)
+    posterior_gate: PosteriorGateConfig = field(default_factory=PosteriorGateConfig)
+    l2_policy: L2PosteriorPolicyConfig = field(default_factory=L2PosteriorPolicyConfig)
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"off", "audit", "gate"}:
+            raise ValueError(f"invalid alpha_foundry mode: {self.mode!r}")
+        if self.max_recipes_per_family < 1:
+            raise ValueError(f"max_recipes_per_family must be >= 1, got {self.max_recipes_per_family}")
+        if self.top_k_per_family_tf < 1:
+            raise ValueError(f"top_k_per_family_tf must be >= 1, got {self.top_k_per_family_tf}")
+        if self.initial_fold_budget < 1:
+            raise ValueError(f"initial_fold_budget must be >= 1, got {self.initial_fold_budget}")
+        for f in self.include_families:
+            if not f.strip():
+                raise ValueError("include_families contains empty string after trim")
+        for f in self.exclude_families:
+            if not f.strip():
+                raise ValueError("exclude_families contains empty string after trim")
+
+
+@dataclass(slots=True, frozen=True)
+class PanelRecipeBinding:
+    panel_index: int
+    recipe_id: str
+    family: str
+    variant: str
+    source: Literal["catalog_exact", "catalog_family_variant", "synthetic_recipe"]
+
+
+@dataclass(slots=True, frozen=True)
+class AlphaFoundryBridgeReport:
+    run_id: str
+    mode: Literal["audit", "gate"]
+    timeframe: str
+    symbols: tuple[str, ...]
+    n_bars: int
+    n_panels_in: int
+    n_bound_panels: int
+    n_evidence: int
+    n_passed: int
+    n_rejected: int
+    reject_reason_counts: dict[str, int]
+    elapsed_sec: float
+    json_path: str
+    parquet_path: str
+
+
+@dataclass(slots=True, frozen=True)
+class AlphaFoundryFoldRow:
+    symbol: str
+    recipe_id: str
+    family: str
+    timeframe: str
+    activation_context: str
+    net_bps: float
+    fold_id: int
+    effective_weight: float
