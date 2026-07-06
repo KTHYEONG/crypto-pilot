@@ -10,10 +10,13 @@ from collections.abc import Mapping, Sequence
 from typing import Literal
 
 from src.domain.futures.alpha_foundry.contracts import (
+    AlphaArchetype,
     AlphaRecipe,
     BucketKey,
     CheapGateEvidence,
     DiversitySelectionResult,
+    L0BucketBudget,
+    L0SignalCandidate,
     L1PosteriorEvidence,
     L1VerificationUnit,
     PosteriorGateConfig,
@@ -117,43 +120,111 @@ def update_successive_halving_state(
 def allocate_global_l1_budget(
     *,
     bucket_results: Sequence[DiversitySelectionResult],
-    evidence_by_recipe_id: Mapping[str, CheapGateEvidence],
+    candidate_by_recipe_id: Mapping[str, L0SignalCandidate],
     total_l1_verification_budget: int,
     top_k_max: int,
-) -> dict[BucketKey, int]:
+    min_seed_slots_per_archetype: int = 1,
+    min_seed_slots_per_timeframe: int = 1,
+) -> tuple[dict[BucketKey, int], tuple[L0BucketBudget, ...]]:
     if total_l1_verification_budget <= 0:
         raise ValueError(
             f"total_l1_verification_budget must be positive, got {total_l1_verification_budget}"
         )
+
+    # Compute bucket quality as max l1_priority_score in bucket
     quality: dict[BucketKey, float] = {}
+    archetype_by_bucket: dict[BucketKey, AlphaArchetype] = {}
+    cand_count_by_bucket: dict[BucketKey, int] = {}
     for br in bucket_results:
         best = 0.0
-        for rid in br.selected_recipe_ids:
-            ev = evidence_by_recipe_id.get(rid)
-            if ev is not None:
-                best = max(best, ev.block_lcb_bps)
+        archetype: AlphaArchetype = "trend"
+        for rid in br.ranked_recipe_ids:
+            cand = candidate_by_recipe_id.get(rid)
+            if cand is not None:
+                best = max(best, cand.l1_priority_score)
+                archetype = cand.archetype
         quality[br.bucket_key] = best
+        archetype_by_bucket[br.bucket_key] = archetype
+        cand_count_by_bucket[br.bucket_key] = len(br.selected_recipe_ids)
 
-    positive = {b: q for b, q in quality.items() if q > 0.0}
-    if not positive:
-        return dict.fromkeys(quality, 0)
+    # Stage 1: Archetype seed slots - ensure each active archetype gets at least one slot
+    buckets_by_archetype: dict[AlphaArchetype, list[BucketKey]] = {}
+    for bk, arch in archetype_by_bucket.items():
+        if arch not in buckets_by_archetype:
+            buckets_by_archetype[arch] = []
+        buckets_by_archetype[arch].append(bk)
 
-    total_quality = sum(positive.values())
-    raw = {b: total_l1_verification_budget * q / total_quality for b, q in positive.items()}
-    floor_alloc = {b: min(top_k_max, int(v)) for b, v in raw.items()}
+    allocated: dict[BucketKey, int] = {}
+    for bk in quality:
+        allocated[bk] = 0
 
-    remainder = total_l1_verification_budget - sum(floor_alloc.values())
-    fractional = {b: raw[b] - floor_alloc[b] for b in positive}
+    remaining_budget = total_l1_verification_budget
 
-    sorted_buckets = sorted(fractional.keys(), key=lambda b: (-fractional[b], b))
-    for b in sorted_buckets:
-        if remainder <= 0:
+    for buckets in buckets_by_archetype.values():
+        if remaining_budget <= 0:
             break
-        if floor_alloc[b] < top_k_max:
-            floor_alloc[b] += 1
-            remainder -= 1
+        # Assign min_seed to the highest-quality bucket per archetype
+        best_bucket = max(buckets, key=lambda b: quality.get(b, 0.0))
+        allocated[best_bucket] = min(min_seed_slots_per_archetype, remaining_budget)
+        remaining_budget -= allocated[best_bucket]
 
-    result: dict[BucketKey, int] = {}
-    for b in quality:
-        result[b] = floor_alloc.get(b, 0)
-    return result
+    # Stage 2: Timeframe seed slots
+    buckets_by_tf: dict[str, list[BucketKey]] = {}
+    for bk in archetype_by_bucket:
+        tf = bk[1]  # timeframe
+        if tf not in buckets_by_tf:
+            buckets_by_tf[tf] = []
+        buckets_by_tf[tf].append(bk)
+
+    for buckets in buckets_by_tf.values():
+        if remaining_budget <= 0:
+            break
+        already_has_slot = any(allocated.get(b, 0) > 0 for b in buckets)
+        if already_has_slot:
+            continue
+        best_bucket = max(buckets, key=lambda b: quality.get(b, 0.0))
+        allocated[best_bucket] = allocated.get(best_bucket, 0) + min(min_seed_slots_per_timeframe, remaining_budget)
+        remaining_budget -= min(min_seed_slots_per_timeframe, remaining_budget)
+
+    # Stage 3: Residual proportional allocation (largest remainder)
+    positive = {b: q for b, q in quality.items() if q > 0.0}
+    if positive:
+        total_quality = sum(positive.values())
+        raw = {b: remaining_budget * q / total_quality for b, q in positive.items()}
+        floor_alloc = {b: allocated.get(b, 0) + min(top_k_max - allocated.get(b, 0), int(v)) for b, v in raw.items()}
+
+        remainder = total_l1_verification_budget - sum(floor_alloc.values())
+        fractional = {b: raw[b] - (floor_alloc[b] - allocated.get(b, 0)) for b in positive}
+
+        sorted_buckets = sorted(fractional.keys(), key=lambda b: (-fractional[b], b))
+        for b in sorted_buckets:
+            if remainder <= 0:
+                break
+            if floor_alloc[b] < top_k_max:
+                floor_alloc[b] += 1
+                remainder -= 1
+
+        for b in positive:
+            allocated[b] = floor_alloc.get(b, allocated.get(b, 0))
+
+    # Clamp to top_k_max
+    for bk in allocated:
+        allocated[bk] = min(allocated[bk], top_k_max)
+
+    # Build L0BucketBudget records
+    budgets: list[L0BucketBudget] = []
+    for br in bucket_results:
+        bk = br.bucket_key
+        budgets.append(L0BucketBudget(
+            bucket_key=bk,
+            archetype=archetype_by_bucket.get(bk, "trend"),
+            candidate_count=cand_count_by_bucket.get(bk, 0),
+            selected_count=len(br.selected_recipe_ids),
+            min_seed_slots=min_seed_slots_per_archetype,
+            max_slots=top_k_max,
+            allocated_slots=allocated.get(bk, 0),
+            bucket_quality=quality.get(bk, 0.0),
+            effective_test_count=br.bucket_eff_test_count,
+        ))
+
+    return allocated, tuple(budgets)
