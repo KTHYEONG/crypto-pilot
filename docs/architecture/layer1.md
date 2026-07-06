@@ -15,10 +15,24 @@ related_paths:
   - src/domain/futures/strategy/tiered_workflow/pipeline.py
   - src/domain/futures/optimization/metrics.py
   - src/domain/futures/strategy_runtime/bridge.py
+  - src/domain/futures/alpha_foundry/contracts.py
+  - src/domain/futures/alpha_foundry/recipes.py
+  - src/domain/futures/alpha_foundry/cheap_gate.py
+  - src/domain/futures/alpha_foundry/diversity.py
+  - src/domain/futures/alpha_foundry/budget.py
+  - src/domain/futures/alpha_foundry/posterior.py
+  - src/domain/futures/alpha_foundry/pipeline.py
 change_triggers:
   - src/domain/futures/signals/rules.py
   - src/domain/futures/signals/diagnostics.py
   - src/domain/futures/strategy_runtime/bridge.py
+  - src/domain/futures/alpha_foundry/contracts.py
+  - src/domain/futures/alpha_foundry/recipes.py
+  - src/domain/futures/alpha_foundry/cheap_gate.py
+  - src/domain/futures/alpha_foundry/diversity.py
+  - src/domain/futures/alpha_foundry/budget.py
+  - src/domain/futures/alpha_foundry/posterior.py
+  - src/domain/futures/alpha_foundry/pipeline.py
 dependencies:
   documents:
     - docs/architecture/regime.md
@@ -60,6 +74,14 @@ last_verified: 2026-07-06
 - `xs_carry`: Funding rate z-score 역수 (`-funding_z_96/168`)
 - `xs_flow`: Order flow imbalance z-score (`flow_z_24`)
 - `xs_oi_skew`: Open Interest 빌드업과 LSR 스큐 결합 (`-(oi_build_z_42 * sign(lsr_log_z_42))`)
+
+### Alpha Foundry Core [ADR_20260706_ALPHA_FOUNDRY_SYNC]
+- `AlphaRecipe`: `recipe_id`, `family`, `variant`, `timeframe`, `archetype`, `indicator_params`, `side_rule_id`, `exit_policy_id`, `required_fields`, `causal_lag_bars`, `max_turnover_per_year`.
+- `CheapGateEvidence`: cost-adjusted event summary with `gate_passed`, `reject_reasons`, `block_lcb_bps`, `rank_ic`, `turnover_per_year`.
+- `L1VerificationUnit`: fold-bounded verification unit with `prior_mu_bps`, `prior_sigma_bps`, `allocated_fold_budget`, `early_stop_state`.
+- `L1PosteriorEvidence`: `posterior_mu_bps`, `posterior_sigma_bps`, `prob_mu_gt_cost`, `lcb_net_bps`, `quality_weight`, `activation_contract`.
+- `evaluate_panel_cheap_gate()` and `evaluate_alpha_cheap_gate_batch()` consume aligned `[T, N]` arrays, causal lag, funding cost, and stressed round-trip cost.
+- `shrink_l1_evidence_hierarchical()` applies family/timeframe shrinkage with `w = n_eff / (n_eff + prior_effective_n)`.
 
 # 3. Core I/O Interfaces
 
