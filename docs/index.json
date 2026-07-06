@@ -77,7 +77,7 @@
   },
   "src/domain/futures/optimization/opt_config.py": {
     "architecture": "docs/architecture/layer3.md",
-    "testing": "tests/unit/domain/futures/validation/test_rolling_holdout_panel.py"
+    "testing": "tests/unit/domain/futures/optimization/test_data_window_floor_consistency.py"
   },
   "src/domain/futures/validation/gates.py": {
     "architecture": "docs/architecture/layer3.md",
@@ -90,5 +90,9 @@
   "src/domain/futures/optimization/l2_search_space.py": {
     "architecture": "docs/architecture/layer2.md",
     "testing": "tests/unit/domain/futures/optimization/test_param_spaces.py"
+  },
+  "src/domain/futures/optimization/opt_data_utils.py": {
+    "architecture": "docs/architecture/layer3.md",
+    "testing": "tests/unit/domain/futures/optimization/test_data_window_floor_consistency.py"
   }
 }

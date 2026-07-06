@@ -19,6 +19,7 @@ related_paths:
   - src/application/futures/runner/cli.py
   - src/application/futures/runner/config.py
   - src/domain/futures/optimization/opt_config.py
+  - src/domain/futures/optimization/opt_data_utils.py
   - src/domain/futures/optimization/observability/run_tracker.py
 change_triggers:
   - src/domain/futures/strategy/tiered_workflow/pipeline.py
@@ -26,6 +27,7 @@ change_triggers:
   - src/domain/futures/validation/gates.py
   - src/domain/futures/optimization/final_evaluator.py
   - src/domain/futures/optimization/opt_config.py
+  - src/domain/futures/optimization/opt_data_utils.py
   - src/domain/futures/optimization/observability/run_tracker.py
   - src/domain/futures/strategy/tiered_workflow/major_symbol_registry_replay.py
   - src/domain/futures/strategy/tiered_workflow/tf_validation_repair.py
@@ -85,7 +87,8 @@ Optuna 최적화로 최종 선별된 챔피언 전략에 대해 $N$개의 서로
 - `EpisodeOutcome(episode_id, role, candidate_total_return, baseline_total_return)` → `evaluate_rolling_holdout_consistency()`가 `RollingConsistencyVerdict(consistent_improvement, stress_generalization_pass, n_promotion_episodes, failing_episode_ids)`를 산출 — 전 promotion episode에서 candidate≥baseline이어야 `consistent_improvement=True`.
 - **ADR-레벨 Sharpe Pool**: `adr_sharpe_pool_study_name(tag)` Optuna study(승패 무관 전량 기록, `champion_store_study_name`과 별개)에 `record_adr_evaluation()`으로 적재, `compute_adr_level_deflated_sharpe()`가 기존 `optimization.metrics._deflated_sharpe_probability`(Bailey & López de Prado 2014, 신규 공식 아님, `[ADR_20260706_PRODUCTION_PIPELINE_CONSOLIDATION]`로 `allocation/`에서 이관됨)를 이 pool로 재호출.
 - **오케스트레이션 미배선**: 위 3세트를 실제 여러 episode에 대해 `run_tiered_pipeline`을 반복 실행하는 통합 루프는 아직 구현되지 않음(순수 함수만 존재).
-- **Data-Readiness 진단**: `_run_data_stage`(`active_pipeline.py`)의 `_build_data_not_ready_reasons()`가 `kept_symbols=()`일 때 `reason` 분포를 `RuntimeError` 메시지에 포함(`[ADR_20260706_PRODUCTION_PIPELINE_CONSOLIDATION]`). 실측 확인된 reason 값: `fetch_window_short`, `warmup_insufficient` — `QuarterlyWindow`의 `fetch_start`가 `--date`에 따라 이동하며 발생. 근본 수정(fetch 단계와 readiness 창의 일치 여부)은 별도 조사 필요.
+- **Data-Readiness 진단**: `_run_data_stage`(`active_pipeline.py`)의 `_build_data_not_ready_reasons()`가 `kept_symbols=()`일 때 `reason` 분포를 `RuntimeError` 메시지에 포함(`[ADR_20260706_PRODUCTION_PIPELINE_CONSOLIDATION]`). 실측 확인된 reason 값: `fetch_window_short`, `warmup_insufficient` — `QuarterlyWindow`의 `fetch_start`가 `--date`에 따라 이동하며 발생.
+- **Warmup Buffer 실측 정합** `[ADR_20260706_DATA_WINDOW_FLOOR_CONSISTENCY]`: `get_layered_window`/`get_quarterly_window`의 `fetch_start` 버퍼(`warmup_days`)는 하드코딩 365일 대신 `resolve_warmup_days_for_tf(tf)`(`opt_data_utils.py`, 기존 `_resolve_warmup_bars` 재사용)로 계산 — 4h 기준 62일. `warmup_days`를 명시적으로 넘기면 그 값이 우선(하위 호환). 근거: 48개월(요구) vs ~51개월(실제 데이터 가용, 2022-04-01~) 예산에서 365일 버퍼가 여유 3개월을 전부 소진해 `--date` 이동 시 전 심볼 탈락을 유발했음을 실측 확인.
 
 ### Validation Parity Report Flow [ADR_20260705_TF_VALIDATION_ROOT_CAUSE_CAPTURE]
 - `build_validation_parity_capture()`는 pre-clear probe/main/census evidence를 묶고, `finalize_validation_parity_capture()`는 이후 L2/L3 sleeve evidence로 major-gap 클래스를 확정한다.
