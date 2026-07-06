@@ -22,11 +22,15 @@ related_paths:
   - src/application/futures/runner/pipeline.py
   - src/application/futures/runner/config.py
   - src/execution/opt_main_futures.py
+  - src/domain/futures/alpha_foundry/l2_policy.py
+  - src/domain/futures/alpha_foundry/pipeline.py
 change_triggers:
   - src/domain/futures/strategy/tiered_workflow/pipeline.py
   - src/domain/futures/strategy/tiered_workflow/selection.py
   - src/domain/futures/strategy/tiered_workflow/dataclasses.py
   - src/application/futures/runner/pipeline.py
+  - src/domain/futures/alpha_foundry/l2_policy.py
+  - src/domain/futures/alpha_foundry/pipeline.py
 dependencies:
   documents:
     - docs/architecture/layer1.md
@@ -61,6 +65,13 @@ L1에서 검증된 Candidate Events를 입력받아 Cross-sectional Ranking, Reg
   - $e = (1-\lambda) e_{raw} + \lambda e_{family} \quad (\lambda = 0.3)$
 - **Bucket-Conditional Weight** (`apply_bucket_conditional_weight`, `l2_regime_conditional_weight_enabled`): `filter_sleeves_by_bucket`의 binary 통과 대신 $g(e)=\text{clip}((e-\text{floor})/\text{ref}, 0.5, 1.5)$로 `quality_weight`를 재가중.
   - **알려진 한계** [ADR_20260705_L1L2_REGIME_CONDITIONAL_WEIGHT]: (1) `l2_regime_policy_mode="filter"` 분기 전용 — 기본값 `"soft"`에서는 호출되지 않음(실측: BTCUSDT/ETHUSDT/BNBUSDT 4h A/B 결과 baseline과 완전 동일). (2) 곱셈 재가중이라 L1 `quality_weight=0`(전체-구간 평균 음수)인 sleeve는 복구 불가.
+
+### Alpha Foundry L2 Bridge [ADR_20260706_ALPHA_FOUNDRY_SYNC]
+- `L2PosteriorPolicyConfig`: `kelly_fraction`, `posterior_z`, `risk_budget_target`, `gross_cap_by_regime`, `cost_safety_mult`, `turnover_penalty`.
+- `L2PosteriorSleeve`: `mu_eff_bps`, `sigma_bps`, `quality_weight`, `side`, `disabled_reason`.
+- `convert_posterior_to_l2_sleeves()` uses `mu_eff_bps = posterior_mu_bps - posterior_z * posterior_sigma_bps - cost_safety_mult * stress_cost_bps` to decide sleeve side.
+- `build_staged_l2_search_spaces()` splits search space into `signal`, `risk`, `regime`, and `deployment` stages.
+- `resolve_staged_search_budget()` allocates trial budget per stage and returns `StagedSearchBudget(stage, n_trials, min_feasible_eff, patience, seed_count)`.
 
 ### Kelly Sizing & Vol Target
 - **Diagonal Kelly Weights**:
