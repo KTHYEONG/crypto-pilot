@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,11 @@ def _resolve_warmup_bars(tf: str) -> int:
     min_membership_warm_days = int(OPT_FUTURES_CONFIG.get("FUTURES_MEMBERSHIP_WARM_DAYS", 42))
     min_membership_warm = min_membership_warm_days * bars_per_day
     return max(lookback, cov, sigma, atr, embargo, platt, min_membership_warm)
+
+def resolve_warmup_days_for_tf(tf: str, *, safety_margin_days: int = 20) -> int:
+    """지표 워밍업 요구치(bar)를 캘린더 일수로 환산. [ADR_20260706_DATA_WINDOW_FLOOR_CONSISTENCY]"""
+    bars_per_day = {"1h": 24, "4h": 6, "1d": 1}.get(str(tf).lower(), 6)
+    return math.ceil(_resolve_warmup_bars(tf) / bars_per_day) + safety_margin_days
 
 
 def evaluate_symbol_data_sufficiency(
