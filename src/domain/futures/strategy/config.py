@@ -428,6 +428,10 @@ class CandidateStrategyConfig:
         "funding_term_structure_carry",
         "flow_trend_continuation",
         "lsr_oi_regime_filter",
+        "macd_4h",
+        "supertrend",
+        "ichimoku_trend",
+        "positioning_unwind",
     )
     # TF-Specific Signal Pools
     per_tf_candidate_families: dict[str, tuple[str, ...]] | None = None
@@ -1026,6 +1030,10 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "funding_carry",
         "xs_momentum",
         "xs_carry",
+        "xs_flow",
+        "xs_oi_skew",
+        "mtf_breakout_retest",
+        "lsr_oi_regime_filter",
         "supertrend",
     ),
     "8h": (
@@ -1037,6 +1045,10 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "funding_carry",
         "xs_momentum",
         "xs_carry",
+        "xs_flow",
+        "xs_oi_skew",
+        "mtf_breakout_retest",
+        "lsr_oi_regime_filter",
         "supertrend",
     ),
     "12h": (
@@ -1049,6 +1061,9 @@ _DEFAULT_PER_TF_FAMILIES: dict[str, tuple[str, ...]] = {
         "xs_momentum",
         "xs_carry",
         "xs_oi_skew",
+        "mtf_breakout_retest",
+        "vol_term_structure_gate",
+        "flow_trend_continuation",
         "ichimoku_trend",
         "supertrend",
     ),
@@ -1076,6 +1091,11 @@ _DEFAULT_PER_TF_GATE_OVERRIDES: dict[str, dict[str, float]] = {
     "12h": {
         "l1_pair_min_effective_obs": 6.0,
         "l1_min_fold_ratio": 0.55,
+    },
+    "1d": {
+        "l1_pair_min_effective_obs": 7.0,
+        "l1_min_fold_ratio": 0.60,
+        "l1_min_realized_match_ratio": 0.85,
     },
 }
 
@@ -1138,12 +1158,30 @@ def resolve_tf_signal_pool(cfg: CandidateStrategyConfig, tf: str) -> tuple[str, 
     return cfg.candidate_families
 
 
+def resolve_family_registration_gap(
+    all_families: tuple[str, ...],
+    candidate_families: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return families present in all_families but absent from candidate_families.
+
+    Order-preserving relative to all_families; empty tuple means full coverage.
+
+    [ADR_20260706_L0_SIGNAL_FAMILY_DIVERSITY]
+    """
+    candidate_set = frozenset(candidate_families)
+    return tuple(f for f in all_families if f not in candidate_set)
+
+
 def resolve_tf_gate_overrides(cfg: CandidateStrategyConfig, tf: str) -> dict[str, float]:
     """Resolve gate threshold overrides for a given TF.
 
-    Returns the raw override dict from per_tf_gate_overrides[tf],
-    or an empty dict when no overrides exist.
+    Returns the raw override dict from per_tf_gate_overrides[tf] (instance-level),
+    falling back to _DEFAULT_PER_TF_GATE_OVERRIDES[tf] when instance-level is None.
+    Returns an empty dict when no overrides exist for the given TF.
     """
-    if cfg.per_tf_gate_overrides and tf in cfg.per_tf_gate_overrides:
-        return cfg.per_tf_gate_overrides[tf]
+    overrides_map = (
+        cfg.per_tf_gate_overrides if cfg.per_tf_gate_overrides is not None else _DEFAULT_PER_TF_GATE_OVERRIDES
+    )
+    if tf in overrides_map:
+        return overrides_map[tf]
     return {}
