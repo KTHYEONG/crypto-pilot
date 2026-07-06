@@ -101,9 +101,7 @@ class TestBuildAlphaRecipeCatalog:
         assert all(c <= 2 for c in family_counts.values()), "max_recipes_per_family=2 violated"
 
     def test_empty_result_when_all_families_excluded(self) -> None:
-        recipes = build_alpha_recipe_catalog(
-            timeframe="4h", include_families=("nonexistent_family",)
-        )
+        recipes = build_alpha_recipe_catalog(timeframe="4h", include_families=("nonexistent_family",))
         assert len(recipes) == 0
 
 

@@ -165,13 +165,15 @@ class TestS1DataIntegrityFailGapBars:
         """
         # Arrange
         iid = "binance_usdt_perpetual:XYZUSDT"
-        instruments = pd.DataFrame([
-            _standard_inst_row(
-                iid,
-                max_gap_bars=7,           # exceeds threshold of 6
-                last_60d_coverage=0.95,   # exactly at floor — should not save it
-            )
-        ])
+        instruments = pd.DataFrame(
+            [
+                _standard_inst_row(
+                    iid,
+                    max_gap_bars=7,  # exceeds threshold of 6
+                    last_60d_coverage=0.95,  # exactly at floor — should not save it
+                )
+            ]
+        )
         observations = pd.DataFrame(_make_obs_rows(iid))
         rules = {iid: _make_rules(iid)}
         cfg = _config()
@@ -196,9 +198,7 @@ class TestS1DataIntegrityFailGapBars:
         """max_gap_bars=6 == threshold → gate passes (boundary: inclusive)."""
         # Arrange
         iid = "binance_usdt_perpetual:XYZUSDT"
-        instruments = pd.DataFrame([
-            _standard_inst_row(iid, max_gap_bars=6, last_60d_coverage=0.96)
-        ])
+        instruments = pd.DataFrame([_standard_inst_row(iid, max_gap_bars=6, last_60d_coverage=0.96)])
         observations = pd.DataFrame(_make_obs_rows(iid))
         rules = {iid: _make_rules(iid)}
         cfg = _config()
@@ -230,9 +230,7 @@ class TestS2StalenessCheck:
         """staleness_bars=3 > max_staleness_bars=2 → STALE_MARKET_DATA."""
         # Arrange
         iid = "binance_usdt_perpetual:ABCUSDT"
-        instruments = pd.DataFrame([
-            _standard_inst_row(iid, staleness_bars=3)
-        ])
+        instruments = pd.DataFrame([_standard_inst_row(iid, staleness_bars=3)])
         observations = pd.DataFrame(_make_obs_rows(iid))
         rules = {iid: _make_rules(iid)}
         cfg = _config(max_staleness_bars=2)
@@ -256,9 +254,7 @@ class TestS2StalenessCheck:
         """staleness_bars=2 == max_staleness_bars=2 → gate passes."""
         # Arrange
         iid = "binance_usdt_perpetual:ABCUSDT"
-        instruments = pd.DataFrame([
-            _standard_inst_row(iid, staleness_bars=2)
-        ])
+        instruments = pd.DataFrame([_standard_inst_row(iid, staleness_bars=2)])
         observations = pd.DataFrame(_make_obs_rows(iid))
         rules = {iid: _make_rules(iid)}
         cfg = _config(max_staleness_bars=2)
@@ -291,9 +287,7 @@ class TestS3LeveragedToken:
         """Symbols containing UP/DOWN/BULL/BEAR → LEVERAGED_TOKEN."""
         # Arrange
         iid = f"binance_usdt_perpetual:{symbol_suffix}"
-        instruments = pd.DataFrame([
-            _standard_inst_row(iid)
-        ])
+        instruments = pd.DataFrame([_standard_inst_row(iid)])
         observations = pd.DataFrame(_make_obs_rows(iid))
         rules = {iid: _make_rules(iid)}
         cfg = _config()
@@ -317,9 +311,7 @@ class TestS3LeveragedToken:
         """Regular symbol BTCUSDT is not excluded by G0."""
         # Arrange
         iid = "binance_usdt_perpetual:BTCUSDT"
-        instruments = pd.DataFrame([
-            _standard_inst_row(iid)
-        ])
+        instruments = pd.DataFrame([_standard_inst_row(iid)])
         observations = pd.DataFrame(_make_obs_rows(iid, adv=10_000_000.0))
         rules = {iid: _make_rules(iid)}
         cfg = _config()
@@ -356,9 +348,7 @@ class TestS4ConfidenceResolution:
         """
         # Arrange: confidence explicitly set to 'unknown' (as _resolve_confidence produces)
         iid = "binance_usdt_perpetual:NANUSDT"
-        instruments = pd.DataFrame([
-            _standard_inst_row(iid, has_nan=True, confidence="unknown")
-        ])
+        instruments = pd.DataFrame([_standard_inst_row(iid, has_nan=True, confidence="unknown")])
         observations = pd.DataFrame(_make_obs_rows(iid))
         rules = {iid: _make_rules(iid)}
         # min_data_confidence = RECONSTRUCTED → UNKNOWN fails G3

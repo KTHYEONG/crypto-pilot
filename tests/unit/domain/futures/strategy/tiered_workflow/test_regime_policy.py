@@ -40,9 +40,7 @@ def _make_aligned(close_1d: list[float]) -> MagicMock:
 
 
 def _make_fold() -> tuple[WFFold, ...]:
-    return (
-        WFFold(fit_start=0, fit_end=3, cal_start=3, cal_end=5, oos_start=5, oos_end=8),
-    )
+    return (WFFold(fit_start=0, fit_end=3, cal_start=3, cal_end=5, oos_start=5, oos_end=8),)
 
 
 def _make_symbol_signal() -> SymbolSignal:
@@ -593,6 +591,7 @@ def test_apply_regime_risk_cap_invalid_cap_raises() -> None:
 
 # ── Scenario 1: 기본값 검증 (pooled_passthrough=True, require_fit_n_for_downweight=False) ──
 
+
 def test_layer2_allocation_config_defaults_new_regime_conservatism_fields() -> None:
     cfg = Layer2AllocationConfig.from_mapping({})
     assert cfg.l2_regime_pooled_is_passthrough is True
@@ -638,6 +637,7 @@ def test_build_regime_policy_by_fold_pooled_is_passthrough_false_preserves_poole
 
 # ── Scenario 2: pooled_is_passthrough=True 로 pooled cell → allow 전환 ──
 
+
 def test_build_regime_policy_by_fold_pooled_is_passthrough_true_converts_pooled_to_allow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -675,6 +675,7 @@ def test_build_regime_policy_by_fold_pooled_is_passthrough_true_converts_pooled_
 
 
 # ── Scenario 3: insufficient_fit_but_good_cal ──
+
 
 def test_build_regime_policy_by_fold_insufficient_fit_but_good_cal_becomes_allow(
     monkeypatch: pytest.MonkeyPatch,
@@ -720,6 +721,7 @@ def test_build_regime_policy_by_fold_insufficient_fit_but_good_cal_becomes_allow
 
 # ── Scenario 4: insufficient_cal_partial ──
 
+
 def test_build_regime_policy_by_fold_insufficient_cal_partial_downweight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -764,6 +766,7 @@ def test_build_regime_policy_by_fold_insufficient_cal_partial_downweight(
 
 # ── Scenario 5: bucket_reliability relaxed threshold ──
 
+
 def test_build_bucket_reliability_relaxed_threshold_downweight_to_allow() -> None:
     from src.domain.futures.strategy.tiered_workflow.bucket_reliability import build_bucket_reliability
 
@@ -791,6 +794,7 @@ def test_build_bucket_reliability_relaxed_threshold_downweight_to_allow() -> Non
 
 
 # ── Scenario 6: require_fit_n_for_downweight=True blocks insufficient_fit downweight ──
+
 
 def test_build_regime_policy_by_fold_require_fit_n_for_downweight_blocks(
     monkeypatch: pytest.MonkeyPatch,

@@ -10,6 +10,7 @@ Scenarios:
   S7 - Edge: empty book or NaN score → m == 0.0
   S8 - BVA gamma: convex/concave boundary behaviour
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -29,6 +30,7 @@ from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2Alloca
 # ---------------------------------------------------------------------------
 # _edge_throttle_multiplier
 # ---------------------------------------------------------------------------
+
 
 class TestEdgeThrottleMultiplier:
     def test_s1_full_deploy_at_ref(self) -> None:
@@ -100,6 +102,7 @@ class TestEdgeThrottleMultiplier:
 # ---------------------------------------------------------------------------
 # _apply_risk_budget_floor
 # ---------------------------------------------------------------------------
+
 
 class TestRiskBudgetFloor:
     def test_under_deployed_book_scales_up_without_support_leak(self) -> None:
@@ -191,6 +194,7 @@ class TestAdaptiveBreadth:
 # _book_edge_score
 # ---------------------------------------------------------------------------
 
+
 class TestBookEdgeScore:
     def test_s7_empty_book(self) -> None:
         """S7: all weights zero → 0.0."""
@@ -218,6 +222,7 @@ class TestBookEdgeScore:
 # S4 - Distribution reshape
 # ---------------------------------------------------------------------------
 
+
 class TestDistributionReshape:
     """S4: throttle reduces bad-fold contribution → Sharpe improves."""
 
@@ -242,6 +247,7 @@ class TestDistributionReshape:
 # S5 - Scale-invariance: global scalar ≠ DSR mover
 # ---------------------------------------------------------------------------
 
+
 class TestScaleInvariance:
     """S5: Sharpe is scale-invariant → confirms throttle must reshape distribution."""
 
@@ -261,6 +267,7 @@ class TestScaleInvariance:
 # S6 - Config plumbing: disabled → m≡1
 # ---------------------------------------------------------------------------
 
+
 class TestConfigPlumbing:
     def test_s6_disabled_via_from_mapping(self) -> None:
         """S6: edge_throttle_enabled=False parsed correctly."""
@@ -277,21 +284,29 @@ class TestConfigPlumbing:
         # Simulate caller logic: if not enabled, skip _edge_throttle_multiplier
         cfg = Layer2AllocationConfig.from_mapping({"edge_throttle_enabled": False})
         # m is 1.0 by convention when disabled
-        m = 1.0 if not cfg.edge_throttle_enabled else _edge_throttle_multiplier(
-            0.0, floor_bps=cfg.edge_floor_bps, ref_bps=cfg.edge_ref_bps,
-            gamma=cfg.edge_throttle_gamma,
+        m = (
+            1.0
+            if not cfg.edge_throttle_enabled
+            else _edge_throttle_multiplier(
+                0.0,
+                floor_bps=cfg.edge_floor_bps,
+                ref_bps=cfg.edge_ref_bps,
+                gamma=cfg.edge_throttle_gamma,
+            )
         )
         assert m == pytest.approx(1.0)
 
     def test_throttle_params_from_mapping(self) -> None:
         """All 4 throttle params round-trip through from_mapping."""
-        cfg = Layer2AllocationConfig.from_mapping({
-            "edge_throttle_enabled": True,
-            "edge_floor_bps": 1.5,
-            "edge_ref_bps": 8.0,
-            "edge_throttle_gamma": 2.0,
-            "edge_throttle_min_active_mult": 0.25,
-        })
+        cfg = Layer2AllocationConfig.from_mapping(
+            {
+                "edge_throttle_enabled": True,
+                "edge_floor_bps": 1.5,
+                "edge_ref_bps": 8.0,
+                "edge_throttle_gamma": 2.0,
+                "edge_throttle_min_active_mult": 0.25,
+            }
+        )
         assert cfg.edge_floor_bps == pytest.approx(1.5)
         assert cfg.edge_ref_bps == pytest.approx(8.0)
         assert cfg.edge_throttle_gamma == pytest.approx(2.0)

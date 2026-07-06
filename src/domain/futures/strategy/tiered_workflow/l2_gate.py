@@ -123,11 +123,7 @@ def evaluate_layer2_gate(
     cost_drag = compute_cost_drag_ratio(fold_attributions) if fold_attributions else 0.0
 
     # psr_floor: PSR < threshold → BLOCKER (None 입력 시 -1.0 통과)
-    psr_constraint = (
-        -1.0
-        if psr_hybrid is None
-        else _finite_or_fail(float(config.l2_min_psr) - float(psr_hybrid))
-    )
+    psr_constraint = -1.0 if psr_hybrid is None else _finite_or_fail(float(config.l2_min_psr) - float(psr_hybrid))
     recent_fold_constraint = -1.0
     if config.l2_require_recent_fold_pass:
         if recent_fold_passed is False:
@@ -145,9 +141,7 @@ def evaluate_layer2_gate(
     block_delta_constraint = (
         -1.0
         if positive_block_delta_ratio is None or not np.isfinite(float(positive_block_delta_ratio))
-        else _finite_or_fail(
-            float(config.l2_min_positive_block_delta_ratio) - float(positive_block_delta_ratio)
-        )
+        else _finite_or_fail(float(config.l2_min_positive_block_delta_ratio) - float(positive_block_delta_ratio))
     )
     optuna_constraint_values = (
         1.0 if deployment_failed else -1.0,
@@ -177,13 +171,15 @@ def evaluate_layer2_gate(
         _finite_or_fail(float(config.l2_min_friction_pass) - friction_pass_pct),
         _finite_or_fail(
             _growth_lcb_vol_matched_baseline(
-                growth_lcb_baseline, growth_lcb_hybrid, std_hybrid, std_baseline,
+                growth_lcb_baseline,
+                growth_lcb_hybrid,
+                std_hybrid,
+                std_baseline,
             )
-            + float(config.l2_min_growth_uplift) - growth_lcb_hybrid
+            + float(config.l2_min_growth_uplift)
+            - growth_lcb_hybrid
         ),
-        _finite_or_fail(
-            sharpe_hac_baseline + float(config.l2_min_sharpe_uplift) - sharpe_hac_hybrid
-        ),
+        _finite_or_fail(sharpe_hac_baseline + float(config.l2_min_sharpe_uplift) - sharpe_hac_hybrid),
         psr_constraint,
     )
 
@@ -218,17 +214,28 @@ def evaluate_layer2_gate(
         "psr=%.4f(vs%.2f) uplift=%.4f(vs%.2f) cvar=%.4f(vs%.2f)",
         promotion_passed,
         promotion_blocker,
-        cagr_hybrid, config.l2_min_cagr,
-        sortino_hybrid, config.l2_min_sortino,
-        sharpe_hybrid, config.l2_min_sharpe_abs,
-        cagr_hybrid / (mdd_hybrid + 1e-9), config.l2_min_calmar,
-        mdd_hybrid, config.l2_max_mdd_abs,
-        fold_pass_ratio, config.l2_min_fold_pass_ratio,
-        trade_count, config.l2_min_trades,
-        cost_drag, config.l2_max_cost_drag_ratio,
-        psr_hybrid if psr_hybrid is not None else -1.0, config.l2_min_psr,
-        sharpe_hac_hybrid - sharpe_hac_baseline, config.l2_min_sharpe_uplift,
-        cvar_95_hybrid, config.l2_max_cvar_95,
+        cagr_hybrid,
+        config.l2_min_cagr,
+        sortino_hybrid,
+        config.l2_min_sortino,
+        sharpe_hybrid,
+        config.l2_min_sharpe_abs,
+        cagr_hybrid / (mdd_hybrid + 1e-9),
+        config.l2_min_calmar,
+        mdd_hybrid,
+        config.l2_max_mdd_abs,
+        fold_pass_ratio,
+        config.l2_min_fold_pass_ratio,
+        trade_count,
+        config.l2_min_trades,
+        cost_drag,
+        config.l2_max_cost_drag_ratio,
+        psr_hybrid if psr_hybrid is not None else -1.0,
+        config.l2_min_psr,
+        sharpe_hac_hybrid - sharpe_hac_baseline,
+        config.l2_min_sharpe_uplift,
+        cvar_95_hybrid,
+        config.l2_max_cvar_95,
     )
 
     _logger.debug(

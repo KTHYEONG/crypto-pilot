@@ -19,17 +19,30 @@ from src.application.futures.runner.pipeline import run_pipeline
 
 def make_run_config(phase: str = "l3") -> FuturesRunConfig:
     return FuturesRunConfig(
-        timeframe="4h", date="2026-05-01", trials=3,
-        phase=phase, sync="skip", refresh_universe=False, sync_metrics=False,  # type: ignore[arg-type]
+        timeframe="4h",
+        date="2026-05-01",
+        trials=3,
+        phase=phase,
+        sync="skip",
+        refresh_universe=False,
+        sync_metrics=False,  # type: ignore[arg-type]
     )
+
 
 def make_window() -> RunWindow:
     from datetime import date
+
     return RunWindow(
-        fetch_start="2024-01-01", is_start="2024-04-01", oos_start="2025-01-01",
-        end_date="2026-05-01", fetch_start_date=date(2024,1,1), is_start_date=date(2024,4,1),
-        oos_start_date=date(2025,1,1), end_date_value=date(2026,5,1),
+        fetch_start="2024-01-01",
+        is_start="2024-04-01",
+        oos_start="2025-01-01",
+        end_date="2026-05-01",
+        fetch_start_date=date(2024, 1, 1),
+        is_start_date=date(2024, 4, 1),
+        oos_start_date=date(2025, 1, 1),
+        end_date_value=date(2026, 5, 1),
     )
+
 
 def make_data_bundle() -> MarketDataBundle:
     return MarketDataBundle(
@@ -48,9 +61,13 @@ class TestRunPipeline:
     def test_run_pipeline_l3_preserves_orchestration_order(self, mocker: MockerFixture) -> None:
         order: list[str] = []
 
-        mocker.patch("src.application.futures.runner.active_pipeline._resolve_quarterly_window", return_value=make_window())  # noqa: E501
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._resolve_quarterly_window", return_value=make_window()
+        )
         mocker.patch("src.application.futures.runner.active_pipeline._resolve_layered_window", return_value=None)
-        mocker.patch("src.application.futures.runner.active_pipeline._selected_symbols_from_snapshot", return_value=("BTCUSDT",))  # noqa: E501
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._selected_symbols_from_snapshot", return_value=("BTCUSDT",)
+        )
 
         mocker.patch(
             "src.application.futures.runner.active_pipeline._ensure_universe_ledger_sync",
@@ -58,7 +75,9 @@ class TestRunPipeline:
         )
         mocker.patch(
             "src.application.futures.runner.active_pipeline._run_universe_stage",
-            side_effect=lambda *args, **kwargs: _track(order, "universe", (["BTCUSDT"], [], [], ["BTCUSDT"], object(), [], object())),  # noqa: E501
+            side_effect=lambda *args, **kwargs: _track(
+                order, "universe", (["BTCUSDT"], [], [], ["BTCUSDT"], object(), [], object())
+            ),
         )
         mocker.patch(
             "src.application.futures.runner.active_pipeline._ensure_cached_symbol_data_for_targets",
@@ -89,9 +108,13 @@ class TestRunPipeline:
 
     @pytest.mark.parametrize("phase", ["l1", "l2"])
     def test_run_pipeline_l1_l2_skip_optimization(self, mocker: MockerFixture, phase: str) -> None:
-        mocker.patch("src.application.futures.runner.active_pipeline._resolve_quarterly_window", return_value=make_window())  # noqa: E501
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._resolve_quarterly_window", return_value=make_window()
+        )
         mocker.patch("src.application.futures.runner.active_pipeline._resolve_layered_window", return_value=None)
-        mocker.patch("src.application.futures.runner.active_pipeline._selected_symbols_from_snapshot", return_value=("BTCUSDT",))  # noqa: E501
+        mocker.patch(
+            "src.application.futures.runner.active_pipeline._selected_symbols_from_snapshot", return_value=("BTCUSDT",)
+        )
         mocker.patch("src.application.futures.runner.active_pipeline._ensure_universe_ledger_sync")
         mocker.patch(
             "src.application.futures.runner.active_pipeline._run_universe_stage",
@@ -109,10 +132,7 @@ class TestRunPipeline:
 
         mock_optimize = mocker.patch("src.application.futures.runner.active_pipeline._run_optimization_stage")
 
-        expected = (
-            RunnerResult(0, "l1_mode_done") if phase == "l1"
-            else RunnerResult(0, "tiered_pipeline_l2_completed")
-        )
+        expected = RunnerResult(0, "l1_mode_done") if phase == "l1" else RunnerResult(0, "tiered_pipeline_l2_completed")
         result = run_pipeline(make_run_config(phase))
 
         assert result == expected
@@ -120,35 +140,33 @@ class TestRunPipeline:
 
     def test_ledger_sync_skipped_when_sync_is_skip(self, mocker: MockerFixture) -> None:
         from src.application.futures.runner.active_pipeline import _ensure_universe_ledger_sync
-        
+
         mock_path = mocker.MagicMock()
         mock_path.exists.return_value = False
         mocker.patch("src.domain.futures.universe.models.DEFAULT_LEDGER_PATH", mock_path)
         mock_sync = mocker.patch("src.application.futures.runner.active_pipeline.run_historical_sync")
-        
+
         run_config = FuturesRunConfig(
-            timeframe="4h", date=None, trials=1,
-            phase="l3", sync="skip", refresh_universe=False, sync_metrics=False
+            timeframe="4h", date=None, trials=1, phase="l3", sync="skip", refresh_universe=False, sync_metrics=False
         )
         window = make_window()
-        
+
         _ensure_universe_ledger_sync(run_config, window)  # type: ignore[arg-type]
         mock_sync.assert_not_called()
 
     def test_ledger_sync_called_when_sync_is_auto(self, mocker: MockerFixture) -> None:
         from src.application.futures.runner.active_pipeline import _ensure_universe_ledger_sync
-        
+
         mock_path = mocker.MagicMock()
         mock_path.exists.return_value = False
         mocker.patch("src.domain.futures.universe.models.DEFAULT_LEDGER_PATH", mock_path)
         mock_sync = mocker.patch("src.application.futures.runner.active_pipeline.run_historical_sync")
-        
+
         run_config = FuturesRunConfig(
-            timeframe="4h", date=None, trials=1,
-            phase="l3", sync="auto", refresh_universe=False, sync_metrics=False
+            timeframe="4h", date=None, trials=1, phase="l3", sync="auto", refresh_universe=False, sync_metrics=False
         )
         window = make_window()
-        
+
         _ensure_universe_ledger_sync(run_config, window)  # type: ignore[arg-type]
         mock_sync.assert_called_once()
 

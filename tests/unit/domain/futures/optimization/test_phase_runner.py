@@ -34,9 +34,7 @@ def test_phase_runner_study_naming_and_order(
         calls.append(kwargs)
         return _DummyStudy(study_name=kwargs["study_name"])
 
-    monkeypatch.setattr(
-        "src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop
-    )
+    monkeypatch.setattr("src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop)
 
     bundle = run_phased_optimization_skeleton(
         base_ctx=_base_ctx("r1"),
@@ -76,9 +74,7 @@ def test_phase_runner_uses_phase_specific_trial_budgets(
         calls.append(kwargs)
         return _DummyStudy(study_name=kwargs["study_name"])
 
-    monkeypatch.setattr(
-        "src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop
-    )
+    monkeypatch.setattr("src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop)
 
     run_phased_optimization_skeleton(
         base_ctx=_base_ctx("r3"),
@@ -107,9 +103,7 @@ def test_phase_b_receives_enqueue_seeds(monkeypatch: pytest.MonkeyPatch) -> None
         calls.append(kwargs)
         return _DummyStudy(study_name=kwargs["study_name"])
 
-    monkeypatch.setattr(
-        "src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop
-    )
+    monkeypatch.setattr("src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop)
 
     seeds = [{"K_LONG": 2, "TARGET_ANN_VOL": 0.12}]
     run_phased_optimization_skeleton(
@@ -199,9 +193,7 @@ def test_phase_runner_propagates_frozen_and_shrunk_to_phase_b(
             )
         return _DummyStudyWithTrials(sname, [])
 
-    monkeypatch.setattr(
-        "src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop
-    )
+    monkeypatch.setattr("src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop)
     monkeypatch.setattr(
         "src.domain.futures.optimization.workflow.build_phase_b_plan",
         lambda *_a, **_k: PhaseBPlan(
@@ -251,9 +243,7 @@ def test_phase_runner_inherits_base_phase_ranges_for_all_phases(
         calls.append(kwargs)
         return _DummyStudyWithTrials(kwargs["study_name"])
 
-    monkeypatch.setattr(
-        "src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop
-    )
+    monkeypatch.setattr("src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop)
     monkeypatch.setattr(
         "src.domain.futures.optimization.workflow.build_phase_b_plan",
         lambda *_a, **_k: PhaseBPlan(

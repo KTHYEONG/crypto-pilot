@@ -23,20 +23,20 @@ _LEGACY_TARGET_COLUMNS = ("net_return_bps", "net_event_bps", "edge_after_hurdle_
 
 # Archetype label map (module-level SSOT shared by ENS log + diagnostics)
 ARCHETYPE_LABELS: dict[str, str] = {
-    "trend":     "TRD",
-    "ts_mom":    "TMO",
-    "mean_rev":  "MRV",
+    "trend": "TRD",
+    "ts_mom": "TMO",
+    "mean_rev": "MRV",
     "carry_rev": "CRY",
-    "flow_rev":  "FLO",
-    "unwind":    "UNW",
+    "flow_rev": "FLO",
+    "unwind": "UNW",
     "beta_neut": "BTN",
 }
 _EXPECTED_ARCHETYPES: frozenset[str] = frozenset(ARCHETYPE_LABELS)
 
 # Diagnostic thresholds (observability only, NOT gates)
-_DIAG_MIN_SYMBOL_N: int = 30       # per-symbol 판정 최소 표본
+_DIAG_MIN_SYMBOL_N: int = 30  # per-symbol 판정 최소 표본
 _DIAG_HARMFUL_EDGE_BPS: float = 0.0
-_DIAG_MAX_SYMBOL_ROWS: int = 20    # family당 per-symbol 출력 상한
+_DIAG_MAX_SYMBOL_ROWS: int = 20  # family당 per-symbol 출력 상한
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,8 +88,7 @@ def _resolve_ensemble_target_column(events: pd.DataFrame) -> str:
         if column in events.columns:
             return column
     raise ValueError(
-        "missing ensemble target column; expected one of "
-        f"{[*_GROSS_TARGET_COLUMNS, *_LEGACY_TARGET_COLUMNS]}"
+        f"missing ensemble target column; expected one of {[*_GROSS_TARGET_COLUMNS, *_LEGACY_TARGET_COLUMNS]}"
     )
 
 
@@ -208,11 +207,10 @@ def _predict_mu_by_event(
     arches = events["archetype"].astype(str).to_numpy()
     if use_archetype_only:
         return np.array([arch_mu.get(a, global_mu) for a in arches], dtype=np.float64)
-    
+
     regimes = events["entry_regime_code"].fillna(0).astype(int).to_numpy()
     return np.array(
-        [cell_mu.get((a, r), arch_mu.get(a, global_mu)) for a, r in zip(arches, regimes, strict=True)],
-        dtype=np.float64
+        [cell_mu.get((a, r), arch_mu.get(a, global_mu)) for a, r in zip(arches, regimes, strict=True)], dtype=np.float64
     )
 
 
@@ -231,6 +229,7 @@ def _log_ensemble_diagnostics(
 ) -> dict[str, Any]:
     """Emit a consolidated diagnostic log for ensemble fitting (Atomic One-Liner)."""
     import logging
+
     logger = logging.getLogger(__name__)
 
     n_total = len(frame)
@@ -269,9 +268,16 @@ def _log_ensemble_diagnostics(
         logger.debug(
             "[DEBUG-L1-ENS-RAW] tag=%s mode=%s symbols=%d events=%d total_bps=%f adaptive_shrinkage=%s k_used=%f "
             "valid_regimes=%d score_cal=%s archetypes=%s",
-            tag, mode_short, n_syms, n_total, global_mu, str(adaptive_shrinkage), k_used,
-            num_valid_regimes, str(score_cal_summary),
-            ",".join(f"{k}:{v:.4f}" for k, v in arch_mu.items())
+            tag,
+            mode_short,
+            n_syms,
+            n_total,
+            global_mu,
+            str(adaptive_shrinkage),
+            k_used,
+            num_valid_regimes,
+            str(score_cal_summary),
+            ",".join(f"{k}:{v:.4f}" for k, v in arch_mu.items()),
         )
 
     # INFO level print - ONLY print if it is the final aggregate ensemble (tag is ENS-FINAL)
@@ -342,8 +348,7 @@ def _log_signal_symbol_diagnostics(
         else:
             pos_sym = float("nan")
         review = (n >= min_obs) and (
-            mean_edge <= _DIAG_HARMFUL_EDGE_BPS
-            or (has_sym and np.isfinite(pos_sym) and pos_sym < 0.5)
+            mean_edge <= _DIAG_HARMFUL_EDGE_BPS or (has_sym and np.isfinite(pos_sym) and pos_sym < 0.5)
         )
         rows.append((arch, fam, n, mean_edge, pos_rate, nsym, pos_sym, review))
 
@@ -356,7 +361,14 @@ def _log_signal_symbol_diagnostics(
         flag = " ⚠REVIEW" if review else ""
         _logger.debug(
             "  [%s] %-28s n=%6d mean=%+7.1f pos=%.2f nsym=%2d possym=%s%s",
-            label, fam, n, mean_edge, pos_rate, nsym, pos_sym_str, flag,
+            label,
+            fam,
+            n,
+            mean_edge,
+            pos_rate,
+            nsym,
+            pos_sym_str,
+            flag,
         )
 
     # (C) per-symbol detail for ⚠REVIEW families only
@@ -374,7 +386,9 @@ def _log_signal_symbol_diagnostics(
             for sym, row_data in sm.head(_DIAG_MAX_SYMBOL_ROWS).iterrows():
                 _logger.debug(
                     "    %-14s n=%4d mean=%+7.1f",
-                    sym, int(row_data["size"]), float(row_data["mean"]),
+                    sym,
+                    int(row_data["size"]),
+                    float(row_data["mean"]),
                 )
 
 
@@ -471,9 +485,7 @@ def _fit_cell_means(
         arch_groups.append((a, vals))
 
     k_arch = (
-        _compute_eb_shrinkage_k(arch_raw_means, arch_raw_vars, shrinkage_k_max)
-        if adaptive_shrinkage
-        else shrinkage_k
+        _compute_eb_shrinkage_k(arch_raw_means, arch_raw_vars, shrinkage_k_max) if adaptive_shrinkage else shrinkage_k
     )
     for a, vals in arch_groups:
         n_eff = _effective_n(float(vals.shape[0]))
@@ -497,9 +509,7 @@ def _fit_cell_means(
         cell_raw_means: list[float] = []
         cell_raw_vars: list[float] = []
         cell_groups: list[tuple[tuple[str, int], np.ndarray]] = []
-        for (archetype, regime_code), grp in frame.groupby(
-            ["archetype", "entry_regime_code"], sort=False
-        ):
+        for (archetype, regime_code), grp in frame.groupby(["archetype", "entry_regime_code"], sort=False):
             vals = grp[target_column].to_numpy(dtype=np.float64, copy=False)
             key = (str(archetype), int(regime_code))
             cell_raw_means.append(float(np.mean(vals)))
@@ -580,12 +590,18 @@ def _internal_validation_rank_ic(
         "min_cell_edge_floor_bps": min_cell_edge_floor_bps,
     }
     _, _, arch_mu, _, global_mu, _, _, _, _ = _fit_cell_means(
-        sub_fit, shrinkage_k=shrinkage_k, axis="archetype_only", **fit_kwargs  # type: ignore[arg-type]
+        sub_fit,
+        shrinkage_k=shrinkage_k,
+        axis="archetype_only",
+        **fit_kwargs,  # type: ignore[arg-type]
     )
 
     if axis == "archetype_regime":
         cell_mu, _, _, _, _, _, _, _, _ = _fit_cell_means(
-            sub_fit, shrinkage_k=shrinkage_k, axis="archetype_regime", **fit_kwargs  # type: ignore[arg-type]
+            sub_fit,
+            shrinkage_k=shrinkage_k,
+            axis="archetype_regime",
+            **fit_kwargs,  # type: ignore[arg-type]
         )
     else:
         cell_mu = {}
@@ -642,9 +658,7 @@ def _internal_validation_rank_ic(
     val_set_p = val_set
     if _sub_valid and "score_z" in val_set.columns:
         val_set_p = val_set.copy()
-        val_set_p["_sz_cal"] = pd.to_numeric(val_set["score_z"], errors="coerce").clip(
-            -score_z_clip, score_z_clip
-        )
+        val_set_p["_sz_cal"] = pd.to_numeric(val_set["score_z"], errors="coerce").clip(-score_z_clip, score_z_clip)
 
     # Verify index alignment prior to metric calculation
     assert (val_set_p.index == val_set.index).all(), "Index mismatch between prediction frame and label frame"
@@ -653,23 +667,22 @@ def _internal_validation_rank_ic(
     regimes = val_set_p["entry_regime_code"].values.astype(int)
 
     if axis == "archetype_regime":
-        base_vals = np.array([
-            cell_mu.get((arch, reg), arch_mu.get(arch, global_mu))
-            for arch, reg in zip(archetypes, regimes, strict=True)
-        ], dtype=np.float64)
+        base_vals = np.array(
+            [
+                cell_mu.get((arch, reg), arch_mu.get(arch, global_mu))
+                for arch, reg in zip(archetypes, regimes, strict=True)
+            ],
+            dtype=np.float64,
+        )
     else:
-        base_vals = np.array([
-            arch_mu.get(arch, global_mu)
-            for arch in archetypes
-        ], dtype=np.float64)
+        base_vals = np.array([arch_mu.get(arch, global_mu) for arch in archetypes], dtype=np.float64)
 
     if has_family_variant:
         families = val_set_p["family"].values.astype(str)
         variants = val_set_p["variant"].values.astype(str)
-        offsets = np.array([
-            v_offset.get(f"{fam}:{var}", 0.0)
-            for fam, var in zip(families, variants, strict=True)
-        ], dtype=np.float64)
+        offsets = np.array(
+            [v_offset.get(f"{fam}:{var}", 0.0) for fam, var in zip(families, variants, strict=True)], dtype=np.float64
+        )
         base_vals += offsets
 
     if _sub_valid:
@@ -738,9 +751,7 @@ def fit_regime_conditional_ensemble(
     frame["entry_regime_code"] = pd.to_numeric(frame["entry_regime_code"], errors="coerce")
     frame[target_column] = pd.to_numeric(frame[target_column], errors="coerce")
     frame = frame.loc[
-        frame["archetype"].ne("")
-        & frame["entry_regime_code"].notna()
-        & frame[target_column].notna()
+        frame["archetype"].ne("") & frame["entry_regime_code"].notna() & frame[target_column].notna()
     ].copy()
     if frame.empty:
         return RegimeConditionalEnsemble(
@@ -791,7 +802,10 @@ def fit_regime_conditional_ensemble(
     }
     # Compute archetype-only (always needed for fallback/auto)
     _, _, arch_mu, arch_q10, global_mu, global_q10, _, arch_q90, global_q90 = _fit_cell_means(
-        frame, shrinkage_k=shrinkage_k, axis="archetype_only", **eb_fit_kwargs  # type: ignore[arg-type]
+        frame,
+        shrinkage_k=shrinkage_k,
+        axis="archetype_only",
+        **eb_fit_kwargs,  # type: ignore[arg-type]
     )
 
     # L1-ADR-008: degenerate Arch-Only IC removed.
@@ -800,7 +814,10 @@ def fit_regime_conditional_ensemble(
 
     if chosen == "archetype_regime":
         cell_mu, cell_q10, _, _, _, _, cell_q90, _, _ = _fit_cell_means(
-            frame, shrinkage_k=shrinkage_k, axis="archetype_regime", **eb_fit_kwargs  # type: ignore[arg-type]
+            frame,
+            shrinkage_k=shrinkage_k,
+            axis="archetype_regime",
+            **eb_fit_kwargs,  # type: ignore[arg-type]
         )
     else:
         cell_mu = {}
@@ -842,15 +859,13 @@ def fit_regime_conditional_ensemble(
                 score_calibration_valid[g] = False
                 _logger.debug(
                     "[SCORE-CAL-DIAG] regime=%d REJECT obs_too_low n=%d min=%d",
-                    g, n_valid, score_calibration_min_obs,
+                    g,
+                    n_valid,
+                    score_calibration_min_obs,
                 )
                 continue
 
-            grp_ordered = (
-                grp[valid_mask].sort_values("entry_idx")
-                if "entry_idx" in grp.columns
-                else grp[valid_mask]
-            )
+            grp_ordered = grp[valid_mask].sort_values("entry_idx") if "entry_idx" in grp.columns else grp[valid_mask]
 
             z_arr = grp_ordered["_score_z"].to_numpy(dtype=np.float64)
             y_arr = grp_ordered[target_column].to_numpy(dtype=np.float64)
@@ -859,7 +874,9 @@ def fit_regime_conditional_ensemble(
             if not np.isfinite(rho):
                 score_calibration_valid[g] = False
                 _logger.debug(
-                    "[SCORE-CAL-DIAG] regime=%d REJECT invalid_rho n=%d", g, n_valid,
+                    "[SCORE-CAL-DIAG] regime=%d REJECT invalid_rho n=%d",
+                    g,
+                    n_valid,
                 )
                 continue
 
@@ -886,7 +903,11 @@ def fit_regime_conditional_ensemble(
                 _reason = "ACCEPT(short_probe)" if _valid else "REJECT negative_slope(short_probe)"
                 _logger.debug(
                     "[SCORE-CAL-DIAG] regime=%d %s beta=%.4f n=%d probe_start=%d",
-                    g, _reason, beta_shrunk, n_valid, probe_start,
+                    g,
+                    _reason,
+                    beta_shrunk,
+                    n_valid,
+                    probe_start,
                 )
             else:
                 _valid = (beta_shrunk > 0.0) and oos_sign_ok
@@ -894,17 +915,25 @@ def fit_regime_conditional_ensemble(
                 if _valid:
                     _logger.debug(
                         "[SCORE-CAL-DIAG] regime=%d ACCEPT beta=%.4f oos_sign_ok=%s n=%d",
-                        g, beta_shrunk, oos_sign_ok, n_valid,
+                        g,
+                        beta_shrunk,
+                        oos_sign_ok,
+                        n_valid,
                     )
                 elif beta_shrunk <= 0.0:
                     _logger.debug(
                         "[SCORE-CAL-DIAG] regime=%d REJECT negative_slope beta=%.4f n=%d",
-                        g, beta_shrunk, n_valid,
+                        g,
+                        beta_shrunk,
+                        n_valid,
                     )
                 else:
                     _logger.debug(
                         "[SCORE-CAL-DIAG] regime=%d REJECT oos_sign_fail beta=%.4f rho_probe=%.4f n=%d",
-                        g, beta_shrunk, float(np.corrcoef(z_arr[probe_start:], y_arr[probe_start:])[0, 1]), n_valid,
+                        g,
+                        beta_shrunk,
+                        float(np.corrcoef(z_arr[probe_start:], y_arr[probe_start:])[0, 1]),
+                        n_valid,
                     )
 
     # ── Score-Cal 요약 (Consolidated into Ensemble log) ──────────────────────
@@ -917,7 +946,7 @@ def fit_regime_conditional_ensemble(
             _n_obs_low = len(_all_regimes - set(score_calibration_valid.keys()))
         else:
             _n_obs_low = 0
-            
+
         score_cal_summary = (
             f"Score:{_n_valid_sc}/{_n_total_sc} "
             f"(L:{_n_obs_low},F:{sum(1 for v in score_calibration_valid.values() if not v)})"
@@ -959,16 +988,10 @@ def fit_regime_conditional_ensemble(
         and not oos_proof_events.empty
     ):
         proof_target_column = _resolve_ensemble_target_column(oos_proof_events)
-        proof_events = oos_proof_events.loc[
-            :, ["archetype", "entry_regime_code", proof_target_column]
-        ].copy()
+        proof_events = oos_proof_events.loc[:, ["archetype", "entry_regime_code", proof_target_column]].copy()
         proof_events["archetype"] = proof_events["archetype"].astype(str)
-        proof_events["entry_regime_code"] = pd.to_numeric(
-            proof_events["entry_regime_code"], errors="coerce"
-        )
-        proof_events[proof_target_column] = pd.to_numeric(
-            proof_events[proof_target_column], errors="coerce"
-        )
+        proof_events["entry_regime_code"] = pd.to_numeric(proof_events["entry_regime_code"], errors="coerce")
+        proof_events[proof_target_column] = pd.to_numeric(proof_events[proof_target_column], errors="coerce")
         proof_events = proof_events.loc[
             proof_events["archetype"].ne("")
             & proof_events["entry_regime_code"].notna()
@@ -1034,7 +1057,6 @@ def fit_regime_conditional_ensemble(
         len(train_events),
     )
 
-    
     return RegimeConditionalEnsemble(
         cell_mu_bps=cell_mu,
         cell_q10_bps=cell_q10,
@@ -1207,11 +1229,7 @@ def predict_regime_conditional_ensemble(
             "conditioning": model.conditioning,
             "conditioning_path": model.conditioning_path,
             "validation_rank_ic": model.validation_rank_ic,
-            "lift_proof_passed": (
-                int(model.lift_proof.proof_passed) if model.lift_proof is not None else -1
-            ),
-            "lift_nw_tstat": (
-                model.lift_proof.nw_tstat if model.lift_proof is not None else float("nan")
-            ),
+            "lift_proof_passed": (int(model.lift_proof.proof_passed) if model.lift_proof is not None else -1),
+            "lift_nw_tstat": (model.lift_proof.nw_tstat if model.lift_proof is not None else float("nan")),
         },
     )

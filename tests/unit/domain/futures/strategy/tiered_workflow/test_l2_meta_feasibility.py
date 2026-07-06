@@ -151,7 +151,8 @@ class TestMetaFeaturesNoLookahead:
         features_after = samples2.X[0]
 
         np.testing.assert_array_equal(
-            features_before, features_after,
+            features_before,
+            features_after,
             err_msg="features at t=2 must not depend on future close",
         )
 
@@ -219,10 +220,8 @@ class TestPurgedEmbargoNoTrainValOverlap:
 
         for ti in train_idx:
             tt = int(t_vals[ti])
-            in_embargo = (val_t_min - embargo <= tt <= val_t_max + embargo)
-            assert not in_embargo, (
-                f"train t={tt} inside embargo [{val_t_min - embargo}, {val_t_max + embargo}]"
-            )
+            in_embargo = val_t_min - embargo <= tt <= val_t_max + embargo
+            assert not in_embargo, f"train t={tt} inside embargo [{val_t_min - embargo}, {val_t_max + embargo}]"
 
     def test_embargo_blocks_proximal_train(self) -> None:
         t_vals = np.array([5, 15, 25, 35, 45, 55, 65, 75], dtype=np.int64)
@@ -235,9 +234,7 @@ class TestPurgedEmbargoNoTrainValOverlap:
 
         for ti in train_idx:
             tt = int(t_vals[ti])
-            assert not (val_t_min - embargo <= tt <= val_t_max + embargo), (
-                f"train t={tt} should be purged"
-            )
+            assert not (val_t_min - embargo <= tt <= val_t_max + embargo), f"train t={tt} should be purged"
 
 
 class TestMetaIcSignAndSignificance:
@@ -262,7 +259,10 @@ class TestMetaIcSignAndSignificance:
         )
 
         report = evaluate_meta_feasibility(
-            samples, n_splits=3, embargo_bars=5, threshold_quantile=0.5,
+            samples,
+            n_splits=3,
+            embargo_bars=5,
+            threshold_quantile=0.5,
         )
 
         assert np.isfinite(report.oos_meta_ic)
@@ -285,7 +285,10 @@ class TestMetaIcSignAndSignificance:
         )
 
         report = evaluate_meta_feasibility(
-            samples, n_splits=3, embargo_bars=5, threshold_quantile=0.5,
+            samples,
+            n_splits=3,
+            embargo_bars=5,
+            threshold_quantile=0.5,
         )
 
         if np.isfinite(report.oos_meta_ic):
@@ -314,13 +317,14 @@ class TestNetEdgeLiftPositiveWhenScoreInformative:
         )
 
         report = evaluate_meta_feasibility(
-            samples, n_splits=3, embargo_bars=5, threshold_quantile=0.5,
+            samples,
+            n_splits=3,
+            embargo_bars=5,
+            threshold_quantile=0.5,
         )
 
         if np.isfinite(report.net_edge_lift_bps):
-            assert report.net_edge_lift_bps > 0.0, (
-                f"expected positive lift, got {report.net_edge_lift_bps}"
-            )
+            assert report.net_edge_lift_bps > 0.0, f"expected positive lift, got {report.net_edge_lift_bps}"
 
 
 class TestMetaDatasetEmptyAndBoundarySafe:
@@ -369,7 +373,10 @@ class TestMetaDatasetEmptyAndBoundarySafe:
             feature_names=(),
         )
         report = evaluate_meta_feasibility(
-            samples, n_splits=3, embargo_bars=5, threshold_quantile=0.5,
+            samples,
+            n_splits=3,
+            embargo_bars=5,
+            threshold_quantile=0.5,
         )
 
         assert np.isnan(report.oos_meta_ic)

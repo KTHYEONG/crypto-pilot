@@ -1,4 +1,5 @@
 """Alpha Foundry bridge report logging in _run_strategy_stage. [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING]"""
+
 from __future__ import annotations
 
 import sys
@@ -18,8 +19,14 @@ import time
 import warnings
 
 # 반드시 numba/numpy import 전에 설정 — fork child OOM 방지
-for _env in ("NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
-             "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
+for _env in (
+    "NUMBA_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
     os.environ[_env] = "1"
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -112,6 +119,8 @@ if TYPE_CHECKING:
     from src.domain.futures.optimization.workflow import TieredContext
 
 _GLOBAL_L2_CTX: TieredContext | None = None
+
+
 def _btc_index_if_present(symbols: tuple[str, ...]) -> int:
     for i, s in enumerate(symbols):
         if "BTC" in s.upper():
@@ -124,6 +133,7 @@ def _evaluate_l2_trial_from_global(params: dict[str, Any]) -> tuple[float, dict[
     if _GLOBAL_L2_CTX is None:
         raise ValueError("Global L2 context is not initialized")
     from src.domain.futures.optimization.workflow import _evaluate_l2_params
+
     return _evaluate_l2_params(params, _GLOBAL_L2_CTX)
 
 
@@ -134,6 +144,7 @@ def _get_rss_mb() -> float:
     """Return current process RSS in MB via psutil with proc/status fallback."""
     try:
         import psutil
+
         return float(psutil.Process().memory_info().rss) / (1024.0 * 1024.0)
     except Exception:
         try:
@@ -166,15 +177,19 @@ def _log_mem(stage: str, rss_before: float, /, *, extra: str = "") -> None:
     peak_str = f" peak={peak_rss:.0f}MB" if peak_rss > 0 else ""
     _logger.debug(
         "[MEM] stage=%s rss=%.0fMB delta=%+.0fMB%s %s",
-        stage, rss_after, delta, peak_str, extra,
+        stage,
+        rss_after,
+        delta,
+        peak_str,
+        extra,
     )
-
 
 
 # Minimum bars a symbol must provide within [fetch_start, holdout_end] for tiered admission.
 # Derived from score_pct_variant_hist_window_bars default (2160) but floored at 1500 to
 # allow shorter-listed symbols that still cover the OOS window.
 _TIERED_MIN_WINDOW_BARS: int = 1500
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeBreakdown:
@@ -236,21 +251,17 @@ def _log_ascii_table(
         level,
         "| "
         + " | ".join(
-            f"{_fit_table_cell(header, width):<{width}}"
-            for header, width in zip(headers, widths, strict=True)
+            f"{_fit_table_cell(header, width):<{width}}" for header, width in zip(headers, widths, strict=True)
         )
-        + " |"
+        + " |",
     )
     _logger.log(level, "-" * border)
     for row in rows:
         _logger.log(
             level,
             "| "
-            + " | ".join(
-                f"{_fit_table_cell(cell, width):<{width}}"
-                for cell, width in zip(row, widths, strict=True)
-            )
-            + " |"
+            + " | ".join(f"{_fit_table_cell(cell, width):<{width}}" for cell, width in zip(row, widths, strict=True))
+            + " |",
         )
     _logger.log(level, "-" * border)
 
@@ -503,21 +514,13 @@ def _resolve_data_collection_symbols(
 ) -> tuple[str, ...]:
     base_symbols = list(inference_panel or live_inference_panel or tuple(discovered_symbols))
 
-    merged_symbols = (
-        base_symbols
-        + list(FUTURES_ANCHOR_SYMBOLS)
-        + list(FUTURES_MACRO_INDEX_SYMBOLS)
-    )
+    merged_symbols = base_symbols + list(FUTURES_ANCHOR_SYMBOLS) + list(FUTURES_MACRO_INDEX_SYMBOLS)
     load_symbols = tuple(dict.fromkeys(merged_symbols))
     return load_symbols
 
 
 def _selected_symbols_from_snapshot(snapshot: UniverseSnapshot) -> tuple[str, ...]:
-    return tuple(
-        str(meta.symbol).strip()
-        for meta in snapshot.selected
-        if str(meta.symbol).strip()
-    )
+    return tuple(str(meta.symbol).strip() for meta in snapshot.selected if str(meta.symbol).strip())
 
 
 def _resolve_universe_state_cube(universe_result: Any | None) -> UniverseStateCube | None:
@@ -638,15 +641,11 @@ def _inject_universe_metadata_into_maps(
         frame["cluster_id"] = np.full(len(frame), cluster_id, dtype=np.float64)
         frame["beta_vs_market"] = np.full(len(frame), beta_vs_market, dtype=np.float64)
         frame["cluster_size"] = np.full(len(frame), cluster_size, dtype=np.float64)
-        frame["anchor_cluster_member"] = np.full(
-            len(frame), anchor_cluster_member, dtype=np.float64
-        )
+        frame["anchor_cluster_member"] = np.full(len(frame), anchor_cluster_member, dtype=np.float64)
         frame["vol_30d"] = np.full(len(frame), vol_30d, dtype=np.float64)
         frame["friction_score"] = np.full(len(frame), friction_score, dtype=np.float64)
         frame["alpha_capacity_score"] = np.full(len(frame), alpha_capacity_score, dtype=np.float64)
-        frame["diversification_score"] = np.full(
-            len(frame), diversification_score, dtype=np.float64
-        )
+        frame["diversification_score"] = np.full(len(frame), diversification_score, dtype=np.float64)
         frame["tradeable_score"] = np.full(len(frame), tradeable_score, dtype=np.float64)
 
 
@@ -791,11 +790,7 @@ def _resolve_quarterly_window(reference_date: str | None, *, tf: str = "4h") -> 
 def _resolve_layered_window(reference_date: str | None, *, tf: str = "4h") -> Any:
     from src.domain.futures.optimization.opt_config import get_layered_window
 
-    parsed_reference = (
-        datetime.strptime(reference_date, "%Y-%m-%d").date()
-        if reference_date is not None
-        else None
-    )
+    parsed_reference = datetime.strptime(reference_date, "%Y-%m-%d").date() if reference_date is not None else None
     return get_layered_window(reference_date=parsed_reference, tf=tf)
 
 
@@ -866,18 +861,13 @@ def _run_universe_stage(
 
     discovered_symbols = list(universe_result.symbols)
     timeline_obj: UniverseMembershipTimeline = universe_result.timeline
-    timeline = {
-        window.effective_from.date(): frozenset(window.active_symbols)
-        for window in timeline_obj.windows
-    }
+    timeline = {window.effective_from.date(): frozenset(window.active_symbols) for window in timeline_obj.windows}
     inference_panel = universe_result.inference_symbols
     live_inference_panel = universe_result.inference_symbols
     inference_timeline = {}
     inf_tl = universe_result.inference_timeline
     if isinstance(inf_tl, UniverseMembershipTimeline):
-        inference_timeline = {
-            w.effective_from.date(): frozenset(w.active_symbols) for w in inf_tl.windows
-        }
+        inference_timeline = {w.effective_from.date(): frozenset(w.active_symbols) for w in inf_tl.windows}
 
     return (
         discovered_symbols,
@@ -902,9 +892,7 @@ def _build_data_not_ready_reasons(report: pd.DataFrame) -> dict[str, int]:
     """
     return (
         report["reason"].value_counts().to_dict()
-        if isinstance(report, pd.DataFrame)
-        and not report.empty
-        and "reason" in report.columns
+        if isinstance(report, pd.DataFrame) and not report.empty and "reason" in report.columns
         else {}
     )
 
@@ -928,9 +916,7 @@ def _run_data_stage(
     )
     require_exec_1m = _requires_exec_1m(run_config)
     probe_tf_grid_resolved: list[str] | None = (
-        list(OPT_FUTURES_CONFIG.get("TF_PROBE_GRID", []))
-        if OPT_FUTURES_CONFIG.get("ENABLE_TF_PROBE", False)
-        else None
+        list(OPT_FUTURES_CONFIG.get("TF_PROBE_GRID", [])) if OPT_FUTURES_CONFIG.get("ENABLE_TF_PROBE", False) else None
     )
 
     scope_name = "stage6_selected"
@@ -1007,8 +993,7 @@ def _run_data_stage(
     if not valid_symbols:
         reason_counts = _build_data_not_ready_reasons(readiness.report)
         _logger.warning(
-            "[data-readiness] no symbols kept: requested=%d loaded=%d kept=%d "
-            "probe_enabled=%s reasons=%s",
+            "[data-readiness] no symbols kept: requested=%d loaded=%d kept=%d probe_enabled=%s reasons=%s",
             len(load_symbols),
             len(data_maps),
             len(valid_symbols),
@@ -1171,13 +1156,10 @@ def _run_regime_evaluation_stage(
     # compute proxy C3/C4 from BTC bar-level returns (pre-signal)
     import dataclasses as _dc
 
-
     btc_log_ret = np.zeros(aligned.datetimes.shape[0], dtype=np.float64)
     btc_close = aligned.close_2d
     if btc_close.shape[1] > 0:
-        btc_idx = next(
-            (i for i, s in enumerate(aligned.symbols) if "BTC" in s.upper()), 0
-        )
+        btc_idx = next((i for i, s in enumerate(aligned.symbols) if "BTC" in s.upper()), 0)
         raw = np.maximum(btc_close[:, btc_idx], 1e-12)
         btc_log_ret[1:] = np.diff(np.log(raw))
 
@@ -1294,8 +1276,6 @@ def _run_tiered_l2_study(
 
     from src.domain.futures.optimization.l2_search_space import L2_SEARCH_SPACE as L2_ALLOC_SPACE
 
-
-
     # Optuna 스터디 정보 로그 억제
     _optuna.logging.set_verbosity(_optuna.logging.WARNING)
 
@@ -1328,14 +1308,17 @@ def _run_tiered_l2_study(
     if not _awf_folds_l2:
         _cal_end = max(_l1_end - 1, 1)
         from src.domain.futures.strategy.walk_forward import WFFold
-        _awf_folds_l2 = (WFFold(
-            fit_start=0,
-            fit_end=_cal_end,
-            cal_start=max(0, _cal_end - max(1, _cal_end // 5)),
-            cal_end=_cal_end,
-            oos_start=_l1_end,
-            oos_end=_ho_start_idx,
-        ),)
+
+        _awf_folds_l2 = (
+            WFFold(
+                fit_start=0,
+                fit_end=_cal_end,
+                cal_start=max(0, _cal_end - max(1, _cal_end // 5)),
+                cal_end=_cal_end,
+                oos_start=_l1_end,
+                oos_end=_ho_start_idx,
+            ),
+        )
 
     # Precompute bucket realized edges (trial-param independent → 1회만 계산)
     from dataclasses import replace
@@ -1344,6 +1327,7 @@ def _run_tiered_l2_study(
     from src.domain.futures.strategy.tiered_workflow.l2_meta import (
         build_regime_routing_plan,
     )
+
     _fallback_mode = str(getattr(cfg, "l2_regime_fallback_mode", "pooled"))
     if _fallback_mode not in {"pooled", "empty"}:
         raise ValueError("l2_regime_fallback_mode must be one of pooled/empty")
@@ -1379,7 +1363,8 @@ def _run_tiered_l2_study(
         policy_pooled_is_passthrough=os.environ.get(
             "L2_REGIME_POOLED_IS_PASSTHROUGH",
             str(getattr(cfg, "l2_regime_pooled_is_passthrough", True)),
-        ).lower() in ("1", "true", "yes"),
+        ).lower()
+        in ("1", "true", "yes"),
         policy_min_fit_n_floor=int(
             os.environ.get(
                 "L2_REGIME_MIN_FIT_N_FLOOR",
@@ -1389,9 +1374,11 @@ def _run_tiered_l2_study(
         policy_require_fit_n_for_downweight=os.environ.get(
             "L2_REGIME_REQUIRE_FIT_N_FOR_DOWNWEIGHT",
             str(getattr(cfg, "l2_regime_require_fit_n_for_downweight", False)),
-        ).lower() in ("1", "true", "yes"),
+        ).lower()
+        in ("1", "true", "yes"),
     )
-    l2_sim_cache = replace(l2_sim_cache,
+    l2_sim_cache = replace(
+        l2_sim_cache,
         bucket_edges_by_fold=_routing_plan.effective_bucket_edges_by_fold,
         pooled_edges_by_fold=_routing_plan.pooled_edges_by_fold,
         regime_code_1d=_routing_plan.effective_regime_code_1d,
@@ -1560,6 +1547,7 @@ def _run_tiered_l2_study(
     except Exception as _storage_exc:
         _logger.warning("[L2-OPT] Optuna storage 셋업 실패: %s", _storage_exc)
         import optuna.storages
+
         storage = optuna.storages.InMemoryStorage()
 
     storage_type = "InMemory"
@@ -1577,10 +1565,13 @@ def _run_tiered_l2_study(
         study_name,
     )
     _logger.debug(
-        "    symbols=%s fp=%s", unique_symbols, signal_batch_fingerprint[:12],
+        "    symbols=%s fp=%s",
+        unique_symbols,
+        signal_batch_fingerprint[:12],
     )
     try:
         from tqdm import tqdm
+
         class L2OptunaProgressCallback:
             def __init__(self, total_trials: int):
                 self.pbar = tqdm(total=total_trials, desc="[L2-OPT]", leave=True)
@@ -1592,10 +1583,10 @@ def _run_tiered_l2_study(
                     val = getattr(trial, "value", None)
                 if val is None and hasattr(study, "trials") and len(study.trials) > trial.number:
                     val = getattr(study.trials[trial.number], "value", None)
-                
+
                 if val is not None and val > self.best_val:
                     self.best_val = val
-                
+
                 best_disp = f"{self.best_val * 100:.2f}%" if self.best_val > float("-1e6") else "N/A"
                 current_disp = f"{val * 100:.2f}%" if (val is not None and val > float("-1e6")) else "BLOCKED"
                 self.pbar.set_postfix_str(f"Best CAGR: {best_disp} | Current: {current_disp}")
@@ -1643,15 +1634,17 @@ def _run_tiered_l2_study(
         }
         if not any(t.state == _optuna.trial.TrialState.COMPLETE for t in study.trials):
             import contextlib
+
             with contextlib.suppress(Exception):
                 study.enqueue_trial(_anchor_params)
 
         progress_cb = L2OptunaProgressCallback(n_trials)
         try:
             import psutil
+
             batch_size = int(OPT_FUTURES_CONFIG.get("L2_OPTUNA_BATCH_SIZE", 2))
             try:
-                avail_mem_gb = psutil.virtual_memory().available / (1024.0 ** 3)
+                avail_mem_gb = psutil.virtual_memory().available / (1024.0**3)
                 if avail_mem_gb < 3.0 and batch_size > 1:
                     _logger.warning(
                         "[L2-OPT] Low system memory (%.2f GB < 3.0 GB). Forcing sequential n_jobs=1 for OOM safety.",
@@ -1673,14 +1666,18 @@ def _run_tiered_l2_study(
                 import multiprocessing
                 from concurrent.futures import ProcessPoolExecutor
 
-                avail_gb = psutil.virtual_memory().available / (1024.0 ** 3)
+                avail_gb = psutil.virtual_memory().available / (1024.0**3)
                 cpu_cores = os.cpu_count() or 4
                 # Fork CoW: child shares parent numpy arrays. Unique allocation ≈ 0.7GB per worker.
                 mem_safe = max(1, int(avail_gb / 0.7))
                 max_workers = max(1, min(batch_size, cpu_cores, mem_safe))
                 _logger.debug(
                     "[L2-OPT] ProcessPool workers=%d (mem=%.1fGB, mem_safe=%d, cpu=%d, batch=%d)",
-                    max_workers, avail_gb, mem_safe, cpu_cores, batch_size,
+                    max_workers,
+                    avail_gb,
+                    mem_safe,
+                    cpu_cores,
+                    batch_size,
                 )
 
                 global _GLOBAL_L2_CTX
@@ -1711,8 +1708,7 @@ def _run_tiered_l2_study(
 
                             _t_submit = time.perf_counter()
                             futures = [
-                                executor.submit(_evaluate_l2_trial_from_global, params)
-                                for params in batch_params
+                                executor.submit(_evaluate_l2_trial_from_global, params) for params in batch_params
                             ]
                             _t_submit = time.perf_counter() - _t_submit
 
@@ -1797,10 +1793,9 @@ def _run_tiered_l2_study(
         )
 
     complete_trials = [
-        t for t in study.trials
-        if t.state == _optuna.trial.TrialState.COMPLETE
-        and t.value is not None
-        and t.value > float("-1e6")
+        t
+        for t in study.trials
+        if t.state == _optuna.trial.TrialState.COMPLETE and t.value is not None and t.value > float("-1e6")
     ]
     if not complete_trials:
         _logger.warning("[L2-OPT] 모든 %d trials 실패/pruned — 기본 l2_params 사용", n_trials)
@@ -1820,10 +1815,10 @@ def _run_tiered_l2_study(
     gc.collect()
     _logger.debug("[MEM] stage=l2_study_complete rss=%.0fMB", _get_rss_mb())
     _min_dsr = float(OPT_FUTURES_CONFIG.get("FUTURES_L2_MIN_DSR", 0.60))
-    
+
     _t_champ_start = time.perf_counter()
     _mem_champ_before = _get_rss_mb()
-    
+
     l2_study_result = select_layer2_champion(
         study=study,
         tf=tf,
@@ -1834,7 +1829,7 @@ def _run_tiered_l2_study(
         min_dsr=_min_dsr,
         prebuilt_cache=l2_sim_cache,
     )
-    
+
     _log_mem("select_layer2_champion", _mem_champ_before, extra=f"took={time.perf_counter() - _t_champ_start:.4f}s")
     gc.collect()
 
@@ -1915,7 +1910,6 @@ class L2ReversalReplayResult:
     fold_metrics: tuple[L2ReversalReplayFoldMetric, ...]
     adoption_passed: bool
     blocker_reason: str
-
 
 
 def _fold_metrics_from_l2_evaluation(
@@ -2097,8 +2091,15 @@ def _run_l2_reversal_economic_replay(
         _logger.info(
             "[L2-REVERSAL-REPLAY] variant=%s CAGR=%.4f MDD=%.4f trades=%d L*=%.2f "
             "selection_parity=%s metric_parity=%s adoption_passed=%s blocker=%s",
-            res.variant, res.cagr, res.mdd, res.trade_count, res.deploy_leverage,
-            res.selection_parity, res.metric_parity, res.adoption_passed, res.blocker_reason,
+            res.variant,
+            res.cagr,
+            res.mdd,
+            res.trade_count,
+            res.deploy_leverage,
+            res.selection_parity,
+            res.metric_parity,
+            res.adoption_passed,
+            res.blocker_reason,
         )
     if output_path is not None:
         _write_replay_csv(results=tuple(results), output_path=output_path)
@@ -2168,7 +2169,8 @@ def _run_strategy_stage(
 
     def _emit_strategy_profile() -> None:
         profile = _runtime_breakdown(time.perf_counter() - t_strategy_stage, **strategy_steps)
-        _logger.log(PERF, 
+        _logger.log(
+            PERF,
             (
                 "[STRATEGY-PROF] total=%.4fs map_pick=%.4fs metadata=%.4fs bridge=%.4fs "
                 "report=%.4fs merge=%.4fs evaluation=%.4fs accounted=%.4fs unaccounted=%.4fs"
@@ -2214,9 +2216,8 @@ def _run_strategy_stage(
     from src.application.futures.runner.tf_probe_scoped import (
         probe_stage_result_to_raw_manifest,
     )
-    _probe_manifest_raw: list[dict[str, Any]] | None = (
-        probe_stage_result_to_raw_manifest(_effective_probe_result)
-    )
+
+    _probe_manifest_raw: list[dict[str, Any]] | None = probe_stage_result_to_raw_manifest(_effective_probe_result)
 
     if run_config.phase in ("l1", "l2"):
         _mem_before = _get_rss_mb()
@@ -2276,10 +2277,10 @@ def _run_strategy_stage(
                 min_holdout_coverage=0.90,
             )
             effective_trade_syms = list(scope_result.admitted)
-            
+
             # Unified Minimal Tree Style log emission
             dropped_count = sum(len(value) for value in scope_result.dropped_by_reason.values())
-            l_start_dropped = len(scope_result.dropped_by_reason.get('late_start', []))
+            l_start_dropped = len(scope_result.dropped_by_reason.get("late_start", []))
             _logger.info(
                 "📊 [L1: SWF SCOPE & ADMISSION]\n"
                 f"  ├─ Symbols : {len(effective_trade_syms)}/{len(data_stage.valid_symbols)} Admitted\n"
@@ -2290,14 +2291,12 @@ def _run_strategy_stage(
                 TieredPipelineError,
             )
 
-            raise TieredPipelineError(
-                "tiered tradeable scope is empty after sub-window admission"
-            )
+            raise TieredPipelineError("tiered tradeable scope is empty after sub-window admission")
     else:
         effective_trade_syms = list(data_stage.valid_symbols)
 
-    bridge_symbol_scope = tuple(effective_trade_syms) if use_tiered else (
-        trading_symbols or tuple(data_stage.valid_symbols)
+    bridge_symbol_scope = (
+        tuple(effective_trade_syms) if use_tiered else (trading_symbols or tuple(data_stage.valid_symbols))
     )
     bridge_trading_symbols = list(bridge_symbol_scope)
 
@@ -2350,9 +2349,9 @@ def _run_strategy_stage(
         )
 
         try:
-
             from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
             from src.domain.futures.strategy.common.alignment import align_data_maps
+
             _pit_state_cube = _resolve_universe_state_cube(universe_result)
             _mem_align = _get_rss_mb()
             t_align = time.perf_counter()
@@ -2372,11 +2371,15 @@ def _run_strategy_stage(
             _rss_align = _get_rss_mb()
             _logger.debug(
                 "[MEM] stage=align rss=%.0fMB n_syms=%d n_bars=%d",
-                _rss_align, len(effective_trade_syms), len(aligned_tiered.datetimes),
+                _rss_align,
+                len(effective_trade_syms),
+                len(aligned_tiered.datetimes),
             )
             _logger.debug(
                 "[MEM] stage=bridge rss=%.0fMB delta=%+.0fMB n_syms=%d",
-                _get_rss_mb(), _rss_align - _mem_align, len(bridge_trading_symbols),
+                _get_rss_mb(),
+                _rss_align - _mem_align,
+                len(bridge_trading_symbols),
             )
             del full_strategy_maps
             gc.collect()
@@ -2390,10 +2393,9 @@ def _run_strategy_stage(
             if tiered_window is not None:
                 try:
                     aligned_start = pd.Timestamp(aligned_tiered.datetimes[0]).date()
-                    is_mock_start = (
-                        hasattr(tiered_window, "fetch_start")
-                        and type(tiered_window.fetch_start).__name__ in ("MagicMock", "Mock")
-                    )
+                    is_mock_start = hasattr(tiered_window, "fetch_start") and type(
+                        tiered_window.fetch_start
+                    ).__name__ in ("MagicMock", "Mock")
                 except (TypeError, ValueError, IndexError):
                     # Fallback for MagicMocks in tests
                     aligned_start = pd.Timestamp("1900-01-01").date()
@@ -2408,10 +2410,9 @@ def _run_strategy_stage(
 
                 try:
                     aligned_end = pd.Timestamp(aligned_tiered.datetimes[-1]).date()
-                    is_mock_end = (
-                        hasattr(tiered_window, "holdout_start")
-                        and type(tiered_window.holdout_start).__name__ in ("MagicMock", "Mock")
-                    )
+                    is_mock_end = hasattr(tiered_window, "holdout_start") and type(
+                        tiered_window.holdout_start
+                    ).__name__ in ("MagicMock", "Mock")
                 except (TypeError, ValueError, IndexError):
                     # Fallback for MagicMocks in tests
                     aligned_end = pd.Timestamp("2100-01-01").date()
@@ -2467,6 +2468,7 @@ def _run_strategy_stage(
                 from src.domain.futures.strategy.market_regime import (
                     compute_market_regime_context as _compute_regime_ctx,
                 )
+
                 _regime_ctx = _compute_regime_ctx(aligned=aligned_tiered)
                 _regime_code = _regime_ctx.code_1d
                 from src.domain.futures.strategy.market_regime import compress_regime_codes
@@ -2511,13 +2513,12 @@ def _run_strategy_stage(
             # ── Step C: L2 window 신호 예측 ──────────────────────────────────
             _mem_l2_start = _get_rss_mb()
             _t_l2_pred_start = time.perf_counter()
-            l2_signals = _build_l2_signal_batch(
-                l1_res, labeled_tiered, aligned_tiered, tiered_cfg, tiered_window
-            )
+            l2_signals = _build_l2_signal_batch(l1_res, labeled_tiered, aligned_tiered, tiered_cfg, tiered_window)
             _log_mem("l2_signal_batch", _mem_l2_start, extra=f"took={time.perf_counter() - _t_l2_pred_start:.4f}s")
 
             # ── Step D: Optuna L2 파라미터 탐색 ──────────────────────────────
             from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+
             _t_cache_start = time.perf_counter()
             shared_l2_cache = build_l2_simulation_cache(aligned_tiered, l2_signals, run_config.timeframe)
             _logger.log(
@@ -2536,29 +2537,38 @@ def _run_strategy_stage(
                         build_sleeve_meta_dataset,
                         evaluate_meta_feasibility,
                     )
+
                     _mf_regime = compute_market_regime_context(aligned=aligned_tiered).code_1d
                     _mf_start = int(getattr(l2_signals, "start_idx", 0))
                     _mf_end = int(getattr(l2_signals, "end_idx", aligned_tiered.close_2d.shape[0]))  # type: ignore[arg-type]
                     _mf_cost = float(OPT_FUTURES_CONFIG.get("L2_ROUND_TRIP_COST_BPS", 6.0))
                     _mf_samples = build_sleeve_meta_dataset(
-                        shared_l2_cache, aligned_tiered, _mf_regime,
-                        _mf_start, _mf_end, cost_bps=_mf_cost,
+                        shared_l2_cache,
+                        aligned_tiered,
+                        _mf_regime,
+                        _mf_start,
+                        _mf_end,
+                        cost_bps=_mf_cost,
                     )
                     _mf_embargo = int(OPT_FUTURES_CONFIG.get("EMBARGO_BARS_BY_TF", {}).get(run_config.timeframe, 42))
                     _mf_report = evaluate_meta_feasibility(
-                        _mf_samples, n_splits=5, embargo_bars=_mf_embargo, threshold_quantile=0.70,
+                        _mf_samples,
+                        n_splits=5,
+                        embargo_bars=_mf_embargo,
+                        threshold_quantile=0.70,
                     )
                     _logger.info(
                         "[L2-META-FEAS-SUMMARY] meta_ic=%.4f tstat=%.2f net_lift_bps=%.3f "
                         "auc=%.3f n_oos=%d n_events=%d feats=%s",
-                        _mf_report.oos_meta_ic, _mf_report.oos_meta_ic_tstat,
-                        _mf_report.net_edge_lift_bps, _mf_report.auc_sign,
-                        _mf_report.n_oos, len(_mf_samples.y),
+                        _mf_report.oos_meta_ic,
+                        _mf_report.oos_meta_ic_tstat,
+                        _mf_report.net_edge_lift_bps,
+                        _mf_report.auc_sign,
+                        _mf_report.n_oos,
+                        len(_mf_samples.y),
                         ",".join(_mf_samples.feature_names),
                     )
-                    for _bk, _bv in sorted(
-                        _mf_report.bucket_table.items(), key=lambda kv: kv[1], reverse=True
-                    )[:12]:
+                    for _bk, _bv in sorted(_mf_report.bucket_table.items(), key=lambda kv: kv[1], reverse=True)[:12]:
                         _logger.info("[L2-META-BUCKET] %s oos_edge_bps=%.3f", _bk, _bv)
 
                     # Decisive conditional feasibility: causal fit->oos bucket-edge
@@ -2567,6 +2577,7 @@ def _run_strategy_stage(
                     # in BOTH halves, correlates fit-edge vs oos-edge across buckets.
                     if len(_mf_samples.y) >= 50:
                         from scipy.stats import spearmanr as _spr
+
                         _et = _mf_samples.event_t
                         _med = float(np.median(_et))
                         _fitm = _et < _med
@@ -2579,9 +2590,7 @@ def _run_strategy_stage(
                         _bfit: dict[str, list[float]] = {}
                         _boos: dict[str, list[float]] = {}
                         for _i, _k in enumerate(_keys):
-                            (_bfit if _fitm[_i] else _boos).setdefault(_k, []).append(
-                                float(_mf_samples.y[_i])
-                            )
+                            (_bfit if _fitm[_i] else _boos).setdefault(_k, []).append(float(_mf_samples.y[_i]))
                         # Robustness: multiple forward split fractions x min_n,
                         # report the distribution of causal corr (stability check).
                         _et_sorted = np.sort(_et)
@@ -2592,9 +2601,7 @@ def _run_strategy_stage(
                                 _bf: dict[str, list[float]] = {}
                                 _bo: dict[str, list[float]] = {}
                                 for _i, _k in enumerate(_keys):
-                                    (_bf if _fm[_i] else _bo).setdefault(_k, []).append(
-                                        float(_mf_samples.y[_i])
-                                    )
+                                    (_bf if _fm[_i] else _bo).setdefault(_k, []).append(float(_mf_samples.y[_i]))
                                 _pf = []
                                 _po = []
                                 for _k in _bf:
@@ -2606,12 +2613,18 @@ def _run_strategy_stage(
                                     _logger.info(
                                         "[L2-BUCKET-PERSIST] split=%.2f min_n=%d "
                                         "causal_corr=%.4f pval=%.4f n_buckets=%d",
-                                        _frac, _min_n, float(_bc), float(_bp), len(_pf),
+                                        _frac,
+                                        _min_n,
+                                        float(_bc),
+                                        float(_bp),
+                                        len(_pf),
                                     )
                                 else:
                                     _logger.info(
                                         "[L2-BUCKET-PERSIST] split=%.2f min_n=%d insufficient n=%d",
-                                        _frac, _min_n, len(_pf),
+                                        _frac,
+                                        _min_n,
+                                        len(_pf),
                                     )
                 except Exception as _mf_exc:
                     _logger.warning("[L2-META-FEAS] measurement failed: %s", _mf_exc, exc_info=True)
@@ -2628,6 +2641,7 @@ def _run_strategy_stage(
             from src.domain.futures.strategy.tiered_workflow.pipeline import (
                 _resolve_l2_master_tf,
             )
+
             l2_master_tf = _resolve_l2_master_tf(tiered_cfg, {}, _probe_manifest_raw)
             l2_study_result = _run_tiered_l2_study(
                 signal_batch=l2_signals,
@@ -2659,11 +2673,11 @@ def _run_strategy_stage(
             from src.domain.futures.strategy.market_regime import (
                 compute_market_regime_context as _compute_l3_regime_ctx,
             )
-            _l3_regime_code_1d = _compress_l3_regime_codes(
-                _compute_l3_regime_ctx(aligned=aligned_tiered).code_1d
-            )
+
+            _l3_regime_code_1d = _compress_l3_regime_codes(_compute_l3_regime_ctx(aligned=aligned_tiered).code_1d)
 
             from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
+
             _mem_l2_final = _get_rss_mb()
             _t_l2_final_start = time.perf_counter()
             _, l2_final, _ = run_tiered_pipeline(
@@ -2688,13 +2702,14 @@ def _run_strategy_stage(
             )
             # B2: SSOT assert — study tf must match final deployment tf
             if l2_final is not None and hasattr(l2_final, "master_tf") and l2_master_tf != l2_final.master_tf:
-                    _logger.error(
-                        "[L2-TF-SSOT] study_tf=%s final_tf=%s "
-                        "→ blocking: annualization_tf_mismatch",
-                        l2_master_tf, l2_final.master_tf,
-                    )
-                    import dataclasses as _dc
-                    l2_final = _dc.replace(l2_final, gate_passed=False, blocker_reason="annualization_tf_mismatch")
+                _logger.error(
+                    "[L2-TF-SSOT] study_tf=%s final_tf=%s → blocking: annualization_tf_mismatch",
+                    l2_master_tf,
+                    l2_final.master_tf,
+                )
+                import dataclasses as _dc
+
+                l2_final = _dc.replace(l2_final, gate_passed=False, blocker_reason="annualization_tf_mismatch")
             if l2_final is not None and l2_study_result.best_evaluation is not None:
                 from src.domain.futures.strategy.tiered_workflow.replay_parity import (
                     assert_selection_replay_parity,
@@ -2721,6 +2736,7 @@ def _run_strategy_stage(
                     )
                     if _parity_gate and hasattr(l2_final, "blocker_reason"):
                         import dataclasses
+
                         l2_final = dataclasses.replace(l2_final, gate_passed=False, blocker_reason="parity_divergence")
 
             _reversal_replay_env = os.environ.get("L2_REVERSAL_REPLAY", "")
@@ -2741,7 +2757,9 @@ def _run_strategy_stage(
                     if _rr.adoption_passed and _rr.variant != "baseline_off":
                         _logger.info(
                             "[L2-REVERSAL-REPLAY] PASS candidate=%s CAGR=%.4f blocker=%s",
-                            _rr.variant, _rr.cagr, _rr.blocker_reason,
+                            _rr.variant,
+                            _rr.cagr,
+                            _rr.blocker_reason,
                         )
 
             _log_mem("l2_final_pipeline", _mem_l2_final, extra=f"took={time.perf_counter() - _t_l2_final_start:.4f}s")
@@ -2749,7 +2767,7 @@ def _run_strategy_stage(
             if l2_final is None or not l2_final.gate_passed:
                 final_reason = l2_study_result.blocker_reason or getattr(l2_final, "blocker_reason", "unknown")
                 return RunnerResult(exit_code=1, reason=f"layer2_blocked:{final_reason}")
-            
+
             # Tiered Pipeline이 L3까지 수행했으므로 여기서 종료
             if run_config.phase == "l3":
                 return RunnerResult(exit_code=0, reason="tiered_pipeline_completed")
@@ -2851,9 +2869,7 @@ def _run_strategy_stage(
                 gates_cell = admitted_cells if len(admitted_cells) <= 26 else f"{admitted_cells[:25]}…"
             else:
                 action = str(brow.get("candidate_action", ""))[:16]
-                failed_labels = ", ".join(
-                    _gate_label.get(g, g) for g in brow.get("failed_checks", [])
-                )
+                failed_labels = ", ".join(_gate_label.get(g, g) for g in brow.get("failed_checks", []))
                 gates_cell = failed_labels if len(failed_labels) <= 26 else f"{failed_labels[:25]}…"
             _logger.info(f"| {vname:<30} | {action:<16} | {gates_cell:<26} |")
         _logger.info("-" * 82)
@@ -2867,19 +2883,14 @@ def _run_strategy_stage(
             f"| {'Fold':<4} | {'Mode':<10} | {'IC(diag)':>8} | {'Events':>7} | "
             f"{'RlzdMean':>8} | {'EU_p90':>7} | {'Pass':<6} |"
         )
-        _logger.info(
-            f"| {'':<4} | {'':<10} | {'(ref)':>8} | {'':<7} | "
-            f"{'(★gate)':>8} | {'(★gate)':>7} | {'':<6} |"
-        )
+        _logger.info(f"| {'':<4} | {'':<10} | {'(ref)':>8} | {'':<7} | {'(★gate)':>8} | {'(★gate)':>7} | {'':<6} |")
         _logger.info("-" * 82)
         for res in wf_details:
             fold_id = res.get("fold_id", 0)
             mode = res.get("inference_mode", "n/a")
             rank_ic = res.get("rank_ic")
             rank_ic_str = (
-                f"{rank_ic:>8.3f}"
-                if isinstance(rank_ic, (int, float)) and np.isfinite(rank_ic)
-                else f"{'n/a':>8}"
+                f"{rank_ic:>8.3f}" if isinstance(rank_ic, (int, float)) and np.isfinite(rank_ic) else f"{'n/a':>8}"
             )
             events = res.get("n_events", 0)
             rlzd_mean = res.get("realized_mean_bps", float("nan"))
@@ -2903,7 +2914,7 @@ def _run_strategy_stage(
     title = "[BRIDGE SUMMARY] "
     _logger.info("\n" + title + "-" * (width - len(title)))
     _logger.info(header)
-    _logger.info(f"| {'-'*18:<18} | {'-'*27:<27} |")
+    _logger.info(f"| {'-' * 18:<18} | {'-' * 27:<27} |")
     workflow_status = str(candidate_report.get("workflow_status", "blocked"))
     _logger.info(f"| {'Active Signals':<18} | {f'{non_zero_weights} (sel={selected_total_bridge})':<27} |")
     _logger.info(f"| {'Status':<18} | {workflow_status:<27} |")
@@ -2915,11 +2926,15 @@ def _run_strategy_stage(
 
     t_merge_start = time.perf_counter()
     merge_candidate_output_into_is_and_oos(
-        ml_out, data_stage.data_maps, data_stage.oos_data_maps,
-        data_stage.valid_symbols, run_config.timeframe,
+        ml_out,
+        data_stage.data_maps,
+        data_stage.oos_data_maps,
+        data_stage.valid_symbols,
+        run_config.timeframe,
     )
     strategy_steps["merge"] = time.perf_counter() - t_merge_start
-    _logger.log(PERF, 
+    _logger.log(
+        PERF,
         "[PROFILE][STAGE] merge_candidate_output_into_is_and_oos took %.4fs",
         strategy_steps["merge"],
     )
@@ -2933,15 +2948,13 @@ def _run_strategy_stage(
         avg_bars = int(np.mean([float(v.get("n_bars", 0)) for v in sv_list])) if sv_list else 0
         avg_nan = float(np.mean([float(v.get("nan_pct", 0.0)) for v in sv_list])) * 100 if sv_list else 0.0
         avg_zero = float(np.mean([float(v.get("zero_neg_pct", 0.0)) for v in sv_list])) * 100 if sv_list else 0.0
-        
-        _logger.info(format_data_integrity_summary(
-            total=total_sv,
-            passed=passed_sv,
-            bars=avg_bars,
-            nan_pct=avg_nan,
-            zero_pct=avg_zero
-        ))
-        
+
+        _logger.info(
+            format_data_integrity_summary(
+                total=total_sv, passed=passed_sv, bars=avg_bars, nan_pct=avg_nan, zero_pct=avg_zero
+            )
+        )
+
         if total_sv != passed_sv:
             _logger.info("\n[SIGNAL VALIDATION: DATA INTEGRITY AUDIT (FAILURES)]")
             _logger.info("-" * 135)
@@ -2961,13 +2974,13 @@ def _run_strategy_stage(
                 close_std = float(sv.get("close_std", 0.0))
                 hi_lo = int(sv.get("hi_lo_violation", 0))
                 fail_text = ",".join(str(v) for v in sv.get("fail_reasons", [])) or "-"
-                
+
                 _logger.info(
                     f"| {sym:<15} | {status_text:<8} | {nan_pct:>7.2f}% | {zero_neg_pct:>11.2f}% | "
                     f"{close_std:>11.4f} | {hi_lo:>10} | {fail_text:<50} |"
                 )
             _logger.info("-" * 135)
-        
+
         _emit_strategy_profile()
         return ml_out
 
@@ -3003,9 +3016,7 @@ def _refresh_regime_c34_gold_standard(
 
     labeled = ml_out.labeled
     if labeled is None or labeled.empty:
-        _logger.info(
-            "[REGIME_C34_GOLD] labeled DataFrame 없음 — baseline scorecard 출력"
-        )
+        _logger.info("[REGIME_C34_GOLD] labeled DataFrame 없음 — baseline scorecard 출력")
         log_regime_scorecard(scorecard)
         return
 
@@ -3083,7 +3094,7 @@ def _run_candidate_evaluation_report(
         timeframe=tf,
     ).candidate
     eval_steps["config"] = time.perf_counter() - t_step
-    
+
     active_syms = [s for s in trading_symbols if s in data_stage.data_maps]
     if not active_syms:
         active_syms = list(data_stage.data_maps.keys())
@@ -3097,7 +3108,7 @@ def _run_candidate_evaluation_report(
         cached_output=candidate_out,
     )
     eval_steps["ablation"] = time.perf_counter() - t_step
-    
+
     # Alias mapping for variant names to keep the table compact
     alias_map = {
         "rule_only_equal_size": "Equal Size",
@@ -3126,8 +3137,8 @@ def _run_candidate_evaluation_report(
     _logger.info("\n" + title + "-" * (width - len(title)))
     _logger.info(header)
     _logger.info(
-        f"| {'-'*18:<18} | {'-'*7:>7} | {'-'*7:>7} | {'-'*6:>6}"
-        f" | {'-'*10:>10} | {'-'*6:>6} | {'-'*6:>6} | {'-'*5:<5} |"
+        f"| {'-' * 18:<18} | {'-' * 7:>7} | {'-' * 7:>7} | {'-' * 6:>6}"
+        f" | {'-' * 10:>10} | {'-' * 6:>6} | {'-' * 6:>6} | {'-' * 5:<5} |"
     )
 
     t_render = time.perf_counter()
@@ -3141,14 +3152,12 @@ def _run_candidate_evaluation_report(
         trades = str(int(row.get("trade_count", 0)))
         deploy = f"{float(row.get('deployed_bar_fraction', 0.0)):.2f}"
         final_pass = (
-            str(row["pass_compound_gate"]) == "True"
-            and str(row.get("pass_deployment_gate", "False")) == "True"
+            str(row["pass_compound_gate"]) == "True" and str(row.get("pass_deployment_gate", "False")) == "True"
         )
         passed = "Y" if final_pass else "N"
 
         _logger.info(
-            f"| {alias:<18} | {cagr:>7} | {dd:>7} | {mar:>6}"
-            f" | {equity:>10} | {trades:>6} | {deploy:>6} | {passed:^5} |"
+            f"| {alias:<18} | {cagr:>7} | {dd:>7} | {mar:>6} | {equity:>10} | {trades:>6} | {deploy:>6} | {passed:^5} |"
         )
     eval_steps["render"] = time.perf_counter() - t_render
     _logger.info("-" * width)
@@ -3239,10 +3248,11 @@ def _run_optimization_stage(
     opt_res = run_optimization(opt_req)
     opt_elapsed = time.perf_counter() - t_opt
     _logger.debug(f"[OPTIMIZE] Optimization complete in {opt_elapsed:.2f}s")
-    
+
     precompute_profile = getattr(opt_res.base_ctx, "precompute_profile", None)
     if isinstance(precompute_profile, dict):
-        _logger.log(PERF, 
+        _logger.log(
+            PERF,
             (
                 "[RUN_PROF] step=ml_precompute total=%.2fs align=%.2fs "
                 "covariance=%.2fs awf_refit=%.2fs calibrator=%.2fs "
@@ -3298,8 +3308,7 @@ def _run_optimization_stage(
                 if total_mean > 0:
                     _logger.info("=" * 60)
                     _logger.info(
-                        " [PROFILING SUMMARY] Strategy Backtest Performance Profiling "
-                        "(n_trials=%d)",
+                        " [PROFILING SUMMARY] Strategy Backtest Performance Profiling (n_trials=%d)",
                         len(valid_trials),
                     )
                     _logger.info(
@@ -3344,17 +3353,14 @@ def _run_optimization_stage(
                     )
                     _logger.info("  * Total Backtest/Tr : %6.2f ms", total_mean * 1000.0)
                     _logger.info(
-                        "[RUN_PROF] trial_elapsed_sum=%.2fs run_optimization=%.2fs "
-                        "hidden_overhead=%.2fs",
+                        "[RUN_PROF] trial_elapsed_sum=%.2fs run_optimization=%.2fs hidden_overhead=%.2fs",
                         trial_elapsed_sum,
                         opt_elapsed,
                         hidden_overhead,
                     )
                     _logger.info("=" * 60)
     except Exception as e:
-        _logger.warning(
-            "[RUN_PROF] action=calculate_summary status=failed error=%s", type(e).__name__
-        )
+        _logger.warning("[RUN_PROF] action=calculate_summary status=failed error=%s", type(e).__name__)
     # ------------------------------------------------------------
 
     if study_ml is None or best_trial is None:
@@ -3484,18 +3490,14 @@ def run_pipeline(
 
     # Consolidate all initialization info into the System Dashboard
     from src.domain.futures.strategy.tiered_logging import format_system_context_dashboard
-    
+
     universe_report = {
         "discovered": len(discovered_symbols),
         "selected": len(_selected_symbols_from_snapshot(universe_snapshot)),
         "live_panel": len(live_inference_panel),
     }
-    
-    _loaded_ratio = (
-        f"{(len(data_stage.data_maps) / len(resolved_load_symbols)):.1%}"
-        if resolved_load_symbols
-        else "0%"
-    )
+
+    _loaded_ratio = f"{(len(data_stage.data_maps) / len(resolved_load_symbols)):.1%}" if resolved_load_symbols else "0%"
     _all_ready = len(data_stage.valid_symbols) == len(data_stage.data_maps)
     dq_report = {
         "loaded_ratio": _loaded_ratio,
@@ -3504,19 +3506,21 @@ def run_pipeline(
         "ready_count": len(data_stage.valid_symbols),
         "fail_summary": "None" if _all_ready else "See logs",
     }
-    
+
     strategy_info = {
         "engine": "Alpha-Ensemble Engine",
         "inf_panel": len(inference_panel),
         "trade_scope": len(data_stage.valid_symbols),
     }
 
-    _logger.info(format_system_context_dashboard(
-        window=window,
-        universe_report=universe_report,
-        data_quality=dq_report,
-        strategy_info=strategy_info,
-    ))
+    _logger.info(
+        format_system_context_dashboard(
+            window=window,
+            universe_report=universe_report,
+            data_quality=dq_report,
+            strategy_info=strategy_info,
+        )
+    )
 
     # Step 3.5) regime evaluation (between universe and signal)
     regime_stage_result = _run_regime_evaluation_stage(run_config, data_stage)
@@ -3543,11 +3547,7 @@ def run_pipeline(
     # Layer1Result는 labeled 속성이 없으므로 isinstance guard
     from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer1Result
 
-    if (
-        regime_stage_result is not None
-        and strategy_out is not None
-        and not isinstance(strategy_out, Layer1Result)
-    ):
+    if regime_stage_result is not None and strategy_out is not None and not isinstance(strategy_out, Layer1Result):
         _refresh_regime_c34_gold_standard(*regime_stage_result, strategy_out)
     if run_config.phase == "l1":
         return RunnerResult(exit_code=0, reason="l1_mode_done")
@@ -3571,7 +3571,8 @@ def run_pipeline(
         resume=resume,
     )
     _logger.debug("<< OPTIMIZE: %.2fs", time.perf_counter() - t_opt_stage)
-    _logger.log(PERF, 
+    _logger.log(
+        PERF,
         "<< PIPELINE_TOTAL: %.2fs",
         time.perf_counter() - pipeline_t0,
     )

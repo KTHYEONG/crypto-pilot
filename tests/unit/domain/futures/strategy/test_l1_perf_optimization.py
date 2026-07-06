@@ -1,4 +1,5 @@
 """L1 PERF 최적화 검증: P1 캐시워밍·P3 진단게이팅·P4 로깅·P5 타이머분리."""
+
 from __future__ import annotations
 
 import logging
@@ -72,9 +73,19 @@ def test_warm_2d_cache_populates_base_keys(aligned_mock: Any, cfg_mock: Any) -> 
 
     # Assert
     cache = _ALIGNED_FEATURE_CACHE.get(aligned_id, {})
-    for key in ("sym_ret_1", "sym_ret_5", "sym_vol_20", "sym_volume_z20",
-                "funding_z20", "mkt_ret_1_padded", "mkt_vol_20",
-                "mkt_dispersion_20", "market_breadth_20", "overlay_ctx", "regime_ctx"):
+    for key in (
+        "sym_ret_1",
+        "sym_ret_5",
+        "sym_vol_20",
+        "sym_volume_z20",
+        "funding_z20",
+        "mkt_ret_1_padded",
+        "mkt_vol_20",
+        "mkt_dispersion_20",
+        "market_breadth_20",
+        "overlay_ctx",
+        "regime_ctx",
+    ):
         assert key in cache, f"캐시 키 누락: {key}"
 
 
@@ -92,9 +103,7 @@ def test_warm_2d_cache_idempotent(aligned_mock: Any, cfg_mock: Any) -> None:
     assert _ALIGNED_FEATURE_CACHE[aligned_id]["sym_ret_1"] is ref_arr
 
 
-def test_prime_cache_does_not_call_build_candidate_dataset(
-    aligned_mock: Any, cfg_mock: Any
-) -> None:
+def test_prime_cache_does_not_call_build_candidate_dataset(aligned_mock: Any, cfg_mock: Any) -> None:
     from src.domain.futures.strategy.candidate_dataset import prime_aligned_feature_cache
 
     # Act
@@ -131,23 +140,25 @@ def test_warm_cache_empty_close_returns_early(cfg_mock: Any) -> None:
 
 def _make_model_output(n: int = 5) -> Any:
     rng = np.random.default_rng(0)
-    events = pd.DataFrame({
-        "datetime": pd.date_range("2024-01-01", periods=n, freq="4h"),
-        "symbol": ["BTCUSDT"] * n,
-        "family": ["trend"] * n,
-        "variant": ["v1"] * n,
-        "side": [1] * n,
-        "raw_score": rng.uniform(0.1, 1.0, n),
-        "score_z": rng.uniform(-1, 1, n),
-        "expected_holding_bars": [12] * n,
-        "min_holding_bars": [4] * n,
-        "stop_atr_mult": [1.0] * n,
-        "take_profit_atr_mult": [2.0] * n,
-        "turnover_proxy": [1.0] * n,
-        "cost_floor_bps": [7.5] * n,
-        "entry_idx": list(range(100, 100 + n)),
-        "side_flipped": [False] * n,
-    })
+    events = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2024-01-01", periods=n, freq="4h"),
+            "symbol": ["BTCUSDT"] * n,
+            "family": ["trend"] * n,
+            "variant": ["v1"] * n,
+            "side": [1] * n,
+            "raw_score": rng.uniform(0.1, 1.0, n),
+            "score_z": rng.uniform(-1, 1, n),
+            "expected_holding_bars": [12] * n,
+            "min_holding_bars": [4] * n,
+            "stop_atr_mult": [1.0] * n,
+            "take_profit_atr_mult": [2.0] * n,
+            "turnover_proxy": [1.0] * n,
+            "cost_floor_bps": [7.5] * n,
+            "entry_idx": list(range(100, 100 + n)),
+            "side_flipped": [False] * n,
+        }
+    )
     return SimpleNamespace(
         events=events,
         p_pass=rng.uniform(0.5, 1.0, n),
@@ -219,9 +230,7 @@ def test_signal_batch_convert_emits_perf_log(caplog: Any) -> None:
     )
 
     model_output = _make_model_output(n=3)
-    registry = QualifiedSignalRegistry(
-        by_symbol={}, ready_symbols=(), trade_scope_count=0, registry_version="v0"
-    )
+    registry = QualifiedSignalRegistry(by_symbol={}, ready_symbols=(), trade_scope_count=0, registry_version="v0")
     datetimes = np.array(
         [np.datetime64("2024-01-01", "ns") + np.timedelta64(i * 4, "h") for i in range(200)],
         dtype="datetime64[ns]",
@@ -256,10 +265,16 @@ def empty_fold_out_p5() -> SimpleNamespace:
     return SimpleNamespace(
         fit_status="trained",
         timing_profile={
-            "schema": 0.01, "dataset_fit": 0.05, "dataset_early_stop": 0.0,
-            "dataset_calibration_fit": 0.0, "dataset_calibration_eval": 0.0,
-            "dataset_oos": 0.02, "edge_fit": 0.10, "inference": 0.08,
-            "selection": 0.04, "total": 0.30,
+            "schema": 0.01,
+            "dataset_fit": 0.05,
+            "dataset_early_stop": 0.0,
+            "dataset_calibration_fit": 0.0,
+            "dataset_calibration_eval": 0.0,
+            "dataset_oos": 0.02,
+            "edge_fit": 0.10,
+            "inference": 0.08,
+            "selection": 0.04,
+            "total": 0.30,
         },
         model_output=SimpleNamespace(
             events=pd.DataFrame(),
@@ -332,8 +347,7 @@ def test_audit_tables_timer_excludes_inference(
             return_value="outer",
         ),
         patch(
-            "src.domain.futures.strategy.tiered_workflow.pipeline"
-            ".format_layer1_deployment_registry_table",
+            "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_deployment_registry_table",
             return_value="reg",
         ),
     ):
@@ -347,6 +361,7 @@ def test_audit_tables_timer_excludes_inference(
 
     def _took(msg: str) -> float:
         import re
+
         m = re.search(r"took=([\d.]+)s", msg)
         return float(m.group(1)) if m else -1.0
 
@@ -369,12 +384,14 @@ def test_audit_tables_timer_excludes_inference(
 
 # ─── P0: resolve_safe_nested_workers worker 계산 검증 ──────────────────────────
 
+
 def test_resolve_safe_nested_workers_memory_estimate() -> None:
     """P0: 500MB frame, 8GB available → workers >= 2 (was 1 with old formula)."""
     from src.domain.futures.strategy.tiered_workflow.pipeline import resolve_safe_nested_workers
+
     with patch("psutil.virtual_memory") as mock_mem:
-        mock_mem.return_value.available = 8 * 1024 ** 3  # 8 GB
-        result = resolve_safe_nested_workers(n_tasks=16, frame_memory_bytes=500 * 1024 ** 2)
+        mock_mem.return_value.available = 8 * 1024**3  # 8 GB
+        result = resolve_safe_nested_workers(n_tasks=16, frame_memory_bytes=500 * 1024**2)
     assert result >= 2, f"Expected >=2 workers with 8GB/500MB frame, got {result}"
     assert result <= 16, "Should not exceed n_tasks"
 
@@ -382,6 +399,7 @@ def test_resolve_safe_nested_workers_memory_estimate() -> None:
 def test_resolve_safe_nested_workers_pinned() -> None:
     """P0: pinned=2 → 정확히 2 worker 반환."""
     from src.domain.futures.strategy.tiered_workflow.pipeline import resolve_safe_nested_workers
+
     result = resolve_safe_nested_workers(n_tasks=16, frame_memory_bytes=1_000_000_000, pinned=2)
     assert result == 2, f"Expected 2 workers (pinned), got {result}"
 
@@ -393,12 +411,12 @@ def test_resolve_safe_nested_workers_applies_result_soft_cap_and_logs_fields(
     from src.domain.futures.strategy.tiered_workflow.pipeline import resolve_safe_nested_workers
 
     with patch("psutil.virtual_memory") as mock_mem:
-        mock_mem.return_value.available = 16 * 1024 ** 3
+        mock_mem.return_value.available = 16 * 1024**3
 
         with caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"):
             workers = resolve_safe_nested_workers(
                 n_tasks=16,
-                frame_memory_bytes=200 * 1024 ** 2,
+                frame_memory_bytes=200 * 1024**2,
                 compact_result=True,
                 result_soft_cap_mb=256,
             )
@@ -416,10 +434,10 @@ def test_resolve_safe_nested_workers_pinned_does_not_bypass_safety_guards() -> N
     from src.domain.futures.strategy.tiered_workflow.pipeline import resolve_safe_nested_workers
 
     with patch("psutil.virtual_memory") as mock_mem:
-        mock_mem.return_value.available = 4 * 1024 ** 3
+        mock_mem.return_value.available = 4 * 1024**3
         workers = resolve_safe_nested_workers(
             n_tasks=16,
-            frame_memory_bytes=200 * 1024 ** 2,
+            frame_memory_bytes=200 * 1024**2,
             pinned=8,
             compact_result=True,
             result_soft_cap_mb=128,
@@ -430,9 +448,8 @@ def test_resolve_safe_nested_workers_pinned_does_not_bypass_safety_guards() -> N
 
 # ─── P3: defer_artifact=True 경로 검증 ─────────────────────────────────────────
 
-def test_run_l1_nested_swf_defer_artifact_skips_inference(
-    aligned_mock: Any, cfg_mock: Any, caplog: Any
-) -> None:
+
+def test_run_l1_nested_swf_defer_artifact_skips_inference(aligned_mock: Any, cfg_mock: Any, caplog: Any) -> None:
     """P3: defer_artifact=True 시 inference_artifact=None."""
     import concurrent.futures
 
@@ -442,8 +459,18 @@ def test_run_l1_nested_swf_defer_artifact_skips_inference(
         return SimpleNamespace(
             fit_status="trained",
             timing_profile=dict.fromkeys(
-                ("schema", "dataset_fit", "dataset_early_stop", "dataset_calibration_fit",
-                 "dataset_calibration_eval", "dataset_oos", "edge_fit", "inference", "selection"), 0.01
+                (
+                    "schema",
+                    "dataset_fit",
+                    "dataset_early_stop",
+                    "dataset_calibration_fit",
+                    "dataset_calibration_eval",
+                    "dataset_oos",
+                    "edge_fit",
+                    "inference",
+                    "selection",
+                ),
+                0.01,
             ),
             model_output=SimpleNamespace(
                 events=pd.DataFrame(),
@@ -480,13 +507,13 @@ def test_run_l1_nested_swf_defer_artifact_skips_inference(
         caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"),
     ):
         result = run_l1_nested_swf(
-                labeled_events=pd.DataFrame(),
-                aligned=aligned_mock,
-                outer_folds=outer_folds,
-                cfg=cfg_mock,
-                seed=3,
-                defer_artifact=True,
-            )
+            labeled_events=pd.DataFrame(),
+            aligned=aligned_mock,
+            outer_folds=outer_folds,
+            cfg=cfg_mock,
+            seed=3,
+            defer_artifact=True,
+        )
 
     assert result.inference_artifact is None, "defer_artifact=True → inference_artifact must be None"
     perf_logs = [r.message for r in caplog.records if "l1_fit_inference_artifact" in r.message]
@@ -495,14 +522,15 @@ def test_run_l1_nested_swf_defer_artifact_skips_inference(
 
 # ─── PERF-GAP1: worker_calc PERF 로그 포맷 검증 ──────────────────────────────
 
+
 def test_resolve_safe_nested_workers_emits_worker_calc_perf_log(caplog: Any) -> None:
     """PERF-GAP1: resolve_safe_nested_workers → [PERF] worker_calc 로그."""
     from src.domain.futures.strategy.tiered_workflow.pipeline import resolve_safe_nested_workers
 
     with patch("psutil.virtual_memory") as mock_mem:
-        mock_mem.return_value.available = 16 * 1024 ** 3
+        mock_mem.return_value.available = 16 * 1024**3
         with caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"):
-            resolve_safe_nested_workers(n_tasks=16, frame_memory_bytes=200 * 1024 ** 2)
+            resolve_safe_nested_workers(n_tasks=16, frame_memory_bytes=200 * 1024**2)
 
     logs = [r.message for r in caplog.records if "worker_calc" in r.message]
     assert len(logs) >= 1, "worker_calc PERF log must be emitted"
@@ -516,11 +544,11 @@ def test_resolve_safe_nested_workers_applies_soft_cap_and_pinned_guard(caplog: A
     from src.domain.futures.strategy.tiered_workflow.pipeline import resolve_safe_nested_workers
 
     with patch("psutil.virtual_memory") as mock_mem:
-        mock_mem.return_value.available = 4 * 1024 ** 3
+        mock_mem.return_value.available = 4 * 1024**3
         with caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"):
             workers = resolve_safe_nested_workers(
                 n_tasks=16,
-                frame_memory_bytes=200 * 1024 ** 2,
+                frame_memory_bytes=200 * 1024**2,
                 compact_result=True,
                 pinned=8,
                 result_soft_cap_mb=128,
@@ -538,9 +566,8 @@ def test_resolve_safe_nested_workers_applies_soft_cap_and_pinned_guard(caplog: A
 
 # ─── PERF-GAP2: l1_nested_ipc_collect PERF 로그 검증 ──────────────────────────
 
-def test_l1_nested_ipc_collect_log_emitted(
-    aligned_mock: Any, cfg_mock: Any, caplog: Any
-) -> None:
+
+def test_l1_nested_ipc_collect_log_emitted(aligned_mock: Any, cfg_mock: Any, caplog: Any) -> None:
     """PERF-GAP2: run_l1_nested_swf → [PERF] l1_nested_ipc_collect 로그."""
     import concurrent.futures
 
@@ -549,9 +576,20 @@ def test_l1_nested_ipc_collect_log_emitted(
 
     _empty = SimpleNamespace(
         fit_status="trained",
-        timing_profile=dict.fromkeys(("schema", "dataset_fit", "dataset_early_stop",
-                                      "dataset_calibration_fit", "dataset_calibration_eval",
-                                      "dataset_oos", "edge_fit", "inference", "selection"), 0.01),
+        timing_profile=dict.fromkeys(
+            (
+                "schema",
+                "dataset_fit",
+                "dataset_early_stop",
+                "dataset_calibration_fit",
+                "dataset_calibration_eval",
+                "dataset_oos",
+                "edge_fit",
+                "inference",
+                "selection",
+            ),
+            0.01,
+        ),
         model_output=SimpleNamespace(
             events=pd.DataFrame(),
             expected_gross_bps=np.zeros((0,), dtype=np.float64),
@@ -603,9 +641,7 @@ def test_l1_nested_ipc_collect_log_emitted(
         assert "took=" in log
 
 
-def test_run_l1_nested_swf_soft_cap_forces_compact_submit(
-    aligned_mock: Any, cfg_mock: Any, caplog: Any
-) -> None:
+def test_run_l1_nested_swf_soft_cap_forces_compact_submit(aligned_mock: Any, cfg_mock: Any, caplog: Any) -> None:
     """nested soft cap은 compact preference보다 우선하며 submit 인자에도 반영돼야 한다."""
     import concurrent.futures
 
@@ -676,8 +712,7 @@ def test_run_l1_nested_swf_soft_cap_forces_compact_submit(
             return_value="outer",
         ),
         patch(
-            "src.domain.futures.strategy.tiered_workflow.pipeline"
-            ".format_layer1_deployment_registry_table",
+            "src.domain.futures.strategy.tiered_workflow.pipeline.format_layer1_deployment_registry_table",
             return_value="reg",
         ),
         caplog.at_level(PERF, logger="src.domain.futures.strategy.tiered_workflow"),
@@ -750,9 +785,7 @@ def test_event_results_from_fold_output_prefers_inline_compact_payload() -> None
     assert len(inline_result) == len(legacy_result)
 
 
-def test_l1_nested_soft_cap_forces_compact_submit(
-    aligned_mock: Any, cfg_mock: Any, caplog: Any
-) -> None:
+def test_l1_nested_soft_cap_forces_compact_submit(aligned_mock: Any, cfg_mock: Any, caplog: Any) -> None:
     """Nested path should force compact IPC when full payload exceeds soft cap."""
     import concurrent.futures
 
@@ -903,12 +936,11 @@ def test_run_tiered_pipeline_default_l1_tfs_matches_config() -> None:
 
     from src.domain.futures.strategy.config import CandidateStrategyConfig
     from src.domain.futures.strategy.tiered_workflow.pipeline import run_tiered_pipeline
+
     sig = inspect.signature(run_tiered_pipeline)
     default_l1_tfs = sig.parameters["l1_tfs"].default
     ref_cfg = CandidateStrategyConfig()
-    assert default_l1_tfs == ref_cfg.l1_tfs, (
-        f"Default l1_tfs={default_l1_tfs} != config l1_tfs={ref_cfg.l1_tfs}"
-    )
+    assert default_l1_tfs == ref_cfg.l1_tfs, f"Default l1_tfs={default_l1_tfs} != config l1_tfs={ref_cfg.l1_tfs}"
 
 
 # ─── OPT-3: _t_ppf_cached equivalence ──────────────────────────────────────
@@ -1012,14 +1044,16 @@ def test_prefit_artifact_equivalence(
 
 
 def _make_label_events(n: int = 5) -> pd.DataFrame:
-    return pd.DataFrame({
-        "symbol": ["BTCUSDT"] * n,
-        "side": [1] * n,
-        "entry_idx": list(range(10, 10 + n)),
-        "expected_holding_bars": [12] * n,
-        "stop_atr_mult": [1.0] * n,
-        "take_profit_atr_mult": [2.0] * n,
-    })
+    return pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"] * n,
+            "side": [1] * n,
+            "entry_idx": list(range(10, 10 + n)),
+            "expected_holding_bars": [12] * n,
+            "stop_atr_mult": [1.0] * n,
+            "take_profit_atr_mult": [2.0] * n,
+        }
+    )
 
 
 def _make_label_cfg() -> MagicMock:
@@ -1049,15 +1083,16 @@ def test_label_candidate_events_atr_cache_skips_computation(aligned_mock: Any) -
         wraps=_compute_yang_zhang_vol_2d,
     ) as mock_atr:
         result = label_candidate_events(
-            events=events, aligned=aligned_mock, cfg=cfg,
+            events=events,
+            aligned=aligned_mock,
+            cfg=cfg,
             precomputed_atr_2d=precomputed,
         )
 
     mock_atr.assert_not_called()
     assert isinstance(result, pd.DataFrame)
     assert not result.empty
-    expected_cols = {"symbol", "side", "entry_idx", "expected_holding_bars",
-                     "stop_atr_mult", "take_profit_atr_mult"}
+    expected_cols = {"symbol", "side", "entry_idx", "expected_holding_bars", "stop_atr_mult", "take_profit_atr_mult"}
     assert expected_cols.issubset(result.columns)
 
 
@@ -1076,7 +1111,9 @@ def test_label_candidate_events_atr_default_computes_once(aligned_mock: Any) -> 
         wraps=_compute_yang_zhang_vol_2d,
     ) as mock_atr:
         result = label_candidate_events(
-            events=events, aligned=aligned_mock, cfg=cfg,
+            events=events,
+            aligned=aligned_mock,
+            cfg=cfg,
         )
 
     mock_atr.assert_called_once()
@@ -1093,7 +1130,9 @@ def test_label_candidate_events_atr_shape_mismatch_raises(aligned_mock: Any) -> 
 
     with pytest.raises(ValueError, match="precomputed_atr_2d shape"):
         label_candidate_events(
-            events=events, aligned=aligned_mock, cfg=cfg,
+            events=events,
+            aligned=aligned_mock,
+            cfg=cfg,
             precomputed_atr_2d=wrong_shape,
         )
 
@@ -1104,6 +1143,7 @@ def test_label_candidate_events_atr_shape_mismatch_raises(aligned_mock: Any) -> 
 @pytest.fixture
 def signal_only_cfg() -> Any:
     from src.domain.futures.strategy.config import CandidateStrategyConfig
+
     return CandidateStrategyConfig(
         signal_only=True,
         promotion_filter_enabled=True,
@@ -1122,6 +1162,7 @@ def signal_only_cfg() -> Any:
 @pytest.fixture
 def non_signal_only_cfg() -> Any:
     from src.domain.futures.strategy.config import CandidateStrategyConfig
+
     return CandidateStrategyConfig(
         signal_only=False,
         promotion_filter_enabled=True,
@@ -1139,6 +1180,7 @@ def non_signal_only_cfg() -> Any:
 
 def _make_strategy_cfg(candidate_cfg: Any) -> Any:
     from src.domain.futures.strategy.config import StrategyConfig
+
     return StrategyConfig(candidate=candidate_cfg)
 
 
@@ -1152,14 +1194,16 @@ def test_run_candidate_signal_only_skips_diagnostics(
 
     strategy_cfg = _make_strategy_cfg(signal_only_cfg)
 
-    non_empty_events = pd.DataFrame({
-        "symbol": ["BTCUSDT"],
-        "side": [1],
-        "entry_idx": [10],
-        "expected_holding_bars": [12],
-        "stop_atr_mult": [1.0],
-        "take_profit_atr_mult": [2.0],
-    })
+    non_empty_events = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [10],
+            "expected_holding_bars": [12],
+            "stop_atr_mult": [1.0],
+            "take_profit_atr_mult": [2.0],
+        }
+    )
     with (
         patch(
             "src.domain.futures.strategy.rule_diagnostics.compute_rule_diagnostics",
@@ -1203,9 +1247,7 @@ def test_run_candidate_signal_only_skips_diagnostics(
     assert result.rule_report["recommended_flip_variants"] == ()
 
 
-def test_run_candidate_non_signal_only_calls_diagnostics(
-    aligned_mock: Any, non_signal_only_cfg: MagicMock
-) -> None:
+def test_run_candidate_non_signal_only_calls_diagnostics(aligned_mock: Any, non_signal_only_cfg: MagicMock) -> None:
     """Scenario 5: signal_only=False → compute_rule_diagnostics 1회 호출."""
     from src.domain.futures.strategy.rule_diagnostics import RuleDiagnosticsResult
     from src.domain.futures.strategy_runtime.bridge import (
@@ -1214,8 +1256,10 @@ def test_run_candidate_non_signal_only_calls_diagnostics(
 
     strategy_cfg = _make_strategy_cfg(non_signal_only_cfg)
     fake_diag = RuleDiagnosticsResult(
-        by_family=pd.DataFrame(), by_variant=pd.DataFrame(),
-        by_family_side=pd.DataFrame(), side_flip=pd.DataFrame(),
+        by_family=pd.DataFrame(),
+        by_variant=pd.DataFrame(),
+        by_family_side=pd.DataFrame(),
+        side_flip=pd.DataFrame(),
         decision={},
         recommended_keep_variants=("v1",),
         recommended_flip_variants=(),
@@ -1226,14 +1270,16 @@ def test_run_candidate_non_signal_only_calls_diagnostics(
         report_split=(0, 10),
     )
 
-    non_empty_events = pd.DataFrame({
-        "symbol": ["BTCUSDT"],
-        "side": [1],
-        "entry_idx": [10],
-        "expected_holding_bars": [5],
-        "stop_atr_mult": [1.0],
-        "take_profit_atr_mult": [2.0],
-    })
+    non_empty_events = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [10],
+            "expected_holding_bars": [5],
+            "stop_atr_mult": [1.0],
+            "take_profit_atr_mult": [2.0],
+        }
+    )
     with (
         patch(
             "src.domain.futures.strategy.rule_diagnostics.compute_rule_diagnostics",
@@ -1278,23 +1324,23 @@ def test_run_candidate_non_signal_only_calls_diagnostics(
     mock_diag.assert_called_once()
 
 
-def test_run_candidate_signal_only_skips_promotion(
-    aligned_mock: Any, signal_only_cfg: MagicMock
-) -> None:
+def test_run_candidate_signal_only_skips_promotion(aligned_mock: Any, signal_only_cfg: MagicMock) -> None:
     """Scenario 6: signal_only=True + promotion_filter_enabled → apply_variant_promotions 호출 0회."""
     from src.domain.futures.strategy_runtime.bridge import (
         run_candidate_strategy_for_universe,
     )
 
     strategy_cfg = _make_strategy_cfg(signal_only_cfg)
-    non_empty_events = pd.DataFrame({
-        "symbol": ["BTCUSDT"],
-        "side": [1],
-        "entry_idx": [10],
-        "expected_holding_bars": [5],
-        "stop_atr_mult": [1.0],
-        "take_profit_atr_mult": [2.0],
-    })
+    non_empty_events = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"],
+            "side": [1],
+            "entry_idx": [10],
+            "expected_holding_bars": [5],
+            "stop_atr_mult": [1.0],
+            "take_profit_atr_mult": [2.0],
+        }
+    )
 
     with (
         patch(

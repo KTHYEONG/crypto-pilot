@@ -137,7 +137,7 @@ def evaluate_compound_backtest(
         bars_per_year = 8760.0
     elif cfg.timeframe == "1d":
         bars_per_year = 365.0
-    
+
     years = max(n_bars / bars_per_year, 1e-9)
     initial_eq = max(float(equity_curve[0]), 1e-12)
     final_eq = max(float(equity_curve[-1]), 0.0)
@@ -167,7 +167,7 @@ def evaluate_compound_backtest(
             liquidation_count = int(trades["is_liquidation"].sum())
         elif "liquidation" in trades.columns:
             liquidation_count = int(trades["liquidation"].sum())
-        
+
         if "size" in trades.columns and n_bars > 0:
             turnover = float(trades["size"].sum() / initial_eq / n_bars)
 
@@ -227,9 +227,7 @@ def evaluate_compound_backtest(
         min_deploy_frac = float(getattr(cfg, "min_deployment_capital_fraction", 0.05))
         min_deploy_trades = int(getattr(cfg, "min_deployment_trade_count", 20))
         if deployed_bar_fraction < min_deploy_frac:
-            fail_reasons.append(
-                f"deployed_bar_fraction {deployed_bar_fraction:.3f} below {min_deploy_frac:.3f}"
-            )
+            fail_reasons.append(f"deployed_bar_fraction {deployed_bar_fraction:.3f} below {min_deploy_frac:.3f}")
         if trade_count < min_deploy_trades:
             fail_reasons.append(f"trade_count {trade_count} below min_deployment_trade_count {min_deploy_trades}")
 

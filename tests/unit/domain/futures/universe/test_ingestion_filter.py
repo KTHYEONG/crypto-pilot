@@ -20,6 +20,7 @@ from src.domain.futures.universe.ingestion_filter import (
 
 # ── Test helpers ──────────────────────────────────────────────────────────────
 
+
 @dataclass(frozen=True, slots=True)
 class _FakeProfile:
     """Minimal SymbolSyncProfile stand-in for tests."""
@@ -54,6 +55,7 @@ def _make_ticker(rows: list[tuple[str, float]]) -> pd.DataFrame:
 
 
 # ── S1: Leveraged tokens excluded ────────────────────────────────────────────
+
 
 def test_select_ingestion_symbols_s1_leveraged_tokens_excluded() -> None:
     # Arrange
@@ -94,6 +96,7 @@ def test_select_ingestion_symbols_s1_leveraged_tokens_excluded() -> None:
 
 # ── S2: Stablecoin bases excluded ────────────────────────────────────────────
 
+
 @pytest.mark.parametrize(
     "symbol",
     ["USDCUSDT", "EURUSDT", "FRAXUSDT", "USDEUSDT"],
@@ -121,11 +124,10 @@ def test_select_ingestion_symbols_s2_stablecoin_base_excluded(symbol: str) -> No
 
 # ── S2b: PAXG passes (gold-price linked — NOT in denylist) ────────────────
 
+
 def test_select_ingestion_symbols_s2b_paxg_passes() -> None:
     # Arrange — PAXG should NOT be in STABLECOIN_BASES
-    assert "PAXG" not in STABLECOIN_BASES, (
-        "PAXG must not be in stablecoin denylist — gold-price alpha exists"
-    )
+    assert "PAXG" not in STABLECOIN_BASES, "PAXG must not be in stablecoin denylist — gold-price alpha exists"
 
     exchange_info = _make_exchange_info([_perp_symbol("PAXGUSDT")])
     ticker = _make_ticker([("PAXGUSDT", 2_000_000.0)])
@@ -146,6 +148,7 @@ def test_select_ingestion_symbols_s2b_paxg_passes() -> None:
 
 
 # ── S3: Lifetime ADV floor — zombie excluded, past-peak passes ───────────────
+
 
 def test_select_ingestion_symbols_s3_lifetime_floor_zombie_excluded() -> None:
     # Arrange: symbol with quoteVolume < 500k → excluded (zombie)
@@ -201,19 +204,17 @@ def test_select_ingestion_symbols_s3_current_low_but_historical_high_passes() ->
 
 # ── S4: Delist horizon — delivery_date near future excluded via profile ───────
 
+
 def test_select_ingestion_symbols_s4_delist_horizon_excluded_via_profile() -> None:
     # Arrange: delivery_date = today + 10 days (< 30-day horizon)
     today = date.today()
     from datetime import timedelta
+
     near_delivery = today + timedelta(days=10)
 
     # deliveryDate epoch ms < 4T → treated as real delivery (not perp marker)
-    delivery_ms = int(
-        pd.Timestamp(near_delivery).timestamp() * 1000
-    )
-    exchange_info = _make_exchange_info(
-        [_perp_symbol("NEARDELISYUSDT", delivery_date_ms=delivery_ms)]
-    )
+    delivery_ms = int(pd.Timestamp(near_delivery).timestamp() * 1000)
+    exchange_info = _make_exchange_info([_perp_symbol("NEARDELISYUSDT", delivery_date_ms=delivery_ms)])
     ticker = _make_ticker([("NEARDELISYUSDT", 5_000_000.0)])
     config = IngestionFilterConfig(delist_horizon_days=30, max_data_staleness_days=180)
 
@@ -241,6 +242,7 @@ def test_select_ingestion_symbols_s4_delist_horizon_excluded_via_profile() -> No
 
 
 # ── S5: Normal small-cap passes (L1 is the alpha decision maker) ─────────────
+
 
 def test_select_ingestion_symbols_s5_normal_small_cap_passes() -> None:
     # Arrange: peak ADV = 5M, current = 2M → passes all gates
@@ -271,11 +273,10 @@ def test_select_ingestion_symbols_s5_normal_small_cap_passes() -> None:
 
 # ── Misc: non-perpetual excluded ──────────────────────────────────────────────
 
+
 def test_select_ingestion_symbols_non_perpetual_excluded() -> None:
     # Arrange
-    exchange_info = _make_exchange_info(
-        [_perp_symbol("BTCQUARTERUSDT", contract_type="DELIVERING")]
-    )
+    exchange_info = _make_exchange_info([_perp_symbol("BTCQUARTERUSDT", contract_type="DELIVERING")])
     ticker = _make_ticker([("BTCQUARTERUSDT", 10_000_000.0)])
     config = IngestionFilterConfig(perpetual_only=True)
 
@@ -294,6 +295,7 @@ def test_select_ingestion_symbols_non_perpetual_excluded() -> None:
 
 
 # ── Edge: empty exchange_info → empty outputs ─────────────────────────────────
+
 
 def test_select_ingestion_symbols_empty_exchange_info_returns_empty() -> None:
     # Arrange
@@ -315,6 +317,7 @@ def test_select_ingestion_symbols_empty_exchange_info_returns_empty() -> None:
 
 
 # ── Stablecoin denylist constant sanity ──────────────────────────────────────
+
 
 def test_stablecoin_bases_count_and_known_members() -> None:
     # spec C0 코드블록: USDC..PYUSD(7) + DAI..USDE(7) + EUR/EURS/GBP/AUD(4) + USDY(1) = 19

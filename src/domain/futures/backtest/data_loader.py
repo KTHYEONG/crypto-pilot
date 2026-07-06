@@ -114,9 +114,7 @@ def _coalesce_metrics_frames(
 ) -> pd.DataFrame:
     """Coalesce complementary OI/LSR rows by timestamp without dropping fields."""
     normalized = [
-        _normalize_metrics_frame(frame, symbol=symbol)
-        for frame in frames
-        if frame is not None and not frame.empty
+        _normalize_metrics_frame(frame, symbol=symbol) for frame in frames if frame is not None and not frame.empty
     ]
     if not normalized:
         return _empty_metrics_frame()
@@ -203,11 +201,7 @@ def summarize_dataframe_integrity(
     total_cells = max(rows * cols, 1)
     nan_pct = float(df.isna().sum().sum() / total_cells)
     num_df = df.select_dtypes(include=[np.number])
-    inf_count = (
-        float(np.isinf(num_df.to_numpy(dtype=np.float64, copy=False)).sum())
-        if not num_df.empty
-        else 0.0
-    )
+    inf_count = float(np.isinf(num_df.to_numpy(dtype=np.float64, copy=False)).sum()) if not num_df.empty else 0.0
     zero_ratio = (
         float((num_df.to_numpy(dtype=np.float64, copy=False) == 0.0).sum() / max(num_df.size, 1))
         if not num_df.empty
@@ -282,11 +276,7 @@ def summarize_ohlcv_collection_integrity(
     total_cells = max(rows * cols, 1)
     nan_pct = float(df.isna().sum().sum() / total_cells)
     num_df = df.select_dtypes(include=[np.number])
-    inf_count = (
-        float(np.isinf(num_df.to_numpy(dtype=np.float64, copy=False)).sum())
-        if not num_df.empty
-        else 0.0
-    )
+    inf_count = float(np.isinf(num_df.to_numpy(dtype=np.float64, copy=False)).sum()) if not num_df.empty else 0.0
 
     tf_to_delta = {
         "1m": pd.Timedelta(minutes=1),
@@ -317,9 +307,7 @@ def summarize_ohlcv_collection_integrity(
                     expected_bars = int((expected_end - expected_start) / expected_delta) + 1
                     expected_bars = max(expected_bars, 1)
                     actual_bars = int(dt.nunique())
-                    missing_bar_ratio = float(
-                        max(expected_bars - actual_bars, 0) / expected_bars
-                    )
+                    missing_bar_ratio = float(max(expected_bars - actual_bars, 0) / expected_bars)
             if len(dt_raw) > 1:
                 raw_diffs = dt_raw.diff()
                 non_monotonic_dt_count = float((raw_diffs.dropna() < pd.Timedelta(0)).sum())
@@ -666,9 +654,7 @@ class DataCollector:
         mask = (cache_df["datetime"] >= req_start) & (cache_df["datetime"] <= req_end)
         return cache_df.loc[mask].copy()
 
-    def ensure_ohlcv_data(
-        self, symbol: str, timeframe: str, start_date: str, end_date: str
-    ) -> None:
+    def ensure_ohlcv_data(self, symbol: str, timeframe: str, start_date: str, end_date: str) -> None:
         """Generic OHLCV data collection: Vision for bulk, API for recent."""
         req_start, req_end = (
             pd.to_datetime(start_date, utc=True),
@@ -686,9 +672,7 @@ class DataCollector:
                 if ea_dt <= req_start and la_dt >= req_end - pd.Timedelta(hours=8):
                     return
             except Exception as exc:
-                self.logger.debug(
-                    "Failed to parse metadata for %s %s: %s", symbol, timeframe, exc
-                )
+                self.logger.debug("Failed to parse metadata for %s %s: %s", symbol, timeframe, exc)
 
         cache_df = self._load_cache(symbol, timeframe)
         if (
@@ -712,9 +696,7 @@ class DataCollector:
         vision_tasks = []
         while current_month_start < min(req_end, api_cutoff):
             # Check if this month is already in cache_df
-            month_end = (current_month_start + pd.offsets.MonthEnd(1)).replace(
-                hour=23, minute=59, second=59
-            )
+            month_end = (current_month_start + pd.offsets.MonthEnd(1)).replace(hour=23, minute=59, second=59)
             if (
                 cache_df.empty
                 or cache_df["datetime"].min() > current_month_start
@@ -759,9 +741,7 @@ class DataCollector:
                 return pd.DataFrame()
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                future_to_task = {
-                    executor.submit(_fetch_month, y, m): (y, m) for y, m in vision_tasks
-                }
+                future_to_task = {executor.submit(_fetch_month, y, m): (y, m) for y, m in vision_tasks}
                 for future in concurrent.futures.as_completed(future_to_task):
                     try:
                         res_df = future.result()
@@ -771,24 +751,23 @@ class DataCollector:
                         self.logger.warning(f"Error fetching vision data for {symbol}: {e}")
 
         # 2. API for recent data or gaps
-        
+
         # [Fix] 과거 데이터 갭 백필 (req_start ~ 캐시 최저점)
         if not cache_df.empty:
             cache_min_dt = cache_df["datetime"].min()
-            
+
             # 상장일 프로필 조회하여 시작점 보정
             effective_req_start = req_start
             try:
                 from src.domain.futures.universe.storage import _load_symbol_sync_profiles
+
                 profiles = _load_symbol_sync_profiles()
                 if symbol in profiles and profiles[symbol].onboard_date is not None:
                     onboard_dt = pd.to_datetime(profiles[symbol].onboard_date, utc=True)
                     if effective_req_start < onboard_dt:
                         effective_req_start = onboard_dt
             except Exception as exc:
-                self.logger.debug(
-                    "Failed to resolve onboard_date for %s: %s", symbol, exc
-                )
+                self.logger.debug("Failed to resolve onboard_date for %s: %s", symbol, exc)
 
             # metadata에서 이전에 성공적으로 조회해 본 최소 시점(earliest_searched) 확인
             earliest_searched = meta.get("earliest_searched")
@@ -805,9 +784,7 @@ class DataCollector:
             # 그 시간차가 24시간 이상이고, 아직 조회하지 않은 범위인 경우에만 과거 갭 백필 진행
             time_gap = cache_min_dt - effective_req_start
             should_backfill = (
-                not already_searched
-                and effective_req_start < cache_min_dt
-                and time_gap > pd.Timedelta(hours=24)
+                not already_searched and effective_req_start < cache_min_dt and time_gap > pd.Timedelta(hours=24)
             )
             if should_backfill:
                 gap_start = effective_req_start
@@ -819,9 +796,7 @@ class DataCollector:
                     requested_end=gap_end,
                 ):
                     try:
-                        gap_chunk = self.client.fetch_ohlcv_with_taker(
-                            symbol, timeframe, str(gap_start), str(gap_end)
-                        )
+                        gap_chunk = self.client.fetch_ohlcv_with_taker(symbol, timeframe, str(gap_start), str(gap_end))
                         if not gap_chunk.empty:
                             new_parts.append(self._normalize_df(gap_chunk))
                         # 성공적으로 조회했으므로 (데이터가 비어있더라도)
@@ -860,9 +835,7 @@ class DataCollector:
             if latest_cached_dt is None or part_max_dt > latest_cached_dt:
                 latest_cached_dt = part_max_dt
 
-        remaining_start = (
-            max(req_start, latest_cached_dt) if latest_cached_dt is not None else req_start
-        )
+        remaining_start = max(req_start, latest_cached_dt) if latest_cached_dt is not None else req_start
         if remaining_start < req_end and not self._is_range_blocked_by_permanent_failure(
             symbol=symbol,
             timeframe=timeframe,
@@ -870,9 +843,7 @@ class DataCollector:
             requested_end=req_end,
         ):
             try:
-                chunk = self.client.fetch_ohlcv_with_taker(
-                    symbol, timeframe, str(remaining_start), str(req_end)
-                )
+                chunk = self.client.fetch_ohlcv_with_taker(symbol, timeframe, str(remaining_start), str(req_end))
                 if not chunk.empty:
                     new_parts.append(self._normalize_df(chunk))
             except BinanceKlinePermanentError as exc:
@@ -914,9 +885,7 @@ class DataCollector:
                 }
             )
 
-    def collect_1m_ohlcv(
-        self, symbol: str, start_date: str, end_date: str, fetch_network: bool = True
-    ) -> pd.DataFrame:
+    def collect_1m_ohlcv(self, symbol: str, start_date: str, end_date: str, fetch_network: bool = True) -> pd.DataFrame:
         timeframe = "1m"
         req_start, req_end = (
             pd.to_datetime(start_date, utc=True),
@@ -931,9 +900,7 @@ class DataCollector:
             return cache_df.loc[mask].copy()
 
         cache_covers_range = (
-            not cache_df.empty
-            and cache_df["datetime"].min() <= req_start
-            and cache_df["datetime"].max() >= req_end
+            not cache_df.empty and cache_df["datetime"].min() <= req_start and cache_df["datetime"].max() >= req_end
         )
 
         if not cache_covers_range:
@@ -963,9 +930,7 @@ class DataCollector:
                 if ea_dt <= req_start and la_dt >= req_end - pd.Timedelta(hours=8):
                     return
             except Exception as exc:
-                self.logger.debug(
-                    "Failed to parse metadata for %s %s: %s", symbol, timeframe, exc
-                )
+                self.logger.debug("Failed to parse metadata for %s %s: %s", symbol, timeframe, exc)
 
         cache_df = self._load_cache(symbol, timeframe)
         if (
@@ -989,9 +954,7 @@ class DataCollector:
         vision_tasks = []
         while current_month_start < min(req_end, api_cutoff):
             # Check if this month is already in cache_df
-            month_end = (current_month_start + pd.offsets.MonthEnd(1)).replace(
-                hour=23, minute=59, second=59
-            )
+            month_end = (current_month_start + pd.offsets.MonthEnd(1)).replace(hour=23, minute=59, second=59)
             if (
                 cache_df.empty
                 or cache_df["datetime"].min() > current_month_start
@@ -1050,9 +1013,7 @@ class DataCollector:
 
             # 무리하지 않게 4개의 스레드로 제한하여 I/O 대기와 파싱(CPU)을 교차 병렬화
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                future_to_task = {
-                    executor.submit(_fetch_month, y, m): (y, m) for y, m in vision_tasks
-                }
+                future_to_task = {executor.submit(_fetch_month, y, m): (y, m) for y, m in vision_tasks}
                 for future in concurrent.futures.as_completed(future_to_task):
                     try:
                         res_df = future.result()
@@ -1062,24 +1023,23 @@ class DataCollector:
                         self.logger.warning(f"Error fetching vision data for {symbol}: {e}")
 
         # 2. API for recent data or gaps
-        
+
         # [Fix] 과거 데이터 갭 백필 (req_start ~ 캐시 최저점)
         if not cache_df.empty:
             cache_min_dt = cache_df["datetime"].min()
-            
+
             # 상장일 프로필 조회하여 시작점 보정
             effective_req_start = req_start
             try:
                 from src.domain.futures.universe.storage import _load_symbol_sync_profiles
+
                 profiles = _load_symbol_sync_profiles()
                 if symbol in profiles and profiles[symbol].onboard_date is not None:
                     onboard_dt = pd.to_datetime(profiles[symbol].onboard_date, utc=True)
                     if effective_req_start < onboard_dt:
                         effective_req_start = onboard_dt
             except Exception as exc:
-                self.logger.debug(
-                    "Failed to resolve onboard_date for %s: %s", symbol, exc
-                )
+                self.logger.debug("Failed to resolve onboard_date for %s: %s", symbol, exc)
 
             # metadata에서 이전에 성공적으로 조회해 본 최소 시점(earliest_searched) 확인
             earliest_searched = meta.get("earliest_searched")
@@ -1096,9 +1056,7 @@ class DataCollector:
             # 그 시간차가 24시간 이상이고, 아직 조회하지 않은 범위인 경우에만 과거 갭 백필 진행
             time_gap = cache_min_dt - effective_req_start
             should_backfill = (
-                not already_searched
-                and effective_req_start < cache_min_dt
-                and time_gap > pd.Timedelta(hours=24)
+                not already_searched and effective_req_start < cache_min_dt and time_gap > pd.Timedelta(hours=24)
             )
             if should_backfill:
                 gap_start = effective_req_start
@@ -1110,9 +1068,7 @@ class DataCollector:
                     requested_end=gap_end,
                 ):
                     try:
-                        gap_chunk = self.client.fetch_ohlcv_with_taker(
-                            symbol, timeframe, str(gap_start), str(gap_end)
-                        )
+                        gap_chunk = self.client.fetch_ohlcv_with_taker(symbol, timeframe, str(gap_start), str(gap_end))
                         if not gap_chunk.empty:
                             new_parts.append(self._normalize_df(gap_chunk))
                         # 성공적으로 조회했으므로 (데이터가 비어있더라도)
@@ -1150,9 +1106,7 @@ class DataCollector:
             if latest_cached_dt is None or part_max_dt > latest_cached_dt:
                 latest_cached_dt = part_max_dt
 
-        remaining_start = (
-            max(req_start, latest_cached_dt) if latest_cached_dt is not None else req_start
-        )
+        remaining_start = max(req_start, latest_cached_dt) if latest_cached_dt is not None else req_start
         if remaining_start < req_end and not self._is_range_blocked_by_permanent_failure(
             symbol=symbol,
             timeframe=timeframe,
@@ -1160,9 +1114,7 @@ class DataCollector:
             requested_end=req_end,
         ):
             try:
-                chunk = self.client.fetch_ohlcv_with_taker(
-                    symbol, timeframe, str(remaining_start), str(req_end)
-                )
+                chunk = self.client.fetch_ohlcv_with_taker(symbol, timeframe, str(remaining_start), str(req_end))
                 if not chunk.empty:
                     new_parts.append(self._normalize_df(chunk))
             except BinanceKlinePermanentError as exc:
@@ -1268,10 +1220,7 @@ class DataCollector:
             temp_path = path.with_suffix(".tmp.parquet")
             combined.to_parquet(temp_path, index=False)
             temp_path.replace(path)
-            coverage = {
-                f"{col}_coverage": float(combined[col].notna().mean())
-                for col in _METRICS_NUMERIC_COLUMNS
-            }
+            coverage = {f"{col}_coverage": float(combined[col].notna().mean()) for col in _METRICS_NUMERIC_COLUMNS}
             self._save_meta(
                 {
                     self._meta_key(symbol, "metrics"): {
@@ -1310,15 +1259,10 @@ class DataCollector:
             try:
                 ea_dt = pd.to_datetime(ea, utc=True)
                 la_dt = pd.to_datetime(la, utc=True)
-                if (
-                    ea_dt <= req_start + pd.Timedelta(days=1)
-                    and la_dt >= req_end - pd.Timedelta(hours=12)
-                ):
+                if ea_dt <= req_start + pd.Timedelta(days=1) and la_dt >= req_end - pd.Timedelta(hours=12):
                     return
             except Exception as exc:
-                self.logger.debug(
-                    "Failed to parse metadata for %s funding: %s", symbol, exc
-                )
+                self.logger.debug("Failed to parse metadata for %s funding: %s", symbol, exc)
 
         cache_df = pd.DataFrame()
         if path.exists():
@@ -1358,9 +1302,7 @@ class DataCollector:
 
         vision_tasks = []
         while current_month_start < min(req_end, api_cutoff):
-            month_end = (current_month_start + pd.offsets.MonthEnd(1)).replace(
-                hour=23, minute=59, second=59
-            )
+            month_end = (current_month_start + pd.offsets.MonthEnd(1)).replace(hour=23, minute=59, second=59)
             if (
                 cache_df.empty
                 or cache_df["datetime"].min() > current_month_start
@@ -1379,9 +1321,7 @@ class DataCollector:
                 return pd.DataFrame()
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                future_to_task = {
-                    executor.submit(_fetch_month_funding, y, m): (y, m) for y, m in vision_tasks
-                }
+                future_to_task = {executor.submit(_fetch_month_funding, y, m): (y, m) for y, m in vision_tasks}
                 for future in concurrent.futures.as_completed(future_to_task):
                     try:
                         res_df = future.result()
@@ -1400,13 +1340,9 @@ class DataCollector:
             if latest_cached_dt is None or part_max_dt > latest_cached_dt:
                 latest_cached_dt = part_max_dt
 
-        remaining_start = (
-            max(req_start, latest_cached_dt) if latest_cached_dt is not None else req_start
-        )
+        remaining_start = max(req_start, latest_cached_dt) if latest_cached_dt is not None else req_start
         if remaining_start < req_end:
-            new_funding = self.client.fetch_funding_rate_history(
-                symbol, str(remaining_start), str(req_end)
-            )
+            new_funding = self.client.fetch_funding_rate_history(symbol, str(remaining_start), str(req_end))
             if not new_funding.empty:
                 new_parts.append(_normalize_funding_frame(new_funding))
 

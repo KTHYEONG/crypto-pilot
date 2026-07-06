@@ -90,7 +90,8 @@ def test_phase_objectives_write_lcb_ucb_attrs(
     assert len(trial.reported_steps) == 3
 
     a2 = objective_phase_a2_sortino_mdd(trial_obj, ctx)
-    assert isinstance(a2, tuple) and len(a2) == 2
+    assert isinstance(a2, tuple)
+    assert len(a2) == 2
     assert "sortino_lcb" in trial.user_attrs
     assert "mdd_ucb" in trial.user_attrs
     assert a2[0] == lcb([0.20, 0.30, 0.10], k=1.0)

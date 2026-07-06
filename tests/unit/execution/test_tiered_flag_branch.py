@@ -1,4 +1,5 @@
 """USE_CS_RANK_ENGINE 플래그 분기 smoke test."""
+
 from __future__ import annotations
 
 from unittest.mock import patch

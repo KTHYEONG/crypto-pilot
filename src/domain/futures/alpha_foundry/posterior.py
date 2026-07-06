@@ -1,4 +1,5 @@
-"""Alpha Foundry hierarchical posterior shrinkage. [ADR_20260706_ALPHA_FOUNDRY_SYNC]"""
+"""Alpha Foundry hierarchical posterior shrinkage. [ADR_20260706_ALPHA_FOUNDRY_SYNC]
+[ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]"""
 
 from __future__ import annotations
 
@@ -58,19 +59,12 @@ def shrink_l1_evidence_hierarchical(
 
         w = n_eff_cell / (n_eff_cell + config.prior_effective_n)
         mu_post = w * cell_mu + (1 - w) * fam_mu
-        sigma_post = np.sqrt(
-            w ** 2 * max(grp["net_bps"].std(), 1e-6) ** 2
-            + (1 - w) ** 2 * fam_sigma ** 2
-        )
+        sigma_post = np.sqrt(w**2 * max(grp["net_bps"].std(), 1e-6) ** 2 + (1 - w) ** 2 * fam_sigma**2)
 
-        prob_mu_gt_cost = 1.0 - float(scipy_stats.norm.cdf(
-            (cost_bps - mu_post) / max(sigma_post, 1e-10)
-        ))
+        prob_mu_gt_cost = 1.0 - float(scipy_stats.norm.cdf((cost_bps - mu_post) / max(sigma_post, 1e-10)))
 
         lcb_net_bps = mu_post - 1.0 * sigma_post
-        fold_pass_ratio = float(
-            (grp["net_bps"] > cost_bps).mean()
-        )
+        fold_pass_ratio = float((grp["net_bps"] > cost_bps).mean())
         regime_stability = 0.0
         q_value = 1.0 - prob_mu_gt_cost
         quality_weight = max(0.0, min(1.0, 2.0 * prob_mu_gt_cost - 1.0)) * fold_pass_ratio
@@ -86,20 +80,22 @@ def shrink_l1_evidence_hierarchical(
             activation_contract = "observe"
             quality_weight = 0.0
 
-        results.append(L1PosteriorEvidence(
-            symbol=symbol,
-            recipe_id=recipe_id,
-            family=family,
-            timeframe=timeframe,
-            activation_context=activation_context,
-            posterior_mu_bps=float(mu_post),
-            posterior_sigma_bps=float(sigma_post),
-            prob_mu_gt_cost=float(prob_mu_gt_cost),
-            lcb_net_bps=float(lcb_net_bps),
-            q_value=float(q_value),
-            fold_pass_ratio=fold_pass_ratio,
-            regime_stability=regime_stability,
-            quality_weight=quality_weight,
-            activation_contract=activation_contract,
-        ))
+        results.append(
+            L1PosteriorEvidence(
+                symbol=symbol,
+                recipe_id=recipe_id,
+                family=family,
+                timeframe=timeframe,
+                activation_context=activation_context,
+                posterior_mu_bps=float(mu_post),
+                posterior_sigma_bps=float(sigma_post),
+                prob_mu_gt_cost=float(prob_mu_gt_cost),
+                lcb_net_bps=float(lcb_net_bps),
+                q_value=float(q_value),
+                fold_pass_ratio=fold_pass_ratio,
+                regime_stability=regime_stability,
+                quality_weight=quality_weight,
+                activation_contract=activation_contract,
+            )
+        )
     return tuple(results)

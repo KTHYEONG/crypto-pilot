@@ -56,7 +56,6 @@ class AlignedMarketData:
     symbol_meta: dict[str, NDArray[np.float32]] | None = None
 
 
-
 _ALIGNED_DATA_MAPS_CACHE: dict[
     tuple[int, tuple[str, ...], str],
     tuple[AlignedMarketData, dict[str, tuple[int, int]]],
@@ -115,9 +114,7 @@ def align_data_maps(
         raise ValueError("unable to align data maps")
     eff_len = int(info["eff_ref_len"])
     offsets: dict[str, int] = info["alignment_offsets"]
-    valid_symbols = tuple(
-        sym for sym in symbols if sym in offsets and sym in data_maps and tf in data_maps[sym]
-    )
+    valid_symbols = tuple(sym for sym in symbols if sym in offsets and sym in data_maps and tf in data_maps[sym])
     if not valid_symbols:
         raise ValueError("no symbols available after alignment")
 
@@ -175,9 +172,7 @@ def align_data_maps(
         close_2d[:, col] = frame["close"].iloc[start:end].to_numpy(dtype=np.float64)
         volume_2d[:, col] = frame["volume"].iloc[start:end].to_numpy(dtype=np.float64)
         if "funding_rate_sum" in frame.columns:
-            funding_2d[:, col] = frame["funding_rate_sum"].iloc[start:end].to_numpy(
-                dtype=np.float64
-            )
+            funding_2d[:, col] = frame["funding_rate_sum"].iloc[start:end].to_numpy(dtype=np.float64)
         elif "funding_rate" in frame.columns:
             funding_2d[:, col] = frame["funding_rate"].iloc[start:end].to_numpy(dtype=np.float64)
         if "basis" in frame.columns or "basis_rate" in frame.columns:
@@ -211,21 +206,13 @@ def align_data_maps(
         if "adv_usdt" in frame.columns:
             adv_usdt_2d[:, col] = frame["adv_usdt"].iloc[start:end].to_numpy(dtype=np.float64)
         if "execution_cost_bps" in frame.columns:
-            execution_cost_bps_2d[:, col] = frame["execution_cost_bps"].iloc[start:end].to_numpy(
-                dtype=np.float64
-            )
+            execution_cost_bps_2d[:, col] = frame["execution_cost_bps"].iloc[start:end].to_numpy(dtype=np.float64)
         if "universe_active_mask" in frame.columns:
-            active_mask[:, col] = frame["universe_active_mask"].iloc[start:end].to_numpy(
-                dtype=bool
-            )
+            active_mask[:, col] = frame["universe_active_mask"].iloc[start:end].to_numpy(dtype=bool)
         if "universe_entry_warm_mask" in frame.columns:
-            warm_mask[:, col] = frame["universe_entry_warm_mask"].iloc[start:end].to_numpy(
-                dtype=bool
-            )
+            warm_mask[:, col] = frame["universe_entry_warm_mask"].iloc[start:end].to_numpy(dtype=bool)
         if "entry_block_mask" in frame.columns:
-            entry_block_mask[:, col] = frame["entry_block_mask"].iloc[start:end].to_numpy(
-                dtype=bool
-            )
+            entry_block_mask[:, col] = frame["entry_block_mask"].iloc[start:end].to_numpy(dtype=bool)
         if "kill_signal" in frame.columns:
             kill_mask[:, col] = frame["kill_signal"].iloc[start:end].to_numpy(dtype=bool)
         # Phase D/E: per-symbol 정적 메타 (PIT-safe: aligned window의 첫 유효값 사용)
@@ -246,33 +233,23 @@ def align_data_maps(
         if "inference_active_mask" in frame.columns:
             if _inf_active is None:
                 _inf_active = np.ones((eff_len, n), dtype=bool)
-            _inf_active[:, col] = frame["inference_active_mask"].iloc[start:end].to_numpy(
-                dtype=bool
-            )
+            _inf_active[:, col] = frame["inference_active_mask"].iloc[start:end].to_numpy(dtype=bool)
         if "inference_entry_warm_mask" in frame.columns:
             if _inf_warm is None:
                 _inf_warm = np.ones((eff_len, n), dtype=bool)
-            _inf_warm[:, col] = frame["inference_entry_warm_mask"].iloc[start:end].to_numpy(
-                dtype=bool
-            )
+            _inf_warm[:, col] = frame["inference_entry_warm_mask"].iloc[start:end].to_numpy(dtype=bool)
         if "execution_eligibility_mask" in frame.columns:
             if _execution_eligibility is None:
                 _execution_eligibility = np.ones((eff_len, n), dtype=bool)
-            _execution_eligibility[:, col] = frame["execution_eligibility_mask"].iloc[start:end].to_numpy(
-                dtype=bool
-            )
+            _execution_eligibility[:, col] = frame["execution_eligibility_mask"].iloc[start:end].to_numpy(dtype=bool)
         if "strategy_readiness_mask" in frame.columns:
             if _strategy_readiness is None:
                 _strategy_readiness = np.ones((eff_len, n), dtype=bool)
-            _strategy_readiness[:, col] = frame["strategy_readiness_mask"].iloc[start:end].to_numpy(
-                dtype=bool
-            )
+            _strategy_readiness[:, col] = frame["strategy_readiness_mask"].iloc[start:end].to_numpy(dtype=bool)
         if "promotion_active_mask" in frame.columns:
             if _promotion_active is None:
                 _promotion_active = np.ones((eff_len, n), dtype=bool)
-            _promotion_active[:, col] = frame["promotion_active_mask"].iloc[start:end].to_numpy(
-                dtype=bool
-            )
+            _promotion_active[:, col] = frame["promotion_active_mask"].iloc[start:end].to_numpy(dtype=bool)
         if datetimes is None:
             datetimes = np.asarray(
                 frame["datetime"].iloc[start:end].to_numpy(),
@@ -340,8 +317,7 @@ def align_data_maps(
             r_calendar = getattr(readiness_cube, "calendar", None)
             r_iid_tuple: tuple[str, ...] = getattr(readiness_cube, "instrument_ids", ())
             r_sym_idx: dict[str, int] = {
-                (iid.split(":")[-1] if ":" in iid else iid): r_n
-                for r_n, iid in enumerate(r_iid_tuple)
+                (iid.split(":")[-1] if ":" in iid else iid): r_n for r_n, iid in enumerate(r_iid_tuple)
             }
             if r_calendar is not None:
                 r_cal_ns = np.asarray(
@@ -362,9 +338,7 @@ def align_data_maps(
                         if sym not in r_sym_idx:
                             continue
                         r_n = r_sym_idx[sym]
-                        _strategy_readiness[t_valid_r, col] = readiness_cube.ready[
-                            s_idx, p_valid_r, r_n
-                        ]
+                        _strategy_readiness[t_valid_r, col] = readiness_cube.ready[s_idx, p_valid_r, r_n]
     # ── end readiness_cube join ───────────────────────────────────────────────
 
     symbol_meta = {
@@ -399,12 +373,8 @@ def align_data_maps(
         promotion_active_mask=_promotion_active,
         vol_30d_1d=None if symbol_meta is None else symbol_meta.get("vol_30d"),
         friction_score_1d=None if symbol_meta is None else symbol_meta.get("friction_score"),
-        alpha_capacity_score_1d=(
-            None if symbol_meta is None else symbol_meta.get("alpha_capacity_score")
-        ),
-        diversification_score_1d=(
-            None if symbol_meta is None else symbol_meta.get("diversification_score")
-        ),
+        alpha_capacity_score_1d=(None if symbol_meta is None else symbol_meta.get("alpha_capacity_score")),
+        diversification_score_1d=(None if symbol_meta is None else symbol_meta.get("diversification_score")),
         tradeable_score_1d=None if symbol_meta is None else symbol_meta.get("tradeable_score"),
         cluster_id_1d=None if symbol_meta is None else symbol_meta.get("cluster_id"),
         beta_vs_market_1d=None if symbol_meta is None else symbol_meta.get("beta_vs_market"),

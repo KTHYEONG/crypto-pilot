@@ -14,6 +14,7 @@ from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_panel(
     *,
     n_bars: int,
@@ -71,6 +72,7 @@ def _make_panel(
 # S7 (D7 - LTF fidelity): 1h signal → 1h base preserves bars; 4h base loses most
 # ---------------------------------------------------------------------------
 
+
 class TestProjectPanelLtfFidelity:
     """S7: LTF (1h) projection fidelity across different base grids."""
 
@@ -97,9 +99,7 @@ class TestProjectPanelLtfFidelity:
 
         # Assert
         active_count = int(np.sum(proj.valid_mask_2d))
-        assert active_count == 3, (
-            f"1h→1h projection should preserve all 3 active bars; got {active_count}"
-        )
+        assert active_count == 3, f"1h→1h projection should preserve all 3 active bars; got {active_count}"
 
     def test_project_panel_ltf_fidelity_4h_base_loses_most_active_bars(self) -> None:
         """1h signal projected to 4h base grid: only 1 bar survives (searchsorted last).
@@ -125,9 +125,7 @@ class TestProjectPanelLtfFidelity:
 
         # Assert
         active_count = int(np.sum(proj.valid_mask_2d))
-        assert active_count < 3, (
-            f"1h→4h projection should lose bars (LTF resolution loss); got {active_count} active"
-        )
+        assert active_count < 3, f"1h→4h projection should lose bars (LTF resolution loss); got {active_count} active"
 
     def test_project_panel_ltf_fidelity_1h_vs_4h_base_comparison(self) -> None:
         """1h base preserves more active bars than 4h base for a 1h signal.
@@ -158,9 +156,7 @@ class TestProjectPanelLtfFidelity:
         active_4h = int(np.sum(proj_4h.valid_mask_2d))
 
         # Assert
-        assert active_1h > active_4h, (
-            f"1h base should preserve more signal ({active_1h}) than 4h base ({active_4h})"
-        )
+        assert active_1h > active_4h, f"1h base should preserve more signal ({active_1h}) than 4h base ({active_4h})"
 
     def test_project_panel_ltf_fidelity_output_shape_matches_base_grid(self) -> None:
         """Projected panel T dimension must match base_datetimes length.
@@ -190,6 +186,7 @@ class TestProjectPanelLtfFidelity:
 # ---------------------------------------------------------------------------
 # S8 (D7 - HTF fidelity): 6h signal → both 1h and 4h base give consistent coverage
 # ---------------------------------------------------------------------------
+
 
 class TestProjectPanelHtfFidelity:
     """S8: HTF (6h) backward-asof projection is look-ahead-safe on both base grids."""
@@ -236,9 +233,7 @@ class TestProjectPanelHtfFidelity:
         # Assert: 1h base has more active coverage (6 1h bars per 6h bar vs 1.5 4h bars)
         active_1h = int(np.sum(proj_1h.valid_mask_2d))
         active_4h = int(np.sum(proj_4h.valid_mask_2d))
-        assert active_1h > active_4h, (
-            f"6h→1h base should fill more bars ({active_1h}) than 6h→4h ({active_4h})"
-        )
+        assert active_1h > active_4h, f"6h→1h base should fill more bars ({active_1h}) than 6h→4h ({active_4h})"
 
     def test_project_panel_htf_fidelity_no_future_reference_1h_base(self) -> None:
         """6h→1h base: bar t must not reference a 6h bar that opens after t.
@@ -306,6 +301,7 @@ class TestProjectPanelHtfFidelity:
 # S2 (C1 - inject_full_grid): winning_keys filter bypass logic
 # ---------------------------------------------------------------------------
 
+
 class TestInjectFullGridFilter:
     """S2: inject_full_grid parameter controls winning_keys filter bypass.
 
@@ -343,9 +339,7 @@ class TestInjectFullGridFilter:
         passed = [(f, v) for f, v in candidate_panels if _passes_filter(f, v)]
 
         # Assert
-        assert passed == [("family_a", "v1")], (
-            f"inject_full_grid=False should admit only winners; got {passed}"
-        )
+        assert passed == [("family_a", "v1")], f"inject_full_grid=False should admit only winners; got {passed}"
 
     def test_inject_full_grid_filter_logic_when_true_admits_all_panels(self) -> None:
         """inject_full_grid=True contract: ALL panels pass regardless of winning_keys.
@@ -374,9 +368,7 @@ class TestInjectFullGridFilter:
         passed = [(f, v) for f, v in candidate_panels if _passes_filter(f, v)]
 
         # Assert
-        assert len(passed) == 3, (
-            f"inject_full_grid=True should admit all panels; got {len(passed)}: {passed}"
-        )
+        assert len(passed) == 3, f"inject_full_grid=True should admit all panels; got {len(passed)}: {passed}"
 
     def test_inject_full_grid_empty_winning_keys_when_true_still_admits_all(self) -> None:
         """inject_full_grid=True with empty winning_keys still admits all panels.
@@ -406,6 +398,7 @@ class TestInjectFullGridFilter:
 # ---------------------------------------------------------------------------
 # S4 (C3 - metadata tagging): probe_origin flag on projected panels
 # ---------------------------------------------------------------------------
+
 
 class TestProbeOriginMetadataTagging:
     """S4: projected probe panels must carry probe_origin=True in metadata."""
@@ -447,12 +440,8 @@ class TestProbeOriginMetadataTagging:
         projected = _project_panel_to_base_grid(panel, base_datetimes=dt_4h, tf_i="6h", base_tf="4h")
 
         # Assert
-        assert projected.metadata.get("probe_origin") is True, (
-            "probe_origin=True must propagate through projection"
-        )
-        assert projected.metadata.get("probe_tf") == "6h", (
-            "probe_tf must propagate through projection"
-        )
+        assert projected.metadata.get("probe_origin") is True, "probe_origin=True must propagate through projection"
+        assert projected.metadata.get("probe_tf") == "6h", "probe_tf must propagate through projection"
 
     def test_probe_origin_metadata_ic_tstat_propagates(self) -> None:
         """probe_ic_tstat value in metadata propagates through projection.
@@ -518,6 +507,7 @@ class TestProbeOriginMetadataTagging:
 # S6 (D4 - cost SSOT): ExecutionCostModel.round_trip_bps() == _DEFAULT_RT_BPS
 # ---------------------------------------------------------------------------
 
+
 class TestProbeCostSSOT:
     """S6: ExecutionCostModel SSOT and _DEFAULT_RT_BPS must be identical."""
 
@@ -540,8 +530,7 @@ class TestProbeCostSSOT:
 
         # Assert
         assert probe_cost == pytest.approx(_DEFAULT_RT_BPS, rel=1e-6), (
-            f"ExecutionCostModel().round_trip_bps()={probe_cost} must equal "
-            f"config._DEFAULT_RT_BPS={_DEFAULT_RT_BPS}"
+            f"ExecutionCostModel().round_trip_bps()={probe_cost} must equal config._DEFAULT_RT_BPS={_DEFAULT_RT_BPS}"
         )
 
     def test_execution_cost_model_default_round_trip_is_7_5_bps(self) -> None:
@@ -557,9 +546,7 @@ class TestProbeCostSSOT:
         rt = ExecutionCostModel().round_trip_bps()
 
         # Assert
-        assert rt == pytest.approx(7.5, rel=1e-9), (
-            f"Default round_trip_bps should be 7.5; got {rt}"
-        )
+        assert rt == pytest.approx(7.5, rel=1e-9), f"Default round_trip_bps should be 7.5; got {rt}"
 
     def test_execution_cost_model_default_is_not_6_bps(self) -> None:
         """Default round_trip_bps must NOT be 6.0 (the stale probe default).

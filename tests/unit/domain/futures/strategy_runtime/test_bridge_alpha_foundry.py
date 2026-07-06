@@ -29,11 +29,19 @@ from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 
 
-def _b(panel_index: int, recipe_id: str = "r1", family: str = "trend_ma",
-       variant: str = "ema_12_72_4h", source: str = "catalog_exact") -> PanelRecipeBinding:
+def _b(
+    panel_index: int,
+    recipe_id: str = "r1",
+    family: str = "trend_ma",
+    variant: str = "ema_12_72_4h",
+    source: str = "catalog_exact",
+) -> PanelRecipeBinding:
     return PanelRecipeBinding(
-        panel_index=panel_index, recipe_id=recipe_id, family=family,
-        variant=variant, source=source,
+        panel_index=panel_index,
+        recipe_id=recipe_id,
+        family=family,
+        variant=variant,
+        source=source,
     )
 
 
@@ -162,43 +170,64 @@ def _make_l0_artifacts(evidences: list[CheapGateEvidence]) -> object:
     for ev in evidences:
         is_passing = ev.gate_passed
         budget_units = 1 if is_passing else 0
-        candidates.append(L0SignalCandidate(
-            run_id="test", timeframe=ev.timeframe, family="", variant="",
-            recipe_id=ev.recipe_id, archetype="trend",
-            source="catalog_exact",
-            n_events=ev.n_events, effective_n=ev.effective_n,
-            mean_net_bps=ev.mean_net_bps, block_lcb_bps=ev.block_lcb_bps,
-            nw_tstat=ev.nw_tstat,
-            bootstrap_lcb_bps=ev.bootstrap_lcb_bps,
-            bootstrap_agree=ev.bootstrap_agree,
-            cost_drag_ratio=ev.cost_drag_ratio,
-            turnover_per_year=ev.turnover_per_year,
-            max_abs_corr_in_bucket=0.0,
-            tf_coverage_count=0, sign_agreement_ratio=0.0,
-            corroboration_tier="insufficient_coverage",
-            discovery_tier="candidate" if is_passing else "blocked",
-            l1_priority_score=ev.block_lcb_bps,
-            l1_budget_units=budget_units,
-            hard_reject_reasons=ev.reject_reasons,
-            soft_flags=(),
-        ))
+        candidates.append(
+            L0SignalCandidate(
+                run_id="test",
+                timeframe=ev.timeframe,
+                family="",
+                variant="",
+                recipe_id=ev.recipe_id,
+                archetype="trend",
+                source="catalog_exact",
+                n_events=ev.n_events,
+                effective_n=ev.effective_n,
+                mean_net_bps=ev.mean_net_bps,
+                block_lcb_bps=ev.block_lcb_bps,
+                nw_tstat=ev.nw_tstat,
+                bootstrap_lcb_bps=ev.bootstrap_lcb_bps,
+                bootstrap_agree=ev.bootstrap_agree,
+                cost_drag_ratio=ev.cost_drag_ratio,
+                turnover_per_year=ev.turnover_per_year,
+                max_abs_corr_in_bucket=0.0,
+                tf_coverage_count=0,
+                sign_agreement_ratio=0.0,
+                corroboration_tier="insufficient_coverage",
+                discovery_tier="candidate" if is_passing else "blocked",
+                l1_priority_score=ev.block_lcb_bps,
+                l1_budget_units=budget_units,
+                hard_reject_reasons=ev.reject_reasons,
+                soft_flags=(),
+            )
+        )
 
     evidence_rows = [
         AlphaFoundryEvidenceRow(
-            run_id="test", timeframe=ev.timeframe, family="", variant="",
-            recipe_id=ev.recipe_id, archetype="", n_events=ev.n_events,
-            effective_n=ev.effective_n, mean_net_bps=ev.mean_net_bps,
-            nw_tstat=ev.nw_tstat, block_lcb_bps=ev.block_lcb_bps,
-            rank_ic=ev.rank_ic, incremental_rank_ic=ev.incremental_rank_ic,
+            run_id="test",
+            timeframe=ev.timeframe,
+            family="",
+            variant="",
+            recipe_id=ev.recipe_id,
+            archetype="",
+            n_events=ev.n_events,
+            effective_n=ev.effective_n,
+            mean_net_bps=ev.mean_net_bps,
+            nw_tstat=ev.nw_tstat,
+            block_lcb_bps=ev.block_lcb_bps,
+            rank_ic=ev.rank_ic,
+            incremental_rank_ic=ev.incremental_rank_ic,
             cost_drag_ratio=ev.cost_drag_ratio,
             turnover_per_year=ev.turnover_per_year,
             compute_cost_score=ev.compute_cost_score,
             gate_passed=ev.gate_passed,
             reject_reasons="|".join(ev.reject_reasons),
-            bucket_key=f":{ev.timeframe}", bucket_rank=0,
-            selected_for_l1=ev.gate_passed, redundant_with="",
-            bucket_eff_test_count=1.0, global_eff_test_count=1.0,
-            bootstrap_lcb_bps=ev.bootstrap_lcb_bps, bootstrap_agree=ev.bootstrap_agree,
+            bucket_key=f":{ev.timeframe}",
+            bucket_rank=0,
+            selected_for_l1=ev.gate_passed,
+            redundant_with="",
+            bucket_eff_test_count=1.0,
+            global_eff_test_count=1.0,
+            bootstrap_lcb_bps=ev.bootstrap_lcb_bps,
+            bootstrap_agree=ev.bootstrap_agree,
             created_at_ms=1000,
         )
         for ev in evidences
@@ -213,9 +242,12 @@ def _make_l0_artifacts(evidences: list[CheapGateEvidence]) -> object:
         passed_recipe_ids=tuple(c.recipe_id for c in candidates if c.l1_budget_units > 0),
         reject_reason_counts=reject_reason_counts,
         stage_counts=L0ReportStageCounts(
-            hard_reject=hard_reject, soft_reject=0,
-            seeded=seeded, budget_exhausted=0,
-            tf_contradicted=0, l1_queued=seeded,
+            hard_reject=hard_reject,
+            soft_reject=0,
+            seeded=seeded,
+            budget_exhausted=0,
+            tf_contradicted=0,
+            l1_queued=seeded,
         ),
         evidence_rows=tuple(evidence_rows),
     )
@@ -265,10 +297,12 @@ class TestAlphaFoundryAuditMode:
     def test_audit_all_panels_preserved(self, mocker: MockerFixture) -> None:
         mocker.patch(
             "src.domain.futures.alpha_foundry.pipeline.run_alpha_foundry_l0_pipeline",
-            return_value=_make_l0_artifacts([
-                make_passing_evidence("r1"),
-                make_rejected_evidence("r2"),
-            ]),
+            return_value=_make_l0_artifacts(
+                [
+                    make_passing_evidence("r1"),
+                    make_rejected_evidence("r2"),
+                ]
+            ),
         )
 
         panel_pass = make_panel(variant="ema_12_72_4h", recipe_id="r1")
@@ -312,10 +346,12 @@ class TestAlphaFoundryGateMode:
     def test_gate_keeps_only_passed_bound_panels(self, mocker: MockerFixture) -> None:
         mocker.patch(
             "src.domain.futures.alpha_foundry.pipeline.run_alpha_foundry_l0_pipeline",
-            return_value=_make_l0_artifacts([
-                make_passing_evidence("r1"),
-                make_rejected_evidence("r2"),
-            ]),
+            return_value=_make_l0_artifacts(
+                [
+                    make_passing_evidence("r1"),
+                    make_rejected_evidence("r2"),
+                ]
+            ),
         )
 
         panel_pass = make_panel(variant="ema_12_72_4h", recipe_id="r1")
@@ -484,6 +520,97 @@ class TestBindPanelsToAlphaRecipes:
         assert len(bindings) <= 1
 
 
+class TestAlphaFoundryGateModeHandoff:
+    """Scenario S1-2, S3-3: bridge gate uses passed_recipe_ids only."""
+
+    def test_gate_uses_passed_recipe_ids_only(self, mocker: MockerFixture) -> None:
+        panel_r1 = make_panel(variant="ema_12_72_4h", recipe_id="r1")
+        panel_r2 = make_panel(family="trend_ma", variant="ema_12_72_4h", recipe_id="r2")
+        panel_r3 = make_panel(family="unknown", variant="no_match_4h", recipe_id="r3")
+
+        def _l0_with_passed_only(  # type: ignore[no-untyped-def]
+            *args, **kwargs
+        ) -> AlphaFoundryL0Artifacts:
+            base = _make_l0_artifacts(
+                [
+                    make_passing_evidence("r1"),
+                    make_passing_evidence("r2"),
+                    make_passing_evidence("r3"),
+                ]
+            )
+            return dataclasses.replace(base, passed_recipe_ids=("r2",))
+
+        mocker.patch(
+            "src.domain.futures.alpha_foundry.pipeline.run_alpha_foundry_l0_pipeline",
+            side_effect=_l0_with_passed_only,
+        )
+
+        bindings = [
+            _b(0, recipe_id="r1"),
+            _b(1, recipe_id="r2"),
+            _b(2, recipe_id="r3"),
+        ]
+
+        aligned = make_aligned_market_data(t=12, n=2)
+        config = make_runtime_config(Path("/tmp/af_test"), mode="gate")  # noqa: S108
+        recipe_pass = make_recipe()
+        recipe_pass = dataclasses.replace(recipe_pass, recipe_id="r1")
+
+        result = run_alpha_foundry_l0_gate(
+            panels=[panel_r1, panel_r2, panel_r3],
+            bindings=bindings,
+            recipes={"r1": recipe_pass, "r2": recipe_pass, "r3": recipe_pass},
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            runtime_config=config,
+            run_id="test_gate_handoff",
+            timeframe="4h",
+        )
+
+        assert result.report is not None
+        assert result.report.n_passed == 1
+        assert len(result.panels_for_l1) == 1
+        panel_sent = result.panels_for_l1[0]
+        assert panel_sent.metadata.get("recipe_id") == "r2"
+
+    def test_bridge_handles_empty_passed_without_seed_fallback(self, mocker: MockerFixture) -> None:
+        def _l0_empty_passed(  # type: ignore[no-untyped-def]
+            *args, **kwargs
+        ) -> AlphaFoundryL0Artifacts:
+            base = _make_l0_artifacts(
+                [
+                    make_passing_evidence("r1"),
+                    make_rejected_evidence("r2"),
+                ]
+            )
+            return dataclasses.replace(base, passed_recipe_ids=())
+
+        mocker.patch(
+            "src.domain.futures.alpha_foundry.pipeline.run_alpha_foundry_l0_pipeline",
+            side_effect=_l0_empty_passed,
+        )
+
+        panel = make_panel(recipe_id="r1")
+        bindings = [_b(0)]
+        aligned = make_aligned_market_data(t=12, n=2)
+        config = make_runtime_config(Path("/tmp/af_test"), mode="gate")  # noqa: S108
+
+        result = run_alpha_foundry_l0_gate(
+            panels=[panel],
+            bindings=bindings,
+            recipes={},
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            runtime_config=config,
+            run_id="test_empty_passed",
+            timeframe="4h",
+        )
+
+        assert len(result.panels_for_l1) == 0
+        assert result.report is not None
+        assert result.report.n_passed == 0
+
+
 class TestRunAlphaFoundryGateWithBindings:
     """S2-10: unmatched panels excluded from evidence."""
 
@@ -530,18 +657,24 @@ class TestSynthesizeRecipeFromPanel:
         aligned = make_aligned_market_data(t=12, n=2)
         t, n = aligned.close_2d.shape
         panel = CandidateSignalPanel(
-            family="trend_ma", variant="ema_12_72_4h", params=params,
-            datetimes=aligned.datetimes, symbols=aligned.symbols,
+            family="trend_ma",
+            variant="ema_12_72_4h",
+            params=params,
+            datetimes=aligned.datetimes,
+            symbols=aligned.symbols,
             signed_score_2d=np.ones((t, n), dtype=np.float64),
             side_hint_2d=np.ones((t, n), dtype=np.int8),
-            expected_holding_bars=3, min_holding_bars=1,
-            stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+            expected_holding_bars=3,
+            min_holding_bars=1,
+            stop_atr_mult=2.0,
+            take_profit_atr_mult=4.0,
             turnover_proxy_2d=np.zeros((t, n), dtype=np.float64),
             valid_mask_2d=np.ones((t, n), dtype=np.bool_),
             metadata={"recipe_id": synth_id},
         )
         result = synthesize_recipe_from_panel(
-            panel=panel, timeframe="4h",
+            panel=panel,
+            timeframe="4h",
             catalog_recipes={synth_id: recipe},
         )
         assert result.recipe_id == synth_id

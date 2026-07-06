@@ -1,4 +1,5 @@
-"""Alpha Foundry L2 posterior policy bridge. [ADR_20260706_ALPHA_FOUNDRY_SYNC]"""
+"""Alpha Foundry L2 posterior policy bridge. [ADR_20260706_ALPHA_FOUNDRY_SYNC]
+[ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]"""
 
 from __future__ import annotations
 
@@ -24,37 +25,39 @@ def convert_posterior_to_l2_sleeves(
     results: list[L2PosteriorSleeve] = []
     for ev in posterior:
         mu_eff = (
-            ev.posterior_mu_bps
-            - config.posterior_z * ev.posterior_sigma_bps
-            - config.cost_safety_mult * stress_cost
+            ev.posterior_mu_bps - config.posterior_z * ev.posterior_sigma_bps - config.cost_safety_mult * stress_cost
         )
         if ev.quality_weight <= 0.0 or ev.lcb_net_bps <= 0.0:
-            results.append(L2PosteriorSleeve(
-                symbol=ev.symbol,
-                recipe_id=ev.recipe_id,
-                family=ev.family,
-                timeframe=ev.timeframe,
-                activation_context=ev.activation_context,
-                mu_eff_bps=mu_eff,
-                sigma_bps=ev.posterior_sigma_bps,
-                quality_weight=ev.quality_weight,
-                side=0,
-                disabled_reason="non_positive_lcb",
-            ))
+            results.append(
+                L2PosteriorSleeve(
+                    symbol=ev.symbol,
+                    recipe_id=ev.recipe_id,
+                    family=ev.family,
+                    timeframe=ev.timeframe,
+                    activation_context=ev.activation_context,
+                    mu_eff_bps=mu_eff,
+                    sigma_bps=ev.posterior_sigma_bps,
+                    quality_weight=ev.quality_weight,
+                    side=0,
+                    disabled_reason="non_positive_lcb",
+                )
+            )
         else:
             side = 1 if mu_eff > 0 else -1 if mu_eff < 0 else 0
-            results.append(L2PosteriorSleeve(
-                symbol=ev.symbol,
-                recipe_id=ev.recipe_id,
-                family=ev.family,
-                timeframe=ev.timeframe,
-                activation_context=ev.activation_context,
-                mu_eff_bps=mu_eff,
-                sigma_bps=ev.posterior_sigma_bps,
-                quality_weight=ev.quality_weight,
-                side=cast(Literal[-1, 0, 1], side),
-                disabled_reason="",
-            ))
+            results.append(
+                L2PosteriorSleeve(
+                    symbol=ev.symbol,
+                    recipe_id=ev.recipe_id,
+                    family=ev.family,
+                    timeframe=ev.timeframe,
+                    activation_context=ev.activation_context,
+                    mu_eff_bps=mu_eff,
+                    sigma_bps=ev.posterior_sigma_bps,
+                    quality_weight=ev.quality_weight,
+                    side=cast(Literal[-1, 0, 1], side),
+                    disabled_reason="",
+                )
+            )
     return tuple(results)
 
 
@@ -94,11 +97,13 @@ def resolve_staged_search_budget(
     for stage in stages:
         d = n_dimensions.get(stage, 1)
         n_trials_val = max(requested_trials // len(stages), 20 * d)
-        budgets.append(StagedSearchBudget(
-            stage=cast(Literal["signal", "risk", "regime", "deployment"], stage),
-            n_trials=n_trials_val,
-            min_feasible_eff=0.05,
-            patience=max(5, d * 2),
-            seed_count=seed_count,
-        ))
+        budgets.append(
+            StagedSearchBudget(
+                stage=cast(Literal["signal", "risk", "regime", "deployment"], stage),
+                n_trials=n_trials_val,
+                min_feasible_eff=0.05,
+                patience=max(5, d * 2),
+                seed_count=seed_count,
+            )
+        )
     return tuple(budgets)

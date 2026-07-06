@@ -6,9 +6,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 
-def winsorized_cs_zscore(
-    values: NDArray[np.float64], clip_z: float, min_symbols: int
-) -> NDArray[np.float64]:
+def winsorized_cs_zscore(values: NDArray[np.float64], clip_z: float, min_symbols: int) -> NDArray[np.float64]:
     """Compute robust cross-sectional z-score by timestamp."""
     if values.ndim != 2:
         raise ValueError("values must be 2D")
@@ -29,9 +27,7 @@ def winsorized_cs_zscore(
     return out
 
 
-def cross_sectional_rank(
-    values: NDArray[np.float64], mask: NDArray[np.bool_], min_symbols: int
-) -> NDArray[np.float64]:
+def cross_sectional_rank(values: NDArray[np.float64], mask: NDArray[np.bool_], min_symbols: int) -> NDArray[np.float64]:
     """Compute [0, 1] percentile rank inside each timestamp."""
     out = np.full(values.shape, np.nan, dtype=np.float64)
     t_len, _n_len = values.shape

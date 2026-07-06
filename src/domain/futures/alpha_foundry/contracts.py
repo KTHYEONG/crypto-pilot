@@ -1,5 +1,6 @@
 """Alpha Foundry contracts and stage state machines.
 
+[ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
@@ -39,6 +40,28 @@ L0SoftFlag: TypeAlias = Literal[
     "insufficient_tf_coverage",
     "high_bucket_corr",
 ]
+
+L0HandoffExclusionReason: TypeAlias = Literal[
+    "",
+    "hard_reject",
+    "bucket_redundant",
+    "cross_bucket_redundant",
+    "budget_exhausted",
+    "non_positive_priority",
+    "missing_panel",
+]
+
+
+@dataclass(slots=True, frozen=True)
+class L0HandoffDecision:
+    recipe_id: str
+    bucket_key: BucketKey
+    candidate_tier: DiscoveryTier
+    eligible_for_diversity: bool
+    eligible_for_budget: bool
+    selected_for_l1: bool
+    budget_units: int
+    exclusion_reason: L0HandoffExclusionReason
 
 
 @dataclass(slots=True, frozen=True)
@@ -118,6 +141,7 @@ class L0ReportStageCounts:
     budget_exhausted: int
     tf_contradicted: int
     l1_queued: int
+    viable_candidates: int = 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -127,6 +151,7 @@ class L0L1Handoff:
     budget_by_bucket: dict[BucketKey, int]
     audit_rows_path: str
     mode: Literal["audit", "gate"]
+
 
 AlphaArchetype: TypeAlias = Literal[
     "trend",
@@ -436,7 +461,6 @@ class AlphaFoundryRuntimeConfig:
             raise ValueError(f"min_conviction_lcb_bps must be >= 0.0, got {self.min_conviction_lcb_bps}")
         if self.total_l1_verification_budget < 1:
             raise ValueError(f"total_l1_verification_budget must be >= 1, got {self.total_l1_verification_budget}")
-
 
 
 @dataclass(slots=True, frozen=True)

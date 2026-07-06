@@ -21,15 +21,17 @@ class DummyDataset:
         self.X = np.random.randn(size, 5)
         self.y_edge_bps = np.random.randn(size)
         self.edge_weight = np.ones(size)
-        self.event_index = pd.DataFrame({
-            "datetime": pd.date_range("2026-01-01", periods=size, freq="4h"),
-            "symbol": ["BTC"] * size,
-            "entry_idx": np.arange(size),
-            "family": ["trend_ma"] * size,
-            "variant": ["fast"] * size,
-            "side": [1.0] * size,
-            "expected_holding_bars": [6] * size,
-        })
+        self.event_index = pd.DataFrame(
+            {
+                "datetime": pd.date_range("2026-01-01", periods=size, freq="4h"),
+                "symbol": ["BTC"] * size,
+                "entry_idx": np.arange(size),
+                "family": ["trend_ma"] * size,
+                "variant": ["fast"] * size,
+                "side": [1.0] * size,
+                "expected_holding_bars": [6] * size,
+            }
+        )
         self.y_gate = np.ones(size, dtype=np.int8)
         self.gate_weight = np.ones(size)
         self.feature_names = ["f1", "f2", "f3", "f4", "f5"]
@@ -67,17 +69,14 @@ def test_run_candidate_walk_forward_prior_only_fallback(monkeypatch: pytest.Monk
     # Monkeypatch dataset builders to return DummyDataset
     monkeypatch.setattr(
         "src.domain.futures.strategy.candidate_workflow.build_candidate_dataset",
-        lambda *args, **kwargs: DummyDataset(10)
+        lambda *args, **kwargs: DummyDataset(10),
     )
     monkeypatch.setattr(
-        "src.domain.futures.strategy.candidate_workflow.fit_candidate_feature_schema",
-        lambda *args, **kwargs: {}
+        "src.domain.futures.strategy.candidate_workflow.fit_candidate_feature_schema", lambda *args, **kwargs: {}
     )
 
     labeled_events = pd.DataFrame()
-    folds = (
-        WFFold(fit_start=0, fit_end=5, cal_start=5, cal_end=7, oos_start=7, oos_end=10),
-    )
+    folds = (WFFold(fit_start=0, fit_end=5, cal_start=5, cal_end=7, oos_start=7, oos_end=10),)
 
     outputs = run_candidate_walk_forward(
         labeled_events=labeled_events,

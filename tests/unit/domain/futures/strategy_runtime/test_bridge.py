@@ -160,7 +160,6 @@ def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) 
     import numpy as np
     import pandas as pd
 
-
     t = 200
     datetimes = np.asarray(
         [np.datetime64("2026-01-01T00:00:00") + np.timedelta64(i, "h") for i in range(t)],
@@ -181,24 +180,26 @@ def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) 
         kill_mask=np.zeros((t, 1), dtype=bool),
         execution_cost_bps_2d=np.zeros((t, 1), dtype=np.float64),
     )
-    raw_events = pd.DataFrame({
-        "datetime": [datetimes[0]],
-        "symbol": ["BTCUSDT"],
-        "family": ["trend_ma"],
-        "variant": ["ema_12_72"],
-        "side": [1],
-        "raw_score": [0.9],
-        "score_z": [0.9],
-        "entry_idx": [0],
-        "exit_idx": [1],
-        "expected_holding_bars": [1],
-        "min_holding_bars": [0],
-        "stop_atr_mult": [50.0],
-        "take_profit_atr_mult": [50.0],
-        "turnover_proxy": [0.1],
-        "cost_floor_bps": [0.0],
-        "hurdle_bps": [0.0],
-    })
+    raw_events = pd.DataFrame(
+        {
+            "datetime": [datetimes[0]],
+            "symbol": ["BTCUSDT"],
+            "family": ["trend_ma"],
+            "variant": ["ema_12_72"],
+            "side": [1],
+            "raw_score": [0.9],
+            "score_z": [0.9],
+            "entry_idx": [0],
+            "exit_idx": [1],
+            "expected_holding_bars": [1],
+            "min_holding_bars": [0],
+            "stop_atr_mult": [50.0],
+            "take_profit_atr_mult": [50.0],
+            "turnover_proxy": [0.1],
+            "cost_floor_bps": [0.0],
+            "hurdle_bps": [0.0],
+        }
+    )
 
     monkeypatch.setattr("src.domain.futures.strategy.common.alignment.align_data_maps", lambda *_, **__: aligned)
     monkeypatch.setattr(
@@ -216,10 +217,13 @@ def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) 
     monkeypatch.setattr(
         "src.domain.futures.strategy.rule_diagnostics.compute_rule_diagnostics",
         lambda *_, **__: SimpleNamespace(
-            recommended_keep_variants=(), recommended_flip_variants=(),
-            recommended_keep_signal_cells=(), recommended_flip_signal_cells=(),
+            recommended_keep_variants=(),
+            recommended_flip_variants=(),
+            recommended_keep_signal_cells=(),
+            recommended_flip_signal_cells=(),
             recommendation_basis="fit_calibration",
-            recommendation_split=(0, 0), report_split=(0, 0),
+            recommendation_split=(0, 0),
+            report_split=(0, 0),
             recommendation_failure_report=None,
         ),
     )
@@ -262,6 +266,7 @@ def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) 
         *, models: object, dataset: object, p_pass: np.ndarray, cfg: object, **__: Any
     ) -> CandidateModelOutput:
         from src.domain.futures.strategy.candidate_contracts import EdgeSource
+
         n = p_pass.shape[0]
         neg_mu = np.full(n, -999.0, dtype=np.float64)
         zeros = np.zeros(n, dtype=np.float64)
@@ -281,6 +286,7 @@ def test_bridge_wf_fold_pass_ratio_blocks_when_all_folds_fail(monkeypatch: Any) 
             kelly_fraction=zeros,
             validation_diagnostics={},
         )
+
     monkeypatch.setattr("src.domain.futures.strategy.candidate_edge.predict_candidate_edges", fake_predict_edges)
 
 
@@ -330,7 +336,8 @@ def test_bridge_emits_profile_log_when_raw_events_empty(
 
     strategy_cfg = StrategyConfig()
     object.__setattr__(
-        strategy_cfg, "candidate",
+        strategy_cfg,
+        "candidate",
         replace(
             strategy_cfg.candidate,
             ml_fit_fraction=0.5,
@@ -463,6 +470,7 @@ def test_bridge_realized_fold_survival_fails_when_selected_realized_edge_is_nega
         *, models: object, dataset: object, p_pass: np.ndarray, cfg: object, **__: Any
     ) -> CandidateModelOutput:
         from src.domain.futures.strategy.candidate_contracts import EdgeSource
+
         zeros = np.zeros(1, dtype=np.float64)
         return CandidateModelOutput(
             events=getattr(dataset, "event_index", pd.DataFrame()),
@@ -633,6 +641,7 @@ def test_bridge_reports_shadow_profile_when_production_selection_stays_blocked(m
         *, models: object, dataset: object, p_pass: np.ndarray, cfg: object, **__: Any
     ) -> CandidateModelOutput:
         from src.domain.futures.strategy.candidate_contracts import EdgeSource
+
         n = len(getattr(dataset, "event_index", pd.DataFrame()))
         zeros = np.zeros(n, dtype=np.float64)
         net_bps = np.full(n, 42.0, dtype=np.float64)  # positive edge
@@ -819,33 +828,30 @@ def test_bridge_signal_only_silent_diagnostics(monkeypatch: Any) -> None:
 
     # signal_only=True 시 compute_rule_diagnostics 전체가 스킵되므로
     # captured_kwargs는 비어있어야 한다 (함수 자체가 호출 안 됨)
-    assert captured_kwargs == {}, (
-        f"signal_only=True일 때 compute_rule_diagnostics가 호출되면 안 됨: {captured_kwargs}"
-    )
-
+    assert captured_kwargs == {}, f"signal_only=True일 때 compute_rule_diagnostics가 호출되면 안 됨: {captured_kwargs}"
 
 
 def test_verify_data_integrity_happy_path() -> None:
     from src.domain.futures.strategy_runtime.bridge import verify_data_integrity
-    
+
     n_bars = 150
     close = np.linspace(100.0, 110.0, n_bars).reshape(n_bars, 1)
     high = close + 1.0
     low = close - 1.0
     volume = np.full((n_bars, 1), 500.0)
-    
+
     close_2d = np.hstack([close, close])
     high_2d = np.hstack([high, high])
     low_2d = np.hstack([low, low])
     volume_2d = np.hstack([volume, volume])
-    
+
     aligned = SimpleNamespace(
         close_2d=close_2d,
         high_2d=high_2d,
         low_2d=low_2d,
         volume_2d=volume_2d,
     )
-    
+
     report = verify_data_integrity(aligned, ["BTC", "ETH"], min_length=100)  # type: ignore
     assert report["BTC"]["status"] == "PASS"
     assert report["ETH"]["status"] == "PASS"
@@ -854,43 +860,43 @@ def test_verify_data_integrity_happy_path() -> None:
 
 def test_verify_data_integrity_edge_cases() -> None:
     from src.domain.futures.strategy_runtime.bridge import verify_data_integrity
-    
+
     n_bars = 50
     close = np.linspace(100.0, 110.0, n_bars).reshape(n_bars, 1)
     high = close + 1.0
     low = close - 1.0
     volume = np.full((n_bars, 1), 500.0)
-    
+
     close_eth = close.copy()
     close_eth[10] = np.nan
-    
+
     close_sol = np.full((n_bars, 1), 100.0)
     high_sol = np.full((n_bars, 1), 100.0)
     low_sol = np.full((n_bars, 1), 100.0)
-    
+
     high_ada = close - 2.0
     low_ada = close + 2.0
-    
+
     close_2d = np.hstack([close, close_eth, close_sol, close])
     high_2d = np.hstack([high, high, high_sol, high_ada])
     low_2d = np.hstack([low, low, low_sol, low_ada])
     volume_2d = np.hstack([volume, volume, volume, volume])
-    
+
     aligned = SimpleNamespace(
         close_2d=close_2d,
         high_2d=high_2d,
         low_2d=low_2d,
         volume_2d=volume_2d,
     )
-    
+
     report = verify_data_integrity(aligned, ["BTC", "ETH", "SOL", "ADA"], min_length=100)  # type: ignore
-    
+
     assert report["BTC"]["status"] == "FAIL"
     assert "too_short" in report["BTC"]["reasons"]
-    
+
     assert "excessive_nan" in report["ETH"]["reasons"]
     assert "too_short" in report["ETH"]["reasons"]
-    
+
     assert "stuck_price" in report["SOL"]["reasons"]
-    
+
     assert "hi_lo_violation" in report["ADA"]["reasons"]

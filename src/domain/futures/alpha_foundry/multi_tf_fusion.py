@@ -1,5 +1,6 @@
 """Alpha Foundry cross-timeframe corroboration fusion.
 
+[ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
 
@@ -48,9 +49,7 @@ def fuse_multi_timeframe_evidence(
     for (family, variant), group in combined.groupby(["family", "variant"]):
         for tf, tf_group in group.groupby("timeframe"):
             if len(tf_group) > 1:
-                raise ValueError(
-                    f"duplicate (family,variant,timeframe) rows: {family}/{variant}/{tf}"
-                )
+                raise ValueError(f"duplicate (family,variant,timeframe) rows: {family}/{variant}/{tf}")
             native_row = tf_group.iloc[0]
 
             others = group[group.timeframe != tf]
@@ -89,19 +88,20 @@ def fuse_multi_timeframe_evidence(
             else:
                 fused_conviction_score = base * 1.0
 
-            results.append(MultiTimeframeEvidence(
-                family=str(family),
-                variant=str(variant),
-                native_timeframe=str(tf),
-                native_recipe_id=str(native_row["recipe_id"]),
-                tf_coverage_count=tf_coverage_count,
-                sign_agreement_ratio=sign_agreement_ratio,
-                corroboration_tier=cast(CorroborationTier, tier),
-                fused_conviction_score=fused_conviction_score,
-            ))
+            results.append(
+                MultiTimeframeEvidence(
+                    family=str(family),
+                    variant=str(variant),
+                    native_timeframe=str(tf),
+                    native_recipe_id=str(native_row["recipe_id"]),
+                    tf_coverage_count=tf_coverage_count,
+                    sign_agreement_ratio=sign_agreement_ratio,
+                    corroboration_tier=cast(CorroborationTier, tier),
+                    fused_conviction_score=fused_conviction_score,
+                )
+            )
 
     return tuple(results)
-
 
 
 def index_multi_timeframe_evidence(

@@ -257,7 +257,8 @@ def select_layer2_champion(
     결정에 따라 pipeline 하드 게이트와 동기화하여 선정 단계에서도 필터링을 수행한다.
     """
     complete_trials = [
-        t for t in study.trials
+        t
+        for t in study.trials
         if t.state == optuna.trial.TrialState.COMPLETE
         and t.value is not None
         and t.value > -1e6
@@ -280,15 +281,10 @@ def select_layer2_champion(
         )
 
     # 1. feasible completed trials 분류 (Optuna constraints) — Fix C: 먼저 분류하여 n_trials_eff에 사용
-    feasible_trials = [
-        t for t in complete_trials
-        if all(c <= 0.0 for c in layer2_constraints_from_trial(t))
-    ]
+    feasible_trials = [t for t in complete_trials if all(c <= 0.0 for c in layer2_constraints_from_trial(t))]
 
     # 2. effective trial count 계산 — Fix C: feasible trials 서명만 사용 (DSR 벤치마크 정직화)
-    feasible_signatures = [
-        t.user_attrs["l2_block_log_growth_signature"] for t in feasible_trials
-    ]
+    feasible_signatures = [t.user_attrs["l2_block_log_growth_signature"] for t in feasible_trials]
     n_feasible = len(feasible_trials)
 
     if n_feasible >= 2:
@@ -304,11 +300,7 @@ def select_layer2_champion(
         n_trials_eff = float(max(n_feasible, 1))
 
     # 3. objective 값 기준으로 내림차순 정렬
-    feasible_sorted = sorted(
-        feasible_trials,
-        key=lambda t: t.value if t.value is not None else -1e6,
-        reverse=True
-    )
+    feasible_sorted = sorted(feasible_trials, key=lambda t: t.value if t.value is not None else -1e6, reverse=True)
 
     if not feasible_sorted:
         _logger.warning("[L2-SELECTION] feasible한 trials가 없음 -> fallback")
@@ -327,10 +319,7 @@ def select_layer2_champion(
 
     bars_per_year = _bars_per_year_for_tf(tf)
     # Fix C: DSR pool을 feasible trials로 제한 → 다중검정 벤치마크 정직화
-    completed_trial_sharpes = np.array(
-        [t.user_attrs["sharpe_hac_hybrid"] for t in feasible_trials],
-        dtype=np.float64
-    )
+    completed_trial_sharpes = np.array([t.user_attrs["sharpe_hac_hybrid"] for t in feasible_trials], dtype=np.float64)
 
     # 4. objective(growth_lcb) 최상위 feasible trial부터 bounded replay fallback 수행
     # + DSR 하드 게이트 필터링 (2026-06-17)
@@ -361,6 +350,7 @@ def select_layer2_champion(
         cache = prebuilt_cache
     else:
         from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+
         cache = build_l2_simulation_cache(aligned, signal_batch, tf)
 
     _eval_memo: dict[tuple[Any, ...], Any] = {}
@@ -384,9 +374,9 @@ def select_layer2_champion(
 
     # 1차 필터링: 이미 사전 게이트 통과(l2_promotion_passed) 이력이 있는 trial들 선별
     gate_passed_candidates = [
-        t for t in replay_candidates
-        if t.user_attrs.get("l2_promotion_passed", False)
-        or t.user_attrs.get("promotion_passed", False)
+        t
+        for t in replay_candidates
+        if t.user_attrs.get("l2_promotion_passed", False) or t.user_attrs.get("promotion_passed", False)
     ]
 
     if gate_passed_candidates:
@@ -455,9 +445,7 @@ def select_layer2_champion(
             sharpe_hac_hybrid=float(candidate_evaluation.sharpe_hac_hybrid),
             sharpe_hac_baseline=sharpe_hac_baseline_ew,
             sortino_hybrid=float(candidate_evaluation.sortino_hybrid),
-            mar_hybrid=float(
-                candidate_evaluation.cagr_hybrid / (candidate_evaluation.mdd_hybrid + 1e-9)
-            ),
+            mar_hybrid=float(candidate_evaluation.cagr_hybrid / (candidate_evaluation.mdd_hybrid + 1e-9)),
             mdd_hybrid=float(candidate_evaluation.mdd_hybrid),
             cvar_95_hybrid=float(candidate_evaluation.cvar_95_hybrid),
             fold_pass_ratio=float(candidate_evaluation.fold_pass_ratio),
@@ -514,33 +502,29 @@ def select_layer2_champion(
             float(dsr),
         )
 
-        if (
-            best_diagnostic_trial is None
-            or (
-                int(gate.promotion_passed),
-                float(deployable_score.score),
-                float(dsr),
-                float(candidate_evaluation.objective_value),
-                float(candidate_evaluation.growth_lcb_hybrid),
-                float(candidate_evaluation.cagr_hybrid),
-                -int(candidate.number),
+        if best_diagnostic_trial is None or (
+            int(gate.promotion_passed),
+            float(deployable_score.score),
+            float(dsr),
+            float(candidate_evaluation.objective_value),
+            float(candidate_evaluation.growth_lcb_hybrid),
+            float(candidate_evaluation.cagr_hybrid),
+            -int(candidate.number),
+        ) > (
+            int(best_diagnostic_gate.promotion_passed) if best_diagnostic_gate is not None else 0,
+            float(
+                _score_layer2_deployable_fallback(
+                    best_diagnostic_evaluation,
+                    config=Layer2AllocationConfig.from_mapping(dict(best_diagnostic_trial.params)),
+                ).score
             )
-            > (
-                int(best_diagnostic_gate.promotion_passed) if best_diagnostic_gate is not None else 0,
-                float(
-                    _score_layer2_deployable_fallback(
-                        best_diagnostic_evaluation,
-                        config=Layer2AllocationConfig.from_mapping(dict(best_diagnostic_trial.params)),
-                    ).score
-                )
-                if best_diagnostic_trial is not None and best_diagnostic_evaluation is not None
-                else -1e6,
-                float(best_diagnostic_dsr),
-                float(best_diagnostic_evaluation.objective_value) if best_diagnostic_evaluation is not None else -1e6,
-                float(best_diagnostic_evaluation.growth_lcb_hybrid) if best_diagnostic_evaluation is not None else -1e6,
-                float(best_diagnostic_evaluation.cagr_hybrid) if best_diagnostic_evaluation is not None else -1e6,
-                -int(best_diagnostic_trial.number),
-            )
+            if best_diagnostic_trial is not None and best_diagnostic_evaluation is not None
+            else -1e6,
+            float(best_diagnostic_dsr),
+            float(best_diagnostic_evaluation.objective_value) if best_diagnostic_evaluation is not None else -1e6,
+            float(best_diagnostic_evaluation.growth_lcb_hybrid) if best_diagnostic_evaluation is not None else -1e6,
+            float(best_diagnostic_evaluation.cagr_hybrid) if best_diagnostic_evaluation is not None else -1e6,
+            -int(best_diagnostic_trial.number),
         ):
             best_diagnostic_trial = candidate
             best_diagnostic_evaluation = candidate_evaluation
@@ -552,13 +536,15 @@ def select_layer2_champion(
             # D4: argmax(dsr, cagr) → argmax(sortino, cagr) 교체.
             # DSR은 자기참조(동일 신호셋 파라미터 섭동) → 독립성 불성립.
             # Sortino가 하방위험 조정 shape를 직접 반영 (shape 최적화 D1과 정합).
-            passed_candidates.append((
-                float(candidate_evaluation.sortino_hybrid),
-                float(candidate_evaluation.cagr_hybrid),
-                candidate,
-                candidate_evaluation,
-                float(dsr),
-            ))
+            passed_candidates.append(
+                (
+                    float(candidate_evaluation.sortino_hybrid),
+                    float(candidate_evaluation.cagr_hybrid),
+                    candidate,
+                    candidate_evaluation,
+                    float(dsr),
+                )
+            )
 
     # D4: gate-pass 후보 중 argmax(sortino_hybrid, cagr_hybrid) 선택
     if passed_candidates:
@@ -609,7 +595,7 @@ def select_layer2_champion(
         champion_trial.number,
         champion_trial.value,
         champion_dsr,
-        n_trials_eff
+        n_trials_eff,
     )
     # Fix-A: champion 경로에서도 배치 적용
     deployed_champion_params = _apply_deployment_to_params(

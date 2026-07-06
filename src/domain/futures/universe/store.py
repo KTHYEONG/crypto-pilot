@@ -135,9 +135,7 @@ def _symbol_meta_from_decision_row(row: Any) -> SymbolMeta:
         beta_vs_market=float(row.beta_vs_market),
         cluster_id=int(row.cluster_id),
         tradeable_rank=int(row.rank) if pd.notna(row.rank) else 0,
-        basis_annualized_mean=(
-            None if pd.isna(row.basis_annualized_mean) else float(row.basis_annualized_mean)
-        ),
+        basis_annualized_mean=(None if pd.isna(row.basis_annualized_mean) else float(row.basis_annualized_mean)),
         basis_vol=None if pd.isna(row.basis_vol) else float(row.basis_vol),
         capacity_clip_usdt_list=tuple(float(item) for item in row.capacity_clip_usdt_list),
         cluster_size=float(row.cluster_size),
@@ -183,9 +181,7 @@ def _cube_from_df(df: pd.DataFrame) -> UniverseStateCube:
     n_inst = int(row["n_inst"])
     instrument_ids_raw = list(row["instrument_ids_raw"])
     instrument_ids: tuple[str, ...] = tuple(str(s) for s in instrument_ids_raw)
-    calendar = pd.DatetimeIndex(
-        [pd.Timestamp(s) for s in list(row["calendar_iso"])], tz="UTC"
-    )
+    calendar = pd.DatetimeIndex([pd.Timestamp(s) for s in list(row["calendar_iso"])], tz="UTC")
     eligible = np.frombuffer(bytes(row["eligible"]), dtype=np.bool_).reshape(n_bar, n_inst)
     entry_block = np.frombuffer(bytes(row["entry_block"]), dtype=np.bool_).reshape(n_bar, n_inst)
     exit_required = np.frombuffer(bytes(row["exit_required"]), dtype=np.bool_).reshape(n_bar, n_inst)
@@ -328,8 +324,7 @@ def _to_rejected(frame: pd.DataFrame) -> dict[str, FilterReport]:
             metrics = _stage_metrics_from_row(row)
             metric_fragment = ",".join(f"{k}={v:.6g}" for k, v in sorted(metrics.items()))
             audit_steps.append(
-                f"{stage}:{'PASS' if passed else 'FAIL'}:{reason}"
-                + (f":{metric_fragment}" if metric_fragment else "")
+                f"{stage}:{'PASS' if passed else 'FAIL'}:{reason}" + (f":{metric_fragment}" if metric_fragment else "")
             )
             if stage.startswith("stage1"):
                 base = base.__class__(**{**asdict(base), "stage1_reason": reject, "stage1_metrics": metrics})
@@ -344,15 +339,11 @@ def _to_rejected(frame: pd.DataFrame) -> dict[str, FilterReport]:
             elif stage.startswith("stage6"):
                 final_rank_raw = row.get("rank")
                 final_rank = (
-                    int(final_rank_raw)
-                    if final_rank_raw is not None and pd.notna(final_rank_raw)
-                    else base.final_rank
+                    int(final_rank_raw) if final_rank_raw is not None and pd.notna(final_rank_raw) else base.final_rank
                 )
                 cluster_raw = row.get("cluster_id")
                 final_cluster_id = (
-                    int(cluster_raw)
-                    if cluster_raw is not None and pd.notna(cluster_raw)
-                    else base.final_cluster_id
+                    int(cluster_raw) if cluster_raw is not None and pd.notna(cluster_raw) else base.final_cluster_id
                 )
                 base = base.__class__(
                     **{
@@ -437,71 +428,27 @@ def build_decision_frame(
                 "stage6_selected": symbol in stage6_symbols,
                 "stage": stage_value,
                 "selection_reason": selection_reason,
-                "role": (
-                    str(source_row.get("role", "regular"))
-                    if source_row is not None
-                    else "regular"
-                ),
+                "role": (str(source_row.get("role", "regular")) if source_row is not None else "regular"),
                 "rank": final_rank,
-                "tradeable_score": (
-                    float(source_row.get("tradeable_score", 0.0))
-                    if source_row is not None
-                    else 0.0
-                ),
-                "vol_30d": (
-                    float(source_row.get("vol_30d", 0.0))
-                    if source_row is not None
-                    else 0.0
-                ),
-                "friction_score": (
-                    float(source_row.get("friction_score", 0.0))
-                    if source_row is not None
-                    else 0.0
-                ),
+                "tradeable_score": (float(source_row.get("tradeable_score", 0.0)) if source_row is not None else 0.0),
+                "vol_30d": (float(source_row.get("vol_30d", 0.0)) if source_row is not None else 0.0),
+                "friction_score": (float(source_row.get("friction_score", 0.0)) if source_row is not None else 0.0),
                 "alpha_capacity_score": (
-                    float(source_row.get("alpha_capacity_score", 0.0))
-                    if source_row is not None
-                    else 0.0
+                    float(source_row.get("alpha_capacity_score", 0.0)) if source_row is not None else 0.0
                 ),
                 "diversification_score": (
-                    float(source_row.get("diversification_score", 0.0))
-                    if source_row is not None
-                    else 0.0
+                    float(source_row.get("diversification_score", 0.0)) if source_row is not None else 0.0
                 ),
-                "adv_usdt_median": (
-                    float(source_row.get("adv_usdt_median", 0.0))
-                    if source_row is not None
-                    else 0.0
-                ),
+                "adv_usdt_median": (float(source_row.get("adv_usdt_median", 0.0)) if source_row is not None else 0.0),
                 "execution_cost_bps": (
-                    float(source_row.get("execution_cost_bps", 0.0))
-                    if source_row is not None
-                    else 0.0
+                    float(source_row.get("execution_cost_bps", 0.0)) if source_row is not None else 0.0
                 ),
-                "funding_rate_8h": (
-                    float(source_row.get("funding_rate_8h", 0.0))
-                    if source_row is not None
-                    else 0.0
-                ),
-                "beta_vs_market": (
-                    float(source_row.get("beta_vs_market", 0.0))
-                    if source_row is not None
-                    else 0.0
-                ),
-                "cluster_id": (
-                    int(source_row.get("cluster_id", -1))
-                    if source_row is not None
-                    else -1
-                ),
-                "cluster_size": (
-                    float(source_row.get("cluster_size", 1.0))
-                    if source_row is not None
-                    else 1.0
-                ),
+                "funding_rate_8h": (float(source_row.get("funding_rate_8h", 0.0)) if source_row is not None else 0.0),
+                "beta_vs_market": (float(source_row.get("beta_vs_market", 0.0)) if source_row is not None else 0.0),
+                "cluster_id": (int(source_row.get("cluster_id", -1)) if source_row is not None else -1),
+                "cluster_size": (float(source_row.get("cluster_size", 1.0)) if source_row is not None else 1.0),
                 "anchor_cluster_member": (
-                    float(source_row.get("anchor_cluster_member", 0.0))
-                    if source_row is not None
-                    else 0.0
+                    float(source_row.get("anchor_cluster_member", 0.0)) if source_row is not None else 0.0
                 ),
                 "basis_annualized_mean": (
                     None
@@ -611,16 +558,12 @@ def materialize_snapshot_from_store(
         selected_meta: tuple[SymbolMeta, ...] = ()
         selected_frame = pd.DataFrame(columns=_selected_frame_columns())
     else:
-        selected["_anchor_priority"] = (
-            selected["role"].astype(str).str.lower().eq("anchor").astype(int) * -1
-        )
+        selected["_anchor_priority"] = selected["role"].astype(str).str.lower().eq("anchor").astype(int) * -1
         selected = selected.sort_values(
             ["_anchor_priority", "rank", "symbol"],
             na_position="last",
         ).reset_index(drop=True)
-        selected_meta = tuple(
-            _symbol_meta_from_decision_row(row) for row in selected.itertuples(index=False)
-        )
+        selected_meta = tuple(_symbol_meta_from_decision_row(row) for row in selected.itertuples(index=False))
         selected_frame = selected.loc[:, _selected_frame_columns()].copy()
     snapshot = UniverseSnapshot(
         as_of=manifest.as_of,

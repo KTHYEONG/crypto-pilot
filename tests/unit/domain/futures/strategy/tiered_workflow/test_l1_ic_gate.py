@@ -64,7 +64,11 @@ def test_s1_happy_strong_ic_passes() -> None:
     )
     cfg = _base_cfg()
     report = evaluate_layer1_readiness(
-        fold_reports=fold_reports, fold_cov=1.0, trade_scope_count=57, cfg=cfg, seed=42,
+        fold_reports=fold_reports,
+        fold_cov=1.0,
+        trade_scope_count=57,
+        cfg=cfg,
+        seed=42,
     )
     assert report.passed is True
     assert len(report.blockers) == 0
@@ -83,7 +87,11 @@ def test_s2_zero_ic_is_monitoring_only_no_block() -> None:
     )
     cfg = _base_cfg()
     report = evaluate_layer1_readiness(
-        fold_reports=fold_reports, fold_cov=1.0, trade_scope_count=57, cfg=cfg, seed=42,
+        fold_reports=fold_reports,
+        fold_cov=1.0,
+        trade_scope_count=57,
+        cfg=cfg,
+        seed=42,
     )
     # IC hard gate 제거 — IC는 DEBUG 모니터링만, gate는 다른 메트릭으로 통과
     assert report.passed is True
@@ -105,7 +113,11 @@ def test_s3_single_fold_luck_passes_no_ic_gate() -> None:
     )
     cfg = _base_cfg()
     report = evaluate_layer1_readiness(
-        fold_reports=fold_reports, fold_cov=1.0, trade_scope_count=57, cfg=cfg, seed=42,
+        fold_reports=fold_reports,
+        fold_cov=1.0,
+        trade_scope_count=57,
+        cfg=cfg,
+        seed=42,
     )
     assert report.passed is True
     assert not any(c.key.startswith("ic_") for c in report.checks)
@@ -122,7 +134,11 @@ def test_s4_probe_metric_breadth_uses_all_symbols() -> None:
     )
     cfg = replace(_base_cfg(), l1_probe_metric="breadth")
     report = evaluate_layer1_readiness(
-        fold_reports=fold_reports, fold_cov=1.0, trade_scope_count=57, cfg=cfg, seed=42,
+        fold_reports=fold_reports,
+        fold_cov=1.0,
+        trade_scope_count=57,
+        cfg=cfg,
+        seed=42,
     )
     assert report.passed is True
     assert len(report.blockers) == 0
@@ -135,7 +151,11 @@ def test_s5_empty_fold_reports_graceful() -> None:
     """fold reports가 빈 tuple → BLOCK, not crash."""
     cfg = _base_cfg()
     report = evaluate_layer1_readiness(
-        fold_reports=(), fold_cov=0.0, trade_scope_count=0, cfg=cfg, seed=42,
+        fold_reports=(),
+        fold_cov=0.0,
+        trade_scope_count=0,
+        cfg=cfg,
+        seed=42,
     )
     assert report.passed is False
     assert len(report.checks) > 0
@@ -145,14 +165,16 @@ def test_s5_nan_ic_graceful() -> None:
     """IC가 NaN이어도 gate는 정상 동작 (IC hard gate 없음)."""
     nan = float("nan")
     fold_reports = (
-        _fold(0, rank_ic_all=nan, rank_ic_tstat=nan, probe_bps=50.0,
-              probe_lcb_bps=20.0, probe_series_bps=(50.0,)),
-        _fold(1, rank_ic_all=nan, rank_ic_tstat=nan, probe_bps=50.0,
-              probe_lcb_bps=20.0, probe_series_bps=(50.0,)),
+        _fold(0, rank_ic_all=nan, rank_ic_tstat=nan, probe_bps=50.0, probe_lcb_bps=20.0, probe_series_bps=(50.0,)),
+        _fold(1, rank_ic_all=nan, rank_ic_tstat=nan, probe_bps=50.0, probe_lcb_bps=20.0, probe_series_bps=(50.0,)),
     )
     cfg = _base_cfg()
     report = evaluate_layer1_readiness(
-        fold_reports=fold_reports, fold_cov=1.0, trade_scope_count=57, cfg=cfg, seed=42,
+        fold_reports=fold_reports,
+        fold_cov=1.0,
+        trade_scope_count=57,
+        cfg=cfg,
+        seed=42,
     )
     # IC hard gate 제거 — NaN IC가 gate decision을 망가뜨리지 않음
     assert not any(c.key.startswith("ic_") for c in report.checks)

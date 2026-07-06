@@ -1,4 +1,5 @@
 """compute_diversification_ratio TDD tests (Scenarios A1-A4)."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -43,9 +44,7 @@ class TestComputeDiversificationRatio:
         """A4: 음의 상관 롱-온리(long-only) → DR > sqrt(N) (헤지 효과)."""
         w = np.array([0.5, 0.5], dtype=np.float64)
         sigma_diag = np.array([0.02, 0.02], dtype=np.float64)
-        sigma_mat = np.array(
-            [[0.0004, -0.00038], [-0.00038, 0.0004]], dtype=np.float64
-        )
+        sigma_mat = np.array([[0.0004, -0.00038], [-0.00038, 0.0004]], dtype=np.float64)
 
         dr = compute_diversification_ratio(w, sigma_diag, sigma_mat)
         assert dr > np.sqrt(2.0)

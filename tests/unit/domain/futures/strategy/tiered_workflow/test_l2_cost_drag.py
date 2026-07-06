@@ -60,9 +60,7 @@ class TestComputeCostDragRatio:
 
     def test_cost_drag_ratio_negative_gross_returns_large_finite(self) -> None:
         """S2: gross 음수 시 abs(gross) 기준으로 유한."""
-        attrs = (
-            _make_attribution(realized_price=-0.05, realized_cost=0.04),
-        )
+        attrs = (_make_attribution(realized_price=-0.05, realized_cost=0.04),)
         result = compute_cost_drag_ratio(attrs)
         assert np.isfinite(result)
         assert result == pytest.approx(0.8, rel=1e-3)
@@ -107,7 +105,7 @@ class TestEvaluateGateCostDrag:
             "psr_hybrid": 0.95,
             "recent_fold_passed": True,
             "recent_fold_sharpe": 1.5,
-            "fold_attributions": getattr(result, 'fold_attributions', ()),
+            "fold_attributions": getattr(result, "fold_attributions", ()),
         }
 
     def _eval_gate(self, cost_drag: float, config: Layer2AllocationConfig) -> Layer2GateEvaluation:
@@ -199,5 +197,5 @@ class TestAlwaysOnAttribution:
         """S7: l2_diag_attribution_enabled=False여도 fold_attributions 비어있지 않음."""
 
         config = Layer2AllocationConfig(l2_diag_attribution_enabled=False)
-        assert hasattr(config, 'l2_diag_attribution_enabled')
+        assert hasattr(config, "l2_diag_attribution_enabled")
         assert config.l2_diag_attribution_enabled is False
