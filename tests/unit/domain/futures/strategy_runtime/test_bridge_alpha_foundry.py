@@ -12,14 +12,18 @@ from src.domain.futures.alpha_foundry.bridge_helpers import (
     run_alpha_foundry_l0_gate,
 )
 from src.domain.futures.alpha_foundry.contracts import (
+    AlphaFoundryEvidenceRow,
     AlphaFoundryRuntimeConfig,
     AlphaRecipe,
     CheapGateConfig,
     CheapGateEvidence,
+    L0ReportStageCounts,
+    L0SignalCandidate,
     L2PosteriorPolicyConfig,
     PanelRecipeBinding,
     PosteriorGateConfig,
 )
+from src.domain.futures.alpha_foundry.pipeline import AlphaFoundryL0Artifacts
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.execution_cost import ExecutionCostModel
@@ -149,14 +153,35 @@ def make_rejected_evidence(recipe_id: str = "bad_recipe") -> CheapGateEvidence:
 
 
 def _make_l0_artifacts(evidences: list[CheapGateEvidence]) -> object:
-    from src.domain.futures.alpha_foundry.contracts import AlphaFoundryEvidenceRow
-    from src.domain.futures.alpha_foundry.pipeline import AlphaFoundryL0Artifacts
-
-    passed_ids = tuple(e.recipe_id for e in evidences if e.gate_passed)
     reject_reason_counts: dict[str, int] = {}
     for ev in evidences:
         for reason in ev.reject_reasons:
             reject_reason_counts[reason] = reject_reason_counts.get(reason, 0) + 1
+
+    candidates: list[L0SignalCandidate] = []
+    for ev in evidences:
+        is_passing = ev.gate_passed
+        budget_units = 1 if is_passing else 0
+        candidates.append(L0SignalCandidate(
+            run_id="test", timeframe=ev.timeframe, family="", variant="",
+            recipe_id=ev.recipe_id, archetype="trend",
+            source="catalog_exact",
+            n_events=ev.n_events, effective_n=ev.effective_n,
+            mean_net_bps=ev.mean_net_bps, block_lcb_bps=ev.block_lcb_bps,
+            nw_tstat=ev.nw_tstat,
+            bootstrap_lcb_bps=ev.bootstrap_lcb_bps,
+            bootstrap_agree=ev.bootstrap_agree,
+            cost_drag_ratio=ev.cost_drag_ratio,
+            turnover_per_year=ev.turnover_per_year,
+            max_abs_corr_in_bucket=0.0,
+            tf_coverage_count=0, sign_agreement_ratio=0.0,
+            corroboration_tier="insufficient_coverage",
+            discovery_tier="candidate" if is_passing else "blocked",
+            l1_priority_score=ev.block_lcb_bps,
+            l1_budget_units=budget_units,
+            hard_reject_reasons=ev.reject_reasons,
+            soft_flags=(),
+        ))
 
     evidence_rows = [
         AlphaFoundryEvidenceRow(
@@ -179,10 +204,19 @@ def _make_l0_artifacts(evidences: list[CheapGateEvidence]) -> object:
         for ev in evidences
     ]
 
+    hard_reject = sum(1 for c in candidates if c.discovery_tier == "blocked")
+    seeded = sum(1 for c in candidates if c.discovery_tier in ("seed", "candidate"))
+
     return AlphaFoundryL0Artifacts(
         evidences=tuple(evidences),
-        passed_recipe_ids=passed_ids,
+        candidates=tuple(candidates),
+        passed_recipe_ids=tuple(c.recipe_id for c in candidates if c.l1_budget_units > 0),
         reject_reason_counts=reject_reason_counts,
+        stage_counts=L0ReportStageCounts(
+            hard_reject=hard_reject, soft_reject=0,
+            seeded=seeded, budget_exhausted=0,
+            tf_contradicted=0, l1_queued=seeded,
+        ),
         evidence_rows=tuple(evidence_rows),
     )
 
@@ -483,3 +517,76 @@ class TestRunAlphaFoundryGateWithBindings:
         assert result.report.n_bound_panels == 1
         assert result.report.n_evidence == 1
         assert len(result.panels_for_l1) == 2
+
+
+class TestSynthesizeRecipeFromPanel:
+    def test_known_catalog_recipe_returned_directly(self) -> None:
+        from src.domain.futures.alpha_foundry.bridge_helpers import synthesize_recipe_from_panel
+        from src.domain.futures.alpha_foundry.recipes import _make_recipe_id
+
+        params = {"fast": 12, "slow": 72}
+        synth_id = _make_recipe_id("trend_ma", "ema_12_72_4h", "4h", params)
+        recipe = dataclasses.replace(make_recipe(), recipe_id=synth_id, variant="ema_12_72_4h")
+        aligned = make_aligned_market_data(t=12, n=2)
+        t, n = aligned.close_2d.shape
+        panel = CandidateSignalPanel(
+            family="trend_ma", variant="ema_12_72_4h", params=params,
+            datetimes=aligned.datetimes, symbols=aligned.symbols,
+            signed_score_2d=np.ones((t, n), dtype=np.float64),
+            side_hint_2d=np.ones((t, n), dtype=np.int8),
+            expected_holding_bars=3, min_holding_bars=1,
+            stop_atr_mult=2.0, take_profit_atr_mult=4.0,
+            turnover_proxy_2d=np.zeros((t, n), dtype=np.float64),
+            valid_mask_2d=np.ones((t, n), dtype=np.bool_),
+            metadata={"recipe_id": synth_id},
+        )
+        result = synthesize_recipe_from_panel(
+            panel=panel, timeframe="4h",
+            catalog_recipes={synth_id: recipe},
+        )
+        assert result.recipe_id == synth_id
+
+    def test_unknown_family_falls_back_to_archetype(self) -> None:
+        from src.domain.futures.alpha_foundry.bridge_helpers import synthesize_recipe_from_panel
+
+        panel = make_panel(family="unknown_flow_family", recipe_id="r_new")
+        result = synthesize_recipe_from_panel(
+            panel=panel,
+            timeframe="4h",
+            catalog_recipes={},
+        )
+        assert result.family == "unknown_flow_family"
+        assert result.archetype is not None
+
+
+class TestBuildAlphaRecipeCatalog:
+    def test_build_catalog_basic(self) -> None:
+        from src.domain.futures.alpha_foundry.recipes import build_alpha_recipe_catalog
+
+        catalog = build_alpha_recipe_catalog(timeframe="4h")
+        assert len(catalog) > 0
+        all_ids = {r.recipe_id for r in catalog}
+        assert len(all_ids) == len(catalog)
+
+    def test_build_catalog_with_includes(self) -> None:
+        from src.domain.futures.alpha_foundry.recipes import build_alpha_recipe_catalog
+
+        catalog = build_alpha_recipe_catalog(
+            timeframe="4h",
+            include_families=("trend_ma", "funding_carry"),
+        )
+        families = {r.family for r in catalog}
+        assert "trend_ma" in families
+        assert "funding_carry" in families
+
+    def test_build_catalog_exclude_and_max(self) -> None:
+        from src.domain.futures.alpha_foundry.recipes import build_alpha_recipe_catalog
+
+        catalog = build_alpha_recipe_catalog(
+            timeframe="4h",
+            exclude_families=("trend_ma",),
+            max_recipes_per_family=1,
+        )
+        families = {r.family for r in catalog}
+        assert "trend_ma" not in families
+        assert len(catalog) > 0
