@@ -1,4 +1,8 @@
-"""Alpha Foundry L0 cheap gate and survivor filtering. [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]"""
+"""Alpha Foundry L0 cheap gate and survivor filtering.
+
+[ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
+[ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
+"""
 
 from __future__ import annotations
 
@@ -34,19 +38,48 @@ def _validate_shape(panel: CandidateSignalPanel, aligned: AlignedMarketData) -> 
             )
 
 
-def _block_lcb(values: NDArray[np.float64], block_bars: int) -> float:
+def _compute_block_means(values: NDArray[np.float64], block_bars: int) -> NDArray[np.float64]:
     n = len(values)
-    if n < 2:
-        return 0.0
+    if n < 2 or block_bars < 1:
+        return np.array([])
     n_blocks = max(1, n // block_bars)
-    block_means = np.array([
+    return np.array([
         values[i * block_bars : (i + 1) * block_bars].mean()
         for i in range(n_blocks)
     ])
+
+
+def _block_moments(block_means: NDArray[np.float64]) -> tuple[float, float]:
+    if len(block_means) < 2:
+        return (0.0, 0.0)
     mu = float(np.nanmean(block_means))
     n_valid = float(np.sum(~np.isnan(block_means)))
-    se_val = float(np.nanstd(block_means, ddof=1)) / max(np.sqrt(max(n_valid, 1.0)), 1.0)
-    return float(mu - 1.0 * se_val)
+    se = float(np.nanstd(block_means, ddof=1)) / max(np.sqrt(max(n_valid, 1.0)), 1.0)
+    return (mu, se)
+
+
+def _bootstrap_block_ci(
+    block_means: NDArray[np.float64], n_resamples: int, rng: np.random.Generator,
+) -> tuple[float, float]:
+    if len(block_means) < 2:
+        return (0.0, 0.5)
+    indices = rng.integers(0, len(block_means), size=(n_resamples, len(block_means)))
+    resampled_means = block_means[indices].mean(axis=1)
+    lcb = float(np.percentile(resampled_means, 5))
+    p_positive = float(np.mean(resampled_means > 0))
+    return (lcb, p_positive)
+
+
+def _sparse_entry_mask(
+    side: NDArray[np.int8], valid: NDArray[np.bool_],
+) -> NDArray[np.bool_]:
+    """Independent-trade entry mask: True where a bar starts a new position —
+    either from flat (side==0) or a direct reversal (sign flip without going
+    flat). A continuation bar (same side as t-1) is never an entry.
+    """
+    side_prev = np.vstack([np.zeros((1, side.shape[1]), dtype=side.dtype), side[:-1, :]])
+    entry: NDArray[np.bool_] = (side != 0) & (side != side_prev) & valid
+    return entry
 
 
 def _compute_turnover_per_year(
@@ -110,6 +143,8 @@ def evaluate_panel_cheap_gate(
             novelty_corr_max=0.0,
             incremental_rank_ic=0.0,
             compute_cost_score=0.0,
+            bootstrap_lcb_bps=0.0,
+            bootstrap_agree=True,
             gate_passed=False,
             reject_reasons=("insufficient_events",),
         )
@@ -117,12 +152,10 @@ def evaluate_panel_cheap_gate(
     idx_start = causal_lag
     idx_end = t - holding_bars
 
-    event_mask = np.zeros((t, n), dtype=np.bool_)
+    entry_full = _sparse_entry_mask(side, valid)
+    event_mask = np.zeros_like(entry_full)
     if idx_start < idx_end:
-        event_mask[idx_start:idx_end, :] = (
-            (side[idx_start:idx_end, :] != 0)
-            & valid[idx_start:idx_end, :]
-        )
+        event_mask[idx_start:idx_end, :] = entry_full[idx_start:idx_end, :]
 
     n_events = int(np.sum(event_mask))
     if n_events < config.min_events:
@@ -141,6 +174,8 @@ def evaluate_panel_cheap_gate(
             novelty_corr_max=0.0,
             incremental_rank_ic=0.0,
             compute_cost_score=0.0,
+            bootstrap_lcb_bps=0.0,
+            bootstrap_agree=True,
             gate_passed=False,
             reject_reasons=("insufficient_events",),
         )
@@ -162,18 +197,17 @@ def evaluate_panel_cheap_gate(
 
     reject_reasons_list: list[CheapGateRejectReason] = []
 
-    # effective_n
-    w = np.ones(n_events, dtype=np.float64)
-    effective_n = float(np.sum(w) ** 2 / np.sum(w ** 2)) if np.any(w) else 0.0
+    effective_n = float(n_events)
     if effective_n < config.min_effective_n:
         reject_reasons_list.append("insufficient_effective_n")
 
     mean_net_bps = float(np.nanmean(net_vals)) if n_events > 0 else 0.0
-    std_net = float(np.nanstd(net_vals, ddof=1)) if n_events > 1 else 0.0
-    nw_tstat = mean_net_bps / max(std_net / np.sqrt(max(n_events, 1)), 1e-10)
 
-    # block LCB
-    block_lcb_bps = _block_lcb(net_vals, config.block_bars)
+    block_bars_eff = max(config.block_bars, 2 * holding_bars)
+    block_means = _compute_block_means(net_vals, block_bars_eff)
+    mu_block, se_block = _block_moments(block_means)
+    nw_tstat = mu_block / max(se_block, 1e-10)
+    block_lcb_bps = mu_block - 1.0 * se_block
 
     if block_lcb_bps <= config.min_lcb_net_bps:
         reject_reasons_list.append("non_positive_lcb")
@@ -197,6 +231,11 @@ def evaluate_panel_cheap_gate(
     if turnover > max_turn:
         reject_reasons_list.append("excess_turnover")
 
+    # bootstrap
+    rng = np.random.default_rng(config.bootstrap_seed)
+    bootstrap_lcb_bps, _ = _bootstrap_block_ci(block_means, config.bootstrap_samples, rng)
+    bootstrap_agree = (bootstrap_lcb_bps > 0) == (block_lcb_bps > 0)
+
     gate_passed = len(reject_reasons_list) == 0
 
     return CheapGateEvidence(
@@ -214,6 +253,8 @@ def evaluate_panel_cheap_gate(
         novelty_corr_max=0.0,
         incremental_rank_ic=0.0,
         compute_cost_score=0.0,
+        bootstrap_lcb_bps=bootstrap_lcb_bps,
+        bootstrap_agree=bootstrap_agree,
         gate_passed=gate_passed,
         reject_reasons=tuple(reject_reasons_list),
     )

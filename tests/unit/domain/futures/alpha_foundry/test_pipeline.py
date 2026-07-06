@@ -22,14 +22,18 @@ from src.domain.futures.strategy.execution_cost import ExecutionCostModel
 
 
 def _make_aligned() -> AlignedMarketData:
-    t, n = 60, 2
+    # 600 bars — long enough for the 8-on/8-off entry pattern in _make_panel()
+    # to clear min_events=40 while staying under the default turnover cap.
+    t, n = 600, 2
     datetimes = np.arange(
         np.datetime64("2026-01-01"),
         np.datetime64("2026-01-01") + np.timedelta64(t, "h"),
         np.timedelta64(1, "h"),
         dtype="datetime64[ns]",
     )
-    close = np.linspace(100, 112, t).reshape(-1, 1) * np.ones((1, n))
+    # Constant per-bar log-drift so the mean 3-bar gross return stays
+    # comfortably above the ~11.25bps stress round-trip cost.
+    close = (100.0 * np.exp(0.002 * np.arange(t, dtype=np.float64))).reshape(-1, 1) * np.ones((1, n))
     mask = np.ones((t, n), dtype=np.bool_)
     return AlignedMarketData(
         datetimes=datetimes,
@@ -50,14 +54,19 @@ def _make_aligned() -> AlignedMarketData:
 def _make_panel() -> CandidateSignalPanel:
     aligned = _make_aligned()
     t, n = aligned.close_2d.shape
+    # 8-on/8-off cycle: sparse-entry semantics need real flat/reversal
+    # transitions (a constant side=1 array yields zero entries).
+    side = np.zeros((t, n), dtype=np.int8)
+    for start in range(0, t, 16):
+        side[start : start + 8, :] = 1
     return CandidateSignalPanel(
         family="trend_ma",
         variant="ema_12_72",
         params={"fast": 12, "slow": 72},
         datetimes=aligned.datetimes,
         symbols=aligned.symbols,
-        signed_score_2d=np.ones((t, n), dtype=np.float64),
-        side_hint_2d=np.ones((t, n), dtype=np.int8),
+        signed_score_2d=side.astype(np.float64),
+        side_hint_2d=side,
         expected_holding_bars=3,
         min_holding_bars=1,
         stop_atr_mult=2.0,

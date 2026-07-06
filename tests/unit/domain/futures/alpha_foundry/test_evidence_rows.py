@@ -56,6 +56,8 @@ class TestWriteAlphaFoundryReport:
                 redundant_with="",
                 bucket_eff_test_count=2.0,
                 global_eff_test_count=3.0,
+                bootstrap_lcb_bps=1.0 + i * 0.5,
+                bootstrap_agree=True,
                 created_at_ms=1000,
             )
             for i in range(n)
