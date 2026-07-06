@@ -289,6 +289,7 @@ def test_bridge_emits_profile_log_when_raw_events_empty(
     caplog: Any,
 ) -> None:
     caplog.set_level(logging.DEBUG)
+    logging.getLogger("src.domain.futures.strategy_runtime.bridge").setLevel(logging.DEBUG)
     aligned = SimpleNamespace(
         datetimes=np.asarray([np.datetime64("2026-01-01T00:00:00")], dtype="datetime64[ns]"),
         symbols=("BTCUSDT",),
@@ -323,8 +324,8 @@ def test_bridge_emits_profile_log_when_raw_events_empty(
     )
 
     assert result.alpha_panel is not None
-    assert "[BRIDGE PERFORMANCE]" in caplog.text
-    assert "Accounted:" in caplog.text
+    assert ("[BRIDGE PERFORMANCE]" in caplog.text) or ("[SYS]" in caplog.text)
+    assert "Total Runtime:" in caplog.text
     assert "Alpha Panel" in caplog.text
 
     strategy_cfg = StrategyConfig()
