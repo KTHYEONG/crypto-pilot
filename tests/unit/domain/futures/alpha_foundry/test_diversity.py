@@ -117,6 +117,8 @@ class TestClusterCorrelatedRecipes:
             compute_cost_score=0.0,
             gate_passed=True,
             reject_reasons=(),
+            bootstrap_lcb_bps=0.4,
+            bootstrap_agree=True,
         )
 
     def test_groups_highly_correlated(self) -> None:

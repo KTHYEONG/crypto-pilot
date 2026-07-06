@@ -1,16 +1,27 @@
-"""Alpha Foundry L0 gate bridge helpers for the strategy runtime bridge. [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]"""
+"""Alpha Foundry L0 gate bridge helpers for the strategy runtime bridge.
+
+[ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
+[ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
+"""
 
 from __future__ import annotations
 
 import json
 import time as _time_module
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     pass
+
+from src.domain.futures.alpha_foundry.contracts import (
+    AlphaRecipe as _AlphaRecipe,
+)
+from src.domain.futures.alpha_foundry.contracts import (
+    PanelRecipeBinding as _PanelRecipeBinding,
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -31,15 +42,13 @@ def _normalize_variant(variant: str, timeframe: str) -> str:
 def bind_panels_to_alpha_recipes(
     *,
     panels: Sequence[Any],
-    recipes: Mapping[str, Any],
+    recipes: MutableMapping[str, Any],
     timeframe: str,
     max_recipes_per_family: int,
     include_families: tuple[str, ...],
     exclude_families: tuple[str, ...],
+    enable_synthetic_recipes: bool = True,
 ) -> tuple[Any, ...]:
-    from src.domain.futures.alpha_foundry.contracts import (
-        PanelRecipeBinding as _PanelRecipeBinding,
-    )
 
     include_set = set(include_families) if include_families else None
     exclude_set = set(exclude_families) if exclude_families else None
@@ -78,7 +87,35 @@ def bind_panels_to_alpha_recipes(
                 break
 
         if matched_recipe_id is None:
-            continue
+            if not enable_synthetic_recipes:
+                continue
+            from src.domain.futures.alpha_foundry.recipes import (
+                _make_recipe_id,
+                map_signal_archetype_to_alpha_archetype,
+            )
+            panel_params = dict(getattr(panel, "params", {})) or {}
+            synth_recipe_id = _make_recipe_id(family, variant, timeframe, panel_params)
+            if synth_recipe_id in recipes:
+                matched_recipe_id = synth_recipe_id
+                matched_source = "synthetic_recipe"
+            else:
+                synth_params = dict(getattr(panel, "params", {}))
+                panel_archetype = str(getattr(panel, "archetype", ""))
+                recipes[synth_recipe_id] = _AlphaRecipe(
+                    recipe_id=synth_recipe_id,
+                    family=family,
+                    variant=variant,
+                    timeframe=timeframe,
+                    archetype=map_signal_archetype_to_alpha_archetype(panel_archetype),
+                    indicator_params=synth_params,
+                    side_rule_id=f"synthetic:{family}",
+                    exit_policy_id=f"synthetic:{family}",
+                    required_fields=(),
+                    causal_lag_bars=1,
+                    max_turnover_per_year=365.0,
+                )
+                matched_recipe_id = synth_recipe_id
+                matched_source = "synthetic_recipe"
 
         src = cast(
             Literal["catalog_exact", "catalog_family_variant", "synthetic_recipe"],
@@ -145,6 +182,8 @@ def _write_alpha_foundry_report(
             "cost_drag_ratio": pd.Series(dtype="float64"),
             "turnover_per_year": pd.Series(dtype="float64"),
             "compute_cost_score": pd.Series(dtype="float64"),
+            "bootstrap_lcb_bps": pd.Series(dtype="float64"),
+            "bootstrap_agree": pd.Series(dtype="bool"),
             "gate_passed": pd.Series(dtype="bool"),
             "reject_reasons": pd.Series(dtype="str"),
             "bucket_key": pd.Series(dtype="str"),
@@ -219,6 +258,16 @@ def run_alpha_foundry_l0_gate(
                 runtime_config.top_k_per_family_tf
                 if hasattr(runtime_config, "top_k_per_family_tf")
                 else 5
+            ),
+            min_conviction_lcb_bps=(
+                runtime_config.min_conviction_lcb_bps
+                if hasattr(runtime_config, "min_conviction_lcb_bps")
+                else 5.0
+            ),
+            total_l1_verification_budget=(
+                runtime_config.total_l1_verification_budget
+                if hasattr(runtime_config, "total_l1_verification_budget")
+                else 30
             ),
         )
         evidences = l0_result.evidences

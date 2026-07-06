@@ -1,4 +1,7 @@
-"""Strategy runtime bridge with Alpha Foundry L0 gate wiring. [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING]"""
+"""Strategy runtime bridge with Alpha Foundry L0 gate wiring.
+
+[ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
+"""
 from __future__ import annotations
 
 import dataclasses
@@ -955,6 +958,7 @@ def run_candidate_strategy_for_universe(
             max_recipes_per_family=alpha_foundry_config.max_recipes_per_family,
             include_families=alpha_foundry_config.include_families,
             exclude_families=alpha_foundry_config.exclude_families,
+            enable_synthetic_recipes=alpha_foundry_config.enable_synthetic_recipes,
         )
         af_result = run_alpha_foundry_l0_gate(
             panels=panels,

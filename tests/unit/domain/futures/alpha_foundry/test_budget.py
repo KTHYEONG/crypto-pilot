@@ -49,6 +49,8 @@ PASS_EVIDENCE = CheapGateEvidence(
     compute_cost_score=0.0,
     gate_passed=True,
     reject_reasons=(),
+    bootstrap_lcb_bps=1.5,
+    bootstrap_agree=True,
 )
 
 FAIL_EVIDENCE = CheapGateEvidence(
@@ -68,6 +70,8 @@ FAIL_EVIDENCE = CheapGateEvidence(
     compute_cost_score=0.0,
     gate_passed=False,
     reject_reasons=("insufficient_events",),
+    bootstrap_lcb_bps=0.0,
+    bootstrap_agree=True,
 )
 
 
@@ -127,6 +131,8 @@ class TestBuildL1VerificationUnits:
                 compute_cost_score=0.0,
                 gate_passed=True,
                 reject_reasons=(),
+                bootstrap_lcb_bps=1.5,
+                bootstrap_agree=True,
             )
             for i in range(6)
         ]

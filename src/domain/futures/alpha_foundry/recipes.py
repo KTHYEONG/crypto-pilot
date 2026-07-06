@@ -1,4 +1,7 @@
-"""Alpha Foundry recipe catalog builder. [ADR_20260706_ALPHA_FOUNDRY_SYNC]"""
+"""Alpha Foundry recipe catalog builder.
+
+[ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
+"""
 
 from __future__ import annotations
 
@@ -200,6 +203,22 @@ def _make_recipe_id(family: str, variant: str, timeframe: str, params: dict[str,
     raw = f"{family}:{variant}:{timeframe}:{sorted(params.items())}"
     digest = hashlib.sha256(raw.encode()).hexdigest()[:12]
     return f"{family}:{variant}:{timeframe}:{digest}"
+
+
+_SIGNAL_TO_ALPHA: dict[str, AlphaArchetype] = {
+    "trend": "trend",
+    "ts_mom": "trend",
+    "mean_rev": "mean_reversion",
+    "flow_rev": "flow",
+    "unwind": "flow",
+    "carry_rev": "carry",
+    "beta_neut": "hedge",
+    "xs_alpha": "cross_sectional",
+}
+
+
+def map_signal_archetype_to_alpha_archetype(signal_archetype: str) -> AlphaArchetype:
+    return _SIGNAL_TO_ALPHA.get(signal_archetype, "trend")
 
 
 def build_alpha_recipe_catalog(
