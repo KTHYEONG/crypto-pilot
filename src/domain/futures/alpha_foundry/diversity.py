@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -17,6 +18,7 @@ from src.domain.futures.alpha_foundry.contracts import (
     CheapGateEvidence,
     CrossBucketDiversityResult,
     DiversitySelectionResult,
+    L0SignalCandidate,
 )
 from src.domain.futures.signals.contracts import CandidateSignalPanel
 
@@ -58,7 +60,7 @@ def compute_panel_correlation_matrix(
 
 def cluster_correlated_recipes(
     *,
-    evidences: Sequence[CheapGateEvidence],
+    evidences: Sequence[Any],
     corr: NDArray[np.float64],
     max_corr: float,
 ) -> tuple[tuple[str, ...], ...]:
@@ -124,33 +126,18 @@ def apply_bucket_bh_correction(
     return frozenset(selected)
 
 
-def select_bucket_diverse_recipes(
+def select_bucket_diverse_candidates(
     *,
     bucket_key: BucketKey,
-    candidates: Sequence[CheapGateEvidence],
+    candidates: Sequence[L0SignalCandidate],
     panel_by_recipe_id: Mapping[str, CandidateSignalPanel],
-    fwd_ret_by_recipe_id: Mapping[str, NDArray[np.float64]],
     active_mask: NDArray[np.bool_],
     top_k_per_family_tf: int,
     max_novelty_corr: float,
-    fdr_alpha: float,
-    min_conviction_lcb_bps: float,
 ) -> DiversitySelectionResult:
     redundant_reason_map: dict[str, str] = {}
 
-    bh_ok = apply_bucket_bh_correction(candidates, fdr_alpha)
-    filtered: list[CheapGateEvidence] = []
-    for c in candidates:
-        if c.recipe_id not in bh_ok:
-            redundant_reason_map[c.recipe_id] = "bh_rejected"
-        elif c.block_lcb_bps < min_conviction_lcb_bps:
-            redundant_reason_map[c.recipe_id] = "below_conviction_floor"
-        else:
-            filtered.append(c)
-
-    candidates = filtered
-
-    ranked = sorted(candidates, key=lambda e: (-e.block_lcb_bps, e.recipe_id))
+    ranked = sorted(candidates, key=lambda e: (-e.l1_priority_score, e.recipe_id))
     ranked_ids = tuple(e.recipe_id for e in ranked)
 
     if not ranked:
@@ -175,8 +162,8 @@ def select_bucket_diverse_recipes(
             bucket_eff_test_count=1.0,
         )
 
-    selected: list[CheapGateEvidence] = [ranked[0]]
-    redundant: list[CheapGateEvidence] = []
+    selected: list[L0SignalCandidate] = [ranked[0]]
+    redundant: list[L0SignalCandidate] = []
 
     for candidate in ranked[1:]:
         if len(selected) >= top_k_per_family_tf:
@@ -232,7 +219,7 @@ def resolve_cross_bucket_diversity(
     *,
     bucket_results: Sequence[DiversitySelectionResult],
     panel_by_recipe_id: Mapping[str, CandidateSignalPanel],
-    evidence_by_recipe_id: Mapping[str, CheapGateEvidence],
+    candidate_by_recipe_id: Mapping[str, L0SignalCandidate],
     active_mask: NDArray[np.bool_],
     max_novelty_corr: float,
 ) -> CrossBucketDiversityResult:
@@ -269,23 +256,25 @@ def resolve_cross_bucket_diversity(
         )
 
     cross_corr = compute_panel_correlation_matrix(panels, active_mask)
-    all_evidences = [evidence_by_recipe_id[rid] for rid in all_selected if rid in evidence_by_recipe_id]
-    if len(all_evidences) != len(all_selected):
-        all_evidences = [
-            CheapGateEvidence(
-                recipe_id=rid, timeframe="", symbol_scope="symbol",
-                n_events=0, effective_n=0.0, mean_net_bps=0.0, nw_tstat=0.0,
-                block_lcb_bps=0.0, rank_ic=0.0, cost_drag_ratio=0.0,
-                turnover_per_year=0.0, novelty_corr_max=0.0,
-                incremental_rank_ic=0.0, compute_cost_score=0.0,
-                bootstrap_lcb_bps=0.0, bootstrap_agree=True,
-                gate_passed=True, reject_reasons=(),
+    all_candidates = [candidate_by_recipe_id[rid] for rid in all_selected if rid in candidate_by_recipe_id]
+    if len(all_candidates) != len(all_selected):
+        all_candidates = [
+            L0SignalCandidate(
+                run_id="", timeframe="", family="", variant="", recipe_id=rid,
+                archetype="trend", source="synthetic_recipe",
+                n_events=0, effective_n=0.0, mean_net_bps=0.0, block_lcb_bps=0.0,
+                nw_tstat=0.0, bootstrap_lcb_bps=0.0, bootstrap_agree=True,
+                cost_drag_ratio=0.0, turnover_per_year=0.0, max_abs_corr_in_bucket=0.0,
+                tf_coverage_count=0, sign_agreement_ratio=0.0,
+                corroboration_tier="insufficient_coverage",
+                discovery_tier="candidate", l1_priority_score=0.0, l1_budget_units=0,
+                hard_reject_reasons=(), soft_flags=(),
             )
             for rid in all_selected
         ]
 
     clusters = cluster_correlated_recipes(
-        evidences=all_evidences,
+        evidences=all_candidates,
         corr=cross_corr,
         max_corr=max_novelty_corr,
     )
@@ -299,11 +288,11 @@ def resolve_cross_bucket_diversity(
             final_selected.append(cluster[0])
         else:
             def _best_key(rid: str) -> float:
-                ev = evidence_by_recipe_id.get(rid)
-                if ev is None:
+                cand = candidate_by_recipe_id.get(rid)
+                if cand is None:
                     idx = all_selected.index(rid)
-                    ev = all_evidences[idx]
-                return ev.block_lcb_bps
+                    cand = all_candidates[idx]
+                return cand.l1_priority_score
             best_rid = max(cluster, key=_best_key)
             for rid in cluster:
                 if rid == best_rid:
@@ -321,3 +310,8 @@ def resolve_cross_bucket_diversity(
         cross_bucket_corr=cross_corr,
         global_eff_test_count=global_eff,
     )
+
+
+
+# Backward-compat alias
+select_bucket_diverse_recipes = select_bucket_diverse_candidates

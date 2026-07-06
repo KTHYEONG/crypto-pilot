@@ -32,6 +32,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="off",
         help="Alpha Foundry L0 mode",
     )
+    parser.add_argument(
+        "--alpha-foundry-total-l1-budget",
+        type=int,
+        default=30,
+        help="Total L1 verification budget for pipeline",
+    )
+    parser.add_argument(
+        "--alpha-foundry-min-conviction-lcb-bps",
+        type=float,
+        default=5.0,
+        help="Minimum conviction LCB in bps for L1 qualification",
+    )
+    parser.add_argument(
+        "--alpha-foundry-enable-fast-tf",
+        action="store_true",
+        help="Enable fast discovery timeframes (1h/2h)",
+    )
     from src.application.futures.runner.config import _REMOVED_ARG_KEYS
     for key in _REMOVED_ARG_KEYS:
         parser.add_argument(f"--{key.replace('_', '-')}", action="store_true", help=argparse.SUPPRESS)

@@ -61,8 +61,14 @@ def build_alpha_foundry_runtime_config(
     if isinstance(args, Namespace):
         args = vars(args)
     alpha_foundry_mode = str(args.get("alpha_foundry", "off"))
+    total_l1_budget = int(args.get("alpha_foundry_total_l1_budget", 30))
+    min_conviction = float(args.get("alpha_foundry_min_conviction_lcb_bps", 5.0))
+    enable_fast_tf = bool(args.get("alpha_foundry_enable_fast_tf", False))
     config = AlphaFoundryRuntimeConfig(
         mode=alpha_foundry_mode,  # type: ignore[arg-type]
+        total_l1_verification_budget=max(1, total_l1_budget),
+        min_conviction_lcb_bps=min_conviction,
+        enable_fast_discovery_timeframes=enable_fast_tf,
     )
     return validate_alpha_foundry_runtime_config(config)
 
@@ -78,6 +84,26 @@ def validate_alpha_foundry_runtime_config(
         raise ValueError(f"top_k_per_family_tf must be >= 1, got {config.top_k_per_family_tf}")
     if config.initial_fold_budget < 1:
         raise ValueError(f"initial_fold_budget must be >= 1, got {config.initial_fold_budget}")
+    if config.total_l1_verification_budget < 1:
+        raise ValueError(f"total_l1_verification_budget must be >= 1, got {config.total_l1_verification_budget}")
+    if config.min_conviction_lcb_bps < 0.0:
+        raise ValueError(f"min_conviction_lcb_bps must be >= 0.0, got {config.min_conviction_lcb_bps}")
+    if config.enable_fast_discovery_timeframes:
+        for tf in config.fast_discovery_timeframes:
+            if not tf.endswith("h") or not tf[:-1].isdigit():
+                raise ValueError(f"invalid fast discovery timeframe: {tf!r}")
+    # Validate cheap_gate constraints
+    cg = config.cheap_gate
+    if cg.min_seed_slots_per_archetype < 1:
+        raise ValueError(f"min_seed_slots_per_archetype must be >= 1, got {cg.min_seed_slots_per_archetype}")
+    if cg.min_seed_slots_per_timeframe < 1:
+        raise ValueError(f"min_seed_slots_per_timeframe must be >= 1, got {cg.min_seed_slots_per_timeframe}")
+    for archetype, floor in cg.archetype_event_floors.items():
+        if floor < 0:
+            raise ValueError(f"negative event floor for archetype {archetype}: {floor}")
+    for family, floor in cg.family_event_floors.items():
+        if floor < 0:
+            raise ValueError(f"negative event floor for family {family}: {floor}")
     return config
 
 

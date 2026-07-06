@@ -231,3 +231,96 @@ class TestL2SleevesFromPosterior:
             config=config,
         )
         assert len(result) > 0
+
+
+class TestBuildL1VerificationUnits:
+    def test_build_units(self) -> None:
+        from src.domain.futures.alpha_foundry.budget import build_l1_verification_units
+        from src.domain.futures.alpha_foundry.contracts import CheapGateEvidence
+
+        ev = CheapGateEvidence(
+            recipe_id="r1", timeframe="4h", symbol_scope="symbol",
+            n_events=100, effective_n=80.0, mean_net_bps=5.0, nw_tstat=2.0,
+            block_lcb_bps=2.0, rank_ic=0.05, cost_drag_ratio=0.3,
+            turnover_per_year=50.0, novelty_corr_max=0.0,
+            incremental_rank_ic=0.0, compute_cost_score=0.0,
+            gate_passed=True, reject_reasons=(),
+            bootstrap_lcb_bps=1.5, bootstrap_agree=True,
+        )
+        recipe = AlphaRecipe(
+            recipe_id="r1", family="f", variant="v", timeframe="4h",
+            archetype="trend", indicator_params={}, side_rule_id="s",
+            exit_policy_id="e", required_fields=("close",),
+            causal_lag_bars=1, max_turnover_per_year=365.0,
+        )
+        units = build_l1_verification_units(
+            evidences=[ev],
+            recipes={"r1": recipe},
+            symbols=("BTCUSDT",),
+            top_k_per_family_tf=5,
+            initial_fold_budget=3,
+        )
+        assert len(units) == 1
+        assert units[0].recipe_id == "r1"
+        assert units[0].allocated_fold_budget == 3
+
+    def test_build_units_skips_unknown_recipe(self) -> None:
+        from src.domain.futures.alpha_foundry.budget import build_l1_verification_units
+        from src.domain.futures.alpha_foundry.contracts import CheapGateEvidence
+
+        ev = CheapGateEvidence(
+            recipe_id="unknown", timeframe="4h", symbol_scope="symbol",
+            n_events=100, effective_n=80.0, mean_net_bps=5.0, nw_tstat=2.0,
+            block_lcb_bps=2.0, rank_ic=0.05, cost_drag_ratio=0.3,
+            turnover_per_year=50.0, novelty_corr_max=0.0,
+            incremental_rank_ic=0.0, compute_cost_score=0.0,
+            gate_passed=True, reject_reasons=(),
+            bootstrap_lcb_bps=1.5, bootstrap_agree=True,
+        )
+        units = build_l1_verification_units(
+            evidences=[ev],
+            recipes={},
+            symbols=("BTCUSDT",),
+            top_k_per_family_tf=5,
+            initial_fold_budget=3,
+        )
+        assert len(units) == 0
+
+    def test_build_units_raises_on_budget_violation(self) -> None:
+        from src.domain.futures.alpha_foundry.budget import build_l1_verification_units
+        from src.domain.futures.alpha_foundry.contracts import CheapGateEvidence
+
+        recipe = AlphaRecipe(
+            recipe_id="r1", family="f", variant="v", timeframe="4h",
+            archetype="trend", indicator_params={}, side_rule_id="s",
+            exit_policy_id="e", required_fields=("close",),
+            causal_lag_bars=1, max_turnover_per_year=365.0,
+        )
+        evs = [
+            CheapGateEvidence(
+                recipe_id="r1", timeframe="4h", symbol_scope="symbol",
+                n_events=100, effective_n=80.0, mean_net_bps=5.0, nw_tstat=2.0,
+                block_lcb_bps=2.0, rank_ic=0.05, cost_drag_ratio=0.3,
+                turnover_per_year=50.0, novelty_corr_max=0.0,
+                incremental_rank_ic=0.0, compute_cost_score=0.0,
+                gate_passed=True, reject_reasons=(),
+                bootstrap_lcb_bps=1.5, bootstrap_agree=True,
+            ),
+            CheapGateEvidence(
+                recipe_id="r1", timeframe="4h", symbol_scope="symbol",
+                n_events=100, effective_n=80.0, mean_net_bps=4.0, nw_tstat=2.0,
+                block_lcb_bps=1.0, rank_ic=0.05, cost_drag_ratio=0.3,
+                turnover_per_year=50.0, novelty_corr_max=0.0,
+                incremental_rank_ic=0.0, compute_cost_score=0.0,
+                gate_passed=True, reject_reasons=(),
+                bootstrap_lcb_bps=1.0, bootstrap_agree=True,
+            ),
+        ]
+        with pytest.raises(ValueError, match="budget violated"):
+            build_l1_verification_units(
+                evidences=evs,
+                recipes={"r1": recipe},
+                symbols=("BTCUSDT",),
+                top_k_per_family_tf=1,  # only 1 allowed, but 2 same-bucket
+                initial_fold_budget=3,
+            )

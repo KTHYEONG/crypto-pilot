@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import cast
 
 import numpy as np
@@ -101,3 +101,14 @@ def fuse_multi_timeframe_evidence(
             ))
 
     return tuple(results)
+
+
+
+def index_multi_timeframe_evidence(
+    fusion_rows: Sequence[MultiTimeframeEvidence],
+) -> dict[tuple[str, str, str], MultiTimeframeEvidence]:
+    result: dict[tuple[str, str, str], MultiTimeframeEvidence] = {}
+    for row in fusion_rows:
+        key = (row.family, row.variant, row.native_timeframe)
+        result[key] = row
+    return result
