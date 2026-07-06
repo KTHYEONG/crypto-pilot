@@ -23,6 +23,10 @@ def _rd(
 
 
 RECIPE_DEFINITIONS: dict[str, tuple[dict[str, object], ...]] = {
+    "trend_ma": (
+        _rd("ema_12_72", {"fast": 12, "slow": 72}, 1, ("close",)),
+        _rd("ema_18_108", {"fast": 18, "slow": 108}, 1, ("close",)),
+    ),
     "ema_trend": (
         _rd("ema_12_24", {"fast": 12, "slow": 24}, 1, ("close",)),
         _rd("ema_12_48", {"fast": 12, "slow": 48}, 2, ("close",)),
@@ -47,6 +51,7 @@ RECIPE_DEFINITIONS: dict[str, tuple[dict[str, object], ...]] = {
             26,
             ("high", "low", "close"),
         ),
+        _rd("ichi_9_26", {"tenkan": 9, "kijun": 26}, 2, ("high", "low", "close")),
     ),
     "rsi_mean_reversion": (
         _rd("rsi_14_30_70", {"period": 14, "oversold": 30, "overbought": 70}, 1, ("close",)),
@@ -68,6 +73,7 @@ RECIPE_DEFINITIONS: dict[str, tuple[dict[str, object], ...]] = {
         _rd("kc_20_1.5", {"period": 20, "atr_mult": 1.5}, 1, ("close", "high", "low")),
     ),
     "funding_carry": (
+        _rd("funding_24", {"window": 24}, 1, ("close", "funding")),
         _rd("funding_zscore_4", {"z_window": 4}, 1, ("close", "funding")),
         _rd("funding_zscore_8", {"z_window": 8}, 2, ("close", "funding")),
         _rd("funding_zscore_24", {"z_window": 24}, 3, ("close", "funding")),
@@ -89,16 +95,24 @@ RECIPE_DEFINITIONS: dict[str, tuple[dict[str, object], ...]] = {
         _rd("taker_imbalance_24", {"window": 24}, 2, ("close", "taker_buy")),
     ),
     "xs_momentum": (
+        _rd("xs_mom_12", {"rank_window": 12}, 1, ("close",)),
+        _rd("xs_mom_48", {"rank_window": 48}, 2, ("close",)),
         _rd("xs_mom_rank_12", {"rank_window": 12}, 2, ("close",)),
         _rd("xs_mom_rank_24", {"rank_window": 24}, 3, ("close",)),
     ),
     "xs_carry": (
+        _rd("xs_carry_96", {"funding_z_window": 96}, 2, ("close", "funding")),
+        _rd("xs_carry_168", {"funding_z_window": 168}, 3, ("close", "funding")),
         _rd("xs_carry_rank_12", {"rank_window": 12}, 2, ("close", "funding")),
         _rd("xs_carry_rank_24", {"rank_window": 24}, 3, ("close", "funding")),
+    ),
+    "macd_4h": (
+        _rd("macd_12_26_9", {"fast": 12, "slow": 26, "signal": 9}, 1, ("close",)),
     ),
 }
 
 FAMILY_ARCHETYPE: dict[str, AlphaArchetype] = {
+    "trend_ma": "trend",
     "ema_trend": "trend",
     "hma_trend": "trend",
     "kama_trend": "trend",
@@ -115,9 +129,11 @@ FAMILY_ARCHETYPE: dict[str, AlphaArchetype] = {
     "taker_flow_imbalance": "flow",
     "xs_momentum": "cross_sectional",
     "xs_carry": "cross_sectional",
+    "macd_4h": "trend",
 }
 
 FAMILY_SIDE_RULE: dict[str, str] = {
+    "trend_ma": "trend_follow",
     "ema_trend": "trend_follow",
     "hma_trend": "trend_follow",
     "kama_trend": "trend_follow",
@@ -134,9 +150,11 @@ FAMILY_SIDE_RULE: dict[str, str] = {
     "taker_flow_imbalance": "flow_reversal",
     "xs_momentum": "xs_momentum",
     "xs_carry": "xs_carry",
+    "macd_4h": "trend_follow",
 }
 
 FAMILY_EXIT_POLICY: dict[str, str] = {
+    "trend_ma": "atr_trail_2",
     "ema_trend": "atr_trail_2",
     "hma_trend": "atr_trail_2",
     "kama_trend": "atr_trail_2",
@@ -153,9 +171,11 @@ FAMILY_EXIT_POLICY: dict[str, str] = {
     "taker_flow_imbalance": "tp_sl_1_2",
     "xs_momentum": "atr_trail_2",
     "xs_carry": "atr_trail_2",
+    "macd_4h": "atr_trail_2",
 }
 
 FAMILY_MAX_TURNOVER: dict[str, float] = {
+    "trend_ma": 365.0,
     "ema_trend": 365.0,
     "hma_trend": 365.0,
     "kama_trend": 365.0,
@@ -172,6 +192,7 @@ FAMILY_MAX_TURNOVER: dict[str, float] = {
     "taker_flow_imbalance": 730.0,
     "xs_momentum": 365.0,
     "xs_carry": 365.0,
+    "macd_4h": 365.0,
 }
 
 
