@@ -21,7 +21,8 @@ related_paths:
   - src/domain/futures/alpha_foundry/diversity.py
   - src/domain/futures/alpha_foundry/budget.py
   - src/domain/futures/alpha_foundry/posterior.py
-  - src/domain/futures/alpha_foundry/pipeline.py
+   - src/domain/futures/alpha_foundry/pipeline.py
+   - src/domain/futures/alpha_foundry/bridge_helpers.py
 change_triggers:
   - src/domain/futures/signals/rules.py
   - src/domain/futures/signals/diagnostics.py
@@ -32,7 +33,8 @@ change_triggers:
   - src/domain/futures/alpha_foundry/diversity.py
   - src/domain/futures/alpha_foundry/budget.py
   - src/domain/futures/alpha_foundry/posterior.py
-  - src/domain/futures/alpha_foundry/pipeline.py
+   - src/domain/futures/alpha_foundry/pipeline.py
+   - src/domain/futures/alpha_foundry/bridge_helpers.py
 dependencies:
   documents:
     - docs/architecture/regime.md
@@ -82,6 +84,15 @@ last_verified: 2026-07-06
 - `L1PosteriorEvidence`: `posterior_mu_bps`, `posterior_sigma_bps`, `prob_mu_gt_cost`, `lcb_net_bps`, `quality_weight`, `activation_contract`.
 - `evaluate_panel_cheap_gate()` and `evaluate_alpha_cheap_gate_batch()` consume aligned `[T, N]` arrays, causal lag, funding cost, and stressed round-trip cost.
 - `shrink_l1_evidence_hierarchical()` applies family/timeframe shrinkage with `w = n_eff / (n_eff + prior_effective_n)`.
+
+### Alpha Foundry Bridge Wiring [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING]
+- `PanelRecipeBinding`: binding record with `panel_tag`, `recipe_id`, `source` (alpha_foundry/main/panels), `timestamp`.
+- `AlphaFoundryBridgeReport`: per-TF report with `mode` (off/audit/gate), `panels_in`, `bound`, `survivors`, `reject_breakdown`, `warnings`.
+- `AlphaFoundryL0Result`: typed result from L0 gate with `evidence_rows`, `passed`, `rejected`, `report`, `binding`.
+- `run_alpha_foundry_l0_gate(panel_dfs, recipes, config)` — panel→recipe matching, cheap gate evaluation, audit/gate filtering, report generation with JSON artifact.
+- `bind_panels_to_alpha_recipes(panel_dfs, recipes, max_per_family)` — variant normalization (`_normalize_variant()`, strip suffix/prefix), family filter, max-per-family budget.
+- `_write_alpha_foundry_report(mode, rows, passed, tf)` — writes `logs/futures/alpha_foundry/{tf}_{timestamp}_report.json`.
+- Mode behavior: `"audit"` preserves all bound panels with `gate_passed` flag; `"gate"` only forwards survivors (zero-survivor closes tiered L1 entry).
 
 # 3. Core I/O Interfaces
 
