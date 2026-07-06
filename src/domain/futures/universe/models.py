@@ -261,20 +261,14 @@ def query_ledger_as_of(
     as_of_date = _to_date(as_of)
     out = ledger.copy()
     out["date"] = pd.to_datetime(out["date"], utc=True, errors="coerce").dt.date
-    out["knowledge_date"] = pd.to_datetime(
-        out["knowledge_date"], utc=True, errors="coerce"
-    ).dt.date
+    out["knowledge_date"] = pd.to_datetime(out["knowledge_date"], utc=True, errors="coerce").dt.date
     mask = (out["tf"] == tf) & (out["date"] <= as_of_date) & (out["knowledge_date"] <= as_of_date)
     if symbols is not None:
         symbol_set = set(symbols)
         mask &= out["symbol"].isin(symbol_set)
     if enforce_eligibility:
-        is_listed = (
-            out.get("is_listed", pd.Series(True, index=out.index)).fillna(False).astype(bool)
-        )
-        is_trading = (
-            out.get("is_trading", pd.Series(True, index=out.index)).fillna(False).astype(bool)
-        )
+        is_listed = out.get("is_listed", pd.Series(True, index=out.index)).fillna(False).astype(bool)
+        is_trading = out.get("is_trading", pd.Series(True, index=out.index)).fillna(False).astype(bool)
         mask &= is_listed & is_trading
     out = out.loc[mask]
     out = out.sort_values(["symbol", "date", "knowledge_date"])
@@ -362,9 +356,7 @@ def _load_sqlite_ledger_slice(
         finally:
             conn.close()
     except (sqlite3.DatabaseError, pd.errors.DatabaseError, ValueError) as exc:
-        raise ValueError(
-            f"Failed to load sqlite ledger slice from {ledger_path}: {exc}"
-        ) from exc
+        raise ValueError(f"Failed to load sqlite ledger slice from {ledger_path}: {exc}") from exc
 
 
 def _load_parquet_ledger_slice(
@@ -391,9 +383,7 @@ def _load_parquet_ledger_slice(
     synth_allowed = {"is_listed", "is_trading"} if enforce_eligibility else set()
     extra_missing = missing.difference(synth_allowed)
     if extra_missing:
-        raise ValueError(
-            f"Parquet ledger missing required columns: {sorted(extra_missing)} from {ledger_path}"
-        )
+        raise ValueError(f"Parquet ledger missing required columns: {sorted(extra_missing)} from {ledger_path}")
     for column in synth_allowed.intersection(missing):
         frame[column] = True
 
@@ -405,21 +395,20 @@ def update_ledger(new_rows: pd.DataFrame, *, ledger_path: Path = DEFAULT_LEDGER_
     if new_rows.empty:
         return
     import sqlite3
+
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     logger.info(f"[SQL-DB]   💾 Updating ledger: {len(new_rows)} rows -> {ledger_path.name}")
     conn = sqlite3.connect(str(ledger_path))
     try:
         new_rows.to_sql("temp_ledger", conn, if_exists="replace", index=False)
-        
+
         cursor = conn.cursor()
         cursor.execute("SELECT count(name) FROM sqlite_master WHERE type='table' AND name='ledger'")
         if cursor.fetchone()[0] == 0:
             cursor.execute("CREATE TABLE ledger AS SELECT * FROM temp_ledger WHERE 1=0")
-            cursor.execute(
-                "CREATE UNIQUE INDEX idx_ledger ON ledger (symbol, tf, date, knowledge_date)"
-            )
-            
+            cursor.execute("CREATE UNIQUE INDEX idx_ledger ON ledger (symbol, tf, date, knowledge_date)")
+
         cols = ", ".join([f'"{col}"' for col in new_rows.columns])
         cursor.execute(f"INSERT OR REPLACE INTO ledger ({cols}) SELECT {cols} FROM temp_ledger")  # noqa: S608
         cursor.execute("DROP TABLE temp_ledger")
@@ -446,9 +435,7 @@ def apply_structure_stage(
         errors="coerce",
     )
     multiplier_valid = multiplier.notna() & np.isfinite(multiplier) & (multiplier > 0.0)
-    leveraged = np.logical_or.reduce(
-        [upper.str.contains(p, regex=False) for p in LEVERAGED_TOKEN_PATTERNS]
-    )
+    leveraged = np.logical_or.reduce([upper.str.contains(p, regex=False) for p in LEVERAGED_TOKEN_PATTERNS])
 
     usdt_quote_or_margin = is_usdt_quote | is_usdt_margin
     pass_mask = is_perp & usdt_quote_or_margin & is_trading & multiplier_valid & (~leveraged)

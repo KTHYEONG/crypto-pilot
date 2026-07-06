@@ -6,6 +6,7 @@ Scenarios:
     S2: _sortino 무손실 edge — dd=0 → 0.0 (inf 방어).
     S3: _terminal_multiple — 복리 배수 및 전손(prod<=0) 케이스.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -21,6 +22,7 @@ from src.domain.futures.strategy.tiered_workflow.metrics import (
 # S1: _sortino happy path
 # ---------------------------------------------------------------------------
 
+
 def test_sortino_happy_path_matches_hand_calculation() -> None:
     """S1: 표준 TDD(전표본 N 정규화) 수기계산값과 일치 (rel=1e-4).
 
@@ -32,7 +34,7 @@ def test_sortino_happy_path_matches_hand_calculation() -> None:
     rets = [0.02, -0.01, 0.03, -0.02]
     bars_per_year = 2190.0
     # dd=sqrt(sum([1e-4,4e-4])/4)=sqrt(1.25e-4)=0.011180339...
-    expected = 0.005 / (5e-4 / 4) ** 0.5 * 2190.0 ** 0.5  # ≈ 20.929
+    expected = 0.005 / (5e-4 / 4) ** 0.5 * 2190.0**0.5  # ≈ 20.929
 
     # Act (When)
     result = _sortino(rets, bars_per_year=bars_per_year)
@@ -44,6 +46,7 @@ def test_sortino_happy_path_matches_hand_calculation() -> None:
 # ---------------------------------------------------------------------------
 # S2: _sortino 무손실 edge (inf 방어)
 # ---------------------------------------------------------------------------
+
 
 def test_sortino_returns_zero_when_no_losses() -> None:
     """S2: 전부 양수 수익률 → downside=empty → dd=0 → 0.0 반환 (inf 방어)."""
@@ -102,14 +105,13 @@ def test_sortino_exceeds_sharpe_for_mixed_returns() -> None:
     sharpe_val = _sharpe(rets, bars_per_year=bars_per_year)
 
     # Assert (Then)
-    assert sortino_val > sharpe_val, (
-        f"표준 Sortino({sortino_val:.4f}) must exceed Sharpe({sharpe_val:.4f})"
-    )
+    assert sortino_val > sharpe_val, f"표준 Sortino({sortino_val:.4f}) must exceed Sharpe({sharpe_val:.4f})"
 
 
 # ---------------------------------------------------------------------------
 # S3: _terminal_multiple
 # ---------------------------------------------------------------------------
+
 
 def test_terminal_multiple_compounds_correctly() -> None:
     """S3: [0.1, 0.1] → 1.1*1.1 = 1.21."""

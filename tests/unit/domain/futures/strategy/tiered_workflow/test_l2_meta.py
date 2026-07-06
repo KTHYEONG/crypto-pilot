@@ -13,8 +13,13 @@ from src.domain.futures.strategy.tiered_workflow.l2_meta import (
 
 def _sig(raw_mu: float, quality_weight: float = 1.0) -> SymbolSignal:
     return SymbolSignal(
-        raw_mu=raw_mu, volatility=1e-3, n_obs=100, t_stat=2.0,
-        valid=True, beta_btc=None, quality_weight=quality_weight,
+        raw_mu=raw_mu,
+        volatility=1e-3,
+        n_obs=100,
+        t_stat=2.0,
+        valid=True,
+        beta_btc=None,
+        quality_weight=quality_weight,
     )
 
 
@@ -66,7 +71,6 @@ from src.domain.futures.strategy.tiered_workflow.l2_meta import (
 
 
 class TestRegimeReliabilityMultiplier:
-
     def test_reliability_mult_negative_edge_downweights(self) -> None:
         result = compute_regime_reliability_multiplier(
             [-30.0, -25.0],
@@ -123,12 +127,14 @@ class TestRegimeReliabilityMultiplier:
             compute_regime_reliability_multiplier([], floor=1.5)
         with pytest.raises(ValueError, match="pos_edge_at_full_bps"):
             compute_regime_reliability_multiplier(
-                [], floor=0.2, pos_edge_at_full_bps=-10.0, neg_edge_at_floor_bps=0.0,
+                [],
+                floor=0.2,
+                pos_edge_at_full_bps=-10.0,
+                neg_edge_at_floor_bps=0.0,
             )
 
 
 class TestBearEdgePerBarBps:
-
     def test_bear_edge_per_bar_bps(self) -> None:
         assert bear_edge_per_bar_bps(0.015, 100) == pytest.approx(1.5)
         assert bear_edge_per_bar_bps(-0.30, 200) == pytest.approx(-15.0)
@@ -179,6 +185,7 @@ class TestParseMetaGroupIds:
 
 # ─── apply_bucket_conditional_weight ─────────────────────────────────
 
+
 def test_apply_bucket_conditional_weight_clip_lower_bound() -> None:
     """1.2 edge가 낮으면 g가 g_min으로 clip된다."""
     sleeve_sigs = {
@@ -214,7 +221,10 @@ def test_apply_bucket_conditional_weight_missing_bucket_key() -> None:
     }
     bucket_edges: dict[tuple[int, str, str], float] = {}
     result = apply_bucket_conditional_weight(
-        sleeve_sigs, bucket_edges, regime_now=2, edge_floor_bps=0.0,
+        sleeve_sigs,
+        bucket_edges,
+        regime_now=2,
+        edge_floor_bps=0.0,
     )
     assert len(result) == 0
 
@@ -226,8 +236,13 @@ def test_apply_bucket_conditional_weight_missing_key_with_neg_floor() -> None:
     }
     bucket_edges: dict[tuple[int, str, str], float] = {}
     result = apply_bucket_conditional_weight(
-        sleeve_sigs, bucket_edges, regime_now=2,
-        edge_floor_bps=-10.0, edge_ref_bps=50.0, g_min=0.5, g_max=1.5,
+        sleeve_sigs,
+        bucket_edges,
+        regime_now=2,
+        edge_floor_bps=-10.0,
+        edge_ref_bps=50.0,
+        g_min=0.5,
+        g_max=1.5,
     )
     assert len(result) == 1
     g = max(0.5, min(1.5, (0.0 - (-10.0)) / 50.0))
@@ -245,8 +260,13 @@ def test_apply_bucket_conditional_weight_reduces_pooled_magnitude() -> None:
         (2, "ichimoku_trend", "4h"): 65.0,
     }
     reweighted = apply_bucket_conditional_weight(
-        sleeve_sigs, bucket_edges, regime_now=2,
-        edge_floor_bps=0.0, edge_ref_bps=50.0, g_min=0.5, g_max=1.5,
+        sleeve_sigs,
+        bucket_edges,
+        regime_now=2,
+        edge_floor_bps=0.0,
+        edge_ref_bps=50.0,
+        g_min=0.5,
+        g_max=1.5,
     )
     cs = np.array([max(s.quality_weight, 0.0) for s in sleeve_sigs.values()], dtype=np.float64)
     mus = np.array([s.raw_mu for s in sleeve_sigs.values()], dtype=np.float64)
@@ -270,12 +290,20 @@ def test_apply_bucket_conditional_weight_preserves_conviction_cap() -> None:
         (2, "supertrend", "4h"): 50.0,
     }
     reweighted = apply_bucket_conditional_weight(
-        sleeve_sigs, bucket_edges, regime_now=2,
-        edge_floor_bps=0.0, edge_ref_bps=50.0, g_min=0.5, g_max=1.5,
+        sleeve_sigs,
+        bucket_edges,
+        regime_now=2,
+        edge_floor_bps=0.0,
+        edge_ref_bps=50.0,
+        g_min=0.5,
+        g_max=1.5,
     )
     from src.domain.futures.strategy.tiered_workflow.awf_sim import _combine_sleeve_signals_to_symbol
+
     combined, _ = _combine_sleeve_signals_to_symbol(
-        dict(reweighted), method="precision_weighted", conviction_cap_mult=1.5,
+        dict(reweighted),
+        method="precision_weighted",
+        conviction_cap_mult=1.5,
     )
     btc_sig = combined["BTCUSDT"]
     cs = np.array([max(s.quality_weight, 0.0) for s in reweighted.values()], dtype=np.float64)
@@ -288,14 +316,14 @@ def _simulate_guard(config: object) -> None:
     _l2_regime_weight = bool(getattr(config, "l2_regime_conditional_weight_enabled", False))
     _l2_intra_divergence = bool(getattr(config, "l2_intra_symbol_divergence_enabled", False))
     assert not (_l2_regime_weight and _l2_intra_divergence), (
-        "l2_regime_conditional_weight_enabled and l2_intra_symbol_divergence_enabled "
-        "are mutually exclusive"
+        "l2_regime_conditional_weight_enabled and l2_intra_symbol_divergence_enabled are mutually exclusive"
     )
 
 
 def test_mutual_exclusion_guard_raises_on_dual_enable() -> None:
     """2.3 l2_regime_conditional_weight_enabled + l2_intra_symbol_divergence_enabled 동시 True → AssertionError."""
     from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
+
     cfg = Layer2AllocationConfig(
         l2_regime_conditional_weight_enabled=True,
         l2_intra_symbol_divergence_enabled=True,
@@ -307,6 +335,7 @@ def test_mutual_exclusion_guard_raises_on_dual_enable() -> None:
 def test_mutual_exclusion_guard_passes_single_enable() -> None:
     """단일 flag만 True면 guard 통과."""
     from src.domain.futures.strategy.tiered_workflow.dataclasses import Layer2AllocationConfig
+
     cfg = Layer2AllocationConfig(
         l2_regime_conditional_weight_enabled=True,
         l2_intra_symbol_divergence_enabled=False,

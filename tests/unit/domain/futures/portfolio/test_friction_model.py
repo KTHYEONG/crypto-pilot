@@ -39,14 +39,10 @@ def test_compute_coarse_precharge_bps_math() -> None:
 def test_compute_impact_bps_sqrt_proportionality() -> None:
     """Verify that impact scale behaves proportionally to sqrt of size."""
     # order size: 10,000 USDT, ADV: 1,000,000 USDT, sigma: 0.02 (2% daily vol)
-    impact_small = compute_impact_bps(
-        sigma_1d=0.02, order_notional=10000.0, adv_30d=1000000.0, k=0.5
-    )
+    impact_small = compute_impact_bps(sigma_1d=0.02, order_notional=10000.0, adv_30d=1000000.0, k=0.5)
 
     # 4x order size -> 40,000 USDT. Impact should double (sqrt(4) = 2)
-    impact_large = compute_impact_bps(
-        sigma_1d=0.02, order_notional=40000.0, adv_30d=1000000.0, k=0.5
-    )
+    impact_large = compute_impact_bps(sigma_1d=0.02, order_notional=40000.0, adv_30d=1000000.0, k=0.5)
 
     assert abs(impact_large - 2.0 * impact_small) < 1e-9
 
@@ -64,15 +60,11 @@ def test_maker_share_impact_on_fee() -> None:
     """Verify how maker vs taker share shifts the transaction costs."""
     # Pure Taker (maker_share = 0.0) -> fee should be taker_fee_bps (4.0)
     cfg_taker = FrictionConfig(maker_share=0.0, taker_fee_bps=4.0, maker_rebate_bps=-2.0)
-    total_taker = compute_coarse_precharge_bps(
-        spread_bps=0.0, impact_bps=0.0, funding_proxy_bps=0.0, cfg=cfg_taker
-    )
+    total_taker = compute_coarse_precharge_bps(spread_bps=0.0, impact_bps=0.0, funding_proxy_bps=0.0, cfg=cfg_taker)
 
     # Pure Maker (maker_share = 1.0) -> fee should be maker_rebate_bps (-2.0)
     cfg_maker = FrictionConfig(maker_share=1.0, taker_fee_bps=4.0, maker_rebate_bps=-2.0)
-    total_maker = compute_coarse_precharge_bps(
-        spread_bps=0.0, impact_bps=0.0, funding_proxy_bps=0.0, cfg=cfg_maker
-    )
+    total_maker = compute_coarse_precharge_bps(spread_bps=0.0, impact_bps=0.0, funding_proxy_bps=0.0, cfg=cfg_maker)
 
     # Difference in pre-charge should equal the fee gap.
     # 4.0 - (-2.0) = 6.0 bps

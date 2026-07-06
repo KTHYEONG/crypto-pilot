@@ -16,6 +16,7 @@ from src.domain.futures.portfolio.signal_composer import rolling_per_bar_return_
 # 벡터화 구현 (pipeline.py OPT-3 블록과 동일 로직)
 # ---------------------------------------------------------------------------
 
+
 def _vectorized_volatility(close_2d: np.ndarray, vol_window: int) -> np.ndarray:
     """OPT-3 벡터화 volatility_2d 계산 (pipeline.py 구현 사본).
 
@@ -35,12 +36,7 @@ def _vectorized_volatility(close_2d: np.ndarray, vol_window: int) -> np.ndarray:
     if _n_t >= 2:
         _r[1:] = (_c[1:] - _c[:-1]) / np.maximum(np.abs(_c[:-1]), 1e-12)
     _rw = max(2, int(vol_window))
-    vol = (
-        pd.DataFrame(_r)
-        .rolling(_rw, min_periods=2)
-        .std(ddof=1)
-        .to_numpy(dtype=np.float64)
-    )
+    vol = pd.DataFrame(_r).rolling(_rw, min_periods=2).std(ddof=1).to_numpy(dtype=np.float64)
     vol = np.nan_to_num(vol, nan=0.0, posinf=0.0, neginf=0.0)
     return np.maximum(vol, 1e-12)
 
@@ -55,14 +51,13 @@ def _column_stack_baseline(close_2d: np.ndarray, vol_window: int) -> np.ndarray:
     Returns:
         Volatility matrix shape [T, N].
     """
-    return np.column_stack(
-        [rolling_per_bar_return_std(close_2d[:, i], vol_window) for i in range(close_2d.shape[1])]
-    )
+    return np.column_stack([rolling_per_bar_return_std(close_2d[:, i], vol_window) for i in range(close_2d.shape[1])])
 
 
 # ---------------------------------------------------------------------------
 # S1: 랜덤 [200, 5] — 벡터화 vs 컬럼별 동일성
 # ---------------------------------------------------------------------------
+
 
 class TestS1NumericalIdentity:
     """S1: 랜덤 [200, 5] 데이터에서 벡터화 결과 == 컬럼별 스택 결과."""
@@ -111,6 +106,7 @@ class TestS1NumericalIdentity:
 # S2: T=1 (단일 행) — 전부 floor(1e-12) 반환
 # ---------------------------------------------------------------------------
 
+
 class TestS2SingleRow:
     """S2: T=1 경계값 — rolling std 불가 → nan_to_num(0.0) → maximum = 1e-12."""
 
@@ -145,6 +141,7 @@ class TestS2SingleRow:
 # ---------------------------------------------------------------------------
 # S3: NaN 포함 컬럼 — nan_to_num 흡수
 # ---------------------------------------------------------------------------
+
 
 class TestS3NaNColumn:
     """S3: NaN close 값 포함 시 출력에 NaN·음수·inf 없음."""

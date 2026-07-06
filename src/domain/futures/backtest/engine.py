@@ -122,9 +122,7 @@ class PortfolioBacktestEngine:
 
         tw_raw = d.get("target_weights")
         if tw_raw is None:
-            raise RuntimeError(
-                "target_weights required: pre-merge candidate output before running engine"
-            )
+            raise RuntimeError("target_weights required: pre-merge candidate output before running engine")
         tw_arr = np.asarray(tw_raw, dtype=np.float64)
         entry_block = d.get("entry_block_mask")
         if entry_block is not None:
@@ -134,9 +132,7 @@ class PortfolioBacktestEngine:
 
         raw_kill = d.get("kill_signal")
         kill_2d = (
-            np.asarray(raw_kill, dtype=np.float64)
-            if raw_kill is not None
-            else np.zeros_like(c2d, dtype=np.float64)
+            np.asarray(raw_kill, dtype=np.float64) if raw_kill is not None else np.zeros_like(c2d, dtype=np.float64)
         )
         membership_kill = d.get("membership_kill_signal")
         if membership_kill is not None:
@@ -158,9 +154,7 @@ class PortfolioBacktestEngine:
                 "aligned OOS/portfolio data is inconsistent."
             )
 
-        use_simple_atr_i = (
-            1 if bool(OPT_FUTURES_CONFIG.get("FUTURES_SIMPLE_ATR_STOP", True)) else 0
-        )
+        use_simple_atr_i = 1 if bool(OPT_FUTURES_CONFIG.get("FUTURES_SIMPLE_ATR_STOP", True)) else 0
 
         use_intrabar = (
             prepared.execution_mode == "intrabar_1m"
@@ -252,10 +246,42 @@ class PortfolioBacktestEngine:
                     diag[3] = float(blocked_entry_count)
         if trades_arr.size == 0:
             return pd.DataFrame(), equity, final_bal, diag
-        df = pd.DataFrame(trades_arr, columns=["sym_idx", "entry_idx", "exit_idx", "side_val", "entry_price", "exit_price", "pnl", "amount", "entry_fee", "funding_fee"])
+        df = pd.DataFrame(
+            trades_arr,
+            columns=[
+                "sym_idx",
+                "entry_idx",
+                "exit_idx",
+                "side_val",
+                "entry_price",
+                "exit_price",
+                "pnl",
+                "amount",
+                "entry_fee",
+                "funding_fee",
+            ],
+        )
         df["symbol"] = [self.symbols[int(i)] for i in df["sym_idx"]]
         df["side"] = np.where(df["side_val"] == 1.0, "LONG", "SHORT")
-        return df[["symbol", "entry_idx", "exit_idx", "side", "entry_price", "exit_price", "pnl", "amount", "entry_fee", "funding_fee"]], equity, final_bal, diag
+        return (
+            df[
+                [
+                    "symbol",
+                    "entry_idx",
+                    "exit_idx",
+                    "side",
+                    "entry_price",
+                    "exit_price",
+                    "pnl",
+                    "amount",
+                    "entry_fee",
+                    "funding_fee",
+                ]
+            ],
+            equity,
+            final_bal,
+            diag,
+        )
 
 
 class FuturesBacktestEngine:

@@ -189,6 +189,7 @@ def _fit_and_predict_single_fold_from_globals(
         raise RuntimeError("candidate workflow globals are not initialized")
 
     import gc
+
     gc.disable()
     try:
         res = _fit_and_predict_single_fold(
@@ -220,7 +221,12 @@ def _fit_and_predict_single_fold(
     """Run model fitting and out-of-sample prediction for a single fold."""
     with threadpool_limits(limits=1, user_api="blas"):
         return _fit_and_predict_single_fold_inner(
-            fold_idx, fold, labeled_events, aligned, cfg, purge_bars,
+            fold_idx,
+            fold,
+            labeled_events,
+            aligned,
+            cfg,
+            purge_bars,
             is_evidence_fold=is_evidence_fold,
             compact_result=compact_result,
         )
@@ -276,9 +282,7 @@ def _fit_and_predict_single_fold_inner(
     # 1. Feature Schema
     t_step = time.perf_counter()
     _prepared_identity = (
-        labeled_events.frozen_identity_names
-        if isinstance(labeled_events, PreparedLabeledEvents)
-        else None
+        labeled_events.frozen_identity_names if isinstance(labeled_events, PreparedLabeledEvents) else None
     )
     schema = fit_candidate_feature_schema(
         labeled_events=labeled_events,
@@ -289,7 +293,7 @@ def _fit_and_predict_single_fold_inner(
     )
     timing_profile["schema"] = time.perf_counter() - t_step
 
-    skip_feat = (cfg.allocation_backend == "ensemble_b0")
+    skip_feat = cfg.allocation_backend == "ensemble_b0"
 
     def _build_window(
         *,
@@ -330,9 +334,7 @@ def _fit_and_predict_single_fold_inner(
     timing_profile["dataset_early_stop"] = time.perf_counter() - t_step
     cal_fit_end = max(
         fold.cal_start + 1,
-        fold.cal_start + int(
-            max(1, (fold.cal_end - fold.cal_start) * cfg.calibration_fit_fraction)
-        ),
+        fold.cal_start + int(max(1, (fold.cal_end - fold.cal_start) * cfg.calibration_fit_fraction)),
     )
     t_step = time.perf_counter()
     calibration_fit_set = _build_window(
@@ -363,19 +365,32 @@ def _fit_and_predict_single_fold_inner(
         if not is_evidence_fold:
             _logger.warning(
                 "[WORKFLOW] Fold %d skipped Ensemble (fit=%d < 2)",
-                fold_idx, n_fit,
+                fold_idx,
+                n_fit,
             )
         # Prior-only outputs fallback
         n_oos = oos_set.X.shape[0] if oos_set.X is not None else 0
         gate_rep = GateValidationReport(
-            enabled=False, threshold=0.5, raw_brier=0.25, calibrated_brier=0.25,
-            base_brier=0.25, brier_skill=0.0, roc_auc=0.5, average_precision=0.5,
-            decile_lift=0.0, incremental_log_growth_lcb=0.0, reason="insufficient_observations"
+            enabled=False,
+            threshold=0.5,
+            raw_brier=0.25,
+            calibrated_brier=0.25,
+            base_brier=0.25,
+            brier_skill=0.0,
+            roc_auc=0.5,
+            average_precision=0.5,
+            decile_lift=0.0,
+            incremental_log_growth_lcb=0.0,
+            reason="insufficient_observations",
         )
         edge_rep = EdgeValidationReport(
-            source=EdgeSource.DISABLED, prior_rank_ic=0.0, residual_rank_ic=0.0,
-            incremental_log_growth_mean=0.0, incremental_log_growth_lcb=0.0,
-            selected=False, reason="insufficient_observations"
+            source=EdgeSource.DISABLED,
+            prior_rank_ic=0.0,
+            residual_rank_ic=0.0,
+            incremental_log_growth_mean=0.0,
+            incremental_log_growth_lcb=0.0,
+            selected=False,
+            reason="insufficient_observations",
         )
         ml_out = CandidateModelOutput(
             events=oos_set.event_index,
@@ -394,11 +409,12 @@ def _fit_and_predict_single_fold_inner(
             q90_gross_bps=np.zeros(n_oos, dtype=np.float64),
             selection_score=np.zeros(n_oos, dtype=np.float64),
             kelly_fraction=np.zeros(n_oos, dtype=np.float64),
-            validation_diagnostics={}
+            validation_diagnostics={},
         )
         t_step = time.perf_counter()
         selected_events = select_candidate_events_for_portfolio(
-            model_output=ml_out, cfg=cfg,
+            model_output=ml_out,
+            cfg=cfg,
             enable_diagnostics=_enable_diagnostics,
         )
         timing_profile["selection"] = time.perf_counter() - t_step
@@ -428,9 +444,7 @@ def _fit_and_predict_single_fold_inner(
     if cfg.allocation_backend == "ensemble_b0":
         train_events = fit_set.event_index.copy()
         train_events["net_return_bps"] = (
-            fit_set.y_return_bps
-            if fit_set.y_return_bps is not None
-            else fit_set.y_edge_bps
+            fit_set.y_return_bps if fit_set.y_return_bps is not None else fit_set.y_edge_bps
         )
         proof_events: pd.DataFrame | None = None
         proof_fold_ids: np.ndarray | None = None
@@ -462,6 +476,7 @@ def _fit_and_predict_single_fold_inner(
 
         # --- Calculate Rank IC for ensemble_b0 on OOS ---
         from src.domain.futures.strategy.candidate_edge import _rank_ic
+
         pred_oos = ml_out.expected_net_bps
         realized_oos = np.asarray(
             oos_set.y_return_bps
@@ -481,11 +496,7 @@ def _fit_and_predict_single_fold_inner(
         _conditioning = getattr(ensemble_model, "conditioning", "ensemble_b0")
         _val_ic = float(getattr(ensemble_model, "validation_rank_ic", 0.0))
         _lam_value = ml_out.validation_diagnostics.get("mu_shrinkage_lambda", 1.0)
-        _lam = (
-            float(_lam_value)
-            if isinstance(_lam_value, (int, float, np.integer, np.floating))
-            else 1.0
-        )
+        _lam = float(_lam_value) if isinstance(_lam_value, (int, float, np.integer, np.floating)) else 1.0
         ml_out.validation_diagnostics["conditioning"] = _conditioning
         ml_out.validation_diagnostics["val_rank_ic"] = _val_ic
         ml_out.validation_diagnostics["oos_rank_ic"] = rank_ic_val
@@ -585,7 +596,8 @@ def _fit_and_predict_single_fold_inner(
 
     t_step = time.perf_counter()
     selected_events = select_candidate_events_for_portfolio(
-        model_output=ml_out, cfg=cfg,
+        model_output=ml_out,
+        cfg=cfg,
         enable_diagnostics=_enable_diagnostics,
     )
     timing_profile["selection"] = time.perf_counter() - t_step
@@ -598,10 +610,12 @@ def _fit_and_predict_single_fold_inner(
         prediction=np.asarray(ml_out.expected_net_bps, dtype=np.float64),
     )
 
-    _logger.log(PERF,
+    _logger.log(
+        PERF,
         "[CANDIDATE-FOLD] fold=%d fit_status=%s total=%.3fs schema=%.3fs ds_fit=%.3fs ds_es=%.3fs "
         "ds_cal_fit=%.3fs ds_cal_eval=%.3fs ds_oos=%.3fs edge_fit=%.3fs inference=%.3fs selection=%.3fs",
-        fold_idx, fit_status,
+        fold_idx,
+        fit_status,
         timing_profile.get("total", 0),
         timing_profile.get("schema", 0),
         timing_profile.get("dataset_fit", 0),
@@ -663,11 +677,7 @@ def run_candidate_walk_forward(
         mode = "sequential"
         outputs = []
         for fold_idx, fold in enumerate(folds):
-            outputs.append(
-                _fit_and_predict_single_fold(
-                    fold_idx, fold, labeled_events, aligned, cfg, purge_bars
-                )
-            )
+            outputs.append(_fit_and_predict_single_fold(fold_idx, fold, labeled_events, aligned, cfg, purge_bars))
     else:
         mode = "process_pool"
         global _GLOBAL_LABELED_EVENTS, _GLOBAL_PREPARED_EVENTS, _GLOBAL_ALIGNED, _GLOBAL_CFG, _GLOBAL_PURGE_BARS

@@ -262,48 +262,46 @@ def _deflated_sharpe_probability(
     arr = _clean_rets_array(selected_rets)
     if arr.size < 2 or effective_trial_count <= 0.0:
         return 0.0
-    
+
     # 1. Annualized Sharpe Ratio
     observed_ann = _sharpe_hac(arr, bars_per_year=bars_per_year, max_lag=max_lag)
     if not np.isfinite(observed_ann):
         return 0.0
-        
+
     # 2. Convert to per-bar scale
     observed_per_bar = observed_ann / np.sqrt(bars_per_year)
-    
+
     # 3. Convert trial pool Sharpe ratios to per-bar scale
     sr_pool_ann = np.asarray(completed_trial_sharpes, dtype=np.float64)
     sr_pool_ann = sr_pool_ann[np.isfinite(sr_pool_ann)]
     if sr_pool_ann.size == 0:
         return _psr(arr.tolist(), bars_per_year=bars_per_year)
-        
+
     sr_pool_per_bar = sr_pool_ann / np.sqrt(bars_per_year)
-    
+
     # 4. Calculate per-bar benchmark — Bailey & López de Prado (2014) null SR=0 정론.
     # +mean(pool) 항 제거: 동일 신호셋 파라미터 섭동(독립 가설 불성립) → 자기참조 제거.
     # benchmark = std(pool) * sqrt(2 * ln(N_eff)) only.
-    benchmark_per_bar = float(
-        np.std(sr_pool_per_bar, ddof=0) * np.sqrt(2.0 * np.log(max(effective_trial_count, 1.0)))
-    )
-    
+    benchmark_per_bar = float(np.std(sr_pool_per_bar, ddof=0) * np.sqrt(2.0 * np.log(max(effective_trial_count, 1.0))))
+
     # 5. Effective sample size
     n_eff = _effective_sample_size_hac(arr, max_lag=max_lag)
     if n_eff <= 1.0:
         return 0.0
-        
+
     # 6. Standard error under Bailey & López de Prado (2012)
     from scipy.stats import kurtosis as _kurt
     from scipy.stats import skew as _skew
+
     skew_val = float(_skew(arr))
     kurt_val = float(_kurt(arr, fisher=True))
-    
+
     denom = 1.0 - skew_val * observed_per_bar + (kurt_val + 2.0) / 4.0 * observed_per_bar**2
     variance = 1.0 / (n_eff - 1.0) if denom <= 0.0 else denom / (n_eff - 1.0)
-        
+
     variance = max(variance, 1e-12)
     z_score = (observed_per_bar - benchmark_per_bar) / float(np.sqrt(variance))
     return float(norm.cdf(z_score))
-
 
 
 def _is_non_constant_finite_array(values: NDArray[np.float64]) -> bool:
@@ -524,9 +522,7 @@ def variance_ratio(rets: NDArray[np.float64], q: int) -> tuple[float, float]:
     return (float(vr), float(m2))
 
 
-def hurst_dfa(
-    rets: NDArray[np.float64], *, min_scale: int = 8, max_scale: int | None = None
-) -> float:
+def hurst_dfa(rets: NDArray[np.float64], *, min_scale: int = 8, max_scale: int | None = None) -> float:
     """Detrended Fluctuation Analysis Hurst exponent.
 
     Returns 0.5 for n<32, non-finite, or non-convergent fits.
@@ -597,7 +593,7 @@ def _numba_moving_block_bootstrap_mean(
 ) -> NDArray[np.float64]:
     boot = np.zeros(n_bootstrap, dtype=np.float64)
     num_blocks = rand_indices.shape[1]
-    
+
     for boot_idx in range(n_bootstrap):
         sample_arr = np.zeros(n_clusters + block, dtype=np.float64)
         curr_len = 0
@@ -651,7 +647,7 @@ def moving_block_bootstrap_mean(
     num_blocks = max(1, (n_clusters + block - 1) // block)
     rng = np.random.default_rng(seed)
     rand_indices = rng.integers(0, n_clusters, size=(n_bootstrap, num_blocks), dtype=np.int64)
-    
+
     return _numba_moving_block_bootstrap_mean(  # type: ignore[no-any-return]
         np.ascontiguousarray(cluster_means),
         n_clusters,
@@ -676,7 +672,7 @@ def compute_panel_diversity(panel: tuple[StrategySignal, ...]) -> float:
     pairwise_abs_corr: list[float] = []
     for idx, left in enumerate(valid_panel[:-1]):
         left_map = dict(left._fold_edges)
-        for right in valid_panel[idx + 1:]:
+        for right in valid_panel[idx + 1 :]:
             right_map = dict(right._fold_edges)
             common_folds = sorted(set(left_map) & set(right_map))
             if len(common_folds) < 2:
@@ -731,6 +727,7 @@ def _psr(
     n = len(arr)
     from scipy.stats import kurtosis as _kurt
     from scipy.stats import skew as _skew
+
     skew_val = float(_skew(arr))
     kurt_val = float(_kurt(arr, fisher=True))  # excess kurtosis κ = γ₄ - 3 (normal=0)
     # Bailey & López de Prado (2012): (γ₄ - 1)/4 = (κ + 3 - 1)/4 = (κ + 2)/4
@@ -738,6 +735,7 @@ def _psr(
     if denom <= 0.0:
         return 0.0
     from scipy.special import ndtr
+
     z = (sr_obs - sr_benchmark) * float(np.sqrt(n - 1)) / float(np.sqrt(denom))
     return float(ndtr(z))
 

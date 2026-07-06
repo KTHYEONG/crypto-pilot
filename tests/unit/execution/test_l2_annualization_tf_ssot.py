@@ -15,6 +15,7 @@ from src.domain.futures.strategy.tiered_workflow.risk_deployment import apply_de
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
+
 def make_eval(
     rets: list[float],
     l_star: float,
@@ -37,6 +38,7 @@ def make_eval(
 
 # ── Scenario 1: Bug reproduction — horizon mismatch -> x2 CAGR / xV2 Sharpe ──
 
+
 class TestScenario1BugReproduction:
     def test_annualization_tf_2x_signature_on_4h_vs_8h(self) -> None:
         rng = np.random.default_rng(42)
@@ -50,6 +52,7 @@ class TestScenario1BugReproduction:
 
 
 # ── Scenario 2: Fix invariant — same tf → parity passes ──
+
 
 class TestScenario2FixInvariant:
     def test_parity_passes_when_annualization_tf_identical(self) -> None:
@@ -66,6 +69,7 @@ class TestScenario2FixInvariant:
 
 
 # ── Scenario 3: B1 — runner resolves & passes master tf ──
+
 
 class TestScenario3RunnerResolvesMasterTf:
     def test_resolve_l2_master_tf_with_empty_inputs_returns_default(self) -> None:
@@ -94,37 +98,52 @@ class TestScenario3RunnerResolvesMasterTf:
         from src.domain.futures.strategy.tiered_workflow.pipeline import (
             _resolve_l2_master_tf,
         )
+
         mock_run = MagicMock()
         tiered_cfg = MagicMock()
         tiered_cfg.l2_master_tf = ""
         l2_master_tf = _resolve_l2_master_tf(tiered_cfg, {}, None)
         assert l2_master_tf == "8h"
-        mock_run(signal_batch=MagicMock(), aligned=MagicMock(), cfg=tiered_cfg,
-                 window=MagicMock(), caps=MagicMock(), tf=l2_master_tf,
-                 n_trials=5, seed=42, l2_sim_cache=MagicMock())
+        mock_run(
+            signal_batch=MagicMock(),
+            aligned=MagicMock(),
+            cfg=tiered_cfg,
+            window=MagicMock(),
+            caps=MagicMock(),
+            tf=l2_master_tf,
+            n_trials=5,
+            seed=42,
+            l2_sim_cache=MagicMock(),
+        )
         _call_tf = mock_run.call_args[1]["tf"]
         assert _call_tf == "8h", f"Expected tf='8h', got tf={_call_tf!r}"
 
 
 # ── Scenario 4: B2 — SSOT assert blocks on mismatch ──
 
+
 class TestScenario4SsotAssertBlocks:
     def test_l2_tf_ssot_assert_blocks_on_mismatch(self, caplog: pytest.LogCaptureFixture) -> None:
         from dataclasses import dataclass
+
         _test_logger = logging.getLogger("test_l2_tf_ssot")
+
         @dataclass
         class _MockL2Result:
             master_tf: str = "8h"
             gate_passed: bool = True
             blocker_reason: str = ""
+
         l2_master_tf = "4h"
         l2_final = _MockL2Result(master_tf="8h", gate_passed=True, blocker_reason="")
         with caplog.at_level(logging.ERROR, logger="test_l2_tf_ssot"):
             if l2_master_tf != l2_final.master_tf:
                 import dataclasses as _dc
+
                 _test_logger.error(
                     "[L2-TF-SSOT] study_tf=%s final_tf=%s → blocking: annualization_tf_mismatch",
-                    l2_master_tf, l2_final.master_tf,
+                    l2_master_tf,
+                    l2_final.master_tf,
                 )
                 l2_final = _dc.replace(l2_final, gate_passed=False, blocker_reason="annualization_tf_mismatch")
         assert l2_final.gate_passed is False
@@ -133,22 +152,26 @@ class TestScenario4SsotAssertBlocks:
 
     def test_l2_tf_ssot_passes_on_match(self, caplog: pytest.LogCaptureFixture) -> None:
         from dataclasses import dataclass
+
         @dataclass
         class _MockL2Result:
             master_tf: str = "8h"
             gate_passed: bool = True
             blocker_reason: str = ""
+
         l2_master_tf = "8h"
         l2_final = _MockL2Result(master_tf="8h", gate_passed=True, blocker_reason="")
         with caplog.at_level(logging.ERROR):
             if l2_master_tf != l2_final.master_tf:
                 import dataclasses as _dc
+
                 l2_final = _dc.replace(l2_final, gate_passed=False, blocker_reason="annualization_tf_mismatch")
         assert l2_final.gate_passed is True
         assert not any("annualization_tf_mismatch" in rec.message for rec in caplog.records)
 
 
 # ── Scenario 5: Edge — master_tf override keeps consistency ──
+
 
 class TestScenario5MasterTfOverride:
     def test_master_tf_override_keeps_study_and_final_consistent(self) -> None:
@@ -174,6 +197,7 @@ class TestScenario5MasterTfOverride:
 
 
 # ── Scenario 6: Edge — empty / singleton rets ──
+
 
 class TestScenario6EmptySingleton:
     def test_annualization_handles_empty(self) -> None:

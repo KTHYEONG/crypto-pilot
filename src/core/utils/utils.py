@@ -45,6 +45,7 @@ from src.core.settings import (
 # Performance measurement level (Level 10 is standard DEBUG)
 PERF = logging.DEBUG
 
+
 class CategorizedLogger(logging.Logger):
     """Logger subclass that automatically ensures debug messages start with logical tags."""
 
@@ -81,6 +82,7 @@ class CategorizedLogger(logging.Logger):
         if level == logging.DEBUG and isinstance(msg, str):
             msg_str = msg.strip()
             import re
+
             # Extract leading bracketed tag e.g. "[MEM]"
             tag_match = re.match(r"^\[([^\]]+)\]", msg_str)
 
@@ -92,14 +94,32 @@ class CategorizedLogger(logging.Logger):
                         new_tag = "SYS"
                     elif original_tag in ("DATA-INTEGRITY", "DATA-READINESS", "KLINE", "DATA"):
                         new_tag = "DATA"
-                    elif original_tag in ("BRIDGE", "REGIME-L2-POLICY", "L1", "L2-LONGSHORT", "L3-LONGSHORT", "STRAT", "REGIME_C34_GOLD", "L2-CALIB", "ALGO"):
+                    elif original_tag in (
+                        "BRIDGE",
+                        "REGIME-L2-POLICY",
+                        "L1",
+                        "L2-LONGSHORT",
+                        "L3-LONGSHORT",
+                        "STRAT",
+                        "REGIME_C34_GOLD",
+                        "L2-CALIB",
+                        "ALGO",
+                    ):
                         new_tag = "ALGO"
-                    elif original_tag in ("OPTIMIZE", "OPTUNA", "L2-REGIME", "L3-REGIME", "BRIDGE SUMMARY", "OPT", "EVAL"):
+                    elif original_tag in (
+                        "OPTIMIZE",
+                        "OPTUNA",
+                        "L2-REGIME",
+                        "L3-REGIME",
+                        "BRIDGE SUMMARY",
+                        "OPT",
+                        "EVAL",
+                    ):
                         new_tag = "EVAL"
                     else:
                         new_tag = "SYS"  # Fallback for unrecognized tags
 
-                    msg = f"[{new_tag}] {msg_str[tag_match.end():].lstrip()}"
+                    msg = f"[{new_tag}] {msg_str[tag_match.end() :].lstrip()}"
             else:
                 # Prepend default [SYS] tag if none present
                 msg = f"[SYS] {msg_str}"
@@ -113,6 +133,7 @@ class CategorizedLogger(logging.Logger):
             stack_info=stack_info,
             stacklevel=stacklevel,
         )
+
 
 logging.setLoggerClass(CategorizedLogger)
 
@@ -242,9 +263,7 @@ def setup_logger(
         backupCount=LOG_BACKUP_COUNT,
         encoding="utf-8",
     )
-    text_handler.setFormatter(
-        logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s")
-    )
+    text_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s"))
     logger.addHandler(text_handler)
 
     # JSON 로그 (모니터링 연동용) — 단일 파일만 유지
@@ -292,8 +311,7 @@ def create_retry_decorator() -> Any:
                         last_error = e
                         wait_time = min(API_RETRY_WAIT_MIN * (2**attempt), API_RETRY_WAIT_MAX)
                         _internal_logger.warning(
-                            f"⚠️ Retry {attempt + 1}/{API_RETRY_ATTEMPTS}: {e}. "
-                            f"Waiting {wait_time}s..."
+                            f"⚠️ Retry {attempt + 1}/{API_RETRY_ATTEMPTS}: {e}. Waiting {wait_time}s..."
                         )
                         time.sleep(wait_time)
                 if last_error:

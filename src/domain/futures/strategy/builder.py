@@ -27,6 +27,7 @@ def build_strategy_alpha(
     """
     if cfg.name in {"candidate_ml", "rule_baseline"}:
         from src.domain.futures.strategy_runtime.bridge import run_candidate_strategy_for_universe
+
         res = run_candidate_strategy_for_universe(
             symbols=symbols,
             tf=tf,
@@ -35,6 +36,4 @@ def build_strategy_alpha(
         )
         return res.alpha_panel
 
-    raise ValueError(
-        f"unsupported active strategy name: {cfg.name}; allowed: candidate_ml, rule_baseline"
-    )
+    raise ValueError(f"unsupported active strategy name: {cfg.name}; allowed: candidate_ml, rule_baseline")

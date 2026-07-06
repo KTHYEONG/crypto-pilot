@@ -10,6 +10,7 @@ parquet(FUTURES_DATA_DIR/{symbol}_metrics.parquet)가 물질화돼 있어야 이
 Time Complexity: O(S) parquet reads where S = len(symbols), each O(N) for N rows.
 Space Complexity: O(N) per symbol frame (not retained across symbols).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -85,12 +86,8 @@ def _compute_entry(
     if n_rows == 0:
         return _empty_entry(symbol)
 
-    oi_ratio = (
-        float(df[_OI_COLUMN].notna().mean()) if _OI_COLUMN in df.columns else 0.0
-    )
-    lsr_ratio = (
-        float(df[_LSR_COLUMN].notna().mean()) if _LSR_COLUMN in df.columns else 0.0
-    )
+    oi_ratio = float(df[_OI_COLUMN].notna().mean()) if _OI_COLUMN in df.columns else 0.0
+    lsr_ratio = float(df[_LSR_COLUMN].notna().mean()) if _LSR_COLUMN in df.columns else 0.0
     first_valid_ts: pd.Timestamp | None = None
     if _OI_COLUMN in df.columns:
         valid_idx = df[_OI_COLUMN].first_valid_index()

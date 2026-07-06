@@ -9,6 +9,7 @@ Scenarios:
     S5 (RC-4 adaptive throttle): adaptive ref가 신호 스케일 추종 — m≈1.0
     S6 (selection 노브 — RC-3): vol_target/gross에 L* 주입, kelly 불변
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -45,38 +46,38 @@ def _market_rets(n: int = 2190, mu_bps: float = 0.0, sigma_bps: float = 90.0, se
 
 def _make_evaluation(**kwargs: Any) -> Layer2TrialEvaluation:
     """최소 필수 필드를 채운 Layer2TrialEvaluation fixture."""
-    defaults: dict[str, Any] = dict(
-        objective_value=1.0,
-        constraint_values=(-1.0,) * 8,
-        cagr_hybrid=0.03,
-        cagr_baseline=0.01,
-        growth_lcb_hybrid=0.0,
-        growth_lcb_baseline=0.0,
-        sharpe_hac_hybrid=1.8,
-        sharpe_hac_baseline=0.5,
-        psr_hybrid=0.95,
-        mdd_hybrid=0.01,
-        cvar_95_hybrid=0.001,
-        fold_pass_ratio=0.80,
-        break_even_pass_pct=0.80,
-        average_gross_exposure=0.10,
-        cap_saturation_ratio=0.0,
-        total_cost_bps=5.0,
-        block_metrics=(),
-        returns_hybrid=tuple(_low_vol_rets()),
-        returns_baseline=(),
-        sharpe_hybrid=1.8,
-        sharpe_hac_baseline_ew=0.5,
-        sortino_hybrid=3.0,
-        trade_count=150,
-        risk_utilization=0.034,
-        deployment_objective_bonus=0.0,
-        worst_fold_sharpe=1.2,
-        gate=None,
-        fit_returns_hybrid=tuple(_low_vol_rets()),
-        deploy_leverage=1.0,
-        deploy_binding="",
-    )
+    defaults: dict[str, Any] = {
+        "objective_value": 1.0,
+        "constraint_values": (-1.0,) * 8,
+        "cagr_hybrid": 0.03,
+        "cagr_baseline": 0.01,
+        "growth_lcb_hybrid": 0.0,
+        "growth_lcb_baseline": 0.0,
+        "sharpe_hac_hybrid": 1.8,
+        "sharpe_hac_baseline": 0.5,
+        "psr_hybrid": 0.95,
+        "mdd_hybrid": 0.01,
+        "cvar_95_hybrid": 0.001,
+        "fold_pass_ratio": 0.80,
+        "break_even_pass_pct": 0.80,
+        "average_gross_exposure": 0.10,
+        "cap_saturation_ratio": 0.0,
+        "total_cost_bps": 5.0,
+        "block_metrics": (),
+        "returns_hybrid": tuple(_low_vol_rets()),
+        "returns_baseline": (),
+        "sharpe_hybrid": 1.8,
+        "sharpe_hac_baseline_ew": 0.5,
+        "sortino_hybrid": 3.0,
+        "trade_count": 150,
+        "risk_utilization": 0.034,
+        "deployment_objective_bonus": 0.0,
+        "worst_fold_sharpe": 1.2,
+        "gate": None,
+        "fit_returns_hybrid": tuple(_low_vol_rets()),
+        "deploy_leverage": 1.0,
+        "deploy_binding": "",
+    }
     defaults.update(kwargs)
     return Layer2TrialEvaluation(**defaults)
 
@@ -132,9 +133,7 @@ class TestS2DeployedCagrGatePass:
     def test_cagr_scales_with_leverage(self) -> None:
         # Arrange: unit-vol book CAGR ≈ 3%
         rets = _low_vol_rets(n=2190, mu_bps=6.4, sigma_bps=2.0)
-        unit_cagr = apply_deployment(
-            rets=rets, leverage=1.0, bars_per_year=_BARS_PER_YEAR
-        ).cagr
+        unit_cagr = apply_deployment(rets=rets, leverage=1.0, bars_per_year=_BARS_PER_YEAR).cagr
 
         # Act: L*=15 적용
         dep = apply_deployment(rets=rets, leverage=15.0, bars_per_year=_BARS_PER_YEAR)

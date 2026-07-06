@@ -214,12 +214,7 @@ def _fold_eligible_symbol_mask(
         kill_mask = np.zeros((len(aligned.datetimes), len(aligned.symbols)), dtype=bool)
 
     oos_slice = slice(fold.oos_start, fold.oos_end)
-    eligible_2d = (
-        active_mask[oos_slice]
-        & warm_mask[oos_slice]
-        & ~entry_block_mask[oos_slice]
-        & ~kill_mask[oos_slice]
-    )
+    eligible_2d = active_mask[oos_slice] & warm_mask[oos_slice] & ~entry_block_mask[oos_slice] & ~kill_mask[oos_slice]
     coverage = np.mean(eligible_2d.astype(np.float64), axis=0)
     return np.asarray(coverage >= float(min_bar_coverage), dtype=bool)
 
@@ -248,9 +243,7 @@ def compute_per_symbol_ic(
         if events_df.empty or "symbol" not in events_df.columns:
             continue
 
-        pred: NDArray[np.float64] = np.asarray(
-            fold_out.model_output.expected_net_bps, dtype=np.float64
-        )
+        pred: NDArray[np.float64] = np.asarray(fold_out.model_output.expected_net_bps, dtype=np.float64)
         realized: NDArray[np.float64] = np.asarray(y_realized, dtype=np.float64)
 
         if len(pred) != len(realized) or len(pred) != len(events_df):
@@ -358,13 +351,7 @@ def compute_per_symbol_realized_stats(
         mu = float(np.mean(r_arr)) if n > 0 else 0.0
         t = _nw_tstat_realized(r_arr) if n >= 4 else 0.0
         ic = per_symbol_ic.get(sym, 0.0)
-        valid = (
-            n >= min_obs
-            and abs(t) >= t_stat_floor
-            and bool(np.isfinite(mu))
-            and bool(np.isfinite(t))
-            and ic > 0.0
-        )
+        valid = n >= min_obs and abs(t) >= t_stat_floor and bool(np.isfinite(mu)) and bool(np.isfinite(t)) and ic > 0.0
         result[sym] = SymbolRealizedStat(
             realized_mu_bps=mu,
             t_stat=t,
@@ -436,10 +423,7 @@ def compute_per_strategy_oos_validation(
             sorted((int(fold_id), float(edge)) for fold_id, edge in per_strategy_fold_edge.get(strategy_id, {}).items())
         )
         n_folds = len(fold_edges)
-        fold_consistency = (
-            float(sum(1 for _, edge in fold_edges if edge > 0.0) / n_folds)
-            if n_folds > 0 else 0.0
-        )
+        fold_consistency = float(sum(1 for _, edge in fold_edges if edge > 0.0) / n_folds) if n_folds > 0 else 0.0
         nw_tstat = _nw_tstat_realized(realized_clean)
         panel.append(
             StrategySignal(
@@ -475,9 +459,7 @@ def _compute_fold_ts_ic(*, fold_out: Any) -> float | None:
     if y_realized is None:
         return None
 
-    pred: NDArray[np.float64] = np.asarray(
-        fold_out.model_output.expected_net_bps, dtype=np.float64
-    )
+    pred: NDArray[np.float64] = np.asarray(fold_out.model_output.expected_net_bps, dtype=np.float64)
     realized: NDArray[np.float64] = np.asarray(y_realized, dtype=np.float64)
 
     if len(pred) != len(realized) or len(pred) < 4:
@@ -524,9 +506,7 @@ def compute_prediction_decomposition_diag(
         if events_df.empty:
             continue
 
-        pred: NDArray[np.float64] = np.asarray(
-            fold_out.model_output.expected_net_bps, dtype=np.float64
-        )
+        pred: NDArray[np.float64] = np.asarray(fold_out.model_output.expected_net_bps, dtype=np.float64)
         real: NDArray[np.float64] = np.asarray(y_realized, dtype=np.float64)
 
         if len(pred) != len(real) or len(pred) != len(events_df):
@@ -541,19 +521,13 @@ def compute_prediction_decomposition_diag(
         ev_m = events_df.loc[mask.tolist() if not isinstance(mask, np.ndarray) else events_df.index[mask]]
 
         n_m = int(mask.sum())
-        arch_col = (
-            ev_m["archetype"].astype(str).tolist() if "archetype" in ev_m.columns
-            else ["_unknown"] * n_m
-        )
+        arch_col = ev_m["archetype"].astype(str).tolist() if "archetype" in ev_m.columns else ["_unknown"] * n_m
         regime_col: list[int] = []
         if "entry_regime_code" in ev_m.columns:
             regime_col = [int(v) if pd.notna(v) else -1 for v in ev_m["entry_regime_code"]]
         else:
             regime_col = [-1] * n_m
-        variant_col = (
-            ev_m["variant"].astype(str).tolist() if "variant" in ev_m.columns
-            else ["_unknown"] * n_m
-        )
+        variant_col = ev_m["variant"].astype(str).tolist() if "variant" in ev_m.columns else ["_unknown"] * n_m
 
         all_pred.append(pred_m)
         all_real.append(real_m)
@@ -650,7 +624,9 @@ def _log_fold_regime_analysis(
         if not _is_trained_fold_output(fold_out):
             logger.debug(
                 "[SWF-DIAG-FOLD%d] %s~%s fit_status=%s SKIP",
-                fold_idx + 1, date_start, date_end,
+                fold_idx + 1,
+                date_start,
+                date_end,
                 getattr(fold_out, "fit_status", "unknown"),
             )
             continue
@@ -689,18 +665,23 @@ def _log_fold_regime_analysis(
                     arch_parts.append(f"{label}:{mu:.1f}(n={len(finite)})")
             arch_mu_str = " | ".join(arch_parts)
 
-        pred_arr: NDArray[np.float64] = np.asarray(
-            fold_out.model_output.expected_net_bps, dtype=np.float64
-        )
+        pred_arr: NDArray[np.float64] = np.asarray(fold_out.model_output.expected_net_bps, dtype=np.float64)
         cs_ic_str = "ic=N/A"
         if len(pred_arr) == n_ev and n_ev >= 4:
             mask_f = np.isfinite(pred_arr) & np.isfinite(y_arr)
             if mask_f.sum() >= 4:
                 from scipy.stats import spearmanr as _sr
+
                 _ic, _ = _sr(pred_arr[mask_f], y_arr[mask_f])
                 cs_ic_str = f"ic={float(_ic):.4f}"
 
         logger.debug(
             "[SWF-DIAG-FOLD%d] %s~%s n=%d %s | regime[%s] | arch[%s]",
-            fold_idx + 1, date_start, date_end, n_ev, cs_ic_str, regime_dist, arch_mu_str,
+            fold_idx + 1,
+            date_start,
+            date_end,
+            n_ev,
+            cs_ic_str,
+            regime_dist,
+            arch_mu_str,
         )

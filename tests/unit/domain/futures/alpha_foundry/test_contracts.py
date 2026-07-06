@@ -162,9 +162,7 @@ class TestL2PosteriorSleeve:
 
 class TestStagedSearchBudget:
     def test_valid_budget_creates_successfully(self) -> None:
-        budget = StagedSearchBudget(
-            stage="signal", n_trials=100, min_feasible_eff=0.05, patience=5, seed_count=1
-        )
+        budget = StagedSearchBudget(stage="signal", n_trials=100, min_feasible_eff=0.05, patience=5, seed_count=1)
         assert budget.stage == "signal"
         assert budget.n_trials == 100
 

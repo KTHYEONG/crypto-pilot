@@ -43,8 +43,8 @@ _EXEC_1M_VALUE_COLS: tuple[str, ...] = (
     "exec_low_1m",
     "exec_close_1m",
     "exec_volume_1m",
-    "funding_event_mask_1m",   # intrabar 엔진 funding event 판정용
-    "funding_rate_event_1m",   # intrabar 엔진 funding rate 적용용
+    "funding_event_mask_1m",  # intrabar 엔진 funding event 판정용
+    "funding_rate_event_1m",  # intrabar 엔진 funding rate 적용용
 )
 _EXEC_1M_DT_COL = "exec_dt_index_1m"
 _DECISION_DT_COL = "dt_index"
@@ -104,11 +104,7 @@ def merge_effective_membership_constraints(
 
     symbol_names = aligned_data.get("symbol_names")
     rows: list[dict[str, Any]] = []
-    if (
-        isinstance(symbol_names, np.ndarray)
-        and symbol_names.ndim == 1
-        and symbol_names.shape[0] == n_syms
-    ):
+    if isinstance(symbol_names, np.ndarray) and symbol_names.ndim == 1 and symbol_names.shape[0] == n_syms:
         for s_idx, symbol in enumerate(symbol_names.tolist()):
             rows.append(
                 {
@@ -231,9 +227,7 @@ def _build_aligned_2d_from_prebuilt(
             return None
         aligned_data[col] = np.ascontiguousarray(merged)
     if "target_weight" in aligned_data:
-        aligned_data["target_weights"] = np.asarray(
-            aligned_data["target_weight"], dtype=np.float64
-        )
+        aligned_data["target_weights"] = np.asarray(aligned_data["target_weight"], dtype=np.float64)
 
     decision_dt = _extract_decision_dt_index(
         prebuilt_arrays=prebuilt_arrays,
@@ -398,12 +392,7 @@ def align_data_for_2d_engine(
         empty: dict[str, np.ndarray] = {}
         return empty, pd.Series(dtype="datetime64[ns]")
 
-    master_index = (
-        pd.concat(all_dates, ignore_index=True)
-        .drop_duplicates()
-        .sort_values()
-        .reset_index(drop=True)
-    )
+    master_index = pd.concat(all_dates, ignore_index=True).drop_duplicates().sort_values().reset_index(drop=True)
     master_df = pd.DataFrame({"datetime": master_index})
     n_bars = len(master_index)
     n_syms = len(symbols)

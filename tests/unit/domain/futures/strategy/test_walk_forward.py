@@ -132,8 +132,8 @@ def test_build_l1_swf_folds_causal_and_expanding() -> None:
     for fold in folds:
         assert fold.fit_end == fold.oos_start
         assert fold.cal_start == fold.cal_end == fold.oos_start
-        assert fold.fit_start == 2000         # expanding from L1 start
-    assert folds[0].oos_start == 3000        # first block reserved for initial train
+        assert fold.fit_start == 2000  # expanding from L1 start
+    assert folds[0].oos_start == 3000  # first block reserved for initial train
     assert folds[-1].oos_end == 8000
 
 

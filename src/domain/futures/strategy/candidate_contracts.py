@@ -148,9 +148,7 @@ class CandidateModelOutput:
     kelly_fraction: NDArray[np.float64]
     prediction_scale_bps: NDArray[np.float64]
     _has_explicit_expected_gross_bps: bool = field(init=False, repr=False, default=False)
-    validation_diagnostics: dict[str, object] = field(
-        default_factory=dict
-    )
+    validation_diagnostics: dict[str, object] = field(default_factory=dict)
 
     def __init__(
         self,
@@ -226,9 +224,7 @@ class CandidateModelOutput:
         object.__setattr__(self, "prediction_scale_bps", scale)
 
         val_diag = (
-            validation_diagnostics
-            if validation_diagnostics is not None
-            else kwargs.get("selection_thresholds", {})
+            validation_diagnostics if validation_diagnostics is not None else kwargs.get("selection_thresholds", {})
         )
         object.__setattr__(self, "validation_diagnostics", dict(val_diag))
 
@@ -365,15 +361,9 @@ class SymbolStrategyEvidence:
             if block_tstat_incremental is not None
             else float(bootstrap_tstat_incremental or 0.0)
         )
-        compat_weight = (
-            quality_weight if quality_weight is not None else float(reliability or 0.0)
-        )
-        compat_hard_eligible = (
-            hard_eligible if hard_eligible is not None else bool(qualified)
-        )
-        compat_structural = (
-            structural_reasons if structural_reasons else tuple(rejection_reasons or ())
-        )
+        compat_weight = quality_weight if quality_weight is not None else float(reliability or 0.0)
+        compat_hard_eligible = hard_eligible if hard_eligible is not None else bool(qualified)
+        compat_structural = structural_reasons if structural_reasons else tuple(rejection_reasons or ())
         object.__setattr__(self, "key", key)
         object.__setattr__(self, "mean_gross_bps", mean_gross_bps)
         object.__setattr__(self, "mean_incremental_bps", mean_incremental_bps)
@@ -598,9 +588,7 @@ class Layer1FoldReadiness:
         compat_probe_lcb = float(probe_lcb_bps)
         if legacy_compat and compat_probe_lcb == 0.0:
             compat_probe_lcb = float(
-                probe_bps
-                if probe_bps != 0.0
-                else float(np.mean(np.asarray(compat_probe_series, dtype=np.float64)))
+                probe_bps if probe_bps != 0.0 else float(np.mean(np.asarray(compat_probe_series, dtype=np.float64)))
             )
         object.__setattr__(self, "fold_id", int(fold_id))
         object.__setattr__(self, "registry_source_end_idx", int(registry_source_end_idx))

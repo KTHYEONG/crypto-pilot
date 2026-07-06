@@ -65,9 +65,7 @@ class TestBoundaryContract:
         is_end_idx = 1000  # IS 마지막 bar 인덱스
 
         oos_first_usable = is_end_idx + purge_bars
-        assert oos_first_usable == 1024, (
-            f"OOS 첫 사용 가능 bar index = {oos_first_usable}, expected 1024"
-        )
+        assert oos_first_usable == 1024, f"OOS 첫 사용 가능 bar index = {oos_first_usable}, expected 1024"
 
     def test_register_overwrite_same_module(self) -> None:
         """동일 모듈명 재등록 시 최신값으로 갱신."""

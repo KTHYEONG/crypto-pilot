@@ -4,6 +4,7 @@ docs/specs/l1-nontrend-diversification-measure-first.md C1 (Phase 1b) 참조.
 OI/LSR metrics parquet 캐시의 심볼별 커버리지를 측정해 xs_oi_skew 등
 OI/LSR 의존 family 트랙을 진행할지(track_go) 판정한다.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -22,11 +23,13 @@ from src.domain.futures.universe.metrics_coverage import (
 @pytest.fixture
 def metrics_dir(tmp_path: Path) -> Path:
     idx = pd.date_range("2024-01-01", periods=100, freq="1h", tz="UTC")
-    full = pd.DataFrame({
-        "datetime": idx,
-        "sum_open_interest": np.linspace(1e6, 2e6, 100),
-        "long_short_ratio": np.full(100, 1.2),
-    })
+    full = pd.DataFrame(
+        {
+            "datetime": idx,
+            "sum_open_interest": np.linspace(1e6, 2e6, 100),
+            "long_short_ratio": np.full(100, 1.2),
+        }
+    )
     full.to_parquet(tmp_path / "AAAUSDT_metrics.parquet")
     sparse = full.copy()
     sparse.loc[sparse.index[:60], "sum_open_interest"] = np.nan  # 40% coverage
@@ -60,7 +63,8 @@ class TestComputeMetricsCoverageReport:
 
     def test_track_go_false_when_below_min_symbols(self, metrics_dir: Path) -> None:
         report = compute_metrics_coverage_report(
-            ("AAAUSDT", "BBBUSDT", "ZZZUSDT"), data_dir=metrics_dir,
+            ("AAAUSDT", "BBBUSDT", "ZZZUSDT"),
+            data_dir=metrics_dir,
         )
 
         assert report.n_eligible == 1
@@ -69,15 +73,18 @@ class TestComputeMetricsCoverageReport:
     def test_track_go_true_when_min_symbols_met(self, tmp_path: Path) -> None:
         idx = pd.date_range("2024-01-01", periods=100, freq="1h", tz="UTC")
         for sym in ("A1USDT", "A2USDT", "A3USDT"):
-            df = pd.DataFrame({
-                "datetime": idx,
-                "sum_open_interest": np.linspace(1e6, 2e6, 100),
-                "long_short_ratio": np.full(100, 1.2),
-            })
+            df = pd.DataFrame(
+                {
+                    "datetime": idx,
+                    "sum_open_interest": np.linspace(1e6, 2e6, 100),
+                    "long_short_ratio": np.full(100, 1.2),
+                }
+            )
             df.to_parquet(tmp_path / f"{sym}_metrics.parquet")
 
         report = compute_metrics_coverage_report(
-            ("A1USDT", "A2USDT", "A3USDT"), data_dir=tmp_path,
+            ("A1USDT", "A2USDT", "A3USDT"),
+            data_dir=tmp_path,
         )
 
         assert report.n_eligible == 3
@@ -90,12 +97,15 @@ class TestComputeMetricsCoverageReport:
         window_end = idx[99]
 
         report = compute_metrics_coverage_report(
-            ("BBBUSDT",), data_dir=metrics_dir, start=window_start, end=window_end,
+            ("BBBUSDT",),
+            data_dir=metrics_dir,
+            start=window_start,
+            end=window_end,
         )
 
         # Within [70, 99], sparse frame (NaN at [0:60]) is fully valid.
         assert report.entries[0].oi_non_null_ratio == pytest.approx(1.0)
 
     def test_default_thresholds_match_spec_constants(self) -> None:
-        assert MIN_METRICS_COVERAGE_RATIO == pytest.approx(0.70)
+        assert pytest.approx(0.70) == MIN_METRICS_COVERAGE_RATIO
         assert MIN_ELIGIBLE_SYMBOLS == 3

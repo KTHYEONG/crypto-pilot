@@ -1,5 +1,6 @@
 """Alpha Foundry L0 gate bridge helpers for the strategy runtime bridge.
 
+[ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]
 [ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
@@ -95,6 +96,7 @@ def bind_panels_to_alpha_recipes(
                 _make_recipe_id,
                 map_signal_archetype_to_alpha_archetype,
             )
+
             panel_params = dict(getattr(panel, "params", {})) or {}
             synth_recipe_id = _make_recipe_id(family, variant, timeframe, panel_params)
             if synth_recipe_id in recipes:
@@ -123,16 +125,17 @@ def bind_panels_to_alpha_recipes(
             Literal["catalog_exact", "catalog_family_variant", "synthetic_recipe"],
             matched_source,
         )
-        bindings.append(_PanelRecipeBinding(
-            panel_index=i,
-            recipe_id=matched_recipe_id,
-            family=family,
-            variant=variant,
-            source=src,
-        ))
+        bindings.append(
+            _PanelRecipeBinding(
+                panel_index=i,
+                recipe_id=matched_recipe_id,
+                family=family,
+                variant=variant,
+                source=src,
+            )
+        )
 
     return tuple(bindings)
-
 
 
 def synthesize_recipe_from_panel(
@@ -214,37 +217,40 @@ def _write_alpha_foundry_report(
 
     if evidence_rows:
         from dataclasses import asdict
+
         df = pd.DataFrame([asdict(r) for r in evidence_rows])
     else:
-        df = pd.DataFrame({
-            "run_id": pd.Series(dtype="str"),
-            "timeframe": pd.Series(dtype="str"),
-            "family": pd.Series(dtype="str"),
-            "variant": pd.Series(dtype="str"),
-            "recipe_id": pd.Series(dtype="str"),
-            "archetype": pd.Series(dtype="str"),
-            "n_events": pd.Series(dtype="int64"),
-            "effective_n": pd.Series(dtype="float64"),
-            "mean_net_bps": pd.Series(dtype="float64"),
-            "nw_tstat": pd.Series(dtype="float64"),
-            "block_lcb_bps": pd.Series(dtype="float64"),
-            "rank_ic": pd.Series(dtype="float64"),
-            "incremental_rank_ic": pd.Series(dtype="float64"),
-            "cost_drag_ratio": pd.Series(dtype="float64"),
-            "turnover_per_year": pd.Series(dtype="float64"),
-            "compute_cost_score": pd.Series(dtype="float64"),
-            "bootstrap_lcb_bps": pd.Series(dtype="float64"),
-            "bootstrap_agree": pd.Series(dtype="bool"),
-            "gate_passed": pd.Series(dtype="bool"),
-            "reject_reasons": pd.Series(dtype="str"),
-            "bucket_key": pd.Series(dtype="str"),
-            "bucket_rank": pd.Series(dtype="int64"),
-            "selected_for_l1": pd.Series(dtype="bool"),
-            "redundant_with": pd.Series(dtype="str"),
-            "bucket_eff_test_count": pd.Series(dtype="float64"),
-            "global_eff_test_count": pd.Series(dtype="float64"),
-            "created_at_ms": pd.Series(dtype="int64"),
-        })
+        df = pd.DataFrame(
+            {
+                "run_id": pd.Series(dtype="str"),
+                "timeframe": pd.Series(dtype="str"),
+                "family": pd.Series(dtype="str"),
+                "variant": pd.Series(dtype="str"),
+                "recipe_id": pd.Series(dtype="str"),
+                "archetype": pd.Series(dtype="str"),
+                "n_events": pd.Series(dtype="int64"),
+                "effective_n": pd.Series(dtype="float64"),
+                "mean_net_bps": pd.Series(dtype="float64"),
+                "nw_tstat": pd.Series(dtype="float64"),
+                "block_lcb_bps": pd.Series(dtype="float64"),
+                "rank_ic": pd.Series(dtype="float64"),
+                "incremental_rank_ic": pd.Series(dtype="float64"),
+                "cost_drag_ratio": pd.Series(dtype="float64"),
+                "turnover_per_year": pd.Series(dtype="float64"),
+                "compute_cost_score": pd.Series(dtype="float64"),
+                "bootstrap_lcb_bps": pd.Series(dtype="float64"),
+                "bootstrap_agree": pd.Series(dtype="bool"),
+                "gate_passed": pd.Series(dtype="bool"),
+                "reject_reasons": pd.Series(dtype="str"),
+                "bucket_key": pd.Series(dtype="str"),
+                "bucket_rank": pd.Series(dtype="int64"),
+                "selected_for_l1": pd.Series(dtype="bool"),
+                "redundant_with": pd.Series(dtype="str"),
+                "bucket_eff_test_count": pd.Series(dtype="float64"),
+                "global_eff_test_count": pd.Series(dtype="float64"),
+                "created_at_ms": pd.Series(dtype="int64"),
+            }
+        )
     df.to_parquet(parquet_path, index=False)
 
     return json_path, parquet_path
@@ -293,7 +299,6 @@ def run_alpha_foundry_l0_gate(
     cheap_config = runtime_config.cheap_gate if hasattr(runtime_config, "cheap_gate") else None
     l0_start = _time_module.perf_counter()
 
-    candidates: tuple[Any, ...] = ()
     evidence_rows: tuple[Any, ...] = ()
     l0_artifacts: Any = None
 
@@ -310,14 +315,10 @@ def run_alpha_foundry_l0_gate(
             cheap_gate_config=cheap_config,
             run_id=run_id,
             top_k_per_family_tf=(
-                runtime_config.top_k_per_family_tf
-                if hasattr(runtime_config, "top_k_per_family_tf")
-                else 5
+                runtime_config.top_k_per_family_tf if hasattr(runtime_config, "top_k_per_family_tf") else 5
             ),
             min_conviction_lcb_bps=(
-                runtime_config.min_conviction_lcb_bps
-                if hasattr(runtime_config, "min_conviction_lcb_bps")
-                else 5.0
+                runtime_config.min_conviction_lcb_bps if hasattr(runtime_config, "min_conviction_lcb_bps") else 5.0
             ),
             total_l1_verification_budget=(
                 runtime_config.total_l1_verification_budget
@@ -327,38 +328,15 @@ def run_alpha_foundry_l0_gate(
         )
         evidences = l0_artifacts.evidences
         evidence_rows = l0_artifacts.evidence_rows
-        candidates = l0_artifacts.candidates
     else:
         evidences = ()
         evidence_rows = ()
 
-    # Gate mode: forward only panels with l1_budget_units > 0
-    if mode == "gate" and candidates:
-        candidate_by_rid = {c.recipe_id: c for c in candidates}
-        l1_queued_ids = {
-            rid for rid, c in candidate_by_rid.items()
-            if c.l1_budget_units > 0
-        }
-        passed_panel_indices = {
-            b.panel_index
-            for b in bindings
-            if b.recipe_id in l1_queued_ids
-        }
-        if not passed_panel_indices and len(candidates) > 0:
-            # Fallback: at least seed candidates
-            seed_ids = {
-                rid for rid, c in candidate_by_rid.items()
-                if c.discovery_tier in ("seed", "candidate")
-            }
-            passed_panel_indices = {
-                b.panel_index
-                for b in bindings
-                if b.recipe_id in seed_ids
-            } if seed_ids else set()
-
-        panels_for_l1 = tuple(
-            p for i, p in enumerate(panels) if i in passed_panel_indices
-        )
+    # Gate mode: forward only panels matching passed_recipe_ids
+    if mode == "gate" and l0_artifacts is not None:
+        passed_ids = set(l0_artifacts.passed_recipe_ids)
+        passed_panel_indices = {b.panel_index for b in bindings if b.recipe_id in passed_ids}
+        panels_for_l1 = tuple(p for i, p in enumerate(panels) if i in passed_panel_indices)
     elif mode == "audit":
         panels_for_l1 = tuple(panels)
     else:
@@ -369,7 +347,7 @@ def run_alpha_foundry_l0_gate(
     n_panels_in = len(panels)
     n_bound = len(bindings)
     n_evidence = len(evidences)
-    n_passed = len([c for c in candidates if c.discovery_tier != "blocked"]) if candidates else 0
+    n_passed = len(l0_artifacts.passed_recipe_ids) if l0_artifacts is not None else 0
     n_rejected = n_evidence - n_passed
 
     symbols = aligned.symbols if hasattr(aligned, "symbols") else ()
@@ -398,12 +376,13 @@ def run_alpha_foundry_l0_gate(
 
     try:
         report_dir = (
-            runtime_config.report_dir
-            if hasattr(runtime_config, "report_dir")
-            else Path("logs/futures/alpha_foundry")
+            runtime_config.report_dir if hasattr(runtime_config, "report_dir") else Path("logs/futures/alpha_foundry")
         )
         json_path, parquet_path = _write_alpha_foundry_report(
-            report, evidence_rows, report_dir, run_id,
+            report,
+            evidence_rows,
+            report_dir,
+            run_id,
         )
         report = AlphaFoundryBridgeReport(
             run_id=run_id,

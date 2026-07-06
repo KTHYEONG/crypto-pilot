@@ -2,6 +2,7 @@
 
 [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING][ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -88,8 +89,7 @@ def _log_ascii_table(
     _logger.info(
         "| "
         + " | ".join(
-            f"{_fit_table_cell(header, width):<{width}}"
-            for header, width in zip(headers, widths, strict=True)
+            f"{_fit_table_cell(header, width):<{width}}" for header, width in zip(headers, widths, strict=True)
         )
         + " |"
     )
@@ -97,10 +97,7 @@ def _log_ascii_table(
     for row in rows:
         _logger.info(
             "| "
-            + " | ".join(
-                f"{_fit_table_cell(cell, width):<{width}}"
-                for cell, width in zip(row, widths, strict=True)
-            )
+            + " | ".join(f"{_fit_table_cell(cell, width):<{width}}" for cell, width in zip(row, widths, strict=True))
             + " |"
         )
     _logger.info("-" * border)
@@ -230,7 +227,7 @@ def _project_panel_to_base_grid(
 
             # side_hint: mode per window via bincount
             for i in np.where(valid_windows)[0]:
-                seg = panel.side_hint_2d[starts[i]:ends[i], n]
+                seg = panel.side_hint_2d[starts[i] : ends[i], n]
                 proj_side[i, n] = np.bincount(seg.astype(np.int64) + 1).argmax() - 1
 
             # turnover: windowed mean via cumsum
@@ -301,11 +298,7 @@ def _resample_probe_source_frame(frame: pd.DataFrame, *, target_tf: str) -> pd.D
     for col in RESAMPLE_METADATA_FLOAT_COLS:
         if col in prepared.columns:
             agg[col] = "mean"
-    resampled = (
-        prepared.resample(target_tf, label="right", closed="right")
-        .agg(agg)
-        .dropna(subset=["close"])
-    )
+    resampled = prepared.resample(target_tf, label="right", closed="right").agg(agg).dropna(subset=["close"])
     if not resampled.empty:
         resampled = resampled.iloc[:-1]
     return resampled.reset_index()
@@ -489,17 +482,12 @@ def build_multi_tf_panels(
 
     if audit_rows:
         import logging
+
         logger = logging.getLogger("opt_main_futures")
-        tf_summaries = [
-            f"[{row[0]}] Proj={row[3]} Syms={row[1]}"
-            for row in audit_rows
-        ]
-        
+        tf_summaries = [f"[{row[0]}] Proj={row[3]} Syms={row[1]}" for row in audit_rows]
+
         # Format as Minimal Tree Style
-        logger.info(
-            "🧬 [L1: MULTI-TF PANEL INJECTION]\n"
-            f"  └─ Active : {' | '.join(tf_summaries)}"
-        )
+        logger.info(f"🧬 [L1: MULTI-TF PANEL INJECTION]\n  └─ Active : {' | '.join(tf_summaries)}")
     return tuple(extra)
 
 
@@ -518,9 +506,7 @@ class _RuntimeBreakdown:
 
 
 def verify_data_integrity(
-    aligned: AlignedMarketData,
-    symbols: list[str],
-    min_length: int = 100
+    aligned: AlignedMarketData, symbols: list[str], min_length: int = 100
 ) -> dict[str, dict[str, Any]]:
     """Verify market data integrity per symbol before running the candidate strategy.
 
@@ -536,7 +522,7 @@ def verify_data_integrity(
     n_bars = aligned.close_2d.shape[0]
 
     _logger.debug("[DATA-INTEGRITY] 💠 Starting audit for %d symbols...", len(symbols))
-    
+
     passed_symbols = []
     failed_symbols_info = []
 
@@ -573,9 +559,7 @@ def verify_data_integrity(
         if status == "PASS":
             passed_symbols.append((sym, n_bars))
         else:
-            failed_symbols_info.append(
-                (sym, n_bars, nan_pct, zero_neg_pct, close_std, hi_lo_violation, status_str)
-            )
+            failed_symbols_info.append((sym, n_bars, nan_pct, zero_neg_pct, close_std, hi_lo_violation, status_str))
 
         report[sym] = {
             "status": status,
@@ -591,26 +575,35 @@ def verify_data_integrity(
     if passed_symbols:
         bar_lengths = sorted({x[1] for x in passed_symbols})
         avg_bars = int(np.mean(bar_lengths)) if bar_lengths else 0
-        _logger.info(format_data_integrity_summary(
-            total=len(symbols),
-            passed=len(passed_symbols),
-            bars=avg_bars,
-            nan_pct=0.0,
-            zero_pct=0.0
-        ))
+        _logger.info(
+            format_data_integrity_summary(
+                total=len(symbols), passed=len(passed_symbols), bars=avg_bars, nan_pct=0.0, zero_pct=0.0
+            )
+        )
 
     if failed_symbols_info:
         _logger.warning("[DATA-INTEGRITY] FAIL: %d symbols failed integrity check:", len(failed_symbols_info))
         _logger.warning(
             "[DATA-INTEGRITY] %-12s | %-6s | %-6s | %-6s | %-6s | %-6s | %s",
-            "Symbol", "Bars", "NaN%", "Zero%", "VolStd", "Hi>=Lo", "Status (Reason)"
+            "Symbol",
+            "Bars",
+            "NaN%",
+            "Zero%",
+            "VolStd",
+            "Hi>=Lo",
+            "Status (Reason)",
         )
         for info in failed_symbols_info:
             sym, n_bars, nan_pct, zero_neg_pct, close_std, hi_lo_violation, status_str = info
             _logger.warning(
                 "[DATA-INTEGRITY] %-12s | %-6d | %-5.1f%% | %-5.1f%% | %-6.4f | %-6s | %s",
-                sym, n_bars, nan_pct, zero_neg_pct, close_std,
-                "FAIL" if hi_lo_violation > 0 else "PASS", status_str
+                sym,
+                n_bars,
+                nan_pct,
+                zero_neg_pct,
+                close_std,
+                "FAIL" if hi_lo_violation > 0 else "PASS",
+                status_str,
             )
 
     return report
@@ -750,8 +743,10 @@ def _empty_rule_diagnostics() -> Any:
     """signal_only fast-path용 빈 RuleDiagnosticsResult."""
     empty_df = pd.DataFrame()
     return SimpleNamespace(
-        by_family=empty_df, by_variant=empty_df,
-        by_family_side=empty_df, side_flip=empty_df,
+        by_family=empty_df,
+        by_variant=empty_df,
+        by_family_side=empty_df,
+        side_flip=empty_df,
         decision={},
         recommended_keep_variants=(),
         recommended_flip_variants=(),
@@ -864,36 +859,36 @@ def run_candidate_strategy_for_universe(
     def _emit_bridge_profile() -> None:
         total_time = time.perf_counter() - bridge_t0
         breakdown = _RuntimeBreakdown(total=total_time, steps=bridge_prof)
-        
+
         width = 60
         border = "━" * width
         lines = [
             f"[BRIDGE PERFORMANCE] {border}",
-            f"  Total Runtime: {total_time:.2f}s (Accounted: {breakdown.accounted/total_time:.1%})",
-            ""
+            f"  Total Runtime: {total_time:.2f}s (Accounted: {breakdown.accounted / total_time:.1%})",
+            "",
         ]
-        
+
         # Sort steps by duration for the bar chart
         sorted_steps = sorted(bridge_prof.items(), key=lambda x: x[1], reverse=True)
         max_step_time = max(bridge_prof.values()) if bridge_prof else 1.0
-        
+
         shown_names: set[str] = set()
         for name, duration in sorted_steps:
             if duration < 0.01 and name != sorted_steps[0][0]:
                 continue
-            
+
             bar_width = int((duration / max_step_time) * 20)
             bar = "█" * bar_width
             pct = (duration / total_time) * 100
-            
+
             # Add fire emoji for the top bottleneck if it's significant
             suffix = " 🔥" if name == sorted_steps[0][0] and pct > 30 else ""
             skip_label = " (skipped)" if name == "walk_forward" and duration < 0.01 else ""
-            
+
             label = name.replace("_", " ").title()
             lines.append(f"  {label:<15}: {bar:<20} {duration:>6.2f}s ({pct:>5.1f}%){suffix}{skip_label}")
             shown_names.add(name)
-        
+
         if "walk_forward" not in shown_names:
             wf_dur = bridge_prof.get("walk_forward", 0.0)
             lines.append(f"  {'Walk Forward':<15}: {'                    '} {wf_dur:>6.2f}s (  0.0%) (skipped)")
@@ -902,13 +897,12 @@ def run_candidate_strategy_for_universe(
         if stage_rss_samples:
             peak_rss = max(s[1] for s in stage_rss_samples)
             lines.append("")
-            lines.append(
-                f"  [MEMORY] Peak RSS: {peak_rss:.0f} MB | Baseline: {rss_baseline:.0f} MB"
-            )
+            lines.append(f"  [MEMORY] Peak RSS: {peak_rss:.0f} MB | Baseline: {rss_baseline:.0f} MB")
             lines.append("  Stage RSS Delta (top 5 by delta):")
             sorted_rss = sorted(
                 [(name, delta) for name, rss, delta in stage_rss_samples if delta > 0],
-                key=lambda x: x[1], reverse=True,
+                key=lambda x: x[1],
+                reverse=True,
             )[:5]
             for name, delta in sorted_rss:
                 label = name.replace("_", " ").title()
@@ -931,15 +925,14 @@ def run_candidate_strategy_for_universe(
     n_bars = aligned.close_2d.shape[0]
     _logger.debug(
         "[BRIDGE][INPUT] n_symbols=%d n_bars=%d tf=%s",
-        len(symbols), n_bars, tf,
+        len(symbols),
+        n_bars,
+        tf,
     )
 
     t_step = time.perf_counter()
     panels = build_rule_signal_panels(aligned=aligned, cfg=strategy_cfg.candidate)
-    panels = tuple(
-        dataclasses.replace(p, variant=f"{p.variant}_{tf}")
-        for p in panels
-    )
+    panels = tuple(dataclasses.replace(p, variant=f"{p.variant}_{tf}") for p in panels)
     bridge_prof["rules"] = time.perf_counter() - t_step
     _sample_rss("rules")
     if alpha_foundry_config is not None and getattr(alpha_foundry_config, "mode", "off") != "off":
@@ -1039,7 +1032,9 @@ def run_candidate_strategy_for_universe(
 
     t_step = time.perf_counter()
     labeled = label_candidate_events(
-        events=raw_events, aligned=aligned, cfg=candidate_cfg,
+        events=raw_events,
+        aligned=aligned,
+        cfg=candidate_cfg,
         precomputed_atr_2d=atr_2d_cache,
     )
     bridge_prof["label"] = time.perf_counter() - t_step
@@ -1077,7 +1072,9 @@ def run_candidate_strategy_for_universe(
                 if not htf_raw_events.empty:
                     t_htf_label = time.perf_counter()
                     htf_labeled = label_candidate_events(
-                        events=htf_raw_events, aligned=aligned, cfg=candidate_cfg,
+                        events=htf_raw_events,
+                        aligned=aligned,
+                        cfg=candidate_cfg,
                         precomputed_atr_2d=atr_2d_cache,
                     )
                     bridge_prof["htf_label"] = time.perf_counter() - t_htf_label
@@ -1144,9 +1141,7 @@ def run_candidate_strategy_for_universe(
         bridge_prof["promotions"] = time.perf_counter() - t_step
         _sample_rss("promotions")
         if labeled.empty:
-            _logger.debug(
-                "[BRIDGE] all candidate variants blocked by promotion filter; producing zero weights"
-            )
+            _logger.debug("[BRIDGE] all candidate variants blocked by promotion filter; producing zero weights")
             t_step = time.perf_counter()
             alpha_panel = build_candidate_alpha_panel(
                 selected_events=pd.DataFrame(),
@@ -1268,6 +1263,7 @@ def run_candidate_strategy_for_universe(
 
     # --- WF fold loop: train per fold using shared workflow ---
     from src.domain.futures.strategy.candidate_workflow import run_candidate_walk_forward
+
     t_step = time.perf_counter()
     prepared = prepare_labeled_events(
         labeled_events=labeled,
@@ -1321,14 +1317,10 @@ def run_candidate_strategy_for_universe(
         selected_count = int(selected_fold.shape[0])
         realized_mean = float(realized_edge.mean()) if realized_edge.notna().any() else float("nan")
         realized_hit_rate = float((realized_edge > 0.0).mean()) if realized_edge.notna().any() else 0.0
-        
+
         if realized_edge.notna().any():
             log_growth_proxy = float(
-                np.mean(
-                    np.log1p(
-                        np.clip(realized_edge.to_numpy(dtype=np.float64, copy=False) * 1e-4, -0.99, None)
-                    )
-                )
+                np.mean(np.log1p(np.clip(realized_edge.to_numpy(dtype=np.float64, copy=False) * 1e-4, -0.99, None)))
             )
         else:
             log_growth_proxy = float("-inf")
@@ -1359,13 +1351,13 @@ def run_candidate_strategy_for_universe(
             survival_reason = "realized_log_growth_pass" if pass_survival else "realized_log_growth_fail"
         else:
             # Compute ML selection lift: mean(selected_edge) - mean(all_fold_oos_edge)
-            fold_oos_events = labeled[
-                (labeled["entry_idx"] >= fold.oos_start) & (labeled["entry_idx"] < fold.oos_end)
-            ] if "entry_idx" in labeled.columns else pd.DataFrame()
+            fold_oos_events = (
+                labeled[(labeled["entry_idx"] >= fold.oos_start) & (labeled["entry_idx"] < fold.oos_end)]
+                if "entry_idx" in labeled.columns
+                else pd.DataFrame()
+            )
             if not fold_oos_events.empty and "edge_after_hurdle_bps" in fold_oos_events.columns:
-                baseline_mean = float(
-                    pd.to_numeric(fold_oos_events["edge_after_hurdle_bps"], errors="coerce").mean()
-                )
+                baseline_mean = float(pd.to_numeric(fold_oos_events["edge_after_hurdle_bps"], errors="coerce").mean())
             else:
                 baseline_mean = float("nan")
             ml_lift_bps = (
@@ -1381,7 +1373,7 @@ def run_candidate_strategy_for_universe(
                 and pass_lift
             )
             survival_reason = "realized_selected_edge_pass" if pass_survival else "realized_selected_edge_fail"
-        
+
         fold_cost_survival.append(bool(pass_survival))
         fold_selection_reports.append(
             {
@@ -1415,23 +1407,21 @@ def run_candidate_strategy_for_universe(
         _rank_ic_val = (
             _vdiag.get("oos_rank_ic", _edge_rep.prior_rank_ic)
             if _mode == "ensemble_b0"
-            else (
-                _edge_rep.residual_rank_ic
-                if _mode == "prior_residual"
-                else _edge_rep.prior_rank_ic
-            )
+            else (_edge_rep.residual_rank_ic if _mode == "prior_residual" else _edge_rep.prior_rank_ic)
         )
-        wf_fold_details.append({
-            "fold_id": len(fold_selection_reports),
-            "inference_mode": _mode,
-            "rank_ic": float(_rank_ic_val),
-            "n_events": int(ml_out.events.shape[0]) if ml_out.events is not None else 0,
-            "prior_bps": float(_vdiag.get("prior_component_p90_bps", 0.0)),
-            "eu_p90": float(selection_diag_fold.get("waterfall_expected_utility_adj_p90_bps", 0.0)),
-            "pass_cost": bool(pass_survival),
-            "realized_mean_bps": float(realized_mean),   # actual pass gate: >= min_fold_realized_edge_bps
-            "selected_total": int(selected_count),        # actual pass gate: >= min_fold_selected_events
-        })
+        wf_fold_details.append(
+            {
+                "fold_id": len(fold_selection_reports),
+                "inference_mode": _mode,
+                "rank_ic": float(_rank_ic_val),
+                "n_events": int(ml_out.events.shape[0]) if ml_out.events is not None else 0,
+                "prior_bps": float(_vdiag.get("prior_component_p90_bps", 0.0)),
+                "eu_p90": float(selection_diag_fold.get("waterfall_expected_utility_adj_p90_bps", 0.0)),
+                "pass_cost": bool(pass_survival),
+                "realized_mean_bps": float(realized_mean),  # actual pass gate: >= min_fold_realized_edge_bps
+                "selected_total": int(selected_count),  # actual pass gate: >= min_fold_selected_events
+            }
+        )
 
         _logger.debug(
             (
@@ -1501,24 +1491,16 @@ def run_candidate_strategy_for_universe(
     _combined_q90 = np.concatenate(fold_q90_parts) if fold_q90_parts else np.array([], dtype=np.float64)
     _combined_utility = np.concatenate(fold_utility_parts) if fold_utility_parts else np.array([], dtype=np.float64)
     _combined_expected_return_r = (
-        np.concatenate(fold_expected_return_r_parts)
-        if fold_expected_return_r_parts
-        else np.array([], dtype=np.float64)
+        np.concatenate(fold_expected_return_r_parts) if fold_expected_return_r_parts else np.array([], dtype=np.float64)
     )
     _combined_q10_return_r = (
-        np.concatenate(fold_q10_return_r_parts)
-        if fold_q10_return_r_parts
-        else np.array([], dtype=np.float64)
+        np.concatenate(fold_q10_return_r_parts) if fold_q10_return_r_parts else np.array([], dtype=np.float64)
     )
     _combined_q90_return_r = (
-        np.concatenate(fold_q90_return_r_parts)
-        if fold_q90_return_r_parts
-        else np.array([], dtype=np.float64)
+        np.concatenate(fold_q90_return_r_parts) if fold_q90_return_r_parts else np.array([], dtype=np.float64)
     )
     _combined_kelly_fraction = (
-        np.concatenate(fold_kelly_fraction_parts)
-        if fold_kelly_fraction_parts
-        else np.array([], dtype=np.float64)
+        np.concatenate(fold_kelly_fraction_parts) if fold_kelly_fraction_parts else np.array([], dtype=np.float64)
     )
     # Combine fold OOS outputs (time-ordered concat)
     if fold_event_parts:
@@ -1536,19 +1518,13 @@ def run_candidate_strategy_for_universe(
             else np.array([], dtype=np.float64)
         )
         _combined_q10_return_r = (
-            np.concatenate(fold_q10_return_r_parts)
-            if fold_q10_return_r_parts
-            else np.array([], dtype=np.float64)
+            np.concatenate(fold_q10_return_r_parts) if fold_q10_return_r_parts else np.array([], dtype=np.float64)
         )
         _combined_q90_return_r = (
-            np.concatenate(fold_q90_return_r_parts)
-            if fold_q90_return_r_parts
-            else np.array([], dtype=np.float64)
+            np.concatenate(fold_q90_return_r_parts) if fold_q90_return_r_parts else np.array([], dtype=np.float64)
         )
         _combined_kelly_fraction = (
-            np.concatenate(fold_kelly_fraction_parts)
-            if fold_kelly_fraction_parts
-            else np.array([], dtype=np.float64)
+            np.concatenate(fold_kelly_fraction_parts) if fold_kelly_fraction_parts else np.array([], dtype=np.float64)
         )
     else:
         # Fallback: use last fold's full OOS as single-fold behavior
@@ -1596,13 +1572,13 @@ def run_candidate_strategy_for_universe(
         split_start=wf_folds[-1].oos_start,
         split_end=wf_folds[-1].oos_end,
     )
-    
+
     from src.domain.futures.strategy.candidate_contracts import (
         CandidateModelOutput,
         CandidateWorkflowStatus,
         EdgeSource,
     )
-    
+
     validation = getattr(fold_gate_model, "validation", None) if fold_gate_model is not None else None
     gate_enabled = validation.enabled if validation is not None else False
     gate_threshold = validation.threshold if validation is not None else 0.5
@@ -1613,9 +1589,7 @@ def run_candidate_strategy_for_universe(
     )
 
     if fold_gate_model is not None:
-        p_pass_ref = predict_candidate_gate(
-            model=fold_gate_model, dataset=_last_oos_set, cfg=strategy_cfg.candidate
-        )
+        p_pass_ref = predict_candidate_gate(model=fold_gate_model, dataset=_last_oos_set, cfg=strategy_cfg.candidate)
     else:
         p_pass_ref = np.zeros(_last_oos_set.X.shape[0] if _last_oos_set.X is not None else 0)
 
@@ -1668,36 +1642,39 @@ def run_candidate_strategy_for_universe(
         for r in fold_selection_reports
         if np.isfinite(float(r.get("log_growth_proxy", float("nan"))))
     ]
-    wf_fold_realized_mean_bps = (
-        float(np.mean(realized_mean_values)) if realized_mean_values else float("nan")
-    )
-    wf_fold_log_growth_mean = (
-        float(np.mean(log_growth_values)) if log_growth_values else float("nan")
-    )
-    wf_waterfall_expected_utility_p90_bps = float(
-        np.mean(
-            [
-                float(r["waterfall_expected_utility_adj_p90_bps"])
-                for r in fold_selection_reports
-                if np.isfinite(float(r.get("waterfall_expected_utility_adj_p90_bps", float("nan"))))
-            ]
+    wf_fold_realized_mean_bps = float(np.mean(realized_mean_values)) if realized_mean_values else float("nan")
+    wf_fold_log_growth_mean = float(np.mean(log_growth_values)) if log_growth_values else float("nan")
+    wf_waterfall_expected_utility_p90_bps = (
+        float(
+            np.mean(
+                [
+                    float(r["waterfall_expected_utility_adj_p90_bps"])
+                    for r in fold_selection_reports
+                    if np.isfinite(float(r.get("waterfall_expected_utility_adj_p90_bps", float("nan"))))
+                ]
+            )
         )
-    ) if any(
-        np.isfinite(float(r.get("waterfall_expected_utility_adj_p90_bps", float("nan"))))
-        for r in fold_selection_reports
-    ) else float("nan")
-    wf_waterfall_downside_drag_p90_bps = float(
-        np.mean(
-            [
-                float(r["waterfall_downside_drag_p90_bps"])
-                for r in fold_selection_reports
-                if np.isfinite(float(r.get("waterfall_downside_drag_p90_bps", float("nan"))))
-            ]
+        if any(
+            np.isfinite(float(r.get("waterfall_expected_utility_adj_p90_bps", float("nan"))))
+            for r in fold_selection_reports
         )
-    ) if any(
-        np.isfinite(float(r.get("waterfall_downside_drag_p90_bps", float("nan"))))
-        for r in fold_selection_reports
-    ) else float("nan")
+        else float("nan")
+    )
+    wf_waterfall_downside_drag_p90_bps = (
+        float(
+            np.mean(
+                [
+                    float(r["waterfall_downside_drag_p90_bps"])
+                    for r in fold_selection_reports
+                    if np.isfinite(float(r.get("waterfall_downside_drag_p90_bps", float("nan"))))
+                ]
+            )
+        )
+        if any(
+            np.isfinite(float(r.get("waterfall_downside_drag_p90_bps", float("nan")))) for r in fold_selection_reports
+        )
+        else float("nan")
+    )
     wf_shadow_profile_count = max((int(r.get("shadow_profile_count", 0)) for r in fold_selection_reports), default=0)
     wf_shadow_max_selected_total = max(
         (int(r.get("shadow_max_selected_total", 0)) for r in fold_selection_reports),
@@ -1795,10 +1772,7 @@ def run_candidate_strategy_for_universe(
     # Reconstruct oos_set for report counts (use combined)
 
     _logger.debug(
-        (
-            "[DIAG][PIPELINE] raw=%d labeled=%d promoted=%d fit=%d cal=%d oos=%d "
-            "n_folds=%d wf_scheme=%s"
-        ),
+        ("[DIAG][PIPELINE] raw=%d labeled=%d promoted=%d fit=%d cal=%d oos=%d n_folds=%d wf_scheme=%s"),
         len(raw_events),
         len(labeled),
         promoted_total,
@@ -2009,14 +1983,23 @@ def merge_candidate_output_into_data_maps(
 ) -> None:
     """Merge candidate output payload into data maps."""
     import time
+
     t_merge_start_all = time.perf_counter()
     panel = getattr(candidate_out, "alpha_panel", None)
     if panel is None or panel.empty:
         return
     required = {
-        "alpha_long", "alpha_short", "target_weight", "candidate_family",
-        "candidate_variant", "p_pass", "mu_net_decision_bps", "q10_net_bps", "utility_score",
-        "candidate_stop_atr_mult", "candidate_take_profit_atr_mult",
+        "alpha_long",
+        "alpha_short",
+        "target_weight",
+        "candidate_family",
+        "candidate_variant",
+        "p_pass",
+        "mu_net_decision_bps",
+        "q10_net_bps",
+        "utility_score",
+        "candidate_stop_atr_mult",
+        "candidate_take_profit_atr_mult",
     }
     if not required.issubset(panel.columns):
         _logger.warning("[%s] candidate panel missing required columns; skip merge", log_tag)
@@ -2087,8 +2070,13 @@ def merge_candidate_output_into_data_maps(
         arr = np.array(_merge_sym_times)
         _logger.debug(
             "[PROFILE][MERGE][SUMMARY] tag=%s n_syms=%d total=%.4fs min=%.4f max=%.4f mean=%.4f median=%.4f",
-            log_tag, len(_merge_sym_times), total_merge,
-            float(arr.min()), float(arr.max()), float(arr.mean()), float(np.median(arr)),
+            log_tag,
+            len(_merge_sym_times),
+            total_merge,
+            float(arr.min()),
+            float(arr.max()),
+            float(arr.mean()),
+            float(np.median(arr)),
         )
     else:
         _logger.debug("[PROFILE][MERGE] Total merge %s took %.4fs; no symbols processed", log_tag, total_merge)

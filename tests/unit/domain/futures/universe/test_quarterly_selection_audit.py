@@ -150,7 +150,9 @@ def _write_ledger(path: Path) -> None:
     pd.DataFrame(rows).to_parquet(path, index=False)
 
 
-@pytest.mark.skip(reason="Phase 4-E: Stage6-specific rejection tracking (stage3_reason, snapshot.rejected); redesign for PIT semantics pending")
+@pytest.mark.skip(
+    reason="Phase 4-E: Stage6-specific rejection tracking (stage3_reason, snapshot.rejected); redesign for PIT semantics pending"  # noqa: E501
+)
 def test_quarterly_universe_selection_audit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -204,8 +206,7 @@ def test_quarterly_universe_selection_audit(
         assert tuple(meta.symbol for meta in snapshot.selected) == expectation["selected"]
         assert all(meta.vol_30d >= 0.0 for meta in snapshot.selected)
         assert all(
-            np.isfinite(meta.tradeable_score) or meta.tradeable_score == float("-inf")
-            for meta in snapshot.selected
+            np.isfinite(meta.tradeable_score) or meta.tradeable_score == float("-inf") for meta in snapshot.selected
         )
 
         ranked_out = expectation["ranked_out"]
@@ -215,9 +216,7 @@ def test_quarterly_universe_selection_audit(
         assert rejected.audit_trail[-1].startswith("stage3_liquidity:FAIL:adv_too_low")
         rejected_symbols = set(report.loc[~report["passed"].astype(bool), "symbol"].astype(str))
         assert ranked_out in rejected_symbols
-        assert (
-            load_universe_snapshot(as_of=is_end, tf="4h", snapshot_root=snapshot_root) is not None
-        )
+        assert load_universe_snapshot(as_of=is_end, tf="4h", snapshot_root=snapshot_root) is not None
 
     assert observed == {
         "2025-01-01": ("BTC/USDT", "ETH/USDT"),

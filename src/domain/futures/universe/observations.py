@@ -18,8 +18,8 @@ _LOG = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 _EPS: float = 1e-12
-_BARS_PER_HOUR: int = 1        # 4h bar resolution → 1 bar per 4 hours
-_BARS_PER_DAY: int = 6         # 24 / 4 = 6 bars per calendar day
+_BARS_PER_HOUR: int = 1  # 4h bar resolution → 1 bar per 4 hours
+_BARS_PER_DAY: int = 6  # 24 / 4 = 6 bars per calendar day
 _ANNUALISE_4H: float = float(np.sqrt(6 * 365))  # sqrt(bars_per_day * days_per_year)
 
 _OUTPUT_COLS: list[str] = [
@@ -39,6 +39,7 @@ _SOURCE_FUNDING: str = "funding"
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def build_pit_market_observations(
     klines: pd.DataFrame,
@@ -119,6 +120,7 @@ def build_pit_market_observations(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 def _validate_timestamps(sym_klines: pd.DataFrame, symbol: str) -> None:
     """Raise ValueError if timestamps are not unique and strictly monotonic.
 
@@ -131,9 +133,7 @@ def _validate_timestamps(sym_klines: pd.DataFrame, symbol: str) -> None:
     """
     ts = sym_klines["timestamp"]
     if ts.duplicated().any() or not ts.is_monotonic_increasing:
-        raise ValueError(
-            f"market timestamps must be unique and monotonic (symbol={symbol!r})"
-        )
+        raise ValueError(f"market timestamps must be unique and monotonic (symbol={symbol!r})")
 
 
 def _process_symbol_klines(
@@ -237,11 +237,7 @@ def _compute_vol30(
     min_periods_bars = min_observations * _BARS_PER_DAY
     lr_series = pd.Series(log_returns, index=timestamps)
     # Rolling std with NaN exclusion; min_periods enforces min_observations days
-    vol = (
-        lr_series.rolling(window=min_periods_bars, min_periods=min_periods_bars)
-        .std(ddof=1)
-        .mul(_ANNUALISE_4H)
-    )
+    vol = lr_series.rolling(window=min_periods_bars, min_periods=min_periods_bars).std(ddof=1).mul(_ANNUALISE_4H)
 
     # observed_at = bar close timestamp (each 4h bar)
     observed_at = timestamps.reset_index(drop=True)
@@ -320,9 +316,7 @@ def _compute_daily_metrics(
     prev_close = daily["close_last"].shift(1)
     with np.errstate(divide="ignore", invalid="ignore"):
         log_ret_daily = np.where(
-            daily["close_last"].notna()
-            & prev_close.notna()
-            & (prev_close > 0),
+            daily["close_last"].notna() & prev_close.notna() & (prev_close > 0),
             np.abs(np.log(daily["close_last"].to_numpy(dtype=np.float64) / prev_close.to_numpy(dtype=np.float64))),
             np.nan,
         )
@@ -331,16 +325,8 @@ def _compute_daily_metrics(
     daily["a_d"] = a_d
 
     # Rolling median over lookback_days with min_periods=min_observations
-    adv30 = (
-        daily["v_d"]
-        .rolling(window=lookback_days, min_periods=min_observations)
-        .median()
-    )
-    amihud30 = (
-        daily["a_d"]
-        .rolling(window=lookback_days, min_periods=min_observations)
-        .median()
-    )
+    adv30 = daily["v_d"].rolling(window=lookback_days, min_periods=min_observations).median()
+    amihud30 = daily["a_d"].rolling(window=lookback_days, min_periods=min_observations).median()
 
     # observed_at = start of NEXT day UTC (day + 1 00:00 UTC)
     observed_at = daily["date"] + pd.Timedelta(days=1)
@@ -390,9 +376,7 @@ def _process_funding(
             "instrument_id": funding["symbol"].astype(str),
             "metric": "funding_rate",
             "observed_at": funding["funding_time"].reset_index(drop=True),
-            "available_at": (
-                funding["funding_time"].reset_index(drop=True) + availability_lag
-            ),
+            "available_at": (funding["funding_time"].reset_index(drop=True) + availability_lag),
             "value": funding["funding_rate"].to_numpy(dtype=np.float64),
             "source": _SOURCE_FUNDING,
             "confidence": DataConfidence.OBSERVED.value,

@@ -1,4 +1,5 @@
 """Tests for Major Symbol Registry Replay & Classification."""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -107,21 +108,29 @@ def test_classify_major_symbol_registry_gap_returns_outvoted_for_btc() -> None:
     """S3: BTC family, registry/observed both exist, adverse mismatch 0.63 → outvoted."""
     entries = (
         MajorSymbolRegistryCensusEntry(
-            symbol="BTCUSDT", family="dual_momentum",
-            registry_mean_incremental_bps=3.5, hard_eligible=True,
+            symbol="BTCUSDT",
+            family="dual_momentum",
+            registry_mean_incremental_bps=3.5,
+            hard_eligible=True,
             observed_active_in_holdout=True,
         ),
     )
     summaries = (
         MajorSymbolSleeveContributionSummary(
-            symbol="BTCUSDT", family="dual_momentum", n_obs=10,
-            mean_raw_mu_sleeve=2.0, mean_quality_weight_sleeve=1.0,
-            sign_mismatch_pct=0.5, regime_adverse_sign_mismatch_pct=0.63,
+            symbol="BTCUSDT",
+            family="dual_momentum",
+            n_obs=10,
+            mean_raw_mu_sleeve=2.0,
+            mean_quality_weight_sleeve=1.0,
+            sign_mismatch_pct=0.5,
+            regime_adverse_sign_mismatch_pct=0.63,
         ),
     )
     result = classify_major_symbol_registry_gap(
-        symbol="BTCUSDT", family="dual_momentum",
-        registry_entries=entries, observed_sleeve_summaries=summaries,
+        symbol="BTCUSDT",
+        family="dual_momentum",
+        registry_entries=entries,
+        observed_sleeve_summaries=summaries,
         adverse_sign_mismatch_threshold=0.50,
     )
     assert result == "outvoted"
@@ -172,52 +181,113 @@ def test_major_symbol_registry_replay_adoption_passes_on_positive_median_delta()
     """S5: 3 seeds → median total return up, median MDD down, trades maintained → verdict True."""
     baseline_rows = (
         MajorSymbolRegistryReplayResult(
-            variant="baseline", seed=1, baseline_parity=True,
-            l2_cagr=0.15, l3_total_return=0.10, l3_cagr=0.12, l3_mdd=0.08,
-            l3_sharpe=0.9, l3_sortino=1.2, l3_trade_count=50,
-            btc_mu_bullish_pct=0.6, eth_mu_bullish_pct=0.5,
-            registry_census=(), adoption_passed=False, blocker_reason="",
+            variant="baseline",
+            seed=1,
+            baseline_parity=True,
+            l2_cagr=0.15,
+            l3_total_return=0.10,
+            l3_cagr=0.12,
+            l3_mdd=0.08,
+            l3_sharpe=0.9,
+            l3_sortino=1.2,
+            l3_trade_count=50,
+            btc_mu_bullish_pct=0.6,
+            eth_mu_bullish_pct=0.5,
+            registry_census=(),
+            adoption_passed=False,
+            blocker_reason="",
         ),
         MajorSymbolRegistryReplayResult(
-            variant="baseline", seed=2, baseline_parity=True,
-            l2_cagr=0.14, l3_total_return=0.09, l3_cagr=0.11, l3_mdd=0.09,
-            l3_sharpe=0.8, l3_sortino=1.1, l3_trade_count=45,
-            btc_mu_bullish_pct=0.6, eth_mu_bullish_pct=0.5,
-            registry_census=(), adoption_passed=False, blocker_reason="",
+            variant="baseline",
+            seed=2,
+            baseline_parity=True,
+            l2_cagr=0.14,
+            l3_total_return=0.09,
+            l3_cagr=0.11,
+            l3_mdd=0.09,
+            l3_sharpe=0.8,
+            l3_sortino=1.1,
+            l3_trade_count=45,
+            btc_mu_bullish_pct=0.6,
+            eth_mu_bullish_pct=0.5,
+            registry_census=(),
+            adoption_passed=False,
+            blocker_reason="",
         ),
         MajorSymbolRegistryReplayResult(
-            variant="baseline", seed=3, baseline_parity=True,
-            l2_cagr=0.13, l3_total_return=0.08, l3_cagr=0.10, l3_mdd=0.10,
-            l3_sharpe=0.7, l3_sortino=1.0, l3_trade_count=55,
-            btc_mu_bullish_pct=0.6, eth_mu_bullish_pct=0.5,
-            registry_census=(), adoption_passed=False, blocker_reason="",
+            variant="baseline",
+            seed=3,
+            baseline_parity=True,
+            l2_cagr=0.13,
+            l3_total_return=0.08,
+            l3_cagr=0.10,
+            l3_mdd=0.10,
+            l3_sharpe=0.7,
+            l3_sortino=1.0,
+            l3_trade_count=55,
+            btc_mu_bullish_pct=0.6,
+            eth_mu_bullish_pct=0.5,
+            registry_census=(),
+            adoption_passed=False,
+            blocker_reason="",
         ),
     )
     candidate_rows = (
         MajorSymbolRegistryReplayResult(
-            variant="btc_divergence_dampener", seed=1, baseline_parity=True,
-            l2_cagr=0.16, l3_total_return=0.12, l3_cagr=0.13, l3_mdd=0.07,
-            l3_sharpe=1.0, l3_sortino=1.3, l3_trade_count=48,
-            btc_mu_bullish_pct=0.6, eth_mu_bullish_pct=0.5,
-            registry_census=(), adoption_passed=False, blocker_reason="",
+            variant="btc_divergence_dampener",
+            seed=1,
+            baseline_parity=True,
+            l2_cagr=0.16,
+            l3_total_return=0.12,
+            l3_cagr=0.13,
+            l3_mdd=0.07,
+            l3_sharpe=1.0,
+            l3_sortino=1.3,
+            l3_trade_count=48,
+            btc_mu_bullish_pct=0.6,
+            eth_mu_bullish_pct=0.5,
+            registry_census=(),
+            adoption_passed=False,
+            blocker_reason="",
         ),
         MajorSymbolRegistryReplayResult(
-            variant="btc_divergence_dampener", seed=2, baseline_parity=True,
-            l2_cagr=0.15, l3_total_return=0.11, l3_cagr=0.12, l3_mdd=0.08,
-            l3_sharpe=0.9, l3_sortino=1.2, l3_trade_count=42,
-            btc_mu_bullish_pct=0.6, eth_mu_bullish_pct=0.5,
-            registry_census=(), adoption_passed=False, blocker_reason="",
+            variant="btc_divergence_dampener",
+            seed=2,
+            baseline_parity=True,
+            l2_cagr=0.15,
+            l3_total_return=0.11,
+            l3_cagr=0.12,
+            l3_mdd=0.08,
+            l3_sharpe=0.9,
+            l3_sortino=1.2,
+            l3_trade_count=42,
+            btc_mu_bullish_pct=0.6,
+            eth_mu_bullish_pct=0.5,
+            registry_census=(),
+            adoption_passed=False,
+            blocker_reason="",
         ),
         MajorSymbolRegistryReplayResult(
-            variant="btc_divergence_dampener", seed=3, baseline_parity=True,
-            l2_cagr=0.14, l3_total_return=0.10, l3_cagr=0.11, l3_mdd=0.09,
-            l3_sharpe=0.8, l3_sortino=1.1, l3_trade_count=50,
-            btc_mu_bullish_pct=0.6, eth_mu_bullish_pct=0.5,
-            registry_census=(), adoption_passed=False, blocker_reason="",
+            variant="btc_divergence_dampener",
+            seed=3,
+            baseline_parity=True,
+            l2_cagr=0.14,
+            l3_total_return=0.10,
+            l3_cagr=0.11,
+            l3_mdd=0.09,
+            l3_sharpe=0.8,
+            l3_sortino=1.1,
+            l3_trade_count=50,
+            btc_mu_bullish_pct=0.6,
+            eth_mu_bullish_pct=0.5,
+            registry_census=(),
+            adoption_passed=False,
+            blocker_reason="",
         ),
     )
     adopted, reason = _major_symbol_registry_replay_adoption_verdict(
-        baseline_rows=baseline_rows, candidate_rows=candidate_rows,
+        baseline_rows=baseline_rows,
+        candidate_rows=candidate_rows,
     )
     assert adopted is True
     assert reason == ""
@@ -240,8 +310,10 @@ def test_aggregate_per_tf_l1_does_not_concat_multiple_registries() -> None:
 def test_classify_major_symbol_registry_gap_returns_admission_gap_when_rows_absent() -> None:
     """X2: No registry rows → admission_gap."""
     result = classify_major_symbol_registry_gap(
-        symbol="ETHUSDT", family="dual_momentum",
-        registry_entries=(), observed_sleeve_summaries=(),
+        symbol="ETHUSDT",
+        family="dual_momentum",
+        registry_entries=(),
+        observed_sleeve_summaries=(),
     )
     assert result == "admission_gap"
 
@@ -250,14 +322,18 @@ def test_classify_major_symbol_registry_gap_returns_activation_gap_when_hard_eli
     """X3: hard_eligible row exists but no holdout observation → activation_gap."""
     entries = (
         MajorSymbolRegistryCensusEntry(
-            symbol="ETHUSDT", family="dual_momentum",
-            registry_mean_incremental_bps=3.5, hard_eligible=True,
+            symbol="ETHUSDT",
+            family="dual_momentum",
+            registry_mean_incremental_bps=3.5,
+            hard_eligible=True,
             observed_active_in_holdout=False,
         ),
     )
     result = classify_major_symbol_registry_gap(
-        symbol="ETHUSDT", family="dual_momentum",
-        registry_entries=entries, observed_sleeve_summaries=(),
+        symbol="ETHUSDT",
+        family="dual_momentum",
+        registry_entries=entries,
+        observed_sleeve_summaries=(),
     )
     assert result == "activation_gap"
 
@@ -266,22 +342,31 @@ def test_classify_major_symbol_registry_gap_ignores_near_zero_mismatch_under_dea
     """X4: near-zero mismatch (1e-13) under dead_zone → not outvoted."""
     entries = (
         MajorSymbolRegistryCensusEntry(
-            symbol="BTCUSDT", family="dual_momentum",
-            registry_mean_incremental_bps=3.5, hard_eligible=True,
+            symbol="BTCUSDT",
+            family="dual_momentum",
+            registry_mean_incremental_bps=3.5,
+            hard_eligible=True,
             observed_active_in_holdout=True,
         ),
     )
     summaries = (
         MajorSymbolSleeveContributionSummary(
-            symbol="BTCUSDT", family="dual_momentum", n_obs=10,
-            mean_raw_mu_sleeve=1e-13, mean_quality_weight_sleeve=1.0,
-            sign_mismatch_pct=1e-13, regime_adverse_sign_mismatch_pct=1e-13,
+            symbol="BTCUSDT",
+            family="dual_momentum",
+            n_obs=10,
+            mean_raw_mu_sleeve=1e-13,
+            mean_quality_weight_sleeve=1.0,
+            sign_mismatch_pct=1e-13,
+            regime_adverse_sign_mismatch_pct=1e-13,
         ),
     )
     result = classify_major_symbol_registry_gap(
-        symbol="BTCUSDT", family="dual_momentum",
-        registry_entries=entries, observed_sleeve_summaries=summaries,
-        adverse_sign_mismatch_threshold=0.50, dead_zone=1e-12,
+        symbol="BTCUSDT",
+        family="dual_momentum",
+        registry_entries=entries,
+        observed_sleeve_summaries=summaries,
+        adverse_sign_mismatch_threshold=0.50,
+        dead_zone=1e-12,
     )
     assert result != "outvoted"
 
@@ -329,24 +414,45 @@ def test_major_symbol_registry_replay_adoption_fails_on_trade_collapse() -> None
     """X6: candidate trades < 75% of baseline → blocker 'trade_collapse'."""
     baseline_rows = (
         MajorSymbolRegistryReplayResult(
-            variant="baseline", seed=1, baseline_parity=True,
-            l2_cagr=0.15, l3_total_return=0.10, l3_cagr=0.12, l3_mdd=0.08,
-            l3_sharpe=0.9, l3_sortino=1.2, l3_trade_count=100,
-            btc_mu_bullish_pct=0.6, eth_mu_bullish_pct=0.5,
-            registry_census=(), adoption_passed=False, blocker_reason="",
+            variant="baseline",
+            seed=1,
+            baseline_parity=True,
+            l2_cagr=0.15,
+            l3_total_return=0.10,
+            l3_cagr=0.12,
+            l3_mdd=0.08,
+            l3_sharpe=0.9,
+            l3_sortino=1.2,
+            l3_trade_count=100,
+            btc_mu_bullish_pct=0.6,
+            eth_mu_bullish_pct=0.5,
+            registry_census=(),
+            adoption_passed=False,
+            blocker_reason="",
         ),
     )
     candidate_rows = (
         MajorSymbolRegistryReplayResult(
-            variant="btc_divergence_dampener", seed=1, baseline_parity=True,
-            l2_cagr=0.16, l3_total_return=0.12, l3_cagr=0.13, l3_mdd=0.07,
-            l3_sharpe=1.0, l3_sortino=1.3, l3_trade_count=70,  # 70% < 75%
-            btc_mu_bullish_pct=0.6, eth_mu_bullish_pct=0.5,
-            registry_census=(), adoption_passed=False, blocker_reason="",
+            variant="btc_divergence_dampener",
+            seed=1,
+            baseline_parity=True,
+            l2_cagr=0.16,
+            l3_total_return=0.12,
+            l3_cagr=0.13,
+            l3_mdd=0.07,
+            l3_sharpe=1.0,
+            l3_sortino=1.3,
+            l3_trade_count=70,  # 70% < 75%
+            btc_mu_bullish_pct=0.6,
+            eth_mu_bullish_pct=0.5,
+            registry_census=(),
+            adoption_passed=False,
+            blocker_reason="",
         ),
     )
     adopted, reason = _major_symbol_registry_replay_adoption_verdict(
-        baseline_rows=baseline_rows, candidate_rows=candidate_rows,
+        baseline_rows=baseline_rows,
+        candidate_rows=candidate_rows,
         min_trade_ratio=0.75,
     )
     assert adopted is False
@@ -357,38 +463,79 @@ def test_major_symbol_registry_replay_adoption_fails_when_mdd_not_improved() -> 
     """X7: total return up but median MDD not improved → blocker 'median_mdd_not_improved'."""
     baseline_rows = (
         MajorSymbolRegistryReplayResult(
-            variant="baseline", seed=1, baseline_parity=True,
-            l2_cagr=0.15, l3_total_return=0.10, l3_cagr=0.12, l3_mdd=0.08,
-            l3_sharpe=0.9, l3_sortino=1.2, l3_trade_count=50,
-            btc_mu_bullish_pct=0.6, eth_mu_bullish_pct=0.5,
-            registry_census=(), adoption_passed=False, blocker_reason="",
+            variant="baseline",
+            seed=1,
+            baseline_parity=True,
+            l2_cagr=0.15,
+            l3_total_return=0.10,
+            l3_cagr=0.12,
+            l3_mdd=0.08,
+            l3_sharpe=0.9,
+            l3_sortino=1.2,
+            l3_trade_count=50,
+            btc_mu_bullish_pct=0.6,
+            eth_mu_bullish_pct=0.5,
+            registry_census=(),
+            adoption_passed=False,
+            blocker_reason="",
         ),
         MajorSymbolRegistryReplayResult(
-            variant="baseline", seed=2, baseline_parity=True,
-            l2_cagr=0.14, l3_total_return=0.09, l3_cagr=0.11, l3_mdd=0.09,
-            l3_sharpe=0.8, l3_sortino=1.1, l3_trade_count=45,
-            btc_mu_bullish_pct=0.6, eth_mu_bullish_pct=0.5,
-            registry_census=(), adoption_passed=False, blocker_reason="",
+            variant="baseline",
+            seed=2,
+            baseline_parity=True,
+            l2_cagr=0.14,
+            l3_total_return=0.09,
+            l3_cagr=0.11,
+            l3_mdd=0.09,
+            l3_sharpe=0.8,
+            l3_sortino=1.1,
+            l3_trade_count=45,
+            btc_mu_bullish_pct=0.6,
+            eth_mu_bullish_pct=0.5,
+            registry_census=(),
+            adoption_passed=False,
+            blocker_reason="",
         ),
     )
     candidate_rows = (
         MajorSymbolRegistryReplayResult(
-            variant="btc_divergence_dampener", seed=1, baseline_parity=True,
-            l2_cagr=0.16, l3_total_return=0.12, l3_cagr=0.13, l3_mdd=0.09,
-            l3_sharpe=1.0, l3_sortino=1.3, l3_trade_count=48,
-            btc_mu_bullish_pct=0.6, eth_mu_bullish_pct=0.5,
-            registry_census=(), adoption_passed=False, blocker_reason="",
+            variant="btc_divergence_dampener",
+            seed=1,
+            baseline_parity=True,
+            l2_cagr=0.16,
+            l3_total_return=0.12,
+            l3_cagr=0.13,
+            l3_mdd=0.09,
+            l3_sharpe=1.0,
+            l3_sortino=1.3,
+            l3_trade_count=48,
+            btc_mu_bullish_pct=0.6,
+            eth_mu_bullish_pct=0.5,
+            registry_census=(),
+            adoption_passed=False,
+            blocker_reason="",
         ),
         MajorSymbolRegistryReplayResult(
-            variant="btc_divergence_dampener", seed=2, baseline_parity=True,
-            l2_cagr=0.15, l3_total_return=0.11, l3_cagr=0.12, l3_mdd=0.10,
-            l3_sharpe=0.9, l3_sortino=1.2, l3_trade_count=42,
-            btc_mu_bullish_pct=0.6, eth_mu_bullish_pct=0.5,
-            registry_census=(), adoption_passed=False, blocker_reason="",
+            variant="btc_divergence_dampener",
+            seed=2,
+            baseline_parity=True,
+            l2_cagr=0.15,
+            l3_total_return=0.11,
+            l3_cagr=0.12,
+            l3_mdd=0.10,
+            l3_sharpe=0.9,
+            l3_sortino=1.2,
+            l3_trade_count=42,
+            btc_mu_bullish_pct=0.6,
+            eth_mu_bullish_pct=0.5,
+            registry_census=(),
+            adoption_passed=False,
+            blocker_reason="",
         ),
     )
     adopted, reason = _major_symbol_registry_replay_adoption_verdict(
-        baseline_rows=baseline_rows, candidate_rows=candidate_rows,
+        baseline_rows=baseline_rows,
+        candidate_rows=candidate_rows,
     )
     assert adopted is False
     assert reason == "median_mdd_not_improved"
@@ -475,14 +622,18 @@ def test_classify_major_symbol_registry_gap_defaults_to_no_gap_for_non_matching_
     """E4: symbol/family mismatch → no_gap, no exception."""
     entries = (
         MajorSymbolRegistryCensusEntry(
-            symbol="BTCUSDT", family="dual_momentum",
-            registry_mean_incremental_bps=3.5, hard_eligible=True,
+            symbol="BTCUSDT",
+            family="dual_momentum",
+            registry_mean_incremental_bps=3.5,
+            hard_eligible=True,
             observed_active_in_holdout=True,
         ),
     )
     result = classify_major_symbol_registry_gap(
-        symbol="ETHUSDT", family="trend_ma",
-        registry_entries=entries, observed_sleeve_summaries=(),
+        symbol="ETHUSDT",
+        family="trend_ma",
+        registry_entries=entries,
+        observed_sleeve_summaries=(),
     )
     assert result == "admission_gap"
 
@@ -504,7 +655,7 @@ def _make_cfg(**overrides: object) -> MagicMock:
 
 def test_run_tiered_pipeline_master_tf_matches_registry_source() -> None:
     """S1: l2_tf resolved from per_tf_l1 matches the TF whose registry is propagated.
-    
+
     Invariant: deployment_registry in aggregated result comes from the same TF
     that _resolve_l2_master_tf selects as master.
     """
@@ -516,10 +667,14 @@ def test_run_tiered_pipeline_master_tf_matches_registry_source() -> None:
     l1_8h = Layer1Result(
         signals_per_fold=l1_4h.signals_per_fold,
         oos_stacked={"sym1": MagicMock(), "sym2": MagicMock(), "sym3": MagicMock()},
-        pooled_ic=l1_4h.pooled_ic, pooled_tstat=l1_4h.pooled_tstat,
-        breadth=l1_4h.breadth, valid_coverage=l1_4h.valid_coverage,
+        pooled_ic=l1_4h.pooled_ic,
+        pooled_tstat=l1_4h.pooled_tstat,
+        breadth=l1_4h.breadth,
+        valid_coverage=l1_4h.valid_coverage,
         fold_pass_ratio=l1_4h.fold_pass_ratio,
-        gate_passed=True, n_valid=l1_4h.n_valid, n_total=l1_4h.n_total,
+        gate_passed=True,
+        n_valid=l1_4h.n_valid,
+        n_total=l1_4h.n_total,
         deployment_registry=reg_8h,
     )
     per_tf_l1 = {
@@ -545,17 +700,29 @@ def test_master_tf_selected_even_when_finest_tf_gate_fails() -> None:
     reg_8h = make_registry("test:8h", symbol="BTCUSDT")
 
     l1_4h_none = Layer1Result(
-        signals_per_fold=(), oos_stacked={"s": MagicMock()},
-        pooled_ic=0.0, pooled_tstat=0.0, breadth=0.0,
-        valid_coverage=0.0, fold_pass_ratio=0.0,
-        gate_passed=False, n_valid=0, n_total=1,
+        signals_per_fold=(),
+        oos_stacked={"s": MagicMock()},
+        pooled_ic=0.0,
+        pooled_tstat=0.0,
+        breadth=0.0,
+        valid_coverage=0.0,
+        fold_pass_ratio=0.0,
+        gate_passed=False,
+        n_valid=0,
+        n_total=1,
         deployment_registry=None,
     )
     l1_8h = Layer1Result(
-        signals_per_fold=(), oos_stacked={"s1": MagicMock(), "s2": MagicMock()},
-        pooled_ic=0.05, pooled_tstat=2.0, breadth=0.8,
-        valid_coverage=0.9, fold_pass_ratio=0.75,
-        gate_passed=True, n_valid=1, n_total=1,
+        signals_per_fold=(),
+        oos_stacked={"s1": MagicMock(), "s2": MagicMock()},
+        pooled_ic=0.05,
+        pooled_tstat=2.0,
+        breadth=0.8,
+        valid_coverage=0.9,
+        fold_pass_ratio=0.75,
+        gate_passed=True,
+        n_valid=1,
+        n_total=1,
         deployment_registry=reg_8h,
     )
     per_tf_l1 = {
@@ -568,9 +735,7 @@ def test_master_tf_selected_even_when_finest_tf_gate_fails() -> None:
     assert l2_tf == "8h", "8h should win on n_winning_signals despite 4h gate failure"
 
     result = _aggregate_per_tf_l1(per_tf_l1, preferred_tf=l2_tf)
-    assert result.deployment_registry is reg_8h, (
-        "Registry should come from '8h' (master TF), not None from '4h'"
-    )
+    assert result.deployment_registry is reg_8h, "Registry should come from '8h' (master TF), not None from '4h'"
 
 
 def test_l1_result_override_path_unaffected() -> None:
@@ -587,8 +752,12 @@ def test_l1_result_override_path_unaffected() -> None:
 def test_divergence_diag_distinguishes_dead_vs_live_dissent() -> None:
     """S2: quality_weight=0 → dissent_present=1 but dissent_qw_sum=0.0 (log field)."""
     _dc: dict[str, float] = {
-        "dom": 1, "dissent_present": 1, "dissent_nonzero": 1, "armed": 0,
-        "dom_qw_sum": 2.5, "dissent_qw_sum": 0.0,
+        "dom": 1,
+        "dissent_present": 1,
+        "dissent_nonzero": 1,
+        "armed": 0,
+        "dom_qw_sum": 2.5,
+        "dissent_qw_sum": 0.0,
     }
     dom_qw_mean = _dc["dom_qw_sum"] / max(_dc["dom"], 1)
     dissent_qw_mean = _dc["dissent_qw_sum"] / max(_dc["dissent_present"], 1)
@@ -628,11 +797,21 @@ def test_format_major_symbol_registry_replay_table_smoke() -> None:
     """Smoke: format table does not raise."""
     results = (
         MajorSymbolRegistryReplayResult(
-            variant="baseline", seed=42, baseline_parity=True,
-            l2_cagr=0.15, l3_total_return=0.10, l3_cagr=0.12, l3_mdd=0.08,
-            l3_sharpe=0.9, l3_sortino=1.2, l3_trade_count=50,
-            btc_mu_bullish_pct=0.6, eth_mu_bullish_pct=0.5,
-            registry_census=(), adoption_passed=True, blocker_reason="",
+            variant="baseline",
+            seed=42,
+            baseline_parity=True,
+            l2_cagr=0.15,
+            l3_total_return=0.10,
+            l3_cagr=0.12,
+            l3_mdd=0.08,
+            l3_sharpe=0.9,
+            l3_sortino=1.2,
+            l3_trade_count=50,
+            btc_mu_bullish_pct=0.6,
+            eth_mu_bullish_pct=0.5,
+            registry_census=(),
+            adoption_passed=True,
+            blocker_reason="",
         ),
     )
     table = format_major_symbol_registry_replay_table(results)

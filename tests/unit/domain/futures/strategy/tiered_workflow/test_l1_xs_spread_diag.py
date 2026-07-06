@@ -31,30 +31,37 @@ def _make_cfg(**overrides: object) -> MagicMock:
 
 
 def _positive_factor_rows(
-    n_bars: int, family: str, variant: str, archetype: str = "xs_alpha",
+    n_bars: int,
+    family: str,
+    variant: str,
+    archetype: str = "xs_alpha",
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for b in range(n_bars):
-        rows.append({
-            "decision_idx": b,
-            "symbol": "A",
-            "family": family,
-            "variant": variant,
-            "archetype": archetype,
-            "side": 1,
-            "score_z": 1.0,
-            "realized_side_adjusted_gross_bps": 40.0,
-        })
-        rows.append({
-            "decision_idx": b,
-            "symbol": "B",
-            "family": family,
-            "variant": variant,
-            "archetype": archetype,
-            "side": -1,
-            "score_z": -1.0,
-            "realized_side_adjusted_gross_bps": 35.0,
-        })
+        rows.append(
+            {
+                "decision_idx": b,
+                "symbol": "A",
+                "family": family,
+                "variant": variant,
+                "archetype": archetype,
+                "side": 1,
+                "score_z": 1.0,
+                "realized_side_adjusted_gross_bps": 40.0,
+            }
+        )
+        rows.append(
+            {
+                "decision_idx": b,
+                "symbol": "B",
+                "family": family,
+                "variant": variant,
+                "archetype": archetype,
+                "side": -1,
+                "score_z": -1.0,
+                "realized_side_adjusted_gross_bps": 35.0,
+            }
+        )
     return rows
 
 
@@ -63,26 +70,30 @@ def _null_factor_rows(n_bars: int, family: str, variant: str, archetype: str = "
     rows: list[dict[str, object]] = []
     for b in range(n_bars):
         noise = float(rng.uniform(-50, 50))
-        rows.append({
-            "decision_idx": b,
-            "symbol": "A",
-            "family": family,
-            "variant": variant,
-            "archetype": archetype,
-            "side": 1,
-            "score_z": 0.5,
-            "realized_side_adjusted_gross_bps": noise,
-        })
-        rows.append({
-            "decision_idx": b,
-            "symbol": "B",
-            "family": family,
-            "variant": variant,
-            "archetype": archetype,
-            "side": -1,
-            "score_z": -0.5,
-            "realized_side_adjusted_gross_bps": -noise,
-        })
+        rows.append(
+            {
+                "decision_idx": b,
+                "symbol": "A",
+                "family": family,
+                "variant": variant,
+                "archetype": archetype,
+                "side": 1,
+                "score_z": 0.5,
+                "realized_side_adjusted_gross_bps": noise,
+            }
+        )
+        rows.append(
+            {
+                "decision_idx": b,
+                "symbol": "B",
+                "family": family,
+                "variant": variant,
+                "archetype": archetype,
+                "side": -1,
+                "score_z": -0.5,
+                "realized_side_adjusted_gross_bps": -noise,
+            }
+        )
     return rows
 
 
@@ -123,7 +134,10 @@ class TestXsSpreadDiagCompute:
         frame = _xs_frame(rows)
         cfg = _make_cfg()
         result = compute_xs_factor_spread_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=0,
         )
         assert result is not None
         pos = result.by_factor.get("xs_carry:xs_carry_96")
@@ -144,7 +158,10 @@ class TestXsSpreadDiagCompute:
         frame = _xs_frame(rows)
         cfg = _make_cfg(min_bars=8)
         result = compute_xs_factor_spread_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=0,
         )
         assert result is not None
         assert "xs_carry:xs_carry_96" in result.by_factor
@@ -156,29 +173,47 @@ class TestXsSpreadDiagCompute:
         frame = _xs_frame(rows)
         cfg = _make_cfg()
         result = compute_xs_factor_spread_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=0,
         )
         assert result is None
 
     def test_family_fallback_when_archetype_missing(self) -> None:
         rows: list[dict[str, object]] = []
         for b in range(12):
-            rows.append({
-                "decision_idx": b, "symbol": "A", "family": "xs_momentum",
-                "variant": "xs_momentum_48", "side": 1, "score_z": 1.0,
-                "realized_side_adjusted_gross_bps": 40.0,
-            })
-            rows.append({
-                "decision_idx": b, "symbol": "B", "family": "xs_momentum",
-                "variant": "xs_momentum_48", "side": -1, "score_z": -1.0,
-                "realized_side_adjusted_gross_bps": 35.0,
-            })
+            rows.append(
+                {
+                    "decision_idx": b,
+                    "symbol": "A",
+                    "family": "xs_momentum",
+                    "variant": "xs_momentum_48",
+                    "side": 1,
+                    "score_z": 1.0,
+                    "realized_side_adjusted_gross_bps": 40.0,
+                }
+            )
+            rows.append(
+                {
+                    "decision_idx": b,
+                    "symbol": "B",
+                    "family": "xs_momentum",
+                    "variant": "xs_momentum_48",
+                    "side": -1,
+                    "score_z": -1.0,
+                    "realized_side_adjusted_gross_bps": 35.0,
+                }
+            )
         frame = _xs_frame(rows)
         if "archetype" in frame.columns:
             frame = frame.drop(columns=["archetype"])
         cfg = _make_cfg()
         result = compute_xs_factor_spread_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=0,
         )
         assert result is not None
         assert len(result.by_factor) > 0
@@ -186,28 +221,49 @@ class TestXsSpreadDiagCompute:
     def test_rank_ic_positive_when_score_predicts_realized(self) -> None:
         rows: list[dict[str, object]] = []
         for b in range(12):
-            rows.append({
-                "decision_idx": b, "symbol": "A", "family": "xs_carry",
-                "variant": "xs_carry_96", "archetype": "xs_alpha",
-                "side": 1, "score_z": 2.0,
-                "realized_side_adjusted_gross_bps": 50.0,
-            })
-            rows.append({
-                "decision_idx": b, "symbol": "B", "family": "xs_carry",
-                "variant": "xs_carry_96", "archetype": "xs_alpha",
-                "side": -1, "score_z": -2.0,
-                "realized_side_adjusted_gross_bps": 30.0,
-            })
-            rows.append({
-                "decision_idx": b, "symbol": "C", "family": "xs_carry",
-                "variant": "xs_carry_96", "archetype": "xs_alpha",
-                "side": 1, "score_z": -0.5,
-                "realized_side_adjusted_gross_bps": 10.0,
-            })
+            rows.append(
+                {
+                    "decision_idx": b,
+                    "symbol": "A",
+                    "family": "xs_carry",
+                    "variant": "xs_carry_96",
+                    "archetype": "xs_alpha",
+                    "side": 1,
+                    "score_z": 2.0,
+                    "realized_side_adjusted_gross_bps": 50.0,
+                }
+            )
+            rows.append(
+                {
+                    "decision_idx": b,
+                    "symbol": "B",
+                    "family": "xs_carry",
+                    "variant": "xs_carry_96",
+                    "archetype": "xs_alpha",
+                    "side": -1,
+                    "score_z": -2.0,
+                    "realized_side_adjusted_gross_bps": 30.0,
+                }
+            )
+            rows.append(
+                {
+                    "decision_idx": b,
+                    "symbol": "C",
+                    "family": "xs_carry",
+                    "variant": "xs_carry_96",
+                    "archetype": "xs_alpha",
+                    "side": 1,
+                    "score_z": -0.5,
+                    "realized_side_adjusted_gross_bps": 10.0,
+                }
+            )
         frame = _xs_frame(rows)
         cfg = _make_cfg()
         result = compute_xs_factor_spread_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=0,
         )
         assert result is not None
         _, _, _, _, _, _, ic, ict, _, _ = result.by_factor["xs_carry:xs_carry_96"]
@@ -217,22 +273,37 @@ class TestXsSpreadDiagCompute:
     def test_constant_series_no_zero_division(self) -> None:
         rows: list[dict[str, object]] = []
         for b in range(12):
-            rows.append({
-                "decision_idx": b, "symbol": "A", "family": "xs_carry",
-                "variant": "xs_carry_96", "archetype": "xs_alpha",
-                "side": 1, "score_z": 1.0,
-                "realized_side_adjusted_gross_bps": 30.0,
-            })
-            rows.append({
-                "decision_idx": b, "symbol": "B", "family": "xs_carry",
-                "variant": "xs_carry_96", "archetype": "xs_alpha",
-                "side": -1, "score_z": -1.0,
-                "realized_side_adjusted_gross_bps": 30.0,
-            })
+            rows.append(
+                {
+                    "decision_idx": b,
+                    "symbol": "A",
+                    "family": "xs_carry",
+                    "variant": "xs_carry_96",
+                    "archetype": "xs_alpha",
+                    "side": 1,
+                    "score_z": 1.0,
+                    "realized_side_adjusted_gross_bps": 30.0,
+                }
+            )
+            rows.append(
+                {
+                    "decision_idx": b,
+                    "symbol": "B",
+                    "family": "xs_carry",
+                    "variant": "xs_carry_96",
+                    "archetype": "xs_alpha",
+                    "side": -1,
+                    "score_z": -1.0,
+                    "realized_side_adjusted_gross_bps": 30.0,
+                }
+            )
         frame = _xs_frame(rows)
         cfg = _make_cfg()
         result = compute_xs_factor_spread_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=0,
         )
         assert result is not None
         _, _, _, std, sharpe, _, _, _, _, _ = result.by_factor["xs_carry:xs_carry_96"]
@@ -244,10 +315,16 @@ class TestXsSpreadDiagCompute:
         frame = _xs_frame(rows)
         cfg = _make_cfg()
         r1 = compute_xs_factor_spread_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=123,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=123,
         )
         r2 = compute_xs_factor_spread_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=123,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=123,
         )
         assert r1 is not None
         assert r2 is not None

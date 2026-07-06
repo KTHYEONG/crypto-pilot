@@ -124,6 +124,7 @@ class ContextualDirectionalVetoState:
 @dataclass(slots=True)
 class IntraSymbolDivergenceState:
     """[ADR_20260705_L1_DIVERGENCE_DAMPENER] dominant/dissent sleeve 부호 분기 상태."""
+
     symbol: str
     state: Literal["idle", "watch", "armed", "cooldown"] = "idle"
     divergence_streak: int = 0
@@ -188,7 +189,8 @@ def _compute_contextual_directional_veto_signal(
         if not should_release and regime_code == 0:
             new_bull = state.bull_release_streak + 1
             new_state = ContextualDirectionalVetoState(
-                symbol=symbol, state="veto",
+                symbol=symbol,
+                state="veto",
                 adverse_long_streak=state.adverse_long_streak,
                 bull_release_streak=new_bull,
                 cooldown_left=state.cooldown_left,
@@ -200,7 +202,8 @@ def _compute_contextual_directional_veto_signal(
                 release_reason = "bull_regime_streak"
         elif not should_release:
             new_state = ContextualDirectionalVetoState(
-                symbol=symbol, state="veto",
+                symbol=symbol,
+                state="veto",
                 adverse_long_streak=state.adverse_long_streak,
                 bull_release_streak=state.bull_release_streak,
                 cooldown_left=state.cooldown_left,
@@ -209,9 +212,12 @@ def _compute_contextual_directional_veto_signal(
             )
         if should_release:
             new_state = ContextualDirectionalVetoState(
-                symbol=symbol, state="cooldown",
-                adverse_long_streak=0, bull_release_streak=0,
-                cooldown_left=cooldown_bars, entry_t=None,
+                symbol=symbol,
+                state="cooldown",
+                adverse_long_streak=0,
+                bull_release_streak=0,
+                cooldown_left=cooldown_bars,
+                entry_t=None,
                 last_action="none",
             )
             raw_mu_after = raw_mu
@@ -264,29 +270,45 @@ def _compute_contextual_directional_veto_signal(
     _entry_t = state.entry_t if state.entry_t is not None else config.l2_regime_directional_veto_loss_lookback_bars
     if new_streak >= persistence_bars and loss_triggered:
         new_state = ContextualDirectionalVetoState(
-            symbol=symbol, state="veto", adverse_long_streak=new_streak,
-            bull_release_streak=0, cooldown_left=0,
-            entry_t=_entry_t, last_action="drop_long",
+            symbol=symbol,
+            state="veto",
+            adverse_long_streak=new_streak,
+            bull_release_streak=0,
+            cooldown_left=0,
+            entry_t=_entry_t,
+            last_action="drop_long",
         )
         fired = True
         raw_mu_after = 0.0
     elif new_streak >= persistence_bars:
         new_state = ContextualDirectionalVetoState(
-            symbol=symbol, state="armed", adverse_long_streak=new_streak,
-            bull_release_streak=0, cooldown_left=0,
-            entry_t=_entry_t, last_action="none",
+            symbol=symbol,
+            state="armed",
+            adverse_long_streak=new_streak,
+            bull_release_streak=0,
+            cooldown_left=0,
+            entry_t=_entry_t,
+            last_action="none",
         )
     elif new_streak > 1:
         new_state = ContextualDirectionalVetoState(
-            symbol=symbol, state="watch", adverse_long_streak=new_streak,
-            bull_release_streak=0, cooldown_left=0,
-            entry_t=_entry_t, last_action="none",
+            symbol=symbol,
+            state="watch",
+            adverse_long_streak=new_streak,
+            bull_release_streak=0,
+            cooldown_left=0,
+            entry_t=_entry_t,
+            last_action="none",
         )
     else:
         new_state = ContextualDirectionalVetoState(
-            symbol=symbol, state="watch", adverse_long_streak=1,
-            bull_release_streak=0, cooldown_left=0,
-            entry_t=_entry_t, last_action="none",
+            symbol=symbol,
+            state="watch",
+            adverse_long_streak=1,
+            bull_release_streak=0,
+            cooldown_left=0,
+            entry_t=_entry_t,
+            last_action="none",
         )
 
     state_after = new_state.state
@@ -319,7 +341,8 @@ def _compute_intra_symbol_divergence_signal(
     if state.state == "cooldown":
         if state.cooldown_left > 0:
             new = IntraSymbolDivergenceState(
-                symbol=symbol, state="cooldown",
+                symbol=symbol,
+                state="cooldown",
                 cooldown_left=state.cooldown_left - 1,
             )
         else:
@@ -331,18 +354,21 @@ def _compute_intra_symbol_divergence_signal(
             new_release = state.release_streak + 1
             if new_release >= _release:
                 new = IntraSymbolDivergenceState(
-                    symbol=symbol, state="cooldown",
+                    symbol=symbol,
+                    state="cooldown",
                     cooldown_left=_cooldown,
                 )
                 return (new, False, state_before, new.state)
             new = IntraSymbolDivergenceState(
-                symbol=symbol, state="armed",
+                symbol=symbol,
+                state="armed",
                 divergence_streak=state.divergence_streak,
                 release_streak=new_release,
             )
             return (new, True, state_before, new.state)
         new = IntraSymbolDivergenceState(
-            symbol=symbol, state="armed",
+            symbol=symbol,
+            state="armed",
             divergence_streak=state.divergence_streak + 1,
         )
         return (new, True, state_before, new.state)
@@ -354,19 +380,22 @@ def _compute_intra_symbol_divergence_signal(
     new_streak = state.divergence_streak + 1
     if new_streak >= _persist:
         new = IntraSymbolDivergenceState(
-            symbol=symbol, state="armed",
+            symbol=symbol,
+            state="armed",
             divergence_streak=new_streak,
         )
         return (new, True, state_before, new.state)
 
     if new_streak > 1:
         new = IntraSymbolDivergenceState(
-            symbol=symbol, state="watch",
+            symbol=symbol,
+            state="watch",
             divergence_streak=new_streak,
         )
     else:
         new = IntraSymbolDivergenceState(
-            symbol=symbol, state="watch",
+            symbol=symbol,
+            state="watch",
             divergence_streak=1,
         )
     return (new, False, state_before, new.state)
@@ -578,12 +607,8 @@ def compute_mean_trend_efficiency(
     total_bars = sum(max(a.oos_bars, 0) for a in fold_attributions)
     if total_bars <= 0:
         return 0.0, 0.0
-    mean_er = sum(
-        a.mean_trend_efficiency * max(a.oos_bars, 0) for a in fold_attributions
-    ) / total_bars
-    mean_corr = sum(
-        a.trend_efficiency_corr * max(a.oos_bars, 0) for a in fold_attributions
-    ) / total_bars
+    mean_er = sum(a.mean_trend_efficiency * max(a.oos_bars, 0) for a in fold_attributions) / total_bars
+    mean_corr = sum(a.trend_efficiency_corr * max(a.oos_bars, 0) for a in fold_attributions) / total_bars
     return float(mean_er), float(mean_corr)
 
 
@@ -611,6 +636,7 @@ def compute_long_short_price_by_symbol(
         for sym, val in a.realized_price_short_by_symbol:
             short_totals[sym] = short_totals.get(sym, 0.0) + val
     return (tuple(long_totals.items()), tuple(short_totals.items()))
+
 
 def summarize_major_symbol_signal_sizing(
     fold_attributions: tuple[Layer2FoldAttribution, ...],
@@ -643,12 +669,17 @@ def summarize_major_symbol_signal_sizing(
         regime_cap_engaged_pct = float(np.mean(long_mask & (mult_arr < 1.0)))
         mean_mult_when_long = float(mult_arr[long_mask].mean()) if n_long > 0 else 0.0
 
-        results.append(MajorSymbolSignalSizingSummary(
-            symbol=symbol, n_obs=n_obs,
-            mu_bullish_pct=mu_bullish_pct, weight_long_pct=weight_long_pct,
-            stale_long_pct=stale_long_pct, regime_cap_engaged_pct=regime_cap_engaged_pct,
-            mean_regime_risk_mult_when_long=mean_mult_when_long,
-        ))
+        results.append(
+            MajorSymbolSignalSizingSummary(
+                symbol=symbol,
+                n_obs=n_obs,
+                mu_bullish_pct=mu_bullish_pct,
+                weight_long_pct=weight_long_pct,
+                stale_long_pct=stale_long_pct,
+                regime_cap_engaged_pct=regime_cap_engaged_pct,
+                mean_regime_risk_mult_when_long=mean_mult_when_long,
+            )
+        )
 
     order = {s: i for i, s in enumerate(MAJOR_DIAG_SYMBOLS)}
     results.sort(key=lambda r: order.get(r.symbol, len(order)))
@@ -705,15 +736,17 @@ def summarize_major_symbol_sleeve_contribution(
             float(adverse_sign_mismatch.sum() / n_adverse_valid) if n_adverse_valid > 0 else 0.0
         )
 
-        results.append(MajorSymbolSleeveContributionSummary(
-            symbol=symbol,
-            family=family,
-            n_obs=n_obs,
-            mean_raw_mu_sleeve=mean_raw_mu_sleeve,
-            mean_quality_weight_sleeve=mean_quality_weight_sleeve,
-            sign_mismatch_pct=sign_mismatch_pct,
-            regime_adverse_sign_mismatch_pct=regime_adverse_sign_mismatch_pct,
-        ))
+        results.append(
+            MajorSymbolSleeveContributionSummary(
+                symbol=symbol,
+                family=family,
+                n_obs=n_obs,
+                mean_raw_mu_sleeve=mean_raw_mu_sleeve,
+                mean_quality_weight_sleeve=mean_quality_weight_sleeve,
+                sign_mismatch_pct=sign_mismatch_pct,
+                regime_adverse_sign_mismatch_pct=regime_adverse_sign_mismatch_pct,
+            )
+        )
 
     return tuple(results)
 
@@ -721,6 +754,7 @@ def summarize_major_symbol_sleeve_contribution(
 @dataclass(slots=True, frozen=True)
 class MajorSymbolRegistryCensusEntry:
     """[ADR_20260705_L1_DIVERGENCE_DAMPENER] L1 registry 전체 census vs holdout 관측 대조."""
+
     symbol: str
     family: str
     registry_mean_incremental_bps: float
@@ -738,6 +772,7 @@ def compute_major_symbol_registry_census(
     registry.by_symbol[symbol]의 family 전체를 observed_sleeve_summaries(Phase 0 holdout 관측)와 대조.
     """
     from src.domain.futures.strategy.candidate_contracts import QualifiedSignalRegistry
+
     if not isinstance(registry, QualifiedSignalRegistry):
         return ()
     by_symbol = registry.by_symbol
@@ -763,12 +798,15 @@ def compute_major_symbol_registry_census(
             mean_bps = float(getattr(ev, "mean_incremental_bps", 0.0))
             hard_eligible = bool(getattr(ev, "hard_eligible", False))
             is_observed = (sym, fam) in observed
-            results.append(MajorSymbolRegistryCensusEntry(
-                symbol=sym, family=fam,
-                registry_mean_incremental_bps=mean_bps,
-                hard_eligible=hard_eligible,
-                observed_active_in_holdout=is_observed,
-            ))
+            results.append(
+                MajorSymbolRegistryCensusEntry(
+                    symbol=sym,
+                    family=fam,
+                    registry_mean_incremental_bps=mean_bps,
+                    hard_eligible=hard_eligible,
+                    observed_active_in_holdout=is_observed,
+                )
+            )
     return tuple(results)
 
 
@@ -834,29 +872,21 @@ def summarize_major_symbol_regime_incoherence(
     for symbol, c in accum.items():
         n_transitions = int(c["n_censored"]) + int(c["n_lag_obs"])
         regime_adverse_mu_bullish_pct = (
-            int(c["adverse_bull_count"]) / int(c["adverse_bar_count"])
-            if int(c["adverse_bar_count"]) > 0
-            else 0.0
+            int(c["adverse_bull_count"]) / int(c["adverse_bar_count"]) if int(c["adverse_bar_count"]) > 0 else 0.0
         )
-        mean_reversal_lag_bars = (
-            float(c["lag_sum"]) / int(c["n_lag_obs"])
-            if int(c["n_lag_obs"]) > 0
-            else float("nan")
-        )
-        censored_pct = (
-            int(c["n_censored"]) / n_transitions
-            if n_transitions > 0
-            else 0.0
-        )
+        mean_reversal_lag_bars = float(c["lag_sum"]) / int(c["n_lag_obs"]) if int(c["n_lag_obs"]) > 0 else float("nan")
+        censored_pct = int(c["n_censored"]) / n_transitions if n_transitions > 0 else 0.0
 
-        results.append(MajorSymbolIncoherenceSummary(
-            symbol=symbol,
-            n_obs=int(c["n_obs"]),
-            regime_adverse_mu_bullish_pct=regime_adverse_mu_bullish_pct,
-            n_transitions=n_transitions,
-            mean_reversal_lag_bars=mean_reversal_lag_bars,
-            censored_pct=censored_pct,
-        ))
+        results.append(
+            MajorSymbolIncoherenceSummary(
+                symbol=symbol,
+                n_obs=int(c["n_obs"]),
+                regime_adverse_mu_bullish_pct=regime_adverse_mu_bullish_pct,
+                n_transitions=n_transitions,
+                mean_reversal_lag_bars=mean_reversal_lag_bars,
+                censored_pct=censored_pct,
+            )
+        )
 
     order = {s: i for i, s in enumerate(MAJOR_DIAG_SYMBOLS)}
     results.sort(key=lambda r: order.get(r.symbol, len(order)))
@@ -884,41 +914,33 @@ def summarize_directional_veto(
         n_fired = sum(1 for s in snaps if s.fired)
         fire_rate = n_fired / max(n_obs, 1)
         adverse_fire_rate = n_fired / max(n_adverse, 1)
-        false_positive_count = sum(
-            1 for s in snaps if s.fired and s.counterfactual_long_return >= 0.0
-        )
+        false_positive_count = sum(1 for s in snaps if s.fired and s.counterfactual_long_return >= 0.0)
         false_positive_rate = false_positive_count / max(n_fired, 1)
-        opportunity_cost = sum(
-            max(s.counterfactual_long_return, 0.0) for s in snaps if s.fired
-        )
-        avoided_loss = sum(
-            max(-s.counterfactual_long_return, 0.0) for s in snaps if s.fired
-        )
+        opportunity_cost = sum(max(s.counterfactual_long_return, 0.0) for s in snaps if s.fired)
+        avoided_loss = sum(max(-s.counterfactual_long_return, 0.0) for s in snaps if s.fired)
         net_veto_value = avoided_loss - opportunity_cost
-        n_watch = sum(
-            1 for s in snaps if s.state_after in {"watch", "armed", "veto"}
-        )
-        trigger_losses = [
-            s.rolling_symbol_return for s in snaps if s.fired
-        ]
+        n_watch = sum(1 for s in snaps if s.state_after in {"watch", "armed", "veto"})
+        trigger_losses = [s.rolling_symbol_return for s in snaps if s.fired]
         mean_trigger_loss = float(np.mean(trigger_losses)) if trigger_losses else 0.0
         mean_episode_bars = _compute_mean_episode_bars(snaps)
-        results.append(DirectionalVetoSummary(
-            symbol=symbol,
-            n_obs=n_obs,
-            n_missing=n_missing,
-            n_adverse=n_adverse,
-            n_fired=n_fired,
-            fire_rate=fire_rate,
-            adverse_fire_rate=adverse_fire_rate,
-            false_positive_rate=false_positive_rate,
-            opportunity_cost=opportunity_cost,
-            avoided_loss=avoided_loss,
-            net_veto_value=net_veto_value,
-            n_watch=n_watch,
-            mean_trigger_loss=mean_trigger_loss,
-            mean_episode_bars=mean_episode_bars,
-        ))
+        results.append(
+            DirectionalVetoSummary(
+                symbol=symbol,
+                n_obs=n_obs,
+                n_missing=n_missing,
+                n_adverse=n_adverse,
+                n_fired=n_fired,
+                fire_rate=fire_rate,
+                adverse_fire_rate=adverse_fire_rate,
+                false_positive_rate=false_positive_rate,
+                opportunity_cost=opportunity_cost,
+                avoided_loss=avoided_loss,
+                net_veto_value=net_veto_value,
+                n_watch=n_watch,
+                mean_trigger_loss=mean_trigger_loss,
+                mean_episode_bars=mean_episode_bars,
+            )
+        )
     return tuple(results)
 
 
@@ -996,11 +1018,7 @@ def _assemble_fold_attribution(
         rps = np.array([r for _, r in er_return_pairs])
         low_er_mask = ers < target
         realized_price_low_er = float(rps[low_er_mask].sum()) if low_er_mask.any() else 0.0
-        if (
-            ers.size > 1
-            and float(np.std(ers, ddof=0)) > 1e-12
-            and float(np.std(rps, ddof=0)) > 1e-12
-        ):
+        if ers.size > 1 and float(np.std(ers, ddof=0)) > 1e-12 and float(np.std(rps, ddof=0)) > 1e-12:
             trend_efficiency_corr = float(np.corrcoef(ers, rps)[0, 1])
         else:
             trend_efficiency_corr = 0.0
@@ -1012,17 +1030,13 @@ def _assemble_fold_attribution(
 
     if price_long_by_sym is not None and symbols:
         realized_price_long_by_symbol = tuple(
-            (sym, float(v))
-            for sym, v in zip(symbols, price_long_by_sym, strict=True)
-            if abs(float(v)) > 1e-12
+            (sym, float(v)) for sym, v in zip(symbols, price_long_by_sym, strict=True) if abs(float(v)) > 1e-12
         )
     else:
         realized_price_long_by_symbol = ()
     if price_short_by_sym is not None and symbols:
         realized_price_short_by_symbol = tuple(
-            (sym, float(v))
-            for sym, v in zip(symbols, price_short_by_sym, strict=True)
-            if abs(float(v)) > 1e-12
+            (sym, float(v)) for sym, v in zip(symbols, price_short_by_sym, strict=True) if abs(float(v)) > 1e-12
         )
     else:
         realized_price_short_by_symbol = ()
@@ -1117,12 +1131,12 @@ class _AwfSimResult:
     cap_saturation_count: int
     rebalance_count: int
     trade_count: int
-    fold_rets_hybrid: list[list[float]]    # fold별 strategy returns
+    fold_rets_hybrid: list[list[float]]  # fold별 strategy returns
     fold_rets_baseline: list[list[float]]  # fold별 baseline returns
     fold_selected_symbols: tuple[tuple[str, ...], ...]
     block_rets_hybrid: tuple[tuple[float, ...], ...]
     block_rets_baseline: tuple[tuple[float, ...], ...]
-    rets_baseline_ew: list[float]          # 순수 1/N EW baseline (uplift 측정 전용)
+    rets_baseline_ew: list[float]  # 순수 1/N EW baseline (uplift 측정 전용)
     fit_rets_hybrid: tuple[float, ...] = ()  # D3: fit-leg 수익률 (look-ahead-free L* calibration용)
     fold_attributions: tuple[Layer2FoldAttribution, ...] = ()
     policy_effect_by_fold: tuple[RegimePolicyEffectSummary, ...] = ()
@@ -1256,12 +1270,7 @@ def _apply_risk_budget_floor(
     sigma_port_bar = float(np.sqrt(float(np.dot(w**2, sig**2))))
     ann_vol = _estimate_annual_vol(w, sig, bars_per_year)
     floor_ann_vol = float(vol_target) * float(floor_ratio)
-    if (
-        not np.isfinite(ann_vol)
-        or not np.isfinite(floor_ann_vol)
-        or ann_vol <= 1e-12
-        or ann_vol >= floor_ann_vol
-    ):
+    if not np.isfinite(ann_vol) or not np.isfinite(floor_ann_vol) or ann_vol <= 1e-12 or ann_vol >= floor_ann_vol:
         return w
 
     scale = min(floor_ann_vol / ann_vol, float(max_scale))
@@ -1301,13 +1310,7 @@ def _resolve_adaptive_k_rank(
 ) -> int:
     """Expand breadth when the prior book used too little of the risk budget."""
     bounded_base = max(0, min(int(base_k), int(n_valid)))
-    if (
-        bounded_base <= 0
-        or n_valid <= 0
-        or vol_target is None
-        or expand_below_vol_ratio <= 0.0
-        or max_extra <= 0
-    ):
+    if bounded_base <= 0 or n_valid <= 0 or vol_target is None or expand_below_vol_ratio <= 0.0 or max_extra <= 0:
         return bounded_base
     prev_ann_vol = _estimate_annual_vol(prev_weights, sigma, bars_per_year)
     trigger_vol = float(vol_target) * float(expand_below_vol_ratio)
@@ -1540,9 +1543,7 @@ def build_directional_equal_weight_baseline(
     w = direction / float(n_support)
 
     sigma_arr = np.maximum(np.asarray(sigma, dtype=np.float64), VOL_FLOOR)
-    sigma_port = float(
-        np.sqrt(np.dot(np.clip(w, -caps.per_symbol, caps.per_symbol) ** 2, sigma_arr**2))
-    )
+    sigma_port = float(np.sqrt(np.dot(np.clip(w, -caps.per_symbol, caps.per_symbol) ** 2, sigma_arr**2)))
     return project_all_caps(
         w,
         np.asarray(btc_beta, dtype=np.float64),
@@ -1648,14 +1649,14 @@ def _scatter_signals_jit(
         end = min(t_max, start + holding_bars_arr[e])
         if start >= end:
             continue
-        
+
         g_val = gross_vals[e]
         n_val = net_vals[e]
         h_bars = float(holding_bars_arr[e])
         s_val = side_vals[e]
         q_val = qw_vals[e]
         str_val = strengths[e]
-        
+
         for t in range(start, end):
             if not signal_mask_2d[t, sleeve_j]:
                 signal_mask_2d[t, sleeve_j] = True
@@ -1734,6 +1735,7 @@ def build_l2_simulation_cache(
     Space Complexity: O(T·(S+N)) where N=n_sym.
     """
     import logging as _logging
+
     _log = _logging.getLogger(__name__)
 
     lookback = composer_sigma_lookback_bars(tf)
@@ -1782,14 +1784,21 @@ def build_l2_simulation_cache(
     n_sleeve = len(sleeve_ids_sorted)
     sleeve_to_idx: dict[tuple[str, str], int] = {sid: j for j, sid in enumerate(sleeve_ids_sorted)}
     # sleeve_to_sym[j] = symbol col idx (underlying symbol의 vol/beta 참조용)
-    sleeve_to_sym_arr: NDArray[np.int64] = np.array(
-        [sym_to_idx[sid[0]] for sid in sleeve_ids_sorted],
-        dtype=np.int64,
-    ) if n_sleeve > 0 else np.empty(0, dtype=np.int64)
+    sleeve_to_sym_arr: NDArray[np.int64] = (
+        np.array(
+            [sym_to_idx[sid[0]] for sid in sleeve_ids_sorted],
+            dtype=np.int64,
+        )
+        if n_sleeve > 0
+        else np.empty(0, dtype=np.int64)
+    )
 
     _log.debug(
         "[BUILD-CACHE] n_sym=%d n_sleeve=%d n_events=%d tf=%s",
-        n_sym, n_sleeve, len(signal_batch.events), tf,
+        n_sym,
+        n_sleeve,
+        len(signal_batch.events),
+        tf,
     )
 
     if n_sleeve == 0:
@@ -1832,7 +1841,7 @@ def build_l2_simulation_cache(
     side_vals = []
     qw_vals = []
     strengths = []
-    
+
     for event in signal_batch.events:
         sleeve_key = (event.symbol, event.strategy_id)
         sleeve_j = sleeve_to_idx.get(sleeve_key)
@@ -1882,14 +1891,21 @@ def build_l2_simulation_cache(
         for _tfk in sorted(_tf_agg):
             _b = _tf_agg[_tfk]
             _n = len(_b["hold"])
+
             def _mean(xs: list[float]) -> float:
                 return float(sum(xs) / len(xs)) if xs else 0.0
+
             _log.debug(
                 "[L2-TFDIAG] tf=%s n_events=%d mean_hold_bars=%.2f mean_gross_bps=%.1f "
                 "mean_net_bps=%.1f mean_per_bar_net=%.2f didx_min=%.0f didx_max=%.0f",
-                _tfk, _n, _mean(_b["hold"]), _mean(_b["gross"]), _mean(_b["net"]),
+                _tfk,
+                _n,
+                _mean(_b["hold"]),
+                _mean(_b["gross"]),
+                _mean(_b["net"]),
                 _mean(_b["net"]) / max(_mean(_b["hold"]), 1.0),
-                min(_b["didx"]), max(_b["didx"]),
+                min(_b["didx"]),
+                max(_b["didx"]),
             )
 
     return L2SimulationCache(
@@ -1908,6 +1924,7 @@ def build_l2_simulation_cache(
         sleeve_ids=sleeve_ids_sorted,
         sleeve_to_tf=tuple(_parse_tf_from_strategy_id(sid[1]) for sid in sleeve_ids_sorted),
     )
+
 
 def _parse_tf_from_strategy_id(strategy_id: str) -> str:
     """strategy_id 접미사에서 TF 문자열을 추출한다.
@@ -2314,12 +2331,22 @@ def _content_hash_dataclass(
     return hashlib.md5(combined, usedforsecurity=False).hexdigest()[:10]
 
 
-_CACHE_ARRAY_FIELDS: frozenset[str] = frozenset({
-    "vol_matrix_2d", "tradeable_mask_2d", "hurdle_2d", "funding_2d",
-    "beta_1d", "expected_gross_bps_2d", "expected_net_bps_2d",
-    "holding_bars_2d", "side_2d", "quality_weight_2d", "signal_mask_2d",
-    "regime_code_1d",
-})
+_CACHE_ARRAY_FIELDS: frozenset[str] = frozenset(
+    {
+        "vol_matrix_2d",
+        "tradeable_mask_2d",
+        "hurdle_2d",
+        "funding_2d",
+        "beta_1d",
+        "expected_gross_bps_2d",
+        "expected_net_bps_2d",
+        "holding_bars_2d",
+        "side_2d",
+        "quality_weight_2d",
+        "signal_mask_2d",
+        "regime_code_1d",
+    }
+)
 
 
 def _content_hash_cache(cache: object) -> str:
@@ -2430,13 +2457,13 @@ def _run_awf_simulation(
     """AWF 시뮬레이션 핵심 루프 (L2/L3 공용)."""
     import logging
     import time
+
     logger = logging.getLogger("src.domain.futures.strategy.tiered_workflow")
     # L2 mutual exclusion guard: regime-conditional weight vs intra-symbol divergence
     _l2_regime_weight = bool(getattr(config, "l2_regime_conditional_weight_enabled", False))
     _l2_intra_divergence = bool(getattr(config, "l2_intra_symbol_divergence_enabled", False))
     assert not (_l2_regime_weight and _l2_intra_divergence), (
-        "l2_regime_conditional_weight_enabled and l2_intra_symbol_divergence_enabled "
-        "are mutually exclusive"
+        "l2_regime_conditional_weight_enabled and l2_intra_symbol_divergence_enabled are mutually exclusive"
     )
     t_start_total = time.perf_counter()
     prof_prep = 0.0
@@ -2471,9 +2498,7 @@ def _run_awf_simulation(
     risk_budget_max_scale = float(getattr(config, "risk_budget_max_scale", 3.0))
     adaptive_breadth_enabled = bool(getattr(config, "adaptive_breadth_enabled", False))
     adaptive_k_extra = int(getattr(config, "adaptive_k_extra", 0))
-    adaptive_expand_below_vol_ratio = float(
-        getattr(config, "adaptive_expand_below_vol_ratio", 0.0)
-    )
+    adaptive_expand_below_vol_ratio = float(getattr(config, "adaptive_expand_below_vol_ratio", 0.0))
 
     if _diag and logger.isEnabledFor(logging.DEBUG):
         logger.debug(
@@ -2482,11 +2507,18 @@ def _run_awf_simulation(
             "edge_throttle_enabled=%s edge_floor_bps=%.2f edge_ref_bps=%.2f "
             "edge_throttle_gamma=%.3f risk_budget_floor_ratio=%.3f "
             "risk_budget_max_scale=%.3f l2_sleeve_combine_method=%s",
-            config.k_rank, config.rebalance_bars, config.kelly_fraction,
-            config.fixed_cost_safety_mult, config.deploy_cost_safety_mult,
-            config.edge_throttle_enabled, config.edge_floor_bps, config.edge_ref_bps,
-            config.edge_throttle_gamma, config.risk_budget_floor_ratio,
-            config.risk_budget_max_scale, config.l2_sleeve_combine_method,
+            config.k_rank,
+            config.rebalance_bars,
+            config.kelly_fraction,
+            config.fixed_cost_safety_mult,
+            config.deploy_cost_safety_mult,
+            config.edge_throttle_enabled,
+            config.edge_floor_bps,
+            config.edge_ref_bps,
+            config.edge_throttle_gamma,
+            config.risk_budget_floor_ratio,
+            config.risk_budget_max_scale,
+            config.l2_sleeve_combine_method,
         )
 
     symbols = aligned.symbols
@@ -2521,12 +2553,23 @@ def _run_awf_simulation(
     fold_rets_baseline: list[list[float]] = []
     fold_selected_symbols: list[tuple[str, ...]] = []
 
-    _trend_arch_families = frozenset({
-        "trend_ma", "trend_donchian", "vol_breakout", "trend_pullback_continuation",
-        "mtf_trend_pullback", "mtf_breakout_retest", "vol_term_structure_gate",
-        "macd_4h", "supertrend", "ichimoku_trend",
-        "dual_momentum", "taker_imbalance_momentum", "flow_trend_continuation",
-    })
+    _trend_arch_families = frozenset(
+        {
+            "trend_ma",
+            "trend_donchian",
+            "vol_breakout",
+            "trend_pullback_continuation",
+            "mtf_trend_pullback",
+            "mtf_breakout_retest",
+            "vol_term_structure_gate",
+            "macd_4h",
+            "supertrend",
+            "ichimoku_trend",
+            "dual_momentum",
+            "taker_imbalance_momentum",
+            "flow_trend_continuation",
+        }
+    )
 
     # L2_POSITIONING_CROWDING_GATE: per-symbol crowding dampener (pre-compute for OOS+fit-leg)
     _crowding_gate_enabled = os.environ.get("L2_POSITIONING_CROWDING_GATE", "") not in ("", "0", "false", "False")
@@ -2539,6 +2582,7 @@ def _run_awf_simulation(
                 compute_positioning_crowding_z_2d,
             )
             from src.domain.futures.strategy.timeframe_contracts import scale_bar_count
+
             _oi_z_2d, _lsr_z_2d = compute_positioning_crowding_z_2d(aligned, tf=tf)
             # NOTE: trend_sign must share aligned.close_2d's SYMBOL dimension (N), not
             # cache.side_2d's SLEEVE dimension (symbol x strategy_id, generally > N) —
@@ -2551,7 +2595,9 @@ def _run_awf_simulation(
             _trend_sign_2d = np.sign(aligned.close_2d / np.maximum(_mom_ref, 1e-12) - 1.0)
             _trend_sign_2d[:_mom_lookback] = 0.0
             _crowding_mask_2d = compute_crowding_persistent_mask_2d(
-                _oi_z_2d, _lsr_z_2d, _trend_sign_2d,
+                _oi_z_2d,
+                _lsr_z_2d,
+                _trend_sign_2d,
                 persistence_bars=getattr(config, "l2_crowding_persistence_bars", 3),
                 recovery_cooldown_bars=getattr(config, "l2_crowding_recovery_cooldown_bars", 3),
             )
@@ -2574,7 +2620,6 @@ def _run_awf_simulation(
     prev_w_baseline_ew: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
     last_selected: frozenset[str] = frozenset()
     last_w: NDArray[np.float64] = np.zeros(n_sym, dtype=np.float64)
-
 
     # C1: fit-leg book 수익률 수집 (RC-2 수정).
     # OOS 루프와 동일한 allocation 체인(rank→diagonal_kelly→throttle→vol_target)을 fit 구간에 적용.
@@ -2599,7 +2644,7 @@ def _run_awf_simulation(
             _fit_hurdle = cache.hurdle_2d[_ft]
             _fit_beta_arr = cache.beta_1d
             _fit_btc_beta = _fit_beta_arr  # Use directly
-            
+
             # Sleeve 기반 signal 읽기 — [S] mask에서 [N] tradeable 참조
             _sleeve_signals, _, _ = _resolve_sleeve_signals_at_bar(
                 cache=cache,
@@ -2613,6 +2658,7 @@ def _run_awf_simulation(
             # L2_POSITIONING_CROWDING_GATE: fit-leg dampening
             if _crowding_gate_enabled and _crowding_mask_2d is not None and _ft > 0:
                 from src.domain.futures.strategy.tiered_workflow.l2_meta import _parse_meta_group_ids as _parse_fit
+
                 _fit_modified: dict[tuple[str, str], SymbolSignal] = {}
                 for _fit_sk, _fit_ss in _sleeve_signals.items():
                     _fit_fam, _fit_tf = _parse_fit(_fit_sk[1])
@@ -2668,7 +2714,7 @@ def _run_awf_simulation(
             _fit_support_mask = _fit_mu_arr != 0.0
             if config.l2_portfolio_cov_mode == "correlated":
                 _fit_lb = config.l2_portfolio_cov_lookback_bars
-                _fit_price_window = aligned.close_2d[max(0, _ft - _fit_lb): _ft + 1]
+                _fit_price_window = aligned.close_2d[max(0, _ft - _fit_lb) : _ft + 1]
                 _fit_returns_hist = np.diff(np.log(np.maximum(_fit_price_window, 1e-12)), axis=0)
             else:
                 _fit_returns_hist = None
@@ -2706,7 +2752,7 @@ def _run_awf_simulation(
                 _fit_cap_row = np.nan_to_num(_fit_adv[_ft], nan=0.0, posinf=0.0, neginf=0.0)
                 _intended = np.abs(_fit_w) * _portfolio_nav
                 _fit_w[_intended < _min_order_usdt] = 0.0
-                
+
                 _cap_positive = _fit_cap_row > 0.0
                 if np.any(_cap_positive):
                     _max_w = np.where(_cap_positive, _fit_cap_row / max(_portfolio_nav, 1.0), np.inf)
@@ -2747,6 +2793,7 @@ def _run_awf_simulation(
 
     # per-fold fit-leg diagnostics (vol-targeting 무결성 확인)
     from src.domain.futures.strategy.tiered_workflow.metrics import _cagr, _mdd
+
     for _f_idx, _ffit in enumerate(_per_fold_fit_rets):
         if len(_ffit) < 2:
             continue
@@ -2757,9 +2804,13 @@ def _run_awf_simulation(
         _fstd = max(float(np.std(_farr, ddof=1)), 1e-12)
         _fsharpe = float(np.mean(_farr) / _fstd) * float(np.sqrt(max(bars_per_year, 1e-12)))
         logger.debug(
-            "[L2-FIT-DIAG] fold=%d fit_bars=%d fit_CAGR=%.4f fit_MDD=%.4f "
-            "fit_ann_vol=%.4f fit_sharpe=%.4f",
-            _f_idx, len(_ffit), _fcagr, _fmdd, _fann_vol, _fsharpe,
+            "[L2-FIT-DIAG] fold=%d fit_bars=%d fit_CAGR=%.4f fit_MDD=%.4f fit_ann_vol=%.4f fit_sharpe=%.4f",
+            _f_idx,
+            len(_ffit),
+            _fcagr,
+            _fmdd,
+            _fann_vol,
+            _fsharpe,
         )
 
     # C4: per-TF fit-leg edge → included_tfs (TF 게이트)
@@ -2778,13 +2829,16 @@ def _run_awf_simulation(
             if not _included:
                 logger.debug(
                     "[L2-TFGATE] fold=%d included_tfs=∅ edges=%s → fallback: ALL TFs",
-                    _f_idx, _per_tf_edge,
+                    _f_idx,
+                    _per_tf_edge,
                 )
                 _included = set(cache.sleeve_to_tf) - {"unk"}
             included_tfs_by_fold.append(_included)
             logger.debug(
                 "[L2-TFGATE] fold=%d included=%s edges=%s",
-                _f_idx, sorted(_included), _per_tf_edge,
+                _f_idx,
+                sorted(_included),
+                _per_tf_edge,
             )
         else:
             included_tfs_by_fold.append(set(cache.sleeve_to_tf) - {"unk"})
@@ -2805,12 +2859,14 @@ def _run_awf_simulation(
 
     if _l2_routing_mode == "bucket":
         from src.domain.futures.strategy.market_regime import compute_market_regime_context
+
         if cache.regime_code_1d is not None:
             _regime_code_1d = cache.regime_code_1d
         else:
             _regime_code_1d = compute_market_regime_context(aligned=aligned).code_1d
             if getattr(config, "l2_regime_compression_enabled", True):
                 from src.domain.futures.strategy.market_regime import compress_regime_codes
+
                 _regime_code_1d = compress_regime_codes(_regime_code_1d)
 
         if cache.bucket_edges_by_fold:
@@ -2822,6 +2878,7 @@ def _run_awf_simulation(
             from src.domain.futures.strategy.tiered_workflow.l2_meta import (
                 compute_bucket_realized_edges,
             )
+
             for _f_idx, _f_fold in enumerate(awf_folds):
                 if int(_f_fold.fit_start) < int(_f_fold.oos_start):
                     _be = compute_bucket_realized_edges(
@@ -2846,7 +2903,10 @@ def _run_awf_simulation(
                 _pct = float(_c) / float(_n_total_regime) * 100.0
                 logger.debug(
                     "[L2-REGIME-OCC] regime=%d count=%d pct=%.1f%% total=%d",
-                    _r, _c, _pct, _n_total_regime,
+                    _r,
+                    _c,
+                    _pct,
+                    _n_total_regime,
                 )
             if _routing_diag is not None:
                 logger.debug(
@@ -2896,19 +2956,20 @@ def _run_awf_simulation(
                 _rl = _regime_names_local[_br] if 0 <= _br < len(_regime_names_local) else f"unknown({_br})"
                 logger.debug(
                     "[L2-BUCKET-EDGE] fold=%d regime=%s(%d) family=%s tf=%s edge=%.2f_bps",
-                    _bf_idx, _rl, _br, _bfam, _btf, _bval,
+                    _bf_idx,
+                    _rl,
+                    _br,
+                    _bfam,
+                    _btf,
+                    _bval,
                 )
 
     # Step H: per-fold regime distribution stability (fit vs OOS)
     if _l2_routing_mode == "bucket":
-        _state_count = (
-            _routing_diag.active_state_count
-            if _routing_diag is not None
-            else 6
-        )
+        _state_count = _routing_diag.active_state_count if _routing_diag is not None else 6
         for _fi, _fold in enumerate(awf_folds):
-            _fit_slice = _regime_code_1d[int(_fold.fit_start):int(_fold.oos_start)]
-            _oos_slice = _regime_code_1d[int(_fold.oos_start):int(_fold.oos_end)]
+            _fit_slice = _regime_code_1d[int(_fold.fit_start) : int(_fold.oos_start)]
+            _oos_slice = _regime_code_1d[int(_fold.oos_start) : int(_fold.oos_end)]
             if len(_fit_slice) == 0 or len(_oos_slice) == 0:
                 continue
             _fit_uniq, _fit_counts = np.unique(_fit_slice, return_counts=True)
@@ -2930,17 +2991,21 @@ def _run_awf_simulation(
                 if _p > 0:
                     _js += _p * np.log2(_p / _q) if _q > 0 else 0.0
             _js /= 2.0
-            _fit_occ = "|".join(f"{p*100:.0f}" for p in _fit_freq)
-            _oos_occ = "|".join(f"{p*100:.0f}" for p in _oos_freq)
+            _fit_occ = "|".join(f"{p * 100:.0f}" for p in _fit_freq)
+            _oos_occ = "|".join(f"{p * 100:.0f}" for p in _oos_freq)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     "[L2-REGIME-SHIFT] fold=%d js_div=%.4f fit=%s oos=%s",
-                    _fi, _js, _fit_occ, _oos_occ,
+                    _fi,
+                    _js,
+                    _fit_occ,
+                    _oos_occ,
                 )
                 if _js > 0.15:
                     logger.debug(
                         "[L2-REGIME-SHIFT] fold=%d regime shift detected (fit↔OOS JS=%.4f)",
-                        _fi, _js,
+                        _fi,
+                        _js,
                     )
 
     # Steps G+J: init per-fold bucket hit ratio + OOS realized edge accumulators
@@ -2966,9 +3031,8 @@ def _run_awf_simulation(
                 compress_regime_codes,
                 compute_market_regime_context,
             )
-            _diag_regime_full = compress_regime_codes(
-                compute_market_regime_context(aligned=aligned).code_1d
-            )
+
+            _diag_regime_full = compress_regime_codes(compute_market_regime_context(aligned=aligned).code_1d)
         except Exception:
             _diag_regime_full = None
     _diag_regime_names = ("bull", "bear", "crisis")
@@ -2978,9 +3042,7 @@ def _run_awf_simulation(
     _reliability_floor = float(getattr(config, "l2_regime_reliability_floor", 0.2))
     _bear_edge_by_fold: list[float] = []
     _state_names_for_cap_global = (
-        _routing_diag.active_state_names
-        if _routing_diag is not None
-        else ("bull", "bear", "crisis")
+        _routing_diag.active_state_names if _routing_diag is not None else ("bull", "bear", "crisis")
     )
     _is_bear_code = {ci for ci, nm in enumerate(_state_names_for_cap_global) if nm.startswith("bear")}
 
@@ -2990,6 +3052,7 @@ def _run_awf_simulation(
     if _trend_gate_enabled or _diag:
         try:
             from src.domain.futures.strategy.market_regime import compute_market_regime_context
+
             _trend_efficiency_1d = compute_market_regime_context(aligned=aligned).trend_efficiency_1d
         except Exception:
             _trend_efficiency_1d = None
@@ -3006,6 +3069,7 @@ def _run_awf_simulation(
                 compute_reversal_risk_off_1d,
                 compute_xs_downside_breadth_1d,
             )
+
             _rev_cfg = _reversal_config_from_env()
             _btc_sym_idx = next((i for i, s in enumerate(aligned.symbols) if "BTC" in s.upper()), 0)
             _btc_close_1d: NDArray[np.float64] = np.maximum(
@@ -3048,9 +3112,10 @@ def _run_awf_simulation(
     for _fold_idx, fold in enumerate(awf_folds):
         t_fold_start = time.perf_counter()
         if _reliability_enabled and _bear_edge_by_fold:
-            _trail = _bear_edge_by_fold[max(0, _fold_idx - _reliability_window):_fold_idx]
+            _trail = _bear_edge_by_fold[max(0, _fold_idx - _reliability_window) : _fold_idx]
             _bear_reliability_mult = compute_regime_reliability_multiplier(
-                _trail, floor=_reliability_floor,
+                _trail,
+                floor=_reliability_floor,
             )
         else:
             _bear_reliability_mult = 1.0
@@ -3127,20 +3192,16 @@ def _run_awf_simulation(
             if _tf_inclusion_enabled:
                 _current_included = included_tfs_by_fold[_fold_idx]
                 _oos_sleeve_sigs = {
-                    k: v for k, v in _oos_sleeve_sigs.items()
-                    if _parse_tf_from_strategy_id(k[1]) in _current_included
+                    k: v for k, v in _oos_sleeve_sigs.items() if _parse_tf_from_strategy_id(k[1]) in _current_included
                 }
                 _oos_sleeve_edges = {
-                    k: v for k, v in _oos_sleeve_edges.items()
-                    if _parse_tf_from_strategy_id(k[1]) in _current_included
+                    k: v for k, v in _oos_sleeve_edges.items() if _parse_tf_from_strategy_id(k[1]) in _current_included
                 }
             # L2 bucket routing: OOS bar t의 regime 기반 sleeve 필터링
             if _l2_routing_mode == "bucket" and (
                 _fold_idx < len(bucket_edges_by_fold) or _fold_idx < len(policy_by_fold)
             ):
-                _current_bucket_edges = (
-                    bucket_edges_by_fold[_fold_idx] if _fold_idx < len(bucket_edges_by_fold) else {}
-                )
+                _current_bucket_edges = bucket_edges_by_fold[_fold_idx] if _fold_idx < len(bucket_edges_by_fold) else {}
                 _current_policy_map = policy_by_fold[_fold_idx] if _fold_idx < len(policy_by_fold) else {}
                 if _current_bucket_edges or _current_policy_map:
                     from src.domain.futures.strategy.tiered_workflow.l2_meta import (
@@ -3149,12 +3210,14 @@ def _run_awf_simulation(
                         apply_regime_cell_policy,
                         filter_sleeves_by_bucket,
                     )
+
                     _before_filter_count = len(_oos_sleeve_sigs)
                     _before_sleeve_keys = set(_oos_sleeve_sigs.keys())
                     _regime_now = int(_regime_code_1d[t]) if t < len(_regime_code_1d) else 0
                     # Step J: pre-compute sleeve key → index mapping for OOS edge tracking
                     _sleeve_to_j = {
-                        cache.sleeve_ids[_j]: _j for _j in range(cache.signal_mask_2d.shape[1])
+                        cache.sleeve_ids[_j]: _j
+                        for _j in range(cache.signal_mask_2d.shape[1])
                         if cache.signal_mask_2d[t, _j] and cache.sleeve_ids[_j] in _before_sleeve_keys
                     }
                     if _regime_policy_mode == "filter":
@@ -3163,22 +3226,16 @@ def _run_awf_simulation(
                                 _oos_sleeve_sigs,
                                 _current_bucket_edges,
                                 _regime_now,
-                                edge_floor_bps=float(
-                                    getattr(config, "l2_bucket_edge_floor_bps", 0.0)
-                                ),
+                                edge_floor_bps=float(getattr(config, "l2_bucket_edge_floor_bps", 0.0)),
                             )
                         else:
                             _oos_sleeve_sigs = filter_sleeves_by_bucket(
                                 _oos_sleeve_sigs,
                                 _current_bucket_edges,
                                 _regime_now,
-                                edge_floor_bps=float(
-                                    getattr(config, "l2_bucket_edge_floor_bps", 0.0)
-                                ),
+                                edge_floor_bps=float(getattr(config, "l2_bucket_edge_floor_bps", 0.0)),
                             )
-                        _oos_sleeve_edges = {
-                            k: v for k, v in _oos_sleeve_edges.items() if k in _oos_sleeve_sigs
-                        }
+                        _oos_sleeve_edges = {k: v for k, v in _oos_sleeve_edges.items() if k in _oos_sleeve_sigs}
                     else:
                         _pre_policy_sleeve_edges = _oos_sleeve_edges
                         _policy_input_edges = {k: float(v[0]) for k, v in _pre_policy_sleeve_edges.items()}
@@ -3191,12 +3248,8 @@ def _run_awf_simulation(
                                 Literal["filter", "observe", "soft", "hybrid"],
                                 _regime_policy_mode,
                             ),
-                            scale_signal_mu=bool(
-                                getattr(config, "l2_regime_scale_signal_mu", True)
-                            ),
-                            scale_quality_weight=bool(
-                                getattr(config, "l2_regime_scale_quality_weight", True)
-                            ),
+                            scale_signal_mu=bool(getattr(config, "l2_regime_scale_signal_mu", True)),
+                            scale_quality_weight=bool(getattr(config, "l2_regime_scale_quality_weight", True)),
                         )
                         if _fold_idx < len(policy_effect_logs_by_fold) and _policy_applied.n_input > 0:
                             policy_effect_logs_by_fold[_fold_idx].append(_policy_applied)
@@ -3248,7 +3301,10 @@ def _run_awf_simulation(
                         logger.debug(
                             "[L2-BUCKET-FILTER] t=%d fold=%d regime=%s(%d) "
                             "mode=%s source=%s sleeves_before=%d after=%d dropped=%d",
-                            t, _fold_idx, _rl, _regime_now,
+                            t,
+                            _fold_idx,
+                            _rl,
+                            _regime_now,
                             _regime_policy_mode,
                             ("fit/cal policy" if _regime_policy_mode != "filter" else "bucket edge"),
                             _before_filter_count,
@@ -3265,7 +3321,11 @@ def _run_awf_simulation(
                                 logger.debug(
                                     "[L2-BUCKET-DROP] t=%d sym=%s family=%s tf=%s "
                                     "regime=%d mode=%s source=%s edge=%.2f floor=%.2f",
-                                    t, _dk[0], _fam, _tf, _regime_now,
+                                    t,
+                                    _dk[0],
+                                    _fam,
+                                    _tf,
+                                    _regime_now,
                                     _regime_policy_mode,
                                     ("fit/cal policy" if _regime_policy_mode != "filter" else "bucket edge"),
                                     _bedge,
@@ -3314,7 +3374,7 @@ def _run_awf_simulation(
                 _modified: dict[tuple[str, str], SymbolSignal] = {}
                 for _sk, _ss in _oos_sleeve_sigs.items():
                     _fam, _tf = _parse_meta_group_ids(_sk[1])
-                    if                     _fam in _trend_arch_families:
+                    if _fam in _trend_arch_families:
                         _modified[_sk] = replace(_ss, raw_mu=_ss.raw_mu * _trend_mult)
                     else:
                         _modified[_sk] = _ss
@@ -3322,6 +3382,7 @@ def _run_awf_simulation(
             # L2_POSITIONING_CROWDING_GATE: per-symbol crowding dampener
             if _crowding_gate_enabled and _crowding_mask_2d is not None and t > 0:
                 from src.domain.futures.strategy.tiered_workflow.l2_meta import _parse_meta_group_ids
+
                 _modified2: dict[tuple[str, str], SymbolSignal] = {}
                 for _sk, _ss in _oos_sleeve_sigs.items():
                     _fam, _tf = _parse_meta_group_ids(_sk[1])
@@ -3376,8 +3437,15 @@ def _run_awf_simulation(
                             _dissent_mus.append(float(_ss.raw_mu))
                             _dissent_qw_accum += float(_ss.quality_weight)
                     _dc = _div_diag_counts.setdefault(
-                        _dsym, {"dom": 0, "dissent_present": 0, "dissent_nonzero": 0, "armed": 0,
-                                "dom_qw_sum": 0.0, "dissent_qw_sum": 0.0}
+                        _dsym,
+                        {
+                            "dom": 0,
+                            "dissent_present": 0,
+                            "dissent_nonzero": 0,
+                            "armed": 0,
+                            "dom_qw_sum": 0.0,
+                            "dissent_qw_sum": 0.0,
+                        },
                     )
                     if not _dom_mus:
                         continue
@@ -3453,24 +3521,31 @@ def _run_awf_simulation(
                     for _vsym in _veto_symbols:
                         _vsig = valid_signals.get(_vsym)
                         if _vsig is None:
-                            _directional_veto_snaps.append(DirectionalVetoSnapshot(
-                                fold_idx=_fold_idx, t=t, symbol=_vsym,
-                                regime_code=_regime_now,
-                                raw_mu_before=0.0, raw_mu_after=0.0,
-                                counterfactual_weight=0.0, weight_after=0.0,
-                                fired=False, was_missing=True,
-                                bar_price_return_after=0.0, counterfactual_long_return=0.0,
-                                state_before="idle", state_after="idle",
-                            ))
+                            _directional_veto_snaps.append(
+                                DirectionalVetoSnapshot(
+                                    fold_idx=_fold_idx,
+                                    t=t,
+                                    symbol=_vsym,
+                                    regime_code=_regime_now,
+                                    raw_mu_before=0.0,
+                                    raw_mu_after=0.0,
+                                    counterfactual_weight=0.0,
+                                    weight_after=0.0,
+                                    fired=False,
+                                    was_missing=True,
+                                    bar_price_return_after=0.0,
+                                    counterfactual_long_return=0.0,
+                                    state_before="idle",
+                                    state_after="idle",
+                                )
+                            )
                             continue
                         _raw_mu = float(_vsig.raw_mu)
                         _is_adverse = _regime_now in _veto_adverse
                         if _raw_mu > _veto_eps * 1e-4:
                             _sym_idx = sym_to_idx.get(_vsym)
                             if _sym_idx is not None:
-                                _lookback = int(
-                                    getattr(config, "l2_regime_directional_veto_loss_lookback_bars", 18)
-                                )
+                                _lookback = int(getattr(config, "l2_regime_directional_veto_loss_lookback_bars", 18))
                                 _rolling_ret = _compute_symbol_rolling_return(
                                     close_2d=aligned.close_2d,
                                     t=t,
@@ -3482,7 +3557,7 @@ def _run_awf_simulation(
                         else:
                             _rolling_ret = 0.0
                         _vs_state = _contextual_veto_states.get(_vsym, ContextualDirectionalVetoState(symbol=_vsym))
-                        _new_state, _fired, _mu_after, _release_reason, _state_before, _state_after = \
+                        _new_state, _fired, _mu_after, _release_reason, _state_before, _state_after = (
                             _compute_contextual_directional_veto_signal(
                                 symbol=_vsym,
                                 raw_mu=_raw_mu,
@@ -3491,6 +3566,7 @@ def _run_awf_simulation(
                                 state=_vs_state,
                                 config=config,
                             )
+                        )
                         _contextual_veto_states[_vsym] = _new_state
                         if _fired:
                             _cap_mu_bps = float(getattr(config, "l2_regime_directional_veto_cap_mu_bps", 0.0))
@@ -3504,28 +3580,46 @@ def _run_awf_simulation(
                         _counterfactual_weight = float(_pre_veto_signals.get(_vsym, _vsig).raw_mu) if _fired else 0.0
                         if _fired:
                             _counterfactual_candidates[_vsym] = _counterfactual_weight
-                        _directional_veto_snaps.append(DirectionalVetoSnapshot(
-                            fold_idx=_fold_idx, t=t, symbol=_vsym,
-                            regime_code=_regime_now,
-                            raw_mu_before=_raw_mu, raw_mu_after=_mu_after,
-                            counterfactual_weight=_counterfactual_weight, weight_after=0.0,
-                            fired=_fired, was_missing=False,
-                            bar_price_return_after=0.0, counterfactual_long_return=0.0,
-                            state_before=_state_before, state_after=_state_after,
-                            rolling_symbol_return=_rolling_ret, release_reason=_release_reason,
-                        ))
+                        _directional_veto_snaps.append(
+                            DirectionalVetoSnapshot(
+                                fold_idx=_fold_idx,
+                                t=t,
+                                symbol=_vsym,
+                                regime_code=_regime_now,
+                                raw_mu_before=_raw_mu,
+                                raw_mu_after=_mu_after,
+                                counterfactual_weight=_counterfactual_weight,
+                                weight_after=0.0,
+                                fired=_fired,
+                                was_missing=False,
+                                bar_price_return_after=0.0,
+                                counterfactual_long_return=0.0,
+                                state_before=_state_before,
+                                state_after=_state_after,
+                                rolling_symbol_return=_rolling_ret,
+                                release_reason=_release_reason,
+                            )
+                        )
                 else:
                     for _vsym in _veto_symbols:
                         _vsig = valid_signals.get(_vsym)
                         if _vsig is None:
-                            _directional_veto_snaps.append(DirectionalVetoSnapshot(
-                                fold_idx=_fold_idx, t=t, symbol=_vsym,
-                                regime_code=_regime_now,
-                                raw_mu_before=0.0, raw_mu_after=0.0,
-                                counterfactual_weight=0.0, weight_after=0.0,
-                                fired=False, was_missing=True,
-                                bar_price_return_after=0.0, counterfactual_long_return=0.0,
-                            ))
+                            _directional_veto_snaps.append(
+                                DirectionalVetoSnapshot(
+                                    fold_idx=_fold_idx,
+                                    t=t,
+                                    symbol=_vsym,
+                                    regime_code=_regime_now,
+                                    raw_mu_before=0.0,
+                                    raw_mu_after=0.0,
+                                    counterfactual_weight=0.0,
+                                    weight_after=0.0,
+                                    fired=False,
+                                    was_missing=True,
+                                    bar_price_return_after=0.0,
+                                    counterfactual_long_return=0.0,
+                                )
+                            )
                             continue
                         _raw_mu = float(_vsig.raw_mu)
                         _is_adverse = _regime_now in _veto_adverse
@@ -3543,19 +3637,29 @@ def _run_awf_simulation(
                         _counterfactual_weight = float(_pre_veto_signals.get(_vsym, _vsig).raw_mu) if _fired else 0.0
                         if _fired:
                             _counterfactual_candidates[_vsym] = _counterfactual_weight
-                        _directional_veto_snaps.append(DirectionalVetoSnapshot(
-                            fold_idx=_fold_idx, t=t, symbol=_vsym,
-                            regime_code=_regime_now,
-                            raw_mu_before=_raw_mu, raw_mu_after=_raw_mu_after,
-                            counterfactual_weight=_counterfactual_weight, weight_after=0.0,
-                            fired=_fired, was_missing=False,
-                            bar_price_return_after=0.0, counterfactual_long_return=0.0,
-                        ))
+                        _directional_veto_snaps.append(
+                            DirectionalVetoSnapshot(
+                                fold_idx=_fold_idx,
+                                t=t,
+                                symbol=_vsym,
+                                regime_code=_regime_now,
+                                raw_mu_before=_raw_mu,
+                                raw_mu_after=_raw_mu_after,
+                                counterfactual_weight=_counterfactual_weight,
+                                weight_after=0.0,
+                                fired=_fired,
+                                was_missing=False,
+                                bar_price_return_after=0.0,
+                                counterfactual_long_return=0.0,
+                            )
+                        )
 
             if _oos_sleeve_sigs:
                 logger.debug(
                     "[AWF-EDGE] t=%d sleeve_count=%d edge_pass=%d",
-                    t, len(_oos_sleeve_sigs), len(valid_signals),
+                    t,
+                    len(_oos_sleeve_sigs),
+                    len(valid_signals),
                 )
             if _diag:
                 _attr_netting += _count_netting_symbols(_oos_sleeve_sigs, valid_signals)
@@ -3609,9 +3713,12 @@ def _run_awf_simulation(
                     _z_arr = np.asarray(_z_vals, dtype=np.float64)
                     logger.debug(
                         "[L2-Z-DIST] t=%d n_pos=%d z_min=%.3f z_max=%.3f z_med=%.3f z_std=%.3f",
-                        t, len(_z_vals),
-                        float(np.min(_z_arr)), float(np.max(_z_arr)),
-                        float(np.median(_z_arr)), float(np.std(_z_arr, ddof=1)),
+                        t,
+                        len(_z_vals),
+                        float(np.min(_z_arr)),
+                        float(np.max(_z_arr)),
+                        float(np.median(_z_arr)),
+                        float(np.std(_z_arr, ddof=1)),
                     )
             last_selected = selected
             if selected:
@@ -3633,10 +3740,7 @@ def _run_awf_simulation(
             support_mask = mu_arr != 0.0
             if _diag:
                 n_sel = len(selected)
-                w_eq_sel = (
-                    np.where(support_mask, np.sign(mu_arr) / n_sel, 0.0)
-                    if n_sel > 0 else np.zeros_like(mu_arr)
-                )
+                w_eq_sel = np.where(support_mask, np.sign(mu_arr) / n_sel, 0.0) if n_sel > 0 else np.zeros_like(mu_arr)
             # CS Score Amplification: _z_scores dict → array
             _z_score_arr: NDArray[np.float64] | None = None
             if config.l2_cs_amp_enabled and _z_scores:
@@ -3647,7 +3751,7 @@ def _run_awf_simulation(
                         _z_score_arr[_i] = z
             if config.l2_portfolio_cov_mode == "correlated":
                 _lb = config.l2_portfolio_cov_lookback_bars
-                _price_window = aligned.close_2d[max(0, t - _lb): t + 1]
+                _price_window = aligned.close_2d[max(0, t - _lb) : t + 1]
                 _returns_hist = np.diff(np.log(np.maximum(_price_window, 1e-12)), axis=0)
             else:
                 _returns_hist = None
@@ -3698,9 +3802,7 @@ def _run_awf_simulation(
             w = np.where(tradeable_mask, w, 0.0)
             _regime_now_for_cap = int(_regime_code_1d[t]) if t < len(_regime_code_1d) else 2
             _state_names_for_cap = (
-                _routing_diag.active_state_names
-                if _routing_diag is not None
-                else ("bull", "bear", "crisis")
+                _routing_diag.active_state_names if _routing_diag is not None else ("bull", "bear", "crisis")
             )
             _gross_before_cap = float(np.sum(np.abs(w)))
             w_precap = w.copy()
@@ -3736,7 +3838,7 @@ def _run_awf_simulation(
                 _cap_row = np.nan_to_num(_adv[t], nan=0.0, posinf=0.0, neginf=0.0)
                 _intended = np.abs(w) * _portfolio_nav
                 w[_intended < _min_order_usdt] = 0.0
-                
+
                 _cap_positive = _cap_row > 0.0
                 if np.any(_cap_positive):
                     _max_w = np.where(_cap_positive, _cap_row / max(_portfolio_nav, 1.0), np.inf)
@@ -3817,8 +3919,7 @@ def _run_awf_simulation(
                 _attr_signal_total += len(selected)
             if _diag and logger.isEnabledFor(logging.DEBUG):
                 _sample_cond = (t == fold.oos_start) or (
-                    _diag_sample_every > 0 and rebalance_count > 0
-                    and rebalance_count % _diag_sample_every == 0
+                    _diag_sample_every > 0 and rebalance_count > 0 and rebalance_count % _diag_sample_every == 0
                 )
                 if _sample_cond and len(_oos_sleeve_sigs) > 0:
                     _sym_w_pairs: list[tuple[str, float]] = []
@@ -3830,9 +3931,7 @@ def _run_awf_simulation(
                     _sym_w_pairs.sort(key=lambda x: -x[1])
                     for _sym, _aw in _sym_w_pairs[:_diag_top_k]:
                         _sym_idx = sym_to_idx.get(_sym, -1)
-                        _sleeve_sig = next(
-                            (v for k, v in _oos_sleeve_sigs.items() if k[0] == _sym), None
-                        )
+                        _sleeve_sig = next((v for k, v in _oos_sleeve_sigs.items() if k[0] == _sym), None)
                         if _sleeve_sig is None:
                             continue
                         _side = 1 if _sleeve_sig.raw_mu > 0 else -1
@@ -3840,8 +3939,12 @@ def _run_awf_simulation(
                         logger.debug(
                             "[L2-ATTR-SLEEVE] fold=%d t=%d sym=%s side=%d raw_mu_pb=%.4f "
                             "qw=%.3f w=%.4f friction_pass=%s",
-                            _fold_idx, t, _sym, _side,
-                            _sleeve_sig.raw_mu, _sleeve_sig.quality_weight,
+                            _fold_idx,
+                            t,
+                            _sym,
+                            _side,
+                            _sleeve_sig.raw_mu,
+                            _sleeve_sig.quality_weight,
                             float(w[_sym_idx]) if _sym_idx >= 0 else 0.0,
                             _fpass,
                         )
@@ -3900,11 +4003,14 @@ def _run_awf_simulation(
                                 _cf_long_bar_ret = _cf_weight * (_sym_bar_ret - _sym_funding)
                                 _rebal_cost_bar = rebal_cost / float(max(t_end - t, 1))
                                 _cf_long_bar_ret_net = _cf_long_bar_ret - (_rebal_cost_bar if t2 == t else 0.0)
-                                _updated_snaps.append(replace(
-                                    _vs,
-                                    bar_price_return_after=_vs.bar_price_return_after + _sym_bar_ret,
-                                    counterfactual_long_return=_vs.counterfactual_long_return + _cf_long_bar_ret_net,
-                                ))
+                                _updated_snaps.append(
+                                    replace(
+                                        _vs,
+                                        bar_price_return_after=_vs.bar_price_return_after + _sym_bar_ret,
+                                        counterfactual_long_return=_vs.counterfactual_long_return
+                                        + _cf_long_bar_ret_net,
+                                    )
+                                )
                             else:
                                 _updated_snaps.append(_vs)
                         else:
@@ -3949,20 +4055,23 @@ def _run_awf_simulation(
                 cost_baseline = rebal_cost_baseline if t2 == t else 0.0
                 cost_baseline_ew = rebal_cost_baseline_ew if t2 == t else 0.0
                 r_h = gross_ret - cost
-                r_b = compute_futures_bar_return(
-                    weights=w_base,
-                    price_returns=bar_ret,
-                    funding_rates=funding_rates,
-                ) - cost_baseline
-                r_b_ew = compute_futures_bar_return(
-                    weights=w_base_ew,
-                    price_returns=bar_ret,
-                    funding_rates=funding_rates,
-                ) - cost_baseline_ew
-                if (
-                    _selected_regime_return_sum_bps.size > 0
-                    and (selected or np.any(np.abs(w) > 1e-12))
-                ):
+                r_b = (
+                    compute_futures_bar_return(
+                        weights=w_base,
+                        price_returns=bar_ret,
+                        funding_rates=funding_rates,
+                    )
+                    - cost_baseline
+                )
+                r_b_ew = (
+                    compute_futures_bar_return(
+                        weights=w_base_ew,
+                        price_returns=bar_ret,
+                        funding_rates=funding_rates,
+                    )
+                    - cost_baseline_ew
+                )
+                if _selected_regime_return_sum_bps.size > 0 and (selected or np.any(np.abs(w) > 1e-12)):
                     _selected_state = int(_regime_code_1d[t]) if t < len(_regime_code_1d) else 0
                     if 0 <= _selected_state < _selected_regime_return_sum_bps.size:
                         _selected_regime_return_sum_bps[_selected_state] += float(r_h) * 10000.0
@@ -3994,7 +4103,10 @@ def _run_awf_simulation(
         if _reliability_enabled and logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "[L2-REGIME-RELIABILITY] fold=%d bear_edge_pb_bps=%.2f next_mult=%.3f window=%d",
-                _fold_idx, _bear_edge_by_fold[-1], _bear_reliability_mult, _reliability_window,
+                _fold_idx,
+                _bear_edge_by_fold[-1],
+                _bear_reliability_mult,
+                _reliability_window,
             )
         fold_rets_hybrid.append(_fold_h)
         fold_rets_baseline.append(_fold_b)
@@ -4052,8 +4164,12 @@ def _run_awf_simulation(
                     "[L2-DIVERGENCE-DIAG] fold=%d symbol=%s bars_dom=%d "
                     "bars_dissent_present=%d bars_dissent_nonzero=%d bars_armed=%d "
                     "dom_qw_mean=%.3f dissent_qw_mean=%.3f",
-                    _fold_idx, _dsym, _dc["dom"],
-                    _dc["dissent_present"], _dc["dissent_nonzero"], _dc["armed"],
+                    _fold_idx,
+                    _dsym,
+                    _dc["dom"],
+                    _dc["dissent_present"],
+                    _dc["dissent_nonzero"],
+                    _dc["armed"],
                     _dc["dom_qw_sum"] / max(_dc["dom"], 1),
                     _dc["dissent_qw_sum"] / max(_dc["dissent_present"], 1),
                 )
@@ -4066,13 +4182,28 @@ def _run_awf_simulation(
                 "dropped_below_cost=%d netting_events=%d "
                 "low_er_price=%.6f er_corr=%.3f mean_er=%.3f "
                 "roff_bars=%d roff_price=%.6f ron_price=%.6f",
-                _attr.fold_idx, _attr.oos_bars, _attr.n_rebal, _attr.realized_total,
-                _attr.realized_price, _attr.realized_funding, _attr.realized_cost,
-                _attr.expected_net, _attr.alpha_gap, _attr.mean_gross_exp, _attr.mean_net_exp,
-                _attr.sleeves_active_mean, _attr.friction_pass_ratio, _attr.throttle_mult_mean,
-                _attr.dropped_below_cost, _attr.netting_events,
-                _attr.realized_price_low_er, _attr.trend_efficiency_corr, _attr.mean_trend_efficiency,
-                _attr.risk_off_bars, _attr.risk_off_realized_price, _attr.risk_on_realized_price,
+                _attr.fold_idx,
+                _attr.oos_bars,
+                _attr.n_rebal,
+                _attr.realized_total,
+                _attr.realized_price,
+                _attr.realized_funding,
+                _attr.realized_cost,
+                _attr.expected_net,
+                _attr.alpha_gap,
+                _attr.mean_gross_exp,
+                _attr.mean_net_exp,
+                _attr.sleeves_active_mean,
+                _attr.friction_pass_ratio,
+                _attr.throttle_mult_mean,
+                _attr.dropped_below_cost,
+                _attr.netting_events,
+                _attr.realized_price_low_er,
+                _attr.trend_efficiency_corr,
+                _attr.mean_trend_efficiency,
+                _attr.risk_off_bars,
+                _attr.risk_off_realized_price,
+                _attr.risk_on_realized_price,
             )
             if _diag_regime_full is not None:
                 _reg_parts = " ".join(
@@ -4081,16 +4212,18 @@ def _run_awf_simulation(
                 )
                 logger.debug("[L2-ATTR-REGIME] fold=%d %s", _attr.fold_idx, _reg_parts)
             if _breadth_diag_1d is not None:
-                _bd_slice = _breadth_diag_1d[fold.oos_start:fold.oos_end]
+                _bd_slice = _breadth_diag_1d[fold.oos_start : fold.oos_end]
                 _bd_valid = _bd_slice[np.isfinite(_bd_slice)]
                 if _bd_valid.size > 0:
                     _bd_mean = float(np.mean(_bd_valid))
                     _bd_p90 = float(np.percentile(_bd_valid, 90))
                     logger.debug(
-                        "[L2-PANEL-DIAG] fold=%d breadth_mean=%.4f breadth_p90=%.4f "
-                        "btc_off_bars=%d roff_price=%.6f",
-                        _attr.fold_idx, _bd_mean, _bd_p90,
-                        _attr.risk_off_bars, _attr.risk_off_realized_price,
+                        "[L2-PANEL-DIAG] fold=%d breadth_mean=%.4f breadth_p90=%.4f btc_off_bars=%d roff_price=%.6f",
+                        _attr.fold_idx,
+                        _bd_mean,
+                        _bd_p90,
+                        _attr.risk_off_bars,
+                        _attr.risk_off_realized_price,
                     )
         if _diag and logger.isEnabledFor(logging.DEBUG):
             _waterfall = _assemble_edge_waterfall(
@@ -4108,11 +4241,15 @@ def _run_awf_simulation(
                 "capped=%.1f realized=%.1f | loss_wgt=%.1f loss_cap=%.1f "
                 "loss_fric=%.1f n_adm_mean=%.1f cap_bind=%.2f",
                 _waterfall.fold_idx,
-                _waterfall.admitted_contrib, _waterfall.weighted_contrib,
-                _waterfall.capped_contrib, _waterfall.realized_contrib,
-                _waterfall.loss_weighting, _waterfall.loss_capping,
+                _waterfall.admitted_contrib,
+                _waterfall.weighted_contrib,
+                _waterfall.capped_contrib,
+                _waterfall.realized_contrib,
+                _waterfall.loss_weighting,
+                _waterfall.loss_capping,
                 _waterfall.loss_friction,
-                _waterfall.n_sleeves_admitted_mean, _waterfall.cap_binding_ratio,
+                _waterfall.n_sleeves_admitted_mean,
+                _waterfall.cap_binding_ratio,
             )
         if _diag and logger.isEnabledFor(logging.DEBUG):
             _nr = max(_fold_rebalance_count, 1)
@@ -4124,38 +4261,45 @@ def _run_awf_simulation(
                 "pooling_dilution=%.3f conflict_ratio=%.3f "
                 "edge_surrendered_bps_per_rebal=%.4f "
                 "breadth_funnel=%.1f->%.1f->%.1f",
-                _fold_idx, _fold_rebalance_count, _mtf_sym_ratio,
-                _mtf_dilution, _mtf_conflict,
+                _fold_idx,
+                _fold_rebalance_count,
+                _mtf_sym_ratio,
+                _mtf_dilution,
+                _mtf_conflict,
                 _mtf_edge_surr_sum / _nr,
                 (sum(_attr_sleeves_active) / _nr if _attr_sleeves_active else 0.0),
-                _mtf_pooled_sum / _nr, _mtf_selected_sum / _nr,
+                _mtf_pooled_sum / _nr,
+                _mtf_selected_sum / _nr,
             )
         if logger.isEnabledFor(logging.DEBUG) and _fold_idx < len(_per_fold_fit_rets):
             _ffit = _per_fold_fit_rets[_fold_idx]
             _foos = _fold_h  # current fold OOS rets (still in scope)
             _bars_per_year = bars_per_year
             _bpy = bars_per_year
+
             def _fold_cagr(rets: list[float], bpy: float = _bpy) -> float:
                 if not rets:
                     return float("nan")
                 eq = 1.0
                 for r in rets:
-                    eq *= (1.0 + r)
+                    eq *= 1.0 + r
                 years = len(rets) / max(bpy, 1.0)
                 return float(eq ** (1.0 / max(years, 1e-9)) - 1.0) if years > 0 else float("nan")
+
             # sleeve-level L1 예측 일관성(IC): fit-leg vs OOS 기간 평균 expected_net_bps per sleeve
             _n_sl = cache.signal_mask_2d.shape[1]
             if _n_sl > 0:
-                _fit_mask = cache.signal_mask_2d[fold.fit_start:fold.oos_start]
-                _oos_mask = cache.signal_mask_2d[fold.oos_start:fold.oos_end]
-                _fit_net = cache.expected_net_bps_2d[fold.fit_start:fold.oos_start]
-                _oos_net = cache.expected_net_bps_2d[fold.oos_start:fold.oos_end]
+                _fit_mask = cache.signal_mask_2d[fold.fit_start : fold.oos_start]
+                _oos_mask = cache.signal_mask_2d[fold.oos_start : fold.oos_end]
+                _fit_net = cache.expected_net_bps_2d[fold.fit_start : fold.oos_start]
+                _oos_net = cache.expected_net_bps_2d[fold.oos_start : fold.oos_end]
                 _sl_fit_mu = np.nanmean(np.where(_fit_mask, _fit_net, np.nan), axis=0)
                 _sl_oos_mu = np.nanmean(np.where(_oos_mask, _oos_net, np.nan), axis=0)
                 _valid = np.isfinite(_sl_fit_mu) & np.isfinite(_sl_oos_mu)
                 _n_valid = int(_valid.sum())
                 if _n_valid >= 5:
                     from scipy.stats import spearmanr as _spearmanr
+
                     _ic, _pval = _spearmanr(_sl_fit_mu[_valid], _sl_oos_mu[_valid])
                 else:
                     _ic, _pval, _n_valid = float("nan"), float("nan"), 0
@@ -4164,9 +4308,14 @@ def _run_awf_simulation(
             logger.debug(
                 "[L2-PERSIST] fold=%d fit_bars=%d fit_cagr=%.4f oos_bars=%d oos_cagr=%.4f "
                 "pred_autocorr=%.3f pred_autocorr_pval=%.3f n_sleeves=%d",
-                _fold_idx, len(_ffit), _fold_cagr(_ffit),
-                len(_foos), _fold_cagr(_foos),
-                _ic, _pval, _n_valid,
+                _fold_idx,
+                len(_ffit),
+                _fold_cagr(_ffit),
+                len(_foos),
+                _fold_cagr(_foos),
+                _ic,
+                _pval,
+                _n_valid,
             )
             # sleeve-level 실현엣지 rank-IC (P2a 게이트)
             _n_sl2 = cache.signal_mask_2d.shape[1]
@@ -4177,6 +4326,7 @@ def _run_awf_simulation(
                 _n_valid2 = int(_valid2.sum())
                 if _n_valid2 >= 5:
                     from scipy.stats import spearmanr as _spearmanr2
+
                     _ric, _rpval = _spearmanr2(_e_fit[_valid2], _e_oos[_valid2])
                 else:
                     _ric, _rpval, _n_valid2 = float("nan"), float("nan"), 0
@@ -4184,23 +4334,35 @@ def _run_awf_simulation(
                 _ric, _rpval, _n_valid2 = float("nan"), float("nan"), 0
             logger.debug(
                 "[L2-SLEEVE-IC] fold=%d realized_ic=%.3f pval=%.3f n=%d",
-                _fold_idx, _ric, _rpval, _n_valid2,
+                _fold_idx,
+                _ric,
+                _rpval,
+                _n_valid2,
             )
-        logger.log(PERF,
+        logger.log(
+            PERF,
             "[PERF] awf_fold fold=%d/%d oos_bars=%d took=%.4fs",
-            _fold_idx + 1, len(awf_folds),
+            _fold_idx + 1,
+            len(awf_folds),
             fold.oos_end - fold.oos_start,
             time.perf_counter() - t_fold_start,
         )
 
-    logger.log(PERF,
+    logger.log(
+        PERF,
         "[PERF] awf_total n_folds=%d n_rebalances=%d "
         "fit_leg=%.3fs mid=%.3fs regime=%.3fs post=%.3fs "
         "prep=%.3fs rank=%.3fs alloc=%.3fs eval=%.3fs took=%.4fs",
-        len(awf_folds), rebalance_count,
-        prof_fit_leg, prof_mid, prof_regime,
+        len(awf_folds),
+        rebalance_count,
+        prof_fit_leg,
+        prof_mid,
+        prof_regime,
         prof_bucket_routing - prof_regime,
-        prof_prep, prof_rank, prof_alloc, prof_eval,
+        prof_prep,
+        prof_rank,
+        prof_alloc,
+        prof_eval,
         time.perf_counter() - t_start_total,
     )
 
@@ -4213,12 +4375,16 @@ def _run_awf_simulation(
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     "[L2-BUCKET-HIT] fold=%d active_bars=%d bars_with_hit=%d hit_pct=%.1f%%",
-                    _fi, _active, _hit, _hit_pct,
+                    _fi,
+                    _active,
+                    _hit,
+                    _hit_pct,
                 )
                 if _hit_pct < 30.0:
                     logger.debug(
                         "[L2-BUCKET-HIT] fold=%d low bucket coverage (%.1f%%)",
-                        _fi, _hit_pct,
+                        _fi,
+                        _hit_pct,
                     )
     if _l2_routing_mode == "bucket" and logger.isEnabledFor(logging.DEBUG):
         _regime_names_local = (
@@ -4241,18 +4407,21 @@ def _run_awf_simulation(
             _fit_vals = np.array([_fit_edges[_bk] for _bk in _common], dtype=np.float64)
             _oos_vals = np.array([_oos_edges[_bk] for _bk in _common], dtype=np.float64)
             _errors = _oos_vals - _fit_vals
-            _rmse = float(np.sqrt(np.mean(_errors ** 2)))
+            _rmse = float(np.sqrt(np.mean(_errors**2)))
             _mae = float(np.mean(np.abs(_errors)))
             _bias = float(np.mean(_errors))
             _corr = float(np.corrcoef(_fit_vals, _oos_vals)[0, 1]) if len(_common) >= 3 else 0.0
             logger.debug(
                 "[L2-BUCKET-OOS] fold=%d n_common=%d rmse=%.2f mae=%.2f "
                 "bias=%.2f corr=%.3f evaluation_only=1 source=fit_vs_oos_debug",
-                _fi, len(_common), _rmse, _mae, _bias, _corr,
+                _fi,
+                len(_common),
+                _rmse,
+                _mae,
+                _bias,
+                _corr,
             )
-            _sorted_by_err = sorted(
-                _common, key=lambda _bk: abs(_oos_edges[_bk] - _fit_edges[_bk]), reverse=True
-            )
+            _sorted_by_err = sorted(_common, key=lambda _bk: abs(_oos_edges[_bk] - _fit_edges[_bk]), reverse=True)
             for _bk in _sorted_by_err[:15]:
                 _rl = _regime_names_local[_bk[0]] if 0 <= _bk[0] < 6 else f"unknown({_bk[0]})"
                 _err = _oos_edges[_bk] - _fit_edges[_bk]
@@ -4260,8 +4429,15 @@ def _run_awf_simulation(
                 logger.debug(
                     "[L2-BUCKET-OOS-DETAIL] fold=%d regime=%s(%d) family=%s tf=%s "
                     "fit=%.1fbps oos=%.1fbps err=%.1fbps n=%d",
-                    _fi, _rl, _bk[0], _bk[1], _bk[2],
-                    _fit_edges[_bk], _oos_edges[_bk], _err, _n_bucket,
+                    _fi,
+                    _rl,
+                    _bk[0],
+                    _bk[1],
+                    _bk[2],
+                    _fit_edges[_bk],
+                    _oos_edges[_bk],
+                    _err,
+                    _n_bucket,
                 )
             _underfit = sorted(_common, key=lambda _bk: _oos_edges[_bk] - _fit_edges[_bk], reverse=True)[:5]
             _overfit = sorted(_common, key=lambda _bk: _oos_edges[_bk] - _fit_edges[_bk])[:5]
@@ -4272,8 +4448,15 @@ def _run_awf_simulation(
                 logger.debug(
                     "[L2-BUCKET-UNDERFIT] fold=%d regime=%s(%d) family=%s tf=%s "
                     "fit=%.1fbps oos=%.1fbps surplus=%.1fbps n=%d",
-                    _fi, _rl, _bk[0], _bk[1], _bk[2],
-                    _fit_edges[_bk], _oos_edges[_bk], _err, _n_bucket,
+                    _fi,
+                    _rl,
+                    _bk[0],
+                    _bk[1],
+                    _bk[2],
+                    _fit_edges[_bk],
+                    _oos_edges[_bk],
+                    _err,
+                    _n_bucket,
                 )
             for _bk in _overfit:
                 _rl = _regime_names_local[_bk[0]] if 0 <= _bk[0] < 6 else f"unknown({_bk[0]})"
@@ -4282,8 +4465,15 @@ def _run_awf_simulation(
                 logger.debug(
                     "[L2-BUCKET-OVERFIT] fold=%d regime=%s(%d) family=%s tf=%s "
                     "fit=%.1fbps oos=%.1fbps deficit=%.1fbps n=%d",
-                    _fi, _rl, _bk[0], _bk[1], _bk[2],
-                    _fit_edges[_bk], _oos_edges[_bk], _err, _n_bucket,
+                    _fi,
+                    _rl,
+                    _bk[0],
+                    _bk[1],
+                    _bk[2],
+                    _fit_edges[_bk],
+                    _oos_edges[_bk],
+                    _err,
+                    _n_bucket,
                 )
 
     if _routing_diag is not None and _routing_diag.debug_diagnostics is not None:
@@ -4307,8 +4497,7 @@ def _run_awf_simulation(
             logger.debug("%-6s | %4d | %+18.1f", _state_name, _bars, _ret)
 
     policy_effect_by_fold = tuple(
-        _summarize_regime_policy_effects(tuple(applications))
-        for applications in policy_effect_logs_by_fold
+        _summarize_regime_policy_effects(tuple(applications)) for applications in policy_effect_logs_by_fold
     )
     for fold_idx, summary in enumerate(policy_effect_by_fold):
         logger.debug(
@@ -4338,10 +4527,17 @@ def _run_awf_simulation(
             "[AWF-SIM-FP] origin=%s n_folds=%d oos_bars=%s fold_ret_lens=%s "
             "total_bars=%d trades=%d rets_fp=%s sum_logret=%.6f cfg_fp=%s "
             "cache_id=%x signal_id=%x aligned_bars=%d",
-            sim_origin, len(awf_folds), oos_bars, fold_lens,
-            rets_arr.size, trade_count, rets_fp,
+            sim_origin,
+            len(awf_folds),
+            oos_bars,
+            fold_lens,
+            rets_arr.size,
+            trade_count,
+            rets_fp,
             float(np.sum(np.log1p(np.clip(rets_arr, -0.999, None)))),
-            cfg_fp, id(cache) & 0xffffff, id(signal_batch) & 0xffffff,
+            cfg_fp,
+            id(cache) & 0xFFFFFF,
+            id(signal_batch) & 0xFFFFFF,
             int(aligned.close_2d.shape[0]),
         )
 
@@ -4354,10 +4550,14 @@ def _run_awf_simulation(
         ]
         deploy_lev = float(getattr(config, "l2_deploy_leverage", 1.0))
         logger.debug(
-            "[AWF-SIM-FP2] origin=%s cache_ch=%s cfg_ch=%s caps_ch=%s "
-            "per_fold_fp=%s deploy_lev=%.4f portfolio_nav=%s",
-            sim_origin, cache_ch, cfg_ch, caps_ch, per_fold_fp,
-            deploy_lev, portfolio_nav,
+            "[AWF-SIM-FP2] origin=%s cache_ch=%s cfg_ch=%s caps_ch=%s per_fold_fp=%s deploy_lev=%.4f portfolio_nav=%s",
+            sim_origin,
+            cache_ch,
+            cfg_ch,
+            caps_ch,
+            per_fold_fp,
+            deploy_lev,
+            portfolio_nav,
         )
 
     return _AwfSimResult(

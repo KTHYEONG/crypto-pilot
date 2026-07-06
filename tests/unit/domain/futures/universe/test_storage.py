@@ -268,9 +268,10 @@ def test_requested_sync_caches_missing_delisted_guard(
     tmp_path: Path,
 ) -> None:
     from src.domain.futures.universe.storage import SymbolSyncProfile
+
     monkeypatch.setattr("src.domain.futures.universe.storage.FUTURES_DATA_DIR", tmp_path)
     symbol = "ZUSDT"
-    
+
     # 2024-01-01부터 2024-01-31까지의 데이터 준비
     dt = pd.date_range("2024-01-01", "2024-01-31", freq="4h", tz="UTC")
     pd.DataFrame({"datetime": dt}).to_parquet(tmp_path / f"{symbol}_1h.parquet")
@@ -284,7 +285,7 @@ def test_requested_sync_caches_missing_delisted_guard(
         delivery_date=date(2024, 1, 31),
         status="DELISTED",
     )
-    
+
     assert not _requested_sync_caches_missing(
         symbol,
         sync_1d=False,
@@ -299,12 +300,9 @@ def test_requested_sync_caches_missing_delisted_guard(
     # 2. 메타데이터 캐시 상의 latest_available가 180일 이전(예: 2024-01-31)이고, 요청 범위는 2026-06-14일 때
     # 180일 이상 경과했으므로 상장폐지된 것으로 간주하여 missing이 아니어야 함 (False 반환).
     metadata_cache = {
-        "ZUSDT::1h": {
-            "earliest_available": "2024-01-01T00:00:00Z",
-            "latest_available": "2024-01-31T00:00:00Z"
-        }
+        "ZUSDT::1h": {"earliest_available": "2024-01-01T00:00:00Z", "latest_available": "2024-01-31T00:00:00Z"}
     }
-    
+
     assert not _requested_sync_caches_missing(
         symbol,
         sync_1d=False,
@@ -319,11 +317,11 @@ def test_requested_sync_caches_missing_delisted_guard(
 
 def test_sqlite_ledger_happy_path(tmp_path: Path) -> None:
     db_path = tmp_path / "universe_ledger.db"
-    
+
     # 1. new_rows가 비어있을 때 예외 없이 무시되는지 테스트
     update_ledger(pd.DataFrame(), ledger_path=db_path)
     assert not db_path.exists()
-    
+
     # 2. 정상 적재 검증
     new_rows = pd.DataFrame(
         {
@@ -338,7 +336,7 @@ def test_sqlite_ledger_happy_path(tmp_path: Path) -> None:
     )
     update_ledger(new_rows, ledger_path=db_path)
     assert db_path.exists()
-    
+
     # 3. 슬라이스 쿼리 및 schema/정렬 정합성 테스트
     df_slice = load_ledger_slice(
         as_of="2026-06-14",
@@ -348,14 +346,14 @@ def test_sqlite_ledger_happy_path(tmp_path: Path) -> None:
         ledger_path=db_path,
         enforce_eligibility=True,
     )
-    
+
     assert not df_slice.empty
     assert "extra_col" in df_slice.columns
     assert "symbol" in df_slice.columns
-    
+
     # UPSERT 멱등성 검증
     update_ledger(new_rows, ledger_path=db_path)
-    
+
     df_slice_2 = load_ledger_slice(
         as_of="2026-06-14",
         tf="4h",

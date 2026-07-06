@@ -1,9 +1,10 @@
 """Phase 3-5: capacity_usdt clip unit tests.
 
 Scenarios:
-- S4: weight 0.01 × portfolio_nav=500 → intended=5 USDT (boundary of < 5 USDT) → weight=0.
-- S5: weight 0.5 × portfolio_nav=100000 → intended=50000 USDT → cap=10000 USDT → clipped to 0.1.
+- S4: weight 0.01 x portfolio_nav=500 → intended=5 USDT (boundary of < 5 USDT) → weight=0.
+- S5: weight 0.5 x portfolio_nav=100000 → intended=50000 USDT → cap=10000 USDT → clipped to 0.1.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -69,11 +70,9 @@ class TestS4MinOrderThreshold:
         # Act
         result = _apply_capacity_clip(weights, cap_row, portfolio_nav)
 
-        # Assert: 0.01 × 500 = 5.0, which is NOT < 5.0, so weight survives
+        # Assert: 0.01 x 500 = 5.0, which is NOT < 5.0, so weight survives
         # (boundary is strictly less-than)
-        assert result[0] != pytest.approx(0.0), (
-            "Intended=5.0 USDT is not < 5.0, so weight must NOT be zeroed"
-        )
+        assert result[0] != pytest.approx(0.0), "Intended=5.0 USDT is not < 5.0, so weight must NOT be zeroed"
 
     def test_weight_below_threshold_is_zeroed(self) -> None:
         """Arrange: weight=0.009, nav=500 → intended=4.5 USDT < 5 USDT → weight=0."""
@@ -86,9 +85,7 @@ class TestS4MinOrderThreshold:
         result = _apply_capacity_clip(weights, cap_row, portfolio_nav)
 
         # Assert
-        assert result[0] == pytest.approx(0.0), (
-            f"Expected 0.0 (below min-order), got {result[0]}"
-        )
+        assert result[0] == pytest.approx(0.0), f"Expected 0.0 (below min-order), got {result[0]}"
 
     def test_negative_weight_below_threshold_is_zeroed(self) -> None:
         """Arrange: weight=-0.009, nav=500 → |intended|=4.5 < 5 → weight=0."""
@@ -106,8 +103,8 @@ class TestS4MinOrderThreshold:
     def test_multiple_symbols_zeroes_only_subthreshold(self) -> None:
         """Arrange: sym0 below threshold, sym1 above → only sym0 zeroed."""
         # Arrange
-        # sym0: 0.009 × 500 = 4.5 < 5 → zeroed
-        # sym1: 0.1 × 500 = 50 >= 5 → kept (cap=1000 > 50)
+        # sym0: 0.009 x 500 = 4.5 < 5 → zeroed
+        # sym1: 0.1 x 500 = 50 >= 5 → kept (cap=1000 > 50)
         weights = np.array([0.009, 0.1], dtype=np.float64)
         cap_row = np.array([1_000.0, 1_000.0], dtype=np.float64)
         portfolio_nav = 500.0
@@ -177,7 +174,7 @@ class TestS5CapacityClip:
         # Act
         result = _apply_capacity_clip(weights, cap_row, portfolio_nav)
 
-        # Assert: 0.5 × 100000 = 50000 >= 5 USDT, cap=0 → no clip, weight unchanged
+        # Assert: 0.5 x 100000 = 50000 >= 5 USDT, cap=0 → no clip, weight unchanged
         assert result[0] == pytest.approx(0.5)
 
     def test_nan_cap_skips_clip(self) -> None:
@@ -196,9 +193,9 @@ class TestS5CapacityClip:
     def test_mixed_symbols_independent_clip(self) -> None:
         """Arrange: sym0 clipped, sym1 within cap, sym2 below min-order."""
         # Arrange
-        # sym0: 0.5 × 100000 = 50000 > 10000 cap → clip to 0.1
-        # sym1: 0.05 × 100000 = 5000 < 10000 cap → unchanged
-        # sym2: 0.00004 × 100000 = 4.0 < 5 USDT → zeroed
+        # sym0: 0.5 x 100000 = 50000 > 10000 cap → clip to 0.1
+        # sym1: 0.05 x 100000 = 5000 < 10000 cap → unchanged
+        # sym2: 0.00004 x 100000 = 4.0 < 5 USDT → zeroed
         weights = np.array([0.5, 0.05, 0.00004], dtype=np.float64)
         cap_row = np.array([10_000.0, 10_000.0, 10_000.0], dtype=np.float64)
         portfolio_nav = 100_000.0

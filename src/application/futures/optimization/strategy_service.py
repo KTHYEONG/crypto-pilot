@@ -231,9 +231,7 @@ def summarize_candidate_output_readiness(
     if _candidate_panel_has_non_finite_metadata(alpha_panel):
         raise RuntimeError("metadata contains non-finite values")
 
-    panel_target_weight_non_zero = int(
-        np.count_nonzero(panel_reset["target_weight"].to_numpy(dtype=np.float64))
-    )
+    panel_target_weight_non_zero = int(np.count_nonzero(panel_reset["target_weight"].to_numpy(dtype=np.float64)))
     panel_start = str(panel_reset["_merge_datetime"].min())
     panel_end = str(panel_reset["_merge_datetime"].max())
     panel_dt_by_symbol = {
@@ -262,11 +260,7 @@ def summarize_candidate_output_readiness(
         target_oos_target_weight_non_zero += int(np.count_nonzero(target_weight[target_oos_mask]))
 
     warnings: list[str] = []
-    if (
-        target_oos_rows > 0
-        and target_oos_target_weight_non_zero <= 0
-        and merged_panel_target_weight_non_zero > 0
-    ):
+    if target_oos_rows > 0 and target_oos_target_weight_non_zero <= 0 and merged_panel_target_weight_non_zero > 0:
         warnings.append("target_oos_candidate_output_absent_preflight")
 
     return CandidateOutputReadinessReport(
@@ -299,8 +293,7 @@ def assert_candidate_output_ready(
         raise RuntimeError("strategy mode has no merged symbol frames for selected timeframe")
     if report.panel_target_weight_non_zero <= 0:
         raise RuntimeError(
-            "candidate alpha_panel is zero-only "
-            f"(nonzero target_weight={report.panel_target_weight_non_zero})"
+            f"candidate alpha_panel is zero-only (nonzero target_weight={report.panel_target_weight_non_zero})"
         )
     if report.merged_panel_target_weight_non_zero <= 0:
         raise RuntimeError(

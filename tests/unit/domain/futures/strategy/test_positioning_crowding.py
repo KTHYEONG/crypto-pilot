@@ -66,7 +66,11 @@ class TestComputeCrowdingPersistentMask2D:
         oi[5:7, :] = 1.0
         lsr[5:7, :] = 2.0
         mask = compute_crowding_persistent_mask_2d(
-            oi, lsr, trend, persistence_bars=3, recovery_cooldown_bars=2,
+            oi,
+            lsr,
+            trend,
+            persistence_bars=3,
+            recovery_cooldown_bars=2,
         )
         assert not mask.any()
 
@@ -78,7 +82,11 @@ class TestComputeCrowdingPersistentMask2D:
         oi[:4, :] = 1.0
         lsr[:4, :] = 2.0
         mask = compute_crowding_persistent_mask_2d(
-            oi, lsr, trend, persistence_bars=3, recovery_cooldown_bars=0,
+            oi,
+            lsr,
+            trend,
+            persistence_bars=3,
+            recovery_cooldown_bars=0,
         )
         assert not mask[0, 0]
         assert not mask[1, 0]
@@ -94,7 +102,11 @@ class TestComputeCrowdingPersistentMask2D:
         oi[:4, :] = 1.0
         lsr[:4, :] = 2.0
         mask = compute_crowding_persistent_mask_2d(
-            oi, lsr, trend, persistence_bars=3, recovery_cooldown_bars=3,
+            oi,
+            lsr,
+            trend,
+            persistence_bars=3,
+            recovery_cooldown_bars=3,
         )
         assert not mask[0, 0]
         assert not mask[1, 0]
@@ -113,7 +125,11 @@ class TestComputeCrowdingPersistentMask2D:
         oi[:5, 0] = 1.0
         lsr[:5, 0] = 2.0
         mask = compute_crowding_persistent_mask_2d(
-            oi, lsr, trend, persistence_bars=3, recovery_cooldown_bars=0,
+            oi,
+            lsr,
+            trend,
+            persistence_bars=3,
+            recovery_cooldown_bars=0,
         )
         assert mask[:, 0].any()
         assert not mask[:, 1].any()
@@ -124,7 +140,10 @@ class TestComputeCrowdingPersistentMask2D:
         trend = np.ones((10, 2), dtype=np.float64)
         with pytest.raises(ValueError, match="persistence_bars must be >= 1"):
             compute_crowding_persistent_mask_2d(
-                oi, lsr, trend, persistence_bars=0,
+                oi,
+                lsr,
+                trend,
+                persistence_bars=0,
             )
 
 

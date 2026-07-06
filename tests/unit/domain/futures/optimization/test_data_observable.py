@@ -1,4 +1,5 @@
 """Tests for data_observable (Phase 3-2) in opt_data_utils."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -9,6 +10,7 @@ from src.domain.futures.optimization.opt_data_utils import data_observable
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_symbol_map(
     tf: str = "4h",
@@ -81,9 +83,7 @@ class TestDataObservable:
         result = data_observable(symbol="DELISTED", tf="4h", symbol_map=symbol_map)
 
         # Assert — partial coverage must NOT cause a fail
-        assert result["pass"] is True, (
-            "data_observable must pass even when data ends before OOS end"
-        )
+        assert result["pass"] is True, "data_observable must pass even when data ends before OOS end"
         assert result["n_bars"] == 30
 
     def test_data_observable_onboard_date_adjusts_effective_start(self) -> None:
@@ -93,17 +93,13 @@ class TestDataObservable:
         onboard_date = "2023-06-01"
 
         # Act
-        result = data_observable(
-            symbol="NEW", tf="4h", symbol_map=symbol_map, onboard_date=onboard_date
-        )
+        result = data_observable(symbol="NEW", tf="4h", symbol_map=symbol_map, onboard_date=onboard_date)
 
         # Assert
         assert result["pass"] is True
         effective_start = pd.Timestamp(result["effective_start"])
         onboard_ts = pd.Timestamp(onboard_date, tz="UTC")
-        assert effective_start >= onboard_ts, (
-            "effective_start must be at or after onboard_date"
-        )
+        assert effective_start >= onboard_ts, "effective_start must be at or after onboard_date"
 
     def test_data_observable_empty_frame_returns_fail(self) -> None:
         """Empty DataFrame must return pass=False with reason empty_datetime."""
@@ -126,13 +122,9 @@ class TestDataObservable:
         onboard_date = "2020-01-01"
 
         # Act
-        result = data_observable(
-            symbol="OLD", tf="4h", symbol_map=symbol_map, onboard_date=onboard_date
-        )
+        result = data_observable(symbol="OLD", tf="4h", symbol_map=symbol_map, onboard_date=onboard_date)
 
         # Assert
         first_dt = pd.Timestamp(result["first_dt"])
         effective_start = pd.Timestamp(result["effective_start"])
-        assert effective_start == first_dt, (
-            "effective_start must equal first_dt when onboard_date precedes data"
-        )
+        assert effective_start == first_dt, "effective_start must equal first_dt when onboard_date precedes data"

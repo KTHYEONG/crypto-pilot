@@ -159,12 +159,15 @@ def _resolve_activation_context(
     """
     if not qualify_by_regime:
         return "all"
-    return str(
-        row.get(
-            "activation_context",
-            row.get("signal_cell", row.get("entry_regime", "all")),
+    return (
+        str(
+            row.get(
+                "activation_context",
+                row.get("signal_cell", row.get("entry_regime", "all")),
+            )
         )
-    ) or "all"
+        or "all"
+    )
 
 
 def _signal_source_key_from_row(row: pd.Series, *, qualify_by_regime: bool = True) -> SignalSourceKey:
@@ -358,7 +361,6 @@ def _compute_probe_m_eff(
     return max(1.0, m_eff)
 
 
-
 def _event_results_from_fold_output(
     *,
     fold_id: int,
@@ -452,9 +454,7 @@ def compute_symbol_strategy_evidence(
         errors="coerce",
     ).fillna(0.0)
     frame["side"] = (
-        pd.to_numeric(frame.get("side", pd.Series(1, index=frame.index)), errors="coerce")
-        .fillna(1.0)
-        .astype(int)
+        pd.to_numeric(frame.get("side", pd.Series(1, index=frame.index)), errors="coerce").fillna(1.0).astype(int)
     )
     frame["expected_holding_bars"] = (
         pd.to_numeric(
@@ -466,9 +466,7 @@ def compute_symbol_strategy_evidence(
         .astype(int)
     )
     frame["fold_id"] = (
-        pd.to_numeric(frame.get("fold_id", pd.Series(0, index=frame.index)), errors="coerce")
-        .fillna(0)
-        .astype(int)
+        pd.to_numeric(frame.get("fold_id", pd.Series(0, index=frame.index)), errors="coerce").fillna(0).astype(int)
     )
     if "exit_idx" in frame.columns:
         exit_idx = pd.to_numeric(frame["exit_idx"], errors="coerce").fillna(np.inf).astype(float)
@@ -487,9 +485,7 @@ def compute_symbol_strategy_evidence(
     # 사전 일괄 벡터화: per-pair inner groupby 제거 (P2 최적화)
     _pair_fold_means: dict[tuple[str, str, str], list[float]] = {}
     _pfm_raw = (
-        frame.groupby(["symbol", "strategy_id", "activation_context", "fold_id"], sort=True)[
-            "incremental_bps"
-        ]
+        frame.groupby(["symbol", "strategy_id", "activation_context", "fold_id"], sort=True)["incremental_bps"]
         .mean()
         .reset_index()
     )
@@ -517,37 +513,30 @@ def compute_symbol_strategy_evidence(
                 effective_n = (weight_sum * weight_sum) / denom
         mean_gross = float(np.average(gross, weights=weights)) if weight_sum > 0.0 else 0.0
         mean_incremental = float(np.average(incremental, weights=weights)) if weight_sum > 0.0 else 0.0
-        fold_means = _pair_fold_means.get(
-            (str(symbol), str(strategy_id), str(activation_context)), []
-        )
+        fold_means = _pair_fold_means.get((str(symbol), str(strategy_id), str(activation_context)), [])
         positive_fold_ratio = (
-            float(sum(1 for value in fold_means if value > 0.0) / len(fold_means))
-            if fold_means
-            else 0.0
+            float(sum(1 for value in fold_means if value > 0.0) / len(fold_means)) if fold_means else 0.0
         )
         t_stat = _series_tstat(incremental)
         p_value = _one_sided_p_value(t_stat)
         boot_means = moving_block_bootstrap_mean(
             incremental.astype(np.float64, copy=False),
-            group.get("decision_idx", group.get("entry_idx", pd.Series(0, index=group.index)))
-            .to_numpy(dtype=np.int64, copy=False),
+            group.get("decision_idx", group.get("entry_idx", pd.Series(0, index=group.index))).to_numpy(
+                dtype=np.int64, copy=False
+            ),
             block_bars=int(getattr(cfg, "l1_bootstrap_block_bars", 6)),
             n_bootstrap=int(getattr(cfg, "l1_bootstrap_samples", 200)),
-            seed=seed + int.from_bytes(
+            seed=seed
+            + int.from_bytes(
                 sha256(f"{symbol}:{strategy_id}:{activation_context}".encode()).digest()[:4],
                 byteorder="big",
-            ) % 10_000,
+            )
+            % 10_000,
         )
         probability_positive = (
-            float(np.mean(boot_means > 0.0))
-            if boot_means.size > 0
-            else (1.0 if mean_incremental > 0.0 else 0.0)
+            float(np.mean(boot_means > 0.0)) if boot_means.size > 0 else (1.0 if mean_incremental > 0.0 else 0.0)
         )
-        lcb_net = (
-            float(np.quantile(boot_means, 0.05))
-            if boot_means.size > 0
-            else mean_incremental
-        )
+        lcb_net = float(np.quantile(boot_means, 0.05)) if boot_means.size > 0 else mean_incremental
         block_tstat = (
             float(mean_incremental / (np.std(boot_means, ddof=1) + 1e-12))
             if boot_means.size >= 2 and float(np.std(boot_means, ddof=1)) > 0.0
@@ -628,7 +617,8 @@ def compute_symbol_strategy_evidence(
 
         t_qf = time.perf_counter()
         adverse_lcb, adverse_n, adverse_defended = compute_adverse_regime_evidence(
-            group, cfg=cfg,
+            group,
+            cfg=cfg,
             fold_id=int(group["fold_id"].iloc[0]) if len(group) else 0,
             seed=seed,
         )
@@ -665,10 +655,7 @@ def compute_symbol_strategy_evidence(
     _m_eff: float | None = None
     if probe_diversity_corr is not None and raw_p_values:
         _m_eff = _compute_probe_m_eff(
-            groups=[
-                (e.key.symbol, e.key.strategy_id, str(e.key.activation_context))
-                for e in evidence_list
-            ],
+            groups=[(e.key.symbol, e.key.strategy_id, str(e.key.activation_context)) for e in evidence_list],
             diversity_corr=probe_diversity_corr,
         )
     q_values = _by_q_values(
@@ -716,35 +703,40 @@ def compute_symbol_strategy_evidence(
             logger.debug(
                 "[L1-EVIDENCE-PAIR] %s:%s:%s -> hard_eligible=%s structural_reasons=%s diag_flags=%s "
                 "eff_n=%.2f/%s gross=%.2f inc=%.2f t_stat=%.2f folds=%d/%d qw=%.4f lcb=%.4f",
-                ev_item.key.symbol, ev_item.key.strategy_id, ev_item.key.activation_context,
-                ev_item.hard_eligible, ev_item.structural_reasons, ev_item.diagnostic_flags,
-                ev_item.effective_n, min_eff_obs, ev_item.mean_gross_bps, ev_item.mean_incremental_bps,
-                ev_item.block_tstat_incremental, ev_item.n_folds, min_folds, ev_item.quality_weight, ev_item.lcb_net_bps
+                ev_item.key.symbol,
+                ev_item.key.strategy_id,
+                ev_item.key.activation_context,
+                ev_item.hard_eligible,
+                ev_item.structural_reasons,
+                ev_item.diagnostic_flags,
+                ev_item.effective_n,
+                min_eff_obs,
+                ev_item.mean_gross_bps,
+                ev_item.mean_incremental_bps,
+                ev_item.block_tstat_incremental,
+                ev_item.n_folds,
+                min_folds,
+                ev_item.quality_weight,
+                ev_item.lcb_net_bps,
             )
-    qualified_count = sum(
-        1 for ev in final_evidence
-        if ev.hard_eligible and ev.quality_weight > 0.0
-    )
+    qualified_count = sum(1 for ev in final_evidence if ev.hard_eligible and ev.quality_weight > 0.0)
     t_elapsed = time.perf_counter() - t_core
     logger.log(
         PERF,
-        "[PERF] signal_evidence n_pairs=%d n_qualified=%d "
-        "prep=%.4fs stats=%.4fs qualify=%.4fs took=%.4fs",
-        len(evidence_list), qualified_count,
-        t_prep_total, t_stats_total, t_qualify_total, t_elapsed,
+        "[PERF] signal_evidence n_pairs=%d n_qualified=%d prep=%.4fs stats=%.4fs qualify=%.4fs took=%.4fs",
+        len(evidence_list),
+        qualified_count,
+        t_prep_total,
+        t_stats_total,
+        t_qualify_total,
+        t_elapsed,
     )
     # 진단: registry 공집합 경고
     if qualified_count == 0 and final_evidence:
-        reasons: Counter[str] = Counter(
-            r for ev in final_evidence for r in ev.structural_reasons
-        )
-        qw_zero = sum(
-            1 for ev in final_evidence
-            if ev.hard_eligible and ev.quality_weight <= 0.0
-        )
+        reasons: Counter[str] = Counter(r for ev in final_evidence for r in ev.structural_reasons)
+        qw_zero = sum(1 for ev in final_evidence if ev.hard_eligible and ev.quality_weight <= 0.0)
         logger.warning(
-            "[L1-EVIDENCE] as_of=%d: %d pairs, 0 qualified. "
-            "structural_reasons=%s, hard_eligible_but_qw_zero=%d",
+            "[L1-EVIDENCE] as_of=%d: %d pairs, 0 qualified. structural_reasons=%s, hard_eligible_but_qw_zero=%d",
             registry_as_of_idx,
             len(final_evidence),
             dict(reasons),
@@ -765,9 +757,7 @@ def build_qualified_signal_registry(
     t_reg = time.perf_counter()
     grouped: dict[str, list[SymbolStrategyEvidence]] = defaultdict(list)
     # cfg=None → LCB gate disabled (backward compat for tests / callers without cfg)
-    breakeven: float | None = (
-        float(getattr(cfg, "l1_breakeven_floor_bps", 0.0)) if cfg is not None else None
-    )
+    breakeven: float | None = float(getattr(cfg, "l1_breakeven_floor_bps", 0.0)) if cfg is not None else None
     for item in evidence:
         hard_eligible = bool(getattr(item, "hard_eligible", getattr(item, "qualified", False)))
         quality_weight = float(getattr(item, "quality_weight", getattr(item, "reliability", 0.0)))
@@ -793,7 +783,10 @@ def build_qualified_signal_registry(
                     reject_reasons.append(f"lcb_fail({lcb_net_bps:.4f} <= {breakeven})")
                 logger.debug(
                     "[L1-REGISTRY-REJECT] %s:%s:%s -> reasons=%s",
-                    item.key.symbol, item.key.strategy_id, item.key.activation_context, ", ".join(reject_reasons)
+                    item.key.symbol,
+                    item.key.strategy_id,
+                    item.key.activation_context,
+                    ", ".join(reject_reasons),
                 )
     by_symbol: dict[str, tuple[SymbolStrategyEvidence, ...]] = {}
     ready_symbols: list[str] = []
@@ -844,7 +837,7 @@ def _registry_to_symbol_signals(
             continue
         best = evidence_items[0]
         adapted[symbol] = SymbolSignal(
-            raw_mu=float(best.mean_incremental_bps),   # gross → incremental (net) edge
+            raw_mu=float(best.mean_incremental_bps),  # gross → incremental (net) edge
             volatility=VOL_FLOOR,
             n_obs=max(round(best.effective_n), 0),
             t_stat=float(best.block_tstat_incremental),
@@ -898,9 +891,7 @@ def _candidate_output_to_signal_batch(
         }
     else:
         source_keys_relaxed = {
-            (item.key.symbol, item.key.strategy_id)
-            for items in registry.by_symbol.values()
-            for item in items
+            (item.key.symbol, item.key.strategy_id) for items in registry.by_symbol.values() for item in items
         }
     _t_keys_took = time.perf_counter() - _t_keys
     events: list[ValidatedSignalEvent] = []
@@ -937,12 +928,14 @@ def _candidate_output_to_signal_batch(
         _keyset = {f"{s}|{st}" for (s, st) in source_keys_relaxed}
     mask_reg = _composite.isin(_keyset).to_numpy()
     n_registry_pass = int(mask_reg.sum())
+
     # ── prediction arrays padded to n_raw with cascaded fallback ─────────────
     def _pad(arr: NDArray[np.float64], fb: NDArray[np.float64]) -> NDArray[np.float64]:
         out = fb.copy()
         sz = min(arr.size, n_raw)
         out[:sz] = arr[:sz]
         return out
+
     g = np.zeros(n_raw, dtype=np.float64)
     g[: min(gross.size, n_raw)] = gross[: min(gross.size, n_raw)]
     n_net_p = _pad(net, g)
@@ -965,12 +958,14 @@ def _candidate_output_to_signal_batch(
     # ── side / holding ────────────────────────────────────────────────────────
     side_raw = (
         pd.to_numeric(frame["side"], errors="coerce").fillna(1.0).to_numpy(dtype=np.float64)
-        if "side" in frame.columns else np.ones(n_raw, dtype=np.float64)
+        if "side" in frame.columns
+        else np.ones(n_raw, dtype=np.float64)
     )
     side_arr_v = np.where(side_raw >= 0, 1, -1).astype(np.int64)
     hold_raw = (
         pd.to_numeric(frame["expected_holding_bars"], errors="coerce").fillna(1.0).to_numpy(dtype=np.float64)
-        if "expected_holding_bars" in frame.columns else np.ones(n_raw, dtype=np.float64)
+        if "expected_holding_bars" in frame.columns
+        else np.ones(n_raw, dtype=np.float64)
     )
     hold_arr_v = np.maximum(hold_raw.astype(np.int64), 1)
     # ── quality_weight lookup (registry flattened once) ───────────────────────
@@ -1007,7 +1002,13 @@ def _candidate_output_to_signal_batch(
     _t_loop_took = time.perf_counter() - _t_loop
     logger.debug(
         "[L2-SIGNAL] gates: raw=%d registry=%d gross=%d threshold=%d decision=%d final=%d activation_floor=%.1f",
-        n_raw, n_registry_pass, n_gross_pass, n_threshold_pass, n_decision_pass, len(events), activation_floor_bps,
+        n_raw,
+        n_registry_pass,
+        n_gross_pass,
+        n_threshold_pass,
+        n_decision_pass,
+        len(events),
+        activation_floor_bps,
     )
     _t_sort = time.perf_counter()
     events.sort(key=lambda item: (item.decision_idx, item.symbol, item.strategy_id, item.activation_context))
@@ -1015,7 +1016,12 @@ def _candidate_output_to_signal_batch(
     logger.log(
         PERF,
         "[PERF] signal_batch_convert n_raw=%d n_out=%d pred=%.4fs keys=%.4fs loop=%.4fs sort=%.4fs total=%.4fs",
-        n_raw, len(events), _t_pred_took, _t_keys_took, _t_loop_took, _t_sort_took,
+        n_raw,
+        len(events),
+        _t_pred_took,
+        _t_keys_took,
+        _t_loop_took,
+        _t_sort_took,
         time.perf_counter() - _t_batch_total,
     )
     return ValidatedSignalBatch(
@@ -1041,15 +1047,9 @@ def select_outer_symbol_opportunities(
         if candidate is None:
             best_by_slot[slot] = event
             continue
-        current_score = (
-            event.expected_gross_bps
-            / max(event.expected_holding_bars, 1)
-            * max(event.quality_weight, 0.0)
-        )
+        current_score = event.expected_gross_bps / max(event.expected_holding_bars, 1) * max(event.quality_weight, 0.0)
         best_score = (
-            candidate.expected_gross_bps
-            / max(candidate.expected_holding_bars, 1)
-            * max(candidate.quality_weight, 0.0)
+            candidate.expected_gross_bps / max(candidate.expected_holding_bars, 1) * max(candidate.quality_weight, 0.0)
         )
         if current_score > best_score or (
             np.isclose(current_score, best_score)
@@ -1112,6 +1112,7 @@ class XsFactorSpreadDiagnostics:
 @dataclass(slots=True, frozen=True)
 class XsAdmissionBasis:
     """Factor-level admission basis for XS alpha portfolio-level gate substitution. [ADR_20260703_L1_XS]"""
+
     mean_bps: float
     lcb_bps: float
     sharpe: float
@@ -1126,11 +1127,10 @@ class FamilyRegimeDiagnostics:
     docs/specs/l1-regime-diversification-tf-expansion.md 참조. 모든 값은 gross
     (비용 미차감) — Phase 2 go/no-go 판정 시 l1_breakeven_floor_bps와 비교해야 함.
     """
+
     fold_id: int
     by_family_regime: dict[tuple[str, int], tuple[int, int, float, float, float, float, float]]
-    by_family_regime_side: (
-        dict[tuple[str, int, str], tuple[int, int, float, float, float, float, float]] | None
-    ) = None
+    by_family_regime_side: dict[tuple[str, int, str], tuple[int, int, float, float, float, float, float]] | None = None
 
 
 def _xs_rank_ic(
@@ -1171,7 +1171,10 @@ def compute_xs_factor_spread_diagnostics(
     seed: int = 0,
     xs_archetype: str = "xs_alpha",
     xs_family_fallback: tuple[str, ...] = (
-        "xs_momentum", "xs_carry", "xs_flow", "xs_oi_skew",
+        "xs_momentum",
+        "xs_carry",
+        "xs_flow",
+        "xs_oi_skew",
     ),
     min_bars: int = 8,
 ) -> XsFactorSpreadDiagnostics | None:
@@ -1285,7 +1288,11 @@ def compute_adverse_regime_evidence(
     if n_adverse < min_bars:
         return (None, n_adverse, True)
     stats = _family_regime_cell_stats(
-        adverse_g, cfg=cfg, fold_id=fold_id, seed=seed, min_bars=min_bars,
+        adverse_g,
+        cfg=cfg,
+        fold_id=fold_id,
+        seed=seed,
+        min_bars=min_bars,
     )
     if stats is None:
         return (None, n_adverse, True)
@@ -1322,7 +1329,11 @@ def compute_family_regime_edge_diagnostics(
     by_family_regime: dict[tuple[str, int], tuple[int, int, float, float, float, float, float]] = {}
     for (family, regime_code), g in df.groupby(["family", "entry_regime_code"], sort=True):
         stats_tuple = _family_regime_cell_stats(
-            g, cfg=cfg, fold_id=fold_id, seed=seed, min_bars=min_bars,
+            g,
+            cfg=cfg,
+            fold_id=fold_id,
+            seed=seed,
+            min_bars=min_bars,
         )
         if stats_tuple is None:
             continue
@@ -1330,9 +1341,7 @@ def compute_family_regime_edge_diagnostics(
     if not by_family_regime:
         return None
 
-    by_family_regime_side: (
-        dict[tuple[str, int, str], tuple[int, int, float, float, float, float, float]] | None
-    ) = None
+    by_family_regime_side: dict[tuple[str, int, str], tuple[int, int, float, float, float, float, float]] | None = None
     if split_side and "side" in df.columns:
         by_family_regime_side = {}
         side_numeric = pd.to_numeric(df["side"], errors="coerce")
@@ -1342,7 +1351,11 @@ def compute_family_regime_edge_diagnostics(
             ["family", "entry_regime_code", "_side_numeric"], sort=True
         ):
             stats_tuple = _family_regime_cell_stats(
-                g, cfg=cfg, fold_id=fold_id, seed=seed, min_bars=min_bars,
+                g,
+                cfg=cfg,
+                fold_id=fold_id,
+                seed=seed,
+                min_bars=min_bars,
             )
             if stats_tuple is None:
                 continue
@@ -1415,9 +1428,7 @@ def compute_probe_breadth_diagnostics(
         scored.sort(reverse=True)
         return [gi for _, gi in scored[:k]]
 
-    def _residual_decompose(
-        sel_mask: NDArray[np.bool_], topk: int = 3
-    ) -> tuple[float, float, float, int]:
+    def _residual_decompose(sel_mask: NDArray[np.bool_], topk: int = 3) -> tuple[float, float, float, int]:
         """multi-event bar만 사용해 beta/selection_alpha/residual_ic 분해."""
         all_idx = np.flatnonzero(sel_mask)
         if all_idx.size == 0:
@@ -1458,9 +1469,7 @@ def compute_probe_breadth_diagnostics(
             r_ic = 0.0
         return beta_edge, sel_alpha, r_ic, nres
 
-    beta_edge_bps, selection_alpha_bps, residual_ic, n_residual = _residual_decompose(
-        np.ones(n, dtype=bool)
-    )
+    beta_edge_bps, selection_alpha_bps, residual_ic, n_residual = _residual_decompose(np.ones(n, dtype=bool))
     residual_ic_tstat = (
         residual_ic * np.sqrt((n_residual - 2) / (1.0 - residual_ic * residual_ic))
         if abs(residual_ic) < 1.0 and n_residual > 2
@@ -1492,9 +1501,7 @@ def compute_probe_breadth_diagnostics(
                     continue
                 vol = float(volatility_2d[int(decision_idx_i), int(sidx)])
                 denom = max(vol, float(VOL_FLOOR))
-                risk_scores.append(
-                    (abs(float(sub_exp[ri])) * max(float(sub_qw[ri]), 0.0) / denom, ri)
-                )
+                risk_scores.append((abs(float(sub_exp[ri])) * max(float(sub_qw[ri]), 0.0) / denom, ri))
             if not risk_scores:
                 continue
             risk_scores.sort(reverse=True)
@@ -1608,9 +1615,9 @@ def _format_probe_diag(diag: ProbeBreadthDiagnostics) -> str:
         f"n_events={diag.n_events}",
         f"n_decisions={diag.n_decisions}",
         f"breadth={diag.avg_breadth_per_decision:.1f}",
-        f"gross_k3={diag.probe_gross_by_k.get(3,0):.2f}",
-        f"net_k3={diag.probe_net_by_k.get(3,0):.2f}",
-        f"gross_all={diag.probe_gross_by_k.get(-1,0):.2f}",
+        f"gross_k3={diag.probe_gross_by_k.get(3, 0):.2f}",
+        f"net_k3={diag.probe_net_by_k.get(3, 0):.2f}",
+        f"gross_all={diag.probe_gross_by_k.get(-1, 0):.2f}",
         f"rank_ic={diag.rank_ic_all:.4f}",
         f"ic_t={diag.rank_ic_tstat:.2f}",
         f"real_mean={diag.realized_mean_all:.2f}",
@@ -1623,12 +1630,8 @@ def _format_probe_diag(diag: ProbeBreadthDiagnostics) -> str:
     ]
     for rname, (rn, _rg, rnet, rpos, ric) in diag.regime_breakdown.items():
         rr = diag.regime_residual.get(rname)
-        rr_str = (
-            f"/beta{rr[0]:.1f}/alpha{rr[1]:+.1f}/resic{rr[2]:+.3f}" if rr is not None else ""
-        )
-        parts.append(
-            f"REG[{rname}]=n{rn}/net{rnet:.1f}/pos{rpos:.0%}/ic{ric:+.3f}{rr_str}"
-        )
+        rr_str = f"/beta{rr[0]:.1f}/alpha{rr[1]:+.1f}/resic{rr[2]:+.3f}" if rr is not None else ""
+        parts.append(f"REG[{rname}]=n{rn}/net{rnet:.1f}/pos{rpos:.0%}/ic{ric:+.3f}{rr_str}")
         ss = diag.regime_side_split.get(rname)
         if ss is not None:
             lf, lr, sr, nl, ns = ss
@@ -1639,18 +1642,14 @@ def _format_probe_diag(diag: ProbeBreadthDiagnostics) -> str:
 def _format_xs_spread_diag(diag: XsFactorSpreadDiagnostics) -> str:
     parts: list[str] = []
     for sid, (nbars, _nevents, _mean, _std, sharpe, lcb, ic, ict, lf, pp) in diag.by_factor.items():
-        parts.append(
-            f"XS[{sid}]=sh{sharpe:+.2f}/lcb{lcb:+.1f}/ic{ic:+.3f}/t{ict:+.2f}/n{nbars}/lf{lf:.0%}/pp{pp:.2f}"
-        )
+        parts.append(f"XS[{sid}]=sh{sharpe:+.2f}/lcb{lcb:+.1f}/ic{ic:+.3f}/t{ict:+.2f}/n{nbars}/lf{lf:.0%}/pp{pp:.2f}")
     return " | ".join(parts) if parts else ""
 
 
 def _format_family_regime_diag(diag: FamilyRegimeDiagnostics) -> str:
     parts: list[str] = []
     for (family, regime_code), (nbars, _nevents, mean, _std, sharpe, lcb, ic) in diag.by_family_regime.items():
-        parts.append(
-            f"{family}@R{regime_code}=gross{mean:+.1f}/sh{sharpe:+.2f}/lcb{lcb:+.1f}/ic{ic:+.3f}/n{nbars}"
-        )
+        parts.append(f"{family}@R{regime_code}=gross{mean:+.1f}/sh{sharpe:+.2f}/lcb{lcb:+.1f}/ic{ic:+.3f}/n{nbars}")
     return " | ".join(parts) if parts else ""
 
 
@@ -1658,9 +1657,15 @@ def _format_family_regime_side_diag(diag: FamilyRegimeDiagnostics) -> str:
     if diag.by_family_regime_side is None:
         return ""
     parts: list[str] = []
-    for (family, regime_code, side_label), (nbars, _nevents, mean, _std, sharpe, lcb, ic) in (
-        diag.by_family_regime_side.items()
-    ):
+    for (family, regime_code, side_label), (
+        nbars,
+        _nevents,
+        mean,
+        _std,
+        sharpe,
+        lcb,
+        ic,
+    ) in diag.by_family_regime_side.items():
         parts.append(
             f"{family}@R{regime_code}/{side_label}=gross{mean:+.1f}/sh{sharpe:+.2f}/lcb{lcb:+.1f}/ic{ic:+.3f}/n{nbars}"
         )
@@ -1751,9 +1756,7 @@ def evaluate_outer_signal_opportunities(
                 if symbol_idx is None or d_idx < 0 or d_idx >= volatility_2d.shape[0]:
                     continue
                 vol = (
-                    float(volatility_2d[d_idx, symbol_idx])
-                    if volatility_2d.ndim == 2
-                    else float(volatility_2d[d_idx])
+                    float(volatility_2d[d_idx, symbol_idx]) if volatility_2d.ndim == 2 else float(volatility_2d[d_idx])
                 )
                 denom = max(vol, VOL_FLOOR)
                 risk_scores_ts.append(
@@ -1823,8 +1826,12 @@ def evaluate_outer_signal_opportunities(
     rank_ic_tstat_val = 0.0
     if _l1_probe_diag_enabled() and logger.isEnabledFor(logging.DEBUG):
         diag = compute_probe_breadth_diagnostics(
-            merged=merged, volatility_2d=volatility_2d,
-            symbol_to_idx=symbol_to_idx, cfg=cfg, fold_id=fold_id, seed=seed,
+            merged=merged,
+            volatility_2d=volatility_2d,
+            symbol_to_idx=symbol_to_idx,
+            cfg=cfg,
+            fold_id=fold_id,
+            seed=seed,
             regime_code_1d=regime_code_1d,
         )
         if diag is not None:
@@ -1833,13 +1840,19 @@ def evaluate_outer_signal_opportunities(
             rank_ic_tstat_val = diag.rank_ic_tstat
     if _l1_xs_spread_diag_enabled() and logger.isEnabledFor(logging.DEBUG):
         xs_diag = compute_xs_factor_spread_diagnostics(
-            realized_event_results=realized_event_results, cfg=cfg, fold_id=fold_id, seed=seed,
+            realized_event_results=realized_event_results,
+            cfg=cfg,
+            fold_id=fold_id,
+            seed=seed,
         )
         if xs_diag is not None:
             logger.debug("[L1-XS-SPREAD-DIAG] %s", _format_xs_spread_diag(xs_diag))
     if _l1_family_regime_diag_enabled() and logger.isEnabledFor(logging.DEBUG):
         family_regime_diag = compute_family_regime_edge_diagnostics(
-            realized_event_results=realized_event_results, cfg=cfg, fold_id=fold_id, seed=seed,
+            realized_event_results=realized_event_results,
+            cfg=cfg,
+            fold_id=fold_id,
+            seed=seed,
             split_side=True,
         )
         if family_regime_diag is not None:
@@ -1944,7 +1957,7 @@ def evaluate_layer1_readiness(
     fold_ratio = float(ready_fold_count / len(fold_reports)) if fold_reports else 0.0
     match_ratio = float(np.mean(match_ratios)) if match_ratios else 0.0
     probe_bps = float(np.mean(probe_series)) if probe_series else 0.0
-    
+
     if bool(getattr(cfg, "l1_probe_lcb_pooled", True)):
         probe_lcb = _compute_pooled_probe_lcb(fold_reports, cfg, seed=seed)
     else:
@@ -1971,7 +1984,9 @@ def evaluate_layer1_readiness(
         ic_sign_ratio = float(np.mean([1.0 if v > 0.0 else 0.0 for v in valid_ics])) if valid_ics else 0.0
         logger.debug(
             "[L1-IC-DIAG] pooled_ic_tstat=%.3f ic_sign_ratio=%.3f n_folds=%d",
-            pooled_ic_tstat, ic_sign_ratio, len(fold_reports),
+            pooled_ic_tstat,
+            ic_sign_ratio,
+            len(fold_reports),
         )
 
     check_specs = (
@@ -2081,10 +2096,15 @@ def prefit_layer1_model(
     if "gross_event_bps" not in baseline_frame.columns and gross_targets is not None:
         baseline_frame["gross_event_bps"] = np.asarray(gross_targets, dtype=np.float64)
     if "side" in baseline_frame.columns and "expected_holding_bars" in baseline_frame.columns:
-        baseline_frame["holding_bucket"] = pd.to_numeric(
-            baseline_frame["expected_holding_bars"],
-            errors="coerce",
-        ).fillna(1).astype(int).map(_holding_bucket)
+        baseline_frame["holding_bucket"] = (
+            pd.to_numeric(
+                baseline_frame["expected_holding_bars"],
+                errors="coerce",
+            )
+            .fillna(1)
+            .astype(int)
+            .map(_holding_bucket)
+        )
         grouped = baseline_frame.groupby(["symbol", "side", "holding_bucket"], sort=False)
         for (symbol, side, holding_bucket), group in grouped:
             side_literal: Literal[-1, 1] = 1 if int(side) >= 0 else -1
@@ -2241,9 +2261,7 @@ def predict_layer1_signals_multi_tf(
         art = artifacts_by_tf[tf]
         # native_tf 필터: look-ahead 없음 — 이미 L1 단계에서 base grid 투영된 컬럼
         ev_tf: pd.DataFrame = (
-            candidate_events[candidate_events["native_tf"] == tf]
-            if has_native_tf
-            else candidate_events
+            candidate_events[candidate_events["native_tf"] == tf] if has_native_tf else candidate_events
         )
         if ev_tf.empty:
             logger.debug("[MULTI-TF] tf=%s candidate_events 비어있음 — skip", tf)
@@ -2301,12 +2319,8 @@ def predict_layer1_signals_multi_tf(
         )
 
     # registry_version: TF별 registry_version SHA 합성
-    _composite_rv = sha256(
-        "|".join(b.registry_version for b in batches).encode()
-    ).hexdigest()[:16]
-    _composite_mv = sha256(
-        "|".join(b.model_version for b in batches).encode()
-    ).hexdigest()[:16]
+    _composite_rv = sha256("|".join(b.registry_version for b in batches).encode()).hexdigest()[:16]
+    _composite_mv = sha256("|".join(b.model_version for b in batches).encode()).hexdigest()[:16]
 
     merged_start = min(b.start_idx for b in batches)
     merged_end = max(b.end_idx for b in batches)

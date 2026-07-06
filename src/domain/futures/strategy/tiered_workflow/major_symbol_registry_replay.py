@@ -69,8 +69,7 @@ def classify_major_symbol_registry_gap(
         return "admission_gap"
 
     observed_active = any(
-        getattr(s, "symbol", None) == symbol and getattr(s, "family", None) == family
-        for s in observed_sleeve_summaries
+        getattr(s, "symbol", None) == symbol and getattr(s, "family", None) == family for s in observed_sleeve_summaries
     )
     if not observed_active:
         return "activation_gap"
@@ -217,7 +216,9 @@ def run_major_symbol_registry_replay(
         _baseline_parity = True
         if variant.name == "baseline" and baseline_l2 is not None:
             _l2_parity_ok = assert_selection_replay_parity(
-                replay_evaluation=l2, final_evaluation=baseline_l2, tolerance=1e-6,
+                replay_evaluation=l2,
+                final_evaluation=baseline_l2,
+                tolerance=1e-6,
             )
             _l3_parity_ok = True if baseline_l3 is None else abs(l3.cagr - baseline_l3.cagr) < 1e-6
             _baseline_parity = _l2_parity_ok and _l3_parity_ok
@@ -286,41 +287,45 @@ def write_major_symbol_registry_replay_csv(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as fp:
         writer = csv.writer(fp)
-        writer.writerow((
-            "variant",
-            "seed",
-            "baseline_parity",
-            "l2_cagr",
-            "l3_total_return",
-            "l3_cagr",
-            "l3_mdd",
-            "l3_sharpe",
-            "l3_sortino",
-            "l3_trade_count",
-            "btc_mu_bullish_pct",
-            "eth_mu_bullish_pct",
-            "registry_census_count",
-            "adoption_passed",
-            "blocker_reason",
-        ))
+        writer.writerow(
+            (
+                "variant",
+                "seed",
+                "baseline_parity",
+                "l2_cagr",
+                "l3_total_return",
+                "l3_cagr",
+                "l3_mdd",
+                "l3_sharpe",
+                "l3_sortino",
+                "l3_trade_count",
+                "btc_mu_bullish_pct",
+                "eth_mu_bullish_pct",
+                "registry_census_count",
+                "adoption_passed",
+                "blocker_reason",
+            )
+        )
         for r in results:
-            writer.writerow((
-                r.variant,
-                r.seed,
-                r.baseline_parity,
-                r.l2_cagr,
-                r.l3_total_return,
-                r.l3_cagr,
-                r.l3_mdd,
-                r.l3_sharpe,
-                r.l3_sortino,
-                r.l3_trade_count,
-                r.btc_mu_bullish_pct,
-                r.eth_mu_bullish_pct,
-                len(r.registry_census),
-                r.adoption_passed,
-                r.blocker_reason,
-            ))
+            writer.writerow(
+                (
+                    r.variant,
+                    r.seed,
+                    r.baseline_parity,
+                    r.l2_cagr,
+                    r.l3_total_return,
+                    r.l3_cagr,
+                    r.l3_mdd,
+                    r.l3_sharpe,
+                    r.l3_sortino,
+                    r.l3_trade_count,
+                    r.btc_mu_bullish_pct,
+                    r.eth_mu_bullish_pct,
+                    len(r.registry_census),
+                    r.adoption_passed,
+                    r.blocker_reason,
+                )
+            )
 
 
 def _major_symbol_registry_replay_adoption_verdict(
@@ -347,11 +352,13 @@ def _major_symbol_registry_replay_adoption_verdict(
     for c in candidate_rows:
         for b in baseline_rows:
             if c.seed == b.seed:
-                deltas.append({
-                    "total_return_delta": c.l3_total_return - b.l3_total_return,
-                    "mdd_delta": c.l3_mdd - b.l3_mdd,
-                    "trade_ratio": c.l3_trade_count / max(b.l3_trade_count, 1),
-                })
+                deltas.append(
+                    {
+                        "total_return_delta": c.l3_total_return - b.l3_total_return,
+                        "mdd_delta": c.l3_mdd - b.l3_mdd,
+                        "trade_ratio": c.l3_trade_count / max(b.l3_trade_count, 1),
+                    }
+                )
                 break
 
     if not deltas:

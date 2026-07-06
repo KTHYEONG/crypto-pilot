@@ -300,20 +300,23 @@ def _precompute_enrich(
     crisis_active = overlay_ctx.crisis_active_1d[event_t].astype(np.float32)
 
     # arm: archetype-regime match affinity
-    archetype_arr = (
-        frame.get("archetype", pd.Series("", index=frame.index))
-        .fillna("")
-        .astype(str)
-        .values
-    )
+    archetype_arr = frame.get("archetype", pd.Series("", index=frame.index)).fillna("").astype(str).values
     _archetypes = [
-        "trend", "ts_mom", "mean_rev",
-        "carry_rev", "flow_rev", "unwind",
+        "trend",
+        "ts_mom",
+        "mean_rev",
+        "carry_rev",
+        "flow_rev",
+        "unwind",
         "beta_neut",
     ]
     _regimes = [
-        "bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile",
-        "transition", "crash",
+        "bull_quiet",
+        "bull_volatile",
+        "bear_quiet",
+        "bear_volatile",
+        "transition",
+        "crash",
     ]
     _arch_to_idx = {a: idx for idx, a in enumerate(_archetypes)}
     _reg_to_idx = {r: idx for idx, r in enumerate(_regimes)}
@@ -1061,25 +1064,17 @@ def build_candidate_dataset(
         if not exclude_leaky:
             idx_ret1 = feat_to_idx.get("sym_ret_1")
             if idx_ret1 is not None:
-                x_mat[valid_mask, idx_ret1] = sym_ret_1[
-                    event_t[valid_mask] - 1, event_sym_idxs[valid_mask]
-                ]
+                x_mat[valid_mask, idx_ret1] = sym_ret_1[event_t[valid_mask] - 1, event_sym_idxs[valid_mask]]
 
         idx_ret5 = feat_to_idx.get("sym_ret_5")
         if idx_ret5 is not None:
-            x_mat[valid_mask, idx_ret5] = sym_ret_5[
-                event_t[valid_mask] - 5, event_sym_idxs[valid_mask]
-            ]
+            x_mat[valid_mask, idx_ret5] = sym_ret_5[event_t[valid_mask] - 5, event_sym_idxs[valid_mask]]
         idx_vol20 = feat_to_idx.get("sym_vol_20")
         if idx_vol20 is not None:
-            x_mat[valid_mask, idx_vol20] = sym_vol_20[
-                event_t[valid_mask], event_sym_idxs[valid_mask]
-            ]
+            x_mat[valid_mask, idx_vol20] = sym_vol_20[event_t[valid_mask], event_sym_idxs[valid_mask]]
         idx_volume_z20 = feat_to_idx.get("sym_volume_z20")
         if idx_volume_z20 is not None:
-            x_mat[valid_mask, idx_volume_z20] = sym_volume_z20[
-                event_t[valid_mask], event_sym_idxs[valid_mask]
-            ]
+            x_mat[valid_mask, idx_volume_z20] = sym_volume_z20[event_t[valid_mask], event_sym_idxs[valid_mask]]
 
         if not exclude_leaky:
             idx_mkt_ret1 = feat_to_idx.get("mkt_ret_1")
@@ -1091,9 +1086,7 @@ def build_candidate_dataset(
             x_mat[valid_mask, idx_mkt_vol20] = mkt_vol_20[event_t[valid_mask]]
         idx_mkt_dispersion_20 = feat_to_idx.get("mkt_dispersion_20")
         if idx_mkt_dispersion_20 is not None:
-            x_mat[valid_mask, idx_mkt_dispersion_20] = mkt_dispersion_20[
-                event_t[valid_mask]
-            ]
+            x_mat[valid_mask, idx_mkt_dispersion_20] = mkt_dispersion_20[event_t[valid_mask]]
 
         if "ex_ante_cost_bps" in events.columns:
             _set_feat("ex_ante_cost_bps", events["ex_ante_cost_bps"].fillna(0).values.astype(np.float32))
@@ -1106,9 +1099,7 @@ def build_candidate_dataset(
 
         idx_funding_z20 = feat_to_idx.get("funding_z20")
         if idx_funding_z20 is not None:
-            x_mat[valid_mask, idx_funding_z20] = funding_z20[
-                event_t[valid_mask], event_sym_idxs[valid_mask]
-            ]
+            x_mat[valid_mask, idx_funding_z20] = funding_z20[event_t[valid_mask], event_sym_idxs[valid_mask]]
 
         curr = len(base_feat_names)
         x_mat[:, curr : curr + len(uni_feat_names)] = uni_matrix
@@ -1157,20 +1148,23 @@ def build_candidate_dataset(
                 arm = prepared.enrich_cache["arm"][row_ids]
             else:
                 regime_names_arr = np.asarray(regime_ctx.name_by_code, dtype=object)[regime_ctx.code_1d[event_t]]
-                archetype_arr = (
-                    events.get("archetype", pd.Series("", index=events.index))
-                    .fillna("")
-                    .astype(str)
-                    .values
-                )
+                archetype_arr = events.get("archetype", pd.Series("", index=events.index)).fillna("").astype(str).values
                 _archetypes = [
-                    "trend", "ts_mom", "mean_rev",
-                    "carry_rev", "flow_rev", "unwind",
+                    "trend",
+                    "ts_mom",
+                    "mean_rev",
+                    "carry_rev",
+                    "flow_rev",
+                    "unwind",
                     "beta_neut",
                 ]
                 _regimes = [
-                    "bull_quiet", "bull_volatile", "bear_quiet", "bear_volatile",
-                    "transition", "crash",
+                    "bull_quiet",
+                    "bull_volatile",
+                    "bear_quiet",
+                    "bear_volatile",
+                    "transition",
+                    "crash",
                 ]
                 _arch_to_idx = {a: idx for idx, a in enumerate(_archetypes)}
                 _reg_to_idx = {r: idx for idx, r in enumerate(_regimes)}
@@ -1199,9 +1193,7 @@ def build_candidate_dataset(
             _set_sig("overlay_mult_entry", overlay_ctx.overlay_mult_1d[event_t].astype(np.float32))
             crisis_idx = feat_to_idx.get("crisis_active_entry")
             if crisis_idx is not None:
-                x_mat[valid_mask, crisis_idx] = (
-                    overlay_ctx.crisis_active_1d[event_t[valid_mask]].astype(np.float32)
-                )
+                x_mat[valid_mask, crisis_idx] = overlay_ctx.crisis_active_1d[event_t[valid_mask]].astype(np.float32)
             _set_sig("funding_side_alignment", fsa)
             _set_sig("score_pct_variant_hist_90d", score_pct)
             _set_sig("archetype_regime_match", arm)
@@ -1355,22 +1347,23 @@ def build_candidate_dataset(
         bootstrap_n = int(getattr(cfg, "signal_prequalify_bootstrap_n", 1000))
         seed = int(getattr(cfg, "seed", 42))
         edge_col = "edge_after_hurdle_bps" if "edge_after_hurdle_bps" in kept_events.columns else None
-        if (
-            edge_col is not None
-            and "family" in kept_events.columns
-            and "variant" in kept_events.columns
-        ):
-            variant_keys = (
-                kept_events["family"].astype(str) + ":" + kept_events["variant"].astype(str)
-            ).to_numpy(dtype=object)
+        if edge_col is not None and "family" in kept_events.columns and "variant" in kept_events.columns:
+            variant_keys = (kept_events["family"].astype(str) + ":" + kept_events["variant"].astype(str)).to_numpy(
+                dtype=object
+            )
             edge_values = pd.to_numeric(kept_events[edge_col], errors="coerce").to_numpy(
                 dtype=np.float64,
                 copy=False,
             )
-            holding_bars = pd.to_numeric(
-                kept_events.get("expected_holding_bars", pd.Series(1, index=kept_events.index)),
-                errors="coerce",
-            ).fillna(1).clip(lower=1).to_numpy(dtype=np.int32, copy=False)
+            holding_bars = (
+                pd.to_numeric(
+                    kept_events.get("expected_holding_bars", pd.Series(1, index=kept_events.index)),
+                    errors="coerce",
+                )
+                .fillna(1)
+                .clip(lower=1)
+                .to_numpy(dtype=np.int32, copy=False)
+            )
             disq_arr = np.zeros(kept_events.shape[0], dtype=bool)
             for key in pd.unique(variant_keys):
                 key_mask = variant_keys == key

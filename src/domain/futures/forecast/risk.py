@@ -1,4 +1,5 @@
 """RiskForecast builder — Ledoit-Wolf cov + BTC beta (strict causal) + residual var."""
+
 from __future__ import annotations
 
 import logging

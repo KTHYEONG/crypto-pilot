@@ -98,4 +98,3 @@ def select_probe_source_tf(sym_maps: Mapping[str, Any], target_tf: str) -> str |
     if not compatible:
         return None
     return min(compatible, key=hours_per_bar)
-

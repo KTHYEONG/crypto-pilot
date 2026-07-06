@@ -24,6 +24,7 @@ from src.domain.futures.strategy.cs_rank import VOL_FLOOR
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_model_output(
     symbols_list: list[str],
     net_bps_list: list[float],
@@ -42,6 +43,7 @@ def _flat_close_2d(n_bars: int, n_syms: int, price: float = 50_000.0) -> NDArray
 # ---------------------------------------------------------------------------
 # TI4: Happy path
 # ---------------------------------------------------------------------------
+
 
 class TestHappyPath:
     """TI4 — 2 symbols, 충분한 obs, gate 느슨하게(t_stat_floor=0.0)."""
@@ -193,6 +195,7 @@ class TestHappyPath:
 # TI5: QC reject — n_obs < min_obs
 # ---------------------------------------------------------------------------
 
+
 class TestQCReject:
     """TI5 — 1건 obs로 min_obs=5 → valid=False."""
 
@@ -238,6 +241,7 @@ class TestQCReject:
 # TI6: beta_vs_market_1d=None → beta_btc is None
 # ---------------------------------------------------------------------------
 
+
 class TestNoBeta:
     """TI6 — beta_vs_market_1d=None이면 모든 심볼의 beta_btc is None."""
 
@@ -267,6 +271,7 @@ class TestNoBeta:
 # ---------------------------------------------------------------------------
 # TI7: empty events → empty dict
 # ---------------------------------------------------------------------------
+
 
 class TestEmptyEvents:
     """TI7 — events 빈 DataFrame → 빈 dict 반환."""
@@ -387,4 +392,3 @@ class TestConstantSignal:
         # Assert
         assert "BTC" in result
         assert result["BTC"].t_stat == 0.0
-

@@ -33,9 +33,8 @@ def _family_regime_rows(
     regime_code: int,
     gross_bps: float,
 ) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for b in range(n_bars):
-        rows.append({
+    rows = [
+        {
             "decision_idx": b,
             "symbol": "A",
             "family": family,
@@ -43,7 +42,9 @@ def _family_regime_rows(
             "side": 1,
             "score_z": 1.0,
             "realized_side_adjusted_gross_bps": gross_bps,
-        })
+        }
+        for b in range(n_bars)
+    ]
     return rows
 
 
@@ -69,7 +70,10 @@ class TestFamilyRegimeDiagCompute:
         cfg = _make_cfg()
 
         result = compute_family_regime_edge_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=0,
         )
 
         assert result is not None
@@ -89,7 +93,11 @@ class TestFamilyRegimeDiagCompute:
         cfg = _make_cfg()
 
         result = compute_family_regime_edge_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0, min_bars=8,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=0,
+            min_bars=8,
         )
 
         assert result is not None
@@ -101,7 +109,10 @@ class TestFamilyRegimeDiagCompute:
         cfg = _make_cfg()
 
         result = compute_family_regime_edge_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=0,
         )
 
         assert result is None
@@ -112,7 +123,10 @@ class TestFamilyRegimeDiagCompute:
         cfg = _make_cfg()
 
         result = compute_family_regime_edge_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=0,
         )
 
         assert result is None
@@ -123,10 +137,16 @@ class TestFamilyRegimeDiagCompute:
         cfg = _make_cfg()
 
         r1 = compute_family_regime_edge_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=123,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=123,
         )
         r2 = compute_family_regime_edge_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=123,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=123,
         )
 
         assert r1 is not None
@@ -141,13 +161,14 @@ class TestFamilyRegimeDiagCompute:
         cfg = _make_cfg()
 
         result = compute_family_regime_edge_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=0,
         )
 
         assert result is not None
-        _n_bars, _n_events, _mean, std, sharpe, _lcb, _ic = result.by_family_regime[
-            ("residual_reversion", 0)
-        ]
+        _n_bars, _n_events, _mean, std, sharpe, _lcb, _ic = result.by_family_regime[("residual_reversion", 0)]
         assert std == 0.0
         assert np.isfinite(sharpe)
 
@@ -177,9 +198,8 @@ def _family_regime_rows_with_side(
     gross_bps: float,
     side: int,
 ) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for b in range(n_bars):
-        rows.append({
+    rows = [
+        {
             "decision_idx": b,
             "symbol": "A",
             "family": family,
@@ -187,7 +207,9 @@ def _family_regime_rows_with_side(
             "side": side,
             "score_z": 1.0,
             "realized_side_adjusted_gross_bps": gross_bps,
-        })
+        }
+        for b in range(n_bars)
+    ]
     return rows
 
 
@@ -199,7 +221,11 @@ class TestFamilyRegimeDiagSplitSide:
         cfg = _make_cfg()
 
         result = compute_family_regime_edge_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0, split_side=True,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=0,
+            split_side=True,
         )
 
         assert result is not None
@@ -217,7 +243,10 @@ class TestFamilyRegimeDiagSplitSide:
         cfg = _make_cfg()
 
         result = compute_family_regime_edge_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=0,
         )
 
         assert result is not None
@@ -229,7 +258,11 @@ class TestFamilyRegimeDiagSplitSide:
         cfg = _make_cfg()
 
         result = compute_family_regime_edge_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0, split_side=True,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=0,
+            split_side=True,
         )
 
         assert result is not None
@@ -242,7 +275,11 @@ class TestFamilyRegimeDiagSplitSide:
         cfg = _make_cfg()
 
         result = compute_family_regime_edge_diagnostics(
-            realized_event_results=frame, cfg=cfg, fold_id=0, seed=0, split_side=True,
+            realized_event_results=frame,
+            cfg=cfg,
+            fold_id=0,
+            seed=0,
+            split_side=True,
         )
 
         assert result is not None

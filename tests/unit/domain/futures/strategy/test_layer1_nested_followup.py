@@ -53,9 +53,11 @@ def test_run_l1_nested_swf_emits_new_runtime_tables() -> None:
     outer_folds = (WFFold(0, 4, 4, 6, 6, 10),)
 
     import concurrent.futures
+
     class SafeThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
         def __init__(self, *args, mp_context=None, **kwargs):
             super().__init__(*args, **kwargs)
+
     with (
         patch("src.domain.futures.strategy.config.resolve_purge_and_embargo_bars", return_value=(1, 0)),
         patch("src.domain.futures.strategy.tiered_workflow.build_l1_swf_folds", return_value=()),
@@ -303,19 +305,21 @@ def _make_events(
 ) -> pd.DataFrame:
     rng = np.random.default_rng(42)
     gross = rng.normal(5.0, 3.0, n)
-    return pd.DataFrame({
-        "symbol": symbol,
-        "strategy_id": strategy_id,
-        "activation_context": regime,
-        "entry_regime": regime,
-        "gross_event_bps": gross,
-        # Set baseline to 0 so incremental = gross (positive on average)
-        "baseline_gross_bps": np.zeros(n, dtype=np.float64),
-        "side": 1,
-        "expected_holding_bars": 4,
-        "fold_id": fold_id,
-        "uniqueness_weight": 1.0,
-    })
+    return pd.DataFrame(
+        {
+            "symbol": symbol,
+            "strategy_id": strategy_id,
+            "activation_context": regime,
+            "entry_regime": regime,
+            "gross_event_bps": gross,
+            # Set baseline to 0 so incremental = gross (positive on average)
+            "baseline_gross_bps": np.zeros(n, dtype=np.float64),
+            "side": 1,
+            "expected_holding_bars": 4,
+            "fold_id": fold_id,
+            "uniqueness_weight": 1.0,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -374,10 +378,13 @@ def test_compute_evidence_qualified_with_two_folds(
     cfg_factory: Callable[..., CandidateStrategyConfig],
 ) -> None:
     """l1_pair_min_folds=2, cell이 2 fold 출현 → qualified=True."""
-    events = pd.concat([
-        _make_events(20, regime="all", fold_id=0),
-        _make_events(20, regime="all", fold_id=1),
-    ], ignore_index=True)
+    events = pd.concat(
+        [
+            _make_events(20, regime="all", fold_id=0),
+            _make_events(20, regime="all", fold_id=1),
+        ],
+        ignore_index=True,
+    )
     cfg = cfg_factory(l1_qualify_by_regime=False, l1_pair_min_folds=2, l1_pair_min_effective_obs=10.0)
 
     from src.domain.futures.strategy.tiered_workflow.signal_selection import compute_symbol_strategy_evidence
@@ -434,14 +441,16 @@ def test_evaluate_outer_time_series_ic_single_symbol(
         registry_version="test",
         model_version="test",
     )
-    realized = pd.DataFrame({
-        "entry_idx": [di + 1 for di in decision_idxs],  # entry_idx = decision_idx + 1
-        "symbol": "BTC",
-        "strategy_id": "strat:v1",
-        "activation_context": "all",
-        "realized_side_adjusted_gross_bps": real_bps.tolist(),
-        "exit_idx": [di + 4 for di in decision_idxs],
-    })
+    realized = pd.DataFrame(
+        {
+            "entry_idx": [di + 1 for di in decision_idxs],  # entry_idx = decision_idx + 1
+            "symbol": "BTC",
+            "strategy_id": "strat:v1",
+            "activation_context": "all",
+            "realized_side_adjusted_gross_bps": real_bps.tolist(),
+            "exit_idx": [di + 4 for di in decision_idxs],
+        }
+    )
     fold = WFFold(fit_start=0, fit_end=10, cal_start=10, cal_end=10, oos_start=10, oos_end=20)
     cfg = cfg_factory(l1_opp_ic_mode="time_series", l1_min_cross_section=2, l1_probe_top_k=3)
     vol = np.ones((30, len(sample_aligned.symbols)), dtype=np.float64) * 0.01
@@ -608,9 +617,11 @@ def test_run_l1_nested_swf_builds_prequential_snapshots_once() -> None:
     )
 
     import concurrent.futures
+
     class SafeThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
         def __init__(self, *args, mp_context=None, **kwargs):
             super().__init__(*args, **kwargs)
+
     with (
         patch("src.domain.futures.strategy.config.resolve_purge_and_embargo_bars", return_value=(1, 0)),
         patch(
@@ -670,9 +681,7 @@ def test_evidence_grid_folds_multiplied_by_outer_count() -> None:
     assert first_ev_oos < first_outer_oos, (
         f"첫 evidence oos_start({first_ev_oos}) < 첫 outer oos_start({first_outer_oos}) 기대"
     )
-    assert ev_block < outer_block, (
-        f"evidence block_len({ev_block}) < outer block_len({outer_block}) 기대"
-    )
+    assert ev_block < outer_block, f"evidence block_len({ev_block}) < outer block_len({outer_block}) 기대"
 
 
 def test_evidence_grid_max_folds_cap_applied() -> None:
@@ -717,6 +726,7 @@ def test_format_layer1_outer_fold_table_renders_none_ic_as_na() -> None:
 # ---------------------------------------------------------------------------
 # Fix 1 — warmup 격자 검증
 # ---------------------------------------------------------------------------
+
 
 def test_build_l1_nested_swf_folds_warmup_shifts_first_oos() -> None:
     from src.domain.futures.strategy.walk_forward import build_l1_nested_swf_folds
@@ -788,6 +798,7 @@ def test_build_l1_nested_swf_folds_causality_invariant() -> None:
 # Fix 2 — config validate
 # ---------------------------------------------------------------------------
 
+
 def test_config_validate_rejects_zero_warmup_blocks() -> None:
     # Arrange / Act / Assert
     with pytest.raises(ValueError, match="l1_outer_warmup_blocks"):
@@ -797,6 +808,7 @@ def test_config_validate_rejects_zero_warmup_blocks() -> None:
 # ---------------------------------------------------------------------------
 # Fix 3 — 진단 로깅
 # ---------------------------------------------------------------------------
+
 
 def test_compute_symbol_strategy_evidence_logs_warning_when_zero_qualified(
     caplog: pytest.LogCaptureFixture,
@@ -809,18 +821,20 @@ def test_compute_symbol_strategy_evidence_logs_warning_when_zero_qualified(
 
     # Arrange: effective_n<5를 강제하는 소량 합성 데이터
     cfg = CandidateStrategyConfig()
-    events = pd.DataFrame({
-        "symbol": ["BTCUSDT"] * 3,
-        "strategy_id": ["trend:v1"] * 3,
-        "activation_context": ["all"] * 3,
-        "gross_event_bps": [1.0, 2.0, -1.0],
-        "fold_id": [0, 0, 0],
-        "exit_idx": [10, 20, 30],
-        "entry_idx": [1, 11, 21],
-        "uniqueness_weight": [1.0, 1.0, 1.0],
-        "expected_holding_bars": [5, 5, 5],
-        "side": [1, 1, 1],
-    })
+    events = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"] * 3,
+            "strategy_id": ["trend:v1"] * 3,
+            "activation_context": ["all"] * 3,
+            "gross_event_bps": [1.0, 2.0, -1.0],
+            "fold_id": [0, 0, 0],
+            "exit_idx": [10, 20, 30],
+            "entry_idx": [1, 11, 21],
+            "uniqueness_weight": [1.0, 1.0, 1.0],
+            "expected_holding_bars": [5, 5, 5],
+            "side": [1, 1, 1],
+        }
+    )
 
     # Act
     with caplog.at_level(
@@ -846,18 +860,20 @@ def test_compute_symbol_strategy_evidence_deterministic_seeding(monkeypatch: pyt
     )
 
     cfg = CandidateStrategyConfig(l1_bootstrap_samples=100)
-    events = pd.DataFrame({
-        "symbol": ["BTCUSDT"] * 10,
-        "strategy_id": ["trend:v1"] * 10,
-        "activation_context": ["all"] * 10,
-        "gross_event_bps": [1.0, 2.0, -1.0, 3.0, 0.5, -0.2, 1.1, -1.5, 0.9, -0.4],
-        "fold_id": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        "exit_idx": [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
-        "entry_idx": [1, 11, 21, 31, 41, 51, 61, 71, 81, 91],
-        "uniqueness_weight": [1.0] * 10,
-        "expected_holding_bars": [5] * 10,
-        "side": [1] * 10,
-    })
+    events = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"] * 10,
+            "strategy_id": ["trend:v1"] * 10,
+            "activation_context": ["all"] * 10,
+            "gross_event_bps": [1.0, 2.0, -1.0, 3.0, 0.5, -0.2, 1.1, -1.5, 0.9, -0.4],
+            "fold_id": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            "exit_idx": [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+            "entry_idx": [1, 11, 21, 31, 41, 51, 61, 71, 81, 91],
+            "uniqueness_weight": [1.0] * 10,
+            "expected_holding_bars": [5] * 10,
+            "side": [1] * 10,
+        }
+    )
 
     # Run 1: with default hash
     res1 = compute_symbol_strategy_evidence(
@@ -895,18 +911,20 @@ def test_compute_symbol_strategy_evidence_none_and_empty_types() -> None:
     )
 
     cfg = CandidateStrategyConfig(l1_bootstrap_samples=10)
-    events = pd.DataFrame({
-        "symbol": ["BTCUSDT", ""],
-        "strategy_id": ["trend:v1", "trend:v2"],
-        "activation_context": ["all", "all"],
-        "gross_event_bps": [1.0, 2.0],
-        "fold_id": [0, 0],
-        "exit_idx": [10, 20],
-        "entry_idx": [1, 11],
-        "uniqueness_weight": [1.0, 1.0],
-        "expected_holding_bars": [5, 5],
-        "side": [1, 1],
-    })
+    events = pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT", ""],
+            "strategy_id": ["trend:v1", "trend:v2"],
+            "activation_context": ["all", "all"],
+            "gross_event_bps": [1.0, 2.0],
+            "fold_id": [0, 0],
+            "exit_idx": [10, 20],
+            "entry_idx": [1, 11],
+            "uniqueness_weight": [1.0, 1.0],
+            "expected_holding_bars": [5, 5],
+            "side": [1, 1],
+        }
+    )
 
     # Act & Assert: Should run successfully without encoding/hashing errors
     res = compute_symbol_strategy_evidence(
@@ -916,4 +934,3 @@ def test_compute_symbol_strategy_evidence_none_and_empty_types() -> None:
         registry_as_of_idx=100,
     )
     assert len(res) >= 0
-

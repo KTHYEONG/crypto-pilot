@@ -14,6 +14,7 @@ from src.domain.futures.universe.observations import build_pit_market_observatio
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 def _make_klines(
     symbol: str,
     timestamps: list[pd.Timestamp],
@@ -80,9 +81,7 @@ def _four_hour_range(start: str, periods: int) -> list[pd.Timestamp]:
     Returns:
         List of UTC-aware Timestamps.
     """
-    return list(
-        pd.date_range(start, periods=periods, freq="4h", tz="UTC")
-    )
+    return list(pd.date_range(start, periods=periods, freq="4h", tz="UTC"))
 
 
 _LAG_2H = pd.Timedelta("2h")
@@ -93,6 +92,7 @@ _LOOKBACK = 30
 # ---------------------------------------------------------------------------
 # Scenario 3: Information availability (available_at = observed_at + lag)
 # ---------------------------------------------------------------------------
+
 
 class TestScenario3InformationAvailability:
     """Verify that available_at == observed_at + availability_lag for every row."""
@@ -122,8 +122,7 @@ class TestScenario3InformationAvailability:
         assert not obs.empty, "observations must not be empty"
         delta = obs["available_at"] - obs["observed_at"]
         assert (delta == _LAG_2H).all(), (
-            f"All rows must satisfy available_at == observed_at + {_LAG_2H}; "
-            f"found deltas: {delta.unique()}"
+            f"All rows must satisfy available_at == observed_at + {_LAG_2H}; found deltas: {delta.unique()}"
         )
 
     def test_available_at_equals_observed_at_when_zero_lag(self) -> None:
@@ -150,6 +149,7 @@ class TestScenario3InformationAvailability:
 # Scenario 7: Missing data and recovery
 # ---------------------------------------------------------------------------
 
+
 class TestScenario7MissingDataAndRecovery:
     """Verify NaN during gap, recovery after sufficient bars, no 0-fill."""
 
@@ -172,9 +172,7 @@ class TestScenario7MissingDataAndRecovery:
 
         # Assert: all ADV30 rows should be NaN because < 20 valid days
         adv_rows = obs[obs["metric"] == "adv30"]
-        assert adv_rows["value"].isna().all(), (
-            "ADV30 must be NaN when fewer than min_observations valid days"
-        )
+        assert adv_rows["value"].isna().all(), "ADV30 must be NaN when fewer than min_observations valid days"
 
     def test_metrics_recover_after_sufficient_bars_accumulate(self) -> None:
         """ADV30 becomes non-NaN once min_observations valid days accumulate."""
@@ -195,9 +193,7 @@ class TestScenario7MissingDataAndRecovery:
 
         # Assert: at least one ADV30 row is non-NaN (recovery)
         adv_rows = obs[obs["metric"] == "adv30"]
-        assert adv_rows["value"].notna().any(), (
-            "ADV30 must recover to non-NaN once sufficient days accumulate"
-        )
+        assert adv_rows["value"].notna().any(), "ADV30 must recover to non-NaN once sufficient days accumulate"
 
     def test_gap_not_filled_with_zero_volume(self) -> None:
         """Quote volumes must never be silently replaced with 0 in observations."""
@@ -229,9 +225,7 @@ class TestScenario7MissingDataAndRecovery:
         # The gap dates should not appear as observed_at in the output
         gap_start = pd.Timestamp("2024-02-10 00:00:00", tz="UTC")
         gap_end = pd.Timestamp("2024-02-14 23:59:59", tz="UTC")
-        gap_obs = adv_rows[
-            (adv_rows["observed_at"] > gap_start) & (adv_rows["observed_at"] < gap_end)
-        ]
+        gap_obs = adv_rows[(adv_rows["observed_at"] > gap_start) & (adv_rows["observed_at"] < gap_end)]
         assert gap_obs.empty, "No observations should exist for the gap period"
 
 
@@ -239,15 +233,14 @@ class TestScenario7MissingDataAndRecovery:
 # Additional targeted tests
 # ---------------------------------------------------------------------------
 
+
 class TestEdgeCases:
     """Edge-case and contract-level tests for observations builder."""
 
     def test_empty_klines_returns_empty_frame(self) -> None:
         """Empty klines with empty funding must return an empty DataFrame."""
         # Arrange
-        klines = pd.DataFrame(
-            columns=["symbol", "timestamp", "open", "high", "low", "close", "volume", "quote_volume"]
-        )
+        klines = pd.DataFrame(columns=["symbol", "timestamp", "open", "high", "low", "close", "volume", "quote_volume"])
         funding = pd.DataFrame(columns=["symbol", "funding_time", "funding_rate"])
 
         # Act
@@ -260,7 +253,13 @@ class TestEdgeCases:
         # Assert
         assert obs.empty
         assert list(obs.columns) == [
-            "instrument_id", "metric", "observed_at", "available_at", "value", "source", "confidence"
+            "instrument_id",
+            "metric",
+            "observed_at",
+            "available_at",
+            "value",
+            "source",
+            "confidence",
         ]
 
     def test_duplicate_timestamp_raises_value_error(self) -> None:
@@ -292,9 +291,7 @@ class TestEdgeCases:
 
         # Assert
         adv_rows = obs[obs["metric"] == "adv30"]
-        assert adv_rows["value"].isna().all(), (
-            "ADV30 must be NaN with fewer than min_observations valid days"
-        )
+        assert adv_rows["value"].isna().all(), "ADV30 must be NaN with fewer than min_observations valid days"
 
     def test_vol30_annualized_correctly(self) -> None:
         """vol30 = std(log_returns) * sqrt(6*365) for a known input."""

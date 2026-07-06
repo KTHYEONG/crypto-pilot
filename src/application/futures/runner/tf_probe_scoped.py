@@ -36,15 +36,10 @@ def _run_tf_probe_stage_scoped(
     )
     from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 
-    resolved_scope: Sequence[str] = (
-        scope_symbols if scope_symbols is not None else _TF_PROBE_FALLBACK_SYMBOLS
-    )
+    resolved_scope: Sequence[str] = scope_symbols if scope_symbols is not None else _TF_PROBE_FALLBACK_SYMBOLS
     _max_scope = 20
     if len(resolved_scope) > _max_scope:
-        raise ValueError(
-            f"scope_symbols has {len(resolved_scope)} symbols, "
-            f"exceeds max {_max_scope} (OOM guard)"
-        )
+        raise ValueError(f"scope_symbols has {len(resolved_scope)} symbols, exceeds max {_max_scope} (OOM guard)")
     if not OPT_FUTURES_CONFIG.get("ENABLE_TF_PROBE", False):
         return None
 
@@ -110,9 +105,14 @@ def _run_tf_probe_stage_scoped(
         )
         audit_table_rows: list[list[str]] = [
             [
-                row.tf, str(row.computed), str(row.pass_tstat), str(row.pass_fdr),
-                str(row.pass_net_edge), str(row.pass_fold_consistency),
-                str(row.winning), row.top_fail_reason,
+                row.tf,
+                str(row.computed),
+                str(row.pass_tstat),
+                str(row.pass_fdr),
+                str(row.pass_net_edge),
+                str(row.pass_fold_consistency),
+                str(row.winning),
+                row.top_fail_reason,
             ]
             for row in gate_rows
         ]
@@ -156,10 +156,21 @@ def probe_stage_result_to_raw_manifest(
             row = {
                 k: getattr(cell, k)
                 for k in (
-                    "symbol", "family", "variant", "archetype", "tf",
-                    "n_obs", "n_events", "ic_mean", "ic_tstat_hac",
-                    "ic_fold_sign_consistency", "alpha_half_life_h",
-                    "net_edge_bps", "turnover_per_year", "vr_label", "hurst",
+                    "symbol",
+                    "family",
+                    "variant",
+                    "archetype",
+                    "tf",
+                    "n_obs",
+                    "n_events",
+                    "ic_mean",
+                    "ic_tstat_hac",
+                    "ic_fold_sign_consistency",
+                    "alpha_half_life_h",
+                    "net_edge_bps",
+                    "turnover_per_year",
+                    "vr_label",
+                    "hurst",
                     "passed_fdr",
                 )
                 if hasattr(cell, k)

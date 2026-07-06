@@ -1,4 +1,5 @@
 """Tests for L1/L2 layer-specific Optuna parameter spaces."""
+
 from __future__ import annotations
 
 

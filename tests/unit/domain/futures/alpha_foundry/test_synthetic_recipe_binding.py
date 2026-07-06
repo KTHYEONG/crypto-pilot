@@ -104,12 +104,20 @@ class TestSyntheticRecipeFallback:
         recipes_b: dict[str, object] = {}
 
         bindings_a = bind_panels_to_alpha_recipes(
-            panels=[panel], recipes=recipes_a, timeframe="4h",
-            max_recipes_per_family=64, include_families=(), exclude_families=(),
+            panels=[panel],
+            recipes=recipes_a,
+            timeframe="4h",
+            max_recipes_per_family=64,
+            include_families=(),
+            exclude_families=(),
         )
         bindings_b = bind_panels_to_alpha_recipes(
-            panels=[panel], recipes=recipes_b, timeframe="4h",
-            max_recipes_per_family=64, include_families=(), exclude_families=(),
+            panels=[panel],
+            recipes=recipes_b,
+            timeframe="4h",
+            max_recipes_per_family=64,
+            include_families=(),
+            exclude_families=(),
         )
         assert bindings_a[0].recipe_id == bindings_b[0].recipe_id
 

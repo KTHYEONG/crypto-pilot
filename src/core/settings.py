@@ -42,9 +42,9 @@ BINANCE_SECRET = os.getenv("BINANCE_SECRET", "")
 
 # === Canonical transaction-cost model (single source of truth, per-side, Binance USDⓈ-M VIP0) ===
 # 아래 *_BPS 상수가 유일한 수정 지점입니다. Decimal rate는 여기서 파생되므로 직접 수정하지 마세요.
-MAKER_FEE_BPS: float = 2.0   # 0.0200% — Maker(지정가) 수수료 per side
-TAKER_FEE_BPS: float = 5.0   # 0.0500% — Taker(시장가) 수수료 per side
-SLIPPAGE_BPS: float = 2.0    # 시장가 주문 예상 슬리피지 per side
+MAKER_FEE_BPS: float = 2.0  # 0.0200% — Maker(지정가) 수수료 per side
+TAKER_FEE_BPS: float = 5.0  # 0.0500% — Taker(시장가) 수수료 per side
+SLIPPAGE_BPS: float = 2.0  # 시장가 주문 예상 슬리피지 per side
 FUNDING_FEE_BPS_PER_8H: float = 1.0  # 펀딩비 per 8h (Binance Default)
 FILLS_PER_ROUND_TRIP: int = 2  # 진입 1회 + 청산 1회
 
@@ -77,6 +77,7 @@ def round_trip_cost_bps(*, taker_entry: bool = True, taker_exit: bool = True) ->
     entry_fee = TAKER_FEE_BPS if taker_entry else MAKER_FEE_BPS
     exit_fee = TAKER_FEE_BPS if taker_exit else MAKER_FEE_BPS
     return entry_fee + exit_fee + FILLS_PER_ROUND_TRIP * SLIPPAGE_BPS
+
 
 # ============================================================
 # RealTrader Futures 설정

@@ -28,6 +28,7 @@ from src.domain.futures.strategy.walk_forward import WFFold
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
+
 def _make_aligned(
     symbols: list[str],
     n_bars: int,
@@ -62,24 +63,25 @@ def _make_folds(fit_start: int, fit_end: int, oos_start: int, oos_end: int) -> t
 
 def _make_layer1_result(**overrides: Any) -> Layer1Result:
     """Construct a minimal Layer1Result with sensible defaults."""
-    defaults: dict[str, Any] = dict(
-        signals_per_fold=(),
-        oos_stacked={},
-        pooled_ic=0.0,
-        pooled_tstat=0.0,
-        breadth=0.0,
-        valid_coverage=0.0,
-        fold_pass_ratio=0.0,
-        gate_passed=True,
-        n_valid=0,
-        n_total=2,
-        n_trade_scope=2,
-    )
+    defaults: dict[str, Any] = {
+        "signals_per_fold": (),
+        "oos_stacked": {},
+        "pooled_ic": 0.0,
+        "pooled_tstat": 0.0,
+        "breadth": 0.0,
+        "valid_coverage": 0.0,
+        "fold_pass_ratio": 0.0,
+        "gate_passed": True,
+        "n_valid": 0,
+        "n_total": 2,
+        "n_trade_scope": 2,
+    }
     defaults.update(overrides)
     return Layer1Result(**defaults)
 
 
 # ── lifecycle computation helper (extracted for unit-testability) ─────────────
+
 
 def _compute_lifecycle(
     aligned: Any,
@@ -98,9 +100,7 @@ def _compute_lifecycle(
     if _active is None:
         _active = np.ones((len(aligned.datetimes), len(aligned.symbols)), dtype=np.bool_)
 
-    ready_syms: set[str] = (
-        set(deployment_registry.ready_symbols) if deployment_registry is not None else set()
-    )
+    ready_syms: set[str] = set(deployment_registry.ready_symbols) if deployment_registry is not None else set()
     records: list[SymbolLifecycleRecord] = []
     for col, sym in enumerate(aligned.symbols):
         mask_slice = _active[l1_fit_start:l1_fit_end, col]
@@ -137,6 +137,7 @@ def _compute_lifecycle(
 
 # ── S1: promoted ──────────────────────────────────────────────────────────────
 
+
 class TestS1Promoted:
     """Symbol present in ready_symbols → fold_status='promoted'."""
 
@@ -145,7 +146,7 @@ class TestS1Promoted:
         n_bars = 100
         active_mask = np.zeros((n_bars, 2), dtype=np.bool_)
         active_mask[10:, 0] = True  # sym "A" eligible from bar 10
-        active_mask[5:, 1] = True   # sym "B" eligible from bar 5
+        active_mask[5:, 1] = True  # sym "B" eligible from bar 5
         aligned = _make_aligned(["A", "B"], n_bars, active_mask)
         folds = _make_folds(fit_start=0, fit_end=80, oos_start=80, oos_end=100)
 
@@ -199,6 +200,7 @@ class TestS1Promoted:
 
 # ── S9: not_evaluated ─────────────────────────────────────────────────────────
 
+
 class TestS9NotEvaluated:
     """Symbol with all-False active_mask in fit window → not_evaluated."""
 
@@ -206,7 +208,7 @@ class TestS9NotEvaluated:
         # Arrange
         n_bars = 100
         active_mask = np.zeros((n_bars, 2), dtype=np.bool_)
-        active_mask[:, 0] = True   # sym "A" — fully eligible
+        active_mask[:, 0] = True  # sym "A" — fully eligible
         # sym "B" — active_mask stays all-False
         aligned = _make_aligned(["A", "B"], n_bars, active_mask)
         folds = _make_folds(fit_start=0, fit_end=80, oos_start=80, oos_end=100)
@@ -246,6 +248,7 @@ class TestS9NotEvaluated:
 
 
 # ── stage6 path: active_mask=None ─────────────────────────────────────────────
+
 
 class TestStage6Path:
     """active_mask=None (stage6) → synthetic all-True mask; promo_at = bar[fit_start].date()."""
@@ -292,6 +295,7 @@ class TestStage6Path:
 
 # ── lifecycle gate injection ───────────────────────────────────────────────────
 
+
 class TestLifecycleGate:
     """Gate logic: symbols with promotion_available_at > l2_start are removed from oos_stacked."""
 
@@ -306,9 +310,7 @@ class TestLifecycleGate:
             return oos_stacked
         l2_date = l2_start if isinstance(l2_start, date) else l2_start.date()
         late = {
-            r.symbol
-            for r in lifecycle
-            if r.promotion_available_at is not None and r.promotion_available_at > l2_date
+            r.symbol for r in lifecycle if r.promotion_available_at is not None and r.promotion_available_at > l2_date
         }
         if not late:
             return oos_stacked
@@ -382,6 +384,7 @@ class TestLifecycleGate:
 
 
 # ── Layer1Result field integration ────────────────────────────────────────────
+
 
 class TestLayer1ResultIntegration:
     """Verify symbol_lifecycle field is accepted by frozen dataclass and default is ()."""

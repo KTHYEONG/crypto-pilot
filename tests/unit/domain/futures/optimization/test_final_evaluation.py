@@ -68,9 +68,7 @@ def test_phase_runner_includes_phase_c_diagnostics(
         assert top_k == 5
         return {"phase": "phase_c", "robustness_score": 0.5, "stability_cv": 0.1}
 
-    monkeypatch.setattr(
-        "src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop
-    )
+    monkeypatch.setattr("src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop)
     monkeypatch.setattr(
         "src.domain.futures.optimization.workflow.evaluate_phase_c_robustness",
         _fake_phase_c,
@@ -257,9 +255,7 @@ def test_phase_b_top_candidates_prioritize_calmar_and_constraints(
     assert len(top) == 2
     assert str(top[0]["trial"].user_attrs.get("phase", "")).lower() == "phase_b"
     assert str(top[1]["trial"].user_attrs.get("phase", "")).lower() == "phase_b"
-    assert float(top[0]["trial"].user_attrs["calmar_lcb"]) >= float(
-        top[1]["trial"].user_attrs["calmar_lcb"]
-    )
+    assert float(top[0]["trial"].user_attrs["calmar_lcb"]) >= float(top[1]["trial"].user_attrs["calmar_lcb"])
 
 
 def test_phase_b_strategy_mode_prefers_active_trials(

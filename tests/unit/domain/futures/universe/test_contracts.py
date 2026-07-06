@@ -29,11 +29,19 @@ def test_contract_enums_expose_expected_values() -> None:
     assert DataConfidence.UNKNOWN.value == "unknown"
 
     expected_codes = {
-        "ELIGIBLE", "NOT_ONBOARDED", "STATUS_NOT_TRADING", "STALE_MARKET_DATA",
-        "MISSING_RULES", "ORDER_TOO_SMALL", "COST_TOO_HIGH",
-        "INSUFFICIENT_OBSERVATIONS", "DATA_CONFIDENCE_LOW",
+        "ELIGIBLE",
+        "NOT_ONBOARDED",
+        "STATUS_NOT_TRADING",
+        "STALE_MARKET_DATA",
+        "MISSING_RULES",
+        "ORDER_TOO_SMALL",
+        "COST_TOO_HIGH",
+        "INSUFFICIENT_OBSERVATIONS",
+        "DATA_CONFIDENCE_LOW",
         # Phase 3 additions
-        "DATA_INTEGRITY_FAIL", "LEVERAGED_TOKEN", "ADV_FLOOR_FAIL",
+        "DATA_INTEGRITY_FAIL",
+        "LEVERAGED_TOKEN",
+        "ADV_FLOOR_FAIL",
     }
     assert {code.value for code in EligibilityCode} == expected_codes
 
@@ -170,9 +178,7 @@ def test_execution_rules_and_reason_contracts_keep_all_metadata_fields() -> None
 def test_eligibility_snapshot_shapes_are_dense_and_indexed() -> None:
     """Cube contracts must expose explicit calendar and instrument axes."""
 
-    calendar = pd.DatetimeIndex(
-        [pd.Timestamp("2025-01-01T00:00:00Z"), pd.Timestamp("2025-01-01T04:00:00Z")]
-    )
+    calendar = pd.DatetimeIndex([pd.Timestamp("2025-01-01T00:00:00Z"), pd.Timestamp("2025-01-01T04:00:00Z")])
     instrument_ids = ("BTCUSDT", "ETHUSDT")
     eligible = np.array([[True, False], [True, True]], dtype=bool)
     entry_block = np.array([[False, True], [False, False]], dtype=bool)

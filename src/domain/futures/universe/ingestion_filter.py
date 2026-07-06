@@ -185,9 +185,7 @@ def select_ingestion_symbols(
                         if ts_ms > 0 and ts_ms < 4_000_000_000_000:
                             from datetime import datetime
 
-                            delivery = datetime.fromtimestamp(
-                                ts_ms / 1000.0, tz=UTC
-                            ).date()
+                            delivery = datetime.fromtimestamp(ts_ms / 1000.0, tz=UTC).date()
                     except (ValueError, TypeError, OverflowError):
                         pass
             # For staleness: if symbol is not in ticker_24h at all AND
@@ -211,9 +209,7 @@ def select_ingestion_symbols(
                 excluded = True
                 reason = "lifetime_adv_floor"
 
-        report_rows.append(
-            {"symbol": symbol, "excluded": excluded, "reason": reason}
-        )
+        report_rows.append({"symbol": symbol, "excluded": excluded, "reason": reason})
         if not excluded:
             download_symbols.append(symbol)
 
@@ -227,9 +223,7 @@ def select_ingestion_symbols(
         len(download_symbols),
     )
     if n_excluded > 0:
-        reason_counts = (
-            exclusion_df[exclusion_df["excluded"]]["reason"].value_counts().to_dict()
-        )
+        reason_counts = exclusion_df[exclusion_df["excluded"]]["reason"].value_counts().to_dict()
         logger.info("ingestion_filter exclusion reasons: %s", reason_counts)
 
     return download_symbols, exclusion_df
