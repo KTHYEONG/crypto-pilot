@@ -773,8 +773,8 @@ def _build_run_config(args: argparse.Namespace) -> FuturesRunConfig:
     return build_run_config_from_args(payload)
 
 
-def _resolve_quarterly_window(reference_date: str | None) -> QuarterlyWindow:
-    fetch_start, is_start, oos_start, end_date = get_quarterly_window(reference_date)
+def _resolve_quarterly_window(reference_date: str | None, *, tf: str = "4h") -> QuarterlyWindow:
+    fetch_start, is_start, oos_start, end_date = get_quarterly_window(reference_date, tf=tf)
     return QuarterlyWindow(
         fetch_start=fetch_start,
         is_start=is_start,
@@ -787,7 +787,7 @@ def _resolve_quarterly_window(reference_date: str | None) -> QuarterlyWindow:
     )
 
 
-def _resolve_layered_window(reference_date: str | None) -> Any:
+def _resolve_layered_window(reference_date: str | None, *, tf: str = "4h") -> Any:
     from src.domain.futures.optimization.opt_config import get_layered_window
 
     parsed_reference = (
@@ -795,7 +795,7 @@ def _resolve_layered_window(reference_date: str | None) -> Any:
         if reference_date is not None
         else None
     )
-    return get_layered_window(reference_date=parsed_reference)
+    return get_layered_window(reference_date=parsed_reference, tf=tf)
 
 
 def _window_with_fetch_start(window: QuarterlyWindow, fetch_start_date: date) -> QuarterlyWindow:
@@ -2242,7 +2242,7 @@ def _run_strategy_stage(
     effective_trade_syms = []
     tiered_window = None
     if use_tiered:
-        tiered_window = layered_window or _resolve_layered_window(run_config.date)
+        tiered_window = layered_window or _resolve_layered_window(run_config.date, tf=run_config.timeframe)
         base_scope = _resolve_base_symbol_scope(
             valid_symbols=data_stage.valid_symbols,
             strategy_maps=full_strategy_maps,
@@ -3406,9 +3406,9 @@ def run_pipeline(
     pipeline_t0 = time.perf_counter()
     # Step 1) parse run window
     t_window = time.perf_counter()
-    window = _resolve_quarterly_window(run_config.date)
+    window = _resolve_quarterly_window(run_config.date, tf=run_config.timeframe)
     layered_window = (
-        _resolve_layered_window(run_config.date)
+        _resolve_layered_window(run_config.date, tf=run_config.timeframe)
         if OPT_FUTURES_CONFIG.get("USE_CS_RANK_ENGINE", False)
         else None
     )
