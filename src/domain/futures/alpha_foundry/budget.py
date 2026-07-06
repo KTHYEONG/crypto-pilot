@@ -1,4 +1,4 @@
-"""Alpha Foundry L1 budget allocation helpers. [ADR_20260706_ALPHA_FOUNDRY_SYNC]"""
+"""Alpha Foundry L1 budget allocation helpers. [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]"""
 
 from __future__ import annotations
 
@@ -23,6 +23,20 @@ def build_l1_verification_units(
     initial_fold_budget: int,
 ) -> tuple[L1VerificationUnit, ...]:
     survivors = [e for e in evidences if e.gate_passed]
+
+    bucket_counts: dict[tuple[str, str], int] = {}
+    for ev in survivors:
+        recipe = recipes.get(ev.recipe_id)
+        if recipe is None:
+            continue
+        key = (recipe.family, recipe.timeframe)
+        bucket_counts[key] = bucket_counts.get(key, 0) + 1
+    for key, count in bucket_counts.items():
+        if count > top_k_per_family_tf:
+            raise ValueError(
+                f"L0 diversity budget violated for bucket {key[0]}:{key[1]}: "
+                f"{count} > {top_k_per_family_tf}"
+            )
 
     units: list[L1VerificationUnit] = []
     for ev in survivors:

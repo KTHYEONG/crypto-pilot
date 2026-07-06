@@ -1,4 +1,4 @@
-"""Alpha Foundry contracts and stage state machines. [ADR_20260706_ALPHA_FOUNDRY_SYNC]"""
+"""Alpha Foundry contracts and stage state machines. [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY]"""
 
 from __future__ import annotations
 
@@ -6,6 +6,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias
+
+import numpy as np
+from numpy.typing import NDArray
 
 AlphaArchetype: TypeAlias = Literal[
     "trend",
@@ -27,11 +30,12 @@ CheapGateRejectReason: TypeAlias = Literal[
     "weak_tstat",
     "excess_cost_drag",
     "excess_turnover",
-    "duplicate_signal",
     "invalid_shape",
     "lookahead_risk",
     "missing_required_field",
 ]
+
+BucketKey: TypeAlias = tuple[str, str]  # (family, timeframe)
 
 
 def _validate_non_empty_keys(mapping: Mapping[str, object], name: str) -> None:
@@ -92,8 +96,6 @@ class CheapGateEvidence:
     nw_tstat: float
     block_lcb_bps: float
     rank_ic: float
-    monotonic_bucket_score: float
-    regime_edges_bps: Mapping[str, float]
     cost_drag_ratio: float
     turnover_per_year: float
     novelty_corr_max: float
@@ -101,6 +103,55 @@ class CheapGateEvidence:
     compute_cost_score: float
     gate_passed: bool
     reject_reasons: tuple[CheapGateRejectReason, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class DiversitySelectionResult:
+    bucket_key: BucketKey
+    ranked_recipe_ids: tuple[str, ...]
+    selected_recipe_ids: tuple[str, ...]
+    redundant_recipe_ids: tuple[str, ...]
+    redundant_reason_by_id: Mapping[str, str]  # recipe_id -> 최대상관 상대 recipe_id
+    bucket_corr: NDArray[np.float64]
+    bucket_eff_test_count: float
+
+
+@dataclass(slots=True, frozen=True)
+class CrossBucketDiversityResult:
+    final_selected_recipe_ids: tuple[str, ...]
+    demoted_recipe_ids: tuple[str, ...]  # Stage2 selected였으나 Stage3에서 강등
+    demoted_reason_by_id: Mapping[str, str]
+    cross_bucket_corr: NDArray[np.float64]
+    global_eff_test_count: float
+
+
+@dataclass(slots=True, frozen=True)
+class AlphaFoundryEvidenceRow:
+    run_id: str
+    timeframe: str
+    family: str
+    variant: str
+    recipe_id: str
+    archetype: str
+    n_events: int
+    effective_n: float
+    mean_net_bps: float
+    nw_tstat: float
+    block_lcb_bps: float
+    rank_ic: float
+    incremental_rank_ic: float
+    cost_drag_ratio: float
+    turnover_per_year: float
+    compute_cost_score: float
+    gate_passed: bool
+    reject_reasons: str  # "|".join(reject_reasons)
+    bucket_key: str  # f"{family}:{timeframe}"
+    bucket_rank: int
+    selected_for_l1: bool
+    redundant_with: str  # "" if none
+    bucket_eff_test_count: float
+    global_eff_test_count: float
+    created_at_ms: int
 
 
 @dataclass(slots=True, frozen=True)

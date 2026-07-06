@@ -113,8 +113,6 @@ def make_passing_evidence(recipe_id: str = "trend_ma__ema_12_72__4h") -> CheapGa
         nw_tstat=2.5,
         block_lcb_bps=2.0,
         rank_ic=0.05,
-        monotonic_bucket_score=0.6,
-        regime_edges_bps={},
         cost_drag_ratio=0.3,
         turnover_per_year=50.0,
         novelty_corr_max=0.3,
@@ -136,8 +134,6 @@ def make_rejected_evidence(recipe_id: str = "bad_recipe") -> CheapGateEvidence:
         nw_tstat=0.5,
         block_lcb_bps=-2.0,
         rank_ic=0.01,
-        monotonic_bucket_score=0.3,
-        regime_edges_bps={},
         cost_drag_ratio=0.9,
         turnover_per_year=500.0,
         novelty_corr_max=0.9,
@@ -145,6 +141,44 @@ def make_rejected_evidence(recipe_id: str = "bad_recipe") -> CheapGateEvidence:
         compute_cost_score=0.5,
         gate_passed=False,
         reject_reasons=("insufficient_events", "weak_tstat"),
+    )
+
+
+def _make_l0_artifacts(evidences: list[CheapGateEvidence]) -> object:
+    from src.domain.futures.alpha_foundry.contracts import AlphaFoundryEvidenceRow
+    from src.domain.futures.alpha_foundry.pipeline import AlphaFoundryL0Artifacts
+
+    passed_ids = tuple(e.recipe_id for e in evidences if e.gate_passed)
+    reject_reason_counts: dict[str, int] = {}
+    for ev in evidences:
+        for reason in ev.reject_reasons:
+            reject_reason_counts[reason] = reject_reason_counts.get(reason, 0) + 1
+
+    evidence_rows = [
+        AlphaFoundryEvidenceRow(
+            run_id="test", timeframe=ev.timeframe, family="", variant="",
+            recipe_id=ev.recipe_id, archetype="", n_events=ev.n_events,
+            effective_n=ev.effective_n, mean_net_bps=ev.mean_net_bps,
+            nw_tstat=ev.nw_tstat, block_lcb_bps=ev.block_lcb_bps,
+            rank_ic=ev.rank_ic, incremental_rank_ic=ev.incremental_rank_ic,
+            cost_drag_ratio=ev.cost_drag_ratio,
+            turnover_per_year=ev.turnover_per_year,
+            compute_cost_score=ev.compute_cost_score,
+            gate_passed=ev.gate_passed,
+            reject_reasons="|".join(ev.reject_reasons),
+            bucket_key=f":{ev.timeframe}", bucket_rank=0,
+            selected_for_l1=ev.gate_passed, redundant_with="",
+            bucket_eff_test_count=1.0, global_eff_test_count=1.0,
+            created_at_ms=1000,
+        )
+        for ev in evidences
+    ]
+
+    return AlphaFoundryL0Artifacts(
+        evidences=tuple(evidences),
+        passed_recipe_ids=passed_ids,
+        reject_reason_counts=reject_reason_counts,
+        evidence_rows=tuple(evidence_rows),
     )
 
 
@@ -191,11 +225,11 @@ class TestAlphaFoundryAuditMode:
 
     def test_audit_all_panels_preserved(self, mocker: MockerFixture) -> None:
         mocker.patch(
-            "src.domain.futures.alpha_foundry.cheap_gate.evaluate_alpha_cheap_gate_batch",
-            return_value=[
+            "src.domain.futures.alpha_foundry.pipeline.run_alpha_foundry_l0_pipeline",
+            return_value=_make_l0_artifacts([
                 make_passing_evidence("r1"),
                 make_rejected_evidence("r2"),
-            ],
+            ]),
         )
 
         panel_pass = make_panel(variant="ema_12_72_4h", recipe_id="r1")
@@ -238,11 +272,11 @@ class TestAlphaFoundryGateMode:
 
     def test_gate_keeps_only_passed_bound_panels(self, mocker: MockerFixture) -> None:
         mocker.patch(
-            "src.domain.futures.alpha_foundry.cheap_gate.evaluate_alpha_cheap_gate_batch",
-            return_value=[
+            "src.domain.futures.alpha_foundry.pipeline.run_alpha_foundry_l0_pipeline",
+            return_value=_make_l0_artifacts([
                 make_passing_evidence("r1"),
                 make_rejected_evidence("r2"),
-            ],
+            ]),
         )
 
         panel_pass = make_panel(variant="ema_12_72_4h", recipe_id="r1")
@@ -281,8 +315,8 @@ class TestAlphaFoundryGateMode:
 
     def test_gate_zero_survivors_returns_empty_panels(self, mocker: MockerFixture) -> None:
         mocker.patch(
-            "src.domain.futures.alpha_foundry.cheap_gate.evaluate_alpha_cheap_gate_batch",
-            return_value=[make_rejected_evidence("r1")],
+            "src.domain.futures.alpha_foundry.pipeline.run_alpha_foundry_l0_pipeline",
+            return_value=_make_l0_artifacts([make_rejected_evidence("r1")]),
         )
 
         panel = make_panel(recipe_id="r1")
@@ -313,8 +347,8 @@ class TestAlphaFoundryReportFailure:
 
     def test_report_write_failure_raises_oserror(self, mocker: MockerFixture) -> None:
         mocker.patch(
-            "src.domain.futures.alpha_foundry.cheap_gate.evaluate_alpha_cheap_gate_batch",
-            return_value=[make_passing_evidence("r1")],
+            "src.domain.futures.alpha_foundry.pipeline.run_alpha_foundry_l0_pipeline",
+            return_value=_make_l0_artifacts([make_passing_evidence("r1")]),
         )
         mocker.patch(
             "pathlib.Path.mkdir",
@@ -416,8 +450,8 @@ class TestRunAlphaFoundryGateWithBindings:
 
     def test_unmatched_audit_panel_excluded_from_evidence(self, mocker: MockerFixture) -> None:
         mocker.patch(
-            "src.domain.futures.alpha_foundry.cheap_gate.evaluate_alpha_cheap_gate_batch",
-            return_value=[make_passing_evidence("r1")],
+            "src.domain.futures.alpha_foundry.pipeline.run_alpha_foundry_l0_pipeline",
+            return_value=_make_l0_artifacts([make_passing_evidence("r1")]),
         )
         panel_pass = make_panel(recipe_id="r1")
         panel_unmatched = make_panel(family="unknown", variant="no_match_4h", recipe_id="r3")
