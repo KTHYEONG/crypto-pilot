@@ -140,9 +140,9 @@ def test_run_per_tf_l1_passes_all_families_when_no_tf_config() -> None:
 
 
 def test_resolve_tf_gate_overrides_empty_when_no_overrides() -> None:
-    """Scenario 3: No overrides → empty dict."""
+    """Scenario 3: No overrides (instance-level None and no defaults for TF) → empty dict."""
     cfg = _make_cfg(per_tf_gate_overrides=None)
-    overrides = resolve_tf_gate_overrides(cfg, "1h")
+    overrides = resolve_tf_gate_overrides(cfg, "4h")
     assert overrides == {}
 
 
