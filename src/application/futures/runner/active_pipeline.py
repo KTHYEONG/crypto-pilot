@@ -1,3 +1,4 @@
+"""Alpha Foundry bridge report logging in _run_strategy_stage. [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING]"""
 from __future__ import annotations
 
 import sys
@@ -2321,6 +2322,20 @@ def _run_strategy_stage(
     )
     bridge_elapsed = time.perf_counter() - t_bridge_start
     strategy_steps["bridge"] = bridge_elapsed
+    af_report = getattr(ml_out, "alpha_foundry_report", None)
+    if af_report is not None:
+        _logger.info(
+            "[ALPHA-FOUNDRY] mode=%s n_panels_in=%d n_bound=%d n_passed=%d n_rejected=%d elapsed=%.4fs",
+            af_report.mode,
+            af_report.n_panels_in,
+            af_report.n_bound_panels,
+            af_report.n_passed,
+            af_report.n_rejected,
+            af_report.elapsed_sec,
+        )
+        if af_report.mode == "gate" and af_report.n_passed <= 0:
+            _logger.info("[ALPHA-FOUNDRY] gate produced zero survivors; stopping before tiered L1")
+            return None
     _rss_pre_gc = _get_rss_mb()
     _logger.debug("[MEM] stage=pre_gc rss=%.0fMB", _rss_pre_gc)
     gc.collect()

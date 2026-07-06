@@ -1,3 +1,4 @@
+"""Strategy runtime bridge with Alpha Foundry L0 gate wiring. [ADR_20260706_ALPHA_FOUNDRY_MAIN_WIRING]"""
 from __future__ import annotations
 
 import dataclasses
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from src.domain.futures.strategy.candidate_contracts import CandidateSignalPanel
     from src.domain.futures.strategy.common.alignment import AlignedMarketData
     from src.domain.futures.strategy.config import CandidateStrategyConfig, StrategyConfig
+
 
 _logger = logging.getLogger(__name__)
 
@@ -781,6 +783,7 @@ class CandidatePipelineOutput:
     oos_start: int | None = None
     oos_end: int | None = None
     fold_oos_boundaries: tuple[tuple[int, int], ...] | None = None
+    alpha_foundry_report: Any | None = None
 
 
 def run_candidate_strategy_for_universe(
@@ -789,6 +792,7 @@ def run_candidate_strategy_for_universe(
     *,
     strategy_cfg: StrategyConfig | None = None,
     preloaded_data_maps: dict[str, dict[str, Any]] | None = None,
+    alpha_foundry_config: Any | None = None,
     silent: bool = False,
 ) -> CandidatePipelineOutput:
     """Run candidate strategy pipeline and return candidate output."""
@@ -798,6 +802,11 @@ def run_candidate_strategy_for_universe(
     import time
     from dataclasses import replace
 
+    from src.domain.futures.alpha_foundry.bridge_helpers import (
+        bind_panels_to_alpha_recipes,
+        run_alpha_foundry_l0_gate,
+    )
+    from src.domain.futures.alpha_foundry.recipes import build_alpha_recipe_catalog
     from src.domain.futures.strategy.ablation import apply_variant_promotions
     from src.domain.futures.strategy.candidate_dataset import (
         build_candidate_dataset,
@@ -816,6 +825,7 @@ def run_candidate_strategy_for_universe(
     )
     from src.domain.futures.strategy.common.alignment import align_data_maps
     from src.domain.futures.strategy.config import resolve_purge_and_embargo_bars, with_max_holding_bars
+    from src.domain.futures.strategy.execution_cost import ExecutionCostModel
     from src.domain.futures.strategy.rule_diagnostics import compute_rule_diagnostics
     from src.domain.futures.strategy.rule_signals import (
         build_rule_signal_panels,
@@ -824,6 +834,7 @@ def run_candidate_strategy_for_universe(
     from src.domain.futures.strategy.walk_forward import build_walk_forward_folds
 
     bridge_t0 = time.perf_counter()
+    alpha_foundry_report: Any | None = None
     bridge_prof: dict[str, float] = {
         "align": 0.0,
         "rules": 0.0,
@@ -928,6 +939,37 @@ def run_candidate_strategy_for_universe(
     )
     bridge_prof["rules"] = time.perf_counter() - t_step
     _sample_rss("rules")
+    if alpha_foundry_config is not None and getattr(alpha_foundry_config, "mode", "off") != "off":
+        t_step = time.perf_counter()
+        recipes_seq = build_alpha_recipe_catalog(
+            timeframe=tf,
+            include_families=alpha_foundry_config.include_families,
+            exclude_families=alpha_foundry_config.exclude_families,
+            max_recipes_per_family=alpha_foundry_config.max_recipes_per_family,
+        )
+        recipes = {recipe.recipe_id: recipe for recipe in recipes_seq}
+        bindings = bind_panels_to_alpha_recipes(
+            panels=panels,
+            recipes=recipes,
+            timeframe=tf,
+            max_recipes_per_family=alpha_foundry_config.max_recipes_per_family,
+            include_families=alpha_foundry_config.include_families,
+            exclude_families=alpha_foundry_config.exclude_families,
+        )
+        af_result = run_alpha_foundry_l0_gate(
+            panels=panels,
+            bindings=bindings,
+            recipes=recipes,
+            aligned=aligned,
+            cost_model=ExecutionCostModel(),
+            runtime_config=alpha_foundry_config,
+            run_id=f"{tf}_{int(time.time())}",
+            timeframe=tf,
+        )
+        panels = af_result.panels_for_l1
+        alpha_foundry_report = af_result.report
+        bridge_prof["alpha_foundry"] = time.perf_counter() - t_step
+        _sample_rss("alpha_foundry")
     t_step = time.perf_counter()
     raw_events = candidate_panels_to_events(
         panels,
@@ -986,6 +1028,7 @@ def run_candidate_strategy_for_universe(
                 "recommended_keep_signal_cells": (),
                 "recommended_flip_signal_cells": (),
             },
+            alpha_foundry_report=alpha_foundry_report,
         )
 
     atr_2d_cache = _compute_yang_zhang_vol_2d(aligned)
@@ -1136,6 +1179,7 @@ def run_candidate_strategy_for_universe(
                     "recommended_keep_signal_cells": diag.recommended_keep_signal_cells,
                     "recommended_flip_signal_cells": diag.recommended_flip_signal_cells,
                 },
+                alpha_foundry_report=alpha_foundry_report,
             )
     promoted_total = len(labeled)
 
@@ -1208,6 +1252,7 @@ def run_candidate_strategy_for_universe(
                 ],
                 "signal_validation_pass": any_passes,
             },
+            alpha_foundry_report=alpha_foundry_report,
         )
 
     # Build WF folds (multi-fold or single)
@@ -1736,6 +1781,7 @@ def run_candidate_strategy_for_universe(
             oos_start=wf_folds[0].oos_start,
             oos_end=wf_folds[-1].oos_end,
             fold_oos_boundaries=_fold_oos_boundaries,
+            alpha_foundry_report=alpha_foundry_report,
         )
         _emit_bridge_profile()
         return out
@@ -1946,6 +1992,7 @@ def run_candidate_strategy_for_universe(
         oos_start=wf_folds[0].oos_start,
         oos_end=wf_folds[-1].oos_end,
         fold_oos_boundaries=_fold_oos_boundaries,
+        alpha_foundry_report=alpha_foundry_report,
     )
 
 
