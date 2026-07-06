@@ -52,7 +52,9 @@ def build_anchored_wf_legs(
 
     return legs
 
+
 # --- MC Gate Adjustment (from mc_gate_adjust.py) ---
+
 
 def trial_adjusted_pbo_ceiling(
     base: float,
@@ -112,22 +114,18 @@ def resolve_adjusted_gates(cfg: dict[str, Any], n_trials: int) -> tuple[float, f
     pbo_step = float(cfg.get("FUTURES_MC_PBO_STEP_PER_BUCKET", 0.01))
     pbo_clamp = float(cfg.get("FUTURES_MC_PBO_CEILING_CLAMP_MIN", 0.38))
 
-    pbo_max = trial_adjusted_pbo_ceiling(
-        raw_pbo_max, n_trials, step=pbo_step, bucket=bucket, clamp_min=pbo_clamp
-    )
-    champ = trial_adjusted_pbo_ceiling(
-        raw_champ, n_trials, step=pbo_step, bucket=bucket, clamp_min=pbo_clamp
-    )
+    pbo_max = trial_adjusted_pbo_ceiling(raw_pbo_max, n_trials, step=pbo_step, bucket=bucket, clamp_min=pbo_clamp)
+    champ = trial_adjusted_pbo_ceiling(raw_champ, n_trials, step=pbo_step, bucket=bucket, clamp_min=pbo_clamp)
     dsr_min = raw_dsr_min
     if bool(cfg.get("FUTURES_MC_DSR_TRIAL_ADJUST_ENABLED", False)):
         dsr_step = float(cfg.get("FUTURES_MC_DSR_STEP_PER_BUCKET", 0.02))
         dsr_cap = float(cfg.get("FUTURES_MC_DSR_FLOOR_CAP", 0.95))
-        dsr_min = trial_adjusted_dsr_floor(
-            raw_dsr_min, n_trials, step=dsr_step, bucket=bucket, clamp_max=dsr_cap
-        )
+        dsr_min = trial_adjusted_dsr_floor(raw_dsr_min, n_trials, step=dsr_step, bucket=bucket, clamp_max=dsr_cap)
     return pbo_max, dsr_min, champ
 
+
 # --- Go/No-Go Check (from go_nogo.py) ---
+
 
 @dataclass
 class CheckRecord:
@@ -174,10 +172,7 @@ def run_go_nogo_check(
     target_pf = 1.50
     pf_pass: bool = profit_factor >= target_pf
 
-    if tf == "1h":
-        base_req = 30
-    else:  # 4h
-        base_req = 10
+    base_req = 30 if tf == "1h" else 10
 
     if profit_factor >= 3.0:
         trades_pass = total_trades >= int(base_req * 0.5)
@@ -217,9 +212,7 @@ def run_go_nogo_check(
 
     summary_lines.append("-" * 60)
     final_status: str = (
-        "🌟 ELITE GO (Top 1% Ready)"
-        if all_passed
-        else f"🔴 NO-GO (Needs Revision, Passed {req_met}/{total_req})"
+        "🌟 ELITE GO (Top 1% Ready)" if all_passed else f"🔴 NO-GO (Needs Revision, Passed {req_met}/{total_req})"
     )
     summary_lines.append(f"  FINAL VERDICT: {final_status}")
 
@@ -323,17 +316,7 @@ def _part3_symbol_table_lines(rows: Sequence[FuturesSymbolGateRow]) -> list[str]
         + f"{'Trades':^{w[4]}} |"
     )
     rule = (
-        "  | "
-        + "-" * w[0]
-        + " | "
-        + "-" * w[1]
-        + " | "
-        + "-" * w[2]
-        + " | "
-        + "-" * w[3]
-        + " | "
-        + "-" * w[4]
-        + " |"
+        "  | " + "-" * w[0] + " | " + "-" * w[1] + " | " + "-" * w[2] + " | " + "-" * w[3] + " | " + "-" * w[4] + " |"
     )
     out: list[str] = [header, rule]
     for row in rows:
@@ -389,18 +372,14 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
         "=" * 71,
         " [TIER 1. AWF STATISTICAL EDGE RIGOR]",
         "=" * 71,
-        f"  - System Quality Number (SQN) : {ctx.gate1_sqn:.2f}   "
-        f"{_fmt_pass_info(sqn_ok)} (Min: 1.6)",
+        f"  - System Quality Number (SQN) : {ctx.gate1_sqn:.2f}   {_fmt_pass_info(sqn_ok)} (Min: 1.6)",
         f"  - Path Sortino Ratio          : {ctx.gate1_path_sortino:.2f}   "
         f"{_fmt_pass_info(ps_ok)} (Min: {ctx.path_sortino_target})",
         f"  - Path Tail Ratio (Discovery) : {ctx.gate1_tail_ratio:.2f}   "
         f"{_fmt_pass_info(g1_tr_ok)} (Min: {ctx.tail_ratio_target})",
-        f"  - Prob. Sharpe Ratio (PSR)    : {ctx.gate1_psr:.4f}   "
-        f"{_fmt_pass_info(psr_ok)} (Min: 0.40)",
-        f"  - Deflated Sharpe Ratio (DSR) : {ctx.gate1_dsr:.4f}   "
-        f"{_fmt_pass_info(dsr_ok)} (Min: 0.20)",
-        f"  - P10 GMGR (Worst Path Grow)  : {ctx.gate1_p10_gmgr:.6f}   "
-        f"{_fmt_pass_info(gmgr_ok)} (Target: >= -0.001)",
+        f"  - Prob. Sharpe Ratio (PSR)    : {ctx.gate1_psr:.4f}   {_fmt_pass_info(psr_ok)} (Min: 0.40)",
+        f"  - Deflated Sharpe Ratio (DSR) : {ctx.gate1_dsr:.4f}   {_fmt_pass_info(dsr_ok)} (Min: 0.20)",
+        f"  - P10 GMGR (Worst Path Grow)  : {ctx.gate1_p10_gmgr:.6f}   {_fmt_pass_info(gmgr_ok)} (Target: >= -0.001)",
         f"  - AWF mean path return          : {ctx.cpcv_mean_path_return_pct:.1f}%",
         f"  - AWF worst segment MDD         : {ctx.cpcv_worst_segment_mdd_pct:.1f}%",
         "",
@@ -412,14 +391,11 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
         "=" * 71,
         " [TIER 2. OOS ABSOLUTE RISK HARD GATES: 4H FUTURES]",
         "=" * 71,
-        f"  - Maximum Pain (MDD Limit)    : {ctx.oos_mdd_pct:.1f}%   "
-        f"{_fmt_pass_info(oos_mdd_ok)} (Limit: 35.0%)",
+        f"  - Maximum Pain (MDD Limit)    : {ctx.oos_mdd_pct:.1f}%   {_fmt_pass_info(oos_mdd_ok)} (Limit: 35.0%)",
         f"  - Portfolio CVaR(5%) Loss     : {ctx.oos_cvar_pct:.2f}%   "
         f"{_fmt_pass_info(cvar_ok)} (Limit: {ctx.cvar_limit_pct}%)",
-        f"  - Recovery Time (Max UD)      : {ctx.hw_recovery_days:.1f}d   "
-        f"{_fmt_pass_info(hw_ok)} (Limit: 120.0d)",
-        f"  - Ulcer Index (Pain)          : {ctx.oos_ulcer_index:.2f}   "
-        f"{_fmt_pass_info(ui_ok)} (Limit: 15.0)",
+        f"  - Recovery Time (Max UD)      : {ctx.hw_recovery_days:.1f}d   {_fmt_pass_info(hw_ok)} (Limit: 120.0d)",
+        f"  - Ulcer Index (Pain)          : {ctx.oos_ulcer_index:.2f}   {_fmt_pass_info(ui_ok)} (Limit: 15.0)",
         f"  - OOS Calmar Ratio (Grow/Risk): {ctx.oos_calmar:.2f}   "
         f"{_fmt_pass_info(calmar_ok)} (Min: {ctx.calmar_target})",
         f"  - Funding Drag Ratio          : {ctx.funding_drag_pct:.2f}%   "
@@ -430,21 +406,17 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
         "=" * 71,
         f"  - Annualized Return (CAGR)    : {ctx.oos_net_cagr_pct:.1f}%   "
         f"{_fmt_pass_info(oos_cagr_ok)} (Min: {ctx.oos_cagr_target_pct}%)",
-        f"  - EV/Cost Ratio (Min 3.0)     : {ctx.oos_ev_cost_ratio:.2f}   "
-        f"{_fmt_pass_info(ev_cost_ok)}",
-        f"  - Trade Profit Factor         : {ctx.oos_pf:.2f}   "
-        f"{_fmt_pass_info(pf_ok)} (Min: {ctx.pf_target})",
+        f"  - EV/Cost Ratio (Min 3.0)     : {ctx.oos_ev_cost_ratio:.2f}   {_fmt_pass_info(ev_cost_ok)}",
+        f"  - Trade Profit Factor         : {ctx.oos_pf:.2f}   {_fmt_pass_info(pf_ok)} (Min: {ctx.pf_target})",
         f"  - Directional PF (L/S >= 1.05): {_fmt_pf(ctx.oos_long_pf)} / "
         f"{_fmt_pf(ctx.oos_short_pf)}   {_fmt_pass_info(l_pf_ok and s_pf_ok)}",
-        f"  - Short Win Rate (Min 35%)    : {ctx.oos_short_win_rate_pct:.1f}%   "
-        f"{_fmt_pass_info(short_wr_ok)}",
+        f"  - Short Win Rate (Min 35%)    : {ctx.oos_short_win_rate_pct:.1f}%   {_fmt_pass_info(short_wr_ok)}",
         f"  - Alpha Decay (Stability)     : {ctx.alpha_decay_pct:.1f}%   "
         f"{_fmt_pass_info(ad_ok)} (Limit: {ctx.alpha_decay_floor_pct}%)",
         f"  - Terminal Wealth Ratio       : {ctx.terminal_wealth_ratio:.3f}   "
         f"{_fmt_pass_info(tw_ok)} (Min: {ctx.tw_target})",
         f"  - OOS Win Rate (INFO)         : {ctx.oos_win_rate_pct:.1f}%",
-        f"  - Long/Short Ratio (INFO)     : {ctx.oos_long_short_minority_pct:.1f}% "
-        "minority direction",
+        f"  - Long/Short Ratio (INFO)     : {ctx.oos_long_short_minority_pct:.1f}% minority direction",
         "",
     ]
     if ctx.multi_window_summary:
@@ -456,8 +428,7 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
             " [PART 3. SYMBOL MICROSTRUCTURE & FINAL VERDICT]",
             "=" * 71,
             "▶ Portfolio Composition (Margin-Shared)",
-            f"  - Capital: ${ctx.initial_capital_usdt:,.0f} -> ${final_capital:,.0f} "
-            f"({profit_pct:+.1f}%)",
+            f"  - Capital: ${ctx.initial_capital_usdt:,.0f} -> ${final_capital:,.0f} ({profit_pct:+.1f}%)",
             f"  - Total Trades: {ctx.oos_total_trades} | Concentration: {ctx.loso_warning}",
             "",
         ]
@@ -466,11 +437,9 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
 
     lines.extend(
         [
-            "  ※ Symbol PnL contrib ann%: margin-shared trade PnL vs initial, "
-            "annualized (not standalone engine CAGR).",
+            "  ※ Symbol PnL contrib ann%: margin-shared trade PnL vs initial, annualized (not standalone engine CAGR).",
             "",
-            "▶ Final Verdict : "
-            f"{'[GO - DEPLOYABLE]' if ctx.final_decision_go else '[NO-GO - REFINEMENT NEEDED]'}",
+            f"▶ Final Verdict : {'[GO - DEPLOYABLE]' if ctx.final_decision_go else '[NO-GO - REFINEMENT NEEDED]'}",
             f"  Compliance Score: {ctx.hard_passed}/{ctx.hard_total} Critical Gates Passed",
         ]
     )
@@ -478,9 +447,7 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
     tot_ls = int(ctx.oos_long_trades) + int(ctx.oos_short_trades)
     ratio_txt = f"{ctx.oos_long_trades}/{ctx.oos_short_trades}" if tot_ls > 0 else "0/0"
     drag_pct = (
-        (ctx.funding_cost_total_usdt / max(ctx.gross_pnl_abs_usdt, 1e-9)) * 100.0
-        if ctx.gross_pnl_abs_usdt > 0
-        else 0.0
+        (ctx.funding_cost_total_usdt / max(ctx.gross_pnl_abs_usdt, 1e-9)) * 100.0 if ctx.gross_pnl_abs_usdt > 0 else 0.0
     )
     lines.extend(
         [
@@ -489,10 +456,8 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
             " [PART 4. LONG/SHORT BALANCE (FUTURES)]",
             "=" * 71,
             "▶ Long/Short Balance Diagnostic",
-            f"  - Long Trades: {ctx.oos_long_trades} | Short Trades: {ctx.oos_short_trades} | "
-            f"Ratio: {ratio_txt}",
-            f"  - Funding Cost Total: ${ctx.funding_cost_total_usdt:,.2f} | "
-            f"Drag: {drag_pct:.1f}% of gross PnL",
+            f"  - Long Trades: {ctx.oos_long_trades} | Short Trades: {ctx.oos_short_trades} | Ratio: {ratio_txt}",
+            f"  - Funding Cost Total: ${ctx.funding_cost_total_usdt:,.2f} | Drag: {drag_pct:.1f}% of gross PnL",
             "=" * 71,
         ]
     )
@@ -556,18 +521,13 @@ def run_multi_window_oos_gate(
         " [Gate 3.5 — Multi-Window OOS (anchored)]",
         "=" * 71,
         *[
-            (
-                f"  - end_idx={w['end_idx']} | CAGR {w['cagr_pct']:.2f}% | "
-                f"MDD {w['mdd_pct']:.2f}% | PF {w['pf']:.2f}"
-            )
+            (f"  - end_idx={w['end_idx']} | CAGR {w['cagr_pct']:.2f}% | MDD {w['mdd_pct']:.2f}% | PF {w['pf']:.2f}")
             for w in window_results
         ],
         f"  - Positive windows >= {min_positive_windows} | "
         f"{'PASS' if ok_pos else 'FAIL'} | obs={pos}/{len(window_results)}",
-        f"  - Median window CAGR >= {min_median_cagr_pct}% | "
-        f"{'PASS' if ok_med else 'FAIL'} | obs={med_c:.2f}%",
-        f"  - Worst-window |MDD| <= {max_worst_mdd_pct}% | "
-        f"{'PASS' if ok_mdd else 'FAIL'} | obs={worst_mdd:.2f}%",
+        f"  - Median window CAGR >= {min_median_cagr_pct}% | {'PASS' if ok_med else 'FAIL'} | obs={med_c:.2f}%",
+        f"  - Worst-window |MDD| <= {max_worst_mdd_pct}% | {'PASS' if ok_mdd else 'FAIL'} | obs={worst_mdd:.2f}%",
         "-" * 55,
         f"  FINAL: {'GO' if passed else 'NO-GO'}",
     ]
@@ -602,9 +562,6 @@ def format_regime_oos_diagnostic_block(
     stress_mdd = float(regime_metrics.get("stress", {}).get("mdd_pct", 0.0))
     if stress_mdd > float(stress_mdd_warn_pct):
         lines.append("")
-        lines.append(
-            f"  ⚠ WARNING: Stress-regime MDD ({stress_mdd:.2f}%) "
-            f"exceeds threshold ({stress_mdd_warn_pct}%)"
-        )
+        lines.append(f"  ⚠ WARNING: Stress-regime MDD ({stress_mdd:.2f}%) exceeds threshold ({stress_mdd_warn_pct}%)")
     lines.append("=" * 71)
     return "\n".join(lines)

@@ -45,6 +45,8 @@ def compress_regime_codes(code_1d: NDArray[np.int8]) -> NDArray[np.int8]:
     for src, dst in _REGIME_COMPRESSION_MAP.items():
         compressed[code_1d == src] = dst
     return compressed
+
+
 _DEFAULT_BARS_PER_YEAR = 365.0 * 6.0
 _EPS = 1e-12
 
@@ -316,16 +318,12 @@ def _continuous_regime_codes(
     else:
         # Stateless path (backward compat): band-based decisiveness + sign direction
         tb: NDArray[np.float64] = (
-            trend_band_arr
-            if trend_band_arr is not None
-            else np.full(trend_snr.shape[0], 0.5, dtype=np.float64)
+            trend_band_arr if trend_band_arr is not None else np.full(trend_snr.shape[0], 0.5, dtype=np.float64)
         )
         decisive = finite & (np.abs(trend_snr) >= tb)
         bull = trend_snr >= 0.0
     # adaptive threshold: vol_threshold 제공 시 사용, 아니면 1.0 고정
-    vt: NDArray[np.float64] = (
-        vol_threshold if vol_threshold is not None else np.ones_like(vol_scale)
-    )
+    vt: NDArray[np.float64] = vol_threshold if vol_threshold is not None else np.ones_like(vol_scale)
     quiet = vol_scale >= vt
     code[decisive & bull & quiet] = 0
     code[decisive & bull & ~quiet] = 1
@@ -685,9 +683,7 @@ def compute_market_regime_context(
 
     # persistence-targeted band: self-calibrating adaptive enter threshold
     abs_snr: NDArray[np.float64] = np.abs(trend_snr_clean)
-    trend_band_arr: NDArray[np.float64] = _persistence_targeted_band(
-        abs_snr, target_dwell, min_n
-    )
+    trend_band_arr: NDArray[np.float64] = _persistence_targeted_band(abs_snr, target_dwell, min_n)
 
     # Schmitt stateful directional state (hysteresis) driven by the adaptive band;
     # scalar enter/exit thetas only set the exit/enter ratio (and pre-min_n fallback).
@@ -709,13 +705,14 @@ def compute_market_regime_context(
         _unique_r, _counts_r = np.unique(code, return_counts=True)
         _n_total_r = int(code.shape[0])
         _summary = "; ".join(
-            f"{_REGIME_NAMES[int(r)]}({int(r)}):{float(c)/float(_n_total_r)*100:.1f}%"
+            f"{_REGIME_NAMES[int(r)]}({int(r)}):{float(c) / float(_n_total_r) * 100:.1f}%"
             for r, c in sorted(zip(_unique_r.tolist(), _counts_r.tolist(), strict=True))
         )
         _logger.debug("[REGIME-DIST] total_bars=%d %s", _n_total_r, _summary)
 
     trend_efficiency_1d = compute_trend_efficiency_1d(
-        btc_close, regime_cfg.trend_efficiency_window,
+        btc_close,
+        regime_cfg.trend_efficiency_window,
     )
 
     return MarketRegimeContext(
@@ -726,6 +723,7 @@ def compute_market_regime_context(
         dispersion_z_1d=dispersion_z.astype(np.float64, copy=False),
         trend_efficiency_1d=trend_efficiency_1d,
     )
+
 
 def _rolling_max_1d(values: NDArray[np.float64], window: int) -> NDArray[np.float64]:
     out = np.empty(values.shape[0], dtype=np.float64)
@@ -856,12 +854,7 @@ def compute_xs_downside_breadth_1d(
     """
     prev = np.full_like(universe_close_2d, np.nan, dtype=np.float64)
     prev[mom_window:] = universe_close_2d[:-mom_window]
-    valid = (
-        np.isfinite(universe_close_2d)
-        & (universe_close_2d > _EPS)
-        & np.isfinite(prev)
-        & (prev > _EPS)
-    )
+    valid = np.isfinite(universe_close_2d) & (universe_close_2d > _EPS) & np.isfinite(prev) & (prev > _EPS)
     r = np.where(valid, np.log(universe_close_2d / np.maximum(prev, _EPS)), np.nan)
     neg = valid & (r < 0.0)
     denom = valid.sum(axis=1)

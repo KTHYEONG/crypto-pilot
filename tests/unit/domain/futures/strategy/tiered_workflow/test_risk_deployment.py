@@ -1,5 +1,6 @@
 # tests/unit/domain/futures/strategy/tiered_workflow/test_risk_deployment.py
 """Fix-A risk_deployment 모듈 단위 테스트 (S1~S5 + DSR 불변성)."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -76,7 +77,7 @@ class TestMddBinding:
         lev, binding, _ = calibrate_deployment_leverage(
             fit_rets=rets,
             mdd_cap=mdd_cap,
-            cvar_cap=0.10,   # 느슨한 CVaR 제약
+            cvar_cap=0.10,  # 느슨한 CVaR 제약
             mdd_margin=mdd_margin,
             cvar_margin=0.0,
             l_hard_cap=20.0,
@@ -98,10 +99,7 @@ class TestScaleInvariance:
 
         rets = _make_rets(2190, seed=7)
 
-        sharpes = [
-            _sharpe_hac(rets * lev, bars_per_year=BARS_PER_YEAR)
-            for lev in [1.0, 2.0, 4.0]
-        ]
+        sharpes = [_sharpe_hac(rets * lev, bars_per_year=BARS_PER_YEAR) for lev in [1.0, 2.0, 4.0]]
 
         assert sharpes[0] == pytest.approx(sharpes[1], rel=1e-5)
         assert sharpes[0] == pytest.approx(sharpes[2], rel=1e-5)
@@ -167,7 +165,7 @@ class TestCvarBinding:
         rng = np.random.default_rng(99)
         rets = rng.normal(1e-4, 0.0016, 2190).astype(np.float64)
 
-        mdd_cap = 0.80   # 매우 느슨한 MDD 제약
+        mdd_cap = 0.80  # 매우 느슨한 MDD 제약
         cvar_cap = 0.004  # 매우 타이트 CVaR 제약 (0.4%)
         mdd_margin = 0.0
         cvar_margin = 0.0

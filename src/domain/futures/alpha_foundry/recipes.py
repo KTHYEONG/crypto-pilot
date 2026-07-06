@@ -1,5 +1,6 @@
 """Alpha Foundry recipe catalog builder.
 
+[ADR_20260706_ALPHA_FOUNDRY_L0_L1_HANDOFF_GUARD]
 [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 """
 
@@ -72,9 +73,7 @@ RECIPE_DEFINITIONS: dict[str, tuple[dict[str, object], ...]] = {
         _rd("bb_20_2", {"period": 20, "std": 2.0}, 1, ("close",)),
         _rd("bb_40_2.5", {"period": 40, "std": 2.5}, 2, ("close",)),
     ),
-    "keltner_mean_reversion": (
-        _rd("kc_20_1.5", {"period": 20, "atr_mult": 1.5}, 1, ("close", "high", "low")),
-    ),
+    "keltner_mean_reversion": (_rd("kc_20_1.5", {"period": 20, "atr_mult": 1.5}, 1, ("close", "high", "low")),),
     "funding_carry": (
         _rd("funding_24", {"window": 24}, 1, ("close", "funding")),
         _rd("funding_zscore_4", {"z_window": 4}, 1, ("close", "funding")),
@@ -109,9 +108,7 @@ RECIPE_DEFINITIONS: dict[str, tuple[dict[str, object], ...]] = {
         _rd("xs_carry_rank_12", {"rank_window": 12}, 2, ("close", "funding")),
         _rd("xs_carry_rank_24", {"rank_window": 24}, 3, ("close", "funding")),
     ),
-    "macd_4h": (
-        _rd("macd_12_26_9", {"fast": 12, "slow": 26, "signal": 9}, 1, ("close",)),
-    ),
+    "macd_4h": (_rd("macd_12_26_9", {"fast": 12, "slow": 26, "signal": 9}, 1, ("close",)),),
 }
 
 FAMILY_ARCHETYPE: dict[str, AlphaArchetype] = {

@@ -12,6 +12,7 @@ from src.domain.futures.strategy.market_regime import (
 
 # ── Helpers ──
 
+
 def _constant_universe(t_len: int, n_sym: int, value: float = 100.0) -> NDArray[np.float64]:
     return np.full((t_len, n_sym), value, dtype=np.float64)
 
@@ -44,6 +45,7 @@ def _make_btc_crash_series(n_stable: int = 30) -> NDArray[np.float64]:
 # ════════════════════════════════════════════════════════════
 # Scenario Group 1 — compute_xs_downside_breadth_1d
 # ════════════════════════════════════════════════════════════
+
 
 class TestBreadth:
     """S1: compute_xs_downside_breadth_1d"""
@@ -99,6 +101,7 @@ class TestBreadth:
 # Scenario Group 2 — compute_market_state_risk_off_1d
 # ════════════════════════════════════════════════════════════
 
+
 class TestPanel:
     """S2: compute_market_state_risk_off_1d"""
 
@@ -106,12 +109,14 @@ class TestPanel:
         N = 5
         btc = _make_btc_crash_series(n_stable=30)
         T = btc.shape[0]
-        universe = _breadth_region_universe(T, N, mom_window=5, n_neg=0,
-                                            bar_start=0, bar_end=T - 1)
+        universe = _breadth_region_universe(T, N, mom_window=5, n_neg=0, bar_start=0, bar_end=T - 1)
         risk_off = compute_market_state_risk_off_1d(
-            btc, universe,
-            dd_window=10, dd_threshold=0.06,
-            mom_fast=5, mom_slow=20,
+            btc,
+            universe,
+            dd_window=10,
+            dd_threshold=0.06,
+            mom_fast=5,
+            mom_slow=20,
             breadth_mom_window=5,
             breadth_neg_frac_enter=0.60,
             breadth_neg_frac_exit=0.40,
@@ -125,12 +130,14 @@ class TestPanel:
         N = 5
         btc = _make_btc_crash_series(n_stable=30)
         T = btc.shape[0]
-        universe = _breadth_region_universe(T, N, mom_window=5, n_neg=4,
-                                            bar_start=12, bar_end=T - 1)
+        universe = _breadth_region_universe(T, N, mom_window=5, n_neg=4, bar_start=12, bar_end=T - 1)
         risk_off = compute_market_state_risk_off_1d(
-            btc, universe,
-            dd_window=10, dd_threshold=0.06,
-            mom_fast=5, mom_slow=20,
+            btc,
+            universe,
+            dd_window=10,
+            dd_threshold=0.06,
+            mom_fast=5,
+            mom_slow=20,
             breadth_mom_window=5,
             breadth_neg_frac_enter=0.60,
             breadth_neg_frac_exit=0.40,
@@ -148,9 +155,12 @@ class TestPanel:
             universe[t, :2] = universe[t - 1, :2] * 0.99
             universe[t, 2:] = universe[t - 1, 2:] * 1.005
         risk_off = compute_market_state_risk_off_1d(
-            btc, universe,
-            dd_window=10, dd_threshold=0.06,
-            mom_fast=5, mom_slow=20,
+            btc,
+            universe,
+            dd_window=10,
+            dd_threshold=0.06,
+            mom_fast=5,
+            mom_slow=20,
             breadth_mom_window=5,
             breadth_neg_frac_enter=0.60,
             breadth_neg_frac_exit=0.20,
@@ -163,12 +173,14 @@ class TestPanel:
         N = 5
         btc = _make_btc_crash_series(n_stable=50)
         T = btc.shape[0]
-        universe = _breadth_region_universe(T, N, mom_window=5, n_neg=4,
-                                            bar_start=12, bar_end=T - 1)
+        universe = _breadth_region_universe(T, N, mom_window=5, n_neg=4, bar_start=12, bar_end=T - 1)
         risk_off_no_cooldown = compute_market_state_risk_off_1d(
-            btc, universe,
-            dd_window=10, dd_threshold=0.06,
-            mom_fast=5, mom_slow=20,
+            btc,
+            universe,
+            dd_window=10,
+            dd_threshold=0.06,
+            mom_fast=5,
+            mom_slow=20,
             breadth_mom_window=5,
             breadth_neg_frac_enter=0.60,
             breadth_neg_frac_exit=0.40,
@@ -176,9 +188,12 @@ class TestPanel:
             recovery_cooldown_bars=0,
         )
         risk_off_cooldown = compute_market_state_risk_off_1d(
-            btc, universe,
-            dd_window=10, dd_threshold=0.06,
-            mom_fast=5, mom_slow=20,
+            btc,
+            universe,
+            dd_window=10,
+            dd_threshold=0.06,
+            mom_fast=5,
+            mom_slow=20,
             breadth_mom_window=5,
             breadth_neg_frac_enter=0.60,
             breadth_neg_frac_exit=0.40,
@@ -191,12 +206,14 @@ class TestPanel:
         N = 5
         btc = _make_btc_crash_series(n_stable=30)
         T = btc.shape[0]
-        universe = _breadth_region_universe(T, N, mom_window=5, n_neg=4,
-                                            bar_start=15, bar_end=16)
+        universe = _breadth_region_universe(T, N, mom_window=5, n_neg=4, bar_start=15, bar_end=16)
         risk_off = compute_market_state_risk_off_1d(
-            btc, universe,
-            dd_window=10, dd_threshold=0.06,
-            mom_fast=5, mom_slow=20,
+            btc,
+            universe,
+            dd_window=10,
+            dd_threshold=0.06,
+            mom_fast=5,
+            mom_slow=20,
             breadth_mom_window=5,
             breadth_neg_frac_enter=0.60,
             breadth_neg_frac_exit=0.40,
@@ -208,12 +225,14 @@ class TestPanel:
         N = 5
         btc = _make_btc_crash_series(n_stable=30)
         T = btc.shape[0]
-        universe = _breadth_region_universe(T, N, mom_window=5, n_neg=4,
-                                            bar_start=12, bar_end=T - 1)
+        universe = _breadth_region_universe(T, N, mom_window=5, n_neg=4, bar_start=12, bar_end=T - 1)
         risk_off = compute_market_state_risk_off_1d(
-            btc, universe,
-            dd_window=10, dd_threshold=0.06,
-            mom_fast=5, mom_slow=20,
+            btc,
+            universe,
+            dd_window=10,
+            dd_threshold=0.06,
+            mom_fast=5,
+            mom_slow=20,
             breadth_mom_window=5,
             breadth_neg_frac_enter=0.60,
             breadth_neg_frac_exit=0.40,
@@ -225,9 +244,12 @@ class TestPanel:
         btc = np.empty(0, dtype=np.float64)
         universe = np.empty((0, 5), dtype=np.float64)
         result = compute_market_state_risk_off_1d(
-            btc, universe,
-            dd_window=10, dd_threshold=0.06,
-            mom_fast=5, mom_slow=20,
+            btc,
+            universe,
+            dd_window=10,
+            dd_threshold=0.06,
+            mom_fast=5,
+            mom_slow=20,
             breadth_mom_window=5,
             breadth_neg_frac_enter=0.60,
             breadth_neg_frac_exit=0.40,
@@ -239,6 +261,7 @@ class TestPanel:
 # ════════════════════════════════════════════════════════════
 # Scenario Group 3 — Config 검증
 # ════════════════════════════════════════════════════════════
+
 
 class TestPanelConfig:
     """S3: RegimeConfig new field validation"""

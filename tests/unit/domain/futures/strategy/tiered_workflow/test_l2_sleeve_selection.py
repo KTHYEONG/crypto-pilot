@@ -157,9 +157,7 @@ class TestSleeveRealizedIcSign:
         fit_edges = [0.01 * (j + 1) for j in range(S)]
         oos_edges = [0.001 * (j + 1) for j in range(S)]
 
-        cache, aligned, fit_start, fit_end, oos_start, oos_end = (
-            self._build_cache_with_edges(fit_edges, oos_edges)
-        )
+        cache, aligned, fit_start, fit_end, oos_start, oos_end = self._build_cache_with_edges(fit_edges, oos_edges)
 
         e_fit = compute_per_sleeve_realized_edge(cache, aligned, fit_start, fit_end)
         e_oos = compute_per_sleeve_realized_edge(cache, aligned, oos_start, oos_end)
@@ -175,9 +173,7 @@ class TestSleeveRealizedIcSign:
         fit_edges = [0.01 * (j + 1) for j in range(S)]
         oos_edges = [0.01 * (S - j) for j in range(S)]
 
-        cache, aligned, fit_start, fit_end, oos_start, oos_end = (
-            self._build_cache_with_edges(fit_edges, oos_edges)
-        )
+        cache, aligned, fit_start, fit_end, oos_start, oos_end = self._build_cache_with_edges(fit_edges, oos_edges)
 
         e_fit = compute_per_sleeve_realized_edge(cache, aligned, fit_start, fit_end)
         e_oos = compute_per_sleeve_realized_edge(cache, aligned, oos_start, oos_end)

@@ -159,13 +159,9 @@ def test_store_roundtrip_preserves_stage5_and_stage6_rows(tmp_path: Path) -> Non
     assert eth_decision["stage"] == "stage6_selection"
     assert eth_decision["selection_reason"] == "not_selected"
     assert tuple(selected_frame["symbol"].tolist()) == ("BTCUSDT",)
-    assert (
-        selected_frame.loc[selected_frame["symbol"] == "BTCUSDT", "tradeable_score"].iloc[0]
-        == pytest.approx(0.9)
-    )
-    assert (
-        selected_frame.loc[selected_frame["symbol"] == "BTCUSDT", "alpha_capacity_score"].iloc[0]
-        == pytest.approx(0.73)
+    assert selected_frame.loc[selected_frame["symbol"] == "BTCUSDT", "tradeable_score"].iloc[0] == pytest.approx(0.9)
+    assert selected_frame.loc[selected_frame["symbol"] == "BTCUSDT", "alpha_capacity_score"].iloc[0] == pytest.approx(
+        0.73
     )
     assert "execution_pool_score" not in selected_frame.columns
     assert snapshot.selected[0].vol_30d == pytest.approx(0.35)
@@ -225,9 +221,7 @@ def test_exact_schema_validation_and_materialization_guardrails() -> None:
     assert validate_materializable_pit_store_run(decisions=exact_decisions, cube=cube)
     assert not validate_materializable_pit_store_run(decisions=alias_only_decisions, cube=cube)
 
-    report = pd.DataFrame(
-        [{"symbol": "BTCUSDT", "stage": "stage6_selection", "passed": True, "reason": "selected"}]
-    )
+    report = pd.DataFrame([{"symbol": "BTCUSDT", "stage": "stage6_selection", "passed": True, "reason": "selected"}])
     with pytest.raises(ValueError, match="invalid PIT store run for materialization"):
         materialize_snapshot_from_store(
             manifest=manifest,
@@ -267,9 +261,7 @@ def test_load_universe_snapshot_materializes_valid_exact_store_run(
             }
         ]
     )
-    report = pd.DataFrame(
-        [{"symbol": "BTCUSDT", "stage": "stage6_selection", "passed": True, "reason": "selected"}]
-    )
+    report = pd.DataFrame([{"symbol": "BTCUSDT", "stage": "stage6_selection", "passed": True, "reason": "selected"}])
     decisions = build_decision_frame(
         manifest=manifest,
         stage5_frame=stage5,
@@ -348,9 +340,7 @@ def test_load_universe_snapshot_returns_none_for_alias_only_store_run(
                 [{"symbol": "BTCUSDT", "stage": "stage6_selection", "passed": True, "reason": "selected"}]
             ),
         ),
-        report=pd.DataFrame(
-            [{"symbol": "BTCUSDT", "stage": "stage6_selection", "passed": True, "reason": "selected"}]
-        ),
+        report=pd.DataFrame([{"symbol": "BTCUSDT", "stage": "stage6_selection", "passed": True, "reason": "selected"}]),
         snapshot=materialize_snapshot_from_store(
             manifest=manifest,
             decisions=build_decision_frame(
@@ -377,38 +367,40 @@ def test_load_universe_snapshot_returns_none_for_alias_only_store_run(
 
 def test_load_universe_store_run_requires_exact_hash_match(tmp_path: Path) -> None:
     manifest = _manifest()
-    decisions = pd.DataFrame(columns=[
-        "as_of",
-        "tf",
-        "run_id",
-        "config_hash",
-        "data_manifest_hash",
-        "symbol",
-        "stage5_pass",
-        "stage6_selected",
-        "stage",
-        "selection_reason",
-        "role",
-        "rank",
-        "tradeable_score",
-        "vol_30d",
-        "friction_score",
-        "alpha_capacity_score",
-        "diversification_score",
-        "adv_usdt_median",
-        "execution_cost_bps",
-        "funding_rate_8h",
-        "beta_vs_market",
-        "cluster_id",
-        "cluster_size",
-        "anchor_cluster_member",
-        "basis_annualized_mean",
-        "basis_vol",
-        "capacity_clip_usdt_list",
-        "reject_code",
-        "final_rank",
-        "generated_at_utc",
-    ])
+    decisions = pd.DataFrame(
+        columns=[
+            "as_of",
+            "tf",
+            "run_id",
+            "config_hash",
+            "data_manifest_hash",
+            "symbol",
+            "stage5_pass",
+            "stage6_selected",
+            "stage",
+            "selection_reason",
+            "role",
+            "rank",
+            "tradeable_score",
+            "vol_30d",
+            "friction_score",
+            "alpha_capacity_score",
+            "diversification_score",
+            "adv_usdt_median",
+            "execution_cost_bps",
+            "funding_rate_8h",
+            "beta_vs_market",
+            "cluster_id",
+            "cluster_size",
+            "anchor_cluster_member",
+            "basis_annualized_mean",
+            "basis_vol",
+            "capacity_clip_usdt_list",
+            "reject_code",
+            "final_rank",
+            "generated_at_utc",
+        ]
+    )
     report = pd.DataFrame(columns=["symbol", "stage", "passed", "reason"])
     write_universe_store_run(manifest=manifest, decisions=decisions, report=report, root=tmp_path)
 
@@ -461,15 +453,27 @@ def test_cube_persistence_through_store_run(tmp_path: Path) -> None:
     """Cube.parquet written via snapshot param, loaded via load_universe_store_run."""
     manifest = _manifest()
     cube = _make_cube()
-    stage5 = pd.DataFrame([{
-        "symbol": "BTCUSDT", "role": "anchor", "rank": 1,
-        "tradeable_score": 0.9, "alpha_capacity_score": 0.8,
-        "adv_usdt_median": 100_000_000.0, "execution_cost_bps": 8.0,
-        "funding_rate_8h": 0.001, "beta_vs_market": 1.2,
-        "cluster_id": 4, "cluster_size": 6.0, "anchor_cluster_member": 1.0,
-        "basis_annualized_mean": 0.01, "basis_vol": 0.02,
-        "capacity_clip_usdt_list": (1000.0,),
-    }])
+    stage5 = pd.DataFrame(
+        [
+            {
+                "symbol": "BTCUSDT",
+                "role": "anchor",
+                "rank": 1,
+                "tradeable_score": 0.9,
+                "alpha_capacity_score": 0.8,
+                "adv_usdt_median": 100_000_000.0,
+                "execution_cost_bps": 8.0,
+                "funding_rate_8h": 0.001,
+                "beta_vs_market": 1.2,
+                "cluster_id": 4,
+                "cluster_size": 6.0,
+                "anchor_cluster_member": 1.0,
+                "basis_annualized_mean": 0.01,
+                "basis_vol": 0.02,
+                "capacity_clip_usdt_list": (1000.0,),
+            }
+        ]
+    )
     decisions = build_decision_frame(
         manifest=manifest,
         stage5_frame=stage5,
@@ -478,7 +482,10 @@ def test_cube_persistence_through_store_run(tmp_path: Path) -> None:
     )
     report = pd.DataFrame([{"symbol": "BTCUSDT", "stage": "stage6_selection", "passed": True, "reason": "selected"}])
     snapshot = materialize_snapshot_from_store(
-        manifest=manifest, decisions=decisions, report=report, cube=cube,
+        manifest=manifest,
+        decisions=decisions,
+        report=report,
+        cube=cube,
     )[0]
     assert snapshot.pit_state_cube is not None
 
@@ -505,16 +512,40 @@ def test_cube_persistence_through_store_run(tmp_path: Path) -> None:
 
 
 def test_gc_stale_store_runs_removes_old_dirs(tmp_path: Path) -> None:
-    decisions = pd.DataFrame(columns=[
-        "as_of", "tf", "run_id", "config_hash", "data_manifest_hash",
-        "symbol", "stage5_pass", "stage6_selected", "stage", "selection_reason",
-        "role", "rank", "tradeable_score",
-        "vol_30d", "friction_score", "alpha_capacity_score", "diversification_score",
-        "adv_usdt_median", "execution_cost_bps", "funding_rate_8h",
-        "beta_vs_market", "cluster_id", "cluster_size", "anchor_cluster_member",
-        "basis_annualized_mean", "basis_vol", "capacity_clip_usdt_list",
-        "reject_code", "final_rank", "generated_at_utc",
-    ])
+    decisions = pd.DataFrame(
+        columns=[
+            "as_of",
+            "tf",
+            "run_id",
+            "config_hash",
+            "data_manifest_hash",
+            "symbol",
+            "stage5_pass",
+            "stage6_selected",
+            "stage",
+            "selection_reason",
+            "role",
+            "rank",
+            "tradeable_score",
+            "vol_30d",
+            "friction_score",
+            "alpha_capacity_score",
+            "diversification_score",
+            "adv_usdt_median",
+            "execution_cost_bps",
+            "funding_rate_8h",
+            "beta_vs_market",
+            "cluster_id",
+            "cluster_size",
+            "anchor_cluster_member",
+            "basis_annualized_mean",
+            "basis_vol",
+            "capacity_clip_usdt_list",
+            "reject_code",
+            "final_rank",
+            "generated_at_utc",
+        ]
+    )
     report = pd.DataFrame(columns=["symbol", "stage", "passed", "reason"])
 
     for suffix in ("a", "b", "c"):
@@ -543,7 +574,10 @@ def test_gc_stale_store_runs_removes_old_dirs(tmp_path: Path) -> None:
             n_stage6_selected=0,
         )
         write_universe_store_run(
-            manifest=m, decisions=decisions, report=report, root=tmp_path,
+            manifest=m,
+            decisions=decisions,
+            report=report,
+            root=tmp_path,
         )
         time.sleep(0.01)
 

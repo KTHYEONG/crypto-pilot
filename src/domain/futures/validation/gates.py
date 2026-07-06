@@ -138,7 +138,7 @@ def _calc_block_mdd(equity_curve: np.ndarray) -> float:
 
 def evaluate_atomic_blocks(
     equity_curves: list[np.ndarray],
-    config: AtomicBlockConfig = AtomicBlockConfig(),
+    config: AtomicBlockConfig | None = None,
 ) -> AtomicBlockResult:
     """블록별 equity curve를 평가하여 AtomicBlockResult 반환.
 
@@ -150,6 +150,8 @@ def evaluate_atomic_blocks(
         AtomicBlockResult with pass/fail 판정.
 
     """
+    if config is None:
+        config = AtomicBlockConfig()
     n_blocks = len(equity_curves)
 
     if n_blocks < config.required_min_blocks:
@@ -194,6 +196,7 @@ def evaluate_atomic_blocks(
 
 
 # --- Boundary Contract (Purge Bars) ---
+
 
 @dataclass
 class ModulePurgeBarsMeta:
@@ -263,6 +266,7 @@ class PurgeBarsRegistry:
 
 # --- Research Gates ---
 
+
 @dataclass(frozen=True)
 class ChampionGateConfig:
     """v3.0 확정 상수 — 8-gate 평가 기준."""
@@ -294,7 +298,7 @@ def evaluate_champion_gates(
     funding_drag_ratio: float,
     ergodicity_dev_pct: float,
     capacity_results: dict[int, bool],
-    gates: ChampionGateConfig = ChampionGateConfig(),
+    gates: ChampionGateConfig | None = None,
 ) -> GateResult:
     """8-gate v3.0 평가.
 
@@ -310,8 +314,10 @@ def evaluate_champion_gates(
 
     Returns:
         GateResult(passed, failures, metrics).
-
     """
+    if gates is None:
+        gates = ChampionGateConfig()
+
     arr = np.asarray(leg_log_tw, dtype=np.float64)
     tw_arr = np.exp(arr)
 
@@ -342,13 +348,8 @@ def evaluate_champion_gates(
 
     # Gate 6: capacity — CAPACITY_REQUIRED_TIERS 전부 통과 필요
     required_tiers = set(gates.CAPACITY_REQUIRED_TIERS)
-    cap_fail = any(
-        not capacity_results.get(tier, False)
-        for tier in required_tiers
-        if tier in capacity_results
-    ) or any(
-        tier not in capacity_results
-        for tier in required_tiers
+    cap_fail = any(not capacity_results.get(tier, False) for tier in required_tiers if tier in capacity_results) or any(
+        tier not in capacity_results for tier in required_tiers
     )
     if cap_fail:
         failures.append("CAPACITY")
@@ -421,17 +422,16 @@ def evaluate_research_gates(inp: FuturesResearchGateInput) -> tuple[bool, list[s
     """
     failures: list[str] = []
 
-    if inp.phase3_enabled:
-        if not check_hard_gates_ml(
-            inp.oos_port,
-            float(inp.pbo_obs),
-            float(inp.dsr_obs),
-            inp.is_precision,
-            pbo_max_override=inp.pbo_max,
-            dsr_min_override=inp.dsr_min,
-        ):
-            failures.append("PHASE3_HARD_GATE")
-            return False, failures
+    if inp.phase3_enabled and not check_hard_gates_ml(
+        inp.oos_port,
+        float(inp.pbo_obs),
+        float(inp.dsr_obs),
+        inp.is_precision,
+        pbo_max_override=inp.pbo_max,
+        dsr_min_override=inp.dsr_min,
+    ):
+        failures.append("PHASE3_HARD_GATE")
+        return False, failures
 
     if inp.wf_failures:
         failures.extend(inp.wf_failures)
@@ -464,10 +464,7 @@ def evaluate_research_gates(inp: FuturesResearchGateInput) -> tuple[bool, list[s
         failures.append("DIRECTIONAL_PF_GATE")
         return False, failures
 
-    if not (
-        inp.is_cagr_pct > float(inp.is_survival_min_cagr)
-        and inp.is_sharpe > float(inp.is_survival_min_sharpe)
-    ):
+    if not (inp.is_cagr_pct > float(inp.is_survival_min_cagr) and inp.is_sharpe > float(inp.is_survival_min_sharpe)):
         failures.append("IS_SURVIVAL_GATE")
         return False, failures
 
@@ -524,18 +521,13 @@ def check_hard_gates_ml(
 
     """
     from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+
     _logger = logging.getLogger(__name__)
 
     cfg = OPT_FUTURES_CONFIG
-    pbo_lim = float(
-        pbo_max_override if pbo_max_override is not None else cfg.get("FUTURES_PBO_MAX", 0.45)
-    )
+    pbo_lim = float(pbo_max_override if pbo_max_override is not None else cfg.get("FUTURES_PBO_MAX", 0.45))
     pbo_ok = pbo_val < pbo_lim
-    dsr_floor = float(
-        dsr_min_override if dsr_min_override is not None else (
-            cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.20)
-        )
-    )
+    dsr_floor = float(dsr_min_override if dsr_min_override is not None else (cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.20)))
     dsr_ok = dsr_val >= dsr_floor
     wr_pct = float(oos_result.get("win_rate_pct", oos_result.get("win_rate", 0.0)))
     wr_frac = wr_pct / 100.0 if wr_pct > 1.0 else wr_pct
@@ -595,7 +587,7 @@ def apply_fdr_promotion_gate(
     m = len(sorted_pvals)
 
     max_k = -1
-    for idx, (vk, p) in enumerate(sorted_pvals):
+    for idx, (_vk, p) in enumerate(sorted_pvals):
         k = idx + 1  # 1-indexed rank
         if p <= (k / m) * alpha_fdr:
             max_k = idx  # Update max k (0-indexed index)
@@ -603,8 +595,7 @@ def apply_fdr_promotion_gate(
     if max_k == -1:
         return set()
 
-    return {vk for vk, p in sorted_pvals[:max_k + 1]}
-
+    return {vk for vk, p in sorted_pvals[: max_k + 1]}
 
 
 @dataclass(frozen=True)
@@ -644,11 +635,7 @@ def evaluate_rolling_holdout_consistency(
             failing_episode_ids=("no_promotion_episodes",),
         )
 
-    failing = [
-        o.episode_id
-        for o in promotion_outcomes
-        if o.candidate_total_return < o.baseline_total_return
-    ]
+    failing = [o.episode_id for o in promotion_outcomes if o.candidate_total_return < o.baseline_total_return]
     consistent = len(failing) == 0
 
     return RollingConsistencyVerdict(

@@ -4,6 +4,7 @@
 Spec: docs/specs/layer2-deployment-realization.md
 순수 NumPy 단위테스트 — 외부 boundary 없음, 모킹 불필요.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -231,7 +232,6 @@ class TestScenario4RiskUtilGate:
         # sigma=100bps/bar → MDD 예산(21%)이 적당히 binding
         fit_rets = rng.normal(3e-4, 50e-4, 2190).astype(np.float64)
         mdd_cap = 0.30
-        mdd_margin = 0.30
 
         # Act
         l_star, binding, _ = calibrate_deployment_leverage(

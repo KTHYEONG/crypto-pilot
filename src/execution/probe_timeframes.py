@@ -66,9 +66,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     try:
         from src.domain.futures.optimization.opt_data_utils import (
@@ -94,9 +92,7 @@ def main() -> None:
     # ---------------------------------------------------------------------------
     # Data loading (IS only for probe)
     # ---------------------------------------------------------------------------
-    _logger.info(
-        "Loading data for %d symbols [%s → %s]", len(symbols), args.fetch_start, args.is_end
-    )
+    _logger.info("Loading data for %d symbols [%s → %s]", len(symbols), args.fetch_start, args.is_end)
     try:
         data_maps, _oos_maps, valid_symbols = load_futures_data_maps_for_symbols(
             symbols=symbols,

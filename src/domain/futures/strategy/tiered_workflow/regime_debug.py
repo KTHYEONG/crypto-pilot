@@ -24,8 +24,7 @@ def replace_selected_regime_debug_diagnostics(
         return routing_diag
 
     mean_returns = tuple(
-        float(selected_return_sum_bps[idx] / max(int(selected_bar_count[idx]), 1))
-        for idx in range(state_count)
+        float(selected_return_sum_bps[idx] / max(int(selected_bar_count[idx]), 1)) for idx in range(state_count)
     )
     bar_counts = tuple(int(selected_bar_count[idx]) for idx in range(state_count))
     updated_debug_diag = replace(

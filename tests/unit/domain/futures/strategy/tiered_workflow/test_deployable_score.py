@@ -53,15 +53,7 @@ def test_build_layer2_deployable_score_uses_spec_formula() -> None:
         config=config,
     )
 
-    expected = (
-        0.20
-        + 0.10 * 1.2
-        + 0.05 * 2.0
-        - 0.50 * 0.20
-        - 0.25 * (0.45 - 0.25)
-        - 0.20 * 0.30
-        - 0.15
-    )
+    expected = 0.20 + 0.10 * 1.2 + 0.05 * 2.0 - 0.50 * 0.20 - 0.25 * (0.45 - 0.25) - 0.20 * 0.30 - 0.15
     assert score.score == pytest.approx(expected)
 
 
@@ -81,10 +73,13 @@ def test_score_layer2_deployable_fallback_prefers_existing_score() -> None:
     )
     evaluation = SimpleNamespace(deployable_score=existing)
 
-    assert score_layer2_deployable_fallback(
-        evaluation,
-        config=Layer2AllocationConfig(),
-    ) is existing
+    assert (
+        score_layer2_deployable_fallback(
+            evaluation,
+            config=Layer2AllocationConfig(),
+        )
+        is existing
+    )
 
 
 def test_score_layer2_deployable_fallback_computes_missing_fields() -> None:
@@ -109,4 +104,3 @@ def test_score_layer2_deployable_fallback_computes_missing_fields() -> None:
 
     assert score.cagr == pytest.approx(0.22)
     assert score.entry_spike_penalty == pytest.approx(0.05)
-

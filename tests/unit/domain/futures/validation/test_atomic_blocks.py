@@ -42,9 +42,7 @@ class TestBuildAtomicBlocks:
         for k in range(len(blocks) - 1):
             end_k = blocks[k][1]
             start_next = blocks[k + 1][0]
-            assert end_k <= start_next, (
-                f"Block {k}의 끝({end_k})이 Block {k + 1}의 시작({start_next})보다 커서는 안 됨"
-            )
+            assert end_k <= start_next, f"Block {k}의 끝({end_k})이 Block {k + 1}의 시작({start_next})보다 커서는 안 됨"
 
     def test_blocks_start_after_is_end(self) -> None:
         """IS 기간 데이터가 block에 포함되지 않음."""
@@ -107,9 +105,7 @@ class TestBuildAtomicBlocks:
         sum_block_bars = sum(e - s for s, e in blocks)
 
         # blocks가 OOS 기간 내에 있는지 확인 (마지막 블록은 잘릴 수 있음)
-        assert sum_block_bars <= total_oos_bars + 1, (
-            f"블록 총합({sum_block_bars})이 OOS 기간({total_oos_bars})을 초과"
-        )
+        assert sum_block_bars <= total_oos_bars + 1, f"블록 총합({sum_block_bars})이 OOS 기간({total_oos_bars})을 초과"
 
     def test_insufficient_data_returns_empty_or_few_blocks(self) -> None:
         """데이터 부족 (2 blocks만 확보 가능) — n_blocks < required_min_blocks → passed=False."""
@@ -197,6 +193,4 @@ class TestEvaluateAtomicBlocks:
         ]
         config = AtomicBlockConfig(required_min_blocks=2)
         result = evaluate_atomic_blocks(equity_curves, config=config)
-        assert result.worst_block_mdd > 0.05, (
-            f"worst_block_mdd={result.worst_block_mdd:.3f}이 0.05보다 커야 함"
-        )
+        assert result.worst_block_mdd > 0.05, f"worst_block_mdd={result.worst_block_mdd:.3f}이 0.05보다 커야 함"

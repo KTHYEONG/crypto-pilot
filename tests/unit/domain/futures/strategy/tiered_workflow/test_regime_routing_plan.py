@@ -46,9 +46,7 @@ def test_build_regime_routing_plan_when_compression_enabled_uses_three_states() 
     raw_codes = np.array([0, 1, 2, 3, 4, 5, 0, 1], dtype=np.int8)
     cache = _make_cache(len(raw_codes))
     aligned = _make_aligned([100.0, 101.0, 102.0, 101.0, 100.0, 99.0, 100.0, 101.0])
-    folds = (
-        WFFold(fit_start=0, fit_end=3, cal_start=3, cal_end=4, oos_start=4, oos_end=8),
-    )
+    folds = (WFFold(fit_start=0, fit_end=3, cal_start=3, cal_end=4, oos_start=4, oos_end=8),)
 
     plan = build_regime_routing_plan(
         cache=cache,
@@ -207,9 +205,7 @@ def test_compute_regime_cell_debug_stats_ranks_negative_oos_gap() -> None:
     cache = _make_cache(len(raw_codes))
     cache.holding_bars_2d[:, :] = 1.0
     aligned = _make_aligned([100.0, 101.0, 102.0, 103.0, 100.0, 99.0, 98.0, 97.0])
-    folds = (
-        WFFold(fit_start=0, fit_end=3, cal_start=3, cal_end=4, oos_start=4, oos_end=8),
-    )
+    folds = (WFFold(fit_start=0, fit_end=3, cal_start=3, cal_end=4, oos_start=4, oos_end=8),)
     plan = build_regime_routing_plan(
         cache=cache,
         aligned=aligned,
@@ -274,11 +270,7 @@ def test_compute_pooled_realized_edges_respects_holding_bars() -> None:
         min_n=1,
     )
 
-    expected = (
-        ((103.0 - 100.0) / 100.0) * 10000.0
-        + ((103.0 - 101.0) / 101.0) * 10000.0
-        + 0.0
-    ) / 3.0
+    expected = (((103.0 - 100.0) / 100.0) * 10000.0 + ((103.0 - 101.0) / 101.0) * 10000.0 + 0.0) / 3.0
     assert pooled[("trend", "4h")] == pytest.approx(expected)
 
 
@@ -309,9 +301,7 @@ def test_build_regime_routing_plan_passes_regime_and_pooled_edges_separately(
     raw_codes = np.array([0] * 8, dtype=np.int8)
     cache = _make_cache(len(raw_codes))
     aligned = _make_aligned([100.0, 101.0, 102.0, 103.0, 102.0, 101.0, 100.0, 99.0])
-    folds = (
-        WFFold(fit_start=0, fit_end=3, cal_start=3, cal_end=4, oos_start=4, oos_end=8),
-    )
+    folds = (WFFold(fit_start=0, fit_end=3, cal_start=3, cal_end=4, oos_start=4, oos_end=8),)
 
     plan = build_regime_routing_plan(
         cache=cache,

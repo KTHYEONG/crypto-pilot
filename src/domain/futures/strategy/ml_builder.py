@@ -87,28 +87,20 @@ def _resolve_side_targets(
     long_mag = (
         labels.magnitude_target_long
         if labels.magnitude_target_long is not None
-        else (
-            labels.magnitude_target if labels.magnitude_target is not None else labels.exec_net_ret
-        )
+        else (labels.magnitude_target if labels.magnitude_target is not None else labels.exec_net_ret)
     )
     short_mag = (
         labels.magnitude_target_short
         if labels.magnitude_target_short is not None
         else np.maximum(
-            -(
-                labels.magnitude_target
-                if labels.magnitude_target is not None
-                else labels.exec_net_ret
-            ),
+            -(labels.magnitude_target if labels.magnitude_target is not None else labels.exec_net_ret),
             0.0,
         )
     )
     return long_rel, short_rel, long_mag, short_mag
 
 
-def _rank_score(
-    fit_result: RankerFitResult | None, dataset: LongMatrixDataset
-) -> np.ndarray:
+def _rank_score(fit_result: RankerFitResult | None, dataset: LongMatrixDataset) -> np.ndarray:
     """Return rank score or zeros when ranker is disabled.
 
     Args:
@@ -149,12 +141,7 @@ def _btc_close_from_data_maps(
     """
     for sym in prefer_symbols:
         df: pd.DataFrame | None = data_maps.get(sym, {}).get(tf)
-        if (
-            df is not None
-            and not df.empty
-            and "close" in df.columns
-            and "datetime" in df.columns
-        ):
+        if df is not None and not df.empty and "close" in df.columns and "datetime" in df.columns:
             return df.set_index("datetime")["close"]
     return pd.Series(dtype=np.float64)
 
@@ -186,6 +173,8 @@ class _FoldPredictResult:
     score_test_short: np.ndarray
     ev_valid_long: np.ndarray
     ev_valid_short: np.ndarray
+
+
 def _train_predict_single_fold(
     fold: FoldSpec,
     features: FeaturePanel,
@@ -198,15 +187,11 @@ def _train_predict_single_fold(
 ) -> dict[str, Any]:
     """Train and predict a single walk-forward or virtual fold in parallel-safe manner."""
     # 1. Feature normalization and imputation on fold slices
-    train_values = features.values[fold.train_start : fold.train_end].astype(
-        np.float64, copy=False
-    )
+    train_values = features.values[fold.train_start : fold.train_end].astype(np.float64, copy=False)
     bounds = fit_robust_bounds(train_values, clip_quantile=0.995)
     clipped_values = apply_robust_bounds(features.values.astype(np.float64, copy=False), bounds)
     imputer = fit_missing_value_imputer(train_values)
-    normalized = apply_missing_value_imputer(clipped_values, imputer).astype(
-        np.float32, copy=False
-    )
+    normalized = apply_missing_value_imputer(clipped_values, imputer).astype(np.float32, copy=False)
     normalized_features = FeaturePanel(
         datetimes=features.datetimes,
         symbols=features.symbols,
@@ -356,12 +341,8 @@ def _fit_predict_fold_dual_side(
 
     """
     if ml_cfg.ranker_enabled:
-        ranker_long: RankerFitResult | None = fit_ranker(
-            train=train_long, valid=valid_long, cfg=ml_cfg
-        )
-        ranker_short: RankerFitResult | None = fit_ranker(
-            train=train_short, valid=valid_short, cfg=ml_cfg
-        )
+        ranker_long: RankerFitResult | None = fit_ranker(train=train_long, valid=valid_long, cfg=ml_cfg)
+        ranker_short: RankerFitResult | None = fit_ranker(train=train_short, valid=valid_short, cfg=ml_cfg)
     else:
         ranker_long = None
         ranker_short = None
@@ -384,30 +365,18 @@ def _fit_predict_fold_dual_side(
         rank_score_valid=_rank_score(ranker_short, valid_short),
         cfg=ml_cfg,
     )
-    ev_valid_long = predict_conservative_ev(
-        calibration_fit_long, valid_long, score_valid_long, ml_cfg
-    )
+    ev_valid_long = predict_conservative_ev(calibration_fit_long, valid_long, score_valid_long, ml_cfg)
     ev_valid_short = predict_conservative_ev(
         calibration_fit_short, valid_short, _rank_score(ranker_short, valid_short), ml_cfg
     )
-    ev_test_long = predict_conservative_ev(
-        calibration_fit_long, test_long, score_test_long, ml_cfg
-    )
-    ev_test_short = predict_conservative_ev(
-        calibration_fit_short, test_short, score_test_short, ml_cfg
-    )
-    quant_test_long = _predict_quantiles_with_fallback(
-        calibration_fit_long, test_long, score_test_long, ev_test_long
-    )
+    ev_test_long = predict_conservative_ev(calibration_fit_long, test_long, score_test_long, ml_cfg)
+    ev_test_short = predict_conservative_ev(calibration_fit_short, test_short, score_test_short, ml_cfg)
+    quant_test_long = _predict_quantiles_with_fallback(calibration_fit_long, test_long, score_test_long, ev_test_long)
     quant_test_short = _predict_quantiles_with_fallback(
         calibration_fit_short, test_short, score_test_short, ev_test_short
     )
-    conf_test_long = compute_forecast_confidence(
-        quant_test_long.q10, quant_test_long.q50, quant_test_long.q90
-    )
-    conf_test_short = compute_forecast_confidence(
-        quant_test_short.q10, quant_test_short.q50, quant_test_short.q90
-    )
+    conf_test_long = compute_forecast_confidence(quant_test_long.q10, quant_test_long.q50, quant_test_long.q90)
+    conf_test_short = compute_forecast_confidence(quant_test_short.q10, quant_test_short.q50, quant_test_short.q90)
     return _FoldPredictResult(
         ev_test_long=ev_test_long,
         ev_test_short=ev_test_short,
@@ -462,10 +431,7 @@ def precompute_anchored_ml_panels(
     )
     aligned = align_data_maps(data_maps=data_maps, symbols=symbols, tf=tf)
     if len(aligned.symbols) < ml_cfg.min_group_size:
-        raise ValueError(
-            f"anchored strategy needs >= {ml_cfg.min_group_size} symbols, "
-            f"got {len(aligned.symbols)}"
-        )
+        raise ValueError(f"anchored strategy needs >= {ml_cfg.min_group_size} symbols, got {len(aligned.symbols)}")
     features = build_feature_panel(aligned, ml_cfg)
     labels = build_label_panel(aligned, ml_cfg)
     validate_feature_panel(features)
@@ -511,9 +477,7 @@ def build_ml_strategy_alpha(
                 cfg=candidate_cfg,
             )
             report = panel.attrs.get("quality_report", {})
-            active_p95_bps = float(
-                report.get("alpha_active_p95_bps", report.get("alpha_p95_bps", 0.0))
-            )
+            active_p95_bps = float(report.get("alpha_active_p95_bps", report.get("alpha_p95_bps", 0.0)))
             full_matrix_p95_bps = float(report.get("alpha_p95_bps", 0.0))
             tradable_density = min(
                 float(report.get("alpha_long_tradable_nz", 0.0)),
@@ -584,9 +548,7 @@ def build_ml_strategy_alpha(
     t_align_start = time.perf_counter()
     aligned = align_data_maps(data_maps=data_maps, symbols=symbols, tf=tf)
     if len(aligned.symbols) < ml_cfg.min_group_size:
-        raise ValueError(
-            f"strategy needs >= {ml_cfg.min_group_size} symbols, got {len(aligned.symbols)}"
-        )
+        raise ValueError(f"strategy needs >= {ml_cfg.min_group_size} symbols, got {len(aligned.symbols)}")
     features = build_feature_panel(aligned, ml_cfg)
     labels = build_label_panel(aligned, ml_cfg)
     validate_feature_panel(features)
@@ -625,11 +587,7 @@ def build_ml_strategy_alpha(
     _logger.debug(
         ".. ML_LABEL: eligible=%.4f sample_weight_mean=%.4f",
         float(np.mean(labels.eligible_mask)),
-        (
-            float(np.mean(labels.sample_weight[labels.eligible_mask]))
-            if np.any(labels.eligible_mask)
-            else 0.0
-        ),
+        (float(np.mean(labels.sample_weight[labels.eligible_mask])) if np.any(labels.eligible_mask) else 0.0),
     )
 
     ev_long_grid = np.zeros((features.values.shape[0], features.values.shape[1]), dtype=np.float32)
@@ -652,9 +610,7 @@ def build_ml_strategy_alpha(
     all_folds = list(folds)
     v_fold = None
     if last_test_end < total_bars:
-        _logger.debug(
-            "[ML-OOS-FILL] Uncovered OOS/live window detected: [%d, %d)", last_test_end, total_bars
-        )
+        _logger.debug("[ML-OOS-FILL] Uncovered OOS/live window detected: [%d, %d)", last_test_end, total_bars)
         # Construct virtual fold Spec
         v_size = folds[-1].valid_end - folds[-1].valid_start
         v_train_end = last_test_end - v_size
@@ -682,7 +638,7 @@ def build_ml_strategy_alpha(
             folds_jobs = min(6, max(1, cpu_count - 2))
         else:
             folds_jobs = ml_cfg.parallel_fold_workers
-        
+
         # Enforce n_jobs = 1 to prevent CPU oversubscription thrashing.
         lgb_n_jobs = 1
         _logger.info(
@@ -745,7 +701,7 @@ def build_ml_strategy_alpha(
     t_grid_start = time.perf_counter()
     for res in results:
         fold_id = res["fold_id"]
-        is_virtual = (v_fold is not None and fold_id == v_fold.fold_id)
+        is_virtual = v_fold is not None and fold_id == v_fold.fold_id
 
         ev_test_long = res["ev_test_long"]
         ev_test_short = res["ev_test_short"]
@@ -759,7 +715,7 @@ def build_ml_strategy_alpha(
         if not is_virtual:
             valid_ev_long_all.append(res["ev_valid_long"])
             valid_ev_short_all.append(res["ev_valid_short"])
-            
+
             _logger.debug(
                 ".. ML_RANKER: fold=%d train_n=%d valid_n=%d test_n=%d",
                 fold_id,
@@ -829,15 +785,9 @@ def build_ml_strategy_alpha(
                 float(np.count_nonzero(ev_test_long) / max(1, ev_test_long.size)),
             )
         else:
-            nz_l = (
-                float(np.count_nonzero(ev_test_long) / max(1, ev_test_long.size))
-                if ev_test_long.size > 0
-                else 0.0
-            )
+            nz_l = float(np.count_nonzero(ev_test_long) / max(1, ev_test_long.size)) if ev_test_long.size > 0 else 0.0
             nz_s = (
-                float(np.count_nonzero(ev_test_short) / max(1, ev_test_short.size))
-                if ev_test_short.size > 0
-                else 0.0
+                float(np.count_nonzero(ev_test_short) / max(1, ev_test_short.size)) if ev_test_short.size > 0 else 0.0
             )
             _logger.info(
                 "🧩 ML_OOS_FILL: virtual_refit complete (rows=%d L_nz=%.3f S=%.3f)",
@@ -887,9 +837,7 @@ def build_ml_strategy_alpha(
     panel.attrs["feature_names"] = list(features.feature_names)
     panel.attrs["fold_count"] = len(folds)
     panel.attrs["config_hash"] = build_manifest_hash(asdict(cfg.ml))
-    panel.attrs["feature_config_hash"] = build_manifest_hash(
-        {"feature_names": sorted(list(features.feature_names))}
-    )
+    panel.attrs["feature_config_hash"] = build_manifest_hash({"feature_names": sorted(features.feature_names)})
     panel.attrs["label_config_hash"] = build_manifest_hash(
         {
             "label_horizon_bars": ml_cfg.label_horizon_bars,
@@ -938,10 +886,7 @@ def build_ml_strategy_alpha(
         "version": "v1",
         "mode": "single_horizon",
         "selected_horizon": int(ml_cfg.label_horizon_bars),
-        "cost_floor_bps": float(
-            round_trip_cost_bps()
-            + float(default_ev_hurdle_bps(OPT_FUTURES_CONFIG))
-        ),
+        "cost_floor_bps": float(round_trip_cost_bps() + float(default_ev_hurdle_bps(OPT_FUTURES_CONFIG))),
         "candidate_count": 1,
     }
     panel.attrs["model_family"] = "lightgbm_dual_side_quantile"
@@ -971,15 +916,11 @@ def build_ml_strategy_alpha(
     _oos_time_mask: np.ndarray = _score_finite_per_bar >= 1  # OOS로 추정되는 bar들
 
     # Co-finite: score AND signed_net_ret 모두 finite인 (t,s) 쌍 수 / bar
-    _cofinite_per_bar = np.sum(
-        np.isfinite(_score_grid_f) & np.isfinite(_snr_f), axis=1
-    )  # [T]
+    _cofinite_per_bar = np.sum(np.isfinite(_score_grid_f) & np.isfinite(_snr_f), axis=1)  # [T]
     _cofinite_oos = _cofinite_per_bar[_oos_time_mask]  # OOS 구간만
 
     # SNR OOS finite 비율 진단 — signed_net_ret가 OOS에서 얼마나 채워져 있는가
-    _snr_oos_finite = float(
-        np.mean(np.isfinite(_snr_f[_oos_time_mask]))
-    ) if _oos_time_mask.any() else 0.0
+    _snr_oos_finite = float(np.mean(np.isfinite(_snr_f[_oos_time_mask]))) if _oos_time_mask.any() else 0.0
 
     _cofinite_p50 = float(np.median(_cofinite_oos)) if _cofinite_oos.size > 0 else 0.0
     _bars_ge5 = int(np.sum(_cofinite_oos >= 5))
@@ -1011,16 +952,14 @@ def build_ml_strategy_alpha(
 
     _score_breadth = float(np.mean(_score_finite_per_bar))
     _logger.info(
-        "🔬 [SCORE-IC] dense_ranker ic=%.4f t=%.2f hit=%.3f breadth=%.1f"
-        " (cf. emit_breadth≈1, target_breadth≥8)",
+        "🔬 [SCORE-IC] dense_ranker ic=%.4f t=%.2f hit=%.3f breadth=%.1f (cf. emit_breadth≈1, target_breadth≥8)",
         float(_oos_ic_stats["mean_ic"]),
         float(_oos_ic_stats["t_stat"]),
         float(_oos_ic_stats["hit_ratio"]),
         _score_breadth,
     )
     _logger.info(
-        "🔬 [OOS-RANKIC] ic=%.4f t=%.2f n_bars=%d cofinite_p50=%.1f"
-        " bars_ge5_ratio=%.3f snr_oos_finite=%.3f",
+        "🔬 [OOS-RANKIC] ic=%.4f t=%.2f n_bars=%d cofinite_p50=%.1f bars_ge5_ratio=%.3f snr_oos_finite=%.3f",
         float(_oos_ic_stats["mean_ic"]),
         float(_oos_ic_stats["t_stat"]),
         int(_oos_ic_stats.get("n_obs", 0.0)),
@@ -1037,16 +976,8 @@ def build_ml_strategy_alpha(
     if not ml_cfg.ranker_enabled:
         # NDCG is N/A without ranker; mark as passing to avoid false gate failure
         quality_report["ranker_valid_ndcg_at_5"] = 1.0
-    valid_stack_long = (
-        np.concatenate(valid_ev_long_all)
-        if valid_ev_long_all
-        else np.zeros((0,), dtype=np.float32)
-    )
-    valid_stack_short = (
-        np.concatenate(valid_ev_short_all)
-        if valid_ev_short_all
-        else np.zeros((0,), dtype=np.float32)
-    )
+    valid_stack_long = np.concatenate(valid_ev_long_all) if valid_ev_long_all else np.zeros((0,), dtype=np.float32)
+    valid_stack_short = np.concatenate(valid_ev_short_all) if valid_ev_short_all else np.zeros((0,), dtype=np.float32)
     valid_alpha = (
         np.concatenate([valid_stack_long, valid_stack_short])
         if (valid_stack_long.size + valid_stack_short.size) > 0
@@ -1056,9 +987,7 @@ def build_ml_strategy_alpha(
         quality_report["in_fold_valid_alpha_p95_bps"] = (
             float(np.percentile(np.abs(valid_alpha) * 1e4, 95)) if valid_alpha.size > 0 else 0.0
         )
-    cost_floor = (
-        round_trip_cost_bps() + float(default_ev_hurdle_bps(OPT_FUTURES_CONFIG))
-    ) / 10000.0
+    cost_floor = (round_trip_cost_bps() + float(default_ev_hurdle_bps(OPT_FUTURES_CONFIG))) / 10000.0
     xs_long_proxy = np.where(alpha_long_final >= cost_floor, alpha_long_final, 0.0)
     xs_short_proxy = np.where(alpha_short_final >= cost_floor, alpha_short_final, 0.0)
     xs_long_preservation = preservation_ratio(alpha_long_final, xs_long_proxy)
@@ -1116,9 +1045,7 @@ def build_ml_strategy_alpha(
             or (k == "ranker_valid_ndcg_at_5" and v <= 0.0)
             or (k == "spearman_rank_ic" and v < 0.0)
         }
-        raise RuntimeError(
-            f"strategy ml quality gate failed: reasons={failed_keys} full={quality_report}"
-        )
+        raise RuntimeError(f"strategy ml quality gate failed: reasons={failed_keys} full={quality_report}")
     if float(np.count_nonzero(panel["alpha_long"].to_numpy(dtype=np.float64))) <= 0.0:
         raise RuntimeError("generated alpha_long is all zero")
     if float(np.count_nonzero(panel["alpha_short"].to_numpy(dtype=np.float64))) <= 0.0:
@@ -1266,9 +1193,7 @@ def build_ml_strategy_alpha_anchored(
     tgt_start = int(np.clip(target_start, 0, t_size))
     tgt_end = int(np.clip(target_end, 0, t_size))
     if anchor_end < 32:
-        raise RuntimeError(
-            f"anchored refit: anchor_end={anchor_end} too small (< 32 bars); cannot train"
-        )
+        raise RuntimeError(f"anchored refit: anchor_end={anchor_end} too small (< 32 bars); cannot train")
     if tgt_end <= tgt_start:
         raise RuntimeError(f"anchored refit: empty target window [{tgt_start}, {tgt_end})")
 
@@ -1489,9 +1414,7 @@ def build_ml_strategy_alpha_anchored(
         np.clip(np.maximum(ev_short_grid, 0.0), 0.0, clip_lim_awf),
         0.0,
     ).astype(np.float32, copy=False)
-    alpha_ic_score_awf = (alpha_long_final_awf - alpha_short_final_awf).astype(
-        np.float64, copy=False
-    )
+    alpha_ic_score_awf = (alpha_long_final_awf - alpha_short_final_awf).astype(np.float64, copy=False)
     ev_grid = alpha_ic_score_awf
 
     panel = assemble_alpha_panel(
@@ -1537,13 +1460,9 @@ def build_ml_strategy_alpha_anchored(
     )
     if "in_fold_valid_alpha_p95_bps" not in awf_quality_report:
         awf_quality_report["in_fold_valid_alpha_p95_bps"] = (
-            float(np.percentile(np.abs(_awf_valid_stack) * 1e4, 95))
-            if _awf_valid_stack.size > 0
-            else 0.0
+            float(np.percentile(np.abs(_awf_valid_stack) * 1e4, 95)) if _awf_valid_stack.size > 0 else 0.0
         )
-    cost_floor_awf = (
-        round_trip_cost_bps() + float(default_ev_hurdle_bps(OPT_FUTURES_CONFIG))
-    ) / 10000.0
+    cost_floor_awf = (round_trip_cost_bps() + float(default_ev_hurdle_bps(OPT_FUTURES_CONFIG))) / 10000.0
     xs_long_proxy_awf = np.where(
         alpha_long_final_awf >= cost_floor_awf,
         alpha_long_final_awf,
@@ -1563,9 +1482,7 @@ def build_ml_strategy_alpha_anchored(
             cost_floor=cost_floor_awf,
         )
     )
-    awf_quality_report["alpha_full_matrix_p95_bps"] = float(
-        awf_quality_report.get("alpha_p95_bps", 0.0)
-    )
+    awf_quality_report["alpha_full_matrix_p95_bps"] = float(awf_quality_report.get("alpha_p95_bps", 0.0))
     awf_quality_report["xs_long_preservation_ratio"] = xs_long_pres_awf
     awf_quality_report["xs_short_preservation_ratio"] = xs_short_pres_awf
     _awf_friction_bps = round_trip_cost_bps()
@@ -1576,12 +1493,8 @@ def build_ml_strategy_alpha_anchored(
         hurdle_bps=float(_awf_hurdle_bps),
         long_nz=float(awf_quality_report.get("alpha_long_non_zero_ratio", 0.0)),
         short_nz=float(awf_quality_report.get("alpha_short_non_zero_ratio", 0.0)),
-        xs_long_preservation_ratio=float(
-            awf_quality_report.get("xs_long_preservation_ratio", 0.0)
-        ),
-        xs_short_preservation_ratio=float(
-            awf_quality_report.get("xs_short_preservation_ratio", 0.0)
-        ),
+        xs_long_preservation_ratio=float(awf_quality_report.get("xs_long_preservation_ratio", 0.0)),
+        xs_short_preservation_ratio=float(awf_quality_report.get("xs_short_preservation_ratio", 0.0)),
         min_long_nz=ml_cfg.alpha_gate_min_long_nz,
         min_short_nz=ml_cfg.alpha_gate_min_short_nz,
         min_xs_preservation=ml_cfg.alpha_gate_min_xs_preservation,

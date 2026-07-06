@@ -111,9 +111,7 @@ class TestScoreV3:
             aum_impact_penalty=0.01,
         )
 
-        assert score_loss < score_profit, (
-            f"손실 전략({score_loss:.4f})이 수익 전략({score_profit:.4f})보다 낮아야 함"
-        )
+        assert score_loss < score_profit, f"손실 전략({score_loss:.4f})이 수익 전략({score_profit:.4f})보다 낮아야 함"
 
     def test_zero_penalties_score_equals_mean_log_tw(self) -> None:
         """모든 패널티 0이면 score = mean(leg_log_tw)."""

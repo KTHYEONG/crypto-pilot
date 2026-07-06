@@ -120,14 +120,11 @@ def rank_and_select(
     Space Complexity: O(N).
     """
     # valid 심볼만 추출 (삽입 순서 보존: Python 3.7+)
-    valid_sigs: dict[str, SymbolSignal] = {
-        k: v for k, v in signals.items() if v.valid
-    }
+    valid_sigs: dict[str, SymbolSignal] = {k: v for k, v in signals.items() if v.valid}
 
     if not valid_sigs:
         _logger.debug("rank_and_select: no valid signals, returning empty selection")
         return frozenset(), {}
-
 
     syms: list[str] = list(valid_sigs.keys())
     n: int = len(syms)
@@ -137,9 +134,7 @@ def rank_and_select(
         [valid_sigs[s].raw_mu * max(valid_sigs[s].quality_weight, 0.0) for s in syms],
         dtype=np.float64,
     )
-    vol_arr: NDArray[np.float64] = np.array(
-        [max(valid_sigs[s].volatility, VOL_FLOOR) for s in syms], dtype=np.float64
-    )
+    vol_arr: NDArray[np.float64] = np.array([max(valid_sigs[s].volatility, VOL_FLOOR) for s in syms], dtype=np.float64)
 
     # beta_btc 배열: 하나라도 non-None이면 배열 구성, 모두 None이면 None 전달 → CS demean 폴백
     beta_btc_arr: NDArray[np.float64] | None = None
@@ -174,17 +169,11 @@ def rank_and_select(
     rank_of: dict[str, int] = {s: idx + 1 for idx, s in enumerate(rank_order)}
 
     # Hysteresis: prev_selection 중 rank ≤ k_rank + rank_buffer 유지
-    sticky: set[str] = {
-        s
-        for s in prev_selection
-        if s in eligible_symbols and rank_of[s] <= k_rank + rank_buffer
-    }
+    sticky: set[str] = {s for s in prev_selection if s in eligible_symbols and rank_of[s] <= k_rank + rank_buffer}
 
     # 새로 진입할 Top candidates (sticky 제외, 여유 슬롯만큼)
     fresh_slots: int = max(0, k_rank - len(sticky))
-    fresh: list[str] = [
-        s for s in rank_order if s not in sticky and s in eligible_symbols
-    ][:fresh_slots]
+    fresh: list[str] = [s for s in rank_order if s not in sticky and s in eligible_symbols][:fresh_slots]
 
     selected: set[str] = sticky | set(fresh)
 

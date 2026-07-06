@@ -36,6 +36,7 @@ from src.domain.futures.strategy.walk_forward import WFFold
 
 # ── helpers ──────────────────────────────────────────────────────────
 
+
 def _make_gate(promotion_passed: bool = True, blocker: str = "") -> Layer2GateEvaluation:
     return Layer2GateEvaluation(
         optuna_constraint_values=(),
@@ -48,9 +49,13 @@ def _make_gate(promotion_passed: bool = True, blocker: str = "") -> Layer2GateEv
 def _dummy_metrics(n: int = 2) -> tuple[Layer2BlockMetric, ...]:
     return tuple(
         Layer2BlockMetric(
-            start_idx=i * 10, end_idx=(i + 1) * 10,
-            log_growth_hybrid=0.01, log_growth_baseline=0.005,
-            mdd_hybrid=0.02, turnover_hybrid=0.3, active_rebalances=5,
+            start_idx=i * 10,
+            end_idx=(i + 1) * 10,
+            log_growth_hybrid=0.01,
+            log_growth_baseline=0.005,
+            mdd_hybrid=0.02,
+            turnover_hybrid=0.3,
+            active_rebalances=5,
         )
         for i in range(n)
     )
@@ -138,10 +143,18 @@ def _make_minimal_eval(
         "bucket_reliability_mean": 0.7,
         "entry_spike_penalty": 0.0,
         "deployable_score": Layer2DeployableScore(
-            cagr=0.35, sortino=2.0, sharpe=1.8, calmar=2.33,
-            mdd=0.15, fold_pass_ratio=0.75, score=0.8,
-            worst_fold_cagr=0.25, positive_block_delta_ratio=0.6,
-            cost_drag=0.02, bucket_reliability_mean=0.7, entry_spike_penalty=0.0,
+            cagr=0.35,
+            sortino=2.0,
+            sharpe=1.8,
+            calmar=2.33,
+            mdd=0.15,
+            fold_pass_ratio=0.75,
+            score=0.8,
+            worst_fold_cagr=0.25,
+            positive_block_delta_ratio=0.6,
+            cost_drag=0.02,
+            bucket_reliability_mean=0.7,
+            entry_spike_penalty=0.0,
         ),
         "last_selected_symbols": ("BTC", "ETH"),
         "last_weights": (0.6, 0.4),
@@ -155,6 +168,7 @@ def _make_minimal_eval(
 
 
 # ── fixtures ──────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def base_config() -> Layer2AllocationConfig:
@@ -177,14 +191,20 @@ def base_config() -> Layer2AllocationConfig:
 
 def _make_folds(n: int = 2) -> tuple[WFFold, ...]:
     return tuple(
-        WFFold(fit_start=i * 10, fit_end=(i + 1) * 10,
-               cal_start=i * 10, cal_end=(i + 1) * 10,
-               oos_start=(i + 1) * 10, oos_end=(i + 2) * 10)
+        WFFold(
+            fit_start=i * 10,
+            fit_end=(i + 1) * 10,
+            cal_start=i * 10,
+            cal_end=(i + 1) * 10,
+            oos_start=(i + 1) * 10,
+            oos_end=(i + 2) * 10,
+        )
         for i in range(n)
     )
 
 
 # ── S1: override 적용 ────────────────────────────────────────────────
+
 
 class TestEvaluateL2TrialOverride:
     """C1: deploy_leverage_override 파라미터 검증."""
@@ -337,6 +357,7 @@ class TestEvaluateL2TrialOverride:
 
 # ── S4: parity 불변식 (핵심) ─────────────────────────────────────────
 
+
 class TestRunL2AwfParity:
     """C2/C3: run_l2_awf가 evaluate_l2_trial에 위임 후 parity 유지."""
 
@@ -482,6 +503,7 @@ class TestRunL2AwfParity:
 
 # ── S6: adapter 필드 매핑 ────────────────────────────────────────────
 
+
 class TestLayer2ResultAdapter:
     """C3: _layer2_result_from_trial_eval 매핑 정확성."""
 
@@ -553,12 +575,22 @@ class TestLayer2ResultAdapter:
             last_selected_symbols=("BTC", "ETH"),
             last_weights=(0.6, 0.4),
         )
-        extras = {"sharpe_baseline": 0.9, "mdd_baseline": 0.1, "cagr_baseline": 0.15,
-                  "turnover": 0.3, "average_net_exposure": 0.5, "n_rebalances": 10,
-                  "dsr_hybrid": 0.6, "terminal_multiple": 1.25}
+        extras = {
+            "sharpe_baseline": 0.9,
+            "mdd_baseline": 0.1,
+            "cagr_baseline": 0.15,
+            "turnover": 0.3,
+            "average_net_exposure": 0.5,
+            "n_rebalances": 10,
+            "dsr_hybrid": 0.6,
+            "terminal_multiple": 1.25,
+        }
 
         result = _layer2_result_from_trial_eval(
-            eval, gate_passed=True, blocker_reason="", extras=extras,
+            eval,
+            gate_passed=True,
+            blocker_reason="",
+            extras=extras,
         )
 
         assert result.selected_last == frozenset({"BTC", "ETH"})

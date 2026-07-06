@@ -113,14 +113,7 @@ def compute_coarse_precharge_bps(
     if cfg is None:
         cfg = FrictionConfig()
     fee_bps = cfg.taker_fee_bps + cfg.maker_share * (cfg.maker_rebate_bps - cfg.taker_fee_bps)
-    total_bps = (
-        fee_bps
-        + spread_bps
-        + impact_bps
-        + cfg.tick_cost_bps
-        + cfg.latency_buffer_bps
-        + funding_proxy_bps
-    )
+    total_bps = fee_bps + spread_bps + impact_bps + cfg.tick_cost_bps + cfg.latency_buffer_bps + funding_proxy_bps
     return float(total_bps)
 
 

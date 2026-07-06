@@ -66,6 +66,7 @@ def _existing_ledger_columns(*, ledger_path: Path) -> tuple[str, ...]:
     if not ledger_path.exists():
         return ()
     import sqlite3
+
     conn = sqlite3.connect(str(ledger_path))
     try:
         cursor = conn.cursor()
@@ -78,18 +79,13 @@ def _existing_ledger_columns(*, ledger_path: Path) -> tuple[str, ...]:
         conn.close()
 
 
-
-
-
-
-
 _MANIFEST_CACHE: dict[Path, tuple[float, pd.DataFrame]] = {}
 
 
 def _compute_manifest_hash(*, as_of: date, tf: str, manifest_path: Path) -> str:
     if not manifest_path.exists():
         return str(hash_manifest_rows(()))
-    
+
     try:
         mtime = os.path.getmtime(manifest_path)
     except OSError:
@@ -137,9 +133,6 @@ def _compute_manifest_hash(*, as_of: date, tf: str, manifest_path: Path) -> str:
             )
         )
     return str(hash_manifest_rows(rows))
-
-
-
 
 
 def _save_snapshot(
@@ -262,6 +255,7 @@ def load_universe_snapshot(
 # PIT path helpers (Phase 1)
 # ---------------------------------------------------------------------------
 
+
 def _instrument_df_from_ledger(latest_df: pd.DataFrame) -> pd.DataFrame:
     """Convert latest ledger rows to InstrumentRecord-schema DataFrame.
 
@@ -312,20 +306,32 @@ def _instrument_df_from_ledger(latest_df: pd.DataFrame) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(
             columns=[
-                "instrument_id", "symbol", "pair", "quote_asset", "margin_asset",
-                "contract_type", "onboard_at", "status", "state_valid_from",
-                "available_at", "confidence",
-                "n_bar_gaps", "max_gap_bars", "frozen_bars", "n_zero_volume_bars_60d",
-                "last_60d_coverage", "has_nan", "has_inf", "has_timestamp_issues",
+                "instrument_id",
+                "symbol",
+                "pair",
+                "quote_asset",
+                "margin_asset",
+                "contract_type",
+                "onboard_at",
+                "status",
+                "state_valid_from",
+                "available_at",
+                "confidence",
+                "n_bar_gaps",
+                "max_gap_bars",
+                "frozen_bars",
+                "n_zero_volume_bars_60d",
+                "last_60d_coverage",
+                "has_nan",
+                "has_inf",
+                "has_timestamp_issues",
                 "staleness_bars",
             ]
         )
     return pd.DataFrame(rows)
 
 
-def _observation_df_from_ledger(
-    latest_df: pd.DataFrame, *, decision_at: datetime
-) -> pd.DataFrame:
+def _observation_df_from_ledger(latest_df: pd.DataFrame, *, decision_at: datetime) -> pd.DataFrame:
     """Convert ledger metrics to MarketObservation-schema DataFrame.
 
     Maps: adv_usdt_median→adv30_usdt, amihud_30d→amihud30, vol_30d→vol30,
@@ -381,16 +387,19 @@ def _observation_df_from_ledger(
     if not rows:
         return pd.DataFrame(
             columns=[
-                "instrument_id", "metric", "observed_at", "available_at",
-                "value", "source", "confidence",
+                "instrument_id",
+                "metric",
+                "observed_at",
+                "available_at",
+                "value",
+                "source",
+                "confidence",
             ]
         )
     return pd.DataFrame(rows)
 
 
-def _rules_from_ledger(
-    latest_df: pd.DataFrame, *, decision_at: datetime
-) -> dict[str, ExecutionRules]:
+def _rules_from_ledger(latest_df: pd.DataFrame, *, decision_at: datetime) -> dict[str, ExecutionRules]:
     """Build ExecutionRules mapping from ledger tick_size and taker_fee_bps.
 
     Args:
@@ -504,9 +513,7 @@ def build_universe(
     )
     ledger_columns = _existing_ledger_columns(ledger_path=ledger_path)
     optional_oi_cols = tuple(
-        col
-        for col in ("oi_usdt_median", "sum_open_interest_value", "open_interest_usdt")
-        if col in ledger_columns
+        col for col in ("oi_usdt_median", "sum_open_interest_value", "open_interest_usdt") if col in ledger_columns
     )
     stage0 = load_ledger_slice(
         as_of=as_of_date,
@@ -567,11 +574,7 @@ def build_universe(
         _save_snapshot(manifest, snapshot, selected, decisions, report, root=snapshot_root)
         return snapshot, selected, report
 
-    latest = (
-        stage0.sort_values(["symbol", "date", "knowledge_date"])
-        .groupby("symbol", as_index=False)
-        .tail(1)
-    )
+    latest = stage0.sort_values(["symbol", "date", "knowledge_date"]).groupby("symbol", as_index=False).tail(1)
     decision_at = datetime.combine(as_of_date, datetime.min.time()).replace(tzinfo=UTC)
 
     instruments_df = _instrument_df_from_ledger(latest)
@@ -611,16 +614,9 @@ def build_universe(
     )
 
     eligible_ids = {e.instrument_id for e in snapshot_elig.eligibilities if e.eligible}
-    _cap_lookup: dict[str, float] = {
-        e.instrument_id: e.capacity_usdt
-        for e in snapshot_elig.eligibilities
-    }
+    _cap_lookup: dict[str, float] = {e.instrument_id: e.capacity_usdt for e in snapshot_elig.eligibilities}
     latest_by_symbol = latest.set_index("symbol", drop=False)
-    eligible_syms_all = [
-        sym
-        for sym in latest["symbol"].tolist()
-        if f"binance_usdt_perpetual:{sym}" in eligible_ids
-    ]
+    eligible_syms_all = [sym for sym in latest["symbol"].tolist() if f"binance_usdt_perpetual:{sym}" in eligible_ids]
     # Sort by capacity_usdt descending (helps L2 sizing decisions)
     # Breadth-maximizing: k_max is the only bound (capacity prefix REMOVED per spec C4).
     # capacity_usdt is preserved in state_cube for L2 sizing — NOT used here for prefix cut.
@@ -668,9 +664,7 @@ def build_universe(
                 ),
                 basis_vol=(
                     None
-                    if source_row is None
-                    or "basis_vol" not in source_row.index
-                    or pd.isna(source_row.get("basis_vol"))
+                    if source_row is None or "basis_vol" not in source_row.index or pd.isna(source_row.get("basis_vol"))
                     else float(source_row.get("basis_vol"))
                 ),
                 capacity_clip_usdt_list=(_capacity_for(sym),),
@@ -740,11 +734,7 @@ def build_universe(
     eligibility_report_df = pd.DataFrame(
         [
             {
-                "symbol": (
-                    e.instrument_id.split(":")[-1]
-                    if ":" in e.instrument_id
-                    else e.instrument_id
-                ),
+                "symbol": (e.instrument_id.split(":")[-1] if ":" in e.instrument_id else e.instrument_id),
                 "stage": "pit_eligibility",
                 "passed": e.eligible,
                 "reason": e.code.value,
@@ -763,11 +753,7 @@ def build_universe(
             for sym in eligible_syms
         ]
     )
-    non_selected_syms = [
-        sym
-        for sym in eligible_syms_all
-        if sym not in set(eligible_syms)
-    ]
+    non_selected_syms = [sym for sym in eligible_syms_all if sym not in set(eligible_syms)]
     if non_selected_syms:
         selection_report_df = pd.concat(
             [

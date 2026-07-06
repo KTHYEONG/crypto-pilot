@@ -57,6 +57,7 @@ def default_cfg() -> MagicMock:
 
 # ─── Scenario 1 — Happy Path ───────────────────────────────────────────
 
+
 def test_adverse_regime_detects_defeat(adverse_regime_event_frame: pd.DataFrame, default_cfg: MagicMock) -> None:
     """1.1 adverse 구간에서 방어 실패 감지: lcb < 0, defended=False."""
     lcb, n_obs, defended = compute_adverse_regime_evidence(
@@ -73,7 +74,8 @@ def test_adverse_regime_detects_defeat(adverse_regime_event_frame: pd.DataFrame,
 
 
 def test_adverse_regime_short_sample_returns_undecided(
-    adverse_regime_event_frame: pd.DataFrame, default_cfg: MagicMock,
+    adverse_regime_event_frame: pd.DataFrame,
+    default_cfg: MagicMock,
 ) -> None:
     """2.2 adverse subset이 min_bars=8 미만(5행): (None, 5, True)."""
     short = adverse_regime_event_frame.iloc[:15]  # crisis = rows 12~15 → 4 rows only
@@ -91,12 +93,17 @@ def test_adverse_regime_short_sample_returns_undecided(
 
 def test_adverse_regime_no_entry_regime_column(default_cfg: MagicMock) -> None:
     """3.1 entry_regime_code 컬럼 없는 레거시 fixture: (None, 0, True)."""
-    df = pd.DataFrame({
-        "realized_side_adjusted_gross_bps": [1.0, 2.0],
-        "decision_idx": [0, 1],
-    })
+    df = pd.DataFrame(
+        {
+            "realized_side_adjusted_gross_bps": [1.0, 2.0],
+            "decision_idx": [0, 1],
+        }
+    )
     lcb, n_obs, defended = compute_adverse_regime_evidence(
-        df, cfg=default_cfg, fold_id=0, seed=42,
+        df,
+        cfg=default_cfg,
+        fold_id=0,
+        seed=42,
     )
     assert lcb is None
     assert n_obs == 0
@@ -105,14 +112,20 @@ def test_adverse_regime_no_entry_regime_column(default_cfg: MagicMock) -> None:
 
 def test_adverse_regime_uses_entry_code_only(default_cfg: MagicMock) -> None:
     """2.1 exit_regime_code가 섞여 있어도 entry_regime_code만 참조."""
-    df = pd.DataFrame({
-        "realized_side_adjusted_gross_bps": [10.0] * 5 + [-20.0] * 8,
-        "entry_regime_code": [0] * 5 + [2] * 8,
-        "exit_regime_code": [2] * 5 + [0] * 8,
-        "decision_idx": list(range(13)),
-    })
+    df = pd.DataFrame(
+        {
+            "realized_side_adjusted_gross_bps": [10.0] * 5 + [-20.0] * 8,
+            "entry_regime_code": [0] * 5 + [2] * 8,
+            "exit_regime_code": [2] * 5 + [0] * 8,
+            "decision_idx": list(range(13)),
+        }
+    )
     lcb, n_obs, defended = compute_adverse_regime_evidence(
-        df, cfg=default_cfg, fold_id=0, seed=42, min_bars=8,
+        df,
+        cfg=default_cfg,
+        fold_id=0,
+        seed=42,
+        min_bars=8,
     )
     assert n_obs == 8
     assert lcb is not None
@@ -121,7 +134,8 @@ def test_adverse_regime_uses_entry_code_only(default_cfg: MagicMock) -> None:
 
 
 def test_existing_fields_unchanged_by_new_fields(
-    adverse_regime_event_frame: pd.DataFrame, default_cfg: MagicMock,
+    adverse_regime_event_frame: pd.DataFrame,
+    default_cfg: MagicMock,
 ) -> None:
     """2.5 신규 필드 3개만 추가되고 기존 필드는 동일."""
     event_results = adverse_regime_event_frame.copy()

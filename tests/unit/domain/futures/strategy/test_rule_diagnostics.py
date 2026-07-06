@@ -710,6 +710,7 @@ def test_breakeven_hard_gate_excludes_subbreakeven_variant() -> None:
 # Regime-cell conditional admission tests
 # ---------------------------------------------------------------------------
 
+
 def _make_cell_admission_cfg(**overrides: object) -> CandidateStrategyConfig:
     defaults: dict[str, object] = {
         "regime_cell_admission_enabled": True,
@@ -745,14 +746,18 @@ def _make_regime_arrays(
     regime_code = np.full(n_bars, other_code, dtype=np.int64)
     regime_code[:half] = cell_code
     # n_per_cell events in target cell (bars 0..half-1), same count in other cell
-    entry_idx = np.concatenate([
-        np.arange(0, n_per_cell, dtype=np.int64),
-        np.arange(half, half + n_per_cell, dtype=np.int64),
-    ])
-    edge = np.concatenate([
-        rng.normal(cell_edge, noise_std, n_per_cell),
-        rng.normal(2.0, noise_std, n_per_cell),
-    ])
+    entry_idx = np.concatenate(
+        [
+            np.arange(0, n_per_cell, dtype=np.int64),
+            np.arange(half, half + n_per_cell, dtype=np.int64),
+        ]
+    )
+    edge = np.concatenate(
+        [
+            rng.normal(cell_edge, noise_std, n_per_cell),
+            rng.normal(2.0, noise_std, n_per_cell),
+        ]
+    )
     return entry_idx, edge, regime_code
 
 
@@ -807,21 +812,23 @@ def test_regime_cell_admission_caps_at_max_cells() -> None:
 def test_regime_cell_admission_safety_gate_blocks_high_q10_fail() -> None:
     # Arrange: cell passes edge/tstat, but q10_shortfall_fail_rate=0.80 > 0.65.
     cfg = _make_cell_admission_cfg()
-    row = pd.Series({
-        "oos_n": 150,
-        "oos_mean_edge_bps": 4.0,            # fails global mean_edge gate
-        "oos_median_edge_bps": -5.0,
-        "oos_p10_edge_bps": -200.0,
-        "oos_q10_shortfall_fail_rate": 0.80,  # FAILS safety gate
-        "event_fraction_per_bar": 0.05,
-        "regime_pass": False,
-        "edge_stability_bps": float("nan"),
-        "oos_pct_edge_pos": 0.4,
-        "oos_payoff_ratio": 1.1,
-        "breakeven_hard_pass": False,
-        "oos_rank_ic": 0.01,
-        "regime_cell_admitted": True,         # cell path would normally override
-    })
+    row = pd.Series(
+        {
+            "oos_n": 150,
+            "oos_mean_edge_bps": 4.0,  # fails global mean_edge gate
+            "oos_median_edge_bps": -5.0,
+            "oos_p10_edge_bps": -200.0,
+            "oos_q10_shortfall_fail_rate": 0.80,  # FAILS safety gate
+            "event_fraction_per_bar": 0.05,
+            "regime_pass": False,
+            "edge_stability_bps": float("nan"),
+            "oos_pct_edge_pos": 0.4,
+            "oos_payoff_ratio": 1.1,
+            "breakeven_hard_pass": False,
+            "oos_rank_ic": 0.01,
+            "regime_cell_admitted": True,  # cell path would normally override
+        }
+    )
 
     # Act
     result = _meets_recommendation_thresholds(row, cfg)
@@ -849,21 +856,23 @@ def test_regime_cell_admission_default_off_is_bit_identical() -> None:
         admission_use_newey_west=True,
         admission_tau_prior_bps=15.0,
     )
-    row_no_admission = pd.Series({
-        "oos_n": 150,
-        "oos_mean_edge_bps": 4.0,
-        "oos_median_edge_bps": 3.0,
-        "oos_p10_edge_bps": -200.0,
-        "oos_q10_shortfall_fail_rate": 0.40,
-        "event_fraction_per_bar": 0.05,
-        "regime_pass": False,
-        "edge_stability_bps": float("nan"),
-        "oos_pct_edge_pos": 0.4,
-        "oos_payoff_ratio": 1.1,
-        "breakeven_hard_pass": False,
-        "oos_rank_ic": 0.005,
-        "regime_cell_admitted": False,  # not admitted even if enabled
-    })
+    row_no_admission = pd.Series(
+        {
+            "oos_n": 150,
+            "oos_mean_edge_bps": 4.0,
+            "oos_median_edge_bps": 3.0,
+            "oos_p10_edge_bps": -200.0,
+            "oos_q10_shortfall_fail_rate": 0.40,
+            "event_fraction_per_bar": 0.05,
+            "regime_pass": False,
+            "edge_stability_bps": float("nan"),
+            "oos_pct_edge_pos": 0.4,
+            "oos_payoff_ratio": 1.1,
+            "breakeven_hard_pass": False,
+            "oos_rank_ic": 0.005,
+            "regime_cell_admitted": False,  # not admitted even if enabled
+        }
+    )
 
     # Act
     result_off = _meets_recommendation_thresholds(row_no_admission, cfg_off)
@@ -926,18 +935,14 @@ def test_bayesian_admission_s1_strong_edge_sparse_cell_admitted() -> None:
     )
     rng = np.random.default_rng(10)
     regime_names = ["bear_quiet", "other"]
-    entry_idx, edge, regime_code = _make_bcr_style_arrays(
-        n_cell=39, edge_mean=70.0, noise_std=30.0, cell_code=0
-    )
+    entry_idx, edge, regime_code = _make_bcr_style_arrays(n_cell=39, edge_mean=70.0, noise_std=30.0, cell_code=0)
     edge = rng.normal(70.0, 30.0, 39)  # override with controlled seed
     entry_idx = np.arange(39, dtype=np.int64)
     n_bars = 500
     regime_code = np.full(n_bars, 1, dtype=np.int64)
     regime_code[:39] = 0
 
-    result = _regime_cell_admission(
-        entry_idx, edge, regime_code, regime_names, cfg, arch_prior_bps=10.0
-    )
+    result = _regime_cell_admission(entry_idx, edge, regime_code, regime_names, cfg, arch_prior_bps=10.0)
 
     assert result["admitted"] is True
     assert "bear_quiet" in result["admitted_cells"]
@@ -993,17 +998,13 @@ def test_bayesian_admission_s3_eb_shrinks_outlier_cell_mean() -> None:
     regime_code[:n] = 0
     entry_idx = np.arange(n, dtype=np.int64)
 
-    result = _regime_cell_admission(
-        entry_idx, edge, regime_code, regime_names, cfg, arch_prior_bps=10.0
-    )
+    result = _regime_cell_admission(entry_idx, edge, regime_code, regime_names, cfg, arch_prior_bps=10.0)
 
     raw_mean = float(np.mean(edge))
     mu_post = result["cell_mu_post"]["bull"]
     arch_prior = 10.0
     # Posterior mean is between prior and raw mean (EB shrinkage toward prior)
-    assert arch_prior < mu_post < raw_mean, (
-        f"mu_post={mu_post:.1f} should be in ({arch_prior}, {raw_mean:.1f})"
-    )
+    assert arch_prior < mu_post < raw_mean, f"mu_post={mu_post:.1f} should be in ({arch_prior}, {raw_mean:.1f})"
     # Shrinkage is non-trivial: at least 3% pulled toward prior
     shrinkage_frac = (raw_mean - mu_post) / (raw_mean - arch_prior)
     assert shrinkage_frac > 0.03, f"Expected shrinkage > 3%, got {shrinkage_frac:.3f}"
@@ -1127,45 +1128,41 @@ def test_bayesian_admission_s9_momentum_signal_still_passes() -> None:
 def test_compute_rule_diagnostics_fdr_and_spa_gating() -> None:
     aligned = _make_regime_aligned()
     # 1. FDR gate test
-    rows = []
-    # 20 events for positive variant in OOS window (entry_idx = 240)
-    for i in range(20):
-        rows.append({
-            "datetime": aligned.datetimes[239],
-            "symbol": "BTCUSDT",
-            "family": "trend_ma",
-            "variant": "ema_12_72",
-            "side": 1,
-            "raw_score": 0.9,
-            "score_z": 0.9,
-            "entry_idx": 240,
-            "expected_holding_bars": 4,
-            "min_holding_bars": 1,
-            "stop_atr_mult": 50.0,
-            "take_profit_atr_mult": 50.0,
-            "turnover_proxy": 0.1,
-            "cost_floor_bps": 0.0,
-            "hurdle_bps": 0.0,
-        })
-    # 20 events for negative variant in OOS window (entry_idx = 240)
-    for i in range(20):
-        rows.append({
-            "datetime": aligned.datetimes[239],
-            "symbol": "BTCUSDT",
-            "family": "rsi_reversion",
-            "variant": "rsi_14",
-            "side": -1,
-            "raw_score": -0.8,
-            "score_z": -0.8,
-            "entry_idx": 240,
-            "expected_holding_bars": 4,
-            "min_holding_bars": 1,
-            "stop_atr_mult": 50.0,
-            "take_profit_atr_mult": 50.0,
-            "turnover_proxy": 0.1,
-            "cost_floor_bps": 0.0,
-            "hurdle_bps": 0.0,
-        })
+    pos_row = {
+        "datetime": aligned.datetimes[239],
+        "symbol": "BTCUSDT",
+        "family": "trend_ma",
+        "variant": "ema_12_72",
+        "side": 1,
+        "raw_score": 0.9,
+        "score_z": 0.9,
+        "entry_idx": 240,
+        "expected_holding_bars": 4,
+        "min_holding_bars": 1,
+        "stop_atr_mult": 50.0,
+        "take_profit_atr_mult": 50.0,
+        "turnover_proxy": 0.1,
+        "cost_floor_bps": 0.0,
+        "hurdle_bps": 0.0,
+    }
+    neg_row = {
+        "datetime": aligned.datetimes[239],
+        "symbol": "BTCUSDT",
+        "family": "rsi_reversion",
+        "variant": "rsi_14",
+        "side": -1,
+        "raw_score": -0.8,
+        "score_z": -0.8,
+        "entry_idx": 240,
+        "expected_holding_bars": 4,
+        "min_holding_bars": 1,
+        "stop_atr_mult": 50.0,
+        "take_profit_atr_mult": 50.0,
+        "turnover_proxy": 0.1,
+        "cost_floor_bps": 0.0,
+        "hurdle_bps": 0.0,
+    }
+    rows = [pos_row] * 20 + [neg_row] * 20
     events = pd.DataFrame(rows)
     labeled = label_candidate_events(
         events=events,
@@ -1178,7 +1175,7 @@ def test_compute_rule_diagnostics_fdr_and_spa_gating() -> None:
             labeled.at[idx, "edge_after_hurdle_bps"] = 100.0  # high edge
         else:
             labeled.at[idx, "edge_after_hurdle_bps"] = -10.0  # negative edge
-            
+
     # Base configuration to relax other unrelated gates
     cfg_base = {
         "min_variant_oos_obs": 1,
@@ -1194,12 +1191,7 @@ def test_compute_rule_diagnostics_fdr_and_spa_gating() -> None:
     }
 
     # fdr_gate_enabled=True, spa_gate_enabled=False
-    cfg_fdr = CandidateStrategyConfig(
-        fdr_gate_enabled=True,
-        spa_gate_enabled=False,
-        fdr_alpha=0.10,
-        **cfg_base
-    )
+    cfg_fdr = CandidateStrategyConfig(fdr_gate_enabled=True, spa_gate_enabled=False, fdr_alpha=0.10, **cfg_base)
     result_fdr = compute_rule_diagnostics(
         labeled_events=labeled,
         aligned=aligned,
@@ -1207,6 +1199,7 @@ def test_compute_rule_diagnostics_fdr_and_spa_gating() -> None:
         min_obs=1,
     )
     import logging
+
     logging.warning("BY_VARIANT TABLE:\n%s", result_fdr.by_variant.to_string())
     logging.warning("DECISION:\n%s", result_fdr.decision)
     logging.warning("FAILURE REPORT:\n%s", result_fdr.recommendation_failure_report)
@@ -1215,11 +1208,7 @@ def test_compute_rule_diagnostics_fdr_and_spa_gating() -> None:
 
     # 2. SPA gate test: Pass scenario
     cfg_spa_pass = CandidateStrategyConfig(
-        fdr_gate_enabled=False,
-        spa_gate_enabled=True,
-        spa_p_value_max=0.50,
-        spa_n_bootstrap=100,
-        **cfg_base
+        fdr_gate_enabled=False, spa_gate_enabled=True, spa_p_value_max=0.50, spa_n_bootstrap=100, **cfg_base
     )
     result_spa_pass = compute_rule_diagnostics(
         labeled_events=labeled,
@@ -1233,11 +1222,7 @@ def test_compute_rule_diagnostics_fdr_and_spa_gating() -> None:
     labeled_bad = labeled.copy()
     labeled_bad["edge_after_hurdle_bps"] = -50.0  # all negative
     cfg_spa_fail = CandidateStrategyConfig(
-        fdr_gate_enabled=False,
-        spa_gate_enabled=True,
-        spa_p_value_max=0.10,
-        spa_n_bootstrap=100,
-        **cfg_base
+        fdr_gate_enabled=False, spa_gate_enabled=True, spa_p_value_max=0.10, spa_n_bootstrap=100, **cfg_base
     )
     result_spa_fail = compute_rule_diagnostics(
         labeled_events=labeled_bad,
@@ -1252,21 +1237,24 @@ def test_compute_rule_diagnostics_fdr_and_spa_gating() -> None:
 # Phase 2: Signal Pruning — min_variant_oos_profit_bps
 # ---------------------------------------------------------------------------
 
+
 def _make_profit_row(oos_mean_edge_bps: float) -> pd.Series:
     """Minimal row for profit floor gate tests."""
-    return pd.Series({
-        "oos_n": 200,
-        "oos_rank_ic": 0.05,
-        "oos_ic_n": 200,
-        "oos_mean_edge_bps": oos_mean_edge_bps,
-        "oos_median_edge_bps": 0.0,
-        "oos_p10_edge_bps": -200.0,
-        "oos_q10_shortfall_fail_rate": 0.3,
-        "event_fraction_per_bar": 0.05,
-        "regime_cell_admitted": False,
-        "breakeven_hard_pass": True,
-        "exit_policy_id": "stop_loss",
-    })
+    return pd.Series(
+        {
+            "oos_n": 200,
+            "oos_rank_ic": 0.05,
+            "oos_ic_n": 200,
+            "oos_mean_edge_bps": oos_mean_edge_bps,
+            "oos_median_edge_bps": 0.0,
+            "oos_p10_edge_bps": -200.0,
+            "oos_q10_shortfall_fail_rate": 0.3,
+            "event_fraction_per_bar": 0.05,
+            "regime_cell_admitted": False,
+            "breakeven_hard_pass": True,
+            "exit_policy_id": "stop_loss",
+        }
+    )
 
 
 def test_profit_floor_blocks_noise_signals() -> None:

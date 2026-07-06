@@ -5,6 +5,7 @@ Scenarios 6-8: compute_symbol_strategy_evidence xs_admission substitution
 Scenario 9: compute_xs_factor_spread_diagnostics 10-tuple regression
 Scenario 10: build_qualified_signal_registry gate-2 regression
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -64,30 +65,37 @@ def _xs_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
 
 
 def _positive_factor_rows(
-    n_bars: int, family: str, variant: str, archetype: str = "xs_alpha",
+    n_bars: int,
+    family: str,
+    variant: str,
+    archetype: str = "xs_alpha",
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for b in range(n_bars):
-        rows.append({
-            "decision_idx": b,
-            "symbol": "A",
-            "family": family,
-            "variant": variant,
-            "archetype": archetype,
-            "side": 1,
-            "score_z": 1.0,
-            "realized_side_adjusted_gross_bps": 40.0,
-        })
-        rows.append({
-            "decision_idx": b,
-            "symbol": "B",
-            "family": family,
-            "variant": variant,
-            "archetype": archetype,
-            "side": -1,
-            "score_z": -1.0,
-            "realized_side_adjusted_gross_bps": 35.0,
-        })
+        rows.append(
+            {
+                "decision_idx": b,
+                "symbol": "A",
+                "family": family,
+                "variant": variant,
+                "archetype": archetype,
+                "side": 1,
+                "score_z": 1.0,
+                "realized_side_adjusted_gross_bps": 40.0,
+            }
+        )
+        rows.append(
+            {
+                "decision_idx": b,
+                "symbol": "B",
+                "family": family,
+                "variant": variant,
+                "archetype": archetype,
+                "side": -1,
+                "score_z": -1.0,
+                "realized_side_adjusted_gross_bps": 35.0,
+            }
+        )
     return rows
 
 
@@ -115,34 +123,39 @@ def _make_event_frame(
     for i in range(n_obs):
         fold = i % max(n_folds, 1)
         t_g = target_gross_high if fold == 0 else target_gross_low
-        rows.append({
-            "symbol": symbol,
-            "strategy_id": strategy_id,
-            "activation_context": "all",
-            "side": 1,
-            "holding_bucket": 4,
-            "gross_event_bps": t_g,
-            "fold_id": fold,
-            "uniqueness_weight": 1.0,
-            "expected_holding_bars": 4,
-            "decision_idx": i,
-        })
-        rows.append({
-            "symbol": symbol,
-            "strategy_id": "xs_peer:high_gross",
-            "activation_context": "all",
-            "side": 1,
-            "holding_bucket": 4,
-            "gross_event_bps": peer_gross,
-            "fold_id": fold,
-            "uniqueness_weight": 1.0,
-            "expected_holding_bars": 4,
-            "decision_idx": i,
-        })
+        rows.append(
+            {
+                "symbol": symbol,
+                "strategy_id": strategy_id,
+                "activation_context": "all",
+                "side": 1,
+                "holding_bucket": 4,
+                "gross_event_bps": t_g,
+                "fold_id": fold,
+                "uniqueness_weight": 1.0,
+                "expected_holding_bars": 4,
+                "decision_idx": i,
+            }
+        )
+        rows.append(
+            {
+                "symbol": symbol,
+                "strategy_id": "xs_peer:high_gross",
+                "activation_context": "all",
+                "side": 1,
+                "holding_bucket": 4,
+                "gross_event_bps": peer_gross,
+                "fold_id": fold,
+                "uniqueness_weight": 1.0,
+                "expected_holding_bars": 4,
+                "decision_idx": i,
+            }
+        )
     return pd.DataFrame(rows)
 
 
 # ─── Scenario 1: resolve_xs_alpha_admission — Happy Path ──────────────────
+
 
 def test_resolve_xs_alpha_admission_passes_when_lcb_and_sharpe_exceed_floor() -> None:
     diag = XsFactorSpreadDiagnostics(
@@ -166,6 +179,7 @@ def test_resolve_xs_alpha_admission_passes_when_lcb_and_sharpe_exceed_floor() ->
 
 # ─── Scenario 2: Feature flag off ─────────────────────────────────────────
 
+
 def test_resolve_xs_alpha_admission_returns_empty_when_disabled() -> None:
     diag = XsFactorSpreadDiagnostics(
         fold_id=0,
@@ -177,6 +191,7 @@ def test_resolve_xs_alpha_admission_returns_empty_when_disabled() -> None:
 
 
 # ─── Scenario 3: LCB below breakeven floor ────────────────────────────────
+
 
 def test_resolve_xs_alpha_admission_rejects_when_lcb_below_breakeven_floor() -> None:
     diag = XsFactorSpreadDiagnostics(
@@ -194,6 +209,7 @@ def test_resolve_xs_alpha_admission_rejects_when_lcb_below_breakeven_floor() -> 
 
 # ─── Scenario 4: Sharpe below minimum ─────────────────────────────────────
 
+
 def test_resolve_xs_alpha_admission_rejects_when_sharpe_below_minimum() -> None:
     diag = XsFactorSpreadDiagnostics(
         fold_id=0,
@@ -210,6 +226,7 @@ def test_resolve_xs_alpha_admission_rejects_when_sharpe_below_minimum() -> None:
 
 # ─── Scenario 5: None / empty diag ────────────────────────────────────────
 
+
 def test_resolve_xs_alpha_admission_handles_none_and_empty_diag() -> None:
     cfg = _make_cfg(l1_xs_alpha_admission_enabled=True)
     assert resolve_xs_alpha_admission(None, cfg) == {}
@@ -218,6 +235,7 @@ def test_resolve_xs_alpha_admission_handles_none_and_empty_diag() -> None:
 
 
 # ─── Scenario 6: xs_admission substitution integration ────────────────────
+
 
 def test_compute_symbol_strategy_evidence_xs_admission_substitutes_gate_inputs() -> None:
     """With xs_admission, factor-level values override pair-level negative incremental."""
@@ -231,12 +249,18 @@ def test_compute_symbol_strategy_evidence_xs_admission_substitutes_gate_inputs()
     )
     admission_map = {
         "xs_momentum:v1": XsAdmissionBasis(
-            mean_bps=54.0, lcb_bps=41.8, sharpe=0.47,
-            probability_positive=0.9, n_bars=544,
+            mean_bps=54.0,
+            lcb_bps=41.8,
+            sharpe=0.47,
+            probability_positive=0.9,
+            n_bars=544,
         ),
     }
     evidence = compute_symbol_strategy_evidence(
-        event_results=df, cfg=cfg, seed=0, registry_as_of_idx=999,
+        event_results=df,
+        cfg=cfg,
+        seed=0,
+        registry_as_of_idx=999,
         xs_admission=admission_map,
     )
     evs = {e.key.strategy_id: e for e in evidence}
@@ -250,6 +274,7 @@ def test_compute_symbol_strategy_evidence_xs_admission_substitutes_gate_inputs()
 
 # ─── Scenario 7: Regression — xs_admission=None keeps existing gate ───────
 
+
 def test_compute_symbol_strategy_evidence_without_xs_admission_keeps_existing_gate() -> None:
     """Without xs_admission, pair-level negative incremental triggers no_incremental_edge."""
     df = _make_event_frame(target_gross_high=10, target_gross_low=5, n_obs=30)
@@ -260,7 +285,10 @@ def test_compute_symbol_strategy_evidence_without_xs_admission_keeps_existing_ga
         l1_pair_min_mean_gross_bps=0.0,
     )
     evidence = compute_symbol_strategy_evidence(
-        event_results=df, cfg=cfg, seed=0, registry_as_of_idx=999,
+        event_results=df,
+        cfg=cfg,
+        seed=0,
+        registry_as_of_idx=999,
         xs_admission=None,
     )
     evs = {e.key.strategy_id: e for e in evidence}
@@ -270,6 +298,7 @@ def test_compute_symbol_strategy_evidence_without_xs_admission_keeps_existing_ga
 
 
 # ─── Scenario 8: Sample size gate still blocks ────────────────────────────
+
 
 def test_compute_symbol_strategy_evidence_xs_admission_does_not_bypass_sample_size_gate() -> None:
     """Even with xs_admission, insufficient effective_obs still blocks."""
@@ -281,12 +310,18 @@ def test_compute_symbol_strategy_evidence_xs_admission_does_not_bypass_sample_si
     )
     admission_map = {
         "xs_momentum:v1": XsAdmissionBasis(
-            mean_bps=54.0, lcb_bps=41.8, sharpe=0.47,
-            probability_positive=0.9, n_bars=544,
+            mean_bps=54.0,
+            lcb_bps=41.8,
+            sharpe=0.47,
+            probability_positive=0.9,
+            n_bars=544,
         ),
     }
     evidence = compute_symbol_strategy_evidence(
-        event_results=df, cfg=cfg, seed=0, registry_as_of_idx=999,
+        event_results=df,
+        cfg=cfg,
+        seed=0,
+        registry_as_of_idx=999,
         xs_admission=admission_map,
     )
     evs = {e.key.strategy_id: e for e in evidence}
@@ -298,12 +333,16 @@ def test_compute_symbol_strategy_evidence_xs_admission_does_not_bypass_sample_si
 
 # ─── Scenario 9: compute_xs_factor_spread_diagnostics 10-tuple regression ─
 
+
 def test_compute_xs_factor_spread_diagnostics_includes_probability_positive() -> None:
     rows = _positive_factor_rows(12, "xs_momentum", "xs_momentum_48")
     frame = _xs_frame(rows)
     cfg = _make_cfg()
     result = compute_xs_factor_spread_diagnostics(
-        realized_event_results=frame, cfg=cfg, fold_id=0, seed=0,
+        realized_event_results=frame,
+        cfg=cfg,
+        fold_id=0,
+        seed=0,
     )
     assert result is not None
     vals = result.by_factor.get("xs_momentum:xs_momentum_48")
@@ -316,6 +355,7 @@ def test_compute_xs_factor_spread_diagnostics_includes_probability_positive() ->
 
 # ─── Scenario 10: build_qualified_signal_registry gate-2 regression ───────
 
+
 def test_build_qualified_signal_registry_admits_xs_pair_via_substituted_lcb() -> None:
     """Gate-2 (lcb_net_bps > breakeven) must pass when xs_admission substitutes lcb."""
     df = _make_event_frame(target_gross_high=120, target_gross_low=10, n_obs=30)
@@ -324,11 +364,15 @@ def test_build_qualified_signal_registry_admits_xs_pair_via_substituted_lcb() ->
     ev_pass = compute_symbol_strategy_evidence(
         event_results=df,
         cfg=_make_cfg(l1_pair_min_effective_obs=5.0, l1_pair_min_folds=1, l1_pair_min_incremental_bps=0.0),
-        seed=0, registry_as_of_idx=999,
+        seed=0,
+        registry_as_of_idx=999,
         xs_admission={
             "xs_momentum:v1": XsAdmissionBasis(
-                mean_bps=54.0, lcb_bps=41.8, sharpe=0.47,
-                probability_positive=0.9, n_bars=544,
+                mean_bps=54.0,
+                lcb_bps=41.8,
+                sharpe=0.47,
+                probability_positive=0.9,
+                n_bars=544,
             ),
         },
     )
@@ -347,7 +391,8 @@ def test_build_qualified_signal_registry_admits_xs_pair_via_substituted_lcb() ->
     ev_fail = compute_symbol_strategy_evidence(
         event_results=df,
         cfg=_make_cfg(l1_pair_min_effective_obs=5.0, l1_pair_min_folds=1, l1_pair_min_incremental_bps=0.0),
-        seed=0, registry_as_of_idx=999,
+        seed=0,
+        registry_as_of_idx=999,
         xs_admission=None,
     )
     registry_fail = build_qualified_signal_registry(

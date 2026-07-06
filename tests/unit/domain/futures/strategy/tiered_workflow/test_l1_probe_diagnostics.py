@@ -35,20 +35,23 @@ def _merged(
     side: list[int] | None = None,
 ) -> pd.DataFrame:
     n = len(exp)
-    df = pd.DataFrame({
-        "decision_idx": decision_idx,
-        "symbol": symbols,
-        "strategy_id": ["s"] * n,
-        "expected_gross_bps": np.asarray(exp, dtype=float),
-        "realized_side_adjusted_gross_bps": np.asarray(real, dtype=float),
-        "quality_weight": np.ones(n, dtype=float) if qw is None else np.asarray(qw, dtype=float),
-    })
+    df = pd.DataFrame(
+        {
+            "decision_idx": decision_idx,
+            "symbol": symbols,
+            "strategy_id": ["s"] * n,
+            "expected_gross_bps": np.asarray(exp, dtype=float),
+            "realized_side_adjusted_gross_bps": np.asarray(real, dtype=float),
+            "quality_weight": np.ones(n, dtype=float) if qw is None else np.asarray(qw, dtype=float),
+        }
+    )
     if side is not None:
         df["side"] = np.asarray(side, dtype=int)
     return df
 
 
 # ─── Scenario 1: Selection-inflation detection ────────────────────────────
+
 
 def test_compute_probe_diag_detects_selection_inflation() -> None:
     exp = [100.0, 90.0, 80.0, 10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0]
@@ -59,8 +62,12 @@ def test_compute_probe_diag_detects_selection_inflation() -> None:
     cfg = _make_cfg()
 
     diag = compute_probe_breadth_diagnostics(
-        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
-        cfg=cfg, fold_id=0, seed=0,
+        merged=merged,
+        volatility_2d=VOL,
+        symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg,
+        fold_id=0,
+        seed=0,
     )
 
     assert diag is not None
@@ -73,6 +80,7 @@ def test_compute_probe_diag_detects_selection_inflation() -> None:
 
 # ─── Scenario 2: Gross → net reversal by rt_cost ──────────────────────────
 
+
 def test_compute_probe_diag_net_below_gross_by_rtcost() -> None:
     exp = [4.0, 4.0, 4.0]
     real = [4.0, 4.0, 4.0]
@@ -82,8 +90,12 @@ def test_compute_probe_diag_net_below_gross_by_rtcost() -> None:
     cfg = _make_cfg(expected_cost_bps=6.0)
 
     diag = compute_probe_breadth_diagnostics(
-        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
-        cfg=cfg, fold_id=0, seed=0,
+        merged=merged,
+        volatility_2d=VOL,
+        symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg,
+        fold_id=0,
+        seed=0,
     )
 
     assert diag is not None
@@ -93,6 +105,7 @@ def test_compute_probe_diag_net_below_gross_by_rtcost() -> None:
 
 
 # ─── Scenario 3: Rank-IC absence (random) ─────────────────────────────────
+
 
 def test_compute_probe_diag_zero_rank_ic_when_no_signal() -> None:
     rng = np.random.RandomState(42)
@@ -105,8 +118,12 @@ def test_compute_probe_diag_zero_rank_ic_when_no_signal() -> None:
     cfg = _make_cfg()
 
     diag = compute_probe_breadth_diagnostics(
-        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
-        cfg=cfg, fold_id=0, seed=0,
+        merged=merged,
+        volatility_2d=VOL,
+        symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg,
+        fold_id=0,
+        seed=0,
     )
 
     assert diag is not None
@@ -115,6 +132,7 @@ def test_compute_probe_diag_zero_rank_ic_when_no_signal() -> None:
 
 
 # ─── Scenario 4: Rank-IC positive (strong signal) ─────────────────────────
+
 
 def test_compute_probe_diag_positive_rank_ic_when_aligned() -> None:
     rng = np.random.RandomState(42)
@@ -129,8 +147,12 @@ def test_compute_probe_diag_positive_rank_ic_when_aligned() -> None:
     cfg = _make_cfg()
 
     diag = compute_probe_breadth_diagnostics(
-        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
-        cfg=cfg, fold_id=0, seed=0,
+        merged=merged,
+        volatility_2d=VOL,
+        symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg,
+        fold_id=0,
+        seed=0,
     )
 
     assert diag is not None
@@ -140,12 +162,17 @@ def test_compute_probe_diag_positive_rank_ic_when_aligned() -> None:
 
 # ─── Scenario 5: Edge cases ───────────────────────────────────────────────
 
+
 def test_compute_probe_diag_empty_returns_none() -> None:
     merged = pd.DataFrame()
     cfg = _make_cfg()
     diag = compute_probe_breadth_diagnostics(
-        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
-        cfg=cfg, fold_id=0, seed=0,
+        merged=merged,
+        volatility_2d=VOL,
+        symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg,
+        fold_id=0,
+        seed=0,
     )
     assert diag is None
 
@@ -154,8 +181,12 @@ def test_compute_probe_diag_single_event_graceful() -> None:
     merged = _merged([5.0], [3.0], [0], ["s0"])
     cfg = _make_cfg()
     diag = compute_probe_breadth_diagnostics(
-        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
-        cfg=cfg, fold_id=0, seed=0,
+        merged=merged,
+        volatility_2d=VOL,
+        symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg,
+        fold_id=0,
+        seed=0,
     )
     assert diag is not None
     assert diag.rank_ic_all == 0.0
@@ -167,6 +198,7 @@ def test_compute_probe_diag_single_event_graceful() -> None:
 
 
 # ─── Scenario 6: Env gate ─────────────────────────────────────────────────
+
 
 class TestL1ProbeDiagEnvGate:
     def test_disabled_by_default(self) -> None:
@@ -197,6 +229,7 @@ class TestL1ProbeDiagEnvGate:
 
 # ─── Helper: format probe diag ────────────────────────────────────────────
 
+
 def test_format_probe_diag_output() -> None:
     diag = ProbeBreadthDiagnostics(
         fold_id=5,
@@ -223,6 +256,7 @@ def test_format_probe_diag_output() -> None:
 
 # ─── Regime decomposition (market regime code_1d) ─────────────────────────
 
+
 def test_compute_probe_diag_regime_breakdown_by_code() -> None:
     # decision_idx 0,1 -> bull(0); 2,3 -> crisis(2)
     exp = [10.0, 12.0, 8.0, 9.0]
@@ -234,8 +268,13 @@ def test_compute_probe_diag_regime_breakdown_by_code() -> None:
     regime_code = np.array([0, 0, 2, 2], dtype=np.int8)  # bull,bull,crisis,crisis
 
     diag = compute_probe_breadth_diagnostics(
-        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
-        cfg=cfg, fold_id=0, seed=0, regime_code_1d=regime_code,
+        merged=merged,
+        volatility_2d=VOL,
+        symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg,
+        fold_id=0,
+        seed=0,
+        regime_code_1d=regime_code,
     )
 
     assert diag is not None
@@ -244,7 +283,7 @@ def test_compute_probe_diag_regime_breakdown_by_code() -> None:
     crisis_n, _c_gross, crisis_net, crisis_pos, _c_ic = diag.regime_breakdown["crisis"]
     assert bull_n == 2
     assert crisis_n == 2
-    assert bull_net == pytest.approx(90.0 - 5.0)   # mean(100,80)-rt
+    assert bull_net == pytest.approx(90.0 - 5.0)  # mean(100,80)-rt
     assert crisis_net == pytest.approx(-40.0 - 5.0)  # mean(-50,-30)-rt
     assert bull_pos == pytest.approx(1.0)
     assert crisis_pos == pytest.approx(0.0)
@@ -255,8 +294,13 @@ def test_compute_probe_diag_no_regime_when_code_none() -> None:
     cfg = _make_cfg()
 
     diag = compute_probe_breadth_diagnostics(
-        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
-        cfg=cfg, fold_id=0, seed=0, regime_code_1d=None,
+        merged=merged,
+        volatility_2d=VOL,
+        symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg,
+        fold_id=0,
+        seed=0,
+        regime_code_1d=None,
     )
 
     assert diag is not None
@@ -265,25 +309,30 @@ def test_compute_probe_diag_no_regime_when_code_none() -> None:
 
 # ─── Residual-alpha decomposition ─────────────────────────────────────────
 
+
 def test_compute_probe_diag_residual_separates_beta_and_alpha() -> None:
     # 단일 bar, 4 이벤트. exp가 real과 동조 → residual_ic 양(+), selection_alpha 양(+).
     exp = [40.0, 30.0, 20.0, 10.0]
-    real = [100.0, 80.0, 20.0, 0.0]   # per_bar_mean=50
+    real = [100.0, 80.0, 20.0, 0.0]  # per_bar_mean=50
     decision_idx = [0, 0, 0, 0]
     symbols = ["s0", "s1", "s2", "s3"]
     merged = _merged(exp, real, decision_idx, symbols)
     cfg = _make_cfg()
 
     diag = compute_probe_breadth_diagnostics(
-        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
-        cfg=cfg, fold_id=0, seed=0,
+        merged=merged,
+        volatility_2d=VOL,
+        symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg,
+        fold_id=0,
+        seed=0,
     )
 
     assert diag is not None
-    assert diag.beta_edge_bps == pytest.approx(50.0)          # 횡단면 평균
+    assert diag.beta_edge_bps == pytest.approx(50.0)  # 횡단면 평균
     # top-3 by exp=[40,30,20] -> real[100,80,20] mean=66.67 - 50
     assert diag.selection_alpha_bps == pytest.approx(66.6667 - 50.0, abs=1e-2)
-    assert diag.residual_ic > 0.9                              # exp가 잔차 순위 예측
+    assert diag.residual_ic > 0.9  # exp가 잔차 순위 예측
     assert diag.n_residual_events == 4
 
 
@@ -293,8 +342,12 @@ def test_compute_probe_diag_residual_zero_when_single_event_bars() -> None:
     cfg = _make_cfg()
 
     diag = compute_probe_breadth_diagnostics(
-        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
-        cfg=cfg, fold_id=0, seed=0,
+        merged=merged,
+        volatility_2d=VOL,
+        symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg,
+        fold_id=0,
+        seed=0,
     )
 
     assert diag is not None
@@ -305,6 +358,7 @@ def test_compute_probe_diag_residual_zero_when_single_event_bars() -> None:
 
 
 # ─── Phase-1: Bear-side directionality — regime_side_split ────────────────
+
 
 def test_compute_probe_diag_bear_net_long_bias_detected() -> None:
     exp = [10.0, 8.0, 6.0, 5.0]
@@ -317,8 +371,13 @@ def test_compute_probe_diag_bear_net_long_bias_detected() -> None:
     regime_code = np.array([1, 1, 1, 1], dtype=np.int8)
 
     diag = compute_probe_breadth_diagnostics(
-        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
-        cfg=cfg, fold_id=0, seed=0, regime_code_1d=regime_code,
+        merged=merged,
+        volatility_2d=VOL,
+        symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg,
+        fold_id=0,
+        seed=0,
+        regime_code_1d=regime_code,
     )
 
     assert diag is not None
@@ -343,8 +402,13 @@ def test_compute_probe_diag_side_split_defaults_long_when_missing() -> None:
     regime_code = np.array([1, 1, 1], dtype=np.int8)
 
     diag = compute_probe_breadth_diagnostics(
-        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
-        cfg=cfg, fold_id=0, seed=0, regime_code_1d=regime_code,
+        merged=merged,
+        volatility_2d=VOL,
+        symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg,
+        fold_id=0,
+        seed=0,
+        regime_code_1d=regime_code,
     )
 
     assert diag is not None
@@ -366,8 +430,13 @@ def test_compute_probe_diag_side_split_all_short_no_zero_div() -> None:
     regime_code = np.array([1, 1], dtype=np.int8)
 
     diag = compute_probe_breadth_diagnostics(
-        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
-        cfg=cfg, fold_id=0, seed=0, regime_code_1d=regime_code,
+        merged=merged,
+        volatility_2d=VOL,
+        symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg,
+        fold_id=0,
+        seed=0,
+        regime_code_1d=regime_code,
     )
 
     assert diag is not None
@@ -385,8 +454,13 @@ def test_compute_probe_diag_side_split_empty_when_no_regime() -> None:
     cfg = _make_cfg()
 
     diag = compute_probe_breadth_diagnostics(
-        merged=merged, volatility_2d=VOL, symbol_to_idx=SYM_TO_IDX,
-        cfg=cfg, fold_id=0, seed=0, regime_code_1d=None,
+        merged=merged,
+        volatility_2d=VOL,
+        symbol_to_idx=SYM_TO_IDX,
+        cfg=cfg,
+        fold_id=0,
+        seed=0,
+        regime_code_1d=None,
     )
 
     assert diag is not None

@@ -496,7 +496,9 @@ def test_run_data_stage_ignores_virtual_probe_targets_in_loader(
     )
     captured: dict[str, object] = {}
 
-    def fake_loader(*args: object, **kwargs: object) -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]], list[str]]:
+    def fake_loader(
+        *args: object, **kwargs: object
+    ) -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]], list[str]]:
         captured["args"] = args
         captured["kwargs"] = kwargs
         return {"BTCUSDT": {"4h": frame.copy()}}, {"BTCUSDT": {"4h": frame.copy()}}, ["BTCUSDT"]
@@ -822,9 +824,7 @@ def _patch_tiered_deps(
     monkeypatch.setattr(
         opt_main_futures,
         "run_active_strategy_output_bridge",
-        lambda *_args, **_kwargs: CandidatePipelineOutput(
-            labeled_unfiltered=pd.DataFrame({"symbol": ["BTCUSDT"]})
-        ),
+        lambda *_args, **_kwargs: CandidatePipelineOutput(labeled_unfiltered=pd.DataFrame({"symbol": ["BTCUSDT"]})),
     )
     monkeypatch.setattr(
         opt_main_futures,
@@ -940,9 +940,7 @@ def test_tiered_aligned_scope_s1_happy_path(
     _patch_tiered_deps(monkeypatch, captured, stub_admission_to_base_scope=True)
 
     # Act
-    run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
-    )
+    run_config = build_run_config_from_args({"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"})
     opt_main_futures._run_strategy_stage(
         run_config,
         _make_window(),
@@ -976,9 +974,7 @@ def test_tiered_aligned_scope_s2_fallback_when_no_overlap(
     _patch_tiered_deps(monkeypatch, captured, stub_admission_to_base_scope=True)
 
     # Act
-    run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
-    )
+    run_config = build_run_config_from_args({"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"})
     opt_main_futures._run_strategy_stage(
         run_config,
         _make_window(),
@@ -1012,12 +1008,8 @@ def test_tiered_aligned_scope_s3_regression_breadth_denominator(
     captured: list[list[str]] = []
     _patch_tiered_deps(monkeypatch, captured, stub_admission_to_base_scope=True)
 
-    run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
-    )
-    opt_main_futures._run_strategy_stage(
-        run_config, _make_window(), data_stage, universe_snapshot=snapshot
-    )
+    run_config = build_run_config_from_args({"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"})
+    opt_main_futures._run_strategy_stage(run_config, _make_window(), data_stage, universe_snapshot=snapshot)
 
     # align_data_maps receives the admitted subset only; missing symbols are dropped.
     assert len(captured) >= 1
@@ -1062,12 +1054,8 @@ def test_tiered_aligned_scope_s4_partial_overlap(
     captured: list[list[str]] = []
     _patch_tiered_deps(monkeypatch, captured, stub_admission_to_base_scope=True)
 
-    run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
-    )
-    opt_main_futures._run_strategy_stage(
-        run_config, _make_window(), data_stage, universe_snapshot=snapshot
-    )
+    run_config = build_run_config_from_args({"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"})
+    opt_main_futures._run_strategy_stage(run_config, _make_window(), data_stage, universe_snapshot=snapshot)
 
     # Assert: snapshot overlap과 무관하게 valid_symbols 유지
     assert len(captured) >= 1
@@ -1097,9 +1085,7 @@ def test_tiered_window_uses_run_config_date_reference(
     monkeypatch.setattr(
         opt_main_futures,
         "run_active_strategy_output_bridge",
-        lambda *_args, **_kwargs: CandidatePipelineOutput(
-            labeled_unfiltered=pd.DataFrame({"symbol": ["BTCUSDT"]})
-        ),
+        lambda *_args, **_kwargs: CandidatePipelineOutput(labeled_unfiltered=pd.DataFrame({"symbol": ["BTCUSDT"]})),
     )
     monkeypatch.setattr(opt_main_futures, "merge_candidate_output_into_is_and_oos", lambda *_a, **_k: None)
     monkeypatch.setattr(opt_main_futures, "_run_candidate_evaluation_report", lambda *_a, **_k: None)
@@ -1180,9 +1166,7 @@ def test_tiered_pipeline_uses_unfiltered_labeled_events(
         valid_symbols=["BTCUSDT"],
     )
     filtered = pd.DataFrame({"symbol": ["BTCUSDT"], "variant": ["promoted"]})
-    unfiltered = pd.DataFrame(
-        {"symbol": ["BTCUSDT", "ETHUSDT"], "variant": ["promoted", "candidate"]}
-    )
+    unfiltered = pd.DataFrame({"symbol": ["BTCUSDT", "ETHUSDT"], "variant": ["promoted", "candidate"]})
 
     monkeypatch.setattr(
         opt_main_futures,
@@ -1286,9 +1270,7 @@ def test_tiered_layer3_terminal_failure_does_not_fallback_to_phase_d(
     monkeypatch.setattr(
         opt_main_futures,
         "run_active_strategy_output_bridge",
-        lambda *_args, **_kwargs: CandidatePipelineOutput(
-            labeled_unfiltered=pd.DataFrame({"symbol": ["BTCUSDT"]})
-        ),
+        lambda *_args, **_kwargs: CandidatePipelineOutput(labeled_unfiltered=pd.DataFrame({"symbol": ["BTCUSDT"]})),
     )
     monkeypatch.setattr(opt_main_futures, "merge_candidate_output_into_is_and_oos", lambda *_a, **_k: None)
     monkeypatch.setattr(opt_main_futures, "_run_candidate_evaluation_report", lambda *_a, **_k: None)
@@ -1316,6 +1298,7 @@ def test_tiered_layer3_terminal_failure_does_not_fallback_to_phase_d(
             datetimes=np.array([], dtype="datetime64[ns]"),
         ),
     )
+
     def _raise_l3_error(**_kwargs: object) -> object:
         raise Layer3ExecutionError("layer3_signal_prediction_failed")
 
@@ -1374,13 +1357,9 @@ def test_effective_trade_syms_s1_excludes_symbol_delisted_before_holdout_end(
     holdout_end = date(2026, 3, 31)
 
     # 4h bars from 2022-01-01: ~7700 bars to 2026-04-07 (>> min_window_bars=1500)
-    full_coverage = pd.DataFrame(
-        {"datetime": pd.date_range("2022-01-01", "2026-04-07", freq="4h", tz="UTC")}
-    )
+    full_coverage = pd.DataFrame({"datetime": pd.date_range("2022-01-01", "2026-04-07", freq="4h", tz="UTC")})
     # Delisted: also > 1500 bars, but ends 2025-08-01 (< holdout_start=2025-10-01 → 0% OOS coverage)
-    delisted_coverage = pd.DataFrame(
-        {"datetime": pd.date_range("2022-01-01", "2025-08-01", freq="4h", tz="UTC")}
-    )
+    delisted_coverage = pd.DataFrame({"datetime": pd.date_range("2022-01-01", "2025-08-01", freq="4h", tz="UTC")})
     data_maps = {
         "AAUSDT": {"4h": full_coverage.copy()},
         "BBUSDT": {"4h": full_coverage.copy()},
@@ -1396,14 +1375,10 @@ def test_effective_trade_syms_s1_excludes_symbol_delisted_before_holdout_end(
 
     import src.domain.futures.optimization.opt_config as _opt_cfg
 
-    layered_window = _make_layered_window(
-        fetch_start=fetch_start, holdout_start=holdout_start, holdout_end=holdout_end
-    )
+    layered_window = _make_layered_window(fetch_start=fetch_start, holdout_start=holdout_start, holdout_end=holdout_end)
     monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kw: layered_window)
 
-    run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
-    )
+    run_config = build_run_config_from_args({"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"})
 
     # Act
     opt_main_futures._run_strategy_stage(
@@ -1454,9 +1429,7 @@ def test_tiered_pipeline_s2_raises_when_aligned_end_before_holdout_start(
     monkeypatch.setattr(
         opt_main_futures,
         "run_active_strategy_output_bridge",
-        lambda *_args, **_kwargs: CandidatePipelineOutput(
-            labeled_unfiltered=pd.DataFrame({"symbol": ["BTCUSDT"]})
-        ),
+        lambda *_args, **_kwargs: CandidatePipelineOutput(labeled_unfiltered=pd.DataFrame({"symbol": ["BTCUSDT"]})),
     )
     monkeypatch.setattr(opt_main_futures, "merge_candidate_output_into_is_and_oos", lambda *_a, **_k: None)
     monkeypatch.setattr(opt_main_futures, "_run_candidate_evaluation_report", lambda *_a, **_k: None)
@@ -1471,9 +1444,7 @@ def test_tiered_pipeline_s2_raises_when_aligned_end_before_holdout_start(
     import src.domain.futures.strategy.common.alignment as _align
     import src.domain.futures.strategy.tiered_workflow as _tw
 
-    layered_window = _make_layered_window(
-        fetch_start=fetch_start, holdout_start=holdout_start, holdout_end=holdout_end
-    )
+    layered_window = _make_layered_window(fetch_start=fetch_start, holdout_start=holdout_start, holdout_end=holdout_end)
     monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kw: layered_window)
     monkeypatch.setattr(_pc, "PortfolioCaps", MagicMock(return_value=MagicMock()))
 
@@ -1516,9 +1487,7 @@ def test_tiered_pipeline_s2_raises_when_aligned_end_before_holdout_start(
     )
     _stub_tradeable_scope(monkeypatch)
 
-    run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
-    )
+    run_config = build_run_config_from_args({"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"})
     caplog.set_level(logging.INFO)
 
     # Act: the ValueError is raised inside the tiered try-block, caught by the
@@ -1555,16 +1524,12 @@ def test_effective_trade_syms_s14_uses_merged_full_strategy_maps(
     holdout_start = date(2025, 10, 1)
     holdout_end = date(2026, 3, 31)
 
-    is_only_coverage = pd.DataFrame(
-        {"datetime": pd.date_range("2025-01-01", "2025-09-01", freq="7D", tz="UTC")}
-    )
+    is_only_coverage = pd.DataFrame({"datetime": pd.date_range("2025-01-01", "2025-09-01", freq="7D", tz="UTC")})
     # OOS frame extends coverage through holdout_end
-    oos_coverage = pd.DataFrame(
-        {"datetime": pd.date_range("2025-09-08", "2026-04-07", freq="7D", tz="UTC")}
+    oos_coverage = pd.DataFrame({"datetime": pd.date_range("2025-09-08", "2026-04-07", freq="7D", tz="UTC")})
+    full_merged_coverage = (
+        pd.concat([is_only_coverage, oos_coverage], ignore_index=True).sort_values("datetime").reset_index(drop=True)
     )
-    full_merged_coverage = pd.concat(
-        [is_only_coverage, oos_coverage], ignore_index=True
-    ).sort_values("datetime").reset_index(drop=True)
 
     data_stage = opt_main_futures.DataStageResult(
         data_maps={"BTCUSDT": {"4h": is_only_coverage.copy()}},
@@ -1584,14 +1549,10 @@ def test_effective_trade_syms_s14_uses_merged_full_strategy_maps(
 
     import src.domain.futures.optimization.opt_config as _opt_cfg
 
-    layered_window = _make_layered_window(
-        fetch_start=fetch_start, holdout_start=holdout_start, holdout_end=holdout_end
-    )
+    layered_window = _make_layered_window(fetch_start=fetch_start, holdout_start=holdout_start, holdout_end=holdout_end)
     monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kw: layered_window)
 
-    run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
-    )
+    run_config = build_run_config_from_args({"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"})
 
     # Act
     opt_main_futures._run_strategy_stage(
@@ -1642,9 +1603,7 @@ def test_align_data_maps_s15_receives_merged_full_strategy_maps(
 
     monkeypatch.setattr(_align, "align_data_maps", _capturing_align)
 
-    run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
-    )
+    run_config = build_run_config_from_args({"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"})
 
     # Act
     opt_main_futures._run_strategy_stage(
@@ -1664,9 +1623,7 @@ def test_run_strategy_stage_passes_pit_state_cube_with_real_run_config(
 ) -> None:
     from unittest.mock import MagicMock
 
-    run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
-    )
+    run_config = build_run_config_from_args({"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"})
     data_times = pd.date_range("2025-01-01", "2026-04-07", freq="7D", tz="UTC")
     data_stage = opt_main_futures.DataStageResult(
         data_maps={"BTCUSDT": {"4h": pd.DataFrame({"datetime": data_times})}},
@@ -1688,9 +1645,7 @@ def test_run_strategy_stage_passes_pit_state_cube_with_real_run_config(
     monkeypatch.setattr(
         opt_main_futures,
         "run_active_strategy_output_bridge",
-        lambda *_args, **_kwargs: CandidatePipelineOutput(
-            labeled_unfiltered=pd.DataFrame({"symbol": ["BTCUSDT"]})
-        ),
+        lambda *_args, **_kwargs: CandidatePipelineOutput(labeled_unfiltered=pd.DataFrame({"symbol": ["BTCUSDT"]})),
     )
     monkeypatch.setattr(
         opt_main_futures,
@@ -1787,6 +1742,7 @@ def test_resolve_base_symbol_scope_filters_missing_and_empty_frames() -> None:
 # ---------------------------------------------------------------------------
 # C1 — _resolve_tradeable_scope unit tests
 # ---------------------------------------------------------------------------
+
 
 def _make_sym_df(
     start: str,
@@ -1974,8 +1930,8 @@ def test_resolve_tradeable_scope_string_datetime_fallback() -> None:
     df_str = pd.DataFrame({"datetime": dts.strftime("%Y-%m-%d %H:%M:%S%z")})
     df_dt64 = pd.DataFrame({"datetime": dts})
     strategy_maps: dict[str, dict[str, pd.DataFrame]] = {
-        "symA": {"4h": df_str},      # string datetime
-        "symB": {"4h": df_dt64},     # datetime64 (but _native_flag may be set by symA)
+        "symA": {"4h": df_str},  # string datetime
+        "symB": {"4h": df_dt64},  # datetime64 (but _native_flag may be set by symA)
     }
 
     with _patch("pandas.to_datetime", wraps=pd.to_datetime) as mock_to_dt:
@@ -2004,9 +1960,7 @@ def test_tiered_empty_admission_fail_closed(
     holdout_start = date(2025, 10, 1)
     holdout_end = date(2026, 3, 31)
 
-    delisted_coverage = pd.DataFrame(
-        {"datetime": pd.date_range("2022-01-01", "2025-08-01", freq="4h", tz="UTC")}
-    )
+    delisted_coverage = pd.DataFrame({"datetime": pd.date_range("2022-01-01", "2025-08-01", freq="4h", tz="UTC")})
     data_stage = opt_main_futures.DataStageResult(
         data_maps={
             "AAUSDT": {"4h": delisted_coverage.copy()},
@@ -2020,14 +1974,10 @@ def test_tiered_empty_admission_fail_closed(
 
     import src.domain.futures.optimization.opt_config as _opt_cfg
 
-    layered_window = _make_layered_window(
-        fetch_start=fetch_start, holdout_start=holdout_start, holdout_end=holdout_end
-    )
+    layered_window = _make_layered_window(fetch_start=fetch_start, holdout_start=holdout_start, holdout_end=holdout_end)
     monkeypatch.setattr(_opt_cfg, "get_layered_window", lambda **_kw: layered_window)
 
-    run_config = build_run_config_from_args(
-        {"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"}
-    )
+    run_config = build_run_config_from_args({"phase": "l3", "timeframe": "4h", "trials": 1, "sync": "auto"})
 
     with pytest.raises(TieredPipelineError, match="tiered tradeable scope is empty"):
         opt_main_futures._run_strategy_stage(

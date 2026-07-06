@@ -96,7 +96,7 @@ def _make_aligned(
     aligned.funding_2d = np.zeros((t_max, n), dtype=np.float64)
     aligned.beta_vs_market_1d = np.zeros(n, dtype=np.float64)
     aligned.datetimes = np.array(
-        [np.datetime64(f"2024-01-{i+1:02d}", "D") for i in range(t_max)],
+        [np.datetime64(f"2024-01-{i + 1:02d}", "D") for i in range(t_max)],
         dtype="datetime64[D]",
     )
     # adv_usdt 미설정(None)
@@ -204,9 +204,7 @@ class TestPredictLayer1SignalsMultiTf:
         aligned = _make_aligned(symbols, t_max=20)
         cfg = self._make_cfg()
 
-        ev_8h = _make_signal_event(
-            symbol="SYMA", strategy_id="donchian_72_8h", decision_idx=5
-        )
+        ev_8h = _make_signal_event(symbol="SYMA", strategy_id="donchian_72_8h", decision_idx=5)
         batch_8h = _make_signal_batch([ev_8h], symbols)
         art_4h = _make_artifact(symbols=symbols, strategy_ids=("donchian_72_4h",))
         art_8h = _make_artifact(symbols=symbols, strategy_ids=("donchian_72_8h",))
@@ -273,9 +271,7 @@ class TestPredictLayer1SignalsMultiTf:
         aligned = _make_aligned(symbols, t_max=20)
         cfg = self._make_cfg()
 
-        ev = _make_signal_event(
-            symbol="SYMA", strategy_id="donchian_72_4h", decision_idx=5
-        )
+        ev = _make_signal_event(symbol="SYMA", strategy_id="donchian_72_4h", decision_idx=5)
         # 동일 이벤트를 두 batch에 넣음
         batch1 = _make_signal_batch([ev], symbols)
         batch2 = _make_signal_batch([ev], symbols)
@@ -324,12 +320,20 @@ class TestBuildL2SimulationCacheSleevedimension:
         aligned = _make_aligned(symbols, t_max=20)
 
         ev_4h = _make_signal_event(
-            symbol="SYMA", strategy_id="donchian_72_4h", decision_idx=5,
-            gross_bps=50.0, net_bps=40.0, holding_bars=4,
+            symbol="SYMA",
+            strategy_id="donchian_72_4h",
+            decision_idx=5,
+            gross_bps=50.0,
+            net_bps=40.0,
+            holding_bars=4,
         )
         ev_8h = _make_signal_event(
-            symbol="SYMA", strategy_id="donchian_72_8h", decision_idx=5,
-            gross_bps=300.0, net_bps=280.0, holding_bars=8,
+            symbol="SYMA",
+            strategy_id="donchian_72_8h",
+            decision_idx=5,
+            gross_bps=300.0,
+            net_bps=280.0,
+            holding_bars=8,
         )
         batch = _make_signal_batch([ev_4h, ev_8h], symbols)
 
@@ -351,10 +355,14 @@ class TestBuildL2SimulationCacheSleevedimension:
         aligned = _make_aligned(symbols, t_max=20)
 
         ev_a = _make_signal_event(
-            symbol="SYMA", strategy_id="donchian_72_4h", decision_idx=5,
+            symbol="SYMA",
+            strategy_id="donchian_72_4h",
+            decision_idx=5,
         )
         ev_b = _make_signal_event(
-            symbol="SYMB", strategy_id="donchian_72_4h", decision_idx=5,
+            symbol="SYMB",
+            strategy_id="donchian_72_4h",
+            decision_idx=5,
         )
         batch = _make_signal_batch([ev_a, ev_b], symbols)
 
@@ -405,12 +413,22 @@ class TestSleeveToSymbolAggregation:
         # Arrange
         symbols = ("SYMA",)
         ev_4h = _make_signal_event(
-            symbol="SYMA", strategy_id="donchian_72_4h", decision_idx=5,
-            gross_bps=50.0, net_bps=40.0, holding_bars=4, side=1,
+            symbol="SYMA",
+            strategy_id="donchian_72_4h",
+            decision_idx=5,
+            gross_bps=50.0,
+            net_bps=40.0,
+            holding_bars=4,
+            side=1,
         )
         ev_8h = _make_signal_event(
-            symbol="SYMA", strategy_id="donchian_72_8h", decision_idx=5,
-            gross_bps=300.0, net_bps=280.0, holding_bars=4, side=1,
+            symbol="SYMA",
+            strategy_id="donchian_72_8h",
+            decision_idx=5,
+            gross_bps=300.0,
+            net_bps=280.0,
+            holding_bars=4,
+            side=1,
         )
 
         # Act
@@ -427,12 +445,20 @@ class TestSleeveToSymbolAggregation:
         # Arrange
         symbols = ("SYMA",)
         ev_long = _make_signal_event(
-            symbol="SYMA", strategy_id="donchian_72_4h", decision_idx=5,
-            side=1, gross_bps=50.0, net_bps=40.0,
+            symbol="SYMA",
+            strategy_id="donchian_72_4h",
+            decision_idx=5,
+            side=1,
+            gross_bps=50.0,
+            net_bps=40.0,
         )
         ev_short = _make_signal_event(
-            symbol="SYMA", strategy_id="rsi_short_4h", decision_idx=5,
-            side=-1, gross_bps=50.0, net_bps=40.0,
+            symbol="SYMA",
+            strategy_id="rsi_short_4h",
+            decision_idx=5,
+            side=-1,
+            gross_bps=50.0,
+            net_bps=40.0,
         )
 
         # Act
@@ -453,7 +479,9 @@ class TestSleeveToSymbolAggregation:
         # Arrange
         symbols = ("SYMA",)
         ev = _make_signal_event(
-            symbol="SYMA", strategy_id="donchian_72_4h", decision_idx=5,
+            symbol="SYMA",
+            strategy_id="donchian_72_4h",
+            decision_idx=5,
         )
 
         # Act
@@ -468,12 +496,20 @@ class TestSleeveToSymbolAggregation:
         # Arrange
         symbols = ("SYMA",)
         ev_4h = _make_signal_event(
-            symbol="SYMA", strategy_id="donchian_72_4h", decision_idx=5,
-            gross_bps=50.0, net_bps=40.0, holding_bars=4,
+            symbol="SYMA",
+            strategy_id="donchian_72_4h",
+            decision_idx=5,
+            gross_bps=50.0,
+            net_bps=40.0,
+            holding_bars=4,
         )
         ev_8h = _make_signal_event(
-            symbol="SYMA", strategy_id="donchian_72_8h", decision_idx=5,
-            gross_bps=300.0, net_bps=280.0, holding_bars=8,
+            symbol="SYMA",
+            strategy_id="donchian_72_8h",
+            decision_idx=5,
+            gross_bps=300.0,
+            net_bps=280.0,
+            holding_bars=8,
         )
 
         # Act
@@ -568,10 +604,14 @@ class TestL2SimulationCacheFields:
         aligned = _make_aligned(symbols, t_max=t_max)
 
         ev_a = _make_signal_event(
-            symbol="SYMA", strategy_id="donchian_72_4h", decision_idx=3,
+            symbol="SYMA",
+            strategy_id="donchian_72_4h",
+            decision_idx=3,
         )
         ev_b = _make_signal_event(
-            symbol="SYMB", strategy_id="donchian_72_8h", decision_idx=3,
+            symbol="SYMB",
+            strategy_id="donchian_72_8h",
+            decision_idx=3,
         )
         batch = _make_signal_batch([ev_a, ev_b], symbols)
 
@@ -638,10 +678,7 @@ class TestCombineSleeveSignalsToSymbol:
 
     def test_conviction_cap(self) -> None:
         """A.S4: 4 sleeve qw=[1,1,1,1], κ=1.5 → c_s=min(4.0, 1.5)=1.5."""
-        signals = {
-            ("SYMA", f"strat_{i}"): self._make_ss(10.0, 1.0)
-            for i in range(4)
-        }
+        signals = {("SYMA", f"strat_{i}"): self._make_ss(10.0, 1.0) for i in range(4)}
         result, _ = _combine_sleeve_signals_to_symbol(signals, conviction_cap_mult=1.5)
         assert result["SYMA"].quality_weight == 1.5
 
@@ -697,8 +734,13 @@ class TestPoolingRegression:
         """B.S1: 단일 TF signal_batch → pooled mu == single sleeve mu."""
         signals = {
             ("SYMA", "strat_a"): SymbolSignal(
-                raw_mu=42.0, volatility=0.01, n_obs=10, t_stat=2.0,
-                valid=True, beta_btc=None, quality_weight=1.0,
+                raw_mu=42.0,
+                volatility=0.01,
+                n_obs=10,
+                t_stat=2.0,
+                valid=True,
+                beta_btc=None,
+                quality_weight=1.0,
             ),
         }
         result, _ = _combine_sleeve_signals_to_symbol(signals)
@@ -707,10 +749,7 @@ class TestPoolingRegression:
 
     def test_multi_tf_pooled_mu_not_exceeding_max(self) -> None:
         """B.S2: 4-TF 동방향 → pooled mu ≤ max single mu (인플레이션 방지)."""
-        signals = {
-            ("SYMA", f"tf_{i}"): self._make_ss(100.0, 1.0)
-            for i in range(4)
-        }
+        signals = {("SYMA", f"tf_{i}"): self._make_ss(100.0, 1.0) for i in range(4)}
         result, _ = _combine_sleeve_signals_to_symbol(signals)
         assert result["SYMA"].raw_mu == 100.0  # all same → mean = 100
         assert result["SYMA"].raw_mu <= 100.0
@@ -726,10 +765,12 @@ class TestLayer2AllocationConfigKnobs:
 
     def test_custom_method_and_cap(self) -> None:
         """C.S1: from_mapping으로 equal + 2.0 설정."""
-        cfg = Layer2AllocationConfig.from_mapping({
-            "l2_sleeve_combine_method": "equal",
-            "l2_sleeve_conviction_cap_mult": 2.0,
-        })
+        cfg = Layer2AllocationConfig.from_mapping(
+            {
+                "l2_sleeve_combine_method": "equal",
+                "l2_sleeve_conviction_cap_mult": 2.0,
+            }
+        )
         assert cfg.l2_sleeve_combine_method == "equal"
         assert cfg.l2_sleeve_conviction_cap_mult == 2.0
 
@@ -742,9 +783,11 @@ class TestLayer2AllocationConfigKnobs:
     def test_invalid_method_raises(self) -> None:
         """C.S1: 잘못된 method → ValueError."""
         with pytest.raises(ValueError, match="l2_sleeve_combine_method"):
-            Layer2AllocationConfig.from_mapping({
-                "l2_sleeve_combine_method": "invalid",
-            })
+            Layer2AllocationConfig.from_mapping(
+                {
+                    "l2_sleeve_combine_method": "invalid",
+                }
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -757,11 +800,18 @@ class TestCombineFriction:
 
     @staticmethod
     def _make_ss(
-        raw_mu: float, quality_weight: float = 1.0, vol: float = 0.01,
+        raw_mu: float,
+        quality_weight: float = 1.0,
+        vol: float = 0.01,
     ) -> SymbolSignal:
         return SymbolSignal(
-            raw_mu=raw_mu, volatility=vol, n_obs=10, t_stat=2.0,
-            valid=True, beta_btc=None, quality_weight=quality_weight,
+            raw_mu=raw_mu,
+            volatility=vol,
+            n_obs=10,
+            t_stat=2.0,
+            valid=True,
+            beta_btc=None,
+            quality_weight=quality_weight,
         )
 
     def test_friction_pass(self) -> None:
@@ -769,7 +819,8 @@ class TestCombineFriction:
         signals = {("SYMA", "a"): self._make_ss(5.0, 1.0)}
         edges = {("SYMA", "a"): (10.0, 5.0)}
         _, friction = _combine_sleeve_signals_to_symbol(
-            signals, sleeve_edges=edges,
+            signals,
+            sleeve_edges=edges,
         )
         assert friction["SYMA"] is True
 
@@ -778,7 +829,8 @@ class TestCombineFriction:
         signals = {("SYMA", "a"): self._make_ss(0.0, 1.0)}
         edges = {("SYMA", "a"): (3.0, 5.0)}
         _, friction = _combine_sleeve_signals_to_symbol(
-            signals, sleeve_edges=edges,
+            signals,
+            sleeve_edges=edges,
         )
         assert friction["SYMA"] is False
 
@@ -793,7 +845,8 @@ class TestCombineFriction:
             ("SYMA", "b"): (2.0, 4.0),
         }
         _, friction = _combine_sleeve_signals_to_symbol(
-            signals, sleeve_edges=edges,
+            signals,
+            sleeve_edges=edges,
         )
         # g_bar=(3*10+1*2)/4=8, c_bar=(3*4+1*4)/4=4 → 8>=4 → True
         assert friction["SYMA"] is True
@@ -809,7 +862,8 @@ class TestCombineFriction:
             ("SYMA", "b"): (-10.0, 4.0),
         }
         _, friction = _combine_sleeve_signals_to_symbol(
-            signals, sleeve_edges=edges,
+            signals,
+            sleeve_edges=edges,
         )
         # g_bar=(1*10+1*(-10))/2=0 < c_bar=4 → False
         assert friction["SYMA"] is False
@@ -874,8 +928,13 @@ class TestFrictionDimensionalConsistency:
     @staticmethod
     def _make_ss(raw_mu: float, vol: float = 0.01) -> SymbolSignal:
         return SymbolSignal(
-            raw_mu=raw_mu, volatility=vol, n_obs=10, t_stat=2.0,
-            valid=True, beta_btc=None, quality_weight=1.0,
+            raw_mu=raw_mu,
+            volatility=vol,
+            n_obs=10,
+            t_stat=2.0,
+            valid=True,
+            beta_btc=None,
+            quality_weight=1.0,
         )
 
     def test_h_invariance(self) -> None:
@@ -884,13 +943,15 @@ class TestFrictionDimensionalConsistency:
         signals_h4 = {("SYMA", "a"): self._make_ss(50.0)}
         edges_h4 = {("SYMA", "a"): (100.0, 50.0)}
         _, f_h4 = _combine_sleeve_signals_to_symbol(
-            signals_h4, sleeve_edges=edges_h4,
+            signals_h4,
+            sleeve_edges=edges_h4,
         )
         # gross_total=7200, H=72 → gross_pb=100, cost_pb=50
         signals_h72 = {("SYMA", "a"): self._make_ss(50.0)}
         edges_h72 = {("SYMA", "a"): (100.0, 50.0)}
         _, f_h72 = _combine_sleeve_signals_to_symbol(
-            signals_h72, sleeve_edges=edges_h72,
+            signals_h72,
+            sleeve_edges=edges_h72,
         )
         assert f_h4["SYMA"] == f_h72["SYMA"]
 
@@ -899,7 +960,8 @@ class TestFrictionDimensionalConsistency:
         signals = {("SYMA", "a"): self._make_ss(10.0)}
         edges = {("SYMA", "a"): (30.0, 20.0)}
         _, friction = _combine_sleeve_signals_to_symbol(
-            signals, sleeve_edges=edges,
+            signals,
+            sleeve_edges=edges,
         )
         assert friction["SYMA"] is True
 

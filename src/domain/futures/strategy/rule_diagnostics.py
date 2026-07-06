@@ -202,7 +202,7 @@ def log_regime_scorecard(scorecard: Any) -> None:
         return f"{val:.1f}/10" if avail else "  n/a  "
 
     _logger.info("\n" + sep)
-    _logger.info(f"| {'[REGIME_SCORECARD]':<{w-4}} |")
+    _logger.info(f"| {'[REGIME_SCORECARD]':<{w - 4}} |")
     _logger.info(sep)
     _logger.info(f"| {'Axis':<20} | {'Score':^7} | {'Key Metrics':<45} |")
     _logger.info(sep)
@@ -225,22 +225,24 @@ def log_regime_scorecard(scorecard: Any) -> None:
         f"| {'Weighted C2-C5':<20} | {scorecard.weighted_c2_to_c5:^7.3f} | {'C1(hard_gate=pass)  C6-C8(manual)':<45} |"
     )
     _logger.info(sep)
-    
+
     # Occupancy
     occ_pairs = list(zip(scorecard.regime_names, scorecard.occupancy_by_regime, strict=False))
+
     def _fmt_occ(n: str, v: float) -> str:
         sn = n.replace("volatile", "vol").replace("quiet", "q").replace("transition", "trans")
         return f"{sn}={v:.3f}"
-        
+
     occ_line1 = "  ".join(_fmt_occ(n, v) for n, v in occ_pairs[:3])
     occ_line2 = "  ".join(_fmt_occ(n, v) for n, v in occ_pairs[3:])
-    
+
     _logger.info(f"| {'Occupancy':<20} | {'  n/a  ':^7} | {occ_line1:<45} |")
     if occ_line2:
         _logger.info(f"| {'':<20} | {'':^7} | {occ_line2:<45} |")
-        
+
     # Proxy row
     import math as _math
+
     c3p = getattr(scorecard, "c3_proxy_pvalue", float("nan"))
     c4p_rho = getattr(scorecard, "c4_proxy_spearman_rho", float("nan"))
     c3p_flip = getattr(scorecard, "c3_proxy_sign_flip", False)
@@ -445,20 +447,28 @@ def _summarize_view(
         train_group = group.loc[entry_idx < report_start]
         oos_group = group.loc[_window_mask(entry_idx, report_start, report_end)]
         full_metrics = _edge_summary_from_frame(group, cfg=cfg)
-        train_metrics = _edge_summary_from_frame(train_group, cfg=cfg) if not train_group.empty else {
-            "mean_edge_bps": float("nan"),
-            "pct_edge_pos": 0.0,
-            "payoff_ratio": 0.0,
-            "q10_shortfall_fail_rate": 0.0,
-            "spearman_score_edge": 0.0,
-        }
-        oos_metrics = _edge_summary_from_frame(oos_group, cfg=cfg) if not oos_group.empty else {
-            "mean_edge_bps": float("nan"),
-            "pct_edge_pos": 0.0,
-            "payoff_ratio": 0.0,
-            "q10_shortfall_fail_rate": 0.0,
-            "spearman_score_edge": 0.0,
-        }
+        train_metrics = (
+            _edge_summary_from_frame(train_group, cfg=cfg)
+            if not train_group.empty
+            else {
+                "mean_edge_bps": float("nan"),
+                "pct_edge_pos": 0.0,
+                "payoff_ratio": 0.0,
+                "q10_shortfall_fail_rate": 0.0,
+                "spearman_score_edge": 0.0,
+            }
+        )
+        oos_metrics = (
+            _edge_summary_from_frame(oos_group, cfg=cfg)
+            if not oos_group.empty
+            else {
+                "mean_edge_bps": float("nan"),
+                "pct_edge_pos": 0.0,
+                "payoff_ratio": 0.0,
+                "q10_shortfall_fail_rate": 0.0,
+                "spearman_score_edge": 0.0,
+            }
+        )
 
         records.append(
             {
@@ -558,9 +568,7 @@ def _summarize_recommendation_variants(
     # When promotion_level == "variant", group at family:variant granularity
     # regardless of diagnose_signal_cells to avoid obs fragmentation.
     use_signal_cells = bool(
-        cfg.diagnose_signal_cells
-        and "signal_cell" in events.columns
-        and cfg.promotion_level == "signal_cell"
+        cfg.diagnose_signal_cells and "signal_cell" in events.columns and cfg.promotion_level == "signal_cell"
     )
     regime_ctx = compute_market_regime_context(aligned=aligned)
     regime_code = regime_ctx.code_1d
@@ -590,6 +598,7 @@ def _summarize_recommendation_variants(
             int(max(1, float(row0.get("expected_holding_bars", 1)) - 1)),
         )
         from scipy.stats import t
+
         if rec_n >= 2 and not np.isnan(breakeven_tstat):
             one_sided_p = float(1.0 - t.cdf(breakeven_tstat, df=rec_n - 1))
         else:
@@ -722,9 +731,11 @@ def _summarize_recommendation_variants(
                 "candidate_action",
             ]
         )
-    return pd.DataFrame.from_records(records).sort_values(
-        ["oos_mean_edge_bps", "group"], ascending=[False, True]
-    ).reset_index(drop=True)
+    return (
+        pd.DataFrame.from_records(records)
+        .sort_values(["oos_mean_edge_bps", "group"], ascending=[False, True])
+        .reset_index(drop=True)
+    )
 
 
 def _summarize_side_flip(
@@ -887,8 +898,8 @@ def _log_variant_top_block(
     _logger.info("\n" + title + "-" * (width - len(title)))
     _logger.info(header)
     _logger.info(
-        f"| {'-'*4:<4} | {'-'*35:<35} | {'-'*12:<12} | {'-'*11:>11} | "
-        f"{'-'*8:>8} | {'-'*6:>6} | {'-'*6:>6} | {'-'*6:<6} | {'-'*3:<3} |"
+        f"| {'-' * 4:<4} | {'-' * 35:<35} | {'-' * 12:<12} | {'-' * 11:>11} | "
+        f"{'-' * 8:>8} | {'-' * 6:>6} | {'-' * 6:>6} | {'-' * 6:<6} | {'-' * 3:<3} |"
     )
 
     for idx, row in enumerate(top.itertuples(index=False), start=1):
@@ -987,15 +998,13 @@ def _recommendation_threshold_checks(row: pd.Series, cfg: CandidateStrategyConfi
     checks = {
         "min_obs": _oos_n >= min_obs,
         "breakeven_hard_gate": (
-            (not cfg.standalone_breakeven_hard_gate_enabled)
-            or bool(row.get("breakeven_hard_pass", False))
+            (not cfg.standalone_breakeven_hard_gate_enabled) or bool(row.get("breakeven_hard_pass", False))
         ),
         "mean_edge": float(row.get("oos_mean_edge_bps", float("nan"))) >= cfg.min_variant_oos_edge_bps,
         # Hard economic floor: min_variant_oos_profit_bps is NOT bypassable via Bayesian
         # admission — it enforces a cost-based minimum profitability for all paths.
-        "profit_floor": float(row.get("oos_mean_edge_bps", float("nan"))) >= float(
-            getattr(cfg, "min_variant_oos_profit_bps", 0.0)
-        ),
+        "profit_floor": float(row.get("oos_mean_edge_bps", float("nan")))
+        >= float(getattr(cfg, "min_variant_oos_profit_bps", 0.0)),
         "median_edge": median_ok,
         "p10_edge": p10_ok,
         "q10_fail": float(row.get("oos_q10_shortfall_fail_rate", 1.0)) <= cfg.max_variant_oos_q10_fail_rate,
@@ -1012,8 +1021,18 @@ def _recommendation_threshold_checks(row: pd.Series, cfg: CandidateStrategyConfi
     # global pooled obs and edge gates are overridden.
     # Hard safety gates (q10_fail, event_density) remain mandatory in both paths.
     if cfg.regime_cell_admission_enabled and bool(row.get("regime_cell_admitted", False)):
-        for key in ("min_obs", "breakeven_hard_gate", "mean_edge", "median_edge", "p10_edge",
-                    "regime_edge", "edge_decay", "hit_or_payoff", "oos_rank_ic", "ic_tstat"):
+        for key in (
+            "min_obs",
+            "breakeven_hard_gate",
+            "mean_edge",
+            "median_edge",
+            "p10_edge",
+            "regime_edge",
+            "edge_decay",
+            "hit_or_payoff",
+            "oos_rank_ic",
+            "ic_tstat",
+        ):
             checks[key] = True
     return checks
 
@@ -1033,9 +1052,7 @@ def summarize_recommendation_gate_failures(
 ) -> pd.DataFrame:
     """Return one row per recommendation group with pass/fail checks."""
     if recommendation_summary.empty:
-        return pd.DataFrame(
-            columns=["group", "candidate_action", "recommended", "failed_checks"]
-        )
+        return pd.DataFrame(columns=["group", "candidate_action", "recommended", "failed_checks"])
 
     rows: list[dict[str, Any]] = []
     for row in recommendation_summary.itertuples(index=False):
@@ -1072,13 +1089,9 @@ def _log_recommendation_failure_block(summary: pd.DataFrame, *, cfg: CandidateSt
             failure_counts[name] = failure_counts.get(name, 0) + 1
 
     ordered_counts = " | ".join(f"{name}x{count}" for name, count in sorted(failure_counts.items()))
-    top_blocked = (
-        blocked.sort_values(["oos_mean_edge_bps", "group"], ascending=[False, True])
-        .head(top_k)
-    )
+    top_blocked = blocked.sort_values(["oos_mean_edge_bps", "group"], ascending=[False, True]).head(top_k)
     top_names = ", ".join(
-        str(getattr(r, "variant", str(r.group).removeprefix("variant=")))
-        for r in top_blocked.itertuples(index=False)
+        str(getattr(r, "variant", str(r.group).removeprefix("variant="))) for r in top_blocked.itertuples(index=False)
     )
     _logger.debug(
         "[DIAG][RECOMMEND_BLOCKED] n=%d  fail_gates: %s  top: %s",
@@ -1123,10 +1136,10 @@ def _build_recommendations(
             variant_pvalues[str(row["group"]) + "_flipped"] = float(row["one_sided_p"])
 
     from src.domain.futures.validation.gates import apply_fdr_promotion_gate
+
     fdr_passed: set[str] = set()
     if cfg.fdr_gate_enabled and variant_pvalues:
         fdr_passed = apply_fdr_promotion_gate(variant_pvalues, alpha_fdr=cfg.fdr_alpha)
-
 
     keep_groups: list[str] = []
     for _, row in by_variant.iterrows():
@@ -1349,6 +1362,7 @@ def compute_rule_diagnostics(
         by_family_side = f_side.result()
 
     import sys
+
     is_testing = "pytest" in sys.modules
     # If not configured for side flip and not in unit testing, bypass to optimize speed
     if not cfg.side_flip_candidate_variants and not is_testing:
@@ -1380,9 +1394,9 @@ def compute_rule_diagnostics(
                 if col in flipped_labeled.columns:
                     flipped_labeled[col] = pd.to_numeric(flipped_labeled[col], errors="coerce").astype(np.float64)
             if "entry_idx" in flipped_labeled.columns:
-                flipped_labeled["entry_idx"] = pd.to_numeric(
-                    flipped_labeled["entry_idx"], errors="coerce"
-                ).astype(np.int64)
+                flipped_labeled["entry_idx"] = pd.to_numeric(flipped_labeled["entry_idx"], errors="coerce").astype(
+                    np.int64
+                )
 
         with ThreadPoolExecutor(max_workers=3) as pool:
             f_sf_fam = pool.submit(
@@ -1421,10 +1435,9 @@ def compute_rule_diagnostics(
                 f_sf_side.result(),
             ]
         side_flip = pd.concat(side_flip_frames, axis=0, ignore_index=True) if side_flip_frames else pd.DataFrame()
-        side_flip_lookup = {
-            str(row.group): row
-            for row in side_flip.itertuples(index=False)
-        } if not side_flip.empty else {}
+        side_flip_lookup = (
+            {str(row.group): row for row in side_flip.itertuples(index=False)} if not side_flip.empty else {}
+        )
 
     def _apply_action(table: pd.DataFrame) -> pd.DataFrame:
         if table.empty:
@@ -1470,10 +1483,14 @@ def compute_rule_diagnostics(
     by_family = _apply_action(by_family)
     by_variant = _apply_action(by_variant)
     by_family_side = _apply_action(by_family_side)
-    side_flip_rec_lookup = {
-        str(row.group): (float(row.delta_mean_edge_bps), float(row.flip_mean_edge_bps))
-        for row in side_flip.itertuples(index=False)
-    } if not side_flip.empty else {}
+    side_flip_rec_lookup = (
+        {
+            str(row.group): (float(row.delta_mean_edge_bps), float(row.flip_mean_edge_bps))
+            for row in side_flip.itertuples(index=False)
+        }
+        if not side_flip.empty
+        else {}
+    )
     with ThreadPoolExecutor(max_workers=2) as pool:
         f_rec_var = pool.submit(
             _summarize_recommendation_variants,
@@ -1512,13 +1529,13 @@ def compute_rule_diagnostics(
         _bv_indexed = by_variant.set_index("group")
         _ic_map: pd.Series = _bv_indexed["oos_rank_ic"]
         recommendation_variant_summary["oos_rank_ic"] = (
-            recommendation_variant_summary["group"].map(_ic_map)
-            .fillna(recommendation_variant_summary["oos_rank_ic"])
+            recommendation_variant_summary["group"].map(_ic_map).fillna(recommendation_variant_summary["oos_rank_ic"])
         )
         if "oos_n" in _bv_indexed.columns:
             _n_map: pd.Series = _bv_indexed["oos_n"]
             recommendation_variant_summary["oos_ic_n"] = (
-                recommendation_variant_summary["group"].map(_n_map)
+                recommendation_variant_summary["group"]
+                .map(_n_map)
                 .fillna(recommendation_variant_summary["oos_n"])
                 .astype(int)
             )
@@ -1530,7 +1547,7 @@ def compute_rule_diagnostics(
             grp = str(row.get("group", ""))
             if (grp.startswith("variant=") or grp.startswith("cell=")) and _meets_recommendation_thresholds(row, cfg):
                 valid_candidates.append(row)
-        
+
         flipped_lookup = (
             recommendation_flipped_summary.set_index("group")
             if not recommendation_flipped_summary.empty
@@ -1544,36 +1561,34 @@ def compute_rule_diagnostics(
                 and grp in getattr(flipped_lookup, "index", [])
             ):
                 flip_row = flipped_lookup.loc[grp]
-                if (
-                    not isinstance(flip_row, pd.DataFrame)
-                    and _meets_recommendation_thresholds(pd.Series(flip_row), cfg)
+                if not isinstance(flip_row, pd.DataFrame) and _meets_recommendation_thresholds(
+                    pd.Series(flip_row), cfg
                 ):
                     flip_row_series = pd.Series(flip_row).copy()
                     flip_row_series["group"] = grp
                     valid_candidates.append(flip_row_series)
-                        
+
         if valid_candidates:
             best_candidate = max(valid_candidates, key=lambda r: float(r.get("oos_mean_edge_bps", -np.inf)))
             best_group = str(best_candidate.get("group", ""))
-            
+
             is_cell = best_group.startswith("cell=")
             best_key = best_group.removeprefix("cell=").removeprefix("variant=")
-            
+
             if is_cell:
                 best_events = labeled_events.loc[labeled_events["signal_cell"].astype(str) == best_key]
             else:
                 fam, var = best_key.split(":", 1)
                 best_events = labeled_events.loc[
-                    (labeled_events["family"].astype(str) == fam) &
-                    (labeled_events["variant"].astype(str) == var)
+                    (labeled_events["family"].astype(str) == fam) & (labeled_events["variant"].astype(str) == var)
                 ]
-            
+
             is_flipped = False
             if not recommendation_variant_summary.empty:
                 var_row = recommendation_variant_summary.loc[recommendation_variant_summary["group"] == best_group]
                 if not var_row.empty and str(var_row.iloc[0].get("candidate_action", "")) == "SIDE_FLIP_CANDIDATE":
                     is_flipped = True
-            
+
             best_oos = best_events.loc[
                 _window_mask(
                     best_events["entry_idx"].to_numpy(copy=False),
@@ -1581,20 +1596,21 @@ def compute_rule_diagnostics(
                     resolved_recommendation_end,
                 )
             ].copy()
-            
+
             ts_len = resolved_recommendation_end - resolved_recommendation_start
             ts_edge = np.zeros(ts_len, dtype=np.float64)
             if not best_oos.empty:
                 if is_flipped:
                     best_oos["edge_after_hurdle_bps"] = -best_oos["edge_after_hurdle_bps"]
-                
+
                 daily_mean = best_oos.groupby("entry_idx")["edge_after_hurdle_bps"].mean()
                 for idx, val in daily_mean.items():
                     ri = int(idx) - resolved_recommendation_start
                     if 0 <= ri < ts_len:
                         ts_edge[ri] = val
-                        
+
             from src.domain.futures.optimization.evaluator import stationary_bootstrap_spa
+
             spa_p = stationary_bootstrap_spa(
                 ts_edge,
                 n_bootstrap=cfg.spa_n_bootstrap,
@@ -1618,12 +1634,8 @@ def compute_rule_diagnostics(
         cfg=cfg,
         spa_passed=spa_passed,
     )
-    recommended_keep_signal_cells, recommended_keep_variants = _split_recommendation_groups(
-        recommended_keep_variants
-    )
-    recommended_flip_signal_cells, recommended_flip_variants = _split_recommendation_groups(
-        recommended_flip_variants
-    )
+    recommended_keep_signal_cells, recommended_keep_variants = _split_recommendation_groups(recommended_keep_variants)
+    recommended_flip_signal_cells, recommended_flip_variants = _split_recommendation_groups(recommended_flip_variants)
 
     decision_counts = by_variant["candidate_action"].value_counts() if not by_variant.empty else pd.Series(dtype=int)
     best_row = by_variant.iloc[0] if not by_variant.empty else None
@@ -1669,10 +1681,8 @@ def compute_rule_diagnostics(
                 for name in failed:
                     failure_counts[name] = failure_counts.get(name, 0) + 1
             ordered_counts = " | ".join(f"{name}x{count}" for name, count in sorted(failure_counts.items()))
-            top_blocked = (
-                blocked_df
-                .sort_values(["oos_mean_edge_bps", "group"], ascending=[False, True])
-                .head(cfg.diagnostic_top_k)
+            top_blocked = blocked_df.sort_values(["oos_mean_edge_bps", "group"], ascending=[False, True]).head(
+                cfg.diagnostic_top_k
             )
             top_names = ", ".join(
                 str(getattr(r, "variant", str(r.group).removeprefix("variant=")))

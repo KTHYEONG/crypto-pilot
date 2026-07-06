@@ -6,6 +6,7 @@ L1 재현성(Determinism) 회귀 테스트.
   - resolve_safe_nested_workers의 pinned 파라미터 동작
   - l1_nested_workers config 검증 (ValueError 발생 조건)
 """
+
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -19,6 +20,7 @@ from src.domain.futures.strategy.tiered_workflow.pipeline import resolve_safe_ne
 # ---------------------------------------------------------------------------
 # Scenario 3: Config 검증 / Error Handling
 # ---------------------------------------------------------------------------
+
 
 class TestL1NestedWorkersConfig:
     def test_l1_nested_workers_zero_raises_value_error(self) -> None:
@@ -45,12 +47,13 @@ class TestL1NestedWorkersConfig:
 # pinned는 safety clamp를 우회하지 못하는 upper bound로 동작.
 # ---------------------------------------------------------------------------
 
+
 class TestResolveNestedWorkersPinned:
     @pytest.fixture(autouse=True)
     def _mock_sufficient_memory(self) -> None:
         with patch("psutil.virtual_memory") as mock:
             mem = mock.return_value
-            mem.available = 16 * 1024 ** 3  # 16GB (low-memory guard 비활성화)
+            mem.available = 16 * 1024**3  # 16GB (low-memory guard 비활성화)
             yield
 
     def test_pinned_capped_by_n_tasks(self) -> None:
@@ -85,15 +88,20 @@ class TestResolveNestedWorkersPinned:
         # pinned=8 이어도 soft_cap=128MB, compact_result=True → predicted_result_mb=100
         # result_mem_limit = max(1, 128//100) = 1. workers가 1로 제한된다.
         result = resolve_safe_nested_workers(
-            n_tasks=16, frame_memory_bytes=0, pinned=8,
-            compact_result=True, result_soft_cap_mb=128,
+            n_tasks=16,
+            frame_memory_bytes=0,
+            pinned=8,
+            compact_result=True,
+            result_soft_cap_mb=128,
         )
         assert result == 1, "pinned=8이어도 soft_cap=128MB(1 worker)가 최종 상한"
 
     def test_pinned_is_upper_bound_not_hard_override(self) -> None:
         # pinned=8 이지만 low-memory guard(available_gb < 5.0)가 더 낮게 제한
         result = resolve_safe_nested_workers(
-            n_tasks=16, frame_memory_bytes=0, pinned=8,
+            n_tasks=16,
+            frame_memory_bytes=0,
+            pinned=8,
         )
         # 낮은 메모리 환경에서는 min(8, ...)이 2 이하로 제한됨
         assert result <= 8
@@ -103,6 +111,7 @@ class TestResolveNestedWorkersPinned:
 # ---------------------------------------------------------------------------
 # Scenario 4: threadpool_limits 적용 검증 (화이트박스)
 # ---------------------------------------------------------------------------
+
 
 class TestFitFoldThreadpoolLimits:
     def test_threadpool_limits_called_with_blas_single(self) -> None:
@@ -129,8 +138,12 @@ class TestFitFoldThreadpoolLimits:
         from src.domain.futures.strategy.walk_forward import WFFold
 
         fold = WFFold(
-            fit_start=0, fit_end=50, cal_start=50, cal_end=70,
-            oos_start=70, oos_end=100,
+            fit_start=0,
+            fit_end=50,
+            cal_start=50,
+            cal_end=70,
+            oos_start=70,
+            oos_end=100,
         )
         events = pd.DataFrame()
         cfg = CandidateStrategyConfig()
@@ -152,10 +165,13 @@ class TestFitFoldThreadpoolLimits:
         )
 
         # Act: threadpool_limits를 fake로 교체 → _FakeCtx.__exit__이 RuntimeError 발생 (내부 실행 중단)
-        with patch(
-            "src.domain.futures.strategy.candidate_workflow.threadpool_limits",
-            side_effect=fake_threadpool_limits,
-        ), pytest.raises(RuntimeError, match="_STOP_INNER_EXECUTION"):
+        with (
+            patch(
+                "src.domain.futures.strategy.candidate_workflow.threadpool_limits",
+                side_effect=fake_threadpool_limits,
+            ),
+            pytest.raises(RuntimeError, match="_STOP_INNER_EXECUTION"),
+        ):
             _fit_and_predict_single_fold(0, fold, events, aligned, cfg, 0)
 
         # Assert: limits=1, user_api='blas'로 호출됐는지 확인
@@ -167,6 +183,7 @@ class TestFitFoldThreadpoolLimits:
 # ---------------------------------------------------------------------------
 # Scenario 1 (단위): moving_block_bootstrap_mean 재현성 및 가속 확인
 # ---------------------------------------------------------------------------
+
 
 class TestBootstrapReproducibility:
     def test_same_seed_gives_identical_output(self) -> None:
@@ -221,6 +238,7 @@ class TestBootstrapReproducibility:
 # Scenario 3 (캐시): 캐시 프라이밍 및 중복 연산 방지 검증
 # ---------------------------------------------------------------------------
 
+
 class TestFeatureCachePriming:
     def test_prime_aligned_feature_cache_populates_global_cache(self) -> None:
         """prime_aligned_feature_cache 호출 시 _ALIGNED_FEATURE_CACHE에 정상 등록 확인."""
@@ -236,7 +254,11 @@ class TestFeatureCachePriming:
         aligned = AlignedMarketData(
             symbols=("BTC",),
             datetimes=np.array(pd.date_range("2026-01-01", periods=size, freq="4h")),
-            open_2d=arr, high_2d=arr, low_2d=arr, close_2d=arr, volume_2d=arr,
+            open_2d=arr,
+            high_2d=arr,
+            low_2d=arr,
+            close_2d=arr,
+            volume_2d=arr,
             funding_2d=np.zeros((size, 1)),
             active_mask=np.ones((size, 1), dtype=bool),
             warm_mask=np.ones((size, 1), dtype=bool),
@@ -244,13 +266,15 @@ class TestFeatureCachePriming:
             kill_mask=np.zeros((size, 1), dtype=bool),
         )
 
-        labeled_events = pd.DataFrame({
-            "entry_idx": [25, 50, 75],
-            "exit_idx": [30, 60, 80],
-            "symbol": ["BTC", "BTC", "BTC"],
-            "side": [1, -1, 1],
-            "score": [0.5, -0.2, 0.8]
-        })
+        labeled_events = pd.DataFrame(
+            {
+                "entry_idx": [25, 50, 75],
+                "exit_idx": [30, 60, 80],
+                "symbol": ["BTC", "BTC", "BTC"],
+                "side": [1, -1, 1],
+                "score": [0.5, -0.2, 0.8],
+            }
+        )
 
         cfg = CandidateStrategyConfig(market_state_features_enabled=True)
 
@@ -270,6 +294,7 @@ class TestFeatureCachePriming:
 # ---------------------------------------------------------------------------
 # Scenario 4: PERF(15) 로그 커버리지 검증
 # ---------------------------------------------------------------------------
+
 
 class TestPerfLogCoverage:
     """L1 PERF 로그 출력 검증: 병목탐지용 로그가 정상 emit되는지 확인."""
@@ -297,18 +322,20 @@ class TestPerfLogCoverage:
             l1_bootstrap_samples=10,
             l1_quality_weight_enabled=False,
         )
-        event_results = pd.DataFrame({
-            "symbol": ["BTC", "ETH"],
-            "strategy_id": ["mom:a", "mom:b"],
-            "activation_context": ["all", "all"],
-            "fold_id": [0, 0],
-            "expected_holding_bars": [1, 1],
-            "gross_event_bps": [10.0, 5.0],
-            "incremental_bps": [8.0, 3.0],
-            "uniqueness_weight": [1.0, 1.0],
-            "decision_idx": [0, 0],
-            "batch_size": [1, 1],
-        })
+        event_results = pd.DataFrame(
+            {
+                "symbol": ["BTC", "ETH"],
+                "strategy_id": ["mom:a", "mom:b"],
+                "activation_context": ["all", "all"],
+                "fold_id": [0, 0],
+                "expected_holding_bars": [1, 1],
+                "gross_event_bps": [10.0, 5.0],
+                "incremental_bps": [8.0, 3.0],
+                "uniqueness_weight": [1.0, 1.0],
+                "decision_idx": [0, 0],
+                "batch_size": [1, 1],
+            }
+        )
 
         result = compute_symbol_strategy_evidence(
             event_results=event_results,
@@ -355,16 +382,23 @@ class TestPerfLogCoverage:
         aligned.datetimes = np.array([f"2024-01-0{d}T00:00:00" for d in range(1, 7)], dtype="datetime64[ns]")
 
         from src.domain.futures.strategy.walk_forward import WFFold
+
         fold = WFFold(
-            fit_start=0, fit_end=1,
-            cal_start=0, cal_end=1,
-            oos_start=1, oos_end=5,
+            fit_start=0,
+            fit_end=1,
+            cal_start=0,
+            cal_end=1,
+            oos_start=1,
+            oos_end=5,
         )
         awf_folds = (fold,)
 
         config = Layer2AllocationConfig(
-            k_rank=2, rank_buffer=0, kelly_fraction=0.5,
-            no_trade_band=0.0, rebalance_bars=1,
+            k_rank=2,
+            rank_buffer=0,
+            kelly_fraction=0.5,
+            no_trade_band=0.0,
+            rebalance_bars=1,
         )
 
         from src.domain.futures.portfolio.portfolio_constructor import PortfolioCaps
@@ -381,13 +415,8 @@ class TestPerfLogCoverage:
 
         assert result is not None
         perf_messages = [rec.message for rec in caplog.records if rec.levelno == PERF]
-        assert any("[AWF-PERF]" in m for m in perf_messages), (
-            f"[AWF-PERF] not found in PERF logs. Got: {perf_messages}"
-        )
-        assert any("[AWF-FOLD]" in m for m in perf_messages), (
-            f"[AWF-FOLD] not found in PERF logs. Got: {perf_messages}"
-        )
+        assert any("[AWF-PERF]" in m for m in perf_messages), f"[AWF-PERF] not found in PERF logs. Got: {perf_messages}"
+        assert any("[AWF-FOLD]" in m for m in perf_messages), f"[AWF-FOLD] not found in PERF logs. Got: {perf_messages}"
         assert not any("L2-AWF-PROF" in m for m in perf_messages), (
             "Legacy [L2-AWF-PROF] DEBUG log should be migrated to PERF"
         )
-

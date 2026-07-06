@@ -101,9 +101,7 @@ def _make_config() -> Layer2AllocationConfig:
 
 
 def _make_folds() -> tuple[WFFold, ...]:
-    return (
-        WFFold(fit_start=0, fit_end=1, cal_start=1, cal_end=1, oos_start=1, oos_end=4),
-    )
+    return (WFFold(fit_start=0, fit_end=1, cal_start=1, cal_end=1, oos_start=1, oos_end=4),)
 
 
 class TestAwfSimInstrumentation:
@@ -113,7 +111,8 @@ class TestAwfSimInstrumentation:
     """
 
     def test_run_awf_simulation_fingerprint_is_deterministic(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """S1: 동일 입력 2회 호출 → [AWF-SIM-FP] 2줄, rets_fp 해시 동일."""
         caplog.set_level(logging.DEBUG)
@@ -150,10 +149,7 @@ class TestAwfSimInstrumentation:
         assert len(fp_records) == 2, f"Expected 2 [AWF-SIM-FP] records, got {len(fp_records)}"
 
         rets_fp_values = [
-            part.split("=")[1]
-            for rec in fp_records
-            for part in str(rec.message).split()
-            if part.startswith("rets_fp=")
+            part.split("=")[1] for rec in fp_records for part in str(rec.message).split() if part.startswith("rets_fp=")
         ]
         assert len(rets_fp_values) == 2
         assert rets_fp_values[0] == rets_fp_values[1], (
@@ -161,7 +157,8 @@ class TestAwfSimInstrumentation:
         )
 
     def test_run_awf_simulation_logs_sim_origin_tag(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """S2: sim_origin='champion_eval' 전달 → 로그에 origin=champion_eval 포함."""
         caplog.set_level(logging.DEBUG)
@@ -188,7 +185,8 @@ class TestAwfSimInstrumentation:
         assert "origin=champion_eval" in str(fp_records[0].message)
 
     def test_run_awf_simulation_logs_per_fold_oos_bars(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """S3: 2개 fold(oos 길이 상이) 입력 → oos_bars에 실제 fold 길이 일치."""
         caplog.set_level(logging.DEBUG)
@@ -220,7 +218,8 @@ class TestAwfSimInstrumentation:
         assert "oos_bars=[4, 6]" in msg, f"Expected oos_bars=[4, 6], got: {msg}"
 
     def test_run_awf_simulation_empty_folds_logs_gracefully(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """S4: awf_folds=() → crash 없이 n_folds=0 oos_bars=[] 로깅."""
         caplog.set_level(logging.DEBUG)
@@ -247,7 +246,8 @@ class TestAwfSimInstrumentation:
         assert "oos_bars=[]" in msg, f"Expected oos_bars=[], got: {msg}"
 
     def test_run_awf_simulation_skips_fingerprint_when_debug_off(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """S5: DEBUG 비활성 시 [AWF-SIM-FP] 미출력."""
         caplog.set_level(logging.INFO)
@@ -269,6 +269,4 @@ class TestAwfSimInstrumentation:
         )
 
         fp_records = [r for r in caplog.records if "[AWF-SIM-FP]" in str(r.message)]
-        assert len(fp_records) == 0, (
-            f"Expected 0 [AWF-SIM-FP] records when DEBUG is off, got {len(fp_records)}"
-        )
+        assert len(fp_records) == 0, f"Expected 0 [AWF-SIM-FP] records when DEBUG is off, got {len(fp_records)}"

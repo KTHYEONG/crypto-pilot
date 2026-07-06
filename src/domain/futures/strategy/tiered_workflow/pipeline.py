@@ -169,7 +169,6 @@ if os.environ.get("LOG_LEVEL") == "PERF":
     logger.setLevel(15)
 
 
-
 _VALID_COVERAGE_FLAG_THRESHOLD: float = 0.80
 _TRAINED_FOLD_COVERAGE_THRESHOLD: float = 0.80
 
@@ -269,10 +268,10 @@ def resolve_safe_nested_workers(
     requested_workers = min(n_tasks, pinned) if isinstance(pinned, int) and pinned >= 1 else n_tasks
 
     mem = psutil.virtual_memory()
-    available_gb = mem.available / (1024 ** 3)
+    available_gb = mem.available / (1024**3)
     safe_mem_gb = available_gb * 0.70
 
-    frame_gb = frame_memory_bytes / (1024 ** 3)
+    frame_gb = frame_memory_bytes / (1024**3)
     predicted_result_gb = 0.10 if compact_result else 0.40
     estimated_proc_gb = max(0.8, 0.5 + frame_gb * 0.5 + predicted_result_gb)
 
@@ -304,12 +303,24 @@ def resolve_safe_nested_workers(
         "max_workers=%d available_gb=%.2f frame_gb=%.2f estimated_proc_gb=%.2f compact=%s "
         "result_soft_cap_mb=%s predicted_result_mb=%d result_mem_limit=%s pinned_applied=%s "
         "mem_limit=%d workers=%d",
-        stage, n_tasks, requested_workers, physical_cores, cpu_limit, max_workers, available_gb,
-        frame_gb, estimated_proc_gb, compact_result, result_soft_cap_mb, predicted_result_mb,
-        result_mem_limit, isinstance(pinned, int) and pinned >= 1, mem_limit, workers,
+        stage,
+        n_tasks,
+        requested_workers,
+        physical_cores,
+        cpu_limit,
+        max_workers,
+        available_gb,
+        frame_gb,
+        estimated_proc_gb,
+        compact_result,
+        result_soft_cap_mb,
+        predicted_result_mb,
+        result_mem_limit,
+        isinstance(pinned, int) and pinned >= 1,
+        mem_limit,
+        workers,
     )
     return workers
-
 
 
 def _log_fold_avg_profile(results: Sequence[Any], tag: str) -> None:
@@ -318,9 +329,15 @@ def _log_fold_avg_profile(results: Sequence[Any], tag: str) -> None:
     if n == 0:
         return
     _profile_keys = (
-        "schema", "dataset_fit", "dataset_early_stop",
-        "dataset_calibration_fit", "dataset_calibration_eval",
-        "dataset_oos", "edge_fit", "inference", "selection",
+        "schema",
+        "dataset_fit",
+        "dataset_early_stop",
+        "dataset_calibration_fit",
+        "dataset_calibration_eval",
+        "dataset_oos",
+        "edge_fit",
+        "inference",
+        "selection",
     )
     _agg: dict[str, float] = dict.fromkeys(_profile_keys, 0.0)
     for _r in results:
@@ -334,10 +351,17 @@ def _log_fold_avg_profile(results: Sequence[Any], tag: str) -> None:
         "[PERF] l1_%s_fold_avg_profile n=%d "
         "schema=%.3fs ds_fit=%.3fs ds_es=%.3fs ds_cal_fit=%.3fs ds_cal_eval=%.3fs "
         "ds_oos=%.3fs edge_fit=%.3fs inference=%.3fs selection=%.3fs",
-        tag, n,
-        _agg["schema"], _agg["dataset_fit"], _agg["dataset_early_stop"],
-        _agg["dataset_calibration_fit"], _agg["dataset_calibration_eval"],
-        _agg["dataset_oos"], _agg["edge_fit"], _agg["inference"], _agg["selection"],
+        tag,
+        n,
+        _agg["schema"],
+        _agg["dataset_fit"],
+        _agg["dataset_early_stop"],
+        _agg["dataset_calibration_fit"],
+        _agg["dataset_calibration_eval"],
+        _agg["dataset_oos"],
+        _agg["edge_fit"],
+        _agg["inference"],
+        _agg["selection"],
     )
 
 
@@ -432,6 +456,7 @@ def build_l1_prequential_evidence_snapshots(
 
         # Set process globals to minimize IPC size under fork
         import gc
+
         gc.collect()
         cw._GLOBAL_LABELED_EVENTS = labeled_events
         cw._GLOBAL_ALIGNED = aligned
@@ -480,7 +505,8 @@ def build_l1_prequential_evidence_snapshots(
             cw._GLOBAL_ALIGNED = None
             cw._GLOBAL_CFG = None
             cw._GLOBAL_PURGE_BARS = None
-        logger.log(PERF,
+        logger.log(
+            PERF,
             "[PERF] evidence_prequential_parallel_exec took=%.4fs",
             time.perf_counter() - t_exec,
         )
@@ -549,12 +575,12 @@ def build_l1_prequential_evidence_snapshots(
         _n_workers = min(len(_snapshot_items), max(1, (os.cpu_count() or 4) // 2))
         with ThreadPoolExecutor(max_workers=_n_workers) as _pool:
             _futs = {
-                _pool.submit(_build_snapshot, _offset, _aidx): _aidx
-                for _offset, _aidx in enumerate(_snapshot_items)
+                _pool.submit(_build_snapshot, _offset, _aidx): _aidx for _offset, _aidx in enumerate(_snapshot_items)
             }
             snapshots.extend(fut.result() for fut in as_completed(_futs))
         snapshots.sort(key=lambda s: s.as_of_idx)
     return tuple(snapshots)
+
 
 _L1_SWF_FOLD_CACHE: dict[tuple[Any, ...], Any] = {}
 
@@ -585,8 +611,12 @@ def run_l1_swf(
     t_start = time.perf_counter()
     logger.debug(
         "[SWF-START] n_symbols=%d n_bars=%d n_folds=%d purge=%d embargo=%d cfg=%s max_workers=%d",
-        n_total, len(aligned.datetimes), len(folds), purge_bars, _embargo_bars,
-        getattr(cfg, 'candidate_name', cfg.__class__.__name__),
+        n_total,
+        len(aligned.datetimes),
+        len(folds),
+        purge_bars,
+        _embargo_bars,
+        getattr(cfg, "candidate_name", cfg.__class__.__name__),
         max_workers,
     )
 
@@ -598,10 +628,15 @@ def run_l1_swf(
 
     for fold_idx, wf_fold in enumerate(folds):
         cache_key = (
-            wf_fold.fit_start, wf_fold.fit_end,
-            wf_fold.cal_start, wf_fold.cal_end,
-            wf_fold.oos_start, wf_fold.oos_end,
-            id(labeled_events), id(aligned), id(cfg)
+            wf_fold.fit_start,
+            wf_fold.fit_end,
+            wf_fold.cal_start,
+            wf_fold.cal_end,
+            wf_fold.oos_start,
+            wf_fold.oos_end,
+            id(labeled_events),
+            id(aligned),
+            id(cfg),
         )
         if cache_key in _L1_SWF_FOLD_CACHE:
             futures.append((fold_idx, wf_fold, _L1_SWF_FOLD_CACHE[cache_key]))
@@ -627,10 +662,15 @@ def run_l1_swf(
                         )(fold_idx, wf_fold, labeled_events, aligned, cfg, purge_bars)
                         futures.append((fold_idx, wf_fold, fold_out))
                         cache_key = (
-                            wf_fold.fit_start, wf_fold.fit_end,
-                            wf_fold.cal_start, wf_fold.cal_end,
-                            wf_fold.oos_start, wf_fold.oos_end,
-                            id(labeled_events), id(aligned), id(cfg)
+                            wf_fold.fit_start,
+                            wf_fold.fit_end,
+                            wf_fold.cal_start,
+                            wf_fold.cal_end,
+                            wf_fold.oos_start,
+                            wf_fold.oos_end,
+                            id(labeled_events),
+                            id(aligned),
+                            id(cfg),
                         )
                         _L1_SWF_FOLD_CACHE[cache_key] = fold_out
                     except Exception:
@@ -646,9 +686,7 @@ def run_l1_swf(
                             (
                                 fold_idx,
                                 wf_fold,
-                                executor.submit(
-                                    cw._fit_and_predict_single_fold_from_globals, fold_idx, wf_fold
-                                ),
+                                executor.submit(cw._fit_and_predict_single_fold_from_globals, fold_idx, wf_fold),
                             )
                         )
                     for fold_idx, wf_fold, fut in submits:
@@ -656,10 +694,15 @@ def run_l1_swf(
                             fold_out = fut.result()
                             futures.append((fold_idx, wf_fold, fold_out))
                             cache_key = (
-                                wf_fold.fit_start, wf_fold.fit_end,
-                                wf_fold.cal_start, wf_fold.cal_end,
-                                wf_fold.oos_start, wf_fold.oos_end,
-                                id(labeled_events), id(aligned), id(cfg)
+                                wf_fold.fit_start,
+                                wf_fold.fit_end,
+                                wf_fold.cal_start,
+                                wf_fold.cal_end,
+                                wf_fold.oos_start,
+                                wf_fold.oos_end,
+                                id(labeled_events),
+                                id(aligned),
+                                id(cfg),
                             )
                             _L1_SWF_FOLD_CACHE[cache_key] = fold_out
                         except Exception:
@@ -674,9 +717,7 @@ def run_l1_swf(
 
     for fold_loop_idx, (_fold_idx, _wf_fold, fold_out) in enumerate(futures):
         beta_f32 = aligned.beta_vs_market_1d
-        beta_f64: NDArray[np.float64] | None = (
-            beta_f32.astype(np.float64) if beta_f32 is not None else None
-        )
+        beta_f64: NDArray[np.float64] | None = beta_f32.astype(np.float64) if beta_f32 is not None else None
         fold_sigs: dict[str, SymbolSignal] = {}
         if _is_trained_fold_output(fold_out):
             fold_sigs = compose_symbol_signals(
@@ -695,24 +736,24 @@ def run_l1_swf(
 
         eligible_mask = _fold_eligible_symbol_mask(aligned=aligned, fold=_wf_fold)
         f_n_eligible = int(np.count_nonzero(eligible_mask))
-        fold_realized_valid = _compute_fold_realized_valid_set(
-            fold_out, min_obs=min_obs, t_stat_floor=t_stat_floor
-        )
+        fold_realized_valid = _compute_fold_realized_valid_set(fold_out, min_obs=min_obs, t_stat_floor=t_stat_floor)
         eligible_syms = {s for s, e in zip(symbols, eligible_mask, strict=True) if e}
         f_n_valid = len(fold_realized_valid & eligible_syms)
         f_breadth = f_n_valid / max(1, f_n_eligible)
         f_n_events = len(fold_out.model_output.expected_net_bps)
-        fold_diags.append(FoldDiagnostic(
-            fold=fold_loop_idx + 1,
-            ic=fold_ic,
-            breadth=f_breadth,
-            n_valid=f_n_valid,
-            n_eligible=f_n_eligible,
-            n_events=f_n_events,
-            n_fit=int(getattr(fold_out, "n_fit", 0)),
-            fit_status=getattr(fold_out, "fit_status", "failed"),
-            passed=fold_ic is not None and fold_ic > 0,
-        ))
+        fold_diags.append(
+            FoldDiagnostic(
+                fold=fold_loop_idx + 1,
+                ic=fold_ic,
+                breadth=f_breadth,
+                n_valid=f_n_valid,
+                n_eligible=f_n_eligible,
+                n_events=f_n_events,
+                n_fit=int(getattr(fold_out, "n_fit", 0)),
+                fit_status=getattr(fold_out, "fit_status", "failed"),
+                passed=fold_ic is not None and fold_ic > 0,
+            )
+        )
 
     total_folds = len(futures)
     if total_folds > 0:
@@ -738,7 +779,8 @@ def run_l1_swf(
         for k in avg_profile:
             avg_profile[k] /= total_folds
 
-        logger.log(PERF,
+        logger.log(
+            PERF,
             "[PERF] swf_fold_avg_profile n=%d "
             "schema=%.3fs ds_fit=%.3fs ds_es=%.3fs ds_cal_fit=%.3fs ds_cal_eval=%.3fs "
             "ds_oos=%.3fs edge_fit=%.3fs inference=%.3fs selection=%.3fs",
@@ -754,7 +796,8 @@ def run_l1_swf(
             avg_profile["selection"],
         )
 
-    logger.log(PERF,
+    logger.log(
+        PERF,
         "[PERF] run_l1_swf took=%.2fs",
         time.perf_counter() - t_start,
     )
@@ -771,6 +814,7 @@ def run_l1_swf(
     sigs_tuple = tuple(signals_per_fold)
     oos_stacked = _stack_oos_signals(sigs_tuple, realized_stats=per_sym_realized)
     from src.domain.futures.strategy import tiered_workflow as _tw_panel_raw
+
     _tw_panel_fn: Any = _tw_panel_raw
     strategy_panel = _tw_panel_fn.compute_per_strategy_oos_validation(fold_tuples=futures)
     n_valid_strategies = sum(1 for sig in strategy_panel if sig.valid)
@@ -797,9 +841,7 @@ def run_l1_swf(
         cs_ic_fold_pass_ratio = float(sum(1 for ic in valid_fold_ics if ic > 0.0) / len(valid_fold_ics))
         if len(valid_fold_ics) >= 2:
             cs_ic_std = float(np.std(valid_fold_ics, ddof=1))
-            cs_ic_tstat = float(
-                cs_ic_mean / (cs_ic_std / np.sqrt(len(valid_fold_ics)) + 1e-12)
-            )
+            cs_ic_tstat = float(cs_ic_mean / (cs_ic_std / np.sqrt(len(valid_fold_ics)) + 1e-12))
         else:
             cs_ic_tstat = 0.0
     else:
@@ -855,21 +897,18 @@ def run_l1_swf(
     _valid_pairs = [(d.ic, d.n_events) for d in fold_diags if d.ic is not None]
     if _valid_pairs:
         _w_total = sum(n for _, n in _valid_pairs)
-        fold_pass_ratio = (
-            sum(n for ic, n in _valid_pairs if ic > 0) / _w_total
-            if _w_total > 0 else 0.0
-        )
+        fold_pass_ratio = sum(n for ic, n in _valid_pairs if ic > 0) / _w_total if _w_total > 0 else 0.0
     else:
         fold_pass_ratio = 0.0
 
     breadth = float(np.mean([d.breadth for d in fold_diags])) if fold_diags else 0.0
     valid_coverage = (
         float(sum(1 for d in fold_diags if d.breadth >= _VALID_COVERAGE_FLAG_THRESHOLD) / len(fold_diags))
-        if fold_diags else 0.0
+        if fold_diags
+        else 0.0
     )
     trained_fold_coverage = (
-        float(sum(1 for d in fold_diags if d.fit_status == "trained") / len(fold_diags))
-        if fold_diags else 0.0
+        float(sum(1 for d in fold_diags if d.fit_status == "trained") / len(fold_diags)) if fold_diags else 0.0
     )
 
     n_valid = sum(1 for s in per_sym_realized.values() if s.valid)
@@ -877,14 +916,16 @@ def run_l1_swf(
     sym_details: list[dict[str, Any]] = []
     for sym, sig in sorted(oos_stacked.items()):
         real = per_sym_realized.get(sym)
-        sym_details.append({
-            "symbol": sym,
-            "raw_mu": sig.raw_mu,
-            "vol": sig.volatility,
-            "t_stat": real.t_stat if real is not None else 0.0,
-            "ic": per_sym_ic.get(sym, 0.0),
-            "valid": real.valid if real is not None else False,
-        })
+        sym_details.append(
+            {
+                "symbol": sym,
+                "raw_mu": sig.raw_mu,
+                "vol": sig.volatility,
+                "t_stat": real.t_stat if real is not None else 0.0,
+                "ic": per_sym_ic.get(sym, 0.0),
+                "valid": real.valid if real is not None else False,
+            }
+        )
 
     _diag = compute_prediction_decomposition_diag(fold_tuples=futures)
     gate_passed: bool = bool(
@@ -962,11 +1003,11 @@ def _opportunities_to_symbol_signals(opportunities: ValidatedSignalBatch) -> dic
     from collections import defaultdict
 
     from src.domain.futures.strategy.cs_rank import VOL_FLOOR, SymbolSignal
-    
+
     sym_events = defaultdict(list)
     for event in opportunities.events:
         sym_events[event.symbol].append(event)
-        
+
     adapted: dict[str, SymbolSignal] = {}
     for sym, evs in sym_events.items():
         mus = [float(e.expected_gross_bps * e.side) for e in evs if np.isfinite(e.expected_gross_bps)]
@@ -990,12 +1031,11 @@ def _prefit_layer1_from_globals(
 ) -> _Layer1ModelCore:
     """Wrapper for ``prefit_layer1_model`` using process-global context (fork IPC bypass)."""
     import src.domain.futures.strategy.candidate_workflow as _cw
+
     if _cw._GLOBAL_LABELED_EVENTS is None and _cw._GLOBAL_PREPARED_EVENTS is None:
         raise RuntimeError("candidate workflow globals are not initialized for prefit")
     labeled_events = (
-        _cw._GLOBAL_LABELED_EVENTS
-        if _cw._GLOBAL_LABELED_EVENTS is not None
-        else _cw._GLOBAL_PREPARED_EVENTS
+        _cw._GLOBAL_LABELED_EVENTS if _cw._GLOBAL_LABELED_EVENTS is not None else _cw._GLOBAL_PREPARED_EVENTS
     )
     assert _cw._GLOBAL_ALIGNED is not None, "prefit requires GLOBAL_ALIGNED"
     assert _cw._GLOBAL_CFG is not None, "prefit requires GLOBAL_CFG"
@@ -1049,12 +1089,7 @@ def run_l1_nested_swf(
     if _n_t >= 2:
         _r[1:] = (_c[1:] - _c[:-1]) / np.maximum(np.abs(_c[:-1]), 1e-12)
     _rw = max(2, int(_vol_window))
-    volatility_2d = (
-        pd.DataFrame(_r)
-        .rolling(_rw, min_periods=2)
-        .std(ddof=1)
-        .to_numpy(dtype=np.float64)
-    )
+    volatility_2d = pd.DataFrame(_r).rolling(_rw, min_periods=2).std(ddof=1).to_numpy(dtype=np.float64)
     volatility_2d = np.nan_to_num(volatility_2d, nan=0.0, posinf=0.0, neginf=0.0)
     volatility_2d = np.maximum(volatility_2d, 1e-12)
     logger.log(
@@ -1065,7 +1100,10 @@ def run_l1_nested_swf(
     _rss_now = _get_rss_mb()
     logger.debug(
         "[MEM] stage=volatility_2d rss=%.0fMB delta=%+.0fMB shape=(%d,%d)",
-        _rss_now, _rss_now - _mem_vol, _n_t, _n_sym,
+        _rss_now,
+        _rss_now - _mem_vol,
+        _n_t,
+        _n_sym,
     )
     outer_reports: list[Layer1FoldReadiness] = []
     outer_event_frames: list[pd.DataFrame] = []
@@ -1151,6 +1189,7 @@ def run_l1_nested_swf(
     t_mp_prep = time.perf_counter()
     # Set process globals to minimize IPC size under fork
     import gc
+
     gc.collect()
     cw._GLOBAL_LABELED_EVENTS = labeled_events if prepared_events is None else None
     cw._GLOBAL_PREPARED_EVENTS = prepared_events
@@ -1169,9 +1208,7 @@ def run_l1_nested_swf(
     compact_pref = compact_pref_raw if isinstance(compact_pref_raw, bool) else True
     soft_cap_raw = getattr(cfg, "l1_nested_result_soft_cap_mb", 512)
     soft_cap_mb = (
-        int(soft_cap_raw)
-        if isinstance(soft_cap_raw, (int, float)) and not isinstance(soft_cap_raw, bool)
-        else 512
+        int(soft_cap_raw) if isinstance(soft_cap_raw, (int, float)) and not isinstance(soft_cap_raw, bool) else 512
     )
     full_result_mb = 400
     force_compact = compact_pref
@@ -1227,17 +1264,23 @@ def run_l1_nested_swf(
         "[PERF] l1_nested_mp_prep took=%.4fs",
         time.perf_counter() - t_mp_prep,
     )
-    
+
     evidence_results: list[Any] = []
     outer_results: list[Any] = []
     _wf_profile_keys = (
-        "schema", "dataset_fit", "dataset_early_stop",
-        "dataset_calibration_fit", "dataset_calibration_eval",
-        "dataset_oos", "edge_fit", "inference", "selection",
+        "schema",
+        "dataset_fit",
+        "dataset_early_stop",
+        "dataset_calibration_fit",
+        "dataset_calibration_eval",
+        "dataset_oos",
+        "edge_fit",
+        "inference",
+        "selection",
     )
     _prefit_future: Any = None
     _prefit_core: _Layer1ModelCore | None = None
-    
+
     try:
         with ProcessPoolExecutor(max_workers=max_pool_workers, mp_context=mp_ctx) as executor:
             # ── Phase 1: Evidence folds ─────────────────────────────────────────────
@@ -1265,14 +1308,20 @@ def run_l1_nested_swf(
                 t_ev_ipc = time.perf_counter()
                 _mem_ipc_ref = _get_rss_mb()
                 evidence_results = [fut.result() for fut in as_completed(ev_submits)]
-                evidence_results.sort(
-                    key=lambda r: int(getattr(r, "fold_id", getattr(r, "fold_idx", 0)))
+                evidence_results.sort(key=lambda r: int(getattr(r, "fold_id", getattr(r, "fold_idx", 0))))
+                logger.log(
+                    PERF,
+                    "[PERF] l1_evidence_ipc_collect n=%d took=%.4fs",
+                    len(evidence_results),
+                    time.perf_counter() - t_ev_ipc,
                 )
-                logger.log(PERF, "[PERF] l1_evidence_ipc_collect n=%d took=%.4fs",
-                    len(evidence_results), time.perf_counter() - t_ev_ipc)
                 _rss_ev = _get_rss_mb()
-                logger.debug("[MEM] stage=evidence_ipc rss=%.0fMB delta=%+.0fMB n_results=%d",
-                    _rss_ev, _rss_ev - _mem_ipc_ref, len(evidence_results))
+                logger.debug(
+                    "[MEM] stage=evidence_ipc rss=%.0fMB delta=%+.0fMB n_results=%d",
+                    _rss_ev,
+                    _rss_ev - _mem_ipc_ref,
+                    len(evidence_results),
+                )
 
                 _log_fold_avg_profile(evidence_results, "evidence")
 
@@ -1286,10 +1335,10 @@ def run_l1_nested_swf(
                     seed=seed,
                     precomputed_results=evidence_results,
                 )
-                logger.log(PERF, "[PERF] l1_prequential_evidence_snapshots took=%.4fs",
-                    time.perf_counter() - t_ev_snap)
-                logger.debug("[MEM] stage=evidence_snapshots rss=%.0fMB n_snapshots=%d",
-                    _get_rss_mb(), len(evidence_snapshots))
+                logger.log(PERF, "[PERF] l1_prequential_evidence_snapshots took=%.4fs", time.perf_counter() - t_ev_snap)
+                logger.debug(
+                    "[MEM] stage=evidence_snapshots rss=%.0fMB n_snapshots=%d", _get_rss_mb(), len(evidence_snapshots)
+                )
 
                 _wf_agg_timings = dict.fromkeys(_wf_profile_keys, 0.0)
                 for _r in evidence_results:
@@ -1310,12 +1359,13 @@ def run_l1_nested_swf(
             t_outer_exec = time.perf_counter()
             if outer_folds:
                 import concurrent.futures
+
                 out_submits = []
                 active_futures: set[concurrent.futures.Future[Any]] = set()
-                
+
                 t_out_ipc = time.perf_counter()
                 _mem_ipc_ref = _get_rss_mb()
-                
+
                 for idx, fold in enumerate(outer_folds):
                     while len(active_futures) >= workers_outer:
                         done, _ = concurrent.futures.wait(
@@ -1323,7 +1373,7 @@ def run_l1_nested_swf(
                             return_when=concurrent.futures.FIRST_COMPLETED,
                         )
                         active_futures.difference_update(done)
-                    
+
                     fut = executor.submit(
                         cw._fit_and_predict_single_fold_from_globals,
                         idx,
@@ -1333,7 +1383,7 @@ def run_l1_nested_swf(
                     )
                     active_futures.add(fut)
                     out_submits.append(fut)
-                
+
                 outer_results = [fut.result() for fut in out_submits]
                 for _fold_idx, _result in enumerate(outer_results):
                     if not hasattr(_result, "fold_id"):
@@ -1341,11 +1391,19 @@ def run_l1_nested_swf(
 
                         with contextlib.suppress(Exception):
                             _result.fold_id = int(_fold_idx)
-                logger.log(PERF, "[PERF] l1_outer_ipc_collect n=%d took=%.4fs",
-                    len(outer_results), time.perf_counter() - t_out_ipc)
+                logger.log(
+                    PERF,
+                    "[PERF] l1_outer_ipc_collect n=%d took=%.4fs",
+                    len(outer_results),
+                    time.perf_counter() - t_out_ipc,
+                )
                 _rss_out = _get_rss_mb()
-                logger.debug("[MEM] stage=outer_ipc rss=%.0fMB delta=%+.0fMB n_results=%d",
-                    _rss_out, _rss_out - _mem_ipc_ref, len(outer_results))
+                logger.debug(
+                    "[MEM] stage=outer_ipc rss=%.0fMB delta=%+.0fMB n_results=%d",
+                    _rss_out,
+                    _rss_out - _mem_ipc_ref,
+                    len(outer_results),
+                )
 
             # ── Collect speculative pre-fit result ────────────────────────────────
             if _prefit_future is not None:
@@ -1381,10 +1439,18 @@ def run_l1_nested_swf(
         "[PERF] l1_wf_summary n_folds=%d evidence=%d outer=%d workers=%d "
         "wall: ev=%.1fs out=%.1fs total=%.1fs "
         "avg: selection=%.3fs ds_fit=%.3fs schema=%.3fs edge_fit=%.3fs inference=%.3fs",
-        n_total, len(evidence_folds), len(outer_folds), max_pool_workers,
-        ev_wall, out_wall, ev_wall + out_wall,
-        _wf_agg_timings["selection"], _wf_agg_timings["dataset_fit"],
-        _wf_agg_timings["schema"], _wf_agg_timings["edge_fit"], _wf_agg_timings["inference"],
+        n_total,
+        len(evidence_folds),
+        len(outer_folds),
+        max_pool_workers,
+        ev_wall,
+        out_wall,
+        ev_wall + out_wall,
+        _wf_agg_timings["selection"],
+        _wf_agg_timings["dataset_fit"],
+        _wf_agg_timings["schema"],
+        _wf_agg_timings["edge_fit"],
+        _wf_agg_timings["inference"],
     )
 
     # L1_PROBE_DIAG: 시장 regime code_1d(3-state)을 1회 계산해 fold 진단에 주입.
@@ -1395,9 +1461,8 @@ def run_l1_nested_swf(
                 compress_regime_codes,
                 compute_market_regime_context,
             )
-            _diag_regime_code = compress_regime_codes(
-                compute_market_regime_context(aligned=aligned).code_1d
-            )
+
+            _diag_regime_code = compress_regime_codes(compute_market_regime_context(aligned=aligned).code_1d)
         except Exception as exc:
             logger.debug("[L1-PROBE-DIAG] regime code compute failed: %s", exc)
             _diag_regime_code = None
@@ -1467,11 +1532,16 @@ def run_l1_nested_swf(
             )
         )
         _t_eval_took = time.perf_counter() - _t_eval
-        logger.log(PERF,
+        logger.log(
+            PERF,
             "[PERF] l1_outer_fold fold=%d/%d oos=[%d,%d) batch=%.4fs sel=%.4fs eval=%.4fs total=%.4fs",
-            outer_idx + 1, len(outer_folds),
-            outer_fold.oos_start, outer_fold.oos_end,
-            _t_batch_took, _t_sel_took, _t_eval_took,
+            outer_idx + 1,
+            len(outer_folds),
+            outer_fold.oos_start,
+            outer_fold.oos_end,
+            _t_batch_took,
+            _t_sel_took,
+            _t_eval_took,
             time.perf_counter() - t_fold,
         )
         del opportunities, fold_sigs, prediction_batch, outer_events
@@ -1482,21 +1552,18 @@ def run_l1_nested_swf(
     del outer_results
     gc.collect()
 
-    fold_cov = (
-        float(trained_count / len(outer_folds))
-        if outer_folds
-        else 0.0
-    )
+    fold_cov = float(trained_count / len(outer_folds)) if outer_folds else 0.0
     deployment_event_results = (
-        pd.concat(outer_event_frames, ignore_index=True)
-        if outer_event_frames
-        else pd.DataFrame()
+        pd.concat(outer_event_frames, ignore_index=True) if outer_event_frames else pd.DataFrame()
     )
     t_ev_deploy = time.perf_counter()
     _deploy_xs_admission: dict[str, XsAdmissionBasis] | None = None
     if bool(getattr(cfg, "l1_xs_alpha_admission_enabled", False)):
         _deploy_xs_diag = compute_xs_factor_spread_diagnostics(
-            realized_event_results=deployment_event_results, cfg=cfg, fold_id=-1, seed=seed,
+            realized_event_results=deployment_event_results,
+            cfg=cfg,
+            fold_id=-1,
+            seed=seed,
         )
         _deploy_xs_admission = resolve_xs_alpha_admission(_deploy_xs_diag, cfg)
     deployment_evidence = compute_symbol_strategy_evidence(
@@ -1601,9 +1668,7 @@ def run_l1_nested_swf(
             # stage6 path — no PIT mask; treat all bars as eligible
             _active = np.ones((len(aligned.datetimes), len(aligned.symbols)), dtype=np.bool_)
 
-        _ready_syms: set[str] = (
-            set(deployment_registry.ready_symbols) if deployment_registry is not None else set()
-        )
+        _ready_syms: set[str] = set(deployment_registry.ready_symbols) if deployment_registry is not None else set()
         for _col, _sym in enumerate(aligned.symbols):
             _mask_slice = _active[_l1_fit_start:_l1_fit_end, _col]  # shape: [L1_T]
             if not _mask_slice.any():
@@ -1663,12 +1728,13 @@ def _layer2_result_from_trial_eval(
     _major_incoherence = summarize_major_symbol_regime_incoherence(eval.fold_attributions)
     _major_sleeve_diag = summarize_major_symbol_sleeve_contribution(eval.fold_attributions)
     _symbols_for_veto = eval.fold_attributions[0].major_symbol_snapshots
-    _directional_veto_symbols = tuple(sorted({
-        s.symbol for fa in eval.fold_attributions for s in fa.directional_veto_snapshots
-    }))
+    _directional_veto_symbols = tuple(
+        sorted({s.symbol for fa in eval.fold_attributions for s in fa.directional_veto_snapshots})
+    )
     _directional_veto_summary = (
         summarize_directional_veto(eval.fold_attributions, symbols=_directional_veto_symbols)
-        if _directional_veto_symbols else ()
+        if _directional_veto_symbols
+        else ()
     )
     return Layer2Result(
         selected_last=frozenset(eval.last_selected_symbols),
@@ -1722,6 +1788,7 @@ def _layer2_result_from_trial_eval(
         directional_veto_summary=_directional_veto_summary,
     )
 
+
 def run_l2_awf(
     *,
     signal_batch: ValidatedSignalBatch,
@@ -1765,9 +1832,11 @@ def run_l2_awf(
             _sample_key = next(iter(eval_memo))
             _sample_cfg_ch, _sample_cache_id = _sample_key[1], _sample_key[0]
             logger.debug(
-                "[L2-MEMO-PARITY] deploy cfg_ch=%s memo_cfg_ch=%s "
-                "deploy_cache_id=%x memo_cache_id=%x",
-                cfg_ch, _sample_cfg_ch, id(cache) & 0xffffff, _sample_cache_id & 0xffffff,
+                "[L2-MEMO-PARITY] deploy cfg_ch=%s memo_cfg_ch=%s deploy_cache_id=%x memo_cache_id=%x",
+                cfg_ch,
+                _sample_cfg_ch,
+                id(cache) & 0xFFFFFF,
+                _sample_cache_id & 0xFFFFFF,
             )
         eval_result = evaluate_l2_trial_cached(
             cache=cache,
@@ -1812,9 +1881,7 @@ def run_l2_awf(
     avg_net_exposure = float(np.mean(np.abs(eval_result.all_net_exposures))) if eval_result.all_net_exposures else 0.0
     n_rebalances = eval_result.rebalance_count
     dsr_hybrid = (
-        float(override_dsr)
-        if override_dsr is not None
-        else _psr(list(_rets_h_arr), bars_per_year=bars_per_year)
+        float(override_dsr) if override_dsr is not None else _psr(list(_rets_h_arr), bars_per_year=bars_per_year)
     )
     terminal_multiple = _terminal_multiple(list(_rets_h_arr))
 
@@ -1884,10 +1951,14 @@ def run_l2_awf(
             "[L2-FINAL-DIAG] fit_CAGR_vol1=%.4f fit_MDD_vol1=%.4f | "
             "OOS_CAGR_vol1=%.4f OOS_MDD_vol1=%.4f | "
             "L*=%.4f(%s) | deployed_CAGR=%.4f deployed_MDD=%.4f",
-            _diag_fit_cagr, _diag_fit_mdd,
-            _diag_oos_cagr, _diag_oos_mdd,
-            eval_result.deploy_leverage, eval_result.deploy_binding,
-            eval_result.cagr_hybrid, eval_result.mdd_hybrid,
+            _diag_fit_cagr,
+            _diag_fit_mdd,
+            _diag_oos_cagr,
+            _diag_oos_mdd,
+            eval_result.deploy_leverage,
+            eval_result.deploy_binding,
+            eval_result.cagr_hybrid,
+            eval_result.mdd_hybrid,
         )
 
     # ── verbose fold diagnostics (eval.fold_deployed_cagrs 기반) ──
@@ -1900,46 +1971,36 @@ def run_l2_awf(
         return str(pd.Timestamp(aligned.datetimes[safe_idx]).date())
 
     l2_eval_start = _idx_to_date_label(awf_folds[0].oos_start) if awf_folds else None
-    l2_eval_end = (
-        _idx_to_date_label(max(awf_folds[-1].oos_end - 1, awf_folds[-1].oos_start))
-        if awf_folds
-        else None
-    )
+    l2_eval_end = _idx_to_date_label(max(awf_folds[-1].oos_end - 1, awf_folds[-1].oos_start)) if awf_folds else None
     awf_fold_diags = [
         {
             "fold": i + 1,
             "sharpe": (
                 float(eval_result.fold_deployed_sharpes[i])
-                if hasattr(eval_result, "fold_deployed_sharpes")
-                and i < len(eval_result.fold_deployed_sharpes)
+                if hasattr(eval_result, "fold_deployed_sharpes") and i < len(eval_result.fold_deployed_sharpes)
                 else 0.0
             ),
             "mdd": (
                 float(eval_result.fold_deployed_mdds[i])
-                if i < len(eval_result.fold_deployed_mdds)
-                and eval_result.fold_deployed_mdds[i] is not None
+                if i < len(eval_result.fold_deployed_mdds) and eval_result.fold_deployed_mdds[i] is not None
                 else float("nan")
             ),
-            "cagr": (float(eval_result.fold_deployed_cagrs[i])
-                     if i < len(eval_result.fold_deployed_cagrs)
-                     and eval_result.fold_deployed_cagrs[i] is not None
-                     else 0.0),
+            "cagr": (
+                float(eval_result.fold_deployed_cagrs[i])
+                if i < len(eval_result.fold_deployed_cagrs) and eval_result.fold_deployed_cagrs[i] is not None
+                else 0.0
+            ),
             "pass": (
-                bool(eval_result.fold_deployed_cagrs[i] is not None
-                     and eval_result.fold_deployed_cagrs[i] > 0.0)
-                if i < len(eval_result.fold_deployed_cagrs) else False
+                bool(eval_result.fold_deployed_cagrs[i] is not None and eval_result.fold_deployed_cagrs[i] > 0.0)
+                if i < len(eval_result.fold_deployed_cagrs)
+                else False
             ),
-            "symbols": (
-                eval_result.fold_selected_symbols[i]
-                if i < len(eval_result.fold_selected_symbols) else ()
-            ),
+            "symbols": (eval_result.fold_selected_symbols[i] if i < len(eval_result.fold_selected_symbols) else ()),
             "symbol_count": (
-                len(eval_result.fold_selected_symbols[i])
-                if i < len(eval_result.fold_selected_symbols) else 0
+                len(eval_result.fold_selected_symbols[i]) if i < len(eval_result.fold_selected_symbols) else 0
             ),
             "period": (
-                f"{_idx_to_date_label(fold.oos_start)} ~ "
-                f"{_idx_to_date_label(max(fold.oos_end - 1, fold.oos_start))}"
+                f"{_idx_to_date_label(fold.oos_start)} ~ {_idx_to_date_label(max(fold.oos_end - 1, fold.oos_start))}"
             ),
             "trend_efficiency": (
                 float(eval_result.fold_attributions[i].mean_trend_efficiency)
@@ -2038,6 +2099,7 @@ def run_l3_holdout(
     )
 
     from src.domain.futures.strategy.tiered_workflow.awf_sim import build_l2_simulation_cache
+
     cache = build_l2_simulation_cache(aligned, signal_batch, tf)
 
     sim = _run_awf_simulation(
@@ -2053,9 +2115,7 @@ def run_l3_holdout(
     bars_per_year = _bars_per_year_for_tf(tf)
     l_star = (
         float(deploy_leverage)
-        if deploy_leverage is not None
-        and np.isfinite(deploy_leverage)
-        and deploy_leverage > 1.0
+        if deploy_leverage is not None and np.isfinite(deploy_leverage) and deploy_leverage > 1.0
         else 1.0
     )
     unit_rets = np.asarray(sim.rets_hybrid, dtype=np.float64)
@@ -2077,9 +2137,7 @@ def run_l3_holdout(
     sortino_baseline = _sortino(sim.rets_baseline, bars_per_year=bars_per_year)
     n_trades = int(sim.trade_count)
     cvar95 = dep.cvar_95
-    avg_gross_exposure = (
-        float(np.mean(sim.all_gross_exposures)) * l_star if sim.all_gross_exposures else 0.0
-    )
+    avg_gross_exposure = float(np.mean(sim.all_gross_exposures)) * l_star if sim.all_gross_exposures else 0.0
 
     metrics_finite = all(
         np.isfinite(val)
@@ -2117,22 +2175,12 @@ def run_l3_holdout(
         gate_passed = True
 
     _attr = sim.fold_attributions[0] if sim.fold_attributions else None
-    _major_diag = (
-        summarize_major_symbol_signal_sizing((_attr,)) if _attr is not None else ()
-    )
-    _major_sleeve_diag = (
-        summarize_major_symbol_sleeve_contribution((_attr,)) if _attr is not None else ()
-    )
-    _major_incoherence = (
-        summarize_major_symbol_regime_incoherence((_attr,)) if _attr is not None else ()
-    )
-    _l3_veto_symbols = (
-        tuple(sorted({s.symbol for s in _attr.directional_veto_snapshots}))
-        if _attr is not None else ()
-    )
+    _major_diag = summarize_major_symbol_signal_sizing((_attr,)) if _attr is not None else ()
+    _major_sleeve_diag = summarize_major_symbol_sleeve_contribution((_attr,)) if _attr is not None else ()
+    _major_incoherence = summarize_major_symbol_regime_incoherence((_attr,)) if _attr is not None else ()
+    _l3_veto_symbols = tuple(sorted({s.symbol for s in _attr.directional_veto_snapshots})) if _attr is not None else ()
     _l3_veto_summary = (
-        summarize_directional_veto((_attr,), symbols=_l3_veto_symbols)
-        if _attr is not None and _l3_veto_symbols else ()
+        summarize_directional_veto((_attr,), symbols=_l3_veto_symbols) if _attr is not None and _l3_veto_symbols else ()
     )
 
     mean_trend_efficiency = _attr.mean_trend_efficiency if _attr is not None else 0.0
@@ -2231,16 +2279,25 @@ def _l2_reversal_replay_variants() -> tuple[L2ReversalReplayVariant, ...]:
         L2ReversalReplayVariant(name="balanced_010_p3", enabled=True, dd_threshold=0.10, persistence_bars=3),
         L2ReversalReplayVariant(name="current_012_p3", enabled=True, dd_threshold=0.12, persistence_bars=3),
         L2ReversalReplayVariant(
-            name="legacy_006_p1_cd4", enabled=True, dd_threshold=0.06,
-            persistence_bars=1, recovery_cooldown_bars=4,
+            name="legacy_006_p1_cd4",
+            enabled=True,
+            dd_threshold=0.06,
+            persistence_bars=1,
+            recovery_cooldown_bars=4,
         ),
         L2ReversalReplayVariant(
-            name="legacy_006_p1_cd8", enabled=True, dd_threshold=0.06,
-            persistence_bars=1, recovery_cooldown_bars=8,
+            name="legacy_006_p1_cd8",
+            enabled=True,
+            dd_threshold=0.06,
+            persistence_bars=1,
+            recovery_cooldown_bars=8,
         ),
         L2ReversalReplayVariant(
-            name="current_012_p3_cd8", enabled=True, dd_threshold=0.12,
-            persistence_bars=3, recovery_cooldown_bars=8,
+            name="current_012_p3_cd8",
+            enabled=True,
+            dd_threshold=0.12,
+            persistence_bars=3,
+            recovery_cooldown_bars=8,
         ),
     )
 
@@ -2248,8 +2305,12 @@ def _l2_reversal_replay_variants() -> tuple[L2ReversalReplayVariant, ...]:
 @contextmanager
 def _temporary_reversal_env(variant: L2ReversalReplayVariant) -> Iterator[None]:
     _saved: dict[str, str | None] = {}
-    _env_keys = ("L2_REVERSAL_KILL", "L2_REVERSAL_DD_THRESHOLD",
-                 "L2_REVERSAL_PERSISTENCE_BARS", "L2_REVERSAL_RECOVERY_COOLDOWN")
+    _env_keys = (
+        "L2_REVERSAL_KILL",
+        "L2_REVERSAL_DD_THRESHOLD",
+        "L2_REVERSAL_PERSISTENCE_BARS",
+        "L2_REVERSAL_RECOVERY_COOLDOWN",
+    )
     for _key in _env_keys:
         _saved[_key] = os.environ.get(_key)
     try:
@@ -2314,21 +2375,23 @@ def run_l3_reversal_economic_replay(
                 verbose=False,
                 deploy_leverage=deploy_leverage,
             )
-        results.append(L3ReversalReplayResult(
-            variant=variant.name,
-            dd_threshold=variant.dd_threshold,
-            persistence_bars=variant.persistence_bars,
-            recovery_cooldown_bars=variant.recovery_cooldown_bars,
-            cagr=l3.cagr,
-            mdd=l3.mdd,
-            sharpe=l3.sharpe,
-            gate_passed=l3.gate_passed,
-            blocker_reason=l3.blocker_reason,
-            risk_off_bars=l3.risk_off_bars,
-            risk_off_realized_price=l3.risk_off_realized_price,
-            risk_on_realized_price=l3.risk_on_realized_price,
-            risk_off_episodes=l3.risk_off_episodes,
-        ))
+        results.append(
+            L3ReversalReplayResult(
+                variant=variant.name,
+                dd_threshold=variant.dd_threshold,
+                persistence_bars=variant.persistence_bars,
+                recovery_cooldown_bars=variant.recovery_cooldown_bars,
+                cagr=l3.cagr,
+                mdd=l3.mdd,
+                sharpe=l3.sharpe,
+                gate_passed=l3.gate_passed,
+                blocker_reason=l3.blocker_reason,
+                risk_off_bars=l3.risk_off_bars,
+                risk_off_realized_price=l3.risk_off_realized_price,
+                risk_on_realized_price=l3.risk_on_realized_price,
+                risk_off_episodes=l3.risk_off_episodes,
+            )
+        )
     return tuple(results)
 
 
@@ -2337,6 +2400,7 @@ def _write_l3_reversal_replay_csv(
     path: Path,
 ) -> None:
     import csv
+
     rows = [
         {
             "variant": r.variant,
@@ -2478,23 +2542,17 @@ def _directional_veto_replay_adoption_verdict(
         if s.n_fired > 0
     ):
         return False, "fit_false_positive"
-    if any(
-        s.net_veto_value < -max_fit_net_value_loss
-        for s in candidate.l2_directional_veto_summary
-        if s.n_fired > 0
-    ):
+    if any(s.net_veto_value < -max_fit_net_value_loss for s in candidate.l2_directional_veto_summary if s.n_fired > 0):
         return False, "fit_net_value_negative"
     if candidate.l2_average_gross_exposure / max(baseline.l2_average_gross_exposure, 1e-9) < min_gross_ratio:
         return False, "gross_preservation"
     if candidate.l2_turnover > baseline.l2_turnover + max_turnover_delta:
         return False, "turnover_budget"
     _bl_long_loss = sum(
-        max(-v, 0.0) for sym, v in baseline.l3_realized_price_long_by_symbol
-        if sym in ("BTCUSDT", "ETHUSDT")
+        max(-v, 0.0) for sym, v in baseline.l3_realized_price_long_by_symbol if sym in ("BTCUSDT", "ETHUSDT")
     )
     _ca_long_loss = sum(
-        max(-v, 0.0) for sym, v in candidate.l3_realized_price_long_by_symbol
-        if sym in ("BTCUSDT", "ETHUSDT")
+        max(-v, 0.0) for sym, v in candidate.l3_realized_price_long_by_symbol if sym in ("BTCUSDT", "ETHUSDT")
     )
     if _ca_long_loss >= _bl_long_loss:
         return False, "major_long_loss_not_improved"
@@ -2579,7 +2637,8 @@ def run_directional_veto_economic_replay(
         _baseline_parity = True
         if variant.name == "baseline" and baseline_l2 is not None and baseline_l3 is not None:
             _l2_parity_ok = _assert_directional_veto_l2_parity(
-                replay_l2=l2, final_l2=baseline_l2,
+                replay_l2=l2,
+                final_l2=baseline_l2,
             )
             _l3_parity_ok = abs(l3.cagr - baseline_l3.cagr) < 1e-6
             _baseline_parity = _l2_parity_ok and _l3_parity_ok
@@ -2636,6 +2695,7 @@ def _write_directional_veto_replay_detail_csv(
     path: Path,
 ) -> None:
     import csv
+
     rows: list[dict[str, object]] = []
     for r in results:
         _rows = [
@@ -2673,6 +2733,7 @@ def _write_directional_veto_replay_csv(
     """[ADR_20260704_L2_DIRECTIONAL_VETO] Persist replay rows for post-run inspection."""
 
     import csv
+
     rows = [
         {
             "variant": r.variant,
@@ -2769,9 +2830,7 @@ def run_per_tf_l1(
 
     _tf_cfg = strategy_config.apply_tf_gate_overrides(cfg, tf)
     _tf_labeled = (
-        labeled_events[labeled_events["native_tf"] == tf]
-        if "native_tf" in labeled_events.columns
-        else labeled_events
+        labeled_events[labeled_events["native_tf"] == tf] if "native_tf" in labeled_events.columns else labeled_events
     )
     from src.domain.futures.strategy import tiered_workflow as _tiered_workflow
 
@@ -2802,6 +2861,7 @@ def _tf_hours(tf: str) -> float:
         TF의 시간 단위 (float). 파싱 실패 시 999.0 반환.
     """
     import re as _re
+
     m = _re.match(r"^(\d+)(h|m|d)$", tf.lower())
     if not m:
         return 999.0
@@ -2864,6 +2924,7 @@ def _resolve_l2_master_tf(
 
     if probe_manifest:
         from collections import Counter
+
         tf_counts: Counter[str] = Counter()
         for c in probe_manifest:
             if c.get("is_winner") and isinstance(tf_val := c.get("tf"), str):
@@ -2951,22 +3012,12 @@ def _aggregate_per_tf_l1(
     # artifacts_by_tf: 모든 TF artifact 보존 (multi-TF signal 예측 핵심).
     # inference_artifact: 가장 fine TF(정렬 기준 첫번째) → annualization 기준 유지.
     artifacts_by_tf: dict[str, Any] = {
-        tf: r.l1_result.inference_artifact
-        for tf, r in per_tf_l1.items()
-        if r.l1_result.inference_artifact is not None
+        tf: r.l1_result.inference_artifact for tf, r in per_tf_l1.items() if r.l1_result.inference_artifact is not None
     }
     # sorted TF 중 가장 fine(숫자 작은 시간 단위)를 base TF artifact로 선택
-    merged_artifact = (
-        artifacts_by_tf[min(artifacts_by_tf, key=lambda t: _tf_hours(t))]
-        if artifacts_by_tf
-        else None
-    )
+    merged_artifact = artifacts_by_tf[min(artifacts_by_tf, key=lambda t: _tf_hours(t))] if artifacts_by_tf else None
 
-    lifecycles = [
-        r.l1_result.symbol_lifecycle
-        for r in per_tf_l1.values()
-        if r.l1_result.symbol_lifecycle
-    ]
+    lifecycles = [r.l1_result.symbol_lifecycle for r in per_tf_l1.values() if r.l1_result.symbol_lifecycle]
     merged_lifecycle = lifecycles[0] if lifecycles else ()
 
     deployment_registry = _select_representative_l1_registry(
@@ -3042,7 +3093,6 @@ def run_tiered_pipeline(
     _is_ts = _to_utc_timestamp(window.l1_start)
     _oos_ts = _to_utc_timestamp(window.l2_start)
 
-
     # ─── Layer 1 ─────────────────────────────────────────────────────────────
     t_l1 = time.perf_counter()
     _l2_tf_resolved: str = ""
@@ -3064,13 +3114,15 @@ def run_tiered_pipeline(
             import contextlib
 
             from src.domain.futures.strategy.candidate_dataset import prime_aligned_feature_cache
+
             _mem_cache = _get_rss_mb()
             with contextlib.suppress(KeyError, TypeError, ValueError):
                 prime_aligned_feature_cache(labeled_events=labeled_events, aligned=aligned, cfg=cfg)
             _rss_now = _get_rss_mb()
             logger.debug(
                 "[MEM] stage=prime_feature_cache rss=%.0fMB delta=%+.0fMB",
-                _rss_now, _rss_now - _mem_cache,
+                _rss_now,
+                _rss_now - _mem_cache,
             )
 
         per_tf_l1: dict[str, PerTfL1Result] = {}
@@ -3078,18 +3130,16 @@ def run_tiered_pipeline(
             t_tf = time.perf_counter()
             aligned_tf = _resolve_aligned_for_tf(tf, aligned, per_tf_data_maps)
             t_aligned = time.perf_counter()
-            if (
-                aligned_tf is aligned
-                and tf_idx > 0
-                and per_tf_data_maps is not None
-                and tf not in per_tf_data_maps
-            ):
+            if aligned_tf is aligned and tf_idx > 0 and per_tf_data_maps is not None and tf not in per_tf_data_maps:
                 logger.log(PERF, "[PERF] per_tf_l1 tf=%s aligned=%.4fs skipped", tf, t_aligned - t_tf)
                 continue
 
             logger.debug(
                 "[MEM] stage=per_tf_l1_enter tf=%s rss=%.0fMB n_syms=%d n_bars=%d",
-                tf, _get_rss_mb(), len(aligned_tf.symbols), len(aligned_tf.datetimes),
+                tf,
+                _get_rss_mb(),
+                len(aligned_tf.symbols),
+                len(aligned_tf.datetimes),
             )
 
             n_bars_tf = len(aligned_tf.datetimes)
@@ -3107,6 +3157,7 @@ def run_tiered_pipeline(
             )
 
             from src.domain.futures.strategy import tiered_workflow as _tw_l1
+
             _build_l1_nested_folds: Any = _tw_l1.build_l1_nested_swf_folds
             outer_folds_tf = _build_l1_nested_folds(
                 n_bars=n_bars_tf,
@@ -3119,6 +3170,7 @@ def run_tiered_pipeline(
 
             # l2_multi_tf_enabled=True(default) → 전 TF artifact 빌드. False → 첫 TF만 빌드(구 동작).
             import os as _os_mtf
+
             _multi_tf_enabled: bool = bool(getattr(cfg, "l2_multi_tf_enabled", True))
             if _os_mtf.environ.get("L2_MULTI_TF", "") in ("0", "false", "False"):
                 _multi_tf_enabled = False
@@ -3187,19 +3239,26 @@ def run_tiered_pipeline(
     if not l1.gate_passed:
         if verbose:
             from src.domain.futures.strategy import tiered_workflow as _tw_l1_blocked
+
             _tw_l1_blocked.logger.info(">> LAYER 1: BLOCKED -> gate_passed=False")
         return (l1, None, None)
 
     # ── Lifecycle gate (Phase 3): exclude symbols whose promotion_available_at > l2_start ──
     if l1.symbol_lifecycle and window.l2_start is not None:
         import dataclasses as _dc
+
         _l2_date: date = (
-            window.l2_start if isinstance(window.l2_start, date)
-            else date(1970, 1, 1) if hasattr(window.l2_start, "_mock_self")
+            window.l2_start
+            if isinstance(window.l2_start, date)
+            else date(1970, 1, 1)
+            if hasattr(window.l2_start, "_mock_self")
             else pd.Timestamp(window.l2_start).date()
         )
-        _late = {r.symbol for r in l1.symbol_lifecycle
-                 if r.promotion_available_at is not None and r.promotion_available_at > _l2_date}
+        _late = {
+            r.symbol
+            for r in l1.symbol_lifecycle
+            if r.promotion_available_at is not None and r.promotion_available_at > _l2_date
+        }
         if _late:
             logger.info(
                 "[L1-LIFECYCLE] %d symbol(s) excluded: promotion_available_at > l2_start=%s",
@@ -3280,14 +3339,16 @@ def run_tiered_pipeline(
             ho_start_idx_l2,
         )
         cal_end = max(_l1_end_bars - 1, 1)
-        awf_folds = (WFFold(
-            fit_start=0,
-            fit_end=cal_end,
-            cal_start=max(0, cal_end - max(1, cal_end // 5)),
-            cal_end=cal_end,
-            oos_start=_l1_end_bars,
-            oos_end=ho_start_idx_l2,
-        ),)
+        awf_folds = (
+            WFFold(
+                fit_start=0,
+                fit_end=cal_end,
+                cal_start=max(0, cal_end - max(1, cal_end // 5)),
+                cal_end=cal_end,
+                oos_start=_l1_end_bars,
+                oos_end=ho_start_idx_l2,
+            ),
+        )
     logger.debug(
         "[L2] AWF window: L2_start_bar=%d ho_start_bar=%d n_folds=%d",
         _l1_end_bars,
@@ -3305,8 +3366,7 @@ def run_tiered_pipeline(
     if _l2_intra_symbol_divergence_env not in ("", "0", "false", "False"):
         l2_config = dataclasses.replace(l2_config, l2_intra_symbol_divergence_enabled=True)
     logger.debug(
-        "[L2-CONFIG] l2_min_sharpe_uplift=%.2f l2_cs_amp_enabled=%s "
-        "l2_cs_amp_alpha=%.1f l2_cs_amp_mode=%s",
+        "[L2-CONFIG] l2_min_sharpe_uplift=%.2f l2_cs_amp_enabled=%s l2_cs_amp_alpha=%.1f l2_cs_amp_mode=%s",
         l2_config.l2_min_sharpe_uplift,
         l2_config.l2_cs_amp_enabled,
         l2_config.l2_cs_amp_alpha,
@@ -3343,9 +3403,7 @@ def run_tiered_pipeline(
     )
     # champion L* SSOT 전달: selection이 l2_params에 기록한 값 재사용 → recalibrate drift 0 보장
     _raw_l_star = l2_params.get("l2_deploy_leverage")
-    _champion_l_star: float | None = (
-        float(_raw_l_star) if isinstance(_raw_l_star, (int, float)) else None
-    )
+    _champion_l_star: float | None = float(_raw_l_star) if isinstance(_raw_l_star, (int, float)) else None
     l2 = run_l2_awf(
         signal_batch=l2_signal_batch,
         aligned=aligned,
@@ -3421,6 +3479,7 @@ def run_tiered_pipeline(
                 run_major_symbol_registry_replay,
                 write_major_symbol_registry_replay_csv,
             )
+
             _major_replay_seed = int(getattr(cfg, "seed", 42))
             _major_replay_results = run_major_symbol_registry_replay(
                 seed=_major_replay_seed,
@@ -3592,6 +3651,7 @@ def run_tiered_pipeline(
     _l2_regime_directional_veto_replay = os.environ.get("L2_REGIME_DIRECTIONAL_VETO_REPLAY", "")
     if _l2_regime_directional_veto_replay not in ("", "0", "false", "False"):
         import gc as _gc_veto
+
         _veto_replay_deploy_leverage: float | None = (
             _champion_l_star if (_champion_l_star is not None and _champion_l_star > 1.0) else None
         )
@@ -3621,5 +3681,5 @@ def run_tiered_pipeline(
         _gc_veto.collect()
 
     if verbose:
-        logger.info("\n" + "="*80)
+        logger.info("\n" + "=" * 80)
     return (l1, l2, l3)

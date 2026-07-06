@@ -1,4 +1,5 @@
 """signal_batch_convert 벡터화 등가성·gate·경계·relaxed 모드 검증."""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -124,10 +125,12 @@ def test_signal_batch_returns_only_registry_matched_events() -> None:
         sides=[1, 1, -1],
         gross_bps=[15.0, 12.0, 8.0],
     )
-    registry = _make_registry([
-        ("BTCUSDT", "trend:v1", "C1", 0.80),  # C1만 등록, C2 미등록
-        ("ETHUSDT", "mom:v2", "C1", 0.60),
-    ])
+    registry = _make_registry(
+        [
+            ("BTCUSDT", "trend:v1", "C1", 0.80),  # C1만 등록, C2 미등록
+            ("ETHUSDT", "mom:v2", "C1", 0.60),
+        ]
+    )
 
     # Act
     result = _call(model_output, registry)
@@ -255,10 +258,12 @@ def test_signal_batch_floor_filters_low_gross() -> None:
         sides=[1, 1],
         gross_bps=[5.0, 20.0],
     )
-    registry = _make_registry([
-        ("BTCUSDT", "trend:v1", "C1", 0.8),
-        ("ETHUSDT", "trend:v1", "C1", 0.7),
-    ])
+    registry = _make_registry(
+        [
+            ("BTCUSDT", "trend:v1", "C1", 0.8),
+            ("ETHUSDT", "trend:v1", "C1", 0.7),
+        ]
+    )
 
     # Act — floor=10.0 → 5.0 는 제외
     result = _call(model_output, registry, floor=10.0)
@@ -283,9 +288,11 @@ def test_signal_batch_relaxed_mode_collapses_activation_context() -> None:
         gross_bps=[15.0, 12.0],
     )
     # relaxed mode: source_keys_relaxed = {(symbol, strategy_id)} — actx 무관
-    registry = _make_registry([
-        ("BTCUSDT", "trend:v1", "all", 0.70),  # registry actx="all"
-    ])
+    registry = _make_registry(
+        [
+            ("BTCUSDT", "trend:v1", "all", 0.70),  # registry actx="all"
+        ]
+    )
 
     # Act — cfg.l1_activation_match_regime=False
     cfg = SimpleNamespace(l1_activation_match_regime=False)

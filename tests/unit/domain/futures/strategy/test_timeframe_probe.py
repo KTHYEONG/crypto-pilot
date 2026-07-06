@@ -302,9 +302,7 @@ class TestBhFdr:
         n_rejected = int(np.sum(discoveries))
         rejection_rate = n_rejected / n_cells
         # BH controls FDR at q; under null, rejection rate <= alpha ≈ q
-        assert rejection_rate <= fdr_q + 0.05, (
-            f"Rejection rate {rejection_rate:.3f} exceeds fdr_q={fdr_q} by >5%"
-        )
+        assert rejection_rate <= fdr_q + 0.05, f"Rejection rate {rejection_rate:.3f} exceeds fdr_q={fdr_q} by >5%"
 
     def test_all_significant_p_values_all_rejected(self) -> None:
         """All p-values near zero => all rejected."""
@@ -428,14 +426,10 @@ class TestSelectTfFamilyCellsBva:
     def test_fold_consistency_below_threshold_excluded(self) -> None:
         """Cell with fold_consistency < min threshold is excluded."""
         # Arrange
-        cell = _make_cell(
-            ic_tstat_hac=3.0, passed_fdr=True, ic_fold_sign_consistency=0.74
-        )
+        cell = _make_cell(ic_tstat_hac=3.0, passed_fdr=True, ic_fold_sign_consistency=0.74)
         manifest = self._make_manifest([cell])
         # Act
-        result = select_tf_family_cells(
-            manifest, min_ic_tstat=2.0, require_fdr=True, min_fold_sign_consistency=0.75
-        )
+        result = select_tf_family_cells(manifest, min_ic_tstat=2.0, require_fdr=True, min_fold_sign_consistency=0.75)
         # Assert
         assert len(result) == 0
 
@@ -445,9 +439,7 @@ class TestSelectTfFamilyCellsBva:
         cell = _make_cell(ic_tstat_hac=3.0, passed_fdr=True, net_edge_bps=-0.1)
         manifest = self._make_manifest([cell])
         # Act
-        result = select_tf_family_cells(
-            manifest, min_ic_tstat=2.0, require_fdr=True, min_net_edge_bps=0.0
-        )
+        result = select_tf_family_cells(manifest, min_ic_tstat=2.0, require_fdr=True, min_net_edge_bps=0.0)
         # Assert
         assert len(result) == 0
 
@@ -590,9 +582,7 @@ class TestFoldIcValues:
         mid_ts = idx[n // 2]
 
         # Act: no exception
-        ic_vals = _fold_ic_values(
-            signal, fwd, valid_mask, fold_boundaries=[mid_ts], datetimes=datetimes
-        )
+        ic_vals = _fold_ic_values(signal, fwd, valid_mask, fold_boundaries=[mid_ts], datetimes=datetimes)
 
         # Assert: returns array (possibly empty if folds too small)
         assert isinstance(ic_vals, np.ndarray)
@@ -651,9 +641,7 @@ class TestComputeNetEdgeBps:
 class TestProbeWorkerNormalization:
     """Unit tests for _probe_tf_worker normalized panel construction."""
 
-    def test_probe_tf_worker_enables_normalized_time_horizon(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_probe_tf_worker_enables_normalized_time_horizon(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Worker must opt into normalized 4h wall-clock horizons."""
         captured: dict[str, object] = {}
         aligned = type(
@@ -734,8 +722,7 @@ class TestResampleOhlcv:
         close = 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.005, n)))
         idx = pd.date_range("2023-01-01", periods=n, freq="1h")
         df_1h = pd.DataFrame(
-            {"open": close, "high": close * 1.001, "low": close * 0.999,
-             "close": close, "volume": np.ones(n) * 1000.0},
+            {"open": close, "high": close * 1.001, "low": close * 0.999, "close": close, "volume": np.ones(n) * 1000.0},
             index=idx,
         )
 
@@ -938,8 +925,7 @@ class TestProbeTimeframeAlphaIntegration:
         syms = self._SYMBOLS
         tfs = self._TF_GRID
         return {
-            sym: {tf: _make_ohlcv_df(500, freq=tf, seed=i * 10 + j)
-                  for j, tf in enumerate(tfs)}
+            sym: {tf: _make_ohlcv_df(500, freq=tf, seed=i * 10 + j) for j, tf in enumerate(tfs)}
             for i, sym in enumerate(syms)
         }
 
@@ -1026,9 +1012,7 @@ class TestProbeTimeframeAlphaIntegration:
         assert manifest.coverage_by_tf["4h"] > 0
         assert len(manifest.cells) > 0
 
-    def test_s1_rangeindex_resample_to_higher_tf_keeps_data_available(
-        self, base_cfg: object
-    ) -> None:
+    def test_s1_rangeindex_resample_to_higher_tf_keeps_data_available(self, base_cfg: object) -> None:
         """RangeIndex + datetime column must still resample to a higher tf."""
         import unittest.mock as _mock
         from concurrent.futures import ThreadPoolExecutor
@@ -1095,9 +1079,7 @@ class TestProbeTimeframeAlphaIntegration:
         expected_fwd_0 = close[1 + h_bars] / close[1] - 1.0
         assert fwd_correct[0] == pytest.approx(expected_fwd_0, rel=1e-9)
 
-    def test_s3_all_nan_fwd_returns_no_exception(
-        self, base_cfg: object
-    ) -> None:
+    def test_s3_all_nan_fwd_returns_no_exception(self, base_cfg: object) -> None:
         """S3: Very short series yields all-NaN fwd returns; probe returns manifest
         without raising, with ic_mean=0 for cells with n_events < _MIN_IC_OBS."""
         import unittest.mock as _mock
@@ -1111,8 +1093,7 @@ class TestProbeTimeframeAlphaIntegration:
         # Arrange: short OHLCV — fewer than _MIN_IC_OBS + h_hold bars
         short_n = max(5, _MIN_IC_OBS - 5)
         short_data_maps = {
-            sym: {"4h": _make_ohlcv_df(short_n, freq="4h", seed=i)}
-            for i, sym in enumerate(self._SYMBOLS)
+            sym: {"4h": _make_ohlcv_df(short_n, freq="4h", seed=i)} for i, sym in enumerate(self._SYMBOLS)
         }
 
         # Worker returns cells with n_events < _MIN_IC_OBS (ic_mean=0 path)
@@ -1163,10 +1144,7 @@ class TestProbeTimeframeAlphaIntegration:
         def _strong_worker(args: tuple[object, ...]) -> list[dict[str, object]]:
             tf = str(args[2])
             return [
-                _make_synthetic_cell_dict(
-                    sym, tf, ic_mean=0.15, ic_tstat_hac=4.0, n_obs=500
-                )
-                for sym in self._SYMBOLS
+                _make_synthetic_cell_dict(sym, tf, ic_mean=0.15, ic_tstat_hac=4.0, n_obs=500) for sym in self._SYMBOLS
             ]
 
         with (
@@ -1223,14 +1201,8 @@ class TestTimeframeProbeFixes:
         base_cfg = CandidateStrategyConfig(timeframe="4h")
 
         # 10 cells in '1h' (high tstat) and 10 cells in '12h' (0 tstat)
-        cells_1h = [
-            _make_synthetic_cell_dict(f"SYM{i}", "1h", ic_mean=0.1, ic_tstat_hac=4.0)
-            for i in range(10)
-        ]
-        cells_12h = [
-            _make_synthetic_cell_dict(f"SYM{i}", "12h", ic_mean=0.0, ic_tstat_hac=0.0)
-            for i in range(10)
-        ]
+        cells_1h = [_make_synthetic_cell_dict(f"SYM{i}", "1h", ic_mean=0.1, ic_tstat_hac=4.0) for i in range(10)]
+        cells_12h = [_make_synthetic_cell_dict(f"SYM{i}", "12h", ic_mean=0.0, ic_tstat_hac=0.0) for i in range(10)]
 
         def _mock_worker(args: tuple[object, ...]) -> list[dict[str, object]]:
             tf = str(args[2])
@@ -1294,14 +1266,16 @@ class TestTimeframeProbeFixes:
         # 50 bars of data
         n_bars = 50
         close = np.linspace(100.0, 150.0, n_bars)
-        df = pd.DataFrame({
-            "open": close,
-            "high": close * 1.01,
-            "low": close * 0.99,
-            "close": close,
-            "volume": np.ones(n_bars) * 1000.0,
-            "datetime": pd.date_range("2023-01-01", periods=n_bars, freq="12h", tz="UTC")
-        })
+        df = pd.DataFrame(
+            {
+                "open": close,
+                "high": close * 1.01,
+                "low": close * 0.99,
+                "close": close,
+                "volume": np.ones(n_bars) * 1000.0,
+                "datetime": pd.date_range("2023-01-01", periods=n_bars, freq="12h", tz="UTC"),
+            }
+        )
 
         resampled_maps = {"BTCUSDT": df}
         base_cfg_kwargs = {"timeframe": "12h"}
@@ -1391,21 +1365,14 @@ class TestTimeframeProbeFixes:
         base_cfg = CandidateStrategyConfig(timeframe="4h")
 
         # 5 tested cells with strong t-stats and 100 untested cells with 0.0 t-stats
-        cells_1h = [
-            _make_synthetic_cell_dict(f"SYM{i}", "1h", ic_mean=0.1, ic_tstat_hac=3.0)
-            for i in range(5)
-        ] + [
-            _make_synthetic_cell_dict(f"SYM{i+5}", "1h", ic_mean=0.0, ic_tstat_hac=0.0)
-            for i in range(100)
+        cells_1h = [_make_synthetic_cell_dict(f"SYM{i}", "1h", ic_mean=0.1, ic_tstat_hac=3.0) for i in range(5)] + [
+            _make_synthetic_cell_dict(f"SYM{i + 5}", "1h", ic_mean=0.0, ic_tstat_hac=0.0) for i in range(100)
         ]
 
         def _mock_worker(args: tuple[object, ...]) -> list[dict[str, object]]:
             return cells_1h
 
-        data_maps = {
-            f"SYM{i}": {"1h": _make_ohlcv_df(100, freq="1h", seed=i)}
-            for i in range(105)
-        }
+        data_maps = {f"SYM{i}": {"1h": _make_ohlcv_df(100, freq="1h", seed=i)} for i in range(105)}
 
         with (
             _mock.patch(
@@ -1519,15 +1486,17 @@ class TestTimeframeProbeFixes:
 def test_resample_ohlcv_preserves_bool_metadata() -> None:
     from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
 
-    df = pd.DataFrame({
-        "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
-        "open": [100.0, 101.0, 102.0, 103.0],
-        "high": [101.0, 102.0, 103.0, 104.0],
-        "low": [99.0, 100.0, 101.0, 102.0],
-        "close": [101.0, 102.0, 103.0, 104.0],
-        "volume": [1000.0, 1100.0, 1200.0, 1300.0],
-        "universe_entry_warm_mask": [True, False, True, False],
-    })
+    df = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
+            "open": [100.0, 101.0, 102.0, 103.0],
+            "high": [101.0, 102.0, 103.0, 104.0],
+            "low": [99.0, 100.0, 101.0, 102.0],
+            "close": [101.0, 102.0, 103.0, 104.0],
+            "volume": [1000.0, 1100.0, 1200.0, 1300.0],
+            "universe_entry_warm_mask": [True, False, True, False],
+        }
+    )
 
     result = _resample_ohlcv(df, "2h")
 
@@ -1540,15 +1509,17 @@ def test_resample_ohlcv_preserves_bool_metadata() -> None:
 def test_resample_ohlcv_preserves_float_metadata() -> None:
     from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
 
-    df = pd.DataFrame({
-        "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
-        "open": [100.0, 101.0, 102.0, 103.0],
-        "high": [101.0, 102.0, 103.0, 104.0],
-        "low": [99.0, 100.0, 101.0, 102.0],
-        "close": [101.0, 102.0, 103.0, 104.0],
-        "volume": [1000.0, 1100.0, 1200.0, 1300.0],
-        "cluster_id": [1.0, 2.0, 3.0, 4.0],
-    })
+    df = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
+            "open": [100.0, 101.0, 102.0, 103.0],
+            "high": [101.0, 102.0, 103.0, 104.0],
+            "low": [99.0, 100.0, 101.0, 102.0],
+            "close": [101.0, 102.0, 103.0, 104.0],
+            "volume": [1000.0, 1100.0, 1200.0, 1300.0],
+            "cluster_id": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
 
     result = _resample_ohlcv(df, "2h")
 
@@ -1562,14 +1533,16 @@ def test_resample_ohlcv_preserves_float_metadata() -> None:
 def test_resample_ohlcv_no_metadata_unchanged() -> None:
     from src.domain.futures.strategy.timeframe_probe import _resample_ohlcv
 
-    df = pd.DataFrame({
-        "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
-        "open": [100.0, 101.0, 102.0, 103.0],
-        "high": [101.0, 102.0, 103.0, 104.0],
-        "low": [99.0, 100.0, 101.0, 102.0],
-        "close": [101.0, 102.0, 103.0, 104.0],
-        "volume": [1000.0, 1100.0, 1200.0, 1300.0],
-    })
+    df = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
+            "open": [100.0, 101.0, 102.0, 103.0],
+            "high": [101.0, 102.0, 103.0, 104.0],
+            "low": [99.0, 100.0, 101.0, 102.0],
+            "close": [101.0, 102.0, 103.0, 104.0],
+            "volume": [1000.0, 1100.0, 1200.0, 1300.0],
+        }
+    )
 
     result = _resample_ohlcv(df, "2h")
 
@@ -1580,16 +1553,18 @@ def test_resample_ohlcv_no_metadata_unchanged() -> None:
 def test_resample_probe_source_frame_preserves_metadata() -> None:
     from src.domain.futures.strategy_runtime.bridge import _resample_probe_source_frame
 
-    df = pd.DataFrame({
-        "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
-        "open": [100.0, 101.0, 102.0, 103.0],
-        "high": [101.0, 102.0, 103.0, 104.0],
-        "low": [99.0, 100.0, 101.0, 102.0],
-        "close": [101.0, 102.0, 103.0, 104.0],
-        "volume": [1000.0, 1100.0, 1200.0, 1300.0],
-        "universe_entry_warm_mask": [True, False, True, False],
-        "cluster_id": [1.0, 2.0, 3.0, 4.0],
-    })
+    df = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2026-01-01", periods=4, freq="1h", tz="UTC"),
+            "open": [100.0, 101.0, 102.0, 103.0],
+            "high": [101.0, 102.0, 103.0, 104.0],
+            "low": [99.0, 100.0, 101.0, 102.0],
+            "close": [101.0, 102.0, 103.0, 104.0],
+            "volume": [1000.0, 1100.0, 1200.0, 1300.0],
+            "universe_entry_warm_mask": [True, False, True, False],
+            "cluster_id": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
 
     result = _resample_probe_source_frame(df, target_tf="2h")
 
@@ -1617,7 +1592,14 @@ def test_net_edge_bps_holding_bars_default_one() -> None:
     cost = 6.0
 
     net_bps, _ = _compute_net_edge_bps(
-        signal, fwd, valid, to, cost, "4h", min_obs=10, holding_bars=1,
+        signal,
+        fwd,
+        valid,
+        to,
+        cost,
+        "4h",
+        min_obs=10,
+        holding_bars=1,
     )
 
     expected_gross = 10.0  # 0.001 * 1e4 = 10 bps
@@ -1636,7 +1618,14 @@ def test_net_edge_bps_holding_bars_three() -> None:
     cost = 6.0
 
     net_bps, _ = _compute_net_edge_bps(
-        signal, fwd, valid, to, cost, "4h", min_obs=10, holding_bars=3,
+        signal,
+        fwd,
+        valid,
+        to,
+        cost,
+        "4h",
+        min_obs=10,
+        holding_bars=3,
     )
 
     expected_gross = 10.0
@@ -1653,7 +1642,14 @@ def test_net_edge_bps_below_min_obs() -> None:
     to = np.ones(5, dtype=np.float64) * 0.05
 
     net_bps, turnover_yr = _compute_net_edge_bps(
-        signal, fwd, valid, to, 6.0, "4h", min_obs=10, holding_bars=3,
+        signal,
+        fwd,
+        valid,
+        to,
+        6.0,
+        "4h",
+        min_obs=10,
+        holding_bars=3,
     )
 
     assert net_bps == 0.0
@@ -1666,32 +1662,49 @@ def test_select_tf_family_cells_debug_logging(caplog: pytest.LogCaptureFixture) 
     from src.domain.futures.strategy.timeframe_probe import TfCellEvidence, TfProbeManifest, select_tf_family_cells
 
     cell_fail = TfCellEvidence(
-        symbol="SYM1", family="fam1", variant="v1", archetype="trend", tf="1h",
-        n_obs=100, n_events=50, ic_mean=0.01, ic_tstat_hac=1.0,
-        ic_fold_sign_consistency=0.5, alpha_half_life_h=4.0, net_edge_bps=-1.0,
-        turnover_per_year=10.0, vr_label="flat", hurst=0.5, passed_fdr=False
+        symbol="SYM1",
+        family="fam1",
+        variant="v1",
+        archetype="trend",
+        tf="1h",
+        n_obs=100,
+        n_events=50,
+        ic_mean=0.01,
+        ic_tstat_hac=1.0,
+        ic_fold_sign_consistency=0.5,
+        alpha_half_life_h=4.0,
+        net_edge_bps=-1.0,
+        turnover_per_year=10.0,
+        vr_label="flat",
+        hurst=0.5,
+        passed_fdr=False,
     )
     cell_pass = TfCellEvidence(
-        symbol="SYM2", family="fam2", variant="v2", archetype="trend", tf="1h",
-        n_obs=1000, n_events=800, ic_mean=0.05, ic_tstat_hac=3.0,
-        ic_fold_sign_consistency=0.8, alpha_half_life_h=4.0, net_edge_bps=5.0,
-        turnover_per_year=10.0, vr_label="trend", hurst=0.6, passed_fdr=True
+        symbol="SYM2",
+        family="fam2",
+        variant="v2",
+        archetype="trend",
+        tf="1h",
+        n_obs=1000,
+        n_events=800,
+        ic_mean=0.05,
+        ic_tstat_hac=3.0,
+        ic_fold_sign_consistency=0.8,
+        alpha_half_life_h=4.0,
+        net_edge_bps=5.0,
+        turnover_per_year=10.0,
+        vr_label="trend",
+        hurst=0.6,
+        passed_fdr=True,
     )
 
     manifest = TfProbeManifest(
-        cells=(cell_fail, cell_pass),
-        tf_grid=("1h",),
-        coverage_by_tf={"1h": 1000},
-        diversity_corr={}
+        cells=(cell_fail, cell_pass), tf_grid=("1h",), coverage_by_tf={"1h": 1000}, diversity_corr={}
     )
 
     with caplog.at_level(logging.DEBUG):
         selected = select_tf_family_cells(
-            manifest,
-            min_ic_tstat=2.0,
-            require_fdr=True,
-            min_net_edge_bps=0.0,
-            min_fold_sign_consistency=0.75
+            manifest, min_ic_tstat=2.0, require_fdr=True, min_net_edge_bps=0.0, min_fold_sign_consistency=0.75
         )
 
     assert len(selected) == 1
@@ -1715,7 +1728,3 @@ def test_apply_tf_gate_overrides_default_fallback() -> None:
     assert cfg_1h.l1_min_sym_count == 4
     assert cfg_1h.l1_min_fold_ratio == 0.40
     assert cfg_1h.l1_min_realized_match_ratio == 0.80
-
-
-
-

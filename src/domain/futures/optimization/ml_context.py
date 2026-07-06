@@ -355,9 +355,7 @@ def _fit_oos_platt_calibrators_from_maps(
     widen = bool(OPT_FUTURES_CONFIG.get("FUTURES_CALIB_PLATT_OOS_WIDEN_TO_POOL", True))
     pool = int(oos_pool_start) if oos_pool_start is not None else lo
 
-    def _collect(
-        a0: int, a1: int
-    ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+    def _collect(a0: int, a1: int) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
         al, rl, ash, rsh = [], [], [], []
         for sym in symbols:
             if sym not in data_maps or tf not in data_maps[sym]:
@@ -474,11 +472,7 @@ def _build_prebuilt_full_arrays(
             if "volume" in raw_full.columns
             else np.ones(len(raw_full))
         )
-        _atr_col = (
-            raw_full["atr"].to_numpy(dtype=np.float64, copy=False)
-            if "atr" in raw_full.columns
-            else None
-        )
+        _atr_col = raw_full["atr"].to_numpy(dtype=np.float64, copy=False) if "atr" in raw_full.columns else None
         if _atr_col is None or not np.any(_atr_col > 0):
             _atr_period_fb = int(OPT_FUTURES_CONFIG.get("FUTURES_ATR_PERIOD_FIXED", 30))
             _atr_col = compute_atr_numpy(
@@ -499,9 +493,7 @@ def _build_prebuilt_full_arrays(
         )
 
         if "funding_rate_sum" in raw_full.columns:
-            trimmed_sig["funding_rate_sum"] = raw_full["funding_rate_sum"].to_numpy(
-                dtype=np.float64, copy=False
-            )
+            trimmed_sig["funding_rate_sum"] = raw_full["funding_rate_sum"].to_numpy(dtype=np.float64, copy=False)
         if "execution_cost_bps" in raw_full.columns:
             trimmed_sig["execution_cost_bps"] = raw_full["execution_cost_bps"].to_numpy(
                 dtype=np.float64,
@@ -552,9 +544,9 @@ def _build_prebuilt_full_arrays(
         _ = calibrator_short
 
         gp_centered = gp_base - 0.5
-        trimmed_sig["trend_direction"] = np.where(
-            np.abs(gp_centered) > 0.01, np.sign(gp_centered), 0.0
-        ).astype(np.float64)
+        trimmed_sig["trend_direction"] = np.where(np.abs(gp_centered) > 0.01, np.sign(gp_centered), 0.0).astype(
+            np.float64
+        )
         trimmed_sig["entry_upper"] = 0.0
         trimmed_sig["entry_lower"] = 999999.0
         _xs_cols = (
@@ -630,22 +622,14 @@ def _attach_execution_cost_bps_2d(
             else None
         )
         cfg = CostModelConfig(
-            taker_fee_bps=float(
-                OPT_FUTURES_CONFIG.get("FUTURES_COST_TAKER_FEE_BPS", TAKER_FEE_BPS)
-            ),
-            latency_buffer_bps=float(
-                OPT_FUTURES_CONFIG.get("FUTURES_COST_LATENCY_BUFFER_BPS", 0.5)
-            ),
+            taker_fee_bps=float(OPT_FUTURES_CONFIG.get("FUTURES_COST_TAKER_FEE_BPS", TAKER_FEE_BPS)),
+            latency_buffer_bps=float(OPT_FUTURES_CONFIG.get("FUTURES_COST_LATENCY_BUFFER_BPS", 0.5)),
             impact_coef=float(OPT_FUTURES_CONFIG.get("FUTURES_COST_IMPACT_COEF", 0.5)),
             vol_buffer_coef=float(OPT_FUTURES_CONFIG.get("FUTURES_COST_VOL_BUFFER_COEF", 0.0)),
-            funding_event_buffer_bps=float(
-                OPT_FUTURES_CONFIG.get("FUTURES_COST_FUNDING_EVENT_BUFFER_BPS", 0.0)
-            ),
+            funding_event_buffer_bps=float(OPT_FUTURES_CONFIG.get("FUTURES_COST_FUNDING_EVENT_BUFFER_BPS", 0.0)),
             adv_lookback=int(OPT_FUTURES_CONFIG.get("FUTURES_COST_ADV_LOOKBACK", 30)),
             vol_lookback=int(OPT_FUTURES_CONFIG.get("FUTURES_COST_VOL_LOOKBACK", 20)),
-            estimated_order_notional=float(
-                OPT_FUTURES_CONFIG.get("FUTURES_COST_ORDER_NOTIONAL_USDT", 0.0)
-            ),
+            estimated_order_notional=float(OPT_FUTURES_CONFIG.get("FUTURES_COST_ORDER_NOTIONAL_USDT", 0.0)),
             uncertainty_ratio=float(OPT_FUTURES_CONFIG.get("FUTURES_COST_UNCERTAINTY_RATIO", 0.1)),
             enable_dynamic_components=True,
         )
@@ -786,18 +770,11 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "LEVERAGE": int(lev),
         "BETA_ALPHA": float(ml.get("BETA_ALPHA", cfg.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))),
         "EV_HURDLE_BPS": float(ml.get("EV_HURDLE_BPS", default_ev_hurdle_bps(cfg))),
-        "SLIPPAGE_BPS_BUFFER_MULT": float(
-            ml.get("SLIPPAGE_BPS_BUFFER_MULT", cfg.get("SLIPPAGE_BPS_BUFFER_MULT", 1.0))
-        ),
-        "TIME_BARRIER_H": float(
-            ml.get("TIME_BARRIER_H", cfg.get("FUTURES_DEFAULT_TIME_BARRIER_H", 0.0))
-        ),
-        "PORTFOLIO_KAPPA": float(
-            ml.get("PORTFOLIO_KAPPA", cfg.get("FUTURES_PORTFOLIO_KAPPA", 0.35))
-        ),
+        "SLIPPAGE_BPS_BUFFER_MULT": float(ml.get("SLIPPAGE_BPS_BUFFER_MULT", cfg.get("SLIPPAGE_BPS_BUFFER_MULT", 1.0))),
+        "TIME_BARRIER_H": float(ml.get("TIME_BARRIER_H", cfg.get("FUTURES_DEFAULT_TIME_BARRIER_H", 0.0))),
+        "PORTFOLIO_KAPPA": float(ml.get("PORTFOLIO_KAPPA", cfg.get("FUTURES_PORTFOLIO_KAPPA", 0.35))),
         "FUTURES_EXECUTION_MODE": str(
-            ml.get("FUTURES_EXECUTION_MODE")
-            or OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE", "coarse")
+            ml.get("FUTURES_EXECUTION_MODE") or OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE", "coarse")
         ),
         "STRATEGY_MODE": bool(ml.get("STRATEGY_MODE", False)),
     }
@@ -843,9 +820,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             if sym in ctx.data_maps and ctx.tf in ctx.data_maps[sym]:
                 start_idx = alignment_info["alignment_offsets"][sym]
                 close_2d_full[:, s_idx] = (
-                    ctx.data_maps[sym][ctx.tf]["close"]
-                    .iloc[start_idx : start_idx + eff_len]
-                    .to_numpy(dtype=np.float64)
+                    ctx.data_maps[sym][ctx.tf]["close"].iloc[start_idx : start_idx + eff_len].to_numpy(dtype=np.float64)
                 )
         t_cov = time.perf_counter()
         sigma_3d_full = precompute_rolling_covariances(close_2d_full, lookback)
@@ -970,12 +945,8 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                                 _as_nz2_slice_list.append(float((_as2_slice != 0).mean()))
                     _al_nz2 = float(np.mean(_al_nz2_list)) if _al_nz2_list else 0.0
                     _as_nz2 = float(np.mean(_as_nz2_list)) if _as_nz2_list else 0.0
-                    _al_nz2_slice = (
-                        float(np.mean(_al_nz2_slice_list)) if _al_nz2_slice_list else 0.0
-                    )
-                    _as_nz2_slice = (
-                        float(np.mean(_as_nz2_slice_list)) if _as_nz2_slice_list else 0.0
-                    )
+                    _al_nz2_slice = float(np.mean(_al_nz2_slice_list)) if _al_nz2_slice_list else 0.0
+                    _as_nz2_slice = float(np.mean(_as_nz2_slice_list)) if _as_nz2_slice_list else 0.0
                     _logger.debug(
                         "[ALPHA-ALIGN] leg=%d range=[%d,%d) bars=%d "
                         "full_long_nz=%.3f full_short_nz=%.3f "

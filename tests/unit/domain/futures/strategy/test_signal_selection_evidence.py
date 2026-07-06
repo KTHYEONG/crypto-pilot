@@ -1,6 +1,7 @@
 """Tests for adaptive t-statistic thresholding, MDES filter, and
 activation floor boundary checks in signal selection.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -75,6 +76,7 @@ def _make_event_frame(
 
 # ─── Scenario 1: Insufficient Effective Obs ───────────────────────────────
 
+
 def test_insufficient_effective_obs_rejection() -> None:
     """If effective_n < l1_pair_min_effective_obs, reject with insufficient_effective_obs."""
     # Given: effective_obs = 3, but threshold is 5.0
@@ -96,6 +98,7 @@ def test_insufficient_effective_obs_rejection() -> None:
 
 
 # ─── Scenario 2: Adaptive t-statistic and MDES Filtering ──────────────────
+
 
 def test_adaptive_tstat_and_mdes_filtering() -> None:
     """Verify adaptive t-threshold and MDES filtering."""
@@ -141,25 +144,28 @@ def test_adaptive_tstat_and_mdes_filtering() -> None:
 
 # ─── Scenario 3 & 4: Activation Floor Boundary Condition and Zero-Prediction Fallback ─
 
+
 def test_candidate_output_to_signal_batch_zero_bps_retained() -> None:
     """Verify that pred == 0.0 is not discarded when activation_floor_bps == 0.0 (Strict comparison <)."""
     # Arrange
-    events = pd.DataFrame([
-        {
-            "entry_idx": 1,
-            "symbol": "BTCUSDT",
-            "family": "trend",
-            "variant": "fast",
-            "entry_regime": "bull",
-            "side": 1,
-            "expected_holding_bars": 3,
-        }
-    ])
+    events = pd.DataFrame(
+        [
+            {
+                "entry_idx": 1,
+                "symbol": "BTCUSDT",
+                "family": "trend",
+                "variant": "fast",
+                "entry_regime": "bull",
+                "side": 1,
+                "expected_holding_bars": 3,
+            }
+        ]
+    )
     model_output = CandidateModelOutput(
         events=events,
         p_pass=np.asarray([1.0], dtype=np.float64),
         edge_source=EdgeSource.PRIOR_ONLY,
-        expected_gross_bps=np.asarray([0.0], dtype=np.float64), # 0.0 prediction
+        expected_gross_bps=np.asarray([0.0], dtype=np.float64),  # 0.0 prediction
         q10_gross_bps=np.asarray([-2.0], dtype=np.float64),
         q90_gross_bps=np.asarray([2.0], dtype=np.float64),
     )
@@ -257,38 +263,41 @@ def test_build_qualified_signal_registry_prefers_quality_weight_over_input_order
 # P3: Adaptive Evidence Gate (snapshot_index)
 # ---------------------------------------------------------------------------
 
+
 def _make_event_frame_3events() -> pd.DataFrame:
     """Return a 3-row event DataFrame with 1 fold, effective_n ≈ 3.0.
 
     Uses the same columns as the existing `_make_event_frame` helper (no exit_idx
     so maturity filter is skipped). entry_idx is included for bootstrap grouping.
     """
-    return pd.DataFrame({
-        "symbol": ["BTCUSDT"] * 3,
-        "family": ["trend_ma"] * 3,
-        "variant": ["ema_12_72"] * 3,
-        "strategy_id": ["trend_ma:ema_12_72"] * 3,
-        "activation_context": ["all"] * 3,
-        "fold_id": [0] * 3,
-        "gross_event_bps": [5.0, 6.0, 4.0],
-        "side": [1] * 3,
-        "expected_holding_bars": [24] * 3,
-        "uniqueness_weight": [1.0] * 3,
-        "entry_idx": [0, 1, 2],
-    })
+    return pd.DataFrame(
+        {
+            "symbol": ["BTCUSDT"] * 3,
+            "family": ["trend_ma"] * 3,
+            "variant": ["ema_12_72"] * 3,
+            "strategy_id": ["trend_ma:ema_12_72"] * 3,
+            "activation_context": ["all"] * 3,
+            "fold_id": [0] * 3,
+            "gross_event_bps": [5.0, 6.0, 4.0],
+            "side": [1] * 3,
+            "expected_holding_bars": [24] * 3,
+            "uniqueness_weight": [1.0] * 3,
+            "entry_idx": [0, 1, 2],
+        }
+    )
 
 
 def test_adaptive_gate_early_snapshot_relaxed() -> None:
     """P3.1: Early snapshot (index=1 < early_snapshots=2) uses relaxed thresholds."""
     cfg = _make_cfg(
-        l1_pair_min_effective_obs=5.0,       # strict
-        l1_pair_min_folds=2,                  # strict
+        l1_pair_min_effective_obs=5.0,  # strict
+        l1_pair_min_folds=2,  # strict
         l1_evidence_early_snapshots=2,
         l1_pair_min_effective_obs_early=2.0,  # relaxed
-        l1_pair_min_folds_early=1,            # relaxed
+        l1_pair_min_folds_early=1,  # relaxed
         l1_pair_min_mean_gross_bps=0.0,
         l1_pair_min_incremental_bps=0.0,
-        l1_quality_weight_enabled=False,      # simplify: quality_weight controlled by hard_eligible only
+        l1_quality_weight_enabled=False,  # simplify: quality_weight controlled by hard_eligible only
     )
     df = _make_event_frame_3events()
 
@@ -307,8 +316,8 @@ def test_adaptive_gate_early_snapshot_relaxed() -> None:
 def test_adaptive_gate_late_snapshot_strict() -> None:
     """P3.2: Late snapshot (index=3 >= early_snapshots=2) uses strict thresholds."""
     cfg = _make_cfg(
-        l1_pair_min_effective_obs=5.0,       # strict — 3 < 5
-        l1_pair_min_folds=2,                  # strict — 1 < 2
+        l1_pair_min_effective_obs=5.0,  # strict — 3 < 5
+        l1_pair_min_folds=2,  # strict — 1 < 2
         l1_evidence_early_snapshots=2,
         l1_pair_min_effective_obs_early=2.0,
         l1_pair_min_folds_early=1,
@@ -335,7 +344,7 @@ def test_adaptive_gate_disabled_always_strict() -> None:
     cfg = _make_cfg(
         l1_pair_min_effective_obs=5.0,
         l1_pair_min_folds=2,
-        l1_evidence_early_snapshots=0,       # disabled
+        l1_evidence_early_snapshots=0,  # disabled
         l1_pair_min_effective_obs_early=2.0,  # would be relaxed but never used
         l1_pair_min_folds_early=1,
     )

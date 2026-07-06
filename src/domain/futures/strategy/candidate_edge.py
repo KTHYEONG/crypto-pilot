@@ -196,10 +196,10 @@ def _build_variant_priors(
         eligible_variants.append((key, indexer, variant_mean, obs))
         shrink = obs / (obs + shrinkage_obs)
         prior = float(shrink * variant_mean + (1.0 - shrink) * global_prior)
-        reference_risk_unit_bps = float(
-            np.median(dataset.risk_unit_bps.astype(np.float64, copy=False)[dataset.risk_unit_bps > 0.0])
-        ) if dataset.risk_unit_bps is not None and np.any(dataset.risk_unit_bps > 0.0) else float(
-            getattr(cfg, "min_risk_unit_bps", 25.0)
+        reference_risk_unit_bps = (
+            float(np.median(dataset.risk_unit_bps.astype(np.float64, copy=False)[dataset.risk_unit_bps > 0.0]))
+            if dataset.risk_unit_bps is not None and np.any(dataset.risk_unit_bps > 0.0)
+            else float(getattr(cfg, "min_risk_unit_bps", 25.0))
         )
         max_dev_bps = float(getattr(cfg, "edge_prior_max_deviation_bps", float("inf")))
         max_dev = (
@@ -580,20 +580,20 @@ def fit_candidate_edge_models(
         cal_keys = _variant_keys(calibration_eval)
         if use_prior_residual:
             cal_prior_r = np.asarray(
-                [variant_prior_bps.get(key, global_prior_bps) / max(median_risk_unit_bps, 1e-6)
-                 for key in cal_keys],
+                [variant_prior_bps.get(key, global_prior_bps) / max(median_risk_unit_bps, 1e-6) for key in cal_keys],
                 dtype=np.float64,
             )
         else:
             cal_prior_r = np.zeros(n_cal_eval, dtype=np.float64)
-        pred_cal = cast(
-            NDArray[np.float64],
-            center.predict(calibration_eval.X),
-        ).astype(np.float64, copy=False) + cal_prior_r
+        pred_cal = (
+            cast(
+                NDArray[np.float64],
+                center.predict(calibration_eval.X),
+            ).astype(np.float64, copy=False)
+            + cal_prior_r
+        )
         realized_cal = np.asarray(
-            calibration_eval.y_return_r
-            if calibration_eval.y_return_r is not None
-            else calibration_eval.y_edge_bps,
+            calibration_eval.y_return_r if calibration_eval.y_return_r is not None else calibration_eval.y_edge_bps,
             dtype=np.float64,
         )
         rank_ic_val = _rank_ic(pred_cal, realized_cal)
@@ -717,15 +717,9 @@ def predict_candidate_edges(
             },
         )
 
-    center_pred_r = cast(NDArray[np.float64], models.center_model.predict(dataset.X)).astype(
-        np.float64, copy=False
-    )
-    q10_model_r = cast(NDArray[np.float64], models.q10_model.predict(dataset.X)).astype(
-        np.float64, copy=False
-    )
-    q90_model_r = cast(NDArray[np.float64], models.q90_model.predict(dataset.X)).astype(
-        np.float64, copy=False
-    )
+    center_pred_r = cast(NDArray[np.float64], models.center_model.predict(dataset.X)).astype(np.float64, copy=False)
+    q10_model_r = cast(NDArray[np.float64], models.q10_model.predict(dataset.X)).astype(np.float64, copy=False)
+    q90_model_r = cast(NDArray[np.float64], models.q90_model.predict(dataset.X)).astype(np.float64, copy=False)
 
     expected_cost_bps = float(getattr(cfg, "expected_cost_bps", 24.0))
     downside_penalty = float(getattr(cfg, "downside_penalty", 1.0))
@@ -759,10 +753,7 @@ def predict_candidate_edges(
     mu_return_r = center_component_r + prior_component_r
     q10_return_r = q10_model_r
     q90_return_r = q90_model_r
-    effective_p_pass = (
-        p_pass if gate_enabled
-        else _downside_upside_ratio_p_pass(mu_return_r, q10_return_r)
-    )
+    effective_p_pass = p_pass if gate_enabled else _downside_upside_ratio_p_pass(mu_return_r, q10_return_r)
     mu_net_decision_bps = mu_return_r * risk_unit_bps
     q10_net_bps = q10_return_r * risk_unit_bps
     q90_net_bps = q90_return_r * risk_unit_bps
@@ -904,10 +895,10 @@ def predict_candidate_edges(
             dict[str, float | int | str | bool],
             {
                 **_selection_thresholds(
-                utility_score=utility_score,
-                p_pass=effective_p_pass.astype(np.float64, copy=False),
-                mu_net_decision_bps=mu_net_decision_bps,
-                cfg=cfg,
+                    utility_score=utility_score,
+                    p_pass=effective_p_pass.astype(np.float64, copy=False),
+                    mu_net_decision_bps=mu_net_decision_bps,
+                    cfg=cfg,
                 ),
                 "prediction_mode": models.prediction_mode,
                 "center_component_p90_bps": float(np.percentile(center_component_r * risk_unit_bps, 90))

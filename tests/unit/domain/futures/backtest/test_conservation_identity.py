@@ -31,9 +31,7 @@ def _run_single_trade_scenario(
     # 결정 바 데이터 (1m → 결정 바 집계)
     price_dec = price_path[:: n_1m // n_decisions][:n_decisions]
     if len(price_dec) < n_decisions:
-        price_dec = np.concatenate(
-            [price_dec, np.full(n_decisions - len(price_dec), price_dec[-1])]
-        )
+        price_dec = np.concatenate([price_dec, np.full(n_decisions - len(price_dec), price_dec[-1])])
 
     decision_close = price_dec.reshape(-1, 1)
     decision_high = decision_close * 1.002
@@ -46,10 +44,7 @@ def _run_single_trade_scenario(
     path_high = path_close * 1.002
     path_low = path_close * 0.998
 
-    if mark_path is not None:
-        mark_2d = mark_path.reshape(-1, 1)
-    else:
-        mark_2d = None
+    mark_2d = mark_path.reshape(-1, 1) if mark_path is not None else None
 
     target_weights = np.zeros((n_decisions, n_syms), dtype=np.float64)
     target_weights[1:, 0] = target_weight_val
@@ -216,6 +211,4 @@ class TestConservationIdentity:
             target_weight_val=0.3,
             lev=5.0,
         )
-        assert final_bal <= final_no_fund + 1.0, (
-            "펀딩 비용 누적 후 최종잔고가 펀딩 없는 경우보다 커서는 안 됨"
-        )
+        assert final_bal <= final_no_fund + 1.0, "펀딩 비용 누적 후 최종잔고가 펀딩 없는 경우보다 커서는 안 됨"

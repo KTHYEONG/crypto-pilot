@@ -1,4 +1,5 @@
 """Unit tests for tiered_workflow.metrics internal functions."""
+
 import numpy as np
 import pytest
 
@@ -50,7 +51,7 @@ class TestCagrCompound:
         bars_per_year = 100.0
         result = _cagr(rets, bars_per_year=bars_per_year)
         # base = 1.01^100, CAGR^1 = 1.01^100 - 1
-        expected = (1.01 ** 100) - 1.0
+        expected = (1.01**100) - 1.0
         assert result == pytest.approx(expected, rel=1e-6)
 
 

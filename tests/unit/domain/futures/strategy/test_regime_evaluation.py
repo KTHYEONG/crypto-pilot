@@ -1,4 +1,5 @@
 """Unit tests for C2-C5 regime evaluation metrics."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -199,10 +200,7 @@ def test_c4_reversed_rank_negative_rho() -> None:
     # IS: 0 > 1 > 2 > 3  /  OOS: opposite
     is_means: dict[int, float] = {0: 8.0, 1: 4.0, 2: -2.0, 3: -6.0}
     oos_means: dict[int, float] = {0: -6.0, 1: -2.0, 2: 4.0, 3: 8.0}
-    fwd = np.array([
-        rng.normal(is_means[int(c)] if is_m[i] else oos_means[int(c)], 1.0)
-        for i, c in enumerate(code)
-    ])
+    fwd = np.array([rng.normal(is_means[int(c)] if is_m[i] else oos_means[int(c)], 1.0) for i, c in enumerate(code)])
     rho, _n, score = _compute_c4(code, fwd, is_m, oos_m, min_n_per_regime=10)
     assert rho < 0
     assert score <= 1.0
@@ -406,18 +404,14 @@ class TestDeflatedSharpeRatio:
     def test_dsr_negative_with_many_trials_and_modest_sr(self) -> None:
         """n_trials=60, N=200, SR=0.3 → DSR < 0 (다중검정 후 기각)."""
         # Arrange / Act
-        dsr = deflated_sharpe_ratio(
-            sr=0.3, n_obs=200, n_trials=60, skewness=0.0, kurtosis=0.0
-        )
+        dsr = deflated_sharpe_ratio(sr=0.3, n_obs=200, n_trials=60, skewness=0.0, kurtosis=0.0)
 
         # Assert
         assert dsr < 0
 
     def test_dsr_positive_with_very_high_sr(self) -> None:
         """SR=5.0, n_trials=2 → DSR > 0 (강한 edge는 통과)."""
-        dsr = deflated_sharpe_ratio(
-            sr=5.0, n_obs=500, n_trials=2, skewness=0.0, kurtosis=0.0
-        )
+        dsr = deflated_sharpe_ratio(sr=5.0, n_obs=500, n_trials=2, skewness=0.0, kurtosis=0.0)
         assert dsr > 0
 
 

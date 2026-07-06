@@ -122,16 +122,8 @@ def objective_key(cand: dict[str, Any]) -> tuple[float, float, float, float, int
     """Sort key for candidates based on Optuna objectives and robustness."""
     tr = cand["trial"]
     vals = list(tr.values or [])
-    v0 = (
-        safe_float(vals[0], 1e9)
-        if len(vals) >= 1
-        else -cand_metric(cand, "awf_robust_score", -1e9)
-    )
-    v1 = (
-        safe_float(vals[1], 1e9)
-        if len(vals) >= 2
-        else -cand_metric(cand, "awf_leg_worst_log_tw", -1e9)
-    )
+    v0 = safe_float(vals[0], 1e9) if len(vals) >= 1 else -cand_metric(cand, "awf_robust_score", -1e9)
+    v1 = safe_float(vals[1], 1e9) if len(vals) >= 2 else -cand_metric(cand, "awf_leg_worst_log_tw", -1e9)
     robust = cand_metric(cand, "awf_robust_score", -1e9)
     worst = cand_metric(cand, "awf_leg_worst_log_tw", -1e9)
     return (v0, v1, -robust, -worst, -int(tr.number))
@@ -203,7 +195,7 @@ def deploy_reject_reasons(cand: dict[str, Any]) -> list[str]:
     cfg = dict(OPT_FUTURES_CONFIG)
     step2_enabled = bool(cfg.get("FUTURES_CHOP_REGIME_GATE_ENABLED", False))
     step4_enabled = bool(cfg.get("FUTURES_AWF_POST_OPT_GATE_STEP4_ENABLED", False))
-    
+
     robust = cand_metric(cand, "awf_robust_score", -1.0)
     worst_leg = cand_metric(cand, "awf_leg_worst_log_tw", -0.5)
     pos_ratio = cand_metric(cand, "awf_leg_pos_ratio", 0.0)
@@ -244,11 +236,11 @@ def deploy_reject_reasons(cand: dict[str, Any]) -> list[str]:
         turnover_cost_ratio = max(0.0, cand_metric(cand, "awf_turnover_cost_ratio", 0.0))
         chop_pf_raw = ua.get("awf_chop_pf", diag.get("awf_chop_pf"))
         chop_pf = safe_float(chop_pf_raw, 0.0) if chop_pf_raw is not None else 1.0
-        
+
         step4_chop_trade_max = float(cfg.get("FUTURES_AWF_CHOP_TRADE_SHARE_MAX", 0.35))
         step4_turnover_cost_max = float(cfg.get("FUTURES_AWF_TURNOVER_COST_RATIO_MAX", 0.12))
         step4_chop_pf_min = float(cfg.get("FUTURES_AWF_CHOP_PF_MIN", 0.90))
-        
+
         if chop_trade_share > step4_chop_trade_max:
             reasons.append("STEP4_HIGH_CHOP_TRADE")
         if turnover_cost_ratio > step4_turnover_cost_max:
@@ -287,7 +279,7 @@ def replay_stability_candidate(
 
     from src.domain.futures.optimization.ml_context import rerun_precompute_for_ctx
     from src.domain.futures.validation.tmp_md_champion import tmp_md_layer1_failures_from_awf_diag
-    
+
     sctx = dataclasses.replace(base_ctx, seed=seed)
     rerun_precompute_for_ctx(sctx)
     try:
@@ -308,10 +300,7 @@ def stability_cv(label: str, objs: list[float], l3_fail: bool) -> float | None:
     mu = float(np.mean(arr))
     sig = float(np.std(arr))
     cv = sig / abs(mu) if abs(mu) > 1e-9 else 0.0
-    _logger.info(
-        " [STABILITY] %s: mu=%.4f sig=%.4f cv=%.4f l3_fail=%s",
-        label, mu, sig, cv, l3_fail
-    )
+    _logger.info(" [STABILITY] %s: mu=%.4f sig=%.4f cv=%.4f l3_fail=%s", label, mu, sig, cv, l3_fail)
     return cv
 
 
@@ -328,15 +317,11 @@ def select_and_rank_candidates(
     """
     from optuna.trial import TrialState
 
-    completed = [
-        t for t in study_ml.get_trials()
-        if t.state == TrialState.COMPLETE and t.value is not None
-    ]
+    completed = [t for t in study_ml.get_trials() if t.state == TrialState.COMPLETE and t.value is not None]
     is_phase_b_study = str(getattr(study_ml, "study_name", "")).endswith("_phase_b")
     if is_phase_b_study:
         phase_b_only = [
-            t for t in completed
-            if str(t.user_attrs.get("phase", "phase_b")).strip().lower() in {"phase_b", "b"}
+            t for t in completed if str(t.user_attrs.get("phase", "phase_b")).strip().lower() in {"phase_b", "b"}
         ]
         if phase_b_only:
             completed = phase_b_only
@@ -384,9 +369,7 @@ def select_and_rank_candidates(
         # Gate 3: 최소 거래 수 확인
         n_trades = float(ua.get("awf_trade_count_mean", ua.get("avg_trades", 0.0))) * _k_legs
         if n_trades < _min_trades_total:
-            reject_reason_count["insufficient_trades"] = (
-                reject_reason_count.get("insufficient_trades", 0) + 1
-            )
+            reject_reason_count["insufficient_trades"] = reject_reason_count.get("insufficient_trades", 0) + 1
             continue
 
         # replay for full diag
@@ -404,7 +387,8 @@ def select_and_rank_candidates(
         # FAIL-OPEN: gate 전부 실패해도 J 최고값 반환
         _logger.warning(
             " [SELECT] All gates failed (%s). FAIL-OPEN with best J=%.4f.",
-            reject_reason_count, viable[0].value,
+            reject_reason_count,
+            viable[0].value,
         )
         trial = viable[0]
         _, val_diag = replay_robust_awf_for_trial_params(base_ctx, trial.params)
@@ -466,13 +450,9 @@ def select_phase_b_top_candidates(
     from optuna.trial import TrialState
 
     k = max(1, int(top_k))
-    completed = [
-        t for t in study_ml.get_trials()
-        if t.state == TrialState.COMPLETE and t.value is not None
-    ]
+    completed = [t for t in study_ml.get_trials() if t.state == TrialState.COMPLETE and t.value is not None]
     phase_b_completed = [
-        t for t in completed
-        if str(t.user_attrs.get("phase", "phase_b")).strip().lower() in {"phase_b", "b"}
+        t for t in completed if str(t.user_attrs.get("phase", "phase_b")).strip().lower() in {"phase_b", "b"}
     ]
     if phase_b_completed:
         completed = phase_b_completed
@@ -481,11 +461,7 @@ def select_phase_b_top_candidates(
 
     feasible = [t for t in completed if _is_phase_b_feasible(t)]
     strategy_mode = bool(getattr(base_ctx, "strategy_mode", False))
-    strategy_active = (
-        [t for t in feasible if _is_strategy_active_trial(t)]
-        if strategy_mode
-        else []
-    )
+    strategy_active = [t for t in feasible if _is_strategy_active_trial(t)] if strategy_mode else []
     if strategy_active:
         pool = strategy_active
     elif feasible:
@@ -498,13 +474,15 @@ def select_phase_b_top_candidates(
     top_candidates: list[dict[str, Any]] = []
     for trial in selected_trials:
         _, val_diag = replay_robust_awf_for_trial_params(base_ctx, trial.params)
-        top_candidates.append({
-            "trial": trial,
-            "params": dict(trial.params),
-            "awf_diag": val_diag,
-            "j_score": float(safe_float(getattr(trial, "value", 0.0), 0.0)),
-            "deploy_score": float(safe_float(trial.user_attrs.get("calmar_lcb", trial.value), 0.0)),
-        })
+        top_candidates.append(
+            {
+                "trial": trial,
+                "params": dict(trial.params),
+                "awf_diag": val_diag,
+                "j_score": float(safe_float(getattr(trial, "value", 0.0), 0.0)),
+                "deploy_score": float(safe_float(trial.user_attrs.get("calmar_lcb", trial.value), 0.0)),
+            }
+        )
 
     summary = {
         "selected_by": "phase_b_calmar_lcb",

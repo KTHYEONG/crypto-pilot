@@ -60,9 +60,7 @@ def test_load_ledger_slice_reads_parquet_and_applies_pit_filter(tmp_path: Path) 
 
     assert tuple(frame["symbol"].astype(str).tolist()) == ("BTC/USDT", "ETH/USDT")
     assert set(frame["status"].astype(str).tolist()) == {"TRADING"}
-    assert float(frame.loc[frame["symbol"] == "BTC/USDT", "adv_usdt_median"].iloc[0]) == pytest.approx(
-        120_000_000.0
-    )
+    assert float(frame.loc[frame["symbol"] == "BTC/USDT", "adv_usdt_median"].iloc[0]) == pytest.approx(120_000_000.0)
 
 
 def test_load_ledger_slice_rejects_missing_required_parquet_columns(tmp_path: Path) -> None:

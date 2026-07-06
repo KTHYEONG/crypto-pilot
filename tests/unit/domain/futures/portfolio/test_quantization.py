@@ -101,6 +101,4 @@ class TestQuantization:
         result = quantize_weights(w, equity, prices, step_sizes, min_notional=20.0)
 
         # 비중이므로 |result| ≤ 1.0 (gross ≤ 2.0)
-        assert float(np.sum(np.abs(result))) <= 2.0, (
-            f"출력이 비중이어야 함 (gross={np.sum(np.abs(result))})"
-        )
+        assert float(np.sum(np.abs(result))) <= 2.0, f"출력이 비중이어야 함 (gross={np.sum(np.abs(result))})"

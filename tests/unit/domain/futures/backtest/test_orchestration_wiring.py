@@ -215,9 +215,7 @@ def test_evaluate_sequential_promotion_gate_returns_result() -> None:
         intrabar_mdd=0.15,
     )
 
-    assert isinstance(result, PromotionGateResult), (
-        f"반환 타입이 PromotionGateResult가 아님: {type(result)}"
-    )
+    assert isinstance(result, PromotionGateResult), f"반환 타입이 PromotionGateResult가 아님: {type(result)}"
     assert result.passed is True, f"gate_failures={result.gate_failures}"
     assert result.promoted_to_champion is True
 

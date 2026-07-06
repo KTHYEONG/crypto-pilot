@@ -168,12 +168,8 @@ class TestExposureCap:
             weights[i, 0] = 0.30  # bar 10~: 신호
 
         # atr_mult=999 → stop_p 매우 낮아 stop 미발동
-        trades_dd, _, _, _ = _run(
-            d, weights, dd_thr=0.15, atr_mult=999.0, rb=1, max_exp=10.0, max_exp_coin=100.0
-        )
-        trades_no_dd, _, _, _ = _run(
-            d, weights, dd_thr=0.0, atr_mult=999.0, rb=1, max_exp=10.0, max_exp_coin=100.0
-        )
+        trades_dd, _, _, _ = _run(d, weights, dd_thr=0.15, atr_mult=999.0, rb=1, max_exp=10.0, max_exp_coin=100.0)
+        trades_no_dd, _, _, _ = _run(d, weights, dd_thr=0.0, atr_mult=999.0, rb=1, max_exp=10.0, max_exp_coin=100.0)
 
         # bar 10에서 진입한 trades 비교
         dd_entry = trades_dd[trades_dd[:, 1] == 10]
@@ -240,9 +236,7 @@ class TestLiquidation:
         weights = np.zeros((n_bars, n_syms), dtype=np.float64)
         weights[1, 0] = 0.999  # tgt_notional = 0.0001*0.999 << min_notional
 
-        trades, _, _, diag_out = _run(
-            d, weights, init_bal=0.0001, max_exp=10.0, max_exp_coin=100.0, rb=1
-        )
+        trades, _, _, diag_out = _run(d, weights, init_bal=0.0001, max_exp=10.0, max_exp_coin=100.0, rb=1)
 
         assert diag_out[0] > 0  # dust_skip_cnt 증가
         assert len(trades) == 0  # 포지션 미개설
@@ -770,9 +764,7 @@ class TestConservationOfMoney:
         weights[3, 1] = -0.20  # short
         weights[6, :] = 0.0  # 청산
 
-        trades, final_balance, _, _ = _run(
-            d, weights, rb=3, max_exp=10.0, max_exp_coin=100.0, init_bal=10_000.0
-        )
+        trades, final_balance, _, _ = _run(d, weights, rb=3, max_exp=10.0, max_exp_coin=100.0, init_bal=10_000.0)
 
         if len(trades) > 0:
             net_pnl_total = float(trades[:, 6].sum())  # net_pnl (exit_fee 포함)
@@ -787,9 +779,7 @@ class TestConservationOfMoney:
         d = _make_data(n_bars, n_syms, price=100.0, atr=5.0)
         weights = np.zeros((n_bars, n_syms), dtype=np.float64)
 
-        _, final_balance, equity_curve, _ = _run(
-            d, weights, max_exp=10.0, max_exp_coin=100.0, init_bal=10_000.0
-        )
+        _, final_balance, equity_curve, _ = _run(d, weights, max_exp=10.0, max_exp_coin=100.0, init_bal=10_000.0)
 
         assert np.all(equity_curve == pytest.approx(10_000.0, abs=1e-6))
         assert final_balance == pytest.approx(10_000.0, abs=1e-6)
@@ -874,12 +864,8 @@ class TestConservationOfMoney:
                         w *= 0.95 / gross
                     weights[i, :] = w
 
-            trades1, final1, eq1, _ = _run(
-                d, weights, rb=1, init_bal=init_bal, max_exp=1.0, max_exp_coin=1.0
-            )
-            trades2, final2, eq2, _ = _run(
-                d, weights, rb=1, init_bal=init_bal, max_exp=1.0, max_exp_coin=1.0
-            )
+            trades1, final1, eq1, _ = _run(d, weights, rb=1, init_bal=init_bal, max_exp=1.0, max_exp_coin=1.0)
+            trades2, final2, eq2, _ = _run(d, weights, rb=1, init_bal=init_bal, max_exp=1.0, max_exp_coin=1.0)
 
             # 결정론: 동일 입력 결과 동일
             assert final1 == final2
@@ -941,9 +927,7 @@ class TestNanIsolation:
         weights = np.zeros((n_bars, n_syms), dtype=np.float64)
         weights[3, 0] = 0.30
 
-        trades, final_balance, _, diag_out = _run(
-            d, weights, rb=3, max_exp=10.0, max_exp_coin=100.0
-        )
+        trades, final_balance, _, diag_out = _run(d, weights, rb=3, max_exp=10.0, max_exp_coin=100.0)
 
         assert diag_out[1] >= 0  # crash 없음
         assert np.isfinite(final_balance)
@@ -1058,9 +1042,7 @@ class TestKillSignalMaxHold:
         for i in range(1, n_bars):
             weights[i, 0] = 0.30  # weight 유지 → 리밸런싱에서 need_exit=False
 
-        trades, _, _, _ = _run(
-            d, weights, rb=1, slip=slip, atr_mult=999.0, max_exp=10.0, max_exp_coin=100.0
-        )
+        trades, _, _, _ = _run(d, weights, rb=1, slip=slip, atr_mult=999.0, max_exp=10.0, max_exp_coin=100.0)
 
         assert len(trades) >= 1
         # 첫 번째 trade: bar 1 진입, bar 3 청산
