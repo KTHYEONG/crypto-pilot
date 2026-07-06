@@ -69,6 +69,7 @@ This protocol applies only inside code-writing phases such as `implement`.
 - **Unverified Refactoring:** Prohibit large-scale structural changes without test code or guaranteed behavior.
 - **Ignoring Return Values:** Prohibit neglecting return values or error handling.
 - **No Unsolicited Task Expansion**: Do not perform additional tasks that were not requested. Specifically, overstepping the currently assigned phase in the skill workflow (e.g., executing `check` automatically after `implement` finishes) is considered a waste of tokens and a violation of user control.
+  - **Coverage Gap Exception**: During the `implement` phase, if the spec's test scenarios do not cover newly introduced functions/classes, the AI MAY write supplementary test cases that target the uncovered lines. This is NOT considered unsolicited expansion. The supplementary tests must be minimal, directly related to the new code, and committed as part of the implementation task.
 
 ## 9. Rule Isolation & Priority: Commit Skill
 

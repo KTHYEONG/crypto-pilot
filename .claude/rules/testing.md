@@ -137,7 +137,9 @@ graph TD
    - **Core Logic (Domain, Signal, Sizing, Portfolio):** Aim for **>= 90%**. Run the self-correction loop here.
    - **Adapters/Runners/DTOs/Boilerplate:** Aim for **>= 70%**. Do NOT run self-correction loop beyond 1 iteration for these layers. Running 3 full coverage iterations on adapter files is a token waste anti-pattern.
    - **Entrypoints / CLI / `__init__.py`:** Skip coverage requirement entirely. Use `# pragma: no cover` where applicable.
-4. **[CRITICAL LIMIT] AI Loop Termination:**
+4. **Modified-Files-Only Coverage Scope:**
+   - Coverage MUST be measured ONLY on files created or modified by the current spec (determinable via `git diff --name-only` against the base branch). Unchanged files in the same module directory are excluded from the coverage report to avoid false-negative penalties.
+5. **[CRITICAL LIMIT] AI Loop Termination:**
    The AI MUST NOT execute the coverage self-correction loop more than **3 times**. If targets are not achieved within 3 iterations, the AI MUST stop, commit the current progress, and report the specific bottleneck to the user.
 5. **No Empty Assertions:**
    Tests written solely to execute lines without performing meaningful assertions are strictly prohibited. The AI must always validate the final return value or verify expected state side effects.
