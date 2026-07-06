@@ -79,6 +79,14 @@ last_verified: 2026-07-06
 - `xs_flow`: Order flow imbalance z-score (`flow_z_24`)
 - `xs_oi_skew`: Open Interest 빌드업과 LSR 스큐 결합 (`-(oi_build_z_42 * sign(lsr_log_z_42))`)
 
+### Signal Family Registry [ADR_20260706_L0_SIGNAL_FAMILY_DIVERSITY]
+- `ALL_SIGNAL_FAMILIES` (`signals/rules.py`, `strategy/rule_signals.py`, 두 모듈 각자 동일 값 유지): 27개 rule family 모듈 상수. 두 모듈은 family 연산 로직을 병행 유지하므로 값 동기화가 계약.
+- `CandidateStrategyConfig.candidate_families`: native TF 빌드 시 `filter_rule_signal_panels()`가 적용하는 전역 allowlist(27종 전량 포함).
+- `resolve_tf_signal_pool(cfg, tf)` / `_DEFAULT_PER_TF_FAMILIES`: HTF(6h/8h/12h) 파생 패널 전용 family allowlist. `build_multi_tf_panels()`가 `family_filter`로 직접 주입 — native TF의 `candidate_families`와는 별개 축.
+- `resolve_family_registration_gap(all_families, candidate_families)`: `all_families` 중 `candidate_families`에 없는 항목을 반환하는 순수 함수(orphan 탐지).
+- `src/domain/futures/strategy/family_lifecycle.py`: `FAMILY_TF_RETIREMENT`(economic replay 기각 이력의 `(family, tf)` 집합) + `is_family_tf_retired()` — 동일 조합 재검증 방지 가드.
+- **L0 게이트 스코프**: `run_alpha_foundry_l0_gate()`는 native TF panel에만 적용된다(`strategy_runtime/bridge.py`, native panel 생성 직후 호출). HTF 파생 패널(`build_multi_tf_panels`)은 그 이후 별도 생성되어 L0 경제성 게이트(LCB/tstat/cost-drag)를 거치지 않고 `resolve_tf_signal_pool` family 필터만 적용된 채 L1 fold 평가로 직행한다.
+
 ### Alpha Foundry Core [ADR_20260706_ALPHA_FOUNDRY_SYNC][ADR_20260706_ALPHA_FOUNDRY_L0_DIVERSITY][ADR_20260706_ALPHA_FOUNDRY_L0_SIGNAL_RIGOR]
 - `AlphaRecipe`: `recipe_id`, `family`, `variant`, `timeframe`, `archetype`, `indicator_params`, `side_rule_id`, `exit_policy_id`, `required_fields`, `causal_lag_bars`, `max_turnover_per_year`.
 - `BucketKey`: `tuple[str, str]` alias for `(family, timeframe)` — diversity selection grouping key.
